@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -18,11 +17,11 @@
 typedef unsigned char confidence_t;
 
 typedef struct kf_mem_s {
-	confidence_t km_confidence; /* confidence level that the memory is bad 
-				     * is this necessary ? 
+	confidence_t km_confidence; /* confidence level that the memory is bad
+				     * is this necessary ?
 				     */
-	confidence_t km_dimm[MAX_DIMMS];   
-	                            /* confidence level that dimm[i] is bad 
+	confidence_t km_dimm[MAX_DIMMS];
+	                            /* confidence level that dimm[i] is bad
 				     *I think this is the right number
 				     */
 

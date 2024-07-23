@@ -30,78 +30,106 @@
  * now, we expressly forbid it, especially as some of the stuff we do
  * here is not interrupt context safe.
  *
+ * We should allow this function to be called from interrupt context.
+ * However, we call ioremap, which needs to fiddle around with various
+ * things (like the vmlist_lock, and allocating page tables).  These
+ * things aren't interrupt safe (yet).
+ *
  * Note that this does *not* zero the allocated area!
  */
 void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
 {
-	int order;
-	unsigned long page;
+	struct page *page, *end, *free;
+	unsigned long order;
 	void *ret;
 
+	/* FIXME */
 	if (in_interrupt())
 		BUG();
 
 	size = PAGE_ALIGN(size);
 	order = get_order(size);
 
-	page = __get_free_pages(gfp, order);
+	page = alloc_pages(gfp, order);
 	if (!page)
 		goto no_page;
 
-	ret = __ioremap(virt_to_phys((void *)page), size, 0);
-	if (ret) {
-		/* free wasted pages */
-		unsigned long end;
+	*dma_handle = page_to_bus(page);
+	ret = __ioremap(page_to_pfn(page) << PAGE_SHIFT, size, 0);
+	if (!ret)
+		goto no_remap;
+
+#if 0 /* ioremap_does_flush_cache_all */
+	{
+		void *virt = page_address(page);
 
 		/*
-		 * we need to ensure that there are no
-		 * cachelines in use, or worse dirty in
-		 * this area.
+		 * we need to ensure that there are no cachelines in use, or
+		 * worse dirty in this area.  Really, we don't need to do
+		 * this since __ioremap does a flush_cache_all() anyway. --rmk
 		 */
-		invalidate_dcache_range(page, page + size);
-		invalidate_dcache_range((unsigned long)ret, (unsigned long)ret + size);
-
-		*dma_handle = __virt_to_bus(page);
-
-		end = page + (PAGE_SIZE << order);
-		page += size;
-		while (page < end) {
-			free_page(page);
-			page += PAGE_SIZE;
-		}
-		return ret;
+		invalidate_dcache_range(virt, virt + size);
 	}
+#endif
 
-	free_pages(page, order);
+	/*
+	 * free wasted pages.  We skip the first page since we know
+	 * that it will have count = 1 and won't require freeing.
+	 * We also mark the pages in use as reserved so that
+	 * remap_page_range works.
+	 */
+	free = page + (size >> PAGE_SHIFT);
+	end  = page + (1 << order);
+
+	for (; page < end; page++) {
+		set_page_count(page, 1);
+		if (page >= free)
+			__free_page(page);
+		else
+			SetPageReserved(page);
+	}
+	return ret;
+
+no_remap:
+	__free_pages(page, order);
 no_page:
-	BUG();
 	return NULL;
 }
 
 void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size, dma_addr_t *handle)
 {
-	void *__ret;
-	int __gfp = GFP_KERNEL;
+	int gfp = GFP_KERNEL;
 
-#ifdef CONFIG_PCI
-	if ((hwdev) == NULL ||
+#if defined(CONFIG_PCI) || defined(CONFIG_SA1111)
+	if ((hwdev) == NULL || dev_is_sa1111(hwdev) ||
 	    (hwdev)->dma_mask != 0xffffffff)
 #endif
-		__gfp |= GFP_DMA;
+		gfp |= GFP_DMA;
 
-	__ret = consistent_alloc(__gfp, (size),
-				 (handle));
-	return __ret;
+	return consistent_alloc(gfp, size, handle);
 }
 
 /*
  * free a page as defined by the above mapping.  We expressly forbid
  * calling this from interrupt context.
  */
-void consistent_free(void *vaddr)
+void consistent_free(void *vaddr, size_t size, dma_addr_t handle)
 {
+	struct page *page, *end;
+
 	if (in_interrupt())
 		BUG();
+
+	/*
+	 * More messing around with the MM internals.  This is
+	 * sick, but then so is remap_page_range().
+	 */
+	size = PAGE_ALIGN(size);
+	page = virt_to_page(bus_to_virt(handle));
+	end = page + (size >> PAGE_SHIFT);
+
+	for (; page < end; page++)
+		ClearPageReserved(page);
 
 	__iounmap(vaddr);
 }

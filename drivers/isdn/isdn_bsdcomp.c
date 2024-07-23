@@ -4,8 +4,14 @@
  * Patched version for ISDN syncPPP written 1997/1998 by Michael Hipp
  * The whole module is now SKB based.
  *
- * Compile with:
- *  gcc -O2 -I/usr/src/linux/include -D__KERNEL__ -DMODULE -c isdn_bsdcomp.c
+ */
+
+/*
+ * Update: The Berkeley copyright was changed, and the change 
+ * is retroactive to all "true" BSD software (ie everything
+ * from UCB as opposed to other peoples code that just carried
+ * the same license). The new copyright doesn't clash with the
+ * GPL, so the module-only restriction has been removed..
  */
 
 /*
@@ -47,12 +53,8 @@
  * SUCH DAMAGE.
  */
 
-#ifndef MODULE
-#error This file must be compiled as a module.
-#endif
-
 #include <linux/module.h>
-
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -61,7 +63,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/string.h>	/* used in new tty drivers */
@@ -80,18 +82,21 @@
 #include <linux/skbuff.h>
 #include <linux/inet.h>
 #include <linux/ioctl.h>
+#include <linux/vmalloc.h>
 
 #include <linux/ppp_defs.h>
 
 #include <linux/isdn.h>
 #include <linux/isdn_ppp.h>
-/* #include <linux/netprotocol.h> */
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/if_arp.h>
 #include <linux/ppp-comp.h>
 
 #include "isdn_ppp.h"
+
+MODULE_DESCRIPTION("ISDN4Linux: BSD Compression for PPP over ISDN");
+MODULE_LICENSE("Dual BSD/GPL");
 
 #define BSD_VERSION(x)	((x) >> 5)
 #define BSD_NBITS(x)	((x) & 0x1F)
@@ -919,7 +924,7 @@ static struct isdn_ppp_compressor ippp_bsd_compress = {
  * Module support routines
  *************************************************************/
 
-int init_module(void)
+static int __init isdn_bsdcomp_init(void)
 {
 	int answer = isdn_ppp_register_compressor (&ippp_bsd_compress);
 	if (answer == 0)
@@ -927,7 +932,10 @@ int init_module(void)
 	return answer;
 }
 
-void cleanup_module(void)
+static void __exit isdn_bsdcomp_exit(void)
 {
 	isdn_ppp_unregister_compressor (&ippp_bsd_compress);
 }
+
+module_init(isdn_bsdcomp_init);
+module_exit(isdn_bsdcomp_exit);

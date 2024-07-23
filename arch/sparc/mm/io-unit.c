@@ -1,4 +1,4 @@
-/* $Id: io-unit.c,v 1.22 2000/08/09 00:00:15 davem Exp $
+/* $Id: io-unit.c,v 1.23 2001/02/13 01:16:43 davem Exp $
  * io-unit.c:  IO-UNIT specific routines for memory management.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek    (jj@sunsite.mff.cuni.cz)
@@ -7,7 +7,7 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <asm/scatterlist.h>
 #include <asm/pgalloc.h>
@@ -130,7 +130,8 @@ static void iounit_get_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_bus 
 
 	/* FIXME: Cache some resolved pages - often several sg entries are to the same page */
 	spin_lock_irqsave(&iounit->lock, flags);
-	for (; sz >= 0; sz--) {
+	while (sz != 0) {
+		sz--;
 		sg[sz].dvma_address = iounit_get_area(iounit, (unsigned long)sg[sz].address, sg[sz].length);
 		sg[sz].dvma_length = sg[sz].length;
 	}
@@ -158,7 +159,8 @@ static void iounit_release_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_
 	struct iounit_struct *iounit = (struct iounit_struct *)sbus->iommu;
 
 	spin_lock_irqsave(&iounit->lock, flags);
-	for (; sz >= 0; sz--) {
+	while (sz != 0) {
+		--sz;
 		len = ((sg[sz].dvma_address & ~PAGE_MASK) + sg[sz].length + (PAGE_SIZE-1)) >> PAGE_SHIFT;
 		vaddr = (sg[sz].dvma_address - IOUNIT_DMA_BASE) >> PAGE_SHIFT;
 		IOD(("iounit_release %08lx-%08lx\n", (long)vaddr, (long)len+vaddr));
@@ -186,7 +188,7 @@ static void iounit_map_dma_area(unsigned long va, __u32 addr, int len)
 			pte_t *ptep;
 			long i;
 
-			pgdp = pgd_offset(init_task.mm, addr);
+			pgdp = pgd_offset(&init_mm, addr);
 			pmdp = pmd_offset(pgdp, addr);
 			ptep = pte_offset(pmdp, addr);
 

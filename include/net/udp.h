@@ -23,7 +23,9 @@
 #define _UDP_H
 
 #include <linux/udp.h>
+#include <linux/poll.h>
 #include <net/sock.h>
+#include <net/snmp.h>
 
 #define UDP_HTABLE_SIZE		128
 
@@ -59,15 +61,17 @@ static inline int udp_lport_inuse(u16 num)
 extern struct proto udp_prot;
 
 
-extern void	udp_err(struct sk_buff *, unsigned char *, int);
+extern void	udp_err(struct sk_buff *, u32);
 extern int	udp_connect(struct sock *sk,
 			    struct sockaddr *usin, int addr_len);
 
 extern int	udp_sendmsg(struct sock *sk, struct msghdr *msg, int len);
 
-extern int	udp_rcv(struct sk_buff *skb, unsigned short len);
+extern int	udp_rcv(struct sk_buff *skb);
 extern int	udp_ioctl(struct sock *sk, int cmd, unsigned long arg);
 extern int	udp_disconnect(struct sock *sk, int flags);
+extern unsigned int udp_poll(struct file *file, struct socket *sock,
+			     poll_table *wait);
 
 extern struct udp_mib udp_statistics[NR_CPUS*2];
 #define UDP_INC_STATS(field)		SNMP_INC_STATS(udp_statistics, field)

@@ -407,8 +407,11 @@ static int x25_getsockopt(struct socket *sock, int level, int optname,
 			return -ENOPROTOOPT;
 	}
 
-	len = min(len, sizeof(int));
+	len = min_t(unsigned int, len, sizeof(int));
 
+	if (len < 0)
+		return -EINVAL;
+		
 	if (put_user(len, optlen))
 		return -EFAULT;
 
@@ -912,7 +915,7 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 
 	size = len + X25_MAX_L2_LEN + X25_EXT_MIN_LEN;
 
-	if ((skb = sock_alloc_send_skb(sk, size, 0, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
+	if ((skb = sock_alloc_send_skb(sk, size, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
 	X25_SKB_CB(skb)->flags = msg->msg_flags;
 
@@ -1084,6 +1087,9 @@ static int x25_recvmsg(struct socket *sock, struct msghdr *msg, int size, int fl
 	msg->msg_namelen = sizeof(struct sockaddr_x25);
 
 	skb_free_datagram(sk, skb);
+	lock_sock(sk);
+	x25_check_rbuf(sk);
+	release_sock(sk);
 
 	return copied;
 }
@@ -1258,8 +1264,8 @@ static int x25_get_info(char *buffer, char **start, off_t offset, int length)
 } 
 
 struct net_proto_family x25_family_ops = {
-	AF_X25,
-	x25_create
+	family:		AF_X25,
+	create:		x25_create,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(x25_proto_ops) = {
@@ -1280,24 +1286,20 @@ static struct proto_ops SOCKOPS_WRAPPED(x25_proto_ops) = {
 	sendmsg:	x25_sendmsg,
 	recvmsg:	x25_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
 SOCKOPS_WRAP(x25_proto, AF_X25);
 
 
-static struct packet_type x25_packet_type =
-{
-	0,		/* MUTTER ntohs(ETH_P_X25),*/
-	0,		/* copy */
-	x25_lapb_receive_frame,
-	NULL,
-	NULL,
+static struct packet_type x25_packet_type = {
+	type:		__constant_htons(ETH_P_X25),
+	func:		x25_lapb_receive_frame,
 };
 
 struct notifier_block x25_dev_notifier = {
-	x25_device_event,
-	0
+	notifier_call:	x25_device_event,
 };
 
 void x25_kill_by_neigh(struct x25_neigh *neigh)
@@ -1317,7 +1319,6 @@ static int __init x25_init(void)
 #endif /* MODULE */
 	sock_register(&x25_family_ops);
 
-	x25_packet_type.type = htons(ETH_P_X25);
 	dev_add_pack(&x25_packet_type);
 
 	register_netdevice_notifier(&x25_dev_notifier);
@@ -1356,6 +1357,7 @@ EXPORT_NO_SYMBOLS;
 
 MODULE_AUTHOR("Jonathan Naylor <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The X.25 Packet Layer network layer protocol");
+MODULE_LICENSE("GPL");
 
 static void __exit x25_exit(void)
 {

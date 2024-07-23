@@ -19,7 +19,7 @@
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ptrace.h>
 #include <linux/signal.h>
 #include <linux/timer.h>
@@ -390,7 +390,7 @@ kbd_wontreset:
 		kbd_state, keyval);
 #endif
 	mdelay(1);
-	inb(IOC_KARTRX);
+	ioc_readb(IOC_KARTRX);
 	a5kkbd_sendbyte (HRST);
 	kbd_state = KBD_INITRST;
 	return 0;
@@ -407,16 +407,42 @@ kbd_error:
 static void a5kkbd_rx(int irq, void *dev_id, struct pt_regs *regs)
 {
 	kbd_pt_regs = regs;
-	if (handle_rawcode(inb(IOC_KARTRX)))
+	if (handle_rawcode(ioc_readb(IOC_KARTRX)))
 		tasklet_schedule(&keyboard_tasklet);
 }
 
 static void a5kkbd_tx(int irq, void *dev_id, struct pt_regs *regs)
 {
-	outb (kbd_txval[kbd_txtail], IOC_KARTTX);
+	ioc_writeb (kbd_txval[kbd_txtail], IOC_KARTTX);
 	KBD_INCTXPTR(kbd_txtail);
 	if (kbd_txtail == kbd_txhead)
 		disable_irq(irq);
+}
+
+static int a5kkbd_setkeycode(unsigned int scancode, unsigned int keycode)
+{
+	return -EINVAL;
+}
+
+static int a5kkbd_getkeycode(unsigned int scancode)
+{
+	return -EINVAL;
+}
+
+static int a5kkbd_translate(unsigned char scancode, unsigned char *keycode, char rawmode)
+{
+	*keycode = scancode;
+	return 1;
+}
+
+static char a5kkbd_unexpected_up(unsigned char keycode)
+{
+	return 0200;
+}
+
+static int a5kkbd_rate(struct kbd_repeat *rep)
+{
+	return -EINVAL;
 }
 
 #ifdef CONFIG_KBDMOUSE
@@ -425,13 +451,24 @@ static struct busmouse a5kkbd_mouse = {
 };
 #endif
 
+struct kbd_ops_struct a5k_kbd_ops = {
+	k_setkeycode:		a5kkbd_setkeycode,
+	k_getkeycode:		a5kkbd_getkeycode,
+	k_translate:		a5kkbd_translate,
+	k_unexpected_up:	a5kkbd_unexpected_up,
+	k_leds:			a5kkbd_leds,
+	k_rate:			a5kkbd_rate,
+#ifdef CONFIG_MAGIC_SYSRQ
+	k_sysrq_xlate:		a5kkbd_sysrq_xlate,
+	k_sysrq_key:		13,
+#endif
+};
+
 void __init a5kkbd_init_hw (void)
 {
-	unsigned long flags;
-
 	if (request_irq (IRQ_KEYBOARDTX, a5kkbd_tx, 0, "keyboard", NULL) != 0)
 		panic("Could not allocate keyboard transmit IRQ!");
-	(void)inb(IOC_KARTRX);
+	(void)ioc_readb(IOC_KARTRX);
 	if (request_irq (IRQ_KEYBOARDRX, a5kkbd_rx, 0, "keyboard", NULL) != 0)
 		panic("Could not allocate keyboard receive IRQ!");
 

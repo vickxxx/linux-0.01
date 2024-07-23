@@ -1,12 +1,12 @@
-/* $Id: starfire.c,v 1.8 2000/10/27 18:36:47 anton Exp $
+/* $Id: starfire.c,v 1.10 2001/04/14 21:13:45 davem Exp $
  * starfire.c: Starfire/E10000 support.
  *
  * Copyright (C) 1998 David S. Miller (davem@redhat.com)
- * Copyright (C) 2000 Anton Blanchard (anton@linuxcare.com)
+ * Copyright (C) 2000 Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/page.h>
 #include <asm/oplib.h>

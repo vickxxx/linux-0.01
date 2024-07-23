@@ -1,6 +1,6 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Corel Computer Corporation, 1998
+    (c) Rebel.COM, 1998,1999
 
     Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
@@ -24,24 +24,28 @@
 /* Read and write floating point status register */
 extern __inline__ unsigned int readFPSR(void)
 {
-  return(fpa11->fpsr);
+	FPA11 *fpa11 = GET_FPA11();
+	return (fpa11->fpsr);
 }
 
 extern __inline__ void writeFPSR(FPSR reg)
 {
-  /* the sysid byte in the status register is readonly */
-  fpa11->fpsr = (fpa11->fpsr & MASK_SYSID) | (reg & ~MASK_SYSID);
+	FPA11 *fpa11 = GET_FPA11();
+	/* the sysid byte in the status register is readonly */
+	fpa11->fpsr = (fpa11->fpsr & MASK_SYSID) | (reg & ~MASK_SYSID);
 }
 
 /* Read and write floating point control register */
 extern __inline__ FPCR readFPCR(void)
 {
-  /* clear SB, AB and DA bits before returning FPCR */
-  return(fpa11->fpcr & ~MASK_RFC);
+	FPA11 *fpa11 = GET_FPA11();
+	/* clear SB, AB and DA bits before returning FPCR */
+	return (fpa11->fpcr & ~MASK_RFC);
 }
 
 extern __inline__ void writeFPCR(FPCR reg)
 {
-  fpa11->fpcr &= ~MASK_WFC;		/* clear SB, AB and DA bits */
-  fpa11->fpcr |= (reg & MASK_WFC);	/* write SB, AB and DA bits */
+	FPA11 *fpa11 = GET_FPA11();
+	fpa11->fpcr &= ~MASK_WFC;		/* clear SB, AB and DA bits */
+	fpa11->fpcr |= (reg & MASK_WFC);	/* write SB, AB and DA bits */
 }

@@ -25,11 +25,11 @@
  * the generic PPP layer to give it frames to send and to process
  * received frames.  It implements the PPP line discipline.
  *
- * Part of the code in this driver was inspired by the old sync-only
+ * Part of the code in this driver was inspired by the old async-only
  * PPP driver, written by Michael Callahan and Al Longyear, and
  * subsequently hacked by Paul Mackerras.
  *
- * ==FILEVERSION 20000322==
+ * ==FILEVERSION 20020125==
  */
 
 #include <linux/module.h>
@@ -41,17 +41,12 @@
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
 #include <linux/ppp_channel.h>
+#include <linux/spinlock.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
+#include <asm/semaphore.h>
 
-#ifndef spin_trylock_bh
-#define spin_trylock_bh(lock)	({ int __r; local_bh_disable();	\
-				   __r = spin_trylock(lock);	\
-				   if (!__r) local_bh_enable();	\
-				   __r; })
-#endif
-
-#define PPP_VERSION	"2.4.1"
+#define PPP_VERSION	"2.4.2"
 
 /* Structure for storing local state. */
 struct syncppp {
@@ -72,6 +67,8 @@ struct syncppp {
 
 	struct sk_buff	*rpkt;
 
+	atomic_t	refcnt;
+	struct semaphore dead_sem;
 	struct ppp_channel chan;	/* interface to generic ppp layer */
 };
 
@@ -96,7 +93,7 @@ static void ppp_sync_flush_output(struct syncppp *ap);
 static void ppp_sync_input(struct syncppp *ap, const unsigned char *buf,
 			   char *flags, int count);
 
-struct ppp_channel_ops sync_ops = {
+static struct ppp_channel_ops sync_ops = {
 	ppp_sync_send,
 	ppp_sync_ioctl
 };
@@ -168,7 +165,38 @@ ppp_print_buffer (const char *name, const __u8 *buf, int count)
  */
 
 /*
- * Called when a tty is put into line discipline.
+ * We have a potential race on dereferencing tty->disc_data,
+ * because the tty layer provides no locking at all - thus one
+ * cpu could be running ppp_synctty_receive while another
+ * calls ppp_synctty_close, which zeroes tty->disc_data and
+ * frees the memory that ppp_synctty_receive is using.  The best
+ * way to fix this is to use a rwlock in the tty struct, but for now
+ * we use a single global rwlock for all ttys in ppp line discipline.
+ *
+ * FIXME: Fixed in tty_io nowdays.
+ */
+static rwlock_t disc_data_lock = RW_LOCK_UNLOCKED;
+
+static struct syncppp *sp_get(struct tty_struct *tty)
+{
+	struct syncppp *ap;
+
+	read_lock(&disc_data_lock);
+	ap = tty->disc_data;
+	if (ap != NULL)
+		atomic_inc(&ap->refcnt);
+	read_unlock(&disc_data_lock);
+	return ap;
+}
+
+static void sp_put(struct syncppp *ap)
+{
+	if (atomic_dec_and_test(&ap->refcnt))
+		up(&ap->dead_sem);
+}
+
+/*
+ * Called when a tty is put into sync-PPP line discipline.
  */
 static int
 ppp_sync_open(struct tty_struct *tty)
@@ -192,6 +220,9 @@ ppp_sync_open(struct tty_struct *tty)
 	ap->xaccm[3] = 0x60000000U;
 	ap->raccm = ~0U;
 
+	atomic_set(&ap->refcnt, 1);
+	init_MUTEX_LOCKED(&ap->dead_sem);
+
 	ap->chan.private = ap;
 	ap->chan.ops = &sync_ops;
 	ap->chan.mtu = PPP_MRU;
@@ -213,16 +244,34 @@ ppp_sync_open(struct tty_struct *tty)
 
 /*
  * Called when the tty is put into another line discipline
- * (or it hangs up).
+ * or it hangs up.  We have to wait for any cpu currently
+ * executing in any of the other ppp_synctty_* routines to
+ * finish before we can call ppp_unregister_channel and free
+ * the syncppp struct.  This routine must be called from
+ * process context, not interrupt or softirq context.
  */
 static void
 ppp_sync_close(struct tty_struct *tty)
 {
-	struct syncppp *ap = tty->disc_data;
+	struct syncppp *ap;
 
+	write_lock(&disc_data_lock);
+	ap = tty->disc_data;
+	tty->disc_data = 0;
+	write_unlock(&disc_data_lock);
 	if (ap == 0)
 		return;
-	tty->disc_data = 0;
+
+	/*
+	 * We have now ensured that nobody can start using ap from now
+	 * on, but we have to wait for all existing users to finish.
+	 * Note that ppp_unregister_channel ensures that no calls to
+	 * our channel ops (i.e. ppp_sync_send/ioctl) are in progress
+	 * by the time it returns.
+	 */
+	if (!atomic_dec_and_test(&ap->refcnt))
+		down(&ap->dead_sem);
+
 	ppp_unregister_channel(&ap->chan);
 	if (ap->rpkt != 0)
 		kfree_skb(ap->rpkt);
@@ -233,40 +282,48 @@ ppp_sync_close(struct tty_struct *tty)
 }
 
 /*
- * Read a PPP frame, for compatibility until pppd is updated.
+ * Called on tty hangup in process context.
+ *
+ * Wait for I/O to driver to complete and unregister PPP channel.
+ * This is already done by the close routine, so just call that.
+ */
+static int ppp_sync_hangup(struct tty_struct *tty)
+{
+	ppp_sync_close(tty);
+	return 0;
+}
+
+/*
+ * Read does nothing - no data is ever available this way.
+ * Pppd reads and writes packets via /dev/ppp instead.
  */
 static ssize_t
 ppp_sync_read(struct tty_struct *tty, struct file *file,
 	       unsigned char *buf, size_t count)
 {
-	struct syncppp *ap = tty->disc_data;
-
-	if (ap == 0)
-		return -ENXIO;
-	return ppp_channel_read(&ap->chan, file, buf, count);
+	return -EAGAIN;
 }
 
 /*
- * Write a ppp frame, for compatibility until pppd is updated.
+ * Write on the tty does nothing, the packets all come in
+ * from the ppp generic stuff.
  */
 static ssize_t
 ppp_sync_write(struct tty_struct *tty, struct file *file,
 		const unsigned char *buf, size_t count)
 {
-	struct syncppp *ap = tty->disc_data;
-
-	if (ap == 0)
-		return -ENXIO;
-	return ppp_channel_write(&ap->chan, buf, count);
+	return -EAGAIN;
 }
 
 static int
 ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
 		  unsigned int cmd, unsigned long arg)
 {
-	struct syncppp *ap = tty->disc_data;
+	struct syncppp *ap = sp_get(tty);
 	int err, val;
 
+	if (ap == 0)
+		return -ENXIO;
 	err = -EFAULT;
 	switch (cmd) {
 	case PPPIOCGCHAN:
@@ -308,34 +365,11 @@ ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
 		err = 0;
 		break;
 
-	/*
-	 * Compatibility calls until pppd is updated.
-	 */
-	case PPPIOCGFLAGS:
-	case PPPIOCSFLAGS:
-	case PPPIOCGASYNCMAP:
-	case PPPIOCSASYNCMAP:
-	case PPPIOCGRASYNCMAP:
-	case PPPIOCSRASYNCMAP:
-	case PPPIOCGXASYNCMAP:
-	case PPPIOCSXASYNCMAP:
-	case PPPIOCGMRU:
-	case PPPIOCSMRU:
-		err = -EPERM;
-		if (!capable(CAP_NET_ADMIN))
-			break;
-		err = ppp_sync_ioctl(&ap->chan, cmd, arg);
-		break;
-
-	case PPPIOCATTACH:
-	case PPPIOCDETACH:
-		err = ppp_channel_ioctl(&ap->chan, cmd, arg);
-		break;
-
 	default:
 		err = -ENOIOCTLCMD;
 	}
 
+	sp_put(ap);
 	return err;
 }
 
@@ -343,16 +377,7 @@ ppp_synctty_ioctl(struct tty_struct *tty, struct file *file,
 static unsigned int
 ppp_sync_poll(struct tty_struct *tty, struct file *file, poll_table *wait)
 {
-	struct syncppp *ap = tty->disc_data;
-	unsigned int mask;
-
-	mask = POLLOUT | POLLWRNORM;
-	/* compatibility for old pppd */
-	if (ap != 0)
-		mask |= ppp_channel_poll(&ap->chan, file, wait);
-	if (test_bit(TTY_OTHER_CLOSED, &tty->flags) || tty_hung_up_p(file))
-		mask |= POLLHUP;
-	return mask;
+	return 0;
 }
 
 static int
@@ -365,13 +390,14 @@ static void
 ppp_sync_receive(struct tty_struct *tty, const unsigned char *buf,
 		  char *flags, int count)
 {
-	struct syncppp *ap = tty->disc_data;
+	struct syncppp *ap = sp_get(tty);
 
 	if (ap == 0)
 		return;
 	spin_lock_bh(&ap->recv_lock);
 	ppp_sync_input(ap, buf, flags, count);
 	spin_unlock_bh(&ap->recv_lock);
+	sp_put(ap);
 	if (test_and_clear_bit(TTY_THROTTLED, &tty->flags)
 	    && tty->driver.unthrottle)
 		tty->driver.unthrottle(tty);
@@ -380,13 +406,14 @@ ppp_sync_receive(struct tty_struct *tty, const unsigned char *buf,
 static void
 ppp_sync_wakeup(struct tty_struct *tty)
 {
-	struct syncppp *ap = tty->disc_data;
+	struct syncppp *ap = sp_get(tty);
 
 	clear_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
 	if (ap == 0)
 		return;
 	if (ppp_sync_push(ap))
 		ppp_output_wakeup(&ap->chan);
+	sp_put(ap);
 }
 
 
@@ -399,12 +426,13 @@ static struct tty_ldisc ppp_sync_ldisc = {
 	write:	ppp_sync_write,
 	ioctl:	ppp_synctty_ioctl,
 	poll:	ppp_sync_poll,
+	hangup: ppp_sync_hangup,
 	receive_room: ppp_sync_room,
 	receive_buf: ppp_sync_receive,
 	write_wakeup: ppp_sync_wakeup,
 };
 
-int
+static int __init
 ppp_sync_init(void)
 {
 	int err;
@@ -738,7 +766,7 @@ ppp_sync_input(struct syncppp *ap, const unsigned char *buf,
 	}
 }
 
-void __exit
+static void __exit
 ppp_sync_cleanup(void)
 {
 	if (tty_register_ldisc(N_SYNC_PPP, NULL) != 0)
@@ -747,3 +775,4 @@ ppp_sync_cleanup(void)
 
 module_init(ppp_sync_init);
 module_exit(ppp_sync_cleanup);
+MODULE_LICENSE("GPL");

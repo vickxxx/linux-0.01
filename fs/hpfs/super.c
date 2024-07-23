@@ -3,7 +3,7 @@
  *
  *  Mikulas Patocka (mikulas@artax.karlin.mff.cuni.cz), 1998-1999
  *
- *  mouning, unmounting, error handling
+ *  mounting, unmounting, error handling
  */
 
 #include <linux/string.h>
@@ -212,6 +212,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "case")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "lower"))
 				*lowercase = 1;
 			else if (!strcmp(rhs, "asis"))
@@ -220,6 +222,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "conv")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "binary"))
 				*conv = CONV_BINARY;
 			else if (!strcmp(rhs, "text"))
@@ -230,6 +234,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "check")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "none"))
 				*chk = 0;
 			else if (!strcmp(rhs, "normal"))
@@ -240,6 +246,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "errors")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "continue"))
 				*errs = 0;
 			else if (!strcmp(rhs, "remount-ro"))
@@ -250,6 +258,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "eas")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "no"))
 				*eas = 0;
 			else if (!strcmp(rhs, "ro"))
@@ -260,6 +270,8 @@ int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 				return 0;
 		}
 		else if (!strcmp(p, "chkdsk")) {
+			if (!rhs || !*rhs)
+				return 0;
 			if (!strcmp(rhs, "no"))
 				*chkdsk = 0;
 			else if (!strcmp(rhs, "errors"))
@@ -398,6 +410,8 @@ struct super_block *hpfs_read_super(struct super_block *s, void *options,
 	/*s->s_hpfs_mounting = 1;*/
 	dev = s->s_dev;
 	set_blocksize(dev, 512);
+	s->s_blocksize = 512;
+	s->s_blocksize_bits = 9;
 	s->s_hpfs_fs_size = -1;
 	if (!(bootblock = hpfs_map_sector(s, 0, &bh0, 0))) goto bail1;
 	if (!(superblock = hpfs_map_sector(s, 16, &bh1, 1))) goto bail2;
@@ -424,8 +438,6 @@ struct super_block *hpfs_read_super(struct super_block *s, void *options,
 
 	/* Fill superblock stuff */
 	s->s_magic = HPFS_SUPER_MAGIC;
-	s->s_blocksize = 512;
-	s->s_blocksize_bits = 9;
 	s->s_op = &hpfs_sops;
 
 	s->s_hpfs_root = superblock->root;
@@ -449,6 +461,7 @@ struct super_block *hpfs_read_super(struct super_block *s, void *options,
 	s->s_hpfs_was_error = 0;
 	s->s_hpfs_cp_table = NULL;
 	s->s_hpfs_c_bitmap = -1;
+	s->s_hpfs_max_fwd_alloc = 0xffffff;
 	
 	/* Load bitmap directory */
 	if (!(s->s_hpfs_bmp_dir = hpfs_load_bitmap_directory(s, superblock->bitmaps)))
@@ -572,3 +585,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_hpfs_fs)
 module_exit(exit_hpfs_fs)
+MODULE_LICENSE("GPL");

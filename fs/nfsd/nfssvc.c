@@ -19,7 +19,7 @@
 #include <linux/uio.h>
 #include <linux/version.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 
@@ -36,8 +36,19 @@
 #define NFSDDBG_FACILITY	NFSDDBG_SVC
 #define NFSD_BUFSIZE		(1024 + NFSSVC_MAXBLKSIZE)
 
+/* these signals will be delivered to an nfsd thread 
+ * when handling a request
+ */
 #define ALLOWED_SIGS	(sigmask(SIGKILL))
-#define SHUTDOWN_SIGS	(sigmask(SIGKILL) | sigmask(SIGINT) | sigmask(SIGQUIT))
+/* these signals will be delivered to an nfsd thread
+ * when not handling a request. i.e. when waiting
+ */
+#define SHUTDOWN_SIGS	(sigmask(SIGKILL) | sigmask(SIGHUP) | sigmask(SIGINT) | sigmask(SIGQUIT))
+/* if the last thread dies with SIGHUP, then the exports table is
+ * left unchanged ( like 2.4-{0-9} ).  Any other signal will clear
+ * the exports table (like 2.2).
+ */
+#define	SIG_NOCLEAN	SIGHUP
 
 extern struct svc_program	nfsd_program;
 static void			nfsd(struct svc_rqst *rqstp);
@@ -55,7 +66,7 @@ struct list_head nfsd_list = LIST_HEAD_INIT(nfsd_list);
 /*
  * Maximum number of nfsd processes
  */
-#define	NFSD_MAXSERVS		128
+#define	NFSD_MAXSERVS		8192
 
 int
 nfsd_svc(unsigned short port, int nrservs)
@@ -76,6 +87,7 @@ nfsd_svc(unsigned short port, int nrservs)
 	if (error<0)
 		goto out;
 	if (!nfsd_serv) {
+		error = -ENOMEM;
 		nfsd_serv = svc_create(&nfsd_program, NFSD_BUFSIZE, NFSSVC_XDRSIZE);
 		if (nfsd_serv == NULL)
 			goto out;
@@ -83,12 +95,12 @@ nfsd_svc(unsigned short port, int nrservs)
 		if (error < 0)
 			goto failure;
 
-#if 0	/* Don't even pretend that TCP works. It doesn't. */
+#if CONFIG_NFSD_TCP
 		error = svc_makesock(nfsd_serv, IPPROTO_TCP, port);
 		if (error < 0)
 			goto failure;
 #endif
-		get_fast_time(&nfssvc_boot);		/* record boot time */
+		do_gettimeofday(&nfssvc_boot);		/* record boot time */
 	} else
 		nfsd_serv->sv_nrthreads++;
 	nrservs -= (nfsd_serv->sv_nrthreads-1);
@@ -103,7 +115,7 @@ nfsd_svc(unsigned short port, int nrservs)
 		struct nfsd_list *nl =
 			list_entry(victim,struct nfsd_list, list);
 		victim = victim->next;
-		send_sig(SIGKILL, nl->task, 1);
+		send_sig(SIG_NOCLEAN, nl->task, 1);
 		nrservs++;
 	}
  failure:
@@ -117,7 +129,7 @@ nfsd_svc(unsigned short port, int nrservs)
 	return error;
 }
 
-static void inline
+static inline void
 update_thread_usage(int busy_threads)
 {
 	unsigned long prev_call;
@@ -149,13 +161,9 @@ nfsd(struct svc_rqst *rqstp)
 	/* Lock module and set up kernel thread */
 	MOD_INC_USE_COUNT;
 	lock_kernel();
-	exit_mm(current);
-	current->session = 1;
-	current->pgrp = 1;
+	daemonize();
 	sprintf(current->comm, "nfsd");
-	current->fs->umask = 0;
-
-	current->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY; 
+	current->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY;
 
 	nfsdstats.th_cnt++;
 	/* Let svc_process check client's authentication. */
@@ -181,7 +189,7 @@ nfsd(struct svc_rqst *rqstp)
 		 * recvfrom routine.
 		 */
 		while ((err = svc_recv(serv, rqstp,
-				       MAX_SCHEDULE_TIMEOUT)) == -EAGAIN)
+				       5*60*HZ)) == -EAGAIN)
 		    ;
 		if (err < 0)
 			break;
@@ -218,7 +226,7 @@ nfsd(struct svc_rqst *rqstp)
 			if (sigismember(&current->pending.signal, signo) &&
 			    !sigismember(&current->blocked, signo))
 				break;
-		printk(KERN_WARNING "nfsd: terminating on signal %d\n", signo);
+		err = signo;
 	}
 
 	/* Release lockd */
@@ -226,6 +234,12 @@ nfsd(struct svc_rqst *rqstp)
 
 	/* Check if this is last thread */
 	if (serv->sv_nrthreads==1) {
+		
+		printk(KERN_WARNING "nfsd: last server has exited\n");
+		if (err != SIG_NOCLEAN) {
+			printk(KERN_WARNING "nfsd: unexporting all filesystems\n");
+			nfsd_export_shutdown();
+		}
 		nfsd_serv = NULL;
 	        nfsd_racache_shutdown();	/* release read-ahead cache */
 	}
@@ -257,7 +271,7 @@ nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 		return 0;
 	case RC_REPLY:
 		return 1;
-	case RC_DOIT:
+	case RC_DOIT:;
 		/* do it */
 	}
 
@@ -272,6 +286,12 @@ nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 
 	/* Now call the procedure handler, and encode NFS status. */
 	nfserr = proc->pc_func(rqstp, rqstp->rq_argp, rqstp->rq_resp);
+	if (nfserr == nfserr_dropit) {
+		dprintk("nfsd: Dropping request due to malloc failure!\n");
+		nfsd_cache_update(rqstp, RC_NOCACHE, NULL);
+		return 0;
+	}
+		
 	if (rqstp->rq_proc != 0)
 		svc_putlong(&rqstp->rq_resbuf, nfserr);
 

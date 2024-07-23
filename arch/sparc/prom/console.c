@@ -1,9 +1,9 @@
-/* $Id: console.c,v 1.23 2000/08/26 02:38:03 anton Exp $
+/* $Id: console.c,v 1.25 2001/10/30 04:54:22 davem Exp $
  * console.c: Routines that deal with sending and receiving IO
  *            to/from the current console device using the PROM.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1998 Pete Zaitcev <zaitcev@metabyte.com>
+ * Copyright (C) 1998 Pete Zaitcev <zaitcev@yahoo.com>
  */
 
 #include <linux/types.h>
@@ -207,6 +207,7 @@ prom_query_output_device()
 		}
 		break;
 	default:
-	}
+		;
+	};
 	return PROMDEV_O_UNK;
 }

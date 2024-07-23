@@ -14,7 +14,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
@@ -402,6 +402,7 @@ static struct fb_ops xxxfb_ops = {
      */
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
 int init_module(void)
 {
     return xxxfb_init();

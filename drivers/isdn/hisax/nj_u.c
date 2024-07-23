@@ -1,6 +1,7 @@
-/* $Id: nj_u.c,v 2.8.6.1 2000/11/29 16:00:14 kai Exp $ 
+/* $Id: nj_u.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $ 
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -15,7 +16,7 @@
 #include <linux/ppp_defs.h>
 #include "netjet.h"
 
-const char *NETjet_U_revision = "$Revision: 2.8.6.1 $";
+const char *NETjet_U_revision = "$Revision: 1.1.4.1 $";
 
 static u_char dummyrr(struct IsdnCardState *cs, int chan, u_char off)
 {
@@ -174,6 +175,7 @@ setup_netjet_u(struct IsdnCard *card)
 			PCI_DEVICE_ID_TIGERJET_300,  dev_netjet))) {
 			if (pci_enable_device(dev_netjet))
 				return(0);
+			pci_set_master(dev_netjet);
 			cs->irq = dev_netjet->irq;
 			if (!cs->irq) {
 				printk(KERN_WARNING "NETspider-U: No IRQ for PCI card found\n");
@@ -243,11 +245,11 @@ setup_netjet_u(struct IsdnCard *card)
 	bytecnt = 256;
 
 	printk(KERN_INFO
-		"NETspider-U: PCI card configured at 0x%x IRQ %d\n",
+		"NETspider-U: PCI card configured at %#lx IRQ %d\n",
 		cs->hw.njet.base, cs->irq);
 	if (check_region(cs->hw.njet.base, bytecnt)) {
 		printk(KERN_WARNING
-		       "HiSax: %s config port %x-%x already in use\n",
+		       "HiSax: %s config port %#lx-%#lx already in use\n",
 		       CardType[card->typ],
 		       cs->hw.njet.base,
 		       cs->hw.njet.base + bytecnt);

@@ -29,7 +29,7 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/parport.h>
 #include <linux/sched.h>
@@ -69,6 +69,7 @@ struct qcam_device {
 static int parport[MAX_CAMS] = { [1 ... MAX_CAMS-1] = -1 };
 static int probe = 2;
 static int force_rgb = 0;
+static int video_nr = -1;
 
 static inline void qcam_set_ack(struct qcam_device *qcam, unsigned int i)
 {
@@ -500,13 +501,11 @@ static long qc_capture(struct qcam_device *q, char *buf, unsigned long len)
 
 static int qcam_open(struct video_device *dev, int flags)
 {
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void qcam_close(struct video_device *dev)
 {
-	MOD_DEC_USE_COUNT;
 }
 
 static long qcam_write(struct video_device *v, const char *buf, unsigned long count, int noblock)
@@ -725,6 +724,7 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
 /* video device template */
 static struct video_device qcam_template=
 {
+	owner:		THIS_MODULE,
 	name:		"Colour QuickCam",
 	type:		VID_TYPE_CAPTURE,
 	hardware:	VID_HARDWARE_QCAM_C,
@@ -816,7 +816,7 @@ int init_cqcam(struct parport *port)
 
 	parport_release(qcam->pdev);
 	
-	if (video_register_device(&qcam->vdev, VFL_TYPE_GRABBER)==-1)
+	if (video_register_device(&qcam->vdev, VFL_TYPE_GRABBER, video_nr)==-1)
 	{
 		printk(KERN_ERR "Unable to register Colour QuickCam on %s\n",
 		       qcam->pport->name);
@@ -876,12 +876,15 @@ static void __exit cqcam_cleanup (void)
 
 MODULE_AUTHOR("Philip Blundell <philb@gnu.org>");
 MODULE_DESCRIPTION(BANNER);
+MODULE_LICENSE("GPL");
+
 MODULE_PARM_DESC(parport ,"parport=<auto|n[,n]...> for port detection method\n\
 probe=<0|1|2> for camera detection method\n\
 force_rgb=<0|1> for RGB data format (default BGR)");
 MODULE_PARM(parport, "1-" __MODULE_STRING(MAX_CAMS) "i");
 MODULE_PARM(probe, "i");
 MODULE_PARM(force_rgb, "i");
+MODULE_PARM(video_nr,"i");
 
 module_init(cqcam_init);
 module_exit(cqcam_cleanup);

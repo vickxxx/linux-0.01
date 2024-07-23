@@ -71,14 +71,14 @@
 #include <linux/un.h>
 #include <linux/net.h>
 #include <linux/fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/file.h>
 #include <linux/proc_fs.h>
+#include <linux/tcp.h>
 
 #include <net/sock.h>
-#include <net/tcp.h>
 #include <net/af_unix.h>
 #include <net/scm.h>
 
@@ -205,12 +205,21 @@ void unix_gc(void)
 
 	forall_unix_sockets(i, s)
 	{
+		int open_count = 0;
+
 		/*
 		 *	If all instances of the descriptor are not
 		 *	in flight we are in use.
+		 *
+		 *	Special case: when socket s is embrion, it may be
+		 *	hashed but still not in queue of listening socket.
+		 *	In this case (see unix_create1()) we set artificial
+		 *	negative inflight counter to close race window.
+		 *	It is trick of course and dirty one.
 		 */
-		if(s->socket && s->socket->file &&
-		   file_count(s->socket->file) > atomic_read(&s->protinfo.af_unix.inflight))
+		if(s->socket && s->socket->file)
+			open_count = file_count(s->socket->file);
+		if (open_count > atomic_read(&s->protinfo.af_unix.inflight))
 			maybe_unmark_and_push(s);
 	}
 
@@ -296,9 +305,6 @@ void unix_gc(void)
 	 *	Here we are. Hitlist is filled. Die.
 	 */
 
-	while ((skb=__skb_dequeue(&hitlist))!=NULL) {
-		kfree_skb(skb);
-	}
-
+	__skb_queue_purge(&hitlist);
 	up(&unix_gc_sem);
 }

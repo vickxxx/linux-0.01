@@ -118,6 +118,8 @@ static struct pci_device_id iph5526_pci_tbl[] __initdata = {
 };
 MODULE_DEVICE_TABLE(pci, iph5526_pci_tbl);
 
+MODULE_LICENSE("GPL");
+
 #define MAX_FC_CARDS 2
 static struct fc_info *fc[MAX_FC_CARDS+1];
 static unsigned int pci_irq_line;
@@ -222,7 +224,7 @@ static void flush_tachyon_cache(struct fc_info *fi, u_short ox_id);
 static int get_scsi_oxid(struct fc_info *fi);
 static void update_scsi_oxid(struct fc_info *fi);
 
-Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
+static Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
 
 static void iph5526_timeout(struct net_device *dev);
 
@@ -241,7 +243,7 @@ static int __init iph5526_probe_pci(struct net_device *dev)
 	struct fc_info *fi = (struct fc_info *)dev->priv;
 #else
 	struct fc_info *fi;
-	static int count = 0;
+	static int count;
  
 	if(fc[count] != NULL) {
 		if (dev == NULL) {
@@ -687,8 +689,8 @@ int index, no_of_entries = 0;
 			prev_IMQ_index = current_IMQ_index;
 		}
 	} /*end of for loop*/		
-	return;
 	LEAVE("tachyon_interrupt");
+       return;
 }
 
 
@@ -1074,11 +1076,11 @@ int wrap_around = FALSE, no_of_wrap_buffs = NO_OF_ENTRIES - 1;
 			fi->fc_stats.rx_dropped++;
 			fi->g.mfs_buffer_count += no_of_buffers;
 			if (fi->g.mfs_buffer_count >= NO_OF_ENTRIES) {
-			int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
+				int count = fi->g.mfs_buffer_count / NO_OF_ENTRIES;
 				fi->g.mfs_buffer_count -= NO_OF_ENTRIES * count;
 				update_MFSBQ_indx(fi, count);
-				return;
 			}
+			return;
 		}
 		if (wrap_around) {
 		int wrap_size = no_of_wrap_buffs * MFS_BUFFER_SIZE;
@@ -1930,7 +1932,7 @@ u_int tachyon_status;
 		fi->g.name_server = FALSE;
 		fi->g.alpa_list_index = 0;
 		fi->g.ox_id = NOT_SCSI_XID;
-		fi->g.my_mtu = FRAME_SIZE;
+		fi->g.my_mtu = TACH_FRAME_SIZE;
 		
 		/* Implicitly LOGO with all logged-in nodes. 
 		 */
@@ -2809,7 +2811,7 @@ int i;
 	else
 	if (logi == ELS_FLOGI)
 		fi->g.login.common_features = htons(FLOGI_C_F);
-	fi->g.login.recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.n_port_total_conc_seq = htons(CONCURRENT_SEQUENCES);
 	fi->g.login.rel_off_by_info_cat = htons(RO_INFO_CATEGORY);
 	fi->g.login.ED_TOV = htonl(E_D_TOV);
@@ -2845,7 +2847,7 @@ int i;
 		fi->g.login.c_of_s[2].service_options  = htons(SERVICE_VALID);
 	fi->g.login.c_of_s[2].initiator_ctl = htons(0);
 	fi->g.login.c_of_s[2].recipient_ctl = htons(0);
-	fi->g.login.c_of_s[2].recv_data_field_size = htons(FRAME_SIZE);
+	fi->g.login.c_of_s[2].recv_data_field_size = htons(TACH_FRAME_SIZE);
 	fi->g.login.c_of_s[2].concurrent_sequences = htons(CLASS3_CONCURRENT_SEQUENCE);
 	fi->g.login.c_of_s[2].n_port_end_to_end_credit = htons(0);
 	fi->g.login.c_of_s[2].open_seq_per_exchange = htons(CLASS3_OPEN_SEQUENCE);
@@ -2931,7 +2933,7 @@ static void iph5526_timeout(struct net_device *dev)
 {
 	struct fc_info *fi = (struct fc_info*)dev->priv;
 	printk(KERN_WARNING "%s: timed out on send.\n", dev->name);
-	fi->fc_stats.rx_dropped++;
+	fi->fc_stats.tx_dropped++;
 	dev->trans_start = jiffies;
 	netif_wake_queue(dev);
 }
@@ -2974,7 +2976,7 @@ static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
 		fi->fc_stats.tx_packets++;
 	}
 	else
-		fi->fc_stats.rx_dropped++;
+		fi->fc_stats.tx_dropped++;
 	dev->trans_start = jiffies;
 	/* We free up the IP buffers in the OCI_interrupt handler.
 	 * status == 0 implies that the frame was not transmitted. So the
@@ -2982,8 +2984,7 @@ static int iph5526_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 */
 	if ((type == ETH_P_ARP) || (status == 0))
 		dev_kfree_skb(skb);
-	else
-		netif_wake_queue(dev);
+	netif_wake_queue(dev);
 	LEAVE("iph5526_send_packet");
 	return 0;
 }
@@ -3148,6 +3149,7 @@ struct fch_hdr fch;
 	if (skb->protocol == ntohs(ETH_P_ARP))
 		skb->data[1] = 0x06;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	fi->fc_stats.rx_packets++;
 	LEAVE("rx_net_packet");
 }
@@ -3168,39 +3170,8 @@ struct fch_hdr fch;
 	skb->protocol = fc_type_trans(skb, dev);
 	DPRINTK("protocol = %x", skb->protocol);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	LEAVE("rx_net_mfs_packet");
-}
-
-unsigned short fc_type_trans(struct sk_buff *skb, struct net_device *dev) 
-{
-struct fch_hdr *fch=(struct fch_hdr *)skb->data;
-struct fcllc *fcllc;
-	skb->mac.raw = skb->data;
-	fcllc = (struct fcllc *)(skb->data + sizeof(struct fch_hdr) + 2);
-	skb_pull(skb,sizeof(struct fch_hdr) + 2);
-
-	if(*fch->daddr & 1) {
-		if(!memcmp(fch->daddr,dev->broadcast,FC_ALEN)) 	
-			skb->pkt_type = PACKET_BROADCAST;
-		else
-			skb->pkt_type = PACKET_MULTICAST;
-	}
-	else if(dev->flags & IFF_PROMISC) {
-		if(memcmp(fch->daddr, dev->dev_addr, FC_ALEN))
-			skb->pkt_type=PACKET_OTHERHOST;
-	}
-	
-	/* Strip the SNAP header from ARP packets since we don't 
-	 * pass them through to the 802.2/SNAP layers.
-	 */
-
-	if (fcllc->dsap == EXTENDED_SAP &&
-		(fcllc->ethertype == ntohs(ETH_P_IP) ||
-		 fcllc->ethertype == ntohs(ETH_P_ARP))) {
-		skb_pull(skb, sizeof(struct fcllc));
-		return fcllc->ethertype;
-	}
-	return ntohs(ETH_P_802_2);
 }
 
 static int tx_exchange(struct fc_info *fi, char *data, u_int len, u_int r_ctl, u_int type, u_int d_id, u_int mtu, int int_required, u_short tx_ox_id, u_int frame_class)
@@ -3403,8 +3374,8 @@ u_int s_id;
 		q = q->next;
 	}
 	DPRINTK1("Port Name does not match. Txing LOGO.");
-	return 0;
 	LEAVE("validate_login");
+       return 0;
 }
 
 static void add_to_address_cache(struct fc_info *fi, u_int *base_ptr)
@@ -3765,7 +3736,7 @@ struct pci_dev *pdev = NULL;
 	for (i = 0; i <= MAX_FC_CARDS; i++) 
 		fc[i] = NULL;
 
-	for (i = 0; i < clone_list[i].vendor_id != 0; i++)
+	for (i = 0; clone_list[i].vendor_id != 0; i++)
 	while ((pdev = pci_find_device(clone_list[i].vendor_id, clone_list[i].device_id, pdev))) {
 		unsigned short pci_command;
 		if (pci_enable_device(pdev))
@@ -3787,8 +3758,10 @@ struct pci_dev *pdev = NULL;
 		sprintf(fi->name, "fc%d", count);
 
 		host = scsi_register(tmpt, sizeof(struct iph5526_hostdata));
-		if(host==NULL)
+		if(host==NULL) {
+			kfree(fc[count]);
 			return no_of_hosts;
+		}
 			
 		hostdata = (struct iph5526_hostdata *)host->hostdata;
 		memset(hostdata, 0 , sizeof(struct iph5526_hostdata));
@@ -3867,8 +3840,11 @@ struct pci_dev *pdev = NULL;
 		/* Wait for the Link to come up and the login process 
 		 * to complete. 
 		 */
-		for(timeout = jiffies + 10*HZ; (timeout > jiffies) && ((fi->g.link_up == FALSE) || (fi->g.port_discovery == TRUE) || (fi->g.explore_fabric == TRUE) || (fi->g.perform_adisc == TRUE));)
+		for(timeout = jiffies + 10*HZ; time_before(jiffies, timeout) && ((fi->g.link_up == FALSE) || (fi->g.port_discovery == TRUE) || (fi->g.explore_fabric == TRUE) || (fi->g.perform_adisc == TRUE));)
+		{
+			cpu_relax();
 			barrier();
+		}
 		
 		count++;
 		no_of_hosts++;
@@ -4521,9 +4497,9 @@ static char buf[80];
 
 static struct net_device *dev_fc[MAX_FC_CARDS];
 
-static int io =  0;
-static int irq  = 0;
-static int bad  = 0;	/* 0xbad = bad sig or no reset ack */
+static int io;
+static int irq;
+static int bad;	/* 0xbad = bad sig or no reset ack */
 static int scsi_registered;
 
 

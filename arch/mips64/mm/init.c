@@ -1,5 +1,4 @@
-/* $Id: init.c,v 1.13 2000/02/23 00:41:00 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -33,31 +32,12 @@
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
-#ifdef CONFIG_SGI_IP22
-#include <asm/sgialib.h>
-#endif
 #include <asm/mmu_context.h>
+#include <asm/tlb.h>
+#include <asm/cpu.h>
 
+mmu_gather_t mmu_gathers[NR_CPUS];
 unsigned long totalram_pages;
-
-void __bad_pte_kernel(pmd_t *pmd)
-{
-	printk("Bad pmd in pte_alloc_kernel: %08lx\n", pmd_val(*pmd));
-	pmd_set(pmd, BAD_PAGETABLE);
-}
-
-void __bad_pte(pmd_t *pmd)
-{
-	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-	pmd_set(pmd, BAD_PAGETABLE);
-}
-
-/* Fixme, we need something like BAD_PMDTABLE ...  */
-void __bad_pmd(pgd_t *pgd)
-{
-	printk("Bad pgd in pmd_alloc: %08lx\n", pgd_val(*pgd));
-	pgd_set(pgd, empty_bad_pmd_table);
-}
 
 void pgd_init(unsigned long page)
 {
@@ -83,7 +63,7 @@ pgd_t *get_pgd_slow(void)
 {
 	pgd_t *ret, *init;
 
-	ret = (pgd_t *) __get_free_pages(GFP_KERNEL, 1);
+	ret = (pgd_t *) __get_free_pages(GFP_KERNEL, PGD_ORDER);
 	if (ret) {
 		init = pgd_offset(&init_mm, 0);
 		pgd_init((unsigned long)ret);
@@ -113,72 +93,6 @@ void pmd_init(unsigned long addr, unsigned long pagetable)
 	}
 }
 
-pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long offset)
-{
-	pmd_t *pmd;
-
-	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL, 1);
-	if (pgd_none(*pgd)) {
-		if (pmd) {
-			pmd_init((unsigned long)pmd, (unsigned long)invalid_pte_table);
-			pgd_set(pgd, pmd);
-			return pmd + offset;
-		}
-		pgd_set(pgd, BAD_PMDTABLE);
-		return NULL;
-	}
-	free_page((unsigned long)pmd);
-	if (pgd_bad(*pgd)) {
-		__bad_pmd(pgd);
-		return NULL;
-	}
-	return (pmd_t *) pgd_page(*pgd) + offset;
-}
-
-pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *page;
-
-	page = (pte_t *) __get_free_pages(GFP_USER, 1);
-	if (pmd_none(*pmd)) {
-		if (page) {
-			clear_page(page);
-			pmd_set(pmd, page);
-			return page + offset;
-		}
-		pmd_set(pmd, BAD_PAGETABLE);
-		return NULL;
-	}
-	free_page((unsigned long)page);
-	if (pmd_bad(*pmd)) {
-		__bad_pte_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *page;
-
-	page = (pte_t *) __get_free_pages(GFP_KERNEL, 0);
-	if (pmd_none(*pmd)) {
-		if (page) {
-			clear_page(page);
-			pmd_val(*pmd) = (unsigned long)page;
-			return page + offset;
-		}
-		pmd_set(pmd, BAD_PAGETABLE);
-		return NULL;
-	}
-	free_pages((unsigned long)page, 0);
-	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
 int do_check_pgt_cache(int low, int high)
 {
 	int freed = 0;
@@ -196,16 +110,8 @@ int do_check_pgt_cache(int low, int high)
 	return freed;
 }
 
-
-asmlinkage int sys_cacheflush(void *addr, int bytes, int cache)
-{
-	/* XXX Just get it working for now... */
-	flush_cache_l1();
-	return 0;
-}
-
 /*
- * We have upto 8 empty zeroed pages so we can map one of the right colour
+ * We have up to 8 empty zeroed pages so we can map one of the right colour
  * when needed.  This is necessary only on R4000 / R4400 SC and MC versions
  * where we have to avoid VCED / VECI exceptions for good performance at
  * any price.  Since page is never written to after the initialization we
@@ -218,16 +124,10 @@ unsigned long setup_zero_pages(void)
 	unsigned long order, size;
 	struct page *page;
 
-	switch (mips_cputype) {
-	case CPU_R4000SC:
-	case CPU_R4000MC:
-	case CPU_R4400SC:
-	case CPU_R4400MC:
+	if (cpu_has_vce)
 		order = 3;
-		break;
-	default:
+	else
 		order = 0;
-	}
 
 	empty_zero_page = __get_free_pages(GFP_KERNEL, order);
 	if (!empty_zero_page)
@@ -245,34 +145,6 @@ unsigned long setup_zero_pages(void)
 	memset((void *)empty_zero_page, 0, size);
 
 	return 1UL << order;
-}
-
-/*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving a inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
- */
-pmd_t * __bad_pmd_table(void)
-{
-	return empty_bad_pmd_table;
-}
-
-pte_t * __bad_pagetable(void)
-{
-	return empty_bad_page_table;
-}
-
-pte_t __bad_page(void)
-{
-	return __pte(0);
 }
 
 void show_mem(void)
@@ -312,37 +184,74 @@ extern char __init_begin, __init_end;
 
 void __init paging_init(void)
 {
+	pmd_t *pmd = kpmdtbl;
+	pte_t *pte = kptbl;
+
 	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
 	unsigned long max_dma, low;
+	int i;
 
 	/* Initialize the entire pgd.  */
 	pgd_init((unsigned long)swapper_pg_dir);
 	pmd_init((unsigned long)invalid_pmd_table, (unsigned long)invalid_pte_table);
 	memset((void *)invalid_pte_table, 0, sizeof(pte_t) * PTRS_PER_PTE);
-	pmd_init((unsigned long)empty_bad_pmd_table, (unsigned long)empty_bad_page_table);
-	memset((void *)empty_bad_page_table, 0, sizeof(pte_t) * PTRS_PER_PTE);
 
 	max_dma =  virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 	low = max_low_pfn;
 
+#ifdef CONFIG_ISA
 	if (low < max_dma)
 		zones_size[ZONE_DMA] = low;
 	else {
 		zones_size[ZONE_DMA] = max_dma;
 		zones_size[ZONE_NORMAL] = low - max_dma;
 	}
+#else
+	zones_size[ZONE_DMA] = low;
+#endif
 
 	free_area_init(zones_size);
+
+	memset((void *)kptbl, 0, PAGE_SIZE << PGD_ORDER);
+	memset((void *)kpmdtbl, 0, PAGE_SIZE);
+	pgd_set(swapper_pg_dir, kpmdtbl);
+	for (i = 0; i < (1 << PGD_ORDER); pmd++,i++,pte+=PTRS_PER_PTE)
+		pmd_val(*pmd) = (unsigned long)pte;
 }
 
-extern int page_is_ram(unsigned long pagenr);
+//extern int page_is_ram(unsigned long pagenr);
+
+#define PFN_UP(x)	(((x) + PAGE_SIZE - 1) >> PAGE_SHIFT)
+#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
+
+static inline int page_is_ram(unsigned long pagenr)
+{
+	int i;
+
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		unsigned long addr, end;
+
+		if (boot_mem_map.map[i].type != BOOT_MEM_RAM)
+			/* not usable memory */
+			continue;
+
+		addr = PFN_UP(boot_mem_map.map[i].addr);
+		end = PFN_DOWN(boot_mem_map.map[i].addr +
+			       boot_mem_map.map[i].size);
+
+		if (pagenr >= addr && pagenr < end)
+			return 1;
+	}
+
+	return 0;
+}
 
 void __init mem_init(void)
 {
 	unsigned long codesize, reservedpages, datasize, initsize;
 	unsigned long tmp, ram;
 
-	max_mapnr = num_physpages = max_low_pfn;
+	max_mapnr = num_mappedpages = num_physpages = max_low_pfn;
 	high_memory = (void *) __va(max_mapnr << PAGE_SHIFT);
 
 	totalram_pages += free_all_bootmem();
@@ -360,8 +269,8 @@ void __init mem_init(void)
 	datasize =  (unsigned long) &_edata - (unsigned long) &_fdata;
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 
-	printk("Memory: %luk/%luk available (%ldk kernel code, %ldk reserved, "
-	       "%ldk data, %ldk init)\n",
+	printk(KERN_INFO "Memory: %luk/%luk available (%ldk kernel code, "
+	       "%ldk reserved, %ldk data, %ldk init)\n",
 	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
 	       ram << (PAGE_SHIFT-10),
 	       codesize >> 10,
@@ -374,18 +283,24 @@ void __init mem_init(void)
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
+	/* Switch from KSEG0 to XKPHYS addresses */
+	start = (unsigned long)phys_to_virt(CPHYSADDR(start));
+	end = (unsigned long)phys_to_virt(CPHYSADDR(end));
+	if (start < end)
+		printk(KERN_INFO "Freeing initrd memory: %ldk freed\n",
+		       (end - start) >> 10);
+
 	for (; start < end; start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(start));
 		set_page_count(virt_to_page(start), 1);
 		free_page(start);
 		totalram_pages++;
 	}
-	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 }
 #endif
 
 extern char __init_begin, __init_end;
-extern void prom_free_prom_memory(void);
+extern void prom_free_prom_memory(void) __init;
 
 void
 free_initmem(void)
@@ -393,7 +308,7 @@ free_initmem(void)
 	unsigned long addr, page;
 
 	prom_free_prom_memory();
-    
+
 	addr = (unsigned long)(&__init_begin);
 	while (addr < (unsigned long)&__init_end) {
 		page = PAGE_OFFSET | CPHYSADDR(addr);
@@ -403,7 +318,7 @@ free_initmem(void)
 		totalram_pages++;
 		addr += PAGE_SIZE;
 	}
-	printk("Freeing unused kernel memory: %ldk freed\n",
+	printk(KERN_INFO "Freeing unused kernel memory: %ldk freed\n",
 	       (&__init_end - &__init_begin) >> 10);
 }
 

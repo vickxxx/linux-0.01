@@ -1,4 +1,4 @@
-/* $Id: sunserial.c,v 1.75 2000/03/22 02:45:36 davem Exp $
+/* $Id: sunserial.c,v 1.79.2.2 2002/01/05 01:12:31 davem Exp $
  * serial.c: Serial port driver infrastructure for the Sparc.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -54,20 +54,22 @@ struct sunserial_operations rs_ops = {
 	nop_rs_read_proc
 };
 
-int rs_init(void)
+void rs_init(void)
 {
-	struct initfunc *init;
-	int err = -ENODEV;
+	static int invoked = 0;
 
-	init = rs_ops.rs_init;
-	while (init) {
-		err = init->init();
-		init = init->next;
+	if (!invoked) {
+		struct initfunc *init;
+
+		invoked = 1;
+
+		init = rs_ops.rs_init;
+		while (init) {
+			(void) init->init();
+			init = init->next;
+		}
 	}
-	return err;
 }
-
-__initcall(rs_init);
 
 void __init rs_kgdb_hook(int channel)
 {
@@ -137,6 +139,15 @@ struct sunkbd_operations kbd_ops = {
 	nop_getkeycode
 };
 
+#if defined(CONFIG_USB) || defined(CONFIG_USB_MODULE)
+extern void pci_compute_shiftstate(void);
+extern int pci_setkeycode(unsigned int, unsigned int);
+extern int pci_getkeycode(unsigned int);
+extern void pci_setledstate(struct kbd_struct *, unsigned int);
+extern unsigned char pci_getledstate(void);
+extern int pcikbd_init(void);
+#endif
+
 int kbd_init(void)
 {
 	struct initfunc *init;
@@ -147,6 +158,18 @@ int kbd_init(void)
 		err = init->init();
 		init = init->next;
 	}
+#if defined(CONFIG_USB) || defined(CONFIG_USB_MODULE)
+	if (!serial_console &&
+	    kbd_ops.compute_shiftstate == nop_compute_shiftstate) {
+		printk("kbd_init: Assuming USB keyboard.\n");
+		kbd_ops.compute_shiftstate = pci_compute_shiftstate;
+		kbd_ops.setledstate = pci_setledstate;
+		kbd_ops.getledstate = pci_getledstate;
+		kbd_ops.setkeycode = pci_setkeycode;
+		kbd_ops.getkeycode = pci_getkeycode;
+		pcikbd_init();
+	}
+#endif
 	return err;
 }
 
@@ -285,7 +308,7 @@ no_options:
 		case 9600: cflag |= B9600; break;
 		case 19200: cflag |= B19200; break;
 		case 38400: cflag |= B38400; break;
-		default: cflag |= B9600; break;
+		default: baud = 9600; cflag |= B9600; break;
 	}
 
 	switch (bits) {

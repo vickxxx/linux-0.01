@@ -1,31 +1,15 @@
-
 /*
+ * Diva Server 4BRI specific part of initialisation
  *
  * Copyright (C) Eicon Technology Corporation, 2000.
  *
- * This source file is supplied for the exclusive use with Eicon
- * Technology Corporation's range of DIVA Server Adapters.
- *
  * Eicon File Revision :    1.7  
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY OF ANY KIND WHATSOEVER INCLUDING ANY 
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-
-/* Diva Server 4BRI specific part of initialisation */
 #include "sys.h"
 #include "idi.h"
 #include "divas.h"
@@ -67,7 +51,7 @@ void mem_out_buffer(ADAPTER *a, void *adr, void *P, word length);
 void mem_inc(ADAPTER *a, void *adr);
 
 int Divas4BRIInitPCI(card_t *card, dia_card_t *cfg);
-int fourbri_ISR (card_t* card);
+static int fourbri_ISR (card_t* card);
 
 int FPGA_Download(word, dword, byte *, byte *, int);
 extern byte FPGA_Bytes[];
@@ -113,7 +97,7 @@ static int diva_server_4bri_config(card_t *card, dia_config_t *config)
 
 	UxCardMemOut(card->hw, &shared[ 8], config->tei);
 	UxCardMemOut(card->hw, &shared[ 9], config->nt2);
-	UxCardMemOut(card->hw, &shared[10], 0);
+	UxCardMemOut(card->hw, &shared[10], config->sig_flags);
 	UxCardMemOut(card->hw, &shared[11], config->watchdog);
 	UxCardMemOut(card->hw, &shared[12], config->permanent);
 	UxCardMemOut(card->hw, &shared[13], config->x_interface);
@@ -353,7 +337,8 @@ static int diva_server_4bri_load(card_t *card, dia_load_t *load)
 static int diva_server_4bri_start(card_t *card, byte *channels)
 {
 	byte *ctl;
-	byte *shared, i;
+	byte *shared;
+	int i;
 	int adapter_num;
 
 	DPRINTF(("divas: start Diva Server 4BRI"));
@@ -561,23 +546,16 @@ int memcm(byte *dst, byte *src, dword dwLen)
 }*/
 
 
-int fourbri_ISR (card_t* card) 
+static int fourbri_ISR (card_t* card) 
 {
-	int served = 0;
 	byte *ctl;
-	byte *reg = UxCardMemAttach(card->hw, DIVAS_REG_MEMORY);
 
-	if (UxCardPortIoIn(card->hw, reg, PLX9054_INTCSR) & 0x80) 
-	{
-		served = 1;
-		card->int_pend  += 1;
-		DivasDpcSchedule(); /* ISR DPC */
+	card->int_pend  += 1;
+	DivasDpcSchedule(); /* ISR DPC */
 
-		ctl = UxCardMemAttach(card->hw, DIVAS_CTL_MEMORY);
-		UxCardMemOut(card->hw, &ctl[MQ_BREG_IRQ_TEST], MQ_IRQ_REQ_OFF);
-		UxCardMemDetach(card->hw, ctl);
-	}
+	ctl = UxCardMemAttach(card->hw, DIVAS_CTL_MEMORY);
+	UxCardMemOut(card->hw, &ctl[MQ_BREG_IRQ_TEST], MQ_IRQ_REQ_OFF);
+	UxCardMemDetach(card->hw, ctl);
 
-	UxCardMemDetach(card->hw, reg);
-	return (served != 0);
+	return (1);
 }

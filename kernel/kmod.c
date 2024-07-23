@@ -24,6 +24,9 @@
 #include <linux/unistd.h>
 #include <linux/kmod.h>
 #include <linux/smp_lock.h>
+#include <linux/slab.h>
+#include <linux/namespace.h>
+#include <linux/completion.h>
 
 #include <asm/uaccess.h>
 
@@ -35,6 +38,7 @@ use_init_fs_context(void)
 	struct fs_struct *our_fs, *init_fs;
 	struct dentry *root, *pwd;
 	struct vfsmount *rootmnt, *pwdmnt;
+	struct namespace *our_ns, *init_ns;
 
 	/*
 	 * Make modprobe's fs context be a copy of init's.
@@ -54,6 +58,11 @@ use_init_fs_context(void)
 	 */
 
 	init_fs = init_task.fs;
+	init_ns = init_task.namespace;
+	get_namespace(init_ns);
+	our_ns = current->namespace;
+	current->namespace = init_ns;
+	put_namespace(our_ns);
 	read_lock(&init_fs->lock);
 	rootmnt = mntget(init_fs->rootmnt);
 	root = dget(init_fs->root);
@@ -110,19 +119,16 @@ int exec_usermodehelper(char *program_path, char *argv[], char *envp[])
 		if (curtask->files->fd[i]) close(i);
 	}
 
-	/* Drop the "current user" thing */
-	{
-		struct user_struct *user = curtask->user;
-		curtask->user = INIT_USER;
-		atomic_inc(&INIT_USER->__count);
-		atomic_inc(&INIT_USER->processes);
-		atomic_dec(&user->processes);
-		free_uid(user);
-	}
+	switch_uid(INIT_USER);
 
 	/* Give kmod all effective privileges.. */
-	curtask->euid = curtask->fsuid = 0;
-	curtask->egid = curtask->fsgid = 0;
+	curtask->euid = curtask->uid = curtask->suid = curtask->fsuid = 0;
+	curtask->egid = curtask->gid = curtask->sgid = curtask->fsgid = 0;
+
+	memcpy(&curtask->rlim, &init_task.rlim, sizeof(struct rlimit)*RLIM_NLIMITS);
+
+	curtask->ngroups = 0;
+
 	cap_set_full(curtask->cap_effective);
 
 	/* Allow execve args to be in kernel space. */
@@ -157,19 +163,18 @@ static int exec_modprobe(void * module_name)
 }
 
 /**
- *	request_module - try to load a kernel module
- *	@module_name: Name of module
+ * request_module - try to load a kernel module
+ * @module_name: Name of module
  *
- * 	Load a module using the user mode module loader. The function returns
- *	zero on success or a negative errno code on failure. Note that a
- * 	successful module load does not mean the module did not then unload
- *	and exit on an error of its own. Callers must check that the service
- *	they requested is now available not blindly invoke it.
+ * Load a module using the user mode module loader. The function returns
+ * zero on success or a negative errno code on failure. Note that a
+ * successful module load does not mean the module did not then unload
+ * and exit on an error of its own. Callers must check that the service
+ * they requested is now available not blindly invoke it.
  *
- *	If module auto-loading support is disabled then this function
- *	becomes a no-operation.
+ * If module auto-loading support is disabled then this function
+ * becomes a no-operation.
  */
- 
 int request_module(const char * module_name)
 {
 	pid_t pid;
@@ -264,7 +269,7 @@ EXPORT_SYMBOL(hotplug_path);
 #endif /* CONFIG_HOTPLUG */
 
 struct subprocess_info {
-	struct semaphore *sem;
+	struct completion *complete;
 	char *path;
 	char **argv;
 	char **envp;
@@ -303,7 +308,7 @@ static void __call_usermodehelper(void *data)
 	pid = kernel_thread(____call_usermodehelper, sub_info, CLONE_VFORK | SIGCHLD);
 	if (pid < 0)
 		sub_info->retval = pid;
-	up(sub_info->sem);
+	complete(sub_info->complete);
 }
 
 /**
@@ -321,9 +326,9 @@ static void __call_usermodehelper(void *data)
  */
 int call_usermodehelper(char *path, char **argv, char **envp)
 {
-	DECLARE_MUTEX_LOCKED(sem);
+	DECLARE_COMPLETION(work);
 	struct subprocess_info sub_info = {
-		sem:		&sem,
+		complete:	&work,
 		path:		path,
 		argv:		argv,
 		envp:		envp,
@@ -342,7 +347,7 @@ int call_usermodehelper(char *path, char **argv, char **envp)
 		__call_usermodehelper(&sub_info);
 	} else {
 		schedule_task(&tqs);
-		down(&sem);		/* Wait until keventd has started the subprocess */
+		wait_for_completion(&work);
 	}
 out:
 	return sub_info.retval;

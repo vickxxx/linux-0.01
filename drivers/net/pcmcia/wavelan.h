@@ -7,11 +7,11 @@
  * Original copyright follow. See wavelan_cs.h for details.
  *
  * This file contain the declarations of the Wavelan hardware. Note that
- * the Pcmcia Wavelan include a i82593 controler (see definitions in
+ * the Pcmcia Wavelan include a i82593 controller (see definitions in
  * file i82593.h).
  *
  * The main difference between the pcmcia hardware and the ISA one is
- * the Ethernet Controler (i82593 instead of i82586). The i82593 allow
+ * the Ethernet Controller (i82593 instead of i82586). The i82593 allow
  * only one send buffer. The PSA (Parameter Storage Area : EEprom for
  * permanent storage of various info) is memory mapped, but not the
  * MMI (Modem Management Interface).
@@ -87,6 +87,7 @@ const short	channel_bands[] = { 0x30, 0x58, 0x64, 0x7A, 0x80, 0xA8,
  * Note : all frequencies apart from the first one need to be multiplied by 10
  */
 const int	fixed_bands[] = { 915e6, 2.425e8, 2.46e8, 2.484e8, 2.4305e8 };
+
 
 /*************************** PC INTERFACE ****************************/
 
@@ -316,6 +317,7 @@ struct mmw_t
 /* Calculate offset of a field in the above structure */
 #define	mmwoff(p,f) 	(unsigned short)((void *)(&((mmw_t *)((void *)0 + (p)))->f) - (void *)0)
 
+
 /*
  * Modem Management Controller (MMC) read structure.
  */
@@ -372,6 +374,7 @@ struct mmr_t
 
 /* Calculate offset of a field in the above structure */
 #define	mmroff(p,f) 	(unsigned short)((void *)(&((mmr_t *)((void *)0 + (p)))->f) - (void *)0)
+
 
 /* Make the two above structures one */
 typedef union mm_t

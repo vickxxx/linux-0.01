@@ -27,12 +27,13 @@
 #include <net/dn_route.h>
 
 
-int decnet_debug_level = 0;
+int decnet_debug_level;
 int decnet_time_wait = 30;
 int decnet_dn_count = 1;
 int decnet_di_count = 3;
 int decnet_dr_count = 3;
 int decnet_log_martians = 1;
+int decnet_no_fc_max_cwnd = NSP_MIN_WINDOW;
 
 #ifdef CONFIG_SYSCTL
 extern int decnet_dst_gc_interval;
@@ -42,6 +43,8 @@ static int min_state_count[] = { 1 };
 static int max_state_count[] = { NSP_MAXRXTSHIFT };
 static int min_decnet_dst_gc_interval[] = { 1 };
 static int max_decnet_dst_gc_interval[] = { 60 };
+static int min_decnet_no_fc_max_cwnd[] = { NSP_MIN_WINDOW };
+static int max_decnet_no_fc_max_cwnd[] = { NSP_MAX_WINDOW };
 static char node_name[7] = "???";
 
 static struct ctl_table_header *dn_table_header = NULL;
@@ -127,7 +130,7 @@ static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
 				void *newval, size_t newlen,
 				void **context)
 {
-	int len;
+	size_t len;
 	dn_address addr;
 
 	if (oldval && oldlenp) {
@@ -161,7 +164,7 @@ static int dn_node_address_handler(ctl_table *table, int write,
 				void *buffer, size_t *lenp)
 {
 	char addr[DN_ASCBUF_LEN];
-	int len;
+	size_t len;
 	dn_address dnaddr;
 
 	if (!*lenp || (filp->f_pos && !write)) {
@@ -265,7 +268,7 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 				struct file * filp,
 				void *buffer, size_t *lenp)
 {
-	int len;
+	size_t len;
 	struct net_device *dev = decnet_default_device;
 	char devname[17];
 
@@ -344,6 +347,10 @@ static ctl_table dn_table[] = {
 	sizeof(int), 0644,
 	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
 	&min_decnet_dst_gc_interval, &max_decnet_dst_gc_interval},
+	{NET_DECNET_NO_FC_MAX_CWND, "no_fc_max_cwnd", &decnet_no_fc_max_cwnd,
+	sizeof(int), 0644,
+	NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
+	&min_decnet_no_fc_max_cwnd, &max_decnet_no_fc_max_cwnd},
 	{NET_DECNET_DEBUG_LEVEL, "debug", &decnet_debug_level, 
 	sizeof(int), 0644, 
 	NULL, &proc_dointvec, &sysctl_intvec, NULL,

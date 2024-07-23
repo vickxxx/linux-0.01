@@ -7,7 +7,7 @@
  * Support for 8-bit mode by Zoltan Szilagyi <zoltans@cs.arizona.edu>
  *
  * Many modifications, and currently maintained, by
- *  Philip Blundell <Philip.Blundell@pobox.com>
+ *  Philip Blundell <philb@gnu.org>
  * Added the Compaq LTE  Alan Cox <alan@redhat.com>
  * Added MCA support Adam Fritzler <mid@auk.cx>
  *
@@ -120,7 +120,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mca.h>
 
 #include <linux/spinlock.h>
@@ -341,7 +341,7 @@ static inline unsigned short int SHADOW(short int addr)
 int __init express_probe(struct net_device *dev)
 {
 	unsigned short *port;
-	static unsigned short ports[] = { 0x300,0x310,0x270,0x320,0x340,0 };
+	static unsigned short ports[] = { 0x240,0x300,0x310,0x270,0x320,0x340,0 };
 	unsigned short ioaddr = dev->base_addr;
 
 	SET_MODULE_OWNER(dev);
@@ -436,10 +436,26 @@ static int eexp_open(struct net_device *dev)
 	ret = request_irq(dev->irq,&eexp_irq,0,dev->name,dev);
 	if (ret) return ret;
 
-	request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress");
-	request_region(ioaddr+0x4000, 16, "EtherExpress shadow");
-	request_region(ioaddr+0x8000, 16, "EtherExpress shadow");
-	request_region(ioaddr+0xc000, 16, "EtherExpress shadow");
+	if (!request_region(ioaddr, EEXP_IO_EXTENT, "EtherExpress")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr);
+		goto err_out1;
+	}
+	if (!request_region(ioaddr+0x4000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0x4000);
+		goto err_out2;
+	}
+	if (!request_region(ioaddr+0x8000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0x8000);
+		goto err_out3;
+	}
+	if (!request_region(ioaddr+0xc000, EEXP_IO_EXTENT, "EtherExpress shadow")) {
+		printk(KERN_WARNING "EtherExpress io port %x, is busy.\n"
+			, ioaddr+0xc000);
+		goto err_out4;
+	}
 	
 	if (lp->width) {
 		printk("%s: forcing ASIC to 8-bit mode\n", dev->name);
@@ -452,6 +468,16 @@ static int eexp_open(struct net_device *dev)
 	printk(KERN_DEBUG "%s: leaving eexp_open()\n", dev->name);
 #endif
 	return 0;
+
+	err_out4:
+		release_region(ioaddr+0x8000, EEXP_IO_EXTENT);
+	err_out3:
+		release_region(ioaddr+0x4000, EEXP_IO_EXTENT);
+	err_out2:
+		release_region(ioaddr, EEXP_IO_EXTENT);
+	err_out1:
+		free_irq(dev->irq, dev);
+		return -EBUSY;
 }
 
 /*
@@ -592,7 +618,7 @@ static void eexp_timeout(struct net_device *dev)
 
 	status = scb_status(dev);
 	unstick_cu(dev);
-	printk(KERN_INFO "%s: transmit timed out, %s?", dev->name,
+	printk(KERN_INFO "%s: transmit timed out, %s?\n", dev->name,
 	       (SCB_complete(status)?"lost interrupt":
 		"board on fire"));
 	lp->stats.tx_errors++;
@@ -614,6 +640,7 @@ static void eexp_timeout(struct net_device *dev)
 static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
+	short length = buf->len;
 #ifdef CONFIG_SMP
 	unsigned long flags;
 #endif
@@ -621,6 +648,14 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 #if NET_DEBUG > 6
 	printk(KERN_DEBUG "%s: eexp_xmit()\n", dev->name);
 #endif
+
+	if(buf->len < ETH_ZLEN)
+	{
+		buf = skb_padto(buf, ETH_ZLEN);
+		if(buf == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 
 	disable_irq(dev->irq);
 
@@ -634,8 +669,6 @@ static int eexp_xmit(struct sk_buff *buf, struct net_device *dev)
 #endif
   
 	{
-		unsigned short length = (ETH_ZLEN < buf->len) ? buf->len :
-			ETH_ZLEN;
 		unsigned short *data = (unsigned short *)buf->data;
 
 		lp->stats.tx_bytes += length;
@@ -939,6 +972,7 @@ static void eexp_hw_rx_pio(struct net_device *dev)
 			        insw(ioaddr+DATAPORT, skb_put(skb,pkt_len),(pkt_len+1)>>1);
 				skb->protocol = eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
 				lp->stats.rx_bytes += pkt_len;
 			}
@@ -1631,6 +1665,10 @@ static int io[EEXP_MAX_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(EEXP_MAX_CARDS) "i");
+MODULE_PARM_DESC(io, "EtherExpress 16 I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherExpress 16 IRQ number(s)");
+MODULE_LICENSE("GPL");
+
 
 /* Ideally the user would give us io=, irq= for every card.  If any parameters
  * are specified, we verify and then use them.  If no parameters are given, we
@@ -1669,7 +1707,6 @@ void cleanup_module(void)
 			unregister_netdev(dev);
 			kfree(dev->priv);
 			dev->priv = NULL;
-			release_region(dev->base_addr, EEXP_IO_EXTENT);
 		}
 	}
 }

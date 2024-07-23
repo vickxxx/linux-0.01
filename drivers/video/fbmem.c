@@ -3,6 +3,9 @@
  *
  *  Copyright (C) 1994 Martin Schaller
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
@@ -17,7 +20,7 @@
 #include <linux/smp_lock.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mman.h>
 #include <linux/tty.h>
 #include <linux/console.h>
@@ -56,6 +59,8 @@ extern int cyberfb_init(void);
 extern int cyberfb_setup(char*);
 extern int pm2fb_init(void);
 extern int pm2fb_setup(char*);
+extern int pm3fb_init(void);
+extern int pm3fb_setup(char*);
 extern int cyber2000fb_init(void);
 extern int retz3fb_init(void);
 extern int retz3fb_setup(char*);
@@ -69,6 +74,8 @@ extern int atyfb_init(void);
 extern int atyfb_setup(char*);
 extern int aty128fb_init(void);
 extern int aty128fb_setup(char*);
+extern int neofb_init(void);
+extern int neofb_setup(char*);
 extern int igafb_init(void);
 extern int igafb_setup(char*);
 extern int imsttfb_init(void);
@@ -111,10 +118,33 @@ extern int rivafb_init(void);
 extern int rivafb_setup(char*);
 extern int tdfxfb_init(void);
 extern int tdfxfb_setup(char*);
+extern int tridentfb_init(void);
+extern int tridentfb_setup(char*);
 extern int sisfb_init(void);
 extern int sisfb_setup(char*);
 extern int stifb_init(void);
 extern int stifb_setup(char*);
+extern int pmagaafb_init(void);
+extern int pmagbafb_init(void);
+extern int pmagbbfb_init(void);
+extern int maxinefb_init(void);
+extern int tx3912fb_init(void);
+extern int radeonfb_init(void);
+extern int radeonfb_setup(char*);
+extern int intelfb_init(void);
+extern int intelfb_setup(char*);
+extern int e1355fb_init(void);
+extern int e1355fb_setup(char*);
+extern int e1356fb_init(void);
+extern int e1356fb_setup(char*);
+extern int au1100fb_init(void);
+extern int au1100fb_setup(char*);
+extern int pvr2fb_init(void);
+extern int pvr2fb_setup(char*);
+extern int sstfb_init(void);
+extern int sstfb_setup(char*);
+extern int it8181fb_init(void);
+extern int it8181fb_setup(char*);
 
 static struct {
 	const char *name;
@@ -149,6 +179,9 @@ static struct {
 #ifdef CONFIG_FB_PM2
 	{ "pm2fb", pm2fb_init, pm2fb_setup },
 #endif
+#ifdef CONFIG_FB_PM3
+	{ "pm3fb", pm3fb_init, pm3fb_setup },
+#endif
 #ifdef CONFIG_FB_CLGEN
 	{ "clgen", clgenfb_init, clgenfb_setup },
 #endif
@@ -161,11 +194,20 @@ static struct {
 #ifdef CONFIG_FB_ATY128
 	{ "aty128fb", aty128fb_init, aty128fb_setup },
 #endif
+#ifdef CONFIG_FB_NEOMAGIC
+	{ "neo", neofb_init, neofb_setup },
+#endif
 #ifdef CONFIG_FB_VIRGE
 	{ "virge", virgefb_init, virgefb_setup },
 #endif
 #ifdef CONFIG_FB_RIVA
 	{ "riva", rivafb_init, rivafb_setup },
+#endif
+#ifdef CONFIG_FB_RADEON
+	{ "radeon", radeonfb_init, radeonfb_setup },
+#endif
+#ifdef CONFIG_FB_INTEL
+	{ "intelfb", intelfb_init, intelfb_setup },
 #endif
 #ifdef CONFIG_FB_CONTROL
 	{ "controlfb", control_init, control_setup },
@@ -190,6 +232,12 @@ static struct {
 #endif 
 #ifdef CONFIG_FB_SIS
 	{ "sisfb", sisfb_init, sisfb_setup },
+#endif
+#ifdef CONFIG_FB_TRIDENT
+	{ "trident", tridentfb_init, tridentfb_setup },
+#endif
+#ifdef CONFIG_FB_VOODOO1
+	{ "sst", sstfb_init, sstfb_setup },
 #endif
 
 	/*
@@ -256,6 +304,37 @@ static struct {
 #ifdef CONFIG_FB_HIT
 	{ "hitfb", hitfb_init, NULL },
 #endif
+#ifdef CONFIG_FB_TX3912
+	{ "tx3912", tx3912fb_init, NULL },
+#endif
+#ifdef CONFIG_FB_E1355
+	{ "e1355fb", e1355fb_init, e1355fb_setup },
+#endif
+#ifdef CONFIG_FB_E1356
+        { "e1356fb", e1356fb_init, e1356fb_setup },
+#endif
+#ifdef CONFIG_FB_PVR2
+	{ "pvr2", pvr2fb_init, pvr2fb_setup },
+#endif
+#ifdef CONFIG_FB_PMAG_AA
+	{ "pmagaafb", pmagaafb_init, NULL },
+#endif
+#ifdef CONFIG_FB_PMAG_BA
+	{ "pmagbafb", pmagbafb_init, NULL },
+#endif
+#ifdef CONFIG_FB_PMAGB_B
+	{ "pmagbbfb", pmagbbfb_init, NULL },
+#endif
+#ifdef CONFIG_FB_MAXINE
+	{ "maxinefb", maxinefb_init, NULL },
+#endif
+#ifdef CONFIG_FB_AU1100
+	{ "au1100fb", au1100fb_init, au1100fb_setup },
+#endif 
+#ifdef CONFIG_FB_IT8181
+	{ "it8181fb", it8181fb_init, it8181fb_setup },
+#endif
+
 
 	/*
 	 * Generic drivers that don't use resource management (yet)
@@ -309,7 +388,7 @@ static int fbmem_read_proc(char *buf, char **start, off_t offset,
 	int clen;
 
 	clen = 0;
-	for (fi = registered_fb; fi < &registered_fb[FB_MAX] && len < 4000; fi++)
+	for (fi = registered_fb; fi < &registered_fb[FB_MAX] && clen < 4000; fi++)
 		if (*fi)
 			clen += sprintf(buf + clen, "%d %s\n",
 				        GET_FB_IDX((*fi)->node),
@@ -325,23 +404,27 @@ static int fbmem_read_proc(char *buf, char **start, off_t offset,
 static ssize_t
 fb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
-	unsigned long p = *ppos;
+	loff_t p = *ppos;
 	struct inode *inode = file->f_dentry->d_inode;
 	int fbidx = GET_FB_IDX(inode->i_rdev);
 	struct fb_info *info = registered_fb[fbidx];
 	struct fb_ops *fb = info->fbops;
 	struct fb_fix_screeninfo fix;
+	unsigned int size;
 
 	if (! fb || ! info->disp)
 		return -ENODEV;
 
+	if (p < 0)
+		return -EINVAL;
+
 	fb->fb_get_fix(&fix,PROC_CONSOLE(info), info);
-	if (p >= fix.smem_len)
+	size = info->mapped_vram ? info->mapped_vram : fix.smem_len;
+	
+	if (p >= size)
 	    return 0;
-	if (count >= fix.smem_len)
-	    count = fix.smem_len;
-	if (count + p > fix.smem_len)
-		count = fix.smem_len - p;
+	if (count > size - p)
+		count = size - p;
 	if (count) {
 	    char *base_addr;
 
@@ -349,7 +432,7 @@ fb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 	    count -= copy_to_user(buf, base_addr+p, count);
 	    if (!count)
 		return -EFAULT;
-	    *ppos += count;
+	    *ppos = p + count;
 	}
 	return count;
 }
@@ -357,25 +440,29 @@ fb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 static ssize_t
 fb_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
-	unsigned long p = *ppos;
+	loff_t p = *ppos;
 	struct inode *inode = file->f_dentry->d_inode;
 	int fbidx = GET_FB_IDX(inode->i_rdev);
 	struct fb_info *info = registered_fb[fbidx];
 	struct fb_ops *fb = info->fbops;
 	struct fb_fix_screeninfo fix;
 	int err;
+	unsigned int size;
 
 	if (! fb || ! info->disp)
 		return -ENODEV;
 
+	if (p < 0)
+		return -EINVAL;
+
 	fb->fb_get_fix(&fix, PROC_CONSOLE(info), info);
-	if (p > fix.smem_len)
+	size = info->mapped_vram ? info->mapped_vram : fix.smem_len;
+	
+	if (p > size)
 	    return -ENOSPC;
-	if (count >= fix.smem_len)
-	    count = fix.smem_len;
 	err = 0;
-	if (count + p > fix.smem_len) {
-	    count = fix.smem_len - p;
+	if (count > size - p) {
+	    count = size - p;
 	    err = -ENOSPC;
 	}
 	if (count) {
@@ -383,7 +470,7 @@ fb_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 
 	    base_addr = info->disp->screen_base;
 	    count -= copy_from_user(base_addr+p, buf, count);
-	    *ppos += count;
+	    *ppos = p + count;
 	    err = -EFAULT;
 	}
 	if (count)
@@ -521,6 +608,8 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 		lock_kernel();
 		res = fb->fb_mmap(info, file, vma);
 		unlock_kernel();
+		/* This is an IO map - tell maydump to skip this VMA */
+		vma->vm_flags |= VM_IO;
 		return res;
 	}
 
@@ -536,13 +625,15 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 
 	/* frame buffer memory */
 	start = fix.smem_start;
-	len = PAGE_ALIGN((start & ~PAGE_MASK)+fix.smem_len);
+	len = PAGE_ALIGN((start & ~PAGE_MASK) + fix.smem_len);
 	if (off >= len) {
 		/* memory mapped io */
 		off -= len;
 		fb->fb_get_var(&var, PROC_CONSOLE(info), info);
-		if (var.accel_flags)
+		if (var.accel_flags) {
+			unlock_kernel();
 			return -EINVAL;
+		}
 		start = fix.mmio_start;
 		len = PAGE_ALIGN((start & ~PAGE_MASK)+fix.mmio_len);
 	}
@@ -552,28 +643,13 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 		return -EINVAL;
 	off += start;
 	vma->vm_pgoff = off >> PAGE_SHIFT;
+	/* This is an IO map - tell maydump to skip this VMA */
+	vma->vm_flags |= VM_IO;
 #if defined(__sparc_v9__)
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
-	{
-		unsigned long align, j;
-		for (align = 0x400000; align > PAGE_SIZE; align >>= 3)
-			if (len >= align && !((start & ~PAGE_MASK) & (align - 1)))
-				break;
-		if (align > PAGE_SIZE && vma->vm_start & (align - 1)) {
-			/* align as much as possible */
-			struct vm_area_struct *vmm;
-			j = (-vma->vm_start) & (align - 1);
-			vmm = find_vma(current->mm, vma->vm_start);
-			if (!vmm || vmm->vm_start >= vma->vm_end + j) {
-				vma->vm_start += j;
-				vma->vm_end += j;
-			}
-		}
-	}
 	if (io_remap_page_range(vma->vm_start, off,
 				vma->vm_end - vma->vm_start, vma->vm_page_prot, 0))
 		return -EAGAIN;
-	vma->vm_flags |= VM_IO;
 #else
 #if defined(__mc68000__)
 #if defined(CONFIG_SUN3)
@@ -591,21 +667,19 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE|_PAGE_GUARDED;
 #elif defined(__alpha__)
 	/* Caching is off in the I/O space quadrant by design.  */
-#elif defined(__i386__)
+#elif defined(__i386__) || defined(__x86_64__)
 	if (boot_cpu_data.x86 > 3)
 		pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
-#elif defined(__mips__)
-	pgprot_val(vma->vm_page_prot) &= ~_CACHE_MASK;
-	pgprot_val(vma->vm_page_prot) |= _CACHE_UNCACHED;
-#elif defined(__arm__)
-#if defined(CONFIG_CPU_32) && !defined(CONFIG_ARCH_ACORN)
-	/* On Acorn architectures, we want to keep the framebuffer
-	 * cached.
-	 */
-	pgprot_val(vma->vm_page_prot) &= ~(PTE_CACHEABLE | PTE_BUFFERABLE);
-#endif
+#elif defined(__arm__) || defined(__mips__)
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 #elif defined(__sh__)
 	pgprot_val(vma->vm_page_prot) &= ~_PAGE_CACHABLE;
+#elif defined(__hppa__)
+	pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE; 
+#elif defined(__ia64__)
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+#elif defined(__hppa__)
+	pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE; 
 #else
 #warning What do we have to do here??
 #endif
@@ -682,9 +756,23 @@ static struct file_operations fb_fops = {
 	mmap:		fb_mmap,
 	open:		fb_open,
 	release:	fb_release,
+#ifdef HAVE_ARCH_FB_UNMAPPED_AREA
+	get_unmapped_area: get_fb_unmapped_area,
+#endif
 };
 
 static devfs_handle_t devfs_handle;
+
+
+/**
+ *	register_framebuffer - registers a frame buffer device
+ *	@fb_info: frame buffer info structure
+ *
+ *	Registers a frame buffer device @fb_info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int
 register_framebuffer(struct fb_info *fb_info)
@@ -735,6 +823,17 @@ register_framebuffer(struct fb_info *fb_info)
 	return 0;
 }
 
+
+/**
+ *	unregister_framebuffer - releases a frame buffer device
+ *	@fb_info: frame buffer info structure
+ *
+ *	Unregisters a frame buffer device @fb_info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
+
 int
 unregister_framebuffer(struct fb_info *fb_info)
 {
@@ -754,6 +853,16 @@ unregister_framebuffer(struct fb_info *fb_info)
 	num_registered_fb--;
 	return 0;
 }
+
+
+/**
+ *	fbmem_init - init frame buffer subsystem
+ *
+ *	Initialize the frame buffer subsystem.
+ *
+ *	NOTE: This function is _only_ to be called by drivers/char/mem.c.
+ *
+ */
 
 void __init 
 fbmem_init(void)
@@ -784,9 +893,18 @@ fbmem_init(void)
 			fb_drivers[i].init();
 }
 
-    /*
-     *  Command line options
-     */
+
+/**
+ *	video_setup - process command line options
+ *	@options: string of options
+ *
+ *	Process command line options for frame buffer subsystem.
+ *
+ *	NOTE: This function is a __setup and __init function.
+ *
+ *	Returns zero.
+ *
+ */
 
 int __init video_setup(char *options)
 {
@@ -882,3 +1000,5 @@ EXPORT_SYMBOL(num_registered_fb);
 #if 1 /* to go away in 2.5.0 */
 EXPORT_SYMBOL(GET_FB_IDX);
 #endif
+
+MODULE_LICENSE("GPL");

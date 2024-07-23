@@ -5,6 +5,8 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/string.h>
+#include <linux/errno.h>
 #include <linux/skbuff.h>
 #include <linux/interrupt.h>
 #include <linux/atmdev.h>
@@ -163,7 +165,7 @@ static void destroy_filters(struct atm_flow_data *flow)
 	while ((filter = flow->filter_list)) {
 		DPRINTK("destroy_filters: destroying filter %p\n",filter);
 		flow->filter_list = filter->next;
-		filter->ops->destroy(filter);
+		tcf_destroy(filter);
 	}
 }
 
@@ -509,8 +511,7 @@ static void sch_atm_dequeue(unsigned long data)
 			ATM_SKB(skb)->vcc = flow->vcc;
 			memcpy(skb_push(skb,flow->hdr_len),flow->hdr,
 			    flow->hdr_len);
-			atomic_add(skb->truesize,&flow->vcc->tx_inuse);
-			ATM_SKB(skb)->iovcnt = 0;
+			atomic_add(skb->truesize,&flow->vcc->sk->wmem_alloc);
 			/* atm.atm_options are already set by atm_tc_enqueue */
 			(void) flow->vcc->send(flow->vcc,skb);
 		}
@@ -546,15 +547,16 @@ static int atm_tc_requeue(struct sk_buff *skb,struct Qdisc *sch)
 }
 
 
-static int atm_tc_drop(struct Qdisc *sch)
+static unsigned int atm_tc_drop(struct Qdisc *sch)
 {
 	struct atm_qdisc_data *p = PRIV(sch);
 	struct atm_flow_data *flow;
+	unsigned int len;
 
 	DPRINTK("atm_tc_drop(sch %p,[qdisc %p])\n",sch,p);
 	for (flow = p->flows; flow; flow = flow->next)
-		if (flow->q->ops->drop && flow->q->ops->drop(flow->q))
-			return 1;
+		if (flow->q->ops->drop && (len = flow->q->ops->drop(flow->q)))
+			return len;
 	return 0;
 }
 
@@ -564,7 +566,6 @@ static int atm_tc_init(struct Qdisc *sch,struct rtattr *opt)
 	struct atm_qdisc_data *p = PRIV(sch);
 
 	DPRINTK("atm_tc_init(sch %p,[qdisc %p],opt %p)\n",sch,p,opt);
-	memset(p,0,sizeof(*p));
 	p->flows = &p->link;
 	if(!(p->link.q = qdisc_create_dflt(sch->dev,&pfifo_qdisc_ops)))
 		p->link.q = &noop_qdisc;
@@ -617,8 +618,6 @@ static void atm_tc_destroy(struct Qdisc *sch)
 }
 
 
-#ifdef CONFIG_RTNETLINK
-
 static int atm_tc_dump_class(struct Qdisc *sch, unsigned long cl,
     struct sk_buff *skb, struct tcmsg *tcm)
 {
@@ -666,9 +665,6 @@ static int atm_tc_dump(struct Qdisc *sch, struct sk_buff *skb)
 	return 0;
 }
 
-#endif
-
-
 static struct Qdisc_class_ops atm_class_ops =
 {
 	atm_tc_graft,			/* graft */
@@ -683,9 +679,7 @@ static struct Qdisc_class_ops atm_class_ops =
 	atm_tc_bind_filter,		/* bind_tcf */
 	atm_tc_put,			/* unbind_tcf */
 
-#ifdef CONFIG_RTNETLINK
 	atm_tc_dump_class,		/* dump */
-#endif
 };
 
 struct Qdisc_ops atm_qdisc_ops =
@@ -705,9 +699,7 @@ struct Qdisc_ops atm_qdisc_ops =
 	atm_tc_destroy,			/* destroy */
 	NULL,				/* change */
 
-#ifdef CONFIG_RTNETLINK
 	atm_tc_dump			/* dump */
-#endif
 };
 
 

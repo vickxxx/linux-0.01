@@ -1,5 +1,5 @@
 /*
- * $Id: adi.c,v 1.12 2000/06/03 20:18:52 vojtech Exp $
+ * $Id: adi.c,v 1.15 2001/01/09 13:32:39 vojtech Exp $
  *
  *  Copyright (c) 1998-2000 Vojtech Pavlik
  *
@@ -34,7 +34,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/gameport.h>
 #include <linux/init.h>
@@ -370,7 +370,8 @@ static void adi_id_decode(struct adi *adi, struct adi_port *port)
 		adi->cname[i] = adi_get_bits(adi, 8);
 	adi->cname[i] = 0;
 
-	if (adi->length != (t = 8 + adi->buttons + adi->axes10 * 10 + adi->axes8 * 8 + adi->hats * 4)) {
+	t = 8 + adi->buttons + adi->axes10 * 10 + adi->axes8 * 8 + adi->hats * 4;
+	if (adi->length != t && adi->length != t + (t & 1)) {
 		printk(KERN_WARNING "adi: Expected length %d != data length %d\n", t, adi->length);
 		adi->length = 0;
 		return;
@@ -552,3 +553,5 @@ void __exit adi_exit(void)
 
 module_init(adi_init);
 module_exit(adi_exit);
+
+MODULE_LICENSE("GPL");

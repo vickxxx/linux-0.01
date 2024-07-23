@@ -1,8 +1,8 @@
-/* $Id: head.S,v 1.103 2000/05/09 17:40:13 davem Exp $
+/* $Id: head.S,v 1.105 2001/08/12 09:08:56 davem Exp $
  * head.S: The initial boot code for the Sparc port of Linux.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1995,1999 Pete Zaitcev   (zaitcev@metabyte.com)
+ * Copyright (C) 1995,1999 Pete Zaitcev   (zaitcev@yahoo.com)
  * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  * Copyright (C) 1997 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997 Michael A. Griffith (grif@acm.org)
@@ -160,7 +160,7 @@ t_bad79:BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7
 t_bad7e:BAD_TRAP(0x7e) BAD_TRAP(0x7f)
 t_sunos:SUNOS_SYSCALL_TRAP                  /* SunOS System Call             */
 t_sbkpt:BREAKPOINT_TRAP                     /* Software Breakpoint/KGDB      */
-t_divz:	BAD_TRAP(0x82)                      /* Divide by zero trap           */
+t_divz:	TRAP_ENTRY(0x82, do_hw_divzero)     /* Divide by zero trap           */
 t_flwin:TRAP_ENTRY(0x83, do_flush_windows)  /* Flush Windows Trap            */
 t_clwin:BAD_TRAP(0x84)                      /* Clean Windows Trap            */
 t_rchk:	BAD_TRAP(0x85)                      /* Range Check                   */
@@ -245,7 +245,7 @@ C_LABEL(trapbase_cpu1):
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
 	SUNOS_SYSCALL_TRAP 
 	BREAKPOINT_TRAP
-	BAD_TRAP(0x82)
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -313,7 +313,7 @@ C_LABEL(trapbase_cpu2):
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
 	SUNOS_SYSCALL_TRAP 
 	BREAKPOINT_TRAP
-	BAD_TRAP(0x82)
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -381,7 +381,7 @@ C_LABEL(trapbase_cpu3):
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
 	SUNOS_SYSCALL_TRAP  
 	BREAKPOINT_TRAP
-	BAD_TRAP(0x82)
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -1011,7 +1011,7 @@ sun4c_continue_boot:
 
 		/* I want a kernel stack NOW! */
 		set	C_LABEL(init_task_union), %g1
-		set	(TASK_UNION_SIZE - REGWIN_SZ), %g2
+		set	(TASK_UNION_SIZE - STACKFRAME_SZ), %g2
 		add	%g1, %g2, %sp
 		mov	0, %fp			/* And for good luck */
 

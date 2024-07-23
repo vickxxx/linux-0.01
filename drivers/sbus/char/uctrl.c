@@ -1,4 +1,4 @@
-/* $Id: uctrl.c,v 1.9 2000/11/08 05:04:06 davem Exp $
+/* $Id: uctrl.c,v 1.12 2001/10/08 22:19:51 davem Exp $
  * uctrl.c: TS102 Microcontroller interface on Tadpole Sparcbook 3
  *
  * Copyright 1999 Derrick J Brashear (shadow@dementia.org)
@@ -9,7 +9,7 @@
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/miscdevice.h>
@@ -198,12 +198,6 @@ static struct uctrl_driver drv;
 void uctrl_get_event_status(void);
 void uctrl_get_external_status(void);
 
-static loff_t
-uctrl_llseek(struct file *file, loff_t offset, int type)
-{
-	return -ESPIPE;
-}
-
 static int
 uctrl_ioctl(struct inode *inode, struct file *file,
 	      unsigned int cmd, unsigned long arg)
@@ -231,7 +225,7 @@ void uctrl_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 static struct file_operations uctrl_fops = {
 	owner:		THIS_MODULE,
-	llseek:		uctrl_llseek,
+	llseek:		no_llseek,
 	ioctl:		uctrl_ioctl,
 	open:		uctrl_open,
 };
@@ -395,15 +389,11 @@ static int __init ts102_uctrl_init(void)
 	if(!driver->irq) 
 		driver->irq = tmp_irq[0].pri;
 
-	request_irq(driver->irq, uctrl_interrupt, 0, 
-		    "uctrl", driver);
-
-	enable_irq(driver->irq);
+	request_irq(driver->irq, uctrl_interrupt, 0, "uctrl", driver);
 
 	if (misc_register(&uctrl_dev)) {
 		printk("%s: unable to get misc minor %d\n",
 		       __FUNCTION__, uctrl_dev.minor);
-		disable_irq(driver->irq);
 		free_irq(driver->irq, driver);
 		return -ENODEV;
 	}
@@ -420,13 +410,12 @@ static void __exit ts102_uctrl_cleanup(void)
 	struct uctrl_driver *driver = &drv;
 
 	misc_deregister(&uctrl_dev);
-	if (driver->irq) {
-		disable_irq(driver->irq);
+	if (driver->irq)
 		free_irq(driver->irq, driver);
-	}
 	if (driver->regs)
 		driver->regs = 0;
 }
 
 module_init(ts102_uctrl_init);
 module_exit(ts102_uctrl_cleanup);
+MODULE_LICENSE("GPL");

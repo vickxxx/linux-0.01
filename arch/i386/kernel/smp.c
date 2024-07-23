@@ -4,7 +4,7 @@
  *	(c) 1995 Alan Cox, Building #3 <alan@redhat.com>
  *	(c) 1998-99, 2000 Ingo Molnar <mingo@redhat.com>
  *
- *	This code is released under the GNU public license version 2 or
+ *	This code is released under the GNU General Public License version 2 or
  *	later.
  */
 
@@ -17,9 +17,11 @@
 #include <linux/smp_lock.h>
 #include <linux/kernel_stat.h>
 #include <linux/mc146818rtc.h>
+#include <linux/cache.h>
 
 #include <asm/mtrr.h>
 #include <asm/pgalloc.h>
+#include <asm/smpboot.h>
 
 /*
  *	Some notes on x86 processor bugs affecting SMP operation:
@@ -28,21 +30,21 @@
  *	The Linux implications for SMP are handled as follows:
  *
  *	Pentium III / [Xeon]
- *		None of the E1AP-E3AP erratas are visible to the user.
+ *		None of the E1AP-E3AP errata are visible to the user.
  *
  *	E1AP.	see PII A1AP
  *	E2AP.	see PII A2AP
  *	E3AP.	see PII A3AP
  *
  *	Pentium II / [Xeon]
- *		None of the A1AP-A3AP erratas are visible to the user.
+ *		None of the A1AP-A3AP errata are visible to the user.
  *
  *	A1AP.	see PPro 1AP
  *	A2AP.	see PPro 2AP
  *	A3AP.	see PPro 7AP
  *
  *	Pentium Pro
- *		None of 1AP-9AP erratas are visible to the normal user,
+ *		None of 1AP-9AP errata are visible to the normal user,
  *	except occasional delivery of 'spurious interrupt' as trap #15.
  *	This is very rare and a non-problem.
  *
@@ -64,7 +66,7 @@
  *	an L1cache=Writethrough or L1cache=off option.
  *
  *		B stepping CPUs may hang. There are hardware work arounds
- *	for this. We warn about it in case your board doesnt have the work
+ *	for this. We warn about it in case your board doesn't have the work
  *	arounds. Basically thats so I can tell anyone with a B stepping
  *	CPU and SMP problems "tough".
  *
@@ -101,9 +103,9 @@
  */
 
 /* The 'big kernel lock' */
-spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
+spinlock_cacheline_t kernel_flag_cacheline = {SPIN_LOCK_UNLOCKED};
 
-struct tlb_state cpu_tlbstate[NR_CPUS] = {[0 ... NR_CPUS-1] = { &init_mm, 0 }};
+struct tlb_state cpu_tlbstate[NR_CPUS] __cacheline_aligned = {[0 ... NR_CPUS-1] = { &init_mm, 0, }};
 
 /*
  * the following functions deal with sending IPIs between CPUs.
@@ -113,7 +115,7 @@ struct tlb_state cpu_tlbstate[NR_CPUS] = {[0 ... NR_CPUS-1] = { &init_mm, 0 }};
 
 static inline int __prepare_ICR (unsigned int shortcut, int vector)
 {
-	return APIC_DM_FIXED | shortcut | vector | APIC_DEST_LOGICAL;
+	return APIC_DM_FIXED | shortcut | vector | INT_DEST_ADDR_MODE;
 }
 
 static inline int __prepare_ICR2 (unsigned int mask)
@@ -148,28 +150,12 @@ static inline void __send_IPI_shortcut(unsigned int shortcut, int vector)
 	apic_write_around(APIC_ICR, cfg);
 }
 
-static inline void send_IPI_allbutself(int vector)
-{
-	/*
-	 * if there are no other CPUs in the system then
-	 * we get an APIC send error if we try to broadcast.
-	 * thus we have to avoid sending IPIs in this case.
-	 */
-	if (smp_num_cpus > 1)
-		__send_IPI_shortcut(APIC_DEST_ALLBUT, vector);
-}
-
-static inline void send_IPI_all(int vector)
-{
-	__send_IPI_shortcut(APIC_DEST_ALLINC, vector);
-}
-
-void send_IPI_self(int vector)
+void fastcall send_IPI_self(int vector)
 {
 	__send_IPI_shortcut(APIC_DEST_SELF, vector);
 }
 
-static inline void send_IPI_mask(int mask, int vector)
+static inline void send_IPI_mask_bitmask(int mask, int vector)
 {
 	unsigned long cfg;
 	unsigned long flags;
@@ -177,27 +163,123 @@ static inline void send_IPI_mask(int mask, int vector)
 	__save_flags(flags);
 	__cli();
 
+		
 	/*
 	 * Wait for idle.
 	 */
 	apic_wait_icr_idle();
-
+		
 	/*
 	 * prepare target chip field
 	 */
 	cfg = __prepare_ICR2(mask);
 	apic_write_around(APIC_ICR2, cfg);
-
+		
 	/*
 	 * program the ICR 
 	 */
 	cfg = __prepare_ICR(0, vector);
-	
+			
 	/*
 	 * Send the IPI. The write to APIC_ICR fires this off.
 	 */
 	apic_write_around(APIC_ICR, cfg);
+
 	__restore_flags(flags);
+}
+
+static inline void send_IPI_mask_sequence(int mask, int vector)
+{
+	unsigned long cfg, flags;
+	unsigned int query_cpu, query_mask;
+
+	/*
+	 * Hack. The clustered APIC addressing mode doesn't allow us to send 
+	 * to an arbitrary mask, so I do a unicasts to each CPU instead. This 
+	 * should be modified to do 1 message per cluster ID - mbligh
+	 */ 
+
+	__save_flags(flags);
+	__cli();
+
+	for (query_cpu = 0; query_cpu < NR_CPUS; ++query_cpu) {
+		query_mask = 1 << query_cpu;
+		if (query_mask & mask) {
+		
+			/*
+			 * Wait for idle.
+			 */
+			apic_wait_icr_idle();
+		
+			/*
+			 * prepare target chip field
+			 */
+			if(clustered_apic_mode == CLUSTERED_APIC_XAPIC)
+				cfg = __prepare_ICR2(cpu_to_physical_apicid(query_cpu));
+			else
+				cfg = __prepare_ICR2(cpu_to_logical_apicid(query_cpu));
+			apic_write_around(APIC_ICR2, cfg);
+		
+			/*
+			 * program the ICR 
+			 */
+			cfg = __prepare_ICR(0, vector);
+			
+			/*
+			 * Send the IPI. The write to APIC_ICR fires this off.
+			 */
+			apic_write_around(APIC_ICR, cfg);
+		}
+	}
+	__restore_flags(flags);
+}
+
+static inline void send_IPI_mask(int mask, int vector)
+{
+	if (clustered_apic_mode) 
+		send_IPI_mask_sequence(mask, vector);
+	else
+		send_IPI_mask_bitmask(mask, vector);
+}
+
+static inline void send_IPI_allbutself(int vector)
+{
+	/*
+	 * if there are no other CPUs in the system then
+	 * we get an APIC send error if we try to broadcast.
+	 * thus we have to avoid sending IPIs in this case.
+	 */
+	if (!(smp_num_cpus > 1))
+		return;
+
+	if (clustered_apic_mode) {
+		// Pointless. Use send_IPI_mask to do this instead
+		int cpu;
+
+		if (smp_num_cpus > 1) {
+			for (cpu = 0; cpu < smp_num_cpus; ++cpu) {
+				if (cpu != smp_processor_id())
+					send_IPI_mask(1 << cpu, vector);
+			}
+		}
+	} else {
+		__send_IPI_shortcut(APIC_DEST_ALLBUT, vector);
+		return;
+	}
+}
+
+static inline void send_IPI_all(int vector)
+{
+	if (clustered_apic_mode) {
+		// Pointless. Use send_IPI_mask to do this instead
+		int cpu;
+
+		for (cpu = 0; cpu < smp_num_cpus; ++cpu) {
+			send_IPI_mask(1 << cpu, vector);
+		}
+	} else {
+		__send_IPI_shortcut(APIC_DEST_ALLINC, vector);
+	}
 }
 
 /*
@@ -219,12 +301,15 @@ static spinlock_t tlbstate_lock = SPIN_LOCK_UNLOCKED;
 /*
  * We cannot call mmdrop() because we are in interrupt context, 
  * instead update mm->cpu_vm_mask.
+ *
+ * We need to reload %cr3 since the page tables may be going
+ * away frm under us...
  */
 static void inline leave_mm (unsigned long cpu)
 {
-	if (cpu_tlbstate[cpu].state == TLBSTATE_OK)
-		BUG();
+	BUG_ON(cpu_tlbstate[cpu].state == TLBSTATE_OK);
 	clear_bit(cpu, &cpu_tlbstate[cpu].active_mm->cpu_vm_mask);
+	load_cr3(swapper_pg_dir);
 }
 
 /*
@@ -412,7 +497,7 @@ void flush_tlb_all(void)
  * anything. Worst case is that we lose a reschedule ...
  */
 
-void smp_send_reschedule(int cpu)
+void fastcall smp_send_reschedule(int cpu)
 {
 	send_IPI_mask(1 << cpu, RESCHEDULE_VECTOR);
 }
@@ -450,7 +535,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
  * remote CPUs are nearly ready to execute <<func>> or are or have executed.
  *
  * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler, you may call it from a bottom half handler.
+ * hardware interrupt handler or from a bottom half handler.
  */
 {
 	struct call_data_struct data;
@@ -466,8 +551,9 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		atomic_set(&data.finished, 0);
 
-	spin_lock_bh(&call_lock);
+	spin_lock(&call_lock);
 	call_data = &data;
+	wmb();
 	/* Send a message to all other CPUs and wait for them to respond */
 	send_IPI_allbutself(CALL_FUNCTION_VECTOR);
 
@@ -478,7 +564,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		while (atomic_read(&data.finished) != cpus)
 			barrier();
-	spin_unlock_bh(&call_lock);
+	spin_unlock(&call_lock);
 
 	return 0;
 }
@@ -531,12 +617,15 @@ asmlinkage void smp_call_function_interrupt(void)
 	 * Notify initiating CPU that I've grabbed the data and am
 	 * about to execute the function
 	 */
+	mb();
 	atomic_inc(&call_data->started);
 	/*
 	 * At this point the info structure may be out of scope unless wait==1
 	 */
 	(*func)(info);
-	if (wait)
+	if (wait) {
+		mb();
 		atomic_inc(&call_data->finished);
+	}
 }
 

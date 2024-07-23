@@ -15,7 +15,7 @@
 #include <asm/processor.h>
 #include <asm/8xx_immap.h>
 #include <asm/mpc8xx.h>
-#include "commproc.h"
+#include <asm/commproc.h>
 
 extern void xmon_printf(const char *fmt, ...);
 extern int xmon_8xx_write(char *str, int nb);
@@ -46,7 +46,7 @@ xmon_map_scc(void)
 
 	cpmp = (cpm8xx_t *)&(((immap_t *)IMAP_ADDR)->im_cpm);
 	use_screen = 0;
-	
+
 	prom_drawstring("xmon uses serial port\n");
 }
 

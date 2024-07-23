@@ -19,12 +19,12 @@ Parport as modules
 
 If you load the parport code as a module, say
 
-	# insmod parport.o
+	# insmod parport
 
 to load the generic parport code.  You then must load the
 architecture-dependent code with (for example):
 
-	# insmod parport_pc.o io=0x3bc,0x378,0x278 irq=none,7,auto
+	# insmod parport_pc io=0x3bc,0x378,0x278 irq=none,7,auto
 
 to tell the parport code that you want three PC-style ports, one at
 0x3bc with no IRQ, one at 0x378 using IRQ 7, and one at 0x278 with an
@@ -162,6 +162,10 @@ modes		Parallel port's hardware modes, comma-separated,
 				is available and will be used.
 		DMA		DMA is available and will be used.
 
+		Note that the current implementation will only take
+		advantage of COMPAT and ECP modes if it has an IRQ
+		line to use.
+
 autoprobe	Any IEEE-1284 device ID information that has been
 		acquired from the (non-IEEE 1284.3) device.
 
@@ -174,7 +178,7 @@ spintime	The number of microseconds to busy-loop while waiting
 		peripherals.  This is a port-wide setting, i.e. it
 		applies to all devices on a particular port.
 
-timeslice	The number of miliseconds that a device driver is
+timeslice	The number of milliseconds that a device driver is
 		allowed to keep a port claimed for.  This is advisory,
 		and driver can ignore it if it must.
 
@@ -192,7 +196,7 @@ is loaded it will create one lp device for each port found.  You can
 override this, though, by using parameters either when you load the lp
 driver:
 
-	# insmod lp.o parport=0,2
+	# insmod lp parport=0,2
 
 or on the LILO command line:
 
@@ -260,5 +264,5 @@ the DMA channel, and try with:
     io=0x378 irq=7 dma=none (for PIO)
     io=0x378 irq=7 dma=3 (for DMA)
 --
-Philip.Blundell@pobox.com
-tim@cyberelk.demon.co.uk
+philb@gnu.org
+tim@cyberelk.net

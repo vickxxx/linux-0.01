@@ -1,4 +1,4 @@
-/* $Id: sys_sparc32.c,v 1.171 2000/12/13 16:34:55 davem Exp $
+/* $Id: sys_sparc32.c,v 1.182.2.1 2002/02/20 08:49:24 davem Exp $
  * sys_sparc32.c: Conversion between 32bit and 64bit native syscalls.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -25,13 +25,14 @@
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/uio.h>
 #include <linux/nfs_fs.h>
 #include <linux/smb_fs.h>
 #include <linux/smb_mount.h>
 #include <linux/ncp_fs.h>
 #include <linux/quota.h>
+#include <linux/quotacompat.h>
 #include <linux/module.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/nfsd/nfsd.h>
@@ -49,6 +50,9 @@
 #include <linux/in.h>
 #include <linux/icmpv6.h>
 #include <linux/sysctl.h>
+#include <linux/vmalloc.h>
+#include <linux/dnotify.h>
+#include <linux/netfilter_ipv4/ip_tables.h>
 
 #include <asm/types.h>
 #include <asm/ipc.h>
@@ -412,7 +416,7 @@ struct shmid64_ds32 {
  *
  * This is really horribly ugly.
  */
-#define IPCOP_MASK(__x)	(1UL << (__x))
+#define IPCOP_MASK(__x)	(1UL << ((__x)&~IPC_64))
 static int do_sys32_semctl(int first, int second, int third, void *uptr)
 {
 	union semun fourth;
@@ -424,7 +428,7 @@ static int do_sys32_semctl(int first, int second, int third, void *uptr)
 	err = -EFAULT;
 	if (get_user (pad, (u32 *)uptr))
 		goto out;
-	if(third == SETVAL)
+	if ((third & ~IPC_64) == SETVAL)
 		fourth.val = (int)pad;
 	else
 		fourth.__pad = (void *)A(pad);
@@ -502,25 +506,32 @@ out:
 	return err;
 }
 
-static int do_sys32_msgsnd (int first, int second, int third, void *uptr)
+static int do_sys32_msgsnd(int first, int second, int third, void *uptr)
 {
-	struct msgbuf *p = kmalloc (second + sizeof (struct msgbuf) + 4, GFP_USER);
-	struct msgbuf32 *up = (struct msgbuf32 *)uptr;
+	struct msgbuf *p;
+	struct msgbuf32 *up;
 	mm_segment_t old_fs;
 	int err;
 
+	if (second < 0)
+		return -EINVAL;
+
+	p = kmalloc(second + sizeof (struct msgbuf), GFP_USER);
 	if (!p)
 		return -ENOMEM;
-	err = get_user (p->mtype, &up->mtype);
-	err |= __copy_from_user (p->mtext, &up->mtext, second);
-	if (err)
+
+	up = (struct msgbuf32 *)uptr;
+	err = -EFAULT;
+	if (get_user(p->mtype, &up->mtype) ||
+	    __copy_from_user(p->mtext, up->mtext, second))
 		goto out;
-	old_fs = get_fs ();
-	set_fs (KERNEL_DS);
-	err = sys_msgsnd (first, p, second, third);
-	set_fs (old_fs);
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_msgsnd(first, p, second, third);
+	set_fs(old_fs);
 out:
-	kfree (p);
+	kfree(p);
 	return err;
 }
 
@@ -531,6 +542,9 @@ static int do_sys32_msgrcv (int first, int second, int msgtyp, int third,
 	struct msgbuf *p;
 	mm_segment_t old_fs;
 	int err;
+
+	if (second < 0)
+		return -EINVAL;
 
 	if (!version) {
 		struct ipc_kludge *uipck = (struct ipc_kludge *)uptr;
@@ -546,18 +560,18 @@ static int do_sys32_msgrcv (int first, int second, int msgtyp, int third,
 		msgtyp = ipck.msgtyp;
 	}
 	err = -ENOMEM;
-	p = kmalloc (second + sizeof (struct msgbuf) + 4, GFP_USER);
+	p = kmalloc (second + sizeof (struct msgbuf), GFP_USER);
 	if (!p)
 		goto out;
 	old_fs = get_fs ();
 	set_fs (KERNEL_DS);
-	err = sys_msgrcv (first, p, second + 4, msgtyp, third);
+	err = sys_msgrcv (first, p, second, msgtyp, third);
 	set_fs (old_fs);
 	if (err < 0)
 		goto free_then_out;
 	up = (struct msgbuf32 *)uptr;
 	if (put_user (p->mtype, &up->mtype) ||
-	    __copy_to_user (&up->mtext, p->mtext, err))
+	    __copy_to_user (up->mtext, p->mtext, err))
 		err = -EFAULT;
 free_then_out:
 	kfree (p);
@@ -644,18 +658,18 @@ out:
 	return err;
 }
 
-static int do_sys32_shmat (int first, int second, int third, int version, void *uptr)
+static int do_sys32_shmat(int first, int second, u32 third, int version, void *uptr)
 {
 	unsigned long raddr;
-	u32 *uaddr = (u32 *)A((u32)third);
+	u32 *uaddr = (u32 *)A(third);
 	int err = -EINVAL;
 
 	if (version == 1)
 		goto out;
-	err = sys_shmat (first, uptr, second, &raddr);
+	err = sys_shmat(first, uptr, second, &raddr);
 	if (err)
 		goto out;
-	err = put_user (raddr, uaddr);
+	err = put_user(raddr, uaddr);
 out:
 	return err;
 }
@@ -760,9 +774,45 @@ out:
 	return err;
 }
 
-asmlinkage int sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u32 fifth)
+static __inline__ void *alloc_user_space(long len)
+{
+	struct pt_regs *regs = current->thread.kregs;
+	unsigned long usp = regs->u_regs[UREG_I6];
+
+	if (!(current->thread.flags & SPARC_FLAG_32BIT))
+		usp += STACK_BIAS;
+	else
+		usp &= 0xffffffffUL;
+
+	return (void *) (usp - len);
+}
+
+struct timespec32 {
+	s32    tv_sec;
+	s32    tv_nsec;
+};
+                
+static int sys32_semtimedop(int semid, struct sembuf *tsems, int nsems,
+			    const struct timespec32 *timeout32)
+{
+	struct timespec32 t32;
+	struct timespec *t64 = alloc_user_space(sizeof(*t64));
+
+	if (copy_from_user(&t32, timeout32, sizeof(t32)))
+		return -EFAULT;
+
+	if (put_user(t32.tv_sec, &t64->tv_sec) ||
+	    put_user(t32.tv_nsec, &t64->tv_nsec))
+		return -EFAULT;
+
+	return sys_semtimedop(semid, tsems, nsems, t64);
+}
+
+asmlinkage int sys32_ipc (u32 call, u32 first, u32 second, u32 third, s32 __ptr, s32 __fifth)
 {
 	int version, err;
+	u32 ptr = (u32) __ptr;
+	u32 fifth = (u32) __fifth;
 
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
@@ -771,58 +821,72 @@ asmlinkage int sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u
 		switch (call) {
 		case SEMOP:
 			/* struct sembuf is the same on 32 and 64bit :)) */
-			err = sys_semop (first, (struct sembuf *)AA(ptr), second);
+			err = sys_semtimedop((int)first,
+					     (struct sembuf *)A(ptr),
+					     second, NULL);
 			goto out;
+		case SEMTIMEDOP:
+			err = sys32_semtimedop((int)first,
+					       (struct sembuf *)A(ptr),
+					       second,
+					       (const struct timespec32 *)
+					       A(fifth));
 		case SEMGET:
-			err = sys_semget (first, second, third);
+			err = sys_semget((key_t)first, (int)second,
+					 (int)third);
 			goto out;
 		case SEMCTL:
-			err = do_sys32_semctl (first, second, third, (void *)AA(ptr));
+			err = do_sys32_semctl((int)first, (int)second,
+					      (int)third, (void *) A(ptr));
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		};
 	if (call <= MSGCTL) 
 		switch (call) {
 		case MSGSND:
-			err = do_sys32_msgsnd (first, second, third, (void *)AA(ptr));
+			err = do_sys32_msgsnd((int)first, (int)second,
+					      (int)third, (void *)A(ptr));
 			goto out;
 		case MSGRCV:
-			err = do_sys32_msgrcv (first, second, fifth, third,
-					       version, (void *)AA(ptr));
+			err = do_sys32_msgrcv((int)first, (int)second,
+					      (int)fifth, (int)third,
+					      version, (void *)A(ptr));
 			goto out;
 		case MSGGET:
-			err = sys_msgget ((key_t) first, second);
+			err = sys_msgget((key_t)first, (int)second);
 			goto out;
 		case MSGCTL:
-			err = do_sys32_msgctl (first, second, (void *)AA(ptr));
+			err = do_sys32_msgctl((int)first, (int)second,
+					      (void *)A(ptr));
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	if (call <= SHMCTL) 
 		switch (call) {
 		case SHMAT:
-			err = do_sys32_shmat (first, second, third,
-					      version, (void *)AA(ptr));
+			err = do_sys32_shmat((int)first, (int)second, third,
+					     version, (void *)A(ptr));
 			goto out;
 		case SHMDT: 
-			err = sys_shmdt ((char *)AA(ptr));
+			err = sys_shmdt((char *)A(ptr));
 			goto out;
 		case SHMGET:
-			err = sys_shmget (first, second, third);
+			err = sys_shmget((key_t)first, second, (int)third);
 			goto out;
 		case SHMCTL:
-			err = do_sys32_shmctl (first, second, (void *)AA(ptr));
+			err = do_sys32_shmctl((int)first, (int)second,
+					      (void *)A(ptr));
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 
-	err = -EINVAL;
+	err = -ENOSYS;
 
 out:
 	return err;
@@ -887,7 +951,7 @@ asmlinkage long sys32_fcntl64(unsigned int fd, unsigned int cmd, unsigned long a
 	return sys32_fcntl(fd, cmd, arg);
 }
 
-struct dqblk32 {
+struct user_dqblk32 {
     __u32 dqb_bhardlimit;
     __u32 dqb_bsoftlimit;
     __u32 dqb_curblocks;
@@ -900,44 +964,42 @@ struct dqblk32 {
                                 
 extern asmlinkage int sys_quotactl(int cmd, const char *special, int id, caddr_t addr);
 
-asmlinkage int sys32_quotactl(int cmd, const char *special, int id, unsigned long addr)
+asmlinkage int sys32_quotactl(int cmd, const char *special, int id, caddr_t addr)
 {
 	int cmds = cmd >> SUBCMDSHIFT;
 	int err;
-	struct dqblk d;
+	struct v1c_mem_dqblk d;
 	mm_segment_t old_fs;
 	char *spec;
 	
 	switch (cmds) {
-	case Q_GETQUOTA:
+	case Q_V1_GETQUOTA:
 		break;
-	case Q_SETQUOTA:
-	case Q_SETUSE:
-	case Q_SETQLIM:
-		if (copy_from_user (&d, (struct dqblk32 *)addr,
-				    sizeof (struct dqblk32)))
+	case Q_V1_SETQUOTA:
+	case Q_V1_SETUSE:
+	case Q_V1_SETQLIM:
+		if (copy_from_user(&d, addr, sizeof(struct user_dqblk32)))
 			return -EFAULT;
-		d.dqb_itime = ((struct dqblk32 *)&d)->dqb_itime;
-		d.dqb_btime = ((struct dqblk32 *)&d)->dqb_btime;
+		d.dqb_itime = ((struct user_dqblk32 *)&d)->dqb_itime;
+		d.dqb_btime = ((struct user_dqblk32 *)&d)->dqb_btime;
 		break;
 	default:
-		return sys_quotactl(cmd, special,
-				    id, (caddr_t)addr);
+		return sys_quotactl(cmd, special, id, addr);
 	}
-	spec = getname (special);
+	spec = getname(special);
 	err = PTR_ERR(spec);
-	if (IS_ERR(spec)) return err;
-	old_fs = get_fs ();
+	if (IS_ERR(spec))
+		return err;
+	old_fs = get_fs();
 	set_fs (KERNEL_DS);
 	err = sys_quotactl(cmd, (const char *)spec, id, (caddr_t)&d);
 	set_fs (old_fs);
 	putname (spec);
-	if (cmds == Q_GETQUOTA) {
+	if (cmds == Q_V1_GETQUOTA) {
 		__kernel_time_t b = d.dqb_btime, i = d.dqb_itime;
-		((struct dqblk32 *)&d)->dqb_itime = i;
-		((struct dqblk32 *)&d)->dqb_btime = b;
-		if (copy_to_user ((struct dqblk32 *)addr, &d,
-				  sizeof (struct dqblk32)))
+		((struct user_dqblk32 *)&d)->dqb_itime = i;
+		((struct user_dqblk32 *)&d)->dqb_btime = b;
+		if (copy_to_user(addr, &d, sizeof(struct user_dqblk32)))
 			return -EFAULT;
 	}
 	return err;
@@ -1055,10 +1117,9 @@ typedef ssize_t (*iov_fn_t)(struct file *, const struct iovec *, unsigned long, 
 static long do_readv_writev32(int type, struct file *file,
 			      const struct iovec32 *vector, u32 count)
 {
-	unsigned long tot_len;
+	__kernel_ssize_t32 tot_len;
 	struct iovec iovstack[UIO_FASTIOV];
 	struct iovec *iov=iovstack, *ivp;
-	struct inode *inode;
 	long retval, i;
 	io_fn_t fn;
 	iov_fn_t fnv;
@@ -1066,28 +1127,38 @@ static long do_readv_writev32(int type, struct file *file,
 	/* First get the "struct iovec" from user memory and
 	 * verify all the pointers
 	 */
+	retval = 0;
 	if (!count)
-		return 0;
+		goto out_nofree;
+	retval = -EFAULT;
 	if (verify_area(VERIFY_READ, vector, sizeof(struct iovec32)*count))
-		return -EFAULT;
+		goto out_nofree;
+	retval = -EINVAL;
 	if (count > UIO_MAXIOV)
-		return -EINVAL;
+		goto out_nofree;
 	if (count > UIO_FASTIOV) {
+		retval = -ENOMEM;
 		iov = kmalloc(count*sizeof(struct iovec), GFP_KERNEL);
 		if (!iov)
-			return -ENOMEM;
+			goto out_nofree;
 	}
 
 	tot_len = 0;
 	i = count;
 	ivp = iov;
+	retval = -EINVAL;
 	while(i > 0) {
-		u32 len;
+		__kernel_ssize_t32 tmp = tot_len;
+		__kernel_ssize_t32 len;
 		u32 buf;
 
 		__get_user(len, &vector->iov_len);
 		__get_user(buf, &vector->iov_base);
+		if (len < 0)	/* size_t not fittina an ssize_t32 .. */
+			goto out;
 		tot_len += len;
+		if (tot_len < tmp) /* maths overflow on the ssize_t32 */
+			goto out;
 		ivp->iov_base = (void *)A(buf);
 		ivp->iov_len = (__kernel_size_t) len;
 		vector++;
@@ -1095,11 +1166,9 @@ static long do_readv_writev32(int type, struct file *file,
 		i--;
 	}
 
-	inode = file->f_dentry->d_inode;
 	/* VERIFY_WRITE actually means a read, as we write to user space */
-	retval = locks_verify_area((type == VERIFY_WRITE
-				    ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE),
-				   inode, file, file->f_pos, tot_len);
+	retval = rw_verify_area((type == VERIFY_WRITE ? READ : WRITE),
+				   file, &file->f_pos, tot_len);
 	if (retval)
 		goto out;
 
@@ -1135,6 +1204,11 @@ static long do_readv_writev32(int type, struct file *file,
 out:
 	if (iov != iovstack)
 		kfree(iov);
+out_nofree:
+	/* VERIFY_WRITE actually means a read, as we write to user space */
+	if ((retval + (type == VERIFY_WRITE)) > 0)
+		dnotify_parent(file->f_dentry,
+			(type == VERIFY_WRITE) ? DN_ACCESS : DN_MODIFY);
 
 	return retval;
 }
@@ -1192,7 +1266,7 @@ struct readdir_callback32 {
 };
 
 static int fillonedir(void * __buf, const char * name, int namlen,
-		      off_t offset, ino_t ino, unsigned int d_type)
+		      loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct readdir_callback32 * buf = (struct readdir_callback32 *) __buf;
 	struct old_linux_dirent32 * dirent;
@@ -1247,7 +1321,7 @@ struct getdents_callback32 {
 	int error;
 };
 
-static int filldir(void * __buf, const char * name, int namlen, off_t offset, ino_t ino,
+static int filldir(void * __buf, const char * name, int namlen, loff_t offset, ino_t ino,
 		   unsigned int d_type)
 {
 	struct linux_dirent32 * dirent;
@@ -1266,7 +1340,7 @@ static int filldir(void * __buf, const char * name, int namlen, off_t offset, in
 	put_user(reclen, &dirent->d_reclen);
 	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
-	((char *) dirent) += reclen;
+	dirent = (void *) dirent + reclen;
 	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -1600,7 +1674,7 @@ asmlinkage int sys32_sysfs(int option, u32 arg1, u32 arg2)
 	return sys_sysfs(option, arg1, arg2);
 }
 
-struct ncp_mount_data32 {
+struct ncp_mount_data32_v3 {
         int version;
         unsigned int ncp_fd;
         __kernel_uid_t32 mounted_uid;
@@ -1615,19 +1689,69 @@ struct ncp_mount_data32 {
         __kernel_mode_t32 dir_mode;
 };
 
+struct ncp_mount_data32_v4 {
+	int version;
+	/* all members below are "long" in ABI ... i.e. 32bit on sparc32, while 64bits on sparc64 */
+	unsigned int flags;
+	unsigned int mounted_uid;
+	int wdog_pid;
+
+	unsigned int ncp_fd;
+	unsigned int time_out;
+	unsigned int retry_count;
+
+	unsigned int uid;
+	unsigned int gid;
+	unsigned int file_mode;
+	unsigned int dir_mode;
+};
+
 static void *do_ncp_super_data_conv(void *raw_data)
 {
-	struct ncp_mount_data news, *n = &news; 
-	struct ncp_mount_data32 *n32 = (struct ncp_mount_data32 *)raw_data;
+	switch (*(int*)raw_data) {
+		case NCP_MOUNT_VERSION:
+			{
+				struct ncp_mount_data news, *n = &news; 
+				struct ncp_mount_data32_v3 *n32 = (struct ncp_mount_data32_v3 *)raw_data;
 
-	n->dir_mode = n32->dir_mode;
-	n->file_mode = n32->file_mode;
-	n->gid = low2highgid(n32->gid);
-	n->uid = low2highuid(n32->uid);
-	memmove (n->mounted_vol, n32->mounted_vol, (sizeof (n32->mounted_vol) + 3 * sizeof (unsigned int)));
-	n->wdog_pid = n32->wdog_pid;
-	n->mounted_uid = low2highuid(n32->mounted_uid);
-	memcpy(raw_data, n, sizeof(struct ncp_mount_data)); 
+				n->version = n32->version;
+				n->ncp_fd = n32->ncp_fd;
+				n->mounted_uid = low2highuid(n32->mounted_uid);
+				n->wdog_pid = n32->wdog_pid;
+				memmove (n->mounted_vol, n32->mounted_vol, sizeof (n32->mounted_vol));
+				n->time_out = n32->time_out;
+				n->retry_count = n32->retry_count;
+				n->flags = n32->flags;
+				n->uid = low2highuid(n32->uid);
+				n->gid = low2highgid(n32->gid);
+				n->file_mode = n32->file_mode;
+				n->dir_mode = n32->dir_mode;
+				memcpy(raw_data, n, sizeof(*n)); 
+			}
+			break;
+		case NCP_MOUNT_VERSION_V4:
+			{
+				struct ncp_mount_data_v4 news, *n = &news; 
+				struct ncp_mount_data32_v4 *n32 = (struct ncp_mount_data32_v4 *)raw_data;
+
+				n->version = n32->version;
+				n->flags = n32->flags;
+				n->mounted_uid = n32->mounted_uid;
+				n->wdog_pid = n32->wdog_pid;
+				n->ncp_fd = n32->ncp_fd;
+				n->time_out = n32->time_out;
+				n->retry_count = n32->retry_count;
+				n->uid = n32->uid;
+				n->gid = n32->gid;
+				n->file_mode = n32->file_mode;
+				n->dir_mode = n32->dir_mode;
+				memcpy(raw_data, n, sizeof(*n)); 
+			}
+			break;
+		default:
+			/* do not touch unknown structures */
+			break;
+	}
 	return raw_data;
 }
 
@@ -1699,13 +1823,12 @@ asmlinkage int sys32_mount(char *dev_name, char *dir_name, char *type, unsigned 
 	if (err)
 		goto out;
 
-	if (!type_page) {
-		err = -EINVAL;
-		goto out;
+	if (type_page) {
+		is_smb = !strcmp((char *)type_page, SMBFS_NAME);
+		is_ncp = !strcmp((char *)type_page, NCPFS_NAME);
+	} else {
+		is_smb = is_ncp = 0;
 	}
-
-	is_smb = !strcmp((char *)type_page, SMBFS_NAME);
-	is_ncp = !strcmp((char *)type_page, NCPFS_NAME);
 
 	err = copy_mount_stuff_to_kernel((const void *)AA(data), &data_page);
 	if (err)
@@ -1794,9 +1917,6 @@ static int put_rusage (struct rusage32 *ru, struct rusage *r)
 	return err;
 }
 
-extern asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr,
-				int options, struct rusage * ru);
-
 asmlinkage int sys32_wait4(__kernel_pid_t32 pid, unsigned int *stat_addr, int options, struct rusage32 *ru)
 {
 	if (!ru)
@@ -1827,7 +1947,11 @@ struct sysinfo32 {
         u32 totalswap;
         u32 freeswap;
         unsigned short procs;
-        char _f[22];
+	unsigned short pad;
+	u32 totalhigh;
+	u32 freehigh;
+	u32 mem_unit;
+	char _f[20-2*sizeof(int)-sizeof(int)];
 };
 
 extern asmlinkage int sys_sysinfo(struct sysinfo *info);
@@ -1836,11 +1960,30 @@ asmlinkage int sys32_sysinfo(struct sysinfo32 *info)
 {
 	struct sysinfo s;
 	int ret, err;
+	int bitcount = 0;
 	mm_segment_t old_fs = get_fs ();
 	
-	set_fs (KERNEL_DS);
+	set_fs(KERNEL_DS);
 	ret = sys_sysinfo(&s);
-	set_fs (old_fs);
+	set_fs(old_fs);
+	/* Check to see if any memory value is too large for 32-bit and
+         * scale down if needed.
+         */
+	if ((s.totalram >> 32) || (s.totalswap >> 32)) {
+		while (s.mem_unit < PAGE_SIZE) {
+			s.mem_unit <<= 1;
+			bitcount++;
+		}
+		s.totalram >>= bitcount;
+		s.freeram >>= bitcount;
+		s.sharedram >>= bitcount;
+		s.bufferram >>= bitcount;
+		s.totalswap >>= bitcount;
+		s.freeswap >>= bitcount;
+		s.totalhigh >>= bitcount;
+		s.freehigh >>= bitcount;
+	}
+
 	err = put_user (s.uptime, &info->uptime);
 	err |= __put_user (s.loads[0], &info->loads[0]);
 	err |= __put_user (s.loads[1], &info->loads[1]);
@@ -1852,16 +1995,14 @@ asmlinkage int sys32_sysinfo(struct sysinfo32 *info)
 	err |= __put_user (s.totalswap, &info->totalswap);
 	err |= __put_user (s.freeswap, &info->freeswap);
 	err |= __put_user (s.procs, &info->procs);
+	err |= __put_user (s.totalhigh, &info->totalhigh);
+	err |= __put_user (s.freehigh, &info->freehigh);
+	err |= __put_user (s.mem_unit, &info->mem_unit);
 	if (err)
 		return -EFAULT;
 	return ret;
 }
 
-struct timespec32 {
-	s32    tv_sec;
-	s32    tv_nsec;
-};
-                
 extern asmlinkage int sys_sched_rr_get_interval(pid_t pid, struct timespec *interval);
 
 asmlinkage int sys32_sched_rr_get_interval(__kernel_pid_t32 pid, struct timespec32 *interval)
@@ -2038,25 +2179,28 @@ sys32_rt_sigtimedwait(sigset_t32 *uthese, siginfo_t32 *uinfo,
 	spin_lock_irq(&current->sigmask_lock);
 	sig = dequeue_signal(&these, &info);
 	if (!sig) {
-		/* None ready -- temporarily unblock those we're interested
-		   in so that we'll be awakened when they arrive.  */
-		sigset_t oldblocked = current->blocked;
-		sigandsets(&current->blocked, &current->blocked, &these);
-		recalc_sigpending(current);
-		spin_unlock_irq(&current->sigmask_lock);
-
 		timeout = MAX_SCHEDULE_TIMEOUT;
 		if (uts)
 			timeout = (timespec_to_jiffies(&ts)
 				   + (ts.tv_sec || ts.tv_nsec));
 
-		current->state = TASK_INTERRUPTIBLE;
-		timeout = schedule_timeout(timeout);
+		if (timeout) {
+			/* None ready -- temporarily unblock those we're
+			 * interested while we are sleeping in so that we'll
+			 * be awakened when they arrive.  */
+			sigset_t oldblocked = current->blocked;
+			sigandsets(&current->blocked, &current->blocked, &these);
+			recalc_sigpending(current);
+			spin_unlock_irq(&current->sigmask_lock);
 
-		spin_lock_irq(&current->sigmask_lock);
-		sig = dequeue_signal(&these, &info);
-		current->blocked = oldblocked;
-		recalc_sigpending(current);
+			current->state = TASK_INTERRUPTIBLE;
+			timeout = schedule_timeout(timeout);
+
+			spin_lock_irq(&current->sigmask_lock);
+			sig = dequeue_signal(&these, &info);
+			current->blocked = oldblocked;
+			recalc_sigpending(current);
+		}
 	}
 	spin_unlock_irq(&current->sigmask_lock);
 
@@ -2231,6 +2375,11 @@ struct cmsghdr32 {
 				    (struct cmsghdr32 *)(ctl) : \
 				    (struct cmsghdr32 *)NULL)
 #define CMSG32_FIRSTHDR(msg)	__CMSG32_FIRSTHDR((msg)->msg_control, (msg)->msg_controllen)
+#define CMSG32_OK(ucmlen, ucmsg, mhdr) \
+	((ucmlen) >= sizeof(struct cmsghdr32) && \
+	 (ucmlen) <= (unsigned long) \
+	 ((mhdr)->msg_controllen - \
+	  ((char *)(ucmsg) - (char *)(mhdr)->msg_control)))
 
 __inline__ struct cmsghdr32 *__cmsg32_nxthdr(void *__ctl, __kernel_size_t __size,
 					      struct cmsghdr32 *__cmsg, int __cmsg_len)
@@ -2348,24 +2497,22 @@ static int cmsghdr_from_user32_to_kern(struct msghdr *kmsg,
 	struct cmsghdr *kcmsg, *kcmsg_base;
 	__kernel_size_t32 ucmlen;
 	__kernel_size_t kcmlen, tmp;
+	int err = -EFAULT;
 
 	kcmlen = 0;
 	kcmsg_base = kcmsg = (struct cmsghdr *)stackbuf;
 	ucmsg = CMSG32_FIRSTHDR(kmsg);
 	while(ucmsg != NULL) {
-		if(get_user(ucmlen, &ucmsg->cmsg_len))
+		if (get_user(ucmlen, &ucmsg->cmsg_len))
 			return -EFAULT;
 
 		/* Catch bogons. */
-		if(CMSG32_ALIGN(ucmlen) <
-		   CMSG32_ALIGN(sizeof(struct cmsghdr32)))
-			return -EINVAL;
-		if((unsigned long)(((char *)ucmsg - (char *)kmsg->msg_control)
-				   + ucmlen) > kmsg->msg_controllen)
+		if (!CMSG32_OK(ucmlen, ucmsg, kmsg))
 			return -EINVAL;
 
 		tmp = ((ucmlen - CMSG32_ALIGN(sizeof(*ucmsg))) +
 		       CMSG_ALIGN(sizeof(struct cmsghdr)));
+		tmp = CMSG_ALIGN(tmp);
 		kcmlen += tmp;
 		ucmsg = CMSG32_NXTHDR(kmsg, ucmsg, ucmlen);
 	}
@@ -2386,21 +2533,23 @@ static int cmsghdr_from_user32_to_kern(struct msghdr *kmsg,
 	memset(kcmsg, 0, kcmlen);
 	ucmsg = CMSG32_FIRSTHDR(kmsg);
 	while(ucmsg != NULL) {
-		__get_user(ucmlen, &ucmsg->cmsg_len);
+		if (__get_user(ucmlen, &ucmsg->cmsg_len))
+			goto Efault;
 		tmp = ((ucmlen - CMSG32_ALIGN(sizeof(*ucmsg))) +
 		       CMSG_ALIGN(sizeof(struct cmsghdr)));
+		if ((char *)kcmsg_base + kcmlen - (char *)kcmsg < CMSG_ALIGN(tmp))
+			goto Einval;
 		kcmsg->cmsg_len = tmp;
-		__get_user(kcmsg->cmsg_level, &ucmsg->cmsg_level);
-		__get_user(kcmsg->cmsg_type, &ucmsg->cmsg_type);
-
-		/* Copy over the data. */
-		if(copy_from_user(CMSG_DATA(kcmsg),
-				  CMSG32_DATA(ucmsg),
-				  (ucmlen - CMSG32_ALIGN(sizeof(*ucmsg)))))
-			goto out_free_efault;
+		tmp = CMSG_ALIGN(tmp);
+		if (__get_user(kcmsg->cmsg_level, &ucmsg->cmsg_level) ||
+		    __get_user(kcmsg->cmsg_type, &ucmsg->cmsg_type) ||
+		    copy_from_user(CMSG_DATA(kcmsg),
+				   CMSG32_DATA(ucmsg),
+				   (ucmlen - CMSG32_ALIGN(sizeof(*ucmsg)))))
+			goto Efault;
 
 		/* Advance. */
-		kcmsg = (struct cmsghdr *)((char *)kcmsg + CMSG_ALIGN(tmp));
+		kcmsg = (struct cmsghdr *)((char *)kcmsg + tmp);
 		ucmsg = CMSG32_NXTHDR(kmsg, ucmsg, ucmlen);
 	}
 
@@ -2409,10 +2558,12 @@ static int cmsghdr_from_user32_to_kern(struct msghdr *kmsg,
 	kmsg->msg_controllen = kcmlen;
 	return 0;
 
-out_free_efault:
-	if(kcmsg_base != (struct cmsghdr *)stackbuf)
+Einval:
+	err = -EINVAL;
+Efault:
+	if (kcmsg_base != (struct cmsghdr *)stackbuf)
 		kfree(kcmsg_base);
-	return -EFAULT;
+	return err;
 }
 
 static void put_cmsg32(struct msghdr *kmsg, int level, int type,
@@ -2524,7 +2675,8 @@ static void scm_detach_fds32(struct msghdr *kmsg, struct scm_cookie *scm)
  *		IPV6_RTHDR	ipv6 routing exthdr	32-bit clean
  *		IPV6_AUTHHDR	ipv6 auth exthdr	32-bit clean
  */
-static void cmsg32_recvmsg_fixup(struct msghdr *kmsg, unsigned long orig_cmsg_uptr)
+static void cmsg32_recvmsg_fixup(struct msghdr *kmsg,
+		unsigned long orig_cmsg_uptr, __kernel_size_t orig_cmsg_len)
 {
 	unsigned char *workbuf, *wp;
 	unsigned long bufsz, space_avail;
@@ -2555,10 +2707,31 @@ static void cmsg32_recvmsg_fixup(struct msghdr *kmsg, unsigned long orig_cmsg_up
 		__get_user(kcmsg32->cmsg_type, &ucmsg->cmsg_type);
 
 		clen64 = kcmsg32->cmsg_len;
-		copy_from_user(CMSG32_DATA(kcmsg32), CMSG_DATA(ucmsg),
-			       clen64 - CMSG_ALIGN(sizeof(*ucmsg)));
-		clen32 = ((clen64 - CMSG_ALIGN(sizeof(*ucmsg))) +
-			  CMSG32_ALIGN(sizeof(struct cmsghdr32)));
+		if ((clen64 < CMSG_ALIGN(sizeof(*ucmsg))) ||
+				(clen64 > (orig_cmsg_len + wp - workbuf)))
+			break;
+		if (kcmsg32->cmsg_level == SOL_SOCKET &&
+			kcmsg32->cmsg_type == SO_TIMESTAMP) {
+			struct timeval tv;
+			struct timeval32 *tv32;
+
+			if (clen64 != CMSG_LEN(sizeof(struct timeval))) {
+				kfree(workbuf);
+				goto fail;
+			}
+
+			copy_from_user(&tv, CMSG_DATA(ucmsg), sizeof(tv));
+			tv32 = (struct timeval32 *)CMSG32_DATA(kcmsg32);
+			tv32->tv_sec = tv.tv_sec;
+			tv32->tv_usec = tv.tv_usec;
+			clen32 = sizeof(*tv32) +
+				  CMSG32_ALIGN(sizeof(struct cmsghdr32));
+		} else {
+			copy_from_user(CMSG32_DATA(kcmsg32), CMSG_DATA(ucmsg),
+				       clen64 - CMSG_ALIGN(sizeof(*ucmsg)));
+			clen32 = ((clen64 - CMSG_ALIGN(sizeof(*ucmsg))) +
+				  CMSG32_ALIGN(sizeof(struct cmsghdr32)));
+		}
 		kcmsg32->cmsg_len = clen32;
 
 		ucmsg = (struct cmsghdr *) (((char *)ucmsg) + CMSG_ALIGN(clen64));
@@ -2640,6 +2813,7 @@ asmlinkage int sys32_recvmsg(int fd, struct msghdr32 *user_msg, unsigned int use
 	struct sockaddr *uaddr;
 	int *uaddr_len;
 	unsigned long cmsg_ptr;
+	__kernel_size_t cmsg_len;
 	int err, total_len, len = 0;
 
 	if(msghdr_from_user32_to_kern(&kern_msg, user_msg))
@@ -2655,6 +2829,7 @@ asmlinkage int sys32_recvmsg(int fd, struct msghdr32 *user_msg, unsigned int use
 	total_len = err;
 
 	cmsg_ptr = (unsigned long) kern_msg.msg_control;
+	cmsg_len = kern_msg.msg_controllen;
 	kern_msg.msg_flags = 0;
 
 	sock = sockfd_lookup(fd, &err);
@@ -2680,7 +2855,8 @@ asmlinkage int sys32_recvmsg(int fd, struct msghdr32 *user_msg, unsigned int use
 				 * to fix it up before we tack on more stuff.
 				 */
 				if((unsigned long) kern_msg.msg_control != cmsg_ptr)
-					cmsg32_recvmsg_fixup(&kern_msg, cmsg_ptr);
+					cmsg32_recvmsg_fixup(&kern_msg,
+							cmsg_ptr, cmsg_len);
 
 				/* Wheee... */
 				if(sock->passcred)
@@ -2713,6 +2889,77 @@ out:
 
 extern asmlinkage int sys_setsockopt(int fd, int level, int optname,
 				     char *optval, int optlen);
+
+static int do_netfilter_replace(int fd, int level, int optname,
+				char *optval, int optlen)
+{
+	struct ipt_replace32 {
+		char name[IPT_TABLE_MAXNAMELEN];
+		__u32 valid_hooks;
+		__u32 num_entries;
+		__u32 size;
+		__u32 hook_entry[NF_IP_NUMHOOKS];
+		__u32 underflow[NF_IP_NUMHOOKS];
+		__u32 num_counters;
+		__u32 counters;
+		struct ipt_entry entries[0];
+	} *repl32 = (struct ipt_replace32 *)optval;
+	struct ipt_replace *krepl;
+	struct ipt_counters *counters32;
+	__u32 origsize;
+	unsigned int kreplsize, kcountersize;
+	mm_segment_t old_fs;
+	int ret;
+
+	if (optlen < sizeof(repl32))
+		return -EINVAL;
+
+	if (copy_from_user(&origsize,
+			&repl32->size,
+			sizeof(origsize)))
+		return -EFAULT;
+
+	kreplsize = sizeof(*krepl) + origsize;
+	kcountersize = krepl->num_counters * sizeof(struct ipt_counters);
+
+	/* Hack: Causes ipchains to give correct error msg --RR */
+	if (optlen != kreplsize)
+		return -ENOPROTOOPT;
+
+	krepl = (struct ipt_replace *)vmalloc(kreplsize);
+	if (krepl == NULL)
+		return -ENOMEM;
+
+	if (copy_from_user(krepl, optval, kreplsize)) {
+		vfree(krepl);
+		return -EFAULT;
+	}
+
+	counters32 = (struct ipt_counters *)AA(
+		((struct ipt_replace32 *)krepl)->counters);
+
+	kcountersize = krepl->num_counters * sizeof(struct ipt_counters);
+	krepl->counters = (struct ipt_counters *)vmalloc(kcountersize);
+	if (krepl->counters == NULL) {
+		vfree(krepl);
+		return -ENOMEM;
+	}
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	ret = sys_setsockopt(fd, level, optname,
+			     (char *)krepl, kreplsize);
+	set_fs(old_fs);
+
+	if (ret == 0 &&
+		copy_to_user(counters32, krepl->counters, kcountersize))
+			ret = -EFAULT;
+
+	vfree(krepl->counters);
+	vfree(krepl);
+
+	return ret;
+}
 
 static int do_set_attach_filter(int fd, int level, int optname,
 				char *optval, int optlen)
@@ -2757,44 +3004,77 @@ static int do_set_attach_filter(int fd, int level, int optname,
 	return ret;
 }
 
-static int do_set_icmpv6_filter(int fd, int level, int optname,
-				char *optval, int optlen)
+static int do_set_sock_timeout(int fd, int level, int optname, char *optval, int optlen)
 {
-	struct icmp6_filter kfilter;
+	struct timeval32 *up = (struct timeval32 *) optval;
+	struct timeval ktime;
 	mm_segment_t old_fs;
-	int ret, i;
+	int err;
 
-	if (copy_from_user(&kfilter, optval, sizeof(kfilter)))
+	if (optlen < sizeof(*up))
+		return -EINVAL;
+	if (get_user(ktime.tv_sec, &up->tv_sec) ||
+	    __get_user(ktime.tv_usec, &up->tv_usec))
 		return -EFAULT;
-
-
-	for (i = 0; i < 8; i += 2) {
-		u32 tmp = kfilter.data[i];
-
-		kfilter.data[i] = kfilter.data[i + 1];
-		kfilter.data[i + 1] = tmp;
-	}
-
 	old_fs = get_fs();
 	set_fs(KERNEL_DS);
-	ret = sys_setsockopt(fd, level, optname,
-			     (char *) &kfilter, sizeof(kfilter));
+	err = sys_setsockopt(fd, level, optname, (char *) &ktime, sizeof(ktime));
 	set_fs(old_fs);
 
-	return ret;
+	return err;
 }
 
 asmlinkage int sys32_setsockopt(int fd, int level, int optname,
 				char *optval, int optlen)
 {
-	if (optname == SO_ATTACH_FILTER)
+	if (optname == IPT_SO_SET_REPLACE)
+		return do_netfilter_replace(fd, level, optname,
+					    optval, optlen);
+	if (level == SOL_SOCKET && optname == SO_ATTACH_FILTER)
 		return do_set_attach_filter(fd, level, optname,
 					    optval, optlen);
-	if (level == SOL_ICMPV6 && optname == ICMPV6_FILTER)
-		return do_set_icmpv6_filter(fd, level, optname,
-					    optval, optlen);
+	if (level == SOL_SOCKET && 
+	    (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO))
+		return do_set_sock_timeout(fd, level, optname, optval, optlen);
 
 	return sys_setsockopt(fd, level, optname, optval, optlen);
+}
+
+extern asmlinkage long sys_getsockopt(int fd, int level, int optname,
+				      char *optval, int *optlen);
+
+static int do_get_sock_timeout(int fd, int level, int optname, char *optval, int *optlen)
+{
+	struct timeval32 *up = (struct timeval32 *) optval;
+	struct timeval ktime;
+	mm_segment_t old_fs;
+	int len, err;
+
+	if (get_user(len, optlen))
+		return -EFAULT;
+	if (len < sizeof(*up))
+		return -EINVAL;
+	len = sizeof(ktime);
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	err = sys_getsockopt(fd, level, optname, (char *) &ktime, &len);
+	set_fs(old_fs);
+
+	if (!err) {
+		if (put_user(sizeof(*up), optlen) ||
+		    put_user(ktime.tv_sec, &up->tv_sec) ||
+		    __put_user(ktime.tv_usec, &up->tv_usec))
+			err = -EFAULT;
+	}
+	return err;
+}
+
+asmlinkage int sys32_getsockopt(int fd, int level, int optname,
+				char *optval, int *optlen)
+{
+	if (optname == SO_RCVTIMEO || optname == SO_SNDTIMEO)
+		return do_get_sock_timeout(fd, level, optname, optval, optlen);
+	return sys_getsockopt(fd, level, optname, optval, optlen);
 }
 
 extern void check_pending(int signum);
@@ -2811,9 +3091,12 @@ asmlinkage int sys32_sigaction (int sig, struct old_sigaction32 *act, struct old
 
         if (act) {
 		old_sigset_t32 mask;
+		u32 u_handler, u_restorer;
 		
-		ret = get_user((long)new_ka.sa.sa_handler, &act->sa_handler);
-		ret |= __get_user((long)new_ka.sa.sa_restorer, &act->sa_restorer);
+		ret = get_user(u_handler, &act->sa_handler);
+		new_ka.sa.sa_handler = (void *) (long) u_handler;
+		ret |= __get_user(u_restorer, &act->sa_restorer);
+		new_ka.sa.sa_restorer = (void *) (long) u_restorer;
 		ret |= __get_user(new_ka.sa.sa_flags, &act->sa_flags);
 		ret |= __get_user(mask, &act->sa_mask);
 		if (ret)
@@ -2852,8 +3135,11 @@ sys32_rt_sigaction(int sig, struct sigaction32 *act, struct sigaction32 *oact,
 	current->thread.flags |= SPARC_FLAG_NEWSIGNALS;
 
         if (act) {
+		u32 u_handler, u_restorer;
+
 		new_ka.ka_restorer = restorer;
-		ret = get_user((long)new_ka.sa.sa_handler, &act->sa_handler);
+		ret = get_user(u_handler, &act->sa_handler);
+		new_ka.sa.sa_handler = (void *) (long) u_handler;
 		ret |= __copy_from_user(&set32, &act->sa_mask, sizeof(sigset_t32));
 		switch (_NSIG_WORDS) {
 		case 4: new_ka.sa.sa_mask.sig[3] = set32.sig[6] | (((long)set32.sig[7]) << 32);
@@ -2862,7 +3148,8 @@ sys32_rt_sigaction(int sig, struct sigaction32 *act, struct sigaction32 *oact,
 		case 1: new_ka.sa.sa_mask.sig[0] = set32.sig[0] | (((long)set32.sig[1]) << 32);
 		}
 		ret |= __get_user(new_ka.sa.sa_flags, &act->sa_flags);
-		ret |= __get_user((long)new_ka.sa.sa_restorer, &act->sa_restorer);
+		ret |= __get_user(u_restorer, &act->sa_restorer);
+		new_ka.sa.sa_restorer = (void *) (long) u_restorer;
                 if (ret)
                 	return -EFAULT;
 	}
@@ -2880,6 +3167,8 @@ sys32_rt_sigaction(int sig, struct sigaction32 *act, struct sigaction32 *oact,
 		ret |= __copy_to_user(&oact->sa_mask, &set32, sizeof(sigset_t32));
 		ret |= __put_user(old_ka.sa.sa_flags, &oact->sa_flags);
 		ret |= __put_user((long)old_ka.sa.sa_restorer, &oact->sa_restorer);
+		if (ret)
+			ret = -EFAULT;
         }
 
         return ret;
@@ -3496,6 +3785,7 @@ sys32_get_kernel_syms(struct kernel_sym *table)
 
 #endif  /* CONFIG_MODULES */
 
+#if defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
 /* Stuff for NFS server syscalls... */
 struct nfsctl_svc32 {
 	u16			svc32_port;
@@ -3605,7 +3895,7 @@ static int nfs_clnt32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
 	err |= copy_from_user(&karg->ca_client.cl_fhkey[0],
 			  &arg32->ca32_client.cl32_fhkey[0],
 			  NFSCLNT_KEYMAX);
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 static int nfs_exp32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
@@ -3631,7 +3921,7 @@ static int nfs_exp32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
 		      &arg32->ca32_export.ex32_anon_gid);
 	karg->ca_export.ex_anon_uid = high2lowuid(karg->ca_export.ex_anon_uid);
 	karg->ca_export.ex_anon_gid = high2lowgid(karg->ca_export.ex_anon_gid);
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 static int nfs_uud32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
@@ -3679,7 +3969,7 @@ static int nfs_uud32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
 		err |= __get_user(karg->ca_umap.ug_gdimap[i],
 			      &(((__kernel_gid_t32 *)A(uaddr))[i]));
 
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 static int nfs_getfh32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
@@ -3696,7 +3986,7 @@ static int nfs_getfh32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32
 		      &arg32->ca32_getfh.gf32_ino);
 	err |= __get_user(karg->ca_getfh.gf_version,
 		      &arg32->ca32_getfh.gf32_version);
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 static int nfs_getfd32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
@@ -3712,7 +4002,7 @@ static int nfs_getfd32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32
 			  (NFS_MAXPATHLEN+1));
 	err |= __get_user(karg->ca_getfd.gd_version,
 		      &arg32->ca32_getfd.gd32_version);
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 static int nfs_getfs32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
@@ -3728,7 +4018,7 @@ static int nfs_getfs32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32
 			  (NFS_MAXPATHLEN+1));
 	err |= __get_user(karg->ca_getfs.gd_maxlen,
 		      &arg32->ca32_getfs.gd32_maxlen);
-	return err;
+	return (err ? -EFAULT : 0);
 }
 
 /* This really doesn't need translations, we are only passing
@@ -3736,7 +4026,7 @@ static int nfs_getfs32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32
  */
 static int nfs_getfh32_res_trans(union nfsctl_res *kres, union nfsctl_res32 *res32)
 {
-	return copy_to_user(res32, kres, sizeof(*res32));
+	return (copy_to_user(res32, kres, sizeof(*res32)) ? -EFAULT : 0);
 }
 
 int asmlinkage sys32_nfsservctl(int cmd, struct nfsctl_arg32 *arg32, union nfsctl_res32 *res32)
@@ -3818,6 +4108,13 @@ done:
 		kfree(kres);
 	return err;
 }
+#else /* !NFSD */
+extern asmlinkage long sys_ni_syscall(void);
+int asmlinkage sys32_nfsservctl(int cmd, void *notused, void *notused2)
+{
+	return sys_ni_syscall();
+}
+#endif
 
 /* Translations due to time_t size differences.  Which affects all
    sorts of things, like timeval and itimerval.  */
@@ -3914,7 +4211,7 @@ asmlinkage int sys32_utimes(char *filename, struct timeval32 *tvs)
 
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		ret = sys_utimes(kfilename, &ktvs[0]);
+		ret = sys_utimes(kfilename, (tvs ? &ktvs[0] : NULL));
 		set_fs(old_fs);
 
 		putname(kfilename);
@@ -3994,6 +4291,12 @@ asmlinkage ssize_t32 sys32_pwrite(unsigned int fd, char *ubuf,
 	return sys_pwrite(fd, ubuf, count, ((loff_t)AA(poshi) << 32) | AA(poslo));
 }
 
+extern asmlinkage ssize_t sys_readahead(int fd, loff_t offset, size_t count);
+
+asmlinkage ssize_t32 sys32_readahead(int fd, u32 offhi, u32 offlo, s32 count)
+{
+	return sys_readahead(fd, ((loff_t)AA(offhi) << 32) | AA(offlo), count);
+}
 
 extern asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
 
@@ -4010,7 +4313,7 @@ asmlinkage int sys32_sendfile(int out_fd, int in_fd, __kernel_off_t32 *offset, s
 	ret = sys_sendfile(out_fd, in_fd, offset ? &of : NULL, count);
 	set_fs(old_fs);
 	
-	if (!ret && offset && put_user(of, offset))
+	if (offset && put_user(of, offset))
 		return -EFAULT;
 		
 	return ret;
@@ -4136,26 +4439,37 @@ asmlinkage unsigned long sys32_mremap(unsigned long addr,
 		goto out;
 	if (addr > 0xf0000000UL - old_len)
 		goto out;
-	down(&current->mm->mmap_sem);
-	vma = find_vma(current->mm, addr);
-	if (vma && (vma->vm_flags & VM_SHARED))
-		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+	down_write(&current->mm->mmap_sem);
 	if (flags & MREMAP_FIXED) {
 		if (new_addr > 0xf0000000UL - new_len)
 			goto out_sem;
 	} else if (addr > 0xf0000000UL - new_len) {
+		unsigned long map_flags = 0;
+		struct file *file = NULL;
+
 		ret = -ENOMEM;
 		if (!(flags & MREMAP_MAYMOVE))
 			goto out_sem;
-		new_addr = get_unmapped_area(addr, new_len);
-		if (!new_addr)
+
+		vma = find_vma(current->mm, addr);
+		if (vma) {
+			if (vma->vm_flags & VM_SHARED)
+				map_flags |= MAP_SHARED;
+			file = vma->vm_file;
+		}
+
+		/* MREMAP_FIXED checked above. */
+		new_addr = get_unmapped_area(file, addr, new_len,
+				    vma ? vma->vm_pgoff : 0,
+				    map_flags);
+		ret = new_addr;
+		if (new_addr & ~PAGE_MASK)
 			goto out_sem;
 		flags |= MREMAP_FIXED;
 	}
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
 out_sem:
-	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 out:
 	return ret;       
 }
@@ -4181,6 +4495,9 @@ struct __sysctl_args32 {
 
 extern asmlinkage long sys32_sysctl(struct __sysctl_args32 *args)
 {
+#ifndef CONFIG_SYSCTL
+	return -ENOSYS;
+#else
 	struct __sysctl_args32 tmp;
 	int error;
 	size_t oldlen, *oldlenp = NULL;
@@ -4215,4 +4532,5 @@ extern asmlinkage long sys32_sysctl(struct __sysctl_args32 *args)
 		copy_to_user(args->__unused, tmp.__unused, sizeof(tmp.__unused));
 	}
 	return error;
+#endif
 }

@@ -37,6 +37,8 @@ struct termio {
 #define TIOCM_OUT2	0x4000
 #define TIOCM_LOOP	0x8000
 
+#define TIOCM_MODEM_BITS       TIOCM_OUT2      /* IRDA support */
+
 /* ioctl (fd, TIOCSERGETLSR, &result) where result may be as below */
 
 /* line disciplines */
@@ -51,10 +53,11 @@ struct termio {
 #define N_MASC		8	/* Reserved for Mobitex module <kaz@cafe.net> */
 #define N_R3964		9	/* Reserved for Simatic R3964 module */
 #define N_PROFIBUS_FDL	10	/* Reserved for Profibus <Dave@mvhi.com> */
-#define N_IRDA		11	/* Linux IR - http://www.cs.uit.no/~dagb/irda/irda.html */
+#define N_IRDA		11	/* Linux IR - http://irda.sourceforge.net/ */
 #define N_SMSBLOCK	12	/* SMS block mode - for talking to GSM data cards about SMS messages */
 #define N_HDLC		13	/* synchronous HDLC */
 #define N_SYNC_PPP	14
+#define N_HCI		15  /* Bluetooth HCI UART */
 
 #ifdef __KERNEL__
 

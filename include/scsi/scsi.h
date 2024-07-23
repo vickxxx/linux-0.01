@@ -78,6 +78,7 @@
 #define MODE_SENSE_10         0x5a
 #define PERSISTENT_RESERVE_IN 0x5e
 #define PERSISTENT_RESERVE_OUT 0x5f
+#define REPORT_LUNS           0xa0
 #define MOVE_MEDIUM           0xa5
 #define READ_12               0xa8
 #define WRITE_12              0xaa
@@ -88,6 +89,34 @@
 #define READ_ELEMENT_STATUS   0xb8
 #define SEND_VOLUME_TAG       0xb6
 #define WRITE_LONG_2          0xea
+#define READ_16               0x88
+#define WRITE_16              0x8a
+#define VERIFY_16	      0x8f
+#define SERVICE_ACTION_IN     0x9e
+/* values for service action in */
+#define SAI_READ_CAPACITY_16  0x10
+
+/* Values for T10/04-262r7 */
+#define	ATA_16		      0x85	/* 16-byte pass-thru */
+#define	ATA_12		      0xa1	/* 12-byte pass-thru */
+
+#define SCSI_RETRY_10(c) ((c) == READ_6 || (c) == WRITE_6 || (c) == SEEK_6)
+
+/*
+ *  SCSI Architecture Model (SAM) Status codes. Taken from SAM-3 draft
+ *  T10/1561-D Revision 4 Draft dated 7th November 2002.
+ */
+#define SAM_STAT_GOOD            0x00
+#define SAM_STAT_CHECK_CONDITION 0x02
+#define SAM_STAT_CONDITION_MET   0x04
+#define SAM_STAT_BUSY            0x08
+#define SAM_STAT_INTERMEDIATE    0x10
+#define SAM_STAT_INTERMEDIATE_CONDITION_MET 0x14
+#define SAM_STAT_RESERVATION_CONFLICT 0x18
+#define SAM_STAT_COMMAND_TERMINATED 0x22        /* obsolete in SAM-3 */
+#define SAM_STAT_TASK_SET_FULL   0x28
+#define SAM_STAT_ACA_ACTIVE      0x30
+#define SAM_STAT_TASK_ABORTED    0x40
 
 /*
  *  Status codes
@@ -130,6 +159,7 @@
 
 #define TYPE_DISK           0x00
 #define TYPE_TAPE           0x01
+#define TYPE_PRINTER        0x02
 #define TYPE_PROCESSOR      0x03    /* HP scanners use this */
 #define TYPE_WORM           0x04    /* Treated as ROM by our system */
 #define TYPE_ROM            0x05
@@ -196,8 +226,9 @@ struct ccs_modesel_head
  * Here are some scsi specific ioctl commands which are sometimes useful.
  */
 /* These are a few other constants  only used by scsi  devices */
+/* Note that include/linux/cdrom.h also defines IOCTL 0x5300 - 0x5395 */
 
-#define SCSI_IOCTL_GET_IDLUN 0x5382
+#define SCSI_IOCTL_GET_IDLUN 0x5382	/* conflicts with CDROMAUDIOBUFSIZ */
 
 /* Used to turn on and off tagged queuing for scsi devices */
 
@@ -209,6 +240,9 @@ struct ccs_modesel_head
 
 /* Used to get the bus number for a device */
 #define SCSI_IOCTL_GET_BUS_NUMBER 0x5386
+
+/* Used to get the PCI location of a device */
+#define SCSI_IOCTL_GET_PCI 0x5387
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

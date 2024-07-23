@@ -15,8 +15,6 @@
  *	2000-10-29	Henner Eisen	lapb_data_indication() return status.
  */
  
-#include <linux/config.h>
-#if defined(CONFIG_LAPB) || defined(CONFIG_LAPB_MODULE)
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -41,7 +39,7 @@
 #include <linux/init.h>
 #include <net/lapb.h>
 
-static lapb_cb *volatile lapb_list = NULL;
+static lapb_cb *volatile lapb_list /* = NULL initially */;
 
 /*
  *	Free an allocated lapb control block. This is done to centralise
@@ -271,7 +269,7 @@ int lapb_connect_request(void *token)
 
 	return LAPB_OK;
 }
-	
+
 int lapb_disconnect_request(void *token)
 {
 	lapb_cb *lapb;
@@ -399,18 +397,16 @@ EXPORT_SYMBOL(lapb_disconnect_request);
 EXPORT_SYMBOL(lapb_data_request);
 EXPORT_SYMBOL(lapb_data_received);
 
+static char banner[] __initdata = KERN_INFO "NET4: LAPB for Linux. Version 0.01 for NET4.0\n";
+
 static int __init lapb_init(void)
 {
-	printk(KERN_INFO "NET4: LAPB for Linux. Version 0.01 for NET4.0\n");
+	printk(banner);
 	return 0;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Jonathan Naylor <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The X.25 Link Access Procedure B link layer protocol");
-#endif
-
+MODULE_LICENSE("GPL");
 
 module_init(lapb_init);
-
-#endif

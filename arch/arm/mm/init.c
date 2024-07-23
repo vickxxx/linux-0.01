@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/mm/init.c
  *
- *  Copyright (C) 1995-2000 Russell King
+ *  Copyright (C) 1995-2002 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -46,11 +46,13 @@
 #define TABLE_OFFSET	0
 #endif
 
-#define TABLE_SIZE	((TABLE_OFFSET + PTRS_PER_PTE) * sizeof(void *))
+#define TABLE_SIZE	((TABLE_OFFSET + PTRS_PER_PTE) * sizeof(pte_t))
 
 static unsigned long totalram_pages;
-pgd_t swapper_pg_dir[PTRS_PER_PGD];
+extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern char _stext, _text, _etext, _end, __init_begin, __init_end;
+extern unsigned long phys_initrd_start;
+extern unsigned long phys_initrd_size;
 
 /*
  * The sole use of this is to pass memory configuration
@@ -59,52 +61,10 @@ extern char _stext, _text, _etext, _end, __init_begin, __init_end;
 static struct meminfo meminfo __initdata = { 0, };
 
 /*
- * empty_bad_page is the page that is used for page faults when
- * linux is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving a inode
- * unused etc..
- *
- * empty_bad_pte_table is the accompanying page-table: it is
- * initialized to point to BAD_PAGE entries.
- *
  * empty_zero_page is a special page that is used for
  * zero-initialized data and COW.
  */
 struct page *empty_zero_page;
-struct page *empty_bad_page;
-pte_t *empty_bad_pte_table;
-
-pte_t *get_bad_pte_table(void)
-{
-	pte_t v;
-	int i;
-
-	v = pte_mkdirty(mk_pte(empty_bad_page, PAGE_SHARED));
-
-	for (i = 0; i < PTRS_PER_PTE; i++)
-		set_pte(empty_bad_pte_table + i, v);
-
-	return empty_bad_pte_table;
-}
-
-void __handle_bad_pmd(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-#ifdef CONFIG_DEBUG_ERRORS
-	__backtrace();
-#endif
-	set_pmd(pmd, mk_user_pmd(get_bad_pte_table()));
-}
-
-void __handle_bad_pmd_kernel(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-#ifdef CONFIG_DEBUG_ERRORS
-	__backtrace();
-#endif
-	set_pmd(pmd, mk_kernel_pmd(get_bad_pte_table()));
-}
 
 #ifndef CONFIG_NO_PGT_CACHE
 struct pgtable_cache_struct quicklists;
@@ -120,12 +80,12 @@ int do_check_pgt_cache(int low, int high)
 				freed++;
 			}
 			if(pmd_quicklist) {
-				free_pmd_slow(get_pmd_fast());
+				pmd_free_slow(pmd_alloc_one_fast(NULL, 0));
 				freed++;
 			}
 			if(pte_quicklist) {
-				free_pte_slow(get_pte_fast());
-				 freed++;
+				pte_free_slow(pte_alloc_one_fast(NULL, 0));
+				freed++;
 			}
 		} while(pgtable_cache_size > low);
 	}
@@ -138,22 +98,6 @@ int do_check_pgt_cache(int low, int high)
 }
 #endif
 
-void show_mem(void)
-{
-	int free = 0, total = 0, reserved = 0;
-	int shared = 0, cached = 0, node;
-
-	printk("Mem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-
-	for (node = 0; node < numnodes; node++) {
-		struct page *page, *end;
-
-		page = NODE_MEM_MAP(node);
-		end  = page + NODE_DATA(node)->node_size;
-
-		do {
 /* This is currently broken
  * PG_skip is used on sparc/sparc64 architectures to "skip" certain
  * parts of the address space.
@@ -166,11 +110,29 @@ void show_mem(void)
  *					break;
  *			}
  */
+void show_mem(void)
+{
+	int free = 0, total = 0, reserved = 0;
+	int shared = 0, cached = 0, slab = 0, node;
+
+	printk("Mem-info:\n");
+	show_free_areas();
+	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
+
+	for (node = 0; node < numnodes; node++) {
+		struct page *page, *end;
+
+		page = NODE_MEM_MAP(node);
+		end  = page + NODE_DATA(node)->node_size;
+
+		do {
 			total++;
 			if (PageReserved(page))
 				reserved++;
 			else if (PageSwapCache(page))
 				cached++;
+			else if (PageSlab(page))
+				slab++;
 			else if (!page_count(page))
 				free++;
 			else
@@ -182,6 +144,7 @@ void show_mem(void)
 	printk("%d pages of RAM\n", total);
 	printk("%d free pages\n", free);
 	printk("%d reserved pages\n", reserved);
+	printk("%d slab pages\n", slab);
 	printk("%d pages shared\n", shared);
 	printk("%d pages swap cached\n", cached);
 #ifndef CONFIG_NO_PGT_CACHE
@@ -331,6 +294,7 @@ find_memend_and_nodes(struct meminfo *mi, struct node_info *np)
 	 * also get rid of some of the stuff above as well.
 	 */
 	max_low_pfn = memend_pfn - O_PFN_DOWN(PHYS_OFFSET);
+//	max_pfn = memend_pfn - O_PFN_DOWN(PHYS_OFFSET);
 	mi->end = memend_pfn << PAGE_SHIFT;
 
 	return bootmem_pages;
@@ -341,16 +305,16 @@ static int __init check_initrd(struct meminfo *mi)
 	int initrd_node = -2;
 
 #ifdef CONFIG_BLK_DEV_INITRD
+	unsigned long end = phys_initrd_start + phys_initrd_size;
+
 	/*
 	 * Make sure that the initrd is within a valid area of
 	 * memory.
 	 */
-	if (initrd_start) {
-		unsigned long phys_initrd_start, phys_initrd_end;
+	if (phys_initrd_size) {
 		unsigned int i;
 
-		phys_initrd_start = __pa(initrd_start);
-		phys_initrd_end   = __pa(initrd_end);
+		initrd_node = -1;
 
 		for (i = 0; i < mi->nr_banks; i++) {
 			unsigned long bank_end;
@@ -358,7 +322,7 @@ static int __init check_initrd(struct meminfo *mi)
 			bank_end = mi->bank[i].start + mi->bank[i].size;
 
 			if (mi->bank[i].start <= phys_initrd_start &&
-			    phys_initrd_end <= bank_end)
+			    end <= bank_end)
 				initrd_node = mi->bank[i].node;
 		}
 	}
@@ -366,8 +330,8 @@ static int __init check_initrd(struct meminfo *mi)
 	if (initrd_node == -1) {
 		printk(KERN_ERR "initrd (0x%08lx - 0x%08lx) extends beyond "
 		       "physical memory - disabling initrd\n",
-		       initrd_start, initrd_end);
-		initrd_start = initrd_end = 0;
+		       phys_initrd_start, end);
+		phys_initrd_start = phys_initrd_size = 0;
 	}
 #endif
 
@@ -393,7 +357,7 @@ static __init void reserve_node_zero(unsigned int bootmap_pfn, unsigned int boot
 	 * and can only be in node 0.
 	 */
 	reserve_bootmem_node(pgdat, __pa(swapper_pg_dir),
-			     PTRS_PER_PGD * sizeof(void *));
+			     PTRS_PER_PGD * sizeof(pgd_t));
 #endif
 	/*
 	 * And don't forget to reserve the allocator bitmap,
@@ -417,8 +381,17 @@ static __init void reserve_node_zero(unsigned int bootmap_pfn, unsigned int boot
 	 */
 	if (machine_is_archimedes() || machine_is_a5k())
 		reserve_bootmem_node(pgdat, 0x02000000, 0x00080000);
+	if (machine_is_edb7211() || machine_is_fortunet())
+		reserve_bootmem_node(pgdat, 0xc0000000, 0x00020000);
 	if (machine_is_p720t())
-		reserve_bootmem_node(pgdat, 0xc0000000, 0x00014000);
+		reserve_bootmem_node(pgdat, PHYS_OFFSET, 0x00014000);
+#ifdef CONFIG_SA1111
+	/*
+	 * Because of the SA1111 DMA bug, we want to preserve
+	 * our precious DMA-able memory...
+	 */
+	reserve_bootmem_node(pgdat, PHYS_OFFSET, __pa(swapper_pg_dir)-PHYS_OFFSET);
+#endif
 }
 
 /*
@@ -450,8 +423,28 @@ void __init bootmem_init(struct meminfo *mi)
 	initrd_node   = check_initrd(mi);
 
 	map_pg = bootmap_pfn;
-	
-	for (node = 0; node < numnodes; node++, np++) {
+
+	/*
+	 * Initialise the bootmem nodes.
+	 *
+	 * What we really want to do is:
+	 *
+	 *   unmap_all_regions_except_kernel();
+	 *   for_each_node_in_reverse_order(node) {
+	 *     map_node(node);
+	 *     allocate_bootmem_map(node);
+	 *     init_bootmem_node(node);
+	 *     free_bootmem_node(node);
+	 *   }
+	 *
+	 * but this is a 2.5-type change.  For now, we just set
+	 * the nodes up in reverse order.
+	 *
+	 * (we could also do with rolling bootmem_init and paging_init
+	 * into one generic "memory_init" type function).
+	 */
+	np += numnodes - 1;
+	for (node = numnodes - 1; node >= 0; node--, np--) {
 		/*
 		 * If there are no pages in this node, ignore it.
 		 * Note that node 0 must always have some pages.
@@ -479,13 +472,17 @@ void __init bootmem_init(struct meminfo *mi)
 
 
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (initrd_node >= 0)
-		reserve_bootmem_node(NODE_DATA(initrd_node), __pa(initrd_start),
-				     initrd_end - initrd_start);
+	if (phys_initrd_size && initrd_node >= 0) {
+		reserve_bootmem_node(NODE_DATA(initrd_node), phys_initrd_start,
+				     phys_initrd_size);
+		initrd_start = __phys_to_virt(phys_initrd_start);
+		initrd_end = initrd_start + phys_initrd_size;
+	}
 #endif
 
 	if (map_pg != bootmap_pfn + bootmap_pages)
 		BUG();
+
 }
 
 /*
@@ -494,18 +491,15 @@ void __init bootmem_init(struct meminfo *mi)
  */
 void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 {
-	void *zero_page, *bad_page, *bad_table;
+	void *zero_page;
 	int node;
 
 	memcpy(&meminfo, mi, sizeof(meminfo));
 
 	/*
-	 * allocate what we need for the bad pages.
-	 * note that we count on this going ok.
+	 * allocate the zero page.  Note that we count on this going ok.
 	 */
 	zero_page = alloc_bootmem_low_pages(PAGE_SIZE);
-	bad_page  = alloc_bootmem_low_pages(PAGE_SIZE);
-	bad_table = alloc_bootmem_low_pages(TABLE_SIZE);
 
 	/*
 	 * initialise the page tables.
@@ -513,6 +507,7 @@ void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 	memtable_init(mi);
 	if (mdesc->map_io)
 		mdesc->map_io();
+	flush_cache_all();
 	flush_tlb_all();
 
 	/*
@@ -546,6 +541,12 @@ void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 				(bdata->node_boot_start >> PAGE_SHIFT);
 
 		/*
+		 * If this zone has zero size, skip it.
+		 */
+		if (!zone_size[0])
+			continue;
+
+		/*
 		 * For each bank in this node, calculate the size of the
 		 * holes.  holes = node_size - sum(bank_sizes_in_node)
 		 */
@@ -557,6 +558,12 @@ void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 			zhole_size[0] -= mi->bank[i].size >> PAGE_SHIFT;
 		}
 
+		/*
+		 * Adjust the sizes according to any special
+		 * requirements for this machine type.
+		 */
+		arch_adjust_zones(node, zone_size, zhole_size);
+
 		free_area_init_node(node, pgdat, 0, zone_size,
 				bdata->node_boot_start, zhole_size);
 	}
@@ -566,11 +573,24 @@ void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 	 * the mem_map is initialised
 	 */
 	memzero(zero_page, PAGE_SIZE);
-	memzero(bad_page, PAGE_SIZE);
-
 	empty_zero_page = virt_to_page(zero_page);
-	empty_bad_page  = virt_to_page(bad_page);
-	empty_bad_pte_table = ((pte_t *)bad_table) + TABLE_OFFSET;
+	flush_dcache_page(empty_zero_page);
+}
+
+static inline void free_area(unsigned long addr, unsigned long end, char *s)
+{
+	unsigned int size = (end - addr) >> 10;
+
+	for (; addr < end; addr += PAGE_SIZE) {
+		struct page *page = virt_to_page(addr);
+		ClearPageReserved(page);
+		set_page_count(page, 1);
+		free_page(addr);
+		totalram_pages++;
+	}
+
+	if (size && s)
+		printk(KERN_INFO "Freeing %s memory: %dK\n", s, size);
 }
 
 /*
@@ -597,8 +617,17 @@ void __init mem_init(void)
 		create_memmap_holes(&meminfo);
 
 	/* this will put all unused low memory onto the freelists */
-	for (node = 0; node < numnodes; node++)
-		totalram_pages += free_all_bootmem_node(NODE_DATA(node));
+	for (node = 0; node < numnodes; node++) {
+		pg_data_t *pgdat = NODE_DATA(node);
+
+		if (pgdat->node_size != 0)
+			totalram_pages += free_all_bootmem_node(pgdat);
+	}
+
+#ifdef CONFIG_SA1111
+	/* now that our DMA memory is actually so designated, we can free it */
+	free_area(PAGE_OFFSET, (unsigned long)swapper_pg_dir, NULL);
+#endif
 
 	/*
 	 * Since our memory may not be contiguous, calculate the
@@ -627,22 +656,6 @@ void __init mem_init(void)
 		 */
 		sysctl_overcommit_memory = 1;
 	}
-}
-
-static inline void free_area(unsigned long addr, unsigned long end, char *s)
-{
-	unsigned int size = (end - addr) >> 10;
-
-	for (; addr < end; addr += PAGE_SIZE) {
-		struct page *page = virt_to_page(addr);
-		ClearPageReserved(page);
-		set_page_count(page, 1);
-		free_page(addr);
-		totalram_pages++;
-	}
-
-	if (size)
-		printk("Freeing %s memory: %dK\n", s, size);
 }
 
 void free_initmem(void)

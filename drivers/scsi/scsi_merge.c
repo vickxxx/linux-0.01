@@ -6,6 +6,7 @@
  *                        Based upon conversations with large numbers
  *                        of people at Linux Expo.
  *	Support for dynamic DMA mapping: Jakub Jelinek (jakub@redhat.com).
+ *	Support for highmem I/O: Jens Axboe <axboe@suse.de>
  */
 
 /*
@@ -39,7 +40,7 @@
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/stat.h>
@@ -47,7 +48,6 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/smp_lock.h>
-
 
 #define __KERNEL_SYSCALLS__
 
@@ -62,6 +62,12 @@
 #include "hosts.h"
 #include "constants.h"
 #include <scsi/scsi_ioctl.h>
+
+/*
+ * scsi_malloc() can only dish out items of PAGE_SIZE or less, so we cannot
+ * build a request that requires an sg table allocation of more than that.
+ */
+static const int scsi_max_sg = PAGE_SIZE / sizeof(struct scatterlist);
 
 /*
  * This means that bounce buffers cannot be allocated in chunks > PAGE_SIZE.
@@ -95,7 +101,7 @@ static int dump_stats(struct request *req,
 		printk("Segment 0x%p, blocks %d, addr 0x%lx\n",
 		       bh,
 		       bh->b_size >> 9,
-		       virt_to_phys(bh->b_data - 1));
+		       bh_phys(bh) - 1);
 	}
 	panic("Ththththaats all folks.  Too dangerous to continue.\n");
 }
@@ -120,9 +126,11 @@ static void dma_exhausted(Scsi_Cmnd * SCpnt, int i)
 {
 	int jj;
 	struct scatterlist *sgpnt;
+	void **bbpnt;
 	int consumed = 0;
 
 	sgpnt = (struct scatterlist *) SCpnt->request_buffer;
+	bbpnt = SCpnt->bounce_buffers;
 
 	/*
 	 * Now print out a bunch of stats.  First, start with the request
@@ -136,28 +144,19 @@ static void dma_exhausted(Scsi_Cmnd * SCpnt, int i)
 	 */
 	for(jj=0; jj < SCpnt->use_sg; jj++)
 	{
-		printk("[%d]\tlen:%d\taddr:%p\talt:%p\n",
+		printk("[%d]\tlen:%d\taddr:%p\tbounce:%p\n",
 		       jj,
 		       sgpnt[jj].length,
 		       sgpnt[jj].address,
-		       sgpnt[jj].alt_address);		       
-		if( sgpnt[jj].alt_address != NULL )
-		{
-			consumed = (sgpnt[jj].length >> 9);
-		}
+		       (bbpnt ? bbpnt[jj] : NULL));
+		if (bbpnt && bbpnt[jj])
+			consumed += sgpnt[jj].length;
 	}
 	printk("Total %d sectors consumed\n", consumed);
 	panic("DMA pool exhausted");
 }
 
-/*
- * FIXME(eric) - the original disk code disabled clustering for MOD
- * devices.  I have no idea why we thought this was a good idea - my
- * guess is that it was an attempt to limit the size of requests to MOD
- * devices.
- */
-#define CLUSTERABLE_DEVICE(SH,SD) (SH->use_clustering && \
-				   SD->type != TYPE_MOD)
+#define CLUSTERABLE_DEVICE(SH,SD) (SH->use_clustering)
 
 /*
  * This entire source file deals with the new queueing code.
@@ -223,11 +222,10 @@ __inline static int __count_segments(struct request *req,
 			 * DMA capable host, make sure that a segment doesn't span
 			 * the DMA threshold boundary.  
 			 */
-			if (dma_host &&
-			    virt_to_phys(bhnext->b_data) - 1 == ISA_DMA_THRESHOLD) {
+			if (dma_host && bh_phys(bhnext) - 1 == ISA_DMA_THRESHOLD) {
 				ret++;
 				reqsize = bhnext->b_size;
-			} else if (CONTIGUOUS_BUFFERS(bh, bhnext)) {
+			} else if (blk_seg_merge_ok(bh, bhnext)) {
 				/*
 				 * This one is OK.  Let it go.
 				 */ 
@@ -241,8 +239,7 @@ __inline static int __count_segments(struct request *req,
 				 * kind of screwed and we need to start
 				 * another segment.
 				 */
-				if( dma_host
-				    && virt_to_phys(bh->b_data) - 1 >= ISA_DMA_THRESHOLD
+				if( dma_host && bh_phys(bh) - 1 >= ISA_DMA_THRESHOLD
 				    && reqsize + bhnext->b_size > PAGE_SIZE )
 				{
 					ret++;
@@ -304,7 +301,7 @@ recount_segments(Scsi_Cmnd * SCpnt)
 }
 
 #define MERGEABLE_BUFFERS(X,Y) \
-(((((long)(X)->b_data+(X)->b_size)|((long)(Y)->b_data)) & \
+(((((long)bh_phys((X))+(X)->b_size)|((long)bh_phys((Y)))) & \
   (DMA_CHUNK_SIZE - 1)) == 0)
 
 #ifdef DMA_CHUNK_SIZE
@@ -324,7 +321,6 @@ static inline int scsi_new_mergeable(request_queue_t * q,
 	    req->nr_segments >= SHpnt->sg_tablesize)
 		return 0;
 	req->nr_segments++;
-	q->elevator.nr_segments++;
 	return 1;
 }
 
@@ -341,11 +337,8 @@ static inline int scsi_new_segment(request_queue_t * q,
 	if (req->nr_hw_segments >= SHpnt->sg_tablesize ||
 	     req->nr_segments >= SHpnt->sg_tablesize)
 		return 0;
-	if (req->nr_segments >= max_segments)
-		return 0;
 	req->nr_hw_segments++;
 	req->nr_segments++;
-	q->elevator.nr_segments++;
 	return 1;
 }
 #else
@@ -361,7 +354,6 @@ static inline int scsi_new_segment(request_queue_t * q,
 		 * counter.
 		 */
 		req->nr_segments++;
-		q->elevator.nr_segments++;
 		return 1;
 	} else {
 		return 0;
@@ -411,14 +403,22 @@ __inline static int __scsi_back_merge_fn(request_queue_t * q,
 {
 	unsigned int count;
 	unsigned int segment_size = 0;
-	Scsi_Device *SDpnt;
-	struct Scsi_Host *SHpnt;
+	Scsi_Device *SDpnt = q->queuedata;
+	struct Scsi_Host *SHpnt = SDpnt->host;
 
-	SDpnt = (Scsi_Device *) q->queuedata;
-	SHpnt = SDpnt->host;
+	if (max_segments > scsi_max_sg)
+		max_segments = scsi_max_sg;
 
+#ifdef DMA_CHUNK_SIZE
 	if (max_segments > 64)
 		max_segments = 64;
+#endif
+
+	if ((req->nr_sectors + (bh->b_size >> 9)) > SHpnt->max_sectors)
+		return 0;
+
+	if (!BH_PHYS_4G(req->bhtail, bh))
+		goto new_end_segment;
 
 	if (use_clustering) {
 		/* 
@@ -427,14 +427,11 @@ __inline static int __scsi_back_merge_fn(request_queue_t * q,
 		 * DMA capable host, make sure that a segment doesn't span
 		 * the DMA threshold boundary.  
 		 */
-		if (dma_host &&
-		    virt_to_phys(req->bhtail->b_data) - 1 == ISA_DMA_THRESHOLD) {
+		if (dma_host && bh_phys(req->bhtail) - 1 == ISA_DMA_THRESHOLD)
 			goto new_end_segment;
-		}
-		if (CONTIGUOUS_BUFFERS(req->bhtail, bh)) {
+		if (BH_CONTIG(req->bhtail, bh)) {
 #ifdef DMA_SEGMENT_SIZE_LIMITED
-			if( dma_host
-			    && virt_to_phys(bh->b_data) - 1 >= ISA_DMA_THRESHOLD ) {
+			if (dma_host && bh_phys(bh) - 1 >= ISA_DMA_THRESHOLD) {
 				segment_size = 0;
 				count = __count_segments(req, use_clustering, dma_host, &segment_size);
 				if( segment_size + bh->b_size > PAGE_SIZE ) {
@@ -465,14 +462,22 @@ __inline static int __scsi_front_merge_fn(request_queue_t * q,
 {
 	unsigned int count;
 	unsigned int segment_size = 0;
-	Scsi_Device *SDpnt;
-	struct Scsi_Host *SHpnt;
+	Scsi_Device *SDpnt = q->queuedata;
+	struct Scsi_Host *SHpnt = SDpnt->host;
 
-	SDpnt = (Scsi_Device *) q->queuedata;
-	SHpnt = SDpnt->host;
+	if (max_segments > scsi_max_sg)
+		max_segments = scsi_max_sg;
 
+#ifdef DMA_CHUNK_SIZE
 	if (max_segments > 64)
 		max_segments = 64;
+#endif
+
+	if ((req->nr_sectors + (bh->b_size >> 9)) > SHpnt->max_sectors)
+		return 0;
+
+	if (!BH_PHYS_4G(bh, req->bh))
+		goto new_start_segment;
 
 	if (use_clustering) {
 		/* 
@@ -481,14 +486,12 @@ __inline static int __scsi_front_merge_fn(request_queue_t * q,
 		 * DMA capable host, make sure that a segment doesn't span
 		 * the DMA threshold boundary. 
 		 */
-		if (dma_host &&
-		    virt_to_phys(bh->b_data) - 1 == ISA_DMA_THRESHOLD) {
+		if (dma_host && bh_phys(bh) - 1 == ISA_DMA_THRESHOLD) {
 			goto new_start_segment;
 		}
-		if (CONTIGUOUS_BUFFERS(bh, req->bh)) {
+		if (BH_CONTIG(bh, req->bh)) {
 #ifdef DMA_SEGMENT_SIZE_LIMITED
-			if( dma_host
-			    && virt_to_phys(bh->b_data) - 1 >= ISA_DMA_THRESHOLD ) {
+			if (dma_host && bh_phys(bh) - 1 >= ISA_DMA_THRESHOLD) {
 				segment_size = bh->b_size;
 				count = __count_segments(req, use_clustering, dma_host, &segment_size);
 				if( count != req->nr_segments ) {
@@ -595,16 +598,23 @@ __inline static int __scsi_merge_requests_fn(request_queue_t * q,
 					     int use_clustering,
 					     int dma_host)
 {
-	Scsi_Device *SDpnt;
-	struct Scsi_Host *SHpnt;
+	Scsi_Device *SDpnt = q->queuedata;
+	struct Scsi_Host *SHpnt = SDpnt->host;
 
-	SDpnt = (Scsi_Device *) q->queuedata;
-	SHpnt = SDpnt->host;
+	/*
+	 * First check if the either of the requests are re-queued
+	 * requests.  Can't merge them if they are.
+	 */
+	if (req->special || next->special)
+		return 0;
 
+	if (max_segments > scsi_max_sg)
+		max_segments = scsi_max_sg;
+
+#ifdef DMA_CHUNK_SIZE
 	if (max_segments > 64)
 		max_segments = 64;
 
-#ifdef DMA_CHUNK_SIZE
 	/* If it would not fit into prepared memory space for sg chain,
 	 * then don't allow the merge.
 	 */
@@ -625,6 +635,13 @@ __inline static int __scsi_merge_requests_fn(request_queue_t * q,
 		return 0;
 	}
 #endif
+
+	if ((req->nr_sectors + next->nr_sectors) > SHpnt->max_sectors)
+		return 0;
+
+	if (!BH_PHYS_4G(req->bhtail, next->bh))
+		goto dont_combine;
+
 	/*
 	 * The main question is whether the two segments at the boundaries
 	 * would be considered one or two.
@@ -636,18 +653,15 @@ __inline static int __scsi_merge_requests_fn(request_queue_t * q,
 		 * DMA capable host, make sure that a segment doesn't span
 		 * the DMA threshold boundary.  
 		 */
-		if (dma_host &&
-		    virt_to_phys(req->bhtail->b_data) - 1 == ISA_DMA_THRESHOLD) {
+		if (dma_host && bh_phys(req->bhtail) - 1 == ISA_DMA_THRESHOLD)
 			goto dont_combine;
-		}
 #ifdef DMA_SEGMENT_SIZE_LIMITED
 		/*
 		 * We currently can only allocate scatter-gather bounce
 		 * buffers in chunks of PAGE_SIZE or less.
 		 */
-		if (dma_host
-		    && CONTIGUOUS_BUFFERS(req->bhtail, next->bh)
-		    && virt_to_phys(req->bhtail->b_data) - 1 >= ISA_DMA_THRESHOLD )
+		if (dma_host && BH_CONTIG(req->bhtail, next->bh)
+		    && bh_phys(req->bhtail) - 1 >= ISA_DMA_THRESHOLD)
 		{
 			int segment_size = 0;
 			int count = 0;
@@ -659,12 +673,11 @@ __inline static int __scsi_merge_requests_fn(request_queue_t * q,
 			}
 		}
 #endif
-		if (CONTIGUOUS_BUFFERS(req->bhtail, next->bh)) {
+		if (BH_CONTIG(req->bhtail, next->bh)) {
 			/*
 			 * This one is OK.  Let it go.
 			 */
 			req->nr_segments += next->nr_segments - 1;
-			q->elevator.nr_segments--;
 #ifdef DMA_CHUNK_SIZE
 			req->nr_hw_segments += next->nr_hw_segments - 1;
 #endif
@@ -788,35 +801,12 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	char		   * buff;
 	int		     count;
 	int		     i;
-	struct request     * req;
+	struct request     * req = &SCpnt->request;
 	int		     sectors;
 	struct scatterlist * sgpnt;
 	int		     this_count;
+	void		   ** bbpnt;
 
-	/*
-	 * FIXME(eric) - don't inline this - it doesn't depend on the
-	 * integer flags.   Come to think of it, I don't think this is even
-	 * needed any more.  Need to play with it and see if we hit the
-	 * panic.  If not, then don't bother.
-	 */
-	if (!SCpnt->request.bh) {
-		/* 
-		 * Case of page request (i.e. raw device), or unlinked buffer 
-		 * Typically used for swapping, but this isn't how we do
-		 * swapping any more.
-		 */
-		panic("I believe this is dead code.  If we hit this, I was wrong");
-#if 0
-		SCpnt->request_bufflen = SCpnt->request.nr_sectors << 9;
-		SCpnt->request_buffer = SCpnt->request.buffer;
-		SCpnt->use_sg = 0;
-		/*
-		 * FIXME(eric) - need to handle DMA here.
-		 */
-#endif
-		return 1;
-	}
-	req = &SCpnt->request;
 	/*
 	 * First we need to know how many scatter gather segments are needed.
 	 */
@@ -832,24 +822,39 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	 * buffer.
 	 */
 	if (dma_host && scsi_dma_free_sectors <= 10) {
-		this_count = SCpnt->request.current_nr_sectors;
+		this_count = req->current_nr_sectors;
 		goto single_segment;
 	}
 	/*
-	 * Don't bother with scatter-gather if there is only one segment.
-	 */
-	if (count == 1) {
-		this_count = SCpnt->request.nr_sectors;
+	 * we really want to use sg even for a single segment request,
+	 * however some people just cannot be bothered to write decent
+	 * driver code so we can't risk to break somebody making the
+	 * assumption that sg requests will always contain at least 2
+	 * segments. if the driver is 32-bit dma safe, then use sg for
+	 * 1 entry anyways. if not, don't rely on the driver handling this
+	 * case.
+ 	 */
+	if (count == 1 && !SCpnt->host->highmem_io) {
+		this_count = req->nr_sectors;
 		goto single_segment;
 	}
-	SCpnt->use_sg = count;
 
-	/* 
-	 * Allocate the actual scatter-gather table itself.
-	 * scsi_malloc can only allocate in chunks of 512 bytes 
+	/*
+	 * for sane drivers, use sg even for 1 entry request
 	 */
-	SCpnt->sglist_len = (SCpnt->use_sg
-			     * sizeof(struct scatterlist) + 511) & ~511;
+	SCpnt->use_sg = count;
+	SCpnt->sglist_len = (SCpnt->use_sg * sizeof(struct scatterlist));
+
+	/* If we could potentially require ISA bounce buffers, allocate
+	 * space for this array here.
+	 */
+	if (dma_host)
+		SCpnt->sglist_len += (SCpnt->use_sg * sizeof(void *));
+
+	/* scsi_malloc can only allocate in chunks of 512 bytes so
+	 * round it up.
+	 */
+	SCpnt->sglist_len = (SCpnt->sglist_len + 511) & ~511;
 
 	sgpnt = (struct scatterlist *) scsi_malloc(SCpnt->sglist_len);
 
@@ -857,15 +862,25 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	 * Now fill the scatter-gather table.
 	 */
 	if (!sgpnt) {
+#if 0
 		/*
 		 * If we cannot allocate the scatter-gather table, then
 		 * simply write the first buffer all by itself.
 		 */
 		printk("Warning - running *really* short on DMA buffers\n");
-		this_count = SCpnt->request.current_nr_sectors;
+		this_count = req->current_nr_sectors;
 		goto single_segment;
+#else
+		/*
+		 * it's probably better to simply always back off a little,
+		 * and let some memory be returned to dma pool instead of
+		 * always falling back to (slow) single segments
+		 */
+		return 0;
+#endif
 	}
-	/* 
+
+	/*
 	 * Next, walk the list, and fill in the addresses and sizes of
 	 * each segment.
 	 */
@@ -874,13 +889,19 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	SCpnt->request_bufflen = 0;
 	bhprev = NULL;
 
-	for (count = 0, bh = SCpnt->request.bh;
-	     bh; bh = bh->b_reqnext) {
+	if (dma_host)
+		bbpnt = (void **) ((char *)sgpnt +
+			 (SCpnt->use_sg * sizeof(struct scatterlist)));
+	else
+		bbpnt = NULL;
+
+	SCpnt->bounce_buffers = bbpnt;
+
+	for (count = 0, bh = req->bh; bh; bh = bh->b_reqnext) {
 		if (use_clustering && bhprev != NULL) {
-			if (dma_host &&
-			    virt_to_phys(bhprev->b_data) - 1 == ISA_DMA_THRESHOLD) {
+			if (dma_host && bh_phys(bhprev) - 1 == ISA_DMA_THRESHOLD) {
 				/* Nothing - fall through */
-			} else if (CONTIGUOUS_BUFFERS(bhprev, bh)) {
+			} else if (blk_seg_merge_ok(bhprev, bh)) {
 				/*
 				 * This one is OK.  Let it go.  Note that we
 				 * do not have the ability to allocate
@@ -889,7 +910,7 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 				 */
 				if( dma_host ) {
 #ifdef DMA_SEGMENT_SIZE_LIMITED
-					if( virt_to_phys(bh->b_data) - 1 < ISA_DMA_THRESHOLD
+					if (bh_phys(bh) - 1 < ISA_DMA_THRESHOLD
 					    || sgpnt[count - 1].length + bh->b_size <= PAGE_SIZE ) {
 						sgpnt[count - 1].length += bh->b_size;
 						bhprev = bh;
@@ -908,12 +929,25 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 				}
 			}
 		}
-		count++;
-		sgpnt[count - 1].address = bh->b_data;
-		sgpnt[count - 1].length += bh->b_size;
-		if (!dma_host) {
-			SCpnt->request_bufflen += bh->b_size;
+
+		if (SCpnt->host->highmem_io) {
+			sgpnt[count].page = bh->b_page;
+			sgpnt[count].offset = bh_offset(bh);
+			sgpnt[count].address = NULL;
+		} else {
+			if (PageHighMem(bh->b_page))
+				BUG();
+
+			sgpnt[count].page = NULL;
+			sgpnt[count].address = bh->b_data;
 		}
+		
+		sgpnt[count].length = bh->b_size;
+
+		if (!dma_host)
+			SCpnt->request_bufflen += bh->b_size;
+
+		count++;
 		bhprev = bh;
 	}
 
@@ -936,12 +970,16 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	for (i = 0; i < count; i++) {
 		sectors = (sgpnt[i].length >> 9);
 		SCpnt->request_bufflen += sgpnt[i].length;
+		/*
+		 * only done for dma_host, in which case .page is not
+		 * set since it's guarenteed to be a low memory page
+		 */
 		if (virt_to_phys(sgpnt[i].address) + sgpnt[i].length - 1 >
 		    ISA_DMA_THRESHOLD) {
 			if( scsi_dma_free_sectors - sectors <= 10  ) {
 				/*
 				 * If this would nearly drain the DMA
-				 * pool, mpty, then let's stop here.
+				 * pool empty, then let's stop here.
 				 * Don't make this request any larger.
 				 * This is kind of a safety valve that
 				 * we use - we could get screwed later
@@ -955,7 +993,7 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 				break;
 			}
 
-			sgpnt[i].alt_address = sgpnt[i].address;
+			bbpnt[i] = sgpnt[i].address;
 			sgpnt[i].address =
 			    (char *) scsi_malloc(sgpnt[i].length);
 			/*
@@ -971,8 +1009,8 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 				}
 				break;
 			}
-			if (SCpnt->request.cmd == WRITE) {
-				memcpy(sgpnt[i].address, sgpnt[i].alt_address,
+			if (req->cmd == WRITE) {
+				memcpy(sgpnt[i].address, bbpnt[i],
 				       sgpnt[i].length);
 			}
 		}
@@ -1016,8 +1054,7 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 	 * single-block requests if we had hundreds of free sectors.
 	 */
 	if( scsi_dma_free_sectors > 30 ) {
-		for (this_count = 0, bh = SCpnt->request.bh;
-		     bh; bh = bh->b_reqnext) {
+		for (this_count = 0, bh = req->bh; bh; bh = bh->b_reqnext) {
 			if( scsi_dma_free_sectors - this_count < 30 
 			    || this_count == sectors )
 			{
@@ -1030,21 +1067,32 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 		/*
 		 * Yow!   Take the absolute minimum here.
 		 */
-		this_count = SCpnt->request.current_nr_sectors;
+		this_count = req->current_nr_sectors;
 	}
 
 	/*
 	 * Now drop through into the single-segment case.
 	 */
 	
-      single_segment:
+single_segment:
+	/*
+	 * for highmem cases, we have to revert to bouncing for single
+	 * segments. rather just give up now and let the device starvation
+	 * path reinitiate this i/o later
+	 */
+	if (SCpnt->host->highmem_io)
+		return 0;
+
 	/*
 	 * Come here if for any reason we choose to do this as a single
 	 * segment.  Possibly the entire request, or possibly a small
 	 * chunk of the entire request.
 	 */
-	bh = SCpnt->request.bh;
-	buff = SCpnt->request.buffer;
+	bh = req->bh;
+	buff = req->buffer = bh->b_data;
+
+	if (PageHighMem(bh->b_page))
+		BUG();
 
 	if (dma_host) {
 		/*
@@ -1052,21 +1100,21 @@ __inline static int __init_io(Scsi_Cmnd * SCpnt,
 		 * back and allocate a really small one - enough to satisfy
 		 * the first buffer.
 		 */
-		if (virt_to_phys(SCpnt->request.bh->b_data)
-		    + (this_count << 9) - 1 > ISA_DMA_THRESHOLD) {
+		if (bh_phys(bh) + (this_count << 9) - 1 > ISA_DMA_THRESHOLD) {
 			buff = (char *) scsi_malloc(this_count << 9);
 			if (!buff) {
 				printk("Warning - running low on DMA memory\n");
-				this_count = SCpnt->request.current_nr_sectors;
+				this_count = req->current_nr_sectors;
 				buff = (char *) scsi_malloc(this_count << 9);
 				if (!buff) {
 					dma_exhausted(SCpnt, 0);
 				}
 			}
-			if (SCpnt->request.cmd == WRITE)
-				memcpy(buff, (char *) SCpnt->request.buffer, this_count << 9);
+			if (req->cmd == WRITE)
+				memcpy(buff, (char *) req->buffer, this_count << 9);
 		}
 	}
+
 	SCpnt->request_bufflen = this_count << 9;
 	SCpnt->request_buffer = buff;
 	SCpnt->use_sg = 0;
@@ -1105,20 +1153,10 @@ INITIO(scsi_init_io_vdc, 1, 1, 1)
  */
 void initialize_merge_fn(Scsi_Device * SDpnt)
 {
-	request_queue_t *q;
-	struct Scsi_Host *SHpnt;
-	SHpnt = SDpnt->host;
+	struct Scsi_Host *SHpnt = SDpnt->host;
+	request_queue_t *q = &SDpnt->request_queue;
+	dma64_addr_t bounce_limit;
 
-	q = &SDpnt->request_queue;
-
-	/*
-	 * If the host has already selected a merge manager, then don't
-	 * pick a new one.
-	 */
-#if 0
-	if (q->back_merge_fn && q->front_merge_fn)
-		return;
-#endif
 	/*
 	 * If this host has an unlimited tablesize, then don't bother with a
 	 * merge manager.  The whole point of the operation is to make sure
@@ -1151,4 +1189,20 @@ void initialize_merge_fn(Scsi_Device * SDpnt)
 		q->merge_requests_fn = scsi_merge_requests_fn_dc;
 		SDpnt->scsi_init_io_fn = scsi_init_io_vdc;
 	}
+
+	/*
+	 * now enable highmem I/O, if appropriate
+	 */
+	bounce_limit = BLK_BOUNCE_HIGH;
+	if (SHpnt->highmem_io && (SDpnt->type == TYPE_DISK)) {
+		if (!PCI_DMA_BUS_IS_PHYS)
+			/* Platforms with virtual-DMA translation
+ 			 * hardware have no practical limit.
+			 */
+			bounce_limit = BLK_BOUNCE_ANY;
+		else
+			bounce_limit = SHpnt->pci_dev->dma_mask;
+	}
+
+	blk_queue_bounce_limit(q, bounce_limit);
 }

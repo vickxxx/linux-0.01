@@ -7,24 +7,17 @@
  * 
  * Copyright 1994 Comtrol Corporation.    All Rights Reserved.
  * 
- * The following source code is subject to Comtrol Corporation's
- * Developer's License Agreement.
- * 
- * This source code is protected by United States copyright law and 
- * international copyright treaties.
- * 
- * This source code may only be used to develop software products that
- * will operate with Comtrol brand hardware.
- * 
- * You may not reproduce nor distribute this source code in its original
- * form but must produce a derivative work which includes portions of
- * this source code only.
- * 
- * The portions of this source code which you use in your derivative
- * work must bear Comtrol's copyright notice:
- * 
- * 		Copyright 1994 Comtrol Corporation.
- * 
+ * Erroneously clashing license removed. This file is GPL
+ * (Kurt Robideau, Comtrol Corp, 20030610)
+ * This driver is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This driver is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  */
 
 /*
@@ -185,7 +178,7 @@ Channel Register Offsets - Indexed - Internal - Fixed
 
 /* Old clock prescale definition and baud rates associated with it */
 
-#define CLOCK_PRESC 0x19  */        /* mod 9 (divide by 10) prescale */
+#define CLOCK_PRESC 0x19          /* mod 9 (divide by 10) prescale */
 #define BRD50             4607
 #define BRD75             3071
 #define BRD110            2094
@@ -1206,6 +1199,9 @@ struct r_port {
 #endif
 #ifndef PCI_DEVICE_ID_RP8J
 #define PCI_DEVICE_ID_RP8J		0x0006
+#endif
+#ifndef PCI_DEVICE_ID_RP4J
+#define PCI_DEVICE_ID_RP4J		0x0007
 #endif
 #ifndef PCI_DEVICE_ID_RPP4
 #define PCI_DEVICE_ID_RPP4		0x000A

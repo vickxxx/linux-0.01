@@ -6,11 +6,12 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is a driver for the HP PC-LAN adaptors.
 
@@ -18,7 +19,7 @@
 	  The Crynwr packet driver.
 */
 
-static const char *version =
+static const char version[] =
 	"hp.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 
@@ -379,6 +380,10 @@ static int irq[MAX_HP_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HP_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HP_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
+MODULE_DESCRIPTION("HP PC-LAN ISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -426,6 +431,7 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+
 
 /*
  * Local variables:

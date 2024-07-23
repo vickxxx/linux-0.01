@@ -1,5 +1,4 @@
-/* $Id: strnlen_user.S,v 1.2 1999/11/19 20:35:21 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -28,27 +27,22 @@
  *       bytes.  There's nothing secret there ...
  */
 LEAF(__strnlen_user_asm)
-	lw	v0, THREAD_CURDS($28)	# pointer ok?
-	and	v0, a0
-	bltz	v0, fault
+	LONG_L		v0, THREAD_CURDS($28)	# pointer ok?
+	and		v0, a0
+	bltz		v0, fault
 
-EXPORT(__strnlen_user_nocheck_asm)
-	.type	__strnlen_user_nocheck_asm,@function
-	move	v0, a0
-	addu	a1, a0			# stop pointer
-	.set	noreorder
-1:	beq	v0, a1, 1f		# limit reached?
-	 addiu	v0, 1
-	.set	reorder
+FEXPORT(__strnlen_user_nocheck_asm)
+	move		v0, a0
+	PTR_ADDU	a1, a0			# stop pointer
+	.set		noreorder
+1:	beq		v0, a1, 1f		# limit reached?
+	 PTR_ADDIU	v0, 1
+	.set		reorder
 	EX(lb, t0, -1(v0), fault)
-	bnez	t0, 1b
-1:	subu	v0, a0
-	jr	ra
+	bnez		t0, 1b
+1:	PTR_SUBU	v0, a0
+	jr		ra
 	END(__strnlen_user_asm)
 
-	.section	__ex_table,"a"
-	PTR		1b, fault
-	.previous
-
-fault:	move	v0, zero
-	jr	ra
+fault:	move		v0, zero
+	jr		ra

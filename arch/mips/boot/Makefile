@@ -1,18 +1,13 @@
-# $Id: Makefile,v 1.9 1999/04/07 18:45:23 harald Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995, 1998 by Ralf Baechle
+# Copyright (C) 1995, 1998, 2001 by Ralf Baechle
+# Copyright (C) 2004  Maciej W. Rozycki
 #
 
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
-
-OBJS  = milo.o a.out.o
+USE_STANDARD_AS_RULE := true
 
 #
 # Some DECstations need all possible sections of an ECOFF executable
@@ -27,16 +22,23 @@ endif
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
-drop-sections	= .reginfo .mdebug
+drop-sections	= .reginfo .mdebug .comment .note .pdr .options .MIPS.options
 strip-flags	= $(addprefix --remove-section=,$(drop-sections))
 
-all: vmlinux.ecoff addinitrd
+VMLINUX = $(TOPDIR)/vmlinux
 
-vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(TOPDIR)/vmlinux
-	./elf2ecoff $(TOPDIR)/vmlinux vmlinux.ecoff $(E2EFLAGS)
+all:
+
+boot: vmlinux.ecoff vmlinux.srec addinitrd
+
+vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(VMLINUX)
+	./elf2ecoff $(VMLINUX) vmlinux.ecoff $(E2EFLAGS)
 
 elf2ecoff: elf2ecoff.c
 	$(HOSTCC) -o $@ $^
+
+vmlinux.srec: $(CONFIGURE) $(VMLINUX)
+	$(OBJCOPY) -S -O srec $(strip-flags) $(VMLINUX) vmlinux.srec
 
 addinitrd: addinitrd.c
 	$(HOSTCC) -o $@ $^
@@ -45,26 +47,10 @@ addinitrd: addinitrd.c
 dep:
 
 clean:
-	rm -f vmlinux.ecoff
-	rm -f zImage zImage.tmp mkboot
+	rm -f vmlinux.ecoff vmlinux.srec
 
 mrproper:
-	rm -f vmlinux.ecoff
-	rm -f addinitrd
-	rm -f elf2ecoff
-
-zImage:	$(CONFIGURE) mkboot $(TOPDIR)/vmlinux
-	$(OBJCOPY) $(strip-flags) $(TOPDIR)/vmlinux zImage.tmp
-	./mkboot zImage.tmp zImage
-	rm -f zImage.tmp
-
-mkboot: mkboot.c
-	$(HOSTCC) -o $@ $^
-
-zdisk: 	zImage
-	cp $(TOPDIR)/vmlinux $(TOPDIR)/vm
-	$(STRIP) $(TOPDIR)/vm
-	gzip -9f $(TOPDIR)/vm
+	rm -f vmlinux.ecoff vmlinux.srec addinitrd elf2ecoff
 
 dummy:
 

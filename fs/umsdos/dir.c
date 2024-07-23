@@ -15,7 +15,7 @@
 #include <linux/stat.h>
 #include <linux/limits.h>
 #include <linux/umsdos_fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 
 #define UMSDOS_SPECIAL_DIRFPOS	3
@@ -67,7 +67,7 @@ struct UMSDOS_DIR_ONCE {
 static int umsdos_dir_once (	void *buf,
 				const char *name,
 				int len,
-				off_t offset,
+				loff_t offset,
 				ino_t ino,
 				unsigned type)
 {
@@ -651,13 +651,16 @@ char * umsdos_d_path(struct dentry *dentry, char * buffer, int len)
 	old_root = dget(current->fs->root);
 	read_unlock(&current->fs->lock);
 	spin_lock(&dcache_lock);
-	path = __d_path(dentry, NULL, dentry->d_sb->s_root, NULL, buffer, len);
+	path = __d_path(dentry, current->fs->rootmnt, dentry->d_sb->s_root, current->fs->rootmnt, buffer, len); /* FIXME: current->fs->rootmnt */
 	spin_unlock(&dcache_lock);
+
+	if (IS_ERR(path))
+		return path;
 
 	if (*path == '/')
 		path++; /* skip leading '/' */
 
-	if (old_root->d_inode == pseudo_root)
+	if (current->fs->root->d_inode == pseudo_root)
 	{
 		*(path-1) = '/';
 		path -= (UMSDOS_PSDROOT_LEN+1);

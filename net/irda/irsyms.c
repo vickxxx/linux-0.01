@@ -10,6 +10,7 @@
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
  *     Copyright (c) 1997, 1999-2000 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -35,9 +36,6 @@
 #include <net/irda/irda.h>
 #include <net/irda/irmod.h>
 #include <net/irda/irlap.h>
-#ifdef CONFIG_IRDA_COMPRESSION
-#include <net/irda/irlap_comp.h>
-#endif /* CONFIG_IRDA_COMPRESSION */
 #include <net/irda/irlmp.h>
 #include <net/irda/iriap.h>
 #include <net/irda/irias_object.h>
@@ -46,6 +44,7 @@
 #include <net/irda/wrapper.h>
 #include <net/irda/timer.h>
 #include <net/irda/parameters.h>
+#include <net/irda/crc.h>
 
 extern struct proc_dir_entry *proc_irda;
 
@@ -66,12 +65,6 @@ extern int ircomm_tty_init(void);
 extern int irlpt_client_init(void);
 extern int irlpt_server_init(void);
 
-#ifdef CONFIG_IRDA_COMPRESSION
-#ifdef CONFIG_IRDA_DEFLATE
-extern irda_deflate_init();
-#endif /* CONFIG_IRDA_DEFLATE */
-#endif /* CONFIG_IRDA_COMPRESSION */
-
 /* IrTTP */
 EXPORT_SYMBOL(irttp_open_tsap);
 EXPORT_SYMBOL(irttp_close_tsap);
@@ -88,7 +81,6 @@ EXPORT_SYMBOL(irttp_dup);
 EXPORT_SYMBOL(irda_debug);
 #endif
 EXPORT_SYMBOL(irda_notify_init);
-EXPORT_SYMBOL(irda_lock);
 #ifdef CONFIG_PROC_FS
 EXPORT_SYMBOL(proc_irda);
 #endif
@@ -150,10 +142,6 @@ EXPORT_SYMBOL(hashbin_get_first);
 /* IrLAP */
 EXPORT_SYMBOL(irlap_open);
 EXPORT_SYMBOL(irlap_close);
-#ifdef CONFIG_IRDA_COMPRESSION
-EXPORT_SYMBOL(irda_unregister_compressor);
-EXPORT_SYMBOL(irda_register_compressor);
-#endif /* CONFIG_IRDA_COMPRESSION */
 EXPORT_SYMBOL(irda_init_max_qos_capabilies);
 EXPORT_SYMBOL(irda_qos_bits_to_value);
 EXPORT_SYMBOL(irda_device_setup);
@@ -171,6 +159,8 @@ EXPORT_SYMBOL(irda_task_delete);
 
 EXPORT_SYMBOL(async_wrap_skb);
 EXPORT_SYMBOL(async_unwrap_char);
+EXPORT_SYMBOL(irda_calc_crc16);
+EXPORT_SYMBOL(irda_crc16_table);
 EXPORT_SYMBOL(irda_start_timer);
 EXPORT_SYMBOL(setup_dma);
 EXPORT_SYMBOL(infrared_mode);
@@ -184,7 +174,7 @@ EXPORT_SYMBOL(irtty_set_packet_mode);
 
 int __init irda_init(void)
 {
-	IRDA_DEBUG(0, __FUNCTION__ "()\n");
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
 
  	irlmp_init();
 	irlap_init();
@@ -208,17 +198,10 @@ int __init irda_init(void)
 	ircomm_init();
 	ircomm_tty_init();
 #endif
-
-#ifdef CONFIG_IRDA_COMPRESSION
-#ifdef CONFIG_IRDA_DEFLATE
-	irda_deflate_init();
-#endif /* CONFIG_IRDA_DEFLATE */
-#endif /* CONFIG_IRDA_COMPRESSION */
-
 	return 0;
 }
 
-static void __exit irda_cleanup(void)
+void __exit irda_cleanup(void)
 {
 #ifdef CONFIG_SYSCTL
 	irda_sysctl_unregister();
@@ -237,21 +220,6 @@ static void __exit irda_cleanup(void)
 
 	/* Remove middle layer */
 	irlmp_cleanup();
-}
-
-/*
- * Function irda_unlock (lock)
- *
- *    Unlock variable. Returns false if lock is already unlocked
- *
- */
-inline int irda_unlock(int *lock) 
-{
-	if (!test_and_clear_bit(0, (void *) lock))  {
-		printk("Trying to unlock already unlocked variable!\n");
-		return FALSE;
-        }
-	return TRUE;
 }
 
 /*

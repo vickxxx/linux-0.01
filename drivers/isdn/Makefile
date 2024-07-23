@@ -2,7 +2,7 @@
 
 # The target object and module list name.
 
-O_TARGET	:= isdn.a
+O_TARGET	:= vmlinux-obj.o
 
 # Objects that export symbols.
 
@@ -11,8 +11,7 @@ export-objs	:= isdn_common.o
 # Multipart objects.
 
 list-multi	:= isdn.o
-isdn-objs	:= isdn_net.o isdn_tty.o isdn_cards.o isdn_v110.o \
-		   isdn_common.o
+isdn-objs	:= isdn_net.o isdn_tty.o isdn_v110.o isdn_common.o
 
 # Optional parts of multipart objects.
 
@@ -33,9 +32,9 @@ obj-$(CONFIG_ISDN_PPP_BSDCOMP)		+= isdn_bsdcomp.o
 
 # Object files in subdirectories
 
-mod-subdirs				:= avmb1 eicon
+mod-subdirs				:= avmb1 eicon hisax
 subdir-$(CONFIG_ISDN_DIVERSION)		+= divert
-subdir-$(CONFIG_ISDN_DRV_HISAX)		+= hisax
+subdir-$(CONFIG_ISDN_HISAX)		+= hisax
 subdir-$(CONFIG_ISDN_DRV_ICN)		+= icn
 subdir-$(CONFIG_ISDN_DRV_PCBIT)		+= pcbit
 subdir-$(CONFIG_ISDN_DRV_SC)		+= sc
@@ -44,6 +43,7 @@ subdir-$(CONFIG_ISDN_DRV_LOOP)		+= isdnloop
 subdir-$(CONFIG_ISDN_DRV_ACT2000)	+= act2000
 subdir-$(CONFIG_ISDN_DRV_EICON)		+= eicon
 subdir-$(CONFIG_HYSDN)			+= hysdn
+subdir-$(CONFIG_ISDN_DRV_TPAM)		+= tpam
 
 obj-y += $(addsuffix /vmlinux-obj.o, $(subdir-y))
 

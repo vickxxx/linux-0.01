@@ -1,7 +1,7 @@
 /*      cops.c: LocalTalk driver for Linux.
  *
  *	Authors:
- *      - Jay Schulist <jschlst@turbolinux.com>
+ *      - Jay Schulist <jschlst@samba.org>
  *
  *	With more than a little help from;
  *	- Alan Cox <Alan.Cox@linux.org> 
@@ -16,7 +16,7 @@
  *      Director, National Security Agency.
  *
  *      This software may be used and distributed according to the terms
- *      of the GNU Public License, incorporated herein by reference.
+ *      of the GNU General Public License, incorporated herein by reference.
  *
  *	Changes:
  *	19970608	Alan Cox	Allowed dual card type support
@@ -34,7 +34,7 @@
  */
 
 static const char *version =
-"cops.c:v0.04 6/7/98 Jay Schulist <jschlst@turbolinux.com>\n";
+"cops.c:v0.04 6/7/98 Jay Schulist <jschlst@samba.org>\n";
 /*
  *  Sources:
  *      COPS Localtalk SDK. This provides almost all of the information
@@ -59,7 +59,7 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -98,7 +98,7 @@ static int board_type = TANGENT;
 static int io = 0x240;		/* Default IO for Dayna */
 static int irq = 5;		/* Default IRQ */
 #else
-static int io = 0;		/* Default IO for Dayna */
+static int io;			/* Default IO for Dayna */
 #endif
 
 /*
@@ -181,7 +181,7 @@ struct cops_local
         int board;			/* Holds what board type is. */
 	int nodeid;			/* Set to 1 once have nodeid. */
         unsigned char node_acquire;	/* Node ID when acquired. */
-        struct at_addr node_addr;	/* Full node addres */
+        struct at_addr node_addr;	/* Full node address */
 };
 
 /* Index to functions, as function prototypes. */
@@ -752,8 +752,8 @@ static void cops_rx(struct net_device *dev)
 {
         int pkt_len = 0;
         int rsp_type = 0;
-        struct sk_buff *skb;
-        struct cops_local *lp = (struct cops_local *)dev->priv;
+        struct sk_buff *skb = NULL;
+        struct cops_local *lp = dev->priv;
         int ioaddr = dev->base_addr;
         int boguscount = 0;
         unsigned long flags;
@@ -771,6 +771,7 @@ static void cops_rx(struct net_device *dev)
                 /* Wait for DMA to turn around. */
                 while(++boguscount<1000000)
                 {
+			barrier();
                         if((inb(ioaddr+DAYNA_CARD_STATUS)&0x03)==DAYNA_RX_READY)
                                 break;
                 }
@@ -801,6 +802,7 @@ static void cops_rx(struct net_device *dev)
                 lp->stats.rx_dropped++;
                 while(pkt_len--)        /* Discard packet */
                         inb(ioaddr);
+		restore_flags(flags);
                 return;
         }
         skb->dev = dev;
@@ -820,7 +822,7 @@ static void cops_rx(struct net_device *dev)
 		printk(KERN_WARNING "%s: Bad packet length of %d bytes.\n", 
 			dev->name, pkt_len);
                 lp->stats.tx_errors++;
-                kfree_skb(skb);
+                dev_kfree_skb_any(skb);
                 return;
         }
 
@@ -828,7 +830,7 @@ static void cops_rx(struct net_device *dev)
         if(rsp_type == LAP_INIT_RSP)
         {	/* Nodeid taken from received packet. */
                 lp->node_acquire = skb->data[0];
-                kfree_skb(skb);
+                dev_kfree_skb_any(skb);
                 return;
         }
 
@@ -837,7 +839,7 @@ static void cops_rx(struct net_device *dev)
         {
                 printk(KERN_WARNING "%s: Bad packet type %d.\n", dev->name, rsp_type);
                 lp->stats.tx_errors++;
-                kfree_skb(skb);
+                dev_kfree_skb_any(skb);
                 return;
         }
 
@@ -851,8 +853,7 @@ static void cops_rx(struct net_device *dev)
 
         /* Send packet to a higher place. */
         netif_rx(skb);
-
-        return;
+	dev->last_rx = jiffies;
 }
 
 static void cops_timeout(struct net_device *dev)
@@ -1012,6 +1013,8 @@ static struct net_device_stats *cops_get_stats(struct net_device *dev)
 
 #ifdef MODULE
 static struct net_device cops0_dev = { init: cops_probe };
+
+MODULE_LICENSE("GPL");
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(board_type, "i");

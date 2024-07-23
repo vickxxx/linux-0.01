@@ -1,22 +1,11 @@
-/* $Id: icn.h,v 1.30 2000/11/13 22:51:48 kai Exp $
-
+/* $Id: icn.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * ISDN lowlevel-module for the ICN active ISDN-Card.
  *
  * Copyright 1994 by Fritz Elfert (fritz@isdn4linux.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -46,7 +35,6 @@ typedef struct icn_cdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/module.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -55,7 +43,7 @@ typedef struct icn_cdef {
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -187,6 +175,7 @@ typedef struct icn_card {
  * Main driver data
  */
 typedef struct icn_dev {
+	unsigned long memaddr;	/* Address of memory mapped buffers */
 	icn_shmem *shmem;       /* Pointer to memory-mapped-buffers */
 	int mvalid;             /* IO-shmem has been requested      */
 	int channel;            /* Currently mapped channel         */
@@ -204,27 +193,6 @@ static u_char chan2bank[] =
 {0, 4, 8, 12};                  /* for icn_map_channel() */
 
 static icn_dev dev;
-
-/* With modutils >= 1.1.67 Integers can be changed while loading a
- * module. For this reason define the Port-Base an Shmem-Base as
- * integers.
- */
-static int portbase = ICN_BASEADDR;
-static int membase = ICN_MEMADDR;
-static char *icn_id = "\0";
-static char *icn_id2 = "\0";
-
-#ifdef MODULE
-MODULE_AUTHOR("Fritz Elfert");
-MODULE_PARM(portbase, "i");
-MODULE_PARM_DESC(portbase, "Port adress of first card");
-MODULE_PARM(membase, "i");
-MODULE_PARM_DESC(membase, "Shared memory adress of all cards");
-MODULE_PARM(icn_id, "s");
-MODULE_PARM_DESC(icn_id, "ID-String of first card");
-MODULE_PARM(icn_id2, "s");
-MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
-#endif
 
 #endif                          /* __KERNEL__ */
 
@@ -283,17 +251,6 @@ MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
 		   readb(&msg_i)-readb(&msg_o))
 
 #define CID (card->interface.id)
-
-#define MIN(a,b) ((a<b)?a:b)
-#define MAX(a,b) ((a>b)?a:b)
-
-/* Hopefully, a separate resource-registration-scheme for shared-memory
- * will be introduced into the kernel. Until then, we use the normal
- * routines, designed for port-registration.
- */
-#define check_shmem   check_region
-#define release_shmem release_region
-#define request_shmem request_region
 
 #endif                          /* defined(__KERNEL__) || defined(__DEBUGVAR__) */
 #endif                          /* icn_h */

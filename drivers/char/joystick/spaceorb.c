@@ -34,7 +34,7 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/input.h>
@@ -223,3 +223,5 @@ void __exit spaceorb_exit(void)
 
 module_init(spaceorb_init);
 module_exit(spaceorb_exit);
+
+MODULE_LICENSE("GPL");

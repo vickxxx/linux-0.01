@@ -12,7 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/poll.h>
@@ -29,7 +29,7 @@
 
 /* Uncomment this if your mouse drivers expect the kernel to
  * return with EAGAIN if the mouse does not have any events
- * available, even if the mouse is opened in nonblocking mode.
+ * available, even if the mouse is opened in blocking mode.
  * Please report use of this "feature" to the author using the
  * above address.
  */
@@ -444,3 +444,5 @@ EXPORT_SYMBOL(busmouse_add_movement);
 EXPORT_SYMBOL(busmouse_add_buttons);
 EXPORT_SYMBOL(register_busmouse);
 EXPORT_SYMBOL(unregister_busmouse);
+
+MODULE_LICENSE("GPL");

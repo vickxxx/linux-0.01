@@ -8,15 +8,29 @@
  */
 #ifndef __ASM_SMP_H
 #define __ASM_SMP_H
+
 #include <linux/config.h>
-#ifdef CONFIG_SMP
-#ifndef __ASSEMBLY__
+
+#if defined(__KERNEL__) && defined(CONFIG_SMP) && !defined(__ASSEMBLY__)
 
 #include <asm/lowcore.h>
-#include <linux/tasks.h>    // FOR NR_CPUS definition only.
-#include <linux/kernel.h>   // FOR FASTCALL definition
 
-#define smp_processor_id() (current->processor)
+/*
+  s390 specific smp.c headers
+ */
+typedef struct
+{
+	int        intresting;
+	sigp_ccode ccode; 
+	__u32      status;
+	__u16      cpu;
+} sigp_info;
+
+extern int smp_call_function_on(void (*func) (void *info), void *info,
+				int nonatomic, int wait, int cpu);
+
+extern unsigned long cpu_online_map;
+
 #define NO_PROC_ID		0xFF		/* No processor magic marker */
 
 /*
@@ -31,49 +45,32 @@
  
 #define PROC_CHANGE_PENALTY	20		/* Schedule penalty */
 
-extern unsigned long ipi_count;
-extern void count_cpus(void);
+#define smp_processor_id() (current->processor)
 
 extern __inline__ int cpu_logical_map(int cpu)
 {
-        return cpu;
+	return cpu;
 }
 
 extern __inline__ int cpu_number_map(int cpu)
 {
-        return cpu;
+	return cpu;
 }
 
 extern __inline__ __u16 hard_smp_processor_id(void)
 {
-        __u16 cpu_address;
+	__u16 cpu_address;
  
-        __asm__ ("stap %0\n" : "=m" (cpu_address));
-        return cpu_address;
+	__asm__ ("stap %0\n" : "=m" (cpu_address));
+	return cpu_address;
 }
 
 #define cpu_logical_map(cpu) (cpu)
 
-void smp_local_timer_interrupt(struct pt_regs * regs);
-
-/*
-  s390 specific smp.c headers
- */
-typedef struct
-{
-	int        intresting;
-	sigp_ccode ccode; 
-	__u32      status;
-	__u16      cpu;
-} sigp_info;
-
-sigp_ccode smp_ext_call_sync(int cpu, ec_cmd_sig cmd,void *parms);
-sigp_ccode smp_ext_call_async(int cpu, ec_bit_sig sig);
-void smp_ext_call_sync_others(ec_cmd_sig cmd, void *parms);
-void smp_ext_call_async_others(ec_bit_sig sig);
-
-int smp_signal_others(sigp_order_code order_code,__u32 parameter,
-                      int spin,sigp_info *info);
 #endif
+
+#ifndef CONFIG_SMP
+#define smp_call_function_on(func,info,nonatomic,wait,cpu)      ({ 0; })
 #endif
+
 #endif

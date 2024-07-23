@@ -29,6 +29,14 @@ struct mac_partition {
 	/* there is more stuff after this that we don't need */
 };
 
+static inline void macpart_fix_string(char *stg, int len)
+{
+	int i;
+
+	for (i = len - 1; i >= 0 && stg[i] == ' '; i--)
+		stg[i] = 0;
+}
+
 #define MAC_STATUS_BOOTABLE	8	/* partition is bootable */
 
 #define MAC_DRIVER_MAGIC	0x4552
@@ -41,4 +49,4 @@ struct mac_driver_desc {
     /* ... more stuff */
 };
 
-int mac_partition(struct gendisk *hd, kdev_t dev, unsigned long fsec, int first_part_minor);
+int mac_partition(struct gendisk *hd, struct block_device *bdev, unsigned long fsec, int first_part_minor);

@@ -23,7 +23,7 @@
    Functions as standalone, loadable, and PCMCIA driver, the latter from
    Dave Hinds' PCMCIA package.
 
-   Redistributable under terms of the GNU Public License
+   Redistributable under terms of the GNU General Public License
 
 */
 /*----------------------------------------------------------------*/
@@ -111,13 +111,10 @@
 
 #include <linux/module.h>
 
-#ifdef PCMCIA
-#undef MODULE
-#endif 
-
 #include <linux/blk.h>	/* to get disk capacity */
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
@@ -128,11 +125,15 @@
 #include "sd.h"
 #include "hosts.h"
 #include "qlogicfas.h"
-#include<linux/stat.h>
+#include <linux/stat.h>
+
+#ifdef PCMCIA
+#undef MODULE
+#endif 
 
 /*----------------------------------------------------------------*/
 /* driver state info, local to driver */
-static int	    qbase = 0;	/* Port */
+static int	    qbase;	/* Port */
 static int	    qinitid;	/* initiator ID */
 static int	    qabort;	/* Flag to cause an abort */
 static int	    qlirq = -1;	/* IRQ being used */
@@ -145,6 +146,8 @@ static int	    qlcfg7 = SYNCOFFST;
 static int	    qlcfg8 = ( SLOWCABLE << 7 ) | ( QL_ENABLE_PARITY << 4 );
 static int	    qlcfg9 = ( ( XTALFREQ + 4 ) / 5 );
 static int	    qlcfgc = ( FASTCLK << 3 ) | ( FASTSCSI << 4 );
+
+struct	Scsi_Host	*hreg;	/* registered host structure */
 
 /*----------------------------------------------------------------*/
 /* The qlogic card uses two register maps - These macros select which one */
@@ -270,9 +273,11 @@ static int	ql_wai(void)
 int	i,k;
 	k = 0;
 	i = jiffies + WATCHDOG;
-	while ( i > jiffies && !qabort && !((k = inb(qbase + 4)) & 0xe0))
+	while (time_before(jiffies, i) && !qabort && !((k = inb(qbase + 4)) & 0xe0)) {
 		barrier();
-	if (i <= jiffies)
+		cpu_relax();
+	}
+	if (time_after_eq(jiffies, i))
 		return (DID_TIME_OUT);
 	if (qabort)
 		return (qabort == 1 ? DID_ABORT : DID_RESET);
@@ -402,8 +407,8 @@ rtrc(2)
 	}
 /*** Enter Status (and Message In) Phase ***/
 	k = jiffies + WATCHDOG;
-	while ( k > jiffies && !qabort && !(inb(qbase + 4) & 6));	/* wait for status phase */
-	if ( k <= jiffies ) {
+	while ( time_before(jiffies, k) && !qabort && !(inb(qbase + 4) & 6));	/* wait for status phase */
+	if ( time_after_eq(jiffies, k) ) {
 		ql_zap();
 		return (DID_TIME_OUT << 16);
 	}
@@ -430,6 +435,7 @@ rtrc(1)
 	i = inb(qbase + 5);	/* should be bus service */
 	while (!qabort && ((i & 0x20) != 0x20)) {
 		barrier();
+		cpu_relax();
 		i |= inb(qbase + 5);
 	}
 rtrc(0)
@@ -512,8 +518,10 @@ int	qlogicfas_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 
 	cmd->scsi_done = done;
 /* wait for the last command's interrupt to finish */
-	while (qlcmd != NULL)
+	while (qlcmd != NULL) {
 		barrier();
+		cpu_relax();
+	}
 	ql_icmd(cmd);
 	return 0;
 }
@@ -535,13 +543,24 @@ void	qlogicfas_preset(int port, int irq)
 }
 #endif
 
+int	qlogicfas_release(struct Scsi_Host *hreg)
+{
+	release_region(qbase, 0x10);
+
+	if (qlirq >= 0)
+		free_irq(qlirq, hreg);
+
+	scsi_unregister(hreg);
+
+	return 0;
+}
+
 /*----------------------------------------------------------------*/
 /* look for qlogic card and init if found */
-int	qlogicfas_detect(Scsi_Host_Template * host)
+int __QLINIT qlogicfas_detect(Scsi_Host_Template * host)
 {
 int	i, j;			/* these are only used by IRQ detect */
 int	qltyp;			/* type of chip */
-struct	Scsi_Host	*hreg;	/* registered host structure */
 unsigned long	flags;
 
 host->proc_name =  "qlogicfas";
@@ -556,12 +575,13 @@ host->proc_name =  "qlogicfas";
 
 	if( !qbase ) {
 		for (qbase = 0x230; qbase < 0x430; qbase += 0x100) {
-			if( check_region( qbase , 0x10 ) )
+			if( !request_region( qbase , 0x10, "qlogicfas" ) )
 				continue;
 			REG1;
 			if ( ( (inb(qbase + 0xe) ^ inb(qbase + 0xe)) == 7 )
 			  && ( (inb(qbase + 0xe) ^ inb(qbase + 0xe)) == 7 ) )
 				break;
+			release_region(qbase, 0x10 );
 		}
 		if (qbase == 0x430)
 			return 0;
@@ -613,15 +633,28 @@ host->proc_name =  "qlogicfas";
 	else
 		printk( "Ql: Using preset IRQ %d\n", qlirq );
 
-	if (qlirq >= 0 && !request_irq(qlirq, do_ql_ihandl, 0, "qlogicfas", NULL))
+	if (qlirq >= 0)
 		host->can_queue = 1;
 #endif
-	request_region( qbase , 0x10 ,"qlogicfas");
 	hreg = scsi_register( host , 0 );	/* no host data */
+	if (!hreg)
+		goto err_release_mem;
+
+#if QL_USE_IRQ
+#ifdef PCMCIA
+	if(request_irq(qlirq, do_ql_ihandl, SA_SHIRQ, "qlogicfas", hreg) < 0)
+#else	
+	if(request_irq(qlirq, do_ql_ihandl, SA_SHIRQ, "qlogicfas", hreg) < 0)
+#endif	
+	{
+		scsi_unregister(hreg);
+		goto err_release_mem;
+	}
+#endif
 	hreg->io_port = qbase;
 	hreg->n_io_port = 16;
 	hreg->dma_channel = -1;
-	if( qlirq != -1 )
+	if( qlirq >= 0 )
 		hreg->irq = qlirq;
 
 	sprintf(qinfo, "Qlogicfas Driver version 0.46, chip %02X at %03X, IRQ %d, TPdma:%d",
@@ -629,6 +662,13 @@ host->proc_name =  "qlogicfas";
 	host->name = qinfo;
 
 	return 1;
+
+ err_release_mem:
+	release_region(qbase, 0x10);
+	if (qlirq >= 0)
+		free_irq(qlirq, hreg);
+	return 0;
+
 }
 
 /*----------------------------------------------------------------*/
@@ -675,8 +715,11 @@ const char	*qlogicfas_info(struct Scsi_Host * host)
 {
 	return qinfo;
 }
+MODULE_LICENSE("GPL");
 
+#ifndef PCMCIA
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = QLOGICFAS;
 #include "scsi_module.c"
+#endif
 

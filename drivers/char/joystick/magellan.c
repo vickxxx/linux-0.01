@@ -32,7 +32,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
 #include <linux/init.h>
@@ -208,3 +208,5 @@ void __exit magellan_exit(void)
 
 module_init(magellan_init);
 module_exit(magellan_exit);
+
+MODULE_LICENSE("GPL");

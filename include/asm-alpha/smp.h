@@ -29,6 +29,7 @@ struct cpuinfo_alpha {
 	int need_new_asn;
 	int asn_lock;
 	unsigned long *pgd_cache;
+	unsigned long *pmd_cache;
 	unsigned long *pte_cache;
 	unsigned long pgtable_cache_sz;
 	unsigned long ipi_count;
@@ -57,6 +58,13 @@ extern int __cpu_logical_map[NR_CPUS];
 #define smp_processor_id()	(current->processor)
 
 extern unsigned long cpu_present_mask;
+#define cpu_online_map cpu_present_mask
+
+extern int smp_call_function_on_cpu(void (*func) (void *info), void *info,int retry, int wait, unsigned long cpu);
+
+#else /* CONFIG_SMP */
+
+#define smp_call_function_on_cpu(func,info,retry,wait,cpu)    ({ 0; })
 
 #endif /* CONFIG_SMP */
 

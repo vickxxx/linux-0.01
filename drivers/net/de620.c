@@ -13,7 +13,7 @@
  *
  *	Adapted to the sample network driver core for linux,
  *	written by: Donald Becker <becker@super.org>
- *		(Now at <becker@cesdis.gsfc.nasa.gov>
+ *		(Now at <becker@scyld.com>)
  *
  *	Valuable assistance from:
  *		J. Joshua Kopper <kopper@rtsg.mot.com>
@@ -38,7 +38,7 @@
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  *****************************************************************************/
-static const char *version =
+static const char version[] =
 	"de620.c: $Revision: 1.40 $,  Bjorn Ekwall <bj0rn@blox.se>\n";
 
 /***********************************************************************
@@ -183,8 +183,8 @@ typedef unsigned char byte;
  * Make a clone skip the Ethernet-address range check:
  *	insmod de620.o clone=1
  */
-static int bnc = 0;
-static int utp = 0;
+static int bnc;
+static int utp;
 static int io  = DE620_IO;
 static int irq = DE620_IRQ;
 static int clone = DE620_CLONE;
@@ -197,6 +197,12 @@ MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(clone, "i");
 MODULE_PARM(de620_debug, "i");
+MODULE_PARM_DESC(bnc, "DE-620 set BNC medium (0-1)");
+MODULE_PARM_DESC(utp, "DE-620 set UTP medium (0-1)");
+MODULE_PARM_DESC(io, "DE-620 I/O base address,required");
+MODULE_PARM_DESC(irq, "DE-620 IRQ number,required");
+MODULE_PARM_DESC(clone, "Check also for non-D-Link DE-620 clones (0-1)");
+MODULE_PARM_DESC(de620_debug, "DE-620 debug level (0-2)");
 
 /***********************************************
  *                                             *
@@ -310,7 +316,7 @@ de620_read_byte(struct net_device *dev)
 }
 
 static inline void
-de620_write_block(struct net_device *dev, byte *buffer, int count)
+de620_write_block(struct net_device *dev, byte *buffer, int count, int pad)
 {
 #ifndef LOWSPEED
 	byte uflip = NIC_Cmd ^ (DS0 | DS1);
@@ -328,6 +334,9 @@ de620_write_block(struct net_device *dev, byte *buffer, int count)
 	/* No further optimization useful, the limit is in the adapter. */
 	for ( ; count > 0; --count, ++buffer) {
 		de620_put_byte(dev,*buffer);
+	}
+	for ( count = pad ; count > 0; --count, ++buffer) {
+		de620_put_byte(dev, 0);
 	}
 	de620_send_command(dev,W_DUMMY);
 #ifdef COUNT_LOOPS
@@ -443,11 +452,17 @@ static int de620_open(struct net_device *dev)
 		return ret;
 	}
 
-	if (adapter_init(dev))
-		return -EIO;
+	if (adapter_init(dev)) {
+		ret = -EIO;
+		goto out_free_irq;
+	}
 
 	netif_start_queue(dev);
 	return 0;
+
+out_free_irq:
+	free_irq(dev->irq, dev);
+	return ret;
 }
 
 /************************************************
@@ -563,9 +578,8 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		printk(KERN_WARNING "%s: No tx-buffer available!\n", dev->name);
 		restore_flags(flags);
 		return 1;
-		break;
 	}
-	de620_write_block(dev, buffer, len);
+	de620_write_block(dev, buffer, skb->len, len-skb->len);
 
 	dev->trans_start = jiffies;
 	if(!(using_txbuf == (TXBF0 | TXBF1)))
@@ -691,7 +705,6 @@ static int de620_rx_intr(struct net_device *dev)
 		else { /* Yep! Go get it! */
 			skb_reserve(skb,2);	/* Align */
 			skb->dev = dev;
-			skb->used = 0;
 			/* skb->data points to the start of sk_buff data area */
 			buffer = skb_put(skb,size);
 			/* copy the packet into the buffer */
@@ -699,8 +712,10 @@ static int de620_rx_intr(struct net_device *dev)
 			PRINTK(("Read %d bytes\n", size));
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb); /* deliver it "upstairs" */
+			dev->last_rx = jiffies;
 			/* count all receives */
 			((struct net_device_stats *)(dev->priv))->rx_packets++;
+			((struct net_device_stats *)(dev->priv))->rx_bytes += size;
 		}
 	}
 
@@ -721,7 +736,7 @@ static int de620_rx_intr(struct net_device *dev)
 static int adapter_init(struct net_device *dev)
 {
 	int i;
-	static int was_down = 0;
+	static int was_down;
 
 	if ((nic_data.Model == 3) || (nic_data.Model == 0)) { /* CT */
 		EIPRegister = NCTL0;
@@ -838,13 +853,10 @@ int __init de620_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 
-#if 0 /* Not yet */
-	if (check_region(dev->base_addr, 3)) {
-		printk(", port 0x%x busy\n", dev->base_addr);
+	if (!request_region(dev->base_addr, 3, "de620")) {
+		printk(KERN_ERR "io 0x%3lX, which is busy.\n", dev->base_addr);
 		return -EBUSY;
 	}
-#endif
-	request_region(dev->base_addr, 3, "de620");
 
 	/* else, got it! */
 	printk(", Ethernet Address: %2.2X",
@@ -1002,6 +1014,8 @@ void cleanup_module(void)
 	release_region(de620_dev.base_addr, 3);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * (add '-DMODULE' when compiling as loadable module)

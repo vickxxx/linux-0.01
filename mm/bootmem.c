@@ -1,5 +1,5 @@
 /*
- *  linux/mm/initmem.c
+ *  linux/mm/bootmem.c
  *
  *  Copyright (C) 1999 Ingo Molnar
  *  Discontiguous memory support, Kanoj Sarcar, SGI, Nov 1999
@@ -18,6 +18,7 @@
 #include <linux/bootmem.h>
 #include <linux/mmzone.h>
 #include <asm/dma.h>
+#include <asm/io.h>
 
 /*
  * Access to this subsystem has to be serialized externally. (this is
@@ -25,6 +26,7 @@
  */
 unsigned long max_low_pfn;
 unsigned long min_low_pfn;
+unsigned long max_pfn;
 
 /* return the number of _pages_ that will be allocated for the boot bitmap */
 unsigned long __init bootmem_bootmap_pages (unsigned long pages)
@@ -83,6 +85,14 @@ static void __init reserve_bootmem_core(bootmem_data_t *bdata, unsigned long add
 
 	if (!size) BUG();
 
+	if (sidx < 0)
+		BUG();
+	if (eidx < 0)
+		BUG();
+	if (sidx >= eidx)
+		BUG();
+	if ((addr >> PAGE_SHIFT) >= bdata->node_low_pfn)
+		BUG();
 	if (end > bdata->node_low_pfn)
 		BUG();
 	for (i = sidx; i < eidx; i++)
@@ -143,6 +153,15 @@ static void * __init __alloc_bootmem_core (bootmem_data_t *bdata,
 
 	if (!size) BUG();
 
+	if (align & (align-1))
+		BUG();
+
+	offset = 0;
+	if (align &&
+	    (bdata->node_boot_start & (align - 1UL)) != 0)
+		offset = (align - (bdata->node_boot_start & (align - 1UL)));
+	offset >>= PAGE_SHIFT;
+
 	/*
 	 * We try to allocate bootmem pages above 'goal'
 	 * first, then we try to allocate lower pages.
@@ -154,6 +173,7 @@ static void * __init __alloc_bootmem_core (bootmem_data_t *bdata,
 		preferred = 0;
 
 	preferred = ((preferred + align - 1) & ~(align - 1)) >> PAGE_SHIFT;
+	preferred += offset;
 	areasize = (size+PAGE_SIZE-1)/PAGE_SIZE;
 	incr = align >> PAGE_SHIFT ? : 1;
 
@@ -173,9 +193,10 @@ restart_scan:
 	fail_block:;
 	}
 	if (preferred) {
-		preferred = 0;
+		preferred = offset;
 		goto restart_scan;
 	}
+	return NULL;
 found:
 	if (start >= eidx)
 		BUG();
@@ -304,19 +325,19 @@ unsigned long __init free_all_bootmem (void)
 
 void * __init __alloc_bootmem (unsigned long size, unsigned long align, unsigned long goal)
 {
-	pg_data_t *pgdat = pgdat_list;
+	pg_data_t *pgdat;
 	void *ptr;
 
-	while (pgdat) {
+	for_each_pgdat(pgdat)
 		if ((ptr = __alloc_bootmem_core(pgdat->bdata, size,
 						align, goal)))
 			return(ptr);
-		pgdat = pgdat->node_next;
-	}
+
 	/*
 	 * Whoops, we cannot satisfy the allocation request.
 	 */
-	BUG();
+	printk(KERN_ALERT "bootmem alloc of %lu bytes failed!\n", size);
+	panic("Out of memory");
 	return NULL;
 }
 
@@ -331,7 +352,8 @@ void * __init __alloc_bootmem_node (pg_data_t *pgdat, unsigned long size, unsign
 	/*
 	 * Whoops, we cannot satisfy the allocation request.
 	 */
-	BUG();
+	printk(KERN_ALERT "bootmem alloc of %lu bytes failed!\n", size);
+	panic("Out of memory");
 	return NULL;
 }
 

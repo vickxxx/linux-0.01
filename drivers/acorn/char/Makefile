@@ -11,11 +11,6 @@
 
 O_TARGET 	:= acorn-char.o
 
-O_OBJS		:=
-OX_OBJS		:=
-M_OBJS		:=
-MX_OBJS		:=
-
 # Object file lists.
 
 obj-y   	:=
@@ -29,18 +24,19 @@ export-objs	:= mouse_rpc.o
 obj-arc		:= keyb_arc.o
 obj-rpc		:= keyb_ps2.o
 obj-clps7500	:= keyb_ps2.o defkeymap-acorn.o
+obj-riscstation := keyb_ps2.o defkeymap-acorn.o
 
+obj-$(CONFIG_7K5MOUSE)		+= mouse_ps2.o
 obj-$(CONFIG_RPCMOUSE)		+= mouse_rpc.o
 obj-$(CONFIG_ATOMWIDE_SERIAL)	+= serial-atomwide.o
 obj-$(CONFIG_DUALSP_SERIAL)	+= serial-dualsp.o
 obj-$(CONFIG_ARCH_ACORN)	+= defkeymap-acorn.o i2c.o pcf8583.o
+obj-$(CONFIG_L7200_KEYB)	+= defkeymap-l7200.o keyb_l7200.o
 
 # Do the i2c and rtc last
-obj-y		+= $(obj-$(MACHINE)) 
-
-O_OBJS		:= $(filter-out $(export-objs), $(obj-y))
-OX_OBJS		:= $(filter     $(export-objs), $(obj-y))
-M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
-MX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-m)))
+obj-y		+= $(obj-$(MACHINE))
 
 include $(TOPDIR)/Rules.make
+
+%.c: %.map
+	loadkeys --mktable $< > $@

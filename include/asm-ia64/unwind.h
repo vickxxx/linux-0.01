@@ -2,8 +2,8 @@
 #define _ASM_IA64_UNWIND_H
 
 /*
- * Copyright (C) 1999-2000 Hewlett-Packard Co
- * Copyright (C) 1999-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2000, 2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * A simple API for unwinding kernel stacks.  This is used for
  * debugging and error reporting purposes.  The kernel doesn't need
@@ -26,7 +26,9 @@ enum unw_application_register {
 	UNW_AR_EC,
 	UNW_AR_FPSR,
 	UNW_AR_RSC,
-	UNW_AR_CCV
+	UNW_AR_CCV,
+	UNW_AR_CSD,
+	UNW_AR_SSD
 };
 
 /*
@@ -60,6 +62,7 @@ struct unw_frame_info {
 	unsigned long ip;		/* instruction pointer value */
 	unsigned long pr;		/* current predicate values */
 	unsigned long *cfm_loc;		/* cfm save location (or NULL) */
+	unsigned long pt;		/* struct pt_regs location */
 
 	struct task_struct *task;
 	struct switch_stack *sw;
@@ -90,13 +93,20 @@ struct unw_frame_info {
  * The official API follows below:
  */
 
+struct unw_table_entry {
+	u64 start_offset;
+	u64 end_offset;
+	u64 info_offset;
+};
+
 /*
  * Initialize unwind support.
  */
 extern void unw_init (void);
+extern void unw_create_gate_table (void);
 
 extern void *unw_add_unwind_table (const char *name, unsigned long segment_base, unsigned long gp,
-				   void *table_start, void *table_end);
+				   const void *table_start, const void *table_end);
 
 extern void unw_remove_unwind_table (void *handle);
 
@@ -105,24 +115,15 @@ extern void unw_remove_unwind_table (void *handle);
  */
 extern void unw_init_from_blocked_task (struct unw_frame_info *info, struct task_struct *t);
 
+/*
+ * Prepare to unwind from interruption.  The pt-regs and switch-stack structures must have
+ * be "adjacent" (no state modifications between pt-regs and switch-stack).
+ */
+extern void unw_init_from_interruption (struct unw_frame_info *info, struct task_struct *t,
+					struct pt_regs *pt, struct switch_stack *sw);
+
 extern void unw_init_frame_info (struct unw_frame_info *info, struct task_struct *t,
 				 struct switch_stack *sw);
-
-/*
- * Prepare to unwind the current task.  For this to work, the kernel
- * stack identified by REGS must look like this:
- *
- *	//		      //
- *	|		      |
- *	|   kernel stack      |
- *	|		      |
- *	+=====================+
- *	|   struct pt_regs    |
- *	+---------------------+ <--- REGS
- *	| struct switch_stack |
- *	+---------------------+
- */
-extern void unw_init_from_current (struct unw_frame_info *info, struct pt_regs *regs);
 
 /*
  * Prepare to unwind the currently running thread.
@@ -144,42 +145,42 @@ extern int unw_unwind_to_user (struct unw_frame_info *info);
 
 #define unw_is_intr_frame(info)	(((info)->flags & UNW_FLAG_INTERRUPT_FRAME) != 0)
 
-static inline unsigned long
+static inline int
 unw_get_ip (struct unw_frame_info *info, unsigned long *valp)
 {
 	*valp = (info)->ip;
 	return 0;
 }
 
-static inline unsigned long
+static inline int
 unw_get_sp (struct unw_frame_info *info, unsigned long *valp)
 {
 	*valp = (info)->sp;
 	return 0;
 }
 
-static inline unsigned long
+static inline int
 unw_get_psp (struct unw_frame_info *info, unsigned long *valp)
 {
 	*valp = (info)->psp;
 	return 0;
 }
 
-static inline unsigned long
+static inline int
 unw_get_bsp (struct unw_frame_info *info, unsigned long *valp)
 {
 	*valp = (info)->bsp;
 	return 0;
 }
 
-static inline unsigned long
+static inline int
 unw_get_cfm (struct unw_frame_info *info, unsigned long *valp)
 {
 	*valp = *(info)->cfm_loc;
 	return 0;
 }
 
-static inline unsigned long
+static inline int
 unw_set_cfm (struct unw_frame_info *info, unsigned long val)
 {
 	*(info)->cfm_loc = val;

@@ -2,22 +2,17 @@
 
 <book id="ViaAudioGuide">
  <bookinfo>
-  <title>Via 686 Audio Driver for Linux</title>
+  <title>Via 686/8233/8235 Audio Driver for Linux</title>
   
   <authorgroup>
    <author>
     <firstname>Jeff</firstname>
     <surname>Garzik</surname>
-    <affiliation>
-     <address>
-      <email>jgarzik@mandrakesoft.com</email>
-     </address>
-    </affiliation>
    </author>
   </authorgroup>
 
   <copyright>
-   <year>2000</year>
+   <year>1999-2001</year>
    <holder>Jeff Garzik</holder>
   </copyright>
 
@@ -59,7 +54,9 @@
   	The Via VT82C686A "super southbridge" chips contain
 	AC97-compatible audio logic which features dual 16-bit stereo
 	PCM sound channels (full duplex), plus a third PCM channel intended for use
-	in hardware-assisted FM synthesis.
+	in hardware-assisted FM synthesis. The VIA VT8233/8235 extends this
+	support to include six channel output and additional record
+	facilities.
   </para>
   <para>
   	The current Linux kernel audio driver for this family of chips
@@ -68,7 +65,7 @@
 	support are not yet available.
   </para>
   <para>
-  	This driver supports any Linux kernel version after 2.3.50.
+  	This driver supports any Linux kernel version after 2.4.10.
   </para>
   <para>
 	Please send bug reports to the mailing list <email>linux-via@gtf.org</email>.
@@ -115,7 +112,7 @@
   <sect1 id="bugrepdiag"><title>Diagnostic output</title>
   <para>
 	Obtain the via-audio-diag diagnostics program from
-	http://gtf.org/garzik/drivers/via82cxxx/ and provide a dump of the
+	http://sf.net/projects/gkernel/ and provide a dump of the
 	audio chip's registers while the problem is occurring.  Sample command line:
   </para>
   <programlisting>
@@ -149,36 +146,11 @@
      <title>Known Bugs And Assumptions</title>
   <para>
   <variablelist>
-    <varlistentry><term>MMAP support</term>
-    <listitem>
-    <para>
-    	MMAP support is currently missing.  Make sure to
-	test with Quake.
-    </para>
-    </listitem></varlistentry>
-
-    <varlistentry><term>AC97 codec timeout during init</term>
-    <listitem>
-    <para>
-    	A warning message "via82cxxx: timeout while reading AC97
-	codec" is printed during driver initialization.  This
-	message can safely be ignored.
-    </para>
-    </listitem></varlistentry>
-
     <varlistentry><term>Low volume</term>
     <listitem>
     <para>
 	Volume too low on many systems.  Workaround:  use mixer program
 	such as xmixer to increase volume.
-    </para>
-    </listitem></varlistentry>
-
-    <varlistentry><term>RealPlayer trouble</term>
-    <listitem>
-    <para>
-	RealPlayer output very scratchy.  Workaround:  use esd, and
-	configure RealPlayer to output to esd.
     </para>
     </listitem></varlistentry>
 
@@ -198,6 +170,19 @@
   <para>
 	AC97 mixer interface fixes and debugging by Ron Cemer <email>roncemer@gte.net</email>.
   </para>
+  <para>
+	Rui Sousa <email>rui.sousa@conexant.com</email>, for bugfixing
+	MMAP support, and several other notable fixes that resulted from
+	his hard work and testing.
+  </para>
+  <para>
+	Adrian Cox <email>adrian@humboldt.co.uk</email>, for bugfixing
+	MMAP support, and several other notable fixes that resulted from
+	his hard work and testing.
+  </para>
+  <para>
+  	Thomas Sailer for further bugfixes.
+  </para>
   </chapter>
   
   <chapter id="notes">
@@ -216,10 +201,15 @@
   <para>
 	This driver by default supports all PCI audio devices which report
 	a vendor id of 0x1106, and a device id of 0x3058.  Subsystem vendor
-	and device ids are not examined.
+	and device ids are not examined. The 8233 support covers all devices
+	with a device id of 0x3059 and vendor id of 0x1106. Again subsystem
+	ids are ignored as they usually hold the AC97 codec vendor information.
   </para>
   <para>
-	GNU indent formatting options:  -kr -i8 -pcs
+	GNU indent formatting options:
+  <programlisting>
+-kr -i8 -ts8 -br -ce -bap -sob -l80 -pcs -cs -ss -bs -di1 -nbc -lp -psl
+  </programlisting>
   </para>
   <para>
 	Via has graciously donated e-mail support and source code to help further
@@ -237,6 +227,119 @@
 
   <chapter id="changelog">
       <title>Driver ChangeLog</title>
+
+<sect1 id="version191ac"><title>
+Version 1.9.1-ac
+</title>
+  <itemizedlist spacing=compact>
+   <listitem>
+    <para>
+    Added VIA 8233/8235 support including six channel support. We don't
+    yet support S/PDIF, EAPD, using the second DSP channel and FM channels
+    as extra dsp devices, or the extra record channel. New features tested
+    on a VIA EPIA-M kindly provided by VIA.
+    </para>
+   </listitem>
+  </itemizedlist>
+</sect1>
+
+<sect1 id="version191"><title>
+Version 1.9.1
+</title>
+  <itemizedlist spacing=compact>
+   <listitem>
+    <para>
+    DSP read/write bugfixes from Thomas Sailer.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Add new PCI id for single-channel use of Via 8233.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Other bug fixes, tweaks, new ioctls.
+    </para>
+   </listitem>
+
+  </itemizedlist>
+</sect1>
+
+<sect1 id="version1115"><title>
+Version 1.1.15
+</title>
+  <itemizedlist spacing=compact>
+   <listitem>
+    <para>
+    Support for variable fragment size and variable fragment number (Rui
+    Sousa)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Fixes for the SPEED, STEREO, CHANNELS, FMT ioctls when in read &
+    write mode (Rui Sousa)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Mmaped sound is now fully functional. (Rui Sousa)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Make sure to enable PCI device before reading any of its PCI
+    config information. (fixes potential hotplug problems)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Clean up code a bit and add more internal function documentation.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    AC97 codec access fixes (Adrian Cox)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Big endian fixes (Adrian Cox)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    MIDI support (Adrian Cox)
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Detect and report locked-rate AC97 codecs.  If your hardware only
+    supports 48Khz (locked rate), then your recording/playback software
+    must upsample or downsample accordingly.  The hardware cannot do it.
+    </para>
+   </listitem>
+
+   <listitem>
+    <para>
+    Use new pci_request_regions and pci_disable_device functions in
+    kernel 2.4.6.
+    </para>
+   </listitem>
+
+  </itemizedlist>
+</sect1>
 
 <sect1 id="version1114"><title>
 Version 1.1.14

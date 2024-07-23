@@ -18,8 +18,6 @@
  *					  negotiation.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_X25) || defined(CONFIG_X25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -101,8 +99,8 @@ int x25_parse_facilities(struct sk_buff *skb, struct x25_facilities *facilities,
 
 			case X25_FAC_CLASS_D:
 				printk(KERN_DEBUG "X.25: unknown facility %02X, length %d, values %02X, %02X, %02X, %02X\n", p[0], p[1], p[2], p[3], p[4], p[5]);
-				p   += p[1] + 2;
 				len -= p[1] + 2;
+				p   += p[1] + 2;
 				break;
 		}
 	}
@@ -232,7 +230,3 @@ void x25_limit_facilities(struct x25_facilities *facilities,
 		}
 	}
 }
-
-#endif
-
-

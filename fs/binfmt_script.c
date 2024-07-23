@@ -8,7 +8,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
 #include <linux/file.h>
@@ -108,3 +108,4 @@ static void __exit exit_script_binfmt(void)
 
 module_init(init_script_binfmt)
 module_exit(exit_script_binfmt)
+MODULE_LICENSE("GPL");

@@ -136,7 +136,7 @@
 
 /* ----------------------------------------------------------------------- */
 
-#undef  SCC_LDELAY	1	/* slow it even a bit more down */
+#undef  SCC_LDELAY		/* slow it even a bit more down */
 #undef  SCC_DONT_CHECK		/* don't look if the SCCs you specified are available */
 
 #define SCC_MAXCHIPS	4       /* number of max. supported chips */
@@ -160,7 +160,7 @@
 #include <linux/in.h>
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 
 #include <linux/skbuff.h>
@@ -184,7 +184,7 @@
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 
-static const char banner[] __initdata = KERN_INFO "AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
+static char banner[] __initdata = KERN_INFO "AX.25: Z8530 SCC driver version "VERSION".dl1bke\n";
 
 static void t_dwait(unsigned long);
 static void t_txdelay(unsigned long);
@@ -214,9 +214,9 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int scc_net_set_mac_address(struct net_device *dev, void *addr);
 static struct net_device_stats * scc_net_get_stats(struct net_device *dev);
 
-static unsigned char *SCC_DriverName = "scc";
+static unsigned char SCC_DriverName[] = "scc";
 
-static struct irqflags { unsigned char used : 1; } Ivec[16];
+static struct irqflags { unsigned char used : 1; } Ivec[NR_IRQS];
 	
 static struct scc_channel SCC_Info[2 * SCC_MAXCHIPS];	/* information per channel */
 
@@ -582,7 +582,7 @@ static inline void scc_spint(struct scc_channel *scc)
 		
 		if (skb != NULL) 
 			dev_kfree_skb_irq(skb);
-		scc->rx_buff = NULL;
+		scc->rx_buff = skb = NULL;
 	}
 
 	if(status & END_FR && skb != NULL)	/* end of frame */
@@ -689,7 +689,7 @@ static void scc_isr(int irq, void *dev_id, struct pt_regs *regs)
 			break;
 		}
 
-		/* This looks wierd and it is. At least the BayCom USCC doesn't
+		/* This looks weird and it is. At least the BayCom USCC doesn't
 		 * use the Interrupt Daisy Chain, thus we'll have to start
 		 * all over again to be sure not to miss an interrupt from 
 		 * (any of) the other chip(s)...
@@ -1484,7 +1484,7 @@ static void z8530_init(void)
 	printk(KERN_INFO "Init Z8530 driver: %u channels, IRQ", Nchips*2);
 	
 	flag=" ";
-	for (k = 0; k < 16; k++)
+	for (k = 0; k < NR_IRQS; k++)
 		if (Ivec[k].used) 
 		{
 			printk("%s%d", flag, k);
@@ -1574,8 +1574,6 @@ static unsigned char ax25_nocall[AX25_ADDR_LEN] =
 
 static int scc_net_init(struct net_device *dev)
 {
-	dev_init_buffers(dev);
-	
 	dev->tx_queue_len    = 16;	/* should be enough... */
 
 	dev->open            = scc_net_open;
@@ -1766,6 +1764,9 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 			if (hwcfg.irq == 2) hwcfg.irq = 9;
 
+			if (hwcfg.irq <0 || hwcfg.irq > NR_IRQS)
+				return -EINVAL;
+				
 			if (!Ivec[hwcfg.irq].used && hwcfg.irq)
 			{
 				if (request_irq(hwcfg.irq, scc_isr, SA_INTERRUPT, "AX.25 SCC", NULL))
@@ -1774,9 +1775,9 @@ static int scc_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 					Ivec[hwcfg.irq].used = 1;
 			}
 
-			if (hwcfg.vector_latch) {
-				if (!request_region(Vector_Latch, 1, "scc vector latch"))
-					printk(KERN_WARNING "z8530drv: warning, cannot reserve vector latch port 0x%x\n, disabled.", hwcfg.vector_latch);
+			if (hwcfg.vector_latch && !Vector_Latch) {
+				if (!request_region(hwcfg.vector_latch, 1, "scc vector latch"))
+					printk(KERN_WARNING "z8530drv: warning, cannot reserve vector latch port 0x%lx\n, disabled.", hwcfg.vector_latch);
 				else
 					Vector_Latch = hwcfg.vector_latch;
 			}
@@ -2127,7 +2128,7 @@ static int __init scc_init_driver (void)
 
 static void __exit scc_cleanup_driver(void)
 {
-	long flags;
+	unsigned long flags;
 	io_port ctrl;
 	int k;
 	struct scc_channel *scc;
@@ -2164,7 +2165,7 @@ static void __exit scc_cleanup_driver(void)
 		}
 	}
 	
-	for (k=0; k < 16 ; k++)
+	for (k=0; k < NR_IRQS ; k++)
 		if (Ivec[k].used) free_irq(k, NULL);
 		
 	if (Vector_Latch)
@@ -2178,5 +2179,6 @@ static void __exit scc_cleanup_driver(void)
 MODULE_AUTHOR("Joerg Reuter <jreuter@yaina.de>");
 MODULE_DESCRIPTION("AX.25 Device Driver for Z8530 based HDLC cards");
 MODULE_SUPPORTED_DEVICE("Z8530 based SCC cards for Amateur Radio");
+MODULE_LICENSE("GPL");
 module_init(scc_init_driver);
 module_exit(scc_cleanup_driver);

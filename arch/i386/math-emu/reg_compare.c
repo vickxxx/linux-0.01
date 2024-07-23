@@ -136,7 +136,7 @@ static int compare(FPU_REG const *b, int tagb)
 #ifdef PARANOID
   if (!(st0_ptr->sigh & 0x80000000)) EXCEPTION(EX_Invalid);
   if (!(b->sigh & 0x80000000)) EXCEPTION(EX_Invalid);
-#endif PARANOID
+#endif /* PARANOID */
 
   diff = exp0 - expb;
   if ( diff == 0 )
@@ -174,7 +174,7 @@ static int compare(FPU_REG const *b, int tagb)
 /* This function requires that st(0) is not empty */
 int FPU_compare_st_data(FPU_REG const *loaded_data, u_char loaded_tag)
 {
-  int f, c;
+  int f = 0, c;
 
   c = compare(loaded_data, loaded_tag);
 
@@ -203,7 +203,7 @@ int FPU_compare_st_data(FPU_REG const *loaded_data, u_char loaded_tag)
 	EXCEPTION(EX_INTERNAL|0x121);
 	f = SW_C3 | SW_C2 | SW_C0;
 	break;
-#endif PARANOID
+#endif /* PARANOID */
       }
   setcc(f);
   if (c & COMP_Denormal)
@@ -216,7 +216,7 @@ int FPU_compare_st_data(FPU_REG const *loaded_data, u_char loaded_tag)
 
 static int compare_st_st(int nr)
 {
-  int f, c;
+  int f = 0, c;
   FPU_REG *st_ptr;
 
   if ( !NOT_EMPTY(0) || !NOT_EMPTY(nr) )
@@ -255,7 +255,7 @@ static int compare_st_st(int nr)
 	EXCEPTION(EX_INTERNAL|0x122);
 	f = SW_C3 | SW_C2 | SW_C0;
 	break;
-#endif PARANOID
+#endif /* PARANOID */
       }
   setcc(f);
   if (c & COMP_Denormal)
@@ -268,7 +268,7 @@ static int compare_st_st(int nr)
 
 static int compare_u_st_st(int nr)
 {
-  int f, c;
+  int f = 0, c;
   FPU_REG *st_ptr;
 
   if ( !NOT_EMPTY(0) || !NOT_EMPTY(nr) )
@@ -312,7 +312,7 @@ static int compare_u_st_st(int nr)
 	EXCEPTION(EX_INTERNAL|0x123);
 	f = SW_C3 | SW_C2 | SW_C0;
 	break;
-#endif PARANOID
+#endif /* PARANOID */ 
       }
   setcc(f);
   if (c & COMP_Denormal)

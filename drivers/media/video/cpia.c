@@ -3,9 +3,10 @@
  *
  * Supports CPiA based Video Camera's.
  *
- * (C) Copyright 1999-2000 Peter Pregler,
- * (C) Copyright 1999-2000 Scott J. Bertin,
- * (C) Copyright 1999-2000 Johannes Erdfelt, jerdfelt@valinux.com
+ * (C) Copyright 1999-2000 Peter Pregler
+ * (C) Copyright 1999-2000 Scott J. Bertin
+ * (C) Copyright 1999-2000 Johannes Erdfelt <johannes@erdfelt.com>
+ * (C) Copyright 2000 STMicroelectronics
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,7 +23,9 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
-/* #define _CPIA_DEBUG_		define for verbose debug output */
+/* define _CPIA_DEBUG_ for verbose debug output (see cpia.h) */
+/* #define _CPIA_DEBUG_  1 */  
+
 #include <linux/config.h>
 
 #include <linux/module.h>
@@ -52,9 +55,13 @@ extern int cpia_pp_init(void);
 extern int cpia_usb_init(void);
 #endif
 
+static int video_nr = -1;
+
 #ifdef MODULE
-MODULE_AUTHOR("Scott J. Bertin <sbertin@mindspring.com> & Peter Pregler <Peter_Pregler@email.com> & Johannes Erdfelt <jerdfelt@valinux.com>");
+MODULE_PARM(video_nr,"i");
+MODULE_AUTHOR("Scott J. Bertin <sbertin@securenym.net> & Peter Pregler <Peter_Pregler@email.com> & Johannes Erdfelt <johannes@erdfeld.com>");
 MODULE_DESCRIPTION("V4L-driver for Vision CPiA based cameras");
+MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("video");
 #endif
 
@@ -159,6 +166,7 @@ enum {
 #define COMMAND_SETAPCOR		0x1000
 #define COMMAND_SETFLICKERCTRL		0x2000
 #define COMMAND_SETVLOFFSET		0x4000
+#define COMMAND_SETLIGHTS		0x8000
 
 /* Developer's Guide Table 5 p 3-34
  * indexed by [mains][sensorFps.baserate][sensorFps.divisor]*/
@@ -174,50 +182,17 @@ static void reset_camera_struct(struct cam_data *cam);
  *
  * Memory management
  *
- * This is a shameless copy from the USB-cpia driver (linux kernel
- * version 2.3.29 or so, I have no idea what this code actually does ;).
- * Actually it seems to be a copy of a shameless copy of the bttv-driver.
- * Or that is a copy of a shameless copy of ... (To the powers: is there
- * no generic kernel-function to do this sort of stuff?)
- *
- * Yes, it was a shameless copy from the bttv-driver. IIRC, Alan says
- * there will be one, but apparentely not yet - jerdfelt
- *
  **********************************************************************/
 
-/* Given PGD from the address space's page table, return the kernel
- * virtual mapping of the physical memory mapped at ADR.
- */
-static inline unsigned long uvirt_to_kva(pgd_t *pgd, unsigned long adr)
-{
-	unsigned long ret = 0UL;
-	pmd_t *pmd;
-	pte_t *ptep, pte;
-
-	if (!pgd_none(*pgd)) {
-		pmd = pmd_offset(pgd, adr);
-		if (!pmd_none(*pmd)) {
-			ptep = pte_offset(pmd, adr);
-			pte = *ptep;
-			if (pte_present(pte)) {
-				ret = (unsigned long) page_address(pte_page(pte));
-				ret |= (adr & (PAGE_SIZE-1));
-			}
-		}
-	}
-	return ret;
-}
-
 /* Here we want the physical address of the memory.
- * This is used when initializing the contents of the
- * area and marking the pages as reserved.
+ * This is used when initializing the contents of the area.
  */
 static inline unsigned long kvirt_to_pa(unsigned long adr)
 {
-	unsigned long va, kva, ret;
+	unsigned long kva, ret;
 
-	va = VMALLOC_VMADDR(adr);
-	kva = uvirt_to_kva(pgd_offset_k(va), va);
+	kva = (unsigned long) page_address(vmalloc_to_page((void *)adr));
+	kva |= adr & (PAGE_SIZE-1); /* restore the offset */
 	ret = __pa(kva);
 	return ret;
 }
@@ -225,12 +200,9 @@ static inline unsigned long kvirt_to_pa(unsigned long adr)
 static void *rvmalloc(unsigned long size)
 {
 	void *mem;
-	unsigned long adr, page;
+	unsigned long adr;
 
-	/* Round it off to PAGE_SIZE */
-	size += (PAGE_SIZE - 1);
-	size &= ~(PAGE_SIZE - 1);
-
+	size = PAGE_ALIGN(size);
 	mem = vmalloc_32(size);
 	if (!mem)
 		return NULL;
@@ -238,13 +210,9 @@ static void *rvmalloc(unsigned long size)
 	memset(mem, 0, size); /* Clear the ram out, no junk to the user */
 	adr = (unsigned long) mem;
 	while (size > 0) {
-		page = kvirt_to_pa(adr);
-		mem_map_reserve(virt_to_page(__va(page)));
+		mem_map_reserve(vmalloc_to_page((void *)adr));
 		adr += PAGE_SIZE;
-		if (size > PAGE_SIZE)
-			size -= PAGE_SIZE;
-		else
-			size = 0;
+		size -= PAGE_SIZE;
 	}
 
 	return mem;
@@ -252,23 +220,16 @@ static void *rvmalloc(unsigned long size)
 
 static void rvfree(void *mem, unsigned long size)
 {
-	unsigned long adr, page;
+	unsigned long adr;
 
 	if (!mem)
 		return;
 
-	size += (PAGE_SIZE - 1);
-	size &= ~(PAGE_SIZE - 1);
-
 	adr = (unsigned long) mem;
-	while (size > 0) {
-		page = kvirt_to_pa(adr);
-		mem_map_unreserve(virt_to_page(__va(page)));
+	while ((long) size > 0) {
+		mem_map_unreserve(vmalloc_to_page((void *)adr));
 		adr += PAGE_SIZE;
-		if (size > PAGE_SIZE)
-			size -= PAGE_SIZE;
-		else
-			size = 0;
+		size -= PAGE_SIZE;
 	}
 	vfree(mem);
 }
@@ -287,7 +248,7 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 	char *out = page;
 	int len, tmp;
 	struct cam_data *cam = data;
-	char tmpstr[20];
+	char tmpstr[29];
 
 	/* IMPORTANT: This output MUST be kept under PAGE_SIZE
 	 *            or we need to get more sophisticated. */
@@ -324,6 +285,13 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 	               cam->params.status.vpStatus);
 	out += sprintf(out, "error_code:               %#04x\n",
 	               cam->params.status.errorCode);
+	/* QX3 specific entries */
+	if (cam->params.qx3.qx3_detected) {
+		out += sprintf(out, "button:                   %4d\n",
+		               cam->params.qx3.button);
+		out += sprintf(out, "cradled:                  %4d\n",
+		               cam->params.qx3.cradled);
+	}
 	out += sprintf(out, "video_size:               %s\n",
 	               cam->params.format.videoSize == VIDEOSIZE_CIF ?
 		       "CIF " : "QCIF");
@@ -388,16 +356,17 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 	if (cam->params.version.firmwareVersion == 1 &&
 	   cam->params.version.firmwareRevision == 2)
 		/* 1-02 firmware limits gain to 2 */
-		sprintf(tmpstr, "%8d  %8d", 1, 2);
+		sprintf(tmpstr, "%8d  %8d  %8d", 1, 2, 2);
 	else
-		sprintf(tmpstr, "1,2,4,8");
+		sprintf(tmpstr, "%8d  %8d  %8d", 1, 8, 2);
 
 	if (cam->params.exposure.gainMode == 0)
-		out += sprintf(out, "max_gain:                unknown  %18s"
-		               "  %8d\n", tmpstr, 2); 
+		out += sprintf(out, "max_gain:                unknown  %28s"
+		               "  powers of 2\n", tmpstr); 
 	else
-		out += sprintf(out, "max_gain:               %8d  %18s  %8d\n", 
-		               1<<(cam->params.exposure.gainMode-1), tmpstr, 2);
+		out += sprintf(out, "max_gain:               %8d  %28s"
+			       "  1,2,4 or 8 \n",
+		               1<<(cam->params.exposure.gainMode-1), tmpstr);
 
 	switch(cam->params.exposure.expMode) {
 	case 1:
@@ -524,6 +493,15 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 	out += sprintf(out, "decimation_thresh_mod:  %8d  %8d  %8d  %8d\n",
 	               cam->params.compressionParams.decimationThreshMod,
 		       0, 255, 2);
+	/* QX3 specific entries */
+	if (cam->params.qx3.qx3_detected) {
+		out += sprintf(out, "toplight:               %8s  %8s  %8s  %8s\n", 
+		               cam->params.qx3.toplight ? "on" : "off",
+			       "off", "on", "off");
+		out += sprintf(out, "bottomlight:            %8s  %8s  %8s  %8s\n", 
+		               cam->params.qx3.bottomlight ? "on" : "off",
+			       "off", "on", "off");
+	}
 	
 	len = out - page;
 	len -= off;
@@ -537,16 +515,85 @@ static int cpia_read_proc(char *page, char **start, off_t off,
 	return len;
 }
 
-static int cpia_write_proc(struct file *file, const char *buffer,
+static int match(char *checkstr, char **buffer, unsigned long *count,
+                 int *find_colon, int *err)
+{
+	int ret, colon_found = 1;
+	int len = strlen(checkstr);
+	ret = (len <= *count && strncmp(*buffer, checkstr, len) == 0);
+	if (ret) {
+		*buffer += len;
+		*count -= len;
+		if (*find_colon) {
+			colon_found = 0;
+			while (*count && (**buffer == ' ' || **buffer == '\t' ||
+			       (!colon_found && **buffer == ':'))) {
+				if (**buffer == ':')
+					colon_found = 1;
+				--*count;
+				++*buffer;
+			}
+			if (!*count || !colon_found)
+				*err = -EINVAL;
+			*find_colon = 0;
+		}
+	}
+	return ret;
+}
+
+static unsigned long int value(char **buffer, unsigned long *count, int *err)
+{
+	char *p;
+	unsigned long int ret;
+	ret = simple_strtoul(*buffer, &p, 0);
+	if (p == *buffer)
+		*err = -EINVAL;
+	else {
+		*count -= p - *buffer;
+		*buffer = p;
+	}
+	return ret;
+}
+
+static int cpia_write_proc(struct file *file, const char *buf,
                            unsigned long count, void *data)
 {
 	struct cam_data *cam = data;
 	struct cam_params new_params;
+	char *page, *buffer;
 	int retval, find_colon;
 	int size = count;
-	unsigned long val;
+	unsigned long val = 0;
 	u32 command_flags = 0;
 	u8 new_mains;
+
+	/*
+	 * This code to copy from buf to page is shamelessly copied
+	 * from the comx driver
+	 */
+	if (count > PAGE_SIZE) {
+		printk(KERN_ERR "count is %lu > %d!!!\n", count, (int)PAGE_SIZE);
+		return -ENOSPC;
+	}
+
+	if (!(page = (char *)__get_free_page(GFP_KERNEL))) return -ENOMEM;
+
+	if(copy_from_user(page, buf, count))
+	{
+		retval = -EFAULT;
+		goto out;
+	}
+
+	if (page[count-1] == '\n')
+		page[count-1] = '\0';
+	else if (count < PAGE_SIZE)
+		page[count] = '\0';
+	else if (page[count]) {
+		retval = -EINVAL;
+		goto out;
+	}
+	
+	buffer = page;
 	
 	if (down_interruptible(&cam->param_lock))
 		return -ERESTARTSYS;
@@ -562,44 +609,11 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 	memcpy(&new_params, &cam->params, sizeof(struct cam_params));
 	new_mains = cam->mainsFreq;
 	
-#define MATCH(x) \
-	({ \
-		int _len = strlen(x), _ret, _colon_found; \
-		_ret = (_len <= count && strncmp(buffer, x, _len) == 0); \
-		if (_ret) { \
-			buffer += _len; \
-			count -= _len; \
-			if (find_colon) { \
-				_colon_found = 0; \
-				while (count && (*buffer == ' ' || *buffer == '\t' || \
-				       (!_colon_found && *buffer == ':'))) { \
-					if (*buffer == ':')  \
-						_colon_found = 1; \
-					--count; \
-					++buffer; \
-				} \
-				if (!count || !_colon_found) \
-					retval = -EINVAL; \
-				find_colon = 0; \
-			} \
-		} \
-		_ret; \
-	})
+#define MATCH(x) (match(x, &buffer, &count, &find_colon, &retval))
+#define VALUE (value(&buffer,&count, &retval))
 #define FIRMWARE_VERSION(x,y) (new_params.version.firmwareVersion == (x) && \
                                new_params.version.firmwareRevision == (y))
-#define VALUE \
-	({ \
-		char *_p; \
-		unsigned long int _ret; \
-		_ret = simple_strtoul(buffer, &_p, 0); \
-		if (_p == buffer) \
-			retval = -EINVAL; \
-		else { \
-			count -= _p - buffer; \
-			buffer = _p; \
-		} \
-		_ret; \
-	})
+
 
 	retval = 0;
 	while (count && !retval) {
@@ -1204,6 +1218,22 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 					retval = -EINVAL;
 			}
 			command_flags |= COMMAND_SETCOMPRESSIONPARAMS;
+		} else if (MATCH("toplight")) {
+		        if (!retval && MATCH("on"))
+				new_params.qx3.toplight = 1;
+			else if (!retval && MATCH("off"))
+				new_params.qx3.toplight = 0;
+			else 
+				retval = -EINVAL;
+			command_flags |= COMMAND_SETLIGHTS;
+		} else if (MATCH("bottomlight")) {
+		        if (!retval && MATCH("on"))
+				new_params.qx3.bottomlight = 1;
+			else if (!retval && MATCH("off"))  
+				new_params.qx3.bottomlight = 0;
+			else 
+				retval = -EINVAL;
+			command_flags |= COMMAND_SETLIGHTS;
 		} else {
 			DBG("No match found\n");
 			retval = -EINVAL;
@@ -1215,7 +1245,10 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 				++buffer;
 			}
 			if (count) {
-				if (*buffer != '\n' && *buffer != ';')
+				if (*buffer == '\0' && count != 1)
+					retval = -EINVAL;
+				else if (*buffer != '\n' && *buffer != ';' &&
+					 *buffer != '\0')
 					retval = -EINVAL;
 				else {
 					--count;
@@ -1225,10 +1258,9 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 		}
 	}
 #undef MATCH	
-#undef FIRMWARE_VERSION
 #undef VALUE
-#undef FIND_VALUE
-#undef FIND_END
+#undef FIRMWARE_VERSION
+
 	if (!retval) {
 		if (command_flags & COMMAND_SETCOLOURPARAMS) {
 			/* Adjust cam->vp to reflect these changes */
@@ -1249,6 +1281,8 @@ static int cpia_write_proc(struct file *file, const char *buffer,
 	
 	up(&cam->param_lock);
 	
+out:
+	free_page((unsigned long)page);
 	return retval;
 }
 
@@ -1269,7 +1303,12 @@ static void create_proc_cpia_cam(struct cam_data *cam)
 	ent->data = cam;
 	ent->read_proc = cpia_read_proc;
 	ent->write_proc = cpia_write_proc;
-	ent->size = 3626;
+	/* 
+	   size of the proc entry is 3672 bytes for the standard webcam;
+ 	   the extra features of the QX3 microscope add 188 bytes.
+	   (we have not yet probed the camera to see which type it is).
+	*/
+	ent->size = 3672 + 188;
 	cam->proc_entry = ent;
 }
 
@@ -1530,7 +1569,7 @@ static int free_frame_buf(struct cam_data *cam)
 }
 
 
-static void inline free_frames(struct cpia_frame frame[FRAME_NUM])
+static inline void free_frames(struct cpia_frame frame[FRAME_NUM])
 {
 	int i;
 
@@ -1562,6 +1601,10 @@ static int do_command(struct cam_data *cam, u16 command, u8 a, u8 b, u8 c, u8 d)
 	case CPIA_COMMAND_GetExposure:
 		down(&cam->param_lock);
 		datasize=8;
+		break;
+	case CPIA_COMMAND_ReadMCPorts: 
+	case CPIA_COMMAND_ReadVCRegs:
+		datasize = 4;
 		break;
 	default:
 		datasize=0;
@@ -1640,13 +1683,9 @@ static int do_command(struct cam_data *cam, u16 command, u8 a, u8 b, u8 c, u8 d)
 			 * values.             - rich@annexia.org
 			 */
 			if (cam->params.exposure.redComp < 220 ||
-			    cam->params.exposure.redComp > 255 ||
 			    cam->params.exposure.green1Comp < 214 ||
-			    cam->params.exposure.green1Comp > 255 ||
 			    cam->params.exposure.green2Comp < 214 ||
-			    cam->params.exposure.green2Comp > 255 ||
-			    cam->params.exposure.blueComp < 230 ||
-			    cam->params.exposure.blueComp > 255)
+			    cam->params.exposure.blueComp < 230)
 			  {
 			    printk (KERN_WARNING "*_comp parameters have gone AWOL (%d/%d/%d/%d) - reseting them\n",
 				    cam->params.exposure.redComp,
@@ -1660,6 +1699,22 @@ static int do_command(struct cam_data *cam, u16 command, u8 a, u8 b, u8 c, u8 d)
 			  }
 			up(&cam->param_lock);
 			break;
+
+		case CPIA_COMMAND_ReadMCPorts: 
+			if (!cam->params.qx3.qx3_detected) 
+				break;
+			/* test button press */ 
+			cam->params.qx3.button = ((data[1] & 0x02) == 0);
+			if (cam->params.qx3.button) {
+				/* button pressed - unlock the latch */
+				do_command(cam,CPIA_COMMAND_WriteMCPort,3,0xDF,0xDF,0);
+				do_command(cam,CPIA_COMMAND_WriteMCPort,3,0xFF,0xFF,0);
+			}
+
+			/* test whether microscope is cradled */
+			cam->params.qx3.cradled = ((data[2] & 0x40) == 0);
+			break;
+
 		default:
 			break;
 		}
@@ -1695,7 +1750,7 @@ static int do_command_extended(struct cam_data *cam, u16 command,
 
 	retval = cam->ops->transferCmd(cam->lowlevel_data, cmd, data);
 	if (retval)
-		LOG("%x - failed\n", command);
+		DBG("%x - failed\n", command);
 
 	return retval;
 }
@@ -1819,6 +1874,7 @@ static int skipcount(int count, int fmt)
 {
 	switch(fmt) {
 	case VIDEO_PALETTE_GREY:
+		return count;
 	case VIDEO_PALETTE_RGB555:
 	case VIDEO_PALETTE_RGB565:
 	case VIDEO_PALETTE_YUV422:
@@ -1919,7 +1975,7 @@ static int parse_picture(struct cam_data *cam, int size)
 	while (size > 0) {
 		size -= (ll+2);
 		if (size < 0) {
-			LOG("Insufficient data in buffer\n");
+			DBG("Insufficient data in buffer\n");
 			return -1;
 		}
 
@@ -1934,7 +1990,7 @@ static int parse_picture(struct cam_data *cam, int size)
 				int skipsize = skipcount(*ibuf >> 1, out_fmt);
 				obuf += skipsize;
 				if (obuf > end_obuf) {
-					LOG("Insufficient data in buffer\n");
+					DBG("Insufficient data in buffer\n");
 					return -1;
 				}
 				++ibuf;
@@ -1943,7 +1999,7 @@ static int parse_picture(struct cam_data *cam, int size)
 		}
 		if (ll == 1) {
 			if (*ibuf != EOL) {
-				LOG("EOL not found giving up after %d/%d"
+				DBG("EOL not found giving up after %d/%d"
 				    " bytes\n", origsize-size, origsize);
 				return -1;
 			}
@@ -1961,7 +2017,7 @@ static int parse_picture(struct cam_data *cam, int size)
 				ibuf += 2; /* skip over line length */
 			}
 		} else {
-			LOG("line length was not 1 but %d after %d/%d bytes\n",
+			DBG("line length was not 1 but %d after %d/%d bytes\n",
 			    ll, origsize-size, origsize);
 			return -1;
 		}
@@ -2099,6 +2155,13 @@ static void dispatch_commands(struct cam_data *cam)
 	if (cam->cmd_queue & COMMAND_RESUME)
 		init_stream_cap(cam);
 
+	if (cam->cmd_queue & COMMAND_SETLIGHTS && cam->params.qx3.qx3_detected) {
+		int p1 = (cam->params.qx3.bottomlight == 0) << 1;
+		int p2 = (cam->params.qx3.toplight == 0) << 3;
+		do_command(cam, CPIA_COMMAND_WriteVCReg,  0x90, 0x8F, 0x50, 0);
+		do_command(cam, CPIA_COMMAND_WriteMCPort, 2, 0, (p1|p2|0xE0), 0);
+	}
+
 	up(&cam->param_lock);
 	cam->cmd_queue = COMMAND_NONE;
 	return;
@@ -2175,9 +2238,10 @@ static void fetch_frame(void *data)
 		/* camera idle now so dispatch queued commands */
 		dispatch_commands(cam);
 
-		/* Update our knowledge of the camera state - FIXME: necessary? */
+		/* Update our knowledge of the camera state */
 		do_command(cam, CPIA_COMMAND_GetColourBalance, 0, 0, 0, 0);
 		do_command(cam, CPIA_COMMAND_GetExposure, 0, 0, 0, 0);
+		do_command(cam, CPIA_COMMAND_ReadMCPorts, 0, 0, 0, 0);
 
 		/* decompress and convert image to by copying it from
 		 * raw_image to decompressed_frame
@@ -2379,7 +2443,7 @@ static int reset_camera(struct cam_data *cam)
 		goto_high_power(cam);
 		do_command(cam, CPIA_COMMAND_DiscardFrame, 0, 0, 0, 0);
 		if (goto_low_power(cam))
-			return -NODEV;
+			return -ENODEV;
 	}
 	
 	/* procedure described in developer's guide p3-28 */
@@ -2389,7 +2453,11 @@ static int reset_camera(struct cam_data *cam)
 	get_version_information(cam);
 	if (cam->params.version.firmwareVersion != 1)
 		return -ENODEV;
-	
+
+	/* set QX3 detected flag */
+	cam->params.qx3.qx3_detected = (cam->params.pnpID.vendor == 0x0813 &&
+					cam->params.pnpID.product == 0x0001);
+
 	/* The fatal error checking should be done after
 	 * the camera powers up (developer's guide p 3-38) */
 
@@ -2438,54 +2506,56 @@ static int reset_camera(struct cam_data *cam)
 	return 0;
 }
 
-/* ------------------------- V4L interface --------------------- */
-static int cpia_open(struct video_device *dev, int flags)
+static void put_cam(struct cpia_camera_ops* ops)
 {
-	int i;
+	if (ops->owner)
+		__MOD_DEC_USE_COUNT(ops->owner);
+}
+
+/* ------------------------- V4L interface --------------------- */
+static int cpia_open(struct inode *inode, struct file *file)
+{
+	struct video_device *dev = video_devdata(file);
 	struct cam_data *cam = dev->priv;
+	int err;
 
 	if (!cam) {
 		DBG("Internal error, cam_data not found!\n");
-		return -EBUSY;
+		return -ENODEV;
 	}
-	    
+
 	if (cam->open_count > 0) {
 		DBG("Camera already open\n");
 		return -EBUSY;
 	}
-	
+
+	if (!try_inc_mod_count(cam->ops->owner))
+	  return -ENODEV;
+
+	down(&cam->busy_lock);
+
+	err = -ENOMEM;	
 	if (!cam->raw_image) {
 		cam->raw_image = rvmalloc(CPIA_MAX_IMAGE_SIZE);
 		if (!cam->raw_image)
-			return -ENOMEM;
+			goto oops;
 	}
 
 	if (!cam->decompressed_frame.data) {
 		cam->decompressed_frame.data = rvmalloc(CPIA_MAX_FRAME_SIZE);
-		if (!cam->decompressed_frame.data) {
-			rvfree(cam->raw_image, CPIA_MAX_IMAGE_SIZE);
-			cam->raw_image = NULL;
-			return -ENOMEM;
-		}
+		if (!cam->decompressed_frame.data) 
+			goto oops;
 	}
 	
 	/* open cpia */
-	if (cam->ops->open(cam->lowlevel_data)) {
-		rvfree(cam->decompressed_frame.data, CPIA_MAX_FRAME_SIZE);
-		cam->decompressed_frame.data = NULL;
-		rvfree(cam->raw_image, CPIA_MAX_IMAGE_SIZE);
-		cam->raw_image = NULL;
-		return -ENODEV;
-	}
+	err = -ENODEV;
+	if (cam->ops->open(cam->lowlevel_data)) 
+		goto oops;
 	
 	/* reset the camera */
-	if ((i = reset_camera(cam)) != 0) {
+	if ((err = reset_camera(cam)) != 0) {
 		cam->ops->close(cam->lowlevel_data);
-		rvfree(cam->decompressed_frame.data, CPIA_MAX_FRAME_SIZE);
-		cam->decompressed_frame.data = NULL;
-		rvfree(cam->raw_image, CPIA_MAX_IMAGE_SIZE);
-		cam->raw_image = NULL;
-		return i;
+		goto oops;
 	}
 	
 	/* Set ownership of /proc/cpia/videoX to current user */
@@ -2499,17 +2569,28 @@ static int cpia_open(struct video_device *dev, int flags)
 	cam->mmap_kludge = 0;
 	
 	++cam->open_count;
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
+	file->private_data = dev;
+	up(&cam->busy_lock);
 	return 0;
+
+ oops:
+	if (cam->decompressed_frame.data) {
+		rvfree(cam->decompressed_frame.data, CPIA_MAX_FRAME_SIZE);
+		cam->decompressed_frame.data = NULL;
+	}
+	if (cam->raw_image) {
+		rvfree(cam->raw_image, CPIA_MAX_IMAGE_SIZE);
+		cam->raw_image = NULL;
+	}
+	up(&cam->busy_lock);
+	put_cam(cam->ops);
+	return err;
 }
 
-static void cpia_close(struct video_device *dev)
+static int cpia_close(struct inode *inode, struct file *file)
 {
-	struct cam_data *cam;
-
-	cam = dev->priv;
+	struct  video_device *dev = file->private_data;
+	struct cam_data *cam = dev->priv;
 
 	if (cam->ops) {
 	        /* Return ownership of /proc/cpia/videoX to root */
@@ -2522,7 +2603,7 @@ static void cpia_close(struct video_device *dev)
 		/* GotoLoPower */
 		goto_low_power(cam);
 
-		/* Update the camera ststus */
+		/* Update the camera status */
 		do_command(cam, CPIA_COMMAND_GetCameraStatus, 0, 0, 0, 0);
 
 		/* cleanup internal state stuff */
@@ -2530,6 +2611,7 @@ static void cpia_close(struct video_device *dev)
 
 		/* close cpia */
 		cam->ops->close(cam->lowlevel_data);
+		put_cam(cam->ops);
 	}
 
 	if (--cam->open_count == 0) {
@@ -2547,25 +2629,22 @@ static void cpia_close(struct video_device *dev)
 		if (cam->frame_buf)
 			free_frame_buf(cam);
 
-		if (!cam->ops) {
-			video_unregister_device(dev);
+		if (!cam->ops) 
 			kfree(cam);
-		}
 	}
 	
+	file->private_data = NULL;
 
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
-	return;
+	return 0;
 }
 
-static long cpia_read(struct video_device *dev, char *buf,
-                      unsigned long count, int noblock)
+static int cpia_read(struct file *file, char *buf,
+		     size_t count, loff_t *ppos)
 {
-	struct cam_data *cam = dev->priv;
+	struct video_device *dev = file->private_data;
+ 	struct cam_data *cam = dev->priv;
 
-	/* make this _really_ smp and multithredi-safe */
+	/* make this _really_ smp and multithread-safe */
 	if (down_interruptible(&cam->busy_lock))
 		return -EINTR;
 
@@ -2602,7 +2681,7 @@ static long cpia_read(struct video_device *dev, char *buf,
 	/* copy data to user space */
 	if (cam->decompressed_frame.count > count) {
 		DBG("count wrong: %d, %lu\n", cam->decompressed_frame.count,
-		    count);
+		    (unsigned long) count);
 		up(&cam->busy_lock);
 		return -EFAULT;
 	}
@@ -2617,8 +2696,10 @@ static long cpia_read(struct video_device *dev, char *buf,
 	return cam->decompressed_frame.count;
 }
 
-static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
+static int cpia_do_ioctl(struct inode *inode, struct file *file,
+			 unsigned int ioctlnr, void *arg)
 {
+	struct video_device *dev = file->private_data;
 	struct cam_data *cam = dev->priv;
 	int retval = 0;
 
@@ -2635,20 +2716,17 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 	/* query capabilites */
 	case VIDIOCGCAP:
 	{
-		struct video_capability b;
+		struct video_capability *b = arg;
 
 		DBG("VIDIOCGCAP\n");
-		strcpy(b.name, "CPiA Camera");
-		b.type = VID_TYPE_CAPTURE;
-		b.channels = 1;
-		b.audios = 0;
-		b.maxwidth = 352;	/* VIDEOSIZE_CIF */
-		b.maxheight = 288;
-		b.minwidth = 48;	/* VIDEOSIZE_48_48 */
-		b.minheight = 48;
-
-		if (copy_to_user(arg, &b, sizeof(b)))
-			retval = -EFAULT;
+		strcpy(b->name, "CPiA Camera");
+		b->type = VID_TYPE_CAPTURE;
+		b->channels = 1;
+		b->audios = 0;
+		b->maxwidth = 352;	/* VIDEOSIZE_CIF */
+		b->maxheight = 288;
+		b->minwidth = 48;	/* VIDEOSIZE_48_48 */
+		b->minheight = 48;
 
 		break;
 	}
@@ -2656,39 +2734,30 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 	/* get/set video source - we are a camera and nothing else */
 	case VIDIOCGCHAN:
 	{
-		struct video_channel v;
+		struct video_channel *v = arg;
 
 		DBG("VIDIOCGCHAN\n");
-		if (copy_from_user(&v, arg, sizeof(v))) {
-			retval = -EFAULT;
-			break;
-		}
-		if (v.channel != 0) {
+		if (v->channel != 0) {
 			retval = -EINVAL;
 			break;
 		}
 
-		v.channel = 0;
-		strcpy(v.name, "Camera");
-		v.tuners = 0;
-		v.flags = 0;
-		v.type = VIDEO_TYPE_CAMERA;
-		v.norm = 0;
+		v->channel = 0;
+		strcpy(v->name, "Camera");
+		v->tuners = 0;
+		v->flags = 0;
+		v->type = VIDEO_TYPE_CAMERA;
+		v->norm = 0;
 
-		if (copy_to_user(arg, &v, sizeof(v)))
-			retval = -EFAULT;
 		break;
 	}
 	
 	case VIDIOCSCHAN:
 	{
-		int v;
+		struct video_channel *v = arg;
 
 		DBG("VIDIOCSCHAN\n");
-		if (copy_from_user(&v, arg, sizeof(v)))
-			retval = -EFAULT;
-
-		if (retval == 0 && v != 0)
+		if (v->channel != 0)
 			retval = -EINVAL;
 
 		break;
@@ -2696,38 +2765,35 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 
 	/* image properties */
 	case VIDIOCGPICT:
+	{
+ 		struct video_picture *pic = arg;
+
 		DBG("VIDIOCGPICT\n");
-		if (copy_to_user(arg, &cam->vp, sizeof(struct video_picture)))
-			retval = -EFAULT;
+ 		*pic = cam->vp;
 		break;
-	
+	}
+
 	case VIDIOCSPICT:
 	{
-		struct video_picture vp;
+		struct video_picture *vp = arg;
 
 		DBG("VIDIOCSPICT\n");
 
-		/* copy_from_user */
-		if (copy_from_user(&vp, arg, sizeof(vp))) {
-			retval = -EFAULT;
-			break;
-		}
-
 		/* check validity */
-		DBG("palette: %d\n", vp.palette);
-		DBG("depth: %d\n", vp.depth);
-		if (!valid_mode(vp.palette, vp.depth)) {
+		DBG("palette: %d\n", vp->palette);
+		DBG("depth: %d\n", vp->depth);
+		if (!valid_mode(vp->palette, vp->depth)) {
 			retval = -EINVAL;
 			break;
 		}
 
 		down(&cam->param_lock);
 		/* brightness, colour, contrast need no check 0-65535 */
-		memcpy( &cam->vp, &vp, sizeof(vp) );
+		cam->vp = *vp;
 		/* update cam->params.colourParams */
-		cam->params.colourParams.brightness = vp.brightness*100/65535;
-		cam->params.colourParams.contrast = vp.contrast*100/65535;
-		cam->params.colourParams.saturation = vp.colour*100/65535;
+		cam->params.colourParams.brightness = vp->brightness*100/65535;
+		cam->params.colourParams.contrast = vp->contrast*100/65535;
+		cam->params.colourParams.saturation = vp->colour*100/65535;
 		/* contrast is in steps of 8, so round */
 		cam->params.colourParams.contrast =
 			((cam->params.colourParams.contrast + 3) / 8) * 8;
@@ -2742,34 +2808,33 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 		cam->cmd_queue |= COMMAND_SETCOLOURPARAMS;
 		up(&cam->param_lock);
 		DBG("VIDIOCSPICT: %d / %d // %d / %d / %d / %d\n",
-		    vp.depth, vp.palette, vp.brightness, vp.hue, vp.colour,
-		    vp.contrast);
+		    vp->depth, vp->palette, vp->brightness, vp->hue, 
+		    vp->colour, vp->contrast);
 		break;
 	}
 
 	/* get/set capture window */
 	case VIDIOCGWIN:
+	{
+		struct video_window *vw = arg;
+
 		DBG("VIDIOCGWIN\n");
 
-		if (copy_to_user(arg, &cam->vw, sizeof(struct video_window)))
-			retval = -EFAULT;
+		*vw = cam->vw;
 		break;
-	
+	}	
+
 	case VIDIOCSWIN:
 	{
 		/* copy_from_user, check validity, copy to internal structure */
-		struct video_window vw;
+		struct video_window *vw = arg;
 		DBG("VIDIOCSWIN\n");
-		if (copy_from_user(&vw, arg, sizeof(vw))) {
-			retval = -EFAULT;
-			break;
-		}
 
-		if (vw.clipcount != 0) {    /* clipping not supported */
+		if (vw->clipcount != 0) {    /* clipping not supported */
 			retval = -EINVAL;
 			break;
 		}
-		if (vw.clips != NULL) {     /* clipping not supported */
+		if (vw->clips != NULL) {     /* clipping not supported */
 			retval = -EINVAL;
 			break;
 		}
@@ -2778,8 +2843,8 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 		* is requested by the user???
 		*/
 		down(&cam->param_lock);
-		if (vw.width != cam->vw.width || vw.height != cam->vw.height) {
-			int video_size = match_videosize(vw.width, vw.height);
+		if (vw->width != cam->vw.width || vw->height != cam->vw.height) {
+			int video_size = match_videosize(vw->width, vw->height);
 
 			if (video_size < 0) {
 				retval = -EINVAL;
@@ -2792,7 +2857,6 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 			cam->cmd_queue |= COMMAND_SETFORMAT;
 		}
 
-		// FIXME needed??? memcpy(&cam->vw, &vw, sizeof(vw));
 		up(&cam->param_lock);
 
 		/* setformat ignored by camera during streaming,
@@ -2809,44 +2873,37 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 	/* mmap interface */
 	case VIDIOCGMBUF:
 	{
-		struct video_mbuf vm;
+		struct video_mbuf *vm = arg;
 		int i;
 
 		DBG("VIDIOCGMBUF\n");
-		memset(&vm, 0, sizeof(vm));
-		vm.size = CPIA_MAX_FRAME_SIZE*FRAME_NUM;
-		vm.frames = FRAME_NUM;
+		memset(vm, 0, sizeof(*vm));
+		vm->size = CPIA_MAX_FRAME_SIZE*FRAME_NUM;
+		vm->frames = FRAME_NUM;
 		for (i = 0; i < FRAME_NUM; i++)
-			vm.offsets[i] = CPIA_MAX_FRAME_SIZE * i;
-
-		if (copy_to_user((void *)arg, (void *)&vm, sizeof(vm)))
-			retval = -EFAULT;
+			vm->offsets[i] = CPIA_MAX_FRAME_SIZE * i;
 
 		break;
 	}
 	
 	case VIDIOCMCAPTURE:
 	{
-		struct video_mmap vm;
+		struct video_mmap *vm = arg;
 		int video_size;
 
-		if (copy_from_user((void *)&vm, (void *)arg, sizeof(vm))) {
-			retval = -EFAULT;
-			break;
-		}
-#if 1
-		DBG("VIDIOCMCAPTURE: %d / %d / %dx%d\n", vm.format, vm.frame,
-		    vm.width, vm.height);
-#endif
-		if (vm.frame<0||vm.frame>FRAME_NUM) {
+		DBG("VIDIOCMCAPTURE: %d / %d / %dx%d\n", vm->format, vm->frame,
+		    vm->width, vm->height);
+		if (vm->frame<0||vm->frame>=FRAME_NUM) {
 			retval = -EINVAL;
 			break;
 		}
 
 		/* set video format */
-		cam->vp.palette = vm.format;
-		switch(vm.format) {
+		cam->vp.palette = vm->format;
+		switch(vm->format) {
 		case VIDEO_PALETTE_GREY:
+			cam->vp.depth=8;
+			break;
 		case VIDEO_PALETTE_RGB555:
 		case VIDEO_PALETTE_RGB565:
 		case VIDEO_PALETTE_YUV422:
@@ -2868,8 +2925,8 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 			break;
 
 		/* set video size */
-		video_size = match_videosize(vm.width, vm.height);
-		if (cam->video_size < 0) {
+		video_size = match_videosize(vm->width, vm->height);
+		if (video_size < 0) {
 			retval = -EINVAL;
 			break;
 		}
@@ -2879,43 +2936,35 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 			cam->cmd_queue |= COMMAND_SETFORMAT;
 			dispatch_commands(cam);
 		}
-#if 0
-		DBG("VIDIOCMCAPTURE: %d / %d/%d\n", cam->video_size,
-		    cam->vw.width, cam->vw.height);
-#endif
 		/* according to v4l-spec we must start streaming here */
 		cam->mmap_kludge = 1;
-		retval = capture_frame(cam, &vm);
+		retval = capture_frame(cam, vm);
 
 		break;
 	}
 	
 	case VIDIOCSYNC:
 	{
-		int frame;
+		int *frame = arg;
 
-		if (copy_from_user((void *)&frame, arg, sizeof(int))) {
-			retval = -EFAULT;
-			break;
-		}
-		//DBG("VIDIOCSYNC: %d\n", frame);
+		//DBG("VIDIOCSYNC: %d\n", *frame);
 
-		if (frame<0 || frame >= FRAME_NUM) {
+		if (*frame<0 || *frame >= FRAME_NUM) {
 			retval = -EINVAL;
 			break;
 		}
 
-		switch (cam->frame[frame].state) {
+		switch (cam->frame[*frame].state) {
 		case FRAME_UNUSED:
 		case FRAME_READY:
 		case FRAME_GRABBING:
-			DBG("sync to unused frame %d\n", frame);
+			DBG("sync to unused frame %d\n", *frame);
 			retval = -EINVAL;
 			break;
 
 		case FRAME_DONE:
-			cam->frame[frame].state = FRAME_UNUSED;
-			//DBG("VIDIOCSYNC: %d synced\n", frame);
+			cam->frame[*frame].state = FRAME_UNUSED;
+			//DBG("VIDIOCSYNC: %d synced\n", *frame);
 			break;
 		}
 		if (retval == -EINTR) {
@@ -2927,36 +2976,22 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 
 	/* pointless to implement overlay with this camera */
 	case VIDIOCCAPTURE:
-		retval = -EINVAL;
-		break;
 	case VIDIOCGFBUF:
-		retval = -EINVAL;
-		break;
 	case VIDIOCSFBUF:
-		retval = -EINVAL;
-		break;
 	case VIDIOCKEY:
 		retval = -EINVAL;
 		break;
 
 	/* tuner interface - we have none */
 	case VIDIOCGTUNER:
-		retval = -EINVAL;
-		break;
 	case VIDIOCSTUNER:
-		retval = -EINVAL;
-		break;
 	case VIDIOCGFREQ:
-		retval = -EINVAL;
-		break;
 	case VIDIOCSFREQ:
 		retval = -EINVAL;
 		break;
 
 	/* audio interface - we have none */
 	case VIDIOCGAUDIO:
-		retval = -EINVAL;
-		break;
 	case VIDIOCSAUDIO:
 		retval = -EINVAL;
 		break;
@@ -2965,16 +3000,23 @@ static int cpia_ioctl(struct video_device *dev, unsigned int ioctlnr, void *arg)
 		break;
 	}
 
-	up(&cam->param_lock);
 	up(&cam->busy_lock);
 	return retval;
 } 
 
-/* FIXME */
-static int cpia_mmap(struct video_device *dev, const char *adr,
-                     unsigned long size)
+static int cpia_ioctl(struct inode *inode, struct file *file,
+		     unsigned int cmd, unsigned long arg)
 {
-	unsigned long start = (unsigned long)adr;
+	return video_usercopy(inode, file, cmd, arg, cpia_do_ioctl);
+}
+
+
+/* FIXME */
+static int cpia_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct video_device *dev = file->private_data;
+	unsigned long start = vma->vm_start;
+	unsigned long size  = vma->vm_end - vma->vm_start;
 	unsigned long page, pos;
 	struct cam_data *cam = dev->priv;
 	int retval;
@@ -3022,24 +3064,22 @@ static int cpia_mmap(struct video_device *dev, const char *adr,
 	return 0;
 }
 
-int cpia_video_init(struct video_device *vdev)
-{
-#ifdef CONFIG_PROC_FS
-	create_proc_cpia_cam(vdev->priv);
-#endif
-	return 0;
-}
+static struct file_operations cpia_fops = {
+	owner:		THIS_MODULE,
+	open:		cpia_open,
+	release:	cpia_close,
+	read:		cpia_read,
+	mmap:		cpia_mmap,
+	ioctl:		cpia_ioctl,
+	llseek:         no_llseek,
+};
 
 static struct video_device cpia_template = {
+	owner:		THIS_MODULE,
 	name:		"CPiA Camera",
 	type:		VID_TYPE_CAPTURE,
-	hardware:	VID_HARDWARE_CPIA,      /* FIXME */
-	open:		cpia_open,
-	close:		cpia_close,
-	read:		cpia_read,
-	ioctl:		cpia_ioctl,
-	mmap:		cpia_mmap,
-	initialize:	cpia_video_init,
+	hardware:	VID_HARDWARE_CPIA,
+	fops:           &cpia_fops,
 	minor:		-1,
 };
 
@@ -3098,8 +3138,8 @@ static void reset_camera_struct(struct cam_data *cam)
 	cam->params.sensorFps.divisor = 1;
 	cam->params.sensorFps.baserate = 1;
 	
-	cam->params.yuvThreshold.yThreshold = 15; /* FIXME? */
-	cam->params.yuvThreshold.uvThreshold = 15; /* FIXME? */
+	cam->params.yuvThreshold.yThreshold = 6; /* From windows driver */
+	cam->params.yuvThreshold.uvThreshold = 6; /* From windows driver */
 	
 	cam->params.format.subSample = SUBSAMPLE_422;
 	cam->params.format.yuvOrder = YUVORDER_YUYV;
@@ -3107,8 +3147,14 @@ static void reset_camera_struct(struct cam_data *cam)
 	cam->params.compression.mode = CPIA_COMPRESSION_AUTO;
 	cam->params.compressionTarget.frTargeting =
 		CPIA_COMPRESSION_TARGET_QUALITY;
-	cam->params.compressionTarget.targetFR = 7; /* FIXME? */
-	cam->params.compressionTarget.targetQ = 10; /* FIXME? */
+	cam->params.compressionTarget.targetFR = 15; /* From windows driver */
+	cam->params.compressionTarget.targetQ = 5; /* From windows driver */
+
+	cam->params.qx3.qx3_detected = 0;
+	cam->params.qx3.toplight = 0;
+	cam->params.qx3.bottomlight = 0;
+	cam->params.qx3.button = 0;
+	cam->params.qx3.cradled = 0;
 
 	cam->video_size = VIDEOSIZE_CIF;
 	
@@ -3117,8 +3163,8 @@ static void reset_camera_struct(struct cam_data *cam)
 	cam->vp.brightness = 32768;  /* 50% */
 	cam->vp.contrast = 32768;    /* 50% */
 	cam->vp.whiteness = 0;       /* not used -> grayscale only */
-	cam->vp.depth = 0;           /* FIXME: to be set by user? */
-	cam->vp.palette = VIDEO_PALETTE_RGB24;         /* FIXME: to be set by user? */
+	cam->vp.depth = 24;          /* to be set by user */
+	cam->vp.palette = VIDEO_PALETTE_RGB24; /* to be set by user */
 
 	cam->vw.x = 0;
 	cam->vw.y = 0;
@@ -3170,24 +3216,17 @@ static void init_camera_struct(struct cam_data *cam,
 
 struct cam_data *cpia_register_camera(struct cpia_camera_ops *ops, void *lowlevel)
 {
-        struct cam_data *camera;
+	struct cam_data *camera;
 	
-	/* Need a lock when adding/removing cameras.  This doesn't happen
-	 * often and doesn't take very long, so grabbing the kernel lock
-	 * should be OK. */
-	
-	if ((camera = kmalloc(sizeof(struct cam_data), GFP_KERNEL)) == NULL) {
-		unlock_kernel();
+	if ((camera = kmalloc(sizeof(struct cam_data), GFP_KERNEL)) == NULL)
 		return NULL;
-	}
 	
 	init_camera_struct( camera, ops );
 	camera->lowlevel_data = lowlevel;
 	
 	/* register v4l device */
-	if (video_register_device(&camera->vdev, VFL_TYPE_GRABBER) == -1) {
+	if (video_register_device(&camera->vdev, VFL_TYPE_GRABBER, video_nr) == -1) {
 		kfree(camera);
-		unlock_kernel();
 		printk(KERN_DEBUG "video_register_device failed\n");
 		return NULL;
 	}
@@ -3207,12 +3246,10 @@ struct cam_data *cpia_register_camera(struct cpia_camera_ops *ops, void *lowleve
 	/* close cpia */
 	camera->ops->close(camera->lowlevel_data);
 
-/* Eh? Feeling happy? - jerdfelt */
-/*
-	camera->ops->open(camera->lowlevel_data);
-	camera->ops->close(camera->lowlevel_data);
-*/
-	
+#ifdef CONFIG_PROC_FS
+	create_proc_cpia_cam(camera);
+#endif
+
 	printk(KERN_INFO "  CPiA Version: %d.%02d (%d.%d)\n",
 	       camera->params.version.firmwareVersion,
 	       camera->params.version.firmwareRevision,
@@ -3232,12 +3269,10 @@ struct cam_data *cpia_register_camera(struct cpia_camera_ops *ops, void *lowleve
 
 void cpia_unregister_camera(struct cam_data *cam)
 {
-	if (!cam->open_count) {
-		DBG("unregistering video\n");
-		video_unregister_device(&cam->vdev);
-	} else {
-		LOG("/dev/video%d removed while open, "
-		    "deferring video_unregister_device\n", cam->vdev.minor);
+	DBG("unregistering video\n");
+	video_unregister_device(&cam->vdev);
+	if (cam->open_count) {
+		put_cam(cam->ops);
 		DBG("camera open -- setting ops to NULL\n");
 		cam->ops = NULL;
 	}
@@ -3252,41 +3287,7 @@ void cpia_unregister_camera(struct cam_data *cam)
 	}
 }
 
-/****************************************************************************
- *
- *  Module routines
- *
- ***************************************************************************/
-
-#ifdef MODULE
-int init_module(void)
-{
-	printk(KERN_INFO "%s v%d.%d.%d\n", ABOUT,
-	       CPIA_MAJ_VER, CPIA_MIN_VER, CPIA_PATCH_VER);
-#ifdef CONFIG_PROC_FS
-	proc_cpia_create();
-#endif
-#ifdef CONFIG_KMOD
-#ifdef CONFIG_VIDEO_CPIA_PP_MODULE
-	request_module("cpia_pp");
-#endif
-#ifdef CONFIG_VIDEO_CPIA_USB_MODULE
-	request_module("cpia_usb");
-#endif
-#endif
-return 0;
-}
-
-void cleanup_module(void)
-{
-#ifdef CONFIG_PROC_FS
-	proc_cpia_destroy();
-#endif
-}
-
-#else
-
-int cpia_init(struct video_init *unused)
+static int __init cpia_init(void)
 {
 	printk(KERN_INFO "%s v%d.%d.%d\n", ABOUT,
 	       CPIA_MAJ_VER, CPIA_MIN_VER, CPIA_PATCH_VER);
@@ -3294,9 +3295,6 @@ int cpia_init(struct video_init *unused)
 	proc_cpia_create();
 #endif
 
-#ifdef CONFIG_VIDEO_CPIA_PP
-	cpia_pp_init();
-#endif
 #ifdef CONFIG_KMOD
 #ifdef CONFIG_VIDEO_CPIA_PP_MODULE
 	request_module("cpia_pp");
@@ -3306,15 +3304,27 @@ int cpia_init(struct video_init *unused)
 	request_module("cpia_usb");
 #endif
 #endif	/* CONFIG_KMOD */
+
+#ifdef CONFIG_VIDEO_CPIA_PP
+	cpia_pp_init();
+#endif
 #ifdef CONFIG_VIDEO_CPIA_USB
 	cpia_usb_init();
 #endif
 	return 0;
 }
 
+static void __exit cpia_exit(void)
+{
+#ifdef CONFIG_PROC_FS
+	proc_cpia_destroy();
+#endif
+}
+
+module_init(cpia_init);
+module_exit(cpia_exit);
+
 /* Exported symbols for modules. */
 
 EXPORT_SYMBOL(cpia_register_camera);
 EXPORT_SYMBOL(cpia_unregister_camera);
-
-#endif

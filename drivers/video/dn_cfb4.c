@@ -3,7 +3,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <asm/setup.h>
@@ -505,3 +505,5 @@ static struct display_switch dispsw_apollofb = {
     revc:		rev_char_apollofb,
     fontwidthmask:	FONTWIDTH(8)
 };
+
+MODULE_LICENSE("GPL");

@@ -29,7 +29,7 @@
 #endif
 
 #ifndef PCI_VENDOR_ID_SI
-#define PCI_VENDOR_ID_SI			0x0139
+#define PCI_VENDOR_ID_SI			0x1039
 #endif
 
 #ifndef PCI_VENDOR_ID_ALI
@@ -90,7 +90,10 @@ enum trident_op_registers {
 	T4D_STOP_B      = 0xb8, T4D_CSPF_B	= 0xbc,
 	T4D_SBBL_SBCL	= 0xc0, T4D_SBCTRL_SBE2R_SBDD    = 0xc4,
 	T4D_STIMER	= 0xc8, T4D_LFO_B_I2S_DELTA      = 0xcc,
-	T4D_AINT_B	= 0xd8, T4D_AINTEN_B    = 0xdc
+	T4D_AINT_B	= 0xd8, T4D_AINTEN_B	= 0xdc,
+	ALI_MPUR2	= 0x22,	ALI_GPIO	= 0x7c,
+	ALI_EBUF1 = 0xf4,
+	ALI_EBUF2 = 0xf8
 };
 
 enum ali_op_registers {
@@ -136,7 +139,13 @@ enum ali_control_all {
 	ALI_CHANNELS		= 32,
 	ALI_STOP_ALL_CHANNELS	= 0xffffffff,
 	ALI_MULTI_CHANNELS_START_STOP	= 0x07800000
+};
 
+enum ali_EMOD_control_bit {
+	ALI_EMOD_DEC	= 0x00000000,
+	ALI_EMOD_INC	= 0x10000000,
+	ALI_EMOD_Delay	= 0x20000000,
+	ALI_EMOD_Still	= 0x30000000
 };
 
 enum ali_pcm_in_channel_num {
@@ -306,18 +315,25 @@ enum miscint_bits {
 
 #define TRID_REG( trident, x ) ( (trident) -> iobase + (x) )
 
+#define		CYBER_PORT_AUDIO		0x3CE
+#define		CYBER_IDX_AUDIO_ENABLE          0x7B
+#define		CYBER_BMSK_AUDIO_INT_ENABLE	0x09
+#define		CYBER_BMSK_AUENZ		0x01
+#define		CYBER_BMSK_AUENZ_ENABLE		0x00
+#define		CYBER_IDX_IRQ_ENABLE		0x12
+      
 #define VALIDATE_MAGIC(FOO,MAG)				\
-({						  \
-	if (!(FOO) || (FOO)->magic != MAG) { \
-		printk(invalid_magic,__FUNCTION__);	       \
-		return -ENXIO;			  \
-	}					  \
+({						  	\
+	if (!(FOO) || (FOO)->magic != MAG) { 		\
+		printk(invalid_magic,__FUNCTION__);	\
+		return -ENXIO;			  	\
+	}					  	\
 })
 
 #define VALIDATE_STATE(a) VALIDATE_MAGIC(a,TRIDENT_STATE_MAGIC)
 #define VALIDATE_CARD(a) VALIDATE_MAGIC(a,TRIDENT_CARD_MAGIC)
 
-extern __inline__ unsigned ld2(unsigned int x)
+static inline unsigned ld2(unsigned int x)
 {
 	unsigned r = 0;
 	
@@ -342,5 +358,16 @@ extern __inline__ unsigned ld2(unsigned int x)
 	return r;
 }
 
-#endif /* __TRID4DWAVE_H */
+#ifdef DEBUG
 
+#define TRDBG(msg, args...) do {          \
+        printk(KERN_DEBUG msg , ##args ); \
+} while (0)
+
+#else /* !defined(DEBUG) */ 
+
+#define TRDBG(msg, args...) do { } while (0)
+
+#endif /* DEBUG */ 
+
+#endif /* __TRID4DWAVE_H */

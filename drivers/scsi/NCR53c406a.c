@@ -184,13 +184,13 @@ static  int  irq_probe(void);
 /* ================================================================= */
 
 #if USE_BIOS
-static void *bios_base = (void *)0;
+static void *bios_base;
 #endif
 
 #if PORT_BASE
 static int   port_base = PORT_BASE;
 #else
-static int   port_base = 0;
+static int   port_base;
 #endif
 
 #if IRQ_LEV
@@ -200,16 +200,16 @@ static int   irq_level = -1; /* 0 is 'no irq', so use -1 for 'uninitialized'*/
 #endif
 
 #if USE_DMA
-static int   dma_chan = 0;
+static int   dma_chan;
 #endif
 
 #if USE_PIO
 static int   fast_pio = USE_FAST_PIO;
 #endif
 
-static Scsi_Cmnd         *current_SC       = NULL;
-static volatile int internal_done_flag = 0;
-static volatile int internal_done_errcode = 0;
+static Scsi_Cmnd         *current_SC;
+static volatile int internal_done_flag;
+static volatile int internal_done_errcode;
 static char info_msg[256];
 
 /* ================================================================= */
@@ -221,7 +221,7 @@ static void *addresses[] = {
     (void *)0xc8000
 };
 #define ADDRESS_COUNT (sizeof( addresses ) / sizeof( unsigned ))
-#endif USE_BIOS
+#endif /* USE_BIOS */
 		       
 /* possible i/o port addresses */
 static unsigned short ports[] =
@@ -244,7 +244,7 @@ struct signature {
     { "Copyright (C) Acculogic, Inc.\r\n2.8M Diskette Extension Bios ver 4.04.03 03/01/1993", 61, 82 },
 };
 #define SIGNATURE_COUNT (sizeof( signatures ) / sizeof( struct signature ))
-#endif USE_BIOS
+#endif /* USE_BIOS */
 
 /* ============================================================ */
 
@@ -347,7 +347,7 @@ NCR53c406a_dma_residual (void) {
     
     return tmp;
 }
-#endif USE_DMA
+#endif /* USE_DMA */
 
 #if USE_PIO
 static __inline__ int NCR53c406a_pio_read(unsigned char *request, 
@@ -455,7 +455,7 @@ static __inline__ int NCR53c406a_pio_write(unsigned char *request,
     }
     return 0;
 }
-#endif USE_PIO
+#endif /* USE_PIO */
 
 int  __init 
 NCR53c406a_detect(Scsi_Host_Template * tpnt){
@@ -481,20 +481,20 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
     }
     
     DEB(printk("NCR53c406a BIOS found at %X\n", (unsigned int) bios_base););
-#endif USE_BIOS
+#endif /* USE_BIOS */
     
 #ifdef PORT_BASE
-    if (check_region(port_base, 0x10)) /* ports already snatched */
+    if (!request_region(port_base, 0x10, "NCR53c406a")) /* ports already snatched */
         port_base = 0;
     
 #else  /* autodetect */
     if (port_base) {		/* LILO override */
-        if (check_region(port_base, 0x10))
+        if (!request_region(port_base, 0x10, "NCR53c406a"))
             port_base = 0;
     }
     else {
         for(i=0;  i<PORT_COUNT && !port_base; i++){
-            if(check_region(ports[i], 0x10)){
+            if(!request_region(ports[i], 0x10, "NCR53c406a")){
                 DEB(printk("NCR53c406a: port %x in use\n", ports[i]));
             }
             else {
@@ -503,14 +503,16 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
                 if(   (inb(ports[i] + 0x0e) ^ inb(ports[i] + 0x0e)) == 7
                    && (inb(ports[i] + 0x0e) ^ inb(ports[i] + 0x0e)) == 7
                    && (inb(ports[i] + 0x0e) & 0xf8) == 0x58 ) {
+                    port_base = ports[i];
                     VDEB(printk("NCR53c406a: Sig register valid\n"));
                     VDEB(printk("port_base=%x\n", port_base));
-                    port_base = ports[i];
+                    break;
                 }
+                release_region(ports[i], 0x10);
             }
         }
     }
-#endif PORT_BASE
+#endif /* PORT_BASE */
     
     if(!port_base){		/* no ports found */
         printk("NCR53c406a: no available ports found\n");
@@ -527,18 +529,17 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
         irq_level=irq_probe();
         if (irq_level < 0) {		/* Trouble */
             printk("NCR53c406a: IRQ problem, irq_level=%d, giving up\n", irq_level);
-            return 0;
+            goto err_release;
         }
     }
 #endif
     
     DEB(printk("NCR53c406a: using port_base %x\n", port_base));
-    request_region(port_base, 0x10, "NCR53c406a");
     
     if(irq_level > 0) {
         if(request_irq(irq_level, do_NCR53c406a_intr, 0, "NCR53c406a", NULL)){
             printk("NCR53c406a: unable to allocate IRQ %d\n", irq_level);
-            return 0;
+            goto err_release;
         }
         tpnt->can_queue = 1;
         DEB(printk("NCR53c406a: allocated IRQ %d\n", irq_level));
@@ -548,28 +549,32 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
         DEB(printk("NCR53c406a: No interrupts detected\n"));
 #if USE_DMA
         printk("NCR53c406a: No interrupts found and DMA mode defined. Giving up.\n");
-        return 0;
-#endif USE_DMA
+        goto err_release;
+#endif /* USE_DMA */
     }
     else {
         DEB(printk("NCR53c406a: Shouldn't get here!\n"));
-        return 0;
+        goto err_free_irq;
     }
     
 #if USE_DMA
     dma_chan = DMA_CHAN;
     if(request_dma(dma_chan, "NCR53c406a") != 0){
         printk("NCR53c406a: unable to allocate DMA channel %d\n", dma_chan);
-        return 0;
+        goto err_release;
     }
     
     DEB(printk("Allocated DMA channel %d\n", dma_chan));
-#endif USE_DMA 
+#endif /* USE_DMA */
     
     tpnt->present = 1;
     tpnt->proc_name = "NCR53c406a";
     
     shpnt = scsi_register(tpnt, 0);
+    if (!shpnt) {
+            printk("NCR53c406a: Unable to register host, giving up.\n");
+            goto err_free_dma;
+    }
     shpnt->irq = irq_level;
     shpnt->io_port = port_base;
     shpnt->n_io_port = 0x10;
@@ -586,6 +591,17 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt){
 #endif
     
     return (tpnt->present);
+
+
+ err_free_dma:
+#if USE_DMA
+    free_dma(dma_chan);
+#endif
+ err_free_irq:
+    free_irq(irq_level, do_NCR53c406a_intr);
+ err_release:
+    release_region(port_base, 0x10);
+    return 0;
 }
 
 /* called from init/main.c */
@@ -649,7 +665,7 @@ static void internal_done(Scsi_Cmnd *SCpnt) {
 }
 
 
-static void wait_intr() {
+static void wait_intr(void) {
     int i = jiffies + WATCHDOG;
     
     while(time_after(i,jiffies) && !(inb(STAT_REG)&0xe0)) /* wait for a pseudo-interrupt */
@@ -804,8 +820,8 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
     printk("\n");
 #else
     printk(", pio=%02x\n", pio_status);
-#endif USE_DMA
-#endif NCR53C406A_DEBUG
+#endif /* USE_DMA */
+#endif /* NCR53C406A_DEBUG */
     
     if(int_reg & 0x80){         /* SCSI reset intr */
         rtrc(3);
@@ -824,7 +840,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
         current_SC->scsi_done(current_SC);
         return;
     }
-#endif USE_PIO
+#endif /* USE_PIO */
     
     if(status & 0x20) {		/* Parity error */
         printk("NCR53c406a: Warning: parity error!\n");
@@ -869,7 +885,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
 #if USE_DMA			/* No s/g support for DMA */
             NCR53c406a_dma_write(current_SC->request_buffer, 
                                  current_SC->request_bufflen);
-#endif USE_DMA
+#endif /* USE_DMA */
             outb(TRANSFER_INFO | DMA_OP, CMD_REG); 
 #if USE_PIO
             if (!current_SC->use_sg) /* Don't use scatter-gather */
@@ -884,7 +900,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
                 }
             }
             REG0;
-#endif USE_PIO
+#endif /* USE_PIO */
         }
         break;
         
@@ -898,7 +914,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
 #if USE_DMA			/* No s/g support for DMA */
             NCR53c406a_dma_read(current_SC->request_buffer, 
                                 current_SC->request_bufflen);
-#endif USE_DMA
+#endif /* USE_DMA */
             outb(TRANSFER_INFO | DMA_OP, CMD_REG); 
 #if USE_PIO
             if (!current_SC->use_sg) /* Don't use scatter-gather */
@@ -913,7 +929,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
                 }
             }
             REG0;
-#endif USE_PIO
+#endif /* USE_PIO */
         }
         break;
         
@@ -965,7 +981,7 @@ NCR53c406a_intr(int unused, void *dev_id, struct pt_regs *regs){
 }
 
 #ifndef IRQ_LEV
-static int irq_probe()
+static int irq_probe(void)
 {
     int irqs, irq;
     int i;
@@ -995,9 +1011,9 @@ static int irq_probe()
     
     return irq;
 }
-#endif IRQ_LEV
+#endif /* IRQ_LEV */
 
-static void chip_init()
+static void chip_init(void)
 {
     REG1;
 #if USE_DMA
@@ -1058,6 +1074,7 @@ void __init calc_port_addr(void)
     /* SIGNATURE	= (port_base+0x0E);*/
     /* CONFIG6		= (port_base+0x0F);*/
 }
+MODULE_LICENSE("GPL");
 
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = NCR53c406a;

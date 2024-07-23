@@ -1,4 +1,4 @@
-/* $Id: amd7930.c,v 1.24 2000/01/22 05:10:27 anton Exp $
+/* $Id: amd7930.c,v 1.28 2001/10/13 01:47:29 davem Exp $
  * drivers/sbus/audio/amd7930.c
  *
  * Copyright (C) 1996,1997 Thomas K. Dyas (tdyas@eden.rutgers.edu)
@@ -88,7 +88,7 @@
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/version.h>
 #include <linux/soundcard.h>
@@ -107,7 +107,7 @@ static __u8  mulaw2bilinear(__u8 data);
 static __u8  linear2mulaw(__u16 data);
 static __u16 mulaw2linear(__u8 data);
 
-#if defined (AMD79C30_ISDN) || defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x200ff 
+#if defined (AMD79C30_ISDN)
 #include "../../isdn/hisax/hisax.h"
 #include "../../isdn/hisax/isdnl1.h"
 #include "../../isdn/hisax/foreign.h"
@@ -1131,7 +1131,7 @@ static int amd7930_ioctl(struct inode * inode, struct file * file,
  *
  */
 
-#if defined (AMD79C30_ISDN) || defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x200ff 
+#if defined (AMD79C30_ISDN)
 static int amd7930_get_irqnum(int dev)
 {
 	struct amd7930_info *info;
@@ -1619,7 +1619,6 @@ static int amd7930_attach(struct sparcaudio_driver *drv, int node,
 	info->irq = irq.pri;
 	request_irq(info->irq, amd7930_interrupt,
 		    SA_INTERRUPT, "amd7930", drv);
-	enable_irq(info->irq);
 	amd7930_enable_ints(info);
 
 	/* Initalize the local copy of the MAP registers. */
@@ -1644,7 +1643,6 @@ static int amd7930_attach(struct sparcaudio_driver *drv, int node,
 	err = register_sparcaudio_driver(drv, 1);
 	if (err < 0) {
 		printk(KERN_ERR "amd7930: unable to register\n");
-		disable_irq(info->irq);
 		free_irq(info->irq, drv);
 		sbus_iounmap(info->regs, info->regs_size);
 		kfree(drv->private);
@@ -1659,27 +1657,20 @@ static int amd7930_attach(struct sparcaudio_driver *drv, int node,
 	return 0;
 }
 
-#ifdef MODULE
 /* Detach from an amd7930 chip given the device structure. */
-static void amd7930_detach(struct sparcaudio_driver *drv)
+static void __exit amd7930_detach(struct sparcaudio_driver *drv)
 {
 	struct amd7930_info *info = (struct amd7930_info *)drv->private;
 
 	unregister_sparcaudio_driver(drv, 1);
 	amd7930_idle(info);
-	disable_irq(info->irq);
 	free_irq(info->irq, drv);
 	sbus_iounmap(info->regs, info->regs_size);
 	kfree(drv->private);
 }
-#endif
 
 /* Probe for the amd7930 chip and then attach the driver. */
-#ifdef MODULE
-int init_module(void)
-#else
-int __init amd7930_init(void)
-#endif
+static int __init amd7930_init(void)
 {
 	struct sbus_bus *sbus;
 	struct sbus_dev *sdev;
@@ -1710,8 +1701,7 @@ int __init amd7930_init(void)
 	return (num_drivers > 0) ? 0 : -EIO;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit amd7930_exit(void)
 {
 	register int i;
 
@@ -1720,8 +1710,10 @@ void cleanup_module(void)
 		num_drivers--;
 	}
 }
-#endif
 
+module_init(amd7930_init);
+module_exit(amd7930_exit);
+MODULE_LICENSE("GPL");
 
 /*************************************************************/
 /*                 Audio format conversion                   */

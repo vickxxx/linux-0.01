@@ -17,7 +17,7 @@
 #include <linux/msg.h>
 #include <linux/smp_lock.h>
 #include <linux/vmalloc.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/highuid.h>
 
 #if defined(CONFIG_SYSVIPC)
@@ -75,7 +75,7 @@ void __init ipc_init_ids(struct ipc_ids* ids, int size)
 		ids->size = 0;
 	}
 	ids->ary = SPIN_LOCK_UNLOCKED;
-	for(i=0;i<size;i++)
+	for(i=0;i<ids->size;i++)
 		ids->entries[i].p = NULL;
 }
 
@@ -185,7 +185,7 @@ struct kern_ipc_perm* ipc_rmid(struct ipc_ids* ids, int id)
 {
 	struct kern_ipc_perm* p;
 	int lid = id % SEQ_MULTIPLIER;
-	if(lid > ids->size)
+	if(lid >= ids->size)
 		BUG();
 	p = ids->entries[lid].p;
 	ids->entries[lid].p = NULL;
@@ -312,7 +312,7 @@ void ipc64_perm_to_ipc_perm (struct ipc64_perm *in, struct ipc_perm *out)
 	out->seq	= in->seq;
 }
 
-#ifndef __ia64__
+#if !defined(__ia64__) && !defined(__hppa__)
 
 /**
  *	ipc_parse_version	-	IPC call version
@@ -325,6 +325,10 @@ void ipc64_perm_to_ipc_perm (struct ipc64_perm *in, struct ipc_perm *out)
  
 int ipc_parse_version (int *cmd)
 {
+#ifdef __x86_64__
+	if (!(current->thread.flags & THREAD_IA32))
+		return IPC_64; 
+#endif
 	if (*cmd & IPC_64) {
 		*cmd ^= IPC_64;
 		return IPC_64;
@@ -351,6 +355,12 @@ asmlinkage long sys_semget (key_t key, int nsems, int semflg)
 }
 
 asmlinkage long sys_semop (int semid, struct sembuf *sops, unsigned nsops)
+{
+	return -ENOSYS;
+}
+
+asmlinkage long sys_semtimedop(int semid, struct sembuf *sops, unsigned nsops,
+			       const struct timespec *timeout)
 {
 	return -ENOSYS;
 }

@@ -19,7 +19,6 @@
  */
 
 #include <linux/config.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
@@ -89,6 +88,7 @@ static int nr_rebuild_header(struct sk_buff *skb)
 	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
 	struct sk_buff *skbn;
 	unsigned char *bp = skb->data;
+	int len;
 
 	if (arp_find(bp + 7, skb)) {
 		return 1;
@@ -113,13 +113,15 @@ static int nr_rebuild_header(struct sk_buff *skb)
 
 	kfree_skb(skb);
 
+	len = skbn->len;
+	
 	if (!nr_route_frame(skbn, NULL)) {
 		kfree_skb(skbn);
 		stats->tx_errors++;
 	}
 
 	stats->tx_packets++;
-	stats->tx_bytes += skbn->len;
+	stats->tx_bytes += len;
 
 	return 1;
 }
@@ -230,8 +232,6 @@ int nr_init(struct net_device *dev)
 	memset(dev->priv, 0, sizeof(struct net_device_stats));
 
 	dev->get_stats = nr_get_stats;
-
-	dev_init_buffers(dev);
 
 	return 0;
 };

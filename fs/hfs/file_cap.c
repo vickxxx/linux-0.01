@@ -2,7 +2,7 @@
  * linux/fs/hfs/file_cap.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the file_ops and inode_ops for the metadata
  * files under the CAP representation.
@@ -26,7 +26,8 @@
 #include <linux/hfs_fs.h>
 
 /*================ Forward declarations ================*/
-
+static loff_t      cap_info_llseek(struct file *, loff_t,
+                                   int);
 static hfs_rwret_t cap_info_read(struct file *, char *,
 				 hfs_rwarg_t, loff_t *);
 static hfs_rwret_t cap_info_write(struct file *, const char *,
@@ -45,6 +46,7 @@ static hfs_rwret_t cap_info_write(struct file *, const char *,
 /*================ Global variables ================*/
 
 struct file_operations hfs_cap_info_operations = {
+	llseek:		cap_info_llseek,
 	read:		cap_info_read,
 	write:		cap_info_write,
 	fsync:		file_fsync,
@@ -83,6 +85,29 @@ static void cap_build_meta(struct hfs_cap_info *meta,
 	hfs_put_nl(hfs_m_to_htime(entry->create_date), meta->fi_ctime);
 	hfs_put_nl(hfs_m_to_htime(entry->modify_date), meta->fi_mtime);
 	hfs_put_nl(CURRENT_TIME,                       meta->fi_utime);
+}
+
+static loff_t cap_info_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+
+	switch (origin) {
+		case 2:
+			offset += file->f_dentry->d_inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset>=0 && offset<=HFS_FORK_MAX) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_reada = 0;
+			file->f_version = ++event;
+		}
+		retval = offset;
+	}
+	return retval;
 }
 
 /*
@@ -166,7 +191,7 @@ static hfs_rwret_t cap_info_write(struct file *filp, const char *buf,
 				  hfs_rwarg_t count, loff_t *ppos)
 {
         struct inode *inode = filp->f_dentry->d_inode;
-	hfs_u32 pos;
+	hfs_u32 pos, last;
 
 	if (!S_ISREG(inode->i_mode)) {
 		hfs_warn("hfs_file_write: mode = %07o\n", inode->i_mode);
@@ -182,14 +207,14 @@ static hfs_rwret_t cap_info_write(struct file *filp, const char *buf,
 		return 0;
 	}
 
-	*ppos += count;
-	if (*ppos > HFS_FORK_MAX) {
-		*ppos = HFS_FORK_MAX;
+	last = pos + count;
+	if (last > HFS_FORK_MAX) {
+		last = HFS_FORK_MAX;
 		count = HFS_FORK_MAX - pos;
 	}
 
-	if (*ppos > inode->i_size)
-	        inode->i_size = *ppos;
+	if (last > inode->i_size)
+	        inode->i_size = last;
 
 	/* Only deal with the part we store in memory */
 	if (pos < sizeof(struct hfs_cap_info)) {
@@ -247,6 +272,7 @@ static hfs_rwret_t cap_info_write(struct file *filp, const char *buf,
 		}
 	}
 
+	*ppos = last;
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
 	return count;

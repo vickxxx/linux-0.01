@@ -11,7 +11,7 @@
  * ------------------------------------------------------------------------- */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/locks.h>
 #include <asm/bitops.h>
@@ -314,9 +314,11 @@ struct inode *autofs4_get_inode(struct super_block *sb,
 	if (S_ISDIR(inf->mode)) {
 		inode->i_nlink = 2;
 		inode->i_op = &autofs4_dir_inode_operations;
-		inode->i_fop = &autofs4_dir_operations;
-	} else if (S_ISLNK(inf->mode))
+		inode->i_fop = &dcache_dir_ops;
+	} else if (S_ISLNK(inf->mode)) {
+		inode->i_size = inf->size;
 		inode->i_op = &autofs4_symlink_inode_operations;
+	}
 
 	return inode;
 }

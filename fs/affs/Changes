@@ -26,7 +26,62 @@ Known bugs:
   last allocated block is not cleared. Well,
   this fs never claimed to be Posix conformant.
 
-Please direct bug reports to: hjw@zvw.de
+Please direct bug reports to: zippel@linux-m68k.org
+
+Version 3.19
+------------
+
+- sizeof changes from Kernel Janitor Project
+- several bug fixes found with fsx
+
+Version 3.18
+------------
+
+- change to global min macro + warning fixes
+- add module tags
+
+Version 3.17
+------------
+
+- locking fixes
+- wrong sign in __affs_hash_dentry
+- remove unnecessary check in affs_new_inode
+- enable international mode for dircache fs
+
+Version 3.16
+------------
+
+- use mark_buffer_dirty_inode instead of mark_buffer_dirty.
+- introduce affs_lock_{link|dir|ext}.
+
+Version 3.15
+------------
+
+- disable link to directories until we can properly support them.
+- locking fixes for link creation/removal.
+
+Version 3.14
+------------
+
+- correctly cut off long file names for compares
+- correctly initialize s_last_bmap
+
+Version 3.13
+------------
+
+Major cleanup for 2.4 [Roman Zippel]
+- new extended block handling
+- new bitmap allocation functions
+- locking should be safe for the future
+- cleanup of some interfaces
+
+Version 3.12
+------------
+
+more 2.4 fixes: [Roman Zippel]
+- s_lock changes
+- increased getblock mess
+- clear meta blocks 
 
 Version 3.11
 ------------

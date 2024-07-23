@@ -13,6 +13,8 @@
 #include <linux/dnotify.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/tty.h>
+#include <linux/iobuf.h>
 
 #include <asm/uaccess.h>
 
@@ -69,6 +71,30 @@ out:
 	return error;
 }
 
+/*
+ * Install a file pointer in the fd array.  
+ *
+ * The VFS is full of places where we drop the files lock between
+ * setting the open_fds bitmap and installing the file in the file
+ * array.  At any such point, we are vulnerable to a dup2() race
+ * installing a file in the array before us.  We need to detect this and
+ * fput() the struct file we are about to overwrite in this case.
+ *
+ * It should never happen - if we allow dup2() do it, _really_ bad things
+ * will follow.
+ */
+
+void fd_install(unsigned int fd, struct file * file)
+{
+	struct files_struct *files = current->files;
+	
+	write_lock(&files->file_lock);
+	if (files->fd[fd])
+		BUG();
+	files->fd[fd] = file;
+	write_unlock(&files->file_lock);
+}
+
 int do_truncate(struct dentry *dentry, loff_t length)
 {
 	struct inode *inode = dentry->d_inode;
@@ -79,11 +105,15 @@ int do_truncate(struct dentry *dentry, loff_t length)
 	if (length < 0)
 		return -EINVAL;
 
+	down_write(&inode->i_alloc_sem);
 	down(&inode->i_sem);
 	newattrs.ia_size = length;
 	newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
+	/* Remove suid/sgid on truncate too */
+	remove_suid(inode);
 	error = notify_change(dentry, &newattrs);
 	up(&inode->i_sem);
+	up_write(&inode->i_alloc_sem);
 	return error;
 }
 
@@ -102,7 +132,12 @@ static inline long do_sys_truncate(const char * path, loff_t length)
 		goto out;
 	inode = nd.dentry->d_inode;
 
-	error = -EACCES;
+	/* For directories it's -EISDIR, for other non-regulars - -EINVAL */
+	error = -EISDIR;
+	if (S_ISDIR(inode->i_mode))
+		goto dput_and_out;
+
+	error = -EINVAL;
 	if (!S_ISREG(inode->i_mode))
 		goto dput_and_out;
 
@@ -144,10 +179,11 @@ out:
 
 asmlinkage long sys_truncate(const char * path, unsigned long length)
 {
-	return do_sys_truncate(path, length);
+	/* on 32-bit boxen it will cut the range 2^31--2^32-1 off */
+	return do_sys_truncate(path, (long)length);
 }
 
-static inline long do_sys_ftruncate(unsigned int fd, loff_t length)
+static inline long do_sys_ftruncate(unsigned int fd, loff_t length, int small)
 {
 	struct inode * inode;
 	struct dentry *dentry;
@@ -161,13 +197,24 @@ static inline long do_sys_ftruncate(unsigned int fd, loff_t length)
 	file = fget(fd);
 	if (!file)
 		goto out;
+
+	/* explicitly opened as large or we are on 64-bit box */
+	if (file->f_flags & O_LARGEFILE)
+		small = 0;
+
 	dentry = file->f_dentry;
 	inode = dentry->d_inode;
-	error = -EACCES;
+	error = -EINVAL;
 	if (!S_ISREG(inode->i_mode) || !(file->f_mode & FMODE_WRITE))
 		goto out_putf;
+
+	error = -EINVAL;
+	/* Cannot ftruncate over 2^31 bytes without large file support */
+	if (small && length > MAX_NON_LFS)
+		goto out_putf;
+
 	error = -EPERM;
-	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+	if (IS_APPEND(inode))
 		goto out_putf;
 
 	error = locks_verify_truncate(inode, file, length);
@@ -181,7 +228,7 @@ out:
 
 asmlinkage long sys_ftruncate(unsigned int fd, unsigned long length)
 {
-	return do_sys_ftruncate(fd, length);
+	return do_sys_ftruncate(fd, length, 1);
 }
 
 /* LFS versions of truncate are only needed on 32 bit machines */
@@ -193,7 +240,7 @@ asmlinkage long sys_truncate64(const char * path, loff_t length)
 
 asmlinkage long sys_ftruncate64(unsigned int fd, loff_t length)
 {
-	return do_sys_ftruncate(fd, length);
+	return do_sys_ftruncate(fd, length, 0);
 }
 #endif
 
@@ -229,6 +276,9 @@ asmlinkage long sys_utime(char * filename, struct utimbuf * times)
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
+		error = -EPERM;
+		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+			goto dput_and_out;
 		error = get_user(newattrs.ia_atime, &times->actime);
 		if (!error) 
 			error = get_user(newattrs.ia_mtime, &times->modtime);
@@ -237,6 +287,9 @@ asmlinkage long sys_utime(char * filename, struct utimbuf * times)
 
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
+		error = -EACCES;
+		if (IS_IMMUTABLE(inode))
+			goto dput_and_out;
 		if (current->fsuid != inode->i_uid &&
 		    (error = permission(inode,MAY_WRITE)) != 0)
 			goto dput_and_out;
@@ -275,6 +328,9 @@ asmlinkage long sys_utimes(char * filename, struct timeval * utimes)
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (utimes) {
 		struct timeval times[2];
+		error = -EPERM;
+		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+			goto dput_and_out;
 		error = -EFAULT;
 		if (copy_from_user(&times, utimes, sizeof(times)))
 			goto dput_and_out;
@@ -282,7 +338,12 @@ asmlinkage long sys_utimes(char * filename, struct timeval * utimes)
 		newattrs.ia_mtime = times[1].tv_sec;
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		if ((error = permission(inode,MAY_WRITE)) != 0)
+		error = -EACCES;
+		if (IS_IMMUTABLE(inode))
+			goto dput_and_out;
+
+		if (current->fsuid != inode->i_uid &&
+		    (error = permission(inode,MAY_WRITE)) != 0)
 			goto dput_and_out;
 	}
 	error = notify_change(nd.dentry, &newattrs);
@@ -341,17 +402,8 @@ asmlinkage long sys_chdir(const char * filename)
 {
 	int error;
 	struct nameidata nd;
-	char *name;
 
-	name = getname(filename);
-	error = PTR_ERR(name);
-	if (IS_ERR(name))
-		goto out;
-
-	error = 0;
-	if (path_init(name,LOOKUP_POSITIVE|LOOKUP_FOLLOW|LOOKUP_DIRECTORY,&nd))
-		error = path_walk(name, &nd);
-	putname(name);
+	error = __user_walk(filename,LOOKUP_POSITIVE|LOOKUP_FOLLOW|LOOKUP_DIRECTORY,&nd);
 	if (error)
 		goto out;
 
@@ -401,17 +453,9 @@ asmlinkage long sys_chroot(const char * filename)
 {
 	int error;
 	struct nameidata nd;
-	char *name;
 
-	name = getname(filename);
-	error = PTR_ERR(name);
-	if (IS_ERR(name))
-		goto out;
-
-	path_init(name, LOOKUP_POSITIVE | LOOKUP_FOLLOW |
+	error = __user_walk(filename, LOOKUP_POSITIVE | LOOKUP_FOLLOW |
 		      LOOKUP_DIRECTORY | LOOKUP_NOALT, &nd);
-	error = path_walk(name, &nd);	
-	putname(name);
 	if (error)
 		goto out;
 
@@ -505,7 +549,7 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 
 	error = -ENOENT;
 	if (!(inode = dentry->d_inode)) {
-		printk("chown_common: NULL inode\n");
+		printk(KERN_ERR "chown_common: NULL inode\n");
 		goto out;
 	}
 	error = -EROFS;
@@ -552,7 +596,7 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
-	error = DQUOT_TRANSFER(dentry, &newattrs);
+	error = notify_change(dentry, &newattrs);
 out:
 	return error;
 }
@@ -633,6 +677,7 @@ struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 {
 	struct file * f;
 	struct inode *inode;
+	static LIST_HEAD(kill_list);
 	int error;
 
 	error = -ENFILE;
@@ -653,8 +698,17 @@ struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 	f->f_pos = 0;
 	f->f_reada = 0;
 	f->f_op = fops_get(inode->i_fop);
-	if (inode->i_sb)
-		file_move(f, &inode->i_sb->s_files);
+	file_move(f, &inode->i_sb->s_files);
+
+	/* preallocate kiobuf for O_DIRECT */
+	f->f_iobuf = NULL;
+	f->f_iobuf_lock = 0;
+	if (f->f_flags & O_DIRECT) {
+		error = alloc_kiovec(1, &f->f_iobuf);
+		if (error)
+			goto cleanup_all;
+	}
+
 	if (f->f_op && f->f_op->open) {
 		error = f->f_op->open(inode,f);
 		if (error)
@@ -665,9 +719,12 @@ struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 	return f;
 
 cleanup_all:
+	if (f->f_iobuf)
+		free_kiovec(1, &f->f_iobuf);
 	fops_put(f->f_op);
 	if (f->f_mode & FMODE_WRITE)
 		put_write_access(inode);
+	file_move(f, &kill_list); /* out of the way.. */
 	f->f_dentry = NULL;
 	f->f_vfsmnt = NULL;
 cleanup_file:
@@ -729,7 +786,7 @@ repeat:
 #if 1
 	/* Sanity check */
 	if (files->fd[fd] != NULL) {
-		printk("get_unused_fd: slot %d not NULL!\n", fd);
+		printk(KERN_WARNING "get_unused_fd: slot %d not NULL!\n", fd);
 		files->fd[fd] = NULL;
 	}
 #endif
@@ -792,7 +849,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 	int retval;
 
 	if (!file_count(filp)) {
-		printk("VFS: Close: file count is 0\n");
+		printk(KERN_ERR "VFS: Close: file count is 0\n");
 		return 0;
 	}
 	retval = 0;
@@ -801,7 +858,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 		retval = filp->f_op->flush(filp);
 		unlock_kernel();
 	}
-	fcntl_dirnotify(0, filp, 0);
+	dnotify_flush(filp, id);
 	locks_remove_posix(filp, id);
 	fput(filp);
 	return retval;
@@ -846,3 +903,18 @@ asmlinkage long sys_vhangup(void)
 	}
 	return -EPERM;
 }
+
+/*
+ * Called when an inode is about to be open.
+ * We use this to disallow opening RW large files on 32bit systems if
+ * the caller didn't specify O_LARGEFILE.  On 64bit systems we force
+ * on this flag in sys_open.
+ */
+int generic_file_open(struct inode * inode, struct file * filp)
+{
+	if (!(filp->f_flags & O_LARGEFILE) && inode->i_size > MAX_NON_LFS)
+		return -EFBIG;
+	return 0;
+}
+
+EXPORT_SYMBOL(generic_file_open);

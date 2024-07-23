@@ -11,7 +11,6 @@
  *    Copyright (C) 1991, 1992, 1995  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -27,26 +26,33 @@
 
 #include <asm/uaccess.h>
 #include <asm/delay.h>
+#include <asm/s390_ext.h>
 
-#include <linux/mc146818rtc.h>
 #include <linux/timex.h>
+#include <linux/config.h>
 
 #include <asm/irq.h>
 
-
-extern volatile unsigned long lost_ticks;
-
 /* change this if you have some constant time drift */
-#define USECS_PER_JIFFY ((signed long)1000000/HZ)
-#define CLK_TICKS_PER_JIFFY ((signed long)USECS_PER_JIFFY<<12)
+#define CLK_TICKS_PER_JIFFY ((unsigned long) USECS_PER_JIFFY << 12)
+
+/*
+ * Create a small time difference between the timer interrupts
+ * on the different cpus to avoid lock contention.
+ */
+#define USECS_PER_JIFFY     ((unsigned long) 1000000/HZ)
+#define CPU_DEVIATION       (smp_processor_id() << 12)
 
 #define TICK_SIZE tick
 
-static uint64_t init_timer_cc, last_timer_cc;
+static ext_int_info_t ext_int_info_timer;
+static u64 init_timer_cc;
+static u64 xtime_cc;
 
 extern rwlock_t xtime_lock;
+extern unsigned long wall_jiffies;
 
-void tod_to_timeval(uint64_t todval, struct timeval *xtime)
+void tod_to_timeval(__u64 todval, struct timeval *xtime)
 {
         const int high_bit = 0x80000000L;
         const int c_f4240 = 0xf4240L;
@@ -80,13 +86,15 @@ void tod_to_timeval(uint64_t todval, struct timeval *xtime)
 		      : "cc", "memory", "2", "3", "4" );
 }
 
-unsigned long do_gettimeoffset(void) 
+static inline unsigned long do_gettimeoffset(void) 
 {
-	__u64 timer_cc;
+	__u64 now;
 
-	asm volatile ("STCK %0" : "=m" (timer_cc));
-        /* We require the offset from the previous interrupt */
-        return ((unsigned long)((timer_cc - last_timer_cc)>>12));
+	asm volatile ("STCK 0(%0)" : : "a" (&now) : "memory", "cc");
+        now = (now - init_timer_cc) >> 12;
+	/* We require the offset from the latest update of xtime */
+	now -= (__u64) wall_jiffies*USECS_PER_JIFFY;
+	return (unsigned long) now;
 }
 
 /*
@@ -94,16 +102,12 @@ unsigned long do_gettimeoffset(void)
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	extern volatile unsigned long lost_ticks;
 	unsigned long flags;
 	unsigned long usec, sec;
 
 	read_lock_irqsave(&xtime_lock, flags);
-	usec = do_gettimeoffset();
-	if (lost_ticks)
-		usec +=(USECS_PER_JIFFY*lost_ticks);
 	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
+	usec = xtime.tv_usec + do_gettimeoffset();
 	read_unlock_irqrestore(&xtime_lock, flags);
 
 	while (usec >= 1000000) {
@@ -140,81 +144,91 @@ void do_settimeofday(struct timeval *tv)
 	write_unlock_irq(&xtime_lock);
 }
 
+static inline __u32 div64_32(__u64 dividend, __u32 divisor)
+{
+	register_pair rp;
+
+	rp.pair = dividend;
+	asm ("dr %0,%1" : "+d" (rp) : "d" (divisor));
+	return rp.subreg.odd;
+}
+
 /*
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-
-#ifdef CONFIG_SMP
-extern __u16 boot_cpu_addr;
-#endif
-
-void do_timer_interrupt(struct pt_regs *regs,int error_code)
+void account_ticks(struct pt_regs *regs)
 {
-        unsigned long flags;
+	int cpu = smp_processor_id();
+	__u64 tmp;
+	__u32 ticks;
 
-        /*
-         * reset timer to 10ms minus time already elapsed
-         * since timer-interrupt pending
-         */
- 
-        save_flags(flags);
-        cli();
-#ifdef CONFIG_SMP
-	if(S390_lowcore.cpu_data.cpu_addr==boot_cpu_addr) {
-		write_lock(&xtime_lock);
-		last_timer_cc = S390_lowcore.jiffy_timer_cc;
+	/* Calculate how many ticks have passed. */
+	tmp = S390_lowcore.int_clock - S390_lowcore.jiffy_timer;
+	if (tmp >= 2*CLK_TICKS_PER_JIFFY) {
+		ticks = div64_32(tmp >> 1, CLK_TICKS_PER_JIFFY >> 1) + 1;
+		S390_lowcore.jiffy_timer +=
+			CLK_TICKS_PER_JIFFY * (__u64) ticks;
+	} else if (tmp > CLK_TICKS_PER_JIFFY) {
+		ticks = 2;
+		S390_lowcore.jiffy_timer += 2*CLK_TICKS_PER_JIFFY;
+	} else {
+		ticks = 1;
+		S390_lowcore.jiffy_timer += CLK_TICKS_PER_JIFFY;
 	}
-#else
-        last_timer_cc = S390_lowcore.jiffy_timer_cc;
-#endif
-        /* set clock comparator */
-        S390_lowcore.jiffy_timer_cc += CLK_TICKS_PER_JIFFY;
-        asm volatile ("SCKC %0" : : "m" (S390_lowcore.jiffy_timer_cc));
 
-/*
- * In the SMP case we use the local timer interrupt to do the
- * profiling, except when we simulate SMP mode on a uniprocessor
- * system, in that case we have to call the local interrupt handler.
- */
-#ifdef CONFIG_SMP
-        /* when SMP, do smp_local_timer_interrupt for *all* CPUs,
-           but only do the rest for the boot CPU */
-        smp_local_timer_interrupt(regs);
-#else
-        if (!user_mode(regs))
-                s390_do_profile(regs->psw.addr);
-#endif
+	/* set clock comparator for next tick */
+	tmp = S390_lowcore.jiffy_timer + CPU_DEVIATION;
+	asm volatile ("SCKC %0" : : "m" (tmp));
+
+	irq_enter(cpu, 0);
 
 #ifdef CONFIG_SMP
-	if(S390_lowcore.cpu_data.cpu_addr==boot_cpu_addr)
-#endif
-	{
+	/*
+	 * Do not rely on the boot cpu to do the calls to do_timer.
+	 * Spread it over all cpus instead.
+	 */
+	write_lock(&xtime_lock);
+	if (S390_lowcore.jiffy_timer > xtime_cc) {
+		__u32 xticks;
+
+		tmp = S390_lowcore.jiffy_timer - xtime_cc;
+		if (tmp >= 2*CLK_TICKS_PER_JIFFY) {
+			xticks = div64_32(tmp >> 1, CLK_TICKS_PER_JIFFY >> 1);
+			xtime_cc += (__u64) xticks * CLK_TICKS_PER_JIFFY;
+		} else {
+			xticks = 1;
+			xtime_cc += CLK_TICKS_PER_JIFFY;
+		}
+		while (xticks--)
+			do_timer(regs);
+	}
+	write_unlock(&xtime_lock);
+	while (ticks--)
+		update_process_times(user_mode(regs));
+#else
+	while (ticks--)
 		do_timer(regs);
-#ifdef CONFIG_SMP
-		write_unlock(&xtime_lock);
 #endif
-	}
-        restore_flags(flags);
-
+	irq_exit(cpu, 0);
 }
 
 /*
  * Start the clock comparator on the current CPU
  */
-static long cr0 __attribute__ ((aligned (8)));
-
-void init_100hz_timer(void)
+void init_cpu_timer(void)
 {
+        unsigned long cr0;
+	__u64 timer;
+
+        timer = init_timer_cc + (__u64) jiffies * CLK_TICKS_PER_JIFFY;
+        S390_lowcore.jiffy_timer = timer + CLK_TICKS_PER_JIFFY;
+        timer += CLK_TICKS_PER_JIFFY + CPU_DEVIATION;
+        asm volatile ("SCKC %0" : : "m" (timer));
         /* allow clock comparator timer interrupt */
         asm volatile ("STCTL 0,0,%0" : "=m" (cr0) : : "memory");
         cr0 |= 0x800;
         asm volatile ("LCTL 0,0,%0" : : "m" (cr0) : "memory");
-        /* set clock comparator */
-        /* read the TOD clock */
-        asm volatile ("STCK %0" : "=m" (S390_lowcore.jiffy_timer_cc));
-        S390_lowcore.jiffy_timer_cc += CLK_TICKS_PER_JIFFY;
-        asm volatile ("SCKC %0" : : "m" (S390_lowcore.jiffy_timer_cc));
 }
 
 /*
@@ -223,12 +237,14 @@ void init_100hz_timer(void)
  */
 void __init time_init(void)
 {
+        __u64 set_time_cc;
 	int cc;
 
         /* kick the TOD clock */
-        asm volatile ("STCK %1\n\t"
+        asm volatile ("STCK 0(%1)\n\t"
                       "IPM  %0\n\t"
-                      "SRL  %0,28" : "=r" (cc), "=m" (init_timer_cc));
+                      "SRL  %0,28" : "=r" (cc) : "a" (&init_timer_cc) 
+				   : "memory", "cc");
         switch (cc) {
         case 0: /* clock in set state: all is fine */
                 break;
@@ -242,9 +258,18 @@ void __init time_init(void)
                 printk("time_init: TOD clock stopped/non-operational\n");
                 break;
         }
-        init_100hz_timer();
-        init_timer_cc = S390_lowcore.jiffy_timer_cc;
-        init_timer_cc -= 0x8126d60e46000000LL -
-                         (0x3c26700LL*1000000*4096);
-        tod_to_timeval(init_timer_cc, &xtime);
+
+	/* set xtime */
+	xtime_cc = init_timer_cc + CLK_TICKS_PER_JIFFY;
+        set_time_cc = init_timer_cc - 0x8126d60e46000000LL +
+                      (0x3c26700LL*1000000*4096);
+        tod_to_timeval(set_time_cc, &xtime);
+
+        /* request the 0x1004 external interrupt */
+        if (register_early_external_interrupt(0x1004, NULL,
+					      &ext_int_info_timer) != 0)
+                panic("Couldn't request external interrupt 0x1004");
+
+        /* init CPU timer */
+        init_cpu_timer();
 }

@@ -35,7 +35,7 @@ static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 
 #define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -657,6 +657,7 @@ uint unit;
 			*/
 			if (PortP->TxStart == 0) {
 					rio_dprintk (RIO_DEBUG_ROUTE, "Tx pkts not set up yet\n");
+					rio_spin_unlock_irqrestore(&PortP->portSem, flags);
 					break;
 			}
 

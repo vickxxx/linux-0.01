@@ -1,4 +1,4 @@
-/* $Id: sunqe.c,v 1.47 2000/10/22 16:08:38 davem Exp $
+/* $Id: sunqe.c,v 1.52.2.1 2001/12/21 00:52:47 davem Exp $
  * sunqe.c: Sparc QuadEthernet 10baseT SBUS card driver.
  *          Once again I am out to prove that every ethernet
  *          controller out there can be most efficiently programmed
@@ -7,7 +7,7 @@
  * Copyright (C) 1996, 1999 David S. Miller (davem@redhat.com)
  */
 
-static char *version =
+static char version[] =
         "sunqe.c:v2.9 9/11/99 David S. Miller (davem@redhat.com)\n";
 
 #include <linux/module.h>
@@ -20,10 +20,11 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -46,7 +47,7 @@ static char *version =
 
 #include "sunqe.h"
 
-static struct sunqec *root_qec_dev = NULL;
+static struct sunqec *root_qec_dev;
 
 static void qe_set_multicast(struct net_device *dev);
 
@@ -438,6 +439,7 @@ static void qe_rx(struct sunqe *qep)
 						 len, 0);
 				skb->protocol = eth_type_trans(skb, qep->dev);
 				netif_rx(skb);
+				qep->dev->last_rx = jiffies;
 				qep->net_stats.rx_packets++;
 				qep->net_stats.rx_bytes += len;
 			}
@@ -493,6 +495,7 @@ static void qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				spin_unlock(&qep->lock);
 			}
 	next:
+			;
 		}
 		qec_status >>= 4;
 		channel++;
@@ -502,16 +505,11 @@ static void qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 static int qe_open(struct net_device *dev)
 {
 	struct sunqe *qep = (struct sunqe *) dev->priv;
-	int res;
 
 	qep->mconfig = (MREGS_MCONFIG_TXENAB |
 			MREGS_MCONFIG_RXENAB |
 			MREGS_MCONFIG_MBAENAB);
-	res = qe_init(qep, 0);
-	if (!res)
-		MOD_INC_USE_COUNT;
-
-	return res;
+	return qe_init(qep, 0);
 }
 
 static int qe_close(struct net_device *dev)
@@ -519,7 +517,6 @@ static int qe_close(struct net_device *dev)
 	struct sunqe *qep = (struct sunqe *) dev->priv;
 
 	qe_stop(qep);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -626,17 +623,14 @@ static struct net_device_stats *qe_get_stats(struct net_device *dev)
 	return &qep->net_stats;
 }
 
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
-
 static void qe_set_multicast(struct net_device *dev)
 {
 	struct sunqe *qep = (struct sunqe *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
 	u8 new_mconfig = qep->mconfig;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 crc;
 
 	/* Lock out others. */
 	netif_stop_queue(dev);
@@ -664,18 +658,7 @@ static void qe_set_multicast(struct net_device *dev)
 
 			if (!(*addrs & 1))
 				continue;
-
-			crc = 0xffffffffU;
-			for (byte = 0; byte < 6; byte++) {
-				for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
-					int test;
-
-					test = ((bit ^ crc) & 0x01);
-					crc >>= 1;
-					if (test)
-						crc = crc ^ poly;
-				}
-			}
+			crc = ether_crc_le(6, addrs);
 			crc >>= 26;
 			hash_table[crc >> 4] |= 1 << (crc & 0xf);
 		}
@@ -738,7 +721,7 @@ static inline void qec_init_once(struct sunqec *qecp, struct sbus_dev *qsdev)
 /* Four QE's per QEC card. */
 static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	struct net_device *qe_devs[4];
 	struct sunqe *qeps[4];
 	struct sbus_dev *qesdevs[4];
@@ -881,6 +864,7 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 	}
 
 	for (i = 0; i < 4; i++) {
+		SET_MODULE_OWNER(qe_devs[i]);
 		qe_devs[i]->open = qe_open;
 		qe_devs[i]->stop = qe_close;
 		qe_devs[i]->hard_start_xmit = qe_start_xmit;
@@ -945,7 +929,6 @@ qec_free_devs:
 							     sizeof(struct sunqe_buffers),
 							     qe->buffers,
 							     qe->buffers_dvma);
-				kfree(qe_devs[i]->priv);
 			}
 			kfree(qe_devs[i]);
 		}
@@ -987,7 +970,7 @@ static int __init qec_probe(void)
 	struct net_device *dev = NULL;
 	struct sbus_bus *bus;
 	struct sbus_dev *sdev = 0;
-	static int called = 0;
+	static int called;
 	int cards = 0, v;
 
 	root_qec_dev = NULL;
@@ -1045,3 +1028,4 @@ static void __exit qec_cleanup(void)
 
 module_init(qec_probe);
 module_exit(qec_cleanup);
+MODULE_LICENSE("GPL");

@@ -1,17 +1,17 @@
 /*
  * SyncLink Multiprotocol Serial Adapter Driver
  *
- * $Id: synclink.h,v 3.2 2000/11/06 22:34:38 paul Exp $
+ * $Id: synclink.h,v 3.6 2002/02/20 21:58:20 paulkf Exp $
  *
  * Copyright (C) 1998-2000 by Microgate Corporation
- * 
- * Redistribution of this file is permitted under 
+ *
+ * Redistribution of this file is permitted under
  * the terms of the GNU Public License (GPL)
  */
 
 #ifndef _SYNCLINK_H_
 #define _SYNCLINK_H_
-#define SYNCLINK_H_VERSION 3.2
+#define SYNCLINK_H_VERSION 3.6
 
 #define BOOLEAN int
 #define TRUE 1
@@ -84,6 +84,11 @@
 #define HDLC_CRC_NONE			0
 #define HDLC_CRC_16_CCITT		1
 #define HDLC_CRC_32_CCITT		2
+#define HDLC_CRC_MASK			0x00ff
+#define HDLC_CRC_RETURN_EX		0x8000
+
+#define RX_OK				0
+#define RX_CRC_ERROR			1
 
 #define HDLC_TXIDLE_FLAGS		0
 #define HDLC_TXIDLE_ALT_ZEROS_ONES	1
@@ -117,10 +122,16 @@
 
 #define MGSL_MODE_ASYNC		1
 #define MGSL_MODE_HDLC		2
+#define MGSL_MODE_RAW		6
 
 #define MGSL_BUS_TYPE_ISA	1
 #define MGSL_BUS_TYPE_EISA	2
 #define MGSL_BUS_TYPE_PCI	5
+
+#define MGSL_INTERFACE_DISABLE  0
+#define MGSL_INTERFACE_RS232    1
+#define MGSL_INTERFACE_V35      2
+#define MGSL_INTERFACE_RS422    3
 
 typedef struct _MGSL_PARAMS
 {
@@ -128,7 +139,7 @@ typedef struct _MGSL_PARAMS
 
 	unsigned long	mode;		/* Asynchronous or HDLC */
 	unsigned char	loopback;	/* internal loopback mode */
-	
+
 	/* HDLC Only */
 
 	unsigned short	flags;
@@ -150,6 +161,8 @@ typedef struct _MGSL_PARAMS
 
 #define MICROGATE_VENDOR_ID 0x13c0
 #define SYNCLINK_DEVICE_ID 0x0010
+#define MGSCC_DEVICE_ID 0x0020
+#define SYNCLINK_SCA_DEVICE_ID 0x0030
 #define MGSL_MAX_SERIAL_NUMBER 30
 
 /*
@@ -239,6 +252,8 @@ struct mgsl_icount {
  * MGSL_IOCGSTATS	return current statistics
  * MGSL_IOCWAITEVENT	wait for specified event to occur
  * MGSL_LOOPTXDONE	transmit in HDLC LoopMode done
+ * MGSL_IOCSIF          set the serial interface type
+ * MGSL_IOCGIF          get the serial interface type
  */
 #define MGSL_MAGIC_IOC	'm'
 #define MGSL_IOCSPARAMS		_IOW(MGSL_MAGIC_IOC,0,struct _MGSL_PARAMS)
@@ -252,5 +267,7 @@ struct mgsl_icount {
 #define MGSL_IOCWAITEVENT	_IOWR(MGSL_MAGIC_IOC,8,int)
 #define MGSL_IOCCLRMODCOUNT	_IO(MGSL_MAGIC_IOC,15)
 #define MGSL_IOCLOOPTXDONE	_IO(MGSL_MAGIC_IOC,9)
+#define MGSL_IOCSIF		_IO(MGSL_MAGIC_IOC,10)
+#define MGSL_IOCGIF		_IO(MGSL_MAGIC_IOC,11)
 
 #endif /* _SYNCLINK_H_ */

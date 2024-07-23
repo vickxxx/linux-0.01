@@ -1,19 +1,21 @@
 /*
 	drivers/net/tulip/pnic.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/networking/tulip.txt for more
-	information on this driver.
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
 #include <linux/kernel.h>
+#include <linux/pci.h>
 #include "tulip.h"
 
 
@@ -44,12 +46,11 @@ void pnic_do_nway(struct net_device *dev)
 		if (tp->csr6 != new_csr6) {
 			tp->csr6 = new_csr6;
 			/* Restart Tx */
-			tulip_restart_rxtx(tp, tp->csr6);
+			tulip_restart_rxtx(tp);
 			dev->trans_start = jiffies;
 		}
 	}
 }
-
 
 void pnic_lnk_change(struct net_device *dev, int csr5)
 {
@@ -62,19 +63,29 @@ void pnic_lnk_change(struct net_device *dev, int csr5)
 			   dev->name, phy_reg, csr5);
 	if (inl(ioaddr + CSR5) & TPLnkFail) {
 		outl((inl(ioaddr + CSR7) & ~TPLnkFail) | TPLnkPass, ioaddr + CSR7);
+		/* If we use an external MII, then we mustn't use the
+		 * internal negotiation.
+		 */
+		if (tulip_media_cap[dev->if_port] & MediaIsMII)
+			return;
 		if (! tp->nwayset  ||  jiffies - dev->trans_start > 1*HZ) {
 			tp->csr6 = 0x00420000 | (tp->csr6 & 0x0000fdff);
-			tulip_outl_csr(tp, tp->csr6, CSR6);
+			outl(tp->csr6, ioaddr + CSR6);
 			outl(0x30, ioaddr + CSR12);
 			outl(0x0201F078, ioaddr + 0xB8); /* Turn on autonegotiation. */
 			dev->trans_start = jiffies;
 		}
 	} else if (inl(ioaddr + CSR5) & TPLnkPass) {
-		pnic_do_nway(dev);
+		if (tulip_media_cap[dev->if_port] & MediaIsMII) {
+			spin_lock(&tp->lock);
+			tulip_check_duplex(dev);
+			spin_unlock(&tp->lock);
+		} else {
+			pnic_do_nway(dev);
+		}
 		outl((inl(ioaddr + CSR7) & ~TPLnkPass) | TPLnkFail, ioaddr + CSR7);
 	}
 }
-
 
 void pnic_timer(unsigned long data)
 {
@@ -83,9 +94,20 @@ void pnic_timer(unsigned long data)
 	long ioaddr = dev->base_addr;
 	int next_tick = 60*HZ;
 
+	if(!inl(ioaddr + CSR7)) {
+		/* the timer was called due to a work overflow
+		 * in the interrupt handler. Skip the connection
+		 * checks, the nic is definitively speaking with
+		 * his link partner.
+		 */
+		goto too_good_connection;
+	}
+
 	if (tulip_media_cap[dev->if_port] & MediaIsMII) {
+		spin_lock_irq(&tp->lock);
 		if (tulip_check_duplex(dev) > 0)
 			next_tick = 3*HZ;
+		spin_unlock_irq(&tp->lock);
 	} else {
 		int csr12 = inl(ioaddr + CSR12);
 		int new_csr6 = tp->csr6 & ~0x40C40200;
@@ -127,7 +149,7 @@ void pnic_timer(unsigned long data)
 			if (tp->csr6 != new_csr6) {
 				tp->csr6 = new_csr6;
 				/* Restart Tx */
-				tulip_restart_rxtx(tp, tp->csr6);
+				tulip_restart_rxtx(tp);
 				dev->trans_start = jiffies;
 				if (tulip_debug > 1)
 					printk(KERN_INFO "%s: Changing PNIC configuration to %s "
@@ -137,7 +159,14 @@ void pnic_timer(unsigned long data)
 			}
 		}
 	}
-	tp->timer.expires = RUN_AT(next_tick);
-	add_timer(&tp->timer);
+too_good_connection:
+	mod_timer(&tp->timer, RUN_AT(next_tick));
+	if(!inl(ioaddr + CSR7)) {
+		if (tulip_debug > 1)
+			printk(KERN_INFO "%s: sw timer wakeup.\n", dev->name);
+		disable_irq(dev->irq);
+		tulip_refill_rx(dev);
+		enable_irq(dev->irq);
+		outl(tulip_tbl[tp->chip_id].valid_intrs, ioaddr + CSR7);
+	}
 }
-

@@ -17,17 +17,18 @@
 
 #define MD_RESERVED       0UL
 #define LINEAR            1UL
-#define STRIPED           2UL
-#define RAID0             STRIPED
+#define RAID0             2UL
 #define RAID1             3UL
 #define RAID5             4UL
 #define TRANSLUCENT       5UL
 #define HSM               6UL
-#define MAX_PERSONALITY   7UL
+#define MULTIPATH         7UL
+#define MAX_PERSONALITY   8UL
 
-extern inline int pers_to_level (int pers)
+static inline int pers_to_level (int pers)
 {
 	switch (pers) {
+		case MULTIPATH:		return -4;
 		case HSM:		return -3;
 		case TRANSLUCENT:	return -2;
 		case LINEAR:		return -1;
@@ -35,12 +36,14 @@ extern inline int pers_to_level (int pers)
 		case RAID1:		return 1;
 		case RAID5:		return 5;
 	}
-	panic("pers_to_level()");
+	BUG();
+	return MD_RESERVED;
 }
 
-extern inline int level_to_pers (int level)
+static inline int level_to_pers (int level)
 {
 	switch (level) {
+		case -4: return MULTIPATH;
 		case -3: return HSM;
 		case -2: return TRANSLUCENT;
 		case -1: return LINEAR;
@@ -56,7 +59,7 @@ typedef struct mddev_s mddev_t;
 typedef struct mdk_rdev_s mdk_rdev_t;
 
 #if (MINORBITS != 8)
-#error MD doesnt handle bigger kdev yet
+#error MD does not handle bigger kdev yet
 #endif
 
 #define MAX_MD_DEVS  (1<<MINORBITS)	/* Max number of md dev */
@@ -72,7 +75,7 @@ typedef struct dev_mapping_s {
 
 extern dev_mapping_t mddev_map [MAX_MD_DEVS];
 
-extern inline mddev_t * kdev_to_mddev (kdev_t dev)
+static inline mddev_t * kdev_to_mddev (kdev_t dev)
 {
 	if (MAJOR(dev) != MD_MAJOR)
 		BUG();
@@ -88,64 +91,64 @@ extern inline mddev_t * kdev_to_mddev (kdev_t dev)
 /*
  * default readahead
  */
-#define MD_READAHEAD	MAX_READAHEAD
+#define MD_READAHEAD	vm_max_readahead
 
-extern inline int disk_faulty(mdp_disk_t * d)
+static inline int disk_faulty(mdp_disk_t * d)
 {
 	return d->state & (1 << MD_DISK_FAULTY);
 }
 
-extern inline int disk_active(mdp_disk_t * d)
+static inline int disk_active(mdp_disk_t * d)
 {
 	return d->state & (1 << MD_DISK_ACTIVE);
 }
 
-extern inline int disk_sync(mdp_disk_t * d)
+static inline int disk_sync(mdp_disk_t * d)
 {
 	return d->state & (1 << MD_DISK_SYNC);
 }
 
-extern inline int disk_spare(mdp_disk_t * d)
+static inline int disk_spare(mdp_disk_t * d)
 {
 	return !disk_sync(d) && !disk_active(d) && !disk_faulty(d);
 }
 
-extern inline int disk_removed(mdp_disk_t * d)
+static inline int disk_removed(mdp_disk_t * d)
 {
 	return d->state & (1 << MD_DISK_REMOVED);
 }
 
-extern inline void mark_disk_faulty(mdp_disk_t * d)
+static inline void mark_disk_faulty(mdp_disk_t * d)
 {
 	d->state |= (1 << MD_DISK_FAULTY);
 }
 
-extern inline void mark_disk_active(mdp_disk_t * d)
+static inline void mark_disk_active(mdp_disk_t * d)
 {
 	d->state |= (1 << MD_DISK_ACTIVE);
 }
 
-extern inline void mark_disk_sync(mdp_disk_t * d)
+static inline void mark_disk_sync(mdp_disk_t * d)
 {
 	d->state |= (1 << MD_DISK_SYNC);
 }
 
-extern inline void mark_disk_spare(mdp_disk_t * d)
+static inline void mark_disk_spare(mdp_disk_t * d)
 {
 	d->state = 0;
 }
 
-extern inline void mark_disk_removed(mdp_disk_t * d)
+static inline void mark_disk_removed(mdp_disk_t * d)
 {
 	d->state = (1 << MD_DISK_FAULTY) | (1 << MD_DISK_REMOVED);
 }
 
-extern inline void mark_disk_inactive(mdp_disk_t * d)
+static inline void mark_disk_inactive(mdp_disk_t * d)
 {
 	d->state &= ~(1 << MD_DISK_ACTIVE);
 }
 
-extern inline void mark_disk_nonsync(mdp_disk_t * d)
+static inline void mark_disk_nonsync(mdp_disk_t * d)
 {
 	d->state &= ~(1 << MD_DISK_SYNC);
 }
@@ -168,8 +171,10 @@ struct mdk_rdev_s
 	struct block_device *bdev;	/* block device handle */
 
 	mdp_super_t *sb;
+	struct page *sb_page;
 	unsigned long sb_offset;
 
+	int alias_device;		/* device alias to the same disk */
 	int faulty;			/* if faulty do not issue IO requests */
 	int desc_nr;			/* descriptor index in the superblock */
 };
@@ -219,7 +224,7 @@ struct mdk_personality_s
 	int (*make_request)(mddev_t *mddev, int rw, struct buffer_head * bh);
 	int (*run)(mddev_t *mddev);
 	int (*stop)(mddev_t *mddev);
-	int (*status)(char *page, mddev_t *mddev);
+	void (*status)(struct seq_file *seq, mddev_t *mddev);
 	int (*error_handler)(mddev_t *mddev, kdev_t dev);
 
 /*
@@ -245,18 +250,19 @@ struct mdk_personality_s
  * number. This will have to change to dynamic allocation
  * once we start supporting partitioning of md devices.
  */
-extern inline int mdidx (mddev_t * mddev)
+static inline int mdidx (mddev_t * mddev)
 {
 	return mddev->__minor;
 }
 
-extern inline kdev_t mddev_to_kdev(mddev_t * mddev)
+static inline kdev_t mddev_to_kdev(mddev_t * mddev)
 {
 	return MKDEV(MD_MAJOR, mdidx(mddev));
 }
 
 extern mdk_rdev_t * find_rdev(mddev_t * mddev, kdev_t dev);
 extern mdk_rdev_t * find_rdev_nr(mddev_t *mddev, int nr);
+extern mdp_disk_t *get_spare(mddev_t *mddev);
 
 /*
  * iterates through some rdev ringlist. It's safe to remove the
@@ -304,12 +310,12 @@ extern mdk_rdev_t * find_rdev_nr(mddev_t *mddev, int nr);
 			tmp = tmp->next, tmp->prev != &all_mddevs	\
 		; )
 
-extern inline int lock_mddev (mddev_t * mddev)
+static inline int lock_mddev (mddev_t * mddev)
 {
 	return down_interruptible(&mddev->reconfig_sem);
 }
 
-extern inline void unlock_mddev (mddev_t * mddev)
+static inline void unlock_mddev (mddev_t * mddev)
 {
 	up(&mddev->reconfig_sem);
 }
@@ -322,7 +328,7 @@ typedef struct mdk_thread_s {
 	void			*data;
 	md_wait_queue_head_t	wqueue;
 	unsigned long           flags;
-	struct semaphore	*sem;
+	struct completion	*event;
 	struct task_struct	*tsk;
 	const char		*name;
 } mdk_thread_t;
@@ -363,6 +369,31 @@ do {									\
 	if (condition)	 						\
 		break;							\
 	__wait_event_lock_irq(wq, condition, lock);			\
+} while (0)
+
+
+#define __wait_disk_event(wq, condition) 				\
+do {									\
+	wait_queue_t __wait;						\
+	init_waitqueue_entry(&__wait, current);				\
+									\
+	add_wait_queue(&wq, &__wait);					\
+	for (;;) {							\
+		set_current_state(TASK_UNINTERRUPTIBLE);		\
+		if (condition)						\
+			break;						\
+		run_task_queue(&tq_disk);				\
+		schedule();						\
+	}								\
+	current->state = TASK_RUNNING;					\
+	remove_wait_queue(&wq, &__wait);				\
+} while (0)
+
+#define wait_disk_event(wq, condition) 					\
+do {									\
+	if (condition)	 						\
+		break;							\
+	__wait_disk_event(wq, condition);				\
 } while (0)
 
 #endif 

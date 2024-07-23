@@ -37,7 +37,7 @@
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -145,7 +145,7 @@ static void __sound_remove_unit(struct sound_unit **list, int unit)
  *	This lock guards the sound loader list.
  */
 
-spinlock_t sound_loader_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t sound_loader_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  *	Allocate the controlling structure and add it to the sound driver
@@ -168,7 +168,11 @@ static int sound_insert_unit(struct sound_unit **list, struct file_operations *f
 	spin_unlock(&sound_loader_lock);
 	
 	if(r<0)
+	{
 		kfree(s);
+		return r;
+	}
+	
 	if (r == low)
 		sprintf (name_buf, "%s", name);
 	else
@@ -543,6 +547,7 @@ EXPORT_SYMBOL(mod_firmware_load);
 
 MODULE_DESCRIPTION("Core sound module");
 MODULE_AUTHOR("Alan Cox");
+MODULE_LICENSE("GPL");
 
 static void __exit cleanup_soundcore(void)
 {

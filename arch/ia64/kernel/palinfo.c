@@ -5,16 +5,14 @@
  * This code is based on specification of PAL as of the
  * Intel IA-64 Architecture Software Developer's Manual v1.0.
  *
- * 
- * Copyright (C) 2000 Hewlett-Packard Co
- * Copyright (C) 2000 Stephane Eranian <eranian@hpl.hp.com>
- * 
+ *
+ * Copyright (C) 2000-2001, 2003 Hewlett-Packard Co
+ *	Stephane Eranian <eranian@hpl.hp.com>
+ *
  * 05/26/2000	S.Eranian	initial release
  * 08/21/2000	S.Eranian	updated to July 2000 PAL specs
- *
- * ISSUES:
- *	- as of 2.2.9/2.2.12, the following values are still wrong
- *		PAL_VM_SUMMARY: key & rid sizes
+ * 02/05/2001   S.Eranian	fixed module support
+ * 10/23/2001	S.Eranian	updated pal_perf_mon_info bug fixes
  */
 #include <linux/config.h>
 #include <linux/types.h>
@@ -23,34 +21,19 @@
 #include <linux/proc_fs.h>
 #include <linux/mm.h>
 #include <linux/module.h>
-#if defined(MODVERSIONS)
-#include <linux/modversions.h>
-#endif
+#include <linux/efi.h>
 
 #include <asm/pal.h>
 #include <asm/sal.h>
-#include <asm/efi.h>
 #include <asm/page.h>
 #include <asm/processor.h>
-#ifdef CONFIG_SMP
 #include <linux/smp.h>
-#endif
 
 MODULE_AUTHOR("Stephane Eranian <eranian@hpl.hp.com>");
 MODULE_DESCRIPTION("/proc interface to IA-64 PAL");
+MODULE_LICENSE("GPL");
 
-/*
- * Hope to get rid of this one in a near future
-*/
-#define IA64_PAL_VERSION_BUG		1
-
-#define PALINFO_VERSION "0.3"
-
-#ifdef CONFIG_SMP
-#define cpu_is_online(i) (cpu_online_map & (1UL << i))
-#else
-#define cpu_is_online(i)	1
-#endif
+#define PALINFO_VERSION "0.5"
 
 typedef int (*palinfo_func_t)(char*);
 
@@ -86,7 +69,7 @@ static const char *cache_st_hints[]={
 	"Non-temporal, all levels",
 	"Reserved",
 	"Reserved",
-	"Reserved",	
+	"Reserved",
 	"Reserved"
 };
 
@@ -97,7 +80,7 @@ static const char *cache_ld_hints[]={
 	"Non-temporal, all levels",
 	"Reserved",
 	"Reserved",
-	"Reserved",	
+	"Reserved",
 	"Reserved"
 };
 
@@ -108,28 +91,17 @@ static const char *rse_hints[]={
 	"eager loads and stores"
 };
 
-#define RSE_HINTS_COUNT (sizeof(rse_hints)/sizeof(const char *))
+#define RSE_HINTS_COUNT ARRAY_SIZE(rse_hints)
 
-/*
- * The current revision of the Volume 2 (July 2000) of 
- * IA-64 Architecture Software Developer's Manual is wrong.
- * Table 4-10 has invalid information concerning the ma field:
- * Correct table is:
- *      bit 0 - 001 - UC
- *      bit 4 - 100 - UC
- *      bit 5 - 101 - UCE
- *      bit 6 - 110 - WC
- *      bit 7 - 111 - NatPage 
- */
 static const char *mem_attrib[]={
-	"Write Back (WB)",		/* 000 */
-	"Uncacheable (UC)",		/* 001 */
-	"Reserved",			/* 010 */
-	"Reserved",			/* 011 */
-	"Uncacheable (UC)",		/* 100 */
-	"Uncacheable Exported (UCE)",	/* 101 */
-	"Write Coalescing (WC)",	/* 110 */
-	"NaTPage"			/* 111 */
+	"WB",		/* 000 */
+	"SW",		/* 001 */
+	"010",		/* 010 */
+	"011",		/* 011 */
+	"UC",		/* 100 */
+	"UCE",		/* 101 */
+	"WC",		/* 110 */
+	"NaTPage"	/* 111 */
 };
 
 /*
@@ -139,7 +111,7 @@ static const char *mem_attrib[]={
  *
  * Input:
  *	- a pointer to a buffer to hold the string
- * 	- a 64-bit vector
+ *	- a 64-bit vector
  * Ouput:
  *	- a pointer to the end of the buffer
  *
@@ -166,7 +138,7 @@ bitvector_process(char *p, u64 vector)
  *
  * Input:
  *	- a pointer to a buffer to hold the string
- * 	- a 64-bit vector
+ *	- a 64-bit vector
  * Ouput:
  *	- a pointer to the end of the buffer
  *
@@ -184,7 +156,7 @@ bitregister_process(char *p, u64 *reg_info, int max)
 		if (i != 0 && (i%64) == 0) value = *++reg_info;
 
 		if ((value & 0x1) == 0 && skip == 0) {
-			if (begin  <= i - 2) 
+			if (begin  <= i - 2)
 				p += sprintf(p, "%d-%d ", begin, i-1);
 			else
 				p += sprintf(p, "%d ", i-1);
@@ -197,7 +169,7 @@ bitregister_process(char *p, u64 *reg_info, int max)
 		value >>=1;
 	}
 	if (begin > -1) {
-		if (begin < 127) 
+		if (begin < 127)
 			p += sprintf(p, "%d-127", begin);
 		else
 			p += sprintf(p, "127");
@@ -220,15 +192,15 @@ power_info(char *page)
 
 	for (i=0; i < 8 ; i++ ) {
 		if (halt_info[i].pal_power_mgmt_info_s.im == 1) {
-			p += sprintf(p,	"Power level %d:\n" \
-					"\tentry_latency       : %d cycles\n" \
-				 	"\texit_latency        : %d cycles\n" \
-					"\tpower consumption   : %d mW\n" \
-					"\tCache+TLB coherency : %s\n", i,
-				halt_info[i].pal_power_mgmt_info_s.entry_latency,
-				halt_info[i].pal_power_mgmt_info_s.exit_latency,
-				halt_info[i].pal_power_mgmt_info_s.power_consumption,
-				halt_info[i].pal_power_mgmt_info_s.co ? "Yes" : "No");
+			p += sprintf(p,	"Power level %d:\n"
+				     "\tentry_latency       : %d cycles\n"
+				     "\texit_latency        : %d cycles\n"
+				     "\tpower consumption   : %d mW\n"
+				     "\tCache+TLB coherency : %s\n", i,
+				     halt_info[i].pal_power_mgmt_info_s.entry_latency,
+				     halt_info[i].pal_power_mgmt_info_s.exit_latency,
+				     halt_info[i].pal_power_mgmt_info_s.power_consumption,
+				     halt_info[i].pal_power_mgmt_info_s.co ? "Yes" : "No");
 		} else {
 			p += sprintf(p,"Power level %d: not implemented\n",i);
 		}
@@ -236,24 +208,21 @@ power_info(char *page)
 	return p - page;
 }
 
-static int 
+static int
 cache_info(char *page)
 {
 	char *p = page;
-	u64 levels, unique_caches;
+	u64 i, levels, unique_caches;
 	pal_cache_config_info_t cci;
-	int i,j, k;
+	int j, k;
 	s64 status;
 
-	if ((status=ia64_pal_cache_summary(&levels, &unique_caches)) != 0) {
-			printk("ia64_pal_cache_summary=%ld\n", status);
-			return 0;
+	if ((status = ia64_pal_cache_summary(&levels, &unique_caches)) != 0) {
+		printk(KERN_ERR "ia64_pal_cache_summary=%ld\n", status);
+		return 0;
 	}
 
-	p += sprintf(p, "Cache levels  : %ld\n" \
-			"Unique caches : %ld\n\n",
-			levels,
-			unique_caches);
+	p += sprintf(p, "Cache levels  : %ld\nUnique caches : %ld\n\n", levels, unique_caches);
 
 	for (i=0; i < levels; i++) {
 
@@ -263,48 +232,50 @@ cache_info(char *page)
 			if ((status=ia64_pal_cache_config_info(i,j, &cci)) != 0) {
 				continue;
 			}
-			p += sprintf(p, "%s Cache level %d:\n" \
-					"\tSize           : %ld bytes\n" \
-					"\tAttributes     : ",
-					cache_types[j+cci.pcci_unified], i+1,
-					cci.pcci_cache_size);
+			p += sprintf(p,
+				     "%s Cache level %lu:\n"
+				     "\tSize           : %lu bytes\n"
+				     "\tAttributes     : ",
+				     cache_types[j+cci.pcci_unified], i+1,
+				     cci.pcci_cache_size);
 
 			if (cci.pcci_unified) p += sprintf(p, "Unified ");
 
 			p += sprintf(p, "%s\n", cache_mattrib[cci.pcci_cache_attr]);
 
-			p += sprintf(p, "\tAssociativity  : %d\n" \
-					"\tLine size      : %d bytes\n" \
-					"\tStride         : %d bytes\n",
-					cci.pcci_assoc,
-					1<<cci.pcci_line_size,
-					1<<cci.pcci_stride);
+			p += sprintf(p,
+				     "\tAssociativity  : %d\n"
+				     "\tLine size      : %d bytes\n"
+				     "\tStride         : %d bytes\n",
+				     cci.pcci_assoc, 1<<cci.pcci_line_size, 1<<cci.pcci_stride);
 			if (j == 1)
 				p += sprintf(p, "\tStore latency  : N/A\n");
 			else
 				p += sprintf(p, "\tStore latency  : %d cycle(s)\n",
 						cci.pcci_st_latency);
 
-			p += sprintf(p, "\tLoad latency   : %d cycle(s)\n" \
-					"\tStore hints    : ",
-					cci.pcci_ld_latency);
+			p += sprintf(p,
+				     "\tLoad latency   : %d cycle(s)\n"
+				     "\tStore hints    : ", cci.pcci_ld_latency);
 
 			for(k=0; k < 8; k++ ) {
-				if ( cci.pcci_st_hints & 0x1) p += sprintf(p, "[%s]", cache_st_hints[k]);
-				cci.pcci_st_hints >>=1; 
+				if ( cci.pcci_st_hints & 0x1)
+					p += sprintf(p, "[%s]", cache_st_hints[k]);
+				cci.pcci_st_hints >>=1;
 			}
 			p += sprintf(p, "\n\tLoad hints     : ");
 
 			for(k=0; k < 8; k++ ) {
-				if ( cci.pcci_ld_hints & 0x1) p += sprintf(p, "[%s]", cache_ld_hints[k]);
-				cci.pcci_ld_hints >>=1; 
+				if (cci.pcci_ld_hints & 0x1)
+					p += sprintf(p, "[%s]", cache_ld_hints[k]);
+				cci.pcci_ld_hints >>=1;
 			}
-			p += sprintf(p, "\n\tAlias boundary : %d byte(s)\n" \
-					"\tTag LSB        : %d\n" \
-					"\tTag MSB        : %d\n",
-					1<<cci.pcci_alias_boundary,
-					cci.pcci_tag_lsb,
-					cci.pcci_tag_msb);
+			p += sprintf(p,
+				     "\n\tAlias boundary : %d byte(s)\n"
+				     "\tTag LSB        : %d\n"
+				     "\tTag MSB        : %d\n",
+				     1<<cci.pcci_alias_boundary, cci.pcci_tag_lsb,
+				     cci.pcci_tag_msb);
 
 			/* when unified, data(j=2) is enough */
 			if (cci.pcci_unified) break;
@@ -324,44 +295,54 @@ vm_info(char *page)
 	pal_vm_info_2_u_t vm_info_2;
 	pal_tc_info_u_t	tc_info;
 	ia64_ptce_info_t ptce;
+	const char *sep;
 	int i, j;
 	s64 status;
 
-	if ((status=ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
-		printk("ia64_pal_vm_summary=%ld\n", status);
+	if ((status = ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
+		printk(KERN_ERR "ia64_pal_vm_summary=%ld\n", status);
 		return 0;
 	}
 
 
-	p += sprintf(p, "Physical Address Space         : %d bits\n" \
-			"Virtual Address Space          : %d bits\n" \
-			"Protection Key Registers(PKR)  : %d\n" \
-			"Implemented bits in PKR.key    : %d\n" \
-			"Hash Tag ID                    : 0x%x\n" \
-			"Size of RR.rid                 : %d\n",
-			vm_info_1.pal_vm_info_1_s.phys_add_size,
-			vm_info_2.pal_vm_info_2_s.impl_va_msb+1,
-			vm_info_1.pal_vm_info_1_s.max_pkr+1,
-			vm_info_1.pal_vm_info_1_s.key_size,
-			vm_info_1.pal_vm_info_1_s.hash_tag_id,
-			vm_info_2.pal_vm_info_2_s.rid_size);
+	p += sprintf(p,
+		     "Physical Address Space         : %d bits\n"
+		     "Virtual Address Space          : %d bits\n"
+		     "Protection Key Registers(PKR)  : %d\n"
+		     "Implemented bits in PKR.key    : %d\n"
+		     "Hash Tag ID                    : 0x%x\n"
+		     "Size of RR.rid                 : %d\n",
+		     vm_info_1.pal_vm_info_1_s.phys_add_size,
+		     vm_info_2.pal_vm_info_2_s.impl_va_msb+1, vm_info_1.pal_vm_info_1_s.max_pkr+1,
+		     vm_info_1.pal_vm_info_1_s.key_size, vm_info_1.pal_vm_info_1_s.hash_tag_id,
+		     vm_info_2.pal_vm_info_2_s.rid_size);
 
-	if (ia64_pal_mem_attrib(&attrib) != 0) return 0;
+	if (ia64_pal_mem_attrib(&attrib) != 0)
+		return 0;
 
-	p += sprintf(p, "Supported memory attributes    : %s\n", mem_attrib[attrib&0x7]);
+	p += sprintf(p, "Supported memory attributes    : ");
+	sep = "";
+	for (i = 0; i < 8; i++) {
+		if (attrib & (1 << i)) {
+			p += sprintf(p, "%s%s", sep, mem_attrib[i]);
+			sep = ", ";
+		}
+	}
+	p += sprintf(p, "\n");
 
-	if ((status=ia64_pal_vm_page_size(&tr_pages, &vw_pages)) !=0) {
-		printk("ia64_pal_vm_page_size=%ld\n", status);
+	if ((status = ia64_pal_vm_page_size(&tr_pages, &vw_pages)) !=0) {
+		printk(KERN_ERR "ia64_pal_vm_page_size=%ld\n", status);
 		return 0;
 	}
 
-	p += sprintf(p, "\nTLB walker                     : %s implemented\n" \
-			"Number of DTR                  : %d\n" \
-			"Number of ITR                  : %d\n" \
-			"TLB insertable page sizes      : ",
-			vm_info_1.pal_vm_info_1_s.vw ? "\b":"not",
-			vm_info_1.pal_vm_info_1_s.max_dtr_entry+1,
-			vm_info_1.pal_vm_info_1_s.max_itr_entry+1);
+	p += sprintf(p,
+		     "\nTLB walker                     : %simplemented\n"
+		     "Number of DTR                  : %d\n"
+		     "Number of ITR                  : %d\n"
+		     "TLB insertable page sizes      : ",
+		     vm_info_1.pal_vm_info_1_s.vw ? "" : "not ",
+		     vm_info_1.pal_vm_info_1_s.max_dtr_entry+1,
+		     vm_info_1.pal_vm_info_1_s.max_itr_entry+1);
 
 
 	p = bitvector_process(p, tr_pages);
@@ -371,45 +352,42 @@ vm_info(char *page)
 	p = bitvector_process(p, vw_pages);
 
 	if ((status=ia64_get_ptce(&ptce)) != 0) {
-		printk("ia64_get_ptce=%ld\n",status);
+		printk(KERN_ERR "ia64_get_ptce=%ld\n", status);
 		return 0;
 	}
 
-	p += sprintf(p, "\nPurge base address             : 0x%016lx\n" \
-			"Purge outer loop count         : %d\n" \
-			"Purge inner loop count         : %d\n" \
-			"Purge outer loop stride        : %d\n" \
-			"Purge inner loop stride        : %d\n",
-			ptce.base,
-			ptce.count[0],
-			ptce.count[1],
-			ptce.stride[0],
-			ptce.stride[1]);
+	p += sprintf(p,
+		     "\nPurge base address             : 0x%016lx\n"
+		     "Purge outer loop count         : %d\n"
+		     "Purge inner loop count         : %d\n"
+		     "Purge outer loop stride        : %d\n"
+		     "Purge inner loop stride        : %d\n",
+		     ptce.base, ptce.count[0], ptce.count[1], ptce.stride[0], ptce.stride[1]);
 
-	p += sprintf(p, "TC Levels                      : %d\n" \
-			"Unique TC(s)                   : %d\n", 
-			vm_info_1.pal_vm_info_1_s.num_tc_levels,
-			vm_info_1.pal_vm_info_1_s.max_unique_tcs);
+	p += sprintf(p,
+		     "TC Levels                      : %d\n"
+		     "Unique TC(s)                   : %d\n",
+		     vm_info_1.pal_vm_info_1_s.num_tc_levels,
+		     vm_info_1.pal_vm_info_1_s.max_unique_tcs);
 
 	for(i=0; i < vm_info_1.pal_vm_info_1_s.num_tc_levels; i++) {
 		for (j=2; j>0 ; j--) {
 			tc_pages = 0; /* just in case */
 
-		
+
 			/* even without unification, some levels may not be present */
 			if ((status=ia64_pal_vm_info(i,j, &tc_info, &tc_pages)) != 0) {
 				continue;
 			}
 
-			p += sprintf(p, "\n%s Translation Cache Level %d:\n" \
-					"\tHash sets           : %d\n" \
-					"\tAssociativity       : %d\n" \
-					"\tNumber of entries   : %d\n" \
-					"\tFlags               : ",
-					cache_types[j+tc_info.tc_unified], i+1,
-					tc_info.tc_num_sets,
-					tc_info.tc_associativity,
-					tc_info.tc_num_entries);
+			p += sprintf(p,
+				     "\n%s Translation Cache Level %d:\n"
+				     "\tHash sets           : %d\n"
+				     "\tAssociativity       : %d\n"
+				     "\tNumber of entries   : %d\n"
+				     "\tFlags               : ",
+				     cache_types[j+tc_info.tc_unified], i+1, tc_info.tc_num_sets,
+				     tc_info.tc_associativity, tc_info.tc_num_entries);
 
 			if (tc_info.tc_pf) p += sprintf(p, "PreferredPageSizeOptimized ");
 			if (tc_info.tc_unified) p += sprintf(p, "Unified ");
@@ -425,7 +403,7 @@ vm_info(char *page)
 	}
 	p += sprintf(p, "\n");
 
-	return p - page;	
+	return p - page;
 }
 
 
@@ -449,7 +427,7 @@ register_info(char *page)
 
 		if (ia64_pal_register_info(info, &reg_info[0], &reg_info[1]) != 0) return 0;
 
-	 	p += sprintf(p, "%-32s : ", info_type[info]);
+		p += sprintf(p, "%-32s : ", info_type[info]);
 
 		p = bitregister_process(p, reg_info, 128);
 
@@ -458,17 +436,18 @@ register_info(char *page)
 
 	if (ia64_pal_rse_info(&phys_stacked, &hints) != 0) return 0;
 
-	p += sprintf(p, "RSE stacked physical registers   : %ld\n" \
-			"RSE load/store hints             : %ld (%s)\n",
-			phys_stacked,
-			hints.ph_data, 
-		     	hints.ph_data < RSE_HINTS_COUNT ? rse_hints[hints.ph_data]: "(\?\?)");
+	p += sprintf(p,
+		     "RSE stacked physical registers   : %ld\n"
+		     "RSE load/store hints             : %ld (%s)\n",
+		     phys_stacked, hints.ph_data,
+		     hints.ph_data < RSE_HINTS_COUNT ? rse_hints[hints.ph_data]: "(\?\?)");
 
-	if (ia64_pal_debug_info(&iregs, &dregs)) return 0;
+	if (ia64_pal_debug_info(&iregs, &dregs))
+		return 0;
 
-	p += sprintf(p, "Instruction debug register pairs : %ld\n" \
-			"Data debug register pairs        : %ld\n",
-			iregs, dregs);
+	p += sprintf(p,
+		     "Instruction debug register pairs : %ld\n"
+		     "Data debug register pairs        : %ld\n", iregs, dregs);
 
 	return p - page;
 }
@@ -489,15 +468,15 @@ static const char *proc_features[]={
 	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	"Disable BINIT on processor time-out",
 	"Disable dynamic power management (DPM)",
-	"Disable coherency", 
-	"Disable cache", 
+	"Disable coherency",
+	"Disable cache",
 	"Enable CMCI promotion",
 	"Enable MCA to BINIT promotion",
 	"Enable MCA promotion",
-	"Enable BEER promotion"
+	"Enable BERR promotion"
 };
 
-	
+
 static int
 processor_info(char *page)
 {
@@ -511,7 +490,7 @@ processor_info(char *page)
 
 	for(i=0; i < 64; i++, v++,avail >>=1, status >>=1, control >>=1) {
 		if ( ! *v ) continue;
-		p += sprintf(p, "%-40s : %s%s %s\n", *v, 
+		p += sprintf(p, "%-40s : %s%s %s\n", *v,
 				avail & 0x1 ? "" : "NotImpl",
 				avail & 0x1 ? (status & 0x1 ? "On" : "Off"): "",
 				avail & 0x1 ? (control & 0x1 ? "Ctrl" : "NoCtrl"): "");
@@ -529,11 +508,11 @@ static const char *bus_features[]={
 	"Enable Half Transfer",
 	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-	NULL, NULL, NULL, NULL, 
-	"Enable Cache Line Repl. Exclusive", 
-	"Enable Cache Line Repl. Shared", 
+	NULL, NULL, NULL, NULL,
+	"Enable Cache Line Repl. Shared",
+	"Enable Cache Line Repl. Exclusive",
 	"Disable Transaction Queuing",
-	"Disable Reponse Error Checking",
+	"Disable Response Error Checking",
 	"Disable Bus Error Checking",
 	"Disable Bus Requester Internal Error Signalling",
 	"Disable Bus Requester Error Signalling",
@@ -544,7 +523,7 @@ static const char *bus_features[]={
 	"Disable Bus Data Error Checking"
 };
 
-	
+
 static int
 bus_info(char *page)
 {
@@ -563,7 +542,7 @@ bus_info(char *page)
 
 	for(i=0; i < 64; i++, v++, avail >>=1, status >>=1, control >>=1) {
 		if ( ! *v ) continue;
-		p += sprintf(p, "%-48s : %s%s %s\n", *v, 
+		p += sprintf(p, "%-48s : %s%s %s\n", *v,
 				avail & 0x1 ? "" : "NotImpl",
 				avail & 0x1 ? (status  & 0x1 ? "On" : "Off"): "",
 				avail & 0x1 ? (control & 0x1 ? "Ctrl" : "NoCtrl"): "");
@@ -571,63 +550,35 @@ bus_info(char *page)
 	return p - page;
 }
 
-
-/*
- * physical mode call for PAL_VERSION is working fine.
- * This function is meant to go away once PAL get fixed.
- */
-static inline s64 
-ia64_pal_version_phys(pal_version_u_t *pal_min_version, pal_version_u_t *pal_cur_version) 
-{	
-	struct ia64_pal_retval iprv;
-	PAL_CALL_PHYS(iprv, PAL_VERSION, 0, 0, 0);
-	if (pal_min_version)
-		pal_min_version->pal_version_val = iprv.v0;
-	if (pal_cur_version)
-		pal_cur_version->pal_version_val = iprv.v1;
-	return iprv.status; 
-}
-
 static int
 version_info(char *page)
 {
-	s64 status;
 	pal_version_u_t min_ver, cur_ver;
 	char *p = page;
 
-#ifdef IA64_PAL_VERSION_BUG
-	/* The virtual mode call is buggy. But the physical mode call seems
-	 * to be ok. Until they fix virtual mode, we do physical.
+	/* The PAL_VERSION call is advertised as being able to support
+	 * both physical and virtual mode calls. This seems to be a documentation
+	 * bug rather than firmware bug. In fact, it does only support physical mode.
+	 * So now the code reflects this fact and the pal_version() has been updated
+	 * accordingly.
 	 */
-	status = ia64_pal_version_phys(&min_ver, &cur_ver);
-#else
-	/* The system crashes if you enable this code with the wrong PAL 
-	 * code
-	 */
-	status = ia64_pal_version(&min_ver, &cur_ver);
-#endif
-	if (status != 0) return 0;
+	if (ia64_pal_version(&min_ver, &cur_ver) != 0) return 0;
 
-	p += sprintf(p, "PAL_vendor : 0x%02x (min=0x%02x)\n" \
-			"PAL_A      : %x.%x.%x (min=%x.%x.%x)\n" \
-			"PAL_B      : %x.%x.%x (min=%x.%x.%x)\n",
-	     		cur_ver.pal_version_s.pv_pal_vendor,
-	     		min_ver.pal_version_s.pv_pal_vendor,
+	p += sprintf(p,
+		     "PAL_vendor : 0x%02x (min=0x%02x)\n"
+		     "PAL_A      : %x.%x.%x (min=%x.%x.%x)\n"
+		     "PAL_B      : %x.%x.%x (min=%x.%x.%x)\n",
+		     cur_ver.pal_version_s.pv_pal_vendor, min_ver.pal_version_s.pv_pal_vendor,
 
-	     		cur_ver.pal_version_s.pv_pal_a_model>>4,
-	     		cur_ver.pal_version_s.pv_pal_a_model&0xf,
-	     		cur_ver.pal_version_s.pv_pal_a_rev,
-	     		min_ver.pal_version_s.pv_pal_a_model>>4,
-	     		min_ver.pal_version_s.pv_pal_a_model&0xf,
-	     		min_ver.pal_version_s.pv_pal_a_rev,
+		     cur_ver.pal_version_s.pv_pal_a_model>>4,
+		     cur_ver.pal_version_s.pv_pal_a_model&0xf, cur_ver.pal_version_s.pv_pal_a_rev,
+		     min_ver.pal_version_s.pv_pal_a_model>>4,
+		     min_ver.pal_version_s.pv_pal_a_model&0xf, min_ver.pal_version_s.pv_pal_a_rev,
 
-	     		cur_ver.pal_version_s.pv_pal_b_model>>4,
-	     		cur_ver.pal_version_s.pv_pal_b_model&0xf,
-	     		cur_ver.pal_version_s.pv_pal_b_rev,
-	     		min_ver.pal_version_s.pv_pal_b_model>>4,
-	     		min_ver.pal_version_s.pv_pal_b_model&0xf,
-	     		min_ver.pal_version_s.pv_pal_b_rev);
-
+		     cur_ver.pal_version_s.pv_pal_b_model>>4,
+		     cur_ver.pal_version_s.pv_pal_b_model&0xf, cur_ver.pal_version_s.pv_pal_b_rev,
+		     min_ver.pal_version_s.pv_pal_b_model>>4,
+		     min_ver.pal_version_s.pv_pal_b_model&0xf, min_ver.pal_version_s.pv_pal_b_rev);
 	return p - page;
 }
 
@@ -640,37 +591,30 @@ perfmon_info(char *page)
 
 	if (ia64_pal_perf_mon_info(pm_buffer, &pm_info) != 0) return 0;
 
-#ifdef IA64_PAL_PERF_MON_INFO_BUG
-	/*
-	 * This bug has been fixed in PAL 2.2.9 and higher
-	 */
-	pm_buffer[5]=0x3;
-	pm_info.pal_perf_mon_info_s.cycles  = 0x12;
-	pm_info.pal_perf_mon_info_s.retired = 0x08;
-#endif
-
-	p += sprintf(p, "PMC/PMD pairs                 : %d\n" \
-			"Counter width                 : %d bits\n" \
-			"Cycle event number            : %d\n" \
-			"Retired event number          : %d\n" \
-			"Implemented PMC               : ", 
-			pm_info.pal_perf_mon_info_s.generic,
-			pm_info.pal_perf_mon_info_s.width,
-			pm_info.pal_perf_mon_info_s.cycles,
-			pm_info.pal_perf_mon_info_s.retired);
+	p += sprintf(p,
+		     "PMC/PMD pairs                 : %d\n"
+		     "Counter width                 : %d bits\n"
+		     "Cycle event number            : %d\n"
+		     "Retired event number          : %d\n"
+		     "Implemented PMC               : ",
+		     pm_info.pal_perf_mon_info_s.generic, pm_info.pal_perf_mon_info_s.width,
+		     pm_info.pal_perf_mon_info_s.cycles, pm_info.pal_perf_mon_info_s.retired);
 
 	p = bitregister_process(p, pm_buffer, 256);
-
 	p += sprintf(p, "\nImplemented PMD               : ");
-	
 	p = bitregister_process(p, pm_buffer+4, 256);
-
 	p += sprintf(p, "\nCycles count capable          : ");
-	
 	p = bitregister_process(p, pm_buffer+8, 256);
-
 	p += sprintf(p, "\nRetired bundles count capable : ");
-	
+
+#ifdef CONFIG_ITANIUM
+	/*
+	 * PAL_PERF_MON_INFO reports that only PMC4 can be used to count CPU_CYCLES
+	 * which is wrong, both PMC4 and PMD5 support it.
+	 */
+	if (pm_buffer[12] == 0x10) pm_buffer[12]=0x30;
+#endif
+
 	p = bitregister_process(p, pm_buffer+12, 256);
 
 	p += sprintf(p, "\n");
@@ -686,18 +630,17 @@ frequency_info(char *page)
 	u64 base;
 
 	if (ia64_pal_freq_base(&base) == -1)
-		p += sprintf(p, "Output clock            : not implemented\n"); 
+		p += sprintf(p, "Output clock            : not implemented\n");
 	else
 		p += sprintf(p, "Output clock            : %ld ticks/s\n", base);
 
 	if (ia64_pal_freq_ratios(&proc, &bus, &itc) != 0) return 0;
 
-	p += sprintf(p, "Processor/Clock ratio   : %ld/%ld\n" \
-			"Bus/Clock ratio         : %ld/%ld\n" \
-			"ITC/Clock ratio         : %ld/%ld\n",
-			proc.num, proc.den,
-			bus.num, bus.den,
-			itc.num, itc.den);
+	p += sprintf(p,
+		     "Processor/Clock ratio   : %ld/%ld\n"
+		     "Bus/Clock ratio         : %ld/%ld\n"
+		     "ITC/Clock ratio         : %ld/%ld\n",
+		     proc.num, proc.den, bus.num, bus.den, itc.num, itc.den);
 
 	return p - page;
 }
@@ -711,7 +654,7 @@ tr_info(char *page)
 	u64 tr_buffer[4];
 	pal_vm_info_1_u_t vm_info_1;
 	pal_vm_info_2_u_t vm_info_2;
-	int i, j;
+	u64 i, j;
 	u64 max[3], pgm;
 	struct ifa_reg {
 		u64 valid:1;
@@ -745,8 +688,8 @@ tr_info(char *page)
 		u64 rv2:32;
 	} *rid_reg;
 
-	if ((status=ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
-		printk("ia64_pal_vm_summary=%ld\n", status);
+	if ((status = ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
+		printk(KERN_ERR "ia64_pal_vm_summary=%ld\n", status);
 		return 0;
 	}
 	max[0] = vm_info_1.pal_vm_info_1_s.max_itr_entry+1;
@@ -757,7 +700,8 @@ tr_info(char *page)
 
 		status = ia64_pal_tr_read(j, i, tr_buffer, &tr_valid);
 		if (status != 0) {
-			printk(__FUNCTION__ " pal call failed on tr[%d:%d]=%ld\n", i, j, status);
+			printk(KERN_ERR "palinfo: pal call failed on tr[%lu:%lu]=%ld\n",
+			       i, j, status);
 			continue;
 		}
 
@@ -765,39 +709,34 @@ tr_info(char *page)
 
 		if (ifa_reg->valid == 0) continue;
 
-		gr_reg   = (struct gr_reg *)tr_buffer;	
+		gr_reg   = (struct gr_reg *)tr_buffer;
 		itir_reg = (struct itir_reg *)&tr_buffer[1];
 		rid_reg  = (struct rid_reg *)&tr_buffer[3];
 
 		pgm	 = -1 << (itir_reg->ps - 12);
-		p += sprintf(p, "%cTR%d: av=%d pv=%d dv=%d mv=%d\n" \
-				"\tppn  : 0x%lx\n" \
-				"\tvpn  : 0x%lx\n" \
-				"\tps   : ",
-
-				"ID"[i],
-				j,
-				tr_valid.pal_tr_valid_s.access_rights_valid,
-				tr_valid.pal_tr_valid_s.priv_level_valid,
-				tr_valid.pal_tr_valid_s.dirty_bit_valid,
-				tr_valid.pal_tr_valid_s.mem_attr_valid,
-				(gr_reg->ppn & pgm)<< 12,
-				(ifa_reg->vpn & pgm)<< 12);
+		p += sprintf(p,
+			     "%cTR%lu: av=%d pv=%d dv=%d mv=%d\n"
+			     "\tppn  : 0x%lx\n"
+			     "\tvpn  : 0x%lx\n"
+			     "\tps   : ",
+			     "ID"[i], j,
+			     tr_valid.pal_tr_valid_s.access_rights_valid,
+			     tr_valid.pal_tr_valid_s.priv_level_valid,
+			     tr_valid.pal_tr_valid_s.dirty_bit_valid,
+			     tr_valid.pal_tr_valid_s.mem_attr_valid,
+			     (gr_reg->ppn & pgm)<< 12, (ifa_reg->vpn & pgm)<< 12);
 
 		p = bitvector_process(p, 1<< itir_reg->ps);
 
-		p += sprintf(p, "\n\tpl   : %d\n" \
-				"\tar   : %d\n" \
-				"\trid  : %x\n" \
-				"\tp    : %d\n" \
-				"\tma   : %d\n" \
-				"\td    : %d\n", 
-				gr_reg->pl,
-				gr_reg->ar,
-				rid_reg->rid,
-				gr_reg->p,
-				gr_reg->ma,
-				gr_reg->d);
+		p += sprintf(p,
+			     "\n\tpl   : %d\n"
+			     "\tar   : %d\n"
+			     "\trid  : %x\n"
+			     "\tp    : %d\n"
+			     "\tma   : %d\n"
+			     "\td    : %d\n",
+			     gr_reg->pl, gr_reg->ar, rid_reg->rid, gr_reg->p, gr_reg->ma,
+			     gr_reg->d);
 		}
 	}
 	return p - page;
@@ -810,7 +749,7 @@ tr_info(char *page)
  */
 static palinfo_entry_t palinfo_entries[]={
 	{ "version_info",	version_info, },
-	{ "vm_info", 		vm_info, },
+	{ "vm_info",		vm_info, },
 	{ "cache_info",		cache_info, },
 	{ "power_info",		power_info, },
 	{ "register_info",	register_info, },
@@ -821,17 +760,17 @@ static palinfo_entry_t palinfo_entries[]={
 	{ "tr_info",		tr_info, }
 };
 
-#define NR_PALINFO_ENTRIES	(sizeof(palinfo_entries)/sizeof(palinfo_entry_t))
+#define NR_PALINFO_ENTRIES	(int) ARRAY_SIZE(palinfo_entries)
 
 /*
- * this array is used to keep track of the proc entries we create. This is 
+ * this array is used to keep track of the proc entries we create. This is
  * required in the module mode when we need to remove all entries. The procfs code
  * does not do recursion of deletion
  *
  * Notes:
  *	- first +1 accounts for the cpuN entry
  *	- second +1 account for toplevel palinfo
- * 
+ *
  */
 #define NR_PALINFO_PROC_ENTRIES	(NR_CPUS*(NR_PALINFO_ENTRIES+1)+1)
 
@@ -858,7 +797,7 @@ typedef union {
 #ifdef CONFIG_SMP
 
 /*
- * used to hold information about final function to call 
+ * used to hold information about final function to call
  */
 typedef struct {
 	palinfo_func_t	func;	/* pointer to function to call */
@@ -875,9 +814,8 @@ static void
 palinfo_smp_call(void *info)
 {
 	palinfo_smp_data_t *data = (palinfo_smp_data_t *)info;
-	/* printk(__FUNCTION__" called on CPU %d\n", smp_processor_id());*/
 	if (data == NULL) {
-		printk(KERN_ERR __FUNCTION__" data pointer is NULL\n");
+		printk(KERN_ERR "palinfo: data pointer is NULL\n");
 		data->ret = 0; /* no output */
 		return;
 	}
@@ -891,7 +829,7 @@ palinfo_smp_call(void *info)
  *	0 : error or nothing to output
  *	otherwise how many bytes in the "page" buffer were written
  */
-static 
+static
 int palinfo_handle_smp(pal_func_cpu_u_t *f, char *page)
 {
 	palinfo_smp_data_t ptr;
@@ -901,20 +839,20 @@ int palinfo_handle_smp(pal_func_cpu_u_t *f, char *page)
 	ptr.page = page;
 	ptr.ret  = 0; /* just in case */
 
-	/*printk(__FUNCTION__" calling CPU %d from CPU %d for function %d\n", f->req_cpu,smp_processor_id(), f->func_id);*/
 
 	/* will send IPI to other CPU and wait for completion of remote call */
 	if ((ret=smp_call_function_single(f->req_cpu, palinfo_smp_call, &ptr, 0, 1))) {
-		printk(__FUNCTION__" remote CPU call from %d to %d on function %d: error %d\n", smp_processor_id(), f->req_cpu, f->func_id, ret);
+		printk(KERN_ERR "palinfo: remote CPU call from %d to %d on function %d: "
+		       "error %d\n", smp_processor_id(), f->req_cpu, f->func_id, ret);
 		return 0;
 	}
 	return ptr.ret;
 }
 #else /* ! CONFIG_SMP */
-static 
+static
 int palinfo_handle_smp(pal_func_cpu_u_t *f, char *page)
 {
-	printk(__FUNCTION__" should not be called with non SMP kernel\n");
+	printk(KERN_ERR "palinfo: should not be called with non SMP kernel\n");
 	return 0;
 }
 #endif /* CONFIG_SMP */
@@ -933,25 +871,25 @@ palinfo_read_entry(char *page, char **start, off_t off, int count, int *eof, voi
 	 * in SMP mode, we may need to call another CPU to get correct
 	 * information. PAL, by definition, is processor specific
 	 */
-	if (f->req_cpu == smp_processor_id()) 
+	if (f->req_cpu == smp_processor_id())
 		len = (*palinfo_entries[f->func_id].proc_read)(page);
 	else
 		len = palinfo_handle_smp(f, page);
 
-        if (len <= off+count) *eof = 1;
+	if (len <= off+count) *eof = 1;
 
-        *start = page + off;
-        len   -= off;
+	*start = page + off;
+	len   -= off;
 
-        if (len>count) len = count;
-        if (len<0) len = 0;
+	if (len>count) len = count;
+	if (len<0) len = 0;
 
 	MOD_DEC_USE_COUNT;
 
-        return len;
+	return len;
 }
 
-static int __init 
+static int __init
 palinfo_init(void)
 {
 #	define CPUSTR	"cpu%d"
@@ -972,7 +910,7 @@ palinfo_init(void)
 	 */
 	for (i=0; i < NR_CPUS; i++) {
 
-		if (!cpu_is_online(i)) continue;
+		if (!cpu_online(i)) continue;
 
 		sprintf(cpustr,CPUSTR, i);
 
@@ -982,8 +920,10 @@ palinfo_init(void)
 
 		for (j=0; j < NR_PALINFO_ENTRIES; j++) {
 			f.func_id = j;
-			*pdir++ = create_proc_read_entry (palinfo_entries[j].name, 0, cpu_dir, 
-						palinfo_read_entry, (void *)f.value);
+			*pdir = create_proc_read_entry(
+					palinfo_entries[j].name, 0, cpu_dir,
+					palinfo_read_entry, (void *)f.value);
+			pdir++;
 		}
 		*pdir++ = cpu_dir;
 	}
@@ -997,9 +937,10 @@ palinfo_exit(void)
 {
 	int i = 0;
 
-	/* remove all nodes: depth first pass */
+	/* remove all nodes: depth first pass. Could optimize this  */
 	for (i=0; i< NR_PALINFO_PROC_ENTRIES ; i++) {
-		remove_proc_entry (palinfo_proc_entries[i]->name, NULL);
+		if (palinfo_proc_entries[i])
+			remove_proc_entry (palinfo_proc_entries[i]->name, NULL);
 	}
 }
 

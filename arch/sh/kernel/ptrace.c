@@ -1,4 +1,4 @@
-/* $Id: ptrace.c,v 1.6 2000/06/08 23:44:50 gniibe Exp $
+/* $Id: ptrace.c,v 1.1.1.1.2.3 2003/10/23 22:11:08 yoshii Exp $
  *
  * linux/arch/sh/kernel/ptrace.c
  *
@@ -71,6 +71,8 @@ compute_next_pc(struct pt_regs *regs, unsigned short inst,
 	/* bra & bsr */
 	if (nib[0] == 0xa || nib[0] == 0xb) {
 		*pc1 = regs->pc + 4 + ((short) ((inst & 0xfff) << 4) >> 3);
+		if(*pc1 == regs->pc + 2)
+			*pc1 = regs->pc + 4;
 		*pc2 = (unsigned long) -1;
 		return;
 	}
@@ -85,7 +87,12 @@ compute_next_pc(struct pt_regs *regs, unsigned short inst,
 	/* bt/s & bf/s */
 	if (nib[0] == 0x8 && (nib[1] == 0xd || nib[1] == 0xf)) {
 		*pc1 = regs->pc + 4 + ((char) (inst & 0xff) << 1);
-		*pc2 = regs->pc + 4;
+		if(*pc1 == regs->pc + 2) {
+			*pc1 = regs->pc + 4;
+			*pc2 = (unsigned long) -1;
+		}
+		else
+			*pc2 = regs->pc + 4;
 		return;
 	}
 
@@ -93,6 +100,8 @@ compute_next_pc(struct pt_regs *regs, unsigned short inst,
 	if (nib[0] == 0x4 && nib[3] == 0xb
 	    && (nib[2] == 0x0 || nib[2] == 0x2)) {
 		*pc1 = regs->regs[nib[1]];
+		if(*pc1 == regs->pc + 2)
+			*pc1 = regs->pc + 4;
 		*pc2 = (unsigned long) -1;
 		return;
 	}
@@ -101,12 +110,16 @@ compute_next_pc(struct pt_regs *regs, unsigned short inst,
 	if (nib[0] == 0x0 && nib[3] == 0x3
 	    && (nib[2] == 0x0 || nib[2] == 0x2)) {
 		*pc1 = regs->pc + 4 + regs->regs[nib[1]];
+		if(*pc1 == regs->pc + 2)
+			*pc1 = regs->pc + 4;
 		*pc2 = (unsigned long) -1;
 		return;
 	}
 
 	if (inst == 0x000b) {
 		*pc1 = regs->pr;
+		if(*pc1 == regs->pc + 2)
+			*pc1 = regs->pc + 4;
 		*pc2 = (unsigned long) -1;
 		return;
 	}
@@ -116,30 +129,14 @@ compute_next_pc(struct pt_regs *regs, unsigned short inst,
 	return;
 }
 
-/* Tracing by user break controller.  */
-static void
-ubc_set_tracing(int asid, unsigned long nextpc1, unsigned nextpc2)
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
 {
-	ctrl_outl(nextpc1, UBC_BARA);
-	ctrl_outb(asid, UBC_BASRA);
-#if defined(CONFIG_CPU_SUBTYPE_SH7709)
-	ctrl_outl(0x0fff, UBC_BAMRA);
-#else
-	ctrl_outb(BAMR_12, UBC_BAMRA);
-#endif
-	ctrl_outw(BBR_INST | BBR_READ, UBC_BBRA);
-
-	if (nextpc2 != (unsigned long) -1) {
-		ctrl_outl(nextpc2, UBC_BARB);
-		ctrl_outb(asid, UBC_BASRB);
-#if defined(CONFIG_CPU_SUBTYPE_SH7709)
-		ctrl_outl(0x0fff, UBC_BAMRA);
-#else
-		ctrl_outb(BAMR_12, UBC_BAMRB);
-#endif
-		ctrl_outw(BBR_INST | BBR_READ, UBC_BBRB);
-	}
-	ctrl_outw(BRCR_PCBA | BRCR_PCBB, UBC_BRCR);
+	/* nothing to do.. */
 }
 
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
@@ -173,32 +170,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		goto out_tsk;
 
 	if (request == PTRACE_ATTACH) {
-		if (child == tsk)
-			goto out_tsk;
-		if ((!child->dumpable ||
-		    (tsk->uid != child->euid) ||
-		    (tsk->uid != child->suid) ||
-		    (tsk->uid != child->uid) ||
-	 	    (tsk->gid != child->egid) ||
-	 	    (tsk->gid != child->sgid) ||
-	 	    (!cap_issubset(child->cap_permitted, tsk->cap_permitted)) ||
-	 	    (tsk->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
-			goto out_tsk;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out_tsk;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != tsk) {
-			REMOVE_LINKS(child);
-			child->p_pptr = tsk;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
 	ret = -ESRCH;
@@ -352,8 +324,11 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		if (nextpc2 != (unsigned long) -1 && (nextpc2 & 0x80000000))
 			break;
 
-		ubc_set_tracing(child->mm->context & MMU_CONTEXT_ASID_MASK,
-				nextpc1, nextpc2);
+		/* Next scheduling will set up UBC */
+		if (child->thread.ubc_pc1 == 0)
+			ubc_usercnt += 1;
+		child->thread.ubc_pc1 = nextpc1;
+		child->thread.ubc_pc2 = nextpc2;
 
 		child->exit_code = data;
 		/* give it a chance to run. */
@@ -362,21 +337,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 	}
 
-	case PTRACE_DETACH: { /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		child->ptrace = 0;
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		wake_up_process(child);
-		ret = 0;
+	case PTRACE_DETACH: /* detach a process that was attached. */
+		ret = ptrace_detach(child, data);
 		break;
-	}
 
 	case PTRACE_SETOPTIONS: {
 		if (data & PTRACE_O_TRACESYSGOOD)
@@ -386,6 +349,37 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = 0;
 		break;
 	}
+
+#ifdef CONFIG_SH_DSP
+	case PTRACE_GETDSPREGS: {
+		unsigned long dp;
+
+		ret = -EIO;
+		dp = ((unsigned long) child) + THREAD_SIZE -
+			 sizeof(struct pt_dspregs);
+		if (*((int *) (dp - 4)) == SR_DSP) {
+			copy_to_user(addr, (void *) dp,
+				sizeof(struct pt_dspregs));
+			ret = 0;
+		}
+		break;
+	}
+
+	case PTRACE_SETDSPREGS: {
+		unsigned long dp;
+		int i;
+
+		ret = -EIO;
+		dp = ((unsigned long) child) + THREAD_SIZE -
+			 sizeof(struct pt_dspregs);
+		if (*((int *) (dp - 4)) == SR_DSP) {
+			copy_from_user((void *) dp, addr,
+				sizeof(struct pt_dspregs));
+			ret = 0;
+		}
+		break;
+	}
+#endif
 
 	default:
 		ret = -EIO;

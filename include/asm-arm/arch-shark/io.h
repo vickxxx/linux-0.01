@@ -1,7 +1,7 @@
 /*
  * linux/include/asm-arm/arch-shark/io.h
  *
- * by Alexander.Schulz@stud.uni-karlsruhe.de
+ * by Alexander Schulz
  *
  * derived from:
  * linux/include/asm-arm/arch-ebsa110/io.h
@@ -11,7 +11,8 @@
 #ifndef __ASM_ARM_ARCH_IO_H
 #define __ASM_ARM_ARCH_IO_H
 
-#define __arch_ioremap(off,size,nocache) __ioremap(off,size,0)
+#define iomem_valid_addr(off,sz)	(1)
+#define iomem_to_phys(off)		(off)
 
 #define IO_SPACE_LIMIT 0xffffffff
 
@@ -28,35 +29,35 @@
  * optimize the expressions
  */
 #define DECLARE_DYN_OUT(fnsuffix,instr)						\
-extern __inline__ void __out##fnsuffix (unsigned int value, unsigned int port)	\
+static inline void __out##fnsuffix (unsigned int value, unsigned int port)	\
 {										\
 	unsigned long temp;							\
 	__asm__ __volatile__(							\
 	"tst	%2, #0x80000000\n\t"						\
 	"mov	%0, %4\n\t"							\
 	"addeq	%0, %0, %3\n\t"							\
-	"str" ##instr## "	%1, [%0, %2]	@ out"###fnsuffix	\
+	"str" instr "	%1, [%0, %2]	@ out" #fnsuffix			\
 	: "=&r" (temp)								\
 	: "r" (value), "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)	\
 	: "cc");								\
 }
 
 #define DECLARE_DYN_IN(sz,fnsuffix,instr)					\
-extern __inline__ unsigned sz __in##fnsuffix (unsigned int port)		\
+static inline unsigned sz __in##fnsuffix (unsigned int port)		\
 {										\
 	unsigned long temp, value;						\
 	__asm__ __volatile__(							\
 	"tst	%2, #0x80000000\n\t"						\
 	"mov	%0, %4\n\t"							\
 	"addeq	%0, %0, %3\n\t"							\
-	"ldr" ##instr## "	%1, [%0, %2]	@ in"###fnsuffix	\
+	"ldr" instr "	%1, [%0, %2]	@ in" #fnsuffix				\
 	: "=&r" (temp), "=r" (value)						\
 	: "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)		\
 	: "cc");								\
 	return (unsigned sz)value;						\
 }
 
-extern __inline__ unsigned int __ioaddr (unsigned int port)			\
+static inline unsigned int __ioaddr (unsigned int port)			\
 {										\
 	if (__PORT_PCIO(port))							\
 		return (unsigned int)(PCIO_BASE + (port));			\
@@ -181,13 +182,8 @@ DECLARE_IO(long,l,"")
 #define outw(v,p)	(__builtin_constant_p((p)) ? __outwc(v,p) : __outw(v,p))
 #define outl(v,p)	(__builtin_constant_p((p)) ? __outlc(v,p) : __outl(v,p))
 
-#define __arch_getb(addr)	(*(volatile unsigned char *)(addr))
 #define __arch_getw(addr)	(*(volatile unsigned short *)(addr))
-#define __arch_getl(addr)	(*(volatile unsigned long *)(addr))
-
-#define __arch_putb(b,addr)	(*(volatile unsigned char *)(addr) = (b))
 #define __arch_putw(b,addr)	(*(volatile unsigned short *)(addr) = (b))
-#define __arch_putl(b,addr)	(*(volatile unsigned long *)(addr) = (b))
 
 /*
  * Translated address IO functions

@@ -42,6 +42,7 @@
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/gameport.h>
 
 #include "sound_config.h"
 
@@ -51,6 +52,7 @@
 
 static int      mad16_conf;
 static int      mad16_cdsel;
+static struct gameport gameport;
 
 static int      already_initialized = 0;
 
@@ -365,6 +367,8 @@ static int __init init_c930(struct address_info *hw_config)
 {
 	unsigned char cfg = 0;
 
+	cfg |= (0x0f & mad16_conf);
+
 	if(c931_detected)
 	{
 		/* Bit 0 has reversd meaning. Bits 1 and 2 sese
@@ -402,7 +406,10 @@ static int __init init_c930(struct address_info *hw_config)
 	   and the C931. */
 	cfg = c931_detected ? 0x04 : 0x00;
 
-	mad_write(MC4_PORT, 0x52|cfg);
+	if(mad16_cdsel & 0x20)
+		mad_write(MC4_PORT, 0x62|cfg);  /* opl4 */
+	else
+		mad_write(MC4_PORT, 0x52|cfg);  /* opl3 */
 
 	mad_write(MC5_PORT, 0x3C);	/* Init it into mode2 */
 	mad_write(MC6_PORT, 0x02);	/* Enable WSS, Disable MPU and SB */
@@ -423,72 +430,80 @@ static int __init chip_detect(void)
 
 	DDB(printk("Detect using password = 0xE5\n"));
 	
-	if (!detect_mad16())	/* No luck. Try different model */
-	{
-		board_type = C928;
-
-		DDB(printk("Detect using password = 0xE2\n"));
-
-		if (!detect_mad16())
-		{
-			board_type = C929;
-
-			DDB(printk("Detect using password = 0xE3\n"));
-
-			if (!detect_mad16())
-			{
-				if (inb(PASSWD_REG) != 0xff)
-					return 0;
-
-				/*
-				 * First relocate MC# registers to 0xe0e/0xe0f, disable password 
-				 */
-
-				outb((0xE4), PASSWD_REG);
-				outb((0x80), PASSWD_REG);
-
-				board_type = C930;
-
-				DDB(printk("Detect using password = 0xE4\n"));
-
-				for (i = 0xf8d; i <= 0xf93; i++)
-					DDB(printk("port %03x = %02x\n", i, mad_read(i)));
-                                if(!detect_mad16()) {
-
-				  /* The C931 has the password reg at F8D */
-				  outb((0xE4), 0xF8D);
-				  outb((0x80), 0xF8D);
-				  DDB(printk("Detect using password = 0xE4 for C931\n"));
-
-				  if (!detect_mad16()) {
-				    board_type = C924;
-				    c924pnp++;
-				    DDB(printk("Detect using password = 0xE5 (again), port offset -0x80\n"));
-				    if (!detect_mad16()) {
-				      c924pnp=0;
-				      return 0;
-				    }
-				  
-				    DDB(printk("mad16.c: 82C924 PnP detected\n"));
-				  }
-				}
-				else
-				  DDB(printk("mad16.c: 82C930 detected\n"));
-			} else
-				DDB(printk("mad16.c: 82C929 detected\n"));
-		} else {
-			unsigned char model;
-
-			if (((model = mad_read(MC3_PORT)) & 0x03) == 0x03) {
-				DDB(printk("mad16.c: Mozart detected\n"));
-				board_type = MOZART;
-			} else {
-				DDB(printk("mad16.c: 82C928 detected???\n"));
-				board_type = C928;
-			}
-		}
+	if (detect_mad16()) {
+		return 1;
 	}
-	return 1;
+	
+	board_type = C928;
+
+	DDB(printk("Detect using password = 0xE2\n"));
+
+	if (detect_mad16())
+	{
+		unsigned char model;
+
+		if (((model = mad_read(MC3_PORT)) & 0x03) == 0x03) {
+			DDB(printk("mad16.c: Mozart detected\n"));
+			board_type = MOZART;
+		} else {
+			DDB(printk("mad16.c: 82C928 detected???\n"));
+			board_type = C928;
+		}
+		return 1;
+	}
+
+	board_type = C929;
+
+	DDB(printk("Detect using password = 0xE3\n"));
+
+	if (detect_mad16())
+	{
+		DDB(printk("mad16.c: 82C929 detected\n"));
+		return 1;
+	}
+
+	if (inb(PASSWD_REG) != 0xff)
+		return 0;
+
+	/*
+	 * First relocate MC# registers to 0xe0e/0xe0f, disable password 
+	 */
+
+	outb((0xE4), PASSWD_REG);
+	outb((0x80), PASSWD_REG);
+
+	board_type = C930;
+
+	DDB(printk("Detect using password = 0xE4\n"));
+
+	for (i = 0xf8d; i <= 0xf93; i++)
+		DDB(printk("port %03x = %02x\n", i, mad_read(i)));
+
+        if(detect_mad16()) {
+		DDB(printk("mad16.c: 82C930 detected\n"));
+		return 1;
+	}
+
+	/* The C931 has the password reg at F8D */
+	outb((0xE4), 0xF8D);
+	outb((0x80), 0xF8D);
+	DDB(printk("Detect using password = 0xE4 for C931\n"));
+
+	if (detect_mad16()) {
+		return 1;
+	}
+
+	board_type = C924;
+	c924pnp++;
+	DDB(printk("Detect using password = 0xE5 (again), port offset -0x80\n"));
+	if (detect_mad16()) {
+		DDB(printk("mad16.c: 82C924 PnP detected\n"));
+		return 1;
+	}
+	
+	c924pnp=0;
+
+	return 0;
 }
 
 static int __init probe_mad16(struct address_info *hw_config)
@@ -551,10 +566,10 @@ static int __init probe_mad16(struct address_info *hw_config)
 	 */
 
 	tmp &= ~0x0f;
+	tmp |= (mad16_conf & 0x0f);   /* CD-ROM and joystick bits */
 	mad_write(MC1_PORT, tmp);
 
-	tmp = mad_read(MC2_PORT);
-
+	tmp = mad16_cdsel;
 	mad_write(MC2_PORT, tmp);
 	mad_write(MC3_PORT, 0xf0);	/* Disable SB */
 
@@ -656,13 +671,13 @@ static void __init attach_mad16(struct address_info *hw_config)
 
 	outb((bits | dma_bits[dma] | dma2_bit), config_port);	/* Write IRQ+DMA setup */
 
-	hw_config->slots[0] = ad1848_init("MAD16 WSS", hw_config->io_base + 4,
+	hw_config->slots[0] = ad1848_init("mad16 WSS", hw_config->io_base + 4,
 					  hw_config->irq,
 					  dma,
 					  dma2, 0,
 					  hw_config->osp,
 					  THIS_MODULE);
-	request_region(hw_config->io_base, 4, "MAD16 WSS config");
+	request_region(hw_config->io_base, 4, "mad16 WSS config");
 }
 
 static int __init probe_mad16_mpu(struct address_info *hw_config)
@@ -1002,14 +1017,6 @@ static int __init init_mad16(void)
 	}
 
 	printk(".\n");
-        printk(KERN_INFO "Joystick port ");
-        if (joystick == 1)
-                printk("enabled.\n");
-        else
-        {
-                joystick = 0;
-                printk("disabled.\n");
-        }
 
 	cfg.io_base = io;
 	cfg.irq = irq;
@@ -1030,6 +1037,18 @@ static int __init init_mad16(void)
 	attach_mad16(&cfg);
 
 	found_mpu = probe_mad16_mpu(&cfg_mpu);
+
+	if (joystick == 1) {
+	        /* register gameport */
+                if (!request_region(0x201, 1, "mad16 gameport"))
+                        printk(KERN_ERR "mad16: gameport address 0x201 already in use\n");
+                else {
+			printk(KERN_ERR "mad16: gameport enabled at 0x201\n");
+                        gameport.io = 0x201;
+		        gameport_register_port(&gameport);
+                }
+	}
+	else printk(KERN_ERR "mad16: gameport disabled.\n");
 	return 0;
 }
 
@@ -1037,6 +1056,12 @@ static void __exit cleanup_mad16(void)
 {
 	if (found_mpu)
 		unload_mad16_mpu(&cfg_mpu);
+	if (gameport.io) {
+		/* the gameport was initialized so we must free it up */
+		gameport_unregister_port(&gameport);
+		gameport.io = 0;
+		release_region(0x201, 1);
+	}
 	unload_mad16(&cfg);
 }
 
@@ -1047,19 +1072,21 @@ module_exit(cleanup_mad16);
 static int __init setup_mad16(char *str)
 {
         /* io, irq */
-	int ints[7];
+	int ints[8];
 	
 	str = get_options(str, ARRAY_SIZE(ints), ints);
 
-	io	= ints[1];
-	irq	= ints[2];
-	dma	= ints[3];
-	dma16	= ints[4];
-	mpu_io	= ints[5];
-	mpu_irq = ints[6];
+	io	 = ints[1];
+	irq	 = ints[2];
+	dma	 = ints[3];
+	dma16	 = ints[4];
+	mpu_io	 = ints[5];
+	mpu_irq  = ints[6];
+	joystick = ints[7];
 
 	return 1;
 }
 
 __setup("mad16=", setup_mad16);
 #endif
+MODULE_LICENSE("GPL");

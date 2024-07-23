@@ -1,4 +1,4 @@
-/*  $Id: signal.c,v 1.54 2000/09/05 21:44:54 davem Exp $
+/*  $Id: signal.c,v 1.56 2001/03/21 11:46:20 davem Exp $
  *  arch/sparc64/kernel/signal.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -30,9 +30,6 @@
 #include <asm/visasm.h>
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
-
-asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
-			 int options, unsigned long *ru);
 
 asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 			 unsigned long orig_o0, int ret_from_syscall);
@@ -111,12 +108,16 @@ asmlinkage void sparc64_set_context(struct pt_regs *regs)
 		recalc_sigpending(current);
 		spin_unlock_irq(&current->sigmask_lock);
 	}
+	if ((tp->flags & SPARC_FLAG_32BIT) != 0) {
+		pc &= 0xffffffff;
+		npc &= 0xffffffff;
+	}
 	regs->tpc = pc;
 	regs->tnpc = npc;
 	err |= __get_user(regs->y, &((*grp)[MC_Y]));
 	err |= __get_user(tstate, &((*grp)[MC_TSTATE]));
-	regs->tstate &= ~(TSTATE_ICC | TSTATE_XCC);
-	regs->tstate |= (tstate & (TSTATE_ICC | TSTATE_XCC));
+	regs->tstate &= ~(TSTATE_ASI | TSTATE_ICC | TSTATE_XCC);
+	regs->tstate |= (tstate & (TSTATE_ASI | TSTATE_ICC | TSTATE_XCC));
 	err |= __get_user(regs->u_regs[UREG_G1], (&(*grp)[MC_G1]));
 	err |= __get_user(regs->u_regs[UREG_G2], (&(*grp)[MC_G2]));
 	err |= __get_user(regs->u_regs[UREG_G3], (&(*grp)[MC_G3]));
@@ -193,9 +194,13 @@ asmlinkage void sparc64_get_context(struct pt_regs *regs)
 	grp = &mcp->mc_gregs;
 
 	/* Skip over the trap instruction, first. */
-	regs->tpc   = regs->tnpc;
-	regs->tnpc += 4;
-
+	if ((tp->flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc   = (regs->tnpc & 0xffffffff);
+		regs->tnpc  = (regs->tnpc + 4) & 0xffffffff;
+	} else {
+		regs->tpc   = regs->tnpc;
+		regs->tnpc += 4;
+	}
 	err = 0;
 	if (_NSIG_WORDS == 1)
 		err |= __put_user(current->blocked.sig[0],
@@ -214,7 +219,7 @@ asmlinkage void sparc64_get_context(struct pt_regs *regs)
 	err |= __put_user(regs->u_regs[UREG_G4], &((*grp)[MC_G4]));
 	err |= __put_user(regs->u_regs[UREG_G5], &((*grp)[MC_G5]));
 	err |= __put_user(regs->u_regs[UREG_G6], &((*grp)[MC_G6]));
-	err |= __put_user(regs->u_regs[UREG_G6], &((*grp)[MC_G7]));
+	err |= __put_user(regs->u_regs[UREG_G7], &((*grp)[MC_G7]));
 	err |= __put_user(regs->u_regs[UREG_I0], &((*grp)[MC_O0]));
 	err |= __put_user(regs->u_regs[UREG_I1], &((*grp)[MC_O1]));
 	err |= __put_user(regs->u_regs[UREG_I2], &((*grp)[MC_O2]));
@@ -292,8 +297,13 @@ asmlinkage void _sigpause_common(old_sigset_t set, struct pt_regs *regs)
 	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	
-	regs->tpc = regs->tnpc;
-	regs->tnpc += 4;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc = (regs->tnpc & 0xffffffff);
+		regs->tnpc = (regs->tnpc + 4) & 0xffffffff;
+	} else {
+		regs->tpc = regs->tnpc;
+		regs->tnpc += 4;
+	}
 
 	/* Condition codes and return value where set here for sigpause,
 	 * and so got used by setup_frame, which again causes sigreturn()
@@ -347,8 +357,13 @@ asmlinkage void do_rt_sigsuspend(sigset_t *uset, size_t sigsetsize, struct pt_re
 	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	
-	regs->tpc = regs->tnpc;
-	regs->tnpc += 4;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc = (regs->tnpc & 0xffffffff);
+		regs->tnpc = (regs->tnpc + 4) & 0xffffffff;
+	} else {
+		regs->tpc = regs->tnpc;
+		regs->tnpc += 4;
+	}
 
 	/* Condition codes and return value where set here for sigpause,
 	 * and so got used by setup_frame, which again causes sigreturn()
@@ -396,6 +411,7 @@ void do_rt_sigreturn(struct pt_regs *regs)
 	struct rt_signal_frame *sf;
 	unsigned long tpc, tnpc, tstate;
 	__siginfo_fpu_t *fpu_save;
+	mm_segment_t old_fs;
 	sigset_t set;
 	stack_t st;
 	int err;
@@ -410,6 +426,10 @@ void do_rt_sigreturn(struct pt_regs *regs)
 
 	err = get_user(tpc, &sf->regs.tpc);
 	err |= __get_user(tnpc, &sf->regs.tnpc);
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		tpc &= 0xffffffff;
+		tnpc &= 0xffffffff;
+	}
 	err |= ((tpc | tnpc) & 3);
 
 	/* 2. Restore the state */
@@ -417,9 +437,9 @@ void do_rt_sigreturn(struct pt_regs *regs)
 	err |= __get_user(tstate, &sf->regs.tstate);
 	err |= copy_from_user(regs->u_regs, sf->regs.u_regs, sizeof(regs->u_regs));
 
-	/* User can only change condition codes in %tstate. */
-	regs->tstate &= ~(TSTATE_ICC);
-	regs->tstate |= (tstate & TSTATE_ICC);
+	/* User can only change condition codes and %asi in %tstate. */
+	regs->tstate &= ~(TSTATE_ASI | TSTATE_ICC | TSTATE_XCC);
+	regs->tstate |= (tstate & (TSTATE_ASI | TSTATE_ICC | TSTATE_XCC));
 
 	err |= __get_user(fpu_save, &sf->fpu_save);
 	if (fpu_save)
@@ -436,7 +456,10 @@ void do_rt_sigreturn(struct pt_regs *regs)
 	
 	/* It is more difficult to avoid calling this function than to
 	   call it and ignore errors.  */
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
 	do_sigaltstack(&st, NULL, (unsigned long)sf);
+	set_fs(old_fs);
 
 	sigdelsetmask(&set, ~_BLOCKABLE);
 	spin_lock_irq(&current->sigmask_lock);
@@ -555,10 +578,19 @@ setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	regs->u_regs[UREG_I0] = signo;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
 
+	/* The sigcontext is passed in this way because of how it
+	 * is defined in GLIBC's /usr/include/bits/sigcontext.h
+	 * for sparc64.  It includes the 128 bytes of siginfo_t.
+	 */
+	regs->u_regs[UREG_I2] = (unsigned long) &sf->info;
+
 	/* 5. signal handler */
 	regs->tpc = (unsigned long) ka->sa.sa_handler;
 	regs->tnpc = (regs->tpc + 4);
-
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 	/* 4. return to kernel instructions */
 	regs->u_regs[UREG_I7] = (unsigned long)ka->ka_restorer;
 	return;
@@ -647,6 +679,8 @@ static inline void read_maps (void)
 			line = d_path(map->vm_file->f_dentry,
 				      map->vm_file->f_vfsmnt,
 				      buffer, PAGE_SIZE);
+			if (IS_ERR(line))
+				break;
 		}
 		printk(MAPS_LINE_FORMAT, map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
 			      kdevname(dev), ino);
@@ -687,9 +721,23 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 		signr = dequeue_signal(&current->blocked, &info);
 		spin_unlock_irq(&current->sigmask_lock);
 		
-		if (!signr) break;
+		if (!signr)
+			break;
 
 		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+			/* Do the syscall restart before we let the debugger
+			 * look at the child registers.
+			 */
+			if (restart_syscall &&
+			    (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
+			     regs->u_regs[UREG_I0] == ERESTARTSYS ||
+			     regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
+				regs->u_regs[UREG_I0] = orig_i0;
+				regs->tpc -= 4;
+				regs->tnpc -= 4;
+				restart_syscall = 0;
+			}
+
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
 			notify_parent(current, SIGCHLD);
@@ -718,8 +766,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 		
 		ka = &current->sig->action[signr-1];
 		
-		if(ka->sa.sa_handler == SIG_IGN) {
-			if(signr != SIGCHLD)
+		if (ka->sa.sa_handler == SIG_IGN) {
+			if (signr != SIGCHLD)
 				continue;
 
                         /* sys_wait4() grabs the master kernel lock, so
@@ -727,17 +775,17 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
                          * threaded and would not be that difficult to
                          * do anyways.
                          */
-                        while(sys_wait4(-1, NULL, WNOHANG, NULL) > 0)
+                        while (sys_wait4(-1, NULL, WNOHANG, NULL) > 0)
                                 ;
 			continue;
 		}
-		if(ka->sa.sa_handler == SIG_DFL) {
+		if (ka->sa.sa_handler == SIG_DFL) {
 			unsigned long exit_code = signr;
 			
-			if(current->pid == 1)
+			if (current->pid == 1)
 				continue;
-			switch(signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
+			switch (signr) {
+			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -749,8 +797,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
-				if(!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags &
-				     SA_NOCLDSTOP))
+				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags &
+				      SA_NOCLDSTOP))
 					notify_parent(current, SIGCHLD);
 				schedule();
 				continue;
@@ -769,8 +817,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 					struct reg_window *rw = (struct reg_window *)(regs->u_regs[UREG_FP] + STACK_BIAS);
 					unsigned long ins[8];
                                                 
-					while(rw &&
-					      !(((unsigned long) rw) & 0x3)) {
+					while (rw &&
+					       !(((unsigned long) rw) & 0x3)) {
 					        copy_from_user(ins, &rw->ins[0], sizeof(ins));
 						printk("Caller[%016lx](%016lx,%016lx,%016lx,%016lx,%016lx,%016lx)\n", ins[7], ins[0], ins[1], ins[2], ins[3], ins[4], ins[5]);
 						rw = (struct reg_window *)(unsigned long)(ins[6] + STACK_BIAS);
@@ -784,22 +832,19 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 #endif
 				/* fall through */
 			default:
-				sigaddset(&current->pending.signal, signr);
-				recalc_sigpending(current);
-				current->flags |= PF_SIGNALED;
-				do_exit(exit_code);
+				sig_exit(signr, exit_code, &info);
 				/* NOT REACHED */
 			}
 		}
-		if(restart_syscall)
+		if (restart_syscall)
 			syscall_restart(orig_i0, regs, &ka->sa);
 		handle_signal(signr, ka, &info, oldset, regs);
 		return 1;
 	}
-	if(restart_syscall &&
-	   (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
-	    regs->u_regs[UREG_I0] == ERESTARTSYS ||
-	    regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
+	if (restart_syscall &&
+	    (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
+	     regs->u_regs[UREG_I0] == ERESTARTSYS ||
+	     regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
 		/* replay the system call when we are done */
 		regs->u_regs[UREG_I0] = orig_i0;
 		regs->tpc -= 4;

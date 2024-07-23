@@ -1,5 +1,5 @@
 /*
- * linux/fs/nls.c
+ * linux/fs/nls_base.c
  *
  * Native language support--charsets and unicode translations.
  * By Gordon Chaffee 1996, 1997
@@ -13,7 +13,7 @@
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/nls.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
@@ -93,7 +93,7 @@ utf8_mbstowcs(wchar_t *pwcs, const __u8 *s, int n)
 				ip++;
 				n--;
 			} else {
-				op += size;
+				op++;
 				ip += size;
 				n -= size;
 			}

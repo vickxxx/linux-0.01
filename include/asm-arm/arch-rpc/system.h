@@ -11,35 +11,14 @@
 #include <asm/hardware/iomd.h>
 #include <asm/io.h>
 
-static void arch_idle(void)
+static inline void arch_idle(void)
 {
-	unsigned long start_idle;
-
-	start_idle = jiffies;
-
-	do {
-		if (current->need_resched || hlt_counter)
-			goto slow_out;
-		cpu_do_idle(IDLE_WAIT_FAST);
-	} while (time_before(jiffies, start_idle + HZ/50));
-
-	cpu_do_idle(IDLE_CLOCK_SLOW);
-
-	while (!current->need_resched && !hlt_counter) {
-		cpu_do_idle(IDLE_WAIT_SLOW);
-	}
-
-	cpu_do_idle(IDLE_CLOCK_FAST);
-slow_out:
+	cpu_do_idle();
 }
 
-extern __inline__ void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
-	extern void ecard_reset(int card);
-
-	ecard_reset(-1);
-
-	outb(0, IOMD_ROMCR0);
+	iomd_writeb(0, IOMD_ROMCR0);
 
 	/*
 	 * Jump into the ROM

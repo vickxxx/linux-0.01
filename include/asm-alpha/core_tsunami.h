@@ -275,6 +275,9 @@ union TPchipPERRMASK {
 /* The IO address space is larger than 0xffff */
 #define TSUNAMI_IO_SPACE	(TSUNAMI_CONF(0) - TSUNAMI_IO(0))
 
+/* Offset between ram physical addresses and pci64 DAC bus addresses.  */
+#define TSUNAMI_DAC_OFFSET	(1UL << 40)
+
 /*
  * Data structure for handling TSUNAMI machine checks:
  */
@@ -285,7 +288,7 @@ struct el_TSUNAMI_sysdata_mcheck {
 #ifdef __KERNEL__
 
 #ifndef __EXTERN_INLINE
-#define __EXTERN_INLINE extern inline
+#define __EXTERN_INLINE static inline
 #define __IO_EXTERN_INLINE
 #endif
 
@@ -301,7 +304,7 @@ struct el_TSUNAMI_sysdata_mcheck {
 #define vuip	volatile unsigned int *
 #define vulp	volatile unsigned long *
 
-__EXTERN_INLINE unsigned int tsunami_inb(unsigned long addr)
+__EXTERN_INLINE u8 tsunami_inb(unsigned long addr)
 {
 	/* ??? I wish I could get rid of this.  But there's no ioremap
 	   equivalent for I/O space.  PCI I/O can be forced into the
@@ -312,33 +315,33 @@ __EXTERN_INLINE unsigned int tsunami_inb(unsigned long addr)
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE void tsunami_outb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void tsunami_outb(u8 b, unsigned long addr)
 {
 	addr += TSUNAMI_IO_BIAS;
 	__kernel_stb(b, *(vucp)addr);
 	mb();
 }
 
-__EXTERN_INLINE unsigned int tsunami_inw(unsigned long addr)
+__EXTERN_INLINE u16 tsunami_inw(unsigned long addr)
 {
 	addr += TSUNAMI_IO_BIAS;
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE void tsunami_outw(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void tsunami_outw(u16 b, unsigned long addr)
 {
 	addr += TSUNAMI_IO_BIAS;
 	__kernel_stw(b, *(vusp)addr);
 	mb();
 }
 
-__EXTERN_INLINE unsigned int tsunami_inl(unsigned long addr)
+__EXTERN_INLINE u32 tsunami_inl(unsigned long addr)
 {
 	addr += TSUNAMI_IO_BIAS;
 	return *(vuip)addr;
 }
 
-__EXTERN_INLINE void tsunami_outl(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void tsunami_outl(u32 b, unsigned long addr)
 {
 	addr += TSUNAMI_IO_BIAS;
 	*(vuip)addr = b;
@@ -349,9 +352,16 @@ __EXTERN_INLINE void tsunami_outl(unsigned int b, unsigned long addr)
  * Memory functions.  all accesses are done through linear space.
  */
 
-__EXTERN_INLINE unsigned long tsunami_ioremap(unsigned long addr)
+__EXTERN_INLINE unsigned long tsunami_ioremap(unsigned long addr, 
+					      unsigned long size
+					      __attribute__((unused)))
 {
 	return addr + TSUNAMI_MEM_BIAS;
+}
+
+__EXTERN_INLINE void tsunami_iounmap(unsigned long addr)
+{
+	return;
 }
 
 __EXTERN_INLINE int tsunami_is_ioaddr(unsigned long addr)
@@ -359,42 +369,42 @@ __EXTERN_INLINE int tsunami_is_ioaddr(unsigned long addr)
 	return addr >= TSUNAMI_BASE;
 }
 
-__EXTERN_INLINE unsigned long tsunami_readb(unsigned long addr)
+__EXTERN_INLINE u8 tsunami_readb(unsigned long addr)
 {
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE unsigned long tsunami_readw(unsigned long addr)
+__EXTERN_INLINE u16 tsunami_readw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE unsigned long tsunami_readl(unsigned long addr)
+__EXTERN_INLINE u32 tsunami_readl(unsigned long addr)
 {
 	return *(vuip)addr;
 }
 
-__EXTERN_INLINE unsigned long tsunami_readq(unsigned long addr)
+__EXTERN_INLINE u64 tsunami_readq(unsigned long addr)
 {
 	return *(vulp)addr;
 }
 
-__EXTERN_INLINE void tsunami_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void tsunami_writeb(u8 b, unsigned long addr)
 {
 	__kernel_stb(b, *(vucp)addr);
 }
 
-__EXTERN_INLINE void tsunami_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void tsunami_writew(u16 b, unsigned long addr)
 {
 	__kernel_stw(b, *(vusp)addr);
 }
 
-__EXTERN_INLINE void tsunami_writel(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void tsunami_writel(u32 b, unsigned long addr)
 {
 	*(vuip)addr = b;
 }
 
-__EXTERN_INLINE void tsunami_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void tsunami_writeq(u64 b, unsigned long addr)
 {
 	*(vulp)addr = b;
 }
@@ -420,7 +430,8 @@ __EXTERN_INLINE void tsunami_writeq(unsigned long b, unsigned long addr)
 #define __writew(x,a)		tsunami_writew((x),(unsigned long)(a))
 #define __writel(x,a)		tsunami_writel((x),(unsigned long)(a))
 #define __writeq(x,a)		tsunami_writeq((x),(unsigned long)(a))
-#define __ioremap(a)		tsunami_ioremap((unsigned long)(a))
+#define __ioremap(a,s)		tsunami_ioremap((unsigned long)(a),(s))
+#define __iounmap(a)		tsunami_iounmap((unsigned long)(a))
 #define __is_ioaddr(a)		tsunami_is_ioaddr((unsigned long)(a))
 
 #define inb(p)			__inb(p)

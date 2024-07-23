@@ -5,9 +5,9 @@
  * PPPoE --- PPP over Ethernet (RFC 2516)
  *
  *
- * Version:	0.5.1
+ * Version:	0.5.2
  *
- * Author:	Michal Ostrowski <mostrows@styx.uwaterloo.ca>
+ * Author:	Michal Ostrowski <mostrows@speakeasy.net>
  *
  * 051000 :	Initialization cleanup
  *
@@ -26,7 +26,7 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 
 #include <linux/netdevice.h>
@@ -38,7 +38,7 @@
 #include <linux/if_ppp.h>
 #include <linux/ppp_channel.h>
 
-static struct pppox_proto *proto[PX_MAX_PROTO+1] = { NULL, };
+static struct pppox_proto *proto[PX_MAX_PROTO+1];
 
 int register_pppox_proto(int proto_num, struct pppox_proto *pp)
 {
@@ -67,9 +67,9 @@ void pppox_unbind_sock(struct sock *sk)
 {
 	/* Clear connection to ppp device, if attached. */
 
-	if (sk->state & PPPOX_BOUND) {
+	if (sk->state & (PPPOX_BOUND | PPPOX_CONNECTED | PPPOX_ZOMBIE)) {
 		ppp_unregister_channel(&sk->protinfo.pppox->chan);
-		sk->state &= ~PPPOX_BOUND;
+		sk->state = PPPOX_DEAD;
 	}
 }
 
@@ -77,8 +77,8 @@ EXPORT_SYMBOL(register_pppox_proto);
 EXPORT_SYMBOL(unregister_pppox_proto);
 EXPORT_SYMBOL(pppox_unbind_sock);
 
-int pppox_ioctl(struct socket* sock, unsigned int cmd,
-		unsigned long arg)
+static int pppox_ioctl(struct socket* sock, unsigned int cmd,
+		       unsigned long arg)
 {
 	struct sock *sk = sock->sk;
 	struct pppox_opt *po;
@@ -116,7 +116,7 @@ int pppox_ioctl(struct socket* sock, unsigned int cmd,
 }
 
 
-int pppox_create(struct socket *sock, int protocol)
+static int pppox_create(struct socket *sock, int protocol)
 {
 	int err = 0;
 
@@ -137,28 +137,28 @@ int pppox_create(struct socket *sock, int protocol)
 	return err;
 }
 
-struct net_proto_family pppox_proto_family = {
+static struct net_proto_family pppox_proto_family = {
 	PF_PPPOX,
 	pppox_create
 };
 
-int __init pppox_init(void)
+static int __init pppox_init(void)
 {
 	int err = 0;
 
 	err = sock_register(&pppox_proto_family);
 
-	if (err == 0) {
-		printk(KERN_INFO "Registered PPPoX v0.5\n");
-	}
-
 	return err;
 }
 
-void __exit pppox_exit(void)
+static void __exit pppox_exit(void)
 {
 	sock_unregister(PF_PPPOX);
 }
 
 module_init(pppox_init);
 module_exit(pppox_exit);
+
+MODULE_AUTHOR("Michal Ostrowski <mostrows@speakeasy.net>");
+MODULE_DESCRIPTION("PPP over Ethernet driver (generic socket layer)");
+MODULE_LICENSE("GPL");

@@ -42,23 +42,23 @@ extern int swim3_init(void);
 extern int swimiop_init(void);
 extern int amiga_floppy_init(void);
 extern int atari_floppy_init(void);
-extern int nbd_init(void);
 extern int ez_init(void);
 extern int bpcd_init(void);
 extern int ps2esdi_init(void);
 extern int jsfd_init(void);
+extern int viodasd_init(void);
+extern int viocd_init(void);
 
 #if defined(CONFIG_ARCH_S390)
-extern int mdisk_init(void);
 extern int dasd_init(void);
+extern int xpram_init(void);
+extern int tapeblock_init(void);
 #endif /* CONFIG_ARCH_S390 */
 
 extern void set_device_ro(kdev_t dev,int flag);
 void add_blkdev_randomness(int major);
 
 extern int floppy_init(void);
-extern void rd_load(void);
-extern int rd_init(void);
 extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
 extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
 extern int rd_image_start;	/* starting block # of image */
@@ -68,7 +68,6 @@ extern int rd_image_start;	/* starting block # of image */
 #define INITRD_MINOR 250 /* shouldn't collide with /dev/ram* too soon ... */
 
 extern unsigned long initrd_start,initrd_end;
-extern int mount_initrd; /* zero if initrd should not be mounted */
 extern int initrd_below_start_ok; /* 1 if it is not an error if initrd_start < memory_start */
 void initrd_init(void);
 
@@ -87,10 +86,6 @@ void initrd_init(void);
 
 static inline void blkdev_dequeue_request(struct request * req)
 {
-	if (req->e) {
-		req->e->dequeue_fn(req);
-		req->e = NULL;
-	}
 	list_del(&req->queue);
 }
 
@@ -322,7 +317,7 @@ static void floppy_off(unsigned int nr);
 
 #define DEVICE_NAME "ida"
 #define TIMEOUT_VALUE (25*HZ)
-#define DEVICE_REQUEST do_ida_request0
+#define DEVICE_REQUEST do_ida_request
 #define DEVICE_NR(device) (MINOR(device) >> 4)
 
 #endif /* MAJOR_NR == whatever */

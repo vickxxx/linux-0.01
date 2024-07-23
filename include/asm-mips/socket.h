@@ -4,7 +4,7 @@
 #include <asm/sockios.h>
 
 /*
- * For setsockoptions(2)
+ * For setsockopt(2)
  *
  * This defines are ABI conformant as far as Linux supports these ...
  */
@@ -33,6 +33,7 @@ To add: #define SO_REUSEPORT 0x0200	/* Allow local address and port reuse.  */
 #define SO_RCVLOWAT	0x1004	/* receive low-water mark */
 #define SO_SNDTIMEO	0x1005	/* send timeout */
 #define SO_RCVTIMEO 	0x1006	/* receive timeout */
+#define SO_ACCEPTCONN	0x1009
 
 /* linux-specific, might as well be the same as on i386 */
 #define SO_NO_CHECK	11
@@ -70,6 +71,7 @@ To add: #define SO_REUSEPORT 0x0200	/* Allow local address and port reuse.  */
 					/* level.  For writing rarp and	*/
 					/* other similar things on the	*/
 					/* user level.			*/
+#define	SOCK_MAX	(SOCK_PACKET+1)
 #endif
 
 #endif /* _ASM_SOCKET_H */

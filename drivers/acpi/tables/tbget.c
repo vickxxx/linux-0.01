@@ -1,46 +1,424 @@
 /******************************************************************************
  *
  * Module Name: tbget - ACPI Table get* routines
- *              $Revision: 40 $
  *
  *****************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ * Copyright (C) 2000 - 2004, R. Byron Moore
+ * All rights reserved.
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions, and the following disclaimer,
+ *    without modification.
+ * 2. Redistributions in binary form must reproduce at minimum a disclaimer
+ *    substantially similar to the "NO WARRANTY" disclaimer below
+ *    ("Disclaimer") and any redistribution must be conditioned upon
+ *    including a substantially similar Disclaimer requirement for further
+ *    binary redistribution.
+ * 3. Neither the names of the above-listed copyright holders nor the names
+ *    of any contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * Alternatively, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") version 2 as published by the Free
+ * Software Foundation.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * NO WARRANTY
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
  */
 
 
-#include "acpi.h"
-#include "achware.h"
-#include "actables.h"
+#include <acpi/acpi.h>
+#include <acpi/actables.h>
 
 
-#define _COMPONENT          TABLE_MANAGER
-	 MODULE_NAME         ("tbget")
+#define _COMPONENT          ACPI_TABLES
+	 ACPI_MODULE_NAME    ("tbget")
 
-#define RSDP_CHECKSUM_LENGTH 20
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_tb_get_table_ptr
+ * FUNCTION:    acpi_tb_get_table
  *
- * PARAMETERS:  Table_type      - one of the defined table types
+ * PARAMETERS:  Address             - Address of table to retrieve.  Can be
+ *                                    Logical or Physical
+ *              table_info          - Where table info is returned
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Get entire table of unknown size.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_tb_get_table (
+	struct acpi_pointer             *address,
+	struct acpi_table_desc          *table_info)
+{
+	acpi_status                     status;
+	struct acpi_table_header        header;
+
+
+	ACPI_FUNCTION_TRACE ("tb_get_table");
+
+
+	/*
+	 * Get the header in order to get signature and table size
+	 */
+	status = acpi_tb_get_table_header (address, &header);
+	if (ACPI_FAILURE (status)) {
+		return_ACPI_STATUS (status);
+	}
+
+	/* Get the entire table */
+
+	status = acpi_tb_get_table_body (address, &header, table_info);
+	if (ACPI_FAILURE (status)) {
+		ACPI_REPORT_ERROR (("Could not get ACPI table (size %X), %s\n",
+			header.length, acpi_format_exception (status)));
+		return_ACPI_STATUS (status);
+	}
+
+	return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_get_table_header
+ *
+ * PARAMETERS:  Address             - Address of table to retrieve.  Can be
+ *                                    Logical or Physical
+ *              return_header       - Where the table header is returned
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Get an ACPI table header.  Works in both physical or virtual
+ *              addressing mode.  Works with both physical or logical pointers.
+ *              Table is either copied or mapped, depending on the pointer
+ *              type and mode of the processor.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_tb_get_table_header (
+	struct acpi_pointer             *address,
+	struct acpi_table_header        *return_header)
+{
+	acpi_status                     status = AE_OK;
+	struct acpi_table_header        *header = NULL;
+
+
+	ACPI_FUNCTION_TRACE ("tb_get_table_header");
+
+
+	/*
+	 * Flags contains the current processor mode (Virtual or Physical addressing)
+	 * The pointer_type is either Logical or Physical
+	 */
+	switch (address->pointer_type) {
+	case ACPI_PHYSMODE_PHYSPTR:
+	case ACPI_LOGMODE_LOGPTR:
+
+		/* Pointer matches processor mode, copy the header */
+
+		ACPI_MEMCPY (return_header, address->pointer.logical, sizeof (struct acpi_table_header));
+		break;
+
+
+	case ACPI_LOGMODE_PHYSPTR:
+
+		/* Create a logical address for the physical pointer*/
+
+		status = acpi_os_map_memory (address->pointer.physical, sizeof (struct acpi_table_header),
+				  (void *) &header);
+		if (ACPI_FAILURE (status)) {
+			ACPI_REPORT_ERROR (("Could not map memory at %8.8X%8.8X for length %X\n",
+				ACPI_FORMAT_UINT64 (address->pointer.physical),
+				sizeof (struct acpi_table_header)));
+			return_ACPI_STATUS (status);
+		}
+
+		/* Copy header and delete mapping */
+
+		ACPI_MEMCPY (return_header, header, sizeof (struct acpi_table_header));
+		acpi_os_unmap_memory (header, sizeof (struct acpi_table_header));
+		break;
+
+
+	default:
+
+		ACPI_REPORT_ERROR (("Invalid address flags %X\n",
+			address->pointer_type));
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
+	}
+
+	return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_get_table_body
+ *
+ * PARAMETERS:  Address             - Address of table to retrieve.  Can be
+ *                                    Logical or Physical
+ *              Header              - Header of the table to retrieve
+ *              table_info          - Where the table info is returned
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Get an entire ACPI table with support to allow the host OS to
+ *              replace the table with a newer version (table override.)
+ *              Works in both physical or virtual
+ *              addressing mode.  Works with both physical or logical pointers.
+ *              Table is either copied or mapped, depending on the pointer
+ *              type and mode of the processor.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_tb_get_table_body (
+	struct acpi_pointer             *address,
+	struct acpi_table_header        *header,
+	struct acpi_table_desc          *table_info)
+{
+	acpi_status                     status;
+
+
+	ACPI_FUNCTION_TRACE ("tb_get_table_body");
+
+
+	if (!table_info || !address) {
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
+	}
+
+	/*
+	 * Attempt table override.
+	 */
+	status = acpi_tb_table_override (header, table_info);
+	if (ACPI_SUCCESS (status)) {
+		/* Table was overridden by the host OS */
+
+		return_ACPI_STATUS (status);
+	}
+
+	/* No override, get the original table */
+
+	status = acpi_tb_get_this_table (address, header, table_info);
+	return_ACPI_STATUS (status);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_table_override
+ *
+ * PARAMETERS:  Header              - Pointer to table header
+ *              table_info          - Return info if table is overridden
+ *
+ * RETURN:      None
+ *
+ * DESCRIPTION: Attempts override of current table with a new one if provided
+ *              by the host OS.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_tb_table_override (
+	struct acpi_table_header        *header,
+	struct acpi_table_desc          *table_info)
+{
+	struct acpi_table_header        *new_table;
+	acpi_status                     status;
+	struct acpi_pointer             address;
+
+
+	ACPI_FUNCTION_TRACE ("tb_table_override");
+
+
+	/*
+	 * The OSL will examine the header and decide whether to override this
+	 * table.  If it decides to override, a table will be returned in new_table,
+	 * which we will then copy.
+	 */
+	status = acpi_os_table_override (header, &new_table);
+	if (ACPI_FAILURE (status)) {
+		/* Some severe error from the OSL, but we basically ignore it */
+
+		ACPI_REPORT_ERROR (("Could not override ACPI table, %s\n",
+			acpi_format_exception (status)));
+		return_ACPI_STATUS (status);
+	}
+
+	if (!new_table) {
+		/* No table override */
+
+		return_ACPI_STATUS (AE_NO_ACPI_TABLES);
+	}
+
+	/*
+	 * We have a new table to override the old one.  Get a copy of
+	 * the new one.  We know that the new table has a logical pointer.
+	 */
+	address.pointer_type    = ACPI_LOGICAL_POINTER | ACPI_LOGICAL_ADDRESSING;
+	address.pointer.logical = new_table;
+
+	status = acpi_tb_get_this_table (&address, new_table, table_info);
+	if (ACPI_FAILURE (status)) {
+		ACPI_REPORT_ERROR (("Could not copy override ACPI table, %s\n",
+			acpi_format_exception (status)));
+		return_ACPI_STATUS (status);
+	}
+
+	/* Copy the table info */
+
+	ACPI_REPORT_INFO (("Table [%4.4s] replaced by host OS\n",
+		table_info->pointer->signature));
+
+	return_ACPI_STATUS (AE_OK);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_get_this_table
+ *
+ * PARAMETERS:  Address             - Address of table to retrieve.  Can be
+ *                                    Logical or Physical
+ *              Header              - Header of the table to retrieve
+ *              table_info          - Where the table info is returned
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Get an entire ACPI table.  Works in both physical or virtual
+ *              addressing mode.  Works with both physical or logical pointers.
+ *              Table is either copied or mapped, depending on the pointer
+ *              type and mode of the processor.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_tb_get_this_table (
+	struct acpi_pointer             *address,
+	struct acpi_table_header        *header,
+	struct acpi_table_desc          *table_info)
+{
+	struct acpi_table_header        *full_table = NULL;
+	u8                              allocation;
+	acpi_status                     status = AE_OK;
+
+
+	ACPI_FUNCTION_TRACE ("tb_get_this_table");
+
+
+	/*
+	 * Flags contains the current processor mode (Virtual or Physical addressing)
+	 * The pointer_type is either Logical or Physical
+	 */
+	switch (address->pointer_type) {
+	case ACPI_PHYSMODE_PHYSPTR:
+	case ACPI_LOGMODE_LOGPTR:
+
+		/* Pointer matches processor mode, copy the table to a new buffer */
+
+		full_table = ACPI_MEM_ALLOCATE (header->length);
+		if (!full_table) {
+			ACPI_REPORT_ERROR (("Could not allocate table memory for [%4.4s] length %X\n",
+				header->signature, header->length));
+			return_ACPI_STATUS (AE_NO_MEMORY);
+		}
+
+		/* Copy the entire table (including header) to the local buffer */
+
+		ACPI_MEMCPY (full_table, address->pointer.logical, header->length);
+
+		/* Save allocation type */
+
+		allocation = ACPI_MEM_ALLOCATED;
+		break;
+
+
+	case ACPI_LOGMODE_PHYSPTR:
+
+		/*
+		 * Just map the table's physical memory
+		 * into our address space.
+		 */
+		status = acpi_os_map_memory (address->pointer.physical, (acpi_size) header->length,
+				  (void *) &full_table);
+		if (ACPI_FAILURE (status)) {
+			ACPI_REPORT_ERROR (("Could not map memory for table [%4.4s] at %8.8X%8.8X for length %X\n",
+				header->signature,
+				ACPI_FORMAT_UINT64 (address->pointer.physical), header->length));
+			return (status);
+		}
+
+		/* Save allocation type */
+
+		allocation = ACPI_MEM_MAPPED;
+		break;
+
+
+	default:
+
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Invalid address flags %X\n",
+			address->pointer_type));
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
+	}
+
+	/*
+	 * Validate checksum for _most_ tables,
+	 * even the ones whose signature we don't recognize
+	 */
+	if (table_info->type != ACPI_TABLE_FACS) {
+		status = acpi_tb_verify_table_checksum (full_table);
+
+#if (!ACPI_CHECKSUM_ABORT)
+		if (ACPI_FAILURE (status)) {
+			/* Ignore the error if configuration says so */
+
+			status = AE_OK;
+		}
+#endif
+	}
+
+	/* Return values */
+
+	table_info->pointer     = full_table;
+	table_info->length      = (acpi_size) header->length;
+	table_info->allocation  = allocation;
+
+	ACPI_DEBUG_PRINT ((ACPI_DB_INFO,
+		"Found table [%4.4s] at %8.8X%8.8X, mapped/copied to %p\n",
+		full_table->signature,
+		ACPI_FORMAT_UINT64 (address->pointer.physical), full_table));
+
+	return_ACPI_STATUS (status);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_get_table_ptr
+ *
+ * PARAMETERS:  table_type      - one of the defined table types
  *              Instance        - Which table of this type
- *              Table_ptr_loc   - pointer to location to place the pointer for
+ *              table_ptr_loc   - pointer to location to place the pointer for
  *                                return
  *
  * RETURN:      Status
@@ -49,56 +427,56 @@
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_tb_get_table_ptr (
-	ACPI_TABLE_TYPE         table_type,
-	u32                     instance,
-	ACPI_TABLE_HEADER       **table_ptr_loc)
+	acpi_table_type                 table_type,
+	u32                             instance,
+	struct acpi_table_header        **table_ptr_loc)
 {
-	ACPI_TABLE_DESC         *table_desc;
-	u32                     i;
+	struct acpi_table_desc          *table_desc;
+	u32                             i;
+
+
+	ACPI_FUNCTION_TRACE ("tb_get_table_ptr");
 
 
 	if (!acpi_gbl_DSDT) {
-		return (AE_NO_ACPI_TABLES);
+		return_ACPI_STATUS (AE_NO_ACPI_TABLES);
 	}
 
 	if (table_type > ACPI_TABLE_MAX) {
-		return (AE_BAD_PARAMETER);
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
-
 
 	/*
 	 * For all table types (Single/Multiple), the first
 	 * instance is always in the list head.
 	 */
-
 	if (instance == 1) {
-		/*
-		 * Just pluck the pointer out of the global table!
-		 * Will be null if no table is present
-		 */
+		/* Get the first */
 
-		*table_ptr_loc = acpi_gbl_acpi_tables[table_type].pointer;
-		return (AE_OK);
+		*table_ptr_loc = NULL;
+		if (acpi_gbl_table_lists[table_type].next) {
+			*table_ptr_loc = acpi_gbl_table_lists[table_type].next->pointer;
+		}
+		return_ACPI_STATUS (AE_OK);
 	}
-
 
 	/*
 	 * Check for instance out of range
 	 */
-	if (instance > acpi_gbl_acpi_tables[table_type].count) {
-		return (AE_NOT_EXIST);
+	if (instance > acpi_gbl_table_lists[table_type].count) {
+		return_ACPI_STATUS (AE_NOT_EXIST);
 	}
 
 	/* Walk the list to get the desired table
-	 *  Since the if (Instance == 1) check above checked for the
-	 *  first table, setting Table_desc equal to the .Next member
-	 *  is actually pointing to the second table.  Therefore, we
-	 *  need to walk from the 2nd table until we reach the Instance
-	 *  that the user is looking for and return its table pointer.
+	 * Since the if (Instance == 1) check above checked for the
+	 * first table, setting table_desc equal to the .Next member
+	 * is actually pointing to the second table.  Therefore, we
+	 * need to walk from the 2nd table until we reach the Instance
+	 * that the user is looking for and return its table pointer.
 	 */
-	table_desc = acpi_gbl_acpi_tables[table_type].next;
+	table_desc = acpi_gbl_table_lists[table_type].next;
 	for (i = 2; i < instance; i++) {
 		table_desc = table_desc->next;
 	}
@@ -107,504 +485,6 @@ acpi_tb_get_table_ptr (
 
 	*table_ptr_loc = table_desc->pointer;
 
-	return (AE_OK);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    Acpi_tb_get_table
- *
- * PARAMETERS:  Physical_address        - Physical address of table to retrieve
- *              *Buffer_ptr             - If Buffer_ptr is valid, read data from
- *                                         buffer rather than searching memory
- *              *Table_info             - Where the table info is returned
- *
- * RETURN:      Status
- *
- * DESCRIPTION: Maps the physical address of table into a logical address
- *
- ******************************************************************************/
-
-ACPI_STATUS
-acpi_tb_get_table (
-	ACPI_PHYSICAL_ADDRESS   physical_address,
-	ACPI_TABLE_HEADER       *buffer_ptr,
-	ACPI_TABLE_DESC         *table_info)
-{
-	ACPI_TABLE_HEADER       *table_header = NULL;
-	ACPI_TABLE_HEADER       *full_table = NULL;
-	u32                     size;
-	u8                      allocation;
-	ACPI_STATUS             status = AE_OK;
-
-
-	if (!table_info) {
-		return (AE_BAD_PARAMETER);
-	}
-
-
-	if (buffer_ptr) {
-		/*
-		 * Getting data from a buffer, not BIOS tables
-		 */
-
-		table_header = buffer_ptr;
-		status = acpi_tb_validate_table_header (table_header);
-		if (ACPI_FAILURE (status)) {
-			/* Table failed verification, map all errors to BAD_DATA */
-
-			return (AE_BAD_DATA);
-		}
-
-		/* Allocate buffer for the entire table */
-
-		full_table = acpi_cm_allocate (table_header->length);
-		if (!full_table) {
-			return (AE_NO_MEMORY);
-		}
-
-		/* Copy the entire table (including header) to the local buffer */
-
-		size = table_header->length;
-		MEMCPY (full_table, buffer_ptr, size);
-
-		/* Save allocation type */
-
-		allocation = ACPI_MEM_ALLOCATED;
-	}
-
-
-	/*
-	 * Not reading from a buffer, just map the table's physical memory
-	 * into our address space.
-	 */
-	else {
-		size = SIZE_IN_HEADER;
-
-		status = acpi_tb_map_acpi_table (physical_address, &size,
-				  (void **) &full_table);
-		if (ACPI_FAILURE (status)) {
-			return (status);
-		}
-
-		/* Save allocation type */
-
-		allocation = ACPI_MEM_MAPPED;
-	}
-
-
-	/* Return values */
-
-	table_info->pointer     = full_table;
-	table_info->length      = size;
-	table_info->allocation  = allocation;
-	table_info->base_pointer = full_table;
-
-	return (status);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    Acpi_tb_get_all_tables
- *
- * PARAMETERS:  Number_of_tables    - Number of tables to get
- *              Table_ptr           - Input buffer pointer, optional
- *
- * RETURN:      Status
- *
- * DESCRIPTION: Load and validate all tables other than the RSDT.  The RSDT must
- *              already be loaded and validated.
- *
- ******************************************************************************/
-
-ACPI_STATUS
-acpi_tb_get_all_tables (
-	u32                     number_of_tables,
-	ACPI_TABLE_HEADER       *table_ptr)
-{
-	ACPI_STATUS             status = AE_OK;
-	u32                     index;
-	ACPI_TABLE_DESC         table_info;
-
-
-	/*
-	 * Loop through all table pointers found in RSDT.
-	 * This will NOT include the FACS and DSDT - we must get
-	 * them after the loop
-	 */
-
-	for (index = 0; index < number_of_tables; index++) {
-		/* Clear the Table_info each time */
-
-		MEMSET (&table_info, 0, sizeof (ACPI_TABLE_DESC));
-
-		/* Get the table via the XSDT */
-
-		status = acpi_tb_get_table ((ACPI_PHYSICAL_ADDRESS)
-				 acpi_gbl_XSDT->table_offset_entry[index],
-				 table_ptr, &table_info);
-
-		/* Ignore a table that failed verification */
-
-		if (status == AE_BAD_DATA) {
-			continue;
-		}
-
-		/* However, abort on serious errors */
-
-		if (ACPI_FAILURE (status)) {
-			return (status);
-		}
-
-		/* Recognize and install the table */
-
-		status = acpi_tb_install_table (table_ptr, &table_info);
-		if (ACPI_FAILURE (status)) {
-			/*
-			 * Unrecognized or unsupported table, delete it and ignore the
-			 * error.  Just get as many tables as we can, later we will
-			 * determine if there are enough tables to continue.
-			 */
-
-			acpi_tb_uninstall_table (&table_info);
-		}
-	}
-
-
-	/*
-	 * Convert the FADT to a common format.  This allows earlier revisions of the
-	 * table to coexist with newer versions, using common access code.
-	 */
-	status = acpi_tb_convert_table_fadt ();
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-
-	/*
-	 * Get the minimum set of ACPI tables, namely:
-	 *
-	 * 1) FADT (via RSDT in loop above)
-	 * 2) FACS
-	 * 3) DSDT
-	 *
-	 */
-
-
-	/*
-	 * Get the FACS (must have the FADT first, from loop above)
-	 * Acpi_tb_get_table_facs will fail if FADT pointer is not valid
-	 */
-
-	status = acpi_tb_get_table_facs (table_ptr, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-
-	/* Install the FACS */
-
-	status = acpi_tb_install_table (table_ptr, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	/*
-	 * Create the common FACS pointer table
-	 * (Contains pointers to the original table)
-	 */
-
-	status = acpi_tb_build_common_facs (&table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-
-	/*
-	 * Get the DSDT (We know that the FADT is valid now)
-	 */
-
-	status = acpi_tb_get_table (acpi_gbl_FADT->Xdsdt, table_ptr, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	/* Install the DSDT */
-
-	status = acpi_tb_install_table (table_ptr, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	/* Dump the DSDT Header */
-
-	/* Dump the entire DSDT */
-
-	/*
-	 * Initialize the capabilities flags.
-	 * Assumes that platform supports ACPI_MODE since we have tables!
-	 */
-	acpi_gbl_system_flags |= acpi_hw_get_mode_capabilities ();
-
-
-	/* Always delete the RSDP mapping, we are done with it */
-
-	acpi_tb_delete_acpi_table (ACPI_TABLE_RSDP);
-
-	return (status);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    Acpi_tb_verify_rsdp
- *
- * PARAMETERS:  Number_of_tables    - Where the table count is placed
- *
- * RETURN:      Status
- *
- * DESCRIPTION: Load and validate the RSDP (ptr) and RSDT (table)
- *
- ******************************************************************************/
-
-ACPI_STATUS
-acpi_tb_verify_rsdp (
-	ACPI_PHYSICAL_ADDRESS   rsdp_physical_address)
-{
-	ACPI_TABLE_DESC         table_info;
-	ACPI_STATUS             status;
-	u8                      *table_ptr;
-
-
-	/*
-	 * Obtain access to the RSDP structure
-	 */
-	status = acpi_os_map_memory (rsdp_physical_address,
-			  sizeof (RSDP_DESCRIPTOR),
-			  (void **) &table_ptr);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	/*
-	 *  The signature and checksum must both be correct
-	 */
-	if (STRNCMP ((NATIVE_CHAR *) table_ptr, RSDP_SIG, sizeof (RSDP_SIG)-1) != 0) {
-		/* Nope, BAD Signature */
-
-		status = AE_BAD_SIGNATURE;
-		goto cleanup;
-	}
-
-	if (acpi_tb_checksum (table_ptr, RSDP_CHECKSUM_LENGTH) != 0) {
-		/* Nope, BAD Checksum */
-
-		status = AE_BAD_CHECKSUM;
-		goto cleanup;
-	}
-
-	/* TBD: Check extended checksum if table version >= 2 */
-
-	/* The RSDP supplied is OK */
-
-	table_info.pointer     = (ACPI_TABLE_HEADER *) table_ptr;
-	table_info.length      = sizeof (RSDP_DESCRIPTOR);
-	table_info.allocation  = ACPI_MEM_MAPPED;
-	table_info.base_pointer = table_ptr;
-
-	/* Save the table pointers and allocation info */
-
-	status = acpi_tb_init_table_descriptor (ACPI_TABLE_RSDP, &table_info);
-	if (ACPI_FAILURE (status)) {
-		goto cleanup;
-	}
-
-
-	/* Save the RSDP in a global for easy access */
-
-	acpi_gbl_RSDP = (RSDP_DESCRIPTOR *) table_info.pointer;
-	return (status);
-
-
-	/* Error exit */
-cleanup:
-
-	acpi_os_unmap_memory (table_ptr, sizeof (RSDP_DESCRIPTOR));
-	return (status);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    Acpi_tb_get_table_rsdt
- *
- * PARAMETERS:  Number_of_tables    - Where the table count is placed
- *
- * RETURN:      Status
- *
- * DESCRIPTION: Load and validate the RSDP (ptr) and RSDT (table)
- *
- ******************************************************************************/
-
-ACPI_STATUS
-acpi_tb_get_table_rsdt (
-	u32                     *number_of_tables)
-{
-	ACPI_TABLE_DESC         table_info;
-	ACPI_STATUS             status = AE_OK;
-	ACPI_PHYSICAL_ADDRESS   physical_address;
-	u32                     signature_length;
-	char                    *table_signature;
-
-
-	/*
-	 * Get the RSDT from the RSDP
-	 */
-
-	/*
-	 * For RSDP revision 0 or 1, we use the RSDT.
-	 * For RSDP revision 2 (and above), we use the XSDT
-	 */
-	if (acpi_gbl_RSDP->revision < 2) {
-#ifdef _IA64
-		/* 0.71 RSDP has 64bit Rsdt address field */
-		physical_address = ((RSDP_DESCRIPTOR_REV071 *)acpi_gbl_RSDP)->rsdt_physical_address;
-#else
-		physical_address = acpi_gbl_RSDP->rsdt_physical_address;
-#endif
-		table_signature = RSDT_SIG;
-		signature_length = sizeof (RSDT_SIG) -1;
-	}
-	else {
-		physical_address = (ACPI_PHYSICAL_ADDRESS) acpi_gbl_RSDP->xsdt_physical_address;
-		table_signature = XSDT_SIG;
-		signature_length = sizeof (XSDT_SIG) -1;
-	}
-
-
-	/* Get the RSDT/XSDT */
-
-	status = acpi_tb_get_table (physical_address, NULL, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-
-	/* Check the RSDT or XSDT signature */
-
-	if (STRNCMP ((char *) table_info.pointer, table_signature,
-			  signature_length))
-	{
-		/* Invalid RSDT or XSDT signature */
-
-		REPORT_ERROR (("Invalid signature where RSDP indicates %s should be located\n",
-				  table_signature));
-
-		return (status);
-	}
-
-
-	/* Valid RSDT signature, verify the checksum */
-
-	status = acpi_tb_verify_table_checksum (table_info.pointer);
-
-
-	/* Convert and/or copy to an XSDT structure */
-
-	status = acpi_tb_convert_to_xsdt (&table_info, number_of_tables);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	/* Save the table pointers and allocation info */
-
-	status = acpi_tb_init_table_descriptor (ACPI_TABLE_XSDT, &table_info);
-	if (ACPI_FAILURE (status)) {
-		return (status);
-	}
-
-	acpi_gbl_XSDT = (XSDT_DESCRIPTOR *) table_info.pointer;
-
-	return (status);
-}
-
-
-/******************************************************************************
- *
- * FUNCTION:    Acpi_tb_get_table_facs
- *
- * PARAMETERS:  *Buffer_ptr             - If Buffer_ptr is valid, read data from
- *                                          buffer rather than searching memory
- *              *Table_info             - Where the table info is returned
- *
- * RETURN:      Status
- *
- * DESCRIPTION: Returns a pointer to the FACS as defined in FADT.  This
- *              function assumes the global variable FADT has been
- *              correctly initialized.  The value of FADT->Firmware_ctrl
- *              into a far pointer which is returned.
- *
- *****************************************************************************/
-
-ACPI_STATUS
-acpi_tb_get_table_facs (
-	ACPI_TABLE_HEADER       *buffer_ptr,
-	ACPI_TABLE_DESC         *table_info)
-{
-	void                    *table_ptr = NULL;
-	u32                     size;
-	u8                      allocation;
-	ACPI_STATUS             status = AE_OK;
-
-
-	/* Must have a valid FADT pointer */
-
-	if (!acpi_gbl_FADT) {
-		return (AE_NO_ACPI_TABLES);
-	}
-
-	size = sizeof (FACS_DESCRIPTOR);
-	if (buffer_ptr) {
-		/*
-		 * Getting table from a file -- allocate a buffer and
-		 * read the table.
-		 */
-		table_ptr = acpi_cm_allocate (size);
-		if(!table_ptr) {
-			return (AE_NO_MEMORY);
-		}
-
-		MEMCPY (table_ptr, buffer_ptr, size);
-
-		/* Save allocation type */
-
-		allocation = ACPI_MEM_ALLOCATED;
-	}
-
-	else {
-		/* Just map the physical memory to our address space */
-
-		status = acpi_tb_map_acpi_table (acpi_gbl_FADT->Xfirmware_ctrl,
-				   &size, &table_ptr);
-		if (ACPI_FAILURE(status)) {
-			return (status);
-		}
-
-		/* Save allocation type */
-
-		allocation = ACPI_MEM_MAPPED;
-	}
-
-
-	/* Return values */
-
-	table_info->pointer     = table_ptr;
-	table_info->length      = size;
-	table_info->allocation  = allocation;
-	table_info->base_pointer = table_ptr;
-
-	return (status);
+	return_ACPI_STATUS (AE_OK);
 }
 

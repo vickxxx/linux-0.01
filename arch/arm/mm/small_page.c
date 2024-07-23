@@ -150,8 +150,8 @@ static void __free_small_page(unsigned long spage, struct order *order)
 	unsigned long flags;
 	struct page *page;
 
-	page = virt_to_page(spage);
-	if (VALID_PAGE(page)) {
+	if (virt_addr_valid(spage)) {
+		page = virt_to_page(spage);
 
 		/*
 		 * The container-page must be marked Reserved
@@ -202,17 +202,6 @@ already_free:
 	printk("Trying to free free small page from %p\n", __builtin_return_address(0));
 }
 
-unsigned long get_page_2k(int priority)
-{
-	return __get_small_page(priority, orders+0);
-}
-
-void free_page_2k(unsigned long spage)
-{
-	__free_small_page(spage, orders+0);
-}
-
-#if PAGE_SIZE > 8192
 unsigned long get_page_8k(int priority)
 {
 	return __get_small_page(priority, orders+1);
@@ -222,4 +211,3 @@ void free_page_8k(unsigned long spage)
 {
 	__free_small_page(spage, orders+1);
 }
-#endif

@@ -87,7 +87,7 @@
 
 #include <linux/bpqether.h>
 
-static const char banner[] __initdata = KERN_INFO "AX.25: bpqether driver version 004\n";
+static char banner[] __initdata = KERN_INFO "AX.25: bpqether driver version 004\n";
 
 static unsigned char ax25_bcast[AX25_ADDR_LEN] =
 	{'Q' << 1, 'S' << 1, 'T' << 1, ' ' << 1, ' ' << 1, ' ' << 1, '0' << 1};
@@ -166,7 +166,7 @@ static inline int dev_is_ethdev(struct net_device *dev)
  */
 static int bpq_check_devices(struct net_device *dev)
 {
-	struct bpqdev *bpq, *bpq_prev;
+	struct bpqdev *bpq, *bpq_prev, *bpq_next;
 	int result = 0;
 	unsigned long flags;
 
@@ -175,7 +175,8 @@ static int bpq_check_devices(struct net_device *dev)
 
 	bpq_prev = NULL;
 
-	for (bpq = bpq_devices; bpq != NULL; bpq = bpq->next) {
+	for (bpq = bpq_devices; bpq != NULL; bpq = bpq_next) {
+		bpq_next = bpq->next;
 		if (!dev_get(bpq->ethname)) {
 			if (bpq_prev)
 				bpq_prev->next = bpq->next;
@@ -192,8 +193,8 @@ static int bpq_check_devices(struct net_device *dev)
 			unregister_netdevice(&bpq->axdev);
 			kfree(bpq);
 		}
-
-		bpq_prev = bpq;
+		else
+			bpq_prev = bpq;
 	}
 
 	restore_flags(flags);
@@ -530,8 +531,6 @@ static int bpq_new_device(struct net_device *dev)
                 return -EIO;
         }
 
-	dev_init_buffers(dev);
-
 	dev->hard_start_xmit = bpq_xmit;
 	dev->open	     = bpq_open;
 	dev->stop	     = bpq_close;
@@ -646,5 +645,6 @@ static void __exit bpq_cleanup_driver(void)
 
 MODULE_AUTHOR("Joerg Reuter DL1BKE <jreuter@yaina.de>");
 MODULE_DESCRIPTION("Transmit and receive AX.25 packets over Ethernet");
+MODULE_LICENSE("GPL");
 module_init(bpq_init_driver);
 module_exit(bpq_cleanup_driver);

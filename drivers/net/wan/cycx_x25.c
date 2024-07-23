@@ -3,7 +3,7 @@
 *
 * Author:	Arnaldo Carvalho de Melo <acme@conectiva.com.br>
 *
-* Copyright:	(c) 1998-2000 Arnaldo Carvalho de Melo
+* Copyright:	(c) 1998-2001 Arnaldo Carvalho de Melo
 *
 * Based on sdla_x25.c by Gene Kozin <genek@compuserve.com>
 *
@@ -12,6 +12,7 @@
 *		as published by the Free Software Foundation; either version
 *		2 of the License, or (at your option) any later version.
 * ============================================================================
+* 2001/01/12	acme		use dev_kfree_skb_irq on interrupt context
 * 2000/04/02	acme		dprintk, cycx_debug
 * 				fixed the bug introduced in get_dev_by_lcn and
 * 				get_dev_by_dte_addr by the anonymous hacker
@@ -82,7 +83,7 @@
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/string.h>	/* inline memset(), etc. */
-#include <linux/malloc.h>	/* kmalloc(), kfree() */
+#include <linux/slab.h>	/* kmalloc(), kfree() */
 #include <linux/wanrouter.h>	/* WAN router definitions */
 #include <asm/byteorder.h>	/* htons(), etc. */
 #include <linux/if_arp.h>       /* ARPHRD_HWX25 */
@@ -259,13 +260,13 @@ int cyx_init (cycx_t *card, wandev_conf_t *conf)
 	        cfg.flags = 0;      /* FIXME just reset the 2nd bit */
 
 	if (conf->u.x25.hi_pvc) {
-		card->u.x.hi_pvc = min(conf->u.x25.hi_pvc, 4095);
-		card->u.x.lo_pvc = min(conf->u.x25.lo_pvc, card->u.x.hi_pvc);
+		card->u.x.hi_pvc = min_t(unsigned int, conf->u.x25.hi_pvc, 4095);
+		card->u.x.lo_pvc = min_t(unsigned int, conf->u.x25.lo_pvc, card->u.x.hi_pvc);
 	}
 
 	if (conf->u.x25.hi_svc) {
-		card->u.x.hi_svc = min(conf->u.x25.hi_svc, 4095);
-		card->u.x.lo_svc = min(conf->u.x25.lo_svc, card->u.x.hi_svc);
+		card->u.x.hi_svc = min_t(unsigned int, conf->u.x25.hi_svc, 4095);
+		card->u.x.lo_svc = min_t(unsigned int, conf->u.x25.lo_svc, card->u.x.hi_svc);
 	}
 
 	if (card->u.x.lo_pvc == 255)
@@ -276,25 +277,25 @@ int cyx_init (cycx_t *card, wandev_conf_t *conf)
 	cfg.nvc = card->u.x.hi_svc - card->u.x.lo_svc + 1 + cfg.npvc;
 
 	if (conf->u.x25.hdlc_window)
-		cfg.n2win = min(conf->u.x25.hdlc_window, 7);
+		cfg.n2win = min_t(unsigned int, conf->u.x25.hdlc_window, 7);
 
 	if (conf->u.x25.pkt_window)
-		cfg.n3win = min(conf->u.x25.pkt_window, 7);
+		cfg.n3win = min_t(unsigned int, conf->u.x25.pkt_window, 7);
 
 	if (conf->u.x25.t1)
-		cfg.t1 = min(conf->u.x25.t1, 30);
+		cfg.t1 = min_t(unsigned int, conf->u.x25.t1, 30);
 
 	if (conf->u.x25.t2)
-		cfg.t2 = min(conf->u.x25.t2, 30);
+		cfg.t2 = min_t(unsigned int, conf->u.x25.t2, 30);
 
 	if (conf->u.x25.t11_t21)
-		cfg.t21 = min(conf->u.x25.t11_t21, 30);
+		cfg.t21 = min_t(unsigned int, conf->u.x25.t11_t21, 30);
 
 	if (conf->u.x25.t13_t23)
-		cfg.t23 = min(conf->u.x25.t13_t23, 30);
+		cfg.t23 = min_t(unsigned int, conf->u.x25.t13_t23, 30);
 
 	if (conf->u.x25.n2)
-		cfg.n2 = min(conf->u.x25.n2, 30);
+		cfg.n2 = min_t(unsigned int, conf->u.x25.n2, 30);
 
 	/* initialize adapter */
 	if (x25_configure(card, &cfg))
@@ -491,7 +492,6 @@ static int if_init (struct net_device *dev)
         dev->tx_queue_len = 10;
 
 	/* Initialize socket buffers */
-	dev_init_buffers(dev);
 	set_chan_state(dev, WAN_DISCONNECTED);
 
 	return 0;
@@ -794,7 +794,7 @@ static void rx_intr (cycx_t *card, TX25Cmd *cmd)
 
 	if (skb_tailroom(skb) < pktlen) {
 		/* No room for the packet. Call off the whole thing! */
-		dev_kfree_skb(skb);
+		dev_kfree_skb_irq(skb);
 		chan->rx_skb = NULL;
 
 		if (bitm)
@@ -812,14 +812,14 @@ static void rx_intr (cycx_t *card, TX25Cmd *cmd)
 	if (bitm)
 		return; /* more data is coming */
 
-	dev->last_rx = jiffies;		/* timestamp */
 	chan->rx_skb = NULL;		/* dequeue packet */
 
 	++chan->ifstats.rx_packets;
-	chan->ifstats.rx_bytes += skb->len;
+	chan->ifstats.rx_bytes += pktlen;
 
 	skb->mac.raw = skb->data;
 	netif_rx(skb);
+	dev->last_rx = jiffies;		/* timestamp */
 }
 
 /* Connect interrupt handler. */
@@ -1347,7 +1347,7 @@ static void set_chan_state (struct net_device *dev, u8 state)
 {
 	x25_channel_t *chan = dev->priv;
 	cycx_t *card = chan->card;
-	u32 flags = 0;
+	long flags;
 	char *string_state = NULL;
 
 	spin_lock_irqsave(&card->lock, flags);
@@ -1446,7 +1446,7 @@ static void chan_x25_send_event(struct net_device *dev, u8 event)
         unsigned char *ptr;
 
         if ((skb = dev_alloc_skb(1)) == NULL) {
-                printk(KERN_ERR __FUNCTION__ ": out of memory\n");
+                printk(KERN_ERR "%s: out of memory\n", __FUNCTION__);
                 return;
         }
 
@@ -1459,6 +1459,7 @@ static void chan_x25_send_event(struct net_device *dev, u8 event)
         skb->pkt_type = PACKET_HOST;
 
         netif_rx(skb);
+	dev->last_rx = jiffies;		/* timestamp */
 }
 
 /* Convert line speed in bps to a number used by cyclom 2x code. */

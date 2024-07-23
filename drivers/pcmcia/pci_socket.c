@@ -172,13 +172,20 @@ static struct pccard_operations pci_socket_operations = {
 static int __devinit add_pci_socket(int nr, struct pci_dev *dev, struct pci_socket_ops *ops)
 {
 	pci_socket_t *socket = nr + pci_socket_array;
-
+	int err;
+	
 	memset(socket, 0, sizeof(*socket));
 	socket->dev = dev;
 	socket->op = ops;
-	dev->driver_data = socket;
+	pci_set_drvdata(dev, socket);
 	spin_lock_init(&socket->event_lock);
-	return socket->op->open(socket);
+	err = socket->op->open(socket);
+	if(err)
+	{
+		socket->dev = NULL;
+		pci_set_drvdata(dev, NULL);
+	}
+	return err;
 }
 
 void cardbus_register(pci_socket_t *socket)
@@ -195,8 +202,7 @@ cardbus_probe (struct pci_dev *dev, const struct pci_device_id *id)
 
 	for (s = 0; s < MAX_SOCKETS; s++) {
 		if (pci_socket_array [s].dev == 0) {
-			add_pci_socket (s, dev, &yenta_operations);
-			return 0;
+			return add_pci_socket (s, dev, &yenta_operations);
 		}
 	}
 	return -ENODEV;
@@ -204,24 +210,26 @@ cardbus_probe (struct pci_dev *dev, const struct pci_device_id *id)
 
 static void __devexit cardbus_remove (struct pci_dev *dev)
 {
-	pci_socket_t *socket = (pci_socket_t *) dev->driver_data;
+	pci_socket_t *socket = pci_get_drvdata(dev);
 
 	pcmcia_unregister_socket (socket->pcmcia_socket);
 	if (socket->op && socket->op->close)
 		socket->op->close(socket);
-	dev->driver_data = 0;
+	pci_set_drvdata(dev, NULL);
 }
 
-static void cardbus_suspend (struct pci_dev *dev)
+static int cardbus_suspend (struct pci_dev *dev, u32 state)
 {
-	pci_socket_t *socket = (pci_socket_t *) dev->driver_data;
+	pci_socket_t *socket = pci_get_drvdata(dev);
 	pcmcia_suspend_socket (socket->pcmcia_socket);
+	return 0;
 }
 
-static void cardbus_resume (struct pci_dev *dev)
+static int cardbus_resume (struct pci_dev *dev)
 {
-	pci_socket_t *socket = (pci_socket_t *) dev->driver_data;
+	pci_socket_t *socket = pci_get_drvdata(dev);
 	pcmcia_resume_socket (socket->pcmcia_socket);
+	return 0;
 }
 
 
@@ -241,7 +249,7 @@ static struct pci_driver pci_cardbus_driver = {
 	name:		"cardbus",
 	id_table:	cardbus_table,
 	probe:		cardbus_probe,
-	remove:		cardbus_remove,
+	remove:		__devexit_p(cardbus_remove),
 	suspend:	cardbus_suspend,
 	resume:		cardbus_resume,
 };

@@ -1,7 +1,14 @@
 /*
- *  Reset a Cobalt Qube.
+ * Cobalt Reset operations
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1995, 1996, 1997 by Ralf Baechle
+ * Copyright (C) 2001 by Liam Davies (ldavies@agile.tv)
+ *
  */
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <asm/io.h>
@@ -9,6 +16,7 @@
 #include <asm/processor.h>
 #include <asm/reboot.h>
 #include <asm/system.h>
+#include <asm/mipsregs.h>
 
 void cobalt_machine_restart(char *command)
 {
@@ -20,10 +28,10 @@ void cobalt_machine_restart(char *command)
 	 * kernel in the flush locks up somewhen during of after the PCI
 	 * detection stuff.
 	 */
-	set_cp0_status((ST0_BEV | ST0_ERL), (ST0_BEV | ST0_ERL));
-	set_cp0_config(CONFIG_CM_CMASK, CONFIG_CM_UNCACHED);
+	set_c0_status(ST0_BEV | ST0_ERL);
+	change_c0_config(CONF_CM_CMASK, CONF_CM_UNCACHED);
 	flush_cache_all();
-	write_32bit_cp0_register(CP0_WIRED, 0);
+	write_c0_wired(0);
 	__asm__ __volatile__(
 		"jr\t%0"
 		:
@@ -38,17 +46,17 @@ void cobalt_machine_halt(void)
 {
 	int mark;
 
-	// Blink our cute little LED (number 3)...
+	/* Blink our cute? little LED (number 3)... */
 	while (1) {
 		led_state = led_state | ( 1 << 3 );
-		LEDSet(led_state);  
+		LEDSet(led_state);
 		mark = jiffies;
 		while (jiffies<(mark+HZ));
 		led_state = led_state & ~( 1 << 3 );
 		LEDSet(led_state);
 		mark = jiffies;
 		while (jiffies<(mark+HZ));
-	} 
+	}
 }
 
 /*

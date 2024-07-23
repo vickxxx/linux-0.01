@@ -87,7 +87,7 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
@@ -123,6 +123,8 @@ extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_priva
  */
 unsigned int pamsnet_debug = NET_DEBUG;
 MODULE_PARM(pamsnet_debug, "i");
+MODULE_PARM_DESC(pamsnet_debug, "pamsnet debug enable (0-1)");
+MODULE_LICENSE("GPL");
 
 static unsigned int pamsnet_min_poll_time = 2;
 
@@ -168,7 +170,7 @@ static void pamsnet_tick(unsigned long);
 
 static void pamsnet_intr(int irq, void *data, struct pt_regs *fp);
 
-static struct timer_list pamsnet_timer = { function: amsnet_tick };
+static struct timer_list pamsnet_timer = { function: pamsnet_tick };
 
 #define STRAM_ADDR(a)	(((a) & 0xff000000) == 0)
 
@@ -569,9 +571,9 @@ pamsnet_probe (dev)
 	HADDR *hwaddr;
 
 	unsigned char station_addr[6];
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	/* avoid "Probing for..." printed 4 times - the driver is supporting only one adapter now! */
-	static int no_more_found = 0;
+	static int no_more_found;
 
 	if (no_more_found)
 		return -ENODEV;
@@ -633,6 +635,8 @@ pamsnet_probe (dev)
 	/* Initialize the device structure. */
 	if (dev->priv == NULL)
 		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (!dev->priv)
+		return -ENOMEM;
 	memset(dev->priv, 0, sizeof(struct net_local));
 
 	dev->open		= pamsnet_open;
@@ -794,6 +798,7 @@ pamsnet_poll_rx(struct net_device *dev) {
 			 */
 			memcpy(skb->data, nic_packet->buffer, pkt_len);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes+=pkt_len;
 		}

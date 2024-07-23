@@ -17,7 +17,7 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/pagemap.h>
@@ -131,7 +131,7 @@ int ncp__vol2io(unsigned char *, unsigned int *,
 
 #endif /* CONFIG_NCPFS_NLS */
 
-inline int
+int
 ncp_strnicmp(struct nls_table *,
 		const unsigned char *, const unsigned char *, int);
 

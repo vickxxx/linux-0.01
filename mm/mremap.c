@@ -51,9 +51,9 @@ static inline pte_t *alloc_one_pte(struct mm_struct *mm, unsigned long addr)
 	pmd_t * pmd;
 	pte_t * pte = NULL;
 
-	pmd = pmd_alloc(pgd_offset(mm, addr), addr);
+	pmd = pmd_alloc(mm, pgd_offset(mm, addr), addr);
 	if (pmd)
-		pte = pte_alloc(pmd, addr);
+		pte = pte_alloc(mm, pmd, addr);
 	return pte;
 }
 
@@ -62,7 +62,6 @@ static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
 	int error = 0;
 	pte_t pte;
 
-	spin_lock(&mm->page_table_lock);
 	if (!pte_none(*src)) {
 		pte = ptep_get_and_clear(src);
 		if (!dst) {
@@ -72,18 +71,23 @@ static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
 		}
 		set_pte(dst, pte);
 	}
-	spin_unlock(&mm->page_table_lock);
 	return error;
 }
 
 static int move_one_page(struct mm_struct *mm, unsigned long old_addr, unsigned long new_addr)
 {
 	int error = 0;
-	pte_t * src;
+	pte_t * src, * dst;
 
+	spin_lock(&mm->page_table_lock);
 	src = get_one_pte(mm, old_addr);
-	if (src)
-		error = copy_one_pte(mm, src, alloc_one_pte(mm, new_addr));
+	if (src) {
+		dst = alloc_one_pte(mm, new_addr);
+		src = get_one_pte(mm, old_addr);
+		if (src) 
+			error = copy_one_pte(mm, src, dst);
+	}
+	spin_unlock(&mm->page_table_lock);
 	return error;
 }
 
@@ -119,7 +123,6 @@ oops_we_failed:
 	while ((offset += PAGE_SIZE) < len)
 		move_one_page(mm, new_addr + offset, old_addr + offset);
 	zap_page_range(mm, new_addr, len);
-	flush_tlb_range(mm, new_addr, new_addr + len);
 	return -1;
 }
 
@@ -127,32 +130,87 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 	unsigned long addr, unsigned long old_len, unsigned long new_len,
 	unsigned long new_addr)
 {
-	struct vm_area_struct * new_vma;
+	struct mm_struct * mm = vma->vm_mm;
+	struct vm_area_struct * new_vma, * next, * prev;
+	int allocated_vma;
 
-	new_vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
-	if (new_vma) {
-		if (!move_page_tables(current->mm, new_addr, addr, old_len)) {
+	new_vma = NULL;
+	next = find_vma_prev(mm, new_addr, &prev);
+	if (next) {
+		if (prev && prev->vm_end == new_addr &&
+		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+			spin_lock(&mm->page_table_lock);
+			prev->vm_end = new_addr + new_len;
+			spin_unlock(&mm->page_table_lock);
+			new_vma = prev;
+			if (next != prev->vm_next)
+				BUG();
+			if (prev->vm_end == next->vm_start && can_vma_merge(next, prev->vm_flags)) {
+				spin_lock(&mm->page_table_lock);
+				prev->vm_end = next->vm_end;
+				__vma_unlink(mm, next, prev);
+				spin_unlock(&mm->page_table_lock);
+
+				mm->map_count--;
+				kmem_cache_free(vm_area_cachep, next);
+			}
+		} else if (next->vm_start == new_addr + new_len &&
+			   can_vma_merge(next, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+			spin_lock(&mm->page_table_lock);
+			next->vm_start = new_addr;
+			spin_unlock(&mm->page_table_lock);
+			new_vma = next;
+		}
+	} else {
+		prev = find_vma(mm, new_addr-1);
+		if (prev && prev->vm_end == new_addr &&
+		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+			spin_lock(&mm->page_table_lock);
+			prev->vm_end = new_addr + new_len;
+			spin_unlock(&mm->page_table_lock);
+			new_vma = prev;
+		}
+	}
+
+	allocated_vma = 0;
+	if (!new_vma) {
+		new_vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+		if (!new_vma)
+			goto out;
+		allocated_vma = 1;
+	}
+
+	if (!move_page_tables(current->mm, new_addr, addr, old_len)) {
+		unsigned long vm_locked = vma->vm_flags & VM_LOCKED;
+
+		if (allocated_vma) {
 			*new_vma = *vma;
 			new_vma->vm_start = new_addr;
 			new_vma->vm_end = new_addr+new_len;
-			new_vma->vm_pgoff += (addr - vma->vm_start) >> PAGE_SHIFT;
+			new_vma->vm_pgoff += (addr-vma->vm_start) >> PAGE_SHIFT;
 			new_vma->vm_raend = 0;
 			if (new_vma->vm_file)
 				get_file(new_vma->vm_file);
 			if (new_vma->vm_ops && new_vma->vm_ops->open)
 				new_vma->vm_ops->open(new_vma);
 			insert_vm_struct(current->mm, new_vma);
-			do_munmap(current->mm, addr, old_len);
-			current->mm->total_vm += new_len >> PAGE_SHIFT;
-			if (new_vma->vm_flags & VM_LOCKED) {
-				current->mm->locked_vm += new_len >> PAGE_SHIFT;
-				make_pages_present(new_vma->vm_start,
-						   new_vma->vm_end);
-			}
-			return new_addr;
 		}
-		kmem_cache_free(vm_area_cachep, new_vma);
+
+		/* XXX: possible errors masked, mapping might remain */
+		do_munmap(current->mm, addr, old_len);
+
+		current->mm->total_vm += new_len >> PAGE_SHIFT;
+		if (vm_locked) {
+			current->mm->locked_vm += new_len >> PAGE_SHIFT;
+			if (new_len > old_len)
+				make_pages_present(new_addr + old_len,
+						   new_addr + new_len);
+		}
+		return new_addr;
 	}
+	if (allocated_vma)
+		kmem_cache_free(vm_area_cachep, new_vma);
+ out:
 	return -ENOMEM;
 }
 
@@ -179,6 +237,12 @@ unsigned long do_mremap(unsigned long addr,
 	old_len = PAGE_ALIGN(old_len);
 	new_len = PAGE_ALIGN(new_len);
 
+	if (old_len > TASK_SIZE || addr > TASK_SIZE - old_len)
+		goto out;
+
+	if (addr >= TASK_SIZE)
+		goto out;
+
 	/* new_addr is only valid if MREMAP_FIXED is specified */
 	if (flags & MREMAP_FIXED) {
 		if (new_addr & ~PAGE_MASK)
@@ -187,6 +251,17 @@ unsigned long do_mremap(unsigned long addr,
 			goto out;
 
 		if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
+			goto out;
+
+		if (new_addr >= TASK_SIZE)
+			goto out;
+
+		/*
+		 * Allow new_len == 0 only if new_addr == addr
+		 * to preserve truncation in place (that was working
+		 * safe and some app may depend on it).
+		 */
+		if (unlikely(!new_len && new_addr != addr))
 			goto out;
 
 		/* Check if the location we're moving into overlaps the
@@ -198,16 +273,26 @@ unsigned long do_mremap(unsigned long addr,
 		if ((addr <= new_addr) && (addr+old_len) > new_addr)
 			goto out;
 
-		do_munmap(current->mm, new_addr, new_len);
+		/* Ensure a non-privileged process is not trying to map
+		 * lower pages.
+		 */
+		if (new_addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
+			return -EPERM;
+
+		ret = do_munmap(current->mm, new_addr, new_len);
+		if (ret && new_len)
+			goto out;
 	}
 
 	/*
 	 * Always allow a shrinking remap: that just unmaps
 	 * the unnecessary pages..
 	 */
-	ret = addr;
 	if (old_len >= new_len) {
-		do_munmap(current->mm, addr+new_len, old_len - new_len);
+		ret = do_munmap(current->mm, addr+new_len, old_len - new_len);
+		if (ret && old_len != new_len)
+			goto out;
+		ret = addr;
 		if (!(flags & MREMAP_FIXED) || (new_addr == addr))
 			goto out;
 	}
@@ -276,8 +361,13 @@ unsigned long do_mremap(unsigned long addr,
 	ret = -ENOMEM;
 	if (flags & MREMAP_MAYMOVE) {
 		if (!(flags & MREMAP_FIXED)) {
-			new_addr = get_unmapped_area(0, new_len);
-			if (!new_addr)
+			unsigned long map_flags = 0;
+			if (vma->vm_flags & VM_SHARED)
+				map_flags |= MAP_SHARED;
+
+			new_addr = get_unmapped_area(vma->vm_file, 0, new_len, vma->vm_pgoff, map_flags);
+			ret = new_addr;
+			if (new_addr & ~PAGE_MASK)
 				goto out;
 		}
 		ret = move_vma(vma, addr, old_len, new_len, new_addr);
@@ -292,8 +382,8 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 {
 	unsigned long ret;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return ret;
 }

@@ -19,11 +19,13 @@
 
 #include <asm/uaccess.h>
 
+#include "proto.h"
+
 int
 smb_ioctl(struct inode *inode, struct file *filp,
 	  unsigned int cmd, unsigned long arg)
 {
-	struct smb_sb_info *server = SMB_SERVER(inode);
+	struct smb_sb_info *server = server_from_inode(inode);
 	struct smb_conn_opt opt;
 	int result = -EINVAL;
 
@@ -37,15 +39,18 @@ smb_ioctl(struct inode *inode, struct file *filp,
 		break;
 
 	case SMB_IOC_NEWCONN:
-		/* require an argument == the mount data, else it is EINVAL */
-		if (!arg)
+		/* arg is smb_conn_opt, or NULL if no connection was made */
+		if (!arg) {
+			result = smb_wakeup(server);
 			break;
+		}
 
 		result = -EFAULT;
 		if (!copy_from_user(&opt, (void *)arg, sizeof(opt)))
 			result = smb_newconn(server, &opt);
 		break;
 	default:
+		break;
 	}
 
 	return result;

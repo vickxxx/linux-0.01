@@ -23,7 +23,7 @@ static const char *awc_version =
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -38,6 +38,7 @@ static const char *awc_version =
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 
 #include "aironet4500.h"
 
@@ -58,6 +59,15 @@ static const char *awc_version =
 #ifdef CONFIG_AIRONET4500_PCI
 
 #include <linux/pci.h>
+
+static struct pci_device_id aironet4500_card_pci_tbl[] __devinitdata = {
+	{ PCI_VENDOR_ID_AIRONET, PCI_DEVICE_AIRONET_4800_1, PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_AIRONET, PCI_DEVICE_AIRONET_4800, PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_AIRONET, PCI_DEVICE_AIRONET_4500, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, aironet4500_card_pci_tbl);
+MODULE_LICENSE("GPL");
 
 
 static int reverse_probe;
@@ -128,17 +138,12 @@ int awc4500_pci_probe(struct net_device *dev)
 //		request_region(pci_cisaddr, AIRONET4X00_CIS_SIZE, "aironet4x00 cis");
 //		request_region(pci_memaddr, AIRONET4X00_MEM_SIZE, "aironet4x00 mem");
 
-//		pci_write_config_word(pdev, PCI_COMMAND, 0);
-		udelay(10000);
+		mdelay(10);
 
 		pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
-		new_command = pci_command |0x100 | PCI_COMMAND_MEMORY|PCI_COMMAND_IO;
-		if (pci_command != new_command) {
-			printk(KERN_INFO "  The PCI BIOS has not enabled this"
-				   " device!  Updating PCI command %4.4x->%4.4x.\n",
-				   pci_command, new_command);
+		new_command = pci_command | PCI_COMMAND_SERR;
+		if (pci_command != new_command)
 			pci_write_config_word(pdev, PCI_COMMAND, new_command);
-		}
 
 
 /*		if (device == PCI_DEVICE_AIRONET_4800)
@@ -173,6 +178,13 @@ static int awc_pci_init(struct net_device * dev, struct pci_dev *pdev,
 		allocd_dev = 1;
 	}
 	dev->priv = kmalloc(sizeof(struct awc_private),GFP_KERNEL );
+        if (!dev->priv) {
+                if (allocd_dev) {
+                        unregister_netdev(dev);
+                        kfree(dev);
+                }
+                return -ENOMEM;
+        }       
 	memset(dev->priv,0,sizeof(struct awc_private));
 	if (!dev->priv) {
 		printk(KERN_CRIT "aironet4x00: could not allocate device private, some unstability may follow\n");
@@ -370,7 +382,15 @@ int awc4500_pnp_probe(struct net_device *dev)
 		request_region(isa_ioaddr, AIRONET4X00_IO_SIZE, "aironet4x00 ioaddr");
 
 		if (!dev) {
-			dev = init_etherdev(dev, 0 );	
+			dev = init_etherdev(NULL, 0);	
+			if (!dev) {
+				release_region(isa_ioaddr, AIRONET4X00_IO_SIZE);
+				isapnp_cfg_begin(logdev->PNP_BUS->PNP_BUS_NUMBER,
+						 logdev->PNP_DEV_NUMBER);
+				isapnp_deactivate(logdev->PNP_DEV_NUMBER);
+				isapnp_cfg_end();
+				return -ENOMEM;
+			}
 		}
 		dev->priv = kmalloc(sizeof(struct awc_private),GFP_KERNEL );
 		memset(dev->priv,0,sizeof(struct awc_private));
@@ -485,6 +505,14 @@ static void awc_pnp_release(void) {
 
 } 
 
+static struct isapnp_device_id id_table[] = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('A','W','L'), ISAPNP_DEVICE(1), 0 },
+	{0}
+};
+
+MODULE_DEVICE_TABLE(isapnp, id_table);
+
 #endif //MODULE
 #endif /* CONFIG_AIRONET4500_PNP */
 
@@ -524,7 +552,7 @@ int awc4500_isa_probe(struct net_device *dev)
 	printk(KERN_WARNING "     Use aironet4500_pnp if any problems(i.e. card malfunctioning). \n");
 	printk(KERN_WARNING "     Note that this isa probe is not friendly... must give exact parameters \n");
 
-	while (irq[card] !=0){
+	while (irq[card] != 0){
 	
 		isa_ioaddr = io[card];
 		isa_irq_line = irq[card];
@@ -532,7 +560,11 @@ int awc4500_isa_probe(struct net_device *dev)
 		request_region(isa_ioaddr, AIRONET4X00_IO_SIZE, "aironet4x00 ioaddr");
 
 		if (!dev) {
-			dev = init_etherdev(dev, 0 );	
+			dev = init_etherdev(NULL, 0);	
+			if (!dev) {
+				release_region(isa_ioaddr, AIRONET4X00_IO_SIZE);
+				return (card == 0) ? -ENOMEM : 0;
+			}
 		}
 		dev->priv = kmalloc(sizeof(struct awc_private),GFP_KERNEL );
 		memset(dev->priv,0,sizeof(struct awc_private));
@@ -627,7 +659,7 @@ static void awc_isa_release(void) {
 
 #endif /* CONFIG_AIRONET4500_ISA */
 
-#ifdef  CONFIG_AIRONET4500_365 
+#ifdef  CONFIG_AIRONET4500_I365 
 
 #define port_range 0x40
 
@@ -700,14 +732,14 @@ int awc_i365_probe_once(struct i365_socket * s ){
 	awc_i365_card_release(s);
 
 
-	udelay(100000);
+	mdelay(100);
 	
 	i365_out(s, 0x2, 0x10 ); 	// power enable
-	udelay(200000);
+	mdelay(200);
 	
 	i365_out(s, 0x2, 0x10 | 0x01 | 0x04 | 0x80);	//power enable
 	
-	udelay(250000);
+	mdelay(250);
 	
 	if (!s->irq)
 		s->irq = 11;
@@ -733,7 +765,7 @@ int awc_i365_probe_once(struct i365_socket * s ){
 	i365_out(s,0x15,0x3f | 0x40);		// enab mem reg bit
 	i365_out(s,0x06,0x01);			// enab mem 
 	
-	udelay(10000);
+	mdelay(10);
 	
 	cis[0] = 0x45;
 	
@@ -744,7 +776,7 @@ int awc_i365_probe_once(struct i365_socket * s ){
 
 	mem[0x3e0] = 0x45;
 
-	udelay(10000);
+	mdelay(10);
 	
 	memcpy_fromio(cis,0xD000, 0x3e0);
 	
@@ -772,7 +804,7 @@ int awc_i365_probe_once(struct i365_socket * s ){
 		s->socket, s->manufacturer,s->product);
 
 	i365_out(s,0x07, 0x1 | 0x2); 		// enable io 16bit
-	udelay(1000);
+	mdelay(1);
 	port = s->io;
 	i365_out(s,0x08, port & 0xff);
 	i365_out(s,0x09, (port & 0xff00)/ 0x100);
@@ -781,7 +813,7 @@ int awc_i365_probe_once(struct i365_socket * s ){
 
 	i365_out(s,0x06, 0x40); 		// enable io window
 
-	udelay(1000);
+	mdelay(1);
 
 	i365_out(s,0x3e0,0x45);
 	
@@ -799,13 +831,10 @@ int awc_i365_probe_once(struct i365_socket * s ){
 
 	
 	outw(0x10, s->io + 0x34);
-	udelay(10000);
+	mdelay(10);
 	
 	return 0;
-	
-	
 
-		
 };
 
 
@@ -950,7 +979,7 @@ failed:
 
 }
 
-#endif /* CONFIG_AIRONET4500_365 */
+#endif /* CONFIG_AIRONET4500_I365 */
 
 #ifdef MODULE        
 int init_module(void)

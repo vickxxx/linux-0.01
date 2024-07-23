@@ -15,7 +15,6 @@
  */
 
 #include <linux/config.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
@@ -121,6 +120,7 @@ static int rose_rebuild_header(struct sk_buff *skb)
 	if (!rose_route_frame(skbn, NULL)) {
 		kfree_skb(skbn);
 		stats->tx_errors++;
+		return 1;
 	}
 
 	stats->tx_packets++;
@@ -199,8 +199,6 @@ int rose_init(struct net_device *dev)
 	memset(dev->priv, 0, sizeof(struct net_device_stats));
 
 	dev->get_stats = rose_get_stats;
-
-	dev_init_buffers(dev);
 
 	return 0;
 };

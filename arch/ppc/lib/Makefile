@@ -2,13 +2,14 @@
 # Makefile for ppc-specific library files..
 #
 
-.S.o:
-	$(CC) $(AFLAGS) -c $< -o $*.o
+USE_STANDARD_AS_RULE	:= true
 
 O_TARGET		:= lib.o
 
-obj-y			:= checksum.o string.o strcase.o
+export-objs		:= dec_and_lock.o
 
-obj-$(CONFIG_SMP)	:= locks.o
+obj-y			:= checksum.o string.o strcase.o dec_and_lock.o div64.o
+
+obj-$(CONFIG_SMP)	+= locks.o
 
 include $(TOPDIR)/Rules.make

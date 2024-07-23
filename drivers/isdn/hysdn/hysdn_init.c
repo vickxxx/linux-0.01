@@ -1,23 +1,12 @@
-/* $Id: hysdn_init.c,v 1.6.6.1 2000/11/28 12:02:47 kai Exp $
-
+/* $Id: hysdn_init.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * Linux driver for HYSDN cards, init functions.
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -27,12 +16,24 @@
 #include <linux/version.h>
 #include <linux/poll.h>
 #include <linux/vmalloc.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 
 #include "hysdn_defs.h"
 
-static char *hysdn_init_revision = "$Revision: 1.6.6.1 $";
+static struct pci_device_id hysdn_pci_tbl[] __initdata = {
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_METRO},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_CHAMP2},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_ERGO},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_OLD_ERGO},
+	{ }				/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, hysdn_pci_tbl);
+MODULE_DESCRIPTION("ISDN4Linux: Driver for HYSDN cards");
+MODULE_AUTHOR("Werner Cornelius");
+MODULE_LICENSE("GPL");
+
+static char *hysdn_init_revision = "$Revision: 1.1.4.1 $";
 int cardmax;			/* number of found cards */
 hysdn_card *card_root = NULL;	/* pointer to first card */
 
@@ -62,14 +63,6 @@ static struct {
 	}			/* terminating entry */
 };
 
-static struct pci_device_id hysdn_pci_tbl[] __initdata = {
-	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_METRO},
-	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_CHAMP2},
-	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_ERGO},
-	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_OLD_ERGO},
-	{ }				/* Terminating entry */
-};
-MODULE_DEVICE_TABLE(pci, hysdn_pci_tbl);
 
 /*********************************************************************/
 /* search_cards searches for available cards in the pci config data. */
@@ -89,6 +82,7 @@ search_cards(void)
 					     akt_pcidev)) != NULL) {
 		if (pci_enable_device(akt_pcidev))
 			continue;
+
 		if (!(card = kmalloc(sizeof(hysdn_card), GFP_KERNEL))) {
 			printk(KERN_ERR "HYSDN: unable to alloc device mem \n");
 			return;
@@ -173,7 +167,6 @@ stop_cards(void)
 /* image becomes smaller and the driver code is only loaded when needed.    */
 /* Additionally newer versions may be activated without rebooting.          */
 /****************************************************************************/
-#ifdef CONFIG_MODULES
 
 /******************************************************/
 /* extract revision number from string for log output */
@@ -197,12 +190,12 @@ hysdn_getrev(const char *revision)
 /****************************************************************************/
 /* init_module is called once when the module is loaded to do all necessary */
 /* things like autodetect...                                                */
-/* If the return value of this function is 0 the init has been successfull  */
+/* If the return value of this function is 0 the init has been successful   */
 /* and the module is added to the list in /proc/modules, otherwise an error */
 /* is assumed and the module will not be kept in memory.                    */
 /****************************************************************************/
-int
-init_module(void)
+static int __init
+hysdn_init(void)
 {
 	char tmp[50];
 
@@ -235,14 +228,14 @@ init_module(void)
 
 /***********************************************************************/
 /* cleanup_module is called when the module is released by the kernel. */
-/* The routine is only called if init_module has been successfull and  */
+/* The routine is only called if init_module has been successful and   */
 /* the module counter has a value of 0. Otherwise this function will   */
 /* not be called. This function must release all resources still allo- */
 /* cated as after the return from this function the module code will   */
 /* be removed from memory.                                             */
 /***********************************************************************/
-void
-cleanup_module(void)
+static void __exit
+hysdn_exit(void)
 {
 #ifdef CONFIG_HYSDN_CAPI
 	hysdn_card *card;
@@ -261,4 +254,5 @@ cleanup_module(void)
 	printk(KERN_NOTICE "HYSDN: module unloaded\n");
 }				/* cleanup_module */
 
-#endif				/* CONFIG_MODULES */
+module_init(hysdn_init);
+module_exit(hysdn_exit);

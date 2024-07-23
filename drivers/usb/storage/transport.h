@@ -1,7 +1,7 @@
 /* Driver for USB Mass Storage compliant devices
  * Transport Functions Header File
  *
- * $Id: transport.h,v 1.13 2000/10/03 01:06:07 mdharm Exp $
+ * $Id: transport.h,v 1.17 2002/02/25 00:43:41 mdharm Exp $
  *
  * Current development and maintenance by:
  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
@@ -58,11 +58,24 @@
 #define US_PR_EUSB_SDDR09	0x81	/* SCM-SCSI bridge for
 						SDDR-09 */
 #endif
+#ifdef CONFIG_USB_STORAGE_SDDR55
+#define US_PR_SDDR55	0x82		/* SDDR-55 (made up) */
+#endif
 #define US_PR_DPCM_USB  0xf0		/* Combination CB/SDDR09 */
 
 #ifdef CONFIG_USB_STORAGE_FREECOM
 #define US_PR_FREECOM   0xf1            /* Freecom */
 #endif
+
+#ifdef CONFIG_USB_STORAGE_DATAFAB
+#define US_PR_DATAFAB   0xf2            /* Datafab chipsets */
+#endif
+
+#ifdef CONFIG_USB_STORAGE_JUMPSHOT
+#define US_PR_JUMPSHOT  0xf3            /* Lexar Jumpshot */
+#endif
+
+#define US_PR_DEVICE	0xff		/* Use device's value */
 
 /*
  * Bulk only data structures
@@ -95,6 +108,8 @@ struct bulk_cs_wrap {
 
 #define US_BULK_CS_WRAP_LEN	13
 #define US_BULK_CS_SIGN		0x53425355	/* spells out 'USBS' */
+/* This is for Olympus Camedia digital cameras */
+#define US_BULK_CS_OLYMPUS_SIGN		0x55425355	/* spells out 'USBU' */
 #define US_BULK_STAT_OK		0
 #define US_BULK_STAT_FAIL	1
 #define US_BULK_STAT_PHASE	2
@@ -104,7 +119,7 @@ struct bulk_cs_wrap {
 #define US_BULK_GET_MAX_LUN	0xfe
 
 /*
- * us_bulk_transfer() return codes
+ * usb_stor_transfer() return codes
  */
 #define US_BULK_TRANSFER_GOOD		0  /* good transfer                 */
 #define US_BULK_TRANSFER_SHORT		1  /* transfered less than expected */
@@ -143,4 +158,6 @@ extern int usb_stor_bulk_msg(struct us_data*, void*, int, unsigned int,
 		unsigned int*);
 extern int usb_stor_control_msg(struct us_data*, unsigned int, u8, u8,
 		u16, u16, void*, u16);
+extern int usb_stor_clear_halt(struct us_data*, int );
+extern void usb_stor_transfer(Scsi_Cmnd*, struct us_data*);
 #endif

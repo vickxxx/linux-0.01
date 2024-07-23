@@ -1,11 +1,9 @@
 /*
- * include/asm-mips/errno.h
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1999 by Ralf Baechle
+ * Copyright (C) 1995, 1999, 2001 by Ralf Baechle
  */
 #ifndef _ASM_ERRNO_H
 #define _ASM_ERRNO_H
@@ -19,7 +17,7 @@
 #define	EINTR		 4	/* Interrupted system call */
 #define	EIO		 5	/* I/O error */
 #define	ENXIO		 6	/* No such device or address */
-#define	E2BIG		 7	/* Arg list too long */
+#define	E2BIG		 7	/* Argument list too long */
 #define	ENOEXEC		 8	/* Exec format error */
 #define	EBADF		 9	/* Bad file number */
 #define	ECHILD		10	/* No child processes */

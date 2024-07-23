@@ -6,11 +6,11 @@
 
 /* entry.S is sensitive to the offsets of these fields */
 typedef struct {
-	unsigned int __softirq_active;
-	unsigned int __softirq_mask;
+	unsigned long __softirq_pending;
 	unsigned int __local_irq_count;
 	unsigned int __local_bh_count;
 	unsigned int __syscall_count;
+	struct task_struct * __ksoftirqd_task;
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
@@ -31,7 +31,7 @@ typedef struct {
 #ifndef CONFIG_SMP
 
 extern unsigned long __irq_attempt[];
-#define irq_attempt(cpu, irq)  ((void)(cpu), __irq_attempt[irq])
+#define irq_attempt(cpu, irq)  (__irq_attempt[irq])
 
 #define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
 #define hardirq_endlock(cpu)	((void) 0)

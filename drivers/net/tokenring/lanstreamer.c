@@ -59,12 +59,18 @@
  *  03/03/00 - Merged to kernel, indented -kr -i8 -bri0, fixed some missing
  *		malloc free checks, reviewed code. <alan@redhat.com>
  *  03/13/00 - Added spinlocks for smp
+ *  03/08/01 - Added support for module_init() and module_exit()
+ *  08/15/01 - Added ioctl() functionality for debugging, changed netif_*_queue
+ *             calls and other incorrectness - Kent Yoder <yoder1@us.ibm.com>
+ *  11/05/01 - Restructured the interrupt function, added delays, reduced the 
+ *             the number of TX descriptors to 1, which together can prevent 
+ *             the card from locking up the box - <yoder1@us.ibm.com>
+ *  09/27/02 - New PCI interface + bug fix. - <yoder1@us.ibm.com>
+ *  11/13/02 - Removed free_irq calls which could cause a hang, added
+ *	       netif_carrier_{on|off} - <yoder1@us.ibm.com>
  *  
  *  To Do:
  *
- *  1) Test Network Monitor Mode
- *  2) Add auto reset logic on adapter errors
- *  3) Test with varying options
  *
  *  If Problems do Occur
  *  Most problems can be rectified by either closing and opening the interface
@@ -85,6 +91,14 @@
  */
 
 #define STREAMER_NETWORK_MONITOR 0
+
+/* #define CONFIG_PROC_FS */
+
+/*
+ *  Allow or disallow ioctl's for debugging
+ */
+
+#define STREAMER_IOCTL 0
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -107,6 +121,7 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
+#include <linux/version.h>
 #include <net/checksum.h>
 
 #include <asm/io.h>
@@ -123,7 +138,15 @@
  * Official releases will only have an a.b.c version number format.
  */
 
-static char *version = "LanStreamer.c v0.3.1 03/13/99 - Mike Sullivan";
+static char version[] = "LanStreamer.c v0.4.0 03/08/01 - Mike Sullivan\n"
+                        "              v0.5.3 11/13/02 - Kent Yoder";
+
+static struct pci_device_id streamer_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_IBM, PCI_DEVICE_ID_IBM_TR, PCI_ANY_ID, PCI_ANY_ID,},
+	{}	/* terminating entry */
+};
+MODULE_DEVICE_TABLE(pci,streamer_pci_tbl);
+
 
 static char *open_maj_error[] = {
 	"No error", "Lobe Media Test", "Physical Insertion",
@@ -170,8 +193,11 @@ static int message_level[STREAMER_MAX_ADAPTERS] = { 1, };
 MODULE_PARM(message_level,
 	    "1-" __MODULE_STRING(STREAMER_MAX_ADAPTERS) "i");
 
-static int streamer_scan(struct net_device *dev);
-static int streamer_init(struct net_device *dev);
+#if STREAMER_IOCTL
+static int streamer_ioctl(struct net_device *, struct ifreq *, int);
+#endif
+
+static int streamer_reset(struct net_device *dev);
 static int streamer_open(struct net_device *dev);
 static int streamer_xmit(struct sk_buff *skb, struct net_device *dev);
 static int streamer_close(struct net_device *dev);
@@ -186,97 +212,223 @@ static void streamer_srb_bh(struct net_device *dev);
 static void streamer_asb_bh(struct net_device *dev);
 #if STREAMER_NETWORK_MONITOR
 #ifdef CONFIG_PROC_FS
+static int streamer_proc_info(char *buffer, char **start, off_t offset,
+			      int length, int *eof, void *data);
 static int sprintf_info(char *buffer, struct net_device *dev);
+struct streamer_private *dev_streamer=NULL;
 #endif
 #endif
 
-int __init streamer_probe(struct net_device *dev)
+static int __devinit streamer_init_one(struct pci_dev *pdev,
+				       const struct pci_device_id *ent)
 {
-	int cards_found;
-
-	cards_found = streamer_scan(dev);
-	return cards_found ? 0 : -ENODEV;
-}
-
-static int __init streamer_scan(struct net_device *dev)
-{
-	struct pci_dev *pci_device = NULL;
+  struct net_device *dev=NULL;
 	struct streamer_private *streamer_priv;
-	int card_no = 0;
-	if (pci_present()) 
-	{
-		while ((pci_device = pci_find_device(PCI_VENDOR_ID_IBM,	PCI_DEVICE_ID_IBM_TR, pci_device))) 
-		{
-			if (pci_enable_device(pci_device))
-				continue;
-			pci_set_master(pci_device);
+  __u32 pio_start, pio_end, pio_flags, pio_len;
+  __u32 mmio_start, mmio_end, mmio_flags, mmio_len;
+  int rc=0;
+  static int card_no=-1;
+  u16 pcr;
+  u8 cls = 0;
 
-			/* Check to see if io has been allocated, if so, we've already done this card,
-			   so continue on the card discovery loop  */
-
-			if (check_region(pci_resource_start(pci_device,0), STREAMER_IO_SPACE)) 
-			{
-				card_no++;
-				continue;
-			}
-
-			streamer_priv = kmalloc(sizeof(struct streamer_private), GFP_KERNEL);
-			if(streamer_priv==NULL)
-			{
-				printk(KERN_ERR "lanstreamer: out of memory.\n");
-				break;
-			}
-			memset(streamer_priv, 0, sizeof(struct streamer_private));
-			init_waitqueue_head(&streamer_priv->srb_wait);
-			init_waitqueue_head(&streamer_priv->trb_wait);
-#ifndef MODULE
-			dev = init_trdev(dev, 0);
-			if(dev==NULL)
-			{
-				kfree(streamer_priv);
-				printk(KERN_ERR "lanstreamer: out of memory.\n");
-				break;
-			}
-#endif
-			dev->priv = (void *) streamer_priv;
 #if STREAMER_DEBUG
-			printk("pci_device: %p, dev:%p, dev->priv: %p\n",
-			       pci_device, dev, dev->priv);
+  printk("lanstreamer::streamer_init_one, entry pdev %p\n",pdev);
 #endif
-			dev->irq = pci_device->irq;
-			dev->base_addr = pci_resource_start(pci_device, 0);
-			dev->init = &streamer_init;
-			streamer_priv->streamer_card_name = (char *)pci_device->resource[0].name;
-			streamer_priv->streamer_mmio = 
-				ioremap(pci_resource_start(pci_device, 1), 256);
 
-			if ((pkt_buf_sz[card_no] < 100) || (pkt_buf_sz[card_no] > 18000))
-				streamer_priv->pkt_buf_sz = PKT_BUF_SZ;
-			else
-				streamer_priv->pkt_buf_sz = pkt_buf_sz[card_no];
-
-			streamer_priv->streamer_ring_speed = ringspeed[card_no];
-			streamer_priv->streamer_message_level = message_level[card_no];
-
-			if (streamer_init(dev) == -1) {
-				unregister_netdevice(dev);
-				kfree(dev->priv);
-				return 0;
+				card_no++;
+  dev=init_trdev(dev, sizeof(*streamer_priv));
+  if(dev==NULL) {
+				printk(KERN_ERR "lanstreamer: out of memory.\n");
+    return -ENOMEM;
 			}
+			SET_MODULE_OWNER(dev);
+  streamer_priv=dev->priv;
+
+#if STREAMER_NETWORK_MONITOR
+#ifdef CONFIG_PROC_FS
+  if (!dev_streamer) {
+    create_proc_read_entry("net/streamer_tr",0,0,streamer_proc_info,NULL); 
+  }
+  streamer_priv->next=dev_streamer;
+  dev_streamer=streamer_priv;
+#endif
+#endif
+ 
+  if(pci_set_dma_mask(pdev, 0xFFFFFFFF)) {
+    printk(KERN_ERR "%s: No suitable PCI mapping available.\n", dev->name);
+    rc = -ENODEV;
+    goto err_out;
+  }
+  
+  if (pci_enable_device(pdev)) {
+    printk(KERN_ERR "lanstreamer: unable to enable pci device\n");
+    rc=-EIO;
+    goto err_out;
+  }
+  
+  pci_set_master(pdev);
+  
+  pio_start = pci_resource_start(pdev, 0);
+  pio_end = pci_resource_end(pdev, 0);
+  pio_flags = pci_resource_flags(pdev, 0);
+  pio_len = pci_resource_len(pdev, 0);
+  
+  mmio_start = pci_resource_start(pdev, 1);
+  mmio_end = pci_resource_end(pdev, 1);
+  mmio_flags = pci_resource_flags(pdev, 1);
+  mmio_len = pci_resource_len(pdev, 1);
+  
+#if STREAMER_DEBUG
+  printk("lanstreamer: pio_start %x pio_end %x pio_len %x pio_flags %x\n",
+	 pio_start, pio_end, pio_len, pio_flags);
+  printk("lanstreamer: mmio_start %x mmio_end %x mmio_len %x mmio_flags %x\n",
+	 mmio_start, mmio_end, mmio_flags, mmio_len);
+#endif
+
+  if (!request_region(pio_start, pio_len, "lanstreamer")) {
+    printk(KERN_ERR "lanstreamer: unable to get pci io addr %x\n",pio_start);
+    rc= -EBUSY;
+    goto err_out;
+  }
+
+  if (!request_mem_region(mmio_start, mmio_len, "lanstreamer")) {
+    printk(KERN_ERR "lanstreamer: unable to get pci mmio addr %x\n",mmio_start);
+    rc= -EBUSY;
+    goto err_out_free_pio;
+  }
+
+  streamer_priv->streamer_mmio=ioremap(mmio_start, mmio_len);
+  if (streamer_priv->streamer_mmio == NULL) {
+    printk(KERN_ERR "lanstreamer: unable to remap MMIO %x\n",mmio_start);
+    rc= -EIO;
+    goto err_out_free_mmio;
+			}
+
+  init_waitqueue_head(&streamer_priv->srb_wait);
+  init_waitqueue_head(&streamer_priv->trb_wait);
 
 			dev->open = &streamer_open;
 			dev->hard_start_xmit = &streamer_xmit;
 			dev->change_mtu = &streamer_change_mtu;
-
 			dev->stop = &streamer_close;
+#if STREAMER_IOCTL
+			dev->do_ioctl = &streamer_ioctl;
+#else
 			dev->do_ioctl = NULL;
+#endif
 			dev->set_multicast_list = &streamer_set_rx_mode;
 			dev->get_stats = &streamer_get_stats;
 			dev->set_mac_address = &streamer_set_mac_address;
-			return 1;
+  dev->irq = pdev->irq;
+  dev->base_addr=pio_start;
+  
+  streamer_priv->streamer_card_name = (char *)pdev->resource[0].name;
+  streamer_priv->pci_dev=pdev;
+  
+  if ((pkt_buf_sz[card_no] < 100) || (pkt_buf_sz[card_no] > 18000))
+    streamer_priv->pkt_buf_sz = PKT_BUF_SZ;
+  else
+    streamer_priv->pkt_buf_sz = pkt_buf_sz[card_no];
+  
+  streamer_priv->streamer_ring_speed = ringspeed[card_no];
+  streamer_priv->streamer_message_level = message_level[card_no];
+
+  pci_set_drvdata(pdev, dev);
+
+  spin_lock_init(&streamer_priv->streamer_lock);
+  
+  pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cls);
+  cls <<= 2;
+  if (cls != SMP_CACHE_BYTES) {
+         printk(KERN_INFO "  PCI cache line size set incorrectly "
+                "(%i bytes) by BIOS/FW, ", cls);
+         if (cls > SMP_CACHE_BYTES)
+                printk("expecting %i\n", SMP_CACHE_BYTES);
+         else {
+                printk("correcting to %i\n", SMP_CACHE_BYTES);
+                pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE,
+                                      SMP_CACHE_BYTES >> 2);
+         }
+  }
+
+  pci_read_config_word (pdev, PCI_COMMAND, &pcr);
+
+  pcr |= (PCI_COMMAND_INVALIDATE | PCI_COMMAND_SERR);
+
+  pci_write_config_word (pdev, PCI_COMMAND, pcr);
+  pci_read_config_word (pdev, PCI_COMMAND, &pcr);
+
+  printk("%s \n", version);
+  printk("%s: %s. I/O at %hx, MMIO at %p, using irq %d\n",dev->name,
+	 streamer_priv->streamer_card_name,
+	 (unsigned int) dev->base_addr,
+	 streamer_priv->streamer_mmio, 
+	 dev->irq);
+
+  if (!streamer_reset(dev)) {
+    return 0;
+  }
+
+  iounmap(streamer_priv->streamer_mmio);
+err_out_free_mmio:
+  release_mem_region(mmio_start, mmio_len);
+err_out_free_pio:
+  release_region(pio_start, pio_len);
+err_out:
+  unregister_trdev(dev);
+  kfree(dev);
+#if STREAMER_DEBUG
+  printk("lanstreamer: Exit error %x\n",rc);
+#endif
+  return rc;
+}
+
+static void __devexit streamer_remove_one(struct pci_dev *pdev) {
+  struct net_device *dev=pci_get_drvdata(pdev);
+  struct streamer_private *streamer_priv;
+
+#if STREAMER_DEBUG
+  printk("lanstreamer::streamer_remove_one entry pdev %p\n",pdev);
+#endif
+
+  if (dev == NULL) {
+    printk(KERN_ERR "lanstreamer::streamer_remove_one, ERROR dev is NULL\n");
+    return;
 		}
+
+  streamer_priv=dev->priv;
+  if (streamer_priv == NULL) {
+    printk(KERN_ERR "lanstreamer::streamer_remove_one, ERROR dev->priv is NULL\n");
+    return;
 	}
-	return 0;
+
+#if STREAMER_NETWORK_MONITOR
+#ifdef CONFIG_PROC_FS
+  {
+    struct streamer_private *slast;
+    struct streamer_private *scurrent;
+    if (streamer_priv == dev_streamer) {
+      dev_streamer=dev_streamer->next;
+    } else {
+      for(slast=scurrent=dev_streamer; dev_streamer; slast=scurrent, scurrent=scurrent->next) {
+	if (scurrent == streamer_priv) {
+	  slast->next=scurrent->next;
+	  break;
+	}
+      }
+    }
+    if (!dev_streamer) {
+      remove_proc_entry("net/streamer_tr", NULL);
+    }
+  }
+#endif
+#endif
+
+  unregister_trdev(dev);
+  release_region(pci_resource_start(pdev, 0), pci_resource_len(pdev,0));
+  release_mem_region(pci_resource_start(pdev, 1), pci_resource_len(pdev,1));
+  kfree(dev);
+  pci_set_drvdata(pdev, NULL);
 }
 
 
@@ -306,6 +458,7 @@ static int streamer_reset(struct net_device *dev)
 	printk("GPR: %x\n", readw(streamer_mmio + GPR));
 	printk("SISRMASK: %x\n", readw(streamer_mmio + SISR_MASK));
 #endif
+	writew(readw(streamer_mmio + BCTL) | (BCTL_RX_FIFO_8 | BCTL_TX_FIFO_8), streamer_mmio + BCTL );
 
 	if (streamer_priv->streamer_ring_speed == 0) {	/* Autosense */
 		writew(readw(streamer_mmio + GPR) | GPR_AUTOSENSE,
@@ -337,9 +490,11 @@ static int streamer_reset(struct net_device *dev)
 		data=((u8 *)skb->data)+sizeof(struct streamer_rx_desc);
 		rx_ring->forward=0;
 		rx_ring->status=0;
-		rx_ring->buffer=virt_to_bus(data);
+		rx_ring->buffer=cpu_to_le32(pci_map_single(streamer_priv->pci_dev, data, 
+							512, PCI_DMA_FROMDEVICE));
 		rx_ring->framelen_buflen=512; 
-		writel(virt_to_bus(rx_ring),streamer_mmio+RXBDA);
+		writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, rx_ring, 512, PCI_DMA_FROMDEVICE)),
+			streamer_mmio+RXBDA);
 	}
 
 #if STREAMER_DEBUG
@@ -355,6 +510,8 @@ static int streamer_reset(struct net_device *dev)
 			printk(KERN_ERR
 			       "IBM PCI tokenring card not responding\n");
 			release_region(dev->base_addr, STREAMER_IO_SPACE);
+			if (skb)
+				dev_kfree_skb(skb);
 			return -1;
 		}
 	}
@@ -423,32 +580,6 @@ static int streamer_reset(struct net_device *dev)
 	return 0;
 }
 
-static int __init streamer_init(struct net_device *dev) 
-{
-        struct streamer_private *streamer_priv;
-	__u8 *streamer_mmio;
-	int rc;
-  
-	streamer_priv=(struct streamer_private *)dev->priv;
-	streamer_mmio=streamer_priv->streamer_mmio;
-
-	spin_lock_init(&streamer_priv->streamer_lock);
-  
-	printk("%s \n", version);
-	printk("%s: %s. I/O at %hx, MMIO at %p, using irq %d\n",dev->name,
-	       streamer_priv->streamer_card_name,
-	       (unsigned int) dev->base_addr,
-	       streamer_priv->streamer_mmio, 
-	       dev->irq);
-
-	request_region(dev->base_addr, STREAMER_IO_SPACE, "streamer");
-
-	rc=streamer_reset(dev);
-	return rc;
-}
-  
-
-
 static int streamer_open(struct net_device *dev)
 {
 	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
@@ -464,7 +595,7 @@ static int streamer_open(struct net_device *dev)
 	        rc=streamer_reset(dev);
 	}
 
-	if (request_irq(dev->irq, &streamer_interrupt, SA_SHIRQ, "streamer", dev)) {
+	if (request_irq(dev->irq, &streamer_interrupt, SA_SHIRQ, "lanstreamer", dev)) {
 		return -EAGAIN;
 	}
 #if STREAMER_DEBUG
@@ -487,8 +618,6 @@ static int streamer_open(struct net_device *dev)
 	do {
 		int i;
 
-		save_flags(flags);
-		cli();
 		for (i = 0; i < SRB_COMMAND_SIZE; i += 2) {
 			writew(0, streamer_mmio + LAPDINC);
 		}
@@ -528,11 +657,12 @@ static int streamer_open(struct net_device *dev)
 		}
 		printk("\n");
 #endif
-
+		spin_lock_irqsave(&streamer_priv->streamer_lock, flags);
 		streamer_priv->srb_queued = 1;
 
 		/* signal solo that SRB command has been issued */
 		writew(LISR_SRB_CMD, streamer_mmio + LISR_SUM);
+		spin_unlock_irqrestore(&streamer_priv->streamer_lock, flags);
 
 		while (streamer_priv->srb_queued) {
 			interruptible_sleep_on_timeout(&streamer_priv->srb_wait, 5 * HZ);
@@ -546,7 +676,6 @@ static int streamer_open(struct net_device *dev)
 				break;
 			}
 		}
-		restore_flags(flags);
 
 #if STREAMER_DEBUG
 		printk("SISR_MASK: %x\n", readw(streamer_mmio + SISR_MASK));
@@ -562,7 +691,7 @@ static int streamer_open(struct net_device *dev)
 		 * timed out.
 		 */
 		writew(srb_open + 2, streamer_mmio + LAPA);
-		srb_word = ntohs(readw(streamer_mmio + LAPD)) & 0xFF;
+		srb_word = ntohs(readw(streamer_mmio + LAPD)) >> 8;
 		if (srb_word == STREAMER_CLEAR_RET_CODE) {
 			printk(KERN_WARNING "%s: Adapter Open time out or error.\n",
 			       dev->name);
@@ -657,14 +786,19 @@ static int streamer_open(struct net_device *dev)
 
 		skb->dev = dev;
 
-		streamer_priv->streamer_rx_ring[i].forward = virt_to_bus(&streamer_priv->streamer_rx_ring[i + 1]);
+		streamer_priv->streamer_rx_ring[i].forward = 
+			cpu_to_le32(pci_map_single(streamer_priv->pci_dev, &streamer_priv->streamer_rx_ring[i + 1],
+					sizeof(struct streamer_rx_desc), PCI_DMA_FROMDEVICE));
 		streamer_priv->streamer_rx_ring[i].status = 0;
-		streamer_priv->streamer_rx_ring[i].buffer = virt_to_bus(skb->data);
+		streamer_priv->streamer_rx_ring[i].buffer = 
+			cpu_to_le32(pci_map_single(streamer_priv->pci_dev, skb->data,
+					      streamer_priv->pkt_buf_sz, PCI_DMA_FROMDEVICE));
 		streamer_priv->streamer_rx_ring[i].framelen_buflen = streamer_priv->pkt_buf_sz;
 		streamer_priv->rx_ring_skb[i] = skb;
 	}
 	streamer_priv->streamer_rx_ring[STREAMER_RX_RING_SIZE - 1].forward =
-				virt_to_bus(&streamer_priv->streamer_rx_ring[0]);
+				cpu_to_le32(pci_map_single(streamer_priv->pci_dev, &streamer_priv->streamer_rx_ring[0],
+						sizeof(struct streamer_rx_desc), PCI_DMA_FROMDEVICE));
 
 	if (i == 0) {
 		printk(KERN_WARNING "%s: Not enough memory to allocate rx buffers. Adapter disabled\n", dev->name);
@@ -674,8 +808,12 @@ static int streamer_open(struct net_device *dev)
 
 	streamer_priv->rx_ring_last_received = STREAMER_RX_RING_SIZE - 1;	/* last processed rx status */
 
-	writel(virt_to_bus(&streamer_priv->streamer_rx_ring[0]), streamer_mmio + RXBDA);
-	writel(virt_to_bus(&streamer_priv->streamer_rx_ring[STREAMER_RX_RING_SIZE - 1]), streamer_mmio + RXLBDA);
+	writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, &streamer_priv->streamer_rx_ring[0],
+				sizeof(struct streamer_rx_desc), PCI_DMA_TODEVICE)), 
+		streamer_mmio + RXBDA);
+	writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, &streamer_priv->streamer_rx_ring[STREAMER_RX_RING_SIZE - 1],
+				sizeof(struct streamer_rx_desc), PCI_DMA_TODEVICE)), 
+		streamer_mmio + RXLBDA);
 
 	/* set bus master interrupt event mask */
 	writew(MISR_RX_NOBUF | MISR_RX_EOF, streamer_mmio + MISR_MASK);
@@ -691,14 +829,21 @@ static int streamer_open(struct net_device *dev)
 
 	writew(~BMCTL_TX2_DIS, streamer_mmio + BMCTL_RUM);	/* Enables TX channel 2 */
 	for (i = 0; i < STREAMER_TX_RING_SIZE; i++) {
-		streamer_priv->streamer_tx_ring[i].forward = virt_to_bus(&streamer_priv->streamer_tx_ring[i + 1]);
+		streamer_priv->streamer_tx_ring[i].forward = cpu_to_le32(pci_map_single(streamer_priv->pci_dev, 
+										&streamer_priv->streamer_tx_ring[i + 1],
+										sizeof(struct streamer_tx_desc),
+										PCI_DMA_TODEVICE));
 		streamer_priv->streamer_tx_ring[i].status = 0;
 		streamer_priv->streamer_tx_ring[i].bufcnt_framelen = 0;
 		streamer_priv->streamer_tx_ring[i].buffer = 0;
 		streamer_priv->streamer_tx_ring[i].buflen = 0;
+		streamer_priv->streamer_tx_ring[i].rsvd1 = 0;
+		streamer_priv->streamer_tx_ring[i].rsvd2 = 0;
+		streamer_priv->streamer_tx_ring[i].rsvd3 = 0;
 	}
 	streamer_priv->streamer_tx_ring[STREAMER_TX_RING_SIZE - 1].forward =
-					virt_to_bus(&streamer_priv->streamer_tx_ring[0]);;
+					cpu_to_le32(pci_map_single(streamer_priv->pci_dev, &streamer_priv->streamer_tx_ring[0],
+							sizeof(struct streamer_tx_desc), PCI_DMA_TODEVICE));
 
 	streamer_priv->free_tx_ring_entries = STREAMER_TX_RING_SIZE;
 	streamer_priv->tx_ring_free = 0;	/* next entry in tx ring to use */
@@ -736,7 +881,7 @@ static int streamer_open(struct net_device *dev)
 #endif
 
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
+	netif_carrier_on(dev);
 	return 0;
 }
 
@@ -797,6 +942,11 @@ static void streamer_rx(struct net_device *dev)
 				skb->dev = dev;
 
 				if (buffer_cnt == 1) {
+					/* release the DMA mapping */
+					pci_unmap_single(streamer_priv->pci_dev, 
+						le32_to_cpu(streamer_priv->streamer_rx_ring[rx_ring_last_received].buffer),
+						streamer_priv->pkt_buf_sz, 
+						PCI_DMA_FROMDEVICE);
 					skb2 = streamer_priv->rx_ring_skb[rx_ring_last_received];
 #if STREAMER_DEBUG_PACKETS
 					{
@@ -816,20 +966,29 @@ static void streamer_rx(struct net_device *dev)
 					/* recycle this descriptor */
 					streamer_priv->streamer_rx_ring[rx_ring_last_received].status = 0;
 					streamer_priv->streamer_rx_ring[rx_ring_last_received].framelen_buflen = streamer_priv->pkt_buf_sz;
-					streamer_priv->streamer_rx_ring[rx_ring_last_received].buffer = virt_to_bus(skb->data);
-					streamer_priv-> rx_ring_skb[rx_ring_last_received] = skb;
+					streamer_priv->streamer_rx_ring[rx_ring_last_received].buffer = 
+						cpu_to_le32(pci_map_single(streamer_priv->pci_dev, skb->data, streamer_priv->pkt_buf_sz,
+								PCI_DMA_FROMDEVICE));
+					streamer_priv->rx_ring_skb[rx_ring_last_received] = skb;
 					/* place recycled descriptor back on the adapter */
-					writel(virt_to_bus(&streamer_priv->streamer_rx_ring[rx_ring_last_received]),streamer_mmio + RXLBDA);
+					writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, 
+									&streamer_priv->streamer_rx_ring[rx_ring_last_received],
+									sizeof(struct streamer_rx_desc), PCI_DMA_FROMDEVICE)),
+						streamer_mmio + RXLBDA);
 					/* pass the received skb up to the protocol */
 					netif_rx(skb2);
 				} else {
 					do {	/* Walk the buffers */
-						memcpy(skb_put(skb, length),bus_to_virt(rx_desc->buffer), length);	/* copy this fragment */
+						pci_unmap_single(streamer_priv->pci_dev, le32_to_cpu(rx_desc->buffer), length, PCI_DMA_FROMDEVICE), 
+						memcpy(skb_put(skb, length), (void *)rx_desc->buffer, length);	/* copy this fragment */
 						streamer_priv->streamer_rx_ring[rx_ring_last_received].status = 0;
 						streamer_priv->streamer_rx_ring[rx_ring_last_received].framelen_buflen = streamer_priv->pkt_buf_sz;
 						
 						/* give descriptor back to the adapter */
-						writel(virt_to_bus(&streamer_priv->streamer_rx_ring[rx_ring_last_received]), streamer_mmio + RXLBDA);
+						writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, 
+									&streamer_priv->streamer_rx_ring[rx_ring_last_received],
+									length, PCI_DMA_FROMDEVICE)), 
+							streamer_mmio + RXLBDA);
 
 						if (rx_desc->status & 0x80000000)
 							break;	/* this descriptor completes the frame */
@@ -852,6 +1011,7 @@ static void streamer_rx(struct net_device *dev)
 					/* send up to the protocol */
 					netif_rx(skb);
 				}
+				dev->last_rx = jiffies;
 				streamer_priv->streamer_stats.rx_packets++;
 				streamer_priv->streamer_stats.rx_bytes += length;
 			}	/* if skb == null */
@@ -870,46 +1030,42 @@ static void streamer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	__u8 *streamer_mmio = streamer_priv->streamer_mmio;
 	__u16 sisr;
 	__u16 misr;
-	__u16 sisrmask;
-
-	sisrmask = SISR_MI;
-	writew(~sisrmask, streamer_mmio + SISR_MASK_RUM);
-	sisr = readw(streamer_mmio + SISR);
-	writew(~sisr, streamer_mmio + SISR_RUM);
-	misr = readw(streamer_mmio + MISR_RUM);
-	writew(~misr, streamer_mmio + MISR_RUM);
-
-	if (!sisr) 
-	{		/* Interrupt isn't for us */
-  	        writew(~misr,streamer_mmio+MISR_RUM);
-		return;
-	}
+	u8 max_intr = MAX_INTR;
 
 	spin_lock(&streamer_priv->streamer_lock);
+	sisr = readw(streamer_mmio + SISR);
 
-	if ((sisr & (SISR_SRB_REPLY | SISR_ADAPTER_CHECK | SISR_ASB_FREE | SISR_ARB_CMD | SISR_TRB_REPLY))
-	    || (misr & (MISR_TX2_EOF | MISR_RX_NOBUF | MISR_RX_EOF))) {
-		if (sisr & SISR_SRB_REPLY) {
-			if (streamer_priv->srb_queued == 1) {
-				wake_up_interruptible(&streamer_priv->srb_wait);
-			} else if (streamer_priv->srb_queued == 2) {
-				streamer_srb_bh(dev);
-			}
-			streamer_priv->srb_queued = 0;
+	while((sisr & (SISR_MI | SISR_SRB_REPLY | SISR_ADAPTER_CHECK | SISR_ASB_FREE | 
+		       SISR_ARB_CMD | SISR_TRB_REPLY | SISR_PAR_ERR | SISR_SERR_ERR))
+               && (max_intr > 0)) {
+
+		if(sisr & SISR_PAR_ERR) {
+			writew(~SISR_PAR_ERR, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
 		}
-		/* SISR_SRB_REPLY */
+
+		else if(sisr & SISR_SERR_ERR) {
+			writew(~SISR_SERR_ERR, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
+		}
+
+		else if(sisr & SISR_MI) {
+			misr = readw(streamer_mmio + MISR_RUM);
+
 		if (misr & MISR_TX2_EOF) {
-			while (streamer_priv->streamer_tx_ring[(streamer_priv->tx_ring_last_status + 1) & (STREAMER_TX_RING_SIZE - 1)].status) 
-			{
+				while(streamer_priv->streamer_tx_ring[(streamer_priv->tx_ring_last_status + 1) & (STREAMER_TX_RING_SIZE - 1)].status) {
 				streamer_priv->tx_ring_last_status = (streamer_priv->tx_ring_last_status + 1) & (STREAMER_TX_RING_SIZE - 1);
 				streamer_priv->free_tx_ring_entries++;
 				streamer_priv->streamer_stats.tx_bytes += streamer_priv->tx_ring_skb[streamer_priv->tx_ring_last_status]->len;
 				streamer_priv->streamer_stats.tx_packets++;
 				dev_kfree_skb_irq(streamer_priv->tx_ring_skb[streamer_priv->tx_ring_last_status]);
-				streamer_priv-> streamer_tx_ring[streamer_priv->tx_ring_last_status].buffer = 0xdeadbeef;
+				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].buffer = 0xdeadbeef;
 				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].status = 0;
 				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].bufcnt_framelen = 0;
 				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].buflen = 0;
+				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].rsvd1 = 0;
+				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].rsvd2 = 0;
+				streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_last_status].rsvd3 = 0;
 			}
 			netif_wake_queue(dev);
 		}
@@ -918,7 +1074,30 @@ static void streamer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			streamer_rx(dev);
 		}
 		/* MISR_RX_EOF */
-		if (sisr & SISR_ADAPTER_CHECK) {
+
+			if (misr & MISR_RX_NOBUF) {
+				/* According to the documentation, we don't have to do anything,  
+                                 * but trapping it keeps it out of /var/log/messages.  
+                                 */
+			}		/* SISR_RX_NOBUF */
+
+			writew(~misr, streamer_mmio + MISR_RUM);
+			(void)readw(streamer_mmio + MISR_RUM);
+		}
+
+		else if (sisr & SISR_SRB_REPLY) {
+			if (streamer_priv->srb_queued == 1) {
+				wake_up_interruptible(&streamer_priv->srb_wait);
+			} else if (streamer_priv->srb_queued == 2) {
+				streamer_srb_bh(dev);
+			}
+			streamer_priv->srb_queued = 0;
+
+			writew(~SISR_SRB_REPLY, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
+		}
+
+		else if (sisr & SISR_ADAPTER_CHECK) {
 			printk(KERN_WARNING "%s: Adapter Check Interrupt Raised, 8 bytes of information follow:\n", dev->name);
 			writel(readl(streamer_mmio + LAPWWO), streamer_mmio + LAPA);
 			printk(KERN_WARNING "%s: Words %x:%x:%x:%x:\n",
@@ -926,42 +1105,43 @@ static void streamer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			       ntohs(readw(streamer_mmio + LAPDINC)),
 			       ntohs(readw(streamer_mmio + LAPDINC)),
 			       ntohs(readw(streamer_mmio + LAPDINC)));
-			free_irq(dev->irq, dev);
+			netif_stop_queue(dev);
+			netif_carrier_off(dev);
+			printk(KERN_WARNING "%s: Adapter must be manually reset.\n", dev->name);
 		}
 
 		/* SISR_ADAPTER_CHECK */
-		if (sisr & SISR_ASB_FREE) {
+		else if (sisr & SISR_ASB_FREE) {
 			/* Wake up anything that is waiting for the asb response */
 			if (streamer_priv->asb_queued) {
 				streamer_asb_bh(dev);
 			}
+			writew(~SISR_ASB_FREE, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
 		}
 		/* SISR_ASB_FREE */
-		if (sisr & SISR_ARB_CMD) {
+		else if (sisr & SISR_ARB_CMD) {
 			streamer_arb_cmd(dev);
+			writew(~SISR_ARB_CMD, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
 		}
 		/* SISR_ARB_CMD */
-		if (sisr & SISR_TRB_REPLY) {
+		else if (sisr & SISR_TRB_REPLY) {
 			/* Wake up anything that is waiting for the trb response */
 			if (streamer_priv->trb_queued) {
 				wake_up_interruptible(&streamer_priv->
 						      trb_wait);
 			}
 			streamer_priv->trb_queued = 0;
+			writew(~SISR_TRB_REPLY, streamer_mmio + SISR_RUM);
+			(void)readw(streamer_mmio + SISR_RUM);
 		}
 		/* SISR_TRB_REPLY */
-		if (misr & MISR_RX_NOBUF) {
-			/* According to the documentation, we don't have to do anything, but trapping it keeps it out of
-			   /var/log/messages.  */
-		}		/* SISR_RX_NOBUF */
-	} else {
-		printk(KERN_WARNING "%s: Unexpected interrupt: %x\n",
-		       dev->name, sisr);
-		printk(KERN_WARNING "%s: SISR_MASK: %x\n", dev->name,
-		       readw(streamer_mmio + SISR_MASK));
-	}			/* One if the interrupts we want */
 
-	writew(SISR_MI, streamer_mmio + SISR_MASK_SUM);
+		sisr = readw(streamer_mmio + SISR);
+		max_intr--;
+	} /* while() */		
+
 	spin_unlock(&streamer_priv->streamer_lock) ; 
 }
 
@@ -973,13 +1153,17 @@ static int streamer_xmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned long flags ;
 
 	spin_lock_irqsave(&streamer_priv->streamer_lock, flags);
-	netif_stop_queue(dev);
 
 	if (streamer_priv->free_tx_ring_entries) {
 		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].status = 0;
-		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].bufcnt_framelen = 0x00010000 | skb->len;
-		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].buffer = virt_to_bus(skb->data);
+		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].bufcnt_framelen = 0x00020000 | skb->len;
+		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].buffer = 
+			cpu_to_le32(pci_map_single(streamer_priv->pci_dev, skb->data, skb->len, PCI_DMA_TODEVICE));
+		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].rsvd1 = skb->len;
+		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].rsvd2 = 0;
+		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].rsvd3 = 0;
 		streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free].buflen = skb->len;
+
 		streamer_priv->tx_ring_skb[streamer_priv->tx_ring_free] = skb;
 		streamer_priv->free_tx_ring_entries--;
 #if STREAMER_DEBUG_PACKETS
@@ -995,13 +1179,17 @@ static int streamer_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 #endif
 
-		writel(virt_to_bus (&streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free]),streamer_mmio + TX2LFDA);
+		writel(cpu_to_le32(pci_map_single(streamer_priv->pci_dev, 
+					&streamer_priv->streamer_tx_ring[streamer_priv->tx_ring_free],
+					sizeof(struct streamer_tx_desc), PCI_DMA_TODEVICE)),
+			streamer_mmio + TX2LFDA);
+		(void)readl(streamer_mmio + TX2LFDA);
 
 		streamer_priv->tx_ring_free = (streamer_priv->tx_ring_free + 1) & (STREAMER_TX_RING_SIZE - 1);
-		netif_wake_queue(dev);
 		spin_unlock_irqrestore(&streamer_priv->streamer_lock,flags);
 		return 0;
 	} else {
+	        netif_stop_queue(dev);
 	        spin_unlock_irqrestore(&streamer_priv->streamer_lock,flags);
 		return 1;
 	}
@@ -1017,15 +1205,17 @@ static int streamer_close(struct net_device *dev)
 	int i;
 
 	netif_stop_queue(dev);
+	netif_carrier_off(dev);
 	writew(streamer_priv->srb, streamer_mmio + LAPA);
 	writew(htons(SRB_CLOSE_ADAPTER << 8),streamer_mmio+LAPDINC);
 	writew(htons(STREAMER_CLEAR_RET_CODE << 8), streamer_mmio+LAPDINC);
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&streamer_priv->streamer_lock, flags);
 
 	streamer_priv->srb_queued = 1;
 	writew(LISR_SRB_CMD, streamer_mmio + LISR_SUM);
+
+	spin_unlock_irqrestore(&streamer_priv->streamer_lock, flags);
 
 	while (streamer_priv->srb_queued) 
 	{
@@ -1043,7 +1233,6 @@ static int streamer_close(struct net_device *dev)
 		}
 	}
 
-	restore_flags(flags);
 	streamer_priv->rx_ring_last_received = (streamer_priv->rx_ring_last_received + 1) & (STREAMER_RX_RING_SIZE - 1);
 
 	for (i = 0; i < STREAMER_RX_RING_SIZE; i++) {
@@ -1070,8 +1259,6 @@ static int streamer_close(struct net_device *dev)
 	printk("\n");
 #endif
 	free_irq(dev->irq, dev);
-
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1383,8 +1570,11 @@ static void streamer_arb_cmd(struct net_device *dev)
 			       status, len);
 		}
 #endif
-		mac_frame = dev_alloc_skb(frame_len);
-
+		if (!(mac_frame = dev_alloc_skb(frame_len))) {
+			printk(KERN_WARNING "%s: Memory squeeze, dropping frame.\n",
+			       dev->name);
+			goto drop_frame;
+		}
 		/* Walk the buffer chain, creating the frame */
 
 		do {
@@ -1431,7 +1621,7 @@ static void streamer_arb_cmd(struct net_device *dev)
 		netif_rx(mac_frame);
 
 		/* Now tell the card we have dealt with the received frame */
-
+drop_frame:
 		/* Set LISR Bit 1 */
 		writel(LISR_ARB_FREE, streamer_priv->streamer_mmio + LISR_SUM);
 
@@ -1486,11 +1676,10 @@ static void streamer_arb_cmd(struct net_device *dev)
 			/* @TBD. no llc reset on autostreamer writel(readl(streamer_mmio+BCTL)|(3<<13),streamer_mmio+BCTL);
 			   udelay(1);
 			   writel(readl(streamer_mmio+BCTL)&~(3<<13),streamer_mmio+BCTL); */
+
 			netif_stop_queue(dev);
-			free_irq(dev->irq, dev);
-
-			printk(KERN_WARNING "%s: Adapter has been closed \n", dev->name);
-
+			netif_carrier_off(dev);
+			printk(KERN_WARNING "%s: Adapter must be manually reset.\n", dev->name);
 		}
 		/* If serious error */
 		if (streamer_priv->streamer_message_level) {
@@ -1616,27 +1805,24 @@ static int streamer_change_mtu(struct net_device *dev, int mtu)
 static int streamer_proc_info(char *buffer, char **start, off_t offset,
 			      int length, int *eof, void *data)
 {
+  struct streamer_private *sdev=NULL;
 	struct pci_dev *pci_device = NULL;
 	int len = 0;
 	off_t begin = 0;
 	off_t pos = 0;
 	int size;
 
-	struct device *dev;
-
+  struct net_device *dev;
 
 	size = sprintf(buffer, "IBM LanStreamer/MPC Chipset Token Ring Adapters\n");
 
 	pos += size;
 	len += size;
 
-	while ((pci_device = pci_find_device(PCI_VENDOR_ID_IBM, PCI_DEVICE_ID_IBM_TR, pci_device))) 
-	{
+  for(sdev=dev_streamer; sdev; sdev=sdev->next) {
+    pci_device=sdev->pci_dev;
+    dev=pci_get_drvdata(pci_device);
 
-		for (dev = dev_base; dev != NULL; dev = dev->next) 
-		{
-		        if (dev->base_addr == pci_device->resource[0].start) 
-			{       /* Yep, a Streamer device */
 				size = sprintf_info(buffer + len, dev);
 				len += size;
 				pos = begin + len;
@@ -1647,9 +1833,7 @@ static int streamer_proc_info(char *buffer, char **start, off_t offset,
 				}
 				if (pos > offset + length)
 					break;
-			}	/* if */
 		}		/* for */
-	}			/* While */
 
 	*start = buffer + (offset - begin);	/* Start of wanted data */
 	len -= (offset - begin);	/* Start slop */
@@ -1741,65 +1925,79 @@ static int sprintf_info(char *buffer, struct net_device *dev)
 #endif
 #endif
 
-#ifdef MODULE
-
-static struct net_device *dev_streamer[STREAMER_MAX_ADAPTERS];
-
-int init_module(void)
+#if STREAMER_IOCTL && (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
+static int streamer_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
-	int i;
+        int i;
+	struct streamer_private *streamer_priv = (struct streamer_private *) dev->priv;
+	u8 *streamer_mmio = streamer_priv->streamer_mmio;
 
-#if STREAMER_NETWORK_MONITOR
-#ifdef CONFIG_PROC_FS
-	create_proc_read_entry("net/streamer_tr",0,0,streamer_proc_info,NULL); 
-#endif
-#endif
-	for (i = 0; (i < STREAMER_MAX_ADAPTERS); i++) 
-	{
-		dev_streamer[i] = NULL;
-		dev_streamer[i] = init_trdev(dev_streamer[i], 0);
-		if (dev_streamer[i] == NULL)
-			return -ENOMEM;
-
-		dev_streamer[i]->init = &streamer_probe;
-
-		if (register_trdev(dev_streamer[i]) != 0) {
-			kfree(dev_streamer[i]);
-			dev_streamer[i] = NULL;
-			if (i == 0) 
-			{
-				printk(KERN_INFO "Streamer: No IBM LanStreamer PCI Token Ring cards found in system.\n");
-				return -EIO;
-			} else {
-				printk(KERN_INFO "Streamer: %d IBM LanStreamer PCI Token Ring card(s) found in system.\n", i);
-				return 0;
-			}
-		}
+	switch(cmd) {
+	case IOCTL_SISR_MASK:
+		writew(SISR_MI, streamer_mmio + SISR_MASK_SUM);
+		break;
+	case IOCTL_SPIN_LOCK_TEST:
+	        printk(KERN_INFO "spin_lock() called.\n");
+		spin_lock(&streamer_priv->streamer_lock);
+		spin_unlock(&streamer_priv->streamer_lock);
+		printk(KERN_INFO "spin_unlock() finished.\n");
+		break;
+	case IOCTL_PRINT_BDAS:
+	        printk(KERN_INFO "bdas: RXBDA: %x RXLBDA: %x TX2FDA: %x TX2LFDA: %x\n",
+		       readw(streamer_mmio + RXBDA),
+		       readw(streamer_mmio + RXLBDA),
+		       readw(streamer_mmio + TX2FDA),
+		       readw(streamer_mmio + TX2LFDA));
+		break;
+	case IOCTL_PRINT_REGISTERS:
+	        printk(KERN_INFO "registers:\n");
+		printk(KERN_INFO "SISR: %04x MISR: %04x LISR: %04x BCTL: %04x BMCTL: %04x\nmask  %04x mask  %04x\n", 
+		       readw(streamer_mmio + SISR),
+		       readw(streamer_mmio + MISR_RUM),
+		       readw(streamer_mmio + LISR),
+		       readw(streamer_mmio + BCTL),
+		       readw(streamer_mmio + BMCTL_SUM),
+		       readw(streamer_mmio + SISR_MASK),
+		       readw(streamer_mmio + MISR_MASK));
+		break;
+	case IOCTL_PRINT_RX_BUFS:
+	        printk(KERN_INFO "Print rx bufs:\n");
+		for(i=0; i<STREAMER_RX_RING_SIZE; i++)
+		        printk(KERN_INFO "rx_ring %d status: 0x%x\n", i, 
+			       streamer_priv->streamer_rx_ring[i].status);
+		break;
+	case IOCTL_PRINT_TX_BUFS:
+	        printk(KERN_INFO "Print tx bufs:\n");
+		for(i=0; i<STREAMER_TX_RING_SIZE; i++)
+		        printk(KERN_INFO "tx_ring %d status: 0x%x\n", i, 
+			       streamer_priv->streamer_tx_ring[i].status);
+		break;
+	case IOCTL_RX_CMD:
+	        streamer_rx(dev);
+		printk(KERN_INFO "Sent rx command.\n");
+		break;
+	default:
+	        printk(KERN_INFO "Bad ioctl!\n");
 	}
-
 	return 0;
 }
-
-void cleanup_module(void)
-{
-	int i;
-	struct streamer_private *streamer_priv;
-
-	for (i = 0; i < STREAMER_MAX_ADAPTERS; i++)
-		if (dev_streamer[i]) {
-			unregister_trdev(dev_streamer[i]);
-			release_region(dev_streamer[i]->base_addr, STREAMER_IO_SPACE);
-			streamer_priv=(struct streamer_private *)dev_streamer[i]->priv;
-			kfree(streamer_priv->streamer_rx_ring);
-			kfree(streamer_priv->streamer_tx_ring);
-			kfree(dev_streamer[i]->priv);
-			kfree(dev_streamer[i]);
-			dev_streamer[i] = NULL;
-		}
-#if STREAMER_NETWORK_MONITOR
-#ifdef CONFIG_PROC_FS
-	remove_proc_entry("net/streamer_tr", NULL);
 #endif
-#endif
+
+static struct pci_driver streamer_pci_driver = {
+  name:       "lanstreamer",
+  id_table:   streamer_pci_tbl,
+  probe:      streamer_init_one,
+  remove:     __devexit_p(streamer_remove_one),
+};
+
+static int __init streamer_init_module(void) {
+  return pci_module_init(&streamer_pci_driver);
 }
-#endif				/* MODULE */
+
+static void __exit streamer_cleanup_module(void) {
+  pci_unregister_driver(&streamer_pci_driver);
+}
+
+module_init(streamer_init_module);
+module_exit(streamer_cleanup_module);
+MODULE_LICENSE("GPL");

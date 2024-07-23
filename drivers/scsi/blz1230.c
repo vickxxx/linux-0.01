@@ -21,7 +21,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -51,9 +51,9 @@ static int  dma_irq_p(struct NCR_ESP *esp);
 static int  dma_ports_p(struct NCR_ESP *esp);
 static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write);
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
 
@@ -64,6 +64,7 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 	struct zorro_dev *z = NULL;
 	unsigned long address;
 	struct ESP_regs *eregs;
+	unsigned long board;
 
 #if MKIV
 #define REAL_BLZ1230_ID		ZORRO_PROD_PHASE5_BLIZZARD_1230_IV_1260
@@ -76,7 +77,7 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 #endif
 
 	if ((z = zorro_find_device(REAL_BLZ1230_ID, z))) {
-	    unsigned long board = z->resource.start;
+	    board = z->resource.start;
 	    if (request_mem_region(board+REAL_BLZ1230_ESP_ADDR,
 				   sizeof(struct ESP_regs), "NCR53C9x")) {
 		/* Do some magic to figure out if the blizzard is
@@ -88,13 +89,8 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 
 		esp_write(eregs->esp_cfg1, (ESP_CONFIG1_PENABLE | 7));
 		udelay(5);
-		if(esp_read(eregs->esp_cfg1) != (ESP_CONFIG1_PENABLE | 7)){
-			esp_deallocate(esp);
-			scsi_unregister(esp->ehost);
-			release_mem_region(board+REAL_BLZ1230_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0; /* Bail out if address did not hold data */
-		}
+		if(esp_read(eregs->esp_cfg1) != (ESP_CONFIG1_PENABLE | 7))
+			goto err_out;
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -135,13 +131,14 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 		esp->eregs = eregs;
 
 		/* Set the command buffer */
-		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+		esp->esp_command = cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		esp->slot = board+REAL_BLZ1230_ESP_ADDR;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
-			    "Blizzard 1230 SCSI IV", esp_intr);
+		if (request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+				 "Blizzard 1230 SCSI IV", esp_intr))
+			goto err_out;
 
 		/* Figure out our scsi ID on the bus */
 		esp->scsi_id = 7;
@@ -156,6 +153,13 @@ int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 		return esps_in_use;
 	    }
 	}
+	return 0;
+ 
+ err_out:
+	scsi_unregister(esp->ehost);
+	esp_deallocate(esp);
+	release_mem_region(board+REAL_BLZ1230_ESP_ADDR,
+			   sizeof(struct ESP_regs));
 	return 0;
 }
 
@@ -292,3 +296,5 @@ int blz1230_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+MODULE_LICENSE("GPL");

@@ -21,8 +21,8 @@
    not, write to the Free Software Foundation, Inc.,
    59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
 
-#ifndef SOFT_FP_H
-#define SOFT_FP_H
+#ifndef __MATH_EMU_SOFT_FP_H__
+#define __MATH_EMU_SOFT_FP_H__
 
 #include <asm/sfp-machine.h>
 
@@ -154,11 +154,11 @@ do {						\
 
 #define _FP_CLS_COMBINE(x,y)	(((x) << 2) | (y))
 
-#include "op-1.h"
-#include "op-2.h"
-#include "op-4.h"
-#include "op-8.h"
-#include "op-common.h"
+#include <math-emu/op-1.h>
+#include <math-emu/op-2.h>
+#include <math-emu/op-4.h>
+#include <math-emu/op-8.h>
+#include <math-emu/op-common.h>
 
 /* Sigh.  Silly things longlong.h needs.  */
 #define UWtype		_FP_W_TYPE
@@ -178,4 +178,4 @@ typedef USItype UHWtype;
 #include <stdlib/longlong.h>
 #endif
 
-#endif
+#endif /* __MATH_EMU_SOFT_FP_H__ */

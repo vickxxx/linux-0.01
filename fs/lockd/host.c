@@ -10,7 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
@@ -51,7 +51,8 @@ nlmclnt_lookup_host(struct sockaddr_in *sin, int proto, int version)
 struct nlm_host *
 nlmsvc_lookup_host(struct svc_rqst *rqstp)
 {
-	return nlm_lookup_host(rqstp->rq_client, &rqstp->rq_addr, 0, 0);
+	return nlm_lookup_host(rqstp->rq_client, &rqstp->rq_addr,
+			       rqstp->rq_prot, rqstp->rq_vers);
 }
 
 /*
@@ -97,7 +98,9 @@ nlm_lookup_host(struct svc_client *clnt, struct sockaddr_in *sin,
 		nlm_gc_hosts();
 
 	for (hp = &nlm_hosts[hash]; (host = *hp); hp = &host->h_next) {
-		if (host->h_version != version || host->h_proto != proto)
+		if (proto && host->h_proto != proto)
+			continue;
+		if (version && host->h_version != version)
 			continue;
 
 		if (nlm_match_host(host, clnt, sin)) {
@@ -184,15 +187,7 @@ nlm_bind_host(struct nlm_host *host)
 					host->h_nextrebind - jiffies);
 		}
 	} else {
-		uid_t saved_fsuid = current->fsuid;
-		kernel_cap_t saved_cap = current->cap_effective;
-
-		/* Create RPC socket as root user so we get a priv port */
-		current->fsuid = 0;
-		cap_raise (current->cap_effective, CAP_NET_BIND_SERVICE);
 		xprt = xprt_create_proto(host->h_proto, &host->h_addr, NULL);
-		current->fsuid = saved_fsuid;
-		current->cap_effective = saved_cap;
 		if (xprt == NULL)
 			goto forgetit;
 
@@ -206,6 +201,7 @@ nlm_bind_host(struct nlm_host *host)
 		}
 		clnt->cl_autobind = 1;	/* turn on pmap queries */
 		xprt->nocong = 1;	/* No congestion control for NLM */
+		xprt->resvport = 1;	/* NLM requires a reserved port */
 
 		host->h_rpcclnt = clnt;
 	}
@@ -325,7 +321,8 @@ nlm_gc_hosts(void)
 			}
 			dprintk("lockd: delete host %s\n", host->h_name);
 			*q = host->h_next;
-			if (host->h_monitored)
+			/* Don't unmonitor hosts that have been invalidated */
+			if (host->h_monitored && !host->h_killed)
 				nsm_unmonitor(host);
 			if ((clnt = host->h_rpcclnt) != NULL) {
 				if (atomic_read(&clnt->cl_users)) {

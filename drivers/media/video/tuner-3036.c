@@ -20,7 +20,7 @@
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/version.h>
 #include <linux/init.h>
 
@@ -220,6 +220,8 @@ tuner3036_exit(void)
 
 MODULE_DESCRIPTION("SAB3036 tuner driver");
 MODULE_AUTHOR("Philip Blundell <philb@gnu.org>");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(debug,"i");
 MODULE_PARM_DESC(debug,"Enable debugging output");
 

@@ -53,9 +53,10 @@
 
 #include "../../scsi/scsi.h"
 #include "../../scsi/hosts.h"
-#include "ecoscsi.h"
 #include "../../scsi/NCR5380.h"
 #include "../../scsi/constants.h"
+
+#define ECOSCSI_PUBLIC_RELEASE 1
 
 static char ecoscsi_read(struct Scsi_Host *instance, int reg)
 {
@@ -124,7 +125,10 @@ int ecoscsi_detect(Scsi_Host_Template * tpnt)
     }
 
     NCR5380_init(instance, 0);
-    request_region (instance->io_port, instance->n_io_port, "ecoscsi");
+    if (request_region (instance->io_port, instance->n_io_port, "ecoscsi") == NULL) {
+	scsi_unregister(instance);
+	return 0;
+    }
 
     if (instance->irq != IRQ_NONE)
 	if (request_irq(instance->irq, do_ecoscsi_intr, SA_INTERRUPT, "ecoscsi", NULL)) {
@@ -231,11 +235,67 @@ printk("reading %p len %d\n",addr, len);
 #endif
 #undef STAT
 
+#define NCR5380_implementation_fields \
+    int port, ctrl
+
+#define NCR5380_local_declare() \
+        struct Scsi_Host *_instance
+
+#define NCR5380_setup(instance) \
+        _instance = instance
+
+#define NCR5380_read(reg) ecoscsi_read(_instance, reg)
+#define NCR5380_write(reg, value) ecoscsi_write(_instance, reg, value)
+
+#define do_NCR5380_intr do_ecoscsi_intr
+#define NCR5380_queue_command ecoscsi_queue_command
+#define NCR5380_abort ecoscsi_abort
+#define NCR5380_reset ecoscsi_reset
+#define NCR5380_proc_info ecoscsi_proc_info
+
+int NCR5380_proc_info(char *buffer, char **start, off_t offset,
+		      int length, int hostno, int inout);
+
+#define BOARD_NORMAL	0
+#define BOARD_NCR53C400	1
+
 #include "../../scsi/NCR5380.c"
 
-#ifdef MODULE
+static Scsi_Host_Template ecoscsi_template =  {
+	module:		THIS_MODULE,
+	name:		"Serial Port EcoSCSI NCR5380",
+	detect:		ecoscsi_detect,
+	release:	ecoscsi_release,
+	info:		ecoscsi_info,
+	queuecommand:	ecoscsi_queue_command,
+	abort:		ecoscsi_abort,
+	reset:		ecoscsi_reset,
+	can_queue:	16,
+	this_id:	7,
+	sg_tablesize:	SG_ALL,
+	cmd_per_lun:	2,
+	use_clustering:	DISABLE_CLUSTERING
+};
 
-Scsi_Host_Template driver_template = ECOSCSI_NCR5380;
+static int __init ecoscsi_init(void)
+{
+	scsi_register_module(MODULE_SCSI_HA, &ecoscsi_template);
+	if (ecoscsi_template.present)
+		return 0;
 
-#include "../../scsi/scsi_module.c"
-#endif
+	scsi_unregister_module(MODULE_SCSI_HA, &ecoscsi_template);
+	return -ENODEV;
+}
+
+static void __exit ecoscsi_exit(void)
+{
+	scsi_unregister_module(MODULE_SCSI_HA, &ecoscsi_template);
+}
+
+module_init(ecoscsi_init);
+module_exit(ecoscsi_exit);
+
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("Econet-SCSI driver for Acorn machines");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

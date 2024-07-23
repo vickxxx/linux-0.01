@@ -12,6 +12,7 @@ obj-y := atmdev_init.o
 obj-$(CONFIG_ATM_ENI) += eni.o suni.o
 obj-$(CONFIG_ATM_ZATM) += zatm.o uPD98402.o
 obj-$(CONFIG_ATM_NICSTAR) += nicstar.o
+obj-$(CONFIG_ATM_IDT77252) += idt77252.o
 
 ifeq ($(CONFIG_ATM_NICSTAR_USE_SUNI),y)
   obj-$(CONFIG_ATM_NICSTAR) += suni.o
@@ -21,10 +22,16 @@ ifeq ($(CONFIG_ATM_NICSTAR_USE_IDT77105),y)
   obj-$(CONFIG_ATM_NICSTAR) += idt77105.o
 endif
 
+ifeq ($(CONFIG_ATM_IDT77252_USE_SUNI),y)
+  obj-$(CONFIG_ATM_IDT77252) += suni.o
+endif
+
 obj-$(CONFIG_ATM_HORIZON) += horizon.o
 obj-$(CONFIG_ATM_AMBASSADOR) += ambassador.o
 obj-$(CONFIG_ATM_TCP) += atmtcp.o
 obj-$(CONFIG_ATM_IA) += iphase.o suni.o
+obj-$(CONFIG_ATM_FIRESTREAM) += firestream.o
+obj-$(CONFIG_ATM_LANAI) += lanai.o
 
 ifeq ($(CONFIG_ATM_FORE200E_PCA),y)
   FORE200E_FW_OBJS += fore200e_pca_fw.o
@@ -45,10 +52,15 @@ ifeq ($(CONFIG_ATM_FORE200E_SBA),y)
     CONFIG_ATM_FORE200E_SBA_FW := sba200e_ecd.bin2
   endif
 endif
+obj-$(CONFIG_ATM_FORE200E) += fore_200e.o
 
-obj-$(CONFIG_ATM_FORE200E) += fore200e.o $(FORE200E_FW_OBJS)
+obj-$(CONFIG_ATM_HE)		+= he.o
+ifeq ($(CONFIG_ATM_HE_USE_SUNI),y)
+  obj-$(CONFIG_ATM_HE)		+= suni.o
+endif
 
-EXTRA_CFLAGS=-g
+list-multi	:= fore_200e.o
+fore_200e-objs	:= fore200e.o $(FORE200E_FW_OBJS)
 
 include $(TOPDIR)/Rules.make
 
@@ -80,11 +92,10 @@ fore200e_mkfirm: fore200e_mkfirm.c
 # deal with the various suffixes of the binary firmware images
 %.bin %.bin1 %.bin2: %.data
 	objcopy -Iihex $< -Obinary $@.gz
-	gzip -df $@.gz
+	gzip -n -df $@.gz
 
-# module build
-fore_200e.o: fore200e.o $(FORE200E_FW_OBJS)
-	$(LD) -r -o $@ $< $(FORE200E_FW_OBJS)
+fore_200e.o: $(fore_200e-objs)
+	$(LD) -r -o $@ $(fore_200e-objs)
 
 # firmware dependency stuff taken from drivers/sound/Makefile
 FORE200E_FW_UP_TO_DATE :=

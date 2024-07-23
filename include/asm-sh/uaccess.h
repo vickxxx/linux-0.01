@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.10 2000/03/24 13:53:45 gniibe Exp $
+/* $Id: uaccess.h,v 1.1.1.1.2.4 2002/08/28 16:52:43 gniibe Exp $
  *
  * User space memory access functions
  *
@@ -102,12 +102,11 @@ default: __get_user_unknown(); break; \
 } x = (__typeof__(*(ptr))) __gu_val; __gu_err; })
 
 #define __get_user_check(x,ptr,size) ({ \
-long __gu_err; \
+long __gu_err = -EFAULT; \
 __typeof__(*(ptr)) __gu_val; \
 long __gu_addr; \
 __asm__("":"=r" (__gu_val)); \
 __gu_addr = (long) (ptr); \
-__asm__("":"=r" (__gu_err)); \
 if (__access_ok(__gu_addr,size)) { \
 switch (size) { \
 case 1: __get_user_asm("b"); break; \
@@ -150,21 +149,22 @@ switch (size) { \
 case 1: __put_user_asm("b"); break; \
 case 2: __put_user_asm("w"); break; \
 case 4: __put_user_asm("l"); break; \
+case 8: __put_user_u64(__pu_val,__pu_addr,__pu_err); break; \
 default: __put_user_unknown(); break; \
 } __pu_err; })
 
 #define __put_user_check(x,ptr,size) ({ \
-long __pu_err; \
+long __pu_err = -EFAULT; \
 __typeof__(*(ptr)) __pu_val; \
 long __pu_addr; \
 __pu_val = (x); \
 __pu_addr = (long) (ptr); \
-__asm__("":"=r" (__pu_err)); \
 if (__access_ok(__pu_addr,size)) { \
 switch (size) { \
 case 1: __put_user_asm("b"); break; \
 case 2: __put_user_asm("w"); break; \
 case 4: __put_user_asm("l"); break; \
+case 8: __put_user_u64(__pu_val,__pu_addr,__pu_err); break; \
 default: __put_user_unknown(); break; \
 } } __pu_err; })
 
@@ -190,46 +190,59 @@ __asm__ __volatile__( \
 	:"r" (__pu_val), "m" (__m(__pu_addr)), "i" (-EFAULT) \
         :"memory"); })
 
+#if defined(__LITTLE_ENDIAN__)
+#define __put_user_u64(val,addr,retval) \
+({ \
+__asm__ __volatile__( \
+	"1:\n\t" \
+	"mov.l	%R1,%2\n\t" \
+	"mov.l	%S1,%T2\n\t" \
+	"mov	#0,%0\n" \
+	"2:\n" \
+	".section	.fixup,\"ax\"\n" \
+	"3:\n\t" \
+	"nop\n\t" \
+	"mov.l	4f,%0\n\t" \
+	"jmp	@%0\n\t" \
+	" mov	%3,%0\n" \
+	"4:	.long	2b\n\t" \
+	".previous\n" \
+	".section	__ex_table,\"a\"\n\t" \
+	".long	1b, 3b\n\t" \
+	".previous" \
+	: "=r" (retval) \
+	: "r" (val), "m" (__m(addr)), "i" (-EFAULT) \
+        : "memory"); })
+#else
+#define __put_user_u64(val,addr,retval) \
+({ \
+__asm__ __volatile__( \
+	"1:\n\t" \
+	"mov.l	%S1,%2\n\t" \
+	"mov.l	%R1,%T2\n\t" \
+	"mov	#0,%0\n" \
+	"2:\n" \
+	".section	.fixup,\"ax\"\n" \
+	"3:\n\t" \
+	"nop\n\t" \
+	"mov.l	4f,%0\n\t" \
+	"jmp	@%0\n\t" \
+	" mov	%3,%0\n" \
+	"4:	.long	2b\n\t" \
+	".previous\n" \
+	".section	__ex_table,\"a\"\n\t" \
+	".long	1b, 3b\n\t" \
+	".previous" \
+	: "=r" (retval) \
+	: "r" (val), "m" (__m(addr)), "i" (-EFAULT) \
+        : "memory"); })
+#endif
+
 extern void __put_user_unknown(void);
 
 /* Generic arbitrary sized copy.  */
 /* Return the number of bytes NOT copied */
-/* XXX: should be such that: 4byte and the rest. */
-extern __inline__ __kernel_size_t
-__copy_user(void *__to, const void *__from, __kernel_size_t __n)
-{
-	unsigned long __dummy, _f, _t;
-	__kernel_size_t res;
-
-	if ((res = __n))
-	__asm__ __volatile__(
-		"9:\n\t"
-		"mov.b	@%2+, %1\n\t"
-		"dt	%0\n"
-		"1:\n\t"
-		"mov.b	%1, @%3\n\t"
-		"bf/s	9b\n\t"
-		" add	#1, %3\n"
-		"2:\n"
-		".section .fixup,\"ax\"\n"
-		"3:\n\t"
-		"mov.l	5f, %1\n\t"
-		"jmp	@%1\n\t"
-		" add	#1, %0\n\t"
-		".balign 4\n"
-		"5:	.long 2b\n"
-		".previous\n"
-		".section __ex_table,\"a\"\n"
-		"	.balign 4\n"
-		"	.long 9b,2b\n"
-		"	.long 1b,3b\n"
-		".previous"
-		: "=r" (res), "=&z" (__dummy), "=r" (_f), "=r" (_t)
-		: "2" (__from), "3" (__to), "0" (res)
-		: "memory", "t");
-
-	return res;
-}
+extern __kernel_size_t __copy_user(void *to, const void *from, __kernel_size_t n);
 
 #define copy_to_user(to,from,n) ({ \
 void *__copy_to = (void *) (to); \
@@ -258,39 +271,11 @@ __copy_res; })
 	__copy_user((void *)(to),		\
 		    (void *)(from), n)
 
-/* XXX: Not sure it works well..
-   should be such that: 4byte clear and the rest. */
-extern __inline__ __kernel_size_t
-__clear_user(void *addr, __kernel_size_t size)
-{
-	unsigned long __a;
-
-	__asm__ __volatile__(
-		"9:\n\t"
-		"dt	%0\n"
-		"1:\n\t"
-		"mov.b	%4, @%1\n\t"
-		"bf/s	9b\n\t"
-		" add	#1, %1\n"
-		"2:\n"
-		".section .fixup,\"ax\"\n"
-		"3:\n\t"
-		"mov.l	4f, %1\n\t"
-		"jmp	@%1\n\t"
-		" nop\n"
-		".balign 4\n"
-		"4:	.long 2b\n"
-		".previous\n"
-		".section __ex_table,\"a\"\n"
-		"	.balign 4\n"
-		"	.long 1b,3b\n"
-		".previous"
-		: "=r" (size), "=r" (__a)
-		: "0" (size), "1" (addr), "r" (0)
-		: "memory", "t");
-
-	return size;
-}
+/*
+ * Clear the area and return remaining number of bytes
+ * (on failure.  Usually it's 0.)
+ */
+extern __kernel_size_t __clear_user(void *addr, __kernel_size_t size);
 
 #define clear_user(addr,n) ({ \
 void * __cl_addr = (addr); \
@@ -299,7 +284,7 @@ if (__cl_size && __access_ok(((unsigned long)(__cl_addr)), __cl_size)) \
 __cl_size = __clear_user(__cl_addr, __cl_size); \
 __cl_size; })
 
-extern __inline__ int
+static __inline__ int
 __strncpy_from_user(unsigned long __dest, unsigned long __src, int __count)
 {
 	__kernel_size_t res;
@@ -346,12 +331,10 @@ if(__access_ok(__sfu_src, __sfu_count)) { \
 __sfu_res = __strncpy_from_user((unsigned long) (dest), __sfu_src, __sfu_count); \
 } __sfu_res; })
 
-#define strlen_user(str) strnlen_user(str, ~0UL >> 1)
-
 /*
  * Return the size of a string (including the ending 0!)
  */
-extern __inline__ long __strnlen_user(const char *__s, long __n)
+static __inline__ long __strnlen_user(const char *__s, long __n)
 {
 	unsigned long res;
 	unsigned long __dummy;
@@ -384,12 +367,20 @@ extern __inline__ long __strnlen_user(const char *__s, long __n)
 	return res;
 }
 
-extern __inline__ long strnlen_user(const char *s, long n)
+static __inline__ long strnlen_user(const char *s, long n)
 {
-	if (!__addr_ok(s))
+	if (!access_ok(VERIFY_READ, s, n))
 		return 0;
 	else
 		return __strnlen_user(s, n);
+}
+
+static __inline__ long strlen_user(const char *s)
+{
+	if (!access_ok(VERIFY_READ, s, 0))
+		return 0;
+	else
+		return __strnlen_user(s, ~0UL >> 1);
 }
 
 struct exception_table_entry

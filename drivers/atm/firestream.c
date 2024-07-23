@@ -271,11 +271,11 @@ struct reginit_item PHY_NTC_INIT[] __initdata = {
 
    150000 packets per second is close to the limit a PC is going to have
    anyway. We therefore have to disable this for production. -- REW */
-#undef IRQ_RATE_LIMIT 100
+#undef IRQ_RATE_LIMIT // 100
 
 /* Interrupts work now. Unlike serial cards, ATM cards don't work all
    that great without interrupts. -- REW */
-#undef FS_POLL_FREQ 100
+#undef FS_POLL_FREQ // 100
 
 /* 
    This driver can spew a whole lot of debugging output at you. If you
@@ -294,6 +294,8 @@ struct reginit_item PHY_NTC_INIT[] __initdata = {
 #endif
 
 
+static int fs_keystream = 0;
+
 #ifdef DEBUG
 /* I didn't forget to set this to zero before shipping. Hit me with a stick 
    if you get this with the debug default not set to zero again. -- REW */
@@ -308,6 +310,7 @@ MODULE_PARM(fs_debug, "i");
 #endif
 MODULE_PARM(loopback, "i");
 MODULE_PARM(num, "i");
+MODULE_PARM(fs_keystream, "i");
 /* XXX Add rx_buf_sizes, and rx_pool_sizes As per request Amar. -- REW */
 #endif
 
@@ -327,8 +330,8 @@ MODULE_PARM(num, "i");
 #define FS_DEBUG_QSIZE   0x00001000
 
 
-#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter " __FUNCTION__ "\n")
-#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  " __FUNCTION__ "\n")
+#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter %s\n", __FUNCTION__)
+#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  %s\n", __FUNCTION__)
 
 
 struct fs_dev *fs_boards = NULL;
@@ -377,7 +380,7 @@ static inline void fs_kfree_skb (struct sk_buff * skb)
 
 
 
-/* It seems the ATM forum recomends this horribly complicated 16bit
+/* It seems the ATM forum recommends this horribly complicated 16bit
  * floating point format. Turns out the Ambassador uses the exact same
  * encoding. I just copied it over. If Mitch agrees, I'll move it over
  * to the atm_misc file or something like that. (and remove it from 
@@ -716,6 +719,8 @@ static void process_txdone_queue (struct fs_dev *dev, struct queue *q)
 
 
 		switch (STATUS_CODE (qe)) {
+		case 0x01: /* This is for AAL0 where we put the chip in streaming mode */
+			/* Fall through */
 		case 0x02:
 			/* Process a real txdone entry. */
 			tmp = qe->p0;
@@ -755,6 +760,7 @@ static void process_txdone_queue (struct fs_dev *dev, struct queue *q)
 		default:
 			/* Here we get the tx purge inhibit command ... */
 			/* Action, I believe, is "don't do anything". -- REW */
+			break;
 		}
     
 		write_fs (dev, Q_RP(q->offset), Q_INCWRAP);
@@ -796,6 +802,8 @@ static void process_incoming (struct fs_dev *dev, struct queue *q)
 
 		/* Single buffer packet */
 		switch (STATUS_CODE (qe)) {
+		case 0x1:
+			/* Fall through for streaming mode */
 		case 0x2:/* Packet received OK.... */
 			if (atm_vcc) {
 				skb = pe->skb;
@@ -877,7 +885,9 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 	if (vci != ATM_VPI_UNSPEC && vpi != ATM_VCI_UNSPEC)
 		set_bit(ATM_VF_ADDR, &atm_vcc->flags);
 
-	if (atm_vcc->qos.aal != ATM_AAL5) return -EINVAL; /* XXX AAL0 */
+	if ((atm_vcc->qos.aal != ATM_AAL5) &&
+	    (atm_vcc->qos.aal != ATM_AAL2))
+	  return -EINVAL; /* XXX AAL0 */
 
 	fs_dprintk (FS_DEBUG_OPEN, "fs: (itf %d): open %d.%d\n", 
 		    atm_vcc->dev->number, atm_vcc->vpi, atm_vcc->vci);	
@@ -903,6 +913,9 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 		if (IS_FS50(dev)) {
 			/* Increment the channel numer: take a free one next time.  */
 			for (to=33;to;to--, dev->channo++) {
+				/* We only have 32 channels */
+				if (dev->channo >= 32)
+					dev->channo = 0;
 				/* If we need to do RX, AND the RX is inuse, try the next */
 				if (DO_DIRECTION(rxtp) && dev->atm_vccs[dev->channo])
 					continue;
@@ -946,12 +959,27 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 		   need to wait for completion anyway, to see if it completed
 		   succesfully. */
 
-		tc->flags = 0
+		switch (atm_vcc->qos.aal) {
+		case ATM_AAL2:
+		case ATM_AAL0:
+		  tc->flags = 0
+		    | TC_FLAGS_TRANSPARENT_PAYLOAD
+		    | TC_FLAGS_PACKET
+		    | (1 << 28)
+		    | TC_FLAGS_TYPE_UBR /* XXX Change to VBR -- PVDL */
+		    | TC_FLAGS_CAL0;
+		  break;
+		case ATM_AAL5:
+		  tc->flags = 0
 			| TC_FLAGS_AAL5
 			| TC_FLAGS_PACKET  /* ??? */
 			| TC_FLAGS_TYPE_CBR
 			| TC_FLAGS_CAL0;
-
+		  break;
+		default:
+			printk ("Unknown aal: %d\n", atm_vcc->qos.aal);
+			tc->flags = 0;
+		}
 		/* Docs are vague about this atm_hdr field. By the way, the FS
 		 * chip makes odd errors if lower bits are set.... -- REW */
 		tc->atm_hdr =  (vpi << 20) | (vci << 4); 
@@ -1025,7 +1053,6 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 
 		for (bfp = 0;bfp < FS_NR_FREE_POOLS; bfp++)
 			if (atm_vcc->qos.rxtp.max_sdu <= dev->rx_fp[bfp].bufsize) break;
-    
 		if (bfp >= FS_NR_FREE_POOLS) {
 			fs_dprintk (FS_DEBUG_OPEN, "No free pool fits sdu: %d.\n", 
 				    atm_vcc->qos.rxtp.max_sdu);
@@ -1037,12 +1064,23 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 			return -EINVAL;
 		}
 
-		submit_command (dev, &dev->hp_txq, 
-				QE_CMD_CONFIG_RX | QE_CMD_IMM_INQ | vcc->channo,
-				RC_FLAGS_AAL5 | 
-				RC_FLAGS_BFPS_BFP * bfp |
-				RC_FLAGS_RXBM_PSB, 0, 0);
-    
+		switch (atm_vcc->qos.aal) {
+		case ATM_AAL0:
+		case ATM_AAL2:
+			submit_command (dev, &dev->hp_txq,
+					QE_CMD_CONFIG_RX | QE_CMD_IMM_INQ | vcc->channo,
+					RC_FLAGS_TRANSP |
+					RC_FLAGS_BFPS_BFP * bfp |
+					RC_FLAGS_RXBM_PSB, 0, 0);
+			break;
+		case ATM_AAL5:
+			submit_command (dev, &dev->hp_txq,
+					QE_CMD_CONFIG_RX | QE_CMD_IMM_INQ | vcc->channo,
+					RC_FLAGS_AAL5 |
+					RC_FLAGS_BFPS_BFP * bfp |
+					RC_FLAGS_RXBM_PSB, 0, 0);
+			break;
+		};
 		if (IS_FS50 (dev)) {
 			submit_command (dev, &dev->hp_txq, 
 					QE_CMD_REG_WR | QE_CMD_IMM_INQ,
@@ -1192,7 +1230,7 @@ static int fs_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
 {
 	func_enter ();
 	func_exit ();
-	return 0;
+	return -ENOIOCTLCMD;
 }
 
 
@@ -1441,7 +1479,7 @@ static inline int nr_buffers_in_freepool (struct fs_dev *dev, struct freepool *f
 
 
 /* Check if this gets going again if a pool ever runs out.  -- Yes, it
-   does. I've seen "recieve abort: no buffers" and things started
+   does. I've seen "receive abort: no buffers" and things started
    working again after that...  -- REW */
 
 static void top_off_fp (struct fs_dev *dev, struct freepool *fp, int gfp_flags)
@@ -1493,7 +1531,7 @@ static void top_off_fp (struct fs_dev *dev, struct freepool *fp, int gfp_flags)
 	fs_dprintk (FS_DEBUG_QUEUE, "Added %d entries. \n", n);
 }
 
-static void __exit free_queue (struct fs_dev *dev, struct queue *txq)
+static void __devexit free_queue (struct fs_dev *dev, struct queue *txq)
 {
 	func_enter ();
 
@@ -1509,7 +1547,7 @@ static void __exit free_queue (struct fs_dev *dev, struct queue *txq)
 	func_exit ();
 }
 
-static void __exit free_freepool (struct fs_dev *dev, struct freepool *fp)
+static void __devexit free_freepool (struct fs_dev *dev, struct freepool *fp)
 {
 	func_enter ();
 
@@ -1697,7 +1735,7 @@ static int __init fs_init (struct fs_dev *dev)
 
 	/* AN3: 10 */
 	write_fs (dev, SARMODE1, 0 
-		  | (0 * SARMODE1_DEFHEC) /* XXX PHY */
+		  | (fs_keystream * SARMODE1_DEFHEC) /* XXX PHY */
 		  | ((loopback == 1) * SARMODE1_TSTLP) /* XXX Loopback mode enable... */
 		  | (1 * SARMODE1_DCRM)
 		  | (1 * SARMODE1_DCOAM)
@@ -1895,7 +1933,7 @@ static int __init firestream_init_one (struct pci_dev *pci_dev,
  err_out_free_atm_dev:
 	atm_dev_deregister(atm_dev);
  err_out_free_fs_dev:
-	kfree(fs_dev);
+ 	kfree(fs_dev);
  err_out:
 	return -ENODEV;
 }
@@ -2051,7 +2089,7 @@ int __init init_PCI (void)
 #endif 
 */
 
-const static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
+static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS50, 
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, FS_IS50},
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS155, 
@@ -2065,7 +2103,7 @@ static struct pci_driver firestream_driver = {
 	name:           "firestream",
 	id_table:       firestream_pci_tbl,
 	probe:          firestream_init_one,
-	remove:         firestream_remove_one,
+	remove:         __devexit_p(firestream_remove_one),
 };
 
 static int __init firestream_init_module (void)
@@ -2086,3 +2124,5 @@ static void __exit firestream_cleanup_module(void)
 module_init(firestream_init_module);
 module_exit(firestream_cleanup_module);
 
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

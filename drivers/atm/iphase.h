@@ -7,7 +7,7 @@
 *******************************************************************************
       
       This software may be used and distributed according to the terms
-      of the GNU Public License (GPL), incorporated herein by reference.
+      of the GNU General Public License (GPL), incorporated herein by reference.
       Drivers based on this skeleton fall under the GPL and must retain
       the authorship (implicit copyright) notice.
 
@@ -67,8 +67,6 @@
 #define IF_IADBG_DESC           0x01000000        //
 #define IF_IADBG_SUNI_STAT      0x02000000        // suni statistics
 #define IF_IADBG_RESET          0x04000000        
-
-extern	unsigned int	IADebugFlag;
 
 #define IF_IADBG(f) if (IADebugFlag & (f))
 
@@ -200,7 +198,13 @@ struct cpcs_trailer
 	u_short length;  
 	u_int	crc32;  
 };  
-  
+
+struct cpcs_trailer_desc
+{
+	struct cpcs_trailer *cpcs;
+	dma_addr_t dma_addr;
+};
+
 struct ia_vcc 
 { 
 	int rxing;	 
@@ -272,6 +276,7 @@ struct ext_vc
 #define DLE_ENTRIES 256  
 #define DMA_INT_ENABLE 0x0002	/* use for both Tx and Rx */  
 #define TX_DLE_PSI 0x0001  
+#define DLE_TOTAL_SIZE (sizeof(struct dle)*DLE_ENTRIES)
   
 /* Descriptor List Entries (DLE) */  
 struct dle 
@@ -1017,7 +1022,7 @@ typedef struct iadev_t {
         struct wait_queue     *close_wait;
         struct wait_queue     *timeout_wait;
 #endif
-	caddr_t *tx_buf;  
+	struct cpcs_trailer_desc *tx_buf;
         u16 num_tx_desc, tx_buf_sz, rate_limit;
         u32 tx_cell_cnt, tx_pkt_cnt;
         u32 MAIN_VC_TABLE_ADDR, EXT_VC_TABLE_ADDR, ABR_SCHED_TABLE_ADDR;
@@ -1063,7 +1068,9 @@ typedef struct iadev_t {
         struct desc_tbl_t *desc_tbl;
         u_short host_tcq_wr;
         struct testTable_t **testTable;
-} IADEV;  
+	dma_addr_t tx_dle_dma;
+	dma_addr_t rx_dle_dma;
+} IADEV;
   
   
 #define INPH_IA_DEV(d) ((IADEV *) (d)->dev_data)  

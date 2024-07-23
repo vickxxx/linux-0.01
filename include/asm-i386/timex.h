@@ -9,7 +9,12 @@
 #include <linux/config.h>
 #include <asm/msr.h>
 
-#define CLOCK_TICK_RATE	1193180 /* Underlying HZ */
+#ifdef CONFIG_MELAN
+#  define CLOCK_TICK_RATE 1189200 /* AMD Elan has different frequency! */
+#else
+#  define CLOCK_TICK_RATE 1193180 /* Underlying HZ */
+#endif
+
 #define CLOCK_TICK_FACTOR	20	/* Factor of both 1000000 and CLOCK_TICK_RATE */
 #define FINETUNE ((((((long)LATCH * HZ - CLOCK_TICK_RATE) << SHIFT_HZ) * \
 	(1000000/CLOCK_TICK_FACTOR) / (CLOCK_TICK_RATE/CLOCK_TICK_FACTOR)) \
@@ -44,5 +49,10 @@ static inline cycles_t get_cycles (void)
 	return ret;
 #endif
 }
+
+extern unsigned long cpu_khz;
+
+#define vxtime_lock()		do {} while (0)
+#define vxtime_unlock()		do {} while (0)
 
 #endif

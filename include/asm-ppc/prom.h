@@ -15,9 +15,6 @@ typedef void *ihandle;
 
 extern char *prom_display_paths[];
 extern unsigned int prom_num_displays;
-#ifndef CONFIG_MACH_SPECIFIC
-extern int have_of;
-#endif
 
 struct address_range {
 	unsigned int space;
@@ -35,13 +32,6 @@ struct reg_property {
 	unsigned int size;
 };
 
-struct translation_property {
-	unsigned int virt;
-	unsigned int size;
-	unsigned int phys;
-	unsigned int flags;
-};
-
 struct property {
 	char	*name;
 	int	length;
@@ -49,6 +39,9 @@ struct property {
 	struct property *next;
 };
 
+/*
+ * Note: don't change this structure for now or you'll break BootX !
+ */
 struct device_node {
 	char	*name;
 	char	*type;
@@ -80,23 +73,43 @@ extern struct device_node *find_type_devices(const char *type);
 extern struct device_node *find_path_device(const char *path);
 extern struct device_node *find_compatible_devices(const char *type,
 						   const char *compat);
-extern struct device_node *find_pci_device_OFnode(unsigned char bus,
-	unsigned char dev_fn);
-extern struct device_node *find_phandle(phandle);
 extern struct device_node *find_all_nodes(void);
+extern struct device_node *find_phandle(phandle);
 extern int device_is_compatible(struct device_node *device, const char *);
 extern int machine_is_compatible(const char *compat);
 extern unsigned char *get_property(struct device_node *node, const char *name,
 				   int *lenp);
+extern void prom_add_property(struct device_node* np, struct property* prop);
+extern void prom_get_irq_senses(unsigned char *, int, int);
+extern int prom_n_addr_cells(struct device_node* np);
+extern int prom_n_size_cells(struct device_node* np);
+
+extern struct resource*
+request_OF_resource(struct device_node* node, int index, const char* name_postfix);
+extern int release_OF_resource(struct device_node* node, int index);
+
 extern void print_properties(struct device_node *node);
 extern int call_rtas(const char *service, int nargs, int nret,
 		     unsigned long *outputs, ...);
-extern void prom_drawstring(const char *c);
-extern void prom_drawhex(unsigned long v);
-extern void prom_drawchar(char c);
 
-extern void map_bootx_text(void);
+/*
+ * When we call back to the Open Firmware client interface, we usually
+ * have to do that before the kernel is relocated to its final location
+ * (this is because we can't use OF after we have overwritten the
+ * exception vectors with our exception handlers).  These macros assist
+ * in performing the address calculations that we need to do to access
+ * data when the kernel is running at an address that is different from
+ * the address that the kernel is linked at.  The reloc_offset() function
+ * returns the difference between these two addresses and the macros
+ * simplify the process of adding or subtracting this offset to/from
+ * pointer values.  See arch/ppc/kernel/prom.c for how these are used.
+ */
+extern unsigned long reloc_offset(void);
+extern unsigned long add_reloc_offset(unsigned long);
+extern unsigned long sub_reloc_offset(unsigned long);
 
+#define PTRRELOC(x)	((typeof(x))add_reloc_offset((unsigned long)(x)))
+#define PTRUNRELOC(x)	((typeof(x))sub_reloc_offset((unsigned long)(x)))
 
 #endif /* _PPC_PROM_H */
 #endif /* __KERNEL__ */

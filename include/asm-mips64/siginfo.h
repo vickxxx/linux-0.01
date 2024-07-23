@@ -1,14 +1,15 @@
-/* $Id: siginfo.h,v 1.2 2000/01/27 01:05:37 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1998, 1999 by Ralf Baechle
+ * Copyright (C) 1998, 1999, 2001, 03, 04 Ralf Baechle
+ * Copyright (C) 2000, 2001 Silicon Graphics, Inc.
  */
 #ifndef _ASM_SIGINFO_H
 #define _ASM_SIGINFO_H
 
+#include <linux/config.h>
 #include <linux/types.h>
 
 /* This structure matches IRIX 32/n32 ABIs for binary compatibility. */
@@ -22,12 +23,18 @@ typedef union sigval {
    has Linux extensions.  */
 
 #define SI_MAX_SIZE	128
+#ifdef CONFIG_MIPS32
 #define SI_PAD_SIZE	((SI_MAX_SIZE/sizeof(int)) - 3)
+#endif
+#ifdef CONFIG_MIPS64
+#define SI_PAD_SIZE	((SI_MAX_SIZE/sizeof(int)) - 4)
+#endif
 
 typedef struct siginfo {
 	int si_signo;
 	int si_code;
 	int si_errno;
+	int __pad0[SI_MAX_SIZE / sizeof(int) - SI_PAD_SIZE - 3];
 
 	union {
 		int _pad[SI_PAD_SIZE];
@@ -42,8 +49,8 @@ typedef struct siginfo {
 		struct {
 			pid_t _pid;		/* which child */
 			uid_t _uid;		/* sender's uid */
-			clock_t _utime;
 			int _status;		/* exit code */
+			clock_t _utime;
 			clock_t _stime;
 		} _sigchld;
 
@@ -62,7 +69,7 @@ typedef struct siginfo {
 
 		/* SIGPOLL, SIGXFSZ (To do ...)  */
 		struct {
-			int _band;	/* POLL_IN, POLL_OUT, POLL_MSG */
+			long _band;	/* POLL_IN, POLL_OUT, POLL_MSG */
 			int _fd;
 		} _sigpoll;
 
@@ -127,6 +134,7 @@ typedef struct siginfo {
 #define SI_TIMER __SI_CODE(__SI_TIMER,-3) /* sent by timer expiration */
 #define SI_MESGQ	-4	/* sent by real time mesq state change */
 #define SI_SIGIO	-5	/* sent by queued SIGIO */
+#define SI_TKILL	-6	/* sent by tkill system call */
 
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 #define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
@@ -203,25 +211,24 @@ typedef struct siginfo {
 
 /*
  * sigevent definitions
- * 
- * It seems likely that SIGEV_THREAD will have to be handled from 
+ *
+ * It seems likely that SIGEV_THREAD will have to be handled from
  * userspace, libpthread transmuting it to SIGEV_SIGNAL, which the
  * thread manager then catches and does the appropriate nonsense.
  * However, everything is written out here so as to not get lost.
  */
-#define SIGEV_NONE	128	/* other notification: meaningless */
-#define SIGEV_SIGNAL	129	/* notify via signal */
-#define SIGEV_CALLBACK	130	/* ??? */
-#define SIGEV_THREAD	131	/* deliver via thread creation */
+#define SIGEV_SIGNAL	0	/* notify via signal */
+#define SIGEV_NONE	1	/* other notification: meaningless */
+#define SIGEV_THREAD	2	/* deliver via thread creation */
 
 #define SIGEV_MAX_SIZE	64
-#define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE/sizeof(int)) - 4)
+#define SIGEV_HEAD_SIZE	(sizeof(long) + 2*sizeof(int))
+#define SIGEV_PAD_SIZE	((SIGEV_MAX_SIZE-SIGEV_HEAD_SIZE) / sizeof(int))
 
-/* XXX This one isn't yet IRIX / ABI compatible.  */
 typedef struct sigevent {
-	int sigev_notify;
 	sigval_t sigev_value;
 	int sigev_signo;
+	int sigev_notify;
 	union {
 		int _pad[SIGEV_PAD_SIZE];
 
@@ -238,7 +245,7 @@ typedef struct sigevent {
 #ifdef __KERNEL__
 #include <linux/string.h>
 
-extern inline void copy_siginfo(siginfo_t *to, siginfo_t *from)
+static inline void copy_siginfo(siginfo_t *to, siginfo_t *from)
 {
 	if (from->si_code < 0)
 		memcpy(to, from, sizeof(siginfo_t));

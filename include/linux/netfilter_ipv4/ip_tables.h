@@ -289,7 +289,7 @@ struct ipt_get_entries
 #define IPT_ERROR_TARGET "ERROR"
 
 /* Helper functions */
-extern __inline__ struct ipt_entry_target *
+static __inline__ struct ipt_entry_target *
 ipt_get_target(struct ipt_entry *e)
 {
 	return (void *)e + e->target_offset;
@@ -300,14 +300,14 @@ ipt_get_target(struct ipt_entry *e)
 ({						\
 	unsigned int __i;			\
 	int __ret = 0;				\
-	struct ipt_entry_match *__m;		\
+	struct ipt_entry_match *__match;	\
 						\
 	for (__i = sizeof(struct ipt_entry);	\
 	     __i < (e)->target_offset;		\
-	     __i += __m->u.match_size) {	\
-		__m = (void *)(e) + __i;	\
+	     __i += __match->u.match_size) {	\
+		__match = (void *)(e) + __i;	\
 						\
-		__ret = fn(__m , ## args);	\
+		__ret = fn(__match , ## args);	\
 		if (__ret != 0)			\
 			break;			\
 	}					\
@@ -319,12 +319,12 @@ ipt_get_target(struct ipt_entry *e)
 ({								\
 	unsigned int __i;					\
 	int __ret = 0;						\
-	struct ipt_entry *__e;					\
+	struct ipt_entry *__entry;				\
 								\
-	for (__i = 0; __i < (size); __i += __e->next_offset) {	\
-		__e = (void *)(entries) + __i;			\
+	for (__i = 0; __i < (size); __i += __entry->next_offset) { \
+		__entry = (void *)(entries) + __i;		\
 								\
-		__ret = fn(__e , ## args);			\
+		__ret = fn(__entry , ## args);			\
 		if (__ret != 0)					\
 			break;					\
 	}							\
@@ -403,6 +403,11 @@ struct ipt_target
 	struct module *me;
 };
 
+extern struct ipt_target *
+ipt_find_target_lock(const char *name, int *error, struct semaphore *mutex);
+extern struct arpt_target *
+arpt_find_target_lock(const char *name, int *error, struct semaphore *mutex);
+
 extern int ipt_register_target(struct ipt_target *target);
 extern void ipt_unregister_target(struct ipt_target *target);
 
@@ -428,6 +433,9 @@ struct ipt_table
 
 	/* Man behind the curtain... */
 	struct ipt_table_info *private;
+
+	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	struct module *me;
 };
 
 extern int ipt_register_table(struct ipt_table *table);

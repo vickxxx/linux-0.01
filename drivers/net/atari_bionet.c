@@ -79,7 +79,7 @@
 
 #define MAX_POLL_TIME	10
 
-static char *version =
+static char version[] =
 	"bionet.c:v1.0 06-feb-96 (c) Hartmut Laue.\n";
 
 #include <linux/module.h>
@@ -93,7 +93,7 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/timer.h>
@@ -127,6 +127,8 @@ extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_priva
  */
 unsigned int bionet_debug = NET_DEBUG;
 MODULE_PARM(bionet_debug, "i");
+MODULE_PARM_DESC(bionet_debug, "bionet debug level (0-2)");
+MODULE_LICENSE("GPL");
 
 static unsigned int bionet_min_poll_time = 2;
 
@@ -327,8 +329,8 @@ end:
 int __init 
 bionet_probe(struct net_device *dev){
 	unsigned char station_addr[6];
-	static unsigned version_printed = 0;
-	static int no_more_found = 0; /* avoid "Probing for..." printed 4 times */
+	static unsigned version_printed;
+	static int no_more_found;	/* avoid "Probing for..." printed 4 times */
 	int i;
 
 	if (!MACH_IS_ATARI || no_more_found)
@@ -374,6 +376,8 @@ bionet_probe(struct net_device *dev){
 
 	if (dev->priv == NULL)
 		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (!dev->priv)
+		return -ENOMEM;
 	memset(dev->priv, 0, sizeof(struct net_local));
 
 	dev->open		= bionet_open;
@@ -551,6 +555,7 @@ bionet_poll_rx(struct net_device *dev) {
 			memcpy(skb->data, nic_packet->buffer, pkt_len);
 			skb->protocol = eth_type_trans( skb, dev ); 
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes+=pkt_len;
 

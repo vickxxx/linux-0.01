@@ -1,23 +1,13 @@
-/* $Id: hysdn_defs.h,v 1.5.6.1 2000/11/28 12:02:47 kai Exp $
-
- * Linux driver for HYSDN cards, global definitions and exported vars and functions.
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
+/* $Id: hysdn_defs.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * Linux driver for HYSDN cards
+ * global definitions and exported vars and functions.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -273,6 +263,7 @@ extern int hysdn_sched_rx(hysdn_card *, uchar *, word, word);
 extern int hysdn_tx_cfgline(hysdn_card *, uchar *, word);	/* send one cfg line */
 
 /* hysdn_net.c */
+extern unsigned int hynet_enable; 
 extern char *hysdn_net_revision;
 extern int hysdn_net_create(hysdn_card *);	/* create a new net device */
 extern int hysdn_net_release(hysdn_card *);	/* delete the device */
@@ -282,6 +273,7 @@ extern struct sk_buff *hysdn_tx_netget(hysdn_card *);	/* get next network packet
 extern void hysdn_rx_netpkt(hysdn_card *, uchar *, word);	/* rxed packet from network */
 
 #ifdef CONFIG_HYSDN_CAPI
+extern unsigned int hycapi_enable; 
 extern struct capi_driver_interface *hy_di;
 extern int hycapi_capi_create(hysdn_card *);	/* create a new capi device */
 extern int hycapi_capi_release(hysdn_card *);	/* delete the device */

@@ -8,7 +8,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -300,4 +300,4 @@ static Scsi_Host_Template driver_template = FCAL;
 
 #include "scsi_module.c"
 
-EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");

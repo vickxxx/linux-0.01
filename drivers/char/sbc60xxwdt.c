@@ -16,6 +16,7 @@
  *
  *           12/4 - 2000      [Initial revision]
  *           25/4 - 2000      Added /dev/watchdog support
+ *           09/5 - 2001      [smj@oro.net] fixed fop_write to "return 1" on success
  *
  *
  *  Theory of operation:
@@ -63,7 +64,7 @@
 #include <linux/sched.h>
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/smp_lock.h>
@@ -173,11 +174,16 @@ static ssize_t fop_write(struct file * file, const char * buf, size_t count, lof
 
 		/* now scan */
 		for(ofs = 0; ofs != count; ofs++) 
-			if(buf[ofs] == 'V')
+		{
+			char c;
+			if(get_user(c, buf+ofs))
+				return -EFAULT;
+			if(c == 'V')
 				wdt_expect_close = 1;
-
+		}
 		/* Well, anyhow someone wrote to us, we should return that favour */
 		next_heartbeat = jiffies + WDT_HEARTBEAT;
+		return 1;
 	}
 	return 0;
 }
@@ -223,17 +229,12 @@ static int fop_close(struct inode * inode, struct file * file)
 	return 0;
 }
 
-static long long fop_llseek(struct file *file, long long offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int fop_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned long arg)
 {
 	static struct watchdog_info ident=
 	{
-		0,
+		WDIOF_MAGICCLOSE,
 		1,
 		"SB60xx"
 	};
@@ -241,7 +242,7 @@ static int fop_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	switch(cmd)
 	{
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
 			return copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident))?-EFAULT:0;
 		case WDIOC_KEEPALIVE:
@@ -252,7 +253,7 @@ static int fop_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 static struct file_operations wdt_fops = {
 	owner:		THIS_MODULE,
-	llseek:		fop_llseek,
+	llseek:		no_llseek,
 	read:		fop_read,
 	write:		fop_write,
 	open:		fop_open,
@@ -299,15 +300,16 @@ static void __exit sbc60xxwdt_unload(void)
 
 	unregister_reboot_notifier(&wdt_notifier);
 	release_region(WDT_START,1);
-	release_region(WDT_STOP,1);
+//	release_region(WDT_STOP,1);
 }
 
 static int __init sbc60xxwdt_init(void)
 {
 	int rc = -EBUSY;
 
-	if (!request_region(WDT_STOP, 1, "SBC 60XX WDT"))
-		goto err_out;
+//	We cannot reserve 0x45 - the kernel already has!
+//	if (!request_region(WDT_STOP, 1, "SBC 60XX WDT"))
+//		goto err_out;
 	if (!request_region(WDT_START, 1, "SBC 60XX WDT"))
 		goto err_out_region1;
 
@@ -333,9 +335,12 @@ err_out_region2:
 	release_region(WDT_START,1);
 err_out_region1:
 	release_region(WDT_STOP,1);
-err_out:
+/* err_out: */
 	return rc;
 }
 
 module_init(sbc60xxwdt_init);
 module_exit(sbc60xxwdt_unload);
+
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

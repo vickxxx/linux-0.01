@@ -9,7 +9,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
@@ -52,6 +52,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		cli();
 		/* Ensure clock and real-time-mode-register are accessible */
 		rtc->ctrl = RTC_READ;
+		memset(&wtime, 0, sizeof(struct rtc_time));
 		wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
 		wtime.tm_min =  BCD2BIN(rtc->bcd_min);
 		wtime.tm_hour = BCD2BIN(rtc->bcd_hr);
@@ -72,7 +73,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		unsigned char mon, day, hrs, min, sec, leap_yr;
 		unsigned int yrs;
 
-		if (!suser())
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 
 		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,
@@ -168,7 +169,6 @@ int __init rtc_MK48T08_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "MK48T08 Real Time Clock Driver v%s\n", RTC_VERSION);
-	misc_register(&rtc_dev);
-	return 0;
+	return misc_register(&rtc_dev);
 }
 

@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: policy rules.
  *
- * Version:	$Id: fib_rules.c,v 1.15 2000/04/15 01:48:10 davem Exp $
+ * Version:	$Id: fib_rules.c,v 1.17 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -76,9 +76,27 @@ struct fib_rule
 	int		r_dead;
 };
 
-static struct fib_rule default_rule = { NULL, ATOMIC_INIT(2), 0x7FFF, RT_TABLE_DEFAULT, RTN_UNICAST, };
-static struct fib_rule main_rule = { &default_rule, ATOMIC_INIT(2), 0x7FFE, RT_TABLE_MAIN, RTN_UNICAST, };
-static struct fib_rule local_rule = { &main_rule, ATOMIC_INIT(2), 0, RT_TABLE_LOCAL, RTN_UNICAST, };
+static struct fib_rule default_rule = {
+	r_clntref:	ATOMIC_INIT(2),
+	r_preference:	0x7FFF,
+	r_table:	RT_TABLE_DEFAULT,
+	r_action:	RTN_UNICAST,
+};
+
+static struct fib_rule main_rule = {
+	r_next:		&default_rule,
+	r_clntref:	ATOMIC_INIT(2),
+	r_preference:	0x7FFE,
+	r_table:	RT_TABLE_MAIN,
+	r_action:	RTN_UNICAST,
+};
+
+static struct fib_rule local_rule = {
+	r_next:		&main_rule,
+	r_clntref:	ATOMIC_INIT(2),
+	r_table:	RT_TABLE_LOCAL,
+	r_action:	RTN_UNICAST,
+};
 
 static struct fib_rule *fib_rules = &local_rule;
 static rwlock_t fib_rules_lock = RW_LOCK_UNLOCKED;
@@ -374,14 +392,10 @@ static int fib_rules_event(struct notifier_block *this, unsigned long event, voi
 
 
 struct notifier_block fib_rules_notifier = {
-	fib_rules_event,
-	NULL,
-	0
+	notifier_call:	fib_rules_event,
 };
 
-#ifdef CONFIG_RTNETLINK
-
-extern __inline__ int inet_fill_rule(struct sk_buff *skb,
+static __inline__ int inet_fill_rule(struct sk_buff *skb,
 				     struct fib_rule *r,
 				     struct netlink_callback *cb)
 {
@@ -424,7 +438,7 @@ extern __inline__ int inet_fill_rule(struct sk_buff *skb,
 
 nlmsg_failure:
 rtattr_failure:
-	skb_put(skb, b - skb->tail);
+	skb_trim(skb, b - skb->data);
 	return -1;
 }
 
@@ -446,8 +460,6 @@ int inet_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif /* CONFIG_RTNETLINK */
 
 void __init fib_rules_init(void)
 {

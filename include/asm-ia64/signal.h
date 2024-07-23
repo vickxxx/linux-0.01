@@ -2,8 +2,8 @@
 #define _ASM_IA64_SIGNAL_H
 
 /*
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Modified 1998-2001
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  *
  * Unfortunately, this file is being included by bits/signal.h in
  * glibc-2.x.  Hence the #ifdef __KERNEL__ ugliness.
@@ -56,7 +56,7 @@
  * SA_FLAGS values:
  *
  * SA_ONSTACK indicates that a registered stack_t will be used.
- * SA_INTERRUPT is a no-op, but left due to historical reasons. Use the
+ * SA_INTERRUPT is a no-op, but left due to historical reasons.
  * SA_RESTART flag to get restarting signals (which were the default long ago)
  * SA_NOCLDSTOP flag to turn off SIGCHLD when children stop.
  * SA_RESETHAND clears the handler when the signal is delivered.
@@ -80,14 +80,24 @@
 
 #define SA_RESTORER	0x04000000
 
-/* 
+/*
  * sigaltstack controls
  */
 #define SS_ONSTACK	1
 #define SS_DISABLE	2
 
-#define MINSIGSTKSZ	2048
-#define SIGSTKSZ	8192
+/*
+ * The minimum stack size needs to be fairly large because we want to
+ * be sure that an app compiled for today's CPUs will continue to run
+ * on all future CPU models.  The CPU model matters because the signal
+ * frame needs to have space for the complete machine state, including
+ * all physical stacked registers.  The number of physical stacked
+ * registers is CPU model dependent, but given that the width of
+ * ar.rsc.loadrs is 14 bits, we can assume that they'll never take up
+ * more than 16KB of space.
+ */
+#define MINSIGSTKSZ	131027	/* min. stack size for sigaltstack() */
+#define SIGSTKSZ	262144	/* default stack size for sigaltstack() */
 
 #ifdef __KERNEL__
 
@@ -105,7 +115,7 @@
 #define SA_PROBE		SA_ONESHOT
 #define SA_SAMPLE_RANDOM	SA_RESTART
 #define SA_SHIRQ		0x04000000
-#define SA_LEGACY		0x02000000	/* installed via a legacy irq? */
+#define SA_PERCPU_IRQ		0x02000000
 
 #endif /* __KERNEL__ */
 

@@ -1,10 +1,10 @@
 /*
 	usa26msg.h
 
-	Copyright (c) 1998-2000 InnoSys Incorporated.  All Rights Reserved
+	Copyright (C) 1998-2000 InnoSys Incorporated.  All Rights Reserved
 	This file is available under a BSD-style copyright
 
-	Keyspan USB Async Firmware to run on Anchor EZ-USB
+	Keyspan USB Async Message Formats for the USA28X
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are
@@ -15,15 +15,11 @@
    	disclaimer.  The following copyright notice must appear immediately at
    	the beginning of all source files:
 
-        	Copyright (c) 1998-2000 InnoSys Incorporated.  All Rights Reserved
+        	Copyright (C) 1998-2000 InnoSys Incorporated.  All Rights Reserved
 
         	This file is available under a BSD-style copyright
 
-	2. Redistributions in binary form must reproduce the above copyright
-   	notice, this list of conditions and the following disclaimer in the
-   	documentation and/or other materials provided with the distribution.
-
-	3. The name of InnoSys Incorprated may not be used to endorse or promote
+	2. The name of InnoSys Incorporated may not be used to endorse or promote
    	products derived from this software without specific prior written
    	permission.
 
@@ -44,7 +40,7 @@
 	Buffer formats for RX/TX data messages are not defined by
 	a structure, but are described here:
 
-	USB OUT (host -> USA26, transmit) messages contain a 
+	USB OUT (host -> USAxx, transmit) messages contain a 
 	REQUEST_ACK indicator (set to 0xff to request an ACK at the 
 	completion of transmit; 0x00 otherwise), followed by data:
 
@@ -52,25 +48,48 @@
 
 	with a total data length of 63.
 
-	USB IN (USA26 -> host, receive) messages contain either a zero
-	flag (indicating no error in any data bytes):
+	USB IN (USAxx -> host, receive) messages begin with a status
+	byte in which the 0x80 bit is either:
 
-		00 DAT DAT DAT ...
+		(a)	0x80 bit clear
+			indicates that the bytes following it are all data
+			bytes:
 
-	for a total of 63 data bytes, or a non-zero status flag (indicating 
-	that all data bytes will be preceded by status flag):
+				STAT DATA DATA DATA DATA DATA ...
 
-		STAT DAT STAT DAT STAT DAT ...
+			for a total of up to 63 DATA bytes,
 
-	for a total of 32 data bytes.  The valid bits in the STAT bytes are:
+	or:
+
+		(b)	0x80 bit set
+			indiates that the bytes following alternate data and
+			status bytes:
+
+				STAT DATA STAT DATA STAT DATA STAT DATA ...
+
+			for a total of up to 32 DATA bytes.
+
+	The valid bits in the STAT bytes are:
 
 		OVERRUN	0x02
 		PARITY	0x04
 		FRAMING	0x08
 		BREAK	0x10
 
-	Note: a "no status" RX data message (first byte zero) can serve as
-	a "break off" indicator.
+	Notes:
+
+	(1) The OVERRUN bit can appear in either (a) or (b) format
+		messages, but the but the PARITY/FRAMING/BREAK bits
+		only appear in (b) format messages.
+	(2) For the host to determine the exact point at which the
+		overrun occurred (to identify the point in the data
+		stream at which the data was lost), it needs to count
+		128 characters, starting at the first character of the
+		message in which OVERRUN was reported; the lost character(s)
+		would have been received between the 128th and 129th
+		characters.
+	(3)	An RX data message in which the first byte has 0x80 clear
+		serves as a "break off" indicator.
 
 	revision history:
 
@@ -80,6 +99,7 @@
 	1999apr14	add resetDataToggle to control message
 	2000jan04	merge with usa17msg.h
 	2000jun01	add extended BSD-style copyright text
+	2001jul05	change message format to improve OVERRUN case
 
 	Note on shared names:
 
@@ -93,7 +113,7 @@
 #define	__USA26MSG__
 
 
-typedef struct keyspan_usa26_portControlMessage
+struct keyspan_usa26_portControlMessage
 {
 	/*
 		there are three types of "commands" sent in the control message:
@@ -103,39 +123,39 @@ typedef struct keyspan_usa26_portControlMessage
 			when necessary, to reduce overhead on the USA26):
 	*/
 	u8	setClocking,	// BOTH: host requests baud rate be set
-		baudLo,			// BOTH: host does baud divisor calculation
-		baudHi,			// BOTH: baudHi is only used for first port (gives lower rates)
+		baudLo,		// BOTH: host does baud divisor calculation
+		baudHi,		// BOTH: baudHi is only used for first port (gives lower rates)
 		externalClock_txClocking,
-						// USA26: 0=internal, other=external
-						// USA17: 0=internal, other=external/RI
+					// USA26: 0=internal, other=external
+					// USA17: 0=internal, other=external/RI
 		rxClocking,		// USA17: 0=internal, 1=external/RI, other=external/DSR
 
 
 		setLcr,			// BOTH: host requests lcr be set
 		lcr,			// BOTH: use PARITY, STOPBITS, DATABITS below
 
-		setFlowControl,	// BOTH: host requests flow control be set
-		ctsFlowControl,	// BOTH: 1=use CTS flow control, 0=don't
-		xonFlowControl,	// BOTH: 1=use XON/XOFF flow control, 0=don't
+		setFlowControl,		// BOTH: host requests flow control be set
+		ctsFlowControl,		// BOTH: 1=use CTS flow control, 0=don't
+		xonFlowControl,		// BOTH: 1=use XON/XOFF flow control, 0=don't
 		xonChar,		// BOTH: specified in current character format
 		xoffChar,		// BOTH: specified in current character format
 
 		setTxTriState_setRts,
-						// USA26: host requests TX tri-state be set
-						// USA17: host requests RTS output be set
-		txTriState_rts,	// BOTH: 1=active (normal), 0=tristate (off)
+					// USA26: host requests TX tri-state be set
+					// USA17: host requests RTS output be set
+		txTriState_rts,		// BOTH: 1=active (normal), 0=tristate (off)
 
 		setHskoa_setDtr,
-						// USA26: host requests HSKOA output be set
-						// USA17: host requests DTR output be set
+					// USA26: host requests HSKOA output be set
+					// USA17: host requests DTR output be set
 		hskoa_dtr,		// BOTH: 1=on, 0=off
 
-		setPrescaler,	// USA26: host requests prescalar be set (default: 13)
+		setPrescaler,		// USA26: host requests prescalar be set (default: 13)
 		prescaler;		// BOTH: specified as N/8; values 8-ff are valid
-						// must be set any time internal baud rate is set;
-						// must not be set when external clocking is used
-						// note: in USA17, prescaler is applied whenever
-						// setClocking is requested
+					// must be set any time internal baud rate is set;
+					// must not be set when external clocking is used
+					// note: in USA17, prescaler is applied whenever
+					// setClocking is requested
 
 	/*
 		3.	configuration data which is simply used as is (no overhead,
@@ -164,7 +184,7 @@ typedef struct keyspan_usa26_portControlMessage
 		returnStatus,	// BOTH: return current status (even if it hasn't changed)
 		resetDataToggle;// BOTH: reset data toggle state to DATA0
 	
-} keyspan_usa26_portControlMessage;
+};
 
 // defines for bits in lcr
 #define	USA_DATABITS_5		0x00
@@ -182,7 +202,7 @@ typedef struct keyspan_usa26_portControlMessage
 
 // all things called "StatusMessage" are sent on the status endpoint
 
-typedef struct keyspan_usa26_portStatusMessage	// one for each port
+struct keyspan_usa26_portStatusMessage	// one for each port
 {
 	u8	port,			// BOTH: 0=first, 1=second, other=see below
 		hskia_cts,		// USA26: reports HSKIA pin
@@ -195,7 +215,7 @@ typedef struct keyspan_usa26_portStatusMessage	// one for each port
 		_txXoff,		// port is in XOFF state (either host or RX XOFF)
 		rxEnabled,		// as configured by rxOn/rxOff 1=on, 0=off
 		controlResponse;// 1=a control message has been processed
-} keyspan_usa26_portStatusMessage;
+};
 
 // bits in RX data message when STAT byte is included
 #define	RXERROR_OVERRUN	0x02
@@ -203,28 +223,28 @@ typedef struct keyspan_usa26_portStatusMessage	// one for each port
 #define	RXERROR_FRAMING	0x08
 #define	RXERROR_BREAK	0x10
 
-typedef struct keyspan_usa26_globalControlMessage
+struct keyspan_usa26_globalControlMessage
 {
 	u8	sendGlobalStatus,	// 2=request for two status responses
 		resetStatusToggle,	// 1=reset global status toggle
 		resetStatusCount;	// a cycling value
-} keyspan_usa26_globalControlMessage;
+};
 
-typedef struct keyspan_usa26_globalStatusMessage
+struct keyspan_usa26_globalStatusMessage
 {
 	u8	port,				// 3
 		sendGlobalStatus,	// from request, decremented
 		resetStatusCount;	// as in request
-} keyspan_usa26_globalStatusMessage;
+};
 
-typedef struct keyspan_usa26_globalDebugMessage
+struct keyspan_usa26_globalDebugMessage
 {
 	u8	port,				// 2
 		a,
 		b,
 		c,
 		d;
-} keyspan_usa26_globalDebugMessage;
+};
 
 // ie: the maximum length of an EZUSB endpoint buffer
 #define	MAX_DATA_LEN			64

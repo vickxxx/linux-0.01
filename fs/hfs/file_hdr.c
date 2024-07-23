@@ -2,7 +2,7 @@
  * linux/fs/hfs/file_hdr.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the file_ops and inode_ops for the metadata
  * files under the AppleDouble and Netatalk representations.
@@ -39,13 +39,14 @@
 #define PRODOSI_AUXTYPE_DIR 0x0200
 
 /*================ Forward declarations ================*/
-
+static loff_t      hdr_llseek(struct file *, loff_t, int);
 static hfs_rwret_t hdr_read(struct file *, char *, hfs_rwarg_t, loff_t *);
 static hfs_rwret_t hdr_write(struct file *, const char *,
 			     hfs_rwarg_t, loff_t *);
 /*================ Global variables ================*/
 
 struct file_operations hfs_hdr_operations = {
+	llseek:		hdr_llseek,
 	read:		hdr_read,
 	write:		hdr_write,
 	fsync:		file_fsync,
@@ -240,7 +241,9 @@ static struct hfs_hdr_layout *dup_layout(const struct hfs_hdr_layout *old)
 	if (HFS_NEW(new)) {
 		memcpy(new, old, sizeof(*new));
 		for (lcv = 0; lcv < new->entries; ++lcv) {
-			(char *)(new->order[lcv]) += (char *)new - (char *)old;
+			new->order[lcv] = (struct hfs_hdr_descr *)
+					  ((char *)(new->order[lcv]) +
+					   ((char *)new - (char *)old));
 		}
 	}
 	return new;
@@ -342,15 +345,38 @@ static void set_dates(struct hfs_cat_entry *entry, struct inode *inode,
 	}
 }
 
+loff_t hdr_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+
+	switch (origin) {
+		case 2:
+			offset += file->f_dentry->d_inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset>=0 && offset<file->f_dentry->d_inode->i_size) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_reada = 0;
+			file->f_version = ++event;
+		}
+		retval = offset;
+	}
+	return retval;
+}
+
 /*
  * hdr_read()
  *
  * This is the read field in the inode_operations structure for
  * header files.  The purpose is to transfer up to 'count' bytes
  * from the file corresponding to 'inode', beginning at
- * 'filp->offset' bytes into the file.	The data is transfered to
+ * 'filp->offset' bytes into the file.	The data is transferred to
  * user-space at the address 'buf'.  Returns the number of bytes
- * successfully transfered.
+ * successfully transferred.
  */
 /* XXX: what about the entry count changing on us? */
 static hfs_rwret_t hdr_read(struct file * filp, char * buf, 
@@ -360,7 +386,7 @@ static hfs_rwret_t hdr_read(struct file * filp, char * buf,
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 	const struct hfs_hdr_layout *layout;
 	off_t start, length, offset;
-	off_t pos = *ppos;
+	loff_t pos = *ppos;
 	int left, lcv, read = 0;
 
 	if (!S_ISREG(inode->i_mode)) {
@@ -375,7 +401,7 @@ static hfs_rwret_t hdr_read(struct file * filp, char * buf,
 	}
 
 	/* Adjust count to fit within the bounds of the file */
-	if ((pos >= inode->i_size) || (count <= 0)) {
+	if (pos != (unsigned)pos || pos >= inode->i_size || count <= 0) {
 		return 0;
 	} else if (count > inode->i_size - pos) {
 		count = inode->i_size - pos;
@@ -616,17 +642,18 @@ static hfs_rwret_t hdr_write(struct file *filp, const char *buf,
         int left, lcv, written = 0;
 	struct hdr_hdr meta;
 	int built_meta = 0;
-        off_t pos;
+        loff_t pos;
 
 	if (!S_ISREG(inode->i_mode)) {
 		hfs_warn("hfs_hdr_write: mode = %07o\n", inode->i_mode);
 		return -EINVAL;
 	}
-	if (count <= 0) {
-		return 0;
-	}
 
 	pos = (filp->f_flags & O_APPEND) ? inode->i_size : *ppos;
+
+	if (count <= 0 || pos != (unsigned)pos) {
+		return 0;
+	}
 
 	if (!HFS_I(inode)->layout) {
 		HFS_I(inode)->layout = dup_layout(HFS_I(inode)->default_layout);

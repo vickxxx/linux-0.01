@@ -38,17 +38,14 @@ enum {
 
 /* Convenience functions to stuff various integer values into int128s */
 
-extern inline void zero128(int128 a)
+static inline void zero128(int128 a)
 {
 	a[LSW128] = a[NLSW128] = a[NMSW128] = a[MSW128] = 0;
 }
 
 /* Human-readable word order in the arguments */
-extern inline void set128(unsigned int i3,
-			  unsigned int i2,
-			  unsigned int i1,
-			  unsigned int i0,
-			  int128 a)
+static inline void set128(unsigned int i3, unsigned int i2, unsigned int i1,
+			  unsigned int i0, int128 a)
 {
 	a[LSW128] = i0;
 	a[NLSW128] = i1;
@@ -57,21 +54,19 @@ extern inline void set128(unsigned int i3,
 }
 
 /* Convenience functions (for testing as well) */
-extern inline void int64_to_128(unsigned long long src,
-				int128 dest)
+static inline void int64_to_128(unsigned long long src, int128 dest)
 {
 	dest[LSW128] = (unsigned int) src;
 	dest[NLSW128] = src >> 32;
 	dest[NMSW128] = dest[MSW128] = 0;
 }
 
-extern inline void int128_to_64(const int128 src,
-				unsigned long long *dest)
+static inline void int128_to_64(const int128 src, unsigned long long *dest)
 {
 	*dest = src[LSW128] | (long long) src[NLSW128] << 32;
 }
 
-extern inline void put_i128(const int128 a)
+static inline void put_i128(const int128 a)
 {
 	printk("%08x %08x %08x %08x\n", a[MSW128], a[NMSW128],
 	       a[NLSW128], a[LSW128]);
@@ -82,7 +77,7 @@ extern inline void put_i128(const int128 a)
    Note that these are only good for 0 < count < 32.
  */
 
-extern inline void _lsl128(unsigned int count, int128 a)
+static inline void _lsl128(unsigned int count, int128 a)
 {
 	a[MSW128] = (a[MSW128] << count) | (a[NMSW128] >> (32 - count));
 	a[NMSW128] = (a[NMSW128] << count) | (a[NLSW128] >> (32 - count));
@@ -90,7 +85,7 @@ extern inline void _lsl128(unsigned int count, int128 a)
 	a[LSW128] <<= count;
 }
 
-extern inline void _lsr128(unsigned int count, int128 a)
+static inline void _lsr128(unsigned int count, int128 a)
 {
 	a[LSW128] = (a[LSW128] >> count) | (a[NLSW128] << (32 - count));
 	a[NLSW128] = (a[NLSW128] >> count) | (a[NMSW128] << (32 - count));
@@ -100,7 +95,7 @@ extern inline void _lsr128(unsigned int count, int128 a)
 
 /* Should be faster, one would hope */
 
-extern inline void lslone128(int128 a)
+static inline void lslone128(int128 a)
 {
 	asm volatile ("lsl.l #1,%0\n"
 		      "roxl.l #1,%1\n"
@@ -118,7 +113,7 @@ extern inline void lslone128(int128 a)
 		      "3"(a[MSW128]));
 }
 
-extern inline void lsrone128(int128 a)
+static inline void lsrone128(int128 a)
 {
 	asm volatile ("lsr.l #1,%0\n"
 		      "roxr.l #1,%1\n"
@@ -140,7 +135,7 @@ extern inline void lsrone128(int128 a)
 
    These bit-shift to a multiple of 32, then move whole longwords.  */
 
-extern inline void lsl128(unsigned int count, int128 a)
+static inline void lsl128(unsigned int count, int128 a)
 {
 	int wordcount, i;
 
@@ -159,7 +154,7 @@ extern inline void lsl128(unsigned int count, int128 a)
 	}
 }
 
-extern inline void lsr128(unsigned int count, int128 a)
+static inline void lsr128(unsigned int count, int128 a)
 {
 	int wordcount, i;
 
@@ -177,18 +172,18 @@ extern inline void lsr128(unsigned int count, int128 a)
 	}
 }
 
-extern inline int orl128(int a, int128 b)
+static inline int orl128(int a, int128 b)
 {
 	b[LSW128] |= a;
 }
 
-extern inline int btsthi128(const int128 a)
+static inline int btsthi128(const int128 a)
 {
 	return a[MSW128] & 0x80000000;
 }
 
 /* test bits (numbered from 0 = LSB) up to and including "top" */
-extern inline int bftestlo128(int top, const int128 a)
+static inline int bftestlo128(int top, const int128 a)
 {
 	int r = 0;
 
@@ -206,7 +201,7 @@ extern inline int bftestlo128(int top, const int128 a)
 
 /* Aargh.  We need these because GCC is broken */
 /* FIXME: do them in assembly, for goodness' sake! */
-extern inline void mask64(int pos, unsigned long long *mask)
+static inline void mask64(int pos, unsigned long long *mask)
 {
 	*mask = 0;
 
@@ -218,7 +213,7 @@ extern inline void mask64(int pos, unsigned long long *mask)
 	HI_WORD(*mask) = (1 << (pos - 32)) - 1;
 }
 
-extern inline void bset64(int pos, unsigned long long *dest)
+static inline void bset64(int pos, unsigned long long *dest)
 {
 	/* This conditional will be optimized away.  Thanks, GCC! */
 	if (pos < 32)
@@ -229,7 +224,7 @@ extern inline void bset64(int pos, unsigned long long *dest)
 			      (HI_WORD(*dest)):"id"(pos - 32));
 }
 
-extern inline int btst64(int pos, unsigned long long dest)
+static inline int btst64(int pos, unsigned long long dest)
 {
 	if (pos < 32)
 		return (0 != (LO_WORD(dest) & (1 << pos)));
@@ -237,7 +232,7 @@ extern inline int btst64(int pos, unsigned long long dest)
 		return (0 != (HI_WORD(dest) & (1 << (pos - 32))));
 }
 
-extern inline void lsl64(int count, unsigned long long *dest)
+static inline void lsl64(int count, unsigned long long *dest)
 {
 	if (count < 32) {
 		HI_WORD(*dest) = (HI_WORD(*dest) << count)
@@ -250,7 +245,7 @@ extern inline void lsl64(int count, unsigned long long *dest)
 	LO_WORD(*dest) = 0;
 }
 
-extern inline void lsr64(int count, unsigned long long *dest)
+static inline void lsr64(int count, unsigned long long *dest)
 {
 	if (count < 32) {
 		LO_WORD(*dest) = (LO_WORD(*dest) >> count)
@@ -264,7 +259,7 @@ extern inline void lsr64(int count, unsigned long long *dest)
 }
 #endif
 
-extern inline void fp_denormalize(struct fp_ext *reg, unsigned int cnt)
+static inline void fp_denormalize(struct fp_ext *reg, unsigned int cnt)
 {
 	reg->exp += cnt;
 
@@ -306,7 +301,7 @@ extern inline void fp_denormalize(struct fp_ext *reg, unsigned int cnt)
 	}
 }
 
-extern inline int fp_overnormalize(struct fp_ext *reg)
+static inline int fp_overnormalize(struct fp_ext *reg)
 {
 	int shift;
 
@@ -324,12 +319,12 @@ extern inline int fp_overnormalize(struct fp_ext *reg)
 	return shift;
 }
 
-extern inline int fp_addmant(struct fp_ext *dest, struct fp_ext *src)
+static inline int fp_addmant(struct fp_ext *dest, struct fp_ext *src)
 {
 	int carry;
 
 	/* we assume here, gcc only insert move and a clr instr */
-	asm volatile ("add.b %1,%0" : "=d,=g" (dest->lowmant)
+	asm volatile ("add.b %1,%0" : "=d,g" (dest->lowmant)
 		: "g,d" (src->lowmant), "0,0" (dest->lowmant));
 	asm volatile ("addx.l %1,%0" : "=d" (dest->mant.m32[1])
 		: "d" (src->mant.m32[1]), "0" (dest->mant.m32[1]));
@@ -340,7 +335,7 @@ extern inline int fp_addmant(struct fp_ext *dest, struct fp_ext *src)
 	return carry;
 }
 
-extern inline int fp_addcarry(struct fp_ext *reg)
+static inline int fp_addcarry(struct fp_ext *reg)
 {
 	if (++reg->exp == 0x7fff) {
 		if (reg->mant.m64)
@@ -357,10 +352,11 @@ extern inline int fp_addcarry(struct fp_ext *reg)
 	return 1;
 }
 
-extern inline void fp_submant(struct fp_ext *dest, struct fp_ext *src1, struct fp_ext *src2)
+static inline void fp_submant(struct fp_ext *dest, struct fp_ext *src1,
+			      struct fp_ext *src2)
 {
 	/* we assume here, gcc only insert move and a clr instr */
-	asm volatile ("sub.b %1,%0" : "=d,=g" (dest->lowmant)
+	asm volatile ("sub.b %1,%0" : "=d,g" (dest->lowmant)
 		: "g,d" (src2->lowmant), "0,0" (src1->lowmant));
 	asm volatile ("subx.l %1,%0" : "=d" (dest->mant.m32[1])
 		: "d" (src2->mant.m32[1]), "0" (src1->mant.m32[1]));
@@ -376,14 +372,14 @@ extern inline void fp_submant(struct fp_ext *dest, struct fp_ext *src1, struct f
 	asm ("divu.l %2,%1:%0" : "=d" (quot), "=d" (rem)		\
 		: "dm" (div), "1" (srch), "0" (srcl))
 #define fp_add64(dest1, dest2, src1, src2) ({				\
-	asm ("add.l %1,%0" : "=d,=dm" (dest2)				\
+	asm ("add.l %1,%0" : "=d,dm" (dest2)				\
 		: "dm,d" (src2), "0,0" (dest2));			\
 	asm ("addx.l %1,%0" : "=d" (dest1)				\
 		: "d" (src1), "0" (dest1));				\
 })
 #define fp_addx96(dest, src) ({						\
 	/* we assume here, gcc only insert move and a clr instr */	\
-	asm volatile ("add.l %1,%0" : "=d,=g" (dest->m32[2])		\
+	asm volatile ("add.l %1,%0" : "=d,g" (dest->m32[2])		\
 		: "g,d" (temp.m32[1]), "0,0" (dest->m32[2]));		\
 	asm volatile ("addx.l %1,%0" : "=d" (dest->m32[1])		\
 		: "d" (temp.m32[0]), "0" (dest->m32[1]));		\
@@ -391,14 +387,14 @@ extern inline void fp_submant(struct fp_ext *dest, struct fp_ext *src1, struct f
 		: "d" (0), "0" (dest->m32[0]));				\
 })
 #define fp_sub64(dest, src) ({						\
-	asm ("sub.l %1,%0" : "=d,=dm" (dest.m32[1])			\
+	asm ("sub.l %1,%0" : "=d,dm" (dest.m32[1])			\
 		: "dm,d" (src.m32[1]), "0,0" (dest.m32[1]));		\
 	asm ("subx.l %1,%0" : "=d" (dest.m32[0])			\
 		: "d" (src.m32[0]), "0" (dest.m32[0]));			\
 })
 #define fp_sub96c(dest, srch, srcm, srcl) ({				\
 	char carry;							\
-	asm ("sub.l %1,%0" : "=d,=dm" (dest.m32[2])			\
+	asm ("sub.l %1,%0" : "=d,dm" (dest.m32[2])			\
 		: "dm,d" (srcl), "0,0" (dest.m32[2]));			\
 	asm ("subx.l %1,%0" : "=d" (dest.m32[1])			\
 		: "d" (srcm), "0" (dest.m32[1]));			\
@@ -407,7 +403,8 @@ extern inline void fp_submant(struct fp_ext *dest, struct fp_ext *src1, struct f
 	carry;								\
 })
 
-extern inline void fp_multiplymant(union fp_mant128 *dest, struct fp_ext *src1, struct fp_ext *src2)
+static inline void fp_multiplymant(union fp_mant128 *dest, struct fp_ext *src1,
+				   struct fp_ext *src2)
 {
 	union fp_mant64 temp;
 
@@ -421,7 +418,8 @@ extern inline void fp_multiplymant(union fp_mant128 *dest, struct fp_ext *src1, 
 	fp_addx96(dest, temp);
 }
 
-extern inline void fp_dividemant(union fp_mant128 *dest, struct fp_ext *src, struct fp_ext *div)
+static inline void fp_dividemant(union fp_mant128 *dest, struct fp_ext *src,
+				 struct fp_ext *div)
 {
 	union fp_mant128 tmp;
 	union fp_mant64 tmp64;
@@ -484,7 +482,7 @@ extern inline void fp_dividemant(union fp_mant128 *dest, struct fp_ext *src, str
 }
 
 #if 0
-extern inline unsigned int fp_fls128(union fp_mant128 *src)
+static inline unsigned int fp_fls128(union fp_mant128 *src)
 {
 	unsigned long data;
 	unsigned int res, off;
@@ -504,7 +502,7 @@ extern inline unsigned int fp_fls128(union fp_mant128 *src)
 	return res + off;
 }
 
-extern inline void fp_shiftmant128(union fp_mant128 *src, int shift)
+static inline void fp_shiftmant128(union fp_mant128 *src, int shift)
 {
 	unsigned long sticky;
 
@@ -594,7 +592,8 @@ extern inline void fp_shiftmant128(union fp_mant128 *src, int shift)
 }
 #endif
 
-extern inline void fp_putmant128(struct fp_ext *dest, union fp_mant128 *src, int shift)
+static inline void fp_putmant128(struct fp_ext *dest, union fp_mant128 *src,
+				 int shift)
 {
 	unsigned long tmp;
 
@@ -639,7 +638,7 @@ extern inline void fp_putmant128(struct fp_ext *dest, union fp_mant128 *src, int
 }
 
 #if 0 /* old code... */
-extern inline int fls(unsigned int a)
+static inline int fls(unsigned int a)
 {
 	int r;
 
@@ -649,7 +648,7 @@ extern inline int fls(unsigned int a)
 }
 
 /* fls = "find last set" (cf. ffs(3)) */
-extern inline int fls128(const int128 a)
+static inline int fls128(const int128 a)
 {
 	if (a[MSW128])
 		return fls(a[MSW128]);
@@ -668,12 +667,12 @@ extern inline int fls128(const int128 a)
 		return -1;
 }
 
-extern inline int zerop128(const int128 a)
+static inline int zerop128(const int128 a)
 {
 	return !(a[LSW128] | a[NLSW128] | a[NMSW128] | a[MSW128]);
 }
 
-extern inline int nonzerop128(const int128 a)
+static inline int nonzerop128(const int128 a)
 {
 	return (a[LSW128] | a[NLSW128] | a[NMSW128] | a[MSW128]);
 }
@@ -681,7 +680,7 @@ extern inline int nonzerop128(const int128 a)
 /* Addition and subtraction */
 /* Do these in "pure" assembly, because "extended" asm is unmanageable
    here */
-extern inline void add128(const int128 a, int128 b)
+static inline void add128(const int128 a, int128 b)
 {
 	/* rotating carry flags */
 	unsigned int carry[2];
@@ -699,7 +698,7 @@ extern inline void add128(const int128 a, int128 b)
 }
 
 /* Note: assembler semantics: "b -= a" */
-extern inline void sub128(const int128 a, int128 b)
+static inline void sub128(const int128 a, int128 b)
 {
 	/* rotating borrow flags */
 	unsigned int borrow[2];
@@ -717,9 +716,7 @@ extern inline void sub128(const int128 a, int128 b)
 }
 
 /* Poor man's 64-bit expanding multiply */
-extern inline void mul64(unsigned long long a,
-		  unsigned long long b,
-		  int128 c)
+static inline void mul64(unsigned long long a, unsigned long long b, int128 c)
 {
 	unsigned long long acc;
 	int128 acc128;
@@ -756,7 +753,7 @@ extern inline void mul64(unsigned long long a,
 }
 
 /* Note: unsigned */
-extern inline int cmp128(int128 a, int128 b)
+static inline int cmp128(int128 a, int128 b)
 {
 	if (a[MSW128] < b[MSW128])
 		return -1;

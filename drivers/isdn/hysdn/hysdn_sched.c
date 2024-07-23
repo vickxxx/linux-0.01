@@ -1,36 +1,23 @@
-/* $Id: hysdn_sched.c,v 1.5 2000/11/22 17:13:13 kai Exp $
-
- * Linux driver for HYSDN cards, scheduler routines for handling exchange card <-> pc.
+/* $Id: hysdn_sched.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
  *
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Linux driver for HYSDN cards
+ * scheduler routines for handling exchange card <-> pc.
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
-#include <linux/module.h>
-#include <linux/version.h>
-#include <asm/io.h>
+#include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
+#include <asm/io.h>
 
 #include "hysdn_defs.h"
 
@@ -47,7 +34,10 @@ hysdn_sched_rx(hysdn_card * card, uchar * buf, word len, word chan)
 
 	switch (chan) {
 		case CHAN_NDIS_DATA:
-			hysdn_rx_netpkt(card, buf, len);	/* give packet to network handler */
+			if (hynet_enable & (1 << card->myid)) {
+                          /* give packet to network handler */
+				hysdn_rx_netpkt(card, buf, len);
+			}
 			break;
 
 		case CHAN_ERRLOG:
@@ -58,7 +48,9 @@ hysdn_sched_rx(hysdn_card * card, uchar * buf, word len, word chan)
 #ifdef CONFIG_HYSDN_CAPI
          	case CHAN_CAPI:
 /* give packet to CAPI handler */
-			hycapi_rx_capipkt(card, buf, len);
+			if (hycapi_enable & (1 << card->myid)) {
+				hycapi_rx_capipkt(card, buf, len);
+			}
 			break;
 #endif /* CONFIG_HYSDN_CAPI */
 		default:
@@ -115,7 +107,9 @@ hysdn_sched_tx(hysdn_card * card, uchar * buf, word volatile *len, word volatile
 		return (1);	/* tell that data should be send */
 	}			/* error log start and able to send */
 	/* now handle network interface packets */
-	if ((skb = hysdn_tx_netget(card)) != NULL) {
+	if ((hynet_enable & (1 << card->myid)) && 
+	    (skb = hysdn_tx_netget(card)) != NULL) 
+	{
 		if (skb->len <= maxlen) {
 			memcpy(buf, skb->data, skb->len);	/* copy the packet to the buffer */
 			*len = skb->len;
@@ -126,7 +120,9 @@ hysdn_sched_tx(hysdn_card * card, uchar * buf, word volatile *len, word volatile
 			hysdn_tx_netack(card);	/* aknowledge packet -> throw away */
 	}			/* send a network packet if available */
 #ifdef CONFIG_HYSDN_CAPI
-	if((skb = hycapi_tx_capiget(card)) != NULL) {
+	if( ((hycapi_enable & (1 << card->myid))) && 
+	    ((skb = hycapi_tx_capiget(card)) != NULL) )
+	{
 		if (skb->len <= maxlen) {
 			memcpy(buf, skb->data, skb->len);
 			*len = skb->len;
@@ -141,7 +137,7 @@ hysdn_sched_tx(hysdn_card * card, uchar * buf, word volatile *len, word volatile
 
 
 /*****************************************************************************/
-/* send one config line to the card and return 0 if successfull, otherwise a */
+/* send one config line to the card and return 0 if successful, otherwise a */
 /* negative error code.                                                      */
 /* The function works with timeouts perhaps not giving the greatest speed    */
 /* sending the line, but this should be meaningless beacuse only some lines  */

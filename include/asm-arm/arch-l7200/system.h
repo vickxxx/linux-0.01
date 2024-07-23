@@ -12,14 +12,12 @@
 #ifndef __ASM_ARCH_SYSTEM_H
 #define __ASM_ARCH_SYSTEM_H
 
-static void arch_idle(void)
+static inline void arch_idle(void)
 {
-        while (!current->need_resched && !hlt_counter) {
-		cpu_do_idle(IDLE_WAIT_SLOW);
-	}
+	*(unsigned long *)(IO_BASE + 0x50004) = 1;	/* idle mode */
 }
 
-extern inline void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
 	if (mode == 's') {
 		cpu_reset(0);

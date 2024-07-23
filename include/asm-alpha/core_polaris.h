@@ -68,7 +68,7 @@ struct el_POLARIS_sysdata_mcheck {
 #define vuip	volatile unsigned int  *
 #define vulp	volatile unsigned long  *
 
-__EXTERN_INLINE unsigned int polaris_inb(unsigned long addr)
+__EXTERN_INLINE u8 polaris_inb(unsigned long addr)
 {
 	/* ??? I wish I could get rid of this.  But there's no ioremap
 	   equivalent for I/O space.  PCI I/O can be forced into the
@@ -78,29 +78,29 @@ __EXTERN_INLINE unsigned int polaris_inb(unsigned long addr)
 	return __kernel_ldbu(*(vucp)(addr + POLARIS_DENSE_IO_BASE));
 }
 
-__EXTERN_INLINE void polaris_outb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void polaris_outb(u8 b, unsigned long addr)
 {
 	__kernel_stb(b, *(vucp)(addr + POLARIS_DENSE_IO_BASE));
 	mb();
 }
 
-__EXTERN_INLINE unsigned int polaris_inw(unsigned long addr)
+__EXTERN_INLINE u16 polaris_inw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)(addr + POLARIS_DENSE_IO_BASE));
 }
 
-__EXTERN_INLINE void polaris_outw(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void polaris_outw(u16 b, unsigned long addr)
 {
 	__kernel_stw(b, *(vusp)(addr + POLARIS_DENSE_IO_BASE));
 	mb();
 }
 
-__EXTERN_INLINE unsigned int polaris_inl(unsigned long addr)
+__EXTERN_INLINE u32 polaris_inl(unsigned long addr)
 {
 	return *(vuip)(addr + POLARIS_DENSE_IO_BASE);
 }
 
-__EXTERN_INLINE void polaris_outl(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void polaris_outl(u32 b, unsigned long addr)
 {
 	*(vuip)(addr + POLARIS_DENSE_IO_BASE) = b;
 	mb();
@@ -113,49 +113,56 @@ __EXTERN_INLINE void polaris_outl(unsigned int b, unsigned long addr)
  * We will only support DENSE access via BWX insns.
  */
 
-__EXTERN_INLINE unsigned long polaris_readb(unsigned long addr)
+__EXTERN_INLINE u8 polaris_readb(unsigned long addr)
 {
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE unsigned long polaris_readw(unsigned long addr)
+__EXTERN_INLINE u16 polaris_readw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE unsigned long polaris_readl(unsigned long addr)
+__EXTERN_INLINE u32 polaris_readl(unsigned long addr)
 {
-	return *(vuip)addr;
+	return (*(vuip)addr) & 0xffffffff;
 }
 
-__EXTERN_INLINE unsigned long polaris_readq(unsigned long addr)
+__EXTERN_INLINE u64 polaris_readq(unsigned long addr)
 {
 	return *(vulp)addr;
 }
 
-__EXTERN_INLINE void polaris_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void polaris_writeb(u8 b, unsigned long addr)
 {
 	__kernel_stb(b, *(vucp)addr);
 }
 
-__EXTERN_INLINE void polaris_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void polaris_writew(u16 b, unsigned long addr)
 {
 	__kernel_stw(b, *(vusp)addr);
 }
 
-__EXTERN_INLINE void polaris_writel(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void polaris_writel(u32 b, unsigned long addr)
 {
 	*(vuip)addr = b;
 }
 
-__EXTERN_INLINE void polaris_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void polaris_writeq(u64 b, unsigned long addr)
 {
 	*(vulp)addr = b;
 }
 
-__EXTERN_INLINE unsigned long polaris_ioremap(unsigned long addr)
+__EXTERN_INLINE unsigned long polaris_ioremap(unsigned long addr,
+					      unsigned long size
+					      __attribute__((unused)))
 {
 	return addr + POLARIS_DENSE_MEM_BASE;
+}
+
+__EXTERN_INLINE void polaris_iounmap(unsigned long addr)
+{
+	return;
 }
 
 __EXTERN_INLINE int polaris_is_ioaddr(unsigned long addr)
@@ -184,7 +191,8 @@ __EXTERN_INLINE int polaris_is_ioaddr(unsigned long addr)
 #define __writew(x,a)		polaris_writew((x),(unsigned long)(a))
 #define __writel(x,a)		polaris_writel((x),(unsigned long)(a))
 #define __writeq(x,a)		polaris_writeq((x),(unsigned long)(a))
-#define __ioremap(a)		polaris_ioremap((unsigned long)(a))
+#define __ioremap(a,s)		polaris_ioremap((unsigned long)(a),(s))
+#define __iounmap(a)		polaris_iounmap((unsigned long)(a))
 #define __is_ioaddr(a)		polaris_is_ioaddr((unsigned long)(a))
 
 #define inb(p)			__inb(p)

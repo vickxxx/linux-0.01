@@ -25,9 +25,9 @@
 #include <linux/linkage.h>
 #include <linux/config.h>
 #include <asm/assembler.h>
+#include <asm/constants.h>
 #include <asm/procinfo.h>
 #include <asm/hardware.h>
-#include "../lib/constants.h"
 
 /*
  * This is the maximum size of an area which will be invalidated
@@ -56,24 +56,29 @@
  * cpu_arm920_data_abort()
  *
  * obtain information about current aborted instruction
+ * Note: we read user space.  This means we might cause a data
+ * abort here if the I-TLB and D-TLB aren't seeing the same
+ * picture.  Unfortunately, this does happen.  We live with it.
  *
- * r0 = address of aborted instruction
+ *  r2 = address of aborted instruction
+ *  r3 = cpsr
  *
  * Returns:
  *  r0 = address of abort
  *  r1 != 0 if writing
  *  r3 = FSR
+ *  r4 = corrupted
  */
 	.align	5
 ENTRY(cpu_arm920_data_abort)
-	ldr	r1, [r0]			@ read aborted instruction
-	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	mov	r1, r1, lsr #19			@ b1 = L
 	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
-	and	r1, r1, #2
+	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
+	ldr	r1, [r2]			@ read aborted instruction
 	and	r3, r3, #255
+	tst	r1, r1, lsr #21			@ C = bit 20
+	sbc	r1, r1, r1			@ r1 = C - 1
 	mov	pc, lr
-
+	
 /*
  * cpu_arm920_check_bugs()
  */
@@ -129,9 +134,7 @@ ENTRY(cpu_arm920_reset)
  */
 	.align	5
 ENTRY(cpu_arm920_do_idle)
-#if defined(CONFIG_CPU_ARM920_CPU_IDLE)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-#endif
 	mov	pc, lr
 
 /* ================================= CACHE ================================ */
@@ -150,7 +153,7 @@ ENTRY(cpu_arm920_cache_clean_invalidate_all)
 	mov	r2, #1
 cpu_arm920_cache_clean_invalidate_all_r2:
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
 /*
@@ -180,21 +183,33 @@ cpu_arm920_cache_clean_invalidate_all_r2:
  * end:   Area end address
  * flags: nonzero for I cache as well
  */
-	.align	5
+		.align	5
 ENTRY(cpu_arm920_cache_clean_invalidate_range)
 	bic	r0, r0, #DCACHELINESIZE - 1	@ && added by PGM
+	bic	r1, r1, #DCACHELINESIZE - 1     @ && added by DHM
 	sub	r3, r1, r0
 	cmp	r3, #MAX_AREA_SIZE
 	bgt	cpu_arm920_cache_clean_invalidate_all_r2
-1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
+1:	teq	r2, #0
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
+	add	r0, r0, #DCACHELINESIZE
+	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
+	add	r0, r0, #DCACHELINESIZE
+#else
+	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
+	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
+	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
 	add	r0, r0, #DCACHELINESIZE
+#endif
 	cmp	r0, r1
 	blt	1b
-	teq	r2, #0
-	movne	r0, #0
-	mcrne	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+
+	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
@@ -207,10 +222,17 @@ ENTRY(cpu_arm920_cache_clean_invalidate_range)
 	.align	5
 ENTRY(cpu_arm920_flush_ram_page)
 	mov	r1, #PAGESIZE
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	add	r0, r0, #DCACHELINESIZE
+	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	add	r0, r0, #DCACHELINESIZE
+#else
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
+#endif
 	subs	r1, r1, #2 * DCACHELINESIZE
 	bne	1b
 	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
@@ -231,11 +253,14 @@ ENTRY(cpu_arm920_flush_ram_page)
  */
 	.align	5
 ENTRY(cpu_arm920_dcache_invalidate_range)
+#ifndef CONFIG_CPU_ARM920_WRITETHROUGH
 	tst	r0, #DCACHELINESIZE - 1
-	bic	r0, r0, #DCACHELINESIZE - 1
 	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
 	tst	r1, #DCACHELINESIZE - 1
 	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry
+#endif		@ clean D entry
+	bic	r0, r0, #DCACHELINESIZE - 1
+	bic	r1, r1, #DCACHELINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
 	cmp	r0, r1
@@ -254,18 +279,21 @@ ENTRY(cpu_arm920_dcache_invalidate_range)
  */
 	.align	5
 ENTRY(cpu_arm920_dcache_clean_range)
+#ifndef CONFIG_CPU_ARM920_WRITETHROUGH
 	bic	r0, r0, #DCACHELINESIZE - 1
 	sub	r1, r1, r0
 	cmp	r1, #MAX_AREA_SIZE
 	mov	r2, #0
 	bgt	cpu_arm920_cache_clean_invalidate_all_r2
 
+	bic	r1, r1, #DCACHELINESIZE -1
+	add	r1, r1, #DCACHELINESIZE
+
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #2 * DCACHELINESIZE
+	subs	r1, r1, #DCACHELINESIZE
 	bpl	1b
+#endif
 	mcr	p15, 0, r2, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
@@ -284,7 +312,7 @@ ENTRY(cpu_arm920_dcache_clean_range)
  */
 	.align	5
 ENTRY(cpu_arm920_dcache_clean_page)
-#ifndef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
+#ifndef CONFIG_CPU_ARM920_WRITETHROUGH
 	mov	r1, #PAGESIZE
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	add	r0, r0, #DCACHELINESIZE
@@ -305,7 +333,7 @@ ENTRY(cpu_arm920_dcache_clean_page)
  */
 	.align	5
 ENTRY(cpu_arm920_dcache_clean_entry)
-#ifndef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
+#ifndef CONFIG_CPU_ARM920_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
@@ -318,21 +346,43 @@ ENTRY(cpu_arm920_dcache_clean_entry)
  *
  * invalidate a range of virtual addresses from the Icache
  *
+ * This is a little misleading, it is not intended to clean out
+ * the i-cache but to make sure that any data written to the
+ * range is made consistant.  This means that when we execute code
+ * in that region, everything works as we expect.
+ *
+ * This generally means writing back data in the Dcache and
+ * write buffer and flushing the Icache over that region
+ *
  * start: virtual start address
  * end:   virtual end address
+ *
+ * NOTE: ICACHELINESIZE == DCACHELINESIZE (so we don't need to
+ * loop twice, once for i-cache, once for d-cache)
  */
 	.align	5
 ENTRY(cpu_arm920_icache_invalidate_range)
-1:	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	cmp	r0, r1
-	blo	1b
+	bic	r0, r0, #ICACHELINESIZE - 1	@ Safety check
+	sub	r1, r1, r0
+	cmp	r1, #MAX_AREA_SIZE
+	bgt	cpu_arm920_cache_clean_invalidate_all_r2
+
+	bic	r1, r1, #ICACHELINESIZE - 1
+	add	r1, r1, #ICACHELINESIZE
+
+1:	mcr	p15, 0, r0, c7, c5, 1		@ Clean I entry
+	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
+	add	r0, r0, #ICACHELINESIZE
+	subs	r1, r1, #ICACHELINESIZE
+	bne	1b
+
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-ENTRY(cpu_arm920_icache_invalidate_page)
-	/* why no invalidate I cache --rmk */
 	mov	pc, lr
 
+ENTRY(cpu_arm920_icache_invalidate_page)
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+	mov	pc, lr
 
 /* ================================== TLB ================================= */
 
@@ -358,8 +408,18 @@ ENTRY(cpu_arm920_tlb_invalidate_all)
  */
 	.align	5
 ENTRY(cpu_arm920_tlb_invalidate_range)
+	sub	r3, r1, r0
+	cmp	r3, #256 * PAGESIZE		@ arbitary, should be tuned
+	bhi	cpu_arm920_tlb_invalidate_all
+
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
+
+	mov	r3, #PAGESIZE
+	sub	r3, r3, #1
+	bic 	r0, r0, r3
+	bic	r1, r1, r3
+
 1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
 	mcr	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
 	add	r0, r0, #PAGESIZE
@@ -396,7 +456,7 @@ ENTRY(cpu_arm920_tlb_invalidate_page)
 	.align	5
 ENTRY(cpu_arm920_set_pgd)
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	/* Any reason why we don't use mcr p15, 0, r0, c7, c7, 0 here? --rmk */
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
@@ -429,7 +489,7 @@ ENTRY(cpu_arm920_set_pgd)
  */
 	.align	5
 ENTRY(cpu_arm920_set_pmd)
-#ifdef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	eor	r2, r1, #0x0a			@ C & Section
 	tst	r2, #0x0b
 	biceq	r1, r1, #4			@ clear bufferable bit
@@ -463,8 +523,8 @@ ENTRY(cpu_arm920_set_pte)
 	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
 	movne	r2, #0
 
-#ifdef CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH
-	eor	r3, r1, #0x0a			@ C & small page?
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+	eor	r3, r2, #0x0a			@ C & small page?
 	tst	r3, #0x0b
 	biceq	r2, r2, #4
 #endif
@@ -475,19 +535,14 @@ ENTRY(cpu_arm920_set_pte)
 	mov	pc, lr
 
 
-cpu_manu_name:
-	.asciz	"ARM/VLSI"
 ENTRY(cpu_arm920_name)
-	.ascii	"Arm920"
-#if defined(CONFIG_CPU_ARM920_CPU_IDLE)
-	.ascii	"s"
-#endif
-#if defined(CONFIG_CPU_ARM920_I_CACHE_ON)
+	.ascii	"Arm920T"
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	.ascii	"i"
 #endif
-#if defined(CONFIG_CPU_ARM920_D_CACHE_ON)
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	.ascii	"d"
-#if defined(CONFIG_CPU_ARM920_FORCE_WRITE_THROUGH)
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	.ascii	"(wt)"
 #else
 	.ascii	"(wb)"
@@ -510,21 +565,22 @@ __arm920_setup:
 /*
  * Clear out 'unwanted' bits (then put them in if we need them)
  */
-	bic	r0, r0, #0x0e00			@ ....??r.........
-	bic	r0, r0, #0x0002			@ ..............a.
-	bic	r0, r0, #0x000c			@ W,D
-	bic	r0, r0, #0x1000			@ I
+						@   VI ZFRS BLDP WCAM
+	bic	r0, r0, #0x0e00
+	bic	r0, r0, #0x0002
+	bic	r0, r0, #0x000c
+	bic	r0, r0, #0x1000			@ ...0 000. .... 000.
 /*
  * Turn on what we want
  */
-	orr	r0, r0, #0x0031			@ ..........DP...M
-	orr	r0, r0, #0x0100			@ .......S........
+	orr	r0, r0, #0x0031
+	orr	r0, r0, #0x2100			@ ..1. ...1 ..11 ...1
 
-#ifdef CONFIG_CPU_ARM920_D_CACHE_ON
-	orr	r0, r0, #0x0004			@ Enable D cache
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	orr	r0, r0, #0x0004			@ .... .... .... .1..
 #endif
-#ifdef CONFIG_CPU_ARM920_I_CACHE_ON
-	orr	r0, r0, #0x1000                 @ I Cache on
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	orr	r0, r0, #0x1000			@ ...1 .... .... ....
 #endif
 	mov	pc, lr
 
@@ -571,7 +627,7 @@ arm920_processor_functions:
 
 	.type	cpu_arm920_info, #object
 cpu_arm920_info:
-	.long	cpu_manu_name
+	.long	0
 	.long	cpu_arm920_name
 	.size	cpu_arm920_info, . - cpu_arm920_info
 
@@ -596,7 +652,7 @@ __arm920_proc_info:
 	b	__arm920_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
 	.long	cpu_arm920_info
 	.long	arm920_processor_functions
 	.size	__arm920_proc_info, . - __arm920_proc_info

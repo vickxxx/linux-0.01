@@ -1,10 +1,12 @@
-/* $Id: jade.c,v 1.6 2000/11/24 17:05:38 kai Exp $
+/* $Id: jade.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * jade.c   JADE stuff (derived from original hscx.c)
+ * JADE stuff (derived from original hscx.c)
  *
- * Author   Roland Klabunde (R.Klabunde@Berkom.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Roland Klabunde
+ * Copyright    by Roland Klabunde   <R.Klabunde@Berkom.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -209,8 +211,8 @@ close_jadestate(struct BCState *bcs)
 		kfree(bcs->blog);
 		bcs->blog = NULL;
 	}
-	discard_queue(&bcs->rqueue);
-	discard_queue(&bcs->squeue);
+	skb_queue_purge(&bcs->rqueue);
+	skb_queue_purge(&bcs->squeue);
 	if (bcs->tx_skb) {
 		dev_kfree_skb_any(bcs->tx_skb);
 		bcs->tx_skb = NULL;

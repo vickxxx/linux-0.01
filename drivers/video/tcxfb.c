@@ -1,4 +1,4 @@
-/* $Id: tcxfb.c,v 1.11 1999/11/19 09:57:21 davem Exp $
+/* $Id: tcxfb.c,v 1.13 2001/09/19 00:04:33 davem Exp $
  * tcxfb.c: TCX 24/8bit frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -13,7 +13,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -362,3 +362,5 @@ char __init *tcxfb_init(struct fb_info_sbusfb *fb)
 
 	return idstring;
 }
+
+MODULE_LICENSE("GPL");

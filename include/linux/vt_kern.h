@@ -8,6 +8,7 @@
 
 #include <linux/config.h>
 #include <linux/vt.h>
+#include <linux/kd.h>
 
 /*
  * Presently, a lot of graphics programs do not restore the contents of
@@ -30,7 +31,8 @@ extern struct vt_struct {
 	wait_queue_head_t paste_wait;
 } *vt_cons[MAX_NR_CONSOLES];
 
-void (*kd_mksound)(unsigned int hz, unsigned int ticks);
+extern void (*kd_mksound)(unsigned int hz, unsigned int ticks);
+extern int (*kbd_rate)(struct kbd_repeat *rep);
 
 /* console.c */
 
@@ -88,6 +90,5 @@ void complete_change_console(unsigned int new_console);
 int vt_waitactive(int vt);
 void change_console(unsigned int);
 void reset_vc(unsigned int new_console);
-int vt_waitactive(int vt);
 
 #endif /* _VT_KERN_H */

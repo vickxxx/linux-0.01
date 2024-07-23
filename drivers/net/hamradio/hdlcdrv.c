@@ -49,7 +49,7 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/if.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <asm/bitops.h>
@@ -93,11 +93,6 @@ static char ax25_nocall[AX25_ADDR_LEN] =
 #define PARAM_FULLDUP   5
 #define PARAM_HARDWARE  6
 #define PARAM_RETURN    255
-
-/* --------------------------------------------------------------------- */
-
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
 
 /* --------------------------------------------------------------------- */
 /*
@@ -791,7 +786,6 @@ static int hdlcdrv_probe(struct net_device *dev)
 	dev->get_stats = hdlcdrv_get_stats;
 
 	/* Fill in the fields of the device structure */
-	dev_init_buffers(dev);
 
 	s->skb = NULL;
 	
@@ -907,6 +901,7 @@ static void __exit hdlcdrv_cleanup_driver(void)
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Packet Radio network interface HDLC encoder/decoder");
+MODULE_LICENSE("GPL");
 module_init(hdlcdrv_init_driver);
 module_exit(hdlcdrv_cleanup_driver);
 

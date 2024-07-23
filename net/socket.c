@@ -67,10 +67,13 @@
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/wanrouter.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/cache.h>
 #include <linux/module.h>
+#include <linux/highmem.h>
 
 #if defined(CONFIG_KMOD) && defined(CONFIG_NET)
 #include <linux/kmod.h>
@@ -78,16 +81,11 @@
 
 #include <asm/uaccess.h>
 
-#include <linux/inet.h>
-#include <net/ip.h>
 #include <net/sock.h>
-#include <net/tcp.h>
-#include <net/udp.h>
 #include <net/scm.h>
 #include <linux/netfilter.h>
 
 static int sock_no_open(struct inode *irrelevant, struct file *dontcare);
-static loff_t sock_lseek(struct file *file, loff_t offset, int whence);
 static ssize_t sock_read(struct file *file, char *buf,
 			 size_t size, loff_t *ppos);
 static ssize_t sock_write(struct file *file, const char *buf,
@@ -104,6 +102,8 @@ static ssize_t sock_readv(struct file *file, const struct iovec *vector,
 			  unsigned long count, loff_t *ppos);
 static ssize_t sock_writev(struct file *file, const struct iovec *vector,
 			  unsigned long count, loff_t *ppos);
+static ssize_t sock_sendpage(struct file *file, struct page *page,
+			     int offset, size_t size, loff_t *ppos, int more);
 
 
 /*
@@ -112,7 +112,7 @@ static ssize_t sock_writev(struct file *file, const struct iovec *vector,
  */
 
 static struct file_operations socket_file_ops = {
-	llseek:		sock_lseek,
+	llseek:		no_llseek,
 	read:		sock_read,
 	write:		sock_write,
 	poll:		sock_poll,
@@ -122,7 +122,8 @@ static struct file_operations socket_file_ops = {
 	release:	sock_close,
 	fasync:		sock_fasync,
 	readv:		sock_readv,
-	writev:		sock_writev
+	writev:		sock_writev,
+	sendpage:	sock_sendpage
 };
 
 /*
@@ -146,8 +147,7 @@ static void net_family_write_lock(void)
 	while (atomic_read(&net_family_lockct) != 0) {
 		spin_unlock(&net_family_lock);
 
-		current->policy |= SCHED_YIELD;
-		schedule();
+		yield();
 
 		spin_lock(&net_family_lock);
 	}
@@ -299,8 +299,7 @@ static struct super_block * sockfs_read_super(struct super_block *sb, void *data
 }
 
 static struct vfsmount *sock_mnt;
-static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super,
-	FS_NOMOUNT|FS_SINGLE);
+static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super, FS_NOMOUNT);
 static int sockfs_delete_dentry(struct dentry *dentry)
 {
 	return 1;
@@ -312,21 +311,21 @@ static struct dentry_operations sockfs_dentry_operations = {
 /*
  *	Obtains the first available file descriptor and sets it up for use.
  *
- *	This functions creates file structure and maps it to fd space
+ *	This function creates file structure and maps it to fd space
  *	of current process. On success it returns file descriptor
  *	and file struct implicitly stored in sock->file.
  *	Note that another thread may close file descriptor before we return
  *	from this function. We use the fact that now we do not refer
  *	to socket after mapping. If one day we will need it, this
- *	function will inincrement ref. count on file by 1.
+ *	function will increment ref. count on file by 1.
  *
  *	In any case returned fd MAY BE not valid!
- *	This race condition is inavoidable
- *	with shared fd spaces, we cannot solve is inside kernel,
+ *	This race condition is unavoidable
+ *	with shared fd spaces, we cannot solve it inside kernel,
  *	but we take care of internal coherence yet.
  */
 
-static int sock_map_fd(struct socket *sock)
+int sock_map_fd(struct socket *sock)
 {
 	int fd;
 	struct qstr this;
@@ -437,11 +436,11 @@ struct socket *sock_alloc(void)
 	struct inode * inode;
 	struct socket * sock;
 
-	inode = get_empty_inode();
+	inode = new_inode(sock_mnt->mnt_sb);
 	if (!inode)
 		return NULL;
 
-	inode->i_sb = sock_mnt->mnt_sb;
+	inode->i_dev = NODEV;
 	sock = socki_lookup(inode);
 
 	inode->i_mode = S_IFSOCK|S_IRWXUGO;
@@ -526,15 +525,6 @@ int sock_recvmsg(struct socket *sock, struct msghdr *msg, int size, int flags)
 
 
 /*
- *	Sockets are not seekable.
- */
-
-static loff_t sock_lseek(struct file *file, loff_t offset, int whence)
-{
-	return -ESPIPE;
-}
-
-/*
  *	Read data from a socket. ubuf is a user mode pointer. We make sure the user
  *	area ubuf...ubuf+size-1 is writable before asking the protocol.
  */
@@ -600,6 +590,24 @@ static ssize_t sock_write(struct file *file, const char *ubuf,
 	iov.iov_len=size;
 	
 	return sock_sendmsg(sock, &msg, size);
+}
+
+ssize_t sock_sendpage(struct file *file, struct page *page,
+		      int offset, size_t size, loff_t *ppos, int more)
+{
+	struct socket *sock;
+	int flags;
+
+	if (ppos != &file->f_pos)
+		return -ESPIPE;
+
+	sock = socki_lookup(file->f_dentry->d_inode);
+
+	flags = !(file->f_flags & O_NONBLOCK) ? 0 : MSG_DONTWAIT;
+	if (more)
+		flags |= MSG_MORE;
+
+	return sock->ops->sendpage(sock, page, offset, size, flags);
 }
 
 int sock_readv_writev(int type, struct inode * inode, struct file * file,
@@ -734,11 +742,13 @@ static int sock_fasync(int fd, struct file *filp, int on)
 			return -ENOMEM;
 	}
 
-
 	sock = socki_lookup(filp->f_dentry->d_inode);
 	
-	if ((sk=sock->sk) == NULL)
+	if ((sk=sock->sk) == NULL) {
+		if (fna)
+			kfree(fna);
 		return -EINVAL;
+	}
 
 	lock_sock(sk);
 
@@ -819,8 +829,10 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 	/*
 	 *	Check protocol is in range
 	 */
-	if(family<0 || family>=NPROTO)
+	if (family < 0 || family >= NPROTO)
 		return -EAFNOSUPPORT;
+	if (type < 0 || type >= SOCK_MAX)
+		return -EINVAL;
 
 	/* Compatibility.
 
@@ -1004,14 +1016,16 @@ asmlinkage long sys_bind(int fd, struct sockaddr *umyaddr, int addrlen)
  *	ready for listening.
  */
 
+int sysctl_somaxconn = SOMAXCONN;
+
 asmlinkage long sys_listen(int fd, int backlog)
 {
 	struct socket *sock;
 	int err;
 	
 	if ((sock = sockfd_lookup(fd, &err)) != NULL) {
-		if ((unsigned) backlog > SOMAXCONN)
-			backlog = SOMAXCONN;
+		if ((unsigned) backlog > sysctl_somaxconn)
+			backlog = sysctl_somaxconn;
 		err=sock->ops->listen(sock, backlog);
 		sockfd_put(sock);
 	}
@@ -1041,7 +1055,7 @@ asmlinkage long sys_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_a
 	if (!sock)
 		goto out;
 
-	err = -EMFILE;
+	err = -ENFILE;
 	if (!(newsock = sock_alloc())) 
 		goto out_put;
 
@@ -1181,13 +1195,14 @@ asmlinkage long sys_sendto(int fd, void * buff, size_t len, unsigned flags,
 	msg.msg_iovlen=1;
 	msg.msg_control=NULL;
 	msg.msg_controllen=0;
-	msg.msg_namelen=addr_len;
+	msg.msg_namelen=0;
 	if(addr)
 	{
 		err = move_addr_to_kernel(addr, addr_len, address);
 		if (err < 0)
 			goto out_put;
 		msg.msg_name=address;
+		msg.msg_namelen=addr_len;
 	}
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
@@ -1240,7 +1255,7 @@ asmlinkage long sys_recvfrom(int fd, void * ubuf, size_t size, unsigned flags,
 		flags |= MSG_DONTWAIT;
 	err=sock_recvmsg(sock, &msg, size, flags);
 
-	if(err >= 0 && addr != NULL && msg.msg_namelen)
+	if(err >= 0 && addr != NULL)
 	{
 		err2=move_addr_to_user(address, msg.msg_namelen, addr, addr_len);
 		if(err2<0)
@@ -1269,7 +1284,10 @@ asmlinkage long sys_setsockopt(int fd, int level, int optname, char *optval, int
 {
 	int err;
 	struct socket *sock;
-	
+
+	if (optlen < 0)
+		return -EINVAL;
+			
 	if ((sock = sockfd_lookup(fd, &err))!=NULL)
 	{
 		if (level == SOL_SOCKET)
@@ -1343,7 +1361,7 @@ asmlinkage long sys_sendmsg(int fd, struct msghdr *msg, unsigned flags)
 		goto out;
 
 	/* do not move before msg_sys is valid */
-	err = -EINVAL;
+	err = -EMSGSIZE;
 	if (msg_sys.msg_iovlen > UIO_MAXIOV)
 		goto out_put;
 
@@ -1426,7 +1444,7 @@ asmlinkage long sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 	if (!sock)
 		goto out;
 
-	err = -EINVAL;
+	err = -EMSGSIZE;
 	if (msg_sys.msg_iovlen > UIO_MAXIOV)
 		goto out_put;
 	
@@ -1461,7 +1479,7 @@ asmlinkage long sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 		goto out_freeiov;
 	len = err;
 
-	if (uaddr != NULL && msg_sys.msg_namelen) {
+	if (uaddr != NULL) {
 		err = move_addr_to_user(addr, msg_sys.msg_namelen, uaddr, uaddr_len);
 		if (err < 0)
 			goto out_freeiov;
@@ -1643,6 +1661,10 @@ extern void sk_init(void);
 extern void wanrouter_init(void);
 #endif
 
+#ifdef CONFIG_BLUEZ
+extern void bluez_init(void);
+#endif
+
 void __init sock_init(void)
 {
 	int i;
@@ -1693,7 +1715,8 @@ void __init sock_init(void)
 	 * The netlink device handler may be needed early.
 	 */
 
-#ifdef  CONFIG_RTNETLINK
+#ifdef CONFIG_NET
+	netlink_proto_init();
 	rtnetlink_init();
 #endif
 #ifdef CONFIG_NETLINK_DEV
@@ -1701,6 +1724,10 @@ void __init sock_init(void)
 #endif
 #ifdef CONFIG_NETFILTER
 	netfilter_init();
+#endif
+
+#ifdef CONFIG_BLUEZ
+	bluez_init();
 #endif
 }
 

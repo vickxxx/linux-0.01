@@ -78,7 +78,7 @@ static rwlock_t dn_fib_tables_lock = RW_LOCK_UNLOCKED;
 static struct dn_fib_table *dn_fib_tables[DN_NUM_TABLES + 1];
 
 static kmem_cache_t *dn_hash_kmem;
-static int dn_fib_hash_zombies = 0;
+static int dn_fib_hash_zombies;
 
 static __inline__ dn_fib_idx_t dn_hash(dn_fib_key_t key, struct dn_zone *dz)
 {
@@ -267,7 +267,6 @@ static int dn_fib_nh_match(struct rtmsg *r, struct nlmsghdr *nlh, struct dn_kern
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int dn_fib_dump_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
                         u8 tb_id, u8 type, u8 scope, void *dst, int dst_len,
                         struct dn_fib_info *fi)
@@ -434,12 +433,6 @@ static int dn_fib_table_dump(struct dn_fib_table *tb, struct sk_buff *skb,
 
         return skb->len;
 }
-
-#else /* no CONFIG_RTNETLINK */
-
-#define dn_rtmsg_fib(event,f,z,tb_id,nlh,req)
-
-#endif /* CONFIG_RTNETLINK */
 
 static int dn_fib_table_insert(struct dn_fib_table *tb, struct rtmsg *r, struct dn_kern_rta *rta, struct nlmsghdr *n, struct netlink_skb_parms *req)
 {
@@ -843,8 +836,7 @@ struct dn_fib_table *dn_fib_get_table(int n, int create)
                 return NULL;
 
         if (in_interrupt() && net_ratelimit()) {
-                printk(KERN_DEBUG "DECnet: BUG! Attempt to create routing table 
-from interrupt\n"); 
+                printk(KERN_DEBUG "DECnet: BUG! Attempt to create routing table from interrupt\n"); 
                 return NULL;
         }
         if ((t = kmalloc(sizeof(struct dn_fib_table), GFP_KERNEL)) == NULL)
@@ -860,9 +852,7 @@ from interrupt\n");
 #ifdef CONFIG_PROC_FS
 	t->get_info = dn_fib_table_get_info;
 #endif
-#ifdef CONFIG_RTNETLINK
         t->dump = dn_fib_table_dump;
-#endif
         dn_fib_tables[n] = t;
 
         return t;

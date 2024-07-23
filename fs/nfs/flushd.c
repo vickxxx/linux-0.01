@@ -24,7 +24,7 @@
 
 #include <linux/config.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/file.h>
 
@@ -34,13 +34,13 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/sched.h>
 
-#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 
 #include <linux/nfs.h>
 #include <linux/nfs_fs.h>
+#include <linux/nfs_page.h>
 #include <linux/nfs_fs_sb.h>
 #include <linux/nfs_flushd.h>
-#include <linux/nfs_mount.h>
 
 /*
  * Various constants
@@ -50,12 +50,7 @@
 /*
  * This is the wait queue all cluster daemons sleep on
  */
-static struct rpc_wait_queue    flushd_queue = RPC_INIT_WAITQ("nfs_flushd");
-
-/*
- * Spinlock
- */
-spinlock_t nfs_flushd_lock = SPIN_LOCK_UNLOCKED;
+static RPC_WAITQ(flushd_queue, "nfs_flushd");
 
 /*
  * Local function declarations.
@@ -64,23 +59,24 @@ static void	nfs_flushd(struct rpc_task *);
 static void	nfs_flushd_exit(struct rpc_task *);
 
 
-int nfs_reqlist_init(struct nfs_server *server)
+static int nfs_reqlist_init(struct nfs_server *server)
 {
 	struct nfs_reqlist	*cache;
 	struct rpc_task		*task;
-	int			status = 0;
+	int			status;
 
 	dprintk("NFS: writecache_init\n");
-	spin_lock(&nfs_flushd_lock);
-	cache = server->rw_requests;
 
-	if (cache->task)
+	lock_kernel();
+	status = -ENOMEM;
+	/* Create the RPC task */
+	if (!(task = rpc_new_task(server->client, NULL, RPC_TASK_ASYNC)))
 		goto out_unlock;
 
-	/* Create the RPC task */
-	status = -ENOMEM;
-	task = rpc_new_task(server->client, NULL, RPC_TASK_ASYNC);
-	if (!task)
+	cache = server->rw_requests;
+
+	status = 0;
+	if (cache->task)
 		goto out_unlock;
 
 	task->tk_calldata = server;
@@ -94,11 +90,13 @@ int nfs_reqlist_init(struct nfs_server *server)
 	task->tk_action   = nfs_flushd;
 	task->tk_exit   = nfs_flushd_exit;
 
-	spin_unlock(&nfs_flushd_lock);
 	rpc_execute(task);
+	unlock_kernel();
 	return 0;
  out_unlock:
-	spin_unlock(&nfs_flushd_lock);
+	if (task)
+		rpc_release_task(task);
+	unlock_kernel();
 	return status;
 }
 
@@ -106,23 +104,21 @@ void nfs_reqlist_exit(struct nfs_server *server)
 {
 	struct nfs_reqlist      *cache;
 
+	lock_kernel();
 	cache = server->rw_requests;
 	if (!cache)
-		return;
+		goto out;
 
 	dprintk("NFS: reqlist_exit (ptr %p rpc %p)\n", cache, cache->task);
-	while (cache->task || cache->inodes) {
-		spin_lock(&nfs_flushd_lock);
-		if (!cache->task) {
-			spin_unlock(&nfs_flushd_lock);
-			nfs_reqlist_init(server);
-		} else {
-			cache->task->tk_status = -ENOMEM;
-			rpc_wake_up_task(cache->task);
-			spin_unlock(&nfs_flushd_lock);
-		}
+
+	while (cache->task) {
+		rpc_exit(cache->task, 0);
+		rpc_wake_up_task(cache->task);
+
 		interruptible_sleep_on_timeout(&cache->request_wait, 1 * HZ);
 	}
+ out:
+	unlock_kernel();
 }
 
 int nfs_reqlist_alloc(struct nfs_server *server)
@@ -140,7 +136,7 @@ int nfs_reqlist_alloc(struct nfs_server *server)
 	init_waitqueue_head(&cache->request_wait);
 	server->rw_requests = cache;
 
-	return 0;
+	return nfs_reqlist_init(server);
 }
 
 void nfs_reqlist_free(struct nfs_server *server)
@@ -151,142 +147,47 @@ void nfs_reqlist_free(struct nfs_server *server)
 	}
 }
 
-void nfs_wake_flushd()
-{
-	rpc_wake_up_status(&flushd_queue, -ENOMEM);
-}
-
-static void inode_append_flushd(struct inode *inode)
-{
-	struct nfs_reqlist	*cache = NFS_REQUESTLIST(inode);
-	struct inode		**q;
-
-	spin_lock(&nfs_flushd_lock);
-	if (NFS_FLAGS(inode) & NFS_INO_FLUSH)
-		goto out;
-	inode->u.nfs_i.hash_next = NULL;
-
-	q = &cache->inodes;
-	while (*q)
-		q = &(*q)->u.nfs_i.hash_next;
-	*q = inode;
-
-	/* Note: we increase the inode i_count in order to prevent
-	 *	 it from disappearing when on the flush list
-	 */
-	NFS_FLAGS(inode) |= NFS_INO_FLUSH;
-	atomic_inc(&inode->i_count);
- out:
-	spin_unlock(&nfs_flushd_lock);
-}
-
-void inode_remove_flushd(struct inode *inode)
-{
-	struct nfs_reqlist	*cache = NFS_REQUESTLIST(inode);
-	struct inode		**q;
-
-	spin_lock(&nfs_flushd_lock);
-	if (!(NFS_FLAGS(inode) & NFS_INO_FLUSH))
-		goto out;
-
-	q = &cache->inodes;
-	while (*q && *q != inode)
-		q = &(*q)->u.nfs_i.hash_next;
-	if (*q) {
-		*q = inode->u.nfs_i.hash_next;
-		NFS_FLAGS(inode) &= ~NFS_INO_FLUSH;
-		iput(inode);
-	}
- out:
-	spin_unlock(&nfs_flushd_lock);
-}
-
-void inode_schedule_scan(struct inode *inode, unsigned long time)
-{
-	struct nfs_reqlist	*cache = NFS_REQUESTLIST(inode);
-	struct rpc_task		*task;
-	unsigned long		mintimeout;
-
-	if (time_after(NFS_NEXTSCAN(inode), time))
-		NFS_NEXTSCAN(inode) = time;
-	mintimeout = jiffies + 1 * HZ;
-	if (time_before(mintimeout, NFS_NEXTSCAN(inode)))
-		mintimeout = NFS_NEXTSCAN(inode);
-	inode_append_flushd(inode);
-
-	spin_lock(&nfs_flushd_lock);
-	task = cache->task;
-	if (!task) {
-		spin_unlock(&nfs_flushd_lock);
-		nfs_reqlist_init(NFS_SERVER(inode));
-	} else {
-		if (time_after(cache->runat, mintimeout))
-			rpc_wake_up_task(task);
-		spin_unlock(&nfs_flushd_lock);
-	}
-}
-
-
+#define NFS_FLUSHD_TIMEOUT	(30*HZ)
 static void
 nfs_flushd(struct rpc_task *task)
 {
 	struct nfs_server	*server;
 	struct nfs_reqlist	*cache;
-	struct inode		*inode, *next;
-	unsigned long		delay = jiffies + NFS_WRITEBACK_LOCKDELAY;
-	int			flush = (task->tk_status == -ENOMEM);
+	LIST_HEAD(head);
 
         dprintk("NFS: %4d flushd starting\n", task->tk_pid);
 	server = (struct nfs_server *) task->tk_calldata;
         cache = server->rw_requests;
 
-	spin_lock(&nfs_flushd_lock);
-	next = cache->inodes;
-	cache->inodes = NULL;
-	spin_unlock(&nfs_flushd_lock);
-
-	while ((inode = next) != NULL) {
-		next = next->u.nfs_i.hash_next;
-		inode->u.nfs_i.hash_next = NULL;
-		NFS_FLAGS(inode) &= ~NFS_INO_FLUSH;
-
-		if (flush) {
-			nfs_pagein_inode(inode, 0, 0);
-			nfs_sync_file(inode, NULL, 0, 0, FLUSH_AGING);
-		} else if (time_after(jiffies, NFS_NEXTSCAN(inode))) {
-			NFS_NEXTSCAN(inode) = jiffies + NFS_WRITEBACK_LOCKDELAY;
-			nfs_pagein_timeout(inode);
-			nfs_flush_timeout(inode, FLUSH_AGING);
+	for(;;) {
+		spin_lock(&nfs_wreq_lock);
+		if (nfs_scan_lru_dirty_timeout(server, &head)) {
+			spin_unlock(&nfs_wreq_lock);
+			nfs_flush_list(&head, server->wpages, FLUSH_AGING);
+			continue;
+		}
+		if (nfs_scan_lru_read_timeout(server, &head)) {
+			spin_unlock(&nfs_wreq_lock);
+			nfs_pagein_list(&head, server->rpages);
+			continue;
+		}
 #ifdef CONFIG_NFS_V3
-			nfs_commit_timeout(inode, FLUSH_AGING);
+		if (nfs_scan_lru_commit_timeout(server, &head)) {
+			spin_unlock(&nfs_wreq_lock);
+			nfs_commit_list(&head, FLUSH_AGING);
+			continue;
+		}
 #endif
-		}
-
-		if (nfs_have_writebacks(inode) || nfs_have_read(inode)) {
-			inode_append_flushd(inode);
-			if (time_after(delay, NFS_NEXTSCAN(inode)))
-				delay = NFS_NEXTSCAN(inode);
-		}
-		iput(inode);
+		spin_unlock(&nfs_wreq_lock);
+		break;
 	}
 
 	dprintk("NFS: %4d flushd back to sleep\n", task->tk_pid);
-	if (time_after(jiffies + 1 * HZ, delay))
-		delay = 1 * HZ;
-	else
-		delay = delay - jiffies;
-	task->tk_status = 0;
-	task->tk_action = nfs_flushd;
-	task->tk_timeout = delay;
-	cache->runat = jiffies + task->tk_timeout;
-
-	spin_lock(&nfs_flushd_lock);
-	if (!atomic_read(&cache->nr_requests) && !cache->inodes) {
-		cache->task = NULL;
-		task->tk_action = NULL;
-	} else
+	if (task->tk_action) {
+		task->tk_timeout = NFS_FLUSHD_TIMEOUT;
+		cache->runat = jiffies + task->tk_timeout;
 		rpc_sleep_on(&flushd_queue, task, NULL, NULL);
-	spin_unlock(&nfs_flushd_lock);
+	}
 }
 
 static void
@@ -297,10 +198,8 @@ nfs_flushd_exit(struct rpc_task *task)
 	server = (struct nfs_server *) task->tk_calldata;
 	cache = server->rw_requests;
 
-	spin_lock(&nfs_flushd_lock);
 	if (cache->task == task)
 		cache->task = NULL;
-	spin_unlock(&nfs_flushd_lock);
 	wake_up(&cache->request_wait);
 }
 

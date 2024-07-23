@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_timer.c,v 1.80 2000/10/03 07:29:01 anton Exp $
+ * Version:	$Id: tcp_timer.c,v 1.87 2001/09/21 21:27:34 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -248,7 +248,7 @@ static void tcp_delack_timer(unsigned long data)
 	if (tcp_ack_scheduled(tp)) {
 		if (!tp->ack.pingpong) {
 			/* Delayed ACK missed: inflate ATO. */
-			tp->ack.ato = min(tp->ack.ato<<1, tp->rto);
+			tp->ack.ato = min(tp->ack.ato << 1, tp->rto);
 		} else {
 			/* Delayed ACK missed: leave pingpong mode and
 			 * deflate ATO.
@@ -326,6 +326,29 @@ static void tcp_retransmit_timer(struct sock *sk)
 
 	BUG_TRAP(!skb_queue_empty(&sk->write_queue));
 
+	if (tp->snd_wnd == 0 && !sk->dead &&
+	    !((1<<sk->state)&(TCPF_SYN_SENT|TCPF_SYN_RECV))) {
+		/* Receiver dastardly shrinks window. Our retransmits
+		 * become zero probes, but we should not timeout this
+		 * connection. If the socket is an orphan, time it out,
+		 * we cannot allow such beasts to hang infinitely.
+		 */
+#ifdef TCP_DEBUG
+		if (net_ratelimit())
+			printk(KERN_DEBUG "TCP: Treason uncloaked! Peer %u.%u.%u.%u:%u/%u shrinks window %u:%u. Repaired.\n",
+			       NIPQUAD(sk->daddr), htons(sk->dport), sk->num,
+			       tp->snd_una, tp->snd_nxt);
+#endif
+		if (tcp_time_stamp - tp->rcv_tstamp > TCP_RTO_MAX) {
+			tcp_write_err(sk);
+			goto out;
+		}
+		tcp_enter_loss(sk, 0);
+		tcp_retransmit_skb(sk, skb_peek(&sk->write_queue));
+		__sk_dst_reset(sk);
+		goto out_reset_timer;
+	}
+
 	if (tcp_write_timeout(sk))
 		goto out;
 
@@ -349,7 +372,11 @@ static void tcp_retransmit_timer(struct sock *sk)
 		}
 	}
 
-	tcp_enter_loss(sk, 0);
+	if (tcp_use_frto(sk)) {
+		tcp_enter_frto(sk);
+	} else {
+		tcp_enter_loss(sk, 0);
+	}
 
 	if (tcp_retransmit_skb(sk, skb_peek(&sk->write_queue)) > 0) {
 		/* Retransmission failed because of local congestion,
@@ -379,6 +406,8 @@ static void tcp_retransmit_timer(struct sock *sk)
 	 */
 	tp->backoff++;
 	tp->retransmits++;
+
+out_reset_timer:
 	tp->rto = min(tp->rto << 1, TCP_RTO_MAX);
 	tcp_reset_xmit_timer(sk, TCP_TIME_RETRANS, tp->rto);
 	if (tp->retransmits > sysctl_tcp_retries1)

@@ -76,7 +76,7 @@
 #include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
@@ -89,10 +89,10 @@
 #include <linux/if_shaper.h>
 
 struct shaper_cb { 
+	unsigned long	shapeclock;		/* Time it should go out */
+	unsigned long	shapestamp;		/* Stamp for shaper */ 
 	__u32		shapelatency;		/* Latency on frame */
-	__u32		shapeclock;		/* Time it should go out */
 	__u32		shapelen;		/* Frame length in clocks */
-	__u32		shapestamp;		/* Stamp for shaper    */
 	__u16		shapepend;		/* Pending */
 }; 
 #define SHAPERCB(skb) ((struct shaper_cb *) ((skb)->cb))
@@ -283,7 +283,7 @@ static void shaper_queue_xmit(struct shaper *shaper, struct sk_buff *skb)
 				shaper->dev->name,newskb->priority);
 		dev_queue_xmit(newskb);
 
-                shaper->stats.tx_bytes+=newskb->len;
+                shaper->stats.tx_bytes += skb->len;
 		shaper->stats.tx_packets++;
 
                 if(sh_debug)
@@ -336,7 +336,7 @@ static void shaper_kick(struct shaper *shaper)
 		 */
 		 
 		if(sh_debug)
-			printk("Clock = %d, jiffies = %ld\n", SHAPERCB(skb)->shapeclock, jiffies);
+			printk("Clock = %ld, jiffies = %ld\n", SHAPERCB(skb)->shapeclock, jiffies);
 		if(time_before_eq(SHAPERCB(skb)->shapeclock - jiffies, SHAPER_BURST))
 		{
 			/*
@@ -651,8 +651,6 @@ static int __init shaper_probe(struct net_device *dev)
 	 *	Intialise the packet queues
 	 */
 	 
-	dev_init_buffers(dev);
-	
 	/*
 	 *	Handlers for when we attach to a device.
 	 */
@@ -684,6 +682,7 @@ static int shapers = 1;
 #ifdef MODULE
 
 MODULE_PARM(shapers, "i");
+MODULE_PARM_DESC(shapers, "Traffic shaper: maximum nuber of shapers");
 
 #else /* MODULE */
 
@@ -738,10 +737,16 @@ static int __init shaper_init(void)
 
 static void __exit shaper_exit (void)
 {
+	int i;
+
+	for (i = 0; i < shapers; i++)
+		unregister_netdev(&devs[i]);
+
 	kfree(devs);
 	devs = NULL;
 }
 
 module_init(shaper_init);
 module_exit(shaper_exit);
+MODULE_LICENSE("GPL");
 

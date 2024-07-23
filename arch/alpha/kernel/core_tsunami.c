@@ -21,6 +21,8 @@
 #include <asm/core_tsunami.h>
 #undef __EXTERN_INLINE
 
+#include <linux/bootmem.h>
+
 #include "proto.h"
 #include "pci_impl.h"
 
@@ -90,7 +92,7 @@ static int
 mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
 	     unsigned char *type1)
 {
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	unsigned long addr;
 	u8 bus = dev->bus->number;
 	u8 device_fn = dev->devfn;
@@ -206,7 +208,7 @@ struct pci_ops tsunami_pci_ops =
 };
 
 void
-tsunami_pci_tbi(struct pci_controler *hose, dma_addr_t start, dma_addr_t end)
+tsunami_pci_tbi(struct pci_controller *hose, dma_addr_t start, dma_addr_t end)
 {
 	tsunami_pchip *pchip = hose->index ? TSUNAMI_pchip1 : TSUNAMI_pchip0;
 	volatile unsigned long *csr;
@@ -222,7 +224,6 @@ tsunami_pci_tbi(struct pci_controler *hose, dma_addr_t start, dma_addr_t end)
 	   it's the shifted tag bits.  */
 	value = (start & 0xffff0000) >> 12;
 
-	wmb();
 	*csr = value;
 	mb();
 	*csr;
@@ -280,12 +281,12 @@ tsunami_probe_write(volatile unsigned long *vaddr)
 static void __init
 tsunami_init_one_pchip(tsunami_pchip *pchip, int index)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
 
 	if (tsunami_probe_read(&pchip->pctl.csr) == 0)
 		return;
 
-	hose = alloc_pci_controler();
+	hose = alloc_pci_controller();
 	if (index == 0)
 		pci_isa_hose = hose;
 	hose->io_space = alloc_resource();
@@ -347,36 +348,39 @@ tsunami_init_one_pchip(tsunami_pchip *pchip, int index)
 	 * Note: Window 3 is scatter-gather only
 	 * 
 	 * Window 0 is scatter-gather 8MB at 8MB (for isa)
-	 * Window 1 is direct access 1GB at 1GB
-	 * Window 2 is direct access 1GB at 2GB
-	 * Window 3 is scatter-gather 128MB at 3GB
-	 * ??? We ought to scale window 3 memory.
+	 * Window 1 is scatter-gather (up to) 1GB at 1GB
+	 * Window 2 is direct access 2GB at 2GB
 	 *
-	 * We must actually use 2 windows to direct-map the 2GB space,
-	 * because of an idiot-syncrasy of the CYPRESS chip.  It may
-	 * respond to a PCI bus address in the last 1MB of the 4GB
-	 * address range.
+	 * NOTE: we need the align_entry settings for Acer devices on ES40,
+	 * specifically floppy and IDE when memory is larger than 2GB.
 	 */
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 0);
-	hose->sg_pci = iommu_arena_new(hose, 0xc0000000, 0x08000000, 0);
-	__direct_map_base = 0x40000000;
+	/* Initially set for 4 PTEs, but will be overridden to 64K for ISA. */
+	hose->sg_isa->align_entry = 4;
+
+	hose->sg_pci = iommu_arena_new(hose, 0x40000000,
+				       size_for_memory(0x40000000), 0);
+	hose->sg_pci->align_entry = 4; /* Tsunami caches 4 PTEs at a time */
+
+	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
 
 	pchip->wsba[0].csr = hose->sg_isa->dma_base | 3;
 	pchip->wsm[0].csr  = (hose->sg_isa->size - 1) & 0xfff00000;
 	pchip->tba[0].csr  = virt_to_phys(hose->sg_isa->ptes);
 
-	pchip->wsba[1].csr = 0x40000000 | 1;
-	pchip->wsm[1].csr  = (0x40000000 - 1) & 0xfff00000;
-	pchip->tba[1].csr  = 0;
+	pchip->wsba[1].csr = hose->sg_pci->dma_base | 3;
+	pchip->wsm[1].csr  = (hose->sg_pci->size - 1) & 0xfff00000;
+	pchip->tba[1].csr  = virt_to_phys(hose->sg_pci->ptes);
 
 	pchip->wsba[2].csr = 0x80000000 | 1;
-	pchip->wsm[2].csr  = (0x40000000 - 1) & 0xfff00000;
-	pchip->tba[2].csr  = 0x40000000;
+	pchip->wsm[2].csr  = (0x80000000 - 1) & 0xfff00000;
+	pchip->tba[2].csr  = 0;
 
-	pchip->wsba[3].csr = hose->sg_pci->dma_base | 3;
-	pchip->wsm[3].csr  = (hose->sg_pci->size - 1) & 0xfff00000;
-	pchip->tba[3].csr  = virt_to_phys(hose->sg_pci->ptes);
+	pchip->wsba[3].csr = 0;
+
+	/* Enable the Monster Window to make DAC pci64 possible. */
+	pchip->pctl.csr |= pctl_m_mwin;
 
 	tsunami_pci_tbi(hose, 0, -1);
 }

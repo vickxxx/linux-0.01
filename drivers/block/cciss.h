@@ -27,33 +27,37 @@ struct access_method {
 };
 typedef struct _drive_info_struct
 {
- 	__u32   LunID;	
-	int 	usage_count;
-	int 	nr_blocks;
-	int	block_size;
-	int 	heads;
-	int	sectors;
-	int 	cylinders;
+ 	__u32   	LunID;	
+	int 		usage_count;
+	unsigned int 	nr_blocks;
+	int		block_size;
+	int 		heads;
+	int		sectors;
+	int 		cylinders;
+	int 		raid_level;
 } drive_info_struct;
 
 struct ctlr_info 
 {
 	int	ctlr;
+	int	major;
 	char	devname[8];
 	char    *product_name;
 	char	firm_ver[4]; // Firmware version 
-	unchar  pci_bus;
-        unchar  pci_dev_fn;
+	struct pci_dev *pdev;
 	__u32	board_id;
-	ulong   vaddr;
-	__u32	paddr;	
+	unsigned long vaddr;
+	unsigned long paddr;	
+	unsigned long io_mem_addr;
+	unsigned long io_mem_length;
 	CfgTable_struct *cfgtable;
-	int	intr;
-
+	unsigned int	intr;
+	int	interrupts_enabled;
 	int 	max_commands;
 	int	commands_outstanding;
 	int 	max_outstanding; /* Debug */ 
 	int	num_luns;
+	int 	highest_lun;
 	int	usage_count;  /* number of opens all all minor devices */
 
 	// information about each logical volume
@@ -70,7 +74,9 @@ struct ctlr_info
 
 	//* pointers to command and error info pool */ 
 	CommandList_struct 	*cmd_pool;
+	dma_addr_t		cmd_pool_dhandle; 
 	ErrorInfo_struct 	*errinfo_pool;
+	dma_addr_t		errinfo_pool_dhandle; 
         __u32   		*cmd_pool_bits;
 	int			nr_allocs;
 	int			nr_frees; 
@@ -82,6 +88,44 @@ struct ctlr_info
 	int              sizes[256];
 	int              blocksizes[256];
 	int              hardsizes[256];
+	int busy_configuring;
+#ifdef CONFIG_CISS_SCSI_TAPE
+	void *scsi_ctlr; /* ptr to structure containing scsi related stuff */
+#endif
+#ifdef CONFIG_CISS_MONITOR_THREAD
+	struct timer_list watchdog;
+	struct task_struct *monitor_thread; 
+	unsigned int monitor_period;
+	unsigned int monitor_deadline;
+	unsigned char alive;
+	unsigned char monitor_started;
+#define CCISS_MIN_PERIOD 10
+#define CCISS_MAX_PERIOD 3600 
+#define CTLR_IS_ALIVE(h) (h->alive)
+#define ASSERT_CTLR_ALIVE(h) {	h->alive = 1; \
+				h->monitor_period = 0; \
+				h->monitor_started = 0; }
+#define MONITOR_STATUS_PATTERN "Status: %s\n"
+#define CTLR_STATUS(h) CTLR_IS_ALIVE(h) ? "operational" : "failed"
+#define MONITOR_PERIOD_PATTERN "Monitor thread period: %d\n"
+#define MONITOR_PERIOD_VALUE(h) (h->monitor_period)
+#define MONITOR_DEADLINE_PATTERN "Monitor thread deadline: %d\n"
+#define MONITOR_DEADLINE_VALUE(h) (h->monitor_deadline)
+#define START_MONITOR_THREAD(h, cmd, count, cciss_monitor, rc) \
+	start_monitor_thread(h, cmd, count, cciss_monitor, rc)
+#else
+
+#define MONITOR_PERIOD_PATTERN "%s"
+#define MONITOR_PERIOD_VALUE(h) ""
+#define MONITOR_DEADLINE_PATTERN "%s"
+#define MONITOR_DEADLINE_VALUE(h) ""
+#define MONITOR_STATUS_PATTERN "%s\n"
+#define CTLR_STATUS(h) ""
+#define CTLR_IS_ALIVE(h) (1)
+#define ASSERT_CTLR_ALIVE(h)
+#define START_MONITOR_THREAD(a,b,c,d,rc) (*rc == 0)
+
+#endif
 };
 
 /*  Defining the diffent access_menthods */
@@ -93,9 +137,15 @@ struct ctlr_info
 #define SA5_REPLY_INTR_MASK_OFFSET	0x34
 #define SA5_REPLY_PORT_OFFSET		0x44
 #define SA5_INTR_STATUS		0x30
+#define SA5_SCRATCHPAD_OFFSET	0xB0
+
+#define SA5_CTCFG_OFFSET	0xB4
+#define SA5_CTMEM_OFFSET	0xB8
 
 #define SA5_INTR_OFF		0x08
+#define SA5B_INTR_OFF		0x04
 #define SA5_INTR_PENDING	0x08
+#define SA5B_INTR_PENDING	0x04
 #define FIFO_EMPTY		0xffffffff	
 
 #define  CISS_ERROR_BIT		0x02
@@ -117,7 +167,7 @@ static void SA5_submit_command( ctlr_info_t *h, CommandList_struct *c)
 }
 
 /*  
- *  This card is the oposite of the other cards.  
+ *  This card is the opposite of the other cards.  
  *   0 turns interrupts on... 
  *   0x08 turns them off... 
  */
@@ -125,12 +175,32 @@ static void SA5_intr_mask(ctlr_info_t *h, unsigned long val)
 {
 	if (val) 
 	{ /* Turn interrupts on */
+		h->interrupts_enabled = 1;
 		writel(0, h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
 	} else /* Turn them off */
 	{
+		h->interrupts_enabled = 0;
         	writel( SA5_INTR_OFF, 
 			h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
 	}
+}
+/*
+ *  This card is the opposite of the other cards.
+ *   0 turns interrupts on...
+ *   0x04 turns them off...
+ */
+static void SA5B_intr_mask(ctlr_info_t *h, unsigned long val)
+{
+        if (val)
+        { /* Turn interrupts on */
+		h->interrupts_enabled = 1;
+                writel(0, h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
+        } else /* Turn them off */
+        {
+		h->interrupts_enabled = 0;
+                writel( SA5B_INTR_OFF,
+                        h->vaddr + SA5_REPLY_INTR_MASK_OFFSET);
+        }
 }
 /*
  *  Returns true if fifo is full.  
@@ -183,6 +253,21 @@ static unsigned long SA5_intr_pending(ctlr_info_t *h)
 	return 0 ;
 }
 
+/*
+ *      Returns true if an interrupt is pending..
+ */
+static unsigned long SA5B_intr_pending(ctlr_info_t *h)
+{
+        unsigned long register_value  =
+                readl(h->vaddr + SA5_INTR_STATUS);
+#ifdef CCISS_DEBUG
+        printk("cciss: intr_pending %lx\n", register_value);
+#endif  /* CCISS_DEBUG */
+        if( register_value &  SA5B_INTR_PENDING)
+                return  1;
+        return 0 ;
+}
+
 
 static struct access_method SA5_access = {
 	SA5_submit_command,
@@ -190,6 +275,14 @@ static struct access_method SA5_access = {
 	SA5_fifo_full,
 	SA5_intr_pending,
 	SA5_completed,
+};
+
+static struct access_method SA5B_access = {
+        SA5_submit_command,
+        SA5B_intr_mask,
+        SA5_fifo_full,
+        SA5B_intr_pending,
+        SA5_completed,
 };
 
 struct board_type {

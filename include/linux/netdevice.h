@@ -40,6 +40,17 @@
 #endif
 
 struct divert_blk;
+struct vlan_group;
+struct ethtool_ops;
+
+					/* source back-compat hooks */
+#define SET_ETHTOOL_OPS(netdev,ops) \
+	( (netdev)->ethtool_ops = (ops) )
+
+#define HAVE_ALLOC_NETDEV		/* feature macro: alloc_xxxdev
+					   functions are available. */
+#define HAVE_FREE_NETDEV		/* free_netdev() */
+#define HAVE_NETDEV_PRIV		/* netdev_priv() */
 
 #define NET_XMIT_SUCCESS	0
 #define NET_XMIT_DROP		1	/* skb dropped			*/
@@ -61,7 +72,7 @@ struct divert_blk;
 
 #endif
 
-#define MAX_ADDR_LEN	7		/* Largest hardware address length */
+#define MAX_ADDR_LEN	8		/* Largest hardware address length */
 
 /*
  *	Compute the worst case header length according to the protocols
@@ -158,7 +169,7 @@ struct netif_rx_stats
 	unsigned fastroute_deferred_out;
 	unsigned fastroute_latency_reduction;
 	unsigned cpu_collision;
-} __attribute__ ((__aligned__(SMP_CACHE_BYTES)));
+} ____cacheline_aligned;
 
 extern struct netif_rx_stats netdev_rx_stat[];
 
@@ -180,12 +191,21 @@ struct hh_cache
 {
 	struct hh_cache *hh_next;	/* Next entry			     */
 	atomic_t	hh_refcnt;	/* number of users                   */
-	unsigned short  hh_type;	/* protocol identifier, f.e ETH_P_IP */
+	unsigned short  hh_type;	/* protocol identifier, f.e ETH_P_IP
+                                         *  NOTE:  For VLANs, this will be the
+                                         *  encapuslated type. --BLG
+                                         */
 	int		hh_len;		/* length of header */
 	int		(*hh_output)(struct sk_buff *skb);
 	rwlock_t	hh_lock;
+
 	/* cached hardware header; allow for machine alignment needs.        */
-	unsigned long	hh_data[16/sizeof(unsigned long)];
+#define HH_DATA_MOD	16
+#define HH_DATA_OFF(__len) \
+	(HH_DATA_MOD - ((__len) & (HH_DATA_MOD - 1)))
+#define HH_DATA_ALIGN(__len) \
+	(((__len)+(HH_DATA_MOD-1))&~(HH_DATA_MOD - 1))
+	unsigned long	hh_data[HH_DATA_ALIGN(LL_MAX_HEADER) / sizeof(long)];
 };
 
 /* These flag bits are private to the generic network queueing
@@ -199,7 +219,8 @@ enum netdev_state_t
 	__LINK_STATE_START,
 	__LINK_STATE_PRESENT,
 	__LINK_STATE_SCHED,
-	__LINK_STATE_NOCARRIER
+	__LINK_STATE_NOCARRIER,
+	__LINK_STATE_RX_SCHED
 };
 
 
@@ -272,6 +293,12 @@ struct net_device
 	struct net_device_stats* (*get_stats)(struct net_device *dev);
 	struct iw_statistics*	(*get_wireless_stats)(struct net_device *dev);
 
+	/* List of functions to handle Wireless Extensions (instead of ioctl).
+	 * See <net/iw_handler.h> for details. Jean II */
+	struct iw_handler_def *	wireless_handlers;
+
+	struct ethtool_ops *ethtool_ops;
+
 	/*
 	 * This marks the end of the "visible" part of the structure. All
 	 * fields hereafter are internal to the system, and may change at
@@ -284,6 +311,11 @@ struct net_device
 
 	unsigned short		flags;	/* interface flags (a la BSD)	*/
 	unsigned short		gflags;
+        unsigned short          priv_flags; /* Like 'flags' but invisible to userspace. */
+        unsigned short          unused_alignment_fixer; /* Because we need priv_flags,
+                                                         * and we want to be 32-bit aligned.
+                                                         */
+
 	unsigned		mtu;	/* interface MTU value		*/
 	unsigned short		type;	/* interface hardware type	*/
 	unsigned short		hard_header_len;	/* hardware hdr length	*/
@@ -295,7 +327,6 @@ struct net_device
 
 	/* Interface address info. */
 	unsigned char		broadcast[MAX_ADDR_LEN];	/* hw bcast add	*/
-	unsigned char		pad;		/* make dev_addr aligned to 8 bytes */
 	unsigned char		dev_addr[MAX_ADDR_LEN];	/* hw address	*/
 	unsigned char		addr_len;	/* hardware address length	*/
 
@@ -315,10 +346,14 @@ struct net_device
 	void                    *ip6_ptr;       /* IPv6 specific data */
 	void			*ec_ptr;	/* Econet specific data	*/
 
+	struct list_head	poll_list;	/* Link to poll list	*/
+	int			quota;
+	int			weight;
+
 	struct Qdisc		*qdisc;
 	struct Qdisc		*qdisc_sleeping;
-	struct Qdisc		*qdisc_list;
 	struct Qdisc		*qdisc_ingress;
+	struct list_head	qdisc_list;
 	unsigned long		tx_queue_len;	/* Max frames per queue allowed */
 
 	/* hard_start_xmit synchronizer */
@@ -342,7 +377,11 @@ struct net_device
 #define NETIF_F_HW_CSUM		8	/* Can checksum all the packets. */
 #define NETIF_F_DYNALLOC	16	/* Self-dectructable device. */
 #define NETIF_F_HIGHDMA		32	/* Can DMA to high memory. */
-#define NETIF_F_FRAGLIST	1	/* Scatter/gather IO. */
+#define NETIF_F_FRAGLIST	64	/* Scatter/gather IO. */
+#define NETIF_F_HW_VLAN_TX	128	/* Transmit VLAN hw acceleration */
+#define NETIF_F_HW_VLAN_RX	256	/* Receive VLAN hw acceleration */
+#define NETIF_F_HW_VLAN_FILTER	512	/* Receive filtering on VLAN */
+#define NETIF_F_VLAN_CHALLENGED	1024	/* Device cannot handle VLAN packets */
 
 	/* Called after device is detached from network. */
 	void			(*uninit)(struct net_device *dev);
@@ -354,6 +393,8 @@ struct net_device
 	int			(*stop)(struct net_device *dev);
 	int			(*hard_start_xmit) (struct sk_buff *skb,
 						    struct net_device *dev);
+#define HAVE_NETDEV_POLL
+	int			(*poll) (struct net_device *dev, int *quota);
 	int			(*hard_header) (struct sk_buff *skb,
 						struct net_device *dev,
 						unsigned short type,
@@ -384,6 +425,13 @@ struct net_device
 #define HAVE_TX_TIMEOUT
 	void			(*tx_timeout) (struct net_device *dev);
 
+	void			(*vlan_rx_register)(struct net_device *dev,
+						    struct vlan_group *grp);
+	void			(*vlan_rx_add_vid)(struct net_device *dev,
+						   unsigned short vid);
+	void			(*vlan_rx_kill_vid)(struct net_device *dev,
+						    unsigned short vid);
+
 	int			(*hard_header_parse)(struct sk_buff *skb,
 						     unsigned char *haddr);
 	int			(*neigh_setup)(struct net_device *dev, struct neigh_parms *);
@@ -407,6 +455,8 @@ struct net_device
 #endif /* CONFIG_NET_DIVERT */
 };
 
+/* 2.6 compatibility */
+#define SET_NETDEV_DEV(net, pdev) do { } while (0)
 
 struct packet_type 
 {
@@ -418,6 +468,10 @@ struct packet_type
 	struct packet_type	*next;
 };
 
+static inline void *netdev_priv(struct net_device *dev)
+{
+	return dev->priv;
+}
 
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
@@ -432,6 +486,10 @@ extern struct net_device    *dev_getbyhwaddr(unsigned short type, char *hwaddr);
 extern void		dev_add_pack(struct packet_type *pt);
 extern void		dev_remove_pack(struct packet_type *pt);
 extern int		dev_get(const char *name);
+extern struct net_device	*dev_get_by_flags(unsigned short flags,
+					unsigned short mask);
+extern struct net_device	*__dev_get_by_flags(unsigned short flags,
+					unsigned short mask);
 extern struct net_device	*dev_get_by_name(const char *name);
 extern struct net_device	*__dev_get_by_name(const char *name);
 extern struct net_device	*dev_alloc(const char *name, int *err);
@@ -466,9 +524,12 @@ struct softnet_data
 	int			cng_level;
 	int			avg_blog;
 	struct sk_buff_head	input_pkt_queue;
+	struct list_head	poll_list;
 	struct net_device	*output_queue;
 	struct sk_buff		*completion_queue;
-} __attribute__((__aligned__(SMP_CACHE_BYTES)));
+
+	struct net_device	blog_dev;	/* Sorry. 8) */
+} ____cacheline_aligned;
 
 
 extern struct softnet_data softnet_data[NR_CPUS];
@@ -484,7 +545,7 @@ static inline void __netif_schedule(struct net_device *dev)
 		local_irq_save(flags);
 		dev->next_sched = softnet_data[cpu].output_queue;
 		softnet_data[cpu].output_queue = dev;
-		__cpu_raise_softirq(cpu, NET_TX_SOFTIRQ);
+		cpu_raise_softirq(cpu, NET_TX_SOFTIRQ);
 		local_irq_restore(flags);
 	}
 }
@@ -521,6 +582,7 @@ static inline int netif_running(struct net_device *dev)
 	return test_bit(__LINK_STATE_START, &dev->state);
 }
 
+
 /* Use this variant when it is known for sure that it
  * is executing from interrupt context.
  */
@@ -533,7 +595,7 @@ static inline void dev_kfree_skb_irq(struct sk_buff *skb)
 		local_irq_save(flags);
 		skb->next = softnet_data[cpu].completion_queue;
 		softnet_data[cpu].completion_queue = skb;
-		__cpu_raise_softirq(cpu, NET_TX_SOFTIRQ);
+		cpu_raise_softirq(cpu, NET_TX_SOFTIRQ);
 		local_irq_restore(flags);
 	}
 }
@@ -549,10 +611,12 @@ static inline void dev_kfree_skb_any(struct sk_buff *skb)
 		dev_kfree_skb(skb);
 }
 
-extern void		net_call_rx_atomic(void (*fn)(void));
 #define HAVE_NETIF_RX 1
 extern int		netif_rx(struct sk_buff *skb);
+#define HAVE_NETIF_RECEIVE_SKB 1
+extern int		netif_receive_skb(struct sk_buff *skb);
 extern int		dev_ioctl(unsigned int cmd, void *);
+extern int		dev_ethtool(struct ifreq *);
 extern int		dev_change_flags(struct net_device *, unsigned);
 extern void		dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev);
 
@@ -560,9 +624,20 @@ extern void		dev_init(void);
 
 extern int		netdev_nit;
 
+/* Post buffer to the network code from _non interrupt_ context.
+ * see net/core/dev.c for netif_rx description.
+ */
+static inline int netif_rx_ni(struct sk_buff *skb)
+{
+       int err = netif_rx(skb);
+       if (softirq_pending(smp_processor_id()))
+               do_softirq();
+       return err;
+}
+
 static inline void dev_init_buffers(struct net_device *dev)
 {
-	/* DO NOTHING */
+	/* WILL BE REMOVED IN 2.5.0 */
 }
 
 extern int netdev_finish_unregister(struct net_device *dev);
@@ -623,6 +698,161 @@ static inline void netif_device_attach(struct net_device *dev)
 	}
 }
 
+/*
+ * Network interface message level settings
+ */
+#define HAVE_NETIF_MSG 1
+
+enum {
+	NETIF_MSG_DRV		= 0x0001,
+	NETIF_MSG_PROBE		= 0x0002,
+	NETIF_MSG_LINK		= 0x0004,
+	NETIF_MSG_TIMER		= 0x0008,
+	NETIF_MSG_IFDOWN	= 0x0010,
+	NETIF_MSG_IFUP		= 0x0020,
+	NETIF_MSG_RX_ERR	= 0x0040,
+	NETIF_MSG_TX_ERR	= 0x0080,
+	NETIF_MSG_TX_QUEUED	= 0x0100,
+	NETIF_MSG_INTR		= 0x0200,
+	NETIF_MSG_TX_DONE	= 0x0400,
+	NETIF_MSG_RX_STATUS	= 0x0800,
+	NETIF_MSG_PKTDATA	= 0x1000,
+	NETIF_MSG_HW		= 0x2000,
+	NETIF_MSG_WOL		= 0x4000,
+};
+
+#define netif_msg_drv(p)	((p)->msg_enable & NETIF_MSG_DRV)
+#define netif_msg_probe(p)	((p)->msg_enable & NETIF_MSG_PROBE)
+#define netif_msg_link(p)	((p)->msg_enable & NETIF_MSG_LINK)
+#define netif_msg_timer(p)	((p)->msg_enable & NETIF_MSG_TIMER)
+#define netif_msg_ifdown(p)	((p)->msg_enable & NETIF_MSG_IFDOWN)
+#define netif_msg_ifup(p)	((p)->msg_enable & NETIF_MSG_IFUP)
+#define netif_msg_rx_err(p)	((p)->msg_enable & NETIF_MSG_RX_ERR)
+#define netif_msg_tx_err(p)	((p)->msg_enable & NETIF_MSG_TX_ERR)
+#define netif_msg_tx_queued(p)	((p)->msg_enable & NETIF_MSG_TX_QUEUED)
+#define netif_msg_intr(p)	((p)->msg_enable & NETIF_MSG_INTR)
+#define netif_msg_tx_done(p)	((p)->msg_enable & NETIF_MSG_TX_DONE)
+#define netif_msg_rx_status(p)	((p)->msg_enable & NETIF_MSG_RX_STATUS)
+#define netif_msg_pktdata(p)	((p)->msg_enable & NETIF_MSG_PKTDATA)
+#define netif_msg_hw(p)		((p)->msg_enable & NETIF_MSG_HW)
+#define netif_msg_wol(p)	((p)->msg_enable & NETIF_MSG_WOL)
+
+static inline u32 netif_msg_init(int debug_value, int default_msg_enable_bits)
+{
+	/* use default */
+	if (debug_value < 0 || debug_value >= (sizeof(u32) * 8))
+		return default_msg_enable_bits;
+	if (debug_value == 0)	/* no output */
+		return 0;
+	/* set low N bits */
+	return (1 << debug_value) - 1;
+}
+
+/* Schedule rx intr now? */
+
+static inline int netif_rx_schedule_prep(struct net_device *dev)
+{
+	return netif_running(dev) &&
+		!test_and_set_bit(__LINK_STATE_RX_SCHED, &dev->state);
+}
+
+/* Add interface to tail of rx poll list. This assumes that _prep has
+ * already been called and returned 1.
+ */
+
+static inline void __netif_rx_schedule(struct net_device *dev)
+{
+	unsigned long flags;
+	int cpu = smp_processor_id();
+
+	local_irq_save(flags);
+	dev_hold(dev);
+	list_add_tail(&dev->poll_list, &softnet_data[cpu].poll_list);
+	if (dev->quota < 0)
+		dev->quota += dev->weight;
+	else
+		dev->quota = dev->weight;
+	__cpu_raise_softirq(cpu, NET_RX_SOFTIRQ);
+	local_irq_restore(flags);
+}
+
+/* Try to reschedule poll. Called by irq handler. */
+
+static inline void netif_rx_schedule(struct net_device *dev)
+{
+	if (netif_rx_schedule_prep(dev))
+		__netif_rx_schedule(dev);
+}
+
+/* Try to reschedule poll. Called by dev->poll() after netif_rx_complete().
+ * Do not inline this?
+ */
+static inline int netif_rx_reschedule(struct net_device *dev, int undo)
+{
+	if (netif_rx_schedule_prep(dev)) {
+		unsigned long flags;
+		int cpu = smp_processor_id();
+
+		dev->quota += undo;
+
+		local_irq_save(flags);
+		list_add_tail(&dev->poll_list, &softnet_data[cpu].poll_list);
+		__cpu_raise_softirq(cpu, NET_RX_SOFTIRQ);
+		local_irq_restore(flags);
+		return 1;
+	}
+	return 0;
+}
+
+/* Remove interface from poll list: it must be in the poll list
+ * on current cpu. This primitive is called by dev->poll(), when
+ * it completes the work. The device cannot be out of poll list at this
+ * moment, it is BUG().
+ */
+static inline void netif_rx_complete(struct net_device *dev)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
+	list_del(&dev->poll_list);
+	smp_mb__before_clear_bit();
+	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
+	local_irq_restore(flags);
+}
+
+static inline void netif_poll_disable(struct net_device *dev)
+{
+	while (test_and_set_bit(__LINK_STATE_RX_SCHED, &dev->state)) {
+		/* No hurry. */
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
+	}
+}
+
+static inline void netif_poll_enable(struct net_device *dev)
+{
+	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
+}
+
+/* same as netif_rx_complete, except that local_irq_save(flags)
+ * has already been issued
+ */
+static inline void __netif_rx_complete(struct net_device *dev)
+{
+	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
+	list_del(&dev->poll_list);
+	smp_mb__before_clear_bit();
+	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
+}
+
+static inline void netif_tx_disable(struct net_device *dev)
+{
+	spin_lock_bh(&dev->xmit_lock);
+	netif_stop_queue(dev);
+	spin_unlock_bh(&dev->xmit_lock);
+}
+
 /* These functions live elsewhere (drivers/net/net_init.c, but related) */
 
 extern void		ether_setup(struct net_device *dev);
@@ -630,14 +860,11 @@ extern void		fddi_setup(struct net_device *dev);
 extern void		tr_setup(struct net_device *dev);
 extern void		fc_setup(struct net_device *dev);
 extern void		fc_freedev(struct net_device *dev);
-extern int		ether_config(struct net_device *dev, struct ifmap *map);
 /* Support for loadable net-drivers */
+extern struct net_device *alloc_netdev(int sizeof_priv, const char *name,
+				       void (*setup)(struct net_device *));
 extern int		register_netdev(struct net_device *dev);
 extern void		unregister_netdev(struct net_device *dev);
-extern int		register_trdev(struct net_device *dev);
-extern void		unregister_trdev(struct net_device *dev);
-extern int		register_fcdev(struct net_device *dev);
-extern void		unregister_fcdev(struct net_device *dev);
 /* Functions used for multicast support */
 extern void		dev_mc_upload(struct net_device *dev);
 extern int 		dev_mc_delete(struct net_device *dev, void *addr, int alen, int all);
@@ -652,15 +879,21 @@ extern void		dev_mcast_init(void);
 extern int		netdev_register_fc(struct net_device *dev, void (*stimul)(struct net_device *dev));
 extern void		netdev_unregister_fc(int bit);
 extern int		netdev_max_backlog;
+extern int		weight_p;
 extern unsigned long	netdev_fc_xoff;
 extern atomic_t netdev_dropping;
 extern int		netdev_set_master(struct net_device *dev, struct net_device *master);
+extern struct sk_buff * skb_checksum_help(struct sk_buff *skb);
 #ifdef CONFIG_NET_FASTROUTE
 extern int		netdev_fastroute;
 extern int		netdev_fastroute_obstacles;
 extern void		dev_clear_fastroute(struct net_device *dev);
 #endif
 
+static inline void free_netdev(struct net_device *dev)
+{
+	kfree(dev);
+}
 
 #endif /* __KERNEL__ */
 

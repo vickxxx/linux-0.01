@@ -54,9 +54,21 @@ struct smb_sb_info {
 	   to put it on the stack. This points to temp_buf space. */
 	char *name_buf;
 
-	int (*convert)(char *, int, const char *, int,
-		       struct nls_table *, struct nls_table *);
+	struct smb_ops *ops;
 };
+
+
+static inline void
+smb_lock_server(struct smb_sb_info *server)
+{
+	down(&(server->sem));
+}
+
+static inline void
+smb_unlock_server(struct smb_sb_info *server)
+{
+	up(&(server->sem));
+}
 
 #endif /* __KERNEL__ */
 

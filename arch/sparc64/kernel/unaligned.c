@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.20 2000/04/29 08:05:21 anton Exp $
+/* $Id: unaligned.c,v 1.23 2001/04/09 04:29:03 davem Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -12,6 +12,7 @@
 #include <linux/mm.h>
 #include <asm/asi.h>
 #include <asm/ptrace.h>
+#include <asm/pstate.h>
 #include <asm/processor.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -148,8 +149,8 @@ static unsigned long *fetch_reg_addr(unsigned int reg, struct pt_regs *regs)
 	}
 }
 
-static inline unsigned long compute_effective_address(struct pt_regs *regs,
-						      unsigned int insn, unsigned int rd)
+unsigned long compute_effective_address(struct pt_regs *regs,
+					unsigned int insn, unsigned int rd)
 {
 	unsigned int rs1 = (insn >> 14) & 0x1f;
 	unsigned int rs2 = insn & 0x1f;
@@ -165,7 +166,7 @@ static inline unsigned long compute_effective_address(struct pt_regs *regs,
 }
 
 /* This is just to make gcc think die_if_kernel does return... */
-static void unaligned_panic(char *str, struct pt_regs *regs)
+static void __attribute_used__ unaligned_panic(char *str, struct pt_regs *regs)
 {
 	die_if_kernel(str, regs);
 }
@@ -334,6 +335,10 @@ static inline void advance(struct pt_regs *regs)
 {
 	regs->tpc   = regs->tnpc;
 	regs->tnpc += 4;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 }
 
 static inline int floating_point_load_or_store_p(unsigned int insn)
@@ -372,6 +377,9 @@ void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 	regs->tpc = fixup;
 	regs->tnpc = regs->tpc + 4;
 	regs->u_regs [UREG_G2] = g2;
+
+	regs->tstate &= ~TSTATE_ASI;
+	regs->tstate |= (ASI_AIUS << 24UL);
 }
 
 asmlinkage void kernel_unaligned_trap(struct pt_regs *regs, unsigned int insn, unsigned long sfar, unsigned long sfsr)
@@ -471,7 +479,9 @@ int handle_popc(u32 insn, struct pt_regs *regs)
 
 extern void do_fpother(struct pt_regs *regs);
 extern void do_privact(struct pt_regs *regs);
-extern void data_access_exception(struct pt_regs *regs);
+extern void spitfire_data_access_exception(struct pt_regs *regs,
+					   unsigned long sfsr,
+					   unsigned long sfar);
 
 int handle_ldf_stq(u32 insn, struct pt_regs *regs)
 {
@@ -514,14 +524,14 @@ int handle_ldf_stq(u32 insn, struct pt_regs *regs)
 				break;
 			}
 		default:
-			data_access_exception(regs);
+			spitfire_data_access_exception(regs, 0, addr);
 			return 1;
 		}
 		if (put_user (first >> 32, (u32 *)addr) ||
 		    __put_user ((u32)first, (u32 *)(addr + 4)) ||
 		    __put_user (second >> 32, (u32 *)(addr + 8)) ||
 		    __put_user ((u32)second, (u32 *)(addr + 12))) {
-		    	data_access_exception(regs);
+		    	spitfire_data_access_exception(regs, 0, addr);
 		    	return 1;
 		}
 	} else {
@@ -534,7 +544,7 @@ int handle_ldf_stq(u32 insn, struct pt_regs *regs)
 			do_privact(regs);
 			return 1;
 		} else if (asi > ASI_SNFL) {
-			data_access_exception(regs);
+			spitfire_data_access_exception(regs, 0, addr);
 			return 1;
 		}
 		switch (insn & 0x180000) {
@@ -551,7 +561,7 @@ int handle_ldf_stq(u32 insn, struct pt_regs *regs)
 				err |= __get_user (data[i], (u32 *)(addr + 4*i));
 		}
 		if (err && !(asi & 0x2 /* NF */)) {
-			data_access_exception(regs);
+			spitfire_data_access_exception(regs, 0, addr);
 			return 1;
 		}
 		if (asi & 0x8) /* Little */ {
@@ -654,7 +664,7 @@ void handle_lddfmna(struct pt_regs *regs, unsigned long sfar, unsigned long sfsr
 		*(u64 *)(f->regs + freg) = value;
 		current->thread.fpsaved[0] |= flag;
 	} else {
-daex:		data_access_exception(regs);
+daex:		spitfire_data_access_exception(regs, sfsr, sfar);
 		return;
 	}
 	advance(regs);
@@ -698,7 +708,7 @@ void handle_stdfmna(struct pt_regs *regs, unsigned long sfar, unsigned long sfsr
 		    __put_user ((u32)value, (u32 *)(sfar + 4)))
 			goto daex;
 	} else {
-daex:		data_access_exception(regs);
+daex:		spitfire_data_access_exception(regs, sfsr, sfar);
 		return;
 	}
 	advance(regs);

@@ -61,6 +61,8 @@
 
 #define BITS2FREQ(x)	((x) * FREQ_STEP - FREQ_IF)
 
+static int radio_nr = -1;
+MODULE_PARM(radio_nr, "i");
 
 
 static int radio_open(struct video_device *, int);
@@ -69,6 +71,7 @@ static void radio_close(struct video_device *);
 
 static struct video_device maestro_radio=
 {
+	owner:		THIS_MODULE,
 	name:		"Maestro radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_SF16MI,
@@ -282,14 +285,12 @@ static int radio_open(struct video_device *dev, int flags)
 	if(users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void radio_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -297,6 +298,7 @@ inline static __u16 radio_install(struct pci_dev *pcidev);
 
 MODULE_AUTHOR("Adam Tlalka, atlka@pg.gda.pl");
 MODULE_DESCRIPTION("Radio driver for the Maestro PCI sound card radio.");
+MODULE_LICENSE("GPL");
 
 EXPORT_NO_SYMBOLS;
 
@@ -304,30 +306,6 @@ void __exit maestro_radio_exit(void)
 {
 	video_unregister_device(&maestro_radio);
 }
-
-int __init maestro_radio_init(void)
-{
-	register __u16 found=0;
-	struct pci_dev *pcidev = NULL;
-	if(!pci_present())
-		return -ENODEV;
-	while(!found && (pcidev = pci_find_device(PCI_VENDOR_ESS, 
-						  PCI_DEVICE_ID_ESS_ESS1968,
-						  pcidev)))
-		found |= radio_install(pcidev);
-	while(!found && (pcidev = pci_find_device(PCI_VENDOR_ESS,
-						  PCI_DEVICE_ID_ESS_ESS1978, 
-						  pcidev)))
-		found |= radio_install(pcidev);
-	if(!found) {
-		printk(KERN_INFO "radio-maestro: no devices found.\n");
-		return -ENODEV;
-	}
-	return 0;
-}
-
-module_init(maestro_radio_init);
-module_exit(maestro_radio_exit);
 
 inline static __u16 radio_power_on(struct radio_device *dev)
 {
@@ -360,7 +338,7 @@ inline static __u16 radio_install(struct pci_dev *pcidev)
 	init_MUTEX(&radio_unit.lock);
 	
 	if(radio_power_on(&radio_unit)) {
-		if(video_register_device(&maestro_radio, VFL_TYPE_RADIO)==-1) {
+		if(video_register_device(&maestro_radio, VFL_TYPE_RADIO, radio_nr)==-1) {
 			printk("radio-maestro: can't register device!");
 			return 0;
 		}
@@ -375,4 +353,28 @@ inline static __u16 radio_install(struct pci_dev *pcidev)
 	} else
 		return 0;   
 }
+
+int __init maestro_radio_init(void)
+{
+	register __u16 found=0;
+	struct pci_dev *pcidev = NULL;
+	if(!pci_present())
+		return -ENODEV;
+	while(!found && (pcidev = pci_find_device(PCI_VENDOR_ESS, 
+						  PCI_DEVICE_ID_ESS_ESS1968,
+						  pcidev)))
+		found |= radio_install(pcidev);
+	while(!found && (pcidev = pci_find_device(PCI_VENDOR_ESS,
+						  PCI_DEVICE_ID_ESS_ESS1978, 
+						  pcidev)))
+		found |= radio_install(pcidev);
+	if(!found) {
+		printk(KERN_INFO "radio-maestro: no devices found.\n");
+		return -ENODEV;
+	}
+	return 0;
+}
+
+module_init(maestro_radio_init);
+module_exit(maestro_radio_exit);
 

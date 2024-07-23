@@ -4,7 +4,7 @@
  * Supports CPiA based parallel port Video Camera's.
  *
  * Copyright (C) 1999        Jochen Scharrlach <Jochen.Scharrlach@schwaben.de>
- * Copyright (C) 1999, 2000  Johannes Erdfelt <jerdfelt@valinux.com>
+ * Copyright (C) 1999, 2000  Johannes Erdfelt <johannes@erdfelt.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,11 +21,13 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+/* define _CPIA_DEBUG_ for verbose debug output (see cpia.h) */
+/* #define _CPIA_DEBUG_  1 */  
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/wait.h>
-#include <linux/sched.h>
 #include <linux/list.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
@@ -46,7 +48,7 @@
 
 struct cpia_sbuf {
 	char *data;
-	urb_t *urb;
+	struct urb *urb;
 };
 
 #define FRAMEBUF_LEN (CPIA_MAX_FRAME_SIZE+100)
@@ -100,10 +102,12 @@ static struct cpia_camera_ops cpia_usb_ops = {
 	cpia_usb_streamStop,
 	cpia_usb_streamRead,
 	cpia_usb_close,
-	0
+	0,
+	THIS_MODULE
 };
 
-static struct cam_data *cam_list;
+static LIST_HEAD(cam_list);
+static spinlock_t cam_list_lock_usb;
 
 static void cpia_usb_complete(struct urb *urb)
 {
@@ -167,7 +171,7 @@ static void cpia_usb_complete(struct urb *urb)
 static int cpia_usb_open(void *privdata)
 {
 	struct usb_cpia *ucpia = (struct usb_cpia *) privdata;
-	urb_t *urb;
+	struct urb *urb;
 	int ret, retval = 0, fx, err;
   
 	if (!ucpia)
@@ -265,14 +269,16 @@ static int cpia_usb_open(void *privdata)
 
 error_urb1:		/* free urb 1 */
 	usb_free_urb(ucpia->sbuf[1].urb);
-
+	ucpia->sbuf[1].urb = NULL;
 error_urb0:		/* free urb 0 */
 	usb_free_urb(ucpia->sbuf[0].urb);
-
+	ucpia->sbuf[0].urb = NULL;
 error_1:
 	kfree (ucpia->sbuf[1].data);
+	ucpia->sbuf[1].data = NULL;
 error_0:
 	kfree (ucpia->sbuf[0].data);
+	ucpia->sbuf[0].data = NULL;
 	
 	return retval;
 }
@@ -453,12 +459,14 @@ static int cpia_usb_close(void *privdata)
 {
 	struct usb_cpia *ucpia = (struct usb_cpia *) privdata;
 
+	if(!ucpia)
+		return -ENODEV;
+
 	ucpia->open = 0;
 
-	cpia_usb_free_resources(ucpia, 1);
-
-	if (!ucpia->present)
-		kfree(ucpia);
+	/* ucpia->present = 0 protects against trying to reset the
+	 * alt setting if camera is physically disconnected while open */
+	cpia_usb_free_resources(ucpia, ucpia->present);
 
 	return 0;
 }
@@ -536,7 +544,9 @@ static void *cpia_probe(struct usb_device *udev, unsigned int ifnum,
 		goto fail_all;
 	}
 
-	ADD_TO_LIST(cam_list, cam);
+	spin_lock( &cam_list_lock_usb );
+	list_add( &cam->cam_data_list, &cam_list );
+	spin_unlock( &cam_list_lock_usb );
 
 	return cam;
 
@@ -550,6 +560,7 @@ fail_alloc_1:
 	vfree(ucpia->buffers[0]);
 	ucpia->buffers[0] = NULL;
 fail_alloc_0:
+	kfree(ucpia);
 
 	return NULL;
 }
@@ -558,10 +569,13 @@ static void cpia_disconnect(struct usb_device *dev, void *ptr);
 
 static struct usb_device_id cpia_id_table [] = {
 	{ USB_DEVICE(0x0553, 0x0002) },
+	{ USB_DEVICE(0x0813, 0x0001) },
 	{ }					/* Terminating entry */
 };
 
 MODULE_DEVICE_TABLE (usb, cpia_id_table);
+MODULE_LICENSE("GPL");
+
 
 static struct usb_driver cpia_driver = {
 	name:		"cpia",
@@ -570,71 +584,56 @@ static struct usb_driver cpia_driver = {
 	id_table:	cpia_id_table,
 };
 
-/* don't use dev, it may be NULL! (see usb_cpia_cleanup) */
-/* _disconnect from usb_cpia_cleanup is not necessary since usb_deregister */
-/* will do it for us as well as passing a udev structure - jerdfelt */
 static void cpia_disconnect(struct usb_device *udev, void *ptr)
 {
 	struct cam_data *cam = (struct cam_data *) ptr;
 	struct usb_cpia *ucpia = (struct usb_cpia *) cam->lowlevel_data;
   
-	REMOVE_FROM_LIST(cam);
-
-	/* Don't even try to reset the altsetting if we're disconnected */
-	cpia_usb_free_resources(ucpia, 0);
-
+	spin_lock( &cam_list_lock_usb );
+	list_del(&cam->cam_data_list);
+	spin_unlock( &cam_list_lock_usb );
+	
 	ucpia->present = 0;
-
 	cpia_unregister_camera(cam);
+	if(ucpia->open)
+		cpia_usb_close(cam->lowlevel_data);
 
 	ucpia->curbuff->status = FRAME_ERROR;
-
 	if (waitqueue_active(&ucpia->wq_stream))
 		wake_up_interruptible(&ucpia->wq_stream);
-
 	usb_driver_release_interface(&cpia_driver,
 				     &udev->actconfig->interface[0]);
-
 	ucpia->curbuff = ucpia->workbuff = NULL;
-
 	if (ucpia->buffers[2]) {
 		vfree(ucpia->buffers[2]);
 		ucpia->buffers[2] = NULL;
 	}
-
 	if (ucpia->buffers[1]) {
 		vfree(ucpia->buffers[1]);
 		ucpia->buffers[1] = NULL;
 	}
-
 	if (ucpia->buffers[0]) {
 		vfree(ucpia->buffers[0]);
 		ucpia->buffers[0] = NULL;
 	}
 
-	if (!ucpia->open)
-		kfree(ucpia);
+	cam->lowlevel_data = NULL;
+	kfree(ucpia);
 }
 
 static int __init usb_cpia_init(void)
 {
-	cam_list = NULL;
+	printk(KERN_INFO "%s v%d.%d.%d\n",ABOUT, 
+	       CPIA_USB_MAJ_VER,CPIA_USB_MIN_VER,CPIA_USB_PATCH_VER);
 
+	spin_lock_init(&cam_list_lock_usb);
 	return usb_register(&cpia_driver);
 }
 
 static void __exit usb_cpia_cleanup(void)
 {
-/*
-	struct cam_data *cam;
-
-	while ((cam = cam_list) != NULL)
-		cpia_disconnect(NULL, cam);
-*/
-
 	usb_deregister(&cpia_driver);
 }
-
 
 module_init (usb_cpia_init);
 module_exit (usb_cpia_cleanup);

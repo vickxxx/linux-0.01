@@ -13,62 +13,9 @@
  *  Note:  there is a StrongARM bug in the STMIA rn, {regs}^ instruction that causes
  *  it to save wrong values...  Be aware!
  */
-#include <linux/config.h> /* for CONFIG_ARCH_xxxx */
-#include <linux/linkage.h>
+#include <linux/config.h>
+#include "entry-header.S"
 
-#include <asm/assembler.h>
-#include <asm/errno.h>
-#include <asm/hardware.h>
-#include <asm/arch/irqs.h>
-#include <asm/proc-fns.h>
-
-#include "../lib/constants.h"
-
-#ifndef MODE_SVC
-#define MODE_SVC 0x13
-#endif
-
-		.macro	zero_fp
-#ifdef CONFIG_FRAME_POINTER
-		mov	fp, #0
-#endif
-		.endm
-
-		.text
-
-@ Bad Abort numbers
-@ -----------------
-@
-#define BAD_PREFETCH	0
-#define BAD_DATA	1
-#define BAD_ADDREXCPTN	2
-#define BAD_IRQ		3
-#define BAD_UNDEFINSTR	4
-
-@
-@ Stack format (ensured by USER_* and SVC_*)
-@
-#define S_FRAME_SIZE	72
-#define S_OLD_R0	68
-#define S_PSR		64
-#define S_PC		60
-#define S_LR		56
-#define S_SP		52
-#define S_IP		48
-#define S_FP		44
-#define S_R10		40
-#define S_R9		36
-#define S_R8		32
-#define S_R7		28
-#define S_R6		24
-#define S_R5		20
-#define S_R4		16
-#define S_R3		12
-#define S_R2		8
-#define S_R1		4
-#define S_R0		0
-
-#define OFF_CR_ALIGNMENT(x)	cr_alignment - x
 
 #ifdef IOC_BASE
 /* IOC / IOMD based hardware */
@@ -89,41 +36,52 @@
 		.if	ioc_base_low
 		orr	r4, r4, #ioc_base_low
 		.endif
-		ldrb	\irqstat, [r4, #0x24]		@ get high priority first
-		adr	\base, irq_prio_h
+		ldrb	\irqstat, [r4, #IOMD_IRQREQB]	@ get high priority first
+		ldr	\base, =irq_prio_h
 		teq	\irqstat, #0
 #ifdef IOMD_BASE
-		ldreqb	\irqstat, [r4, #0x1f4]		@ get dma
-		adreq	\base, irq_prio_d
+		ldreqb	\irqstat, [r4, #IOMD_DMAREQ]	@ get dma
+		addeq	\base, \base, #256		@ irq_prio_h table size
+		teqeq	\irqstat, #0
+		bne	2406f
+#endif
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQA]	@ get low priority
+		addeq	\base, \base, #256		@ irq_prio_d table size
+		teqeq	\irqstat, #0
+#ifdef IOMD_IRQREQC
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQC]
+		addeq	\base, \base, #256		@ irq_prio_l table size
 		teqeq	\irqstat, #0
 #endif
-		ldreqb	\irqstat, [r4, #0x14]		@ get low priority
-		adreq	\base, irq_prio_l
-
-		teq	\irqstat, #0
-		ldrneb	\irqnr, [\base, \irqstat]	@ get IRQ number
+#ifdef IOMD_IRQREQD
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQD]
+		addeq	\base, \base, #256		@ irq_prio_lc table size
+		teqeq	\irqstat, #0
+#endif
+2406:		ldrneb	\irqnr, [\base, \irqstat]	@ get IRQ number
 		.endm
 
 /*
- * Interrupt table (incorporates priority)
+ * Interrupt table (incorporates priority).  Please note that we
+ * rely on the order of these tables (see above code).
  */
 		.macro	irq_prio_table
-irq_prio_l:	.byte	 0, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 4, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	12, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
 #ifdef IOMD_BASE
 irq_prio_d:	.byte	 0,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
@@ -142,25 +100,63 @@ irq_prio_d:	.byte	 0,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 #endif
-irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	12, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+irq_prio_l:	.byte	 0, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 4, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+#ifdef IOMD_IRQREQC
+irq_prio_lc:	.byte	24,24,25,24,26,26,26,26,27,27,27,27,27,27,27,27
+		.byte	28,24,25,24,26,26,26,26,27,27,27,27,27,27,27,27
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	30,30,30,30,30,30,30,30,27,27,27,27,27,27,27,27
+		.byte	30,30,30,30,30,30,30,30,27,27,27,27,27,27,27,27
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+#endif
+#ifdef IOMD_IRQREQD
+irq_prio_ld:	.byte	40,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
+		.byte	44,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	46,46,46,46,46,46,46,46,43,43,43,43,43,43,43,43
+		.byte	46,46,46,46,46,46,46,46,43,43,43,43,43,43,43,43
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+#endif
 		.endm
 
 #elif defined(CONFIG_ARCH_EBSA110)
+
+#define IRQ_STAT		0xff000000	/* read */
 
 		.macro	disable_fiq
 		.endm
@@ -191,11 +187,10 @@ irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
 
 		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
 		mov	r4, #0xe0000000
-		orr	r4, r4, #0x20
 
 		mov	\irqstat, #0x0C
-		strb	\irqstat, [r4]			@outb(0x0C, 0x20) /* Poll command */
-		ldrb	\irqnr, [r4]			@irq = inb(0x20) & 7
+		strb	\irqstat, [r4, #0x20]		@outb(0x0C, 0x20) /* Poll command */
+		ldrb	\irqnr, [r4, #0x20]		@irq = inb(0x20) & 7
 		and	\irqstat, \irqnr, #0x80
 		teq	\irqstat, #0
 		beq	43f
@@ -203,8 +198,8 @@ irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
 		teq	\irqnr, #2
 		bne	44f
 43:		mov	\irqstat, #0x0C
-		strb	\irqstat, [r4, #0x80]		@outb(0x0C, 0xA0) /* Poll command */
-		ldrb	\irqnr, [r4, #0x80]		@irq = (inb(0xA0) & 7) + 8
+		strb	\irqstat, [r4, #0xa0]		@outb(0x0C, 0xA0) /* Poll command */
+		ldrb	\irqnr, [r4, #0xa0]		@irq = (inb(0xA0) & 7) + 8
 		and	\irqstat, \irqnr, #0x80
 		teq	\irqstat, #0
 		beq	44f
@@ -409,6 +404,7 @@ ENTRY(soft_irq_mask)
 		.endm
 
 #elif defined(CONFIG_ARCH_L7200)
+#include <asm/hardware.h>
 	
 		.equ	irq_base_addr,	IO_BASE_2
 
@@ -457,7 +453,77 @@ ENTRY(soft_irq_mask)
 		.macro	irq_prio_table
 		.endm
 
-#elif defined(CONFIG_ARCH_P720T)
+#elif defined(CONFIG_ARCH_AT91RM9200)
+#include <asm/hardware.h>
+
+		.macro  disable_fiq
+		.endm
+
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\base, =(AT91C_VA_BASE_SYS)	@ base virtual address of SYS peripherals
+		ldr	\irqnr, [\base, #AIC_IVR]	@ read IRQ vector register: de-asserts nIRQ to processor (and clears interrupt)
+		ldr	\irqstat, [\base, #AIC_ISR]	@ read interrupt source number
+		teq	\irqstat, #0			@ ISR is 0 when no current interrupt, or spurious interrupt
+		streq   \tmp, [\base, #AIC_EOICR]	@ not going to be handled further, then ACK it now.
+		.endm
+
+		.macro  irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_MX1ADS)
+
+		.macro	disable_fiq
+		.endm
+#define AITC_NIVECSR   0x40
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\irqstat, =IO_ADDRESS(MX1ADS_AITC_BASE)
+		@ Load offset & priority of the highest priority
+		@ interrupt pending.
+		ldr	\irqnr, [\irqstat, #AITC_NIVECSR]
+		@ Shift off the priority leaving the offset or
+		@ "interrupt number"
+		mov	\irqnr, \irqnr, lsr #16
+ 		ldr	\irqstat, =1	@ dummy compare
+		ldr	\base, =0xFFFF		// invalid interrupt
+		cmp	\irqnr, \base
+		bne	1001f
+		ldr	\irqstat, =0
+1001:
+		tst	\irqstat, #1	@ to make the condition code = TRUE
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_OMAHA)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		
+		/* Read all interrupts pending... */
+		ldr	\irqnr, =IO_ADDRESS(PLAT_PERIPHERAL_BASE) + OMAHA_INTPND
+		ldr	\irqstat, [\irqnr]		/* INTPND */
+
+		/* All pending irqs are now in \irqstat */
+		mov	\irqnr, #0
+1001:		tst	\irqstat, #1
+		bne	1002f
+		add	\irqnr, \irqnr, #1
+		mov	\irqstat, \irqstat, lsr #1
+		cmp	\irqnr, #MAXIRQNUM
+		bcc	1001b
+1002:		/* EQ will be set if we reach MAXIRQNUM */
+
+		.endm
+
+		.macro	irq_prio_table
+		.endm    
+
+#elif defined(CONFIG_ARCH_CLPS711X)
+
+#include <asm/hardware/clps7111.h>
 
 		.macro	disable_fiq
 		.endm
@@ -500,76 +566,58 @@ ENTRY(soft_irq_mask)
 
 		.macro	irq_prio_table
 		.endm
+	
+#elif defined (CONFIG_ARCH_CAMELOT)
+#include <asm/arch/platform.h>
+#undef IRQ_MODE /* same name defined in asm/proc/ptrace.h */
+#include <asm/arch/int_ctrl00.h>
+	
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+	
+		ldr	\irqstat, =INT_ID(IO_ADDRESS(EXC_INT_CTRL00_BASE))
+		ldr	\irqnr,[\irqstat]		
+		cmp	\irqnr,#0
+		subne	\irqnr,\irqnr,#1
+
+	
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_ANAKIN)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	\base, #IO_BASE
+		mov	\irqstat, #INTERRUPT_CONTROLLER
+		ldr	\tmp, =anakin_irq_mask
+		ldr	\irqstat, [\base, \irqstat]
+		ldr	\tmp, [\tmp]
+		ands	\irqstat, \irqstat, \tmp
+		ldrne	\tmp, =anakin_active_irqs
+		strne	\irqstat, [\tmp]
+		movne	\irqnr, #IRQ_ANAKIN
+		.endm
+
+		.macro	irq_prio_table
+		.ltorg
+		.bss
+ENTRY(anakin_irq_mask)
+		.word	0
+ENTRY(anakin_active_irqs)
+		.space	4
+		.text
+		.endm
 
 #else
 #error Unknown architecture
 #endif
-
-/*============================================================================
- * For entry-common.S
- */
-
-		.macro	save_user_regs
-		sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - r12}			@ Calling r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^			@ Calling sp, lr
-		str	lr, [r8, #0]			@ Save calling PC
-		mrs	r6, spsr
-		str	r6, [r8, #4]			@ Save CPSR
-		str	r0, [r8, #8]			@ Save OLD_R0
-		.endm
-
-		.macro	restore_user_regs
-		ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
-		mov	ip, #I_BIT | MODE_SVC
-		msr	cpsr_c, ip			@ disable IRQs
-		msr	spsr, r0			@ save in spsr_svc
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		ldr	lr, [sp, #S_PC]			@ Get PC
-		add	sp, sp, #S_FRAME_SIZE
-		movs	pc, lr				@ return & move spsr_svc into cpsr
-		.endm
-
-		.macro	mask_pc, rd, rm
-		.endm
-
-		/* If we're optimising for StrongARM the resulting code won't 
-		   run on an ARM7 and we can save a couple of instructions.  
-									--pb */
-		.macro	arm700_bug_check, instr, temp
-#ifndef __ARM_ARCH_4__
-		and	\temp, \instr, #0x0f000000	@ check for SWI
-		teq	\temp, #0x0f000000
-		bne	.Larm700bug
-#endif
-		.endm
-
-		.macro	enable_irqs, temp
-		mrs	\temp, cpsr
-		bic	\temp, \temp, #I_BIT
-		msr	cpsr, \temp
-		.endm
-
-		.macro	get_current_task, rd
-		mov	\rd, sp, lsr #13
-		mov	\rd, \rd, lsl #13
-		.endm
-
-		/*
-		 * Like adr, but force SVC mode (if required)
-		 */
-		.macro	adrsvc, cond, reg, label
-		adr\cond	\reg, \label
-		.endm
-
-		.macro	alignment_trap, rbase, rtemp, sym
-#ifdef CONFIG_ALIGNMENT_TRAP
-		ldr	\rtemp, [\rbase, #OFF_CR_ALIGNMENT(\sym)]
-		mcr	p15, 0, \rtemp, c1, c0
-#endif
-		.endm
 
 /*
  * Invalid mode handlers
@@ -605,16 +653,6 @@ __und_invalid:	sub	sp, sp, #S_FRAME_SIZE
 		and	r2, r6, #31			@ int mode
 		b	SYMBOL_NAME(bad_mode)
 
-#ifdef CONFIG_NWFPE
-		/* The FPE is always present */
-		.equ	fpe_not_present, 0
-#else
-wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
-		.word	0x0fef0fff
-		.word	0x0d0d0100			@ LDF [sp]/STF [sp]
-		.word	0x0d0b0100			@ LDF [fp]/STF [fp]
-		.word	0x0f0f0f00
-
 /* We get here if an undefined instruction happens and the floating
  * point emulator is not present.  If the offending instruction was
  * a WFS, we just perform a normal return as if we had emulated the
@@ -622,30 +660,7 @@ wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
  * to run so that the emulator module proper can be loaded. --philb
  */
 fpe_not_present:
-		adr	r10, wfs_mask_data
-		ldmia	r10, {r4, r5, r6, r7, r8}
-		ldr	r10, [sp, #S_PC]		@ Load PC
-		sub	r10, r10, #4
-		mask_pc	r10, r10
-		ldrt	r10, [r10]			@ get instruction
-		and	r5, r10, r5
-		teq	r5, r4				@ Is it WFS?
-		moveq	pc, r9
-		and	r5, r10, r8
-		teq	r5, r6				@ Is it LDF/STF on sp or fp?
-		teqne	r5, r7
-		movne	pc, lr
-		tst	r10, #0x00200000		@ Does it have WB
-		moveq	pc, r9
-		and	r4, r10, #255			@ get offset
-		and	r6, r10, #0x000f0000
-		tst	r10, #0x00800000		@ +/-
-		ldr	r5, [sp, r6, lsr #14]		@ Load reg
-		rsbeq	r4, r4, #0
-		add	r5, r5, r4, lsl #2
-		str	r5, [sp, r6, lsr #14]		@ Save reg
-		mov	pc, r9
-#endif
+		mov	pc, lr
 
 /*
  * SVC mode handlers
@@ -662,14 +677,14 @@ __dabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		mrs	r9, cpsr			@ Enable interrupts if they were
 		tst	r3, #I_BIT
 		biceq	r9, r9, #I_BIT			@ previously
-		mov	r0, r2
+		mov	r0, r2				@ *** remove once everyones in sync
 /*
  * This routine must not corrupt r9
  */
 #ifdef MULTI_CPU
-		ldr	r2, .LCprocfns
-		mov	lr, pc
-		ldr	pc, [r2]			@ call processor specific code
+		ldr	r4, .LCprocfns			@ pass r0, r3 to
+		mov	lr, pc				@ processor code
+		ldr	pc, [r4]			@ call processor specific code
 #else
 		bl	cpu_data_abort
 #endif
@@ -697,10 +712,12 @@ __irq_svc:	sub	sp, sp, #S_FRAME_SIZE
 		@ routine called with r0 = irq number, r1 = struct pt_regs *
 		@
 		adrsvc	ne, lr, 1b
-		bne	do_IRQ
+		bne	asm_do_IRQ
 		ldr	r0, [sp, #S_PSR]		@ irqs are already disabled
 		msr	spsr, r0
 		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+
+		.ltorg
 
 		.align	5
 __und_svc:	sub	sp, sp, #S_FRAME_SIZE
@@ -755,9 +772,6 @@ __pabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 .LCprocfns:	.word	SYMBOL_NAME(processor)
 #endif
 .LCfp:		.word	SYMBOL_NAME(fp_enter)
-#ifdef CONFIG_ALIGNMENT_TRAP
-.LCswi:		.word	SYMBOL_NAME(cr_alignment)
-#endif
 
 		irq_prio_table
 
@@ -767,24 +781,25 @@ __pabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		.align	5
 __dabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		stmia	sp, {r0 - r12}			@ save r0 - r12
-		ldr	r4, .LCabt
-		add	r3, sp, #S_PC
-		ldmia	r4, {r0 - r2}			@ Get USR pc, cpsr
-		stmia	r3, {r0 - r2}			@ Save USR pc, cpsr, old_r0
-		stmdb	r3, {sp, lr}^
-		alignment_trap r4, r7, __temp_abt
+		ldr	r7, .LCabt
+		add	r5, sp, #S_PC
+		ldmia	r7, {r2 - r4}			@ Get USR pc, cpsr
+		stmia	r5, {r2 - r4}			@ Save USR pc, cpsr, old_r0
+		stmdb	r5, {sp, lr}^
+		alignment_trap r7, r7, __temp_abt
 		zero_fp
+		mov	r0, r2				@ remove once everyones in sync
 #ifdef MULTI_CPU
-		ldr	r2, .LCprocfns
-		mov	lr, pc
-		ldr	pc, [r2]			@ call processor specific code
+		ldr	r4, .LCprocfns			@ pass r0, r3 to
+		mov	lr, pc				@ processor code
+		ldr	pc, [r4]			@ call processor specific code
 #else
 		bl	cpu_data_abort
 #endif
 		mov	r2, #MODE_SVC
 		msr	cpsr_c, r2			@ Enable interrupts
 		mov	r2, sp
-		adrsvc	al, lr, ret_from_sys_call
+		adrsvc	al, lr, ret_from_exception
 		b	SYMBOL_NAME(do_DataAbort)
 
 		.align	5
@@ -803,10 +818,12 @@ __irq_usr:	sub	sp, sp, #S_FRAME_SIZE
 		@
 		@ routine called with r0 = irq number, r1 = struct pt_regs *
 		@
-		bne	do_IRQ
-		mov	r4, #0
-		get_current_task r5
-		b	ret_with_reschedule
+		bne	asm_do_IRQ
+		mov	why, #0
+		get_current_task tsk
+		b	ret_to_user
+
+		.ltorg
 
 		.align	5
 __und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
@@ -818,7 +835,9 @@ __und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		stmdb	r8, {sp, lr}^			@ Save user sp, lr
 		alignment_trap r4, r7, __temp_und
 		zero_fp
-		adrsvc	al, r9, ret_from_sys_call	@ r9  = normal FP return
+		tst	r6, #T_BIT			@ Thumb mode
+		bne	fpundefinstr
+		adrsvc	al, r9, ret_from_exception	@ r9  = normal FP return
 		adrsvc	al, lr, fpundefinstr		@ lr  = undefined instr return
 
 call_fpe:	get_current_task r10
@@ -832,7 +851,7 @@ fpundefinstr:	mov	r0, #MODE_SVC
 		msr	cpsr_c, r0			@ Enable interrupts
 		mov	r0, lr
 		mov	r1, sp
-		adrsvc	al, lr, ret_from_sys_call
+		adrsvc	al, lr, ret_from_exception
 		b	SYMBOL_NAME(do_undefinstr)
 
 		.align	5
@@ -850,40 +869,20 @@ __pabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		mov	r0, r5				@ address (pc)
 		mov	r1, sp				@ regs
 		bl	SYMBOL_NAME(do_PrefetchAbort)	@ call abort handler
-		teq	r0, #0				@ Does this still apply???
-		bne	ret_from_sys_call		@ Return from exception
-#ifdef DEBUG_UNDEF
-		adr	r0, t
-		bl	SYMBOL_NAME(printk)
-#endif
-		mov	r0, r5
-		mov	r1, sp
-		and	r2, r6, #31
-		bl	SYMBOL_NAME(do_undefinstr)
-		ldr	lr, [sp, #S_PSR]		@ Get USR cpsr
-		msr	spsr, lr
-		ldmia	sp, {r0 - pc}^			@ Restore USR registers
+		/* fall through */
+/*
+ * This is the return code to user mode for abort handlers
+ */
+ENTRY(ret_from_exception)
+		disable_irq r1
+		mov	why, #0
+		get_current_task tsk
+		b	ret_to_user
 
-#ifdef DEBUG_UNDEF
-t:		.ascii "Prefetch -> undefined instruction\n\0"
-		.align
-#endif
-
-#include "entry-common.S"
-
+		.data
+ENTRY(fp_enter)
+		.word	fpe_not_present
 		.text
-
-#ifndef __ARM_ARCH_4__
-.Larm700bug:	ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
-		str	lr, [r8]
-		msr	spsr, r0
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		ldr	lr, [sp, #S_PC]			@ Get PC
-		add	sp, sp, #S_FRAME_SIZE
-		movs	pc, lr
-#endif
-
 /*
  * Register switch for ARMv3 and ARMv4 processors
  * r0 = previous, r1 = next, return previous.
@@ -926,7 +925,9 @@ vector_IRQ:	@
 		@
 		@ now branch to the relevent MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #I_BIT | MODE_SVC
 		msr	spsr_c, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
@@ -967,7 +968,9 @@ vector_data:	@
 		@
 		@ now branch to the relevent MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #I_BIT | MODE_SVC
 		msr	spsr_c, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
@@ -1009,7 +1012,9 @@ vector_prefetch:
 		@
 		@ now branch to the relevent MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #I_BIT | MODE_SVC
 		msr	spsr_c, r13			@ switch to SVC_32 mode
 
 		ands	lr, lr, #15
@@ -1050,7 +1055,9 @@ vector_undefinstr:
 		@
 		@ now branch to the relevent MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #I_BIT | MODE_SVC
 		msr	spsr_c, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
@@ -1128,7 +1135,6 @@ ENTRY(__trap_init)
 		stmfd	sp!, {r4 - r6, lr}
 
 		adr	r1, .LCvectors			@ set up the vectors
-		mov	r0, #0
 		ldmia	r1, {r1, r2, r3, r4, r5, r6, ip, lr}
 		stmia	r0, {r1, r2, r3, r4, r5, r6, ip, lr}
 

@@ -1,14 +1,17 @@
-/* $Id: elsa.c,v 2.26.6.1 2000/11/28 12:02:46 kai Exp $
+/* $Id: elsa.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * elsa.c     low level stuff for Elsa isdn cards
+ * low level stuff for Elsa isdn cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
  *
- * Thanks to    Elsa GmbH for documents and informations
+ * Thanks to    Elsa GmbH for documents and information
  *
  *              Klaus Lichtenwalder (Klaus.Lichtenwalder@WebForum.DE)
  *              for ELSA PCMCIA support
@@ -25,12 +28,13 @@
 #include "hscx.h"
 #include "isdnl1.h"
 #include <linux/pci.h>
+#include <linux/isapnp.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
 
 extern const char *CardType[];
 
-const char *Elsa_revision = "$Revision: 2.26.6.1 $";
+const char *Elsa_revision = "$Revision: 1.1.4.1 $";
 const char *Elsa_Types[] =
 {"None", "PC", "PCC-8", "PCC-16", "PCF", "PCF-Pro",
  "PCMCIA", "QS 1000", "QS 3000", "Microlink PCI", "QS 3000 PCI", 
@@ -590,13 +594,13 @@ check_arcofi(struct IsdnCardState *cs)
 		if (cs->subtyp==ELSA_QS1000) {
 			cs->subtyp = ELSA_QS3000;
 			printk(KERN_INFO
-				"Elsa: %s detected modem at 0x%x\n",
+				"Elsa: %s detected modem at 0x%lx\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base+8);
 			release_region(cs->hw.elsa.base, 8);
 			if (check_region(cs->hw.elsa.base, 16)) {
 				printk(KERN_WARNING
-				"HiSax: %s config port %x-%x already in use\n",
+				"HiSax: %s config port %lx-%lx already in use\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base + 8,
 				cs->hw.elsa.base + 16);
@@ -606,13 +610,13 @@ check_arcofi(struct IsdnCardState *cs)
 		} else if (cs->subtyp==ELSA_PCC16) {
 			cs->subtyp = ELSA_PCF;
 			printk(KERN_INFO
-				"Elsa: %s detected modem at 0x%x\n",
+				"Elsa: %s detected modem at 0x%lx\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base+8);
 			release_region(cs->hw.elsa.base, 8);
 			if (check_region(cs->hw.elsa.base, 16)) {
 				printk(KERN_WARNING
-				"HiSax: %s config port %x-%x already in use\n",
+				"HiSax: %s config port %lx-%lx already in use\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base + 8,
 				cs->hw.elsa.base + 16);
@@ -621,7 +625,7 @@ check_arcofi(struct IsdnCardState *cs)
 					"elsa isdn modem");
 		} else
 			printk(KERN_INFO
-				"Elsa: %s detected modem at 0x%x\n",
+				"Elsa: %s detected modem at 0x%lx\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base+8);
 		arcofi_fsm(cs, ARCOFI_START, &ARCOFI_XOP_0);
@@ -860,6 +864,21 @@ probe_elsa(struct IsdnCardState *cs)
 static 	struct pci_dev *dev_qs1000 __devinitdata = NULL;
 static 	struct pci_dev *dev_qs3000 __devinitdata = NULL;
 
+#ifdef __ISAPNP__
+static struct isapnp_device_id elsa_ids[] __initdata = {
+	{ ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0133),
+	  ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0133), 
+	  (unsigned long) "Elsa QS1000" },
+	{ ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0134),
+	  ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0134), 
+	  (unsigned long) "Elsa QS3000" },
+	{ 0, }
+};
+
+static struct isapnp_device_id *pdev = &elsa_ids[0];
+static struct pci_bus *pnp_c __devinitdata = NULL;
+#endif
+
 int __devinit
 setup_elsa(struct IsdnCard *card)
 {
@@ -874,6 +893,7 @@ setup_elsa(struct IsdnCard *card)
 	cs->hw.elsa.ctrl_reg = 0;
 	cs->hw.elsa.status = 0;
 	cs->hw.elsa.MFlag = 0;
+	cs->subtyp = 0;
 	if (cs->typ == ISDN_CTYPE_ELSA) {
 		cs->hw.elsa.base = card->para[0];
 		printk(KERN_INFO "Elsa: Microlink IO probing\n");
@@ -881,7 +901,7 @@ setup_elsa(struct IsdnCard *card)
 			if (!(cs->subtyp = probe_elsa_adr(cs->hw.elsa.base,
 							  cs->typ))) {
 				printk(KERN_WARNING
-				     "Elsa: no Elsa Microlink at 0x%x\n",
+				       "Elsa: no Elsa Microlink at %#lx\n",
 				       cs->hw.elsa.base);
 				return (0);
 			}
@@ -919,7 +939,7 @@ setup_elsa(struct IsdnCard *card)
 			if ((cs->subtyp == ELSA_PCFPRO) && (val = 'G'))
 				val = 'C';
 			printk(KERN_INFO
-			       "Elsa: %s found at 0x%x Rev.:%c IRQ %d\n",
+			       "Elsa: %s found at %#lx Rev.:%c IRQ %d\n",
 			       Elsa_Types[cs->subtyp],
 			       cs->hw.elsa.base,
 			       val, cs->irq);
@@ -935,9 +955,60 @@ setup_elsa(struct IsdnCard *card)
 			return (0);
 		}
 	} else if (cs->typ == ISDN_CTYPE_ELSA_PNP) {
-		cs->hw.elsa.base = card->para[1];
-		cs->irq = card->para[0];
-		cs->subtyp = ELSA_QS1000;
+#ifdef __ISAPNP__
+		if (!card->para[1] && isapnp_present()) {
+			struct pci_bus *pb;
+			struct pci_dev *pd;
+
+			while(pdev->card_vendor) {
+				if ((pb = isapnp_find_card(pdev->card_vendor,
+					pdev->card_device, pnp_c))) {
+					pnp_c = pb;
+					pd = NULL;
+					if ((pd = isapnp_find_dev(pnp_c,
+						pdev->vendor, pdev->function, pd))) {
+						printk(KERN_INFO "HiSax: %s detected\n",
+							(char *)pdev->driver_data);
+						pd->prepare(pd);
+						pd->deactivate(pd);
+						pd->activate(pd);
+						card->para[1] =
+							pd->resource[0].start;
+						card->para[0] =
+							pd->irq_resource[0].start;
+						if (!card->para[0] || !card->para[1]) {
+							printk(KERN_ERR "Elsa PnP:some resources are missing %ld/%lx\n",
+								card->para[0], card->para[1]);
+							pd->deactivate(pd);
+							return(0);
+						}
+						if (pdev->function == ISAPNP_FUNCTION(0x133))
+							cs->subtyp = ELSA_QS1000;
+						else
+							cs->subtyp = ELSA_QS3000;
+						break;
+					} else {
+						printk(KERN_ERR "Elsa PnP: PnP error card found, no device\n");
+						return(0);
+					}
+				}
+				pdev++;
+				pnp_c=NULL;
+			} 
+			if (!pdev->card_vendor) {
+				printk(KERN_INFO "Elsa PnP: no ISAPnP card found\n");
+				return(0);
+			}
+		}
+#endif
+		if (card->para[1] && card->para[0]) { 
+			cs->hw.elsa.base = card->para[1];
+			cs->irq = card->para[0];
+			if (!cs->subtyp)
+				cs->subtyp = ELSA_QS1000;
+		} else {
+			printk(KERN_ERR "Elsa PnP: no parameter\n");
+		}
 		cs->hw.elsa.cfg = cs->hw.elsa.base + ELSA_CONFIG;
 		cs->hw.elsa.ale = cs->hw.elsa.base + ELSA_ALE;
 		cs->hw.elsa.isac = cs->hw.elsa.base + ELSA_ISAC;
@@ -946,7 +1017,7 @@ setup_elsa(struct IsdnCard *card)
 		cs->hw.elsa.timer = cs->hw.elsa.base + ELSA_START_TIMER;
 		cs->hw.elsa.ctrl = cs->hw.elsa.base + ELSA_CONTROL;
 		printk(KERN_INFO
-		       "Elsa: %s defined at 0x%x IRQ %d\n",
+		       "Elsa: %s defined at %#lx IRQ %d\n",
 		       Elsa_Types[cs->subtyp],
 		       cs->hw.elsa.base,
 		       cs->irq);
@@ -970,7 +1041,7 @@ setup_elsa(struct IsdnCard *card)
 		cs->hw.elsa.trig = 0;
 		cs->hw.elsa.ctrl = 0;
 		printk(KERN_INFO
-		       "Elsa: %s defined at 0x%x IRQ %d\n",
+		       "Elsa: %s defined at %#lx IRQ %d\n",
 		       Elsa_Types[cs->subtyp],
 		       cs->hw.elsa.base,
 		       cs->irq);
@@ -1028,7 +1099,7 @@ setup_elsa(struct IsdnCard *card)
 		cs->hw.elsa.trig  = 0;
 		cs->irq_flags |= SA_SHIRQ;
 		printk(KERN_INFO
-		       "Elsa: %s defined at 0x%x/0x%x IRQ %d\n",
+		       "Elsa: %s defined at %#lx/0x%x IRQ %d\n",
 		       Elsa_Types[cs->subtyp],
 		       cs->hw.elsa.base,
 		       cs->hw.elsa.cfg,
@@ -1052,6 +1123,7 @@ setup_elsa(struct IsdnCard *card)
 			break;
 		case ELSA_PCFPRO:
 		case ELSA_PCF:
+		case ELSA_QS3000:
 		case ELSA_QS3000PCI:
 			bytecnt = 16;
 			break;
@@ -1068,7 +1140,7 @@ setup_elsa(struct IsdnCard *card)
 	   here, it would fail. */
 	if (cs->typ != ISDN_CTYPE_ELSA_PCMCIA && check_region(cs->hw.elsa.base, bytecnt)) {
 		printk(KERN_WARNING
-		       "HiSax: %s config port %x-%x already in use\n",
+		       "HiSax: %s config port %#lx-%#lx already in use\n",
 		       CardType[card->typ],
 		       cs->hw.elsa.base,
 		       cs->hw.elsa.base + bytecnt);

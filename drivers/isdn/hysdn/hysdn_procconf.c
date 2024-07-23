@@ -1,23 +1,13 @@
-/* $Id: hysdn_procconf.c,v 1.8 2000/11/13 22:51:47 kai Exp $
-
+/* $Id: hysdn_procconf.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * Linux driver for HYSDN cards, /proc/net filesystem dir and conf functions.
+ *
  * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
  *
  * Copyright 1999  by Werner Cornelius (werner@titro.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -31,7 +21,7 @@
 
 #include "hysdn_defs.h"
 
-static char *hysdn_procconf_revision = "$Revision: 1.8 $";
+static char *hysdn_procconf_revision = "$Revision: 1.1.4.1 $";
 
 #define INFO_OUT_LEN 80		/* length of info line including lf */
 
@@ -41,7 +31,7 @@ static char *hysdn_procconf_revision = "$Revision: 1.8 $";
 #define CONF_STATE_DETECT 0	/* waiting for detect */
 #define CONF_STATE_CONF   1	/* writing config data */
 #define CONF_STATE_POF    2	/* writing pof data */
-#define CONF_LINE_LEN    80	/* 80 chars max */
+#define CONF_LINE_LEN   255	/* 255 chars max */
 
 struct conf_writedata {
 	hysdn_card *card;	/* card the device is connected to */
@@ -56,7 +46,7 @@ struct conf_writedata {
 /***********************************************************************/
 /* process_line parses one config line and transfers it to the card if */
 /* necessary.                                                          */
-/* if the return value is negative an error occured.                   */
+/* if the return value is negative an error occurred.                   */
 /***********************************************************************/
 static int
 process_line(struct conf_writedata *cnf)
@@ -92,15 +82,6 @@ process_line(struct conf_writedata *cnf)
 	return (0);
 }				/* process_line */
 
-/*************************/
-/* dummy file operations */
-/*************************/
-static loff_t
-hysdn_dummy_lseek(struct file *file, loff_t offset, int orig)
-{
-	return -ESPIPE;
-}				/* hysdn_dummy_lseek */
-
 /***********************************/
 /* conf file operations and tables */
 /***********************************/
@@ -130,7 +111,7 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 		if (ch == 0x1A) {
 			/* we detected a pof file */
 			if ((cnf->needed_size = pof_write_open(cnf->card, &cnf->pof_buffer)) <= 0)
-				return (cnf->needed_size);	/* an error occured -> exit */
+				return (cnf->needed_size);	/* an error occurred -> exit */
 			cnf->buf_size = 0;	/* buffer is empty */
 			cnf->state = CONF_STATE_POF;	/* new state */
 		} else {
@@ -158,7 +139,7 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 			cnf->needed_size = pof_write_buffer(cnf->card, cnf->buf_size);	/* write data */
 			if (cnf->needed_size <= 0) {
 				cnf->card->state = CARD_STATE_BOOTERR;	/* show boot error */
-				return (cnf->needed_size);	/* an error occured */
+				return (cnf->needed_size);	/* an error occurred */
 			}
 			cnf->buf_size = 0;	/* buffer is empty again */
 		}
@@ -231,29 +212,32 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 static ssize_t
 hysdn_conf_read(struct file *file, char *buf, size_t count, loff_t * off)
 {
+	loff_t pos = *off;
 	char *cp;
 	int i;
 
 	if (off != &file->f_pos)	/* fs error check */
 		return -ESPIPE;
 
-	if (file->f_mode & FMODE_READ) {
-		if (!(cp = file->private_data))
-			return (-EFAULT);	/* should never happen */
-		i = strlen(cp);	/* get total string length */
-		if (*off < i) {
-			/* still bytes to transfer */
-			cp += *off;	/* point to desired data offset */
-			i -= *off;	/* remaining length */
-			if (i > count)
-				i = count;	/* limit length to transfer */
-			if (copy_to_user(buf, cp, i))
-				return (-EFAULT);	/* copy error */
-			*off += i;	/* adjust offset */
-		} else
-			return (0);
-	} else
-		return (-EPERM);	/* no permission to read */
+	if (!(file->f_mode & FMODE_READ))
+		return -EPERM;
+
+	if (!(cp = file->private_data))
+		return (-EFAULT);	/* should never happen */
+
+	i = strlen(cp);	/* get total string length */
+
+	if (pos != (unsigned)pos || pos >= i)
+		return 0;
+
+	/* still bytes to transfer */
+	cp += pos;	/* point to desired data offset */
+	i -= pos;	/* remaining length */
+	if (i > count)
+		i = count;	/* limit length to transfer */
+	if (copy_to_user(buf, cp, i))
+		return (-EFAULT);	/* copy error */
+	*off = pos + i;	/* adjust offset */
 
 	return (i);
 }				/* hysdn_conf_read */
@@ -396,7 +380,7 @@ hysdn_conf_close(struct inode *ino, struct file *filep)
 /******************************************************/
 static struct file_operations conf_fops =
 {
-	llseek:         hysdn_dummy_lseek,
+	llseek:         no_llseek,
 	read:           hysdn_conf_read,
 	write:          hysdn_conf_write,
 	open:           hysdn_conf_open,
@@ -465,4 +449,4 @@ hysdn_procconf_release(void)
 	}
 
 	remove_proc_entry(PROC_SUBDIR_NAME, proc_net);
-}				/* hysdn_procfs_release */
+}

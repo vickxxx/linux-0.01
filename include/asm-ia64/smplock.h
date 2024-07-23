@@ -3,10 +3,12 @@
  *
  * Default SMP lock implementation
  */
-#include <linux/sched.h>
 #include <linux/interrupt.h>
+#include <linux/spinlock.h>
+#include <linux/sched.h>
 
-#include <asm/spinlock.h>
+#include <asm/current.h>
+#include <asm/hardirq.h>
 
 extern spinlock_t kernel_flag;
 
@@ -15,7 +17,7 @@ extern spinlock_t kernel_flag;
 /*
  * Release global kernel lock and global interrupt lock
  */
-static __inline__ void 
+static __inline__ void
 release_kernel_lock(struct task_struct *task, int cpu)
 {
 	if (task->lock_depth >= 0)
@@ -27,7 +29,7 @@ release_kernel_lock(struct task_struct *task, int cpu)
 /*
  * Re-acquire the kernel lock
  */
-static __inline__ void 
+static __inline__ void
 reacquire_kernel_lock(struct task_struct *task)
 {
 	if (task->lock_depth >= 0)
@@ -41,14 +43,14 @@ reacquire_kernel_lock(struct task_struct *task)
  * so we only need to worry about other
  * CPU's.
  */
-static __inline__ void 
+static __inline__ void
 lock_kernel(void)
 {
 	if (!++current->lock_depth)
 		spin_lock(&kernel_flag);
 }
 
-static __inline__ void 
+static __inline__ void
 unlock_kernel(void)
 {
 	if (--current->lock_depth < 0)

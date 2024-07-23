@@ -22,7 +22,7 @@
 **  This driver has been ported to Linux from the FreeBSD NCR53C8XX driver
 **  and is currently maintained by
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -49,6 +49,8 @@
 **
 **	Used by hosts.c and ncr53c8xx.c with module configuration.
 */
+
+#if (LINUX_VERSION_CODE >= 0x020400) || defined(HOSTS_C) || defined(MODULE)
 
 #include <scsi/scsicam.h>
 
@@ -93,5 +95,7 @@ int ncr53c8xx_release(struct Scsi_Host *);
 			0,	0,	DISABLE_CLUSTERING} 
  
 #endif /* LINUX_VERSION_CODE */
+
+#endif /* defined(HOSTS_C) || defined(MODULE) */ 
 
 #endif /* NCR53C8XX_H */

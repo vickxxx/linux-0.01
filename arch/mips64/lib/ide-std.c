@@ -1,12 +1,11 @@
-/* $Id: ide-std.c,v 1.1 1999/08/21 21:43:00 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * IDE routines for typical pc-like standard configurations.
  *
- * Copyright (C) 1998, 1999 by Ralf Baechle
+ * Copyright (C) 1998, 1999, 2001 by Ralf Baechle
  */
 #include <linux/sched.h>
 #include <linux/ide.h>
@@ -60,44 +59,11 @@ static void std_ide_init_hwif_ports (hw_regs_t *hw, ide_ioreg_t data_port,
 	}
 	if (irq != NULL)
 		*irq = 0;
-}
-
-static int std_ide_request_irq(unsigned int irq,
-                                void (*handler)(int,void *, struct pt_regs *),
-                                unsigned long flags, const char *device,
-                                void *dev_id)
-{
-	return request_irq(irq, handler, flags, device, dev_id);
-}			
-
-static void std_ide_free_irq(unsigned int irq, void *dev_id)
-{
-	free_irq(irq, dev_id);
-}
-
-static int std_ide_check_region(ide_ioreg_t from, unsigned int extent)
-{
-	return check_region(from, extent);
-}
-
-static void std_ide_request_region(ide_ioreg_t from, unsigned int extent,
-                                    const char *name)
-{
-	request_region(from, extent, name);
-}
-
-static void std_ide_release_region(ide_ioreg_t from, unsigned int extent)
-{
-	release_region(from, extent);
+	hw->io_ports[IDE_IRQ_OFFSET] = 0;
 }
 
 struct ide_ops std_ide_ops = {
 	&std_ide_default_irq,
 	&std_ide_default_io_base,
-	&std_ide_init_hwif_ports,
-	&std_ide_request_irq,
-	&std_ide_free_irq,
-	&std_ide_check_region,
-	&std_ide_request_region,
-	&std_ide_release_region
+	&std_ide_init_hwif_ports
 };

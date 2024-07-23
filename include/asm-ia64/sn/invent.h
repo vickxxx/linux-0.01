@@ -4,12 +4,13 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Colin Ngam
+ * Copyright (C) 1992 - 1997, 2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
-#ifndef _ASM_SN_INVENT_H
-#define _ASM_SN_INVENT_H
+#ifndef _ASM_IA64_SN_INVENT_H
+#define _ASM_IA64_SN_INVENT_H
 
+#include <linux/types.h>
+#include <asm/sn/sgi.h>
 /*
  * sys/sn/invent.h --  Kernel Hardware Inventory
  *
@@ -29,7 +30,11 @@
 #define minor_t int
 #define app32_ptr_t unsigned long
 #define graph_vertex_place_t long
-#define GRAPH_VERTEX_NONE ((devfs_handle_t)-1)
+#define GRAPH_VERTEX_NONE ((vertex_hdl_t)-1)
+#define GRAPH_EDGE_PLACE_NONE ((graph_edge_place_t)0)
+#define GRAPH_INFO_PLACE_NONE ((graph_info_place_t)0)
+#define GRAPH_VERTEX_PLACE_NONE ((graph_vertex_place_t)0)
+
 
 typedef struct inventory_s {
 	struct	inventory_s *inv_next;	/* next inventory record in list */
@@ -105,6 +110,8 @@ typedef struct router_inv_s{
 #define INV_RPS		23      /* redundant power source */
 #define INV_TPU		24	/* Tensor Processing Unit */
 #define INV_FCNODE	25	/* Helper class for SCSI classes, not in classes[] */
+#define INV_USB		26	/* Universal Serial Bus */
+#define INV_1394NODE    27      /* helper class for 1394/SPB2 classes, not in classes[] */
 
 /* types for class processor */
 #define INV_CPUBOARD	1
@@ -187,8 +194,11 @@ typedef struct router_inv_s{
 #define INV_QL_12160    17      /* qlogic 12160 */
 #define INV_QL_2100	18	/* qLogic 2100 Fibrechannel */
 #define INV_QL_2200	19	/* qLogic 2200 Fibrechannel */
-#define INV_SBP2	20	/* SBP2 protocol over OHCI on 1394 */
-
+#define INV_PR_HIO_D	20	/* Prisa HIO Dual channel */
+#define INV_PR_PCI64_D	21	/* Prisa PCI-64 Dual channel */
+#define INV_QL_2200A	22	/* qLogic 2200A Fibrechannel */
+#define INV_SBP2        23      /* SBP2 protocol over OHCI on 1394 */
+#define INV_QL_2300	24	/* qLogic 2300 Fibrechannel */
 
 
 /* states for INV_SCSIDRIVE type of class disk */
@@ -215,6 +225,7 @@ typedef struct router_inv_s{
 #define INV_SIDCACHE	8
 #define INV_MAIN_MB	9
 #define INV_HUBSPC      10      /* HUBSPC */
+#define INV_TIDCACHE	11
 
 /* types for class serial */
 #define INV_CDSIO	1	/* Central Data serial board */
@@ -405,6 +416,7 @@ typedef struct router_inv_s{
 #define INV_NET_ISDN_PRI	8	/* PRI ISDN */
 #define INV_NET_HIPPIS		9	/* HIPPI-Serial */
 #define	INV_NET_GSN		10	/* GSN (aka HIPPI-6400) */
+#define INV_NET_MYRINET		11	/* Myricom PCI network */
 
 /* controllers for network types, unique within class network */
 #define INV_ETHER_EC	0	/* IP6 integral controller */
@@ -463,6 +475,7 @@ typedef struct router_inv_s{
 #define INV_OPTICAL	7	/* optical disks (read-write) */
 #define INV_CHANGER	8	/* jukebox's for CDROMS, for example */
 #define INV_COMM	9	/* Communications device */
+#define INV_STARCTLR	12	/* Storage Array Controller */
 #define INV_RAIDCTLR	32	/* RAID ctlr actually gives type 0 */
 
 /* bit definitions for state field for class INV_SCSI */
@@ -495,6 +508,7 @@ typedef struct router_inv_s{
 #define	INV_VIDEO_RACER		11	/* SpeedRacer Pro Video */
 #define	INV_VIDEO_EVO		12	/* EVO Personal Video */
 #define INV_VIDEO_XTHD		13	/* XIO XT-HDTV video */
+#define INV_VIDEO_XTDIGVID      14      /* XIO XT-HDDIGVID video */
 
 /* states for video class INV_VIDEO_EXPRESS */
 
@@ -568,10 +582,7 @@ typedef struct router_inv_s{
 #define INV_7of9_PANEL          5       /* 7of9 flatpanel board and panel */
 
 /* types for class INV_IEEE1394 */
-#define INV_OHCI		0	/* Ohci IEEE1394 pci card */
-#define INV_RAWISO1394   	10	/* Raw Isochronous IEEE 1394 protocol driver */
-#define INV_RAWASYNC1394 	11	/* Raw Asynchronous IEEE 1394 protocol driver */
-#define INV_AVC1394     	12	/* Audio, Video & Control (AV/C) IEEE 1394 protocol driver */
+#define INV_OHCI	0	/* Ohci IEEE1394 pci card */
 
 /* state for class INV_IEEE1394 & type INV_OHCI */
 #define INV_IEEE1394_STATE_TI_REV_1 0
@@ -582,6 +593,51 @@ typedef struct router_inv_s{
 /* types for class INV_TPU */
 #define	INV_TPU_EXT		0	/* External XIO Tensor Processing Unit */
 #define	INV_TPU_XIO		1	/* Internal XIO Tensor Processing Unit */
+
+/*
+ * USB Types.  The upper 8 bits contain general usb device class and are used to
+ * qualify the lower 8 bits which contain device type within a usb class.
+ * Use USB_INV_DEVCLASS and USB_INV_DEVTYPE to to decode an i_type, and
+ * USB_INV_TYPE to set it.
+ */
+
+#define USB_INV_DEVCLASS(invtype)	((invtype) >> 8)
+#define USB_INV_DEVTYPE(invtype)	((invtype) & 0xf)
+#define USB_INV_TYPE(usbclass, usbtype)	(((usbclass) << 8) | (usbtype))
+
+/*
+ * USB device classes.  These classes might not match the classes as defined
+ * by the usb spec, but where possible we will try.
+ */
+
+#define USB_INV_CLASS_RH	0x00	/* root hub (ie. controller) */
+#define USB_INV_CLASS_HID	0x03	/* human interface device */
+#define USB_INV_CLASS_HUB	0x09	/* hub device */
+
+/*
+ * USB device types within a class.  These will not match USB device types,
+ * as the usb is not consistent on how specific types are defined (sometimes
+ * they are found in the interface subclass, sometimes (as in HID devices) they
+ * are found within data generated by the device (hid report descriptors for
+ * example).
+ */
+
+/*
+ * RH types
+ */
+
+#define USB_INV_RH_OHCI		0x01	/* ohci root hub */
+
+/*
+ * HID types
+ */
+
+#define USB_INV_HID_KEYBOARD	0x01	/* kbd (HID class) */
+#define USB_INV_HID_MOUSE	0x02	/* mouse (HID class) */
+
+/*
+ * HUB types - none yet
+ */
 
 typedef struct invent_generic_s {
 	unsigned short	ig_module;
@@ -618,6 +674,8 @@ typedef struct invent_cpuinfo {
 	cpu_inv_t     ic_cpu_info;
 	unsigned short	ic_cpuid;
 	unsigned short	ic_slice;
+	unsigned short  ic_cpumode;
+
 } invent_cpuinfo_t;
 
 typedef struct invent_rpsinfo {
@@ -643,30 +701,25 @@ typedef struct invent_routerinfo{
 
 #ifdef __KERNEL__
 
-typedef struct irix5_inventory_s {
-	app32_ptr_t	inv_next;	/* next inventory record in list */
-	int	inv_class;		/* class of object */
-	int	inv_type;		/* class sub-type of object */
-	major_t	inv_controller;		/* object major identifier */
-	minor_t	inv_unit;		/* object minor identifier */
-	int	inv_state;		/* information specific to object or
-					   class */
-} irix5_inventory_t;
-
 typedef struct invplace_s {
-	devfs_handle_t		invplace_vhdl;		/* current vertex */
-	devfs_handle_t		invplace_vplace;	/* place in vertex list */
+	vertex_hdl_t		invplace_vhdl;		/* current vertex */
+	vertex_hdl_t		invplace_vplace;	/* place in vertex list */
 	inventory_t		*invplace_inv;		/* place in inv list on vertex */
 } invplace_t; /* Magic cookie placeholder in inventory list */
 
+extern invplace_t invplace_none;
+#define INVPLACE_NONE invplace_none
+
 extern void	    add_to_inventory(int, int, int, int, int);
 extern void	    replace_in_inventory(inventory_t *, int, int, int, int, int);
+extern void         start_scan_inventory(invplace_t *);
 extern inventory_t  *get_next_inventory(invplace_t *);
+extern void         end_scan_inventory(invplace_t *);
 extern inventory_t  *find_inventory(inventory_t *, int, int, int, int, int);
 extern int	    scaninvent(int (*)(inventory_t *, void *), void *);
 extern int	    get_sizeof_inventory(int);
 
-extern void device_inventory_add(	devfs_handle_t device, 
+extern void device_inventory_add(	vertex_hdl_t device, 
 					int class, 
 					int type, 
 					major_t ctlr, 
@@ -674,11 +727,11 @@ extern void device_inventory_add(	devfs_handle_t device,
 					int state);
 
 
-extern inventory_t *device_inventory_get_next(	devfs_handle_t device,
+extern inventory_t *device_inventory_get_next(	vertex_hdl_t device,
 						invplace_t *);
 
-extern void device_controller_num_set(	devfs_handle_t,
+extern void device_controller_num_set(	vertex_hdl_t,
 					int);
-extern int device_controller_num_get(	devfs_handle_t);
+extern int device_controller_num_get(	vertex_hdl_t);
 #endif /* __KERNEL__ */
-#endif /* _ASM_SN_INVENT_H */
+#endif /* _ASM_IA64_SN_INVENT_H */

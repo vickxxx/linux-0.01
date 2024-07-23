@@ -13,8 +13,8 @@
  * over and over again with slight variations and possibly making a
  * mistake somewhere.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
@@ -25,7 +25,30 @@
 
 #define __IA64_UNCACHED_OFFSET	0xc000000000000000	/* region 6 */
 
-#define IO_SPACE_LIMIT 0xffff
+/*
+ * The legacy I/O space defined by the ia64 architecture supports only 65536 ports, but
+ * large machines may have multiple other I/O spaces so we can't place any a priori limit
+ * on IO_SPACE_LIMIT.  These additional spaces are described in ACPI.
+ */
+#define IO_SPACE_LIMIT		0xffffffffffffffffUL
+
+#define MAX_IO_SPACES			16
+#define IO_SPACE_BITS			24
+#define IO_SPACE_SIZE			(1UL << IO_SPACE_BITS)
+
+#define IO_SPACE_NR(port)		((port) >> IO_SPACE_BITS)
+#define IO_SPACE_BASE(space)		((space) << IO_SPACE_BITS)
+#define IO_SPACE_PORT(port)		((port) & (IO_SPACE_SIZE - 1))
+
+#define IO_SPACE_SPARSE_ENCODING(p)	((((p) >> 2) << 12) | (p & 0xfff))
+
+struct io_space {
+	unsigned long mmio_base;	/* base in MMIO space */
+	int sparse;
+};
+
+extern struct io_space io_space[];
+extern unsigned int num_io_spaces;
 
 # ifdef __KERNEL__
 
@@ -43,7 +66,7 @@ virt_to_phys (volatile void *address)
 }
 
 static inline void*
-phys_to_virt(unsigned long address)
+phys_to_virt (unsigned long address)
 {
 	return (void *) (address + PAGE_OFFSET);
 }
@@ -54,6 +77,7 @@ phys_to_virt(unsigned long address)
  */
 #define bus_to_virt	phys_to_virt
 #define virt_to_bus	virt_to_phys
+#define page_to_bus	page_to_phys
 
 # endif /* KERNEL */
 
@@ -74,29 +98,25 @@ __ia64_get_io_port_base (void)
 static inline void*
 __ia64_mk_io_addr (unsigned long port)
 {
-	const unsigned long io_base = __ia64_get_io_port_base();
-	unsigned long addr;
+	struct io_space *space;
+	unsigned long offset;
 
-	addr = io_base | ((port >> 2) << 12) | (port & 0xfff);
-	return (void *) addr;
+	space = &io_space[IO_SPACE_NR(port)];
+	port = IO_SPACE_PORT(port);
+	if (space->sparse)
+		offset = IO_SPACE_SPARSE_ENCODING(port);
+	else
+		offset = port;
+
+	return (void *) (space->mmio_base | offset);
 }
 
 /*
- * For the in/out instructions, we need to do:
- *
- *	o "mf" _before_ doing the I/O access to ensure that all prior
- *	  accesses to memory occur before the I/O access
- *	o "mf.a" _after_ doing the I/O access to ensure that the access
- *	  has completed before we're doing any other I/O accesses
- *
- * The former is necessary because we might be doing normal (cached) memory
- * accesses, e.g., to set up a DMA descriptor table and then do an "outX()"
- * to tell the DMA controller to start the DMA operation.  The "mf" ahead
- * of the I/O operation ensures that the DMA table is correct when the I/O
- * access occurs.
- *
- * The mf.a is necessary to ensure that all I/O access occur in program
- * order. --davidm 99/12/07 
+ * For the in/out routines, we need to do "mf.a" _after_ doing the I/O access to ensure
+ * that the access has completed before executing other I/O accesses.  Since we're doing
+ * the accesses through an uncachable (UC) translation, the CPU will execute them in
+ * program order.  However, we still need to tell the compiler not to shuffle them around
+ * during optimization, which is why we use "volatile" pointers.
  */
 
 static inline unsigned int
@@ -265,9 +285,9 @@ __outsl (unsigned long port, void *src, unsigned long count)
 }
 
 /*
- * Unfortunately, some platforms are broken and do not follow the
- * IA-64 architecture specification regarding legacy I/O support.
- * Thus, we have to make these operations platform dependent...
+ * Unfortunately, some platforms are broken and do not follow the IA-64 architecture
+ * specification regarding legacy I/O support.  Thus, we have to make these operations
+ * platform dependent...
  */
 #define __inb		platform_inb
 #define __inw		platform_inw
@@ -276,18 +296,18 @@ __outsl (unsigned long port, void *src, unsigned long count)
 #define __outw		platform_outw
 #define __outl		platform_outl
 
-#define inb		__inb
-#define inw		__inw
-#define inl		__inl
-#define insb		__insb
-#define insw		__insw
-#define insl		__insl
-#define outb		__outb
-#define outw		__outw
-#define outl		__outl
-#define outsb		__outsb
-#define outsw		__outsw
-#define outsl		__outsl
+#define inb(p)		__inb(p)
+#define inw(p)		__inw(p)
+#define inl(p)		__inl(p)
+#define insb(p,d,c)	__insb(p,d,c)
+#define insw(p,d,c)	__insw(p,d,c)
+#define insl(p,d,c)	__insl(p,d,c)
+#define outb(v,p)	__outb(v,p)
+#define outw(v,p)	__outw(v,p)
+#define outl(v,p)	__outl(v,p)
+#define outsb(p,s,c)	__outsb(p,s,c)
+#define outsw(p,s,c)	__outsw(p,s,c)
+#define outsl(p,s,c)	__outsl(p,s,c)
 
 /*
  * The address passed to these functions are ioremap()ped already.
@@ -343,7 +363,7 @@ __writeq (unsigned long val, void *addr)
 #define readb(a)	__readb((void *)(a))
 #define readw(a)	__readw((void *)(a))
 #define readl(a)	__readl((void *)(a))
-#define readq(a)	__readqq((void *)(a))
+#define readq(a)	__readq((void *)(a))
 #define __raw_readb	readb
 #define __raw_readw	readw
 #define __raw_readl	readl
@@ -378,17 +398,16 @@ __writeq (unsigned long val, void *addr)
 #endif
 
 /*
- * An "address" in IO memory space is not clearly either an integer
- * or a pointer. We will accept both, thus the casts.
+ * An "address" in IO memory space is not clearly either an integer or a pointer. We will
+ * accept both, thus the casts.
  *
- * On ia-64, we access the physical I/O memory space through the
- * uncached kernel region.
+ * On ia-64, we access the physical I/O memory space through the uncached kernel region.
  */
 static inline void *
 ioremap (unsigned long offset, unsigned long size)
 {
 	return (void *) (__IA64_UNCACHED_OFFSET | (offset));
-} 
+}
 
 static inline void
 iounmap (void *addr)
@@ -413,74 +432,11 @@ extern void __ia64_memset_c_io (unsigned long, unsigned long, long);
 #define memset_io(addr,c,len) \
   __ia64_memset_c_io((unsigned long)(addr),0x0101010101010101UL*(u8)(c),(len))
 
-#define __HAVE_ARCH_MEMSETW_IO
-#define memsetw_io(addr,c,len) \
-  _memset_c_io((unsigned long)(addr),0x0001000100010001UL*(u16)(c),(len))
 
-/*
- * XXX - We don't have csum_partial_copy_fromio() yet, so we cheat here and 
- * just copy it. The net code will then do the checksum later. Presently 
- * only used by some shared memory 8390 Ethernet cards anyway.
- */
-
-#define eth_io_copy_and_sum(skb,src,len,unused)		memcpy_fromio((skb)->data,(src),(len))
-
-#if 0
-
-/*
- * XXX this is the kind of legacy stuff we want to get rid of with IA-64... --davidm 99/12/02
- */
-
-/*
- * This is used for checking BIOS signatures.  It's not clear at all
- * why this is here.  This implementation seems to be the same on
- * all architectures.  Strange.
- */
-static inline int
-check_signature (unsigned long io_addr, const unsigned char *signature, int length)
-{
-	int retval = 0;
-	do {
-		if (readb(io_addr) != *signature)
-			goto out;
-		io_addr++;
-		signature++;
-		length--;
-	} while (length);
-	retval = 1;
-out:
-	return retval;
-}
-
-#define RTC_PORT(x)		(0x70 + (x))
-#define RTC_ALWAYS_BCD		0
-
-#endif
-
-/*
- * The caches on some architectures aren't DMA-coherent and have need
- * to handle this in software.  There are two types of operations that
- * can be applied to dma buffers.
- *
- * - dma_cache_inv(start, size) invalidates the affected parts of the
- *   caches.  Dirty lines of the caches may be written back or simply
- *   be discarded.  This operation is necessary before dma operations
- *   to the memory.
- *
- * - dma_cache_wback(start, size) makes caches and memory coherent
- *   by writing the content of the caches back to memory, if necessary
- *   (cache flush).
- *
- * - dma_cache_wback_inv(start, size) Like dma_cache_wback() but the
- *   function also invalidates the affected part of the caches as
- *   necessary before DMA transfers from outside to memory.
- *
- * Fortunately, the IA-64 architecture mandates cache-coherent DMA, so
- * these functions can be implemented as no-ops.
- */
-#define dma_cache_inv(_start,_size)		do { } while (0)
-#define dma_cache_wback(_start,_size)		do { } while (0)
-#define dma_cache_wback_inv(_start,_size)	do { } while (0)
+#define dma_cache_inv(_start,_size)             do { } while (0)
+#define dma_cache_wback(_start,_size)           do { } while (0)
+#define dma_cache_wback_inv(_start,_size)       do { } while (0)
 
 # endif /* __KERNEL__ */
+
 #endif /* _ASM_IA64_IO_H */

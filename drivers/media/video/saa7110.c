@@ -19,6 +19,7 @@
 */
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
@@ -82,6 +83,7 @@ int saa7110_write_block(struct saa7110* decoder, unsigned const char *data, unsi
 	while (len-- > 0) {
                 if (i2c_sendbyte(decoder->bus,*data,0)) {
                         i2c_stop(decoder->bus);
+                        UNLOCK_I2C_BUS(decoder->bus);
                         return -EAGAIN;
                 }
 		decoder->reg[subaddr++] = *data++;
@@ -305,7 +307,7 @@ int saa7110_command(struct i2c_device *device, unsigned int cmd, void *arg)
 				saa7110_write(decoder, 0x0D, 0x06);
 				saa7110_write(decoder, 0x11, 0x2C);
 				saa7110_write(decoder, 0x30, 0x81);
-saa7110_write(decoder, 0x2A, 0xDF);
+				saa7110_write(decoder, 0x2A, 0xDF);
 				break;
 			 case VIDEO_MODE_PAL:
 				saa7110_write(decoder, 0x0D, 0x06);
@@ -390,7 +392,7 @@ saa7110_write(decoder, 0x2A, 0xDF);
 		break;
 
 	 default:
-		DEBUG(printk(KERN_INFO "unknown saa7110_command??(%d)\n",cmd));
+		DEBUG(printk(KERN_INFO "unknown saa7110_command?(%d)\n",cmd));
 		return -EINVAL;
 	}
 	return 0;
@@ -398,11 +400,11 @@ saa7110_write(decoder, 0x2A, 0xDF);
 
 /* ----------------------------------------------------------------------- */
 
-struct i2c_driver i2c_driver_saa7110 =
+static struct i2c_driver i2c_driver_saa7110 =
 {
 	"saa7110",			/* name */
 
-	I2C_DRIVERID_VIDEODECODER,	/* in i2c.h */
+	I2C_DRIVERID_VIDEODECODER,	/* in i2c-old.h */
 	I2C_SAA7110, I2C_SAA7110+1,	/* Addr range */
 
 	saa7110_attach,
@@ -412,18 +414,17 @@ struct i2c_driver i2c_driver_saa7110 =
 
 EXPORT_NO_SYMBOLS;
 
-#ifdef MODULE
-int init_module(void)
-#else
-int saa7110_init(void)
-#endif
+static int saa7110_init(void)
 {
 	return i2c_register_driver(&i2c_driver_saa7110);
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void saa7110_exit(void)
 {
 	i2c_unregister_driver(&i2c_driver_saa7110);
 }
-#endif
+
+
+module_init(saa7110_init);
+module_exit(saa7110_exit);
+MODULE_LICENSE("GPL");

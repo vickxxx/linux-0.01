@@ -1,6 +1,6 @@
 /*======================================================================
 
-    PCMCIA Card Services -- core services
+    Kernel Card Services -- core services
 
     cs.c 1.271 2000/10/02 20:27:49
     
@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -38,7 +38,7 @@
 #include <linux/string.h>
 #include <linux/major.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
@@ -60,14 +60,6 @@
 #include <pcmcia/cisreg.h>
 #include <pcmcia/bus_ops.h>
 #include "cs_internal.h"
-#include "rsrc_mgr.h"
-
-#ifdef PCMCIA_DEBUG
-int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
-static const char *version =
-"cs.c 1.271 2000/10/02 20:27:49 (David Hinds)";
-#endif
 
 #ifdef CONFIG_PCI
 #define PCI_OPT " [pci]"
@@ -90,16 +82,17 @@ static const char *version =
 #define OPTIONS PCI_OPT CB_OPT PM_OPT
 #endif
 
-static const char *release = "Linux PCMCIA Card Services " CS_RELEASE;
+static const char *release = "Linux Kernel Card Services " CS_RELEASE;
 static const char *options = "options: " OPTIONS;
-
-MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
-MODULE_DESCRIPTION("Linux PCMCIA Card Services " CS_RELEASE
-		   "\n  options:" OPTIONS);
 
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
+/* Module parameters */
+
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
+MODULE_DESCRIPTION("Linux Kernel Card Services " CS_RELEASE
+		   "\n  options:" OPTIONS);
+MODULE_LICENSE("Dual MPL/GPL");	  
 
 #define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
 
@@ -125,6 +118,12 @@ INT_MODULE_PARM(do_apm,		1);
 INT_MODULE_PARM(do_apm,		0);
 #endif
 
+#ifdef PCMCIA_DEBUG
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
+static const char *version =
+"cs.c 1.279 2001/10/13 00:08:28 (David Hinds)";
+#endif
+ 
 /*====================================================================*/
 
 socket_state_t dead_socket = {
@@ -471,6 +470,15 @@ static void shutdown_socket(socket_info_t *s)
 	kfree(s->fake_cis);
 	s->fake_cis = NULL;
     }
+    /* Should not the socket be forced quiet as well?  e.g. turn off Vcc */
+    /* Without these changes, the socket is left hot, even though card-services */
+    /* realizes that no card is in place. */
+    s->socket.flags &= ~SS_OUTPUT_ENA;
+    s->socket.Vpp = 0;
+    s->socket.Vcc = 0;
+    s->socket.io_irq = 0;
+    set_socket(s, &s->socket);
+    /* */
 #ifdef CONFIG_CARDBUS
     cb_release_cis_mem(s);
     cb_free(s);
@@ -621,7 +629,7 @@ static void unreset_socket(socket_info_t *s)
 
     The central event handler.  Send_event() sends an event to all
     valid clients.  Parse_events() interprets the event bits from
-    a card status change report.  Do_shotdown() handles the high
+    a card status change report.  Do_shutdown() handles the high
     priority stuff associated with a card removal.
     
 ======================================================================*/
@@ -788,6 +796,10 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	      *base, align);
 	align = 0;
     }
+    if ((s->cap.features & SS_CAP_STATIC_MAP) && s->cap.io_offset) {
+	*base = s->cap.io_offset | (*base & 0x0fff);
+	return 0;
+    }
     /* Check for an already-allocated window that must conflict with
        what was asked for.  It is a hack because it does not catch all
        potential conflicts, just the most obvious ones. */
@@ -797,7 +809,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	    return 1;
     for (i = 0; i < MAX_IO_WIN; i++) {
 	if (s->io[i].NumPorts == 0) {
-	    if (find_io_region(base, num, align, name) == 0) {
+	    if (find_io_region(base, num, align, name, s) == 0) {
 		s->io[i].Attributes = attr;
 		s->io[i].BasePort = *base;
 		s->io[i].NumPorts = s->io[i].InUse = num;
@@ -809,7 +821,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	/* Try to extend top of window */
 	try = s->io[i].BasePort + s->io[i].NumPorts;
 	if ((*base == 0) || (*base == try))
-	    if (find_io_region(&try, num, 0, name) == 0) {
+	    if (find_io_region(&try, num, 0, name, s) == 0) {
 		*base = try;
 		s->io[i].NumPorts += num;
 		s->io[i].InUse += num;
@@ -818,7 +830,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	/* Try to extend bottom of window */
 	try = s->io[i].BasePort - num;
 	if ((*base == 0) || (*base == try))
-	    if (find_io_region(&try, num, 0, name) == 0) {
+	    if (find_io_region(&try, num, 0, name, s) == 0) {
 		s->io[i].BasePort = *base = try;
 		s->io[i].NumPorts += num;
 		s->io[i].InUse += num;
@@ -832,7 +844,8 @@ static void release_io_space(socket_info_t *s, ioaddr_t base,
 			     ioaddr_t num)
 {
     int i;
-    release_region(base, num);
+    if(!(s->cap.features & SS_CAP_STATIC_MAP))
+	release_region(base, num);
     for (i = 0; i < MAX_IO_WIN; i++) {
 	if ((s->io[i].BasePort <= base) &&
 	    (s->io[i].BasePort+s->io[i].NumPorts >= base+num)) {
@@ -869,6 +882,10 @@ int pcmcia_access_configuration_register(client_handle_t handle,
 	c = &s->config[reg->Function];
     } else
 	c = CONFIG(handle);
+
+    if (c == NULL)
+	return CS_NO_CARD;
+
     if (!(c->state & CONFIG_LOCKED))
 	return CS_CONFIGURATION_LOCKED;
 
@@ -1255,7 +1272,7 @@ int pcmcia_get_status(client_handle_t handle, cs_status_t *status)
     } else
 	c = CONFIG(handle);
     if ((c != NULL) && (c->state & CONFIG_LOCKED) &&
-	(c->IntType & INT_MEMORY_AND_IO)) {
+	(c->IntType & (INT_MEMORY_AND_IO|INT_ZOOMED_VIDEO))) {
 	u_char reg;
 	if (c->Present & PRESENT_PIN_REPLACE) {
 	    read_cis_mem(s, 1, (c->ConfigBase+CISREG_PRR)>>1, 1, &reg);
@@ -1458,6 +1475,8 @@ int pcmcia_register_client(client_handle_t *handle, client_reg_t *req)
 	    s->functions = 1;
 	s->config = kmalloc(sizeof(config_t) * s->functions,
 			    GFP_KERNEL);
+	if (!s->config)
+		return CS_OUT_OF_RESOURCE;
 	memset(s->config, 0, sizeof(config_t) * s->functions);
     }
     
@@ -1500,7 +1519,7 @@ int pcmcia_release_configuration(client_handle_t handle)
     if (!(handle->state & CLIENT_STALE)) {
 	config_t *c = CONFIG(handle);
 	if (--(s->lock_count) == 0) {
-	    s->socket.flags = SS_OUTPUT_ENA;
+	    s->socket.flags = SS_OUTPUT_ENA;   /* Is this correct? */
 	    s->socket.Vpp = 0;
 	    s->socket.io_irq = 0;
 	    set_socket(s, &s->socket);
@@ -1620,7 +1639,8 @@ int pcmcia_release_window(window_handle_t win)
     s->state &= ~SOCKET_WIN_REQ(win->index);
 
     /* Release system memory */
-    release_mem_region(win->base, win->size);
+    if(!(s->cap.features & SS_CAP_STATIC_MAP))
+	release_mem_region(win->base, win->size);
     win->handle->state &= ~CLIENT_WIN_REQ(win->index);
 
     win->magic = 0;
@@ -1680,6 +1700,8 @@ int pcmcia_request_configuration(client_handle_t handle,
     c->Attributes = req->Attributes;
     if (req->IntType & INT_MEMORY_AND_IO)
 	s->socket.flags |= SS_IOCARD;
+    if (req->IntType & INT_ZOOMED_VIDEO)
+	s->socket.flags |= SS_ZVCARD|SS_IOCARD;
     if (req->Attributes & CONF_ENABLE_DMA)
 	s->socket.flags |= SS_DMA_MODE;
     if (req->Attributes & CONF_ENABLE_SPKR)
@@ -1840,7 +1862,7 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 {
     socket_info_t *s;
     config_t *c;
-    int ret = 0, irq = 0;
+    int ret = CS_IN_USE, irq = 0;
     
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
@@ -1852,13 +1874,9 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	return CS_CONFIGURATION_LOCKED;
     if (c->state & CONFIG_IRQ_REQ)
 	return CS_IN_USE;
-    
-    /* Short cut: if there are no ISA interrupts, then it is PCI */
-    if (!s->cap.irq_mask) {
-	irq = s->cap.pci_irq;
-	ret = (irq) ? 0 : CS_IN_USE;
+
 #ifdef CONFIG_ISA
-    } else if (s->irq.AssignedIRQ != 0) {
+    if (s->irq.AssignedIRQ != 0) {
 	/* If the interrupt is already assigned, it must match */
 	irq = s->irq.AssignedIRQ;
 	if (req->IRQInfo1 & IRQ_INFO2_VALID) {
@@ -1867,7 +1885,6 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	} else
 	    ret = ((req->IRQInfo1&IRQ_MASK) == irq) ? 0 : CS_BAD_ARGS;
     } else {
-	ret = CS_IN_USE;
 	if (req->IRQInfo1 & IRQ_INFO2_VALID) {
 	    u_int try, mask = req->IRQInfo2 & s->cap.irq_mask;
 	    for (try = 0; try < 2; try++) {
@@ -1882,9 +1899,13 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	    irq = req->IRQInfo1 & IRQ_MASK;
 	    ret = try_irq(req->Attributes, irq, 1);
 	}
-#endif
     }
-    if (ret != 0) return ret;
+#endif
+    if (ret != 0) {
+	if (!s->cap.pci_irq)
+	    return ret;
+	irq = s->cap.pci_irq;
+    }
 
     if (req->Attributes & IRQ_HANDLE_PRESENT) {
 	if (bus_request_irq(s->cap.bus, irq, req->Handler,
@@ -1958,7 +1979,7 @@ int pcmcia_request_window(client_handle_t *handle, win_req_t *req, window_handle
 	find_mem_region(&win->base, win->size, align,
 			(req->Attributes & WIN_MAP_BELOW_1MB) ||
 			!(s->cap.features & SS_CAP_PAGE_REGS),
-			(*handle)->dev_info))
+			(*handle)->dev_info, s))
 	return CS_IN_USE;
     (*handle)->state |= CLIENT_WIN_REQ(w);
 
@@ -2414,7 +2435,7 @@ static int __init init_pcmcia_cs(void)
 
 static void __exit exit_pcmcia_cs(void)
 {
-    printk(KERN_INFO "unloading PCMCIA Card Services\n");
+    printk(KERN_INFO "unloading Kernel Card Services\n");
 #ifdef CONFIG_PROC_FS
     if (proc_pccard) {
 	remove_proc_entry("pccard", proc_bus);

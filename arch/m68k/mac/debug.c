@@ -36,7 +36,7 @@ extern unsigned long mac_videobase;
 extern unsigned long mac_videodepth;
 extern unsigned long mac_rowbytes;
 
-extern void mac_serial_print(char *);
+extern void mac_serial_print(const char *);
 
 #define DEBUG_HEADS
 #undef DEBUG_SCREEN
@@ -137,7 +137,7 @@ void mac_debugging_long(int pos, long addr)
  * TODO: serial debug code
  */
 
-struct SCC
+struct mac_SCC
  {
   u_char cha_b_ctrl;
   u_char char_dummy1;
@@ -148,7 +148,7 @@ struct SCC
   u_char cha_a_data;
  };
 
-# define scc (*((volatile struct SCC*)mac_bi_data.sccbase))
+# define scc (*((volatile struct mac_SCC*)mac_bi_data.sccbase))
 
 /* Flag that serial port is already initialized and used */
 int mac_SCC_init_done = 0;
@@ -187,7 +187,7 @@ void mac_debug_console_write (struct console *co, const char *str,
 
 
 
-/* Mac: loops_per_sec min. 1900000 ^= .5 us; MFPDELAY was 0.6 us*/
+/* Mac: loops_per_jiffy min. 19000 ^= .5 us; MFPDELAY was 0.6 us*/
 
 #define uSEC 1
 
@@ -235,32 +235,6 @@ void mac_scca_console_write (struct console *co, const char *str,
     }
 }
 
-#if defined(CONFIG_SERIAL_CONSOLE) || defined(DEBUG_SERIAL)
-int mac_sccb_console_wait_key(struct console *co)
-{
-    int i;
-    do {
-	for( i = uSEC; i > 0; --i )
-		barrier();
-    } while( !(scc.cha_b_ctrl & 0x01) ); /* wait for rx buf filled */
-    for( i = uSEC; i > 0; --i )
-	barrier();
-    return( scc.cha_b_data );
-}
-
-int mac_scca_console_wait_key(struct console *co)
-{
-    int i;
-    do {
-	for( i = uSEC; i > 0; --i )
-		barrier();
-    } while( !(scc.cha_a_ctrl & 0x01) ); /* wait for rx buf filled */
-    for( i = uSEC; i > 0; --i )
-	barrier();
-    return( scc.cha_a_data );
-}
-#endif
-
 /* The following two functions do a quick'n'dirty initialization of the MFP or
  * SCC serial ports. They're used by the debugging interface, kgdb, and the
  * serial console code. */
@@ -286,9 +260,9 @@ int mac_scca_console_wait_key(struct console *co)
 		barrier();				\
     } while(0)
 
-/* loops_per_sec isn't initialized yet, so we can't use udelay(). This does a
+/* loops_per_jiffy isn't initialized yet, so we can't use udelay(). This does a
  * delay of ~ 60us. */
-/* Mac: loops_per_sec min. 1900000 ^= .5 us; MFPDELAY was 0.6 us*/
+/* Mac: loops_per_jiffy min. 19000 ^= .5 us; MFPDELAY was 0.6 us*/
 #define LONG_DELAY()				\
     do {					\
 	int i;					\
@@ -395,18 +369,12 @@ void __init mac_debug_init(void)
 	/* Mac modem port */
 	mac_init_scc_port( B9600|CS8, 0 );
 	mac_console_driver.write = mac_scca_console_write;
-#ifdef CONFIG_SERIAL_CONSOLE
-	mac_console_driver.wait_key = mac_scca_console_wait_key;
-#endif
 	scc_port = 0;
     }
     else if (!strcmp( m68k_debug_device, "ser2" )) {
 	/* Mac printer port */
 	mac_init_scc_port( B9600|CS8, 1 );
 	mac_console_driver.write = mac_sccb_console_write;
-#ifdef CONFIG_SERIAL_CONSOLE
-	mac_console_driver.wait_key = mac_sccb_console_wait_key;
-#endif
 	scc_port = 1;
     }
 #endif

@@ -1,26 +1,34 @@
-/* $Id: icn.c,v 1.65 2000/11/13 22:51:48 kai Exp $
-
+/* $Id: icn.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * ISDN low-level module for the ICN active ISDN-Card.
  *
  * Copyright 1994,95,96 by Fritz Elfert (fritz@isdn4linux.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 #include "icn.h"
+#include <linux/module.h>
+#include <linux/init.h>
+
+static int portbase = ICN_BASEADDR;
+static unsigned long membase = ICN_MEMADDR;
+static char *icn_id = "\0";
+static char *icn_id2 = "\0";
+
+MODULE_DESCRIPTION("ISDN4Linux: Driver for ICN active ISDN card");
+MODULE_AUTHOR("Fritz Elfert");
+MODULE_LICENSE("GPL");
+MODULE_PARM(portbase, "i");
+MODULE_PARM_DESC(portbase, "Port address of first card");
+MODULE_PARM(membase, "l");
+MODULE_PARM_DESC(membase, "Shared memory address of all cards");
+MODULE_PARM(icn_id, "s");
+MODULE_PARM_DESC(icn_id, "ID-String of first card");
+MODULE_PARM(icn_id2, "s");
+MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
 
 /*
  * Verbose bootcode- and protocol-downloading.
@@ -33,7 +41,7 @@
 #undef MAP_DEBUG
 
 static char
-*revision = "$Revision: 1.65 $";
+*revision = "$Revision: 1.1.4.1 $";
 
 static int icn_addcard(int, char *, char *);
 
@@ -50,8 +58,7 @@ icn_free_queue(icn_card * card, int channel)
 	struct sk_buff *skb;
 	unsigned long flags;
 
-	while ((skb = skb_dequeue(queue)))
-		dev_kfree_skb(skb);
+	skb_queue_purge(queue);
 	save_flags(flags);
 	cli();
 	card->xlen[channel] = 0;
@@ -607,7 +614,7 @@ icn_polldchan(unsigned long data)
 	int left;
 	u_char c;
 	int ch;
-	int flags;
+	unsigned long flags;
 	int i;
 	u_char *p;
 	isdn_ctrl cmd;
@@ -804,8 +811,8 @@ static int
 icn_loadboot(u_char * buffer, icn_card * card)
 {
 	int ret;
-	ulong flags;
 	u_char *codebuf;
+	unsigned long flags;
 
 #ifdef BOOT_DEBUG
 	printk(KERN_DEBUG "icn_loadboot called, buffaddr=%08lx\n", (ulong) buffer);
@@ -818,8 +825,6 @@ icn_loadboot(u_char * buffer, icn_card * card)
 		kfree(codebuf);
 		return ret;
 	}
-	save_flags(flags);
-	cli();
 	if (!card->rvalid) {
 		if (check_region(card->port, ICN_PORTLEN)) {
 			printk(KERN_WARNING
@@ -827,7 +832,6 @@ icn_loadboot(u_char * buffer, icn_card * card)
 			       CID,
 			       card->port,
 			       card->port + ICN_PORTLEN);
-			restore_flags(flags);
 			kfree(codebuf);
 			return -EBUSY;
 		}
@@ -837,23 +841,21 @@ icn_loadboot(u_char * buffer, icn_card * card)
 			card->other->rvalid = 1;
 	}
 	if (!dev.mvalid) {
-		if (check_shmem((ulong) dev.shmem, 0x4000)) {
+		if (check_mem_region(dev.memaddr, 0x4000)) {
 			printk(KERN_WARNING
-			       "icn: memory at 0x%08lx in use.\n",
-			       (ulong) dev.shmem);
-			restore_flags(flags);
+			       "icn: memory at 0x%08lx in use.\n", dev.memaddr);
 			return -EBUSY;
 		}
-		request_shmem((ulong) dev.shmem, 0x4000, "icn");
+		request_mem_region(dev.memaddr, 0x4000, "icn-isdn (all cards)");
+		dev.shmem = ioremap(dev.memaddr, 0x4000);
 		dev.mvalid = 1;
 	}
-	restore_flags(flags);
 	OUTB_P(0, ICN_RUN);     /* Reset Controller */
 	OUTB_P(0, ICN_MAPRAM);  /* Disable RAM      */
 	icn_shiftout(ICN_CFG, 0x0f, 3, 4);	/* Windowsize= 16k  */
-	icn_shiftout(ICN_CFG, (unsigned long) dev.shmem, 23, 10);	/* Set RAM-Addr.    */
+	icn_shiftout(ICN_CFG, dev.memaddr, 23, 10);	/* Set RAM-Addr.    */
 #ifdef BOOT_DEBUG
-	printk(KERN_DEBUG "shmem=%08lx\n", (ulong) dev.shmem);
+	printk(KERN_DEBUG "shmem=%08lx\n", dev.memaddr);
 #endif
 	SLEEP(1);
 #ifdef BOOT_DEBUG
@@ -867,7 +869,7 @@ icn_loadboot(u_char * buffer, icn_card * card)
 	SLEEP(1);
 	memcpy_toio(dev.shmem, codebuf, ICN_CODE_STAGE1);	/* Copy code        */
 #ifdef BOOT_DEBUG
-	printk(KERN_DEBUG "Bootloader transfered\n");
+	printk(KERN_DEBUG "Bootloader transferred\n");
 #endif
 	if (card->doubleS0) {
 		SLEEP(1);
@@ -883,7 +885,7 @@ icn_loadboot(u_char * buffer, icn_card * card)
 		SLEEP(1);
 		memcpy_toio(dev.shmem, codebuf, ICN_CODE_STAGE1);	/* Copy code        */
 #ifdef BOOT_DEBUG
-		printk(KERN_DEBUG "Bootloader transfered\n");
+		printk(KERN_DEBUG "Bootloader transferred\n");
 #endif
 	}
 	kfree(codebuf);
@@ -935,7 +937,9 @@ icn_loadproto(u_char * buffer, icn_card * card)
 	restore_flags(flags);
 	while (left) {
 		if (sbfree) {   /* If there is a free buffer...  */
-			cnt = MIN(256, left);
+			cnt = left;
+			if (cnt > 256)
+				cnt = 256;
 			if (copy_from_user(codebuf, p, cnt)) {
 				icn_maprelease_channel(card, 0);
 				return -EFAULT;
@@ -1034,7 +1038,6 @@ static int
 icn_writecmd(const u_char * buf, int len, int user, icn_card * card)
 {
 	int mch = card->secondhalf ? 2 : 0;
-	int avail;
 	int pp;
 	int i;
 	int count;
@@ -1051,18 +1054,20 @@ icn_writecmd(const u_char * buf, int len, int user, icn_card * card)
 	ocount = 1;
 	xcount = loop = 0;
 	while (len) {
+		count = cmd_free;
+		if (count > len)
+			count = len;
+		if (user)
+			copy_from_user(msg, buf, count);
+		else
+			memcpy(msg, buf, count);
+
 		save_flags(flags);
 		cli();
 		lastmap_card = dev.mcard;
 		lastmap_channel = dev.channel;
 		icn_map_channel(card, mch);
 
-		avail = cmd_free;
-		count = MIN(avail, len);
-		if (user)
-			copy_from_user(msg, buf, count);
-		else
-			memcpy(msg, buf, count);
 		icn_putmsg(card, '>');
 		for (p = msg, pp = readb(&cmd_i), i = count; i > 0; i--, p++, pp
 		     ++) {
@@ -1140,10 +1145,7 @@ static void
 icn_disable_cards(void)
 {
 	icn_card *card = cards;
-	unsigned long flags;
 
-	save_flags(flags);
-	cli();
 	while (card) {
 		if (check_region(card->port, ICN_PORTLEN)) {
 			printk(KERN_WARNING
@@ -1151,14 +1153,12 @@ icn_disable_cards(void)
 			       CID,
 			       card->port,
 			       card->port + ICN_PORTLEN);
-			cli();
 		} else {
 			OUTB_P(0, ICN_RUN);	/* Reset Controller     */
 			OUTB_P(0, ICN_MAPRAM);	/* Disable RAM          */
 		}
 		card = card->next;
 	}
-	restore_flags(flags);
 }
 
 static int
@@ -1176,29 +1176,31 @@ icn_command(isdn_ctrl * c, icn_card * card)
 			memcpy(&a, c->parm.num, sizeof(ulong));
 			switch (c->arg) {
 				case ICN_IOCTL_SETMMIO:
-					if ((unsigned long) dev.shmem != (a & 0x0ffc000)) {
-						if (check_shmem((ulong) (a & 0x0ffc000), 0x4000)) {
+					if (dev.memaddr != (a & 0x0ffc000)) {
+						if (check_mem_region(a & 0x0ffc000, 0x4000)) {
 							printk(KERN_WARNING
 							       "icn: memory at 0x%08lx in use.\n",
-							       (ulong) (a & 0x0ffc000));
+							       a & 0x0ffc000);
 							return -EINVAL;
 						}
 						icn_stopallcards();
 						save_flags(flags);
 						cli();
-						if (dev.mvalid)
-							release_shmem((ulong) dev.shmem, 0x4000);
+						if (dev.mvalid) {
+							iounmap(dev.shmem);
+							release_mem_region(dev.memaddr, 0x4000);
+						}
 						dev.mvalid = 0;
-						dev.shmem = (icn_shmem *) (a & 0x0ffc000);
+						dev.memaddr = a & 0x0ffc000;
 						restore_flags(flags);
 						printk(KERN_INFO
 						       "icn: (%s) mmio set to 0x%08lx\n",
 						       CID,
-						       (unsigned long) dev.shmem);
+						       dev.memaddr);
 					}
 					break;
 				case ICN_IOCTL_GETMMIO:
-					return (long) dev.shmem;
+					return (long) dev.memaddr;
 				case ICN_IOCTL_SETPORT:
 					if (a == 0x300 || a == 0x310 || a == 0x320 || a == 0x330
 					    || a == 0x340 || a == 0x350 || a == 0x360 ||
@@ -1601,25 +1603,19 @@ icn_initcard(int port, char *id)
 static int
 icn_addcard(int port, char *id1, char *id2)
 {
-	ulong flags;
 	icn_card *card;
 	icn_card *card2;
 
-	save_flags(flags);
-	cli();
 	if (!(card = icn_initcard(port, id1))) {
-		restore_flags(flags);
 		return -EIO;
 	}
 	if (!strlen(id2)) {
-		restore_flags(flags);
 		printk(KERN_INFO
 		       "icn: (%s) ICN-2B, port 0x%x added\n",
 		       card->interface.id, port);
 		return 0;
 	}
 	if (!(card2 = icn_initcard(port, id2))) {
-		restore_flags(flags);
 		printk(KERN_INFO
 		       "icn: (%s) half ICN-4B, port 0x%x added\n",
 		       card2->interface.id, port);
@@ -1631,17 +1627,13 @@ icn_addcard(int port, char *id1, char *id2)
 	card2->doubleS0 = 1;
 	card2->secondhalf = 1;
 	card2->other = card;
-	restore_flags(flags);
 	printk(KERN_INFO
 	       "icn: (%s and %s) ICN-4B, port 0x%x added\n",
 	       card->interface.id, card2->interface.id, port);
 	return 0;
 }
 
-#ifdef MODULE
-#define icn_init init_module
-#else
-#include <linux/init.h>
+#ifndef MODULE
 static int __init
 icn_setup(char *line)
 {
@@ -1654,7 +1646,7 @@ icn_setup(char *line)
 	if (ints[0])
 		portbase = ints[1];
 	if (ints[0] > 1)
-		membase = ints[2];
+		membase = (unsigned long)ints[2];
 	if (str && *str) {
 		strcpy(sid, str);
 		icn_id = sid;
@@ -1667,22 +1659,18 @@ icn_setup(char *line)
 	return(1);
 }
 __setup("icn=", icn_setup);
-#endif /* MODULES */
+#endif /* MODULE */
 
-int
-icn_init(void)
+static int __init icn_init(void)
 {
 	char *p;
 	char rev[10];
 
 	memset(&dev, 0, sizeof(icn_dev));
-	dev.shmem = (icn_shmem *) ((unsigned long) membase & 0x0ffc000);
+	dev.memaddr = (membase & 0x0ffc000);
 	dev.channel = -1;
 	dev.mcard = NULL;
 	dev.firstload = 1;
-
-	/* No symbols to export, hide all symbols */
-	EXPORT_NO_SYMBOLS;
 
 	if ((p = strchr(revision, ':'))) {
 		strcpy(rev, p + 1);
@@ -1691,13 +1679,11 @@ icn_init(void)
 	} else
 		strcpy(rev, " ??? ");
 	printk(KERN_NOTICE "ICN-ISDN-driver Rev%smem=0x%08lx\n", rev,
-	       (ulong) dev.shmem);
+	       dev.memaddr);
 	return (icn_addcard(portbase, icn_id, icn_id2));
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void __exit icn_exit(void)
 {
 	isdn_ctrl cmd;
 	icn_card *card = cards;
@@ -1727,8 +1713,12 @@ cleanup_module(void)
 		card = card->next;
 		kfree(last);
 	}
-	if (dev.mvalid)
-		release_shmem((ulong) dev.shmem, 0x4000);
+	if (dev.mvalid) {
+		iounmap(dev.shmem);
+		release_mem_region(dev.memaddr, 0x4000);
+	}
 	printk(KERN_NOTICE "ICN-ISDN-driver unloaded\n");
 }
-#endif
+
+module_init(icn_init);
+module_exit(icn_exit);

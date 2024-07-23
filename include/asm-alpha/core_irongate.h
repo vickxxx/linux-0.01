@@ -50,13 +50,14 @@ typedef struct {
 
 	igcsr32 bacsr10;		/* 0x40 - base address chip selects */
 	igcsr32 bacsr32;		/* 0x44 - base address chip selects */
-	igcsr32 bacsr54;		/* 0x48 - base address chip selects */
+	igcsr32 bacsr54_eccms761;	/* 0x48 - 751: base addr. chip selects
+						  761: ECC, mode/status */
 
 	igcsr32 rsrvd2[1];		/* 0x4C-0x4F reserved */
 
 	igcsr32 drammap;		/* 0x50 - address mapping control */
 	igcsr32 dramtm;			/* 0x54 - timing, driver strength */
-	igcsr32 dramms;			/* 0x58 - ECC, mode/status */
+	igcsr32 dramms;			/* 0x58 - DRAM mode/status */
 
 	igcsr32 rsrvd3[1];		/* 0x5C-0x5F reserved */
 
@@ -73,7 +74,10 @@ typedef struct {
 	igcsr32 pciarb;			/* 0x84 - PCI arbitration control */
 	igcsr32 pcicfg;			/* 0x88 - PCI config status */
 
-	igcsr32 rsrvd6[5];		/* 0x8C-0x9F reserved */
+	igcsr32 rsrvd6[4];		/* 0x8C-0x9B reserved */
+
+	igcsr32 pci_mem;		/* 0x9C - PCI top of memory,
+						  761 only */
 
 	/* AGP (bus 1) control registers */
 	igcsr32 agpcap;			/* 0xA0 - AGP Capability Identifier */
@@ -102,6 +106,7 @@ typedef struct {
 
 } Irongate1;
 
+extern igcsr32 *IronECC;
 
 /*
  * Memory spaces:
@@ -190,34 +195,34 @@ struct el_IRONGATE_sysdata_mcheck {
 #define vuip	volatile unsigned int *
 #define vulp	volatile unsigned long *
 
-__EXTERN_INLINE unsigned int irongate_inb(unsigned long addr)
+__EXTERN_INLINE u8 irongate_inb(unsigned long addr)
 {
 	return __kernel_ldbu(*(vucp)(addr + IRONGATE_IO));
 }
 
-__EXTERN_INLINE void irongate_outb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void irongate_outb(u8 b, unsigned long addr)
 {
         __kernel_stb(b, *(vucp)(addr + IRONGATE_IO));
 	mb();
 }
 
-__EXTERN_INLINE unsigned int irongate_inw(unsigned long addr)
+__EXTERN_INLINE u16 irongate_inw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)(addr + IRONGATE_IO));
 }
 
-__EXTERN_INLINE void irongate_outw(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void irongate_outw(u16 b, unsigned long addr)
 {
         __kernel_stw(b, *(vusp)(addr + IRONGATE_IO));
 	mb();
 }
 
-__EXTERN_INLINE unsigned int irongate_inl(unsigned long addr)
+__EXTERN_INLINE u32 irongate_inl(unsigned long addr)
 {
 	return *(vuip)(addr + IRONGATE_IO);
 }
 
-__EXTERN_INLINE void irongate_outl(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void irongate_outl(u32 b, unsigned long addr)
 {
         *(vuip)(addr + IRONGATE_IO) = b;
 	mb();
@@ -227,50 +232,48 @@ __EXTERN_INLINE void irongate_outl(unsigned int b, unsigned long addr)
  * Memory functions.  All accesses are done through linear space.
  */
 
-__EXTERN_INLINE unsigned long irongate_readb(unsigned long addr)
+__EXTERN_INLINE u8 irongate_readb(unsigned long addr)
 {
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE unsigned long irongate_readw(unsigned long addr)
+__EXTERN_INLINE u16 irongate_readw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE unsigned long irongate_readl(unsigned long addr)
+__EXTERN_INLINE u32 irongate_readl(unsigned long addr)
 {
-	return *(vuip)addr;
+	return (*(vuip)addr) & 0xffffffff;
 }
 
-__EXTERN_INLINE unsigned long irongate_readq(unsigned long addr)
+__EXTERN_INLINE u64 irongate_readq(unsigned long addr)
 {
 	return *(vulp)addr;
 }
 
-__EXTERN_INLINE void irongate_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void irongate_writeb(u8 b, unsigned long addr)
 {
 	__kernel_stb(b, *(vucp)addr);
 }
 
-__EXTERN_INLINE void irongate_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void irongate_writew(u16 b, unsigned long addr)
 {
 	__kernel_stw(b, *(vusp)addr);
 }
 
-__EXTERN_INLINE void irongate_writel(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void irongate_writel(u32 b, unsigned long addr)
 {
 	*(vuip)addr = b;
 }
 
-__EXTERN_INLINE void irongate_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void irongate_writeq(u64 b, unsigned long addr)
 {
 	*(vulp)addr = b;
 }
 
-__EXTERN_INLINE unsigned long irongate_ioremap(unsigned long addr)
-{
-	return addr + IRONGATE_MEM;
-}
+extern unsigned long irongate_ioremap(unsigned long addr, unsigned long size);
+extern void irongate_iounmap(unsigned long addr);
 
 __EXTERN_INLINE int irongate_is_ioaddr(unsigned long addr)
 {
@@ -298,7 +301,8 @@ __EXTERN_INLINE int irongate_is_ioaddr(unsigned long addr)
 #define __writew(x,a)		irongate_writew((x),(unsigned long)(a))
 #define __writel(x,a)		irongate_writel((x),(unsigned long)(a))
 #define __writeq(x,a)		irongate_writeq((x),(unsigned long)(a))
-#define __ioremap(a)		irongate_ioremap((unsigned long)(a))
+#define __ioremap(a,s)		irongate_ioremap((unsigned long)(a),(s))
+#define __iounmap(a)		irongate_iounmap((unsigned long)(a))
 #define __is_ioaddr(a)		irongate_is_ioaddr((unsigned long)(a))
 
 #define inb(p)			__inb(p)

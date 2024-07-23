@@ -1,6 +1,20 @@
 #ifndef _ACENIC_H_
 #define _ACENIC_H_
 
+#include <linux/config.h>
+
+/*
+ * Generate TX index update each time, when TX ring is closed.
+ * Normally, this is not useful, because results in more dma (and irqs
+ * without TX_COAL_INTS_ONLY).
+ */
+#define USE_TX_COAL_NOW	 0
+
+#ifndef MAX_SKB_FRAGS
+#define MAX_SKB_FRAGS 0
+#endif
+
+
 /*
  * Addressing:
  *
@@ -193,8 +207,8 @@ typedef struct {
 /*
  * udelay() values for when clocking the eeprom
  */
-#define ACE_SHORT_DELAY		1
-#define ACE_LONG_DELAY		2
+#define ACE_SHORT_DELAY		2
+#define ACE_LONG_DELAY		4
 
 
 /*
@@ -258,7 +272,12 @@ typedef struct {
  * DMA config
  */
 
+#define DMA_THRESH_1W		0x10
+#define DMA_THRESH_2W		0x20
+#define DMA_THRESH_4W		0x40
 #define DMA_THRESH_8W		0x80
+#define DMA_THRESH_16W		0x100
+#define DMA_THRESH_32W		0x0	/* not described in doc, but exists. */
 
 
 /*
@@ -398,7 +417,17 @@ struct cmd {
 #define BD_FLG_TCP_UDP_SUM	0x01
 #define BD_FLG_IP_SUM		0x02
 #define BD_FLG_END		0x04
+#define BD_FLG_MORE		0x08
 #define BD_FLG_JUMBO		0x10
+#define BD_FLG_UCAST		0x20
+#define BD_FLG_MCAST		0x40
+#define BD_FLG_BCAST		0x60
+#define BD_FLG_TYP_MASK		0x60
+#define BD_FLG_IP_FRAG		0x80
+#define BD_FLG_IP_FRAG_END	0x100
+#define BD_FLG_VLAN_TAG		0x200
+#define BD_FLG_FRAME_ERROR	0x400
+#define BD_FLG_COAL_NOW		0x800
 #define BD_FLG_MINI		0x1000
 
 
@@ -407,6 +436,7 @@ struct cmd {
  */
 #define RCB_FLG_TCP_UDP_SUM	0x01
 #define RCB_FLG_IP_SUM		0x02
+#define RCB_FLG_NO_PSEUDO_HDR	0x08
 #define RCB_FLG_VLAN_ASSIST	0x10
 #define RCB_FLG_COAL_INT_ONLY	0x20
 #define RCB_FLG_TX_HOST_RING	0x40
@@ -416,11 +446,12 @@ struct cmd {
 
 
 /*
- * TX ring
+ * TX ring - maximum TX ring entries for Tigon I's is 128
  */
-#define TX_RING_ENTRIES	256	
-#define TX_RING_SIZE	(TX_RING_ENTRIES * sizeof(struct tx_desc))
-#define TX_RING_BASE	0x3800
+#define MAX_TX_RING_ENTRIES	256
+#define TIGON_I_TX_RING_ENTRIES	128
+#define TX_RING_SIZE		(MAX_TX_RING_ENTRIES * sizeof(struct tx_desc))
+#define TX_RING_BASE		0x3800
 
 struct tx_desc{
         aceaddr	addr;
@@ -564,7 +595,19 @@ struct ace_info {
 
 struct ring_info {
 	struct sk_buff		*skb;
-	dma_addr_t		mapping;
+	DECLARE_PCI_UNMAP_ADDR(mapping)
+};
+
+
+/*
+ * Funny... As soon as we add maplen on alpha, it starts to work
+ * much slower. Hmm... is it because struct does not fit to one cacheline?
+ * So, split tx_ring_info.
+ */
+struct tx_ring_info {
+	struct sk_buff		*skb;
+	DECLARE_PCI_UNMAP_ADDR(mapping)
+	DECLARE_PCI_UNMAP_LEN(maplen)
 };
 
 
@@ -575,7 +618,7 @@ struct ring_info {
  */
 struct ace_skb
 {
-	struct ring_info	tx_skbuff[TX_RING_ENTRIES];
+	struct tx_ring_info	tx_skbuff[MAX_TX_RING_ENTRIES];
 	struct ring_info	rx_std_skbuff[RX_STD_RING_ENTRIES];
 	struct ring_info	rx_mini_skbuff[RX_MINI_RING_ENTRIES];
 	struct ring_info	rx_jumbo_skbuff[RX_JUMBO_RING_ENTRIES];
@@ -605,11 +648,10 @@ struct ace_private
 	/*
 	 * TX elements
 	 */
-	struct tx_desc		*tx_ring
-				__attribute__ ((aligned (SMP_CACHE_BYTES)));
-	struct timer_list	timer;		/* used by TX handling only */
+	struct tx_desc		*tx_ring;
 	u32			tx_prd;
-	volatile u32		tx_full, tx_ret_csm;
+	volatile u32		tx_ret_csm;
+	int			tx_ring_entries;
 
 	/*
 	 * RX elements
@@ -627,6 +669,10 @@ struct ace_private
 	struct rx_desc		*rx_jumbo_ring;
 	struct rx_desc		*rx_mini_ring;
 	struct rx_desc		*rx_return_ring;
+
+#if ACENIC_DO_VLAN
+	struct vlan_group	*vlgrp;
+#endif
 
 	int			tasklet_pending, jumbo;
 	struct tasklet_struct	ace_tasklet;
@@ -654,36 +700,33 @@ struct ace_private
 	u32			last_tx, last_std_rx, last_mini_rx;
 #endif
 	struct net_device_stats stats;
+	int			pci_using_dac;
 };
+
+
+#define TX_RESERVED	MAX_SKB_FRAGS
+
+static inline int tx_space (struct ace_private *ap, u32 csm, u32 prd)
+{
+	return (csm - prd - 1) & (ACE_TX_RING_ENTRIES(ap) - 1);
+}
+
+#define tx_free(ap) 		tx_space((ap)->tx_ret_csm, (ap)->tx_prd, ap)
+
+#if MAX_SKB_FRAGS
+#define tx_ring_full(ap, csm, prd)	(tx_space(ap, csm, prd) <= TX_RESERVED)
+#else
+#define tx_ring_full			0
+#endif
 
 
 static inline void set_aceaddr(aceaddr *aa, dma_addr_t addr)
 {
-	unsigned long baddr = (unsigned long) addr;
-#ifdef ACE_64BIT_PTR
+	u64 baddr = (u64) addr;
 	aa->addrlo = baddr & 0xffffffff;
 	aa->addrhi = baddr >> 32;
-#else
-	/* Don't bother setting zero every time */
-	aa->addrlo = baddr;
-#endif
-	mb();
+	wmb();
 }
-
-
-#if 0
-static inline void *get_aceaddr(aceaddr *aa)
-{
-	unsigned long addr;
-	mb();
-#ifdef ACE_64BIT_PTR
-	addr = (u64)aa->addrhi << 32 | aa->addrlo;
-#else
-	addr = aa->addrlo;
-#endif
-	return (void *)addr;
-}
-#endif
 
 
 static inline void ace_set_txprd(struct ace_regs *regs,
@@ -705,6 +748,32 @@ static inline void ace_set_txprd(struct ace_regs *regs,
 }
 
 
+static inline void ace_mask_irq(struct net_device *dev)
+{
+	struct ace_private *ap = dev->priv;
+	struct ace_regs *regs = ap->regs;
+
+	if (ACE_IS_TIGON_I(ap))
+		writel(1, &regs->MaskInt);
+	else
+		writel(readl(&regs->HostCtrl) | MASK_INTS, &regs->HostCtrl);
+
+	ace_sync_irq(dev->irq);
+}
+
+
+static inline void ace_unmask_irq(struct net_device *dev)
+{
+	struct ace_private *ap = dev->priv;
+	struct ace_regs *regs = ap->regs;
+ 
+	if (ACE_IS_TIGON_I(ap))
+		writel(0, &regs->MaskInt);
+	else
+		writel(readl(&regs->HostCtrl) & ~MASK_INTS, &regs->HostCtrl);
+}
+
+
 /*
  * Prototypes
  */
@@ -717,14 +786,10 @@ static int ace_load_firmware(struct net_device *dev);
 static int ace_open(struct net_device *dev);
 static int ace_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int ace_close(struct net_device *dev);
-static void ace_timer(unsigned long data);
 static void ace_tasklet(unsigned long dev);
 static void ace_dump_trace(struct ace_private *ap);
 static void ace_set_multicast_list(struct net_device *dev);
 static int ace_change_mtu(struct net_device *dev, int new_mtu);
-#ifdef SKB_RECYCLE
-extern int ace_recycle(struct sk_buff *skb);
-#endif
 static int ace_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int ace_set_mac_addr(struct net_device *dev, void *p);
 static void ace_set_rxtx_parms(struct net_device *dev, int jumbo);
@@ -733,5 +798,9 @@ static void ace_free_descriptors(struct net_device *dev);
 static void ace_init_cleanup(struct net_device *dev);
 static struct net_device_stats *ace_get_stats(struct net_device *dev);
 static int read_eeprom_byte(struct net_device *dev, unsigned long offset);
+#if ACENIC_DO_VLAN
+static void ace_vlan_rx_register(struct net_device *dev, struct vlan_group *grp);
+static void ace_vlan_rx_kill_vid(struct net_device *dev, unsigned short vid);
+#endif
 
 #endif /* _ACENIC_H_ */

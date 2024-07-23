@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -38,7 +37,7 @@
  *	to write an integer number of pages.
  */
 struct user {
-	unsigned long	regs[EF_SIZE/4+64];	/* integer and fp regs */
+	unsigned long	regs[EF_SIZE/8+64];	/* integer and fp regs */
 	size_t		u_tsize;		/* text size (pages) */
 	size_t		u_dsize;		/* data size (pages) */
 	size_t		u_ssize;		/* stack size (pages) */

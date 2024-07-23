@@ -2,15 +2,10 @@
 # Makefile for all Linux ACPI interpreter subdirectories
 #
 
-O_TARGET := ../$(shell basename `pwd`).o
+O_TARGET := $(notdir $(CURDIR)).o
 
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
-
-EXTRA_CFLAGS += -I../include
+obj-$(CONFIG_ACPI_INTERPRETER) := $(patsubst %.c,%.o,$(wildcard *.c))
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
 
 include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o 

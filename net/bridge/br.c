@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br.c,v 1.45 2000/10/22 18:26:07 davem Exp $
+ *	$Id: br.c,v 1.46.2.1 2001/12/24 00:56:13 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -21,6 +21,8 @@
 #include <linux/etherdevice.h>
 #include <linux/init.h>
 #include <linux/if_bridge.h>
+#include <linux/brlock.h>
+#include <linux/rtnetlink.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
 
@@ -43,9 +45,7 @@ static int __init br_init(void)
 	printk(KERN_INFO "NET4: Ethernet Bridge 008 for NET4.0\n");
 
 	br_handle_frame_hook = br_handle_frame;
-#ifdef CONFIG_INET
 	br_ioctl_hook = br_ioctl_deviceless_stub;
-#endif
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = br_fdb_get;
 	br_fdb_put_hook = br_fdb_put;
@@ -55,23 +55,18 @@ static int __init br_init(void)
 	return 0;
 }
 
-static void __br_clear_frame_hook(void)
-{
-	br_handle_frame_hook = NULL;
-}
-
-static void __br_clear_ioctl_hook(void)
-{
-#ifdef CONFIG_INET
-	br_ioctl_hook = NULL;
-#endif	
-}
-
 static void __exit br_deinit(void)
 {
 	unregister_netdevice_notifier(&br_device_notifier);
-	br_call_ioctl_atomic(__br_clear_ioctl_hook);
-	net_call_rx_atomic(__br_clear_frame_hook);
+
+	rtnl_lock();
+	br_ioctl_hook = NULL;
+	rtnl_unlock();
+
+	br_write_lock_bh(BR_NETPROTO_LOCK);
+	br_handle_frame_hook = NULL;
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
+
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = NULL;
 	br_fdb_put_hook = NULL;
@@ -82,3 +77,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(br_init)
 module_exit(br_deinit)
+MODULE_LICENSE("GPL");

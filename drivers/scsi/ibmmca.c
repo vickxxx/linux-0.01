@@ -16,6 +16,7 @@
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
 #error "This driver works only with kernel 2.4.0 or higher!"
 #endif
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ctype.h>
@@ -38,7 +39,7 @@
 #include <linux/config.h>
 
 /* current version of this driver-source: */
-#define IBMMCA_SCSI_DRIVER_VERSION "4.0a"
+#define IBMMCA_SCSI_DRIVER_VERSION "4.0b"
 
 #define IBMLOCK spin_lock_irqsave(&io_request_lock, flags);
 #define IBMUNLOCK spin_unlock_irqrestore(&io_request_lock, flags);
@@ -49,7 +50,7 @@
 
 /* driver debugging - #undef all for normal operation */
 /* if defined: count interrupts and ignore this special one: */
-#undef	IM_DEBUG_TIMEOUT	50            
+#undef	IM_DEBUG_TIMEOUT	//50            
 #define TIMEOUT_PUN	0
 #define TIMEOUT_LUN	0
 /* verbose interrupt: */
@@ -443,7 +444,6 @@ static int scsi_id[IM_MAX_HOSTS] = { 7, 7, 7, 7, 7, 7, 7, 7 };
    (that is kernel version 2.1.x) */
 #if defined(MODULE)
 static char *boot_options = NULL;
-#include <linux/module.h>
 MODULE_PARM(boot_options, "s");
 MODULE_PARM(io_port, "1-" __MODULE_STRING(IM_MAX_HOSTS) "i");
 MODULE_PARM(scsi_id, "1-" __MODULE_STRING(IM_MAX_HOSTS) "i");
@@ -1594,7 +1594,7 @@ int ibmmca_detect (Scsi_Host_Template * scsi_template)
       if ((pos[2] & 1) == 1) /* is the subsystem chip enabled ? */
 	port = IM_IO_PORT;
       else { /* if disabled, no IRQs will be generated, as the chip won't
-	      * listen to the incomming commands and will do really nothing,
+	      * listen to the incoming commands and will do really nothing,
 	      * except for listening to the pos-register settings. If this
 	      * happens, I need to hugely think about it, as one has to
 	      * write something to the MCA-Bus pos register in order to
@@ -2563,9 +2563,6 @@ static int option_setup(char *str)
 
 __setup("ibmmcascsi=", option_setup);
 
-#ifdef MODULE
-/* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = IBMMCA;
+static Scsi_Host_Template driver_template = IBMMCA;
 
 #include "scsi_module.c"
-#endif

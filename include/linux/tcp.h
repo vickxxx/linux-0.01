@@ -110,7 +110,7 @@ enum {
 	TCP_FLAG_RST = __constant_htonl(0x00040000), 
 	TCP_FLAG_SYN = __constant_htonl(0x00020000), 
 	TCP_FLAG_FIN = __constant_htonl(0x00010000),
-	TCP_RESERVED_BITS = __constant_htonl(0x0FC00000),
+	TCP_RESERVED_BITS = __constant_htonl(0x0F000000),
 	TCP_DATA_OFFSET = __constant_htonl(0xF0000000)
 }; 
 
@@ -126,6 +126,7 @@ enum {
 #define TCP_DEFER_ACCEPT	9	/* Wake up listener only when data arrive */
 #define TCP_WINDOW_CLAMP	10	/* Bound advertised window */
 #define TCP_INFO		11	/* Information about this connection. */
+#define TCP_QUICKACK		12	/* Block/reenable quick acks */
 
 #define TCPI_OPT_TIMESTAMPS	1
 #define TCPI_OPT_SACK		2

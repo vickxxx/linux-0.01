@@ -82,7 +82,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/zorro.h>
 #include <linux/fb.h>
@@ -110,7 +110,7 @@ static void cv64_dump(void);
 #define wb_64(regs,reg,dat) (*(((volatile unsigned char *)regs) + reg) = dat)
 #define rb_64(regs, reg) (*(((volatile unsigned char *)regs) + reg))
 
-#define ww_64(regs,reg,dat) (*((volatile unsigned short *)(regs + reg) = dat)
+#define ww_64(regs,reg,dat) (*(volatile unsigned short *)(regs + reg) = dat)
 
 struct cyberfb_par {
 	struct fb_var_screeninfo var;
@@ -1022,8 +1022,9 @@ int __init cyberfb_setup(char *options)
 		return 0;
 	}
 
-	for (this_opt = strtok(options, ","); this_opt;
-	     this_opt = strtok(NULL, ",")) {
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!*this_opt)
+			continue;
 		if (!strcmp(this_opt, "inverse")) {
 			Cyberfb_inverse = 1;
 			fb_invert_cmaps();
@@ -1251,6 +1252,8 @@ static struct display_switch fbcon_cyber8 = {
 
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
 	return cyberfb_init();

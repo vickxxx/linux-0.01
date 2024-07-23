@@ -1,4 +1,4 @@
-/* $Id: pcic.c,v 1.20 2000/12/05 00:56:36 anton Exp $
+/* $Id: pcic.c,v 1.22.2.1 2002/01/23 14:35:45 davem Exp $
  * pcic.c: Sparc/PCI controller support
  *
  * Copyright (C) 1998 V. Roganov and G. Raiko
@@ -15,7 +15,7 @@
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/ebus.h>
 #include <asm/sbus.h> /* for sanity check... */
@@ -185,7 +185,7 @@ static struct pcic_sn2list pcic_known_sysnames[] = {
  * Only one PCIC per IIep,
  * and since we have no SMP IIep, only one per system.
  */
-static int pcic0_up = 0;
+static int pcic0_up;
 static struct linux_pcic pcic0;
 
 unsigned int pcic_regs;
@@ -759,7 +759,6 @@ void __init pci_time_init(void)
 	unsigned long v;
 	int timer_irq, irq;
 
-	do_get_fast_time = pci_do_gettimeofday;
 	/* A hack until do_gettimeofday prototype is moved to arch specific headers
 	   and btfixupped. Patch do_gettimeofday with ba pci_do_gettimeofday; nop */
 	((unsigned int *)do_gettimeofday)[0] = 
@@ -866,11 +865,12 @@ void pcibios_update_resource(struct pci_dev *pdev, struct resource *res1,
 {
 }
 
-void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
+void pcibios_align_resource(void *data, struct resource *res,
+			    unsigned long size, unsigned long align)
 {
 }
 
-int pcibios_enable_device(struct pci_dev *pdev)
+int pcibios_enable_device(struct pci_dev *pdev, int mask)
 {
 	return 0;
 }
@@ -897,93 +897,6 @@ void pcic_nmi(unsigned int pend, struct pt_regs *regs)
 	regs->pc = regs->npc;
 	regs->npc += 4;
 }
-
-/*
- * XXX  Gleb wrote me that he needs this for X server (only).
- * Since we successfuly use XF86_FBDev, we do not need these anymore.
- *
- *  Following code added to handle extra PCI-related system calls 
- */
-asmlinkage int sys_pciconfig_read(unsigned long bus,
-				  unsigned long dfn,
-				  unsigned long off,
-				  unsigned long len,
-				  unsigned char *buf)
-{
-	unsigned char ubyte;
-	unsigned short ushort;
-	unsigned int uint;
-	int err = 0;
-
-	if(!suser())
-		return -EPERM;
-
-	switch(len) {
-	case 1:
-		pcibios_read_config_byte(bus, dfn, off, &ubyte);
-		put_user(ubyte, (unsigned char *)buf);
-		break;
-	case 2:
-		pcibios_read_config_word(bus, dfn, off, &ushort);
-		put_user(ushort, (unsigned short *)buf);
-		break;
-	case 4:
-		pcibios_read_config_dword(bus, dfn, off, &uint);
-		put_user(uint, (unsigned int *)buf);
-		break;
-
-	default:
-		err = -EINVAL;
-		break;
-	};
-
-	return err;
-}
-
-asmlinkage int sys_pciconfig_write(unsigned long bus,
-				   unsigned long dfn,
-				   unsigned long off,
-				   unsigned long len,
-				   unsigned char *buf)
-{
-	unsigned char ubyte;
-	unsigned short ushort;
-	unsigned int uint;
-	int err = 0;
-
-	if(!suser())
-		return -EPERM;
-
-	switch(len) {
-	case 1:
-		err = get_user(ubyte, (unsigned char *)buf);
-		if(err)
-			break;
-		pcibios_write_config_byte(bus, dfn, off, ubyte);
-		break;
-
-	case 2:
-		err = get_user(ushort, (unsigned short *)buf);
-		if(err)
-			break;
-		pcibios_write_config_byte(bus, dfn, off, ushort);
-		break;
-
-	case 4:
-		err = get_user(uint, (unsigned int *)buf);
-		if(err)
-			break;
-		pcibios_write_config_byte(bus, dfn, off, uint);
-		break;
-
-	default:
-		err = -EINVAL;
-		break;
-
-	};
-
-	return err;
-}			   
 
 static inline unsigned long get_irqmask(int irq_nr)
 {

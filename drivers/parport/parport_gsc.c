@@ -7,17 +7,19 @@
  *      the Free Software Foundation; either version 2 of the License, or
  *      (at your option) any later version.
  *
- *	by Helge Deller <deller@gmx.de>
+ *	(C) 1999-2001 by Helge Deller <deller@gmx.de>
  *
  * 
  * based on parport_pc.c by 
  * 	    Grant Guenther <grant@torque.net>
- * 	    Phil Blundell <Philip.Blundell@pobox.com>
+ * 	    Phil Blundell <philb@gnu.org>
  *          Tim Waugh <tim@cyberelk.demon.co.uk>
  *	    Jose Renau <renau@acm.org>
  *          David Campbell <campbell@torque.net>
  *          Andrea Arcangeli
  */
+
+#undef DEBUG	/* undef for production */
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -27,13 +29,14 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/sysctl.h>
 
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/uaccess.h>
+#include <asm/superio.h>
 
 #include <linux/parport.h>
 #include <asm/gsc.h>
@@ -42,13 +45,10 @@
 #include <asm/parport_gsc.h>
 
 
-#undef DEBUG	/* undef for production */
-
-#ifdef DEBUG
-#define DPRINTK  printk
-#else
-#define DPRINTK(stuff...)
-#endif
+MODULE_AUTHOR("Helge Deller <deller@gmx.de>");
+MODULE_DESCRIPTION("HP-PARISC PC-style parallel port driver");
+MODULE_SUPPORTED_DEVICE("integrated PC-style parallel port");
+MODULE_LICENSE("GPL");
 
 
 /*
@@ -83,25 +83,18 @@ static int clear_epp_timeout(struct parport *pb)
 
 static void parport_gsc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	DPRINTK(__FILE__ ": got IRQ\n");
 	parport_generic_irq(irq, (struct parport *) dev_id, regs);
 }
 
 void parport_gsc_write_data(struct parport *p, unsigned char d)
 {
-	DPRINTK(__FILE__ ": write (0x%02x) %c \n", d, d);
 	parport_writeb (d, DATA (p));
 }
 
 unsigned char parport_gsc_read_data(struct parport *p)
 {
-#ifdef DEBUG
 	unsigned char c = parport_readb (DATA (p));
-	DPRINTK(__FILE__ ": read (0x%02x) %c\n", c,c);
 	return c;
-#else
-	return parport_readb (DATA (p));
-#endif
 }
 
 void parport_gsc_write_control(struct parport *p, unsigned char d)
@@ -113,8 +106,8 @@ void parport_gsc_write_control(struct parport *p, unsigned char d)
 
 	/* Take this out when drivers have adapted to the newer interface. */
 	if (d & 0x20) {
-		printk (KERN_DEBUG "%s (%s): use data_reverse for this!\n",
-			p->name, p->cad->name);
+		pr_debug("%s (%s): use data_reverse for this!\n",
+			    p->name, p->cad->name);
 		parport_gsc_data_reverse (p);
 	}
 
@@ -141,7 +134,7 @@ unsigned char parport_gsc_frob_control (struct parport *p, unsigned char mask,
 
 	/* Take this out when drivers have adapted to the newer interface. */
 	if (mask & 0x20) {
-		printk (KERN_DEBUG "%s (%s): use data_%s for this!\n",
+		pr_debug("%s (%s): use data_%s for this!\n",
 			p->name, p->cad->name,
 			(val & 0x20) ? "reverse" : "forward");
 		if (val & 0x20)
@@ -199,16 +192,12 @@ void parport_gsc_restore_state(struct parport *p, struct parport_state *s)
 
 void parport_gsc_inc_use_count(void)
 {
-#ifdef MODULE
 	MOD_INC_USE_COUNT;
-#endif
 }
 
 void parport_gsc_dec_use_count(void)
 {
-#ifdef MODULE
 	MOD_DEC_USE_COUNT;
-#endif
 }
 
 
@@ -360,9 +349,6 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 	struct parport tmp;
 	struct parport *p = &tmp;
 
-	if (check_region(base, 3)) 
-	    return NULL;
-	    
 	priv = kmalloc (sizeof (struct parport_gsc_private), GFP_KERNEL);
 	if (!priv) {
 		printk (KERN_DEBUG "parport (0x%lx): no memory!\n", base);
@@ -439,12 +425,6 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 	printk("]\n");
 	parport_proc_register(p);
 
-	request_region (p->base, 3, p->name);
-	if (p->size > 3)
-		request_region (p->base + 3, p->size - 3, p->name);
-	if (p->modes & PARPORT_MODE_ECP)
-		request_region (p->base_hi, 3, p->name);
-
 	if (p->irq != PARPORT_IRQ_NONE) {
 		if (request_irq (p->irq, parport_gsc_interrupt,
 				 0, p->name, p)) {
@@ -474,73 +454,56 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 
 static int __initdata parport_count;
 
-static int __init 
-parport_init_chip(struct hp_device *d, struct pa_iodc_driver *dri)
+static int __devinit parport_init_chip(struct parisc_device *dev)
 {
 	unsigned long port;
-	int irq;
 
-	irq = busdevice_alloc_irq(d); 
-
-	if (!irq) {
-	    printk("IRQ not found for parallel device at 0x%p\n", d->hpa);
-	    return -ENODEV;
+	if (!dev->irq) {
+		printk("IRQ not found for parallel device at 0x%lx\n", dev->hpa);
+		return -ENODEV;
 	}
 
-	port = ((unsigned long) d->hpa) + PARPORT_GSC_OFFSET;
+	port = dev->hpa + PARPORT_GSC_OFFSET;
 	
-	/* 
-	    some older machines with ASP-chip don't support the enhanced parport modes 
-	*/
-	if (!pdc_add_valid( (void *)(port+4))) {
-	    /* Initialize bidirectional-mode (0x10) & data-tranfer-mode #1 (0x20) */
-	    printk("%s: initialize bidirectional-mode.\n", __FUNCTION__);
-	    parport_writeb ( (0x10 + 0x20), port + 4);
+	/* some older machines with ASP-chip don't support
+	 * the enhanced parport modes.
+	 */
+	if (boot_cpu_data.cpu_type > pcxt && !pdc_add_valid(port+4)) {
+
+		/* Initialize bidirectional-mode (0x10) & data-tranfer-mode #1 (0x20) */
+		printk("%s: initialize bidirectional-mode.\n", __FUNCTION__);
+		parport_writeb ( (0x10 + 0x20), port + 4);
+
 	} else {
-	    printk("%s: enhanced parport-modes not supported.\n", __FUNCTION__);
+		printk("%s: enhanced parport-modes not supported.\n", __FUNCTION__);
 	}
 	
-	if (parport_gsc_probe_port(port, 0, 
-		    irq, /* PARPORT_IRQ_NONE */
-		    PARPORT_DMA_NONE, NULL))
-	    parport_count++;
+	if (parport_gsc_probe_port(port, 0, dev->irq,
+			/* PARPORT_IRQ_NONE */ PARPORT_DMA_NONE, NULL))
+		parport_count++;
 
 	return 0;
 }
 
-static struct pa_iodc_driver parport_drivers_for[] __initdata = {
-  {HPHW_FIO, 0x0, 0x0, 0x74, 0x0, 0,			/* 715/64 */
-	DRIVER_CHECK_SVERSION + DRIVER_CHECK_HWTYPE,
-	"parallel device", "HP 7xx - Series", (void *) parport_init_chip},
-  { 0 }
+static struct parisc_device_id parport_tbl[] = {
+	{ HPHW_FIO, HVERSION_REV_ANY_ID, HVERSION_ANY_ID, 0x74 },
+	{ 0, }
 };
 
-int __init 
-parport_gsc_init ( void )
+MODULE_DEVICE_TABLE(parisc, parport_tbl);
+
+static struct parisc_driver parport_driver = {
+	name:		"Parallel",
+	id_table:	parport_tbl,
+	probe:		parport_init_chip,
+};
+
+int __devinit parport_gsc_init(void)
 {
-	parport_count = 0;
-	
-	register_driver(parport_drivers_for);
-
-	return parport_count;
+	return register_parisc_driver(&parport_driver);
 }
 
-/* Exported symbols. */
-EXPORT_NO_SYMBOLS;
-
-
-#ifdef MODULE
-
-MODULE_AUTHOR("Helge Deller <deller@gmx.de>");
-MODULE_DESCRIPTION("HP-PARISC PC-style parallel port driver");
-MODULE_SUPPORTED_DEVICE("integrated PC-style parallel port");
-
-int init_module(void)
-{	
-	return !parport_gsc_init ();
-}
-
-void cleanup_module(void)
+static void __devexit parport_gsc_exit(void)
 {
 	struct parport *p = parport_enumerate(), *tmp;
 	while (p) {
@@ -552,11 +515,6 @@ void cleanup_module(void)
 				free_dma(p->dma);
 			if (p->irq != PARPORT_IRQ_NONE)
 				free_irq(p->irq, p);
-			release_region(p->base, 3);
-			if (p->size > 3)
-				release_region(p->base + 3, p->size - 3);
-			if (p->modes & PARPORT_MODE_ECP)
-				release_region(p->base_hi, 3);
 			parport_proc_unregister(p);
 			if (priv->dma_buf)
 				pci_free_consistent(priv->dev, PAGE_SIZE,
@@ -568,5 +526,10 @@ void cleanup_module(void)
 		}
 		p = tmp;
 	}
+	unregister_parisc_driver(&parport_driver);
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+
+module_init(parport_gsc_init);
+module_exit(parport_gsc_exit);

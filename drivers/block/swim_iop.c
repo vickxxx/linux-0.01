@@ -359,11 +359,12 @@ static int floppy_ioctl(struct inode *inode, struct file *filp,
 		err = swimiop_eject(fs);
 		return err;
 	case FDGETPRM:
-	        err = copy_to_user((void *) param, (void *) &floppy_type,
-				   sizeof(struct floppy_struct));
-		return err;
+	        if (copy_to_user((void *) param, (void *) &floppy_type,
+				 sizeof(struct floppy_struct)))
+			return -EFAULT;
+		return 0;
 	}
-	return -ENOIOCTLCMD;
+	return -ENOTTY;
 }
 
 static int floppy_open(struct inode *inode, struct file *filp)

@@ -8,8 +8,9 @@
 
 struct scm_fp_list
 {
-	int		count;
-	struct file	*fp[SCM_MAX_FD];
+	struct list_head	list;
+	int			count;
+	struct file		*fp[SCM_MAX_FD];
 };
 
 struct scm_cookie
@@ -63,5 +64,5 @@ static __inline__ void scm_recv(struct socket *sock, struct msghdr *msg,
 }
 
 
-#endif __LINUX_NET_SCM_H
+#endif /* __LINUX_NET_SCM_H */
 

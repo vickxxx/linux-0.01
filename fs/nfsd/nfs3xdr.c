@@ -52,7 +52,7 @@ decode_time3(u32 *p, time_t *secp)
 static inline u32 *
 decode_fh(u32 *p, struct svc_fh *fhp)
 {
-	int size;
+	unsigned int size;
 	fh_init(fhp, NFS3_FHSIZE);
 	size = ntohl(*p++);
 	if (size > NFS3_FHSIZE)
@@ -83,12 +83,11 @@ decode_filename(u32 *p, char **namp, int *lenp)
 	char		*name;
 	int		i;
 
-	if ((p = xdr_decode_string(p, namp, lenp, NFS3_MAXNAMLEN)) != NULL) {
+	if ((p = xdr_decode_string_inplace(p, namp, lenp, NFS3_MAXNAMLEN)) != NULL) {
 		for (i = 0, name = *namp; i < *lenp; i++, name++) {
 			if (*name == '\0' || *name == '/')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -105,7 +104,6 @@ decode_pathname(u32 *p, char **namp, int *lenp)
 			if (*name == '\0')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -156,14 +154,9 @@ decode_sattr3(u32 *p, struct iattr *iap)
 }
 
 static inline u32 *
-encode_fattr3(struct svc_rqst *rqstp, u32 *p, struct dentry *dentry)
+encode_fattr3(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 {
-	struct inode	*inode = dentry->d_inode;
-
-	if (!inode) {
-		printk("nfsd: NULL inode in %s:%d", __FILE__, __LINE__);
-		return NULL;
-	}
+	struct inode	*inode = fhp->fh_dentry->d_inode;
 
 	*p++ = htonl(nfs3_ftypes[(inode->i_mode & S_IFMT) >> 12]);
 	*p++ = htonl((u32) inode->i_mode);
@@ -182,7 +175,12 @@ encode_fattr3(struct svc_rqst *rqstp, u32 *p, struct dentry *dentry)
 		p = xdr_encode_hyper(p, ((u64)inode->i_blocks) << 9);
 	*p++ = htonl((u32) MAJOR(inode->i_rdev));
 	*p++ = htonl((u32) MINOR(inode->i_rdev));
-	p = xdr_encode_hyper(p, (u64) inode->i_dev);
+	if (rqstp->rq_reffh->fh_version == 1
+	    && rqstp->rq_reffh->fh_fsid_type == 1
+	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
+		p = xdr_encode_hyper(p, (u64) fhp->fh_export->ex_fsid);
+	else
+		p = xdr_encode_hyper(p, (u64) inode->i_dev);
 	p = xdr_encode_hyper(p, (u64) inode->i_ino);
 	p = encode_time3(p, inode->i_atime);
 	p = encode_time3(p, lease_get_mtime(inode));
@@ -212,7 +210,12 @@ encode_saved_post_attr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 	p = xdr_encode_hyper(p, ((u64)fhp->fh_post_blocks) << 9);
 	*p++ = htonl((u32) MAJOR(fhp->fh_post_rdev));
 	*p++ = htonl((u32) MINOR(fhp->fh_post_rdev));
-	p = xdr_encode_hyper(p, (u64) inode->i_dev);
+	if (rqstp->rq_reffh->fh_version == 1
+	    && rqstp->rq_reffh->fh_fsid_type == 1
+	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
+		p = xdr_encode_hyper(p, (u64) fhp->fh_export->ex_fsid);
+	else
+		p = xdr_encode_hyper(p, (u64) inode->i_dev);
 	p = xdr_encode_hyper(p, (u64) inode->i_ino);
 	p = encode_time3(p, fhp->fh_post_atime);
 	p = encode_time3(p, fhp->fh_post_mtime);
@@ -227,11 +230,12 @@ encode_saved_post_attr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
  * handle. In this case, no attributes are returned.
  */
 static u32 *
-encode_post_op_attr(struct svc_rqst *rqstp, u32 *p, struct dentry *dentry)
+encode_post_op_attr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 {
+	struct dentry *dentry = fhp->fh_dentry;
 	if (dentry && dentry->d_inode != NULL) {
 		*p++ = xdr_one;		/* attributes follow */
-		return encode_fattr3(rqstp, p, dentry);
+		return encode_fattr3(rqstp, p, fhp);
 	}
 	*p++ = xdr_zero;
 	return p;
@@ -258,7 +262,7 @@ encode_wcc_data(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 	}
 	/* no pre- or post-attrs */
 	*p++ = xdr_zero;
-	return encode_post_op_attr(rqstp, p, dentry);
+	return encode_post_op_attr(rqstp, p, fhp);
 }
 
 /*
@@ -269,7 +273,7 @@ xdr_argsize_check(struct svc_rqst *rqstp, u32 *p)
 {
 	struct svc_buf	*buf = &rqstp->rq_argbuf;
 
-	return p - buf->base <= buf->buflen;
+	return p >= buf->base && p <= buf->base + buf->buflen ;
 }
 
 static inline int
@@ -515,9 +519,8 @@ int
 nfs3svc_encode_attrstat(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_attrstat *resp)
 {
-	if (resp->status == 0
-	 && !(p = encode_fattr3(rqstp, p, resp->fh.fh_dentry)))
-		return 0;
+	if (resp->status == 0)
+		p = encode_fattr3(rqstp, p, &resp->fh);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -526,8 +529,7 @@ int
 nfs3svc_encode_wccstat(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_attrstat *resp)
 {
-	if (!(p = encode_wcc_data(rqstp, p, &resp->fh)))
-		return 0;
+	p = encode_wcc_data(rqstp, p, &resp->fh);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -538,9 +540,9 @@ nfs3svc_encode_diropres(struct svc_rqst *rqstp, u32 *p,
 {
 	if (resp->status == 0) {
 		p = encode_fh(p, &resp->fh);
-		p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+		p = encode_post_op_attr(rqstp, p, &resp->fh);
 	}
-	p = encode_post_op_attr(rqstp, p, resp->dirfh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->dirfh);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -549,7 +551,7 @@ int
 nfs3svc_encode_accessres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_accessres *resp)
 {
-	p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->fh);
 	if (resp->status == 0)
 		*p++ = htonl(resp->access);
 	return xdr_ressize_check(rqstp, p);
@@ -560,7 +562,7 @@ int
 nfs3svc_encode_readlinkres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_readlinkres *resp)
 {
-	p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->fh);
 	if (resp->status == 0) {
 		*p++ = htonl(resp->len);
 		p += XDR_QUADLEN(resp->len);
@@ -573,7 +575,7 @@ int
 nfs3svc_encode_readres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_readres *resp)
 {
-	p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->fh);
 	if (resp->status == 0) {
 		*p++ = htonl(resp->count);
 		*p++ = htonl(resp->eof);
@@ -606,7 +608,7 @@ nfs3svc_encode_createres(struct svc_rqst *rqstp, u32 *p,
 	if (resp->status == 0) {
 		*p++ = xdr_one;
 		p = encode_fh(p, &resp->fh);
-		p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+		p = encode_post_op_attr(rqstp, p, &resp->fh);
 	}
 	p = encode_wcc_data(rqstp, p, &resp->dirfh);
 	return xdr_ressize_check(rqstp, p);
@@ -627,7 +629,7 @@ int
 nfs3svc_encode_linkres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_linkres *resp)
 {
-	p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->fh);
 	p = encode_wcc_data(rqstp, p, &resp->tfh);
 	return xdr_ressize_check(rqstp, p);
 }
@@ -637,7 +639,7 @@ int
 nfs3svc_encode_readdirres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd3_readdirres *resp)
 {
-	p = encode_post_op_attr(rqstp, p, resp->fh.fh_dentry);
+	p = encode_post_op_attr(rqstp, p, &resp->fh);
 	if (resp->status == 0) {
 		/* stupid readdir cookie */
 		memcpy(p, resp->verf, 8); p += 2;
@@ -707,20 +709,18 @@ encode_entry(struct readdir_cd *cd, const char *name,
 		exp  = cd->dirfh->fh_export;
 
 		fh_init(&fh, NFS3_FHSIZE);
-		if (fh_verify(cd->rqstp, cd->dirfh, S_IFDIR, MAY_EXEC) != 0)
-			goto noexec;
 		if (isdotent(name, namlen)) {
 			dchild = dparent;
 			if (namlen == 2)
 				dchild = dchild->d_parent;
 			dchild = dget(dchild);
 		} else
-			dchild = lookup_one(name, dparent);
+			dchild = lookup_one_len(name, dparent,namlen);
 		if (IS_ERR(dchild))
 			goto noexec;
-		if (fh_compose(&fh, exp, dchild) != 0 || !dchild->d_inode)
+		if (fh_compose(&fh, exp, dchild, cd->dirfh) != 0 || !dchild->d_inode)
 			goto noexec;
-		p = encode_post_op_attr(cd->rqstp, p, fh.fh_dentry);
+		p = encode_post_op_attr(cd->rqstp, p, &fh);
 		*p++ = xdr_one; /* yes, a file handle follows */
 		p = encode_fh(p, &fh);
 		fh_put(&fh);
@@ -739,14 +739,14 @@ noexec:
 
 int
 nfs3svc_encode_entry(struct readdir_cd *cd, const char *name,
-		     int namlen, off_t offset, ino_t ino, unsigned int d_type)
+		     int namlen, loff_t offset, ino_t ino, unsigned int d_type)
 {
 	return encode_entry(cd, name, namlen, offset, ino, d_type, 0);
 }
 
 int
 nfs3svc_encode_entry_plus(struct readdir_cd *cd, const char *name,
-			  int namlen, off_t offset, ino_t ino, unsigned int d_type)
+			  int namlen, loff_t offset, ino_t ino, unsigned int d_type)
 {
 	return encode_entry(cd, name, namlen, offset, ino, d_type, 1);
 }

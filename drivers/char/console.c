@@ -69,6 +69,9 @@
  *
  * Removed old-style timers, introduced console_timer, made timer
  * deletion SMP-safe.  17Jun00, Andrew Morton <andrewm@uow.edu.au>
+ *
+ * Removed console_lock, enabled interrupts across all console operations
+ * 13 March 2001, Andrew Morton
  */
 
 #include <linux/module.h>
@@ -79,7 +82,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/console.h>
@@ -97,18 +100,19 @@
 #include <linux/tqueue.h>
 #include <linux/bootmem.h>
 #include <linux/pm.h>
+#include <linux/smp_lock.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
 
-#include <asm/linux_logo.h>
-
 #include "console_macros.h"
 
 
 const struct consw *conswitchp;
+
+static void __console_callback(void);
 
 /* A bitmap for codes <32. A bit of 1 indicates that the code
  * corresponding to that bit number invokes some special action
@@ -151,6 +155,7 @@ static void set_vesa_blanking(unsigned long arg);
 static void set_cursor(int currcons);
 static void hide_cursor(int currcons);
 static void unblank_screen_t(unsigned long dummy);
+static void console_callback(void *ignored);
 
 static int printable;		/* Is console ready for printing? */
 
@@ -160,6 +165,10 @@ int console_blanked;
 static int vesa_blank_mode; /* 0:none 1:suspendV 2:suspendH 3:powerdown */
 static int blankinterval = 10*60*HZ;
 static int vesa_off_interval;
+
+static struct tq_struct console_callback_tq = {
+	routine: console_callback,
+};
 
 /*
  * fg_console is the current virtual console,
@@ -182,15 +191,13 @@ static struct vc_data *master_display_fg;
 
 /*
  * Unfortunately, we need to delay tty echo when we're currently writing to the
- * console since the code is (and always was) not re-entrant, so we insert
- * all filp requests to con_task_queue instead of tq_timer and run it from
- * the console_tasklet.  The console_tasklet is protected by the IRQ
- * protected console_lock.
+ * console since the code is (and always was) not re-entrant, so we schedule
+ * all flip requests to process context with schedule-task() and run it from
+ * console_callback().
  */
-DECLARE_TASK_QUEUE(con_task_queue);
 
 /*
- * For the same reason, we defer scrollback to the console tasklet.
+ * For the same reason, we defer scrollback to the console callback.
  */
 static int scrollback_delta;
 
@@ -234,7 +241,19 @@ static inline unsigned short *screenpos(int currcons, int offset, int viewed)
 static inline void scrolldelta(int lines)
 {
 	scrollback_delta += lines;
-	tasklet_schedule(&console_tasklet);
+	schedule_console_callback();
+}
+
+extern int machine_paniced; 
+
+void schedule_console_callback(void)
+{
+	/* Don't care about locking after panic - but I want to switch the console
+	   NOW */ 
+	if (machine_paniced)
+		__console_callback(); 
+	else
+		schedule_task(&console_callback_tq);
 }
 
 static void scrup(int currcons, unsigned int t, unsigned int b, int nr)
@@ -390,20 +409,28 @@ void invert_screen(int currcons, int offset, int count, int viewed)
 	else {
 		u16 *q = p;
 		int cnt = count;
+		u16 a;
 
 		if (!can_do_color) {
-			while (cnt--) *q++ ^= 0x0800;
+			while (cnt--) {
+			    a = scr_readw(q);
+			    a ^= 0x0800;
+			    scr_writew(a, q);
+			    q++;
+			}
 		} else if (hi_font_mask == 0x100) {
 			while (cnt--) {
-				u16 a = *q;
+				a = scr_readw(q);
 				a = ((a) & 0x11ff) | (((a) & 0xe000) >> 4) | (((a) & 0x0e00) << 4);
-				*q++ = a;
+				scr_writew(a, q);
+				q++;
 			}
 		} else {
 			while (cnt--) {
-				u16 a = *q;
+				a = scr_readw(q);
 				a = ((a) & 0x88ff) | (((a) & 0x7000) >> 4) | (((a) & 0x0700) << 4);
-				*q++ = a;
+				scr_writew(a, q);
+				q++;
 			}
 		}
 	}
@@ -652,6 +679,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	    p = (long) kmalloc(structsize, GFP_KERNEL);
 	    if (!p)
 		return -ENOMEM;
+	    memset((void *)p, 0, structsize);
 	    vc_cons[currcons].d = (struct vc_data *)p;
 	    vt_cons[currcons] = (struct vt_struct *)(p+sizeof(struct vc_data));
 	    visual_init(currcons, 1);
@@ -677,6 +705,9 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	return 0;
 }
 
+#define VC_RESIZE_MAXCOL (32767)
+#define VC_RESIZE_MAXROW (32767)
+
 /*
  * Change # of rows and columns (0 means unchanged/the size of fg_console)
  * [this is to be used together with some user program
@@ -688,6 +719,9 @@ int vc_resize(unsigned int lines, unsigned int cols,
 	unsigned int cc, ll, ss, sr, todo = 0;
 	unsigned int currcons = fg_console, i;
 	unsigned short *newscreens[MAX_NR_CONSOLES];
+
+	if (cols > VC_RESIZE_MAXCOL || lines > VC_RESIZE_MAXROW)
+		return -EINVAL;
 
 	cc = (cols ? cols : video_num_columns);
 	ll = (lines ? lines : video_num_lines);
@@ -782,6 +816,7 @@ int vc_resize(unsigned int lines, unsigned int cols,
 
 void vc_disallocate(unsigned int currcons)
 {
+	acquire_console_sem();
 	if (vc_cons_allocated(currcons)) {
 	    sw->con_deinit(vc_cons[currcons].d);
 	    if (kmalloced)
@@ -790,6 +825,7 @@ void vc_disallocate(unsigned int currcons)
 		kfree(vc_cons[currcons].d);
 	    vc_cons[currcons].d = NULL;
 	}
+	release_console_sem();
 }
 
 /*
@@ -1028,6 +1064,7 @@ static void default_attr(int currcons)
 	color = def_color;
 }
 
+/* console_sem is held */
 static void csi_m(int currcons)
 {
 	int i;
@@ -1167,6 +1204,7 @@ int mouse_reporting(void)
 	return report_mouse;
 }
 
+/* console_sem is held */
 static void set_mode(int currcons, int on_off)
 {
 	int i;
@@ -1232,6 +1270,7 @@ static void set_mode(int currcons, int on_off)
 		}
 }
 
+/* console_sem is held */
 static void setterm_command(int currcons)
 {
 	switch(par[0]) {
@@ -1286,19 +1325,7 @@ static void setterm_command(int currcons)
 	}
 }
 
-static void insert_line(int currcons, unsigned int nr)
-{
-	scrdown(currcons,y,bottom,nr);
-	need_wrap = 0;
-}
-
-
-static void delete_line(int currcons, unsigned int nr)
-{
-	scrup(currcons,y,bottom,nr);
-	need_wrap = 0;
-}
-
+/* console_sem is held */
 static void csi_at(int currcons, unsigned int nr)
 {
 	if (nr > video_num_columns - x)
@@ -1308,15 +1335,18 @@ static void csi_at(int currcons, unsigned int nr)
 	insert_char(currcons, nr);
 }
 
+/* console_sem is held */
 static void csi_L(int currcons, unsigned int nr)
 {
 	if (nr > video_num_lines - y)
 		nr = video_num_lines - y;
 	else if (!nr)
 		nr = 1;
-	insert_line(currcons, nr);
+	scrdown(currcons,y,bottom,nr);
+	need_wrap = 0;
 }
 
+/* console_sem is held */
 static void csi_P(int currcons, unsigned int nr)
 {
 	if (nr > video_num_columns - x)
@@ -1326,15 +1356,18 @@ static void csi_P(int currcons, unsigned int nr)
 	delete_char(currcons, nr);
 }
 
+/* console_sem is held */
 static void csi_M(int currcons, unsigned int nr)
 {
 	if (nr > video_num_lines - y)
 		nr = video_num_lines - y;
 	else if (!nr)
 		nr=1;
-	delete_line(currcons, nr);
+	scrup(currcons,y,bottom,nr);
+	need_wrap = 0;
 }
 
+/* console_sem is held (except via vc_init->reset_terminal */
 static void save_cur(int currcons)
 {
 	saved_x		= x;
@@ -1349,6 +1382,7 @@ static void save_cur(int currcons)
 	saved_G1	= G1_charset;
 }
 
+/* console_sem is held */
 static void restore_cur(int currcons)
 {
 	gotoxy(currcons,saved_x,saved_y);
@@ -1369,6 +1403,7 @@ enum { ESnormal, ESesc, ESsquare, ESgetpars, ESgotpars, ESfunckey,
 	EShash, ESsetG0, ESsetG1, ESpercent, ESignore, ESnonstd,
 	ESpalette };
 
+/* console_sem is held (except via vc_init()) */
 static void reset_terminal(int currcons, int do_clear)
 {
 	top		= 0;
@@ -1401,7 +1436,10 @@ static void reset_terminal(int currcons, int do_clear)
 	kbd_table[currcons].slockstate = 0;
 	kbd_table[currcons].ledmode = LED_SHOW_FLAGS;
 	kbd_table[currcons].ledflagstate = kbd_table[currcons].default_ledflagstate;
-	set_leds();
+	
+	/* Only schedule the keyboard_tasklet if it is enabled. */
+	if(!atomic_read(&keyboard_tasklet.count))
+		set_leds();
 
 	cursor_type = CUR_DEFAULT;
 	complement_mask = s_complement_mask;
@@ -1424,6 +1462,7 @@ static void reset_terminal(int currcons, int do_clear)
 	    csi_J(currcons,2);
 }
 
+/* console_sem is held */
 static void do_con_trol(struct tty_struct *tty, unsigned int currcons, int c)
 {
 	/*
@@ -1804,6 +1843,7 @@ char con_buf[PAGE_SIZE];
 #define CON_BUF_SIZE	PAGE_SIZE
 DECLARE_MUTEX(con_buf_sem);
 
+/* acquires console_sem */
 static int do_con_write(struct tty_struct * tty, int from_user,
 			const unsigned char *buf, int count)
 {
@@ -1824,6 +1864,9 @@ static int do_con_write(struct tty_struct * tty, int from_user,
 	const unsigned char *orig_buf = NULL;
 	int orig_count;
 
+	if (in_interrupt())
+		return count;
+		
 	currcons = vt->vc_num;
 	if (!vc_cons_allocated(currcons)) {
 	    /* could this happen? */
@@ -1844,6 +1887,7 @@ static int do_con_write(struct tty_struct * tty, int from_user,
 again:
 		if (count > CON_BUF_SIZE)
 			count = CON_BUF_SIZE;
+		console_conditional_schedule();
 		if (copy_from_user(con_buf, buf, count)) {
 			n = 0; /* ?? are error codes legal here ?? */
 			goto out;
@@ -1859,7 +1903,7 @@ again:
 	 * the console spinlock during the entire write.
 	 */
 
-	spin_lock_irq(&console_lock);
+	acquire_console_sem();
 
 	himask = hi_font_mask;
 	charmask = himask ? 0x1ff : 0xff;
@@ -1977,7 +2021,8 @@ again:
 		do_con_trol(tty, currcons, c);
 	}
 	FLUSH
-	spin_unlock_irq(&console_lock);
+	console_conditional_schedule();
+	release_console_sem();
 
 out:
 	if (from_user) {
@@ -2001,24 +2046,23 @@ out:
 }
 
 /*
- * This is the console switching tasklet.
+ * This is the console switching callback.
  *
- * Doing console switching in a tasklet allows
+ * Doing console switching in a process context allows
  * us to do the switches asynchronously (needed when we want
  * to switch due to a keyboard interrupt).  Synchronization
  * with other console code and prevention of re-entrancy is
- * ensured with console_lock.
+ * ensured with console_sem.
  */
-static void console_softint(unsigned long ignored)
+static void console_callback(void *unused) 
 {
-	/* Runs the task queue outside of the console lock.  These
-	 * callbacks can come back into the console code and thus
-	 * will perform their own locking.
-	 */
-	run_task_queue(&con_task_queue);
+	acquire_console_sem();
+	__console_callback(); 
+	release_console_sem();	
+} 
 
-	spin_lock_irq(&console_lock);
-
+static void __console_callback(void)
+{
 	if (want_console >= 0) {
 		if (want_console != fg_console && vc_cons_allocated(want_console)) {
 			hide_cursor(fg_console);
@@ -2040,8 +2084,12 @@ static void console_softint(unsigned long ignored)
 			sw->con_scrolldelta(vc_cons[currcons].d, scrollback_delta);
 		scrollback_delta = 0;
 	}
+}
 
-	spin_unlock_irq(&console_lock);
+void set_console(int nr)
+{
+	want_console = nr;
+	schedule_console_callback();
 }
 
 #ifdef CONFIG_VT_CONSOLE
@@ -2049,7 +2097,7 @@ static void console_softint(unsigned long ignored)
 /*
  *	Console on virtual terminal
  *
- * The console_lock must be held when we get here.
+ * The console must be locked when we get here.
  */
 
 void vt_console_print(struct console *co, const char * b, unsigned count)
@@ -2136,6 +2184,9 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 	}
 	set_cursor(currcons);
 
+	if (!oops_in_progress)
+		poke_blanked_console();
+
 quit:
 	clear_bit(0, &printing);
 }
@@ -2149,7 +2200,6 @@ struct console vt_console_driver = {
 	name:		"tty",
 	write:		vt_console_print,
 	device:		vt_console_device,
-	wait_key:	keyboard_wait_for_keypress,
 	unblank:	unblank_screen,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,
@@ -2160,27 +2210,45 @@ struct console vt_console_driver = {
  *	Handling of Linux-specific VC ioctls
  */
 
+/*
+ * Generally a bit racy with respect to console_sem().
+ *
+ * There are some functions which don't need it.
+ *
+ * There are some functions which can sleep for arbitrary periods (paste_selection)
+ * but we don't need the lock there anyway.
+ *
+ * set_selection has locking, and definitely needs it
+ */
+
 int tioclinux(struct tty_struct *tty, unsigned long arg)
 {
 	char type, data;
+	int ret;
 
 	if (tty->driver.type != TTY_DRIVER_TYPE_CONSOLE)
 		return -EINVAL;
-	if (current->tty != tty && !suser())
+	if (current->tty != tty && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 	if (get_user(type, (char *)arg))
 		return -EFAULT;
+	ret = 0;
 	switch (type)
 	{
 		case 2:
-			return set_selection(arg, tty, 1);
+			acquire_console_sem();
+			ret = set_selection(arg, tty, 1);
+			release_console_sem();
+			break;
 		case 3:
-			return paste_selection(tty);
+			ret = paste_selection(tty);
+			break;
 		case 4:
 			unblank_screen();
-			return 0;
+			break;
 		case 5:
-			return sel_loadlut(arg);
+			ret = sel_loadlut(arg);
+			break;
 		case 6:
 			
 	/*
@@ -2190,24 +2258,33 @@ int tioclinux(struct tty_struct *tty, unsigned long arg)
 	 * related to the kernel should not use this.
 	 */
 	 		data = shift_state;
-			return __put_user(data, (char *) arg);
+			ret = __put_user(data, (char *) arg);
+			break;
 		case 7:
 			data = mouse_reporting();
-			return __put_user(data, (char *) arg);
+			ret = __put_user(data, (char *) arg);
+			break;
 		case 10:
 			set_vesa_blanking(arg);
-			return 0;
+			break;;
 		case 11:	/* set kmsg redirect */
-			if (!suser())
-				return -EPERM;
-			if (get_user(data, (char *)arg+1))
-					return -EFAULT;
-			kmsg_redirect = data;
-			return 0;
+			if (!capable(CAP_SYS_ADMIN)) {
+				ret = -EPERM;
+			} else {
+				if (get_user(data, (char *)arg+1))
+					ret = -EFAULT;
+				else
+					kmsg_redirect = data;
+			}
+			break;
 		case 12:	/* get fg_console */
-			return fg_console;
+			ret = fg_console;
+			break;
+		default:
+			ret = -EINVAL;
+			break;
 	}
-	return -EINVAL;
+	return ret;
 }
 
 /*
@@ -2228,6 +2305,8 @@ static int con_write(struct tty_struct * tty, int from_user,
 
 static void con_put_char(struct tty_struct *tty, unsigned char ch)
 {
+	if (in_interrupt())
+		return;		/* n_r3964 calls put_char() from interrupt context */
 	pm_access(pm_con);
 	do_con_write(tty, 0, &ch, 1);
 }
@@ -2290,15 +2369,25 @@ static void con_start(struct tty_struct *tty)
 	set_leds();
 }
 
+/*
+ * we can race here against con_close, so we grab the bkl
+ * and check the pointer before calling set_cursor
+ */
 static void con_flush_chars(struct tty_struct *tty)
 {
-	unsigned long flags;
-	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
+	struct vt_struct *vt;
+
+	if (in_interrupt())	/* from flush_to_ldisc */
+		return;
 
 	pm_access(pm_con);
-	spin_lock_irqsave(&console_lock, flags);
-	set_cursor(vt->vc_num);
-	spin_unlock_irqrestore(&console_lock, flags);
+	lock_kernel();
+	acquire_console_sem();
+	vt = (struct vt_struct *)tty->driver_data;
+	if (vt)
+		set_cursor(vt->vc_num);
+	release_console_sem();
+	unlock_kernel();
 }
 
 /*
@@ -2368,8 +2457,6 @@ static void vc_init(unsigned int currcons, unsigned int rows, unsigned int cols,
 
 struct tty_driver console_driver;
 static int console_refcount;
-
-DECLARE_TASKLET_DISABLED(console_tasklet, console_softint, 0);
 
 void __init con_init(void)
 {
@@ -2455,9 +2542,6 @@ void __init con_init(void)
 #ifdef CONFIG_VT_CONSOLE
 	register_console(&vt_console_driver);
 #endif
-
-	tasklet_enable(&console_tasklet);
-	tasklet_schedule(&console_tasklet);
 }
 
 #ifndef VT_SINGLE_DRIVER
@@ -2544,10 +2628,10 @@ void give_up_console(const struct consw *csw)
 
 static void set_vesa_blanking(unsigned long arg)
 {
-    char *argp = (char *)arg + 1;
-    unsigned int mode;
-    get_user(mode, argp);
-    vesa_blank_mode = (mode < 4) ? mode : 0;
+	char *argp = (char *)arg + 1;
+	unsigned int mode;
+	if (get_user(mode, argp) == 0)
+		vesa_blank_mode = (mode < 4) ? mode : 0;
 }
 
 /* We can't register the console with devfs during con_init(), because it
@@ -2563,6 +2647,9 @@ void __init con_init_devfs (void)
 				    console_driver.minor_start + i);
 }
 
+/*
+ * This is called by a timer handler
+ */
 static void vesa_powerdown(void)
 {
     struct vc_data *c = vc_cons[fg_console].d;
@@ -2583,9 +2670,12 @@ static void vesa_powerdown(void)
     }
 }
 
+/*
+ * This is a timer handler
+ */
 static void vesa_powerdown_screen(unsigned long dummy)
 {
-	console_timer.function = unblank_screen_t;	/* I don't have a clue why this is necessary */
+	console_timer.function = unblank_screen_t;
 
 	vesa_powerdown();
 }
@@ -2644,11 +2734,17 @@ void do_blank_screen(int entering_gfx)
 	timer_do_blank_screen(entering_gfx, 0);
 }
 
+/*
+ * This is a timer handler
+ */
 static void unblank_screen_t(unsigned long dummy)
 {
 	unblank_screen();
 }
 
+/*
+ * Called by timer as well as from vt_console_driver
+ */
 void unblank_screen(void)
 {
 	int currcons;
@@ -2660,12 +2756,15 @@ void unblank_screen(void)
 		printk("unblank_screen: tty %d not allocated ??\n", fg_console+1);
 		return;
 	}
+	currcons = fg_console;
+	if (vcmode != KD_TEXT)
+		return; /* but leave console_blanked != 0 */
+
 	console_timer.function = blank_screen;
 	if (blankinterval) {
 		mod_timer(&console_timer, jiffies + blankinterval);
 	}
 
-	currcons = fg_console;
 	console_blanked = 0;
 	if (console_blank_hook)
 		console_blank_hook(0);
@@ -2676,15 +2775,24 @@ void unblank_screen(void)
 	set_cursor(fg_console);
 }
 
+/*
+ * This is both a user-level callable and a timer handler
+ */
 static void blank_screen(unsigned long dummy)
 {
 	timer_do_blank_screen(0, 1);
 }
 
+void disable_console_blank(void)
+{
+	del_timer_sync(&console_timer);
+	blankinterval = 0;
+}
+
 void poke_blanked_console(void)
 {
-	del_timer(&console_timer);	/* Can't use _sync here: called from tasklet */
-	if (vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
+	del_timer(&console_timer);
+	if (!vt_cons[fg_console] || vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
 		return;
 	if (console_blanked) {
 		console_timer.function = unblank_screen_t;
@@ -2831,9 +2939,9 @@ int con_font_op(int currcons, struct console_font_op *op)
 		op->data = temp;
 	}
 
-	spin_lock_irq(&console_lock);
+	acquire_console_sem();
 	rc = sw->con_font_op(vc_cons[currcons].d, op);
-	spin_unlock_irq(&console_lock);
+	release_console_sem();
 
 	op->data = old_op.data;
 	if (!rc && !set) {

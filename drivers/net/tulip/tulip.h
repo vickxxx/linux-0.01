@@ -1,37 +1,42 @@
 /*
 	drivers/net/tulip/tulip.h
 
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
+
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
 #ifndef __NET_TULIP_H__
 #define __NET_TULIP_H__
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
+#include <linux/delay.h>
 #include <asm/io.h>
+#include <asm/irq.h>
 
 
 
 /* undefine, or define to various debugging levels (>4 == obscene levels) */
-#undef TULIP_DEBUG
+#define TULIP_DEBUG 1
 
-
-#ifdef TULIP_DEBUG
-/* note: prints function name for you */
-#define DPRINTK(fmt, args...) printk(KERN_DEBUG "%s: " fmt, __FUNCTION__ , ## args)
+/* undefine USE_IO_OPS for MMIO, define for PIO */
+#ifdef CONFIG_TULIP_MMIO
+# undef USE_IO_OPS
 #else
-#define DPRINTK(fmt, args...)
+# define USE_IO_OPS 1
 #endif
-
 
 
 
@@ -45,17 +50,20 @@ struct tulip_chip_table {
 
 
 enum tbl_flag {
-	HAS_MII = 1,
-	HAS_MEDIA_TABLE = 2,
-	CSR12_IN_SROM = 4,
-	ALWAYS_CHECK_MII = 8,
-	HAS_ACPI = 0x10,
-	MC_HASH_ONLY = 0x20,	/* Hash-only multicast filter. */
-	HAS_PNICNWAY = 0x80,
-	HAS_NWAY = 0x40,	/* Uses internal NWay xcvr. */
-	HAS_INTR_MITIGATION = 0x100,
-	IS_ASIX = 0x200,
-	HAS_8023X = 0x400,
+	HAS_MII			= 0x0001,
+	HAS_MEDIA_TABLE		= 0x0002,
+	CSR12_IN_SROM		= 0x0004,
+	ALWAYS_CHECK_MII	= 0x0008,
+	HAS_ACPI		= 0x0010,
+	MC_HASH_ONLY		= 0x0020, /* Hash-only multicast filter. */
+	HAS_PNICNWAY		= 0x0080,
+	HAS_NWAY		= 0x0040, /* Uses internal NWay xcvr. */
+	HAS_INTR_MITIGATION	= 0x0100,
+	IS_ASIX			= 0x0200,
+	HAS_8023X		= 0x0400,
+	COMET_MAC_ADDR		= 0x0800,
+	HAS_PCI_MWI		= 0x1000,
+	HAS_PHY_IRQ		= 0x2000,
 };
 
 
@@ -77,6 +85,7 @@ enum chips {
 	COMPEX9881,
 	I21145,
 	DM910X,
+	CONEXANT,
 };
 
 
@@ -107,7 +116,14 @@ enum tulip_offsets {
 	CSR12 = 0x60,
 	CSR13 = 0x68,
 	CSR14 = 0x70,
-	CSR15 = 0x78
+	CSR15 = 0x78,
+};
+
+/* register offset and bits for CFDD PCI config reg */
+enum pci_cfg_driver_reg {
+	CFDD = 0x40,
+	CFDD_Sleep = (1 << 31),
+	CFDD_Snooze = (1 << 30),
 };
 
 
@@ -128,6 +144,31 @@ enum status_bits {
 	TxNoBuf = 0x04,
 	TxDied = 0x02,
 	TxIntr = 0x01,
+};
+
+/* bit mask for CSR5 TX/RX process state */
+#define CSR5_TS	0x00700000
+#define CSR5_RS	0x000e0000
+
+enum tulip_mode_bits {
+	TxThreshold		= (1 << 22),
+	FullDuplex		= (1 << 9),
+	TxOn			= 0x2000,
+	AcceptBroadcast		= 0x0100,
+	AcceptAllMulticast	= 0x0080,
+	AcceptAllPhys		= 0x0040,
+	AcceptRunt		= 0x0008,
+	RxOn			= 0x0002,
+	RxTx			= (TxOn | RxOn),
+};
+
+
+enum tulip_busconfig_bits {
+	MWI			= (1 << 24),
+	MRL			= (1 << 23),
+	MRM			= (1 << 21),
+	CALShift		= 14,
+	BurstLenShift		= 8,
 };
 
 
@@ -161,8 +202,8 @@ enum t21041_csr13_bits {
 	csr13_cac = (1<<2), /* CSR13/14/15 autoconfiguration */
 	csr13_srl = (1<<0), /* When reset, resets all SIA functions, machines */
 
-	csr13_mask_auibnc = (csr13_eng | csr13_aui | csr13_cac | csr13_srl),
-	csr13_mask_10bt = (csr13_eng | csr13_cac | csr13_srl),
+	csr13_mask_auibnc = (csr13_eng | csr13_aui | csr13_srl),
+	csr13_mask_10bt = (csr13_eng | csr13_srl),
 };
 
 enum t21143_csr6_bits {
@@ -195,7 +236,6 @@ enum t21143_csr6_bits {
 	 *   (1,1)   *    1024   *   160   *
 	 ***********************************/
 
-	csr6_st = (1<<13),   /* Transmit conrol: 1 = transmit, 0 = stop */
 	csr6_fc = (1<<12),   /* Forces a collision in next transmission (for testing in loopback mode) */
 	csr6_om_int_loop = (1<<10), /* internal (FIFO) loopback flag */
 	csr6_om_ext_loop = (1<<11), /* external (PMD) loopback flag */
@@ -207,7 +247,6 @@ enum t21143_csr6_bits {
 	csr6_if = (1<<4),    /* Inverse Filtering, rejects only addresses in address table: can't be set */
 	csr6_pb = (1<<3),    /* Pass Bad Frames, (1) causes even bad frames to be passed on */
 	csr6_ho = (1<<2),    /* Hash-only filtering mode: can't be set */
-	csr6_sr = (1<<1),    /* Start(1)/Stop(0) Receive */
 	csr6_hp = (1<<0),    /* Hash/Perfect Receive Filtering Mode: can't be set */
 
 	csr6_mask_capture = (csr6_sc | csr6_ca),
@@ -228,8 +267,21 @@ enum t21143_csr6_bits {
 #define TX_RING_SIZE	16
 #define RX_RING_SIZE	32
 
+#define MEDIA_MASK     31
 
 #define PKT_BUF_SZ		1536	/* Size of each temporary Rx buffer. */
+
+#define TULIP_MIN_CACHE_LINE	8	/* in units of 32-bit words */
+
+#if defined(__sparc__) || defined(__hppa__)
+/* The UltraSparc PCI controllers will disconnect at every 64-byte
+ * crossing anyways so it makes no sense to tell Tulip to burst
+ * any more than that.
+ */
+#define TULIP_MAX_CACHE_LINE	16	/* in units of 32-bit words */
+#else
+#define TULIP_MAX_CACHE_LINE	32	/* in units of 32-bit words */
+#endif
 
 
 /* Ring-wrap flag in length field, use for last ring entry.
@@ -243,44 +295,10 @@ enum t21143_csr6_bits {
 #define DESC_RING_WRAP 0x02000000
 
 
-/*  EEPROM_Ctrl bits. */
-#define EE_SHIFT_CLK	0x02	/* EEPROM shift clock. */
-#define EE_CS			0x01	/* EEPROM chip select. */
-#define EE_DATA_WRITE	0x04	/* Data from the Tulip to EEPROM. */
-#define EE_WRITE_0		0x01
-#define EE_WRITE_1		0x05
-#define EE_DATA_READ	0x08	/* Data from the EEPROM chip. */
-#define EE_ENB			(0x4800 | EE_CS)
-
-/* Delay between EEPROM clock transitions.
-   Even at 33Mhz current PCI implementations don't overrun the EEPROM clock.
-   We add a bus turn-around to insure that this remains true. */
-#define eeprom_delay()	inl(ee_addr)
-
-/* The EEPROM commands include the alway-set leading bit. */
-#define EE_READ_CMD		(6)
-
 #define EEPROM_SIZE 128 	/* 2 << EEPROM_ADDRLEN */
 
 
-/* The maximum data clock rate is 2.5 Mhz.  The minimum timing is usually
-   met by back-to-back PCI I/O cycles, but we insert a delay to avoid
-   "overclocking" issues or future 66Mhz PCI. */
-#define mdio_delay() inl(mdio_addr)
-
-/* Read and write the MII registers using software-generated serial
-   MDIO protocol.  It is just different enough from the EEPROM protocol
-   to not share code.  The maxium data clock rate is 2.5 Mhz. */
-#define MDIO_SHIFT_CLK	0x10000
-#define MDIO_DATA_WRITE0 0x00000
-#define MDIO_DATA_WRITE1 0x20000
-#define MDIO_ENB		0x00000		/* Ignore the 0x02000 databook setting. */
-#define MDIO_ENB_IN		0x40000
-#define MDIO_DATA_READ	0x80000
-
-
 #define RUN_AT(x) (jiffies + (x))
-
 
 #if defined(__i386__)			/* AKA get_unaligned() */
 #define get_u16(ptr) (*(u16 *)(ptr))
@@ -338,9 +356,18 @@ struct tulip_private {
 	int flags;
 	struct net_device_stats stats;
 	struct timer_list timer;	/* Media selection timer. */
+	u32 mc_filter[2];
 	spinlock_t lock;
+	spinlock_t mii_lock;
 	unsigned int cur_rx, cur_tx;	/* The next free ring entry */
 	unsigned int dirty_rx, dirty_tx;	/* The ring entries to be free()ed. */
+
+#ifdef CONFIG_NET_HW_FLOWCONTROL
+#define RX_A_NBF_STOP 0xffffff3f /* To disable RX and RX-NOBUF ints. */
+        int fc_bit;
+        int mit_sel;
+        int mit_change; /* Signal for Interrupt Mitigtion */
+#endif
 	unsigned int full_duplex:1;	/* Full-duplex operation requested. */
 	unsigned int full_duplex_lock:1;
 	unsigned int fake_addr:1;	/* Multiport board faked address. */
@@ -353,7 +380,7 @@ struct tulip_private {
 	unsigned int csr6;	/* Current CSR6 control settings. */
 	unsigned char eeprom[EEPROM_SIZE];	/* Serial EEPROM contents. */
 	void (*link_change) (struct net_device * dev, int csr5);
-	u16 to_advertise;	/* NWay capabilities advertised.  */
+	u16 sym_advertise, mii_advertise; /* NWay capabilities advertised.  */
 	u16 lpar;		/* 21143 Link partner ability. */
 	u16 advertising[4];
 	signed char phys[4], mii_cnt;	/* MII device addresses. */
@@ -365,7 +392,8 @@ struct tulip_private {
 	int susp_rx;
 	unsigned long nir;
 	unsigned long base_addr;
-	int pad0, pad1;		/* Used for 8-byte alignment */
+	int csr12_shadow;
+	int pad0;		/* Used for 8-byte alignment */
 };
 
 
@@ -384,6 +412,13 @@ void t21142_timer(unsigned long data);
 void t21142_start_nway(struct net_device *dev);
 void t21142_lnk_change(struct net_device *dev, int csr5);
 
+
+/* PNIC2.c */
+void pnic2_lnk_change(struct net_device *dev, int csr5);
+void pnic2_timer(unsigned long data);
+void pnic2_start_nway(struct net_device *dev);
+void pnic2_lnk_change(struct net_device *dev, int csr5);
+
 /* eeprom.c */
 void tulip_parse_eeprom(struct net_device *dev);
 int tulip_read_eeprom(long ioaddr, int location, int addr_len);
@@ -392,12 +427,14 @@ int tulip_read_eeprom(long ioaddr, int location, int addr_len);
 extern unsigned int tulip_max_interrupt_work;
 extern int tulip_rx_copybreak;
 void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
+int tulip_refill_rx(struct net_device *dev);
 
 /* media.c */
 int tulip_mdio_read(struct net_device *dev, int phy_id, int location);
 void tulip_mdio_write(struct net_device *dev, int phy_id, int location, int value);
 void tulip_select_media(struct net_device *dev, int startup);
 int tulip_check_duplex(struct net_device *dev);
+void tulip_find_mii (struct net_device *dev, int board_idx);
 
 /* pnic.c */
 void pnic_do_nway(struct net_device *dev);
@@ -419,21 +456,58 @@ extern u16 t21041_csr13[];
 extern u16 t21041_csr14[];
 extern u16 t21041_csr15[];
 
+#ifndef USE_IO_OPS
+#undef inb
+#undef inw
+#undef inl
+#undef outb
+#undef outw
+#undef outl
+#define inb(addr) readb((void*)(addr))
+#define inw(addr) readw((void*)(addr))
+#define inl(addr) readl((void*)(addr))
+#define outb(val,addr) writeb((val), (void*)(addr))
+#define outw(val,addr) writew((val), (void*)(addr))
+#define outl(val,addr) writel((val), (void*)(addr))
+#endif /* !USE_IO_OPS */
 
-static inline void tulip_outl_csr (struct tulip_private *tp, u32 newValue, enum tulip_offsets offset)
+
+
+static inline void tulip_start_rxtx(struct tulip_private *tp)
 {
-	outl (newValue, tp->base_addr + offset);
+	long ioaddr = tp->base_addr;
+	outl(tp->csr6 | RxTx, ioaddr + CSR6);
+	barrier();
+	(void) inl(ioaddr + CSR6); /* mmio sync */
 }
 
-static inline void tulip_stop_rxtx(struct tulip_private *tp, u32 csr6mask)
+static inline void tulip_stop_rxtx(struct tulip_private *tp)
 {
-	tulip_outl_csr(tp, csr6mask & ~(csr6_st | csr6_sr), CSR6);
+	long ioaddr = tp->base_addr;
+	u32 csr6 = inl(ioaddr + CSR6);
+
+	if (csr6 & RxTx) {
+		unsigned i=1300/10;
+		outl(csr6 & ~RxTx, ioaddr + CSR6);
+		barrier();
+		/* wait until in-flight frame completes.
+		 * Max time @ 10BT: 1500*8b/10Mbps == 1200us (+ 100us margin)
+		 * Typically expect this loop to end in < 50us on 100BT.
+		 */
+		while (--i && (inl(ioaddr + CSR5) & (CSR5_TS|CSR5_RS))) 
+			udelay(10);
+
+		if (!i)
+			printk (KERN_DEBUG "%s: tulip_stop_rxtx() failed\n",
+					tp->pdev->slot_name);
+	}
 }
 
-static inline void tulip_restart_rxtx(struct tulip_private *tp, u32 csr6mask)
+static inline void tulip_restart_rxtx(struct tulip_private *tp)
 {
-	tulip_outl_csr(tp, csr6mask | csr6_sr, CSR6);
-	tulip_outl_csr(tp, csr6mask | csr6_st | csr6_sr, CSR6);
+	tulip_stop_rxtx(tp);
+	udelay(5);
+	tulip_start_rxtx(tp);
 }
 
 #endif /* __NET_TULIP_H__ */

@@ -5,7 +5,7 @@
  *
  *		The User Datagram Protocol (UDP).
  *
- * Version:	$Id: udp.c,v 1.91 2000/11/28 13:38:38 davem Exp $
+ * Version:	$Id: udp.c,v 1.100.2.4 2002/03/05 12:47:34 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -61,6 +61,9 @@
  *					return ENOTCONN for unconnected sockets (POSIX)
  *		Janos Farkas	:	don't deliver multi/broadcasts to a different
  *					bound-to-device socket
+ *	YOSHIFUJI Hideaki @USAGI and:	Support IPV6_V6ONLY socket option, which
+ *	Alexey Kuznetsov:		allow both IPv4 and IPv6 sockets to bind
+ *					a single port at the same time.
  *
  *
  *		This program is free software; you can redistribute it and/or
@@ -69,31 +72,9 @@
  *		2 of the License, or (at your option) any later version.
  */
  
-/* RFC1122 Status:
-   4.1.3.1 (Ports):
-     SHOULD send ICMP_PORT_UNREACHABLE in response to datagrams to 
-       an un-listened port. (OK)
-   4.1.3.2 (IP Options)
-     MUST pass IP options from IP -> application (OK)
-     MUST allow application to specify IP options (OK)
-   4.1.3.3 (ICMP Messages)
-     MUST pass ICMP error messages to application (OK -- except when SO_BSDCOMPAT is set)
-   4.1.3.4 (UDP Checksums)
-     MUST provide facility for checksumming (OK)
-     MAY allow application to control checksumming (OK)
-     MUST default to checksumming on (OK)
-     MUST discard silently datagrams with bad csums (OK, except during debugging)
-   4.1.3.5 (UDP Multihoming)
-     MUST allow application to specify source address (OK)
-     SHOULD be able to communicate the chosen src addr up to application
-       when application doesn't choose (DOES - use recvmsg cmsgs)
-   4.1.3.6 (Invalid Addresses)
-     MUST discard invalid source addresses (OK -- done in the new routing code)
-     MUST only send datagrams with one of our addresses (OK)
-*/
-
 #include <asm/system.h>
 #include <asm/uaccess.h>
+#include <asm/ioctls.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/socket.h>
@@ -107,6 +88,7 @@
 #include <linux/netdevice.h>
 #include <net/snmp.h>
 #include <net/ip.h>
+#include <net/ipv6.h>
 #include <net/protocol.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
@@ -161,7 +143,7 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 		next:;
 		}
 		result = best;
-		for(;; result += UDP_HTABLE_SIZE) {
+		for(i = 0; i < (1 << 16) / UDP_HTABLE_SIZE; i++, result += UDP_HTABLE_SIZE) {
 			if (result > sysctl_local_port_range[1])
 				result = sysctl_local_port_range[0]
 					+ ((result - sysctl_local_port_range[0]) &
@@ -169,6 +151,8 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 			if (!udp_lport_inuse(result))
 				break;
 		}
+		if (i >= (1 << 16) / UDP_HTABLE_SIZE)
+			goto fail;
 gotit:
 		udp_port_rover = snum = result;
 	} else {
@@ -179,7 +163,10 @@ gotit:
 		     sk2 = sk2->next) {
 			if (sk2->num == snum &&
 			    sk2 != sk &&
-			    sk2->bound_dev_if == sk->bound_dev_if &&
+			    !ipv6_only_sock(sk2) &&
+			    (!sk2->bound_dev_if ||
+			     !sk->bound_dev_if ||
+			     sk2->bound_dev_if == sk->bound_dev_if) &&
 			    (!sk2->rcv_saddr ||
 			     !sk->rcv_saddr ||
 			     sk2->rcv_saddr == sk->rcv_saddr) &&
@@ -235,29 +222,34 @@ struct sock *udp_v4_lookup_longway(u32 saddr, u16 sport, u32 daddr, u16 dport, i
 	int badness = -1;
 
 	for(sk = udp_hash[hnum & (UDP_HTABLE_SIZE - 1)]; sk != NULL; sk = sk->next) {
-		if(sk->num == hnum) {
-			int score = 0;
+		if(sk->num == hnum && !ipv6_only_sock(sk)) {
+			int score;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+			score = sk->family == PF_INET ? 1 : 0;
+#else
+			score = 1;
+#endif
 			if(sk->rcv_saddr) {
 				if(sk->rcv_saddr != daddr)
 					continue;
-				score++;
+				score+=2;
 			}
 			if(sk->daddr) {
 				if(sk->daddr != saddr)
 					continue;
-				score++;
+				score+=2;
 			}
 			if(sk->dport) {
 				if(sk->dport != sport)
 					continue;
-				score++;
+				score+=2;
 			}
 			if(sk->bound_dev_if) {
 				if(sk->bound_dev_if != dif)
 					continue;
-				score++;
+				score+=2;
 			}
-			if(score == 4) {
+			if(score == 9) {
 				result = sk;
 				break;
 			} else if(score > badness) {
@@ -281,6 +273,8 @@ __inline__ struct sock *udp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport
 	return sk;
 }
 
+extern int ip_mc_sf_allow(struct sock *sk, u32 local, u32 rmt, int dif);
+
 static inline struct sock *udp_v4_mcast_next(struct sock *sk,
 					     u16 loc_port, u32 loc_addr,
 					     u16 rmt_port, u32 rmt_addr,
@@ -293,7 +287,10 @@ static inline struct sock *udp_v4_mcast_next(struct sock *sk,
 		    (s->daddr && s->daddr!=rmt_addr)			||
 		    (s->dport != rmt_port && s->dport != 0)			||
 		    (s->rcv_saddr  && s->rcv_saddr != loc_addr)		||
+		    ipv6_only_sock(s)					||
 		    (s->bound_dev_if && s->bound_dev_if != dif))
+			continue;
+		if (!ip_mc_sf_allow(s, loc_addr, rmt_addr, dif))
 			continue;
 		break;
   	}
@@ -311,21 +308,15 @@ static inline struct sock *udp_v4_mcast_next(struct sock *sk,
  * to find the appropriate port.
  */
 
-void udp_err(struct sk_buff *skb, unsigned char *dp, int len)
+void udp_err(struct sk_buff *skb, u32 info)
 {
-	struct iphdr *iph = (struct iphdr*)dp;
-	struct udphdr *uh = (struct udphdr*)(dp+(iph->ihl<<2));
+	struct iphdr *iph = (struct iphdr*)skb->data;
+	struct udphdr *uh = (struct udphdr*)(skb->data+(iph->ihl<<2));
 	int type = skb->h.icmph->type;
 	int code = skb->h.icmph->code;
 	struct sock *sk;
 	int harderr;
-	u32 info;
 	int err;
-
-	if (len < (iph->ihl<<2)+sizeof(struct udphdr)) {
-		ICMP_INC_STATS_BH(IcmpInErrors);
-		return;
-	}
 
 	sk = udp_v4_lookup(iph->daddr, uh->dest, iph->saddr, uh->source, skb->dev->ifindex);
 	if (sk == NULL) {
@@ -334,7 +325,6 @@ void udp_err(struct sk_buff *skb, unsigned char *dp, int len)
 	}
 
 	err = 0;
-	info = 0;
 	harderr = 0;
 
 	switch (type) {
@@ -346,14 +336,12 @@ void udp_err(struct sk_buff *skb, unsigned char *dp, int len)
 		goto out;
 	case ICMP_PARAMETERPROB:
 		err = EPROTO;
-		info = ntohl(skb->h.icmph->un.gateway)>>24;
 		harderr = 1;
 		break;
 	case ICMP_DEST_UNREACH:
 		if (code == ICMP_FRAG_NEEDED) { /* Path MTU discovery */
 			if (sk->protinfo.af_inet.pmtudisc != IP_PMTUDISC_DONT) {
 				err = EMSGSIZE;
-				info = ntohs(skb->h.icmph->un.frag.mtu);
 				harderr = 1;
 				break;
 			}
@@ -383,7 +371,6 @@ out:
 	sock_put(sk);
 }
 
-
 static unsigned short udp_check(struct udphdr *uh, int len, unsigned long saddr, unsigned long daddr, unsigned long base)
 {
 	return(csum_tcpudp_magic(saddr, daddr, len, IPPROTO_UDP, base));
@@ -399,13 +386,11 @@ struct udpfakehdr
 };
 
 /*
- *	Copy and checksum a UDP packet from user space into a buffer. We still have
- *	to do the planning to get ip_build_xmit to spot direct transfer to network
- *	card and provide an additional callback mode for direct user->board I/O
- *	transfers. That one will be fun.
+ *	Copy and checksum a UDP packet from user space into a buffer.
  */
  
-static int udp_getfrag(const void *p, char * to, unsigned int offset, unsigned int fraglen) 
+static int udp_getfrag(const void *p, char * to, unsigned int offset,
+                       unsigned int fraglen, struct sk_buff *skb)
 {
 	struct udpfakehdr *ufh = (struct udpfakehdr *)p;
 	if (offset==0) {
@@ -429,13 +414,11 @@ static int udp_getfrag(const void *p, char * to, unsigned int offset, unsigned i
 }
 
 /*
- *	Unchecksummed UDP is sufficiently critical to stuff like ATM video conferencing
- *	that we use two routines for this for speed. Probably we ought to have a
- *	CONFIG_FAST_NET set for >10Mb/second boards to activate this sort of coding.
- *	Timing needed to verify if this is a valid decision.
+ *	Copy a UDP packet from user space into a buffer without checksumming.
  */
  
-static int udp_getfrag_nosum(const void *p, char * to, unsigned int offset, unsigned int fraglen) 
+static int udp_getfrag_nosum(const void *p, char * to, unsigned int offset,
+                             unsigned int fraglen, struct sk_buff *skb) 
 {
 	struct udpfakehdr *ufh = (struct udpfakehdr *)p;
 
@@ -500,7 +483,7 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 			return -EINVAL;
 	} else {
 		if (sk->state != TCP_ESTABLISHED)
-			return -ENOTCONN;
+			return -EDESTADDRREQ;
 		ufh.daddr = sk->daddr;
 		ufh.uh.dest = sk->dport;
 		/* Open fast path for connected socket.
@@ -645,13 +628,62 @@ int udp_ioctl(struct sock *sk, int cmd, unsigned long arg)
 
 static __inline__ int __udp_checksum_complete(struct sk_buff *skb)
 {
-	return (unsigned short)csum_fold(csum_partial(skb->h.raw, skb->len, skb->csum));
+	return (unsigned short)csum_fold(skb_checksum(skb, 0, skb->len, skb->csum));
 }
 
 static __inline__ int udp_checksum_complete(struct sk_buff *skb)
 {
 	return skb->ip_summed != CHECKSUM_UNNECESSARY &&
 		__udp_checksum_complete(skb);
+}
+
+
+/**
+ * 	udp_poll - wait for a UDP event.
+ *	@file - file struct
+ *	@sock - socket
+ *	@wait - poll table
+ *
+ *	This is same as datagram poll, except for the special case of 
+ *	blocking sockets. If application is using a blocking fd
+ *	and a packet with checksum error is in the queue;
+ *	then it could get return from select indicating data available
+ *	but then block when reading it. Add special case code
+ *	to work around these arguably broken applications.
+ */
+unsigned int udp_poll(struct file *file, struct socket *sock, poll_table *wait)
+{
+	unsigned int mask = datagram_poll(file, sock, wait);
+	struct sock *sk = sock->sk;
+	
+	/* Check for false positives due to checksum errors */
+	if ( (mask & POLLRDNORM) &&
+	     !(file->f_flags & O_NONBLOCK) &&
+	     !(sk->shutdown & RCV_SHUTDOWN)){
+		struct sk_buff_head *rcvq = &sk->receive_queue;
+		struct sk_buff *skb;
+
+		spin_lock_irq(&rcvq->lock);
+		while ((skb = skb_peek(rcvq)) != NULL) {
+			if (udp_checksum_complete(skb)) {
+				UDP_INC_STATS_BH(UdpInErrors);
+				IP_INC_STATS_BH(IpInDiscards);
+				__skb_unlink(skb, rcvq);
+				kfree_skb(skb);
+			} else {
+				skb->ip_summed = CHECKSUM_UNNECESSARY;
+				break;
+			}
+		}
+		spin_unlock_irq(&rcvq->lock);
+
+		/* nothing to see, move along */
+		if (skb == NULL)
+			mask &= ~(POLLIN | POLLRDNORM);
+	}
+
+	return mask;
+	
 }
 
 /*
@@ -675,11 +707,7 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 	if (flags & MSG_ERRQUEUE)
 		return ip_recv_error(sk, msg, len);
 
-	/*
-	 *	From here the generic datagram does a lot of the work. Come
-	 *	the finished NET3, it will do _ALL_ the work!
-	 */
-
+try_again:
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb)
 		goto out;
@@ -699,9 +727,9 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 		err = skb_copy_datagram_iovec(skb, sizeof(struct udphdr), msg->msg_iov,
 					      copied);
 	} else {
-		err = copy_and_csum_toiovec(msg->msg_iov, skb, sizeof(struct udphdr));
+		err = skb_copy_and_csum_datagram_iovec(skb, sizeof(struct udphdr), msg->msg_iov);
 
-		if (err)
+		if (err == -EINVAL)
 			goto csum_copy_err;
 	}
 
@@ -720,7 +748,10 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, int len,
   	}
 	if (sk->protinfo.af_inet.cmsg_flags)
 		ip_cmsg_recv(msg, skb);
+
 	err = copied;
+	if (flags & MSG_TRUNC)
+		err = skb->len - sizeof(struct udphdr);
   
 out_free:
   	skb_free_datagram(sk, skb);
@@ -745,13 +776,17 @@ csum_copy_err:
 
 	skb_free_datagram(sk, skb);
 
-	return -EAGAIN;	
+	if (noblock)
+		return -EAGAIN;	
+	goto try_again;
 }
 
 int udp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_in *usin = (struct sockaddr_in *) uaddr;
 	struct rtable *rt;
+	u32 saddr;
+	int oif;
 	int err;
 
 	
@@ -763,8 +798,16 @@ int udp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 
 	sk_dst_reset(sk);
 
-	err = ip_route_connect(&rt, usin->sin_addr.s_addr, sk->saddr,
-			       sk->protinfo.af_inet.tos|sk->localroute, sk->bound_dev_if);
+	oif = sk->bound_dev_if;
+	saddr = sk->saddr;
+	if (MULTICAST(usin->sin_addr.s_addr)) {
+		if (!oif)
+			oif = sk->protinfo.af_inet.mc_index;
+		if (!saddr)
+			saddr = sk->protinfo.af_inet.mc_addr;
+	}
+	err = ip_route_connect(&rt, usin->sin_addr.s_addr, saddr,
+			       RT_CONN_FLAGS(sk), oif);
 	if (err)
 		return err;
 	if ((rt->rt_flags&RTCF_BROADCAST) && !sk->broadcast) {
@@ -778,6 +821,7 @@ int udp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 	sk->daddr = rt->rt_dst;
 	sk->dport = usin->sin_port;
 	sk->state = TCP_ESTABLISHED;
+	sk->protinfo.af_inet.id = jiffies;
 
 	sk_dst_set(sk, &rt->u.dst);
 	return(0);
@@ -892,10 +936,13 @@ static int udp_checksum_init(struct sk_buff *skb, struct udphdr *uh,
 	if (uh->check == 0) {
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
 	} else if (skb->ip_summed == CHECKSUM_HW) {
-		if (udp_check(uh, ulen, saddr, daddr, skb->csum))
-			return -1;
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
-	} else if (skb->ip_summed != CHECKSUM_UNNECESSARY)
+		if (!udp_check(uh, ulen, saddr, daddr, skb->csum))
+			return 0;
+		NETDEBUG(if (net_ratelimit()) printk(KERN_DEBUG "udp v4 hw csum failure.\n"));
+		skb->ip_summed = CHECKSUM_NONE;
+	}
+	if (skb->ip_summed != CHECKSUM_UNNECESSARY)
 		skb->csum = csum_tcpudp_nofold(saddr, daddr, ulen, IPPROTO_UDP, 0);
 	/* Probably, we should checksum udp header (it should be in cache
 	 * in any case) and data in tiny packets (< rx copybreak).
@@ -907,7 +954,7 @@ static int udp_checksum_init(struct sk_buff *skb, struct udphdr *uh,
  *	All we need to do is get the socket, and then do a checksum. 
  */
  
-int udp_rcv(struct sk_buff *skb, unsigned short len)
+int udp_rcv(struct sk_buff *skb)
 {
   	struct sock *sk;
   	struct udphdr *uh;
@@ -915,29 +962,25 @@ int udp_rcv(struct sk_buff *skb, unsigned short len)
 	struct rtable *rt = (struct rtable*)skb->dst;
 	u32 saddr = skb->nh.iph->saddr;
 	u32 daddr = skb->nh.iph->daddr;
-
-	/*
-	 *	Get the header.
-	 */
-	 
-  	uh = skb->h.uh;
-	__skb_pull(skb, skb->h.raw - skb->data);
+	int len = skb->len;
 
   	IP_INC_STATS_BH(IpInDelivers);
 
 	/*
 	 *	Validate the packet and the UDP length.
 	 */
-	 
+	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
+		goto no_header;
+
+  	uh = skb->h.uh;
+
 	ulen = ntohs(uh->len);
 
-	if (ulen > len || ulen < sizeof(*uh)) {
-		NETDEBUG(printk(KERN_DEBUG "UDP: short packet: %d/%d\n", ulen, len));
-		UDP_INC_STATS_BH(UdpInErrors);
-		kfree_skb(skb);
-		return(0);
-	}
-	skb_trim(skb, ulen);
+	if (ulen > len || ulen < sizeof(*uh))
+		goto short_packet;
+
+	if (pskb_trim(skb, ulen))
+		goto short_packet;
 
 	if (udp_checksum_init(skb, uh, ulen, saddr, daddr) < 0)
 		goto csum_error;
@@ -967,12 +1010,27 @@ int udp_rcv(struct sk_buff *skb, unsigned short len)
 	kfree_skb(skb);
 	return(0);
 
+short_packet:
+	NETDEBUG(if (net_ratelimit())
+		 printk(KERN_DEBUG "UDP: short packet: %u.%u.%u.%u:%u %d/%d to %u.%u.%u.%u:%u\n",
+			NIPQUAD(saddr),
+			ntohs(uh->source),
+			ulen,
+			len,
+			NIPQUAD(daddr),
+			ntohs(uh->dest)));
+no_header:
+	UDP_INC_STATS_BH(UdpInErrors);
+	kfree_skb(skb);
+	return(0);
+
 csum_error:
 	/* 
 	 * RFC1122: OK.  Discards the bad packet silently (as far as 
 	 * the network is concerned, anyway) as per 4.1.3.4 (MUST). 
 	 */
-	NETDEBUG(printk(KERN_DEBUG "UDP: bad checksum. From %d.%d.%d.%d:%d to %d.%d.%d.%d:%d ulen %d\n",
+	NETDEBUG(if (net_ratelimit())
+		 printk(KERN_DEBUG "UDP: bad checksum. From %d.%d.%d.%d:%d to %d.%d.%d.%d:%d ulen %d\n",
 			NIPQUAD(saddr),
 			ntohs(uh->source),
 			NIPQUAD(daddr),
@@ -993,7 +1051,7 @@ static void get_udp_sock(struct sock *sp, char *tmpbuf, int i)
 	destp = ntohs(sp->dport);
 	srcp  = ntohs(sp->sport);
 	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
-		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
+		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %lu %d %p",
 		i, src, srcp, dest, destp, sp->state, 
 		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
 		0, 0L, 0,

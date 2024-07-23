@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -65,6 +65,8 @@
 **	Used by hosts.c and sym53c8xx.c with module configuration.
 */
 
+#if (LINUX_VERSION_CODE >= 0x020400) || defined(HOSTS_C) || defined(MODULE)
+
 #include <scsi/scsicam.h>
 
 int sym53c8xx_abort(Scsi_Cmnd *);
@@ -94,7 +96,9 @@ int sym53c8xx_release(struct Scsi_Host *);
 			this_id:        7,			\
 			sg_tablesize:   SCSI_NCR_SG_TABLESIZE,	\
 			cmd_per_lun:    SCSI_NCR_CMD_PER_LUN,	\
-			use_clustering: DISABLE_CLUSTERING} 
+			max_sectors:    MAX_SEGMENTS*8,		\
+			use_clustering: DISABLE_CLUSTERING,	\
+			highmem_io:	1}
 
 #else
 
@@ -108,5 +112,7 @@ int sym53c8xx_release(struct Scsi_Host *);
 			0,	0,	DISABLE_CLUSTERING} 
  
 #endif /* LINUX_VERSION_CODE */
+
+#endif /* defined(HOSTS_C) || defined(MODULE) */ 
 
 #endif /* SYM53C8XX_H */

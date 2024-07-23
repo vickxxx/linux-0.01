@@ -4,8 +4,6 @@
  * Copyright (C) 1998 Vladimir Roganov & Gleb Raiko
  *      Code (mostly sleleton and comments) derived from DECstation IRQ
  *      handling.
- *
- * $Id: irq.c,v 1.6 2000/02/04 07:40:23 ralf Exp $
  */
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -16,7 +14,7 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/timex.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/delay.h>
 
@@ -29,24 +27,24 @@
 
 #include <asm/baget/baget.h>
 
-unsigned long spurious_count = 0;
+volatile unsigned long irq_err_count;
 
 /*
  * This table is a correspondence between IRQ numbers and CPU PILs
  */
- 
-static int irq_to_pil_map[BAGET_IRQ_NR] = { 
+
+static int irq_to_pil_map[BAGET_IRQ_NR] = {
 	7/*fixme: dma_err -1*/,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1, /* 0x00 - 0x0f */
 	-1,-1,-1,-1, 3,-1,-1,-1, 2, 2, 2,-1, 3,-1,-1,3/*fixme: lance*/, /* 0x10 - 0x1f */
         -1,-1,-1,-1,-1,-1, 5,-1,-1,-1,-1,-1, 7,-1,-1,-1, /* 0x20 - 0x2f */
 	-1, 3, 2/*fixme systimer:3*/, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3  /* 0x30 - 0x3f */
 };
 
-static inline int irq_to_pil(int irq_nr) 
+static inline int irq_to_pil(int irq_nr)
 {
 	int pil = -1;
 
-	if (irq_nr >= BAGET_IRQ_NR) 
+	if (irq_nr >= BAGET_IRQ_NR)
 		baget_printk("irq_to_pil: too large irq_nr = 0x%x\n", irq_nr);
 	else {
 		pil = irq_to_pil_map[irq_nr];
@@ -61,13 +59,13 @@ static inline int irq_to_pil(int irq_nr)
 
 static inline void modify_cp0_intmask(unsigned clr_mask, unsigned set_mask)
 {
-	unsigned long status = read_32bit_cp0_register(CP0_STATUS);
+	unsigned long status = read_c0_status();
 	status &= ~((clr_mask & 0xFF) << 8);
 	status |=   (set_mask & 0xFF) << 8;
-	write_32bit_cp0_register(CP0_STATUS, status);
+	write_c0_status(status);
 }
 
-/* 
+/*
  *  These two functions may be used for unconditional IRQ
  *  masking via their PIL protection.
  */
@@ -93,22 +91,22 @@ static inline void unmask_irq(unsigned int irq_nr)
 
 static volatile unsigned int pil_in_use[BAGET_PIL_NR] = { 0, };
 
-void mask_irq_count(int irq_nr) 
+void mask_irq_count(int irq_nr)
 {
 	unsigned long flags;
 	int pil = irq_to_pil(irq_nr);
-	
+
 	save_and_cli(flags);
 	if (!--pil_in_use[pil])
 		mask_irq(irq_nr);
 	restore_flags(flags);
 }
 
-void unmask_irq_count(int irq_nr) 
+void unmask_irq_count(int irq_nr)
 {
 	unsigned long flags;
 	int pil = irq_to_pil(irq_nr);
-	
+
 	save_and_cli(flags);
 	if (!pil_in_use[pil]++)
 		unmask_irq(irq_nr);
@@ -150,7 +148,7 @@ int get_irq_list(char *buf)
 
 	for (i = 0 ; i < BAGET_IRQ_NR ; i++) {
 		action = irq_action[i];
-		if (!action) 
+		if (!action)
 			continue;
 		len += sprintf(buf+len, "%2d: %8d %c %s",
 			i, kstat.irqs[0][i],
@@ -180,10 +178,10 @@ static void do_IRQ(int irq, struct pt_regs * regs)
 	int do_random, cpu;
 
 	cpu = smp_processor_id();
-	irq_enter(cpu);
+	irq_enter(cpu, irq);
 	kstat.irqs[cpu][irq]++;
 
-	mask_irq(irq);  
+	mask_irq(irq);
 	action = *(irq + irq_action);
 	if (action) {
 		if (!(action->flags & SA_INTERRUPT))
@@ -199,10 +197,10 @@ static void do_IRQ(int irq, struct pt_regs * regs)
 			add_interrupt_randomness(irq);
 		__cli();
 	} else {
-		printk("do_IRQ: Unregistered IRQ (0x%X) occured\n", irq);
+		printk("do_IRQ: Unregistered IRQ (0x%X) occurred\n", irq);
 	}
 	unmask_irq(irq);
-	irq_exit(cpu);
+	irq_exit(cpu, irq);
 
 	/* unmasking and bottom half handling is done magically for us. */
 }
@@ -210,14 +208,14 @@ static void do_IRQ(int irq, struct pt_regs * regs)
 /*
  *  What to do in case of 'no VIC register available' for current interrupt
  */
-static void vic_reg_error(unsigned long address, unsigned char active_pils) 
+static void vic_reg_error(unsigned long address, unsigned char active_pils)
 {
 	printk("\nNo VIC register found: reg=%08lx active_pils=%02x\n"
-	       "Current interrupt mask from CP0_CAUSE: %02x\n", 
-	       address, 0xff & active_pils, 
-	       0xff & (read_32bit_cp0_register(CP0_CAUSE)>>8));
+	       "Current interrupt mask from CP0_CAUSE: %02x\n",
+	       address, 0xff & active_pils,
+	       0xff & (read_c0_cause()>>8));
 	{ int i; for (i=0; i<10000; i++) udelay(1000); }
-}	
+}
 
 static char baget_fpu_irq = BAGET_FPU_IRQ;
 #define BAGET_INT_FPU {(unsigned long)&baget_fpu_irq, 1}
@@ -227,27 +225,27 @@ static char baget_fpu_irq = BAGET_FPU_IRQ;
  */
 asmlinkage void baget_interrupt(struct pt_regs *regs)
 {
-	static struct baget_int_reg int_reg[BAGET_PIL_NR] = { 
+	static struct baget_int_reg int_reg[BAGET_PIL_NR] = {
 		BAGET_INT_NONE, BAGET_INT_NONE, BAGET_INT0_ACK, BAGET_INT1_ACK,
-		BAGET_INT_NONE, BAGET_INT_FPU,  BAGET_INT_NONE, BAGET_INT5_ACK 
+		BAGET_INT_NONE, BAGET_INT_FPU,  BAGET_INT_NONE, BAGET_INT5_ACK
 	};
 	unsigned char active_pils;
-	while ((active_pils = read_32bit_cp0_register(CP0_CAUSE)>>8)) {
+	while ((active_pils = read_c0_cause()>>8)) {
 		int pil;
 		struct baget_int_reg* reg;
 
                 for (pil = 0; pil < BAGET_PIL_NR; pil++) {
                         if (!(active_pils & (1<<pil))) continue;
- 			
+
 			reg = &int_reg[pil];
 
 			if (reg->address) {
                                 extern int try_read(unsigned long,int);
 				int irq  = try_read(reg->address, reg->size);
 
-				if (irq != -1) 
+				if (irq != -1)
 				      do_IRQ(BAGET_IRQ_MASK(irq), regs);
-				else 
+				else
 				      vic_reg_error(reg->address, active_pils);
 			} else {
 				printk("baget_interrupt: unknown interrupt "
@@ -299,9 +297,9 @@ int setup_baget_irq(int irq, struct irqaction * new)
 	return 0;
 }
 
-int request_irq(unsigned int irq, 
+int request_irq(unsigned int irq,
 		void (*handler)(int, void *, struct pt_regs *),
-		unsigned long irqflags, 
+		unsigned long irqflags,
 		const char * devname,
 		void *dev_id)
 {
@@ -312,12 +310,12 @@ int request_irq(unsigned int irq,
 		return -EINVAL;
 	if (!handler)
 		return -EINVAL;
-	if (irq_to_pil_map[irq] < 0) 
+	if (irq_to_pil_map[irq] < 0)
 		return -EINVAL;
 
 	action = (struct irqaction *)
 			kmalloc(sizeof(struct irqaction), GFP_KERNEL);
-	if (!action) 
+	if (!action)
 		return -ENOMEM;
 
 	action->handler = handler;
@@ -334,13 +332,13 @@ int request_irq(unsigned int irq,
 
 	return retval;
 }
-		
+
 void free_irq(unsigned int irq, void *dev_id)
 {
 	struct irqaction * action, **p;
 	unsigned long flags;
 
-	if (irq >= BAGET_IRQ_NR) 
+	if (irq >= BAGET_IRQ_NR)
 		printk("Trying to free IRQ%d\n",irq);
 
 	for (p = irq + irq_action; (action = *p) != NULL; p = &action->next) {
@@ -358,13 +356,6 @@ void free_irq(unsigned int irq, void *dev_id)
 	}
 	printk("Trying to free free IRQ%d\n",irq);
 }
-
-static int baget_irq_canonicalize(int irq) 
-{
-	return irq;
-}
-
-int (*irq_cannonicalize)(int irq) = baget_irq_canonicalize; 
 
 unsigned long probe_irq_on (void)
 {
@@ -384,7 +375,7 @@ static void write_err_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	*(volatile char*) BAGET_WRERR_ACK = 0;
 }
 
-static struct irqaction irq0  = 
+static struct irqaction irq0  =
 { write_err_interrupt, SA_INTERRUPT, 0, "bus write error", NULL, NULL};
 
 void __init init_IRQ(void)
@@ -397,6 +388,6 @@ void __init init_IRQ(void)
 	/* Enable interrupts for pils 2 and 3 (lines 0 and 1) */
 	modify_cp0_intmask(0, (1<<2)|(1<<3));
 
-	if (setup_baget_irq(0, &irq0) < 0) 
+	if (setup_baget_irq(0, &irq0) < 0)
 		printk("init_IRQ: unable to register write_err irq\n");
 }

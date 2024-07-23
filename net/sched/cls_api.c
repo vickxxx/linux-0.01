@@ -97,8 +97,6 @@ int unregister_tcf_proto_ops(struct tcf_proto_ops *ops)
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
-
 static int tfilter_notify(struct sk_buff *oskb, struct nlmsghdr *n,
 			  struct tcf_proto *tp, unsigned long fh, int event);
 
@@ -248,9 +246,7 @@ static int tc_ctl_tfilter(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 			*back = tp->next;
 			spin_unlock_bh(&dev->queue_lock);
 			write_unlock(&qdisc_tree_lock);
-
-			tp->ops->destroy(tp);
-			kfree(tp);
+			tcf_destroy(tp);
 			err = 0;
 			goto errout;
 		}
@@ -430,12 +426,9 @@ errout:
 	return skb->len;
 }
 
-#endif
-
 
 int __init tc_filter_init(void)
 {
-#ifdef CONFIG_RTNETLINK
 	struct rtnetlink_link *link_p = rtnetlink_links[PF_UNSPEC];
 
 	/* Setup rtnetlink links. It is made here to avoid
@@ -448,7 +441,6 @@ int __init tc_filter_init(void)
 		link_p[RTM_GETTFILTER-RTM_BASE].doit = tc_ctl_tfilter;
 		link_p[RTM_GETTFILTER-RTM_BASE].dumpit = tc_dump_tfilter;
 	}
-#endif
 #define INIT_TC_FILTER(name) { \
           extern struct tcf_proto_ops cls_##name##_ops; \
           register_tcf_proto_ops(&cls_##name##_ops); \

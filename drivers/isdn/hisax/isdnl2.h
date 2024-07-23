@@ -1,8 +1,9 @@
-/* $Id: isdnl2.h,v 1.3 2000/06/26 08:59:13 keil Exp $
+/* $Id: isdnl2.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
  * Layer 2 defines
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 

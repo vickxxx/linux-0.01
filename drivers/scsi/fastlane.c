@@ -29,7 +29,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -41,7 +41,7 @@
 
 #include <linux/zorro.h>
 #include <asm/irq.h>
-#include <asm/io.h>
+
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 
@@ -74,9 +74,9 @@ static unsigned char ctrl_data = 0;	/* Keep backup of the stuff written
 				 * the hardware register!
 				 */
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
 
@@ -96,9 +96,7 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		 * this ID value. Fortunately only Fastlane maps in Z3 space
 		 */
 		if (board < 0x1000000) {
-			release_mem_region(board+FASTLANE_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0;
+			goto err_release;
 		}
 		esp = esp_allocate(tpnt, (void *)board+FASTLANE_ESP_ADDR);
 
@@ -142,14 +140,11 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 
 		/* Map the physical address space into virtual kernel space */
 		address = (unsigned long)
-			ioremap_nocache(board, z->resource.end-board+1);
+			z_ioremap(board, z->resource.end-board+1);
 
 		if(!address){
 			printk("Could not remap Fastlane controller memory!");
-			scsi_unregister (esp->ehost);
-			release_mem_region(board+FASTLANE_ESP_ADDR,
-					   sizeof(struct ESP_regs));
-			return 0;
+			goto err_unregister;
 		}
 
 
@@ -166,13 +161,16 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		esp->edev = (void *) address;
 		
 		/* Set the command buffer */
-		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+		esp->esp_command = cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		esp->slot = board+FASTLANE_ESP_ADDR;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
-			    "Fastlane SCSI", esp_intr);
+		if (request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
+				"Fastlane SCSI", esp_intr)) {
+			printk(KERN_WARNING "Fastlane: Could not get IRQ%d, aborting.\n", IRQ_AMIGA_PORTS);
+			goto err_unmap;
+		}			
 
 		/* Controller ID */
 		esp->scsi_id = 7;
@@ -188,6 +186,15 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		return esps_in_use;
 	    }
 	}
+	return 0;
+
+ err_unmap:
+	z_iounmap((void *)address);
+ err_unregister:
+	scsi_unregister (esp->ehost);
+ err_release:
+	release_mem_region(z->resource.start+FASTLANE_ESP_ADDR,
+			   sizeof(struct ESP_regs));
 	return 0;
 }
 
@@ -365,3 +372,5 @@ int fastlane_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+MODULE_LICENSE("GPL");

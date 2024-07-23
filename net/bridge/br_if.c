@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_if.c,v 1.5 2000/11/08 05:16:40 davem Exp $
+ *	$Id: br_if.c,v 1.6.2.1 2001/12/24 00:59:27 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -18,10 +18,10 @@
 #include <linux/if_bridge.h>
 #include <linux/inetdevice.h>
 #include <linux/rtnetlink.h>
+#include <linux/brlock.h>
+#include <linux/etherdevice.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
-
-static struct net_bridge *bridge_list;
 
 static int br_initial_port_cost(struct net_device *dev)
 {
@@ -37,13 +37,13 @@ static int br_initial_port_cost(struct net_device *dev)
 	return 100;
 }
 
-/* called under bridge lock */
+/* called under BR_NETPROTO_LOCK and bridge lock */
 static int __br_del_if(struct net_bridge *br, struct net_device *dev)
 {
 	struct net_bridge_port *p;
 	struct net_bridge_port **pptr;
 
-	if ((p = dev->br_port) == NULL)
+	if ((p = dev->br_port) == NULL || p->br != br)
 		return -EINVAL;
 
 	br_stp_disable_port(p);
@@ -68,28 +68,14 @@ static int __br_del_if(struct net_bridge *br, struct net_device *dev)
 	return 0;
 }
 
-static struct net_bridge **__find_br(char *name)
-{
-	struct net_bridge **b;
-	struct net_bridge *br;
-
-	b = &bridge_list;
-	while ((br = *b) != NULL) {
-		if (!strncmp(br->dev.name, name, IFNAMSIZ))
-			return b;
-
-		b = &(br->next);
-	}
-
-	return NULL;
-}
-
 static void del_ifs(struct net_bridge *br)
 {
-	write_lock_bh(&br->lock);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
+	write_lock(&br->lock);
 	while (br->port_list != NULL)
 		__br_del_if(br, br->port_list->dev);
-	write_unlock_bh(&br->lock);
+	write_unlock(&br->lock);
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 }
 
 static struct net_bridge *new_nb(char *name)
@@ -115,7 +101,7 @@ static struct net_bridge *new_nb(char *name)
 	br->bridge_id.prio[1] = 0x00;
 	memset(br->bridge_id.addr, 0, ETH_ALEN);
 
-	br->stp_enabled = 1;
+	br->stp_enabled = 0;
 	br->designated_root = br->bridge_id;
 	br->root_path_cost = 0;
 	br->root_port = 0;
@@ -140,7 +126,7 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 	int i;
 	struct net_bridge_port *p;
 
-	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc(sizeof(*p), GFP_ATOMIC);
 	if (p == NULL)
 		return p;
 
@@ -150,8 +136,6 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 	p->path_cost = br_initial_port_cost(dev);
 	p->priority = 0x80;
 
-	dev->br_port = p;
-
 	for (i=1;i<255;i++)
 		if (br_get_port(br, i) == NULL)
 			break;
@@ -160,6 +144,8 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 		kfree(p);
 		return NULL;
 	}
+
+	dev->br_port = p;
 
 	p->port_no = i;
 	br_init_port(p);
@@ -174,42 +160,48 @@ static struct net_bridge_port *new_nbp(struct net_bridge *br, struct net_device 
 int br_add_bridge(char *name)
 {
 	struct net_bridge *br;
+	struct net_device *dev;
+	int err;
 
 	if ((br = new_nb(name)) == NULL)
 		return -ENOMEM;
 
-	if (__dev_get_by_name(name) != NULL) {
-		kfree(br);
-		return -EEXIST;
+	dev = &br->dev;
+	if (strchr(dev->name, '%')) {
+		err = dev_alloc_name(dev, dev->name);
+		if (err < 0)
+			goto  out;
 	}
 
-	br->next = bridge_list;
-	bridge_list = br;
+	err = register_netdevice(dev);
+	if (err == 0)
+		br_inc_use_count();
 
-	br_inc_use_count();
-	register_netdev(&br->dev);
-
-	return 0;
+ out:
+	return err;
 }
 
 int br_del_bridge(char *name)
 {
-	struct net_bridge **b;
+	struct net_device *dev;
 	struct net_bridge *br;
 
-	if ((b = __find_br(name)) == NULL)
+	dev = __dev_get_by_name(name);
+	if (!dev)
 		return -ENXIO;
 
-	br = *b;
+	if (dev->hard_start_xmit != br_dev_xmit)
+		return -EPERM;
 
-	if (br->dev.flags & IFF_UP)
+	if (dev->flags & IFF_UP)
 		return -EBUSY;
+
+	br = dev->priv;
+	BUG_ON(&br->dev != dev);
 
 	del_ifs(br);
 
-	*b = br->next;
-
-	unregister_netdev(&br->dev);
+	unregister_netdevice(dev);
 	kfree(br);
 	br_dec_use_count();
 
@@ -225,6 +217,12 @@ int br_add_if(struct net_bridge *br, struct net_device *dev)
 
 	if (dev->flags & IFF_LOOPBACK || dev->type != ARPHRD_ETHER)
 		return -EINVAL;
+
+	if (dev->hard_start_xmit == br_dev_xmit)
+		return -ELOOP;
+
+	if (!is_valid_ether_addr(dev->dev_addr))
+		return -EADDRNOTAVAIL;
 
 	dev_hold(dev);
 	write_lock_bh(&br->lock);
@@ -249,28 +247,24 @@ int br_del_if(struct net_bridge *br, struct net_device *dev)
 {
 	int retval;
 
-	write_lock_bh(&br->lock);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
+	write_lock(&br->lock);
 	retval = __br_del_if(br, dev);
 	br_stp_recalculate_bridge_id(br);
-	write_unlock_bh(&br->lock);
+	write_unlock(&br->lock);
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 
 	return retval;
 }
 
 int br_get_bridge_ifindices(int *indices, int num)
 {
-	struct net_bridge *br;
-	int i;
+	struct net_device *dev;
+	int i = 0;
 
-	i = 0;
-
-	br = bridge_list;
-	for (i=0;i<num;i++) {
-		if (br == NULL)
-			break;
-
-		indices[i] = br->dev.ifindex;
-		br = br->next;
+	for (dev = dev_base; i < num && dev != NULL; dev = dev->next) {
+		if (dev->hard_start_xmit == br_dev_xmit)
+			indices[i++] = dev->ifindex;
 	}
 
 	return i;

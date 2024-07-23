@@ -80,7 +80,7 @@ CONFIG_CMDLINE="keepinitrd"
 CONFIG_LEDS=y
 CONFIG_LEDS_TIMER=y
 CONFIG_LEDS_CPU=y
-# CONFIG_ALIGNMENT_TRAP is not set
+CONFIG_ALIGNMENT_TRAP=y
 
 #
 # Parallel port support
@@ -123,7 +123,6 @@ CONFIG_BLK_DEV_INITRD=y
 # ATA/IDE/MFM/RLL support
 #
 # CONFIG_IDE is not set
-# CONFIG_BLK_DEV_IDE_MODES is not set
 # CONFIG_BLK_DEV_HD is not set
 
 #

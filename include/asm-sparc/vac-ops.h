@@ -98,8 +98,8 @@ struct sun4c_vac_props {
 	unsigned int num_bytes;     /* Size of the cache */
 	unsigned int num_lines;     /* Number of cache lines */
 	unsigned int do_hwflushes;  /* Hardware flushing available? */
-	enum { NONE, WRITE_THROUGH,
-	    WRITE_BACK } type;      /* What type of VAC? */
+	enum { VAC_NONE, VAC_WRITE_THROUGH,
+	    VAC_WRITE_BACK } type;  /* What type of VAC? */
 	unsigned int linesize;      /* Size of each line in bytes */
 	unsigned int log2lsize;     /* log2(linesize) */
 	unsigned int on;            /* VAC is enabled */
@@ -107,30 +107,30 @@ struct sun4c_vac_props {
 
 extern struct sun4c_vac_props sun4c_vacinfo;
 
-extern void sun4c_flush_all(void);
-
 /* sun4c_enable_vac() enables the sun4c virtual address cache. */
-extern __inline__ void sun4c_enable_vac(void)
+static inline void sun4c_enable_vac(void)
 {
-  __asm__ __volatile__("lduba [%0] %1, %%g1\n\t"
-		       "or    %%g1, %2, %%g1\n\t"
-		       "stba  %%g1, [%0] %1\n\t" : :
-		       "r" ((unsigned int) AC_SENABLE),
-		       "i" (ASI_CONTROL), "i" (SENABLE_CACHE) :
-		       "g1");
-  sun4c_vacinfo.on = 1;
+	__asm__ __volatile__("lduba [%0] %1, %%g1\n\t"
+			     "or    %%g1, %2, %%g1\n\t"
+			     "stba  %%g1, [%0] %1\n\t"
+			     : /* no outputs */
+			     : "r" ((unsigned int) AC_SENABLE),
+			     "i" (ASI_CONTROL), "i" (SENABLE_CACHE)
+			     : "g1", "memory");
+	sun4c_vacinfo.on = 1;
 }
 
 /* sun4c_disable_vac() disables the virtual address cache. */
-extern __inline__ void sun4c_disable_vac(void)
+static inline void sun4c_disable_vac(void)
 {
-  __asm__ __volatile__("lduba [%0] %1, %%g1\n\t"
-		       "andn  %%g1, %2, %%g1\n\t"
-		       "stba  %%g1, [%0] %1\n\t" : :
-		       "r" ((unsigned int) AC_SENABLE),
-		       "i" (ASI_CONTROL), "i" (SENABLE_CACHE) :
-		       "g1");
-  sun4c_vacinfo.on = 0;
+	__asm__ __volatile__("lduba [%0] %1, %%g1\n\t"
+			     "andn  %%g1, %2, %%g1\n\t"
+			     "stba  %%g1, [%0] %1\n\t"
+			     : /* no outputs */
+			     : "r" ((unsigned int) AC_SENABLE),
+			     "i" (ASI_CONTROL), "i" (SENABLE_CACHE)
+			     : "g1", "memory");
+	sun4c_vacinfo.on = 0;
 }
 
 #endif /* !(_SPARC_VAC_OPS_H) */

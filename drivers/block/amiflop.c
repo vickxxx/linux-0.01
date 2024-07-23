@@ -118,6 +118,7 @@
 static long int fd_def_df0 = FD_DD_3;     /* default for df0 if it doesn't identify */
 
 MODULE_PARM(fd_def_df0,"l");
+MODULE_LICENSE("GPL");
 
 /*
  *  Macros
@@ -332,7 +333,7 @@ static void fd_deselect (int drive)
 
 	get_fdc(drive);
 	save_flags (flags);
-	sti();
+	cli();
 
 	selected = -1;
 
@@ -365,10 +366,8 @@ static int fd_motor_on(int nr)
 		unit[nr].motor = 1;
 		fd_select(nr);
 
-		del_timer(&motor_on_timer);
 		motor_on_timer.data = nr;
-		motor_on_timer.expires = jiffies + HZ/2;
-		add_timer(&motor_on_timer);
+		mod_timer(&motor_on_timer, jiffies + HZ/2);
 
 		on_attempts = 10;
 		sleep_on (&motor_wait);
@@ -426,11 +425,9 @@ static void floppy_off (unsigned int nr)
 	int drive;
 
 	drive = nr & 3;
-	del_timer(motor_off_timer + drive);
-	motor_off_timer[drive].expires = jiffies + 3*HZ;
 	/* called this way it is always from interrupt */
 	motor_off_timer[drive].data = nr | 0x80000000;
-	add_timer(motor_off_timer + nr);
+	mod_timer(motor_off_timer + drive, jiffies + 3*HZ);
 }
 
 static int fd_calibrate(int drive)
@@ -1465,10 +1462,7 @@ static void redo_fd_request(void)
 
 			unit[drive].dirty = 1;
 		        /* reset the timer */
-		        del_timer (flush_track_timer + drive);
-			    
-			flush_track_timer[drive].expires = jiffies + 1;
-			add_timer (flush_track_timer + drive);
+			mod_timer(flush_track_timer + drive, jiffies + 1);
 			restore_flags (flags);
 			break;
 		}
@@ -1490,7 +1484,6 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 {
 	int drive = inode->i_rdev & 3;
 	static struct floppy_struct getprm;
-	struct super_block * sb;
 
 	switch(cmd){
 	case HDIO_GETGEO:
@@ -1540,10 +1533,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 	case FDFMTEND:
 		floppy_off(drive);
-		sb = get_super(inode->i_rdev);
-		if (sb)
-			invalidate_inodes(sb);
-		invalidate_buffers(inode->i_rdev);
+		invalidate_device(inode->i_rdev, 0);
 		break;
 	case FDGETPRM:
 		memset((void *)&getprm, 0, sizeof (getprm));
@@ -1557,7 +1547,10 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 			return -EFAULT;
 		break;
 	case BLKGETSIZE:
-		return put_user(unit[drive].blocks,(long *)param);
+		return put_user(unit[drive].blocks,(unsigned long *)param);
+		break;
+	case BLKGETSIZE64:
+		return put_user((u64)unit[drive].blocks << 9, (u64 *)param);
 		break;
 	case FDSETPRM:
 	case FDDEFPRM:
@@ -1677,9 +1670,6 @@ static int floppy_open(struct inode *inode, struct file *filp)
 
 static int floppy_release(struct inode * inode, struct file * filp)
 {
-#ifdef DEBUG
-	struct super_block * sb;
-#endif
 	int drive = MINOR(inode->i_rdev) & 3;
 
 	if (unit[drive].dirty == 1) {
@@ -1737,6 +1727,7 @@ static int amiga_floppy_change(kdev_t dev)
 }
 
 static struct block_device_operations floppy_fops = {
+	owner:			THIS_MODULE,
 	open:			floppy_open,
 	release:		floppy_release,
 	ioctl:			fd_ioctl,

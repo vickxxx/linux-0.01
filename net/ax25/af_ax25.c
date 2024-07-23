@@ -102,6 +102,7 @@
  *			Joerg(DL1BKE)		Added support for SO_BINDTODEVICE
  *			Arnaldo C. Melo		s/suser/capable(CAP_NET_ADMIN)/, some more cleanups
  *			Michal Ostrowski	Module initialization cleanup.
+ *			Jeroen(PE1RXQ)		Use sock_orphan() on release.
  */
 
 #include <linux/config.h>
@@ -751,7 +752,7 @@ static int ax25_getsockopt(struct socket *sock, int level, int optname, char *op
 		return -EFAULT;
 
 	valptr = (void *) &val;
-	length = min(maxlen, sizeof(int));
+	length = min_t(unsigned int, maxlen, sizeof(int));
 
 	switch (optname) {
 		case AX25_WINDOW:
@@ -803,7 +804,7 @@ static int ax25_getsockopt(struct socket *sock, int level, int optname, char *op
 
 			if (ax25_dev != NULL && ax25_dev->dev != NULL) {
 				strncpy(devname, ax25_dev->dev->name, IFNAMSIZ);
-				length = min(strlen(ax25_dev->dev->name)+1, maxlen);
+				length = min_t(unsigned int, strlen(ax25_dev->dev->name)+1, maxlen);
 				devname[length-1] = '\0';
 			} else {
 				*devname = '\0';
@@ -1018,7 +1019,7 @@ static int ax25_release(struct socket *sock)
 				sk->state                = TCP_CLOSE;
 				sk->shutdown            |= SEND_SHUTDOWN;
 				sk->state_change(sk);
-				sk->dead                 = 1;
+				sock_orphan(sk);
 				sk->destroy              = 1;
 				break;
 
@@ -1029,7 +1030,7 @@ static int ax25_release(struct socket *sock)
 		sk->state     = TCP_CLOSE;
 		sk->shutdown |= SEND_SHUTDOWN;
 		sk->state_change(sk);
-		sk->dead      = 1;
+		sock_orphan(sk);
 		ax25_destroy_socket(sk->protinfo.ax25);
 	}
 
@@ -1451,7 +1452,7 @@ static int ax25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct
 	/* Assume the worst case */
 	size = len + 3 + ax25_addr_size(dp) + AX25_BPQ_HEADER_LEN;
 
-	if ((skb = sock_alloc_send_skb(sk, size, 0, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
+	if ((skb = sock_alloc_send_skb(sk, size, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
 
 	skb_reserve(skb, size - len);
@@ -1782,10 +1783,9 @@ static int ax25_get_info(char *buffer, char **start, off_t offset, int length)
 	return(len);
 }
 
-static struct net_proto_family ax25_family_ops =
-{
-	PF_AX25,
-	ax25_create
+static struct net_proto_family ax25_family_ops = {
+	family:		PF_AX25,
+	create:		ax25_create,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(ax25_proto_ops) = {
@@ -1806,6 +1806,7 @@ static struct proto_ops SOCKOPS_WRAPPED(ax25_proto_ops) = {
 	sendmsg:	ax25_sendmsg,
 	recvmsg:	ax25_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
@@ -1814,18 +1815,13 @@ SOCKOPS_WRAP(ax25_proto, PF_AX25);
 /*
  *	Called by socket.c on kernel start up
  */
-static struct packet_type ax25_packet_type =
-{
-	0,	/* MUTTER ntohs(ETH_P_AX25),*/
-	0,		/* copy */
-	ax25_kiss_rcv,
-	NULL,
-	NULL,
+static struct packet_type ax25_packet_type = {
+	type:		__constant_htons(ETH_P_AX25),
+	func:		ax25_kiss_rcv,
 };
 
 static struct notifier_block ax25_dev_notifier = {
-	ax25_device_event,
-	0
+	notifier_call:	ax25_device_event,
 };
 
 EXPORT_SYMBOL(ax25_encapsulate);
@@ -1846,10 +1842,11 @@ EXPORT_SYMBOL(asc2ax);
 EXPORT_SYMBOL(null_ax25_address);
 EXPORT_SYMBOL(ax25_display_timer);
 
+static char banner[] __initdata = KERN_INFO "NET4: G4KLX/GW4PTS AX.25 for Linux. Version 0.37 for Linux NET4.0\n";
+
 static int __init ax25_init(void)
 {
 	sock_register(&ax25_family_ops);
-	ax25_packet_type.type = htons(ETH_P_AX25);
 	dev_add_pack(&ax25_packet_type);
 	register_netdevice_notifier(&ax25_dev_notifier);
 	ax25_register_sysctl();
@@ -1858,7 +1855,7 @@ static int __init ax25_init(void)
 	proc_net_create("ax25", 0, ax25_get_info);
 	proc_net_create("ax25_calls", 0, ax25_uid_get_info);
 
-	printk(KERN_INFO "NET4: G4KLX/GW4PTS AX.25 for Linux. Version 0.37 for Linux NET4.0\n");
+	printk(banner);
 	return 0;
 }
 module_init(ax25_init);
@@ -1866,6 +1863,7 @@ module_init(ax25_init);
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio AX.25 link layer protocol");
+MODULE_LICENSE("GPL");
 
 static void __exit ax25_exit(void)
 {
@@ -1879,7 +1877,6 @@ static void __exit ax25_exit(void)
 	ax25_unregister_sysctl();
 	unregister_netdevice_notifier(&ax25_dev_notifier);
 
-	ax25_packet_type.type = htons(ETH_P_AX25);
 	dev_remove_pack(&ax25_packet_type);
 
 	sock_unregister(PF_AX25);

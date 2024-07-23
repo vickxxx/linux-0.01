@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -12,7 +11,7 @@
 #ifndef _ASM_SGI_SN0_HUBNI_H
 #define _ASM_SGI_SN0_HUBNI_H
 
-#ifdef _LANGUAGE_C
+#ifndef __ASSEMBLY__
 #include <linux/types.h>
 #endif
 
@@ -227,7 +226,7 @@
 
 #define NLT_EXIT_PORT_MASK (UINT64_CAST 0xf)
 
-#ifdef _LANGUAGE_C
+#ifndef __ASSEMBLY__
 
 typedef union	hubni_port_error_u {
 	u64	nipe_reg_value;
@@ -251,6 +250,6 @@ typedef union	hubni_port_error_u {
 #define NI_LLP_CB_MAX		0xff
 #define NI_LLP_SN_MAX		0xff
 
-#endif /* LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 #endif /* _ASM_SGI_SN0_HUBNI_H */

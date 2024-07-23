@@ -34,8 +34,6 @@
 
 #define MAX_BUF PAGE_SIZE
 
-#define max(a,b) (((a) > (b)) ? (a) : (b))
-
 /*
  * If we are told to probe a host, we will return 0 if  the host is not
  * present, 1 if the host is present, and will return an identifying
@@ -79,7 +77,7 @@ static int ioctl_probe(struct Scsi_Host *host, void *buffer)
  * 
  * *(char *) ((int *) arg)[2] the actual command byte.   
  * 
- * Note that if more than MAX_BUF bytes are requested to be transfered,
+ * Note that if more than MAX_BUF bytes are requested to be transferred,
  * the ioctl will fail with error EINVAL.  MAX_BUF can be increased in
  * the future by increasing the size that scsi_malloc will accept.
  * 
@@ -101,7 +99,10 @@ static int ioctl_internal_command(Scsi_Device * dev, char *cmd,
 
 
 	SCSI_LOG_IOCTL(1, printk("Trying ioctl with scsi command %d\n", cmd[0]));
-	SRpnt = scsi_allocate_request(dev);
+	if (NULL == (SRpnt = scsi_allocate_request(dev))) {
+		printk("SCSI internal ioctl failed, no memory\n");
+		return -ENOMEM;
+	}
 
 	SRpnt->sr_data_direction = SCSI_DATA_NONE;
         scsi_wait_req(SRpnt, cmd, NULL, 0, timeout, retries);
@@ -193,8 +194,8 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 	Scsi_Request *SRpnt;
 	Scsi_Device *SDpnt;
 	unsigned char opcode;
-	int inlen, outlen, cmdlen;
-	int needed, buf_needed;
+	unsigned int inlen, outlen, cmdlen;
+	unsigned int needed, buf_needed;
 	int timeout, retries, result;
 	int data_direction;
 
@@ -206,8 +207,11 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 	if (verify_area(VERIFY_READ, sic, sizeof(Scsi_Ioctl_Command)))
 		return -EFAULT;
 
-	__get_user(inlen, &sic->inlen);
-	__get_user(outlen, &sic->outlen);
+	if(__get_user(inlen, &sic->inlen))
+		return -EFAULT;
+		
+	if(__get_user(outlen, &sic->outlen))
+		return -EFAULT;
 
 	/*
 	 * We do not transfer more than MAX_BUF with this interface.
@@ -220,7 +224,8 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 		return -EINVAL;
 
 	cmd_in = sic->data;
-	__get_user(opcode, cmd_in);
+	if(get_user(opcode, cmd_in))
+		return -EFAULT;
 
 	needed = buf_needed = (inlen > outlen ? inlen : outlen);
 	if (buf_needed) {
@@ -251,23 +256,30 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 	 * Obtain the command from the user's address space.
 	 */
 	cmdlen = COMMAND_SIZE(opcode);
+	
+	result = -EFAULT;
 
 	if (verify_area(VERIFY_READ, cmd_in, cmdlen + inlen))
-		return -EFAULT;
+		goto error;
 
-	__copy_from_user(cmd, cmd_in, cmdlen);
+	if(__copy_from_user(cmd, cmd_in, cmdlen))
+		goto error;
 
 	/*
 	 * Obtain the data to be sent to the device (if any).
 	 */
-	__copy_from_user(buf, cmd_in + cmdlen, inlen);
+
+	if(copy_from_user(buf, cmd_in + cmdlen, inlen))
+		goto error;
 
 	/*
 	 * Set the lun field to the correct value.
 	 */
-	cmd[1] = (cmd[1] & 0x1f) | (dev->lun << 5);
+	if (dev->scsi_level <= SCSI_2)
+		cmd[1] = (cmd[1] & 0x1f) | (dev->lun << 5);
 
 	switch (opcode) {
+	case SEND_DIAGNOSTIC:
 	case FORMAT_UNIT:
 		timeout = FORMAT_UNIT_TIMEOUT;
 		retries = 1;
@@ -300,7 +312,8 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 	SRpnt = scsi_allocate_request(dev);
         if( SRpnt == NULL )
         {
-                return -EINTR;
+                result = -EINTR;
+                goto error;
         }
 
 	SRpnt->sr_data_direction = data_direction;
@@ -309,22 +322,25 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 	/* 
 	 * If there was an error condition, pass the info back to the user. 
 	 */
+
+	result = SRpnt->sr_result;
+
 	if (SRpnt->sr_result) {
 		int sb_len = sizeof(SRpnt->sr_sense_buffer);
 
 		sb_len = (sb_len > OMAX_SB_LEN) ? OMAX_SB_LEN : sb_len;
 		if (copy_to_user(cmd_in, SRpnt->sr_sense_buffer, sb_len))
-			return -EFAULT;
-	} else
+			result = -EFAULT;
+	} else {
 		if (copy_to_user(cmd_in, buf, outlen))
-			return -EFAULT;
-
-	result = SRpnt->sr_result;
+			result = -EFAULT;
+	}	
 
 	SDpnt = SRpnt->sr_device;
 	scsi_release_request(SRpnt);
 	SRpnt = NULL;
 
+error:
 	if (buf)
 		scsi_free(buf, buf_needed);
 
@@ -349,6 +365,29 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 }
 
 /*
+ * The scsi_ioctl_get_pci() function places into arg the value
+ * pci_dev::slot_name (8 characters) for the PCI device (if any).
+ * Returns: 0 on success
+ *          -ENXIO if there isn't a PCI device pointer
+ *                 (could be because the SCSI driver hasn't been
+ *                  updated yet, or because it isn't a SCSI
+ *                  device)
+ *          any copy_to_user() error on failure there
+ */
+static int
+scsi_ioctl_get_pci(Scsi_Device * dev, void *arg)
+{
+
+        if (!dev->host->pci_dev)
+        	return -ENXIO;
+        if(copy_to_user(arg, dev->host->pci_dev->slot_name,
+                            sizeof(dev->host->pci_dev->slot_name)))
+		return -EFAULT;
+	return 0;
+}
+
+
+/*
  * the scsi_ioctl() function differs from most ioctls in that it does
  * not take a major/minor number as the dev field.  Rather, it takes
  * a pointer to a scsi_devices[] element, a structure. 
@@ -356,6 +395,7 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 {
 	char scsi_cmd[MAX_COMMAND_SIZE];
+	char cmd_byte1;
 
 	/* No idea how this happens.... */
 	if (!dev)
@@ -370,14 +410,16 @@ int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 	if (!scsi_block_when_processing_errors(dev)) {
 		return -ENODEV;
 	}
+	cmd_byte1 = (dev->scsi_level <= SCSI_2) ? (dev->lun << 5) : 0;
+
 	switch (cmd) {
 	case SCSI_IOCTL_GET_IDLUN:
 		if (verify_area(VERIFY_WRITE, arg, sizeof(Scsi_Idlun)))
 			return -EFAULT;
 
-		__put_user(dev->id
-			 + (dev->lun << 8)
-			 + (dev->channel << 16)
+		__put_user((dev->id & 0xff)
+			 + ((dev->lun & 0xff) << 8)
+			 + ((dev->channel & 0xff) << 16)
 			 + ((dev->host->host_no & 0xff) << 24),
 			 &((Scsi_Idlun *) arg)->dev_id);
 		__put_user(dev->host->unique_id, &((Scsi_Idlun *) arg)->host_unique_id);
@@ -411,7 +453,7 @@ int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 		if (!dev->removable || !dev->lockable)
 			return 0;
 		scsi_cmd[0] = ALLOW_MEDIUM_REMOVAL;
-		scsi_cmd[1] = dev->lun << 5;
+		scsi_cmd[1] = cmd_byte1;
 		scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 		scsi_cmd[4] = SCSI_REMOVAL_PREVENT;
 		return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
@@ -421,14 +463,14 @@ int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 		if (!dev->removable || !dev->lockable)
 			return 0;
 		scsi_cmd[0] = ALLOW_MEDIUM_REMOVAL;
-		scsi_cmd[1] = dev->lun << 5;
+		scsi_cmd[1] = cmd_byte1;
 		scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 		scsi_cmd[4] = SCSI_REMOVAL_ALLOW;
 		return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
 				   IOCTL_NORMAL_TIMEOUT, NORMAL_RETRIES);
 	case SCSI_IOCTL_TEST_UNIT_READY:
 		scsi_cmd[0] = TEST_UNIT_READY;
-		scsi_cmd[1] = dev->lun << 5;
+		scsi_cmd[1] = cmd_byte1;
 		scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 		scsi_cmd[4] = 0;
 		return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
@@ -436,7 +478,7 @@ int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 		break;
 	case SCSI_IOCTL_START_UNIT:
 		scsi_cmd[0] = START_STOP;
-		scsi_cmd[1] = dev->lun << 5;
+		scsi_cmd[1] = cmd_byte1;
 		scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 		scsi_cmd[4] = 1;
 		return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
@@ -444,12 +486,15 @@ int scsi_ioctl(Scsi_Device * dev, int cmd, void *arg)
 		break;
 	case SCSI_IOCTL_STOP_UNIT:
 		scsi_cmd[0] = START_STOP;
-		scsi_cmd[1] = dev->lun << 5;
+		scsi_cmd[1] = cmd_byte1;
 		scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 		scsi_cmd[4] = 0;
 		return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
 				     START_STOP_TIMEOUT, NORMAL_RETRIES);
 		break;
+        case SCSI_IOCTL_GET_PCI:
+                return scsi_ioctl_get_pci(dev, arg);
+                break;
 	default:
 		if (dev->host->hostt->ioctl)
 			return dev->host->hostt->ioctl(dev, cmd, arg);

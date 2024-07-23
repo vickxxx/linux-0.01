@@ -6,6 +6,7 @@
  *  With additional hacking by Jeffrey Kuskin (jsk@mojave.stanford.edu)
  *  Modified by Danilo Beuche 1998
  *  Some register values added by Damien Doligez, INRIA Rocquencourt
+ *  Various cleanups by Paul Mundt (lethal@chaoticdreams.org)
  *
  *  This file was written by Ryan Nielsen (ran@krazynet.com)
  *  Most of the frame buffer device stuff was copied from atyfb.c
@@ -22,7 +23,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -178,10 +179,10 @@ enum {
 
 /* TI TVP 3030 RAMDAC Direct Registers */
 enum {
-	TVPADDRW = 0x00,	/* 0  Palette/Cursor RAM Write Adress/Index */
+	TVPADDRW = 0x00,	/* 0  Palette/Cursor RAM Write Address/Index */
 	TVPPDATA = 0x04,	/* 1  Palette Data RAM Data */
 	TVPPMASK = 0x08,	/* 2  Pixel Read-Mask */
-	TVPPADRR = 0x0c,	/* 3  Palette/Cursor RAM Read Adress */
+	TVPPADRR = 0x0c,	/* 3  Palette/Cursor RAM Read Address */
 	TVPCADRW = 0x10,	/* 4  Cursor/Overscan Color Write Address */
 	TVPCDATA = 0x14,	/* 5  Cursor/Overscan Color Data */
 				/* 6  reserved */
@@ -370,7 +371,6 @@ enum {
 	TVP = 1
 };
 
-#define USE_NV_MODES		1
 #define INIT_BPP		8
 #define INIT_XRES		640
 #define INIT_YRES		480
@@ -378,13 +378,14 @@ enum {
 #define CURSOR_DRAW_DELAY	2
 
 static int currcon = 0;
+static int inverse = 0;
 static char fontname[40] __initdata = { 0 };
 static char curblink __initdata = 1;
 static char noaccel __initdata = 0;
 #if defined(CONFIG_PPC)
-static signed char init_vmode __initdata = -1, init_cmode __initdata = -1;
+static signed char init_vmode __initdata = VMODE_NVRAM;
+static signed char init_cmode __initdata = CMODE_NVRAM;
 #endif
-static struct fb_info_imstt *fb_info_imstt_p[FB_MAX] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 static struct imstt_regvals tvp_reg_init_2 = {
 	512,
@@ -441,6 +442,12 @@ static struct imstt_regvals tvp_reg_init_20 = {
 	0xf0, 0x2d, 0xf0,
 	{ 0x38, 0x38, 0x38 }, { 0xf3, 0xf2, 0xf1 }
 };
+
+/*
+ * PCI driver prototypes
+ */
+static int imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent);
+static void imsttfb_remove(struct pci_dev *pdev);
 
 static __u32
 getclkMHz (struct fb_info_imstt *p)
@@ -1235,7 +1242,6 @@ imsttfb_setcolreg (u_int regno, u_int red, u_int green, u_int blue,
 {
 	struct fb_info_imstt *p = (struct fb_info_imstt *)info;
 	u_int bpp = fb_display[currcon].var.bits_per_pixel;
-	u_int i;
 
 	if (regno > 255)
 		return 1;
@@ -1272,10 +1278,11 @@ imsttfb_setcolreg (u_int regno, u_int red, u_int green, u_int blue,
 				break;
 #endif
 #ifdef FBCON_HAS_CFB32
-			case 32:
-				i = (regno << 8) | regno;
+			case 32: {
+				int i = (regno << 8) | regno;
 				p->fbcon_cmap.cfb32[regno] = (i << 16) | i;
 				break;
+			}
 #endif
 		}
 
@@ -1413,7 +1420,7 @@ set_disp (struct display *disp, struct fb_info_imstt *p)
 	disp->type_aux = p->fix.type_aux;
 	disp->line_length = disp->var.xres * (disp->var.bits_per_pixel >> 3);
 	disp->can_soft_blank = 1;
-	disp->inverse = 0;
+	disp->inverse = inverse;
 	disp->ypanstep = 1;
 	disp->ywrapstep = 0;
 	if (accel) {
@@ -1622,6 +1629,23 @@ imsttfb_ioctl (struct inode *inode, struct file *file, u_int cmd,
 	}
 }
 
+static struct pci_device_id imsttfb_pci_tbl[] __devinitdata = {
+	{ PCI_VENDOR_ID_IMS, PCI_DEVICE_ID_IMS_TT128,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, IBM },
+	{ PCI_VENDOR_ID_IMS, PCI_DEVICE_ID_IMS_TT3D,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, TVP },
+	{ 0, }
+};
+
+MODULE_DEVICE_TABLE(pci, imsttfb_pci_tbl);
+
+static struct pci_driver imsttfb_pci_driver = {
+	name:		"imsttfb",
+	id_table:	imsttfb_pci_tbl,
+	probe:		imsttfb_probe,
+	remove:		__devexit_p(imsttfb_remove),
+};
+
 static struct fb_ops imsttfb_ops = {
 	owner:		THIS_MODULE,
 	fb_get_fix:	imsttfb_get_fix,
@@ -1780,20 +1804,25 @@ init_imstt(struct fb_info_imstt *p)
 		}
 	}
 
-#if USE_NV_MODES && defined(CONFIG_PPC)
+#ifdef CONFIG_ALL_PPC
 	{
 		int vmode = init_vmode, cmode = init_cmode;
 
-		if (vmode == -1) {
+#ifdef CONFIG_NVRAM
+		/* Attempt to read vmode/cmode from NVRAM */
+		if (vmode == VMODE_NVRAM)
 			vmode = nvram_read_byte(NV_VMODE);
-			if (vmode <= 0 || vmode > VMODE_MAX)
-				vmode = VMODE_640_480_67;
-		}
-		if (cmode == -1) {
+		if (cmode == CMODE_NVRAM)
 			cmode = nvram_read_byte(NV_CMODE);
-			if (cmode < CMODE_8 || cmode > CMODE_32)
-				cmode = CMODE_8;
-		}
+#endif
+		/* If we didn't get something from NVRAM, pick a
+		 * sane default.
+		 */
+		if (vmode <= 0 || vmode > VMODE_MAX)
+			vmode = VMODE_640_480_67;
+		if (cmode < CMODE_8 || cmode > CMODE_32)
+			cmode = CMODE_8;
+
 		if (mac_vmode_to_var(vmode, cmode, &p->disp.var)) {
 			p->disp.var.xres = p->disp.var.xres_virtual = INIT_XRES;
 			p->disp.var.yres = p->disp.var.yres_virtual = INIT_YRES;
@@ -1868,7 +1897,6 @@ init_imstt(struct fb_info_imstt *p)
 	printk("fb%u: %s frame buffer; %uMB vram; chip version %u\n",
 		i, p->fix.id, p->total_vram >> 20, tmp);
 
-	fb_info_imstt_p[i] = p;
 #ifdef CONFIG_FB_COMPAT_XPMAC
 	strncpy(display_info.name, "IMS,tt128mb", sizeof(display_info.name));
 	display_info.fb_address = p->frame_buffer_phys;
@@ -1880,62 +1908,69 @@ init_imstt(struct fb_info_imstt *p)
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 }
 
-int __init 
-imsttfb_init(void)
+static int __devinit
+imsttfb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	int i;
-	struct pci_dev *pdev = NULL;
 	struct fb_info_imstt *p;
 	unsigned long addr, size;
-	__u16 cmd;
 
-	while ((pdev = pci_find_device(PCI_VENDOR_ID_IMS, PCI_ANY_ID, pdev))) {
-		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
-			continue;
-		if (pci_enable_device(pdev))
-			continue;
+	addr = pci_resource_start (pdev, 0);
+	size = pci_resource_len (pdev, 0);
 
-		addr = pci_resource_start (pdev, 0);
-		size = pci_resource_len (pdev, 0);
-		if (!addr)
-			continue;
+	p = kmalloc(sizeof(struct fb_info_imstt), GFP_KERNEL);
 
-		p = kmalloc(sizeof(struct fb_info_imstt), GFP_ATOMIC);
-		if (!p)
-			continue;
-		memset(p, 0, sizeof(struct fb_info_imstt));
-
-		if (!request_mem_region(addr, size, "imsttfb")) {
-			kfree(p);
-			continue;
-		}
-		printk("imsttfb: device=%04x\n", pdev->device);
-
-		switch (pdev->device) {
-			case 0x9128:	/* IMS,tt128mbA */
-				p->ramdac = IBM;
-				break;
-			case 0x9135:	/* IMS,tt3d */
-			default:
-				p->ramdac = TVP;
-				break;
-		}
-
-		p->frame_buffer_phys = addr;
-		p->board_size = size;
-		p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-		p->dc_regs_phys = addr + 0x800000;
-		p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-		p->cmap_regs_phys = addr + 0x840000;
-		p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
-
-		init_imstt(p);
+	if (!p) {
+		printk(KERN_ERR "imsttfb: Can't allocate memory\n");
+		return -ENOMEM;
 	}
-	for (i = 0; i < FB_MAX; i++) {
-		if (fb_info_imstt_p[i])
-			return 0;
+
+	memset(p, 0, sizeof(struct fb_info_imstt));
+
+	if (!request_mem_region(addr, size, "imsttfb")) {
+		printk(KERN_ERR "imsttfb: Can't reserve memory region\n");
+		kfree(p);
+		return -ENODEV;
 	}
-	return -ENXIO;
+
+	switch (pdev->device) {
+		case PCI_DEVICE_ID_IMS_TT128: /* IMS,tt128mbA */
+			p->ramdac = IBM;
+			break;
+		case PCI_DEVICE_ID_IMS_TT3D:  /* IMS,tt3d */
+			p->ramdac = TVP;
+			break;
+		default:
+			printk(KERN_INFO "imsttfb: Device 0x%lx unknown, "
+					 "contact maintainer.\n", pdev->device);
+			return -ENODEV;
+	}
+
+	p->frame_buffer_phys = addr;
+	p->board_size = size;
+	p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
+	p->dc_regs_phys = addr + 0x800000;
+	p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
+	p->cmap_regs_phys = addr + 0x840000;
+	p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
+
+	init_imstt(p);
+
+	pci_set_drvdata(pdev, p);
+
+	return 0;
+}
+
+static void __devexit
+imsttfb_remove(struct pci_dev *pdev)
+{
+	struct fb_info_imstt *p = pci_get_drvdata(pdev);
+
+	unregister_framebuffer(&p->info);
+	iounmap(p->cmap_regs);
+	iounmap(p->dc_regs);
+	iounmap(p->frame_buffer);
+	release_mem_region(p->frame_buffer_phys, p->board_size);
+	kfree(p);
 }
 
 #ifndef MODULE
@@ -1947,8 +1982,7 @@ imsttfb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 
-	for (this_opt = strtok(options, ","); this_opt;
-	     this_opt = strtok(NULL, ",")) {
+	while ((this_opt = strsep(&options, ",")) != NULL) {
 		if (!strncmp(this_opt, "font:", 5)) {
 			char *p;
 			int i;
@@ -1963,6 +1997,9 @@ imsttfb_setup(char *options)
 			curblink = 0;
 		} else if (!strncmp(this_opt, "noaccel", 7)) {
 			noaccel = 1;
+		} else if (!strncmp(this_opt, "inverse", 7)) {
+			inverse = 1;
+			fb_invert_cmaps();
 		}
 #if defined(CONFIG_PPC)
 		else if (!strncmp(this_opt, "vmode:", 6)) {
@@ -1993,32 +2030,21 @@ imsttfb_setup(char *options)
 	return 0;
 }
 
-#else /* MODULE */
-
-int __init
-init_module (void)
-{
-
-	return imsttfb_init();
-}
-
-void
-cleanup_module (void)
-{
-	struct fb_info_imstt *p;
-	__u32 i;
-
-	for (i = 0; i < FB_MAX; i++) {
-		p = fb_info_imstt_p[i];
-		if (!p)
-			continue;
-		iounmap(p->cmap_regs);
-		iounmap(p->dc_regs);
-		iounmap(p->frame_buffer);
-		kfree(p);
-		release_mem_region(p->frame_buffer_phys, p->board_size);
-	}
-}
-
-#include "macmodes.c"
 #endif /* MODULE */
+
+int __init imsttfb_init(void)
+{
+	return pci_module_init(&imsttfb_pci_driver);
+}
+ 
+static void __exit imsttfb_exit(void)
+{
+	pci_unregister_driver(&imsttfb_pci_driver);
+}
+
+#ifdef MODULE
+MODULE_LICENSE("GPL");
+module_init(imsttfb_init);
+#endif
+module_exit(imsttfb_exit);
+

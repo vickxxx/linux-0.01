@@ -2,9 +2,10 @@
 /*
 	Written 1993,1994,1995 by Donald Becker.
 
-	The author may be reached as becker@cesdis.gsfc.nasa.gov or
-	C/O Center of Excellence in Space Data and Information Sciences
-		Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This file contains the initialization for the "pl14+" style ethernet
 	drivers.  It should eventually replace most of drivers/net/Space.c.
@@ -28,15 +29,17 @@
 			up. We now share common code and have regularised name
 			allocation setups. Abolished the 16 card limits.
 	03/19/2000 - jgarzik and Urban Widmark: init_etherdev 32-byte align
+	03/21/2001 - jgarzik: alloc_etherdev and friends
 
 */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/if_ether.h>
 #include <linux/string.h>
 #include <linux/netdevice.h>
@@ -67,6 +70,34 @@
 	and a space waste]
 */
 
+
+struct net_device *alloc_netdev(int sizeof_priv, const char *mask,
+				       void (*setup)(struct net_device *))
+{
+	struct net_device *dev;
+	int alloc_size;
+
+	/* ensure 32-byte alignment of the private area */
+	alloc_size = sizeof (*dev) + sizeof_priv + 31;
+
+	dev = (struct net_device *) kmalloc (alloc_size, GFP_KERNEL);
+	if (dev == NULL)
+	{
+		printk(KERN_ERR "alloc_dev: Unable to allocate device memory.\n");
+		return NULL;
+	}
+
+	memset(dev, 0, alloc_size);
+
+	if (sizeof_priv)
+		dev->priv = (void *) (((long)(dev + 1) + 31) & ~31);
+
+	setup(dev);
+	strcpy(dev->name, mask);
+
+	return dev;
+}
+EXPORT_SYMBOL(alloc_netdev);
 
 static struct net_device *init_alloc_dev(int sizeof_priv)
 {
@@ -135,12 +166,30 @@ static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv,
 	setup(dev);
 	
 	if (new_device) {
+		int err;
+
 		rtnl_lock();
-		register_netdevice(dev);
+		err = register_netdevice(dev);
 		rtnl_unlock();
+
+		if (err < 0) {
+			kfree(dev);
+			dev = NULL;
+		}
 	}
 	return dev;
 }
+
+#if defined(CONFIG_HIPPI) || defined(CONFIG_TR) || defined(CONFIG_NET_FC)
+static int __register_netdev(struct net_device *dev)
+{
+	if (dev->init && dev->init(dev) != 0) {
+		unregister_netdev(dev);
+		return -EIO;
+	}
+	return 0;
+}
+#endif
 
 /**
  * init_etherdev - Register ethernet device
@@ -164,6 +213,26 @@ struct net_device *init_etherdev(struct net_device *dev, int sizeof_priv)
 	return init_netdev(dev, sizeof_priv, "eth%d", ether_setup);
 }
 
+/**
+ * alloc_etherdev - Allocates and sets up an ethernet device
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with ethernet-generic
+ * values. Basically does everything except registering the device.
+ *
+ * Constructs a new net device, complete with a private data area of
+ * size @sizeof_priv.  A 32-byte (not bit) alignment is enforced for
+ * this private data area.
+ */
+
+struct net_device *alloc_etherdev(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "eth%d", ether_setup);
+}
+
+EXPORT_SYMBOL(init_etherdev);
+EXPORT_SYMBOL(alloc_etherdev);
 
 static int eth_mac_addr(struct net_device *dev, void *p)
 {
@@ -184,10 +253,47 @@ static int eth_change_mtu(struct net_device *dev, int new_mtu)
 
 #ifdef CONFIG_FDDI
 
+/**
+ * init_fddidev - Register FDDI device
+ * @dev: A FDDI device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with FDDI-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
+ */
+
 struct net_device *init_fddidev(struct net_device *dev, int sizeof_priv)
 {
 	return init_netdev(dev, sizeof_priv, "fddi%d", fddi_setup);
 }
+
+/**
+ * alloc_fddidev - Register FDDI device
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this FDDI device
+ *
+ * Fill in the fields of the device structure with FDDI-generic values.
+ *
+ * Constructs a new net device, complete with a private data area of
+ * size @sizeof_priv.  A 32-byte (not bit) alignment is enforced for
+ * this private data area.
+ */
+
+struct net_device *alloc_fddidev(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "fddi%d", fddi_setup);
+}
+
+EXPORT_SYMBOL(init_fddidev);
+EXPORT_SYMBOL(alloc_fddidev);
 
 static int fddi_change_mtu(struct net_device *dev, int new_mtu)
 {
@@ -227,19 +333,59 @@ static int hippi_mac_addr(struct net_device *dev, void *p)
 }
 
 
+/**
+ * init_hippi_dev - Register HIPPI device
+ * @dev: A HIPPI device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with HIPPI-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
+ */
+
 struct net_device *init_hippi_dev(struct net_device *dev, int sizeof_priv)
 {
 	return init_netdev(dev, sizeof_priv, "hip%d", hippi_setup);
 }
 
+/**
+ * alloc_hippi_dev - Register HIPPI device
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this HIPPI device
+ *
+ * Fill in the fields of the device structure with HIPPI-generic values.
+ *
+ * Constructs a new net device, complete with a private data area of
+ * size @sizeof_priv.  A 32-byte (not bit) alignment is enforced for
+ * this private data area.
+ */
+
+struct net_device *alloc_hippi_dev(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "hip%d", hippi_setup);
+}
+
+int register_hipdev(struct net_device *dev)
+{
+	return __register_netdev(dev);
+}
 
 void unregister_hipdev(struct net_device *dev)
 {
-	rtnl_lock();
-	unregister_netdevice(dev);
-	rtnl_unlock();
+	unregister_netdev(dev);
 }
 
+EXPORT_SYMBOL(init_hippi_dev);
+EXPORT_SYMBOL(alloc_hippi_dev);
+EXPORT_SYMBOL(register_hipdev);
+EXPORT_SYMBOL(unregister_hipdev);
 
 static int hippi_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
 {
@@ -274,15 +420,14 @@ void ether_setup(struct net_device *dev)
 	dev->hard_header_len 	= ETH_HLEN;
 	dev->mtu		= 1500; /* eth_mtu */
 	dev->addr_len		= ETH_ALEN;
-	dev->tx_queue_len	= 100;	/* Ethernet wants good queues */	
+	dev->tx_queue_len	= 1000;	/* Ethernet wants good queues */	
 	
 	memset(dev->broadcast,0xFF, ETH_ALEN);
 
 	/* New-style flags. */
 	dev->flags		= IFF_BROADCAST|IFF_MULTICAST;
-
-	dev_init_buffers(dev);
 }
+EXPORT_SYMBOL(ether_setup);
 
 #ifdef CONFIG_FDDI
 
@@ -307,11 +452,8 @@ void fddi_setup(struct net_device *dev)
 
 	/* New-style flags */
 	dev->flags		= IFF_BROADCAST | IFF_MULTICAST;
-
-	dev_init_buffers(dev);
-	
-	return;
 }
+EXPORT_SYMBOL(fddi_setup);
 
 #endif /* CONFIG_FDDI */
 
@@ -346,9 +488,8 @@ void hippi_setup(struct net_device *dev)
 	 * static ARP tables. ARP is disabled by hippi_neigh_setup_dev. 
 	 */
 	dev->flags = 0; 
-
-	dev_init_buffers(dev);
 }
+EXPORT_SYMBOL(hippi_setup);
 #endif /* CONFIG_HIPPI */
 
 #if defined(CONFIG_ATALK) || defined(CONFIG_ATALK_MODULE)
@@ -384,28 +525,10 @@ void ltalk_setup(struct net_device *dev)
 	dev->broadcast[0]	= 0xFF;
 
 	dev->flags		= IFF_BROADCAST|IFF_MULTICAST|IFF_NOARP;
-
-	dev_init_buffers(dev);
 }
+EXPORT_SYMBOL(ltalk_setup);
 
 #endif /* CONFIG_ATALK || CONFIG_ATALK_MODULE */
-
-int ether_config(struct net_device *dev, struct ifmap *map)
-{
-	if (map->mem_start != (u_long)(-1))
-		dev->mem_start = map->mem_start;
-	if (map->mem_end != (u_long)(-1))
-		dev->mem_end = map->mem_end;
-	if (map->base_addr != (u_short)(-1))
-		dev->base_addr = map->base_addr;
-	if (map->irq != (u_char)(-1))
-		dev->irq = map->irq;
-	if (map->dma != (u_char)(-1))
-		dev->dma = map->dma;
-	if (map->port != (u_char)(-1))
-		dev->if_port = map->port;
-	return 0;
-}
 
 int register_netdev(struct net_device *dev)
 {
@@ -420,8 +543,8 @@ int register_netdev(struct net_device *dev)
 	 
 	if (strchr(dev->name, '%'))
 	{
-		err = -EBUSY;
-		if(dev_alloc_name(dev, dev->name)<0)
+		err = dev_alloc_name(dev, dev->name);
+		if (err < 0)
 			goto out;
 	}
 	
@@ -431,17 +554,12 @@ int register_netdev(struct net_device *dev)
 	
 	if (dev->name[0]==0 || dev->name[0]==' ')
 	{
-		err = -EBUSY;
-		if(dev_alloc_name(dev, "eth%d")<0)
+		err = dev_alloc_name(dev, "eth%d");
+		if (err < 0)
 			goto out;
 	}
-		
-		
-	err = -EIO;
-	if (register_netdevice(dev))
-		goto out;
 
-	err = 0;
+	err = register_netdevice(dev);
 
 out:
 	rtnl_unlock();
@@ -455,10 +573,12 @@ void unregister_netdev(struct net_device *dev)
 	rtnl_unlock();
 }
 
+EXPORT_SYMBOL(register_netdev);
+EXPORT_SYMBOL(unregister_netdev);
 
 #ifdef CONFIG_TR
 
-static void tr_configure(struct net_device *dev)
+void tr_setup(struct net_device *dev)
 {
 	/*
 	 *	Configure and register
@@ -479,32 +599,61 @@ static void tr_configure(struct net_device *dev)
 	dev->flags		= IFF_BROADCAST | IFF_MULTICAST ;
 }
 
+/**
+ * init_trdev - Register token ring device
+ * @dev: A token ring device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with token ring-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
+ */
+
 struct net_device *init_trdev(struct net_device *dev, int sizeof_priv)
 {
-	return init_netdev(dev, sizeof_priv, "tr%d", tr_configure);
+	return init_netdev(dev, sizeof_priv, "tr%d", tr_setup);
 }
 
-void tr_setup(struct net_device *dev)
+/**
+ * alloc_trdev - Register token ring device
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this token ring device
+ *
+ * Fill in the fields of the device structure with token ring-generic values.
+ *
+ * Constructs a new net device, complete with a private data area of
+ * size @sizeof_priv.  A 32-byte (not bit) alignment is enforced for
+ * this private data area.
+ */
+
+struct net_device *alloc_trdev(int sizeof_priv)
 {
+	return alloc_netdev(sizeof_priv, "tr%d", tr_setup);
 }
 
 int register_trdev(struct net_device *dev)
 {
-	dev_init_buffers(dev);
-	
-	if (dev->init && dev->init(dev) != 0) {
-		unregister_trdev(dev);
-		return -EIO;
-	}
-	return 0;
+	return __register_netdev(dev);
 }
 
 void unregister_trdev(struct net_device *dev)
 {
-	rtnl_lock();
-	unregister_netdevice(dev);
-	rtnl_unlock();
+	unregister_netdev(dev);
 }
+
+EXPORT_SYMBOL(tr_setup);
+EXPORT_SYMBOL(init_trdev);
+EXPORT_SYMBOL(alloc_trdev);
+EXPORT_SYMBOL(register_trdev);
+EXPORT_SYMBOL(unregister_trdev);
+
 #endif /* CONFIG_TR */
 
 
@@ -525,32 +674,62 @@ void fc_setup(struct net_device *dev)
 
         /* New-style flags. */
         dev->flags              =        IFF_BROADCAST;
-	dev_init_buffers(dev);
-        return;
 }
 
+/**
+ * init_fcdev - Register fibre channel device
+ * @dev: A fibre channel device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with fibre channel-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
+ */
 
 struct net_device *init_fcdev(struct net_device *dev, int sizeof_priv)
 {
 	return init_netdev(dev, sizeof_priv, "fc%d", fc_setup);
 }
 
+/**
+ * alloc_fcdev - Register fibre channel device
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this fibre channel device
+ *
+ * Fill in the fields of the device structure with fibre channel-generic values.
+ *
+ * Constructs a new net device, complete with a private data area of
+ * size @sizeof_priv.  A 32-byte (not bit) alignment is enforced for
+ * this private data area.
+ */
+
+struct net_device *alloc_fcdev(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "fc%d", fc_setup);
+}
+
 int register_fcdev(struct net_device *dev)
 {
-        dev_init_buffers(dev);
-        if (dev->init && dev->init(dev) != 0) {
-                unregister_fcdev(dev);
-                return -EIO;
-        }
-        return 0;
+	return __register_netdev(dev);
 }                                               
         
 void unregister_fcdev(struct net_device *dev)
 {
-        rtnl_lock();
-	unregister_netdevice(dev);
-        rtnl_unlock();
+	unregister_netdev(dev);
 }
+
+EXPORT_SYMBOL(fc_setup);
+EXPORT_SYMBOL(init_fcdev);
+EXPORT_SYMBOL(alloc_fcdev);
+EXPORT_SYMBOL(register_fcdev);
+EXPORT_SYMBOL(unregister_fcdev);
 
 #endif /* CONFIG_NET_FC */
 

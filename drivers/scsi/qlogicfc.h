@@ -62,13 +62,8 @@
  * determined for each queue request anew.
  */
 
-#if BITS_PER_LONG > 32
 #define DATASEGS_PER_COMMAND 2
 #define DATASEGS_PER_CONT 5
-#else
-#define DATASEGS_PER_COMMAND 3
-#define DATASEGS_PER_CONT 7
-#endif
 
 #define QLOGICFC_REQ_QUEUE_LEN	127	/* must be power of two - 1 */
 #define QLOGICFC_MAX_SG(ql)	(DATASEGS_PER_COMMAND + (((ql) > 0) ? DATASEGS_PER_CONT*((ql) - 1) : 0))
@@ -100,7 +95,8 @@ int isp2x00_biosparam(Disk *, kdev_t, int[]);
 	cmd_per_lun:		QLOGICFC_CMD_PER_LUN, 			   \
         present:                0,                                         \
         unchecked_isa_dma:      0,                                         \
-        use_clustering:         ENABLE_CLUSTERING 			   \
+        use_clustering:         ENABLE_CLUSTERING,			   \
+	highmem_io:		1					   \
 }
 
 #endif /* _QLOGICFC_H */

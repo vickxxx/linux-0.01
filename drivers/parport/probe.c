@@ -2,7 +2,7 @@
  * Parallel port device probing code
  *
  * Authors:    Carsten Gross, carsten@sol.wohnheim.uni-ulm.de
- *             Philip Blundell <Philip.Blundell@pobox.com>
+ *             Philip Blundell <philb@gnu.org>
  */
 
 #include <linux/parport.h>
@@ -62,7 +62,7 @@ static void parse_data(struct parport *port, int device, char *str)
 	struct parport_device_info *info = &port->probe_info[device + 1];
 
 	if (!txt) {
-		printk("%s probe: memory squeeze\n", port->name);
+		printk(KERN_WARNING "%s probe: memory squeeze\n", port->name);
 		return;
 	}
 	strcpy(txt, str);
@@ -75,8 +75,9 @@ static void parse_data(struct parport *port, int device, char *str)
 			char *u;
 			*(sep++) = 0;
 			/* Get rid of trailing blanks */
-			u = strchr (sep, ' ');
-			if (u) *u = '\0';
+			u = sep + strlen (sep) - 1;
+			while (u >= p && *u == ' ')
+				*u-- = '\0';
 			u = p;
 			while (*u) {
 				*u = toupper(*u);

@@ -1,8 +1,8 @@
-/*  $Id: setup.c,v 1.122 2001/01/01 01:46:15 davem Exp $
+/*  $Id: setup.c,v 1.126 2001/11/13 00:49:27 davem Exp $
  *  linux/arch/sparc/kernel/setup.c
  *
  *  Copyright (C) 1995  David S. Miller (davem@caip.rutgers.edu)
- *  Copyright (C) 2000  Anton Blanchard (anton@linuxcare.com)
+ *  Copyright (C) 2000  Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/errno.h>
@@ -12,7 +12,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <asm/smp.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
@@ -20,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/config.h>
 #include <linux/fs.h>
+#include <linux/seq_file.h>
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
@@ -45,8 +46,6 @@
 #include <asm/softirq.h>
 #include <asm/hardirq.h>
 #include <asm/machines.h>
-
-#undef PROM_DEBUG_CONSOLE
 
 struct screen_info screen_info = {
 	0, 0,			/* orig-x, orig-y */
@@ -133,6 +132,19 @@ void kernel_enter_debugger(void)
 	}
 }
 
+static void
+prom_console_write(struct console *con, const char *s, unsigned n)
+{
+	prom_printf("%s", s);
+}
+
+static struct console prom_debug_console = {
+	name:		"debug",
+	write:		prom_console_write,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
+};
+
 int obp_system_intr(void)
 {
 	if (boot_flags & BOOTME_KGDB) {
@@ -164,6 +176,10 @@ static void __init process_switch(char c)
 	case 'h':
 		prom_printf("boot_flags_init: Halt!\n");
 		prom_halt();
+		break;
+	case 'p':
+		/* Use PROM debug console. */
+		register_console(&prom_debug_console);
 		break;
 	default:
 		printk("Unknown boot switch (-%c)\n", c);
@@ -279,21 +295,6 @@ struct tt_entry *sparc_ttable;
 
 struct pt_regs fake_swapper_regs;
 
-#ifdef PROM_DEBUG_CONSOLE
-static void
-prom_console_write(struct console *con, const char *s, unsigned n)
-{
-	prom_printf("%s", s);
-}
-
-static struct console prom_console = {
-	name:		"debug",
-	write:		prom_console_write,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
-};
-#endif
-
 extern void paging_init(void);
 
 void __init setup_arch(char **cmdline_p)
@@ -347,9 +348,6 @@ void __init setup_arch(char **cmdline_p)
 		printk("UNKNOWN!\n");
 		break;
 	};
-#ifdef PROM_DEBUG_CONSOLE
-	register_console(&prom_console);
-#endif
 
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
@@ -380,7 +378,7 @@ void __init setup_arch(char **cmdline_p)
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
 	ROOT_DEV = to_kdev_t(root_dev);
-#ifdef CONFIG_BLK_DEV_RAM
+#ifdef CONFIG_BLK_DEV_INITRD
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
@@ -441,10 +439,6 @@ void __init setup_arch(char **cmdline_p)
 		breakpoint();
 	}
 
-	/* Due to stack alignment restrictions and assumptions... */
-	init_mm.mmap->vm_page_prot = PAGE_SHARED;
-	init_mm.mmap->vm_start = PAGE_OFFSET;
-	init_mm.mmap->vm_end = PAGE_OFFSET + highest_paddr;
 	init_mm.context = (unsigned long) NO_CONTEXT;
 	init_task.thread.kregs = &fake_swapper_regs;
 
@@ -459,42 +453,72 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
 	return -EIO;
 }
 
-/* BUFFER is PAGE_SIZE bytes long. */
-
 extern char *sparc_cpu_type[];
 extern char *sparc_fpu_type[];
 
-int get_cpuinfo(char *buffer)
+static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
-	int cpuid=hard_smp_processor_id();
-	int len;
+	int cpuid = hard_smp_processor_id();
 
-	len = sprintf(buffer, "cpu\t\t: %s\n"
-            "fpu\t\t: %s\n"
-            "promlib\t\t: Version %d Revision %d\n"
-            "prom\t\t: %d.%d\n"
-            "type\t\t: %s\n"
-	    "ncpus probed\t: %d\n"
-	    "ncpus active\t: %d\n"
+	seq_printf(m,
+		   "cpu\t\t: %s\n"
+		   "fpu\t\t: %s\n"
+		   "promlib\t\t: Version %d Revision %d\n"
+		   "prom\t\t: %d.%d\n"
+		   "type\t\t: %s\n"
+		   "ncpus probed\t: %d\n"
+		   "ncpus active\t: %d\n"
 #ifndef CONFIG_SMP
-            "BogoMips\t: %lu.%02lu\n"
+		   "BogoMips\t: %lu.%02lu\n"
 #endif
-	    ,
-	    sparc_cpu_type[cpuid] ? : "undetermined",
-	    sparc_fpu_type[cpuid] ? : "undetermined",
-            romvec->pv_romvers, prom_rev, romvec->pv_printrev >> 16, (short)romvec->pv_printrev,
-            &cputypval,
-	    linux_num_cpus, smp_num_cpus
+		   ,
+		   sparc_cpu_type[cpuid] ? : "undetermined",
+		   sparc_fpu_type[cpuid] ? : "undetermined",
+		   romvec->pv_romvers,
+		   prom_rev,
+		   romvec->pv_printrev >> 16,
+		   (short) romvec->pv_printrev,
+		   &cputypval,
+		   linux_num_cpus,
+		   smp_num_cpus
 #ifndef CONFIG_SMP
-	    , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
+		   , loops_per_jiffy/(500000/HZ),
+		   (loops_per_jiffy/(5000/HZ)) % 100
 #endif
-	    );
+		);
+
 #ifdef CONFIG_SMP
-	len += smp_bogo_info(buffer + len);
+	smp_bogo_info(m);
 #endif
-	len += mmu_info(buffer + len);
+	mmu_info(m);
 #ifdef CONFIG_SMP
-	len += smp_info(buffer + len);
+	smp_info(m);
 #endif
-	return len;
+	return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	/* The pointer we are returning is arbitrary,
+	 * it just has to be non-NULL and not IS_ERR
+	 * in the success case.
+	 */
+	return *pos == 0 ? &c_start : NULL;
+}
+
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};

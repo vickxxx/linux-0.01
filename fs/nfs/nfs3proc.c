@@ -17,6 +17,37 @@
 
 #define NFSDBG_FACILITY		NFSDBG_PROC
 
+/* A wrapper to handle the EJUKEBOX error message */
+static int
+nfs3_rpc_wrapper(struct rpc_clnt *clnt, struct rpc_message *msg, int flags)
+{
+	sigset_t oldset;
+	int res;
+	rpc_clnt_sigmask(clnt, &oldset);
+	do {
+		res = rpc_call_sync(clnt, msg, flags);
+		if (res != -EJUKEBOX)
+			break;
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(NFS_JUKEBOX_RETRY_TIME);
+		res = -ERESTARTSYS;
+	} while (!signalled());
+	rpc_clnt_sigunmask(clnt, &oldset);
+	return res;
+}
+
+static inline int
+nfs3_rpc_call_wrapper(struct rpc_clnt *clnt, u32 proc, void *argp, void *resp, int flags)
+{
+	struct rpc_message msg = { proc, argp, resp, NULL };
+	return nfs3_rpc_wrapper(clnt, &msg, flags);
+}
+
+#define rpc_call(clnt, proc, argp, resp, flags) \
+		nfs3_rpc_call_wrapper(clnt, proc, argp, resp, flags)
+#define rpc_call_sync(clnt, msg, flags) \
+		nfs3_rpc_wrapper(clnt, msg, flags)
+
 /*
  * Bare-bones access to getattr: this is for nfs_read_super.
  */
@@ -80,7 +111,8 @@ nfs3_proc_lookup(struct inode *dir, struct qstr *name,
 		status = rpc_call(NFS_CLIENT(dir), NFS3PROC_GETATTR,
 			 fhandle, fattr, 0);
 	dprintk("NFS reply lookup: %d\n", status);
-	nfs_refresh_inode(dir, &dir_attr);
+	if (status >= 0)
+		status = nfs_refresh_inode(dir, &dir_attr);
 	return status;
 }
 
@@ -119,17 +151,16 @@ nfs3_proc_access(struct inode *inode, int mode, int ruid)
 }
 
 static int
-nfs3_proc_readlink(struct inode *inode, void *buffer, unsigned int buflen)
+nfs3_proc_readlink(struct inode *inode, struct page *page)
 {
 	struct nfs_fattr	fattr;
-	struct nfs3_readlinkargs args = { NFS_FH(inode), buffer, buflen };
-	struct nfs3_readlinkres	res = { &fattr, buffer, buflen };
+	struct nfs3_readlinkargs args = { NFS_FH(inode), PAGE_CACHE_SIZE, &page };
 	int			status;
 
 	dprintk("NFS call  readlink\n");
 	fattr.valid = 0;
 	status = rpc_call(NFS_CLIENT(inode), NFS3PROC_READLINK,
-			  &args, &res, 0);
+			&args, &fattr, 0);
 	nfs_refresh_inode(inode, &fattr);
 	dprintk("NFS reply readlink: %d\n", status);
 	return status;
@@ -138,11 +169,12 @@ nfs3_proc_readlink(struct inode *inode, void *buffer, unsigned int buflen)
 static int
 nfs3_proc_read(struct inode *inode, struct rpc_cred *cred,
 	       struct nfs_fattr *fattr, int flags,
-	       loff_t offset, unsigned int count, void *buffer, int *eofp)
+	       unsigned int base, unsigned int count, struct page *page,
+	       int *eofp)
 {
-	struct nfs_readargs	arg = { NFS_FH(inode), offset, count, 1,
-					{{buffer, count}, {0,0}, {0,0}, {0,0},
-					 {0,0}, {0,0}, {0,0}, {0,0}} };
+	u64			offset = page_offset(page) + base;
+	struct nfs_readargs	arg = { NFS_FH(inode), offset, count,
+					base, &page };
 	struct nfs_readres	res = { fattr, count, 0 };
 	struct rpc_message	msg = { NFS3PROC_READ, &arg, &res, cred };
 	int			status;
@@ -158,13 +190,12 @@ nfs3_proc_read(struct inode *inode, struct rpc_cred *cred,
 static int
 nfs3_proc_write(struct inode *inode, struct rpc_cred *cred,
 		struct nfs_fattr *fattr, int flags,
-		loff_t offset, unsigned int count,
-		void *buffer, struct nfs_writeverf *verf)
+		unsigned int base, unsigned int count,
+		struct page *page, struct nfs_writeverf *verf)
 {
+	u64			offset = page_offset(page) + base;
 	struct nfs_writeargs	arg = { NFS_FH(inode), offset, count,
-					NFS_FILE_SYNC, 1,
-					{{buffer, count}, {0,0}, {0,0}, {0,0},
-					 {0,0}, {0,0}, {0,0}, {0,0}} };
+					NFS_FILE_SYNC, base, &page };
 	struct nfs_writeres	res = { fattr, verf, 0 };
 	struct rpc_message	msg = { NFS3PROC_WRITE, &arg, &res, cred };
 	int			status, rpcflags = 0;
@@ -269,11 +300,16 @@ nfs3_proc_unlink_setup(struct rpc_message *msg, struct dentry *dir, struct qstr 
 {
 	struct nfs3_diropargs	*arg;
 	struct nfs_fattr	*res;
+	struct unlinkxdr {
+		struct nfs3_diropargs arg;
+		struct nfs_fattr res;
+	} *ptr;
 
-	arg = (struct nfs3_diropargs *)kmalloc(sizeof(*arg)+sizeof(*res), GFP_KERNEL);
-	if (!arg)
+	ptr = (struct unlinkxdr *)kmalloc(sizeof(*ptr), GFP_KERNEL);
+	if (!ptr)
 		return -ENOMEM;
-	res = (struct nfs_fattr*)(arg + 1);
+	arg = &ptr->arg;
+	res = &ptr->res;
 	arg->fh = NFS_FH(dir->d_inode);
 	arg->name = name->name;
 	arg->len = name->len;
@@ -362,8 +398,8 @@ nfs3_proc_mkdir(struct inode *dir, struct qstr *name, struct iattr *sattr,
 		struct nfs_fh *fhandle, struct nfs_fattr *fattr)
 {
 	struct nfs_fattr	dir_attr;
-	struct nfs3_createargs	arg = { NFS_FH(dir), name->name, name->len,
-					sattr, 0, { 0, 0 } };
+	struct nfs3_mkdirargs	arg = { NFS_FH(dir), name->name, name->len,
+					sattr };
 	struct nfs3_diropres	res = { &dir_attr, fhandle, fattr };
 	int			status;
 
@@ -397,36 +433,20 @@ nfs3_proc_rmdir(struct inode *dir, struct qstr *name)
  * The decode function itself doesn't perform any decoding, it just makes
  * sure the reply is syntactically correct.
  *
- * Also note that this implementation handles both plain readdir and
- * readdirplus.
  */
 static int
 nfs3_proc_readdir(struct inode *dir, struct rpc_cred *cred,
-		  u64 cookie, void *entry,
-		  unsigned int size, int plus)
+		  u64 cookie, struct page *page, unsigned int count, int plus)
 {
 	struct nfs_fattr	dir_attr;
-	struct nfs3_readdirargs	arg = { NFS_FH(dir), cookie, {0, 0}, 0, 0, 0 };
-	struct nfs3_readdirres	res = { &dir_attr, 0, 0, 0, 0 };
-	struct rpc_message	msg = { NFS3PROC_READDIR, &arg, &res, cred };
 	u32			*verf = NFS_COOKIEVERF(dir);
+	struct nfs3_readdirargs	arg = { NFS_FH(dir), cookie, {verf[0], verf[1]},
+	       				plus, count, &page };
+	struct nfs3_readdirres	res = { &dir_attr, verf, plus };
+	struct rpc_message	msg = { NFS3PROC_READDIR, &arg, &res, cred };
 	int			status;
 
-	arg.buffer  = entry;
-	arg.bufsiz  = size;
-	arg.verf[0] = verf[0];
-	arg.verf[1] = verf[1];
-	arg.plus    = plus;
-	res.buffer  = entry;
-	res.bufsiz  = size;
-	res.verf    = verf;
-	res.plus    = plus;
-
-	if (plus)
-		msg.rpc_proc = NFS3PROC_READDIRPLUS;
-
-	dprintk("NFS call  readdir%s %d\n",
-			plus? "plus" : "", (unsigned int) cookie);
+	dprintk("NFS call  readdir %d\n", (unsigned int) cookie);
 
 	dir_attr.valid = 0;
 	status = rpc_call_sync(NFS_CLIENT(dir), &msg, 0);

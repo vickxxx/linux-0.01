@@ -1,13 +1,16 @@
-/* $Id: gazel.c,v 2.11.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: gazel.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * gazel.c     low level stuff for Gazel isdn cards
+ * low level stuff for Gazel isdn cards
  *
  * Author       BeWan Systems
  *              based on source code from Karsten Keil
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Copyright    by BeWan Systems
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #include <linux/config.h>
 #include <linux/init.h>
 #define __NO_VERSION__
@@ -19,7 +22,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *gazel_revision = "$Revision: 2.11.6.2 $";
+const char *gazel_revision = "$Revision: 1.1.4.1 $";
 
 #define R647      1
 #define R685      2
@@ -439,10 +442,6 @@ static int
 reserve_regions(struct IsdnCard *card, struct IsdnCardState *cs)
 {
 	unsigned int i, base = 0, adr = 0, len = 0;
-	long flags;
-
-	save_flags(flags);
-	cli();
 
 	switch (cs->subtyp) {
 		case R647:
@@ -487,17 +486,15 @@ reserve_regions(struct IsdnCard *card, struct IsdnCardState *cs)
 			break;
 	}
 
-	restore_flags(flags);
 	return 0;
 
       error:
-	restore_flags(flags);
 	printk(KERN_WARNING "Gazel: %s io ports 0x%x-0x%x already in use\n",
 	       CardType[cs->typ], adr, adr + len);
 	return 1;
 }
 
-static int
+static int __init
 setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 {
 	printk(KERN_INFO "Gazel: ISA PnP card automatic recognition\n");
@@ -546,7 +543,7 @@ setup_gazelisa(struct IsdnCard *card, struct IsdnCardState *cs)
 
 static struct pci_dev *dev_tel __initdata = NULL;
 
-static int
+static int __init
 setup_gazelpci(struct IsdnCardState *cs)
 {
 	u_int pci_ioaddr0 = 0, pci_ioaddr1 = 0;

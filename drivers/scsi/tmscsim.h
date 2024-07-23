@@ -10,17 +10,8 @@
 
 #include <linux/types.h>
 #include <linux/config.h>
-/* 2.0 compat */
-#if defined(__SMP__) && !defined(CONFIG_SMP)
-# if LINUX_VERSION_CODE < KERNEL_VERSION (2,2,0)
-#  define CONFIG_SMP
-# else
-#  error __SMP__ defined but not CONFIG_SMP
-# endif
-#endif
 
-
-#define IRQ_NONE 255
+#define SCSI_IRQ_NONE 255
 
 #define MAX_ADAPTER_NUM 	4
 #define MAX_SG_LIST_BUF 	16	/* Not used */

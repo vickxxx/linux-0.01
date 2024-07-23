@@ -1,4 +1,3 @@
-
 /*     
  **********************************************************************
  *     cardmo.c - MIDI UART output HAL for emu10k1 driver 
@@ -31,7 +30,7 @@
  ********************************************************************** 
  */
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include "hwaccess.h"
 #include "8010.h"

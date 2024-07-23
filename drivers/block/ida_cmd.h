@@ -18,9 +18,6 @@
  *
  *    Questions/Comments/Bugfixes to arrays@compaq.com
  *
- *    If you want to make changes, improve or add functionality to this
- *    driver, you'll probably need the Compaq Array Controller Interface
- *    Specificiation (Document number ECG086/1198)
  */
 #ifndef ARRAYCMD_H
 #define ARRAYCMD_H
@@ -85,7 +82,6 @@ typedef struct {
 
 #define CMD_RWREQ	0x00
 #define CMD_IOCTL_PEND	0x01
-#define CMD_IOCTL_DONE	0x02
 
 typedef struct cmdlist {
 	chdr_t	hdr;
@@ -96,7 +92,8 @@ typedef struct cmdlist {
 	int	ctlr;
 	struct cmdlist *prev;
 	struct cmdlist *next;
-	struct buffer_head *bh;
+	struct request *rq;
+	struct completion *waiting;
 	int type;
 } cmdlist_t;
 	
@@ -321,6 +318,8 @@ typedef struct {
 	__u8	reserved[510];
 } mp_delay_t;
 
+#define SENSE_SURF_STATUS	0x70
+
 #define PASSTHRU_A	0x91
 typedef struct {
 	__u8	target;
@@ -342,6 +341,11 @@ typedef struct {
 } scsi_param_t;
 
 #define RESUME_BACKGROUND_ACTIVITY	0x99
+#define SENSE_CONTROLLER_PERFORMANCE	0xa8
+#define FLUSH_CACHE			0xc2
+#define COLLECT_BUFFER			0xd2
+#define READ_FLASH_ROM			0xf6
+#define WRITE_FLASH_ROM			0xf7
 #pragma pack()	
 
 #endif /* ARRAYCMD_H */

@@ -21,15 +21,25 @@
 #include <linux/utsname.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
-#include <linux/raid/md.h>
 #include <linux/smp_lock.h>
 #include <linux/blk.h>
 #include <linux/hdreg.h>
 #include <linux/iobuf.h>
 #include <linux/bootmem.h>
+#include <linux/file.h>
+#include <linux/tty.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
+
+#if defined(CONFIG_ARCH_S390)
+#include <asm/s390mach.h>
+#include <asm/ccwcache.h>
+#endif
+
+#ifdef CONFIG_ACPI
+#include <linux/acpi.h>
+#endif
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -47,10 +57,6 @@
 #  include <asm/mtrr.h>
 #endif
 
-#ifdef CONFIG_3215_CONSOLE
-extern int con3215_activate(void);
-#endif
-
 #ifdef CONFIG_NUBUS
 #include <linux/nubus.h>
 #endif
@@ -60,10 +66,11 @@ extern int con3215_activate(void);
 #endif
 
 #ifdef CONFIG_IRDA
-#include <net/irda/irda_device.h>
+extern int irda_proto_init(void);
+extern int irda_device_init(void);
 #endif
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/smp.h>
 #endif
 
@@ -91,12 +98,14 @@ extern void sbus_init(void);
 extern void ppc_init(void);
 extern void sysctl_init(void);
 extern void signals_init(void);
-extern void bdev_init(void);
 extern int init_pcmcia_ds(void);
-extern void net_notifier_init(void);
 
 extern void free_initmem(void);
-extern void filesystem_setup(void);
+#ifdef  CONFIG_ACPI_BUS
+extern void acpi_early_init(void);
+#else
+static inline void acpi_early_init(void) { }
+#endif
 
 #ifdef CONFIG_TC
 extern void tc_init(void);
@@ -106,9 +115,6 @@ extern void ecard_init(void);
 
 #if defined(CONFIG_SYSVIPC)
 extern void ipc_init(void);
-#endif
-#if defined(CONFIG_QUOTA)
-extern void dquot_init_hash(void);
 #endif
 
 /*
@@ -122,17 +128,10 @@ extern void softirq_init(void);
 
 int rows, cols;
 
-#ifdef CONFIG_BLK_DEV_INITRD
-kdev_t real_root_dev;
-#endif
-
-int root_mountflags = MS_RDONLY;
 char *execute_command;
-char root_device_name[64];
-
 
 static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
-static char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
+char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
 
 static int __init profile_setup(char *str)
 {
@@ -142,178 +141,6 @@ static int __init profile_setup(char *str)
 }
 
 __setup("profile=", profile_setup);
-
-
-static struct dev_name_struct {
-	const char *name;
-	const int num;
-} root_dev_names[] __initdata = {
-	{ "nfs",     0x00ff },
-	{ "hda",     0x0300 },
-	{ "hdb",     0x0340 },
-	{ "hdc",     0x1600 },
-	{ "hdd",     0x1640 },
-	{ "hde",     0x2100 },
-	{ "hdf",     0x2140 },
-	{ "hdg",     0x2200 },
-	{ "hdh",     0x2240 },
-	{ "hdi",     0x3800 },
-	{ "hdj",     0x3840 },
-	{ "hdk",     0x3900 },
-	{ "hdl",     0x3940 },
-	{ "hdm",     0x5800 },
-	{ "hdn",     0x5840 },
-	{ "hdo",     0x5900 },
-	{ "hdp",     0x5940 },
-	{ "hdq",     0x5A00 },
-	{ "hdr",     0x5A40 },
-	{ "hds",     0x5B00 },
-	{ "hdt",     0x5B40 },
-	{ "sda",     0x0800 },
-	{ "sdb",     0x0810 },
-	{ "sdc",     0x0820 },
-	{ "sdd",     0x0830 },
-	{ "sde",     0x0840 },
-	{ "sdf",     0x0850 },
-	{ "sdg",     0x0860 },
-	{ "sdh",     0x0870 },
-	{ "sdi",     0x0880 },
-	{ "sdj",     0x0890 },
-	{ "sdk",     0x08a0 },
-	{ "sdl",     0x08b0 },
-	{ "sdm",     0x08c0 },
-	{ "sdn",     0x08d0 },
-	{ "sdo",     0x08e0 },
-	{ "sdp",     0x08f0 },
-	{ "ada",     0x1c00 },
-	{ "adb",     0x1c10 },
-	{ "adc",     0x1c20 },
-	{ "add",     0x1c30 },
-	{ "ade",     0x1c40 },
-	{ "fd",      0x0200 },
-	{ "md",      0x0900 },	     
-	{ "xda",     0x0d00 },
-	{ "xdb",     0x0d40 },
-	{ "ram",     0x0100 },
-	{ "scd",     0x0b00 },
-	{ "mcd",     0x1700 },
-	{ "cdu535",  0x1800 },
-	{ "sonycd",  0x1800 },
-	{ "aztcd",   0x1d00 },
-	{ "cm206cd", 0x2000 },
-	{ "gscd",    0x1000 },
-	{ "sbpcd",   0x1900 },
-	{ "eda",     0x2400 },
-	{ "edb",     0x2440 },
-	{ "pda",	0x2d00 },
-	{ "pdb",	0x2d10 },
-	{ "pdc",	0x2d20 },
-	{ "pdd",	0x2d30 },
-	{ "pcd",	0x2e00 },
-	{ "pf",		0x2f00 },
-	{ "apblock", APBLOCK_MAJOR << 8},
-	{ "ddv", DDV_MAJOR << 8},
-	{ "jsfd",    JSFD_MAJOR << 8},
-#ifdef CONFIG_MDISK
-        { "mnda", (MDISK_MAJOR << MINORBITS)},
-        { "mndb", (MDISK_MAJOR << MINORBITS) + 1},
-        { "mndc", (MDISK_MAJOR << MINORBITS) + 2},
-        { "mndd", (MDISK_MAJOR << MINORBITS) + 3},
-        { "mnde", (MDISK_MAJOR << MINORBITS) + 4},
-        { "mndf", (MDISK_MAJOR << MINORBITS) + 5},
-        { "mndg", (MDISK_MAJOR << MINORBITS) + 6},
-        { "mndh", (MDISK_MAJOR << MINORBITS) + 7},
-#endif
-#ifdef CONFIG_DASD
-	{ "dasda", (DASD_MAJOR << MINORBITS) },
-	{ "dasdb", (DASD_MAJOR << MINORBITS) + (1 << 2) },
-	{ "dasdc", (DASD_MAJOR << MINORBITS) + (2 << 2) },
-	{ "dasdd", (DASD_MAJOR << MINORBITS) + (3 << 2) },
-	{ "dasde", (DASD_MAJOR << MINORBITS) + (4 << 2) },
-	{ "dasdf", (DASD_MAJOR << MINORBITS) + (5 << 2) },
-	{ "dasdg", (DASD_MAJOR << MINORBITS) + (6 << 2) },
-	{ "dasdh", (DASD_MAJOR << MINORBITS) + (7 << 2) },
-#endif
-#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
-	{ "ida/c0d0p",0x4800 },
-	{ "ida/c0d1p",0x4810 },
-	{ "ida/c0d2p",0x4820 },
-	{ "ida/c0d3p",0x4830 },
-	{ "ida/c0d4p",0x4840 },
-	{ "ida/c0d5p",0x4850 },
-	{ "ida/c0d6p",0x4860 },
-	{ "ida/c0d7p",0x4870 },
-	{ "ida/c0d8p",0x4880 },
-	{ "ida/c0d9p",0x4890 },
-	{ "ida/c0d10p",0x48A0 },
-	{ "ida/c0d11p",0x48B0 },
-	{ "ida/c0d12p",0x48C0 },
-	{ "ida/c0d13p",0x48D0 },
-	{ "ida/c0d14p",0x48E0 },
-	{ "ida/c0d15p",0x48F0 },
-#endif
-#if defined(CONFIG_BLK_CPQ_CISS_DA) || defined(CONFIG_BLK_CPQ_CISS_DA_MODULE)
-	{ "cciss/c0d0p",0x6800 },
-	{ "cciss/c0d1p",0x6810 },
-	{ "cciss/c0d2p",0x6820 },
-	{ "cciss/c0d3p",0x6830 },
-	{ "cciss/c0d4p",0x6840 },
-	{ "cciss/c0d5p",0x6850 },
-	{ "cciss/c0d6p",0x6860 },
-	{ "cciss/c0d7p",0x6870 },
-	{ "cciss/c0d8p",0x6880 },
-	{ "cciss/c0d9p",0x6890 },
-	{ "cciss/c0d10p",0x68A0 },
-	{ "cciss/c0d11p",0x68B0 },
-	{ "cciss/c0d12p",0x68C0 },
-	{ "cciss/c0d13p",0x68D0 },
-	{ "cciss/c0d14p",0x68E0 },
-	{ "cciss/c0d15p",0x68F0 },
-#endif
-#ifdef CONFIG_NFTL
-	{ "nftla", 0x5d00 },
-#endif
-	{ NULL, 0 }
-};
-
-kdev_t __init name_to_kdev_t(char *line)
-{
-	int base = 0;
-
-	if (strncmp(line,"/dev/",5) == 0) {
-		struct dev_name_struct *dev = root_dev_names;
-		line += 5;
-		do {
-			int len = strlen(dev->name);
-			if (strncmp(line,dev->name,len) == 0) {
-				line += len;
-				base = dev->num;
-				break;
-			}
-			dev++;
-		} while (dev->name);
-	}
-	return to_kdev_t(base + simple_strtoul(line,NULL,base?10:16));
-}
-
-static int __init root_dev_setup(char *line)
-{
-	int i;
-	char ch;
-
-	ROOT_DEV = name_to_kdev_t(line);
-	memset (root_device_name, 0, sizeof root_device_name);
-	if (strncmp (line, "/dev/", 5) == 0) line += 5;
-	for (i = 0; i < sizeof root_device_name - 1; ++i)
-	{
-	    ch = line[i];
-	    if ( isspace (ch) || (ch == ',') || (ch == '\0') ) break;
-	    root_device_name[i] = ch;
-	}
-	return 1;
-}
-
-__setup("root=", root_dev_setup);
 
 static int __init checksetup(char *line)
 {
@@ -381,22 +208,6 @@ void __init calibrate_delay(void)
 		(loops_per_jiffy/(5000/HZ)) % 100);
 }
 
-static int __init readonly(char *str)
-{
-	if (*str)
-		return 0;
-	root_mountflags |= MS_RDONLY;
-	return 1;
-}
-
-static int __init readwrite(char *str)
-{
-	if (*str)
-		return 0;
-	root_mountflags &= ~MS_RDONLY;
-	return 1;
-}
-
 static int __init debug_kernel(char *str)
 {
 	if (*str)
@@ -413,8 +224,6 @@ static int __init quiet_kernel(char *str)
 	return 1;
 }
 
-__setup("ro", readonly);
-__setup("rw", readwrite);
 __setup("debug", debug_kernel);
 __setup("quiet", quiet_kernel);
 
@@ -489,12 +298,14 @@ static void __init parse_options(char *line)
 extern void setup_arch(char **);
 extern void cpu_idle(void);
 
+unsigned long wait_init_idle;
+
 #ifndef CONFIG_SMP
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_LOCAL_APIC
 static void __init smp_init(void)
 {
-	IO_APIC_init_uniprocessor();
+	APIC_init_uniprocessor();
 }
 #else
 #define smp_init()	do { } while (0)
@@ -502,25 +313,51 @@ static void __init smp_init(void)
 
 #else
 
+
 /* Called by boot processor to activate the rest. */
 static void __init smp_init(void)
 {
 	/* Get other processors into their bootup holding patterns. */
 	smp_boot_cpus();
+	wait_init_idle = cpu_online_map;
+	clear_bit(current->processor, &wait_init_idle); /* Don't wait on me! */
+
 	smp_threads_ready=1;
 	smp_commence();
-}		
+
+	/* Wait for the other cpus to set up their idle processes */
+	printk("Waiting on wait_init_idle (map = 0x%lx)\n", wait_init_idle);
+	while (wait_init_idle) {
+		cpu_relax();
+		barrier();
+	}
+	printk("All processors have done init_idle\n");
+}
 
 #endif
 
 /*
+ * We need to finalize in a non-__init function or else race conditions
+ * between the root thread and the init thread may cause start_kernel to
+ * be reaped by free_initmem before the root thread has proceeded to
+ * cpu_idle.
+ */
+
+static void rest_init(void)
+{
+	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
+	unlock_kernel();
+	current->need_resched = 1;
+ 	cpu_idle();
+} 
+
+/*
  *	Activate the first processor.
  */
- 
+
 asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
-	unsigned long mempages;
 	extern char saved_command_line[];
 /*
  * Interrupts are still disabled. Do necessary setups, then
@@ -534,8 +371,8 @@ asmlinkage void __init start_kernel(void)
 	trap_init();
 	init_IRQ();
 	sched_init();
-	time_init();
 	softirq_init();
+	time_init();
 
 	/*
 	 * HACK ALERT! This is early. We're enabling the console before
@@ -569,30 +406,32 @@ asmlinkage void __init start_kernel(void)
 #endif
 	mem_init();
 	kmem_cache_sizes_init();
-#ifdef CONFIG_3215_CONSOLE
-        con3215_activate();
+	pgtable_cache_init();
+
+	/*
+	 * For architectures that have highmem, num_mappedpages represents
+	 * the amount of memory the kernel can use.  For other architectures
+	 * it's the same as the total pages.  We need both numbers because
+	 * some subsystems need to initialize based on how much memory the
+	 * kernel can use.
+	 */
+	if (num_mappedpages == 0)
+		num_mappedpages = num_physpages;
+  
+	fork_init(num_mappedpages);
+	proc_caches_init();
+	vfs_caches_init(num_physpages);
+	buffer_init(num_physpages);
+	page_cache_init(num_physpages);
+#if defined(CONFIG_ARCH_S390)
+	ccwcache_init();
 #endif
+	signals_init();
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
 #endif
-	mempages = num_physpages;
-
-	fork_init(mempages);
-	proc_caches_init();
-	vfs_caches_init(mempages);
-	buffer_init(mempages);
-	page_cache_init(mempages);
-	kiobuf_setup();
-	signals_init();
-	bdev_init();
-	inode_init(mempages);
-#if defined(CONFIG_SYSVIPC)
-	ipc_init();
-#endif
-#if defined(CONFIG_QUOTA)
-	dquot_init_hash();
-#endif
 	check_bugs();
+	acpi_early_init(); /* before LAPIC and SMP init */
 	printk("POSIX conformance testing by UNIFIX\n");
 
 	/* 
@@ -601,26 +440,11 @@ asmlinkage void __init start_kernel(void)
 	 *	make syscalls (and thus be locked).
 	 */
 	smp_init();
-	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
-	unlock_kernel();
-	current->need_resched = 1;
- 	cpu_idle();
-}
-
-#ifdef CONFIG_BLK_DEV_INITRD
-static int do_linuxrc(void * shell)
-{
-	static char *argv[] = { "linuxrc", NULL, };
-
-	close(0);close(1);close(2);
-	setsid();
-	(void) open("/dev/console",O_RDWR,0);
-	(void) dup(0);
-	(void) dup(0);
-	return execve(shell, argv, envp_init);
-}
-
+#if defined(CONFIG_SYSVIPC)
+	ipc_init();
 #endif
+	rest_init();
+}
 
 struct task_struct *child_reaper = &init_task;
 
@@ -647,9 +471,6 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
-#ifdef CONFIG_BLK_DEV_INITRD
-	int real_root_mountflags;
-#endif
 
 	/*
 	 * Tell the world that we're going to be the grim
@@ -678,6 +499,12 @@ static void __init do_basic_setup(void)
 	 * Ok, at this point all CPU's should be initialized, so
 	 * we can start looking into devices..
 	 */
+#if defined(CONFIG_ARCH_S390)
+	s390_init_machine_check();
+#endif
+#ifdef CONFIG_ACPI_INTERPRETER
+	acpi_init();
+#endif
 #ifdef CONFIG_PCI
 	pci_init();
 #endif
@@ -712,56 +539,33 @@ static void __init do_basic_setup(void)
 	/* Networking initialization needs a process context */ 
 	sock_init();
 
-#ifdef CONFIG_BLK_DEV_INITRD
-	real_root_dev = ROOT_DEV;
-	real_root_mountflags = root_mountflags;
-	if (initrd_start && mount_initrd) root_mountflags &= ~MS_RDONLY;
-	else mount_initrd =0;
-#endif
-
 	start_context_thread();
 	do_initcalls();
 
-	/* .. filesystems .. */
-	filesystem_setup();
-
 #ifdef CONFIG_IRDA
+	irda_proto_init();
 	irda_device_init(); /* Must be done after protocol initialization */
 #endif
 #ifdef CONFIG_PCMCIA
 	init_pcmcia_ds();		/* Do this last */
 #endif
-
-	/* Mount the root filesystem.. */
-	mount_root();
-
-	mount_devfs_fs ();
-
-#ifdef CONFIG_BLK_DEV_INITRD
-	root_mountflags = real_root_mountflags;
-	if (mount_initrd && ROOT_DEV != real_root_dev
-	    && MAJOR(ROOT_DEV) == RAMDISK_MAJOR && MINOR(ROOT_DEV) == 0) {
-		int error;
-		int i, pid;
-
-		pid = kernel_thread(do_linuxrc, "/linuxrc", SIGCHLD);
-		if (pid>0)
-			while (pid != wait(&i));
-		if (MAJOR(real_root_dev) != RAMDISK_MAJOR
-		     || MINOR(real_root_dev) != 0) {
-			error = change_root(real_root_dev,"/initrd");
-			if (error)
-				printk(KERN_ERR "Change root to /initrd: "
-				    "error %d\n",error);
-		}
-	}
-#endif
 }
+
+static void run_init_process(char *init_filename)
+{
+	argv_init[0] = init_filename;
+	execve(init_filename, argv_init, envp_init);
+}
+
+extern void prepare_namespace(void);
 
 static int init(void * unused)
 {
+	struct files_struct *files;
 	lock_kernel();
 	do_basic_setup();
+
+	prepare_namespace();
 
 	/*
 	 * Ok, we have completed the initial bootup, and
@@ -770,7 +574,17 @@ static int init(void * unused)
 	 */
 	free_initmem();
 	unlock_kernel();
-
+	
+	/*
+	 * Right now we are a thread sharing with a ton of kernel
+	 * stuff. We don't want to end up in user space in that state
+	 */
+	 
+	files = current->files;
+	if(unshare_files())
+		panic("unshare");
+	put_files_struct(files);
+	
 	if (open("/dev/console", O_RDWR, 0) < 0)
 		printk("Warning: unable to open an initial console.\n");
 
@@ -785,10 +599,12 @@ static int init(void * unused)
 	 */
 
 	if (execute_command)
-		execve(execute_command,argv_init,envp_init);
-	execve("/sbin/init",argv_init,envp_init);
-	execve("/etc/init",argv_init,envp_init);
-	execve("/bin/init",argv_init,envp_init);
-	execve("/bin/sh",argv_init,envp_init);
+		run_init_process(execute_command);
+
+	run_init_process("/sbin/init");
+	run_init_process("/etc/init");
+	run_init_process("/bin/init");
+	run_init_process("/bin/sh");
+
 	panic("No init found.  Try passing init= option to kernel.");
 }

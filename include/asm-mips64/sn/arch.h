@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -21,7 +20,7 @@
 #endif
 
 
-#if defined(_LANGUAGE_C) || defined(_LANGUAGE_C_PLUS_PLUS)
+#ifndef __ASSEMBLY__
 #if !defined(CONFIG_SGI_IO)
 typedef u64	hubreg_t;
 typedef u64	nic_t;
@@ -45,7 +44,7 @@ typedef u64	nic_t;
 #define makespnum(_nasid, _slice)					\
 		(((_nasid) << CPUS_PER_NODE_SHFT) | (_slice))
 
-#if defined(_LANGUAGE_C) || defined(_LANGUAGE_C_PLUS_PLUS)
+#ifndef __ASSEMBLY__
 
 #define INVALID_NASID		(nasid_t)-1
 #define INVALID_CNODEID		(cnodeid_t)-1
@@ -103,7 +102,7 @@ nasid_t compact_to_nasid_nodeid(cnodeid_t cnode);
 
 extern int node_getlastslot(cnodeid_t);
 
-#endif /* _LANGUAGE_C || _LANGUAGE_C_PLUS_PLUS */
+#endif /* !__ASSEMBLY__ */
 
 #define SLOT_BITMASK    	(MAX_MEM_SLOTS - 1)
 #define SLOT_SIZE		(1LL<<SLOT_SHIFT)

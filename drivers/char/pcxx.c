@@ -5,7 +5,7 @@
  *
  *  Copyright (C) 1994,1995 Troy De Jongh
  *  This software may be used and distributed according to the terms 
- *  of the GNU Public License.
+ *  of the GNU General Public License.
  *
  *  This driver is for the DigiBoard PC/Xe and PC/Xi line of products.
  *
@@ -63,7 +63,7 @@
 #include <linux/delay.h>
 #include <linux/serial.h>
 #include <linux/tty_driver.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/version.h>
 
@@ -113,6 +113,7 @@ static int numports[]     = {0, 0, 0, 0};
 # if (LINUX_VERSION_CODE > 0x020111)
 MODULE_AUTHOR("Bernhard Kaindl");
 MODULE_DESCRIPTION("Digiboard PC/X{i,e,eve} driver");
+MODULE_LICENSE("GPL");
 MODULE_PARM(verbose,     "i");
 MODULE_PARM(debug,       "i");
 MODULE_PARM(io,          "1-4i");
@@ -152,7 +153,6 @@ static struct timer_list pcxx_timer;
 DECLARE_TASK_QUEUE(tq_pcxx);
 
 static void pcxxpoll(unsigned long dummy);
-static void pcxxdelay(int);
 static void fepcmd(struct channel *, int, int, int, int, int);
 static void pcxe_put_char(struct tty_struct *, unsigned char);
 static void pcxe_flush_chars(struct tty_struct *);
@@ -619,28 +619,11 @@ static void pcxe_close(struct tty_struct * tty, struct file * filp)
 	
 		if(tty->driver.flush_buffer)
 			tty->driver.flush_buffer(tty);
-		if(tty->ldisc.flush_buffer)
-			tty->ldisc.flush_buffer(tty);
+		tty_ldisc_flush(tty);
 		shutdown(info);
 		tty->closing = 0;
 		info->event = 0;
 		info->tty = NULL;
-#ifndef MODULE
-/* ldiscs[] is not available in a MODULE
-** worth noting that while I'm not sure what this hunk of code is supposed
-** to do, it is not present in the serial.c driver.  Hmmm.  If you know,
-** please send me a note.  brian@ilinx.com
-** Don't know either what this is supposed to do christoph@lameter.com.
-*/
-		if(tty->ldisc.num != ldiscs[N_TTY].num) {
-			if(tty->ldisc.close)
-				(tty->ldisc.close)(tty);
-			tty->ldisc = ldiscs[N_TTY];
-			tty->termios->c_line = N_TTY;
-			if(tty->ldisc.open)
-				(tty->ldisc.open)(tty);
-		}
-#endif
 		if(info->blocked_open) {
 			if(info->close_delay) {
 				current->state = TASK_INTERRUPTIBLE;
@@ -685,7 +668,6 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 	int total, remain, size, stlen;
 	unsigned int head, tail;
 	unsigned long flags;
-
 	/* printk("Entering pcxe_write()\n"); */
 
 	if ((ch=chan(tty))==NULL)
@@ -696,6 +678,7 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 
 	if (from_user) {
 
+		down(&ch->tmp_buf_sem);
 		save_flags(flags);
 		cli();
 		globalwinon(ch);
@@ -703,19 +686,21 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 		/* It seems to be necessary to make sure that the value is stable here somehow
 		   This is a rather odd pice of code here. */
 		do
-		{ tail = bc->tout;
+		{
+			tail = bc->tout;
 		} while (tail != bc->tout);
 		
 		tail &= (size - 1);
 		stlen = (head >= tail) ? (size - (head - tail) - 1) : (tail - head - 1);
 		count = MIN(stlen, count);
+		memoff(ch);
+		restore_flags(flags);
+
 		if (count)
 			if (copy_from_user(ch->tmp_buf, buf, count))
 				count = 0;
 
 		buf = ch->tmp_buf;
-		memoff(ch);
-		restore_flags(flags);
 	}
 
 	/*
@@ -763,6 +748,9 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 	}
 	memoff(ch);
 	restore_flags(flags);
+	
+	if(from_user)
+		up(&ch->tmp_buf_sem);
 
 	return(total);
 }
@@ -878,9 +866,7 @@ static void pcxe_flush_buffer(struct tty_struct *tty)
 	memoff(ch);
 	restore_flags(flags);
 
-	wake_up_interruptible(&tty->write_wait);
-	if((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 static void pcxe_flush_chars(struct tty_struct *tty)
@@ -1265,7 +1251,7 @@ int __init pcxe_init(void)
 	for(crd=0; crd < numcards; crd++) {
 		bd = &boards[crd];
 		outb(FEPRST, bd->port);
-		pcxxdelay(1);
+		mdelay(1);
 
 		for(i=0; (inb(bd->port) & FEPMASK) != FEPRST; i++) {
 			if(i > 100) {
@@ -1277,7 +1263,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 			schedule();
 #endif
-			pcxxdelay(10);
+			mdelay(10);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1356,7 +1342,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 			schedule();
 #endif
-			pcxxdelay(1);
+			mdelay(1);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1407,7 +1393,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 				schedule();
 #endif
-				pcxxdelay(50);
+				mdelay(50);
 			}
 
 			printk("\nPC/Xx: BIOS download failed for board at 0x%x(addr=%lx-%lx)!\n",
@@ -1437,7 +1423,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 				schedule();
 #endif
-				pcxxdelay(10);
+				mdelay(10);
 			}
 
 			printk("\nPC/Xx: BIOS download failed on the %s at 0x%x!\n",
@@ -1481,7 +1467,7 @@ load_fep:
 #ifdef MODULE
 			schedule();
 #endif
-			pcxxdelay(1);
+			mdelay(1);
 		}
 
 		if(bd->status == DISABLED)
@@ -1514,7 +1500,7 @@ load_fep:
 #ifdef MODULE
 			schedule();
 #endif
-			pcxxdelay(1);
+			mdelay(1);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1587,6 +1573,7 @@ load_fep:
 			ch->txbufsize = bc->tmax + 1;
 			ch->rxbufsize = bc->rmax + 1;
 			ch->tmp_buf = kmalloc(ch->txbufsize,GFP_KERNEL);
+			init_MUTEX(&ch->tmp_buf_sem);
 
 			if (!ch->tmp_buf) {
 				printk(KERN_ERR "Unable to allocate memory for temp buffers\n");
@@ -1787,10 +1774,7 @@ static void doevent(int crd)
 			if (event & LOWTX_IND) {
 				if (ch->statusflags & LOWWAIT) {
 					ch->statusflags &= ~LOWWAIT;
-					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-						tty->ldisc.write_wakeup)
-						(tty->ldisc.write_wakeup)(tty);
-					wake_up_interruptible(&tty->write_wait);
+					tty_wakeup(tty);
 				}
 			}
 
@@ -1798,10 +1782,7 @@ static void doevent(int crd)
 				ch->statusflags &= ~TXBUSY;
 				if (ch->statusflags & EMPTYWAIT) {
 					ch->statusflags &= ~EMPTYWAIT;
-					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-						tty->ldisc.write_wakeup)
-						(tty->ldisc.write_wakeup)(tty);
-					wake_up_interruptible(&tty->write_wait);
+					tty_wakeup(tty);
 				}
 			}
 		}
@@ -1815,15 +1796,6 @@ static void doevent(int crd)
 		globalwinon(chan0);
 	}
 
-}
-
-
-/*
- * pcxxdelay - delays a specified number of milliseconds
- */
-static void pcxxdelay(int msec)
-{
-	mdelay(msec);
 }
 
 
@@ -2257,8 +2229,7 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 				tty_wait_until_sent(tty, 0);
 			}
 			else {
-				if(tty->ldisc.flush_buffer)
-					tty->ldisc.flush_buffer(tty);
+				tty_ldisc_flush(tty);
 			}
 
 			/* Fall Thru */

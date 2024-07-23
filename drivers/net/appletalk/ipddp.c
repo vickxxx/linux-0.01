@@ -4,7 +4,7 @@
  *
  *	Authors:
  *      - DDP-IP Encap by: Bradford W. Johnson <johns393@maroon.tc.umn.edu>
- *	- DDP-IP Decap by: Jay Schulist <jschlst@turbolinux.com>
+ *	- DDP-IP Decap by: Jay Schulist <jschlst@samba.org>
  *
  *	Derived from:
  *	- Almost all code already existed in net/appletalk/ddp.c I just
@@ -14,17 +14,14 @@
  *        Written 1993-94 by Donald Becker.
  *	- dummy.c: A dummy net driver. By Nick Holloway.
  *	- MacGate: A user space Daemon for Appletalk-IP Decap for
- *	  Linux by Jay Schulist <jschlst@turbolinux.com>
+ *	  Linux by Jay Schulist <jschlst@samba.org>
  *
  *      Copyright 1993 United States Government as represented by the
  *      Director, National Security Agency.
  *
  *      This software may be used and distributed according to the terms
- *      of the GNU Public License, incorporated herein by reference.
+ *      of the GNU General Public License, incorporated herein by reference.
  */
-
-static const char *version = 
-	"ipddp.c:v0.01 8/28/97 Bradford W. Johnson <johns393@maroon.tc.umn.edu>\n";
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -39,19 +36,15 @@ static const char *version =
 
 #include "ipddp.h"		/* Our stuff */
 
-static struct ipddp_route *ipddp_route_list = NULL;
+static const char version[] = KERN_INFO "ipddp.c:v0.01 8/28/97 Bradford W. Johnson <johns393@maroon.tc.umn.edu>\n";
+
+static struct ipddp_route *ipddp_route_list;
 
 #ifdef CONFIG_IPDDP_ENCAP
 static int ipddp_mode = IPDDP_ENCAP;
 #else
 static int ipddp_mode = IPDDP_DECAP;
 #endif
-
-/* Use 0 for production, 1 for verification, 2 for debug, 3 for verbose debug */
-#ifndef IPDDP_DEBUG
-#define IPDDP_DEBUG 1
-#endif
-static unsigned int ipddp_debug = IPDDP_DEBUG;
 
 /* Index to functions, as function prototypes. */
 static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev);
@@ -64,19 +57,19 @@ static int ipddp_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 
 static int __init ipddp_init(struct net_device *dev)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	SET_MODULE_OWNER(dev);
 
-	if (ipddp_debug && version_printed++ == 0)
-                printk("%s", version);
+	if (version_printed++ == 0)
+                printk(version);
 
 	/* Let the user now what mode we are in */
 	if(ipddp_mode == IPDDP_ENCAP)
 		printk("%s: Appletalk-IP Encap. mode by Bradford W. Johnson <johns393@maroon.tc.umn.edu>\n", 
 			dev->name);
 	if(ipddp_mode == IPDDP_DECAP)
-		printk("%s: Appletalk-IP Decap. mode by Jay Schulist <jschlst@turbolinux.com>\n", 
+		printk("%s: Appletalk-IP Decap. mode by Jay Schulist <jschlst@samba.org>\n", 
 			dev->name);
 
 	/* Fill in the device structure with ethernet-generic values. */
@@ -193,25 +186,23 @@ static int ipddp_xmit(struct sk_buff *skb, struct net_device *dev)
 static int ipddp_create(struct ipddp_route *new_rt)
 {
         struct ipddp_route *rt =(struct ipddp_route*) kmalloc(sizeof(*rt), GFP_KERNEL);
-	struct ipddp_route *test;
 
-        if(rt == NULL)
+        if (rt == NULL)
                 return -ENOMEM;
 
         rt->ip = new_rt->ip;
         rt->at = new_rt->at;
         rt->next = NULL;
-        rt->dev = atrtr_get_dev(&rt->at);
-        if(rt->dev == NULL)
-        {
-        	kfree(rt);
-                return (-ENETUNREACH);
+        if ((rt->dev = atrtr_get_dev(&rt->at)) == NULL) {
+		kfree(rt);
+                return -ENETUNREACH;
         }
 
-	test = ipddp_find_route(rt);
-	if(test != NULL)
-		return (-EEXIST);
-	
+	if (ipddp_find_route(rt)) {
+		kfree(rt);
+		return -EEXIST;
+	}
+
         rt->next = ipddp_route_list;
         ipddp_route_list = rt;
 
@@ -264,22 +255,26 @@ static struct ipddp_route* ipddp_find_route(struct ipddp_route *rt)
 static int ipddp_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
         struct ipddp_route *rt = (struct ipddp_route *)ifr->ifr_data;
+        struct ipddp_route rcp;
 
         if(!capable(CAP_NET_ADMIN))
                 return -EPERM;
 
+	if(copy_from_user(&rcp, rt, sizeof(rcp)))
+		return -EFAULT;
+
         switch(cmd)
         {
 		case SIOCADDIPDDPRT:
-                        return (ipddp_create(rt));
+                        return (ipddp_create(&rcp));
 
                 case SIOCFINDIPDDPRT:
-                        if(copy_to_user(rt, ipddp_find_route(rt), sizeof(struct ipddp_route)))
+                        if(copy_to_user(rt, ipddp_find_route(&rcp), sizeof(struct ipddp_route)))
                                 return -EFAULT;
                         return 0;
 
                 case SIOCDELIPDDPRT:
-                        return (ipddp_delete(rt));
+                        return (ipddp_delete(&rcp));
 
                 default:
                         return -EINVAL;
@@ -288,6 +283,7 @@ static int ipddp_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 static struct net_device dev_ipddp;
 
+MODULE_LICENSE("GPL");
 MODULE_PARM(ipddp_mode, "i");
 
 static int __init ipddp_init_module(void)
@@ -307,11 +303,16 @@ static int __init ipddp_init_module(void)
 
 static void __exit ipddp_cleanup_module(void)
 {
+        struct ipddp_route *p;
+
 	unregister_netdev(&dev_ipddp);
         kfree(dev_ipddp.priv);
 
-	memset(&dev_ipddp, 0, sizeof(dev_ipddp));
-	dev_ipddp.init = ipddp_init;
+        while (ipddp_route_list) {
+                p = ipddp_route_list->next;
+                kfree(ipddp_route_list);
+                ipddp_route_list = p;
+        }
 }
 
 module_init(ipddp_init_module);

@@ -57,38 +57,38 @@
  */
 
 struct screen_info {
-	unsigned char  orig_x;			/* 0x00 */
-	unsigned char  orig_y;			/* 0x01 */
-	unsigned short dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
-	unsigned short orig_video_page;		/* 0x04 */
-	unsigned char  orig_video_mode;		/* 0x06 */
-	unsigned char  orig_video_cols;		/* 0x07 */
-	unsigned short unused2;			/* 0x08 */
-	unsigned short orig_video_ega_bx;	/* 0x0a */
-	unsigned short unused3;			/* 0x0c */
-	unsigned char  orig_video_lines;	/* 0x0e */
-	unsigned char  orig_video_isVGA;	/* 0x0f */
-	unsigned short orig_video_points;	/* 0x10 */
+	u8  orig_x;		/* 0x00 */
+	u8  orig_y;		/* 0x01 */
+	u16 dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
+	u16 orig_video_page;	/* 0x04 */
+	u8  orig_video_mode;	/* 0x06 */
+	u8  orig_video_cols;	/* 0x07 */
+	u16 unused2;		/* 0x08 */
+	u16 orig_video_ega_bx;	/* 0x0a */
+	u16 unused3;		/* 0x0c */
+	u8  orig_video_lines;	/* 0x0e */
+	u8  orig_video_isVGA;	/* 0x0f */
+	u16 orig_video_points;	/* 0x10 */
 
 	/* VESA graphic mode -- linear frame buffer */
-	unsigned short lfb_width;		/* 0x12 */
-	unsigned short lfb_height;		/* 0x14 */
-	unsigned short lfb_depth;		/* 0x16 */
-	unsigned long  lfb_base;		/* 0x18 */
-	unsigned long  lfb_size;		/* 0x1c */
-	unsigned short dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
-	unsigned short lfb_linelength;		/* 0x24 */
-	unsigned char  red_size;		/* 0x26 */
-	unsigned char  red_pos;			/* 0x27 */
-	unsigned char  green_size;		/* 0x28 */
-	unsigned char  green_pos;		/* 0x29 */
-	unsigned char  blue_size;		/* 0x2a */
-	unsigned char  blue_pos;		/* 0x2b */
-	unsigned char  rsvd_size;		/* 0x2c */
-	unsigned char  rsvd_pos;		/* 0x2d */
-	unsigned short vesapm_seg;		/* 0x2e */
-	unsigned short vesapm_off;		/* 0x30 */
-	unsigned short pages;			/* 0x32 */
+	u16 lfb_width;				/* 0x12 */
+	u16 lfb_height;		/* 0x14 */
+	u16 lfb_depth;		/* 0x16 */
+	u32 lfb_base;		/* 0x18 */
+	u32 lfb_size;		/* 0x1c */
+	u16 dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
+	u16 lfb_linelength;	/* 0x24 */
+	u8  red_size;		/* 0x26 */
+	u8  red_pos;		/* 0x27 */
+	u8  green_size;		/* 0x28 */
+	u8  green_pos;		/* 0x29 */
+	u8  blue_size;		/* 0x2a */
+	u8  blue_pos;		/* 0x2b */
+	u8  rsvd_size;		/* 0x2c */
+	u8  rsvd_pos;		/* 0x2d */
+	u16 vesapm_seg;		/* 0x2e */
+	u16 vesapm_off;		/* 0x30 */
+	u16 pages;		/* 0x32 */
 						/* 0x34 -- 0x3f reserved for future expansion */
 };
 
@@ -260,6 +260,7 @@ struct tty_struct {
 	int	magic;
 	struct tty_driver driver;
 	struct tty_ldisc ldisc;
+	struct semaphore termios_sem;
 	struct termios *termios, *termios_locked;
 	int pgrp;
 	int session;
@@ -293,7 +294,7 @@ struct tty_struct {
 	unsigned char lnext:1, erasing:1, raw:1, real_raw:1, icanon:1;
 	unsigned char closing:1;
 	unsigned short minimum_to_wake;
-	unsigned overrun_time;
+	unsigned long overrun_time;
 	int num_overrun;
 	unsigned long process_char_map[256/(8*sizeof(unsigned long))];
 	char *read_buf;
@@ -307,6 +308,8 @@ struct tty_struct {
 	struct semaphore atomic_read;
 	struct semaphore atomic_write;
 	spinlock_t read_lock;
+	/* If the tty has a pending do_SAK, queue it here - akpm */
+	struct tq_struct SAK_tq;
 };
 
 /* tty magic number */
@@ -320,27 +323,28 @@ struct tty_struct {
  * tty->write.  Thus, you must use the inline functions set_bit() and
  * clear_bit() to make things atomic.
  */
-#define TTY_THROTTLED 0
-#define TTY_IO_ERROR 1
-#define TTY_OTHER_CLOSED 2
-#define TTY_EXCLUSIVE 3
-#define TTY_DEBUG 4
-#define TTY_DO_WRITE_WAKEUP 5
-#define TTY_PUSH 6
-#define TTY_CLOSING 7
-#define TTY_DONT_FLIP 8
-#define TTY_HW_COOK_OUT 14
-#define TTY_HW_COOK_IN 15
-#define TTY_PTY_LOCK 16
-#define TTY_NO_WRITE_SPLIT 17
+#define TTY_THROTTLED 		0	/* Call unthrottle() at threshold min */
+#define TTY_IO_ERROR 		1	/* Canse an I/O error (may be no ldisc too) */
+#define TTY_OTHER_CLOSED 	2	/* Other side (if any) has closed */
+#define TTY_EXCLUSIVE 		3	/* Exclusive open mode */
+#define TTY_DEBUG 		4	/* Debugging */
+#define TTY_DO_WRITE_WAKEUP 	5	/* Call write_wakeup after queuing new */
+#define TTY_PUSH 		6	/* n_tty private */
+#define TTY_CLOSING 		7	/* ->close() in progress */
+#define TTY_DONT_FLIP 		8	/* Defer buffer flip */
+#define TTY_LDISC 		9	/* Line discipline attached */
+#define TTY_HW_COOK_OUT 	14	/* Hardware can do output cooking */
+#define TTY_HW_COOK_IN 	15	/* Hardware can do input cooking */
+#define TTY_PTY_LOCK 		16	/* pty private */
+#define TTY_NO_WRITE_SPLIT 	17	/* Preserve write boundaries to driver */
+#define TTY_HUPPED 		18	/* Post driver->hangup() */
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
 extern void tty_write_flush(struct tty_struct *);
 
 extern struct termios tty_std_termios;
-extern struct tty_struct * redirect;
-extern struct tty_ldisc ldiscs[];
+extern struct tty_ldisc tty_ldiscs[];
 extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
@@ -364,6 +368,7 @@ extern int stli_init(void);
 extern int specialix_init(void);
 extern int espserial_init(void);
 extern int macserial_init(void);
+extern int a2232board_init(void);
 
 extern int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
 			      const char *routine);
@@ -393,6 +398,17 @@ extern void do_SAK(struct tty_struct *tty);
 extern void disassociate_ctty(int priv);
 extern void tty_flip_buffer_push(struct tty_struct *tty);
 extern int tty_get_baud_rate(struct tty_struct *tty);
+
+extern struct tty_ldisc *tty_ldisc_ref(struct tty_struct *);
+extern void tty_ldisc_deref(struct tty_ldisc *);
+extern struct tty_ldisc *tty_ldisc_ref_wait(struct tty_struct *);
+
+extern struct tty_ldisc *tty_ldisc_get(int);
+extern void tty_ldisc_put(int);
+
+extern void tty_wakeup(struct tty_struct *tty);
+extern void tty_ldisc_flush(struct tty_struct *tty);
+
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;

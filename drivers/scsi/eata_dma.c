@@ -68,7 +68,7 @@
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
@@ -482,6 +482,7 @@ int eata_queue(Scsi_Cmnd * cmd, void (* done) (Scsi_Cmnd *))
         DBG(DBG_REQSENSE, printk(KERN_DEBUG "Tried to REQUEST SENSE\n"));
 	cmd->result = DID_OK << 16;
 	done(cmd);
+	restore_flags(flags);
 
 	return(0);
     }
@@ -1066,7 +1067,7 @@ short register_HBA(u32 base, struct get_conf *gc, Scsi_Host_Template * tpnt,
     char *buff = 0;
     unchar bugs = 0;
     struct Scsi_Host *sh;
-    hostdata *hd;
+    hostdata *hd = NULL;
     int x;
     
     
@@ -1543,6 +1544,8 @@ int eata_detect(Scsi_Host_Template * tpnt)
 
     return(registered_HBAs);
 }
+
+MODULE_LICENSE("GPL");
 
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = EATA_DMA;

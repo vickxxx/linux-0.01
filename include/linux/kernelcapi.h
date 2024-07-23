@@ -1,17 +1,19 @@
-/*
- * $Id: kernelcapi.h,v 1.8.6.1 2000/11/28 09:36:56 kai Exp $
+/* $Id: kernelcapi.h,v 1.1.4.2 2002/01/28 18:25:10 kai Exp $
  * 
  * Kernel CAPI 2.0 Interface for Linux
  * 
  * (c) Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  */
 
 #ifndef __KERNELCAPI_H__
 #define __KERNELCAPI_H__
 
-#define CAPI_MAXAPPL	20	/* maximum number of applications  */
-#define CAPI_MAXCONTR	10	/* maximum number of controller    */
+#define CAPI_MAXAPPL	128	/* maximum number of applications  */
+#define CAPI_MAXCONTR	16	/* maximum number of controller    */
 #define CAPI_MAXDATAWINDOW	8
 
 

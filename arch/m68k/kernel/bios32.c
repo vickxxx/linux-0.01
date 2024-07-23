@@ -26,7 +26,7 @@
  */
 
 #include <linux/pci.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include <asm/io.h>
@@ -444,7 +444,7 @@ static void __init pcibios_claim_resources(struct pci_bus *bus)
  * dev	- device.
  * i	- resource.
  *
- * Result: 0 if successfull.
+ * Result: 0 if successful.
  */
 
 int __init pcibios_assign_resource(struct pci_dev *dev, int i)

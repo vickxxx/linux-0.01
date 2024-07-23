@@ -10,7 +10,6 @@ SECTIONS
 	*(.head)
 	*(.text)
 	*(.fixup)
-	*(.text.lock)		/* out-of-line lock text */
 	*(.gnu.warning)
 	} = 0x4e75
   .kstrtab : { *(.kstrtab) }
@@ -20,6 +19,7 @@ SECTIONS
 
   .data : {			/* Data */
 	*(.rodata)
+	*(.rodata.*)
 	*(.data)
 	CONSTRUCTORS
   	. = ALIGN(16);		/* Exception table */

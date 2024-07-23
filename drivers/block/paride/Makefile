@@ -7,6 +7,8 @@
 
 L_TARGET := paride.a
 
+export-objs := bpck6.o
+
 obj-$(CONFIG_PARIDE)		+= paride.o
 obj-$(CONFIG_PARIDE_PD)		+= pd.o
 obj-$(CONFIG_PARIDE_PCD)	+= pcd.o
@@ -27,5 +29,6 @@ obj-$(CONFIG_PARIDE_FRIQ)	+= friq.o
 obj-$(CONFIG_PARIDE_ON20)	+= on20.o
 obj-$(CONFIG_PARIDE_ON26)	+= on26.o
 obj-$(CONFIG_PARIDE_KTTI)	+= ktti.o
+obj-$(CONFIG_PARIDE_BPCK6)	+= bpck6.o
 
 include $(TOPDIR)/Rules.make

@@ -34,7 +34,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -112,9 +112,7 @@
 #include <linux/version.h>
 #endif
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #include <stdarg.h>
 #include <asm/irq.h>
@@ -136,7 +134,7 @@
 #include "scsi.h"
 #include "sd.h"
 #include "hosts.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include "ini9100u.h"
 
 #ifdef DEBUG_i91u
@@ -828,3 +826,4 @@ int i91u_release(struct Scsi_Host *hreg)
 	release_region(hreg->io_port, 256);
 	return 0;
 }
+MODULE_LICENSE("Dual BSD/GPL");

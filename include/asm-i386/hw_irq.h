@@ -13,6 +13,7 @@
  */
 
 #include <linux/config.h>
+#include <asm/atomic.h>
 #include <asm/irq.h>
 
 /*
@@ -83,7 +84,9 @@ extern int IO_APIC_get_PCI_irq_vector(int bus, int slot, int fn);
 extern void send_IPI(int dest, int vector);
 
 extern unsigned long io_apic_irqs;
-extern volatile unsigned long irq_err_count;
+
+extern atomic_t irq_err_count;
+extern atomic_t irq_mis_count;
 
 extern char _stext, _etext;
 
@@ -127,7 +130,7 @@ asmlinkage void call_##x(void); \
 __asm__( \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(x) ":\n\t" \
-	"pushl $"#v"\n\t" \
+	"pushl $"#v"-256\n\t" \
 	SAVE_ALL \
 	SYMBOL_NAME_STR(call_##x)":\n\t" \
 	"call "SYMBOL_NAME_STR(smp_##x)"\n\t" \
@@ -140,7 +143,7 @@ asmlinkage void call_##x(void); \
 __asm__( \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(x) ":\n\t" \
-	"pushl $"#v"\n\t" \
+	"pushl $"#v"-256\n\t" \
 	SAVE_ALL \
 	"movl %esp,%eax\n\t" \
 	"pushl %eax\n\t" \
@@ -155,9 +158,9 @@ __asm__( \
 	"\n" __ALIGN_STR"\n" \
 	"common_interrupt:\n\t" \
 	SAVE_ALL \
-	"pushl $ret_from_intr\n\t" \
 	SYMBOL_NAME_STR(call_do_IRQ)":\n\t" \
-	"jmp "SYMBOL_NAME_STR(do_IRQ));
+	"call " SYMBOL_NAME_STR(do_IRQ) "\n\t" \
+	"jmp ret_from_intr\n");
 
 /* 
  * subtle. orig_eax is used by the signal code to distinct between
@@ -210,7 +213,7 @@ static inline void x86_do_profile (unsigned long eip)
 	atomic_inc((atomic_t *)&prof_buffer[eip]);
 }
 
-#ifdef CONFIG_SMP /*more of this file should probably be ifdefed SMP */
+#if defined(CONFIG_X86_IO_APIC)
 static inline void hw_resend_irq(struct hw_interrupt_type *h, unsigned int i) {
 	if (IO_APIC_IRQ(i))
 		send_IPI_self(IO_APIC_VECTOR(i));

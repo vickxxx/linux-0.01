@@ -14,6 +14,7 @@
  *		Alan Cox	:	Support for TCP parameters.
  *		Alexey Kuznetsov:	Major changes for new routing code.
  *		Mike McLagan    :	Routing by source
+ *		Robert Olsson   :	Added rt_cache statistics
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -29,15 +30,20 @@
 #include <linux/in_route.h>
 #include <linux/rtnetlink.h>
 #include <linux/route.h>
+#include <linux/ip.h>
+#include <linux/cache.h>
 
 #ifndef __KERNEL__
 #warning This file is not supposed to be used outside of kernel.
 #endif
 
 #define RTO_ONLINK	0x01
-#define RTO_TPROXY	0x80000000
 
 #define RTO_CONN	0
+/* RTO_CONN is not used (being alias for 0), but preserved not to break
+ * some modules referring to it. */
+
+#define RT_CONN_FLAGS(sk)   (RT_TOS(sk->protinfo.af_inet.tos) | sk->localroute)
 
 struct rt_key
 {
@@ -92,6 +98,26 @@ struct ip_rt_acct
 	__u32 	i_packets;
 };
 
+struct rt_cache_stat 
+{
+        unsigned int in_hit;
+        unsigned int in_slow_tot;
+        unsigned int in_slow_mc;
+        unsigned int in_no_route;
+        unsigned int in_brd;
+        unsigned int in_martian_dst;
+        unsigned int in_martian_src;
+        unsigned int out_hit;
+        unsigned int out_slow_tot;
+        unsigned int out_slow_mc;
+        unsigned int gc_total;
+        unsigned int gc_ignored;
+        unsigned int gc_goal_miss;
+        unsigned int gc_dst_overflow;
+	unsigned int in_hlist_search;
+	unsigned int out_hlist_search;
+} ____cacheline_aligned_in_smp;
+
 extern struct ip_rt_acct *ip_rt_acct;
 
 struct in_device;
@@ -128,12 +154,7 @@ static inline void ip_rt_put(struct rtable * rt)
 		dst_release(&rt->u.dst);
 }
 
-#ifdef CONFIG_INET_ECN
 #define IPTOS_RT_MASK	(IPTOS_TOS_MASK & ~3)
-#else
-#define IPTOS_RT_MASK	IPTOS_TOS_MASK
-#endif
-
 
 extern __u8 ip_tos2prio[16];
 

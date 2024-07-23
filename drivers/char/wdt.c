@@ -27,6 +27,8 @@
  *		Tim Hockin	:	Added insmod parameters, comment cleanup
  *					Parameterized timeout
  *		Tigran Aivazian	:	Restructured wdt_init() to handle failures
+ *		Joel Becker	:	Added WDIOC_GET/SETTIMEOUT
+ *		Matt Domsch	:	Added nowayout module option
  */
 
 #include <linux/config.h>
@@ -40,7 +42,7 @@
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include "wd501p.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <asm/io.h>
@@ -50,7 +52,8 @@
 #include <linux/reboot.h>
 #include <linux/init.h>
 
-static int wdt_is_open;
+static unsigned long wdt_is_open;
+static int expect_close;
 
 /*
  *	You must set these - there is no sane way to probe for this board.
@@ -60,7 +63,19 @@ static int wdt_is_open;
 static int io=0x240;
 static int irq=11;
 
+/* Default margin */
 #define WD_TIMO (100*60)		/* 1 minute */
+
+static int wd_margin = WD_TIMO;
+
+#ifdef CONFIG_WATCHDOG_NOWAYOUT
+static int nowayout = 1;
+#else
+static int nowayout = 0;
+#endif
+
+MODULE_PARM(nowayout,"i");
+MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
 #ifndef MODULE
 
@@ -204,11 +219,6 @@ void wdt_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
-static long long wdt_llseek(struct file *file, long long offset, int origin)
-{
-	return -ESPIPE;
-}
-
 /**
  *	wdt_ping:
  *
@@ -221,7 +231,7 @@ static void wdt_ping(void)
 	/* Write a watchdog value */
 	inb_p(WDT_DC);
 	wdt_ctr_mode(1,2);
-	wdt_ctr_load(1,WD_TIMO);		/* Timeout */
+	wdt_ctr_load(1,wd_margin);		/* Timeout */
 	outb_p(0, WDT_DC);
 }
 
@@ -244,6 +254,20 @@ static ssize_t wdt_write(struct file *file, const char *buf, size_t count, loff_
 
 	if(count)
 	{
+		if (!nowayout) {
+			size_t i;
+
+			/* In case it was set long ago */
+			expect_close = 0;
+
+			for (i = 0; i != count; i++) {
+				char c;
+				if (get_user(c, buf + i))
+					return -EFAULT;
+				if (c == 'V')
+					expect_close = 1;
+			}
+		}
 		wdt_ping();
 		return 1;
 	}
@@ -299,10 +323,13 @@ static ssize_t wdt_read(struct file *file, char *buf, size_t count, loff_t *ptr)
 static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned long arg)
 {
+	int new_margin;
+
 	static struct watchdog_info ident=
 	{
 		WDIOF_OVERHEAT|WDIOF_POWERUNDER|WDIOF_POWEROVER
-			|WDIOF_EXTERN1|WDIOF_EXTERN2|WDIOF_FANFAULT,
+			|WDIOF_EXTERN1|WDIOF_EXTERN2|WDIOF_FANFAULT
+			|WDIOF_SETTIMEOUT|WDIOF_MAGICCLOSE,
 		1,
 		"WDT500/501"
 	};
@@ -311,7 +338,7 @@ static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	switch(cmd)
 	{
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
 			return copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident))?-EFAULT:0;
 
@@ -322,6 +349,17 @@ static int wdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		case WDIOC_KEEPALIVE:
 			wdt_ping();
 			return 0;
+		case WDIOC_SETTIMEOUT:
+			if (get_user(new_margin, (int *)arg))
+				return -EFAULT;
+			/* Arbitrary, can't find the card's limits */
+			if ((new_margin < 0) || (new_margin > 60))
+				return -EINVAL;
+			wd_margin = new_margin * 100;
+			wdt_ping();
+			/* Fall */
+		case WDIOC_GETTIMEOUT:
+			return put_user(wd_margin / 100, (int *)arg);
 	}
 }
 
@@ -342,7 +380,7 @@ static int wdt_open(struct inode *inode, struct file *file)
 	switch(MINOR(inode->i_rdev))
 	{
 		case WATCHDOG_MINOR:
-			if(wdt_is_open)
+			if(test_and_set_bit(0, &wdt_is_open))
 				return -EBUSY;
 			/*
 			 *	Activate 
@@ -354,7 +392,7 @@ static int wdt_open(struct inode *inode, struct file *file)
 			wdt_ctr_mode(1,2);
 			wdt_ctr_mode(2,0);
 			wdt_ctr_load(0, 8948);		/* count at 100Hz */
-			wdt_ctr_load(1,WD_TIMO);	/* Timeout 120 seconds */
+			wdt_ctr_load(1,wd_margin);	/* Timeout 120 seconds */
 			wdt_ctr_load(2,65535);
 			outb_p(0, WDT_DC);	/* Enable */
 			return 0;
@@ -379,16 +417,16 @@ static int wdt_open(struct inode *inode, struct file *file)
  
 static int wdt_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
 	if(MINOR(inode->i_rdev)==WATCHDOG_MINOR)
 	{
-#ifndef CONFIG_WATCHDOG_NOWAYOUT	
-		inb_p(WDT_DC);		/* Disable counters */
-		wdt_ctr_load(2,0);	/* 0 length reset pulses now */
-#endif		
-		wdt_is_open=0;
+		if (expect_close) {
+			inb_p(WDT_DC);		/* Disable counters */
+			wdt_ctr_load(2,0);	/* 0 length reset pulses now */
+		} else {
+			printk(KERN_CRIT "wdt: WDT device closed unexpectedly.  WDT will not stop!\n");
+		}
+		clear_bit(0, &wdt_is_open);
 	}
-	unlock_kernel();
 	return 0;
 }
 
@@ -423,7 +461,7 @@ static int wdt_notify_sys(struct notifier_block *this, unsigned long code,
  
 static struct file_operations wdt_fops = {
 	owner:		THIS_MODULE,
-	llseek:		wdt_llseek,
+	llseek:		no_llseek,
 	read:		wdt_read,
 	write:		wdt_write,
 	ioctl:		wdt_ioctl,
@@ -543,3 +581,7 @@ outmisc:
 module_init(wdt_init);
 module_exit(wdt_exit);
 
+MODULE_AUTHOR("Alan Cox");
+MODULE_DESCRIPTION("Driver for ISA ICS watchdog cards (WDT500/501)");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

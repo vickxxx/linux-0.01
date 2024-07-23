@@ -17,7 +17,7 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/locks.h>
 #include <linux/config.h>
@@ -123,7 +123,7 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 		int de_len;
 
 		if (!bh) {
-			bh = isofs_bread(inode, bufsize, block);
+			bh = isofs_bread(inode, block);
 			if (!bh)
 				return 0;
 		}
@@ -158,7 +158,7 @@ static int do_isofs_readdir(struct inode *inode, struct file *filp,
 			brelse(bh);
 			bh = NULL;
 			if (offset) {
-				bh = isofs_bread(inode, bufsize, block);
+				bh = isofs_bread(inode, block);
 				if (!bh)
 					return 0;
 				memcpy((void *) tmpde + slop, bh->b_data, offset);

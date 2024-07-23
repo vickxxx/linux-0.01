@@ -1,4 +1,4 @@
-/* $Id: esp.c,v 1.98 2000/11/02 22:34:16 davem Exp $
+/* $Id: esp.c,v 1.99 2001/02/13 01:17:01 davem Exp $
  * esp.c:  EnhancedScsiProcessor Sun SCSI driver code.
  *
  * Copyright (C) 1995, 1998 David S. Miller (davem@caip.rutgers.edu)
@@ -18,7 +18,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -378,7 +378,7 @@ static inline void esp_advance_phase(Scsi_Cmnd *s, int newphase)
 #endif
 
 #ifdef DEBUG_ESP_CMDS
-extern inline void esp_cmd(struct esp *esp, u8 cmd)
+static inline void esp_cmd(struct esp *esp, u8 cmd)
 {
 	esp->espcmdlog[esp->espcmdent] = cmd;
 	esp->espcmdent = (esp->espcmdent + 1) & 31;
@@ -4368,4 +4368,4 @@ static Scsi_Host_Template driver_template = SCSI_SPARC_ESP;
 
 #include "scsi_module.c"
 
-EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");

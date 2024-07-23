@@ -14,6 +14,8 @@
 #include <linux/inetdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/version.h>
+#include <linux/module.h>
+#include <net/ip.h>
 #include <net/route.h>
 
 #define ASSERT_READ_LOCK(x) MUST_BE_READ_LOCKED(&ip_conntrack_lock)
@@ -90,9 +92,6 @@ do_masquerade(struct sk_buff **pskb, const struct net_device *dev)
 			WRITE_UNLOCK(&ip_nat_lock);
 			return ret;
 		}
-
-		place_in_hashes(ct, info);
-		info->initialized = 1;
 	} else
 		DEBUGP("Masquerading already done on this conn.\n");
 	WRITE_UNLOCK(&ip_nat_lock);
@@ -129,7 +128,7 @@ check_for_demasq(struct sk_buff **pskb)
 	struct ip_conntrack *ct;
 	int ret;
 
-	protocol = find_proto(iph->protocol);
+	protocol = ip_ct_find_proto(iph->protocol);
 
 	/* We don't feed packets to conntrack system unless we know
            they're part of an connection already established by an
@@ -156,9 +155,9 @@ check_for_demasq(struct sk_buff **pskb)
 		/* Fall thru... */
 	case IPPROTO_TCP:
 	case IPPROTO_UDP:
-		IP_NF_ASSERT((skb->nh.iph->frag_off & htons(IP_OFFSET)) == 0);
+		IP_NF_ASSERT(((*pskb)->nh.iph->frag_off & htons(IP_OFFSET)) == 0);
 
-		if (!get_tuple(iph, (*pskb)->len, &tuple, protocol)) {
+		if (!ip_ct_get_tuple(iph, (*pskb)->len, &tuple, protocol)) {
 			if (net_ratelimit())
 				printk("ip_fw_compat_masq: Can't get tuple\n");
 			return NF_ACCEPT;
@@ -302,13 +301,22 @@ masq_procinfo(char *buffer, char **start, off_t offset, int length)
 int __init masq_init(void)
 {
 	int ret;
+	struct proc_dir_entry *proc;
 
 	ret = ip_conntrack_init();
 	if (ret == 0) {
 		ret = ip_nat_init();
-		if (ret == 0)
-			proc_net_create("ip_masquerade", 0, masq_procinfo);
-		else
+		if (ret == 0) {
+			proc = proc_net_create("ip_masquerade",
+					       0, masq_procinfo);
+			if (proc)
+				proc->owner = THIS_MODULE;
+			else {
+				ip_nat_cleanup();
+				ip_conntrack_cleanup();
+				ret = -ENOMEM;
+			}
+		} else
 			ip_conntrack_cleanup();
 	}
 

@@ -2,7 +2,7 @@
  * net-3-driver for the NI5210 card (i82586 Ethernet chip)
  *
  * This is an extension to the Linux operating system, and is covered by the
- * same Gnu Public License that covers that work.
+ * same GNU General Public License that covers that work.
  *
  * Alphacode 0.82 (96/09/29) for Linux 2.0.0 (or later)
  * Copyrights (c) 1994,1995,1996 by M.Hipp (hippm@informatik.uni-tuebingen.de)
@@ -99,9 +99,9 @@
  * < 30.Sep.93: first versions
  */
 
-static int debuglevel = 0; /* debug-printk 0: off 1: a few 2: more */
-static int automatic_resume = 0; /* experimental .. better should be zero */
-static int rfdadd = 0; /* rfdadd=1 may be better for 8K MEM cards */
+static int debuglevel;	/* debug-printk 0: off 1: a few 2: more */
+static int automatic_resume; /* experimental .. better should be zero */
+static int rfdadd;	/* rfdadd=1 may be better for 8K MEM cards */
 static int fifo=0x8;	/* don't change */
 
 /* #define REALLY_SLOW_IO */
@@ -111,7 +111,7 @@ static int fifo=0x8;	/* don't change */
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -226,10 +226,11 @@ struct priv
 	volatile struct iscp_struct	*iscp;	/* volatile is important */
 	volatile struct scb_struct	*scb;	/* volatile is important */
 	volatile struct tbd_struct	*xmit_buffs[NUM_XMIT_BUFFS];
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
+	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int		nop_point,num_recv_buffs;
@@ -918,7 +919,9 @@ static void ni52_rcv_int(struct net_device *dev)
 						eth_copy_and_sum(skb,(char *) p->base+(unsigned long) rbd->buffer,totlen,0);
 						skb->protocol=eth_type_trans(skb,dev);
 						netif_rx(skb);
+						dev->last_rx = jiffies;
 						p->stats.rx_packets++;
+						p->stats.rx_bytes += totlen;
 					}
 					else
 						p->stats.rx_dropped++;
@@ -1160,7 +1163,12 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 #endif
 	{
 		memcpy((char *)p->xmit_cbuffs[p->xmit_count],(char *)(skb->data),skb->len);
-		len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+		len = skb->len;
+		if(len < ETH_ZLEN)
+		{
+			len = ETH_ZLEN;
+			memset((char *)p->xmit_cbuffs[p->xmit_count]+skb->len, 0, len - skb->len);
+		}
 
 #if (NUM_XMIT_BUFFS == 1)
 #	ifdef NO_NOPCOMMANDS
@@ -1287,13 +1295,17 @@ static struct net_device dev_ni52;
 /* set: io,irq,memstart,memend or set it when calling insmod */
 static int irq=9;
 static int io=0x300;
-static long memstart=0; /* e.g 0xd0000 */
-static long memend=0;	 /* e.g 0xd4000 */
+static long memstart;	/* e.g 0xd0000 */
+static long memend;	/* e.g 0xd4000 */
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(memstart, "l");
 MODULE_PARM(memend, "l");
+MODULE_PARM_DESC(io, "NI5210 I/O base address,required");
+MODULE_PARM_DESC(irq, "NI5210 IRQ number,required");
+MODULE_PARM_DESC(memstart, "NI5210 memory base address,required");
+MODULE_PARM_DESC(memend, "NI5210 memory end address,required");
 
 int init_module(void)
 {
@@ -1356,6 +1368,7 @@ void ni52_dump(struct net_device *dev,void *ptr)
 	printk("\n");
 }
 #endif
+MODULE_LICENSE("GPL");
 
 /*
  * END: linux/drivers/net/ni52.c

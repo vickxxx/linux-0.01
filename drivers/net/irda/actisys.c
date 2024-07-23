@@ -166,8 +166,8 @@ static int actisys_change_speed(struct irda_task *task)
 	int ret = 0;
 	int i = 0;
 
-        IRDA_DEBUG(4, __FUNCTION__ "(), speed=%d (was %d)\n", speed, 
-		   self->speed);
+        IRDA_DEBUG(4, "%s(), speed=%d (was %d)\n", __FUNCTION__,
+        	speed, self->speed);
 
 	/* Go to a known state by reseting the dongle */
 
@@ -260,7 +260,7 @@ static int actisys_reset(struct irda_task *task)
 		self->speed = 9600;	/* That's the default */
 		break;
 	default:
-		ERROR(__FUNCTION__ "(), unknown state %d\n", task->state);
+		ERROR("%s(), unknown state %d\n", __FUNCTION__, task->state);
 		irda_task_next_state(task, IRDA_TASK_DONE);
 		self->reset_task = NULL;
 		ret = -1;
@@ -272,6 +272,8 @@ static int actisys_reset(struct irda_task *task)
 #ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no> - Jean Tourrilhes <jt@hpl.hp.com>");
 MODULE_DESCRIPTION("ACTiSYS IR-220L and IR-220L+ dongle driver");	
+MODULE_LICENSE("GPL");
+
 		
 /*
  * Function init_module (void)

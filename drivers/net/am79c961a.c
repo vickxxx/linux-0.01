@@ -1,7 +1,7 @@
 /*
  *  linux/drivers/net/am79c961.c
  *
- *  by Russell King <rmk@arm.linux.org.uk> 1995-2000.
+ *  by Russell King <rmk@arm.linux.org.uk> 1995-2001.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -10,9 +10,9 @@
  * Derived from various things including skeleton.c
  *
  * This is a special driver for the am79c961A Lance chip used in the
- * Intel (formally Digital Equipment Corp) EBSA110 platform.
+ * Intel (formally Digital Equipment Corp) EBSA110 platform.  Please
+ * note that this can not be built as a module (it doesn't make sense).
  */
-#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -21,7 +21,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
@@ -29,13 +29,13 @@
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <asm/ecard.h>
 
 #define TX_BUFFERS 15
 #define RX_BUFFERS 25
@@ -46,45 +46,42 @@ static void am79c961_interrupt (int irq, void *dev_id, struct pt_regs *regs);
 
 static unsigned int net_debug = NET_DEBUG;
 
-static char *version = "am79c961 ethernet driver (c) 1995 R.M.King v0.02\n";
+static const char version[] =
+	"am79c961 ethernet driver (C) 1995-2001 Russell King v0.04\n";
 
 /* --------------------------------------------------------------------------- */
 
 #ifdef __arm__
-static void
-write_rreg (unsigned long base, unsigned int reg, unsigned short val)
+static void write_rreg(u_long base, u_int reg, u_int val)
 {
 	__asm__("str%?h	%1, [%2]	@ NET_RAP
 		str%?h	%0, [%2, #-4]	@ NET_RDP
-		" : : "r" (val), "r" (reg), "r" (0xf0000464));
+		" : : "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
 }
 
-static inline unsigned short
-read_rreg (unsigned int base_addr, unsigned int reg)
+static inline unsigned short read_rreg(u_long base_addr, u_int reg)
 {
 	unsigned short v;
 	__asm__("str%?h	%1, [%2]	@ NET_RAP
 		ldr%?h	%0, [%2, #-4]	@ NET_RDP
-		" : "=r" (v): "r" (reg), "r" (0xf0000464));
+		" : "=r" (v): "r" (reg), "r" (ISAIO_BASE + 0x0464));
 	return v;
 }
 
-static inline void
-write_ireg (unsigned long base, unsigned int reg, unsigned short val)
+static inline void write_ireg(u_long base, u_int reg, u_int val)
 {
 	__asm__("str%?h	%1, [%2]	@ NET_RAP
 		str%?h	%0, [%2, #8]	@ NET_IDP
-		" : : "r" (val), "r" (reg), "r" (0xf0000464));
+		" : : "r" (val), "r" (reg), "r" (ISAIO_BASE + 0x0464));
 }
 
-#define am_writeword(dev,off,val)\
-	__asm__("str%?h	%0, [%1]" : : \
-		"r" ((val) & 0xffff), "r" (0xe0000000 + ((off) << 1)));
+#define am_writeword(dev,off,val) __raw_writew(val, ISAMEM_BASE + ((off) << 1))
+#define am_readword(dev,off)      __raw_readw(ISAMEM_BASE + ((off) << 1))
 
 static inline void
 am_writebuffer(struct net_device *dev, u_int offset, unsigned char *buf, unsigned int length)
 {
-	offset = 0xe0000000 + (offset << 1);
+	offset = ISAMEM_BASE + (offset << 1);
 	length = (length + 1) & ~1;
 	if ((int)buf & 2) {
 		__asm__ __volatile__("str%?h	%2, [%0], #4"
@@ -114,23 +111,10 @@ am_writebuffer(struct net_device *dev, u_int offset, unsigned char *buf, unsigne
 	}
 }
 
-/*
- * This reads a 16-bit quantity in little-endian
- * mode from the am79c961 buffer.
- */
-static inline unsigned short am_readword(struct net_device *dev, u_int off)
-{
-	unsigned long address = 0xe0000000 + (off << 1);
-	unsigned short val;
-
-	__asm__("ldr%?h	%0, [%1]" : "=r" (val): "r" (address));
-	return val;
-}
-
 static inline void
 am_readbuffer(struct net_device *dev, u_int offset, unsigned char *buf, unsigned int length)
 {
-	offset = 0xe0000000 + (offset << 1);
+	offset = ISAMEM_BASE + (offset << 1);
 	length = (length + 1) & ~1;
 	if ((int)buf & 2) {
 		unsigned int tmp;
@@ -274,12 +258,7 @@ am79c961_init_for_open(struct net_device *dev)
 }
 
 /*
- * Open/initialize the board.  This is called (in the current kernel)
- * sometime after booting when the 'ifconfig' program is run.
- *
- * This routine should set everything up anew at each open, even
- * registers that "should" only need to be set once at boot, so that
- * there is non-reboot way to recover if something goes wrong.
+ * Open/initialize the board.
  */
 static int
 am79c961_open(struct net_device *dev)
@@ -322,8 +301,7 @@ am79c961_close(struct net_device *dev)
 }
 
 /*
- * Get the current statistics.	This may be called with the card open or
- * closed.
+ * Get the current statistics.
  */
 static struct net_device_stats *am79c961_getstats (struct net_device *dev)
 {
@@ -331,33 +309,13 @@ static struct net_device_stats *am79c961_getstats (struct net_device *dev)
 	return &priv->stats;
 }
 
-static inline u32 update_crc(u32 crc, u8 byte)
-{
-	int i;
-
-	for (i = 8; i != 0; i--) {
-		byte ^= crc & 1;
-		crc >>= 1;
-
-		if (byte & 1)
-			crc ^= 0xedb88320;
-
-		byte >>= 1;
-	}
-
-	return crc;
-}
-
 static void am79c961_mc_hash(struct dev_mc_list *dmi, unsigned short *hash)
 {
 	if (dmi->dmi_addrlen == ETH_ALEN && dmi->dmi_addr[0] & 0x01) {
-		int i, idx, bit;
+		int idx, bit;
 		u32 crc;
 
-		crc = 0xffffffff;
-
-		for (i = 0; i < ETH_ALEN; i++)
-			crc = update_crc(crc, dmi->dmi_addr[i]);
+		crc = ether_crc_le(ETH_ALEN, dmi->dmi_addr);
 
 		idx = crc >> 30;
 		bit = (crc >> 26) & 15;
@@ -367,7 +325,7 @@ static void am79c961_mc_hash(struct dev_mc_list *dmi, unsigned short *hash)
 }
 
 /*
- * Set or clear promiscuous/multicast mode filter for this adaptor.
+ * Set or clear promiscuous/multicast mode filter for this adapter.
  */
 static void am79c961_setmulticastlist (struct net_device *dev)
 {
@@ -451,10 +409,19 @@ static int
 am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
-	unsigned int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	unsigned int length = skb->len;
 	unsigned int hdraddr, bufaddr;
 	unsigned int head;
 	unsigned long flags;
+	
+	/* FIXME: I thought the 79c961 could do padding - RMK ??? */
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 
 	head = priv->txhead;
 	hdraddr = priv->txhdr + (head << 3);
@@ -478,10 +445,8 @@ am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 	 * then the tx ring is full and we can't add another
 	 * packet.
 	 */
-	if (am_readword(dev, priv->txhdr + (priv->txhead << 3) + 2) & TMD_OWN) {
-		printk(KERN_DEBUG"tx ring full, stopping queue\n");
+	if (am_readword(dev, priv->txhdr + (priv->txhead << 3) + 2) & TMD_OWN)
 		netif_stop_queue(dev);
-	}
 
 	dev_kfree_skb(skb);
 
@@ -557,9 +522,7 @@ am79c961_tx(struct net_device *dev, struct dev_priv *priv)
 	do {
 		u_int hdraddr;
 		u_int status;
-int bufnum;
 
-bufnum = priv->txtail;
 		hdraddr = priv->txhdr + (priv->txtail << 3);
 		status = am_readword (dev, hdraddr + 2);
 		if (status & TMD_OWN)
@@ -637,7 +600,7 @@ am79c961_hw_init(struct net_device *dev)
 
 static void __init am79c961_banner(void)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (net_debug && version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
@@ -654,7 +617,6 @@ static int __init am79c961_init(void)
 	if (!dev)
 		goto out;
 
-	SET_MODULE_OWNER(dev);
 	priv = dev->priv;
 
 	/*
@@ -668,7 +630,7 @@ static int __init am79c961_init(void)
 	/*
 	 * Reset the device.
 	 */
-	inb((dev->base_addr + NET_RESET) >> 1);
+	inb(dev->base_addr + NET_RESET);
 	udelay(5);
 
 	/*
@@ -676,21 +638,20 @@ static int __init am79c961_init(void)
 	 * ether address.
 	 */
     	ret = -ENODEV;
-	if (inb(dev->base_addr >> 1) != 0x08 ||
-	    inb((dev->base_addr >> 1) + 1) != 00 ||
-	    inb((dev->base_addr >> 1) + 2) != 0x2b)
+	if (inb(dev->base_addr) != 0x08 ||
+	    inb(dev->base_addr + 2) != 0x00 ||
+	    inb(dev->base_addr + 4) != 0x2b)
 	    	goto nodev;
 
 	if (!request_region(dev->base_addr, 0x18, dev->name))
 		goto nodev;
 
 	am79c961_banner();
-	printk(KERN_INFO "%s: am79c961 found at %08lx, IRQ%d, ether address ",
-		dev->name, dev->base_addr, dev->irq);
+	printk(KERN_INFO "%s: ether address ", dev->name);
 
 	/* Retrive and print the ethernet address. */
 	for (i = 0; i < 6; i++) {
-		dev->dev_addr[i] = inb((dev->base_addr >> 1) + i) & 0xff;
+		dev->dev_addr[i] = inb(dev->base_addr + i * 2) & 0xff;
 		printk (i == 5 ? "%02x\n" : "%02x:", dev->dev_addr[i]);
 	}
 
@@ -715,4 +676,4 @@ out:
 	return ret;
 }
 
-module_init(am79c961_init);
+__initcall(am79c961_init);

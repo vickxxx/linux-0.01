@@ -36,7 +36,7 @@ typedef struct {
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
-    struct tq_struct imm_tq;	/* Polling interupt stuff       */
+    struct tq_struct imm_tq;	/* Polling interrupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
     unsigned failed:1;		/* Failure flag                 */
     unsigned dp:1;		/* Data phase present           */
@@ -162,6 +162,7 @@ int imm_detect(Scsi_Host_Template * host)
 		    printk(KERN_ERR "imm%d: failed to claim parport because a "
 		      "pardevice is owning the port for too longtime!\n",
 			   i);
+		    parport_unregister_device (imm_hosts[i].dev);
 		    spin_lock_irq(&io_request_lock);
 		    return 0;
 		}
@@ -1119,7 +1120,7 @@ int imm_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 }
 
 /*
- * Apparently the the disk->capacity attribute is off by 1 sector 
+ * Apparently the disk->capacity attribute is off by 1 sector 
  * for all disk drives.  We add the one here, but it should really
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
@@ -1269,3 +1270,4 @@ static int device_check(int host_no)
     printk("imm: No devices found, aborting driver load.\n");
     return 1;
 }
+MODULE_LICENSE("GPL");

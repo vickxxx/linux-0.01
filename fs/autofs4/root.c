@@ -27,14 +27,13 @@ static int autofs4_root_ioctl(struct inode *, struct file *,unsigned int,unsigne
 static struct dentry *autofs4_root_lookup(struct inode *,struct dentry *);
 
 struct file_operations autofs4_root_operations = {
+	open:		dcache_dir_open,
+	release:	dcache_dir_close,
+	llseek:		dcache_dir_lseek,
 	read:		generic_read_dir,
 	readdir:	dcache_readdir,
+	fsync:		dcache_dir_fsync,
 	ioctl:		autofs4_root_ioctl,
-};
-
-struct file_operations autofs4_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	dcache_readdir,
 };
 
 struct inode_operations autofs4_root_inode_operations = {
@@ -149,7 +148,6 @@ static int autofs4_root_revalidate(struct dentry * dentry, int flags)
 {
 	struct inode * dir = dentry->d_parent->d_inode;
 	struct autofs_sb_info *sbi = autofs4_sbi(dir->i_sb);
-	struct autofs_info *ino;
 	int oz_mode = autofs4_oz_mode(sbi);
 
 	/* Pending dentry */
@@ -163,8 +161,6 @@ static int autofs4_root_revalidate(struct dentry * dentry, int flags)
 	/* Negative dentry.. invalidate if "old" */
 	if (dentry->d_inode == NULL)
 		return (dentry->d_time - jiffies <= AUTOFS_NEGATIVE_TIMEOUT);
-
-	ino = autofs4_dentry_ino(dentry);
 
 	/* Check for a non-mountpoint directory with no contents */
 	spin_lock(&dcache_lock);

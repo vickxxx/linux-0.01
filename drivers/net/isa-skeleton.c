@@ -6,11 +6,12 @@
  *	Director, National Security Agency.
  *
  *	This software may be used and distributed according to the terms
- *	of the GNU Public License, incorporated herein by reference.
+ *	of the GNU General Public License, incorporated herein by reference.
  *
- *	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
- *	Center of Excellence in Space Data and Information Sciences
- *	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+ *	The author may be reached as becker@scyld.com, or C/O
+ *	Scyld Computing Corporation
+ *	410 Severn Ave., Suite 210
+ *	Annapolis MD 21403
  *
  *	This file is an outline for writing a network device driver for the
  *	the Linux operating system.
@@ -49,7 +50,7 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -163,7 +164,7 @@ netcard_probe(struct net_device *dev)
 static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 {
 	struct net_local *np;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i;
 
 	/*
@@ -544,7 +545,9 @@ net_rx(struct net_device *dev)
 			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
 
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 	} while (--boguscount);
 
@@ -633,6 +636,7 @@ static int io = 0x300;
 static int irq;
 static int dma;
 static int mem;
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

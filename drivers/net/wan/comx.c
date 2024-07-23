@@ -1,7 +1,7 @@
 /*
  * Device driver framework for the COMX line of synchronous serial boards
  * 
- * for Linux kernel 2.2.X
+ * for Linux kernel 2.2.X / 2.4.X
  *
  * Original authors:  Arpad Bakay <bakay.arpad@synergon.hu>,
  *                    Peter Bajan <bajan.peter@synergon.hu>,
@@ -73,11 +73,12 @@
 #error For now, COMX really needs the /proc filesystem
 #endif
 
+#include <net/syncppp.h>
 #include "comx.h"
-#include "syncppp.h"
 
 MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>");
 MODULE_DESCRIPTION("Common code for the COMX synchronous serial adapters");
+MODULE_LICENSE("GPL");
 
 extern int comx_hw_comx_init(void);
 extern int comx_hw_locomx_init(void);
@@ -151,8 +152,8 @@ int comx_debug(struct net_device *dev, char *fmt, ...)
 		int free = (ch->debug_start - ch->debug_end + ch->debug_size) 
 			% ch->debug_size;
 
-		to_copy = min( free ? free : ch->debug_size, 
-			min (ch->debug_size - ch->debug_end, len) );
+		to_copy = min_t(int, free ? free : ch->debug_size, 
+			      min_t(int, ch->debug_size - ch->debug_end, len));
 		memcpy(ch->debug_area + ch->debug_end, str, to_copy);
 		str += to_copy;
 		len -= to_copy;
@@ -380,6 +381,7 @@ int comx_rx(struct net_device *dev, struct sk_buff *skb)
 	}
 	if (skb) {
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 	}
 	return 0;
 }
@@ -566,7 +568,7 @@ static int comx_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 
@@ -596,7 +598,7 @@ static int comx_root_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 
@@ -620,9 +622,20 @@ static int comx_write_proc(struct file *file, const char *buffer, u_long count,
 
 	if (!(page = (char *)__get_free_page(GFP_KERNEL))) return -ENOMEM;
 
-	copy_from_user(page, buffer, count);
+	if(copy_from_user(page, buffer, count))
+	{
+		count = -EFAULT;
+		goto out;
+	}
 
-	if (*(page + count - 1) == '\n') *(page + count - 1) = 0;
+	if (page[count-1] == '\n')
+		page[count-1] = '\0';
+	else if (count < PAGE_SIZE)
+		page[count] = '\0';
+	else if (page[count]) {
+		count = -EINVAL;
+		goto out;
+	}
 
 	if (strcmp(entry->name, FILENAME_DEBUG) == 0) {
 		int i;
@@ -763,7 +776,7 @@ static int comx_write_proc(struct file *file, const char *buffer, u_long count,
 			}
 		}
 	}
-
+out:
 	free_page((unsigned long)page);
 	return count;
 }

@@ -9,6 +9,9 @@
 #ifndef _S390_PAGE_H
 #define _S390_PAGE_H
 
+#include <asm/setup.h>
+#include <asm/types.h>
+
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT      12
 #define PAGE_SIZE       (1UL << PAGE_SHIFT)
@@ -17,11 +20,51 @@
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 
-#define STRICT_MM_TYPECHECKS
+static inline void clear_page(void *page)
+{
+	register_pair rp;
+
+	rp.subreg.even = (unsigned long) page;
+	rp.subreg.odd = (unsigned long) 4096;
+        asm volatile ("   slr  1,1\n"
+		      "   mvcl %0,0"
+		      : "+&a" (rp) : : "memory", "cc", "1" );
+}
+
+static inline void copy_page(void *to, void *from)
+{
+        if (MACHINE_HAS_MVPG)
+		asm volatile ("   sr   0,0\n"
+			      "   mvpg %0,%1"
+			      : : "a" ((void *)(to)), "a" ((void *)(from))
+			      : "memory", "cc", "0" );
+	else
+		asm volatile ("   mvc  0(256,%0),0(%1)\n"
+			      "   mvc  256(256,%0),256(%1)\n"
+			      "   mvc  512(256,%0),512(%1)\n"
+			      "   mvc  768(256,%0),768(%1)\n"
+			      "   mvc  1024(256,%0),1024(%1)\n"
+			      "   mvc  1280(256,%0),1280(%1)\n"
+			      "   mvc  1536(256,%0),1536(%1)\n"
+			      "   mvc  1792(256,%0),1792(%1)\n"
+			      "   mvc  2048(256,%0),2048(%1)\n"
+			      "   mvc  2304(256,%0),2304(%1)\n"
+			      "   mvc  2560(256,%0),2560(%1)\n"
+			      "   mvc  2816(256,%0),2816(%1)\n"
+			      "   mvc  3072(256,%0),3072(%1)\n"
+			      "   mvc  3328(256,%0),3328(%1)\n"
+			      "   mvc  3584(256,%0),3584(%1)\n"
+			      "   mvc  3840(256,%0),3840(%1)\n"
+			      : : "a"((void *)(to)),"a"((void *)(from)) 
+			      : "memory" );
+}
+
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 #define BUG() do { \
         printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-        __asm__ __volatile__(".word 0x0000"); \
+        __asm__ __volatile__(".long 0"); \
 } while (0)                                       
 
 #define PAGE_BUG(page) do { \
@@ -42,14 +85,6 @@ extern __inline__ int get_order(unsigned long size)
         return order;
 }
 
-/*
- * gcc uses builtin, i.e. MVCLE for both operations
- */
-
-#define clear_page(page)        memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)      memcpy((void *)(to), (void *)(from), PAGE_SIZE)
-
-#ifdef STRICT_MM_TYPECHECKS
 /*
  * These are used to make use of C type-checking..
  */
@@ -73,48 +108,25 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define __pgd(x)        ((pgd_t) { (x) } )
 #define __pgprot(x)     ((pgprot_t) { (x) } )
 
-#else
-/*
- * .. while these make it easier on the compiler
- */
-typedef unsigned long pte_t;
-typedef unsigned long pmd_t;
-typedef struct {
-        unsigned long pgd0;
-        unsigned long pgd1;
-        unsigned long pgd2;
-        unsigned long pgd3;
-        } pgd_t;
-typedef unsigned long pgprot_t;
-
-#define pte_val(x)      (x)
-#define pmd_val(x)      (x)
-#define pgd_val(x)      (x)
-#define pgprot_val(x)   (x)
-
-#define __pte(x)        (x)
-#define __pmd(x)        (x)
-#define __pgd(x)        (x)
-#define __pgprot(x)     (x)
-
-#endif
-#endif                                 /* !__ASSEMBLY__                    */
+#endif /* !__ASSEMBLY__ */
 
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)        (((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-/*
- *
- *
- */
-
-#define __PAGE_OFFSET           (0x0)
-#define PAGE_OFFSET             ((unsigned long)__PAGE_OFFSET)
-#define __pa(x)                 ((unsigned long)(x)-PAGE_OFFSET)
-#define __va(x)                 ((void *)((unsigned long)(x)+PAGE_OFFSET))
+#define __PAGE_OFFSET           0x0UL
+#define PAGE_OFFSET             0x0UL
+#define __pa(x)                 (unsigned long)(x)
+#define __va(x)                 (void *)(x)
 #define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
 #define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
-#endif                                 /* __KERNEL__                       */
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
-#endif                                 /* _S390_PAGE_H                     */
+unsigned int get_storage_key(void);
+unsigned long pfix_get_page_addr(void *);
+unsigned long pfix_get_addr(void *);
+
+#endif /* __KERNEL__ */
+
+#endif /* _S390_PAGE_H */

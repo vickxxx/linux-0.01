@@ -1,17 +1,16 @@
 /*
+ * CAPI encoder/decoder for
+ * Portugal Telecom CAPI 2.0
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        CAPI encoder/decoder for
- *        Portugal Telecom CAPI 2.0
+ * the GNU General Public License, incorporated herein by reference.
  *
- *        Not compatible with the AVM Gmbh. CAPI 2.0
+ * Not compatible with the AVM Gmbh. CAPI 2.0
+ *
  */
 
 /*
@@ -28,16 +27,12 @@
  *              encode our number in CallerPN and ConnectedPN
  */
 
-#define __NO_VERSION__
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include <linux/tqueue.h>

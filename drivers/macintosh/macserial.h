@@ -110,10 +110,12 @@ struct mac_serial {
 	char break_abort;   /* Is serial console in, so process brk/abrt */
 	char kgdb_channel;  /* Kgdb is running on this channel */
 	char is_cons;       /* Is this our console. */
-	char is_cobalt_modem;	/* is a gatwick-based cobalt modem */
+	char is_internal_modem; /* is connected to an internal modem */
 	char is_irda;		/* is connected to an IrDA codec */
+	int port_type;		/* Port type for pmac_feature */
 	unsigned char tx_active; /* character is being xmitted */
 	unsigned char tx_stopped; /* output is suspended */
+	unsigned char power_wait; /* waiting for power-up delay to expire */
 
 	/* We need to know the current clock divisor
 	 * to read the bps rate the chip has currently
@@ -185,6 +187,8 @@ struct mac_serial {
 	void			*dma_priv;
 	struct timer_list	poll_dma_timer;
 #define RX_DMA_TIMER	(jiffies + 10*HZ/1000)
+
+	struct timer_list	powerup_timer;
 };
 
 

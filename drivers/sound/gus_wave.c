@@ -1952,7 +1952,7 @@ static void guswave_hw_control(int dev, unsigned char *event_rec)
 	int voice, cmd;
 	unsigned short p1, p2;
 	unsigned int plong;
-	unsigned flags;
+	unsigned long flags;
 
 	cmd = event_rec[2];
 	voice = event_rec[3];
@@ -2102,6 +2102,7 @@ static void guswave_hw_control(int dev, unsigned char *event_rec)
 			break;
 
 		default:
+			break;
 	}
 }
 
@@ -3122,7 +3123,7 @@ void __init gus_wave_init(struct address_info *hw_config)
 
 	gus_initialize();
 	
-	if ((gus_mem_size > 0) & !gus_no_wave_dma)
+	if ((gus_mem_size > 0) && !gus_no_wave_dma)
 	{
 		hw_config->slots[4] = -1;
 		if ((gus_devnum = sound_install_audiodrv(AUDIO_DRIVER_VERSION,
@@ -3282,6 +3283,7 @@ static void do_loop_irq(int voice)
 		break;
 
 		default:
+			break;
 	}
 	restore_flags(flags);
 }
@@ -3423,6 +3425,7 @@ void guswave_dma_irq(void)
 				break;
 
 			default:
+				break;
 	}
 	status = gus_look8(0x49);	/*
 					 * Get Sampling IRQ Status

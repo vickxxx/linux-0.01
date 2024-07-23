@@ -18,6 +18,7 @@
 #undef PARPORT_DEBUG_SHARING		/* undef for production */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/threads.h>
 #include <linux/parport.h>
@@ -26,7 +27,7 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/kmod.h>
 
@@ -41,10 +42,10 @@ unsigned long parport_default_timeslice = PARPORT_DEFAULT_TIMESLICE;
 int parport_default_spintime =  DEFAULT_SPIN_TIME;
 
 static struct parport *portlist = NULL, *portlist_tail = NULL;
-spinlock_t parportlist_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t parportlist_lock = SPIN_LOCK_UNLOCKED;
 
 static struct parport_driver *driver_chain = NULL;
-spinlock_t driverlist_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t driverlist_lock = SPIN_LOCK_UNLOCKED;
 
 /* What you can do to a port that's gone away.. */
 static void dead_write_lines (struct parport *p, unsigned char b){}
@@ -782,6 +783,21 @@ void parport_unregister_device(struct pardevice *dev)
 
 	spin_unlock(&port->pardevice_lock);
 
+	/* Make sure we haven't left any pointers around in the wait
+	 * list. */
+	spin_lock (&port->waitlist_lock);
+	if (dev->waitprev || dev->waitnext || port->waithead == dev) {
+		if (dev->waitprev)
+			dev->waitprev->waitnext = dev->waitnext;
+		else
+			port->waithead = dev->waitnext;
+		if (dev->waitnext)
+			dev->waitnext->waitprev = dev->waitprev;
+		else
+			port->waittail = dev->waitprev;
+	}
+	spin_unlock (&port->waitlist_lock);
+
 	kfree(dev->state);
 	kfree(dev);
 
@@ -810,6 +826,10 @@ void parport_unregister_device(struct pardevice *dev)
 struct parport *parport_find_number (int number)
 {
 	struct parport *port, *result = NULL;
+
+	if (!portlist)
+		get_lowlevel_driver ();
+
 	spin_lock (&parportlist_lock);
 	for (port = portlist; port; port = port->next)
 		if (port->number == number) {
@@ -835,6 +855,10 @@ struct parport *parport_find_number (int number)
 struct parport *parport_find_base (unsigned long base)
 {
 	struct parport *port, *result = NULL;
+
+	if (!portlist)
+		get_lowlevel_driver ();
+
 	spin_lock (&parportlist_lock);
 	for (port = portlist; port; port = port->next)
 		if (port->base == base) {
@@ -987,7 +1011,11 @@ int parport_claim_or_block(struct pardevice *dev)
 		/* If dev->waiting is clear now, an interrupt
 		   gave us the port and we would deadlock if we slept.  */
 		if (dev->waiting) {
-			sleep_on(&dev->wait_q);
+			interruptible_sleep_on (&dev->wait_q);
+			if (signal_pending (current)) {
+				restore_flags (flags);
+				return -EINTR;
+			}
 			r = 1;
 		} else {
 			r = 0;
@@ -1055,11 +1083,12 @@ void parport_release(struct pardevice *dev)
 
 	/* If anybody is waiting, find out who's been there longest and
 	   then wake them up. (Note: no locking required) */
+	/* !!! LOCKING IS NEEDED HERE */
 	for (pd = port->waithead; pd; pd = pd->waitnext) {
 		if (pd->waiting & 2) { /* sleeping in claim_or_block */
 			parport_claim(pd);
 			if (waitqueue_active(&pd->wait_q))
-				wake_up(&pd->wait_q);
+				wake_up_interruptible(&pd->wait_q);
 			return;
 		} else if (pd->wakeup) {
 			pd->wakeup(pd->private);
@@ -1072,6 +1101,7 @@ void parport_release(struct pardevice *dev)
 
 	/* Nobody was waiting, so walk the list to see if anyone is
 	   interested in being woken up. (Note: no locking required) */
+	/* !!! LOCKING IS NEEDED HERE */
 	for (pd = port->devices; (port->cad == NULL) && pd; pd = pd->next) {
 		if (pd->wakeup && pd != dev)
 			pd->wakeup(pd->private);
@@ -1095,7 +1125,7 @@ static int parport_parse_params (int nports, const char *str[], int val[],
 			if (ep != str[i])
 				val[i] = r;
 			else {
-				printk("parport: bad specifier `%s'\n", str[i]);
+				printk(KERN_ERR "parport: bad specifier `%s'\n", str[i]);
 				return -1;
 			}
 		}
@@ -1115,3 +1145,4 @@ int parport_parse_dmas(int nports, const char *dmastr[], int dmaval[])
 	return parport_parse_params (nports, dmastr, dmaval, PARPORT_DMA_AUTO,
 				     PARPORT_DMA_NONE, PARPORT_DMA_NOFIFO);
 }
+MODULE_LICENSE("GPL");

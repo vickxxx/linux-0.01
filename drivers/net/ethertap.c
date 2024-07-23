@@ -16,7 +16,7 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 
@@ -43,7 +43,7 @@ static void ethertap_rx(struct sock *sk, int len);
 static void set_multicast_list(struct net_device *dev);
 #endif
 
-static int ethertap_debug = 0;
+static int ethertap_debug;
 
 static struct net_device *tap_map[32];	/* Returns the tap device for a given netlink */
 
@@ -279,6 +279,7 @@ static __inline__ int ethertap_rx_skb(struct sk_buff *skb, struct net_device *de
 	lp->stats.rx_packets++;
 	lp->stats.rx_bytes+=len;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	return len;
 }
 
@@ -335,6 +336,7 @@ static struct net_device_stats *ethertap_get_stats(struct net_device *dev)
 
 static int unit;
 MODULE_PARM(unit,"i");
+MODULE_PARM_DESC(unit,"Ethertap device number");
 
 static struct net_device dev_ethertap =
 {
@@ -372,3 +374,5 @@ void cleanup_module(void)
 }
 
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+

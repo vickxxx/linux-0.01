@@ -28,6 +28,15 @@
  *		          of irqs. Use dev_id.
  * Christoph Hellwig	: adapted to module_init/module_exit
  * Aki Laukkanen	: added power management support
+ * Arnaldo C. de Melo	: added missing restore_flags in ad1848_resume
+ * Miguel Freitas       : added ISA PnP support
+ * Alan Cox		: Added CS4236->4239 identification
+ * Daniel T. Cobra	: Alernate config/mixer for later chips
+ * Alan Cox		: Merged chip idents and config code
+ * Zwane Mwaikambo	: Fix ISA PnP scan
+ *
+ * TODO
+ *		APM save restore assist code on IBM thinkpad
  *
  * Status:
  *		Tested. Believed fully functional.
@@ -38,6 +47,7 @@
 #include <linux/module.h>
 #include <linux/stddef.h>
 #include <linux/pm.h>
+#include <linux/isapnp.h>
 
 #define DEB(x)
 #define DEB1(x)
@@ -54,7 +64,7 @@ typedef struct
 	int             dual_dma;	/* 1, when two DMA channels allocated */
 	int 		subtype;
 	unsigned char   MCE_bit;
-	unsigned char   saved_regs[32];
+	unsigned char   saved_regs[64];	/* Includes extended register space */
 	int             debug_flag;
 
 	int             audio_flags;
@@ -75,6 +85,9 @@ typedef struct
 #define MD_IWAVE	7
 #define MD_4235         8 /* Crystal Audio CS4235  */
 #define MD_1845_SSCAPE  9 /* Ensoniq Soundscape PNP*/
+#define MD_4236		10 /* 4236 and higher */
+#define MD_42xB		11 /* CS 42xB */
+#define MD_4239		12 /* CS4239 */
 
 	/* Mixer parameters */
 	int             recmask;
@@ -105,11 +118,11 @@ typedef struct ad1848_port_info
 ad1848_port_info;
 
 static struct address_info cfg;
-static int nr_ad1848_devs = 0;
+static int nr_ad1848_devs;
 
-int deskpro_xl = 0;
-int deskpro_m = 0;
-int soundpro = 0;
+int deskpro_xl;
+int deskpro_m;
+int soundpro;
 
 static volatile signed char irq2dev[17] = {
 	-1, -1, -1, -1, -1, -1, -1, -1,
@@ -120,9 +133,9 @@ static volatile signed char irq2dev[17] = {
 static int timer_installed = -1;
 #endif
 
-static int loaded = 0;
+static int loaded;
 
-static int ad_format_mask[10 /*devc->model */ ] =
+static int ad_format_mask[13 /*devc->model */ ] =
 {
 	0,
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW,
@@ -133,7 +146,10 @@ static int ad_format_mask[10 /*devc->model */ ] =
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
 	AFMT_U8 | AFMT_S16_LE /* CS4235 */,
-	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW	/* Ensoniq Soundscape*/
+	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW	/* Ensoniq Soundscape*/,
+	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
+	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
+	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM	
 };
 
 static ad1848_info adev_info[MAX_AUDIO_DEV];
@@ -158,6 +174,18 @@ static struct {
     ,{0}           /* MD_4235  */
     ,{CAP_F_TIMER} /* MD_1845_SSCAPE */
 };
+
+#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+static int isapnp	= 1;
+static int isapnpjump	= 0;
+static int reverse	= 0;
+
+static int audio_activated = 0;
+#else
+static int isapnp	= 0;
+#endif
+
+
 
 static int      ad1848_open(int dev, int mode);
 static void     ad1848_close(int dev);
@@ -187,9 +215,22 @@ static int ad_read(ad1848_info * devc, int reg)
 
 	save_flags(flags);
 	cli();
-	outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-	x = inb(io_Indexed_Data(devc));
-/* printk("(%02x<-%02x) ", reg|devc->MCE_bit, x); */
+	
+	if(reg < 32)
+	{
+		outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+		x = inb(io_Indexed_Data(devc));
+	}
+	else
+	{
+		int xreg, xra;
+
+		xreg = (reg & 0xff) - 32;
+		xra = (((xreg & 0x0f) << 4) & 0xf0) | 0x08 | ((xreg & 0x10) >> 2);
+		outb(((unsigned char) (23 & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+		outb(((unsigned char) (xra & 0xff)), io_Indexed_Data(devc));
+		x = inb(io_Indexed_Data(devc));
+	}
 	restore_flags(flags);
 
 	return x;
@@ -205,9 +246,22 @@ static void ad_write(ad1848_info * devc, int reg, int data)
 
 	save_flags(flags);
 	cli();
-	outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-	outb(((unsigned char) (data & 0xff)), io_Indexed_Data(devc));
-	/* printk("(%02x->%02x) ", reg|devc->MCE_bit, data); */
+	
+	if(reg < 32)
+	{
+		outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+		outb(((unsigned char) (data & 0xff)), io_Indexed_Data(devc));
+	}
+	else
+	{
+		int xreg, xra;
+		
+		xreg = (reg & 0xff) - 32;
+		xra = (((xreg & 0x0f) << 4) & 0xf0) | 0x08 | ((xreg & 0x10) >> 2);
+		outb(((unsigned char) (23 & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+		outb(((unsigned char) (xra & 0xff)), io_Indexed_Data(devc));
+		outb((unsigned char) (data & 0xff), io_Indexed_Data(devc));
+	}
 	restore_flags(flags);
 }
 
@@ -576,7 +630,14 @@ static void ad1848_mixer_reset(ad1848_info * devc)
 			devc->mix_devices = &(iwave_mix_devices[0]);
 			break;
 
+		case MD_42xB:
+		case MD_4239:
+			devc->mix_devices = &(cs42xb_mix_devices[0]);
+			devc->supported_devices = MODE3_MIXER_DEVICES;
+			break;
 		case MD_4232:
+		case MD_4235:
+		case MD_4236:
 			devc->supported_devices = MODE3_MIXER_DEVICES;
 			break;
 
@@ -1103,7 +1164,7 @@ static int ad1848_prepare_for_output(int dev, int bsize, int bcount)
 	}
 	old_fs = ad_read(devc, 8);
 
-	if (devc->model == MD_4232)
+	if (devc->model == MD_4232 || devc->model >= MD_4236)
 	{
 		tmp = ad_read(devc, 16);
 		ad_write(devc, 16, tmp | 0x30);
@@ -1124,7 +1185,7 @@ static int ad1848_prepare_for_output(int dev, int bsize, int bcount)
 	while (timeout < 10000 && inb(devc->base) == 0x80)
 		timeout++;
 
-	if (devc->model == MD_4232)
+	if (devc->model >= MD_4232)
 		ad_write(devc, 16, tmp & ~0x30);
 
 	ad_leave_MCE(devc);	/*
@@ -1388,11 +1449,12 @@ static void ad1848_trigger(int dev, int state)
 static void ad1848_init_hw(ad1848_info * devc)
 {
 	int i;
+	int *init_values;
 
 	/*
 	 * Initial values for the indirect registers of CS4248/AD1848.
 	 */
-	static int      init_values[] =
+	static int      init_values_a[] =
 	{
 		0xa8, 0xa8, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
 		0x00, 0x0c, 0x02, 0x00, 0x8a, 0x01, 0x00, 0x00,
@@ -1402,6 +1464,31 @@ static void ad1848_init_hw(ad1848_info * devc)
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 	};
 
+	static int      init_values_b[] =
+	{
+		/* 
+		   Values for the newer chips
+		   Some of the register initialization values were changed. In
+		   order to get rid of the click that preceded PCM playback,
+		   calibration was disabled on the 10th byte. On that same byte,
+		   dual DMA was enabled; on the 11th byte, ADC dithering was
+		   enabled, since that is theoretically desirable; on the 13th
+		   byte, Mode 3 was selected, to enable access to extended
+		   registers.
+		 */
+		0xa8, 0xa8, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
+		0x00, 0x00, 0x06, 0x00, 0xe0, 0x01, 0x00, 0x00,
+ 		0x80, 0x00, 0x10, 0x10, 0x00, 0x00, 0x1f, 0x40,
+ 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	};
+
+	/*
+	 *	Select initialisation data
+	 */
+	 
+	init_values = init_values_a;
+	if(devc->model >= MD_4236)
+		init_values = init_values_b;
 
 	for (i = 0; i < 16; i++)
 		ad_write(devc, i, init_values[i]);
@@ -1753,19 +1840,49 @@ int ad1848_detect(int io_base, int *ad_flags, int *osp)
 				else
 				{
 					switch (id & 0x1f) {
-					case 3: /* CS4236/CS4235 */
+					case 3: /* CS4236/CS4235/CS42xB/CS4239 */
 						{
 							int xid;
 							ad_write(devc, 12, ad_read(devc, 12) | 0x60); /* switch to mode 3 */
 							ad_write(devc, 23, 0x9c); /* select extended register 25 */
 							xid = inb(io_Indexed_Data(devc));
 							ad_write(devc, 12, ad_read(devc, 12) & ~0x60); /* back to mode 0 */
-							if ((xid & 0x1f) == 0x1d) {
-								devc->chip_name = "CS4235";
-								devc->model = MD_4235;
-							} else {
-								devc->chip_name = "CS4236";
-								devc->model = MD_4232;
+							switch (xid & 0x1f)
+							{
+								case 0x00:
+									devc->chip_name = "CS4237B(B)";
+									devc->model = MD_42xB;
+									break;
+								case 0x08:
+									/* Seems to be a 4238 ?? */
+									devc->chip_name = "CS4238";
+									devc->model = MD_42xB;
+									break;
+								case 0x09:
+									devc->chip_name = "CS4238B";
+									devc->model = MD_42xB;
+									break;
+								case 0x0b:
+									devc->chip_name = "CS4236B";
+									devc->model = MD_4236;
+									break;
+								case 0x10:
+									devc->chip_name = "CS4237B";
+									devc->model = MD_42xB;
+									break;
+								case 0x1d:
+									devc->chip_name = "CS4235";
+									devc->model = MD_4235;
+									break;
+								case 0x1e:
+									devc->chip_name = "CS4239";
+									devc->model = MD_4239;
+									break;
+								default:
+									printk("Chip ident is %X.\n", xid&0x1F);
+									devc->chip_name = "CS42xx";
+									devc->model = MD_4232;
+									break;
 							}
 						}
 						break;
@@ -1900,9 +2017,6 @@ int ad1848_init (char *name, int io_base, int irq, int dma_playback,
 	if(portc==NULL)
 		return -1;
 
-	if (owner)
-		ad1848_audio_driver.owner = owner;
-	
 	if ((my_dev = sound_install_audiodrv(AUDIO_DRIVER_VERSION,
 					     dev_name,
 					     &ad1848_audio_driver,
@@ -1920,6 +2034,8 @@ int ad1848_init (char *name, int io_base, int irq, int dma_playback,
 	
 	audio_devs[my_dev]->portc = portc;
 	audio_devs[my_dev]->mixer_dev = -1;
+	if (owner)
+		audio_devs[my_dev]->d->owner = owner;
 	memset((char *) portc, 0, sizeof(*portc));
 
 	nr_ad1848_devs++;
@@ -1986,6 +2102,7 @@ int ad1848_init (char *name, int io_base, int irq, int dma_playback,
 			if (sound_alloc_dma(dma_capture, devc->name))
 				printk(KERN_WARNING "ad1848.c: Can't allocate DMA%d\n", dma_capture);
 	}
+
 	if ((e = sound_install_mixer(MIXER_DRIVER_VERSION,
 				     dev_name,
 				     &ad1848_mixer_operations,
@@ -1993,6 +2110,8 @@ int ad1848_init (char *name, int io_base, int irq, int dma_playback,
 				     devc)) >= 0)
 	{
 		audio_devs[my_dev]->mixer_dev = e;
+		if (owner)
+			mixer_devs[e]->owner = owner;
 	}
 	return my_dev;
 }
@@ -2730,6 +2849,10 @@ static int ad1848_resume(ad1848_info *devc)
 
 	save_flags(flags);
 	cli();
+	
+	/* Thinkpad is a bit more of PITA than normal. The BIOS tends to
+	   restore it in a different config to the one we use.  Need to
+	   fix this somehow */
 
 	/* store old mixer levels */
 	memcpy(mixer_levels, devc->levels, sizeof (mixer_levels));  
@@ -2751,6 +2874,7 @@ static int ad1848_resume(ad1848_info *devc)
 		bits = interrupt_bits[devc->irq];
 		if (bits == -1) {
 			printk(KERN_ERR "MSS: Bad IRQ %d\n", devc->irq);
+			restore_flags(flags);
 			return -1;
 		}
 
@@ -2808,34 +2932,212 @@ MODULE_PARM(irq, "i");                  /* IRQ to use */
 MODULE_PARM(dma, "i");                  /* First DMA channel */
 MODULE_PARM(dma2, "i");                 /* Second DMA channel */
 MODULE_PARM(type, "i");                 /* Card type */
-MODULE_PARM(deskpro_xl, "i");           /* Special magic for Deskpro XL boxen
-*/
+MODULE_PARM(deskpro_xl, "i");           /* Special magic for Deskpro XL boxen */
 MODULE_PARM(deskpro_m, "i");            /* Special magic for Deskpro M box */
-MODULE_PARM(soundpro, "i");             /* More special magic for SoundPro
-chips */
+MODULE_PARM(soundpro, "i");             /* More special magic for SoundPro chips */
+
+#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+MODULE_PARM(isapnp,	"i");
+MODULE_PARM(isapnpjump,	"i");
+MODULE_PARM(reverse,	"i");
+MODULE_PARM_DESC(isapnp,	"When set to 0, Plug & Play support will be disabled");
+MODULE_PARM_DESC(isapnpjump,	"Jumps to a specific slot in the driver's PnP table. Use the source, Luke.");
+MODULE_PARM_DESC(reverse,	"When set to 1, will reverse ISAPnP search order");
+
+struct pci_dev	*ad1848_dev  = NULL;
+
+/* Please add new entries at the end of the table */
+static struct {
+	char *name;
+	unsigned short	card_vendor, card_device,
+			vendor, function;
+	short mss_io, irq, dma, dma2;   /* index into isapnp table */
+        int type;
+} ad1848_isapnp_list[] __initdata = {
+	{"CMI 8330 SoundPRO",
+		ISAPNP_VENDOR('C','M','I'), ISAPNP_DEVICE(0x0001),
+		ISAPNP_VENDOR('@','@','@'), ISAPNP_FUNCTION(0x0001),
+		0, 0, 0,-1, 0},
+        {"CS4232 based card",
+                ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','S','C'), ISAPNP_FUNCTION(0x0000),
+		0, 0, 0, 1, 0},
+        {"CS4232 based card",
+                ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','S','C'), ISAPNP_FUNCTION(0x0100),
+		0, 0, 0, 1, 0},
+        {"OPL3-SA2 WSS mode",
+        	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('Y','M','H'), ISAPNP_FUNCTION(0x0021),
+                1, 0, 0, 1, 1},
+	{"AZT1008",
+		ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('A','Z','T'), ISAPNP_FUNCTION(0x0001),
+		1, 0, 0, 1, 1},
+	{0}
+};
+
+static struct isapnp_device_id id_table[] __devinitdata = {
+	{	ISAPNP_VENDOR('C','M','I'), ISAPNP_DEVICE(0x0001),
+		ISAPNP_VENDOR('@','@','@'), ISAPNP_FUNCTION(0x0001), 0 },
+        {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','S','C'), ISAPNP_FUNCTION(0x0000), 0 },
+        {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('C','S','C'), ISAPNP_FUNCTION(0x0100), 0 },
+        {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('Y','M','H'), ISAPNP_FUNCTION(0x0021), 0 },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('A','Z','T'), ISAPNP_FUNCTION(0x0001), 0 },
+	{0}
+};
+
+MODULE_DEVICE_TABLE(isapnp, id_table);
+
+static struct pci_dev *activate_dev(char *devname, char *resname, struct pci_dev *dev)
+{
+	int err;
+
+	/* Device already active? Let's use it */
+	if(dev->active)
+		return(dev);
+
+	if((err = dev->activate(dev)) < 0) {
+		printk(KERN_ERR "ad1848: %s %s config failed (out of resources?)[%d]\n", devname, resname, err);
+
+		dev->deactivate(dev);
+
+		return(NULL);
+	}
+	return(dev);
+}
+
+static struct pci_dev *ad1848_init_generic(struct pci_dev *dev, struct address_info *hw_config, int slot)
+{
+	/* Configure Audio device, point ad1848_dev to device found */
+	if((ad1848_dev = dev))
+	{
+		int ret;
+		ret = ad1848_dev->prepare(ad1848_dev);
+		/* If device is active, assume configured with /proc/isapnp
+		 * and use anyway. Some other way to check this? */
+		if(ret && ret != -EBUSY) {
+			printk(KERN_ERR "ad1848: ISAPnP found device that could not be autoconfigured.\n");
+			return(NULL);
+		}
+		if(ret == -EBUSY)
+			audio_activated = 1;
+
+		if((ad1848_dev = activate_dev(ad1848_isapnp_list[slot].name, "ad1848", ad1848_dev)))
+		{
+			hw_config->io_base 	= ad1848_dev->resource[ad1848_isapnp_list[slot].mss_io].start;
+			hw_config->irq 		= ad1848_dev->irq_resource[ad1848_isapnp_list[slot].irq].start;
+			hw_config->dma 		= ad1848_dev->dma_resource[ad1848_isapnp_list[slot].dma].start;
+			if(ad1848_isapnp_list[slot].dma2 != -1)
+				hw_config->dma2 = ad1848_dev->dma_resource[ad1848_isapnp_list[slot].dma2].start;
+			else
+				hw_config->dma2 = -1;
+                        hw_config->card_subtype = ad1848_isapnp_list[slot].type;
+		} else
+			return(NULL);
+	} else
+		return(NULL);
+
+	return(ad1848_dev);
+}
+
+static int __init ad1848_isapnp_init(struct address_info *hw_config, struct pci_dev *dev, int slot)
+{
+	char *devname = dev->name[0] ? dev->name : ad1848_isapnp_list[slot].name;
+
+	printk(KERN_INFO "ad1848: %s detected\n", devname);
+
+	/* Initialize this baby. */
+
+	if(ad1848_init_generic(dev, hw_config, slot)) {
+		/* We got it. */
+
+		printk(KERN_NOTICE "ad1848: ISAPnP reports '%s' at i/o %#x, irq %d, dma %d, %d\n",
+		       devname,
+		       hw_config->io_base, hw_config->irq, hw_config->dma,
+		       hw_config->dma2);
+		return 1;
+	}
+	else
+		printk(KERN_INFO "ad1848: Failed to initialize %s\n", devname);
+
+	return 0;
+}
+
+static int __init ad1848_isapnp_probe(struct address_info *hw_config)
+{
+	static int first = 1;
+	int i;
+
+	/* Count entries in sb_isapnp_list */
+	for (i = 0; ad1848_isapnp_list[i].card_vendor != 0; i++);
+	i--;
+
+	/* Check and adjust isapnpjump */
+	if( isapnpjump < 0 || isapnpjump > i) {
+		isapnpjump = reverse ? i : 0;
+		printk(KERN_ERR "ad1848: Valid range for isapnpjump is 0-%d. Adjusted to %d.\n", i, isapnpjump);
+	}
+
+	if(!first || !reverse)
+		i = isapnpjump;
+	first = 0;
+	while(ad1848_isapnp_list[i].card_vendor != 0) {
+		static struct pci_dev *dev = NULL;
+
+		while ((dev = isapnp_find_dev(NULL,
+				ad1848_isapnp_list[i].vendor,
+				ad1848_isapnp_list[i].function,
+				NULL))) {
+			
+			if(ad1848_isapnp_init(hw_config, dev, i)) {
+				isapnpjump = i; /* start next search from here */
+				return 0;
+			}
+		}
+		i += reverse ? -1 : 1;
+	}
+
+	return -ENODEV;
+}
+#endif
+
 
 static int __init init_ad1848(void)
 {
 	printk(KERN_INFO "ad1848/cs4248 codec driver Copyright (C) by Hannu Savolainen 1993-1996\n");
 
-	if(io != -1) {
-		if(irq == -1 || dma == -1) {
-			printk(KERN_WARNING "ad1848: must give I/O , IRQ and DMA.\n");
-			return -EINVAL;
-		}
+#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+	if(isapnp && (ad1848_isapnp_probe(&cfg) < 0) ) {
+		printk(KERN_NOTICE "ad1848: No ISAPnP cards found, trying standard ones...\n");
+		isapnp = 0;
+	}
+#endif
 
-		cfg.irq = irq;
-		cfg.io_base = io;
-		cfg.dma = dma;
-		cfg.dma2 = dma2;
-		cfg.card_subtype = type;
+	if(io != -1) {
+	        if( isapnp == 0 )
+	        {
+			if(irq == -1 || dma == -1) {
+				printk(KERN_WARNING "ad1848: must give I/O , IRQ and DMA.\n");
+				return -EINVAL;
+			}
+
+			cfg.irq = irq;
+			cfg.io_base = io;
+			cfg.dma = dma;
+			cfg.dma2 = dma2;
+			cfg.card_subtype = type;
+	        }
 
 		if(!probe_ms_sound(&cfg))
 			return -ENODEV;
 		attach_ms_sound(&cfg, THIS_MODULE);
 		loaded = 1;
 	}
-	
 	return 0;
 }
 
@@ -2843,6 +3145,12 @@ static void __exit cleanup_ad1848(void)
 {
 	if(loaded)
 		unload_ms_sound(&cfg);
+
+#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+	if(audio_activated)
+		if(ad1848_dev)
+			ad1848_dev->deactivate(ad1848_dev);
+#endif
 }
 
 module_init(init_ad1848);
@@ -2867,3 +3175,4 @@ static int __init setup_ad1848(char *str)
 
 __setup("ad1848=", setup_ad1848);	
 #endif
+MODULE_LICENSE("GPL");

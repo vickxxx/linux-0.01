@@ -1,27 +1,15 @@
-/* $Id: hycapi.c,v 1.8 2000/11/22 17:13:13 kai Exp $
+/* $Id: hycapi.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
  *
  * Linux driver for HYSDN cards, CAPI2.0-Interface.
- * written by Ulrich Albrecht (u.albrecht@hypercope.de) for Hypercope GmbH
  *
+ * Author    Ulrich Albrecht <u.albrecht@hypercope.de> for Hypercope GmbH
  * Copyright 2000 by Hypercope GmbH
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/signal.h>
@@ -41,7 +29,10 @@
 #include "hysdn_defs.h"
 #include <linux/kernelcapi.h>
 
-static char hycapi_revision[]="$Revision: 1.8 $";
+static char hycapi_revision[]="$Revision: 1.1.4.1 $";
+
+unsigned int hycapi_enable = 0xffffffff; 
+MODULE_PARM(hycapi_enable, "i");
 
 typedef struct _hycapi_appl {
 	unsigned int ctrl_mask;
@@ -522,7 +513,7 @@ char *hycapi_procinfo(struct capi_ctr *ctrl)
 /******************************************************************
 hycapi_rx_capipkt
 
-Recieve a capi-message.
+Receive a capi-message.
 
 All B3_DATA_IND are converted to 64K-extension compatible format.
 New nccis are created if neccessary.
@@ -542,15 +533,11 @@ hycapi_rx_capipkt(hysdn_card * card, uchar * buf, word len)
 	printk(KERN_NOTICE "hycapi_rx_capipkt\n");    
 #endif
 	if(!cinfo) {
-		printk(KERN_ERR "HYSDN Card%d: no HYCAPI-controller!\n",
-		       card->myid);
 		return;
 	}
 	ctrl = cinfo->capi_ctrl;
 	if(!ctrl)
 	{
-		printk(KERN_ERR "HYSDN Card%d: no CAPI-controller (1)!\n",
-		       card->myid);
 		return;
 	}
 	if(len < CAPI_MSG_BASELEN) {
@@ -644,8 +631,6 @@ void hycapi_tx_capiack(hysdn_card * card)
 	printk(KERN_NOTICE "hycapi_tx_capiack\n");    
 #endif
 	if(!cinfo) {
-		printk(KERN_ERR "HYSDN Card%d: no CAPI-controller (2)!\n",
-		       card->myid);
 		return;
 	}
 	spin_lock_irq(&cinfo->lock);
@@ -671,8 +656,6 @@ hycapi_tx_capiget(hysdn_card *card)
 {
 	hycapictrl_info *cinfo = card->hyctrlinfo;
 	if(!cinfo) {
-		printk(KERN_ERR "HYSDN Card%d: no CAPI-controller! (3)\n",
-		       card->myid);
 		return (struct sk_buff *)NULL;
 	}
 	if (!cinfo->sk_count)
@@ -739,7 +722,7 @@ hycapi_cleanup(void)
 	struct capi_driver *driver;
 	driver = &hycapi_driver;
 	if (!hy_di) {
-		printk(KERN_ERR "HYSDN: no capi-driver to detach (???)\n");
+		printk(KERN_ERR "HYSDN: no capi-driver to detach (?)\n");
 		return;
 	}
 	printk(KERN_NOTICE "HYSDN: Detaching capi-driver\n");
@@ -792,6 +775,9 @@ hycapi_capi_create(hysdn_card *card)
 #ifdef HYCAPI_PRINTFNAMES
 	printk(KERN_NOTICE "hycapi_capi_create\n");        
 #endif
+	if((hycapi_enable & (1 << card->myid)) == 0) {
+		return 1;
+	}
 	if (!card->hyctrlinfo) {
 		cinfo = (hycapictrl_info *) kmalloc(sizeof(hycapictrl_info), GFP_ATOMIC);
 		if (!cinfo) {

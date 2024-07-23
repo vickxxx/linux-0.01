@@ -10,7 +10,7 @@
  *  DMA functions specific to RiscPC architecture
  */
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mman.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -42,11 +42,11 @@ typedef struct {
 #define TRANSFER_SIZE	2
 
 #define CURA	(0)
-#define ENDA	((IOMD_IO0ENDA - IOMD_IO0CURA) << 2)
-#define CURB	((IOMD_IO0CURB - IOMD_IO0CURA) << 2)
-#define ENDB	((IOMD_IO0ENDB - IOMD_IO0CURA) << 2)
-#define CR	((IOMD_IO0CR - IOMD_IO0CURA) << 2)
-#define ST	((IOMD_IO0ST - IOMD_IO0CURA) << 2)
+#define ENDA	(IOMD_IO0ENDA - IOMD_IO0CURA)
+#define CURB	(IOMD_IO0CURB - IOMD_IO0CURA)
+#define ENDB	(IOMD_IO0ENDB - IOMD_IO0CURA)
+#define CR	(IOMD_IO0CR - IOMD_IO0CURA)
+#define ST	(IOMD_IO0ST - IOMD_IO0CURA)
 
 #define state_prog_a	0
 #define state_wait_a	1
@@ -91,76 +91,40 @@ static void iomd_get_next_sg(struct scatterlist *sg, dma_t *dma)
 	sg->length |= flags;
 }
 
-static inline void iomd_setup_dma_a(struct scatterlist *sg, dma_t *dma)
-{
-	outl_t(sg->dma_address, dma->dma_base + CURA);
-	outl_t(sg->length, dma->dma_base + ENDA);
-}
-
-static inline void iomd_setup_dma_b(struct scatterlist *sg, dma_t *dma)
-{
-	outl_t(sg->dma_address, dma->dma_base + CURB);
-	outl_t(sg->length, dma->dma_base + ENDB);
-}
-
 static void iomd_dma_handle(int irq, void *dev_id, struct pt_regs *regs)
 {
 	dma_t *dma = (dma_t *)dev_id;
-	unsigned int status = 0, no_buffer = dma->sg == NULL;
+	unsigned long base = dma->dma_base;
 
 	do {
-		switch (dma->state) {
-		case state_prog_a:
-			iomd_get_next_sg(&dma->cur_sg, dma);
-			iomd_setup_dma_a(&dma->cur_sg, dma);
-			dma->state = state_wait_a;
+		unsigned int status;
 
-		case state_wait_a:
-			status = inb_t(dma->dma_base + ST);
-			switch (status & (DMA_ST_OFL|DMA_ST_INT|DMA_ST_AB)) {
-			case DMA_ST_OFL|DMA_ST_INT:
-				iomd_get_next_sg(&dma->cur_sg, dma);
-				iomd_setup_dma_a(&dma->cur_sg, dma);
-				break;
+		status = iomd_readb(base + ST);
+		if (!(status & DMA_ST_INT))
+			return;
 
-			case DMA_ST_INT:
-				iomd_get_next_sg(&dma->cur_sg, dma);
-				iomd_setup_dma_b(&dma->cur_sg, dma);
-				dma->state = state_wait_b;
-				break;
-
-			case DMA_ST_OFL|DMA_ST_INT|DMA_ST_AB:
-				iomd_setup_dma_b(&dma->cur_sg, dma);
-				dma->state = state_wait_b;
-				break;
-			}
+		if (status & DMA_ST_OFL && !dma->sg)
 			break;
 
-		case state_wait_b:
-			status = inb_t(dma->dma_base + ST);
-			switch (status & (DMA_ST_OFL|DMA_ST_INT|DMA_ST_AB)) {
-			case DMA_ST_OFL|DMA_ST_INT|DMA_ST_AB:
-				iomd_get_next_sg(&dma->cur_sg, dma);
-				iomd_setup_dma_b(&dma->cur_sg, dma);
-				break;
+		iomd_get_next_sg(&dma->cur_sg, dma);
 
-			case DMA_ST_INT|DMA_ST_AB:
-				iomd_get_next_sg(&dma->cur_sg, dma);
-				iomd_setup_dma_a(&dma->cur_sg, dma);
-				dma->state = state_wait_a;
-				break;
+		switch (status & (DMA_ST_OFL | DMA_ST_AB)) {
+		case DMA_ST_OFL:			/* OIA */
+		case DMA_ST_AB:				/* .IB */
+			iomd_writel(dma->cur_sg.dma_address, base + CURA);
+			iomd_writel(dma->cur_sg.length, base + ENDA);
+			break;
 
-			case DMA_ST_OFL|DMA_ST_INT:
-				iomd_setup_dma_a(&dma->cur_sg, dma);
-				dma->state = state_wait_a;
-				break;
-			}
+		case DMA_ST_OFL | DMA_ST_AB:		/* OIB */
+		case 0:					/* .IA */
+			iomd_writel(dma->cur_sg.dma_address, base + CURB);
+			iomd_writel(dma->cur_sg.length, base + ENDB);
 			break;
 		}
-	} while (dma->sg && (status & DMA_ST_INT));
+	} while (1);
 
-	if (no_buffer)
-		disable_irq(irq);
+	iomd_writeb(0, base + CR);
+	disable_irq(irq);
 }
 
 static int iomd_request_dma(dmach_t channel, dma_t *dma)
@@ -193,25 +157,28 @@ static void iomd_enable_dma(dmach_t channel, dma_t *dma)
 				PCI_DMA_FROMDEVICE : PCI_DMA_TODEVICE);
 		}
 
-		outb_t(DMA_CR_C, dma_base + CR);
-		dma->state = state_prog_a;
+		iomd_writeb(DMA_CR_C, dma_base + CR);
 	}
 		
 	if (dma->dma_mode == DMA_MODE_READ)
 		ctrl |= DMA_CR_D;
 
-	outb_t(ctrl, dma_base + CR);
+	iomd_writeb(ctrl, dma_base + CR);
 	enable_irq(dma->dma_irq);
 }
 
 static void iomd_disable_dma(dmach_t channel, dma_t *dma)
 {
 	unsigned long dma_base = dma->dma_base;
+	unsigned long flags;
 	unsigned int ctrl;
 
-	disable_irq(dma->dma_irq);
-	ctrl = inb_t(dma_base + CR);
-	outb_t(ctrl & ~DMA_CR_E, dma_base + CR);
+	local_irq_save(flags);
+	ctrl = iomd_readb(dma_base + CR);
+	if (ctrl & DMA_CR_E)
+		disable_irq(dma->dma_irq);
+	iomd_writeb(ctrl & ~DMA_CR_E, dma_base + CR);
+	local_irq_restore(flags);
 }
 
 static int iomd_set_dma_speed(dmach_t channel, dma_t *dma, int cycle)
@@ -227,7 +194,7 @@ static int iomd_set_dma_speed(dmach_t channel, dma_t *dma, int cycle)
 	else
 		speed = 0;
 
-	tcr = inb(IOMD_DMATCR);
+	tcr = iomd_readb(IOMD_DMATCR);
 	speed &= 3;
 
 	switch (channel) {
@@ -251,22 +218,22 @@ static int iomd_set_dma_speed(dmach_t channel, dma_t *dma, int cycle)
 		break;
 	}
 
-	outb(tcr, IOMD_DMATCR);
+	iomd_writeb(tcr, IOMD_DMATCR);
 
 	return speed;
 }
 
 static struct dma_ops iomd_dma_ops = {
-	type:		"IOMD",
-	request:	iomd_request_dma,
-	free:		iomd_free_dma,
-	enable:		iomd_enable_dma,
-	disable:	iomd_disable_dma,
-	setspeed:	iomd_set_dma_speed,
+	.type		= "IOMD",
+	.request	= iomd_request_dma,
+	.free		= iomd_free_dma,
+	.enable		= iomd_enable_dma,
+	.disable	= iomd_disable_dma,
+	.setspeed	= iomd_set_dma_speed,
 };
 
 static struct fiq_handler fh = {
-	name: "floppydma"
+	.name		= "floppydma"
 };
 
 static void floppy_enable_dma(dmach_t channel, dma_t *dma)
@@ -287,7 +254,7 @@ static void floppy_enable_dma(dmach_t channel, dma_t *dma)
 
 	regs.ARM_r9  = dma->buf.length;
 	regs.ARM_r10 = (unsigned long)dma->buf.address;
-	regs.ARM_fp  = (unsigned long)PCIO_FLOPPYDMABASE;
+	regs.ARM_fp  = FLOPPYDMA_BASE;
 
 	if (claim_fiq(&fh)) {
 		printk("floppydma: couldn't claim FIQ.\n");
@@ -296,12 +263,12 @@ static void floppy_enable_dma(dmach_t channel, dma_t *dma)
 
 	set_fiq_handler(fiqhandler_start, fiqhandler_length);
 	set_fiq_regs(&regs);
-	enable_irq(dma->dma_irq);
+	enable_fiq(dma->dma_irq);
 }
 
 static void floppy_disable_dma(dmach_t channel, dma_t *dma)
 {
-	disable_irq(dma->dma_irq);
+	disable_fiq(dma->dma_irq);
 	release_fiq(&fh);
 }
 
@@ -313,10 +280,10 @@ static int floppy_get_residue(dmach_t channel, dma_t *dma)
 }
 
 static struct dma_ops floppy_dma_ops = {
-	type:		"FIQDMA",
-	enable:		floppy_enable_dma,
-	disable:	floppy_disable_dma,
-	residue:	floppy_get_residue,
+	.type		= "FIQDMA",
+	.enable		= floppy_enable_dma,
+	.disable	= floppy_disable_dma,
+	.residue	= floppy_get_residue,
 };
 
 /*
@@ -327,39 +294,39 @@ static void sound_enable_disable_dma(dmach_t channel, dma_t *dma)
 }
 
 static struct dma_ops sound_dma_ops = {
-	type:		"VIRTUAL",
-	enable:		sound_enable_disable_dma,
-	disable:	sound_enable_disable_dma,
+	.type		= "VIRTUAL",
+	.enable		= sound_enable_disable_dma,
+	.disable	= sound_enable_disable_dma,
 };
 
 void __init arch_dma_init(dma_t *dma)
 {
-	outb(0, IOMD_IO0CR);
-	outb(0, IOMD_IO1CR);
-	outb(0, IOMD_IO2CR);
-	outb(0, IOMD_IO3CR);
+	iomd_writeb(0, IOMD_IO0CR);
+	iomd_writeb(0, IOMD_IO1CR);
+	iomd_writeb(0, IOMD_IO2CR);
+	iomd_writeb(0, IOMD_IO3CR);
 
-	outb(0xa0, IOMD_DMATCR);
+	iomd_writeb(0xa0, IOMD_DMATCR);
 
-	dma[DMA_0].dma_base		= ioaddr(IOMD_IO0CURA);
+	dma[DMA_0].dma_base		= IOMD_IO0CURA;
 	dma[DMA_0].dma_irq		= IRQ_DMA0;
 	dma[DMA_0].d_ops		= &iomd_dma_ops;
-	dma[DMA_1].dma_base		= ioaddr(IOMD_IO1CURA);
+	dma[DMA_1].dma_base		= IOMD_IO1CURA;
 	dma[DMA_1].dma_irq		= IRQ_DMA1;
 	dma[DMA_1].d_ops		= &iomd_dma_ops;
-	dma[DMA_2].dma_base		= ioaddr(IOMD_IO2CURA);
+	dma[DMA_2].dma_base		= IOMD_IO2CURA;
 	dma[DMA_2].dma_irq		= IRQ_DMA2;
 	dma[DMA_2].d_ops		= &iomd_dma_ops;
-	dma[DMA_3].dma_base		= ioaddr(IOMD_IO3CURA);
+	dma[DMA_3].dma_base		= IOMD_IO3CURA;
 	dma[DMA_3].dma_irq		= IRQ_DMA3;
 	dma[DMA_3].d_ops		= &iomd_dma_ops;
-	dma[DMA_S0].dma_base		= ioaddr(IOMD_SD0CURA);
+	dma[DMA_S0].dma_base		= IOMD_SD0CURA;
 	dma[DMA_S0].dma_irq		= IRQ_DMAS0;
 	dma[DMA_S0].d_ops		= &iomd_dma_ops;
-	dma[DMA_S1].dma_base		= ioaddr(IOMD_SD1CURA);
+	dma[DMA_S1].dma_base		= IOMD_SD1CURA;
 	dma[DMA_S1].dma_irq		= IRQ_DMAS1;
 	dma[DMA_S1].d_ops		= &iomd_dma_ops;
-	dma[DMA_VIRTUAL_FLOPPY].dma_irq	= 64;
+	dma[DMA_VIRTUAL_FLOPPY].dma_irq	= FIQ_FLOPPYDATA;
 	dma[DMA_VIRTUAL_FLOPPY].d_ops	= &floppy_dma_ops;
 	dma[DMA_VIRTUAL_SOUND].d_ops	= &sound_dma_ops;
 
@@ -367,5 +334,5 @@ void __init arch_dma_init(dma_t *dma)
 	 * Setup DMA channels 2,3 to be for podules
 	 * and channels 0,1 for internal devices
 	 */
-	outb(DMA_EXT_IO3|DMA_EXT_IO2, IOMD_DMAEXT);
+	iomd_writeb(DMA_EXT_IO3|DMA_EXT_IO2, IOMD_DMAEXT);
 }

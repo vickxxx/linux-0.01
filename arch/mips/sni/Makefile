@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.3 1999/01/04 16:03:57 ralf Exp $
 #
 # Makefile for the SNI specific part of the kernel
 #
@@ -7,17 +6,17 @@
 # unless it's something special (ie not a .c file).
 #
 
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
+USE_STANDARD_AS_RULE := true
 
-all: sni.o
+all:	sni.o int-handler.o
+
 O_TARGET := sni.o
-O_OBJS	 := dma.o int-handler.o io.o pci.o pcimt_scache.o reset.o setup.o
+
+obj-y	 		+= int-handler.o io.o irq.o pcimt_scache.o reset.o \
+			   setup.o
+
+obj-$(CONFIG_PCI)	+= pci.o
 
 int-handler.o: int-handler.S
-
-clean:
 
 include $(TOPDIR)/Rules.make

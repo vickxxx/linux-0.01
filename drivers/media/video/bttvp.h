@@ -25,8 +25,8 @@
 #ifndef _BTTVP_H_
 #define _BTTVP_H_
 
-#define BTTV_VERSION_CODE KERNEL_VERSION(0,7,50)
-
+#include <linux/version.h>
+#define BTTV_VERSION_CODE KERNEL_VERSION(0,7,108)
 
 #include <linux/types.h>
 #include <linux/wait.h>
@@ -36,6 +36,8 @@
 #include "bt848.h"
 #include "bttv.h"
 #include "audiochip.h"
+#include "tuner.h"
+#include "i2c-compat.h"
 
 #ifdef __KERNEL__
 
@@ -43,25 +45,30 @@
 /* bttv-driver.c                                              */
 
 /* insmod options / kernel args */
+extern unsigned int no_overlay;
 extern unsigned int bttv_verbose;
 extern unsigned int bttv_debug;
 extern unsigned int bttv_gpio;
 extern void bttv_gpio_tracking(struct bttv *btv, char *comment);
+extern int init_bttv_i2c(struct bttv *btv);
+extern int pvr_boot(struct bttv *btv);
 
-/* Anybody who uses more than four? */
-#define BTTV_MAX 4
-extern int bttv_num;			/* number of Bt848s in use */
-extern struct bttv bttvs[BTTV_MAX];
+#define dprintk		if (bttv_debug)   printk
+#define vprintk		if (bttv_verbose) printk
 
+#define BTTV_MAX 16
+extern unsigned int bttv_num;			/* number of Bt848s in use */
 
-#ifndef O_NONCAP  
-#define O_NONCAP	O_TRUNC
+#define UNSET -1U
+
+#ifdef VIDEODAT_HACK
+# define VBI_MAXLINES   19
+#else
+# define VBI_MAXLINES   16
 #endif
-
+#define VBIBUF_SIZE     (2048*VBI_MAXLINES*2)
 #define MAX_GBUFFERS	64
 #define RISCMEM_LEN	(32744*2)
-#define VBI_MAXLINES    16
-#define VBIBUF_SIZE     (2048*VBI_MAXLINES*2)
 
 #define BTTV_MAX_FBUF	0x208000
 
@@ -112,23 +119,22 @@ struct bttv {
 
 	spinlock_t s_lock;
         struct semaphore lock;
-	int user;
-	int capuser;
+	unsigned int user;
 
 	/* i2c */
 	struct i2c_adapter         i2c_adap;
 	struct i2c_algo_bit_data   i2c_algo;
 	struct i2c_client          i2c_client;
 	int                        i2c_state, i2c_rc;
-	struct i2c_client         *i2c_clients[I2C_CLIENTS_MAX];
 
-        int tuner_type;
-        int channel;
+        unsigned int tuner_type;
+        unsigned int pinnacle_id;
+        unsigned int channel;
+	unsigned int svhs;
         
         unsigned int nr;
 	unsigned short id;
 	struct pci_dev *dev;
-	unsigned int irq;          /* IRQ used by Bt848 card */
 	unsigned char revision;
 	unsigned long bt848_adr;      /* bus address of IO mem returned by PCI BIOS */
 	unsigned char *bt848_mem;   /* pointer to mapped IO memory */
@@ -139,10 +145,26 @@ struct bttv {
 	struct bttv_window win;
 	int fb_color_ctl;
 	int type;            /* card type  */
-	int cardid;
+	unsigned int cardid;
 	int audio;           /* audio mode */
 	int audio_chip;      /* set to one of the chips supported by bttv.c */
 	int radio;
+	int has_radio;
+	int has_remote;
+
+	/* miro/pinnacle + Aimslab VHX
+	   philips matchbox (tea5757 radio tuner) support */
+	int has_matchbox;
+	int mbox_we;
+	int mbox_data;
+	int mbox_clk;
+	int mbox_most;
+	int mbox_mask;
+
+	/* ISA stuff (Terratec Active Radio Upgrade) */
+	int mbox_ior;
+	int mbox_iow;
+	int mbox_csel;
 
 	u32 *risc_jmp;
 	u32 *vbi_odd;
@@ -151,7 +173,7 @@ struct bttv {
 	u32 bus_vbi_odd;
         wait_queue_head_t vbiq;
 	wait_queue_head_t capq;
-	int vbip;
+	unsigned int vbip;
 
 	u32 *risc_scr_odd;
 	u32 *risc_scr_even;
@@ -178,23 +200,14 @@ struct bttv {
 
 	wait_queue_head_t gpioq;
 	int shutdown;
+        void (*audio_hook)(struct bttv *btv, struct video_audio *v, int set);
 };
+
+extern struct bttv bttvs[BTTV_MAX];
 #endif
 
-#if defined(__powerpc__) /* big-endian */
-extern __inline__ void io_st_le32(volatile unsigned *addr, unsigned val)
-{
-        __asm__ __volatile__ ("stwbrx %1,0,%2" : \
-                            "=m" (*addr) : "r" (val), "r" (addr));
-      __asm__ __volatile__ ("eieio" : : : "memory");
-}
-
-#define btwrite(dat,adr)  io_st_le32((unsigned *)(btv->bt848_mem+(adr)),(dat))
-#define btread(adr)       ld_le32((unsigned *)(btv->bt848_mem+(adr)))
-#else
 #define btwrite(dat,adr)    writel((dat), (char *) (btv->bt848_mem+(adr)))
 #define btread(adr)         readl(btv->bt848_mem+(adr))
-#endif
 
 #define btand(dat,adr)      btwrite((dat) & btread(adr), adr)
 #define btor(dat,adr)       btwrite((dat) | btread(adr), adr)

@@ -14,7 +14,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -37,8 +37,8 @@
 
 static void rx(struct net_device *dev, int bufnum,
 	       struct archdr *pkthdr, int length);
-static int build_header(struct sk_buff *skb, unsigned short type,
-			uint8_t daddr);
+static int build_header(struct sk_buff *skb, struct net_device *dev,
+			unsigned short type, uint8_t daddr);
 static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum);
 
@@ -83,6 +83,7 @@ void cleanup_module(void)
 	arcnet_unregister_proto(&rawmode_proto);
 }
 
+MODULE_LICENSE("GPL");
 #endif				/* MODULE */
 
 
@@ -128,6 +129,7 @@ static void rx(struct net_device *dev, int bufnum,
 
 	skb->protocol = 0;
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 }
 
 
@@ -135,10 +137,9 @@ static void rx(struct net_device *dev, int bufnum,
  * Create the ARCnet hard/soft headers for raw mode.
  * There aren't any soft headers in raw mode - not even the protocol id.
  */
-static int build_header(struct sk_buff *skb, unsigned short type,
-			uint8_t daddr)
+static int build_header(struct sk_buff *skb, struct net_device *dev,
+			unsigned short type, uint8_t daddr)
 {
-	struct net_device *dev = skb->dev;
 	int hdr_size = ARC_HDR_SIZE;
 	struct archdr *pkt = (struct archdr *) skb_push(skb, hdr_size);
 

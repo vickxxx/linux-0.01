@@ -19,7 +19,7 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/p8022.h>
@@ -98,7 +98,7 @@ static unsigned char cr_bit_encode[] = {
 
 /*
  *	Sendpdu() constructs an output frame in a new skb and
- *	gives it to the MAC layer for transmision.
+ *	gives it to the MAC layer for transmission.
  *	This function is not used to send I pdus.
  *	No queues are updated here, nothing is saved for retransmission.
  *
@@ -186,7 +186,7 @@ void llc_unit_data_request(llcptr lp, int ll, char * data)
 
 /*
  *	llc_sendipdu() Completes an I pdu in an existing skb and gives it
- *	to the MAC layer for transmision.
+ *	to the MAC layer for transmission.
  *	Parameter "type" must be either I_CMD or I_RSP.
  *	The skb is not freed after xmit, it is kept in case a retransmission
  *	is requested. If needed it can be picked up again from the rtq.
@@ -283,7 +283,7 @@ int llc_resend_ipdu(llcptr lp, unsigned char ack_nr, unsigned char type, char p)
 		if(tmp!=NULL)
 		{
 			tmp->dev = lp->dev;
-			dev_queue_xmit(skb);
+			dev_queue_xmit(tmp);
 		}
 		resend_count++;
 		skb = skb->next;

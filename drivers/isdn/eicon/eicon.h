@@ -1,27 +1,15 @@
-/* $Id: eicon.h,v 1.23 2000/06/21 11:28:42 armin Exp $
+/* $Id: eicon.h,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
  * ISDN low-level module for Eicon active ISDN-Cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998       by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1998-2000  by Armin Schindler (mac@melware.de) 
  * Copyright 1999,2000  Cytronics & Melware (info@melware.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 
 #ifndef eicon_h
 #define eicon_h
@@ -139,7 +127,7 @@ typedef struct {
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -147,6 +135,7 @@ typedef struct {
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/ctype.h>
+#include <linux/pci.h>
 
 #include <linux/isdn.h>
 #include <linux/isdnif.h>
@@ -165,18 +154,18 @@ typedef struct {
   __u16 NextReq  __attribute__ ((packed));  /* pointer to next Req Buffer */
   __u16 NextRc   __attribute__ ((packed));  /* pointer to next Rc Buffer  */
   __u16 NextInd  __attribute__ ((packed));  /* pointer to next Ind Buffer */
-  __u8 ReqInput  __attribute__ ((packed));  /* number of Req Buffers sent */
-  __u8 ReqOutput  __attribute__ ((packed)); /* number of Req Buffers returned */
-  __u8 ReqReserved  __attribute__ ((packed));/*number of Req Buffers reserved */
-  __u8 Int  __attribute__ ((packed));       /* ISDN-P interrupt           */
-  __u8 XLock  __attribute__ ((packed));     /* Lock field for arbitration */
-  __u8 RcOutput  __attribute__ ((packed));  /* number of Rc buffers received */
-  __u8 IndOutput  __attribute__ ((packed)); /* number of Ind buffers received */
-  __u8 IMask  __attribute__ ((packed));     /* Interrupt Mask Flag        */
-  __u8 Reserved1[2]  __attribute__ ((packed)); /* reserved field, do not use */
-  __u8 ReadyInt  __attribute__ ((packed));  /* request field for ready int */
-  __u8 Reserved2[12]  __attribute__ ((packed)); /* reserved field, do not use */
-  __u8 InterfaceType  __attribute__ ((packed)); /* interface type 1=16K    */
+  __u8 ReqInput;  /* number of Req Buffers sent */
+  __u8 ReqOutput; /* number of Req Buffers returned */
+  __u8 ReqReserved;/*number of Req Buffers reserved */
+  __u8 Int;       /* ISDN-P interrupt           */
+  __u8 XLock;     /* Lock field for arbitration */
+  __u8 RcOutput;  /* number of Rc buffers received */
+  __u8 IndOutput; /* number of Ind buffers received */
+  __u8 IMask;     /* Interrupt Mask Flag        */
+  __u8 Reserved1[2]; /* reserved field, do not use */
+  __u8 ReadyInt;  /* request field for ready int */
+  __u8 Reserved2[12]; /* reserved field, do not use */
+  __u8 InterfaceType; /* interface type 1=16K    */
   __u16 Signature  __attribute__ ((packed));    /* ISDN-P initialized ind  */
   __u8 B[1];                            /* buffer space for Req,Ind and Rc */
 } eicon_pr_ram;
@@ -355,23 +344,22 @@ typedef struct eicon_card {
 
 #include "eicon_idi.h"
 
-extern eicon_card *cards;
 extern char *eicon_ctype_name[];
 
 
-extern __inline__ void eicon_schedule_tx(eicon_card *card)
+static inline void eicon_schedule_tx(eicon_card *card)
 {
         queue_task(&card->snd_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);
 }
 
-extern __inline__ void eicon_schedule_rx(eicon_card *card)
+static inline void eicon_schedule_rx(eicon_card *card)
 {
         queue_task(&card->rcv_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);
 }
 
-extern __inline__ void eicon_schedule_ack(eicon_card *card)
+static inline void eicon_schedule_ack(eicon_card *card)
 {
         queue_task(&card->ack_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);

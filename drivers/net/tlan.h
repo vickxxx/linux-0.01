@@ -8,10 +8,10 @@
  *  by James Banks
  *
  *  (C) 1997-1998 Caldera, Inc.
- *  (C) 1999-2000 Torben Mathiasen
+ *  (C) 1999-2001 Torben Mathiasen
  * 
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  ** This file is best viewed/edited with tabstop=4, colums>=132
  *
@@ -36,11 +36,11 @@
 #define FALSE			0
 #define TRUE			1
 
-#define TLAN_MIN_FRAME_SIZE	60
-#define TLAN_MAX_FRAME_SIZE	1536
+#define TLAN_MIN_FRAME_SIZE	64
+#define TLAN_MAX_FRAME_SIZE	1600
 
-#define TLAN_NUM_RX_LISTS	4
-#define TLAN_NUM_TX_LISTS	8
+#define TLAN_NUM_RX_LISTS	32
+#define TLAN_NUM_TX_LISTS	64
 
 #define TLAN_IGNORE		0
 #define TLAN_RECORD		1
@@ -53,7 +53,7 @@
 #define TLAN_DEBUG_PROBE	0x0010
 
 #define TX_TIMEOUT		(10*HZ)	 /* We need time for auto-neg */
-
+#define MAX_TLAN_BOARDS		8	 /* Max number of boards installed at a time */
 
 
 	/*****************************************************************
@@ -61,14 +61,6 @@
 	 *
 	 ****************************************************************/
 		
-#define PCI_DEVICE_ID_NETELLIGENT_10			0xAE34
-#define PCI_DEVICE_ID_NETELLIGENT_10_100		0xAE32
-#define PCI_DEVICE_ID_NETFLEX_3P_INTEGRATED		0xAE35
-#define PCI_DEVICE_ID_NETFLEX_3P			0xF130
-#define PCI_DEVICE_ID_NETFLEX_3P_BNC			0xF150
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_PROLIANT	0xAE43
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_DUAL		0xAE40
-#define PCI_DEVICE_ID_DESKPRO_4000_5233MMX		0xB011
 #define PCI_DEVICE_ID_NETELLIGENT_10_T2			0xB012
 #define PCI_DEVICE_ID_NETELLIGENT_10_100_WS_5100	0xB030
 #ifndef PCI_DEVICE_ID_OLICOM_OC2183
@@ -177,15 +169,22 @@ typedef u8 TLanBuffer[TLAN_MAX_FRAME_SIZE];
 
 typedef struct tlan_private_tag {
 	struct net_device       *nextDevice;
+	struct pci_dev		*pciDev;
 	void			*dmaStorage;
+	dma_addr_t		dmaStorageDMA;
+	unsigned int		dmaSize;
 	u8			*padBuffer;
 	TLanList                *rxList;
+	dma_addr_t		rxListDMA;
 	u8			*rxBuffer;
+	dma_addr_t		rxBufferDMA;
 	u32                     rxHead;
 	u32                     rxTail;
 	u32			rxEocCount;
 	TLanList                *txList;
+	dma_addr_t		txListDMA;
 	u8			*txBuffer;
+	dma_addr_t		txBufferDMA;
 	u32                     txHead;
 	u32                     txInProgress;
 	u32                     txTail;
@@ -209,6 +208,8 @@ typedef struct tlan_private_tag {
 	spinlock_t		lock;
 	u8			link;
 	u8			is_eisa;
+	struct tq_struct	tlan_tqueue;
+	u8			neg_be_verbose;
 } TLanPrivateInfo;
 
 

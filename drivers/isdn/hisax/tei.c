@@ -1,23 +1,27 @@
-/* $Id: tei.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+/* $Id: tei.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
  */
+
 #define __NO_VERSION__
 #include "hisax.h"
 #include "isdnl2.h"
 #include <linux/init.h>
 #include <linux/random.h>
 
-const char *tei_revision = "$Revision: 2.17 $";
+const char *tei_revision = "$Revision: 1.1.4.1 $";
 
 #define ID_REQUEST	1
 #define ID_ASSIGNED	2
@@ -446,14 +450,14 @@ static struct FsmNode TeiFnList[] __initdata =
 
 #define TEI_FN_COUNT (sizeof(TeiFnList)/sizeof(struct FsmNode))
 
-void __init
+int __init
 TeiNew(void)
 {
 	teifsm.state_count = TEI_STATE_COUNT;
 	teifsm.event_count = TEI_EVENT_COUNT;
 	teifsm.strEvent = strTeiEvent;
 	teifsm.strState = strTeiState;
-	FsmNew(&teifsm, TeiFnList, TEI_FN_COUNT);
+	return FsmNew(&teifsm, TeiFnList, TEI_FN_COUNT);
 }
 
 void

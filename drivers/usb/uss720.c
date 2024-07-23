@@ -33,6 +33,7 @@
  *   0.4  13.08.99  Added Vendor/Product ID of Brad Hard's cable
  *   0.5  20.09.99  usb_control_msg wrapper used
  *        Nov01.00  usb_device_table support by Adam J. Richter
+ *        08.04.01  Identify version on module load.  gb
  *
  */
 
@@ -43,6 +44,13 @@
 #include <linux/parport.h>
 #include <linux/init.h>
 #include <linux/usb.h>
+
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v0.5"
+#define DRIVER_AUTHOR "Thomas M. Sailer, sailer@ife.ee.ethz.ch"
+#define DRIVER_DESC "USB Parport Cable driver for Cables using the Lucent Technologies USS720 Chip"
 
 /* --------------------------------------------------------------------- */
 
@@ -67,9 +75,10 @@ static int get_1284_register(struct parport *pp, unsigned char reg, unsigned cha
 	if (!usbdev)
 		return -1;
 	ret = usb_control_msg(usbdev, usb_rcvctrlpipe(usbdev,0), 3, 0xc0, ((unsigned int)reg) << 8, 0, priv->reg, 7, HZ);
-	if (ret) {
-		printk(KERN_DEBUG "uss720: get_1284_register(%d) failed, status 0x%x\n",
+	if (ret != 7) {
+		printk(KERN_DEBUG "uss720: get_1284_register(%d) failed, status 0x%x expected 7\n",
 		       (unsigned int)reg, ret);
+		ret = -1;
 	} else {
 #if 0
 		printk(KERN_DEBUG "uss720: get_1284_register(%d) return %02x %02x %02x %02x %02x %02x %02x\n",
@@ -80,6 +89,7 @@ static int get_1284_register(struct parport *pp, unsigned char reg, unsigned cha
 		/* if nAck interrupts are enabled and we have an interrupt, call the interrupt procedure */
 		if (priv->reg[2] & priv->reg[1] & 0x10)
 			parport_generic_irq(0, pp, NULL);
+		ret = 0;
 	}
 	if (val)
 		*val = priv->reg[(reg >= 9) ? 0 : regindex[reg]];
@@ -149,7 +159,7 @@ static int change_mode(struct parport *pp, int m)
 				if (time_after_eq (jiffies, expire))
 					/* The FIFO is stuck. */
 					return -EBUSY;
-				current->state = TASK_INTERRUPTIBLE;
+				set_current_state(TASK_INTERRUPTIBLE);
 				schedule_timeout((HZ + 99) / 100);
 				if (signal_pending (current))
 					break;
@@ -317,13 +327,14 @@ static size_t parport_uss720_epp_read_data(struct parport *pp, void *buf, size_t
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t got = 0;
+	char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; got < length; got++) {
-		if (get_1284_register(pp, 4, (char *)buf))
+		if (get_1284_register(pp, 4, buff))
 			break;
-		((char*)buf)++;
+		buff++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -338,13 +349,14 @@ static size_t parport_uss720_epp_write_data(struct parport *pp, const void *buf,
 #if 0
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t written = 0;
+	const char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; written < length; written++) {
-		if (set_1284_register(pp, 4, (char *)buf))
+		if (set_1284_register(pp, 4, *buff))
 			break;
-		((char*)buf)++;
+		buff++;
 		if (get_1284_register(pp, 1, NULL))
 			break;
 		if (priv->reg[0] & 0x01) {
@@ -366,7 +378,7 @@ static size_t parport_uss720_epp_write_data(struct parport *pp, const void *buf,
 		return 0;
 	i = usb_bulk_msg(usbdev, usb_sndbulkpipe(usbdev, 1), (void *)buf, length, &rlen, HZ*20);
 	if (i)
-		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %u rlen %u\n", buf, length, rlen);
+		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %Zu rlen %u\n", buf, length, rlen);
 	change_mode(pp, ECR_PS2);
 	return rlen;
 #endif
@@ -376,13 +388,14 @@ static size_t parport_uss720_epp_read_addr(struct parport *pp, void *buf, size_t
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t got = 0;
+	char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; got < length; got++) {
-		if (get_1284_register(pp, 3, (char *)buf))
+		if (get_1284_register(pp, 3, buff))
 			break;
-		((char*)buf)++;
+		buff++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -396,13 +409,14 @@ static size_t parport_uss720_epp_write_addr(struct parport *pp, const void *buf,
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t written = 0;
+	const char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; written < length; written++) {
-		if (set_1284_register(pp, 3, *(char *)buf))
+		if (set_1284_register(pp, 3, *buff))
 			break;
-		((char*)buf)++;
+		buff++;
 		if (get_1284_register(pp, 1, NULL))
 			break;
 		if (priv->reg[0] & 0x01) {
@@ -427,7 +441,7 @@ static size_t parport_uss720_ecp_write_data(struct parport *pp, const void *buff
 		return 0;
 	i = usb_bulk_msg(usbdev, usb_sndbulkpipe(usbdev, 1), (void *)buffer, len, &rlen, HZ*20);
 	if (i)
-		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %u rlen %u\n", buffer, len, rlen);
+		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %Zu rlen %u\n", buffer, len, rlen);
 	change_mode(pp, ECR_PS2);
 	return rlen;
 }
@@ -445,7 +459,7 @@ static size_t parport_uss720_ecp_read_data(struct parport *pp, void *buffer, siz
 		return 0;
 	i = usb_bulk_msg(usbdev, usb_rcvbulkpipe(usbdev, 2), buffer, len, &rlen, HZ*20);
 	if (i)
-		printk(KERN_ERR "uss720: recvbulk ep 2 buf %p len %u rlen %u\n", buffer, len, rlen);
+		printk(KERN_ERR "uss720: recvbulk ep 2 buf %p len %Zu rlen %u\n", buffer, len, rlen);
 	change_mode(pp, ECR_PS2);
 	return rlen;
 }
@@ -453,13 +467,14 @@ static size_t parport_uss720_ecp_read_data(struct parport *pp, void *buffer, siz
 static size_t parport_uss720_ecp_write_addr(struct parport *pp, const void *buffer, size_t len, int flags)
 {
 	size_t written = 0;
+	const char *buff = buffer;
 
 	if (change_mode(pp, ECR_ECP))
 		return 0;
 	for (; written < len; written++) {
-		if (set_1284_register(pp, 5, *(char *)buffer))
+		if (set_1284_register(pp, 5, *buff))
 			break;
-		((char*)buffer)++;
+		buff++;
 	}
 	change_mode(pp, ECR_PS2);
 	return written;
@@ -478,7 +493,7 @@ static size_t parport_uss720_write_compat(struct parport *pp, const void *buffer
 		return 0;
 	i = usb_bulk_msg(usbdev, usb_sndbulkpipe(usbdev, 1), (void *)buffer, len, &rlen, HZ*20);
 	if (i)
-		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %u rlen %u\n", buffer, len, rlen);
+		printk(KERN_ERR "uss720: sendbulk ep 1 buf %p len %Zu rlen %u\n", buffer, len, rlen);
 	change_mode(pp, ECR_PS2);
 	return rlen;
 }
@@ -628,6 +643,7 @@ static struct usb_device_id uss720_table [] = {
 	{ USB_DEVICE(0x047e, 0x1001) },
 	{ USB_DEVICE(0x0557, 0x2001) },
 	{ USB_DEVICE(0x0729, 0x1284) },
+	{ USB_DEVICE(0x1293, 0x0002) },
 	{ }						/* Terminating entry */
 };
 
@@ -643,16 +659,16 @@ static struct usb_driver uss720_driver = {
 
 /* --------------------------------------------------------------------- */
 
-MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch");
-MODULE_DESCRIPTION("USB Parport Cable driver for Cables using the Lucent Technologies USS720 Chip");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
 static int __init uss720_init(void)
 {
 	if (usb_register(&uss720_driver) < 0)
 		return -1;
 
-	printk(KERN_INFO "uss720: USB<->IEEE1284 cable driver v0.4 registered.\n"
-	       KERN_INFO "uss720: (C) 1999 by Thomas Sailer, <sailer@ife.ee.ethz.ch>\n");
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
 }
 

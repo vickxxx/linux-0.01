@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -50,7 +49,7 @@
 #define MAX_PREMIUM_REGIONS     MAX_REGIONS
 
 /*
- * MAX_PARITIONS refers to the maximum number of logically defined 
+ * MAX_PARITIONS refers to the maximum number of logically defined
  * partitions the system can support.
  */
 #define MAX_PARTITIONS		MAX_REGIONS

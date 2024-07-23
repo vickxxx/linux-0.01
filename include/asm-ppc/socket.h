@@ -9,7 +9,7 @@
 #define SIOCATMARK	0x8905
 #define SIOCGSTAMP	0x8906		/* Get stamp */
 
-/* For setsockoptions(2) */
+/* For setsockopt(2) */
 #define SOL_SOCKET	1
 
 #define SO_DEBUG	1
@@ -49,6 +49,8 @@
 #define SO_TIMESTAMP		29
 #define SCM_TIMESTAMP		SO_TIMESTAMP
 
+#define SO_ACCEPTCONN		30
+
 /* Nast libc5 fixup - bletch */
 #if defined(__KERNEL__)
 /* Socket types. */
@@ -62,6 +64,7 @@
 					/* level.  For writing rarp and	*/
 					/* other similar things on the	*/
 					/* user level.			*/
-#endif
+#define	SOCK_MAX	(SOCK_PACKET+1)
+#endif /* __KERNEL__ */
 
 #endif /* _ASM_SOCKET_H */

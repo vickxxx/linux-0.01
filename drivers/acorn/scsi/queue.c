@@ -18,14 +18,12 @@
 #include <linux/blk.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/list.h>
+#include <linux/init.h>
 
 #include "../../scsi/scsi.h"
-
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("SCSI command queueing");
 
 #define DEBUG
 
@@ -231,6 +229,27 @@ Scsi_Cmnd *queue_remove_tgtluntag (Queue_t *queue, int target, int lun, int tag)
 }
 
 /*
+ * Function: queue_remove_all_target(queue, target)
+ * Purpose : remove all SCSI commands from the queue for a specified target
+ * Params  : queue  - queue to remove command from
+ *           target - target device id
+ * Returns : nothing
+ */
+void queue_remove_all_target(Queue_t *queue, int target)
+{
+	unsigned long flags;
+	struct list_head *l;
+
+	spin_lock_irqsave(&queue->queue_lock, flags);
+	list_for_each(l, &queue->head) {
+		QE_t *q = list_entry(l, QE_t, list);
+		if (q->SCpnt->target == target)
+			__queue_remove(queue, l);
+	}
+	spin_unlock_irqrestore(&queue->queue_lock, flags);
+}
+
+/*
  * Function: int queue_probetgtlun (queue, target, lun)
  * Purpose : check to see if we have a command in the queue for the specified
  *	     target/lun.
@@ -292,15 +311,9 @@ EXPORT_SYMBOL(queue_remove);
 EXPORT_SYMBOL(queue_remove_exclude);
 EXPORT_SYMBOL(queue_remove_tgtluntag);
 EXPORT_SYMBOL(queue_remove_cmd);
+EXPORT_SYMBOL(queue_remove_all_target);
 EXPORT_SYMBOL(queue_probetgtlun);
 
-#ifdef MODULE
-int init_module (void)
-{
-	return 0;
-}
-
-void cleanup_module (void)
-{
-}
-#endif
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("SCSI command queueing");
+MODULE_LICENSE("GPL");

@@ -1,4 +1,3 @@
-
 /* ------------------------------------------------------------------------- */
 /* i2c-algo-pcf.c i2c driver algorithms for PCF8584 adapters		     */
 /* ------------------------------------------------------------------------- */
@@ -24,22 +23,21 @@
    Frodo Looijaard <frodol@dds.nl> ,and also from Martin Bailey
    <mbailey@littlefeet-inc.com> */
 
-/* $Id: i2c-algo-pcf.c,v 1.25 2000/11/10 13:43:32 frodo Exp $ */
+/* Partially rewriten by Oleg I. Vdovikin <vdovikin@jscc.ru> to handle multiple
+   messages, proper stop/repstart signaling during receive,
+   added detect code */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
-#include <linux/version.h>
+#include <linux/slab.h>
 #include <linux/init.h>
-#include <asm/uaccess.h>
-#include <linux/ioport.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
-
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pcf.h>
 #include "i2c-pcf8584.h"
+
 
 /* ----- global defines ----------------------------------------------- */
 #define DEB(x) if (i2c_debug>=1) x
@@ -49,26 +47,9 @@
  	/* debug the protocol by showing transferred bits */
 #define DEF_TIMEOUT 16
 
-/* debugging - slow down transfer to have a look at the data .. 	*/
-/* I use this with two leds&resistors, each one connected to sda,scl 	*/
-/* respectively. This makes sure that the algorithm works. Some chips   */
-/* might not like this, as they have an internal timeout of some mils	*/
-/*
-#define SLO_IO      jif=jiffies;while(jiffies<=jif+i2c_table[minor].veryslow)\
-                        if (need_resched) schedule();
-*/
-
-
-/* ----- global variables ---------------------------------------------	*/
-
-#ifdef SLO_IO
-	int jif;
-#endif
-
 /* module parameters:
  */
-static int i2c_debug=1;
-static int pcf_test=0;	/* see if the line-setting functions work	*/
+static int i2c_debug=0;
 static int pcf_scan=0;	/* have a look at what's hanging 'round		*/
 
 /* --- setting states on the bus with the right timing: ---------------	*/
@@ -79,7 +60,6 @@ static int pcf_scan=0;	/* have a look at what's hanging 'round		*/
 #define get_clock(adap) adap->getclock(adap->data)
 #define i2c_outb(adap, val) adap->setpcf(adap->data, 0, val)
 #define i2c_inb(adap) adap->getpcf(adap->data, 0)
-
 
 /* --- other auxiliary functions --------------------------------------	*/
 
@@ -111,16 +91,15 @@ static int wait_for_bb(struct i2c_algo_pcf_data *adap) {
 	status = get_pcf(adap, 1);
 #ifndef STUB_I2C
 	while (timeout-- && !(status & I2C_PCF_BB)) {
-		udelay(1000); /* How much is this? */
+		udelay(100); /* wait for 100 us */
 		status = get_pcf(adap, 1);
 	}
 #endif
-	if (timeout<=0)
-		printk("Timeout waiting for Bus Busy\n");
-	/*
-	set_pcf(adap, 1, I2C_PCF_STOP);
-	*/
-	return(timeout<=0);
+	if (timeout <= 0) {
+		printk(KERN_ERR "Timeout waiting for Bus Busy\n");
+	}
+	
+	return (timeout<=0);
 }
 
 
@@ -147,7 +126,6 @@ static int wait_for_pin(struct i2c_algo_pcf_data *adap, int *status) {
 		return(0);
 }
 
-
 /* 
  * This should perform the 'PCF8584 initialization sequence' as described
  * in the Philips IC12 data book (1995, Aug 29).
@@ -156,110 +134,63 @@ static int wait_for_pin(struct i2c_algo_pcf_data *adap, int *status) {
  * There should be a delay at the end equal to the longest I2C message
  * to synchronize the BB-bit (in multimaster systems). How long is
  * this? I assume 1 second is always long enough.
+ *
+ * vdovikin: added detect code for PCF8584
  */
 static int pcf_init_8584 (struct i2c_algo_pcf_data *adap)
 {
+	unsigned char temp;
 
-	/* S1=0x80: S0 selected, serial interface off			*/
+	DEB3(printk(KERN_DEBUG "i2c-algo-pcf.o: PCF state 0x%02x\n", get_pcf(adap, 1)));
+
+	/* S1=0x80: S0 selected, serial interface off */
 	set_pcf(adap, 1, I2C_PCF_PIN);
+	/* check to see S1 now used as R/W ctrl -
+	   PCF8584 does that when ESO is zero */
+	/* PCF also resets PIN bit */
+	if ((temp = get_pcf(adap, 1)) != (0)) {
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: PCF detection failed -- can't select S0 (0x%02x).\n", temp));
+		return -ENXIO; /* definetly not PCF8584 */
+	}
 
 	/* load own address in S0, effective address is (own << 1)	*/
 	i2c_outb(adap, get_own(adap));
+	/* check it's realy writen */
+	if ((temp = i2c_inb(adap)) != get_own(adap)) {
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: PCF detection failed -- can't set S0 (0x%02x).\n", temp));
+		return -ENXIO;
+	}
 
 	/* S1=0xA0, next byte in S2					*/
 	set_pcf(adap, 1, I2C_PCF_PIN | I2C_PCF_ES1);
+	/* check to see S2 now selected */
+	if ((temp = get_pcf(adap, 1)) != I2C_PCF_ES1) {
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: PCF detection failed -- can't select S2 (0x%02x).\n", temp));
+		return -ENXIO;
+	}
 
 	/* load clock register S2					*/
 	i2c_outb(adap, get_clock(adap));
+	/* check it's realy writen, the only 5 lowest bits does matter */
+	if (((temp = i2c_inb(adap)) & 0x1f) != get_clock(adap)) {
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: PCF detection failed -- can't set S2 (0x%02x).\n", temp));
+		return -ENXIO;
+	}
 
 	/* Enable serial interface, idle, S0 selected			*/
 	set_pcf(adap, 1, I2C_PCF_IDLE);
 
-	DEB2(printk("i2c-algo-pcf.o: irq: Initialized 8584.\n"));
+	/* check to see PCF is realy idled and we can access status register */
+	if ((temp = get_pcf(adap, 1)) != (I2C_PCF_PIN | I2C_PCF_BB)) {
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: PCF detection failed -- can't select S1` (0x%02x).\n", temp));
+		return -ENXIO;
+	}
+	
+	printk(KERN_DEBUG "i2c-algo-pcf.o: deteted and initialized PCF8584.\n");
+
 	return 0;
 }
 
-
-/*
- * Sanity check for the adapter hardware - check the reaction of
- * the bus lines only if it seems to be idle.
- */
-static int test_bus(struct i2c_algo_pcf_data *adap, char *name) {
-#if 0
-	int scl,sda;
-	sda=getsda(adap);
-	if (adap->getscl==NULL) {
-		printk("i2c-algo-pcf.o: Warning: Adapter can't read from clock line - skipping test.\n");
-		return 0;		
-	}
-	scl=getscl(adap);
-	printk("i2c-algo-pcf.o: Adapter: %s scl: %d  sda: %d -- testing...\n",
-	name,getscl(adap),getsda(adap));
-	if (!scl || !sda ) {
-		printk("i2c-algo-pcf.o: %s seems to be busy.\n",adap->name);
-		goto bailout;
-	}
-	sdalo(adap);
-	printk("i2c-algo-pcf.o:1 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 != getsda(adap) ) {
-		printk("i2c-algo-pcf.o: %s SDA stuck high!\n",name);
-		sdahi(adap);
-		goto bailout;
-	}
-	if ( 0 == getscl(adap) ) {
-		printk("i2c-algo-pcf.o: %s SCL unexpected low while pulling SDA low!\n",
-			name);
-		goto bailout;
-	}		
-	sdahi(adap);
-	printk("i2c-algo-pcf.o:2 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 == getsda(adap) ) {
-		printk("i2c-algo-pcf.o: %s SDA stuck low!\n",name);
-		sdahi(adap);
-		goto bailout;
-	}
-	if ( 0 == getscl(adap) ) {
-		printk("i2c-algo-pcf.o: %s SCL unexpected low while SDA high!\n",
-		       adap->name);
-	goto bailout;
-	}
-	scllo(adap);
-	printk("i2c-algo-pcf.o:3 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 != getscl(adap) ) {
-		printk("i2c-algo-pcf.o: %s SCL stuck high!\n",name);
-		sclhi(adap);
-		goto bailout;
-	}
-	if ( 0 == getsda(adap) ) {
-		printk("i2c-algo-pcf.o: %s SDA unexpected low while pulling SCL low!\n",
-			name);
-		goto bailout;
-	}
-	sclhi(adap);
-	printk("i2c-algo-pcf.o:4 scl: %d  sda: %d \n",getscl(adap),
-	       getsda(adap));
-	if ( 0 == getscl(adap) ) {
-		printk("i2c-algo-pcf.o: %s SCL stuck low!\n",name);
-		sclhi(adap);
-		goto bailout;
-	}
-	if ( 0 == getsda(adap) ) {
-		printk("i2c-algo-pcf.o: %s SDA unexpected low while SCL high!\n",
-			name);
-		goto bailout;
-	}
-	printk("i2c-algo-pcf.o: %s passed test.\n",name);
-	return 0;
-bailout:
-	sdahi(adap);
-	sclhi(adap);
-	return -ENODEV;
-#endif
-	return (0);
-}
 
 /* ----- Utility functions
  */
@@ -281,90 +212,91 @@ static inline int try_address(struct i2c_algo_pcf_data *adap,
 		i2c_stop(adap);
 		udelay(adap->udelay);
 	}
-	DEB2(if (i) printk("i2c-algo-pcf.o: needed %d retries for %d\n",i,
+	DEB2(if (i) printk(KERN_DEBUG "i2c-algo-pcf.o: needed %d retries for %d\n",i,
 	                   addr));
 	return ret;
 }
 
 
-static int pcf_sendbytes(struct i2c_adapter *i2c_adap,const char *buf,
-                         int count)
+static int pcf_sendbytes(struct i2c_adapter *i2c_adap, const char *buf,
+                         int count, int last)
 {
 	struct i2c_algo_pcf_data *adap = i2c_adap->algo_data;
 	int wrcount, status, timeout;
     
 	for (wrcount=0; wrcount<count; ++wrcount) {
-		DEB2(printk("i2c-algo-pcf.o: %s i2c_write: writing %2.2X\n",
+		DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: %s i2c_write: writing %2.2X\n",
 		      i2c_adap->name, buf[wrcount]&0xff));
 		i2c_outb(adap, buf[wrcount]);
 		timeout = wait_for_pin(adap, &status);
 		if (timeout) {
 			i2c_stop(adap);
-			printk("i2c-algo-pcf.o: %s i2c_write: "
+			printk(KERN_ERR "i2c-algo-pcf.o: %s i2c_write: "
 			       "error - timeout.\n", i2c_adap->name);
 			return -EREMOTEIO; /* got a better one ?? */
 		}
 #ifndef STUB_I2C
 		if (status & I2C_PCF_LRB) {
 			i2c_stop(adap);
-			printk("i2c-algo-pcf.o: %s i2c_write: "
+			printk(KERN_ERR "i2c-algo-pcf.o: %s i2c_write: "
 			       "error - no ack.\n", i2c_adap->name);
 			return -EREMOTEIO; /* got a better one ?? */
 		}
 #endif
 	}
-	i2c_stop(adap);
+	if (last) {
+		i2c_stop(adap);
+	}
+	else {
+		i2c_repstart(adap);
+	}
+
 	return (wrcount);
 }
 
 
-static int pcf_readbytes(struct i2c_adapter *i2c_adap, char *buf, int count)
+static int pcf_readbytes(struct i2c_adapter *i2c_adap, char *buf,
+                         int count, int last)
 {
-	int rdcount=0, i, status, timeout, dummy=1;
+	int i, status;
 	struct i2c_algo_pcf_data *adap = i2c_adap->algo_data;
-    
-	for (i=0; i<count; ++i) {
-		buf[rdcount] = i2c_inb(adap);
-		if (dummy) {
-			dummy = 0;
-		} else {
-			rdcount++;
-		}
-		timeout = wait_for_pin(adap, &status);
-		if (timeout) {
+
+	/* increment number of bytes to read by one -- read dummy byte */
+	for (i = 0; i <= count; i++) {
+
+		if (wait_for_pin(adap, &status)) {
 			i2c_stop(adap);
-			printk("i2c-algo-pcf.o: i2c_read: "
-			       "i2c_inb timed out.\n");
+			printk(KERN_ERR "i2c-algo-pcf.o: pcf_readbytes timed out.\n");
 			return (-1);
 		}
+
 #ifndef STUB_I2C
-		if (status & I2C_PCF_LRB) {
+		if ((status & I2C_PCF_LRB) && (i != count)) {
 			i2c_stop(adap);
-			printk("i2c-algo-pcf.o: i2c_read: i2c_inb, No ack.\n");
+			printk(KERN_ERR "i2c-algo-pcf.o: i2c_read: i2c_inb, No ack.\n");
 			return (-1);
 		}
 #endif
-	}
-	set_pcf(adap, 1, I2C_PCF_ESO);
-	buf[rdcount] = i2c_inb(adap);
-	if (dummy) {
-		dummy = 0;
-	} else {
-		rdcount++;
-	}
-	timeout = wait_for_pin(adap, &status);
-	if (timeout) {
-		i2c_stop(adap);
-		printk("i2c-algo-pcf.o: i2c_read: i2c_inb timed out.\n");
-		return (-1);
-	}
-    
-	i2c_stop(adap);
+		
+		if (i == count - 1) {
+			set_pcf(adap, 1, I2C_PCF_ESO);
+		} else 
+		if (i == count) {
+			if (last) {
+				i2c_stop(adap);
+			} else {
+				i2c_repstart(adap);
+			}
+		};
 
-	/* Read final byte from S0 register */
-	buf[rdcount++] = i2c_inb(adap);
+		if (i) {
+			buf[i - 1] = i2c_inb(adap);
+		} else {
+			i2c_inb(adap); /* dummy read */
+		}
+	}
 
-	return (rdcount);
+	return (i - 1);
 }
 
 
@@ -377,18 +309,18 @@ static inline int pcf_doAddress(struct i2c_algo_pcf_data *adap,
 	if ( (flags & I2C_M_TEN)  ) { 
 		/* a ten bit address */
 		addr = 0xf0 | (( msg->addr >> 7) & 0x03);
-		DEB2(printk("addr0: %d\n",addr));
+		DEB2(printk(KERN_DEBUG "addr0: %d\n",addr));
 		/* try extended address code...*/
 		ret = try_address(adap, addr, retries);
 		if (ret!=1) {
-			printk("died at extended address code.\n");
+			printk(KERN_ERR "died at extended address code.\n");
 			return -EREMOTEIO;
 		}
 		/* the remaining 8 bit address */
 		i2c_outb(adap,msg->addr & 0x7f);
 /* Status check comes here */
 		if (ret != 1) {
-			printk("died at 2nd address code.\n");
+			printk(KERN_ERR "died at 2nd address code.\n");
 			return -EREMOTEIO;
 		}
 		if ( flags & I2C_M_RD ) {
@@ -397,7 +329,7 @@ static inline int pcf_doAddress(struct i2c_algo_pcf_data *adap,
 			addr |= 0x01;
 			ret = try_address(adap, addr, retries);
 			if (ret!=1) {
-				printk("died at extended address code.\n");
+				printk(KERN_ERR "died at extended address code.\n");
 				return -EREMOTEIO;
 			}
 		}
@@ -418,77 +350,79 @@ static int pcf_xfer(struct i2c_adapter *i2c_adap,
 {
 	struct i2c_algo_pcf_data *adap = i2c_adap->algo_data;
 	struct i2c_msg *pmsg;
-	int i = 0;
-	int ret, timeout, status;
+	int i;
+	int ret=0, timeout, status;
     
-	pmsg = &msgs[i];
-    
-	/* Send address here if Read */
-	if (pmsg->flags & I2C_M_RD) {
-		ret = pcf_doAddress(adap, pmsg, i2c_adap->retries);
-	}
-    
+
 	/* Check for bus busy */
 	timeout = wait_for_bb(adap);
 	if (timeout) {
-		DEB2(printk("i2c-algo-pcf.o: "
+		DEB2(printk(KERN_ERR "i2c-algo-pcf.o: "
 		            "Timeout waiting for BB in pcf_xfer\n");)
 		return -EIO;
 	}
+	
+	for (i = 0;ret >= 0 && i < num; i++) {
+		pmsg = &msgs[i];
+
+		DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: Doing %s %d bytes to 0x%02x - %d of %d messages\n",
+		     pmsg->flags & I2C_M_RD ? "read" : "write",
+                     pmsg->len, pmsg->addr, i + 1, num);)
     
-	/* Send address here if Write */
-	if (!(pmsg->flags & I2C_M_RD)) {
 		ret = pcf_doAddress(adap, pmsg, i2c_adap->retries);
-	}
-	/* Send START */
-	i2c_start(adap);
+
+		/* Send START */
+		if (i == 0) {
+			i2c_start(adap); 
+		}
     
-	/* Wait for PIN (pending interrupt NOT) */
-	timeout = wait_for_pin(adap, &status);
-	if (timeout) {
-		i2c_stop(adap);
-		DEB2(printk("i2c-algo-pcf.o: Timeout waiting "
-		            "for PIN(1) in pcf_xfer\n");)
-		return (-EREMOTEIO);
-	}
+		/* Wait for PIN (pending interrupt NOT) */
+		timeout = wait_for_pin(adap, &status);
+		if (timeout) {
+			i2c_stop(adap);
+			DEB2(printk(KERN_ERR "i2c-algo-pcf.o: Timeout waiting "
+				    "for PIN(1) in pcf_xfer\n");)
+			return (-EREMOTEIO);
+		}
     
 #ifndef STUB_I2C
-	/* Check LRB (last rcvd bit - slave ack) */
-	if (status & I2C_PCF_LRB) {
-		i2c_stop(adap);
-		DEB2(printk("i2c-algo-pcf.o: No LRB(1) in pcf_xfer\n");)
-		return (-EREMOTEIO);
-	}
+		/* Check LRB (last rcvd bit - slave ack) */
+		if (status & I2C_PCF_LRB) {
+			i2c_stop(adap);
+			DEB2(printk(KERN_ERR "i2c-algo-pcf.o: No LRB(1) in pcf_xfer\n");)
+			return (-EREMOTEIO);
+		}
 #endif
     
-	DEB3(printk("i2c-algo-pcf.o: Msg %d, addr=0x%x, flags=0x%x, len=%d\n",
-	            i, msgs[i].addr, msgs[i].flags, msgs[i].len);)
+		DEB3(printk(KERN_DEBUG "i2c-algo-pcf.o: Msg %d, addr=0x%x, flags=0x%x, len=%d\n",
+			    i, msgs[i].addr, msgs[i].flags, msgs[i].len);)
     
-	/* Read */
-	if (pmsg->flags & I2C_M_RD) {
+		/* Read */
+		if (pmsg->flags & I2C_M_RD) {
+			/* read bytes into buffer*/
+			ret = pcf_readbytes(i2c_adap, pmsg->buf, pmsg->len,
+                                            (i + 1 == num));
         
-		/* read bytes into buffer*/
-		ret = pcf_readbytes(i2c_adap, pmsg->buf, pmsg->len);
+			if (ret != pmsg->len) {
+				DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: fail: "
+					    "only read %d bytes.\n",ret));
+			} else {
+				DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: read %d bytes.\n",ret));
+			}
+		} else { /* Write */
+			ret = pcf_sendbytes(i2c_adap, pmsg->buf, pmsg->len,
+                                            (i + 1 == num));
         
-		if (ret != pmsg->len) {
-			DEB2(printk("i2c-algo-pcf.o: fail: "
-			            "only read %d bytes.\n",ret));
-		} else {
-			DEB2(printk("i2c-algo-pcf.o: read %d bytes.\n",ret));
-		}
-	} else { /* Write */
-        
-        /* Write bytes from buffer */
-		ret = pcf_sendbytes(i2c_adap, pmsg->buf, pmsg->len);
-        
-		if (ret != pmsg->len) {
-			DEB2(printk("i2c-algo-pcf.o: fail: "
-			            "only wrote %d bytes.\n",ret));
-		} else {
-			DEB2(printk("i2c-algo-pcf.o: wrote %d bytes.\n",ret));
+			if (ret != pmsg->len) {
+				DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: fail: "
+					    "only wrote %d bytes.\n",ret));
+			} else {
+				DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: wrote %d bytes.\n",ret));
+			}
 		}
 	}
-	return (num);
+
+	return (i);
 }
 
 static int algo_control(struct i2c_adapter *adapter, 
@@ -499,21 +433,18 @@ static int algo_control(struct i2c_adapter *adapter,
 
 static u32 pcf_func(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR | 
-	       I2C_FUNC_PROTOCOL_MANGLING; 
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL |
+	       I2C_FUNC_10BIT_ADDR | I2C_FUNC_PROTOCOL_MANGLING;
 }
 
 /* -----exported algorithm data: -------------------------------------	*/
 
 static struct i2c_algorithm pcf_algo = {
-	"PCF8584 algorithm",
-	I2C_ALGO_PCF,
-	pcf_xfer,
-	NULL,
-	NULL,				/* slave_xmit		*/
-	NULL,				/* slave_recv		*/
-	algo_control,			/* ioctl		*/
-	pcf_func,			/* functionality	*/
+	.name		= "PCF8584 algorithm",
+	.id		= I2C_ALGO_PCF,
+	.master_xfer	= pcf_xfer,
+	.algo_control	= algo_control,
+	.functionality	= pcf_func,
 };
 
 /* 
@@ -524,13 +455,7 @@ int i2c_pcf_add_bus(struct i2c_adapter *adap)
 	int i, status;
 	struct i2c_algo_pcf_data *pcf_adap = adap->algo_data;
 
-	if (pcf_test) {
-		int ret = test_bus(pcf_adap, adap->name);
-		if (ret<0)
-			return -ENODEV;
-	}
-
-	DEB2(printk("i2c-algo-pcf.o: hw routines for %s registered.\n",
+	DEB2(printk(KERN_DEBUG "i2c-algo-pcf.o: hw routines for %s registered.\n",
 	            adap->name));
 
 	/* register new adapter to i2c module... */
@@ -538,21 +463,27 @@ int i2c_pcf_add_bus(struct i2c_adapter *adap)
 	adap->id |= pcf_algo.id;
 	adap->algo = &pcf_algo;
 
-	adap->timeout = 100;	/* default values, should	*/
+	adap->timeout = 100;		/* default values, should	*/
 	adap->retries = 3;		/* be replaced by defines	*/
+
+	if ((i = pcf_init_8584(pcf_adap))) {
+		return i;
+	}
 
 #ifdef MODULE
 	MOD_INC_USE_COUNT;
 #endif
-
-	i2c_add_adapter(adap);
-	pcf_init_8584(pcf_adap);
 
 	/* scan bus */
 	if (pcf_scan) {
 		printk(KERN_INFO " i2c-algo-pcf.o: scanning bus %s.\n",
 		       adap->name);
 		for (i = 0x00; i < 0xff; i+=2) {
+			if (wait_for_bb(pcf_adap)) {
+    			printk(KERN_INFO " i2c-algo-pcf.o: scanning bus %s - TIMEOUTed.\n",
+		           adap->name);
+			    break;
+			}
 			i2c_outb(pcf_adap, i);
 			i2c_start(pcf_adap);
 			if ((wait_for_pin(pcf_adap, &status) >= 0) && 
@@ -566,7 +497,8 @@ int i2c_pcf_add_bus(struct i2c_adapter *adap)
 		}
 		printk("\n");
 	}
-	return 0;
+
+	return i2c_add_adapter(adap);
 }
 
 
@@ -589,19 +521,17 @@ int __init i2c_algo_pcf_init (void)
 	return 0;
 }
 
-
 EXPORT_SYMBOL(i2c_pcf_add_bus);
 EXPORT_SYMBOL(i2c_pcf_del_bus);
 
 #ifdef MODULE
 MODULE_AUTHOR("Hans Berglund <hb@spacetec.no>");
 MODULE_DESCRIPTION("I2C-Bus PCF8584 algorithm");
+MODULE_LICENSE("GPL");
 
-MODULE_PARM(pcf_test, "i");
 MODULE_PARM(pcf_scan, "i");
 MODULE_PARM(i2c_debug,"i");
 
-MODULE_PARM_DESC(pcf_test, "Test if the I2C bus is available");
 MODULE_PARM_DESC(pcf_scan, "Scan for active chips on the bus");
 MODULE_PARM_DESC(i2c_debug,
         "debug level - 0 off; 1 normal; 2,3 more verbose; 9 pcf-protocol");

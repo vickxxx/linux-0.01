@@ -2,16 +2,13 @@
  *
  * Name:	skvpd.h
  * Project:	GEnesis, PCI Gigabit Ethernet Adapter
- * Version:	$Revision: 1.10 $
- * Date:	$Date: 2000/08/10 11:29:07 $
  * Purpose:	Defines and Macros for VPD handling
  *
  ******************************************************************************/
 
 /******************************************************************************
  *
- *	(C)Copyright 1998-2000 SysKonnect,
- *	a business unit of Schneider & Koch & Co. Datensysteme GmbH.
+ *	(C)Copyright 1998-2003 SysKonnect GmbH.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -19,49 +16,6 @@
  *	(at your option) any later version.
  *
  *	The information in this file is provided "AS IS" without warranty.
- *
- ******************************************************************************/
-
-/******************************************************************************
- *
- * History:
- *
- *	$Log: skvpd.h,v $
- *	Revision 1.10  2000/08/10 11:29:07  rassmann
- *	Editorial changes.
- *	Preserving 32-bit alignment in structs for the adapter context.
- *	Removed unused function VpdWriteDword() (#if 0).
- *	Made VpdReadKeyword() available for SKDIAG only.
- *	
- *	Revision 1.9  1999/11/22 14:02:27  cgoos
- *	Changed license header to GPL.
- *	
- *	Revision 1.8  1999/03/11 14:26:40  malthoff
- *	Replace __STDC__ with SK_KR_PROTO.
- *	
- *	Revision 1.7  1998/10/28 07:27:17  gklug
- *	rmv: SWAP macros
- *	add: VPD_IN/OUT8 macros
- *	chg: interface definition
- *	
- *	Revision 1.6  1998/10/22 10:03:44  gklug
- *	fix: use SK_OUT16 instead of SK_OUTW
- *	
- *	Revision 1.5  1998/10/14 07:05:31  cgoos
- *	Changed constants in SK_SWAP_32 to UL.
- *	
- *	Revision 1.4  1998/08/19 08:14:09  gklug
- *	fix: remove struct keyword as much as possible from the c-code (see CCC)
- *	
- *	Revision 1.3  1998/08/18 08:18:56  malthoff
- *	Modify VPD in and out macros for SK_DIAG
- *	
- *	Revision 1.2  1998/07/03 14:49:08  malthoff
- *	Add VPD_INxx() and VPD_OUTxx() macros for the Diagnostics tool.
- *	
- *	Revision 1.1  1998/06/19 14:08:03  malthoff
- *	Created.
- *	
  *
  ******************************************************************************/
 
@@ -105,7 +59,12 @@
 /*
  * Define READ and WRITE Constants.
  */
-#define	VPD_SIZE	512
+
+#define VPD_DEV_ID_GENESIS 	0x4300
+
+#define	VPD_SIZE_YUKON		256
+#define	VPD_SIZE_GENESIS	512
+#define	VPD_SIZE			512
 #define VPD_READ	0x0000
 #define VPD_WRITE	0x8000
 
@@ -137,6 +96,8 @@ typedef	struct s_vpd_status {
 typedef	struct s_vpd {
 	SK_VPD_STATUS	v;					/* VPD status structure */
 	char			vpd_buf[VPD_SIZE];	/* VPD buffer */
+	int				rom_size;			/* VPD ROM Size from PCI_OUR_REG_2 */
+	int				vpd_size;			/* saved VPD-size */
 } SK_VPD;
 
 typedef	struct s_vpd_para {
@@ -151,7 +112,7 @@ typedef	struct s_vpd_para {
 /* was removed because of alignment problems */
 
 /*
- * sturcture of VPD keywords
+ * structure of VPD keywords
  */
 typedef	struct s_vpd_key {
 	char			p_key[2];	/* 2 bytes ID string */
@@ -230,8 +191,8 @@ extern SK_U32	VpdReadDWord(
 
 extern int	VpdSetupPara(
 	SK_AC		*pAC,
-	char		*key,
-	char		*buf,
+	const char	*key,
+	const char	*buf,
 	int			len,
 	int			type,
 	int			op);
@@ -250,18 +211,18 @@ extern int	VpdKeys(
 extern int	VpdRead(
 	SK_AC		*pAC,
 	SK_IOC		IoC,
-	char		*key,
+	const char	*key,
 	char		*buf,
 	int			*len);
 
-extern	SK_BOOL	VpdMayWrite(
+extern SK_BOOL	VpdMayWrite(
 	char		*key);
 
 extern int	VpdWrite(
 	SK_AC		*pAC,
 	SK_IOC		IoC,
-	char		*key,
-	char		*buf);
+	const char	*key,
+	const char	*buf);
 
 extern int	VpdDelete(
 	SK_AC		*pAC,

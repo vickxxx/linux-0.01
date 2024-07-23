@@ -18,7 +18,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/irq.h>
@@ -38,7 +38,7 @@ irq_desc_t irq_desc[NR_IRQS] __cacheline_aligned = {
 
 static void register_irq_proc(unsigned int irq);
 
-unsigned long irq_err_count;
+volatile unsigned long irq_err_count;
 
 /*
  * Special irq handlers.
@@ -214,7 +214,7 @@ setup_irq(unsigned int irq, struct irqaction * new)
 
 	if (!shared) {
 		desc->depth = 0;
-		desc->status &= ~IRQ_DISABLED;
+		desc->status &= ~(IRQ_DISABLED | IRQ_INPROGRESS);
 		desc->handler->startup(irq);
 	}
 	spin_unlock_irqrestore(&desc->lock,flags);
@@ -359,7 +359,9 @@ prof_cpu_mask_write_proc(struct file *file, const char *buffer,
 static void
 register_irq_proc (unsigned int irq)
 {
+#ifdef CONFIG_SMP
 	struct proc_dir_entry *entry;
+#endif
 	char name [MAX_NAMELEN];
 
 	if (!root_irq_dir || (irq_desc[irq].handler == &no_irq_type))
@@ -372,15 +374,17 @@ register_irq_proc (unsigned int irq)
 	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
 
 #ifdef CONFIG_SMP
-	/* create /proc/irq/1234/smp_affinity */
-	entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
+	if (irq_desc[irq].handler->set_affinity) {
+		/* create /proc/irq/1234/smp_affinity */
+		entry = create_proc_entry("smp_affinity", 0600, irq_dir[irq]);
 
-	entry->nlink = 1;
-	entry->data = (void *)(long)irq;
-	entry->read_proc = irq_affinity_read_proc;
-	entry->write_proc = irq_affinity_write_proc;
+		entry->nlink = 1;
+		entry->data = (void *)(long)irq;
+		entry->read_proc = irq_affinity_read_proc;
+		entry->write_proc = irq_affinity_write_proc;
 
-	smp_affinity_entry[irq] = entry;
+		smp_affinity_entry[irq] = entry;
+	}
 #endif
 }
 
@@ -389,7 +393,9 @@ unsigned long prof_cpu_mask = ~0UL;
 void
 init_irq_proc (void)
 {
+#ifdef CONFIG_SMP
 	struct proc_dir_entry *entry;
+#endif
 	int i;
 
 	/* create /proc/irq */
@@ -406,12 +412,16 @@ init_irq_proc (void)
 #endif
 
 	/*
-	 * Create entries for all existing IRQs.
+	 * Create entries for all existing IRQs. If the number of IRQs
+	 * is greater the 1/4 the total dynamic inode space for /proc,
+	 * don't pollute the inode space
 	 */
-	for (i = 0; i < NR_IRQS; i++) {
-		if (irq_desc[i].handler == &no_irq_type)
-			continue;
-		register_irq_proc(i);
+	if (ACTUAL_NR_IRQS < (PROC_NDYNAMIC / 4)) {
+		for (i = 0; i < ACTUAL_NR_IRQS; i++) {
+			if (irq_desc[i].handler == &no_irq_type)
+				continue;
+			register_irq_proc(i);
+		}
 	}
 }
 
@@ -512,7 +522,10 @@ free_irq(unsigned int irq, void *dev_id)
 int
 get_irq_list(char *buf)
 {
-	int i, j;
+#ifdef CONFIG_SMP
+	int j;
+#endif
+	int i;
 	struct irqaction * action;
 	char *p = buf;
 
@@ -527,7 +540,7 @@ get_irq_list(char *buf)
 	*p++ = '\n';
 #endif
 
-	for (i = 0; i < NR_IRQS; i++) {
+	for (i = 0; i < ACTUAL_NR_IRQS; i++) {
 		action = irq_desc[i].action;
 		if (!action) 
 			continue;
@@ -569,10 +582,13 @@ get_irq_list(char *buf)
 
 
 /*
- * do_IRQ handles all normal device IRQ's (the special
+ * handle_irq handles all normal device IRQ's (the special
  * SMP cross-CPU interrupts have their own specific
  * handlers).
  */
+
+#define MAX_ILLEGAL_IRQS 16
+
 void
 handle_irq(int irq, struct pt_regs * regs)
 {	
@@ -590,9 +606,11 @@ handle_irq(int irq, struct pt_regs * regs)
 	irq_desc_t *desc = irq_desc + irq;
 	struct irqaction * action;
 	unsigned int status;
-
-	if ((unsigned) irq > ACTUAL_NR_IRQS) {
+	static unsigned int illegal_count=0;
+	
+	if ((unsigned) irq > ACTUAL_NR_IRQS && illegal_count < MAX_ILLEGAL_IRQS ) {
 		irq_err_count++;
+		illegal_count++;
 		printk(KERN_CRIT "device_interrupt: illegal interrupt %d\n",
 		       irq);
 		return;
@@ -632,7 +650,7 @@ handle_irq(int irq, struct pt_regs * regs)
 	/*
 	 * Edge triggered interrupts need to remember pending events.
 	 * This applies to any hw interrupts that allow a second
-	 * instance of the same irq to arrive while we are in do_IRQ
+	 * instance of the same irq to arrive while we are in handle_irq
 	 * or in the handler. But the code here only handles the _second_
 	 * instance of the irq, not the third or fourth. So it is mostly
 	 * useful for irq hardware that does not mask cleanly in an
@@ -656,6 +674,9 @@ out:
 	 */
 	desc->handler->end(irq);
 	spin_unlock(&desc->lock);
+
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 
 /*

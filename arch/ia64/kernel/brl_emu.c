@@ -1,7 +1,10 @@
 /*
  *  Emulation of the "brl" instruction for IA64 processors that
- *  don't support it in hardware. 
+ *  don't support it in hardware.
  *  Author: Stephan Zeisset, Intel Corp. <Stephan.Zeisset@intel.com>
+ *
+ *    02/22/02	D. Mosberger	Clear si_flgs, si_isr, and si_imm to avoid
+ *				leaking kernel bits.
  */
 
 #include <linux/kernel.h>
@@ -23,9 +26,9 @@ struct illegal_op_return {
  *  of an and operation with the mask must be all 0's
  *  or all 1's for the address to be valid.
  */
-#define unimplemented_virtual_address(va) (					\
-	((va) & my_cpu_data.unimpl_va_mask) != 0 &&				\
-	((va) & my_cpu_data.unimpl_va_mask) != my_cpu_data.unimpl_va_mask	\
+#define unimplemented_virtual_address(va) (						\
+	((va) & local_cpu_data->unimpl_va_mask) != 0 &&					\
+	((va) & local_cpu_data->unimpl_va_mask) != local_cpu_data->unimpl_va_mask	\
 )
 
 /*
@@ -35,13 +38,13 @@ struct illegal_op_return {
  *  address to be valid.
  */
 #define unimplemented_physical_address(pa) (		\
-	((pa) & my_cpu_data.unimpl_pa_mask) != 0	\
+	((pa) & local_cpu_data->unimpl_pa_mask) != 0	\
 )
 
 /*
- *  Handle an illegal operation fault that was caused by an 
+ *  Handle an illegal operation fault that was caused by an
  *  unimplemented "brl" instruction.
- *  If we are not successful (e.g because the illegal operation 
+ *  If we are not successful (e.g because the illegal operation
  *  wasn't caused by a "brl" after all), we return -1.
  *  If we are successful, we return either 0 or the address
  *  of a "fixup" function for manipulating preserved register
@@ -52,11 +55,11 @@ struct illegal_op_return
 ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 {
 	unsigned long bundle[2];
-	unsigned long opcode, btype, qp, offset;
+	unsigned long opcode, btype, qp, offset, cpl;
 	unsigned long next_ip;
 	struct siginfo siginfo;
 	struct illegal_op_return rv;
-	int tmp_taken, unimplemented_address;
+	long tmp_taken, unimplemented_address;
 
 	rv.fkt = (unsigned long) -1;
 
@@ -64,8 +67,8 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 	 *  Decode the instruction bundle.
 	 */
 
-        if (copy_from_user(bundle, (void *) (regs->cr_iip), sizeof(bundle)))
-                return rv; 
+	if (copy_from_user(bundle, (void *) (regs->cr_iip), sizeof(bundle)))
+		return rv;
 
 	next_ip = (unsigned long) regs->cr_iip + 16;
 
@@ -79,14 +82,14 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 	btype = ((bundle[1] >> 29) & 0x7);
 	qp = ((bundle[1] >> 23) & 0x3f);
 	offset = ((bundle[1] & 0x0800000000000000L) << 4)
-		| ((bundle[1] & 0x00fffff000000000L) >> 32) 
+		| ((bundle[1] & 0x00fffff000000000L) >> 32)
 		| ((bundle[1] & 0x00000000007fffffL) << 40)
 		| ((bundle[0] & 0xffff000000000000L) >> 24);
 
 	tmp_taken = regs->pr & (1L << qp);
 
 	switch(opcode) {
-		
+
 		case 0xC:
 			/*
 			 *  Long Branch.
@@ -155,9 +158,9 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 			 *  AR[PFS].pec = AR[EC]
 			 *  AR[PFS].ppl = PSR.cpl
 			 */
+			cpl = ia64_psr(regs)->cpl;
 			regs->ar_pfs = ((regs->cr_ifs & 0x3fffffffff)
-					| (ar_ec << 52)
-					| ((unsigned long) ia64_psr(regs)->cpl << 62));
+					| (ar_ec << 52) | (cpl << 62));
 
 			/*
 			 *  CFM.sof -= CFM.sol
@@ -169,7 +172,7 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 			 */
 			regs->cr_ifs = ((regs->cr_ifs & 0xffffffc00000007f)
 					- ((regs->cr_ifs >> 7) & 0x7f));
-				
+
 			break;
 
 		default:
@@ -180,7 +183,7 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 
 	}
 
-	regs->cr_iip += offset; 
+	regs->cr_iip += offset;
 	ia64_psr(regs)->ri = 0;
 
 	if (ia64_psr(regs)->it == 0)
@@ -188,13 +191,16 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 	else
 		unimplemented_address = unimplemented_virtual_address(regs->cr_iip);
 
-	if (unimplemented_address) { 
+	if (unimplemented_address) {
 		/*
 		 *  The target address contains unimplemented bits.
 		 */
-		printk("Woah! Unimplemented Instruction Address Trap!\n");
+		printk(KERN_DEBUG "Woah! Unimplemented Instruction Address Trap!\n");
 		siginfo.si_signo = SIGILL;
 		siginfo.si_errno = 0;
+		siginfo.si_flags = 0;
+		siginfo.si_isr = 0;
+		siginfo.si_imm = 0;
 		siginfo.si_code = ILL_BADIADDR;
 		force_sig_info(SIGILL, &siginfo, current);
 	} else if (ia64_psr(regs)->tb) {
@@ -205,6 +211,10 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 		siginfo.si_signo = SIGTRAP;
 		siginfo.si_errno = 0;
 		siginfo.si_code = TRAP_BRANCH;
+		siginfo.si_flags = 0;
+		siginfo.si_isr = 0;
+		siginfo.si_addr = 0;
+		siginfo.si_imm = 0;
 		force_sig_info(SIGTRAP, &siginfo, current);
 	} else if (ia64_psr(regs)->ss) {
 		/*
@@ -214,6 +224,10 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 		siginfo.si_signo = SIGTRAP;
 		siginfo.si_errno = 0;
 		siginfo.si_code = TRAP_TRACE;
+		siginfo.si_flags = 0;
+		siginfo.si_isr = 0;
+		siginfo.si_addr = 0;
+		siginfo.si_imm = 0;
 		force_sig_info(SIGTRAP, &siginfo, current);
 	}
 	return rv;

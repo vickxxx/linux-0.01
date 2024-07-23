@@ -1,4 +1,4 @@
-/*  $Id: signal.c,v 1.107 2000/09/05 21:44:54 davem Exp $
+/*  $Id: signal.c,v 1.108 2001/01/24 21:05:12 davem Exp $
  *  linux/arch/sparc/kernel/signal.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -27,9 +27,6 @@
 #include <asm/pgtable.h>
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
-
-asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
-			 int options, unsigned long *ru);
 
 extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 		   void *fpqueue, unsigned long *fpqdepth);
@@ -667,6 +664,7 @@ new_setup_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
 	regs->u_regs[UREG_I0] = signo;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
+	regs->u_regs[UREG_I2] = (unsigned long) &sf->info;
 
 	/* 4. signal handler */
 	regs->pc = (unsigned long) ka->sa.sa_handler;
@@ -750,6 +748,7 @@ new_setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
 	regs->u_regs[UREG_I0] = signo;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
+	regs->u_regs[UREG_I2] = (unsigned long) &sf->regs;
 
 	regs->pc = (unsigned long) ka->sa.sa_handler;
 	regs->npc = (regs->pc + 4);
@@ -793,7 +792,7 @@ setup_svr4_frame(struct sigaction *sa, unsigned long pc, unsigned long npc,
 	int window = 0, err;
 
 	synchronize_user_stack();
-	sfp = (svr4_signal_frame_t *) get_sigframe(sa, regs, SVR4_SF_ALIGNED + REGWIN_SZ);
+	sfp = (svr4_signal_frame_t *) get_sigframe(sa, regs, SVR4_SF_ALIGNED + sizeof(struct reg_window));
 
 	if (invalid_frame_pointer (sfp, sizeof (*sfp))){
 #ifdef DEBUG_SIGNALS
@@ -1132,6 +1131,8 @@ static inline void read_maps (void)
 			line = d_path(map->vm_file->f_dentry,
 				      map->vm_file->f_vfsmnt,
 				      buffer, PAGE_SIZE);
+			if (IS_ERR(line))
+				break;
 		}
 		printk(MAPS_LINE_FORMAT, map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
 			      kdevname(dev), ino);
@@ -1175,9 +1176,22 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 		signr = dequeue_signal(&current->blocked, &info);
 		spin_unlock_irq(&current->sigmask_lock);
 
-		if (!signr) break;
+		if (!signr)
+			break;
 
 		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+			/* Do the syscall restart before we let the debugger
+			 * look at the child registers.
+			 */
+			if (restart_syscall &&
+			    (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
+			     regs->u_regs[UREG_I0] == ERESTARTSYS ||
+			     regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
+				regs->u_regs[UREG_I0] = orig_i0;
+				regs->pc -= 4;
+				regs->npc -= 4;
+				restart_syscall = 0;
+			}
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
 
@@ -1210,8 +1224,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 
 		ka = &current->sig->action[signr-1];
 
-		if(ka->sa.sa_handler == SIG_IGN) {
-			if(signr != SIGCHLD)
+		if (ka->sa.sa_handler == SIG_IGN) {
+			if (signr != SIGCHLD)
 				continue;
 
 			/* sys_wait4() grabs the master kernel lock, so
@@ -1219,17 +1233,17 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 			 * threaded and would not be that difficult to
 			 * do anyways.
 			 */
-			while(sys_wait4(-1, NULL, WNOHANG, NULL) > 0)
+			while (sys_wait4(-1, NULL, WNOHANG, NULL) > 0)
 				;
 			continue;
 		}
-		if(ka->sa.sa_handler == SIG_DFL) {
+		if (ka->sa.sa_handler == SIG_DFL) {
 			unsigned long exit_code = signr;
 
-			if(current->pid == 1)
+			if (current->pid == 1)
 				continue;
-			switch(signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
+			switch (signr) {
+			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -1247,8 +1261,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 				current->exit_code = signr;
 
 				/* notify_parent() is SMP safe */
-				if(!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags &
-				     SA_NOCLDSTOP))
+				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa.sa_flags &
+				      SA_NOCLDSTOP))
 					notify_parent(current, SIGCHLD);
 				schedule();
 				continue;
@@ -1267,8 +1281,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 					struct reg_window *rw = (struct reg_window *)regs->u_regs[UREG_FP];
 					unsigned int ins[8];
 
-					while(rw &&
-					      !(((unsigned long) rw) & 0x3)) {
+					while (rw &&
+					       !(((unsigned long) rw) & 0x3)) {
 						copy_from_user(ins, &rw->ins[0], sizeof(ins));
 						printk("Caller[%08x](%08x,%08x,%08x,%08x,%08x,%08x)\n", ins[7], ins[0], ins[1], ins[2], ins[3], ins[4], ins[5]);
 						rw = (struct reg_window *)(unsigned long)ins[6];
@@ -1289,15 +1303,15 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 				/* NOT REACHED */
 			}
 		}
-		if(restart_syscall)
+		if (restart_syscall)
 			syscall_restart(orig_i0, regs, &ka->sa);
 		handle_signal(signr, ka, &info, oldset, regs, svr4_signal);
 		return 1;
 	}
-	if(restart_syscall &&
-	   (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
-	    regs->u_regs[UREG_I0] == ERESTARTSYS ||
-	    regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
+	if (restart_syscall &&
+	    (regs->u_regs[UREG_I0] == ERESTARTNOHAND ||
+	     regs->u_regs[UREG_I0] == ERESTARTSYS ||
+	     regs->u_regs[UREG_I0] == ERESTARTNOINTR)) {
 		/* replay the system call when we are done */
 		regs->u_regs[UREG_I0] = orig_i0;
 		regs->pc -= 4;
@@ -1322,7 +1336,7 @@ do_sys_sigstack(struct sigstack *ssptr, struct sigstack *ossptr, unsigned long s
 	if (ssptr) {
 		void *ss_sp;
 
-		if (get_user((long)ss_sp, &ssptr->the_stack))
+		if (get_user(ss_sp, &ssptr->the_stack))
 			goto out;
 		/* If the current stack was set with sigaltstack, don't
 		   swap stacks while we are on it.  */

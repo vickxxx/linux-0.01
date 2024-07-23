@@ -36,6 +36,7 @@
  *	AX.25 036	Jonathan(G4KLX)	Move DAMA code into own file.
  *			Joerg(DL1BKE)	Fixed DAMA Slave.
  *	AX.25 037	Jonathan(G4KLX)	New timer architecture.
+ *			Thomas(DL9SAU)  Fixed missing initialization of skb->protocol.
  */
 
 #include <linux/config.h>
@@ -82,9 +83,11 @@ static int ax25_rx_fragment(ax25_cb *ax25, struct sk_buff *skb)
 
 				/* Last fragment received ? */
 				if (ax25->fragno == 0) {
-					if ((skbn = alloc_skb(AX25_MAX_HEADER_LEN + ax25->fraglen, GFP_ATOMIC)) == NULL) {
-						while ((skbo = skb_dequeue(&ax25->frag_queue)) != NULL)
-							kfree_skb(skbo);
+					skbn = alloc_skb(AX25_MAX_HEADER_LEN +
+							 ax25->fraglen,
+							 GFP_ATOMIC);
+					if (!skbn) {
+						skb_queue_purge(&ax25->frag_queue);
 						return 1;
 					}
 
@@ -112,8 +115,7 @@ static int ax25_rx_fragment(ax25_cb *ax25, struct sk_buff *skb)
 	} else {
 		/* First fragment received */
 		if (*skb->data & AX25_SEG_FIRST) {
-			while ((skbo = skb_dequeue(&ax25->frag_queue)) != NULL)
-				kfree_skb(skbo);
+			skb_queue_purge(&ax25->frag_queue);
 			ax25->fragno = *skb->data & AX25_SEG_REM;
 			skb_pull(skb, 1);		/* skip fragno */
 			ax25->fraglen = skb->len;
@@ -158,6 +160,7 @@ int ax25_rx_iframe(ax25_cb *ax25, struct sk_buff *skb)
 		skb->nh.raw   = skb->data;
 		skb->dev      = ax25->ax25_dev->dev;
 		skb->pkt_type = PACKET_HOST;
+		skb->protocol = htons(ETH_P_IP);
 		ip_rcv(skb, skb->dev, NULL);	/* Wrong ptype */
 		return 1;
 	}
@@ -287,6 +290,7 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 				skb->nh.raw   = skb->data;
 				skb->dev      = dev;
 				skb->pkt_type = PACKET_HOST;
+				skb->protocol = htons(ETH_P_IP);
 				ip_rcv(skb, dev, ptype);	/* Note ptype here is the wrong one, fix me later */
 				break;
 
@@ -296,6 +300,7 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 				skb->nh.raw   = skb->data;
 				skb->dev      = dev;
 				skb->pkt_type = PACKET_HOST;
+				skb->protocol = htons(ETH_P_ARP);
 				arp_rcv(skb, dev, ptype);	/* Note ptype here is wrong... */
 				break;
 #endif
@@ -412,7 +417,8 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 	/*
 	 *	Sort out any digipeated paths.
 	 */
-	if (dp.ndigi != 0 && ax25->digipeat == NULL && (ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL) {
+	if (dp.ndigi && !ax25->digipeat &&
+	    (ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL) {
 		kfree_skb(skb);
 		ax25_destroy_socket(ax25);
 		return 0;
@@ -425,7 +431,7 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 		}
 	} else {
 		/* Reverse the source SABM's path */
-		memcpy(&ax25->digipeat, &reverse_dp, sizeof(ax25_digi));
+		memcpy(ax25->digipeat, &reverse_dp, sizeof(ax25_digi));
 	}
 
 	if ((*skb->data & ~AX25_PF) == AX25_SABME) {
@@ -464,7 +470,8 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 /*
  *	Receive an AX.25 frame via a SLIP interface.
  */
-int ax25_kiss_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *ptype)
+int ax25_kiss_rcv(struct sk_buff *skb, struct net_device *dev,
+		  struct packet_type *ptype)
 {
 	skb->sk = NULL;		/* Initially we don't know who it's for */
 	skb->destructor = NULL;	/* Who initializes this, dammit?! */

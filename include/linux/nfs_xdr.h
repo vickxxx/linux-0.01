@@ -1,9 +1,6 @@
 #ifndef _LINUX_NFS_XDR_H
 #define _LINUX_NFS_XDR_H
 
-extern struct rpc_program	nfs_program;
-extern struct rpc_stat		nfs_rpcstat;
-
 struct nfs_fattr {
 	unsigned short		valid;		/* which fields are valid */
 	__u64			pre_size;	/* pre_op_attr.size	  */
@@ -62,33 +59,33 @@ struct nfs_fsinfo {
 /* Arguments to the read call.
  * Note that NFS_READ_MAXIOV must be <= (MAX_IOVEC-2) from sunrpc/xprt.h
  */
-#define NFS_READ_MAXIOV 8
+#define NFS_READ_MAXIOV		(9)
 
 struct nfs_readargs {
 	struct nfs_fh *		fh;
 	__u64			offset;
 	__u32			count;
-	unsigned int            nriov;
-	struct iovec            iov[NFS_READ_MAXIOV];
+	unsigned int		pgbase;
+	struct page **		pages;
 };
 
 struct nfs_readres {
 	struct nfs_fattr *	fattr;
-	unsigned int		count;
+	__u32			count;
 	int                     eof;
 };
 
 /* Arguments to the write call.
  * Note that NFS_WRITE_MAXIOV must be <= (MAX_IOVEC-2) from sunrpc/xprt.h
  */
-#define NFS_WRITE_MAXIOV        8
+#define NFS_WRITE_MAXIOV	(9)
 struct nfs_writeargs {
 	struct nfs_fh *		fh;
-	__u32			offset;
+	__u64			offset;
 	__u32			count;
 	enum nfs3_stable_how	stable;
-	unsigned int		nriov;
-	struct iovec		iov[NFS_WRITE_MAXIOV];
+	unsigned int		pgbase;
+	struct page **		pages;
 };
 
 struct nfs_writeverf {
@@ -112,8 +109,6 @@ struct nfs_entry {
 	const char *		name;
 	unsigned int		len;
 	int			eof;
-	struct nfs_fh		fh;
-	struct nfs_fattr	fattr;
 };
 
 /*
@@ -165,8 +160,8 @@ struct nfs_symlinkargs {
 struct nfs_readdirargs {
 	struct nfs_fh *		fh;
 	__u32			cookie;
-	void *			buffer;
-	unsigned int		bufsiz;
+	unsigned int		count;
+	struct page **		pages;
 };
 
 struct nfs_diropok {
@@ -176,18 +171,8 @@ struct nfs_diropok {
 
 struct nfs_readlinkargs {
 	struct nfs_fh *		fh;
-	void *			buffer;
-	unsigned int		bufsiz;
-};
-
-struct nfs_readlinkres {
-	void *			buffer;
-	unsigned int		bufsiz;
-};
-
-struct nfs_readdirres {
-	void *			buffer;
-	unsigned int		bufsiz;
+	unsigned int		count;
+	struct page **		pages;
 };
 
 struct nfs3_sattrargs {
@@ -262,9 +247,9 @@ struct nfs3_readdirargs {
 	struct nfs_fh *		fh;
 	__u64			cookie;
 	__u32			verf[2];
-	void *			buffer;
-	unsigned int		bufsiz;
 	int			plus;
+	unsigned int            count;
+	struct page **		pages;
 };
 
 struct nfs3_diropres {
@@ -280,14 +265,8 @@ struct nfs3_accessres {
 
 struct nfs3_readlinkargs {
 	struct nfs_fh *		fh;
-	void *			buffer;
-	unsigned int		bufsiz;
-};
-
-struct nfs3_readlinkres {
-	struct nfs_fattr *	fattr;
-	void *			buffer;
-	unsigned int		bufsiz;
+	unsigned int		count;
+	struct page **		pages;
 };
 
 struct nfs3_renameres {
@@ -303,8 +282,6 @@ struct nfs3_linkres {
 struct nfs3_readdirres {
 	struct nfs_fattr *	dir_attr;
 	__u32 *			verf;
-	void *			buffer;
-	unsigned int		bufsiz;
 	int			plus;
 };
 
@@ -322,15 +299,15 @@ struct nfs_rpc_ops {
 	int	(*lookup)  (struct inode *, struct qstr *,
 			    struct nfs_fh *, struct nfs_fattr *);
 	int	(*access)  (struct inode *, int , int);
-	int	(*readlink)(struct inode *, void *, unsigned int);
+	int	(*readlink)(struct inode *, struct page *);
 	int	(*read)    (struct inode *, struct rpc_cred *,
 			    struct nfs_fattr *,
-			    int, loff_t, unsigned int,
-			    void *buffer, int *eofp);
+			    int, unsigned int, unsigned int,
+			    struct page *, int *eofp);
 	int	(*write)   (struct inode *, struct rpc_cred *,
 			    struct nfs_fattr *,
-			    int, loff_t, unsigned int,
-			    void *buffer, struct nfs_writeverf *verfp);
+			    int, unsigned int, unsigned int,
+			    struct page *, struct nfs_writeverf *verfp);
 	int	(*commit)  (struct inode *, struct nfs_fattr *,
 			    unsigned long, unsigned int);
 	int	(*create)  (struct inode *, struct qstr *, struct iattr *,
@@ -349,7 +326,7 @@ struct nfs_rpc_ops {
 			    struct nfs_fh *, struct nfs_fattr *);
 	int	(*rmdir)   (struct inode *, struct qstr *);
 	int	(*readdir) (struct inode *, struct rpc_cred *,
-			    u64, void *, unsigned int, int);
+			    u64, struct page *, unsigned int, int);
 	int	(*mknod)   (struct inode *, struct qstr *, struct iattr *,
 			    dev_t, struct nfs_fh *, struct nfs_fattr *);
 	int	(*statfs)  (struct nfs_server *, struct nfs_fh *,
@@ -372,5 +349,6 @@ extern struct nfs_rpc_ops	nfs_v3_clientops;
 extern struct rpc_version	nfs_version2;
 extern struct rpc_version	nfs_version3;
 extern struct rpc_program	nfs_program;
+extern struct rpc_stat		nfs_rpcstat;
 
 #endif

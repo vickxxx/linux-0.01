@@ -13,8 +13,8 @@
 #define IRNET_IRDA_H
 
 /***************************** INCLUDES *****************************/
+/* Please add other headers in irnet.h */
 
-#include <linux/config.h>
 #include "irnet.h"		/* Module global include */
 
 /************************ CONSTANTS & MACROS ************************/
@@ -68,12 +68,21 @@ static void
 	irnet_post_event(irnet_socket *,
 			 irnet_event,
 			 __u32,
+			 __u32,
 			 char *);
 /* ----------------------- IRDA SUBROUTINES ----------------------- */
 static inline int
 	irnet_open_tsap(irnet_socket *);
-static int
+static inline __u8
+	irnet_ias_to_tsap(irnet_socket *,
+			  int,
+			  struct ias_value *);
+static inline int
 	irnet_find_lsap_sel(irnet_socket *);
+static inline int
+	irnet_connect_tsap(irnet_socket *);
+static inline int
+	irnet_discover_next_daddr(irnet_socket *);
 static inline int
 	irnet_discover_daddr_and_lsap_sel(irnet_socket *);
 static inline int
@@ -134,12 +143,19 @@ static void
 			       __u16,
 			       struct ias_value *,
 			       void *);
+static void
+	irnet_discovervalue_confirm(int,
+				    __u16, 
+				    struct ias_value *,
+				    void *);
 #ifdef DISCOVERY_EVENTS
 static void
 	irnet_discovery_indication(discovery_t *,
+				   DISCOVERY_MODE,
 				   void *);
 static void
 	irnet_expiry_indication(discovery_t *,
+				DISCOVERY_MODE,
 				void *);
 #endif
 /* -------------------------- PROC ENTRY -------------------------- */
@@ -149,7 +165,7 @@ static int
 			char **,
 			off_t,
 			int);
-#endif CONFIG_PROC_FS
+#endif /* CONFIG_PROC_FS */
 
 /**************************** VARIABLES ****************************/
 
@@ -164,6 +180,6 @@ struct irnet_ctrl_channel	irnet_events;
 /* The /proc/net/irda directory, defined elsewhere... */
 #ifdef CONFIG_PROC_FS
 extern struct proc_dir_entry *proc_irda;
-#endif CONFIG_PROC_FS
+#endif /* CONFIG_PROC_FS */
 
-#endif IRNET_IRDA_H
+#endif /* IRNET_IRDA_H */

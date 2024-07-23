@@ -1,4 +1,4 @@
-/* $Id: display7seg.c,v 1.4 2000/11/08 05:08:23 davem Exp $
+/* $Id: display7seg.c,v 1.5 2001/10/08 22:19:51 davem Exp $
  *
  * display7seg - Driver implementation for the 7-segment display
  * present on Sun Microsystems CP1400 and CP1500
@@ -55,6 +55,7 @@ MODULE_AUTHOR
 	("Eric Brower <ebrower@usa.net>");
 MODULE_DESCRIPTION
 	("7-Segment Display driver for Sun Microsystems CP1400/1500");
+MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE
 	("d7s");
 #endif /* ifdef MODULE */
@@ -197,6 +198,7 @@ ebus_done:
 	if (0 != iTmp) {
 		printk("%s: unable to acquire miscdevice minor %i\n",
 		       D7S_DEVNAME, D7S_MINOR);
+		iounmap(d7s_regs);
 		return iTmp;
 	}
 

@@ -9,6 +9,7 @@
  * in <asm/page.h> (currently 8192).
  */
 #include <linux/config.h>
+#include <linux/mmzone.h>
 
 #include <asm/page.h>
 #include <asm/processor.h>	/* For TASK_SIZE */
@@ -59,11 +60,6 @@
 #define _PAGE_FOW	0x0004	/* used for page protection (fault on write) */
 #define _PAGE_FOE	0x0008	/* used for page protection (fault on exec) */
 #define _PAGE_ASM	0x0010
-#if defined(CONFIG_ALPHA_EV6) && !defined(CONFIG_SMP)
-#define _PAGE_MBE	0x0080	/* MB disable bit for EV6.  */
-#else
-#define _PAGE_MBE	0x0000
-#endif
 #define _PAGE_KRE	0x0100	/* xxx - see below on the "accessed" bit */
 #define _PAGE_URE	0x0200	/* xxx */
 #define _PAGE_KWE	0x1000	/* used to do the dirty bit in software */
@@ -90,20 +86,19 @@
 #define _PFN_MASK	0xFFFFFFFF00000000
 
 #define _PAGE_TABLE	(_PAGE_VALID | __DIRTY_BITS | __ACCESS_BITS)
-#define _PAGE_CHG_MASK	(_PFN_MASK | __DIRTY_BITS | __ACCESS_BITS | _PAGE_MBE)
+#define _PAGE_CHG_MASK	(_PFN_MASK | __DIRTY_BITS | __ACCESS_BITS)
 
 /*
- * All the normal masks have the "page accessed" bits on, as any time they
- * are used, the page is accessed.  They are cleared only by the page-out
- * routines. 
+ * All the normal masks have the "page accessed" bits on, as any time they are used,
+ * the page is accessed. They are cleared only by the page-out routines
  */
 #define PAGE_NONE	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOR | _PAGE_FOW | _PAGE_FOE)
 #define PAGE_SHARED	__pgprot(_PAGE_VALID | __ACCESS_BITS)
 #define PAGE_COPY	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOW)
 #define PAGE_READONLY	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOW)
-#define PAGE_KERNEL	__pgprot(_PAGE_VALID | _PAGE_ASM | _PAGE_KRE | _PAGE_KWE | _PAGE_MBE)
+#define PAGE_KERNEL	__pgprot(_PAGE_VALID | _PAGE_ASM | _PAGE_KRE | _PAGE_KWE)
 
-#define _PAGE_NORMAL(x) __pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_MBE | (x))
+#define _PAGE_NORMAL(x) __pgprot(_PAGE_VALID | __ACCESS_BITS | (x))
 
 #define _PAGE_P(x) _PAGE_NORMAL((x) | (((x) & _PAGE_FOW)?0:_PAGE_FOW))
 #define _PAGE_S(x) _PAGE_NORMAL(x)
@@ -195,7 +190,15 @@ extern unsigned long __zero_page(void);
  * Conversion functions:  convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
+#ifndef CONFIG_DISCONTIGMEM
+#define PAGE_TO_PA(page)	((page - mem_map) << PAGE_SHIFT)
+#else
+#define PAGE_TO_PA(page) \
+		((((page)-page_zone(page)->zone_mem_map) << PAGE_SHIFT) \
+		+ page_zone(page)->zone_start_paddr)
+#endif
 
+#ifndef CONFIG_DISCONTIGMEM
 #define mk_pte(page, pgprot)						\
 ({									\
 	pte_t pte;							\
@@ -204,9 +207,22 @@ extern unsigned long __zero_page(void);
 		       pgprot_val(pgprot);				\
 	pte;								\
 })
+#else
+#define mk_pte(page, pgprot)							\
+({										\
+	pte_t pte;								\
+	unsigned long pfn;							\
+										\
+	pfn = ((unsigned long)((page)-page_zone(page)->zone_mem_map)) << 32;	\
+	pfn += page_zone(page)->zone_start_paddr << (32-PAGE_SHIFT);		\
+	pte_val(pte) = pfn | pgprot_val(pgprot);				\
+										\
+	pte;									\
+})
+#endif
 
 extern inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
-{ pte_t pte; pte_val(pte) = (PHYS_TWIDDLE(physpage) << (32-PAGE_SHIFT)) | (pgprot_val(pgprot) & ~_PAGE_MBE); return pte; }
+{ pte_t pte; pte_val(pte) = (PHYS_TWIDDLE(physpage) << (32-PAGE_SHIFT)) | pgprot_val(pgprot); return pte; }
 
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 { pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot); return pte; }
@@ -217,7 +233,20 @@ extern inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 extern inline void pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 { pgd_val(*pgdp) = _PAGE_TABLE | ((((unsigned long) pmdp) - PAGE_OFFSET) << (32-PAGE_SHIFT)); }
 
+#ifndef CONFIG_DISCONTIGMEM
 #define pte_page(x)	(mem_map+(unsigned long)((pte_val(x) >> 32)))
+#else
+#define pte_page(x)							\
+({									\
+	unsigned long kvirt;						\
+	struct page * __xx;						\
+									\
+	kvirt = (unsigned long)__va(pte_val(x) >> (32-PAGE_SHIFT));	\
+	__xx = virt_to_page(kvirt);					\
+									\
+	__xx;								\
+})
+#endif
 
 extern inline unsigned long pmd_page(pmd_t pmd)
 { return PAGE_OFFSET + ((pmd_val(pmd) & _PFN_MASK) >> (32-PAGE_SHIFT)); }
@@ -238,8 +267,6 @@ extern inline int pgd_none(pgd_t pgd)		{ return !pgd_val(pgd); }
 extern inline int pgd_bad(pgd_t pgd)		{ return (pgd_val(pgd) & ~_PFN_MASK) != _PAGE_TABLE; }
 extern inline int pgd_present(pgd_t pgd)	{ return pgd_val(pgd) & _PAGE_VALID; }
 extern inline void pgd_clear(pgd_t * pgdp)	{ pgd_val(*pgdp) = 0; }
-
-#define page_address(page)	((page)->virtual)
 
 /*
  * The following only work if pte_present() is true.
@@ -310,10 +337,13 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
+
+#ifndef CONFIG_DISCONTIGMEM
 #define kern_addr_valid(addr)	(1)
+#endif
 
 #define io_remap_page_range(start, busaddr, size, prot) \
-	remap_page_range(start, virt_to_phys(__ioremap(busaddr)), size, prot)
+    remap_page_range(start, virt_to_phys(__ioremap(busaddr, size)), size, prot)
 
 #define pte_ERROR(e) \
 	printk("%s:%d: bad pte %016lx.\n", __FILE__, __LINE__, pte_val(e))
@@ -325,5 +355,13 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 extern void paging_init(void);
 
 #include <asm-generic/pgtable.h>
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
+
+/* We have our own get_unmapped_area to cope with ADDR_LIMIT_32BIT.  */
+#define HAVE_ARCH_UNMAPPED_AREA
 
 #endif /* _ALPHA_PGTABLE_H */

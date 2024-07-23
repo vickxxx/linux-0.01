@@ -61,6 +61,10 @@ static int badness(struct task_struct *p)
 
 	if (!p->mm)
 		return 0;
+
+	if (p->flags & PF_MEMDIE)
+		return 0;
+
 	/*
 	 * The memory size of the process is the basis for the badness.
 	 */
@@ -110,8 +114,7 @@ static int badness(struct task_struct *p)
 
 /*
  * Simple selection loop. We chose the process with the highest
- * number of 'points'. We need the locks to make sure that the
- * list of task structs doesn't change while we look the other way.
+ * number of 'points'. We expect the caller will lock the tasklist.
  *
  * (not docbooked, we don't want this one cluttering up the manual)
  */
@@ -121,7 +124,6 @@ static struct task_struct * select_bad_process(void)
 	struct task_struct *p = NULL;
 	struct task_struct *chosen = NULL;
 
-	read_lock(&tasklist_lock);
 	for_each_task(p) {
 		if (p->pid) {
 			int points = badness(p);
@@ -131,8 +133,52 @@ static struct task_struct * select_bad_process(void)
 			}
 		}
 	}
-	read_unlock(&tasklist_lock);
 	return chosen;
+}
+
+/**
+ * We must be careful though to never send SIGKILL a process with
+ * CAP_SYS_RAW_IO set, send SIGTERM instead (but it's unlikely that
+ * we select a process with CAP_SYS_RAW_IO set).
+ */
+static void __oom_kill_task(struct task_struct *p)
+{
+	printk(KERN_ERR "Out of Memory: Killed process %d (%s).\n", p->pid, p->comm);
+
+	/*
+	 * We give our sacrificial lamb high priority and access to
+	 * all the memory it needs. That way it should be able to
+	 * exit() and clear out its resources quickly...
+	 */
+	p->counter = 5 * HZ;
+	p->flags |= PF_MEMALLOC | PF_MEMDIE;
+
+	/* This process has hardware access, be more careful. */
+	if (cap_t(p->cap_effective) & CAP_TO_MASK(CAP_SYS_RAWIO)) {
+		force_sig(SIGTERM, p);
+	} else {
+		force_sig(SIGKILL, p);
+	}
+}
+
+static struct mm_struct *oom_kill_task(struct task_struct *p)
+{
+	struct mm_struct *mm;
+
+	task_lock(p);
+	mm = p->mm;
+	if (mm) {
+		spin_lock(&mmlist_lock);
+		if (atomic_read(&mm->mm_users))
+			atomic_inc(&mm->mm_users);
+		else
+			mm = NULL;
+		spin_unlock(&mmlist_lock);
+	}
+	task_unlock(p);
+	if (mm)
+		__oom_kill_task(p);
+	return mm;
 }
 
 /**
@@ -142,69 +188,111 @@ static struct task_struct * select_bad_process(void)
  * killing a random task (bad), letting the system crash (worse)
  * OR try to be smart about which process to kill. Note that we
  * don't have to be perfect here, we just have to be good.
- *
- * We must be careful though to never send SIGKILL a process with
- * CAP_SYS_RAW_IO set, send SIGTERM instead (but it's unlikely that
- * we select a process with CAP_SYS_RAW_IO set).
  */
-void oom_kill(void)
+static void oom_kill(void)
 {
+	struct task_struct *p, *q;
+	struct mm_struct *mm;
 
-	struct task_struct *p = select_bad_process();
+retry:
+	read_lock(&tasklist_lock);
+	p = select_bad_process();
 
 	/* Found nothing?!?! Either we hang forever, or we panic. */
 	if (p == NULL)
 		panic("Out of memory and no killable processes...\n");
-
-	printk(KERN_ERR "Out of Memory: Killed process %d (%s).\n", p->pid, p->comm);
-
-	/*
-	 * We give our sacrificial lamb high priority and access to
-	 * all the memory it needs. That way it should be able to
-	 * exit() and clear out its resources quickly...
-	 */
-	p->counter = 5 * HZ;
-	p->flags |= PF_MEMALLOC;
-
-	/* This process has hardware access, be more careful. */
-	if (cap_t(p->cap_effective) & CAP_TO_MASK(CAP_SYS_RAWIO)) {
-		force_sig(SIGTERM, p);
-	} else {
-		force_sig(SIGKILL, p);
+	mm = oom_kill_task(p);
+	if (!mm) {
+		read_unlock(&tasklist_lock);
+		goto retry;
 	}
-
+	/* kill all processes that share the ->mm (i.e. all threads) */
+	for_each_task(q) {
+		if (q->mm == mm)
+			__oom_kill_task(q);
+	}
+	read_unlock(&tasklist_lock);
+	mmput(mm);
 	/*
 	 * Make kswapd go out of the way, so "p" has a good chance of
 	 * killing itself before someone else gets the chance to ask
 	 * for more memory.
 	 */
-	current->policy |= SCHED_YIELD;
-	schedule();
+	yield();
 	return;
 }
 
 /**
  * out_of_memory - is the system out of memory?
- *
- * Returns 0 if there is still enough memory left,
- * 1 when we are out of memory (otherwise).
  */
-int out_of_memory(void)
+void out_of_memory(void)
 {
-	struct sysinfo swp_info;
+	/*
+	 * oom_lock protects out_of_memory()'s static variables.
+	 * It's a global lock; this is not performance-critical.
+	 */
+	static spinlock_t oom_lock = SPIN_LOCK_UNLOCKED;
+	static unsigned long first, last, count, lastkill;
+	unsigned long now, since;
 
-	/* Enough free memory?  Not OOM. */
-	if (nr_free_pages() > freepages.min)
-		return 0;
+	/*
+	 * Enough swap space left?  Not OOM.
+	 */
+	if (nr_swap_pages > 0)
+		return;
 
-	if (nr_free_pages() + nr_inactive_clean_pages() > freepages.low)
-		return 0;
+	spin_lock(&oom_lock);
+	now = jiffies;
+	since = now - last;
+	last = now;
 
-	/* Enough swap space left?  Not OOM. */
-	si_swapinfo(&swp_info);
-	if (swp_info.freeswap > 0)
-		return 0;
+	/*
+	 * If it's been a long time since last failure,
+	 * we're not oom.
+	 */
+	last = now;
+	if (since > 5*HZ)
+		goto reset;
 
-	/* Else... */
-	return 1;
+	/*
+	 * If we haven't tried for at least one second,
+	 * we're not really oom.
+	 */
+	since = now - first;
+	if (since < HZ)
+		goto out_unlock;
+
+	/*
+	 * If we have gotten only a few failures,
+	 * we're not really oom. 
+	 */
+	if (++count < 10)
+		goto out_unlock;
+
+	/*
+	 * If we just killed a process, wait a while
+	 * to give that task a chance to exit. This
+	 * avoids killing multiple processes needlessly.
+	 */
+	since = now - lastkill;
+	if (since < HZ*5)
+		goto out_unlock;
+
+	/*
+	 * Ok, really out of memory. Kill something.
+	 */
+	lastkill = now;
+
+	/* oom_kill() can sleep */
+	spin_unlock(&oom_lock);
+	oom_kill();
+	spin_lock(&oom_lock);
+
+reset:
+	if ((long)first - (long)now < 0)
+		first = now;
+	count = 0;
+
+out_unlock:
+	spin_unlock(&oom_lock);
 }

@@ -5,13 +5,13 @@
 #include <linux/threads.h>
 #include <linux/irq.h>
 
-/* entry.S is sensitive to the offsets of these fields */
+/* assembly code in softirq.h is sensitive to the offsets of these fields */
 typedef struct {
-	unsigned int __softirq_active;
-	unsigned int __softirq_mask;
+	unsigned int __softirq_pending;
 	unsigned int __local_irq_count;
 	unsigned int __local_bh_count;
 	unsigned int __syscall_count;
+	struct task_struct * __ksoftirqd_task; /* waitqueue is too large */
 	unsigned int __nmi_count;	/* arch dependent */
 } ____cacheline_aligned irq_cpustat_t;
 
@@ -67,8 +67,10 @@ static inline void irq_enter(int cpu, int irq)
 {
 	++local_irq_count(cpu);
 
+	smp_mb();
+
 	while (test_bit(0,&global_irq_lock)) {
-		/* nothing */;
+		cpu_relax();
 	}
 }
 

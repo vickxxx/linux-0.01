@@ -24,28 +24,78 @@
  * Function prototypes to keep gcc -Wall happy.
  */
 extern void set_bit(int nr, volatile void * addr);
+
+static inline void __set_bit(int nr, volatile void *addr)
+{
+	((unsigned char *) addr)[nr >> 3] |= (1U << (nr & 7));
+}
+
 extern void clear_bit(int nr, volatile void * addr);
+
+static inline void __clear_bit(int nr, volatile void *addr)
+{
+	((unsigned char *) addr)[nr >> 3] &= ~(1U << (nr & 7));
+}
+
 extern void change_bit(int nr, volatile void * addr);
 
+static inline void __change_bit(int nr, volatile void *addr)
+{
+	((unsigned char *) addr)[nr >> 3] ^= (1U << (nr & 7));
+}
+
 extern int test_and_set_bit(int nr, volatile void * addr);
+
+static inline int __test_and_set_bit(int nr, volatile void *addr)
+{
+	unsigned int mask = 1 << (nr & 7);
+	unsigned int oldval;
+
+	oldval = ((unsigned char *) addr)[nr >> 3];
+	((unsigned char *) addr)[nr >> 3] = oldval | mask;
+	return oldval & mask;
+}
+
 extern int test_and_clear_bit(int nr, volatile void * addr);
+
+static inline int __test_and_clear_bit(int nr, volatile void *addr)
+{
+	unsigned int mask = 1 << (nr & 7);
+	unsigned int oldval;
+
+	oldval = ((unsigned char *) addr)[nr >> 3];
+	((unsigned char *) addr)[nr >> 3] = oldval & ~mask;
+	return oldval & mask;
+}
+
 extern int test_and_change_bit(int nr, volatile void * addr);
+
+static inline int __test_and_change_bit(int nr, volatile void *addr)
+{
+	unsigned int mask = 1 << (nr & 7);
+	unsigned int oldval;
+
+	oldval = ((unsigned char *) addr)[nr >> 3];
+	((unsigned char *) addr)[nr >> 3] = oldval ^ mask;
+	return oldval & mask;
+}
+
 extern int find_first_zero_bit(void * addr, unsigned size);
 extern int find_next_zero_bit(void * addr, int size, int offset);
 
 /*
  * This routine doesn't need to be atomic.
  */
-extern __inline__ int test_bit(int nr, const void * addr)
+static inline int test_bit(int nr, const void * addr)
 {
-    return ((unsigned char *) addr)[nr >> 3] & (1U << (nr & 7));
+    return (((unsigned char *) addr)[nr >> 3] >> (nr & 7)) & 1;
 }	
 
 /*
  * ffz = Find First Zero in word. Undefined if no zero exists,
  * so code should check against ~0UL first..
  */
-extern __inline__ unsigned long ffz(unsigned long word)
+static inline unsigned long ffz(unsigned long word)
 {
 	int k;
 

@@ -40,7 +40,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -74,7 +74,8 @@ static void ether1_setmulticastlist(struct net_device *dev);
 static void ether1_timeout(struct net_device *dev);
 
 /* ------------------------------------------------------------------------- */
-static char *version = "ether1 ethernet driver (c) 2000 Russell King v1.07\n";
+
+static char version[] __initdata = "ether1 ethernet driver (c) 2000 Russell King v1.07\n";
 
 #define BUS_16 16
 #define BUS_8  8
@@ -646,18 +647,18 @@ ether1_open (struct net_device *dev)
 {
 	struct ether1_priv *priv = (struct ether1_priv *)dev->priv;
 
-	MOD_INC_USE_COUNT;
-
-	if (request_irq(dev->irq, ether1_interrupt, 0, "ether1", dev)) {
-		MOD_DEC_USE_COUNT;
-		return -EAGAIN;
+	if (!is_valid_ether_addr(dev->dev_addr)) {
+		printk("%s: invalid ethernet MAC address\n", dev->name);
+		return -EINVAL;
 	}
+
+	if (request_irq(dev->irq, ether1_interrupt, 0, "ether1", dev))
+		return -EAGAIN;
 
 	memset (&priv->stats, 0, sizeof (struct net_device_stats));
 
 	if (ether1_init_for_open (dev)) {
 		free_irq (dev->irq, dev);
-		MOD_DEC_USE_COUNT;
 		return -EAGAIN;
 	}
 
@@ -688,7 +689,6 @@ static int
 ether1_sendpacket (struct sk_buff *skb, struct net_device *dev)
 {
 	struct ether1_priv *priv = (struct ether1_priv *)dev->priv;
-	int len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
 	int tmp, tst, nopaddr, txaddr, tbdaddr, dataddr;
 	unsigned long flags;
 	tx_t tx;
@@ -706,19 +706,25 @@ ether1_sendpacket (struct sk_buff *skb, struct net_device *dev)
 			priv->restart = 0;
 	}
 
+	if (skb->len < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (!skb)
+			goto out;
+	}
+
 	/*
 	 * insert packet followed by a nop
 	 */
 	txaddr = ether1_txalloc (dev, TX_SIZE);
 	tbdaddr = ether1_txalloc (dev, TBD_SIZE);
-	dataddr = ether1_txalloc (dev, len);
+	dataddr = ether1_txalloc (dev, skb->len);
 	nopaddr = ether1_txalloc (dev, NOP_SIZE);
 
 	tx.tx_status = 0;
 	tx.tx_command = CMD_TX | CMD_INTR;
 	tx.tx_link = nopaddr;
 	tx.tx_tbdoffset = tbdaddr;
-	tbd.tbd_opts = TBD_EOL | len;
+	tbd.tbd_opts = TBD_EOL | skb->len;
 	tbd.tbd_link = I82586_NULL;
 	tbd.tbd_bufl = dataddr;
 	tbd.tbd_bufh = 0;
@@ -729,7 +735,7 @@ ether1_sendpacket (struct sk_buff *skb, struct net_device *dev)
 	save_flags_cli(flags);
 	ether1_writebuffer (dev, &tx, txaddr, TX_SIZE);
 	ether1_writebuffer (dev, &tbd, tbdaddr, TBD_SIZE);
-	ether1_writebuffer (dev, skb->data, dataddr, len);
+	ether1_writebuffer (dev, skb->data, dataddr, skb->len);
 	ether1_writebuffer (dev, &nop, nopaddr, NOP_SIZE);
 	tmp = priv->tx_link;
 	priv->tx_link = nopaddr;
@@ -751,6 +757,7 @@ ether1_sendpacket (struct sk_buff *skb, struct net_device *dev)
 	if (tst == -1)
 		netif_stop_queue(dev);
 
+ out:
 	return 0;
 }
 
@@ -965,8 +972,6 @@ ether1_close (struct net_device *dev)
 
 	free_irq(dev->irq, dev);
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -975,6 +980,23 @@ ether1_getstats (struct net_device *dev)
 {
 	struct ether1_priv *priv = (struct ether1_priv *)dev->priv;
 	return &priv->stats;
+}
+
+static int
+ether1_set_mac_address(struct net_device *dev, void *p)
+{
+	struct sockaddr *addr = p;
+
+	if (netif_running(dev))
+		return -EBUSY;
+
+	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+
+	/*
+	 * We'll set the MAC address on the chip when we open it.
+	 */
+
+	return 0;
 }
 
 /*
@@ -996,7 +1018,7 @@ static void __init ether1_banner(void)
 	static unsigned int version_printed = 0;
 
 	if (net_debug && version_printed++ == 0)
-		printk (KERN_INFO "%s", version);
+		printk(KERN_INFO "%s", version);
 }
 
 static struct net_device * __init ether1_init_one(struct expansion_card *ec)
@@ -1008,10 +1030,12 @@ static struct net_device * __init ether1_init_one(struct expansion_card *ec)
 	ether1_banner();
 
 	ecard_claim(ec);
-	
+
 	dev = init_etherdev(NULL, sizeof(struct ether1_priv));
 	if (!dev)
 		goto out;
+
+	SET_MODULE_OWNER(dev);
 
 	dev->base_addr	= ecard_address(ec, ECARD_IOC, ECARD_FAST);
 	dev->irq	= ec->irq;
@@ -1024,29 +1048,30 @@ static struct net_device * __init ether1_init_one(struct expansion_card *ec)
 
 	priv = (struct ether1_priv *)dev->priv;
 	if ((priv->bus_type = ether1_reset(dev)) == 0)
-		goto free_dev;
+		goto release;
 
-	printk(KERN_INFO "%s: ether1 at %lx, IRQ%d, ether address ",
-		dev->name, dev->base_addr, dev->irq);
+	printk(KERN_INFO "%s: ether1 in slot %d, ",
+		dev->name, ec->slot_no);
     
 	for (i = 0; i < 6; i++) {
 		dev->dev_addr[i] = inb(IDPROM_ADDRESS + i);
-		printk (i==0?" %02x":i==5?":%02x\n":":%02x", dev->dev_addr[i]);
+		printk ("%2.2x%c", dev->dev_addr[i], i == 5 ? '\n' : ':');
 	}
 
 	if (ether1_init_2(dev))
-		goto free_dev;
+		goto release;
 
 	dev->open		= ether1_open;
 	dev->stop		= ether1_close;
 	dev->hard_start_xmit    = ether1_sendpacket;
 	dev->get_stats		= ether1_getstats;
 	dev->set_multicast_list = ether1_setmulticastlist;
+	dev->set_mac_address	= ether1_set_mac_address;
 	dev->tx_timeout		= ether1_timeout;
 	dev->watchdog_timeo	= 5 * HZ / 100;
 	return 0;
 
-free_dev:
+release:
 	release_region(dev->base_addr, 16);
 	release_region(dev->base_addr + 0x800, 4096);
 	unregister_netdev(dev);
@@ -1106,3 +1131,5 @@ static void __exit ether1_exit(void)
 
 module_init(ether1_init);
 module_exit(ether1_exit);
+
+MODULE_LICENSE("GPL");

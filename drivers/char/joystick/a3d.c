@@ -1,7 +1,7 @@
 /*
- * $Id: a3d.c,v 1.10 2000/05/29 11:19:50 vojtech Exp $
+ * $Id: a3d.c,v 1.14 2001/04/26 10:24:46 vojtech Exp $
  *
- *  Copyright (c) 1998-2000 Vojtech Pavlik
+ *  Copyright (c) 1998-2001 Vojtech Pavlik
  *
  *  Sponsored by SuSE
  */
@@ -32,7 +32,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
@@ -328,7 +328,6 @@ static void a3d_connect(struct gameport *gameport, struct gameport_dev *dev)
 		a3d->adc.close = a3d_adc_close;
 		a3d->adc.cooked_read = a3d_adc_cooked_read;
 		a3d->adc.fuzz = 1; 
-		a3d->adc.type = GAMEPORT_EXT; 
 
 		a3d_read(a3d, data);
 
@@ -385,3 +384,5 @@ void __exit a3d_exit(void)
 
 module_init(a3d_init);
 module_exit(a3d_exit);
+
+MODULE_LICENSE("GPL");

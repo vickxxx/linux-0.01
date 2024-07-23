@@ -22,6 +22,11 @@
  *					Added use count to neighbour.
  *                      Tomi(OH2BNS)    Fixed rose_getname().
  *                      Arnaldo C. Melo s/suser/capable/ + micro cleanups
+ *                      Joroen (PE1RXQ) Use sock_orphan() on release.
+ *
+ *  ROSE 0.63	Jean-Paul(F6FBB) Fixed wrong length of L3 packets
+ *					Added CLEAR_REQUEST facilities
+ *  ROSE 0.64	Jean-Paul(F6FBB) Fixed null pointer in rose_kill_by_device
  */
 
 #include <linux/config.h>
@@ -70,7 +75,7 @@ int sysctl_rose_link_fail_timeout       = ROSE_DEFAULT_FAIL_TIMEOUT;
 int sysctl_rose_maximum_vcs             = ROSE_DEFAULT_MAXVC;
 int sysctl_rose_window_size             = ROSE_DEFAULT_WINDOW_SIZE;
 
-static struct sock *volatile rose_list = NULL;
+static struct sock *rose_list;
 
 static struct proto_ops rose_proto_ops;
 
@@ -223,7 +228,8 @@ static void rose_kill_by_device(struct net_device *dev)
 	for (s = rose_list; s != NULL; s = s->next) {
 		if (s->protinfo.rose->device == dev) {
 			rose_disconnect(s, ENETUNREACH, ROSE_OUT_OF_ORDER, 0);
-			s->protinfo.rose->neighbour->use--;
+			if (s->protinfo.rose->neighbour)
+				s->protinfo.rose->neighbour->use--;
 			s->protinfo.rose->device = NULL;
 		}
 	}
@@ -471,7 +477,10 @@ static int rose_getsockopt(struct socket *sock, int level, int optname,
 		
 	if (get_user(len, optlen))
 		return -EFAULT;
-	
+
+	if (len < 0)
+		return -EINVAL;
+			
 	switch (optname) {
 		case ROSE_DEFER:
 			val = sk->protinfo.rose->defer;
@@ -505,7 +514,7 @@ static int rose_getsockopt(struct socket *sock, int level, int optname,
 			return -ENOPROTOOPT;
 	}
 
-	len = min(len, sizeof(int));
+	len = min_t(unsigned int, len, sizeof(int));
 
 	if (put_user(len, optlen))
 		return -EFAULT;
@@ -647,16 +656,16 @@ static int rose_release(struct socket *sock)
 			sk->state                = TCP_CLOSE;
 			sk->shutdown            |= SEND_SHUTDOWN;
 			sk->state_change(sk);
-			sk->dead                 = 1;
+			sock_orphan(sk);
 			sk->destroy              = 1;
 			break;
 
 		default:
+			sk->socket = NULL;
 			break;
 	}
 
 	sock->sk = NULL;	
-	sk->socket = NULL;	/* Not used, but we should do this. **/
 
 	return 0;
 }
@@ -1056,7 +1065,7 @@ static int rose_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	SOCK_DEBUG(sk, "ROSE: sendto: building packet.\n");
 	size = len + AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN;
 
-	if ((skb = sock_alloc_send_skb(sk, size, 0, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
+	if ((skb = sock_alloc_send_skb(sk, size, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
 
 	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN);
@@ -1118,7 +1127,7 @@ static int rose_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		frontlen = skb_headroom(skb);
 
 		while (skb->len > 0) {
-			if ((skbn = sock_alloc_send_skb(sk, frontlen + ROSE_PACLEN, 0, 0, &err)) == NULL)
+			if ((skbn = sock_alloc_send_skb(sk, frontlen + ROSE_PACLEN, 0, &err)) == NULL)
 				return err;
 
 			skbn->sk   = sk;
@@ -1392,8 +1401,8 @@ static int rose_get_info(char *buffer, char **start, off_t offset, int length)
 } 
 
 static struct net_proto_family rose_family_ops = {
-	PF_ROSE,
-	rose_create
+	family:		PF_ROSE,
+	create:		rose_create,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(rose_proto_ops) = {
@@ -1414,23 +1423,30 @@ static struct proto_ops SOCKOPS_WRAPPED(rose_proto_ops) = {
 	sendmsg:	rose_sendmsg,
 	recvmsg:	rose_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
 SOCKOPS_WRAP(rose_proto, PF_ROSE);
 
 static struct notifier_block rose_dev_notifier = {
-	rose_device_event,
-	0
+	notifier_call:	rose_device_event,
 };
 
 static struct net_device *dev_rose;
+
+static const char banner[] = KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.64 for AX25.037 Linux 2.4\n";
 
 static int __init rose_proto_init(void)
 {
 	int i;
 
 	rose_callsign = null_ax25_address;
+
+	if (rose_ndevs > 0x7FFFFFFF/sizeof(struct net_device)) {
+		printk(KERN_ERR "ROSE: rose_proto_init - rose_ndevs parameter to large\n");
+		return -1;
+	}
 
 	if ((dev_rose = kmalloc(rose_ndevs * sizeof(struct net_device), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "ROSE: rose_proto_init - unable to allocate device structure\n");
@@ -1447,7 +1463,7 @@ static int __init rose_proto_init(void)
 
 	sock_register(&rose_family_ops);
 	register_netdevice_notifier(&rose_dev_notifier);
-	printk(KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.62 for AX25.037 Linux 2.4\n");
+	printk(banner);
 
 	ax25_protocol_register(AX25_P_ROSE, rose_route_frame);
 	ax25_linkfail_register(rose_link_failed);
@@ -1474,6 +1490,7 @@ MODULE_PARM_DESC(rose_ndevs, "number of ROSE devices");
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio ROSE network layer protocol");
+MODULE_LICENSE("GPL");
 
 static void __exit rose_exit(void)
 {
@@ -1506,7 +1523,6 @@ static void __exit rose_exit(void)
 			dev_rose[i].priv = NULL;
 			unregister_netdev(&dev_rose[i]);
 		}
-		kfree(dev_rose[i].name);
 	}
 
 	kfree(dev_rose);

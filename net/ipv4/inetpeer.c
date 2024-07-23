@@ -3,7 +3,7 @@
  *
  *  This source is covered by the GNU GPL, the same as all kernel sources.
  *
- *  Version:	$Id: inetpeer.c,v 1.3 2000/10/03 07:29:00 anton Exp $
+ *  Version:	$Id: inetpeer.c,v 1.7 2001/09/20 21:22:50 davem Exp $
  *
  *  Authors:	Andrey V. Savochkin <saw@msu.ru>
  */
@@ -67,6 +67,7 @@
  *		ip_id_count: idlock
  */
 
+/* Exported for inet_getid inline function.  */
 spinlock_t inet_peer_idlock = SPIN_LOCK_UNLOCKED;
 
 static kmem_cache_t *peer_cachep;
@@ -83,10 +84,13 @@ static rwlock_t peer_pool_lock = RW_LOCK_UNLOCKED;
 #define PEER_MAXDEPTH 40 /* sufficient for about 2^27 nodes */
 
 static volatile int peer_total;
+/* Exported for sysctl_net_ipv4.  */
 int inet_peer_threshold = 65536 + 128;	/* start to throw entries more
 					 * aggressively at this stage */
 int inet_peer_minttl = 120 * HZ;	/* TTL under high load: 120 sec */
 int inet_peer_maxttl = 10 * 60 * HZ;	/* usual time to live: 10 min */
+
+/* Exported for inet_putpeer inline function.  */
 struct inet_peer *inet_peer_unused_head,
 		**inet_peer_unused_tailp = &inet_peer_unused_head;
 spinlock_t inet_peer_unused_lock = SPIN_LOCK_UNLOCKED;
@@ -95,10 +99,12 @@ spinlock_t inet_peer_unused_lock = SPIN_LOCK_UNLOCKED;
 static void peer_check_expire(unsigned long dummy);
 static struct timer_list peer_periodic_timer =
 	{ { NULL, NULL }, 0, 0, &peer_check_expire };
+
+/* Exported for sysctl_net_ipv4.  */
 int inet_peer_gc_mintime = 10 * HZ,
     inet_peer_gc_maxtime = 120 * HZ;
 
-
+/* Called from ip_output.c:ip_init  */
 void __init inet_initpeers(void)
 {
 	struct sysinfo si;
@@ -109,11 +115,11 @@ void __init inet_initpeers(void)
 	 * <kuznet@ms2.inr.ac.ru>.  I don't have any opinion about the values
 	 * myself.  --SAW
 	 */
-	if (si.totalram <= 32768*1024)
+	if (si.totalram <= (32768*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 1; /* max pool size about 1MB on IA32 */
-	if (si.totalram <= 16384*1024)
+	if (si.totalram <= (16384*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 1; /* about 512KB */
-	if (si.totalram <= 8192*1024)
+	if (si.totalram <= (8192*1024)/PAGE_SIZE)
 		inet_peer_threshold >>= 2; /* about 128KB */
 
 	peer_cachep = kmem_cache_create("inet_peer_cache",
@@ -439,9 +445,12 @@ static void peer_check_expire(unsigned long dummy)
 	/* Trigger the timer after inet_peer_gc_mintime .. inet_peer_gc_maxtime
 	 * interval depending on the total number of entries (more entries,
 	 * less interval). */
-	peer_periodic_timer.expires = jiffies
-		+ inet_peer_gc_maxtime
-		- (inet_peer_gc_maxtime - inet_peer_gc_mintime) / HZ *
-			peer_total / inet_peer_threshold * HZ;
+	if (peer_total >= inet_peer_threshold)
+		peer_periodic_timer.expires = jiffies + inet_peer_gc_mintime;
+	else
+		peer_periodic_timer.expires = jiffies
+			+ inet_peer_gc_maxtime
+			- (inet_peer_gc_maxtime - inet_peer_gc_mintime) / HZ *
+				peer_total / inet_peer_threshold * HZ;
 	add_timer(&peer_periodic_timer);
 }

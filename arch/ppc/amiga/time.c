@@ -53,6 +53,4 @@ void apus_heartbeat (void)
                 dist = period / 4;
 	}
 #endif
-	/* should be made smarter */
-	ppc_md.heartbeat_count = 1;
 }

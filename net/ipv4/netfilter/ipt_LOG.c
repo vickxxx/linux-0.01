@@ -3,15 +3,14 @@
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
-#include <linux/ip.h>
 #include <linux/spinlock.h>
+#include <linux/ip.h>
 #include <net/icmp.h>
 #include <net/udp.h>
 #include <net/tcp.h>
-#include <linux/netfilter_ipv4/ip_tables.h>
-
-struct in_device;
 #include <net/route.h>
+
+#include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_LOG.h>
 
 #if 0
@@ -20,10 +19,20 @@ struct in_device;
 #define DEBUGP(format, args...)
 #endif
 
+/* FIXME: move to ip.h like in 2.5 */
+struct ahhdr {
+	__u8    nexthdr;
+	__u8    hdrlen;
+	__u16   reserved;
+	__u32   spi;
+	__u32   seq_no;
+};
+
 struct esphdr {
 	__u32   spi;
-}; /* FIXME evil kludge */
-        
+	__u32   seq_no;
+};
+
 /* Use lock to serialize, so printks don't overlap */
 static spinlock_t log_lock = SPIN_LOCK_UNLOCKED;
 
@@ -58,7 +67,8 @@ static void dump_packet(const struct ipt_log_info *info,
 		printk("FRAG:%u ", ntohs(iph->frag_off) & IP_OFFSET);
 
 	if ((info->logflags & IPT_LOG_IPOPT)
-	    && iph->ihl * 4 != sizeof(struct iphdr)) {
+	    && iph->ihl * 4 > sizeof(struct iphdr)
+	    && iph->ihl * 4 <= len) {
 		unsigned int i;
 
 		/* Max length: 127 "OPT (" 15*4*2chars ") " */
@@ -95,7 +105,11 @@ static void dump_packet(const struct ipt_log_info *info,
 		printk("WINDOW=%u ", ntohs(tcph->window));
 		/* Max length: 9 "RES=0x3F " */
 		printk("RES=0x%02x ", (u_int8_t)(ntohl(tcp_flag_word(tcph) & TCP_RESERVED_BITS) >> 22));
-		/* Max length: 36 "URG ACK PSH RST SYN FIN " */
+		/* Max length: 32 "CWR ECE URG ACK PSH RST SYN FIN " */
+		if (tcph->cwr)
+			printk("CWR ");
+		if (tcph->ece)
+			printk("ECE ");
 		if (tcph->urg)
 			printk("URG ");
 		if (tcph->ack)
@@ -112,7 +126,8 @@ static void dump_packet(const struct ipt_log_info *info,
 		printk("URGP=%u ", ntohs(tcph->urg_ptr));
 
 		if ((info->logflags & IPT_LOG_TCPOPT)
-		    && tcph->doff * 4 != sizeof(struct tcphdr)) {
+		    && tcph->doff * 4 > sizeof(struct tcphdr)
+		    && tcph->doff * 4 <= datalen) {
 			unsigned int i;
 
 			/* Max length: 127 "OPT (" 15*4*2chars ") " */
@@ -213,7 +228,7 @@ static void dump_packet(const struct ipt_log_info *info,
 				printk("[");
 				dump_packet(info,
 					    (struct iphdr *)(icmph + 1),
-					    datalen-sizeof(struct iphdr),
+					    datalen-sizeof(struct icmphdr),
 					    0);
 				printk("] ");
 			}
@@ -226,13 +241,30 @@ static void dump_packet(const struct ipt_log_info *info,
 		break;
 	}
 	/* Max Length */
-	case IPPROTO_AH:
+	case IPPROTO_AH: {
+		struct ahhdr *ah = protoh;
+
+		/* Max length: 9 "PROTO=AH " */
+		printk("PROTO=AH ");
+
+		if (ntohs(iph->frag_off) & IP_OFFSET)
+			break;
+
+		/* Max length: 25 "INCOMPLETE [65535 bytes] " */
+		if (datalen < sizeof (*ah)) {
+			printk("INCOMPLETE [%u bytes] ", datalen);
+			break;
+		}
+
+		/* Length: 15 "SPI=0xF1234567 " */
+		printk("SPI=0x%x ", ntohl(ah->spi) );
+		break;
+	}
 	case IPPROTO_ESP: {
 		struct esphdr *esph = protoh;
-		int esp= (iph->protocol==IPPROTO_ESP);
 
 		/* Max length: 10 "PROTO=ESP " */
-		printk("PROTO=%s ",esp? "ESP" : "AH");
+		printk("PROTO=ESP ");
 
 		if (ntohs(iph->frag_off) & IP_OFFSET)
 			break;
@@ -254,7 +286,7 @@ static void dump_packet(const struct ipt_log_info *info,
 
 	/* Proto    Max log string length */
 	/* IP:      40+46+6+11+127 = 230 */
-	/* TCP:     10+max(25,20+30+13+9+36+11+127) = 256 */
+	/* TCP:     10+max(25,20+30+13+9+32+11+127) = 252 */
 	/* UDP:     10+max(25,20) = 35 */
 	/* ICMP:    11+max(25, 18+25+max(19,14,24+3+n+10,3+n+10)) = 91+n */
 	/* ESP:     10+max(25)+15 = 50 */
@@ -263,7 +295,7 @@ static void dump_packet(const struct ipt_log_info *info,
 
 	/* (ICMP allows recursion one level deep) */
 	/* maxlen =  IP + ICMP +  IP + max(TCP,UDP,ICMP,unknown) */
-	/* maxlen = 230+   91  + 230 + 256 = 807 */
+	/* maxlen = 230+   91  + 230 + 252 = 803 */
 }
 
 static unsigned int
@@ -353,3 +385,4 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

@@ -1,4 +1,4 @@
-/* $Id: timod.c,v 1.10 2000/07/28 12:15:02 davem Exp $
+/* $Id: timod.c,v 1.16.2.1 2001/12/18 22:15:25 davem Exp $
  * timod.c: timod emulation.
  *
  * Copyright (C) 1998 Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)
@@ -33,7 +33,7 @@ extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
 	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
-spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
+static spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
 static char * page = NULL ;
 
 #ifndef DEBUG_SOLARIS_KMALLOC
@@ -46,7 +46,7 @@ static char * page = NULL ;
 void * mykmalloc(size_t s, int gfp)
 {
 	static char * page;
-	static size_t free = 0;
+	static size_t free;
 	void * r;
 	s = ((s + 63) & ~63);
 	if( s > PAGE_SIZE ) {
@@ -611,7 +611,7 @@ int timod_putmsg(unsigned int fd, char *ctl_buf, int ctl_len,
 		return 0;
 	}
 	default:
-		printk("timod_putmsg: unsuported command %u.\n", ret);
+		printk(KERN_INFO "timod_putmsg: unsupported command %u.\n", ret);
 		break;
 	}
 	return -EINVAL;
@@ -699,10 +699,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 	}
 	if (ctl_maxlen >= 0 && sock->pfirst) {
 		struct T_primsg *it = sock->pfirst;
-#ifndef min
-#define min(a,b) ((a)<(b)?(a):(b))
-#endif
-		int l = min(ctl_maxlen, it->length);
+		int l = min_t(int, ctl_maxlen, it->length);
 		SCHECK_MAGIC((char*)((u64)(((char *)&it->type)+sock->offset+it->length+7)&~7),MKCTL_MAGIC);
 		SOLD("purting ctl data");
 		if(copy_to_user(ctl_buf,
@@ -815,7 +812,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 	filp->f_flags |= O_NONBLOCK;
 	SOLD("calling recvfrom");
 	sys_recvfrom = (int (*)(int, void *, size_t, unsigned, struct sockaddr *, int *))SYS(recvfrom);
-	error = sys_recvfrom(fd, data_buf, min(0,data_maxlen), 0, (struct sockaddr*)tmpbuf, ctl_len);
+	error = sys_recvfrom(fd, data_buf, data_maxlen, 0, (struct sockaddr*)tmpbuf, ctl_len);
 	filp->f_flags = oldflags;
 	if (error < 0)
 		return error;

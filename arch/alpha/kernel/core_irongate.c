@@ -25,10 +25,10 @@
 #include <asm/core_irongate.h>
 #undef __EXTERN_INLINE
 
+#include <linux/bootmem.h>
+
 #include "proto.h"
 #include "pci_impl.h"
-
-#undef DEBUG_IRONGATE 		/* define to enable verbose Irongate debug */
 
 /*
  * BIOS32-style PCI interface:
@@ -42,6 +42,7 @@
 # define DBG_CFG(args)
 #endif
 
+igcsr32 *IronECC;
 
 /*
  * Given a bus, device, and function number, compute resulting
@@ -195,143 +196,6 @@ struct pci_ops irongate_pci_ops =
 	write_dword:	irongate_write_config_dword
 };
 
-#ifdef DEBUG_IRONGATE
-static void
-irongate_register_dump(const char *function_name)
-{
-	printk("%s: Irongate registers:\n"
-	       "\tFunction 0:\n"
-	       "\tdev_vendor\t0x%08x\n"
-	       "\tstat_cmd\t0x%08x\n"
-	       "\tclass\t\t0x%08x\n"
-	       "\tlatency\t\t0x%08x\n"
-	       "\tbar0\t\t0x%08x\n"
-	       "\tbar1\t\t0x%08x\n"
-	       "\tbar2\t\t0x%08x\n"
-	       "\trsrvd0[0]\t0x%08x\n"
-	       "\trsrvd0[1]\t0x%08x\n"
-	       "\trsrvd0[2]\t0x%08x\n"
-	       "\trsrvd0[3]\t0x%08x\n"
-	       "\trsrvd0[4]\t0x%08x\n"
-	       "\trsrvd0[5]\t0x%08x\n"
-	       "\tcapptr\t\t0x%08x\n"
-	       "\trsrvd1[0]\t0x%08x\n"
-	       "\trsrvd1[1]\t0x%08x\n"
-	       "\tbacsr10\t\t0x%08x\n"
-	       "\tbacsr32\t\t0x%08x\n"
-	       "\tbacsr54\t\t0x%08x\n"
-	       "\trsrvd2[0]\t0x%08x\n"
-	       "\tdrammap\t\t0x%08x\n"
-	       "\tdramtm\t\t0x%08x\n"
-	       "\tdramms\t\t0x%08x\n"
-	       "\trsrvd3[0]\t0x%08x\n"
-	       "\tbiu0\t\t0x%08x\n"
-	       "\tbiusip\t\t0x%08x\n"
-	       "\trsrvd4[0]\t0x%08x\n"
-	       "\trsrvd4[1]\t0x%08x\n"
-	       "\tmro\t\t0x%08x\n"
-	       "\trsrvd5[0]\t0x%08x\n"
-	       "\trsrvd5[1]\t0x%08x\n"
-	       "\trsrvd5[2]\t0x%08x\n"
-	       "\twhami\t\t0x%08x\n"
-	       "\tpciarb\t\t0x%08x\n"
-	       "\tpcicfg\t\t0x%08x\n"
-	       "\trsrvd6[0]\t0x%08x\n"
-	       "\trsrvd6[1]\t0x%08x\n"
-	       "\trsrvd6[2]\t0x%08x\n"
-	       "\trsrvd6[3]\t0x%08x\n"
-	       "\trsrvd6[4]\t0x%08x\n"
-	       "\tagpcap\t\t0x%08x\n"
-	       "\tagpstat\t\t0x%08x\n"
-	       "\tagpcmd\t\t0x%08x\n"
-	       "\tagpva\t\t0x%08x\n"
-	       "\tagpmode\t\t0x%08x\n"
-
-	       "\n\tFunction 1:\n"
-	       "\tdev_vendor:\t0x%08x\n"
-	       "\tcmd_status:\t0x%08x\n"
-	       "\trevid_etc :\t0x%08x\n"
-	       "\thtype_etc :\t0x%08x\n"
-	       "\trsrvd0[0] :\t0x%08x\n"
-	       "\trsrvd0[1] :\t0x%08x\n"
-	       "\tbus_nmbers:\t0x%08x\n"
-	       "\tio_baselim:\t0x%08x\n"
-	       "\tmem_bselim:\t0x%08x\n"
-	       "\tpf_baselib:\t0x%08x\n"
-	       "\trsrvd1[0] :\t0x%08x\n"
-	       "\trsrvd1[1] :\t0x%08x\n"
-	       "\tio_baselim:\t0x%08x\n"
-	       "\trsrvd2[0] :\t0x%08x\n"
-	       "\trsrvd2[1] :\t0x%08x\n"
-	       "\tinterrupt :\t0x%08x\n",
-
-	       function_name,
-	       IRONGATE0->dev_vendor,
-	       IRONGATE0->stat_cmd,
-	       IRONGATE0->class,
-	       IRONGATE0->latency,
-	       IRONGATE0->bar0,
-	       IRONGATE0->bar1,
-	       IRONGATE0->bar2,
-	       IRONGATE0->rsrvd0[0],
-	       IRONGATE0->rsrvd0[1],
-	       IRONGATE0->rsrvd0[2],
-	       IRONGATE0->rsrvd0[3],
-	       IRONGATE0->rsrvd0[4],
-	       IRONGATE0->rsrvd0[5],
-	       IRONGATE0->capptr,
-	       IRONGATE0->rsrvd1[0],
-	       IRONGATE0->rsrvd1[1],
-	       IRONGATE0->bacsr10,
-	       IRONGATE0->bacsr32,
-	       IRONGATE0->bacsr54,
-	       IRONGATE0->rsrvd2[0],
-	       IRONGATE0->drammap,
-	       IRONGATE0->dramtm,
-	       IRONGATE0->dramms,
-	       IRONGATE0->rsrvd3[0],
-	       IRONGATE0->biu0,
-	       IRONGATE0->biusip,
-	       IRONGATE0->rsrvd4[0],
-	       IRONGATE0->rsrvd4[1],
-	       IRONGATE0->mro,
-	       IRONGATE0->rsrvd5[0],
-	       IRONGATE0->rsrvd5[1],
-	       IRONGATE0->rsrvd5[2],
-	       IRONGATE0->whami,
-	       IRONGATE0->pciarb,
-	       IRONGATE0->pcicfg,
-	       IRONGATE0->rsrvd6[0],
-	       IRONGATE0->rsrvd6[1],
-	       IRONGATE0->rsrvd6[2],
-	       IRONGATE0->rsrvd6[3],
-	       IRONGATE0->rsrvd6[4],
-	       IRONGATE0->agpcap,
-	       IRONGATE0->agpstat,
-	       IRONGATE0->agpcmd,
-	       IRONGATE0->agpva,
-	       IRONGATE0->agpmode,
-	       IRONGATE1->dev_vendor,
-	       IRONGATE1->stat_cmd,
-	       IRONGATE1->class,
-	       IRONGATE1->htype,
-	       IRONGATE1->rsrvd0[0],
-	       IRONGATE1->rsrvd0[1],
-	       IRONGATE1->busnos,
-	       IRONGATE1->io_baselim_regs,
-	       IRONGATE1->mem_baselim,
-	       IRONGATE1->pfmem_baselim,
-	       IRONGATE1->rsrvd1[0],
-	       IRONGATE1->rsrvd1[1],
-	       IRONGATE1->io_baselim,
-	       IRONGATE1->rsrvd2[0],
-	       IRONGATE1->rsrvd2[1],
-	       IRONGATE1->interrupt );
-}
-#else
-#define irongate_register_dump(x)
-#endif
-
 int
 irongate_pci_clr_err(void)
 {
@@ -345,11 +209,11 @@ again:
 	mb();
 	IRONGATE_jd = IRONGATE0->stat_cmd;  /* re-read to force write */
 
-	IRONGATE_jd = IRONGATE0->dramms;
-	printk("Iron dramms %x\n", IRONGATE_jd);
-	IRONGATE0->dramms = IRONGATE_jd; /* write again clears error bits */
+	IRONGATE_jd = *IronECC;
+	printk("Iron ECC %x\n", IRONGATE_jd);
+	*IronECC = IRONGATE_jd; /* write again clears error bits */
 	mb();
-	IRONGATE_jd = IRONGATE0->dramms;  /* re-read to force write */
+	IRONGATE_jd = *IronECC;  /* re-read to force write */
 
 	/* Clear ALI NMI */
         nmi_ctl = inb(0x61);
@@ -358,26 +222,94 @@ again:
         nmi_ctl &= ~0x0c;
         outb(nmi_ctl, 0x61);
 
-	IRONGATE_jd = IRONGATE0->dramms;
+	IRONGATE_jd = *IronECC;
 	if (IRONGATE_jd & 0x300) goto again;
 
 	return 0;
 }
 
+#define IRONGATE_3GB 0xc0000000UL
+
+/* On Albacore (aka UP1500) with 4Gb of RAM we have to reserve some
+   memory for PCI. At this point we just reserve memory above 3Gb. Most
+   of this memory will be freed after PCI setup is done. */
+static void __init
+albacore_init_arch(void)
+{
+	unsigned long memtop = max_low_pfn << PAGE_SHIFT;
+	unsigned long pci_mem = (memtop + 0x1000000UL) & ~0xffffffUL;
+	struct percpu_struct *cpu;
+	int pal_rev, pal_var;
+
+	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset);
+	pal_rev = cpu->pal_revision & 0xffff;
+	pal_var = (cpu->pal_revision >> 16) & 0xff;
+
+	/* Consoles earlier than A5.6-18 (OSF PALcode v1.62-2) set up
+	   the CPU incorrectly (leave speculative stores enabled),
+	   which causes memory corruption under certain conditions.
+	   Issue a warning for such consoles. */
+	if (alpha_using_srm &&
+	    (pal_rev < 0x13e ||	(pal_rev == 0x13e && pal_var < 2)))
+		printk(KERN_WARNING "WARNING! Upgrade to SRM A5.6-19 "
+				    "or later\n");
+
+	if (pci_mem > IRONGATE_3GB)
+		pci_mem = IRONGATE_3GB;
+	IRONGATE0->pci_mem = pci_mem;
+	alpha_mv.min_mem_address = pci_mem;
+	if (memtop > pci_mem) {
+#ifdef CONFIG_BLK_DEV_INITRD
+		extern unsigned long initrd_start, initrd_end;
+		extern void *move_initrd(unsigned long);
+
+		/* Move the initrd out of the way. */
+		if (initrd_end && __pa(initrd_end) > pci_mem) {
+			unsigned long size;
+
+			size = initrd_end - initrd_start;
+			free_bootmem(__pa(initrd_start), PAGE_ALIGN(size));
+			if (!move_initrd(pci_mem))
+				printk("irongate_init_arch: initrd too big "
+				       "(%ldK)\ndisabling initrd\n",
+				       size / 1024);
+		}
+#endif
+		reserve_bootmem(pci_mem, memtop - pci_mem);
+		printk("irongate_init_arch: temporarily reserving "
+			"region %08lx-%08lx for PCI\n", pci_mem, memtop - 1);
+	}
+}
+
+static void __init
+irongate_setup_agp(void)
+{
+	/* Disable the GART window. AGPGART doesn't work due to yet
+	   unresolved memory coherency issues... */
+	IRONGATE0->agpva = IRONGATE0->agpva & ~0xf;
+	alpha_agpgart_size = 0;
+}
+
 void __init
 irongate_init_arch(void)
 {
-	struct pci_controler *hose;
+	struct pci_controller *hose;
+	int amd761 = (IRONGATE0->dev_vendor >> 16) > 0x7006;	/* Albacore? */
 
-	IRONGATE0->stat_cmd = IRONGATE0->stat_cmd & ~0x100;
+	IronECC = amd761 ? &IRONGATE0->bacsr54_eccms761 : &IRONGATE0->dramms;
+
 	irongate_pci_clr_err();
-	irongate_register_dump(__FUNCTION__);
+
+	if (amd761)
+		albacore_init_arch();
+
+	irongate_setup_agp();
 
 	/*
 	 * Create our single hose.
 	 */
 
-	pci_isa_hose = hose = alloc_pci_controler();
+	pci_isa_hose = hose = alloc_pci_controller();
 	hose->io_space = &ioport_resource;
 	hose->mem_space = &iomem_resource;
 	hose->index = 0;
@@ -396,4 +328,121 @@ irongate_init_arch(void)
 	hose->sg_isa = hose->sg_pci = NULL;
 	__direct_map_base = 0;
 	__direct_map_size = 0xffffffff;
+}
+
+/*
+ * IO map and AGP support
+ */
+#include <linux/vmalloc.h>
+#include <linux/agp_backend.h>
+#include <linux/agpgart.h>
+#include <asm/pgalloc.h>
+
+#define GET_PAGE_DIR_OFF(addr) (addr >> 22)
+#define GET_PAGE_DIR_IDX(addr) (GET_PAGE_DIR_OFF(addr))
+
+#define GET_GATT_OFF(addr) ((addr & 0x003ff000) >> 12) 
+#define GET_GATT(addr) (gatt_pages[GET_PAGE_DIR_IDX(addr)])
+
+unsigned long
+irongate_ioremap(unsigned long addr, unsigned long size)
+{
+	struct vm_struct *area;
+	unsigned long vaddr;
+	unsigned long baddr, last;
+	u32 *mmio_regs, *gatt_pages, *cur_gatt, pte;
+	unsigned long gart_bus_addr;
+
+	if (!alpha_agpgart_size)
+		return addr + IRONGATE_MEM;
+
+	gart_bus_addr = (unsigned long)IRONGATE0->bar0 &
+			PCI_BASE_ADDRESS_MEM_MASK; 
+
+	/* 
+	 * Check for within the AGP aperture...
+	 */
+	do {
+		/*
+		 * Check the AGP area
+		 */
+		if (addr >= gart_bus_addr && addr + size - 1 < 
+		    gart_bus_addr + alpha_agpgart_size)
+			break;
+
+		/*
+		 * Not found - assume legacy ioremap
+		 */
+		return addr + IRONGATE_MEM;
+	} while(0);
+
+	mmio_regs = (u32 *)(((unsigned long)IRONGATE0->bar1 &
+			PCI_BASE_ADDRESS_MEM_MASK) + IRONGATE_MEM);
+
+	gatt_pages = (u32 *)(phys_to_virt(mmio_regs[1])); /* FIXME */
+
+	/*
+	 * Adjust the limits (mappings must be page aligned)
+	 */
+	if (addr & ~PAGE_MASK) {
+		printk("AGP ioremap failed... addr not page aligned (0x%lx)\n",
+		       addr);
+		return addr + IRONGATE_MEM;
+	}
+	last = addr + size - 1;
+	size = PAGE_ALIGN(last) - addr;
+
+#if 0
+	printk("irongate_ioremap(0x%lx, 0x%lx)\n", addr, size);
+	printk("irongate_ioremap:  gart_bus_addr  0x%lx\n", gart_bus_addr);
+	printk("irongate_ioremap:  gart_aper_size 0x%lx\n", gart_aper_size);
+	printk("irongate_ioremap:  mmio_regs      %p\n", mmio_regs);
+	printk("irongate_ioremap:  gatt_pages     %p\n", gatt_pages);
+	
+	for(baddr = addr; baddr <= last; baddr += PAGE_SIZE)
+	{
+		cur_gatt = phys_to_virt(GET_GATT(baddr) & ~1);
+		pte = cur_gatt[GET_GATT_OFF(baddr)] & ~1;
+		printk("irongate_ioremap:  cur_gatt %p pte 0x%x\n",
+		       cur_gatt, pte);
+	}
+#endif
+
+	/*
+	 * Map it
+	 */
+	area = get_vm_area(size, VM_IOREMAP);
+	if (!area) return (unsigned long)NULL;
+
+	for(baddr = addr, vaddr = (unsigned long)area->addr; 
+	    baddr <= last; 
+	    baddr += PAGE_SIZE, vaddr += PAGE_SIZE)
+	{
+		cur_gatt = phys_to_virt(GET_GATT(baddr) & ~1);
+		pte = cur_gatt[GET_GATT_OFF(baddr)] & ~1;
+
+		if (__alpha_remap_area_pages(VMALLOC_VMADDR(vaddr), 
+					     pte, PAGE_SIZE, 0)) {
+			printk("AGP ioremap: FAILED to map...\n");
+			vfree(area->addr);
+			return (unsigned long)NULL;
+		}
+	}
+
+	flush_tlb_all();
+
+	vaddr = (unsigned long)area->addr + (addr & ~PAGE_MASK);
+#if 0
+	printk("irongate_ioremap(0x%lx, 0x%lx) returning 0x%lx\n",
+	       addr, size, vaddr);
+#endif
+	return vaddr;
+}
+
+void
+irongate_iounmap(unsigned long addr)
+{
+	if (((long)addr >> 41) == -2)
+		return;	/* kseg map, nothing to do */
+	if (addr) return vfree((void *)(PAGE_MASK & addr)); 
 }

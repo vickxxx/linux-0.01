@@ -1,4 +1,4 @@
-/* $Id: cgthreefb.c,v 1.9 2000/03/19 04:20:44 anton Exp $
+/* $Id: cgthreefb.c,v 1.11 2001/09/19 00:04:33 davem Exp $
  * cgthreefb.c: CGthree frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -13,7 +13,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -43,6 +43,8 @@
 #define CG3_SR_ID_COLOR         0x01
 #define CG3_SR_ID_MONO          0x02
 #define CG3_SR_ID_MONO_ECL      0x03
+
+MODULE_LICENSE("GPL");
 
 enum cg3_type {
 	CG3_AT_66HZ = 0,

@@ -5,7 +5,8 @@
 
 struct scatterlist {
 	char		*address;	/* virtual address		 */
-	char		*alt_address;	/* indirect dma address, or NULL */
+	struct page	*page;		/* buffer page			 */
+	unsigned int	offset;		/* buffer address		 */
 	dma_addr_t	dma_address;	/* dma address			 */
 	unsigned int	length;		/* length			 */
 };

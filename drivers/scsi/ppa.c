@@ -4,7 +4,7 @@
  * (The PPA3 is the embedded controller in the ZIP drive.)
  * 
  * (c) 1995,1996 Grant R. Guenther, grant@torque.net,
- * under the terms of the GNU Public License.
+ * under the terms of the GNU General Public License.
  * 
  * Current Maintainer: David Campbell (Perth, Western Australia, GMT+0800)
  *                     campbell@torque.net
@@ -29,7 +29,7 @@ typedef struct {
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
-    struct tq_struct ppa_tq;	/* Polling interupt stuff       */
+    struct tq_struct ppa_tq;	/* Polling interrupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
     unsigned long recon_tmo;    /* How many usecs to wait for reconnection (6th bit) */
     unsigned int failed:1;	/* Failure flag                 */
@@ -153,6 +153,7 @@ int ppa_detect(Scsi_Host_Template * host)
 		    printk(KERN_ERR "ppa%d: failed to claim parport because a "
 		      "pardevice is owning the port for too longtime!\n",
 			   i);
+		    parport_unregister_device(ppa_hosts[i].dev);
 		    spin_lock_irq(&io_request_lock);
 		    return 0;
 		}
@@ -222,8 +223,8 @@ int ppa_detect(Scsi_Host_Template * host)
 	    printk("  supported by the imm (ZIP Plus) driver. If the\n");
 	    printk("  cable is marked with \"AutoDetect\", this is what has\n");
 	    printk("  happened.\n");
-	    return 0;
 	    spin_lock_irq(&io_request_lock);
+	    return 0;
 	}
 	try_again = 1;
 	goto retry_entry;
@@ -994,7 +995,7 @@ int ppa_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 }
 
 /*
- * Apparently the the disk->capacity attribute is off by 1 sector 
+ * Apparently the disk->capacity attribute is off by 1 sector 
  * for all disk drives.  We add the one here, but it should really
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
@@ -1144,3 +1145,4 @@ static int device_check(int host_no)
     printk("ppa: No devices found, aborting driver load.\n");
     return 1;
 }
+MODULE_LICENSE("GPL");

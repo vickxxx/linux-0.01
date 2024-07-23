@@ -19,7 +19,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/utsname.h>
@@ -44,7 +44,6 @@
 
 extern int do_pipe(int *);
 
-extern asmlinkage int sys_swapon(const char *specialfile, int swap_flags);
 extern asmlinkage unsigned long sys_brk(unsigned long);
 
 /*
@@ -74,8 +73,10 @@ asmlinkage int osf_set_program_attributes(
 	mm = current->mm;
 	mm->end_code = bss_start + bss_len;
 	mm->brk = bss_start + bss_len;
+#if 0
 	printk("set_program_attributes(%lx %lx %lx %lx)\n",
 		text_start, text_len, bss_start, bss_len);
+#endif
 	unlock_kernel();
 	return 0;
 }
@@ -104,7 +105,7 @@ struct osf_dirent_callback {
 	int error;
 };
 
-static int osf_filldir(void *__buf, const char *name, int namlen, off_t offset,
+static int osf_filldir(void *__buf, const char *name, int namlen, loff_t offset,
 		       ino_t ino, unsigned int d_type)
 {
 	struct osf_dirent *dirent;
@@ -124,7 +125,7 @@ static int osf_filldir(void *__buf, const char *name, int namlen, off_t offset,
 	put_user(reclen, &dirent->d_reclen);
 	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
-	((char *) dirent) += reclen;
+	dirent = (char *)dirent + reclen;
 	buf->dirent = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -218,8 +219,8 @@ asmlinkage unsigned long sys_getxpid(int a0, int a1, int a2, int a3, int a4,
 	 * isn't actually going to matter, as if the parent happens
 	 * to change we can happily return either of the pids.
 	 */
-	(&regs)->r20 = tsk->p_opptr->pid;
-	return tsk->pid;
+	(&regs)->r20 = tsk->p_opptr->tgid;
+	return tsk->tgid;
 }
 
 asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
@@ -240,9 +241,9 @@ asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
 			goto out;
 	}
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	ret = do_mmap(file, addr, len, prot, flags, off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
@@ -461,13 +462,8 @@ out:
 
 asmlinkage int osf_swapon(const char *path, int flags, int lowat, int hiwat)
 {
-	int ret;
-
 	/* for now, simply ignore lowat and hiwat... */
-	lock_kernel();
-	ret = sys_swapon(path, flags);
-	unlock_kernel();
-	return ret;
+	return sys_swapon(path, flags);
 }
 
 asmlinkage unsigned long sys_getpagesize(void)
@@ -528,18 +524,13 @@ asmlinkage long osf_shmat(int shmid, void *shmaddr, int shmflg)
 	unsigned long raddr;
 	long err;
 
-	lock_kernel();
 	err = sys_shmat(shmid, shmaddr, shmflg, &raddr);
-	if (err)
-		goto out;
+
 	/*
 	 * This works because all user-level addresses are
 	 * non-negative longs!
 	 */
-	err = raddr;
-out:
-	unlock_kernel();
-	return err;
+	return err ? err : (long)raddr;
 }
 
 
@@ -904,7 +895,6 @@ extern int do_sys_settimeofday(struct timeval *tv, struct timezone *tz);
 extern int do_getitimer(int which, struct itimerval *value);
 extern int do_setitimer(int which, struct itimerval *, struct itimerval *);
 asmlinkage int sys_utimes(char *, struct timeval *);
-extern int sys_wait4(pid_t, int *, int, struct rusage *);
 extern int do_adjtimex(struct timex *);
 
 struct timeval32
@@ -1320,3 +1310,108 @@ asmlinkage int sys_old_adjtimex(struct timex32 *txc_p)
 
 	return ret;
 }
+
+/* Get an address range which is currently unmapped.  Similar to the
+   generic version except that we know how to honor ADDR_LIMIT_32BIT.  */
+
+static unsigned long
+arch_get_unmapped_area_1(unsigned long addr, unsigned long len,
+		         unsigned long limit)
+{
+	struct vm_area_struct *vma = find_vma(current->mm, addr);
+
+	while (1) {
+		/* At this point:  (!vma || addr < vma->vm_end). */
+		if (limit - len < addr)
+			return -ENOMEM;
+		if (!vma || addr + len <= vma->vm_start)
+			return addr;
+		addr = vma->vm_end;
+		vma = vma->vm_next;
+	}
+}
+
+unsigned long
+arch_get_unmapped_area(struct file *filp, unsigned long addr,
+		       unsigned long len, unsigned long pgoff,
+		       unsigned long flags)
+{
+	unsigned long limit;
+
+	/* "32 bit" actually means 31 bit, since pointers sign extend.  */
+	if (current->personality & ADDR_LIMIT_32BIT)
+		limit = 0x80000000;
+	else
+		limit = TASK_SIZE;
+
+	if (len > limit)
+		return -ENOMEM;
+
+	/* First, see if the given suggestion fits.
+
+	   The OSF/1 loader (/sbin/loader) relies on us returning an
+	   address larger than the requested if one exists, which is
+	   a terribly broken way to program.
+
+	   That said, I can see the use in being able to suggest not
+	   merely specific addresses, but regions of memory -- perhaps
+	   this feature should be incorporated into all ports?  */
+
+	if (addr) {
+		addr = arch_get_unmapped_area_1 (PAGE_ALIGN(addr), len, limit);
+		if (addr != -ENOMEM)
+			return addr;
+	}
+
+	/* Next, try allocating at TASK_UNMAPPED_BASE.  */
+	addr = arch_get_unmapped_area_1 (PAGE_ALIGN(TASK_UNMAPPED_BASE),
+					 len, limit);
+	if (addr != -ENOMEM)
+		return addr;
+
+	/* Finally, try allocating in low memory.  */
+	addr = arch_get_unmapped_area_1 (PAGE_SIZE, len, limit);
+
+	return addr;
+}
+
+#ifdef CONFIG_OSF4_COMPAT
+extern ssize_t sys_readv(unsigned long, const struct iovec *, unsigned long);
+extern ssize_t sys_writev(unsigned long, const struct iovec *, unsigned long);
+
+/* Clear top 32 bits of iov_len in the user's buffer for
+   compatibility with old versions of OSF/1 where iov_len
+   was defined as int. */
+static int
+osf_fix_iov_len(const struct iovec *iov, unsigned long count)
+{
+	unsigned long i;
+
+	for (i = 0 ; i < count ; i++) {
+		int *iov_len_high = (int *)&iov[i].iov_len + 1;
+
+		if (put_user(0, iov_len_high))
+			return -EFAULT;
+	}
+	return 0;
+}
+
+asmlinkage ssize_t
+osf_readv(unsigned long fd, const struct iovec * vector, unsigned long count)
+{
+	if (unlikely(personality(current->personality) == PER_OSF4))
+		if (osf_fix_iov_len(vector, count))
+			return -EFAULT;
+	return sys_readv(fd, vector, count);
+}
+
+asmlinkage ssize_t
+osf_writev(unsigned long fd, const struct iovec * vector, unsigned long count)
+{
+	if (unlikely(personality(current->personality) == PER_OSF4))
+		if (osf_fix_iov_len(vector, count))
+			return -EFAULT;
+	return sys_writev(fd, vector, count);
+}
+
+#endif

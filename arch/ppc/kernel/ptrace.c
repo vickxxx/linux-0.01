@@ -13,8 +13,7 @@
  * and Paul Mackerras (paulus@linuxcare.com.au).
  *
  * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file README.legal in the main directory of
- * this archive for more details.
+ * Public License.  Please read the COPYING file for all license details.
  */
 
 #include <linux/kernel.h>
@@ -34,7 +33,11 @@
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
+#if defined(CONFIG_4xx)
+#define MSR_DEBUGCHANGE	(0)
+#else
 #define MSR_DEBUGCHANGE	(MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1)
+#endif
 
 /*
  * does not yet catch signals sent when the child dies.
@@ -46,7 +49,8 @@
  */
 static inline unsigned long get_reg(struct task_struct *task, int regno)
 {
-	if (regno < sizeof(struct pt_regs) / sizeof(unsigned long))
+	if (regno < sizeof(struct pt_regs) / sizeof(unsigned long)
+	    && task->thread.regs != NULL)
 		return ((unsigned long *)task->thread.regs)[regno];
 	return (0);
 }
@@ -57,7 +61,7 @@ static inline unsigned long get_reg(struct task_struct *task, int regno)
 static inline int put_reg(struct task_struct *task, int regno,
 			  unsigned long data)
 {
-	if (regno <= PT_MQ) {
+	if (regno <= PT_MQ && task->thread.regs != NULL) {
 		if (regno == PT_MSR)
 			data = (data & MSR_DEBUGCHANGE)
 				| (task->thread.regs->msr & ~MSR_DEBUGCHANGE);
@@ -67,18 +71,100 @@ static inline int put_reg(struct task_struct *task, int regno,
 	return -EIO;
 }
 
+#ifdef CONFIG_ALTIVEC
+/*
+ * Get contents of AltiVec register state in task TASK
+ */
+static inline int get_vrregs(unsigned long *data, struct task_struct *task)
+{
+	int i, j;
+
+	if (!access_ok(VERIFY_WRITE, data, 133 * sizeof(unsigned long)))
+		return -EFAULT;
+
+	/* copy AltiVec registers VR[0] .. VR[31] */
+	for (i = 0; i < 32; i++)
+		for (j = 0; j < 4; j++, data++)
+			if (__put_user(task->thread.vr[i].u[j], data))
+				return -EFAULT;
+
+	/* copy VSCR */
+	for (i = 0; i < 4; i++, data++)
+		if (__put_user(task->thread.vscr.u[i], data))
+			return -EFAULT;
+
+        /* copy VRSAVE */
+	if (__put_user(task->thread.vrsave, data))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * Write contents of AltiVec register state into task TASK.
+ */
+static inline int set_vrregs(struct task_struct *task, unsigned long *data)
+{
+	int i, j;
+
+	if (!access_ok(VERIFY_READ, data, 133 * sizeof(unsigned long)))
+		return -EFAULT;
+
+	/* copy AltiVec registers VR[0] .. VR[31] */
+	for (i = 0; i < 32; i++)
+		for (j = 0; j < 4; j++, data++)
+			if (__get_user(task->thread.vr[i].u[j], data))
+				return -EFAULT;
+
+	/* copy VSCR */
+	for (i = 0; i < 4; i++, data++)
+		if (__get_user(task->thread.vscr.u[i], data))
+			return -EFAULT;
+
+	/* copy VRSAVE */
+	if (__get_user(task->thread.vrsave, data))
+		return -EFAULT;
+
+	return 0;
+}
+#endif
+
 static inline void
 set_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-	regs->msr |= MSR_SE;
+#if defined(CONFIG_4xx)
+	regs->msr |= MSR_DE;
+	task->thread.dbcr0 |=  (DBCR0_IDM | DBCR0_IC);
+#else
+	if (regs != NULL)
+		regs->msr |= MSR_SE;
+#endif
+
 }
 
 static inline void
 clear_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-	regs->msr &= ~MSR_SE;
+#if defined(CONFIG_4xx)
+	regs->msr &= ~MSR_DE;
+	task->thread.dbcr0 &=  ~DBCR0_IC;
+#else
+	if (regs != NULL)
+		regs->msr &= ~MSR_SE;
+#endif
+}
+
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	/* make sure the single step bit is not set. */
+	clear_single_step(child);
 }
 
 int sys_ptrace(long request, long pid, long addr, long data)
@@ -110,48 +196,17 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		goto out_tsk;
 
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			goto out_tsk;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-		    (current->gid != child->sgid) ||
-		    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
-		    (current->gid != child->gid))
-		    && !capable(CAP_SYS_PTRACE))
-			goto out_tsk;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out_tsk;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
-		goto out_tsk;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out_tsk;
-	}
-	if (child->p_pptr != current)
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
 		goto out_tsk;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
+	case PTRACE_PEEKTEXT: /* read word at location addr. */
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
 		int copied;
@@ -178,7 +233,8 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		if (index < PT_FPR0) {
 			tmp = get_reg(child, (int) index);
 		} else {
-			if (child->thread.regs->msr & MSR_FP)
+			if (child->thread.regs != NULL
+			    && child->thread.regs->msr & MSR_FP)
 				giveup_fpu(child);
 			tmp = ((unsigned long *)child->thread.fpr)[index - PT_FPR0];
 		}
@@ -211,7 +267,8 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		if (index < PT_FPR0) {
 			ret = put_reg(child, index, data);
 		} else {
-			if (child->thread.regs->msr & MSR_FP)
+			if (child->thread.regs != NULL
+			    && child->thread.regs->msr & MSR_FP)
 				giveup_fpu(child);
 			((unsigned long *)child->thread.fpr)[index - PT_FPR0] = data;
 			ret = 0;
@@ -231,14 +288,20 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		child->exit_code = data;
 		/* make sure the single step bit is not set. */
 		clear_single_step(child);
+#ifdef CONFIG_4xx
+		/* ...but traps may be set, so catch those....
+		*/
+		child->thread.regs->msr   |= MSR_DE;
+		child->thread.dbcr0 |= (DBCR0_IDM | DBCR0_TDE);
+#endif
 		wake_up_process(child);
 		ret = 0;
 		break;
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 	case PTRACE_KILL: {
@@ -265,23 +328,27 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 	}
 
-	case PTRACE_DETACH: { /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		/* make sure the single step bit is not set. */
-		clear_single_step(child);
-		wake_up_process(child);
-		ret = 0;
+	case PTRACE_DETACH:
+		ret = ptrace_detach(child, data);
 		break;
-	}
+
+#ifdef CONFIG_ALTIVEC
+	case PTRACE_GETVRREGS:
+		/* Get the child altivec register state. */
+		if (child->thread.regs->msr & MSR_VEC)
+			giveup_altivec(child);
+		ret = get_vrregs((unsigned long *)data, child);
+		break;
+
+	case PTRACE_SETVRREGS:
+		/* Set the child altivec register state. */
+		/* this is to clear the MSR_VEC bit to force a reload
+		 * of register state from memory */
+		if (child->thread.regs->msr & MSR_VEC)
+			giveup_altivec(child);
+		ret = set_vrregs(child, (unsigned long *)data);
+		break;
+#endif
 
 	default:
 		ret = -EIO;

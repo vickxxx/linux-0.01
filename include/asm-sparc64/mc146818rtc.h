@@ -4,11 +4,17 @@
 #ifndef __ASM_SPARC64_MC146818RTC_H
 #define __ASM_SPARC64_MC146818RTC_H
 
+#include <linux/config.h>
 #include <asm/io.h>
 
 #ifndef RTC_PORT
-#define RTC_PORT(x)	(0x70 + (x))
-#define RTC_ALWAYS_BCD	1	/* RTC operates in binary mode */
+#ifdef CONFIG_PCI
+extern unsigned long ds1287_regs;
+#else
+#define ds1287_regs (0UL)
+#endif
+#define RTC_PORT(x)	(ds1287_regs + (x))
+#define RTC_ALWAYS_BCD	0
 #endif
 
 /*

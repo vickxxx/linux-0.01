@@ -5,17 +5,13 @@
 #include <linux/list.h>
 
 /*
- * This is completely separate from the above, and is the
- * "new and improved" way of handling timers more dynamically.
- * Hopefully efficient and general enough for most things.
+ * In Linux 2.4, static timers have been removed from the kernel.
+ * Timers may be dynamically created and destroyed, and should be initialized
+ * by a call to init_timer() upon creation.
  *
- * The "hardcoded" timers above are still useful for well-
- * defined problems, but the timer-list is probably better
- * when you need multiple outstanding timers or similar.
- *
- * The "data" field is in case you want to use the same
- * timeout function for several timeouts. You can use this
- * to distinguish between the different invocations.
+ * The "data" field enables use of a common timeout function for several
+ * timeouts. You can use this field to distinguish between the different
+ * invocations.
  */
 struct timer_list {
 	struct list_head list;
@@ -62,6 +58,8 @@ static inline int timer_pending (const struct timer_list * timer)
  *	1. Because people otherwise forget
  *	2. Because if the timer wrap changes in future you wont have to
  *	   alter your driver code.
+ *
+ * time_after(a,b) returns true if the time a is after time b.
  *
  * Do this with "<0" and ">=0" to only test the sign of the result. A
  * good compiler would generate better code (and a really good compiler

@@ -1,6 +1,6 @@
 /* 
         comm.c    (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                              Under the terms of the GNU public license.
+                              Under the terms of the GNU General Public License.
 
 	comm.c is a low-level protocol driver for some older models
 	of the DataStor "Commuter" parallel to IDE adapter.  Some of
@@ -227,3 +227,4 @@ void    cleanup_module(void)
 #endif
 
 /* end of comm.c */
+MODULE_LICENSE("GPL");

@@ -3,9 +3,9 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<roque@di.fc.ul.pt>	
+ *	Pedro Roque		<pedro_m@yahoo.com>	
  *
- *	$Id: ip6_output.c,v 1.27 2000/06/21 17:18:40 davem Exp $
+ *	$Id: ip6_output.c,v 1.33 2001/09/20 00:35:35 davem Exp $
  *
  *	Based on linux/net/ipv4/ip_output.c
  *
@@ -22,6 +22,7 @@
  *				etc.
  *
  *      H. von Brand    :       Added missing #include <linux/string.h>
+ *	Imran Patel	: 	frag id should be in NBO
  */
 
 #include <linux/config.h>
@@ -55,7 +56,7 @@ static __inline__ void ipv6_select_ident(struct sk_buff *skb, struct frag_hdr *f
 	static spinlock_t ip6_id_lock = SPIN_LOCK_UNLOCKED;
 
 	spin_lock_bh(&ip6_id_lock);
-	fhdr->identification = ipv6_fragmentation_id;
+	fhdr->identification = htonl(ipv6_fragmentation_id);
 	if (++ipv6_fragmentation_id == 0)
 		ipv6_fragmentation_id = 1;
 	spin_unlock_bh(&ip6_id_lock);
@@ -68,8 +69,11 @@ static inline int ip6_output_finish(struct sk_buff *skb)
 	struct hh_cache *hh = dst->hh;
 
 	if (hh) {
+		int hh_alen;
+
 		read_lock_bh(&hh->hh_lock);
-		memcpy(skb->data - 16, hh->hh_data, 16);
+		hh_alen = HH_DATA_ALIGN(hh->hh_len);
+		memcpy(skb->data - hh_alen, hh->hh_data, hh_alen);
 		read_unlock_bh(&hh->hh_lock);
 	        skb_push(skb, hh->hh_len);
 		return hh->hh_output(skb);
@@ -85,7 +89,7 @@ static inline int ip6_output_finish(struct sk_buff *skb)
 static int ip6_dev_loopback_xmit(struct sk_buff *newskb)
 {
 	newskb->mac.raw = newskb->data;
-	skb_pull(newskb, newskb->nh.raw - newskb->data);
+	__skb_pull(newskb, newskb->nh.raw - newskb->data);
 	newskb->pkt_type = PACKET_LOOPBACK;
 	newskb->ip_summed = CHECKSUM_UNNECESSARY;
 	BUG_TRAP(newskb->dst);
@@ -100,20 +104,21 @@ int ip6_output(struct sk_buff *skb)
 	struct dst_entry *dst = skb->dst;
 	struct net_device *dev = dst->dev;
 
-	skb->protocol = __constant_htons(ETH_P_IPV6);
+	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = dev;
 
 	if (ipv6_addr_is_multicast(&skb->nh.ipv6h->daddr)) {
 		if (!(dev->flags&IFF_LOOPBACK) &&
 		    (skb->sk == NULL || skb->sk->net_pinfo.af_inet6.mc_loop) &&
-		    ipv6_chk_mcast_addr(dev, &skb->nh.ipv6h->daddr)) {
+		    ipv6_chk_mcast_addr(dev, &skb->nh.ipv6h->daddr,
+				&skb->nh.ipv6h->saddr)) {
 			struct sk_buff *newskb = skb_clone(skb, GFP_ATOMIC);
 
 			/* Do not check for IFF_ALLMULTI; multicast routing
 			   is not supported in any case.
 			 */
 			if (newskb)
-				NF_HOOK(PF_INET, NF_IP6_POST_ROUTING, newskb, NULL,
+				NF_HOOK(PF_INET6, NF_IP6_POST_ROUTING, newskb, NULL,
 					newskb->dev,
 					ip6_dev_loopback_xmit);
 
@@ -131,7 +136,7 @@ int ip6_output(struct sk_buff *skb)
 
 
 #ifdef CONFIG_NETFILTER
-static int route6_me_harder(struct sk_buff *skb)
+int ip6_route_me_harder(struct sk_buff *skb)
 {
 	struct ipv6hdr *iph = skb->nh.ipv6h;
 	struct dst_entry *dst;
@@ -148,7 +153,9 @@ static int route6_me_harder(struct sk_buff *skb)
 	dst = ip6_route_output(skb->sk, &fl);
 
 	if (dst->error) {
-		printk(KERN_DEBUG "route6_me_harder: No more route.\n");
+		if (net_ratelimit())
+			printk(KERN_DEBUG "ip6_route_me_harder: No more route.\n");
+		dst_release(dst);
 		return -EINVAL;
 	}
 
@@ -164,7 +171,7 @@ static inline int ip6_maybe_reroute(struct sk_buff *skb)
 {
 #ifdef CONFIG_NETFILTER
 	if (skb->nfcache & NFC_ALTERED){
-		if (route6_me_harder(skb) != 0){
+		if (ip6_route_me_harder(skb) != 0){
 			kfree_skb(skb);
 			return -EINVAL;
 		}
@@ -219,7 +226,7 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 	 *	Fill in the IPv6 header
 	 */
 
-	*(u32*)hdr = __constant_htonl(0x60000000) | fl->fl6_flowlabel;
+	*(u32*)hdr = htonl(0x60000000) | fl->fl6_flowlabel;
 	hlimit = -1;
 	if (np)
 		hlimit = np->hop_limit;
@@ -238,7 +245,9 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 		return NF_HOOK(PF_INET6, NF_IP6_LOCAL_OUT, skb, NULL, dst->dev, ip6_maybe_reroute);
 	}
 
-	printk(KERN_DEBUG "IPv6: sending pkt_too_big to self\n");
+	if (net_ratelimit())
+		printk(KERN_DEBUG "IPv6: sending pkt_too_big to self\n");
+	skb->dev = dst->dev;
 	icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, dst->pmtu, skb->dev);
 	kfree_skb(skb);
 	return -EMSGSIZE;
@@ -259,7 +268,7 @@ int ip6_nd_hdr(struct sock *sk, struct sk_buff *skb, struct net_device *dev,
 	struct ipv6hdr *hdr;
 	int totlen;
 
-	skb->protocol = __constant_htons(ETH_P_IPV6);
+	skb->protocol = htons(ETH_P_IPV6);
 	skb->dev = dev;
 
 	totlen = len + sizeof(struct ipv6hdr);
@@ -405,7 +414,7 @@ static int ip6_frag_xmit(struct sock *sk, inet_getfrag_t getfrag,
 
 	last_skb = sock_alloc_send_skb(sk, unfrag_len + frag_len +
 				       dst->dev->hard_header_len + 15,
-				       0, flags & MSG_DONTWAIT, &err);
+				       flags & MSG_DONTWAIT, &err);
 
 	if (last_skb == NULL)
 		return err;
@@ -542,7 +551,7 @@ int ip6_build_xmit(struct sock *sk, inet_getfrag_t getfrag, const void *data,
 		    || (fl->oif && fl->oif != dst->dev->ifindex)) {
 			dst = NULL;
 		} else
-			dst_clone(dst);
+			dst_hold(dst);
 	}
 
 	if (dst == NULL)
@@ -560,7 +569,7 @@ int ip6_build_xmit(struct sock *sk, inet_getfrag_t getfrag, const void *data,
 		if (err) {
 #if IP6_DEBUG >= 2
 			printk(KERN_DEBUG "ip6_build_xmit: "
-			       "no availiable source address\n");
+			       "no available source address\n");
 #endif
 			goto out;
 		}
@@ -624,7 +633,7 @@ int ip6_build_xmit(struct sock *sk, inet_getfrag_t getfrag, const void *data,
 			goto out;
 
 		skb = sock_alloc_send_skb(sk, pktlength + 15 +
-					  dev->hard_header_len, 0,
+					  dev->hard_header_len,
 					  flags & MSG_DONTWAIT, &err);
 
 		if (skb == NULL) {
@@ -697,14 +706,14 @@ int ip6_call_ra_chain(struct sk_buff *skb, int sel)
 			if (last) {
 				struct sk_buff *skb2 = skb_clone(skb, GFP_ATOMIC);
 				if (skb2)
-					rawv6_rcv(last, skb2, skb2->len);
+					rawv6_rcv(last, skb2);
 			}
 			last = sk;
 		}
 	}
 
 	if (last) {
-		rawv6_rcv(last, skb, skb->len);
+		rawv6_rcv(last, skb);
 		read_unlock(&ip6_ra_lock);
 		return 1;
 	}
@@ -723,8 +732,10 @@ int ip6_forward(struct sk_buff *skb)
 	struct ipv6hdr *hdr = skb->nh.ipv6h;
 	struct inet6_skb_parm *opt =(struct inet6_skb_parm*)skb->cb;
 	
-	if (ipv6_devconf.forwarding == 0 && opt->srcrt == 0)
-		goto drop;
+	if (ipv6_devconf.forwarding == 0)
+		goto error;
+
+	skb->ip_summed = CHECKSUM_NONE;
 
 	/*
 	 *	We DO NOT make any processing on
@@ -785,7 +796,7 @@ int ip6_forward(struct sk_buff *skb)
 	} else if (ipv6_addr_type(&hdr->saddr)&(IPV6_ADDR_MULTICAST|IPV6_ADDR_LOOPBACK
 						|IPV6_ADDR_LINKLOCAL)) {
 		/* This check is security critical. */
-		goto drop;
+		goto error;
 	}
 
 	if (skb->len > dst->pmtu) {
@@ -797,8 +808,8 @@ int ip6_forward(struct sk_buff *skb)
 		return -EMSGSIZE;
 	}
 
-	if ((skb = skb_cow(skb, dst->dev->hard_header_len)) == NULL)
-		return 0;
+	if (skb_cow(skb, dst->dev->hard_header_len))
+		goto drop;
 
 	hdr = skb->nh.ipv6h;
 
@@ -809,8 +820,9 @@ int ip6_forward(struct sk_buff *skb)
 	IP6_INC_STATS_BH(Ip6OutForwDatagrams);
 	return NF_HOOK(PF_INET6,NF_IP6_FORWARD, skb, skb->dev, dst->dev, ip6_forward_finish);
 
-drop:
+error:
 	IP6_INC_STATS_BH(Ip6InAddrErrors);
+drop:
 	kfree_skb(skb);
 	return -EINVAL;
 }

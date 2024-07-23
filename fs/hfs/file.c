@@ -2,7 +2,7 @@
  * linux/fs/hfs/file.c
  *
  * Copyright (C) 1995, 1996  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the file-related functions which are independent of
  * which scheme is being used to represent forks.
@@ -32,6 +32,7 @@ static void hfs_file_truncate(struct inode *);
 /*================ Global variables ================*/
 
 struct file_operations hfs_file_operations = {
+	llseek:		generic_file_llseek,
 	read:		hfs_file_read,
 	write:		hfs_file_write,
 	mmap:		generic_file_mmap,
@@ -60,7 +61,7 @@ struct inode_operations hfs_file_inode_operations = {
 struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 {
 	int tmp;
-	kdev_t dev = fork->entry->mdb->sys_mdb->s_dev;
+	struct super_block *sb = fork->entry->mdb->sys_mdb;
 
 	tmp = hfs_extent_map(fork, block, create);
 
@@ -70,7 +71,7 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		*/
 		if (tmp) {
 			hfs_cat_mark_dirty(fork->entry);
-			return getblk(dev, tmp, HFS_SECTOR_SIZE);
+			return sb_getblk(sb, tmp);
 		}
 		return NULL;
 	} else {
@@ -79,8 +80,7 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		   we waited on the I/O in getblk to complete.
 		*/
 		do {
-			struct buffer_head *bh =
-					getblk(dev, tmp, HFS_SECTOR_SIZE);
+			struct buffer_head *bh = sb_getblk(sb, tmp);
 			int tmp2 = hfs_extent_map(fork, block, 0);
 
 			if (tmp2 == tmp) {
@@ -135,9 +135,9 @@ int hfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_resul
  * This is the read field in the inode_operations structure for
  * "regular" (non-header) files.  The purpose is to transfer up to
  * 'count' bytes from the file corresponding to 'inode', beginning at
- * 'filp->offset' bytes into the file.	The data is transfered to
+ * 'filp->offset' bytes into the file.	The data is transferred to
  * user-space at the address 'buf'.  Returns the number of bytes
- * successfully transfered.  This function checks the arguments, does
+ * successfully transferred.  This function checks the arguments, does
  * some setup and then calls hfs_do_read() to do the actual transfer.  */
 static hfs_rwret_t hfs_file_read(struct file * filp, char * buf, 
 				 hfs_rwarg_t count, loff_t *ppos)
@@ -150,7 +150,7 @@ static hfs_rwret_t hfs_file_read(struct file * filp, char * buf,
 		return -EINVAL;
 	}
 	pos = *ppos;
-	if (pos >= HFS_FORK_MAX) {
+	if (pos < 0 || pos >= HFS_FORK_MAX) {
 		return 0;
 	}
 	size = inode->i_size;
@@ -167,7 +167,7 @@ static hfs_rwret_t hfs_file_read(struct file * filp, char * buf,
 	}
 	if ((read = hfs_do_read(inode, HFS_I(inode)->fork, pos,
 				buf, left, filp->f_reada != 0)) > 0) {
-	        *ppos += read;
+	        *ppos = pos + read;
 		filp->f_reada = 1;
 	}
 
@@ -197,7 +197,7 @@ static hfs_rwret_t hfs_file_write(struct file * filp, const char * buf,
 
 	pos = (filp->f_flags & O_APPEND) ? inode->i_size : *ppos;
 
-	if (pos >= HFS_FORK_MAX) {
+	if (pos < 0 || pos >= HFS_FORK_MAX) {
 		return 0;
 	}
 	if (count > HFS_FORK_MAX) {
@@ -207,8 +207,8 @@ static hfs_rwret_t hfs_file_write(struct file * filp, const char * buf,
 	        pos += written;
 
 	*ppos = pos;
-	if (*ppos > inode->i_size) {
-	        inode->i_size = *ppos;
+	if (pos > inode->i_size) {
+	        inode->i_size = pos;
 		mark_inode_dirty(inode);
 	}
 
@@ -277,7 +277,7 @@ static inline int xlate_from_user(char *data, const char *buf, int count)
  * hfs_do_read()
  *
  * This function transfers actual data from disk to user-space memory,
- * returning the number of bytes successfully transfered.  'fork' tells
+ * returning the number of bytes successfully transferred.  'fork' tells
  * which file on the disk to read from.  'pos' gives the offset into
  * the Linux file at which to begin the transfer.  Note that this will
  * differ from 'filp->offset' in the case of an AppleDouble header file
@@ -433,7 +433,7 @@ hfs_s32 hfs_do_read(struct inode *inode, struct hfs_fork * fork, hfs_u32 pos,
  * hfs_do_write()
  *
  * This function transfers actual data from user-space memory to disk,
- * returning the number of bytes successfully transfered.  'fork' tells
+ * returning the number of bytes successfully transferred.  'fork' tells
  * which file on the disk to write to.  'pos' gives the offset into
  * the Linux file at which to begin the transfer.  Note that this will
  * differ from 'filp->offset' in the case of an AppleDouble header file

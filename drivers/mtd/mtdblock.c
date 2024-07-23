@@ -1,7 +1,7 @@
 /* 
  * Direct MTD block device access
  *
- * $Id: mtdblock.c,v 1.38 2000/11/27 08:50:22 dwmw2 Exp $
+ * $Id: mtdblock.c,v 1.51 2001/11/20 11:42:33 dwmw2 Exp $
  *
  * 02-nov-2000	Nicolas Pitre		Added read-modify-write with cache
  */
@@ -10,8 +10,9 @@
 #include <linux/types.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mtd/mtd.h>
+#include <linux/mtd/compatmac.h>
 
 #define MAJOR_NR MTD_BLOCK_MAJOR
 #define DEVICE_NAME "mtdblock"
@@ -59,6 +60,13 @@ static spinlock_t mtdblks_lock;
 static int mtd_sizes[MAX_MTD_DEVICES];
 static int mtd_blksizes[MAX_MTD_DEVICES];
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,14)
+#define BLK_INC_USE_COUNT MOD_INC_USE_COUNT
+#define BLK_DEC_USE_COUNT MOD_DEC_USE_COUNT
+#else
+#define BLK_INC_USE_COUNT do {} while(0)
+#define BLK_DEC_USE_COUNT do {} while(0)
+#endif
 
 /*
  * Cache stuff...
@@ -158,13 +166,16 @@ static int do_cached_write (struct mtdblk_dev *mtdblk, unsigned long pos,
 			    int len, const char *buf)
 {
 	struct mtd_info *mtd = mtdblk->mtd;
-	unsigned int sect_size = mtd->erasesize;
+	unsigned int sect_size = mtdblk->cache_size;
 	size_t retlen;
 	int ret;
 
 	DEBUG(MTD_DEBUG_LEVEL2, "mtdblock: write on \"%s\" at 0x%lx, size 0x%x\n",
 		mtd->name, pos, len);
 	
+	if (!sect_size)
+		return MTD_WRITE (mtd, pos, len, &retlen, buf);
+
 	while (len > 0) {
 		unsigned long sect_start = (pos/sect_size)*sect_size;
 		unsigned int offset = pos - sect_start;
@@ -224,13 +235,16 @@ static int do_cached_read (struct mtdblk_dev *mtdblk, unsigned long pos,
 			   int len, char *buf)
 {
 	struct mtd_info *mtd = mtdblk->mtd;
-	unsigned int sect_size = mtd->erasesize;
+	unsigned int sect_size = mtdblk->cache_size;
 	size_t retlen;
 	int ret;
 
 	DEBUG(MTD_DEBUG_LEVEL2, "mtdblock: read on \"%s\" at 0x%lx, size 0x%x\n", 
 			mtd->name, pos, len);
 	
+	if (!sect_size)
+		return MTD_READ (mtd, pos, len, &retlen, buf);
+
 	while (len > 0) {
 		unsigned long sect_start = (pos/sect_size)*sect_size;
 		unsigned int offset = pos - sect_start;
@@ -268,6 +282,7 @@ static int do_cached_read (struct mtdblk_dev *mtdblk, unsigned long pos,
 static int mtdblock_open(struct inode *inode, struct file *file)
 {
 	struct mtdblk_dev *mtdblk;
+	struct mtd_info *mtd;
 	int dev;
 
 	DEBUG(MTD_DEBUG_LEVEL1,"mtdblock_open\n");
@@ -278,15 +293,25 @@ static int mtdblock_open(struct inode *inode, struct file *file)
 	dev = MINOR(inode->i_rdev);
 	if (dev >= MAX_MTD_DEVICES)
 		return -EINVAL;
-	
-	MOD_INC_USE_COUNT;
 
+	BLK_INC_USE_COUNT;
+
+	mtd = get_mtd_device(NULL, dev);
+	if (!mtd)
+		return -ENODEV;
+	if (MTD_ABSENT == mtd->type) {
+		put_mtd_device(mtd);
+		BLK_DEC_USE_COUNT;
+		return -ENODEV;
+	}
+	
 	spin_lock(&mtdblks_lock);
 
 	/* If it's already open, no need to piss about. */
 	if (mtdblks[dev]) {
 		mtdblks[dev]->count++;
 		spin_unlock(&mtdblks_lock);
+		put_mtd_device(mtd);
 		return 0;
 	}
 	
@@ -299,28 +324,26 @@ static int mtdblock_open(struct inode *inode, struct file *file)
 
 	mtdblk = kmalloc(sizeof(struct mtdblk_dev), GFP_KERNEL);
 	if (!mtdblk) {
-		MOD_DEC_USE_COUNT;
+		put_mtd_device(mtd);
+		BLK_DEC_USE_COUNT;
 		return -ENOMEM;
 	}
 	memset(mtdblk, 0, sizeof(*mtdblk));
 	mtdblk->count = 1;
-	mtdblk->mtd = get_mtd_device(NULL, dev);
-
-	if (!mtdblk->mtd) {
-		kfree(mtdblk);
-		MOD_DEC_USE_COUNT;
-		return -ENODEV;
-	}
+	mtdblk->mtd = mtd;
 
 	init_MUTEX (&mtdblk->cache_sem);
 	mtdblk->cache_state = STATE_EMPTY;
-	mtdblk->cache_size = mtdblk->mtd->erasesize;
-	mtdblk->cache_data = vmalloc(mtdblk->mtd->erasesize);
-	if (!mtdblk->cache_data) {
-		put_mtd_device(mtdblk->mtd);
-		kfree(mtdblk);
-		MOD_DEC_USE_COUNT;
-		return -ENOMEM;
+	if ((mtdblk->mtd->flags & MTD_CAP_RAM) != MTD_CAP_RAM &&
+	    mtdblk->mtd->erasesize) {
+		mtdblk->cache_size = mtdblk->mtd->erasesize;
+		mtdblk->cache_data = vmalloc(mtdblk->mtd->erasesize);
+		if (!mtdblk->cache_data) {
+			put_mtd_device(mtdblk->mtd);
+			kfree(mtdblk);
+			BLK_DEC_USE_COUNT;
+			return -ENOMEM;
+		}
 	}
 
 	/* OK, we've created a new one. Add it to the list. */
@@ -339,7 +362,8 @@ static int mtdblock_open(struct inode *inode, struct file *file)
 
 	mtdblks[dev] = mtdblk;
 	mtd_sizes[dev] = mtdblk->mtd->size/1024;
-	mtd_blksizes[dev] = mtdblk->mtd->erasesize;
+	if (mtdblk->mtd->erasesize)
+		mtd_blksizes[dev] = mtdblk->mtd->erasesize;
 	if (mtd_blksizes[dev] > PAGE_SIZE)
 		mtd_blksizes[dev] = PAGE_SIZE;
 	set_device_ro (inode->i_rdev, !(mtdblk->mtd->flags & MTD_WRITEABLE));
@@ -355,19 +379,10 @@ static release_t mtdblock_release(struct inode *inode, struct file *file)
 {
 	int dev;
 	struct mtdblk_dev *mtdblk;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-	struct super_block * sb = get_super(inode->i_rdev);
-#endif
    	DEBUG(MTD_DEBUG_LEVEL1, "mtdblock_release\n");
 
 	if (inode == NULL)
 		release_return(-ENODEV);
-   
-	fsync_dev(inode->i_rdev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-	if (sb) invalidate_inodes(sb);
-#endif
-	invalidate_buffers(inode->i_rdev);
 
 	dev = MINOR(inode->i_rdev);
 	mtdblk = mtdblks[dev];
@@ -392,7 +407,7 @@ static release_t mtdblock_release(struct inode *inode, struct file *file)
 
 	DEBUG(MTD_DEBUG_LEVEL1, "ok\n");
 
-	MOD_DEC_USE_COUNT;
+	BLK_DEC_USE_COUNT;
 	release_return(0);
 }  
 
@@ -418,7 +433,7 @@ static void handle_mtdblock_request(void)
 		res = 0;
 
 		if (MINOR(req->rq_dev) >= MAX_MTD_DEVICES)
-			panic(__FUNCTION__": minor out of bound");
+			panic("%s: minor out of bounds", __FUNCTION__);
 
 		if ((req->sector + req->current_nr_sectors) > (mtdblk->mtd->size >> 9))
 			goto end_req;
@@ -461,33 +476,22 @@ end_req:
 }
 
 static volatile int leaving = 0;
-#if LINUX_VERSION_CODE > 0x020300
 static DECLARE_MUTEX_LOCKED(thread_sem);
 static DECLARE_WAIT_QUEUE_HEAD(thr_wq);
-#else
-static struct semaphore thread_sem = MUTEX_LOCKED;
-DECLARE_WAIT_QUEUE_HEAD(thr_wq);
-#endif
 
 int mtdblock_thread(void *dummy)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
 
-	tsk->session = 1;
-	tsk->pgrp = 1;
 	/* we might get involved when memory gets low, so use PF_MEMALLOC */
 	tsk->flags |= PF_MEMALLOC;
 	strcpy(tsk->comm, "mtdblockd");
-	tsk->tty = NULL;
 	spin_lock_irq(&tsk->sigmask_lock);
 	sigfillset(&tsk->blocked);
 	recalc_sigpending(tsk);
 	spin_unlock_irq(&tsk->sigmask_lock);
-	exit_mm(tsk);
-	exit_files(tsk);
-	exit_sighand(tsk);
-	exit_fs(tsk);
+	daemonize();
 
 	while (!leaving) {
 		add_wait_queue(&thr_wq, &wait);
@@ -536,10 +540,12 @@ static int mtdblock_ioctl(struct inode * inode, struct file * file,
 
 	switch (cmd) {
 	case BLKGETSIZE:   /* Return device size */
-		if (!arg)
-			return -EFAULT;
-		return put_user((mtdblk->mtd->size >> 9),
-                                (long *) arg)?-EFAULT:0;
+		return put_user((mtdblk->mtd->size >> 9), (unsigned long *) arg);
+
+#ifdef BLKGETSIZE64
+	case BLKGETSIZE64:
+		return put_user((u64)mtdblk->mtd->size, (u64 *)arg);
+#endif
 		
 	case BLKFLSBUF:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
@@ -572,6 +578,9 @@ static struct file_operations mtd_fops =
 #else
 static struct block_device_operations mtd_fops = 
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,14)
+	owner: THIS_MODULE,
+#endif
 	open: mtdblock_open,
 	release: mtdblock_release,
 	ioctl: mtdblock_ioctl
@@ -586,7 +595,7 @@ static void mtd_notify_add(struct mtd_info* mtd)
 {
         char name[8];
 
-        if (!mtd)
+        if (!mtd || mtd->type == MTD_ABSENT)
                 return;
 
         sprintf(name, "%d", mtd->index);
@@ -598,16 +607,11 @@ static void mtd_notify_add(struct mtd_info* mtd)
 
 static void mtd_notify_remove(struct mtd_info* mtd)
 {
-        if (!mtd)
+        if (!mtd || mtd->type == MTD_ABSENT)
                 return;
 
         devfs_unregister(devfs_rw_handle[mtd->index]);
 }
-#endif
-
-#if LINUX_VERSION_CODE < 0x20212 && defined(MODULE)
-#define init_mtdblock init_module
-#define cleanup_mtdblock cleanup_module
 #endif
 
 int __init init_mtdblock(void)
@@ -643,11 +647,7 @@ int __init init_mtdblock(void)
 	blksize_size[MAJOR_NR] = mtd_blksizes;
 	blk_size[MAJOR_NR] = mtd_sizes;
 	
-#if LINUX_VERSION_CODE < 0x20320
-	blk_dev[MAJOR_NR].request_fn = mtdblock_request;
-#else
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), &mtdblock_request);
-#endif
 	kernel_thread (mtdblock_thread, NULL, CLONE_FS|CLONE_FILES|CLONE_SIGHAND);
 	return 0;
 }
@@ -664,14 +664,15 @@ static void __exit cleanup_mtdblock(void)
 #else
 	unregister_blkdev(MAJOR_NR,DEVICE_NAME);
 #endif
-#if LINUX_VERSION_CODE < 0x20320
-	blk_dev[MAJOR_NR].request_fn = NULL;
-#else
 	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
-#endif
 	blksize_size[MAJOR_NR] = NULL;
 	blk_size[MAJOR_NR] = NULL;
 }
 
 module_init(init_mtdblock);
 module_exit(cleanup_mtdblock);
+
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Nicolas Pitre <nico@cam.org> et al.");
+MODULE_DESCRIPTION("Caching read/erase/writeback block device emulation access to MTD devices");

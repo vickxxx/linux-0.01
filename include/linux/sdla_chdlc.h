@@ -4,7 +4,7 @@
  Author:      	Gideon Hack
 		Nenad Corbic <ncorbic@sangoma.com>	
 
- Copyright:	(c) 1995-1999 Sangoma Technologies Inc.
+ Copyright:	(c) 1995-2000 Sangoma Technologies Inc.
 
 		This program is free software; you can redistribute it and/or
 		modify it under the term of the GNU General Public License
@@ -61,12 +61,12 @@
 #define PRI_MAX_NO_DATA_BYTES_IN_FRAME  15354 /* PRIMARY - max length of the CHDLC data field */
 
 typedef struct {
-	unsigned char opp_flag PACKED;			/* the opp flag */
-	unsigned char command PACKED;			/* the user command */
+	unsigned char opp_flag;			/* the opp flag */
+	unsigned char command;			/* the user command */
 	unsigned short buffer_length PACKED;		/* the data length */
-  	unsigned char return_code PACKED;		/* the return code */
-	unsigned char MB_reserved[NUMBER_MB_RESERVED_BYTES] PACKED;	/* reserved for later */
-	unsigned char data[SIZEOF_MB_DATA_BFR] PACKED;	/* the data area */
+  	unsigned char return_code;		/* the return code */
+	unsigned char MB_reserved[NUMBER_MB_RESERVED_BYTES];	/* reserved for later */
+	unsigned char data[SIZEOF_MB_DATA_BFR];	/* the data area */
 } CHDLC_MAILBOX_STRUCT;
 
 typedef struct {
@@ -136,6 +136,8 @@ typedef struct {
 #define TRACE_ALL                       0x00
 #define TRACE_PROT			0x01
 #define TRACE_DATA			0x02
+
+#define DISCARD_RX_ERROR_FRAMES	0x0001
 
 /* ----------------------------------------------------------------------------
  *                     Return codes from interface commands
@@ -246,7 +248,7 @@ typedef struct {
 
 /* the trace configuration structure (SET_TRACE_CONFIGURATION/READ_TRACE_CONFIGURATION commands) */
 typedef struct {
-	unsigned char trace_config PACKED;		/* trace configuration */
+	unsigned char trace_config;		/* trace configuration */
 	unsigned short trace_deactivation_timer PACKED;	/* trace deactivation timer */
 	unsigned long ptr_trace_stat_el_cfg_struct PACKED;	/* a pointer to the line trace element configuration structure */
 } LINE_TRACE_CONFIG_STRUCT;
@@ -270,9 +272,9 @@ typedef struct {
 
 /* the line trace status element structure */
 typedef struct {
-	unsigned char opp_flag PACKED;			/* opp flag */
+	unsigned char opp_flag;			/* opp flag */
 	unsigned short trace_length PACKED;		/* trace length */
-	unsigned char trace_type PACKED;		/* trace type */
+	unsigned char trace_type;		/* trace type */
 	unsigned short trace_time_stamp PACKED;	/* time stamp */
 	unsigned short trace_reserved_1 PACKED;	/* reserved for later use */
 	unsigned long trace_reserved_2 PACKED;		/* reserved for later use */
@@ -358,6 +360,9 @@ typedef struct {
 #define IGNORE_KPALV_FOR_LINK_STAT		0x0004
 /* ignore keepalive frames in determining the CHDLC link status */ 
 
+#define SINGLE_TX_BUFFER			0x4000 
+/* configure a single transmit buffer */
+
 #define HDLC_STREAMING_MODE			0x8000
 
 /*   settings for the 'CHDLC_statistics_options' */
@@ -410,10 +415,10 @@ typedef struct {
 
 /* the CHDLC status structure */
 typedef struct {
-	unsigned char CHDLC_link_status PACKED;	/* CHDLC link status */
-	unsigned char no_Data_frms_for_app PACKED;	/* number of Data frames available for the application */
-	unsigned char receiver_status PACKED;	/* enabled/disabled */
-	unsigned char SLARP_state PACKED;	/* internal SLARP state */
+	unsigned char CHDLC_link_status;	/* CHDLC link status */
+	unsigned char no_Data_frms_for_app;	/* number of Data frames available for the application */
+	unsigned char receiver_status;	/* enabled/disabled */
+	unsigned char SLARP_state;	/* internal SLARP state */
 } CHDLC_LINK_STATUS_STRUCT;
 
 /* settings for the 'CHDLC_link_status' variable */
@@ -469,7 +474,7 @@ typedef struct {
 	unsigned long reserved_CDP_stat5 PACKED;		/* reserved for later */
 	unsigned long reserved_CDP_stat6 PACKED;		/* reserved for later */
 
-	/* Incomming frames with a format error statistics */
+	/* Incoming frames with a format error statistics */
 	unsigned short Rx_frm_incomp_CHDLC_hdr_count PACKED;	/* frames received of with incomplete Cisco HDLC header */
 	unsigned short Rx_frms_too_long_count PACKED;		/* frames received of excessive length count */
 	unsigned short Rx_invalid_CHDLC_addr_count PACKED;	/* frames received with an invalid CHDLC address count */
@@ -484,7 +489,7 @@ typedef struct {
 	unsigned long reserved_frm_format_err4 PACKED;		/* reserved for later */
 
 	/* CHDLC timeout/retry statistics */
-	unsigned short SLARP_Rx_keepalive_TO_count PACKED;	/* timeout count for incomming SLARP frames */
+	unsigned short SLARP_Rx_keepalive_TO_count PACKED;	/* timeout count for incoming SLARP frames */
 	unsigned short SLARP_Request_TO_count PACKED;		/* timeout count for SLARP Request frames */
 	unsigned long To_retry_reserved_stat1 PACKED;		/* reserved for later */
 	unsigned long To_retry_reserved_stat2 PACKED;		/* reserved for later */
@@ -514,8 +519,8 @@ typedef struct {
 
 /* the structure used for the SET_CHDLC_INTERRUPT_TRIGGERS/READ_CHDLC_INTERRUPT_TRIGGERS command */
 typedef struct {
-	unsigned char CHDLC_interrupt_triggers PACKED;	/* CHDLC interrupt trigger configuration */
-	unsigned char IRQ PACKED;			/* IRQ to be used */
+	unsigned char CHDLC_interrupt_triggers;	/* CHDLC interrupt trigger configuration */
+	unsigned char IRQ;			/* IRQ to be used */
 	unsigned short interrupt_timer PACKED;		/* interrupt timer */
 	unsigned short misc_interrupt_bits PACKED;	/* miscellaneous bits */
 } CHDLC_INT_TRIGGERS_STRUCT;
@@ -558,9 +563,9 @@ typedef struct {
 
 /* the Data frame transmit status element structure */
 typedef struct {
-	unsigned char opp_flag PACKED;		/* opp flag */
+	unsigned char opp_flag;		/* opp flag */
 	unsigned short frame_length PACKED;	/* length of the frame to be transmitted */
-	unsigned char reserved_1 PACKED;	/* reserved for internal use */
+	unsigned char reserved_1;	/* reserved for internal use */
 	unsigned long reserved_2 PACKED;	/* reserved for internal use */
 	unsigned long reserved_3 PACKED;	/* reserved for internal use */
 	unsigned long ptr_data_bfr PACKED;	/* pointer to the data area */
@@ -583,9 +588,9 @@ typedef struct {
 
 /* the Data frame receive status element structure */
 typedef struct {
-	unsigned char opp_flag PACKED;		/* opp flag */
+	unsigned char opp_flag;		/* opp flag */
 	unsigned short frame_length PACKED;   /* length of the received frame */
-        unsigned char error_flag PACKED; /* frame errors (HDLC_STREAMING_MODE)*/
+        unsigned char error_flag; /* frame errors (HDLC_STREAMING_MODE)*/
         unsigned short time_stamp PACKED; /* receive time stamp (HDLC_STREAMING_MODE) */
         unsigned long reserved_1 PACKED; 	/* reserved for internal use */
         unsigned short reserved_2 PACKED; 	/* reserved for internal use */
@@ -600,33 +605,33 @@ typedef struct {
 
 /* the global information structure */
 typedef struct {
- 	unsigned char global_status PACKED;		/* global status */
- 	unsigned char modem_status PACKED;		/* current modem status */
- 	unsigned char global_excep_conditions PACKED;	/* global exception conditions */
-	unsigned char glob_info_reserved[5] PACKED;	/* reserved */
-	unsigned char codename[4] PACKED;		/* Firmware name */
-	unsigned char codeversion[4] PACKED;		/* Firmware version */
+ 	unsigned char global_status;		/* global status */
+ 	unsigned char modem_status;		/* current modem status */
+ 	unsigned char global_excep_conditions;	/* global exception conditions */
+	unsigned char glob_info_reserved[5];	/* reserved */
+	unsigned char codename[4];		/* Firmware name */
+	unsigned char codeversion[4];		/* Firmware version */
 } GLOBAL_INFORMATION_STRUCT;
 
 /* the CHDLC information structure */
 typedef struct {
-	unsigned char CHDLC_status PACKED;		/* CHDLC status */
- 	unsigned char CHDLC_excep_conditions PACKED;	/* CHDLC exception conditions */
-	unsigned char CHDLC_info_reserved[14] PACKED;	/* reserved */
+	unsigned char CHDLC_status;		/* CHDLC status */
+ 	unsigned char CHDLC_excep_conditions;	/* CHDLC exception conditions */
+	unsigned char CHDLC_info_reserved[14];	/* reserved */
 } CHDLC_INFORMATION_STRUCT;
 
 /* the interrupt information structure */
 typedef struct {
- 	unsigned char interrupt_type PACKED;		/* type of interrupt triggered */
- 	unsigned char interrupt_permission PACKED;	/* interrupt permission mask */
-	unsigned char int_info_reserved[14] PACKED;	/* reserved */
+ 	unsigned char interrupt_type;		/* type of interrupt triggered */
+ 	unsigned char interrupt_permission;	/* interrupt permission mask */
+	unsigned char int_info_reserved[14];	/* reserved */
 } INTERRUPT_INFORMATION_STRUCT;
 
 /* the S508/FT1 information structure */
 typedef struct {
- 	unsigned char parallel_port_A_input PACKED;	/* input - parallel port A */
- 	unsigned char parallel_port_B_input PACKED;	/* input - parallel port B */
-	unsigned char FT1_info_reserved[14] PACKED;	/* reserved */
+ 	unsigned char parallel_port_A_input;	/* input - parallel port A */
+ 	unsigned char parallel_port_B_input;	/* input - parallel port B */
+	unsigned char FT1_info_reserved[14];	/* reserved */
 } FT1_INFORMATION_STRUCT;
 
 /* the shared memory area information structure */
@@ -645,32 +650,32 @@ typedef struct {
    This is essentially a mailbox structure, without the large data field */
 
 typedef struct {
-        unsigned char  opp_flag PACKED;                  /* the opp flag */
-        unsigned char  command PACKED;                   /* the user command */
+        unsigned char  opp_flag;                  /* the opp flag */
+        unsigned char  command;                   /* the user command */
         unsigned short buffer_length PACKED;             /* the data length */
-        unsigned char  return_code PACKED;               /* the return code */
-	unsigned char  MB_reserved[NUMBER_MB_RESERVED_BYTES] PACKED;	/* reserved for later */
+        unsigned char  return_code;               /* the return code */
+	unsigned char  MB_reserved[NUMBER_MB_RESERVED_BYTES];	/* reserved for later */
 } cblock_t;
 
 
 /* UDP management packet layout (data area of ip packet) */
 /*
 typedef struct {
-	unsigned char		signature[8]	PACKED;
-	unsigned char		request_reply	PACKED;
-	unsigned char		id		PACKED;
-	unsigned char		reserved[6]	PACKED;
+	unsigned char		signature[8];
+	unsigned char		request_reply;
+	unsigned char		id;
+	unsigned char		reserved[6];
 	cblock_t		cblock		PACKED;
-	unsigned char		num_frames	PACKED;
-	unsigned char		ismoredata	PACKED;
-	unsigned char 		data[SIZEOF_MB_DATA_BFR] 	PACKED;
+	unsigned char		num_frames;
+	unsigned char		ismoredata;
+	unsigned char 		data[SIZEOF_MB_DATA_BFR];
 } udp_management_packet_t;
 
 */
 
 typedef struct {
-	unsigned char		num_frames	PACKED;
-	unsigned char		ismoredata	PACKED;
+	unsigned char		num_frames;
+	unsigned char		ismoredata;
 } trace_info_t;
 
 typedef struct {
@@ -679,20 +684,20 @@ typedef struct {
 	wp_mgmt_t		wp_mgmt		PACKED;
 	cblock_t                cblock          PACKED;
 	trace_info_t       	trace_info      PACKED;
-	unsigned char           data[SIZEOF_MB_DATA_BFR]      PACKED;
+	unsigned char           data[SIZEOF_MB_DATA_BFR];
 } chdlc_udp_pkt_t;
 
 typedef struct ft1_exec_cmd{
-	unsigned char  command PACKED;                   /* the user command */
+	unsigned char  command;                   /* the user command */
         unsigned short buffer_length PACKED;             /* the data length */
-        unsigned char  return_code PACKED;               /* the return code */
-	unsigned char  MB_reserved[NUMBER_MB_RESERVED_BYTES] PACKED;
+        unsigned char  return_code;               /* the return code */
+	unsigned char  MB_reserved[NUMBER_MB_RESERVED_BYTES];
 } ft1_exec_cmd_t;
 
 typedef struct {
-	unsigned char  opp_flag 			PACKED;
+	unsigned char  opp_flag;
 	ft1_exec_cmd_t cmd				PACKED;
-	unsigned char  data[SIZEOF_MB_DATA_BFR]      	PACKED;
+	unsigned char  data[SIZEOF_MB_DATA_BFR];
 } ft1_exec_t;
 
 #define UDPMGMT_SIGNATURE	"CTPIPEAB"
@@ -701,11 +706,11 @@ typedef struct {
 /* UDP/IP packet (for UDP management) layout */
 /*
 typedef struct {
-	unsigned char	reserved[2]	PACKED;
+	unsigned char	reserved[2];
 	unsigned short	ip_length	PACKED;
-	unsigned char	reserved2[4]	PACKED;
-	unsigned char	ip_ttl		PACKED;
-	unsigned char	ip_protocol	PACKED;
+	unsigned char	reserved2[4];
+	unsigned char	ip_ttl;
+	unsigned char	ip_protocol;
 	unsigned short	ip_checksum	PACKED;
 	unsigned long	ip_src_address	PACKED;
 	unsigned long	ip_dst_address	PACKED;
@@ -722,17 +727,17 @@ typedef struct {
 
 
 typedef struct {
-	unsigned char	status		PACKED;
-	unsigned char	data_avail	PACKED;
+	unsigned char	status;
+	unsigned char	data_avail;
 	unsigned short	real_length	PACKED;
 	unsigned short	time_stamp	PACKED;
-	unsigned char	data[1]		PACKED;
+	unsigned char	data[1];
 } trace_pkt_t;
 
 typedef struct {
-	unsigned char	error_flag	PACKED;
+	unsigned char	error_flag;
 	unsigned short	time_stamp	PACKED;
-	unsigned char	reserved[13]	PACKED;
+	unsigned char	reserved[13];
 } api_rx_hdr_t;
 
 typedef struct {
@@ -741,8 +746,8 @@ typedef struct {
 } api_rx_element_t;
 
 typedef struct {
-	unsigned char 	attr		PACKED;
-	unsigned char  	reserved[15]	PACKED;
+	unsigned char 	attr;
+	unsigned char  	reserved[15];
 } api_tx_hdr_t;
 
 typedef struct {

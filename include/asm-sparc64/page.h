@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.36 2000/08/10 01:04:53 davem Exp $ */
+/* $Id: page.h,v 1.38 2001/11/30 01:04:10 davem Exp $ */
 
 #ifndef _SPARC64_PAGE_H
 #define _SPARC64_PAGE_H
@@ -18,14 +18,25 @@
 
 #ifndef __ASSEMBLY__
 
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+extern void do_BUG(const char *file, int line);
+#define BUG() do {					\
+	do_BUG(__FILE__, __LINE__);			\
+	__builtin_trap();				\
+} while (0)
+#else
 #define BUG()		__builtin_trap()
+#endif
+
 #define PAGE_BUG(page)	BUG()
 
+/* Sparc64 is slow at multiplication, we prefer to use some extra space. */
+#define WANT_PAGE_VIRTUAL 1
+
 extern void _clear_page(void *page);
-extern void _copy_page(void *to, void *from);
 #define clear_page(X)	_clear_page((void *)(X))
-#define copy_page(X,Y)	_copy_page((void *)(X), (void *)(Y))
 extern void clear_user_page(void *page, unsigned long vaddr);
+#define copy_page(X,Y)	memcpy((void *)(X), (void *)(Y), PAGE_SIZE)
 extern void copy_user_page(void *to, void *from, unsigned long vaddr);
 
 /* GROSS, defining this makes gcc pass these types as aggregates,
@@ -46,8 +57,8 @@ typedef struct { unsigned long iopgprot; } iopgprot_t;
 
 #define pte_val(x)	((x).pte)
 #define iopte_val(x)	((x).iopte)
-#define pmd_val(x)      ((unsigned long)(x).pmd)
-#define pgd_val(x)	((unsigned long)(x).pgd)
+#define pmd_val(x)      ((x).pmd)
+#define pgd_val(x)	((x).pgd)
 #define ctxd_val(x)	((x).ctxd)
 #define pgprot_val(x)	((x).pgprot)
 #define iopgprot_val(x)	((x).iopgprot)
@@ -72,8 +83,8 @@ typedef unsigned long iopgprot_t;
 
 #define pte_val(x)	(x)
 #define iopte_val(x)	(x)
-#define pmd_val(x)      ((unsigned long)(x))
-#define pgd_val(x)	((unsigned long)(x))
+#define pmd_val(x)      (x)
+#define pgd_val(x)	(x)
 #define ctxd_val(x)	(x)
 #define pgprot_val(x)	(x)
 #define iopgprot_val(x)	(x)
@@ -145,6 +156,9 @@ extern __inline__ int get_order(unsigned long size)
 }
 
 #endif /* !(__ASSEMBLY__) */
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* !(__KERNEL__) */
 

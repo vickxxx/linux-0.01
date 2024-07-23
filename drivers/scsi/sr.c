@@ -101,7 +101,6 @@ static void sr_release(struct cdrom_device_info *cdi)
 {
 	if (scsi_CDs[MINOR(cdi->dev)].device->sector_size > 2048)
 		sr_set_blocklength(MINOR(cdi->dev), 2048);
-	sync_dev(cdi->dev);
 	scsi_CDs[MINOR(cdi->dev)].device->access_count--;
 	if (scsi_CDs[MINOR(cdi->dev)].device->host->hostt->module)
 		__MOD_DEC_USE_COUNT(scsi_CDs[MINOR(cdi->dev)].device->host->hostt->module);
@@ -199,6 +198,7 @@ static void rw_intr(Scsi_Cmnd * SCpnt)
 	int good_sectors = (result == 0 ? this_count : 0);
 	int block_sectors = 0;
 	int device_nr = DEVICE_NR(SCpnt->request.rq_dev);
+	long error_sector;
 
 #ifdef DEBUG
 	printk("sr.c done: %x %p\n", result, SCpnt->request.bh->b_data);
@@ -211,33 +211,54 @@ static void rw_intr(Scsi_Cmnd * SCpnt)
 
 
 	if (driver_byte(result) != 0 &&		/* An error occurred */
-	    SCpnt->sense_buffer[0] == 0xF0 &&	/* Sense data is valid */
-	    (SCpnt->sense_buffer[2] == MEDIUM_ERROR ||
-	     SCpnt->sense_buffer[2] == VOLUME_OVERFLOW ||
-	     SCpnt->sense_buffer[2] == ILLEGAL_REQUEST)) {
-		long error_sector = (SCpnt->sense_buffer[3] << 24) |
-		(SCpnt->sense_buffer[4] << 16) |
-		(SCpnt->sense_buffer[5] << 8) |
-		SCpnt->sense_buffer[6];
-		if (SCpnt->request.bh != NULL)
-			block_sectors = SCpnt->request.bh->b_size >> 9;
-		if (block_sectors < 4)
-			block_sectors = 4;
-		if (scsi_CDs[device_nr].device->sector_size == 2048)
-			error_sector <<= 2;
-		error_sector &= ~(block_sectors - 1);
-		good_sectors = error_sector - SCpnt->request.sector;
-		if (good_sectors < 0 || good_sectors >= this_count)
-			good_sectors = 0;
-		/*
-		 * The SCSI specification allows for the value returned by READ
-		 * CAPACITY to be up to 75 2K sectors past the last readable
-		 * block.  Therefore, if we hit a medium error within the last
-		 * 75 2K sectors, we decrease the saved size value.
-		 */
-		if ((error_sector >> 1) < sr_sizes[device_nr] &&
-		    scsi_CDs[device_nr].capacity - error_sector < 4 * 75)
-			sr_sizes[device_nr] = error_sector >> 1;
+	    (SCpnt->sense_buffer[0] & 0x7f) == 0x70) {	/* Sense data is valid */
+		switch (SCpnt->sense_buffer[2]) {
+		case MEDIUM_ERROR:
+		case VOLUME_OVERFLOW:
+		case ILLEGAL_REQUEST:
+			if (!(SCpnt->sense_buffer[0] & 0x80))
+				break;
+			error_sector = (SCpnt->sense_buffer[3] << 24) |
+			(SCpnt->sense_buffer[4] << 16) |
+			(SCpnt->sense_buffer[5] << 8) |
+			SCpnt->sense_buffer[6];
+			if (SCpnt->request.bh != NULL)
+				block_sectors = SCpnt->request.bh->b_size >> 9;
+			if (block_sectors < 4)
+				block_sectors = 4;
+			if (scsi_CDs[device_nr].device->sector_size == 2048)
+				error_sector <<= 2;
+			error_sector &= ~(block_sectors - 1);
+			good_sectors = error_sector - SCpnt->request.sector;
+			if (good_sectors < 0 || good_sectors >= this_count)
+				good_sectors = 0;
+			/*
+			 * The SCSI specification allows for the value returned
+			 * by READ CAPACITY to be up to 75 2K sectors past the
+			 * last readable block.  Therefore, if we hit a medium
+			 * error within the last 75 2K sectors, we decrease the
+			 * saved size value.
+			 */
+			if ((error_sector >> 1) < sr_sizes[device_nr] &&
+			    scsi_CDs[device_nr].capacity - error_sector < 4 *75)
+				sr_sizes[device_nr] = error_sector >> 1;
+			break;
+
+		case RECOVERED_ERROR:
+			/*
+			 * An error occured, but it recovered.  Inform the
+			 * user, but make sure that it's not treated as a
+			 * hard error.
+			 */
+			print_sense("sr", SCpnt);
+			result = 0;
+			SCpnt->sense_buffer[0] = 0x0;
+			good_sectors = this_count;
+			break;
+
+		default:
+			break;
+		}
 	}
 
 	/*
@@ -263,8 +284,9 @@ static request_queue_t *sr_find_queue(kdev_t dev)
 static int sr_scatter_pad(Scsi_Cmnd *SCpnt, int s_size)
 {
 	struct scatterlist *sg, *old_sg = NULL;
-	int i, fsize, bsize, sg_ent;
+	int i, fsize, bsize, sg_ent, sg_count;
 	char *front, *back;
+	void **bbpnt, **old_bbpnt = NULL;
 
 	back = front = NULL;
 	sg_ent = SCpnt->use_sg;
@@ -291,28 +313,46 @@ static int sr_scatter_pad(Scsi_Cmnd *SCpnt, int s_size)
 	/*
 	 * extend or allocate new scatter-gather table
 	 */
-	if (SCpnt->use_sg)
+	sg_count = SCpnt->use_sg;
+	if (sg_count) {
 		old_sg = (struct scatterlist *) SCpnt->request_buffer;
-	else {
-		SCpnt->use_sg = 1;
+		old_bbpnt = SCpnt->bounce_buffers;
+	} else {
+		sg_count = 1;
 		sg_ent++;
 	}
 
-	SCpnt->sglist_len = ((sg_ent * sizeof(struct scatterlist)) + 511) & ~511;
-	if ((sg = scsi_malloc(SCpnt->sglist_len)) == NULL)
+	/* Get space for scatterlist and bounce buffer array. */
+	i  = sg_ent * sizeof(struct scatterlist);
+	i += sg_ent * sizeof(void *);
+	i  = (i + 511) & ~511;
+
+	if ((sg = scsi_malloc(i)) == NULL)
 		goto no_mem;
 
+	bbpnt = (void **)
+		((char *)sg + (sg_ent * sizeof(struct scatterlist)));
+
+	/*
+	 * no more failing memory allocs possible, we can safely assign
+	 * SCpnt values now
+	 */
+	SCpnt->sglist_len = i;
+	SCpnt->use_sg = sg_count;
 	memset(sg, 0, SCpnt->sglist_len);
 
 	i = 0;
 	if (fsize) {
-		sg[0].address = sg[0].alt_address = front;
+		sg[0].address = bbpnt[0] = front;
 		sg[0].length = fsize;
 		i++;
 	}
 	if (old_sg) {
 		memcpy(sg + i, old_sg, SCpnt->use_sg * sizeof(struct scatterlist));
-		scsi_free(old_sg, ((SCpnt->use_sg * sizeof(struct scatterlist)) + 511) & ~511);
+		if (old_bbpnt)
+			memcpy(bbpnt + i, old_bbpnt, SCpnt->use_sg * sizeof(void *));
+		scsi_free(old_sg, (((SCpnt->use_sg * sizeof(struct scatterlist)) +
+				    (SCpnt->use_sg * sizeof(void *))) + 511) & ~511);
 	} else {
 		sg[i].address = SCpnt->request_buffer;
 		sg[i].length = SCpnt->request_bufflen;
@@ -320,11 +360,12 @@ static int sr_scatter_pad(Scsi_Cmnd *SCpnt, int s_size)
 
 	SCpnt->request_bufflen += (fsize + bsize);
 	SCpnt->request_buffer = sg;
+	SCpnt->bounce_buffers = bbpnt;
 	SCpnt->use_sg += i;
 
 	if (bsize) {
 		sg[SCpnt->use_sg].address = back;
-		sg[SCpnt->use_sg].alt_address = back;
+		bbpnt[SCpnt->use_sg] = back;
 		sg[SCpnt->use_sg].length = bsize;
 		SCpnt->use_sg++;
 	}
@@ -344,7 +385,7 @@ no_mem:
 
 static int sr_init_command(Scsi_Cmnd * SCpnt)
 {
-	int dev, devm, block, this_count, s_size;
+	int dev, devm, block=0, this_count, s_size;
 
 	devm = MINOR(SCpnt->request.rq_dev);
 	dev = DEVICE_NR(SCpnt->request.rq_dev);
@@ -416,7 +457,8 @@ static int sr_init_command(Scsi_Cmnd * SCpnt)
 		   (SCpnt->request.cmd == WRITE) ? "writing" : "reading",
 				 this_count, SCpnt->request.nr_sectors));
 
-	SCpnt->cmnd[1] = (SCpnt->lun << 5) & 0xe0;
+	SCpnt->cmnd[1] = (SCpnt->device->scsi_level <= SCSI_2) ?
+			 ((SCpnt->lun << 5) & 0xe0) : 0;
 
 	if (this_count > 0xffff)
 		this_count = 0xffff;
@@ -465,6 +507,15 @@ static int sr_init_command(Scsi_Cmnd * SCpnt)
 	return 1;
 }
 
+struct block_device_operations sr_bdops =
+{
+	owner:			THIS_MODULE,
+	open:			cdrom_open,
+	release:		cdrom_release,
+	ioctl:			cdrom_ioctl,
+	check_media_change:	cdrom_media_changed,
+};
+
 static int sr_open(struct cdrom_device_info *cdi, int purpose)
 {
 	check_disk_change(cdi->dev);
@@ -497,23 +548,12 @@ static int sr_open(struct cdrom_device_info *cdi, int purpose)
 	return 0;
 }
 
-/*
- * do_sr_request() is the request handler function for the sr driver.
- * Its function in life is to take block device requests, and
- * translate them to SCSI commands.
- */
-
-
 static int sr_detect(Scsi_Device * SDp)
 {
 
 	if (SDp->type != TYPE_ROM && SDp->type != TYPE_WORM)
 		return 0;
-
-	printk("Detected scsi CD-ROM sr%d at scsi%d, channel %d, id %d, lun %d\n",
-	       sr_template.dev_noticed++,
-	       SDp->host->host_no, SDp->channel, SDp->id, SDp->lun);
-
+	sr_template.dev_noticed++;
 	return 1;
 }
 
@@ -542,6 +582,9 @@ static int sr_attach(Scsi_Device * SDp)
 	sr_template.nr_dev++;
 	if (sr_template.nr_dev > sr_template.dev_max)
 		panic("scsi_devices corrupt (sr)");
+
+	printk("Attached scsi CD-ROM sr%d at scsi%d, channel %d, id %d, lun %d\n",
+	       i, SDp->host->host_no, SDp->channel, SDp->id, SDp->lun);
 	return 0;
 }
 
@@ -572,7 +615,8 @@ void get_sectorsize(int i)
 	retries = 3;
 	do {
 		cmd[0] = READ_CAPACITY;
-		cmd[1] = (scsi_CDs[i].device->lun << 5) & 0xe0;
+		cmd[1] = (scsi_CDs[i].device->scsi_level <= SCSI_2) ?
+			 ((scsi_CDs[i].device->lun << 5) & 0xe0) : 0;
 		memset((void *) &cmd[2], 0, 8);
 		SRpnt->sr_request.rq_status = RQ_SCSI_BUSY;	/* Mark as really busy */
 		SRpnt->sr_cmd_len = 0;
@@ -601,7 +645,7 @@ void get_sectorsize(int i)
 	} else {
 #if 0
 		if (cdrom_get_last_written(MKDEV(MAJOR_NR, i),
-					 (long *) &scsi_CDs[i].capacity))
+					   &scsi_CDs[i].capacity))
 #endif
 			scsi_CDs[i].capacity = 1 + ((buffer[0] << 24) |
 						    (buffer[1] << 16) |
@@ -664,19 +708,27 @@ void get_capabilities(int i)
 	};
 
 	buffer = (unsigned char *) scsi_malloc(512);
+	if (!buffer)
+	{
+		printk(KERN_ERR "sr: out of memory.\n");
+		return;
+	}
 	cmd[0] = MODE_SENSE;
-	cmd[1] = (scsi_CDs[i].device->lun << 5) & 0xe0;
+	cmd[1] = (scsi_CDs[i].device->scsi_level <= SCSI_2) ?
+		 ((scsi_CDs[i].device->lun << 5) & 0xe0) : 0;
 	cmd[2] = 0x2a;
 	cmd[4] = 128;
 	cmd[3] = cmd[5] = 0;
 	rc = sr_do_ioctl(i, cmd, buffer, 128, 1, SCSI_DATA_READ, NULL);
 
-	if (-EINVAL == rc) {
-		/* failed, drive has'nt this mode page */
+	if (rc) {
+		/* failed, drive doesn't have capabilities mode page */
 		scsi_CDs[i].cdi.speed = 1;
-		/* disable speed select, drive probably can't do this either */
-		scsi_CDs[i].cdi.mask |= CDC_SELECT_SPEED;
+		scsi_CDs[i].cdi.mask |= (CDC_CD_R | CDC_CD_RW | CDC_DVD_R |
+					 CDC_DVD | CDC_DVD_RAM |
+					 CDC_SELECT_DISC | CDC_SELECT_SPEED);
 		scsi_free(buffer, 512);
+		printk("sr%i: scsi-1 drive\n", i);
 		return;
 	}
 	n = buffer[3] + 4;
@@ -740,7 +792,8 @@ static int sr_packet(struct cdrom_device_info *cdi, struct cdrom_generic_command
 	Scsi_Device *device = scsi_CDs[MINOR(cdi->dev)].device;
 
 	/* set the LUN */
-	cgc->cmd[1] |= device->lun << 5;
+	if (device->scsi_level <= SCSI_2)
+		cgc->cmd[1] |= device->lun << 5;
 
 	cgc->stat = sr_do_ioctl(MINOR(cdi->dev), cgc->cmd, cgc->buffer, cgc->buflen, cgc->quiet, cgc->data_direction, cgc->sense);
 
@@ -757,8 +810,9 @@ static int sr_init()
 		return 0;
 
 	if (!sr_registered) {
-		if (devfs_register_blkdev(MAJOR_NR, "sr", &cdrom_fops)) {
+		if (devfs_register_blkdev(MAJOR_NR, "sr", &sr_bdops)) {
 			printk("Unable to get major %d for SCSI-CD\n", MAJOR_NR);
+			sr_template.dev_noticed = 0;
 			return 1;
 		}
 		sr_registered++;
@@ -800,8 +854,10 @@ cleanup_sizes:
 	kfree(sr_sizes);
 cleanup_cds:
 	kfree(scsi_CDs);
+	scsi_CDs = NULL;
 cleanup_devfs:
 	devfs_unregister_blkdev(MAJOR_NR, "sr");
+	sr_template.dev_noticed = 0;
 	sr_registered--;
 	return 1;
 }
@@ -841,6 +897,10 @@ void sr_finish()
 		scsi_CDs[i].cdi.dev = MKDEV(MAJOR_NR, i);
 		scsi_CDs[i].cdi.mask = 0;
 		scsi_CDs[i].cdi.capacity = 1;
+		/*
+		 *	FIXME: someone needs to handle a get_capabilities
+		 *	failure properly ??
+		 */
 		get_capabilities(i);
 		sr_vendor_init(i);
 
@@ -850,7 +910,7 @@ void sr_finish()
                     devfs_register (scsi_CDs[i].device->de, "cd",
                                     DEVFS_FL_DEFAULT, MAJOR_NR, i,
                                     S_IFBLK | S_IRUGO | S_IWUGO,
-                                    &cdrom_fops, NULL);
+                                    &sr_bdops, NULL);
 		register_cdrom(&scsi_CDs[i].cdi);
 	}
 
@@ -871,18 +931,15 @@ static void sr_detach(Scsi_Device * SDp)
 	Scsi_CD *cpnt;
 	int i;
 
+	if (scsi_CDs == NULL)
+		return;
 	for (cpnt = scsi_CDs, i = 0; i < sr_template.dev_max; i++, cpnt++)
 		if (cpnt->device == SDp) {
-			kdev_t devi = MKDEV(MAJOR_NR, i);
-			struct super_block *sb = get_super(devi);
-
 			/*
 			 * Since the cdrom is read-only, no need to sync the device.
 			 * We should be kind to our buffer cache, however.
 			 */
-			if (sb)
-				invalidate_inodes(sb);
-			invalidate_buffers(devi);
+			invalidate_device(MKDEV(MAJOR_NR, i), 0);
 
 			/*
 			 * Reset things back to a sane state so that one can re-load a new
@@ -932,3 +989,4 @@ static void __exit exit_sr(void)
 
 module_init(init_sr);
 module_exit(exit_sr);
+MODULE_LICENSE("GPL");

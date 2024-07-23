@@ -21,7 +21,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -51,9 +51,9 @@ static void dma_led_on(struct NCR_ESP *esp);
 static int  dma_ports_p(struct NCR_ESP *esp);
 static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write);
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
-				 * before they are transfered to the ESP chip
+				 * before they are transferred to the ESP chip
 				 * via PIO.
 				 */
 
@@ -110,8 +110,8 @@ int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
 		esp->eregs = (struct ESP_regs *)(address + BLZ2060_ESP_ADDR);
 		
 		/* Set the command buffer */
-		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+		esp->esp_command = cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
@@ -254,3 +254,5 @@ int blz2060_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+MODULE_LICENSE("GPL");

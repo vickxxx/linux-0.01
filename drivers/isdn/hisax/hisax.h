@@ -1,13 +1,12 @@
-/* $Id: hisax.h,v 2.52.6.1 2000/12/06 16:59:19 kai Exp $
+/* $Id: hisax.h,v 1.1.4.2 2001/12/09 19:15:28 kai Exp $
  *
- *   Basic declarations, defines and prototypes
+ * Basic declarations, defines and prototypes
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 #include <linux/config.h>
-#include <linux/module.h>
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
@@ -16,7 +15,7 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -69,6 +68,9 @@
 #define DL_DATA		0x0220
 #define DL_FLUSH	0x0224
 #define DL_UNIT_DATA	0x0230
+
+#define MDL_BC_RELEASE  0x0278  // Formula-n enter:now
+#define MDL_BC_ASSIGN   0x027C  // Formula-n enter:now
 #define MDL_ASSIGN	0x0280
 #define MDL_REMOVE	0x0284
 #define MDL_ERROR	0x0288
@@ -126,13 +128,13 @@
   #define l3dss1_process
   #include "l3dss1.h" 
   #undef  l3dss1_process
-#endif CONFIG_HISAX_EURO
+#endif /* CONFIG_HISAX_EURO */
 
 #ifdef CONFIG_HISAX_NI1
   #define l3ni1_process
   #include "l3ni1.h" 
   #undef  l3ni1_process
-#endif CONFIG_HISAX_NI1
+#endif /* CONFIG_HISAX_NI1 */
 
 #define MAX_DFRAME_LEN	260
 #define MAX_DFRAME_LEN_L1	300
@@ -318,10 +320,10 @@ struct PStack {
 	 { u_char uuuu; /* only as dummy */
 #ifdef CONFIG_HISAX_EURO
            dss1_stk_priv dss1; /* private dss1 data */
-#endif CONFIG_HISAX_EURO              
+#endif /* CONFIG_HISAX_EURO */              
 #ifdef CONFIG_HISAX_NI1
            ni1_stk_priv ni1; /* private ni1 data */
-#endif CONFIG_HISAX_NI1              
+#endif /* CONFIG_HISAX_NI1 */             
 	 } prot;
 };
 
@@ -342,10 +344,10 @@ struct l3_process {
 	 { u_char uuuu; /* only when euro not defined, avoiding empty union */
 #ifdef CONFIG_HISAX_EURO 
            dss1_proc_priv dss1; /* private dss1 data */
-#endif CONFIG_HISAX_EURO            
+#endif /* CONFIG_HISAX_EURO */            
 #ifdef CONFIG_HISAX_NI1
            ni1_proc_priv ni1; /* private ni1 data */
-#endif CONFIG_HISAX_NI1              
+#endif /* CONFIG_HISAX_NI1 */             
 	 } prot;
 };
 
@@ -393,15 +395,15 @@ struct isar_hw {
 
 struct hdlc_stat_reg {
 #ifdef __BIG_ENDIAN
-	u_char fill __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char cmd  __attribute__((packed));
+	u_char fill;
+	u_char mode;
+	u_char xml;
+	u_char cmd;
 #else
-	u_char cmd  __attribute__((packed));
-	u_char xml  __attribute__((packed));
-	u_char mode __attribute__((packed));
-	u_char fill __attribute__((packed));
+	u_char cmd;
+	u_char xml;
+	u_char mode;
+	u_char fill;
 #endif
 };
 
@@ -455,7 +457,6 @@ struct amd7930_hw {
 	struct tq_struct tq_xmt;
 };
 
-
 #define BC_FLG_INIT	1
 #define BC_FLG_ACTIV	2
 #define BC_FLG_BUSY	3
@@ -471,6 +472,8 @@ struct amd7930_hw {
 #define BC_FLG_FTI_RUN	13
 #define BC_FLG_LL_OK	14
 #define BC_FLG_LL_CONN	15
+#define BC_FLG_FTI_FTS	16
+#define BC_FLG_FRH_WAIT	17
 
 #define L1_MODE_NULL	0
 #define L1_MODE_TRANS	1
@@ -512,6 +515,7 @@ struct BCState {
 		struct tiger_hw tiger;
 		struct amd7930_hw  amd7930;
 		struct w6692B_hw w6692;
+		struct hisax_b_if *b_if;
 	} hw;
 };
 
@@ -535,7 +539,7 @@ struct Channel {
 };
 
 struct elsa_hw {
-	unsigned int base;
+	unsigned long base;
 	unsigned int cfg;
 	unsigned int ctrl;
 	unsigned int ale;
@@ -597,9 +601,9 @@ struct diva_hw {
 	unsigned long cfg_reg;
 	unsigned long pci_cfg;
 	unsigned int ctrl;
-	unsigned int isac_adr;
+	unsigned long isac_adr;
 	unsigned int isac;
-	unsigned int hscx_adr;
+	unsigned long hscx_adr;
 	unsigned int hscx;
 	unsigned int status;
 	struct timer_list tl;
@@ -653,7 +657,7 @@ struct mic_hw {
 };
 
 struct njet_hw {
-	unsigned int base;
+	unsigned long base;
 	unsigned int isac;
 	unsigned int auxa;
 	unsigned char auxd;
@@ -687,11 +691,12 @@ struct hfcPCI_hw {
         unsigned char *pci_io; /* start of PCI IO memory */
         void *share_start; /* shared memory for Fifos start */
         void *fifos; /* FIFO memory */ 
+        int last_bfifo_cnt[2]; /* marker saving last b-fifo frame count */
 	struct timer_list timer;
 };
 
 struct hfcSX_hw {
-        unsigned int  base;
+        unsigned long base;
 	unsigned char cirm;
 	unsigned char ctmt;
 	unsigned char conn;
@@ -753,15 +758,15 @@ struct saphir_hw {
 };
 
 struct bkm_hw {
-	unsigned int base;
+	unsigned long base;
 	/* A4T stuff */
-	unsigned int isac_adr;
+	unsigned long isac_adr;
 	unsigned int isac_ale;
-	unsigned int jade_adr;
+	unsigned long jade_adr;
 	unsigned int jade_ale;
 	/* Scitel Quadro stuff */
-	unsigned int plx_adr;
-	unsigned int data_adr;
+	unsigned long plx_adr;
+	unsigned long data_adr;
 };	
 
 struct gazel_hw {
@@ -833,6 +838,17 @@ struct w6692_chip {
 	int ph_state;
 };
 
+struct amd7930_chip {
+	u_char lmr1;
+	u_char ph_state;
+	u_char old_state;
+	u_char flg_t3;
+	unsigned int tx_xmtlen;
+	struct timer_list timer3;
+	void (*ph_command) (struct IsdnCardState *, u_char, char *);
+	void (*setIrqMask) (struct IsdnCardState *, u_char);
+};
+
 struct icc_chip {
 	int ph_state;
 	u_char *mon_tx;
@@ -896,6 +912,7 @@ struct IsdnCardState {
 		struct bkm_hw ax;
 		struct gazel_hw gazel;
 		struct w6692_hw w6692;
+		struct hisax_d_if *hisax_d_if;
 	} hw;
 	int myid;
 	isdn_if iif;
@@ -928,6 +945,7 @@ struct IsdnCardState {
 		struct hfcpci_chip hfcpci;
 		struct hfcsx_chip hfcsx;
 		struct w6692_chip w6692;
+		struct amd7930_chip amd7930;
 		struct icc_chip icc;
 	} dc;
 	u_char *rcvbuf;
@@ -948,8 +966,6 @@ struct IsdnCardState {
 #define  MON1_RX	2
 #define  MON0_TX	4
 #define  MON1_TX	8
-
-#define	 HISAX_MAX_CARDS	8
 
 #define  ISDN_CTYPE_16_0	1
 #define  ISDN_CTYPE_8_0		2
@@ -990,7 +1006,9 @@ struct IsdnCardState {
 #define  ISDN_CTYPE_HFC_SX      37
 #define  ISDN_CTYPE_NETJET_U	38
 #define  ISDN_CTYPE_HFC_SP_PCMCIA      39
-#define  ISDN_CTYPE_COUNT	39
+#define  ISDN_CTYPE_DYNAMIC     40
+#define  ISDN_CTYPE_ENTERNOW	41
+#define  ISDN_CTYPE_COUNT	41
 
 
 #ifdef ISDN_CHIP_ISAC
@@ -1249,6 +1267,10 @@ struct IsdnCardState {
 #define CARD_NETJET_U 0
 #endif
 
+#ifdef CONFIG_HISAX_ENTERNOW_PCI
+#define CARD_FN_ENTERNOW_PCI 1
+#endif
+
 #define TEI_PER_CARD 1
 
 /* L1 Debug */
@@ -1274,7 +1296,7 @@ extern void Logl2Frame(struct IsdnCardState *cs, struct sk_buff *skb, char *buf,
 struct IsdnCard {
 	int typ;
 	int protocol;		/* EDSS1, 1TR6 or NI1 */
-	unsigned int para[4];
+	unsigned long para[4];
 	struct IsdnCardState *cs;
 };
 
@@ -1303,7 +1325,7 @@ u_char *findie(u_char * p, int size, u_char ie, int wanted_set);
 int getcallref(u_char * p);
 int newcallref(void);
 
-void FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount);
+int FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount);
 void FsmFree(struct Fsm *fsm);
 int FsmEvent(struct FsmInst *fi, int event, void *arg);
 void FsmChangeState(struct FsmInst *fi, int newstate);
@@ -1324,7 +1346,6 @@ int QuickHex(char *txt, u_char * p, int cnt);
 void LogFrame(struct IsdnCardState *cs, u_char * p, int size);
 void dlogframe(struct IsdnCardState *cs, struct sk_buff *skb, int dir);
 void iecpy(u_char * dest, u_char * iestart, int ieoffset);
-int discard_queue(struct sk_buff_head *q);
 #ifdef ISDN_CHIP_ISAC
 void setstack_isac(struct PStack *st, struct IsdnCardState *cs);
 #endif	/* ISDN_CHIP_ISAC */
@@ -1334,19 +1355,19 @@ void setstack_isac(struct PStack *st, struct IsdnCardState *cs);
 
 int ll_run(struct IsdnCardState *cs, int addfeatures);
 void ll_stop(struct IsdnCardState *cs);
-void CallcNew(void);
+int CallcNew(void);
 void CallcFree(void);
 int CallcNewChan(struct IsdnCardState *cs);
 void CallcFreeChan(struct IsdnCardState *cs);
-void Isdnl1New(void);
+int Isdnl1New(void);
 void Isdnl1Free(void);
-void Isdnl2New(void);
+int Isdnl2New(void);
 void Isdnl2Free(void);
-void Isdnl3New(void);
+int Isdnl3New(void);
 void Isdnl3Free(void);
 void init_tei(struct IsdnCardState *cs, int protocol);
 void release_tei(struct IsdnCardState *cs);
 char *HiSax_getrev(const char *revision);
-void TeiNew(void);
+int TeiNew(void);
 void TeiFree(void);
 int certification_check(int output);

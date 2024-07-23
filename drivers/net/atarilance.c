@@ -3,7 +3,7 @@
 	Written 1995/96 by Roman Hodek (Roman.Hodek@informatik.uni-erlangen.de)
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	This drivers was written with the following sources of reference:
 	 - The driver for the Riebl Lance card by the TU Vienna.
@@ -42,7 +42,7 @@
 
 */
 
-static char *version = "atarilance.c: v1.3 04/04/96 "
+static char version[] = "atarilance.c: v1.3 04/04/96 "
 					   "Roman.Hodek@informatik.uni-erlangen.de\n";
 
 #include <linux/module.h>
@@ -53,7 +53,7 @@ static char *version = "atarilance.c: v1.3 04/04/96 "
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 
@@ -83,6 +83,8 @@ static int lance_debug = LANCE_DEBUG;
 static int lance_debug = 1;
 #endif
 MODULE_PARM(lance_debug, "i");
+MODULE_PARM_DESC(lance_debug, "atarilance debug level (0-3)");
+MODULE_LICENSE("GPL");
 
 /* Print debug messages on probing? */
 #undef LANCE_DEBUG_PROBE
@@ -375,8 +377,8 @@ static void *slow_memcpy( void *dst, const void *src, size_t len )
 
 int __init atarilance_probe( struct net_device *dev )
 {	
-    int i;
-	static int found = 0;
+	int i;
+	static int found;
 
 	SET_MODULE_OWNER(dev);
 
@@ -458,7 +460,7 @@ static unsigned long __init lance_probe1( struct net_device *dev,
 	struct lance_private	*lp;
 	struct lance_ioreg		*IO;
 	int 					i;
-	static int 				did_version = 0;
+	static int 				did_version;
 	unsigned short			save1, save2;
 
 	PROBE_PRINT(( "Probing for Lance card at mem %#lx io %#lx\n",
@@ -515,8 +517,11 @@ static unsigned long __init lance_probe1( struct net_device *dev,
 
   probe_ok:
 	init_etherdev( dev, sizeof(struct lance_private) );
-	if (!dev->priv)
+	if (!dev->priv) {
 		dev->priv = kmalloc( sizeof(struct lance_private), GFP_KERNEL );
+		if (!dev->priv)
+			return 0;
+	}
 	lp = (struct lance_private *)dev->priv;
 	MEM = (struct lance_memory *)memaddr;
 	IO = lp->iobase = (struct lance_ioreg *)ioaddr;
@@ -765,7 +770,7 @@ static void lance_tx_timeout (struct net_device *dev)
 	lance_init_ring(dev);
 	REGA( CSR0 ) = CSR0_INEA | CSR0_INIT | CSR0_STRT;
 	dev->trans_start = jiffies;
-	netif_start_queue (dev);
+	netif_wake_queue (dev);
 }
 
 /* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
@@ -781,6 +786,22 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	DPRINTK( 2, ( "%s: lance_start_xmit() called, csr0 %4.4x.\n",
 				  dev->name, DREG ));
 
+
+	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
+	len = skb->len;
+	if(len < ETH_ZLEN)
+		len = ETH_ZLEN;
+	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
+	else if (lp->cardtype == PAM_CARD && (len & 1))
+		++len;
+		
+	if(len > skb->len)
+	{
+		skb = skb_padto(skb, len);
+		if(skb == NULL)
+			return 0;
+	}
+		
 	netif_stop_queue (dev);
 
 	/* Fill in a Tx ring entry */
@@ -810,19 +831,14 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	 * last.
 	 */
 
-	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
-	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
-	if (lp->cardtype == PAM_CARD && (len & 1))
-		++len;
 
 	head->length = -len;
 	head->misc = 0;
 	lp->memcpy_f( PKTBUF_ADDR(head), (void *)skb->data, skb->len );
 	head->flag = TMD1_OWN_CHIP | TMD1_ENP | TMD1_STP;
+	lp->stats.tx_bytes += skb->len;
 	dev_kfree_skb( skb );
 	lp->cur_tx++;
-	lp->stats.tx_bytes += skb->len;
 	while( lp->cur_tx >= TX_RING_SIZE && lp->dirty_tx >= TX_RING_SIZE ) {
 		lp->cur_tx -= TX_RING_SIZE;
 		lp->dirty_tx -= TX_RING_SIZE;
@@ -915,7 +931,7 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 #ifndef final_version
 			if (lp->cur_tx - dirty_tx >= TX_RING_SIZE) {
 				DPRINTK( 0, ( "out-of-sync dirty pointer,"
-							  " %d vs. %d, full=%d.\n",
+							  " %d vs. %d, full=%ld.\n",
 							  dirty_tx, lp->cur_tx, lp->tx_full ));
 				dirty_tx += TX_RING_SIZE;
 			}
@@ -1028,8 +1044,9 @@ static int lance_rx( struct net_device *dev )
 				lp->memcpy_f( skb->data, PKTBUF_ADDR(head), pkt_len );
 				skb->protocol = eth_type_trans( skb, dev );
 				netif_rx( skb );
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
-				lp->stats.rx_bytes += skb->len;
+				lp->stats.rx_bytes += pkt_len;
 			}
 		}
 

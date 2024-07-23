@@ -13,23 +13,34 @@
 #include <linux/types.h>
 #include <linux/major.h>
 
+enum {
 /* These three have identical behaviour; use the second one if DOS fdisk gets
    confused about extended/logical partitions starting past cylinder 1023. */
-#define DOS_EXTENDED_PARTITION 5
-#define LINUX_EXTENDED_PARTITION 0x85
-#define WIN98_EXTENDED_PARTITION 0x0f
+	DOS_EXTENDED_PARTITION = 5,
+	LINUX_EXTENDED_PARTITION = 0x85,
+	WIN98_EXTENDED_PARTITION = 0x0f,
 
-#define LINUX_SWAP_PARTITION	0x82
-#define LINUX_RAID_PARTITION	0xfd	/* autodetect RAID partition */
+	LINUX_SWAP_PARTITION = 0x82,
+	LINUX_RAID_PARTITION = 0xfd,	/* autodetect RAID partition */
 
-#ifdef CONFIG_SOLARIS_X86_PARTITION
-#define SOLARIS_X86_PARTITION	LINUX_SWAP_PARTITION
-#endif
+	SOLARIS_X86_PARTITION =	LINUX_SWAP_PARTITION,
 
-#define DM6_PARTITION		0x54	/* has DDO: use xlated geom & offset */
-#define EZD_PARTITION		0x55	/* EZ-DRIVE */
-#define DM6_AUX1PARTITION	0x51	/* no DDO:  use xlated geom */
-#define DM6_AUX3PARTITION	0x53	/* no DDO:  use xlated geom */
+	DM6_PARTITION =	0x54,	/* has DDO: use xlated geom & offset */
+	EZD_PARTITION =	0x55,	/* EZ-DRIVE */
+	DM6_AUX1PARTITION = 0x51,	/* no DDO:  use xlated geom */
+	DM6_AUX3PARTITION = 0x53,	/* no DDO:  use xlated geom */
+
+	FREEBSD_PARTITION = 0xa5,    /* FreeBSD Partition ID */
+	OPENBSD_PARTITION = 0xa6,    /* OpenBSD Partition ID */
+	NETBSD_PARTITION = 0xa9,   /* NetBSD Partition ID */
+	BSDI_PARTITION = 0xb7,    /* BSDI Partition ID */
+/* Ours is not to wonder why.. */
+	BSD_PARTITION =	FREEBSD_PARTITION,
+	MINIX_PARTITION = 0x81,  /* Minix Partition ID */
+	PLAN9_PARTITION = 0x39,  /* Plan 9 Partition ID */
+	UNIXWARE_PARTITION = 0x63,		/* Partition ID, same as */
+						/* GNU_HURD and SCO Unix */
+};
 
 struct partition {
 	unsigned char boot_ind;		/* 0x80 - active */
@@ -48,9 +59,29 @@ struct partition {
 #  include <linux/devfs_fs_kernel.h>
 
 struct hd_struct {
-	long start_sect;
-	long nr_sects;
+	unsigned long start_sect;
+	unsigned long nr_sects;
 	devfs_handle_t de;              /* primary (master) devfs entry  */
+#ifdef CONFIG_DEVFS_FS
+	int number;
+#endif /* CONFIG_DEVFS_FS */
+#ifdef CONFIG_BLK_STATS
+	/* Performance stats: */
+	unsigned int ios_in_flight;
+	unsigned int io_ticks;
+	unsigned int last_idle_time;
+	unsigned int last_queue_change;
+	unsigned int aveq;
+	
+	unsigned int rd_ios;
+	unsigned int rd_merges;
+	unsigned int rd_ticks;
+	unsigned int rd_sectors;
+	unsigned int wr_ios;
+	unsigned int wr_merges;
+	unsigned int wr_ticks;
+	unsigned int wr_sectors;	
+#endif /* CONFIG_BLK_STATS */
 };
 
 #define GENHD_FL_REMOVABLE  1
@@ -73,6 +104,15 @@ struct gendisk {
 	devfs_handle_t *de_arr;         /* one per physical disc */
 	char *flags;                    /* one per physical disc */
 };
+
+/* drivers/block/genhd.c */
+extern struct gendisk *gendisk_head;
+
+extern void add_gendisk(struct gendisk *gp);
+extern void del_gendisk(struct gendisk *gp);
+extern struct gendisk *get_gendisk(kdev_t dev);
+extern int walk_gendisk(int (*walk)(struct gendisk *, void *), void *);
+
 #endif  /*  __KERNEL__  */
 
 #ifdef CONFIG_SOLARIS_X86_PARTITION
@@ -82,22 +122,22 @@ struct gendisk {
 
 struct solaris_x86_slice {
 	ushort	s_tag;			/* ID tag of partition */
-	ushort	s_flag;			/* permision flags */
-	daddr_t s_start;		/* start sector no of partition */
-	long	s_size;			/* # of blocks in partition */
+	ushort	s_flag;			/* permission flags */
+	unsigned int s_start;		/* start sector no of partition */
+	unsigned int s_size;		/* # of blocks in partition */
 };
 
 struct solaris_x86_vtoc {
-		unsigned long v_bootinfo[3];	/* info needed by mboot (unsupported) */
-	unsigned long v_sanity;		/* to verify vtoc sanity */
-	unsigned long v_version;	/* layout version */
+	unsigned int v_bootinfo[3];	/* info needed by mboot (unsupported) */
+	unsigned int v_sanity;		/* to verify vtoc sanity */
+	unsigned int v_version;		/* layout version */
 	char	v_volume[8];		/* volume name */
 	ushort	v_sectorsz;		/* sector size in bytes */
 	ushort	v_nparts;		/* number of partitions */
-	unsigned long v_reserved[10];	/* free space */
+	unsigned int v_reserved[10];	/* free space */
 	struct solaris_x86_slice
 		v_slice[SOLARIS_X86_NUMSLICE]; /* slice headers */
-	time_t	timestamp[SOLARIS_X86_NUMSLICE]; /* timestamp (unsupported) */
+	unsigned int timestamp[SOLARIS_X86_NUMSLICE]; /* timestamp (unsupported) */
 	char	v_asciilabel[128];	/* for compatibility */
 };
 
@@ -108,13 +148,6 @@ struct solaris_x86_vtoc {
  * BSD disklabel support by Yossi Gottlieb <yogo@math.tau.ac.il>
  * updated by Marc Espie <Marc.Espie@openbsd.org>
  */
-#define FREEBSD_PARTITION	0xa5    /* FreeBSD Partition ID */
-#define OPENBSD_PARTITION	0xa6    /* OpenBSD Partition ID */
-#define NETBSD_PARTITION	0xa9    /* NetBSD Partition ID */
-#define BSDI_PARTITION		0xb7    /* BSDI Partition ID */
-
-/* Ours is not to wonder why.. */
-#define BSD_PARTITION		FREEBSD_PARTITION
 
 /* check against BSD src/sys/sys/disklabel.h for consistency */
 
@@ -173,8 +206,6 @@ struct bsd_disklabel {
  * and Krzysztof G. Baranowski <kgb@knm.org.pl>
  */
 
-#define UNIXWARE_PARTITION     0x63		/* Partition ID, same as */
-						/* GNU_HURD and SCO Unix */
 #define UNIXWARE_DISKMAGIC     (0xCA5E600DUL)	/* The disk magic number */
 #define UNIXWARE_DISKMAGIC2    (0x600DDEEEUL)	/* The slice table magic nr */
 #define UNIXWARE_NUMSLICE      16
@@ -223,10 +254,30 @@ struct unixware_disklabel {
 
 #endif /* CONFIG_UNIXWARE_DISKLABEL */
 
+#ifdef CONFIG_MINIX_SUBPARTITION
+#   define MINIX_NR_SUBPARTITIONS  4
+#endif /* CONFIG_MINIX_SUBPARTITION */
+
 #ifdef __KERNEL__
-extern struct gendisk *gendisk_head;	/* linked list of disks */
 
 char *disk_name (struct gendisk *hd, int minor, char *buf);
+
+/* 
+ * Account for the completion of an IO request (used by drivers which 
+ * bypass the normal end_request processing) 
+ */
+struct request;
+
+#ifdef CONFIG_BLK_STATS
+extern void disk_round_stats(struct hd_struct *hd);
+extern void req_new_io(struct request *req, int merge, int sectors);
+extern void req_merged_io(struct request *req);
+extern void req_finished_io(struct request *req);
+#else
+static inline void req_new_io(struct request *req, int merge, int sectors) { }
+static inline void req_merged_io(struct request *req) { }
+static inline void req_finished_io(struct request *req) { }
+#endif /* CONFIG_BLK_STATS */
 
 extern void devfs_register_partitions (struct gendisk *dev, int minor,
 				       int unregister);

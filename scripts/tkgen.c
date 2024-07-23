@@ -155,7 +155,7 @@ static void start_proc( char * label, int menu_num, int toplevel )
     printf("\"catch {focus $oldFocus}; " );
     /* 
      * We are checking which windows should be destroyed and which are 
-     * common parrents with the next one. Remember that menu_num field
+     * common parents with the next one. Remember that menu_num field
      * in mainmenu_option record reports number of its *parent* menu.
      */
     if ( menu_num < tot_menu_num
@@ -620,11 +620,11 @@ void generate_if( struct kconfig * cfg, struct condition * ocond,
 	case token_int:
 	    if ( cfg->value && *cfg->value == '$' )
 	    {
-		int index = get_varnum( cfg->value+1 );
+		int i = get_varnum( cfg->value+1 );
 		printf( "\n" );
-		if ( ! vartable[index].global_written )
+		if ( ! vartable[i].global_written )
 		{
-		    global( vartable[index].name );
+		    global( vartable[i].name );
 		}
 		printf( "\t" );
 	    }
@@ -989,7 +989,6 @@ static void generate_update_var( struct kconfig * scfg, int menu_num )
 static void end_proc( struct kconfig * scfg, int menu_num )
 {
     struct kconfig * cfg;
-    int i;
 
     printf( "\n\n\n" );
     printf( "\tfocus $w\n" );
@@ -1084,6 +1083,7 @@ static void end_proc( struct kconfig * scfg, int menu_num )
 	    {
 		if ( cfg->token == token_tristate )
 		{
+		    int i;
 		    if ( ! vartable[cfg->nameindex].global_written )
 		    {
 			vartable[cfg->nameindex].global_written = 1;

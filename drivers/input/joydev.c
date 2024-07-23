@@ -1,5 +1,5 @@
 /*
- * $Id: joydev.c,v 1.13 2000/08/14 21:05:26 vojtech Exp $
+ * $Id: joydev.c,v 1.19 2001/01/10 19:49:40 vojtech Exp $
  *
  *  Copyright (c) 1999-2000 Vojtech Pavlik 
  *  Copyright (c) 1999 Colin Van Dyke 
@@ -38,7 +38,7 @@
 #include <linux/input.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -49,6 +49,8 @@
 #define JOYDEV_MINOR_BASE	0
 #define JOYDEV_MINORS		32
 #define JOYDEV_BUFFER_SIZE	64
+
+#define MSECS(t)	(1000 * ((t) / HZ) + 1000 * ((t) % HZ) / HZ)
 
 struct joydev {
 	int exist;
@@ -84,6 +86,7 @@ static struct joydev *joydev_table[JOYDEV_MINORS];
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_DESCRIPTION("Joystick device driver");
+MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("input/js");
 
 static int joydev_correct(int value, struct js_corr *corr)
@@ -133,7 +136,7 @@ static void joydev_event(struct input_handle *handle, unsigned int type, unsigne
 			return;
 	}  
 
-	event.time = jiffies * (1000 / HZ);
+	event.time = MSECS(jiffies);
 
 	while (list) {
 
@@ -228,13 +231,17 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 	if (count < sizeof(struct js_event))
 		return -EINVAL;
+	
+	if (!joydev->exist)
+		return -ENODEV;
 
 	if (count == sizeof(struct JS_DATA_TYPE)) {
 
 		struct JS_DATA_TYPE data;
+		int i;
 
-		data.buttons =  ((joydev->nkey > 0 && test_bit(joydev->keypam[0], input->key)) ? 1 : 0) |
-				((joydev->nkey > 1 && test_bit(joydev->keypam[1], input->key)) ? 2 : 0);
+		for (data.buttons = i = 0; i < 32 && i < joydev->nkey; i++)
+			data.buttons |= test_bit(joydev->keypam[i], input->key) ? (1 << i) : 0;
 		data.x = (joydev->abs[0] / 256 + 128) >> joydev->glue.JS_CORR.x;
 		data.y = (joydev->abs[1] / 256 + 128) >> joydev->glue.JS_CORR.y;
 
@@ -254,6 +261,10 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 		while (list->head == list->tail) {
 
+			if (!joydev->exist) {
+                                retval = -ENODEV;
+                                break;
+                        }
 			if (file->f_flags & O_NONBLOCK) {
 				retval = -EAGAIN;
 				break;
@@ -277,7 +288,7 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 		struct js_event event;
 
-		event.time = jiffies * (1000/HZ);
+		event.time = MSECS(jiffies);
 
 		if (list->startup < joydev->nkey) {
 			event.type = JS_EVENT_BUTTON | JS_EVENT_INIT;
@@ -323,7 +334,10 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	struct joydev_list *list = file->private_data;
 	struct joydev *joydev = list->joydev;
 	struct input_dev *dev = joydev->handle.dev;
+	int i;
 
+	if (!joydev->exist)
+		return -ENODEV;
 
 	switch (cmd) {
 
@@ -360,6 +374,28 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		case JSIOCGCORR:
 			return copy_to_user((struct js_corr *) arg, joydev->corr,
 						sizeof(struct js_corr) * joydev->nabs) ? -EFAULT : 0;
+		case JSIOCSAXMAP:
+			if (copy_from_user(joydev->abspam, (__u8 *) arg, sizeof(__u8) * ABS_MAX))
+				return -EFAULT;
+			for (i = 0; i < joydev->nabs; i++) {
+				if (joydev->abspam[i] > ABS_MAX) return -EINVAL;
+				joydev->absmap[joydev->abspam[i]] = i;
+			}
+			return 0;
+		case JSIOCGAXMAP:
+			return copy_to_user((__u8 *) arg, joydev->abspam,
+						sizeof(__u8) * ABS_MAX) ? -EFAULT : 0;
+		case JSIOCSBTNMAP:
+			if (copy_from_user(joydev->keypam, (__u16 *) arg, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
+				return -EFAULT;
+			for (i = 0; i < joydev->nkey; i++) {
+				if (joydev->keypam[i] > KEY_MAX || joydev->keypam[i] < BTN_MISC) return -EINVAL;
+				joydev->keymap[joydev->keypam[i] - BTN_MISC] = i;
+			}
+			return 0;
+		case JSIOCGBTNMAP:
+			return copy_to_user((__u16 *) arg, joydev->keypam,
+						sizeof(__u16) * (KEY_MAX - BTN_MISC)) ? -EFAULT : 0;
 		default:
 			if ((cmd & ~(_IOC_SIZEMASK << _IOC_SIZESHIFT)) == JSIOCGNAME(0)) {
 				int len;
@@ -387,7 +423,7 @@ static struct file_operations joydev_fops = {
 static struct input_handle *joydev_connect(struct input_handler *handler, struct input_dev *dev)
 {
 	struct joydev *joydev;
-	int i, j, minor;
+	int i, j, t, minor;
 
 	if (!(test_bit(EV_KEY, dev->evbit) && test_bit(EV_ABS, dev->evbit) &&
 	     (test_bit(ABS_X, dev->absbit) || test_bit(ABS_Y, dev->absbit)) &&
@@ -446,15 +482,17 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 		joydev->corr[i].prec = dev->absfuzz[j];
 		joydev->corr[i].coef[0] = (dev->absmax[j] + dev->absmin[j]) / 2 - dev->absflat[j];
 		joydev->corr[i].coef[1] = (dev->absmax[j] + dev->absmin[j]) / 2 + dev->absflat[j];
-		joydev->corr[i].coef[2] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
-		joydev->corr[i].coef[3] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
+		if (!(t = ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j])))
+			continue;
+		joydev->corr[i].coef[2] = (1 << 29) / t;
+		joydev->corr[i].coef[3] = (1 << 29) / t;
 
 		joydev->abs[i] = joydev_correct(dev->abs[j], joydev->corr + i);
 	}
 
 	joydev->devfs = input_register_minor("js%d", minor, JOYDEV_MINOR_BASE);
 
-	printk(KERN_INFO "js%d: Joystick device for input%d\n", minor, dev->number);
+//	printk(KERN_INFO "js%d: Joystick device for input%d\n", minor, dev->number);
 
 	return &joydev->handle;
 }

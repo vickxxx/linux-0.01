@@ -21,9 +21,6 @@
 
 #include<linux/stat.h>
 
-extern ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
-			u32 base, int io_port, int irq, int dma,
-			long long options, int clock);
 
 int mvme16x_scsi_detect(Scsi_Host_Template *tpnt)
 {
@@ -52,3 +49,6 @@ int mvme16x_scsi_detect(Scsi_Host_Template *tpnt)
     called = 1;
     return 1;
 }
+
+static Scsi_Host_Template driver_template = MVME16x_SCSI;
+#include "scsi_module.c"

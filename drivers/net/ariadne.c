@@ -43,7 +43,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
@@ -54,7 +54,7 @@
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 #include <linux/zorro.h>
-#include <asm/io.h>
+
 #include <asm/irq.h>
 
 #include "ariadne.h"
@@ -121,7 +121,7 @@ struct lancedata {
 };
 
 #ifdef MODULE
-static struct ariadne_private *root_ariadne_dev = NULL;
+static struct ariadne_private *root_ariadne_dev;
 #endif
 
 static int ariadne_open(struct net_device *dev);
@@ -160,24 +160,29 @@ static int __init ariadne_probe(void)
 	unsigned long board = z->resource.start;
 	unsigned long base_addr = board+ARIADNE_LANCE;
 	unsigned long mem_start = board+ARIADNE_RAM;
+	struct resource *r1, *r2;
 
-	if (!request_mem_region(base_addr, sizeof(struct Am79C960),
-		    		"Am79C960"))
-	    continue;
-	if (!request_mem_region(mem_start, ARIADNE_RAM_SIZE, "RAM")) {
-	    release_mem_region(base_addr, sizeof(struct Am79C960));
+	r1 = request_mem_region(base_addr, sizeof(struct Am79C960),
+		    		"Am79C960");
+	if (!r1) continue;
+	r2 = request_mem_region(mem_start, ARIADNE_RAM_SIZE, "RAM");
+	if (!r2) {
+	    release_resource(r1);
 	    continue;
 	}
 
 	dev = init_etherdev(NULL, sizeof(struct ariadne_private));
 
 	if (dev == NULL) {
-	    release_mem_region(base_addr, sizeof(struct Am79C960));
-	    release_mem_region(mem_start, ARIADNE_RAM_SIZE);
+	    release_resource(r1);
+	    release_resource(r2);
 	    return -ENOMEM;
 	}
-	priv = (struct ariadne_private *)dev->priv;
-	memset(priv, 0, sizeof(struct ariadne_private));
+	SET_MODULE_OWNER(dev);
+	priv = dev->priv;
+
+	r1->name = dev->name;
+	r2->name = dev->name;
 
 	priv->dev = dev;
 	dev->dev_addr[0] = 0x00;
@@ -218,6 +223,7 @@ static int ariadne_open(struct net_device *dev)
     volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     u_short in;
     u_long version;
+    int i;
 
     /* Reset the LANCE */
     in = lance->Reset;
@@ -307,14 +313,12 @@ static int ariadne_open(struct net_device *dev)
 
     netif_start_queue(dev);
 
-    if (request_irq(IRQ_AMIGA_PORTS, ariadne_interrupt, SA_SHIRQ,
-                    "Ariadne Ethernet", dev))
-	return -EAGAIN;
+    i = request_irq(IRQ_AMIGA_PORTS, ariadne_interrupt, SA_SHIRQ,
+                    dev->name, dev);
+    if (i) return i;
 
     lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
     lance->RDP = INEA|STRT;
-
-    MOD_INC_USE_COUNT;
 
     return 0;
 }
@@ -388,8 +392,6 @@ static int ariadne_close(struct net_device *dev)
     lance->RDP = STOP;
 
     free_irq(IRQ_AMIGA_PORTS, dev);
-
-    MOD_DEC_USE_COUNT;
 
     return 0;
 }
@@ -575,6 +577,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
     volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     int entry;
     unsigned long flags;
+    int len = skb->len;
 
 #if 0
     if (ariadne_debug > 3) {
@@ -584,6 +587,15 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	lance->RDP = 0x0000;
     }
 #endif
+
+    /* FIXME: is the 79C960 new enough to do its own padding right ? */
+    if(skb->len < ETH_ZLEN)
+    {
+    	skb = skb_padto(skb, ETH_ZLEN);
+    	if(skb == NULL)
+    	    return 0;
+    	len = ETH_ZLEN;
+    }
 
     /* Fill in a Tx ring entry */
 
@@ -615,8 +627,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     priv->tx_ring[entry]->TMD2 = swapw((u_short)-skb->len);
     priv->tx_ring[entry]->TMD3 = 0x0000;
-    memcpyw(priv->tx_buff[entry], (u_short *)skb->data,
-	    skb->len <= ETH_ZLEN ? ETH_ZLEN : skb->len);
+    memcpyw(priv->tx_buff[entry], (u_short *)skb->data, len);
 
 #if 0
     {
@@ -741,7 +752,9 @@ static int ariadne_rx(struct net_device *dev)
 #endif
 
 	    netif_rx(skb);
+	    dev->last_rx = jiffies;
 	    priv->stats.rx_packets++;
+	    priv->stats.rx_bytes += pkt_len;
 	}
 
 	priv->rx_ring[entry]->RMD1 |= RF_OWN;
@@ -843,3 +856,5 @@ static void __exit ariadne_cleanup(void)
 
 module_init(ariadne_probe);
 module_exit(ariadne_cleanup);
+
+MODULE_LICENSE("GPL");

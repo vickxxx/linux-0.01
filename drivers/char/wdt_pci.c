@@ -30,6 +30,9 @@
  *		Alan Cox	:	Split ISA and PCI cards into two drivers
  *		Jeff Garzik	:	PCI cleanups
  *		Tigran Aivazian	:	Restructured wdtpci_init_one() to handle failures
+ *		Joel Becker	:	Added WDIOC_GET/SETTIMEOUT
+ *		Zwane Mwaikambo :	Magic char closing, locking changes, cleanups
+ *		Matt Domsch	:	nowayout module option
  */
 
 #include <linux/config.h>
@@ -43,7 +46,7 @@
 #include <linux/watchdog.h>
 #define WDT_IS_PCI
 #include "wd501p.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <asm/io.h>
@@ -52,7 +55,8 @@
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
-#include <linux/smp_lock.h>
+#include <linux/spinlock.h>
+#include <asm/semaphore.h>
 
 #include <linux/pci.h>
 
@@ -71,49 +75,28 @@
 #define PCI_DEVICE_ID_WDG_CSM 0x22c0
 #endif
 
-static int wdt_is_open;
+static struct semaphore open_sem;
+static spinlock_t wdtpci_lock;
+static int expect_close = 0;
 
-/*
- *	You must set these - there is no sane way to probe for this board.
- *	You can use wdt=x,y to set these now.
- */
- 
-static int io=0x240;
-static int irq=11;
+static int io;
+static int irq;
 
+/* Default timeout */
 #define WD_TIMO (100*60)		/* 1 minute */
+#define WD_TIMO_MAX (WD_TIMO*60)	/* 1 hour(?) */
 
-#ifndef MODULE
+static int wd_margin = WD_TIMO;
 
-/**
- *	wdtpci_setup:
- *	@str: command line string
- *
- *	Setup options. The board isn't really probe-able so we have to
- *	get the user to tell us the configuration. Sane people build it 
- *	modular but the others come here.
- */
- 
-static int __init wdtpci_setup(char *str)
-{
-	int ints[4];
+#ifdef CONFIG_WATCHDOG_NOWAYOUT
+static int nowayout = 1;
+#else
+static int nowayout = 0;
+#endif
 
-	str = get_options (str, ARRAY_SIZE(ints), ints);
+MODULE_PARM(nowayout,"i");
+MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
-	if (ints[0] > 0)
-	{
-		io = ints[1];
-		if(ints[0] > 1)
-			irq = ints[2];
-	}
-
-	return 1;
-}
-
-__setup("wdt=", wdtpci_setup);
-
-#endif /* !MODULE */
- 
 /*
  *	Programming support
  */
@@ -220,11 +203,6 @@ static void wdtpci_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
-static long long wdtpci_llseek(struct file *file, long long offset, int origin)
-{
-	return -ESPIPE;
-}
-
 /**
  *	wdtpci_ping:
  *
@@ -234,11 +212,15 @@ static long long wdtpci_llseek(struct file *file, long long offset, int origin)
  
 static void wdtpci_ping(void)
 {
+	unsigned long flags;
+
 	/* Write a watchdog value */
+	spin_lock_irqsave(&wdtpci_lock, flags);
 	inb_p(WDT_DC);
 	wdtpci_ctr_mode(1,2);
-	wdtpci_ctr_load(1,WD_TIMO);		/* Timeout */
+	wdtpci_ctr_load(1,wd_margin);		/* Timeout */
 	outb_p(0, WDT_DC);
+	spin_unlock_irqrestore(&wdtpci_lock, flags);
 }
 
 /**
@@ -258,12 +240,24 @@ static ssize_t wdtpci_write(struct file *file, const char *buf, size_t count, lo
 	if (ppos != &file->f_pos)
 		return -ESPIPE;
 
-	if(count)
-	{
+	if (count) {
+		if (!nowayout) {
+			size_t i;
+
+			expect_close = 0;
+
+			for (i = 0; i != count; i++) {
+				char c;
+				if(get_user(c, buf+i))
+					return -EFAULT;
+				if (c == 'V')
+					expect_close = 1;
+			}
+		}
 		wdtpci_ping();
-		return 1;
 	}
-	return 0;
+
+	return count;
 }
 
 /**
@@ -315,10 +309,12 @@ static ssize_t wdtpci_read(struct file *file, char *buf, size_t count, loff_t *p
 static int wdtpci_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned long arg)
 {
+	int new_margin;
 	static struct watchdog_info ident=
 	{
 		WDIOF_OVERHEAT|WDIOF_POWERUNDER|WDIOF_POWEROVER
-			|WDIOF_EXTERN1|WDIOF_EXTERN2|WDIOF_FANFAULT,
+			|WDIOF_EXTERN1|WDIOF_EXTERN2|WDIOF_FANFAULT
+			|WDIOF_SETTIMEOUT|WDIOF_MAGICCLOSE,
 		1,
 		"WDT500/501PCI"
 	};
@@ -327,7 +323,7 @@ static int wdtpci_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	switch(cmd)
 	{
 		default:
-			return -ENOIOCTLCMD;
+			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
 			return copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident))?-EFAULT:0;
 
@@ -338,6 +334,18 @@ static int wdtpci_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		case WDIOC_KEEPALIVE:
 			wdtpci_ping();
 			return 0;
+		case WDIOC_SETTIMEOUT:
+			if (get_user(new_margin, (int *)arg))
+				return -EFAULT;
+			/* Arbitrary, can't find the card's limits */
+			new_margin *= 100;
+			if ((new_margin < 0) || (new_margin > WD_TIMO_MAX))
+				return -EINVAL;
+			wd_margin = new_margin;
+			wdtpci_ping();
+			/* Fall */
+		case WDIOC_GETTIMEOUT:
+			return put_user(wd_margin / 100, (int *)arg);
 	}
 }
 
@@ -355,20 +363,22 @@ static int wdtpci_ioctl(struct inode *inode, struct file *file, unsigned int cmd
  
 static int wdtpci_open(struct inode *inode, struct file *file)
 {
+	unsigned long flags;
+
 	switch(MINOR(inode->i_rdev))
 	{
 		case WATCHDOG_MINOR:
-			if(wdt_is_open)
+			if (down_trylock(&open_sem))
 				return -EBUSY;
-#ifdef CONFIG_WATCHDOG_NOWAYOUT	
-			MOD_INC_USE_COUNT;
-#endif
+
+			if (nowayout) {
+				MOD_INC_USE_COUNT;
+			}
 			/*
 			 *	Activate 
 			 */
-	 
-			wdt_is_open=1;
-
+			spin_lock_irqsave(&wdtpci_lock, flags);
+			
 			inb_p(WDT_DC);		/* Disable */
 
 			/*
@@ -390,9 +400,10 @@ static int wdtpci_open(struct inode *inode, struct file *file)
 			wdtpci_ctr_mode(1,2);
 			wdtpci_ctr_mode(2,1);
 			wdtpci_ctr_load(0,20833);	/* count at 100Hz */
-			wdtpci_ctr_load(1,WD_TIMO);/* Timeout 60 seconds */
+			wdtpci_ctr_load(1,wd_margin);/* Timeout 60 seconds */
 			/* DO NOT LOAD CTR2 on PCI card! -- JPN */
 			outb_p(0, WDT_DC);	/* Enable */
+			spin_unlock_irqrestore(&wdtpci_lock, flags);
 			return 0;
 		case TEMP_MINOR:
 			return 0;
@@ -415,15 +426,19 @@ static int wdtpci_open(struct inode *inode, struct file *file)
  
 static int wdtpci_release(struct inode *inode, struct file *file)
 {
-	if(MINOR(inode->i_rdev)==WATCHDOG_MINOR)
-	{
-		lock_kernel();
-#ifndef CONFIG_WATCHDOG_NOWAYOUT	
-		inb_p(WDT_DC);		/* Disable counters */
-		wdtpci_ctr_load(2,0);	/* 0 length reset pulses now */
-#endif		
-		wdt_is_open=0;
-		unlock_kernel();
+
+	if (MINOR(inode->i_rdev)==WATCHDOG_MINOR) {
+		unsigned long flags;
+		if (expect_close) {
+			spin_lock_irqsave(&wdtpci_lock, flags);
+			inb_p(WDT_DC);		/* Disable counters */
+			wdtpci_ctr_load(2,0);	/* 0 length reset pulses now */
+			spin_unlock_irqrestore(&wdtpci_lock, flags);
+		} else {
+			printk(KERN_CRIT PFX "Unexpected close, not stopping timer!");
+			wdtpci_ping();
+		}
+		up(&open_sem);
 	}
 	return 0;
 }
@@ -443,11 +458,14 @@ static int wdtpci_release(struct inode *inode, struct file *file)
 static int wdtpci_notify_sys(struct notifier_block *this, unsigned long code,
 	void *unused)
 {
-	if(code==SYS_DOWN || code==SYS_HALT)
-	{
+	unsigned long flags;
+
+	if (code==SYS_DOWN || code==SYS_HALT) {
 		/* Turn the card off */
+		spin_lock_irqsave(&wdtpci_lock, flags);
 		inb_p(WDT_DC);
 		wdtpci_ctr_load(2,0);
+		spin_unlock_irqrestore(&wdtpci_lock, flags);
 	}
 	return NOTIFY_DONE;
 }
@@ -459,7 +477,7 @@ static int wdtpci_notify_sys(struct notifier_block *this, unsigned long code,
  
 static struct file_operations wdtpci_fops = {
 	owner:		THIS_MODULE,
-	llseek:		wdtpci_llseek,
+	llseek:		no_llseek,
 	read:		wdtpci_read,
 	write:		wdtpci_write,
 	ioctl:		wdtpci_ioctl,
@@ -508,6 +526,9 @@ static int __init wdtpci_init_one (struct pci_dev *dev,
 			"this driver only supports 1 device\n");
 		return -ENODEV;
 	}
+	
+	sema_init(&open_sem, 1);
+	spin_lock_init(&wdtpci_lock);
 
 	irq = dev->irq;
 	io = pci_resource_start (dev, 2);
@@ -536,7 +557,7 @@ static int __init wdtpci_init_one (struct pci_dev *dev,
 
 	ret = register_reboot_notifier (&wdtpci_notifier);
 	if (ret) {
-		printk (KERN_ERR PFX "can't misc_register on minor=%d\n", WATCHDOG_MINOR);
+		printk (KERN_ERR PFX "can't register_reboot_notifier on minor=%d\n", WATCHDOG_MINOR);
 		goto out_misc;
 	}
 #ifdef CONFIG_WDT_501
@@ -565,7 +586,7 @@ out_reg:
 }
 
 
-static void __exit wdtpci_remove_one (struct pci_dev *pdev)
+static void __devexit wdtpci_remove_one (struct pci_dev *pdev)
 {
 	/* here we assume only one device will ever have
 	 * been picked up and registered by probe function */
@@ -590,7 +611,7 @@ static struct pci_driver wdtpci_driver = {
 	name:		"wdt-pci",
 	id_table:	wdtpci_pci_tbl,
 	probe:		wdtpci_init_one,
-	remove:		wdtpci_remove_one,
+	remove:		__devexit_p(wdtpci_remove_one),
 };
 
 
@@ -631,3 +652,9 @@ static int __init wdtpci_init(void)
 
 module_init(wdtpci_init);
 module_exit(wdtpci_cleanup);
+
+MODULE_AUTHOR("JP Nollmann, Alan Cox");
+MODULE_DESCRIPTION("Driver for the ICS PCI watchdog cards");
+MODULE_LICENSE("GPL");
+
+EXPORT_NO_SYMBOLS;

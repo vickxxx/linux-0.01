@@ -10,7 +10,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -46,7 +46,7 @@ static void dma_led_off(struct NCR_ESP *);
 static void dma_led_on(struct NCR_ESP *);
 
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
 				 * before they are trasfered to the ESP chip
 				 * via PIO.
@@ -123,7 +123,7 @@ int jazz_esp_detect(Scsi_Host_Template *tpnt)
 	            NULL);
 
 	/*
-	 * FIXME, look if the scsi id is availabe from NVRAM
+	 * FIXME, look if the scsi id is available from NVRAM
 	 */
 	esp->scsi_id = 7;
 		

@@ -1,23 +1,14 @@
-/* $Id: act2000_isa.c,v 1.11 2000/11/12 16:32:06 kai Exp $
+/* $Id: act2000_isa.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000 (ISA-Version).
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Author       Fritz Elfert
+ * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  * Thanks to Friedemann Baitinger and IBM Germany
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
  */
 
@@ -26,16 +17,7 @@
 #include "act2000_isa.h"
 #include "capi.h"
 
-static act2000_card *irq2card_map[16] =
-{
-	0, 0, 0, 0, 0, 0, 0, 0,	0, 0, 0, 0, 0, 0, 0, 0
-};
-
-static int act2000_isa_irqs[] =
-{
-        3, 5, 7, 10, 11, 12, 15
-};
-#define ISA_NRIRQS (sizeof(act2000_isa_irqs)/sizeof(int))
+static act2000_card *irq2card_map[16];
 
 static void
 act2000_isa_delay(long t)
@@ -82,13 +64,9 @@ int
 act2000_isa_detect(unsigned short portbase)
 {
         int ret = 0;
-        unsigned long flags;
 
-        save_flags(flags);
-        cli();
         if (!check_region(portbase, ISA_REGION))
                 ret = act2000_isa_reset(portbase);
-        restore_flags(flags);
         return ret;
 }
 
@@ -167,9 +145,6 @@ act2000_isa_enable_irq(act2000_card * card)
 int
 act2000_isa_config_irq(act2000_card * card, short irq)
 {
-        int i;
-        unsigned long flags;
-
         if (card->flags & ACT2000_FLAGS_IVALID) {
                 free_irq(card->irq, NULL);
                 irq2card_map[card->irq] = NULL;
@@ -178,30 +153,13 @@ act2000_isa_config_irq(act2000_card * card, short irq)
         outb(ISA_COR_IRQOFF, ISA_PORT_COR);
         if (!irq)
                 return 0;
-        save_flags(flags);
-        cli();
-        if (irq == -1) {
-                /* Auto select */
-                for (i = 0; i < ISA_NRIRQS; i++) {
-                        if (!request_irq(act2000_isa_irqs[i], &act2000_isa_interrupt, 0, card->regname, NULL)) {
-                                card->irq = act2000_isa_irqs[i];
-                                irq2card_map[card->irq] = card;
-                                card->flags |= ACT2000_FLAGS_IVALID;
-                                break;
-                        }
-                }
-        } else {
-                /* Fixed irq */
-                if (!request_irq(irq, &act2000_isa_interrupt, 0, card->regname, NULL)) {
-                        card->irq = irq;
-                        irq2card_map[card->irq] = card;
-			card->flags |= ACT2000_FLAGS_IVALID;
-                }
-        }
-        restore_flags(flags);
-        if (!card->flags & ACT2000_FLAGS_IVALID) {
+
+	if (!request_irq(irq, &act2000_isa_interrupt, 0, card->regname, NULL)) {
+		card->irq = irq;
+		irq2card_map[card->irq] = card;
+		card->flags |= ACT2000_FLAGS_IVALID;
                 printk(KERN_WARNING
-                       "act2000: Could not request irq\n");
+                       "act2000: Could not request irq %d\n",irq);
                 return -EBUSY;
         } else {
 		act2000_isa_select_irq(card);
@@ -220,7 +178,8 @@ act2000_isa_config_port(act2000_card * card, unsigned short portbase)
                 card->flags &= ~ACT2000_FLAGS_PVALID;
         }
         if (!check_region(portbase, ISA_REGION)) {
-                request_region(portbase, ACT2000_PORTLEN, card->regname);
+                if (request_region(portbase, ACT2000_PORTLEN, card->regname) == NULL)
+			return -EIO;
                 card->port = portbase;
                 card->flags |= ACT2000_FLAGS_PVALID;
                 return 0;
@@ -451,7 +410,7 @@ act2000_isa_getid(act2000_card * card)
 int
 act2000_isa_download(act2000_card * card, act2000_ddef * cb)
 {
-        int length;
+        unsigned int length;
         int ret;
         int l;
         int c;
@@ -464,9 +423,8 @@ act2000_isa_download(act2000_card * card, act2000_ddef * cb)
         if (!act2000_isa_reset(card->port))
                 return -ENXIO;
         act2000_isa_delay(HZ / 2);
-        if ((ret = verify_area(VERIFY_READ, (void *) cb, sizeof(cblock))))
-                return ret;
-        copy_from_user(&cblock, (char *) cb, sizeof(cblock));
+        if(copy_from_user(&cblock, (char *) cb, sizeof(cblock)))
+        	return -EFAULT;
         length = cblock.length;
         p = cblock.buffer;
         if ((ret = verify_area(VERIFY_READ, (void *) p, length)))

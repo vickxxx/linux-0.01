@@ -144,6 +144,7 @@
 #include <linux/ioport.h>
 #include <linux/blk.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 
 #include <asm/bitops.h>
 #include <asm/system.h>
@@ -156,6 +157,8 @@
 #include "../../scsi/constants.h"
 #include "acornscsi.h"
 #include "msgqueue.h"
+
+#include <scsi/scsicam.h>
 
 #define VER_MAJOR 2
 #define VER_MINOR 0
@@ -206,24 +209,24 @@ static void acornscsi_abortcmd(AS_Host *host, unsigned char tag);
 static inline void
 sbic_arm_write(unsigned int io_port, int reg, int value)
 {
-    outb_t(reg, io_port);
-    outb_t(value, io_port + 4);
+    __raw_writeb(reg, io_port);
+    __raw_writeb(value, io_port + 4);
 }
 
 #define sbic_arm_writenext(io,val) \
-	outb_t((val), (io) + 4)
+	__raw_writeb((val), (io) + 4)
 
 static inline
 int sbic_arm_read(unsigned int io_port, int reg)
 {
     if(reg == ASR)
-	   return inl_t(io_port) & 255;
-    outb_t(reg, io_port);
-    return inl_t(io_port + 4) & 255;
+	   return __raw_readl(io_port) & 255;
+    __raw_writeb(reg, io_port);
+    return __raw_readl(io_port + 4) & 255;
 }
 
 #define sbic_arm_readnext(io) \
-	inb_t((io) + 4)
+	__raw_readb((io) + 4)
 
 #ifdef USE_DMAC
 #define dmac_read(io_port,reg) \
@@ -1056,7 +1059,7 @@ void acornscsi_dma_setup(AS_Host *host, dmadir_t direction)
     /*
      * Allocate some buffer space, limited to half the buffer size
      */
-    length = min(host->scsi.SCp.this_residual, DMAC_BUFFER_SIZE / 2);
+    length = min_t(unsigned int, host->scsi.SCp.this_residual, DMAC_BUFFER_SIZE / 2);
     if (length) {
 	host->dma.start_addr = address = host->dma.free_addr;
 	host->dma.free_addr = (host->dma.free_addr + length) &
@@ -1184,7 +1187,7 @@ void acornscsi_dma_intr(AS_Host *host)
     /*
      * Allocate some buffer space, limited to half the on-board RAM size
      */
-    length = min(host->scsi.SCp.this_residual, DMAC_BUFFER_SIZE / 2);
+    length = min_t(unsigned int, host->scsi.SCp.this_residual, DMAC_BUFFER_SIZE / 2);
     if (length) {
 	host->dma.start_addr = address = host->dma.free_addr;
 	host->dma.free_addr = (host->dma.free_addr + length) &
@@ -1248,7 +1251,7 @@ void acornscsi_dma_xfer(AS_Host *host)
 
 /*
  * Function: void acornscsi_dma_adjust(AS_Host *host)
- * Purpose : adjust DMA pointers & count for bytes transfered to
+ * Purpose : adjust DMA pointers & count for bytes transferred to
  *	     SBIC but not SCSI bus.
  * Params  : host - host to adjust DMA count for
  */
@@ -1653,8 +1656,8 @@ void acornscsi_message(AS_Host *host)
 		 * to be in operation AFTER the target leaves message out phase.
 		 */
 		acornscsi_sbic_issuecmd(host, CMND_ASSERTATN);
-		period = max(message[3], sdtr_period / 4);
-		length = min(message[4], sdtr_size);
+		period = max_t(unsigned int, message[3], sdtr_period / 4);
+		length = min_t(unsigned int, message[4], sdtr_size);
 		msgqueue_addmsg(&host->scsi.msgs, 5, EXTENDED_MESSAGE, 3,
 				 EXTENDED_SDTR, period, length);
 		host->device[host->SCpnt->target].sync_xfer =
@@ -2858,7 +2861,7 @@ static struct expansion_card *ecs[MAX_ECARDS];
  * Params   : host - host to setup
  */
 static
-void acornscsi_init(AS_Host *host)
+void acornscsi_host_init(AS_Host *host)
 {
     memset(&host->stats, 0, sizeof (host->stats));
     queue_initialise(&host->queues.issue);
@@ -2912,13 +2915,18 @@ int acornscsi_detect(Scsi_Host_Template * tpnt)
 	ecs[count]->irqaddr	= (char *)ioaddr(host->card.io_intr);
 	ecs[count]->irqmask	= 0x0a;
 
-	request_region(instance->io_port + 0x800,  2, "acornscsi(sbic)");
-	request_region(host->card.io_intr,  1, "acornscsi(intr)");
-	request_region(host->card.io_page,  1, "acornscsi(page)");
+	if (!request_region(instance->io_port + 0x800,  2, "acornscsi(sbic)"))
+		goto err_1;
+	if (!request_region(host->card.io_intr,  1, "acornscsi(intr)"))
+		goto err_2;
+	if (!request_region(host->card.io_page,  1, "acornscsi(page)"))
+		goto err_3;
 #ifdef USE_DMAC
-	request_region(host->dma.io_port, 256, "acornscsi(dmac)");
+	if (!request_region(host->dma.io_port, 256, "acornscsi(dmac)"))
+		goto err_4;
 #endif
-	request_region(instance->io_port, 2048, "acornscsi(ram)");
+	if (!request_region(instance->io_port, 2048, "acornscsi(ram)"))
+		goto err_5;
 
 	if (request_irq(host->scsi.irq, acornscsi_intr, SA_INTERRUPT, "acornscsi", host)) {
 	    printk(KERN_CRIT "scsi%d: IRQ%d not free, interrupts disabled\n",
@@ -2926,11 +2934,25 @@ int acornscsi_detect(Scsi_Host_Template * tpnt)
 	    host->scsi.irq = NO_IRQ;
 	}
 
-	acornscsi_init(host);
+	acornscsi_host_init(host);
 
 	++count;
     }
     return count;
+    
+err_5:
+#ifdef USE_DMAC
+    release_region(host->dma.io_port, 256);
+#endif
+err_4:
+    release_region(host->card.io_page, 1);
+err_3:
+    release_region(host->card.io_intr, 1);    
+err_2:
+    release_region(instance->io_port + 0x800, 2);
+err_1:
+    scsi_unregister(instance);
+    return 0;
 }
 
 /*
@@ -3118,9 +3140,45 @@ int acornscsi_proc_info(char *buffer, char **start, off_t offset,
     return pos;
 }
 
-#ifdef MODULE
+static Scsi_Host_Template acornscsi_template = {
+	module:			THIS_MODULE,
+	proc_info:		acornscsi_proc_info,
+	name:			"AcornSCSI",
+	detect:			acornscsi_detect,
+	release:		acornscsi_release,
+	info:			acornscsi_info,
+	queuecommand:		acornscsi_queuecmd,
+	abort:			acornscsi_abort,
+	reset:			acornscsi_reset,
+	bios_param:		scsicam_bios_param,
+	can_queue:		16,
+	this_id:		7,
+	sg_tablesize:		SG_ALL,
+	cmd_per_lun:		2,
+	unchecked_isa_dma:	0,
+	use_clustering:		DISABLE_CLUSTERING
+};
 
-Scsi_Host_Template driver_template = ACORNSCSI_3;
+static int __init acornscsi_init(void)
+{
+	acornscsi_template.module = THIS_MODULE;
+	scsi_register_module(MODULE_SCSI_HA, &acornscsi_template);
+	if (acornscsi_template.present)
+		return 0;
 
-#include "../../scsi/scsi_module.c"
-#endif
+	scsi_unregister_module(MODULE_SCSI_HA, &acornscsi_template);
+	return -ENODEV;
+}
+
+static void __exit acornscsi_exit(void)
+{
+	scsi_unregister_module(MODULE_SCSI_HA, &acornscsi_template);
+}
+
+module_init(acornscsi_init);
+module_exit(acornscsi_exit);
+
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("AcornSCSI driver");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

@@ -4,6 +4,7 @@
  * Copyright (C) 2000 Linus Torvalds.
  *               2000 Transmeta Corp.
  *
+ * Usage limits added by David Gibson, Linuxcare Australia.
  * This file is released under the GPL.
  */
 
@@ -36,7 +37,6 @@
 
 static struct super_operations ramfs_ops;
 static struct address_space_operations ramfs_aops;
-static struct file_operations ramfs_dir_operations;
 static struct file_operations ramfs_file_operations;
 static struct inode_operations ramfs_dir_inode_operations;
 
@@ -44,7 +44,7 @@ static int ramfs_statfs(struct super_block *sb, struct statfs *buf)
 {
 	buf->f_type = RAMFS_MAGIC;
 	buf->f_bsize = PAGE_CACHE_SIZE;
-	buf->f_namelen = 255;
+	buf->f_namelen = NAME_MAX;
 	return 0;
 }
 
@@ -54,6 +54,8 @@ static int ramfs_statfs(struct super_block *sb, struct statfs *buf)
  */
 static struct dentry * ramfs_lookup(struct inode *dir, struct dentry *dentry)
 {
+	if (dentry->d_name.len > NAME_MAX)
+		return ERR_PTR(-ENAMETOOLONG);
 	d_add(dentry, NULL);
 	return NULL;
 }
@@ -71,16 +73,6 @@ static int ramfs_readpage(struct file *file, struct page * page)
 		SetPageUptodate(page);
 	}
 	UnlockPage(page);
-	return 0;
-}
-
-/*
- * Writing: just make sure the page gets marked dirty, so that
- * the page stealer won't grab it.
- */
-static int ramfs_writepage(struct page *page)
-{
-	SetPageDirty(page);
 	return 0;
 }
 
@@ -117,7 +109,7 @@ struct inode *ramfs_get_inode(struct super_block *sb, int mode, int dev)
 		inode->i_gid = current->fsgid;
 		inode->i_blksize = PAGE_CACHE_SIZE;
 		inode->i_blocks = 0;
-		inode->i_rdev = to_kdev_t(dev);
+		inode->i_rdev = NODEV;
 		inode->i_mapping->a_ops = &ramfs_aops;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
@@ -129,7 +121,7 @@ struct inode *ramfs_get_inode(struct super_block *sb, int mode, int dev)
 			break;
 		case S_IFDIR:
 			inode->i_op = &ramfs_dir_inode_operations;
-			inode->i_fop = &ramfs_dir_operations;
+			inode->i_fop = &dcache_dir_ops;
 			break;
 		case S_IFLNK:
 			inode->i_op = &page_symlink_inode_operations;
@@ -148,6 +140,11 @@ static int ramfs_mknod(struct inode *dir, struct dentry *dentry, int mode, int d
 	int error = -ENOSPC;
 
 	if (inode) {
+		if (dir->i_mode & S_ISGID) {
+			inode->i_gid = dir->i_gid;
+			if (S_ISDIR(mode))
+				inode->i_mode |= S_ISGID;
+		}
 		d_instantiate(dentry, inode);
 		dget(dentry);		/* Extra count - pin the dentry in core */
 		error = 0;
@@ -276,7 +273,7 @@ static int ramfs_sync_file(struct file * file, struct dentry *dentry, int datasy
 
 static struct address_space_operations ramfs_aops = {
 	readpage:	ramfs_readpage,
-	writepage:	ramfs_writepage,
+	writepage:	fail_writepage,
 	prepare_write:	ramfs_prepare_write,
 	commit_write:	ramfs_commit_write
 };
@@ -285,12 +282,6 @@ static struct file_operations ramfs_file_operations = {
 	read:		generic_file_read,
 	write:		generic_file_write,
 	mmap:		generic_file_mmap,
-	fsync:		ramfs_sync_file,
-};
-
-static struct file_operations ramfs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	dcache_readdir,
 	fsync:		ramfs_sync_file,
 };
 
@@ -334,6 +325,7 @@ static struct super_block *ramfs_read_super(struct super_block * sb, void * data
 }
 
 static DECLARE_FSTYPE(ramfs_fs_type, "ramfs", ramfs_read_super, FS_LITTER);
+static DECLARE_FSTYPE(rootfs_fs_type, "rootfs", ramfs_read_super, FS_NOMOUNT|FS_LITTER);
 
 static int __init init_ramfs_fs(void)
 {
@@ -347,3 +339,11 @@ static void __exit exit_ramfs_fs(void)
 
 module_init(init_ramfs_fs)
 module_exit(exit_ramfs_fs)
+
+int __init init_rootfs(void)
+{
+	return register_filesystem(&rootfs_fs_type);
+}
+
+MODULE_LICENSE("GPL");
+

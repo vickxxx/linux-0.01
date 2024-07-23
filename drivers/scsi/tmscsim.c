@@ -206,10 +206,7 @@
 #define DCBDEBUG1(x)
 
 /* Includes */
-#ifdef MODULE
-# include <linux/module.h>
-#endif
-
+#include <linux/module.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -495,6 +492,8 @@ MODULE_PARM_DESC(tmscsim, "Host SCSI ID, Speed (0=10MHz), Device Flags, Adapter 
 #if defined(MODULE) && LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,30)
 MODULE_AUTHOR("C.L. Huang / Kurt Garloff");
 MODULE_DESCRIPTION("SCSI host adapter driver for Tekram DC390 and other AMD53C974A based PCI SCSI adapters");
+MODULE_LICENSE("GPL");
+
 MODULE_SUPPORTED_DEVICE("sd,sr,sg,st");
 #endif
 
@@ -663,16 +662,30 @@ static void __init dc390_fill_with_defaults (void)
  * tmscsim: AdaptID, MaxSpeed (Index), DevMode (Bitmapped), AdaptMode (Bitmapped)
  */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,13)
-void __init dc390_setup (char *str)
+int __init dc390_setup (char *str)
 {	
 	int ints[8];
 	int i, im;
 	(void)get_options (str, ARRAY_SIZE(ints), ints);
+	im = ints[0];
+	if (im > 6)
+	{
+		printk (KERN_NOTICE "DC390: ignore extra params!\n");
+		im = 6;
+	};
+	for (i = 0; i < im; i++)
+		tmscsim[i] = ints[i+1];
+	/* dc390_checkparams (); */
+	return 1;
+};
+#ifndef MODULE
+__setup("tmscsim=", dc390_setup);
+#endif
+
 #else
 void __init dc390_setup (char *str, int *ints)
 {
 	int i, im;
-#endif
 	im = ints[0];
 	if (im > 6)
 	{
@@ -683,12 +696,8 @@ void __init dc390_setup (char *str, int *ints)
 		tmscsim[i] = ints[i+1];
 	/* dc390_checkparams (); */
 };
+#endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,13)
-#ifndef MODULE
-__setup("tmscsim=", dc390_setup);
-#endif
-#endif
 
 
 static void __init dc390_EEpromOutDI( PDEVDECL, PUCHAR regval, UCHAR Carry )
@@ -828,7 +837,7 @@ static PDCB __inline__ dc390_findDCB ( PACB pACB, UCHAR id, UCHAR lun)
 /* Queueing philosphy:
  * There are a couple of lists:
  * - Query: Contains the Scsi Commands not yet turned into SRBs (per ACB)
- *   (Note: For new EH, it is unecessary!)
+ *   (Note: For new EH, it is unnecessary!)
  * - Waiting: Contains a list of SRBs not yet sent (per DCB)
  * - Free: List of free SRB slots
  * 
@@ -1441,7 +1450,7 @@ int DC390_bios_param (Disk *disk, kdev_t devno, int geom[])
     int ret_code = -1;
     int size = disk->capacity;
 
-    if ((bh = bread(MKDEV(MAJOR(devno), MINOR(devno)&~0xf), 0, 1024)))
+    if ((bh = bread(MKDEV(MAJOR(devno), MINOR(devno)&~0xf), 0, block_size(devno))))
     {
 	/* try to infer mapping from partition table */
 	ret_code = partsize (bh, (unsigned long) size, (unsigned int *) geom + 2,
@@ -2198,6 +2207,7 @@ static int __init DC390_init (PSHT psht, ULONG io_port, UCHAR Irq, PDEVDECL, UCH
     psh = scsi_register( psht, sizeof(DC390_ACB) );
     if( !psh ) return( -1 );
 	
+    scsi_set_pci_device(psh, pdev);
     pACB = (PACB) psh->hostdata;
     DC390_LOCKA_INIT;
     DC390_LOCK_ACB;
@@ -2852,7 +2862,7 @@ int DC390_proc_info (char *buffer, char **start,
 {
   int dev, spd, spd1;
   char *pos = buffer;
-  PSH shpnt;
+  PSH shpnt = 0;
   PACB pACB;
   PDCB pDCB;
   PSCSICMD pcmd;
@@ -3037,7 +3047,7 @@ int DC390_release (struct Scsi_Host *host)
     /* TO DO: We should check for outstanding commands first. */
     dc390_shutdown (host);
 
-    if (host->irq != IRQ_NONE)
+    if (host->irq != SCSI_IRQ_NONE)
     {
 	DEBUG0(printk(KERN_INFO "DC390: Free IRQ %i\n",host->irq);)
 	free_irq (host->irq, pACB);
@@ -3053,8 +3063,5 @@ int DC390_release (struct Scsi_Host *host)
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,99)
 static Scsi_Host_Template driver_template = DC390_T;
-#include "scsi_module.c"
-#elif defined(MODULE)
-Scsi_Host_Template driver_template = DC390_T;
 #include "scsi_module.c"
 #endif

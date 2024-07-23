@@ -1,12 +1,15 @@
-/* $Id: avm_a1.c,v 2.13 2000/11/24 17:05:37 kai Exp $
+/* $Id: avm_a1.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * avm_a1.c     low level stuff for AVM A1 (Fritz) isdn cards
+ * low level stuff for AVM A1 (Fritz) isdn cards
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
@@ -15,7 +18,7 @@
 #include "isdnl1.h"
 
 extern const char *CardType[];
-static const char *avm_revision = "$Revision: 2.13 $";
+static const char *avm_revision = "$Revision: 1.1.4.1 $";
 
 #define	 AVM_A1_STAT_ISAC	0x01
 #define	 AVM_A1_STAT_HSCX	0x02

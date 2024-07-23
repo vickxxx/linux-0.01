@@ -5,6 +5,11 @@
  * This driver supports various Xircom CreditCard Ethernet adapters
  * including the CE2, CE IIps, RE-10, CEM28, CEM33, CE33, CEM56,
  * CE3-100, CE3B, RE-100, REM10BT, and REM56G-100.
+ *
+ * 2000-09-24 <psheer@icon.co.za> The Xircom CE3B-100 may not
+ * autodetect the media properly. In this case use the
+ * if_port=1 (for 10BaseT) or if_port=4 (for 100BaseT) options
+ * to force the media type.
  * 
  * Written originally by Werner Koch based on David Hinds' skeleton of the
  * PCMCIA driver.
@@ -63,15 +68,17 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
+#include <linux/ethtool.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
+#include <asm/uaccess.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -125,7 +132,7 @@ enum xirc_esr {
 enum xirc_isr {
     TxBufOvr = 0x01,	/* TX Buffer Overflow */
     PktTxed  = 0x02,	/* Packet Transmitted */
-    MACIntr  = 0x04,	/* MAC Interrupt occured */
+    MACIntr  = 0x04,	/* MAC Interrupt occurred */
     TxResGrant = 0x08,	/* Tx Reservation Granted */
     RxFullPkt = 0x20,	/* Rx Full Packet */
     RxPktRej  = 0x40,	/* Rx Packet Rejected */
@@ -246,7 +253,10 @@ static char *version =
 #define XIR_CBE     14	/* (prodid 1) cardbus ethernet: not supported */
 /*====================================================================*/
 
-/* Parameters that can be set with 'insmod' */
+/* Module parameters */
+
+MODULE_DESCRIPTION("Xircom PCMCIA ethernet driver");
+MODULE_LICENSE("Dual MPL/GPL");
 
 #define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
 
@@ -328,7 +338,7 @@ static dev_info_t dev_info = "xirc2ps_cs";
  * device numbers are used to derive the corresponding array index.
  */
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 /****************
  * A dev_link_t structure has fields for most things that are needed
@@ -376,6 +386,7 @@ static int set_card_type(dev_link_t *link, const void *s);
 static int do_config(struct net_device *dev, struct ifmap *map);
 static int do_open(struct net_device *dev);
 static int do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static void hardreset(struct net_device *dev);
 static void do_reset(struct net_device *dev, int full);
 static int init_mii(struct net_device *dev);
@@ -640,12 +651,15 @@ xirc2ps_attach(void)
     dev->set_config = &do_config;
     dev->get_stats = &do_get_stats;
     dev->do_ioctl = &do_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     dev->set_multicast_list = &set_multicast_list;
     ether_setup(dev);
     dev->open = &do_open;
     dev->stop = &do_stop;
+#ifdef HAVE_TX_TIMEOUT
     dev->tx_timeout = do_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
+#endif
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -1348,7 +1362,6 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	     * packets */
 	    lp->stats.rx_dropped++;
 	    DEBUG(2, "%s: RX drop, too much done\n", dev->name);
-	    PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
 	} else if (rsr & PktRxOk) {
 	    struct sk_buff *skb;
 
@@ -1418,13 +1431,13 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		skb->protocol = eth_type_trans(skb, dev);
 		skb->dev = dev;
 		netif_rx(skb);
+		dev->last_rx = jiffies;
 		lp->stats.rx_packets++;
 		lp->stats.rx_bytes += pktlen;
 		if (!(rsr & PhyPkt))
 		    lp->stats.multicast++;
 	    }
-	    PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
-	} else {
+	} else { /* bad packet */
 	    DEBUG(5, "rsr=%#02x\n", rsr);
 	}
 	if (rsr & PktTooLong) {
@@ -1439,6 +1452,9 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	    lp->stats.rx_fifo_errors++; /* okay ? */
 	    DEBUG(3, "%s: Alignment error\n", dev->name);
 	}
+
+	/* clear the received/dropped/error packet */
+	PutWord(XIRCREG0_DO, 0x8000); /* issue cmd: skip_rx_packet */
 
 	/* get the new ethernet status */
 	eth_status = GetByte(XIRCREG_ESR);
@@ -1519,7 +1535,7 @@ do_tx_timeout(struct net_device *dev)
     /* reset the card */
     do_reset(dev,1);
     dev->trans_start = jiffies;
-    netif_start_queue(dev);
+    netif_wake_queue(dev);
 }
 
 static int
@@ -1534,7 +1550,6 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
     DEBUG(1, "do_start_xmit(skb=%p, dev=%p) len=%u\n",
 	  skb, dev, pktlen);
 
-    netif_stop_queue(dev);
 
     /* adjust the packet length to min. required
      * and hope that the buffer is large enough
@@ -1544,8 +1559,14 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
      * pad this in his buffer with random bytes
      */
     if (pktlen < ETH_ZLEN)
+    {
+        skb = skb_padto(skb, ETH_ZLEN);
+        if(skb == NULL)
+        	return 0;
 	pktlen = ETH_ZLEN;
+    }
 
+    netif_stop_queue(dev);
     SelectPage(0);
     PutWord(XIRCREG0_TRS, (u_short)pktlen+2);
     freespace = GetWord(XIRCREG0_TSO);
@@ -1703,6 +1724,16 @@ do_open(struct net_device *dev)
     return 0;
 }
 
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, "xirc2ps_cs");
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
+
 static int
 do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
@@ -1718,13 +1749,16 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return -EOPNOTSUPP;
 
     switch(cmd) {
-      case SIOCDEVPRIVATE:	/* Get the address of the PHY in use. */
+      case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
+      case SIOCDEVPRIVATE:
 	data[0] = 0;		/* we have only this address */
 	/* fall trough */
-      case SIOCDEVPRIVATE+1:	/* Read the specified MII register. */
+      case SIOCGMIIREG:		/* Read the specified MII register. */
+      case SIOCDEVPRIVATE+1:
 	data[3] = mii_rd(ioaddr, data[0] & 0x1f, data[1] & 0x1f);
 	break;
-      case SIOCDEVPRIVATE+2:	/* Write the specified MII register */
+      case SIOCSMIIREG:		/* Write the specified MII register */
+      case SIOCDEVPRIVATE+2:
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mii_wr(ioaddr, data[0] & 0x1f, data[1] & 0x1f, data[2], 16);
@@ -1921,6 +1955,12 @@ init_mii(struct net_device *dev)
     unsigned control, status, linkpartner;
     int i;
 
+    if (if_port == 4 || if_port == 1) { /* force 100BaseT or 10BaseT */
+	dev->if_port = if_port;
+	local->probe_port = 0;
+	return 1;
+    }
+
     status = mii_rd(ioaddr,  0, 1);
     if ((status & 0xff00) != 0x7800)
 	return 0; /* No MII */
@@ -2058,3 +2098,30 @@ exit_xirc2ps_cs(void)
 module_init(init_xirc2ps_cs);
 module_exit(exit_xirc2ps_cs);
 
+#ifndef MODULE
+static int __init setup_xirc2ps_cs(char *str)
+{
+	/* irq, irq_mask, if_port, full_duplex, do_sound, lockup_hack
+	 * [,irq2 [,irq3 [,irq4]]]
+	 */
+	int ints[10] = { -1 };
+
+	str = get_options(str, 9, ints);
+
+#define MAYBE_SET(X,Y) if (ints[0] >= Y && ints[Y] != -1) { X = ints[Y]; }
+	MAYBE_SET(irq_list[0], 1);
+	MAYBE_SET(irq_mask, 2);
+	MAYBE_SET(if_port, 3);
+	MAYBE_SET(full_duplex, 4);
+	MAYBE_SET(do_sound, 5);
+	MAYBE_SET(lockup_hack, 6);
+	MAYBE_SET(irq_list[1], 7);
+	MAYBE_SET(irq_list[2], 8);
+	MAYBE_SET(irq_list[3], 9);
+#undef  MAYBE_SET
+
+	return 0;
+}
+
+__setup("xirc2ps_cs=", setup_xirc2ps_cs);
+#endif

@@ -19,7 +19,7 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -37,10 +37,11 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/proc_fs.h>
 
 #define IN_CARD_SERVICES
 #include <pcmcia/cs_types.h>
@@ -228,6 +229,10 @@ static void setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 	else {
 	    erase->State = 1;
 	    busy = kmalloc(sizeof(erase_busy_t), GFP_KERNEL);
+	    if (!busy) {
+		erase->State = ERASE_FAILED;
+		return;
+	    }
 	    busy->erase = erase;
 	    busy->client = handle;
 	    init_timer(&busy->timeout);
@@ -296,7 +301,7 @@ int MTDHelperEntry(int func, void *a1, void *a2)
     {
 	window_handle_t w;
         int ret = pcmcia_request_window(a1, a2, &w);
-        (window_handle_t *)a1 = w;
+        a1 = w;
 	return  ret;
     }
         break;
@@ -359,6 +364,10 @@ static void setup_regions(client_handle_t handle, int attr,
 	if ((device.dev[i].type != CISTPL_DTYPE_NULL) &&
 	    (device.dev[i].size != 0)) {
 	    r = kmalloc(sizeof(*r), GFP_KERNEL);
+	    if (!r) {
+		printk(KERN_NOTICE "cs: setup_regions: kmalloc failed!\n");
+		return;
+	    }
 	    r->region_magic = REGION_MAGIC;
 	    r->state = 0;
 	    r->dev_info[0] = '\0';

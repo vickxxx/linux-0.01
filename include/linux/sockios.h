@@ -77,6 +77,12 @@
 
 #define SIOCETHTOOL	0x8946		/* Ethtool interface		*/
 
+#define SIOCGMIIPHY	0x8947		/* Get address of MII PHY in use. */
+#define SIOCGMIIREG	0x8948		/* Read MII PHY register.	*/
+#define SIOCSMIIREG	0x8949		/* Write MII PHY register.	*/
+
+#define SIOCWANDEV	0x894A		/* get/set netdev parameters	*/
+
 /* ARP cache control calls. */
 		    /*  0x8950 - 0x8952  * obsolete calls, don't re-use */
 #define SIOCDARP	0x8953		/* delete ARP table entry	*/
@@ -98,6 +104,18 @@
 #define SIOCADDDLCI	0x8980		/* Create new DLCI device	*/
 #define SIOCDELDLCI	0x8981		/* Delete DLCI device		*/
 
+#define SIOCGIFVLAN	0x8982		/* 802.1Q VLAN support		*/
+#define SIOCSIFVLAN	0x8983		/* Set 802.1Q VLAN options 	*/
+
+/* bonding calls */
+
+#define SIOCBONDENSLAVE	0x8990		/* enslave a device to the bond */
+#define SIOCBONDRELEASE 0x8991		/* release a slave from the bond*/
+#define SIOCBONDSETHWADDR      0x8992	/* set the hw addr of the bond  */
+#define SIOCBONDSLAVEINFOQUERY 0x8993   /* rtn info about slave state   */
+#define SIOCBONDINFOQUERY      0x8994	/* rtn info about bond state    */
+#define SIOCBONDCHANGEACTIVE   0x8995   /* update to a new active slave */
+			
 /* Device private ioctl calls */
 
 /*
@@ -105,6 +123,8 @@
  *	vector. Each device should include this file and redefine these names
  *	as their own. Because these are device dependent it is a good idea
  *	_NOT_ to issue them to random objects and hope.
+ *
+ *	THESE IOCTLS ARE _DEPRECATED_ AND WILL DISAPPEAR IN 2.5.X -DaveM
  */
  
 #define SIOCDEVPRIVATE	0x89F0	/* to 89FF */

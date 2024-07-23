@@ -1,19 +1,26 @@
 /* toshiba.c -- Linux driver for accessing the SMM on Toshiba laptops
  *
- * Copyright (c) 1996-2000  Jonathan A. Buzzard (jonathan@buzzard.org.uk)
+ * Copyright (c) 1996-2001  Jonathan A. Buzzard (jonathan@buzzard.org.uk)
  *
  * Valuable assistance and patches from:
  *     Tom May <tom@you-bastards.com>
  *     Rob Napier <rnapier@employees.org>
  *
  * Fn status port numbers for machine ID's courtesy of
+ *     0xfc02: Scott Eisert <scott.e@sky-eye.com>
+ *     0xfc04: Steve VanDevender <stevev@efn.org>
  *     0xfc08: Garth Berry <garth@itsbruce.net>
+ *     0xfc0a: Egbert Eich <eich@xfree86.org>
+ *     0xfc10: Andrew Lofthouse <Andrew.Lofthouse@robins.af.mil>
  *     0xfc11: Spencer Olson <solson@novell.com>
  *     0xfc13: Claudius Frankewitz <kryp@gmx.de>
  *     0xfc15: Tom May <tom@you-bastards.com>
  *     0xfc17: Dave Konrad <konrad@xenia.it>
  *     0xfc1a: George Betzos <betzos@engr.colostate.edu>
+ *     0xfc1b: Munemasa Wada <munemasa@jnovel.co.jp>
  *     0xfc1d: Arthur Liu <armie@slap.mine.nu>
+ *     0xfc5a: Jacques L'helgoualc'h <lhh@free.fr>
+ *     0xfcd1: Mr. Dave Konrad <konrad@xenia.it>
  *
  * WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING WARNING
  *
@@ -46,7 +53,7 @@
  *
  */
 
-#define TOSH_VERSION "1.7 22/6/2000"
+#define TOSH_VERSION "1.11 26/9/2001"
 #define TOSH_DEBUG 0
 
 #include <linux/module.h>
@@ -114,27 +121,6 @@ static int tosh_fn_status(void)
 
         return (int) scan;
 }
-
-
-/*
- * At some point we need to emulate setting the HDD auto off times for
- * the new laptops. We can do this by calling the ide_ioctl on /dev/hda.
- * The values we need for the various times are
- *
- *    Disabled   0x00
- *    1 minute   0x0c
- *    3 minutes  0x24
- *    5 minutes  0x3c
- *   10 minutes  0x78
- *   15 minutes  0xb4
- *   20 minutes  0xf0
- *   30 minutes  0xf1
- *
- */
-/*static int tosh_emulate_hdd(SMMRegisters *regs)
-{
-	return 0;
-}*/
 
 
 /*
@@ -278,7 +264,7 @@ static int tosh_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
 	if (!arg)
 		return -EINVAL;
 
-	if(copy_from_user(&regs, (SMMRegisters *) arg, sizeof(SMMRegisters)))
+	if (copy_from_user(&regs, (SMMRegisters *) arg, sizeof(SMMRegisters)))
 		return -EFAULT;
 
 	switch (cmd) {
@@ -302,7 +288,7 @@ static int tosh_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
 			return -EINVAL;
 	}
 
-        if(copy_to_user((SMMRegisters *) arg, &regs, sizeof(SMMRegisters)))
+        if (copy_to_user((SMMRegisters *) arg, &regs, sizeof(SMMRegisters)))
         	return -EFAULT;
 
 	return (err==0) ? 0:-EINVAL;
@@ -348,11 +334,13 @@ int tosh_get_info(char *buffer, char **start, off_t fpos, int length)
 static void tosh_set_fn_port(void)
 {
 	switch (tosh_id) {
-		case 0xfc11: case 0xfc13: case 0xfc15: case 0xfc1a:
+		case 0xfc02: case 0xfc04: case 0xfc09: case 0xfc0a: case 0xfc10:
+		case 0xfc11: case 0xfc13: case 0xfc15: case 0xfc1a: case 0xfc1b:
+		case 0xfc5a:
 			tosh_fn = 0x62;
 			break;
-		case 0xfc08: case 0xfc17: case 0xfc1d: case 0xfcd1:
-		case 0xfce0: case 0xfce2:
+		case 0xfc08: case 0xfc17: case 0xfc1d: case 0xfcd1: case 0xfce0:
+		case 0xfce2:
 			tosh_fn = 0x68;
 			break;
 		default:
@@ -425,8 +413,19 @@ static int tosh_get_machine_id(void)
  */
 int tosh_probe(void)
 {
-	int major,minor,day,year,month,flag;
+	int i,major,minor,day,year,month,flag;
+	unsigned char signature[7] = { 0x54,0x4f,0x53,0x48,0x49,0x42,0x41 };
 	SMMRegisters regs;
+
+	/* extra sanity check for the string "TOSHIBA" in the BIOS because
+	   some machines that are not Toshiba's pass the next test */
+
+	for (i=0;i<7;i++) {
+		if (isa_readb(0xfe010+i)!=signature[i]) {
+			printk("toshiba: not a supported Toshiba laptop\n");
+			return -ENODEV;
+		}
+	}
 
 	/* call the Toshiba SCI support check routine */
 	
@@ -472,7 +471,6 @@ int tosh_probe(void)
 	   0xa0-0xbf we can't. We just have to live dangerously and use the
 	   ports anyway, oh boy! */
 
-
 	/* do we need to emulate the fan? */
 
 	if ((tosh_id==0xfccb) || (tosh_id==0xfccc))
@@ -501,7 +499,9 @@ int __init tosh_init(void)
 	misc_register(&tosh_device);
 
 	/* register the proc entry */
+
 	create_proc_info_entry("toshiba", 0, NULL, tosh_get_info);
+
 	return 0;
 }
 
@@ -514,9 +514,18 @@ int init_module(void)
 void cleanup_module(void)
 {
 	/* remove the proc entry */
+
 	remove_proc_entry("toshiba", NULL);
 
 	/* unregister the device file */
+
 	misc_deregister(&tosh_device);
 }
 #endif
+
+MODULE_LICENSE("GPL");
+MODULE_PARM_DESC(tosh_fn, "User specified Fn key detection port");
+MODULE_AUTHOR("Jonathan Buzzard <jonathan@buzzard.org.uk>");
+MODULE_DESCRIPTION("Toshiba laptop SMM driver");
+MODULE_SUPPORTED_DEVICE("toshiba");
+

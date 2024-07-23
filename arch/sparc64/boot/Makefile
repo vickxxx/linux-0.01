@@ -19,5 +19,10 @@ tftpboot.img: piggyback $(TOPDIR)/vmlinux $(ROOT_IMG)
 piggyback: piggyback.c
 	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
 
+image: $(TOPDIR)/vmlinux
+	$(STRIP) -R .comment -R .note -K sun4u_init -K _end -K _start $(TOPDIR)/vmlinux -o $@
+
 dep:
 
+clean:
+	rm -f tftpboot.img piggyback image

@@ -1,17 +1,23 @@
-/* $Id: callc.c,v 2.51 2000/11/24 17:05:37 kai Exp $
+/* $Id: callc.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *              based on the teles driver from Jan den Ouden
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
+ *
+ * based on the teles driver from Jan den Ouden
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
  */
+
 #define __NO_VERSION__
+#include <linux/module.h>
 #include <linux/init.h>
 #include "hisax.h"
 #include "../avmb1/capicmd.h"  /* this should be moved in a common place */
@@ -20,12 +26,12 @@
 #define MOD_USE_COUNT ( GET_USE_COUNT (&__this_module))
 #endif	/* MODULE */
 
-const char *lli_revision = "$Revision: 2.51 $";
+const char *lli_revision = "$Revision: 1.1.4.1 $";
 
 extern struct IsdnCard cards[];
 extern int nrcards;
-extern void HiSax_mod_dec_use_count(void);
-extern void HiSax_mod_inc_use_count(void);
+extern void HiSax_mod_dec_use_count(struct IsdnCardState *cs);
+extern void HiSax_mod_inc_use_count(struct IsdnCardState *cs);
 
 static int init_b_st(struct Channel *chanp, int incoming);
 static void release_b_st(struct Channel *chanp);
@@ -64,19 +70,6 @@ hisax_findcard(int driverid)
 			if (cards[i].cs->myid == driverid)
 				return (cards[i].cs);
 	return (struct IsdnCardState *) 0;
-}
-
-int
-discard_queue(struct sk_buff_head *q)
-{
-	struct sk_buff *skb;
-	int ret=0;
-
-	while ((skb = skb_dequeue(q))) {
-		dev_kfree_skb(skb);
-		ret++;
-	}
-	return(ret);
 }
 
 static void
@@ -337,7 +330,7 @@ lli_go_active(struct FsmInst *fi, int event, void *arg)
  * RESUME
  */
 
-/* incomming call */
+/* incoming call */
 
 static void
 lli_deliver_call(struct FsmInst *fi, int event, void *arg)
@@ -850,14 +843,14 @@ static struct FsmNode fnlist[] __initdata =
 
 #define FNCOUNT (sizeof(fnlist)/sizeof(struct FsmNode))
 
-void __init
+int __init
 CallcNew(void)
 {
 	callcfsm.state_count = STATE_COUNT;
 	callcfsm.event_count = EVENT_COUNT;
 	callcfsm.strEvent = strEvent;
 	callcfsm.strState = strState;
-	FsmNew(&callcfsm, fnlist, FNCOUNT);
+	return FsmNew(&callcfsm, fnlist, FNCOUNT);
 }
 
 void
@@ -932,7 +925,7 @@ static void stat_redir_result(struct IsdnCardState *cs, int chan, ulong result)
 	ic.driver = cs->myid;
 	ic.command = ISDN_STAT_REDIR;
 	ic.arg = chan; 
-	(ulong)(ic.parm.num[0]) = result;
+	ic.parm.num[0] = result;
 	cs->iif.statcallb(&ic);
 } /* stat_redir_result */
 
@@ -1026,9 +1019,11 @@ dummy_pstack(struct PStack *st, int pr, void *arg) {
 	printk(KERN_WARNING"call to dummy_pstack pr=%04x arg %lx\n", pr, (long)arg);
 }
 
-static void
+static int
 init_PStack(struct PStack **stp) {
 	*stp = kmalloc(sizeof(struct PStack), GFP_ATOMIC);
+	if (!*stp)
+		return -ENOMEM;
 	(*stp)->next = NULL;
 	(*stp)->l1.l1l2 = dummy_pstack;
 	(*stp)->l1.l1hw = dummy_pstack;
@@ -1041,16 +1036,20 @@ init_PStack(struct PStack **stp) {
 	(*stp)->l3.l3l4 = dummy_pstack;
 	(*stp)->lli.l4l3 = dummy_pstack;
 	(*stp)->ma.layer = dummy_pstack;
+	return 0;
 }
 
-static void
+static int
 init_d_st(struct Channel *chanp)
 {
 	struct PStack *st;
 	struct IsdnCardState *cs = chanp->cs;
 	char tmp[16];
+	int err;
 
-	init_PStack(&chanp->d_st);
+	err = init_PStack(&chanp->d_st);
+	if (err)
+		return err;
 	st = chanp->d_st;
 	st->next = NULL;
 	HiSax_addlist(cs, st);
@@ -1075,6 +1074,8 @@ init_d_st(struct Channel *chanp)
 	st->lli.userdata = chanp;
 	st->lli.l2writewakeup = NULL;
 	st->l3.l3l4 = dchan_l3l4;
+
+	return 0;
 }
 
 static void
@@ -1090,10 +1091,11 @@ callc_debug(struct FsmInst *fi, char *fmt, ...)
 	va_end(args);
 }
 
-static void
+static int
 init_chan(int chan, struct IsdnCardState *csta)
 {
 	struct Channel *chanp = csta->channel + chan;
+	int err;
 
 	chanp->cs = csta;
 	chanp->bcs = csta->bcs + chan;
@@ -1102,7 +1104,9 @@ init_chan(int chan, struct IsdnCardState *csta)
 	chanp->debug = 0;
 	chanp->Flags = 0;
 	chanp->leased = 0;
-	init_PStack(&chanp->b_st);
+	err = init_PStack(&chanp->b_st);
+	if (err)
+		return err;
 	chanp->b_st->l1.delay = DEFAULT_B_DELAY;
 	chanp->fi.fsm = &callcfsm;
 	chanp->fi.state = ST_NULL;
@@ -1112,31 +1116,41 @@ init_chan(int chan, struct IsdnCardState *csta)
 	FsmInitTimer(&chanp->fi, &chanp->dial_timer);
 	FsmInitTimer(&chanp->fi, &chanp->drel_timer);
 	if (!chan || (test_bit(FLG_TWO_DCHAN, &csta->HW_Flags) && chan < 2)) {
-		init_d_st(chanp);
+		err = init_d_st(chanp);
+		if (err)
+			return err;
 	} else {
 		chanp->d_st = csta->channel->d_st;
 	}
 	chanp->data_open = 0;
+	return 0;
 }
 
 int
 CallcNewChan(struct IsdnCardState *csta) {
-	int i;
+	int i, err;
 
 	chancount += 2;
-	init_chan(0, csta);
-	init_chan(1, csta);
+	err = init_chan(0, csta);
+	if (err)
+		return err;
+	err = init_chan(1, csta);
+	if (err)
+		return err;
 	printk(KERN_INFO "HiSax: 2 channels added\n");
 
-	for (i = 0; i < MAX_WAITING_CALLS; i++) 
-		init_chan(i+2,csta);
+	for (i = 0; i < MAX_WAITING_CALLS; i++) { 
+		err = init_chan(i+2,csta);
+		if (err)
+			return err;
+	}
 	printk(KERN_INFO "HiSax: MAX_WAITING_CALLS added\n");
 	if (test_bit(FLG_PTP, &csta->channel->d_st->l2.flag)) {
 		printk(KERN_INFO "LAYER2 WATCHING ESTABLISH\n");
 		csta->channel->d_st->lli.l4l3(csta->channel->d_st,
 			DL_ESTABLISH | REQUEST, NULL);
 	}
-	return (2);
+	return (0);
 }
 
 static void
@@ -1576,7 +1590,7 @@ HiSax_command(isdn_ctrl * ic)
 			}
 			break;
 		case (ISDN_CMD_LOCK):
-			HiSax_mod_inc_use_count();
+			HiSax_mod_inc_use_count(csta);
 #ifdef MODULE
 			if (csta->channel[0].debug & 0x400)
 				HiSax_putstatus(csta, "   LOCK ", "modcnt %lx",
@@ -1584,7 +1598,7 @@ HiSax_command(isdn_ctrl * ic)
 #endif				/* MODULE */
 			break;
 		case (ISDN_CMD_UNLOCK):
-			HiSax_mod_dec_use_count();
+			HiSax_mod_dec_use_count(csta);
 #ifdef MODULE
 			if (csta->channel[0].debug & 0x400)
 				HiSax_putstatus(csta, " UNLOCK ", "modcnt %lx",
@@ -1616,11 +1630,11 @@ HiSax_command(isdn_ctrl * ic)
 					break;
 				case (3):
 					for (i = 0; i < *(unsigned int *) ic->parm.num; i++)
-						HiSax_mod_dec_use_count();
+						HiSax_mod_dec_use_count(NULL);
 					break;
 				case (4):
 					for (i = 0; i < *(unsigned int *) ic->parm.num; i++)
-						HiSax_mod_inc_use_count();
+						HiSax_mod_inc_use_count(NULL);
 					break;
 				case (5):	/* set card in leased mode */
 					num = *(unsigned int *) ic->parm.num;
@@ -1690,7 +1704,7 @@ HiSax_command(isdn_ctrl * ic)
 #ifdef MODULE
 				case (55):
 					MOD_USE_COUNT = 0;
-					HiSax_mod_inc_use_count();
+					HiSax_mod_inc_use_count(NULL);
 					break;
 #endif				/* MODULE */
 				case (11):
@@ -1802,6 +1816,7 @@ HiSax_writebuf_skb(int id, int chan, int ack, struct sk_buff *skb)
 		cli();
 		nskb = skb_clone(skb, GFP_ATOMIC);
 		if (nskb) {
+			nskb->truesize = nskb->len;
 			if (!ack)
 				nskb->pkt_type = PACKET_NOACK;
 			if (chanp->l2_active_protocol == ISDN_PROTO_L2_X75I)

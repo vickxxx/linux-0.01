@@ -3,49 +3,39 @@
  *  Created 16 Dec 1999 by Nicolas Pitre <nico@cam.org>
  *  This file contains the SA1100 architecture specific keyboard definitions
  */
-
 #ifndef _SA1100_KEYBOARD_H
 #define _SA1100_KEYBOARD_H
 
 #include <linux/config.h>
+#include <asm/mach-types.h>
+#include <asm/arch/assabet.h>
 
+#define kbd_disable_irq()	do { } while(0)
+#define kbd_enable_irq()	do { } while(0)
 
-#ifdef CONFIG_SA1100_BRUTUS
+extern int sa1111_kbd_init_hw(void);
+extern void gc_kbd_init_hw(void);
+extern void smartio_kbd_init_hw(void);
+extern void cerf_kbd_init_hw(void);
 
-extern int Brutus_kbd_translate(unsigned char scancode, unsigned char *keycode,
-			   char raw_mode);
-extern void Brutus_kbd_leds(unsigned char leds);
-extern void Brutus_kbd_init_hw(void);
-extern void Brutus_kbd_enable_irq(void);
-extern void Brutus_kbd_disable_irq(void);
-extern unsigned char Brutus_kbd_sysrq_xlate[128];
-
-#define kbd_setkeycode(x...)	(-ENOSYS)
-#define kbd_getkeycode(x...)	(-ENOSYS)
-#define kbd_translate		Brutus_kbd_translate
-#define kbd_unexpected_up(x...)	(1)
-#define kbd_leds		Brutus_kbd_leds
-#define kbd_init_hw		Brutus_kbd_init_hw
-#define kbd_enable_irq		Brutus_kbd_enable_irq
-#define kbd_disable_irq		Brutus_kbd_disable_irq
-#define kbd_sysrq_xlate		Brutus_kbd_sysrq_xlate
-
-#define SYSRQ_KEY 0x54
-
-#else
-
-/* dummy i.e. no real keyboard */
-#define kbd_setkeycode(x...)	(-ENOSYS)
-#define kbd_getkeycode(x...)	(-ENOSYS)
-#define kbd_translate(x...)	(0)
-#define kbd_unexpected_up(x...)	(1)
-#define kbd_leds(x...)		do { } while (0)
-#define kbd_init_hw(x...)	do { } while (0)
-#define kbd_enable_irq(x...)	do { } while (0)
-#define kbd_disable_irq(x...)	do { } while (0)
-
+static inline void kbd_init_hw(void)
+{
+	if ((machine_is_assabet() && machine_has_neponset()) ||
+	    machine_is_graphicsmaster() || machine_is_adsagc())
+		sa1111_kbd_init_hw();
+	if (machine_is_graphicsclient())
+		gc_kbd_init_hw();
+	if (machine_is_adsbitsy() || machine_is_adsbitsyplus())
+		smartio_kbd_init_hw();
+#ifdef CONFIG_SA1100_CERF_CPLD
+	if (machine_is_cerf())
+		cerf_kbd_init_hw();
 #endif
-
+#ifdef CONFIG_SA1100_PT_SYSTEM3
+	/* TODO: add system 3 board specific functions here */
+	if (machine_is_pt_system3())
+		sa1111_kbd_init_hw();
+#endif
+}
 
 #endif  /* _SA1100_KEYBOARD_H */
-

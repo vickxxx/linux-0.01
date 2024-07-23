@@ -1,24 +1,23 @@
-// $Id: l3ni1.c,v 2.5.6.1 2000/12/06 16:59:19 kai Exp $
-//
-//-----------------------------------------------------------------------------
-//
-// NI1 D-channel protocol
-//
-// Authors:
-// Matt Henderson & Guy Ellis - Traverse Tecnologies Pty Ltd
-// www.traverse.com.au
-//
-// 2000.6.6 Initial implementation of routines for US NI1 
-// Layer 3 protocol based on the EURO/DSS1 D-channel protocol 
-// driver written by Karsten Keil et al.  
-// NI-1 Hall of Fame - Thanks to.... 
-// Ragnar Paulson - for some handy code fragments
-// Will Scales - beta tester extraordinaire
-// Brett Whittacre - beta tester and remote devel system in Vegas
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
-//-----------------------------------------------------------------------------
+/* $Id: l3ni1.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+ *
+ * NI1 D-channel protocol
+ *
+ * Author       Matt Henderson & Guy Ellis
+ * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * 2000.6.6 Initial implementation of routines for US NI1 
+ * Layer 3 protocol based on the EURO/DSS1 D-channel protocol 
+ * driver written by Karsten Keil et al.  
+ * NI-1 Hall of Fame - Thanks to.... 
+ * Ragnar Paulson - for some handy code fragments
+ * Will Scales - beta tester extraordinaire
+ * Brett Whittacre - beta tester and remote devel system in Vegas
+ *
+ */
+
 #define __NO_VERSION__
 #include "hisax.h"
 #include "isdnl3.h"
@@ -26,7 +25,7 @@
 #include <linux/ctype.h>
 
 extern char *HiSax_getrev(const char *revision);
-const char *ni1_revision = "$Revision: 2.5.6.1 $";
+const char *ni1_revision = "$Revision: 1.1.4.1 $";
 
 #define EXT_BEARER_CAPS 1
 
@@ -48,7 +47,8 @@ const char *ni1_revision = "$Revision: 2.5.6.1 $";
 static unsigned char new_invoke_id(struct PStack *p)
 {
 	unsigned char retval;
-	int flags,i;
+	unsigned long flags;
+	int i;
   
 	i = 32; /* maximum search depth */
 
@@ -76,7 +76,7 @@ static unsigned char new_invoke_id(struct PStack *p)
 /* free a used invoke id */
 /*************************/
 static void free_invoke_id(struct PStack *p, unsigned char id)
-{ int flags;
+{ unsigned long flags;
 
   if (!id) return; /* 0 = invalid value */
 
@@ -372,12 +372,12 @@ l3ni1_parse_facility(struct PStack *st, struct l3_process *pc,
                            return; 
                          }   
                         if ((pc->prot.ni1.invoke_id) && (pc->prot.ni1.invoke_id == id))
-                          { /* Diversion successfull */
+                          { /* Diversion successful */
                             free_invoke_id(st,pc->prot.ni1.invoke_id);
                             pc->prot.ni1.remote_result = 0; /* success */     
                             pc->prot.ni1.invoke_id = 0;
                             pc->redir_result = pc->prot.ni1.remote_result; 
-                            st->l3.l3l4(st, CC_REDIR | INDICATION, pc);                                  } /* Diversion successfull */
+                            st->l3.l3l4(st, CC_REDIR | INDICATION, pc);                                  } /* Diversion successful */
                         else
                           l3_debug(st,"return error unknown identifier");
 			break;
@@ -1973,7 +1973,7 @@ static void l3ni1_redir_req(struct l3_process *pc, u_char pr, void *arg)
         MsgHead(p, pc->callref, MT_FACILITY);
 
         for (subp = pc->chan->setup.phone; (*subp) && (*subp != '.'); subp++) len_phone++; /* len of phone number */
-        if (*subp++ == '.') len_sub = strlen(subp) + 2; /* length including info subadress element */ 
+        if (*subp++ == '.') len_sub = strlen(subp) + 2; /* length including info subaddress element */ 
 
 	*p++ = 0x1c;   /* Facility info element */
         *p++ = len_phone + len_sub + 2 + 2 + 8 + 3 + 3; /* length of element */
@@ -1999,7 +1999,7 @@ static void l3ni1_redir_req(struct l3_process *pc, u_char pr, void *arg)
 	 *p++ = pc->chan->setup.phone[l];
 
         if (len_sub)
-	  { *p++ = 0x04; /* called party subadress */
+	  { *p++ = 0x04; /* called party subaddress */
             *p++ = len_sub - 2;
             while (*subp) *p++ = *subp++;
           }

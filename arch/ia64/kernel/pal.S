@@ -4,8 +4,9 @@
  *
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
- * Copyright (C) 1999-2000 David Mosberger <davidm@hpl.hp.com>
- * Copyright (C) 2000 Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 1999-2001 Hewlett-Packard Co
+ *	David Mosberger <davidm@hpl.hp.com>
+ *	Stephane Eranian <eranian@hpl.hp.com>
  *
  * 05/22/2000 eranian Added support for stacked register calls
  * 05/24/2000 eranian Added support for physical mode static calls
@@ -13,11 +14,6 @@
 
 #include <asm/asmmacro.h>
 #include <asm/processor.h>
-
-	.text
-	.psr abi64
-	.psr lsb
-	.lsb
 
 	.data
 pal_entry_point:
@@ -36,7 +32,7 @@ GLOBAL_ENTRY(ia64_pal_handler_init)
 	movl r2=pal_entry_point
 	;;
 	st8 [r2]=in0
-	br.ret.sptk.few rp
+	br.ret.sptk.many rp
 END(ia64_pal_handler_init)
 
 /*
@@ -46,7 +42,7 @@ END(ia64_pal_handler_init)
  */
 GLOBAL_ENTRY(ia64_pal_default_handler)
 	mov r8=-1
-	br.cond.sptk.few rp
+	br.cond.sptk.many rp
 END(ia64_pal_default_handler)
 
 /*
@@ -58,7 +54,7 @@ END(ia64_pal_default_handler)
  *
  */
 GLOBAL_ENTRY(ia64_pal_call_static)
-	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(6))
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(6)
 	alloc loc1 = ar.pfs,6,90,0,0
 	movl loc2 = pal_entry_point
 1:	{
@@ -73,7 +69,7 @@ GLOBAL_ENTRY(ia64_pal_call_static)
 	;;
 	mov loc3 = psr
 	mov loc0 = rp
-	UNW(.body)
+	.body
 	mov r30 = in2
 
 (p6)	rsm psr.i | psr.ic
@@ -84,13 +80,13 @@ GLOBAL_ENTRY(ia64_pal_call_static)
 	;;
 (p6)	srlz.i
 	mov rp = r8
-	br.cond.sptk.few b7
+	br.cond.sptk.many b7
 1:	mov psr.l = loc3
 	mov ar.pfs = loc1
 	mov rp = loc0
 	;;
 	srlz.d				// seralize restoration of psr.l
-	br.ret.sptk.few	b0
+	br.ret.sptk.many b0
 END(ia64_pal_call_static)
 
 /*
@@ -101,14 +97,14 @@ END(ia64_pal_call_static)
  * 	in2 - in3   Remaning PAL arguments
  */
 GLOBAL_ENTRY(ia64_pal_call_stacked)
-	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(5))
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(5)
 	alloc loc1 = ar.pfs,5,4,87,0
 	movl loc2 = pal_entry_point
 
 	mov r28  = in0			// Index MUST be copied to r28
 	mov out0 = in0			// AND in0 of PAL function
 	mov loc0 = rp
-	UNW(.body)
+	.body
 	;;
 	ld8 loc2 = [loc2]		// loc2 <- entry point
 	mov out1 = in1
@@ -118,14 +114,14 @@ GLOBAL_ENTRY(ia64_pal_call_stacked)
 	;;
 	rsm psr.i
 	mov b7 = loc2
-	;; 
+	;;
 	br.call.sptk.many rp=b7		// now make the call
 .ret0:	mov psr.l  = loc3
 	mov ar.pfs = loc1
 	mov rp = loc0
 	;;
 	srlz.d				// serialize restoration of psr.l
-	br.ret.sptk.few	b0
+	br.ret.sptk.many b0
 END(ia64_pal_call_stacked)
 
 /*
@@ -148,7 +144,7 @@ END(ia64_pal_call_stacked)
 
 
 GLOBAL_ENTRY(ia64_pal_call_phys_static)
-	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(6))
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(6)
 	alloc loc1 = ar.pfs,6,90,0,0
 	movl loc2 = pal_entry_point
 1:	{
@@ -156,7 +152,7 @@ GLOBAL_ENTRY(ia64_pal_call_phys_static)
 	  mov r8   = ip			// save ip to compute branch
 	  mov loc0 = rp			// save rp
 	}
-	UNW(.body)
+	.body
 	;;
 	ld8 loc2 = [loc2]		// loc2 <- entry point
 	mov r29  = in1			// first argument
@@ -165,26 +161,26 @@ GLOBAL_ENTRY(ia64_pal_call_phys_static)
 	;;
 	mov loc3 = psr			// save psr
 	adds r8  = 1f-1b,r8		// calculate return address for call
-	;; 
+	;;
 	mov loc4=ar.rsc			// save RSE configuration
 	dep.z loc2=loc2,0,61		// convert pal entry point to physical
-	dep.z r8=r8,0,61		// convert rp to physical
+	tpa r8=r8			// convert rp to physical
 	;;
 	mov b7 = loc2			// install target to branch reg
-	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	movl r16=PAL_PSR_BITS_TO_CLEAR
 	movl r17=PAL_PSR_BITS_TO_SET
 	;;
 	or loc3=loc3,r17		// add in psr the bits to set
 	;;
 	andcm r16=loc3,r16		// removes bits to clear from psr
-	br.call.sptk.few rp=ia64_switch_mode
+	br.call.sptk.many rp=ia64_switch_mode_phys
 .ret1:	mov rp = r8			// install return address (physical)
-	br.cond.sptk.few b7
+	br.cond.sptk.many b7
 1:
-	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	mov r16=loc3			// r16= original psr
-	br.call.sptk.few rp=ia64_switch_mode // return to virtual mode
+	br.call.sptk.many rp=ia64_switch_mode_virt // return to virtual mode
 .ret2:
 	mov psr.l = loc3		// restore init PSR
 
@@ -193,7 +189,7 @@ GLOBAL_ENTRY(ia64_pal_call_phys_static)
 	;;
 	mov ar.rsc=loc4			// restore RSE configuration
 	srlz.d				// seralize restoration of psr.l
-	br.ret.sptk.few	b0
+	br.ret.sptk.many b0
 END(ia64_pal_call_phys_static)
 
 /*
@@ -204,7 +200,7 @@ END(ia64_pal_call_phys_static)
  * 	in2 - in3   Remaning PAL arguments
  */
 GLOBAL_ENTRY(ia64_pal_call_phys_stacked)
-	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(5))
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(5)
 	alloc	loc1 = ar.pfs,5,5,86,0
 	movl	loc2 = pal_entry_point
 1:	{
@@ -220,11 +216,11 @@ GLOBAL_ENTRY(ia64_pal_call_phys_stacked)
 	mov out3 = in3		// copy arg3
 	;;
 	mov loc3 = psr		// save psr
-	;; 
+	;;
 	mov loc4=ar.rsc			// save RSE configuration
 	dep.z loc2=loc2,0,61		// convert pal entry point to physical
 	;;
-	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	movl r16=PAL_PSR_BITS_TO_CLEAR
 	movl r17=PAL_PSR_BITS_TO_SET
 	;;
@@ -232,13 +228,13 @@ GLOBAL_ENTRY(ia64_pal_call_phys_stacked)
 	mov b7 = loc2			// install target to branch reg
 	;;
 	andcm r16=loc3,r16		// removes bits to clear from psr
-	br.call.sptk.few rp=ia64_switch_mode
+	br.call.sptk.many rp=ia64_switch_mode_phys
 .ret6:
 	br.call.sptk.many rp=b7		// now make the call
 .ret7:
-	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	mov r16=loc3			// r16= original psr
-	br.call.sptk.few rp=ia64_switch_mode	// return to virtual mode
+	br.call.sptk.many rp=ia64_switch_mode_virt	// return to virtual mode
 
 .ret8:	mov psr.l  = loc3		// restore init PSR
 	mov ar.pfs = loc1
@@ -246,6 +242,52 @@ GLOBAL_ENTRY(ia64_pal_call_phys_stacked)
 	;;
 	mov ar.rsc=loc4			// restore RSE configuration
 	srlz.d				// seralize restoration of psr.l
-	br.ret.sptk.few	b0
+	br.ret.sptk.many b0
 END(ia64_pal_call_phys_stacked)
 
+/*
+ * Save scratch fp scratch regs (fp10-fp15)
+ *
+ * NOTE: We need to do this since firmware (SAL or PAL) uses more
+ * scratch fp regs than the Linux kernel does.
+ *
+ * Inputs:
+ *      in0         Address of stack storage for fp regs
+ */
+
+GLOBAL_ENTRY(ia64_save_scratch_fpregs)
+	alloc r3=ar.pfs,1,0,0,0
+	add r2=16,in0
+	;;
+	stf.spill [in0] = f10,32
+	stf.spill [r2]  = f11,32
+	;;
+	stf.spill [in0] = f12,32
+	stf.spill [r2]  = f13,32
+	;;
+	stf.spill [in0] = f14,32
+	stf.spill [r2]  = f15,32
+	br.ret.sptk.many rp
+END(ia64_save_scratch_fpregs)
+
+/*
+ * Load scratch fp scratch regs (fp10-fp15)
+ *
+ * Inputs:
+ *      in0         Address of stack storage for fp regs
+ */
+
+GLOBAL_ENTRY(ia64_load_scratch_fpregs)
+	alloc r3=ar.pfs,1,0,0,0
+	add r2=16,in0
+	;;
+	ldf.fill  f10 = [in0],32
+	ldf.fill  f11 = [r2],32
+	;;
+	ldf.fill  f12 = [in0],32
+	ldf.fill  f13 = [r2],32
+	;;
+	ldf.fill  f14 = [in0],32
+	ldf.fill  f15 = [r2],32
+	br.ret.sptk.many rp
+END(ia64_load_scratch_fpregs)

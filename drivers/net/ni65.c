@@ -12,7 +12,7 @@
  * driver probes: io: 0x360,0x300,0x320,0x340 / dma: 3,5,6,7
  *
  * This is an extension to the Linux operating system, and is covered by the
- * same Gnu Public License that covers the Linux-kernel.
+ * same GNU General Public License that covers the Linux-kernel.
  *
  * comments/bugs/suggestions can be sent to:
  *   Michael Hipp
@@ -67,7 +67,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -353,18 +353,21 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	unsigned long flags;
 
 	for(i=0;i<NUM_CARDS;i++) {
-		if(check_region(ioaddr, cards[i].total_size))
+		if(!request_region(ioaddr, cards[i].total_size, cards[i].cardname))
 			continue;
 		if(cards[i].id_offset >= 0) {
 			if(inb(ioaddr+cards[i].id_offset+0) != cards[i].id0 ||
 				 inb(ioaddr+cards[i].id_offset+1) != cards[i].id1) {
+				 release_region(ioaddr, cards[i].total_size);
 				 continue;
 			}
 		}
 		if(cards[i].vendor_id) {
 			for(j=0;j<3;j++)
-				if(inb(ioaddr+cards[i].addr_offset+j) != cards[i].vendor_id[j])
+				if(inb(ioaddr+cards[i].addr_offset+j) != cards[i].vendor_id[j]) {
+					release_region(ioaddr, cards[i].total_size);
 					continue;
+			  }
 		}
 		break;
 	}
@@ -374,8 +377,10 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	for(j=0;j<6;j++)
 		dev->dev_addr[j] = inb(ioaddr+cards[i].addr_offset+j);
 
-	if( (j=ni65_alloc_buffer(dev)) < 0)
+	if( (j=ni65_alloc_buffer(dev)) < 0) {
+		release_region(ioaddr, cards[i].total_size);
 		return j;
+	}
 	p = (struct priv *) dev->priv;
 	p->cmdr_addr = ioaddr + cards[i].cmd_offset;
 	p->cardno = i;
@@ -386,6 +391,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	if( (j=readreg(CSR0)) != 0x4) {
 		 printk(KERN_ERR "can't RESET card: %04x\n",j);
 		 ni65_free_buffer(p);
+		 release_region(ioaddr, cards[p->cardno].total_size);
 		 return -EAGAIN;
 	}
 
@@ -437,6 +443,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 			if(i == 5) {
 				printk("Can't detect DMA channel!\n");
 				ni65_free_buffer(p);
+				release_region(ioaddr, cards[p->cardno].total_size);
 				return -EAGAIN;
 			}
 			dev->dma = dmatab[i];
@@ -455,6 +462,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 			{
 				printk("Failed to detect IRQ line!\n");
 				ni65_free_buffer(p);
+				release_region(ioaddr, cards[p->cardno].total_size);
 				return -EAGAIN;
 			}
 			printk("IRQ %d (autodetected).\n",dev->irq);
@@ -467,13 +475,9 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	{
 		printk("%s: Can't request dma-channel %d\n",dev->name,(int) dev->dma);
 		ni65_free_buffer(p);
+		release_region(ioaddr, cards[p->cardno].total_size);
 		return -EAGAIN;
 	}
-
-	/*
-	 * Grab the region so we can find another board.
-	 */
-	request_region(ioaddr,cards[p->cardno].total_size,cards[p->cardno].cardname);
 
 	dev->base_addr = ioaddr;
 
@@ -1045,6 +1049,7 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 				p->stats.rx_bytes += len;
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 			}
 			else
 			{
@@ -1100,7 +1105,7 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 	{
 		short len = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		struct tmd *tmdp;
-		long flags;
+		unsigned long flags;
 
 #ifdef XMT_VIA_SKB
 		if( (unsigned long) (skb->data + skb->len) > 0x1000000) {
@@ -1108,6 +1113,8 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 			memcpy((char *) p->tmdbounce[p->tmdbouncenum] ,(char *)skb->data,
 							 (skb->len > T_BUF_SIZE) ? T_BUF_SIZE : skb->len);
+			if(len > skb->len)
+				memset((char *)p->tmdbounce[p->tmdbouncenum]+skb->len, 0, len-skb->len);
 			dev_kfree_skb (skb);
 
 			save_flags(flags);
@@ -1173,20 +1180,19 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 #ifdef MODULE
-static struct net_device dev_ni65 = {
-	"",	/* "ni6510": device name inserted by net_init.c */
-	0, 0, 0, 0,
-	0x360, 9,	 /* I/O address, IRQ */
-	0, 0, 0, NULL, ni65_probe };
+static struct net_device dev_ni65 = { base_addr: 0x360, irq: 9, init: ni65_probe };
 
 /* set: io,irq,dma or set it when calling insmod */
-static int irq=0;
-static int io=0;
-static int dma=0;
+static int irq;
+static int io;
+static int dma;
 
 MODULE_PARM(irq, "i");
 MODULE_PARM(io, "i");
 MODULE_PARM(dma, "i");
+MODULE_PARM_DESC(irq, "ni6510 IRQ number (ignored for some cards)");
+MODULE_PARM_DESC(io, "ni6510 I/O base address");
+MODULE_PARM_DESC(dma, "ni6510 ISA DMA channel (ignored for some cards)");
 
 int init_module(void)
 {
@@ -1214,6 +1220,7 @@ void cleanup_module(void)
 	dev_ni65.priv = NULL;
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
 
 /*
  * END of ni65.c

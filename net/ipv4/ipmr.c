@@ -9,7 +9,7 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- *	Version: $Id: ipmr.c,v 1.55 2000/11/28 13:13:27 davem Exp $
+ *	Version: $Id: ipmr.c,v 1.65 2001/10/31 21:55:54 davem Exp $
  *
  *	Fixes:
  *	Michael Chastain	:	Incorrect size of copying.
@@ -83,8 +83,8 @@ static int maxvif;
 
 #define VIF_EXISTS(idx) (vif_table[idx].dev != NULL)
 
-int mroute_do_assert = 0;				/* Set in PIM assert	*/
-int mroute_do_pim = 0;
+int mroute_do_assert;					/* Set in PIM assert	*/
+int mroute_do_pim;
 
 static struct mfc_cache *mfc_cache_array[MFC_LINES];	/* Forwarding cache	*/
 
@@ -294,7 +294,6 @@ static void ipmr_destroy_unres(struct mfc_cache *c)
 	atomic_dec(&cache_resolve_queue_len);
 
 	while((skb=skb_dequeue(&c->mfc_un.unres.unresolved))) {
-#ifdef CONFIG_RTNETLINK
 		if (skb->nh.iph->version == 0) {
 			struct nlmsghdr *nlh = (struct nlmsghdr *)skb_pull(skb, sizeof(struct iphdr));
 			nlh->nlmsg_type = NLMSG_ERROR;
@@ -303,7 +302,6 @@ static void ipmr_destroy_unres(struct mfc_cache *c)
 			((struct nlmsgerr*)NLMSG_DATA(nlh))->error = -ETIMEDOUT;
 			netlink_unicast(rtnl, skb, NETLINK_CB(skb).dst_pid, MSG_DONTWAIT);
 		} else
-#endif
 			kfree_skb(skb);
 	}
 
@@ -501,7 +499,6 @@ static void ipmr_cache_resolve(struct mfc_cache *uc, struct mfc_cache *c)
 	 */
 
 	while((skb=__skb_dequeue(&uc->mfc_un.unres.unresolved))) {
-#ifdef CONFIG_RTNETLINK
 		if (skb->nh.iph->version == 0) {
 			int err;
 			struct nlmsghdr *nlh = (struct nlmsghdr *)skb_pull(skb, sizeof(struct iphdr));
@@ -516,7 +513,6 @@ static void ipmr_cache_resolve(struct mfc_cache *uc, struct mfc_cache *c)
 			}
 			err = netlink_unicast(rtnl, skb, NETLINK_CB(skb).dst_pid, MSG_DONTWAIT);
 		} else
-#endif
 			ip_mr_forward(skb, c, 0);
 	}
 }
@@ -976,10 +972,13 @@ int ip_mroute_getsockopt(struct sock *sk,int optname,char *optval,int *optlen)
 	   optname!=MRT_ASSERT)
 		return -ENOPROTOOPT;
 
-	if(get_user(olr, optlen))
+	if (get_user(olr, optlen))
 		return -EFAULT;
 
-	olr=min(olr,sizeof(int));
+	olr = min_t(unsigned int, olr, sizeof(int));
+	if (olr < 0)
+		return -EINVAL;
+		
 	if(put_user(olr,optlen))
 		return -EFAULT;
 	if(optname==MRT_VERSION)
@@ -1092,20 +1091,22 @@ static void ip_encap(struct sk_buff *skb, u32 saddr, u32 daddr)
 	iph->protocol	=	IPPROTO_IPIP;
 	iph->ihl	=	5;
 	iph->tot_len	=	htons(skb->len);
-	ip_select_ident(iph, skb->dst);
+	ip_select_ident(iph, skb->dst, NULL);
 	ip_send_check(iph);
 
 	skb->h.ipiph = skb->nh.iph;
 	skb->nh.iph = iph;
-#ifdef CONFIG_NETFILTER
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#endif
+	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
+	nf_reset(skb);
 }
 
 static inline int ipmr_forward_finish(struct sk_buff *skb)
 {
+	struct ip_options *opt = &(IPCB(skb)->opt);
 	struct dst_entry *dst = skb->dst;
+
+	if (unlikely(opt->optlen))
+		ip_forward_options(skb);
 
 	if (skb->len <= dst->pmtu)
 		return dst->output(skb);
@@ -1383,14 +1384,22 @@ dont_forward:
  * Handle IGMP messages of PIMv1
  */
 
-int pim_rcv_v1(struct sk_buff * skb, unsigned short len)
+int pim_rcv_v1(struct sk_buff * skb)
 {
 	struct igmphdr *pim = (struct igmphdr*)skb->h.raw;
 	struct iphdr   *encap;
 	struct net_device  *reg_dev = NULL;
 
+	if (skb_is_nonlinear(skb)) {
+		if (skb_linearize(skb, GFP_ATOMIC) != 0) {
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
+		pim = (struct igmphdr*)skb->h.raw;
+	}
+
         if (!mroute_do_pim ||
-	    len < sizeof(*pim) + sizeof(*encap) ||
+	    skb->len < sizeof(*pim) + sizeof(*encap) ||
 	    pim->group != PIM_V1_VERSION || pim->code != PIM_V1_REGISTER) {
 		kfree_skb(skb);
                 return -EINVAL;
@@ -1405,7 +1414,7 @@ int pim_rcv_v1(struct sk_buff * skb, unsigned short len)
 	 */
 	if (!MULTICAST(encap->daddr) ||
 	    ntohs(encap->tot_len) == 0 ||
-	    ntohs(encap->tot_len) + sizeof(*pim) > len) {
+	    ntohs(encap->tot_len) + sizeof(*pim) > skb->len) {
 		kfree_skb(skb);
 		return -EINVAL;
 	}
@@ -1427,17 +1436,14 @@ int pim_rcv_v1(struct sk_buff * skb, unsigned short len)
 	skb->nh.iph = (struct iphdr *)skb->data;
 	skb->dev = reg_dev;
 	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = __constant_htons(ETH_P_IP);
+	skb->protocol = htons(ETH_P_IP);
 	skb->ip_summed = 0;
 	skb->pkt_type = PACKET_HOST;
 	dst_release(skb->dst);
 	skb->dst = NULL;
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
-#ifdef CONFIG_NETFILTER
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#endif
+	nf_reset(skb);
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
@@ -1445,17 +1451,25 @@ int pim_rcv_v1(struct sk_buff * skb, unsigned short len)
 #endif
 
 #ifdef CONFIG_IP_PIMSM_V2
-int pim_rcv(struct sk_buff * skb, unsigned short len)
+int pim_rcv(struct sk_buff * skb)
 {
 	struct pimreghdr *pim = (struct pimreghdr*)skb->h.raw;
 	struct iphdr   *encap;
 	struct net_device  *reg_dev = NULL;
 
-        if (len < sizeof(*pim) + sizeof(*encap) ||
+	if (skb_is_nonlinear(skb)) {
+		if (skb_linearize(skb, GFP_ATOMIC) != 0) {
+			kfree_skb(skb);
+			return -ENOMEM;
+		}
+		pim = (struct pimreghdr*)skb->h.raw;
+	}
+
+        if (skb->len < sizeof(*pim) + sizeof(*encap) ||
 	    pim->type != ((PIM_VERSION<<4)|(PIM_REGISTER)) ||
 	    (pim->flags&PIM_NULL_REGISTER) ||
 	    (ip_compute_csum((void *)pim, sizeof(*pim)) != 0 &&
-	     ip_compute_csum((void *)pim, len))) {
+	     ip_compute_csum((void *)pim, skb->len))) {
 		kfree_skb(skb);
                 return -EINVAL;
         }
@@ -1464,7 +1478,7 @@ int pim_rcv(struct sk_buff * skb, unsigned short len)
 	encap = (struct iphdr*)(skb->h.raw + sizeof(struct pimreghdr));
 	if (!MULTICAST(encap->daddr) ||
 	    ntohs(encap->tot_len) == 0 ||
-	    ntohs(encap->tot_len) + sizeof(*pim) > len) {
+	    ntohs(encap->tot_len) + sizeof(*pim) > skb->len) {
 		kfree_skb(skb);
 		return -EINVAL;
 	}
@@ -1486,24 +1500,19 @@ int pim_rcv(struct sk_buff * skb, unsigned short len)
 	skb->nh.iph = (struct iphdr *)skb->data;
 	skb->dev = reg_dev;
 	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = __constant_htons(ETH_P_IP);
+	skb->protocol = htons(ETH_P_IP);
 	skb->ip_summed = 0;
 	skb->pkt_type = PACKET_HOST;
 	dst_release(skb->dst);
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
 	skb->dst = NULL;
-#ifdef CONFIG_NETFILTER
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#endif
+	nf_reset(skb);
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
 }
 #endif
-
-#ifdef CONFIG_RTNETLINK
 
 static int
 ipmr_fill_mroute(struct sk_buff *skb, struct mfc_cache *c, struct rtmsg *rtm)
@@ -1579,7 +1588,6 @@ int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait)
 	read_unlock(&mrt_lock);
 	return err;
 }
-#endif
 
 #ifdef CONFIG_PROC_FS	
 /*

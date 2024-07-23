@@ -20,7 +20,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/reboot.h>
@@ -38,7 +38,6 @@
  * alignment requirements and potentially different initial
  * setup.
  */
-static struct vm_area_struct init_mmap = INIT_MMAP;
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
 static struct signal_struct init_signals = INIT_SIGNALS;
@@ -110,8 +109,8 @@ void machine_power_off(void)
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("Format %02x  Vector: %04x  PC: %08lx  Status: %04x\n",
-	       regs->format, regs->vector, regs->pc, regs->sr);
+	printk("Format %02x  Vector: %04x  PC: %08lx  Status: %04x    %s\n",
+	       regs->format, regs->vector, regs->pc, regs->sr, print_tainted());
 	printk("ORIG_D0: %08lx  D0: %08lx  A2: %08lx  A1: %08lx\n",
 	       regs->orig_d0, regs->d0, regs->a2, regs->a1);
 	printk("A0: %08lx  D5: %08lx  D4: %08lx\n",
@@ -125,7 +124,7 @@ void show_regs(struct pt_regs * regs)
 /*
  * Create a kernel thread
  */
-int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	int pid;
 	mm_segment_t fs;
@@ -137,6 +136,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	register long retval __asm__ ("d0");
 	register long clone_arg __asm__ ("d1") = flags | CLONE_VM;
 
+	retval = __NR_clone;
 	__asm__ __volatile__
 	  ("clrl %%d2\n\t"
 	   "trap #0\n\t"		/* Linux/m68k system call */
@@ -146,14 +146,15 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	   "movel %3,%%sp@-\n\t"	/* push argument */
 	   "jsr %4@\n\t"		/* call fn */
 	   "movel %0,%%d1\n\t"		/* pass exit value */
-	   "movel %2,%0\n\t"		/* exit */
+	   "movel %2,%%d0\n\t"		/* exit */
 	   "trap #0\n"
 	   "1:"
-	   : "=d" (retval)
-	   : "0" (__NR_clone), "i" (__NR_exit),
+	   : "+d" (retval)
+	   : "i" (__NR_clone), "i" (__NR_exit),
 	     "r" (arg), "a" (fn), "d" (clone_arg), "r" (current),
 	     "i" (-KTHREAD_SIZE)
-	   : "d0", "d2");
+	   : "d2");
+
 	pid = retval;
 	}
 

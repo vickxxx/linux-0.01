@@ -5,7 +5,7 @@
  *
  *		PF_INET protocol family socket handler.
  *
- * Version:	$Id: af_inet.c,v 1.127 2000/12/22 19:51:50 davem Exp $
+ * Version:	$Id: af_inet.c,v 1.136 2001/11/06 22:21:08 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -14,6 +14,8 @@
  *
  * Changes (see also sock.c)
  *
+ *		piggy,
+ *		Karl Knutson	:	Socket protocol table
  *		A.N.Kuznetsov	:	Socket death error in accept().
  *		John Richardson :	Fix non blocking error in connect()
  *					so sockets that fail to connect
@@ -88,6 +90,7 @@
 #include <linux/smp_lock.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
+#include <linux/brlock.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/arp.h>
@@ -114,8 +117,6 @@
 #include <linux/wireless.h>		/* Note : will define WIRELESS_EXT */
 #endif	/* CONFIG_NET_RADIO || CONFIG_NET_PCMCIA_RADIO */
 
-#define min(a,b)	((a)<(b)?(a):(b))
-
 struct linux_mib net_statistics[NR_CPUS*2];
 
 #ifdef INET_REFCNT_DEBUG
@@ -135,12 +136,21 @@ extern int dlci_ioctl(unsigned int, void*);
 #endif
 
 #ifdef CONFIG_DLCI_MODULE
-int (*dlci_ioctl_hook)(unsigned int, void *) = NULL;
+int (*dlci_ioctl_hook)(unsigned int, void *);
 #endif
 
 #if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
-int (*br_ioctl_hook)(unsigned long) = NULL;
+int (*br_ioctl_hook)(unsigned long);
 #endif
+
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
+int (*vlan_ioctl_hook)(unsigned long arg);
+#endif
+
+/* The inetsw table contains everything that inet_create needs to
+ * build a new socket.
+ */
+struct list_head inetsw[SOCK_MAX];
 
 /* New destruction routine */
 
@@ -309,45 +319,54 @@ out:
 static int inet_create(struct socket *sock, int protocol)
 {
 	struct sock *sk;
-	struct proto *prot;
+        struct list_head *p;
+        struct inet_protosw *answer;
 
 	sock->state = SS_UNCONNECTED;
 	sk = sk_alloc(PF_INET, GFP_KERNEL, 1);
 	if (sk == NULL) 
 		goto do_oom;
+  
+	/* Look for the requested type/protocol pair. */
+	answer = NULL;
+	br_read_lock_bh(BR_NETPROTO_LOCK);
+	list_for_each(p, &inetsw[sock->type]) {
+		answer = list_entry(p, struct inet_protosw, list);
 
-	switch (sock->type) {
-	case SOCK_STREAM:
-		if (protocol && protocol != IPPROTO_TCP)
-			goto free_and_noproto;
-		protocol = IPPROTO_TCP;
-		prot = &tcp_prot;
-		sock->ops = &inet_stream_ops;
-		break;
-	case SOCK_SEQPACKET:
+		/* Check the non-wild match. */
+		if (protocol == answer->protocol) {
+			if (protocol != IPPROTO_IP)
+				break;
+		} else {
+			/* Check for the two wild cases. */
+			if (IPPROTO_IP == protocol) {
+				protocol = answer->protocol;
+				break;
+			}
+			if (IPPROTO_IP == answer->protocol)
+				break;
+		}
+		answer = NULL;
+	}
+	br_read_unlock_bh(BR_NETPROTO_LOCK);
+
+	if (!answer)
 		goto free_and_badtype;
-	case SOCK_DGRAM:
-		if (protocol && protocol != IPPROTO_UDP)
-			goto free_and_noproto;
-		protocol = IPPROTO_UDP;
-		sk->no_check = UDP_CSUM_DEFAULT;
-		prot=&udp_prot;
-		sock->ops = &inet_dgram_ops;
-		break;
-	case SOCK_RAW:
-		if (!capable(CAP_NET_RAW))
-			goto free_and_badperm;
-		if (!protocol)
-			goto free_and_noproto;
-		prot = &raw_prot;
+	if (answer->capability > 0 && !capable(answer->capability))
+		goto free_and_badperm;
+	if (!protocol)
+		goto free_and_noproto;
+
+	sock->ops = answer->ops;
+	sk->prot = answer->prot;
+	sk->no_check = answer->no_check;
+	if (INET_PROTOSW_REUSE & answer->flags)
 		sk->reuse = 1;
+
+	if (SOCK_RAW == sock->type) {
 		sk->num = protocol;
-		sock->ops = &inet_dgram_ops;
-		if (protocol == IPPROTO_RAW)
+		if (IPPROTO_RAW == protocol)
 			sk->protinfo.af_inet.hdrincl = 1;
-		break;
-	default:
-		goto free_and_badtype;
 	}
 
 	if (ipv4_config.no_pmtu_disc)
@@ -355,23 +374,24 @@ static int inet_create(struct socket *sock, int protocol)
 	else
 		sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_WANT;
 
+	sk->protinfo.af_inet.id = 0;
+
 	sock_init_data(sock,sk);
 
 	sk->destruct = inet_sock_destruct;
 
-	sk->zapped = 0;
-	sk->family = PF_INET;
-	sk->protocol = protocol;
+	sk->zapped	= 0;
+	sk->family	= PF_INET;
+	sk->protocol	= protocol;
 
-	sk->prot = prot;
-	sk->backlog_rcv = prot->backlog_rcv;
+	sk->backlog_rcv = sk->prot->backlog_rcv;
 
-	sk->protinfo.af_inet.ttl=sysctl_ip_default_ttl;
+	sk->protinfo.af_inet.ttl	= sysctl_ip_default_ttl;
 
-	sk->protinfo.af_inet.mc_loop=1;
-	sk->protinfo.af_inet.mc_ttl=1;
-	sk->protinfo.af_inet.mc_index=0;
-	sk->protinfo.af_inet.mc_list=NULL;
+	sk->protinfo.af_inet.mc_loop	= 1;
+	sk->protinfo.af_inet.mc_ttl	= 1;
+	sk->protinfo.af_inet.mc_index	= 0;
+	sk->protinfo.af_inet.mc_list	= NULL;
 
 #ifdef INET_REFCNT_DEBUG
 	atomic_inc(&inet_sock_nr);
@@ -393,10 +413,10 @@ static int inet_create(struct socket *sock, int protocol)
 		int err = sk->prot->init(sk);
 		if (err != 0) {
 			inet_sock_release(sk);
-			return(err);
+			return err;
 		}
 	}
-	return(0);
+	return 0;
 
 free_and_badtype:
 	sk_free(sk);
@@ -450,7 +470,7 @@ int inet_release(struct socket *sock)
 /* It is off by default, see below. */
 int sysctl_ip_nonlocal_bind;
 
-static int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_in *addr=(struct sockaddr_in *)uaddr;
 	struct sock *sk=sock->sk;
@@ -600,13 +620,6 @@ int inet_stream_connect(struct socket *sock, struct sockaddr * uaddr,
 		if (sk->state != TCP_CLOSE) 
 			goto out;
 
-		err = -EAGAIN;
-		if (sk->num == 0) {
-			if (sk->prot->get_port(sk, 0) != 0)
-				goto out;
-			sk->sport = htons(sk->num);
-		}
-
 		err = sk->prot->connect(sk, uaddr, addr_len);
 		if (err < 0)
 			goto out;
@@ -690,7 +703,7 @@ do_err:
  *	This does both peername and sockname.
  */
  
-static int inet_getname(struct socket *sock, struct sockaddr *uaddr,
+int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 		 int *uaddr_len, int peer)
 {
 	struct sock *sk		= sock->sk;
@@ -711,6 +724,7 @@ static int inet_getname(struct socket *sock, struct sockaddr *uaddr,
 		sin->sin_port = sk->sport;
 		sin->sin_addr.s_addr = addr;
 	}
+	memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 	*uaddr_len = sizeof(*sin);
 	return(0);
 }
@@ -807,14 +821,13 @@ int inet_shutdown(struct socket *sock, int how)
  *	There's a good 20K of config code hanging around the kernel.
  */
 
-static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
 	int err;
 	int pid;
 
-	switch(cmd) 
-	{
+	switch(cmd) {
 		case FIOSETOWN:
 		case SIOCSPGRP:
 			err = get_user(pid, (int *) arg);
@@ -865,14 +878,27 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			if (br_ioctl_hook != NULL)
 				return br_ioctl_hook(arg);
 #endif
+			return -ENOPKG;
+
+		case SIOCGIFVLAN:
+		case SIOCSIFVLAN:
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
+#ifdef CONFIG_KMOD
+			if (vlan_ioctl_hook == NULL)
+				request_module("8021q");
+#endif
+			if (vlan_ioctl_hook != NULL)
+				return vlan_ioctl_hook(arg);
+#endif
+			return -ENOPKG;
+
 		case SIOCGIFDIVERT:
 		case SIOCSIFDIVERT:
 #ifdef CONFIG_NET_DIVERT
-			return(divert_ioctl(cmd, (struct divert_cf *) arg));
+			return divert_ioctl(cmd, (struct divert_cf *) arg);
 #else
 			return -ENOPKG;
 #endif	/* CONFIG_NET_DIVERT */
-			return -ENOPKG;
 			
 		case SIOCADDDLCI:
 		case SIOCDELDLCI:
@@ -934,10 +960,32 @@ struct proto_ops inet_stream_ops = {
 	getsockopt:	inet_getsockopt,
 	sendmsg:	inet_sendmsg,
 	recvmsg:	inet_recvmsg,
-	mmap:		sock_no_mmap
+	mmap:		sock_no_mmap,
+	sendpage:	tcp_sendpage
 };
 
 struct proto_ops inet_dgram_ops = {
+	family:		PF_INET,
+
+	release:	inet_release,
+	bind:		inet_bind,
+	connect:	inet_dgram_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	inet_getname, 
+	poll:		udp_poll,
+	ioctl:		inet_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	inet_shutdown,
+	setsockopt:	inet_setsockopt,
+	getsockopt:	inet_getsockopt,
+	sendmsg:	inet_sendmsg,
+	recvmsg:	inet_recvmsg,
+	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
+};
+
+struct proto_ops inet_sockraw_ops = {
 	family:		PF_INET,
 
 	release:	inet_release,
@@ -955,17 +1003,126 @@ struct proto_ops inet_dgram_ops = {
 	sendmsg:	inet_sendmsg,
 	recvmsg:	inet_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 struct net_proto_family inet_family_ops = {
-	PF_INET,
-	inet_create
+	family:	PF_INET,
+	create:	inet_create
 };
 
 
 extern void tcp_init(void);
 extern void tcp_v4_init(struct net_proto_family *);
 
+/* Upon startup we insert all the elements in inetsw_array[] into
+ * the linked list inetsw.
+ */
+static struct inet_protosw inetsw_array[] =
+{
+        {
+                type:        SOCK_STREAM,
+                protocol:    IPPROTO_TCP,
+                prot:        &tcp_prot,
+                ops:         &inet_stream_ops,
+                capability:  -1,
+                no_check:    0,
+                flags:       INET_PROTOSW_PERMANENT,
+        },
+
+        {
+                type:        SOCK_DGRAM,
+                protocol:    IPPROTO_UDP,
+                prot:        &udp_prot,
+                ops:         &inet_dgram_ops,
+                capability:  -1,
+                no_check:    UDP_CSUM_DEFAULT,
+                flags:       INET_PROTOSW_PERMANENT,
+       },
+        
+
+       {
+               type:        SOCK_RAW,
+               protocol:    IPPROTO_IP,	/* wild card */
+               prot:        &raw_prot,
+               ops:         &inet_sockraw_ops,
+               capability:  CAP_NET_RAW,
+               no_check:    UDP_CSUM_DEFAULT,
+               flags:       INET_PROTOSW_REUSE,
+       }
+};
+
+#define INETSW_ARRAY_LEN (sizeof(inetsw_array) / sizeof(struct inet_protosw))
+
+void
+inet_register_protosw(struct inet_protosw *p)
+{
+	struct list_head *lh;
+	struct inet_protosw *answer;
+	int protocol = p->protocol;
+	struct list_head *last_perm;
+
+	br_write_lock_bh(BR_NETPROTO_LOCK);
+
+	if (p->type >= SOCK_MAX)
+		goto out_illegal;
+
+	/* If we are trying to override a permanent protocol, bail. */
+	answer = NULL;
+	last_perm = &inetsw[p->type];
+	list_for_each(lh, &inetsw[p->type]) {
+		answer = list_entry(lh, struct inet_protosw, list);
+
+		/* Check only the non-wild match. */
+		if (INET_PROTOSW_PERMANENT & answer->flags) {
+			if (protocol == answer->protocol)
+				break;
+			last_perm = lh;
+		}
+
+		answer = NULL;
+	}
+	if (answer)
+		goto out_permanent;
+
+	/* Add the new entry after the last permanent entry if any, so that
+	 * the new entry does not override a permanent entry when matched with
+	 * a wild-card protocol. But it is allowed to override any existing
+	 * non-permanent entry.  This means that when we remove this entry, the 
+	 * system automatically returns to the old behavior.
+	 */
+	list_add(&p->list, last_perm);
+out:
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	return;
+
+out_permanent:
+	printk(KERN_ERR "Attempt to override permanent protocol %d.\n",
+	       protocol);
+	goto out;
+
+out_illegal:
+	printk(KERN_ERR
+	       "Ignoring attempt to register illegal socket type %d.\n",
+	       p->type);
+	goto out;
+}
+
+void
+inet_unregister_protosw(struct inet_protosw *p)
+{
+	if (INET_PROTOSW_PERMANENT & p->flags) {
+		printk(KERN_ERR
+		       "Attempt to unregister permanent protocol %d.\n",
+		       p->protocol);
+	} else {
+		br_write_lock_bh(BR_NETPROTO_LOCK);
+		list_del(&p->list);
+		br_write_unlock_bh(BR_NETPROTO_LOCK);
+	}
+}
+
+extern void ipfrag_init(void);
 
 /*
  *	Called by socket.c on kernel startup.  
@@ -975,11 +1132,12 @@ static int __init inet_init(void)
 {
 	struct sk_buff *dummy_skb;
 	struct inet_protocol *p;
+	struct inet_protosw *q;
+	struct list_head *r;
 
 	printk(KERN_INFO "NET4: Linux TCP/IP 1.0 for NET4.0\n");
 
-	if (sizeof(struct inet_skb_parm) > sizeof(dummy_skb->cb))
-	{
+	if (sizeof(struct inet_skb_parm) > sizeof(dummy_skb->cb)) {
 		printk(KERN_CRIT "inet_proto_init: panic\n");
 		return -EINVAL;
 	}
@@ -995,13 +1153,19 @@ static int __init inet_init(void)
 	 */
 
 	printk(KERN_INFO "IP Protocols: ");
-	for(p = inet_protocol_base; p != NULL;) 
-	{
+	for (p = inet_protocol_base; p != NULL;) {
 		struct inet_protocol *tmp = (struct inet_protocol *) p->next;
 		inet_add_protocol(p);
 		printk("%s%s",p->name,tmp?", ":"\n");
 		p = tmp;
 	}
+
+	/* Register the socket-side information for inet_create. */
+	for(r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
+		INIT_LIST_HEAD(r);
+
+	for(q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
+		inet_register_protosw(q);
 
 	/*
 	 *	Set the ARP module up
@@ -1055,6 +1219,9 @@ static int __init inet_init(void)
 	proc_net_create ("tcp", 0, tcp_get_info);
 	proc_net_create ("udp", 0, udp_get_info);
 #endif		/* CONFIG_PROC_FS */
+
+	ipfrag_init();
+
 	return 0;
 }
 module_init(inet_init);

@@ -143,7 +143,7 @@
  * Yunzhou Li <yunzhou@strat.iol.unh.edu> finished this work.
  * Joe Finney <joe@comp.lancs.ac.uk> patched the driver to start
  * 2.00 cards correctly (2.4 GHz with frequency selection).
- * David Hinds <dhinds@hyper.stanford.edu> integrated the whole in his
+ * David Hinds <dahinds@users.sourceforge.net> integrated the whole in his
  * PCMCIA package (and bug corrections).
  *
  * I (Jean Tourrilhes - jt@hplb.hpl.hp.com) then started to make some
@@ -345,6 +345,10 @@
  *	- Fix spinlock stupid bugs that I left in. The driver is now SMP
  *		compliant and doesn't lockup at startup.
  *
+ * Changes made for release in 2.4.20 :
+ * ----------------------------------
+ *	- Set dev->trans_start to avoid filling the logs
+ *
  * Wishes & dreams:
  * ----------------
  *	- roaming (see Pcmcia driver)
@@ -374,7 +378,7 @@
 #include	<linux/netdevice.h>
 #include	<linux/etherdevice.h>
 #include	<linux/skbuff.h>
-#include	<linux/malloc.h>
+#include	<linux/slab.h>
 #include	<linux/timer.h>
 #include	<linux/init.h>
 
@@ -420,7 +424,8 @@
 #undef DEBUG_RX_INFO		/* header of the received packet */
 #undef DEBUG_RX_FAIL		/* Normal failure conditions */
 #define DEBUG_RX_ERROR		/* Unexpected conditions */
-#undef DEBUG_PACKET_DUMP	32	/* Dump packet on the screen. */
+
+#undef DEBUG_PACKET_DUMP	/* Dump packet on the screen if defined to 32. */
 #undef DEBUG_IOCTL_TRACE	/* misc. call by Linux */
 #undef DEBUG_IOCTL_INFO		/* various debugging info */
 #define DEBUG_IOCTL_ERROR	/* what's going wrong */
@@ -446,13 +451,13 @@ static const char	*version	= "wavelan.c : v23 (SMP + wireless extensions) 05/10/
 
 /* ------------------------ PRIVATE IOCTL ------------------------ */
 
-#define SIOCSIPQTHR	SIOCDEVPRIVATE		/* Set quality threshold */
-#define SIOCGIPQTHR	SIOCDEVPRIVATE + 1	/* Get quality threshold */
-#define SIOCSIPLTHR	SIOCDEVPRIVATE + 2	/* Set level threshold */
-#define SIOCGIPLTHR	SIOCDEVPRIVATE + 3	/* Get level threshold */
+#define SIOCSIPQTHR	SIOCIWFIRSTPRIV		/* Set quality threshold */
+#define SIOCGIPQTHR	SIOCIWFIRSTPRIV + 1	/* Get quality threshold */
+#define SIOCSIPLTHR	SIOCIWFIRSTPRIV + 2	/* Set level threshold */
+#define SIOCGIPLTHR	SIOCIWFIRSTPRIV + 3	/* Get level threshold */
 
-#define SIOCSIPHISTO	SIOCDEVPRIVATE + 6	/* Set histogram ranges */
-#define SIOCGIPHISTO	SIOCDEVPRIVATE + 7	/* Get histogram values */
+#define SIOCSIPHISTO	SIOCIWFIRSTPRIV + 6	/* Set histogram ranges */
+#define SIOCGIPHISTO	SIOCIWFIRSTPRIV + 7	/* Get histogram values */
 
 /****************************** TYPES ******************************/
 
@@ -698,12 +703,15 @@ static unsigned short	iobase[]	=
 
 #ifdef	MODULE
 /* Parameters set by insmod */
-static int	io[4]	= { 0, 0, 0, 0 };
-static int	irq[4]	= { 0, 0, 0, 0 };
-static char	name[4][IFNAMSIZ] = { "", "", "", "" };
+static int	io[4];
+static int	irq[4];
+static char	name[4][IFNAMSIZ];
 MODULE_PARM(io, "1-4i");
 MODULE_PARM(irq, "1-4i");
 MODULE_PARM(name, "1-4c" __MODULE_STRING(IFNAMSIZ));
+MODULE_PARM_DESC(io, "WaveLAN I/O base address(es),required");
+MODULE_PARM_DESC(irq, "WaveLAN IRQ number(s)");
+MODULE_PARM_DESC(name, "WaveLAN interface neme(s)");
 #endif	/* MODULE */
 
 #endif	/* WAVELAN_P_H */

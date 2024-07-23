@@ -2,7 +2,7 @@
  * Linux ARCnet driver - COM90xx chipset (memory-mapped buffers)
  * 
  * Written 1994-1999 by Avery Pennarun.
- * Written 1999 by Martin Mares <mj@suse.cz>.
+ * Written 1999 by Martin Mares <mj@ucw.cz>.
  * Derived from skeleton.c by Donald Becker.
  *
  * Special thanks to Contemporary Controls, Inc. (www.ccontrols.com)
@@ -15,7 +15,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -610,15 +610,16 @@ static void com90xx_copy_from_card(struct net_device *dev, int bufnum, int offse
 
 /* Module parameters */
 
-static int io = 0x0;		/* use the insmod io= irq= shmem= options */
-static int irq = 0;
-static int shmem = 0;
+static int io;			/* use the insmod io= irq= shmem= options */
+static int irq;
+static int shmem;
 static char *device;		/* use eg. device=arc1 to change name */
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(shmem, "i");
 MODULE_PARM(device, "s");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

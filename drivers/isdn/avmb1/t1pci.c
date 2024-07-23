@@ -1,73 +1,11 @@
-/*
- * $Id: t1pci.c,v 1.13.6.1 2000/11/28 12:02:45 kai Exp $
+/* $Id: t1pci.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  * 
  * Module for AVM T1 PCI-card.
  * 
- * (c) Copyright 1999 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 1999 by Carsten Paeth <calle@calle.de>
  * 
- * $Log: t1pci.c,v $
- * Revision 1.13.6.1  2000/11/28 12:02:45  kai
- * MODULE_DEVICE_TABLE for 2.4
- *
- * Revision 1.13.2.2  2000/11/26 17:47:53  kai
- * added PCI_DEV_TABLE for 2.4
- *
- * Revision 1.13.2.1  2000/11/26 17:14:19  kai
- * fix device ids
- * also needs patches to include/linux/pci_ids.h
- *
- * Revision 1.13  2000/11/23 20:45:14  kai
- * fixed module_init/exit stuff
- * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
- *
- * Revision 1.12  2000/11/01 14:05:02  calle
- * - use module_init/module_exit from linux/init.h.
- * - all static struct variables are initialized with "membername:" now.
- * - avm_cs.c, let it work with newer pcmcia-cs.
- *
- * Revision 1.11  2000/08/08 09:24:19  calle
- * calls to pci_enable_device surounded by #ifndef COMPAT_HAS_2_2_PCI
- *
- * Revision 1.10  2000/07/20 10:21:21  calle
- * Bugfix: driver will not be unregistered, if not cards were detected.
- *         this result in an oops in kcapi.c
- *
- * Revision 1.9  2000/05/19 15:43:22  calle
- * added calls to pci_device_start().
- *
- * Revision 1.8  2000/05/06 00:52:36  kai
- * merged changes from kernel tree
- * fixed timer and net_device->name breakage
- *
- * Revision 1.7  2000/04/07 15:26:55  calle
- * better error message if cabel not connected or T1 has no power.
- *
- * Revision 1.6  2000/04/03 13:29:25  calle
- * make Tim Waugh happy (module unload races in 2.3.99-pre3).
- * no real problem there, but now it is much cleaner ...
- *
- * Revision 1.5  2000/02/02 18:36:04  calle
- * - Modules are now locked while init_module is running
- * - fixed problem with memory mapping if address is not aligned
- *
- * Revision 1.4  2000/01/25 14:33:38  calle
- * - Added Support AVM B1 PCI V4.0 (tested with prototype)
- *   - splitted up t1pci.c into b1dma.c for common function with b1pciv4
- *   - support for revision register
- *
- * Revision 1.3  1999/11/13 21:27:16  keil
- * remove KERNELVERSION
- *
- * Revision 1.2  1999/11/05 16:38:02  calle
- * Cleanups before kernel 2.4:
- * - Changed all messages to use card->name or driver->name instead of
- *   constant string.
- * - Moved some data from struct avmcard into new struct avmctrl_info.
- *   Changed all lowlevel capi driver to match the new structur.
- *
- * Revision 1.1  1999/10/26 15:31:42  calle
- * Added driver for T1-PCI card.
- *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -88,7 +26,7 @@
 #include "capilli.h"
 #include "avmcard.h"
 
-static char *revision = "$Revision: 1.13.6.1 $";
+static char *revision = "$Revision: 1.1.4.1 $";
 
 #undef CONFIG_T1PCI_DEBUG
 #undef CONFIG_T1PCI_POLLDEBUG
@@ -101,7 +39,9 @@ static struct pci_device_id t1pci_pci_tbl[] __initdata = {
 };
 
 MODULE_DEVICE_TABLE(pci, t1pci_pci_tbl);
-MODULE_AUTHOR("Carsten Paeth <calle@calle.in-berlin.de>");
+MODULE_DESCRIPTION("CAPI4Linux: Driver for AVM T1 PCI card");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 
 /* ------------------------------------------------------------- */
 
@@ -118,7 +58,7 @@ static void t1pci_remove_ctr(struct capi_ctr *ctrl)
 
 	di->detach_ctr(ctrl);
 	free_irq(card->irq, card);
-	iounmap((void *) (((unsigned long) card->mbase) & PAGE_MASK));
+	iounmap(card->mbase);
 	release_region(card->port, AVMB1_PORTLEN);
 	ctrl->driverdata = 0;
 	kfree(card->ctrlinfo);
@@ -132,7 +72,6 @@ static void t1pci_remove_ctr(struct capi_ctr *ctrl)
 
 static int t1pci_add_card(struct capi_driver *driver, struct capicardparams *p)
 {
-	unsigned long base, page_offset;
 	avmcard *card;
 	avmctrl_info *cinfo;
 	int retval;
@@ -183,12 +122,8 @@ static int t1pci_add_card(struct capi_driver *driver, struct capicardparams *p)
 		return -EBUSY;
 	}
 
-	base = card->membase & PAGE_MASK;
-	page_offset = card->membase - base;
-	card->mbase = ioremap_nocache(base, page_offset + 64);
-	if (card->mbase) {
-		card->mbase += page_offset;
-	} else {
+	card->mbase = ioremap_nocache(card->membase, 64);
+	if (!card->mbase) {
 		printk(KERN_NOTICE "%s: can't remap memory at 0x%lx\n",
 					driver->name, card->membase);
 	        kfree(card->ctrlinfo);
@@ -207,7 +142,7 @@ static int t1pci_add_card(struct capi_driver *driver, struct capicardparams *p)
 		else
 			printk(KERN_NOTICE "%s: card at 0x%x, but cabel not connected or T1 has no power (%d)\n",
 					driver->name, card->port, retval);
-                iounmap((void *) (((unsigned long) card->mbase) & PAGE_MASK));
+                iounmap(card->mbase);
 	        kfree(card->ctrlinfo);
 		kfree(card->dma);
 		kfree(card);
@@ -222,7 +157,7 @@ static int t1pci_add_card(struct capi_driver *driver, struct capicardparams *p)
 	if (retval) {
 		printk(KERN_ERR "%s: unable to get IRQ %d.\n",
 				driver->name, card->irq);
-                iounmap((void *) (((unsigned long) card->mbase) & PAGE_MASK));
+                iounmap(card->mbase);
 		release_region(card->port, AVMB1_PORTLEN);
 	        kfree(card->ctrlinfo);
 		kfree(card->dma);
@@ -234,7 +169,7 @@ static int t1pci_add_card(struct capi_driver *driver, struct capicardparams *p)
 	cinfo->capi_ctrl = di->attach_ctr(driver, card->name, cinfo);
 	if (!cinfo->capi_ctrl) {
 		printk(KERN_ERR "%s: attach controller failed.\n", driver->name);
-                iounmap((void *) (((unsigned long) card->mbase) & PAGE_MASK));
+                iounmap(card->mbase);
 		free_irq(card->irq, card);
 		release_region(card->port, AVMB1_PORTLEN);
 	        kfree(card->ctrlinfo);
@@ -302,16 +237,16 @@ static int __init t1pci_init(void)
 
 	MOD_INC_USE_COUNT;
 
-	if ((p = strchr(revision, ':'))) {
-		strncpy(driver->revision, p + 1, sizeof(driver->revision));
-		p = strchr(driver->revision, '$');
-		*p = 0;
+	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+		strncpy(driver->revision, p + 2, sizeof(driver->revision));
+		driver->revision[sizeof(driver->revision)-1] = 0;
+		if ((p = strchr(driver->revision, '$')) != 0 && p > driver->revision)
+			*(p-1) = 0;
 	}
 
 	printk(KERN_INFO "%s: revision %s\n", driver->name, driver->revision);
 
         di = attach_capi_driver(driver);
-
 	if (!di) {
 		printk(KERN_ERR "%s: failed to attach capi_driver\n",
 				driver->name);
@@ -319,30 +254,19 @@ static int __init t1pci_init(void)
 		return -EIO;
 	}
 
-#ifdef CONFIG_PCI
-	if (!pci_present()) {
-		printk(KERN_ERR "%s: no PCI bus present\n", driver->name);
-    		detach_capi_driver(driver);
-		MOD_DEC_USE_COUNT;
-		return -EIO;
-	}
-
 	while ((dev = pci_find_device(PCI_VENDOR_ID_AVM, PCI_DEVICE_ID_AVM_T1, dev))) {
 		struct capicardparams param;
+
+		if (pci_enable_device(dev) < 0) {
+		        printk(KERN_ERR	"%s: failed to enable AVM-T1-PCI\n",
+			       driver->name);
+			continue;
+		}
+		pci_set_master(dev);
 
 		param.port = pci_resource_start(dev, 1);
  		param.irq = dev->irq;
 		param.membase = pci_resource_start(dev, 0);
-
-		retval = pci_enable_device (dev);
-		if (retval != 0) {
-		        printk(KERN_ERR
-			"%s: failed to enable AVM-T1-PCI at i/o %#x, irq %d, mem %#x err=%d\n",
-			driver->name, param.port, param.irq, param.membase, retval);
-    			detach_capi_driver(&t1pci_driver);
-			MOD_DEC_USE_COUNT;
-			return -EIO;
-		}
 
 		printk(KERN_INFO
 			"%s: PCI BIOS reports AVM-T1-PCI at i/o %#x, irq %d, mem %#x\n",
@@ -352,9 +276,7 @@ static int __init t1pci_init(void)
 		        printk(KERN_ERR
 			"%s: no AVM-T1-PCI at i/o %#x, irq %d detected, mem %#x\n",
 			driver->name, param.port, param.irq, param.membase);
-    			detach_capi_driver(&t1pci_driver);
-			MOD_DEC_USE_COUNT;
-			return retval;
+			continue;
 		}
 		ncards++;
 	}
@@ -367,12 +289,7 @@ static int __init t1pci_init(void)
 	printk(KERN_ERR "%s: NO T1-PCI card detected\n", driver->name);
 	detach_capi_driver(&t1pci_driver);
 	MOD_DEC_USE_COUNT;
-	return -ESRCH;
-#else
-	printk(KERN_ERR "%s: kernel not compiled with PCI.\n", driver->name);
-	MOD_DEC_USE_COUNT;
-	return -EIO;
-#endif
+	return -ENODEV;
 }
 
 static void __exit t1pci_exit(void)

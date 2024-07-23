@@ -19,7 +19,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -27,7 +27,7 @@
 #include <asm/system.h>
 #include <asm/ptrace.h>
 #include <asm/pgtable.h>
-#include <asm/io.h>
+
 
 #include "scsi.h"
 #include "hosts.h"
@@ -77,7 +77,9 @@ static void dma_commit(void *opaque);
 long oktag_to_io(long *paddr, long *addr, long len);
 long oktag_from_io(long *addr, long *paddr, long len);
 
-static struct tq_struct tq_fake_dma = { NULL, 0, dma_commit, NULL };
+static struct tq_struct tq_fake_dma = {
+    routine:	dma_commit,
+};
 
 #define DMA_MAXTRANSFER 0x8000
 
@@ -106,7 +108,7 @@ static int direction;
 static struct NCR_ESP *current_esp;
 
 
-volatile unsigned char cmd_buffer[16];
+static volatile unsigned char cmd_buffer[16];
 				/* This is where all commands are put
 				 * before they are trasfered to the ESP chip
 				 * via PIO.
@@ -546,7 +548,7 @@ static void dma_invalidate(struct NCR_ESP *esp)
 
 void dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-        sp->SCp.have_data_in = (int) sp->SCp.ptr =
+        sp->SCp.ptr =
                 sp->request_buffer;
 }
 
@@ -589,3 +591,5 @@ int oktagon_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+MODULE_LICENSE("GPL");

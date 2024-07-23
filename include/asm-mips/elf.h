@@ -10,6 +10,18 @@
 #define ELF_NGREG	45
 #define ELF_NFPREG	33
 
+/* ELF header e_flags defines. MIPS architecture level. */
+#define EF_MIPS_ARCH_1      0x00000000  /* -mips1 code.  */
+#define EF_MIPS_ARCH_2      0x10000000  /* -mips2 code.  */
+#define EF_MIPS_ARCH_3      0x20000000  /* -mips3 code.  */
+#define EF_MIPS_ARCH_4      0x30000000  /* -mips4 code.  */
+#define EF_MIPS_ARCH_5      0x40000000  /* -mips5 code.  */
+#define EF_MIPS_ARCH_32     0x50000000  /* MIPS32 code.  */
+#define EF_MIPS_ARCH_64     0x60000000  /* MIPS64 code.  */
+/* The ABI of a file. */
+#define EF_MIPS_ABI_O32     0x00001000  /* O32 ABI.  */
+#define EF_MIPS_ABI_O64     0x00002000  /* O32 extended for 64 bit.  */
+
 typedef unsigned long elf_greg_t;
 typedef elf_greg_t elf_gregset_t[ELF_NGREG];
 
@@ -17,35 +29,28 @@ typedef double elf_fpreg_t;
 typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 /*
- * This is used to ensure we don't load something for the wrong architecture
- * and also rejects IRIX binaries.
+ * This is used to ensure we don't load something for the wrong architecture.
  */
 #define elf_check_arch(hdr)						\
 ({									\
 	int __res = 1;							\
 	struct elfhdr *__h = (hdr);					\
 									\
-	if ((__h->e_machine != EM_MIPS) &&				\
-	    (__h->e_machine != EM_MIPS_RS4_BE))				\
+	if (__h->e_machine != EM_MIPS)					\
 		__res = 0;						\
-	if (__h->e_flags & EF_MIPS_ARCH)				\
+	if (__h->e_ident[EI_CLASS] != ELFCLASS32)			\
+		__res = 0;						\
+	if ((__h->e_flags & EF_MIPS_ABI2) != 0)				\
+		__res = 0;						\
+	if (((__h->e_flags & EF_MIPS_ABI) != 0) &&			\
+	    ((__h->e_flags & EF_MIPS_ABI) != EF_MIPS_ABI_O32))		\
 		__res = 0;						\
 									\
 	__res;								\
 })
 
 /* This one accepts IRIX binaries.  */
-#define irix_elf_check_arch(hdr)					\
-({									\
-	int __res = 1;							\
-	struct elfhdr *__h = (hdr);					\
-									\
-	if ((__h->e_machine != EM_MIPS) &&				\
-	    (__h->e_machine != EM_MIPS_RS4_BE))				\
-		__res = 0;						\
-									\
-	__res;								\
-})
+#define irix_elf_check_arch(hdr)	((hdr)->e_machine == EM_MIPS)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -59,7 +64,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 #define ELF_ARCH	EM_MIPS
 
 #define USE_ELF_CORE_DUMP
-#define ELF_EXEC_PAGESIZE	4096
+#define ELF_EXEC_PAGESIZE	PAGE_SIZE
 
 #define ELF_CORE_COPY_REGS(_dest,_regs)				\
 	memcpy((char *) &_dest, (char *) _regs,			\
@@ -84,7 +89,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
  * See comments in asm-alpha/elf.h, this is the same thing
  * on the MIPS.
  */
-#define ELF_PLAT_INIT(_r)	do { \
+#define ELF_PLAT_INIT(_r, load_addr)	do { \
 	_r->regs[1] = _r->regs[2] = _r->regs[3] = _r->regs[4] = 0;	\
 	_r->regs[5] = _r->regs[6] = _r->regs[7] = _r->regs[8] = 0;	\
 	_r->regs[9] = _r->regs[10] = _r->regs[11] = _r->regs[12] = 0;	\
@@ -100,7 +105,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
-#define ELF_ET_DYN_BASE         (2 * TASK_SIZE / 3)
+#define ELF_ET_DYN_BASE         (TASK_SIZE / 3 * 2)
 
 #ifdef __KERNEL__
 #define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)

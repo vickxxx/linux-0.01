@@ -59,7 +59,7 @@ int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 	struct pci_dev *pdev = NULL;
 
 	if (!pci_present()) {
-		dmx3191d_printk("PCI support not enabled\n");
+		printk(KERN_WARNING "dmx3191: PCI support not enabled\n");
 		return 0;
 	}
 
@@ -68,18 +68,17 @@ int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 	while ((pdev = pci_find_device(PCI_VENDOR_ID_DOMEX,
 			PCI_DEVICE_ID_DOMEX_DMX3191D, pdev))) {
 
-		unsigned long port = pci_resource_start (pdev, 0);
-
+		unsigned long port;
 		if (pci_enable_device(pdev))
 			continue;
 
-		if (check_region(port, DMX3191D_REGION)) {
-			dmx3191d_printk("region 0x%lx-0x%lx already reserved\n",
+		port = pci_resource_start (pdev, 0);
+		
+		if (!request_region(port, DMX3191D_REGION, DMX3191D_DRIVER_NAME)) {
+			printk(KERN_ERR "dmx3191: region 0x%lx-0x%lx already reserved\n",
 				port, port + DMX3191D_REGION);
 			continue;
 		}
-
-		request_region(port, DMX3191D_REGION, DMX3191D_DRIVER_NAME);
 
 		instance = scsi_register(tmpl, sizeof(struct NCR5380_hostdata));
 		if(instance == NULL)
@@ -87,16 +86,17 @@ int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 			release_region(port, DMX3191D_REGION);
 			continue;
 		}
+		scsi_set_pci_device(instance, pdev);
 		instance->io_port = port;
 		instance->irq = pdev->irq;
 		NCR5380_init(instance, FLAG_NO_PSEUDO_DMA | FLAG_DTC3181E);
 
 		if (request_irq(pdev->irq, dmx3191d_do_intr, SA_SHIRQ,
 				DMX3191D_DRIVER_NAME, instance)) {
-			dmx3191d_printk("irq %d not available\n", pdev->irq);
+			printk(KERN_WARNING "dmx3191: IRQ %d not available - switching to polled mode.\n", pdev->irq);
 			/* Steam powered scsi controllers run without an IRQ
 			   anyway */
-			instance->irq = IRQ_NONE;
+			instance->irq = SCSI_IRQ_NONE;
 		}
 
 		boards++;
@@ -113,12 +113,13 @@ const char * dmx3191d_info(struct Scsi_Host *host) {
 int dmx3191d_release_resources(struct Scsi_Host *instance)
 {
 	release_region(instance->io_port, DMX3191D_REGION);
-	if(instance->irq!=IRQ_NONE)
+	if(instance->irq != SCSI_IRQ_NONE)
 		free_irq(instance->irq, instance);
 
 	return 0;
 }
 
+MODULE_LICENSE("GPL");
 
 static Scsi_Host_Template driver_template = DMX3191D;
 #include "scsi_module.c"

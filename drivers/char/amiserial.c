@@ -59,9 +59,6 @@
  * End of serial driver configuration section.
  */
 
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
 #include <linux/module.h>
 
 #include <linux/types.h>
@@ -85,14 +82,14 @@ static char *serial_version = "4.30";
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 
 #include <asm/setup.h>
 
 #include <asm/system.h>
-#include <asm/io.h>
+
 #include <asm/irq.h>
 #include <asm/bitops.h>
 
@@ -578,10 +575,7 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 }
 
@@ -1043,10 +1037,7 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit.head = info->xmit.tail = 0;
 	restore_flags(flags);
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 /*
@@ -1584,8 +1575,8 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	 * the line discipline to only process XON/XOFF characters.
 	 */
 	tty->closing = 1;
-	if (info->closing_wait != ASYNC_CLOSING_WAIT_NONE)
-		tty_wait_until_sent(tty, info->closing_wait);
+	if (state->closing_wait != ASYNC_CLOSING_WAIT_NONE)
+		tty_wait_until_sent(tty, state->closing_wait);
 	/*
 	 * At this point we stop accepting input.  To do this, we
 	 * disable the receive line status interrupts, and tell the
@@ -1611,15 +1602,14 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
 	if (info->blocked_open) {
-		if (info->close_delay) {
+		if (state->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(info->close_delay);
+			schedule_timeout(state->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -2057,8 +2047,8 @@ static inline int line_info(char *buf, struct serial_state *state)
 	return ret;
 }
 
-int rs_read_proc(char *page, char **start, off_t off, int count,
-		 int *eof, void *data)
+static int rs_read_proc(char *page, char **start, off_t off, int count,
+			int *eof, void *data)
 {
 	int len = 0, l;
 	off_t	begin = 0;
@@ -2291,7 +2281,7 @@ static void amiga_serial_putc(char c)
  *	Print a string to the serial port trying not to disturb
  *	any possible real use of the port...
  *
- *	The console_lock must be held when we get here.
+ *	The console must be locked when we get here.
  */
 static void serial_console_write(struct console *co, const char *s,
 				unsigned count)
@@ -2309,43 +2299,17 @@ static void serial_console_write(struct console *co, const char *s,
 	custom.intena = IF_SETCLR | (intena & IF_TBE);
 }
 
-/*
- *	Receive character from the serial port
- */
-static int serial_console_wait_key(struct console *co)
-{
-	unsigned short intena = custom.intenar;
-	int ch;
-
-	custom.intena = IF_RBF;
-
-	while (!(custom.intreqr & IF_RBF))
-		barrier();
-	ch = custom.serdatr & 0xff;
-	custom.intreq = IF_RBF;
-
-	custom.intena = IF_SETCLR | (intena & IF_RBF);
-
-	return ch;
-}
-
 static kdev_t serial_console_device(struct console *c)
 {
 	return MKDEV(TTY_MAJOR, 64);
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	NULL,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:	"ttyS",
+	write:	serial_console_write,
+	device:	serial_console_device,
+	flags:	CON_PRINTBUFFER,
+	index:	-1,
 };
 
 /*
@@ -2356,3 +2320,5 @@ void __init serial_console_init(void)
 	register_console(&sercons);
 }
 #endif
+
+MODULE_LICENSE("GPL");

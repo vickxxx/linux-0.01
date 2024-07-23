@@ -1,6 +1,6 @@
 /* 
         pf.c    (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                            Under the terms of the GNU public license.
+                            Under the terms of the GNU General Public License.
 
         This is the high-level driver for parallel port ATAPI disk
         drives based on chips supported by the paride module.
@@ -312,6 +312,7 @@ static char * pf_buf;                   /* buffer for request in progress */
 /* kernel glue structures */
 
 static struct block_device_operations pf_fops = {
+	owner:			THIS_MODULE,
 	open:			pf_open,
 	release:		pf_release,
 	ioctl:			pf_ioctl,
@@ -346,7 +347,6 @@ static inline int pf_new_segment(request_queue_t *q, struct request *req, int ma
 
 	if (req->nr_segments < max_segments) {
 		req->nr_segments++;
-		q->elevator.nr_segments++;
 		return 1;
 	}
 	return 0;
@@ -386,7 +386,6 @@ static int pf_merge_requests_fn(request_queue_t *q, struct request *req,
 	if (total_segments > max_segments)
 		return 0;
 
-	q->elevator.nr_segments -= same_segment;
 	req->nr_segments = total_segments;
 	return 1;
 }
@@ -429,19 +428,13 @@ static int pf_open (struct inode *inode, struct file *file)
 
         if ((unit >= PF_UNITS) || (!PF.present)) return -ENODEV;
 
-        MOD_INC_USE_COUNT;
-
 	pf_identify(unit);
 
-	if (PF.media_status == PF_NM) {
-		MOD_DEC_USE_COUNT;
+	if (PF.media_status == PF_NM)
 		return -ENODEV;
-		}
 
-	if ((PF.media_status == PF_RO) && (file ->f_mode & 2)) {
-		MOD_DEC_USE_COUNT;
+	if ((PF.media_status == PF_RO) && (file ->f_mode & 2))
 		return -EROFS;
-		}
 
         PF.access++;
         if (PF.removable) pf_lock(unit,1);
@@ -484,11 +477,9 @@ static int pf_ioctl(struct inode *inode,struct file *file,
                 put_user(0,(long *)&geo->start);
                 return 0;
             case BLKGETSIZE:
-                if (!arg) return -EINVAL;
-                err = verify_area(VERIFY_WRITE,(long *) arg,sizeof(long));
-                if (err) return (err);
-                put_user(PF.capacity,(long *) arg);
-                return (0);
+                return put_user(PF.capacity,(long *) arg);
+            case BLKGETSIZE64:
+                return put_user((u64)PF.capacity << 9,(u64 *)arg);
 	    case BLKROSET:
 	    case BLKROGET:
 	    case BLKRASET:
@@ -516,8 +507,6 @@ static int pf_release (struct inode *inode, struct file *file)
 
 	if (!PF.access && PF.removable)
 		pf_lock(unit,0);
-
-        MOD_DEC_USE_COUNT;
 
 	return 0;
 
@@ -744,7 +733,8 @@ static void xs( char *buf, char *targ, int offs, int len )
 	for (k=0;k<len;k++) 
 	   if((buf[k+offs]!=0x20)||(buf[k+offs]!=l))
 		l=targ[j++]=buf[k+offs];
-	if (l==0x20) j--; targ[j]=0;
+	if (l==0x20) j--;
+	targ[j]=0;
 }
 
 static int xl( char *buf, int offs )
@@ -940,7 +930,7 @@ repeat:
 
 static void pf_next_buf( int unit )
 
-{	long	saved_flags;
+{	unsigned long	saved_flags;
 
 	spin_lock_irqsave(&io_request_lock,saved_flags);
 	end_request(1);
@@ -973,7 +963,7 @@ static void do_pf_read( void )
 static void do_pf_read_start( void )
 
 {       int	unit = pf_unit;
-	long	saved_flags;
+	unsigned long	saved_flags;
 
 	pf_busy = 1;
 
@@ -998,7 +988,7 @@ static void do_pf_read_start( void )
 static void do_pf_read_drq( void )
 
 {       int	unit = pf_unit;
-	long	saved_flags;
+	unsigned long	saved_flags;
 	
 	while (1) {
             if (pf_wait(unit,STAT_BUSY,STAT_DRQ|STAT_ERR,
@@ -1040,7 +1030,7 @@ static void do_pf_write( void )
 static void do_pf_write_start( void )
 
 {       int	unit = pf_unit;
-	long	saved_flags;
+	unsigned long	saved_flags;
 
 	pf_busy = 1;
 
@@ -1089,7 +1079,7 @@ static void do_pf_write_start( void )
 static void do_pf_write_done( void )
 
 {       int	unit = pf_unit;
-	long	saved_flags;
+	unsigned long	saved_flags;
 
         if (pf_wait(unit,STAT_BUSY,0,"write block","done") & STAT_ERR) {
                 pi_disconnect(PI);
@@ -1115,3 +1105,4 @@ static void do_pf_write_done( void )
 
 /* end of pf.c */
 
+MODULE_LICENSE("GPL");

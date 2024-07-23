@@ -1,4 +1,4 @@
-/* $Id: creatorfb.c,v 1.32 2000/07/26 23:02:51 davem Exp $
+/* $Id: creatorfb.c,v 1.37 2001/10/16 05:44:44 davem Exp $
  * creatorfb.c: Creator/Creator3D frame buffer driver
  *
  * Copyright (C) 1997,1998,1999 Jakub Jelinek (jj@ultra.linux.cz)
@@ -11,7 +11,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -69,6 +69,15 @@
 #define	FFB_DAC_POFF		0x00400000UL
 #define	FFB_PROM_POFF		0x00000000UL
 #define	FFB_EXP_POFF		0x00200000UL
+#define FFB_DFB422A_POFF	0x09000000UL
+#define FFB_DFB422AD_POFF	0x09800000UL
+#define FFB_DFB24B_POFF		0x0a000000UL
+#define FFB_DFB422B_POFF	0x0b000000UL
+#define FFB_DFB422BD_POFF	0x0b800000UL
+#define FFB_SFB16Z_POFF		0x0c800000UL
+#define FFB_SFB8Z_POFF		0x0c000000UL
+#define FFB_SFB422_POFF		0x0d000000UL
+#define FFB_SFB422D_POFF	0x0d800000UL
 
 /* Draw operations */
 #define FFB_DRAWOP_DOT		0x00
@@ -330,6 +339,15 @@ static struct sbus_mmap_map ffb_mmap_map[] = {
 	{ FFB_DAC_VOFF,		FFB_DAC_POFF,		0x0002000 },
 	{ FFB_PROM_VOFF,	FFB_PROM_POFF,		0x0010000 },
 	{ FFB_EXP_VOFF,		FFB_EXP_POFF,		0x0002000 },
+	{ FFB_DFB422A_VOFF,	FFB_DFB422A_POFF,	0x0800000 },
+	{ FFB_DFB422AD_VOFF,	FFB_DFB422AD_POFF,	0x0800000 },
+	{ FFB_DFB24B_VOFF,	FFB_DFB24B_POFF,	0x1000000 },
+	{ FFB_DFB422B_VOFF,	FFB_DFB422B_POFF,	0x0800000 },
+	{ FFB_DFB422BD_VOFF,	FFB_DFB422BD_POFF,	0x0800000 },
+	{ FFB_SFB16Z_VOFF,	FFB_SFB16Z_POFF,	0x0800000 },
+	{ FFB_SFB8Z_VOFF,	FFB_SFB8Z_POFF,		0x0800000 },
+	{ FFB_SFB422_VOFF,	FFB_SFB422_POFF,	0x0800000 },
+	{ FFB_SFB422D_VOFF,	FFB_SFB422D_POFF,	0x0800000 },
 	{ 0,			0,			0	  }
 };
 
@@ -457,11 +475,13 @@ static void ffb_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 	unsigned long flags;
 	int i, xy;
 	u8 *fd1, *fd2, *fd3, *fd4;
+	u16 c;
 	u64 fgbg;
 
 	spin_lock_irqsave(&fb->lock, flags);
-	fgbg = (((u64)(((u32 *)p->dispsw_data)[attr_fgcol(p,scr_readw(s))])) << 32) |
-	       ((u32 *)p->dispsw_data)[attr_bgcol(p,scr_readw(s))];
+	c = scr_readw(s);
+	fgbg = (((u64)(((u32 *)p->dispsw_data)[attr_fgcol(p, c)])) << 32) |
+	       ((u32 *)p->dispsw_data)[attr_bgcol(p, c)];
 	if (fgbg != *(u64 *)&fb->s.ffb.fg_cache) {
 		FFBFifo(fb, 2);
 		upa_writeq(fgbg, &fbc->fg);
@@ -751,6 +771,36 @@ static int __init ffb_rasterimg (struct fb_info *info, int start)
 
 static char idstring[60] __initdata = { 0 };
 
+static int __init creator_apply_upa_parent_ranges(int parent, struct linux_prom64_registers *regs)
+{
+	struct linux_prom64_ranges ranges[PROMREG_MAX];
+	char name[128];
+	int len, i;
+
+	prom_getproperty(parent, "name", name, sizeof(name));
+	if (strcmp(name, "upa") != 0)
+		return 0;
+
+	len = prom_getproperty(parent, "ranges", (void *) ranges, sizeof(ranges));
+	if (len <= 0)
+		return 1;
+
+	len /= sizeof(struct linux_prom64_ranges);
+	for (i = 0; i < len; i++) {
+		struct linux_prom64_ranges *rng = &ranges[i];
+		u64 phys_addr = regs->phys_addr;
+
+		if (phys_addr >= rng->ot_child_base &&
+		    phys_addr < (rng->ot_child_base + rng->or_size)) {
+			regs->phys_addr -= rng->ot_child_base;
+			regs->phys_addr += rng->ot_parent_base;
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 char __init *creatorfb_init(struct fb_info_sbusfb *fb)
 {
 	struct fb_fix_screeninfo *fix = &fb->fix;
@@ -764,6 +814,9 @@ char __init *creatorfb_init(struct fb_info_sbusfb *fb)
 	struct fb_ops *fbops;
 
 	if (prom_getproperty(fb->prom_node, "reg", (void *) regs, sizeof(regs)) <= 0)
+		return NULL;
+
+	if (creator_apply_upa_parent_ranges(fb->prom_parent, &regs[0]))
 		return NULL;
 		
 	disp->dispsw_data = (void *)kmalloc(16 * sizeof(u32), GFP_KERNEL);
@@ -869,3 +922,5 @@ char __init *creatorfb_init(struct fb_info_sbusfb *fb)
 
 	return idstring;
 }
+
+MODULE_LICENSE("GPL");

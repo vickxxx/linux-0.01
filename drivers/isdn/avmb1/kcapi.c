@@ -1,117 +1,14 @@
-/*
- * $Id: kcapi.c,v 1.21.6.1 2000/12/10 23:39:19 kai Exp $
+/* $Id: kcapi.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  * 
  * Kernel CAPI 2.0 Module
  * 
- * (c) Copyright 1999 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 1999 by Carsten Paeth <calle@calle.de>
  * 
- * $Log: kcapi.c,v $
- * Revision 1.21.6.1  2000/12/10 23:39:19  kai
- * in 2.4 we don't have tq_scheduler anymore.
- * also add one supported card to hfc_pci.c
- * (from main branch)
- *
- * Revision 1.21  2000/11/23 20:45:14  kai
- * fixed module_init/exit stuff
- * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
- *
- * Revision 1.20  2000/11/19 17:01:53  kai
- * compatibility cleanup - part 2
- *
- * Revision 1.19  2000/11/01 14:05:02  calle
- * - use module_init/module_exit from linux/init.h.
- * - all static struct variables are initialized with "membername:" now.
- * - avm_cs.c, let it work with newer pcmcia-cs.
- *
- * Revision 1.18  2000/07/20 10:22:27  calle
- * - Made procfs function cleaner and removed variable "begin".
- *
- * Revision 1.17  2000/04/21 13:00:56  calle
- * Bugfix: driver_proc_info was also wrong.
- *
- * Revision 1.16  2000/04/21 12:38:42  calle
- * Bugfix: error in proc_ functions, begin-off => off-begin
- *
- * Revision 1.15  2000/04/06 15:01:25  calle
- * Bugfix: crash in capidrv.c when reseting a capi controller.
- * - changed code order on remove of controller.
- * - using tq_schedule for notifier in kcapi.c.
- * - now using spin_lock_irqsave() and spin_unlock_irqrestore().
- * strange: sometimes even MP hang on unload of isdn.o ...
- *
- * Revision 1.14  2000/04/03 13:29:25  calle
- * make Tim Waugh happy (module unload races in 2.3.99-pre3).
- * no real problem there, but now it is much cleaner ...
- *
- * Revision 1.13  2000/03/03 15:50:42  calle
- * - kernel CAPI:
- *   - Changed parameter "param" in capi_signal from __u32 to void *.
- *   - rewrote notifier handling in kcapi.c
- *   - new notifier NCCI_UP and NCCI_DOWN
- * - User CAPI:
- *   - /dev/capi20 is now a cloning device.
- *   - middleware extentions prepared.
- * - capidrv.c
- *   - locking of list operations and module count updates.
- *
- * Revision 1.12  2000/01/28 16:45:39  calle
- * new manufacturer command KCAPI_CMD_ADDCARD (generic addcard),
- * will search named driver and call the add_card function if one exist.
- *
- * Revision 1.11  1999/11/23 13:29:29  calle
- * Bugfix: incoming capi message were never traced.
- *
- * Revision 1.10  1999/10/26 15:30:32  calle
- * Generate error message if user want to add card, but driver module is
- * not loaded.
- *
- * Revision 1.9  1999/10/11 22:04:12  keil
- * COMPAT_NEED_UACCESS (no include in isdn_compat.h)
- *
- * Revision 1.8  1999/09/10 17:24:18  calle
- * Changes for proposed standard for CAPI2.0:
- * - AK148 "Linux Exention"
- *
- * Revision 1.7  1999/09/04 06:20:05  keil
- * Changes from kernel set_current_state()
- *
- * Revision 1.6  1999/07/20 06:41:49  calle
- * Bugfix: After the redesign of the AVM B1 driver, the driver didn't even
- *         compile, if not selected as modules.
- *
- * Revision 1.5  1999/07/09 15:05:48  keil
- * compat.h is now isdn_compat.h
- *
- * Revision 1.4  1999/07/08 14:15:17  calle
- * Forgot to count down ncards in drivercb_detach_ctr.
- *
- * Revision 1.3  1999/07/06 07:42:02  calle
- * - changes in /proc interface
- * - check and changed calls to [dev_]kfree_skb and [dev_]alloc_skb.
- *
- * Revision 1.2  1999/07/05 15:09:52  calle
- * - renamed "appl_release" to "appl_released".
- * - version und profile data now cleared on controller reset
- * - extended /proc interface, to allow driver and controller specific
- *   informations to include by driver hackers.
- *
- * Revision 1.1  1999/07/01 15:26:42  calle
- * complete new version (I love it):
- * + new hardware independed "capi_driver" interface that will make it easy to:
- *   - support other controllers with CAPI-2.0 (i.e. USB Controller)
- *   - write a CAPI-2.0 for the passive cards
- *   - support serial link CAPI-2.0 boxes.
- * + wrote "capi_driver" for all supported cards.
- * + "capi_driver" (supported cards) now have to be configured with
- *   make menuconfig, in the past all supported cards where included
- *   at once.
- * + new and better informations in /proc/capi/
- * + new ioctl to switch trace of capi messages per controller
- *   using "avmcapictrl trace [contr] on|off|...."
- * + complete testcircle with all supported cards and also the
- *   PCMCIA cards (now patch for pcmcia-cs-3.0.13 needed) done.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #define CONFIG_AVMB1_COMPAT
 
 #include <linux/config.h>
@@ -136,7 +33,7 @@
 #include <linux/b1lli.h>
 #endif
 
-static char *revision = "$Revision: 1.21.6.1 $";
+static char *revision = "$Revision: 1.1.4.1 $";
 
 /* ------------------------------------------------------------- */
 
@@ -147,10 +44,12 @@ static char *revision = "$Revision: 1.21.6.1 $";
 
 /* ------------------------------------------------------------- */
 
-int showcapimsgs = 0;
+static int showcapimsgs = 0;
 
-MODULE_AUTHOR("Carsten Paeth <calle@calle.in-berlin.de>");
-MODULE_PARM(showcapimsgs, "0-4i");
+MODULE_DESCRIPTION("CAPI4Linux: kernel CAPI layer");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
+MODULE_PARM(showcapimsgs, "i");
 
 /* ------------------------------------------------------------- */
 
@@ -165,6 +64,7 @@ struct capi_ncci {
 	__u32 ncci;
 	__u32 winsize;
 	int   nmsg;
+        spinlock_t lock;
 	struct msgidqueue *msgidqueue;
 	struct msgidqueue *msgidlast;
 	struct msgidqueue *msgidfree;
@@ -204,14 +104,14 @@ static char capi_manufakturer[64] = "AVM Berlin";
 #define APPL(a)		   (&applications[(a)-1])
 #define	VALID_APPLID(a)	   ((a) && (a) <= CAPI_MAXAPPL && APPL(a)->applid == a)
 #define APPL_IS_FREE(a)    (APPL(a)->applid == 0)
-#define APPL_MARK_FREE(a)  do{ APPL(a)->applid=0; MOD_DEC_USE_COUNT; }while(0);
-#define APPL_MARK_USED(a)  do{ APPL(a)->applid=(a); MOD_INC_USE_COUNT; }while(0);
+#define APPL_MARK_FREE(a)  do{ APPL(a)->applid=0; MOD_DEC_USE_COUNT; }while(0)
+#define APPL_MARK_USED(a)  do{ APPL(a)->applid=(a); MOD_INC_USE_COUNT; }while(0)
 
 #define NCCI2CTRL(ncci)    (((ncci) >> 24) & 0x7f)
 
 #define VALID_CARD(c)	   ((c) > 0 && (c) <= CAPI_MAXCONTR)
 #define CARD(c)		   (&cards[(c)-1])
-#define CARDNR(cp)	   (((cp)-cards)+1)
+#define CARDNR(cp)	   ((((cp)-cards)+1) & 0xff)
 
 static struct capi_appl applications[CAPI_MAXAPPL];
 static struct capi_ctr cards[CAPI_MAXCONTR];
@@ -646,7 +546,13 @@ static int notify_push(unsigned int cmd, __u32 controller,
 static void notify_up(__u32 contr)
 {
 	struct capi_interface_user *p;
+	__u16 appl;
 
+	for (appl = 1; appl <= CAPI_MAXAPPL; appl++) {
+		if (!VALID_APPLID(appl)) continue;
+		if (APPL(appl)->releasing) continue;
+		CARD(contr)->driver->register_appl(CARD(contr), appl, &APPL(appl)->rparam);
+	}
         printk(KERN_NOTICE "kcapi: notify up contr %d\n", contr);
 	spin_lock(&capi_users_lock);
 	for (p = capi_users; p; p = p->next) {
@@ -741,6 +647,7 @@ static void notify_handler(void *dummy)
 static inline void mq_init(struct capi_ncci * np)
 {
 	int i;
+        np->lock = SPIN_LOCK_UNLOCKED;
 	np->msgidqueue = 0;
 	np->msgidlast = 0;
 	np->nmsg = 0;
@@ -755,8 +662,11 @@ static inline void mq_init(struct capi_ncci * np)
 static inline int mq_enqueue(struct capi_ncci * np, __u16 msgid)
 {
 	struct msgidqueue *mq;
-	if ((mq = np->msgidfree) == 0)
+	spin_lock_bh(&np->lock);
+	if ((mq = np->msgidfree) == 0) {
+	        spin_unlock_bh(&np->lock);
 		return 0;
+	}
 	np->msgidfree = mq->next;
 	mq->msgid = msgid;
 	mq->next = 0;
@@ -766,12 +676,14 @@ static inline int mq_enqueue(struct capi_ncci * np, __u16 msgid)
 	if (!np->msgidqueue)
 		np->msgidqueue = mq;
 	np->nmsg++;
+	spin_unlock_bh(&np->lock);
 	return 1;
 }
 
 static inline int mq_dequeue(struct capi_ncci * np, __u16 msgid)
 {
 	struct msgidqueue **pp;
+	spin_lock_bh(&np->lock);
 	for (pp = &np->msgidqueue; *pp; pp = &(*pp)->next) {
 		if ((*pp)->msgid == msgid) {
 			struct msgidqueue *mq = *pp;
@@ -781,9 +693,11 @@ static inline int mq_dequeue(struct capi_ncci * np, __u16 msgid)
 			mq->next = np->msgidfree;
 			np->msgidfree = mq;
 			np->nmsg--;
+	                spin_unlock_bh(&np->lock);
 			return 1;
 		}
 	}
+	spin_unlock_bh(&np->lock);
 	return 0;
 }
 
@@ -806,15 +720,19 @@ static void controllercb_appl_released(struct capi_ctr * card, __u16 appl)
 			nextpp = &(*pp)->next;
 		}
 	}
-	APPL(appl)->releasing--;
-	if (APPL(appl)->releasing <= 0) {
-		APPL(appl)->signal = 0;
-		APPL_MARK_FREE(appl);
-		printk(KERN_INFO "kcapi: appl %d down\n", appl);
-	}
+	if (APPL(appl)->releasing) { /* only release if the application was marked for release */
+		printk(KERN_DEBUG "kcapi: appl %d releasing(%d)\n", appl, APPL(appl)->releasing);
+		APPL(appl)->releasing--;
+		if (APPL(appl)->releasing <= 0) {
+			APPL(appl)->signal = 0;
+			APPL_MARK_FREE(appl);
+			printk(KERN_INFO "kcapi: appl %d down\n", appl);
+		}
+	} else
+		printk(KERN_WARNING "kcapi: appl %d card%d released without request\n", appl, card->cnr);
 }
 /*
- * ncci managment
+ * ncci management
  */
 
 static void controllercb_new_ncci(struct capi_ctr * card,
@@ -964,16 +882,7 @@ error:
 
 static void controllercb_ready(struct capi_ctr * card)
 {
-	__u16 appl;
-
 	card->cardstate = CARD_RUNNING;
-
-	for (appl = 1; appl <= CAPI_MAXAPPL; appl++) {
-		if (!VALID_APPLID(appl)) continue;
-		if (APPL(appl)->releasing) continue;
-		card->driver->register_appl(card, appl, &APPL(appl)->rparam);
-	}
-
         printk(KERN_NOTICE "kcapi: card %d \"%s\" ready.\n",
 		CARDNR(card), card->name);
 
@@ -1235,14 +1144,12 @@ static __u16 capi_register(capi_register_params * rparam, __u16 * applidp)
 
 static __u16 capi_release(__u16 applid)
 {
-	struct sk_buff *skb;
 	int i;
 
 	if (!VALID_APPLID(applid) || APPL(applid)->releasing)
 		return CAPI_ILLAPPNR;
 	APPL(applid)->releasing++;
-	while ((skb = skb_dequeue(&APPL(applid)->recv_queue)) != 0)
-		kfree_skb(skb);
+	skb_queue_purge(&APPL(applid)->recv_queue);
 	for (i = 0; i < CAPI_MAXCONTR; i++) {
 		if (cards[i].cardstate != CARD_RUNNING)
 			continue;
@@ -1752,7 +1659,7 @@ EXPORT_SYMBOL(detach_capi_driver);
 static int __init kcapi_init(void)
 {
 	char *p;
-	char rev[10];
+	char rev[32];
 
 	MOD_INC_USE_COUNT;
 
@@ -1766,17 +1673,18 @@ static int __init kcapi_init(void)
 
         proc_capi_init();
 
-	if ((p = strchr(revision, ':'))) {
-		strcpy(rev, p + 1);
-		p = strchr(rev, '$');
-		*p = 0;
+	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+		strncpy(rev, p + 2, sizeof(rev));
+		rev[sizeof(rev)-1] = 0;
+		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		   *(p-1) = 0;
 	} else
 		strcpy(rev, "1.0");
 
 #ifdef MODULE
-        printk(KERN_NOTICE "CAPI-driver Rev%s: loaded\n", rev);
+        printk(KERN_NOTICE "CAPI-driver Rev %s: loaded\n", rev);
 #else
-	printk(KERN_NOTICE "CAPI-driver Rev%s: started\n", rev);
+	printk(KERN_NOTICE "CAPI-driver Rev %s: started\n", rev);
 #endif
 	MOD_DEC_USE_COUNT;
 	return 0;

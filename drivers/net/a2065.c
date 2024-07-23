@@ -6,6 +6,7 @@
  * Fixes and tips by:
  *	- Janos Farkas (CHEXUM@sparta.banki.hu)
  *	- Jes Degn Soerensen (jds@kom.auc.dk)
+ *	- Matt Domsch (Matt_Domsch@dell.com)
  *
  * ----------------------------------------------------------------------------
  *
@@ -43,13 +44,14 @@
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 
 #include <asm/bitops.h>
-#include <asm/io.h>
+
 #include <asm/irq.h>
 #include <linux/errno.h>
 
@@ -137,7 +139,7 @@ struct lance_private {
 };
 
 #ifdef MODULE
-static struct lance_private *root_a2065_dev = NULL;
+static struct lance_private *root_a2065_dev;
 #endif
 
 #define TX_BUFFS_AVAIL ((lp->tx_old<=lp->tx_new)?\
@@ -282,6 +284,7 @@ static int lance_rx (struct net_device *dev)
 	struct sk_buff *skb = 0;	/* XXX shut up gcc warnings */
 
 #ifdef TEST_HITS
+	int i;
 	printk ("[");
 	for (i = 0; i < RX_RING_SIZE; i++) {
 		if (i == lp->rx_new)
@@ -335,7 +338,9 @@ static int lance_rx (struct net_device *dev)
 					 len, 0);
 			skb->protocol = eth_type_trans (skb, dev);
 			netif_rx (skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += len;
 		}
 
 		/* Return the packet to the pool */
@@ -492,14 +497,14 @@ static int lance_open (struct net_device *dev)
 
 	last_dev = dev;
 
+	/* Stop the Lance */
+	ll->rap = LE_CSR0;
+	ll->rdp = LE_C0_STOP;
+
 	/* Install the Interrupt handler */
 	ret = request_irq(IRQ_AMIGA_PORTS, lance_interrupt, SA_SHIRQ,
 			  dev->name, dev);
 	if (ret) return ret;
-
-	/* Stop the Lance */
-	ll->rap = LE_CSR0;
-	ll->rdp = LE_C0_STOP;
 
 	load_csrs (lp);
 	lance_init_ring (dev);
@@ -570,6 +575,15 @@ static int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
 	unsigned long flags;
 
 	skblen = skb->len;
+	len = skblen;
+	
+	if(len < ETH_ZLEN)
+	{
+		len = ETH_ZLEN;
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+	}
 
 	save_flags(flags);
 	cli();
@@ -591,7 +605,6 @@ static int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 #endif
-	len = (skblen <= ETH_ZLEN) ? ETH_ZLEN : skblen;
 	entry = lp->tx_new & lp->tx_ring_mod_mask;
 	ib->btx_ring [entry].length = (-len) | 0xf000;
 	ib->btx_ring [entry].misc = 0;
@@ -636,8 +649,8 @@ static void lance_load_multicast (struct net_device *dev)
 	volatile u16 *mcast_table = (u16 *)&ib->filter;
 	struct dev_mc_list *dmi=dev->mc_list;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 crc;
 	
 	/* set all multicast bits */
 	if (dev->flags & IFF_ALLMULTI){ 
@@ -658,21 +671,7 @@ static void lance_load_multicast (struct net_device *dev)
 		if (!(*addrs & 1))
 			continue;
 		
-		crc = 0xffffffff;
-		for (byte = 0; byte < 6; byte++)
-			for (bit = *addrs++, j = 0; j < 8; j++, bit>>=1)
-			{
-				int test;
-
-				test = ((bit ^ crc) & 0x01);
-				crc >>= 1;
-
-				if (test)
-				{
-					crc = crc ^ poly;
-				}
-			}
-		
+		crc = ether_crc_le(6, addrs);
 		crc = crc >> 26;
 		mcast_table [crc >> 4] |= 1 << (crc & 0xf);
 	}
@@ -835,3 +834,4 @@ static void __exit a2065_cleanup(void)
 
 module_init(a2065_probe);
 module_exit(a2065_cleanup);
+MODULE_LICENSE("GPL");

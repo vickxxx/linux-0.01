@@ -9,6 +9,8 @@
 
 #include <linux/efs_fs.h>
 #include <linux/efs_fs_sb.h>
+#include <linux/module.h>
+
 
 extern int efs_get_block(struct inode *, long, struct buffer_head *, int);
 static int efs_readpage(struct file *file, struct page *page)
@@ -75,7 +77,7 @@ void efs_read_inode(struct inode *inode) {
 			(EFS_BLOCKSIZE / sizeof(struct efs_dinode))) *
 		sizeof(struct efs_dinode);
 
-	bh = bread(inode->i_dev, block, EFS_BLOCKSIZE);
+	bh = sb_bread(inode->i_sb, block);
 	if (!bh) {
 		printk(KERN_WARNING "EFS: bread() failed at block %d\n", block);
 		goto read_inode_error;
@@ -269,7 +271,7 @@ efs_block_t efs_map_block(struct inode *inode, efs_block_t block) {
 		if (first || lastblock != iblock) {
 			if (bh) brelse(bh);
 
-			bh = bread(inode->i_dev, iblock, EFS_BLOCKSIZE);
+			bh = sb_bread(inode->i_sb, iblock);
 			if (!bh) {
 				printk(KERN_ERR "EFS: bread() failed at block %d\n", iblock);
 				return 0;
@@ -302,3 +304,4 @@ efs_block_t efs_map_block(struct inode *inode, efs_block_t block) {
 	return 0;
 }  
 
+MODULE_LICENSE("GPL");

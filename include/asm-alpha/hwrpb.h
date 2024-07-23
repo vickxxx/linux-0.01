@@ -18,6 +18,12 @@
 #define PCA56_CPU		9	/* PCA56 (21164PC)	*/
 #define PCA57_CPU		10	/* PCA57 (notyet)	*/
 #define EV67_CPU		11	/* EV67 (21264A)	*/
+#define EV68CB_CPU		12	/* EV68CB (21264C)	*/
+#define EV68AL_CPU		13	/* EV68AL (21264B)	*/
+#define EV68CX_CPU		14	/* EV68CX (21264D)	*/
+#define EV7_CPU			15	/* EV7 (21364)		*/
+#define EV79_CPU		16	/* EV79 (21364??)	*/
+#define EV69_CPU		17	/* EV69 (21264/EV69A)	*/
 
 /*
  * DEC system types for Alpha systems.  Found in HWRPB.
@@ -58,6 +64,7 @@
 #define ST_DEC_CUSCO		 36	/* CUSCO systype	*/
 #define ST_DEC_EIGER		 37	/* Eiger systype	*/
 #define ST_DEC_TITAN		 38	/* Titan systype	*/
+#define ST_DEC_MARVEL		 39	/* Marvel systype	*/
 
 /* UNOFFICIAL!!! */
 #define ST_UNOFFICIAL_BIAS	100
@@ -103,6 +110,9 @@ struct percpu_struct {
 	unsigned long ipc_buffer[21];
 	unsigned long palcode_avail[16];
 	unsigned long compatibility;
+	unsigned long console_data_log_pa;
+	unsigned long console_data_log_length;
+	unsigned long bcache_info;
 };
 
 struct procdesc_struct {

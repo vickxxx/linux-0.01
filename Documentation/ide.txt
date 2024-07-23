@@ -306,6 +306,9 @@ Summary of ide driver parameters for kernel "command line":
  "idex=serialize"	: do not overlap operations on idex and ide(x^1)
  "idex=reset"		: reset interface after probe
  "idex=dma"		: automatically configure/use DMA if possible.
+ "idex=nohighio"	: don't use i/o to high memory addresses on this
+			 	interface. i/o to memory locations higher
+				than ~860MiB will be bounced.
 
  The following are valid ONLY on ide0,
  and the defaults for the base,ctl ports must not be altered.
@@ -314,7 +317,7 @@ Summary of ide driver parameters for kernel "command line":
  "ide0=ht6560b"		: probe/support HT6560B interface
  "ide0=cmd640_vlb"	: *REQUIRED* for VLB cards with the CMD640 chip
 			  (not for PCI -- automatically detected)
- "ide0=qd6580"		: probe/support qd6580 interface
+ "ide0=qd65xx"		: probe/support qd65xx interface
  "ide0=ali14xx"		: probe/support ali14xx chipsets (ALI M1439/M1445)
  "ide0=umc8672"		: probe/support umc8672 chipsets
 

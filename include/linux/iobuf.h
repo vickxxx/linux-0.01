@@ -24,8 +24,7 @@
  * entire iovec.
  */
 
-#define KIO_MAX_ATOMIC_IO	64 /* in kb */
-#define KIO_MAX_ATOMIC_BYTES	(64 * 1024)
+#define KIO_MAX_ATOMIC_IO	512 /* in kb */
 #define KIO_STATIC_PAGES	(KIO_MAX_ATOMIC_IO / (PAGE_SIZE >> 10) + 1)
 #define KIO_MAX_SECTORS		(KIO_MAX_ATOMIC_IO * 2)
 
@@ -38,17 +37,11 @@ struct kiobuf
 	int		offset;		/* Offset to start of valid data */
 	int		length;		/* Number of valid bytes of data */
 
-	/* Keep separate track of the physical addresses and page
-	 * structs involved.  If we do IO to a memory-mapped device
-	 * region, there won't necessarily be page structs defined for
-	 * every address. */
-
-	struct page **	maplist;
-
 	unsigned int	locked : 1;	/* If set, pages has been locked */
-	
-	/* Always embed enough struct pages for 64k of IO */
-	struct page *	map_array[KIO_STATIC_PAGES];
+
+	struct page **  maplist;
+	struct buffer_head ** bh;
+	unsigned long * blocks;
 
 	/* Dynamic state for IO completion: */
 	atomic_t	io_count;	/* IOs still in progress */
@@ -64,17 +57,18 @@ int	map_user_kiobuf(int rw, struct kiobuf *, unsigned long va, size_t len);
 void	unmap_kiobuf(struct kiobuf *iobuf);
 int	lock_kiovec(int nr, struct kiobuf *iovec[], int wait);
 int	unlock_kiovec(int nr, struct kiobuf *iovec[]);
+void	mark_dirty_kiobuf(struct kiobuf *iobuf, int bytes);
 
 /* fs/iobuf.c */
 
-void __init kiobuf_setup(void);
-void	kiobuf_init(struct kiobuf *);
 void	end_kio_request(struct kiobuf *, int);
 void	simple_wakeup_kiobuf(struct kiobuf *);
 int	alloc_kiovec(int nr, struct kiobuf **);
 void	free_kiovec(int nr, struct kiobuf **);
 int	expand_kiobuf(struct kiobuf *, int);
 void	kiobuf_wait_for_io(struct kiobuf *);
+extern int alloc_kiobuf_bhs(struct kiobuf *);
+extern void free_kiobuf_bhs(struct kiobuf *);
 
 /* fs/buffer.c */
 

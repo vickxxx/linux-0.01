@@ -260,7 +260,6 @@ static int typhoon_open(struct video_device *dev, int flags)
 	if (typhoon->users)
 		return -EBUSY;
 	typhoon->users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -268,7 +267,6 @@ static void typhoon_close(struct video_device *dev)
 {
 	struct typhoon_device *typhoon = dev->priv;
 	typhoon->users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct typhoon_device typhoon_unit =
@@ -280,6 +278,7 @@ static struct typhoon_device typhoon_unit =
 
 static struct video_device typhoon_radio =
 {
+	owner:		THIS_MODULE,
 	name:		"Typhoon Radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_TYPHOON,
@@ -318,14 +317,18 @@ static int typhoon_get_info(char *buf, char **start, off_t offset, int len)
 
 MODULE_AUTHOR("Dr. Henrik Seidel");
 MODULE_DESCRIPTION("A driver for the Typhoon radio card (a.k.a. EcoRadio).");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the Typhoon card (0x316 or 0x336)");
 MODULE_PARM(mutefreq, "i");
 MODULE_PARM_DESC(mutefreq, "Frequency used when muting the card (in kHz)");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 
 static int io = -1;
+static int radio_nr = -1;
 
 #ifdef MODULE
 static unsigned long mutefreq = 0;
@@ -357,7 +360,7 @@ static int __init typhoon_init(void)
 	}
 
 	typhoon_radio.priv = &typhoon_unit;
-	if (video_register_device(&typhoon_radio, VFL_TYPE_RADIO) == -1)
+	if (video_register_device(&typhoon_radio, VFL_TYPE_RADIO, radio_nr) == -1)
 	{
 		release_region(io, 8);
 		return -EINVAL;

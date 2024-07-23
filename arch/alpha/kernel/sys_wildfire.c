@@ -315,7 +315,7 @@ wildfire_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	};
 	const long min_idsel = 0, max_idsel = 7, irqs_per_slot = 5;
 
-	struct pci_controler *hose = dev->sysdata;
+	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
 	if (irq > 0) {
@@ -352,5 +352,10 @@ struct alpha_machine_vector wildfire_mv __initmv = {
 	kill_arch:		wildfire_kill_arch,
 	pci_map_irq:		wildfire_map_irq,
 	pci_swizzle:		common_swizzle,
+
+	pa_to_nid:		wildfire_pa_to_nid,
+	cpuid_to_nid:		wildfire_cpuid_to_nid,
+	node_mem_start:		wildfire_node_mem_start,
+	node_mem_size:		wildfire_node_mem_size,
 };
 ALIAS_MV(wildfire)

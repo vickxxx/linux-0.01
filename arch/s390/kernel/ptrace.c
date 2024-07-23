@@ -41,7 +41,7 @@
 
 void FixPerRegisters(struct task_struct *task)
 {
-	struct pt_regs *regs = task->thread.regs;
+	struct pt_regs *regs = __KSTK_PTREGS(task);
 	per_struct *per_info=
 			(per_struct *)&task->thread.per_info;
 
@@ -66,10 +66,16 @@ void FixPerRegisters(struct task_struct *task)
 		regs->psw.mask |=PSW_PER_MASK;
 	else
 		regs->psw.mask &= ~PSW_PER_MASK;
-	if(per_info->control_regs.bits.storage_alt_space_ctl)
-		task->thread.user_seg|=USER_STD_MASK;
+	if (per_info->control_regs.bits.em_storage_alteration)
+	{
+		per_info->control_regs.bits.storage_alt_space_ctl=1;
+		//((pgd_t *)__pa(task->mm->pgd))->pgd |= USER_STD_MASK;
+	}
 	else
-		task->thread.user_seg&=~USER_STD_MASK;
+	{
+		per_info->control_regs.bits.storage_alt_space_ctl=0;
+		//((pgd_t *)__pa(task->mm->pgd))->pgd &= ~USER_STD_MASK;
+	}
 }
 
 void set_single_step(struct task_struct *task)
@@ -115,10 +121,11 @@ int ptrace_usercopy(addr_t realuseraddr,addr_t copyaddr,int len,int tofromuser,i
 		else
 		{
 			if(realuseraddr==(addr_t)NULL)
-				retval=(clear_user((void *)copyaddr,len)==-EFAULT ? -EIO:0);
+				retval=clear_user((void *)copyaddr,len);
 			else
-				retval=(copy_to_user((void *)copyaddr,(void *)realuseraddr,len)==-EFAULT ? -EIO:0);
+				retval=copy_to_user((void *)copyaddr,(void *)realuseraddr,len);
 		}      
+		retval = retval ? -EFAULT : 0;
 	}
 	else
 	{
@@ -149,7 +156,7 @@ int copy_user(struct task_struct *task,saddr_t useraddr,addr_t copyaddr,int len,
 		mask=0xffffffff;
 		if(useraddr<PT_FPC)
 		{
-			realuseraddr=(addr_t)&(((u8 *)task->thread.regs)[useraddr]);
+			realuseraddr=((addr_t) __KSTK_PTREGS(task)) + useraddr;
 			if(useraddr<PT_PSWMASK)
 			{
 				copymax=PT_PSWMASK;
@@ -174,9 +181,9 @@ int copy_user(struct task_struct *task,saddr_t useraddr,addr_t copyaddr,int len,
 			copymax=(PT_FPR15_LO+4);
 			realuseraddr=(addr_t)&(((u8 *)&task->thread.fp_regs)[useraddr-PT_FPC]);
 		}
-		else if(useraddr<sizeof(user_regs_struct))
+		else if(useraddr<sizeof(struct user_regs_struct))
 		{
-			copymax=sizeof(user_regs_struct);
+			copymax=sizeof(struct user_regs_struct);
 			realuseraddr=(addr_t)&(((u8 *)&task->thread.per_info)[useraddr-PT_CR_9]);
 		}
 		else 
@@ -196,11 +203,21 @@ int copy_user(struct task_struct *task,saddr_t useraddr,addr_t copyaddr,int len,
 	return(0);
 }
 
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	/* make sure the single step bit is not set. */
+	clear_single_step(child);
+}
+
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
 	int ret = -EPERM;
-	unsigned long flags;
 	unsigned long tmp;
 	int copied;
 	ptrace_area   parea; 
@@ -209,63 +226,45 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	if (request == PTRACE_TRACEME) 
 	{
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
+		if (current->ptrace & PT_PTRACED)
 			goto out;
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		ret = 0;
 		goto out;
 	}
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
+	if (child)
+		get_task_struct(child);
 	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out;
 	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out;
+		goto out_tsk;
 	if (request == PTRACE_ATTACH) 
 	{
-		if (child == current)
-			goto out;
-		if ((!child->dumpable ||
-		     (current->uid != child->euid) ||
-		     (current->uid != child->suid) ||
-		     (current->uid != child->uid) ||
-		     (current->gid != child->egid) ||
-		     (current->gid != child->sgid)) && !capable(CAP_SYS_PTRACE))
-			goto out;
-		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
-			goto out;
-		child->flags |= PF_PTRACED;
-
-		write_lock_irqsave(&tasklist_lock, flags);
-		if (child->p_pptr != current) 
-		{
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irqrestore(&tasklist_lock, flags);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
-		goto out;
+		ret = ptrace_attach(child);
+		goto out_tsk;
 	}
 	ret = -ESRCH;
 	// printk("child=%lX child->flags=%lX",child,child->flags);
-	if (!(child->flags & PF_PTRACED))
-		goto out;
-	if (child->state != TASK_STOPPED) 
+	/* I added child!=current line so we can get the */
+	/* ieee_instruction_pointer from the user structure DJB */
+	if(child!=current)
 	{
-		if (request != PTRACE_KILL)
-			goto out;
+		if (!(child->ptrace & PT_PTRACED))
+			goto out_tsk;
+		if (child->state != TASK_STOPPED) 
+		{
+			if (request != PTRACE_KILL)
+				goto out_tsk;
+		}
+		if (child->p_pptr != current)
+			goto out_tsk;
 	}
-	if (child->p_pptr != current)
-		goto out;
-
 	switch (request) 
 	{
 		/* If I and D space are separate, these will need to be fixed. */
@@ -274,9 +273,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		copied = access_process_vm(child,ADDR_BITS_REMOVE(addr), &tmp, sizeof(tmp), 0);
 		ret = -EIO;
 		if (copied != sizeof(tmp))
-			goto out;
+			break;
 		ret = put_user(tmp,(unsigned long *) data);
-		goto out;
+		break;
 
 		/* read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR:
@@ -288,9 +287,8 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_POKEDATA:
 		ret = 0;
 		if (access_process_vm(child,ADDR_BITS_REMOVE(addr), &data, sizeof(data), 1) == sizeof(data))
-			goto out;
+			break;
 		ret = -EIO;
-		goto out;
 		break;
 
 	case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
@@ -303,9 +301,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		if ((unsigned long) data >= _NSIG)
 			break;
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 		/* make sure the single step bit is not set. */
 		clear_single_step(child);
@@ -332,7 +330,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data >= _NSIG)
 			break;
-		child->flags &= ~PF_TRACESYS;
+		child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 		set_single_step(child);
 		/* give it a chance to run. */
@@ -341,31 +339,21 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 
 	case PTRACE_DETACH:  /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data >= _NSIG)
-			break;
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
-		child->exit_code = data;
-		write_lock_irqsave(&tasklist_lock, flags);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irqrestore(&tasklist_lock, flags);
-		/* make sure the single step bit is not set. */
-		clear_single_step(child);
-		wake_up_process(child);
-		ret = 0;
+		ret = ptrace_detach(child, data);
 		break;
 	case PTRACE_PEEKUSR_AREA:
 	case PTRACE_POKEUSR_AREA:
-		if((ret=copy_from_user(&parea,(void *)addr,sizeof(parea)))==0)  
-		   ret=copy_user(child,parea.kernel_addr,parea.process_addr,
-				 parea.len,1,(request==PTRACE_POKEUSR_AREA));
+		if(copy_from_user(&parea,(void *)addr,sizeof(parea))==0)  
+			ret=copy_user(child,parea.kernel_addr,parea.process_addr,
+				      parea.len,1,(request==PTRACE_POKEUSR_AREA));
+		else ret = -EFAULT;
 		break;
 	default:
 		ret = -EIO;
 		break;
 	}
+ out_tsk:
+	free_task_struct(child);
  out:
 	unlock_kernel();
 	return ret;
@@ -374,11 +362,11 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 asmlinkage void syscall_trace(void)
 {
 	lock_kernel();
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-	    != (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+	    != (PT_PTRACED|PT_TRACESYS))
 		goto out;
 	current->exit_code = SIGTRAP;
-	current->state = TASK_STOPPED;
+	set_current_state(TASK_STOPPED);
 	notify_parent(current, SIGCHLD);
 	schedule();
 	/*

@@ -45,15 +45,12 @@ extern void autoirq_setup(int waittime);
 extern unsigned long autoirq_report(int waittime);
 #endif
 
-/* Currently unused - delete in v2.5.x after purging from drivers */
-#define load_8390_module(driver)	0
-#define unload_8390_module()		do { } while (0)
-
 extern int ethdev_init(struct net_device *dev);
 extern void NS8390_init(struct net_device *dev, int startp);
 extern int ei_open(struct net_device *dev);
 extern int ei_close(struct net_device *dev);
 extern void ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+extern struct net_device *alloc_ei_netdev(void);
 
 /* Most of these entries should be in 'struct net_device' (or most of the
    things in there should be here!) */
@@ -67,7 +64,8 @@ struct ei_device {
 	unsigned char mcfilter[8];
 	unsigned open:1;
 	unsigned word16:1;  		/* We have the 16-bit (vs 8-bit) version of the card. */
-	unsigned bigendian:1;		/* 16-bit big endian mode */
+	unsigned bigendian:1;		/* 16-bit big endian mode. Do NOT */
+					/* set this on random 8390 clones! */
 	unsigned txing:1;		/* Transmit Active */
 	unsigned irqlock:1;		/* 8390's intrs disabled when '1'. */
 	unsigned dmaing:1;		/* Remote DMA Active */
@@ -115,12 +113,25 @@ struct ei_device {
 
 /*
  *	Only generate indirect loads given a machine that needs them.
+ *      - removed AMIGA_PCMCIA from this list, handled as ISA io now
  */
  
-#if defined(CONFIG_MAC) || defined(CONFIG_AMIGA_PCMCIA) || \
-    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE) || \
+#if defined(CONFIG_MAC) ||  \
+    defined(CONFIG_ZORRO8390) || defined(CONFIG_ZORRO8390_MODULE) || \
     defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE)
 #define EI_SHIFT(x)	(ei_local->reg_offset[x])
+#undef inb
+#undef inb_p
+#undef outb
+#undef outb_p
+
+#define inb(port)   in_8(port)
+#define outb(val,port)  out_8(port,val)
+#define inb_p(port)   in_8(port)
+#define outb_p(val,port)  out_8(port,val)
+
+#elif defined(CONFIG_ARM_ETHERH) || defined(CONFIG_ARM_ETHERH_MODULE)
+#define EI_SHIFT(x)    (ei_local->reg_offset[x])
 #else
 #define EI_SHIFT(x)	(x)
 #endif

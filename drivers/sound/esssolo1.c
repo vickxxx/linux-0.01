@@ -1,9 +1,9 @@
-/*****************************************************************************/
+/****************************************************************************/
 
 /*
  *      esssolo1.c  --  ESS Technology Solo1 (ES1946) audio driver.
  *
- *      Copyright (C) 1998-2000  Thomas Sailer (sailer@ife.ee.ethz.ch)
+ *      Copyright (C) 1998-2001, 2003  Thomas Sailer (t.sailer@alumni.ethz.ch)
  *
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
@@ -70,6 +70,19 @@
  *    19.02.2000   0.14  Use pci_dma_supported to determine if recording should be disabled
  *    13.03.2000   0.15  Reintroduce initialization of a couple of PCI config space registers
  *    21.11.2000   0.16  Initialize dma buffers in poll, otherwise poll may return a bogus mask
+ *    12.12.2000   0.17  More dma buffer initializations, patch from
+ *                       Tjeerd Mulder <tjeerd.mulder@fujitsu-siemens.com>
+ *    31.01.2001   0.18  Register/Unregister gameport, original patch from
+ *                       Nathaniel Daw <daw@cs.cmu.edu>
+ *                       Fix SETTRIGGER non OSS API conformity
+ *    10.03.2001         provide abs function, prevent picking up a bogus kernel macro
+ *                       for abs. Bug report by Andrew Morton <andrewm@uow.edu.au>
+ *    15.05.2001         pci_enable_device moved, return values in probe cleaned
+ *                       up. Marcus Meissner <mm@caldera.de>
+ *    22.05.2001   0.19  more cleanups, changed PM to PCI 2.4 style, got rid
+ *                       of global list of devices, using pci device data.
+ *                       Marcus Meissner <mm@caldera.de>
+ *    03.01.2003   0.20  open_mode fixes from Georg Acher <acher@in.tum.de>
  */
 
 /*****************************************************************************/
@@ -81,11 +94,10 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/sound.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/soundcard.h>
 #include <linux/pci.h>
 #include <linux/bitops.h>
-#include <linux/pm.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/init.h>
@@ -95,6 +107,7 @@
 #include <linux/wrapper.h>
 #include <asm/uaccess.h>
 #include <asm/hardirq.h>
+#include <linux/gameport.h>
 
 #include "dm.h"
 
@@ -121,6 +134,7 @@
 #define VCBASE_EXTENT             (DDMABASE_EXTENT+DDMABASE_OFFSET)
 #define MPUBASE_EXTENT            4
 #define GPBASE_EXTENT             4
+#define GAMEPORT_EXTENT		  4
 
 #define FMSYNTH_EXTENT            4
 
@@ -135,15 +149,14 @@
 
 #define FMODE_DMFM 0x10
 
+static struct pci_driver solo1_driver;
+
 /* --------------------------------------------------------------------- */
 
 struct solo1_state {
 	/* magic */
 	unsigned int magic;
 
-	/* list of esssolo1 devices */
-	struct list_head devs;
-	
 	/* the corresponding pci_dev structure */
 	struct pci_dev *dev;
 
@@ -154,7 +167,7 @@ struct solo1_state {
 	int dev_dmfm;
 
 	/* hardware resources */
-	unsigned long iobase, sbbase, vcbase, ddmabase, mpubase, gpbase; /* long for SPARC */
+	unsigned long iobase, sbbase, vcbase, ddmabase, mpubase; /* long for SPARC */
 	unsigned int irq;
 
 	/* mixer registers */
@@ -196,6 +209,7 @@ struct solo1_state {
 		unsigned mapped:1;
 		unsigned ready:1;
 		unsigned endcleared:1;
+		unsigned enabled:1;
 		unsigned ossfragshift;
 		int ossmaxfrags;
 		unsigned subdivision;
@@ -211,15 +225,13 @@ struct solo1_state {
 		unsigned char ibuf[MIDIINBUF];
 		unsigned char obuf[MIDIOUTBUF];
 	} midi;
+
+	struct gameport gameport;
 };
 
 /* --------------------------------------------------------------------- */
 
-static LIST_HEAD(devs);
-
-/* --------------------------------------------------------------------- */
-
-extern inline void write_seq(struct solo1_state *s, unsigned char data)
+static inline void write_seq(struct solo1_state *s, unsigned char data)
 {
         int i;
 	unsigned long flags;
@@ -239,7 +251,7 @@ extern inline void write_seq(struct solo1_state *s, unsigned char data)
 	outb(data, s->sbbase+0xc);
 }
 
-extern inline int read_seq(struct solo1_state *s, unsigned char *data)
+static inline int read_seq(struct solo1_state *s, unsigned char *data)
 {
         int i;
 
@@ -302,7 +314,7 @@ static unsigned char read_mixer(struct solo1_state *s, unsigned char reg)
 
 /* --------------------------------------------------------------------- */
 
-extern inline unsigned ld2(unsigned int x)
+static inline unsigned ld2(unsigned int x)
 {
 	unsigned r = 0;
 	
@@ -329,7 +341,7 @@ extern inline unsigned ld2(unsigned int x)
 
 /* --------------------------------------------------------------------- */
 
-extern inline void stop_dac(struct solo1_state *s)
+static inline void stop_dac(struct solo1_state *s)
 {
 	unsigned long flags;
 
@@ -353,7 +365,7 @@ static void start_dac(struct solo1_state *s)
 	spin_unlock_irqrestore(&s->lock, flags);
 }	
 
-extern inline void stop_adc(struct solo1_state *s)
+static inline void stop_adc(struct solo1_state *s)
 {
 	unsigned long flags;
 
@@ -403,7 +415,7 @@ static void start_adc(struct solo1_state *s)
 #define DMABUF_DEFAULTORDER (15-PAGE_SHIFT)
 #define DMABUF_MINORDER 1
 
-extern inline void dealloc_dmabuf(struct solo1_state *s, struct dmabuf *db)
+static inline void dealloc_dmabuf(struct solo1_state *s, struct dmabuf *db)
 {
 	struct page *page, *pend;
 
@@ -465,10 +477,11 @@ static int prog_dmabuf(struct solo1_state *s, struct dmabuf *db)
 		db->numfrag = db->ossmaxfrags;
 	db->fragsamples = db->fragsize >> sample_shift;
 	db->dmasize = db->numfrag << db->fragshift;
+	db->enabled = 1;
 	return 0;
 }
 
-extern inline int prog_dmabuf_adc(struct solo1_state *s)
+static inline int prog_dmabuf_adc(struct solo1_state *s)
 {
 	unsigned long va;
 	int c;
@@ -496,7 +509,7 @@ extern inline int prog_dmabuf_adc(struct solo1_state *s)
 	return 0;
 }
 
-extern inline int prog_dmabuf_dac(struct solo1_state *s)
+static inline int prog_dmabuf_dac(struct solo1_state *s)
 {
 	unsigned long va;
 	int c;
@@ -519,7 +532,7 @@ extern inline int prog_dmabuf_dac(struct solo1_state *s)
 	return 0;
 }
 
-extern inline void clear_advance(void *buf, unsigned bsize, unsigned bptr, unsigned len, unsigned char c)
+static inline void clear_advance(void *buf, unsigned bsize, unsigned bptr, unsigned len, unsigned char c)
 {
 	if (bptr + len > bsize) {
 		unsigned x = bsize - bptr;
@@ -899,26 +912,25 @@ static int mixer_ioctl(struct solo1_state *s, unsigned int cmd, unsigned long ar
 
 /* --------------------------------------------------------------------- */
 
-static loff_t solo1_llseek(struct file *file, loff_t offset, int origin)
-{
-        return -ESPIPE;
-}
-
-/* --------------------------------------------------------------------- */
-
 static int solo1_open_mixdev(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct list_head *list;
-	struct solo1_state *s;
+	struct solo1_state *s = NULL;
+	struct pci_dev *pci_dev;
 
-	for (list = devs.next; ; list = list->next) {
-		if (list == &devs)
-			return -ENODEV;
-		s = list_entry(list, struct solo1_state, devs);
+	pci_for_each_dev(pci_dev) {
+		struct pci_driver *drvr;
+		drvr = pci_dev_driver (pci_dev);
+		if (drvr != &solo1_driver)
+			continue;
+		s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+		if (!s)
+			continue;
 		if (s->dev_mixer == minor)
 			break;
 	}
+	if (!s)
+		return -ENODEV;
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	return 0;
@@ -939,7 +951,7 @@ static int solo1_ioctl_mixdev(struct inode *inode, struct file *file, unsigned i
 
 static /*const*/ struct file_operations solo1_mixer_fops = {
 	owner:		THIS_MODULE,
-	llseek:		solo1_llseek,
+	llseek:		no_llseek,
 	ioctl:		solo1_ioctl_mixdev,
 	open:		solo1_open_mixdev,
 	release:	solo1_release_mixdev,
@@ -1024,7 +1036,8 @@ static ssize_t solo1_read(struct file *file, char *buffer, size_t count, loff_t 
 		       read_ctrl(s, 0xb8), inb(s->ddmabase+8), inw(s->ddmabase+4), inb(s->sbbase+0xc), cnt);
 #endif
 		if (cnt <= 0) {
-			start_adc(s);
+			if (s->dma_adc.enabled)
+				start_adc(s);
 #ifdef DEBUGREC
 			printk(KERN_DEBUG "solo1_read: regs: A1: 0x%02x  A2: 0x%02x  A4: 0x%02x  A5: 0x%02x  A8: 0x%02x\n"
 			       KERN_DEBUG "solo1_read: regs: B1: 0x%02x  B2: 0x%02x  B7: 0x%02x  B8: 0x%02x  B9: 0x%02x\n"
@@ -1071,7 +1084,8 @@ static ssize_t solo1_read(struct file *file, char *buffer, size_t count, loff_t 
 		count -= cnt;
 		buffer += cnt;
 		ret += cnt;
-		start_adc(s);
+		if (s->dma_adc.enabled)
+			start_adc(s);
 #ifdef DEBUGREC
 		printk(KERN_DEBUG "solo1_read: reg B8: 0x%02x  DMAstat: 0x%02x  DMAcnt: 0x%04x  SBstat: 0x%02x\n", 
 		       read_ctrl(s, 0xb8), inb(s->ddmabase+8), inw(s->ddmabase+4), inb(s->sbbase+0xc));
@@ -1126,7 +1140,8 @@ static ssize_t solo1_write(struct file *file, const char *buffer, size_t count, 
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
-			start_dac(s);
+			if (s->dma_dac.enabled)
+				start_dac(s);
 			if (file->f_flags & O_NONBLOCK) {
 				if (!ret)
 					ret = -EAGAIN;
@@ -1154,7 +1169,8 @@ static ssize_t solo1_write(struct file *file, const char *buffer, size_t count, 
 		count -= cnt;
 		buffer += cnt;
 		ret += cnt;
-		start_dac(s);
+		if (s->dma_dac.enabled)
+			start_dac(s);
 	}
 	remove_wait_queue(&s->dma_dac.wait, &wait);
 	set_current_state(TASK_RUNNING);
@@ -1370,27 +1386,33 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			if (val & PCM_ENABLE_INPUT) {
 				if (!s->dma_adc.ready && (ret = prog_dmabuf_adc(s)))
 					return ret;
+				s->dma_dac.enabled = 1;
 				start_adc(s);
 				if (inb(s->ddmabase+15) & 1)
 					printk(KERN_ERR "solo1: cannot start recording, DDMA mask bit stuck at 1\n");
-			} else
+			} else {
+				s->dma_dac.enabled = 0;
 				stop_adc(s);
+			}
 		}
 		if (file->f_mode & FMODE_WRITE) {
 			if (val & PCM_ENABLE_OUTPUT) {
 				if (!s->dma_dac.ready && (ret = prog_dmabuf_dac(s)))
 					return ret;
+				s->dma_dac.enabled = 1;
 				start_dac(s);
-			} else
+			} else {
+				s->dma_dac.enabled = 0;
 				stop_dac(s);
+			}
 		}
 		return 0;
 
 	case SNDCTL_DSP_GETOSPACE:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf_dac(s)))
-			return ret;
+		if (!s->dma_dac.ready && (val = prog_dmabuf_dac(s)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		solo1_update_ptr(s);
 		abinfo.fragsize = s->dma_dac.fragsize;
@@ -1406,8 +1428,8 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	case SNDCTL_DSP_GETISPACE:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
-		if (!s->dma_adc.ready && (ret = prog_dmabuf_adc(s)))
-			return ret;
+		if (!s->dma_adc.ready && (val = prog_dmabuf_adc(s)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		solo1_update_ptr(s);
 		abinfo.fragsize = s->dma_adc.fragsize;
@@ -1424,8 +1446,8 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
         case SNDCTL_DSP_GETODELAY:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf_dac(s)))
-			return ret;
+		if (!s->dma_dac.ready && (val = prog_dmabuf_dac(s)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		solo1_update_ptr(s);
                 count = s->dma_dac.count;
@@ -1437,8 +1459,8 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
         case SNDCTL_DSP_GETIPTR:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
-		if (!s->dma_adc.ready && (ret = prog_dmabuf_adc(s)))
-			return ret;
+		if (!s->dma_adc.ready && (val = prog_dmabuf_adc(s)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		solo1_update_ptr(s);
                 cinfo.bytes = s->dma_adc.total_bytes;
@@ -1447,13 +1469,13 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf_dac(s)))
-			return ret;
+		if (!s->dma_dac.ready && (val = prog_dmabuf_dac(s)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		solo1_update_ptr(s);
                 cinfo.bytes = s->dma_dac.total_bytes;
@@ -1471,7 +1493,7 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		       cinfo.bytes, cinfo.blocks, cinfo.ptr, s->dma_dac.buforder, s->dma_dac.numfrag, s->dma_dac.fragshift,
 		       s->dma_dac.swptr, s->dma_dac.count, s->dma_dac.fragsize, s->dma_dac.dmasize, s->dma_dac.fragsamples);
 #endif
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
@@ -1571,16 +1593,23 @@ static int solo1_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
 	DECLARE_WAITQUEUE(wait, current);
-	struct list_head *list;
-	struct solo1_state *s;
+	struct solo1_state *s = NULL;
+	struct pci_dev *pci_dev;
 	
-	for (list = devs.next; ; list = list->next) {
-		if (list == &devs)
-			return -ENODEV;
-		s = list_entry(list, struct solo1_state, devs);
+	pci_for_each_dev(pci_dev) {
+		struct pci_driver *drvr;
+
+		drvr = pci_dev_driver(pci_dev);
+		if (drvr != &solo1_driver)
+			continue;
+		s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+		if (!s)
+			continue;
 		if (!((s->dev_audio ^ minor) & ~0xf))
 			break;
 	}
+	if (!s)
+		return -ENODEV;
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -1606,7 +1635,9 @@ static int solo1_open(struct inode *inode, struct file *file)
 	s->clkdiv = 96 | 0x80;
 	s->ena = 0;
 	s->dma_adc.ossfragshift = s->dma_adc.ossmaxfrags = s->dma_adc.subdivision = 0;
+	s->dma_adc.enabled = 1;
 	s->dma_dac.ossfragshift = s->dma_dac.ossmaxfrags = s->dma_dac.subdivision = 0;
+	s->dma_dac.enabled = 1;
 	s->open_mode |= file->f_mode & (FMODE_READ | FMODE_WRITE);
 	up(&s->open_sem);
 	prog_codec(s);
@@ -1615,7 +1646,7 @@ static int solo1_open(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations solo1_audio_fops = {
 	owner:		THIS_MODULE,
-	llseek:		solo1_llseek,
+	llseek:		no_llseek,
 	read:		solo1_read,
 	write:		solo1_write,
 	poll:		solo1_poll,
@@ -1852,16 +1883,23 @@ static int solo1_midi_open(struct inode *inode, struct file *file)
 	int minor = MINOR(inode->i_rdev);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
-	struct list_head *list;
-	struct solo1_state *s;
+	struct solo1_state *s = NULL;
+	struct pci_dev *pci_dev;
 
-	for (list = devs.next; ; list = list->next) {
-		if (list == &devs)
-			return -ENODEV;
-		s = list_entry(list, struct solo1_state, devs);
+	pci_for_each_dev(pci_dev) {
+		struct pci_driver *drvr;
+
+		drvr = pci_dev_driver(pci_dev);
+		if (drvr != &solo1_driver)
+			continue;
+		s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+		if (!s)
+			continue;
 		if (s->dev_midi == minor)
 			break;
 	}
+	if (!s)
+		return -ENODEV;
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -1930,11 +1968,8 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK) {
-				remove_wait_queue(&s->midi.owait, &wait);
-				set_current_state(TASK_RUNNING);
-				return -EBUSY;
-			}
+			if (file->f_flags & O_NONBLOCK)
+				break;
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				printk(KERN_DEBUG "solo1: midi timed out??\n");
@@ -1943,7 +1978,7 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
-	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
+	s->open_mode &= ~((file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE));
 	spin_lock_irqsave(&s->lock, flags);
 	if (!(s->open_mode & (FMODE_MIDI_READ | FMODE_MIDI_WRITE))) {
 		outb(0x30, s->iobase + 7); /* enable A1, A2 irq's */
@@ -1958,7 +1993,7 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations solo1_midi_fops = {
 	owner:		THIS_MODULE,
-	llseek:		solo1_llseek,
+	llseek:		no_llseek,
 	read:		solo1_midi_read,
 	write:		solo1_midi_write,
 	poll:		solo1_midi_poll,
@@ -2069,16 +2104,23 @@ static int solo1_dmfm_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
 	DECLARE_WAITQUEUE(wait, current);
-	struct list_head *list;
-	struct solo1_state *s;
+	struct solo1_state *s = NULL;
+	struct pci_dev *pci_dev;
 
-	for (list = devs.next; ; list = list->next) {
-		if (list == &devs)
-			return -ENODEV;
-		s = list_entry(list, struct solo1_state, devs);
+	pci_for_each_dev(pci_dev) {
+		struct pci_driver *drvr;
+
+		drvr = pci_dev_driver(pci_dev);
+		if (drvr != &solo1_driver)
+			continue;
+		s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+		if (!s)
+			continue;
 		if (s->dev_dmfm == minor)
 			break;
 	}
+	if (!s)
+		return -ENODEV;
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -2139,7 +2181,7 @@ static int solo1_dmfm_release(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations solo1_dmfm_fops = {
 	owner:		THIS_MODULE,
-	llseek:		solo1_llseek,
+	llseek:		no_llseek,
 	ioctl:		solo1_dmfm_ioctl,
 	open:		solo1_dmfm_open,
 	release:	solo1_dmfm_release,
@@ -2213,57 +2255,57 @@ static int setup_solo1(struct solo1_state *s)
 	return 0;
 }
 
-static int solo1_pm_callback(struct pm_dev *dev, pm_request_t rqst, void *data)
-{
-	struct solo1_state *s = (struct solo1_state*) dev->data;
-	if (s) {
-		switch(rqst) {
-		case PM_RESUME:
-			setup_solo1(s);
-			break;
-
-		case PM_SUSPEND:
-			outb(0, s->iobase+6);
-			/* DMA master clear */
-			outb(0, s->ddmabase+0xd); 
-			/* reset sequencer and FIFO */
-			outb(3, s->sbbase+6); 
-			/* turn off DDMA controller address space */
-			pci_write_config_word(s->dev, 0x60, 0); 
-			break;
-		}
-	}
+static int
+solo1_suspend(struct pci_dev *pci_dev, u32 state) {
+	struct solo1_state *s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+	if (!s)
+		return 1;
+	outb(0, s->iobase+6);
+	/* DMA master clear */
+	outb(0, s->ddmabase+0xd); 
+	/* reset sequencer and FIFO */
+	outb(3, s->sbbase+6); 
+	/* turn off DDMA controller address space */
+	pci_write_config_word(s->dev, 0x60, 0); 
 	return 0;
 }
 
-
-#define RSRCISIOREGION(dev,num) (pci_resource_start((dev), (num)) != 0 && \
-				 (pci_resource_flags((dev), (num)) & IORESOURCE_IO))
+static int
+solo1_resume(struct pci_dev *pci_dev) {
+	struct solo1_state *s = (struct solo1_state*)pci_get_drvdata(pci_dev);
+	if (!s)
+		return 1;
+	setup_solo1(s);
+	return 0;
+}
 
 static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device_id *pciid)
 {
 	struct solo1_state *s;
-	struct pm_dev *pmdev;
-	dma_addr_t dma_mask;
+	int ret;
 
-	if (!RSRCISIOREGION(pcidev, 0) ||
-	    !RSRCISIOREGION(pcidev, 1) ||
-	    !RSRCISIOREGION(pcidev, 2) ||
-	    !RSRCISIOREGION(pcidev, 3))
-		return -1;
+ 	if ((ret=pci_enable_device(pcidev)))
+		return ret;
+	if (!(pci_resource_flags(pcidev, 0) & IORESOURCE_IO) ||
+	    !(pci_resource_flags(pcidev, 1) & IORESOURCE_IO) ||
+	    !(pci_resource_flags(pcidev, 2) & IORESOURCE_IO) ||
+	    !(pci_resource_flags(pcidev, 3) & IORESOURCE_IO))
+		return -ENODEV;
 	if (pcidev->irq == 0)
-		return -1;
-	if (pci_dma_supported(pcidev, 0x00ffffff)) {
-		dma_mask = 0x00ffffff; /* this enables playback and recording */
-	} else if (pci_dma_supported(pcidev, 0xffffffff)) {
-		dma_mask = 0xffffffff; /* this enables only playback, as the recording BMDMA can handle only 24bits  */
-	} else {
+		return -ENODEV;
+
+	/* Recording requires 24-bit DMA, so attempt to set dma mask
+	 * to 24 bits first, then 32 bits (playback only) if that fails.
+	 */
+	if (pci_set_dma_mask(pcidev, 0x00ffffff) &&
+	    pci_set_dma_mask(pcidev, 0xffffffff)) {
 		printk(KERN_WARNING "solo1: architecture does not support 24bit or 32bit PCI busmaster DMA\n");
-		return -1;
+		return -ENODEV;
 	}
+
 	if (!(s = kmalloc(sizeof(struct solo1_state), GFP_KERNEL))) {
 		printk(KERN_WARNING "solo1: out of memory\n");
-		return -1;
+		return -ENOMEM;
 	}
 	memset(s, 0, sizeof(struct solo1_state));
 	init_waitqueue_head(&s->dma_adc.wait);
@@ -2280,8 +2322,9 @@ static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device
 	s->vcbase = pci_resource_start(pcidev, 2);
 	s->ddmabase = s->vcbase + DDMABASE_OFFSET;
 	s->mpubase = pci_resource_start(pcidev, 3);
-	s->gpbase = pci_resource_start(pcidev, 4);
+	s->gameport.io = pci_resource_start(pcidev, 4);
 	s->irq = pcidev->irq;
+	ret = -EBUSY;
 	if (!request_region(s->iobase, IOBASE_EXTENT, "ESS Solo1")) {
 		printk(KERN_ERR "solo1: io ports in use\n");
 		goto err_region1;
@@ -2298,40 +2341,46 @@ static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device
 		printk(KERN_ERR "solo1: io ports in use\n");
 		goto err_region4;
 	}
-	if (request_irq(s->irq, solo1_interrupt, SA_SHIRQ, "ESS Solo1", s)) {
+	if (s->gameport.io && !request_region(s->gameport.io, GAMEPORT_EXTENT, "ESS Solo1")) {
+		printk(KERN_ERR "solo1: gameport io ports in use\n");
+		s->gameport.io = 0;
+	}
+	if ((ret=request_irq(s->irq,solo1_interrupt,SA_SHIRQ,"ESS Solo1",s))) {
 		printk(KERN_ERR "solo1: irq %u in use\n", s->irq);
 		goto err_irq;
 	}
- 	if (pci_enable_device(pcidev))
-		goto err_irq;
-	printk(KERN_INFO "solo1: joystick port at %#lx\n", s->gpbase+1);
+	printk(KERN_INFO "solo1: joystick port at %#x\n", s->gameport.io+1);
 	/* register devices */
-	if ((s->dev_audio = register_sound_dsp(&solo1_audio_fops, -1)) < 0)
+	if ((s->dev_audio = register_sound_dsp(&solo1_audio_fops, -1)) < 0) {
+		ret = s->dev_audio;
 		goto err_dev1;
-	if ((s->dev_mixer = register_sound_mixer(&solo1_mixer_fops, -1)) < 0)
+	}
+	if ((s->dev_mixer = register_sound_mixer(&solo1_mixer_fops, -1)) < 0) {
+		ret = s->dev_mixer;
 		goto err_dev2;
-	if ((s->dev_midi = register_sound_midi(&solo1_midi_fops, -1)) < 0)
+	}
+	if ((s->dev_midi = register_sound_midi(&solo1_midi_fops, -1)) < 0) {
+		ret = s->dev_midi;
 		goto err_dev3;
-	if ((s->dev_dmfm = register_sound_special(&solo1_dmfm_fops, 15 /* ?? */)) < 0)
+	}
+	if ((s->dev_dmfm = register_sound_special(&solo1_dmfm_fops, 15 /* ?? */)) < 0) {
+		ret = s->dev_dmfm;
 		goto err_dev4;
-	if (setup_solo1(s))
+	}
+	if (setup_solo1(s)) {
+		ret = -EIO;
 		goto err;
+	}
+	/* register gameport */
+	gameport_register_port(&s->gameport);
 	/* store it in the driver field */
 	pci_set_drvdata(pcidev, s);
-	pcidev->dma_mask = dma_mask;
-	/* put it into driver list */
-	list_add_tail(&s->devs, &devs);
-
-	pmdev = pm_register(PM_PCI_DEV, PM_PCI_ID(pcidev), solo1_pm_callback);
-	if (pmdev)
-		pmdev->data = s;
-
 	return 0;
 
  err:
-	unregister_sound_dsp(s->dev_dmfm);
+	unregister_sound_special(s->dev_dmfm);
  err_dev4:
-	unregister_sound_dsp(s->dev_midi);
+	unregister_sound_midi(s->dev_midi);
  err_dev3:
 	unregister_sound_mixer(s->dev_mixer);
  err_dev2:
@@ -2340,16 +2389,18 @@ static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device
 	printk(KERN_ERR "solo1: initialisation error\n");
 	free_irq(s->irq, s);
  err_irq:
-	release_region(s->iobase, IOBASE_EXTENT);
- err_region4:
-	release_region(s->sbbase+FMSYNTH_EXTENT, SBBASE_EXTENT-FMSYNTH_EXTENT);
- err_region3:
-	release_region(s->ddmabase, DDMABASE_EXTENT);
- err_region2:
+	if (s->gameport.io)
+		release_region(s->gameport.io, GAMEPORT_EXTENT);
 	release_region(s->mpubase, MPUBASE_EXTENT);
+ err_region4:
+	release_region(s->ddmabase, DDMABASE_EXTENT);
+ err_region3:
+	release_region(s->sbbase+FMSYNTH_EXTENT, SBBASE_EXTENT-FMSYNTH_EXTENT);
+ err_region2:
+	release_region(s->iobase, IOBASE_EXTENT);
  err_region1:
 	kfree(s);
-	return -1;
+	return ret;
 }
 
 static void __devinit solo1_remove(struct pci_dev *dev)
@@ -2358,7 +2409,6 @@ static void __devinit solo1_remove(struct pci_dev *dev)
 	
 	if (!s)
 		return;
-	list_del(&s->devs);
 	/* stop DMA controller */
 	outb(0, s->iobase+6);
 	outb(0, s->ddmabase+0xd); /* DMA master clear */
@@ -2366,6 +2416,10 @@ static void __devinit solo1_remove(struct pci_dev *dev)
 	synchronize_irq();
 	pci_write_config_word(s->dev, 0x60, 0); /* turn off DDMA controller address space */
 	free_irq(s->irq, s);
+	if (s->gameport.io) {
+		gameport_unregister_port(&s->gameport);
+		release_region(s->gameport.io, GAMEPORT_EXTENT);
+	}
 	release_region(s->iobase, IOBASE_EXTENT);
 	release_region(s->sbbase+FMSYNTH_EXTENT, SBBASE_EXTENT-FMSYNTH_EXTENT);
 	release_region(s->ddmabase, DDMABASE_EXTENT);
@@ -2389,7 +2443,9 @@ static struct pci_driver solo1_driver = {
 	name: "ESS Solo1",
 	id_table: id_table,
 	probe: solo1_probe,
-	remove: solo1_remove
+	remove: solo1_remove,
+	suspend: solo1_suspend,
+	resume: solo1_resume
 };
 
 
@@ -2397,7 +2453,7 @@ static int __init init_solo1(void)
 {
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "solo1: version v0.16 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "solo1: version v0.20 time " __TIME__ " " __DATE__ "\n");
 	if (!pci_register_driver(&solo1_driver)) {
 		pci_unregister_driver(&solo1_driver);
                 return -ENODEV;
@@ -2409,12 +2465,13 @@ static int __init init_solo1(void)
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("ESS Solo1 Driver");
+MODULE_LICENSE("GPL");
+
 
 static void __exit cleanup_solo1(void)
 {
 	printk(KERN_INFO "solo1: unloading\n");
 	pci_unregister_driver(&solo1_driver);
-	pm_unregister_all(solo1_pm_callback);
 }
 
 /* --------------------------------------------------------------------- */

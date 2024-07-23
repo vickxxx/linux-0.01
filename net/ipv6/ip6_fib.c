@@ -3,9 +3,9 @@
  *	Forwarding Information Database
  *
  *	Authors:
- *	Pedro Roque		<roque@di.fc.ul.pt>	
+ *	Pedro Roque		<pedro_m@yahoo.com>	
  *
- *	$Id: ip6_fib.c,v 1.22 2000/09/12 00:38:34 davem Exp $
+ *	$Id: ip6_fib.c,v 1.25 2001/10/31 21:55:55 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -13,6 +13,12 @@
  *      2 of the License, or (at your option) any later version.
  */
 
+/*
+ * 	Changes:
+ * 	Yuji SEKIYA @USAGI:	Support default route on router node;
+ * 				remove ip6_null_entry from the top of
+ * 				routing table.
+ */
 #include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -76,7 +82,7 @@ rwlock_t fib6_walker_lock = RW_LOCK_UNLOCKED;
 #endif
 
 static void fib6_prune_clones(struct fib6_node *fn, struct rt6_info *rt);
-static void fib6_repair_tree(struct fib6_node *fn);
+static struct fib6_node * fib6_repair_tree(struct fib6_node *fn);
 
 /*
  *	A routing update causes an increase of the serial number on the
@@ -89,7 +95,7 @@ static __u32	rt_sernum	= 0;
 
 static struct timer_list ip6_fib_timer = { function: fib6_run_gc };
 
-static struct fib6_walker_t fib6_walker_list = {
+struct fib6_walker_t fib6_walker_list = {
 	&fib6_walker_list, &fib6_walker_list, 
 };
 
@@ -174,7 +180,7 @@ static __inline__ int addr_diff(void *token1, void *token2, int addrlen)
 
 			xb = ntohl(xb);
 
-			while (test_bit(j, &xb) == 0)
+			while ((xb & (1 << j)) == 0)
 				j--;
 
 			return (i * 32 + 31 - j);
@@ -247,9 +253,6 @@ static struct fib6_node * fib6_add_1(struct fib6_node *root, void *addr,
 	/* insert node in tree */
 
 	fn = root;
-
-	if (plen == 0)
-		return fn;
 
 	do {
 		key = (struct rt6key *)((u8 *)fn->leaf + offset);
@@ -420,12 +423,24 @@ insert_above:
  *	Insert routing information in a node.
  */
 
-static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt)
+static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt,
+		struct nlmsghdr *nlh,  struct netlink_skb_parms *req)
 {
 	struct rt6_info *iter = NULL;
 	struct rt6_info **ins;
 
 	ins = &fn->leaf;
+
+	if (fn->fn_flags&RTN_TL_ROOT &&
+	    fn->leaf == &ip6_null_entry &&
+	    !(rt->rt6i_flags & (RTF_DEFAULT | RTF_ADDRCONF | RTF_ALLONLINK)) ){
+		/*
+		 * The top fib of ip6 routing table includes ip6_null_entry.
+		 */
+		fn->leaf = rt;
+		rt->u.next = NULL;
+		goto out;
+	}
 
 	for (iter = fn->leaf; iter; iter=iter->u.next) {
 		/*
@@ -462,13 +477,12 @@ static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt)
 	 *	insert node
 	 */
 
+out:
 	rt->u.next = iter;
 	*ins = rt;
 	rt->rt6i_node = fn;
 	atomic_inc(&rt->rt6i_ref);
-#ifdef CONFIG_RTNETLINK
-	inet6_rt_notify(RTM_NEWROUTE, rt);
-#endif
+	inet6_rt_notify(RTM_NEWROUTE, rt, nlh, req);
 	rt6_stats.fib_rt_entries++;
 
 	if ((fn->fn_flags & RTN_RTINFO) == 0) {
@@ -481,7 +495,7 @@ static int fib6_add_rt2node(struct fib6_node *fn, struct rt6_info *rt)
 
 static __inline__ void fib6_start_gc(struct rt6_info *rt)
 {
-	if (ip6_fib_timer.expires == 0 &&
+	if (!timer_pending(&ip6_fib_timer) &&
 	    (rt->rt6i_flags & (RTF_EXPIRES|RTF_CACHE)))
 		mod_timer(&ip6_fib_timer, jiffies + ip6_rt_gc_interval);
 }
@@ -492,7 +506,8 @@ static __inline__ void fib6_start_gc(struct rt6_info *rt)
  *	with source addr info in sub-trees
  */
 
-int fib6_add(struct fib6_node *root, struct rt6_info *rt)
+int fib6_add(struct fib6_node *root, struct rt6_info *rt, struct nlmsghdr *nlh,
+		struct netlink_skb_parms *req)
 {
 	struct fib6_node *fn;
 	int err = -ENOMEM;
@@ -565,7 +580,7 @@ int fib6_add(struct fib6_node *root, struct rt6_info *rt)
 	}
 #endif
 
-	err = fib6_add_rt2node(fn, rt);
+	err = fib6_add_rt2node(fn, rt, nlh, req);
 
 	if (err == 0) {
 		fib6_start_gc(rt);
@@ -580,7 +595,7 @@ out:
 
 #ifdef CONFIG_IPV6_SUBTREES
 	/* Subtree creation failed, probably main tree node
-	   is orphan. If it is, shot it.
+	   is orphan. If it is, shoot it.
 	 */
 st_failure:
 	if (fn && !(fn->fn_flags&RTN_RTINFO|RTN_ROOT))
@@ -677,7 +692,7 @@ struct fib6_node * fib6_lookup(struct fib6_node *root, struct in6_addr *daddr,
 
 	fn = fib6_lookup_1(root, args);
 
-	if (fn == NULL)
+	if (fn == NULL || fn->fn_flags & RTN_TL_ROOT)
 		fn = root;
 
 	return fn;
@@ -774,7 +789,7 @@ static struct rt6_info * fib6_find_prefix(struct fib6_node *fn)
  *	is the node we want to try and remove.
  */
 
-static void fib6_repair_tree(struct fib6_node *fn)
+static struct fib6_node * fib6_repair_tree(struct fib6_node *fn)
 {
 	int children;
 	int nstate;
@@ -809,7 +824,7 @@ static void fib6_repair_tree(struct fib6_node *fn)
 			}
 #endif
 			atomic_inc(&fn->leaf->rt6i_ref);
-			return;
+			return fn->parent;
 		}
 
 		pn = fn->parent;
@@ -865,7 +880,7 @@ static void fib6_repair_tree(struct fib6_node *fn)
 
 		node_free(fn);
 		if (pn->fn_flags&RTN_RTINFO || SUBTREE(pn))
-			return;
+			return pn;
 
 		rt6_release(pn->leaf);
 		pn->leaf = NULL;
@@ -873,7 +888,8 @@ static void fib6_repair_tree(struct fib6_node *fn)
 	}
 }
 
-static void fib6_del_route(struct fib6_node *fn, struct rt6_info **rtp)
+static void fib6_del_route(struct fib6_node *fn, struct rt6_info **rtp,
+    struct nlmsghdr *nlh, struct netlink_skb_parms *req)
 {
 	struct fib6_walker_t *w;
 	struct rt6_info *rt = *rtp;
@@ -899,27 +915,47 @@ static void fib6_del_route(struct fib6_node *fn, struct rt6_info **rtp)
 
 	rt->u.next = NULL;
 
+	if (fn->leaf == NULL && fn->fn_flags&RTN_TL_ROOT)
+		fn->leaf = &ip6_null_entry;
+
 	/* If it was last route, expunge its radix tree node */
 	if (fn->leaf == NULL) {
 		fn->fn_flags &= ~RTN_RTINFO;
 		rt6_stats.fib_route_nodes--;
-		fib6_repair_tree(fn);
+		fn = fib6_repair_tree(fn);
 	}
 
-#ifdef CONFIG_RTNETLINK
-	inet6_rt_notify(RTM_DELROUTE, rt);
-#endif
+	if (atomic_read(&rt->rt6i_ref) != 1) {
+		/* This route is used as dummy address holder in some split
+		 * nodes. It is not leaked, but it still holds other resources,
+		 * which must be released in time. So, scan ascendant nodes
+		 * and replace dummy references to this route with references
+		 * to still alive ones.
+		 */
+		while (fn) {
+			if (!(fn->fn_flags&RTN_RTINFO) && fn->leaf == rt) {
+				fn->leaf = fib6_find_prefix(fn);
+				atomic_inc(&fn->leaf->rt6i_ref);
+				rt6_release(rt);
+			}
+			fn = fn->parent;
+		}
+		/* No more references are possiible at this point. */
+		if (atomic_read(&rt->rt6i_ref) != 1) BUG();
+	}
+
+	inet6_rt_notify(RTM_DELROUTE, rt, nlh, req);
 	rt6_release(rt);
 }
 
-int fib6_del(struct rt6_info *rt)
+int fib6_del(struct rt6_info *rt, struct nlmsghdr *nlh, struct netlink_skb_parms *req)
 {
 	struct fib6_node *fn = rt->rt6i_node;
 	struct rt6_info **rtp;
 
 #if RT6_DEBUG >= 2
 	if (rt->u.dst.obsolete>0) {
-		BUG_TRAP(fn==NULL || rt->u.dst.obsolete<=0);
+		BUG_TRAP(fn==NULL);
 		return -ENOENT;
 	}
 #endif
@@ -937,7 +973,7 @@ int fib6_del(struct rt6_info *rt)
 
 	for (rtp = &fn->leaf; *rtp; rtp = &(*rtp)->u.next) {
 		if (*rtp == rt) {
-			fib6_del_route(fn, rtp);
+			fib6_del_route(fn, rtp, nlh, req);
 			return 0;
 		}
 	}
@@ -945,7 +981,7 @@ int fib6_del(struct rt6_info *rt)
 }
 
 /*
- *	Tree transversal function.
+ *	Tree traversal function.
  *
  *	Certainly, it is not interrupt safe.
  *	However, it is internally reenterable wrt itself and fib6_add/fib6_del.
@@ -1066,7 +1102,7 @@ static int fib6_clean_node(struct fib6_walker_t *w)
 		res = c->func(rt, c->arg);
 		if (res < 0) {
 			w->leaf = rt;
-			res = fib6_del(rt);
+			res = fib6_del(rt, NULL, NULL);
 			if (res) {
 #if RT6_DEBUG >= 2
 				printk(KERN_DEBUG "fib6_clean_node: del failed: rt=%p@%p err=%d\n", rt, rt->rt6i_node, res);
@@ -1140,23 +1176,21 @@ static int fib6_age(struct rt6_info *rt, void *arg)
 	   only if they are not in use now.
 	 */
 
-	if (rt->rt6i_flags & RTF_CACHE) {
-		if (atomic_read(&rt->u.dst.__refcnt) == 0 &&
-		    (long)(now - rt->u.dst.lastuse) >= gc_args.timeout) {
-			RT6_TRACE("aging clone %p\n", rt);
-			return -1;
-		}
-		gc_args.more++;
-	}
-
 	/*
 	 *	check addrconf expiration here.
 	 *	They are expired even if they are in use.
 	 */
 
 	if (rt->rt6i_flags&RTF_EXPIRES && rt->rt6i_expires) {
-		if ((long)(now - rt->rt6i_expires) > 0) {
+		if (time_after(now, rt->rt6i_expires)) {
 			RT6_TRACE("expiring %p\n", rt);
+			return -1;
+		}
+		gc_args.more++;
+	} else if (rt->rt6i_flags & RTF_CACHE) {
+		if (atomic_read(&rt->u.dst.__refcnt) == 0 &&
+		    time_after_eq(now, rt->u.dst.lastuse + gc_args.timeout)) {
+			RT6_TRACE("aging clone %p\n", rt);
 			return -1;
 		}
 		gc_args.more++;

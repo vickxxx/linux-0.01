@@ -7,6 +7,8 @@
  *
  * History:
  *
+ * - Revision 0.1.7 (23 Jan 2001): fix crash resulting from MDA only cards 
+ *				   being detected as Hercules.	 (Paul G.)
  * - Revision 0.1.6 (17 Aug 2000): new style structs
  *                                 documentation
  * - Revision 0.1.5 (13 Mar 2000): spinlocks instead of saveflags();cli();etc
@@ -35,7 +37,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
@@ -47,7 +49,7 @@
 
 #ifdef MODULE
 
-#define INCLUDE_LINUX_LOGOBW
+#define INCLUDE_LINUX_LOGO_DATA
 #include <linux/linux_logo.h>
 
 #endif /* MODULE */
@@ -104,7 +106,7 @@ static char *hga_type_name;
 
 /* Global locks */
 
-spinlock_t hga_reg_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t hga_reg_lock = SPIN_LOCK_UNLOCKED;
 
 /* Framebuffer driver structures */
 
@@ -201,7 +203,7 @@ static void hga_clear_screen(void)
 		fillchar = 0x00;
 	spin_unlock_irqrestore(&hga_reg_lock, flags);
 	if (fillchar != 0xbf)
-		memset((char *)hga_vram_base, fillchar, hga_vram_len);
+		isa_memset_io(hga_vram_base, fillchar, hga_vram_len);
 }
 
 
@@ -273,11 +275,12 @@ static void hga_gfx_mode(void)
 static void hga_show_logo(void)
 {
 	int x, y;
-	char *dest = (char *)hga_vram_base;
+	unsigned long dest = hga_vram_base;
 	char *logo = linux_logo_bw;
 	for (y = 134; y < 134 + 80 ; y++) /* this needs some cleanup */
 		for (x = 0; x < 10 ; x++)
-			*(dest + (y%4)*8192 + (y>>2)*90 + x + 40) = ~*(logo++);
+			isa_writeb(~*(logo++),
+				   (dest + (y%4)*8192 + (y>>2)*90 + x + 40));
 }
 #endif /* MODULE */	
 
@@ -309,10 +312,10 @@ static void hga_blank(int blank_mode)
 static int __init hga_card_detect(void)
 {
 	int count=0;
-	u16 *p, p_save;
-	u16 *q, q_save;
+	unsigned long p, q;
+	unsigned short p_save, q_save;
 
-	hga_vram_base = VGA_MAP_MEM(0xb0000);
+	hga_vram_base = 0xb0000;
 	hga_vram_len  = 0x08000;
 
 	if (request_region(0x3b0, 12, "hgafb"))
@@ -322,14 +325,14 @@ static int __init hga_card_detect(void)
 
 	/* do a memory check */
 
-	p = (u16 *) hga_vram_base;
-	q = (u16 *) (hga_vram_base + 0x01000);
+	p = hga_vram_base;
+	q = hga_vram_base + 0x01000;
 
-	p_save = scr_readw(p); q_save = scr_readw(q);
+	p_save = isa_readw(p); q_save = isa_readw(q);
 
-	scr_writew(0xaa55, p); if (scr_readw(p) == 0xaa55) count++;
-	scr_writew(0x55aa, p); if (scr_readw(p) == 0x55aa) count++;
-	scr_writew(p_save, p);
+	isa_writew(0xaa55, p); if (isa_readw(p) == 0xaa55) count++;
+	isa_writew(0x55aa, p); if (isa_readw(p) == 0x55aa) count++;
+	isa_writew(p_save, p);
 
 	if (count != 2) {
 		return 0;
@@ -358,21 +361,22 @@ static int __init hga_card_detect(void)
 		udelay(2);
 	}
 
-	if (p_save != q_save) {
-		switch (inb_p(HGA_STATUS_PORT) & 0x70) {
-			case 0x10:
-				hga_type = TYPE_HERCPLUS;
-				hga_type_name = "HerculesPlus";
-				break;
-			case 0x50:
-				hga_type = TYPE_HERCCOLOR;
-				hga_type_name = "HerculesColor";
-				break;
-			default:
-				hga_type = TYPE_HERC;
-				hga_type_name = "Hercules";
-				break;
-		}
+	if (p_save == q_save) 
+		return 0;
+
+	switch (inb_p(HGA_STATUS_PORT) & 0x70) {
+		case 0x10:
+			hga_type = TYPE_HERCPLUS;
+			hga_type_name = "HerculesPlus";
+			break;
+		case 0x50:
+			hga_type = TYPE_HERCCOLOR;
+			hga_type_name = "HerculesColor";
+			break;
+		default:
+			hga_type = TYPE_HERC;
+			hga_type_name = "Hercules";
+			break;
 	}
 	return 1;
 }
@@ -700,7 +704,7 @@ static void hgafbcon_blank(int blank_mode, struct fb_info *info)
 int __init hgafb_init(void)
 {
 	if (! hga_card_detect()) {
-		printk(KERN_ERR "hgafb: HGA card not detected.\n");
+		printk(KERN_INFO "hgafb: HGA card not detected.\n");
 		return -EINVAL;
 	}
 
@@ -713,7 +717,7 @@ int __init hgafb_init(void)
 	if (!nologo) hga_show_logo();
 #endif /* MODULE */
 
-	hga_fix.smem_start = hga_vram_base;
+	hga_fix.smem_start = VGA_MAP_MEM(hga_vram_base);
 	hga_fix.smem_len = hga_vram_len;
 
 	disp.var = hga_default_var;
@@ -791,8 +795,7 @@ int __init hgafb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 
-	for (this_opt = strtok(options, ","); this_opt;
-			this_opt = strtok(NULL, ",")) {
+	while ((this_opt = strsep(&options, ","))) {
 		if (!strncmp(this_opt, "font:", 5))
 			strcpy(fb_info.fontname, this_opt+5);
 	}
@@ -842,6 +845,7 @@ void cleanup_module(void)
 
 MODULE_AUTHOR("Ferenc Bakonyi (fero@drama.obuda.kando.hu)");
 MODULE_DESCRIPTION("FBDev driver for Hercules Graphics Adaptor");
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(font, "s");
 MODULE_PARM_DESC(font, "Specifies one of the compiled-in fonts (VGA8x8, VGA8x16, SUN8x16, Acorn8x8, PEARL8x8) (default=none)");

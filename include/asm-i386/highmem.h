@@ -2,14 +2,14 @@
  * highmem.h: virtual kernel memory mappings for high memory
  *
  * Used in CONFIG_HIGHMEM systems for memory pages which
- * are not addressable by direct kernel virtual adresses.
+ * are not addressable by direct kernel virtual addresses.
  *
  * Copyright (C) 1999 Gerhard Wichert, Siemens AG
  *		      Gerhard.Wichert@pdb.siemens.de
  *
  *
  * Redesigned the x86 32-bit VM architecture to deal with 
- * up to 16 Terrabyte physical memory. With current x86 CPUs
+ * up to 16 Terabyte physical memory. With current x86 CPUs
  * we now support up to 64 Gigabytes physical RAM.
  *
  * Copyright (C) 1999 Ingo Molnar <mingo@redhat.com>
@@ -26,8 +26,11 @@
 #include <asm/kmap_types.h>
 #include <asm/pgtable.h>
 
-/* undef for production */
+#ifdef CONFIG_DEBUG_HIGHMEM
 #define HIGHMEM_DEBUG 1
+#else
+#define HIGHMEM_DEBUG 0
+#endif
 
 /* declarations for highmem.c */
 extern unsigned long highstart_pfn, highend_pfn;
@@ -43,7 +46,7 @@ extern void kmap_init(void) __init;
  * easily, subsequent pte tables have to be allocated in one physical
  * chunk of RAM.
  */
-#define PKMAP_BASE (0xfe000000UL)
+#define PKMAP_BASE (0xff800000UL)
 #ifdef CONFIG_X86_PAE
 #define LAST_PKMAP 512
 #else
@@ -53,22 +56,25 @@ extern void kmap_init(void) __init;
 #define PKMAP_NR(virt)  ((virt-PKMAP_BASE) >> PAGE_SHIFT)
 #define PKMAP_ADDR(nr)  (PKMAP_BASE + ((nr) << PAGE_SHIFT))
 
-extern void * FASTCALL(kmap_high(struct page *page));
+extern void * FASTCALL(kmap_high(struct page *page, int nonblocking));
 extern void FASTCALL(kunmap_high(struct page *page));
 
-static inline void *kmap(struct page *page)
+#define kmap(page) __kmap(page, 0)
+#define kmap_nonblock(page) __kmap(page, 1)
+
+static inline void *__kmap(struct page *page, int nonblocking)
 {
 	if (in_interrupt())
-		BUG();
+		out_of_line_bug();
 	if (page < highmem_start_page)
 		return page_address(page);
-	return kmap_high(page);
+	return kmap_high(page, nonblocking);
 }
 
 static inline void kunmap(struct page *page)
 {
 	if (in_interrupt())
-		BUG();
+		out_of_line_bug();
 	if (page < highmem_start_page)
 		return;
 	kunmap_high(page);
@@ -92,7 +98,7 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
 #if HIGHMEM_DEBUG
 	if (!pte_none(*(kmap_pte-idx)))
-		BUG();
+		out_of_line_bug();
 #endif
 	set_pte(kmap_pte-idx, mk_pte(page, kmap_prot));
 	__flush_tlb_one(vaddr);
@@ -103,14 +109,14 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 {
 #if HIGHMEM_DEBUG
-	unsigned long vaddr = (unsigned long) kvaddr;
+	unsigned long vaddr = (unsigned long) kvaddr & PAGE_MASK;
 	enum fixed_addresses idx = type + KM_TYPE_NR*smp_processor_id();
 
 	if (vaddr < FIXADDR_START) // FIXME
 		return;
 
 	if (vaddr != __fix_to_virt(FIX_KMAP_BEGIN+idx))
-		BUG();
+		out_of_line_bug();
 
 	/*
 	 * force other mappings to Oops if they'll try to access

@@ -2,7 +2,7 @@
  * Linux Socket Filter - Kernel level socket filtering
  *
  * Author:
- *     Jay Schulist <jschlst@turbolinux.com>
+ *     Jay Schulist <jschlst@samba.org>
  *
  * Based on the design of:
  *     - The Berkeley Packet Filter
@@ -72,7 +72,7 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 	/* len is UNSIGNED. Byte wide insns relies only on implicit
 	   type casts to prevent reading arbitrary memory locations.
 	 */
-	unsigned int len = skb->len;
+	unsigned int len = skb->len-skb->data_len;
 	struct sock_filter *fentry;	/* We walk down these */
 	u32 A = 0;	   		/* Accumulator */
 	u32 X = 0;   			/* Index Register */
@@ -201,7 +201,7 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 			case BPF_LD|BPF_W|BPF_ABS:
 				k = fentry->k;
 load_w:
-				if(k+sizeof(u32) <= len) {
+				if(k >= 0 && (unsigned int)(k+sizeof(u32)) <= len) {
 					A = ntohl(*(u32*)&data[k]);
 					continue;
 				}
@@ -214,13 +214,19 @@ load_w:
 						A = ntohl(*(u32*)ptr);
 						continue;
 					}
+				} else {
+					u32 tmp;
+					if (!skb_copy_bits(skb, k, &tmp, 4)) {
+						A = ntohl(tmp);
+						continue;
+					}
 				}
 				return 0;
 
 			case BPF_LD|BPF_H|BPF_ABS:
 				k = fentry->k;
 load_h:
-				if(k + sizeof(u16) <= len) {
+				if(k >= 0 && (unsigned int) (k + sizeof(u16)) <= len) {
 					A = ntohs(*(u16*)&data[k]);
 					continue;
 				}
@@ -233,13 +239,19 @@ load_h:
 						A = ntohs(*(u16*)ptr);
 						continue;
 					}
+				} else {
+					u16 tmp;
+					if (!skb_copy_bits(skb, k, &tmp, 2)) {
+						A = ntohs(tmp);
+						continue;
+					}
 				}
 				return 0;
 
 			case BPF_LD|BPF_B|BPF_ABS:
 				k = fentry->k;
 load_b:
-				if(k < len) {
+				if(k >= 0 && (unsigned int)k < len) {
 					A = data[k];
 					continue;
 				}
@@ -250,6 +262,12 @@ load_b:
 						break;
 					if ((ptr = load_pointer(skb, k)) != NULL) {
 						A = *ptr;
+						continue;
+					}
+				} else {
+					u8 tmp;
+					if (!skb_copy_bits(skb, k, &tmp, 1)) {
+						A = tmp;
 						continue;
 					}
 				}
@@ -276,10 +294,9 @@ load_b:
 				goto load_b;
 
 			case BPF_LDX|BPF_B|BPF_MSH:
-				k = fentry->k;
-				if(k >= len)
+				if(fentry->k >= len)
 					return (0);
-				X = (data[k] & 0xf) << 2;
+				X = (data[fentry->k] & 0xf) << 2;
 				continue;
 
 			case BPF_LD|BPF_IMM:
@@ -364,6 +381,9 @@ int sk_chk_filter(struct sock_filter *filter, int flen)
 	struct sock_filter *ftest;
         int pc;
 
+	if ((unsigned int) flen >= (~0U / sizeof(struct sock_filter)))
+		return -EINVAL;
+
        /*
         * Check the filter code now.
         */
@@ -386,7 +406,7 @@ int sk_chk_filter(struct sock_filter *filter, int flen)
 				   jumps below, where offsets are limited. --ANK (981016)
 				 */
 				if (ftest->k >= (unsigned)(flen-pc-1))
-					return (-EINVAL);
+					return -EINVAL;
 			}
                         else
 			{
@@ -394,7 +414,7 @@ int sk_chk_filter(struct sock_filter *filter, int flen)
 				 *	For conditionals both must be safe
 				 */
  				if(pc + ftest->jt +1 >= flen || pc + ftest->jf +1 >= flen)
-					return (-EINVAL);
+					return -EINVAL;
 			}
                 }
 

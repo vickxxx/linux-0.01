@@ -53,6 +53,7 @@
 #include <linux/acct.h>
 #include <linux/smp_lock.h>
 #include <linux/file.h>
+#include <linux/tty.h>
 
 #include <asm/uaccess.h>
 
@@ -276,6 +277,7 @@ static void do_acct_process(long exitcode, struct file *file)
 	struct acct ac;
 	mm_segment_t fs;
 	unsigned long vsize;
+	unsigned long flim;
 
 	/*
 	 * First check to see if there is enough free_space to continue
@@ -314,13 +316,13 @@ static void do_acct_process(long exitcode, struct file *file)
 	vsize = 0;
 	if (current->mm) {
 		struct vm_area_struct *vma;
-		down(&current->mm->mmap_sem);
+		down_read(&current->mm->mmap_sem);
 		vma = current->mm->mmap;
 		while (vma) {
 			vsize += vma->vm_end - vma->vm_start;
 			vma = vma->vm_next;
 		}
-		up(&current->mm->mmap_sem);
+		up_read(&current->mm->mmap_sem);
 	}
 	vsize = vsize / 1024;
 	ac.ac_mem = encode_comp_t(vsize);
@@ -337,8 +339,14 @@ static void do_acct_process(long exitcode, struct file *file)
          */
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+	/*
+ 	 * Accounting records are not subject to resource limits.
+ 	 */
+	flim = current->rlim[RLIMIT_FSIZE].rlim_cur;
+	current->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY;
 	file->f_op->write(file, (char *)&ac,
 			       sizeof(struct acct), &file->f_pos);
+	current->rlim[RLIMIT_FSIZE].rlim_cur = flim;
 	set_fs(fs);
 }
 
@@ -353,7 +361,7 @@ int acct_process(long exitcode)
 		file = acct_file;
 		get_file(file);
 		unlock_kernel();
-		do_acct_process(exitcode, acct_file);
+		do_acct_process(exitcode, file);
 		fput(file);
 	} else
 		unlock_kernel();

@@ -1,5 +1,4 @@
-/* $Id: sgialib.h,v 1.3 1999/12/04 03:59:12 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,13 +6,13 @@
  * SGI ARCS firmware interface library for the Linux kernel.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 2001, 2002 Ralf Baechle (ralf@gnu.org)
  */
 #ifndef _ASM_SGIALIB_H
 #define _ASM_SGIALIB_H
 
 #include <asm/sgiarcs.h>
 
-extern PSYSTEM_PARAMETER_BLOCK sgi_pblock;
 extern struct linux_romvec *romvec;
 extern int prom_argc;
 
@@ -25,12 +24,13 @@ extern LONG *_prom_argv, *_prom_envp;
 #define prom_argc(index) ((char *) (long) _prom_argc[(index)])
 
 extern int prom_flags;
-#define PROM_FLAG_ARCS  1
 
-/* Init the PROM library and it's internal data structures.  Called
- * at boot time from head.S before start_kernel is invoked.
- */
-extern int prom_init(int argc, char **argv, char **envp);
+#define PROM_FLAG_ARCS			1
+#define PROM_FLAG_USE_AS_CONSOLE	2
+#define PROM_FLAG_DONT_FREE_TEMP	4
+
+/* Init the PROM library and it's internal data structures. */
+extern void prom_init(int argc, char **argv, char **envp, int *prom_vec);
 
 /* Simple char-by-char console I/O. */
 extern void prom_putchar(char c);
@@ -42,9 +42,9 @@ extern void prom_printf(char *fmt, ...);
 /* Memory descriptor management. */
 #define PROM_MAX_PMEMBLOCKS    32
 struct prom_pmemblock {
-	LONG	base;		/* Within KSEG0 or XKPHYS. */
+	LONG base;		/* Within KSEG0 or XKPHYS. */
 	ULONG size;		/* In bytes. */
-        ULONG type;		/* free or prom memory */
+	ULONG type;		/* free or prom memory */
 };
 
 /* Get next memory descriptor after CURR, returns first descriptor
@@ -58,9 +58,6 @@ extern struct linux_mdesc *prom_getmdesc(struct linux_mdesc *curr);
  */
 extern void prom_meminit(void);
 extern void prom_fixup_mem_map(unsigned long start_mem, unsigned long end_mem);
-
-/* Returns pointer to PROM physical memory block array. */
-extern struct prom_pmemblock *prom_getpblock_array(void);
 
 /* PROM device tree library routines. */
 #define PROM_NULL_COMPONENT ((pcomponent *) 0)
@@ -90,9 +87,9 @@ extern pcomponent *prom_componentbypath(char *path);
  */
 extern void prom_identify_arch(void);
 
-/* Environemt variable routines. */
+/* Environment variable routines. */
 extern PCHAR ArcGetEnvironmentVariable(PCHAR name);
-extern LONG SetEnvironmentVariable(PCHAR name, PCHAR value);
+extern LONG ArcSetEnvironmentVariable(PCHAR name, PCHAR value);
 
 /* ARCS command line acquisition and parsing. */
 extern char *prom_getcmdline(void);
@@ -120,11 +117,11 @@ extern long prom_invoke(unsigned long pc, unsigned long sp, long argc, char **ar
 extern long prom_exec(char *name, long argc, char **argv, char **envp);
 
 /* Misc. routines. */
-extern void prom_halt(VOID) __attribute__((noreturn));
-extern void prom_powerdown(VOID) __attribute__((noreturn));
-extern void prom_restart(VOID) __attribute__((noreturn));
+extern VOID prom_halt(VOID) __attribute__((noreturn));
+extern VOID prom_powerdown(VOID) __attribute__((noreturn));
+extern VOID prom_restart(VOID) __attribute__((noreturn));
 extern VOID ArcReboot(VOID) __attribute__((noreturn));
-extern VOID ArcEnterInteractiveMode(void) __attribute__((noreturn));
+extern VOID ArcEnterInteractiveMode(VOID) __attribute__((noreturn));
 extern long prom_cfgsave(VOID);
 extern struct linux_sysid *prom_getsysid(VOID);
 extern VOID ArcFlushAllCaches(VOID);

@@ -17,11 +17,14 @@ restrictions referred to are that the relevant option is valid if:
 	CD	Appropriate CD support is enabled.
 	DEVFS   devfs support is enabled. 
 	DRM	Direct Rendering Management support is enabled. 
+	EFI	EFI Partitioning (GPT) is enabled
 	EIDE	EIDE/ATAPI support is enabled.
 	FB	The frame buffer device is enabled.
 	HW	Appropriate hardware is enabled.
 	IA-32	IA-32 aka i386 architecture is enabled.
 	IA-64	IA-64 architecture is enabled.
+	IP_PNP	IP DCHP, BOOTP, or RARP is enabled.
+	ISAPNP  ISA PnP code is enabled.
 	ISDN	Appropriate ISDN support is enabled.
 	JOY 	Appropriate joystick support is enabled.
 	LP	Printer support is enabled.
@@ -66,7 +69,26 @@ running once the system is up.
 	53c7xx=		[HW,SCSI] Amiga SCSI controllers.
 
 	acpi=		[HW,ACPI] Advanced Configuration and Power Interface 
+		force	Enable ACPI if default was off
+		off	Disable ACPI if default was on
+		noirq	Do not use ACPI for IRQ routing (see pci=noacpi)
+		ht	Limit ACPI to boot-time LAPIC enumeration for HT,
+			disabling the run-time AML interpreter.
+		strict	Be less tolerant of platforms that are not
+			strictly ACPI specification compliant.
+
+	acpi_sci=	[HW,ACPI] ACPI System Control Interrupt trigger mode
+			Format: { level | edge |  high | low }
  
+	acpi_irq_balance	ACPI will balance active IRQs
+	acpi_irq_nobalance	ACPI will not move active IRQs
+	acpi_irq_pci=	If irq_balance, Clear listed IRQs for use by PCI
+	acpi_irq_isa=	If irq_balance, Mark listed IRQs used by ISA
+
+	acpi_osi=	[HW,ACPI] empty param disables _OSI
+
+	acpi_serialize	[HW,ACPI] force serialization of AML methods
+
 	ad1816=		[HW,SOUND]
 
 	ad1848=		[HW,SOUND]
@@ -188,8 +210,10 @@ running once the system is up.
 
 	es1371=		[HW,SOUND]
  
-	ether=		[HW,NET] Ethernet cards parameters (iomem, irq,
-			dev_name).
+	ether=		[HW,NET] Ethernet cards parameters (irq,
+			base_io_addr, mem_start, mem_end, name.
+			(mem_start is often overloaded to mean something
+			different and driver-specific).
 
 	fd_mcs=		[HW,SCSI]
 
@@ -208,6 +232,9 @@ running once the system is up.
 	gc_3=		[HW,JOY]
  
 	gdth=		[HW,SCSI]
+
+	gpt             [EFI] Forces disk with valid GPT signature but
+			invalid Protective MBR to be treated as GPT.
 
 	gscd=		[HW,CD]
 
@@ -242,7 +269,19 @@ running once the system is up.
 
 	initrd=		[BOOT] Specify the location of the initial ramdisk. 
 
-	ip=		[PNP]
+	ip=		[IP_PNP]
+
+	isapnp=		[ISAPNP] Specify RDP, reset, pci_scan and verbosity.
+
+	isapnp_reserve_irq= [ISAPNP] Exclude IRQs for the autoconfiguration.
+
+	isapnp_reserve_dma= [ISAPNP] Exclude DMAs for the autoconfiguration.
+
+	isapnp_reserve_io= [ISAPNP] Exclude I/O ports for the autoconfiguration.
+				    Ranges are in pairs (I/O port base and size).
+
+	isapnp_reserve_mem= [ISAPNP] Exclude memory regions for the autoconfiguration.
+				     Ranges are in pairs (memory base and size).
 
 	isp16=		[HW,CD]
 
@@ -252,9 +291,15 @@ running once the system is up.
  
 	kbd-reset	[VT]
 
-	keep_initrd	[HW, ARM]
+	keepinitrd	[HW, ARM]
+
+	lapic		[IA-32,APIC] Enable the local APIC even if BIOS disabled it.
 
 	load_ramdisk=	[RAM] List of ramdisks to load from floppy.
+
+	lockd.udpport=	[NFS]
+
+	lockd.tcpport=	[NFS]
 
 	logi_busmouse=	[HW, MOUSE]
 
@@ -292,7 +337,7 @@ running once the system is up.
 
 	max_scsi_luns=	[SCSI]
 
-	mca-pentium	[BUGS=ix86]
+	mca-pentium	[BUGS=IA-32]
 
 	mcd=		[HW,CD]
 
@@ -306,9 +351,26 @@ running once the system is up.
 
 	megaraid=	[HW,SCSI]
  
+	mem=exactmap	[KNL,BOOT,IA-32] enable setting of an exact
+			e820 memory map, as specified by the user.
+			Such mem=exactmap lines can be constructed
+			based on BIOS output or other requirements.
+
 	mem=nn[KMG]	[KNL,BOOT] force use of a specific amount of
 			memory; to be used when the kernel is not able
 			to see the whole system memory or for test.
+
+	mem=nn[KMG]@ss[KMG]
+			[KNL,BOOT] Force usage of a specific region of memory
+			Region of memory to be used, from ss to ss+nn.
+
+	mem=nn[KMG]#ss[KMG]
+			[KNL,BOOT,ACPI] Mark specific memory as ACPI data.
+			Region of memory to be used, from ss to ss+nn.
+
+	mem=nn[KMG]$ss[KMG]
+			[KNL,BOOT,ACPI] Mark specific memory as reserved.
+			Region of memory to be used, from ss to ss+nn.
 
 	memfrac=	[KNL]
 
@@ -328,15 +390,19 @@ running once the system is up.
 
 	ncr53c8xx=	[HW,SCSI]
 
-	netdev=		[NET]
+	netdev=		[NET] Ethernet cards parameters (irq,
+			base_io_addr, mem_start, mem_end, name.
+			(mem_start is often overloaded to mean something
+			different and driver-specific).
+			(cf: ether=)
  
 	nfsaddrs=	[NFS]
 
 	nfsroot=	[NFS] nfs root filesystem for disk-less boxes.
 
-	nmi_watchdog=	[KNL,BUGS=ix86] debugging features for SMP kernels.
+	nmi_watchdog=	[KNL,BUGS=IA-32] debugging features for SMP kernels.
 
-	no387		[BUGS=ix86] Tells the kernel to use the 387 maths
+	no387		[BUGS=IA-32] Tells the kernel to use the 387 maths
 			emulation library even if a 387 maths coprocessor
 			is present.
 
@@ -354,20 +420,30 @@ running once the system is up.
 
 	nohlt		[BUGS=ARM]
  
-	no-hlt		[BUGS=ix86]
+	no-hlt		[BUGS=IA-32] Tells the kernel that the hlt
+			instruction doesn't work correctly and not to
+			use it.
+
+	noisapnp	[ISAPNP] Disables ISA PnP code.
 
 	noinitrd	[RAM] Tells the kernel not to load any configured
 			initial RAM disk.
 
 	nointroute	[IA-64]
+
+	nokeyb		[HW] Skip console keyboard initialization for systems 
+			without a console keyboard, removable keyboard, or 
+			bladecenters with a USB console keyboard switch, etc.
  
+	nolapic		[IA-32,APIC] Do not enable or use the local APIC.
+
 	no-scroll	[VGA]
 
 	nosmp		[SMP] Tells an SMP kernel to act as a UP kernel.
 
 	nosync		[HW, M68K] Disables sync negotiation for all devices.
 
-	notsc           [BUGS=ix86] Disable Time Stamp Counter
+	notsc           [BUGS=IA-32] Disable Time Stamp Counter
 
 	nowb		[ARM]
  
@@ -434,6 +510,10 @@ running once the system is up.
 		lastbus=N		[IA-32] Scan all buses till bus #N. Can be useful
 					if the kernel is unable to find your secondary buses
 					and you want to tell it explicitly which ones they are.
+		assign-busses		[IA-32] Always assign all PCI bus
+					numbers ourselves, overriding
+					whatever the firmware may have
+					done.
 
 	pd.		[PARIDE]
 
@@ -446,7 +526,7 @@ running once the system is up.
 	plip=		[PPT,NET] Parallel port network link.
 
 	profile=	[KNL] enable kernel profiling via /proc/profile
-			(param:log level).
+			(param: profile step/bucket size as a power of 2)
 
 	prompt_ramdisk=	[RAM] List of RAM disks to prompt for floppy disk
 			before loading.
@@ -471,7 +551,7 @@ running once the system is up.
 	ramdisk_start=	[RAM] Starting block of RAM disk image (so you can
 			place it after the kernel image on a boot floppy).
 
-	reboot=		[BUGS=ix86]
+	reboot=		[BUGS=IA-32]
 
 	reserve=	[KNL,BUGS] force the kernel to ignore some iomem area.
 
@@ -480,6 +560,13 @@ running once the system is up.
 	ro		[KNL] Mount root device read-only on boot.
 
 	root=		[KNL] root filesystem.
+
+	rootdelay=	[KNL] Delay (in seconds) to pause before attempting to
+			mount the root filesystem
+
+	rootflags=	[KNL] set root filesystem mount option string
+
+	rootfstype=	[KNL] set root filesystem type
 
 	rw		[KNL] Mount root device read-write on boot.
 

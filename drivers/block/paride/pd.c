@@ -1,6 +1,6 @@
 /* 
         pd.c    (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                            Under the terms of the GNU public license.
+                            Under the terms of the GNU General Public License.
 
         This is the high-level driver for parallel port IDE hard
         drives based on chips supported by the paride module.
@@ -180,7 +180,8 @@ static STT pd_stt[7] = {{"drive0",8,drive0},
 
 void pd_setup( char *str, int *ints)
 
-{	generic_setup(pd_stt,7,str);
+{
+	generic_setup(pd_stt,7,str);
 }
 
 #endif
@@ -287,6 +288,7 @@ static void pd_eject( int unit);
 static struct hd_struct pd_hd[PD_DEVS];
 static int pd_sizes[PD_DEVS];
 static int pd_blocksizes[PD_DEVS];
+static int pd_maxsectors[PD_DEVS];
 
 #define PD_NAMELEN	8
 
@@ -298,6 +300,7 @@ struct pd_unit {
 	int heads;                	/* physical geometry */
 	int sectors;
 	int cylinders;
+        int can_lba;
 	int drive;			/* master=0 slave=1 */
 	int changed;			/* Have we seen a disk change ? */
 	int removable;			/* removable media device  ?  */
@@ -305,7 +308,7 @@ struct pd_unit {
 	int alt_geom;
 	int present;
 	char name[PD_NAMELEN];		/* pda, pdb, etc ... */
-	};
+};
 
 struct pd_unit pd[PD_UNITS];
 
@@ -340,27 +343,23 @@ static char *pd_errs[17] = { "ERR","INDEX","ECC","DRQ","SEEK","WRERR",
 
 /* kernel glue structures */
 
-extern struct block_device_operations pd_fops;
-
-static struct gendisk pd_gendisk = {
-        PD_MAJOR,       /* Major number */
-        PD_NAME,        /* Major name */
-        PD_BITS,        /* Bits to shift to get real from partition */
-        PD_PARTNS,      /* Number of partitions per real */
-        pd_hd,          /* hd struct */
-        pd_sizes,       /* block sizes */
-        0,              /* number */
-        NULL,           /* internal */
-        NULL,           /* next */
-	&pd_fops,       /* block device operations */
-};
-
 static struct block_device_operations pd_fops = {
+	owner:			THIS_MODULE,
         open:			pd_open,
         release:		pd_release,
         ioctl:			pd_ioctl,
         check_media_change:	pd_check_media,
         revalidate:		pd_revalidate
+};
+
+static struct gendisk pd_gendisk = {
+	major:		PD_MAJOR,
+	major_name:	PD_NAME,
+	minor_shift:	PD_BITS,
+	max_p:		PD_PARTNS,
+	part:		pd_hd,
+	sizes:		pd_sizes,
+	fops:		&pd_fops,
 };
 
 void pd_init_units( void )
@@ -385,58 +384,6 @@ void pd_init_units( void )
 	}
 }
 
-static inline int pd_new_segment(request_queue_t *q, struct request *req, int max_segments)
-{
-	if (max_segments > cluster)
-		max_segments = cluster;
-
-	if (req->nr_segments < max_segments) {
-		req->nr_segments++;
-		q->elevator.nr_segments++;
-		return 1;
-	}
-	return 0;
-}
-
-static int pd_back_merge_fn(request_queue_t *q, struct request *req, 
-			    struct buffer_head *bh, int max_segments)
-{
-	if (req->bhtail->b_data + req->bhtail->b_size == bh->b_data)
-		return 1;
-	return pd_new_segment(q, req, max_segments);
-}
-
-static int pd_front_merge_fn(request_queue_t *q, struct request *req, 
-			     struct buffer_head *bh, int max_segments)
-{
-	if (bh->b_data + bh->b_size == req->bh->b_data)
-		return 1;
-	return pd_new_segment(q, req, max_segments);
-}
-
-static int pd_merge_requests_fn(request_queue_t *q, struct request *req,
-				struct request *next, int max_segments)
-{
-	int total_segments = req->nr_segments + next->nr_segments;
-	int same_segment;
-
-	if (max_segments > cluster)
-		max_segments = cluster;
-
-	same_segment = 0;
-	if (req->bhtail->b_data + req->bhtail->b_size == next->bh->b_data) {
-		total_segments--;
-		same_segment = 1;
-	}
-    
-	if (total_segments > max_segments)
-		return 0;
-
-	q->elevator.nr_segments -= same_segment;
-	req->nr_segments = total_segments;
-	return 1;
-}
-
 int pd_init (void)
 
 {       int i;
@@ -450,18 +397,17 @@ int pd_init (void)
         }
 	q = BLK_DEFAULT_QUEUE(MAJOR_NR);
 	blk_init_queue(q, DEVICE_REQUEST);
-	q->back_merge_fn = pd_back_merge_fn;
-	q->front_merge_fn = pd_front_merge_fn;
-	q->merge_requests_fn = pd_merge_requests_fn;
         read_ahead[MAJOR_NR] = 8;       /* 8 sector (4kB) read ahead */
         
 	pd_gendisk.major = major;
 	pd_gendisk.major_name = name;
-	pd_gendisk.next = gendisk_head;
-	gendisk_head = &pd_gendisk;
+	add_gendisk(&pd_gendisk);
 
 	for(i=0;i<PD_DEVS;i++) pd_blocksizes[i] = 1024;
 	blksize_size[MAJOR_NR] = pd_blocksizes;
+
+	for(i=0;i<PD_DEVS;i++) pd_maxsectors[i] = cluster;
+	max_sectors[MAJOR_NR] = pd_maxsectors;
 
 	printk("%s: %s version %s, major %d, cluster %d, nice %d\n",
 		name,name,PD_VERSION,major,cluster,nice);
@@ -484,8 +430,6 @@ static int pd_open (struct inode *inode, struct file *file)
 {       int unit = DEVICE_NR(inode->i_rdev);
 
         if ((unit >= PD_UNITS) || (!PD.present)) return -ENODEV;
-
-        MOD_INC_USE_COUNT;
 
 	wait_event (pd_wait_open, pd_valid);
 
@@ -531,16 +475,12 @@ static int pd_ioctl(struct inode *inode,struct file *file,
 		}
                 put_user(pd_hd[dev].start_sect,(long *)&geo->start);
                 return 0;
-            case BLKGETSIZE:
-                if (!arg) return -EINVAL;
-                err = verify_area(VERIFY_WRITE,(long *) arg,sizeof(long));
-                if (err) return (err);
-                put_user(pd_hd[dev].nr_sects,(long *) arg);
-                return (0);
             case BLKRRPART:
 		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
                 return pd_revalidate(inode->i_rdev);
+	    case BLKGETSIZE:
+	    case BLKGETSIZE64:
 	    case BLKROSET:
 	    case BLKROGET:
 	    case BLKRASET:
@@ -569,8 +509,6 @@ static int pd_release (struct inode *inode, struct file *file)
         if (!PD.access && PD.removable)
 		pd_doorlock(unit,IDE_DOORUNLOCK);
 
-        MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -591,9 +529,6 @@ static int pd_revalidate(kdev_t dev)
 
 {       int p, unit, minor;
         long flags;
-        kdev_t devp;
-
-	struct super_block *sb;
 
         unit = DEVICE_NR(dev);
         if ((unit >= PD_UNITS) || (!PD.present)) return -ENODEV;
@@ -609,13 +544,7 @@ static int pd_revalidate(kdev_t dev)
 
         for (p=(PD_PARTNS-1);p>=0;p--) {
 		minor = p + unit*PD_PARTNS;
-                devp = MKDEV(MAJOR_NR, minor);
-                fsync_dev(devp);
-
-                sb = get_super(devp);
-                if (sb) invalidate_inodes(sb);
-
-                invalidate_buffers(devp);
+                invalidate_device(MKDEV(MAJOR_NR, minor), 1);
                 pd_hd[minor].start_sect = 0;
                 pd_hd[minor].nr_sects = 0;
         }
@@ -648,17 +577,16 @@ int     init_module(void)
 }
 
 void    cleanup_module(void)
-
-{       struct gendisk **gdp;
+{
 	int unit;
 
         devfs_unregister_blkdev(MAJOR_NR,name);
-        for(gdp=&gendisk_head;*gdp;gdp=&((*gdp)->next))
-                if (*gdp == &pd_gendisk) break;
-        if (*gdp) *gdp = (*gdp)->next;
+	del_gendisk(&pd_gendisk);
 
 	for (unit=0;unit<PD_UNITS;unit++) 
 	   if (PD.present) pi_release(PI);
+
+	max_sectors[MAJOR_NR] = NULL;
 }
 
 #endif
@@ -728,14 +656,20 @@ static void pd_ide_command( int unit, int func, int block, int count )
 
 /* Don't use this call if the capacity is zero. */
 
-{       int c1, c0, h, s;
-
-        s  = ( block % PD.sectors) + 1;
-        h  = ( block / PD.sectors) % PD.heads;
-        c0 = ( block / (PD.sectors*PD.heads)) % 256;
-        c1 = ( block / (PD.sectors*PD.heads*256));
-
-        pd_send_command(unit,count,s,h,c0,c1,func);
+{
+       int c1, c0, h, s;
+       if (PD.can_lba) {
+               s = block & 255;
+               c0 = (block >>= 8) & 255;
+               c1 = (block >>= 8) & 255;
+               h = ((block >>= 8) & 15) + 0x40;
+       } else {
+               s  = ( block % PD.sectors) + 1;
+               h  = ( block /= PD.sectors) % PD.heads;
+               c0 = ( block /= PD.heads) % 256;
+               c1 = (block >>= 8);
+       }
+       pd_send_command(unit,count,s,h,c0,c1,func);
 }
 
 /* According to the ATA standard, the default CHS geometry should be
@@ -834,10 +768,14 @@ static int pd_identify( int unit )
         }
         pi_read_block(PI,pd_scratch,512);
         pi_disconnect(PI);
-        PD.sectors = word_val(6);
-        PD.heads = word_val(3);
-        PD.cylinders  = word_val(1);
-        PD.capacity = PD.sectors*PD.heads*PD.cylinders;
+	PD.can_lba = pd_scratch[99] & 2;
+	PD.sectors = le16_to_cpu(*(u16*)(pd_scratch+12));
+	PD.heads = le16_to_cpu(*(u16*)(pd_scratch+6));
+	PD.cylinders  = le16_to_cpu(*(u16*)(pd_scratch+2));
+	if (PD.can_lba)
+	  PD.capacity = le32_to_cpu(*(u32*)(pd_scratch + 120));
+	else
+	  PD.capacity = PD.sectors*PD.heads*PD.cylinders;
 
         for(j=0;j<PD_ID_LEN;j++) id[j^1] = pd_scratch[j+PD_ID_OFF];
         j = PD_ID_LEN-1;
@@ -960,7 +898,7 @@ repeat:
 
 static void pd_next_buf( int unit )
 
-{	long	saved_flags;
+{	unsigned long	saved_flags;
 
 	spin_lock_irqsave(&io_request_lock,saved_flags);
 	end_request(1);
@@ -991,7 +929,7 @@ static void do_pd_read( void )
 static void do_pd_read_start( void )
  
 {       int	unit = pd_unit;
-	long    saved_flags;
+	unsigned long    saved_flags;
 
 	pd_busy = 1;
 
@@ -1017,7 +955,7 @@ static void do_pd_read_start( void )
 static void do_pd_read_drq( void )
 
 {       int	unit = pd_unit;
-	long    saved_flags;
+	unsigned long    saved_flags;
 
 	while (1) {
             if (pd_wait_for(unit,STAT_DRQ,"do_pd_read_drq") & STAT_ERR) {
@@ -1057,7 +995,7 @@ static void do_pd_write( void )
 static void do_pd_write_start( void )
 
 {       int 	unit = pd_unit;
-	long    saved_flags;
+	unsigned long    saved_flags;
 
 	pd_busy = 1;
 
@@ -1105,7 +1043,7 @@ static void do_pd_write_start( void )
 static void do_pd_write_done( void )
 
 {       int	unit = pd_unit;
-	long    saved_flags;
+	unsigned long    saved_flags;
 
         if (pd_wait_for(unit,STAT_READY,"do_pd_write_done") & STAT_ERR) {
                 pi_disconnect(PI);
@@ -1131,3 +1069,4 @@ static void do_pd_write_done( void )
 
 /* end of pd.c */
 
+MODULE_LICENSE("GPL");

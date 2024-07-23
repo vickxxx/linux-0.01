@@ -14,6 +14,7 @@
 #include <asm/types.h>
 #include <asm/sigcontext.h>
 #include <asm/cpufeature.h>
+#include <linux/cache.h>
 #include <linux/config.h>
 #include <linux/threads.h>
 
@@ -52,7 +53,7 @@ struct cpuinfo_x86 {
 	unsigned long *pmd_quick;
 	unsigned long *pte_quick;
 	unsigned long pgtable_cache_sz;
-};
+} __attribute__((__aligned__(SMP_CACHE_BYTES)));
 
 #define X86_VENDOR_INTEL 0
 #define X86_VENDOR_CYRIX 1
@@ -62,6 +63,8 @@ struct cpuinfo_x86 {
 #define X86_VENDOR_CENTAUR 5
 #define X86_VENDOR_RISE 6
 #define X86_VENDOR_TRANSMETA 7
+#define X86_VENDOR_NSC 8
+#define X86_VENDOR_SIS 9
 #define X86_VENDOR_UNKNOWN 0xff
 
 /*
@@ -69,25 +72,14 @@ struct cpuinfo_x86 {
  */
 
 extern struct cpuinfo_x86 boot_cpu_data;
-extern struct tss_struct init_tss[NR_CPUS];
 
 #ifdef CONFIG_SMP
 extern struct cpuinfo_x86 cpu_data[];
 #define current_cpu_data cpu_data[smp_processor_id()]
 #else
-#define cpu_data &boot_cpu_data
+#define cpu_data (&boot_cpu_data)
 #define current_cpu_data boot_cpu_data
 #endif
-
-#define cpu_has_pge	(test_bit(X86_FEATURE_PGE,  boot_cpu_data.x86_capability))
-#define cpu_has_pse	(test_bit(X86_FEATURE_PSE,  boot_cpu_data.x86_capability))
-#define cpu_has_pae	(test_bit(X86_FEATURE_PAE,  boot_cpu_data.x86_capability))
-#define cpu_has_tsc	(test_bit(X86_FEATURE_TSC,  boot_cpu_data.x86_capability))
-#define cpu_has_de	(test_bit(X86_FEATURE_DE,   boot_cpu_data.x86_capability))
-#define cpu_has_vme	(test_bit(X86_FEATURE_VME,  boot_cpu_data.x86_capability))
-#define cpu_has_fxsr	(test_bit(X86_FEATURE_FXSR, boot_cpu_data.x86_capability))
-#define cpu_has_xmm	(test_bit(X86_FEATURE_XMM,  boot_cpu_data.x86_capability))
-#define cpu_has_fpu	(test_bit(X86_FEATURE_FPU,  boot_cpu_data.x86_capability))
 
 extern char ignore_irq13;
 
@@ -119,53 +111,57 @@ extern void dodgy_tsc(void);
 /*
  * Generic CPUID function
  */
-extern inline void cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
+static inline void cpuid(int op, int *eax, int *ebx, int *ecx, int *edx)
 {
 	__asm__("cpuid"
 		: "=a" (*eax),
 		  "=b" (*ebx),
 		  "=c" (*ecx),
 		  "=d" (*edx)
-		: "a" (op));
+		: "0" (op));
 }
 
 /*
  * CPUID functions returning a single datum
  */
-extern inline unsigned int cpuid_eax(unsigned int op)
+static inline unsigned int cpuid_eax(unsigned int op)
 {
-	unsigned int eax, ebx, ecx, edx;
+	unsigned int eax;
 
 	__asm__("cpuid"
-		: "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
-		: "a" (op));
+		: "=a" (eax)
+		: "0" (op)
+		: "bx", "cx", "dx");
 	return eax;
 }
-extern inline unsigned int cpuid_ebx(unsigned int op)
+static inline unsigned int cpuid_ebx(unsigned int op)
 {
-	unsigned int eax, ebx, ecx, edx;
+	unsigned int eax, ebx;
 
 	__asm__("cpuid"
-		: "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
-		: "a" (op));
+		: "=a" (eax), "=b" (ebx)
+		: "0" (op)
+		: "cx", "dx" );
 	return ebx;
 }
-extern inline unsigned int cpuid_ecx(unsigned int op)
+static inline unsigned int cpuid_ecx(unsigned int op)
 {
-	unsigned int eax, ebx, ecx, edx;
+	unsigned int eax, ecx;
 
 	__asm__("cpuid"
-		: "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
-		: "a" (op));
+		: "=a" (eax), "=c" (ecx)
+		: "0" (op)
+		: "bx", "dx" );
 	return ecx;
 }
-extern inline unsigned int cpuid_edx(unsigned int op)
+static inline unsigned int cpuid_edx(unsigned int op)
 {
-	unsigned int eax, ebx, ecx, edx;
+	unsigned int eax, edx;
 
 	__asm__("cpuid"
-		: "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx)
-		: "a" (op));
+		: "=a" (eax), "=d" (edx)
+		: "0" (op)
+		: "bx", "cx");
 	return edx;
 }
 
@@ -183,6 +179,9 @@ extern inline unsigned int cpuid_edx(unsigned int op)
 #define X86_CR4_PCE		0x0100	/* enable performance counters at ipl 3 */
 #define X86_CR4_OSFXSR		0x0200	/* enable fast FPU save and restore */
 #define X86_CR4_OSXMMEXCPT	0x0400	/* enable unmasked SSE exceptions */
+
+#define load_cr3(pgdir) \
+	asm volatile("movl %0,%%cr3": :"r" (__pa(pgdir)));
 
 /*
  * Save the cr4 feature set we're using (ie
@@ -222,6 +221,7 @@ static inline void clear_in_cr4 (unsigned long mask)
 #define CX86_CCR4 0xe8
 #define CX86_CCR5 0xe9
 #define CX86_CCR6 0xea
+#define CX86_CCR7 0xeb
 #define CX86_DIR0 0xfe
 #define CX86_DIR1 0xff
 #define CX86_ARR_BASE 0xc4
@@ -234,8 +234,9 @@ static inline void clear_in_cr4 (unsigned long mask)
 #define getCx86(reg) ({ outb((reg), 0x22); inb(0x23); })
 
 #define setCx86(reg, data) do { \
+	unsigned char _tmp_data = (data); \
 	outb((reg), 0x22); \
-	outb((data), 0x23); \
+	outb(_tmp_data, 0x23); \
 } while (0)
 
 /*
@@ -269,6 +270,7 @@ extern unsigned int mca_pentium_flag;
  * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
  */
 #define IO_BITMAP_SIZE	32
+#define IO_BITMAP_BYTES (IO_BITMAP_SIZE * 4)
 #define IO_BITMAP_OFFSET offsetof(struct tss_struct,io_bitmap)
 #define INVALID_IO_BITMAP_OFFSET 0x8000
 
@@ -355,6 +357,8 @@ struct tss_struct {
 	unsigned long __cacheline_filler[5];
 };
 
+extern struct tss_struct init_tss[NR_CPUS];
+
 struct thread_struct {
 	unsigned long	esp0;
 	unsigned long	eip;
@@ -370,7 +374,7 @@ struct thread_struct {
 /* virtual 86 mode info */
 	struct vm86_struct	* vm86_info;
 	unsigned long		screen_bitmap;
-	unsigned long		v86flags, v86mask, v86mode, saved_esp0;
+	unsigned long		v86flags, v86mask, saved_esp0;
 /* IO permissions */
 	int		ioperm;
 	unsigned long	io_bitmap[IO_BITMAP_SIZE+1];
@@ -382,12 +386,9 @@ struct thread_struct {
 	{ [0 ... 7] = 0 },	/* debugging registers */	\
 	0, 0, 0,						\
 	{ { 0, }, },		/* 387 state */			\
-	0,0,0,0,0,0,						\
+	0,0,0,0,0,						\
 	0,{~0,}			/* io permissions */		\
 }
-
-#define INIT_MMAP \
-{ &init_mm, 0, 0, NULL, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
 #define INIT_TSS  {						\
 	0,0, /* back_link, __blh */				\
@@ -425,16 +426,19 @@ extern void release_thread(struct task_struct *);
 /*
  * create a kernel thread without removing it from tasklists
  */
-extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+extern int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
-/* Copy and release all segment info associated with a VM */
-extern void copy_segments(struct task_struct *p, struct mm_struct * mm);
-extern void release_segments(struct mm_struct * mm);
+/* Copy and release all segment info associated with a VM
+ * Unusable due to lack of error handling, use {init_new,destroy}_context
+ * instead.
+ */
+static inline void copy_segments(struct task_struct *p, struct mm_struct * mm) { }
+static inline void release_segments(struct mm_struct * mm) { }
 
 /*
  * Return saved PC of a blocked thread.
  */
-extern inline unsigned long thread_saved_pc(struct thread_struct *t)
+static inline unsigned long thread_saved_pc(struct thread_struct *t)
 {
 	return ((unsigned long *)t->esp)[3];
 }
@@ -451,7 +455,7 @@ unsigned long get_wchan(struct task_struct *p);
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
 
-struct microcode {
+struct microcode_header {
 	unsigned int hdrver;
 	unsigned int rev;
 	unsigned int date;
@@ -459,17 +463,69 @@ struct microcode {
 	unsigned int cksum;
 	unsigned int ldrver;
 	unsigned int pf;
-	unsigned int reserved[5];
-	unsigned int bits[500];
+	unsigned int datasize;
+	unsigned int totalsize;
+	unsigned int reserved[3];
 };
 
+struct microcode {
+	struct microcode_header hdr;
+	unsigned int bits[0];
+};
+
+typedef struct microcode microcode_t;
+typedef struct microcode_header microcode_header_t;
+
+/* microcode format is extended from prescott processors */
+struct extended_signature {
+	unsigned int sig;
+	unsigned int pf;
+	unsigned int cksum;
+};
+
+struct extended_sigtable {
+	unsigned int count;
+	unsigned int cksum;
+	unsigned int reserved[3];
+	struct extended_signature sigs[0];
+};
 /* '6' because it used to be for P6 only (but now covers Pentium 4 as well) */
 #define MICROCODE_IOCFREE	_IO('6',0)
 
 /* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
-extern inline void rep_nop(void)
+static inline void rep_nop(void)
 {
-	__asm__ __volatile__("rep;nop");
+	__asm__ __volatile__("rep;nop": : :"memory");
 }
+
+#define cpu_relax()	rep_nop()
+
+/* Prefetch instructions for Pentium III and AMD Athlon */
+#if defined(CONFIG_MPENTIUMIII) || defined (CONFIG_MPENTIUM4)
+
+#define ARCH_HAS_PREFETCH
+extern inline void prefetch(const void *x)
+{
+	__asm__ __volatile__ ("prefetchnta (%0)" : : "r"(x));
+}
+
+#elif CONFIG_X86_USE_3DNOW
+
+#define ARCH_HAS_PREFETCH
+#define ARCH_HAS_PREFETCHW
+#define ARCH_HAS_SPINLOCK_PREFETCH
+
+extern inline void prefetch(const void *x)
+{
+	 __asm__ __volatile__ ("prefetch (%0)" : : "r"(x));
+}
+
+extern inline void prefetchw(const void *x)
+{
+	 __asm__ __volatile__ ("prefetchw (%0)" : : "r"(x));
+}
+#define spin_lock_prefetch(x)	prefetchw(x)
+
+#endif
 
 #endif /* __ASM_I386_PROCESSOR_H */

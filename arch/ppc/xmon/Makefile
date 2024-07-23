@@ -1,11 +1,13 @@
+#
 # Makefile for xmon
 
 O_TARGET	:= x.o
 
-ifeq ($(CONFIG_8xx),y)
-obj-y		:= start_8xx.o xmon.o ppc-dis.o ppc-opc.o subr_prf.o setjmp.o
+ifdef CONFIG_8xx
+obj-y		:= start_8xx.o
 else
-obj-y		:= start.o xmon.o ppc-dis.o ppc-opc.o subr_prf.o setjmp.o
+obj-y		:= start.o
 endif
+obj-y		+= xmon.o ppc-dis.o ppc-opc.o subr_prf.o setjmp.o
 
 include $(TOPDIR)/Rules.make

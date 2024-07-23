@@ -1,5 +1,5 @@
 /*
-   drivers/sound/lowlevel/aedsp16.c
+   drivers/sound/aedsp16.c
 
    Audio Excel DSP 16 software configuration routines
    Copyright (C) 1995,1996,1997,1998  Riccardo Facchetti (fizban@tin.it)
@@ -257,9 +257,9 @@
 
 #define VERSION "1.3"		/* Version of Audio Excel DSP 16 driver */
 
-#undef	AEDSP16_DEBUG 1		/* Define this to enable debug code     */
-#undef	AEDSP16_DEBUG_MORE 1	/* Define this to enable more debug     */
-#undef	AEDSP16_INFO  1		/* Define this to enable info code      */
+#undef	AEDSP16_DEBUG 		/* Define this to 1 to enable debug code     */
+#undef	AEDSP16_DEBUG_MORE 	/* Define this to 1 to enable more debug     */
+#undef	AEDSP16_INFO 		/* Define this to 1 to enable info code      */
 
 #if defined(AEDSP16_DEBUG)
 # define DBG(x)  printk x
@@ -1325,6 +1325,7 @@ MODULE_PARM(mpu_base, "i");
 MODULE_PARM_DESC(mpu_base,"MPU-401 I/O base address (0x300 0x310 0x320 0x330)");
 MODULE_AUTHOR("Riccardo Facchetti <fizban@tin.it>");
 MODULE_DESCRIPTION("Audio Excel DSP 16 Driver Version " VERSION);
+MODULE_LICENSE("GPL");
 
 static int __init do_init_aedsp16(void) {
 	printk("Audio Excel DSP 16 init driver Copyright (C) Riccardo Facchetti 1995-98\n");

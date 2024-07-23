@@ -2,6 +2,13 @@
  * Packet matching code.
  *
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
+ * Copyright (C) 2000-2002 Netfilter core team <coreteam@netfilter.org>
+ *
+ * 19 Jan 2002 Harald Welte <laforge@gnumonks.org>
+ * 	- increase module usage count as soon as we have rules inside
+ * 	  a table
+ * 06 Jun 2002 Andras Kis-Szabo <kisza@sch.bme.hu>
+ *      - new extension header parser code
  */
 #include <linux/config.h>
 #include <linux/skbuff.h>
@@ -11,8 +18,9 @@
 #include <linux/module.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/icmp.h>
+#include <linux/icmpv6.h>
 #include <net/ip.h>
+#include <net/ipv6.h>
 #include <asm/uaccess.h>
 #include <asm/semaphore.h>
 #include <linux/proc_fs.h>
@@ -20,6 +28,7 @@
 #include <linux/netfilter_ipv6/ip6_tables.h>
 
 #define IPV6_HDR_LEN	(sizeof(struct ipv6hdr))
+#define IPV6_OPTHDR_LEN	(sizeof(struct ipv6_opt_hdr))
 
 /*#define DEBUG_IP_FIREWALL*/
 /*#define DEBUG_ALLOW_ALL*/ /* Useful for remote debugging */
@@ -49,7 +58,6 @@ do {								\
 #endif
 #define SMP_ALIGN(x) (((x) + SMP_CACHE_BYTES-1) & ~(SMP_CACHE_BYTES-1))
 
-/* Mutex protects lists (only traversed in user context). */
 static DECLARE_MUTEX(ip6t_mutex);
 
 /* Must have mutex */
@@ -86,15 +94,15 @@ struct ip6t_table_info
 	unsigned int size;
 	/* Number of entries: FIXME. --RR */
 	unsigned int number;
+	/* Initial number of entries. Needed for module usage count */
+	unsigned int initial_entries;
 
 	/* Entry points and underflows */
 	unsigned int hook_entry[NF_IP6_NUMHOOKS];
 	unsigned int underflow[NF_IP6_NUMHOOKS];
 
-	char padding[SMP_ALIGN((NF_IP6_NUMHOOKS*2+2)*sizeof(unsigned int))];
-
 	/* ip6t_entry tables: one per CPU */
-	char entries[0];
+	char entries[0] ____cacheline_aligned;
 };
 
 static LIST_HEAD(ip6t_target);
@@ -103,7 +111,7 @@ static LIST_HEAD(ip6t_tables);
 #define ADD_COUNTER(c,b,p) do { (c).bcnt += (b); (c).pcnt += (p); } while(0)
 
 #ifdef CONFIG_SMP
-#define TABLE_OFFSET(t,p) (SMP_ALIGN((t)->size)*cpu_number_map(p))
+#define TABLE_OFFSET(t,p) (SMP_ALIGN((t)->size)*(p))
 #else
 #define TABLE_OFFSET(t,p) 0
 #endif
@@ -126,50 +134,31 @@ static int ip6_masked_addrcmp(struct in6_addr addr1, struct in6_addr mask,
 	return 0;
 }
 
-/* takes in current header and pointer to the header */
-/* if another header exists, sets hdrptr to the next header
-   and returns the new header value, else returns 0 */
-static u_int8_t ip6_nexthdr(u_int8_t currenthdr, u_int8_t *hdrptr)
+/* Check for an extension */
+int 
+ip6t_ext_hdr(u8 nexthdr)
 {
-	int i;
-	u_int8_t hdrlen, nexthdr = 0;
-	switch(currenthdr){
-		case IPPROTO_AH:
-		/* whoever decided to do the length of AUTH for ipv6
-		in 32bit units unlike other headers should be beaten...
-		repeatedly...with a large stick...no, an even LARGER
-		stick...no, you're still not thinking big enough */
-			nexthdr = *hdrptr;
-			hdrlen = hdrptr[i] * 4 + 8;
-			hdrptr = hdrptr + hdrlen;
-			break;
-		/*stupid rfc2402 */
-		case IPPROTO_DSTOPTS:
-		case IPPROTO_ROUTING:
-		case IPPROTO_HOPOPTS:
-			nexthdr = *hdrptr;
-			hdrlen = hdrptr[1] * 8 + 8;
-			hdrptr = hdrptr + hdrlen;
-			break;
-		case IPPROTO_FRAGMENT:
-			nexthdr = *hdrptr;
-			hdrptr = hdrptr + 8;
-			break;
-	}	
-	return nexthdr;
-
+        return ( (nexthdr == IPPROTO_HOPOPTS)   ||
+                 (nexthdr == IPPROTO_ROUTING)   ||
+                 (nexthdr == IPPROTO_FRAGMENT)  ||
+                 (nexthdr == IPPROTO_ESP)       ||
+                 (nexthdr == IPPROTO_AH)        ||
+                 (nexthdr == IPPROTO_NONE)      ||
+                 (nexthdr == IPPROTO_DSTOPTS) );
 }
 
 /* Returns whether matches rule or not. */
 static inline int
-ip6_packet_match(const struct ipv6hdr *ipv6,
+ip6_packet_match(const struct sk_buff *skb,
 		 const char *indev,
 		 const char *outdev,
 		 const struct ip6t_ip6 *ip6info,
-		 int isfrag)
+		 unsigned int *protoff,
+		 int *fragoff)
 {
 	size_t i;
 	unsigned long ret;
+	const struct ipv6hdr *ipv6 = skb->nh.ipv6h;
 
 #define FWINV(bool,invflg) ((bool) ^ !!(ip6info->invflags & invflg))
 
@@ -220,17 +209,77 @@ ip6_packet_match(const struct ipv6hdr *ipv6,
 	/* look for the desired protocol header */
 	if((ip6info->flags & IP6T_F_PROTO)) {
 		u_int8_t currenthdr = ipv6->nexthdr;
-		u_int8_t *hdrptr;
-		hdrptr = (u_int8_t *)(ipv6 + 1);
-		do {
-			if (ip6info->proto == currenthdr) {
-				if(ip6info->invflags & IP6T_INV_PROTO)
+		struct ipv6_opt_hdr *hdrptr;
+		u_int16_t ptr;		/* Header offset in skb */
+		u_int16_t hdrlen;	/* Header */
+		u_int16_t foff = 0;
+
+		ptr = IPV6_HDR_LEN;
+
+		while (ip6t_ext_hdr(currenthdr)) {
+	                /* Is there enough space for the next ext header? */
+	                if (skb->len - ptr < IPV6_OPTHDR_LEN)
+	                        return 0;
+
+			/* NONE or ESP: there isn't protocol part */
+			/* If we want to count these packets in '-p all',
+			 * we will change the return 0 to 1*/
+			if ((currenthdr == IPPROTO_NONE) || 
+				(currenthdr == IPPROTO_ESP))
+				break;
+
+	                hdrptr = (struct ipv6_opt_hdr *)(skb->data + ptr);
+
+			/* Size calculation */
+	                if (currenthdr == IPPROTO_FRAGMENT) {
+				unsigned int foff_off;
+
+				foff_off = ptr + offsetof(struct frag_hdr,
+							  frag_off);
+				if (skb->len - foff_off < sizeof(foff))
 					return 0;
-				return 1;
+
+				foff = ntohs(*(u_int16_t *)(skb->data
+							    + foff_off))
+				       & ~0x7;
+	                        hdrlen = 8;
+	                } else if (currenthdr == IPPROTO_AH)
+	                        hdrlen = (hdrptr->hdrlen+2)<<2;
+	                else
+	                        hdrlen = ipv6_optlen(hdrptr);
+
+			currenthdr = hdrptr->nexthdr;
+	                ptr += hdrlen;
+			/* ptr is too large */
+	                if ( ptr > skb->len ) 
+				return 0;
+			if (foff) {
+				if (ip6t_ext_hdr(currenthdr))
+					return 0;
+				break;
 			}
-			currenthdr = ip6_nexthdr(currenthdr, hdrptr);
-		} while(currenthdr);
-		if (!(ip6info->invflags & IP6T_INV_PROTO))
+		}
+
+		*protoff = ptr;
+		*fragoff = foff;
+
+		/* currenthdr contains the protocol header */
+
+		dprintf("Packet protocol %hi ?= %s%hi.\n",
+				currenthdr, 
+				ip6info->invflags & IP6T_INV_PROTO ? "!":"",
+				ip6info->proto);
+
+		if (ip6info->proto == currenthdr) {
+			if(ip6info->invflags & IP6T_INV_PROTO) {
+				return 0;
+			}
+			return 1;
+		}
+
+		/* We need match for the '-p all', too! */
+		if ((ip6info->proto != 0) &&
+			!(ip6info->invflags & IP6T_INV_PROTO))
 			return 0;
 	}
 	return 1;
@@ -301,10 +350,8 @@ ip6t_do_table(struct sk_buff **pskb,
 	      void *userdata)
 {
 	static const char nulldevname[IFNAMSIZ] = { 0 };
-	u_int16_t offset = 0;
-	struct ipv6hdr *ipv6;
-	void *protohdr;
-	u_int16_t datalen;
+	int offset = 0;
+	unsigned int protoff = 0;
 	int hotdrop = 0;
 	/* Initializing verdict to NF_DROP keeps gcc happy. */
 	unsigned int verdict = NF_DROP;
@@ -313,9 +360,6 @@ ip6t_do_table(struct sk_buff **pskb,
 	struct ip6t_entry *e, *back;
 
 	/* Initialization */
-	ipv6 = (*pskb)->nh.ipv6h;
-	protohdr = (u_int32_t *)((char *)ipv6 + IPV6_HDR_LEN);
-	datalen = (*pskb)->len - IPV6_HDR_LEN;
 	indev = in ? in->name : nulldevname;
 	outdev = out ? out->name : nulldevname;
 
@@ -329,7 +373,8 @@ ip6t_do_table(struct sk_buff **pskb,
 	read_lock_bh(&table->lock);
 	IP_NF_ASSERT(table->valid_hooks & (1 << hook));
 	table_base = (void *)table->private->entries
-		+ TABLE_OFFSET(table->private, smp_processor_id());
+		+ TABLE_OFFSET(table->private, 
+				cpu_number_map(smp_processor_id()));
 	e = get_entry(table_base, table->private->hook_entry[hook]);
 
 #ifdef CONFIG_NETFILTER_DEBUG
@@ -352,16 +397,20 @@ ip6t_do_table(struct sk_buff **pskb,
 		IP_NF_ASSERT(e);
 		IP_NF_ASSERT(back);
 		(*pskb)->nfcache |= e->nfcache;
-		if (ip6_packet_match(ipv6, indev, outdev, &e->ipv6, offset)) {
+		if (ip6_packet_match(*pskb, indev, outdev, &e->ipv6,
+				     &protoff, &offset)) {
 			struct ip6t_entry_target *t;
 
 			if (IP6T_MATCH_ITERATE(e, do_match,
 					       *pskb, in, out,
-					       offset, protohdr,
-					       datalen, &hotdrop) != 0)
+					       offset,
+					       (void *)((*pskb)->data
+							+ protoff),
+					       (*pskb)->len - protoff,
+					       &hotdrop) != 0)
 				goto no_match;
 
-			ADD_COUNTER(e->counters, ntohs(ipv6->payload_len) + IPV6_HDR_LEN, 1);
+			ADD_COUNTER(e->counters, ntohs((*pskb)->nh.ipv6h->payload_len) + IPV6_HDR_LEN, 1);
 
 			t = ip6t_get_target(e);
 			IP_NF_ASSERT(t->u.kernel.target);
@@ -417,11 +466,6 @@ ip6t_do_table(struct sk_buff **pskb,
 				((struct ip6t_entry *)table_base)->comefrom
 					= 0x57acc001;
 #endif
-				/* Target might have changed stuff. */
-				ipv6 = (*pskb)->nh.ipv6h;
-				protohdr = (u_int32_t *)ipv6 + IPV6_HDR_LEN;
-				datalen = (*pskb)->len - IPV6_HDR_LEN;
-
 				if (verdict == IP6T_CONTINUE)
 					e = (void *)e + e->next_offset;
 				else
@@ -504,7 +548,7 @@ find_inlist_lock(struct list_head *head,
 #endif
 
 static inline struct ip6t_table *
-find_table_lock(const char *name, int *error, struct semaphore *mutex)
+ip6t_find_table_lock(const char *name, int *error, struct semaphore *mutex)
 {
 	return find_inlist_lock(&ip6t_tables, name, "ip6table_", error, mutex);
 }
@@ -515,8 +559,8 @@ find_match_lock(const char *name, int *error, struct semaphore *mutex)
 	return find_inlist_lock(&ip6t_match, name, "ip6t_", error, mutex);
 }
 
-static inline struct ip6t_target *
-find_target_lock(const char *name, int *error, struct semaphore *mutex)
+struct ip6t_target *
+ip6t_find_target_lock(const char *name, int *error, struct semaphore *mutex)
 {
 	return find_inlist_lock(&ip6t_target, name, "ip6t_", error, mutex);
 }
@@ -733,9 +777,9 @@ check_entry(struct ip6t_entry *e, const char *name, unsigned int size,
 		goto cleanup_matches;
 
 	t = ip6t_get_target(e);
-	target = find_target_lock(t->u.user.name, &ret, &ip6t_mutex);
+	target = ip6t_find_target_lock(t->u.user.name, &ret, &ip6t_mutex);
 	if (!target) {
-	  //		duprintf("check_entry: `%s' not found\n", t->u.name);
+		duprintf("check_entry: `%s' not found\n", t->u.user.name);
 		goto cleanup_matches;
 	}
 	if (target->me)
@@ -906,7 +950,7 @@ translate_table(const char *name,
 
 	/* And one copy for every other CPU */
 	for (i = 1; i < smp_num_cpus; i++) {
-		memcpy(newinfo->entries + SMP_ALIGN(newinfo->size*i),
+		memcpy(newinfo->entries + SMP_ALIGN(newinfo->size)*i,
 		       newinfo->entries,
 		       SMP_ALIGN(newinfo->size));
 	}
@@ -949,6 +993,7 @@ replace_table(struct ip6t_table *table,
 	}
 	oldinfo = table->private;
 	table->private = newinfo;
+	newinfo->initial_entries = oldinfo->initial_entries;
 	write_unlock_bh(&table->lock);
 
 	return oldinfo;
@@ -1069,7 +1114,7 @@ get_entries(const struct ip6t_get_entries *entries,
 	int ret;
 	struct ip6t_table *t;
 
-	t = find_table_lock(entries->name, &ret, &ip6t_mutex);
+	t = ip6t_find_table_lock(entries->name, &ret, &ip6t_mutex);
 	if (t) {
 		duprintf("t->private->number = %u\n",
 			 t->private->number);
@@ -1102,6 +1147,17 @@ do_replace(void *user, unsigned int len)
 	if (copy_from_user(&tmp, user, sizeof(tmp)) != 0)
 		return -EFAULT;
 
+	/* Pedantry: prevent them from hitting BUG() in vmalloc.c --RR */
+	if ((SMP_ALIGN(tmp.size) >> PAGE_SHIFT) + 2 > num_physpages)
+		return -ENOMEM;
+
+	/* overflow check */
+	if (tmp.size >= (INT_MAX - sizeof(struct ip6t_table_info)) / NR_CPUS -
+			SMP_CACHE_BYTES)
+		return -ENOMEM;
+	if (tmp.num_counters >= INT_MAX / sizeof(struct ip6t_counters))
+		return -ENOMEM;
+
 	newinfo = vmalloc(sizeof(struct ip6t_table_info)
 			  + SMP_ALIGN(tmp.size) * smp_num_cpus);
 	if (!newinfo)
@@ -1128,7 +1184,7 @@ do_replace(void *user, unsigned int len)
 
 	duprintf("ip_tables: Translated table\n");
 
-	t = find_table_lock(tmp.name, &ret, &ip6t_mutex);
+	t = ip6t_find_table_lock(tmp.name, &ret, &ip6t_mutex);
 	if (!t)
 		goto free_newinfo_counters_untrans;
 
@@ -1143,6 +1199,16 @@ do_replace(void *user, unsigned int len)
 	oldinfo = replace_table(t, tmp.num_counters, newinfo, &ret);
 	if (!oldinfo)
 		goto free_newinfo_counters_untrans_unlock;
+
+	/* Update module usage count based on number of rules */
+	duprintf("do_replace: oldnum=%u, initnum=%u, newnum=%u\n",
+		oldinfo->number, oldinfo->initial_entries, newinfo->number);
+	if (t->me && (oldinfo->number <= oldinfo->initial_entries) &&
+ 	    (newinfo->number > oldinfo->initial_entries))
+		__MOD_INC_USE_COUNT(t->me);
+	else if (t->me && (oldinfo->number > oldinfo->initial_entries) &&
+	 	 (newinfo->number <= oldinfo->initial_entries))
+		__MOD_DEC_USE_COUNT(t->me);
 
 	/* Get the old counters. */
 	get_counters(oldinfo, counters);
@@ -1212,12 +1278,12 @@ do_add_counters(void *user, unsigned int len)
 		goto free;
 	}
 
-	t = find_table_lock(tmp.name, &ret, &ip6t_mutex);
+	t = ip6t_find_table_lock(tmp.name, &ret, &ip6t_mutex);
 	if (!t)
 		goto free;
 
 	write_lock_bh(&t->lock);
-	if (t->private->number != paddc->num_counters) {
+	if (t->private->number != tmp.num_counters) {
 		ret = -EINVAL;
 		goto unlock_up_free;
 	}
@@ -1286,7 +1352,8 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void *user, int *len)
 			ret = -EFAULT;
 			break;
 		}
-		t = find_table_lock(name, &ret, &ip6t_mutex);
+		name[IP6T_TABLE_MAXNAMELEN-1] = '\0';
+		t = ip6t_find_table_lock(name, &ret, &ip6t_mutex);
 		if (t) {
 			struct ip6t_getinfo info;
 
@@ -1297,7 +1364,7 @@ do_ip6t_get_ctl(struct sock *sk, int cmd, void *user, int *len)
 			       sizeof(info.underflow));
 			info.num_entries = t->private->number;
 			info.size = t->private->size;
-			strcpy(info.name, name);
+			memcpy(info.name, name, sizeof(info.name));
 
 			if (copy_to_user(user, &info, *len) != 0)
 				ret = -EFAULT;
@@ -1401,7 +1468,7 @@ int ip6t_register_table(struct ip6t_table *table)
 	int ret;
 	struct ip6t_table_info *newinfo;
 	static struct ip6t_table_info bootstrap
-		= { 0, 0, { 0 }, { 0 }, { }, { } };
+		= { 0, 0, 0, { 0 }, { 0 }, { } };
 
 	MOD_INC_USE_COUNT;
 	newinfo = vmalloc(sizeof(struct ip6t_table_info)
@@ -1444,6 +1511,9 @@ int ip6t_register_table(struct ip6t_table *table)
 
 	duprintf("table->private->number = %u\n",
 		 table->private->number);
+
+	/* save number of initial entries */
+	table->private->initial_entries = table->private->number;
 
 	table->lock = RW_LOCK_UNLOCKED;
 	list_prepend(&ip6t_tables, table);
@@ -1493,7 +1563,8 @@ tcp_find_option(u_int8_t option,
 
 	duprintf("tcp_match: finding option\n");
 	/* If we don't have the whole header, drop packet. */
-	if (tcp->doff * 4 > datalen) {
+	if (tcp->doff * 4 < sizeof(struct tcphdr) ||
+	    tcp->doff * 4 > datalen) {
 		*hotdrop = 1;
 		return 0;
 	}
@@ -1642,7 +1713,7 @@ udp_checkentry(const char *tablename,
 
 /* Returns 1 if the type and code is matched by the range, 0 otherwise */
 static inline int
-icmp_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
+icmp6_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
 		     u_int8_t type, u_int8_t code,
 		     int invert)
 {
@@ -1651,7 +1722,7 @@ icmp_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
 }
 
 static int
-icmp_match(const struct sk_buff *skb,
+icmp6_match(const struct sk_buff *skb,
 	   const struct net_device *in,
 	   const struct net_device *out,
 	   const void *matchinfo,
@@ -1660,7 +1731,7 @@ icmp_match(const struct sk_buff *skb,
 	   u_int16_t datalen,
 	   int *hotdrop)
 {
-	const struct icmphdr *icmp = hdr;
+	const struct icmp6hdr *icmp = hdr;
 	const struct ip6t_icmp *icmpinfo = matchinfo;
 
 	if (offset == 0 && datalen < 2) {
@@ -1673,16 +1744,16 @@ icmp_match(const struct sk_buff *skb,
 
 	/* Must not be a fragment. */
 	return !offset
-		&& icmp_type_code_match(icmpinfo->type,
+		&& icmp6_type_code_match(icmpinfo->type,
 					icmpinfo->code[0],
 					icmpinfo->code[1],
-					icmp->type, icmp->code,
+					icmp->icmp6_type, icmp->icmp6_code,
 					!!(icmpinfo->invflags&IP6T_ICMP_INV));
 }
 
 /* Called when user tries to insert an entry of this type. */
 static int
-icmp_checkentry(const char *tablename,
+icmp6_checkentry(const char *tablename,
 	   const struct ip6t_ip6 *ipv6,
 	   void *matchinfo,
 	   unsigned int matchsize,
@@ -1691,7 +1762,7 @@ icmp_checkentry(const char *tablename,
 	const struct ip6t_icmp *icmpinfo = matchinfo;
 
 	/* Must specify proto == ICMP, and no unknown invflags */
-	return ipv6->proto == IPPROTO_ICMP
+	return ipv6->proto == IPPROTO_ICMPV6
 		&& !(ipv6->invflags & IP6T_INV_PROTO)
 		&& matchsize == IP6T_ALIGN(sizeof(struct ip6t_icmp))
 		&& !(icmpinfo->invflags & ~IP6T_ICMP_INV);
@@ -1711,18 +1782,19 @@ static struct ip6t_match tcp_matchstruct
 = { { NULL, NULL }, "tcp", &tcp_match, &tcp_checkentry, NULL };
 static struct ip6t_match udp_matchstruct
 = { { NULL, NULL }, "udp", &udp_match, &udp_checkentry, NULL };
-static struct ip6t_match icmp_matchstruct
-= { { NULL, NULL }, "icmp", &icmp_match, &icmp_checkentry, NULL };
+static struct ip6t_match icmp6_matchstruct
+= { { NULL, NULL }, "icmp6", &icmp6_match, &icmp6_checkentry, NULL };
 
 #ifdef CONFIG_PROC_FS
-static inline int print_name(const struct ip6t_table *t,
+static inline int print_name(const char *i,
 			     off_t start_offset, char *buffer, int length,
 			     off_t *pos, unsigned int *count)
 {
 	if ((*count)++ >= start_offset) {
 		unsigned int namelen;
 
-		namelen = sprintf(buffer + *pos, "%s\n", t->name);
+		namelen = sprintf(buffer + *pos, "%s\n",
+				  i + sizeof(struct list_head));
 		if (*pos + namelen > length) {
 			/* Stop iterating */
 			return 1;
@@ -1730,6 +1802,15 @@ static inline int print_name(const struct ip6t_table *t,
 		*pos += namelen;
 	}
 	return 0;
+}
+
+static inline int print_target(const struct ip6t_target *t,
+                               off_t start_offset, char *buffer, int length,
+                               off_t *pos, unsigned int *count)
+{
+	if (t == &ip6t_standard_target || t == &ip6t_error_target)
+		return 0;
+	return print_name((char *)t, start_offset, buffer, length, pos, count);
 }
 
 static int ip6t_get_tables(char *buffer, char **start, off_t offset, int length)
@@ -1740,7 +1821,7 @@ static int ip6t_get_tables(char *buffer, char **start, off_t offset, int length)
 	if (down_interruptible(&ip6t_mutex) != 0)
 		return 0;
 
-	LIST_FIND(&ip6t_tables, print_name, struct ip6t_table *,
+	LIST_FIND(&ip6t_tables, print_name, char *,
 		  offset, buffer, length, &pos, &count);
 
 	up(&ip6t_mutex);
@@ -1749,6 +1830,46 @@ static int ip6t_get_tables(char *buffer, char **start, off_t offset, int length)
 	*start=(char *)((unsigned long)count-offset);
 	return pos;
 }
+
+static int ip6t_get_targets(char *buffer, char **start, off_t offset, int length)
+{
+	off_t pos = 0;
+	unsigned int count = 0;
+
+	if (down_interruptible(&ip6t_mutex) != 0)
+		return 0;
+
+	LIST_FIND(&ip6t_target, print_target, struct ip6t_target *,
+		  offset, buffer, length, &pos, &count);
+
+	up(&ip6t_mutex);
+
+	*start = (char *)((unsigned long)count - offset);
+	return pos;
+}
+
+static int ip6t_get_matches(char *buffer, char **start, off_t offset, int length)
+{
+	off_t pos = 0;
+	unsigned int count = 0;
+
+	if (down_interruptible(&ip6t_mutex) != 0)
+		return 0;
+
+	LIST_FIND(&ip6t_match, print_name, char *,
+		  offset, buffer, length, &pos, &count);
+
+	up(&ip6t_mutex);
+
+	*start = (char *)((unsigned long)count - offset);
+	return pos;
+}
+
+static struct { char *name; get_info_t *get_info; } ip6t_proc_entry[] =
+{ { "ip6_tables_names", ip6t_get_tables },
+  { "ip6_tables_targets", ip6t_get_targets },
+  { "ip6_tables_matches", ip6t_get_matches },
+  { NULL, NULL} };
 #endif /*CONFIG_PROC_FS*/
 
 static int __init init(void)
@@ -1761,7 +1882,7 @@ static int __init init(void)
 	list_append(&ip6t_target, &ip6t_error_target);
 	list_append(&ip6t_match, &tcp_matchstruct);
 	list_append(&ip6t_match, &udp_matchstruct);
-	list_append(&ip6t_match, &icmp_matchstruct);
+	list_append(&ip6t_match, &icmp6_matchstruct);
 	up(&ip6t_mutex);
 
 	/* Register setsockopt */
@@ -1772,13 +1893,25 @@ static int __init init(void)
 	}
 
 #ifdef CONFIG_PROC_FS
-	if (!proc_net_create("ip6_tables_names", 0, ip6t_get_tables)) {
-		nf_unregister_sockopt(&ip6t_sockopts);
-		return -ENOMEM;
+	{
+		struct proc_dir_entry *proc;
+		int i;
+
+		for (i = 0; ip6t_proc_entry[i].name; i++) {
+			proc = proc_net_create(ip6t_proc_entry[i].name, 0,
+					       ip6t_proc_entry[i].get_info);
+			if (!proc) {
+				while (--i >= 0)
+				       proc_net_remove(ip6t_proc_entry[i].name);
+				nf_unregister_sockopt(&ip6t_sockopts);
+				return -ENOMEM;
+			}
+			proc->owner = THIS_MODULE;
+		}
 	}
 #endif
 
-	printk("ip6_tables: (c)2000 Netfilter core team\n");
+	printk("ip6_tables: (C) 2000-2002 Netfilter core team\n");
 	return 0;
 }
 
@@ -1786,9 +1919,24 @@ static void __exit fini(void)
 {
 	nf_unregister_sockopt(&ip6t_sockopts);
 #ifdef CONFIG_PROC_FS
-	proc_net_remove("ip6_tables_names");
+	{
+		int i;
+		for (i = 0; ip6t_proc_entry[i].name; i++)
+			proc_net_remove(ip6t_proc_entry[i].name);
+	}
 #endif
 }
 
+EXPORT_SYMBOL(ip6t_register_table);
+EXPORT_SYMBOL(ip6t_unregister_table);
+EXPORT_SYMBOL(ip6t_do_table);
+EXPORT_SYMBOL(ip6t_find_target_lock);
+EXPORT_SYMBOL(ip6t_register_match);
+EXPORT_SYMBOL(ip6t_unregister_match);
+EXPORT_SYMBOL(ip6t_register_target);
+EXPORT_SYMBOL(ip6t_unregister_target);
+EXPORT_SYMBOL(ip6t_ext_hdr);
+
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

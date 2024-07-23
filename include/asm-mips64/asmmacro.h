@@ -1,5 +1,4 @@
-/* $Id: asmmacro.h,v 1.2 1999/10/19 20:51:53 ralf Exp $
- *
+/*
  * asmmacro.h: Assembler macros to make things easier to read.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
@@ -9,7 +8,21 @@
 #ifndef _ASM_ASMMACRO_H
 #define _ASM_ASMMACRO_H
 
+#include <linux/config.h>
 #include <asm/offset.h>
+
+#ifdef CONFIG_CPU_SB1
+#define FPU_ENABLE_HAZARD		\
+	.set    push;			\
+	.set	noreorder;		\
+	.set    mips2;			\
+	SSNOP;				\
+	bnezl   $0, .+4;		\
+	 SSNOP;				\
+	.set    pop
+#else
+#define FPU_ENABLE_HAZARD
+#endif
 
 	.macro	fpu_save_16even thread tmp
 	cfc1	\tmp, fcr31

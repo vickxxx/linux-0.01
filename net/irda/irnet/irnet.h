@@ -5,11 +5,11 @@
  *
  * This file contains definitions and declarations global to the IrNET module,
  * all grouped in one place...
- * This file is a private header, so other modules don't want to know
+ * This file is a *private* header, so other modules don't want to know
  * what's in there...
  *
  * Note : as most part of the Linux kernel, this module is available
- * under the GNU Public License (GPL).
+ * under the GNU General Public License (GPL).
  */
 
 #ifndef IRNET_H
@@ -52,15 +52,13 @@
  *	o multipoint operation (limited by IrLAP specification)
  *	o information in /proc/net/irda/irnet
  *	o IrNET events on /dev/irnet (for user space daemon)
- *	o IrNET deamon (irnetd) to automatically handle incomming requests
+ *	o IrNET daemon (irnetd) to automatically handle incoming requests
  *	o Windows 2000 compatibility (tested, but need more work)
  * Currently missing :
  *	o Lot's of testing (that's your job)
  *	o Connection retries (may be too hard to do)
  *	o Check pppd persist mode
- *	o User space deamon (to automatically handle incomming requests)
- *	o A registered device number (comming, waiting from an answer) 
- *	o Final integration in Linux-IrDA (up to Dag) 
+ *	o User space daemon (to automatically handle incoming requests)
  *
  * The setup is not currently the most easy, but this should get much
  * better when everything will get integrated...
@@ -109,16 +107,16 @@
  * and allow to offer the event channel, useful for other stuff like debug.
  *
  * On the other hand, this require a loose coordination between the
- * present module and irnetd. One critical area is how incomming request
+ * present module and irnetd. One critical area is how incoming request
  * are handled.
- * When irnet receive an incomming request, it send an event to irnetd and
- * drop the incomming IrNET socket.
+ * When irnet receive an incoming request, it send an event to irnetd and
+ * drop the incoming IrNET socket.
  * irnetd start a pppd instance, which create a new IrNET socket. This new
  * socket is then connected in the originating node to the pppd instance.
  * At this point, in the originating node, the first socket is closed.
  *
  * I admit, this is a bit messy and waste some ressources. The alternative
- * is caching incomming socket, and that's also quite messy and waste
+ * is caching incoming socket, and that's also quite messy and waste
  * ressources.
  * We also make connection time slower. For example, on a 115 kb/s link it
  * adds 60ms to the connection time (770 ms). However, this is slower than
@@ -128,17 +126,17 @@
  * History :
  * -------
  *
- * v1 - 15/5/00 - Jean II
+ * v1 - 15.5.00 - Jean II
  *	o Basic IrNET (hook to ppp_generic & IrTTP - incl. multipoint)
  *	o control channel on /dev/irnet (set name/address)
  *	o event channel on /dev/irnet (for user space daemon)
  *
- * v2 - 5/6/00 - Jean II
+ * v2 - 5.6.00 - Jean II
  *	o Enable DROP_NOT_READY to avoid PPP timeouts & other weirdness...
  *	o Add DISCONNECT_TO event and rename DISCONNECT_FROM.
  *	o Set official device number alloaction on /dev/irnet
  *
- * v3 - 30/8/00 - Jean II
+ * v3 - 30.8.00 - Jean II
  *	o Update to latest Linux-IrDA changes :
  *		- queue_t => irda_queue_t
  *	o Update to ppp-2.4.0 :
@@ -150,15 +148,80 @@
  *	  another multilink bug (darn !)
  *	o Remove LINKNAME_IOCTL cruft
  *
- * v3b - 31/8/00 - Jean II
+ * v3b - 31.8.00 - Jean II
  *	o Dump discovery log at event channel startup
  *
- * v4 - 28/9/00 - Jean II
+ * v4 - 28.9.00 - Jean II
  *	o Fix interaction between poll/select and dump discovery log
  *	o Add IRNET_BLOCKED_LINK event (depend on new IrDA-Linux patch)
  *	o Add IRNET_NOANSWER_FROM event (mostly to help support)
  *	o Release flow control in disconnect_indication
  *	o Block packets while connecting (speed up connections)
+ *
+ * v5 - 11.01.01 - Jean II
+ *	o Init self->max_header_size, just in case...
+ *	o Set up ap->chan.hdrlen, to get zero copy on tx side working.
+ *	o avoid tx->ttp->flow->ppp->tx->... loop, by checking flow state
+ *		Thanks to Christian Gennerat for finding this bug !
+ *	---
+ *	o Declare the proper MTU/MRU that we can support
+ *		(but PPP doesn't read the MTU value :-()
+ *	o Declare hashbin HB_NOLOCK instead of HB_LOCAL to avoid
+ *		disabling and enabling irq twice
+ *
+ * v6 - 31.05.01 - Jean II
+ *	o Print source address in Found, Discovery, Expiry & Request events
+ *	o Print requested source address in /proc/net/irnet
+ *	o Change control channel input. Allow multiple commands in one line.
+ *	o Add saddr command to change ap->rsaddr (and use that in IrDA)
+ *	---
+ *	o Make the IrDA connection procedure totally asynchronous.
+ *	  Heavy rewrite of the IAS query code and the whole connection
+ *	  procedure. Now, irnet_connect() no longer need to be called from
+ *	  a process context...
+ *	o Enable IrDA connect retries in ppp_irnet_send(). The good thing
+ *	  is that IrDA connect retries are directly driven by PPP LCP
+ *	  retries (we retry for each LCP packet), so that everything
+ *	  is transparently controlled from pppd lcp-max-configure.
+ *	o Add ttp_connect flag to prevent rentry on the connect procedure
+ *	o Test and fixups to eliminate side effects of retries
+ *
+ * v7 - 22.08.01 - Jean II
+ *	o Cleanup : Change "saddr = 0x0" to "saddr = DEV_ADDR_ANY"
+ *	o Fix bug in BLOCK_WHEN_CONNECT introduced in v6 : due to the
+ *	  asynchronous IAS query, self->tsap is NULL when PPP send the
+ *	  first packet.  This was preventing "connect-delay 0" to work.
+ *	  Change the test in ppp_irnet_send() to self->ttp_connect.
+ *
+ * v8 - 1.11.01 - Jean II
+ *	o Tighten the use of self->ttp_connect and self->ttp_open to
+ *	  prevent various race conditions.
+ *	o Avoid leaking discovery log and skb
+ *	o Replace "self" with "server" in irnet_connect_indication() to
+ *	  better detect cut'n'paste error ;-)
+ *
+ * v9 - 29.11.01 - Jean II
+ *	o Fix event generation in disconnect indication that I broke in v8
+ *	  It was always generation "No-Answer" because I was testing ttp_open
+ *	  just after clearing it. *blush*.
+ *	o Use newly created irttp_listen() to fix potential crash when LAP
+ *	  destroyed before irnet module removed.
+ *
+ * v10 - 4.3.2 - Jean II
+ *	o When receiving a disconnect indication, don't reenable the
+ *	  PPP Tx queue, this will trigger a reconnect. Instead, close
+ *	  the channel, which will kill pppd...
+ *
+ * v11 - 20.3.02 - Jean II
+ *	o Oops ! v10 fix disabled IrNET retries and passive behaviour.
+ *	  Better fix in irnet_disconnect_indication() :
+ *	  - if connected, kill pppd via hangup.
+ *	  - if not connected, reenable ppp Tx, which trigger IrNET retry.
+ *
+ * v12 - 10.4.02 - Jean II
+ *	o Fix race condition in irnet_connect_indication().
+ *	  If the socket was already trying to connect, drop old connection
+ *	  and use new one only if acting as primary. See comments.
  */
 
 /***************************** INCLUDES *****************************/
@@ -171,7 +234,10 @@
 #include <linux/proc_fs.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/netdevice.h>
+#include <linux/miscdevice.h>
 #include <linux/poll.h>
+#include <linux/config.h>
+#include <linux/ctype.h>	/* isspace() */
 #include <asm/uaccess.h>
 
 #include <linux/ppp_defs.h>
@@ -205,7 +271,7 @@
 
 /* PPP side of the business */
 #define BLOCK_WHEN_CONNECT	/* Block packets when connecting */
-#undef CONNECT_IN_SEND		/* Will crash hard your box... */
+#define CONNECT_IN_SEND		/* Retry IrDA connection procedure */
 #undef FLUSH_TO_PPP		/* Not sure about this one, let's play safe */
 #undef SECURE_DEVIRNET		/* Bah... */
 
@@ -240,9 +306,11 @@
 #define DEBUG_IRDA_SERV_INFO	0	/* various info */
 #define DEBUG_IRDA_SERV_ERROR	1	/* problems */
 #define DEBUG_IRDA_TCB_TRACE	0	/* IRDA IrTTP callbacks */
-#define DEBUG_IRDA_OCB_TRACE	0	/* IRDA other callbacks */
 #define DEBUG_IRDA_CB_INFO	0	/* various info */
 #define DEBUG_IRDA_CB_ERROR	1	/* problems */
+#define DEBUG_IRDA_OCB_TRACE	0	/* IRDA other callbacks */
+#define DEBUG_IRDA_OCB_INFO	0	/* various info */
+#define DEBUG_IRDA_OCB_ERROR	1	/* problems */
 
 #define DEBUG_ASSERT		0	/* Verify all assertions */
 
@@ -254,29 +322,29 @@
  * compiler will optimise away the if() in all cases.
  */
 /* All error messages (will show up in the normal logs) */
-#define DERROR(dbg, args...) \
+#define DERROR(dbg, format, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_INFO "irnet: " __FUNCTION__ "(): " args);}
+		printk(KERN_INFO "irnet: %s(): " format, __FUNCTION__ , ##args);}
 
 /* Normal debug message (will show up in /var/log/debug) */
-#define DEBUG(dbg, args...) \
+#define DEBUG(dbg, format, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: " __FUNCTION__ "(): " args);}
+		printk(KERN_DEBUG "irnet: %s(): " format, __FUNCTION__ , ##args);}
 
 /* Entering a function (trace) */
-#define DENTER(dbg, args...) \
+#define DENTER(dbg, format, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: ->" __FUNCTION__ args);}
+		printk(KERN_DEBUG "irnet: -> %s" format, __FUNCTION__ , ##args);}
 
 /* Entering and exiting a function in one go (trace) */
-#define DPASS(dbg, args...) \
+#define DPASS(dbg, format, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: <>" __FUNCTION__ args);}
+		printk(KERN_DEBUG "irnet: <>%s" format, __FUNCTION__ , ##args);}
 
 /* Exiting a function (trace) */
-#define DEXIT(dbg, args...) \
+#define DEXIT(dbg, format, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: <-" __FUNCTION__ "()" args);}
+		printk(KERN_DEBUG "irnet: <-%s()" format, __FUNCTION__ , ##args);}
 
 /* Exit a function with debug */
 #define DRETURN(ret, dbg, args...) \
@@ -342,13 +410,15 @@ typedef struct irnet_socket
   /* ------------------------ IrTTP part ------------------------ */
   /* We create a pseudo "socket" over the IrDA tranport */
   int			ttp_open;	/* Set when IrTTP is ready */
+  int			ttp_connect;	/* Set when IrTTP is connecting */
   struct tsap_cb *	tsap;		/* IrTTP instance (the connection) */
 
   char			rname[NICKNAME_MAX_LEN + 1];
 					/* IrDA nickname of destination */
-  __u32			raddr;		/* Requested peer IrDA address */
-  __u32			saddr;		/* my local IrDA address */
+  __u32			rdaddr;		/* Requested peer IrDA address */
+  __u32			rsaddr;		/* Requested local IrDA address */
   __u32			daddr;		/* actual peer IrDA address */
+  __u32			saddr;		/* my local IrDA address */
   __u8			dtsap_sel;	/* Remote TSAP selector */
   __u8			stsap_sel;	/* Local TSAP selector */
 
@@ -365,17 +435,14 @@ typedef struct irnet_socket
   int			nslots;		/* Number of slots for discovery */
 
   struct iriap_cb *	iriap;		/* Used to query remote IAS */
-  wait_queue_head_t	query_wait;	/* Wait for the answer to a query */
-  struct ias_value *	ias_result;	/* Result of remote IAS query */
   int			errno;		/* status of the IAS query */
 
-  /* ---------------------- Optional parts ---------------------- */
-#ifdef INITIAL_DISCOVERY
-  /* Stuff used to dump discovery log */
+  /* -------------------- Discovery log part -------------------- */
+  /* Used by initial discovery on the control channel
+   * and by irnet_discover_daddr_and_lsap_sel() */
   struct irda_device_info *discoveries;	/* Copy of the discovery log */
   int			disco_index;	/* Last read in the discovery log */
   int			disco_number;	/* Size of the discovery log */
-#endif INITIAL_DISCOVERY
 
 } irnet_socket;
 
@@ -402,8 +469,9 @@ typedef struct irnet_log
 {
   irnet_event	event;
   int		unit;
-  __u32		addr;
-  char		name[NICKNAME_MAX_LEN + 1];
+  __u32		saddr;
+  __u32		daddr;
+  char		name[NICKNAME_MAX_LEN + 1];	/* 21 + 1 */
 } irnet_log;
 
 /*
@@ -450,4 +518,4 @@ extern void
 /* Control channel stuff - allocated in irnet_irda.h */
 extern struct irnet_ctrl_channel	irnet_events;
 
-#endif IRNET_H
+#endif /* IRNET_H */

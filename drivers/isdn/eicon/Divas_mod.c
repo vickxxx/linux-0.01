@@ -1,31 +1,11 @@
-
 /*
- *
- * Copyright (C) Eicon Technology Corporation, 2000.
- *
- * This source file is supplied for the exclusive use with Eicon
- * Technology Corporation's range of DIVA Server Adapters.
- *
- * Eicon File Revision :    1.15  
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY OF ANY KIND WHATSOEVER INCLUDING ANY 
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/fs.h>
 #undef N_DATA
 
@@ -34,11 +14,16 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
-#include <errno.h>
+#include <linux/slab.h>
+#include <linux/errno.h>
 
 #include "adapter.h"
 #include "uxio.h"
+
+
+MODULE_DESCRIPTION("ISDN4Linux: Driver for Eicon Diva Server cards");
+MODULE_AUTHOR("Armin Schindler");
+MODULE_LICENSE("GPL");
 
 #ifdef MODULE
 #include "idi.h"
@@ -46,22 +31,16 @@ void DIVA_DIDD_Write(DESCRIPTOR *, int);
 EXPORT_SYMBOL_NOVERS(DIVA_DIDD_Read);
 EXPORT_SYMBOL_NOVERS(DIVA_DIDD_Write);
 EXPORT_SYMBOL_NOVERS(DivasPrintf);
-#define Divas_init init_module
-#else
-#define Divas_init eicon_init
 #endif
-
-extern char *file_check(void);
 
 int DivasCardsDiscover(void);
 
-int
-Divas_init(void)
+static int __init
+divas_init(void)
 {
 	printk(KERN_DEBUG "DIVA Server Driver - initialising\n");
 	
-	printk(KERN_DEBUG "DIVA Server Driver - Version 2.0.15 (%s)\n",file_check());
-
+	printk(KERN_DEBUG "DIVA Server Driver - Version 2.0.16\n");
 
 #if !defined(CONFIG_PCI)
 	printk(KERN_WARNING "CONFIG_PCI is not defined!\n");
@@ -85,9 +64,8 @@ Divas_init(void)
     return 0;
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void __exit
+divas_exit(void)
 {
 	card_t *pCard;
 	word wCardIndex;
@@ -156,15 +134,6 @@ cleanup_module(void)
 	unregister_chrdev(Divas_major, "Divas");
 }
 
-void mod_inc_use_count(void)
-{
-	MOD_INC_USE_COUNT;
-}
-
-void mod_dec_use_count(void)
-{
-	MOD_DEC_USE_COUNT;
-}
-
-#endif
+module_init(divas_init);
+module_exit(divas_exit);
 

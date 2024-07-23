@@ -1,11 +1,11 @@
 /* 3c574.c: A PCMCIA ethernet driver for the 3com 3c574 "RoadRunner".
 
 	Written 1993-1998 by
-	Donald Becker, becker@cesdis.gsfc.nasa.gov, (driver core) and
+	Donald Becker, becker@scyld.com, (driver core) and
 	David Hinds, dahinds@users.sourceforge.net (from his PC card code).
 
 	This software may be used and distributed according to the terms of
-	the GNU Public License, incorporated herein by reference.
+	the GNU General Public License, incorporated herein by reference.
 
 	This driver derives from Donald Becker's 3c509 core, which has the
 	following copyright:
@@ -13,10 +13,6 @@
 	Director, National Security Agency.
 
 */
-
-/* Driver author info must always be in the binary.  Version too.. */
-static const char *tc574_version =
-"3c574_cs.c v1.08 9/24/98 Donald Becker/David Hinds, becker@cesdis.gsfc.nasa.gov.\n";
 
 /*
 				Theory of Operation
@@ -63,7 +59,7 @@ invalid ramWidth is Very Bad.
 
 V. References
 
-http://cesdis.gsfc.nasa.gov/linux/misc/NWay.html
+http://www.scyld.com/expert/NWay.html
 http://www.national.com/pf/DP/DP83840.html
 
 Thanks to Terry Murphy of 3Com for providing development information for
@@ -75,7 +71,7 @@ earlier 3Com products.
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -90,6 +86,8 @@ earlier 3Com products.
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
+#include <linux/ethtool.h>
+#include <asm/uaccess.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -100,24 +98,43 @@ earlier 3Com products.
 #include <pcmcia/ds.h>
 #include <pcmcia/mem_op.h>
 
-/* A few values that may be tweaked. */
-MODULE_PARM(irq_mask, "i");
-MODULE_PARM(irq_list, "1-4i");
-MODULE_PARM(max_interrupt_work, "i");
-MODULE_PARM(full_duplex, "i");
+/*====================================================================*/
+
+/* Module parameters */
+
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
+MODULE_DESCRIPTION("3Com 3c574 series PCMCIA ethernet driver");
+MODULE_LICENSE("GPL");
+
+#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
 
 /* Now-standard PC card module parameters. */
-static u_int irq_mask = 0xdeb8;			/* IRQ3,4,5,7,9,10,11,12,14,15 */
+INT_MODULE_PARM(irq_mask, 0xdeb8);
 static int irq_list[4] = { -1 };
+MODULE_PARM(irq_list, "1-4i");
+
+/* Maximum events (Rx packets, etc.) to handle at each interrupt. */
+INT_MODULE_PARM(max_interrupt_work, 32);
+
+/* Force full duplex modes? */
+INT_MODULE_PARM(full_duplex, 0);
+
+/* Autodetect link polarity reversal? */
+INT_MODULE_PARM(auto_polarity, 1);
+
+#ifdef PCMCIA_DEBUG
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
+#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
+static char *version =
+"3c574_cs.c 1.65 2001/10/13 00:08:50 Donald Becker/David Hinds, becker@scyld.com.\n";
+#else
+#define DEBUG(n, args...)
+#endif
+
+/*====================================================================*/
 
 /* Time in jiffies before concluding the transmitter is hung. */
 #define TX_TIMEOUT  ((800*HZ)/1000)
-
-/* Maximum events (Rx packets, etc.) to handle at each interrupt. */
-static int max_interrupt_work = 32;
-
-/* Force full duplex modes? */
-static int full_duplex;
 
 /* To minimize the size of the driver source and make the driver more
    readable not all constants are symbolically defined.
@@ -197,7 +214,7 @@ struct el3_private {
 	dev_node_t node;
 	struct net_device_stats stats;
 	u16 advertising, partner;			/* NWay media advertisement */
-	unsigned char phys[2];				/* MII device addresses. */
+	unsigned char phys;					/* MII device address */
 	unsigned int
 	  autoselect:1, default_media:3;	/* Read from the EEPROM/Wn3_Config. */
 	/* for transceiver monitoring */
@@ -212,16 +229,6 @@ struct el3_private {
    code size of a per-interface flag is not worthwhile. */
 static char mii_preamble_required = 0;
 
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
-#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
-static char *version =
-"3c574_cs.c 1.000 1998/1/8 Donald Becker, becker@cesdis.gsfc.nasa.gov.\n";
-#else
-#define DEBUG(n, args...)
-#endif
-
 /* Index of functions. */
 
 static void tc574_config(dev_link_t *link);
@@ -233,7 +240,7 @@ static void mdio_sync(ioaddr_t ioaddr, int bits);
 static int mdio_read(ioaddr_t ioaddr, int phy_id, int location);
 static void mdio_write(ioaddr_t ioaddr, int phy_id, int location, int value);
 static u_short read_eeprom(ioaddr_t ioaddr, int index);
-static void wait_for_completion(struct net_device *dev, int cmd);
+static void tc574_wait_for_completion(struct net_device *dev, int cmd);
 
 static void tc574_reset(struct net_device *dev);
 static void media_check(u_long arg);
@@ -246,6 +253,7 @@ static int el3_rx(struct net_device *dev, int worklimit);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static void set_rx_mode(struct net_device *dev);
 
 static dev_info_t dev_info = "3c574_cs";
@@ -253,7 +261,7 @@ static dev_info_t dev_info = "3c574_cs";
 static dev_link_t *tc574_attach(void);
 static void tc574_detach(dev_link_t *);
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 static void flush_stale_links(void)
 {
@@ -321,12 +329,15 @@ static dev_link_t *tc574_attach(void)
 	dev->hard_start_xmit = &el3_start_xmit;
 	dev->get_stats = &el3_get_stats;
 	dev->do_ioctl = &el3_ioctl;
+	SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 	dev->set_multicast_list = &set_rx_mode;
 	ether_setup(dev);
 	dev->open = &el3_open;
 	dev->stop = &el3_close;
+#ifdef HAVE_TX_TIMEOUT
 	dev->tx_timeout = el3_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
+#endif
 
 	/* Register with Card Services */
 	link->next = dev_list;
@@ -507,41 +518,42 @@ static void tc574_config(dev_link_t *link)
 	}
 
 	{
-		int phy, phy_idx = 0;
+		int phy;
 		
 		/* Roadrunner only: Turn on the MII transceiver */
 		outw(0x8040, ioaddr + Wn3_Options);
 		mdelay(1);
 		outw(0xc040, ioaddr + Wn3_Options);
-		wait_for_completion(dev, TxReset);
-		wait_for_completion(dev, RxReset);
+		tc574_wait_for_completion(dev, TxReset);
+		tc574_wait_for_completion(dev, RxReset);
 		mdelay(1);
 		outw(0x8040, ioaddr + Wn3_Options);
 		
 		EL3WINDOW(4);
-		for (phy = 1; phy <= 32 && phy_idx < sizeof(lp->phys); phy++) {
+		for (phy = 1; phy <= 32; phy++) {
 			int mii_status;
 			mdio_sync(ioaddr, 32);
 			mii_status = mdio_read(ioaddr, phy & 0x1f, 1);
 			if (mii_status != 0xffff) {
-				lp->phys[phy_idx++] = phy & 0x1f;
+				lp->phys = phy & 0x1f;
 				DEBUG(0, "  MII transceiver at index %d, status %x.\n",
 					  phy, mii_status);
 				if ((mii_status & 0x0040) == 0)
 					mii_preamble_required = 1;
+				break;
 			}
 		}
-		if (phy_idx == 0) {
+		if (phy > 32) {
 			printk(KERN_NOTICE "  No MII transceivers found!\n");
 			goto failed;
 		}
-		i = mdio_read(ioaddr, lp->phys[0], 16) | 0x40;
-		mdio_write(ioaddr, lp->phys[0], 16, i);
-		lp->advertising = mdio_read(ioaddr, lp->phys[0], 4);
+		i = mdio_read(ioaddr, lp->phys, 16) | 0x40;
+		mdio_write(ioaddr, lp->phys, 16, i);
+		lp->advertising = mdio_read(ioaddr, lp->phys, 4);
 		if (full_duplex) {
 			/* Only advertise the FD media types. */
 			lp->advertising &= ~0x02a0;
-			mdio_write(ioaddr, lp->phys[0], 4, lp->advertising);
+			mdio_write(ioaddr, lp->phys, 4, lp->advertising);
 		}
 	}
 
@@ -654,7 +666,7 @@ static void dump_status(struct net_device *dev)
 /*
   Use this for commands that may take time to finish
 */
-static void wait_for_completion(struct net_device *dev, int cmd)
+static void tc574_wait_for_completion(struct net_device *dev, int cmd)
 {
     int i = 1500;
     outw(cmd, dev->base_addr + EL3_CMD);
@@ -762,7 +774,7 @@ static void tc574_reset(struct net_device *dev)
 	struct el3_private *lp = (struct el3_private *)dev->priv;
 	int i, ioaddr = dev->base_addr;
 
-	wait_for_completion(dev, TotalReset|0x10);
+	tc574_wait_for_completion(dev, TotalReset|0x10);
 
 	/* Clear any transactions in progress. */
 	outw(0, ioaddr + RunnerWrCtrl);
@@ -785,8 +797,8 @@ static void tc574_reset(struct net_device *dev)
 	outw(0x8040, ioaddr + Wn3_Options);
 	mdelay(1);
 	outw(0xc040, ioaddr + Wn3_Options);
-	wait_for_completion(dev, TxReset);
-	wait_for_completion(dev, RxReset);
+	tc574_wait_for_completion(dev, TxReset);
+	tc574_wait_for_completion(dev, RxReset);
 	mdelay(1);
 	outw(0x8040, ioaddr + Wn3_Options);
 
@@ -805,7 +817,12 @@ static void tc574_reset(struct net_device *dev)
 	outw(0x0040, ioaddr + Wn4_NetDiag);
 	/* .. re-sync MII and re-fill what NWay is advertising. */
 	mdio_sync(ioaddr, 32);
-	mdio_write(ioaddr, lp->phys[0], 4, lp->advertising);
+	mdio_write(ioaddr, lp->phys, 4, lp->advertising);
+	if (!auto_polarity) {
+		/* works for TDK 78Q2120 series MII's */
+		int i = mdio_read(ioaddr, lp->phys, 16) | 0x20;
+		mdio_write(ioaddr, lp->phys, 16, i);
+	}
 
 	/* Switch to register set 1 for normal use, just for TxFree. */
 	EL3WINDOW(1);
@@ -857,9 +874,9 @@ static void el3_tx_timeout(struct net_device *dev)
 	lp->stats.tx_errors++;
 	dev->trans_start = jiffies;
 	/* Issue TX_RESET and TX_START commands. */
-	wait_for_completion(dev, TxReset);
+	tc574_wait_for_completion(dev, TxReset);
 	outw(TxEnable, ioaddr + EL3_CMD);
-	netif_start_queue(dev);
+	netif_wake_queue(dev);
 }
 
 static void pop_tx_status(struct net_device *dev)
@@ -874,7 +891,7 @@ static void pop_tx_status(struct net_device *dev)
 		if (!(tx_status & 0x84)) break;
 		/* reset transmitter on jabber error or underrun */
 		if (tx_status & 0x30)
-			wait_for_completion(dev, TxReset);
+			tc574_wait_for_completion(dev, TxReset);
 		if (tx_status & 0x38) {
 			DEBUG(1, "%s: transmit error: status 0x%02x\n",
 				  dev->name, tx_status);
@@ -966,12 +983,12 @@ static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 					   " register %04x.\n", dev->name, fifo_diag);
 				if (fifo_diag & 0x0400) {
 					/* Tx overrun */
-					wait_for_completion(dev, TxReset);
+					tc574_wait_for_completion(dev, TxReset);
 					outw(TxEnable, ioaddr + EL3_CMD);
 				}
 				if (fifo_diag & 0x2000) {
 					/* Rx underrun */
-					wait_for_completion(dev, RxReset);
+					tc574_wait_for_completion(dev, RxReset);
 					set_rx_mode(dev);
 					outw(RxEnable, ioaddr + EL3_CMD);
 				}
@@ -1030,8 +1047,8 @@ static void media_check(u_long arg)
 	save_flags(flags);
 	cli();
 	EL3WINDOW(4);
-	media = mdio_read(ioaddr, lp->phys[0], 1);
-	partner = mdio_read(ioaddr, lp->phys[0], 5);
+	media = mdio_read(ioaddr, lp->phys, 1);
+	partner = mdio_read(ioaddr, lp->phys, 5);
 	EL3WINDOW(1);
 	restore_flags(flags);
 
@@ -1120,7 +1137,6 @@ static void update_stats(struct net_device *dev)
 	/* BadSSD */					   inb(ioaddr + 12);
 	up								 = inb(ioaddr + 13);
 
-	lp->stats.rx_bytes += rx + ((up & 0x0f) << 16);
 	lp->stats.tx_bytes += tx + ((up & 0xf0) << 12);
 
 	EL3WINDOW(1);
@@ -1158,24 +1174,34 @@ static int el3_rx(struct net_device *dev, int worklimit)
 			if (skb != NULL) {
 				skb->dev = dev;
 				skb_reserve(skb, 2);
-
 				insl(ioaddr+RX_FIFO, skb_put(skb, pkt_len),
 						((pkt_len+3)>>2));
-
 				skb->protocol = eth_type_trans(skb, dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
+				lp->stats.rx_bytes += pkt_len;
 			} else {
 				DEBUG(1, "%s: couldn't allocate a sk_buff of"
 					  " size %d.\n", dev->name, pkt_len);
 				lp->stats.rx_dropped++;
 			}
 		}
-		wait_for_completion(dev, RxDiscard);
+		tc574_wait_for_completion(dev, RxDiscard);
 	}
 
 	return worklimit;
 }
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, "3c574_cs");
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /* Provide ioctl() calls to examine the MII xcvr state. */
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1183,19 +1209,21 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	struct el3_private *lp = (struct el3_private *)dev->priv;
 	ioaddr_t ioaddr = dev->base_addr;
 	u16 *data = (u16 *)&rq->ifr_data;
-	int phy = lp->phys[0] & 0x1f;
+	int phy = lp->phys & 0x1f;
 
 	DEBUG(2, "%s: In ioct(%-.6s, %#4.4x) %4.4x %4.4x %4.4x %4.4x.\n",
 		  dev->name, rq->ifr_ifrn.ifrn_name, cmd,
 		  data[0], data[1], data[2], data[3]);
 
     switch(cmd) {
-	case SIOCDEVPRIVATE:		/* Get the address of the PHY in use. */
+	case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
+	case SIOCDEVPRIVATE:
 		data[0] = phy;
-	case SIOCDEVPRIVATE+1:		/* Read the specified MII register. */
+	case SIOCGMIIREG:		/* Read the specified MII register. */
+	case SIOCDEVPRIVATE+1:
 		{
 			int saved_window;
-			long flags;
+			unsigned long flags;
 
 			save_flags(flags);
 			cli();
@@ -1206,10 +1234,11 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			restore_flags(flags);
 			return 0;
 		}
-	case SIOCDEVPRIVATE+2:		/* Write the specified MII register */
+	case SIOCSMIIREG:		/* Write the specified MII register */
+	case SIOCDEVPRIVATE+2:
 		{
 			int saved_window;
-			long flags;
+			unsigned long flags;
 
 			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;
@@ -1285,8 +1314,6 @@ static int __init init_3c574_cs(void)
 {
 	servinfo_t serv;
 
-	/* Always emit the version, before any failure. */
-	printk(KERN_INFO"%s", tc574_version);
 	DEBUG(0, "%s\n", version);
 	CardServices(GetCardServicesInfo, &serv);
 	if (serv.Revision != CS_RELEASE_CODE) {

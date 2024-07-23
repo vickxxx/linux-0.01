@@ -39,7 +39,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <asm/system.h>
@@ -57,8 +57,8 @@
 
 #include <net/sock.h>
 
-static const char *devname = "dlci";
-static const char *version = "DLCI driver v0.35, 4 Jan 1997, mike.mclagan@linux.org";
+static const char devname[] = "dlci";
+static const char version[] = "DLCI driver v0.35, 4 Jan 1997, mike.mclagan@linux.org";
 
 static struct net_device *open_dev[CONFIG_DLCI_COUNT];
 
@@ -227,8 +227,10 @@ static void dlci_receive(struct sk_buff *skb, struct net_device *dev)
 		/* we've set up the protocol, so discard the header */
 		skb->mac.raw = skb->data; 
 		skb_pull(skb, header);
+		dlp->stats.rx_bytes += skb->len;
 		netif_rx(skb);
 		dlp->stats.rx_packets++;
+		dev->last_rx = jiffies;
 	}
 	else
 		dev_kfree_skb(skb);
@@ -573,8 +575,6 @@ int dlci_init(struct net_device *dev)
 	dev->addr_len		= sizeof(short);
 	memset(dev->dev_addr, 0, sizeof(dev->dev_addr));
 
-	dev_init_buffers(dev);
-	
 	return(0);
 }
 
@@ -609,3 +609,7 @@ void cleanup_module(void)
 	dlci_ioctl_hook = NULL;
 }
 #endif /* MODULE */
+
+MODULE_AUTHOR("Mike McLagan");
+MODULE_DESCRIPTION("Frame Relay DLCI layer");
+MODULE_LICENSE("GPL");

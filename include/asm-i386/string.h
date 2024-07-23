@@ -287,13 +287,6 @@ __asm__ __volatile__( \
 
 #ifdef CONFIG_X86_USE_3DNOW
 
-/* All this just for in_interrupt() ... */
-
-#include <asm/system.h>
-#include <asm/ptrace.h>
-#include <linux/smp.h>
-#include <linux/spinlock.h>
-#include <linux/interrupt.h>
 #include <asm/mmx.h>
 
 /*
@@ -302,14 +295,14 @@ __asm__ __volatile__( \
 
 static inline void * __constant_memcpy3d(void * to, const void * from, size_t len)
 {
-	if(len<512 || in_interrupt())
+	if (len < 512)
 		return __constant_memcpy(to, from, len);
 	return _mmx_memcpy(to, from, len);
 }
 
-extern __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
+static __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
 {
-	if(len<512 || in_interrupt())
+	if (len < 512)
 		return __memcpy(to, from, len);
 	return _mmx_memcpy(to, from, len);
 }
@@ -344,7 +337,7 @@ extern void __struct_cpy_bug (void);
 #define struct_cpy(x,y) 			\
 ({						\
 	if (sizeof(*(x)) != sizeof(*(y))) 	\
-		__struct_cpy_bug;		\
+		__struct_cpy_bug();		\
 	memcpy(x, y, sizeof(*(x)));		\
 })
 
@@ -453,34 +446,8 @@ return __res;
 /* end of additional stuff */
 
 #define __HAVE_ARCH_STRSTR
-static inline char * strstr(const char * cs,const char * ct)
-{
-int	d0, d1;
-register char * __res;
-__asm__ __volatile__(
-	"movl %6,%%edi\n\t"
-	"repne\n\t"
-	"scasb\n\t"
-	"notl %%ecx\n\t"
-	"decl %%ecx\n\t"	/* NOTE! This also sets Z if searchstring='' */
-	"movl %%ecx,%%edx\n"
-	"1:\tmovl %6,%%edi\n\t"
-	"movl %%esi,%%eax\n\t"
-	"movl %%edx,%%ecx\n\t"
-	"repe\n\t"
-	"cmpsb\n\t"
-	"je 2f\n\t"		/* also works for empty string, see above */
-	"xchgl %%eax,%%esi\n\t"
-	"incl %%esi\n\t"
-	"cmpb $0,-1(%%eax)\n\t"
-	"jne 1b\n\t"
-	"xorl %%eax,%%eax\n\t"
-	"2:"
-	:"=a" (__res), "=&c" (d0), "=&S" (d1)
-	:"0" (0), "1" (0xffffffff), "2" (cs), "g" (ct)
-	:"dx", "di");
-return __res;
-}
+
+extern char *strstr(const char *cs, const char *ct);
 
 /*
  * This looks horribly ugly, but the compiler can optimize it totally,
@@ -549,10 +516,10 @@ static inline void * memscan(void * addr, int c, size_t size)
 {
 	if (!size)
 		return addr;
-	__asm__("repnz; scasb
-		jnz 1f
-		dec %%edi
-1:		"
+	__asm__("repnz; scasb\n\t"
+		"jnz 1f\n\t"
+		"dec %%edi\n"
+		"1:"
 		: "=D" (addr), "=c" (size)
 		: "0" (addr), "1" (size), "a" (c));
 	return addr;

@@ -21,8 +21,6 @@
  *					needed cleaned seq-number fields.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_X25) || defined(CONFIG_X25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -81,7 +79,7 @@ int x25_output(struct sock *sk, struct sk_buff *skb)
 		frontlen = skb_headroom(skb);
 
 		while (skb->len > 0) {
-			if ((skbn = sock_alloc_send_skb(sk, frontlen + max_len, 0, noblock, &err)) == NULL){
+			if ((skbn = sock_alloc_send_skb(sk, frontlen + max_len, noblock, &err)) == NULL){
 				if(err == -EWOULDBLOCK && noblock){
 					kfree_skb(skb);
 					return sent;
@@ -229,5 +227,3 @@ void x25_enquiry_response(struct sock *sk)
 
 	x25_stop_timer(sk);
 }
-
-#endif

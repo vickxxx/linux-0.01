@@ -54,7 +54,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 
@@ -208,7 +208,7 @@ static enum cardtype external_card_type = IS_VGA;
 
 /*
 The MV300 mixes the color registers. So we need an array of munged
-indices in order to acces the correct reg.
+indices in order to access the correct reg.
 */
 static int MV300_reg_1bit[2]={0,1};
 static int MV300_reg_4bit[16]={
@@ -1193,7 +1193,7 @@ static int falcon_decode_var( struct fb_var_screeninfo *var,
 	par->HBB = gend2 - par->HHT - 2;
 #if 0
 	/* One more Videl constraint: data fetch of two lines must not overlap */
-	if (par->HDB & 0x200  &&  par->HDB & ~0x200 - par->HDE <= 5) {
+	if ((par->HDB & 0x200)  &&  (par->HDB & ~0x200) - par->HDE <= 5) {
 		/* if this happens increase margins, decrease hfreq. */
 	}
 #endif
@@ -3137,6 +3137,8 @@ int __init atafb_setup( char *options )
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
 	return atafb_init();

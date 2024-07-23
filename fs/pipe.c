@@ -7,11 +7,12 @@
 #include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/poll.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/init.h>
 
 #include <asm/uaccess.h>
+#include <asm/ioctls.h>
 
 /*
  * We use a start+len construction, which provides full use of the 
@@ -128,6 +129,8 @@ out:
 out_nolock:
 	if (read)
 		ret = read;
+
+	UPDATE_ATIME(inode);
 	return ret;
 }
 
@@ -209,7 +212,7 @@ pipe_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 		do {
 			/*
 			 * Synchronous wake-up: it knows that this process
-			 * is going to give up this CPU, so it doesnt have
+			 * is going to give up this CPU, so it doesn't have
 			 * to do idle reschedules.
 			 */
 			wake_up_interruptible_sync(PIPE_WAIT(*inode));
@@ -227,8 +230,7 @@ pipe_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 	/* Signal readers asynchronously that there is more data.  */
 	wake_up_interruptible(PIPE_WAIT(*inode));
 
-	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
-	mark_inode_dirty(inode);
+	update_mctime(inode);
 
 out:
 	up(PIPE_SEM(*inode));
@@ -243,12 +245,6 @@ sigpipe:
 	up(PIPE_SEM(*inode));
 	send_sig(SIGPIPE, current, 0);
 	return -EPIPE;
-}
-
-static loff_t
-pipe_lseek(struct file *file, loff_t offset, int orig)
-{
-	return -ESPIPE;
 }
 
 static ssize_t
@@ -380,7 +376,7 @@ pipe_rdwr_open(struct inode *inode, struct file *filp)
  * are also used in linux/fs/fifo.c to do operations on FIFOs.
  */
 struct file_operations read_fifo_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		pipe_read,
 	write:		bad_pipe_w,
 	poll:		fifo_poll,
@@ -390,7 +386,7 @@ struct file_operations read_fifo_fops = {
 };
 
 struct file_operations write_fifo_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		bad_pipe_r,
 	write:		pipe_write,
 	poll:		fifo_poll,
@@ -400,7 +396,7 @@ struct file_operations write_fifo_fops = {
 };
 
 struct file_operations rdwr_fifo_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		pipe_read,
 	write:		pipe_write,
 	poll:		fifo_poll,
@@ -410,7 +406,7 @@ struct file_operations rdwr_fifo_fops = {
 };
 
 struct file_operations read_pipe_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		pipe_read,
 	write:		bad_pipe_w,
 	poll:		pipe_poll,
@@ -420,7 +416,7 @@ struct file_operations read_pipe_fops = {
 };
 
 struct file_operations write_pipe_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		bad_pipe_r,
 	write:		pipe_write,
 	poll:		pipe_poll,
@@ -430,7 +426,7 @@ struct file_operations write_pipe_fops = {
 };
 
 struct file_operations rdwr_pipe_fops = {
-	llseek:		pipe_lseek,
+	llseek:		no_llseek,
 	read:		pipe_read,
 	write:		pipe_write,
 	poll:		pipe_poll,
@@ -475,7 +471,7 @@ static struct dentry_operations pipefs_dentry_operations = {
 
 static struct inode * get_pipe_inode(void)
 {
-	struct inode *inode = get_empty_inode();
+	struct inode *inode = new_inode(pipe_mnt->mnt_sb);
 
 	if (!inode)
 		goto fail_inode;
@@ -484,7 +480,6 @@ static struct inode * get_pipe_inode(void)
 		goto fail_iput;
 	PIPE_READERS(*inode) = PIPE_WRITERS(*inode) = 1;
 	inode->i_fop = &rdwr_pipe_fops;
-	inode->i_sb = pipe_mnt->mnt_sb;
 
 	/*
 	 * Mark the inode dirty from the very beginning,
@@ -629,8 +624,7 @@ static struct super_block * pipefs_read_super(struct super_block *sb, void *data
 	return sb;
 }
 
-static DECLARE_FSTYPE(pipe_fs_type, "pipefs", pipefs_read_super,
-	FS_NOMOUNT|FS_SINGLE);
+static DECLARE_FSTYPE(pipe_fs_type, "pipefs", pipefs_read_super, FS_NOMOUNT);
 
 static int __init init_pipe_fs(void)
 {
@@ -649,7 +643,7 @@ static int __init init_pipe_fs(void)
 static void __exit exit_pipe_fs(void)
 {
 	unregister_filesystem(&pipe_fs_type);
-	kern_umount(pipe_mnt);
+	mntput(pipe_mnt);
 }
 
 module_init(init_pipe_fs)

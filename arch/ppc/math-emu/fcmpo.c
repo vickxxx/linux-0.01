@@ -1,6 +1,3 @@
-/* $Id: fcmpo.c,v 1.1 1999/08/23 18:59:26 cort Exp $
- */
-
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <asm/uaccess.h>
@@ -40,7 +37,7 @@ fcmpo(u32 *ccr, int crfD, void *frA, void *frB)
 
 	*ccr &= ~(15 << ((7 - crfD) << 2));
 	*ccr |= (cmp << ((7 - crfD) << 2));
- 
+
 #ifdef DEBUG
 	printk("CR: %08x\n", *ccr);
 #endif

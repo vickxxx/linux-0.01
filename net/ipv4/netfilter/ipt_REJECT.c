@@ -1,15 +1,17 @@
 /*
  * This is a module which is used for rejecting packets.
  * Added support for customized reject packets (Jozsef Kadlecsik).
+ * Added support for ICMP type-3-code-13 (Maciej Soltysiak). [RFC 1812]
  */
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
 #include <linux/ip.h>
+#include <linux/udp.h>
+#include <linux/icmp.h>
 #include <net/icmp.h>
 #include <net/ip.h>
 #include <net/tcp.h>
-struct in_device;
 #include <net/route.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_REJECT.h>
@@ -20,15 +22,58 @@ struct in_device;
 #define DEBUGP(format, args...)
 #endif
 
+static inline struct rtable *route_reverse(struct sk_buff *skb, int hook)
+{
+	struct iphdr *iph = skb->nh.iph;
+	struct dst_entry *odst;
+	struct rt_key key = {};
+	struct rtable *rt;
+
+	if (hook != NF_IP_FORWARD) {
+		key.dst = iph->saddr;
+		if (hook == NF_IP_LOCAL_IN)
+			key.src = iph->daddr;
+		key.tos = RT_TOS(iph->tos);
+
+		if (ip_route_output_key(&rt, &key) != 0)
+			return NULL;
+	} else {
+		/* non-local src, find valid iif to satisfy
+		 * rp-filter when calling ip_route_input. */
+		key.dst = iph->daddr;
+		if (ip_route_output_key(&rt, &key) != 0)
+			return NULL;
+
+		odst = skb->dst;
+		if (ip_route_input(skb, iph->saddr, iph->daddr,
+		                   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
+			dst_release(&rt->u.dst);
+			return NULL;
+		}
+		dst_release(&rt->u.dst);
+		rt = (struct rtable *)skb->dst;
+		skb->dst = odst;
+	}
+
+	if (rt->u.dst.error) {
+		dst_release(&rt->u.dst);
+		rt = NULL;
+	}
+
+	return rt;
+}
+
 /* Send RST reply */
-static void send_reset(struct sk_buff *oldskb, int local)
+static void send_reset(struct sk_buff *oldskb, int hook)
 {
 	struct sk_buff *nskb;
 	struct tcphdr *otcph, *tcph;
 	struct rtable *rt;
 	unsigned int otcplen;
-	u_int16_t tmp;
+	u_int16_t tmp_port;
+	u_int32_t tmp_addr;
 	int needs_ack;
+	int hh_len;
 
 	/* IP header checks: fragment, too short. */
 	if (oldskb->nh.iph->frag_off & htons(IP_OFFSET)
@@ -48,28 +93,40 @@ static void send_reset(struct sk_buff *oldskb, int local)
 			 csum_partial((char *)otcph, otcplen, 0)) != 0)
 		return;
 
-	/* Copy skb (even if skb is about to be dropped, we can't just
-           clone it because there may be other things, such as tcpdump,
-           interested in it) */
-	nskb = skb_copy(oldskb, GFP_ATOMIC);
-	if (!nskb)
+	if ((rt = route_reverse(oldskb, hook)) == NULL)
 		return;
 
+	hh_len = (rt->u.dst.dev->hard_header_len + 15)&~15;
+
+
+	/* Copy skb (even if skb is about to be dropped, we can't just
+           clone it because there may be other things, such as tcpdump,
+           interested in it). We also need to expand headroom in case
+	   hh_len of incoming interface < hh_len of outgoing interface */
+	nskb = skb_copy_expand(oldskb, hh_len, skb_tailroom(oldskb),
+			       GFP_ATOMIC);
+	if (!nskb) {
+		dst_release(&rt->u.dst);
+		return;
+	}
+
+	dst_release(nskb->dst);
+	nskb->dst = &rt->u.dst;
+
 	/* This packet will not be the same as the other: clear nf fields */
-	nf_conntrack_put(nskb->nfct);
-	nskb->nfct = NULL;
+	nf_reset(nskb);
 	nskb->nfcache = 0;
-#ifdef CONFIG_NETFILTER_DEBUG
-	nskb->nf_debug = 0;
-#endif
+	nskb->nfmark = 0;
 
 	tcph = (struct tcphdr *)((u_int32_t*)nskb->nh.iph + nskb->nh.iph->ihl);
 
 	/* Swap source and dest */
-	nskb->nh.iph->daddr = xchg(&nskb->nh.iph->saddr, nskb->nh.iph->daddr);
-	tmp = tcph->source;
+	tmp_addr = nskb->nh.iph->saddr;
+	nskb->nh.iph->saddr = nskb->nh.iph->daddr;
+	nskb->nh.iph->daddr = tmp_addr;
+	tmp_port = tcph->source;
 	tcph->source = tcph->dest;
-	tcph->dest = tmp;
+	tcph->dest = tmp_port;
 
 	/* Truncate to length (no data) */
 	tcph->doff = sizeof(struct tcphdr)/4;
@@ -114,19 +171,11 @@ static void send_reset(struct sk_buff *oldskb, int local)
 	nskb->nh.iph->check = ip_fast_csum((unsigned char *)nskb->nh.iph, 
 					   nskb->nh.iph->ihl);
 
-	/* Routing: if not headed for us, route won't like source */
-	if (ip_route_output(&rt, nskb->nh.iph->daddr,
-			    local ? nskb->nh.iph->saddr : 0,
-			    RT_TOS(nskb->nh.iph->tos) | RTO_CONN,
-			    0) != 0)
-		goto free_nskb;
-
-	dst_release(nskb->dst);
-	nskb->dst = &rt->u.dst;
-
 	/* "Never happens" */
 	if (nskb->len > nskb->dst->pmtu)
 		goto free_nskb;
+
+	nf_ct_attach(nskb, oldskb);
 
 	NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, nskb, NULL, nskb->dst->dev,
 		ip_finish_output);
@@ -135,6 +184,138 @@ static void send_reset(struct sk_buff *oldskb, int local)
  free_nskb:
 	kfree_skb(nskb);
 }
+
+static void send_unreach(struct sk_buff *skb_in, int code)
+{
+	struct iphdr *iph;
+	struct udphdr *udph;
+	struct icmphdr *icmph;
+	struct sk_buff *nskb;
+	u32 saddr;
+	u8 tos;
+	int hh_len, length;
+	struct rtable *rt = (struct rtable*)skb_in->dst;
+	unsigned char *data;
+
+	if (!rt)
+		return;
+
+	/* FIXME: Use sysctl number. --RR */
+	if (!xrlim_allow(&rt->u.dst, 1*HZ))
+		return;
+
+	iph = skb_in->nh.iph;
+
+	/* No replies to physical multicast/broadcast */
+	if (skb_in->pkt_type!=PACKET_HOST)
+		return;
+
+	/* Now check at the protocol level */
+	if (rt->rt_flags&(RTCF_BROADCAST|RTCF_MULTICAST))
+		return;
+
+	/* Only reply to fragment 0. */
+	if (iph->frag_off&htons(IP_OFFSET))
+		return;
+
+	/* if UDP checksum is set, verify it's correct */
+	if (iph->protocol == IPPROTO_UDP
+	    && skb_in->tail-(u8*)iph >= sizeof(struct udphdr)) {
+		int datalen = skb_in->len - (iph->ihl<<2);
+		udph = (struct udphdr *)((char *)iph + (iph->ihl<<2));
+		if (udph->check
+		    && csum_tcpudp_magic(iph->saddr, iph->daddr,
+		                         datalen, IPPROTO_UDP,
+		                         csum_partial((char *)udph, datalen,
+		                                      0)) != 0)
+			return;
+	}
+		    
+	/* If we send an ICMP error to an ICMP error a mess would result.. */
+	if (iph->protocol == IPPROTO_ICMP
+	    && skb_in->tail-(u8*)iph >= sizeof(struct icmphdr)) {
+		icmph = (struct icmphdr *)((char *)iph + (iph->ihl<<2));
+		/* Between echo-reply (0) and timestamp (13),
+		   everything except echo-request (8) is an error.
+		   Also, anything greater than NR_ICMP_TYPES is
+		   unknown, and hence should be treated as an error... */
+		if ((icmph->type < ICMP_TIMESTAMP
+		     && icmph->type != ICMP_ECHOREPLY
+		     && icmph->type != ICMP_ECHO)
+		    || icmph->type > NR_ICMP_TYPES)
+			return;
+	}
+
+	saddr = iph->daddr;
+	if (!(rt->rt_flags & RTCF_LOCAL))
+		saddr = 0;
+
+	tos = (iph->tos & IPTOS_TOS_MASK) | IPTOS_PREC_INTERNETCONTROL;
+
+	if (ip_route_output(&rt, iph->saddr, saddr, RT_TOS(tos), 0))
+		return;
+
+	/* RFC says return as much as we can without exceeding 576 bytes. */
+	length = skb_in->len + sizeof(struct iphdr) + sizeof(struct icmphdr);
+
+	if (length > rt->u.dst.pmtu)
+		length = rt->u.dst.pmtu;
+	if (length > 576)
+		length = 576;
+
+	hh_len = (rt->u.dst.dev->hard_header_len + 15)&~15;
+
+	nskb = alloc_skb(hh_len+15+length, GFP_ATOMIC);
+	if (!nskb) {
+		ip_rt_put(rt);
+		return;
+	}
+
+	nskb->priority = 0;
+	nskb->dst = &rt->u.dst;
+	skb_reserve(nskb, hh_len);
+
+	/* Set up IP header */
+	iph = nskb->nh.iph
+		= (struct iphdr *)skb_put(nskb, sizeof(struct iphdr));
+	iph->version=4;
+	iph->ihl=5;
+	iph->tos=tos;
+	iph->tot_len = htons(length);
+
+	/* PMTU discovery never applies to ICMP packets. */
+	iph->frag_off = 0;
+
+	iph->ttl = MAXTTL;
+	ip_select_ident(iph, &rt->u.dst, NULL);
+	iph->protocol=IPPROTO_ICMP;
+	iph->saddr=rt->rt_src;
+	iph->daddr=rt->rt_dst;
+	iph->check=0;
+	iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
+
+	/* Set up ICMP header. */
+	icmph = nskb->h.icmph
+		= (struct icmphdr *)skb_put(nskb, sizeof(struct icmphdr));
+	icmph->type = ICMP_DEST_UNREACH;
+	icmph->code = code;	
+	icmph->un.gateway = 0;
+	icmph->checksum = 0;
+	
+	/* Copy as much of original packet as will fit */
+	data = skb_put(nskb,
+		       length - sizeof(struct iphdr) - sizeof(struct icmphdr));
+	/* FIXME: won't work with nonlinear skbs --RR */
+	memcpy(data, skb_in->nh.iph,
+	       length - sizeof(struct iphdr) - sizeof(struct icmphdr));
+	icmph->checksum = ip_compute_csum((unsigned char *)icmph,
+					  length - sizeof(struct iphdr));
+
+	nf_ct_attach(nskb, skb_in);
+
+	NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, nskb, NULL, nskb->dst->dev,
+		ip_finish_output);
+}	
 
 static unsigned int reject(struct sk_buff **pskb,
 			   unsigned int hooknum,
@@ -145,67 +326,44 @@ static unsigned int reject(struct sk_buff **pskb,
 {
 	const struct ipt_reject_info *reject = targinfo;
 
+	/* Our naive response construction doesn't deal with IP
+           options, and probably shouldn't try. */
+	if ((*pskb)->nh.iph->ihl<<2 != sizeof(struct iphdr))
+		return NF_DROP;
+
 	/* WARNING: This code causes reentry within iptables.
 	   This means that the iptables jump stack is now crap.  We
 	   must return an absolute verdict. --RR */
     	switch (reject->with) {
     	case IPT_ICMP_NET_UNREACHABLE:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_NET_UNREACH, 0);
+    		send_unreach(*pskb, ICMP_NET_UNREACH);
     		break;
     	case IPT_ICMP_HOST_UNREACHABLE:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0);
+    		send_unreach(*pskb, ICMP_HOST_UNREACH);
     		break;
     	case IPT_ICMP_PROT_UNREACHABLE:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_PROT_UNREACH, 0);
+    		send_unreach(*pskb, ICMP_PROT_UNREACH);
     		break;
     	case IPT_ICMP_PORT_UNREACHABLE:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
+    		send_unreach(*pskb, ICMP_PORT_UNREACH);
     		break;
     	case IPT_ICMP_NET_PROHIBITED:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_NET_ANO, 0);
+    		send_unreach(*pskb, ICMP_NET_ANO);
     		break;
 	case IPT_ICMP_HOST_PROHIBITED:
-    		icmp_send(*pskb, ICMP_DEST_UNREACH, ICMP_HOST_ANO, 0);
+    		send_unreach(*pskb, ICMP_HOST_ANO);
     		break;
-    	case IPT_ICMP_ECHOREPLY: {
-		struct icmphdr *icmph  = (struct icmphdr *)
-			((u_int32_t *)(*pskb)->nh.iph + (*pskb)->nh.iph->ihl);
-		unsigned int datalen = (*pskb)->len - (*pskb)->nh.iph->ihl * 4;
-
-		/* Not non-head frags, or truncated */
-		if (((ntohs((*pskb)->nh.iph->frag_off) & IP_OFFSET) == 0)
-		    && datalen >= 4) {
-			/* Usually I don't like cut & pasting code,
-                           but dammit, my party is starting in 45
-                           mins! --RR */
-			struct icmp_bxm icmp_param;
-
-			icmp_param.icmph=*icmph;
-			icmp_param.icmph.type=ICMP_ECHOREPLY;
-			icmp_param.data_ptr=(icmph+1);
-			icmp_param.data_len=datalen;
-			icmp_reply(&icmp_param, *pskb);
-		}
-	}
-	break;
+    	case IPT_ICMP_ADMIN_PROHIBITED:
+		send_unreach(*pskb, ICMP_PKT_FILTERED);
+		break;
 	case IPT_TCP_RESET:
-		send_reset(*pskb, hooknum == NF_IP_LOCAL_IN);
+		send_reset(*pskb, hooknum);
+	case IPT_ICMP_ECHOREPLY:
+		/* Doesn't happen. */
 		break;
 	}
 
 	return NF_DROP;
-}
-
-static inline int find_ping_match(const struct ipt_entry_match *m)
-{
-	const struct ipt_icmp *icmpinfo = (const struct ipt_icmp *)m->data;
-
-	if (strcmp(m->u.kernel.match->name, "icmp") == 0
-	    && icmpinfo->type == ICMP_ECHO
-	    && !(icmpinfo->invflags & IPT_ICMP_INV))
-		return 1;
-
-	return 0;
 }
 
 static int check(const char *tablename,
@@ -216,7 +374,7 @@ static int check(const char *tablename,
 {
  	const struct ipt_reject_info *rejinfo = targinfo;
 
- 	if (targinfosize != IPT_ALIGN(sizeof(struct ipt_icmp))) {
+ 	if (targinfosize != IPT_ALIGN(sizeof(struct ipt_reject_info))) {
   		DEBUGP("REJECT: targinfosize %u != 0\n", targinfosize);
   		return 0;
   	}
@@ -234,17 +392,8 @@ static int check(const char *tablename,
 	}
 
 	if (rejinfo->with == IPT_ICMP_ECHOREPLY) {
-		/* Must specify that it's an ICMP ping packet. */
-		if (e->ip.proto != IPPROTO_ICMP
-		    || (e->ip.invflags & IPT_INV_PROTO)) {
-			DEBUGP("REJECT: ECHOREPLY illegal for non-icmp\n");
-			return 0;
-		}
-		/* Must contain ICMP match. */
-		if (IPT_MATCH_ITERATE(e, find_ping_match) == 0) {
-			DEBUGP("REJECT: ECHOREPLY illegal for non-ping\n");
-			return 0;
-		}
+		printk("REJECT: ECHOREPLY no longer supported.\n");
+		return 0;
 	} else if (rejinfo->with == IPT_TCP_RESET) {
 		/* Must specify that it's a TCP packet */
 		if (e->ip.proto != IPPROTO_TCP
@@ -274,3 +423,4 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

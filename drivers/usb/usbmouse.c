@@ -29,14 +29,22 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/usb.h>
 
-MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
-MODULE_DESCRIPTION("USB HID Boot Protocol mouse driver");
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.6"
+#define DRIVER_AUTHOR "Vojtech Pavlik <vojtech@suse.cz>"
+#define DRIVER_DESC "USB HID Boot Protocol mouse driver"
+
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
 struct usb_mouse {
 	signed char data[8];
@@ -106,7 +114,9 @@ static void *usb_mouse_probe(struct usb_device *dev, unsigned int ifnum,
 	endpoint = interface->endpoint + 0;
 	if (!(endpoint->bEndpointAddress & 0x80)) return NULL;
 	if ((endpoint->bmAttributes & 3) != 3) return NULL;
-
+	/* wacom tablets match... */
+ 	if (dev->descriptor.idVendor == 0x056a) return NULL;
+	
 	pipe = usb_rcvintpipe(dev, endpoint->bEndpointAddress);
 	maxp = usb_maxpacket(dev, pipe, usb_pipeout(pipe));
 
@@ -178,7 +188,7 @@ static struct usb_device_id usb_mouse_id_table [] = {
 MODULE_DEVICE_TABLE (usb, usb_mouse_id_table);
 
 static struct usb_driver usb_mouse_driver = {
-	name:		"usb_mouse",
+	name:		"usbmouse",
 	probe:		usb_mouse_probe,
 	disconnect:	usb_mouse_disconnect,
 	id_table:	usb_mouse_id_table,
@@ -187,6 +197,7 @@ static struct usb_driver usb_mouse_driver = {
 static int __init usb_mouse_init(void)
 {
 	usb_register(&usb_mouse_driver);
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
 }
 

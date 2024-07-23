@@ -1,4 +1,4 @@
-/* $Id: sunlance.c,v 1.105 2000/10/22 16:08:38 davem Exp $
+/* $Id: sunlance.c,v 1.109.2.1 2002/01/14 10:07:56 davem Exp $
  * lance.c: Linux/Sparc/Lance driver
  *
  *	Written 1995, 1996 by Miguel de Icaza
@@ -62,14 +62,17 @@
  * 	          Anton Blanchard (anton@progsoc.uts.edu.au)
  * 2.00: 11/9/99: Massive overhaul and port to new SBUS driver interfaces.
  *		  David S. Miller (davem@redhat.com)
+ * 2.01:
+ *      11/08/01: Use library crc32 functions (Matt_Domsch@dell.com)
+ *		  
  */
 
 #undef DEBUG_DRIVER
 
-static char *version =
-	"sunlance.c:v2.00 11/Sep/99 Miguel de Icaza (miguel@nuclecu.unam.mx)\n";
+static char version[] =
+	"sunlance.c:v2.01 08/Nov/01 Miguel de Icaza (miguel@nuclecu.unam.mx)\n";
 
-static char *lancestr = "LANCE";
+static char lancestr[] = "LANCE";
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -82,10 +85,11 @@ static char *lancestr = "LANCE";
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -114,9 +118,6 @@ static char *lancestr = "LANCE";
 #define LANCE_LOG_TX_BUFFERS 4
 #define LANCE_LOG_RX_BUFFERS 4
 #endif
-
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
 
 #define LE_CSR0 0
 #define LE_CSR1 1
@@ -257,7 +258,7 @@ struct lance_private {
 	void (*tx)(struct net_device *);
 
 	char	       	       *name;
-	__u32			init_block_dvma;
+	dma_addr_t		init_block_dvma;
 	struct net_device      *dev;		  /* Backpointer	*/
 	struct lance_private   *next_module;
 	struct sbus_dev	       *sdev;
@@ -291,7 +292,7 @@ int sparc_lance_debug = 2;
 
 #define LANCE_ADDR(x) ((long)(x) & ~0xff000000)
 
-static struct lance_private *root_lance_dev = NULL;
+static struct lance_private *root_lance_dev;
 
 /* Load the CSR registers */
 static void load_csrs(struct lance_private *lp)
@@ -319,7 +320,7 @@ static void lance_init_ring_dvma(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_init_block *ib = lp->init_block;
-	__u32 aib = lp->init_block_dvma;
+	dma_addr_t aib = lp->init_block_dvma;
 	__u32 leptr;
 	int i;
     
@@ -552,6 +553,7 @@ static void lance_rx_dvma(struct net_device *dev)
 					 len, 0);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 		}
 
@@ -723,6 +725,7 @@ static void lance_rx_pio(struct net_device *dev)
 			lance_piocopy_to_skb(skb, &(ib->rx_buf[entry][0]), len);
 			skb->protocol = eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 		}
 
@@ -921,13 +924,13 @@ static int lance_open(struct net_device *dev)
 
 	last_dev = dev;
 
+	STOP_LANCE(lp);
+
 	if (request_irq(dev->irq, &lance_interrupt, SA_SHIRQ,
 			lancestr, (void *) dev)) {
 		printk(KERN_ERR "Lance: Can't get irq %s\n", __irq_itoa(dev->irq));
 		return -EAGAIN;
 	}
-
-	STOP_LANCE(lp);
 
 	/* On the 4m, setup the ledma to provide the upper bits for buffers */
 	if (lp->dregs) {
@@ -963,9 +966,6 @@ static int lance_open(struct net_device *dev)
 		sbus_writew(LE_C0_INEA | LE_C0_TDMD, lp->lregs + RDP);
 	}
 
-	if (!status)
-		MOD_INC_USE_COUNT;
-
 	return status;
 }
 
@@ -979,7 +979,6 @@ static int lance_close(struct net_device *dev)
 	STOP_LANCE(lp);
 
 	free_irq(dev->irq, (void *) dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1182,8 +1181,8 @@ static void lance_load_multicast(struct net_device *dev)
 	volatile u16 *mcast_table = (u16 *) &ib->filter;
 	struct dev_mc_list *dmi = dev->mc_list;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 crc;
 	
 	/* set all multicast bits */
 	if (dev->flags & IFF_ALLMULTI) {
@@ -1213,19 +1212,7 @@ static void lance_load_multicast(struct net_device *dev)
 		/* multicast address? */
 		if (!(*addrs & 1))
 			continue;
-
-		crc = 0xffffffff;
-		for (byte = 0; byte < 6; byte++) {
-			for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
-				int test;
-
-				test = ((bit ^ crc) & 0x01);
-				crc >>= 1;
-
-				if (test)
-					crc = crc ^ poly;
-			}
-		}
+		crc = ether_crc_le(6, addrs);
 		crc = crc >> 26;
 		if (lp->pio_buffer) {
 			u16 tmp = sbus_readw(&mcast_table[crc>>4]);
@@ -1309,7 +1296,7 @@ static int __init sparc_lance_init(struct net_device *dev,
 				   struct sbus_dma *ledma,
 				   struct sbus_dev *lebuffer)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	struct lance_private *lp = NULL;
 	int    i;
 
@@ -1434,7 +1421,7 @@ static int __init sparc_lance_init(struct net_device *dev,
 				       "'tpe-link-test?'\n", dev->name);
 				printk(KERN_NOTICE "%s: warning: mail any problems "
 				       "to ecd@skynet.be\n", dev->name);
-				set_auxio(AUXIO_LINK_TEST, 0);
+				auxio_set_lte(AUXIO_LTE_ON);
 			}
 no_link_test:
 			lp->auto_select = 1;
@@ -1465,6 +1452,7 @@ no_link_test:
 	}
 
 	lp->dev = dev;
+	SET_MODULE_OWNER(dev);
 	dev->open = &lance_open;
 	dev->stop = &lance_close;
 	dev->hard_start_xmit = &lance_start_xmit;
@@ -1514,12 +1502,13 @@ static inline struct sbus_dma *find_ledma(struct sbus_dev *sdev)
 #ifdef CONFIG_SUN4
 
 #include <asm/sun4paddr.h>
+#include <asm/machines.h>
 
 /* Find all the lance cards on the system and initialize them */
 static int __init sparc_lance_probe(void)
 {
 	static struct sbus_dev sdev;
-	static int called = 0;
+	static int called;
 
 	root_lance_dev = NULL;
 
@@ -1546,7 +1535,7 @@ static int __init sparc_lance_probe(void)
 	struct sbus_dev *sdev = 0;
 	struct net_device *dev = NULL;
 	struct sbus_dma *ledma = 0;
-	static int called = 0;
+	static int called;
 	int cards = 0, v;
 
 	root_lance_dev = NULL;
@@ -1604,3 +1593,4 @@ static void __exit sparc_lance_cleanup(void)
 
 module_init(sparc_lance_probe);
 module_exit(sparc_lance_cleanup);
+MODULE_LICENSE("GPL");

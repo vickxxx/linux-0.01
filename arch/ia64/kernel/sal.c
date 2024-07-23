@@ -1,8 +1,8 @@
 /*
  * System Abstraction Layer (SAL) interface routines.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2001, 2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  */
@@ -18,9 +18,8 @@
 #include <asm/sal.h>
 #include <asm/pal.h>
 
-#define SAL_DEBUG
-
-spinlock_t sal_lock = SPIN_LOCK_UNLOCKED;
+spinlock_t sal_lock __cacheline_aligned = SPIN_LOCK_UNLOCKED;
+unsigned long sal_platform_features;
 
 static struct {
 	void *addr;	/* function entry point */
@@ -78,7 +77,7 @@ ia64_sal_strerror (long status)
 	return str;
 }
 
-static void __init 
+void __init
 ia64_sal_handler_init (void *entry_point, void *gpval)
 {
 	/* fill in the SAL procedure descriptor and point ia64_sal to it: */
@@ -97,17 +96,17 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 	int i;
 
 	if (!systab) {
-		printk("Hmm, no SAL System Table.\n");
+		printk(KERN_WARNING "Hmm, no SAL System Table.\n");
 		return;
 	}
 
 	if (strncmp(systab->signature, "SST_", 4) != 0)
-		printk("bad signature in system table!");
+		printk(KERN_ERR "bad signature in system table!");
 
-	/* 
+	/*
 	 * revisions are coded in BCD, so %x does the job for us
 	 */
-	printk("SAL v%x.%02x: oem=%.32s, product=%.32s\n",
+	printk(KERN_INFO "SAL v%x.%02x: oem=%.32s, product=%.32s\n",
 	       systab->sal_rev_major, systab->sal_rev_minor,
 	       systab->oem_id, systab->product_id);
 
@@ -122,10 +121,8 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 		switch (*p) {
 		      case SAL_DESC_ENTRY_POINT:
 			ep = (struct ia64_sal_desc_entry_point *) p;
-#ifdef SAL_DEBUG
-			printk("sal[%d] - entry: pal_proc=0x%lx, sal_proc=0x%lx\n",
-			       i, ep->pal_proc, ep->sal_proc);
-#endif
+			printk(KERN_INFO "SAL: entry: pal_proc=0x%lx, sal_proc=0x%lx\n",
+			       ep->pal_proc, ep->sal_proc);
 			ia64_pal_handler_init(__va(ep->pal_proc));
 			ia64_sal_handler_init(__va(ep->sal_proc), __va(ep->gp));
 			break;
@@ -138,21 +135,16 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 #ifdef CONFIG_SMP
 		      {
 			      struct ia64_sal_desc_ap_wakeup *ap = (void *) p;
-# ifdef SAL_DEBUG
-			      printk("sal[%d] - wakeup type %x, 0x%lx\n",
-				     i, ap->mechanism, ap->vector);
-# endif
+
 			      switch (ap->mechanism) {
 				    case IA64_SAL_AP_EXTERNAL_INT:
 				      ap_wakeup_vector = ap->vector;
-# ifdef SAL_DEBUG
-				      printk("SAL: AP wakeup using external interrupt "
+				      printk(KERN_INFO "SAL: AP wakeup using external interrupt "
 					     "vector 0x%lx\n", ap_wakeup_vector);
-# endif
 				      break;
 
 				    default:
-				      printk("SAL: AP wakeup mechanism unsupported!\n");
+				      printk(KERN_ERR "SAL: AP wakeup mechanism unsupported!\n");
 				      break;
 			      }
 			      break;
@@ -161,37 +153,31 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 		      case SAL_DESC_PLATFORM_FEATURE:
 		      {
 			      struct ia64_sal_desc_platform_feature *pf = (void *) p;
-			      printk("SAL: Platform features ");
+			      sal_platform_features = pf->feature_mask;
+			      printk(KERN_INFO "SAL: Platform features ");
 
-#ifdef CONFIG_IA64_HAVE_IRQREDIR
-			      /*
-			       * Early versions of SAL say we don't have
-			       * IRQ redirection, even though we do...
-			       */
-			      pf->feature_mask |= (1 << 1);
-#endif
-
-			      if (pf->feature_mask & (1 << 0))
+			      if (pf->feature_mask & IA64_SAL_PLATFORM_FEATURE_BUS_LOCK)
 				      printk("BusLock ");
-
-			      if (pf->feature_mask & (1 << 1)) {
+			      if (pf->feature_mask & IA64_SAL_PLATFORM_FEATURE_IRQ_REDIR_HINT) {
 				      printk("IRQ_Redirection ");
 #ifdef CONFIG_SMP
-				      if (no_int_routing) 
+				      if (no_int_routing)
 					      smp_int_redirect &= ~SMP_IRQ_REDIRECTION;
 				      else
 					      smp_int_redirect |= SMP_IRQ_REDIRECTION;
 #endif
 			      }
-			      if (pf->feature_mask & (1 << 2)) {
+			      if (pf->feature_mask & IA64_SAL_PLATFORM_FEATURE_IPI_REDIR_HINT) {
 				      printk("IPI_Redirection ");
 #ifdef CONFIG_SMP
-				      if (no_int_routing) 
+				      if (no_int_routing)
 					      smp_int_redirect &= ~SMP_IPI_REDIRECTION;
 				      else
 					      smp_int_redirect |= SMP_IPI_REDIRECTION;
 #endif
 			      }
+			      if (pf->feature_mask & IA64_SAL_PLATFORM_FEATURE_ITC_DRIFT)
+				      printk("ITC_Drift ");
 			      printk("\n");
 			      break;
  		      }

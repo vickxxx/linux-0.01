@@ -1,11 +1,11 @@
 /* znet.c: An Zenith Z-Note ethernet driver for linux. */
 
-static const char *version = "znet.c:v1.02 9/23/94 becker@cesdis.gsfc.nasa.gov\n";
+static const char version[] = "znet.c:v1.02 9/23/94 becker@cesdis.gsfc.nasa.gov\n";
 
 /*
 	Written by Donald Becker.
 
-	The author may be reached as becker@cesdis.gsfc.nasa.gov.
+	The author may be reached as becker@scyld.com.
 	This driver is based on the Linux skeleton driver.  The copyright of the
 	skeleton driver is held by the United States Government, as represented
 	by DIRNSA, and it is released under the GPL.
@@ -340,7 +340,7 @@ static void znet_tx_timeout (struct net_device *dev)
 			dev->name);
 	outb (CMD0_RESET, ioaddr);
 	hardware_init (dev);
-	netif_start_queue (dev);
+	netif_wake_queue (dev);
 }
 
 static int znet_send_packet(struct sk_buff *skb, struct net_device *dev)
@@ -348,10 +348,19 @@ static int znet_send_packet(struct sk_buff *skb, struct net_device *dev)
 	int ioaddr = dev->base_addr;
 	struct net_local *lp = (struct net_local *)dev->priv;
 	unsigned long flags;
+	short length = skb->len;
 
 	if (znet_debug > 4)
 		printk(KERN_DEBUG "%s: ZNet_send_packet.\n", dev->name);
 
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
+	
 	netif_stop_queue (dev);
 	
 	/* Check that the part hasn't reset itself, probably from suspend. */
@@ -362,7 +371,6 @@ static int znet_send_packet(struct sk_buff *skb, struct net_device *dev)
 	  hardware_init(dev);
 
 	if (1) {
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = (void *)skb->data;
 		ushort *tx_link = zn.tx_cur - 1;
 		ushort rnd_len = (length + 1)>>1;
@@ -585,7 +593,9 @@ static void znet_rx(struct net_device *dev)
 		  }
 		  skb->protocol=eth_type_trans(skb,dev);
 		  netif_rx(skb);
+		  dev->last_rx = jiffies;
 		  lp->stats.rx_packets++;
+		  lp->stats.rx_bytes += pkt_len;
 		}
 		zn.rx_cur = this_rfp_ptr;
 		if (zn.rx_cur >= zn.rx_end)

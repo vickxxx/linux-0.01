@@ -23,6 +23,7 @@
  *		(can detect if station is in stereo)
  *	      - Added unmute function
  *	      - Reworked ioctl functions
+ * 2002-07-15 - Fix Stereo typo
  */
 
 #include <linux/module.h>	/* Modules                        */
@@ -39,6 +40,7 @@
 #endif
 
 static int io = CONFIG_RADIO_ZOLTRIX_PORT;
+static int radio_nr = -1;
 static int users = 0;
 
 struct zol_device {
@@ -279,7 +281,7 @@ static int zol_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			struct video_audio v;
 			memset(&v, 0, sizeof(v));
 			v.flags |= VIDEO_AUDIO_MUTABLE | VIDEO_AUDIO_VOLUME;
-			v.mode != zol_is_stereo(zol)
+			v.mode |= zol_is_stereo(zol)
 				? VIDEO_SOUND_STEREO : VIDEO_SOUND_MONO;
 			v.volume = zol->curvol * 4096;
 			v.step = 4096;
@@ -327,20 +329,19 @@ static int zol_open(struct video_device *dev, int flags)
 	if (users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void zol_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct zol_device zoltrix_unit;
 
 static struct video_device zoltrix_radio =
 {
+	owner:		THIS_MODULE,
 	name:		"Zoltrix Radio Plus",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_ZOLTRIX,
@@ -366,7 +367,7 @@ static int __init zoltrix_init(void)
 		return -EBUSY;
 	}
 
-	if (video_register_device(&zoltrix_radio, VFL_TYPE_RADIO) == -1)
+	if (video_register_device(&zoltrix_radio, VFL_TYPE_RADIO, radio_nr) == -1)
 	{
 		release_region(io, 2);
 		return -EINVAL;
@@ -393,8 +394,11 @@ static int __init zoltrix_init(void)
 
 MODULE_AUTHOR("C.van Schaik");
 MODULE_DESCRIPTION("A driver for the Zoltrix Radio Plus.");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the Zoltrix Radio Plus (0x20c or 0x30c)");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 

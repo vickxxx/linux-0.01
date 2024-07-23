@@ -230,8 +230,9 @@ static int suni_start(struct atm_dev *dev)
 	unsigned long flags;
 	int first;
 
-	if (!(PRIV(dev) = kmalloc(sizeof(struct suni_priv),GFP_KERNEL)))
+	if (!(dev->phy_data = kmalloc(sizeof(struct suni_priv),GFP_KERNEL)))
 		return -ENOMEM;
+
 	PRIV(dev)->dev = dev;
 	spin_lock_irqsave(&sunis_lock,flags);
 	first = !sunis;
@@ -276,6 +277,7 @@ static int suni_stop(struct atm_dev *dev)
 	if (!sunis) del_timer_sync(&poll_timer);
 	spin_unlock_irqrestore(&sunis_lock,flags);
 	kfree(PRIV(dev));
+
 	return 0;
 }
 
@@ -288,14 +290,14 @@ static const struct atmphy_ops suni_ops = {
 };
 
 
-int __init suni_init(struct atm_dev *dev)
+int suni_init(struct atm_dev *dev)
 {
 	unsigned char mri;
 
 	mri = GET(MRI); /* reset SUNI */
 	PUT(mri | SUNI_MRI_RESET,MRI);
 	PUT(mri,MRI);
-	PUT(0,MT); /* disable all tests */
+	PUT((GET(MT) & SUNI_MT_DS27_53),MT); /* disable all tests */
 	REG_CHANGE(SUNI_TPOP_APM_S,SUNI_TPOP_APM_S_SHIFT,SUNI_TPOP_S_SONET,
 	    TPOP_APM); /* use SONET */
 	REG_CHANGE(SUNI_TACP_IUCHP_CLP,0,SUNI_TACP_IUCHP_CLP,
@@ -305,23 +307,6 @@ int __init suni_init(struct atm_dev *dev)
 	return 0;
 }
 
-
 EXPORT_SYMBOL(suni_init);
 
-
-#ifdef MODULE
-
-
-int init_module(void)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-
-void cleanup_module(void)
-{
-	/* Nay */
-}
-
-#endif
+MODULE_LICENSE("GPL");

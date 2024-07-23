@@ -209,7 +209,7 @@ static char rcsid[] =
  * board type.
  *  
  * Revision 1.36.4.30  1997/05/16 15:30:00  daniel
- * Changes to suport new cycladesZ boards.
+ * Changes to support new cycladesZ boards.
  *
  * Revision 1.36.4.29  1997/05/12 11:30:00  daniel
  * Merge of Bentson's and Daniel's version 1.36.4.28.
@@ -241,7 +241,7 @@ static char rcsid[] =
  * varying too fast.
  *
  * Revision 1.36.4.27  1997/03/26 10:30:00  daniel
- * Changed for suport linux versions 2.1.X.
+ * Changed for support linux versions 2.1.X.
  * Backward compatible with linux versions 2.0.X.
  * Corrected illegal use of filler field in
  * CH_CTRL struct.
@@ -628,8 +628,6 @@ static char rcsid[] =
 #define PAUSE ;
 #endif
 
-#define cy_min(a,b) (((a)<(b))?(a):(b))
-
 /*
  * Include section 
  */
@@ -676,14 +674,6 @@ static char rcsid[] =
 
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
-
-#ifdef CONFIG_COBALT_27
-#include <asm/page.h>
-#include <asm/pgtable.h>
-
-#define	CACHED_TO_UNCACHED(x)	(((unsigned long)(x) & \
-				  (unsigned long)0x1fffffff) + KSEG1)
-#endif
 
 #define cy_put_user	put_user
 
@@ -751,7 +741,7 @@ static unsigned char *cy_isa_addresses[] = {
 #define NR_ISA_ADDRS (sizeof(cy_isa_addresses)/sizeof(unsigned char*))
 
 #ifdef MODULE
-static int maddr[NR_CARDS] = { 0, };
+static long maddr[NR_CARDS] = { 0, };
 static int irq[NR_CARDS]  = { 0, };
 
 MODULE_PARM(maddr, "1-" __MODULE_STRING(NR_CARDS) "l");
@@ -1010,11 +1000,7 @@ do_softint(void *private_)
 	wake_up_interruptible(&info->delta_msr_wait);
     }
     if (test_and_clear_bit(Cy_EVENT_WRITE_WAKEUP, &info->event)) {
-        if((tty->flags & (1<< TTY_DO_WRITE_WAKEUP))
-        && tty->ldisc.write_wakeup){
-            (tty->ldisc.write_wakeup)(tty);
-        }
-        wake_up_interruptible(&tty->write_wait);
+	tty_wakeup(tty);
     }
 #ifdef Z_WAKE
     if (test_and_clear_bit(Cy_EVENT_SHUTDOWN_WAKEUP, &info->event)) {
@@ -1639,8 +1625,8 @@ cyz_handle_rx(struct cyclades_port *info, volatile struct CH_CTRL *ch_ctrl,
 	       for performance, but because of buffer boundaries, there
 	       may be several steps to the operation */
 	    while(0 < (small_count = 
-		       cy_min((rx_bufsize - new_rx_get),
-		       cy_min((TTY_FLIPBUF_SIZE - tty->flip.count), char_count))
+		       min_t(unsigned int, (rx_bufsize - new_rx_get),
+		       min_t(unsigned int, (TTY_FLIPBUF_SIZE - tty->flip.count), char_count))
 		 )) {
 		memcpy_fromio(tty->flip.char_buf_ptr,
 			      (char *)(cinfo->base_addr
@@ -1734,9 +1720,9 @@ cyz_handle_tx(struct cyclades_port *info, volatile struct CH_CTRL *ch_ctrl,
 	}
 #ifdef BLOCKMOVE
 	while(0 < (small_count = 
-		   cy_min((tx_bufsize - tx_put),
-		   cy_min ((SERIAL_XMIT_SIZE - info->xmit_tail),
-			cy_min(info->xmit_cnt, char_count))))){
+		   min_t(unsigned int, (tx_bufsize - tx_put),
+		       min_t(unsigned int, (SERIAL_XMIT_SIZE - info->xmit_tail),
+			   min_t(unsigned int, info->xmit_cnt, char_count))))) {
 
 	    memcpy_toio((char *)(cinfo->base_addr + tx_bufaddr + tx_put),
 			&info->xmit_buf[info->xmit_tail],
@@ -2928,8 +2914,7 @@ cy_close(struct tty_struct *tty, struct file *filp)
     shutdown(info);
     if (tty->driver.flush_buffer)
         tty->driver.flush_buffer(tty);
-    if (tty->ldisc.flush_buffer)
-        tty->ldisc.flush_buffer(tty);
+    tty_ldisc_flush(tty);
     CY_LOCK(info, flags);
 
     tty->closing = 0;
@@ -2975,10 +2960,15 @@ static int
 cy_write(struct tty_struct * tty, int from_user,
            const unsigned char *buf, int count)
 {
-  struct cyclades_port *info = (struct cyclades_port *)tty->driver_data;
+  struct cyclades_port *info;
   unsigned long flags;
   int c, ret = 0;
 
+    if (!tty)
+	return 0;
+
+    info = (struct cyclades_port *)tty->driver_data;
+  
 #ifdef CY_DEBUG_IO
     printk("cyc:cy_write ttyC%d\n", info->line); /* */
 #endif
@@ -2987,14 +2977,15 @@ cy_write(struct tty_struct * tty, int from_user,
         return 0;
     }
         
-    if (!tty || !info->xmit_buf || !tmp_buf){
+    if (!info->xmit_buf || !tmp_buf){
         return 0;
     }
 
-    CY_LOCK(info, flags);
     if (from_user) {
 	down(&tmp_buf_sem);
 	while (1) {
+	    int c1;
+	    
 	    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				SERIAL_XMIT_SIZE - info->xmit_head));
 	    if (c <= 0)
@@ -3007,23 +2998,30 @@ cy_write(struct tty_struct * tty, int from_user,
 		}
 		break;
 	    }
-	    c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+	    CY_LOCK(info, flags);
+	    c1 = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 			SERIAL_XMIT_SIZE - info->xmit_head));
+			
+	    if (c1 < c)
+	    	c = c1;
 	    memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
 	    info->xmit_head = ((info->xmit_head + c) & (SERIAL_XMIT_SIZE-1));
 	    info->xmit_cnt += c;
+            CY_UNLOCK(info, flags);
 	    buf += c;
 	    count -= c;
 	    ret += c;
 	}
 	up(&tmp_buf_sem);
     } else {
+	CY_LOCK(info, flags);
 	while (1) {
 	    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1, 
 			SERIAL_XMIT_SIZE - info->xmit_head));
-	    if (c <= 0) {
+	        
+	    if (c <= 0)
 		break;
-	    }
+
 	    memcpy(info->xmit_buf + info->xmit_head, buf, c);
 	    info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
 	    info->xmit_cnt += c;
@@ -3031,8 +3029,8 @@ cy_write(struct tty_struct * tty, int from_user,
 	    count -= c;
 	    ret += c;
 	}
+        CY_UNLOCK(info, flags);
     }
-    CY_UNLOCK(info, flags);
 
     info->idle_stats.xmit_bytes += ret;
     info->idle_stats.xmit_idle   = jiffies;
@@ -3054,9 +3052,14 @@ cy_write(struct tty_struct * tty, int from_user,
 static void
 cy_put_char(struct tty_struct *tty, unsigned char ch)
 {
-  struct cyclades_port *info = (struct cyclades_port *)tty->driver_data;
+  struct cyclades_port *info;
   unsigned long flags;
 
+    if (!tty)
+        return;
+
+    info = (struct cyclades_port *)tty->driver_data;
+  
 #ifdef CY_DEBUG_IO
     printk("cyc:cy_put_char ttyC%d\n", info->line);
 #endif
@@ -3064,7 +3067,7 @@ cy_put_char(struct tty_struct *tty, unsigned char ch)
     if (serial_paranoia_check(info, tty->device, "cy_put_char"))
         return;
 
-    if (!tty || !info->xmit_buf)
+    if (!info->xmit_buf)
         return;
 
     CY_LOCK(info, flags);
@@ -3448,8 +3451,8 @@ set_line_char(struct cyclades_port * info)
 		}
 #ifdef CY_DEBUG_DTR
 		printk("cyc:set_line_char dropping DTR\n");
-		printk("     status: 0x%x,
-		    0x%x\n", cy_readb(base_addr+(CyMSVR1<<index)),
+		printk("     status: 0x%x, 0x%x\n", 
+		    cy_readb(base_addr+(CyMSVR1<<index)),
 		    cy_readb(base_addr+(CyMSVR2<<index)));
 #endif
 	    }else{
@@ -4691,10 +4694,7 @@ cy_flush_buffer(struct tty_struct *tty)
 	}
 	CY_UNLOCK(info, flags);
     }
-    wake_up_interruptible(&tty->write_wait);
-    if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP))
-	&& tty->ldisc.write_wakeup)
-	    (tty->ldisc.write_wakeup)(tty);
+    tty_wakeup(tty);
 } /* cy_flush_buffer */
 
 
@@ -4959,7 +4959,7 @@ cy_detect_pci(void)
   struct pci_dev	*pdev = NULL;
   unsigned char		cyy_rev_id;
   unsigned char         cy_pci_irq = 0;
-  uclong		cy_pci_phys0, cy_pci_phys1, cy_pci_phys2;
+  uclong		cy_pci_phys0, cy_pci_phys2;
   uclong		cy_pci_addr0, cy_pci_addr2;
   unsigned short        i,j,cy_pci_nchan, plx_ver;
   unsigned short        device_id,dev_index = 0;
@@ -4967,6 +4967,7 @@ cy_detect_pci(void)
   uclong		Ze_addr0[NR_CARDS], Ze_addr2[NR_CARDS], ZeIndex = 0;
   uclong		Ze_phys0[NR_CARDS], Ze_phys2[NR_CARDS];
   unsigned char         Ze_irq[NR_CARDS];
+  struct pci_dev	*Ze_pdev[NR_CARDS];
 
         for (i = 0; i < NR_CARDS; i++) {
                 /* look for a Cyclades card by vendor and device id */
@@ -4988,14 +4989,13 @@ cy_detect_pci(void)
                 /* read PCI configuration area */
 		cy_pci_irq = pdev->irq;
 		cy_pci_phys0 = pci_resource_start(pdev, 0);
-		cy_pci_phys1 = pci_resource_start(pdev, 1);
 		cy_pci_phys2 = pci_resource_start(pdev, 2);
 		pci_read_config_byte(pdev, PCI_REVISION_ID, &cyy_rev_id);
 
 		device_id &= ~PCI_DEVICE_ID_MASK;
 
-    if ((device_id == PCI_DEVICE_ID_CYCLOM_Y_Lo)
-	   || (device_id == PCI_DEVICE_ID_CYCLOM_Y_Hi)){
+	if ((device_id == PCI_DEVICE_ID_CYCLOM_Y_Lo)
+	    || (device_id == PCI_DEVICE_ID_CYCLOM_Y_Hi)){
 #ifdef CY_PCI_DEBUG
             printk("Cyclom-Y/PCI (bus=0x0%x, pci_id=0x%x, ",
 		pdev->bus->number, pdev->devfn);
@@ -5014,7 +5014,11 @@ cy_detect_pci(void)
 		/* Although we don't use this I/O region, we should
 		   request it from the kernel anyway, to avoid problems
 		   with other drivers accessing it. */
-		request_region(cy_pci_phys1, CyPCI_Yctl, "Cyclom-Y");
+		if (pci_request_regions(pdev, "Cyclom-Y") != 0) {
+		    printk(KERN_ERR "cyclades: failed to reserve PCI "
+				    "resources\n");
+		    continue;
+		}
 
 #if defined(__alpha__)
                 if (device_id  == PCI_DEVICE_ID_CYCLOM_Y_Lo) { /* below 1M? */
@@ -5085,6 +5089,7 @@ cy_detect_pci(void)
                 cy_card[j].bus_index = 1;
                 cy_card[j].first_line = cy_next_channel;
                 cy_card[j].num_chips = cy_pci_nchan/4;
+		cy_card[j].pdev = pdev;
 
                 /* enable interrupts in the PCI interface */
 		plx_ver = cy_readb(cy_pci_addr2 + CyPLX_VER) & 0x0f;
@@ -5120,7 +5125,7 @@ cy_detect_pci(void)
 		    cy_pci_nchan, cy_next_channel);
 
                 cy_next_channel += cy_pci_nchan;
-    }else if (device_id == PCI_DEVICE_ID_CYCLOM_Z_Lo){
+	}else if (device_id == PCI_DEVICE_ID_CYCLOM_Z_Lo){
 	    /* print message */
 		printk("Cyclades-Z/PCI (bus=0x0%x, pci_id=0x%x, ",
 		    pdev->bus->number, pdev->devfn);
@@ -5130,7 +5135,7 @@ cy_detect_pci(void)
 		    (ulong)cy_pci_phys2, (ulong)cy_pci_phys0);
 	    printk("Cyclades-Z/PCI not supported for low addresses\n");
 	    break;
-    }else if (device_id == PCI_DEVICE_ID_CYCLOM_Z_Hi){
+	}else if (device_id == PCI_DEVICE_ID_CYCLOM_Z_Hi){
 #ifdef CY_PCI_DEBUG
             printk("Cyclades-Z/PCI (bus=0x0%x, pci_id=0x%x, ",
 	        pdev->bus->number, pdev->devfn);
@@ -5164,8 +5169,13 @@ cy_detect_pci(void)
 		/* Although we don't use this I/O region, we should
 		   request it from the kernel anyway, to avoid problems
 		   with other drivers accessing it. */
-		request_region(cy_pci_phys1, CyPCI_Zctl, "Cyclades-Z");
 
+		if (pci_request_regions(pdev, "Cyclades-Z") != 0) {
+			printk(KERN_ERR "cyclades: failed to reserve PCI "
+				    "resources\n");
+  			continue;
+  		}
+  
 		if (mailbox == ZE_V1) {
 		    cy_pci_addr2 = (ulong)ioremap(cy_pci_phys2, CyPCI_Ze_win);
 		    if (ZeIndex == NR_CARDS) {
@@ -5179,6 +5189,7 @@ cy_detect_pci(void)
 			Ze_addr0[ZeIndex] = cy_pci_addr0;
 			Ze_addr2[ZeIndex] = cy_pci_addr2;
 			Ze_irq[ZeIndex] = cy_pci_irq;
+			Ze_pdev[ZeIndex] = pdev;
 			ZeIndex++;
 		    }
 		    i--;
@@ -5263,6 +5274,7 @@ cy_detect_pci(void)
                 cy_card[j].bus_index = 1;
                 cy_card[j].first_line = cy_next_channel;
                 cy_card[j].num_chips = -1;
+		cy_card[j].pdev = pdev;
 
                 /* print message */
 #ifdef CONFIG_CYZ_INTR
@@ -5281,7 +5293,7 @@ cy_detect_pci(void)
                 printk("%d channels starting from port %d.\n",
 		    cy_pci_nchan,cy_next_channel);
                 cy_next_channel += cy_pci_nchan;
-    }
+	    }
         }
 
         for (; ZeIndex != 0 && i < NR_CARDS; i++) {
@@ -5290,12 +5302,14 @@ cy_detect_pci(void)
 	    cy_pci_addr0 = Ze_addr0[0];
 	    cy_pci_addr2 = Ze_addr2[0];
 	    cy_pci_irq = Ze_irq[0];
+	    pdev = Ze_pdev[0];
 	    for (j = 0 ; j < ZeIndex-1 ; j++) {
 		Ze_phys0[j] = Ze_phys0[j+1];
 		Ze_phys2[j] = Ze_phys2[j+1];
 		Ze_addr0[j] = Ze_addr0[j+1];
 		Ze_addr2[j] = Ze_addr2[j+1];
 		Ze_irq[j] = Ze_irq[j+1];
+		Ze_pdev[j] = Ze_pdev[j+1];
 	    }
 	    ZeIndex--;
 		mailbox = (uclong)cy_readl(&((struct RUNTIME_9060 *) 
@@ -5353,6 +5367,7 @@ cy_detect_pci(void)
                 cy_card[j].bus_index = 1;
                 cy_card[j].first_line = cy_next_channel;
                 cy_card[j].num_chips = -1;
+		cy_card[j].pdev = pdev;
 
                 /* print message */
 #ifdef CONFIG_CYZ_INTR
@@ -5789,6 +5804,8 @@ cy_cleanup_module(void)
 #endif /* CONFIG_CYZ_INTR */
 	    )
 		free_irq(cy_card[i].irq, &cy_card[i]);
+	    if (cy_card[i].pdev)
+	    	pci_release_regions(cy_card[i].pdev);
         }
     }
     if (tmp_buf) {
@@ -5821,3 +5838,4 @@ cy_setup(char *str, int *ints)
 } /* cy_setup */
 #endif /* MODULE */
 
+MODULE_LICENSE("GPL");

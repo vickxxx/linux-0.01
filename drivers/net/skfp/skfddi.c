@@ -56,6 +56,7 @@
  *		12-Nov-99	CG	Source code release
  *		22-Nov-99	CG	Included in kernel source.
  *		07-May-00	DM	64 bit fixes, new dma interface
+ *		06-May-02	ML	Structure fixes
  *
  * Compilation options (-Dxxx):
  *              DRIVERDEBUG     print lots of messages to log file
@@ -68,7 +69,7 @@
 
 /* Version information string - should be updated prior to */
 /* each new release!!! */
-#define VERSION		"2.06"
+#define VERSION		"2.07"
 
 static const char *boot_msg = 
 	"SysKonnect FDDI PCI Adapter driver v" VERSION " for\n"
@@ -84,7 +85,7 @@ static const char *boot_msg =
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
@@ -182,12 +183,19 @@ extern void mac_clear_multicast(struct s_smc *smc);
 extern void enable_tx_irq(struct s_smc *smc, u_short queue);
 extern void mac_drv_clear_txd(struct s_smc *smc);
 
+static struct pci_device_id skfddi_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_SK, PCI_DEVICE_ID_SK_FP, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, skfddi_pci_tbl);
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mirko Lindner <mlindner@syskonnect.de>");
 
 // Define module-wide (static) variables
 
-static int num_boards = 0;	/* total number of adapters configured */
-static int num_fddi = 0;
-static int autoprobed = 0;
+static int num_boards;	/* total number of adapters configured */
+static int num_fddi;
+static int autoprobed;
 
 #ifdef MODULE
 int init_module(void);
@@ -195,7 +203,7 @@ void cleanup_module(void);
 static struct net_device *unlink_modules(struct net_device *p);
 static int loading_module = 1;
 #else
-static int loading_module = 0;
+static int loading_module;
 #endif				// MODULE
 
 #ifdef DRIVERDEBUG
@@ -1355,7 +1363,7 @@ static int skfp_send_pkt(struct sk_buff *skb, struct net_device *dev)
 	 */
 
 	if (!(skb->len >= FDDI_K_LLC_ZLEN && skb->len <= FDDI_K_LLC_LEN)) {
-		bp->MacStat.tx_errors++;	/* bump error counter */
+		bp->MacStat.gen.tx_errors++;	/* bump error counter */
 		// dequeue packets from xmt queue and send them
 		netif_start_queue(dev);
 		dev_kfree_skb(skb);
@@ -1632,7 +1640,7 @@ void *mac_drv_get_space(struct s_smc *smc, unsigned int size)
  *	This function is called by the hardware dependent module.
  *	It allocates the memory for the RxD and TxD descriptors.
  *
- *	This memory must be non-cached, non-movable and non-swapable.
+ *	This memory must be non-cached, non-movable and non-swappable.
  *	This memory should start at a physical page boundary.
  * Args
  *	smc - A pointer to the SMT context struct.
@@ -1806,8 +1814,8 @@ void mac_drv_tx_complete(struct s_smc *smc, volatile struct s_smt_fp_txd *txd)
 			 skb->len, PCI_DMA_TODEVICE);
 	txd->txd_os.dma_addr = 0;
 
-	smc->os.MacStat.tx_packets++;	// Count transmitted packets.
-	smc->os.MacStat.tx_bytes+=skb->len;	// Count bytes
+	smc->os.MacStat.gen.tx_packets++;	// Count transmitted packets.
+	smc->os.MacStat.gen.tx_bytes+=skb->len;	// Count bytes
 
 	// free the skb
 	dev_kfree_skb_irq(skb);
@@ -1889,7 +1897,7 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	skb = rxd->rxd_os.skb;
 	if (!skb) {
 		PRINTK(KERN_INFO "No skb in rxd\n");
-		smc->os.MacStat.rx_errors++;
+		smc->os.MacStat.gen.rx_errors++;
 		goto RequeueRxd;
 	}
 	virt = skb->data;
@@ -1942,13 +1950,14 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	}
 
 	// Count statistics.
-	smc->os.MacStat.rx_packets++;	// Count indicated receive packets.
-	smc->os.MacStat.rx_bytes+=len;	// Count bytes
+	smc->os.MacStat.gen.rx_packets++;	// Count indicated receive
+						// packets.
+	smc->os.MacStat.gen.rx_bytes+=len;	// Count bytes.
 
 	// virt points to header again
 	if (virt[1] & 0x01) {	// Check group (multicast) bit.
 
-		smc->os.MacStat.multicast++;
+		smc->os.MacStat.gen.multicast++;
 	}
 
 	// deliver frame to system
@@ -1958,6 +1967,7 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	skb->dev = bp->dev;	/* pass up device pointer */
 
 	netif_rx(skb);
+	bp->dev->last_rx = jiffies;
 
 	HWM_RX_CHECK(smc, RX_LOW_WATERMARK);
 	return;
@@ -1965,7 +1975,8 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
       RequeueRxd:
 	PRINTK(KERN_INFO "Rx: re-queue RXD.\n");
 	mac_drv_requeue_rxd(smc, rxd, frag_count);
-	smc->os.MacStat.rx_errors++;	// Count receive packets not indicated.
+	smc->os.MacStat.gen.rx_errors++;	// Count receive packets
+						// not indicated.
 
 }				// mac_drv_rx_complete
 
@@ -2215,6 +2226,7 @@ int mac_drv_rx_init(struct s_smc *smc, int len, int fc,
 
 	// deliver frame to system
 	skb->protocol = fddi_type_trans(skb, ((skfddi_priv *) & smc->os)->dev);
+	skb->dev->last_rx = jiffies;
 	netif_rx(skb);
 
 	return (0);
@@ -2339,7 +2351,7 @@ void smt_stat_counter(struct s_smc *smc, int stat)
 		break;
 	case 1:
 		PRINTK(KERN_INFO "Receive fifo overflow.\n");
-		smc->os.MacStat.rx_errors++;
+		smc->os.MacStat.gen.rx_errors++;
 		break;
 	default:
 		PRINTK(KERN_INFO "Unknown status (%d).\n", stat);
@@ -2550,7 +2562,7 @@ void drv_reset_indication(struct s_smc *smc)
  *
  ************************/
 #define LP(a) ((struct s_smc*)(a))
-static struct net_device *mdev = NULL;
+static struct net_device *mdev;
 
 /************************
  *

@@ -128,8 +128,13 @@
 #define CDROM_DEBUG		0x5330	/* Turn debug messages on/off */
 #define CDROM_GET_CAPABILITY	0x5331	/* get capabilities */
 
+/* Note that scsi/scsi_ioctl.h also uses 0x5382 - 0x5386.
+ * Future CDROM ioctls should be kept below 0x537F
+ */
+
 /* This ioctl is only used by sbpcd at the moment */
 #define CDROMAUDIOBUFSIZ        0x5382	/* set the audio buffer size */
+					/* conflict with SCSI_IOCTL_GET_IDLUN */
 
 /* DVD-ROM Specific ioctls */
 #define DVD_READ_STRUCT		0x5390  /* Read structure */
@@ -524,10 +529,12 @@ struct dvd_layer {
 	__u32 end_sector_l0;
 };
 
+#define DVD_LAYERS	4
+
 struct dvd_physical {
 	__u8 type;
 	__u8 layer_num;
-	struct dvd_layer layer[4];
+	struct dvd_layer layer[DVD_LAYERS];
 };
 
 struct dvd_copyright {
@@ -722,7 +729,8 @@ struct cdrom_device_info {
 	struct cdrom_device_ops  *ops;  /* link to device_ops */
 	struct cdrom_device_info *next; /* next device_info for this major */
 	void *handle;		        /* driver-dependent data */
-	devfs_handle_t de;		/* real driver creates this  */
+	devfs_handle_t de;		/* real driver should create this  */
+	int number;			/* generic driver updates this  */
 /* specifications */
         kdev_t dev;	                /* device number */
 	int mask;                       /* mask of capability: disables them */
@@ -769,10 +777,25 @@ struct cdrom_device_ops {
 };
 
 /* the general block_device operations structure: */
-extern struct block_device_operations cdrom_fops;
+extern int cdrom_open(struct inode *, struct file *);
+extern int cdrom_release(struct inode *, struct file *);
+extern int cdrom_ioctl(struct inode *, struct file *, unsigned, unsigned long);
+extern int cdrom_media_changed(kdev_t);
 
 extern int register_cdrom(struct cdrom_device_info *cdi);
 extern int unregister_cdrom(struct cdrom_device_info *cdi);
+
+static inline void devfs_plain_cdrom(struct cdrom_device_info *cdi,
+				struct block_device_operations *ops)
+{
+	char vname[23];
+
+	sprintf (vname, "cdroms/cdrom%d", cdi->number);
+	cdi->de = devfs_register (NULL, vname, DEVFS_FL_DEFAULT,
+				    MAJOR (cdi->dev), MINOR (cdi->dev),
+				    S_IFBLK | S_IRUGO | S_IWUGO,
+				    ops, NULL);
+}
 
 typedef struct {
     int data;

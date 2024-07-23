@@ -82,7 +82,7 @@
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/poll.h>
 #include <linux/fs.h>
 #include <linux/devfs_fs_kernel.h>
@@ -102,15 +102,8 @@
 #include <asm/dma.h>
 #include <asm/byteorder.h>
 
-#include "syncppp.h"
+#include <net/syncppp.h>
 #include "cosa.h"
-
-/* Linux version stuff */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-typedef struct wait_queue *wait_queue_head_t;
-#define DECLARE_WAITQUEUE(wait, current) \
-	struct wait_queue wait = { current, NULL }
-#endif
 
 /* Maximum length of the identification string. */
 #define COSA_MAX_ID_STRING	128
@@ -220,9 +213,9 @@ static int cosa_major = 117;
 
 #define COSA_MTU 2000	/* FIXME: I don't know this exactly */
 
-#undef DEBUG_DATA 1	/* Dump the data read or written to the channel */
-#undef DEBUG_IRQS 1	/* Print the message when the IRQ is received */
-#undef DEBUG_IO 1	/* Dump the I/O traffic */
+#undef DEBUG_DATA //1	/* Dump the data read or written to the channel */
+#undef DEBUG_IRQS //1	/* Print the message when the IRQ is received */
+#undef DEBUG_IO   //1	/* Dump the I/O traffic */
 
 #define TX_TIMEOUT	(5*HZ)
 
@@ -235,8 +228,8 @@ static int io[MAX_CARDS+1]  = { 0x220, 0x228, 0x210, 0x218, 0, };
 /* NOTE: DMA is not autoprobed!!! */
 static int dma[MAX_CARDS+1] = { 1, 7, 1, 7, 1, 7, 1, 7, 0, };
 #else
-int io[MAX_CARDS+1]  = { 0, };
-int dma[MAX_CARDS+1] = { 0, };
+static int io[MAX_CARDS+1];
+static int dma[MAX_CARDS+1];
 #endif
 /* IRQ can be safely autoprobed */
 static int irq[MAX_CARDS+1] = { -1, -1, -1, -1, -1, -1, 0, };
@@ -251,6 +244,7 @@ MODULE_PARM_DESC(dma, "The DMA channels of the COSA or SRP cards");
 
 MODULE_AUTHOR("Jan \"Yenya\" Kasprzak, <kas@fi.muni.cz>");
 MODULE_DESCRIPTION("Modular driver for the COSA or SRP synchronous card");
+MODULE_LICENSE("GPL");
 #endif
 
 /* I use this mainly for testing purposes */
@@ -303,7 +297,6 @@ static void chardev_channel_init(struct channel_data *chan);
 static char *chrdev_setup_rx(struct channel_data *channel, int size);
 static int chrdev_rx_done(struct channel_data *channel);
 static int chrdev_tx_done(struct channel_data *channel, int size);
-static loff_t cosa_lseek(struct file *file, loff_t offset, int origin);
 static ssize_t cosa_read(struct file *file,
 	char *buf, size_t count, loff_t *ppos);
 static ssize_t cosa_write(struct file *file,
@@ -319,7 +312,7 @@ static int cosa_fasync(struct inode *inode, struct file *file, int on);
 
 static struct file_operations cosa_fops = {
 	owner:		THIS_MODULE,
-	llseek:		cosa_lseek,
+	llseek:		no_llseek,
 	read:		cosa_read,
 	write:		cosa_write,
 	poll:		cosa_poll,
@@ -618,7 +611,8 @@ static void sppp_channel_delete(struct channel_data *chan)
 static int cosa_sppp_open(struct net_device *d)
 {
 	struct channel_data *chan = d->priv;
-	int err, flags;
+	int err;
+	unsigned long flags;
 
 	if (!(chan->cosa->firmware_status & COSA_FW_START)) {
 		printk(KERN_NOTICE "%s: start the firmware first (status %d)\n",
@@ -689,7 +683,7 @@ static void cosa_sppp_timeout(struct net_device *dev)
 static int cosa_sppp_close(struct net_device *d)
 {
 	struct channel_data *chan = d->priv;
-	int flags;
+	unsigned long flags;
 
 	netif_stop_queue(d);
 	sppp_close(d);
@@ -745,7 +739,7 @@ static int sppp_rx_done(struct channel_data *chan)
 	chan->stats.rx_bytes += chan->cosa->rxsize;
 	netif_rx(chan->rx_skb);
 	chan->rx_skb = 0;
-	chan->pppdev.dev->trans_start = jiffies;
+	chan->pppdev.dev->last_rx = jiffies;
 	return 0;
 }
 
@@ -782,16 +776,11 @@ static void chardev_channel_init(struct channel_data *chan)
 	init_MUTEX(&chan->wsem);
 }
 
-static loff_t cosa_lseek(struct file * file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static ssize_t cosa_read(struct file *file,
 	char *buf, size_t count, loff_t *ppos)
 {
 	DECLARE_WAITQUEUE(wait, current);
-	int flags;
+	unsigned long flags;
 	struct channel_data *chan = (struct channel_data *)file->private_data;
 	struct cosa_data *cosa = chan->cosa;
 	char *kbuf;
@@ -836,7 +825,7 @@ static ssize_t cosa_read(struct file *file,
 	up(&chan->rsem);
 
 	if (copy_to_user(buf, kbuf, count)) {
-		kfree(buf);
+		kfree(kbuf);
 		return -EFAULT;
 	}
 	kfree(kbuf);
@@ -868,7 +857,7 @@ static ssize_t cosa_write(struct file *file,
 	DECLARE_WAITQUEUE(wait, current);
 	struct channel_data *chan = (struct channel_data *)file->private_data;
 	struct cosa_data *cosa = chan->cosa;
-	unsigned int flags;
+	unsigned long flags;
 	char *kbuf;
 
 	if (!(cosa->firmware_status & COSA_FW_START)) {
@@ -1041,20 +1030,21 @@ static inline int cosa_download(struct cosa_data *cosa, struct cosa_download *d)
 		return -EPERM;
 	}
 
-	if (get_user(addr, &(d->addr)) ||
+	if (verify_area(VERIFY_READ, d, sizeof(*d)) ||
+	    __get_user(addr, &(d->addr)) ||
 	    __get_user(len, &(d->len)) ||
 	    __get_user(code, &(d->code)))
 		return -EFAULT;
 
-	if (d->addr < 0 || d->addr > COSA_MAX_FIRMWARE_SIZE)
+	if (addr < 0 || addr > COSA_MAX_FIRMWARE_SIZE)
 		return -EINVAL;
-	if (d->len < 0 || d->len > COSA_MAX_FIRMWARE_SIZE)
+	if (len < 0 || len > COSA_MAX_FIRMWARE_SIZE)
 		return -EINVAL;
 
 	/* If something fails, force the user to reset the card */
 	cosa->firmware_status &= ~(COSA_FW_RESET|COSA_FW_DOWNLOAD);
 
-	if ((i=download(cosa, d->code, len, addr)) < 0) {
+	if ((i=download(cosa, code, len, addr)) < 0) {
 		printk(KERN_NOTICE "cosa%d: microcode download failed: %d\n",
 			cosa->num, i);
 		return -EIO;
@@ -1082,7 +1072,8 @@ static inline int cosa_readmem(struct cosa_data *cosa, struct cosa_download *d)
 		return -EPERM;
 	}
 
-	if (get_user(addr, &(d->addr)) ||
+	if (verify_area(VERIFY_READ, d, sizeof(*d)) ||
+	    __get_user(addr, &(d->addr)) ||
 	    __get_user(len, &(d->len)) ||
 	    __get_user(code, &(d->code)))
 		return -EFAULT;
@@ -1090,7 +1081,7 @@ static inline int cosa_readmem(struct cosa_data *cosa, struct cosa_download *d)
 	/* If something fails, force the user to reset the card */
 	cosa->firmware_status &= ~COSA_FW_RESET;
 
-	if ((i=readmem(cosa, d->code, len, addr)) < 0) {
+	if ((i=readmem(cosa, code, len, addr)) < 0) {
 		printk(KERN_NOTICE "cosa%d: reading memory failed: %d\n",
 			cosa->num, i);
 		return -EIO;
@@ -1257,7 +1248,7 @@ static void cosa_disable_rx(struct channel_data *chan)
 static int cosa_start_tx(struct channel_data *chan, char *buf, int len)
 {
 	struct cosa_data *cosa = chan->cosa;
-	int flags;
+	unsigned long flags;
 #ifdef DEBUG_DATA
 	int i;
 
@@ -1283,7 +1274,7 @@ static int cosa_start_tx(struct channel_data *chan, char *buf, int len)
 
 static void put_driver_status(struct cosa_data *cosa)
 {
-	unsigned flags=0;
+	unsigned long flags;
 	int status;
 
 	spin_lock_irqsave(&cosa->lock, flags);
@@ -1351,7 +1342,7 @@ static void put_driver_status_nolock(struct cosa_data *cosa)
  */
 static void cosa_kick(struct cosa_data *cosa)
 {
-	unsigned flags, flags1;
+	unsigned long flags, flags1;
 	char *s = "(probably) IRQ";
 
 	if (test_bit(RXBIT, &cosa->rxtx))
@@ -2011,7 +2002,7 @@ again:
 /* ---------- I/O debugging routines ---------- */
 /*
  * These routines can be used to monitor COSA/SRP I/O and to printk()
- * the data being transfered on the data and status I/O port in a
+ * the data being transferred on the data and status I/O port in a
  * readable way.
  */
 

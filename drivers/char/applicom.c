@@ -1,6 +1,6 @@
 /* Derived from Applicom driver ac.c for SCO Unix                            */
 /* Ported by David Woodhouse, Axiom (Cambridge) Ltd.                         */
-/* Dave@mvhi.com  30/8/98                                                    */
+/* dwmw2@redhat.com  30/8/98                                                 */
 /* $Id: ac.c,v 1.30 2000/03/22 16:03:57 dwmw2 Exp $			     */
 /* This module is for Linux 2.1 and 2.2 series kernels.                      */
 /*****************************************************************************/
@@ -22,7 +22,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <asm/errno.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -36,7 +36,7 @@
 
 #if LINUX_VERSION_CODE < 0x20300 
 /* These probably want adding to <linux/compatmac.h> */
-#define init_waitqueue_head(x) do { *(x) = NULL; } while (0);
+#define init_waitqueue_head(x) do { *(x) = NULL; } while (0)
 #define PCI_BASE_ADDRESS(dev) (dev->base_address[0])
 #define DECLARE_WAIT_QUEUE_HEAD(x) struct wait_queue *x
 #define __setup(x,y) /* */
@@ -72,8 +72,20 @@ static char *applicom_pci_devnames[] = {
 	"PCI2000PFB"
 };
 
+static struct pci_device_id applicom_pci_tbl[] = {
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCIGENERIC,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCI2000IBS_CAN,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_APPLICOM, PCI_DEVICE_ID_APPLICOM_PCI2000PFB,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, applicom_pci_tbl);
+
 MODULE_AUTHOR("David Woodhouse & Applicom International");
 MODULE_DESCRIPTION("Driver for Applicom Profibus card");
+MODULE_LICENSE("GPL");
 MODULE_PARM(irq, "i");
 MODULE_PARM_DESC(irq, "IRQ of the Applicom board");
 MODULE_PARM(mem, "i");
@@ -82,7 +94,7 @@ MODULE_PARM_DESC(mem, "Shared Memory Address of Applicom board");
 MODULE_SUPPORTED_DEVICE("ac");
 
 
-struct applicom_board {
+static struct applicom_board {
 	unsigned long PhysIO;
 	unsigned long RamIO;
 	wait_queue_head_t FlagSleepSend;
@@ -100,22 +112,21 @@ static unsigned int WriteErrorCount;	/* number of write error      */
 static unsigned int ReadErrorCount;	/* number of read error       */
 static unsigned int DeviceErrorCount;	/* number of device error     */
 
-static loff_t ac_llseek(struct file *, loff_t, int);
 static ssize_t ac_read (struct file *, char *, size_t, loff_t *);
 static ssize_t ac_write (struct file *, const char *, size_t, loff_t *);
 static int ac_ioctl(struct inode *, struct file *, unsigned int,
 		    unsigned long);
 static void ac_interrupt(int, void *, struct pt_regs *);
 
-struct file_operations ac_fops = {
+static struct file_operations ac_fops = {
 	owner:THIS_MODULE,
-	llseek:ac_llseek,
+	llseek:no_llseek,
 	read:ac_read,
 	write:ac_write,
 	ioctl:ac_ioctl,
 };
 
-struct miscdevice ac_miscdev = {
+static struct miscdevice ac_miscdev = {
 	AC_MINOR,
 	"ac",
 	&ac_fops
@@ -123,7 +134,7 @@ struct miscdevice ac_miscdev = {
 
 static int dummy;	/* dev_id for request_irq() */
 
-int ac_register_board(unsigned long physloc, unsigned long loc, 
+static int ac_register_board(unsigned long physloc, unsigned long loc, 
 		      unsigned char boardno)
 {
 	volatile unsigned char byte_reset_it;
@@ -211,6 +222,7 @@ int __init applicom_init(void)
 
 		if (!RamIO) {
 			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", PCI_BASE_ADDRESS(dev));
+			pci_disable_device(dev);
 			return -EIO;
 		}
 
@@ -222,12 +234,14 @@ int __init applicom_init(void)
 						  (unsigned long)RamIO,0))) {
 			printk(KERN_INFO "ac.o: PCI Applicom device doesn't have correct signature.\n");
 			iounmap(RamIO);
+			pci_disable_device(dev);
 			continue;
 		}
 
 		if (request_irq(dev->irq, &ac_interrupt, SA_SHIRQ, "Applicom PCI", &dummy)) {
 			printk(KERN_INFO "Could not allocate IRQ %d for PCI Applicom device.\n", dev->irq);
 			iounmap(RamIO);
+			pci_disable_device(dev);
 			apbs[boardno - 1].RamIO = 0;
 			continue;
 		}
@@ -254,11 +268,6 @@ int __init applicom_init(void)
 
 	/* Now try the specified ISA cards */
 
-	RamIO = ioremap(mem, LEN_RAM_IO * MAX_ISA_BOARD);
-
-	if (!RamIO) 
-		printk(KERN_INFO "ac.o: Failed to ioremap ISA memory space at 0x%lx\n", mem);
-
 	for (i = 0; i < MAX_ISA_BOARD; i++) {
 		RamIO = ioremap(mem + (LEN_RAM_IO * i), LEN_RAM_IO);
 
@@ -281,7 +290,8 @@ int __init applicom_init(void)
 				iounmap((void *) RamIO);
 				apbs[boardno - 1].RamIO = 0;
 			}
-			apbs[boardno - 1].irq = irq;
+			else
+				apbs[boardno - 1].irq = irq;
 		}
 		else
 			apbs[boardno - 1].irq = 0;
@@ -340,11 +350,6 @@ int __init applicom_init(void)
 __initcall(applicom_init);
 #endif
 
-static loff_t ac_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t * ppos)
 {
 	unsigned int NumCard;	/* Board number 1 -> 8           */
@@ -361,7 +366,7 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	if (count != sizeof(struct st_ram_io) + sizeof(struct mailbox)) {
 		static int warncount = 5;
 		if (warncount) {
-			printk(KERN_INFO "Hmmm. write() of Applicom card, length %d != expected %d\n",
+			printk(KERN_INFO "Hmmm. write() of Applicom card, length %zd != expected %zd\n",
 			       count, sizeof(struct st_ram_io) + sizeof(struct mailbox));
 			warncount--;
 		}
@@ -421,7 +426,7 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	}
 	
 	/* Place ourselves on the wait queue */
-	current->state = TASK_INTERRUPTIBLE;
+	set_current_state(TASK_INTERRUPTIBLE);
 	add_wait_queue(&apbs[IndexCard].FlagSleepSend, &wait);
 
 	/* Check whether the card is ready for us */
@@ -435,12 +440,13 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 			remove_wait_queue(&apbs[IndexCard].FlagSleepSend,
 					  &wait);
 			return -EINTR;
-	}
+		}
 		spin_lock_irqsave(&apbs[IndexCard].mutex, flags);
+		set_current_state(TASK_INTERRUPTIBLE);
 	}
 
 	/* We may not have actually slept */
-	current->state = TASK_RUNNING;
+	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&apbs[IndexCard].FlagSleepSend, &wait);
 
 	writeb(1, apbs[IndexCard].RamIO + DATA_FROM_PC_READY);
@@ -468,18 +474,17 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	return 0;
 }
 
-static int do_ac_read(int IndexCard, char *buf)
+static int do_ac_read(int IndexCard, char *buf,
+		struct st_ram_io *st_loc, struct mailbox *mailbox)
 {
-	struct st_ram_io st_loc;
-	struct mailbox tmpmailbox;	/* bounce buffer - can't copy to user space with cli() */
 	unsigned long from = (unsigned long)apbs[IndexCard].RamIO + RAM_TO_PC;
-	unsigned char *to = (unsigned char *)&tmpmailbox;
+	unsigned char *to = (unsigned char *)&mailbox;
 #ifdef DEBUG
 	int c;
 #endif
 
-	st_loc.tic_owner_to_pc = readb(apbs[IndexCard].RamIO + TIC_OWNER_TO_PC);
-	st_loc.numcard_owner_to_pc = readb(apbs[IndexCard].RamIO + NUMCARD_OWNER_TO_PC);
+	st_loc->tic_owner_to_pc = readb(apbs[IndexCard].RamIO + TIC_OWNER_TO_PC);
+	st_loc->numcard_owner_to_pc = readb(apbs[IndexCard].RamIO + NUMCARD_OWNER_TO_PC);
 
 
 	{
@@ -502,32 +507,24 @@ static int do_ac_read(int IndexCard, char *buf)
 		printk("Read from applicom card #%d. struct st_ram_io follows:", NumCard);
 
 		for (c = 0; c < sizeof(struct st_ram_io);) {
-			printk("\n%5.5X: %2.2X", c, ((unsigned char *) &st_loc)[c]);
+			printk("\n%5.5X: %2.2X", c, ((unsigned char *)st_loc)[c]);
 
 			for (c++; c % 8 && c < sizeof(struct st_ram_io); c++) {
-				printk(" %2.2X", ((unsigned char *) &st_loc)[c]);
+				printk(" %2.2X", ((unsigned char *)st_loc)[c]);
 			}
 		}
 
 		printk("\nstruct mailbox follows:");
 
 		for (c = 0; c < sizeof(struct mailbox);) {
-			printk("\n%5.5X: %2.2X", c, ((unsigned char *) &tmpmailbox)[c]);
+			printk("\n%5.5X: %2.2X", c, ((unsigned char *)mailbox)[c]);
 
 			for (c++; c % 8 && c < sizeof(struct mailbox); c++) {
-				printk(" %2.2X", ((unsigned char *) &tmpmailbox)[c]);
+				printk(" %2.2X", ((unsigned char *)mailbox)[c]);
 			}
 		}
 		printk("\n");
 #endif
-
-	/* Je suis stupide. DW. */
-
-	if (copy_to_user(buf, &st_loc, sizeof(struct st_ram_io)))
-		return -EFAULT;
-	if (copy_to_user(&buf[sizeof(struct st_ram_io)], &tmpmailbox, sizeof(struct mailbox)))
-		return -EFAULT;
-
 	return (sizeof(struct st_ram_io) + sizeof(struct mailbox));
 }
 
@@ -543,14 +540,14 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 #endif
 	/* No need to ratelimit this. Only root can trigger it anyway */
 	if (count != sizeof(struct st_ram_io) + sizeof(struct mailbox)) {
-		printk( KERN_WARNING "Hmmm. read() of Applicom card, length %d != expected %d\n",
+		printk( KERN_WARNING "Hmmm. read() of Applicom card, length %zd != expected %zd\n",
 			count,sizeof(struct st_ram_io) + sizeof(struct mailbox));
 		return -EINVAL;
 	}
 	
 	while(1) {
 		/* Stick ourself on the wait queue */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&FlagSleepRec, &wait);
 		
 		/* Scan each board, looking for one which has a packet for us */
@@ -562,11 +559,19 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 			tmp = readb(apbs[i].RamIO + DATA_TO_PC_READY);
 			
 			if (tmp == 2) {
+				struct st_ram_io st_loc;
+				struct mailbox mailbox;
+
 				/* Got a packet for us */
-				ret = do_ac_read(i, buf);
+				ret = do_ac_read(i, buf, &st_loc, &mailbox);
 				spin_unlock_irqrestore(&apbs[i].mutex, flags);
-				current->state = TASK_RUNNING;
+				set_current_state(TASK_RUNNING);
 				remove_wait_queue(&FlagSleepRec, &wait);
+
+				if (copy_to_user(buf, &st_loc, sizeof(st_loc)))
+					return -EFAULT;
+				if (copy_to_user(buf + sizeof(st_loc), &mailbox, sizeof(mailbox)))
+					return -EFAULT;
 				return tmp;
 			}
 			
@@ -575,7 +580,7 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 				Dummy = readb(apbs[i].RamIO + VERS);
 				
 				spin_unlock_irqrestore(&apbs[i].mutex, flags);
-				current->state = TASK_RUNNING;
+				set_current_state(TASK_RUNNING);
 				remove_wait_queue(&FlagSleepRec, &wait);
 				
 				printk(KERN_WARNING "APPLICOM driver read error board %d, DataToPcReady = %d\n",

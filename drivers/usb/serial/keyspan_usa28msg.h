@@ -1,10 +1,10 @@
 /*
 	usa28msg.h
 
-	Copyright (c) 1998-2000 InnoSys Incorporated.  All Rights Reserved
+	Copyright (C) 1998-2000 InnoSys Incorporated.  All Rights Reserved
 	This file is available under a BSD-style copyright
 
-	Keyspan USB Async Firmware to run on Anchor EZ-USB
+	Keyspan USB Async Message Formats for the USA26X
 
 	Redistribution and use in source and binary forms, with or without
 	modification, are permitted provided that the following conditions are
@@ -15,15 +15,11 @@
    	disclaimer.  The following copyright notice must appear immediately at
    	the beginning of all source files:
 
-        	Copyright (c) 1998-2000 InnoSys Incorporated.  All Rights Reserved
+        	Copyright (C) 1998-2000 InnoSys Incorporated.  All Rights Reserved
 
         	This file is available under a BSD-style copyright
 
-	2. Redistributions in binary form must reproduce the above copyright
-   	notice, this list of conditions and the following disclaimer in the
-   	documentation and/or other materials provided with the distribution.
-
-	3. The name of InnoSys Incorprated may not be used to endorse or promote
+	2. The name of InnoSys Incorporated may not be used to endorse or promote
    	products derived from this software without specific prior written
    	permission.
 
@@ -95,7 +91,7 @@
 #define	__USA28MSG__
 
 
-typedef struct keyspan_usa28_portControlMessage
+struct keyspan_usa28_portControlMessage
 {
 	/*
 		there are four types of "commands" sent in the control message:
@@ -113,7 +109,8 @@ typedef struct keyspan_usa28_portControlMessage
 			hardly more trouble to do them than to check whether to do them):
 	*/
 	u8	parity,			// 1=use parity, 0=don't
-		ctsFlowControl,	// 1=use CTS flow control, 0=don't
+		ctsFlowControl,	        // all except 19Q: 1=use CTS flow control, 0=don't
+					// 19Q: 0x08:CTSflowControl 0x10:DSRflowControl
 		xonFlowControl,	// 1=use XON/XOFF flow control, 0=don't
 		rts,			// 1=on, 0=off
 		dtr;			// 1=on, 0=off
@@ -145,9 +142,9 @@ typedef struct keyspan_usa28_portControlMessage
 		returnStatus,	// return current status n times (1 or 2)
 		resetDataToggle;// reset data toggle state to DATA0
 	
-} keyspan_usa28_portControlMessage;
+};
 
-typedef struct keyspan_usa28_portStatusMessage
+struct keyspan_usa28_portStatusMessage
 {
 	u8	port,			// 0=first, 1=second, 2=global (see below)
 		cts,
@@ -163,32 +160,32 @@ typedef struct keyspan_usa28_portStatusMessage
 		rxBreak,		// 1=we're in break state
 		rs232invalid,	// 1=no valid signals on rs-232 inputs
 		controlResponse;// 1=a control messages has been processed
-} keyspan_usa28_portStatusMessage;
+};
 
 // bit defines in txState
 #define	TX_OFF			0x01	// requested by host txOff command
 #define	TX_XOFF			0x02	// either real, or simulated by host
 
-typedef struct keyspan_usa28_globalControlMessage
+struct keyspan_usa28_globalControlMessage
 {
 	u8	sendGlobalStatus,	// 2=request for two status responses
 		resetStatusToggle,	// 1=reset global status toggle
 		resetStatusCount;	// a cycling value
-} keyspan_usa28_globalControlMessage;
+};
 
-typedef struct keyspan_usa28_globalStatusMessage
+struct keyspan_usa28_globalStatusMessage
 {
 	u8	port,				// 3
 		sendGlobalStatus,	// from request, decremented
 		resetStatusCount;	// as in request
-} keyspan_usa28_globalStatusMessage;
+};
 
-typedef struct keyspan_usa28_globalDebugMessage
+struct keyspan_usa28_globalDebugMessage
 {
 	u8	port,				// 2
 		n,					// typically a count/status byte
 		b;					// typically a data byte
-} keyspan_usa28_globalDebugMessage;
+};
 
 // ie: the maximum length of an EZUSB endpoint buffer
 #define	MAX_DATA_LEN			64

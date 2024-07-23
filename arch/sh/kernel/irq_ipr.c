@@ -1,15 +1,16 @@
-/* $Id: irq_ipr.c,v 1.6 2000/05/14 08:41:25 gniibe Exp $
+/* $Id: irq_ipr.c,v 1.1.1.1.2.2 2003/10/14 16:46:10 trent Exp $
  *
  * linux/arch/sh/kernel/irq_ipr.c
  *
  * Copyright (C) 1999  Niibe Yutaka & Takeshi Yaegashi
  * Copyright (C) 2000  Kazumoto Kojima
+ * Copyright (C) 2003 Takashi Kusuda <kusuda-takashi@hitachi-ul.co.jp>
  *
  * Interrupt handling for IPR-based IRQ.
  *
  * Supported system:
  *	On-chip supporting modules (TMU, RTC, etc.).
- *	On-chip supporting modules for SH7709/SH7709A/SH7729.
+ *	On-chip supporting modules for SH7300/SH7709/SH7709A/SH7729.
  *	Hitachi SolutionEngine external I/O:
  *		MS7709SE01, MS7709ASE01, and MS7750SE01
  *
@@ -46,7 +47,7 @@ static unsigned int startup_ipr_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type ipr_irq_type = {
-	"IPR-based-IRQ",
+	"IPR-IRQ",
 	startup_ipr_irq,
 	shutdown_ipr_irq,
 	enable_ipr_irq,
@@ -88,7 +89,8 @@ static void mask_and_ack_ipr(unsigned int irq)
 {
 	disable_ipr_irq(irq);
 
-#if defined(CONFIG_CPU_SUBTYPE_SH7707) || defined(CONFIG_CPU_SUBTYPE_SH7709)
+#if defined(CONFIG_CPU_SUBTYPE_SH7300) || defined(CONFIG_CPU_SUBTYPE_SH7707) || \
+    defined(CONFIG_CPU_SUBTYPE_SH7709)
 	/* This is needed when we use edge triggered setting */
 	/* XXX: Is it really needed? */
 	if (IRQ0_IRQ <= irq && irq <= IRQ5_IRQ) {
@@ -102,7 +104,8 @@ static void mask_and_ack_ipr(unsigned int irq)
 
 static void end_ipr_irq(unsigned int irq)
 {
-	enable_ipr_irq(irq);
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		enable_ipr_irq(irq);
 }
 
 void make_ipr_irq(unsigned int irq, unsigned int addr, int pos, int priority)
@@ -116,14 +119,106 @@ void make_ipr_irq(unsigned int irq, unsigned int addr, int pos, int priority)
 	disable_ipr_irq(irq);
 }
 
+#if defined(CONFIG_CPU_SUBTYPE_SH7707) || defined(CONFIG_CPU_SUBTYPE_SH7709)
+static unsigned char pint_map[256];
+static unsigned long portcr_mask = 0;
+
+static void enable_pint_irq(unsigned int irq);
+static void disable_pint_irq(unsigned int irq);
+
+/* shutdown is same as "disable" */
+#define shutdown_pint_irq disable_pint_irq
+
+static void mask_and_ack_pint(unsigned int);
+static void end_pint_irq(unsigned int irq);
+
+static unsigned int startup_pint_irq(unsigned int irq)
+{ 
+	enable_pint_irq(irq);
+	return 0; /* never anything pending */
+}
+
+static struct hw_interrupt_type pint_irq_type = {
+	"PINT-IRQ",
+	startup_pint_irq,
+	shutdown_pint_irq,
+	enable_pint_irq,
+	disable_pint_irq,
+	mask_and_ack_pint,
+	end_pint_irq
+};
+
+static void disable_pint_irq(unsigned int irq)
+{
+	unsigned long val, flags;
+
+	save_and_cli(flags);
+	val = ctrl_inw(INTC_INTER);
+	val &= ~(1 << (irq - PINT_IRQ_BASE));
+	ctrl_outw(val, INTC_INTER);	/* disable PINTn */
+	portcr_mask &= ~(3 << (irq - PINT_IRQ_BASE)*2);
+	restore_flags(flags);
+}
+
+static void enable_pint_irq(unsigned int irq)
+{
+	unsigned long val, flags;
+
+	save_and_cli(flags);
+	val = ctrl_inw(INTC_INTER);
+	val |= 1 << (irq - PINT_IRQ_BASE);
+	ctrl_outw(val, INTC_INTER);	/* enable PINTn */
+	portcr_mask |= 3 << (irq - PINT_IRQ_BASE)*2;
+	restore_flags(flags);
+}
+
+static void mask_and_ack_pint(unsigned int irq)
+{
+	disable_pint_irq(irq);
+}
+
+static void end_pint_irq(unsigned int irq)
+{
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		enable_pint_irq(irq);
+}
+
+void make_pint_irq(unsigned int irq)
+{
+	disable_irq_nosync(irq);
+	irq_desc[irq].handler = &pint_irq_type;
+	disable_pint_irq(irq);
+}
+#endif
+
 void __init init_IRQ(void)
 {
-	make_ipr_irq(TIMER_IRQ, TIMER_IPR_ADDR, TIMER_IPR_POS, TIMER_PRIORITY);
-	make_ipr_irq(RTC_IRQ, RTC_IPR_ADDR, RTC_IPR_POS, RTC_PRIORITY);
+#if defined(CONFIG_CPU_SUBTYPE_SH7707) || defined(CONFIG_CPU_SUBTYPE_SH7709)
+	int i;
+#endif
 
+	make_ipr_irq(TIMER_IRQ, TIMER_IPR_ADDR, TIMER_IPR_POS, TIMER_PRIORITY);
+
+#if defined(CONFIG_SH_RTC)
+	make_ipr_irq(RTC_IRQ, RTC_IPR_ADDR, RTC_IPR_POS, RTC_PRIORITY);
+#endif
+
+#ifdef SCI_ERI_IRQ
 	make_ipr_irq(SCI_ERI_IRQ, SCI_IPR_ADDR, SCI_IPR_POS, SCI_PRIORITY);
 	make_ipr_irq(SCI_RXI_IRQ, SCI_IPR_ADDR, SCI_IPR_POS, SCI_PRIORITY);
 	make_ipr_irq(SCI_TXI_IRQ, SCI_IPR_ADDR, SCI_IPR_POS, SCI_PRIORITY);
+#endif
+
+#ifdef SCIF1_ERI_IRQ
+	make_ipr_irq(SCIF1_ERI_IRQ, SCIF1_IPR_ADDR, SCIF1_IPR_POS, SCIF1_PRIORITY);
+	make_ipr_irq(SCIF1_RXI_IRQ, SCIF1_IPR_ADDR, SCIF1_IPR_POS, SCIF1_PRIORITY);
+	make_ipr_irq(SCIF1_BRI_IRQ, SCIF1_IPR_ADDR, SCIF1_IPR_POS, SCIF1_PRIORITY);
+	make_ipr_irq(SCIF1_TXI_IRQ, SCIF1_IPR_ADDR, SCIF1_IPR_POS, SCIF1_PRIORITY);
+#endif
+
+#if defined(CONFIG_CPU_SUBTYPE_SH7300)
+	make_ipr_irq(SCIF0_IRQ, SCIF0_IPR_ADDR, SCIF0_IPR_POS, SCIF0_PRIORITY);
+#endif
 
 #ifdef SCIF_ERI_IRQ
 	make_ipr_irq(SCIF_ERI_IRQ, SCIF_IPR_ADDR, SCIF_IPR_POS, SCIF_PRIORITY);
@@ -139,48 +234,95 @@ void __init init_IRQ(void)
 	make_ipr_irq(IRDA_TXI_IRQ, IRDA_IPR_ADDR, IRDA_IPR_POS, IRDA_PRIORITY);
 #endif
 
-#if defined(CONFIG_CPU_SUBTYPE_SH7707) || defined(CONFIG_CPU_SUBTYPE_SH7709)
+#if defined(CONFIG_CPU_SUBTYPE_SH7300) || defined(CONFIG_CPU_SUBTYPE_SH7707) || \
+    defined(CONFIG_CPU_SUBTYPE_SH7709)
 	/*
 	 * Initialize the Interrupt Controller (INTC)
 	 * registers to their power on values
 	 */ 
-#if 0
-	/*
-	 * XXX: I think that this is the job of boot loader. -- gniibe
-	 *
-	 * When Takeshi released new boot loader following setting
-	 * will be removed shortly.
-	 */
-	ctrl_outb(0, INTC_IRR0);
-	ctrl_outb(0, INTC_IRR1);
-	ctrl_outb(0, INTC_IRR2);
-
-	ctrl_outw(0, INTC_ICR0);
-	ctrl_outw(0, INTC_ICR1);/* Really? 0x4000?*/
-	ctrl_outw(0, INTC_ICR2);
-	ctrl_outw(0, INTC_INTER);
-	ctrl_outw(0, INTC_IPRA);
-	ctrl_outw(0, INTC_IPRB);
-	ctrl_outw(0, INTC_IPRC);
-	ctrl_outw(0, INTC_IPRD);
-	ctrl_outw(0, INTC_IPRE);
-#endif
 
 	/*
 	 * Enable external irq (INTC IRQ mode).
 	 * You should set corresponding bits of PFC to "00"
 	 * to enable these interrupts.
 	 */
-	make_ipr_irq(IRQ0_IRQ, IRQ0_IRP_ADDR, IRQ0_IRP_POS, IRQ0_PRIORITY);
-	make_ipr_irq(IRQ1_IRQ, IRQ1_IRP_ADDR, IRQ1_IRP_POS, IRQ1_PRIORITY);
-	make_ipr_irq(IRQ2_IRQ, IRQ2_IRP_ADDR, IRQ2_IRP_POS, IRQ2_PRIORITY);
-	make_ipr_irq(IRQ3_IRQ, IRQ3_IRP_ADDR, IRQ3_IRP_POS, IRQ3_PRIORITY);
-	make_ipr_irq(IRQ4_IRQ, IRQ4_IRP_ADDR, IRQ4_IRP_POS, IRQ4_PRIORITY);
-	make_ipr_irq(IRQ5_IRQ, IRQ5_IRP_ADDR, IRQ5_IRP_POS, IRQ5_PRIORITY);
-#endif /* CONFIG_CPU_SUBTYPE_SH7707 || CONFIG_CPU_SUBTYPE_SH7709 */
+	make_ipr_irq(IRQ0_IRQ, IRQ0_IPR_ADDR, IRQ0_IPR_POS, IRQ0_PRIORITY);
+	make_ipr_irq(IRQ1_IRQ, IRQ1_IPR_ADDR, IRQ1_IPR_POS, IRQ1_PRIORITY);
+	make_ipr_irq(IRQ2_IRQ, IRQ2_IPR_ADDR, IRQ2_IPR_POS, IRQ2_PRIORITY);
+	make_ipr_irq(IRQ3_IRQ, IRQ3_IPR_ADDR, IRQ3_IPR_POS, IRQ3_PRIORITY);
+	make_ipr_irq(IRQ4_IRQ, IRQ4_IPR_ADDR, IRQ4_IPR_POS, IRQ4_PRIORITY);
+	make_ipr_irq(IRQ5_IRQ, IRQ5_IPR_ADDR, IRQ5_IPR_POS, IRQ5_PRIORITY);
+#if !defined(CONFIG_CPU_SUBTYPE_SH7300)
+	make_ipr_irq(PINT0_IRQ, PINT0_IPR_ADDR, PINT0_IPR_POS, PINT0_PRIORITY);
+	make_ipr_irq(PINT8_IRQ, PINT8_IPR_ADDR, PINT8_IPR_POS, PINT8_PRIORITY);
+	enable_ipr_irq(PINT0_IRQ);
+	enable_ipr_irq(PINT8_IRQ);
+
+	for(i = 0; i < 16; i++)
+		make_pint_irq(PINT_IRQ_BASE + i);
+	for(i = 0; i < 256; i++)
+	{
+		if(i & 1) pint_map[i] = 0;
+		else if(i & 2) pint_map[i] = 1;
+		else if(i & 4) pint_map[i] = 2;
+		else if(i & 8) pint_map[i] = 3;
+		else if(i & 0x10) pint_map[i] = 4;
+		else if(i & 0x20) pint_map[i] = 5;
+		else if(i & 0x40) pint_map[i] = 6;
+		else if(i & 0x80) pint_map[i] = 7;
+	}
+#endif
+#endif /* CONFIG_CPU_SUBTYPE_SH7300 || CONFIG_CPU_SUBTYPE_SH7707 || CONFIG_CPU_SUBTYPE_SH7709 */
+
+#ifdef CONFIG_CPU_SUBTYPE_ST40
+	init_IRQ_intc2();
+#endif
 
 	/* Perform the machine specific initialisation */
 	if (sh_mv.mv_init_irq != NULL) {
 		sh_mv.mv_init_irq();
 	}
 }
+#if defined(CONFIG_CPU_SUBTYPE_SH7300) || defined(CONFIG_CPU_SUBTYPE_SH7707) || \
+    defined(CONFIG_CPU_SUBTYPE_SH7709)
+int ipr_irq_demux(int irq)
+{
+#if !defined(CONFIG_CPU_SUBTYPE_SH7300)
+	unsigned long creg, dreg, d, sav;
+
+	if(irq == PINT0_IRQ)
+	{
+#if defined(CONFIG_CPU_SUBTYPE_SH7707)
+		creg = PORT_PACR;
+		dreg = PORT_PADR;
+#else
+		creg = PORT_PCCR;
+		dreg = PORT_PCDR;
+#endif
+		sav = ctrl_inw(creg);
+		ctrl_outw(sav | portcr_mask, creg);
+		d = (~ctrl_inb(dreg) ^ ctrl_inw(INTC_ICR2)) & ctrl_inw(INTC_INTER) & 0xff;
+		ctrl_outw(sav, creg);
+		if(d == 0) return irq;
+		return PINT_IRQ_BASE + pint_map[d];
+	}
+	else if(irq == PINT8_IRQ)
+	{
+#if defined(CONFIG_CPU_SUBTYPE_SH7707)
+		creg = PORT_PBCR;
+		dreg = PORT_PBDR;
+#else
+		creg = PORT_PFCR;
+		dreg = PORT_PFDR;
+#endif
+		sav = ctrl_inw(creg);
+		ctrl_outw(sav | (portcr_mask >> 16), creg);
+		d = (~ctrl_inb(dreg) ^ (ctrl_inw(INTC_ICR2) >> 8)) & (ctrl_inw(INTC_INTER) >> 8) & 0xff;
+		ctrl_outw(sav, creg);
+		if(d == 0) return irq;
+		return PINT_IRQ_BASE + 8 + pint_map[d];
+	}
+#endif
+	return irq;
+}
+#endif

@@ -2,6 +2,7 @@
 #define __ALPHA_TITAN__H__
 
 #include <linux/types.h>
+#include <linux/pci.h>
 #include <asm/compiler.h>
 
 /*
@@ -293,13 +294,15 @@ union TPAchipAGPERR {
  * 		2 - pachip 0 / A Port
  *      	3 - pachip 1 / A Port
  */
-#define TITAN_HOSE(h)		(((unsigned long)(h)) << 33)
+#define TITAN_HOSE_SHIFT       (33) 
+#define TITAN_HOSE(h)		(((unsigned long)(h)) << TITAN_HOSE_SHIFT)
 #define TITAN_BASE		(IDENT_ADDR + TI_BIAS)
 #define TITAN_MEM(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x000000000UL)
 #define _TITAN_IACK_SC(h)    	(TITAN_BASE+TITAN_HOSE(h)+0x1F8000000UL)
 #define TITAN_IO(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x1FC000000UL)
 #define TITAN_CONF(h)	     	(TITAN_BASE+TITAN_HOSE(h)+0x1FE000000UL)
 
+#define TITAN_HOSE_MASK		TITAN_HOSE(3)
 #define TITAN_IACK_SC	     	_TITAN_IACK_SC(0) /* hack! */
 
 /* 
@@ -308,14 +311,18 @@ union TPAchipAGPERR {
  * devices can use their familiar numbers and have them map to bus 0.
  */
 
-#define TITAN_IO_BIAS          TITAN_IO(0)
-#define TITAN_MEM_BIAS         TITAN_MEM(0)
+#define TITAN_IO_BIAS		TITAN_IO(0)
+#define TITAN_MEM_BIAS		TITAN_MEM(0)
 
 /* The IO address space is larger than 0xffff */
 #define TITAN_IO_SPACE		(TITAN_CONF(0) - TITAN_IO(0))
 
 /* TIG Space */
 #define TITAN_TIG_SPACE		(TITAN_BASE + 0x100000000UL)
+
+/* Offset between ram physical addresses and pci64 DAC bus addresses.  */
+/* ??? Just a guess.  Ought to confirm it hasn't been moved.  */
+#define TITAN_DAC_OFFSET	(1UL << 40)
 
 /*
  * Data structure for handling TITAN machine checks:
@@ -375,7 +382,7 @@ struct el_PRIVATEER_envdata_mcheck {
 #define vuip	volatile unsigned int *
 #define vulp	volatile unsigned long *
 
-__EXTERN_INLINE unsigned int titan_inb(unsigned long addr)
+__EXTERN_INLINE u8 titan_inb(unsigned long addr)
 {
 	/* ??? I wish I could get rid of this.  But there's no ioremap
 	   equivalent for I/O space.  PCI I/O can be forced into the
@@ -386,33 +393,33 @@ __EXTERN_INLINE unsigned int titan_inb(unsigned long addr)
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE void titan_outb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void titan_outb(u8 b, unsigned long addr)
 {
 	addr += TITAN_IO_BIAS;
 	__kernel_stb(b, *(vucp)addr);
 	mb();
 }
 
-__EXTERN_INLINE unsigned int titan_inw(unsigned long addr)
+__EXTERN_INLINE u16 titan_inw(unsigned long addr)
 {
 	addr += TITAN_IO_BIAS;
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE void titan_outw(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void titan_outw(u16 b, unsigned long addr)
 {
 	addr += TITAN_IO_BIAS;
 	__kernel_stw(b, *(vusp)addr);
 	mb();
 }
 
-__EXTERN_INLINE unsigned int titan_inl(unsigned long addr)
+__EXTERN_INLINE u32 titan_inl(unsigned long addr)
 {
 	addr += TITAN_IO_BIAS;
 	return *(vuip)addr;
 }
 
-__EXTERN_INLINE void titan_outl(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void titan_outl(u32 b, unsigned long addr)
 {
 	addr += TITAN_IO_BIAS;
 	*(vuip)addr = b;
@@ -423,52 +430,50 @@ __EXTERN_INLINE void titan_outl(unsigned int b, unsigned long addr)
  * Memory functions.  all accesses are done through linear space.
  */
 
-__EXTERN_INLINE unsigned long titan_ioremap(unsigned long addr)
-{
-	return addr + TITAN_MEM_BIAS;
-}
+extern unsigned long titan_ioremap(unsigned long addr, unsigned long size);
+extern void titan_iounmap(unsigned long addr);
 
 __EXTERN_INLINE int titan_is_ioaddr(unsigned long addr)
 {
 	return addr >= TITAN_BASE;
 }
 
-__EXTERN_INLINE unsigned long titan_readb(unsigned long addr)
+__EXTERN_INLINE u8 titan_readb(unsigned long addr)
 {
 	return __kernel_ldbu(*(vucp)addr);
 }
 
-__EXTERN_INLINE unsigned long titan_readw(unsigned long addr)
+__EXTERN_INLINE u16 titan_readw(unsigned long addr)
 {
 	return __kernel_ldwu(*(vusp)addr);
 }
 
-__EXTERN_INLINE unsigned long titan_readl(unsigned long addr)
+__EXTERN_INLINE u32 titan_readl(unsigned long addr)
 {
-	return *(vuip)addr;
+	return (*(vuip)addr) & 0xffffffff;
 }
 
-__EXTERN_INLINE unsigned long titan_readq(unsigned long addr)
+__EXTERN_INLINE u64 titan_readq(unsigned long addr)
 {
 	return *(vulp)addr;
 }
 
-__EXTERN_INLINE void titan_writeb(unsigned char b, unsigned long addr)
+__EXTERN_INLINE void titan_writeb(u8 b, unsigned long addr)
 {
 	__kernel_stb(b, *(vucp)addr);
 }
 
-__EXTERN_INLINE void titan_writew(unsigned short b, unsigned long addr)
+__EXTERN_INLINE void titan_writew(u16 b, unsigned long addr)
 {
 	__kernel_stw(b, *(vusp)addr);
 }
 
-__EXTERN_INLINE void titan_writel(unsigned int b, unsigned long addr)
+__EXTERN_INLINE void titan_writel(u32 b, unsigned long addr)
 {
 	*(vuip)addr = b;
 }
 
-__EXTERN_INLINE void titan_writeq(unsigned long b, unsigned long addr)
+__EXTERN_INLINE void titan_writeq(u64 b, unsigned long addr)
 {
 	*(vulp)addr = b;
 }
@@ -480,29 +485,30 @@ __EXTERN_INLINE void titan_writeq(unsigned long b, unsigned long addr)
 
 #ifdef __WANT_IO_DEF
 
-#define __inb		titan_inb
-#define __inw		titan_inw
-#define __inl		titan_inl
-#define __outb		titan_outb
-#define __outw		titan_outw
-#define __outl		titan_outl
-#define __readb		titan_readb
-#define __readw		titan_readw
-#define __writeb	titan_writeb
-#define __writew	titan_writew
-#define __readl		titan_readl
-#define __readq		titan_readq
-#define __writel	titan_writel
-#define __writeq	titan_writeq
-#define __ioremap	titan_ioremap
-#define __is_ioaddr	titan_is_ioaddr
+#define __inb(p)		titan_inb((unsigned long)(p))
+#define __inw(p)		titan_inw((unsigned long)(p))
+#define __inl(p)		titan_inl((unsigned long)(p))
+#define __outb(x,p)		titan_outb((x),(unsigned long)(p))
+#define __outw(x,p)		titan_outw((x),(unsigned long)(p))
+#define __outl(x,p)		titan_outl((x),(unsigned long)(p))
+#define __readb(a)		titan_readb((unsigned long)(a))
+#define __readw(a)		titan_readw((unsigned long)(a))
+#define __readl(a)		titan_readl((unsigned long)(a))
+#define __readq(a)		titan_readq((unsigned long)(a))
+#define __writeb(x,a)		titan_writeb((x),(unsigned long)(a))
+#define __writew(x,a)		titan_writew((x),(unsigned long)(a))
+#define __writel(x,a)		titan_writel((x),(unsigned long)(a))
+#define __writeq(x,a)		titan_writeq((x),(unsigned long)(a))
+#define __ioremap(a,s)		titan_ioremap((unsigned long)(a),(s))
+#define __iounmap(a)		titan_iounmap((unsigned long)(a))
+#define __is_ioaddr(a)		titan_is_ioaddr((unsigned long)(a))
 
-#define inb(port) 	__inb((port))
-#define inw(port) 	__inw((port))
-#define inl(port) 	__inl((port))
-#define outb(v, port) 	__outb((v),(port))
-#define outw(v, port) 	__outw((v),(port))
-#define outl(v, port) 	__outl((v),(port))
+#define inb(port) 		__inb((port))
+#define inw(port) 		__inw((port))
+#define inl(port) 		__inl((port))
+#define outb(v, port) 		__outb((v),(port))
+#define outw(v, port) 		__outw((v),(port))
+#define outl(v, port) 		__outl((v),(port))
 
 #define __raw_readb(a)		__readb((unsigned long)(a))
 #define __raw_readw(a)		__readw((unsigned long)(a))

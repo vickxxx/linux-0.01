@@ -4,7 +4,7 @@
  *  Written 1999 by Adam Fritzler
  *
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  *  This driver module supports the following cards:
  *	- SysKonnect TR4/16(+) PCI	(SK-4590)
@@ -66,6 +66,8 @@ static struct pci_device_id tmspci_pci_tbl[] __initdata = {
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, tmspci_pci_tbl);
+
+MODULE_LICENSE("GPL");
 
 static void tms_pci_read_eeprom(struct net_device *dev);
 static unsigned short tms_pci_setnselout_pins(struct net_device *dev);
@@ -142,14 +144,13 @@ static int __init tms_pci_attach(struct pci_dev *pdev, const struct pci_device_i
 		printk(":%2.2x", dev->dev_addr[i]);
 	printk("\n");
 		
-	ret = tmsdev_init(dev);
+	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
 	if (ret) {
 		printk("%s: unable to get memory for dev->priv.\n", dev->name);
 		goto err_out_irq;
 	}
 
 	tp = dev->priv;
-	tp->dmalimit = 0; /* XXX: should be the max PCI32 DMA max */
 	tp->setnselout = tms_pci_setnselout_pins;
 		
 	tp->sifreadb = tms_pci_sifreadb;
@@ -165,14 +166,14 @@ static int __init tms_pci_attach(struct pci_dev *pdev, const struct pci_device_i
 	dev->stop = tms380tr_close;
 
 	ret = register_trdev(dev);
-	if (!ret)
+	if (ret)
 		goto err_out_tmsdev;
 	
 	pci_set_drvdata(pdev, dev);
 	return 0;
 
 err_out_tmsdev:
-	kfree(dev->priv);
+	tmsdev_term(dev);
 err_out_irq:
 	free_irq(pdev->irq, dev);
 err_out_region:
@@ -219,7 +220,7 @@ static unsigned short tms_pci_setnselout_pins(struct net_device *dev)
 	return val;
 }
 
-static void __exit tms_pci_detach (struct pci_dev *pdev)
+static void __devexit tms_pci_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 
@@ -228,7 +229,7 @@ static void __exit tms_pci_detach (struct pci_dev *pdev)
 	unregister_netdev(dev);
 	release_region(dev->base_addr, TMS_PCI_IO_EXTENT);
 	free_irq(dev->irq, dev);
-	kfree(dev->priv);
+	tmsdev_term(dev);
 	kfree(dev);
 	pci_set_drvdata(pdev, NULL);
 }
@@ -237,7 +238,7 @@ static struct pci_driver tms_pci_driver = {
 	name:		"tmspci",
 	id_table:	tmspci_pci_tbl,
 	probe:		tms_pci_attach,
-	remove:		tms_pci_detach,
+	remove:		__devexit_p(tms_pci_detach),
 };
 
 static int __init tms_pci_init (void)

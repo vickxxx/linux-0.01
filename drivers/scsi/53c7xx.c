@@ -198,7 +198,7 @@
  * Architecture : 
  * This driver is built around a Linux queue of commands waiting to 
  * be executed, and a shared Linux/NCR array of commands to start.  Commands
- * are transfered to the array  by the run_process_issue_queue() function 
+ * are transferred to the array  by the run_process_issue_queue() function 
  * which is called whenever a command completes.
  *
  * As commands are completed, the interrupt routine is triggered,
@@ -230,9 +230,7 @@
  *
  */
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #include <linux/config.h>
 
@@ -246,7 +244,7 @@
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
@@ -1077,19 +1075,18 @@ NCR53c7x0_init (struct Scsi_Host *host) {
     {
 	printk("scsi%d : IRQ%d not free, detaching\n",
 		host->host_no, host->irq);
-	scsi_unregister (host);
-	return -1;
+	goto err_unregister;
     } 
 
     if ((hostdata->run_tests && hostdata->run_tests(host) == -1) ||
         (hostdata->options & OPTION_DEBUG_TESTS_ONLY)) {
     	/* XXX Should disable interrupts, etc. here */
-	scsi_unregister (host);
-    	return -1;
+	goto err_free_irq;
     } else {
 	if (host->io_port)  {
 	    host->n_io_port = 128;
-	    request_region (host->io_port, host->n_io_port, "ncr53c7xx");
+	    if (!request_region (host->io_port, host->n_io_port, "ncr53c7xx"))
+		goto err_free_irq;
 	}
     }
     
@@ -1098,11 +1095,17 @@ NCR53c7x0_init (struct Scsi_Host *host) {
 	hard_reset (host);
     }
     return 0;
+
+ err_free_irq:
+    free_irq(host->irq,  NCR53c7x0_intr);
+ err_unregister:
+    scsi_unregister(host);
+    return -1;
 }
 
 /* 
- * Function : static int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, 
- *	int chip, u32 base, int io_port, int irq, int dma, long long options,
+ * Function : int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
+ *	unsigned long base, int io_port, int irq, int dma, long long options,
  *	int clock);
  *
  * Purpose : initializes a NCR53c7,8x0 based on base addresses,
@@ -1116,8 +1119,9 @@ NCR53c7x0_init (struct Scsi_Host *host) {
  */
 
 int 
-ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip, 
-    u32 base, int io_port, int irq, int dma, long long options, int clock)
+ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
+    unsigned long base, int io_port, int irq, int dma, 
+    long long options, int clock)
 {
     struct Scsi_Host *instance;
     struct NCR53c7x0_hostdata *hostdata;
@@ -1141,8 +1145,8 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     	return -1;
     }
 
-    printk("scsi-ncr53c7xx : %s at memory 0x%x, io 0x%x, irq %d",
-    	chip_str, (unsigned) base, io_port, irq);
+    printk("scsi-ncr53c7xx : %s at memory 0x%lx, io 0x%x, irq %d",
+    	chip_str, base, io_port, irq);
     if (dma == DMA_NONE)
     	printk("\n");
     else 
@@ -1206,8 +1210,11 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     size += 256;
 #endif
     /* Size should be < 8K, so we can fit it in two pages. */
-    if (size > 8192)
-      panic("53c7xx: hostdata > 8K");
+    if (size > 8192) {
+      printk(KERN_ERR "53c7xx: hostdata > 8K\n");
+      return -1;
+    }
+
     instance = scsi_register (tpnt, 4);
     if (!instance)
     {
@@ -1218,7 +1225,8 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     memset((void *)instance->hostdata[0], 0, 8192);
     cache_push(virt_to_phys((void *)(instance->hostdata[0])), 8192);
     cache_clear(virt_to_phys((void *)(instance->hostdata[0])), 8192);
-    kernel_set_cachemode(instance->hostdata[0], 8192, IOMAP_NOCACHE_SER);
+    kernel_set_cachemode((void *)(instance->hostdata[0]), 8192,
+			 IOMAP_NOCACHE_SER);
 
     /* FIXME : if we ever support an ISA NCR53c7xx based board, we
        need to check if the chip is running in a 16 bit mode, and if so 
@@ -1245,7 +1253,7 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
      */
 
     if (base) {
-	instance->base = (unsigned char *) (unsigned long) base;
+	instance->base = (unsigned long) base;
 	/* Check for forced I/O mapping */
     	if (!(options & OPTION_IO_MAPPED)) {
 	    options |= OPTION_MEMORY_MAPPED;
@@ -1417,7 +1425,7 @@ NCR53c7x0_init_fixup (struct Scsi_Host *host) {
     	memory_to_ncr = tmp|DMODE_800_DIOM;
     	ncr_to_memory = tmp|DMODE_800_SIOM;
     } else {
-    	base = virt_to_bus(host->base);
+    	base = virt_to_bus((void *)host->base);
 	memory_to_ncr = ncr_to_memory = tmp;
     }
 
@@ -1458,9 +1466,9 @@ NCR53c7x0_init_fixup (struct Scsi_Host *host) {
     patch_abs_32 (hostdata->script, 0, test_src, 
 	virt_to_bus(&hostdata->test_source));
     patch_abs_32 (hostdata->script, 0, saved_dsa,
-	virt_to_bus(&hostdata->saved2_dsa));
+	virt_to_bus((void *)&hostdata->saved2_dsa));
     patch_abs_32 (hostdata->script, 0, emulfly,
-	virt_to_bus(&hostdata->emulated_intfly));
+	virt_to_bus((void *)&hostdata->emulated_intfly));
 
     patch_abs_rwri_data (hostdata->script, 0, dsa_check_reselect, 
 	(unsigned char)(Ent_dsa_code_check_reselect - Ent_dsa_zero));
@@ -1621,7 +1629,7 @@ NCR53c7xx_run_tests (struct Scsi_Host *host) {
 	 */
 
 	timeout = jiffies + 5 * HZ / 10;
-	while ((hostdata->test_completed == -1) && jiffies < timeout)
+	while ((hostdata->test_completed == -1) && time_before(jiffies, timeout))
 		barrier();
 
 	failed = 1;
@@ -1707,7 +1715,7 @@ NCR53c7xx_run_tests (struct Scsi_Host *host) {
 	    restore_flags(flags);
 
 	    timeout = jiffies + 5 * HZ;	/* arbitrary */
-	    while ((hostdata->test_completed == -1) && jiffies < timeout)
+	    while ((hostdata->test_completed == -1) && time_before(jiffies, timeout))
 	    	barrier();
 
 	    NCR53c7x0_write32 (DSA_REG, 0);
@@ -3043,7 +3051,7 @@ my_free_page (void *addr, int dummy)
     /* XXX This assumes default cache mode to be IOMAP_FULL_CACHING, which
      * XXX may be invalid (CONFIG_060_WRITETHROUGH)
      */
-    kernel_set_cachemode((u32)addr, 4096, IOMAP_FULL_CACHING);
+    kernel_set_cachemode(addr, 4096, IOMAP_FULL_CACHING);
     free_page ((u32)addr);
 }
 
@@ -3052,7 +3060,7 @@ allocate_cmd (Scsi_Cmnd *cmd) {
     struct Scsi_Host *host = cmd->host;
     struct NCR53c7x0_hostdata *hostdata = 
 	(struct NCR53c7x0_hostdata *) host->hostdata[0];
-    u32 real;			/* Real address */
+    void *real;			/* Real address */
     int size;			/* Size of *tmp */
     struct NCR53c7x0_cmd *tmp;
     unsigned long flags;
@@ -3091,14 +3099,16 @@ allocate_cmd (Scsi_Cmnd *cmd) {
 #endif
 /* FIXME: for ISA bus '7xx chips, we need to or GFP_DMA in here */
 
-        if (size > 4096)
-            panic ("53c7xx: allocate_cmd size > 4K");
-        real = get_free_page(GFP_ATOMIC);
+        if (size > 4096) {
+            printk (KERN_ERR "53c7xx: allocate_cmd size > 4K\n");
+	    return NULL;
+	}
+        real = (void *)get_free_page(GFP_ATOMIC);
         if (real == 0)
         	return NULL;
-        memset((void *)real, 0, 4096);
-        cache_push(virt_to_phys((void *)real), 4096);
-        cache_clear(virt_to_phys((void *)real), 4096);
+        memset(real, 0, 4096);
+        cache_push(virt_to_phys(real), 4096);
+        cache_clear(virt_to_phys(real), 4096);
         kernel_set_cachemode(real, 4096, IOMAP_NOCACHE_SER);
 	tmp = ROUNDUP(real, void *);
 #ifdef FORCE_DSA_ALIGNMENT
@@ -3107,12 +3117,12 @@ allocate_cmd (Scsi_Cmnd *cmd) {
 		tmp = (struct NCR53c7x0_cmd *)((u32)tmp + 255);
 	    tmp = (struct NCR53c7x0_cmd *)(((u32)tmp & ~0xff) + CmdPageStart);
 #if 0
-	    printk ("scsi: size = %d, real = 0x%08x, tmp set to 0x%08x\n",
+	    printk ("scsi: size = %d, real = %p, tmp set to 0x%08x\n",
 			size, real, (u32)tmp);
 #endif
 	}
 #endif
-	tmp->real = (void *)real;
+	tmp->real = real;
 	tmp->size = size;			
 	tmp->free = ((void (*)(void *, int)) my_free_page);
 	save_flags (flags);
@@ -3272,7 +3282,7 @@ create_cmd (Scsi_Cmnd *cmd) {
 
     /*
      * The saved data pointer is set up so that a RESTORE POINTERS message 
-     * will start the data transfer over at the begining.
+     * will start the data transfer over at the beginning.
      */
 
     tmp->saved_data_pointer = virt_to_bus (hostdata->script) + 
@@ -4399,7 +4409,7 @@ abort_connected (struct Scsi_Host *host) {
  * account the current synchronous offset) 
  */
 
-    sstat = (NCR53c8x0_read8 (SSTAT2_REG);
+    sstat = NCR53c8x0_read8 (SSTAT2_REG);
     offset = OFFSET (sstat & SSTAT2_FF_MASK) >> SSTAT2_FF_SHIFT;
     phase = sstat & SSTAT2_PHASE_MASK;
 
@@ -4965,7 +4975,7 @@ intr_dma (struct Scsi_Host *host, struct NCR53c7x0_cmd *cmd) {
      * chances of this happening, and handle it if it occurs anyway.
      *
      * Simply continue with what we were doing, and control should
-     * be transfered to the schedule routine which will ultimately
+     * be transferred to the schedule routine which will ultimately
      * pass control onto the reselection or selection (not yet)
      * code.
      */
@@ -6071,7 +6081,7 @@ NCR53c7x0_release(struct Scsi_Host *host) {
 	(struct NCR53c7x0_hostdata *) host->hostdata[0];
     struct NCR53c7x0_cmd *cmd, *tmp;
     shutdown (host);
-    if (host->irq != IRQ_NONE)
+    if (host->irq != SCSI_IRQ_NONE)
 	{
 	    int irq_count;
 	    struct Scsi_Host *tmp;
@@ -6111,6 +6121,3 @@ NCR53c7x0_release(struct Scsi_Host *host) {
     return 1;
 }
 #endif /* def MODULE */
-
-static Scsi_Host_Template driver_template = NCR53c7xx;
-#include "scsi_module.c"

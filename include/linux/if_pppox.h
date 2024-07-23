@@ -97,8 +97,15 @@ struct pppoe_tag {
 #define PTT_GEN_ERR  	__constant_htons(0x0203)
 
 struct pppoe_hdr {
+#if defined(__LITTLE_ENDIAN_BITFIELD)
 	__u8 ver : 4;
 	__u8 type : 4;
+#elif defined(__BIG_ENDIAN_BITFIELD)
+	__u8 type : 4;
+	__u8 ver : 4;
+#else
+#error	"Please fix <asm/byteorder.h>"
+#endif
 	__u8 code;
 	__u16 sid;
 	__u16 length;
@@ -119,13 +126,14 @@ extern void pppox_unbind_sock(struct sock *sk);/* delete ppp-channel binding */
 extern int pppox_channel_ioctl(struct ppp_channel *pc, unsigned int cmd,
 			       unsigned long arg);
 
-/* PPPoE socket states */
+/* PPPoX socket states */
 enum {
     PPPOX_NONE		= 0,  /* initial state */
     PPPOX_CONNECTED	= 1,  /* connection established ==TCP_ESTABLISHED */
     PPPOX_BOUND		= 2,  /* bound to ppp device */
     PPPOX_RELAY		= 4,  /* forwarding is enabled */
-    PPPOX_DEAD		= 8
+    PPPOX_ZOMBIE	= 8,  /* dead, but still bound to ppp device */
+    PPPOX_DEAD		= 16  /* dead, useless, please clean me up!*/
 };
 
 extern struct ppp_channel_ops pppoe_chan_ops;

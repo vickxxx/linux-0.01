@@ -1,13 +1,10 @@
 /*
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Jack Steiner (steiner@sgi.com)
+ * Copyright (C) 2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
-
 
 /* $Id$
  *
@@ -89,7 +86,7 @@ typedef enum configtype {
 	PCIAdapter,
 	GIOAdapter,
 	TPUAdapter,
-
+	TernaryCache,
 	Anonymous
 } CONFIGTYPE;
 

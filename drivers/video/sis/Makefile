@@ -4,7 +4,9 @@
 
 O_TARGET := sisfb.o
 
-obj-y  := sis_main.o sis_300.o sis_301.o
+export-objs := sis_main.o
+
+obj-y  := sis_main.o init.o init301.o sis_accel.o
 obj-m  := $(O_TARGET)
 
 include $(TOPDIR)/Rules.make

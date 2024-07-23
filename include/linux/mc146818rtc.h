@@ -13,6 +13,7 @@
 
 #include <asm/io.h>
 #include <linux/rtc.h>			/* get the user-level API */
+#include <linux/spinlock.h>		/* spinlock_t */
 #include <asm/mc146818rtc.h>		/* register access macros */
 
 extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
@@ -95,6 +96,14 @@ extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
 
 #ifndef BIN_TO_BCD
 #define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
+#endif
+
+#ifndef RTC_IO_EXTENT
+#define RTC_IO_EXTENT	0x10	/* Only really two ports, but...	*/
+#endif
+
+#ifndef RTC_IOMAPPED
+#define RTC_IOMAPPED	1	/* Default to I/O mapping. */
 #endif
 
 #endif /* _MC146818RTC_H */

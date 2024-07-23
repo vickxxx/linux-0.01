@@ -3,8 +3,8 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994 - 2000 by Ralf Baechle at alii
- * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
+ * Copyright (C) 1994 - 2001 by Ralf Baechle at alii
+ * Copyright (C) 1999, 2000, 2001 Silicon Graphics, Inc.
  */
 #ifndef _ASM_PGALLOC_H
 #define _ASM_PGALLOC_H
@@ -18,30 +18,33 @@
  *  - flush_tlb_page(mm, vmaddr) flushes a single page
  *  - flush_tlb_range(mm, start, end) flushes a range of pages
  *  - flush_tlb_pgtables(mm, start, end) flushes a range of page tables
+ *  - flush_tlb_one(page) flushes a single kernel page
  */
-extern void (*_flush_tlb_all)(void);
-extern void (*_flush_tlb_mm)(struct mm_struct *mm);
-extern void (*_flush_tlb_range)(struct mm_struct *mm, unsigned long start,
+extern void local_flush_tlb_all(void);
+extern void local_flush_tlb_mm(struct mm_struct *mm);
+extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			       unsigned long end);
-extern void (*_flush_tlb_page)(struct vm_area_struct *vma, unsigned long page);
+extern void local_flush_tlb_page(struct vm_area_struct *vma,
+                                 unsigned long page);
+extern void local_flush_tlb_one(unsigned long page);
 
-#ifndef CONFIG_SMP
-
-#define flush_tlb_all()			_flush_tlb_all()
-#define flush_tlb_mm(mm)		_flush_tlb_mm(mm)
-#define flush_tlb_range(mm,vmaddr,end)	_flush_tlb_range(mm, vmaddr, end)
-#define flush_tlb_page(vma,page)	_flush_tlb_page(vma, page)
-
-#else /* CONFIG_SMP */
+#ifdef CONFIG_SMP
 
 extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *);
 extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
 extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
 
+#else /* CONFIG_SMP */
+
+#define flush_tlb_all()			local_flush_tlb_all()
+#define flush_tlb_mm(mm)		local_flush_tlb_mm(mm)
+#define flush_tlb_range(mm,vmaddr,end)	local_flush_tlb_range(mm, vmaddr, end)
+#define flush_tlb_page(vma,page)	local_flush_tlb_page(vma, page)
+
 #endif /* CONFIG_SMP */
 
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
+static inline void flush_tlb_pgtables(struct mm_struct *mm,
                                       unsigned long start, unsigned long end)
 {
 	/* Nothing to do on MIPS.  */
@@ -49,9 +52,7 @@ extern inline void flush_tlb_pgtables(struct mm_struct *mm,
 
 
 /*
- * Allocate and free page tables. The xxx_kernel() versions are
- * used to allocate a kernel page table - this turns on ASN bits
- * if any.
+ * Allocate and free page tables.
  */
 
 #define pgd_quicklist (current_cpu_data.pgd_quick)
@@ -59,9 +60,12 @@ extern inline void flush_tlb_pgtables(struct mm_struct *mm,
 #define pte_quicklist (current_cpu_data.pte_quick)
 #define pgtable_cache_size (current_cpu_data.pgtable_cache_sz)
 
+#define pmd_populate(mm, pmd, pte)	pmd_set(pmd, pte)
+#define pgd_populate(mm, pgd, pmd)	pgd_set(pgd, pmd)
+
 extern pgd_t *get_pgd_slow(void);
 
-extern inline pgd_t *get_pgd_fast(void)
+static inline pgd_t *get_pgd_fast(void)
 {
 	unsigned long *ret;
 
@@ -76,22 +80,43 @@ extern inline pgd_t *get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-extern inline void free_pgd_fast(pgd_t *pgd)
+static inline void free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
 	pgd_quicklist = (unsigned long *) pgd;
 	pgtable_cache_size++;
 }
 
-extern inline void free_pgd_slow(pgd_t *pgd)
+static inline void free_pgd_slow(pgd_t *pgd)
 {
-	free_pages((unsigned long)pgd, 1);
+	free_pages((unsigned long)pgd, PGD_ORDER);
+}
+
+static inline pte_t *pte_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pte_t *pte;
+
+	pte = (pte_t *) __get_free_pages(GFP_KERNEL, PTE_ORDER);
+	if (pte)
+		clear_page(pte);
+	return pte;
+}
+
+static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
+{
+	unsigned long *ret;
+
+	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
+		pte_quicklist = (unsigned long *)(*ret);
+		ret[0] = ret[1];
+		pgtable_cache_size--;
+	}
+	return (pte_t *)ret;
 }
 
 extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
-extern pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long address_preadjusted);
 
-extern inline pte_t *get_pte_fast(void)
+static inline pte_t *get_pte_fast(void)
 {
 	unsigned long *ret;
 
@@ -103,22 +128,43 @@ extern inline pte_t *get_pte_fast(void)
 	return (pte_t *)ret;
 }
 
-extern inline void free_pte_fast(pte_t *pte)
+static inline void free_pte_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-extern inline void free_pte_slow(pte_t *pte)
+static inline void free_pte_slow(pte_t *pte)
 {
-	free_pages((unsigned long)pte, 0);
+	free_pages((unsigned long)pte, PTE_ORDER);
+}
+
+static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pmd_t *pmd;
+
+	pmd = (pmd_t *) __get_free_pages(GFP_KERNEL, PMD_ORDER);
+	if (pmd)
+		pmd_init((unsigned long)pmd, (unsigned long)invalid_pte_table);
+	return pmd;
+}
+
+static inline pmd_t *pmd_alloc_one_fast(struct mm_struct *mm, unsigned long address)
+{
+	unsigned long *ret;
+
+	if ((ret = (unsigned long *)pmd_quicklist) != NULL) {
+		pmd_quicklist = (unsigned long *)(*ret);
+		ret[0] = ret[1];
+		pgtable_cache_size--;
+	}
+	return (pmd_t *)ret;
 }
 
 extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_preadjusted);
-extern pmd_t *get_pmd_kernel_slow(pgd_t *pgd, unsigned long address_preadjusted);
 
-extern inline pmd_t *get_pmd_fast(void)
+static inline pmd_t *get_pmd_fast(void)
 {
 	unsigned long *ret;
 
@@ -132,73 +178,25 @@ extern inline pmd_t *get_pmd_fast(void)
 	return (pmd_t *)ret;
 }
 
-extern inline void free_pmd_fast(pmd_t *pmd)
+static inline void free_pmd_fast(pmd_t *pmd)
 {
 	*(unsigned long *)pmd = (unsigned long) pmd_quicklist;
 	pmd_quicklist = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
-extern inline void free_pmd_slow(pmd_t *pmd)
+static inline void free_pmd_slow(pmd_t *pmd)
 {
-	free_pages((unsigned long)pmd, 1);
+	free_pages((unsigned long)pmd, PMD_ORDER);
 }
-
-extern void __bad_pte(pmd_t *pmd);
-extern void __bad_pte_kernel(pmd_t *pmd);
-extern void __bad_pmd(pgd_t *pgd);
 
 #define pte_free(pte)           free_pte_fast(pte)
 #define pmd_free(pte)           free_pmd_fast(pte)
 #define pgd_free(pgd)           free_pgd_fast(pgd)
-#define pgd_alloc()             get_pgd_fast()
+#define pgd_alloc(mm)           get_pgd_fast()
 
-extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
-{
-	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-
-	if (pmd_none(*pmd)) {
-		pte_t *page = get_pte_fast();
-		if (page) {
-			pmd_val(*pmd) = (unsigned long) page;
-			return page + address;
-		}
-		return get_pte_slow(pmd, address);
-	}
-	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + address;
-}
-
-extern inline pmd_t *pmd_alloc(pgd_t * pgd, unsigned long address)
-{
-	address = (address >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
-	if (pgd_none(*pgd)) {
-		pmd_t *page = get_pmd_fast();
-
-		if (!page)
-			return get_pmd_slow(pgd, address);
-		pgd_set(pgd, page);
-		return page + address;
-	}
-	if (pgd_bad(*pgd)) {
-		__bad_pmd(pgd);
-		return NULL;
-	}
-	return (pmd_t *) pgd_page(*pgd) + address;
-}
-
-extern pte_t kptbl[(PAGE_SIZE<<KPTBL_PAGE_ORDER)/sizeof(pte_t)];
+extern pte_t kptbl[(PAGE_SIZE << PGD_ORDER)/sizeof(pte_t)];
 extern pmd_t kpmdtbl[PTRS_PER_PMD];
-
-#define pmd_alloc_kernel(d,a)	(pmd_t *)kpmdtbl
-
-extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
-{
-	return (kptbl + (address >> PAGE_SHIFT));
-}
 
 extern int do_check_pgt_cache(int, int);
 

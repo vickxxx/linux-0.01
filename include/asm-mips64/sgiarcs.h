@@ -1,5 +1,4 @@
-/* $Id: sgiarcs.h,v 1.4 1999/12/04 03:59:12 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,13 +6,14 @@
  * ARC firmware interface defines.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
- * Copyright (C) 1999 Ralf Baechle (ralf@gnu.org)
+ * Copyright (C) 1999, 2001 Ralf Baechle (ralf@gnu.org)
  * Copyright (C) 1999 Silicon Graphics, Inc.
  */
 #ifndef _ASM_SGIARCS_H
 #define _ASM_SGIARCS_H
 
 #include <linux/config.h>
+#include <asm/types.h>
 #include <asm/arc/types.h>
 
 /* Various ARCS error codes. */
@@ -116,7 +116,7 @@ enum arc_memtypes {
 	arc_prog,    /* A loaded program resides here */
 	arc_atmp,    /* temporary storage area */
 	arc_aperm,   /* permanent storage */
-	arc_fcontig, /* Contiguous and free */    
+	arc_fcontig, /* Contiguous and free */
 };
 
 union linux_memtypes {
@@ -143,7 +143,7 @@ struct linux_tinfo {
 
 /* ARCS virtual dirents. */
 struct linux_vdirent {
-	unsigned long namelen;
+	ULONG namelen;
 	unsigned char attr;
 	char fname[32]; /* XXX imperical, should be a define */
 };
@@ -165,11 +165,11 @@ enum linux_mountops {
 /* This prom has a bolixed design. */
 struct linux_bigint {
 #ifdef __MIPSEL__
-	unsigned long lo;
-	long hi;
+	u32 lo;
+	s32 hi;
 #else /* !(__MIPSEL__) */
-	long hi;
-	unsigned long lo;
+	s32 hi;
+	u32 lo;
 #endif
 };
 
@@ -177,38 +177,38 @@ struct linux_finfo {
 	struct linux_bigint   begin;
 	struct linux_bigint   end;
 	struct linux_bigint   cur;
-	enum linux_devtypes dtype;
+	enum linux_devtypes   dtype;
 	unsigned long         namelen;
 	unsigned char         attr;
 	char                  name[32]; /* XXX imperical, should be define */
 };
 
-/* This describes the vector containing fuction pointers to the ARC
+/* This describes the vector containing function pointers to the ARC
    firmware functions.  */
 struct linux_romvec {
-	LONG load;			/* Load an executable image. */
-	LONG invoke;			/* Invoke a standalong image. */
-	LONG exec;			/* Load and begin execution of a
+	LONG	load;			/* Load an executable image. */
+	LONG	invoke;			/* Invoke a standalong image. */
+	LONG	exec;			/* Load and begin execution of a
 					   standalone image. */
-	LONG halt;			/* Halt the machine. */
-	LONG pdown;			/* Power down the machine. */
-	LONG restart;			/* XXX soft reset??? */
-	LONG reboot;			/* Reboot the machine. */
-	LONG imode;			/* Enter PROM interactive mode. */
-	LONG _unused1;			/* Was ReturnFromMain(). */
+	LONG	halt;			/* Halt the machine. */
+	LONG	pdown;			/* Power down the machine. */
+	LONG	restart;		/* XXX soft reset??? */
+	LONG	reboot;			/* Reboot the machine. */
+	LONG	imode;			/* Enter PROM interactive mode. */
+	LONG	_unused1;		/* Was ReturnFromMain(). */
 
 	/* PROM device tree interface. */
-	LONG next_component;
-	LONG child_component;
-	LONG parent_component;
-	LONG component_data;
-	LONG child_add;
-	LONG comp_del;
-	LONG component_by_path;
+	LONG	next_component;
+	LONG	child_component;
+	LONG	parent_component;
+	LONG	component_data;
+	LONG	child_add;
+	LONG	comp_del;
+	LONG	component_by_path;
 
 	/* Misc. stuff. */
-	LONG cfg_save;
-	LONG get_sysid;
+	LONG	cfg_save;
+	LONG	get_sysid;
 
 	/* Probing for memory. */
 	LONG	get_mdesc;
@@ -365,10 +365,11 @@ struct linux_smonblock {
  * Macros for calling a 32-bit ARC implementation from 64-bit code
  */
 
-#ifdef CONFIG_ARC32
+#if defined(CONFIG_MIPS64) && defined(CONFIG_ARC32)
+
 #define __arc_clobbers							\
-	"$2","$3","$4","$5","$6","$7","$8","$9","$10","$11",		\
-	"$12","$13","$14","$15","$16","$24","25","$31"
+	"$2","$3" /* ... */, "$8","$9","$10","$11",			\
+	"$12","$13","$14","$15","$16","$24","$25","$31"
 
 #define ARC_CALL0(dest)							\
 ({	long __res;							\
@@ -380,7 +381,7 @@ struct linux_smonblock {
 	"move\t%0, $2"							\
 	: "=r" (__res), "=r" (__vec)					\
 	: "1" (__vec)							\
-	: __arc_clobbers);						\
+	: __arc_clobbers, "$4","$5","$6","$7");				\
 	(unsigned long) __res;						\
 })
 
@@ -395,7 +396,7 @@ struct linux_smonblock {
 	"move\t%0, $2"							\
 	: "=r" (__res), "=r" (__vec)					\
 	: "1" (__vec), "r" (__a1)					\
-	: __arc_clobbers);						\
+	: __arc_clobbers, "$5","$6","$7");				\
 	(unsigned long) __res;						\
 })
 
@@ -411,7 +412,7 @@ struct linux_smonblock {
 	"move\t%0, $2"							\
 	: "=r" (__res), "=r" (__vec)					\
 	: "1" (__vec), "r" (__a1), "r" (__a2)				\
-	: __arc_clobbers);						\
+	: __arc_clobbers, "$6","$7");					\
 	__res;								\
 })
 
@@ -428,7 +429,7 @@ struct linux_smonblock {
 	"move\t%0, $2"							\
 	: "=r" (__res), "=r" (__vec)					\
 	: "1" (__vec), "r" (__a1), "r" (__a2), "r" (__a3)		\
-	: __arc_clobbers);						\
+	: __arc_clobbers, "$7");					\
 	__res;								\
 })
 
@@ -461,7 +462,7 @@ struct linux_smonblock {
 	long __vec = (long) romvec->dest;				\
 	__asm__ __volatile__(						\
 	"dsubu\t$29, 32\n\t"						\
-	"sw\t%6, 16($29)\n\t"						\
+	"sw\t%7, 16($29)\n\t"						\
 	"jalr\t%1\n\t"							\
 	"daddu\t$29, 32\n\t"						\
 	"move\t%0, $2"							\
@@ -472,9 +473,11 @@ struct linux_smonblock {
 	: __arc_clobbers);						\
 	__res;								\
 })
-#endif /* CONFIG_ARC32 */
 
-#ifdef CONFIG_ARC64
+#endif /* defined(CONFIG_MIPS64) && defined(CONFIG_ARC32) */
+
+#if (defined(CONFIG_MIPS32) && defined(CONFIG_ARC32)) ||		\
+    (defined(CONFIG_MIPS64) && defined(CONFIG_ARC64))
 
 #define ARC_CALL0(dest)							\
 ({	long __res;							\
@@ -539,6 +542,6 @@ struct linux_smonblock {
 	__res = __vec(__a1, __a2, __a3, __a4, __a5);			\
 	__res;								\
 })
-#endif /* CONFIG_ARC64 */
+#endif /* both kernel and ARC either 32-bit or 64-bit */
 
 #endif /* _ASM_SGIARCS_H */

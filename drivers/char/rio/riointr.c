@@ -36,8 +36,9 @@ static char *_riointr_c_sccs_ = "@(#)riointr.c	1.2";
 
 #define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/tty.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -247,12 +248,9 @@ char *		en;
     rio_dprintk (RIO_DEBUG_INTR, "Waking up.... ldisc:%d (%d/%d)....",
 		 (int)(PortP->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)),
 		 PortP->gs.wakeup_chars, PortP->gs.xmit_cnt); 
-    if ((PortP->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	PortP->gs.tty->ldisc.write_wakeup)
-      (PortP->gs.tty->ldisc.write_wakeup)(PortP->gs.tty);
+    tty_wakeup(PortP->gs.tty);
     rio_dprintk (RIO_DEBUG_INTR, "(%d/%d)\n",
 		PortP->gs.wakeup_chars, PortP->gs.xmit_cnt); 
-    wake_up_interruptible(&PortP->gs.tty->write_wait);
   }
 
 }
@@ -818,7 +816,7 @@ struct Port *		PortP;
 	  ** and available space.
 	  */
 			
-	  transCount = min(PacketP->len & PKT_LEN_MASK,
+	  transCount = min_t(unsigned int, PacketP->len & PKT_LEN_MASK,
 			   TTY_FLIPBUF_SIZE - TtyP->flip.count);
 	  rio_dprintk (RIO_DEBUG_REC,  "port %d: Copy %d bytes\n", 
 				      PortP->PortNum, transCount);

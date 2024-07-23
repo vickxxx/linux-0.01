@@ -16,11 +16,13 @@
  *      Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+#include <asm/hardirq.h>
+
 
 #define disable(oldspl) save_flags (oldspl)
 #define restore(oldspl) restore_flags (oldspl)
 
-#define sysbrk(x) kmalloc ((x), GFP_KERNEL)
+#define sysbrk(x) kmalloc ((x),in_interrupt()? GFP_ATOMIC : GFP_KERNEL)
 #define sysfree(p,size) kfree ((p))
 
 #define WBYTE(p,v) writeb(v, &p)
@@ -57,9 +59,6 @@ struct ttystatics {
 
 
 #define getpid()    (current->pid)
-
-#define major(dev) MAJOR(dev)
-#define minor(dev) MINOR(dev)
 
 #define QSIZE SERIAL_XMIT_SIZE
 

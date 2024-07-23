@@ -34,7 +34,7 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -304,3 +304,5 @@ void __exit interact_exit(void)
 
 module_init(interact_init);
 module_exit(interact_exit);
+
+MODULE_LICENSE("GPL");

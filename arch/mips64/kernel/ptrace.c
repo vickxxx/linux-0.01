@@ -22,11 +22,24 @@
 #include <linux/smp_lock.h>
 #include <linux/user.h>
 
+#include <asm/cpu.h>
+#include <asm/fpu.h>
 #include <asm/mipsregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
+#include <asm/bootinfo.h>
+
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	/* Nothing to do.. */
+}
 
 /*
  * Tracing a 32-bit process with a 64-bit strace and vice versa will not
@@ -62,46 +75,17 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 		goto out_tsk;
 
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			goto out_tsk;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-	 	    (current->gid != child->sgid) ||
-	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
-	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
-			goto out_tsk;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out_tsk;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
 		goto out_tsk;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out_tsk;
-	}
-	if (child->p_pptr != current)
-		goto out_tsk;
+
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
+	case PTRACE_PEEKTEXT: /* read word at location addr. */
 	case PTRACE_PEEKDATA: {
 		unsigned int tmp;
 		int copied;
@@ -129,17 +113,19 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			break;
 		case FPR_BASE ... FPR_BASE + 31:
 			if (child->used_math) {
-#ifndef CONFIG_SMP
-				if (last_task_used_math == child) {
-					set_cp0_status(ST0_CU1, ST0_CU1);
-					save_fp(child);
-					set_cp0_status(ST0_CU1, 0);
-					last_task_used_math = NULL;
-				}
-#endif
-				tmp = child->thread.fpu.hard.fp_regs[addr - 32];
+				unsigned long long *fregs;
+				fregs = (unsigned long long *)get_fpu_regs(child);
+				/*
+				 * The odd registers are actually the high
+				 * order bits of the values stored in the even
+				 * registers - unless we're using r2k_switch.S.
+				 */
+				if (addr & 1)
+					tmp = (unsigned long) (fregs[((addr & ~1) - 32)] >> 32);
+				else
+					tmp = (unsigned long) (fregs[(addr - 32)] & 0xffffffff);
 			} else {
-				tmp = -EIO;
+				tmp = -1;	/* FP not yet used  */
 			}
 			break;
 		case PC:
@@ -158,12 +144,15 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			tmp = regs->lo;
 			break;
 		case FPC_CSR:
-			tmp = child->thread.fpu.hard.control;
+			if (cpu_has_fpu)
+				tmp = child->thread.fpu.hard.control;
+			else
+				tmp = child->thread.fpu.soft.sr;
 			break;
 		case FPC_EIR: { /* implementation / version register */
-			unsigned int flags;
+			unsigned long flags;
 			__save_flags(flags);
-			set_cp0_status(ST0_CU1, ST0_CU1);
+			__enable_fpu();
 			__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
 			__restore_flags(flags);
 			break;
@@ -196,25 +185,28 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			regs->regs[addr] = data;
 			break;
 		case FPR_BASE ... FPR_BASE + 31: {
-			unsigned long *fregs;
-			if (child->used_math) {
-#ifndef CONFIG_SMP
-				if (last_task_used_math == child) {
-					set_cp0_status(ST0_CU1, ST0_CU1);
-					save_fp(child);
-					set_cp0_status(ST0_CU1, 0);
-					last_task_used_math = NULL;
-					regs->cp0_status &= ~ST0_CU1;
-				}
-#endif
-			} else {
+			unsigned long long *fregs;
+			fregs = (unsigned long long *)get_fpu_regs(child);
+			if (!child->used_math) {
 				/* FP not yet used  */
 				memset(&child->thread.fpu.hard, ~0,
 				       sizeof(child->thread.fpu.hard));
 				child->thread.fpu.hard.control = 0;
 			}
-			fregs = child->thread.fpu.hard.fp_regs;
-			fregs[addr - FPR_BASE] = data;
+			/*
+			 * The odd registers are actually the high order bits
+			 * of the values stored in the even registers - unless
+			 * we're using r2k_switch.S.
+			 */
+			if (addr & 1) {
+				fregs[(addr & ~1) - FPR_BASE] &= 0xffffffff;
+				fregs[(addr & ~1) - FPR_BASE] |= ((unsigned long long) data) << 32;
+			} else {
+				fregs[addr - FPR_BASE] &= ~0xffffffffLL;
+				/* Must cast, lest sign extension fill upper
+				   bits!  */
+				fregs[addr - FPR_BASE] |= (unsigned int)data;
+			}
 			break;
 		}
 		case PC:
@@ -227,14 +219,17 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 			regs->lo = data;
 			break;
 		case FPC_CSR:
-			child->thread.fpu.hard.control = data;
+			if (cpu_has_fpu)
+				child->thread.fpu.hard.control = data;
+			else
+				child->thread.fpu.soft.sr = data;
 			break;
 		default:
 			/* The rest are not allowed. */
 			ret = -EIO;
 			break;
 		}
-		goto out;
+		break;
 		}
 	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 	case PTRACE_CONT: { /* restart after signal. */
@@ -252,8 +247,8 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 	case PTRACE_KILL: {
@@ -264,21 +259,9 @@ asmlinkage int sys32_ptrace(int request, int pid, int addr, int data)
 		break;
 	}
 
-	case PTRACE_DETACH: { /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		child->ptrace = 0;
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		wake_up_process(child);
-		ret = 0;
+	case PTRACE_DETACH: /* detach a process that was attached. */
+		ret = ptrace_detach(child, data);
 		break;
-	}
 
 	case PTRACE_SETOPTIONS: {
 		if (data & PTRACE_O_TRACESYSGOOD)
@@ -333,50 +316,20 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out;
+		goto out_tsk;
 
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			goto out_tsk;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-	 	    (current->gid != child->sgid) ||
-	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
-	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
-			goto out_tsk;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out_tsk;
-		child->ptrace |= PT_PTRACED;
-
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
-		goto out_tsk;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out_tsk;
-	}
-	if (child->p_pptr != current)
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
 		goto out_tsk;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
+	case PTRACE_PEEKTEXT: /* read word at location addr. */
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
 		int copied;
@@ -404,15 +357,8 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 		case FPR_BASE ... FPR_BASE + 31:
 			if (child->used_math) {
-#ifndef CONFIG_SMP
-				if (last_task_used_math == child) {
-					set_cp0_status(ST0_CU1, ST0_CU1);
-					save_fp(child);
-					set_cp0_status(ST0_CU1, 0);
-					last_task_used_math = NULL;
-				}
-#endif
-				tmp = child->thread.fpu.hard.fp_regs[addr - 32];
+				unsigned long *fregs = get_fpu_regs(child);
+				tmp = fregs[addr - FPR_BASE];
 			} else {
 				tmp = -EIO;
 			}
@@ -433,12 +379,15 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			tmp = regs->lo;
 			break;
 		case FPC_CSR:
-			tmp = child->thread.fpu.hard.control;
+			if (cpu_has_fpu)
+				tmp = child->thread.fpu.hard.control;
+			else
+				tmp = child->thread.fpu.soft.sr;
 			break;
 		case FPC_EIR: { /* implementation / version register */
-			unsigned int flags;
+			unsigned long flags;
 			__save_flags(flags);
-			set_cp0_status(ST0_CU1, ST0_CU1);
+			__enable_fpu();
 			__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
 			__restore_flags(flags);
 			break;
@@ -471,24 +420,13 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			regs->regs[addr] = data;
 			break;
 		case FPR_BASE ... FPR_BASE + 31: {
-			unsigned long *fregs;
-			if (child->used_math) {
-#ifndef CONFIG_SMP
-				if (last_task_used_math == child) {
-					set_cp0_status(ST0_CU1, ST0_CU1);
-					save_fp(child);
-					set_cp0_status(ST0_CU1, 0);
-					last_task_used_math = NULL;
-					regs->cp0_status &= ~ST0_CU1;
-				}
-#endif
-			} else {
+			unsigned long *fregs = get_fpu_regs(child);
+			if (!child->used_math) {
 				/* FP not yet used  */
 				memset(&child->thread.fpu.hard, ~0,
 				       sizeof(child->thread.fpu.hard));
 				child->thread.fpu.hard.control = 0;
 			}
-			fregs = child->thread.fpu.hard.fp_regs;
 			fregs[addr - FPR_BASE] = data;
 			break;
 		}
@@ -502,14 +440,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			regs->lo = data;
 			break;
 		case FPC_CSR:
-			child->thread.fpu.hard.control = data;
+			if (cpu_has_fpu)
+				child->thread.fpu.hard.control = data;
+			else
+				child->thread.fpu.soft.sr = data;
 			break;
 		default:
 			/* The rest are not allowed. */
 			ret = -EIO;
 			break;
 		}
-		goto out;
+		break;
 		}
 	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 	case PTRACE_CONT: { /* restart after signal. */
@@ -527,8 +468,8 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
+ * make the child exit.  Best I can do is send it a sigkill.
+ * perhaps it should be put in the status that it wants to
  * exit.
  */
 	case PTRACE_KILL: {
@@ -539,21 +480,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 	}
 
-	case PTRACE_DETACH: { /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			break;
-		child->ptrace = 0;
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		wake_up_process(child);
-		ret = 0;
+	case PTRACE_DETACH: /* detach a process that was attached. */
+		ret = ptrace_detach(child, data);
 		break;
-	}
 
 	case PTRACE_SETOPTIONS: {
 		if (data & PTRACE_O_TRACESYSGOOD)

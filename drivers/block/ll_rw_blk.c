@@ -19,15 +19,17 @@
 #include <linux/config.h>
 #include <linux/locks.h>
 #include <linux/mm.h>
+#include <linux/swap.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/completion.h>
+#include <linux/bootmem.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <linux/blk.h>
 #include <linux/highmem.h>
-#include <linux/raid/md.h>
-
+#include <linux/slab.h>
 #include <linux/module.h>
 
 /*
@@ -37,8 +39,6 @@
 #ifdef CONFIG_MAC_FLOPPY_IWM
 extern int mac_floppy_init(void);
 #endif
-
-extern int lvm_init(void);
 
 /*
  * For the allocated request tables
@@ -118,6 +118,13 @@ int * max_readahead[MAX_BLKDEV];
  */
 int * max_sectors[MAX_BLKDEV];
 
+unsigned long blk_max_low_pfn, blk_max_pfn;
+int blk_nohighio = 0;
+
+int block_dump = 0;
+
+static struct timer_list writeback_timer;
+
 static inline int get_max_sectors(kdev_t dev)
 {
 	if (!max_sectors[MAJOR(dev)])
@@ -135,40 +142,28 @@ static inline request_queue_t *__blk_get_queue(kdev_t dev)
 		return &blk_dev[MAJOR(dev)].request_queue;
 }
 
-/*
- * NOTE: the device-specific queue() functions
- * have to be atomic!
- */
 request_queue_t *blk_get_queue(kdev_t dev)
 {
-	request_queue_t *ret;
-	unsigned long flags;
-
-	spin_lock_irqsave(&io_request_lock,flags);
-	ret = __blk_get_queue(dev);
-	spin_unlock_irqrestore(&io_request_lock,flags);
-
-	return ret;
+	return __blk_get_queue(dev);
 }
 
-static int __blk_cleanup_queue(struct list_head *head)
+static int __blk_cleanup_queue(struct request_list *list)
 {
-	struct list_head *entry;
+	struct list_head *head = &list->free;
 	struct request *rq;
 	int i = 0;
 
-	if (list_empty(head))
-		return 0;
-
-	entry = head->next;
-	do {
-		rq = list_entry(entry, struct request, table);
-		entry = entry->next;
-		list_del(&rq->table);
+	while (!list_empty(head)) {
+		rq = list_entry(head->next, struct request, queue);
+		list_del(&rq->queue);
 		kmem_cache_free(request_cachep, rq);
 		i++;
-	} while (!list_empty(head));
+	};
 
+	if (i != list->count)
+		printk("request list leak!\n");
+
+	list->count = 0;
 	return i;
 }
 
@@ -188,13 +183,14 @@ static int __blk_cleanup_queue(struct list_head *head)
  **/
 void blk_cleanup_queue(request_queue_t * q)
 {
-	int count = QUEUE_NR_REQUESTS;
+	int count = q->nr_requests;
 
-	count -= __blk_cleanup_queue(&q->request_freelist[READ]);
-	count -= __blk_cleanup_queue(&q->request_freelist[WRITE]);
+	count -= __blk_cleanup_queue(&q->rq);
 
 	if (count)
 		printk("blk_cleanup_queue: leaked requests (%d)\n", count);
+	if (atomic_read(&q->nr_sectors))
+		printk("blk_cleanup_queue: leaked sectors (%d)\n", atomic_read(&q->nr_sectors));
 
 	memset(q, 0, sizeof(*q));
 }
@@ -220,8 +216,7 @@ void blk_cleanup_queue(request_queue_t * q)
  *    If a driver processes several requests at once, it must remove them (or
  *    at least all but one of them) from the request queue.
  *
- *    When a queue is plugged (see blk_queue_pluggable()) the head will be
- *    assumed to be inactive.
+ *    When a queue is plugged the head will be assumed to be inactive.
  **/
  
 void blk_queue_headactive(request_queue_t * q, int active)
@@ -230,33 +225,22 @@ void blk_queue_headactive(request_queue_t * q, int active)
 }
 
 /**
- * blk_queue_pluggable - define a plugging function for a request queue
- * @q:   the request queue to which the function will apply
- * @plug: the function to be called to plug a queue
+ * blk_queue_throttle_sectors - indicates you will call sector throttling funcs
+ * @q:       The queue which this applies to.
+ * @active:  A flag indication if you want sector throttling on
  *
  * Description:
- *   A request queue will be "plugged" if a request is added to it
- *   while it is empty.  This allows a number of requests to be added
- *   before any are processed, thus providing an opportunity for these
- *   requests to be merged or re-ordered.
- *   The default plugging function (generic_plug_device()) sets the
- *   "plugged" flag for the queue and adds a task to the $tq_disk task
- *   queue to unplug the queue and call the request function at a
- *   later time.
- *
- *   A device driver may provide an alternate plugging function by
- *   passing it to blk_queue_pluggable().  This function should set
- *   the "plugged" flag if it want calls to the request_function to be
- *   blocked, and should place a task on $tq_disk which will unplug
- *   the queue.  Alternately it can simply do nothing and there-by
- *   disable plugging of the device.
+ * The sector throttling code allows us to put a limit on the number of
+ * sectors pending io to the disk at a given time, sending @active nonzero
+ * indicates you will call blk_started_sectors and blk_finished_sectors in
+ * addition to calling blk_started_io and blk_finished_io in order to
+ * keep track of the number of sectors in flight.
  **/
-
-void blk_queue_pluggable (request_queue_t * q, plug_device_fn *plug)
+ 
+void blk_queue_throttle_sectors(request_queue_t * q, int active)
 {
-	q->plug_device_fn = plug;
+	q->can_throttle = active;
 }
-
 
 /**
  * blk_queue_make_request - define an alternate make_request function for a device
@@ -286,11 +270,49 @@ void blk_queue_make_request(request_queue_t * q, make_request_fn * mfn)
 	q->make_request_fn = mfn;
 }
 
+/**
+ * blk_queue_bounce_limit - set bounce buffer limit for queue
+ * @q:  the request queue for the device
+ * @dma_addr:   bus address limit
+ *
+ * Description:
+ *    Different hardware can have different requirements as to what pages
+ *    it can do I/O directly to. A low level driver can call
+ *    blk_queue_bounce_limit to have lower memory pages allocated as bounce
+ *    buffers for doing I/O to pages residing above @page. By default
+ *    the block layer sets this to the highest numbered "low" memory page.
+ **/
+void blk_queue_bounce_limit(request_queue_t *q, u64 dma_addr)
+{
+	unsigned long bounce_pfn = dma_addr >> PAGE_SHIFT;
+
+	q->bounce_pfn = bounce_pfn;
+}
+
+
+/*
+ * can we merge the two segments, or do we need to start a new one?
+ */
+static inline int __blk_seg_merge_ok(struct buffer_head *bh, struct buffer_head *nxt)
+{
+	/*
+	 * if bh and nxt are contigous and don't cross a 4g boundary, it's ok
+	 */
+	if (BH_CONTIG(bh, nxt) && BH_PHYS_4G(bh, nxt))
+		return 1;
+
+	return 0;
+}
+
+int blk_seg_merge_ok(struct buffer_head *bh, struct buffer_head *nxt)
+{
+	return __blk_seg_merge_ok(bh, nxt);
+}
+
 static inline int ll_new_segment(request_queue_t *q, struct request *req, int max_segments)
 {
 	if (req->nr_segments < max_segments) {
 		req->nr_segments++;
-		q->elevator.nr_segments++;
 		return 1;
 	}
 	return 0;
@@ -299,16 +321,18 @@ static inline int ll_new_segment(request_queue_t *q, struct request *req, int ma
 static int ll_back_merge_fn(request_queue_t *q, struct request *req, 
 			    struct buffer_head *bh, int max_segments)
 {
-	if (req->bhtail->b_data + req->bhtail->b_size == bh->b_data)
+	if (__blk_seg_merge_ok(req->bhtail, bh))
 		return 1;
+
 	return ll_new_segment(q, req, max_segments);
 }
 
 static int ll_front_merge_fn(request_queue_t *q, struct request *req, 
 			     struct buffer_head *bh, int max_segments)
 {
-	if (bh->b_data + bh->b_size == req->bh->b_data)
+	if (__blk_seg_merge_ok(bh, req->bh))
 		return 1;
+
 	return ll_new_segment(q, req, max_segments);
 }
 
@@ -316,18 +340,13 @@ static int ll_merge_requests_fn(request_queue_t *q, struct request *req,
 				struct request *next, int max_segments)
 {
 	int total_segments = req->nr_segments + next->nr_segments;
-	int same_segment;
 
-	same_segment = 0;
-	if (req->bhtail->b_data + req->bhtail->b_size == next->bh->b_data) {
+	if (__blk_seg_merge_ok(req->bhtail, next->bh))
 		total_segments--;
-		same_segment = 1;
-	}
-    
+
 	if (total_segments > max_segments)
 		return 0;
 
-	q->elevator.nr_segments -= same_segment;
 	req->nr_segments = total_segments;
 	return 1;
 }
@@ -364,7 +383,7 @@ static inline void __generic_unplug_device(request_queue_t *q)
 	}
 }
 
-static void generic_unplug_device(void *data)
+void generic_unplug_device(void *data)
 {
 	request_queue_t *q = (request_queue_t *) data;
 	unsigned long flags;
@@ -374,24 +393,89 @@ static void generic_unplug_device(void *data)
 	spin_unlock_irqrestore(&io_request_lock, flags);
 }
 
-static void blk_init_free_list(request_queue_t *q)
+/** blk_grow_request_list
+ *  @q: The &request_queue_t
+ *  @nr_requests: how many requests are desired
+ *
+ * More free requests are added to the queue's free lists, bringing
+ * the total number of requests to @nr_requests.
+ *
+ * The requests are added equally to the request queue's read
+ * and write freelists.
+ *
+ * This function can sleep.
+ *
+ * Returns the (new) number of requests which the queue has available.
+ */
+int blk_grow_request_list(request_queue_t *q, int nr_requests, int max_queue_sectors)
 {
-	struct request *rq;
-	int i;
-
-	/*
-	 * Divide requests in half between read and write. This used to
-	 * be a 2/3 advantage for reads, but now reads can steal from
-	 * the write free list.
+	unsigned long flags;
+	/* Several broken drivers assume that this function doesn't sleep,
+	 * this causes system hangs during boot.
+	 * As a temporary fix, make the function non-blocking.
 	 */
-	for (i = 0; i < QUEUE_NR_REQUESTS; i++) {
-		rq = kmem_cache_alloc(request_cachep, SLAB_KERNEL);
+	spin_lock_irqsave(&io_request_lock, flags);
+	while (q->nr_requests < nr_requests) {
+		struct request *rq;
+
+		rq = kmem_cache_alloc(request_cachep, SLAB_ATOMIC);
+		if (rq == NULL)
+			break;
+		memset(rq, 0, sizeof(*rq));
 		rq->rq_status = RQ_INACTIVE;
-		list_add(&rq->table, &q->request_freelist[i & 1]);
+ 		list_add(&rq->queue, &q->rq.free);
+ 		q->rq.count++;
+
+		q->nr_requests++;
 	}
 
-	init_waitqueue_head(&q->wait_for_request);
-	spin_lock_init(&q->request_lock);
+ 	/*
+ 	 * Wakeup waiters after both one quarter of the
+ 	 * max-in-fligh queue and one quarter of the requests
+ 	 * are available again.
+ 	 */
+
+	q->batch_requests = q->nr_requests / 4;
+	if (q->batch_requests > 32)
+		q->batch_requests = 32;
+ 	q->batch_sectors = max_queue_sectors / 4;
+ 
+ 	q->max_queue_sectors = max_queue_sectors;
+ 
+ 	BUG_ON(!q->batch_sectors);
+ 	atomic_set(&q->nr_sectors, 0);
+
+	spin_unlock_irqrestore(&io_request_lock, flags);
+	return q->nr_requests;
+}
+
+static void blk_init_free_list(request_queue_t *q)
+{
+	struct sysinfo si;
+	int megs;		/* Total memory, in megabytes */
+ 	int nr_requests, max_queue_sectors = MAX_QUEUE_SECTORS;
+  
+ 	INIT_LIST_HEAD(&q->rq.free);
+	q->rq.count = 0;
+	q->rq.pending[READ] = q->rq.pending[WRITE] = 0;
+	q->nr_requests = 0;
+
+	si_meminfo(&si);
+	megs = si.totalram >> (20 - PAGE_SHIFT);
+ 	nr_requests = MAX_NR_REQUESTS;
+ 	if (megs < 30) {
+  		nr_requests /= 2;
+ 		max_queue_sectors /= 2;
+ 	}
+ 	/* notice early if anybody screwed the defaults */
+ 	BUG_ON(!nr_requests);
+ 	BUG_ON(!max_queue_sectors);
+ 
+ 	blk_grow_request_list(q, nr_requests, max_queue_sectors);
+
+ 	init_waitqueue_head(&q->wait_for_requests);
+
+	spin_lock_init(&q->queue_lock);
 }
 
 static int __make_request(request_queue_t * q, int rw, struct buffer_head * bh);
@@ -426,14 +510,12 @@ static int __make_request(request_queue_t * q, int rw, struct buffer_head * bh);
  *    blk_queue_headactive().
  *
  * Note:
- *    blk_init_queue() must be paired with a blk_cleanup-queue() call
+ *    blk_init_queue() must be paired with a blk_cleanup_queue() call
  *    when the block device is deactivated (such as at module unload).
  **/
 void blk_init_queue(request_queue_t * q, request_fn_proc * rfn)
 {
 	INIT_LIST_HEAD(&q->queue_head);
-	INIT_LIST_HEAD(&q->request_freelist[READ]);
-	INIT_LIST_HEAD(&q->request_freelist[WRITE]);
 	elevator_init(&q->elevator, ELEVATOR_LINUS);
 	blk_init_free_list(q);
 	q->request_fn     	= rfn;
@@ -445,6 +527,8 @@ void blk_init_queue(request_queue_t * q, request_fn_proc * rfn)
 	q->plug_tq.routine	= &generic_unplug_device;
 	q->plug_tq.data		= q;
 	q->plugged        	= 0;
+	q->can_throttle		= 0;
+
 	/*
 	 * These booleans describe the queue properties.  We set the
 	 * default (and most common) values here.  Other drivers can
@@ -453,84 +537,129 @@ void blk_init_queue(request_queue_t * q, request_fn_proc * rfn)
 	 */
 	q->plug_device_fn 	= generic_plug_device;
 	q->head_active    	= 1;
+
+	blk_queue_bounce_limit(q, BLK_BOUNCE_HIGH);
 }
 
-
-#define blkdev_free_rq(list) list_entry((list)->next, struct request, table);
+#define blkdev_free_rq(list) list_entry((list)->next, struct request, queue);
 /*
  * Get a free request. io_request_lock must be held and interrupts
- * disabled on the way in.
+ * disabled on the way in.  Returns NULL if there are no free requests.
  */
-static inline struct request *get_request(request_queue_t *q, int rw)
+static struct request *get_request(request_queue_t *q, int rw)
 {
-	struct list_head *list = &q->request_freelist[rw];
-	struct request *rq;
+	struct request *rq = NULL;
+	struct request_list *rl = &q->rq;
 
-	/*
-	 * Reads get preferential treatment and are allowed to steal
-	 * from the write free list if necessary.
-	 */
-	if (!list_empty(list)) {
-		rq = blkdev_free_rq(list);
-		goto got_rq;
+	if (blk_oversized_queue(q)) {
+		int rlim = q->nr_requests >> 5;
+
+		if (rlim < 4)
+			rlim = 4;
+
+		/*
+		 * if its a write, or we have more than a handful of reads
+		 * pending, bail out
+		 */
+		if ((rw == WRITE) || (rw == READ && rl->pending[READ] > rlim))
+			return NULL;
+		if (blk_oversized_queue_reads(q))
+			return NULL;
+	}
+	
+	if (!list_empty(&rl->free)) {
+		rq = blkdev_free_rq(&rl->free);
+		list_del(&rq->queue);
+		rl->count--;
+		rl->pending[rw]++;
+		rq->rq_status = RQ_ACTIVE;
+		rq->cmd = rw;
+		rq->special = NULL;
+		rq->io_account = 0;
+		rq->q = q;
 	}
 
-	/*
-	 * if the WRITE list is non-empty, we know that rw is READ
-	 * and that the READ list is empty. allow reads to 'steal'
-	 * from the WRITE list.
-	 */
-	if (!list_empty(&q->request_freelist[WRITE])) {
-		list = &q->request_freelist[WRITE];
-		rq = blkdev_free_rq(list);
-		goto got_rq;
-	}
-
-	return NULL;
-
-got_rq:
-	list_del(&rq->table);
-	rq->free_list = list;
-	rq->rq_status = RQ_ACTIVE;
-	rq->special = NULL;
-	rq->q = q;
 	return rq;
 }
 
 /*
- * No available requests for this queue, unplug the device.
+ * Here's the request allocation design, low latency version:
+ *
+ * 1: Blocking on request exhaustion is a key part of I/O throttling.
+ * 
+ * 2: We want to be `fair' to all requesters.  We must avoid starvation, and
+ *    attempt to ensure that all requesters sleep for a similar duration.  Hence
+ *    no stealing requests when there are other processes waiting.
+ *
+ * There used to be more here, attempting to allow a process to send in a
+ * number of requests once it has woken up.  But, there's no way to 
+ * tell if a process has just been woken up, or if it is a new process
+ * coming in to steal requests from the waiters.  So, we give up and force
+ * everyone to wait fairly.
+ * 
+ * So here's what we do:
+ * 
+ *    a) A READA requester fails if free_requests < batch_requests
+ * 
+ *       We don't want READA requests to prevent sleepers from ever
+ *       waking.  Note that READA is used extremely rarely - a few
+ *       filesystems use it for directory readahead.
+ * 
+ *  When a process wants a new request:
+ * 
+ *    b) If free_requests == 0, the requester sleeps in FIFO manner, and
+ *       the queue full condition is set.  The full condition is not
+ *       cleared until there are no longer any waiters.  Once the full
+ *       condition is set, all new io must wait, hopefully for a very
+ *       short period of time.
+ * 
+ *  When a request is released:
+ * 
+ *    c) If free_requests < batch_requests, do nothing.
+ * 
+ *    d) If free_requests >= batch_requests, wake up a single waiter.
+ *
+ *   As each waiter gets a request, he wakes another waiter.  We do this
+ *   to prevent a race where an unplug might get run before a request makes
+ *   it's way onto the queue.  The result is a cascade of wakeups, so delaying
+ *   the initial wakeup until we've got batch_requests available helps avoid
+ *   wakeups where there aren't any requests available yet.
  */
+
 static struct request *__get_request_wait(request_queue_t *q, int rw)
 {
 	register struct request *rq;
 	DECLARE_WAITQUEUE(wait, current);
 
-	add_wait_queue_exclusive(&q->wait_for_request, &wait);
-	for (;;) {
-		__set_current_state(TASK_UNINTERRUPTIBLE);
+	add_wait_queue_exclusive(&q->wait_for_requests, &wait);
+
+	do {
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		spin_lock_irq(&io_request_lock);
+		if (blk_oversized_queue(q) || q->rq.count == 0) {
+			__generic_unplug_device(q);
+			spin_unlock_irq(&io_request_lock);
+			schedule();
+			spin_lock_irq(&io_request_lock);
+		}
 		rq = get_request(q, rw);
 		spin_unlock_irq(&io_request_lock);
-		if (rq)
-			break;
-		generic_unplug_device(q);
-		schedule();
-	}
-	remove_wait_queue(&q->wait_for_request, &wait);
+	} while (rq == NULL);
+	remove_wait_queue(&q->wait_for_requests, &wait);
 	current->state = TASK_RUNNING;
+
 	return rq;
 }
 
-static inline struct request *get_request_wait(request_queue_t *q, int rw)
+static void get_request_wait_wakeup(request_queue_t *q, int rw)
 {
-	register struct request *rq;
-
-	spin_lock_irq(&io_request_lock);
-	rq = get_request(q, rw);
-	spin_unlock_irq(&io_request_lock);
-	if (rq)
-		return rq;
-	return __get_request_wait(q, rw);
+	/*
+	 * avoid losing an unplug if a second __get_request_wait did the
+	 * generic_unplug_device while our __get_request_wait was running
+	 * w/o the queue_lock held and w/ our request out of the queue.
+	 */	
+	if (waitqueue_active(&q->wait_for_requests))
+		wake_up(&q->wait_for_requests);
 }
 
 /* RO fail safe mechanism */
@@ -579,58 +708,210 @@ inline void drive_stat_acct (kdev_t dev, int rw,
 		printk(KERN_ERR "drive_stat_acct: cmd not R/W?\n");
 }
 
+#ifdef CONFIG_BLK_STATS
+/*
+ * Return up to two hd_structs on which to do IO accounting for a given
+ * request.
+ *
+ * On a partitioned device, we want to account both against the partition
+ * and against the whole disk.
+ */
+static void locate_hd_struct(struct request *req, 
+			     struct hd_struct **hd1,
+			     struct hd_struct **hd2)
+{
+	struct gendisk *gd;
+
+	*hd1 = NULL;
+	*hd2 = NULL;
+	
+	gd = get_gendisk(req->rq_dev);
+	if (gd && gd->part) {
+		/* Mask out the partition bits: account for the entire disk */
+		int devnr = MINOR(req->rq_dev) >> gd->minor_shift;
+		int whole_minor = devnr << gd->minor_shift;
+
+		*hd1 = &gd->part[whole_minor];
+		if (whole_minor != MINOR(req->rq_dev))
+			*hd2= &gd->part[MINOR(req->rq_dev)];
+	}
+}
+
+/*
+ * Round off the performance stats on an hd_struct.
+ *
+ * The average IO queue length and utilisation statistics are maintained
+ * by observing the current state of the queue length and the amount of
+ * time it has been in this state for.
+ * Normally, that accounting is done on IO completion, but that can result
+ * in more than a second's worth of IO being accounted for within any one
+ * second, leading to >100% utilisation.  To deal with that, we do a
+ * round-off before returning the results when reading /proc/partitions,
+ * accounting immediately for all queue usage up to the current jiffies and
+ * restarting the counters again.
+ */
+void disk_round_stats(struct hd_struct *hd)
+{
+	unsigned long now = jiffies;
+	
+	hd->aveq += (hd->ios_in_flight * (jiffies - hd->last_queue_change));
+	hd->last_queue_change = now;
+
+	if (hd->ios_in_flight)
+		hd->io_ticks += (now - hd->last_idle_time);
+	hd->last_idle_time = now;	
+}
+
+static inline void down_ios(struct hd_struct *hd)
+{
+	disk_round_stats(hd);	
+	--hd->ios_in_flight;
+}
+
+static inline void up_ios(struct hd_struct *hd)
+{
+	disk_round_stats(hd);
+	++hd->ios_in_flight;
+}
+
+static void account_io_start(struct hd_struct *hd, struct request *req,
+			     int merge, int sectors)
+{
+	switch (req->cmd) {
+	case READ:
+		if (merge)
+			hd->rd_merges++;
+		hd->rd_sectors += sectors;
+		break;
+	case WRITE:
+		if (merge)
+			hd->wr_merges++;
+		hd->wr_sectors += sectors;
+		break;
+	}
+	if (!merge)
+		up_ios(hd);
+}
+
+static void account_io_end(struct hd_struct *hd, struct request *req)
+{
+	unsigned long duration = jiffies - req->start_time;
+	switch (req->cmd) {
+	case READ:
+		hd->rd_ticks += duration;
+		hd->rd_ios++;
+		break;
+	case WRITE:
+		hd->wr_ticks += duration;
+		hd->wr_ios++;
+		break;
+	}
+	down_ios(hd);
+}
+
+void req_new_io(struct request *req, int merge, int sectors)
+{
+	struct hd_struct *hd1, *hd2;
+
+	locate_hd_struct(req, &hd1, &hd2);
+	req->io_account = 1;
+	if (hd1)
+		account_io_start(hd1, req, merge, sectors);
+	if (hd2)
+		account_io_start(hd2, req, merge, sectors);
+}
+
+void req_merged_io(struct request *req)
+{
+	struct hd_struct *hd1, *hd2;
+
+	if (unlikely(req->io_account == 0))
+		return;
+	locate_hd_struct(req, &hd1, &hd2);
+	if (hd1)
+		down_ios(hd1);
+	if (hd2)	
+		down_ios(hd2);
+}
+
+void req_finished_io(struct request *req)
+{
+	struct hd_struct *hd1, *hd2;
+
+	if (unlikely(req->io_account == 0))
+		return;
+	locate_hd_struct(req, &hd1, &hd2);
+	if (hd1)
+		account_io_end(hd1, req);
+	if (hd2)	
+		account_io_end(hd2, req);
+}
+EXPORT_SYMBOL(req_finished_io);
+#endif /* CONFIG_BLK_STATS */
+
 /*
  * add-request adds a request to the linked list.
- * It disables interrupts (acquires the request spinlock) so that it can muck
- * with the request-lists in peace. Thus it should be called with no spinlocks
- * held.
+ * io_request_lock is held and interrupts disabled, as we muck with the
+ * request queue list.
  *
  * By this point, req->cmd is always either READ/WRITE, never READA,
  * which is important for drive_stat_acct() above.
  */
-
 static inline void add_request(request_queue_t * q, struct request * req,
-			       struct list_head *head, int lat)
+			       struct list_head *insert_here)
 {
-	int major;
-
 	drive_stat_acct(req->rq_dev, req->cmd, req->nr_sectors, 1);
 
-	/*
-	 * let selected elevator insert the request
-	 */
-	q->elevator.elevator_fn(req, &q->elevator, &q->queue_head, head, lat);
+	if (!q->plugged && q->head_active && insert_here == &q->queue_head) {
+		spin_unlock_irq(&io_request_lock);
+		BUG();
+	}
 
-        /*
-	 * FIXME(eric) I don't understand why there is a need for this
-	 * special case code.  It clearly doesn't fit any more with
-	 * the new queueing architecture, and it got added in 2.3.10.
-	 * I am leaving this in here until I hear back from the COMPAQ
-	 * people.
-         */
-	major = MAJOR(req->rq_dev);
-	if (major >= COMPAQ_SMART2_MAJOR+0 && major <= COMPAQ_SMART2_MAJOR+7)
-		(q->request_fn)(q);
-	if (major >= COMPAQ_CISS_MAJOR+0 && major <= COMPAQ_CISS_MAJOR+7)
-                (q->request_fn)(q);
-	if (major >= DAC960_MAJOR+0 && major <= DAC960_MAJOR+7)
-		(q->request_fn)(q);
+	/*
+	 * elevator indicated where it wants this request to be
+	 * inserted at elevator_merge time
+	 */
+	list_add(&req->queue, insert_here);
 }
 
 /*
  * Must be called with io_request_lock held and interrupts disabled
  */
-void inline blkdev_release_request(struct request *req)
+void blkdev_release_request(struct request *req)
 {
+	request_queue_t *q = req->q;
+
 	req->rq_status = RQ_INACTIVE;
+	req->q = NULL;
 
 	/*
-	 * Request may not have originated from ll_rw_blk
+	 * Request may not have originated from ll_rw_blk. if not,
+	 * assume it has free buffers and check waiters
 	 */
-	if (req->free_list) {
-		list_add(&req->table, req->free_list);
-		req->free_list = NULL;
-		wake_up(&req->q->wait_for_request);
+	if (q) {
+		struct request_list *rl = &q->rq;
+		int oversized_batch = 0;
+
+		if (q->can_throttle)
+			oversized_batch = blk_oversized_queue_batch(q);
+		rl->count++;
+		/*
+		 * paranoia check
+		 */
+		if (req->cmd == READ || req->cmd == WRITE)
+			rl->pending[req->cmd]--;
+		if (rl->pending[READ] > q->nr_requests)
+			printk("blk: reads: %u\n", rl->pending[READ]);
+		if (rl->pending[WRITE] > q->nr_requests)
+			printk("blk: writes: %u\n", rl->pending[WRITE]);
+		if (rl->pending[READ] + rl->pending[WRITE] > q->nr_requests)
+			printk("blk: r/w: %u + %u > %u\n", rl->pending[READ], rl->pending[WRITE], q->nr_requests);
+		list_add(&req->queue, &rl->free);
+		if (rl->count >= q->batch_requests && !oversized_batch) {
+			smp_mb();
+			if (waitqueue_active(&q->wait_for_requests))
+				wake_up(&q->wait_for_requests);
+		}
 	}
 }
 
@@ -650,7 +931,7 @@ static void attempt_merge(request_queue_t * q,
 	if (req->cmd != next->cmd
 	    || req->rq_dev != next->rq_dev
 	    || req->nr_sectors + next->nr_sectors > max_sectors
-	    || next->sem)
+	    || next->waiting)
 		return;
 	/*
 	 * If we are not allowed to merge these requests, then
@@ -658,13 +939,28 @@ static void attempt_merge(request_queue_t * q,
 	 * will have been updated to the appropriate number,
 	 * and we shouldn't do it here too.
 	 */
-	if(!(q->merge_requests_fn)(q, req, next, max_segments))
+	if (!q->merge_requests_fn(q, req, next, max_segments))
 		return;
 
+	q->elevator.elevator_merge_req_fn(req, next);
+	
+	/* At this point we have either done a back merge
+	 * or front merge. We need the smaller start_time of
+	 * the merged requests to be the current request
+	 * for accounting purposes.
+	 */
+	if (time_after(req->start_time, next->start_time))
+		req->start_time = next->start_time;
+		
 	req->bhtail->b_reqnext = next->bh;
 	req->bhtail = next->bhtail;
 	req->nr_sectors = req->hard_nr_sectors += next->hard_nr_sectors;
 	list_del(&next->queue);
+
+	/* One last thing: we have removed a request, so we now have one
+	   less expected IO to complete for accounting purposes. */
+	req_merged_io(req);
+
 	blkdev_release_request(next);
 }
 
@@ -695,24 +991,29 @@ static inline void attempt_front_merge(request_queue_t * q,
 static int __make_request(request_queue_t * q, int rw,
 				  struct buffer_head * bh)
 {
-	unsigned int sector, count;
+	unsigned int sector, count, sync;
 	int max_segments = MAX_SEGMENTS;
-	struct request * req = NULL, *freereq = NULL;
+	struct request * req, *freereq = NULL;
 	int rw_ahead, max_sectors, el_ret;
-	struct list_head *head;
+	struct list_head *head, *insert_here;
 	int latency;
 	elevator_t *elevator = &q->elevator;
+	int should_wake = 0;
 
 	count = bh->b_size >> 9;
 	sector = bh->b_rsector;
+	sync = test_and_clear_bit(BH_Sync, &bh->b_state);
 
 	rw_ahead = 0;	/* normal case; gets changed below for READA */
 	switch (rw) {
 		case READA:
+#if 0	/* bread() misinterprets failed READA attempts as IO errors on SMP */
 			rw_ahead = 1;
+#endif
 			rw = READ;	/* drop into READ */
 		case READ:
 		case WRITE:
+			latency = elevator_request_latency(elevator, rw);
 			break;
 		default:
 			BUG();
@@ -731,9 +1032,7 @@ static int __make_request(request_queue_t * q, int rw,
 	 * driver. Create a bounce buffer if the buffer data points into
 	 * high memory - keep the original buffer otherwise.
 	 */
-#if CONFIG_HIGHMEM
-	bh = create_bounce(rw, bh);
-#endif
+	bh = blk_queue_bounce(q, rw, bh);
 
 /* look for a free request. */
 	/*
@@ -741,59 +1040,75 @@ static int __make_request(request_queue_t * q, int rw,
 	 */
 	max_sectors = get_max_sectors(bh->b_rdev);
 
-	latency = elevator_request_latency(elevator, rw);
-
+	req = NULL;
+	head = &q->queue_head;
 	/*
 	 * Now we acquire the request spinlock, we have to be mega careful
 	 * not to schedule or do something nonatomic
 	 */
-again:
 	spin_lock_irq(&io_request_lock);
 
-	/*
-	 * skip first entry, for devices with active queue head
-	 */
-	head = &q->queue_head;
-	if (q->head_active && !q->plugged)
-		head = head->next;
+again:
+	insert_here = head->prev;
 
 	if (list_empty(head)) {
 		q->plug_device_fn(q, bh->b_rdev); /* is atomic */
 		goto get_rq;
-	}
+	} else if (q->head_active && !q->plugged)
+		head = head->next;
 
-	el_ret = elevator->elevator_merge_fn(q, &req, bh, rw,
-					     &max_sectors, &max_segments);
+	el_ret = elevator->elevator_merge_fn(q, &req, head, bh, rw,max_sectors);
 	switch (el_ret) {
 
 		case ELEVATOR_BACK_MERGE:
-			if (!q->back_merge_fn(q, req, bh, max_segments))
+			if (!q->back_merge_fn(q, req, bh, max_segments)) {
+				insert_here = &req->queue;
 				break;
+			}
 			req->bhtail->b_reqnext = bh;
 			req->bhtail = bh;
 			req->nr_sectors = req->hard_nr_sectors += count;
-			req->e = elevator;
+			blk_started_io(count);
+			blk_started_sectors(req, count);
 			drive_stat_acct(req->rq_dev, req->cmd, count, 0);
+			req_new_io(req, 1, count);
 			attempt_back_merge(q, req, max_sectors, max_segments);
 			goto out;
 
 		case ELEVATOR_FRONT_MERGE:
-			if (!q->front_merge_fn(q, req, bh, max_segments))
+			if (!q->front_merge_fn(q, req, bh, max_segments)) {
+				insert_here = req->queue.prev;
 				break;
+			}
 			bh->b_reqnext = req->bh;
 			req->bh = bh;
+			/*
+			 * may not be valid, but queues not having bounce
+			 * enabled for highmem pages must not look at
+			 * ->buffer anyway
+			 */
 			req->buffer = bh->b_data;
-			req->current_nr_sectors = count;
+			req->current_nr_sectors = req->hard_cur_sectors = count;
 			req->sector = req->hard_sector = sector;
 			req->nr_sectors = req->hard_nr_sectors += count;
-			req->e = elevator;
+			blk_started_io(count);
+			blk_started_sectors(req, count);
 			drive_stat_acct(req->rq_dev, req->cmd, count, 0);
+			req_new_io(req, 1, count);
 			attempt_front_merge(q, head, req, max_sectors, max_segments);
 			goto out;
+
 		/*
 		 * elevator says don't/can't merge. get new request
 		 */
 		case ELEVATOR_NO_MERGE:
+			/*
+			 * use elevator hints as to where to insert the
+			 * request. if no hints, just add it to the back
+			 * of the queue
+			 */
+			if (req)
+				insert_here = &req->queue;
 			break;
 
 		default:
@@ -801,45 +1116,61 @@ again:
 			BUG();
 	}
 		
-	/*
-	 * Grab a free request from the freelist. Read first try their
-	 * own queue - if that is empty, we steal from the write list.
-	 * Writes must block if the write list is empty, and read aheads
-	 * are not crucial.
-	 */
 get_rq:
 	if (freereq) {
 		req = freereq;
 		freereq = NULL;
-	} else if ((req = get_request(q, rw)) == NULL) {
-		spin_unlock_irq(&io_request_lock);
-		if (rw_ahead)
-			goto end_io;
-
-		freereq = __get_request_wait(q, rw);
-		goto again;
+	} else {
+		/*
+		 * See description above __get_request_wait()
+		 */
+		if (rw_ahead) {
+			if (q->rq.count < q->batch_requests || blk_oversized_queue_batch(q)) {
+				spin_unlock_irq(&io_request_lock);
+				goto end_io;
+			}
+			req = get_request(q, rw);
+			if (req == NULL)
+				BUG();
+		} else {
+			req = get_request(q, rw);
+			if (req == NULL) {
+				spin_unlock_irq(&io_request_lock);
+				freereq = __get_request_wait(q, rw);
+				head = &q->queue_head;
+				spin_lock_irq(&io_request_lock);
+				should_wake = 1;
+				goto again;
+			}
+		}
 	}
 
 /* fill up the request-info, and add it to the queue */
+	req->elevator_sequence = latency;
 	req->cmd = rw;
 	req->errors = 0;
 	req->hard_sector = req->sector = sector;
 	req->hard_nr_sectors = req->nr_sectors = count;
-	req->current_nr_sectors = count;
+	req->current_nr_sectors = req->hard_cur_sectors = count;
 	req->nr_segments = 1; /* Always 1 for a new request. */
 	req->nr_hw_segments = 1; /* Always 1 for a new request. */
 	req->buffer = bh->b_data;
-	req->sem = NULL;
+	req->waiting = NULL;
 	req->bh = bh;
 	req->bhtail = bh;
 	req->rq_dev = bh->b_rdev;
-	req->e = elevator;
-	add_request(q, req, head, latency);
+	req->start_time = jiffies;
+	req_new_io(req, 0, count);
+	blk_started_io(count);
+	blk_started_sectors(req, count);
+	add_request(q, req, insert_here);
 out:
-	if (!q->plugged)
-		(q->request_fn)(q);
 	if (freereq)
 		blkdev_release_request(freereq);
+	if (should_wake)
+		get_request_wait_wakeup(q, rw);
+	if (sync)
+		__generic_unplug_device(q);
 	spin_unlock_irq(&io_request_lock);
 	return 0;
 end_io:
@@ -884,30 +1215,33 @@ end_io:
 void generic_make_request (int rw, struct buffer_head * bh)
 {
 	int major = MAJOR(bh->b_rdev);
+	int minorsize = 0;
 	request_queue_t *q;
 
-	if (!bh->b_end_io) BUG();
-	if (blk_size[major]) {
-		unsigned long maxsector = (blk_size[major][MINOR(bh->b_rdev)] << 1) + 1;
-		unsigned int sector, count;
+	if (!bh->b_end_io)
+		BUG();
 
-		count = bh->b_size >> 9;
-		sector = bh->b_rsector;
+	/* Test device size, when known. */
+	if (blk_size[major])
+		minorsize = blk_size[major][MINOR(bh->b_rdev)];
+	if (minorsize) {
+		unsigned long maxsector = (minorsize << 1) + 1;
+		unsigned long sector = bh->b_rsector;
+		unsigned int count = bh->b_size >> 9;
 
 		if (maxsector < count || maxsector - count < sector) {
-			bh->b_state &= (1 << BH_Lock) | (1 << BH_Mapped);
-			if (blk_size[major][MINOR(bh->b_rdev)]) {
-				
-				/* This may well happen - the kernel calls bread()
-				   without checking the size of the device, e.g.,
-				   when mounting a device. */
-				printk(KERN_INFO
-				       "attempt to access beyond end of device\n");
-				printk(KERN_INFO "%s: rw=%d, want=%d, limit=%d\n",
-				       kdevname(bh->b_rdev), rw,
-				       (sector + count)>>1,
-				       blk_size[major][MINOR(bh->b_rdev)]);
-			}
+			/* Yecch */
+			bh->b_state &= ~(1 << BH_Dirty);
+
+			/* This may well happen - the kernel calls bread()
+			   without checking the size of the device, e.g.,
+			   when mounting a device. */
+			printk(KERN_INFO
+			       "attempt to access beyond end of device\n");
+			printk(KERN_INFO "%s: rw=%d, want=%ld, limit=%d\n",
+			       kdevname(bh->b_rdev), rw,
+			       (sector + count)>>1, minorsize);
+
 			bh->b_end_io(bh, 0);
 			return;
 		}
@@ -922,23 +1256,22 @@ void generic_make_request (int rw, struct buffer_head * bh)
 	 * Stacking drivers are expected to know what they are doing.
 	 */
 	do {
-		q = blk_get_queue(bh->b_rdev);
+		q = __blk_get_queue(bh->b_rdev);
 		if (!q) {
 			printk(KERN_ERR
-			       "generic_make_request: Trying to access nonexistent block-device %s (%ld)\n",
+			       "generic_make_request: Trying to access "
+			       "nonexistent block-device %s (%ld)\n",
 			       kdevname(bh->b_rdev), bh->b_rsector);
 			buffer_IO_error(bh);
 			break;
 		}
-
-	}
-	while (q->make_request_fn(q, rw, bh));
+	} while (q->make_request_fn(q, rw, bh));
 }
 
 
 /**
  * submit_bh: submit a buffer_head to the block device later for I/O
- * @rw: whether to %READ or %WRITE, or mayve to %READA (read ahead)
+ * @rw: whether to %READ or %WRITE, or maybe to %READA (read ahead)
  * @bh: The &struct buffer_head which describes the I/O
  *
  * submit_bh() is very similar in purpose to generic_make_request(), and
@@ -951,37 +1284,41 @@ void generic_make_request (int rw, struct buffer_head * bh)
  */
 void submit_bh(int rw, struct buffer_head * bh)
 {
+	int count = bh->b_size >> 9;
+
 	if (!test_bit(BH_Lock, &bh->b_state))
 		BUG();
 
 	set_bit(BH_Req, &bh->b_state);
+	set_bit(BH_Launder, &bh->b_state);
 
 	/*
 	 * First step, 'identity mapping' - RAID or LVM might
 	 * further remap this.
 	 */
 	bh->b_rdev = bh->b_dev;
-	bh->b_rsector = bh->b_blocknr * (bh->b_size>>9);
+	bh->b_rsector = bh->b_blocknr * count;
 
+	get_bh(bh);
 	generic_make_request(rw, bh);
 
+	/* fix race condition with wait_on_buffer() */
+	smp_mb(); /* spin_unlock may have inclusive semantics */
+	if (waitqueue_active(&bh->b_wait))
+		wake_up(&bh->b_wait);
+
+	if (block_dump)
+		printk(KERN_DEBUG "%s: %s block %lu/%u on %s\n", current->comm, rw == WRITE ? "WRITE" : "READ", bh->b_rsector, count, kdevname(bh->b_rdev));
+
+	put_bh(bh);
 	switch (rw) {
 		case WRITE:
-			kstat.pgpgout++;
+			kstat.pgpgout += count;
 			break;
 		default:
-			kstat.pgpgin++;
+			kstat.pgpgin += count;
 			break;
 	}
-}
-
-/*
- * Default IO end handler, used by "ll_rw_block()".
- */
-static void end_buffer_io_sync(struct buffer_head *bh, int uptodate)
-{
-	mark_buffer_uptodate(bh, uptodate);
-	unlock_buffer(bh);
 }
 
 /**
@@ -1021,21 +1358,18 @@ void ll_rw_block(int rw, int nr, struct buffer_head * bhs[])
 	int correct_size;
 	int i;
 
+	if (!nr)
+		return;
+
 	major = MAJOR(bhs[0]->b_dev);
 
 	/* Determine correct block size for this device. */
-	correct_size = BLOCK_SIZE;
-	if (blksize_size[major]) {
-		i = blksize_size[major][MINOR(bhs[0]->b_dev)];
-		if (i)
-			correct_size = i;
-	}
+	correct_size = get_hardsect_size(bhs[0]->b_dev);
 
 	/* Verify requested block sizes. */
 	for (i = 0; i < nr; i++) {
-		struct buffer_head *bh;
-		bh = bhs[i];
-		if (bh->b_size != correct_size) {
+		struct buffer_head *bh = bhs[i];
+		if (bh->b_size % correct_size) {
 			printk(KERN_NOTICE "ll_rw_block: device %s: "
 			       "only %d-char blocks implemented (%u)\n",
 			       kdevname(bhs[0]->b_dev),
@@ -1051,14 +1385,12 @@ void ll_rw_block(int rw, int nr, struct buffer_head * bhs[])
 	}
 
 	for (i = 0; i < nr; i++) {
-		struct buffer_head *bh;
-		bh = bhs[i];
+		struct buffer_head *bh = bhs[i];
 
-		/* Only one thread can actually submit the I/O. */
-		if (test_and_set_bit(BH_Lock, &bh->b_state))
-			continue;
+		lock_buffer(bh);
 
 		/* We have the buffer lock */
+		atomic_inc(&bh->b_count);
 		bh->b_end_io = end_buffer_io_sync;
 
 		switch(rw) {
@@ -1096,12 +1428,30 @@ sorry:
 extern int stram_device_init (void);
 #endif
 
-/*
- * First step of what used to be end_request
+static void blk_writeback_timer(unsigned long data)
+{
+	wakeup_bdflush();
+	wakeup_kupdate();
+}
+
+/**
+ * end_that_request_first - end I/O on one buffer.
+ * @req:      the request being processed
+ * @uptodate: 0 for I/O error
+ * @name:     the name printed for an I/O error
  *
- * 0 means continue with end_that_request_last,
- * 1 means we are done
- */
+ * Description:
+ *     Ends I/O on the first buffer attached to @req, and sets it up
+ *     for the next buffer_head (if any) in the cluster.
+ *     
+ * Return:
+ *     0 - we are done with this request, call end_that_request_last()
+ *     1 - still buffers pending for this request
+ *
+ * Caveat: 
+ *     Drivers implementing their own end_request handling must call
+ *     blk_finished_io() appropriately.
+ **/
 
 int end_that_request_first (struct request *req, int uptodate, char *name)
 {
@@ -1115,6 +1465,8 @@ int end_that_request_first (struct request *req, int uptodate, char *name)
 
 	if ((bh = req->bh) != NULL) {
 		nsect = bh->b_size >> 9;
+		blk_finished_io(nsect);
+		blk_finished_sectors(req, nsect);
 		req->bh = bh->b_reqnext;
 		bh->b_reqnext = NULL;
 		bh->b_end_io(bh, uptodate);
@@ -1125,6 +1477,7 @@ int end_that_request_first (struct request *req, int uptodate, char *name)
 			req->nr_sectors = req->hard_nr_sectors;
 
 			req->current_nr_sectors = bh->b_size >> 9;
+			req->hard_cur_sectors = req->current_nr_sectors;
 			if (req->nr_sectors < req->current_nr_sectors) {
 				req->nr_sectors = req->current_nr_sectors;
 				printk("end_request: buffer-list destroyed\n");
@@ -1136,16 +1489,22 @@ int end_that_request_first (struct request *req, int uptodate, char *name)
 	return 0;
 }
 
+extern int laptop_mode;
+
 void end_that_request_last(struct request *req)
 {
-	if (req->e) {
-		printk("end_that_request_last called with non-dequeued req\n");
-		BUG();
-	}
-	if (req->sem != NULL)
-		up(req->sem);
+	struct completion *waiting = req->waiting;
 
+	/*
+	 * schedule the writeout of pending dirty data when the disk is idle
+	 */
+	if (laptop_mode && req->cmd == READ)
+		mod_timer(&writeback_timer, jiffies + 5 * HZ);
+
+	req_finished_io(req);
 	blkdev_release_request(req);
+	if (waiting)
+		complete(waiting);
 }
 
 int __init blk_dev_init(void)
@@ -1165,26 +1524,21 @@ int __init blk_dev_init(void)
 	memset(ro_bits,0,sizeof(ro_bits));
 	memset(max_readahead, 0, sizeof(max_readahead));
 	memset(max_sectors, 0, sizeof(max_sectors));
+
+	blk_max_low_pfn = max_low_pfn - 1;
+	blk_max_pfn = max_pfn - 1;
+
+	init_timer(&writeback_timer);
+	writeback_timer.function = blk_writeback_timer;
+
 #ifdef CONFIG_AMIGA_Z2RAM
 	z2_init();
 #endif
 #ifdef CONFIG_STRAM_SWAP
 	stram_device_init();
 #endif
-#ifdef CONFIG_BLK_DEV_RAM
-	rd_init();
-#endif
-#ifdef CONFIG_BLK_DEV_LOOP
-	loop_init();
-#endif
 #ifdef CONFIG_ISP16_CDI
 	isp16_init();
-#endif
-#if defined(CONFIG_IDE) && defined(CONFIG_BLK_DEV_IDE)
-	ide_init();		/* this MUST precede hd_init */
-#endif
-#if defined(CONFIG_IDE) && defined(CONFIG_BLK_DEV_HD)
-	hd_init();
 #endif
 #ifdef CONFIG_BLK_DEV_PS2
 	ps2esdi_init();
@@ -1256,20 +1610,21 @@ int __init blk_dev_init(void)
 #ifdef CONFIG_DDV
 	ddv_init();
 #endif
-#ifdef CONFIG_BLK_DEV_NBD
-	nbd_init();
-#endif
 #ifdef CONFIG_MDISK
 	mdisk_init();
 #endif
 #ifdef CONFIG_DASD
 	dasd_init();
 #endif
+#if defined(CONFIG_S390_TAPE) && defined(CONFIG_S390_TAPE_BLOCK)
+	tapeblock_init();
+#endif
+#ifdef CONFIG_BLK_DEV_XPRAM
+        xpram_init();
+#endif
+
 #ifdef CONFIG_SUN_JSFLASH
 	jsfd_init();
-#endif
-#ifdef CONFIG_BLK_DEV_LVM
-	lvm_init();
 #endif
 	return 0;
 };
@@ -1277,11 +1632,18 @@ int __init blk_dev_init(void)
 EXPORT_SYMBOL(io_request_lock);
 EXPORT_SYMBOL(end_that_request_first);
 EXPORT_SYMBOL(end_that_request_last);
+EXPORT_SYMBOL(blk_grow_request_list);
 EXPORT_SYMBOL(blk_init_queue);
 EXPORT_SYMBOL(blk_get_queue);
 EXPORT_SYMBOL(blk_cleanup_queue);
 EXPORT_SYMBOL(blk_queue_headactive);
-EXPORT_SYMBOL(blk_queue_pluggable);
+EXPORT_SYMBOL(blk_queue_throttle_sectors);
 EXPORT_SYMBOL(blk_queue_make_request);
 EXPORT_SYMBOL(generic_make_request);
 EXPORT_SYMBOL(blkdev_release_request);
+EXPORT_SYMBOL(generic_unplug_device);
+EXPORT_SYMBOL(blk_queue_bounce_limit);
+EXPORT_SYMBOL(blk_max_low_pfn);
+EXPORT_SYMBOL(blk_max_pfn);
+EXPORT_SYMBOL(blk_seg_merge_ok);
+EXPORT_SYMBOL(blk_nohighio);

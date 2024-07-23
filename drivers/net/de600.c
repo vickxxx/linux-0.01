@@ -1,4 +1,4 @@
-static const char *version =
+static const char version[] =
 	"de600.c: $Revision: 1.40 $,  Bjorn Ekwall (bj0rn@blox.se)\n";
 /*
  *	de600.c
@@ -16,7 +16,7 @@ static const char *version =
  *
  *	Adapted to the sample network driver core for linux,
  *	written by: Donald Becker <becker@super.org>
- *	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+ *		(Now at <becker@scyld.com>)
  *
  *	compile-command:
  *	"gcc -D__KERNEL__  -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer \
@@ -113,9 +113,11 @@ static const char *version =
 
 static unsigned int de600_debug = DE600_DEBUG;
 MODULE_PARM(de600_debug, "i");
+MODULE_PARM_DESC(de600_debug, "DE-600 debug level (0-2)");
 
 static unsigned int delay_time = 10;
 MODULE_PARM(delay_time, "i");
+MODULE_PARM_DESC(delay_time, "DE-600 deley on I/O in microseconds");
 
 #ifdef FAKE_SMALL_MAX
 static unsigned long de600_rspace(struct sock *sk);
@@ -265,14 +267,14 @@ static int	adapter_init(struct net_device *dev);
 /*
  * D-Link driver variables:
  */
-static volatile int		rx_page		= 0;
+static volatile int		rx_page;
 
 #define TX_PAGES 2
 static volatile int		tx_fifo[TX_PAGES];
-static volatile int		tx_fifo_in = 0;
-static volatile int		tx_fifo_out = 0;
+static volatile int		tx_fifo_in;
+static volatile int		tx_fifo_out;
 static volatile int		free_tx_pages = TX_PAGES;
-static int			was_down = 0;
+static int			was_down;
 
 /*
  * Convenience macros/functions for D-Link adapter
@@ -401,6 +403,7 @@ de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	int	len;
 	int	tickssofar;
 	byte	*buffer = skb->data;
+	int	i;
 
 	if (free_tx_pages <= 0) {	/* Do timeouts, to avoid hangs. */
 		tickssofar = jiffies - dev->trans_start;
@@ -445,8 +448,10 @@ de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 #endif
 
 	de600_setup_address(transmit_from, RW_ADDR);
-	for ( ; len > 0; --len, ++buffer)
+	for (i = 0;  i < skb->len ; ++i, ++buffer)
 		de600_put_byte(*buffer);
+	for (; i < len; ++i)
+		de600_put_byte(0);
 
 	if (free_tx_pages-- == TX_PAGES) { /* No transmission going on */
 		dev->trans_start = jiffies;
@@ -597,7 +602,6 @@ de600_rx_intr(struct net_device *dev)
 	}
 
 	skb = dev_alloc_skb(size+2);
-	restore_flags(flags);
 	if (skb == NULL) {
 		printk("%s: Couldn't allocate a sk_buff of size %d.\n",
 			dev->name, size);
@@ -616,11 +620,15 @@ de600_rx_intr(struct net_device *dev)
 	for (i = size; i > 0; --i, ++buffer)
 		*buffer = de600_read_byte(READ_DATA, dev);
 
-	((struct net_device_stats *)(dev->priv))->rx_packets++; /* count all receives */
-
 	skb->protocol=eth_type_trans(skb,dev);
 
 	netif_rx(skb);
+
+	/* update stats */
+	dev->last_rx = jiffies;
+	((struct net_device_stats *)(dev->priv))->rx_packets++; /* count all receives */
+	((struct net_device_stats *)(dev->priv))->rx_bytes += size; /* count all received bytes */
+
 	/*
 	 * If any worth-while packets have been received, netif_rx()
 	 * has done a mark_bh(INET_BH) for us and will work on them
@@ -713,7 +721,7 @@ static int
 adapter_init(struct net_device *dev)
 {
 	int	i;
-	long flags;
+	unsigned long flags;
 
 	save_flags(flags);
 	cli();
@@ -796,7 +804,6 @@ adapter_init(struct net_device *dev)
  * This differs from the standard function, that can return an
  * arbitrarily small window!
  */
-#define min(a,b)	((a)<(b)?(a):(b))
 static unsigned long
 de600_rspace(struct sock *sk)
 {
@@ -810,7 +817,7 @@ de600_rspace(struct sock *sk)
  */
 
 	if (atomic_read(&sk->rmem_alloc) >= sk->rcvbuf-2*DE600_MIN_WINDOW) return(0);
-	amt = min((sk->rcvbuf-atomic_read(&sk->rmem_alloc))/2/*-DE600_MIN_WINDOW*/, DE600_MAX_WINDOW);
+	amt = min_t(int, (sk->rcvbuf-atomic_read(&sk->rmem_alloc))/2/*-DE600_MIN_WINDOW*/, DE600_MAX_WINDOW);
 	if (amt < 0) return(0);
 	return(amt);
   }
@@ -837,6 +844,9 @@ cleanup_module(void)
 	release_region(DE600_IO, 3);
 }
 #endif /* MODULE */
+
+MODULE_LICENSE("GPL");
+
 /*
  * Local variables:
  *  kernel-compile-command: "gcc -D__KERNEL__ -Ilinux/include -I../../net/inet -Wall -Wstrict-prototypes -O2 -m486 -c de600.c"

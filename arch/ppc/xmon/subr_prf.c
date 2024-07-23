@@ -48,3 +48,8 @@ xmon_fprintf(void *f, const char *fmt, ...)
 	va_end(ap);
 }
 
+void
+xmon_puts(char *s)
+{
+	xmon_write(stdout, s, strlen(s));
+}

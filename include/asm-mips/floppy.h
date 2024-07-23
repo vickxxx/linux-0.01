@@ -10,10 +10,6 @@
 #ifndef _ASM_FLOPPY_H
 #define _ASM_FLOPPY_H
 
-#include <asm/bootinfo.h>
-#include <asm/jazz.h>
-#include <asm/jazzdma.h>
-
 struct fd_ops {
 	unsigned char (*fd_inb)(unsigned int port);
 	void (*fd_outb)(unsigned char value, unsigned int port);
@@ -79,14 +75,6 @@ extern struct fd_ops *fd_ops;
 
 #define FDC1			fd_ops->fd_getfdaddr1();
 
-/*
- * Hack: The floppy drivrer defines this, before including fdreg.h.  We use
- * to define FDC2 only one and keep it a static variable in floppy.c.
- */
-#ifdef FDPATCHES
-static int FDC2 = -1;
-#endif
-
 #define N_FDC 1			/* do you *really* want a second controller? */
 #define N_DRIVE 8
 
@@ -106,5 +94,7 @@ static int FDC2 = -1;
  * hardware available with MIPS CPUs ...
  */
 #define CROSS_64KB(a,s) ((unsigned long)(a)/K_64 != ((unsigned long)(a) + (s) - 1) / K_64)
+
+#define EXTRA_FLOPPY_PARAMS
 
 #endif /* _ASM_FLOPPY_H */

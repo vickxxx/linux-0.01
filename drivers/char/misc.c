@@ -41,7 +41,7 @@
 #include <linux/miscdevice.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/stat.h>
@@ -66,20 +66,13 @@ static DECLARE_MUTEX(misc_sem);
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
 extern int psaux_init(void);
-#ifdef CONFIG_SGI_NEWPORT_GFX
-extern void gfx_register(void);
-#endif
-extern void streamable_init(void);
-extern int rtc_sun_init(void);		/* Combines MK48T02 and MK48T08 */
 extern int rtc_DP8570A_init(void);
 extern int rtc_MK48T08_init(void);
 extern int ds1286_init(void);
-extern int dsp56k_init(void);
-extern int radio_init(void);
-extern int pc110pad_init(void);
 extern int pmu_device_init(void);
-extern int qpmouse_init(void);
 extern int tosh_init(void);
+extern int i8k_init(void);
+extern int lcd_init(void);
 
 static int misc_read_proc(char *buf, char **start, off_t offset,
 			  int len, int *eof, void *private)
@@ -174,11 +167,21 @@ static struct file_operations misc_fops = {
  
 int misc_register(struct miscdevice * misc)
 {
-	static devfs_handle_t devfs_handle;
-
+	static devfs_handle_t devfs_handle, dir;
+	struct miscdevice *c;
+	
 	if (misc->next || misc->prev)
 		return -EBUSY;
 	down(&misc_sem);
+	c = misc_list.next;
+
+	while ((c != &misc_list) && (c->minor != misc->minor))
+		c = c->next;
+	if (c != &misc_list) {
+		up(&misc_sem);
+		return -EBUSY;
+	}
+
 	if (misc->minor == MISC_DYNAMIC_MINOR) {
 		int i = DYNAMIC_MINORS;
 		while (--i >= 0)
@@ -195,11 +198,12 @@ int misc_register(struct miscdevice * misc)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
 	if (!devfs_handle)
 		devfs_handle = devfs_mk_dir (NULL, "misc", NULL);
+	dir = strchr (misc->name, '/') ? NULL : devfs_handle;
 	misc->devfs_handle =
-	    devfs_register (devfs_handle, misc->name, DEVFS_FL_NONE,
-			    MISC_MAJOR, misc->minor,
-			    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
-			    misc->fops, NULL);
+		devfs_register (dir, misc->name, DEVFS_FL_NONE,
+				MISC_MAJOR, misc->minor,
+				S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
+				misc->fops, NULL);
 
 	/*
 	 * Add it to the front, so that later devices can "override"
@@ -247,47 +251,26 @@ EXPORT_SYMBOL(misc_deregister);
 int __init misc_init(void)
 {
 	create_proc_read_entry("misc", 0, 0, misc_read_proc, NULL);
-#if defined CONFIG_82C710_MOUSE
-	qpmouse_init();
-#endif
-#ifdef CONFIG_PC110_PAD
-	pc110pad_init();
-#endif
 #ifdef CONFIG_MVME16x
 	rtc_MK48T08_init();
 #endif
 #ifdef CONFIG_BVME6000
 	rtc_DP8570A_init();
 #endif
-#if defined(CONFIG_SUN_MOSTEK_RTC)
-	rtc_sun_init();
-#endif
 #ifdef CONFIG_SGI_DS1286
 	ds1286_init();
-#endif
-#ifdef CONFIG_ATARI_DSP56K
-	dsp56k_init();
-#endif
-#ifdef CONFIG_MISC_RADIO
-	radio_init();
 #endif
 #ifdef CONFIG_PMAC_PBOOK
 	pmu_device_init();
 #endif
-#ifdef CONFIG_SGI_NEWPORT_GFX
-	gfx_register ();
-#endif
-#ifdef CONFIG_SGI_IP22
-	streamable_init ();
-#endif
-#ifdef CONFIG_SGI_NEWPORT_GFX
-	gfx_register ();
-#endif
-#ifdef CONFIG_SGI
-	streamable_init ();
-#endif
 #ifdef CONFIG_TOSHIBA
 	tosh_init();
+#endif
+#ifdef CONFIG_COBALT_LCD
+	lcd_init();
+#endif
+#ifdef CONFIG_I8K
+	i8k_init();
 #endif
 	if (devfs_register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
 		printk("unable to get major %d for misc devices\n",

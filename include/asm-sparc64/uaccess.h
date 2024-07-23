@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.33 2000/08/29 07:01:58 davem Exp $ */
+/* $Id: uaccess.h,v 1.34 2001/09/27 04:36:24 kanoj Exp $ */
 #ifndef _ASM_UACCESS_H
 #define _ASM_UACCESS_H
 
@@ -249,47 +249,55 @@ __asm__ __volatile__(							\
 
 extern int __get_user_bad(void);
 
-extern __kernel_size_t __memcpy_short(void *to, const void *from,
-				      __kernel_size_t size,
-				      long asi_src, long asi_dst);
+extern unsigned long ___copy_from_user(void *to, const void *from,
+				       unsigned long size);
+extern unsigned long copy_from_user_fixup(void *to, const void *from,
+					  unsigned long size);
+static inline unsigned long copy_from_user(void *to, const void *from,
+					   unsigned long size)
+{
+	unsigned long ret = ___copy_from_user(to, from, size);
 
-extern __kernel_size_t __memcpy_entry(void *to, const void *from,
-				      __kernel_size_t size,
-				      long asi_src, long asi_dst);
+	if (ret)
+		ret = copy_from_user_fixup(to, from, size);
+	return ret;
+}
+#define __copy_from_user copy_from_user
 
-extern __kernel_size_t __memcpy_16plus(void *to, const void *from,
-				       __kernel_size_t size,
-				       long asi_src, long asi_dst);
+extern unsigned long ___copy_to_user(void *to, const void *from,
+				     unsigned long size);
+extern unsigned long copy_to_user_fixup(void *to, const void *from,
+					unsigned long size);
+static inline unsigned long copy_to_user(void *to, const void *from,
+					 unsigned long size)
+{
+	unsigned long ret = ___copy_to_user(to, from, size);
 
-extern __kernel_size_t __memcpy_386plus(void *to, const void *from,
-					__kernel_size_t size,
-					long asi_src, long asi_dst);
+	if (ret)
+		ret = copy_to_user_fixup(to, from, size);
+	return ret;
+}
+#define __copy_to_user copy_to_user
 
-extern __kernel_size_t __copy_from_user(void *to, const void *from,
-					__kernel_size_t size);
+extern unsigned long ___copy_in_user(void *to, const void *from,
+				     unsigned long size);
+extern unsigned long copy_in_user_fixup(void *to, void *from,
+					unsigned long size);
+static inline unsigned long copy_in_user(void *to, void *from,
+					 unsigned long size)
+{
+	unsigned long ret = ___copy_in_user(to, from, size);
 
-extern __kernel_size_t __copy_to_user(void *to, const void *from,
-				      __kernel_size_t size);
+	if (ret)
+		ret = copy_in_user_fixup(to, from, size);
+	return ret;
+}
+#define __copy_in_user copy_in_user
 
-extern __kernel_size_t __copy_in_user(void *to, const void *from,
-				      __kernel_size_t size);
-
-#define copy_from_user(to,from,n)		\
-	__copy_from_user((void *)(to),	\
-		    (void *)(from), (__kernel_size_t)(n))
-
-#define copy_to_user(to,from,n) \
-	__copy_to_user((void *)(to), \
-	(void *) (from), (__kernel_size_t)(n))
-
-#define copy_in_user(to,from,n) \
-	__copy_in_user((void *)(to), \
-	(void *) (from), (__kernel_size_t)(n))
-
+extern __kernel_size_t __bzero_noasi(void *addr, __kernel_size_t size);
+	
 extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 {
-	extern __kernel_size_t __bzero_noasi(void *addr, __kernel_size_t size);
-	
 	return __bzero_noasi(addr, size);
 }
 

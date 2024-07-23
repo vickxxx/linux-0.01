@@ -15,11 +15,11 @@
     rights and limitations under the License.
 
     The initial developer of the original code is David A. Hinds
-    <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
+    <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU Public License version 2 (the "GPL"), in which
+    terms of the GNU General Public License version 2 (the "GPL"), in which
     case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
@@ -45,10 +45,11 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
+#include <linux/proc_fs.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -66,8 +67,9 @@ static const char *version =
 #define DEBUG(n, args...)
 #endif
 
-MODULE_AUTHOR("David Hinds <dhinds@pcmcia.sourceforge.org>");
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
 MODULE_DESCRIPTION("Databook TCIC-2 PCMCIA socket driver");
+MODULE_LICENSE("Dual MPL/GPL");
 
 /*====================================================================*/
 

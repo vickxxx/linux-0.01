@@ -8,6 +8,13 @@
  * our soft copy.
  */
 
+/*
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
+ */
+
 #include <asm/io.h>
 #include <asm/hardware.h>
 
@@ -22,7 +29,7 @@ static void timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 	do_timer(regs);
 }
 
-extern __inline__ void setup_timer (void)
+static inline void setup_timer (void)
 {
 	/*
 	 * Default the date to 1 Jan 1970 0:0:0

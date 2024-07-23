@@ -4,11 +4,11 @@
  * Copyright (c) 1999 Nicolas Pitre <nico@cam.org>
  */
 #include <linux/config.h>
+#include <asm/arch/hardware.h>
 
 static inline void arch_idle(void)
 {
-	while (!current->need_resched && !hlt_counter)
-		cpu_do_idle(0);
+	cpu_do_idle();
 }
 
 #ifdef CONFIG_SA1100_VICTOR
@@ -18,19 +18,15 @@ static inline void arch_idle(void)
 
 #else
 
-extern inline void arch_reset(char mode)
+static inline void arch_reset(char mode)
 {
 	if (mode == 's') {
 		/* Jump into ROM at address 0 */
 		cpu_reset(0);
 	} else {
-		/* Activate SA1100 watchdog and wait for the trigger... */
-		OSMR3 = OSCR + 3686400/2;	/* in 1/2 sec */
-		OWER |= OWER_WME;
-		OIER |= OIER_E3;
+		/* Use on-chip reset capability */
+		RSRR = RSRR_SWR;
 	}
 }
-
-#define arch_power_off()	do { } while (0)
 
 #endif

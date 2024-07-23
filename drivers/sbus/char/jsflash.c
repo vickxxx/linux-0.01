@@ -30,7 +30,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
@@ -453,7 +453,9 @@ static int jsfd_ioctl(struct inode *inode, struct file *file,
 
 	switch (cmd) {
 	case BLKGETSIZE:
-		return put_user(jsfd_bytesizes[dev] >> 9, (long *) arg);
+		return put_user(jsfd_bytesizes[dev] >> 9, (unsigned long *) arg);
+	case BLKGETSIZE64:
+		return put_user(jsfd_bytesizes[dev], (u64 *) arg);
 
 #if 0
 	case BLKROSET:
@@ -499,15 +501,12 @@ static int jsfd_open(struct inode *inode, struct file *file)
 	jdp = &jsf0.dv[dev];
 	jdp->refcnt++;
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int jsf_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
 	jsf0.busy = 0;
-	unlock_kernel();
 	return 0;
 }
 
@@ -531,7 +530,6 @@ static int jsfd_release(struct inode *inode, struct file *file)
 		--jdp->refcnt;
 	}
 	/* N.B. Doesn't lo->file need an fput?? */
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -549,6 +547,7 @@ static struct file_operations jsf_fops = {
 static struct miscdevice jsf_dev = { JSF_MINOR, "jsflash", &jsf_fops };
 
 static struct block_device_operations jsfd_fops = {
+	owner:		THIS_MODULE,
 	open:		jsfd_open,
 	release:	jsfd_release,
 	ioctl:		jsfd_ioctl,
@@ -682,6 +681,7 @@ int jsfd_init(void) {
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
 
 int init_module(void) {
 	int rc;

@@ -9,7 +9,7 @@
  * Intel i82586 Ethernet definitions
  *
  * This is an extension to the Linux operating system, and is covered by the
- * same Gnu Public License that covers that work.
+ * same GNU General Public License that covers that work.
  *
  * Copyright 1995 by Chris Beauregard (cpbeaure@undergrad.math.uwaterloo.ca)
  *
@@ -60,7 +60,7 @@ struct scb_struct
   unsigned short cbl_offset;    /* pointeroffset, command block list */
   unsigned short rfa_offset;    /* pointeroffset, receive frame area */
   unsigned short crc_errs;      /* CRC-Error counter */
-  unsigned short aln_errs;      /* allignmenterror counter */
+  unsigned short aln_errs;      /* alignmenterror counter */
   unsigned short rsc_errs;      /* Resourceerror counter */
   unsigned short ovrn_errs;     /* OVerrunerror counter */
 };

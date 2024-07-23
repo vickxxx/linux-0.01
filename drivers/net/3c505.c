@@ -20,6 +20,7 @@
  *                      Juha Laiho, <jlaiho@ichaos.nullnet.fi>
  *              Linux 3C509 driver by
  *                      Donald Becker, <becker@super.org>
+ *			(Now at <becker@scyld.com>)
  *              Crynwr packet driver by
  *                      Krishnan Gopalan and Gregg Stefancik,
  *                      Clemson University Engineering Computer Operations.
@@ -31,10 +32,15 @@
  *              Linux 1.3.0 changes by
  *                      Alan Cox <Alan.Cox@linux.org>
  *              More debugging, DMA support, currently maintained by
- *                      Philip Blundell <Philip.Blundell@pobox.com>
+ *                      Philip Blundell <philb@gnu.org>
  *              Multicard/soft configurable dma channel/rev 2 hardware support
  *                      by Christopher Collins <ccollins@pcug.org.au>
+ *		Ethtool support (jgarzik), 11/17/2001
  */
+
+#define DRV_NAME	"3c505"
+#define DRV_VERSION	"1.10a"
+
 
 /* Theory of operation:
  *
@@ -99,9 +105,12 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -119,13 +128,13 @@
  *
  *********************************************************/
 
-static const char *filename = __FILE__;
+static const char filename[] = __FILE__;
 
-static const char *timeout_msg = "*** timeout at %s:%s (line %d) ***\n";
+static const char timeout_msg[] = "*** timeout at %s:%s (line %d) ***\n";
 #define TIMEOUT_MSG(lineno) \
 	printk(timeout_msg, filename,__FUNCTION__,(lineno))
 
-static const char *invalid_pcb_msg =
+static const char invalid_pcb_msg[] =
 "*** invalid pcb length %d at %s:%s (line %d) ***\n";
 #define INVALID_PCB_MSG(len) \
 	printk(invalid_pcb_msg, (len),filename,__FUNCTION__,__LINE__)
@@ -147,10 +156,11 @@ static char couldnot_msg[] __initdata = "%s: 3c505 not found\n";
  *********************************************************/
 
 #ifdef ELP_DEBUG
-static const int elp_debug = ELP_DEBUG;
+static int elp_debug = ELP_DEBUG;
 #else
-static const int elp_debug = 0;
+static int elp_debug;
 #endif
+#define debug elp_debug
 
 /*
  *  0 = no messages (well, some)
@@ -601,15 +611,16 @@ static void receive_packet(struct net_device *dev, int len)
 		printk("%s: memory squeeze, dropping packet\n", dev->name);
 		target = adapter->dma_buffer;
 		adapter->current_dma.target = NULL;
+		return;
+	}
+
+	skb_reserve(skb, 2);
+	target = skb_put(skb, rlen);
+	if ((unsigned long)(target + rlen) >= MAX_DMA_ADDRESS) {
+		adapter->current_dma.target = target;
+		target = adapter->dma_buffer;
 	} else {
-		skb_reserve(skb, 2);
-		target = skb_put(skb, rlen);
-		if (virt_to_bus(target + rlen) >= MAX_DMA_ADDRESS) {
-			adapter->current_dma.target = target;
-			target = adapter->dma_buffer;
-		} else {
-			adapter->current_dma.target = NULL;
-		}
+		adapter->current_dma.target = NULL;
 	}
 
 	/* if this happens, we die */
@@ -689,6 +700,7 @@ static void elp_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 					skb->protocol = eth_type_trans(skb,dev);
 					adapter->stats.rx_bytes += skb->len;
 					netif_rx(skb);
+					dev->last_rx = jiffies;
 				}
 			}
 			adapter->dmaing = 0;
@@ -1024,10 +1036,13 @@ static int send_packet(struct net_device *dev, struct sk_buff *skb)
 	adapter->current_dma.direction = 1;
 	adapter->current_dma.start_time = jiffies;
 
-	target = virt_to_bus(skb->data);
-	if ((target + nlen) >= MAX_DMA_ADDRESS) {
-		memcpy(adapter->dma_buffer, skb->data, nlen);
+	if ((unsigned long)(skb->data + nlen) >= MAX_DMA_ADDRESS || nlen != skb->len) {
+		memcpy(adapter->dma_buffer, skb->data, skb->len);
+		memset(adapter->dma_buffer+skb->len, 0, nlen-skb->len);
 		target = virt_to_bus(adapter->dma_buffer);
+	}
+	else {
+		target = virt_to_bus(skb->data);
 	}
 	adapter->current_dma.skb = skb;
 
@@ -1255,6 +1270,31 @@ static void elp_set_mc_list(struct net_device *dev)
 	}
 }
 
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+};
+
 /******************************************************
  *
  * initialise Etherlink Plus board
@@ -1275,6 +1315,7 @@ static inline void elp_init(struct net_device *dev)
 	dev->tx_timeout = elp_timeout;			/* local */
 	dev->watchdog_timeo = 10*HZ;
 	dev->set_multicast_list = elp_set_mc_list;	/* local */
+	dev->ethtool_ops = &netdev_ethtool_ops;		/* local */
 
 	/* Setup the generic properties */
 	ether_setup(dev);
@@ -1301,7 +1342,7 @@ static int __init elp_sense(struct net_device *dev)
 	int timeout;
 	int addr = dev->base_addr;
 	const char *name = dev->name;
-	long flags;
+	unsigned long flags;
 	byte orig_HSR;
 
 	if (!request_region(addr, ELP_IO_EXTENT, "3c505"))
@@ -1619,6 +1660,9 @@ static int dma[ELP_MAX_CARDS];
 MODULE_PARM(io, "1-" __MODULE_STRING(ELP_MAX_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(ELP_MAX_CARDS) "i");
 MODULE_PARM(dma, "1-" __MODULE_STRING(ELP_MAX_CARDS) "i");
+MODULE_PARM_DESC(io, "EtherLink Plus I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherLink Plus IRQ number(s) (assigned)");
+MODULE_PARM_DESC(dma, "EtherLink Plus DMA channel(s)");
 
 int init_module(void)
 {
@@ -1665,3 +1709,4 @@ void cleanup_module(void)
 }
 
 #endif				/* MODULE */
+MODULE_LICENSE("GPL");

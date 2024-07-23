@@ -11,7 +11,7 @@
  *
  *	Most of this code is directly derived from his userspace driver.
  *	His driver works so send any reports to alan@redhat.com unless the
- *	userspace driver also doesnt work for you...
+ *	userspace driver also doesn't work for you...
  */
 
 #include <linux/module.h>
@@ -19,7 +19,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
@@ -41,6 +41,7 @@ struct pms_device
 	struct video_picture picture;
 	int height;
 	int width;
+	struct semaphore lock;
 };
 
 struct i2c_info
@@ -64,15 +65,16 @@ static int standard 		= 0;	/* 0 - auto 1 - ntsc 2 - pal 3 - secam */
 static int io_port		=	0x250;
 static int data_port		=	0x251;
 static int mem_base		=	0xC8000;
+static int video_nr             =       -1;
 
 	
 
-extern __inline__ void mvv_write(u8 index, u8 value)
+static inline void mvv_write(u8 index, u8 value)
 {
 	outw(index|(value<<8), io_port);
 }
 
-extern __inline__ u8 mvv_read(u8 index)
+static inline u8 mvv_read(u8 index)
 {
 	outb(index, io_port);
 	return inb(data_port);
@@ -620,7 +622,7 @@ static void pms_vcrinput(short input)
 }
 
 
-static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
+static int pms_capture(struct pms_device *dev, char *buf, int rgb555, unsigned long count)
 {
 	int y;
 	int dw = 2*dev->width;
@@ -672,13 +674,11 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
 
 static int pms_open(struct video_device *dev, int flags)
 {
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void pms_close(struct video_device *dev)
 {
-	MOD_DEC_USE_COUNT;
 }
 
 static long pms_write(struct video_device *v, const char *buf, unsigned long count, int noblock)
@@ -740,8 +740,10 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				return -EFAULT;
 			if(v<0 || v>3)
 				return -EINVAL;
+			down(&pd->lock);		
 			pms_videosource(v&1);
 			pms_vcrinput(v>>1);
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCGTUNER:
@@ -781,6 +783,7 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				return -EFAULT;
 			if(v.tuner)
 				return -EINVAL;
+			down(&pd->lock);
 			switch(v.mode)
 			{
 				case VIDEO_MODE_AUTO:
@@ -804,8 +807,10 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 					pms_format(2);
 					break;
 				default:
+					up(&pd->lock);
 					return -EINVAL;
 			}
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCGPICT:
@@ -829,10 +834,12 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			 *	Now load the card.
 			 */
 
+			down(&pd->lock);
 			pms_brightness(p.brightness>>8);
 			pms_hue(p.hue>>8);
 			pms_colour(p.colour>>8);
 			pms_contrast(p.contrast>>8);	
+			up(&pd->lock);
 			return 0;
 		}
 		case VIDIOCSWIN:
@@ -850,8 +857,9 @@ static int pms_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				return -EINVAL;
 			pd->width=vw.width;
 			pd->height=vw.height;
+			down(&pd->lock);
 			pms_resolution(pd->width, pd->height);
-			/* Ok we figured out what to use from our wide choice */
+			up(&pd->lock);			/* Ok we figured out what to use from our wide choice */
 			return 0;
 		}
 		case VIDIOCGWIN:
@@ -894,14 +902,16 @@ static long pms_read(struct video_device *v, char *buf, unsigned long count,  in
 	struct pms_device *pd=(struct pms_device *)v;
 	int len;
 	
-	/* FIXME: semaphore this */
+	down(&pd->lock);
 	len=pms_capture(pd, buf, (pd->picture.depth==16)?0:1,count);
+	up(&pd->lock);
 	return len;
 }
 
  
 struct video_device pms_template=
 {
+	owner:		THIS_MODULE,
 	name:		"Mediavision PMS",
 	type:		VID_TYPE_CAPTURE,
 	hardware:	VID_HARDWARE_PMS,
@@ -935,14 +945,15 @@ static int init_mediavision(void)
 		0xE4
 	};
 	
-	if(check_region(0x9A01,1))
+	if (!request_region(0x9A01, 1, "Mediavision PMS config"))
 	{
 		printk(KERN_WARNING "mediavision: unable to detect: 0x9A01 in use.\n");
 		return -EBUSY;
 	}
-	if(check_region(io_port,3))
+	if (!request_region(io_port, 3, "Mediavision PMS"))
 	{
 		printk(KERN_WARNING "mediavision: I/O port %d in use.\n", io_port);
+		release_region(0x9A01, 1);
 		return -EBUSY;
 	}
 	outb(0xB8, 0x9A01);		/* Unlock */
@@ -961,16 +972,16 @@ static int init_mediavision(void)
 	else 
 		idec=0;
 
-	printk(KERN_INFO "PMS type is %d\n", idec);		
-	if(idec==0)
-		return -ENODEV;	
+	printk(KERN_INFO "PMS type is %d\n", idec);
+	if(idec == 0) {
+		release_region(io_port, 3);
+		release_region(0x9A01, 1);
+		return -ENODEV;
+	}
 
 	/*
 	 *	Ok we have a PMS of some sort
 	 */
-	 
-	request_region(io_port,3, "Mediavision PMS");
-	request_region(0x9A01, 1, "Mediavision PMS config");
 	
 	mvv_write(0x04, mem_base>>12);	/* Set the memory area */
 	
@@ -1036,15 +1047,19 @@ static int __init init_pms_cards(void)
 		return -ENODEV;
 	}
 	memcpy(&pms_device, &pms_template, sizeof(pms_template));
+	init_MUTEX(&pms_device.lock);
 	pms_device.height=240;
 	pms_device.width=320;
 	pms_swsense(75);
 	pms_resolution(320,240);
-	return video_register_device((struct video_device *)&pms_device, VFL_TYPE_GRABBER);
+	return video_register_device((struct video_device *)&pms_device, VFL_TYPE_GRABBER, video_nr);
 }
 
 MODULE_PARM(io_port,"i");
 MODULE_PARM(mem_base,"i");
+MODULE_PARM(video_nr,"i");
+MODULE_LICENSE("GPL");
+
 
 static void __exit shutdown_mediavision(void)
 {

@@ -1,6 +1,6 @@
 /* 
         dstr.c    (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                              Under the terms of the GNU public license.
+                              Under the terms of the GNU General Public License.
 
         dstr.c is a low-level protocol driver for the 
         DataStor EP2000 parallel to IDE adapter chip.
@@ -242,3 +242,4 @@ void    cleanup_module(void)
 #endif
 
 /* end of dstr.c */
+MODULE_LICENSE("GPL");

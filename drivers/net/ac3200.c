@@ -3,11 +3,13 @@
 	Written 1993, 1994 by Donald Becker.
 	Copyright 1993 United States Government as represented by the Director,
 	National Security Agency.  This software may only be used and distributed
-	according to the terms of the GNU Public License as modified by SRC,
+	according to the terms of the GNU General Public License as modified by SRC,
 	incorporated herein by reference.
 
-	The author may be reached as becker@cesdis.gsfc.nasa.gov, or
-	C/O Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is driver for the Ansel Communications Model 3200 EISA Ethernet LAN
 	Adapter.  The programming information is from the users manual, as related
@@ -19,7 +21,7 @@
 
   */
 
-static const char *version =
+static const char version[] =
 	"ac3200.c:v1.01 7/1/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -344,6 +346,11 @@ static int mem[MAX_AC32_CARDS];
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base adress(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, "Memory base address(es)");
+MODULE_DESCRIPTION("Ansel AC3200 EISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 int
 init_module(void)
@@ -390,6 +397,7 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+
 
 /*
  * Local variables:

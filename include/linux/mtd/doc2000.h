@@ -2,7 +2,7 @@
 /* Linux driver for Disk-On-Chip 2000       */
 /* (c) 1999 Machine Vision Holdings, Inc.   */
 /* Author: David Woodhouse <dwmw2@mvhi.com> */
-/* $Id: doc2000.h,v 1.12 2000/11/03 12:43:43 dwmw2 Exp $ */
+/* $Id: doc2000.h,v 1.15 2001/09/19 00:22:15 dwmw2 Exp $ */
 
 #ifndef __MTD_DOC2000_H__
 #define __MTD_DOC2000_H__
@@ -43,18 +43,22 @@
  * On PPC, it's mmap'd and 16-bit wide.
  * Others use readb/writeb 
  */
-#if defined(__arm__) 
-#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u32 *)(((unsigned long)adr)+(reg<<2))))
-#define WriteDOC_(d, adr, reg)  do{ *(__u32 *)(((unsigned long)adr)+(reg<<2)) = (__u32)d} while(0)
+#if defined(__arm__)
+#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u32 *)(((unsigned long)adr)+((reg)<<2))))
+#define WriteDOC_(d, adr, reg)  do{ *(__u32 *)(((unsigned long)adr)+((reg)<<2)) = (__u32)d; wmb();} while(0)
+#define DOC_IOREMAP_LEN 0x8000
 #elif defined(__ppc__)
-#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u16 *)(((unsigned long)adr)+(reg<<1))))
-#define WriteDOC_(d, adr, reg)  do{ *(__u16 *)(((unsigned long)adr)+(reg<<1)) = (__u16)d} while(0)
+#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u16 *)(((unsigned long)adr)+((reg)<<1))))
+#define WriteDOC_(d, adr, reg)  do{ *(__u16 *)(((unsigned long)adr)+((reg)<<1)) = (__u16)d; wmb();} while(0)
+#define DOC_IOREMAP_LEN 0x4000
 #else
-#define ReadDOC_(adr, reg)      readb(((unsigned long)adr) + reg)
-#define WriteDOC_(d, adr, reg)  writeb(d, ((unsigned long)adr) + reg)
+#define ReadDOC_(adr, reg)      readb(((unsigned long)adr) + (reg))
+#define WriteDOC_(d, adr, reg)  writeb(d, ((unsigned long)adr) + (reg))
+#define DOC_IOREMAP_LEN 0x2000
+
 #endif
 
-#if defined(__i386__)
+#if defined(__i386__) || defined(__x86_64__)
 #define USE_MEMCPY
 #endif
 
@@ -130,6 +134,7 @@ struct DiskOnChip {
 	int numchips;
 	struct Nand *chips;
 	struct mtd_info *nextdoc;
+	struct semaphore lock;
 };
 
 int doc_decode_ecc(unsigned char sector[512], unsigned char ecc1[6]);

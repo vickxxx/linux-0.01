@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.118 2000/12/29 07:52:41 anton Exp $
+/* $Id: fault.c,v 1.122 2001/11/17 07:19:26 davem Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -36,8 +36,6 @@
 
 extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
 extern int prom_node_root;
-
-struct linux_romvec *romvec;
 
 /* At boot time we determine these two values necessary for setting
  * up the segment maps and page table entries (pte's).
@@ -141,7 +139,7 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 {
 	if((unsigned long) address < PAGE_SIZE) {
 		printk(KERN_ALERT "Unable to handle kernel NULL "
-		       "pointer dereference");
+		       "pointer dereference\n");
 	} else {
 		printk(KERN_ALERT "Unable to handle kernel paging request "
 		       "at virtual address %08lx\n", address);
@@ -157,36 +155,68 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 asmlinkage int lookup_fault(unsigned long pc, unsigned long ret_pc, 
 			    unsigned long address)
 {
-	unsigned long g2;
-	int i;
-	unsigned insn;
 	struct pt_regs regs;
+	unsigned long g2;
+	unsigned int insn;
+	int i;
 	
-	i = search_exception_table (ret_pc, &g2);
+	i = search_exception_table(ret_pc, &g2);
 	switch (i) {
-	/* load & store will be handled by fixup */
-	case 3: return 3;
-	/* store will be handled by fixup, load will bump out */
-	/* for _to_ macros */
-	case 1: insn = (unsigned)pc; if ((insn >> 21) & 1) return 1; break;
-	/* load will be handled by fixup, store will bump out */
-	/* for _from_ macros */
-	case 2: insn = (unsigned)pc; 
-		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15) return 2; 
+	case 3:
+		/* load & store will be handled by fixup */
+		return 3;
+
+	case 1:
+		/* store will be handled by fixup, load will bump out */
+		/* for _to_ macros */
+		insn = *((unsigned int *) pc);
+		if ((insn >> 21) & 1)
+			return 1;
+		break;
+
+	case 2:
+		/* load will be handled by fixup, store will bump out */
+		/* for _from_ macros */
+		insn = *((unsigned int *) pc);
+		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15)
+			return 2; 
 		break; 
-	default: break;
-	}
-	memset (&regs, 0, sizeof (regs));
+
+	default:
+		break;
+	};
+
+	memset(&regs, 0, sizeof (regs));
 	regs.pc = pc;
 	regs.npc = pc + 4;
-	__asm__ __volatile__ ("
-		rd %%psr, %0
-		nop
-		nop
-		nop" : "=r" (regs.psr));
-	unhandled_fault (address, current, &regs);
+	__asm__ __volatile__(
+		"rd %%psr, %0\n\t"
+		"nop\n\t"
+		"nop\n\t"
+		"nop\n" : "=r" (regs.psr));
+	unhandled_fault(address, current, &regs);
+
 	/* Not reached */
 	return 0;
+}
+
+extern unsigned long safe_compute_effective_address(struct pt_regs *,
+						    unsigned int);
+
+static unsigned long compute_si_addr(struct pt_regs *regs, int text_fault)
+{
+	unsigned int insn;
+
+	if (text_fault)
+		return regs->pc;
+
+	if (regs->psr & PSR_PS) {
+		insn = *(unsigned int *) regs->pc;
+	} else {
+		__get_user(insn, (unsigned int *) regs->pc);
+	}
+
+	return safe_compute_effective_address(regs, insn);
 }
 
 asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
@@ -224,7 +254,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
         if (in_interrupt() || !mm)
                 goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	/*
 	 * The kernel referencing a bad kernel pointer can lock up
@@ -274,7 +304,7 @@ good_area:
 	default:
 		goto out_of_memory;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 	/*
@@ -282,7 +312,7 @@ good_area:
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
@@ -295,7 +325,7 @@ bad_area_nosemaphore:
 		info.si_errno = 0;
 		/* info.si_code set above to make clear whether
 		   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
-		info.si_addr = (void *)address;
+		info.si_addr = (void *) compute_si_addr(regs, text_fault);
 		info.si_trapno = 0;
 		force_sig_info (SIGSEGV, &info, tsk);
 		return;
@@ -338,18 +368,18 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (from_user)
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
-	info.si_addr = (void *)address;
+	info.si_addr = (void *) compute_si_addr(regs, text_fault);
 	info.si_trapno = 0;
 	force_sig_info (SIGBUS, &info, tsk);
 	if (!from_user)
@@ -479,7 +509,7 @@ inline void force_user_fault(unsigned long address, int write)
 	printk("wf<pid=%d,wr=%d,addr=%08lx>\n",
 	       tsk->pid, write, address);
 #endif
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if(!vma)
 		goto bad_area;
@@ -500,10 +530,10 @@ good_area:
 	}
 	if (!handle_mm_fault(mm, vma, address, write))
 		goto do_sigbus;
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 #if 0
 	printk("Window whee %s [%d]: segfaults at %08lx\n",
 	       tsk->comm, tsk->pid, address);
@@ -512,17 +542,17 @@ bad_area:
 	info.si_errno = 0;
 	/* info.si_code set above to make clear whether
 	   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
-	info.si_addr = (void *)address;
+	info.si_addr = (void *) address;
 	info.si_trapno = 0;
 	force_sig_info (SIGSEGV, &info, tsk);
 	return;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
-	info.si_addr = (void *)address;
+	info.si_addr = (void *) address;
 	info.si_trapno = 0;
 	force_sig_info (SIGBUS, &info, tsk);
 }

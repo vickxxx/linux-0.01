@@ -12,7 +12,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/setup.h>
@@ -71,7 +71,7 @@ static struct vm_struct *get_io_area(unsigned long size)
 		addr = tmp->size + (unsigned long)tmp->addr;
 	}
 	area->addr = (void *)addr;
-	area->size = size + IO_SIZE;
+	area->size = size + IO_SIZE;	/* leave a gap between */
 	area->next = *p;
 	*p = area;
 	return area;
@@ -87,7 +87,10 @@ static inline void free_io_area(void *addr)
 	for (p = &iolist ; (tmp = *p) ; p = &tmp->next) {
 		if (tmp->addr == addr) {
 			*p = tmp->next;
-			__iounmap(tmp->addr, tmp->size);
+			if ( tmp->size > IO_SIZE )
+				__iounmap(tmp->addr, tmp->size - IO_SIZE);
+			else
+				printk("free_io_area: Invalid I/O area size %lu\n", tmp->size);
 			kfree(tmp);
 			return;
 		}

@@ -91,7 +91,7 @@ struct smc_mca_adapters_t {
 	char *name;
 };
 
-static const struct smc_mca_adapters_t smc_mca_adapters[] = {
+static struct smc_mca_adapters_t smc_mca_adapters[] __initdata = {
     { 0x61c8, "SMC Ethercard PLUS Elite/A BNC/AUI (WD8013EP/A)" },
     { 0x61c9, "SMC Ethercard PLUS Elite/A UTP/AUI (WD8013WP/A)" },
     { 0x6fc0, "WD Ethercard PLUS/A (WD8003E/A or WD8003ET/A)" },
@@ -213,7 +213,7 @@ int __init ultramca_probe(struct net_device *dev)
 	dev->mem_start = 0;
 	num_pages      = 40;
 
-	switch (j) {	/* 'j' = card-# in const array above [hs] */
+	switch (adapter) {	/* card-# in const array above [hs] */
 		case _61c8_SMC_Ethercard_PLUS_Elite_A_BNC_AUI_WD8013EP_A:
 		case _61c9_SMC_Ethercard_PLUS_Elite_A_UTP_AUI_WD8013EP_A:
 		{
@@ -373,9 +373,9 @@ static void ultramca_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *
 
 #ifdef notdef
 	/* Officially this is what we are doing, but the readl() is faster */
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 #else
-	((unsigned int*)hdr)[0] = readl(hdr_start);
+	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
 }
 
@@ -390,12 +390,12 @@ static void ultramca_block_input(struct net_device *dev, int count, struct sk_bu
 	if (xfer_start + count > dev->rmem_end) {
 		/* We must wrap the input move. */
 		int semi_count = dev->rmem_end - xfer_start;
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
 	}
 
 }
@@ -405,7 +405,7 @@ static void ultramca_block_output(struct net_device *dev, int count, const unsig
 {
 	unsigned long shmem = dev->mem_start + ((start_page - START_PG) << 8);
 
-	memcpy_toio(shmem, buf, count);
+	isa_memcpy_toio(shmem, buf, count);
 }
 
 static int ultramca_close_card(struct net_device *dev)
@@ -437,9 +437,12 @@ static int ultramca_close_card(struct net_device *dev)
 static struct net_device dev_ultra[MAX_ULTRAMCA_CARDS];
 static int io[MAX_ULTRAMCA_CARDS];
 static int irq[MAX_ULTRAMCA_CARDS];
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ULTRAMCA_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ULTRAMCA_CARDS) "i");
+MODULE_PARM_DESC(io, "SMC Ultra/EtherEZ MCA I/O base address(es)");
+MODULE_PARM_DESC(irq, "SMC Ultra/EtherEZ MCA IRQ number(s)");
 
 int init_module(void)
 {

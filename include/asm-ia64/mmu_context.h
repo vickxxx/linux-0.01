@@ -2,34 +2,29 @@
 #define _ASM_IA64_MMU_CONTEXT_H
 
 /*
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
+
+/*
+ * Routines to manage the allocation of task context numbers.  Task context numbers are
+ * used to reduce or eliminate the need to perform TLB flushes due to context switches.
+ * Context numbers are implemented using ia-64 region ids.  Since the IA-64 TLB does not
+ * consider the region number when performing a TLB lookup, we need to assign a unique
+ * region id to each region in a process.  We use the least significant three bits in a
+ * region id for this purpose.
+ */
+
+#define IA64_REGION_ID_KERNEL	0 /* the kernel's region id (tlb.c depends on this being 0) */
+
+#define ia64_rid(ctx,addr)	(((ctx) << 3) | (addr >> 61))
+
+# ifndef __ASSEMBLY__
 
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 
 #include <asm/processor.h>
-
-/*
- * Routines to manage the allocation of task context numbers.  Task
- * context numbers are used to reduce or eliminate the need to perform
- * TLB flushes due to context switches.  Context numbers are
- * implemented using ia-64 region ids.  Since ia-64 TLBs do not
- * guarantee that the region number is checked when performing a TLB
- * lookup, we need to assign a unique region id to each region in a
- * process.  We use the least significant three bits in a region id
- * for this purpose.  On processors where the region number is checked
- * in TLB lookups, we can get back those two bits by defining
- * CONFIG_IA64_TLB_CHECKS_REGION_NUMBER.  The macro
- * IA64_REGION_ID_BITS gives the number of bits in a region id.  The
- * architecture manual guarantees this number to be in the range
- * 18-24.
- *
- * Copyright (C) 1998 David Mosberger-Tang <davidm@hpl.hp.com>
- */
-
-#define IA64_REGION_ID_KERNEL	0 /* the kernel's region id (tlb.c depends on this being 0) */
 
 struct ia64_ctx {
 	spinlock_t lock;
@@ -47,33 +42,50 @@ enter_lazy_tlb (struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
 {
 }
 
-static inline unsigned long
-ia64_rid (unsigned long context, unsigned long region_addr)
-{
-	return context << 3 | (region_addr >> 61);
-}
-
+/*
+ * When the context counter wraps around all TLBs need to be flushed because an old
+ * context number might have been reused. This is signalled by the ia64_need_tlb_flush
+ * per-CPU variable, which is checked in the routine below. Called by activate_mm().
+ * <efocht@ess.nec.de>
+ */
 static inline void
-get_new_mmu_context (struct mm_struct *mm)
+delayed_tlb_flush (void)
 {
-	spin_lock(&ia64_ctx.lock);
-	{
-		if (ia64_ctx.next >= ia64_ctx.limit)
-			wrap_mmu_context(mm);
-		mm->context = ia64_ctx.next++;
+	extern void local_flush_tlb_all (void);
+
+	if (unlikely(local_cpu_data->need_tlb_flush)) {
+		local_flush_tlb_all();
+		local_cpu_data->need_tlb_flush = 0;
 	}
-	spin_unlock(&ia64_ctx.lock);
-
 }
 
-static inline void
+static inline mm_context_t
 get_mmu_context (struct mm_struct *mm)
 {
-	/* check if our ASN is of an older generation and thus invalid: */
-	if (mm->context == 0)
-		get_new_mmu_context(mm);
+	unsigned long flags;
+	mm_context_t context = mm->context;
+
+	if (context)
+		return context;
+
+	spin_lock_irqsave(&ia64_ctx.lock, flags);
+	{
+		/* re-check, now that we've got the lock: */
+		context = mm->context;
+		if (context == 0) {
+			if (ia64_ctx.next >= ia64_ctx.limit)
+				wrap_mmu_context(mm);
+			mm->context = context = ia64_ctx.next++;
+		}
+	}
+	spin_unlock_irqrestore(&ia64_ctx.lock, flags);
+	return context;
 }
 
+/*
+ * Initialize context number to some sane value.  MM is guaranteed to be a brand-new
+ * address-space, so no TLB flushing is needed, ever.
+ */
 static inline int
 init_new_context (struct task_struct *p, struct mm_struct *mm)
 {
@@ -88,13 +100,13 @@ destroy_context (struct mm_struct *mm)
 }
 
 static inline void
-reload_context (struct mm_struct *mm)
+reload_context (mm_context_t context)
 {
 	unsigned long rid;
 	unsigned long rid_incr = 0;
 	unsigned long rr0, rr1, rr2, rr3, rr4;
 
-	rid = mm->context << 3;	/* make space for encoding the region number */
+	rid = context << 3;	/* make space for encoding the region number */
 	rid_incr = 1 << 8;
 
 	/* encode the region id, preferred page size, and VHPT enable bit: */
@@ -103,6 +115,10 @@ reload_context (struct mm_struct *mm)
 	rr2 = rr0 + 2*rid_incr;
 	rr3 = rr0 + 3*rid_incr;
 	rr4 = rr0 + 4*rid_incr;
+#ifdef  CONFIG_HUGETLB_PAGE
+	rr4 = (rr4 & (~(0xfcUL))) | (HPAGE_SHIFT << 2);
+#endif
+
 	ia64_set_rr(0x0000000000000000, rr0);
 	ia64_set_rr(0x2000000000000000, rr1);
 	ia64_set_rr(0x4000000000000000, rr2);
@@ -113,21 +129,35 @@ reload_context (struct mm_struct *mm)
 	ia64_insn_group_barrier();
 }
 
+static inline void
+activate_context (struct mm_struct *mm)
+{
+	mm_context_t context;
+
+	do {
+		context = get_mmu_context(mm);
+		reload_context(context);
+		/* in the unlikely event of a TLB-flush by another thread, redo the load: */
+	} while (unlikely(context != mm->context));
+}
+
 /*
  * Switch from address space PREV to address space NEXT.
  */
 static inline void
 activate_mm (struct mm_struct *prev, struct mm_struct *next)
 {
+	delayed_tlb_flush();
+
 	/*
-	 * We may get interrupts here, but that's OK because interrupt
-	 * handlers cannot touch user-space.
+	 * We may get interrupts here, but that's OK because interrupt handlers cannot
+	 * touch user-space.
 	 */
-	__asm__ __volatile__ ("mov ar.k7=%0" :: "r"(__pa(next->pgd)));
-	get_mmu_context(next);
-	reload_context(next);
+	ia64_set_kr(IA64_KR_PT_BASE, __pa(next->pgd));
+	activate_context(next);
 }
 
 #define switch_mm(prev_mm,next_mm,next_task,cpu)	activate_mm(prev_mm, next_mm)
 
+# endif /* ! __ASSEMBLY__ */
 #endif /* _ASM_IA64_MMU_CONTEXT_H */

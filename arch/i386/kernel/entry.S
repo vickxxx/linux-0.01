@@ -44,7 +44,6 @@
 #include <linux/sys.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
-#define ASSEMBLY
 #include <asm/smp.h>
 
 EBX		= 0x00
@@ -64,7 +63,9 @@ OLDESP		= 0x34
 OLDSS		= 0x38
 
 CF_MASK		= 0x00000001
+TF_MASK		= 0x00000100
 IF_MASK		= 0x00000200
+DF_MASK		= 0x00000400
 NT_MASK		= 0x00004000
 VM_MASK		= 0x00020000
 
@@ -141,6 +142,9 @@ ENTRY(lcall7)
 	movl CS(%esp),%edx	# this is eip..
 	movl EFLAGS(%esp),%ecx	# and this is cs..
 	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%ebx
@@ -162,6 +166,9 @@ ENTRY(lcall27)
 	movl CS(%esp),%edx	# this is eip..
 	movl EFLAGS(%esp),%ecx	# and this is cs..
 	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%ebx
@@ -196,25 +203,14 @@ ENTRY(system_call)
 	pushl %eax			# save orig_eax
 	SAVE_ALL
 	GET_CURRENT(%ebx)
-	cmpl $(NR_syscalls),%eax
-	jae badsys
 	testb $0x02,tsk_ptrace(%ebx)	# PT_TRACESYS
 	jne tracesys
+	cmpl $(NR_syscalls),%eax
+	jae badsys
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
 ENTRY(ret_from_sys_call)
-#ifdef CONFIG_SMP
-	movl processor(%ebx),%eax
-	shll $CONFIG_X86_L1_CACHE_SHIFT,%eax
-	movl SYMBOL_NAME(irq_stat)(,%eax),%ecx		# softirq_active
-	testl SYMBOL_NAME(irq_stat)+4(,%eax),%ecx	# softirq_mask
-#else
-	movl SYMBOL_NAME(irq_stat),%ecx		# softirq_active
-	testl SYMBOL_NAME(irq_stat)+4,%ecx	# softirq_mask
-#endif
-	jne   handle_softirq
-	
-ret_with_reschedule:
+	cli				# need_resched and signals atomic test
 	cmpl $0,need_resched(%ebx)
 	jne reschedule
 	cmpl $0,sigpending(%ebx)
@@ -257,32 +253,15 @@ badsys:
 	jmp ret_from_sys_call
 
 	ALIGN
-ret_from_exception:
-#ifdef CONFIG_SMP
-	GET_CURRENT(%ebx)
-	movl processor(%ebx),%eax
-	shll $CONFIG_X86_L1_CACHE_SHIFT,%eax
-	movl SYMBOL_NAME(irq_stat)(,%eax),%ecx		# softirq_active
-	testl SYMBOL_NAME(irq_stat)+4(,%eax),%ecx	# softirq_mask
-#else
-	movl SYMBOL_NAME(irq_stat),%ecx		# softirq_active
-	testl SYMBOL_NAME(irq_stat)+4,%ecx	# softirq_mask
-#endif
-	jne   handle_softirq
-
 ENTRY(ret_from_intr)
 	GET_CURRENT(%ebx)
+ret_from_exception:
 	movl EFLAGS(%esp),%eax		# mix EFLAGS and CS
 	movb CS(%esp),%al
 	testl $(VM_MASK | 3),%eax	# return to VM86 mode or non-supervisor?
-	jne ret_with_reschedule
+	jne ret_from_sys_call
 	jmp restore_all
 
-	ALIGN
-handle_softirq:
-	call SYMBOL_NAME(do_softirq)
-	jmp ret_from_intr
-	
 	ALIGN
 reschedule:
 	call SYMBOL_NAME(schedule)    # test
@@ -334,14 +313,16 @@ ENTRY(device_not_available)
 	pushl $-1		# mark this as an int
 	SAVE_ALL
 	GET_CURRENT(%ebx)
-	pushl $ret_from_exception
 	movl %cr0,%eax
 	testl $0x4,%eax			# EM (math emulation bit)
-	je SYMBOL_NAME(math_state_restore)
+	jne device_not_available_emulate
+	call SYMBOL_NAME(math_state_restore)
+	jmp ret_from_exception
+device_not_available_emulate:
 	pushl $0		# temporary storage for ORIG_EIP
 	call  SYMBOL_NAME(math_emulate)
 	addl $4,%esp
-	ret
+	jmp ret_from_exception
 
 ENTRY(debug)
 	pushl $0
@@ -646,13 +627,43 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_getdents64)	/* 220 */
 	.long SYMBOL_NAME(sys_fcntl64)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for TUX */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* Reserved for Security */
+	.long SYMBOL_NAME(sys_gettid)
+	.long SYMBOL_NAME(sys_readahead)	/* 225 */
+	.long SYMBOL_NAME(sys_setxattr)
+	.long SYMBOL_NAME(sys_lsetxattr)
+	.long SYMBOL_NAME(sys_fsetxattr)
+	.long SYMBOL_NAME(sys_getxattr)
+	.long SYMBOL_NAME(sys_lgetxattr)	/* 230 */
+	.long SYMBOL_NAME(sys_fgetxattr)
+	.long SYMBOL_NAME(sys_listxattr)
+	.long SYMBOL_NAME(sys_llistxattr)
+	.long SYMBOL_NAME(sys_flistxattr)
+	.long SYMBOL_NAME(sys_removexattr)	/* 235 */
+	.long SYMBOL_NAME(sys_lremovexattr)
+	.long SYMBOL_NAME(sys_fremovexattr)
+ 	.long SYMBOL_NAME(sys_tkill)
+	.long SYMBOL_NAME(sys_sendfile64)
+	.long SYMBOL_NAME(sys_ni_syscall)	/* 240 reserved for futex */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_setaffinity */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_getaffinity */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_set_thread_area */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_get_thread_area */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* 245 sys_io_setup */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_destroy */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_getevents */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_submit */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_cancel */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* 250 sys_alloc_hugepages */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_free_hugepages */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_exit_group */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_lookup_dcookie */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_create */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_ctl 255 */
+	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_wait */
+ 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_remap_file_pages */
+ 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_set_tid_address */
 
-	/*
-	 * NOTE!! This doesn't have to be exact - we just have
-	 * to make sure we have _enough_ of the "sys_ni_syscall"
-	 * entries. Don't panic if you notice that this hasn't
-	 * been shrunk every time we add a new system call.
-	 */
-	.rept NR_syscalls-221
+	.rept NR_syscalls-(.-sys_call_table)/4
 		.long SYMBOL_NAME(sys_ni_syscall)
 	.endr

@@ -2,7 +2,7 @@
     Copyright 1994 Digital Equipment Corporation.
 
     This software may be used and distributed according to  the terms of the
-    GNU Public License, incorporated herein by reference.
+    GNU General Public License, incorporated herein by reference.
 
     The author may    be  reached as davies@wanton.lkg.dec.com  or   Digital
     Equipment Corporation, 550 King Street, Littleton MA 01460.
@@ -287,7 +287,7 @@
 #define STS_LNF    0x00001000       /* Link Fail */
 #define STS_FD     0x00000800       /* Full-Duplex Short Frame Received */
 #define STS_TM     0x00000800       /* Timer Expired (DC21041) */
-#define STS_ETI    0x00000400       /* Early Transmit Interupt */
+#define STS_ETI    0x00000400       /* Early Transmit Interrupt */
 #define STS_AT     0x00000400       /* AUI/TP Pin */
 #define STS_RWT    0x00000200       /* Receive Watchdog Time-Out */
 #define STS_RPS    0x00000100       /* Receive Process Stopped */

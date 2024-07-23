@@ -1,4 +1,3 @@
-
 /*
  **********************************************************************
  *     irqmgr.c - IRQ manager for emu10k1 driver
@@ -41,10 +40,7 @@
 void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct emu10k1_card *card = (struct emu10k1_card *) dev_id;
-	u32 irqstatus, tmp;
-
-	if (!(irqstatus = emu10k1_readfn0(card, IPR)))
-		return;
+	u32 irqstatus, irqstatus_tmp;
 
 	DPD(4, "emu10k1_interrupt called, irq =  %u\n", irq);
 
@@ -60,14 +56,19 @@ void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 ** - Eric
 	 */
 
-	do {
-		DPD(4, "irq status %x\n", irqstatus);
+	while ((irqstatus = inl(card->iobase + IPR))) {
+		DPD(4, "irq status %#x\n", irqstatus);
 
-		tmp = irqstatus;
+		irqstatus_tmp = irqstatus;
 
 		if (irqstatus & IRQTYPE_TIMER) {
 			emu10k1_timer_irqhandler(card);
 			irqstatus &= ~IRQTYPE_TIMER;
+		}
+
+		if (irqstatus & IRQTYPE_DSP) {
+			emu10k1_dsp_irqhandler(card);
+			irqstatus &= ~IRQTYPE_DSP;
 		}
 
 		if (irqstatus & IRQTYPE_MPUIN) {
@@ -80,13 +81,30 @@ void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			irqstatus &= ~IRQTYPE_MPUOUT;
 		}
 
-		if (irqstatus)
-			emu10k1_irq_disable(card, irqstatus);
+		if (irqstatus & IPR_MUTE) {
+			emu10k1_mute_irqhandler(card);
+			irqstatus &=~IPR_MUTE;
+		}
 
-		emu10k1_writefn0(card, IPR, tmp);
+		if (irqstatus & IPR_VOLINCR) {
+			emu10k1_volincr_irqhandler(card);
+			irqstatus &=~IPR_VOLINCR;
+		}
 
-	} while ((irqstatus = emu10k1_readfn0(card, IPR)));
+		if (irqstatus & IPR_VOLDECR) {
+			emu10k1_voldecr_irqhandler(card);
+			irqstatus &=~IPR_VOLDECR;
+		}
 
-	return;
+		if (irqstatus){
+			printk(KERN_ERR "emu10k1: Warning, unhandled interrupt: %#08x\n", irqstatus);
+			//make sure any interrupts we don't handle are disabled:
+			emu10k1_irq_disable(card, ~(INTE_MIDIRXENABLE | INTE_MIDITXENABLE | INTE_INTERVALTIMERENB |
+						INTE_VOLDECRENABLE | INTE_VOLINCRENABLE | INTE_MUTEENABLE |
+						INTE_FXDSPENABLE));
+		}
+
+		/* acknowledge interrupt */
+                outl(irqstatus_tmp, card->iobase + IPR);
+	}
 }
-

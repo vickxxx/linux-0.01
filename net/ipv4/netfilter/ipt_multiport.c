@@ -78,7 +78,7 @@ checkentry(const char *tablename,
 
 	/* Must specify proto == TCP/UDP, no unknown flags or bad count */
 	return (ip->proto == IPPROTO_TCP || ip->proto == IPPROTO_UDP)
-		&& !(ip->flags & IPT_INV_PROTO)
+		&& !(ip->invflags & IPT_INV_PROTO)
 		&& matchsize == IPT_ALIGN(sizeof(struct ipt_multiport))
 		&& (multiinfo->flags == IPT_MULTIPORT_SOURCE
 		    || multiinfo->flags == IPT_MULTIPORT_DESTINATION
@@ -101,3 +101,4 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

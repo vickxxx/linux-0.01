@@ -1,5 +1,4 @@
-/* $Id: hubmd.h,v 1.1 2000/01/13 00:17:02 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -229,7 +228,7 @@
 #define MSU_SN0_SLOTID_MASK	(UINT64_CAST 7)
 #define MSU_SN00_SLOTID_SHFT	7
 #define MSU_SN00_SLOTID_MASK	(UINT64_CAST 0x80)
-	
+
 #define	MSU_PIMM_PSC_SHFT	4
 #define	MSU_PIMM_PSC_MASK	(0xf << MSU_PIMM_PSC_SHFT)
 
@@ -425,8 +424,7 @@
  * Operations on page migration threshold register
  */
 
-#if _LANGUAGE_C
-#ifndef _STANDALONE
+#ifndef __ASSEMBLY__
 
 /*
  * LED register macros
@@ -538,8 +536,6 @@
 
 #define MD_SPROT_MIGMD_GET(value) ( \
 	((value) & MD_SPROT_MIGMD_MASK) >> MD_SPROT_MIGMD_SHFT)
-
-#endif /* _STANDALONE */
 
 /*
  * Format of dir_error, mem_error, protocol_error and misc_error registers
@@ -740,7 +736,7 @@ typedef union md_perf_cnt {
 } md_perf_cnt_t;
 
 
-#endif /* _LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 
 #define DIR_ERROR_VALID_MASK	0xe000000000000000

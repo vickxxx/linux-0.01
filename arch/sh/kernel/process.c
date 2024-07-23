@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.33 2000/03/25 00:06:15 gniibe Exp $
+/* $Id: process.c,v 1.1.1.1.2.4 2003/05/29 04:21:33 lethal Exp $
  *
  *  linux/arch/sh/kernel/process.c
  *
@@ -11,38 +11,17 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#define __KERNEL_SYSCALLS__
-#include <stdarg.h>
-
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/vmalloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/interrupt.h>
 #include <linux/unistd.h>
-#include <linux/delay.h>
-#include <linux/reboot.h>
-#include <linux/init.h>
+#include <linux/slab.h>
 
-#include <asm/uaccess.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/processor.h>
+#include <asm/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/elf.h>
 
-#include <linux/irq.h>
-
 static int hlt_counter=0;
+
+int ubc_usercnt = 0;
 
 #define HARD_IDLE_TIMEOUT (HZ / 3)
 
@@ -67,11 +46,18 @@ void cpu_idle(void *unused)
 	current->counter = -100;
 
 	while (1) {
-		while (!current->need_resched) {
-			if (hlt_counter)
-				continue;
+		if (hlt_counter) {
+			while (1)
+				if (current->need_resched)
+					break;
+		} else {
+			__cli();
+			while (!current->need_resched) {
+				__sti();
+				asm volatile("sleep" : : : "memory");
+				__cli();
+			}
 			__sti();
-			asm volatile("sleep" : : : "memory");
 		}
 		schedule();
 		check_pgt_cache();
@@ -79,11 +65,16 @@ void cpu_idle(void *unused)
 }
 
 void machine_restart(char * __unused)
-{ /* Need to set MMU_TTB?? */
+{
+	/* SR.BL=1 and invoke address error to let CPU reset (manual reset) */
+	asm volatile("ldc %0, sr\n\t"
+		     "mov.l @%1, %0" : : "r" (0x10000000), "r" (0x80000001));
 }
 
 void machine_halt(void)
 {
+	while (1)
+		asm volatile("sleep" : : : "memory");
 }
 
 void machine_power_off(void)
@@ -93,8 +84,8 @@ void machine_power_off(void)
 void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
-	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08lx\n",
-	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA));
+	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08x    %s\n",
+	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA), print_tainted());
 	printk("R0  : %08lx R1  : %08lx R2  : %08lx R3  : %08lx\n",
 	       regs->regs[0],regs->regs[1],
 	       regs->regs[2],regs->regs[3]);
@@ -129,12 +120,8 @@ void free_task_struct(struct task_struct *p)
 /*
  * This is the mechanism for creating a new kernel thread.
  *
- * NOTE! Only a kernel-only process(ie the swapper or direct descendants
- * who haven't done an "execve()") should use this: it will work within
- * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
  */
-int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {	/* Don't use this in BL=1(cli).  Or else, CPU resets! */
 	register unsigned long __sc0 __asm__ ("r0");
 	register unsigned long __sc3 __asm__ ("r3") = __NR_clone;
@@ -144,12 +131,12 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	register unsigned long __sc9 __asm__ ("r9") = (long) fn;
 
 	__asm__("trapa	#0x12\n\t" 	/* Linux/SH system call */
-		"tst	#0xff, $r0\n\t"	/* child or parent? */
+		"tst	r0, r0\n\t"	/* child or parent? */
 		"bf	1f\n\t"		/* parent - jump */
-		"jsr	@$r9\n\t"	/* call fn */
-		" mov	$r8, $r4\n\t"	/* push argument */
-		"mov	$r0, $r4\n\t"	/* return value to arg of exit */
-		"mov	%1, $r3\n\t"	/* exit */
+		"jsr	@r9\n\t"	/* call fn */
+		" mov	r8, r4\n\t"	/* push argument */
+		"mov	r0, r4\n\t"	/* return value to arg of exit */
+		"mov	%1, r3\n\t"	/* exit */
 		"trapa	#0x11\n"
 		"1:"
 		: "=z" (__sc0)
@@ -164,7 +151,10 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
  */
 void exit_thread(void)
 {
-	/* Nothing to do. */
+	if (current->thread.ubc_pc1) {
+		current->thread.ubc_pc1 = 0;
+		ubc_usercnt -= 1;
+	}
 }
 
 void flush_thread(void)
@@ -195,11 +185,7 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 
 	fpvalid = tsk->used_math;
 	if (fpvalid) {
-		unsigned long flags;
-
-		save_and_cli(flags);
 		unlazy_fpu(tsk);
-		restore_flags(flags);
 		memcpy(fpu, &tsk->thread.fpu.hard, sizeof(*fpu));
 	}
 
@@ -219,15 +205,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 #if defined(__SH4__)
 	struct task_struct *tsk = current;
 
-	if (tsk != &init_task) {
-		unsigned long flags;
-
-		save_and_cli(flags);
-		unlazy_fpu(tsk);
-		restore_flags(flags);
-		p->thread.fpu = current->thread.fpu;
-		p->used_math = tsk->used_math;
-	}
+	unlazy_fpu(tsk);
+	p->thread.fpu = current->thread.fpu;
+	p->used_math = tsk->used_math;
 #endif
 	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long) p)) - 1;
 	*childregs = *regs;
@@ -242,6 +222,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	p->thread.sp = (unsigned long) childregs;
 	p->thread.pc = (unsigned long) ret_from_fork;
+
+	p->thread.ubc_pc1 = 0;
+	p->thread.ubc_pc2 = 0;
 
 	return 0;
 }
@@ -266,6 +249,37 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	dump->u_fpvalid = dump_fpu(regs, &dump->fpu);
 }
 
+/* Tracing by user break controller.  */
+static inline void
+ubc_set_tracing(int asid, unsigned long nextpc1, unsigned nextpc2)
+{
+	ctrl_outl(nextpc1, UBC_BARA);
+	ctrl_outb(asid, UBC_BASRA);
+	if(UBC_TYPE_SH7729){
+		ctrl_outl(0, UBC_BAMRA);
+		ctrl_outw(BBR_INST | BBR_READ | BBR_CPU, UBC_BBRA);
+	}else{
+		ctrl_outb(0, UBC_BAMRA);
+		ctrl_outw(BBR_INST | BBR_READ, UBC_BBRA);
+	}
+
+	if (nextpc2 != (unsigned long) -1) {
+		ctrl_outl(nextpc2, UBC_BARB);
+		ctrl_outb(asid, UBC_BASRB);
+		if(UBC_TYPE_SH7729){
+			ctrl_outl(0, UBC_BAMRB);
+			ctrl_outw(BBR_INST | BBR_READ | BBR_CPU, UBC_BBRB);
+		}else{
+			ctrl_outb(0, UBC_BAMRB);
+			ctrl_outw(BBR_INST | BBR_READ, UBC_BBRB);
+		}
+	}
+	if(UBC_TYPE_SH7729)
+		ctrl_outl(BRCR_PCTE, UBC_BRCR);
+	else
+		ctrl_outw(0, UBC_BRCR);
+}
+
 /*
  *	switch_to(x,y) should switch tasks from x to y.
  *
@@ -273,21 +287,29 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 void __switch_to(struct task_struct *prev, struct task_struct *next)
 {
 #if defined(__SH4__)
-	if (prev != &init_task) {
-		unsigned long flags;
-
-		save_and_cli(flags);
-		unlazy_fpu(prev);
-		restore_flags(flags);
-	}
+	unlazy_fpu(prev);
 #endif
+
 	/*
 	 * Restore the kernel mode register
 	 *   	k7 (r7_bank1)
 	 */
-	asm volatile("ldc	%0, $r7_bank"
+	asm volatile("ldc	%0, r7_bank"
 		     : /* no output */
 		     :"r" (next));
+
+	/* If no tasks are using the UBC, we're done */
+	if (ubc_usercnt == 0)
+		return;
+
+	/* Otherwise, set or clear UBC as appropriate */
+	if (next->thread.ubc_pc1) {
+		ubc_set_tracing(next->mm->context & MMU_CONTEXT_ASID_MASK,
+				next->thread.ubc_pc1, next->thread.ubc_pc2);
+	} else {
+		ctrl_outw(0, UBC_BBRA);
+		ctrl_outw(0, UBC_BBRB);
+	}
 }
 
 asmlinkage int sys_fork(unsigned long r4, unsigned long r5,
@@ -376,7 +398,7 @@ unsigned long get_wchan(struct task_struct *p)
 asmlinkage void print_syscall(int x)
 {
 	unsigned long flags, sr;
-	asm("stc	$sr, %0": "=r" (sr));
+	asm("stc	sr, %0": "=r" (sr));
 	save_and_cli(flags);
 	printk("%c: %c %c, %c: SYSCALL\n", (x&63)+32,
 	       (current->flags&PF_USEDFPU)?'C':' ',
@@ -391,6 +413,9 @@ asmlinkage void break_point_trap(unsigned long r4, unsigned long r5,
 	/* Clear tracing.  */
 	ctrl_outw(0, UBC_BBRA);
 	ctrl_outw(0, UBC_BBRB);
+	current->thread.ubc_pc1 = 0;
+	current->thread.ubc_pc2 = (unsigned long) -1;
+	ubc_usercnt -= 1;
 
 	force_sig(SIGTRAP, current);
 }

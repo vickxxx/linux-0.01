@@ -3,6 +3,8 @@
 
 /* Copyright (C) 1999 Niibe Yutaka */
 
+#include <asm/pgtable-2level.h>
+
 /*
  * This file contains the functions and defines necessary to modify and use
  * the SuperH page table tree.
@@ -12,7 +14,7 @@
 #include <asm/addrspace.h>
 #include <linux/threads.h>
 
-extern pgd_t swapper_pg_dir[1024];
+extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern void paging_init(void);
 
 #if defined(__sh3__)
@@ -39,20 +41,49 @@ extern void paging_init(void);
 #define flush_dcache_page(page)			do { } while (0)
 #define flush_icache_range(start, end)		do { } while (0)
 #define flush_icache_page(vma,pg)		do { } while (0)
+#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
+#define flush_cache_sigtramp(vaddr)		do { } while (0)
+#define __flush_icache_all()			do { } while (0)
+
+#define p3_cache_init()				do { } while (0)
+
 #elif defined(__SH4__)
 /*
  *  Caches are broken on SH-4, so we need them.
  */
+
+/* Page is 4K, OC size is 16K, there are four lines. */
+#define CACHE_ALIAS 0x00003000
+
 extern void flush_cache_all(void);
 extern void flush_cache_mm(struct mm_struct *mm);
 extern void flush_cache_range(struct mm_struct *mm, unsigned long start,
 			      unsigned long end);
 extern void flush_cache_page(struct vm_area_struct *vma, unsigned long addr);
-extern void flush_page_to_ram(struct page *page);
 extern void flush_dcache_page(struct page *pg);
 extern void flush_icache_range(unsigned long start, unsigned long end);
-extern void flush_icache_page(struct vm_area_struct *vma, struct page *pg);
+extern void flush_cache_sigtramp(unsigned long addr);
+
+#define flush_page_to_ram(page)			do { } while (0)
+#define flush_icache_page(vma,pg)		do { } while (0)
+#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
+
+/* Initialization of P3 area for copy_user_page */
+extern void p3_cache_init(void);
+
+#define PG_mapped	PG_arch_1
+
+/* We provide our own get_unmapped_area to avoid cache alias issue */
+#define HAVE_ARCH_UNMAPPED_AREA
 #endif
+
+/* Flush (write-back only) a region (smaller than a page) */
+extern void __flush_wback_region(void *start, int size);
+/* Flush (write-back & invalidate) a region (smaller than a page) */
+extern void __flush_purge_region(void *start, int size);
+/* Flush (invalidate only) a region (smaller than a page) */
+extern void __flush_invalidate_region(void *start, int size);
+
 
 /*
  * Basically we have the same two-level (which is the logical three level
@@ -68,8 +99,6 @@ extern unsigned long empty_zero_page[1024];
 
 #endif /* !__ASSEMBLY__ */
 
-#include <asm/pgtable-2level.h>
-
 #define __beep() asm("")
 
 #define PMD_SIZE	(1UL << PMD_SHIFT)
@@ -80,15 +109,14 @@ extern unsigned long empty_zero_page[1024];
 #define USER_PTRS_PER_PGD	(TASK_SIZE/PGDIR_SIZE)
 #define FIRST_USER_PGD_NR	0
 
-#define USER_PGD_PTRS (PAGE_OFFSET >> PGDIR_SHIFT)
-#define KERNEL_PGD_PTRS (PTRS_PER_PGD-USER_PGD_PTRS)
-
-#define TWOLEVEL_PGDIR_SHIFT	22
-#define BOOT_USER_PGD_PTRS (PAGE_OFFSET >> TWOLEVEL_PGDIR_SHIFT)
-#define BOOT_KERNEL_PGD_PTRS (1024-BOOT_USER_PGD_PTRS)
+#define PTE_PHYS_MASK	0x1ffff000
 
 #ifndef __ASSEMBLY__
-#define VMALLOC_START	P3SEG
+/*
+ * First 1MB map is used by fixed purpose.
+ * Currently only 4-enty (16kB) is used (see arch/sh/mm/cache.c)
+ */
+#define VMALLOC_START	(P3SEG+0x00100000)
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END	P4SEG
 
@@ -121,15 +149,19 @@ extern unsigned long empty_zero_page[1024];
 
 
 /* Mask which drop software flags */
+#if defined(__sh3__)
+/*
+ * MMU on SH-3 has bug on SH-bit: We can't use it if MMUCR.IX=1.
+ * Work around: Just drop SH-bit.
+ */
+#define _PAGE_FLAGS_HARDWARE_MASK	0x1ffff1fc
+#else
 #define _PAGE_FLAGS_HARDWARE_MASK	0x1ffff1fe
+#endif
 /* Hardware flags: SZ=1 (4k-byte) */
 #define _PAGE_FLAGS_HARD		0x00000010
 
-#if defined(__sh3__)
-#define _PAGE_SHARED	_PAGE_HW_SHARED
-#elif defined(__SH4__)
 #define _PAGE_SHARED	_PAGE_U0_SHARED
-#endif
 
 #define _PAGE_TABLE	(_PAGE_PRESENT | _PAGE_RW | _PAGE_USER | _PAGE_ACCESSED | _PAGE_DIRTY)
 #define _KERNPG_TABLE	(_PAGE_PRESENT | _PAGE_RW | _PAGE_ACCESSED | _PAGE_DIRTY)
@@ -168,12 +200,6 @@ extern unsigned long empty_zero_page[1024];
 #define __S110	PAGE_SHARED
 #define __S111	PAGE_SHARED
 
-/*
- * Handling allocation failures during page table setup.
- */
-extern void __handle_bad_pmd(pmd_t * pmd);
-extern void __handle_bad_pmd_kernel(pmd_t * pmd);
-
 #define pte_none(x)	(!pte_val(x))
 #define pte_present(x)	(pte_val(x) & (_PAGE_PRESENT | _PAGE_PROTNONE))
 #define pte_clear(xp)	do { set_pte(xp, __pte(0)); } while (0)
@@ -183,13 +209,8 @@ extern void __handle_bad_pmd_kernel(pmd_t * pmd);
 #define pmd_clear(xp)	do { set_pmd(xp, __pmd(0)); } while (0)
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
 
-/*
- * Permanent address of a page. Obviously must never be
- * called on a highmem page.
- */
-#define page_address(page)  ((page)->virtual)
-#define pages_to_mb(x) ((x) >> (20-PAGE_SHIFT))
-#define pte_page(x) (mem_map+(unsigned long)(((pte_val(x) -__MEMORY_START) >> PAGE_SHIFT)))
+#define pages_to_mb(x)	((x) >> (20-PAGE_SHIFT))
+#define pte_page(x) 	phys_to_page(pte_val(x)&PTE_PHYS_MASK)
 
 /*
  * The following only work if pte_present() is true.
@@ -200,7 +221,7 @@ static inline int pte_exec(pte_t pte) { return pte_val(pte) & _PAGE_USER; }
 static inline int pte_dirty(pte_t pte){ return pte_val(pte) & _PAGE_DIRTY; }
 static inline int pte_young(pte_t pte){ return pte_val(pte) & _PAGE_ACCESSED; }
 static inline int pte_write(pte_t pte){ return pte_val(pte) & _PAGE_RW; }
-static inline int pte_shared(pte_t pte){ return pte_val(pte) & _PAGE_SHARED; }
+static inline int pte_not_present(pte_t pte){ return !(pte_val(pte) & _PAGE_PRESENT); }
 
 static inline pte_t pte_rdprotect(pte_t pte)	{ set_pte(&pte, __pte(pte_val(pte) & ~_PAGE_USER)); return pte; }
 static inline pte_t pte_exprotect(pte_t pte)	{ set_pte(&pte, __pte(pte_val(pte) & ~_PAGE_USER)); return pte; }
@@ -222,9 +243,8 @@ static inline pte_t pte_mkwrite(pte_t pte)	{ set_pte(&pte, __pte(pte_val(pte) | 
 #define mk_pte(page,pgprot)						\
 ({	pte_t __pte;							\
 									\
-	set_pte(&__pte, __pte(((page)-mem_map) * 			\
-		(unsigned long long)PAGE_SIZE + pgprot_val(pgprot) +	\
-		__MEMORY_START));					\
+	set_pte(&__pte, __pte(PHYSADDR(page_address(page))		\
+				+pgprot_val(pgprot)));			\
 	__pte;								\
 })
 
@@ -248,9 +268,6 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
 
-#define __pmd_offset(address) \
-		(((address) >> PMD_SHIFT) & (PTRS_PER_PMD-1))
-
 /* Find an entry in the third-level page table.. */
 #define __pte_offset(address) \
 		((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1))
@@ -271,7 +288,15 @@ extern void update_mmu_cache(struct vm_area_struct * vma,
 #define pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
 #define swp_entry_to_pte(x)	((pte_t) { (x).val })
 
-#include <asm-generic/pgtable.h>
+/*
+ * Routines for update of PTE 
+ *
+ * We just can use generic implementation, as SuperH has no SMP feature.
+ * (We needed atomic implementation for SMP)
+ *
+ */
+
+#define pte_same(A,B)	(pte_val(A) == pte_val(B))
 
 #endif /* !__ASSEMBLY__ */
 
@@ -280,5 +305,16 @@ extern void update_mmu_cache(struct vm_area_struct * vma,
 #define kern_addr_valid(addr)	(1)
 
 #define io_remap_page_range remap_page_range
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
+
+/*
+ * Set pg flags to non-cached
+ */
+#define pgprot_noncached(_prot) __pgprot(pgprot_val(_prot) &= ~_PAGE_CACHABLE)
+
 
 #endif /* __ASM_SH_PAGE_H */

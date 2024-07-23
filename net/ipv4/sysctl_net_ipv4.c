@@ -1,7 +1,7 @@
 /*
  * sysctl_net_ipv4.c: sysctl interface to net IPV4 subsystem.
  *
- * $Id: sysctl_net_ipv4.c,v 1.47 2000/10/19 15:51:02 davem Exp $
+ * $Id: sysctl_net_ipv4.c,v 1.50 2001/10/20 00:00:11 davem Exp $
  *
  * Begun April 1, 1996, Mike Shaver.
  * Added /proc/sys/net/ipv4 directory entry (empty =) ). [MS]
@@ -27,18 +27,18 @@ extern int sysctl_icmp_ignore_bogus_error_responses;
 extern int sysctl_ipfrag_low_thresh;
 extern int sysctl_ipfrag_high_thresh; 
 extern int sysctl_ipfrag_time;
+extern int sysctl_ipfrag_secret_interval;
 
 /* From ip_output.c */
 extern int sysctl_ip_dynaddr;
 
 /* From icmp.c */
-extern int sysctl_icmp_destunreach_time;
-extern int sysctl_icmp_timeexceed_time;
-extern int sysctl_icmp_paramprob_time;
-extern int sysctl_icmp_echoreply_time;
+extern int sysctl_icmp_ratelimit;
+extern int sysctl_icmp_ratemask;
 
 /* From igmp.c */
 extern int sysctl_igmp_max_memberships;
+extern int sysctl_igmp_max_msf;
 
 /* From inetpeer.c */
 extern int inet_peer_threshold;
@@ -47,10 +47,14 @@ extern int inet_peer_maxttl;
 extern int inet_peer_gc_mintime;
 extern int inet_peer_gc_maxtime;
 
+#ifdef CONFIG_SYSCTL
 static int tcp_retr1_max = 255; 
-
 static int ip_local_port_range_min[] = { 1, 1 };
 static int ip_local_port_range_max[] = { 65535, 65535 };
+#endif
+
+/* From tcp_input.c */
+extern int sysctl_tcp_westwood;
 
 struct ipv4_config ipv4_config;
 
@@ -68,7 +72,7 @@ int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 	ret = proc_dointvec(ctl, write, filp, buffer, lenp);
 
 	if (write && ipv4_devconf.forwarding != val)
-		inet_forward_change();
+		inet_forward_change(ipv4_devconf.forwarding);
 
 	return ret;
 }
@@ -84,7 +88,7 @@ static int ipv4_sysctl_forward_strategy(ctl_table *table, int *name, int nlen,
 	if (get_user(new,(int *)newval))
 		return -EFAULT; 
 	if (new != ipv4_devconf.forwarding) 
-		inet_forward_change(); 
+		inet_forward_change(new); 
 	return 0; /* caller does change again and handles handles oldval */ 
 }
 
@@ -177,19 +181,13 @@ ctl_table ipv4_table[] = {
 	{NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES, "icmp_ignore_bogus_error_responses",
 	 &sysctl_icmp_ignore_bogus_error_responses, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
-	{NET_IPV4_ICMP_DESTUNREACH_RATE, "icmp_destunreach_rate",
-	 &sysctl_icmp_destunreach_time, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_ICMP_TIMEEXCEED_RATE, "icmp_timeexceed_rate",
-	 &sysctl_icmp_timeexceed_time, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_ICMP_PARAMPROB_RATE, "icmp_paramprob_rate",
-	 &sysctl_icmp_paramprob_time, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_ICMP_ECHOREPLY_RATE, "icmp_echoreply_rate",
-	 &sysctl_icmp_echoreply_time, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_ROUTE, "route", NULL, 0, 0555, ipv4_route_table},
 #ifdef CONFIG_IP_MULTICAST
 	{NET_IPV4_IGMP_MAX_MEMBERSHIPS, "igmp_max_memberships",
 	 &sysctl_igmp_max_memberships, sizeof(int), 0644, NULL, &proc_dointvec},
 #endif
+	{NET_IPV4_IGMP_MAX_MSF, "igmp_max_msf",
+	 &sysctl_igmp_max_msf, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_INET_PEER_THRESHOLD, "inet_peer_threshold",
 	 &inet_peer_threshold, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_INET_PEER_MINTTL, "inet_peer_minttl",
@@ -210,10 +208,8 @@ ctl_table ipv4_table[] = {
 	 &sysctl_tcp_fack, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_TCP_REORDERING, "tcp_reordering",
 	 &sysctl_tcp_reordering, sizeof(int), 0644, NULL, &proc_dointvec},
-#ifdef CONFIG_INET_ECN
 	{NET_TCP_ECN, "tcp_ecn",
 	 &sysctl_tcp_ecn, sizeof(int), 0644, NULL, &proc_dointvec},
-#endif
 	{NET_TCP_DSACK, "tcp_dsack",
 	 &sysctl_tcp_dsack, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_TCP_MEM, "tcp_mem",
@@ -226,6 +222,55 @@ ctl_table ipv4_table[] = {
 	 &sysctl_tcp_app_win, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_TCP_ADV_WIN_SCALE, "tcp_adv_win_scale",
 	 &sysctl_tcp_adv_win_scale, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_IPV4_ICMP_RATELIMIT, "icmp_ratelimit",
+	 &sysctl_icmp_ratelimit, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_IPV4_ICMP_RATEMASK, "icmp_ratemask",
+	 &sysctl_icmp_ratemask, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_TW_REUSE, "tcp_tw_reuse",
+	 &sysctl_tcp_tw_reuse, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_FRTO, "tcp_frto",
+	 &sysctl_tcp_frto, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_LOW_LATENCY, "tcp_low_latency",
+	 &sysctl_tcp_low_latency, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_IPV4_IPFRAG_SECRET_INTERVAL, "ipfrag_secret_interval",
+	 &sysctl_ipfrag_secret_interval, sizeof(int), 0644, NULL, &proc_dointvec_jiffies, 
+	 &sysctl_jiffies},
+        {NET_TCP_WESTWOOD, "tcp_westwood",
+         &sysctl_tcp_westwood, sizeof(int), 0644, NULL,
+         &proc_dointvec},
+        {NET_TCP_NO_METRICS_SAVE, "tcp_no_metrics_save",
+         &sysctl_tcp_nometrics_save, sizeof(int), 0644, NULL,
+         &proc_dointvec},
+	{NET_TCP_VEGAS, "tcp_vegas_cong_avoid",
+	 &sysctl_tcp_vegas_cong_avoid, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_VEGAS_ALPHA, "tcp_vegas_alpha",
+	 &sysctl_tcp_vegas_alpha, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_VEGAS_BETA, "tcp_vegas_beta",
+	 &sysctl_tcp_vegas_beta, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_VEGAS_GAMMA, "tcp_vegas_gamma",
+	 &sysctl_tcp_vegas_gamma, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_BIC, "tcp_bic",
+	 &sysctl_tcp_bic, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_BIC_FAST_CONVERGENCE, "tcp_bic_fast_convergence",
+	 &sysctl_tcp_bic_fast_convergence, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_BIC_LOW_WINDOW, "tcp_bic_low_window",
+	 &sysctl_tcp_bic_low_window, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+ 	{NET_TCP_DEFAULT_WIN_SCALE, "tcp_default_win_scale",
+	 &sysctl_tcp_default_win_scale, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+ 	{NET_TCP_MODERATE_RCVBUF, "tcp_moderate_rcvbuf",
+	 &sysctl_tcp_moderate_rcvbuf, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_TCP_BIC_BETA, "tcp_bic_beta",
+	 &sysctl_tcp_bic_beta, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
 	{0}
 };
 

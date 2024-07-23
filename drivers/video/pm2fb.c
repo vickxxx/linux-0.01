@@ -20,7 +20,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -129,7 +129,7 @@ static struct {
 
 static char curblink __initdata = 1;
 
-static const struct {
+static struct {
 	char name[16];
 	struct pm2fb_par par;
 } user_mode[] __initdata = {
@@ -2151,6 +2151,8 @@ int __init pm2fb_setup(char* options){
  ***************************************************************************/
 
 #ifdef MODULE
+
+MODULE_LICENSE("GPL");
 
 static char *mode = NULL;
 

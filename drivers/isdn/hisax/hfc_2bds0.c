@@ -1,12 +1,15 @@
-/* $Id: hfc_2bds0.c,v 1.15 2000/11/24 17:05:37 kai Exp $
+/* $Id: hfc_2bds0.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- *  specific routines for CCD's HFC 2BDS0
+ * specific routines for CCD's HFC 2BDS0
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
@@ -568,8 +571,8 @@ close_2bs0(struct BCState *bcs)
 {
 	mode_2bs0(bcs, 0, bcs->channel);
 	if (test_and_clear_bit(BC_FLG_INIT, &bcs->Flag)) {
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;

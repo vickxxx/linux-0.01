@@ -45,7 +45,6 @@
 #include <net/protocol.h>
 #include <net/arp.h>
 #include <net/route.h>
-#include <net/tcp.h>
 #include <net/udp.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
@@ -77,14 +76,9 @@ int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len)
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 struct sock *rtnl;
 
 struct rtnetlink_link * rtnetlink_links[NPROTO];
-
-#define _S	1	/* superuser privileges required */
-#define _X	2	/* exclusive access to tables required */
-#define _G	4	/* GET request */
 
 static const int rtm_min[(RTM_MAX+1-RTM_BASE)/4] =
 {
@@ -274,7 +268,7 @@ static int rtnetlink_done(struct netlink_callback *cb)
 
 /* Process one rtnetlink message. */
 
-extern __inline__ int
+static __inline__ int
 rtnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, int *errp)
 {
 	struct rtnetlink_link *link;
@@ -309,7 +303,7 @@ rtnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, int *errp)
 		return 0;
 
 	family = ((struct rtgenmsg*)NLMSG_DATA(nlh))->rtgen_family;
-	if (family > NPROTO) {
+	if (family >= NPROTO) {
 		*errp = -EAFNOSUPPORT;
 		return -1;
 	}
@@ -400,7 +394,7 @@ err_inval:
  * Malformed skbs with wrong lengths of messages are discarded silently.
  */
 
-extern __inline__ int rtnetlink_rcv_skb(struct sk_buff *skb)
+static inline int rtnetlink_rcv_skb(struct sk_buff *skb)
 {
 	int err;
 	struct nlmsghdr * nlh;
@@ -529,11 +523,8 @@ void __init rtnetlink_init(void)
 	rtnl = netlink_kernel_create(NETLINK_ROUTE, rtnetlink_rcv);
 	if (rtnl == NULL)
 		panic("rtnetlink_init: cannot initialize rtnetlink\n");
+	netlink_set_nonroot(NETLINK_ROUTE, NL_NONROOT_RECV);
 	register_netdevice_notifier(&rtnetlink_dev_notifier);
 	rtnetlink_links[PF_UNSPEC] = link_rtnetlink_table;
 	rtnetlink_links[PF_PACKET] = link_rtnetlink_table;
 }
-
-
-
-#endif

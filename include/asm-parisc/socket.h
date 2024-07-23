@@ -3,7 +3,7 @@
 
 #include <asm/sockios.h>
 
-/* For setsockoptions(2) */
+/* For setsockopt(2) */
 #define SOL_SOCKET	0xffff
 
 #define SO_DEBUG	0x0001
@@ -43,6 +43,8 @@
 #define SO_ATTACH_FILTER        0x401a
 #define SO_DETACH_FILTER        0x401b
 
+#define SO_ACCEPTCONN		0x401c
+
 #if defined(__KERNEL__)
 #define SOCK_STREAM	1	/* stream (connection) socket	*/
 #define SOCK_DGRAM	2	/* datagram (conn.less) socket	*/
@@ -54,6 +56,7 @@
 				/* level.  For writing rarp and	*/
 				/* other similar things on the	*/
 				/* user level.			*/
+#define	SOCK_MAX	(SOCK_PACKET+1)
 #endif
 
 #endif /* _ASM_SOCKET_H */

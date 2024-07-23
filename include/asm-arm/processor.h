@@ -1,7 +1,7 @@
 /*
  *  linux/include/asm-arm/processor.h
  *
- *  Copyright (C) 1995 Russell King
+ *  Copyright (C) 1995-2002 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -38,18 +38,27 @@ typedef unsigned long mm_segment_t;		/* domain register	*/
 
 #define EISA_bus 0
 #define MCA_bus 0
+#define MCA_bus__is_a_macro
 
 #include <asm/atomic.h>
 #include <asm/ptrace.h>
 #include <asm/arch/memory.h>
 #include <asm/proc/processor.h>
+#include <asm/types.h>
+
+union debug_insn {
+	u32	arm;
+	u16	thumb;
+};
+
+struct debug_entry {
+	u32			address;
+	union debug_insn	insn;
+};
 
 struct debug_info {
-	int				nsaved;
-	struct {
-		unsigned long		address;
-		unsigned long		insn;
-	} bp[2];
+	int			nsaved;
+	struct debug_entry	bp[2];
 };
 
 struct thread_struct {
@@ -67,13 +76,6 @@ struct thread_struct {
 	EXTRA_THREAD_STRUCT
 };
 
-#define INIT_MMAP {					\
-	vm_mm:		&init_mm,			\
-	vm_page_prot:	PAGE_SHARED,			\
-	vm_flags:	VM_READ | VM_WRITE | VM_EXEC,	\
-	vm_avl_height:	1,				\
-}
-
 #define INIT_THREAD  {					\
 	refcount:	ATOMIC_INIT(1),			\
 	EXTRA_THREAD_STRUCT_INIT			\
@@ -82,22 +84,14 @@ struct thread_struct {
 /*
  * Return saved PC of a blocked thread.
  */
-extern __inline__ unsigned long thread_saved_pc(struct thread_struct *t)
+static inline unsigned long thread_saved_pc(struct thread_struct *t)
 {
 	return t->save ? pc_pointer(t->save->pc) : 0;
 }
 
-extern __inline__ unsigned long get_css_fp(struct thread_struct *t)
+static inline unsigned long thread_saved_fp(struct thread_struct *t)
 {
 	return t->save ? t->save->fp : 0;
-}
-
-asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
-
-extern __inline__ void init_thread_css(struct context_save_struct *save)
-{
-	*save = INIT_CSS;
-	save->pc |= (unsigned long)ret_from_sys_call;
 }
 
 /* Forward declaration, a strange C thing */
@@ -126,10 +120,12 @@ extern void __free_task_struct(struct task_struct *);
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
 
+#define cpu_relax()	barrier()
+
 /*
  * Create a new kernel thread
  */
-extern int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
+extern int arch_kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
 
 #endif
 

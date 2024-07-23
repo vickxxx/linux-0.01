@@ -68,7 +68,7 @@ struct aunhdr
 	unsigned long handle;
 };
 
-static unsigned long aun_seq = 0;
+static unsigned long aun_seq;
 
 /* Queue of packets waiting to be transmitted. */
 static struct sk_buff_head aun_queue;
@@ -172,9 +172,8 @@ static int econet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len
 	 *	Check legality
 	 */
 	 
-	if (addr_len < sizeof(struct sockaddr_ec))
-		return -EINVAL;
-	if (sec->sec_family != AF_ECONET)
+	if (addr_len < sizeof(struct sockaddr_ec) ||
+	    sec->sec_family != AF_ECONET)
 		return -EINVAL;
 	
 	sk->protinfo.af_econet->cb = sec->cb;
@@ -297,7 +296,7 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 #ifdef CONFIG_ECONET_NATIVE
 		atomic_inc(&dev->refcnt);
 		
-		skb = sock_alloc_send_skb(sk, len+dev->hard_header_len+15, 0, 
+		skb = sock_alloc_send_skb(sk, len+dev->hard_header_len+15, 
 					  msg->msg_flags & MSG_DONTWAIT, &err);
 		if (skb==NULL)
 			goto out_unlock;
@@ -307,6 +306,7 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		
 		eb = (struct ec_cb *)&skb->cb;
 		
+		/* BUG: saddr may be NULL */
 		eb->cookie = saddr->cookie;
 		eb->sec = *saddr;
 		eb->sent = ec_tx_done;
@@ -410,7 +410,7 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	}
 
 	/* Get a skbuff (no data, just holds our cb information) */
-	if ((skb = sock_alloc_send_skb(sk, 0, 0, 
+	if ((skb = sock_alloc_send_skb(sk, 0, 
 			     msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
 
@@ -485,7 +485,6 @@ static void econet_destroy_timer(unsigned long data)
 
 static int econet_release(struct socket *sock)
 {
-	struct sk_buff	*skb;
 	struct sock *sk = sock->sk;
 
 	if (!sk)
@@ -505,8 +504,7 @@ static int econet_release(struct socket *sock)
 
 	/* Purge queues */
 
-	while ((skb=skb_dequeue(&sk->receive_queue))!=NULL)
-		kfree_skb(skb);
+	skb_queue_purge(&sk->receive_queue);
 
 	if (atomic_read(&sk->rmem_alloc) || atomic_read(&sk->wmem_alloc)) {
 		sk->timer.data=(unsigned long)sk;
@@ -695,8 +693,8 @@ static int econet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 }
 
 static struct net_proto_family econet_family_ops = {
-	PF_ECONET,
-	econet_create
+	family:		PF_ECONET,
+	create:		econet_create,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(econet_ops) = {
@@ -717,6 +715,7 @@ static struct proto_ops SOCKOPS_WRAPPED(econet_ops) = {
 	sendmsg:	econet_sendmsg,
 	recvmsg:	econet_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
@@ -726,7 +725,7 @@ SOCKOPS_WRAP(econet, PF_ECONET);
  *	Find the listening socket, if any, for the given data.
  */
 
-struct sock *ec_listening_socket(unsigned char port, unsigned char
+static struct sock *ec_listening_socket(unsigned char port, unsigned char
 				 station, unsigned char net)
 {
 	struct sock *sk = econet_sklist;
@@ -1034,14 +1033,14 @@ static int econet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	if (! edev)
 	{
 		kfree_skb(skb);
-		return 0;
+		return NET_RX_DROP;
 	}
 
 	if (skb->len < sizeof(struct ec_framehdr))
 	{
 		/* Frame is too small to be any use */
 		kfree_skb(skb);
-		return 0;
+		return NET_RX_DROP;
 	}
 
 	/* First check for encapsulated IP */
@@ -1057,25 +1056,24 @@ static int econet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	if (!sk) 
 	{
 		kfree_skb(skb);
-		return 0;
+		return NET_RX_DROP;
 	}
 
-	return ec_queue_packet(sk, skb, edev->net, hdr->src_stn, hdr->cb, 
-			       hdr->port);
+	if (ec_queue_packet(sk, skb, edev->net, hdr->src_stn, hdr->cb, 
+			    hdr->port)) {
+		kfree_skb(skb);
+		return NET_RX_DROP;
+	}
+	return 0;
 }
 
-struct packet_type econet_packet_type=
-{
-	0,
-	NULL,
-	econet_rcv,
-	NULL,
-	NULL
+static struct packet_type econet_packet_type = {
+	type:		__constant_htons(ETH_P_ECONET),
+	func:		econet_rcv,
 };
 
 static void econet_hw_initialise(void)
 {
-	econet_packet_type.type = htons(ETH_P_ECONET);
 	dev_add_pack(&econet_packet_type);
 }
 
@@ -1104,15 +1102,12 @@ static int econet_notifier(struct notifier_block *this, unsigned long msg, void 
 	return NOTIFY_DONE;
 }
 
-struct notifier_block econet_netdev_notifier={
-	econet_notifier,
-	NULL,
-	0
+static struct notifier_block econet_netdev_notifier = {
+	notifier_call:	econet_notifier,
 };
 
-void __exit econet_proto_exit(void)
+static void __exit econet_proto_exit(void)
 {
-	extern void econet_sysctl_unregister(void);
 #ifdef CONFIG_ECONET_AUNUDP
 	del_timer(&ab_cleanup_timer);
 	if (udpsock)
@@ -1120,14 +1115,10 @@ void __exit econet_proto_exit(void)
 #endif
 	unregister_netdevice_notifier(&econet_netdev_notifier);
 	sock_unregister(econet_family_ops.family);
-#ifdef CONFIG_SYSCTL
-	econet_sysctl_unregister();
-#endif
 }
 
-int __init econet_proto_init(void)
+static int __init econet_proto_init(void)
 {
-	extern void econet_sysctl_register(void);
 	sock_register(&econet_family_ops);
 #ifdef CONFIG_ECONET_AUNUDP
 	spin_lock_init(&aun_queue_lock);
@@ -1137,11 +1128,10 @@ int __init econet_proto_init(void)
 	econet_hw_initialise();
 #endif
 	register_netdevice_notifier(&econet_netdev_notifier);
-#ifdef CONFIG_SYSCTL
-	econet_sysctl_register();
-#endif
 	return 0;
 }
 
 module_init(econet_proto_init);
 module_exit(econet_proto_exit);
+
+MODULE_LICENSE("GPL");

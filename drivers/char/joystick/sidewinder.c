@@ -1,7 +1,7 @@
 /*
- * $Id: sidewinder.c,v 1.16 2000/07/14 09:02:41 vojtech Exp $
+ * $Id: sidewinder.c,v 1.20 2001/05/19 08:14:54 vojtech Exp $
  *
- *  Copyright (c) 1998-2000 Vojtech Pavlik
+ *  Copyright (c) 1998-2001 Vojtech Pavlik
  *
  *  Sponsored by SuSE
  */
@@ -33,7 +33,7 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/input.h>
 #include <linux/gameport.h>
@@ -334,7 +334,7 @@ static int sw_parse(unsigned char *buf, struct sw *sw)
 				input_report_abs(dev + i, ABS_Y, GB(i*15+0,1) - GB(i*15+1,1));
 
 				for (j = 0; j < 10; j++)
-					input_report_key(dev, sw_btn[SW_ID_GP][j], !GB(i*15+j+4,1));
+					input_report_key(dev + i, sw_btn[SW_ID_GP][j], !GB(i*15+j+4,1));
 			}
 
 			return 0;
@@ -582,6 +582,9 @@ static void sw_connect(struct gameport *gameport, struct gameport_dev *dev)
 	if (gameport_open(gameport, dev, GAMEPORT_MODE_RAW))
 		goto fail1;
 
+	dbg("Init 0: Opened gameport %d, io %#x, speed %d",
+		gameport->number, gameport->io, gameport->speed);
+
 	i = sw_read_packet(gameport, buf, SW_LENGTH, 0);		/* Read normal packet */
 	m |= sw_guess_mode(buf, i);					/* Data packet (1-bit) can carry mode info [FSP] */
 	udelay(SW_TIMEOUT);
@@ -754,3 +757,5 @@ void __exit sw_exit(void)
 
 module_init(sw_init);
 module_exit(sw_exit);
+
+MODULE_LICENSE("GPL");

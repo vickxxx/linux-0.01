@@ -6,7 +6,7 @@
  * NOTE: we rely on holding the BKL for list manipulation protection.
  */
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/dcache.h>
 #include <linux/sunrpc/sched.h>
@@ -24,7 +24,7 @@ struct nfs_unlinkdata {
 };
 
 static struct nfs_unlinkdata	*nfs_deletes;
-static struct rpc_wait_queue	nfs_delete_queue = RPC_INIT_WAITQ("nfs_delete_queue");
+static RPC_WAITQ(nfs_delete_queue, "nfs_delete_queue");
 
 /**
  * nfs_detach_unlinkdata - Remove asynchronous unlink from global list
@@ -123,12 +123,14 @@ nfs_async_unlink_done(struct rpc_task *task)
 	struct dentry		*dir = data->dir;
 	struct inode		*dir_i;
 
+	if (nfs_async_handle_jukebox(task))
+		return;
 	if (!dir)
 		return;
 	dir_i = dir->d_inode;
 	nfs_zap_caches(dir_i);
 	NFS_PROTO(dir_i)->unlink_done(dir, &task->tk_msg);
-	rpcauth_releasecred(task->tk_auth, data->cred);
+	put_rpccred(data->cred);
 	data->cred = NULL;
 	dput(dir);
 }

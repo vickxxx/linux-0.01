@@ -77,16 +77,28 @@ extern void sort_exception_table(void);
  * As we use the same address space for kernel and user data on the
  * PowerPC, we can just do these as direct assignments.  (Of course, the
  * exception handling means that it's no longer "just"...)
+ *
+ * The "user64" versions of the user access functions are versions that 
+ * allow access of 64-bit data. The "get_user" functions do not 
+ * properly handle 64-bit data because the value gets down cast to a long. 
+ * The "put_user" functions already handle 64-bit data properly but we add 
+ * "user64" versions for completeness
  */
 #define get_user(x,ptr) \
   __get_user_check((x),(ptr),sizeof(*(ptr)))
+#define get_user64(x,ptr) \
+  __get_user64_check((x),(ptr),sizeof(*(ptr)))
 #define put_user(x,ptr) \
   __put_user_check((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
+#define put_user64(x,ptr) put_user(x,ptr)
 
 #define __get_user(x,ptr) \
   __get_user_nocheck((x),(ptr),sizeof(*(ptr)))
+#define __get_user64(x,ptr) \
+  __get_user64_nocheck((x),(ptr),sizeof(*(ptr)))
 #define __put_user(x,ptr) \
   __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
+#define __put_user64(x,ptr) __put_user(x,ptr)
 
 extern long __put_user_bad(void);
 
@@ -113,6 +125,7 @@ do {								\
 	  case 1: __put_user_asm(x,ptr,retval,"stb"); break;	\
 	  case 2: __put_user_asm(x,ptr,retval,"sth"); break;	\
 	  case 4: __put_user_asm(x,ptr,retval,"stw"); break;	\
+	  case 8: __put_user_asm2(x,ptr,retval); break;		\
 	  default: __put_user_bad();				\
 	}							\
 } while (0)
@@ -140,11 +153,36 @@ struct __large_struct { unsigned long buf[100]; };
 		: "=r"(err)					\
 		: "r"(x), "b"(addr), "i"(-EFAULT), "0"(err))
 
+#define __put_user_asm2(x, addr, err)				\
+	__asm__ __volatile__(					\
+		"1:	stw %1,0(%2)\n"				\
+		"2:	stw %1+1,4(%2)\n"				\
+		"3:\n"						\
+		".section .fixup,\"ax\"\n"			\
+		"4:	li %0,%3\n"				\
+		"	b 3b\n"					\
+		".previous\n"					\
+		".section __ex_table,\"a\"\n"			\
+		"	.align 2\n"				\
+		"	.long 1b,4b\n"				\
+		"	.long 2b,4b\n"				\
+		".previous"					\
+		: "=r"(err)					\
+		: "r"(x), "b"(addr), "i"(-EFAULT), "0"(err))
 
 #define __get_user_nocheck(x,ptr,size)				\
 ({								\
 	long __gu_err, __gu_val;				\
 	__get_user_size(__gu_val,(ptr),(size),__gu_err);	\
+	(x) = (__typeof__(*(ptr)))__gu_val;			\
+	__gu_err;						\
+})
+
+#define __get_user64_nocheck(x,ptr,size)			\
+({								\
+	long __gu_err;						\
+	long long __gu_val;					\
+	__get_user_size64(__gu_val,(ptr),(size),__gu_err);	\
 	(x) = (__typeof__(*(ptr)))__gu_val;			\
 	__gu_err;						\
 })
@@ -159,6 +197,17 @@ struct __large_struct { unsigned long buf[100]; };
 	__gu_err;							\
 })
 
+#define __get_user64_check(x,ptr,size)					\
+({									\
+	long __gu_err = -EFAULT;					\
+	long long __gu_val = 0;						\
+	const __typeof__(*(ptr)) *__gu_addr = (ptr);			\
+	if (access_ok(VERIFY_READ,__gu_addr,size))			\
+		__get_user_size64(__gu_val,__gu_addr,(size),__gu_err);	\
+	(x) = (__typeof__(*(ptr)))__gu_val;				\
+	__gu_err;							\
+})
+
 extern long __get_user_bad(void);
 
 #define __get_user_size(x,ptr,size,retval)			\
@@ -168,6 +217,18 @@ do {								\
 	  case 1: __get_user_asm(x,ptr,retval,"lbz"); break;	\
 	  case 2: __get_user_asm(x,ptr,retval,"lhz"); break;	\
 	  case 4: __get_user_asm(x,ptr,retval,"lwz"); break;	\
+	  default: (x) = __get_user_bad();			\
+	}							\
+} while (0)
+
+#define __get_user_size64(x,ptr,size,retval)			\
+do {								\
+	retval = 0;						\
+	switch (size) {						\
+	  case 1: __get_user_asm(x,ptr,retval,"lbz"); break;	\
+	  case 2: __get_user_asm(x,ptr,retval,"lhz"); break;	\
+	  case 4: __get_user_asm(x,ptr,retval,"lwz"); break;	\
+	  case 8: __get_user_asm2(x, ptr, retval); break;	\
 	  default: (x) = __get_user_bad();			\
 	}							\
 } while (0)
@@ -186,6 +247,25 @@ do {								\
 		"	.long 1b,3b\n"			\
 		".previous"				\
 		: "=r"(err), "=r"(x)			\
+		: "b"(addr), "i"(-EFAULT), "0"(err))
+
+#define __get_user_asm2(x, addr, err)			\
+	__asm__ __volatile__(				\
+		"1:	lwz %1,0(%2)\n"			\
+		"2:	lwz %1+1,4(%2)\n"		\
+		"3:\n"					\
+		".section .fixup,\"ax\"\n"		\
+		"4:	li %0,%3\n"			\
+		"	li %1,0\n"			\
+		"	li %1+1,0\n"			\
+		"	b 3b\n"				\
+		".previous\n"				\
+		".section __ex_table,\"a\"\n"		\
+		"	.align 2\n"			\
+		"	.long 1b,4b\n"			\
+		"	.long 2b,4b\n"			\
+		".previous"				\
+		: "=r"(err), "=&r"(x)			\
 		: "b"(addr), "i"(-EFAULT), "0"(err))
 
 /* more complex routines */
@@ -232,7 +312,11 @@ clear_user(void *addr, unsigned long size)
 {
 	if (access_ok(VERIFY_WRITE, addr, size))
 		return __clear_user(addr, size);
-	return size? -EFAULT: 0;
+	if ((unsigned long)addr < TASK_SIZE) {
+		unsigned long over = (unsigned long)addr + size - TASK_SIZE;
+		return __clear_user(addr, size - over) + over;
+	}
+	return size;
 }
 
 extern int __strncpy_from_user(char *dst, const char *src, long count);

@@ -6,7 +6,7 @@
 	Copyright (C) 1996, Paul Gortmaker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	Information and Code Sources:
 
@@ -45,7 +45,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
 	"es3210.c: Driver revision v0.03, 14/09/96\n";
 
 #include <linux/module.h>
@@ -383,6 +383,11 @@ static int mem[MAX_ES_CARDS];
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_ES_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, "memory base address(es)");
+MODULE_DESCRIPTION("Racal-Interlan ES3210 EISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 int
 init_module(void)
@@ -426,3 +431,4 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+

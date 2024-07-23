@@ -1,7 +1,7 @@
 /*
  *  Copyright (C) 1997 Cullen Jennings
  *  Copyright (C) 1998 Elmer.Joandi@ut.ee, +37-255-13500	
- *  Gnu Public License applies
+ *  GNU General Public License applies
  */
 #include <linux/version.h>
 
@@ -15,7 +15,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 
@@ -29,7 +29,7 @@
 #include <linux/etherdevice.h>
 
 
-//#define ARLAN_DEBUGING 1
+//#define ARLAN_DEBUGGING 1
 
 #define ARLAN_PROC_INTERFACE
 #define MAX_ARLANS 4 /* not more than 4 ! */
@@ -47,10 +47,8 @@ extern int 	init_arlan_proc(void);
 
 extern struct net_device *arlan_device[MAX_ARLANS];
 extern int	arlan_debug;
-extern char *	siteName;
 extern int	arlan_entry_debug;
 extern int	arlan_exit_debug;
-extern int	arlan_entry_and_exit_debug;
 extern int	testMemory;
 extern const char* arlan_version;
 extern int     arlan_command(struct net_device * dev, int command);
@@ -76,9 +74,9 @@ extern int     arlan_command(struct net_device * dev, int command);
 #define IFDEBUG( L ) if ( (L) & arlan_debug ) 
 #define ARLAN_FAKE_HDR_LEN 12 
 
-#ifdef ARLAN_DEBUGING
+#ifdef ARLAN_DEBUGGING
 	#define DEBUG 1
-	#define ARLAN_ENTRY_EXIT_DEBUGING 1
+	#define ARLAN_ENTRY_EXIT_DEBUGGING 1
 	#define ARLAN_DEBUG(a,b) printk(KERN_DEBUG a, b)
 #else
 	#define ARLAN_DEBUG(a,b) 
@@ -321,7 +319,7 @@ struct arlan_conf_stru {
       int tx_queue_len;
 };
 
-struct arlan_conf_stru arlan_conf[MAX_ARLANS];
+extern struct arlan_conf_stru arlan_conf[MAX_ARLANS];
 
 struct TxParam
 {

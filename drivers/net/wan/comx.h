@@ -190,14 +190,6 @@ struct comx_debugflags_struct {
 #endif
 
 
-#ifndef min
-#define min(a,b)		((a) > (b) ? (b) : (a))
-#endif
-#ifndef max
-#define max(a,b)		((a) > (b) ? (a) : (b))
-#endif
-
-
 #define COMX_CHANNEL(dev) ((struct comx_channel*)dev->priv)
 
 #define TWIN(dev) (COMX_CHANNEL(dev)->twin)
@@ -219,8 +211,6 @@ typedef u16	word;
 #ifndef	SEEK_END
 #define	SEEK_END	2
 #endif
-
-extern struct proc_dir_entry * comx_root_dir;
 
 extern int	comx_register_hardware(struct comx_hardware *comx_hw);
 extern int	comx_unregister_hardware(char *name);

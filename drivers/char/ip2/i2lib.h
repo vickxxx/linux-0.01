@@ -150,7 +150,7 @@ typedef struct _i2ChanStr
 	// though these are in the channel structure, the channel is also written
 	// here, the easier to send it to the fifo when ready. HOWEVER, individual
 	// packets here are NOT padded to even length: the routines for writing
-	// blocks to the the fifo will pad to even byte counts.
+	// blocks to the fifo will pad to even byte counts.
 	//
 	UCHAR	Obuf[OBUF_SIZE+MAX_OBUF_BLOCK+4];
 	volatile
@@ -340,6 +340,12 @@ static int  i2Output(i2ChanStrPtr, const char *, int, int);
 static int  i2OutputFree(i2ChanStrPtr);
 static int  i2ServiceBoard(i2eBordStrPtr);
 static void i2DrainOutput(i2ChanStrPtr, int);
+
+#ifdef IP2DEBUG_TRACE
+void ip2trace(unsigned short,unsigned char,unsigned char,unsigned long,...);
+#else
+#define ip2trace(a,b,c,d...) do {} while (0)
+#endif
 
 // Argument to i2QueueCommands
 //

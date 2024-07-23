@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: FIB frontend.
  *
- * Version:	$Id: fib_frontend.c,v 1.21 1999/12/15 22:39:07 davem Exp $
+ * Version:	$Id: fib_frontend.c,v 1.26 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -160,9 +160,9 @@ struct net_device * ip_dev_find(u32 addr)
 	if (res.type != RTN_LOCAL)
 		goto out;
 	dev = FIB_RES_DEV(res);
-	if (dev)
-		atomic_inc(&dev->refcnt);
 
+	if (dev)
+		dev_hold(dev);
 out:
 	fib_res_put(&res);
 	return dev;
@@ -236,8 +236,7 @@ int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
 	if (res.type != RTN_UNICAST)
 		goto e_inval_res;
 	*spec_dst = FIB_RES_PREFSRC(res);
-	if (itag)
-		fib_combine_itag(itag, &res);
+	fib_combine_itag(itag, &res);
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 	if (FIB_RES_DEV(res) == dev || res.fi->fib_nhs > 1)
 #else
@@ -333,8 +332,6 @@ int ip_rt_ioctl(unsigned int cmd, void *arg)
 
 #endif
 
-#ifdef CONFIG_RTNETLINK
-
 static int inet_check_attr(struct rtmsg *r, struct rtattr **rta)
 {
 	int i;
@@ -409,8 +406,6 @@ int inet_dump_fib(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif
 
 /* Prepare and feed intra-kernel routing request.
    Really, it should be netlink message, but :-( netlink
@@ -584,16 +579,19 @@ static int fib_inetaddr_event(struct notifier_block *this, unsigned long event, 
 	switch (event) {
 	case NETDEV_UP:
 		fib_add_ifaddr(ifa);
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+		fib_sync_up(ifa->ifa_dev->dev);
+#endif
 		rt_cache_flush(-1);
 		break;
 	case NETDEV_DOWN:
+		fib_del_ifaddr(ifa);
 		if (ifa->ifa_dev && ifa->ifa_dev->ifa_list == NULL) {
 			/* Last address was deleted from this interface.
 			   Disable IP.
 			 */
 			fib_disable_ip(ifa->ifa_dev->dev, 1);
 		} else {
-			fib_del_ifaddr(ifa);
 			rt_cache_flush(-1);
 		}
 		break;
@@ -605,6 +603,11 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 {
 	struct net_device *dev = ptr;
 	struct in_device *in_dev = __in_dev_get(dev);
+
+	if (event == NETDEV_UNREGISTER) {
+		fib_disable_ip(dev, 2);
+		return NOTIFY_DONE;
+	}
 
 	if (!in_dev)
 		return NOTIFY_DONE;
@@ -622,9 +625,6 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 	case NETDEV_DOWN:
 		fib_disable_ip(dev, 0);
 		break;
-	case NETDEV_UNREGISTER:
-		fib_disable_ip(dev, 1);
-		break;
 	case NETDEV_CHANGEMTU:
 	case NETDEV_CHANGE:
 		rt_cache_flush(0);
@@ -634,15 +634,11 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 }
 
 struct notifier_block fib_inetaddr_notifier = {
-	fib_inetaddr_event,
-	NULL,
-	0
+	notifier_call:	fib_inetaddr_event,
 };
 
 struct notifier_block fib_netdev_notifier = {
-	fib_netdev_event,
-	NULL,
-	0
+	notifier_call:	fib_netdev_event,
 };
 
 void __init ip_fib_init(void)

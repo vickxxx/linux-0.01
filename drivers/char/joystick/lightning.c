@@ -1,7 +1,7 @@
 /*
- * $Id: lightning.c,v 1.7 2000/05/24 19:36:03 vojtech Exp $
+ * $Id: lightning.c,v 1.13 2001/04/26 10:24:46 vojtech Exp $
  *
- *  Copyright (c) 1998-2000 Vojtech Pavlik
+ *  Copyright (c) 1998-2001 Vojtech Pavlik
  *
  *  Sponsored by SuSE
  */
@@ -38,7 +38,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/gameport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #define L4_PORT			0x201
 #define L4_SELECT_ANALOG	0xa4
@@ -52,6 +52,7 @@
 #define L4_TIMEOUT		80	/* 80 us */
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
+MODULE_LICENSE("GPL");
 
 struct l4 {
 	struct gameport gameport;
@@ -251,12 +252,9 @@ int __init l4_init(void)
 			gameport->open = l4_open;
 			gameport->cooked_read = l4_cooked_read;
 			gameport->calibrate = l4_calibrate;
-			gameport->type = GAMEPORT_EXT;
 
-			if (!i && !j) {
+			if (!i && !j)
 				gameport->io = L4_PORT;
-				gameport->size = 1;
-			}
 
 			if (rev > 0x28)		/* on 2.9+ the setcal command works correctly */
 				l4_setcal(l4->port, cal);

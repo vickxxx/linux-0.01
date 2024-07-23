@@ -43,10 +43,16 @@ typedef __vector128 vector128;
 
 /* DMA addresses are 32-bits wide */
 typedef u32 dma_addr_t;
-
-typedef unsigned short umode_t;
+typedef u64 dma64_addr_t;
 
 #endif /* __KERNEL__ */
+
+/*
+ * XXX allowed outside of __KERNEL__ for now, until glibc gets
+ * a proper set of asm headers of its own.  -- paulus
+ */
+typedef unsigned short umode_t;
+
 #endif /* __ASSEMBLY__ */
 
 #endif

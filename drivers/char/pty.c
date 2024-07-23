@@ -5,6 +5,10 @@
  *
  *  Added support for a Unix98-style ptmx device.
  *    -- C. Scott Ananian <cananian@alumni.princeton.edu>, 14-Jan-1998
+ *  Added TTY_DO_WRITE_WAKEUP to enable n_tty to send POLL_OUT to
+ *      waiting writers -- Sapan Bhatia <sapan@corewars.org>
+ *
+ *
  */
 
 #include <linux/config.h>
@@ -81,9 +85,9 @@ static void pty_close(struct tty_struct * tty, struct file * filp)
 	if (!tty->link)
 		return;
 	tty->link->packet = 0;
+	set_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	wake_up_interruptible(&tty->link->read_wait);
 	wake_up_interruptible(&tty->link->write_wait);
-	set_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	if (tty->driver.subtype == PTY_TYPE_MASTER) {
 		set_bit(TTY_OTHER_CLOSED, &tty->flags);
 #ifdef CONFIG_UNIX98_PTYS
@@ -117,10 +121,7 @@ static void pty_unthrottle(struct tty_struct * tty)
 	if (!o_tty)
 		return;
 
-	if ((o_tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    o_tty->ldisc.write_wakeup)
-		(o_tty->ldisc.write_wakeup)(o_tty);
-	wake_up_interruptible(&o_tty->write_wait);
+	tty_wakeup(o_tty);
 	set_bit(TTY_THROTTLED, &tty->flags);
 }
 
@@ -133,6 +134,10 @@ static void pty_unthrottle(struct tty_struct * tty)
  *   (2) avoid redundant copying for cases where count >> receive_room
  * N.B. Calls from user space may now return an error code instead of
  * a count.
+ *
+ * FIXME: Our pty_write method is called with our ldisc lock held but
+ * not our partners. We can't just take the other one blindly without
+ * risking deadlocks.  There is also the small matter of TTY_DONT_FLIP
  */
 static int pty_write(struct tty_struct * tty, int from_user,
 		       const unsigned char *buf, int count)
@@ -213,13 +218,15 @@ static int pty_write_room(struct tty_struct *tty)
 static int pty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct tty_struct *to = tty->link;
+	ssize_t (*chars_in_buffer)(struct tty_struct *);
 	int count;
 
-	if (!to || !to->ldisc.chars_in_buffer)
+	/* We should get the line discipline lock for "tty->link" */
+	if (!to || !(chars_in_buffer = to->ldisc.chars_in_buffer))
 		return 0;
 
 	/* The ldisc must report 0 if no characters available to be read */
-	count = to->ldisc.chars_in_buffer(to);
+	count = chars_in_buffer(to);
 
 	if (tty->driver.subtype == PTY_TYPE_SLAVE) return count;
 
@@ -295,9 +302,8 @@ static void pty_flush_buffer(struct tty_struct *tty)
 	
 	if (!to)
 		return;
-	
-	if (to->ldisc.flush_buffer)
-		to->ldisc.flush_buffer(to);
+
+	tty_ldisc_flush(to);	
 	
 	if (to->packet) {
 		tty->ctrl_status |= TIOCPKT_FLUSHWRITE;
@@ -331,10 +337,12 @@ static int pty_open(struct tty_struct *tty, struct file * filp)
 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	wake_up_interruptible(&pty->open_wait);
 	set_bit(TTY_THROTTLED, &tty->flags);
+	set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
+
 	/*  Register a slave for the master  */
 	if (tty->driver.major == PTY_MASTER_MAJOR)
 		tty_register_devfs(&tty->link->driver,
-				   DEVFS_FL_AUTO_OWNER | DEVFS_FL_WAIT,
+				   DEVFS_FL_CURRENT_OWNER | DEVFS_FL_WAIT,
 				   tty->link->driver.minor_start +
 				   MINOR(tty->device)-tty->driver.minor_start);
 	retval = 0;

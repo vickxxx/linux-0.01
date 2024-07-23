@@ -16,7 +16,7 @@
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -35,7 +35,6 @@
 #include <asm/ptrace.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
-#include <asm/vaddrs.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -54,7 +53,7 @@ static int qptis_running = 0;
 
 #define PACKB(a, b)			(((a)<<4)|(b))
 
-const u_char mbox_param[] = {
+static const u_char mbox_param[] = {
 	PACKB(1, 1),	/* MBOX_NO_OP */
 	PACKB(5, 5),	/* MBOX_LOAD_RAM */
 	PACKB(2, 0),	/* MBOX_EXEC_FIRMWARE */
@@ -184,8 +183,10 @@ static int qlogicpti_mbox_command(struct qlogicpti *qpti, u_short param[], int f
 
 	/* Wait for host IRQ bit to clear. */
 	loop_count = DEFAULT_LOOP_COUNT;
-	while (--loop_count && (sbus_readw(qpti->qregs + HCCTRL) & HCCTRL_HIRQ))
+	while (--loop_count && (sbus_readw(qpti->qregs + HCCTRL) & HCCTRL_HIRQ)) {
 		barrier();
+		cpu_relax();
+	}
 	if (!loop_count)
 		printk(KERN_EMERG "qlogicpti: mbox_command loop timeout #1\n");
 
@@ -737,6 +738,7 @@ static void __init qpti_get_scsi_id(struct qlogicpti *qpti)
 			prom_getintdefault(qpti->sdev->bus->prom_node,
 					   "scsi-initiator-id", 7);
 	qpti->qhost->this_id = qpti->scsi_id;
+	qpti->qhost->max_sectors = 64;
 
 	printk("SCSI ID %d ", qpti->scsi_id);
 }
@@ -819,7 +821,8 @@ int __init qlogicpti_detect(Scsi_Host_Template *tpnt)
 			/* Is this a red snapper? */
 			if (strcmp(sdev->prom_name, "ptisp") &&
 			    strcmp(sdev->prom_name, "PTI,ptisp") &&
-			    strcmp(sdev->prom_name, "QLGC,isp"))
+			    strcmp(sdev->prom_name, "QLGC,isp") &&
+			    strcmp(sdev->prom_name, "SUNW,isp"))
 				continue;
 
 			/* Sometimes Antares cards come up not completely
@@ -1530,4 +1533,4 @@ static Scsi_Host_Template driver_template = QLOGICPTI;
 
 #include "scsi_module.c"
 
-EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");

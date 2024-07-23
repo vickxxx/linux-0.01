@@ -4,11 +4,12 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Colin Ngam
+ * Copyright (C) 1992-1997,2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
-#ifndef _ASM_SN_DMAMAP_H
-#define _ASM_SN_DMAMAP_H
+#ifndef _ASM_IA64_SN_DMAMAP_H
+#define _ASM_IA64_SN_DMAMAP_H
+
+#include <asm/sn/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,36 +41,8 @@ typedef struct dmamap {
 	int		dma_index;	/* Beginning map register to use */
 	int		dma_size;	/* Number of map registers to use */
 	paddr_t		dma_addr;	/* Corresponding bus addr for A24/A32 */
-	caddr_t		dma_virtaddr;	/* Beginning virtual address that is mapped */
+	unsigned long	dma_virtaddr;	/* Beginning virtual address that is mapped */
 } dmamap_t;
-
-struct alenlist_s;
-
-/*
- * Prototypes of exported functions
- */
-extern dmamap_t	*dma_mapalloc(int, int, int, int);
-extern void	dma_mapfree(dmamap_t *);
-extern int	dma_map(dmamap_t *, caddr_t, int);
-extern int	dma_map2(dmamap_t *, caddr_t, caddr_t, int);
-extern paddr_t	dma_mapaddr(dmamap_t *, caddr_t);
-#ifdef IRIX
-extern int	dma_mapbp(dmamap_t *, buf_t *, int);
-#endif
-extern int	dma_map_alenlist(dmamap_t *, struct alenlist_s *, size_t);
-extern uint	ev_kvtoiopnum(caddr_t);
-
-/*
- * These variables are defined in master.d/kernel
- */
-extern struct map *a24map[];
-extern struct map *a32map[];
-
-extern int a24_mapsize;
-extern int a32_mapsize;
-
-extern lock_t dmamaplock;
-extern sv_t dmamapout;
 
 #ifdef __cplusplus
 }
@@ -85,4 +58,4 @@ extern sv_t dmamapout;
 
 #define	DMAMAP_FLAGS	0x7
 
-#endif /* _ASM_SN_DMAMAP_H */
+#endif /* _ASM_IA64_SN_DMAMAP_H */

@@ -4,7 +4,7 @@
  * Supports CPiA based parallel port Video Camera's.
  *
  * (C) Copyright 1999 Bas Huisman <bhuism@cs.utwente.nl>
- * (C) Copyright 1999-2000 Scott J. Bertin <sbertin@mindspring.com>,
+ * (C) Copyright 1999-2000 Scott J. Bertin <sbertin@securenym.net>,
  * (C) Copyright 1999-2000 Peter Pregler <Peter_Pregler@email.com>
  *
  * This program is free software; you can redistribute it and/or modify
@@ -22,6 +22,9 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
+/* define _CPIA_DEBUG_ for verbose debug output (see cpia.h) */
+/* #define _CPIA_DEBUG_  1 */  
+
 #include <linux/config.h>
 #include <linux/version.h>
 
@@ -33,10 +36,9 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/smp_lock.h>
+#include <linux/sched.h>
 
-#ifdef CONFIG_KMOD
 #include <linux/kmod.h>
-#endif
 
 /* #define _CPIA_DEBUG_		define for verbose debug output */
 #include "cpia.h"
@@ -52,65 +54,6 @@ static int cpia_pp_close(void *privdata);
 
 #define ABOUT "Parallel port driver for Vision CPiA based cameras"
 
-/* IEEE 1284 Compatiblity Mode signal names 	*/
-#define nStrobe		PARPORT_CONTROL_STROBE	  /* inverted */
-#define nAutoFd		PARPORT_CONTROL_AUTOFD	  /* inverted */
-#define nInit		PARPORT_CONTROL_INIT
-#define nSelectIn	PARPORT_CONTROL_SELECT
-#define IntrEnable	PARPORT_CONTROL_INTEN	  /* normally zero for no IRQ */
-#define DirBit		PARPORT_CONTROL_DIRECTION /* 0 = Forward, 1 = Reverse	*/
-
-#define nFault		PARPORT_STATUS_ERROR
-#define Select		PARPORT_STATUS_SELECT
-#define PError		PARPORT_STATUS_PAPEROUT
-#define nAck		PARPORT_STATUS_ACK
-#define Busy		PARPORT_STATUS_BUSY	  /* inverted */	
-
-/* some more */
-#define HostClk		nStrobe
-#define HostAck		nAutoFd
-#define nReverseRequest	nInit
-#define Active_1284	nSelectIn
-#define nPeriphRequest	nFault
-#define XFlag		Select
-#define nAckReverse	PError
-#define PeriphClk	nAck
-#define PeriphAck	Busy
-
-/* these can be used to correct for the inversion on some bits */
-#define STATUS_INVERSION_MASK	(Busy)
-#define CONTROL_INVERSION_MASK	(nStrobe|nAutoFd|nSelectIn)
-
-#define ECR_empty	0x01
-#define ECR_full	0x02
-#define ECR_serviceIntr 0x04
-#define ECR_dmaEn	0x08
-#define ECR_nErrIntrEn	0x10
-
-#define ECR_mode_mask	0xE0
-#define ECR_SPP_mode	0x00
-#define ECR_PS2_mode	0x20
-#define ECR_FIFO_mode	0x40
-#define ECR_ECP_mode	0x60
-
-#define ECP_FIFO_SIZE	16
-#define DMA_BUFFER_SIZE               PAGE_SIZE
-	/* for 16bit DMA make sure DMA_BUFFER_SIZE is 16 bit aligned */
-#define PARPORT_CHUNK_SIZE	PAGE_SIZE/* >=2.3.x */
-				/* we read this many bytes at once */
-
-#define GetECRMasked(port,mask)	(parport_read_econtrol(port) & (mask))
-#define GetStatus(port)		((parport_read_status(port)^STATUS_INVERSION_MASK)&(0xf8))
-#define SetStatus(port,val)	parport_write_status(port,(val)^STATUS_INVERSION_MASK)
-#define GetControl(port)	((parport_read_control(port)^CONTROL_INVERSION_MASK)&(0x3f))
-#define SetControl(port,val)	parport_write_control(port,(val)^CONTROL_INVERSION_MASK)
-
-#define GetStatusMasked(port,mask)	(GetStatus(port) & (mask))
-#define GetControlMasked(port,mask)	(GetControl(port) & (mask))
-#define SetControlMasked(port,mask)	SetControl(port,GetControl(port) | (mask));
-#define ClearControlMasked(port,mask)	SetControl(port,GetControl(port)&~(mask));
-#define FrobControlBit(port,mask,value)	SetControl(port,(GetControl(port)&~(mask))|((value)&(mask)));
-
 #define PACKET_LENGTH 	8
 
 /* Magic numbers for defining port-device mappings */
@@ -125,6 +68,8 @@ static char *parport[PARPORT_MAX] = {NULL,};
 
 MODULE_AUTHOR("B. Huisman <bhuism@cs.utwente.nl> & Peter Pregler <Peter_Pregler@email.com>");
 MODULE_DESCRIPTION("Parallel port driver for Vision CPiA based cameras");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(parport, "1-" __MODULE_STRING(PARPORT_MAX) "s");
 MODULE_PARM_DESC(parport, "'auto' or a list of parallel port numbers. Just like lp.");
 #else
@@ -156,33 +101,12 @@ static struct cpia_camera_ops cpia_pp_ops =
 	cpia_pp_streamStop,
 	cpia_pp_streamRead,
 	cpia_pp_close,
-	1
+	1,
+	THIS_MODULE
 };
 
-static struct cam_data *cam_list;
-
-#ifdef _CPIA_DEBUG_
-#define DEB_PORT(port) { \
-u8 controll = GetControl(port); \
-u8 statusss = GetStatus(port); \
-DBG("nsel %c per %c naut %c nstrob %c nak %c busy %c nfaul %c sel %c init %c dir %c\n",\
-((controll & nSelectIn)	? 'U' : 'D'), \
-((statusss & PError)	? 'U' : 'D'), \
-((controll & nAutoFd)	? 'U' : 'D'), \
-((controll & nStrobe)	? 'U' : 'D'), \
-((statusss & nAck)	? 'U' : 'D'), \
-((statusss & Busy)	? 'U' : 'D'), \
-((statusss & nFault)	? 'U' : 'D'), \
-((statusss & Select)	? 'U' : 'D'), \
-((controll & nInit)	? 'U' : 'D'), \
-((controll & DirBit)	? 'R' : 'F')  \
-); }
-#else
-#define DEB_PORT(port) {}
-#endif
-
-#define WHILE_OUT_TIMEOUT (HZ/10)
-#define DMA_TIMEOUT 10*HZ
+static LIST_HEAD(cam_list);
+static spinlock_t cam_list_lock_pp;
 
 /* FIXME */
 static void cpia_parport_enable_irq( struct parport *port ) {
@@ -196,6 +120,14 @@ static void cpia_parport_disable_irq( struct parport *port ) {
 	mdelay(10);
 	return;
 }
+
+/* Special CPiA PPC modes: These are invoked by using the 1284 Extensibility
+ * Link Flag during negotiation */  
+#define UPLOAD_FLAG  0x08
+#define ECP_TRANSFER 0x03
+
+#define PARPORT_CHUNK_SIZE	PAGE_SIZE
+
 
 /****************************************************************************
  *
@@ -239,7 +171,7 @@ static int ReverseSetup(struct pp_cam_entry *cam, int extensibility)
 {
 	int retry;
 	int mode = IEEE1284_MODE_ECP;
-	if(extensibility) mode = 8|3|IEEE1284_EXT_LINK;
+	if(extensibility) mode = UPLOAD_FLAG|ECP_TRANSFER|IEEE1284_EXT_LINK;
 
 	/* After some commands the camera needs extra time before
 	 * it will respond again, so we try up to 3 times */
@@ -339,6 +271,11 @@ static int cpia_pp_streamStop(void *privdata)
 	return 0;
 }
 
+/****************************************************************************
+ *
+ *  cpia_pp_streamRead
+ *
+ ***************************************************************************/
 static int cpia_pp_read(struct parport *port, u8 *buffer, int len)
 {
 	int bytes_read, new_bytes;
@@ -350,11 +287,6 @@ static int cpia_pp_read(struct parport *port, u8 *buffer, int len)
 	return bytes_read;
 }
 
-/****************************************************************************
- *
- *  cpia_pp_streamRead
- *
- ***************************************************************************/
 static int cpia_pp_streamRead(void *privdata, u8 *buffer, int noblock)
 {
 	struct pp_cam_entry *cam = privdata;
@@ -451,8 +383,8 @@ static int cpia_pp_transferCmd(void *privdata, u8 *command, u8 *data)
 			return -EINVAL;
 		}
 		if((err = ReadPacket(cam, buffer, 8)) < 0) {
-			return err;
 			DBG("Error reading command result\n");
+                       return err;
 		}
 		memcpy(data, buffer, databytes);
 	} else if(command[0] == DATA_OUT) {
@@ -502,9 +434,6 @@ static int cpia_pp_open(void *privdata)
 	
 	++cam->open_count;
 	
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
 	return 0;
 }
 
@@ -535,9 +464,6 @@ static int cpia_pp_registerCallback(void *privdata, void (*cb)(void *cbdata), vo
 static int cpia_pp_close(void *privdata)
 {
 	struct pp_cam_entry *cam = privdata;
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 	if (--cam->open_count == 0) {
 		parport_release(cam->pdev);
 	}
@@ -590,33 +516,43 @@ static int cpia_pp_register(struct parport *port)
 		kfree(cam);
 		return -ENXIO;
 	}
-	ADD_TO_LIST(cam_list, cpia);
+	spin_lock( &cam_list_lock_pp );
+	list_add( &cpia->cam_data_list, &cam_list );
+	spin_unlock( &cam_list_lock_pp );
 
 	return 0;
 }
 
 static void cpia_pp_detach (struct parport *port)
 {
-	struct cam_data *cpia;
+	struct list_head *tmp;
+	struct cam_data *cpia = NULL;
+	struct pp_cam_entry *cam;
 
-	for(cpia = cam_list; cpia != NULL; cpia = cpia->next) {
-		struct pp_cam_entry *cam = cpia->lowlevel_data;
+	spin_lock( &cam_list_lock_pp );
+	list_for_each (tmp, &cam_list) {
+		cpia = list_entry(tmp, struct cam_data, cam_data_list);
+		cam = (struct pp_cam_entry *) cpia->lowlevel_data;
 		if (cam && cam->port->number == port->number) {
-			REMOVE_FROM_LIST(cpia);
-			
-			cpia_unregister_camera(cpia);
-			
-			if(cam->open_count > 0) {
-				cpia_pp_close(cam);
-			}
-
-			parport_unregister_device(cam->pdev);
-		
-			kfree(cam);
-			cpia->lowlevel_data = NULL;
+			list_del(&cpia->cam_data_list);
 			break;
 		}
+		cpia = NULL;
 	}
+	spin_unlock( &cam_list_lock_pp );			
+
+	if (!cpia) {
+		DBG("cpia_pp_detach failed to find cam_data in cam_list\n");
+		return;
+	}
+	
+	cam = (struct pp_cam_entry *) cpia->lowlevel_data;	
+	cpia_unregister_camera(cpia);
+	if(cam->open_count > 0) 
+		cpia_pp_close(cam);
+	parport_unregister_device(cam->pdev);
+	cpia->lowlevel_data = NULL;	
+	kfree(cam);
 }
 
 static void cpia_pp_attach (struct parport *port)
@@ -664,11 +600,12 @@ int cpia_pp_init(void)
 		return 0;
 	}
 	
+	spin_lock_init( &cam_list_lock_pp );
+
 	if (parport_register_driver (&cpia_pp_driver)) {
 		LOG ("unable to register with parport\n");
 		return -EIO;
 	}
-
 	return 0;
 }
 
@@ -715,15 +652,6 @@ void cleanup_module(void)
 
 static int __init cpia_pp_setup(char *str)
 {
-#if 0
-	/* Is this only a 2.2ism? -jerdfelt */
-	if (!str) {
-		if (ints[0] == 0 || ints[1] == 0) {
-			/* disable driver on "cpia_pp=" or "cpia_pp=0" */
-			parport_nr[0] = PPCPIA_PARPORT_OFF;
-		}
-	} else
-#endif
 	if (!strncmp(str, "parport", 7)) {
 		int n = simple_strtoul(str + 7, NULL, 10);
 		if (parport_ptr < PARPORT_MAX) {

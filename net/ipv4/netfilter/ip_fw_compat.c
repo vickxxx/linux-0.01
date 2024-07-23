@@ -9,6 +9,7 @@ struct notifier_block;
 #include <linux/inetdevice.h>
 #include <linux/netdevice.h>
 #include <linux/module.h>
+#include <asm/uaccess.h>
 #include <net/ip.h>
 #include <net/route.h>
 #include <linux/netfilter_ipv4/compat_firewall.h>
@@ -46,6 +47,12 @@ check_for_demasq(struct sk_buff **pskb);
 extern int __init masq_init(void);
 extern void masq_cleanup(void);
 
+#ifdef CONFIG_IP_VS
+/* From ip_vs_core.c */
+extern unsigned int
+check_for_ip_vs_out(struct sk_buff **skb_p, int (*okfn)(struct sk_buff *));
+#endif
+
 /* They call these; we do what they want. */
 int register_firewall(int pf, struct firewall_ops *fw)
 {
@@ -68,21 +75,6 @@ int unregister_firewall(int pf, struct firewall_ops *fw)
 	return 0;
 }
 
-static inline void
-confirm_connection(struct sk_buff *skb)
-{
-	if (skb->nfct) {
-		struct ip_conntrack *ct
-			= (struct ip_conntrack *)skb->nfct->master;
-		/* ctinfo is the index of the nfct inside the conntrack */
-		enum ip_conntrack_info ctinfo = skb->nfct - ct->infos;
-
-		if ((ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED)
-		    && !(ct->status & IPS_CONFIRMED))
-			ip_conntrack_confirm(ct);
-	}
-}
-
 static unsigned int
 fw_in(unsigned int hooknum,
       struct sk_buff **pskb,
@@ -95,7 +87,18 @@ fw_in(unsigned int hooknum,
 
 	/* Assume worse case: any hook could change packet */
 	(*pskb)->nfcache |= NFC_UNKNOWN | NFC_ALTERED;
-	(*pskb)->ip_summed = CHECKSUM_NONE;
+	if ((*pskb)->ip_summed == CHECKSUM_HW)
+		(*pskb)->ip_summed = CHECKSUM_NONE;
+
+	/* Firewall rules can alter TOS: raw socket (tcpdump) may have
+           clone of incoming skb: don't disturb it --RR */
+	if (skb_cloned(*pskb) && !(*pskb)->sk) {
+		struct sk_buff *nskb = skb_copy(*pskb, GFP_ATOMIC);
+		if (!nskb)
+			return NF_DROP;
+		kfree_skb(*pskb);
+		*pskb = nskb;
+	}
 
 	switch (hooknum) {
 	case NF_IP_PRE_ROUTING:
@@ -105,7 +108,7 @@ fw_in(unsigned int hooknum,
 					  (*pskb)->nh.raw, &redirpt, pskb);
 
 		if ((*pskb)->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-			*pskb = ip_ct_gather_frags(*pskb);
+			*pskb = ip_ct_gather_frags(*pskb, IP_DEFRAG_CONNTRACK_IN);
 
 			if (!*pskb)
 				return NF_STOLEN;
@@ -132,10 +135,13 @@ fw_in(unsigned int hooknum,
 		if (ret == FW_ACCEPT || ret == FW_SKIP) {
 			if (fwops->fw_acct_out)
 				fwops->fw_acct_out(fwops, PF_INET,
-						   (struct net_device *)in,
+						   (struct net_device *)out,
 						   (*pskb)->nh.raw, &redirpt,
 						   pskb);
-			confirm_connection(*pskb);
+
+			/* ip_conntrack_confirm return NF_DROP or NF_ACCEPT */
+			if (ip_conntrack_confirm(*pskb) == NF_DROP)
+				ret = FW_BLOCK;
 		}
 		break;
 	}
@@ -172,8 +178,14 @@ fw_in(unsigned int hooknum,
 		return NF_ACCEPT;
 
 	case FW_MASQUERADE:
-		if (hooknum == NF_IP_FORWARD)
+		if (hooknum == NF_IP_FORWARD) {
+#ifdef CONFIG_IP_VS
+                        /* check if it is for ip_vs */
+                        if (check_for_ip_vs_out(pskb, okfn) == NF_STOLEN)
+                                return NF_STOLEN;
+#endif
 			return do_masquerade(pskb, out);
+                }
 		else return NF_ACCEPT;
 
 	case FW_REDIRECT:
@@ -193,18 +205,31 @@ static unsigned int fw_confirm(unsigned int hooknum,
 			       const struct net_device *out,
 			       int (*okfn)(struct sk_buff *))
 {
-	confirm_connection(*pskb);
-	return NF_ACCEPT;
+	return ip_conntrack_confirm(*pskb);
 }
 
-extern int ip_fw_ctl(int optval, void *user, unsigned int len);
+extern int ip_fw_ctl(int optval, void *m, unsigned int len);
 
 static int sock_fn(struct sock *sk, int optval, void *user, unsigned int len)
 {
+	/* MAX of:
+	   2.2: sizeof(struct ip_fwtest) (~14x4 + 3x4 = 17x4)
+	   2.2: sizeof(struct ip_fwnew) (~1x4 + 15x4 + 3x4 + 3x4 = 22x4)
+	   2.0: sizeof(struct ip_fw) (~25x4)
+
+	   We can't include both 2.0 and 2.2 headers, they conflict.
+	   Hence, 200 is a good number. --RR */
+	char tmp_fw[200];
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	return -ip_fw_ctl(optval, user, len);
+	if (len > sizeof(tmp_fw) || len < 1)
+		return -EINVAL;
+
+	if (copy_from_user(&tmp_fw, user, len))
+		return -EFAULT;
+
+	return -ip_fw_ctl(optval, &tmp_fw, len);
 }
 
 static struct nf_hook_ops preroute_ops

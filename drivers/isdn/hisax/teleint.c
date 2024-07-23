@@ -1,10 +1,12 @@
-/* $Id: teleint.c,v 1.14 2000/11/24 17:05:38 kai Exp $
+/* $Id: teleint.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * teleint.c     low level stuff for TeleInt isdn cards
+ * low level stuff for TeleInt isdn cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -17,7 +19,7 @@
 
 extern const char *CardType[];
 
-const char *TeleInt_revision = "$Revision: 1.14 $";
+const char *TeleInt_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)

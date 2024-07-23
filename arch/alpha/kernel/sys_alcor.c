@@ -15,6 +15,7 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/reboot.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
@@ -219,10 +220,46 @@ alcor_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 static void
 alcor_kill_arch(int mode)
 {
-	/* Who said DEC engineer's have no sense of humor? ;-)  */
-	if (alpha_using_srm) {
-		*(vuip) GRU_RESET = 0x0000dead;
-		mb();
+	cia_kill_arch(mode);
+
+#ifndef ALPHA_RESTORE_SRM_SETUP
+	switch(mode) {
+	case LINUX_REBOOT_CMD_RESTART:
+		/* Who said DEC engineer's have no sense of humor? ;-)  */
+		if (alpha_using_srm) {
+			*(vuip) GRU_RESET = 0x0000dead;
+			mb();
+		}
+		break;
+	case LINUX_REBOOT_CMD_HALT:
+		break;
+	case LINUX_REBOOT_CMD_POWER_OFF:
+		break;
+	}
+
+	halt();
+#endif
+}
+
+static void __init
+alcor_init_pci(void)
+{
+	struct pci_dev *dev;
+
+	cia_init_pci();
+
+	/*
+	 * Now we can look to see if we are really running on an XLT-type
+	 * motherboard, by looking for a 21040 TULIP in slot 6, which is
+	 * built into XLT and BRET/MAVERICK, but not available on ALCOR.
+	 */
+	dev = pci_find_device(PCI_VENDOR_ID_DEC,
+			      PCI_DEVICE_ID_DEC_TULIP,
+			      NULL);
+	if (dev && dev->devfn == PCI_DEVFN(6,0)) {
+		alpha_mv.sys.cia.gru_int_req_bits = XLT_GRU_INT_REQ_BITS; 
+		printk(KERN_INFO "%s: Detected AS500 or XLT motherboard.\n",
+		       __FUNCTION__);
 	}
 }
 
@@ -239,7 +276,7 @@ struct alpha_machine_vector alcor_mv __initmv = {
 	DO_CIA_IO,
 	DO_CIA_BUS,
 	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	max_dma_address:	ALPHA_ALCOR_MAX_DMA_ADDRESS,
 	min_io_address:		EISA_DEFAULT_IO_BASE,
 	min_mem_address:	CIA_DEFAULT_MEM_BASE,
 
@@ -249,7 +286,7 @@ struct alpha_machine_vector alcor_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		cia_init_pci,
+	init_pci:		alcor_init_pci,
 	kill_arch:		alcor_kill_arch,
 	pci_map_irq:		alcor_map_irq,
 	pci_swizzle:		common_swizzle,
@@ -279,7 +316,7 @@ struct alpha_machine_vector xlt_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		cia_init_pci,
+	init_pci:		alcor_init_pci,
 	kill_arch:		alcor_kill_arch,
 	pci_map_irq:		alcor_map_irq,
 	pci_swizzle:		common_swizzle,

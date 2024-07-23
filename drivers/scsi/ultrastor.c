@@ -124,9 +124,7 @@
  * Release ICM slot by clearing first byte on 24F.
  */
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #include <linux/stddef.h>
 #include <linux/string.h>
@@ -259,7 +257,7 @@ static struct ultrastor_config
 } config = {0};
 
 /* Set this to 1 to reset the SCSI bus on error.  */
-int ultrastor_bus_reset = 0;
+int ultrastor_bus_reset;
 
 
 /* Allowed BIOS base addresses (NULL indicates reserved) */
@@ -328,7 +326,7 @@ static void log_ultrastor_abort(register struct ultrastor_config *config,
 {
   static char fmt[80] = "abort %d (%x); MSCP free pool: %x;";
   register int i;
-  int flags;
+  unsigned long flags;
   save_flags(flags);
   cli();
 
@@ -373,14 +371,14 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 	return FALSE;
 
 #ifdef PORT_OVERRIDE
-    if(check_region(PORT_OVERRIDE, 0xc)) {
+    if(!request_region(PORT_OVERRIDE, 0xc, "ultrastor")) {
       printk("Ultrastor I/O space already in use\n");
       return FALSE;
     };
     config.port_address = PORT_OVERRIDE;
 #else
     for (i = 0; i < ARRAY_SIZE(ultrastor_ports_14f); i++) {
-      if(check_region(ultrastor_ports_14f[i], 0x0c)) continue;
+      if(!request_region(ultrastor_ports_14f[i], 0x0c, "ultrastor")) continue;
       config.port_address = ultrastor_ports_14f[i];
 #endif
 
@@ -398,8 +396,9 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 # endif
 #endif
 #ifdef PORT_OVERRIDE
-	    return FALSE;
+	    goto out_release_port;
 #else
+	    release_region(config.port_address, 0x0c);
 	    continue;
 #endif
 	}
@@ -414,8 +413,9 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 # endif
 #endif
 #ifdef PORT_OVERRIDE
-	    return FALSE;
+	    goto out_release_port;
 #else
+	    release_region(config.port_address, 0x0c);
 	    continue;
 #endif
 	}
@@ -427,6 +427,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 # if (ULTRASTOR_DEBUG & UD_DETECT)
 	printk("US14F: detect: no port address found!\n");
 # endif
+	/* all ports probed already released - we can just go straight out */
 	return FALSE;
     }
 #endif
@@ -443,7 +444,6 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
     /* All above tests passed, must be the right thing.  Get some useful
        info. */
 
-    request_region(config.port_address, 0x0c,"ultrastor"); 
     /* Register the I/O space that we use */
 
     *(char *)&config_1 = inb(CONFIG(config.port_address + 0));
@@ -467,7 +467,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 #if (ULTRASTOR_DEBUG & UD_DETECT)
 	printk("US14F: detect: not detected.\n");
 #endif
-	return FALSE;
+	goto out_release_port;
     }
 
     /* Final consistency check, verify previous info. */
@@ -476,7 +476,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 #if (ULTRASTOR_DEBUG & UD_DETECT)
 	    printk("US14F: detect: consistency check failed\n");
 #endif
-	    return FALSE;
+           goto out_release_port;
 	}
 
     /* If we were TRULY paranoid, we could issue a host adapter inquiry
@@ -505,19 +505,22 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
     if (request_irq(config.interrupt, do_ultrastor_interrupt, 0, "Ultrastor", NULL)) {
 	printk("Unable to allocate IRQ%u for UltraStor controller.\n",
 	       config.interrupt);
-	return FALSE;
+	goto out_release_port;
     }
     if (config.dma_channel && request_dma(config.dma_channel,"Ultrastor")) {
 	printk("Unable to allocate DMA channel %u for UltraStor controller.\n",
 	       config.dma_channel);
 	free_irq(config.interrupt, NULL);
-	return FALSE;
+	goto out_release_port;
     }
     tpnt->sg_tablesize = ULTRASTOR_14F_MAX_SG;
     printk("UltraStor driver version" VERSION ".  Using %d SG lists.\n",
 	   ULTRASTOR_14F_MAX_SG);
 
     return TRUE;
+out_release_port:
+    release_region(config.port_address, 0x0c);
+    return FALSE;
 }
 
 static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
@@ -602,6 +605,12 @@ static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
       tpnt->sg_tablesize = ULTRASTOR_24F_MAX_SG;
 
       shpnt = scsi_register(tpnt, 0);
+      if (!shpnt) {
+             printk(KERN_WARNING "(ultrastor:) Could not register scsi device. Aborting registration.\n");
+             free_irq(config.interrupt, do_ultrastor_interrupt);
+             return FALSE;
+      }
+
       shpnt->irq = config.interrupt;
       shpnt->dma_channel = config.dma_channel;
       shpnt->io_port = config.port_address;
@@ -676,7 +685,7 @@ int ultrastor_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
     int mscp_index;
 #endif
     unsigned int status;
-    int flags;
+    unsigned long flags;
 
     /* Next test is for debugging; "can't happen" */
     if ((config.mscp_free & ((1U << ULTRASTOR_MAX_CMDS) - 1)) == 0)
@@ -848,7 +857,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
       {
 	int port0 = (config.slot << 12) | 0xc80;
 	int i;
-	int flags;
+	unsigned long flags;
 	save_flags(flags);
 	cli();
 	strcpy(out, "OGM %d:%x ICM %d:%x ports:  ");
@@ -874,7 +883,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
     if (config.slot ? inb(config.icm_address - 1) == 2 :
 	(inb(SYS_DOORBELL_INTR(config.doorbell_address)) & 1))
       {
-	int flags;
+	unsigned long flags;
 	save_flags(flags);
 	printk("Ux4F: abort while completed command pending\n");
 	restore_flags(flags);
@@ -896,7 +905,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
        and the interrupt handler will call done.  */
     if (config.slot && inb(config.ogm_address - 1) == 0)
       {
-	int flags;
+	unsigned long flags;
 
 	save_flags(flags);
 	cli();
@@ -948,7 +957,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
 
 int ultrastor_reset(Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 {
-    int flags;
+    unsigned long flags;
     register int i;
 #if (ULTRASTOR_DEBUG & UD_RESET)
     printk("US14F: reset: called\n");
@@ -1160,6 +1169,8 @@ static void do_ultrastor_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     ultrastor_interrupt(irq, dev_id, regs);
     spin_unlock_irqrestore(&io_request_lock, flags);
 }
+
+MODULE_LICENSE("GPL");
 
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = ULTRASTOR_14F;

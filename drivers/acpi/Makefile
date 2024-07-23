@@ -1,40 +1,57 @@
 #
 # Makefile for the Linux ACPI interpreter
-#
+# 
 
 O_TARGET := acpi.o
 
-export-objs := ksyms.o
-
 export ACPI_CFLAGS
-ACPI_CFLAGS := -D_LINUX
 
-#
-# CONFIG_ACPI_KERNEL_CONFIG is currently only IA64
-#
-ifdef CONFIG_ACPI_KERNEL_CONFIG
-  ACPI_CFLAGS += -DCONFIG_ACPI_KERNEL_CONFIG_ONLY
+ACPI_CFLAGS	:= -Os 
+
+ifdef CONFIG_ACPI_DEBUG
+  ACPI_CFLAGS	+= -DACPI_DEBUG_OUTPUT
 endif
 
-EXTRA_CFLAGS += -I./include
+EXTRA_CFLAGS	+= $(ACPI_CFLAGS)
 
-EXTRA_CFLAGS += $(ACPI_CFLAGS)
+export-objs 	:= acpi_ksyms.o processor.o
 
-acpi-subdirs := common dispatcher events hardware \
-		interpreter namespace parser resources tables
+obj-$(CONFIG_ACPI)	:= acpi_ksyms.o 
 
-subdir-$(CONFIG_ACPI) += $(acpi-subdirs)
+#
+# ACPI Boot-Time Table Parsing
+#
+obj-$(CONFIG_ACPI_BOOT)		+= tables.o
+obj-$(CONFIG_ACPI_INTERPRETER)	+= blacklist.o
 
-obj-$(CONFIG_ACPI) := $(patsubst %,%.o,$(acpi-subdirs))
-obj-$(CONFIG_ACPI) += os.o ksyms.o
+#
+# ACPI Core Subsystem (Interpreter)
+#
+ifeq ($(CONFIG_ACPI_INTERPRETER),y)
+  obj-y		+= osl.o utils.o
+  subdir-y	+= dispatcher events executer hardware namespace parser \
+		   resources tables utilities
+  obj-y 	+= $(foreach dir,$(subdir-y),$(dir)/$(dir).o)
+endif
 
-ifdef CONFIG_ACPI_KERNEL_CONFIG
-  obj-$(CONFIG_ACPI) += acpiconf.o osconf.o
-else
-  obj-$(CONFIG_ACPI) += driver.o cmbatt.o cpu.o ec.o ksyms.o sys.o table.o power.o
+#
+# ACPI Bus and Device Drivers
+#
+ifeq ($(CONFIG_ACPI_BUS),y)
+  obj-y				+= bus.o motherboard.o 
+  obj-$(CONFIG_ACPI_AC) 	+= ac.o
+  obj-$(CONFIG_ACPI_BATTERY)	+= battery.o
+  obj-$(CONFIG_ACPI_BUTTON)	+= button.o
+  obj-$(CONFIG_ACPI_EC)		+= ec.o
+  obj-$(CONFIG_ACPI_FAN)	+= fan.o
+  obj-$(CONFIG_ACPI_PCI)	+= pci_root.o pci_link.o pci_irq.o pci_bind.o
+  obj-$(CONFIG_ACPI_POWER)	+= power.o
+  obj-$(CONFIG_ACPI_PROCESSOR)	+= processor.o
+  obj-$(CONFIG_ACPI_THERMAL)	+= thermal.o
+  obj-$(CONFIG_ACPI_SYSTEM)	+= system.o
+  obj-$(CONFIG_ACPI_NUMA)	+= numa.o
+  obj-$(CONFIG_ACPI_ASUS)	+= asus_acpi.o
+  obj-$(CONFIG_ACPI_TOSHIBA)	+= toshiba_acpi.o
 endif
 
 include $(TOPDIR)/Rules.make
-
-clean:
-	$(RM) *.o */*.o

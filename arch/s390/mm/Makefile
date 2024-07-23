@@ -1,5 +1,5 @@
 #
-# Makefile for the linux i386-specific parts of the memory manager.
+# Makefile for the linux s390-specific parts of the memory manager.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -8,6 +8,7 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := mm.o
-O_OBJS	 := init.o fault.o ioremap.o extable.o
+
+obj-y	 := init.o fault.o ioremap.o extable.o
 
 include $(TOPDIR)/Rules.make

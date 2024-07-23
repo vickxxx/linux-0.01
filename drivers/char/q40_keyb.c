@@ -21,7 +21,7 @@
 #include <linux/random.h>
 #include <linux/poll.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/keyboard.h>
 #include <asm/bitops.h>
@@ -31,9 +31,6 @@
 #include <asm/irq.h>
 #include <asm/q40ints.h>
 
-/* Some configuration switches are present in the include file... */
-
-#define KBD_REPORT_ERR
 
 /* Simple translation table for the SysRq keys */
 
@@ -215,7 +212,6 @@ static unsigned char e0_keys[128] = {
   0, 0, 0, 0, 0, 0, 0, 0			      /* 0x78-0x7f */
 };
 
-static unsigned int prev_scancode = 0;   /* remember E0, E1 */
 
 int q40kbd_setkeycode(unsigned int scancode, unsigned int keycode)
 {
@@ -246,10 +242,21 @@ int q40kbd_getkeycode(unsigned int scancode)
 int q40kbd_translate(unsigned char scancode, unsigned char *keycode,
 		    char raw_mode)
 {
-  	if (scancode == 0xe0 || scancode == 0xe1) {
+	static int prev_scancode;
+
+	/* special prefix scancodes.. */
+	if (scancode == 0xe0 || scancode == 0xe1) {
 		prev_scancode = scancode;
 		return 0;
- 	}
+	}
+
+	/* 0xFF is sent by a few keyboards, ignore it. 0x00 is error */
+	if (scancode == 0x00 || scancode == 0xff) {
+		prev_scancode = 0;
+		return 0;
+	}
+
+	scancode &= 0x7f;
 
 	if (prev_scancode) {
 	  /*
@@ -347,7 +354,7 @@ static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	spin_lock(&kbd_controller_lock);
 	kbd_pt_regs = regs;
 
-	status = IRQ_KEYB_MASK & master_inb(INTERRUPT_REG);
+	status = Q40_IRQ_KEYB_MASK & master_inb(INTERRUPT_REG);
 	if (status ) 
 	  {
 	    unsigned char scancode,qcode;
@@ -393,12 +400,12 @@ exit:
 #define KBD_NO_DATA	(-1)	/* No data */
 #define KBD_BAD_DATA	(-2)	/* Parity or other error */
 
-static int __init kbd_read_input(void)
+static int __init q40kbd_read_input(void)
 {
 	int retval = KBD_NO_DATA;
 	unsigned char status;
 
-	status = IRQ_KEYB_MASK & master_inb(INTERRUPT_REG);
+	status = Q40_IRQ_KEYB_MASK & master_inb(INTERRUPT_REG);
 	if (status) {
 		unsigned char data = master_inb(KEYCODE_REG);
 
@@ -408,26 +415,21 @@ static int __init kbd_read_input(void)
 	return retval;
 }
 
-extern void q40kbd_leds(unsigned char leds)
-{ /* nothing can be done */ }
 
 static void __init kbd_clear_input(void)
 {
 	int maxread = 100;	/* Random number */
 
 	do {
-		if (kbd_read_input() == KBD_NO_DATA)
+		if (q40kbd_read_input() == KBD_NO_DATA)
 			break;
 	} while (--maxread);
 }
 
 
-void __init q40kbd_init_hw(void)
+int __init q40kbd_init_hw(void)
 {
-#if 0
-	/* Get the keyboard controller registers (incomplete decode) */
-	request_region(0x60, 16, "keyboard");
-#endif
+
 	/* Flush any pending input. */
 	kbd_clear_input();
 
@@ -436,5 +438,6 @@ void __init q40kbd_init_hw(void)
 	master_outb(-1,KEYBOARD_UNLOCK_REG);
 	master_outb(1,KEY_IRQ_ENABLE_REG);
 
+	return 0;
 }
 

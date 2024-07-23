@@ -1,39 +1,33 @@
 /*
- * Almost: $Id: mtdchar.c,v 1.21 2000/12/09 21:15:12 dwmw2 Exp $
- * (With some of the compatibility for previous kernels taken out)
+ * $Id: mtdchar.c,v 1.49 2003/01/24 12:02:58 dwmw2 Exp $
  *
  * Character-device access to raw MTD devices.
+ * Pure 2.4 version - compatibility cruft removed to mtdchar-compat.c
  *
  */
-
-
-#include <linux/mtd/compatmac.h>
 
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mtd/mtd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
 static void mtd_notify_add(struct mtd_info* mtd);
 static void mtd_notify_remove(struct mtd_info* mtd);
+
 static struct mtd_notifier notifier = {
-	mtd_notify_add,
-	mtd_notify_remove,
-	NULL
+	add:	mtd_notify_add,
+	remove:	mtd_notify_remove,
 };
-static devfs_handle_t devfs_dir_handle = NULL;
+
+static devfs_handle_t devfs_dir_handle;
 static devfs_handle_t devfs_rw_handle[MAX_MTD_DEVICES];
 static devfs_handle_t devfs_ro_handle[MAX_MTD_DEVICES];
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
 static loff_t mtd_lseek (struct file *file, loff_t offset, int orig)
-#else
-static int mtd_lseek (struct inode *inode, struct file *file, off_t offset, int orig)
-#endif
 {
 	struct mtd_info *mtd=(struct mtd_info *)file->private_data;
 
@@ -66,7 +60,7 @@ static int mtd_lseek (struct inode *inode, struct file *file, off_t offset, int 
 
 static int mtd_open(struct inode *inode, struct file *file)
 {
-	int minor = MINOR(inode->i_rdev);
+	int minor = minor(inode->i_rdev);
 	int devnum = minor >> 1;
 	struct mtd_info *mtd;
 
@@ -80,10 +74,15 @@ static int mtd_open(struct inode *inode, struct file *file)
 		return -EACCES;
 
 	mtd = get_mtd_device(NULL, devnum);
-		
+	
 	if (!mtd)
 		return -ENODEV;
 	
+	if (MTD_ABSENT == mtd->type) {
+		put_mtd_device(mtd);
+		return -ENODEV;
+	}
+
 	file->private_data = mtd;
 		
 	/* You can't open it RW if it's not a writeable device */
@@ -97,8 +96,7 @@ static int mtd_open(struct inode *inode, struct file *file)
 
 /*====================================================================*/
 
-static release_t mtd_close(struct inode *inode,
-				 struct file *file)
+static int mtd_close(struct inode *inode, struct file *file)
 {
 	struct mtd_info *mtd;
 
@@ -111,100 +109,128 @@ static release_t mtd_close(struct inode *inode,
 	
 	put_mtd_device(mtd);
 
-	release_return(0);
+	return 0;
 } /* mtd_close */
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-#define FILE_POS *ppos
-#else
-#define FILE_POS file->f_pos
-#endif
+/* FIXME: This _really_ needs to die. In 2.5, we should lock the
+   userspace buffer down and use it directly with readv/writev.
+*/
+#define MAX_KMALLOC_SIZE 0x20000
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
 static ssize_t mtd_read(struct file *file, char *buf, size_t count,loff_t *ppos)
-#else
-static int mtd_read(struct inode *inode,struct file *file, char *buf, int count)
-#endif
 {
 	struct mtd_info *mtd = (struct mtd_info *)file->private_data;
 	size_t retlen=0;
+	size_t total_retlen=0;
 	int ret=0;
+	int len;
 	char *kbuf;
+	loff_t pos = *ppos;
 	
 	DEBUG(MTD_DEBUG_LEVEL0,"MTD_read\n");
 
-	if (FILE_POS + count > mtd->size)
-		count = mtd->size - FILE_POS;
+	if (pos < 0 || pos > mtd->size)
+		return 0;
+
+	if (count > mtd->size - pos)
+		count = mtd->size - pos;
 
 	if (!count)
 		return 0;
 	
-	/* FIXME: Use kiovec in 2.3 or 2.2+rawio, or at
-	 * least split the IO into smaller chunks.
-	 */
-	
-	kbuf = vmalloc(count);
-	if (!kbuf)
-		return -ENOMEM;
-	
-	ret = MTD_READ(mtd, FILE_POS, count, &retlen, kbuf);
-	if (!ret) {
-		FILE_POS += retlen;
-		if (copy_to_user(buf, kbuf, retlen))
-			ret = -EFAULT;
+	/* FIXME: Use kiovec in 2.5 to lock down the user's buffers
+	   and pass them directly to the MTD functions */
+	while (count) {
+		if (count > MAX_KMALLOC_SIZE) 
+			len = MAX_KMALLOC_SIZE;
 		else
-			ret = retlen;
+			len = count;
 
+		kbuf=kmalloc(len,GFP_KERNEL);
+		if (!kbuf)
+			return -ENOMEM;
+		
+		ret = MTD_READ(mtd, pos, len, &retlen, kbuf);
+		if (!ret) {
+			pos += retlen;
+			if (copy_to_user(buf, kbuf, retlen)) {
+			        kfree(kbuf);
+				return -EFAULT;
+			}
+			else
+				total_retlen += retlen;
+
+			count -= retlen;
+			buf += retlen;
+		}
+		else {
+			kfree(kbuf);
+			return ret;
+		}
+		
+		kfree(kbuf);
 	}
 	
-	vfree(kbuf);
+	*ppos = pos;
 	
-	return ret;
+	return total_retlen;
 } /* mtd_read */
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
 static ssize_t mtd_write(struct file *file, const char *buf, size_t count,loff_t *ppos)
-#else
-static read_write_t mtd_write(struct inode *inode,struct file *file, const char *buf, count_t count)
-#endif
 {
 	struct mtd_info *mtd = (struct mtd_info *)file->private_data;
 	char *kbuf;
 	size_t retlen;
+	size_t total_retlen=0;
+	loff_t pos = *ppos;
 	int ret=0;
+	int len;
 
 	DEBUG(MTD_DEBUG_LEVEL0,"MTD_write\n");
 	
-	if (FILE_POS == mtd->size)
+	if (pos < 0 || pos >= mtd->size)
 		return -ENOSPC;
-	
-	if (FILE_POS + count > mtd->size)
-		count = mtd->size - FILE_POS;
 
+	if (count > mtd->size - pos)
+		count = mtd->size - pos;
+	
 	if (!count)
 		return 0;
 
-	kbuf=vmalloc(count);
+	while (count) {
+		if (count > MAX_KMALLOC_SIZE) 
+			len = MAX_KMALLOC_SIZE;
+		else
+			len = count;
 
-	if (!kbuf)
-		return -ENOMEM;
-	
-	if (copy_from_user(kbuf, buf, count)) {
-		vfree(kbuf);
-		return -EFAULT;
-	}
+		kbuf=kmalloc(len,GFP_KERNEL);
+		if (!kbuf) {
+			printk("kmalloc is null\n");
+			return -ENOMEM;
+		}
+
+		if (copy_from_user(kbuf, buf, len)) {
+			kfree(kbuf);
+			return -EFAULT;
+		}
 		
-
-	ret = (*(mtd->write))(mtd, FILE_POS, count, &retlen, buf);
+	        ret = (*(mtd->write))(mtd, pos, len, &retlen, kbuf);
+		if (!ret) {
+			pos += retlen;
+			total_retlen += retlen;
+			count -= retlen;
+			buf += retlen;
+		}
+		else {
+			kfree(kbuf);
+			return ret;
+		}
 		
-	if (!ret) {
-		FILE_POS += retlen;
-		ret = retlen;
+		kfree(kbuf);
 	}
+	*ppos = pos;
 
-	vfree(kbuf);
-
-	return ret;
+	return total_retlen;
 } /* mtd_write */
 
 /*======================================================================
@@ -237,6 +263,30 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 	}
 	
 	switch (cmd) {
+	case MEMGETREGIONCOUNT:
+		if (copy_to_user((int *) arg, &(mtd->numeraseregions), sizeof(int)))
+			return -EFAULT;
+		break;
+
+	case MEMGETREGIONINFO:
+	{
+		struct region_info_user ur;
+
+		if (copy_from_user(	&ur, 
+					(struct region_info_user *)arg, 
+					sizeof(struct region_info_user))) {
+			return -EFAULT;
+		}
+
+		if (ur.regionindex >= mtd->numeraseregions)
+			return -EINVAL;
+		if (copy_to_user((struct mtd_erase_region_info *) arg, 
+				&(mtd->eraseregions[ur.regionindex]),
+				sizeof(struct mtd_erase_region_info)))
+			return -EFAULT;
+		break;
+	}
+
 	case MEMGETINFO:
 		if (copy_to_user((struct mtd_info *)arg, mtd,
 				 sizeof(struct mtd_info_user)))
@@ -245,7 +295,12 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 
 	case MEMERASE:
 	{
-		struct erase_info *erase=kmalloc(sizeof(struct erase_info),GFP_KERNEL);
+		struct erase_info *erase;
+
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		erase=kmalloc(sizeof(struct erase_info),GFP_KERNEL);
 		if (!erase)
 			ret = -ENOMEM;
 		else {
@@ -273,15 +328,18 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 			  wq_head is no longer there when the
 			  callback routine tries to wake us up.
 			*/
-			current->state = TASK_UNINTERRUPTIBLE;
-			add_wait_queue(&waitq, &wait);
 			ret = mtd->erase(mtd, erase);
-			if (!ret)
-				schedule();
-			remove_wait_queue(&waitq, &wait);
-			current->state = TASK_RUNNING;
-			if (!ret)
-				ret = (erase->state == MTD_ERASE_FAILED);
+			if (!ret) {
+				set_current_state(TASK_UNINTERRUPTIBLE);
+				add_wait_queue(&waitq, &wait);
+				if (erase->state != MTD_ERASE_DONE &&
+				    erase->state != MTD_ERASE_FAILED)
+					schedule();
+				remove_wait_queue(&waitq, &wait);
+				set_current_state(TASK_RUNNING);
+
+				ret = (erase->state == MTD_ERASE_FAILED)?-EIO:0;
+			}
 			kfree(erase);
 		}
 		break;
@@ -293,6 +351,9 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 		void *databuf;
 		ssize_t retlen;
 		
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
 		if (copy_from_user(&buf, (struct mtd_oob_buf *)arg, sizeof(struct mtd_oob_buf)))
 			return -EFAULT;
 		
@@ -311,12 +372,14 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 		if (!databuf)
 			return -ENOMEM;
 		
-		if (copy_from_user(databuf, buf.ptr, buf.length))
+		if (copy_from_user(databuf, buf.ptr, buf.length)) {
+			kfree(databuf);
 			return -EFAULT;
+		}
 
 		ret = (mtd->write_oob)(mtd, buf.start, buf.length, &retlen, databuf);
 
-		if (copy_to_user((void *)arg + sizeof(loff_t), &retlen, sizeof(ssize_t)))
+		if (copy_to_user((void *)arg + sizeof(u_int32_t), &retlen, sizeof(u_int32_t)))
 			ret = -EFAULT;
 
 		kfree(databuf);
@@ -350,7 +413,7 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 		
 		ret = (mtd->read_oob)(mtd, buf.start, buf.length, &retlen, databuf);
 
-		if (copy_to_user((void *)arg + sizeof(loff_t), &retlen, sizeof(ssize_t)))
+		if (copy_to_user((void *)arg + sizeof(u_int32_t), &retlen, sizeof(u_int32_t)))
 			ret = -EFAULT;
 		else if (retlen && copy_to_user(buf.ptr, databuf, retlen))
 			ret = -EFAULT;
@@ -370,6 +433,7 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 			ret = -EOPNOTSUPP;
 		else
 			ret = mtd->lock(mtd, adrs[0], adrs[1]);
+		break;
 	}
 
 	case MEMUNLOCK:
@@ -383,14 +447,89 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 			ret = -EOPNOTSUPP;
 		else
 			ret = mtd->unlock(mtd, adrs[0], adrs[1]);
+		break;
+	}
+
+	case MEMWRITEDATA:
+	{
+		struct mtd_oob_buf buf;
+		void *databuf;
+		ssize_t retlen;
+		
+		if (copy_from_user(&buf, (struct mtd_oob_buf *)arg, sizeof(struct mtd_oob_buf)))
+			return -EFAULT;
+		
+		if (buf.length > 0x4096)
+			return -EINVAL;
+
+		if (!mtd->write_ecc)
+			ret = -EOPNOTSUPP;
+		else
+			ret = verify_area(VERIFY_READ, (char *)buf.ptr, buf.length);
+
+		if (ret)
+			return ret;
+
+		databuf = kmalloc(buf.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+		
+		if (copy_from_user(databuf, buf.ptr, buf.length)) {
+			kfree(databuf);
+			return -EFAULT;
+		}
+
+		ret = (mtd->write_ecc)(mtd, buf.start, buf.length, &retlen, databuf, NULL, 0);
+
+		if (copy_to_user((void *)arg + sizeof(u_int32_t), &retlen, sizeof(u_int32_t)))
+			ret = -EFAULT;
+
+		kfree(databuf);
+		break;
+
+	}
+
+	case MEMREADDATA:
+	{
+		struct mtd_oob_buf buf;
+		void *databuf;
+		ssize_t retlen = 0;
+
+		if (copy_from_user(&buf, (struct mtd_oob_buf *)arg, sizeof(struct mtd_oob_buf)))
+			return -EFAULT;
+		
+		if (buf.length > 0x4096)
+			return -EINVAL;
+
+		if (!mtd->read_ecc)
+			ret = -EOPNOTSUPP;
+		else
+			ret = verify_area(VERIFY_WRITE, (char *)buf.ptr, buf.length);
+
+		if (ret)
+			return ret;
+
+		databuf = kmalloc(buf.length, GFP_KERNEL);
+		if (!databuf)
+			return -ENOMEM;
+		
+		ret = (mtd->read_ecc)(mtd, buf.start, buf.length, &retlen, databuf, NULL, 0);
+
+		if (copy_to_user((void *)arg + sizeof(u_int32_t), &retlen, sizeof(u_int32_t)))
+			ret = -EFAULT;
+		else if (retlen && copy_to_user(buf.ptr, databuf, retlen))
+			ret = -EFAULT;
+		
+		kfree(databuf);
+		break;
 	}
 
 		
 	default:
-	  printk("Invalid ioctl %x (MEMGETINFO = %x)\n",cmd, MEMGETINFO);
-		ret = -EINVAL;
+		DEBUG(MTD_DEBUG_LEVEL0, "Invalid ioctl %x (MEMGETINFO = %x)\n", cmd, MEMGETINFO);
+		ret = -ENOTTY;
 	}
-	
+
 	return ret;
 } /* memory_ioctl */
 
@@ -425,7 +564,7 @@ static void mtd_notify_add(struct mtd_info* mtd)
 	sprintf(name, "%dro", mtd->index);
 	devfs_ro_handle[mtd->index] = devfs_register(devfs_dir_handle, name,
 			DEVFS_FL_DEFAULT, MTD_CHAR_MAJOR, mtd->index*2+1,
-			S_IFCHR | S_IRUGO | S_IWUGO,
+			S_IFCHR | S_IRUGO,
 			&mtd_fops, NULL);
 }
 
@@ -439,18 +578,9 @@ static void mtd_notify_remove(struct mtd_info* mtd)
 }
 #endif
 
-#if LINUX_VERSION_CODE < 0x20212 && defined(MODULE)
-#define init_mtdchar init_module
-#define cleanup_mtdchar cleanup_module
-#endif
-
-mod_init_t init_mtdchar(void)
+static int __init init_mtdchar(void)
 {
 #ifdef CONFIG_DEVFS_FS
-	int i;
-	char name[8];
-	struct mtd_info* mtd;
-
 	if (devfs_register_chrdev(MTD_CHAR_MAJOR, "mtd", &mtd_fops))
 	{
 		printk(KERN_NOTICE "Can't allocate major number %d for Memory Technology Devices.\n",
@@ -473,7 +603,7 @@ mod_init_t init_mtdchar(void)
 	return 0;
 }
 
-mod_exit_t cleanup_mtdchar(void)
+static void __exit cleanup_mtdchar(void)
 {
 #ifdef CONFIG_DEVFS_FS
 	unregister_mtd_user(&notifier);
@@ -486,3 +616,8 @@ mod_exit_t cleanup_mtdchar(void)
 
 module_init(init_mtdchar);
 module_exit(cleanup_mtdchar);
+
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
+MODULE_DESCRIPTION("Direct character-device access to MTD devices");

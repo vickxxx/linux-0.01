@@ -479,9 +479,9 @@ static int set_recmask(sb_devc * devc, int mask)
 						regimageL |= sb16_recmasks_L[i];
 						regimageR |= sb16_recmasks_R[i];
 					}
-					sb_setmixer (devc, SB16_IMASK_L, regimageL);
-					sb_setmixer (devc, SB16_IMASK_R, regimageR);
 				}
+				sb_setmixer (devc, SB16_IMASK_L, regimageL);
+				sb_setmixer (devc, SB16_IMASK_R, regimageR);
 			}
 			break;
 	}
@@ -748,6 +748,10 @@ int sb_mixer_init(sb_devc * devc, struct module *owner)
 
 void sb_mixer_unload(sb_devc *devc)
 {
+	if (devc->my_mixerdev == -1)
+		return;
+
+	kfree(mixer_devs[devc->my_mixerdev]);
 	sound_unload_mixerdev(devc->my_mixerdev);
 	sbmixnum--;
 }

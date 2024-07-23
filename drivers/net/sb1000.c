@@ -44,7 +44,7 @@ static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
@@ -76,7 +76,6 @@ static const int SB1000_MRU = 1500; /* octects */
 struct sb1000_private {
 	struct sk_buff *rx_skb[NPIDS];
 	short rx_dlen[NPIDS];
-	unsigned int rx_bytes;
 	unsigned int rx_frames;
 	short rx_error_count;
 	short rx_error_dpc_count;
@@ -138,6 +137,14 @@ static inline int sb1000_set_PIDs(const int ioaddr[], const char* name,
 static inline int sb1000_rx(struct net_device *dev);
 static inline void sb1000_error_dpc(struct net_device *dev);
 
+static struct isapnp_device_id id_table[] = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('G','I','C'), ISAPNP_FUNCTION(0x1000), 0 },
+	{0}
+};
+
+MODULE_DEVICE_TABLE(isapnp, id_table);
+
 /* probe for SB1000 using Plug-n-Play mechanism */
 int
 sb1000_probe(struct net_device *dev)
@@ -184,7 +191,7 @@ sb1000_probe(struct net_device *dev)
 		ioaddr[0]=idev->resource[0].start;
 		ioaddr[1]=idev->resource[1].start;
 		
-		irq = idev->irq;
+		irq = idev->irq_resource[0].start;
 
 		/* check I/O base and IRQ */
 		if (dev->base_addr != 0 && dev->base_addr != ioaddr[0])
@@ -197,7 +204,12 @@ sb1000_probe(struct net_device *dev)
 		/*
 		 *	Ok set it up.
 		 */
-		 
+		if (!request_region(ioaddr[0], 16, dev->name))
+			continue;
+		if (!request_region(ioaddr[1], 16, dev->name)) {
+			release_region(ioaddr[0], 16);
+			continue;
+		}
 		 
 		dev->base_addr = ioaddr[0];
 		/* rmem_end holds the second I/O address - fv */
@@ -255,9 +267,6 @@ sb1000_probe(struct net_device *dev)
 
 		/* Lock resources */
 
-		request_region(ioaddr[0], 16, dev->name);
-		request_region(ioaddr[1], 16, dev->name);
-
 		return 0;
 	}
 }
@@ -267,7 +276,7 @@ sb1000_probe(struct net_device *dev)
  * SB1000 hardware routines to be used during open/configuration phases
  */
 
-const int TimeOutJiffies = (int)(8.75 * HZ);
+const int TimeOutJiffies = (875 * HZ) / 100;
 
 static inline void nicedelay(unsigned long usecs)
 {
@@ -290,7 +299,7 @@ card_wait_for_busy_clear(const int ioaddr[], const char* name)
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(0);
 		a = inb(ioaddr[0] + 7);
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: card_wait_for_busy_clear timeout\n",
 				name);
 			return -ETIME;
@@ -314,7 +323,7 @@ card_wait_for_ready(const int ioaddr[], const char* name, unsigned char in[])
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(0);
 		a = inb(ioaddr[1] + 6);
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: card_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -388,7 +397,7 @@ sb1000_wait_for_ready(const int ioaddr[], const char* name)
 
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x80) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -396,7 +405,7 @@ sb1000_wait_for_ready(const int ioaddr[], const char* name)
 	}
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (!(inb(ioaddr[1] + 6) & 0x40)) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -414,7 +423,7 @@ sb1000_wait_for_ready_clear(const int ioaddr[], const char* name)
 
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x80) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready_clear timeout\n",
 				name);
 			return -ETIME;
@@ -422,7 +431,7 @@ sb1000_wait_for_ready_clear(const int ioaddr[], const char* name)
 	}
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x40) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready_clear timeout\n",
 				name);
 			return -ETIME;
@@ -887,9 +896,9 @@ printk("cm0: IP identification: %02x%02x  fragment offset: %02x%02x\n", buffer[3
 	/* datagram completed: send to upper level */
 	skb_trim(skb, dlen);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	stats->rx_bytes+=dlen;
 	stats->rx_packets++;
-	lp->rx_bytes += dlen;
 	lp->rx_skb[ns] = 0;
 	lp->rx_session_id[ns] |= 0x40;
 	return 0;
@@ -955,8 +964,6 @@ sb1000_open(struct net_device *dev)
 	/* rmem_end holds the second I/O address - fv */
 	ioaddr[1] = dev->rmem_end;
 	name = dev->name;
-	request_region(ioaddr[0], SB1000_IO_EXTENT, "sb1000");
-	request_region(ioaddr[1], SB1000_IO_EXTENT, "sb1000");
 
 	/* initialize sb1000 */
 	if ((status = sb1000_reset(ioaddr, name)))
@@ -974,7 +981,6 @@ sb1000_open(struct net_device *dev)
 	lp->rx_dlen[1] = 0;
 	lp->rx_dlen[2] = 0;
 	lp->rx_dlen[3] = 0;
-	lp->rx_bytes = 0;
 	lp->rx_frames = 0;
 	lp->rx_error_count = 0;
 	lp->rx_error_dpc_count = 0;
@@ -1029,7 +1035,7 @@ static int sb1000_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 
 	switch (cmd) {
 	case SIOCGCMSTATS:		/* get statistics */
-		stats[0] = lp->rx_bytes;
+		stats[0] = lp->stats.rx_bytes;
 		stats[1] = lp->rx_frames;
 		stats[2] = lp->stats.rx_packets;
 		stats[3] = lp->stats.rx_errors;
@@ -1203,8 +1209,12 @@ static int sb1000_close(struct net_device *dev)
 #ifdef MODULE
 MODULE_AUTHOR("Franco Venturi <fventuri@mediaone.net>");
 MODULE_DESCRIPTION("General Instruments SB1000 driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "1-2i");
 MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "SB1000 I/O base addresses");
+MODULE_PARM_DESC(irq, "SB1000 IRQ number");
 
 static struct net_device dev_sb1000;
 static int io[2];

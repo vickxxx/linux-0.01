@@ -3,6 +3,7 @@
  * Revised: Mon Dec 28 21:59:02 1998 by faith@acm.org
  * Author: Rickard E. Faith, faith@cs.unc.edu
  * Copyright 1992-1996, 1998 Rickard E. Faith (faith@acm.org)
+ * Shared IRQ supported added 7/7/2001  Alan Cox <alan@redhat.com>
 
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -560,7 +561,8 @@ static void print_banner( struct Scsi_Host *shpnt )
    printk( "\n" );
 }
 
-static int __init fdomain_setup( char *str )
+/* no __init, may be called from fdomain_stubs.c */
+int fdomain_setup( char *str )
 {
 	int ints[4];
 
@@ -587,9 +589,7 @@ __setup("fdomain=", fdomain_setup);
 
 static void do_pause( unsigned amount )	/* Pause for amount*10 milliseconds */
 {
-   do {
-	udelay(10*1000);
-   } while (--amount);
+   mdelay(10*amount);
 }
 
 inline static void fdomain_make_bus_idle( void )
@@ -730,13 +730,13 @@ static int fdomain_isa_detect( int *irq, int *iobase )
       switch (Quantum) {
       case 2:			/* ISA_200S */
       case 3:			/* ISA_250MG */
-	 base = readb(bios_base + 0x1fa2) + (readb(bios_base + 0x1fa3) << 8);
+	 base = isa_readb(bios_base + 0x1fa2) + (isa_readb(bios_base + 0x1fa3) << 8);
 	 break;
       case 4:			/* ISA_200S (another one) */
-	 base = readb(bios_base + 0x1fa3) + (readb(bios_base + 0x1fa4) << 8);
+	 base = isa_readb(bios_base + 0x1fa3) + (isa_readb(bios_base + 0x1fa4) << 8);
 	 break;
       default:
-	 base = readb(bios_base + 0x1fcc) + (readb(bios_base + 0x1fcd) << 8);
+	 base = isa_readb(bios_base + 0x1fcc) + (isa_readb(bios_base + 0x1fcd) << 8);
 	 break;
       }
    
@@ -805,7 +805,7 @@ static int fdomain_isa_detect( int *irq, int *iobase )
    the PCI configuration registers. */
 
 #ifdef CONFIG_PCI
-static int fdomain_pci_bios_detect( int *irq, int *iobase )
+static int fdomain_pci_bios_detect( int *irq, int *iobase, struct pci_dev **ret_pdev )
 {
    unsigned int     pci_irq;                /* PCI interrupt line */
    unsigned long    pci_base;               /* PCI I/O base address */
@@ -849,6 +849,7 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase )
 
    *irq    = pci_irq;
    *iobase = pci_base;
+   *ret_pdev = pdev;
 
 #if DEBUG_DETECT
    printk( "scsi: <fdomain> TMC-3260 detect:"
@@ -875,6 +876,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 {
    int              retcode;
    struct Scsi_Host *shpnt;
+   struct pci_dev *pdev = NULL;
 #if DO_DETECT
    int i = 0;
    int j = 0;
@@ -910,7 +912,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 
 #ifdef CONFIG_PCI
 				/* Try PCI detection first */
-      flag = fdomain_pci_bios_detect( &interrupt_level, &port_base );
+      flag = fdomain_pci_bios_detect( &interrupt_level, &port_base, &pdev );
 #endif
       if (!flag) {
 				/* Then try ISA bus detection */
@@ -969,6 +971,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    	return 0;
    shpnt->irq = interrupt_level;
    shpnt->io_port = port_base;
+   scsi_set_pci_device(shpnt, pdev);
    shpnt->n_io_port = 0x10;
    print_banner( shpnt );
 
@@ -981,7 +984,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       /* Register the IRQ with the kernel */
 
       retcode = request_irq( interrupt_level,
-			     do_fdomain_16x0_intr, 0, "fdomain", NULL);
+			     do_fdomain_16x0_intr, pdev?SA_SHIRQ:0, "fdomain", shpnt);
 
       if (retcode < 0) {
 	 if (retcode == -EINVAL) {
@@ -1228,8 +1231,11 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 				   interruptions while this routine is
 				   running. */
 
-   /* sti();			 Yes, we really want sti() here if we want to lock up our machine */
-   
+   /* Check for other IRQ sources */
+   if((inb(TMC_Status_port)&0x01)==0)   
+   	return;
+
+   /* It is our IRQ */   	
    outb( 0x00, Interrupt_Cntl_port );
 
    /* We usually have one spurious interrupt after each command.  Ignore it. */
@@ -1950,7 +1956,7 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
 	 offset = bios_base + 0x1f31 + drive * 25;
 	 break;
       }
-      memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
+      isa_memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
       info_array[0] = i.heads;
       info_array[1] = i.sectors;
       info_array[2] = i.cylinders;
@@ -2030,7 +2036,20 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
    return 0;
 }
 
+int fdomain_16x0_release(struct Scsi_Host *shpnt)
+{
+	if (shpnt->irq)
+		free_irq(shpnt->irq, shpnt);
+	if (shpnt->io_port && shpnt->n_io_port)
+		release_region(shpnt->io_port, shpnt->n_io_port);
+	return 0;
+}
+
+MODULE_LICENSE("GPL");
+
+#ifndef PCMCIA
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = FDOMAIN_16X0;
 
 #include "scsi_module.c"
+#endif

@@ -64,7 +64,7 @@ not be guaranteed. There are several ways to assure this:
 #include <linux/interrupt.h>
 #include <linux/time.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
 
@@ -367,6 +367,7 @@ static ssize_t slm_read( struct file *file, char *buf, size_t count,
 
 {
 	struct inode *node = file->f_dentry->d_inode;
+	loff_t pos = *ppos;
 	unsigned long page;
 	int length;
 	int end;
@@ -378,19 +379,22 @@ static ssize_t slm_read( struct file *file, char *buf, size_t count,
 	
 	length = slm_getstats( (char *)page, MINOR(node->i_rdev) );
 	if (length < 0) {
-		free_page( page );
-		return( length );
+		count = length;
+		goto out;
 	}
-	if (file->f_pos >= length) {
-		free_page( page );
-		return( 0 );
+	if (pos != (unsigned) pos || pos >= length) {
+		count = 0;
+		goto out;
 	}
-	if (count + file->f_pos > length)
-		count = length - file->f_pos;
-	end = count + file->f_pos;
-	copy_to_user( buf, (char *)page + file->f_pos, count );
-	free_page( page );
-	file->f_pos = end;
+	if (count > length - pos)
+		count = length - pos;
+	end = count + pos;
+	if (copy_to_user(buf, (char *)page + pos, count)) {
+		count = -EFAULT;
+		goto out;
+	}
+	*ppos = end;
+out:	free_page( page );
 	return( count );
 }
 
@@ -648,7 +652,8 @@ static ssize_t slm_write( struct file *file, const char *buf, size_t count,
 	if (filled + n > BufferSize)
 		n = BufferSize - filled;
 
-	copy_from_user( BufferP, buf, n );
+	if (copy_from_user(BufferP, buf, n))
+		return -EFAULT;
 	BufferP += n;
 	filled += n;
 
@@ -725,8 +730,9 @@ static int slm_ioctl( struct inode *inode, struct file *file,
 			if (put_user(stat,
     	    	    	    	     (long *)&((struct SLM_status *)arg)->stat))
     	    	    	    	return -EFAULT;
-			copy_to_user( ((struct SLM_status *)arg)->str, str,
-						 strlen(str) + 1 );
+			if (copy_to_user( ((struct SLM_status *)arg)->str, str,
+						 strlen(str) + 1))
+				return -EFAULT;
 		}
 		return( stat );
 	  }
@@ -734,10 +740,6 @@ static int slm_ioctl( struct inode *inode, struct file *file,
 	  case SLMIOGPSIZE: {	/* get paper size */
 		int w, h;
 		
-		err = verify_area( VERIFY_WRITE, (long *)arg,
-						   sizeof(struct SLM_paper_size) );
-		if (err) return( err );
-
 		if ((err = slm_get_pagesize( device, &w, &h ))) return( err );
 		
     	    	if (put_user(w, (long *)&((struct SLM_paper_size *)arg)->width))
@@ -1002,7 +1004,7 @@ int slm_init( void )
 		return -EBUSY;
 	}
 	
-	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, NULL, "SLM" ))) {
+	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, "SLM" ))) {
 		printk( KERN_ERR "Unable to get SLM ST-Ram buffer.\n" );
 		devfs_unregister_chrdev( MAJOR_NR, "slm" );
 		return -ENOMEM;

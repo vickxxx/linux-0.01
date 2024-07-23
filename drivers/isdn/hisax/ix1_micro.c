@@ -1,56 +1,32 @@
-/* $Id: ix1_micro.c,v 2.10 2000/11/24 17:05:38 kai Exp $
+/* $Id: ix1_micro.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * ix1_micro.c  low level stuff for ITK ix1-micro Rev.2 isdn cards
- *              derived from the original file teles3.c from Karsten Keil
+ * low level stuff for ITK ix1-micro Rev.2 isdn cards
+ * derived from the original file teles3.c from Karsten Keil
  *
- * Copyright (C) 1997 Klaus-Peter Nischke (ITK AG) (for the modifications to
- *                                                  the original file teles.c)
+ * Author       Klaus-Peter Nischke
+ * Copyright    by Klaus-Peter Nischke, ITK AG
+ *                                   <klaus@nischke.do.eunet.de>
+ *              by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Thanks to    Jan den Ouden
- *              Fritz Elfert
- *              Beat Doebeli
- *
+ * Klaus-Peter Nischke
+ * Deusener Str. 287
+ * 44369 Dortmund
+ * Germany
  */
-
-/*
-   For the modification done by the author the following terms and conditions
-   apply (GNU PUBLIC LICENSE)
-
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-
-   You may contact Klaus-Peter Nischke by email: klaus@nischke.do.eunet.de
-   or by conventional mail:
-
-   Klaus-Peter Nischke
-   Deusener Str. 287
-   44369 Dortmund
-   Germany
- */
-
 
 #define __NO_VERSION__
 #include <linux/init.h>
+#include <linux/isapnp.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *ix1_revision = "$Revision: 2.10 $";
+const char *ix1_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -243,6 +219,21 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
+#ifdef __ISAPNP__
+static struct isapnp_device_id itk_ids[] __initdata = {
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25), 
+	  (unsigned long) "ITK micro 2" },
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29), 
+	  (unsigned long) "ITK micro 2." },
+	{ 0, }
+};
+
+static struct isapnp_device_id *idev = &itk_ids[0];
+static struct pci_bus *pnp_c __devinitdata = NULL;
+#endif
+
 
 int __init
 setup_ix1micro(struct IsdnCard *card)
@@ -255,6 +246,45 @@ setup_ix1micro(struct IsdnCard *card)
 	if (cs->typ != ISDN_CTYPE_IX1MICROR2)
 		return (0);
 
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pci_bus *pb;
+		struct pci_dev *pd;
+
+		while(idev->card_vendor) {
+			if ((pb = isapnp_find_card(idev->card_vendor,
+				idev->card_device, pnp_c))) {
+				pnp_c = pb;
+				pd = NULL;
+				if ((pd = isapnp_find_dev(pnp_c,
+					idev->vendor, idev->function, pd))) {
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)idev->driver_data);
+					pd->prepare(pd);
+					pd->deactivate(pd);
+					pd->activate(pd);
+					card->para[1] = pd->resource[0].start;
+					card->para[0] = pd->irq_resource[0].start;
+					if (!card->para[0] || !card->para[1]) {
+						printk(KERN_ERR "ITK PnP:some resources are missing %ld/%lx\n",
+						card->para[0], card->para[1]);
+						pd->deactivate(pd);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "ITK PnP: PnP error card found, no device\n");
+				}
+			}
+			idev++;
+			pnp_c=NULL;
+		} 
+		if (!idev->card_vendor) {
+			printk(KERN_INFO "ITK PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	/* IO-Ports */
 	cs->hw.ix1.isac_ale = card->para[1] + ISAC_COMMAND_OFFSET;
 	cs->hw.ix1.hscx_ale = card->para[1] + HSCX_COMMAND_OFFSET;

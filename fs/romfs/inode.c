@@ -67,7 +67,7 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/romfs_fs.h>
 #include <linux/fs.h>
 #include <linux/locks.h>
@@ -75,11 +75,6 @@
 #include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
-
-static int inline min(int a, int b)
-{
-	return a<b ? a : b;
-}
 
 static __s32
 romfs_checksum(void *data, int size)
@@ -110,7 +105,10 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 	set_blocksize(dev, ROMBSIZE);
 	s->s_blocksize = ROMBSIZE;
 	s->s_blocksize_bits = ROMBSBITS;
-	bh = bread(dev, 0, ROMBSIZE);
+	s->u.generic_sbp = (void *) 0;
+	s->s_maxbytes = 0xFFFFFFFF;
+
+	bh = sb_bread(s, 0);
 	if (!bh) {
 		/* XXX merge with other printk? */
                 printk ("romfs: unable to read superblock\n");
@@ -126,7 +124,7 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 				"%s.\n", kdevname(dev));
 		goto out;
 	}
-	if (romfs_checksum(rsb, min(sz,512))) {
+	if (romfs_checksum(rsb, min_t(int, sz, 512))) {
 		printk ("romfs: bad initial checksum on dev "
 			"%s.\n", kdevname(dev));
 		goto out;
@@ -190,12 +188,12 @@ romfs_strnlen(struct inode *i, unsigned long offset, unsigned long count)
 	if (count > maxsize || offset+count > maxsize)
 		count = maxsize-offset;
 
-	bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+	bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 	if (!bh)
 		return -1;		/* error */
 
 	avail = ROMBSIZE - (offset & ROMBMASK);
-	maxsize = min(count, avail);
+	maxsize = min_t(unsigned long, count, avail);
 	res = strnlen(((char *)bh->b_data)+(offset&ROMBMASK), maxsize);
 	brelse(bh);
 
@@ -205,10 +203,10 @@ romfs_strnlen(struct inode *i, unsigned long offset, unsigned long count)
 	while (res < count) {
 		offset += maxsize;
 
-		bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+		bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 		if (!bh)
 			return -1;
-		maxsize = min(count-res, ROMBSIZE);
+		maxsize = min_t(unsigned long, count - res, ROMBSIZE);
 		avail = strnlen(bh->b_data, maxsize);
 		res += avail;
 		brelse(bh);
@@ -228,12 +226,12 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 	if (offset >= maxsize || count > maxsize || offset+count>maxsize)
 		return -1;
 
-	bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+	bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 	if (!bh)
 		return -1;		/* error */
 
 	avail = ROMBSIZE - (offset & ROMBMASK);
-	maxsize = min(count, avail);
+	maxsize = min_t(unsigned long, count, avail);
 	memcpy(dest, ((char *)bh->b_data) + (offset & ROMBMASK), maxsize);
 	brelse(bh);
 
@@ -243,10 +241,10 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 		offset += maxsize;
 		dest += maxsize;
 
-		bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+		bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 		if (!bh)
 			return -1;
-		maxsize = min(count-res, ROMBSIZE);
+		maxsize = min_t(unsigned long, count - res, ROMBSIZE);
 		memcpy(dest, bh->b_data, maxsize);
 		brelse(bh);
 		res += maxsize;
@@ -400,15 +398,17 @@ romfs_readpage(struct file *file, struct page * page)
 	void *buf;
 	int result = -EIO;
 
+	page_cache_get(page);
 	lock_kernel();
-	get_page(page);
-	buf = page_address(page);
+	buf = kmap(page);
+	if (!buf)
+		goto err_out;
 
 	/* 32 bit warning -- but not for us :) */
 	offset = page->index << PAGE_CACHE_SHIFT;
 	if (offset < inode->i_size) {
 		avail = inode->i_size-offset;
-		readlen = min(avail, PAGE_SIZE);
+		readlen = min_t(unsigned long, avail, PAGE_SIZE);
 		if (romfs_copyfrom(inode, buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
 			if (readlen < PAGE_SIZE) {
 				memset(buf + readlen,0,PAGE_SIZE-readlen);
@@ -425,7 +425,9 @@ romfs_readpage(struct file *file, struct page * page)
 
 	UnlockPage(page);
 
-	__free_page(page);
+	kunmap(page);
+err_out:
+	page_cache_release(page);
 	unlock_kernel();
 
 	return result;
@@ -546,3 +548,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_romfs_fs)
 module_exit(exit_romfs_fs)
+MODULE_LICENSE("GPL");

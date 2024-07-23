@@ -6,8 +6,10 @@ SECTIONS
   .init          : { *(.init)		} =0
   .text      :
   {
+    _ftext = .;
     *(.text)
     *(.rodata)
+    *(.rodata.*)
     *(.rodata1)
     /* .gnu.warning sections are handled specially by elf32.em.  */
     *(.gnu.warning)
@@ -22,6 +24,10 @@ SECTIONS
   __start___dbe_table = .;	/* Exception table for data bus errors */
   __dbe_table : { *(__dbe_table) }
   __stop___dbe_table = .;
+
+  __start___ksymtab = .;	/* Kernel symbol table */
+  __ksymtab : { *(__ksymtab) }
+  __stop___ksymtab = .;
 
   _etext = .;
 
@@ -44,14 +50,13 @@ SECTIONS
   . = ALIGN(4096);	/* Align double page for init_task_union */
   __init_end = .;
 
-  . = ALIGN(4096);
-  .data.page_aligned : { *(.data.idt) }
-
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
 
   .fini      : { *(.fini)    } =0
   .reginfo : { *(.reginfo) }
+  .options : { *(.options) }
+  .MIPS.options : { *(.MIPS.options) }
   /* Adjust the address for the data segment.  We want to adjust up to
      the same address within the page on the next page up.  It would
      be more correct to do this:
@@ -71,6 +76,14 @@ SECTIONS
   {
     _fdata = . ;
     *(.data)
+
+    /* Align the initial ramdisk image (INITRD) on page boundaries. */
+    . = ALIGN(4096);
+    __rd_start = .;
+    *(.initrd)
+    . = ALIGN(4096);
+    __rd_end = .;
+
     CONSTRUCTORS
   }
   .data1   : { *(.data1) }
@@ -96,7 +109,7 @@ SECTIONS
   }
 
   /* Sections to be discarded */
-  /DISCARD/ : 
+  /DISCARD/ :
   {
         *(.text.exit)
         *(.data.exit)

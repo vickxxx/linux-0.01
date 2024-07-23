@@ -142,6 +142,8 @@ struct usbdevfs_hub_portinfo {
 #define USBDEVFS_HUB_PORTINFO      _IOR('U', 19, struct usbdevfs_hub_portinfo)
 #define USBDEVFS_RESET             _IO('U', 20)
 #define USBDEVFS_CLEAR_HALT        _IOR('U', 21, unsigned int)
+#define USBDEVFS_DISCONNECT        _IO('U', 22)
+#define USBDEVFS_CONNECT           _IO('U', 23)
 
 /* --------------------------------------------------------------------- */
 
@@ -161,18 +163,6 @@ struct usbdevfs_hub_portinfo {
 #define IDEVNR(x)  ((x)&0xff)
 
 #define IROOT      1
-
-/*
- * sigh. rwsemaphores do not (yet) work from modules
- */
-
-#define rw_semaphore semaphore
-#define init_rwsem init_MUTEX
-#define down_read down
-#define down_write down
-#define up_read up
-#define up_write up
-
 
 struct dev_state {
 	struct list_head list;      /* state list */
@@ -195,8 +185,6 @@ extern struct file_operations usbdevfs_drivers_fops;
 extern struct file_operations usbdevfs_devices_fops;
 extern struct file_operations usbdevfs_device_file_operations;
 extern struct inode_operations usbdevfs_device_inode_operations;
-extern struct inode_operations usbdevfs_bus_inode_operations;
-extern struct file_operations usbdevfs_bus_file_operations;
 extern void usbdevfs_conn_disc_event(void);
 
 #endif /* __KERNEL__ */

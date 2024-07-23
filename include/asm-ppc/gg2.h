@@ -34,6 +34,8 @@
      *  GG2 specific PCI Registers
      */
 
+extern unsigned long gg2_pci_config_base;	/* kernel virtual address */
+
 #define GG2_PCI_BUSNO		0x40	/* Bus number */
 #define GG2_PCI_SUBBUSNO	0x41	/* Subordinate bus number */
 #define GG2_PCI_DISCCTR		0x42	/* Disconnect counter */

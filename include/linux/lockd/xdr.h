@@ -26,20 +26,22 @@
 /* Lock info passed via NLM */
 struct nlm_lock {
 	char *			caller;
+	int			len; 	/* length of "caller" */
 	struct nfs_fh		fh;
 	struct xdr_netobj	oh;
 	struct file_lock	fl;
 };
 
 /*
- *	NLM cookies. Technically they can be 1K, Nobody uses over 8 bytes
- *	however.
+ *	NLM cookies. Technically they can be 1K, Few people use over 8 bytes,
+ *	FreeBSD uses 16, Apple Mac OS-X 10.3 uses 20.
  */
  
 struct nlm_cookie
 {
-	unsigned char data[8];
 	unsigned int len;
+#define NLM_MAXCOOKIELEN    	32
+	unsigned char data[NLM_MAXCOOKIELEN];
 };
 
 /*
@@ -82,7 +84,6 @@ struct nlm_reboot {
  */
 #define NLMSVC_XDRSIZE		sizeof(struct nlm_args)
 
-void	nlmxdr_init(void);
 int	nlmsvc_decode_testargs(struct svc_rqst *, u32 *, struct nlm_args *);
 int	nlmsvc_encode_testres(struct svc_rqst *, u32 *, struct nlm_res *);
 int	nlmsvc_decode_lockargs(struct svc_rqst *, u32 *, struct nlm_args *);

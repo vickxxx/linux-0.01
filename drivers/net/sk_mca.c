@@ -2,7 +2,7 @@
 net-3-driver for the SKNET MCA-based cards
 
 This is an extension to the Linux operating system, and is covered by the
-same Gnu Public License that covers that work.
+same GNU General Public License that covers that work.
 
 Copyright 1999 by Alfred Arnold (alfred@ccac.rwth-aachen.de, aarnold@elsa.de)
 
@@ -86,11 +86,12 @@ History:
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/time.h>
 #include <linux/mca.h>
+#include <linux/init.h>
 #include <asm/processor.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -151,7 +152,7 @@ static void PrTime(void)
 
 /* deduce resources out of POS registers */
 
-static void getaddrs(int slot, int junior, int *base, int *irq,
+static void __init getaddrs(int slot, int junior, int *base, int *irq,
 		     skmca_medium * medium)
 {
 	u_char pos0, pos1, pos2;
@@ -197,7 +198,7 @@ static void getaddrs(int slot, int junior, int *base, int *irq,
    is disabled and won't get detected using the standard probe.  We
    therefore have to scan the slots manually :-( */
 
-static int dofind(int *junior, int firstslot)
+static int __init dofind(int *junior, int firstslot)
 {
 	int slot;
 	unsigned int id;
@@ -524,7 +525,7 @@ static void DeinitBoard(struct SKMCA_NETDEV *dev)
 
 /* probe for device's irq */
 
-static int ProbeIRQ(struct SKMCA_NETDEV *dev)
+static int __init ProbeIRQ(struct SKMCA_NETDEV *dev)
 {
 	unsigned long imaskval, njiffies, irq;
 	u16 csr0val;
@@ -654,6 +655,7 @@ static u16 irqrx_handler(struct SKMCA_NETDEV *dev, u16 oldcsr0)
 				priv->stat.rx_bytes += descr.Len;
 #endif
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 			}
 		}
 
@@ -1046,13 +1048,13 @@ static void skmca_set_multicast_list(struct SKMCA_NETDEV *dev)
 		block.Mode &= ~LANCE_INIT_PROM;
 
 	if (dev->flags & IFF_ALLMULTI) {	/* get all multicasts */
-		memset(block.LAdrF, 8, 0xff);
+		memset(block.LAdrF, 0xff, sizeof(block.LAdrF));
 	} else {		/* get selected/no multicasts */
 
 		struct dev_mc_list *mptr;
 		int code;
 
-		memset(block.LAdrF, 8, 0x00);
+		memset(block.LAdrF, 0, sizeof(block.LAdrF));
 		for (mptr = dev->mc_list; mptr != NULL; mptr = mptr->next) {
 			code = GetHash(mptr->dmi_addr);
 			block.LAdrF[(code >> 3) & 7] |= 1 << (code & 7);
@@ -1071,7 +1073,7 @@ static void skmca_set_multicast_list(struct SKMCA_NETDEV *dev)
 
 static int startslot;		/* counts through slots when probing multiple devices */
 
-int skmca_probe(struct SKMCA_NETDEV *dev)
+int __init skmca_probe(struct SKMCA_NETDEV *dev)
 {
 	int force_detect = 0;
 	int junior, slot, i;
@@ -1157,6 +1159,8 @@ int skmca_probe(struct SKMCA_NETDEV *dev)
 	/* allocate structure */
 	priv = dev->priv =
 	    (skmca_priv *) kmalloc(sizeof(skmca_priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
 	priv->slot = slot;
 	priv->macbase = base + 0x3fc0;
 	priv->ioregaddr = base + 0x3ff0;
@@ -1225,6 +1229,7 @@ int skmca_probe(struct SKMCA_NETDEV *dev)
  * ------------------------------------------------------------------------ */
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
 
 #define DEVMAX 5
 
@@ -1247,8 +1252,8 @@ static struct SKMCA_NETDEV moddevs[DEVMAX] =
 };
 #endif
 
-int irq = 0;
-int io = 0;
+int irq;
+int io;
 
 int init_module(void)
 {

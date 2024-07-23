@@ -1,33 +1,14 @@
-/*
- * $Id: capicmd.h,v 1.2 2000/03/03 15:50:42 calle Exp $
+/* $Id: capicmd.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  * 
  * CAPI 2.0 Interface for Linux
  * 
- * Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 1997 by Carsten Paeth <calle@calle.de>
  * 
- * $Log: capicmd.h,v $
- * Revision 1.2  2000/03/03 15:50:42  calle
- * - kernel CAPI:
- *   - Changed parameter "param" in capi_signal from __u32 to void *.
- *   - rewrote notifier handling in kcapi.c
- *   - new notifier NCCI_UP and NCCI_DOWN
- * - User CAPI:
- *   - /dev/capi20 is now a cloning device.
- *   - middleware extentions prepared.
- * - capidrv.c
- *   - locking of list operations and module count updates.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Revision 1.1  1997/03/04 21:50:30  calle
- * Frirst version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
- *
- * 
  */
+
 #ifndef __CAPICMD_H__
 #define __CAPICMD_H__
 

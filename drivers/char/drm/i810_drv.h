@@ -11,11 +11,11 @@
  * the rights to use, copy, modify, merge, publish, distribute, sublicense,
  * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the next
  * paragraph) shall be included in all copies or substantial portions of the
  * Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
@@ -54,94 +54,67 @@ typedef struct _drm_i810_ring_buffer{
 } drm_i810_ring_buffer_t;
 
 typedef struct drm_i810_private {
-   	int ring_map_idx;
-   	int buffer_map_idx;
+	drm_map_t *sarea_map;
+	drm_map_t *buffer_map;
+	drm_map_t *mmio_map;
 
-   	drm_i810_ring_buffer_t ring;
 	drm_i810_sarea_t *sarea_priv;
+   	drm_i810_ring_buffer_t ring;
 
       	unsigned long hw_status_page;
    	unsigned long counter;
 
-   	atomic_t flush_done;
-   	wait_queue_head_t flush_queue;	/* Processes waiting until flush    */
+	dma_addr_t dma_status_page;
+
 	drm_buf_t *mmap_buffer;
 
-	
+
 	u32 front_di1, back_di1, zi1;
-	
+
 	int back_offset;
 	int depth_offset;
+	int overlay_offset;
+	int overlay_physical;
 	int w, h;
 	int pitch;
-} drm_i810_private_t;
 
-				/* i810_drv.c */
-extern int  i810_version(struct inode *inode, struct file *filp,
-			  unsigned int cmd, unsigned long arg);
-extern int  i810_open(struct inode *inode, struct file *filp);
-extern int  i810_release(struct inode *inode, struct file *filp);
-extern int  i810_ioctl(struct inode *inode, struct file *filp,
-			unsigned int cmd, unsigned long arg);
-extern int  i810_unlock(struct inode *inode, struct file *filp,
-			 unsigned int cmd, unsigned long arg);
+} drm_i810_private_t;
 
 				/* i810_dma.c */
 extern int  i810_dma_schedule(drm_device_t *dev, int locked);
 extern int  i810_getbuf(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long arg);
-extern int  i810_irq_install(drm_device_t *dev, int irq);
-extern int  i810_irq_uninstall(drm_device_t *dev);
-extern int  i810_control(struct inode *inode, struct file *filp,
-			  unsigned int cmd, unsigned long arg);
-extern int  i810_lock(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
 extern int  i810_dma_init(struct inode *inode, struct file *filp,
 			  unsigned int cmd, unsigned long arg);
 extern int  i810_flush_ioctl(struct inode *inode, struct file *filp,
 			     unsigned int cmd, unsigned long arg);
 extern void i810_reclaim_buffers(drm_device_t *dev, pid_t pid);
-extern int  i810_getage(struct inode *inode, struct file *filp, unsigned int cmd,
-			unsigned long arg);
+extern int  i810_getage(struct inode *inode, struct file *filp,
+			unsigned int cmd, unsigned long arg);
 extern int i810_mmap_buffers(struct file *filp, struct vm_area_struct *vma);
-extern int i810_copybuf(struct inode *inode, struct file *filp, 
+
+/* Obsolete:
+ */
+extern int i810_copybuf(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long arg);
-extern int i810_docopy(struct inode *inode, struct file *filp, 
+/* Obsolete:
+ */
+extern int i810_docopy(struct inode *inode, struct file *filp,
 		       unsigned int cmd, unsigned long arg);
 
-				/* i810_bufs.c */
-extern int  i810_addbufs(struct inode *inode, struct file *filp, 
+extern int i810_rstatus(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long arg);
-extern int  i810_infobufs(struct inode *inode, struct file *filp, 
-			 unsigned int cmd, unsigned long arg);
-extern int  i810_markbufs(struct inode *inode, struct file *filp,
-			 unsigned int cmd, unsigned long arg);
-extern int  i810_freebufs(struct inode *inode, struct file *filp,
-			 unsigned int cmd, unsigned long arg);
-extern int  i810_addmap(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
+extern int i810_ov0_info(struct inode *inode, struct file *filp,
+			unsigned int cmd, unsigned long arg);
+extern int i810_fstatus(struct inode *inode, struct file *filp,
+			unsigned int cmd, unsigned long arg);
+extern int i810_ov0_flip(struct inode *inode, struct file *filp,
+			unsigned int cmd, unsigned long arg);
+extern int i810_dma_mc(struct inode *inode, struct file *filp,
+			unsigned int cmd, unsigned long arg);
 
-				/* i810_context.c */
-extern int  i810_resctx(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-extern int  i810_addctx(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-extern int  i810_modctx(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-extern int  i810_getctx(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-extern int  i810_switchctx(struct inode *inode, struct file *filp,
-			  unsigned int cmd, unsigned long arg);
-extern int  i810_newctx(struct inode *inode, struct file *filp,
-		       unsigned int cmd, unsigned long arg);
-extern int  i810_rmctx(struct inode *inode, struct file *filp,
-		      unsigned int cmd, unsigned long arg);
 
-extern int  i810_context_switch(drm_device_t *dev, int old, int new);
-extern int  i810_context_switch_complete(drm_device_t *dev, int new);
-
-#define I810_VERBOSE 0
-
+extern void i810_dma_quiescent(drm_device_t *dev);
 
 int i810_dma_vertex(struct inode *inode, struct file *filp,
 		    unsigned int cmd, unsigned long arg);
@@ -151,6 +124,18 @@ int i810_swap_bufs(struct inode *inode, struct file *filp,
 
 int i810_clear_bufs(struct inode *inode, struct file *filp,
 		    unsigned int cmd, unsigned long arg);
+
+
+#define I810_BASE(reg)		((unsigned long) \
+				dev_priv->mmio_map->handle)
+#define I810_ADDR(reg)		(I810_BASE(reg) + reg)
+#define I810_DEREF(reg)		*(__volatile__ int *)I810_ADDR(reg)
+#define I810_READ(reg)		I810_DEREF(reg)
+#define I810_WRITE(reg,val) 	do { I810_DEREF(reg) = val; } while (0)
+#define I810_DEREF16(reg)	*(__volatile__ u16 *)I810_ADDR(reg)
+#define I810_READ16(reg)	I810_DEREF16(reg)
+#define I810_WRITE16(reg,val)	do { I810_DEREF16(reg) = val; } while (0)
+
 
 #define GFX_OP_USER_INTERRUPT 		((0<<29)|(2<<23))
 #define GFX_OP_BREAKPOINT_INTERRUPT	((0<<29)|(1<<23))
@@ -184,7 +169,7 @@ int i810_clear_bufs(struct inode *inode, struct file *filp,
 #define RING_START     		0x08
 #define START_ADDR          	0x00FFFFF8
 #define RING_LEN       		0x0C
-#define RING_NR_PAGES       	0x000FF000 
+#define RING_NR_PAGES       	0x000FF000
 #define RING_REPORT_MASK    	0x00000006
 #define RING_REPORT_64K     	0x00000002
 #define RING_REPORT_128K    	0x00000004
@@ -213,6 +198,7 @@ int i810_clear_bufs(struct inode *inode, struct file *filp,
 
 #define CMD_OP_Z_BUFFER_INFO     ((0x0<<29)|(0x16<<23))
 #define CMD_OP_DESTBUFFER_INFO   ((0x0<<29)|(0x15<<23))
+#define CMD_OP_FRONTBUFFER_INFO  ((0x0<<29)|(0x14<<23))
 
 #define BR00_BITBLT_CLIENT   0x40000000
 #define BR00_OP_COLOR_BLT    0x10000000
@@ -222,4 +208,3 @@ int i810_clear_bufs(struct inode *inode, struct file *filp,
 
 
 #endif
-

@@ -4,13 +4,13 @@ Linux PCMCIA ethernet adapter driver for the New Media Ethernet LAN.
 
   The Ethernet LAN uses the Advanced Micro Devices (AMD) Am79C940 Media
   Access Controller for Ethernet (MACE).  It is essentially the Am2150
-  PCMCIA Ethernet card contained in the the Am2150 Demo Kit.
+  PCMCIA Ethernet card contained in the Am2150 Demo Kit.
 
 Written by Roger C. Pao <rpao@paonet.org>
   Copyright 1995 Roger C. Pao
 
   This software may be used and distributed according to the terms of
-  the GNU Public License.
+  the GNU General Public License.
 
 Ported to Linux 1.3.* network driver environment by
   Matti Aarnio <mea@utu.fi>
@@ -27,7 +27,7 @@ References
   Tom Pollard, New Media Corporation
   Dean Siasoyco, New Media Corporation
   Ken Lesniak, Silicon Graphics, Inc. <lesniak@boston.sgi.com>
-  Donald Becker <becker@cesdis1.gsfc.nasa.gov>
+  Donald Becker <becker@scyld.com>
   David Hinds <dahinds@users.sourceforge.net>
 
   The Linux client driver is based on the 3c589_cs.c client driver by
@@ -106,6 +106,10 @@ Log: nmclan_cs.c,v
 
 ---------------------------------------------------------------------------- */
 
+#define DRV_NAME	"nmclan_cs"
+#define DRV_VERSION	"0.16"
+
+
 /* ----------------------------------------------------------------------------
 Conditional Compilation Options
 ---------------------------------------------------------------------------- */
@@ -124,12 +128,15 @@ Include Files
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -375,23 +382,15 @@ Private Global Variables
 static char rcsid[] =
 "nmclan_cs.c,v 0.16 1995/07/01 06:42:17 rpao Exp rpao";
 static char *version =
-"nmclan_cs 0.16 (Roger C. Pao)";
+DRV_NAME " " DRV_VERSION " (Roger C. Pao)";
 #endif
 
 static dev_info_t dev_info="nmclan_cs";
-static dev_link_t *dev_list=NULL;
+static dev_link_t *dev_list;
 
 static char *if_names[]={
     "Auto", "10baseT", "BNC",
 };
-
-#ifdef PCMCIA_DEBUG
-static int pc_debug = PCMCIA_DEBUG;
-MODULE_PARM(pc_debug, "i");
-#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
-#else
-#define DEBUG(n, args...)
-#endif
 
 /* ----------------------------------------------------------------------------
 Parameters
@@ -399,16 +398,25 @@ Parameters
 	'insmod'.
 ---------------------------------------------------------------------------- */
 
-/* 0=auto, 1=10baseT, 2 = 10base2, default=auto */
-static int if_port=0;
+MODULE_DESCRIPTION("New Media PCMCIA ethernet driver");
+MODULE_LICENSE("GPL");
 
-/* Bit map of interrupts to choose from */
-static u_int irq_mask = 0xdeb8;
+#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
+
 static int irq_list[4] = { -1 };
-
-MODULE_PARM(if_port, "i");
-MODULE_PARM(irq_mask, "i");
 MODULE_PARM(irq_list, "1-4i");
+
+/* 0=auto, 1=10baseT, 2 = 10base2, default=auto */
+INT_MODULE_PARM(if_port, 0);
+/* Bit map of interrupts to choose from */
+INT_MODULE_PARM(irq_mask, 0xdeb8);
+
+#ifdef PCMCIA_DEBUG
+INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
+#define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
+#else
+#define DEBUG(n, args...)
+#endif
 
 /* ----------------------------------------------------------------------------
 Function Prototypes
@@ -429,8 +437,9 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static struct net_device_stats *mace_get_stats(struct net_device *dev);
 static int mace_rx(struct net_device *dev, unsigned char RxCnt);
 static void restore_multicast_list(struct net_device *dev);
-
 static void set_multicast_list(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
+
 
 static dev_link_t *nmclan_attach(void);
 static void nmclan_detach(dev_link_t *);
@@ -512,11 +521,14 @@ static dev_link_t *nmclan_attach(void)
     dev->set_config = &mace_config;
     dev->get_stats = &mace_get_stats;
     dev->set_multicast_list = &set_multicast_list;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     ether_setup(dev);
     dev->open = &mace_open;
     dev->stop = &mace_close;
+#ifdef HAVE_TX_TIMEOUT
     dev->tx_timeout = mace_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
+#endif
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -999,6 +1011,34 @@ static int mace_close(struct net_device *dev)
   return 0;
 } /* mace_close */
 
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
+}
+
+#ifdef PCMCIA_DEBUG
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return pc_debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	pc_debug = level;
+}
+#endif /* PCMCIA_DEBUG */
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+#ifdef PCMCIA_DEBUG
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+#endif /* PCMCIA_DEBUG */
+};
+
 /* ----------------------------------------------------------------------------
 mace_start_xmit
 	This routine begins the packet transmit function.  When completed,
@@ -1023,7 +1063,7 @@ static void mace_tx_timeout(struct net_device *dev)
   printk("NOT resetting card\n");
 #endif /* #if RESET_ON_TIMEOUT */
   dev->trans_start = jiffies;
-  netif_start_queue(dev);
+  netif_wake_queue(dev);
 }
 
 static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev)
@@ -1287,6 +1327,7 @@ static int mace_rx(struct net_device *dev, unsigned char RxCnt)
 	
 	netif_rx(skb); /* Send the packet to the upper (protocol) layers. */
 
+	dev->last_rx = jiffies;
 	lp->linux_stats.rx_packets++;
 	lp->linux_stats.rx_bytes += skb->len;
 	outb(0xFF, ioaddr + AM2150_RCV_NEXT); /* skip to next frame */
@@ -1603,7 +1644,7 @@ static void set_multicast_list(struct net_device *dev)
 
 #ifdef PCMCIA_DEBUG
   if (pc_debug > 1) {
-    static int old = 0;
+    static int old;
     if (dev->mc_count != old) {
       old = dev->mc_count;
       DEBUG(0, "%s: setting Rx mode to %d addresses.\n",
@@ -1658,7 +1699,7 @@ static void set_multicast_list(struct net_device *dev)
 
 #ifdef PCMCIA_DEBUG
   if (pc_debug > 1) {
-    static int old = 0;
+    static int old;
     if (dev->mc_count != old) {
       old = dev->mc_count;
       DEBUG(0, "%s: setting Rx mode to %d addresses.\n",

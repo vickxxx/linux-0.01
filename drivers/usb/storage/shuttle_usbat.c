@@ -1,9 +1,12 @@
 /* Driver for SCM Microsystems USB-ATAPI cable
  *
- * $Id: shuttle_usbat.c,v 1.11 2000/11/13 22:29:36 mdharm Exp $
+ * $Id: shuttle_usbat.c,v 1.16 2002/02/25 00:40:13 mdharm Exp $
  *
  * Current development and maintenance by:
- *   (c) 2000 Robert Baruch (autophile@dol.net)
+ *   (c) 2000, 2001 Robert Baruch (autophile@starband.net)
+ *
+ * Developed with the assistance of:
+ *   (c) 2002 Alan Stern <stern@rowland.org>
  *
  * Many originally ATAPI devices were slightly modified to meet the USB
  * market by using some kind of translation from ATAPI to USB on the host,
@@ -18,8 +21,8 @@
  * as well. This driver is only guaranteed to work with the ATAPI
  * translation.
  *
- * The only peripheral that I know of (as of 8 Sep 2000) that uses this
- * device is the Hewlett-Packard 8200e/8210e CD-Writer Plus.
+ * The only peripheral that I know of (as of 27 Mar 2001) that uses this
+ * device is the Hewlett-Packard 8200e/8210e/8230e CD-Writer Plus.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -44,7 +47,7 @@
 
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 extern int usb_stor_control_msg(struct us_data *us, unsigned int pipe,
 	u8 request, u8 requesttype, u16 value, u16 index,
@@ -101,14 +104,14 @@ static int usbat_send_control(struct us_data *us,
 
 	if (result < 0) {
 		/* if the command was aborted, indicate that */
-		if (result == -ENOENT)
+		if (result == -ECONNRESET)
 			return USB_STOR_TRANSPORT_ABORTED;
 
 		/* a stall is a fatal condition from the device */
 		if (result == -EPIPE) {
 			US_DEBUGP("-- Stall on control pipe. Clearing\n");
-			result = usb_clear_halt(us->pusb_dev, pipe);
-			US_DEBUGP("-- usb_clear_halt() returns %d\n", result);
+			result = usb_stor_clear_halt(us, pipe);
+			US_DEBUGP("-- usb_stor_clear_halt() returns %d\n", result);
 			return USB_STOR_TRANSPORT_FAILED;
 		}
 
@@ -140,7 +143,7 @@ static int usbat_raw_bulk(struct us_data *us,
        	        US_DEBUGP("EPIPE: clearing endpoint halt for"
 			" pipe 0x%x, stalled at %d bytes\n",
 			pipe, act_len);
-               	usb_clear_halt(us->pusb_dev, pipe);
+               	usb_stor_clear_halt(us, pipe);
         }
 
 	if (result) {
@@ -152,8 +155,8 @@ static int usbat_raw_bulk(struct us_data *us,
                         return US_BULK_TRANSFER_FAILED;
                 }
 
-                /* -ENOENT -- we canceled this transfer */
-                if (result == -ENOENT) {
+                /* -ECONNRESET -- we canceled this transfer */
+                if (result == -ECONNRESET) {
                         US_DEBUGP("usbat_raw_bulk():"
 				" transfer aborted\n");
                         return US_BULK_TRANSFER_ABORTED;
@@ -344,12 +347,14 @@ int usbat_wait_not_busy(struct us_data *us, int minutes) {
 
 		if (result!=USB_STOR_TRANSPORT_GOOD)
 			return result;
-		if (status&0x01) // check condition
+		if (status&0x01) { // check condition
+			result = usbat_read(us, USBAT_ATA, 0x10, &status);
 			return USB_STOR_TRANSPORT_FAILED;
+		}
 		if (status&0x20) // device fault
 			return USB_STOR_TRANSPORT_FAILED;
 
-		if ((status&0x80)!=0x80) { // not busy
+		if ((status&0x80)==0x00) { // not busy
 			US_DEBUGP("Waited not busy for %d steps\n", i);
 			return USB_STOR_TRANSPORT_GOOD;
 		}
@@ -513,7 +518,7 @@ int usbat_rw_block_test(struct us_data *us,
 			 */
 
 			if (direction==SCSI_DATA_READ && i==0)
-				usb_clear_halt(us->pusb_dev,
+				usb_stor_clear_halt(us,
 					usb_sndbulkpipe(us->pusb_dev,
 					  us->ep_out));
 			/*
@@ -673,13 +678,19 @@ int usbat_handle_read10(struct us_data *us,
 		len = short_pack(data[7+9], data[7+8]);
 		len <<= 16;
 		len |= data[7+7];
+		US_DEBUGP("handle_read10: GPCMD_READ_CD: len %d\n", len);
 		srb->transfersize = srb->request_bufflen/len;
 	}
 
+	if (!srb->transfersize)  {
+		srb->transfersize = 2048; /* A guess */
+		US_DEBUGP("handle_read10: transfersize 0, forcing %d\n",
+			srb->transfersize);
+	}
 
 	len = (65535/srb->transfersize) * srb->transfersize;
 	US_DEBUGP("Max read is %d bytes\n", len);
-	buffer = kmalloc(len, GFP_KERNEL);
+	buffer = kmalloc(len, GFP_NOIO);
 	if (buffer == NULL) // bloody hell!
 		return USB_STOR_TRANSPORT_FAILED;
 	sector = short_pack(data[7+3], data[7+2]);
@@ -971,6 +982,9 @@ int hp8200e_transport(Scsi_Cmnd *srb, struct us_data *us)
 		registers[i] = 0x10;
 		data[i] = (i-7 >= srb->cmd_len) ? 0 : srb->cmnd[i-7];
 	}
+
+	result = usbat_read(us, USBAT_ATA, 0x17, &status);
+	US_DEBUGP("Status = %02X\n", status);
 
 	if (srb->cmnd[0] == TEST_UNIT_READY)
 		transferred = 0;

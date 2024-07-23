@@ -1,4 +1,4 @@
-/* $Id: sparc_ksyms.c,v 1.105 2000/12/11 05:24:25 anton Exp $
+/* $Id: sparc_ksyms.c,v 1.107 2001/07/17 16:17:33 anton Exp $
  * arch/sparc/kernel/ksyms.c: Sparc specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -22,6 +22,7 @@
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
 #endif
+#include <linux/pm.h>
 
 #include <asm/oplib.h>
 #include <asm/delay.h>
@@ -44,6 +45,9 @@
 #ifdef CONFIG_SBUS
 #include <asm/sbus.h>
 #include <asm/dma.h>
+#endif
+#ifdef CONFIG_HIGHMEM
+#include <linux/highmem.h>
 #endif
 #include <asm/a.out.h>
 #include <asm/io-unit.h>
@@ -116,13 +120,9 @@ EXPORT_SYMBOL(__up);
 EXPORT_SYMBOL(__down);
 EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL(__down_interruptible);
-/* rw semaphores */
-EXPORT_SYMBOL_NOVERS(___down_read);
-EXPORT_SYMBOL_NOVERS(___down_write);
-EXPORT_SYMBOL_NOVERS(___up_read);
-EXPORT_SYMBOL_NOVERS(___up_write);
 
 EXPORT_SYMBOL(sparc_valid_addr_bitmap);
+EXPORT_SYMBOL(phys_base);
 
 /* Atomic operations. */
 EXPORT_SYMBOL_PRIVATE(_atomic_add);
@@ -132,8 +132,6 @@ EXPORT_SYMBOL_PRIVATE(_atomic_sub);
 EXPORT_SYMBOL_PRIVATE(_set_bit);
 EXPORT_SYMBOL_PRIVATE(_clear_bit);
 EXPORT_SYMBOL_PRIVATE(_change_bit);
-EXPORT_SYMBOL_PRIVATE(_set_le_bit);
-EXPORT_SYMBOL_PRIVATE(_clear_le_bit);
 
 #ifdef CONFIG_SMP
 /* Kernel wide locking */
@@ -154,9 +152,12 @@ EXPORT_SYMBOL(__cpu_logical_map);
 #endif
 
 EXPORT_SYMBOL(udelay);
+EXPORT_SYMBOL(ndelay);
+EXPORT_SYMBOL(mostek_lock);
 EXPORT_SYMBOL(mstk48t02_regs);
 #if CONFIG_SUN_AUXIO
-EXPORT_SYMBOL(auxio_register);
+EXPORT_SYMBOL(set_auxio);
+EXPORT_SYMBOL(get_auxio);
 #endif
 EXPORT_SYMBOL(request_fast_irq);
 EXPORT_SYMBOL(io_remap_page_range);
@@ -207,6 +208,12 @@ EXPORT_SYMBOL(pci_free_consistent);
 EXPORT_SYMBOL(pci_map_single);
 EXPORT_SYMBOL(pci_unmap_single);
 EXPORT_SYMBOL(pci_dma_sync_single);
+#endif
+
+/* in arch/sparc/mm/highmem.c */
+#ifdef CONFIG_HIGHMEM
+EXPORT_SYMBOL(kmap_atomic);
+EXPORT_SYMBOL(kunmap_atomic);
 #endif
 
 /* Solaris/SunOS binary compatibility */
@@ -290,6 +297,7 @@ EXPORT_SYMBOL_NOVERS(memcmp);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memmove);
+EXPORT_SYMBOL_NOVERS(memchr);
 EXPORT_SYMBOL_NOVERS(__ashrdi3);
 EXPORT_SYMBOL_NOVERS(__ashldi3);
 EXPORT_SYMBOL_NOVERS(__lshrdi3);
@@ -302,3 +310,6 @@ EXPORT_SYMBOL_DOT(mul);
 EXPORT_SYMBOL_DOT(umul);
 EXPORT_SYMBOL_DOT(div);
 EXPORT_SYMBOL_DOT(udiv);
+
+/* Sun Power Management Idle Handler */
+EXPORT_SYMBOL(pm_idle);

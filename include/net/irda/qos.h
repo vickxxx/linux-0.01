@@ -43,8 +43,6 @@
 #define PI_ADD_BOFS      0x85
 #define PI_MIN_TURN_TIME 0x86
 #define PI_LINK_DISC     0x08
-#define PI_COMPRESSION   0x07 /* Just a random pick */
-
 
 #define IR_115200_MAX 0x3f
 
@@ -80,16 +78,11 @@ struct qos_info {
 	qos_value_t link_disc_time;
 	
 	qos_value_t power;
-#ifdef CONFIG_IRDA_COMPRESSION
-	/* An experimental non IrDA field */
-	qos_value_t compression;
-#endif
 };
 
 extern int sysctl_max_baud_rate;
 extern int sysctl_max_inactive_time;
 
-extern __u32 baud_rates[];
 extern __u32 data_sizes[];
 extern __u32 min_turn_times[];
 extern __u32 add_bofs[];
@@ -100,10 +93,19 @@ void irda_qos_compute_intersection(struct qos_info *, struct qos_info *);
 
 __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time);
 __u32 irlap_requested_line_capacity(struct qos_info *qos);
-__u32 irlap_min_turn_time_in_bytes(__u32 speed, __u32 min_turn_time);
 
 int msb_index(__u16 byte);
 void irda_qos_bits_to_value(struct qos_info *qos);
+
+/* So simple, how could we not inline those two ?
+ * Note : one byte is 10 bits if you include start and stop bits
+ * Jean II */
+#define irlap_min_turn_time_in_bytes(speed, min_turn_time) (	\
+	speed * min_turn_time / 10000000			\
+)
+#define irlap_xbofs_in_usec(speed, xbofs) (			\
+	xbofs * 10000000 / speed				\
+)
 
 #endif
 

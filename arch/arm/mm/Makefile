@@ -9,61 +9,50 @@
 
 USE_STANDARD_AS_RULE := true
 
-EXTRA_AFLAGS	:= -traditional
 O_TARGET	:= mm.o
 
 # Object file lists.
 
-obj-y		:= extable.o fault-$(PROCESSOR).o init.o \
-		   mm-$(PROCESSOR).o small_page.o
+obj-y		:= init.o extable.o fault-common.o
 obj-m		:=
 obj-n		:=
 obj-		:=
-export-objs	:= proc-syms.o
+export-objs	:= proc-syms.o discontig.o
 
+ifeq ($(CONFIG_CPU_32),y)
+obj-y		+= consistent.o fault-armv.o ioremap.o mm-armv.o
+obj-$(CONFIG_MODULES) += proc-syms.o
+endif
+
+obj-$(CONFIG_CPU_26) += fault-armo.o mm-armo.o small_page.o
+
+obj-$(CONFIG_ALIGNMENT_TRAP) += alignment.o
+obj-$(CONFIG_DISCONTIGMEM) += discontig.o
+
+# Select the processor-specific files
 p-$(CONFIG_CPU_26)	+= proc-arm2,3.o
-p-$(CONFIG_CPU_ARM6)	+= proc-arm6,7.o
-p-$(CONFIG_CPU_ARM7)	+= proc-arm6,7.o
-p-$(CONFIG_CPU_ARM720)	+= proc-arm720.o
-p-$(CONFIG_CPU_ARM920)	+= proc-arm920.o
-p-$(CONFIG_CPU_ARM10)	+= proc-arm10.o
+p-$(CONFIG_CPU_ARM610)	+= proc-arm6,7.o
+p-$(CONFIG_CPU_ARM710)	+= proc-arm6,7.o
+p-$(CONFIG_CPU_ARM720T)	+= proc-arm720.o
+p-$(CONFIG_CPU_ARM920T)	+= proc-arm920.o
+p-$(CONFIG_CPU_ARM922T)	+= proc-arm922.o
+p-$(CONFIG_CPU_ARM925T)	+= proc-arm925.o
+p-$(CONFIG_CPU_ARM926T)	+= proc-arm926.o
+p-$(CONFIG_CPU_ARM1020)	+= proc-arm1020.o
+p-$(CONFIG_CPU_ARM1026)	+= proc-arm1026.o
 p-$(CONFIG_CPU_SA110)	+= proc-sa110.o
 p-$(CONFIG_CPU_SA1100)	+= proc-sa110.o
 
-obj-$(CONFIG_CPU_32)  	+= consistent.o ioremap.o
-ifeq ($(CONFIG_CPU_32),y)
-obj-$(CONFIG_MODULES)	+= proc-syms.o
-endif
-
 # Integrator follows "new style"
 # Soon, others will do too, and we can get rid of this
-MMMACH		:= mm-$(MACHINE).o
+MMMACH		:= mm-$(MACHINE).c
 ifeq ($(MMMACH),$(wildcard $(MMMACH)))
-obj-$(CONFIG_CPU_32)	+= $(MMMACH)
+obj-$(CONFIG_CPU_32)	+= $(MMMACH:.c=.o)
 endif
 
 obj-y		+= $(sort $(p-y))
 
-# Files that are both resident and modular; remove from modular.
-
-obj-m		:= $(filter-out $(obj-y), $(obj-m))
-
-# Translate to Rules.make lists.
-
-O_OBJS		:= $(filter-out $(export-objs), $(obj-y))
-OX_OBJS 	:= $(filter	$(export-objs), $(obj-y))
-M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
-MX_OBJS 	:= $(sort $(filter     $(export-objs), $(obj-m)))
-
 include $(TOPDIR)/Rules.make
 
 # Special dependencies
-fault-armv.o:   fault-common.c
-fault-armo.o:   fault-common.c
-proc-arm2,3.o:	../lib/constants.h
-proc-arm6,7.o:	../lib/constants.h
-proc-arm720.o:	../lib/constants.h
-proc-arm920.o:	../lib/constants.h
-proc-arm10.o:	../lib/constants.h
-proc-sa110.o:	../lib/constants.h
-
+$(p-y):	$(TOPDIR)/include/asm-arm/constants.h

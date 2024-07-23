@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.58 2001/01/01 01:46:15 davem Exp $
+/*  $Id: setup.c,v 1.71.2.1 2002/02/27 21:31:38 davem Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -12,7 +12,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <asm/smp.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
@@ -20,6 +20,7 @@
 #include <linux/delay.h>
 #include <linux/config.h>
 #include <linux/fs.h>
+#include <linux/seq_file.h>
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
@@ -38,12 +39,12 @@
 #include <asm/idprom.h>
 #include <asm/head.h>
 #include <asm/starfire.h>
+#include <asm/hardirq.h>
+#include <asm/sections.h>
 
 #ifdef CONFIG_IP_PNP
 #include <net/ipconfig.h>
 #endif
-
-#undef PROM_DEBUG_CONSOLE
 
 struct screen_info screen_info = {
 	0, 0,			/* orig-x, orig-y */
@@ -66,6 +67,7 @@ struct screen_info screen_info = {
 #if CONFIG_SUN_CONSOLE
 void (*prom_palette)(int);
 #endif
+void (*prom_keyboard)(void);
 asmlinkage void sys_sync(void);	/* it's really int */
 
 static void
@@ -90,13 +92,23 @@ int prom_callback(long *args)
 	struct console *cons, *saved_console = NULL;
 	unsigned long flags;
 	char *cmd;
+	extern spinlock_t prom_entry_lock;
 
 	if (!args)
 		return -1;
 	if (!(cmd = (char *)args[0]))
 		return -1;
 
+	/*
+	 * The callback can be invoked on the cpu that first dropped 
+	 * into prom_cmdline after taking the serial interrupt, or on 
+	 * a slave processor that was smp_captured() if the 
+	 * administrator has done a switch-cpu inside obp. In either 
+	 * case, the cpu is marked as in-interrupt. Drop IRQ locks.
+	 */
+	irq_exit(smp_processor_id(), 0);
 	save_and_cli(flags);
+	spin_unlock(&prom_entry_lock);
 	cons = console_drivers;
 	while (cons) {
 		unregister_console(cons);
@@ -166,10 +178,14 @@ int prom_callback(long *args)
 					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
 
 			/*
-			 * Locked down tlb entry 63.
+			 * Locked down tlb entry.
 			 */
 
-			tte = spitfire_get_dtlb_data(63);
+			if (tlb_type == spitfire)
+				tte = spitfire_get_dtlb_data(SPITFIRE_HIGHEST_LOCKED_TLBENT);
+			else if (tlb_type == cheetah || tlb_type == cheetah_plus)
+				tte = cheetah_get_ldtlb_data(CHEETAH_HIGHEST_LOCKED_TLBENT);
+
 			res = PROM_TRUE;
 			goto done;
 		}
@@ -181,7 +197,14 @@ int prom_callback(long *args)
 			pgd_t *pgdp;
 			pmd_t *pmdp;
 			pte_t *ptep;
+			int error;
 
+			if ((va >= LOW_OBP_ADDRESS) && (va < HI_OBP_ADDRESS)) {
+				tte = prom_virt_to_phys(va, &error);
+				if (!error)
+					res = PROM_TRUE;
+				goto done;
+			}
 			pgdp = pgd_offset_k(va);
 			if (pgd_none(*pgdp))
 				goto done;
@@ -253,7 +276,7 @@ int prom_callback(long *args)
 		unsigned long tte;
 
 		tte = args[3];
-		prom_printf("%lx ", (tte & _PAGE_SOFT2) >> 50);
+		prom_printf("%lx ", (tte & 0x07FC000000000000) >> 50);
 
 		args[2] = 2;
 		args[args[1] + 3] = 0;
@@ -267,7 +290,12 @@ int prom_callback(long *args)
 		saved_console = cons->next;
 		register_console(cons);
 	}
+	spin_lock(&prom_entry_lock);
 	restore_flags(flags);
+	/*
+	 * Restore in-interrupt status for a resume from obp.
+	 */
+	irq_enter(smp_processor_id(), 0);
 	return 0;
 }
 
@@ -285,14 +313,12 @@ static int console_fb __initdata = 0;
 /* Exported for mm/init.c:paging_init. */
 unsigned long cmdline_memory_size = 0;
 
-#ifdef PROM_DEBUG_CONSOLE
 static struct console prom_debug_console = {
 	name:		"debug",
 	write:		prom_console_write,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,
 };
-#endif
 
 /* XXX Implement this at some point... */
 void kernel_enter_debugger(void)
@@ -325,6 +351,10 @@ static void __init process_switch(char c)
 	case 'h':
 		prom_printf("boot_flags_init: Halt!\n");
 		prom_halt();
+		break;
+	case 'p':
+		/* Use PROM debug console. */
+		register_console(&prom_debug_console);
 		break;
 	default:
 		printk("Unknown boot switch (-%c)\n", c);
@@ -427,7 +457,7 @@ extern int root_mountflags;
 char saved_command_line[256];
 char reboot_command[256];
 
-extern unsigned long phys_base;
+extern unsigned long phys_base, kern_base, kern_size;
 
 static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
@@ -454,10 +484,6 @@ void __init setup_arch(char **cmdline_p)
 	*cmdline_p = prom_getbootargs();
 	strcpy(saved_command_line, *cmdline_p);
 
-#ifdef PROM_DEBUG_CONSOLE
-	register_console(&prom_debug_console);
-#endif
-
 	printk("ARCH: SUN4U\n");
 
 #ifdef CONFIG_DUMMY_CONSOLE
@@ -466,6 +492,18 @@ void __init setup_arch(char **cmdline_p)
 	conswitchp = &prom_con;
 #endif
 
+#ifdef CONFIG_SMP
+	i = (unsigned long)&irq_stat[1] - (unsigned long)&irq_stat[0];
+	if ((i == SMP_CACHE_BYTES) || (i == (2 * SMP_CACHE_BYTES))) {
+		extern unsigned int irqsz_patchme[1];
+		irqsz_patchme[0] |= ((i == SMP_CACHE_BYTES) ? SMP_CACHE_BYTES_SHIFT : \
+							SMP_CACHE_BYTES_SHIFT + 1);
+		flushi((long)&irqsz_patchme[0]);
+	} else {
+		prom_printf("Unexpected size of irq_stat[] elements\n");
+		prom_halt();
+	}
+#endif
 	/* Work out if we are starfire early on */
 	check_if_starfire();
 
@@ -490,19 +528,31 @@ void __init setup_arch(char **cmdline_p)
 			highest_paddr = top;
 	}
 
+	switch (tlb_type) {
+	default:
+	case spitfire:
+		kern_base = spitfire_get_itlb_data(sparc64_highest_locked_tlbent());
+		kern_base &= _PAGE_PADDR_SF;
+		break;
+
+	case cheetah:
+	case cheetah_plus:
+		kern_base = cheetah_get_litlb_data(sparc64_highest_locked_tlbent());
+		kern_base &= _PAGE_PADDR;
+		break;
+	};
+
+	kern_size = (unsigned long)&_end - (unsigned long)KERNBASE;
+
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
 	ROOT_DEV = to_kdev_t(root_dev);
-#ifdef CONFIG_BLK_DEV_RAM
+#ifdef CONFIG_BLK_DEV_INITRD
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
 #endif
 
-	/* Due to stack alignment restrictions and assumptions... */
-	init_mm.mmap->vm_page_prot = PAGE_SHARED;
-	init_mm.mmap->vm_start = PAGE_OFFSET;
-	init_mm.mmap->vm_end = PAGE_OFFSET + highest_paddr;
 	init_task.thread.kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
@@ -571,51 +621,78 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
 
 /* BUFFER is PAGE_SIZE bytes long. */
 
-extern char *sparc_cpu_type[];
-extern char *sparc_fpu_type[];
+extern char *sparc_cpu_type;
+extern char *sparc_fpu_type;
 
-extern int smp_info(char *);
-extern int smp_bogo(char *);
-extern int mmu_info(char *);
+extern void smp_info(struct seq_file *);
+extern void smp_bogo(struct seq_file *);
+extern void mmu_info(struct seq_file *);
 
-int get_cpuinfo(char *buffer)
+#ifndef CONFIG_SMP
+unsigned long up_clock_tick;
+#endif
+
+static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
-	int cpuid=smp_processor_id();
-	int len;
-
-	len = sprintf(buffer, 
-	    "cpu\t\t: %s\n"
-            "fpu\t\t: %s\n"
-            "promlib\t\t: Version 3 Revision %d\n"
-            "prom\t\t: %d.%d.%d\n"
-            "type\t\t: sun4u\n"
-	    "ncpus probed\t: %d\n"
-	    "ncpus active\t: %d\n"
+	seq_printf(m, 
+		   "cpu\t\t: %s\n"
+		   "fpu\t\t: %s\n"
+		   "promlib\t\t: Version 3 Revision %d\n"
+		   "prom\t\t: %d.%d.%d\n"
+		   "type\t\t: sun4u\n"
+		   "ncpus probed\t: %d\n"
+		   "ncpus active\t: %d\n"
 #ifndef CONFIG_SMP
-            "BogoMips\t: %lu.%02lu\n"
+		   "Cpu0Bogo\t: %lu.%02lu\n"
+		   "Cpu0ClkTck\t: %016lx\n"
 #endif
-	    ,
-            sparc_cpu_type[cpuid],
-            sparc_fpu_type[cpuid],
-            prom_rev, prom_prev >> 16, (prom_prev >> 8) & 0xff, prom_prev & 0xff,
-	    linux_num_cpus, smp_num_cpus
+		   ,
+		   sparc_cpu_type,
+		   sparc_fpu_type,
+		   prom_rev,
+		   prom_prev >> 16,
+		   (prom_prev >> 8) & 0xff,
+		   prom_prev & 0xff,
+		   linux_num_cpus,
+		   smp_num_cpus
 #ifndef CONFIG_SMP
-            , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
+		   , loops_per_jiffy/(500000/HZ),
+		   (loops_per_jiffy/(5000/HZ)) % 100,
+		   up_clock_tick
 #endif
-	    );
+		);
 #ifdef CONFIG_SMP
-	len += smp_bogo(buffer + len);
+	smp_bogo(m);
 #endif
-	len += mmu_info(buffer + len);
+	mmu_info(m);
 #ifdef CONFIG_SMP
-	len += smp_info(buffer + len);
+	smp_info(m);
 #endif
-#undef ZS_LOG
-#ifdef ZS_LOG
-	{
-		extern int zs_dumplog(char *);
-		len += zs_dumplog(buffer + len);
-	}
-#endif
-	return len;
+	return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	/* The pointer we are returning is arbitrary,
+	 * it just has to be non-NULL and not IS_ERR
+	 * in the success case.
+	 */
+	return *pos == 0 ? &c_start : NULL;
+}
+
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};

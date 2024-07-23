@@ -6,7 +6,6 @@
  * Copyright (C) 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
 
@@ -36,6 +35,7 @@ EXPORT_SYMBOL(rpciod_down);
 EXPORT_SYMBOL(rpciod_up);
 EXPORT_SYMBOL(rpc_new_task);
 EXPORT_SYMBOL(rpc_wake_up_status);
+EXPORT_SYMBOL(rpc_release_task);
 
 /* RPC client functions */
 EXPORT_SYMBOL(rpc_create_client);
@@ -49,6 +49,7 @@ EXPORT_SYMBOL(rpc_clnt_sigmask);
 EXPORT_SYMBOL(rpc_clnt_sigunmask);
 EXPORT_SYMBOL(rpc_delay);
 EXPORT_SYMBOL(rpc_restart_call);
+EXPORT_SYMBOL(rpc_setbufsize);
 
 /* Client transport */
 EXPORT_SYMBOL(xprt_create_proto);
@@ -64,7 +65,7 @@ EXPORT_SYMBOL(rpcauth_insert_credcache);
 EXPORT_SYMBOL(rpcauth_lookupcred);
 EXPORT_SYMBOL(rpcauth_bindcred);
 EXPORT_SYMBOL(rpcauth_matchcred);
-EXPORT_SYMBOL(rpcauth_releasecred);
+EXPORT_SYMBOL(put_rpccred);
 
 /* RPC server stuff */
 EXPORT_SYMBOL(svc_create);
@@ -76,6 +77,7 @@ EXPORT_SYMBOL(svc_process);
 EXPORT_SYMBOL(svc_recv);
 EXPORT_SYMBOL(svc_wake_up);
 EXPORT_SYMBOL(svc_makesock);
+EXPORT_SYMBOL(svc_reserve);
 
 /* RPC statistics */
 #ifdef CONFIG_PROC_FS
@@ -91,18 +93,12 @@ EXPORT_SYMBOL(svc_proc_read);
 EXPORT_SYMBOL(xdr_encode_array);
 EXPORT_SYMBOL(xdr_encode_string);
 EXPORT_SYMBOL(xdr_decode_string);
+EXPORT_SYMBOL(xdr_decode_string_inplace);
 EXPORT_SYMBOL(xdr_decode_netobj);
 EXPORT_SYMBOL(xdr_encode_netobj);
-EXPORT_SYMBOL(xdr_zero);
-EXPORT_SYMBOL(xdr_one);
-EXPORT_SYMBOL(xdr_two);
-EXPORT_SYMBOL(xdr_shift_iovec);
-EXPORT_SYMBOL(xdr_zero_iovec);
-
-/* RPC errors */
-EXPORT_SYMBOL(rpc_success);
-EXPORT_SYMBOL(rpc_garbage_args);
-EXPORT_SYMBOL(rpc_system_err);
+EXPORT_SYMBOL(xdr_encode_pages);
+EXPORT_SYMBOL(xdr_inline_pages);
+EXPORT_SYMBOL(xdr_shift_buf);
 
 /* Debugging symbols */
 #ifdef RPC_DEBUG

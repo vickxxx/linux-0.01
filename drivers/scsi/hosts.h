@@ -27,6 +27,7 @@
 
 #include <linux/config.h>
 #include <linux/proc_fs.h>
+#include <linux/pci.h>
 
 /* It is senseless to set SG_ALL any higher than this - the performance
  *  does not get any better, and it wastes memory
@@ -242,6 +243,11 @@ typedef struct	SHT
     short unsigned int sg_tablesize;
 
     /*
+     * if the host adapter has limitations beside segment count
+     */
+    short unsigned int max_sectors;
+
+    /*
      * True if this host adapter can make good use of linked commands.
      * This will allow more than one command to be queued to a given
      * unit on a given host.  Set this to the maximum number of command
@@ -284,6 +290,11 @@ typedef struct	SHT
      * True for emulated SCSI host adapters (e.g. ATAPI)
      */
     unsigned emulated:1;
+
+    /*
+     * True for drivers that can do I/O from highmem
+     */
+    unsigned highmem_io:1;
 
     /*
      * Name of proc directory
@@ -379,10 +390,13 @@ struct Scsi_Host
     int can_queue;
     short cmd_per_lun;
     short unsigned int sg_tablesize;
+    short unsigned int max_sectors;
 
     unsigned in_recovery:1;
     unsigned unchecked_isa_dma:1;
     unsigned use_clustering:1;
+    unsigned highmem_io:1;
+
     /*
      * True if this host was loaded as a loadable module
      */
@@ -412,6 +426,12 @@ struct Scsi_Host
     unsigned some_device_starved:1;
    
     void (*select_queue_depths)(struct Scsi_Host *, Scsi_Device *);
+
+    /*
+     * For SCSI hosts which are PCI devices, set pci_dev so that
+     * we can do BIOS EDD 3.0 mappings
+     */
+    struct pci_dev *pci_dev;
 
     /*
      * We should ensure that this is aligned, both for better performance
@@ -466,6 +486,13 @@ extern void scsi_unregister(struct Scsi_Host * i);
 extern void scsi_register_blocked_host(struct Scsi_Host * SHpnt);
 extern void scsi_deregister_blocked_host(struct Scsi_Host * SHpnt);
 
+static inline void scsi_set_pci_device(struct Scsi_Host *SHpnt,
+                                       struct pci_dev *pdev)
+{
+	SHpnt->pci_dev = pdev;
+}
+
+
 /*
  * Prototypes for functions/data in scsi_scan.c
  */
@@ -506,10 +533,18 @@ struct Scsi_Device_Template
 void  scsi_initialize_queue(Scsi_Device * SDpnt, struct Scsi_Host * SHpnt);
 
 int scsi_register_device(struct Scsi_Device_Template * sdpnt);
+void scsi_deregister_device(struct Scsi_Device_Template * tpnt);
+
+/* Support for hot plugging and unplugging devices -- safe for
+ * ieee1394 or USB devices, but probably not for normal SCSI... */
+extern int scsi_add_single_device(struct Scsi_Host *shpnt,
+	int channel, int id, int lun);
+extern int scsi_remove_single_device(struct Scsi_Host *shpnt,
+	int channel, int id, int lun);
 
 /* These are used by loadable modules */
 extern int scsi_register_module(int, void *);
-extern void scsi_unregister_module(int, void *);
+extern int scsi_unregister_module(int, void *);
 
 /* The different types of modules that we can load and unload */
 #define MODULE_SCSI_HA 1

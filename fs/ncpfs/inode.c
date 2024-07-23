@@ -24,7 +24,7 @@
 #include <linux/locks.h>
 #include <linux/file.h>
 #include <linux/fcntl.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 
@@ -44,7 +44,7 @@ static struct super_operations ncp_sops =
 	statfs:		ncp_statfs,
 };
 
-extern struct dentry_operations ncp_dentry_operations;
+extern struct dentry_operations ncp_root_dentry_operations;
 #ifdef CONFIG_NCPFS_EXTRAS
 extern struct address_space_operations ncp_symlink_aops;
 extern int ncp_symlink(struct inode*, struct dentry*, const char*);
@@ -443,7 +443,7 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	sb->s_root = d_alloc_root(root_inode);
         if (!sb->s_root)
 		goto out_no_root;
-	sb->s_root->d_op = &ncp_dentry_operations;
+	sb->s_root->d_op = &ncp_root_dentry_operations;
 	return sb;
 
 out_no_root:
@@ -651,7 +651,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 	if ((attr->ia_valid & ATTR_ATIME) != 0) {
 		__u16 dummy;
 		info_mask |= (DM_LAST_ACCESS_DATE);
-		ncp_date_unix2dos(attr->ia_ctime,
+		ncp_date_unix2dos(attr->ia_atime,
 				  &(dummy), &(info.lastAccessDate));
 		info.lastAccessDate = le16_to_cpu(info.lastAccessDate);
 	}
@@ -692,7 +692,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 		ncp_inode_close(inode);
 		result = ncp_make_closed(inode);
 		if (!result)
-			vmtruncate(inode, attr->ia_size);
+			result = vmtruncate(inode, attr->ia_size);
 	}
 out:
 	return result;
@@ -730,3 +730,4 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_ncp_fs)
 module_exit(exit_ncp_fs)
+MODULE_LICENSE("GPL");

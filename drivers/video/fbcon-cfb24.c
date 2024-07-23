@@ -76,14 +76,14 @@ void fbcon_cfb24_bmove(struct display *p, int sy, int sx, int dy, int dx,
 	out1 = (in1<<8)  | (in2>>16); \
 	out2 = (in2<<16) | (in3>>8); \
 	out3 = (in3<<24) | in4; \
-    } while (0);
+    } while (0)
 #elif defined(__LITTLE_ENDIAN)
 #define convert4to3(in1, in2, in3, in4, out1, out2, out3) \
     do { \
 	out1 = in1       | (in2<<24); \
 	out2 = (in2>> 8) | (in3<<16); \
 	out3 = (in3>>16) | (in4<< 8); \
-    } while (0);
+    } while (0)
 #else
 #error FIXME: No endianness??
 #endif
@@ -191,8 +191,9 @@ void fbcon_cfb24_putcs(struct vc_data *conp, struct display *p,
     u32 eorx, fgx, bgx, d1, d2, d3, d4;
 
     dest0 = p->screen_base + yy * fontheight(p) * bytes + xx * fontwidth(p) * 3;
-    fgx = ((u32 *)p->dispsw_data)[attr_fgcol(p, scr_readw(s))];
-    bgx = ((u32 *)p->dispsw_data)[attr_bgcol(p, scr_readw(s))];
+    c = scr_readw(s);
+    fgx = ((u32 *)p->dispsw_data)[attr_fgcol(p, c)];
+    bgx = ((u32 *)p->dispsw_data)[attr_bgcol(p, c)];
     eorx = fgx ^ bgx;
     while (count--) {
 	c = scr_readw(s++) & p->charmask;
@@ -304,6 +305,8 @@ struct display_switch fbcon_cfb24 = {
 
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
     return 0;

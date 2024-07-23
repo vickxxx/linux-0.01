@@ -57,7 +57,12 @@ struct dn_fib_rule
 	int			r_dead;
 };
 
-static struct dn_fib_rule default_rule = { NULL, ATOMIC_INIT(2), 0x7fff, DN_DEFAULT_TABLE, RTN_UNICAST };
+static struct dn_fib_rule default_rule = {
+	r_clntref:		ATOMIC_INIT(2),
+	r_preference:		0x7fff,
+	r_table:		DN_DEFAULT_TABLE,
+	r_action:		RTN_UNICAST
+};
 
 static struct dn_fib_rule *dn_fib_rules = &default_rule;
 static rwlock_t dn_fib_rules_lock = RW_LOCK_UNLOCKED;
@@ -291,12 +296,8 @@ static int dn_fib_rules_event(struct notifier_block *this, unsigned long event, 
 
 
 static struct notifier_block dn_fib_rules_notifier = {
-	dn_fib_rules_event,
-	NULL,
-	0
+	notifier_call:		dn_fib_rules_event,
 };
-
-#ifdef CONFIG_RTNETLINK
 
 static int dn_fib_fill_rule(struct sk_buff *skb, struct dn_fib_rule *r, struct netlink_callback *cb)
 {
@@ -334,7 +335,7 @@ static int dn_fib_fill_rule(struct sk_buff *skb, struct dn_fib_rule *r, struct n
 
 nlmsg_failure:
 rtattr_failure:
-	skb_put(skb, b - skb->tail);
+	skb_trim(skb, b - skb->data);
 	return -1;
 }
 
@@ -356,8 +357,6 @@ int dn_fib_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif /* CONFIG_RTNETLINK */
 
 void __init dn_fib_rules_init(void)
 {

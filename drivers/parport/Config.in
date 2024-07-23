@@ -11,18 +11,20 @@ comment 'Parallel port support'
 tristate 'Parallel port support' CONFIG_PARPORT
 if [ "$CONFIG_PARPORT" != "n" ]; then
    dep_tristate '  PC-style hardware' CONFIG_PARPORT_PC $CONFIG_PARPORT
+   if [ "$CONFIG_PARPORT_PC" != "n" -a "$CONFIG_SERIAL" != "n" ]; then
+      if [ "$CONFIG_SERIAL" = "m" ]; then
+         define_tristate CONFIG_PARPORT_PC_CML1 m
+      else
+         define_tristate CONFIG_PARPORT_PC_CML1 $CONFIG_PARPORT_PC
+      fi
+      dep_tristate '    Multi-IO cards (parallel and serial)' CONFIG_PARPORT_SERIAL $CONFIG_PARPORT_PC_CML1
+   fi
    if [ "$CONFIG_PARPORT_PC" != "n" ]; then
-      bool '    Use FIFO/DMA if available' CONFIG_PARPORT_PC_FIFO
       if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+         bool '    Use FIFO/DMA if available (EXPERIMENTAL)' CONFIG_PARPORT_PC_FIFO
          bool '    SuperIO chipset support (EXPERIMENTAL)' CONFIG_PARPORT_PC_SUPERIO
       fi
-   fi
-   if [ "$CONFIG_PARPORT_PC" = "y" ]; then
-      # Don't bother with this if parport_pc is a module; it only affects
-      # the presence or not of some __init's, which are no-ops for modules.
-      if [ "$CONFIG_HOTPLUG" = "y" -a "$CONFIG_PCMCIA" != "n" ]; then
-	 bool '    Support for PCMCIA management for PC-style ports' CONFIG_PARPORT_PC_PCMCIA
-      fi
+      dep_tristate '    Support for PCMCIA management for PC-style ports' CONFIG_PARPORT_PC_PCMCIA $CONFIG_PCMCIA $CONFIG_PARPORT_PC $CONFIG_HOTPLUG
    fi
    if [ "$CONFIG_ARM" = "y" ]; then
       dep_tristate '  Archimedes hardware' CONFIG_PARPORT_ARC $CONFIG_PARPORT
@@ -41,10 +43,22 @@ if [ "$CONFIG_PARPORT" != "n" ]; then
    else
       define_tristate CONFIG_PARPORT_ATARI n
    fi
+   if [ "$CONFIG_GSC_LASI" = "y" ]; then
+      dep_tristate '  LASI/ASP builtin parallel-port' CONFIG_PARPORT_GSC $CONFIG_PARPORT
+   else
+      define_tristate CONFIG_PARPORT_GSC n
+   fi
+
    if [ "$CONFIG_SBUS" = "y" -a "$CONFIG_EXPERIMENTAL" = "y" ]; then
       dep_tristate '  Sparc hardware (EXPERIMENTAL)' CONFIG_PARPORT_SUNBPP $CONFIG_PARPORT
    else
       define_tristate CONFIG_PARPORT_SUNBPP n
+   fi
+
+   if [ "$CONFIG_SGI_IP22" = "y" -a "$CONFIG_EXPERIMENTAL" = "y" ]; then
+      dep_tristate '  SGI Indy/Indigo2 hardware (EXPERIMENTAL)' CONFIG_PARPORT_IP22 $CONFIG_PARPORT
+   else
+      define_tristate CONFIG_PARPORT_IP22 n
    fi
 
    # If exactly one hardware type is selected then parport will optimise away

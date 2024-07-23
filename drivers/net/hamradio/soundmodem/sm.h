@@ -150,20 +150,14 @@ struct hardware_info {
 
 /* --------------------------------------------------------------------- */
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
-
-/* --------------------------------------------------------------------- */
-
 extern const char sm_drvname[];
-extern const char sm_drvinfo[];
 
 /* --------------------------------------------------------------------- */
 /*
  * ===================== diagnostics stuff ===============================
  */
 
-extern inline void diag_trigger(struct sm_state *sm)
+static inline void diag_trigger(struct sm_state *sm)
 {
 	if (sm->diag.ptr < 0)
 		if (!(sm->diag.flags & SM_DIAGFLAG_DCDGATE) || sm->hdrv.hdlcrx.dcd)
@@ -175,7 +169,7 @@ extern inline void diag_trigger(struct sm_state *sm)
 #define SHRT_MAX ((short)(((unsigned short)(~0U))>>1))
 #define SHRT_MIN (-SHRT_MAX-1)
 
-extern inline void diag_add(struct sm_state *sm, int valinp, int valdemod)
+static inline void diag_add(struct sm_state *sm, int valinp, int valdemod)
 {
 	int val;
 
@@ -194,7 +188,7 @@ extern inline void diag_add(struct sm_state *sm, int valinp, int valdemod)
 
 /* --------------------------------------------------------------------- */
 
-extern inline void diag_add_one(struct sm_state *sm, int val)
+static inline void diag_add_one(struct sm_state *sm, int val)
 {
 	if ((sm->diag.mode != SM_DIAGMODE_INPUT &&
 	     sm->diag.mode != SM_DIAGMODE_DEMOD) ||
@@ -234,14 +228,14 @@ static inline void diag_add_constellation(struct sm_state *sm, int vali, int val
  */
 
 #if 0
-extern inline unsigned int hweight32(unsigned int w)
+static inline unsigned int hweight32(unsigned int w)
 	__attribute__ ((unused));
-extern inline unsigned int hweight16(unsigned short w)
+static inline unsigned int hweight16(unsigned short w)
 	__attribute__ ((unused));
-extern inline unsigned int hweight8(unsigned char w)
+static inline unsigned int hweight8(unsigned char w)
         __attribute__ ((unused));
 
-extern inline unsigned int hweight32(unsigned int w)
+static inline unsigned int hweight32(unsigned int w)
 {
         unsigned int res = (w & 0x55555555) + ((w >> 1) & 0x55555555);
         res = (res & 0x33333333) + ((res >> 2) & 0x33333333);
@@ -250,7 +244,7 @@ extern inline unsigned int hweight32(unsigned int w)
         return (res & 0x0000FFFF) + ((res >> 16) & 0x0000FFFF);
 }
 
-extern inline unsigned int hweight16(unsigned short w)
+static inline unsigned int hweight16(unsigned short w)
 {
         unsigned short res = (w & 0x5555) + ((w >> 1) & 0x5555);
         res = (res & 0x3333) + ((res >> 2) & 0x3333);
@@ -258,7 +252,7 @@ extern inline unsigned int hweight16(unsigned short w)
         return (res & 0x00FF) + ((res >> 8) & 0x00FF);
 }
 
-extern inline unsigned int hweight8(unsigned char w)
+static inline unsigned int hweight8(unsigned char w)
 {
         unsigned short res = (w & 0x55) + ((w >> 1) & 0x55);
         res = (res & 0x33) + ((res >> 2) & 0x33);
@@ -267,12 +261,12 @@ extern inline unsigned int hweight8(unsigned char w)
 
 #endif
 
-extern inline unsigned int gcd(unsigned int x, unsigned int y)
+static inline unsigned int gcd(unsigned int x, unsigned int y)
 	__attribute__ ((unused));
-extern inline unsigned int lcm(unsigned int x, unsigned int y)
+static inline unsigned int lcm(unsigned int x, unsigned int y)
 	__attribute__ ((unused));
 
-extern inline unsigned int gcd(unsigned int x, unsigned int y)
+static inline unsigned int gcd(unsigned int x, unsigned int y)
 {
 	for (;;) {
 		if (!x)
@@ -286,7 +280,7 @@ extern inline unsigned int gcd(unsigned int x, unsigned int y)
 	}
 }
 
-extern inline unsigned int lcm(unsigned int x, unsigned int y)
+static inline unsigned int lcm(unsigned int x, unsigned int y)
 {
 	return x * y / gcd(x, y);
 }
@@ -299,6 +293,8 @@ extern inline unsigned int lcm(unsigned int x, unsigned int y)
 
 #ifdef __i386__
 
+#include <asm/msr.h>
+
 /*
  * only do 32bit cycle counter arithmetic; we hope we won't overflow.
  * in fact, overflowing modems would require over 2THz CPU clock speeds :-)
@@ -307,10 +303,10 @@ extern inline unsigned int lcm(unsigned int x, unsigned int y)
 #define time_exec(var,cmd)                                              \
 ({                                                                      \
 	if (cpu_has_tsc) {                                              \
-		unsigned int cnt1, cnt2, cnt3;                          \
-		__asm__(".byte 0x0f,0x31" : "=a" (cnt1), "=d" (cnt3));  \
+		unsigned int cnt1, cnt2;                                \
+		rdtscl(cnt1);                                           \
 		cmd;                                                    \
-		__asm__(".byte 0x0f,0x31" : "=a" (cnt2), "=d" (cnt3));  \
+		rdtscl(cnt2);                                           \
 		var = cnt2-cnt1;                                        \
 	} else {                                                        \
 		cmd;                                                    \
@@ -356,7 +352,6 @@ extern const struct hardware_info sm_hw_wssfdx;
 
 extern const struct modem_tx_info *sm_modem_tx_table[];
 extern const struct modem_rx_info *sm_modem_rx_table[];
-extern const struct hardware_info *sm_hardware_table[];
 
 /* --------------------------------------------------------------------- */
 

@@ -1,8 +1,8 @@
 /*
  * EFI call stub.
  *
- * Copyright (C) 1999-2000 Hewlett-Packard Co
- * Copyright (C) 1999-2000 David Mosberger <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2001 Hewlett-Packard Co
+ *	David Mosberger <davidm@hpl.hp.com>
  *
  * This stub allows us to make EFI calls in physical mode with interrupts
  * turned off.  We need this because we can't call SetVirtualMap() until
@@ -33,13 +33,6 @@
 #include <asm/processor.h>
 #include <asm/asmmacro.h>
 
-	.text
-	.psr abi64
-	.psr lsb
-	.lsb
-
-	.text
-
 /*
  * Inputs:
  *	in0 = address of function descriptor of EFI routine to call
@@ -50,42 +43,40 @@
  */
 
 GLOBAL_ENTRY(efi_call_phys)
-	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
 	alloc loc1=ar.pfs,8,5,7,0
 	ld8 r2=[in0],8			// load EFI function's entry point
 	mov loc0=rp
-	UNW(.body)
+	.body
 	;;
 	mov loc2=gp			// save global pointer
 	mov loc4=ar.rsc			// save RSE configuration
-	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	;;
-
 	ld8 gp=[in0]			// load EFI function's global pointer
-	mov out0=in1
-	mov out1=in2
 	movl r16=PSR_BITS_TO_CLEAR
-
 	mov loc3=psr			// save processor status word
 	movl r17=PSR_BITS_TO_SET
 	;;
-	mov out2=in3
 	or loc3=loc3,r17
 	mov b6=r2
 	;;
 	andcm r16=loc3,r16		// get psr with IT, DT, and RT bits cleared
-	mov out3=in4
-	br.call.sptk.few rp=ia64_switch_mode
+	br.call.sptk.many rp=ia64_switch_mode_phys
 .ret0:	mov out4=in5
+	mov out0=in1
+	mov out1=in2
+	mov out2=in3
+	mov out3=in4
 	mov out5=in6
 	mov out6=in7
-	br.call.sptk.few rp=b6		// call the EFI function
-.ret1:	mov ar.rsc=r0			// put RSE in enforced lazy, LE mode
+	br.call.sptk.many rp=b6		// call the EFI function
+.ret1:	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	mov r16=loc3
-	br.call.sptk.few rp=ia64_switch_mode // return to virtual mode
+	br.call.sptk.many rp=ia64_switch_mode_virt // return to virtual mode
 .ret2:	mov ar.rsc=loc4			// restore RSE configuration
 	mov ar.pfs=loc1
 	mov rp=loc0
 	mov gp=loc2
-	br.ret.sptk.few rp
+	br.ret.sptk.many rp
 END(efi_call_phys)

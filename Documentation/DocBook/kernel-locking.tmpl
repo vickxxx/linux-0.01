@@ -11,7 +11,7 @@
     <surname>Russell</surname>
     <affiliation>
      <address>
-      <email>rusty@linuxcare.com</email>
+      <email>rusty@rustcorp.com.au</email>
      </address>
     </affiliation>
    </author>
@@ -386,7 +386,7 @@
        <function>spin_lock()</function> and
        <function>spin_unlock()</function> calls.  
        <function>spin_lock_bh()</function> is
-       unnecessary here, as you are already in a a tasklet, and
+       unnecessary here, as you are already in a tasklet, and
        none will be run on the same CPU.
      </para>
     </sect2>
@@ -720,7 +720,8 @@
       halves without a lock.  Depending on their exact timing, they
       would either see the new element in the list with a valid 
       <structfield>next</structfield> pointer, or it would not be in the 
-      list yet.
+      list yet.  A lock is still required against other CPUs inserting
+      or deleting from the list, of course.
     </para>
 
     <para>
@@ -759,8 +760,11 @@
     </para>
 
     <para>
-      Any atomic operation is defined to act as a memory barrier
-      (ie. as per the <function>mb()</function> macro).  Also,
+      Some atomic operations are defined to act as a memory barrier
+      (ie. as per the <function>mb()</function> macro, but if in
+      doubt, be explicit.
+      <!-- Rusty Russell 2 May 2001, 2.4.4 -->
+      Also,
       spinlock operations act as partial barriers: operations after
       gaining a spinlock will never be moved to precede the
       <function>spin_lock()</function> call, and operations before
@@ -784,8 +788,18 @@
     </para>
 
     <para>
-      Note that the atomic operations are defined to act as both
-      read and write barriers on all platforms.
+      Note that the atomic operations do in general not act as memory
+      barriers. Instead you can insert a memory barrier before or
+      after <function>atomic_inc()</function> or
+      <function>atomic_dec()</function> by inserting
+      <function>smp_mb__before_atomic_inc()</function>,
+      <function>smp_mb__after_atomic_inc()</function>,
+      <function>smp_mb__before_atomic_dec()</function> or
+      <function>smp_mb__after_atomic_dec()</function>
+      respectively. The advantage of using those macros instead of
+      <function>smp_mb()</function> is, that they are cheaper on some
+      platforms.    
+      <!-- Sebastian Wilhelmi <seppi@seppi.de> 2002-03-04 -->
     </para>
    </sect1>
 
@@ -1041,10 +1055,8 @@
       Another common problem is deleting timers which restart
       themselves (by calling <function>add_timer()</function> at the end 
       of their timer function).  Because this is a fairly common case 
-      which is prone to races, you can put a call to
-      <function>timer_exit()</function> at the very end of your timer function,
-      and user <function>del_timer_sync()</function> 
-      (<filename class=headerfile>include/linux/timer.h</filename>)
+      which is prone to races, you should use <function>del_timer_sync()</function> 
+      (<filename class=headerfile>include/linux/timer.h</filename>) 
       to handle this case.  It returns the number of times the timer 
       had to be deleted before we finally stopped it from adding itself back 
       in.

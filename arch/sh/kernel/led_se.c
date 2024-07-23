@@ -11,9 +11,17 @@
 
 #include <linux/config.h>
 
+#ifdef CONFIG_SH_7751_SOLUTION_ENGINE
+#include <asm/hitachi_7751se.h>
+#elif defined(CONFIG_SH_MOBILE_SOLUTION_ENGINE)
+#include <asm/hitachi_shmse.h>
+#else
+#include <asm/hitachi_se.h>
+#endif
+
 static void mach_led(int position, int value)
 {
-	volatile unsigned short* p = (volatile unsigned short*)0xb0c00000;
+	volatile unsigned short* p = (volatile unsigned short*)PA_LED;
 
 	if (value) {
 		*p |= (1<<8);
@@ -30,7 +38,7 @@ static void mach_led(int position, int value)
 void heartbeat_se(void)
 {
 	static unsigned int cnt = 0, period = 0;
-	volatile unsigned short* p = (volatile unsigned short*)0xb0c00000;
+	volatile unsigned short* p = (volatile unsigned short*)PA_LED;
 	static unsigned bit = 0, up = 1;
 
 	cnt += 1;

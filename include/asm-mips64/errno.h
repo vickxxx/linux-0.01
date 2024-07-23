@@ -1,10 +1,10 @@
-/* $Id: errno.h,v 1.1 1999/08/18 23:37:51 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 by Ralf Baechle
+ * Copyright (C) 1995, 2001 by Ralf Baechle
+ * Copyright (C) 2001 Silicon Graphics, Inc.
  */
 #ifndef _ASM_ERRNO_H
 #define _ASM_ERRNO_H
@@ -18,7 +18,7 @@
 #define	EINTR		 4	/* Interrupted system call */
 #define	EIO		 5	/* I/O error */
 #define	ENXIO		 6	/* No such device or address */
-#define	E2BIG		 7	/* Arg list too long */
+#define	E2BIG		 7	/* Argument list too long */
 #define	ENOEXEC		 8	/* Exec format error */
 #define	EBADF		 9	/* Bad file number */
 #define	ECHILD		10	/* No child processes */

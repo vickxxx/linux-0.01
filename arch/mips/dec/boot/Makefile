@@ -6,10 +6,7 @@
 # unless it's something special (ie not a .c file).
 #
 
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
+USE_STANDARD_AS_RULE := true
 
 netboot: all
 	mipsel-linux-ld -N -G 0 -T ld.ecoff ../../boot/zImage \
@@ -18,7 +15,8 @@ netboot: all
 all: dec_boot.o
 
 O_TARGET := dec_boot.o
-O_OBJS	 := decstation.o
+
+obj-y	 := decstation.o
 
 clean:
 	rm -f nbImage

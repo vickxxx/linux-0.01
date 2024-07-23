@@ -1,31 +1,15 @@
-
 /*
+ * Diva Server PRI specific part of initialisation
  *
  * Copyright (C) Eicon Technology Corporation, 2000.
  *
- * This source file is supplied for the exclusive use with Eicon
- * Technology Corporation's range of DIVA Server Adapters.
- *
  * Eicon File Revision :    1.5  
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY OF ANY KIND WHATSOEVER INCLUDING ANY 
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-
-/* Diva Server PRI specific part of initialisation */
 #include "sys.h"
 #include "idi.h"
 #include "divas.h"
@@ -82,7 +66,7 @@ void mem_out_buffer(ADAPTER *a, void *adr, void *P, word length);
 void mem_inc(ADAPTER *a, void *adr);
 
 int DivasPRIInitPCI(card_t *card, dia_card_t *cfg);
-int pri_ISR (card_t* card);
+static int pri_ISR (card_t* card);
 
 static int diva_server_reset(card_t *card)
 {
@@ -156,7 +140,7 @@ static int diva_server_config(card_t *card, dia_config_t *config)
 
 	UxCardMemOut(card->hw, &shared[ 8], config->tei);
 	UxCardMemOut(card->hw, &shared[ 9], config->nt2);
-	UxCardMemOut(card->hw, &shared[10], 0);
+	UxCardMemOut(card->hw, &shared[10], config->sig_flags);
 	UxCardMemOut(card->hw, &shared[11], config->watchdog);
 	UxCardMemOut(card->hw, &shared[12], config->permanent);
 	UxCardMemOut(card->hw, &shared[13], config->x_interface);
@@ -509,7 +493,7 @@ int DivasPriInit(card_t *card, dia_card_t *cfg)
 }
 
 
-int pri_ISR (card_t* card) 
+static int pri_ISR (card_t* card) 
 {
 	int served = 0;
 	byte* cfg = UxCardMemAttach(card->hw, DIVAS_CFG_MEMORY);

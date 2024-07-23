@@ -1,13 +1,15 @@
-/* $Id: niccy.c,v 1.15.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: niccy.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * niccy.c  low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
- *          compatible (SAGEM cybermodem)
+ * low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
+ * compatible (SAGEM cybermodem)
  *
- * Author   Karsten Keil
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  * 
- * Thanks to Dr. Neuhaus and SAGEM for informations
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ * 
+ * Thanks to Dr. Neuhaus and SAGEM for information
  *
  */
 
@@ -20,9 +22,10 @@
 #include "hscx.h"
 #include "isdnl1.h"
 #include <linux/pci.h>
+#include <linux/isapnp.h>
 
 extern const char *CardType[];
-const char *niccy_revision = "$Revision: 1.15.6.2 $";
+const char *niccy_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -195,7 +198,7 @@ release_io_niccy(struct IsdnCardState *cs)
 		val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
 		val &= PCI_IRQ_DISABLE;
 		outl(val, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
-		release_region(cs->hw.niccy.cfg_reg, 0x80);
+		release_region(cs->hw.niccy.cfg_reg, 0x40);
 		release_region(cs->hw.niccy.isac, 4);
 	} else {
 		release_region(cs->hw.niccy.isac, 2);
@@ -236,6 +239,9 @@ niccy_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 static struct pci_dev *niccy_dev __initdata = NULL;
+#ifdef __ISAPNP__
+static struct pci_bus *pnp_c __devinitdata = NULL;
+#endif
 
 int __init
 setup_niccy(struct IsdnCard *card)
@@ -247,7 +253,39 @@ setup_niccy(struct IsdnCard *card)
 	printk(KERN_INFO "HiSax: Niccy driver Rev. %s\n", HiSax_getrev(tmp));
 	if (cs->typ != ISDN_CTYPE_NICCY)
 		return (0);
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pci_bus *pb;
+		struct pci_dev *pd;
 
+		if ((pb = isapnp_find_card(
+			ISAPNP_VENDOR('S', 'D', 'A'),
+			ISAPNP_FUNCTION(0x0150), pnp_c))) {
+			pnp_c = pb;
+			pd = NULL;
+			if (!(pd = isapnp_find_dev(pnp_c,
+				ISAPNP_VENDOR('S', 'D', 'A'),
+				ISAPNP_FUNCTION(0x0150), pd))) {
+				printk(KERN_ERR "NiccyPnP: PnP error card found, no device\n");
+				return (0);
+			}
+			pd->prepare(pd);
+			pd->deactivate(pd);
+			pd->activate(pd);
+			card->para[1] = pd->resource[0].start;
+			card->para[2] = pd->resource[1].start;
+			card->para[0] = pd->irq_resource[0].start;
+			if (!card->para[0] || !card->para[1] || !card->para[2]) {
+				printk(KERN_ERR "NiccyPnP:some resources are missing %ld/%lx/%lx\n",
+					card->para[0], card->para[1], card->para[2]);
+				pd->deactivate(pd);
+				return(0);
+			}
+		} else {
+			printk(KERN_INFO "NiccyPnP: no ISAPnP card found\n");
+		}
+	}
+#endif
 	if (card->para[1]) {
 		cs->hw.niccy.isac = card->para[1] + ISAC_PNP;
 		cs->hw.niccy.hscx = card->para[1] + HSCX_PNP;
@@ -322,16 +360,16 @@ setup_niccy(struct IsdnCard *card)
 			return (0);
 		} else
 			request_region(cs->hw.niccy.isac, 4, "niccy");
-		if (check_region(cs->hw.niccy.cfg_reg, 0x80)) {
+		if (check_region(cs->hw.niccy.cfg_reg, 0x40)) {
 			printk(KERN_WARNING
 			       "HiSax: %s pci port %x-%x already in use\n",
 				CardType[card->typ],
 				cs->hw.niccy.cfg_reg,
-				cs->hw.niccy.cfg_reg + 0x80);
+				cs->hw.niccy.cfg_reg + 0x40);
 			release_region(cs->hw.niccy.isac, 4);
 			return (0);
 		} else {
-			request_region(cs->hw.niccy.cfg_reg, 0x80, "niccy pci");
+			request_region(cs->hw.niccy.cfg_reg, 0x40, "niccy pci");
 		}
 #else
 		printk(KERN_WARNING "Niccy: io0 0 and NO_PCI_BIOS\n");

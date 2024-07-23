@@ -1,4 +1,4 @@
-/* $Id: math.c,v 1.1 1999/08/23 19:00:11 cort Exp $
+/*
  * arch/ppc/math-emu/math.c
  *
  * Copyright (C) 1999  Eddie C. Dost  (ecd@atecom.com)

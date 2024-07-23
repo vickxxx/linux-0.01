@@ -1,4 +1,4 @@
-/*  $Id: irq.c,v 1.109 2000/08/31 10:00:39 anton Exp $
+/*  $Id: irq.c,v 1.113 2001/07/17 16:17:33 anton Exp $
  *  arch/sparc/kernel/irq.c:  Interrupt request handling routines. On the
  *                            Sparc the IRQ's are basically 'cast in stone'
  *                            and you are supposed to probe the prom's device
@@ -6,9 +6,9 @@
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *  Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
- *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@metabyte.com)
+ *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@yahoo.com)
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
- *  Copyright (C) 1998-2000 Anton Blanchard (anton@linuxcare.com)
+ *  Copyright (C) 1998-2000 Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/config.h>
@@ -19,7 +19,7 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -72,7 +72,7 @@ static void irq_panic(void)
     prom_halt();
 }
 
-void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
+void (*sparc_init_timers)(void (*)(int, void *,struct pt_regs *)) =
     (void (*)(void (*)(int, void *,struct pt_regs *))) irq_panic;
 
 /*
@@ -90,9 +90,9 @@ void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
  */
 #define MAX_STATIC_ALLOC	4
 struct irqaction static_irqaction[MAX_STATIC_ALLOC];
-int static_irq_count = 0;
+int static_irq_count;
 
-struct irqaction *irq_action[NR_IRQS+1] = {
+struct irqaction *irq_action[NR_IRQS] = {
 	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL,
 	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL
 };
@@ -110,7 +110,7 @@ int get_irq_list(char *buf)
 		
 		return sun4d_get_irq_list(buf);
 	}
-	for (i = 0 ; i < (NR_IRQS+1) ; i++) {
+	for (i = 0 ; i < NR_IRQS ; i++) {
 	        action = *(i + irq_action);
 		if (!action) 
 		        continue;
@@ -147,7 +147,7 @@ void free_irq(unsigned int irq, void *dev_id)
 		
 		return sun4d_free_irq(irq, dev_id);
 	}
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	action = *(cpu_irq + irq_action);
         if (cpu_irq > 14) {  /* 14 irq levels on the sparc */
                 printk("Trying to free bogus IRQ %d\n", irq);
@@ -382,7 +382,7 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 	struct irqaction * action;
 	unsigned int cpu_irq;
 	
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	action = *(cpu_irq + irq_action);
 
         printk("IO device interrupt, irq = %d\n", irq);
@@ -392,7 +392,7 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 		printk("Expecting: ");
         	for (i = 0; i < 16; i++)
                 	if (action->handler)
-                        	prom_printf("[%s:%d:0x%x] ", action->name,
+				printk("[%s:%d:0x%x] ", action->name,
 				    (int) i, (unsigned int) action->handler);
 	}
         printk("AIEEE\n");
@@ -424,6 +424,8 @@ void handler_irq(int irq, struct pt_regs * regs)
 	} while (action);
 	enable_pil_irq(irq);
 	irq_exit(cpu, irq);
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -439,6 +441,8 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
 	floppy_interrupt(irq, dev_id, regs);
 	irq_exit(cpu, irq);
 	enable_pil_irq(irq);
+	if (softirq_pending(cpu))
+		do_softirq();
 }
 #endif
 
@@ -457,7 +461,7 @@ int request_fast_irq(unsigned int irq,
 	extern struct tt_entry trapbase_cpu1, trapbase_cpu2, trapbase_cpu3;
 #endif
 	
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	if(cpu_irq > 14)
 		return -EINVAL;
 	if(!handler)
@@ -547,7 +551,7 @@ int request_irq(unsigned int irq,
 					     unsigned long, const char *, void *);
 		return sun4d_request_irq(irq, handler, irqflags, devname, dev_id);
 	}
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	if(cpu_irq > 14)
 		return -EINVAL;
 
@@ -632,7 +636,7 @@ void __init init_IRQ(void)
 	extern void sun4c_init_IRQ( void );
 	extern void sun4m_init_IRQ( void );
 	extern void sun4d_init_IRQ( void );
-    
+
 	switch(sparc_cpu_model) {
 	case sun4c:
 	case sun4:

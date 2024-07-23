@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.113 2000/11/08 08:14:58 davem Exp $
+/*  $Id: process.c,v 1.125.2.1 2001/12/18 19:40:17 davem Exp $
  *  arch/sparc64/kernel/process.c
  *
  *  Copyright (C) 1995, 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -22,7 +22,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/config.h>
@@ -39,6 +39,7 @@
 #include <asm/pstate.h>
 #include <asm/elf.h>
 #include <asm/fpumacro.h>
+#include <asm/head.h>
 
 /* #define VERBOSE_SHOWREGS */
 
@@ -99,7 +100,7 @@ int cpu_idle(void)
 		 * other cpus see our increasing idleness for the buddy
 		 * redistribution algorithm.  -DaveM
 		 */
-		membar("#StoreStore | #StoreLoad");
+		membar_safe("#StoreStore | #StoreLoad");
 	}
 }
 
@@ -111,6 +112,7 @@ extern char reboot_command [];
 extern void (*prom_palette)(int);
 extern int serial_console;
 #endif
+extern void (*prom_keyboard)(void);
 
 void machine_halt(void)
 {
@@ -121,8 +123,25 @@ void machine_halt(void)
 	if (!serial_console && prom_palette)
 		prom_palette (1);
 #endif
+	if (prom_keyboard)
+		prom_keyboard();
 	prom_halt();
 	panic("Halt failed!");
+}
+
+void machine_alt_power_off(void)
+{
+	sti();
+	mdelay(8);
+	cli();
+#ifdef CONFIG_SUN_CONSOLE
+	if (!serial_console && prom_palette)
+		prom_palette(1);
+#endif
+	if (prom_keyboard)
+		prom_keyboard();
+	prom_halt_power_off();
+	panic("Power-off failed!");
 }
 
 void machine_restart(char * cmd)
@@ -139,6 +158,8 @@ void machine_restart(char * cmd)
 	if (!serial_console && prom_palette)
 		prom_palette (1);
 #endif
+	if (prom_keyboard)
+		prom_keyboard();
 	if (cmd)
 		prom_reboot(cmd);
 	if (*reboot_command)
@@ -271,14 +292,19 @@ void __show_regs(struct pt_regs * regs)
 #ifdef CONFIG_SMP
 	unsigned long flags;
 
-	spin_lock_irqsave(&regdump_lock, flags);
+	/* Protect against xcall ipis which might lead to livelock on the lock */
+	__asm__ __volatile__("rdpr      %%pstate, %0\n\t"
+			     "wrpr      %0, %1, %%pstate"
+			     : "=r" (flags)
+			     : "i" (PSTATE_IE));
+	spin_lock(&regdump_lock);
 	printk("CPU[%d]: local_irq_count[%u] irqs_running[%d]\n",
 	       smp_processor_id(),
 	       local_irq_count(smp_processor_id()),
 	       irqs_running());
 #endif
-	printk("TSTATE: %016lx TPC: %016lx TNPC: %016lx Y: %08x\n", regs->tstate,
-	       regs->tpc, regs->tnpc, regs->y);
+	printk("TSTATE: %016lx TPC: %016lx TNPC: %016lx Y: %08x    %s\n", regs->tstate,
+	       regs->tpc, regs->tnpc, regs->y, print_tainted());
 	printk("g0: %016lx g1: %016lx g2: %016lx g3: %016lx\n",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -293,7 +319,9 @@ void __show_regs(struct pt_regs * regs)
 	       regs->u_regs[15]);
 	show_regwindow(regs);
 #ifdef CONFIG_SMP
-	spin_unlock_irqrestore(&regdump_lock, flags);
+	spin_unlock(&regdump_lock);
+	__asm__ __volatile__("wrpr	%0, 0, %%pstate"
+			     : : "r" (flags));
 #endif
 }
 
@@ -335,8 +363,8 @@ void show_regs(struct pt_regs *regs)
 	    regs->u_regs[14] >= (long)current - PAGE_SIZE &&
 	    regs->u_regs[14] < (long)current + 6 * PAGE_SIZE) {
 		printk ("*********parent**********\n");
-		__show_regs((struct pt_regs *)(regs->u_regs[14] + STACK_BIAS + REGWIN_SZ));
-		idump_from_user(((struct pt_regs *)(regs->u_regs[14] + STACK_BIAS + REGWIN_SZ))->tpc);
+		__show_regs((struct pt_regs *)(regs->u_regs[14] + PTREGS_OFF));
+		idump_from_user(((struct pt_regs *)(regs->u_regs[14] + PTREGS_OFF))->tpc);
 		printk ("*********endpar**********\n");
 	}
 #endif
@@ -344,8 +372,8 @@ void show_regs(struct pt_regs *regs)
 
 void show_regs32(struct pt_regs32 *regs)
 {
-	printk("PSR: %08x PC: %08x NPC: %08x Y: %08x\n", regs->psr,
-	       regs->pc, regs->npc, regs->y);
+	printk("PSR: %08x PC: %08x NPC: %08x Y: %08x    %s\n", regs->psr,
+	       regs->pc, regs->npc, regs->y, print_tainted());
 	printk("g0: %08x g1: %08x g2: %08x g3: %08x ",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -409,26 +437,30 @@ void flush_thread(void)
 {
 	struct thread_struct *t = &current->thread;
 
+	if (t->flags & SPARC_FLAG_ABI_PENDING)
+		t->flags ^= (SPARC_FLAG_ABI_PENDING |
+			     SPARC_FLAG_32BIT);
 	if (current->mm) {
+		unsigned long pgd_cache = 0UL;
+
 		if (t->flags & SPARC_FLAG_32BIT) {
 			struct mm_struct *mm = current->mm;
 			pgd_t *pgd0 = &mm->pgd[0];
-			unsigned long pgd_cache;
 
 			if (pgd_none(*pgd0)) {
-				pmd_t *page = get_pmd_fast();
+				pmd_t *page = pmd_alloc_one_fast(NULL, 0);
 				if (!page)
-					(void) get_pmd_slow(pgd0, 0);
-				else
-					pgd_set(pgd0, page);
+					page = pmd_alloc_one(NULL, 0);
+				pgd_set(pgd0, page);
 			}
-			pgd_cache = pgd_val(*pgd0) << 11UL;
-			__asm__ __volatile__("stxa %0, [%1] %2"
-					     : /* no outputs */
-					     : "r" (pgd_cache),
-					       "r" (TSB_REG),
-					       "i" (ASI_DMMU));
+			pgd_cache = ((unsigned long) pgd_val(*pgd0)) << 11UL;
 		}
+		__asm__ __volatile__("stxa %0, [%1] %2\n\t"
+				     "membar #Sync"
+				     : /* no outputs */
+				     : "r" (pgd_cache),
+				     "r" (TSB_REG),
+				     "i" (ASI_DMMU));
 	}
 	t->w_saved = 0;
 
@@ -459,6 +491,7 @@ static unsigned long clone_stackframe(unsigned long csp, unsigned long psp)
 		csp += STACK_BIAS;
 		psp += STACK_BIAS;
 		__get_user(fp, &(((struct reg_window *)psp)->ins[6]));
+		fp += STACK_BIAS;
 	} else
 		__get_user(fp, &(((struct reg_window32 *)psp)->ins[6]));
 
@@ -470,7 +503,7 @@ static unsigned long clone_stackframe(unsigned long csp, unsigned long psp)
 
 	distance = fp - psp;
 	rval = (csp - distance);
-	if (copy_in_user(rval, psp, distance))
+	if (copy_in_user((void *)rval, (void *)psp, distance))
 		rval = 0;
 	else if (current->thread.flags & SPARC_FLAG_32BIT) {
 		if (put_user(((u32)csp), &(((struct reg_window32 *)rval)->ins[6])))
@@ -506,11 +539,11 @@ void synchronize_user_stack(void)
 
 	flush_user_windows();
 	if ((window = t->w_saved) != 0) {
-		int winsize = REGWIN_SZ;
+		int winsize = sizeof(struct reg_window);
 		int bias = 0;
 
 		if (t->flags & SPARC_FLAG_32BIT)
-			winsize = REGWIN32_SZ;
+			winsize = sizeof(struct reg_window32);
 		else
 			bias = STACK_BIAS;
 
@@ -531,11 +564,11 @@ void fault_in_user_windows(void)
 {
 	struct thread_struct *t = &current->thread;
 	unsigned long window;
-	int winsize = REGWIN_SZ;
+	int winsize = sizeof(struct reg_window);
 	int bias = 0;
 
 	if (t->flags & SPARC_FLAG_32BIT)
-		winsize = REGWIN32_SZ;
+		winsize = sizeof(struct reg_window32);
 	else
 		bias = STACK_BIAS;
 
@@ -564,13 +597,6 @@ barf:
  * under SunOS are nothing short of bletcherous:
  * Parent -->  %o0 == childs  pid, %o1 == 0
  * Child  -->  %o0 == parents pid, %o1 == 1
- *
- * NOTE: We have a separate fork kpsr/kwim because
- *       the parent could change these values between
- *       sys_fork invocation and when we reach here
- *       if the parent should sleep while trying to
- *       allocate the task_struct and kernel stack in
- *       do_fork().
  */
 int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
@@ -579,12 +605,17 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	struct thread_struct *t = &p->thread;
 	char *child_trap_frame;
 
+#ifdef CONFIG_DEBUG_SPINLOCK
+	t->smp_lock_count = 0;
+	t->smp_lock_pc = 0;
+#endif
+
 	/* Calculate offset to stack_frame & pt_regs */
-	child_trap_frame = ((char *)p) + ((PAGE_SIZE << 1) - (TRACEREG_SZ+REGWIN_SZ));
-	memcpy(child_trap_frame, (((struct reg_window *)regs)-1), (TRACEREG_SZ+REGWIN_SZ));
+	child_trap_frame = ((char *)p) + (THREAD_SIZE - (TRACEREG_SZ+STACKFRAME_SZ));
+	memcpy(child_trap_frame, (((struct sparc_stackf *)regs)-1), (TRACEREG_SZ+STACKFRAME_SZ));
 	t->ksp = ((unsigned long) child_trap_frame) - STACK_BIAS;
 	t->flags |= SPARC_FLAG_NEWCHILD;
-	t->kregs = (struct pt_regs *)(child_trap_frame+sizeof(struct reg_window));
+	t->kregs = (struct pt_regs *)(child_trap_frame+sizeof(struct sparc_stackf));
 	t->cwp = (regs->tstate + 1) & TSTATE_CWP;
 	t->fpsaved[0] = 0;
 
@@ -604,7 +635,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		flush_register_windows();
 		memcpy((void *)(t->ksp + STACK_BIAS),
 		       (void *)(regs->u_regs[UREG_FP] + STACK_BIAS),
-		       sizeof(struct reg_window));
+		       sizeof(struct sparc_stackf));
 		t->kregs->u_regs[UREG_G6] = (unsigned long) p;
 	} else {
 		if (t->flags & SPARC_FLAG_32BIT) {
@@ -643,7 +674,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
  * a system call from a "real" process, but the process memory space will
  * not be free'd until both the parent and the child have exited.
  */
-pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+pid_t arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval;
 

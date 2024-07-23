@@ -11,39 +11,49 @@
    required to allow inlining of cmpfn. */
 #define LIST_FIND(head, cmpfn, type, args...)		\
 ({							\
-	const struct list_head *__i = (head);		\
+	const struct list_head *__i, *__j = NULL;	\
 							\
 	ASSERT_READ_LOCK(head);				\
-	do {						\
-		__i = __i->next;			\
-		if (__i == (head)) {			\
-			__i = NULL;			\
+	list_for_each(__i, (head))			\
+		if (cmpfn((const type)__i , ## args)) {	\
+			__j = __i;			\
 			break;				\
 		}					\
-	} while (!cmpfn((const type)__i , ## args));	\
-	(type)__i;					\
+	(type)__j;					\
 })
 
-#define LIST_FIND_W(head, cmpfn, type, args...)	\
-({						\
-	const struct list_head *__i = (head);	\
-						\
-	ASSERT_WRITE_LOCK(head);		\
-	do {					\
-		__i = __i->next;		\
-		if (__i == (head)) {		\
-			__i = NULL;		\
-			break;			\
-		}				\
-	} while (!cmpfn((type)__i , ## args));	\
-	(type)__i;				\
+#define LIST_FIND_W(head, cmpfn, type, args...)		\
+({							\
+	const struct list_head *__i, *__j = NULL;	\
+							\
+	ASSERT_WRITE_LOCK(head);			\
+	list_for_each(__i, (head))			\
+		if (cmpfn((type)__i , ## args)) {	\
+			__j = __i;			\
+			break;				\
+		}					\
+	(type)__j;					\
 })
 
-extern inline int
+/* Just like LIST_FIND but we search backwards */
+#define LIST_FIND_B(head, cmpfn, type, args...)		\
+({							\
+	const struct list_head *__i, *__j = NULL;	\
+							\
+	ASSERT_READ_LOCK(head);				\
+	list_for_each_prev(__i, (head))			\
+		if (cmpfn((const type)__i , ## args)) {	\
+			__j = __i;			\
+			break;				\
+		}					\
+	(type)__j;					\
+})
+
+static inline int
 __list_cmp_same(const void *p1, const void *p2) { return p1 == p2; }
 
 /* Is this entry in the list? */
-extern inline int
+static inline int
 list_inlist(struct list_head *head, const void *entry)
 {
 	return LIST_FIND(head, __list_cmp_same, void *, entry) != NULL;
@@ -64,7 +74,7 @@ do {									\
 #endif
 
 /* Append. */
-extern inline void
+static inline void
 list_append(struct list_head *head, void *new)
 {
 	ASSERT_WRITE_LOCK(head);
@@ -72,7 +82,7 @@ list_append(struct list_head *head, void *new)
 }
 
 /* Prepend. */
-extern inline void
+static inline void
 list_prepend(struct list_head *head, void *new)
 {
 	ASSERT_WRITE_LOCK(head);
@@ -84,21 +94,21 @@ list_prepend(struct list_head *head, void *new)
 do {								\
 	struct list_head *__i;					\
 	ASSERT_WRITE_LOCK(head);				\
-	for (__i = (head)->next;				\
-	     !cmpfn((new), (typeof (new))__i) && __i != (head);	\
-	     __i = __i->next);					\
+	list_for_each(__i, (head))				\
+		if ((new), (typeof (new))__i)			\
+			break;					\
 	list_add((struct list_head *)(new), __i->prev);		\
 } while(0)
 
 /* If the field after the list_head is a nul-terminated string, you
    can use these functions. */
-extern inline int __list_cmp_name(const void *i, const char *name)
+static inline int __list_cmp_name(const void *i, const char *name)
 {
 	return strcmp(name, i+sizeof(struct list_head)) == 0;
 }
 
 /* Returns false if same name already in list, otherwise does insert. */
-extern inline int
+static inline int
 list_named_insert(struct list_head *head, void *new)
 {
 	if (LIST_FIND(head, __list_cmp_name, void *,

@@ -36,7 +36,7 @@ static char *_rioctrl_c_sccs_ = "@(#)rioctrl.c	1.3";
 
 #define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <asm/io.h>
 #include <asm/system.h>
@@ -764,7 +764,7 @@ RIO_DEBUG_CTRL, 				if (su)
 							PortP->Config &= ~RIO_WAITDRAIN;
 					 	}
 					 /*
-					 ** Store setings if locking or unlocking port or if the
+					 ** Store settings if locking or unlocking port or if the
 					 ** port is not locked, when setting the store option.
 					 */
 					 if (PortP->Mapped &&

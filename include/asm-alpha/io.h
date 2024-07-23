@@ -1,10 +1,6 @@
 #ifndef __ALPHA_IO_H
 #define __ALPHA_IO_H
 
-#include <linux/config.h>
-#include <linux/kernel.h>
-#include <asm/system.h>
-
 /* We don't use IO slowdowns on the Alpha, but.. */
 #define __SLOW_DOWN_IO	do { } while (0)
 #define SLOW_DOWN_IO	do { } while (0)
@@ -19,7 +15,11 @@
 #endif
 
 #ifdef __KERNEL__
+#include <linux/config.h>
+#include <linux/kernel.h>
+#include <asm/system.h>
 #include <asm/machvec.h>
+#include <asm/hwrpb.h>
 
 /*
  * We try to avoid hae updates (thus the cache), but when we
@@ -51,6 +51,7 @@ static inline void set_hae(unsigned long new_hae)
 /*
  * Change virtual addresses to physical addresses and vv.
  */
+#ifdef USE_48_BIT_KSEG
 static inline unsigned long virt_to_phys(void *address)
 {
 	return (unsigned long)address - IDENT_ADDR;
@@ -60,6 +61,28 @@ static inline void * phys_to_virt(unsigned long address)
 {
 	return (void *) (address + IDENT_ADDR);
 }
+#else
+static inline unsigned long virt_to_phys(void *address)
+{
+        unsigned long phys = (unsigned long)address;
+
+	/* Sign-extend from bit 41.  */
+	phys <<= (64 - 41);
+	phys = (long)phys >> (64 - 41);
+
+	/* Crop to the physical address width of the processor.  */
+        phys &= (1ul << hwrpb->pa_bits) - 1;
+
+        return phys;
+}
+
+static inline void * phys_to_virt(unsigned long address)
+{
+        return (void *)(IDENT_ADDR + (address & ((1ul << 41) - 1)));
+}
+#endif
+
+#define page_to_phys(page)	PAGE_TO_PA(page)
 
 /*
  * Change addresses as seen by the kernel (virtual) to addresses as
@@ -128,7 +151,8 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # define __writel(v,a)	alpha_mv.mv_writel((v),(unsigned long)(a))
 # define __writeq(v,a)	alpha_mv.mv_writeq((v),(unsigned long)(a))
 
-# define __ioremap(a)	alpha_mv.mv_ioremap((unsigned long)(a))
+# define __ioremap(a,s)	alpha_mv.mv_ioremap((unsigned long)(a),(s))
+# define __iounmap(a)   alpha_mv.mv_iounmap((unsigned long)(a))
 # define __is_ioaddr(a)	alpha_mv.mv_is_ioaddr((unsigned long)(a))
 
 # define inb		__inb
@@ -162,6 +186,8 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # include <asm/jensen.h>
 #elif defined(CONFIG_ALPHA_LCA)
 # include <asm/core_lca.h>
+#elif defined(CONFIG_ALPHA_MARVEL)
+# include <asm/core_marvel.h>
 #elif defined(CONFIG_ALPHA_MCPCIA)
 # include <asm/core_mcpcia.h>
 #elif defined(CONFIG_ALPHA_POLARIS)
@@ -192,20 +218,20 @@ extern void _sethae (unsigned long addr);	/* cached version */
  * to convince yourself that it won't break anything (in particular
  * module support).
  */
-extern unsigned int	_inb (unsigned long port);
-extern unsigned int	_inw (unsigned long port);
-extern unsigned int	_inl (unsigned long port);
-extern void		_outb (unsigned char b,unsigned long port);
-extern void		_outw (unsigned short w,unsigned long port);
-extern void		_outl (unsigned int l,unsigned long port);
-extern unsigned long	_readb(unsigned long addr);
-extern unsigned long	_readw(unsigned long addr);
-extern unsigned long	_readl(unsigned long addr);
-extern unsigned long	_readq(unsigned long addr);
-extern void		_writeb(unsigned char b, unsigned long addr);
-extern void		_writew(unsigned short b, unsigned long addr);
-extern void		_writel(unsigned int b, unsigned long addr);
-extern void		_writeq(unsigned long b, unsigned long addr);
+extern u8		_inb (unsigned long port);
+extern u16		_inw (unsigned long port);
+extern u32		_inl (unsigned long port);
+extern void		_outb (u8 b,unsigned long port);
+extern void		_outw (u16 w,unsigned long port);
+extern void		_outl (u32 l,unsigned long port);
+extern u8		_readb(unsigned long addr);
+extern u16		_readw(unsigned long addr);
+extern u32		_readl(unsigned long addr);
+extern u64		_readq(unsigned long addr);
+extern void		_writeb(u8 b, unsigned long addr);
+extern void		_writew(u16 b, unsigned long addr);
+extern void		_writel(u32 b, unsigned long addr);
+extern void		_writeq(u64 b, unsigned long addr);
 
 #ifdef __KERNEL__
 /*
@@ -256,7 +282,7 @@ extern void		_writeq(unsigned long b, unsigned long addr);
 
 #else 
 
-/* Userspace declarations.  */
+/* Userspace declarations.  Kill in 2.5. */
 
 extern unsigned int	inb(unsigned long port);
 extern unsigned int	inw(unsigned long port);
@@ -281,15 +307,24 @@ extern void		writel(unsigned int b, unsigned long addr);
  * discontinuities are all across busses, so we need not care for that
  * for any one device.
  *
+ * The DRM drivers need to be able to map contiguously a (potentially)
+ * discontiguous set of I/O pages. This set of pages is scatter-gather
+ * mapped contiguously from the perspective of the bus, but we can't
+ * directly access DMA addresses from the CPU, these addresses need to
+ * have a real ioremap. Therefore, iounmap and the size argument to
+ * ioremap are needed to give the platforms the ability to fully implement
+ * ioremap.
+ *
  * Map the I/O space address into the kernel's virtual address space.
  */
 static inline void * ioremap(unsigned long offset, unsigned long size)
 {
-	return (void *) __ioremap(offset);
+	return (void *) __ioremap(offset, size);
 } 
 
 static inline void iounmap(void *addr)
 {
+	__iounmap(addr);
 }
 
 static inline void * ioremap_nocache(unsigned long offset, unsigned long size)
@@ -299,26 +334,26 @@ static inline void * ioremap_nocache(unsigned long offset, unsigned long size)
 
 /* Indirect back to the macros provided.  */
 
-extern unsigned long	___raw_readb(unsigned long addr);
-extern unsigned long	___raw_readw(unsigned long addr);
-extern unsigned long	___raw_readl(unsigned long addr);
-extern unsigned long	___raw_readq(unsigned long addr);
-extern void		___raw_writeb(unsigned char b, unsigned long addr);
-extern void		___raw_writew(unsigned short b, unsigned long addr);
-extern void		___raw_writel(unsigned int b, unsigned long addr);
-extern void		___raw_writeq(unsigned long b, unsigned long addr);
+extern u8		___raw_readb(unsigned long addr);
+extern u16		___raw_readw(unsigned long addr);
+extern u32		___raw_readl(unsigned long addr);
+extern u64		___raw_readq(unsigned long addr);
+extern void		___raw_writeb(u8 b, unsigned long addr);
+extern void		___raw_writew(u16 b, unsigned long addr);
+extern void		___raw_writel(u32 b, unsigned long addr);
+extern void		___raw_writeq(u64 b, unsigned long addr);
 
 #ifdef __raw_readb
-# define readb(a)	({ unsigned long r_ = __raw_readb(a); mb(); r_; })
+# define readb(a)	({ u8 r_ = __raw_readb(a); mb(); r_; })
 #endif
 #ifdef __raw_readw
-# define readw(a)	({ unsigned long r_ = __raw_readw(a); mb(); r_; })
+# define readw(a)	({ u16 r_ = __raw_readw(a); mb(); r_; })
 #endif
 #ifdef __raw_readl
-# define readl(a)	({ unsigned long r_ = __raw_readl(a); mb(); r_; })
+# define readl(a)	({ u32 r_ = __raw_readl(a); mb(); r_; })
 #endif
 #ifdef __raw_readq
-# define readq(a)	({ unsigned long r_ = __raw_readq(a); mb(); r_; })
+# define readq(a)	({ u64 r_ = __raw_readq(a); mb(); r_; })
 #endif
 
 #ifdef __raw_writeb
@@ -422,7 +457,9 @@ extern void outsl (unsigned long port, const void *src, unsigned long count);
 
 #define eth_io_copy_and_sum(skb,src,len,unused) \
   memcpy_fromio((skb)->data,(src),(len))
-
+#define isa_eth_io_copy_and_sum(skb,src,len,unused) \
+  isa_memcpy_fromio((skb)->data,(src),(len))
+ 
 static inline int
 check_signature(unsigned long io_addr, const unsigned char *signature,
 		int length)
@@ -439,6 +476,39 @@ check_signature(unsigned long io_addr, const unsigned char *signature,
 out:
 	return retval;
 }
+
+
+/*
+ * ISA space is mapped to some machine-specific location on Alpha.
+ * Call into the existing hooks to get the address translated.
+ */
+#define isa_readb(a)			readb(__ioremap((a),1))
+#define isa_readw(a)			readw(__ioremap((a),2))
+#define isa_readl(a)			readl(__ioremap((a),4))
+#define isa_writeb(b,a)			writeb((b),__ioremap((a),1))
+#define isa_writew(w,a)			writew((w),__ioremap((a),2))
+#define isa_writel(l,a)			writel((l),__ioremap((a),4))
+#define isa_memset_io(a,b,c)		memset_io(__ioremap((a),(c)),(b),(c))
+#define isa_memcpy_fromio(a,b,c)	memcpy_fromio((a),__ioremap((b),(c)),(c))
+#define isa_memcpy_toio(a,b,c)		memcpy_toio(__ioremap((a),(c)),(b),(c))
+
+static inline int
+isa_check_signature(unsigned long io_addr, const unsigned char *signature,
+		int length)
+{
+	int retval = 0;
+	do {
+		if (isa_readb(io_addr) != *signature)
+			goto out;
+		io_addr++;
+		signature++;
+		length--;
+	} while (length);
+	retval = 1;
+out:
+	return retval;
+}
+
 
 /*
  * The Alpha Jensen hardware for some rather strange reason puts

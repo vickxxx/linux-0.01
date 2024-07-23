@@ -58,6 +58,7 @@
 
 MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>");
 MODULE_DESCRIPTION("Hardware-level driver for the serial port of the MixCom board");
+MODULE_LICENSE("GPL");
 
 #define MIXCOM_DATA(d) ((struct mixcom_privdata *)(COMX_CHANNEL(d)-> \
 	HW_privdata))
@@ -101,7 +102,7 @@ static inline void hscx_cmd(struct net_device *dev, int cmd)
 	unsigned char cec;
 	unsigned delay = 0;
 
-	while ((cec = (rd_hscx(dev, HSCX_STAR) & HSCX_CEC) != 0) && 
+	while ((cec = (rd_hscx(dev, HSCX_STAR) & HSCX_CEC)) != 0 && 
 	    (jiffs + HZ > jiffies)) {
 		udelay(1);
 		if (++delay > (100000 / HZ)) break;
@@ -121,7 +122,7 @@ static inline void hscx_fill_fifo(struct net_device *dev)
 
 
 	outsb(dev->base_addr + HSCX_FIFO,
-        	&(hw->sending->data[hw->tx_ptr]), min(to_send, 32));
+        	&(hw->sending->data[hw->tx_ptr]), min_t(unsigned int, to_send, 32));
 	if (to_send <= 32) {
         	hscx_cmd(dev, HSCX_XTF | HSCX_XME);
 	        kfree_skb(hw->sending);
@@ -487,15 +488,18 @@ static int MIXCOM_open(struct net_device *dev)
 	struct mixcom_privdata *hw = ch->HW_privdata;
 	struct proc_dir_entry *procfile = ch->procdir->subdir;
 	unsigned long flags; 
+	int ret = -ENODEV;
 
-	if (!dev->base_addr || !dev->irq) return -ENODEV;
+	if (!dev->base_addr || !dev->irq)
+		goto err_ret;
 
 
 	if(hw->channel==1) {
 		if(!TWIN(dev) || !(COMX_CHANNEL(TWIN(dev))->init_status & 
 		    IRQ_ALLOCATED)) {
 			printk(KERN_ERR "%s: channel 0 not yet initialized\n",dev->name);
-			return -EAGAIN;
+			ret = -EAGAIN;
+			goto err_ret;
 		}
 	}
 
@@ -503,28 +507,29 @@ static int MIXCOM_open(struct net_device *dev)
 	/* Is our hw present at all ? Not checking for channel 0 if it is already 
 	   open */
 	if(hw->channel!=0 || !(ch->init_status & IRQ_ALLOCATED)) {
-		if (check_region(dev->base_addr, MIXCOM_IO_EXTENT)) {
-			return -EAGAIN;
+		if (!request_region(dev->base_addr, MIXCOM_IO_EXTENT, dev->name)) {
+			ret = -EAGAIN;
+			goto err_ret;
 		}
 		if (mixcom_probe(dev)) {
-			return -ENODEV;
+			ret = -ENODEV;
+			goto err_release_region;
 		}
 	}
-
-	save_flags(flags); cli();
-
-	if(hw->channel==1) {
-		request_region(dev->base_addr, MIXCOM_IO_EXTENT, dev->name);
-	} 
 
 	if(hw->channel==0 && !(ch->init_status & IRQ_ALLOCATED)) {
 		if (request_irq(dev->irq, MIXCOM_interrupt, 0, 
 		    dev->name, (void *)dev)) {
 			printk(KERN_ERR "MIXCOM: unable to obtain irq %d\n", dev->irq);
-			return -EAGAIN;
+			ret = -EAGAIN;
+			goto err_release_region;
 		}
+	}
+
+	save_flags(flags); cli();
+
+	if(hw->channel==0 && !(ch->init_status & IRQ_ALLOCATED)) {
 		ch->init_status|=IRQ_ALLOCATED;
-		request_region(dev->base_addr, MIXCOM_IO_EXTENT, dev->name);
 		mixcom_board_on(dev);
 	}
 
@@ -560,6 +565,11 @@ static int MIXCOM_open(struct net_device *dev)
 	}
 
 	return 0;
+	
+err_release_region:
+	release_region(dev->base_addr, MIXCOM_IO_EXTENT);
+err_ret:
+	return ret;
 }
 
 static int MIXCOM_close(struct net_device *dev)
@@ -685,7 +695,7 @@ static int mixcom_read_proc(char *page, char **start, off_t off, int count,
 	}
 	*start = page + off;
 	if (count >= len - off) *eof = 1;
-	return ( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 
@@ -752,7 +762,7 @@ static int mixcom_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count = min(count, PAGE_SIZE));
+	copy_from_user(page, buffer, count = min_t(unsigned long, count, PAGE_SIZE));
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}

@@ -1,13 +1,14 @@
-/* $Id: ipac.h,v 1.5 2000/06/26 08:59:13 keil Exp $
+/* $Id: ipac.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * ipac.h   IPAC specific defines
+ * IPAC specific defines
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
- *
- * This file is (c) under GNU PUBLIC LICENSE
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 
 /* All Registers original Siemens Spec  */
 

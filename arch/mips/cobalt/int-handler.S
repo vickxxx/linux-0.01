@@ -1,140 +1,104 @@
 /*
- * arch/mips/cobalt/int-handler.S
+ * Cobalt interrupt handler
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1995, 1996, 1997 by Ralf Baechle
+ * Copyright (C) 2001, 2002, 2003 by Liam Davies (ldavies@agile.tv)
  */
 #include <asm/asm.h>
-#include <asm/mipsconfig.h>
 #include <asm/mipsregs.h>
-#include <asm/cobalt.h>
-#include <asm/irq.h>
+#include <asm/cobalt/cobalt.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
 
 /*
- * cobalt_handle_int: Interrupt handler for the twenty-seven board.
+ * cobalt_handle_int: Interrupt handler for Cobalt boards
  */
-		.align	5
+		.text
 		.set	noreorder
-		NESTED(cobalt_handle_int, PT_SIZE, ra)
 		.set	noat
+		.align	5
+		NESTED(cobalt_handle_int, PT_SIZE, sp)
 		SAVE_ALL
-		REG_S	sp,PT_OR2(sp)
 		CLI
 		.set	at
-		mfc0	t0,CP0_CAUSE
-		mfc0	t1,CP0_STATUS
-		and	t0,t1
-		xor	t1,t0
-		mtc0	t1,CP0_STATUS	# mask all active ints
-		/* Such a kind of cascade is optimal for R5000 */
 
-		andi	t1,t0,STATUSF_IP2
-		bnez	t1,ll_galileo_irq
-		 andi	t1,t0,STATUSF_IP3
-		bnez	t1,ll_ethernet0_irq
-/*
- * This should be conditional, and not used for the cube-1, but
- * there is not a config flag that is useful.
- */
-	
-		 andi	t1,t0,STATUSF_IP4
-		bnez	t1,ll_ethernet1_irq
-/* #endif  */
-		 andi	t1,t0,STATUSF_IP6
-		bnez	t1,ll_via_irq
-		 andi	t1,t0,STATUSF_IP5
-		bnez	t1,ll_serial_irq
-		 andi	t1,t0,STATUSF_IP7
-		bnez	t1,ll_pci_irq
-		  nop
-		/* wrong alarm ... */
-		j	spurious_interrupt
-		 nop
-		END(cobalt_handle_int)
-	
+		/*
+		 * Get pending Interrupts
+		 */
+		mfc0	s0,CP0_CAUSE	# get raw irq status
+		mfc0	a0,CP0_STATUS	# get irq mask
+		and	s0,s0,a0	# compute masked irq status
 
-		.align	5
-		.set	reorder
-ll_galileo_irq:	move	a0,sp
-		INC_INTR_COUNT(s1,s2)
+		andi	a0,s0,CAUSEF_IP2	/* Check for Galileo timer */
+		beq	a0,zero,1f
+		 andi	a0,s0,CAUSEF_IP6	/* Check for Via chip */
+
+		/* Galileo interrupt */
 		jal	galileo_irq
-		  nop
-		DEC_INTR_COUNT(s1,s2)
+		 move	a0,sp
 		j	ret_from_irq
-		  nop
+		 nop
 
-		.align	5
-		.set	reorder
-ll_via_irq:	move	a0,sp
-		INC_INTR_COUNT(s1,s2)
+1:
+		beq	a0,zero,1f		/* Check IP6 */
+		 andi	a0,s0,CAUSEF_IP3
+
+		/* Via interrupt */
 		jal	via_irq
-		  nop
-		DEC_INTR_COUNT(s1,s2)
+		 move	a0,sp
 		j	ret_from_irq
-		  nop
+		 nop
 
-		.align	5
-		.set	reorder
-ll_ethernet0_irq:
-		INC_INTR_COUNT(s1,s2)
-		mfc0	s0,CP0_STATUS		# mask interrupt
-		ori	t0,s0,(STATUSF_IP3 | STATUSF_IP4)
-		xori	t0,(STATUSF_IP3 | STATUSF_IP4)
-		mtc0	t0,CP0_STATUS
-		li	a0,4
-		move	a1,sp
+1:
+		beq	a0,zero,1f		/* Check IP3 */
+		 andi	a0,s0,CAUSEF_IP4
+
+		/* Ethernet 0 interrupt */
+		li	a0,COBALT_ETH0_IRQ
 		jal     do_IRQ
-		  nop
-		mtc0	s0,CP0_STATUS
-		DEC_INTR_COUNT(s1,s2)
-		j	ret_from_irq
-		  nop
+		 move	a1,sp
 
-		.align	5
-		.set	reorder
-ll_serial_irq:	li	a0,7
-		INC_INTR_COUNT(s1,s2)
-		move	a1,sp
+		j	ret_from_irq
+		 nop
+
+1:
+		beq	a0,zero,1f		/* Check IP4 */
+		 andi	a0,s0,CAUSEF_IP5
+
+		/* Ethernet 1 interrupt */
+		li	a0,COBALT_ETH1_IRQ
 		jal     do_IRQ
-		  nop
-		DEC_INTR_COUNT(s1,s2)
+		 move	a1,sp
+
 		j	ret_from_irq
-		  nop
+		 nop
+1:
+		beq	a0,zero,1f		/* Check IP5 */
+		 andi	a0,s0,CAUSEF_IP7
 
-
-		.align	5
-		.set	reorder
-ll_ethernet1_irq:
-		INC_INTR_COUNT(s1,s2)
-		mfc0	s0,CP0_STATUS		# mask interrupt
-
-		ori	t0,s0, (STATUSF_IP3 | STATUSF_IP4)
-		xori	t0,(STATUSF_IP3 | STATUSF_IP4)
-
-		mtc0	t0,CP0_STATUS
-		li	a0,13
-		move	a1,sp
+		/* Serial interrupt */
+		li	a0,COBALT_SERIAL_IRQ
 		jal     do_IRQ
-		  nop
-		mtc0	s0,CP0_STATUS
-		DEC_INTR_COUNT(s1,s2)
+		 move	a1,sp
+
 		j	ret_from_irq
+		 nop
+1:
+		beq	a0,zero,1f		/* Check IP7 */
 		  nop
 
-	#
-	# This is pretty weird.  The "pci" interrupt on the hardware
-	# skematic is from the PCI side of the galileo, so we would
-	# only get interrupts here if WE write the control register
-	# that normally enables the cpu to send interrupts to the PCI.
-	#
-	# If you want to interrupt a PCI card, look elsewhere.
-	#
-		.align	5
-		.set	reorder
-ll_pci_irq:	li	a0,7
-		INC_INTR_COUNT(s1,s2)
-		move	a1,sp
+		/* PCI interrupt */
+		li	a0,COBALT_QUBE_SLOT_IRQ
 		jal     do_IRQ
-		  nop
-		DEC_INTR_COUNT(s1,s2)
+		 move	a1,sp
+
+1:
 		j	ret_from_irq
-		  nop
+		 nop
+
+		END(cobalt_handle_int)
+

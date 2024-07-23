@@ -23,6 +23,7 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/processor.h>
+#include <asm/cputable.h>
 
 #define DEFINE(sym, val) \
 	asm volatile("\n#define\t" #sym "\t%0" : : "i" (val))
@@ -48,13 +49,18 @@ main(void)
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
 	DEFINE(TASK_PTRACE, offsetof(struct task_struct, ptrace));
 	DEFINE(NEED_RESCHED, offsetof(struct task_struct, need_resched));
+	DEFINE(THREAD_FPEXC_MODE, offsetof(struct thread_struct, fpexc_mode));
 	DEFINE(THREAD_FPR0, offsetof(struct thread_struct, fpr[0]));
 	DEFINE(THREAD_FPSCR, offsetof(struct thread_struct, fpscr));
 #ifdef CONFIG_ALTIVEC
 	DEFINE(THREAD_VR0, offsetof(struct thread_struct, vr[0]));
 	DEFINE(THREAD_VRSAVE, offsetof(struct thread_struct, vrsave));
 	DEFINE(THREAD_VSCR, offsetof(struct thread_struct, vscr));
+	DEFINE(THREAD_USED_VR, offsetof(struct thread_struct, used_vr));
 #endif /* CONFIG_ALTIVEC */
+#ifdef CONFIG_4xx
+	DEFINE(THREAD_DBCR0, offsetof(struct thread_struct, dbcr0));
+#endif
 	/* Interrupt register frame */
 	DEFINE(TASK_UNION_SIZE, sizeof(union task_union));
 	DEFINE(STACK_FRAME_OVERHEAD, STACK_FRAME_OVERHEAD);
@@ -114,5 +120,15 @@ main(void)
 	DEFINE(RESULT, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, result));
 	DEFINE(TRAP, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, trap));
 	DEFINE(CLONE_VM, CLONE_VM);
+	DEFINE(MM_PGD, offsetof(struct mm_struct, pgd));
+
+	/* About the CPU features table */
+	DEFINE(CPU_SPEC_ENTRY_SIZE, sizeof(struct cpu_spec));
+	DEFINE(CPU_SPEC_PVR_MASK, offsetof(struct cpu_spec, pvr_mask));
+	DEFINE(CPU_SPEC_PVR_VALUE, offsetof(struct cpu_spec, pvr_value));
+	DEFINE(CPU_SPEC_FEATURES, offsetof(struct cpu_spec, cpu_features));
+	DEFINE(CPU_SPEC_SETUP, offsetof(struct cpu_spec, cpu_setup));
+
+	DEFINE(NUM_USER_SEGMENTS, TASK_SIZE>>28);
 	return 0;
 }

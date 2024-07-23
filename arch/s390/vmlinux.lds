@@ -13,8 +13,7 @@ SECTIONS
 	*(.fixup)
 	*(.gnu.warning)
 	} = 0x0700
-  .text.lock : { *(.text.lock) }	/* out-of-line lock text */
-  .rodata : { *(.rodata) }
+  .rodata : { *(.rodata) *(.rodata.*) }
   .kstrtab : { *(.kstrtab) }
 
   . = ALIGN(16);		/* Exception table */
@@ -25,6 +24,10 @@ SECTIONS
   __start___ksymtab = .;	/* Kernel symbol table */
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
+
+  __start___kallsyms = .;       /* All kernel symbols */
+  __kallsyms : { *(__kallsyms) }
+  __stop___kallsyms = .;
 
   _etext = .;			/* End of text section */
 

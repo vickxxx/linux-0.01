@@ -1,4 +1,4 @@
-/* $Id: misc.c,v 1.31 2000/12/14 22:57:25 davem Exp $
+/* $Id: misc.c,v 1.33 2001/09/18 22:29:06 davem Exp $
  * misc.c: Miscelaneous syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -56,7 +56,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	/* Do we need it here? */
 	set_personality(PER_SVR4);
 	if (flags & MAP_NORESERVE) {
-		static int cnt = 0;
+		static int cnt;
 		
 		if (cnt < 5) {
 			printk("%s:  unimplemented Solaris MAP_NORESERVE mmap() flag\n",
@@ -92,12 +92,12 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	ret_type = flags & _MAP_NEW;
 	flags &= ~_MAP_NEW;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	retval = do_mmap(file,
 			 (unsigned long) addr, (unsigned long) len,
 			 (unsigned long) prot, (unsigned long) flags, off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < 0xf0000000) ? 0 : retval);
 	                        
@@ -708,13 +708,14 @@ asmlinkage void solaris_register(void)
 extern long solaris_to_linux_signals[], linux_to_solaris_signals[];
 
 struct exec_domain solaris_exec_domain = {
-	"Solaris",
-	(lcall7_func)NULL,
-	1, 1,	/* PER_SVR4 personality */
-	solaris_to_linux_signals,
-	linux_to_solaris_signals,
-	THIS_MODULE,
-	NULL
+	name:		"Solaris",
+	handler:	NULL,
+	pers_low:	1,		/* PER_SVR4 personality */
+	pers_high:	1,
+	signal_map:	solaris_to_linux_signals,
+	signal_invmap:	linux_to_solaris_signals,
+	module:		THIS_MODULE,
+	next:		NULL
 };
 
 extern int init_socksys(void);
@@ -723,6 +724,7 @@ extern int init_socksys(void);
 
 MODULE_AUTHOR("Jakub Jelinek (jj@ultra.linux.cz), Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)");
 MODULE_DESCRIPTION("Solaris binary emulation module");
+MODULE_LICENSE("GPL");
 EXPORT_NO_SYMBOLS;
 
 #ifdef __sparc_v9__

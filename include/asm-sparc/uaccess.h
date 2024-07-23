@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.22 2000/08/29 07:01:58 davem Exp $
+/* $Id: uaccess.h,v 1.24 2001/10/30 04:32:24 davem Exp $
  * uaccess.h: User space memore access functions.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -103,7 +103,7 @@ __get_user_check((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr))); })
  * doing multiple accesses to the same area (the user has to do the
  * checks by hand with "access_ok()")
  */
-#define __put_user(x,ptr) __put_user_nocheck((x),(ptr),sizeof(*(ptr)))
+#define __put_user(x,ptr) __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
 #define __get_user(x,ptr) __get_user_nocheck((x),(ptr),sizeof(*(ptr)),__typeof__(*(ptr)))
 
 struct __large_struct { unsigned long buf[100]; };
@@ -116,6 +116,7 @@ switch (size) { \
 case 1: __put_user_asm(x,b,addr,__pu_ret); break; \
 case 2: __put_user_asm(x,h,addr,__pu_ret); break; \
 case 4: __put_user_asm(x,,addr,__pu_ret); break; \
+case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } } else { __pu_ret = -EFAULT; } __pu_ret; })
 
@@ -126,6 +127,7 @@ switch (size) { \
 case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
 case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
 case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
+case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
 default: if (__put_user_bad()) return retval; break; \
 } } else return retval; })
 
@@ -135,6 +137,7 @@ switch (size) { \
 case 1: __put_user_asm(x,b,addr,__pu_ret); break; \
 case 2: __put_user_asm(x,h,addr,__pu_ret); break; \
 case 4: __put_user_asm(x,,addr,__pu_ret); break; \
+case 8: __put_user_asm(x,d,addr,__pu_ret); break; \
 default: __pu_ret = __put_user_bad(); break; \
 } __pu_ret; })
 
@@ -144,6 +147,7 @@ switch (size) { \
 case 1: __put_user_asm_ret(x,b,addr,retval,__foo); break; \
 case 2: __put_user_asm_ret(x,h,addr,retval,__foo); break; \
 case 4: __put_user_asm_ret(x,,addr,retval,__foo); break; \
+case 8: __put_user_asm_ret(x,d,addr,retval,__foo); break; \
 default: if (__put_user_bad()) return retval; break; \
 } })
 
@@ -202,6 +206,7 @@ switch (size) { \
 case 1: __get_user_asm(__gu_val,ub,addr,__gu_ret); break; \
 case 2: __get_user_asm(__gu_val,uh,addr,__gu_ret); break; \
 case 4: __get_user_asm(__gu_val,,addr,__gu_ret); break; \
+case 8: __get_user_asm(__gu_val,d,addr,__gu_ret); break; \
 default: __gu_val = 0; __gu_ret = __get_user_bad(); break; \
 } } else { __gu_val = 0; __gu_ret = -EFAULT; } x = (type) __gu_val; __gu_ret; })
 
@@ -212,6 +217,7 @@ switch (size) { \
 case 1: __get_user_asm_ret(__gu_val,ub,addr,retval); break; \
 case 2: __get_user_asm_ret(__gu_val,uh,addr,retval); break; \
 case 4: __get_user_asm_ret(__gu_val,,addr,retval); break; \
+case 8: __get_user_asm_ret(__gu_val,d,addr,retval); break; \
 default: if (__get_user_bad()) return retval; \
 } x = (type) __gu_val; } else return retval; })
 
@@ -222,6 +228,7 @@ switch (size) { \
 case 1: __get_user_asm(__gu_val,ub,addr,__gu_ret); break; \
 case 2: __get_user_asm(__gu_val,uh,addr,__gu_ret); break; \
 case 4: __get_user_asm(__gu_val,,addr,__gu_ret); break; \
+case 8: __get_user_asm(__gu_val,d,addr,__gu_ret); break; \
 default: __gu_val = 0; __gu_ret = __get_user_bad(); break; \
 } x = (type) __gu_val; __gu_ret; })
 
@@ -231,6 +238,7 @@ switch (size) { \
 case 1: __get_user_asm_ret(__gu_val,ub,addr,retval); break; \
 case 2: __get_user_asm_ret(__gu_val,uh,addr,retval); break; \
 case 4: __get_user_asm_ret(__gu_val,,addr,retval); break; \
+case 8: __get_user_asm_ret(__gu_val,d,addr,retval); break; \
 default: if (__get_user_bad()) return retval; \
 } x = (type) __gu_val; })
 
@@ -314,16 +322,17 @@ __copy_res; })
 extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 {
   __kernel_size_t ret;
-  __asm__ __volatile__ ("
-	.section __ex_table,#alloc
-	.align 4
-	.word 1f,3
-	.previous
-	mov %2, %%o1
-1:	call __bzero
-	 mov %1, %%o0
-	mov %%o0, %0 
-	" : "=r" (ret) : "r" (addr), "r" (size) :
+  __asm__ __volatile__ (
+	".section __ex_table,#alloc\n\t"
+	".align 4\n\t"
+	".word 1f,3\n\t"
+	".previous\n\t"
+	"mov %2, %%o1\n"
+	"1:\n\t"
+	"call __bzero\n\t"
+	" mov %1, %%o0\n\t"
+	"mov %%o0, %0\n"
+	: "=r" (ret) : "r" (addr), "r" (size) :
 	"o0", "o1", "o2", "o3", "o4", "o5", "o7",
 	"g1", "g2", "g3", "g4", "g5", "g7", "cc");
   return ret;

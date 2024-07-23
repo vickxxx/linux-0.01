@@ -92,10 +92,11 @@ typedef struct slip_ctrl {
 	struct slip	ctrl;		/* SLIP things			*/
 	struct net_device	dev;		/* the device			*/
 } slip_ctrl_t;
-static slip_ctrl_t	**slip_ctrls = NULL;
+static slip_ctrl_t	**slip_ctrls;
 
 int slip_maxdev = SL_NRUNIT;		/* Can be overridden with insmod! */
 MODULE_PARM(slip_maxdev, "i");
+MODULE_PARM_DESC(slip_maxdev, "Maximum number of slip devices");
 
 static struct tty_ldisc	sl_ldisc;
 
@@ -387,6 +388,7 @@ sl_bump(struct slip *sl)
 	skb->mac.raw=skb->data;
 	skb->protocol=htons(ETH_P_IP);
 	netif_rx(skb);
+	sl->dev->last_rx = jiffies;
 	sl->rx_packets++;
 }
 
@@ -481,7 +483,7 @@ static void sl_tx_timeout(struct net_device *dev)
 		 *      14 Oct 1994 Dmitry Gorodchanin.
 		 */
 #ifdef SL_CHECK_TRANSMIT
-		if (jiffies - dev->trans_start  < 20 * HZ)  {
+		if (time_before(jiffies, dev->trans_start + 20 * HZ))  {
 			/* 20 sec timeout not reached */
 			goto out;
 		}
@@ -647,8 +649,6 @@ static int sl_init(struct net_device *dev)
 
 	SET_MODULE_OWNER(dev);
 
-	dev_init_buffers(dev);
-
 	/* New-style flags. */
 	dev->flags		= IFF_NOARP|IFF_POINTOPOINT|IFF_MULTICAST;
 
@@ -670,7 +670,9 @@ static int slip_receive_room(struct tty_struct *tty)
  * Handle the 'receiver data ready' interrupt.
  * This function is called by the 'tty_io' module in the kernel when
  * a block of SLIP data has been received, which can now be decapsulated
- * and sent on to some IP layer for further processing.
+ * and sent on to some IP layer for further processing. This will not
+ * be re-entered while running but other ldisc functions may be called
+ * in parallel
  */
  
 static void slip_receive_buf(struct tty_struct *tty, const unsigned char *cp, char *fp, int count)
@@ -826,9 +828,11 @@ sl_alloc(kdev_t line)
  * SLIP line discipline is called for.  Because we are
  * sure the tty line exists, we only have to link it to
  * a free SLIP channel...
+ *
+ * Called in process context serialized from other ldisc calls.
  */
-static int
-slip_open(struct tty_struct *tty)
+
+static int slip_open(struct tty_struct *tty)
 {
 	struct slip *sl;
 	int err;
@@ -865,8 +869,6 @@ slip_open(struct tty_struct *tty)
 	sl->pid = current->pid;
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
 
 	if (!test_bit(SLF_INUSE, &sl->flags)) {
 		/* Perform the low-level SLIP initialization. */
@@ -910,6 +912,9 @@ err_exit:
 }
 
 /*
+
+  FIXME: 1,2 are fixed 3 was never true anyway.
+  
    Let me to blame a bit.
    1. TTY module calls this funstion on soft interrupt.
    2. TTY module calls this function WITH MASKED INTERRUPTS!
@@ -928,9 +933,8 @@ err_exit:
 
 /*
  * Close down a SLIP channel.
- * This means flushing out any pending queues, and then restoring the
- * TTY line discipline to what it was before it got hooked to SLIP
- * (which usually is TTY again).
+ * This means flushing out any pending queues, and then returning. This
+ * call is serialized against other ldisc functions.
  */
 static void
 slip_close(struct tty_struct *tty)
@@ -1387,16 +1391,14 @@ cleanup_module(void)
 	int i;
 
 	if (slip_ctrls != NULL) {
-		unsigned long start = jiffies;
+		unsigned long timeout = jiffies + HZ;
 		int busy = 0;
 
 		/* First of all: check for active disciplines and hangup them.
 		 */
 		do {
-			if (busy) {
-				current->counter = 0;
-				schedule();
-			}
+			if (busy)
+				yield();
 
 			busy = 0;
 			local_bh_disable();
@@ -1412,7 +1414,7 @@ cleanup_module(void)
 				spin_unlock(&slc->ctrl.lock);
 			}
 			local_bh_enable();
-		} while (busy && jiffies - start < 1*HZ);
+		} while (busy && time_before(jiffies, timeout));
 
 		busy = 0;
 		for (i = 0; i < slip_maxdev; i++) {
@@ -1516,3 +1518,4 @@ out:
 }
 
 #endif
+MODULE_LICENSE("GPL");

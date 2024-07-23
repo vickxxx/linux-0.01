@@ -1,74 +1,87 @@
 /*******************************************************************************
  *
- * Module Name: rsmisc - Acpi_rs_end_tag_resource
- *                       Acpi_rs_end_tag_stream
- *                       Acpi_rs_vendor_resource
- *                       Acpi_rs_vendor_stream
- *                       Acpi_rs_start_dependent_functions_resource
- *                       Acpi_rs_end_dependent_functions_resource
- *                       Acpi_rs_start_dependent_functions_stream
- *                       Acpi_rs_end_dependent_functions_stream
- *              $Revision: 10 $
+ * Module Name: rsmisc - Miscellaneous resource descriptors
  *
  ******************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ * Copyright (C) 2000 - 2004, R. Byron Moore
+ * All rights reserved.
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions, and the following disclaimer,
+ *    without modification.
+ * 2. Redistributions in binary form must reproduce at minimum a disclaimer
+ *    substantially similar to the "NO WARRANTY" disclaimer below
+ *    ("Disclaimer") and any redistribution must be conditioned upon
+ *    including a substantially similar Disclaimer requirement for further
+ *    binary redistribution.
+ * 3. Neither the names of the above-listed copyright holders nor the names
+ *    of any contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * Alternatively, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") version 2 as published by the Free
+ * Software Foundation.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * NO WARRANTY
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
  */
 
 
-#include "acpi.h"
-#include "acresrc.h"
+#include <acpi/acpi.h>
+#include <acpi/acresrc.h>
 
-#define _COMPONENT          RESOURCE_MANAGER
-	 MODULE_NAME         ("rsmisc")
+#define _COMPONENT          ACPI_RESOURCES
+	 ACPI_MODULE_NAME    ("rsmisc")
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_end_tag_resource
+ * FUNCTION:    acpi_rs_end_tag_resource
  *
- * PARAMETERS:  Byte_stream_buffer      - Pointer to the resource input byte
- *                                          stream
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes consumed from
- *                                          the Byte_stream_buffer
- *              Output_buffer           - Pointer to the user's return buffer
- *              Structure_size          - u32 pointer that is filled with
- *                                          the number of bytes in the filled
- *                                          in structure
+ * PARAMETERS:  byte_stream_buffer      - Pointer to the resource input byte
+ *                                        stream
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        consumed the byte_stream_buffer is
+ *                                        returned
+ *              output_buffer           - Pointer to the return data buffer
+ *              structure_size          - Pointer to where the number of bytes
+ *                                        in the return data struct is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the resource byte stream and fill out the appropriate
- *                  structure pointed to by the Output_buffer. Return the
- *                  number of bytes consumed from the byte stream.
+ *              structure pointed to by the output_buffer. Return the
+ *              number of bytes consumed from the byte stream.
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_end_tag_resource (
-	u8                      *byte_stream_buffer,
-	u32                     *bytes_consumed,
-	u8                      **output_buffer,
-	u32                     *structure_size)
+	u8                              *byte_stream_buffer,
+	acpi_size                       *bytes_consumed,
+	u8                              **output_buffer,
+	acpi_size                       *structure_size)
 {
-	RESOURCE                *output_struct = (RESOURCE *) * output_buffer;
-	u32                     struct_size = RESOURCE_LENGTH;
+	struct acpi_resource            *output_struct = (void *) *output_buffer;
+	acpi_size                       struct_size = ACPI_RESOURCE_LENGTH;
+
+
+	ACPI_FUNCTION_TRACE ("rs_end_tag_resource");
 
 
 	/*
@@ -79,7 +92,7 @@ acpi_rs_end_tag_resource (
 	/*
 	 *  Fill out the structure
 	 */
-	output_struct->id = end_tag;
+	output_struct->id = ACPI_RSTYPE_END_TAG;
 
 	/*
 	 * Set the Length parameter
@@ -90,36 +103,37 @@ acpi_rs_end_tag_resource (
 	 * Return the final size of the structure
 	 */
 	*structure_size = struct_size;
-
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_end_tag_stream
+ * FUNCTION:    acpi_rs_end_tag_stream
  *
- * PARAMETERS:  Linked_list             - Pointer to the resource linked list
- *              Output_buffer           - Pointer to the user's return buffer
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes of the
- *                                          Output_buffer used
+ * PARAMETERS:  linked_list             - Pointer to the resource linked list
+ *              output_buffer           - Pointer to the user's return buffer
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        used in the output_buffer is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the linked list resource structure and fills in the
- *                  the appropriate bytes in a byte stream
+ *              the appropriate bytes in a byte stream
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_end_tag_stream (
-	RESOURCE                *linked_list,
-	u8                      **output_buffer,
-	u32                     *bytes_consumed)
+	struct acpi_resource            *linked_list,
+	u8                              **output_buffer,
+	acpi_size                       *bytes_consumed)
 {
-	u8                      *buffer = *output_buffer;
-	u8                      temp8 = 0;
+	u8                              *buffer = *output_buffer;
+	u8                              temp8 = 0;
+
+
+	ACPI_FUNCTION_TRACE ("rs_end_tag_stream");
 
 
 	/*
@@ -130,7 +144,7 @@ acpi_rs_end_tag_stream (
 
 	/*
 	 * Set the Checksum - zero means that the resource data is treated as if
-	 *  the checksum operation succeeded (ACPI Spec 1.0b Section 6.4.2.8)
+	 * the checksum operation succeeded (ACPI Spec 1.0b Section 6.4.2.8)
 	 */
 	temp8 = 0;
 
@@ -140,49 +154,48 @@ acpi_rs_end_tag_stream (
 	/*
 	 * Return the number of bytes consumed in this operation
 	 */
-	*bytes_consumed = (u32) ((NATIVE_UINT) buffer -
-			   (NATIVE_UINT) *output_buffer);
-
-	return (AE_OK);
+	*bytes_consumed = ACPI_PTR_DIFF (buffer, *output_buffer);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_vendor_resource
+ * FUNCTION:    acpi_rs_vendor_resource
  *
- * PARAMETERS:  Byte_stream_buffer      - Pointer to the resource input byte
- *                                          stream
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes consumed from
- *                                          the Byte_stream_buffer
- *              Output_buffer           - Pointer to the user's return buffer
- *              Structure_size          - u32 pointer that is filled with
- *                                          the number of bytes in the filled
- *                                          in structure
+ * PARAMETERS:  byte_stream_buffer      - Pointer to the resource input byte
+ *                                        stream
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        consumed the byte_stream_buffer is
+ *                                        returned
+ *              output_buffer           - Pointer to the return data buffer
+ *              structure_size          - Pointer to where the number of bytes
+ *                                        in the return data struct is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the resource byte stream and fill out the appropriate
- *                  structure pointed to by the Output_buffer. Return the
- *                  number of bytes consumed from the byte stream.
+ *              structure pointed to by the output_buffer. Return the
+ *              number of bytes consumed from the byte stream.
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_vendor_resource (
-	u8                      *byte_stream_buffer,
-	u32                     *bytes_consumed,
-	u8                      **output_buffer,
-	u32                     *structure_size)
+	u8                              *byte_stream_buffer,
+	acpi_size                       *bytes_consumed,
+	u8                              **output_buffer,
+	acpi_size                       *structure_size)
 {
-	u8                      *buffer = byte_stream_buffer;
-	RESOURCE                *output_struct = (RESOURCE *) * output_buffer;
-	u16                     temp16 = 0;
-	u8                      temp8 = 0;
-	u8                      index;
-	u32                     struct_size = sizeof (VENDOR_RESOURCE) +
-			  RESOURCE_LENGTH_NO_DATA;
+	u8                              *buffer = byte_stream_buffer;
+	struct acpi_resource            *output_struct = (void *) *output_buffer;
+	u16                             temp16 = 0;
+	u8                              temp8 = 0;
+	u8                              index;
+	acpi_size                       struct_size = ACPI_SIZEOF_RESOURCE (struct acpi_resource_vendor);
+
+
+	ACPI_FUNCTION_TRACE ("rs_vendor_resource");
 
 
 	/*
@@ -192,44 +205,38 @@ acpi_rs_vendor_resource (
 
 	if (temp8 & 0x80) {
 		/*
-		 * Large Item
+		 * Large Item, point to the length field
 		 */
-		/* Point to the length field */
-
 		buffer += 1;
 
 		/* Dereference */
 
-		MOVE_UNALIGNED16_TO_16 (&temp16, buffer);
+		ACPI_MOVE_16_TO_16 (&temp16, buffer);
 
 		/* Calculate bytes consumed */
 
-		*bytes_consumed = temp16 + 3;
+		*bytes_consumed = (acpi_size) temp16 + 3;
 
 		/* Point to the first vendor byte */
 
 		buffer += 2;
 	}
-
 	else {
 		/*
-		 * Small Item
+		 * Small Item, dereference the size
 		 */
-
-		/* Dereference the size */
-
 		temp16 = (u8)(*buffer & 0x07);
 
 		/* Calculate bytes consumed */
 
-		*bytes_consumed = temp16 + 1;
+		*bytes_consumed = (acpi_size) temp16 + 1;
 
 		/* Point to the first vendor byte */
 
 		buffer += 1;
 	}
 
-	output_struct->id = vendor_specific;
+	output_struct->id = ACPI_RSTYPE_VENDOR;
 	output_struct->data.vendor_specific.length = temp16;
 
 	for (index = 0; index < temp16; index++) {
@@ -238,85 +245,77 @@ acpi_rs_vendor_resource (
 	}
 
 	/*
-	 * In order for the Struct_size to fall on a 32-bit boundry,
-	 *  calculate the length of the vendor string and expand the
-	 *  Struct_size to the next 32-bit boundry.
+	 * In order for the struct_size to fall on a 32-bit boundary,
+	 * calculate the length of the vendor string and expand the
+	 * struct_size to the next 32-bit boundary.
 	 */
-	struct_size += ROUND_UP_TO_32_bITS (temp16);
+	struct_size += ACPI_ROUND_UP_to_32_bITS (temp16);
 
 	/*
 	 * Set the Length parameter
 	 */
-	output_struct->length = struct_size;
+	output_struct->length = (u32) struct_size;
 
 	/*
 	 * Return the final size of the structure
 	 */
 	*structure_size = struct_size;
-
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_vendor_stream
+ * FUNCTION:    acpi_rs_vendor_stream
  *
- * PARAMETERS:  Linked_list             - Pointer to the resource linked list
- *              Output_buffer           - Pointer to the user's return buffer
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes of the
- *                                          Output_buffer used
+ * PARAMETERS:  linked_list             - Pointer to the resource linked list
+ *              output_buffer           - Pointer to the user's return buffer
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        used in the output_buffer is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the linked list resource structure and fills in the
- *                  the appropriate bytes in a byte stream
+ *              the appropriate bytes in a byte stream
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_rs_vendor_stream (
-	RESOURCE                *linked_list,
-	u8                      **output_buffer,
-	u32                     *bytes_consumed)
+	struct acpi_resource            *linked_list,
+	u8                              **output_buffer,
+	acpi_size                       *bytes_consumed)
 {
-	u8                      *buffer = *output_buffer;
-	u16                     temp16 = 0;
-	u8                      temp8 = 0;
-	u8                      index;
+	u8                              *buffer = *output_buffer;
+	u16                             temp16 = 0;
+	u8                              temp8 = 0;
+	u8                              index;
+
+
+	ACPI_FUNCTION_TRACE ("rs_vendor_stream");
 
 
 	/*
 	 * Dereference the length to find if this is a large or small item.
 	 */
-
 	if(linked_list->data.vendor_specific.length > 7) {
 		/*
-		 * Large Item
-		 */
-		/*
-		 * Set the descriptor field and length bytes
+		 * Large Item, Set the descriptor field and length bytes
 		 */
 		*buffer = 0x84;
 		buffer += 1;
 
 		temp16 = (u16) linked_list->data.vendor_specific.length;
 
-		MOVE_UNALIGNED16_TO_16 (buffer, &temp16);
+		ACPI_MOVE_16_TO_16 (buffer, &temp16);
 		buffer += 2;
 	}
-
 	else {
 		/*
-		 * Small Item
-		 */
-
-		/*
-		 * Set the descriptor field
+		 * Small Item, Set the descriptor field
 		 */
 		temp8 = 0x70;
-		temp8 |= linked_list->data.vendor_specific.length;
+		temp8 |= (u8) linked_list->data.vendor_specific.length;
 
 		*buffer = temp8;
 		buffer += 1;
@@ -335,48 +334,46 @@ acpi_rs_vendor_stream (
 	/*
 	 * Return the number of bytes consumed in this operation
 	 */
-	*bytes_consumed = (u32) ((NATIVE_UINT) buffer -
-			   (NATIVE_UINT) *output_buffer);
-
-	return (AE_OK);
+	*bytes_consumed = ACPI_PTR_DIFF (buffer, *output_buffer);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_start_dependent_functions_resource
+ * FUNCTION:    acpi_rs_start_depend_fns_resource
  *
- * PARAMETERS:  Byte_stream_buffer      - Pointer to the resource input byte
- *                                          stream
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes consumed from
- *                                          the Byte_stream_buffer
- *              Output_buffer           - Pointer to the user's return buffer
- *              Structure_size          - u32 pointer that is filled with
- *                                          the number of bytes in the filled
- *                                          in structure
+ * PARAMETERS:  byte_stream_buffer      - Pointer to the resource input byte
+ *                                        stream
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        consumed the byte_stream_buffer is
+ *                                        returned
+ *              output_buffer           - Pointer to the return data buffer
+ *              structure_size          - Pointer to where the number of bytes
+ *                                        in the return data struct is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the resource byte stream and fill out the appropriate
- *                  structure pointed to by the Output_buffer. Return the
- *                  number of bytes consumed from the byte stream.
+ *              structure pointed to by the output_buffer. Return the
+ *              number of bytes consumed from the byte stream.
  *
  ******************************************************************************/
 
-ACPI_STATUS
-acpi_rs_start_dependent_functions_resource (
-	u8                      *byte_stream_buffer,
-	u32                     *bytes_consumed,
-	u8                      **output_buffer,
-	u32                     *structure_size)
+acpi_status
+acpi_rs_start_depend_fns_resource (
+	u8                              *byte_stream_buffer,
+	acpi_size                       *bytes_consumed,
+	u8                              **output_buffer,
+	acpi_size                       *structure_size)
 {
-	u8                      *buffer = byte_stream_buffer;
-	RESOURCE                *output_struct = (RESOURCE *) * output_buffer;
-	u8                      temp8 = 0;
-	u32                     struct_size =
-			  sizeof(START_DEPENDENT_FUNCTIONS_RESOURCE) +
-			  RESOURCE_LENGTH_NO_DATA;
+	u8                              *buffer = byte_stream_buffer;
+	struct acpi_resource            *output_struct = (void *) *output_buffer;
+	u8                              temp8 = 0;
+	acpi_size                       struct_size = ACPI_SIZEOF_RESOURCE (struct acpi_resource_start_dpf);
+
+
+	ACPI_FUNCTION_TRACE ("rs_start_depend_fns_resource");
 
 
 	/*
@@ -386,7 +383,7 @@ acpi_rs_start_dependent_functions_resource (
 
 	*bytes_consumed = (temp8 & 0x01) + 1;
 
-	output_struct->id = start_dependent_functions;
+	output_struct->id = ACPI_RSTYPE_START_DPF;
 
 	/*
 	 * Point to Byte 1 if it is used
@@ -398,77 +395,75 @@ acpi_rs_start_dependent_functions_resource (
 		/*
 		 * Check Compatibility priority
 		 */
-		output_struct->data.start_dependent_functions.compatibility_priority =
-				temp8 & 0x03;
+		output_struct->data.start_dpf.compatibility_priority = temp8 & 0x03;
 
-		if (3 == output_struct->data.start_dependent_functions.compatibility_priority) {
-			return (AE_AML_ERROR);
+		if (3 == output_struct->data.start_dpf.compatibility_priority) {
+			return_ACPI_STATUS (AE_AML_BAD_RESOURCE_VALUE);
 		}
 
 		/*
 		 * Check Performance/Robustness preference
 		 */
-		output_struct->data.start_dependent_functions.performance_robustness =
-				(temp8 >> 2) & 0x03;
+		output_struct->data.start_dpf.performance_robustness = (temp8 >> 2) & 0x03;
 
-		if (3 == output_struct->data.start_dependent_functions.performance_robustness) {
-			return (AE_AML_ERROR);
+		if (3 == output_struct->data.start_dpf.performance_robustness) {
+			return_ACPI_STATUS (AE_AML_BAD_RESOURCE_VALUE);
 		}
 	}
-
 	else {
-		output_struct->data.start_dependent_functions.compatibility_priority =
-				ACCEPTABLE_CONFIGURATION;
+		output_struct->data.start_dpf.compatibility_priority =
+				ACPI_ACCEPTABLE_CONFIGURATION;
 
-		output_struct->data.start_dependent_functions.performance_robustness =
-				ACCEPTABLE_CONFIGURATION;
+		output_struct->data.start_dpf.performance_robustness =
+				ACPI_ACCEPTABLE_CONFIGURATION;
 	}
 
 	/*
 	 * Set the Length parameter
 	 */
-	output_struct->length = struct_size;
+	output_struct->length = (u32) struct_size;
 
 	/*
 	 * Return the final size of the structure
 	 */
 	*structure_size = struct_size;
-
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_end_dependent_functions_resource
+ * FUNCTION:    acpi_rs_end_depend_fns_resource
  *
- * PARAMETERS:  Byte_stream_buffer      - Pointer to the resource input byte
- *                                          stream
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes consumed from
- *                                          the Byte_stream_buffer
- *              Output_buffer           - Pointer to the user's return buffer
- *              Structure_size          - u32 pointer that is filled with
- *                                          the number of bytes in the filled
- *                                          in structure
+ * PARAMETERS:  byte_stream_buffer      - Pointer to the resource input byte
+ *                                        stream
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        consumed the byte_stream_buffer is
+ *                                        returned
+ *              output_buffer           - Pointer to the return data buffer
+ *              structure_size          - Pointer to where the number of bytes
+ *                                        in the return data struct is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the resource byte stream and fill out the appropriate
- *                  structure pointed to by the Output_buffer. Return the
- *                  number of bytes consumed from the byte stream.
+ *              structure pointed to by the output_buffer. Return the
+ *              number of bytes consumed from the byte stream.
  *
  ******************************************************************************/
 
-ACPI_STATUS
-acpi_rs_end_dependent_functions_resource (
-	u8                      *byte_stream_buffer,
-	u32                     *bytes_consumed,
-	u8                      **output_buffer,
-	u32                     *structure_size)
+acpi_status
+acpi_rs_end_depend_fns_resource (
+	u8                              *byte_stream_buffer,
+	acpi_size                       *bytes_consumed,
+	u8                              **output_buffer,
+	acpi_size                       *structure_size)
 {
-	RESOURCE                *output_struct = (RESOURCE *) * output_buffer;
-	u32                     struct_size = RESOURCE_LENGTH;
+	struct acpi_resource            *output_struct = (void *) *output_buffer;
+	acpi_size                       struct_size = ACPI_RESOURCE_LENGTH;
+
+
+	ACPI_FUNCTION_TRACE ("rs_end_depend_fns_resource");
 
 
 	/*
@@ -479,58 +474,59 @@ acpi_rs_end_dependent_functions_resource (
 	/*
 	 *  Fill out the structure
 	 */
-	output_struct->id = end_dependent_functions;
+	output_struct->id = ACPI_RSTYPE_END_DPF;
 
 	/*
 	 * Set the Length parameter
 	 */
-	output_struct->length = struct_size;
+	output_struct->length = (u32) struct_size;
 
 	/*
 	 * Return the final size of the structure
 	 */
 	*structure_size = struct_size;
-
-	return (AE_OK);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_start_dependent_functions_stream
+ * FUNCTION:    acpi_rs_start_depend_fns_stream
  *
- * PARAMETERS:  Linked_list             - Pointer to the resource linked list
- *              Output_buffer           - Pointer to the user's return buffer
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes of the
- *                                          Output_buffer used
+ * PARAMETERS:  linked_list             - Pointer to the resource linked list
+ *              output_buffer           - Pointer to the user's return buffer
+ *              bytes_consumed          - u32 pointer that is filled with
+ *                                        the number of bytes of the
+ *                                        output_buffer used
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the linked list resource structure and fills in the
- *                  the appropriate bytes in a byte stream
+ *              the appropriate bytes in a byte stream
  *
  ******************************************************************************/
 
-ACPI_STATUS
-acpi_rs_start_dependent_functions_stream (
-	RESOURCE                *linked_list,
-	u8                      **output_buffer,
-	u32                     *bytes_consumed)
+acpi_status
+acpi_rs_start_depend_fns_stream (
+	struct acpi_resource            *linked_list,
+	u8                              **output_buffer,
+	acpi_size                       *bytes_consumed)
 {
-	u8                      *buffer = *output_buffer;
-	u8                      temp8 = 0;
+	u8                              *buffer = *output_buffer;
+	u8                              temp8 = 0;
+
+
+	ACPI_FUNCTION_TRACE ("rs_start_depend_fns_stream");
 
 
 	/*
 	 * The descriptor field is set based upon whether a byte is needed
-	 *  to contain Priority data.
+	 * to contain Priority data.
 	 */
-	if (ACCEPTABLE_CONFIGURATION ==
-			linked_list->data.start_dependent_functions.compatibility_priority &&
-		ACCEPTABLE_CONFIGURATION ==
-			linked_list->data.start_dependent_functions.performance_robustness)
-	{
+	if (ACPI_ACCEPTABLE_CONFIGURATION ==
+			linked_list->data.start_dpf.compatibility_priority &&
+		ACPI_ACCEPTABLE_CONFIGURATION ==
+			linked_list->data.start_dpf.performance_robustness) {
 		*buffer = 0x30;
 	}
 	else {
@@ -541,13 +537,10 @@ acpi_rs_start_dependent_functions_stream (
 		 * Set the Priority Byte Definition
 		 */
 		temp8 = 0;
-		temp8 = (u8)
-			((linked_list->data.start_dependent_functions.performance_robustness &
-			  0x03) << 2);
-		temp8 |=
-			(linked_list->data.start_dependent_functions.compatibility_priority &
-			 0x03);
-
+		temp8 = (u8) ((linked_list->data.start_dpf.performance_robustness &
+				   0x03) << 2);
+		temp8 |= (linked_list->data.start_dpf.compatibility_priority &
+				   0x03);
 		*buffer = temp8;
 	}
 
@@ -556,38 +549,37 @@ acpi_rs_start_dependent_functions_stream (
 	/*
 	 * Return the number of bytes consumed in this operation
 	 */
-	*bytes_consumed = (u32) ((NATIVE_UINT) buffer -
-			   (NATIVE_UINT) *output_buffer);
-
-	return (AE_OK);
+	*bytes_consumed = ACPI_PTR_DIFF (buffer, *output_buffer);
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_rs_end_dependent_functions_stream
+ * FUNCTION:    acpi_rs_end_depend_fns_stream
  *
- * PARAMETERS:  Linked_list             - Pointer to the resource linked list
- *              Output_buffer           - Pointer to the user's return buffer
- *              Bytes_consumed          - u32 pointer that is filled with
- *                                          the number of bytes of the
- *                                          Output_buffer used
+ * PARAMETERS:  linked_list             - Pointer to the resource linked list
+ *              output_buffer           - Pointer to the user's return buffer
+ *              bytes_consumed          - Pointer to where the number of bytes
+ *                                        used in the output_buffer is returned
  *
- * RETURN:      Status  AE_OK if okay, else a valid ACPI_STATUS code
+ * RETURN:      Status
  *
  * DESCRIPTION: Take the linked list resource structure and fills in the
- *                  the appropriate bytes in a byte stream
+ *              the appropriate bytes in a byte stream
  *
  ******************************************************************************/
 
-ACPI_STATUS
-acpi_rs_end_dependent_functions_stream (
-	RESOURCE                *linked_list,
-	u8                      **output_buffer,
-	u32                     *bytes_consumed
-	)
+acpi_status
+acpi_rs_end_depend_fns_stream (
+	struct acpi_resource            *linked_list,
+	u8                              **output_buffer,
+	acpi_size                       *bytes_consumed)
 {
-	u8                      *buffer = *output_buffer;
+	u8                              *buffer = *output_buffer;
+
+
+	ACPI_FUNCTION_TRACE ("rs_end_depend_fns_stream");
 
 
 	/*
@@ -599,9 +591,7 @@ acpi_rs_end_dependent_functions_stream (
 	/*
 	 * Return the number of bytes consumed in this operation
 	 */
-	*bytes_consumed = (u32) ((NATIVE_UINT) buffer -
-			   (NATIVE_UINT) *output_buffer);
-
-	return (AE_OK);
+	*bytes_consumed = ACPI_PTR_DIFF (buffer, *output_buffer);
+	return_ACPI_STATUS (AE_OK);
 }
 

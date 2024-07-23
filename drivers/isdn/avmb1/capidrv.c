@@ -1,195 +1,11 @@
-/*
- * $Id: capidrv.c,v 1.39 2000/11/23 20:45:14 kai Exp $
+/* $Id: capidrv.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  *
  * ISDN4Linux Driver, using capi20 interface (kernelcapi)
  *
- * Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 1997 by Carsten Paeth <calle@calle.de>
  *
- * $Log: capidrv.c,v $
- * Revision 1.39  2000/11/23 20:45:14  kai
- * fixed module_init/exit stuff
- * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
- *
- * Revision 1.38  2000/11/14 08:43:07  calle
- * Bugfix for v110. Connectparamters where setup for sync ...
- *
- * Revision 1.37  2000/11/01 14:05:02  calle
- * - use module_init/module_exit from linux/init.h.
- * - all static struct variables are initialized with "membername:" now.
- * - avm_cs.c, let it work with newer pcmcia-cs.
- *
- * Revision 1.36  2000/06/26 15:13:41  keil
- * features should be or'ed
- *
- * Revision 1.35  2000/06/19 15:11:25  keil
- * avoid use of freed structs
- * changes from 2.4.0-ac21
- *
- * Revision 1.34  2000/06/19 13:13:55  calle
- * Added Modemsupport!
- *
- * Revision 1.33  2000/05/06 00:52:36  kai
- * merged changes from kernel tree
- * fixed timer and net_device->name breakage
- *
- * Revision 1.32  2000/04/07 15:19:58  calle
- * remove warnings
- *
- * Revision 1.31  2000/04/06 15:01:25  calle
- * Bugfix: crash in capidrv.c when reseting a capi controller.
- * - changed code order on remove of controller.
- * - using tq_schedule for notifier in kcapi.c.
- * - now using spin_lock_irqsave() and spin_unlock_irqrestore().
- * strange: sometimes even MP hang on unload of isdn.o ...
- *
- * Revision 1.30  2000/03/03 15:50:42  calle
- * - kernel CAPI:
- *   - Changed parameter "param" in capi_signal from __u32 to void *.
- *   - rewrote notifier handling in kcapi.c
- *   - new notifier NCCI_UP and NCCI_DOWN
- * - User CAPI:
- *   - /dev/capi20 is now a cloning device.
- *   - middleware extentions prepared.
- * - capidrv.c
- *   - locking of list operations and module count updates.
- *
- * Revision 1.29  1999/12/06 17:13:06  calle
- * Added controller watchdog.
- *
- * Revision 1.28  1999/11/05 16:22:37  calle
- * Bugfix: Missing break in switch on ISDN_CMD_HANGUP.
- *
- * Revision 1.27  1999/09/16 15:13:04  calle
- * forgot to change paramter type of contr for lower_callback ...
- *
- * Revision 1.26  1999/08/06 07:41:16  calle
- * Added the "vbox patch". if (si1 == 1) si2 = 0;
- *
- * Revision 1.25  1999/08/04 10:10:11  calle
- * Bugfix: corrected /proc functions, added structure for new AVM cards.
- *
- * Revision 1.24  1999/07/20 06:48:02  calle
- * Bugfix: firmware version check for D2 trace was too restrictiv.
- *
- * Revision 1.23  1999/07/09 15:05:44  keil
- * compat.h is now isdn_compat.h
- *
- * Revision 1.22  1999/07/06 07:24:14  calle
- * Bugfix: call to kfree_skb in capidrv_signal was too early,
- *         thanks to Lars Heete <hel@admin.de>.
- *
- * Revision 1.21  1999/07/01 15:26:34  calle
- * complete new version (I love it):
- * + new hardware independed "capi_driver" interface that will make it easy to:
- *   - support other controllers with CAPI-2.0 (i.e. USB Controller)
- *   - write a CAPI-2.0 for the passive cards
- *   - support serial link CAPI-2.0 boxes.
- * + wrote "capi_driver" for all supported cards.
- * + "capi_driver" (supported cards) now have to be configured with
- *   make menuconfig, in the past all supported cards where included
- *   at once.
- * + new and better informations in /proc/capi/
- * + new ioctl to switch trace of capi messages per controller
- *   using "avmcapictrl trace [contr] on|off|...."
- * + complete testcircle with all supported cards and also the
- *   PCMCIA cards (now patch for pcmcia-cs-3.0.13 needed) done.
- *
- * Revision 1.20  1999/07/01 08:22:59  keil
- * compatibility macros now in <linux/isdn_compat.h>
- *
- * Revision 1.19  1999/06/29 16:16:54  calle
- * Let ISDN_CMD_UNLOAD work with open isdn devices without crash again.
- * Also right unlocking (ISDN_CMD_UNLOCK) is done now.
- * isdnlog should check returncode of read(2) calls.
- *
- * Revision 1.18  1999/06/21 15:24:15  calle
- * extend information in /proc.
- *
- * Revision 1.17  1999/06/10 16:53:55  calle
- * Removing of module b1pci will now remove card from lower level.
- *
- * Revision 1.16  1999/05/31 11:50:33  calle
- * Bugfix: In if_sendbuf, skb_push'ed DATA_B3 header was not skb_pull'ed
- *         on failure, result in data block with DATA_B3 header transmitted
- *
- * Revision 1.15  1999/05/25 21:26:16  calle
- * Include CAPI-Channelallocation (leased lines) from the 2.0 tree.
- *
- * Revision 1.14  1999/05/22 07:55:06  calle
- * Added *V110* to AVM B1 driver.
- *
- * Revision 1.13  1998/06/26 15:12:55  fritz
- * Added handling of STAT_ICALL with incomplete CPN.
- * Added AT&L for ttyI emulator.
- * Added more locking stuff in tty_write.
- *
- * Revision 1.12  1998/03/29 16:06:03  calle
- * changes from 2.0 tree merged.
- *
- * Revision 1.3.2.10  1998/03/20 14:38:24  calle
- * capidrv: prepared state machines for suspend/resume/hold
- * capidrv: fix bug in state machine if B1/T1 is out of nccis
- * b1capi: changed some errno returns.
- * b1capi: detect if you try to add same T1 to different io address.
- * b1capi: change number of nccis depending on number of channels.
- * b1lli: cosmetics
- *
- * Revision 1.3.2.9  1998/03/20 09:01:12  calle
- * Changes capi_register handling to get full support for 30 bchannels.
- *
- * Revision 1.3.2.8  1998/03/18 17:51:28  calle
- * added controller number to error messages
- *
- * Revision 1.3.2.7  1998/02/27 15:40:47  calle
- * T1 running with slow link. bugfix in capi_release.
- *
- * Revision 1.11  1998/02/13 07:09:15  calle
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 1.10  1998/02/02 19:52:23  calle
- * Fixed vbox (audio) acceptb.
- *
- * Revision 1.9  1998/01/31 11:14:45  calle
- * merged changes to 2.0 tree, prepare 2.1.82 to work.
- *
- * Revision 1.8  1997/11/04 06:12:09  calle
- * capi.c: new read/write in file_ops since 2.1.60
- * capidrv.c: prepared isdnlog interface for d2-trace in newer firmware.
- * capiutil.c: needs config.h (CONFIG_ISDN_DRV_AVMB1_VERBOSE_REASON)
- * compat.h: added #define LinuxVersionCode
- *
- * Revision 1.7  1997/10/11 10:36:34  calle
- * Added isdnlog support. patch to isdnlog needed.
- *
- * Revision 1.6  1997/10/11 10:25:55  calle
- * New interface for lowlevel drivers. BSENT with nr. of bytes sent,
- * allow sending without ACK.
- *
- * Revision 1.5  1997/10/01 09:21:16  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.4  1997/07/13 12:22:43  calle
- * bug fix for more than one controller in connect_req.
- * debugoutput now with contrnr.
- *
- * Revision 1.3  1997/05/18 09:24:15  calle
- * added verbose disconnect reason reporting to avmb1.
- * some fixes in capi20 interface.
- * changed info messages for B1-PCI
- *
- * Revision 1.2  1997/03/05 21:19:59  fritz
- * Removed include of config.h (mkdep stated this is unneded).
- *
- * Revision 1.1  1997/03/04 21:50:31  calle
- * Frirst version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -198,7 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
 #include <linux/signal.h>
@@ -219,10 +35,12 @@
 #include "capicmd.h"
 #include "capidrv.h"
 
-static char *revision = "$Revision: 1.39 $";
+static char *revision = "$Revision: 1.1.4.1 $";
 static int debugmode = 0;
 
-MODULE_AUTHOR("Carsten Paeth <calle@calle.in-berlin.de>");
+MODULE_DESCRIPTION("CAPI4Linux: Interface to ISDN4Linux");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 MODULE_PARM(debugmode, "i");
 
 /* -------- type definitions ----------------------------------------- */
@@ -287,6 +105,7 @@ struct capidrv_contr {
 				int oldstate;
 				/* */
 				__u16 datahandle;
+                                spinlock_t lock;
 				struct ncci_datahandle_queue {
 				    struct ncci_datahandle_queue *next;
 				    __u16                         datahandle;
@@ -488,7 +307,7 @@ static inline __u8 cip2si2(__u16 cipval)
 }
 
 
-/* -------- controller managment ------------------------------------- */
+/* -------- controller management ------------------------------------- */
 
 static inline capidrv_contr *findcontrbydriverid(int driverid)
 {
@@ -604,6 +423,7 @@ static inline capidrv_ncci *new_ncci(capidrv_contr * card,
 	nccip->plcip = plcip;
 	nccip->chan = plcip->chan;
 	nccip->datahandle = 0;
+        nccip->lock = SPIN_LOCK_UNLOCKED;
 
 	nccip->next = plcip->ncci_list;
 	plcip->ncci_list = nccip;
@@ -660,6 +480,7 @@ static int capidrv_add_ack(struct capidrv_ncci *nccip,
 		           __u16 datahandle, int len)
 {
 	struct ncci_datahandle_queue *n, **pp;
+	unsigned long flags;
 
 	n = (struct ncci_datahandle_queue *)
 		kmalloc(sizeof(struct ncci_datahandle_queue), GFP_ATOMIC);
@@ -670,25 +491,31 @@ static int capidrv_add_ack(struct capidrv_ncci *nccip,
 	n->next = 0;
 	n->datahandle = datahandle;
 	n->len = len;
+	spin_lock_irqsave(&nccip->lock, flags);
 	for (pp = &nccip->ackqueue; *pp; pp = &(*pp)->next) ;
 	*pp = n;
+	spin_unlock_irqrestore(&nccip->lock, flags);
 	return 0;
 }
 
 static int capidrv_del_ack(struct capidrv_ncci *nccip, __u16 datahandle)
 {
 	struct ncci_datahandle_queue **pp, *p;
+	unsigned long flags;
 	int len;
 
+	spin_lock_irqsave(&nccip->lock, flags);
 	for (pp = &nccip->ackqueue; *pp; pp = &(*pp)->next) {
  		if ((*pp)->datahandle == datahandle) {
 			p = *pp;
 			len = p->len;
 			*pp = (*pp)->next;
+	                spin_unlock_irqrestore(&nccip->lock, flags);
 		        kfree(p);
 			return len;
 		}
 	}
+        spin_unlock_irqrestore(&nccip->lock, flags);
 	return -1;
 }
 
@@ -696,13 +523,25 @@ static int capidrv_del_ack(struct capidrv_ncci *nccip, __u16 datahandle)
 
 static void send_message(capidrv_contr * card, _cmsg * cmsg)
 {
-	struct sk_buff *skb;
-	size_t len;
+	struct sk_buff	*skb;
+	size_t		len;
+	u16		err;
+
 	capi_cmsg2message(cmsg, cmsg->buf);
 	len = CAPIMSG_LEN(cmsg->buf);
 	skb = alloc_skb(len, GFP_ATOMIC);
+	if(!skb) {
+		printk(KERN_ERR "no skb len(%d) memory\n", len);
+		return;
+	}
 	memcpy(skb_put(skb, len), cmsg->buf, len);
-	(*capifuncs->capi_put_message) (global.appid, skb);
+	err = (*capifuncs->capi_put_message) (global.appid, skb);
+	if (err) {
+		printk(KERN_WARNING "%s: capi_put_message error: %04x\n",
+			__FUNCTION__, err);
+		kfree_skb(skb);
+		return;
+	}
 	global.nsentctlpkt++;
 }
 
@@ -2057,8 +1896,8 @@ static int if_sendbuf(int id, int channel, int doack, struct sk_buff *skb)
 	__u16 datahandle;
 
 	if (!card) {
-		printk(KERN_ERR "capidrv-%d: if_sendbuf called with invalid driverId %d!\n",
-		       card->contrnr, id);
+		printk(KERN_ERR "capidrv: if_sendbuf called with invalid driverId %d!\n",
+		       id);
 		return 0;
 	}
 	if (debugmode > 1)
@@ -2127,8 +1966,8 @@ static int if_readstat(__u8 *buf, int len, int user, int id, int channel)
 	__u8 *p;
 
 	if (!card) {
-		printk(KERN_ERR "capidrv-%d: if_readstat called with invalid driverId %d!\n",
-		       card->contrnr, id);
+		printk(KERN_ERR "capidrv: if_readstat called with invalid driverId %d!\n",
+		       id);
 		return -ENODEV;
 	}
 
@@ -2361,10 +2200,10 @@ static int capidrv_delcontr(__u16 contr)
 			free_ncci(card, card->bchans[card->nbchan-1].nccip);
 		if (card->bchans[card->nbchan-1].plcip)
 			free_plci(card, card->bchans[card->nbchan-1].plcip);
-		if (card->plci_list)
-			printk(KERN_ERR "capidrv: bug in free_plci()\n");
 		card->nbchan--;
 	}
+	if (card->plci_list)
+		printk(KERN_ERR "capidrv: bug in free_plci()\n");
 	kfree(card->bchans);
 	card->bchans = 0;
 
@@ -2484,7 +2323,7 @@ static int __init capidrv_init(void)
 {
 	struct capi_register_params rparam;
 	capi_profile profile;
-	char rev[10];
+	char rev[32];
 	char *p;
 	__u32 ncontr, contr;
 	__u16 errcode;
@@ -2498,12 +2337,13 @@ static int __init capidrv_init(void)
 		return -EIO;
 	}
 
-	if ((p = strchr(revision, ':'))) {
-		strcpy(rev, p + 1);
-		p = strchr(rev, '$');
-		*p = 0;
+	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+		strncpy(rev, p + 2, sizeof(rev));
+		rev[sizeof(rev)-1] = 0;
+		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		   *(p-1) = 0;
 	} else
-		strcpy(rev, " ??? ");
+		strcpy(rev, "1.0");
 
 	rparam.level3cnt = -2;  /* number of bchannels twice */
 	rparam.datablkcnt = 16;
@@ -2534,7 +2374,7 @@ static int __init capidrv_init(void)
 	}
 	proc_init();
 
-	printk(KERN_NOTICE "capidrv: Rev%s: loaded\n", rev);
+	printk(KERN_NOTICE "capidrv: Rev %s: loaded\n", rev);
 	MOD_DEC_USE_COUNT;
 
 	return 0;

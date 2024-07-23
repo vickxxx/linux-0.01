@@ -12,7 +12,7 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -102,7 +102,9 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 
 	if (regno == 30) {
 		addr = &task->thread.usp;
-	} else if (regno == 31 || regno > 64) {
+	} else if (regno == 65) {
+		addr = &task->thread.unique;
+	} else if (regno == 31 || regno > 65) {
 		zero = 0;
 		addr = &zero;
 	} else {
@@ -233,6 +235,16 @@ ptrace_cancel_bpt(struct task_struct * child)
 	return (nsaved != 0);
 }
 
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure the single step bit is not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{ 
+	ptrace_cancel_bpt(child);
+}
+
 asmlinkage long
 sys_ptrace(long request, long pid, long addr, long data,
 	   int a4, int a5, struct pt_regs regs)
@@ -264,32 +276,7 @@ sys_ptrace(long request, long pid, long addr, long data,
 	if (!child)
 		goto out_notsk;
 	if (request == PTRACE_ATTACH) {
-		ret = -EPERM;
-		if (child == current)
-			goto out;
-		if ((!child->dumpable ||
-		     (current->uid != child->euid) ||
-		     (current->uid != child->suid) ||
-		     (current->uid != child->uid) ||
-		     (current->gid != child->egid) ||
-		     (current->gid != child->sgid) ||
-		     (current->gid != child->gid) ||
-		     (!cap_issubset(child->cap_permitted, current->cap_permitted)))
-		    && !capable(CAP_SYS_PTRACE))
-			goto out;
-		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED)
-			goto out;
-		child->ptrace |= PT_PTRACED;
-		write_lock_irq(&tasklist_lock);
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		write_unlock_irq(&tasklist_lock);
-		send_sig(SIGSTOP, child, 1);
-		ret = 0;
+		ret = ptrace_attach(child);
 		goto out;
 	}
 	ret = -ESRCH;
@@ -387,21 +374,8 @@ sys_ptrace(long request, long pid, long addr, long data,
 		ret = 0;
 		goto out;
 
-	case PTRACE_DETACH: /* detach a process that was attached. */
-		ret = -EIO;
-		if ((unsigned long) data > _NSIG)
-			goto out;
-		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
-		wake_up_process(child);
-		child->exit_code = data;
-		write_lock_irq(&tasklist_lock);
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
-		write_unlock_irq(&tasklist_lock);
-		/* make sure single-step breakpoint is gone. */
-		ptrace_cancel_bpt(child);
-		ret = 0;
+	case PTRACE_DETACH:	 /* detach a process that was attached. */
+		ret = ptrace_detach(child, data);
 		goto out;
 
 	default:

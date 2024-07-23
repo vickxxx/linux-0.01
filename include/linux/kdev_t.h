@@ -1,6 +1,6 @@
 #ifndef _LINUX_KDEV_T_H
 #define _LINUX_KDEV_T_H
-#ifdef __KERNEL__
+#if defined(__KERNEL__) || defined(_LVM_H_INCLUDE)
 /*
 As a preparation for the introduction of larger device numbers,
 we introduce a type kdev_t to hold them. No information about
@@ -75,6 +75,15 @@ typedef unsigned short kdev_t;
 
 extern const char * kdevname(kdev_t);	/* note: returns pointer to static data! */
 
+/* 2.5.x compatibility */
+#define mk_kdev(a,b)	MKDEV(a,b)
+#define major(d)	MAJOR(d)
+#define minor(d)	MINOR(d)
+#define kdev_same(a,b)	((a) == (b))
+#define kdev_none(d)	(!(d))
+#define kdev_val(d)	((unsigned int)(d))
+#define val_to_kdev(d)	((kdev_t)(d))
+
 /*
 As long as device numbers in the outside world have 16 bits only,
 we use these conversions.
@@ -101,7 +110,7 @@ static inline kdev_t to_kdev_t(int dev)
 	return MKDEV(major, minor);
 }
 
-#else /* __KERNEL__ */
+#else /* __KERNEL__ || _LVM_H_INCLUDE */
 
 /*
 Some programs want their definitions of MAJOR and MINOR and MKDEV
@@ -110,5 +119,5 @@ from the kernel sources. These must be the externally visible ones.
 #define MAJOR(dev)	((dev)>>8)
 #define MINOR(dev)	((dev) & 0xff)
 #define MKDEV(ma,mi)	((ma)<<8 | (mi))
-#endif /* __KERNEL__ */
+#endif /* __KERNEL__ || _LVM_H_INCLUDE */
 #endif

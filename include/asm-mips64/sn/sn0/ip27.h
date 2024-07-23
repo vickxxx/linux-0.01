@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -20,7 +19,7 @@
 
 #define TLBLO_HWBITSHIFT	0		/* Shift value, for masking */
 
-#if !_LANGUAGE_ASSEMBLY
+#ifndef __ASSEMBLY__
 
 #define CAUSE_BERRINTR 		IE_IRQ5
 
@@ -31,9 +30,9 @@
 #define ECCF_PADDR      4
 #define ECCF_SIZE       (5 * sizeof(long))
 
-#endif /* !_LANGUAGE_ASSEMBLY */
+#endif /* !__ASSEMBLY__ */
 
-#if _LANGUAGE_ASSEMBLY
+#ifdef __ASSEMBLY__
 
 /*
  * KL_GET_CPUNUM (similar to EV_GET_SPNUM for EVEREST platform) reads
@@ -44,7 +43,7 @@
 	dli	proc, LOCAL_HUB(0); 			\
 	ld	proc, PI_CPU_NUM(proc)
 
-#endif /* _LANGUAGE_ASSEMBLY */
+#endif /* __ASSEMBLY__ */
 
 /*
  * R10000 status register interrupt bit mask usage for IP27.

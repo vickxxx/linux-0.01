@@ -1,4 +1,4 @@
-/* $Id: ioctl.c,v 1.16 2000/11/18 02:10:59 davem Exp $
+/* $Id: ioctl.c,v 1.16.2.1 2002/03/03 23:41:26 davem Exp $
  * ioctl.c: Solaris ioctl emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -289,11 +289,15 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	struct inode *ino;
 	/* I wonder which of these tests are superfluous... --patrik */
+	read_lock(&current->files->file_lock);
 	if (! current->files->fd[fd] ||
 	    ! current->files->fd[fd]->f_dentry ||
 	    ! (ino = current->files->fd[fd]->f_dentry->d_inode) ||
-	    ! ino->i_sock)
+	    ! ino->i_sock) {
+		read_unlock(&current->files->file_lock);
 		return TBADF;
+	}
+	read_unlock(&current->files->file_lock);
 	
 	switch (cmd & 0xff) {
 	case 109: /* SI_SOCKPARAMS */
@@ -363,6 +367,7 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 	case 106: /* SI_GETINTRANSIT */
 	case 107: /* SI_TCL_LINK */
 	case 108: /* SI_TCL_UNLINK */
+		;
 	}
 	return TNOTSUPPORT;
 }
@@ -450,6 +455,7 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 	case 145: /* TI_GETPEERNAME */
 	case 146: /* TI_SETMYNAME */
 	case 147: /* TI_SETPEERNAME */
+		;
 	}
 	return TNOTSUPPORT;
 }

@@ -20,7 +20,7 @@
  * bit 0 is the LSB of addr; bit 64 is the LSB of (addr+1).
  */
 
-extern __inline__ void
+static inline void
 set_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long temp;
@@ -41,18 +41,18 @@ set_bit(unsigned long nr, volatile void * addr)
 /*
  * WARNING: non atomic version.
  */
-extern __inline__ void
+static inline void
 __set_bit(unsigned long nr, volatile void * addr)
 {
 	int *m = ((int *) addr) + (nr >> 5);
 
-	*m |= 1UL << (nr & 31);
+	*m |= 1 << (nr & 31);
 }
 
 #define smp_mb__before_clear_bit()	smp_mb()
 #define smp_mb__after_clear_bit()	smp_mb()
 
-extern __inline__ void
+static inline void
 clear_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long temp;
@@ -70,7 +70,18 @@ clear_bit(unsigned long nr, volatile void * addr)
 	:"Ir" (~(1UL << (nr & 31))), "m" (*m));
 }
 
-extern __inline__ void
+/*
+ * WARNING: non atomic version.
+ */
+static __inline__ void
+__change_bit(unsigned long nr, volatile void * addr)
+{
+	int *m = ((int *) addr) + (nr >> 5);
+
+	*m ^= 1 << (nr & 31);
+}
+
+static inline void
 change_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long temp;
@@ -88,7 +99,7 @@ change_bit(unsigned long nr, volatile void * addr)
 	:"Ir" (1UL << (nr & 31)), "m" (*m));
 }
 
-extern __inline__ int
+static inline int
 test_and_set_bit(unsigned long nr, volatile void *addr)
 {
 	unsigned long oldbit;
@@ -118,7 +129,7 @@ test_and_set_bit(unsigned long nr, volatile void *addr)
 /*
  * WARNING: non atomic version.
  */
-extern __inline__ int
+static inline int
 __test_and_set_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long mask = 1 << (nr & 0x1f);
@@ -129,7 +140,7 @@ __test_and_set_bit(unsigned long nr, volatile void * addr)
 	return (old & mask) != 0;
 }
 
-extern __inline__ int
+static inline int
 test_and_clear_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long oldbit;
@@ -159,7 +170,7 @@ test_and_clear_bit(unsigned long nr, volatile void * addr)
 /*
  * WARNING: non atomic version.
  */
-extern __inline__ int
+static inline int
 __test_and_clear_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long mask = 1 << (nr & 0x1f);
@@ -170,7 +181,21 @@ __test_and_clear_bit(unsigned long nr, volatile void * addr)
 	return (old & mask) != 0;
 }
 
-extern __inline__ int
+/*
+ * WARNING: non atomic version.
+ */
+static __inline__ int
+__test_and_change_bit(unsigned long nr, volatile void * addr)
+{
+	unsigned long mask = 1 << (nr & 0x1f);
+	int *m = ((int *) addr) + (nr >> 5);
+	int old = *m;
+
+	*m = old ^ mask;
+	return (old & mask) != 0;
+}
+
+static inline int
 test_and_change_bit(unsigned long nr, volatile void * addr)
 {
 	unsigned long oldbit;
@@ -195,7 +220,7 @@ test_and_change_bit(unsigned long nr, volatile void * addr)
 	return oldbit != 0;
 }
 
-extern __inline__ int
+static inline int
 test_bit(int nr, volatile void * addr)
 {
 	return (1UL & (((const int *) addr)[nr >> 5] >> (nr & 31))) != 0UL;
@@ -208,7 +233,7 @@ test_bit(int nr, volatile void * addr)
  * Do a binary search on the bits.  Due to the nature of large
  * constants on the alpha, it is worthwhile to split the search.
  */
-extern inline unsigned long ffz_b(unsigned long x)
+static inline unsigned long ffz_b(unsigned long x)
 {
 	unsigned long sum = 0;
 
@@ -220,7 +245,7 @@ extern inline unsigned long ffz_b(unsigned long x)
 	return sum;
 }
 
-extern inline unsigned long ffz(unsigned long word)
+static inline unsigned long ffz(unsigned long word)
 {
 #if defined(__alpha_cix__) && defined(__alpha_fix__)
 	/* Whee.  EV67 can calculate it directly.  */
@@ -247,10 +272,30 @@ extern inline unsigned long ffz(unsigned long word)
  * differs in spirit from the above ffz (man ffs).
  */
 
-extern inline int ffs(int word)
+static inline int ffs(int word)
 {
 	int result = ffz(~word);
 	return word ? result+1 : 0;
+}
+
+/* Compute powers of two for the given integer.  */
+static inline int floor_log2(unsigned long word)
+{
+	long bit;
+#if defined(__alpha_cix__) && defined(__alpha_fix__)
+	__asm__("ctlz %1,%0" : "=r"(bit) : "r"(word));
+	return 63 - bit;
+#else
+	for (bit = -1; word ; bit++)
+		word >>= 1;
+	return bit;
+#endif
+}
+
+static inline int ceil_log2(unsigned int word)
+{
+	long bit = floor_log2(word);
+	return bit + (word > (1UL << bit));
 }
 
 /*
@@ -260,7 +305,7 @@ extern inline int ffs(int word)
 
 #if defined(__alpha_cix__) && defined(__alpha_fix__)
 /* Whee.  EV67 can calculate it directly.  */
-extern __inline__ unsigned long hweight64(unsigned long w)
+static inline unsigned long hweight64(unsigned long w)
 {
 	unsigned long result;
 	__asm__("ctpop %1,%0" : "=r"(result) : "r"(w));
@@ -281,7 +326,7 @@ extern __inline__ unsigned long hweight64(unsigned long w)
 /*
  * Find next zero bit in a bitmap reasonably efficiently..
  */
-extern inline unsigned long
+static inline unsigned long
 find_next_zero_bit(void * addr, unsigned long size, unsigned long offset)
 {
 	unsigned long * p = ((unsigned long *) addr) + (offset >> 6);

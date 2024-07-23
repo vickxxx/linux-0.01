@@ -6,11 +6,10 @@
     Director, National Security Agency.
 
     This software may be used and distributed according to the terms
-    of the GNU Public License, incorporated herein by reference.
+    of the GNU General Public License, incorporated herein by reference.
 
-    The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-    Center of Excellence in Space Data and Information Sciences
-        Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+    The author may be reached as becker@scyld.com, or C/O
+    Scyld Computing Corporation, 410 Severn Ave., Suite 210, Annapolis MD 21403
 
     This driver should work with many programmed-I/O 8390-based ethernet
     boards.  Currently it supports the NE1000, NE2000, many clones,
@@ -76,12 +75,17 @@ static unsigned int netcard_portlist[] __initdata = {
 };
 #endif
 
-static struct { unsigned short vendor, function; char *name; }
-isapnp_clone_list[] __initdata = {
-	{ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),		"NN NE2000" },
-	{ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),		"Generic PNP" },
-	{0,}
+static struct isapnp_device_id isapnp_clone_list[] __initdata = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),
+		(long) "NN NE2000" },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),
+		(long) "Generic PNP" },
+	{ }	/* terminate list */
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_clone_list);
 
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
@@ -101,6 +105,9 @@ bad_clone_list[] __initdata = {
     {"PCM-4823", "PCM-4823", {0x00, 0xc0, 0x6c}}, /* Broken Advantech MoBo */
     {"REALTEK", "RTL8019", {0x00, 0x00, 0xe8}}, /* no-name with Realtek chip */
     {"LCS-8834", "LCS-8836", {0x04, 0x04, 0x37}}, /* ShinyNet (SET) */
+#ifdef CONFIG_TOSHIBA_RBTX4927
+    {"TX4927", "TX4927", {0x00, 0x60, 0x0a}}, /* Toshiba w/EEPROM, no probing */
+#endif
     {0,}
 };
 #endif
@@ -206,7 +213,7 @@ static int __init ne_probe_isapnp(struct net_device *dev)
 			dev->base_addr = idev->resource[0].start;
 			dev->irq = idev->irq_resource[0].start;
 			printk(KERN_INFO "ne.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
-				isapnp_clone_list[i].name,
+				(char *) isapnp_clone_list[i].driver_data,
 
 				dev->base_addr, dev->irq);
 			if (ne_probe1(dev, dev->base_addr) != 0) {	/* Shouldn't happen. */
@@ -233,7 +240,14 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 	int start_page, stop_page;
 	int neX000, ctron, copam, bad_card;
 	int reg0, ret;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
+
+#ifdef CONFIG_TOSHIBA_RBTX4927
+#include <asm/tx4927/toshiba_rbtx4927.h>
+	ioaddr = RBTX4927_RTL_8019_BASE;
+	dev->irq = RBTX4927_RTL_8019_IRQ;
+	wordlength = 1;
+#endif
 
 	if (!request_region(ioaddr, NE_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -338,8 +352,15 @@ static int __init ne_probe1(struct net_device *dev, int ioaddr)
 		start_page = NESM_START_PG;
 		stop_page = NESM_STOP_PG;
 	} else {
+#ifdef CONFIG_TOSHIBA_RBTX4927
+		start_page = NESM_START_PG;
+		stop_page = NESM_STOP_PG;
+		for (i = 0; i < 16; i++)
+			SA_prom[i] = SA_prom[i+i];
+#else
 		start_page = NE1SM_START_PG;
 		stop_page = NE1SM_STOP_PG;
+#endif
 	}
 
 	neX000 = (SA_prom[14] == 0x57  &&  SA_prom[15] == 0x57);
@@ -730,6 +751,11 @@ static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
 MODULE_PARM(bad, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es),required");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(bad, "Accept card(s) with bad signatures");
+MODULE_DESCRIPTION("NE1000/NE2000 ISA/PnP Ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that no ISA autoprobe takes place. We can't guarantee
 that the ne2k probe is the last 8390 based probe to take place (as it
@@ -781,6 +807,7 @@ void cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+
 
 /*
  * Local variables:

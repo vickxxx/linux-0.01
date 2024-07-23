@@ -59,6 +59,32 @@
 #define io_v2p( x )             \
    ( (((x)&0x00ffffff) | (((x)&(0x30000000>>VIO_SHIFT))<<VIO_SHIFT)) + PIO_START )
 
+#ifndef __ASSEMBLY__
+#include <asm/types.h>
+
+#if 0
+# define __REG(x)	(*((volatile u32 *)io_p2v(x)))
+#else
+/*
+ * This __REG() version gives the same results as the one above,  except
+ * that we are fooling gcc somehow so it generates far better and smaller
+ * assembly code for access to contigous registers.  It's a shame that gcc
+ * doesn't guess this by itself.
+ */
+typedef struct { volatile u32 offset[4096]; } __regbase;
+# define __REGP(x)	((__regbase *)((x)&~4095))->offset[((x)&4095)>>2]
+# define __REG(x)	__REGP(io_p2v(x))
+#endif
+
+# define __PREG(x)	(io_v2p((u32)&(x)))
+
+#else
+
+# define __REG(x)	io_p2v(x)
+# define __PREG(x)	io_v2p(x)
+
+#endif
+
 #include "SA-1100.h"
 
 
@@ -68,22 +94,57 @@
  * This must be called *before* the corresponding IRQ is registered.
  * Use this instead of directly setting GRER/GFER.
  */
-#define GPIO_FALLING_EDGE       1
-#define GPIO_RISING_EDGE        2
-#define GPIO_BOTH_EDGES         3
+#define GPIO_NO_EDGES		0
+#define GPIO_FALLING_EDGE	1
+#define GPIO_RISING_EDGE	2
+#define GPIO_BOTH_EDGES 	3
 #ifndef __ASSEMBLY__
 extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 #endif
 
 
 /*
- * Implementation specifics
+ * Implementation specifics.
+ *
+ *                      *** BIG FAT NOTE ***
+ *
+ * Any definitions in these files should be prefixed by an identifier -
+ * eg, ASSABET_UCB1300_IRQ  This will allow us to eleminate these
+ * ifdefs, and lots of other preprocessor gunk elsewhere.
+ *
+ * Also, please try to add your entry in alphabetical order.  The
+ * initial ones below are the start of the alphabetical list.
+ *
+ * Do NOT add your ifdefs around your file.
  */
 
-#ifdef CONFIG_SA1100_ASSABET
-#include "assabet.h"
-#else
-#define machine_has_neponset()	(0)
+#include "badge4.h"
+
+#include "frodo.h"
+
+#include "h3600.h"
+
+#include "system3.h"
+
+#ifdef CONFIG_SA1100_PANGOLIN
+#include "pangolin.h"
+#endif
+
+#ifdef CONFIG_SA1100_HUW_WEBPANEL
+#include "huw_webpanel.h"
+#endif
+
+#ifdef CONFIG_SA1100_PFS168
+#include "pfs168.h"
+#endif
+
+
+#ifdef CONFIG_SA1100_YOPY
+#include "yopy.h"
+#endif
+
+#ifdef CONFIG_SA1100_FREEBIRD
+#include "freebird.h"
 #endif
 
 #ifdef CONFIG_SA1100_CERF
@@ -94,18 +155,53 @@ extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 #include "empeg.h"
 #endif
 
-#ifdef CONFIG_SA1100_BITSY
-#include "bitsy.h"
-#endif
-
-#if defined(CONFIG_SA1100_THINCLIENT)
-#include "thinclient.h"
+#ifdef CONFIG_SA1100_ITSY
+#include "itsy.h"
 #endif
 
 #if defined(CONFIG_SA1100_GRAPHICSCLIENT)
 #include "graphicsclient.h"
 #endif
 
+#if defined(CONFIG_SA1100_OMNIMETER)
+#include "omnimeter.h"
+#endif
+
+#if defined(CONFIG_SA1100_JORNADA720)
+#include "jornada720.h"
+#endif
+
+#if defined(CONFIG_SA1100_PLEB)
+#include "pleb.h"
+#endif
+
+#if defined(CONFIG_SA1100_LART)
+#include "lart.h"
+#endif
+
+#ifdef CONFIG_SA1100_SIMPAD
+#include "simpad.h"
+#endif
+
+#ifdef CONFIG_SA1100_SIMPUTER
+#include "simputer.h"
+#endif
+
+#if defined(CONFIG_SA1100_GRAPHICSMASTER)
+#include "graphicsmaster.h"
+#endif
+
+#if defined(CONFIG_SA1100_ADSAGC)
+#include "adsagc.h"
+#endif
+
+#if defined(CONFIG_SA1100_ADSBITSY)
+#include "adsbitsy.h"
+#endif
+
+#if defined(CONFIG_SA1100_ADSBITSYPLUS)
+#include "adsbitsyplus.h"
+#endif
 
 #ifdef CONFIG_SA1101
 
@@ -121,14 +217,16 @@ extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 
 #endif
 
+#if defined(CONFIG_SA1100_OMNIMETER)
+#include "omnimeter.h"
+#endif
 
-#ifdef CONFIG_SA1111
+#if defined(CONFIG_SA1100_JORNADA720)
+#include "jornada720.h"
+#endif
 
-#define SA1111_p2v( x )         ((x) - SA1111_BASE + 0xf4000000)
-#define SA1111_v2p( x )         ((x) - 0xf4000000 + SA1111_BASE)
-
-#include "SA-1111.h"
-
+#if defined(CONFIG_SA1100_FLEXANET)
+#include "flexanet.h"
 #endif
 
 #endif  /* _ASM_ARCH_HARDWARE_H */

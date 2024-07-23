@@ -9,10 +9,15 @@
  * Changes:
  * Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 08/06/2000
  * - check init_etherdev return in gmac_probe1
- * BenH <bh40@calva.net> - 03/09/2000
+ * BenH <benh@kernel.crashing.org> - 03/09/2000
  * - Add support for new PHYs
  * - Add some PowerBook sleep code
- * 
+ * BenH <benh@kernel.crashing.org> - ??/??/????
+ *  - PHY updates
+ * BenH <benh@kernel.crashing.org> - 08/08/2001
+ * - Add more PHYs, fixes to sleep code
+ * Matt Domsch <Matt_Domsch@dell.com> - 11/12/2001
+ * - use library crc32 functions
  */
 
 #include <linux/module.h>
@@ -30,10 +35,12 @@
 #include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/crc32.h>
 #include <asm/prom.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/feature.h>
+#include <asm/machdep.h>
+#include <asm/pmac_feature.h>
 #include <asm/keylargo.h>
 #include <asm/pci-bridge.h>
 #ifdef CONFIG_PMAC_PBOOK
@@ -46,11 +53,12 @@
 
 #define DEBUG_PHY
 
-/* Driver version 1.3, kernel 2.4.x */
-#define GMAC_VERSION	"v1.3k4"
+/* Driver version 1.5, kernel 2.4.x */
+#define GMAC_VERSION	"v1.5k4"
 
-static unsigned char dummy_buf[RX_BUF_ALLOC_SIZE + RX_OFFSET + GMAC_BUFFER_ALIGN];
-static struct net_device *gmacs = NULL;
+#define DUMMY_BUF_LEN	RX_BUF_ALLOC_SIZE + RX_OFFSET + GMAC_BUFFER_ALIGN
+static unsigned char *dummy_buf;
+static struct net_device *gmacs;
 
 /* Prototypes */
 static int mii_read(struct gmac *gm, int phy, int r);
@@ -62,6 +70,7 @@ static int mii_lookup_and_reset(struct gmac *gm);
 static void mii_setup_phy(struct gmac *gm);
 static int mii_do_reset_phy(struct gmac *gm, int phy_addr);
 static void mii_init_BCM5400(struct gmac *gm);
+static void mii_init_BCM5401(struct gmac *gm);
 
 static void gmac_set_power(struct gmac *gm, int power_up);
 static int gmac_powerup_and_reset(struct net_device *dev);
@@ -211,10 +220,12 @@ mii_interrupt(struct gmac *gm)
 		int		link_100 = 0;
 		int		gigabit = 0;
 #ifdef DEBUG_PHY
-		printk("Link state change, phy_status: 0x%04x\n", phy_status);
+		printk(KERN_INFO "%s: Link state change, phy_status: 0x%04x\n",
+			gm->dev->name, phy_status);
 #endif
 		gm->phy_status = phy_status;
 
+		/* Should we enable that in generic mode ? */
 		lpar_ability = mii_read(gm, gm->phy_addr, MII_ANLPA);
 		if (lpar_ability & MII_ANLPA_PAUS)
 			GM_BIS(GM_MAC_CTRL_CONFIG, GM_MAC_CTRL_CONF_SND_PAUSE_EN);
@@ -224,34 +235,52 @@ mii_interrupt(struct gmac *gm)
 		/* Link ? Check for speed and duplex */
 		if ((phy_status & MII_SR_LKS) && (phy_status & MII_SR_ASSC)) {
 		    int restart = 0;
-		    if (gm->phy_type == PHY_B5201) {
-		    	int aux_stat = mii_read(gm, gm->phy_addr, MII_BCM5201_AUXCTLSTATUS);
+		    int aux_stat, link;
+		    switch (gm->phy_type) {
+		      case PHY_B5201:
+		      case PHY_B5221:
+		    	aux_stat = mii_read(gm, gm->phy_addr, MII_BCM5201_AUXCTLSTATUS);
 #ifdef DEBUG_PHY
-			printk("    Link up ! BCM5201 aux_stat: 0x%04x\n", aux_stat);
+			printk(KERN_INFO "%s:    Link up ! BCM5201/5221 aux_stat: 0x%04x\n",
+				gm->dev->name, aux_stat);
 #endif
 		    	full_duplex = ((aux_stat & MII_BCM5201_AUXCTLSTATUS_DUPLEX) != 0);
 		    	link_100 = ((aux_stat & MII_BCM5201_AUXCTLSTATUS_SPEED) != 0);
-		    } else if (gm->phy_type == PHY_B5400) {
-		    	int aux_stat = mii_read(gm, gm->phy_addr, MII_BCM5400_AUXSTATUS);
-		    	int link = (aux_stat & MII_BCM5400_AUXSTATUS_LINKMODE_MASK) >>
+			netif_carrier_on(gm->dev);
+		        break;
+		      case PHY_B5400:
+		      case PHY_B5401:
+		      case PHY_B5411:
+		    	aux_stat = mii_read(gm, gm->phy_addr, MII_BCM5400_AUXSTATUS);
+		    	link = (aux_stat & MII_BCM5400_AUXSTATUS_LINKMODE_MASK) >>
 		    			MII_BCM5400_AUXSTATUS_LINKMODE_SHIFT;
 #ifdef DEBUG_PHY
-			printk("    Link up ! BCM5400 aux_stat: 0x%04x (link mode: %d)\n",
-				aux_stat, link);
+			printk(KERN_INFO "%s:    Link up ! BCM54xx aux_stat: 0x%04x (link mode: %d)\n",
+				gm->dev->name, aux_stat, link);
 #endif
 		    	full_duplex = phy_BCM5400_link_table[link][0];
 		    	link_100 = phy_BCM5400_link_table[link][1];
 		    	gigabit = phy_BCM5400_link_table[link][2];
-		    } else if (gm->phy_type == PHY_LXT971) {
-		    	int stat2 = mii_read(gm, gm->phy_addr, MII_LXT971_STATUS2);
+			netif_carrier_on(gm->dev);
+		    	break;
+		      case PHY_LXT971:
+		    	aux_stat = mii_read(gm, gm->phy_addr, MII_LXT971_STATUS2);
 #ifdef DEBUG_PHY
-			printk("    Link up ! LXT971 stat2: 0x%04x\n", stat2);
+			printk(KERN_INFO "%s:    Link up ! LXT971 stat2: 0x%04x\n",
+				gm->dev->name, aux_stat);
 #endif
-		    	full_duplex = ((stat2 & MII_LXT971_STATUS2_FULLDUPLEX) != 0);
-		    	link_100 = ((stat2 & MII_LXT971_STATUS2_SPEED) != 0);
+		    	full_duplex = ((aux_stat & MII_LXT971_STATUS2_FULLDUPLEX) != 0);
+		    	link_100 = ((aux_stat & MII_LXT971_STATUS2_SPEED) != 0);
+			netif_carrier_on(gm->dev);
+		    	break;
+		      default:
+		    	full_duplex = (lpar_ability & MII_ANLPA_FDAM) != 0;
+		    	link_100 = (lpar_ability & MII_ANLPA_100M) != 0;
+		    	break;
 		    }
 #ifdef DEBUG_PHY
-		    printk("    full_duplex: %d, speed: %s\n", full_duplex,
+		    printk(KERN_INFO "%s:    Full Duplex: %d, Speed: %s\n",
+		    	gm->dev->name, full_duplex,
 		    	gigabit ? "1000" : (link_100 ? "100" : "10"));
 #endif
                     if (gigabit != gm->gigabit) {
@@ -268,11 +297,160 @@ mii_interrupt(struct gmac *gm)
 			gmac_start_dma(gm);
 		} else if (!(phy_status & MII_SR_LKS)) {
 #ifdef DEBUG_PHY
-		    printk("    Link down !\n");
+		    printk(KERN_INFO "%s:    Link down !\n", gm->dev->name);
 #endif
+			netif_carrier_off(gm->dev);
 		}
 	}
 }
+
+#ifdef CONFIG_PMAC_PBOOK
+/* Power management: stop PHY chip for suspend mode
+ * 
+ * TODO: This will have to be modified is WOL is to be supported.
+ */
+static void
+gmac_suspend(struct gmac* gm)
+{
+	int data, timeout;
+	unsigned long flags;
+	
+	gm->sleeping = 1;
+	netif_device_detach(gm->dev);
+
+
+	spin_lock_irqsave(&gm->lock, flags);
+	if (gm->opened) {
+		disable_irq(gm->dev->irq);
+		/* Stop polling PHY */
+		mii_poll_stop(gm);
+	}
+	/* Mask out all chips interrupts */
+	GM_OUT(GM_IRQ_MASK, 0xffffffff);
+	spin_unlock_irqrestore(&gm->lock, flags);
+	
+	if (gm->opened) {
+		int i;
+		/* Empty Tx ring of any remaining gremlins */
+		gmac_tx_cleanup(gm->dev, 1);
+	
+		/* Empty Rx ring of any remaining gremlins */
+		for (i = 0; i < NRX; ++i) {
+			if (gm->rx_buff[i] != 0) {
+				dev_kfree_skb_irq(gm->rx_buff[i]);
+				gm->rx_buff[i] = 0;
+			}
+		}
+	}
+
+	/* Clear interrupts on 5201 */
+	if (gm->phy_type == PHY_B5201 || gm->phy_type == PHY_B5221)
+		mii_write(gm, gm->phy_addr, MII_BCM5201_INTERRUPT, 0);
+		
+	/* Drive MDIO high */
+	GM_OUT(GM_MIF_CFG, 0);
+	
+	/* Unchanged, don't ask me why */
+	data = mii_read(gm, gm->phy_addr, MII_ANLPA);
+	mii_write(gm, gm->phy_addr, MII_ANLPA, data);
+	
+	/* Stop everything */
+	GM_OUT(GM_MAC_RX_CONFIG, 0);
+	GM_OUT(GM_MAC_TX_CONFIG, 0);
+	GM_OUT(GM_MAC_XIF_CONFIG, 0);
+	GM_OUT(GM_TX_CONF, 0);
+	GM_OUT(GM_RX_CONF, 0);
+	
+	/* Set MAC in reset state */
+	GM_OUT(GM_RESET, GM_RESET_TX | GM_RESET_RX);
+	for (timeout = 100; timeout > 0; --timeout) {
+		mdelay(10);
+		if ((GM_IN(GM_RESET) & (GM_RESET_TX | GM_RESET_RX)) == 0)
+			break;
+	}
+	GM_OUT(GM_MAC_TX_RESET, GM_MAC_TX_RESET_NOW);
+	GM_OUT(GM_MAC_RX_RESET, GM_MAC_RX_RESET_NOW);
+
+	/* Superisolate PHY */
+	if (gm->phy_type == PHY_B5201 || gm->phy_type == PHY_B5221)
+		mii_write(gm, gm->phy_addr, MII_BCM5201_MULTIPHY,
+			MII_BCM5201_MULTIPHY_SUPERISOLATE);
+
+	/* Put MDIO in sane electric state. According to an obscure
+	 * Apple comment, not doing so may let them drive some current
+	 * during sleep and possibly damage BCM PHYs.
+	 */
+	GM_OUT(GM_MIF_CFG, GM_MIF_CFGBB);
+	GM_OUT(GM_MIF_BB_CLOCK, 0);
+	GM_OUT(GM_MIF_BB_DATA, 0);
+	GM_OUT(GM_MIF_BB_OUT_ENABLE, 0);
+	GM_OUT(GM_MAC_XIF_CONFIG,
+		GM_MAC_XIF_CONF_GMII_MODE|GM_MAC_XIF_CONF_MII_INT_LOOP);
+	(void)GM_IN(GM_MAC_XIF_CONFIG);
+	
+	/* Unclock the GMAC chip */
+	gmac_set_power(gm, 0);
+}
+
+static void
+gmac_resume(struct gmac *gm)
+{
+	int data;
+
+	if (gmac_powerup_and_reset(gm->dev)) {
+		printk(KERN_ERR "%s: Couldn't revive gmac ethernet !\n", gm->dev->name);
+		return;
+	}
+
+	gm->sleeping = 0;
+	
+	if (gm->opened) {
+		/* Create fresh rings */
+		gmac_init_rings(gm, 1);
+		/* re-initialize the MAC */
+		gmac_mac_init(gm, gm->dev->dev_addr);	
+		/* re-initialize the multicast tables & promisc mode if any */
+		gmac_set_multicast(gm->dev);
+	}
+
+	/* Early enable Tx and Rx so that we are clocked */
+	GM_BIS(GM_TX_CONF, GM_TX_CONF_DMA_EN);
+	mdelay(20);
+	GM_BIS(GM_RX_CONF, GM_RX_CONF_DMA_EN);
+	mdelay(20);
+	GM_BIS(GM_MAC_TX_CONFIG, GM_MAC_TX_CONF_ENABLE);
+	mdelay(20);
+	GM_BIS(GM_MAC_RX_CONFIG, GM_MAC_RX_CONF_ENABLE);
+	mdelay(20);
+	if (gm->phy_type == PHY_B5201 || gm->phy_type == PHY_B5221) {
+		data = mii_read(gm, gm->phy_addr, MII_BCM5201_MULTIPHY);
+		mii_write(gm, gm->phy_addr, MII_BCM5201_MULTIPHY,
+			data & ~MII_BCM5201_MULTIPHY_SUPERISOLATE);
+	}
+	mdelay(1);
+
+	if (gm->opened) {
+		/* restart polling PHY */
+		mii_interrupt(gm);
+		/* restart DMA operations */
+		gmac_start_dma(gm);
+		netif_device_attach(gm->dev);
+		enable_irq(gm->dev->irq);
+	} else {
+		/* Driver not opened, just leave things off. Note that
+		 * we could be smart and superisolate the PHY when the
+		 * driver is closed, but I won't do that unless I have
+		 * a better understanding of some electrical issues with
+		 * this PHY chip --BenH
+		 */
+		GM_OUT(GM_MAC_RX_CONFIG, 0);
+		GM_OUT(GM_MAC_TX_CONFIG, 0);
+		GM_OUT(GM_MAC_XIF_CONFIG, 0);
+		GM_OUT(GM_TX_CONF, 0);
+		GM_OUT(GM_RX_CONF, 0);
+	}
+}
+#endif
 
 static int
 mii_do_reset_phy(struct gmac *gm, int phy_addr)
@@ -301,11 +479,19 @@ mii_do_reset_phy(struct gmac *gm, int phy_addr)
 	return 0;
 }
 
+/* Here's a bunch of configuration routines for
+ * Broadcom PHYs used on various Mac models. Unfortunately,
+ * except for the 5201, Broadcom never sent me any documentation,
+ * so this is from my understanding of Apple's Open Firmware
+ * drivers and Darwin's implementation
+ */
+ 
 static void
 mii_init_BCM5400(struct gmac *gm)
 {
 	int data;
 
+	/* Configure for gigabit full duplex */
 	data = mii_read(gm, gm->phy_addr, MII_BCM5400_AUXCONTROL);
 	data |= MII_BCM5400_AUXCONTROL_PWR10BASET;
 	mii_write(gm, gm->phy_addr, MII_BCM5400_AUXCONTROL, data);
@@ -315,6 +501,8 @@ mii_init_BCM5400(struct gmac *gm)
 	mii_write(gm, gm->phy_addr, MII_BCM5400_GB_CONTROL, data);
 	
 	mdelay(10);
+
+	/* Reset and configure cascaded 10/100 PHY */
 	mii_do_reset_phy(gm, 0x1f);
 	
 	data = mii_read(gm, 0x1f, MII_BCM5201_MULTIPHY);
@@ -326,6 +514,78 @@ mii_init_BCM5400(struct gmac *gm)
 	mii_write(gm, gm->phy_addr, MII_BCM5400_AUXCONTROL, data);
 }
 
+static void
+mii_init_BCM5401(struct gmac *gm)
+{
+	int data;
+	int rev;
+
+	rev = mii_read(gm, gm->phy_addr, MII_ID1) & 0x000f;
+	if (rev == 0 || rev == 3) {
+		/* Some revisions of 5401 appear to need this
+		 * initialisation sequence to disable, according
+		 * to OF, "tap power management"
+		 * 
+		 * WARNING ! OF and Darwin don't agree on the
+		 * register addresses. OF seem to interpret the
+		 * register numbers below as decimal
+		 */
+		mii_write(gm, gm->phy_addr, 0x18, 0x0c20);
+		mii_write(gm, gm->phy_addr, 0x17, 0x0012);
+		mii_write(gm, gm->phy_addr, 0x15, 0x1804);
+		mii_write(gm, gm->phy_addr, 0x17, 0x0013);
+		mii_write(gm, gm->phy_addr, 0x15, 0x1204);
+		mii_write(gm, gm->phy_addr, 0x17, 0x8006);
+		mii_write(gm, gm->phy_addr, 0x15, 0x0132);
+		mii_write(gm, gm->phy_addr, 0x17, 0x8006);
+		mii_write(gm, gm->phy_addr, 0x15, 0x0232);
+		mii_write(gm, gm->phy_addr, 0x17, 0x201f);
+		mii_write(gm, gm->phy_addr, 0x15, 0x0a20);
+	}
+	
+	/* Configure for gigabit full duplex */
+	data = mii_read(gm, gm->phy_addr, MII_BCM5400_GB_CONTROL);
+	data |= MII_BCM5400_GB_CONTROL_FULLDUPLEXCAP;
+	mii_write(gm, gm->phy_addr, MII_BCM5400_GB_CONTROL, data);
+
+	mdelay(10);
+
+	/* Reset and configure cascaded 10/100 PHY */
+	mii_do_reset_phy(gm, 0x1f);
+	
+	data = mii_read(gm, 0x1f, MII_BCM5201_MULTIPHY);
+	data |= MII_BCM5201_MULTIPHY_SERIALMODE;
+	mii_write(gm, 0x1f, MII_BCM5201_MULTIPHY, data);
+}
+
+static void
+mii_init_BCM5411(struct gmac *gm)
+{
+	int data;
+
+	/* Here's some more Apple black magic to setup
+	 * some voltage stuffs.
+	 */
+	mii_write(gm, gm->phy_addr, 0x1c, 0x8c23);
+	mii_write(gm, gm->phy_addr, 0x1c, 0x8ca3);
+	mii_write(gm, gm->phy_addr, 0x1c, 0x8c23);
+
+	/* Here, Apple seems to want to reset it, do
+	 * it as well
+	 */
+	mii_write(gm, gm->phy_addr, MII_CR, MII_CR_RST);
+
+	/* Start autoneg */
+	mii_write(gm, gm->phy_addr, MII_CR,
+			MII_CR_ASSE|MII_CR_FDM|	/* Autospeed, full duplex */
+			MII_CR_RAN|
+			MII_CR_SPEEDSEL2 /* chip specific, gigabit enable ? */);
+
+	data = mii_read(gm, gm->phy_addr, MII_BCM5400_GB_CONTROL);
+	data |= MII_BCM5400_GB_CONTROL_FULLDUPLEXCAP;
+	mii_write(gm, gm->phy_addr, MII_BCM5400_GB_CONTROL, data);
+}
+
 static int
 mii_lookup_and_reset(struct gmac *gm)
 {
@@ -335,11 +595,8 @@ mii_lookup_and_reset(struct gmac *gm)
 	gm->phy_type = PHY_UNKNOWN;
 
 	/* Hard reset the PHY */
-	feature_set_gmac_phy_reset(gm->of_node, KL_GPIO_ETH_PHY_RESET_ASSERT);
-	mdelay(10);
-	feature_set_gmac_phy_reset(gm->of_node, KL_GPIO_ETH_PHY_RESET_RELEASE);
-	mdelay(10);
-	
+	pmac_call_feature(PMAC_FTR_GMAC_PHY_RESET, gm->of_node, 0, 0);
+		
 	/* Find the PHY */
 	for(i=0; i<=31; i++) {
 		mii_control = mii_read(gm, i, MII_CR);
@@ -360,21 +617,34 @@ mii_lookup_and_reset(struct gmac *gm)
 	gm->phy_id = (mii_read(gm, gm->phy_addr, MII_ID0) << 16) |
 		mii_read(gm, gm->phy_addr, MII_ID1);
 #ifdef DEBUG_PHY
-	printk("%s PHY ID: 0x%08x\n", gm->dev->name, gm->phy_id);
+	printk(KERN_INFO "%s: PHY ID: 0x%08x\n", gm->dev->name, gm->phy_id);
 #endif
 	if ((gm->phy_id & MII_BCM5400_MASK) == MII_BCM5400_ID) {
 		gm->phy_type = PHY_B5400;
-		printk(KERN_ERR "%s Found Broadcom BCM5400 PHY (Gigabit)\n",
+		printk(KERN_INFO  "%s: Found Broadcom BCM5400 PHY (Gigabit)\n",
 			gm->dev->name);
 		mii_init_BCM5400(gm);		
+	} else if ((gm->phy_id & MII_BCM5401_MASK) == MII_BCM5401_ID) {
+		gm->phy_type = PHY_B5401;
+		printk(KERN_INFO  "%s: Found Broadcom BCM5401 PHY (Gigabit)\n",
+			gm->dev->name);
+		mii_init_BCM5401(gm);		
+	} else if ((gm->phy_id & MII_BCM5411_MASK) == MII_BCM5411_ID) {
+		gm->phy_type = PHY_B5411;
+		printk(KERN_INFO  "%s: Found Broadcom BCM5411 PHY (Gigabit)\n",
+			gm->dev->name);
+		mii_init_BCM5411(gm);		
 	} else if ((gm->phy_id & MII_BCM5201_MASK) == MII_BCM5201_ID) {
 		gm->phy_type = PHY_B5201;
-		printk(KERN_INFO "%s Found Broadcom BCM5201 PHY\n", gm->dev->name);
+		printk(KERN_INFO "%s: Found Broadcom BCM5201 PHY\n", gm->dev->name);
+	} else if ((gm->phy_id & MII_BCM5221_MASK) == MII_BCM5221_ID) {
+		gm->phy_type = PHY_B5221;
+		printk(KERN_INFO "%s: Found Broadcom BCM5221 PHY\n", gm->dev->name);
 	} else if ((gm->phy_id & MII_LXT971_MASK) == MII_LXT971_ID) {
 		gm->phy_type = PHY_LXT971;
-		printk(KERN_INFO "%s Found LevelOne LX971 PHY\n", gm->dev->name);
+		printk(KERN_INFO "%s: Found LevelOne LX971 PHY\n", gm->dev->name);
 	} else {
-		printk(KERN_ERR "%s: Warning ! Unknown PHY ID 0x%08x !\n",
+		printk(KERN_WARNING "%s: Warning ! Unknown PHY ID 0x%08x, using generic mode...\n",
 			gm->dev->name, gm->phy_id);
 	}
 
@@ -423,7 +693,7 @@ static void
 gmac_set_power(struct gmac *gm, int power_up)
 {
 	if (power_up) {
-		feature_set_gmac_power(gm->of_node, 1);
+		pmac_call_feature(PMAC_FTR_GMAC_ENABLE, gm->of_node, 0, 1);
 		if (gm->pci_devfn != 0xff) {
 			u16 cmd;
 			
@@ -448,9 +718,7 @@ gmac_set_power(struct gmac *gm, int power_up)
 	    			PCI_CACHE_LINE_SIZE, 8);
 		}
 	} else {
-		/* FIXME: Add PHY power down */
-		gm->phy_type = 0;
-		feature_set_gmac_power(gm->of_node, 0);
+		pmac_call_feature(PMAC_FTR_GMAC_ENABLE, gm->of_node, 0, 0);
 	}
 }
 
@@ -472,11 +740,14 @@ gmac_powerup_and_reset(struct net_device *dev)
 		if ((GM_IN(GM_RESET) & (GM_RESET_TX | GM_RESET_RX)) == 0) {
 			/* Mask out all chips interrupts */
 			GM_OUT(GM_IRQ_MASK, 0xffffffff);
+			GM_OUT(GM_MAC_TX_RESET, GM_MAC_TX_RESET_NOW);
+			GM_OUT(GM_MAC_RX_RESET, GM_MAC_RX_RESET_NOW);
 			return 0;
 		}
 	}
 	printk(KERN_ERR "%s reset failed!\n", dev->name);
 	gmac_set_power(gm, 0);
+	gm->phy_type = 0;
 	return -1;
 }
 
@@ -736,18 +1007,19 @@ gmac_stop_dma(struct gmac *gm)
  * Configure promisc mode and setup multicast hash table
  * filter
  */
-#define CRC_POLY	0xedb88320
 static void
 gmac_set_multicast(struct net_device *dev)
 {
 	struct gmac *gm = (struct gmac *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
 	int i,j,k,b;
-	unsigned long crc;
+	u32 crc;
 	int multicast_hash = 0;
 	int multicast_all = 0;
 	int promisc = 0;
-	
+
+	if (gm->sleeping)
+		return;
 
 	/* Lock out others. */
 	netif_stop_queue(dev);
@@ -764,17 +1036,7 @@ gmac_set_multicast(struct net_device *dev)
 			hash_table[i] = 0;
 
 	    	for (i = 0; i < dev->mc_count; i++) {
-			crc = ~0;
-			for (j = 0; j < 6; ++j) {
-			    b = dmi->dmi_addr[j];
-			    for (k = 0; k < 8; ++k) {
-				if ((crc ^ b) & 1)
-				    crc = (crc >> 1) ^ CRC_POLY;
-				else
-				    crc >>= 1;
-				b >>= 1;
-			    }
-			}
+			crc = ether_crc_le(6, dmi->dmi_addr);
 			j = crc >> 24;	/* bit number in multicast_filter */
 			hash_table[j >> 4] |= 1 << (15 - (j & 0xf));
 			dmi = dmi->next;
@@ -843,7 +1105,10 @@ gmac_open(struct net_device *dev)
 	
 	/* Initialize the multicast tables & promisc mode if any */
 	gmac_set_multicast(dev);
-	
+
+	/* Initialize the carrier status */
+	netif_carrier_off(dev);
+
 	/*
 	 * Check out PHY status and start auto-poll
 	 * 
@@ -881,6 +1146,7 @@ gmac_close(struct net_device *dev)
 	
 	/* Shut down chip */
 	gmac_set_power(gm, 0);
+	gm->phy_type = 0;
 
 	/* Empty rings of any remaining gremlins */
 	for (i = 0; i < NRX; ++i) {
@@ -904,7 +1170,6 @@ int
 gmac_sleep_notify(struct pmu_sleep_notifier *self, int when)
 {
 	struct gmac *gm;
-	int i;
 	
 	/* XXX should handle more than one */
 	if (gmacs == NULL)
@@ -920,38 +1185,10 @@ gmac_sleep_notify(struct pmu_sleep_notifier *self, int when)
 	case PBOOK_SLEEP_REJECT:
 		break;
 	case PBOOK_SLEEP_NOW:
-		disable_irq(gm->dev->irq);
-		netif_stop_queue(gm->dev);
-		gmac_stop_dma(gm);
-		mii_poll_stop(gm);
-		gmac_set_power(gm, 0);
-		for (i = 0; i < NRX; ++i) {
-			if (gm->rx_buff[i] != 0) {
-				dev_kfree_skb(gm->rx_buff[i]);
-				gm->rx_buff[i] = 0;
-			}
-		}
-		for (i = 0; i < NTX; ++i) {
-			if (gm->tx_buff[i] != 0) {
-				dev_kfree_skb(gm->tx_buff[i]);
-				gm->tx_buff[i] = 0;
-			}
-		}
+		gmac_suspend(gm);
 		break;
 	case PBOOK_WAKE:
-		/* see if this is enough */
-		gmac_powerup_and_reset(gm->dev);
-		gm->full_duplex = 0;
-		gm->phy_status = 0;
-		mii_lookup_and_reset(gm);
-		mii_setup_phy(gm);
-		gmac_init_rings(gm, 0);
-		gmac_mac_init(gm, gm->dev->dev_addr);
-		gmac_set_multicast(gm->dev);
-		mii_interrupt(gm);
-		gmac_start_dma(gm);
-		netif_start_queue(gm->dev);
-		enable_irq(gm->dev->irq);
+		gmac_resume(gm);
 		break;
 	}
 	return PBOOK_SLEEP_OK;
@@ -967,7 +1204,10 @@ gmac_tx_timeout(struct net_device *dev)
 	struct gmac *gm = (struct gmac *) dev->priv;
 	int i, timeout;
 	unsigned long flags;
-		
+
+	if (gm->sleeping)
+		return;
+
 	printk (KERN_ERR "%s: transmit timed out, resetting\n", dev->name);
 
 	spin_lock_irqsave(&gm->lock, flags);
@@ -990,6 +1230,8 @@ gmac_tx_timeout(struct net_device *dev)
 		if ((GM_IN(GM_RESET) & (GM_RESET_TX | GM_RESET_RX)) == 0) {
 			/* Mask out all chips interrupts */
 			GM_OUT(GM_IRQ_MASK, 0xffffffff);
+			GM_OUT(GM_MAC_TX_RESET, GM_MAC_TX_RESET_NOW);
+			GM_OUT(GM_MAC_RX_RESET, GM_MAC_RX_RESET_NOW);
 			break;
 		}
 	}
@@ -1022,6 +1264,9 @@ gmac_xmit_start(struct sk_buff *skb, struct net_device *dev)
 	unsigned long flags;
 	int i;
 
+	if (gm->sleeping)
+		return 1;
+		
 	spin_lock_irqsave(&gm->lock, flags);
 
 	i = gm->next_tx;
@@ -1209,8 +1454,9 @@ gmac_receive(struct net_device *dev)
 				skb->ip_summed = CHECKSUM_NONE;
 			skb->ip_summed = CHECKSUM_NONE;
 			skb->protocol = eth_type_trans(skb, dev);
-			netif_rx(skb);
 			gm->stats.rx_bytes += skb->len;
+			netif_rx(skb);
+			dev->last_rx = jiffies;
 			++gm->stats.rx_packets;
 		}
 		
@@ -1273,7 +1519,7 @@ gmac_stats(struct net_device *dev)
 	struct gmac *gm = (struct gmac *) dev->priv;
 	struct net_device_stats *stats = &gm->stats;
 
-	if (gm && gm->opened) {
+	if (gm && gm->opened && !gm->sleeping) {
 		stats->rx_crc_errors += GM_IN(GM_MAC_RX_CRC_ERR_CTR);
 		GM_OUT(GM_MAC_RX_CRC_ERR_CTR, 0);
 
@@ -1314,10 +1560,14 @@ gmac_probe(void)
 	     gmac = gmac->next)
 		gmac_probe1(gmac);
 
+#ifdef CONFIG_PMAC_PBOOK
+	if (gmacs)
+		pmu_register_sleep_notifier(&gmac_sleep_notifier);
+#endif
 
 	MOD_DEC_USE_COUNT;
 
-	return 0;
+	return gmacs? 0: -ENODEV;
 }
 
 static void
@@ -1342,6 +1592,14 @@ gmac_probe1(struct device_node *gmac)
 		return;
 	}
 
+	if (dummy_buf == NULL) {
+		dummy_buf = kmalloc(DUMMY_BUF_LEN, GFP_KERNEL);
+		if (dummy_buf == NULL) {
+			printk(KERN_ERR "GMAC: failed to allocated dummy buffer\n");
+			return;
+		}
+	}
+
 	tx_descpage = get_free_page(GFP_KERNEL);
 	if (tx_descpage == 0) {
 		printk(KERN_ERR "GMAC: can't get a page for tx descriptors\n");
@@ -1350,27 +1608,32 @@ gmac_probe1(struct device_node *gmac)
 	rx_descpage = get_free_page(GFP_KERNEL);
 	if (rx_descpage == 0) {
 		printk(KERN_ERR "GMAC: can't get a page for rx descriptors\n");
-		free_page(tx_descpage);
-		return;
+		goto out_txdesc;
 	}
 
 	dev = init_etherdev(NULL, sizeof(struct gmac));
-
 	if (!dev) {
 		printk(KERN_ERR "GMAC: init_etherdev failed, out of memory\n");
-		free_page(tx_descpage);
-		free_page(rx_descpage);
-		return;
+		goto out_rxdesc;
 	}
 	SET_MODULE_OWNER(dev);
 
 	gm = dev->priv;
+	gm->of_node = gmac;
+	if (!request_OF_resource(gmac, 0, " (gmac)")) {
+		printk(KERN_ERR "GMAC: can't request IO resource !\n");
+		gm->of_node = NULL;
+		goto out_unreg;
+	}
 	dev->base_addr = gmac->addrs[0].address;
 	gm->regs = (volatile unsigned int *)
 		ioremap(gmac->addrs[0].address, 0x10000);
+	if (!gm->regs) {
+		printk(KERN_ERR "GMAC: unable to map I/O registers\n");
+		goto out_unreg;
+	}
 	dev->irq = gmac->intrs[0].line;
 	gm->dev = dev;
-	gm->of_node = gmac;
 
 	spin_lock_init(&gm->lock);
 	
@@ -1393,6 +1656,7 @@ gmac_probe1(struct device_node *gmac)
 
 	gm->phy_addr = 0;
 	gm->opened = 0;
+	gm->sleeping = 0;
 
 	dev->open = gmac_open;
 	dev->stop = gmac_close;
@@ -1403,33 +1667,52 @@ gmac_probe1(struct device_node *gmac)
 	dev->watchdog_timeo = 5*HZ;
 
 	ether_setup(dev);
-	
+
 	gm->next_gmac = gmacs;
 	gmacs = dev;
+	return;
 
-#ifdef CONFIG_PMAC_PBOOK
-	pmu_register_sleep_notifier(&gmac_sleep_notifier);
-#endif
+out_unreg:
+	unregister_netdev(dev);
+	if (gm->of_node)
+		release_OF_resource(gm->of_node, 0);
+	kfree(dev);
+out_rxdesc:
+	free_page(rx_descpage);
+out_txdesc:
+	free_page(tx_descpage);
 }
 
 MODULE_AUTHOR("Paul Mackerras/Ben Herrenschmidt");
 MODULE_DESCRIPTION("PowerMac GMAC driver.");
+MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;
 
 static void __exit gmac_cleanup_module(void)
 {
 	struct gmac *gm;
 	struct net_device *dev;
 
+#ifdef CONFIG_PMAC_PBOOK
+	if (gmacs)
+		pmu_unregister_sleep_notifier(&gmac_sleep_notifier);
+#endif
+
 	while ((dev = gmacs) != NULL) {
 		gm = (struct gmac *) dev->priv;
 		unregister_netdev(dev);
+		iounmap((void *) gm->regs);
 		free_page(gm->tx_desc_page);
 		free_page(gm->rx_desc_page);
+		release_OF_resource(gm->of_node, 0);
 		gmacs = gm->next_gmac;
 		kfree(dev);
+	}
+	if (dummy_buf != NULL) {
+		kfree(dummy_buf);
+		dummy_buf = NULL;
 	}
 }
 
 module_init(gmac_probe);
 module_exit(gmac_cleanup_module);
-

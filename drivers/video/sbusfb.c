@@ -9,7 +9,7 @@
  *
  *  and SPARC console subsystem
  *
- *      Copyright (C) 1995 Peter Zaitcev (zaitcev@lab.ipmce.su)
+ *      Copyright (C) 1995 Peter Zaitcev (zaitcev@yahoo.com)
  *      Copyright (C) 1995-1997 David S. Miller (davem@caip.rutgers.edu)
  *      Copyright (C) 1995-1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  *      Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
@@ -28,7 +28,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -193,44 +193,6 @@ static int sbusfb_mmap(struct fb_info *info, struct file *file,
 	/* To stop the swapper from even considering these pages */
 	vma->vm_flags |= (VM_SHM| VM_LOCKED);
 	
-#ifdef __sparc_v9__
-	/* Align it as much as desirable */
-	{
-		unsigned long j, alignment, s = 0;
-		int max = -1;
-		
-		map_offset = (vma->vm_pgoff << PAGE_SHIFT) + size;
-		for (i = 0; fb->mmap_map[i].size; i++) {
-			if (fb->mmap_map[i].voff < off)
-				continue;
-			if (fb->mmap_map[i].voff >= map_offset)
-				break;
-			if (max < 0 || sbusfb_mmapsize(fb,fb->mmap_map[i].size) > s) {
-				max = i;
-				s = sbusfb_mmapsize(fb,fb->mmap_map[max].size);
-			}
-		}
-		if (max >= 0) {
-			j = s;
-			if (fb->mmap_map[max].voff + j > map_offset)
-				j = map_offset - fb->mmap_map[max].voff;
-			for (alignment = 0x400000; alignment > PAGE_SIZE; alignment >>= 3)
-				if (j >= alignment && !(fb->mmap_map[max].poff & (alignment - 1)))
-					break;
-			if (alignment > PAGE_SIZE) {
-				j = alignment;
-				alignment = j - ((vma->vm_start + fb->mmap_map[max].voff - off) & (j - 1));
-				if (alignment != j) {
-					struct vm_area_struct *vmm = find_vma(current->mm, vma->vm_start);
-					if (!vmm || vmm->vm_start >= vma->vm_end + alignment) {
-						vma->vm_start += alignment;
-						vma->vm_end += alignment;
-					}
-				}
-			}
-		}
-	}
-#endif	
 
 	/* Each page, see which map applies */
 	for (page = 0; page < size; ){
@@ -678,7 +640,7 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		int end, count, index;
 		struct fbcmap *cmap;
 		
-		if (!fb->loadcmap)
+		if (!fb->loadcmap || !fb->color_map)
 			return -EINVAL;
 		i = verify_area (VERIFY_READ, (void *) arg, sizeof (struct fbcmap));
 		if (i) return i;
@@ -1110,6 +1072,8 @@ sizechange:
 	}
 	
 	if (!p) {
+		if (fb->color_map)
+			kfree(fb->color_map);
 		kfree(fb);
 		return;
 	}
@@ -1147,6 +1111,8 @@ sizechange:
 	sbusfb_set_var(var, -1, &fb->info);
 
 	if (register_framebuffer(&fb->info) < 0) {
+		if (fb->color_map)
+			kfree(fb->color_map);
 		kfree(fb);
 		return;
 	}
@@ -1175,6 +1141,33 @@ static inline int known_card(char *name)
 	return FBTYPE_NOTYPE;
 }
 
+#ifdef CONFIG_FB_CREATOR
+static void creator_fb_scan_siblings(int root)
+{
+	int node, child;
+
+	child = prom_getchild(root);
+	for (node = prom_searchsiblings(child, "SUNW,ffb"); node;
+	     node = prom_searchsiblings(prom_getsibling(node), "SUNW,ffb"))
+		sbusfb_init_fb(node, root, FBTYPE_CREATOR, NULL);
+	for (node = prom_searchsiblings(child, "SUNW,afb"); node;
+	     node = prom_searchsiblings(prom_getsibling(node), "SUNW,afb"))
+		sbusfb_init_fb(node, root, FBTYPE_CREATOR, NULL);
+}
+
+static void creator_fb_scan(void)
+{
+	int root;
+
+	creator_fb_scan_siblings(prom_root_node);
+
+	root = prom_getchild(prom_root_node);
+	for (root = prom_searchsiblings(root, "upa"); root;
+	     root = prom_searchsiblings(prom_getsibling(root), "upa"))
+		creator_fb_scan_siblings(root);
+}
+#endif
+
 int __init sbusfb_init(void)
 {
 	int type;
@@ -1186,16 +1179,7 @@ int __init sbusfb_init(void)
 	if (!con_is_present()) return -ENXIO;
 	
 #ifdef CONFIG_FB_CREATOR
-	{
-		int root, node;
-		root = prom_getchild(prom_root_node);
-		for (node = prom_searchsiblings(root, "SUNW,ffb"); node;
-		     node = prom_searchsiblings(prom_getsibling(node), "SUNW,ffb"))
-			sbusfb_init_fb(node, prom_root_node, FBTYPE_CREATOR, NULL);
-		for (node = prom_searchsiblings(root, "SUNW,afb"); node;
-		     node = prom_searchsiblings(prom_getsibling(node), "SUNW,afb"))
-			sbusfb_init_fb(node, prom_root_node, FBTYPE_CREATOR, NULL);
-	}
+	creator_fb_scan();
 #endif
 #ifdef CONFIG_SUN4
 	sbusfb_init_fb(0, 0, FBTYPE_SUN2BW, NULL);
@@ -1226,4 +1210,6 @@ int __init sbusfb_init(void)
 		sbusfb_init_fb(sbdp->prom_node, sbdp->bus->prom_node, type, sbdp);
 	}
 	return 0;
-}	
+}
+
+MODULE_LICENSE("GPL");	

@@ -48,7 +48,7 @@
 #if ((SCSI_DATA_UNKNOWN == PCI_DMA_BIDIRECTIONAL) && (SCSI_DATA_WRITE == PCI_DMA_TODEVICE) && (SCSI_DATA_READ == PCI_DMA_FROMDEVICE) && (SCSI_DATA_NONE == PCI_DMA_NONE))
 #define scsi_to_pci_dma_dir(scsi_dir)	((int)(scsi_dir))
 #else
-extern __inline__ int scsi_to_pci_dma_dir(unsigned char scsi_dir)
+static inline int scsi_to_pci_dma_dir(unsigned char scsi_dir)
 {
         if (scsi_dir == SCSI_DATA_UNKNOWN)
                 return PCI_DMA_BIDIRECTIONAL;
@@ -61,12 +61,12 @@ extern __inline__ int scsi_to_pci_dma_dir(unsigned char scsi_dir)
 #endif
 #endif
 
-#if defined(CONFIG_SBUS) && !defined(CONFIG_SUN3)
+#if defined(CONFIG_SBUS) && !defined(CONFIG_SUN3) && !defined(CONFIG_SUN3X)
 #include <asm/sbus.h>
 #if ((SCSI_DATA_UNKNOWN == SBUS_DMA_BIDIRECTIONAL) && (SCSI_DATA_WRITE == SBUS_DMA_TODEVICE) && (SCSI_DATA_READ == SBUS_DMA_FROMDEVICE) && (SCSI_DATA_NONE == SBUS_DMA_NONE))
 #define scsi_to_sbus_dma_dir(scsi_dir)	((int)(scsi_dir))
 #else
-extern __inline__ int scsi_to_sbus_dma_dir(unsigned char scsi_dir)
+static inline int scsi_to_sbus_dma_dir(unsigned char scsi_dir)
 {
         if (scsi_dir == SCSI_DATA_UNKNOWN)
                 return SBUS_DMA_BIDIRECTIONAL;
@@ -351,7 +351,7 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 #define DRIVER_MASK         0x0f
 #define SUGGEST_MASK        0xf0
 
-#define MAX_COMMAND_SIZE    12
+#define MAX_COMMAND_SIZE    16
 #define SCSI_SENSE_BUFFERSIZE   64
 
 /*
@@ -385,15 +385,6 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 #define IS_ABORTING     0x10
 #define ASKED_FOR_SENSE 0x20
 #define SYNC_RESET      0x40
-
-#if defined(__mc68000__) || defined(CONFIG_APUS)
-#include <asm/pgtable.h>
-#define CONTIGUOUS_BUFFERS(X,Y) \
-	(virt_to_phys((X)->b_data+(X)->b_size-1)+1==virt_to_phys((Y)->b_data))
-#else
-#define CONTIGUOUS_BUFFERS(X,Y) ((X->b_data+X->b_size) == Y->b_data)
-#endif
-
 
 /*
  * This is the crap from the old error handling code.  We have it in a special
@@ -575,8 +566,8 @@ struct scsi_device {
 					 * vendor-specific cmd's */
 	unsigned sector_size;	/* size in bytes */
 
-	int attached;		/* # of high level drivers attached to 
-				 * this */
+	int attached;		/* # of high level drivers attached to this */
+	int detected;		/* Delta attached - don't use in drivers! */
 	int access_count;	/* Count of open channels/mounts */
 
 	void *hostdata;		/* available to low-level driver */
@@ -617,6 +608,10 @@ struct scsi_device {
 	unsigned remap:1;	/* support remapping  */
 	unsigned starved:1;	/* unable to process commands because
 				   host busy */
+	unsigned no_start_on_add:1;	/* do not issue start on add */
+
+	// Flag to allow revalidate to succeed in sd_open
+	int allow_revalidate;
 };
 
 
@@ -629,6 +624,8 @@ typedef struct scsi_pointer {
 	int this_residual;	/* left in this buffer */
 	struct scatterlist *buffer;	/* which buffer */
 	int buffers_residual;	/* how many buffers left */
+
+	dma_addr_t dma_handle;
 
 	volatile int Status;
 	volatile int Message;
@@ -668,7 +665,7 @@ struct scsi_request {
 	unsigned short sr_use_sg;	/* Number of pieces of scatter-gather */
 	unsigned short sr_sglist_len;	/* size of malloc'd scatter-gather list */
 	unsigned sr_underflow;	/* Return error if less than
-				   this amount is transfered */
+				   this amount is transferred */
 };
 
 /*
@@ -742,7 +739,8 @@ struct scsi_cmnd {
 	unsigned request_bufflen;	/* Actual request size */
 
 	struct timer_list eh_timeout;	/* Used to time out the command. */
-	void *request_buffer;	/* Actual requested buffer */
+	void *request_buffer;		/* Actual requested buffer */
+        void **bounce_buffers;		/* Array of bounce buffers when using scatter-gather */
 
 	/* These elements define the operation we ultimately want to perform */
 	unsigned char data_cmnd[MAX_COMMAND_SIZE];
@@ -756,7 +754,7 @@ struct scsi_cmnd {
 	void *buffer;		/* Data buffer */
 
 	unsigned underflow;	/* Return error if less than
-				   this amount is transfered */
+				   this amount is transferred */
 	unsigned old_underflow;	/* save underflow here when reusing the
 				 * command for error handling */
 
@@ -842,6 +840,16 @@ struct scsi_cmnd {
 	remove_wait_queue(QUEUE, &wait);\
 	current->state = TASK_RUNNING;	\
     }; }
+
+/*
+ * old style reset request from external source
+ * (private to sg.c and scsi_error.c, supplied by scsi_obsolete.c)
+ */
+#define SCSI_TRY_RESET_DEVICE	1
+#define SCSI_TRY_RESET_BUS	2
+#define SCSI_TRY_RESET_HOST	3
+
+extern int scsi_reset_provider(Scsi_Device *, int);
 
 #endif
 

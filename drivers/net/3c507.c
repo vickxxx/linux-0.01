@@ -6,11 +6,13 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
 	Thanks go to jennings@Montrouge.SMR.slb.com ( Patrick Jennings)
 	and jrs@world.std.com (Rick Sladkey) for testing and bugfixes.
@@ -23,8 +25,12 @@
 	The statistics need to be updated correctly.
 */
 
-static const char *version =
-	"3c507.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+#define DRV_NAME		"3c507"
+#define DRV_VERSION		"1.10a"
+#define DRV_RELDATE		"11/17/2001"
+
+static const char version[] =
+	DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Donald Becker (becker@scyld.com)\n";
 
 
 #include <linux/module.h>
@@ -50,6 +56,9 @@ static const char *version =
 #include <linux/in.h>
 #include <linux/string.h>
 #include <linux/spinlock.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -59,7 +68,7 @@ static const char *version =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 
 
@@ -68,6 +77,8 @@ static const char *version =
 #define NET_DEBUG 1
 #endif
 static unsigned int net_debug = NET_DEBUG;
+#define debug net_debug
+
 
 /* A zero-terminated list of common I/O addresses to be probed. */
 static unsigned int netcard_portlist[] __initdata =
@@ -124,6 +135,7 @@ struct net_local {
 	ushort tx_head;
 	ushort tx_cmd_link;
 	ushort tx_reap;
+	ushort tx_pkts_in_ring;
 	spinlock_t lock;
 };
 
@@ -192,7 +204,7 @@ struct net_local {
 #define DUMP_DATA	0x56	/* A 170 byte buffer for dump and Set-MC into. */
 
 #define TX_BUF_START	0x0100
-#define NUM_TX_BUFS 	4
+#define NUM_TX_BUFS 	5
 #define TX_BUF_SIZE 	(1518+14+20+16) /* packet+header+TBD */
 
 #define RX_BUF_START	0x2000
@@ -291,8 +303,10 @@ static int	el16_close(struct net_device *dev);
 static struct net_device_stats *el16_get_stats(struct net_device *dev);
 static void el16_tx_timeout (struct net_device *dev);
 
-static void hardware_send_packet(struct net_device *dev, void *buf, short length);
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad);
 static void init_82586_mem(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
+static void init_rx_bufs(struct net_device *);
 
 
 /* Check for a network adaptor of this type, and return '0' iff one exists.
@@ -323,7 +337,7 @@ int __init el16_probe(struct net_device *dev)
 
 static int __init el16_probe1(struct net_device *dev, int ioaddr)
 {
-	static unsigned char init_ID_done = 0, version_printed = 0;
+	static unsigned char init_ID_done, version_printed;
 	int i, irq, irqval, retval;
 	struct net_local *lp;
 
@@ -424,6 +438,7 @@ static int __init el16_probe1(struct net_device *dev, int ioaddr)
 	dev->get_stats	= el16_get_stats;
 	dev->tx_timeout = el16_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
+	dev->ethtool_ops = &netdev_ethtool_ops;
 
 	ether_setup(dev);	/* Generic ethernet behaviour */
 
@@ -461,6 +476,7 @@ static void el16_tx_timeout (struct net_device *dev)
 			printk ("Resetting board.\n");
 		/* Completely reset the adaptor. */
 		init_82586_mem (dev);
+		lp->tx_pkts_in_ring = 0;
 	} else {
 		/* Issue the channel attention signal and hope it "gets better". */
 		if (net_debug > 1)
@@ -490,7 +506,7 @@ static int el16_send_packet (struct sk_buff *skb, struct net_device *dev)
 	/* Disable the 82586's input to the interrupt line. */
 	outb (0x80, ioaddr + MISC_CTRL);
 
-	hardware_send_packet (dev, buf, length);
+	hardware_send_packet (dev, buf, skb->len, length - skb->len);
 
 	dev->trans_start = jiffies;
 	/* Enable the 82586 interrupt input. */
@@ -536,30 +552,34 @@ static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	outb(0x80, ioaddr + MISC_CTRL);
 
 	/* Reap the Tx packet buffers. */
-	while (lp->tx_reap != lp->tx_head) {
+	while (lp->tx_pkts_in_ring) {
 	  unsigned short tx_status = isa_readw(shmem+lp->tx_reap);
-
-	  if (tx_status == 0) {
-		if (net_debug > 5)  printk("Couldn't reap %#x.\n", lp->tx_reap);
+	  if (!(tx_status & 0x8000)) {
+		if (net_debug > 5) 
+			printk("Tx command incomplete (%#x).\n", lp->tx_reap);
 		break;
 	  }
-	  if (tx_status & 0x2000) {
-		lp->stats.tx_packets++;
-		lp->stats.collisions += tx_status & 0xf;
-		netif_wake_queue(dev);
-	  } else {
+	  /* Tx unsuccessful or some interesting status bit set. */
+	  if (!(tx_status & 0x2000) || (tx_status & 0x0f3f)) {
 		lp->stats.tx_errors++;
 		if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
 		if (tx_status & 0x0100)  lp->stats.tx_fifo_errors++;
 		if (!(tx_status & 0x0040))  lp->stats.tx_heartbeat_errors++;
 		if (tx_status & 0x0020)  lp->stats.tx_aborted_errors++;
+		lp->stats.collisions += tx_status & 0xf;
 	  }
+	  lp->stats.tx_packets++;
 	  if (net_debug > 5)
 		  printk("Reaped %x, Tx status %04x.\n" , lp->tx_reap, tx_status);
 	  lp->tx_reap += TX_BUF_SIZE;
 	  if (lp->tx_reap > RX_BUF_START - TX_BUF_SIZE)
 		lp->tx_reap = TX_BUF_START;
-	  if (++boguscount > 4)
+
+	  lp->tx_pkts_in_ring--;
+	  /* There is always more space in the Tx ring buffer now. */
+	  netif_wake_queue(dev);
+
+	  if (++boguscount > 10)
 		break;
 	}
 
@@ -583,7 +603,6 @@ static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	if ((status & 0x0070) != 0x0040 && netif_running(dev)) {
-		static void init_rx_bufs(struct net_device *);
 		/* The Rx unit is not ready, it must be hung.  Restart the receiver by
 		   initializing the rx buffers, and issuing an Rx start command. */
 		if (net_debug)
@@ -739,12 +758,13 @@ static void init_82586_mem(struct net_device *dev)
 	return;
 }
 
-static void hardware_send_packet(struct net_device *dev, void *buf, short length)
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
 	ushort tx_block = lp->tx_head;
 	unsigned long write_ptr = dev->mem_start + tx_block;
+	static char padding[ETH_ZLEN];
 
 	/* Set the write pointer to the Tx block, and put out the header. */
 	isa_writew(0x0000,write_ptr);			/* Tx status */
@@ -753,7 +773,7 @@ static void hardware_send_packet(struct net_device *dev, void *buf, short length
 	isa_writew(tx_block+8,write_ptr+=2);			/* Data Buffer offset. */
 
 	/* Output the data buffer descriptor. */
-	isa_writew(length | 0x8000,write_ptr+=2);		/* Byte count parameter. */
+	isa_writew((pad + length) | 0x8000,write_ptr+=2);		/* Byte count parameter. */
 	isa_writew(-1,write_ptr+=2);			/* No next data buffer. */
 	isa_writew(tx_block+22+SCB_BASE,write_ptr+=2);	/* Buffer follows the NoOp command. */
 	isa_writew(0x0000,write_ptr+=2);			/* Buffer address high bits (always zero). */
@@ -765,6 +785,8 @@ static void hardware_send_packet(struct net_device *dev, void *buf, short length
 
 	/* Output the packet at the write pointer. */
 	isa_memcpy_toio(write_ptr+2, buf, length);
+	if(pad)
+		isa_memcpy_toio(write_ptr+length+2, padding, pad);
 
 	/* Set the old command link pointing to this send packet. */
 	isa_writew(tx_block,dev->mem_start + lp->tx_cmd_link);
@@ -780,7 +802,8 @@ static void hardware_send_packet(struct net_device *dev, void *buf, short length
 			   dev->name, ioaddr, length, tx_block, lp->tx_head);
 	}
 
-	if (lp->tx_head != lp->tx_reap)
+	/* Grimly block further packets if there has been insufficient reaping. */
+	if (++lp->tx_pkts_in_ring < NUM_TX_BUFS) 
 		netif_wake_queue(dev);
 }
 
@@ -835,7 +858,9 @@ static void el16_rx(struct net_device *dev)
 
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 
 		/* Clear the status word and set End-of-List on the rx frame. */
@@ -853,12 +878,39 @@ static void el16_rx(struct net_device *dev)
 	lp->rx_head = rx_head;
 	lp->rx_tail = rx_tail;
 }
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+};
+
 #ifdef MODULE
 static struct net_device dev_3c507;
 static int io = 0x300;
-static int irq = 0;
+static int irq;
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "EtherLink16 I/O base address");
+MODULE_PARM_DESC(irq, "(ignored)");
 
 int init_module(void)
 {
@@ -886,6 +938,8 @@ cleanup_module(void)
 	release_region(dev_3c507.base_addr, EL16_IO_EXTENT);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

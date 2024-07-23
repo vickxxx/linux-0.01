@@ -1,6 +1,6 @@
 /* 
         pt.c    (c) 1998  Grant R. Guenther <grant@torque.net>
-                          Under the terms of the GNU public license.
+                          Under the terms of the GNU General Public License.
 
         This is the high-level driver for parallel port ATAPI tape
         drives based on chips supported by the paride module.
@@ -146,7 +146,7 @@ static int pt_drive_count;
 #include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mtio.h>
 #include <linux/wait.h>
 #include <linux/smp_lock.h>
@@ -577,7 +577,8 @@ static void xs( char *buf, char *targ, int offs, int len )
 	for (k=0;k<len;k++) 
 	   if((buf[k+offs]!=0x20)||(buf[k+offs]!=l))
 		l=targ[j++]=buf[k+offs];
-	if (l==0x20) j--; targ[j]=0;
+	if (l==0x20) j--;
+	targ[j]=0;
 }
 
 static int xn( char *buf, int offs, int size )
@@ -753,6 +754,10 @@ static int pt_ioctl(struct inode *inode,struct file *file,
 			pt_rewind(unit);
 			return 0;
 
+		    case MTWEOF:
+			pt_write_fm(unit);
+			return 0;
+
 		    default:	
 			printk("%s: Unimplemented mt_op %d\n",PT.name,
 					mtop.mt_op);
@@ -859,7 +864,10 @@ static ssize_t pt_read(struct file * filp, char * buf,
 		    n -= k;
 		    b = k;
 		    if (b > count) b = count;
-		    copy_to_user(buf+t,PT.bufptr,b);
+		    if (copy_to_user(buf + t, PT.bufptr, b)) {
+	    		pi_disconnect(PI);
+			return -EFAULT;
+		    }
 		    t += b;
 		    count -= b;
 	        }
@@ -943,7 +951,10 @@ static ssize_t pt_write(struct file * filp, const char * buf,
 		    if (k > PT_BUFSIZE) k = PT_BUFSIZE;
 		    b = k;
 		    if (b > count) b = count;
-		    copy_from_user(PT.bufptr,buf+t,b);
+		    if (copy_from_user(PT.bufptr, buf + t, b)) {
+			pi_disconnect(PI);
+			return -EFAULT;
+		    }
                     pi_write_block(PI,PT.bufptr,k);
 		    t += b;
 		    count -= b;
@@ -960,3 +971,4 @@ static ssize_t pt_write(struct file * filp, const char * buf,
 
 /* end of pt.c */
 
+MODULE_LICENSE("GPL");

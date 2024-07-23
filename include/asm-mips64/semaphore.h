@@ -1,18 +1,22 @@
 /*
+ * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1996  Linus Torvalds
- * Copyright (C) 1998, 1999, 2000  Ralf Baechle
- * Copyright (C) 1999, 2000  Silicon Graphics, Inc.
+ * Copyright (C) 1998, 99, 2000, 01  Ralf Baechle
+ * Copyright (C) 1999, 2000, 01  Silicon Graphics, Inc.
+ * Copyright (C) 2000, 01 MIPS Technologies, Inc.
  */
 #ifndef _ASM_SEMAPHORE_H
 #define _ASM_SEMAPHORE_H
 
-#include <asm/system.h>
-#include <asm/atomic.h>
+#include <linux/compiler.h>
+#include <linux/config.h>
 #include <linux/spinlock.h>
 #include <linux/wait.h>
+#include <linux/rwsem.h>
+#include <asm/atomic.h>
 
 struct semaphore {
 #ifdef __MIPSEB__
@@ -26,32 +30,27 @@ struct semaphore {
 #if WAITQUEUE_DEBUG
 	long __magic;
 #endif
-};
+} __attribute__((aligned(8)));
 
 #if WAITQUEUE_DEBUG
-# define __SEM_DEBUG_INIT(name) \
-		, (long)&(name).__magic
+# define __SEM_DEBUG_INIT(name) , .__magic = (long)&(name).__magic
 #else
 # define __SEM_DEBUG_INIT(name)
 #endif
 
-#ifdef __MIPSEB__
-#define __SEMAPHORE_INITIALIZER(name,count) \
-{ ATOMIC_INIT(count), ATOMIC_INIT(0), __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) \
-	__SEM_DEBUG_INIT(name) }
-#else
-#define __SEMAPHORE_INITIALIZER(name,count) \
-{ ATOMIC_INIT(0), ATOMIC_INIT(count), __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) \
-	__SEM_DEBUG_INIT(name) }
-#endif
+#define __SEMAPHORE_INITIALIZER(name,_count) {				\
+	.count	= ATOMIC_INIT(_count),					\
+	.waking	= ATOMIC_INIT(0),					\
+	.wait	= __WAIT_QUEUE_HEAD_INITIALIZER((name).wait)		\
+	__SEM_DEBUG_INIT(name)						\
+}
 
-#define __MUTEX_INITIALIZER(name) \
-	__SEMAPHORE_INITIALIZER(name,1)
+#define __MUTEX_INITIALIZER(name) __SEMAPHORE_INITIALIZER(name, 1)
 
 #define __DECLARE_SEMAPHORE_GENERIC(name,count) \
-	struct semaphore name = __SEMAPHORE_INITIALIZER(name,count)
+	struct semaphore name = __SEMAPHORE_INITIALIZER(name, count)
 
-#define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
+#define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name, 1)
 #define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
 
 static inline void sema_init (struct semaphore *sem, int val)
@@ -74,37 +73,55 @@ static inline void init_MUTEX_LOCKED (struct semaphore *sem)
 	sema_init(sem, 0);
 }
 
-asmlinkage void __down(struct semaphore * sem);
-asmlinkage int  __down_interruptible(struct semaphore * sem);
-asmlinkage int __down_trylock(struct semaphore * sem);
-asmlinkage void __up(struct semaphore * sem);
+#ifndef CONFIG_CPU_HAS_LLDSCD
+/*
+ * On machines without lld/scd we need a spinlock to make the manipulation of
+ * sem->count and sem->waking atomic.
+ */
+extern spinlock_t semaphore_lock;
+#endif
+
+extern void __down_failed(struct semaphore * sem);
+extern int  __down_failed_interruptible(struct semaphore * sem);
+extern void __up_wakeup(struct semaphore * sem);
 
 static inline void down(struct semaphore * sem)
 {
+	int count;
+
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
-	if (atomic_dec_return(&sem->count) < 0)
-		__down(sem);
+	count = atomic_dec_return(&sem->count);
+	if (unlikely(count < 0))
+		__down_failed(sem);
 }
 
+/*
+ * Interruptible try to acquire a semaphore.  If we obtained
+ * it, return zero.  If we were interrupted, returns -EINTR
+ */
 static inline int down_interruptible(struct semaphore * sem)
 {
-	int ret = 0;
+	int count;
 
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
-	if (atomic_dec_return(&sem->count) < 0)
-		ret = __down_interruptible(sem);
-	return ret;
+	count = atomic_dec_return(&sem->count);
+	if (unlikely(count < 0))
+		return __down_failed_interruptible(sem);
+
+	return 0;
 }
+
+#ifdef CONFIG_CPU_HAS_LLDSCD
 
 /*
  * down_trylock returns 0 on success, 1 if we failed to get the lock.
  *
  * We must manipulate count and waking simultaneously and atomically.
- * Here, we this by using ll/sc on the pair of 32-bit words.
+ * Here, we do this by using lld/scd on the pair of 32-bit words.
  *
  * Pseudocode:
  *
@@ -129,29 +146,26 @@ static inline int down_trylock(struct semaphore * sem)
 	CHECK_MAGIC(sem->__magic);
 #endif
 
-	__asm__ __volatile__("
-			.set	mips3
-
-		0:	lld	%1, %4
-			dli	%3, 0x0000000100000000
-			dsubu	%1, %3
-			li	%0, 0
-			bgez	%1, 2f
-			sll	%2, %1, 0
-			blez	%2, 1f
-			daddiu	%1, %1, -1
-			b	2f
-		1:
-			daddu	%1, %1, %3
-			li	%0, 1
-		2:
-			scd	%1, %4
-			beqz	%1, 0b
-
-			.set	mips0"
-		: "=&r"(ret), "=&r"(tmp), "=&r"(tmp2), "=&r"(sub)
-		: "m"(*sem)
-		: "memory");
+	__asm__ __volatile__(
+	"	.set	mips3			# down_trylock		\n"
+	"0:	lld	%1, %4						\n"
+	"	dli	%3, 0x0000000100000000	# count -= 1		\n"
+	"	dsubu	%1, %3						\n"
+	"	li	%0, 0			# ret = 0		\n"
+	"	bgez	%1, 2f			# if count >= 0		\n"
+	"	sll	%2, %1, 0		# extract waking	\n"
+	"	blez	%2, 1f			# if waking < 0 -> 1f	\n"
+	"	daddiu	%1, %1, -1		# waking -= 1		\n"
+	"	b	2f						\n"
+	"1:	daddu	%1, %1, %3		# count += 1		\n"
+	"	li	%0, 1			# ret = 1		\n"
+	"2:	scd	%1, %4						\n"
+	"	beqz	%1, 0b						\n"
+	"	sync							\n"
+	"	.set	mips0						\n"
+	: "=&r"(ret), "=&r"(tmp), "=&r"(tmp2), "=&r"(sub)
+	: "m"(*sem)
+	: "memory");
 
 	return ret;
 }
@@ -162,185 +176,111 @@ static inline int down_trylock(struct semaphore * sem)
  */
 static inline void up(struct semaphore * sem)
 {
+	unsigned long tmp, tmp2;
+	int count;
+
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
-	if (atomic_inc_return(&sem->count) <= 0)
-		__up(sem);
+	/*
+	 * We must manipulate count and waking simultaneously and atomically.
+	 * Otherwise we have races between up and __down_failed_interruptible
+	 * waking up on a signal.
+	 */
+
+	__asm__ __volatile__(
+	"	.set	mips3					\n"
+	"	sync			# up			\n"
+	"1:	lld	%1, %3					\n"
+	"	dsra32	%0, %1, 0	# extract count to %0	\n"
+	"	daddiu	%0, 1		# count += 1		\n"
+	"	slti	%2, %0, 1	# %3 = (%0 <= 0)	\n"
+	"	daddu	%1, %2		# waking += %3		\n"
+	"	dsll32 %1, %1, 0	# zero-extend %1	\n"
+	"	dsrl32 %1, %1, 0				\n"
+	"	dsll32	%2, %0, 0	# Reassemble union	\n"
+	"	or	%1, %2		# from count and waking	\n"
+	"	scd	%1, %3					\n"
+	"	beqz	%1, 1b					\n"
+	"	.set	mips0					\n"
+	: "=&r"(count), "=&r"(tmp), "=&r"(tmp2), "+m"(*sem)
+	:
+	: "memory");
+
+	if (unlikely(count <= 0))
+		__up_wakeup(sem);
 }
 
-/*
- * rw mutexes (should that be mutices? =) -- throw rw spinlocks and
- * semaphores together, and this is what we end up with...
- *
- * The lock is initialized to BIAS.  This way, a writer subtracts BIAS ands
- * gets 0 for the case of an uncontended lock.  Readers decrement by 1 and
- * see a positive value when uncontended, negative if there are writers
- * waiting (in which case it goes to sleep).
- *
- * The value 0x01000000 supports up to 128 processors and lots of processes.
- * BIAS must be chosen such that subtracting BIAS once per CPU will result
- * in the int remaining negative.  In terms of fairness, this should result
- * in the lock flopping back and forth between readers and writers under
- * heavy use.
- *
- * Once we start supporting machines with more than 128 CPUs, we should go
- * for using a 64bit atomic type instead of 32bit as counter. We shall
- * probably go for bias 0x80000000 then, so that single sethi can set it.
- * */
-
-#define RW_LOCK_BIAS		0x01000000
-
-struct rw_semaphore {
-	atomic_t		count;
-	/* bit 0 means read bias granted;
-	   bit 1 means write bias granted.  */
-	unsigned long		granted;
-	wait_queue_head_t	wait;
-	wait_queue_head_t	write_bias_wait;
-#if WAITQUEUE_DEBUG
-	long			__magic;
-	atomic_t		readers;
-	atomic_t		writers;
-#endif
-};
-
-#if WAITQUEUE_DEBUG
-#define __RWSEM_DEBUG_INIT	, ATOMIC_INIT(0), ATOMIC_INIT(0)
 #else
-#define __RWSEM_DEBUG_INIT	/* */
-#endif
 
-#define __RWSEM_INITIALIZER(name,count)					\
-	{ ATOMIC_INIT(count), 0,					\
-	  __WAIT_QUEUE_HEAD_INITIALIZER((name).wait),			\
-	  __WAIT_QUEUE_HEAD_INITIALIZER((name).write_bias_wait)		\
-	  __SEM_DEBUG_INIT(name) __RWSEM_DEBUG_INIT }
-
-#define __DECLARE_RWSEM_GENERIC(name,count) \
-	struct rw_semaphore name = __RWSEM_INITIALIZER(name,count)
-
-#define DECLARE_RWSEM(name) \
-	__DECLARE_RWSEM_GENERIC(name, RW_LOCK_BIAS)
-#define DECLARE_RWSEM_READ_LOCKED(name) \
-	__DECLARE_RWSEM_GENERIC(name, RW_LOCK_BIAS-1)
-#define DECLARE_RWSEM_WRITE_LOCKED(name) \
-	__DECLARE_RWSEM_GENERIC(name, 0)
-
-static inline void init_rwsem(struct rw_semaphore *sem)
+/*
+ * Non-blockingly attempt to down() a semaphore.
+ * Returns zero if we acquired it
+ */
+static inline int down_trylock(struct semaphore * sem)
 {
-	atomic_set(&sem->count, RW_LOCK_BIAS);
-	sem->granted = 0;
-	init_waitqueue_head(&sem->wait);
-	init_waitqueue_head(&sem->write_bias_wait);
-#if WAITQUEUE_DEBUG
-	sem->__magic = (long)&sem->__magic;
-	atomic_set(&sem->readers, 0);
-	atomic_set(&sem->writers, 0);
-#endif
-}
-
-/* The expensive part is outlined.  */
-extern void __down_read(struct rw_semaphore *sem, int count);
-extern void __down_write(struct rw_semaphore *sem, int count);
-extern void __rwsem_wake(struct rw_semaphore *sem, unsigned long readers);
-
-static inline void down_read(struct rw_semaphore *sem)
-{
-	int count;
+	unsigned long flags;
+	int count, waking;
+	int ret = 0;
 
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 
-	count = atomic_dec_return(&sem->count);
-	if (count < 0) {
-		__down_read(sem, count);
+	spin_lock_irqsave(&semaphore_lock, flags);
+	count = atomic_read(&sem->count) - 1;
+	atomic_set(&sem->count, count);
+	if (unlikely(count < 0)) {
+		waking = atomic_read(&sem->waking);
+		if (waking <= 0) {
+			atomic_set(&sem->count, count + 1);
+			ret = 1;
+		} else {
+			atomic_set(&sem->waking, waking - 1);
+			ret = 0;
+		}
 	}
-	mb();
+	spin_unlock_irqrestore(&semaphore_lock, flags);
 
-#if WAITQUEUE_DEBUG
-	if (sem->granted & 2)
-		BUG();
-	if (atomic_read(&sem->writers))
-		BUG();
-	atomic_inc(&sem->readers);
-#endif
-}
-
-static inline void down_write(struct rw_semaphore *sem)
-{
-	int count;
-
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-#endif
-
-	count = atomic_sub_return(RW_LOCK_BIAS, &sem->count);
-	if (count) {
-		__down_write(sem, count);
-	}
-	mb();
-
-#if WAITQUEUE_DEBUG
-	if (atomic_read(&sem->writers))
-		BUG();
-	if (atomic_read(&sem->readers))
-		BUG();
-	if (sem->granted & 3)
-		BUG();
-	atomic_inc(&sem->writers);
-#endif
-}
-
-/* When a reader does a release, the only significant case is when
-   there was a writer waiting, and we've bumped the count to 0: we must
-   wake the writer up.  */
-
-static inline void up_read(struct rw_semaphore *sem)
-{
-	int count;
-
-#if WAITQUEUE_DEBUG
-	CHECK_MAGIC(sem->__magic);
-	if (sem->granted & 2)
-		BUG();
-	if (atomic_read(&sem->writers))
-		BUG();
-	atomic_dec(&sem->readers);
-#endif
-
-	mb();
-	count = atomic_inc_return(&sem->count);
-	if (count == 0) {
-		__rwsem_wake(sem, 0);
-	}
+	return ret;
 }
 
 /*
- * Releasing the writer is easy -- just release it and wake up any sleepers.
+ * Note! This is subtle. We jump to wake people up only if
+ * the semaphore was negative (== somebody was waiting on it).
  */
-static inline void up_write(struct rw_semaphore *sem)
+static inline void up(struct semaphore * sem)
 {
-	int count;
+	unsigned long flags;
+	int count, waking;
 
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
-	if (sem->granted & 3)
-		BUG();
-	if (atomic_read(&sem->readers))
-		BUG();
-	if (atomic_read(&sem->writers) != 1)
-		BUG();
-	atomic_dec(&sem->writers);
 #endif
+	/*
+	 * We must manipulate count and waking simultaneously and atomically.
+	 * Otherwise we have races between up and __down_failed_interruptible
+	 * waking up on a signal.
+	 */
 
-	mb();
-	count = atomic_add_return(RW_LOCK_BIAS, &sem->count);
-	if (count - RW_LOCK_BIAS < 0 && count >= 0) {
-		/* Only do the wake if we're no longer negative.  */
-		__rwsem_wake(sem, count);
-	}
+	spin_lock_irqsave(&semaphore_lock, flags);
+	count = atomic_read(&sem->count) + 1;
+	waking = atomic_read(&sem->waking);
+	if (count <= 0)
+		waking++;
+	atomic_set(&sem->count, count);
+	atomic_set(&sem->waking, waking);
+	spin_unlock_irqrestore(&semaphore_lock, flags);
+
+	if (unlikely(count <= 0))
+		__up_wakeup(sem);
+}
+
+#endif /* CONFIG_CPU_HAS_LLDSCD */
+
+static inline int sem_getcount(struct semaphore *sem)
+{
+	return atomic_read(&sem->count);
 }
 
 #endif /* _ASM_SEMAPHORE_H */

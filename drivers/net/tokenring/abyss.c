@@ -4,7 +4,7 @@
  *  Written 1999-2000 by Adam Fritzler
  *
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  *  This driver module supports the following cards:
  *      - Madge Smart 16/4 PCI Mk2
@@ -52,6 +52,8 @@ static struct pci_device_id abyss_pci_tbl[] __initdata = {
 	{ }			/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(pci, abyss_pci_tbl);
+
+MODULE_LICENSE("GPL");
 
 static int abyss_open(struct net_device *dev);
 static int abyss_close(struct net_device *dev);
@@ -137,7 +139,7 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	 */
 	dev->base_addr += 0x10;
 		
-	ret = tmsdev_init(dev);
+	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
 	if (ret) {
 		printk("%s: unable to get memory for dev->priv.\n", 
 		       dev->name);
@@ -153,7 +155,6 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	printk("\n");
 
 	tp = dev->priv;
-	tp->dmalimit = 0; /* XXX: should be the max PCI32 DMA max */
 	tp->setnselout = abyss_setnselout_pins;
 	tp->sifreadb = abyss_sifreadb;
 	tp->sifreadw = abyss_sifreadw;
@@ -173,7 +174,7 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	return 0;
 
 err_out_tmsdev:
-	kfree(dev->priv);
+	tmsdev_term(dev);
 err_out_irq:
 	free_irq(pdev->irq, dev);
 err_out_region:
@@ -432,7 +433,7 @@ static int abyss_close(struct net_device *dev)
 	return 0;
 }
 
-static void __exit abyss_detach (struct pci_dev *pdev)
+static void __devexit abyss_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	
@@ -441,7 +442,7 @@ static void __exit abyss_detach (struct pci_dev *pdev)
 	unregister_netdev(dev);
 	release_region(dev->base_addr-0x10, ABYSS_IO_EXTENT);
 	free_irq(dev->irq, dev);
-	kfree(dev->priv);
+	tmsdev_term(dev);
 	kfree(dev);
 	pci_set_drvdata(pdev, NULL);
 }
@@ -450,7 +451,7 @@ static struct pci_driver abyss_driver = {
 	name:		"abyss",
 	id_table:	abyss_pci_tbl,
 	probe:		abyss_attach,
-	remove:		abyss_detach,
+	remove:		__devexit_p(abyss_detach),
 };
 
 static int __init abyss_init (void)

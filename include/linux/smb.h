@@ -85,46 +85,34 @@ struct smb_fattr {
 	uid_t		f_uid;
 	gid_t		f_gid;
 	kdev_t		f_rdev;
-	off_t		f_size;
+	loff_t		f_size;
 	time_t		f_atime;
 	time_t		f_mtime;
 	time_t		f_ctime;
 	unsigned long	f_blksize;
 	unsigned long	f_blocks;
-};
-
-struct smb_dirent {
-	struct smb_fattr attr;
-
-	int f_pos;
-	int len;
-	__u8 name[SMB_MAXNAMELEN];
+	int		f_unix;
 };
 
 enum smb_conn_state {
-        CONN_VALID,             /* everything's fine */
-        CONN_INVALID,           /* Something went wrong, but did not
-                                   try to reconnect yet. */
-        CONN_RETRIED            /* Tried a reconnection, but was refused */
+	CONN_VALID,		/* everything's fine */
+	CONN_INVALID,		/* Something went wrong, but did not
+				   try to reconnect yet. */
+	CONN_RETRIED,		/* Tried a reconnection, but was refused */
+	CONN_RETRYING		/* Currently trying to reconnect */
 };
-
-/*
- * The readdir cache size controls how many directory entries are cached.
- */
-#define SMB_READDIR_CACHE_SIZE        64
 
 #define SMB_SUPER_MAGIC               0x517B
 
-#define SMB_SERVER(inode)    (&(inode->i_sb->u.smbfs_sb))
-#define SMB_INOP(inode)      (&(inode->u.smbfs_i))
-
 #define SMB_HEADER_LEN   37     /* includes everything up to, but not
                                  * including smb_bcc */
-#define SMB_DEF_MAX_XMIT 32768
-#define SMB_INITIAL_PACKET_SIZE 4000
 
-/* Allocate max. 1 page */
-#define TRANS2_MAX_TRANSFER (4096-17)
+#define SMB_INITIAL_PACKET_SIZE		4000
+#define SMB_MAX_PACKET_SIZE		32768
+
+/* reserve this much space for trans2 parameters. Shouldn't have to be more
+   than 10 or so, but OS/2 seems happier like this. */
+#define SMB_TRANS2_MAX_PARAM 64
 
 #endif
 #endif

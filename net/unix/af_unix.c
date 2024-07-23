@@ -1,5 +1,5 @@
 /*
- * NET3:	Implementation of BSD Unix domain sockets.
+ * NET4:	Implementation of BSD Unix domain sockets.
  *
  * Authors:	Alan Cox, <alan.cox@linux.org>
  *
@@ -8,7 +8,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Version:	$Id: af_unix.c,v 1.108 2000/11/10 04:02:04 davem Exp $
+ * Version:	$Id: af_unix.c,v 1.126.2.5 2002/03/05 12:47:34 davem Exp $
  *
  * Fixes:
  *		Linus Torvalds	:	Assorted bug cures.
@@ -96,22 +96,21 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/fs.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <net/sock.h>
-#include <net/tcp.h>
+#include <linux/tcp.h>
 #include <net/af_unix.h>
 #include <linux/proc_fs.h>
 #include <net/scm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/smp_lock.h>
+#include <linux/rtnetlink.h>
 
 #include <asm/checksum.h>
-
-#define min(a,b)	(((a)<(b))?(a):(b))
 
 int sysctl_unix_max_dgram_qlen = 10;
 
@@ -124,13 +123,12 @@ static atomic_t unix_nr_socks = ATOMIC_INIT(0);
 #define UNIX_ABSTRACT(sk)	((sk)->protinfo.af_unix.addr->hash!=UNIX_HASH_SIZE)
 
 /*
-   SMP locking strategy.
-   * hash table is protceted with rwlock unix_table_lock
-   * each socket state is protected by separate rwlock.
-
+ *  SMP locking strategy:
+ *    hash table is protected with rwlock unix_table_lock
+ *    each socket state is protected by separate rwlock.
  */
 
-extern __inline__ unsigned unix_hash_fold(unsigned hash)
+static inline unsigned unix_hash_fold(unsigned hash)
 {
 	hash ^= hash>>16;
 	hash ^= hash>>8;
@@ -139,17 +137,17 @@ extern __inline__ unsigned unix_hash_fold(unsigned hash)
 
 #define unix_peer(sk) ((sk)->pair)
 
-extern __inline__ int unix_our_peer(unix_socket *sk, unix_socket *osk)
+static inline int unix_our_peer(unix_socket *sk, unix_socket *osk)
 {
 	return unix_peer(osk) == sk;
 }
 
-extern __inline__ int unix_may_send(unix_socket *sk, unix_socket *osk)
+static inline int unix_may_send(unix_socket *sk, unix_socket *osk)
 {
 	return (unix_peer(osk) == NULL || unix_our_peer(sk, osk));
 }
 
-static __inline__ unix_socket * unix_peer_get(unix_socket *s)
+static inline unix_socket * unix_peer_get(unix_socket *s)
 {
 	unix_socket *peer;
 
@@ -161,7 +159,7 @@ static __inline__ unix_socket * unix_peer_get(unix_socket *s)
 	return peer;
 }
 
-extern __inline__ void unix_release_addr(struct unix_address *addr)
+extern inline void unix_release_addr(struct unix_address *addr)
 {
 	if (atomic_dec_and_test(&addr->refcnt))
 		kfree(addr);
@@ -180,18 +178,7 @@ static int unix_mkname(struct sockaddr_un * sunaddr, int len, unsigned *hashp)
 		return -EINVAL;
 	if (!sunaddr || sunaddr->sun_family != AF_UNIX)
 		return -EINVAL;
-	if (sunaddr->sun_path[0])
-	{
-		/*
-		 *	This may look like an off by one error but it is
-		 *	a bit more subtle. 108 is the longest valid AF_UNIX
-		 *	path for a binding. sun_path[108] doesnt as such
-		 *	exist. However in kernel space we are guaranteed that
-		 *	it is a valid memory location in our kernel
-		 *	address buffer.
-		 */
-		if (len > sizeof(*sunaddr))
-			len = sizeof(*sunaddr);
+	if (sunaddr->sun_path[0]) {
 		((char *)sunaddr)[len]=0;
 		len = strlen(sunaddr->sun_path)+1+sizeof(short);
 		return len;
@@ -231,14 +218,14 @@ static void __unix_insert_socket(unix_socket **list, unix_socket *sk)
 	sock_hold(sk);
 }
 
-static __inline__ void unix_remove_socket(unix_socket *sk)
+static inline void unix_remove_socket(unix_socket *sk)
 {
 	write_lock(&unix_table_lock);
 	__unix_remove_socket(sk);
 	write_unlock(&unix_table_lock);
 }
 
-static __inline__ void unix_insert_socket(unix_socket **list, unix_socket *sk)
+static inline void unix_insert_socket(unix_socket **list, unix_socket *sk)
 {
 	write_lock(&unix_table_lock);
 	__unix_insert_socket(list, sk);
@@ -258,7 +245,7 @@ static unix_socket *__unix_find_socket_byname(struct sockaddr_un *sunname,
 	return NULL;
 }
 
-static __inline__ unix_socket *
+static inline unix_socket *
 unix_find_socket_byname(struct sockaddr_un *sunname,
 			int len, int type, unsigned hash)
 {
@@ -291,7 +278,7 @@ static unix_socket *unix_find_socket_byinode(struct inode *i)
 	return s;
 }
 
-static __inline__ int unix_writable(struct sock *sk)
+static inline int unix_writable(struct sock *sk)
 {
 	return ((atomic_read(&sk->wmem_alloc)<<2) <= sk->sndbuf);
 }
@@ -486,7 +473,7 @@ static struct sock * unix_create1(struct socket *sock)
 	sk->protinfo.af_unix.dentry=NULL;
 	sk->protinfo.af_unix.mnt=NULL;
 	sk->protinfo.af_unix.lock = RW_LOCK_UNLOCKED;
-	atomic_set(&sk->protinfo.af_unix.inflight, 0);
+	atomic_set(&sk->protinfo.af_unix.inflight, sock ? 0 : -1);
 	init_MUTEX(&sk->protinfo.af_unix.readsem);/* single task reading lock */
 	init_waitqueue_head(&sk->protinfo.af_unix.peer_wait);
 	sk->protinfo.af_unix.list=NULL;
@@ -567,10 +554,8 @@ retry:
 				      addr->hash)) {
 		write_unlock(&unix_table_lock);
 		/* Sanity yield. It is unusual case, but yet... */
-		if (!(ordernum&0xFF)) {
-			current->policy |= SCHED_YIELD;
-			schedule();
-		}
+		if (!(ordernum&0xFF))
+			yield();
 		goto retry;
 	}
 	addr->hash ^= sk->type;
@@ -610,6 +595,9 @@ static unix_socket *unix_find_other(struct sockaddr_un *sunname, int len,
 		if (!u)
 			goto put_fail;
 
+		if (u->type == type)
+			UPDATE_ATIME(nd.dentry->d_inode);
+
 		path_release(&nd);
 
 		err=-EPROTOTYPE;
@@ -620,7 +608,12 @@ static unix_socket *unix_find_other(struct sockaddr_un *sunname, int len,
 	} else {
 		err = -ECONNREFUSED;
 		u=unix_find_socket_byname(sunname, len, type, hash);
-		if (!u)
+		if (u) {
+			struct dentry *dentry;
+			dentry = u->protinfo.af_unix.dentry;
+			if (dentry)
+				UPDATE_ATIME(dentry->d_inode);
+		} else
 			goto fail;
 	}
 	return u;
@@ -675,6 +668,7 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	atomic_set(&addr->refcnt, 1);
 
 	if (sunaddr->sun_path[0]) {
+		unsigned int mode;
 		err = 0;
 		/*
 		 * Get the parent directory, calculate the hash for last
@@ -714,8 +708,8 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		/*
 		 * All right, let's create it.
 		 */
-		err = vfs_mknod(nd.dentry->d_inode, dentry,
-			S_IFSOCK|sock->inode->i_mode, 0);
+		mode = S_IFSOCK | (sock->inode->i_mode & ~current->fs->umask);
+		err = vfs_mknod(nd.dentry->d_inode, dentry, mode, 0);
 		if (err)
 			goto out_mknod_dput;
 		up(&nd.dentry->d_inode->i_sem);
@@ -992,7 +986,12 @@ restart:
 	unix_state_wunlock(sk);
 
 	/* take ten and and send info to listening sock */
-	skb_queue_tail(&other->receive_queue,skb);
+	spin_lock(&other->receive_queue.lock);
+	__skb_queue_tail(&other->receive_queue,skb);
+	/* Undo artificially decreased inflight after embrion
+	 * is installed to listening socket. */
+	atomic_inc(&newsk->protinfo.af_unix.inflight);
+	spin_unlock(&other->receive_queue.lock);
 	unix_state_runlock(other);
 	other->data_ready(other, 0);
 	sock_put(other);
@@ -1055,8 +1054,12 @@ static int unix_accept(struct socket *sock, struct socket *newsock, int flags)
 	 */
 
 	skb = skb_recv_datagram(sk, 0, flags&O_NONBLOCK, &err);
-	if (!skb)
+	if (!skb) {
+		/* This means receive shutdown. */
+		if (err == 0)
+			err = -EINVAL;
 		goto out;
+	}
 
 	tsk = skb->sk;
 	skb_free_datagram(sk, skb);
@@ -1183,7 +1186,7 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	if ((unsigned)len > sk->sndbuf - 32)
 		goto out;
 
-	skb = sock_alloc_send_skb(sk, len, 0, msg->msg_flags&MSG_DONTWAIT, &err);
+	skb = sock_alloc_send_skb(sk, len, msg->msg_flags&MSG_DONTWAIT, &err);
 	if (skb==NULL)
 		goto out;
 
@@ -1286,7 +1289,6 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	struct sockaddr_un *sunaddr=msg->msg_name;
 	int err,size;
 	struct sk_buff *skb;
-	int limit=0;
 	int sent=0;
 
 	err = -EOPNOTSUPP;
@@ -1317,37 +1319,29 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		size=len-sent;
 
 		/* Keep two messages in the pipe so it schedules better */
-		if (size > sk->sndbuf/2 - 16)
-			size = sk->sndbuf/2 - 16;
+		if (size > sk->sndbuf/2 - 64)
+			size = sk->sndbuf/2 - 64;
 
-		/*
-		 *	Keep to page sized kmalloc()'s as various people
-		 *	have suggested. Big mallocs stress the vm too
-		 *	much.
-		 */
-
-		if (size > PAGE_SIZE-16)
-			limit = PAGE_SIZE-16; /* Fall back to a page if we can't grab a big buffer this instant */
-		else
-			limit = 0;	/* Otherwise just grab and wait */
-
+		if (size > SKB_MAX_ALLOC)
+			size = SKB_MAX_ALLOC;
+			
 		/*
 		 *	Grab a buffer
 		 */
 		 
-		skb=sock_alloc_send_skb(sk,size,limit,msg->msg_flags&MSG_DONTWAIT, &err);
+		skb=sock_alloc_send_skb(sk,size,msg->msg_flags&MSG_DONTWAIT, &err);
 
 		if (skb==NULL)
 			goto out_err;
 
 		/*
 		 *	If you pass two values to the sock_alloc_send_skb
-		 *	it tries to grab the large buffer with GFP_BUFFER
+		 *	it tries to grab the large buffer with GFP_NOFS
 		 *	(which can fail easily), and if it fails grab the
 		 *	fallback size buffer which is under a page and will
 		 *	succeed. [Alan]
 		 */
-		size = min(size, skb_tailroom(skb));
+		size = min_t(int, size, skb_tailroom(skb));
 
 		memcpy(UNIXCREDS(skb), &scm->creds, sizeof(struct ucred));
 		if (scm->fp)
@@ -1386,7 +1380,7 @@ out_err:
 
 static void unix_copy_addr(struct msghdr *msg, struct sock *sk)
 {
-	msg->msg_namelen = sizeof(short);
+	msg->msg_namelen = 0;
 	if (sk->protinfo.af_unix.addr) {
 		msg->msg_namelen=sk->protinfo.af_unix.addr->len;
 		memcpy(msg->msg_name,
@@ -1409,9 +1403,11 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 	msg->msg_namelen = 0;
 
+	down(&sk->protinfo.af_unix.readsem);
+
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb)
-		goto out;
+		goto out_unlock;
 
 	wake_up_interruptible(&sk->protinfo.af_unix.peer_wait);
 
@@ -1455,6 +1451,8 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 out_free:
 	skb_free_datagram(sk,skb);
+out_unlock:
+	up(&sk->protinfo.af_unix.readsem);
 out:
 	return err;
 }
@@ -1579,7 +1577,7 @@ static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size
 			sunaddr = NULL;
 		}
 
-		chunk = min(skb->len, size);
+		chunk = min_t(unsigned int, skb->len, size);
 		if (memcpy_toiovec(msg->msg_iov, skb->data, chunk)) {
 			skb_queue_head(&sk->receive_queue, skb);
 			if (copied == 0)
@@ -1688,8 +1686,13 @@ static int unix_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			}
 
 			spin_lock(&sk->receive_queue.lock);
-			if((skb=skb_peek(&sk->receive_queue))!=NULL)
-				amount=skb->len;
+			if (sk->type == SOCK_STREAM) {
+				skb_queue_walk(&sk->receive_queue, skb)
+					amount += skb->len;
+			} else {
+				if((skb=skb_peek(&sk->receive_queue))!=NULL)
+					amount=skb->len;
+			}
 			spin_unlock(&sk->receive_queue.lock);
 			err = put_user(amount, (int *)arg);
 			break;
@@ -1753,7 +1756,7 @@ static int unix_read_proc(char *buffer, char **start, off_t offset,
 	{
 		unix_state_rlock(s);
 
-		len+=sprintf(buffer+len,"%p: %08X %08X %08X %04X %02X %5ld",
+		len+=sprintf(buffer+len,"%p: %08X %08X %08X %04X %02X %5lu",
 			s,
 			atomic_read(&s->refcnt),
 			0,
@@ -1819,11 +1822,12 @@ struct proto_ops unix_stream_ops = {
 	sendmsg:	unix_stream_sendmsg,
 	recvmsg:	unix_stream_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 struct proto_ops unix_dgram_ops = {
 	family:		PF_UNIX,
-	
+
 	release:	unix_release,
 	bind:		unix_bind,
 	connect:	unix_dgram_connect,
@@ -1839,23 +1843,29 @@ struct proto_ops unix_dgram_ops = {
 	sendmsg:	unix_dgram_sendmsg,
 	recvmsg:	unix_dgram_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 struct net_proto_family unix_family_ops = {
-	PF_UNIX,
-	unix_create
+	family:		PF_UNIX,
+	create:		unix_create
 };
 
 #ifdef CONFIG_SYSCTL
 extern void unix_sysctl_register(void);
 extern void unix_sysctl_unregister(void);
+#else
+static inline void unix_sysctl_register(void) {}
+static inline void unix_sysctl_unregister(void) {}
 #endif
+
+static char banner[] __initdata = KERN_INFO "NET4: Unix domain sockets 1.0/SMP for Linux NET4.0.\n";
 
 static int __init af_unix_init(void)
 {
 	struct sk_buff *dummy_skb;
-	
-	printk(KERN_INFO "NET4: Unix domain sockets 1.0/SMP for Linux NET4.0.\n");
+
+	printk(banner);
 	if (sizeof(struct unix_skb_parms) > sizeof(dummy_skb->cb))
 	{
 		printk(KERN_CRIT "unix_proto_init: panic\n");
@@ -1865,30 +1875,18 @@ static int __init af_unix_init(void)
 #ifdef CONFIG_PROC_FS
 	create_proc_read_entry("net/unix", 0, 0, unix_read_proc, NULL);
 #endif
-
-#ifdef CONFIG_SYSCTL
 	unix_sysctl_register();
-#endif
-
 	return 0;
 }
 
 static void __exit af_unix_exit(void)
 {
 	sock_unregister(PF_UNIX);
-#ifdef CONFIG_SYSCTL
 	unix_sysctl_unregister();
-#endif
-#ifdef CONFIG_PROC_FS
 	remove_proc_entry("net/unix", 0);
-#endif
 }
 
 module_init(af_unix_init);
 module_exit(af_unix_exit);
 
-/*
- * Local variables:
- *  compile-command: "gcc -g -D__KERNEL__ -Wall -O6 -I/usr/src/linux/include -c af_unix.c"
- * End:
- */
+MODULE_LICENSE("GPL");

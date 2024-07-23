@@ -36,8 +36,9 @@ static char *_riocmd_c_sccs_ = "@(#)riocmd.c	1.2";
 
 #define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/tty.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -461,8 +462,8 @@ PKT *PacketP;
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Length	  0x%x (%d)\n", PacketP->len,PacketP->len );
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Control	 0x%x (%d)\n", PacketP->control, PacketP->control);
 		rio_dprintk (RIO_DEBUG_CMD, "PACKET information: Check	   0x%x (%d)\n", PacketP->csum, PacketP->csum );
-		rio_dprintk (RIO_DEBUG_CMD, "COMMAND information: Host Port Number 0x%x, 
-					Command Code 0x%x\n", PktCmdP->PhbNum, PktCmdP->Command );
+		rio_dprintk (RIO_DEBUG_CMD, "COMMAND information: Host Port Number 0x%x, "
+					"Command Code 0x%x\n", PktCmdP->PhbNum, PktCmdP->Command );
 		return TRUE;
 	}
 
@@ -473,17 +474,18 @@ PKT *PacketP;
 	rio_spin_lock_irqsave(&PortP->portSem, flags);
 	switch( RBYTE(PktCmdP->Command) ) {
 		case BREAK_RECEIVED:
-		rio_dprintk (RIO_DEBUG_CMD, "Received a break!\n");
+			rio_dprintk (RIO_DEBUG_CMD, "Received a break!\n");
 			/* If the current line disc. is not multi-threading and
 	   			the current processor is not the default, reset rup_intr
 	   			and return FALSE to ensure that the command packet is
 	   			not freed. */
 			/* Call tmgr HANGUP HERE */
 			/* Fix this later when every thing works !!!! RAMRAJ */
+			gs_got_break (&PortP->gs);
 			break;
 
 		case COMPLETE:
-		rio_dprintk (RIO_DEBUG_CMD, "Command complete on phb %d host %d\n",
+			rio_dprintk (RIO_DEBUG_CMD, "Command complete on phb %d host %d\n",
 			     RBYTE(PktCmdP->PhbNum), HostP-p->RIOHosts);
 			subCommand = 1;
 			switch (RBYTE(PktCmdP->SubCommand)) {
@@ -547,6 +549,8 @@ PKT *PacketP;
 				** carrier.
 				*/
 				if (PortP->gs.tty == NULL)
+					break;
+				if (PortP->gs.tty->termios == NULL)
 					break;
 			  
 				if (!(PortP->gs.tty->termios->c_cflag & CLOCAL) &&
@@ -622,7 +626,8 @@ RIOGetCmdBlk()
 	struct CmdBlk *CmdBlkP;
 
 	CmdBlkP = (struct CmdBlk *)sysbrk(sizeof(struct CmdBlk));
-	bzero(CmdBlkP, sizeof(struct CmdBlk));
+	if (CmdBlkP)
+		bzero(CmdBlkP, sizeof(struct CmdBlk));
 
 	return CmdBlkP;
 }

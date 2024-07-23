@@ -21,7 +21,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -487,3 +487,5 @@ static void do_install_cmap(int con, struct fb_info *info)
 	fb_set_cmap(fb_default_cmap(1<<fb_display[con].var.bits_per_pixel), 1,
 		    g364fb_setcolreg, info);
 }
+
+MODULE_LICENSE("GPL");

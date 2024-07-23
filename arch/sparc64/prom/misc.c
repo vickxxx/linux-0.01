@@ -1,4 +1,4 @@
-/* $Id: misc.c,v 1.19 2000/06/30 10:18:38 davem Exp $
+/* $Id: misc.c,v 1.20 2001/09/21 03:17:07 kanoj Exp $
  * misc.c:  Miscellaneous prom functions that don't belong
  *          anywhere else.
  *
@@ -59,25 +59,15 @@ prom_cmdline(void)
 		prom_palette (1);
 #endif
 
-	/* We always arrive here via a serial interrupt.
-	 * So in order for everything to work reliably, even
-	 * on SMP, we need to drop the IRQ locks we hold.
-	 */
 #ifdef CONFIG_SMP
-	irq_exit(smp_processor_id(), 0);
 	smp_capture();
-#else
-	local_irq_count(smp_processor_id())--;
 #endif
 
 	p1275_cmd ("enter", P1275_INOUT(0,0));
 
 #ifdef CONFIG_SMP
 	smp_release();
-	irq_enter(smp_processor_id(), 0);
 	spin_unlock_wait(&__br_write_locks[BR_GLOBALIRQ_LOCK].lock);
-#else
-	local_irq_count(smp_processor_id())++;
 #endif
 
 #ifdef CONFIG_SUN_CONSOLE
@@ -105,6 +95,19 @@ prom_halt(void)
 again:
 	p1275_cmd ("exit", P1275_INOUT(0,0));
 	goto again; /* PROM is out to get me -DaveM */
+}
+
+void
+prom_halt_power_off(void)
+{
+#ifdef CONFIG_SMP
+	smp_promstop_others();
+	udelay(8000);
+#endif
+	p1275_cmd ("SUNW,power-off", P1275_INOUT(0,0));
+
+	/* if nothing else helps, we just halt */
+	prom_halt ();
 }
 
 /* Set prom sync handler to call function 'funcp'. */
@@ -181,7 +184,7 @@ int prom_get_mmu_ihandle(void)
 
 static int prom_get_memory_ihandle(void)
 {
-	static int memory_ihandle_cache = 0;
+	static int memory_ihandle_cache;
 	int node, ret;
 
 	if (memory_ihandle_cache != 0)

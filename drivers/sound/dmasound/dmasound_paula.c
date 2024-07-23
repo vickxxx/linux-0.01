@@ -1,11 +1,18 @@
-
 /*
  *  linux/drivers/sound/dmasound/dmasound_paula.c
  *
  *  Amiga `Paula' DMA Sound Driver
  *
  *  See linux/drivers/sound/dmasound/dmasound_core.c for copyright and credits
- */
+ *  prior to 28/01/2001
+ *
+ *  28/01/2001 [0.1] Iain Sandoe
+ *		     - added versioning
+ *		     - put in and populated the hardware_afmts field.
+ *             [0.2] - put in SNDCTL_DSP_GETCAPS value.
+ *	       [0.3] - put in constraint on state buffer usage.
+ *	       [0.4] - put in default hard/soft settings
+*/
 
 
 #include <linux/module.h>
@@ -23,6 +30,8 @@
 
 #include "dmasound.h"
 
+#define DMASOUND_PAULA_REVISION 0
+#define DMASOUND_PAULA_EDITION 4
 
    /*
     *	The minimum period for audio depends on htotal (for OCS/ECS/AGA)
@@ -113,8 +122,8 @@ static inline void enable_heartbeat(void)
 
 static void AmiMixerInit(void);
 static int AmiMixerIoctl(u_int cmd, u_long arg);
-static void AmiWriteSqSetup(void);
-static int AmiStateInfo(char *buffer);
+static int AmiWriteSqSetup(void);
+static int AmiStateInfo(char *buffer, size_t space);
 
 
 /*** Translations ************************************************************/
@@ -155,14 +164,14 @@ static ssize_t ami_ct_s8(const u_char *userPtr, size_t userCount,
 
 	if (!dmasound.soft.stereo) {
 		void *p = &frame[*frameUsed];
-		count = min(userCount, frameLeft) & ~1;
+		count = min_t(unsigned long, userCount, frameLeft) & ~1;
 		used = count;
 		if (copy_from_user(p, userPtr, count))
 			return -EFAULT;
 	} else {
 		u_char *left = &frame[*frameUsed>>1];
 		u_char *right = left+write_sq_block_size_half;
-		count = min(userCount, frameLeft)>>1 & ~1;
+		count = min_t(unsigned long, userCount, frameLeft)>>1 & ~1;
 		used = count*2;
 		while (count > 0) {
 			if (get_user(*left++, userPtr++)
@@ -189,7 +198,7 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 									\
 	if (!dmasound.soft.stereo) {					\
 		u_char *p = &frame[*frameUsed];				\
-		count = min(userCount, frameLeft) & ~1;			\
+		count = min_t(size_t, userCount, frameLeft) & ~1;	\
 		used = count;						\
 		while (count > 0) {					\
 			u_char data;					\
@@ -201,7 +210,7 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 	} else {							\
 		u_char *left = &frame[*frameUsed>>1];			\
 		u_char *right = left+write_sq_block_size_half;		\
-		count = min(userCount, frameLeft)>>1 & ~1;		\
+		count = min_t(size_t, userCount, frameLeft)>>1 & ~1;	\
 		used = count*2;						\
 		while (count > 0) {					\
 			u_char data;					\
@@ -242,7 +251,7 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 	if (!dmasound.soft.stereo) {					\
 		u_char *high = &frame[*frameUsed>>1];			\
 		u_char *low = high+write_sq_block_size_half;		\
-		count = min(userCount, frameLeft)>>1 & ~1;		\
+		count = min_t(size_t, userCount, frameLeft)>>1 & ~1;	\
 		used = count*2;						\
 		while (count > 0) {					\
 			if (get_user(data, ((u_short *)userPtr)++))	\
@@ -257,7 +266,7 @@ static ssize_t funcname(const u_char *userPtr, size_t userCount,	\
 		u_char *leftl = lefth+write_sq_block_size_quarter;	\
 		u_char *righth = lefth+write_sq_block_size_half;	\
 		u_char *rightl = righth+write_sq_block_size_quarter;	\
-		count = min(userCount, frameLeft)>>2 & ~1;		\
+		count = min_t(size_t, userCount, frameLeft)>>2 & ~1;	\
 		used = count*4;						\
 		while (count > 0) {					\
 			if (get_user(data, ((u_short *)userPtr)++))	\
@@ -646,26 +655,44 @@ static int AmiMixerIoctl(u_int cmd, u_long arg)
 }
 
 
-static void AmiWriteSqSetup(void)
+static int AmiWriteSqSetup(void)
 {
 	write_sq_block_size_half = write_sq.block_size>>1;
 	write_sq_block_size_quarter = write_sq_block_size_half>>1;
+	return 0;
 }
 
 
-static int AmiStateInfo(char *buffer)
+static int AmiStateInfo(char *buffer, size_t space)
 {
 	int len = 0;
 	len += sprintf(buffer+len, "\tsound.volume_left = %d [0...64]\n",
 		       dmasound.volume_left);
 	len += sprintf(buffer+len, "\tsound.volume_right = %d [0...64]\n",
 		       dmasound.volume_right);
+	if (len >= space) {
+		printk(KERN_ERR "dmasound_paula: overlowed state buffer alloc.\n") ;
+		len = space ;
+	}
 	return len;
 }
 
 
 /*** Machine definitions *****************************************************/
 
+static SETTINGS def_hard = {
+	format: AFMT_S8,
+	stereo: 0,
+	size: 8,
+	speed: 8000
+} ;
+
+static SETTINGS def_soft = {
+	format: AFMT_U8,
+	stereo: 0,
+	size: 8,
+	speed: 8000
+} ;
 
 static MACHINE machAmiga = {
 	name:		"Amiga",
@@ -688,7 +715,10 @@ static MACHINE machAmiga = {
 	mixer_ioctl:	AmiMixerIoctl,
 	write_sq_setup:	AmiWriteSqSetup,
 	state_info:	AmiStateInfo,
-	min_dsp_speed:	8000
+	min_dsp_speed:	8000,
+	version:	((DMASOUND_PAULA_REVISION<<8) | DMASOUND_PAULA_EDITION),
+	hardware_afmts:	(AFMT_S8 | AFMT_S16_BE), /* h'ware-supported formats *only* here */
+        capabilities:   DSP_CAP_BATCH          /* As per SNDCTL_DSP_GETCAPS */
 };
 
 
@@ -704,6 +734,8 @@ int __init dmasound_paula_init(void)
 				    "dmasound [Paula]"))
 		return -EBUSY;
 	    dmasound.mach = machAmiga;
+	    dmasound.mach.default_hard = def_hard ;
+	    dmasound.mach.default_soft = def_soft ;
 	    err = dmasound_init();
 	    if (err)
 		release_mem_region(CUSTOM_PHYSADDR+0xa0, 0x40);
@@ -720,3 +752,4 @@ static void __exit dmasound_paula_cleanup(void)
 
 module_init(dmasound_paula_init);
 module_exit(dmasound_paula_cleanup);
+MODULE_LICENSE("GPL");

@@ -16,6 +16,7 @@
  *  nfs regular file handling functions
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -24,7 +25,7 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_mount.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/lockd/bind.h>
 #include <linux/smp_lock.h>
@@ -41,6 +42,7 @@ static int  nfs_file_flush(struct file *);
 static int  nfs_fsync(struct file *, struct dentry *dentry, int datasync);
 
 struct file_operations nfs_file_operations = {
+	llseek:		generic_file_llseek,
 	read:		nfs_file_read,
 	write:		nfs_file_write,
 	mmap:		nfs_file_mmap,
@@ -79,7 +81,7 @@ nfs_file_flush(struct file *file)
 	if (file->f_mode & FMODE_READ)
 		nfs_pagein_inode(inode, 0, 0);
 
-	status = nfs_wb_file(inode, file);
+	status = nfs_wb_all(inode);
 	if (!status) {
 		status = file->f_error;
 		file->f_error = 0;
@@ -134,7 +136,7 @@ nfs_fsync(struct file *file, struct dentry *dentry, int datasync)
 	dfprintk(VFS, "nfs: fsync(%x/%ld)\n", inode->i_dev, inode->i_ino);
 
 	lock_kernel();
-	status = nfs_wb_file(inode, file);
+	status = nfs_wb_all(inode);
 	if (!status) {
 		status = file->f_error;
 		file->f_error = 0;
@@ -154,22 +156,16 @@ nfs_fsync(struct file *file, struct dentry *dentry, int datasync)
  */
 static int nfs_prepare_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
-	kmap(page);
 	return nfs_flush_incompatible(file, page);
 }
+
 static int nfs_commit_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
 	long status;
-	loff_t pos = ((loff_t)page->index<<PAGE_CACHE_SHIFT) + to;
-	struct inode *inode = page->mapping->host;
 
-	kunmap(page);
 	lock_kernel();
 	status = nfs_updatepage(file, page, offset, to-offset);
 	unlock_kernel();
-	/* most likely it's already done. CHECKME */
-	if (pos > inode->i_size)
-		inode->i_size = pos;
 	return status;
 }
 
@@ -192,6 +188,7 @@ static int nfs_sync_page(struct page *page)
 	if (!inode)
 		return 0;
 
+	NFS_SetPageSync(page);
 	rpages = NFS_SERVER(inode)->rpages;
 	result = nfs_pagein_inode(inode, index, rpages);
 	if (result < 0)
@@ -203,6 +200,9 @@ struct address_space_operations nfs_file_aops = {
 	readpage: nfs_readpage,
 	sync_page: nfs_sync_page,
 	writepage: nfs_writepage,
+#ifdef CONFIG_NFS_DIRECTIO
+	direct_fileIO: nfs_direct_IO,
+#endif
 	prepare_write: nfs_prepare_write,
 	commit_write: nfs_commit_write
 };
@@ -241,6 +241,93 @@ out_swapfile:
 	goto out;
 }
 
+static int
+do_getlk(struct inode *inode, int cmd, struct file_lock *fl)
+{
+	int status;
+
+	lock_kernel();
+	status = nlmclnt_proc(inode, cmd, fl);
+	unlock_kernel();
+	return status;
+}
+
+static int
+do_unlk(struct inode *inode, int cmd, struct file_lock *fl)
+{
+	sigset_t oldset;
+	int status;
+
+	rpc_clnt_sigmask(NFS_CLIENT(inode), &oldset);
+	/*
+	 * Flush all pending writes before doing anything
+	 * with locks..
+	 */
+	filemap_fdatasync(inode->i_mapping);
+	down(&inode->i_sem);
+	nfs_wb_all(inode);
+	up(&inode->i_sem);
+	filemap_fdatawait(inode->i_mapping);
+
+	/* NOTE: special case
+	 *	If we're signalled while cleaning up locks on process exit, we
+	 *	still need to complete the unlock.
+	 */
+	lock_kernel();
+	status = nlmclnt_proc(inode, cmd, fl);
+	unlock_kernel();
+	rpc_clnt_sigunmask(NFS_CLIENT(inode), &oldset);
+	return status;
+}
+
+static int
+do_setlk(struct file *filp, int cmd, struct file_lock *fl)
+{
+	struct inode *inode = filp->f_dentry->d_inode;
+	int status;
+
+	/*
+	 * Flush all pending writes before doing anything
+	 * with locks..
+	 */
+	status = filemap_fdatasync(inode->i_mapping);
+	if (status == 0) {
+		down(&inode->i_sem);
+		status = nfs_wb_all(inode);
+		up(&inode->i_sem);
+		if (status == 0)
+			status = filemap_fdatawait(inode->i_mapping);
+	}
+	if (status < 0)
+		return status;
+
+	lock_kernel();
+	status = nlmclnt_proc(inode, cmd, fl);
+	/* If we were signalled we still need to ensure that
+	 * we clean up any state on the server. We therefore
+	 * record the lock call as having succeeded in order to
+	 * ensure that locks_remove_posix() cleans it out when
+	 * the process exits.
+	 */
+	if (status == -EINTR || status == -ERESTARTSYS)
+		posix_lock_file(filp, fl, 0);
+	unlock_kernel();
+	if (status < 0)
+		return status;
+
+	/*
+	 * Make sure we clear the cache whenever we try to get the lock.
+	 * This makes locking act as a cache coherency point.
+	 */
+	filemap_fdatasync(inode->i_mapping);
+	down(&inode->i_sem);
+	nfs_wb_all(inode);      /* we may have slept */
+	up(&inode->i_sem);
+	filemap_fdatawait(inode->i_mapping);
+	nfs_zap_caches(inode);
+	return 0;
+}
+
 /*
  * Lock a (portion of) a file
  */
@@ -248,7 +335,6 @@ int
 nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 {
 	struct inode * inode = filp->f_dentry->d_inode;
-	int	status = 0;
 
 	dprintk("NFS: nfs_lock(f=%4x/%ld, t=%x, fl=%x, r=%Ld:%Ld)\n",
 			inode->i_dev, inode->i_ino,
@@ -264,9 +350,9 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 
 	/* Fake OK code if mounted without NLM support */
 	if (NFS_SERVER(inode)->flags & NFS_MOUNT_NONLM) {
-		if (cmd == F_GETLK)
-			status = LOCK_USE_CLNT;
-		goto out_ok;
+		if (IS_GETLK(cmd))
+			return LOCK_USE_CLNT;
+		return 0;
 	}
 
 	/*
@@ -279,31 +365,9 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 	if (!fl->fl_owner || (fl->fl_flags & (FL_POSIX|FL_BROKEN)) != FL_POSIX)
 		return -ENOLCK;
 
-	/*
-	 * Flush all pending writes before doing anything
-	 * with locks..
-	 */
-	down(&filp->f_dentry->d_inode->i_sem);
-	status = nfs_wb_all(inode);
-	up(&filp->f_dentry->d_inode->i_sem);
-	if (status < 0)
-		return status;
-
-	if ((status = nlmclnt_proc(inode, cmd, fl)) < 0)
-		return status;
-	else
-		status = 0;
-
-	/*
-	 * Make sure we clear the cache whenever we try to get the lock.
-	 * This makes locking act as a cache coherency point.
-	 */
- out_ok:
-	if ((cmd == F_SETLK || cmd == F_SETLKW) && fl->fl_type != F_UNLCK) {
-		down(&filp->f_dentry->d_inode->i_sem);
-		nfs_wb_all(inode);      /* we may have slept */
-		nfs_zap_caches(inode);
-		up(&filp->f_dentry->d_inode->i_sem);
-	}
-	return status;
+	if (IS_GETLK(cmd))
+		return do_getlk(inode, cmd, fl);
+	if (fl->fl_type == F_UNLCK)
+		return do_unlk(inode, cmd, fl);
+	return do_setlk(filp, cmd, fl);
 }

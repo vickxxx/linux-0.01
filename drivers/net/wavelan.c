@@ -1545,8 +1545,7 @@ static inline int wv_set_frequency(unsigned long ioaddr,	/* I/O port of the card
 	/* Setting by channel (same as wfreqsel) */
 	/* Warning: each channel is 22 MHz wide, so some of the channels
 	 * will interfere. */
-	if ((frequency->e == 0) &&
-	    (frequency->m >= 0) && (frequency->m < BAND_NUM)) {
+	if ((frequency->e == 0) && (frequency->m < BAND_NUM)) {
 		/* Get frequency offset. */
 		freq = channel_bands[frequency->m] >> 1;
 	}
@@ -2028,8 +2027,17 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 		if (wrq->u.data.pointer != (caddr_t) 0) {
 			struct iw_range range;
 
-			/* Set the length (useless:  it's constant). */
+			/* Set the length (very important for backward
+			 * compatibility) */
 			wrq->u.data.length = sizeof(struct iw_range);
+
+			/* Set all the info we don't care or don't know
+			 * about to zero */
+			memset(&range, 0, sizeof(range));
+
+			/* Set the Wireless Extension versions */
+			range.we_version_compiled = WIRELESS_EXT;
+			range.we_version_source = 9;
 
 			/* Set information in the range struct.  */
 			range.throughput = 1.6 * 1000 * 1000;	/* don't argue on this ! */
@@ -2051,6 +2059,10 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 			range.max_qual.qual = MMR_SGNL_QUAL;
 			range.max_qual.level = MMR_SIGNAL_LVL;
 			range.max_qual.noise = MMR_SILENCE_LVL;
+			range.avg_qual.qual = MMR_SGNL_QUAL; /* Always max */
+			/* Need to get better values for those two */
+			range.avg_qual.level = 30;
+			range.avg_qual.noise = 8;
 
 			range.num_bitrates = 1;
 			range.bitrate[0] = 2000000;	/* 2 Mb/s */
@@ -2285,7 +2297,7 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 			wv_splx(lp, &flags);
 			if (copy_to_user(wrq->u.data.pointer,
 					 lp->his_sum,
-					 sizeof(long) * lp->his_number);
+					 sizeof(long) * lp->his_number));
 				ret = -EFAULT;
 			wv_splhi(lp, &flags);
 
@@ -2469,8 +2481,9 @@ wv_packet_read(device * dev, u16 buf_off, int sksize)
 	netif_rx(skb);
 
 	/* Keep statistics up to date */
+	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
-	lp->stats.rx_bytes += skb->len;
+	lp->stats.rx_bytes += sksize;
 
 #ifdef DEBUG_RX_TRACE
 	printk(KERN_DEBUG "%s: <-wv_packet_read()\n", dev->name);
@@ -2769,6 +2782,9 @@ static inline int wv_packet_write(device * dev, void *buf, short length)
 		    (unsigned char *) &nop.nop_h.ac_link,
 		    sizeof(nop.nop_h.ac_link));
 
+	/* Make sure the watchdog will keep quiet for a while */
+	dev->trans_start = jiffies;
+
 	/* Keep stats up to date. */
 	lp->stats.tx_bytes += length;
 
@@ -2808,6 +2824,13 @@ static int wavelan_packet_xmit(struct sk_buff *skb, device * dev)
 	printk(KERN_DEBUG "%s: ->wavelan_packet_xmit(0x%X)\n", dev->name,
 	       (unsigned) skb);
 #endif
+
+	if(skb->len < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+	}
 
 	/*
 	 * Block a timer-based transmit from overlapping.
@@ -3685,7 +3708,7 @@ static void wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 * the spinlock. */
 	spin_lock(&lp->spinlock);
 
-	/* Check modem interupt */
+	/* Check modem interrupt */
 	if ((hasr = hasr_read(ioaddr)) & HASR_MMC_INTR) {
 		u8 dce_status;
 
@@ -3912,8 +3935,6 @@ static int wavelan_open(device * dev)
 	}
 	wv_splx(lp, &flags);
 	
-	MOD_INC_USE_COUNT;
-
 #ifdef DEBUG_CALLBACK_TRACE
 	printk(KERN_DEBUG "%s: <-wavelan_open()\n", dev->name);
 #endif
@@ -3945,8 +3966,6 @@ static int wavelan_close(device * dev)
 	wv_splx(lp, &flags);
 
 	free_irq(dev->irq, dev);
-
-	MOD_DEC_USE_COUNT;
 
 #ifdef DEBUG_CALLBACK_TRACE
 	printk(KERN_DEBUG "%s: <-wavelan_close()\n", dev->name);
@@ -4010,7 +4029,8 @@ static int __init wavelan_config(device * dev)
 
 	dev->irq = irq;
 
-	request_region(ioaddr, sizeof(ha_t), "wavelan");
+	if (!request_region(ioaddr, sizeof(ha_t), "wavelan"))
+		return -EBUSY;
 
 	dev->mem_start = 0x0000;
 	dev->mem_end = 0x0000;
@@ -4018,8 +4038,10 @@ static int __init wavelan_config(device * dev)
 
 	/* Initialize device structures */
 	dev->priv = kmalloc(sizeof(net_local), GFP_KERNEL);
-	if (dev->priv == NULL)
+	if (dev->priv == NULL) {
+		release_region(ioaddr, sizeof(ha_t));
 		return -ENOMEM;
+	}
 	memset(dev->priv, 0x00, sizeof(net_local));
 	lp = (net_local *) dev->priv;
 
@@ -4044,6 +4066,7 @@ static int __init wavelan_config(device * dev)
 	 */
 	ether_setup(dev);
 
+	SET_MODULE_OWNER(dev);
 	dev->open = wavelan_open;
 	dev->stop = wavelan_close;
 	dev->hard_start_xmit = wavelan_packet_xmit;
@@ -4283,17 +4306,18 @@ void cleanup_module(void)
 #endif
 }
 #endif				/* MODULE */
+MODULE_LICENSE("GPL");
 
 /*
  * This software may only be used and distributed
- * according to the terms of the GNU Public License.
+ * according to the terms of the GNU General Public License.
  *
  * This software was developed as a component of the
  * Linux operating system.
  * It is based on other device drivers and information
  * either written or supplied by:
  *	Ajay Bakre (bakre@paul.rutgers.edu),
- *	Donald Becker (becker@cesdis.gsfc.nasa.gov),
+ *	Donald Becker (becker@scyld.com),
  *	Loeke Brederveld (Loeke.Brederveld@Utrecht.NCR.com),
  *	Anders Klemets (klemets@it.kth.se),
  *	Vladimir V. Kolpakov (w@stier.koenig.ru),

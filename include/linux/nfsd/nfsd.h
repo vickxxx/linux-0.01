@@ -37,7 +37,8 @@
 #define MAY_TRUNC		16
 #define MAY_LOCK		32
 #define MAY_OWNER_OVERRIDE	64
-#if (MAY_SATTR | MAY_TRUNC | MAY_LOCK | MAX_OWNER_OVERRIDE) & (MAY_READ | MAY_WRITE | MAY_EXEC | MAY_OWNER_OVERRIDE)
+#define _NFSD_IRIX_BOGOSITY	128
+#if (MAY_SATTR | MAY_TRUNC | MAY_LOCK | MAY_OWNER_OVERRIDE | _NFSD_IRIX_BOGOSITY) & (MAY_READ | MAY_WRITE | MAY_EXEC)
 # error "please use a different value for MAY_SATTR or MAY_TRUNC or MAY_LOCK or MAY_OWNER_OVERRIDE."
 #endif
 #define MAY_CREATE		(MAY_EXEC|MAY_WRITE)
@@ -57,7 +58,7 @@ struct readdir_cd {
 	char			dotonly;
 };
 typedef int		(*encode_dent_fn)(struct readdir_cd *, const char *,
-						int, off_t, ino_t, unsigned int);
+						int, loff_t, ino_t, unsigned int);
 typedef int (*nfsd_dirop_t)(struct inode *, struct dentry *, int, int);
 
 /*
@@ -81,7 +82,7 @@ void		nfsd_racache_shutdown(void);
 int		nfsd_lookup(struct svc_rqst *, struct svc_fh *,
 				const char *, int, struct svc_fh *);
 int		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
-				struct iattr *);
+				struct iattr *, int, time_t);
 int		nfsd_create(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				int type, dev_t rdev, struct svc_fh *res);
@@ -143,6 +144,7 @@ void		nfsd_lockd_unexport(struct svc_client *);
 #define	nfserr_noent		__constant_htonl(NFSERR_NOENT)
 #define	nfserr_io		__constant_htonl(NFSERR_IO)
 #define	nfserr_nxio		__constant_htonl(NFSERR_NXIO)
+#define	nfserr_eagain		__constant_htonl(NFSERR_EAGAIN)
 #define	nfserr_acces		__constant_htonl(NFSERR_ACCES)
 #define	nfserr_exist		__constant_htonl(NFSERR_EXIST)
 #define	nfserr_xdev		__constant_htonl(NFSERR_XDEV)
@@ -160,14 +162,20 @@ void		nfsd_lockd_unexport(struct svc_client *);
 #define	nfserr_dquot		__constant_htonl(NFSERR_DQUOT)
 #define	nfserr_stale		__constant_htonl(NFSERR_STALE)
 #define	nfserr_remote		__constant_htonl(NFSERR_REMOTE)
+#define	nfserr_wflush		__constant_htonl(NFSERR_WFLUSH)
 #define	nfserr_badhandle	__constant_htonl(NFSERR_BADHANDLE)
-#define	nfserr_notsync		__constant_htonl(NFSERR_NOTSYNC)
-#define	nfserr_badcookie	__constant_htonl(NFSERR_BADCOOKIE)
+#define	nfserr_notsync		__constant_htonl(NFSERR_NOT_SYNC)
+#define	nfserr_badcookie	__constant_htonl(NFSERR_BAD_COOKIE)
 #define	nfserr_notsupp		__constant_htonl(NFSERR_NOTSUPP)
 #define	nfserr_toosmall		__constant_htonl(NFSERR_TOOSMALL)
 #define	nfserr_serverfault	__constant_htonl(NFSERR_SERVERFAULT)
 #define	nfserr_badtype		__constant_htonl(NFSERR_BADTYPE)
 #define	nfserr_jukebox		__constant_htonl(NFSERR_JUKEBOX)
+
+/* error code for internal use - if a request fails due to
+ * kmalloc failure, it gets dropped.  Client should resend eventually
+ */
+#define	nfserr_dropit		__constant_htonl(30000)
 
 /* Check for dir entries '.' and '..' */
 #define isdotent(n, l)	(l < 3 && n[0] == '.' && (l == 1 || n[1] == '.'))

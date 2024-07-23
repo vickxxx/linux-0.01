@@ -36,8 +36,9 @@ static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 
 #define __NO_VERSION__
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/interrupt.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/string.h>
@@ -327,6 +328,7 @@ register struct DownLoad *rbp;
 
 			if ( copyin((int)rbp->DataP,DownCode,rbp->Count)==COPYFAIL ) {
 				rio_dprintk (RIO_DEBUG_BOOT, "Bad copyin of host data\n");
+				sysfree( DownCode, rbp->Count );
 				p->RIOError.Error = COPYIN_FAILED;
 				func_exit ();
 				return EFAULT;

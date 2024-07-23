@@ -40,86 +40,138 @@
    - Bottom halves: globally serialized, grr...
  */
 
-/* No separate irq_stat for s390, it is part of PSA */
-#if !defined(CONFIG_ARCH_S390)
-irq_cpustat_t irq_stat[NR_CPUS];
-#endif	/* CONFIG_ARCH_S390 */
+irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
 
 static struct softirq_action softirq_vec[32] __cacheline_aligned;
+
+/*
+ * we cannot loop indefinitely here to avoid userspace starvation,
+ * but we also don't want to introduce a worst case 1/HZ latency
+ * to the pending events, so lets the scheduler to balance
+ * the softirq load for us.
+ */
+static inline void wakeup_softirqd(unsigned cpu)
+{
+	struct task_struct * tsk = ksoftirqd_task(cpu);
+
+	if (tsk && tsk->state != TASK_RUNNING)
+		wake_up_process(tsk);
+}
 
 asmlinkage void do_softirq()
 {
 	int cpu = smp_processor_id();
-	__u32 active, mask;
+	__u32 pending;
+	unsigned long flags;
+	__u32 mask;
 
 	if (in_interrupt())
 		return;
 
-	local_bh_disable();
+	local_irq_save(flags);
 
-	local_irq_disable();
-	mask = softirq_mask(cpu);
-	active = softirq_active(cpu) & mask;
+	pending = softirq_pending(cpu);
 
-	if (active) {
+	if (pending) {
 		struct softirq_action *h;
 
+		mask = ~pending;
+		local_bh_disable();
 restart:
-		/* Reset active bitmask before enabling irqs */
-		softirq_active(cpu) &= ~active;
+		/* Reset the pending bitmask before enabling irqs */
+		softirq_pending(cpu) = 0;
 
 		local_irq_enable();
 
 		h = softirq_vec;
-		mask &= ~active;
 
 		do {
-			if (active & 1)
+			if (pending & 1)
 				h->action(h);
 			h++;
-			active >>= 1;
-		} while (active);
+			pending >>= 1;
+		} while (pending);
 
 		local_irq_disable();
 
-		active = softirq_active(cpu);
-		if ((active &= mask) != 0)
-			goto retry;
+		pending = softirq_pending(cpu);
+		if (pending & mask) {
+			mask &= ~pending;
+			goto restart;
+		}
+		__local_bh_enable();
+
+		if (pending)
+			wakeup_softirqd(cpu);
 	}
 
-	local_bh_enable();
-
-	/* Leave with locally disabled hard irqs. It is critical to close
-	 * window for infinite recursion, while we help local bh count,
-	 * it protected us. Now we are defenceless.
-	 */
-	return;
-
-retry:
-	goto restart;
+	local_irq_restore(flags);
 }
 
+/*
+ * This function must run with irq disabled!
+ */
+inline fastcall void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
+{
+	__cpu_raise_softirq(cpu, nr);
 
-static spinlock_t softirq_mask_lock = SPIN_LOCK_UNLOCKED;
+	/*
+	 * If we're in an interrupt or bh, we're done
+	 * (this also catches bh-disabled code). We will
+	 * actually run the softirq once we return from
+	 * the irq or bh.
+	 *
+	 * Otherwise we wake up ksoftirqd to make sure we
+	 * schedule the softirq soon.
+	 */
+	if (!(local_irq_count(cpu) | local_bh_count(cpu)))
+		wakeup_softirqd(cpu);
+}
+
+void fastcall raise_softirq(unsigned int nr)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	cpu_raise_softirq(smp_processor_id(), nr);
+	local_irq_restore(flags);
+}
 
 void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)
 {
-	unsigned long flags;
-	int i;
-
-	spin_lock_irqsave(&softirq_mask_lock, flags);
 	softirq_vec[nr].data = data;
 	softirq_vec[nr].action = action;
-
-	for (i=0; i<NR_CPUS; i++)
-		softirq_mask(i) |= (1<<nr);
-	spin_unlock_irqrestore(&softirq_mask_lock, flags);
 }
 
 
 /* Tasklets */
 
 struct tasklet_head tasklet_vec[NR_CPUS] __cacheline_aligned;
+struct tasklet_head tasklet_hi_vec[NR_CPUS] __cacheline_aligned;
+
+void fastcall __tasklet_schedule(struct tasklet_struct *t)
+{
+	int cpu = smp_processor_id();
+	unsigned long flags;
+
+	local_irq_save(flags);
+	t->next = tasklet_vec[cpu].list;
+	tasklet_vec[cpu].list = t;
+	cpu_raise_softirq(cpu, TASKLET_SOFTIRQ);
+	local_irq_restore(flags);
+}
+
+void fastcall __tasklet_hi_schedule(struct tasklet_struct *t)
+{
+	int cpu = smp_processor_id();
+	unsigned long flags;
+
+	local_irq_save(flags);
+	t->next = tasklet_hi_vec[cpu].list;
+	tasklet_hi_vec[cpu].list = t;
+	cpu_raise_softirq(cpu, HI_SOFTIRQ);
+	local_irq_restore(flags);
+}
 
 static void tasklet_action(struct softirq_action *a)
 {
@@ -131,29 +183,22 @@ static void tasklet_action(struct softirq_action *a)
 	tasklet_vec[cpu].list = NULL;
 	local_irq_enable();
 
-	while (list != NULL) {
+	while (list) {
 		struct tasklet_struct *t = list;
 
 		list = list->next;
 
 		if (tasklet_trylock(t)) {
-			if (atomic_read(&t->count) == 0) {
-				clear_bit(TASKLET_STATE_SCHED, &t->state);
-
+			if (!atomic_read(&t->count)) {
+				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
+					BUG();
 				t->func(t->data);
-				/*
-				 * talklet_trylock() uses test_and_set_bit that imply
-				 * an mb when it returns zero, thus we need the explicit
-				 * mb only here: while closing the critical section.
-				 */
-#ifdef CONFIG_SMP
-				smp_mb__before_clear_bit();
-#endif
 				tasklet_unlock(t);
 				continue;
 			}
 			tasklet_unlock(t);
 		}
+
 		local_irq_disable();
 		t->next = tasklet_vec[cpu].list;
 		tasklet_vec[cpu].list = t;
@@ -161,10 +206,6 @@ static void tasklet_action(struct softirq_action *a)
 		local_irq_enable();
 	}
 }
-
-
-
-struct tasklet_head tasklet_hi_vec[NR_CPUS] __cacheline_aligned;
 
 static void tasklet_hi_action(struct softirq_action *a)
 {
@@ -176,21 +217,22 @@ static void tasklet_hi_action(struct softirq_action *a)
 	tasklet_hi_vec[cpu].list = NULL;
 	local_irq_enable();
 
-	while (list != NULL) {
+	while (list) {
 		struct tasklet_struct *t = list;
 
 		list = list->next;
 
 		if (tasklet_trylock(t)) {
-			if (atomic_read(&t->count) == 0) {
-				clear_bit(TASKLET_STATE_SCHED, &t->state);
-
+			if (!atomic_read(&t->count)) {
+				if (!test_and_clear_bit(TASKLET_STATE_SCHED, &t->state))
+					BUG();
 				t->func(t->data);
 				tasklet_unlock(t);
 				continue;
 			}
 			tasklet_unlock(t);
 		}
+
 		local_irq_disable();
 		t->next = tasklet_hi_vec[cpu].list;
 		tasklet_hi_vec[cpu].list = t;
@@ -203,10 +245,11 @@ static void tasklet_hi_action(struct softirq_action *a)
 void tasklet_init(struct tasklet_struct *t,
 		  void (*func)(unsigned long), unsigned long data)
 {
-	t->func = func;
-	t->data = data;
+	t->next = NULL;
 	t->state = 0;
 	atomic_set(&t->count, 0);
+	t->func = func;
+	t->data = data;
 }
 
 void tasklet_kill(struct tasklet_struct *t)
@@ -217,8 +260,7 @@ void tasklet_kill(struct tasklet_struct *t)
 	while (test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
 		current->state = TASK_RUNNING;
 		do {
-			current->policy |= SCHED_YIELD;
-			schedule();
+			yield();
 		} while (test_bit(TASKLET_STATE_SCHED, &t->state));
 	}
 	tasklet_unlock_wait(t);
@@ -315,3 +357,59 @@ void __run_task_queue(task_queue *list)
 			f(data);
 	}
 }
+
+static int ksoftirqd(void * __bind_cpu)
+{
+	int bind_cpu = (int) (long) __bind_cpu;
+	int cpu = cpu_logical_map(bind_cpu);
+
+	daemonize();
+	current->nice = 19;
+	sigfillset(&current->blocked);
+
+	/* Migrate to the right CPU */
+	current->cpus_allowed = 1UL << cpu;
+	while (smp_processor_id() != cpu)
+		schedule();
+
+	sprintf(current->comm, "ksoftirqd_CPU%d", bind_cpu);
+
+	__set_current_state(TASK_INTERRUPTIBLE);
+	mb();
+
+	ksoftirqd_task(cpu) = current;
+
+	for (;;) {
+		if (!softirq_pending(cpu))
+			schedule();
+
+		__set_current_state(TASK_RUNNING);
+
+		while (softirq_pending(cpu)) {
+			do_softirq();
+			if (current->need_resched)
+				schedule();
+		}
+
+		__set_current_state(TASK_INTERRUPTIBLE);
+	}
+}
+
+static __init int spawn_ksoftirqd(void)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < smp_num_cpus; cpu++) {
+		if (kernel_thread(ksoftirqd, (void *) (long) cpu,
+				  CLONE_FS | CLONE_FILES | CLONE_SIGNAL) < 0)
+			printk("spawn_ksoftirqd() failed for cpu %d\n", cpu);
+		else {
+			while (!ksoftirqd_task(cpu_logical_map(cpu)))
+				yield();
+		}
+	}
+
+	return 0;
+}
+
+__initcall(spawn_ksoftirqd);

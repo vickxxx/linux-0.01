@@ -38,6 +38,9 @@
 #define ARPHRD_DLCI	15		/* Frame Relay DLCI		*/
 #define ARPHRD_ATM	19		/* ATM 				*/
 #define ARPHRD_METRICOM	23		/* Metricom STRIP (new IANA id)	*/
+#define	ARPHRD_IEEE1394	24		/* IEEE 1394 IPv4 - RFC 2734	*/
+#define ARPHRD_EUI64	27		/* EUI-64                       */
+#define ARPHRD_INFINIBAND	32		/* InfiniBand                   */
 
 /* Dummy types for non ARP hardware */
 #define ARPHRD_SLIP	256
@@ -50,9 +53,11 @@
 #define ARPHRD_X25	271		/* CCITT X.25			*/
 #define ARPHRD_HWX25	272		/* Boards with X.25 in firmware	*/
 #define ARPHRD_PPP	512
-#define ARPHRD_HDLC	513		/* (Cisco) HDLC 		*/
+#define ARPHRD_CISCO	513		/* Cisco HDLC	 		*/
+#define ARPHRD_HDLC	ARPHRD_CISCO
 #define ARPHRD_LAPB	516		/* LAPB				*/
 #define ARPHRD_DDCMP    517		/* Digital's DDCMP protocol     */
+#define ARPHRD_RAWHDLC	518		/* Raw HDLC			*/
 
 #define ARPHRD_TUNNEL	768		/* IPIP tunnel			*/
 #define ARPHRD_TUNNEL6	769		/* IPIP6 tunnel			*/
@@ -71,14 +76,17 @@
 #define ARPHRD_ECONET	782		/* Acorn Econet			*/
 #define ARPHRD_IRDA 	783		/* Linux-IrDA			*/
 /* ARP works differently on different FC media .. so  */
-#define ARPHRD_FCPP	784		/* Point to point fibrechanel	*/
+#define ARPHRD_FCPP	784		/* Point to point fibrechannel	*/
 #define ARPHRD_FCAL	785		/* Fibrechannel arbitrated loop */
 #define ARPHRD_FCPL	786		/* Fibrechannel public loop	*/
 #define ARPHRD_FCFABRIC	787		/* Fibrechannel fabric		*/
 	/* 787->799 reserved for fibrechannel media types */
 #define ARPHRD_IEEE802_TR 800		/* Magic type ident for TR	*/
+#define ARPHRD_IEEE80211 801		/* IEEE 802.11			*/
+#define ARPHRD_IEEE80211_PRISM 802	/* IEEE 802.11 + Prism2 header  */
 
 #define ARPHRD_VOID	  0xFFFF	/* Void type, nothing is known */
+#define ARPHRD_NONE	  0xFFFE	/* zero header length */
 
 /* ARP protocol opcodes. */
 #define	ARPOP_REQUEST	1		/* ARP request			*/

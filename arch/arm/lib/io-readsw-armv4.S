@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/lib/io-readsb.S
+ *  linux/arch/arm/lib/io-readsw-armv4.S
  *
  *  Copyright (C) 1995-2000 Russell King
  *
@@ -28,7 +28,9 @@
 		subs	r2, r2, #1
 		RETINSTR(moveq, pc, lr)
 
-ENTRY(__arch_readsw)
+ENTRY(__raw_readsw)
+		teq	r2, #0		@ do we have to check for the zero len?
+		moveq	pc, lr
 		tst	r1, #3
 		bne	.insw_align
 
@@ -46,16 +48,18 @@ ENTRY(__arch_readsw)
 		orr	r4, r4, r5, lsl #16
 
 		ldrh	r5, [r0]
-		ldrh	r6, [r0]
-		orr	r5, r5, r6, lsl #16
+		ldrh	ip, [r0]
+		orr	r5, r5, ip, lsl #16
 
 		ldrh	ip, [r0]
 		ldrh	lr, [r0]
 		orr	ip, ip, lr, lsl #16
 
 		stmia	r1!, {r3 - r5, ip}
+
 		subs	r2, r2, #8
 		bpl	.insw_8_lp
+
 		tst	r2, #7
 		LOADREGS(eqfd, sp!, {r4, r5, pc})
 
@@ -84,4 +88,5 @@ ENTRY(__arch_readsw)
 .no_insw_2:	tst	r2, #1
 		ldrneh	r3, [r0]
 		strneh	r3, [r1]
+
 		LOADREGS(fd, sp!, {r4, r5, pc})

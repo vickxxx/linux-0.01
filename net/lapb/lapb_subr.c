@@ -13,8 +13,6 @@
  *	LAPB 001	Jonathan Naylor	Started Coding
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_LAPB) || defined(CONFIG_LAPB_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -40,13 +38,8 @@
  */
 void lapb_clear_queues(lapb_cb *lapb)
 {
-	struct sk_buff *skb;
-
-	while ((skb = skb_dequeue(&lapb->write_queue)) != NULL)
-		kfree_skb(skb);
-
-	while ((skb = skb_dequeue(&lapb->ack_queue)) != NULL)
-		kfree_skb(skb);
+	skb_queue_purge(&lapb->write_queue);
+	skb_queue_purge(&lapb->ack_queue);
 }
 
 /*
@@ -281,5 +274,3 @@ void lapb_transmit_frmr(lapb_cb *lapb)
 
 	lapb_transmit_buffer(lapb, skb, LAPB_RESPONSE);
 }
-
-#endif

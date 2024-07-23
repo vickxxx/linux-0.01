@@ -1,4 +1,4 @@
-/* $Id: irq_imask.c,v 1.6 2000/03/06 14:11:32 gniibe Exp $
+/* $Id: irq_imask.c,v 1.13 2001/07/12 08:13:56 gniibe Exp $
  *
  * linux/arch/sh/kernel/irq_imask.c
  *
@@ -59,16 +59,16 @@ void static inline set_interrupt_registers(int ip)
 {
 	unsigned long __dummy;
 
-	asm volatile("ldc	%2, $r6_bank\n\t"
-		     "stc	$sr, %0\n\t"
+	asm volatile("ldc	%2, r6_bank\n\t"
+		     "stc	sr, %0\n\t"
 		     "and	#0xf0, %0\n\t"
 		     "shlr2	%0\n\t"
 		     "cmp/eq	#0x3c, %0\n\t"
 		     "bt/s	1f	! CLI-ed\n\t"
-		     " stc	$sr, %0\n\t"
+		     " stc	sr, %0\n\t"
 		     "and	%1, %0\n\t"
 		     "or	%2, %0\n\t"
-		     "ldc	%0, $sr\n"
+		     "ldc	%0, sr\n"
 		     "1:"
 		     : "=&z" (__dummy)
 		     : "r" (~0xf0), "r" (ip << 4)
@@ -99,7 +99,8 @@ static void mask_and_ack_imask(unsigned int irq)
 
 static void end_imask_irq(unsigned int irq)
 {
-	enable_imask_irq(irq);
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		enable_imask_irq(irq);
 }
 
 static void shutdown_imask_irq(unsigned int irq)

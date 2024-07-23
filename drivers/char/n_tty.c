@@ -15,7 +15,7 @@
  * This file also contains code originally written by Linus Torvalds,
  * Copyright 1991, 1992, 1993, and by Julian Cowley, Copyright 1994.
  * 
- * This file may be redistributed under the terms of the GNU Public
+ * This file may be redistributed under the terms of the GNU General Public
  * License.
  *
  * Reduced memory usage for older ARM systems  - Russell King.
@@ -23,6 +23,11 @@
  * 2000/01/20   Fixed SMP locking on put_tty_queue using bits of 
  *		the patch by Andrew J. Kroll <ag784@freenet.buffalo.edu>
  *		who actually finally proved there really was a race.
+ *
+ * 2002/03/18   Implemented n_tty_wakeup to send SIGIO POLL_OUTs to
+ *		waiting writing processes-Sapan Bhatia <sapan@corewars.org>.
+ *		Also fixed a bug in BLOCKING mode where write_chan returns
+ *		EAGAIN
  */
 
 #include <linux/types.h>
@@ -38,7 +43,7 @@
 #include <linux/kd.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/poll.h>
 
 #include <asm/uaccess.h>
@@ -86,27 +91,39 @@ static inline void free_buf(unsigned char *buf)
 		free_page((unsigned long) buf);
 }
 
-static inline void put_tty_queue(unsigned char c, struct tty_struct *tty)
+static inline void put_tty_queue_nolock(unsigned char c, struct tty_struct *tty)
 {
-	unsigned long flags;
-	/*
-	 *	The problem of stomping on the buffers ends here.
-	 *	Why didn't anyone see this one comming? --AJK
-	*/
-	spin_lock_irqsave(&tty->read_lock, flags);
 	if (tty->read_cnt < N_TTY_BUF_SIZE) {
 		tty->read_buf[tty->read_head] = c;
 		tty->read_head = (tty->read_head + 1) & (N_TTY_BUF_SIZE-1);
 		tty->read_cnt++;
 	}
+}
+
+static inline void put_tty_queue(unsigned char c, struct tty_struct *tty)
+{
+	unsigned long flags;
+	/*
+	 *	The problem of stomping on the buffers ends here.
+	 *	Why didn't anyone see this one coming? --AJK
+	*/
+	spin_lock_irqsave(&tty->read_lock, flags);
+	put_tty_queue_nolock(c, tty);
 	spin_unlock_irqrestore(&tty->read_lock, flags);
 }
 
-/* 
- * Check whether to call the driver.unthrottle function.
- * We test the TTY_THROTTLED bit first so that it always
- * indicates the current state.
+/**
+ *	check_unthrottle	-	allow new receive data
+ *	@tty; tty device
+ *
+ *	Check whether to call the driver.unthrottle function.
+ *	We test the TTY_THROTTLED bit first so that it always
+ *	indicates the current state. The decision about whether
+ *	it is worth allowing more input has been taken by the caller.
+ *	Can sleep, may be called under the atomic_read semaphore but
+ *	this is not guaranteed.
  */
+ 
 static void check_unthrottle(struct tty_struct * tty)
 {
 	if (tty->count &&
@@ -115,10 +132,13 @@ static void check_unthrottle(struct tty_struct * tty)
 		tty->driver.unthrottle(tty);
 }
 
-/*
- * Reset the read buffer counters, clear the flags, 
- * and make sure the driver is unthrottled. Called
- * from n_tty_open() and n_tty_flush_buffer().
+/**
+ *	reset_buffer_flags	-	reset buffer state
+ *	@tty: terminal to reset
+ *
+ *	Reset the read buffer counters, clear the flags, 
+ *	and make sure the driver is unthrottled. Called
+ *	from n_tty_open() and n_tty_flush_buffer().
  */
 static void reset_buffer_flags(struct tty_struct *tty)
 {
@@ -132,9 +152,19 @@ static void reset_buffer_flags(struct tty_struct *tty)
 	check_unthrottle(tty);
 }
 
-/*
- * Flush the input buffer
+/**
+ *	n_tty_flush_buffer	-	clean input queue
+ *	@tty:	terminal device
+ *
+ *	Flush the input buffer. Called when the line discipline is
+ *	being closed, when the tty layer wants the buffer flushed (eg
+ *	at hangup) or when the N_TTY line discipline internally has to
+ *	clean the pending queue (for example some signals).
+ *
+ *	FIXME: tty->ctrl_status is not spinlocked and relies on
+ *	lock_kernel() still.
  */
+ 
 void n_tty_flush_buffer(struct tty_struct * tty)
 {
 	/* clear everything and unthrottle the driver */
@@ -149,9 +179,14 @@ void n_tty_flush_buffer(struct tty_struct * tty)
 	}
 }
 
-/*
- * Return number of characters buffered to be delivered to user
+/**
+ *	n_tty_chars_in_buffer	-	report available bytes
+ *	@tty: tty device
+ *
+ *	Report the number of characters buffered to be delivered to user
+ *	at this instant in time. 
  */
+ 
 ssize_t n_tty_chars_in_buffer(struct tty_struct *tty)
 {
 	unsigned long flags;
@@ -232,10 +267,20 @@ static int opost(unsigned char c, struct tty_struct *tty)
 	return 0;
 }
 
-/*
- * opost_block --- to speed up block console writes, among other
- * things.
+/**
+ *	opost_block		-	block postprocess
+ *	@tty: terminal device
+ *	@inbuf: user buffer
+ *	@nr: number of bytes
+ *
+ *	This path is used to speed up block console writes, among other
+ *	things when processing blocks of output data. It handles only
+ *	the simple cases normally found and helps to generate blocks of
+ *	symbols for the console driver and thus improve performance.
+ *
+ *	Called from write_chan under the tty layer write lock.
  */
+ 
 static ssize_t opost_block(struct tty_struct * tty,
 		       const unsigned char * inbuf, unsigned int nr)
 {
@@ -324,6 +369,16 @@ static inline void finish_erasing(struct tty_struct *tty)
 	}
 }
 
+/**
+ *	eraser		-	handle erase function
+ *	@c: character input
+ *	@tty: terminal device
+ *
+ *	Perform erase and neccessary output when an erase character is
+ *	present in the stream from the driver layer. Handles the complexities
+ *	of UTF-8 multibyte symbols.
+ */
+ 
 static void eraser(unsigned char c, struct tty_struct *tty)
 {
 	enum { ERASE, WERASE, KILL } kill_type;
@@ -440,6 +495,18 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 		finish_erasing(tty);
 }
 
+/**
+ *	isig		-	handle the ISIG optio
+ *	@sig: signal
+ *	@tty: terminal
+ *	@flush: force flush
+ *
+ *	Called when a signal is being sent due to terminal input. This
+ *	may caus terminal flushing to take place according to the termios
+ *	settings and character used. Called from the driver receive_buf
+ *	path so serialized.
+ */
+ 
 static inline void isig(int sig, struct tty_struct *tty, int flush)
 {
 	if (tty->pgrp > 0)
@@ -451,6 +518,16 @@ static inline void isig(int sig, struct tty_struct *tty, int flush)
 	}
 }
 
+/**
+ *	n_tty_receive_break	-	handle break
+ *	@tty: terminal
+ *
+ *	An RS232 break event has been hit in the incoming bitstream. This
+ *	can cause a variety of events depending upon the termios settings.
+ *
+ *	Called from the receive_buf path so single threaded.
+ */
+ 
 static inline void n_tty_receive_break(struct tty_struct *tty)
 {
 	if (I_IGNBRK(tty))
@@ -467,19 +544,40 @@ static inline void n_tty_receive_break(struct tty_struct *tty)
 	wake_up_interruptible(&tty->read_wait);
 }
 
+/**
+ *	n_tty_receive_overrun	-	handle overrun reporting
+ *	@tty: terminal
+ *
+ *	Data arrived faster than we could process it. While the tty
+ *	driver has flagged this the bits that were missed are gone
+ *	forever.
+ *
+ *	Called from the receive_buf path so single threaded. Does not
+ *	need locking as num_overrun and overrun_time are function
+ *	private.
+ */
+ 
 static inline void n_tty_receive_overrun(struct tty_struct *tty)
 {
 	char buf[64];
 
 	tty->num_overrun++;
 	if (time_before(tty->overrun_time, jiffies - HZ)) {
-		printk("%s: %d input overrun(s)\n", tty_name(tty, buf),
+		printk(KERN_WARNING "%s: %d input overrun(s)\n", tty_name(tty, buf),
 		       tty->num_overrun);
 		tty->overrun_time = jiffies;
 		tty->num_overrun = 0;
 	}
 }
 
+/**
+ *	n_tty_receive_parity_error	-	error notifier
+ *	@tty: terminal device
+ *	@c: character
+ *
+ *	Process a parity error and queue the right data to indicate
+ *	the error case if neccessary. Locking as per n_tty_receive_buf.
+ */
 static inline void n_tty_receive_parity_error(struct tty_struct *tty,
 					      unsigned char c)
 {
@@ -497,8 +595,20 @@ static inline void n_tty_receive_parity_error(struct tty_struct *tty,
 	wake_up_interruptible(&tty->read_wait);
 }
 
+/**
+ *	n_tty_receive_char	-	perform processing
+ *	@tty: terminal device
+ *	@c: character
+ *
+ *	Process an individual character of input received from the driver.
+ *	This is serialized with respect to itself by the rules for the 
+ *	driver above.
+ */
+
 static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 {
+	unsigned long flags;
+
 	if (tty->raw) {
 		put_tty_queue(c, tty);
 		return;
@@ -651,10 +761,12 @@ send_signal:
 				put_tty_queue(c, tty);
 
 		handle_newline:
+			spin_lock_irqsave(&tty->read_lock, flags);
 			set_bit(tty->read_head, &tty->read_flags);
-			put_tty_queue(c, tty);
+			put_tty_queue_nolock(c, tty);
 			tty->canon_head = tty->read_head;
 			tty->canon_data++;
+			spin_unlock_irqrestore(&tty->read_lock, flags);
 			kill_fasync(&tty->fasync, SIGIO, POLL_IN);
 			if (waitqueue_active(&tty->read_wait))
 				wake_up_interruptible(&tty->read_wait);
@@ -684,6 +796,16 @@ send_signal:
 	put_tty_queue(c, tty);
 }	
 
+/**
+ *	n_tty_receive_room	-	receive space
+ *	@tty: terminal
+ *
+ *	Called by the driver to find out how much data it is
+ *	permitted to feed to the line discipline without any being lost
+ *	and thus to manage flow control. Not serialized. Answers for the
+ *	"instant".
+ */
+ 
 static int n_tty_receive_room(struct tty_struct *tty)
 {
 	int	left = N_TTY_BUF_SIZE - tty->read_cnt - 1;
@@ -702,6 +824,38 @@ static int n_tty_receive_room(struct tty_struct *tty)
 	return 0;
 }
 
+/**
+ *	n_tty_write_wakeup	-	asynchronous I/O notifier
+ *	@tty: tty device
+ *
+ *	Required for the ptys, serial driver etc. since processes
+ *	that attach themselves to the master and rely on ASYNC
+ *	IO must be woken up
+ */
+
+static void n_tty_write_wakeup(struct tty_struct *tty)
+{
+	if (tty->fasync)
+	{
+ 		set_bit(TTY_DO_WRITE_WAKEUP, &tty->flags);
+		kill_fasync(&tty->fasync, SIGIO, POLL_OUT);
+	}
+	return;
+}
+
+/**
+ *	n_tty_receive_buf	-	data receive
+ *	@tty: terminal device
+ *	@cp: buffer
+ *	@fp: flag buffer
+ *	@count: characters
+ *
+ *	Called by the terminal driver when a block of characters has
+ *	been received. This function must be called from soft contexts
+ *	not from interrupt context. The driver is responsible for making
+ *	calls one at a time and in order (or using queue_ldisc)
+ */
+ 
 static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 			      char *fp, int count)
 {
@@ -783,6 +937,18 @@ int is_ignored(int sig)
 	        current->sig->action[sig-1].sa.sa_handler == SIG_IGN);
 }
 
+/**
+ *	n_tty_set_termios	-	termios data changed
+ *	@tty: terminal
+ *	@old: previous data
+ *
+ *	Called by the tty layer when the user changes termios flags so
+ *	that the line discipline can plan ahead. This function cannot sleep
+ *	and is protected from re-entry by the tty layer. The user is 
+ *	guaranteed that this function will not be re-entered or in progress
+ *	when the ldisc is closed.
+ */
+ 
 static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 {
 	if (!tty)
@@ -798,7 +964,6 @@ static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 	    I_ICRNL(tty) || I_INLCR(tty) || L_ICANON(tty) ||
 	    I_IXON(tty) || L_ISIG(tty) || L_ECHO(tty) ||
 	    I_PARMRK(tty)) {
-		cli();
 		memset(tty->process_char_map, 0, 256/8);
 
 		if (I_IGNCR(tty) || I_ICRNL(tty))
@@ -834,7 +999,6 @@ static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 			set_bit(SUSP_CHAR(tty), &tty->process_char_map);
 		}
 		clear_bit(__DISABLED_CHAR, &tty->process_char_map);
-		sti();
 		tty->raw = 0;
 		tty->real_raw = 0;
 	} else {
@@ -848,6 +1012,16 @@ static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 	}
 }
 
+/**
+ *	n_tty_close		-	close the ldisc for this tty
+ *	@tty: device
+ *
+ *	Called from the terminal layer when this line discipline is 
+ *	being shut down, either because of a close or becsuse of a 
+ *	discipline change. The function will not be called while other
+ *	ldisc methods are in progress.
+ */
+ 
 static void n_tty_close(struct tty_struct *tty)
 {
 	n_tty_flush_buffer(tty);
@@ -857,11 +1031,22 @@ static void n_tty_close(struct tty_struct *tty)
 	}
 }
 
+/**
+ *	n_tty_open		-	open an ldisc
+ *	@tty: terminal to open
+ *
+ *	Called when this line discipline is being attached to the 
+ *	terminal device. Can sleep. Called serialized so that no
+ *	other events will occur in parallel. No further open will occur
+ *	until a close.
+ */
+
 static int n_tty_open(struct tty_struct *tty)
 {
 	if (!tty)
 		return -EINVAL;
 
+	/* This one is ugly. Currently a malloc failure here can panic */
 	if (!tty->read_buf) {
 		tty->read_buf = alloc_buf();
 		if (!tty->read_buf)
@@ -887,14 +1072,23 @@ static inline int input_available_p(struct tty_struct *tty, int amt)
 	return 0;
 }
 
-/*
- * Helper function to speed up read_chan.  It is only called when
- * ICANON is off; it copies characters straight from the tty queue to
- * user space directly.  It can be profitably called twice; once to
- * drain the space from the tail pointer to the (physical) end of the
- * buffer, and once to drain the space from the (physical) beginning of
- * the buffer to head pointer.
+/**
+ * 	copy_from_read_buf	-	copy read data directly
+ *	@tty: terminal device
+ *	@b: user data
+ *	@nr: size of data
+ *
+ *	Helper function to speed up read_chan.  It is only called when
+ *	ICANON is off; it copies characters straight from the tty queue to
+ *	user space directly.  It can be profitably called twice; once to
+ *	drain the space from the tail pointer to the (physical) end of the
+ *	buffer, and once to drain the space from the (physical) beginning of
+ *	the buffer to head pointer.
+ *
+ *	Called under the tty->atomic_read sem and with TTY_DONT_FLIP set
+ *
  */
+ 
 static inline int copy_from_read_buf(struct tty_struct *tty,
 				      unsigned char **b,
 				      size_t *nr)
@@ -922,25 +1116,18 @@ static inline int copy_from_read_buf(struct tty_struct *tty,
 	return retval;
 }
 
-static ssize_t read_chan(struct tty_struct *tty, struct file *file,
-			 unsigned char *buf, size_t nr)
+/**
+ *     job_control             -       check job control
+ *     @tty: tty
+ *     @file: file handle
+ *
+ *     Perform job control management checks on this file/tty descriptor
+ *     and if appropriate send any needed signals and return a negative
+ *     error code if action should be taken.
+ */
+
+static int job_control(struct tty_struct *tty, struct file *file)
 {
-	unsigned char *b = buf;
-	DECLARE_WAITQUEUE(wait, current);
-	int c;
-	int minimum, time;
-	ssize_t retval = 0;
-	ssize_t size;
-	long timeout;
-	unsigned long flags;
-
-do_it_again:
-
-	if (!tty->read_buf) {
-		printk("n_tty_read_chan: called with read_buf == NULL?!?\n");
-		return -EIO;
-	}
-
 	/* Job control check -- must be done at start and after
 	   every sleep (POSIX.1 7.1.1.4). */
 	/* NOTE: not yet done after every sleep pending a thorough
@@ -959,7 +1146,48 @@ do_it_again:
 			return -ERESTARTSYS;
 		}
 	}
+	return 0;
+}
+ 
 
+/**
+ *	read_chan		-	read function for tty
+ *	@tty: tty device
+ *	@file: file object
+ *	@buf: userspace buffer pointer
+ *	@nr: size of I/O
+ *
+ *	Perform reads for the line discipline. We are guaranteed that the
+ *	line discipline will not be closed under us but we may get multiple
+ *	parallel readers and must handle this ourselves. We may also get
+ *	a hangup. Always called in user context, may sleep.
+ *
+ *	This code must be sure never to sleep through a hangup.
+ */
+ 
+static ssize_t read_chan(struct tty_struct *tty, struct file *file,
+			 unsigned char __user *buf, size_t nr)
+{
+	unsigned char __user *b = buf;
+	DECLARE_WAITQUEUE(wait, current);
+	int c;
+	int minimum, time;
+	ssize_t retval = 0;
+	ssize_t size;
+	long timeout;
+	unsigned long flags;
+
+do_it_again:
+
+	if (!tty->read_buf) {
+		printk("n_tty_read_chan: called with read_buf == NULL?!?\n");
+		return -EIO;
+	}
+
+	c = job_control(tty, file);
+	if(c < 0)
+		return c;
+	
 	minimum = time = 0;
 	timeout = MAX_SCHEDULE_TIMEOUT;
 	if (!tty->icanon) {
@@ -981,6 +1209,9 @@ do_it_again:
 		}
 	}
 
+	/*
+	 *	Internal serialization of reads.
+	 */
 	if (file->f_flags & O_NONBLOCK) {
 		if (down_trylock(&tty->atomic_read))
 			return -EAGAIN;
@@ -1055,12 +1286,6 @@ do_it_again:
 				tty->read_tail = ((tty->read_tail+1) &
 						  (N_TTY_BUF_SIZE-1));
 				tty->read_cnt--;
-				spin_unlock_irqrestore(&tty->read_lock, flags);
-
-				if (!eol || (c != __DISABLED_CHAR)) {
-					put_user(c, b++);
-					nr--;
-				}
 				if (eol) {
 					/* this test should be redundant:
 					 * we shouldn't be reading data if
@@ -1068,8 +1293,15 @@ do_it_again:
 					 */
 					if (--tty->canon_data < 0)
 						tty->canon_data = 0;
-					break;
 				}
+				spin_unlock_irqrestore(&tty->read_lock, flags);
+
+				if (!eol || (c != __DISABLED_CHAR)) {
+					put_user(c, b++);
+					nr--;
+				}
+				if (eol)
+					break;
 			}
 		} else {
 			int uncopied;
@@ -1115,6 +1347,21 @@ do_it_again:
 	return retval;
 }
 
+/**
+ *	write_chan		-	write function for tty
+ *	@tty: tty device
+ *	@file: file object
+ *	@buf: userspace buffer pointer
+ *	@nr: size of I/O
+ *
+ *	Write function of the terminal device. This is serialized with
+ *	respect to other write callers but not to termios changes, reads
+ *	and other such events. We must be careful with N_TTY as the receive
+ *	code will echo characters, thus calling driver write methods.
+ *
+ *	This code must be sure never to sleep through a hangup.
+ */
+ 
 static ssize_t write_chan(struct tty_struct * tty, struct file * file,
 			  const unsigned char * buf, size_t nr)
 {
@@ -1147,6 +1394,8 @@ static ssize_t write_chan(struct tty_struct * tty, struct file * file,
 			while (nr > 0) {
 				ssize_t num = opost_block(tty, b, nr);
 				if (num < 0) {
+					if (num == -EAGAIN)
+						break;
 					retval = num;
 					goto break_out;
 				}
@@ -1184,7 +1433,25 @@ break_out:
 	return (b - buf) ? b - buf : retval;
 }
 
-/* Called without the kernel lock held - fine */
+/**
+ *	normal_poll		-	poll method for N_TTY
+ *	@tty: terminal device
+ *	@file: file accessing it
+ *	@wait: poll table
+ *
+ *	Called when the line discipline is asked to poll() for data or
+ *	for special events. This code is not serialized with respect to
+ *	other events save open/close.
+ *
+ *	This code must be sure never to sleep through a hangup.
+ *	Called without the kernel lock held - fine
+ *
+ *	FIXME: if someone changes the VMIN or discipline settings for the
+ *	terminal while another process is in poll() the poll does not
+ *	recompute the new limits. Possibly set_termios should issue
+ *	a read wakeup to fix this bug.
+ */
+ 
 static unsigned int normal_poll(struct tty_struct * tty, struct file * file, poll_table *wait)
 {
 	unsigned int mask = 0;
@@ -1205,7 +1472,8 @@ static unsigned int normal_poll(struct tty_struct * tty, struct file * file, pol
 		else
 			tty->minimum_to_wake = 1;
 	}
-	if (tty->driver.chars_in_buffer(tty) < WAKEUP_CHARS)
+	if (tty->driver.chars_in_buffer(tty) < WAKEUP_CHARS &&
+			tty->driver.write_room(tty) > 0)
 		mask |= POLLOUT | POLLWRNORM;
 	return mask;
 }
@@ -1224,8 +1492,9 @@ struct tty_ldisc tty_ldisc_N_TTY = {
 	n_tty_ioctl,		/* ioctl */
 	n_tty_set_termios,	/* set_termios */
 	normal_poll,		/* poll */
+	NULL,			/* hangup */
 	n_tty_receive_buf,	/* receive_buf */
 	n_tty_receive_room,	/* receive_room */
-	0			/* write_wakeup */
+	n_tty_write_wakeup	/* write_wakeup */
 };
 

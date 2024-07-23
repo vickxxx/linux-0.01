@@ -6,12 +6,14 @@
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/timex.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
 
+#include <asm/acpi.h>
+#include <asm/atomic.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -19,6 +21,7 @@
 #include <asm/pgtable.h>
 #include <asm/delay.h>
 #include <asm/desc.h>
+#include <asm/apic.h>
 
 #include <linux/irq.h>
 
@@ -321,7 +324,7 @@ spurious_8259A_irq:
 			printk("spurious 8259A interrupt: IRQ%d.\n", irq);
 			spurious_irq_mask |= irqmask;
 		}
-		irq_err_count++;
+		atomic_inc(&irq_err_count);
 		/*
 		 * Theoretically we do not have to handle this IRQ,
 		 * but in Linux this does not cause problems and is
@@ -414,6 +417,9 @@ void __init init_ISA_irqs (void)
 {
 	int i;
 
+#ifdef CONFIG_X86_LOCAL_APIC
+	init_bsp_APIC();
+#endif
 	init_8259A(0);
 
 	for (i = 0; i < NR_IRQS; i++) {
@@ -493,7 +499,8 @@ void __init init_IRQ(void)
 	outb(LATCH >> 8 , 0x40);	/* MSB */
 
 #ifndef CONFIG_VISWS
-	setup_irq(2, &irq2);
+	if (!acpi_ioapic)
+		setup_irq(2, &irq2);
 #endif
 
 	/*

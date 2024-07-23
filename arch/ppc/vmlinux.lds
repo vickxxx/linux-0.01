@@ -33,12 +33,16 @@ SECTIONS
     *(.text)
     *(.fixup)
     *(.got1)
+    __got2_start = .;
+    *(.got2)
+    __got2_end = .;
   }
   _etext = .;
   PROVIDE (etext = .);
   .rodata    :
   {
     *(.rodata)
+    *(.rodata.*)
     *(.rodata1)
   }
   .kstrtab   : { *(.kstrtab) }
@@ -60,6 +64,7 @@ SECTIONS
   _edata  =  .;
   PROVIDE (edata = .);
 
+  . = ALIGN(8);
   .fixup   : { *(.fixup) }
   __start___ex_table = .;
   __ex_table : { *(__ex_table) }
@@ -69,13 +74,18 @@ SECTIONS
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
 
+  . = ALIGN(8);
+  __start___ftr_fixup = .;
+  __ftr_fixup : { *(__ftr_fixup) }
+  __stop___ftr_fixup = .;
+
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
 
   . = ALIGN(4096);
   __init_begin = .;
   .text.init : { *(.text.init) }
-  .data.init : { 
+  .data.init : {
     *(.data.init);
     __vtop_table_begin = .;
     *(.vtop_fixup);
@@ -116,20 +126,6 @@ SECTIONS
   __chrp_end = .;
 
   . = ALIGN(4096);
-  __apus_begin = .;
-  .text.apus : { *(.text.apus) }
-  .data.apus : { *(.data.apus) }
-  . = ALIGN(4096);
-  __apus_end = .;
-
-  . = ALIGN(4096);
-  __apus_begin = .;
-  .text.apus : { *(.text.apus) }
-  .data.apus : { *(.data.apus) }
-  . = ALIGN(4096);
-  __apus_end = .;
-
-  . = ALIGN(4096);
   __openfirmware_begin = .;
   .text.openfirmware : { *(.text.openfirmware) }
   .data.openfirmware : { *(.data.openfirmware) }
@@ -144,6 +140,7 @@ SECTIONS
    *(.bss)
    *(COMMON)
   }
+  . = ALIGN(4);
   _end = . ;
   PROVIDE (end = .);
 }

@@ -11,6 +11,7 @@ struct coda_sb_info
 	struct venus_comm * sbi_vcomm;
 	struct super_block *sbi_sb;
 	struct list_head    sbi_cihead;
+	struct semaphore    sbi_iget4_mutex;
 };
 
 /* communication pending/processing queues */
@@ -39,10 +40,13 @@ int venus_setattr(struct super_block *, struct ViceFid *,
 int venus_lookup(struct super_block *sb, struct ViceFid *fid, 
 		    const char *name, int length, int *type, 
 		    struct ViceFid *resfid);
-int venus_release(struct super_block *sb, struct ViceFid *fid, int flags,
-		  struct coda_cred *);
+int venus_store(struct super_block *sb, struct ViceFid *fid, int flags,
+		struct coda_cred *);
+int venus_release(struct super_block *sb, struct ViceFid *fid, int flags);
+int venus_close(struct super_block *sb, struct ViceFid *fid, int flags,
+		struct coda_cred *);
 int venus_open(struct super_block *sb, struct ViceFid *fid,
-		  int flags, ino_t *ino, dev_t *dev);
+		int flags, struct file **f);
 int venus_mkdir(struct super_block *sb, struct ViceFid *dirfid, 
 			  const char *name, int length, 
 			  struct ViceFid *newfid, struct coda_vattr *attrs);

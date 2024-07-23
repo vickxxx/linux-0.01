@@ -18,9 +18,10 @@
 
 unsigned int __machine_arch_type;
 
+#include <linux/kernel.h>
+
 #include <asm/uaccess.h>
 #include <asm/arch/uncompress.h>
-#include <asm/proc/uncompress.h>
 
 #ifdef STANDALONE_DEBUG
 #define puts printf
@@ -73,7 +74,7 @@ void __memzero (__ptr_t s, size_t n)
 		*u.ucp++ = 0;
 }
 
-extern __inline__ __ptr_t memcpy(__ptr_t __dest, __const __ptr_t __src,
+static inline __ptr_t memcpy(__ptr_t __dest, __const __ptr_t __src,
 			    size_t __n)
 {
 	int i = 0;
@@ -289,7 +290,6 @@ decompress_kernel(ulg output_start, ulg free_mem_ptr_p, ulg free_mem_ptr_end_p,
 	free_mem_ptr_end	= free_mem_ptr_end_p;
 	__machine_arch_type	= arch_id;
 
-	proc_decomp_setup();
 	arch_decomp_setup();
 
 	makecrc();
@@ -313,4 +313,3 @@ int main()
 	return 0;
 }
 #endif
-	

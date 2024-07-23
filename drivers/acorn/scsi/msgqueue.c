@@ -12,11 +12,9 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
+#include <linux/init.h>
 
 #include "msgqueue.h"
-
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("SCSI message queue handling");
 
 /*
  * Function: struct msgqueue_entry *mqe_alloc(MsgQueue_t *msgq)
@@ -128,7 +126,7 @@ int msgqueue_addmsg(MsgQueue_t *msgq, int length, ...)
 
 		va_start(ap, length);
 		for (i = 0; i < length; i++)
-			mq->msg.msg[i] = va_arg(ap, unsigned char);
+			mq->msg.msg[i] = va_arg(ap, unsigned int);
 		va_end(ap);
 
 		mq->msg.length = length;
@@ -168,13 +166,6 @@ EXPORT_SYMBOL(msgqueue_getmsg);
 EXPORT_SYMBOL(msgqueue_addmsg);
 EXPORT_SYMBOL(msgqueue_flush);
 
-#ifdef MODULE
-int init_module(void)
-{
-	return 0;
-}
-
-void cleanup_module(void)
-{
-}
-#endif
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("SCSI message queue handling");
+MODULE_LICENSE("GPL");

@@ -4,7 +4,7 @@
  .
  . Copyright (C) 1996 by Erik Stahlman
  . This software may be used and distributed according to the terms
- . of the GNU Public License, incorporated herein by reference.
+ . of the GNU General Public License, incorporated herein by reference.
  .
  . "Features" of the SMC chip:
  .   4608 byte packet memory. ( for the 91C92.  Others have more )
@@ -25,7 +25,7 @@
  .
  . Sources:
  .    o   SMC databook
- .    o   skeleton.c by Donald Becker ( becker@cesdis.gsfc.nasa.gov )
+ .    o   skeleton.c by Donald Becker ( becker@scyld.com )
  .    o   ( a LOT of advice from Becker as well )
  .
  . History:
@@ -51,9 +51,10 @@
  .				 allocation
  .      08/20/00  Arnaldo Melo   fix kfree(skb) in smc_hardware_send_packet
  .      12/15/00  Christian Jullien fix "Warning: kfree_skb on hard IRQ"
+ .      11/08/01 Matt Domsch     Use common crc32 function
  ----------------------------------------------------------------------------*/
 
-static const char *version =
+static const char version[] =
 	"smc9194.c:v0.14 12/15/00 by Erik Stahlman (erik@vt.edu)\n";
 
 #include <linux/module.h>
@@ -66,9 +67,10 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <linux/errno.h>
@@ -88,7 +90,11 @@ static const char *version =
  . Do you want to use 32 bit xfers?  This should work on all chips, as
  . the chipset is designed to accommodate them.
 */
+#ifdef __sh__
+#undef USE_32_BIT
+#else
 #define USE_32_BIT 1
+#endif
 
 /*
  .the SMC9194 can be at any of the following port addresses.  To change,
@@ -219,10 +225,6 @@ static struct net_device_stats * smc_query_statistics( struct net_device *dev);
 */
 static void smc_set_multicast_list(struct net_device *dev);
 
-/*
- . CRC compute
- */
-static int crc32( char * s, int length );
 
 /*---------------------------------------------------------------
  .
@@ -238,12 +240,12 @@ static void smc_interrupt(int irq, void *, struct pt_regs *regs);
  . This is a separate procedure to handle the receipt of a packet, to
  . leave the interrupt code looking slightly cleaner
 */
-inline static void smc_rcv( struct net_device *dev );
+static inline void smc_rcv( struct net_device *dev );
 /*
  . This handles a TX interrupt, which is only called when an error
  . relating to a packet is sent.
 */
-inline static void smc_tx( struct net_device * dev );
+static inline void smc_tx( struct net_device * dev );
 
 /*
  ------------------------------------------------------------
@@ -432,7 +434,7 @@ static void smc_setmulticast( int ioaddr, int count, struct dev_mc_list * addrs 
 			continue;
 
 		/* only use the low order bits */
-		position = crc32( cur_addr->dmi_addr, 6 ) & 0x3f;
+		position = ether_crc_le(6, cur_addr->dmi_addr) & 0x3f;
 
 		/* do some messy swapping to put the bit in the right spot */
 		multicast_table[invert3[position&7]] |=
@@ -446,33 +448,6 @@ static void smc_setmulticast( int ioaddr, int count, struct dev_mc_list * addrs 
 		outb( multicast_table[i], ioaddr + MULTICAST1 + i );
 	}
 }
-
-/*
-  Finds the CRC32 of a set of bytes.
-  Again, from Peter Cammaert's code.
-*/
-static int crc32( char * s, int length ) {
-	/* indices */
-	int perByte;
-	int perBit;
-	/* crc polynomial for Ethernet */
-	const unsigned long poly = 0xedb88320;
-	/* crc value - preinitialized to all 1's */
-	unsigned long crc_value = 0xffffffff;
-
-	for ( perByte = 0; perByte < length; perByte ++ ) {
-		unsigned char	c;
-
-		c = *(s++);
-		for ( perBit = 0; perBit < 8; perBit++ ) {
-			crc_value = (crc_value>>1)^
-				(((crc_value^c)&0x01)?poly:0);
-			c >>= 1;
-		}
-	}
-	return	crc_value;
-}
-
 
 /*
  . Function: smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * )
@@ -508,10 +483,20 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * de
 		printk(CARDNAME": Bad Craziness - sent packet while busy.\n" );
 		return 1;
 	}
+
+	length = skb->len;
+
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+		{
+			netif_wake_queue(dev);
+			return 0;
+		}
+		length = ETH_ZLEN;
+	}
 	lp->saved_skb = skb;
-
-	length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-
 		
 	/*
 	** The MMU wants the number of pages to be the number of 256 bytes
@@ -616,7 +601,7 @@ static void smc_hardware_send_packet( struct net_device * dev )
 	if ( packet_no & 0x80 ) {
 		/* or isn't there?  BAD CHIP! */
 		printk(KERN_DEBUG CARDNAME": Memory allocation failed. \n");
-		dev_kfree_skb_irq(skb);
+		dev_kfree_skb_any(skb);
 		lp->saved_skb = NULL;
 		netif_wake_queue(dev);
 		return;
@@ -679,7 +664,7 @@ static void smc_hardware_send_packet( struct net_device * dev )
 	PRINTK2((CARDNAME": Sent packet of length %d \n",length));
 
 	lp->saved_skb = NULL;
-	dev_kfree_skb_irq (skb);
+	dev_kfree_skb_any (skb);
 
 	dev->trans_start = jiffies;
 
@@ -983,12 +968,6 @@ static int __init smc_probe(struct net_device *dev, int ioaddr)
 		retval = -ENODEV;
 		goto err_out;
 	}
-	if (dev->irq == 2) {
-		/* Fixup for users that don't know that IRQ 2 is really IRQ 9,
-		 * or don't know which one to set.
-		 */
-		dev->irq = 9;
-	}
 
 	/* now, print out the card info, in a short format.. */
 
@@ -1153,6 +1132,197 @@ static void smc_timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
+/*-------------------------------------------------------------
+ .
+ . smc_rcv -  receive a packet from the card
+ .
+ . There is ( at least ) a packet waiting to be read from
+ . chip-memory.
+ .
+ . o Read the status
+ . o If an error, record it
+ . o otherwise, read in the packet
+ --------------------------------------------------------------
+*/
+static void smc_rcv(struct net_device *dev)
+{
+	struct smc_local *lp = (struct smc_local *)dev->priv;
+	int 	ioaddr = dev->base_addr;
+	int 	packet_number;
+	word	status;
+	word	packet_length;
+
+	/* assume bank 2 */
+
+	packet_number = inw( ioaddr + FIFO_PORTS );
+
+	if ( packet_number & FP_RXEMPTY ) {
+		/* we got called , but nothing was on the FIFO */
+		PRINTK((CARDNAME ": WARNING: smc_rcv with nothing on FIFO. \n"));
+		/* don't need to restore anything */
+		return;
+	}
+
+	/*  start reading from the start of the packet */
+	outw( PTR_READ | PTR_RCV | PTR_AUTOINC, ioaddr + POINTER );
+
+	/* First two words are status and packet_length */
+	status 		= inw( ioaddr + DATA_1 );
+	packet_length 	= inw( ioaddr + DATA_1 );
+
+	packet_length &= 0x07ff;  /* mask off top bits */
+
+	PRINTK2(("RCV: STATUS %4x LENGTH %4x\n", status, packet_length ));
+	/*
+	 . the packet length contains 3 extra words :
+	 . status, length, and an extra word with an odd byte .
+	*/
+	packet_length -= 6;
+
+	if ( !(status & RS_ERRORS ) ){
+		/* do stuff to make a new packet */
+		struct sk_buff  * skb;
+		byte		* data;
+
+		/* read one extra byte */
+		if ( status & RS_ODDFRAME )
+			packet_length++;
+
+		/* set multicast stats */
+		if ( status & RS_MULTICAST )
+			lp->stats.multicast++;
+
+		skb = dev_alloc_skb( packet_length + 5);
+
+		if ( skb == NULL ) {
+			printk(KERN_NOTICE CARDNAME ": Low memory, packet dropped.\n");
+			lp->stats.rx_dropped++;
+			goto done;
+		}
+
+		/*
+		 ! This should work without alignment, but it could be
+		 ! in the worse case
+		*/
+
+		skb_reserve( skb, 2 );   /* 16 bit alignment */
+
+		skb->dev = dev;
+		data = skb_put( skb, packet_length);
+
+#ifdef USE_32_BIT
+		/* QUESTION:  Like in the TX routine, do I want
+		   to send the DWORDs or the bytes first, or some
+		   mixture.  A mixture might improve already slow PIO
+		   performance  */
+		PRINTK3((" Reading %d dwords (and %d bytes) \n",
+			packet_length >> 2, packet_length & 3 ));
+		insl(ioaddr + DATA_1 , data, packet_length >> 2 );
+		/* read the left over bytes */
+		insb( ioaddr + DATA_1, data + (packet_length & 0xFFFFFC),
+			packet_length & 0x3  );
+#else
+		PRINTK3((" Reading %d words and %d byte(s) \n",
+			(packet_length >> 1 ), packet_length & 1 ));
+		insw(ioaddr + DATA_1 , data, packet_length >> 1);
+		if ( packet_length & 1 ) {
+			data += packet_length & ~1;
+			*(data++) = inb( ioaddr + DATA_1 );
+		}
+#endif
+#if	SMC_DEBUG > 2
+			print_packet( data, packet_length );
+#endif
+
+		skb->protocol = eth_type_trans(skb, dev );
+		netif_rx(skb);
+		dev->last_rx = jiffies;
+		lp->stats.rx_packets++;
+		lp->stats.rx_bytes += packet_length;
+	} else {
+		/* error ... */
+		lp->stats.rx_errors++;
+
+		if ( status & RS_ALGNERR )  lp->stats.rx_frame_errors++;
+		if ( status & (RS_TOOSHORT | RS_TOOLONG ) )
+			lp->stats.rx_length_errors++;
+		if ( status & RS_BADCRC)	lp->stats.rx_crc_errors++;
+	}
+
+done:
+	/*  error or good, tell the card to get rid of this packet */
+	outw( MC_RELEASE, ioaddr + MMU_CMD );
+}
+
+
+/*************************************************************************
+ . smc_tx
+ .
+ . Purpose:  Handle a transmit error message.   This will only be called
+ .   when an error, because of the AUTO_RELEASE mode.
+ .
+ . Algorithm:
+ .	Save pointer and packet no
+ .	Get the packet no from the top of the queue
+ .	check if it's valid ( if not, is this an error??? )
+ .	read the status word
+ .	record the error
+ .	( resend?  Not really, since we don't want old packets around )
+ .	Restore saved values
+ ************************************************************************/
+static void smc_tx( struct net_device * dev )
+{
+	int	ioaddr = dev->base_addr;
+	struct smc_local *lp = (struct smc_local *)dev->priv;
+	byte saved_packet;
+	byte packet_no;
+	word tx_status;
+
+
+	/* assume bank 2  */
+
+	saved_packet = inb( ioaddr + PNR_ARR );
+	packet_no = inw( ioaddr + FIFO_PORTS );
+	packet_no &= 0x7F;
+
+	/* select this as the packet to read from */
+	outb( packet_no, ioaddr + PNR_ARR );
+
+	/* read the first word from this packet */
+	outw( PTR_AUTOINC | PTR_READ, ioaddr + POINTER );
+
+	tx_status = inw( ioaddr + DATA_1 );
+	PRINTK3((CARDNAME": TX DONE STATUS: %4x \n", tx_status ));
+
+	lp->stats.tx_errors++;
+	if ( tx_status & TS_LOSTCAR ) lp->stats.tx_carrier_errors++;
+	if ( tx_status & TS_LATCOL  ) {
+		printk(KERN_DEBUG CARDNAME
+			": Late collision occurred on last xmit.\n");
+		lp->stats.tx_window_errors++;
+	}
+#if 0
+		if ( tx_status & TS_16COL ) { ... }
+#endif
+
+	if ( tx_status & TS_SUCCESS ) {
+		printk(CARDNAME": Successful packet caused interrupt \n");
+	}
+	/* re-enable transmit */
+	SMC_SELECT_BANK( 0 );
+	outw( inw( ioaddr + TCR ) | TCR_ENABLE, ioaddr + TCR );
+
+	/* kill the packet */
+	SMC_SELECT_BANK( 2 );
+	outw( MC_FREEPKT, ioaddr + MMU_CMD );
+
+	/* one less packet waiting for me */
+	lp->packets_waiting--;
+
+	outb( saved_packet, ioaddr + PNR_ARR );
+	return;
+}
+
 /*--------------------------------------------------------------------
  .
  . This is the main routine of the driver, to handle the device when
@@ -1278,198 +1448,6 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 	return;
 }
 
-/*-------------------------------------------------------------
- .
- . smc_rcv -  receive a packet from the card
- .
- . There is ( at least ) a packet waiting to be read from
- . chip-memory.
- .
- . o Read the status
- . o If an error, record it
- . o otherwise, read in the packet
- --------------------------------------------------------------
-*/
-static void smc_rcv(struct net_device *dev)
-{
-	struct smc_local *lp = (struct smc_local *)dev->priv;
-	int 	ioaddr = dev->base_addr;
-	int 	packet_number;
-	word	status;
-	word	packet_length;
-
-	/* assume bank 2 */
-
-	packet_number = inw( ioaddr + FIFO_PORTS );
-
-	if ( packet_number & FP_RXEMPTY ) {
-		/* we got called , but nothing was on the FIFO */
-		PRINTK((CARDNAME ": WARNING: smc_rcv with nothing on FIFO. \n"));
-		/* don't need to restore anything */
-		return;
-	}
-
-	/*  start reading from the start of the packet */
-	outw( PTR_READ | PTR_RCV | PTR_AUTOINC, ioaddr + POINTER );
-
-	/* First two words are status and packet_length */
-	status 		= inw( ioaddr + DATA_1 );
-	packet_length 	= inw( ioaddr + DATA_1 );
-
-	packet_length &= 0x07ff;  /* mask off top bits */
-
-	PRINTK2(("RCV: STATUS %4x LENGTH %4x\n", status, packet_length ));
-	/*
-	 . the packet length contains 3 extra words :
-	 . status, length, and an extra word with an odd byte .
-	*/
-	packet_length -= 6;
-
-	if ( !(status & RS_ERRORS ) ){
-		/* do stuff to make a new packet */
-		struct sk_buff  * skb;
-		byte		* data;
-
-		/* read one extra byte */
-		if ( status & RS_ODDFRAME )
-			packet_length++;
-
-		/* set multicast stats */
-		if ( status & RS_MULTICAST )
-			lp->stats.multicast++;
-
-		skb = dev_alloc_skb( packet_length + 5);
-
-		if ( skb == NULL ) {
-			printk(KERN_NOTICE CARDNAME
-			": Low memory, packet dropped.\n");
-			lp->stats.rx_dropped++;
-		}
-
-		/*
-		 ! This should work without alignment, but it could be
-		 ! in the worse case
-		*/
-
-		skb_reserve( skb, 2 );   /* 16 bit alignment */
-
-		skb->dev = dev;
-		data = skb_put( skb, packet_length);
-
-#ifdef USE_32_BIT
-		/* QUESTION:  Like in the TX routine, do I want
-		   to send the DWORDs or the bytes first, or some
-		   mixture.  A mixture might improve already slow PIO
-		   performance  */
-		PRINTK3((" Reading %d dwords (and %d bytes) \n",
-			packet_length >> 2, packet_length & 3 ));
-		insl(ioaddr + DATA_1 , data, packet_length >> 2 );
-		/* read the left over bytes */
-		insb( ioaddr + DATA_1, data + (packet_length & 0xFFFFFC),
-			packet_length & 0x3  );
-#else
-		PRINTK3((" Reading %d words and %d byte(s) \n",
-			(packet_length >> 1 ), packet_length & 1 );
-		if ( packet_length & 1 )
-			*(data++) = inb( ioaddr + DATA_1 );
-		insw(ioaddr + DATA_1 , data, (packet_length + 1 ) >> 1);
-		if ( packet_length & 1 ) {
-			data += packet_length & ~1;
-			*((data++) = inb( ioaddr + DATA_1 );
-		}
-#endif
-#if	SMC_DEBUG > 2
-			print_packet( data, packet_length );
-#endif
-
-		skb->protocol = eth_type_trans(skb, dev );
-		netif_rx(skb);
-		lp->stats.rx_packets++;
-	} else {
-		/* error ... */
-		lp->stats.rx_errors++;
-
-		if ( status & RS_ALGNERR )  lp->stats.rx_frame_errors++;
-		if ( status & (RS_TOOSHORT | RS_TOOLONG ) )
-			lp->stats.rx_length_errors++;
-		if ( status & RS_BADCRC)	lp->stats.rx_crc_errors++;
-	}
-	/*  error or good, tell the card to get rid of this packet */
-	outw( MC_RELEASE, ioaddr + MMU_CMD );
-
-
-	return;
-}
-
-
-/*************************************************************************
- . smc_tx
- .
- . Purpose:  Handle a transmit error message.   This will only be called
- .   when an error, because of the AUTO_RELEASE mode.
- .
- . Algorithm:
- .	Save pointer and packet no
- .	Get the packet no from the top of the queue
- .	check if it's valid ( if not, is this an error??? )
- .	read the status word
- .	record the error
- .	( resend?  Not really, since we don't want old packets around )
- .	Restore saved values
- ************************************************************************/
-static void smc_tx( struct net_device * dev )
-{
-	int	ioaddr = dev->base_addr;
-	struct smc_local *lp = (struct smc_local *)dev->priv;
-	byte saved_packet;
-	byte packet_no;
-	word tx_status;
-
-
-	/* assume bank 2  */
-
-	saved_packet = inb( ioaddr + PNR_ARR );
-	packet_no = inw( ioaddr + FIFO_PORTS );
-	packet_no &= 0x7F;
-
-	/* select this as the packet to read from */
-	outb( packet_no, ioaddr + PNR_ARR );
-
-	/* read the first word from this packet */
-	outw( PTR_AUTOINC | PTR_READ, ioaddr + POINTER );
-
-	tx_status = inw( ioaddr + DATA_1 );
-	PRINTK3((CARDNAME": TX DONE STATUS: %4x \n", tx_status ));
-
-	lp->stats.tx_errors++;
-	if ( tx_status & TS_LOSTCAR ) lp->stats.tx_carrier_errors++;
-	if ( tx_status & TS_LATCOL  ) {
-		printk(KERN_DEBUG CARDNAME
-			": Late collision occurred on last xmit.\n");
-		lp->stats.tx_window_errors++;
-	}
-#if 0
-		if ( tx_status & TS_16COL ) { ... }
-#endif
-
-	if ( tx_status & TS_SUCCESS ) {
-		printk(CARDNAME": Successful packet caused interrupt \n");
-	}
-	/* re-enable transmit */
-	SMC_SELECT_BANK( 0 );
-	outw( inw( ioaddr + TCR ) | TCR_ENABLE, ioaddr + TCR );
-
-	/* kill the packet */
-	SMC_SELECT_BANK( 2 );
-	outw( MC_FREEPKT, ioaddr + MMU_CMD );
-
-	/* one less packet waiting for me */
-	lp->packets_waiting--;
-
-	outb( saved_packet, ioaddr + PNR_ARR );
-	return;
-}
-
 /*----------------------------------------------------
  . smc_close
  .
@@ -1561,10 +1539,14 @@ static struct net_device devSMC9194;
 static int io;
 static int irq;
 static int ifport;
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(ifport, "i");
+MODULE_PARM_DESC(io, "SMC 99194 I/O base address");
+MODULE_PARM_DESC(irq, "SMC 99194 IRQ number");
+MODULE_PARM_DESC(ifport, "SMC 99194 interface port (0-default, 1-TP, 2-AUI)");
 
 int init_module(void)
 {

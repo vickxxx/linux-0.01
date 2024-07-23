@@ -23,7 +23,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
@@ -41,11 +41,14 @@
 #include <asm/ldt.h>
 #include <asm/processor.h>
 #include <asm/i387.h>
+#include <asm/irq.h>
 #include <asm/desc.h>
 #include <asm/mmu_context.h>
+#include <asm/smpboot.h>
 #ifdef CONFIG_MATH_EMULATION
 #include <asm/math_emu.h>
 #endif
+#include <asm/apic.h>
 
 #include <linux/irq.h>
 
@@ -77,7 +80,7 @@ void enable_hlt(void)
  * We use this if we don't have any better
  * idle routine..
  */
-static void default_idle(void)
+void default_idle(void)
 {
 	if (current_cpu_data.hlt_works_ok && !hlt_counter) {
 		__cli();
@@ -150,10 +153,15 @@ static int __init idle_setup (char *str)
 
 __setup("idle=", idle_setup);
 
-static long no_idt[2];
 static int reboot_mode;
-static int reboot_thru_bios;
+int reboot_thru_bios;
 
+#ifdef CONFIG_SMP
+int reboot_smp = 0;
+static int reboot_cpu = -1;
+/* shamelessly grabbed from lib/vsprintf.c for readability */
+#define is_digit(c)	((c) >= '0' && (c) <= '9')
+#endif
 static int __init reboot_setup(char *str)
 {
 	while(1) {
@@ -170,6 +178,19 @@ static int __init reboot_setup(char *str)
 		case 'h': /* "hard" reboot by toggling RESET and/or crashing the CPU */
 			reboot_thru_bios = 0;
 			break;
+#ifdef CONFIG_SMP
+		case 's': /* "smp" reboot by executing reset on BSP or other CPU*/
+			reboot_smp = 1;
+			if (is_digit(*(str+1))) {
+				reboot_cpu = (int) (*(str+1) - '0');
+				if (is_digit(*(str+2))) 
+					reboot_cpu = reboot_cpu*10 + (int)(*(str+2) - '0');
+			}
+				/* we will leave sorting out the final value 
+				when we are ready to reboot, since we might not
+ 				have set up boot_cpu_id or smp_num_cpu */
+			break;
+#endif
 		}
 		if((str = strchr(str,',')) != NULL)
 			str++;
@@ -202,7 +223,8 @@ static struct
 	unsigned long long * base __attribute__ ((packed));
 }
 real_mode_gdt = { sizeof (real_mode_gdt_entries) - 1, real_mode_gdt_entries },
-real_mode_idt = { 0x3ff, 0 };
+real_mode_idt = { 0x3ff, 0 },
+no_idt = { 0, 0 };
 
 /* This is 16-bit protected mode code to disable paging and the cache,
    switch to real mode and jump to the BIOS reset code.
@@ -233,7 +255,7 @@ static unsigned char real_mode_switch [] =
 	0x66, 0x0f, 0x20, 0xc3,			/*    movl  %cr0,%ebx        */
 	0x66, 0x81, 0xe3, 0x00, 0x00, 0x00, 0x60,	/*    andl  $0x60000000,%ebx */
 	0x74, 0x02,				/*    jz    f                */
-	0x0f, 0x08,				/*    invd                   */
+	0x0f, 0x09,				/*    wbinvd                 */
 	0x24, 0x10,				/* f: andb  $0x10,al         */
 	0x66, 0x0f, 0x22, 0xc0			/*    movl  %eax,%cr0        */
 };
@@ -291,7 +313,7 @@ void machine_real_restart(unsigned char *code, int length)
 	/*
 	 * Use `swapper_pg_dir' as our page directory.
 	 */
-	asm volatile("movl %0,%%cr3": :"r" (__pa(swapper_pg_dir)));
+	load_cr3(swapper_pg_dir);
 
 	/* Write 0x1234 to absolute memory location 0x472.  The BIOS reads
 	   this on booting to tell it to "Bypass memory test (also warm
@@ -346,11 +368,47 @@ void machine_real_restart(unsigned char *code, int length)
 void machine_restart(char * __unused)
 {
 #if CONFIG_SMP
+	int cpuid;
+	
+	cpuid = GET_APIC_ID(apic_read(APIC_ID));
+
+	if (reboot_smp) {
+
+		/* check to see if reboot_cpu is valid 
+		   if its not, default to the BSP */
+		if ((reboot_cpu == -1) ||  
+		      (reboot_cpu > (NR_CPUS -1))  || 
+		      !(phys_cpu_present_map & apicid_to_phys_cpu_present(cpuid)))
+			reboot_cpu = boot_cpu_physical_apicid;
+
+		reboot_smp = 0;  /* use this as a flag to only go through this once*/
+		/* re-run this function on the other CPUs
+		   it will fall though this section since we have 
+		   cleared reboot_smp, and do the reboot if it is the
+		   correct CPU, otherwise it halts. */
+		if (reboot_cpu != cpuid)
+			smp_call_function((void *)machine_restart , NULL, 1, 0);
+	}
+
+	/* if reboot_cpu is still -1, then we want a tradional reboot, 
+	   and if we are not running on the reboot_cpu,, halt */
+	if ((reboot_cpu != -1) && (cpuid != reboot_cpu)) {
+		for (;;)
+		__asm__ __volatile__ ("hlt");
+	}
 	/*
 	 * Stop all CPUs and turn off local APICs and the IO-APIC, so
 	 * other OSs see a clean IRQ state.
 	 */
 	smp_send_stop();
+#elif CONFIG_X86_LOCAL_APIC
+	if (cpu_has_apic) {
+		__cli();
+		disable_local_APIC();
+		__sti();
+	}
+#endif
+#ifdef CONFIG_X86_IO_APIC
 	disable_IO_APIC();
 #endif
 
@@ -391,10 +449,11 @@ void show_regs(struct pt_regs * regs)
 	unsigned long cr0 = 0L, cr2 = 0L, cr3 = 0L, cr4 = 0L;
 
 	printk("\n");
+	printk("Pid: %d, comm: %20s\n", current->pid, current->comm);
 	printk("EIP: %04x:[<%08lx>] CPU: %d",0xffff & regs->xcs,regs->eip, smp_processor_id());
 	if (regs->xcs & 3)
 		printk(" ESP: %04x:%08lx",0xffff & regs->xss,regs->esp);
-	printk(" EFLAGS: %08lx\n",regs->eflags);
+	printk(" EFLAGS: %08lx    %s\n",regs->eflags, print_tainted());
 	printk("EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
 		regs->eax,regs->ebx,regs->ecx,regs->edx);
 	printk("ESI: %08lx EDI: %08lx EBP: %08lx",
@@ -417,26 +476,9 @@ void show_regs(struct pt_regs * regs)
 }
 
 /*
- * No need to lock the MM as we are the last user
- */
-void release_segments(struct mm_struct *mm)
-{
-	void * ldt = mm->context.segments;
-
-	/*
-	 * free the LDT
-	 */
-	if (ldt) {
-		mm->context.segments = NULL;
-		clear_LDT();
-		vfree(ldt);
-	}
-}
-
-/*
  * Create a kernel thread
  */
-int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval, d0;
 
@@ -459,6 +501,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 		 "r" (arg), "r" (fn),
 		 "b" (flags | CLONE_VM)
 		: "memory");
+
 	return retval;
 }
 
@@ -485,46 +528,23 @@ void flush_thread(void)
 void release_thread(struct task_struct *dead_task)
 {
 	if (dead_task->mm) {
-		void * ldt = dead_task->mm->context.segments;
-
 		// temporary debugging check
-		if (ldt) {
-			printk("WARNING: dead process %8s still has LDT? <%p>\n",
-					dead_task->comm, ldt);
+		if (dead_task->mm->context.size) {
+			printk("WARNING: dead process %8s still has LDT? <%p/%d>\n",
+					dead_task->comm,
+					dead_task->mm->context.ldt,
+					dead_task->mm->context.size);
 			BUG();
 		}
 	}
-}
-
-/*
- * we do not have to muck with descriptors here, that is
- * done in switch_mm() as needed.
- */
-void copy_segments(struct task_struct *p, struct mm_struct *new_mm)
-{
-	struct mm_struct * old_mm;
-	void *old_ldt, *ldt;
-
-	ldt = NULL;
-	old_mm = current->mm;
-	if (old_mm && (old_ldt = old_mm->context.segments) != NULL) {
-		/*
-		 * Completely new LDT, we initialize it from the parent:
-		 */
-		ldt = vmalloc(LDT_ENTRIES*LDT_ENTRY_SIZE);
-		if (!ldt)
-			printk(KERN_WARNING "ldt allocation failed\n");
-		else
-			memcpy(ldt, old_ldt, LDT_ENTRIES*LDT_ENTRY_SIZE);
-	}
-	new_mm->context.segments = ldt;
+	release_x86_irqs(dead_task);
 }
 
 /*
  * Save a segment.
  */
 #define savesegment(seg,value) \
-	asm volatile("movl %%" #seg ",%0":"=m" (*(int *)&(value)))
+	asm volatile("mov %%" #seg ",%0":"=m" (value))
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	unsigned long unused,
@@ -624,7 +644,7 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
  * More important, however, is the fact that this allows us much
  * more flexibility.
  */
-void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
+void fastcall __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 {
 	struct thread_struct *prev = &prev_p->thread,
 				 *next = &next_p->thread;
@@ -641,8 +661,8 @@ void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	 * Save away %fs and %gs. No need to save %es and %ds, as
 	 * those are always kernel segments while inside the kernel.
 	 */
-	asm volatile("movl %%fs,%0":"=m" (*(int *)&prev->fs));
-	asm volatile("movl %%gs,%0":"=m" (*(int *)&prev->gs));
+	asm volatile("mov %%fs,%0":"=m" (prev->fs));
+	asm volatile("mov %%gs,%0":"=m" (prev->gs));
 
 	/*
 	 * Restore %fs and %gs.
@@ -674,7 +694,7 @@ void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 			 * is not really acceptable.]
 			 */
 			memcpy(tss->io_bitmap, next->io_bitmap,
-				 IO_BITMAP_SIZE*sizeof(unsigned long));
+				 IO_BITMAP_BYTES);
 			tss->bitmap = IO_BITMAP_OFFSET;
 		} else
 			/*

@@ -1,29 +1,36 @@
 /*
  *  drivers/s390/char/hwc.h
- *
+ * 
  *
  *  S390 version
  *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Peschke <peschke@fh-brandenburg.de>
+ *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
  *
- *
- *
+ * 
+ * 
  */
 
 #ifndef __HWC_H__
 #define __HWC_H__
+
+#define HWC_EXT_INT_PARAM_ADDR	0xFFFFFFF8
+#define HWC_EXT_INT_PARAM_PEND 0x00000001
 
 #define ET_OpCmd		0x01
 #define ET_Msg		0x02
 #define ET_StateChange	0x08
 #define ET_PMsgCmd		0x09
 #define ET_CntlProgOpCmd	0x20
+#define ET_CntlProgIdent	0x0B
+#define ET_SigQuiesce	0x1D
 
 #define ET_OpCmd_Mask	0x80000000
 #define ET_Msg_Mask		0x40000000
 #define ET_StateChange_Mask	0x01000000
 #define ET_PMsgCmd_Mask	0x00800000
 #define ET_CtlProgOpCmd_Mask	0x00000001
+#define ET_CtlProgIdent_Mask	0x00200000
+#define ET_SigQuiesce_Mask	0x00000008
 
 #define GMF_DOM		0x8000
 #define GMF_SndAlrm	0x4000
@@ -38,6 +45,8 @@
 #define HWC_COMMAND_INITIATED	0
 #define HWC_BUSY		2
 #define HWC_NOT_OPERATIONAL	3
+
+#define hwc_cmdw_t u32;
 
 #define HWC_CMDW_READDATA 0x00770005
 
@@ -207,9 +216,26 @@ static init_hwcb_t init_hwcb_template =
 	0x0000,
 	0x0000,
 	sizeof (_hwcb_mask_t),
-	ET_OpCmd_Mask | ET_PMsgCmd_Mask,
-	ET_Msg_Mask
+	ET_OpCmd_Mask | ET_PMsgCmd_Mask |
+	ET_StateChange_Mask | ET_SigQuiesce_Mask,
+	ET_Msg_Mask | ET_PMsgCmd_Mask | ET_CtlProgIdent_Mask
 };
+
+typedef struct {
+	_EBUF_HEADER
+	u8 validity_hwc_active_facility_mask:1;
+	u8 validity_hwc_receive_mask:1;
+	u8 validity_hwc_send_mask:1;
+	u8 validity_read_data_function_mask:1;
+	u16 _zeros:12;
+	u16 mask_length;
+	u64 hwc_active_facility_mask;
+	_hwcb_mask_t hwc_receive_mask;
+	_hwcb_mask_t hwc_send_mask;
+	u32 read_data_function_mask;
+} __attribute__ ((packed)) 
+
+statechangebuf_t;
 
 #define _GDS_VECTOR_HEADER	u16	length; \
 				u16	gds_id;

@@ -31,6 +31,7 @@
 #endif
 
 static int io = CONFIG_RADIO_TRUST_PORT; 
+static int radio_nr = -1;
 static int ioval = 0xf;
 static int users = 0;
 static __u16 curvol;
@@ -274,18 +275,17 @@ static int tr_open(struct video_device *dev, int flags)
 	if(users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void tr_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct video_device trust_radio=
 {
+	owner:		THIS_MODULE,
 	name:		"Trust FM Radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_TRUST,
@@ -304,7 +304,7 @@ static int __init trust_init(void)
 		printk(KERN_ERR "trust: port 0x%x already in use\n", io);
 		return -EBUSY;
 	}
-	if(video_register_device(&trust_radio, VFL_TYPE_RADIO)==-1)
+	if(video_register_device(&trust_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 	{
 		release_region(io, 2);
 		return -EINVAL;
@@ -331,8 +331,11 @@ static int __init trust_init(void)
 
 MODULE_AUTHOR("Eric Lammerts, Russell Kroll, Quay Lu, Donald Song, Jason Lewis, Scott McGrath, William McGrath");
 MODULE_DESCRIPTION("A driver for the Trust FM Radio card.");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the Trust FM Radio card (0x350 or 0x358)");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 

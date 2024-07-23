@@ -1,27 +1,41 @@
 #include <linux/config.h>
 
+#include <asm/cache.h>
 #include <asm/page.h>
 #include <asm/system.h>
 
 OUTPUT_FORMAT("elf64-ia64-little")
 OUTPUT_ARCH(ia64)
-ENTRY(_start)
+ENTRY(phys_start)
+PHDRS {
+  code   PT_LOAD;
+  data   PT_LOAD;
+}
 SECTIONS
 {
-  v = PAGE_OFFSET;	/* this symbol is here to make debugging easier... */
+  /* Sections to be discarded */
+  /DISCARD/ : {
+	*(.text.exit)
+	*(.data.exit)
+	*(*.text.exit)
+	*(*.data.exit)
+	*(.exitcall.exit)
+	*(.IA_64.unwind.text.exit)
+	*(.IA_64.unwind_info.text.exit)
+	}
 
+  v = PAGE_OFFSET;	/* this symbol is here to make debugging easier... */
+  phys_start = _start - PAGE_OFFSET;
+
+  code : { } :code
   . = KERNEL_START;
 
   _text = .;
   _stext = .;
+
   .text : AT(ADDR(.text) - PAGE_OFFSET)
     {
-	*(__ivt_section)
-	/* these are not really text pages, but the zero page needs to be in a fixed location: */
-	*(__special_page_section)
-	__start_gate_section = .;
-	*(__gate_section)
-	__stop_gate_section = .;
+	*(.text.ivt)
 	*(.text)
     }
   .text2 : AT(ADDR(.text2) - PAGE_OFFSET)
@@ -34,42 +48,56 @@ SECTIONS
 
   /* Read-only data */
 
-  __gp = ALIGN(8) + 0x200000;
-
   /* Global data */
   _data = .;
 
   /* Exception table */
   . = ALIGN(16);
-  __start___ex_table = .;
   __ex_table : AT(ADDR(__ex_table) - PAGE_OFFSET)
-	{ *(__ex_table) }
-  __stop___ex_table = .;
+	{
+	  __start___ex_table = .;
+	  *(__ex_table)
+	  __stop___ex_table = .;
+	}
 
 #if defined(CONFIG_IA64_GENERIC)
   /* Machine Vector */
   . = ALIGN(16);
-  machvec_start = .;
   .machvec : AT(ADDR(.machvec) - PAGE_OFFSET)
-	{ *(.machvec) }
-  machvec_end = .;
+	{
+	  machvec_start = .;
+	  *(.machvec)
+	  machvec_end = .;
+	}
 #endif
 
-  __start___ksymtab = .;	/* Kernel symbol table */
   __ksymtab : AT(ADDR(__ksymtab) - PAGE_OFFSET)
-	{ *(__ksymtab) }
-  __stop___ksymtab = .;
+	{
+	  __start___ksymtab = .;	/* Kernel symbol table */
+	  *(__ksymtab)
+	  __stop___ksymtab = .;
+	}
 
-  /* Unwind table */
-  ia64_unw_start = .;
-  .IA_64.unwind : AT(ADDR(.IA_64.unwind) - PAGE_OFFSET)
-	{ *(.IA_64.unwind) }
-  ia64_unw_end = .;
+  __kallsyms : AT(ADDR(__kallsyms) - PAGE_OFFSET)
+	{
+	  __start___kallsyms = .;	/* All kernel symbols for debugging */
+	  *(__kallsyms)
+	  __stop___kallsyms = .;
+	}
+
+  /* Unwind info & table: */
+  . = ALIGN(8);
   .IA_64.unwind_info : AT(ADDR(.IA_64.unwind_info) - PAGE_OFFSET)
-	{ *(.IA_64.unwind_info) }
+	{ *(.IA_64.unwind_info*) }
+  .IA_64.unwind : AT(ADDR(.IA_64.unwind) - PAGE_OFFSET)
+	{
+	  ia64_unw_start = .;
+	  *(.IA_64.unwind*)
+	  ia64_unw_end = .;
+	}
 
   .rodata : AT(ADDR(.rodata) - PAGE_OFFSET)
-	{ *(.rodata) }
+	{ *(.rodata) *(.rodata.*) }
   .kstrtab : AT(ADDR(.kstrtab) - PAGE_OFFSET)
 	{ *(.kstrtab) }
   .opd : AT(ADDR(.opd) - PAGE_OFFSET)
@@ -85,14 +113,18 @@ SECTIONS
   .data.init : AT(ADDR(.data.init) - PAGE_OFFSET)
 	{ *(.data.init) }
    . = ALIGN(16);
-  __setup_start = .;
   .setup.init : AT(ADDR(.setup.init) - PAGE_OFFSET)
-        { *(.setup.init) }
-  __setup_end = .;
-  __initcall_start = .;
+        {
+	  __setup_start = .;
+	  *(.setup.init)
+	  __setup_end = .;
+	}
   .initcall.init : AT(ADDR(.initcall.init) - PAGE_OFFSET)
-        { *(.initcall.init) }
-  __initcall_end = .;
+        {
+	  __initcall_start = .;
+	  *(.initcall.init)
+	  __initcall_end = .;
+	}
   . = ALIGN(PAGE_SIZE);
   __init_end = .;
 
@@ -101,9 +133,13 @@ SECTIONS
 	{ *(init_task) }
 
   .data.page_aligned : AT(ADDR(.data.page_aligned) - PAGE_OFFSET)
-        { *(.data.idt) }
+        { *(__special_page_section)
+	  __start_gate_section = .;
+	  *(.text.gate)
+	  __stop_gate_section = .;
+	}
 
-  . = ALIGN(64);
+  . = ALIGN(SMP_CACHE_BYTES);
   .data.cacheline_aligned : AT(ADDR(.data.cacheline_aligned) - PAGE_OFFSET)
         { *(.data.cacheline_aligned) }
 
@@ -111,8 +147,13 @@ SECTIONS
   .kstrtab : AT(ADDR(.kstrtab) - PAGE_OFFSET)
 	{ *(.kstrtab) }
 
+  data : { } :data
   .data : AT(ADDR(.data) - PAGE_OFFSET)
 	{ *(.data) *(.gnu.linkonce.d*) CONSTRUCTORS }
+
+
+  . = ALIGN(16);
+  __gp = . + 0x200000;	/* gp must be 16-byte aligned for exc. table */
 
   .got : AT(ADDR(.got) - PAGE_OFFSET)
 	{ *(.got.plt) *(.got) }
@@ -130,13 +171,7 @@ SECTIONS
   . = ALIGN(64 / 8);
   _end = .;
 
-  /* Sections to be discarded */
-  /DISCARD/ : {
-	*(.text.exit)
-	*(.data.exit)
-	*(.exitcall.exit)
-	}
-
+  code : { } :code
   /* Stabs debugging sections.  */
   .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }

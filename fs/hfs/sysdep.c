@@ -2,7 +2,7 @@
  * linux/fs/hfs/sysdep.c
  *
  * Copyright (C) 1996  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the code to do various system dependent things.
  *
@@ -41,9 +41,9 @@ hfs_buffer hfs_buffer_get(hfs_sysmdb sys_mdb, int block, int read) {
 	hfs_buffer tmp = HFS_BAD_BUFFER;
 
 	if (read) {
-		tmp = bread(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
+		tmp = sb_bread(sys_mdb, block);
 	} else {
-		tmp = getblk(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
+		tmp = sb_getblk(sys_mdb, block);
 		if (tmp) {
 			mark_buffer_uptodate(tmp, 1);
 		}

@@ -1,7 +1,7 @@
-/* $Id: eicon_idi.c,v 1.41 2000/08/12 18:00:47 armin Exp $
+/* $Id: eicon_idi.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
- *        IDI interface 
+ * IDI interface 
  *
  * Copyright 1998-2000  by Armin Schindler (mac@melware.de)
  * Copyright 1999,2000  Cytronics & Melware (info@melware.de)
@@ -11,19 +11,8 @@
  *		capabilities with Diva Server cards.
  *		(dor@deutschemailbox.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -36,7 +25,7 @@
 
 #undef EICON_FULL_SERVICE_OKTETT
 
-char *eicon_idi_revision = "$Revision: 1.41 $";
+char *eicon_idi_revision = "$Revision: 1.1.4.1 $";
 
 eicon_manifbuf *manbuf;
 
@@ -2065,7 +2054,8 @@ idi_faxdata_send(eicon_card *ccard, eicon_chan *chan, struct sk_buff *skb)
 				OutBuf.Len++;
 			} else {
 				*OutBuf.Next++ = 0;
-				*((__u16 *) OutBuf.Next)++ = (__u16) LineBuf.Len;
+				*(__u16 *) OutBuf.Next = (__u16) LineBuf.Len;
+				OutBuf.Next += sizeof(__u16);
 				OutBuf.Len += 3;
 			}
 			memcpy(OutBuf.Next, LineBuf.Data, LineBuf.Len);
@@ -2221,7 +2211,10 @@ idi_parse_udata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
         static char *connmsg[] =
         {"", "V.21", "V.23", "V.22", "V.22bis", "V.32bis", "V.34",
          "V.8", "Bell 212A", "Bell 103", "V.29 Leased", "V.33 Leased", "V.90",
-         "V.21 CH2", "V.27ter", "V.29", "V.33", "V.17"};
+         "V.21 CH2", "V.27ter", "V.29", "V.33", "V.17", "V.32", "K56Flex",
+         "X2", "V.18", "V.18LH", "V.18HL", "V.21LH", "V.21HL",
+         "Bell 103LH", "Bell 103HL", "V.23", "V.23", "EDT 110",
+         "Baudot45", "Baudot47", "Baudot50", "DTMF" };
 	static u_char dtmf_code[] = {
 	'1','4','7','*','2','5','8','0','3','6','9','#','A','B','C','D'
 	};
@@ -2243,7 +2236,11 @@ idi_parse_udata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
 				cmd.driver = ccard->myid;
 				cmd.command = ISDN_STAT_BCONN;
 				cmd.arg = chan->No;
-				sprintf(cmd.parm.num, "%d/%s", p->speed, connmsg[p->norm]);
+                                if (p->norm > 34) {
+                                  sprintf(cmd.parm.num, "%d/(%d)", p->speed, p->norm);
+                                } else {
+                                  sprintf(cmd.parm.num, "%d/%s", p->speed, connmsg[p->norm]);
+                                }
 				ccard->interface.statcallb(&cmd);
 			}
 			eicon_log(ccard, 8, "idi_ind: Ch%d: UDATA_DCD_ON time %d\n", chan->No, p->time);
@@ -2506,7 +2503,7 @@ idi_handle_ind(eicon_card *ccard, struct sk_buff *skb)
 						case ISDN_PROTO_L2_TRANS:
 							idi_do_req(ccard, chan, N_CONNECT, 1);
 							break;
-						default:
+						default:;
 							/* On most incoming calls we use automatic connect */
 							/* idi_do_req(ccard, chan, N_CONNECT, 1); */
 					}
@@ -3123,8 +3120,8 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 			return(ret); 
 		}
 
-	        timeout = jiffies + 50;
-        	while (timeout > jiffies) {
+	        timeout = jiffies + HZ / 2;
+        	while (time_before(jiffies, timeout)) {
 	                if (chan->e.B2Id) break;
         	        SLEEP(10);
 	        }
@@ -3185,8 +3182,8 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 
         eicon_schedule_tx(card);
 
-        timeout = jiffies + 50;
-        while (timeout > jiffies) {
+        timeout = jiffies + HZ / 2;
+        while (time_before(jiffies, timeout)) {
                 if (chan->fsm_state) break;
                 SLEEP(10);
         }

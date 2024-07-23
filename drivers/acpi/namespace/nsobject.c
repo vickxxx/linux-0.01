@@ -2,286 +2,371 @@
  *
  * Module Name: nsobject - Utilities for objects attached to namespace
  *                         table entries
- *              $Revision: 47 $
  *
  ******************************************************************************/
 
 /*
- *  Copyright (C) 2000 R. Byron Moore
+ * Copyright (C) 2000 - 2004, R. Byron Moore
+ * All rights reserved.
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions, and the following disclaimer,
+ *    without modification.
+ * 2. Redistributions in binary form must reproduce at minimum a disclaimer
+ *    substantially similar to the "NO WARRANTY" disclaimer below
+ *    ("Disclaimer") and any redistribution must be conditioned upon
+ *    including a substantially similar Disclaimer requirement for further
+ *    binary redistribution.
+ * 3. Neither the names of the above-listed copyright holders nor the names
+ *    of any contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * Alternatively, this software may be distributed under the terms of the
+ * GNU General Public License ("GPL") version 2 as published by the Free
+ * Software Foundation.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * NO WARRANTY
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ * POSSIBILITY OF SUCH DAMAGES.
  */
 
 
-#include "acpi.h"
-#include "amlcode.h"
-#include "acnamesp.h"
-#include "acinterp.h"
-#include "actables.h"
+#include <acpi/acpi.h>
+#include <acpi/acnamesp.h>
 
 
-#define _COMPONENT          NAMESPACE
-	 MODULE_NAME         ("nsobject")
+#define _COMPONENT          ACPI_NAMESPACE
+	 ACPI_MODULE_NAME    ("nsobject")
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_ns_attach_object
+ * FUNCTION:    acpi_ns_attach_object
  *
- * PARAMETERS:  Node            - Parent Node
+ * PARAMETERS:  Node                - Parent Node
  *              Object              - Object to be attached
  *              Type                - Type of object, or ACPI_TYPE_ANY if not
- *                                      known
+ *                                    known
  *
  * DESCRIPTION: Record the given object as the value associated with the
- *              name whose ACPI_HANDLE is passed.  If Object is NULL
+ *              name whose acpi_handle is passed.  If Object is NULL
  *              and Type is ACPI_TYPE_ANY, set the name as having no value.
+ *              Note: Future may require that the Node->Flags field be passed
+ *              as a parameter.
  *
  * MUTEX:       Assumes namespace is locked
  *
  ******************************************************************************/
 
-ACPI_STATUS
+acpi_status
 acpi_ns_attach_object (
-	ACPI_NAMESPACE_NODE     *node,
-	ACPI_OPERAND_OBJECT     *object,
-	OBJECT_TYPE_INTERNAL    type)
+	struct acpi_namespace_node      *node,
+	union acpi_operand_object       *object,
+	acpi_object_type                type)
 {
-	ACPI_OPERAND_OBJECT     *obj_desc;
-	ACPI_OPERAND_OBJECT     *previous_obj_desc;
-	OBJECT_TYPE_INTERNAL    obj_type = ACPI_TYPE_ANY;
-	u8                      flags;
-	u16                     opcode;
+	union acpi_operand_object       *obj_desc;
+	union acpi_operand_object       *last_obj_desc;
+	acpi_object_type                object_type = ACPI_TYPE_ANY;
+
+
+	ACPI_FUNCTION_TRACE ("ns_attach_object");
 
 
 	/*
 	 * Parameter validation
 	 */
-
-	if (!acpi_gbl_root_node) {
-		/* Name space not initialized  */
-
-		REPORT_ERROR (("Ns_attach_object: Namespace not initialized\n"));
-		return (AE_NO_NAMESPACE);
-	}
-
 	if (!node) {
 		/* Invalid handle */
 
-		REPORT_ERROR (("Ns_attach_object: Null Named_obj handle\n"));
-		return (AE_BAD_PARAMETER);
+		ACPI_REPORT_ERROR (("ns_attach_object: Null named_obj handle\n"));
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
 	if (!object && (ACPI_TYPE_ANY != type)) {
 		/* Null object */
 
-		REPORT_ERROR (("Ns_attach_object: Null object, but type not ACPI_TYPE_ANY\n"));
-		return (AE_BAD_PARAMETER);
+		ACPI_REPORT_ERROR (("ns_attach_object: Null object, but type not ACPI_TYPE_ANY\n"));
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
-	if (!VALID_DESCRIPTOR_TYPE (node, ACPI_DESC_TYPE_NAMED)) {
+	if (ACPI_GET_DESCRIPTOR_TYPE (node) != ACPI_DESC_TYPE_NAMED) {
 		/* Not a name handle */
 
-		REPORT_ERROR (("Ns_attach_object: Invalid handle\n"));
-		return (AE_BAD_PARAMETER);
+		ACPI_REPORT_ERROR (("ns_attach_object: Invalid handle %p [%s]\n",
+				node, acpi_ut_get_descriptor_name (node)));
+		return_ACPI_STATUS (AE_BAD_PARAMETER);
 	}
 
 	/* Check if this object is already attached */
 
 	if (node->object == object) {
-		return (AE_OK);
+		ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Obj %p already installed in name_obj %p\n",
+			object, node));
+
+		return_ACPI_STATUS (AE_OK);
 	}
-
-
-	/* Get the current flags field of the Node */
-
-	flags = node->flags;
-	flags &= ~ANOBJ_AML_ATTACHMENT;
-
 
 	/* If null object, we will just install it */
 
 	if (!object) {
-		obj_desc = NULL;
-		obj_type = ACPI_TYPE_ANY;
+		obj_desc   = NULL;
+		object_type = ACPI_TYPE_ANY;
 	}
 
 	/*
-	 * If the object is an Node with an attached object,
+	 * If the source object is a namespace Node with an attached object,
 	 * we will use that (attached) object
 	 */
-
-	else if (VALID_DESCRIPTOR_TYPE (object, ACPI_DESC_TYPE_NAMED) &&
-			((ACPI_NAMESPACE_NODE *) object)->object)
-	{
+	else if ((ACPI_GET_DESCRIPTOR_TYPE (object) == ACPI_DESC_TYPE_NAMED) &&
+			((struct acpi_namespace_node *) object)->object) {
 		/*
 		 * Value passed is a name handle and that name has a
 		 * non-null value.  Use that name's value and type.
 		 */
-
-		obj_desc = ((ACPI_NAMESPACE_NODE *) object)->object;
-		obj_type = ((ACPI_NAMESPACE_NODE *) object)->type;
-
-		/*
-		 * Copy appropriate flags
-		 */
-
-		if (((ACPI_NAMESPACE_NODE *) object)->flags & ANOBJ_AML_ATTACHMENT) {
-			flags |= ANOBJ_AML_ATTACHMENT;
-		}
+		obj_desc   = ((struct acpi_namespace_node *) object)->object;
+		object_type = ((struct acpi_namespace_node *) object)->type;
 	}
-
 
 	/*
 	 * Otherwise, we will use the parameter object, but we must type
 	 * it first
 	 */
-
 	else {
-		obj_desc = (ACPI_OPERAND_OBJECT *) object;
+		obj_desc = (union acpi_operand_object   *) object;
 
+		/* Use the given type */
 
-		/* If a valid type (non-ANY) was given, just use it */
+		object_type = type;
+	}
 
-		if (ACPI_TYPE_ANY != type) {
-			obj_type = type;
-		}
+	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Installing %p into Node %p [%4.4s]\n",
+		obj_desc, node, acpi_ut_get_node_name (node)));
 
+	/* Detach an existing attached object if present */
+
+	if (node->object) {
+		acpi_ns_detach_object (node);
+	}
+
+	if (obj_desc) {
+		/*
+		 * Must increment the new value's reference count
+		 * (if it is an internal object)
+		 */
+		acpi_ut_add_reference (obj_desc);
 
 		/*
-		 * Type is TYPE_Any, we must try to determinte the
-		 * actual type of the object
+		 * Handle objects with multiple descriptors - walk
+		 * to the end of the descriptor list
 		 */
-
-		/*
-		 * Check if value points into the AML code
-		 */
-		else if (acpi_tb_system_table_pointer (object)) {
-			/*
-			 * Object points into the AML stream.
-			 * Set a flag bit in the Node to indicate this
-			 */
-
-			flags |= ANOBJ_AML_ATTACHMENT;
-
-			/*
-			 * The next byte (perhaps the next two bytes)
-			 * will be the AML opcode
-			 */
-
-			MOVE_UNALIGNED16_TO_16 (&opcode, object);
-
-			/* Check for a recognized Op_code */
-
-			switch ((u8) opcode)
-			{
-
-			case AML_OP_PREFIX:
-
-				if (opcode != AML_REVISION_OP) {
-					/*
-					 * Op_prefix is unrecognized unless part
-					 * of Revision_op
-					 */
-
-					break;
-				}
-
-				/* Else fall through to set type as Number */
-
-
-			case AML_ZERO_OP: case AML_ONES_OP: case AML_ONE_OP:
-			case AML_BYTE_OP: case AML_WORD_OP: case AML_DWORD_OP:
-
-				obj_type = ACPI_TYPE_NUMBER;
-				break;
-
-
-			case AML_STRING_OP:
-
-				obj_type = ACPI_TYPE_STRING;
-				break;
-
-
-			case AML_BUFFER_OP:
-
-				obj_type = ACPI_TYPE_BUFFER;
-				break;
-
-
-			case AML_MUTEX_OP:
-
-				obj_type = ACPI_TYPE_MUTEX;
-				break;
-
-
-			case AML_PACKAGE_OP:
-
-				obj_type = ACPI_TYPE_PACKAGE;
-				break;
-
-
-			default:
-
-				return (AE_TYPE);
-				break;
-			}
+		last_obj_desc = obj_desc;
+		while (last_obj_desc->common.next_object) {
+			last_obj_desc = last_obj_desc->common.next_object;
 		}
 
-		else {
-			/*
-			 * Cannot figure out the type -- set to Def_any which
-			 * will print as an error in the name table dump
-			 */
+		/* Install the object at the front of the object list */
+
+		last_obj_desc->common.next_object = node->object;
+	}
+
+	node->type     = (u8) object_type;
+	node->object   = obj_desc;
+
+	return_ACPI_STATUS (AE_OK);
+}
 
 
-			obj_type = INTERNAL_TYPE_DEF_ANY;
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ns_detach_object
+ *
+ * PARAMETERS:  Node           - An node whose object will be detached
+ *
+ * RETURN:      None.
+ *
+ * DESCRIPTION: Detach/delete an object associated with a namespace node.
+ *              if the object is an allocated object, it is freed.
+ *              Otherwise, the field is simply cleared.
+ *
+ ******************************************************************************/
+
+void
+acpi_ns_detach_object (
+	struct acpi_namespace_node      *node)
+{
+	union acpi_operand_object       *obj_desc;
+
+
+	ACPI_FUNCTION_TRACE ("ns_detach_object");
+
+
+	obj_desc = node->object;
+
+	if (!obj_desc ||
+		(ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_LOCAL_DATA)) {
+		return_VOID;
+	}
+
+	/* Clear the entry in all cases */
+
+	node->object = NULL;
+	if (ACPI_GET_DESCRIPTOR_TYPE (obj_desc) == ACPI_DESC_TYPE_OPERAND) {
+		node->object = obj_desc->common.next_object;
+		if (node->object &&
+		   (ACPI_GET_OBJECT_TYPE (node->object) != ACPI_TYPE_LOCAL_DATA)) {
+			node->object = node->object->common.next_object;
 		}
 	}
 
+	/* Reset the node type to untyped */
 
-	/*
-	 * Must increment the new value's reference count
-	 * (if it is an internal object)
-	 */
+	node->type = ACPI_TYPE_ANY;
 
-	acpi_cm_add_reference (obj_desc);
+	ACPI_DEBUG_PRINT ((ACPI_DB_NAMES, "Node %p [%4.4s] Object %p\n",
+		node, acpi_ut_get_node_name (node), obj_desc));
 
-	/* Save the existing object (if any) for deletion later */
+	/* Remove one reference on the object (and all subobjects) */
 
-	previous_obj_desc = node->object;
-
-	/* Install the object and set the type, flags */
-
-	node->object   = obj_desc;
-	node->type     = (u8) obj_type;
-	node->flags    |= flags;
+	acpi_ut_remove_reference (obj_desc);
+	return_VOID;
+}
 
 
-	/*
-	 * Delete an existing attached object.
-	 */
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ns_get_attached_object
+ *
+ * PARAMETERS:  Node             - Parent Node to be examined
+ *
+ * RETURN:      Current value of the object field from the Node whose
+ *              handle is passed
+ *
+ * DESCRIPTION: Obtain the object attached to a namespace node.
+ *
+ ******************************************************************************/
 
-	if (previous_obj_desc) {
-		/* One for the attach to the Node */
+union acpi_operand_object *
+acpi_ns_get_attached_object (
+	struct acpi_namespace_node      *node)
+{
+	ACPI_FUNCTION_TRACE_PTR ("ns_get_attached_object", node);
 
-		acpi_cm_remove_reference (previous_obj_desc);
 
-		/* Now delete */
+	if (!node) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_WARN, "Null Node ptr\n"));
+		return_PTR (NULL);
+	}
 
-		acpi_cm_remove_reference (previous_obj_desc);
+	if (!node->object ||
+			((ACPI_GET_DESCRIPTOR_TYPE (node->object) != ACPI_DESC_TYPE_OPERAND) &&
+			 (ACPI_GET_DESCRIPTOR_TYPE (node->object) != ACPI_DESC_TYPE_NAMED))  ||
+		(ACPI_GET_OBJECT_TYPE (node->object) == ACPI_TYPE_LOCAL_DATA)) {
+		return_PTR (NULL);
+	}
+
+	return_PTR (node->object);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ns_get_secondary_object
+ *
+ * PARAMETERS:  Node             - Parent Node to be examined
+ *
+ * RETURN:      Current value of the object field from the Node whose
+ *              handle is passed.
+ *
+ * DESCRIPTION: Obtain a secondary object associated with a namespace node.
+ *
+ ******************************************************************************/
+
+union acpi_operand_object *
+acpi_ns_get_secondary_object (
+	union acpi_operand_object       *obj_desc)
+{
+	ACPI_FUNCTION_TRACE_PTR ("ns_get_secondary_object", obj_desc);
+
+
+	if ((!obj_desc)                                               ||
+		(ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_LOCAL_DATA) ||
+		(!obj_desc->common.next_object)                           ||
+		(ACPI_GET_OBJECT_TYPE (obj_desc->common.next_object) == ACPI_TYPE_LOCAL_DATA)) {
+		return_PTR (NULL);
+	}
+
+	return_PTR (obj_desc->common.next_object);
+}
+
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_ns_attach_data
+ *
+ * PARAMETERS:  Node            - Namespace node
+ *              Handler         - Handler to be associated with the data
+ *              Data            - Data to be attached
+ *
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Low-level attach data.  Create and attach a Data object.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ns_attach_data (
+	struct acpi_namespace_node      *node,
+	acpi_object_handler             handler,
+	void                            *data)
+{
+	union acpi_operand_object       *prev_obj_desc;
+	union acpi_operand_object       *obj_desc;
+	union acpi_operand_object       *data_desc;
+
+
+	/* We only allow one attachment per handler */
+
+	prev_obj_desc = NULL;
+	obj_desc = node->object;
+	while (obj_desc) {
+		if ((ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_LOCAL_DATA) &&
+			(obj_desc->data.handler == handler)) {
+			return (AE_ALREADY_EXISTS);
+		}
+
+		prev_obj_desc = obj_desc;
+		obj_desc = obj_desc->common.next_object;
+	}
+
+	/* Create an internal object for the data */
+
+	data_desc = acpi_ut_create_internal_object (ACPI_TYPE_LOCAL_DATA);
+	if (!data_desc) {
+		return (AE_NO_MEMORY);
+	}
+
+	data_desc->data.handler = handler;
+	data_desc->data.pointer = data;
+
+	/* Install the data object */
+
+	if (prev_obj_desc) {
+		prev_obj_desc->common.next_object = data_desc;
+	}
+	else {
+		node->object = data_desc;
 	}
 
 	return (AE_OK);
@@ -290,74 +375,87 @@ acpi_ns_attach_object (
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_ns_detach_object
+ * FUNCTION:    acpi_ns_detach_data
  *
- * PARAMETERS:  Node           - An object whose Value will be deleted
+ * PARAMETERS:  Node            - Namespace node
+ *              Handler         - Handler associated with the data
  *
- * RETURN:      None.
+ * RETURN:      Status
  *
- * DESCRIPTION: Delete the Value associated with a namespace object.  If the
- *              Value is an allocated object, it is freed.  Otherwise, the
- *              field is simply cleared.
+ * DESCRIPTION: Low-level detach data.  Delete the data node, but the caller
+ *              is responsible for the actual data.
  *
  ******************************************************************************/
 
-void
-acpi_ns_detach_object (
-	ACPI_NAMESPACE_NODE     *node)
+acpi_status
+acpi_ns_detach_data (
+	struct acpi_namespace_node      *node,
+	acpi_object_handler             handler)
 {
-	ACPI_OPERAND_OBJECT     *obj_desc;
+	union acpi_operand_object       *obj_desc;
+	union acpi_operand_object       *prev_obj_desc;
 
 
+	prev_obj_desc = NULL;
 	obj_desc = node->object;
-	if (!obj_desc) {
-		return;
+	while (obj_desc) {
+		if ((ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_LOCAL_DATA) &&
+			(obj_desc->data.handler == handler)) {
+			if (prev_obj_desc) {
+				prev_obj_desc->common.next_object = obj_desc->common.next_object;
+			}
+			else {
+				node->object = obj_desc->common.next_object;
+			}
+
+			acpi_ut_remove_reference (obj_desc);
+			return (AE_OK);
+		}
+
+		prev_obj_desc = obj_desc;
+		obj_desc = obj_desc->common.next_object;
 	}
 
-	/* Clear the entry in all cases */
-
-	node->object = NULL;
-
-	/* Found a valid value */
-
-	/*
-	 * Not every value is an object allocated via Acpi_cm_callocate,
-	 * - must check
-	 */
-
-	if (!acpi_tb_system_table_pointer (obj_desc)) {
-		/* Attempt to delete the object (and all subobjects) */
-
-		acpi_cm_remove_reference (obj_desc);
-	}
-
-	return;
+	return (AE_NOT_FOUND);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    Acpi_ns_get_attached_object
+ * FUNCTION:    acpi_ns_get_attached_data
  *
- * PARAMETERS:  Handle              - Parent Node to be examined
+ * PARAMETERS:  Node            - Namespace node
+ *              Handler         - Handler associated with the data
+ *              Data            - Where the data is returned
  *
- * RETURN:      Current value of the object field from the Node whose
- *              handle is passed
+ * RETURN:      Status
+ *
+ * DESCRIPTION: Low level interface to obtain data previously associated with
+ *              a namespace node.
  *
  ******************************************************************************/
 
-void *
-acpi_ns_get_attached_object (
-	ACPI_HANDLE             handle)
+acpi_status
+acpi_ns_get_attached_data (
+	struct acpi_namespace_node      *node,
+	acpi_object_handler             handler,
+	void                            **data)
 {
+	union acpi_operand_object       *obj_desc;
 
-	if (!handle) {
-		/* handle invalid */
 
-		return (NULL);
+	obj_desc = node->object;
+	while (obj_desc) {
+		if ((ACPI_GET_OBJECT_TYPE (obj_desc) == ACPI_TYPE_LOCAL_DATA) &&
+			(obj_desc->data.handler == handler)) {
+			*data = obj_desc->data.pointer;
+			return (AE_OK);
+		}
+
+		obj_desc = obj_desc->common.next_object;
 	}
 
-	return (((ACPI_NAMESPACE_NODE *) handle)->object);
+	return (AE_NOT_FOUND);
 }
 
 

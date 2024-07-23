@@ -43,7 +43,7 @@ nsm_mon_unmon(struct nlm_host *host, u32 proc, struct nsm_res *res)
 
 	args.addr = host->h_addr.sin_addr.s_addr;
 	args.prog = NLM_PROGRAM;
-	args.vers = 1;
+	args.vers = host->h_version;
 	args.proc = NLMPROC_NSM_NOTIFY;
 	memset(res, 0, sizeof(*res));
 
@@ -122,6 +122,7 @@ nsm_create(void)
 	clnt->cl_softrtry = 1;
 	clnt->cl_chatty   = 1;
 	clnt->cl_oneshot  = 1;
+	xprt->resvport = 1;	/* NSM requires a reserved port */
 out:
 	return clnt;
 
@@ -146,7 +147,7 @@ xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	u32	addr = ntohl(argp->addr);
 
 	dprintk("nsm: xdr_encode_mon(%08x, %d, %d, %d)\n",
-			htonl(argp->addr), htonl(argp->proc),
+			htonl(argp->addr), htonl(argp->prog),
 			htonl(argp->vers), htonl(argp->proc));
 
 	/*

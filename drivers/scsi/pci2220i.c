@@ -40,7 +40,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -2016,7 +2016,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	del_timer (&padapter->timer);
 	if ( status )
 		{
-		DEB (printk ("\npci2220i Interupt hanlder return error"));
+		DEB (printk ("\npci2220i Interrupt handler return error"));
 		zl = DecodeError (padapter, status);
 		}
 	else
@@ -2553,6 +2553,7 @@ int Pci2220i_Detect (Scsi_Host_Template *tpnt)
 		if ( GetRegs (pshost, FALSE, pcidev) )
 			goto unregister;
 
+		scsi_set_pci_device(pshost, pcidev);
 		pshost->max_id = padapter->numberOfDrives;
 		for ( z = 0;  z < padapter->numberOfDrives;  z++ )
 			{
@@ -2656,6 +2657,7 @@ unregister:;
 		for ( z = 0;  z < BIGD_MAXDRIVES;  z++ )
 			DiskMirror[z].status = inb_p (padapter->regScratchPad + BIGD_RAID_0_STATUS + z);		
 
+		scsi_set_pci_device(pshost, pcidev);
 		pshost->max_id = padapter->numberOfDrives;
 		padapter->failRegister = inb_p (padapter->regScratchPad + BIGD_ALARM_IMAGE);
 		for ( z = 0;  z < padapter->numberOfDrives;  z++ )
@@ -2922,6 +2924,7 @@ int Pci2220i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	return 0;
 	}
 
+MODULE_LICENSE("Dual BSD/GPL");
 
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = PCI2220I;

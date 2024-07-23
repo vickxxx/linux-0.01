@@ -1,10 +1,10 @@
-/* cs89x0.c: A Crystal Semiconductor CS89[02]0 driver for linux. */
+/* mac89x0.c: A Crystal Semiconductor CS89[02]0 driver for linux. */
 /*
 	Written 1996 by Russell Nelson, with reference to skeleton.c
 	written 1993-1994 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	The author may be reached at nelson@crynwr.com, Crynwr
 	Software, 11 Grant St., Potsdam, NY 13676
@@ -48,6 +48,11 @@
   I/O space and NuBus interrupts for these cards, but neglected to
   provide anything even remotely resembling a NuBus ROM.  Therefore we
   have to probe for them in a brain-damaged ISA-like fashion.
+
+  Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 11/01/2001
+  check kmalloc and release the allocated memory on failure in
+  mac89x0_probe and in init_module
+  use save_flags/restore_flags in net_get_stat, not just cli/sti
 */
 
 static char *version =
@@ -86,7 +91,7 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/nubus.h>
 #include <asm/system.h>
@@ -123,7 +128,7 @@ extern int mac89x0_probe(struct net_device *dev);
 extern void reset_chip(struct net_device *dev);
 #endif
 static int net_open(struct net_device *dev);
-static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
+static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void set_multicast_list(struct net_device *dev);
 static void net_rx(struct net_device *dev);
@@ -139,37 +144,37 @@ static int set_mac_address(struct net_device *dev, void *addr);
 static int inline
 readreg_io(struct net_device *dev, int portno)
 {
-	writew(swab16(portno), dev->base_addr + ADD_PORT);
-	return swab16(readw(dev->base_addr + DATA_PORT));
+	nubus_writew(swab16(portno), dev->base_addr + ADD_PORT);
+	return swab16(nubus_readw(dev->base_addr + DATA_PORT));
 }
 
 static void inline
 writereg_io(struct net_device *dev, int portno, int value)
 {
-	writew(swab16(portno), dev->base_addr + ADD_PORT);
-	writew(swab16(value), dev->base_addr + DATA_PORT);
+	nubus_writew(swab16(portno), dev->base_addr + ADD_PORT);
+	nubus_writew(swab16(value), dev->base_addr + DATA_PORT);
 }
 
 /* These are for reading/writing registers in shared memory */
 static int inline
 readreg(struct net_device *dev, int portno)
 {
-	return swab16(readw(dev->mem_start + portno));
+	return swab16(nubus_readw(dev->mem_start + portno));
 }
 
 static void inline
 writereg(struct net_device *dev, int portno, int value)
 {
-	writew(swab16(value), dev->mem_start + portno);
+	nubus_writew(swab16(value), dev->mem_start + portno);
 }
 
 /* Probe for the CS8900 card in slot E.  We won't bother looking
    anywhere else until we have a really good reason to do so. */
 int __init mac89x0_probe(struct net_device *dev)
 {
-	static int once_is_enough = 0;
+	static int once_is_enough;
 	struct net_local *lp;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i, slot;
 	unsigned rev_type = 0;
 	unsigned long ioaddr;
@@ -205,14 +210,16 @@ int __init mac89x0_probe(struct net_device *dev)
 			return -ENODEV;
 	}
 
-	writew(0, ioaddr + ADD_PORT);
-	sig = readw(ioaddr + DATA_PORT);
+	nubus_writew(0, ioaddr + ADD_PORT);
+	sig = nubus_readw(ioaddr + DATA_PORT);
 	if (sig != swab16(CHIP_EISA_ID_SIG))
 		return -ENODEV;
 
 	/* Initialize the net_device structure. */
 	if (dev->priv == NULL) {
 		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+		if (!dev->priv)
+			return -ENOMEM;
                 memset(dev->priv, 0, sizeof(struct net_local));
         }
 	lp = (struct net_local *)dev->priv;
@@ -252,6 +259,8 @@ int __init mac89x0_probe(struct net_device *dev)
 	/* Try to read the MAC address */
 	if ((readreg(dev, PP_SelfST) & (EEPROM_PRESENT | EEPROM_OK)) == 0) {
 		printk("\nmac89x0: No EEPROM, giving up now.\n");
+		kfree(dev->priv);
+		dev->priv = NULL;
 		return -ENODEV;
         } else {
                 for (i = 0; i < ETH_ALEN; i += 2) {
@@ -359,57 +368,38 @@ net_open(struct net_device *dev)
 static int
 net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		if (net_debug > 0) printk("%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
-		/* Try to restart the adaptor. */
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
-	}
+	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned long flags;
 
-	/* Block a timer-based transmit from overlapping.  This could better be
-	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
-		struct net_local *lp = (struct net_local *)dev->priv;
-		unsigned long flags;
+	if (net_debug > 3)
+		printk("%s: sent %d byte packet of type %x\n",
+		       dev->name, skb->len,
+		       (skb->data[ETH_ALEN+ETH_ALEN] << 8)
+		       | skb->data[ETH_ALEN+ETH_ALEN+1]);
 
-		if (net_debug > 3)
-			printk("%s: sent %d byte packet of type %x\n",
-			       dev->name, skb->len,
-			       (skb->data[ETH_ALEN+ETH_ALEN] << 8)
-			       | skb->data[ETH_ALEN+ETH_ALEN+1]);
+	/* keep the upload from being interrupted, since we
+	   ask the chip to start transmitting before the
+	   whole packet has been completely uploaded. */
+	save_flags(flags);
+	cli();
 
-		/* keep the upload from being interrupted, since we
-                   ask the chip to start transmitting before the
-                   whole packet has been completely uploaded. */
-		save_flags(flags);
-		cli();
+	/* initiate a transmit sequence */
+	writereg(dev, PP_TxCMD, lp->send_cmd);
+	writereg(dev, PP_TxLength, skb->len);
 
-		/* initiate a transmit sequence */
-		writereg(dev, PP_TxCMD, lp->send_cmd);
-		writereg(dev, PP_TxLength, skb->len);
-
-		/* Test to see if the chip has allocated memory for the packet */
-		if ((readreg(dev, PP_BusST) & READY_FOR_TX_NOW) == 0) {
-			/* Gasp!  It hasn't.  But that shouldn't happen since
-			   we're waiting for TxOk, so return 1 and requeue this packet. */
-			restore_flags(flags);
-			return 1;
-		}
-
-		/* Write the contents of the packet */
-		memcpy_toio(dev->mem_start + PP_TxFrame, skb->data, skb->len+1);
-
+	/* Test to see if the chip has allocated memory for the packet */
+	if ((readreg(dev, PP_BusST) & READY_FOR_TX_NOW) == 0) {
+		/* Gasp!  It hasn't.  But that shouldn't happen since
+		   we're waiting for TxOk, so return 1 and requeue this packet. */
 		restore_flags(flags);
-		dev->trans_start = jiffies;
+		return 1;
 	}
+
+	/* Write the contents of the packet */
+	memcpy((void *)(dev->mem_start + PP_TxFrame), skb->data, skb->len+1);
+
+	restore_flags(flags);
+	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
 
 	return 0;
@@ -427,9 +417,6 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
 		return;
 	}
-	if (dev->interrupt)
-		printk("%s: Re-entering the interrupt handler.\n", dev->name);
-	dev->interrupt = 1;
 
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
@@ -441,7 +428,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
            course, if you're on a slow machine, and packets are arriving
            faster than you can read them off, you're screwed.  Hasta la
            vista, baby!  */
-	while ((status = swab16(readw(dev->base_addr + ISQ_PORT)))) {
+	while ((status = swab16(nubus_readw(dev->base_addr + ISQ_PORT)))) {
 		if (net_debug > 4)printk("%s: event=%04x\n", dev->name, status);
 		switch(status & ISQ_EVENT_MASK) {
 		case ISQ_RECEIVER_EVENT:
@@ -450,8 +437,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			break;
 		case ISQ_TRANSMITTER_EVENT:
 			lp->stats.tx_packets++;
-			dev->tbusy = 0;
-			mark_bh(NET_BH);	/* Inform upper layers. */
+			netif_wake_queue(dev);
 			if ((status & TX_OK) == 0) lp->stats.tx_errors++;
 			if (status & TX_LOST_CRS) lp->stats.tx_carrier_errors++;
 			if (status & TX_SQE_ERROR) lp->stats.tx_heartbeat_errors++;
@@ -465,8 +451,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
                                    That shouldn't happen since we only ever
                                    load one packet.  Shrug.  Do the right
                                    thing anyway. */
-				dev->tbusy = 0;
-				mark_bh(NET_BH);	/* Inform upper layers. */
+				netif_wake_queue(dev);
 			}
 			if (status & TX_UNDERRUN) {
 				if (net_debug > 0) printk("%s: transmit underrun\n", dev->name);
@@ -483,7 +468,6 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			break;
 		}
 	}
-	dev->interrupt = 0;
 	return;
 }
 
@@ -515,10 +499,10 @@ net_rx(struct net_device *dev)
 		lp->stats.rx_dropped++;
 		return;
 	}
-	skb->len = length;
+	skb_put(skb, length);
 	skb->dev = dev;
 
-	memcpy_fromio(skb->data, dev->mem_start + PP_RxFrame, length);
+	memcpy(skb->data, (void *)(dev->mem_start + PP_RxFrame), length);
 
 	if (net_debug > 3)printk("%s: received %d byte packet of type %x\n",
                                  dev->name, length,
@@ -527,9 +511,9 @@ net_rx(struct net_device *dev)
 
         skb->protocol=eth_type_trans(skb,dev);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
-	lp->stats.rx_bytes+=skb->len;
-	return;
+	lp->stats.rx_bytes += length;
 }
 
 /* The inverse routine to net_open(). */
@@ -558,12 +542,14 @@ static struct net_device_stats *
 net_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned long flags;
 
+	save_flags(flags);
 	cli();
 	/* Update the statistics from the device registers. */
 	lp->stats.rx_missed_errors += (readreg(dev, PP_RxMiss) >> 6);
 	lp->stats.collisions += (readreg(dev, PP_TxCol) >> 6);
-	sti();
+	restore_flags(flags);
 
 	return &lp->stats;
 }
@@ -596,8 +582,6 @@ static void set_multicast_list(struct net_device *dev)
 static int set_mac_address(struct net_device *dev, void *addr)
 {
 	int i;
-	if (dev->start)
-		return -EBUSY;
 	printk("%s: Setting MAC address to ", dev->name);
 	for (i = 0; i < 6; i++)
 		printk(" %2.2x", dev->dev_addr[i] = ((unsigned char *)addr)[i]);
@@ -615,22 +599,24 @@ static struct net_device dev_cs89x0;
 static int debug;
 
 MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "CS89[02]0 debug level (0-5)");
+MODULE_LICENSE("GPL");
 
 EXPORT_NO_SYMBOLS;
 
 int
 init_module(void)
 {
-	struct net_local *lp;
-
 	net_debug = debug;
         dev_cs89x0.init = mac89x0_probe;
         dev_cs89x0.priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (!dev_cs89x0.priv)
+		return -ENOMEM;
 	memset(dev_cs89x0.priv, 0, sizeof(struct net_local));
-	lp = (struct net_local *)dev_cs89x0.priv;
 
         if (register_netdev(&dev_cs89x0) != 0) {
                 printk(KERN_WARNING "mac89x0.c: No card found\n");
+		kfree(dev_cs89x0.priv);
                 return -ENXIO;
         }
 	return 0;
@@ -642,7 +628,7 @@ cleanup_module(void)
 
 #endif
 #ifdef MODULE
-	writew(0, dev_cs89x0.base_addr + ADD_PORT);
+	nubus_writew(0, dev_cs89x0.base_addr + ADD_PORT);
 #endif
 #ifdef MODULE
 

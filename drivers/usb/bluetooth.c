@@ -1,10 +1,44 @@
 /*
- * bluetooth.c   Version 0.7
+ * bluetooth.c   Version 0.12
  *
- * Copyright (c) 2000 Greg Kroah-Hartman	<greg@kroah.com>
- * Copyright (c) 2000 Mark Douglas Corner	<mcorner@umich.edu>
+ * Copyright (C) 2000, 2001 Greg Kroah-Hartman	<greg@kroah.com>
+ * Copyright (C) 2000 Mark Douglas Corner	<mcorner@umich.edu>
  *
- * USB Bluetooth driver, based on the Bluetooth Spec version 1.0B
+ * USB Bluetooth TTY driver, based on the Bluetooth Spec version 1.0B
+ * 
+ * (2001/11/30) Version 0.13 gkh
+ *	- added locking patch from Masoodur Rahman <rmasoodu@in.ibm.com>
+ *	- removed active variable, as open_count will do.
+ *
+ * (2001/07/09) Version 0.12 gkh
+ *	- removed in_interrupt() call, as it doesn't make sense to do 
+ *	  that anymore.
+ *
+ * (2001/06/05) Version 0.11 gkh
+ *	- Fixed problem with read urb status saying that we have shutdown,
+ *	  and that we shouldn't resubmit the urb.  Patch from unknown.
+ *
+ * (2001/05/28) Version 0.10 gkh
+ *	- Fixed problem with using data from userspace in the bluetooth_write
+ *	  function as found by the CHECKER project.
+ *	- Added a buffer to the write_urb_pool which reduces the number of
+ *	  buffers being created and destroyed for ever write.  Also cleans
+ *	  up the logic a bit.
+ *	- Added a buffer to the control_urb_pool which fixes a memory leak
+ *	  when the device is removed from the system.
+ *
+ * (2001/05/28) Version 0.9 gkh
+ *	Fixed problem with bluetooth==NULL for bluetooth_read_bulk_callback
+ *	which was found by both the CHECKER project and Mikko Rahkonen.
+ *
+ * (08/04/2001) gb
+ *	Identify version on module load.
+ *
+ * (2001/03/10) Version 0.8 gkh
+ *	Fixed problem with not unlinking interrupt urb on device close
+ *	and resubmitting the read urb on error with bluetooth struct.
+ *	Thanks to Narayan Mohanram <narayan@RovingNetworks.com> for the
+ *	fixes.
  *
  * (11/29/2000) Version 0.7 gkh
  *	Fixed problem with overrunning the tty flip buffer.
@@ -70,24 +104,24 @@
 
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/signal.h>
 #include <linux/errno.h>
-#include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
-#include <linux/fcntl.h>
+#include <linux/slab.h>
+#include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/tty.h>
 #include <linux/module.h>
+#include <asm/uaccess.h>
 
 #define DEBUG
 #include <linux/usb.h>
 
-/* Module information */
-MODULE_AUTHOR("Greg Kroah-Hartman, Mark Douglas Corner");
-MODULE_DESCRIPTION("USB Bluetooth driver");
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v0.13"
+#define DRIVER_AUTHOR "Greg Kroah-Hartman, Mark Douglas Corner"
+#define DRIVER_DESC "USB Bluetooth tty driver"
 
 /* define this if you have hardware that is not good */
 /*#define	BTBUGGYHARDWARE */
@@ -126,7 +160,6 @@ MODULE_DESCRIPTION("USB Bluetooth driver");
 #define RELEVANT_IFLAG(iflag)	(iflag & (IGNBRK|BRKINT|IGNPAR|PARMRK|INPCK))
 
 #define CHAR2INT16(c1,c0)	(((u32)((c1) & 0xff) << 8) + (u32)((c0) & 0xff))
-#define MIN(a,b)		(((a)<(b))?(a):(b))
 
 #define NUM_BULK_URBS		24
 #define NUM_CONTROL_URBS	16
@@ -138,12 +171,12 @@ struct usb_bluetooth {
 	struct tty_struct *	tty;		/* the coresponding tty for this port */
 
 	unsigned char		minor;		/* the starting minor number for this device */
-	char			active;		/* someone has this device open */
 	int			throttle;	/* throttled by tty layer */
+	int			open_count;
 	
 	__u8			control_out_bInterfaceNum;
 	struct urb *		control_urb_pool[NUM_CONTROL_URBS];
-	devrequest		dr[NUM_CONTROL_URBS];
+	struct usb_ctrlrequest	dr[NUM_CONTROL_URBS];
 
 	unsigned char *		interrupt_in_buffer;
 	struct urb *		interrupt_in_urb;
@@ -168,6 +201,7 @@ struct usb_bluetooth {
 	unsigned char		int_buffer[EVENT_BUFFER_SIZE];
 	unsigned int		bulk_packet_pos;
 	unsigned char		bulk_buffer[ACL_BUFFER_SIZE];	/* 64k preallocated, fix? */
+	struct semaphore	lock;
 };
 
 
@@ -200,10 +234,10 @@ static struct usb_device_id usb_bluetooth_ids [] = {
 MODULE_DEVICE_TABLE (usb, usb_bluetooth_ids);
 
 static struct usb_driver usb_bluetooth_driver = {
-	name:		"bluetooth",
-	probe:		usb_bluetooth_probe,
-	disconnect:	usb_bluetooth_disconnect,
-	id_table:	usb_bluetooth_ids,
+	.name =		"bluetty",
+	.probe =	usb_bluetooth_probe,
+	.disconnect =	usb_bluetooth_disconnect,
+	.id_table =	usb_bluetooth_ids,
 };
 
 static int			bluetooth_refcount;
@@ -248,14 +282,14 @@ static inline struct usb_bluetooth *get_bluetooth_by_minor (int minor)
 }
 
 
-static int bluetooth_ctrl_msg (struct usb_bluetooth *bluetooth, int request, int value, void *buf, int len)
+static int bluetooth_ctrl_msg (struct usb_bluetooth *bluetooth, int request, int value, const unsigned char *buf, int len)
 {
 	struct urb *urb = NULL;
-	devrequest *dr = NULL;
+	struct usb_ctrlrequest *dr = NULL;
 	int i;
 	int status;
 
-	dbg (__FUNCTION__);
+	dbg ("%s", __FUNCTION__);
 
 	/* try to find a free urb in our list */
 	for (i = 0; i < NUM_CONTROL_URBS; ++i) {
@@ -266,31 +300,43 @@ static int bluetooth_ctrl_msg (struct usb_bluetooth *bluetooth, int request, int
 		}
 	}
 	if (urb == NULL) {
-		dbg (__FUNCTION__ " - no free urbs");
+		dbg ("%s - no free urbs", __FUNCTION__);
 		return -ENOMEM;
 	}
 
-	/* free up the last buffer that this urb used */
-	if (urb->transfer_buffer != NULL) {
-		kfree(urb->transfer_buffer);
-		urb->transfer_buffer = NULL;
+	/* keep increasing the urb transfer buffer to fit the size of the message */
+	if (urb->transfer_buffer == NULL) {
+		urb->transfer_buffer = kmalloc (len, GFP_KERNEL);
+		if (urb->transfer_buffer == NULL) {
+			err ("%s - out of memory", __FUNCTION__);
+			return -ENOMEM;
+		}
 	}
+	if (urb->transfer_buffer_length < len) {
+		kfree (urb->transfer_buffer);
+		urb->transfer_buffer = kmalloc (len, GFP_KERNEL);
+		if (urb->transfer_buffer == NULL) {
+			err ("%s - out of memory", __FUNCTION__);
+			return -ENOMEM;
+		}
+	}
+	memcpy (urb->transfer_buffer, buf, len);
 
-	dr->requesttype = BLUETOOTH_CONTROL_REQUEST_TYPE;
-	dr->request = request;
-	dr->value = cpu_to_le16p(&value);
-	dr->index = cpu_to_le16p(&bluetooth->control_out_bInterfaceNum);
-	dr->length = cpu_to_le16p(&len);
+	dr->bRequestType= BLUETOOTH_CONTROL_REQUEST_TYPE;
+	dr->bRequest = request;
+	dr->wValue = cpu_to_le16((u16) value);
+	dr->wIndex = cpu_to_le16((u16) bluetooth->control_out_bInterfaceNum);
+	dr->wLength = cpu_to_le16((u16) len);
 	
 	FILL_CONTROL_URB (urb, bluetooth->dev, usb_sndctrlpipe(bluetooth->dev, 0),
-			  (unsigned char*)dr, buf, len, bluetooth_ctrl_callback, bluetooth);
+			  (unsigned char*)dr, urb->transfer_buffer, len, bluetooth_ctrl_callback, bluetooth);
 
 	/* send it down the pipe */
 	status = usb_submit_urb(urb);
 	if (status)
-		dbg(__FUNCTION__ " - usb_submit_urb(control) failed with status = %d", status);
+		dbg("%s - usb_submit_urb(control) failed with status = %d", __FUNCTION__, status);
 	
-	return 0;
+	return status;
 }
 
 
@@ -305,7 +351,7 @@ static int bluetooth_open (struct tty_struct *tty, struct file * filp)
 	struct usb_bluetooth *bluetooth;
 	int result;
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
 	/* initialize the pointer incase something fails */
 	tty->driver_data = NULL;
@@ -317,43 +363,46 @@ static int bluetooth_open (struct tty_struct *tty, struct file * filp)
 		return -ENODEV;
 	}
 
-	if (bluetooth->active) {
-		dbg (__FUNCTION__ " - device already open");
-		return -EINVAL;
-	}
+	down (&bluetooth->lock);
+ 
+	++bluetooth->open_count;
+	if (bluetooth->open_count == 1) {
+		/* set up our structure making the tty driver remember our object, and us it */
+		tty->driver_data = bluetooth;
+		bluetooth->tty = tty;
 
-	/* set up our structure making the tty driver remember our object, and us it */
-	tty->driver_data = bluetooth;
-	bluetooth->tty = tty;
-
-	/* force low_latency on so that our tty_push actually forces the data through, 
-	 * otherwise it is scheduled, and with high data rates (like with OHCI) data
-	 * can get lost. */
-	bluetooth->tty->low_latency = 1;
+		/* force low_latency on so that our tty_push actually forces the data through, 
+		 * otherwise it is scheduled, and with high data rates (like with OHCI) data
+		 * can get lost. */
+		bluetooth->tty->low_latency = 1;
 	
-	bluetooth->active = 1;
-
-	/* Reset the packet position counters */
-	bluetooth->int_packet_pos = 0;
-	bluetooth->bulk_packet_pos = 0;
+		/* Reset the packet position counters */
+		bluetooth->int_packet_pos = 0;
+		bluetooth->bulk_packet_pos = 0;
 
 #ifndef BTBUGGYHARDWARE
-	/* Start reading from the device */
-	FILL_BULK_URB(bluetooth->read_urb, bluetooth->dev, 
-		      usb_rcvbulkpipe(bluetooth->dev, bluetooth->bulk_in_endpointAddress),
-		      bluetooth->bulk_in_buffer, bluetooth->bulk_in_buffer_size, 
-		      bluetooth_read_bulk_callback, bluetooth);
-	result = usb_submit_urb(bluetooth->read_urb);
-	if (result)
-		dbg(__FUNCTION__ " - usb_submit_urb(read bulk) failed with status %d", result);
+		/* Start reading from the device */
+		FILL_BULK_URB (bluetooth->read_urb, bluetooth->dev, 
+			       usb_rcvbulkpipe(bluetooth->dev, bluetooth->bulk_in_endpointAddress),
+			       bluetooth->bulk_in_buffer,
+			       bluetooth->bulk_in_buffer_size,
+			       bluetooth_read_bulk_callback, bluetooth);
+		result = usb_submit_urb(bluetooth->read_urb);
+		if (result)
+			dbg("%s - usb_submit_urb(read bulk) failed with status %d", __FUNCTION__, result);
 #endif
-	FILL_INT_URB(bluetooth->interrupt_in_urb, bluetooth->dev, 
-		     usb_rcvintpipe(bluetooth->dev, bluetooth->interrupt_in_endpointAddress),
-		     bluetooth->interrupt_in_buffer, bluetooth->interrupt_in_buffer_size, 
-		     bluetooth_int_callback, bluetooth, bluetooth->interrupt_in_interval);
-	result = usb_submit_urb(bluetooth->interrupt_in_urb);
-	if (result)
-		dbg(__FUNCTION__ " - usb_submit_urb(interrupt in) failed with status %d", result);
+		FILL_INT_URB (bluetooth->interrupt_in_urb, bluetooth->dev, 
+			      usb_rcvintpipe(bluetooth->dev, bluetooth->interrupt_in_endpointAddress),
+			      bluetooth->interrupt_in_buffer,
+			      bluetooth->interrupt_in_buffer_size,
+			      bluetooth_int_callback, bluetooth,
+			      bluetooth->interrupt_in_interval);
+		result = usb_submit_urb(bluetooth->interrupt_in_urb);
+		if (result)
+			dbg("%s - usb_submit_urb(interrupt in) failed with status %d", __FUNCTION__, result);
+	}
+	
+	up(&bluetooth->lock);
 
 	return 0;
 }
@@ -368,19 +417,26 @@ static void bluetooth_close (struct tty_struct *tty, struct file * filp)
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not opened");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not opened", __FUNCTION__);
 		return;
 	}
 
-	/* shutdown any bulk reads and writes that might be going on */
-	for (i = 0; i < NUM_BULK_URBS; ++i)
-		usb_unlink_urb (bluetooth->write_urb_pool[i]);
-	usb_unlink_urb (bluetooth->read_urb);
+	down (&bluetooth->lock);
+ 
+	--bluetooth->open_count;
+	if (bluetooth->open_count <= 0) {
+		bluetooth->open_count = 0;
 
-	bluetooth->active = 0;
+		/* shutdown any bulk reads and writes that might be going on */
+		for (i = 0; i < NUM_BULK_URBS; ++i)
+			usb_unlink_urb (bluetooth->write_urb_pool[i]);
+		usb_unlink_urb (bluetooth->read_urb);
+		usb_unlink_urb (bluetooth->interrupt_in_urb);
+	}
+	up(&bluetooth->lock);
 }
 
 
@@ -388,73 +444,72 @@ static int bluetooth_write (struct tty_struct * tty, int from_user, const unsign
 {
 	struct usb_bluetooth *bluetooth = get_usb_bluetooth ((struct usb_bluetooth *)tty->driver_data, __FUNCTION__);
 	struct urb *urb = NULL;
-	unsigned char *new_buffer;
+	unsigned char *temp_buffer = NULL;
+	const unsigned char *current_buffer;
 	const unsigned char *current_position;
-	int status;
 	int bytes_sent;
 	int buffer_size;
 	int i;
+	int retval = 0;
 
 	if (!bluetooth) {
 		return -ENODEV;
 	}
 
-	dbg(__FUNCTION__ " - %d byte(s)", count);
+	dbg("%s - %d byte(s)", __FUNCTION__, count);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not opened");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not opened", __FUNCTION__);
 		return -EINVAL;
 	}
 
 	if (count == 0) {
-		dbg(__FUNCTION__ " - write request of 0 bytes");
+		dbg("%s - write request of 0 bytes", __FUNCTION__);
 		return 0;
 	}
 	if (count == 1) {
-		dbg(__FUNCTION__ " - write request only included type %d", buf[0]);
+		dbg("%s - write request only included type %d", __FUNCTION__, buf[0]);
 		return 1;
 	}
 
 #ifdef DEBUG
-	printk (KERN_DEBUG __FILE__ ": " __FUNCTION__ " - length = %d, data = ", count);
+	printk (KERN_DEBUG __FILE__ ": %s - length = %d, data = ", __FUNCTION__, count);
 	for (i = 0; i < count; ++i) {
 		printk ("%.2x ", buf[i]);
 	}
 	printk ("\n");
 #endif
 
-	switch (*buf) {
+	if (from_user) {
+		temp_buffer = kmalloc (count, GFP_KERNEL);
+		if (temp_buffer == NULL) {
+			err ("%s - out of memory.", __FUNCTION__);
+			retval = -ENOMEM;
+			goto exit;
+		}
+		if (copy_from_user (temp_buffer, buf, count)) {
+			retval = -EFAULT;
+			goto exit;
+		}
+		current_buffer = temp_buffer;
+	} else {
+		current_buffer = buf;
+	}
+
+	switch (*current_buffer) {
 		/* First byte indicates the type of packet */
 		case CMD_PKT:
-			/* dbg(__FUNCTION__ "- Send cmd_pkt len:%d", count);*/
+			/* dbg("%s- Send cmd_pkt len:%d", __FUNCTION__, count);*/
 
-			if (in_interrupt()){
-				printk("cmd_pkt from interrupt!\n");
-				return count;
+			retval = bluetooth_ctrl_msg (bluetooth, 0x00, 0x00, &current_buffer[1], count-1);
+			if (retval) {
+				goto exit;
 			}
-
-			new_buffer = kmalloc (count-1, GFP_KERNEL);
-
-			if (!new_buffer) {
-				err (__FUNCTION__ "- out of memory.");
-				return -ENOMEM;
-			}
-
-			if (from_user)
-				copy_from_user (new_buffer, buf+1, count-1);
-			else
-				memcpy (new_buffer, buf+1, count-1);
-
-			if (bluetooth_ctrl_msg (bluetooth, 0x00, 0x00, new_buffer, count-1) != 0) {
-				kfree (new_buffer);
-				return 0;
-			}
-
-			/* need to free new_buffer somehow... FIXME */
-			return count;
+			retval = count;
+			break;
 
 		case ACL_PKT:
-			current_position = buf;
+			current_position = current_buffer;
 			++current_position;
 			--count;
 			bytes_sent = 0;
@@ -470,38 +525,26 @@ static int bluetooth_write (struct tty_struct * tty, int from_user, const unsign
 					}
 				}
 				if (urb == NULL) {
-					dbg (__FUNCTION__ " - no free urbs");
-					return bytes_sent;
+					dbg ("%s - no free urbs", __FUNCTION__);
+					retval = bytes_sent;
+					goto exit;
 				}
 				
-				/* free up the last buffer that this urb used */
-				if (urb->transfer_buffer != NULL) {
-					kfree(urb->transfer_buffer);
-					urb->transfer_buffer = NULL;
-				}
 
-				buffer_size = MIN (count, bluetooth->bulk_out_buffer_size);
-				
-				new_buffer = kmalloc (buffer_size, GFP_KERNEL);
-				if (new_buffer == NULL) {
-					err(__FUNCTION__" no more kernel memory...");
-					return bytes_sent;
-				}
-
-				if (from_user)
-					copy_from_user(new_buffer, current_position, buffer_size);
-				else
-					memcpy (new_buffer, current_position, buffer_size);
+				buffer_size = min (count, bluetooth->bulk_out_buffer_size);
+				memcpy (urb->transfer_buffer, current_position, buffer_size);
 
 				/* build up our urb */
 				FILL_BULK_URB (urb, bluetooth->dev, usb_sndbulkpipe(bluetooth->dev, bluetooth->bulk_out_endpointAddress),
-						new_buffer, buffer_size, bluetooth_write_bulk_callback, bluetooth);
+						urb->transfer_buffer, buffer_size, bluetooth_write_bulk_callback, bluetooth);
 				urb->transfer_flags |= USB_QUEUE_BULK;
 
 				/* send it down the pipe */
-				status = usb_submit_urb(urb);
-				if (status)
-					dbg(__FUNCTION__ " - usb_submit_urb(write bulk) failed with status = %d", status);
+				retval = usb_submit_urb(urb);
+				if (retval) {
+					dbg("%s - usb_submit_urb(write bulk) failed with error = %d", __FUNCTION__, retval);
+					goto exit;
+				}
 #ifdef BTBUGGYHARDWARE
 				/* A workaround for the stalled data bug */
 				/* May or may not be needed...*/
@@ -514,13 +557,20 @@ static int bluetooth_write (struct tty_struct * tty, int from_user, const unsign
 				count -= buffer_size;
 			}
 
-			return bytes_sent + 1;
+			retval = bytes_sent + 1;
+			break;
 		
 		default :
-			dbg(__FUNCTION__" - unsupported (at this time) write type");
+			dbg("%s - unsupported (at this time) write type", __FUNCTION__);
+			retval = -EINVAL;
+			break;
 	}
 
-	return 0;
+exit:
+	if (temp_buffer != NULL)
+		kfree (temp_buffer);
+
+	return retval;
 } 
 
 
@@ -534,10 +584,10 @@ static int bluetooth_write_room (struct tty_struct *tty)
 		return -ENODEV;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return -EINVAL;
 	}
 
@@ -547,7 +597,7 @@ static int bluetooth_write_room (struct tty_struct *tty)
 		}
 	}
 
-	dbg(__FUNCTION__ " - returns %d", room);
+	dbg("%s - returns %d", __FUNCTION__, room);
 	return room;
 }
 
@@ -562,8 +612,8 @@ static int bluetooth_chars_in_buffer (struct tty_struct *tty)
 		return -ENODEV;
 	}
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return -EINVAL;
 	}
 
@@ -573,7 +623,7 @@ static int bluetooth_chars_in_buffer (struct tty_struct *tty)
 		}
 	}
 
-	dbg (__FUNCTION__ " - returns %d", chars);
+	dbg ("%s - returns %d", __FUNCTION__, chars);
 	return chars;
 }
 
@@ -586,14 +636,14 @@ static void bluetooth_throttle (struct tty_struct * tty)
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return;
 	}
 	
-	dbg(__FUNCTION__ " unsupported (at this time)");
+	dbg("%s unsupported (at this time)", __FUNCTION__);
 
 	return;
 }
@@ -607,14 +657,14 @@ static void bluetooth_unthrottle (struct tty_struct * tty)
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return;
 	}
 
-	dbg(__FUNCTION__ " unsupported (at this time)");
+	dbg("%s unsupported (at this time)", __FUNCTION__);
 }
 
 
@@ -626,10 +676,10 @@ static int bluetooth_ioctl (struct tty_struct *tty, struct file * file, unsigned
 		return -ENODEV;
 	}
 
-	dbg(__FUNCTION__ " - cmd 0x%.4x", cmd);
+	dbg("%s - cmd 0x%.4x", __FUNCTION__, cmd);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return -ENODEV;
 	}
 
@@ -646,10 +696,10 @@ static void bluetooth_set_termios (struct tty_struct *tty, struct termios * old)
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return;
 	}
 
@@ -668,10 +718,10 @@ void btusb_enable_bulk_read(struct tty_struct *tty){
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return;
 	}
 
@@ -682,7 +732,7 @@ void btusb_enable_bulk_read(struct tty_struct *tty){
 			      bluetooth_read_bulk_callback, bluetooth);
 		result = usb_submit_urb(bluetooth->read_urb);
 		if (result)
-			err (__FUNCTION__ " - failed submitting read urb, error %d", result);
+			err ("%s - failed submitting read urb, error %d", __FUNCTION__, result);
 	}
 }
 
@@ -693,10 +743,10 @@ void btusb_disable_bulk_read(struct tty_struct *tty){
 		return;
 	}
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
-	if (!bluetooth->active) {
-		dbg (__FUNCTION__ " - device not open");
+	if (!bluetooth->open_count) {
+		dbg ("%s - device not open", __FUNCTION__);
 		return;
 	}
 
@@ -719,27 +769,27 @@ static void bluetooth_int_callback (struct urb *urb)
 	unsigned int count = urb->actual_length;
 	unsigned int packet_size;
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
 	if (!bluetooth) {
-		dbg(__FUNCTION__ " - bad bluetooth pointer, exiting");
+		dbg("%s - bad bluetooth pointer, exiting", __FUNCTION__);
 		return;
 	}
 
 	if (urb->status) {
-		dbg(__FUNCTION__ " - nonzero int status received: %d", urb->status);
+		dbg("%s - nonzero int status received: %d", __FUNCTION__, urb->status);
 		return;
 	}
 
 	if (!count) {
-		dbg(__FUNCTION__ " - zero length int");
+		dbg("%s - zero length int", __FUNCTION__);
 		return;
 	}
 
 
 #ifdef DEBUG
 	if (count) {
-		printk (KERN_DEBUG __FILE__ ": " __FUNCTION__ "- length = %d, data = ", count);
+		printk (KERN_DEBUG __FILE__ ": %s- length = %d, data = ", __FUNCTION__, count);
 		for (i = 0; i < count; ++i) {
 			printk ("%.2x ", data[i]);
 		}
@@ -769,7 +819,7 @@ static void bluetooth_int_callback (struct urb *urb)
 	}
 	
 	if (bluetooth->int_packet_pos + count > EVENT_BUFFER_SIZE) {
-		err(__FUNCTION__ " - exceeded EVENT_BUFFER_SIZE");
+		err("%s - exceeded EVENT_BUFFER_SIZE", __FUNCTION__);
 		bluetooth->int_packet_pos = 0;
 		return;
 	}
@@ -785,7 +835,7 @@ static void bluetooth_int_callback (struct urb *urb)
 		return;
 
 	if (packet_size + EVENT_HDR_SIZE < bluetooth->int_packet_pos) {
-		err(__FUNCTION__ " - packet was too long");
+		err("%s - packet was too long", __FUNCTION__);
 		bluetooth->int_packet_pos = 0;
 		return;
 	}
@@ -809,15 +859,15 @@ static void bluetooth_ctrl_callback (struct urb *urb)
 {
 	struct usb_bluetooth *bluetooth = get_usb_bluetooth ((struct usb_bluetooth *)urb->context, __FUNCTION__);
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
 	if (!bluetooth) {
-		dbg(__FUNCTION__ " - bad bluetooth pointer, exiting");
+		dbg("%s - bad bluetooth pointer, exiting", __FUNCTION__);
 		return;
 	}
 
 	if (urb->status) {
-		dbg(__FUNCTION__ " - nonzero read bulk status received: %d", urb->status);
+		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
 		return;
 	}
 }
@@ -832,6 +882,37 @@ static void bluetooth_read_bulk_callback (struct urb *urb)
 	unsigned int packet_size;
 	int result;
 
+
+	dbg("%s", __FUNCTION__);
+
+	if (!bluetooth) {
+		dbg("%s - bad bluetooth pointer, exiting", __FUNCTION__);
+		return;
+	}
+
+	if (urb->status) {
+		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
+		if (urb->status == -ENOENT) {                   
+			dbg("%s - URB canceled, won't reschedule", __FUNCTION__);
+			return;
+		}
+		goto exit;
+	}
+
+	if (!count) {
+		dbg("%s - zero length read bulk", __FUNCTION__);
+		goto exit;
+	}
+
+#ifdef DEBUG
+	if (count) {
+		printk (KERN_DEBUG __FILE__ ": %s- length = %d, data = ", __FUNCTION__, count);
+		for (i = 0; i < count; ++i) {
+			printk ("%.2x ", data[i]);
+		}
+		printk ("\n");
+	}
+#endif
 #ifdef BTBUGGYHARDWARE
 	if ((count == 4) && (data[0] == 0x00) && (data[1] == 0x00)
 	    && (data[2] == 0x00) && (data[3] == 0x00)) {
@@ -842,36 +923,9 @@ static void bluetooth_read_bulk_callback (struct urb *urb)
 			      bluetooth_read_bulk_callback, bluetooth);
 		result = usb_submit_urb(bluetooth->read_urb);
 		if (result)
-			err (__FUNCTION__ " - failed resubmitting read urb, error %d", result);
+			err ("%s - failed resubmitting read urb, error %d", __FUNCTION__, result);
 
 		return;
-	}
-#endif
-
-	dbg(__FUNCTION__);
-
-	if (!bluetooth) {
-		dbg(__FUNCTION__ " - bad bluetooth pointer, exiting");
-		goto exit;
-	}
-
-	if (urb->status) {
-		dbg(__FUNCTION__ " - nonzero read bulk status received: %d", urb->status);
-		goto exit;
-	}
-
-	if (!count) {
-		dbg(__FUNCTION__ " - zero length read bulk");
-		goto exit;
-	}
-
-#ifdef DEBUG
-	if (count) {
-		printk (KERN_DEBUG __FILE__ ": " __FUNCTION__ "- length = %d, data = ", count);
-		for (i = 0; i < count; ++i) {
-			printk ("%.2x ", data[i]);
-		}
-		printk ("\n");
 	}
 #endif
 	/* We add  a packet type identifier to the beginning of each
@@ -886,7 +940,7 @@ static void bluetooth_read_bulk_callback (struct urb *urb)
 	}
 
 	if (bluetooth->bulk_packet_pos + count > ACL_BUFFER_SIZE) {
-		err(__FUNCTION__ " - exceeded ACL_BUFFER_SIZE");
+		err("%s - exceeded ACL_BUFFER_SIZE", __FUNCTION__);
 		bluetooth->bulk_packet_pos = 0;
 		goto exit;
 	}
@@ -903,7 +957,7 @@ static void bluetooth_read_bulk_callback (struct urb *urb)
 	}
 
 	if (packet_size + ACL_HDR_SIZE < bluetooth->bulk_packet_pos) {
-		err(__FUNCTION__ " - packet was too long");
+		err("%s - packet was too long", __FUNCTION__);
 		bluetooth->bulk_packet_pos = 0;
 		goto exit;
 	}
@@ -921,13 +975,16 @@ static void bluetooth_read_bulk_callback (struct urb *urb)
 	}	
 
 exit:
+	if (!bluetooth || !bluetooth->open_count)
+		return;
+
 	FILL_BULK_URB(bluetooth->read_urb, bluetooth->dev, 
 		      usb_rcvbulkpipe(bluetooth->dev, bluetooth->bulk_in_endpointAddress),
 		      bluetooth->bulk_in_buffer, bluetooth->bulk_in_buffer_size, 
 		      bluetooth_read_bulk_callback, bluetooth);
 	result = usb_submit_urb(bluetooth->read_urb);
 	if (result)
-		err (__FUNCTION__ " - failed resubmitting read urb, error %d", result);
+		err ("%s - failed resubmitting read urb, error %d", __FUNCTION__, result);
 
 	return;
 }
@@ -937,15 +994,15 @@ static void bluetooth_write_bulk_callback (struct urb *urb)
 {
 	struct usb_bluetooth *bluetooth = get_usb_bluetooth ((struct usb_bluetooth *)urb->context, __FUNCTION__);
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
 	if (!bluetooth) {
-		dbg(__FUNCTION__ " - bad bluetooth pointer, exiting");
+		dbg("%s - bad bluetooth pointer, exiting", __FUNCTION__);
 		return;
 	}
 
 	if (urb->status) {
-		dbg(__FUNCTION__ " - nonzero write bulk status received: %d", urb->status);
+		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
 		return;
 	}
 
@@ -960,17 +1017,24 @@ static void bluetooth_softint(void *private)
 {
 	struct usb_bluetooth *bluetooth = get_usb_bluetooth ((struct usb_bluetooth *)private, __FUNCTION__);
 	struct tty_struct *tty;
+	struct tty_ldisc *ld;
 
-	dbg(__FUNCTION__);
+	dbg("%s", __FUNCTION__);
 
 	if (!bluetooth) {
 		return;
 	}
 
 	tty = bluetooth->tty;
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup) {
-		dbg(__FUNCTION__ " - write wakeup call.");
-		(tty->ldisc.write_wakeup)(tty);
+	if (tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) {
+		ld = tty_ldisc_ref(tty);
+		if(ld) {
+			if(ld->write_wakeup) {
+				ld->write_wakeup(tty);
+				dbg("%s - write wakeup call.", __FUNCTION__);
+			}
+			tty_ldisc_deref(tty);
+		}
 	}
 
 	wake_up_interruptible(&tty->write_wait);
@@ -1031,7 +1095,7 @@ static void * usb_bluetooth_probe(struct usb_device *dev, unsigned int ifnum,
 	if ((num_bulk_in != 1) ||
 	    (num_bulk_out != 1) ||
 	    (num_interrupt_in != 1)) {
-		dbg (__FUNCTION__ " - improper number of endpoints. Bluetooth driver not bound.");
+		dbg ("%s - improper number of endpoints. Bluetooth driver not bound.", __FUNCTION__);
 		return NULL;
 	}
 
@@ -1059,6 +1123,7 @@ static void * usb_bluetooth_probe(struct usb_device *dev, unsigned int ifnum,
 	bluetooth->minor = minor;
 	bluetooth->tqueue.routine = bluetooth_softint;
 	bluetooth->tqueue.data = bluetooth;
+	init_MUTEX(&bluetooth->lock);
 
 	/* record the interface number for the control out */
 	bluetooth->control_out_bInterfaceNum = control_out_endpoint;
@@ -1093,7 +1158,8 @@ static void * usb_bluetooth_probe(struct usb_device *dev, unsigned int ifnum,
 
 	endpoint = bulk_out_endpoint[0];
 	bluetooth->bulk_out_endpointAddress = endpoint->bEndpointAddress;
-	
+	bluetooth->bulk_out_buffer_size = endpoint->wMaxPacketSize * 2;
+
 	/* create our write urb pool */ 
 	for (i = 0; i < NUM_BULK_URBS; ++i) {
 		struct urb  *urb = usb_alloc_urb(0);
@@ -1101,11 +1167,13 @@ static void * usb_bluetooth_probe(struct usb_device *dev, unsigned int ifnum,
 			err("No free urbs available");
 			goto probe_error;
 		}
-		urb->transfer_buffer = NULL;
+		urb->transfer_buffer = kmalloc (bluetooth->bulk_out_buffer_size, GFP_KERNEL);
+		if (urb->transfer_buffer == NULL) {
+			err("out of memory");
+			goto probe_error;
+		}
 		bluetooth->write_urb_pool[i] = urb;
 	}
-	
-	bluetooth->bulk_out_buffer_size = endpoint->wMaxPacketSize * 2;
 
 	endpoint = interrupt_in_endpoint[0];
 	bluetooth->interrupt_in_urb = usb_alloc_urb(0);
@@ -1143,11 +1211,17 @@ probe_error:
 	if (bluetooth->interrupt_in_buffer)
 		kfree (bluetooth->interrupt_in_buffer);
 	for (i = 0; i < NUM_BULK_URBS; ++i)
-		if (bluetooth->write_urb_pool[i])
+		if (bluetooth->write_urb_pool[i]) {
+			if (bluetooth->write_urb_pool[i]->transfer_buffer)
+				kfree (bluetooth->write_urb_pool[i]->transfer_buffer);
 			usb_free_urb (bluetooth->write_urb_pool[i]);
+		}
 	for (i = 0; i < NUM_CONTROL_URBS; ++i) 
-		if (bluetooth->control_urb_pool[i])
+		if (bluetooth->control_urb_pool[i]) {
+			if (bluetooth->control_urb_pool[i]->transfer_buffer)
+				kfree (bluetooth->control_urb_pool[i]->transfer_buffer);
 			usb_free_urb (bluetooth->control_urb_pool[i]);
+		}
 
 	bluetooth_table[minor] = NULL;
 
@@ -1164,10 +1238,10 @@ static void usb_bluetooth_disconnect(struct usb_device *dev, void *ptr)
 	int i;
 
 	if (bluetooth) {
-		if ((bluetooth->active) && (bluetooth->tty))
+		if ((bluetooth->open_count) && (bluetooth->tty))
 			tty_hangup(bluetooth->tty);
 
-		bluetooth->active = 0;
+		bluetooth->open_count = 0;
 
 		if (bluetooth->read_urb) {
 			usb_unlink_urb (bluetooth->read_urb);
@@ -1218,30 +1292,30 @@ static void usb_bluetooth_disconnect(struct usb_device *dev, void *ptr)
 
 
 static struct tty_driver bluetooth_tty_driver = {
-	magic:			TTY_DRIVER_MAGIC,
-	driver_name:		"usb-bluetooth",
-	name:			"usb/ttub/%d",
-	major:			BLUETOOTH_TTY_MAJOR,
-	minor_start:		0,
-	num:			BLUETOOTH_TTY_MINORS,
-	type:			TTY_DRIVER_TYPE_SERIAL,
-	subtype:		SERIAL_TYPE_NORMAL,
-	flags:			TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS,
+	.magic =		TTY_DRIVER_MAGIC,
+	.driver_name =		"usb-bluetooth",
+	.name =			"usb/ttub/%d",
+	.major =		BLUETOOTH_TTY_MAJOR,
+	.minor_start =		0,
+	.num =			BLUETOOTH_TTY_MINORS,
+	.type =			TTY_DRIVER_TYPE_SERIAL,
+	.subtype =		SERIAL_TYPE_NORMAL,
+	.flags =		TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS,
 
-	refcount:		&bluetooth_refcount,
-	table:			bluetooth_tty,
-	termios:		bluetooth_termios,
-	termios_locked:		bluetooth_termios_locked,
+	.refcount =		&bluetooth_refcount,
+	.table =		bluetooth_tty,
+	.termios =		bluetooth_termios,
+	.termios_locked =	bluetooth_termios_locked,
 
-	open:			bluetooth_open,
-	close:			bluetooth_close,
-	write:			bluetooth_write,
-	write_room:		bluetooth_write_room,
-	ioctl:			bluetooth_ioctl,
-	set_termios:		bluetooth_set_termios,
-	throttle:		bluetooth_throttle,
-	unthrottle:		bluetooth_unthrottle,
-	chars_in_buffer:	bluetooth_chars_in_buffer,
+	.open =			bluetooth_open,
+	.close =		bluetooth_close,
+	.write =		bluetooth_write,
+	.write_room =		bluetooth_write_room,
+	.ioctl =		bluetooth_ioctl,
+	.set_termios =		bluetooth_set_termios,
+	.throttle =		bluetooth_throttle,
+	.unthrottle =		bluetooth_unthrottle,
+	.chars_in_buffer =	bluetooth_chars_in_buffer,
 };
 
 
@@ -1261,7 +1335,7 @@ int usb_bluetooth_init(void)
 	bluetooth_tty_driver.init_termios          = tty_std_termios;
 	bluetooth_tty_driver.init_termios.c_cflag  = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
 	if (tty_register_driver (&bluetooth_tty_driver)) {
-		err(__FUNCTION__ " - failed to register tty driver");
+		err("%s - failed to register tty driver", __FUNCTION__);
 		return -1;
 	}
 
@@ -1272,6 +1346,8 @@ int usb_bluetooth_init(void)
 		err("usb_register failed for the USB bluetooth driver. Error number %d", result);
 		return -1;
 	}
+
+	info(DRIVER_DESC " " DRIVER_VERSION);
 
 	return 0;
 }
@@ -1287,4 +1363,8 @@ void usb_bluetooth_exit(void)
 module_init(usb_bluetooth_init);
 module_exit(usb_bluetooth_exit);
 
+/* Module information */
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 

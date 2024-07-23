@@ -20,7 +20,7 @@
 #include <linux/pagemap.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/smp_lock.h>
 
@@ -29,7 +29,6 @@
  */
 static int nfs_symlink_filler(struct inode *inode, struct page *page)
 {
-	void *buffer = kmap(page);
 	int error;
 
 	/* We place the length at the beginning of the page,
@@ -37,19 +36,16 @@ static int nfs_symlink_filler(struct inode *inode, struct page *page)
 	 * XDR response verification will NULL terminate it.
 	 */
 	lock_kernel();
-	error = NFS_PROTO(inode)->readlink(inode, buffer,
-					   PAGE_CACHE_SIZE - sizeof(u32)-4);
+	error = NFS_PROTO(inode)->readlink(inode, page);
 	unlock_kernel();
 	if (error < 0)
 		goto error;
 	SetPageUptodate(page);
-	kunmap(page);
 	UnlockPage(page);
 	return 0;
 
 error:
 	SetPageError(page);
-	kunmap(page);
 	UnlockPage(page);
 	return -EIO;
 }

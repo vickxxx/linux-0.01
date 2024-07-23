@@ -1,8 +1,8 @@
 /*
  * MMU fault handling support.
  *
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -16,7 +16,7 @@
 #include <asm/uaccess.h>
 #include <asm/hardirq.h>
 
-extern void die_if_kernel (char *, struct pt_regs *, long);
+extern void die (char *, struct pt_regs *, long);
 
 /*
  * This routine is analogous to expand_stack() but instead grows the
@@ -43,24 +43,58 @@ expand_backing_store (struct vm_area_struct *vma, unsigned long address)
 	return 0;
 }
 
+/*
+ * Return TRUE if ADDRESS points at a page in the kernel's mapped segment
+ * (inside region 5, on ia64) and that page is present.
+ */
+static int
+mapped_kernel_page_is_present (unsigned long address)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+
+	pgd = pgd_offset_k(address);
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		return 0;
+
+	pmd = pmd_offset(pgd,address);
+	if (pmd_none(*pmd) || pmd_bad(*pmd))
+		return 0;
+
+	ptep = pte_offset(pmd, address);
+	if (!ptep)
+		return 0;
+
+	pte = *ptep;
+	return pte_present(pte);
+}
+
 void
 ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *regs)
 {
-	struct mm_struct *mm = current->mm;
-	const struct exception_table_entry *fix;
+	int signal = SIGSEGV, code = SEGV_MAPERR;
 	struct vm_area_struct *vma, *prev_vma;
+	struct mm_struct *mm = current->mm;
 	struct siginfo si;
-	int signal = SIGSEGV;
 	unsigned long mask;
 
 	/*
-	 * If we're in an interrupt or have no user
-	 * context, we must not take the fault..
+	 * If we're in an interrupt or have no user context, we must not take the fault..
 	 */
 	if (in_interrupt() || !mm)
 		goto no_context;
 
-	down(&mm->mmap_sem);
+	/*
+	 * If fault is in region 5 and we are in the kernel, we may already
+         * have the mmap_sem (VALID_PAGE macro is called during mmap). There
+	 * should be no vma for region 5 addr's anyway, so skip getting the
+	 * semaphore and go directly to the code that handles a bad area.
+  	 */
+	if ((REGION_NUMBER(address) == 5) && !user_mode(regs))
+		goto bad_area_no_up;
+
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma_prev(mm, address, &prev_vma);
 	if (!vma)
@@ -71,6 +105,8 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		goto check_expansion;
 
   good_area:
+	code = SEGV_ACCERR;
+
 	/* OK, we've got a good vm_area for this memory area.  Check the access permissions: */
 
 #	define VM_READ_BIT	0
@@ -89,12 +125,13 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if ((vma->vm_flags & mask) != mask)
 		goto bad_area;
 
+  survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault, make
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, mask) != 0) {
+	switch (handle_mm_fault(mm, vma, address, (mask & VM_WRITE) != 0)) {
 	      case 1:
 		++current->min_flt;
 		break;
@@ -112,7 +149,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	      default:
 		goto out_of_memory;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
   check_expansion:
@@ -135,11 +172,15 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	goto good_area;
 
   bad_area:
-	up(&mm->mmap_sem);
-	if (isr & IA64_ISR_SP) {
+	up_read(&mm->mmap_sem);
+  bad_area_no_up:
+	if ((isr & IA64_ISR_SP)
+	    || ((isr & IA64_ISR_NA) && (isr & IA64_ISR_CODE_MASK) == IA64_ISR_CODE_LFETCH))
+	{
 		/*
-		 * This fault was due to a speculative load set the "ed" bit in the psr to
-		 * ensure forward progress (target register will get a NaT).
+		 * This fault was due to a speculative load or lfetch.fault, set the "ed"
+		 * bit in the psr to ensure forward progress.  (Target register will get a
+		 * NaT for ld.s, lfetch will be canceled.)
 		 */
 		ia64_psr(regs)->ed = 1;
 		return;
@@ -147,8 +188,10 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (user_mode(regs)) {
 		si.si_signo = signal;
 		si.si_errno = 0;
-		si.si_code = SI_KERNEL;
+		si.si_code = code;
 		si.si_addr = (void *) address;
+		si.si_isr = isr;
+		si.si_flags = __ISR_VALID;
 		force_sig_info(signal, &si, current);
 		return;
 	}
@@ -163,30 +206,42 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		return;
 	}
 
-	fix = search_exception_table(regs->cr_iip);
-	if (fix) {
-		regs->r8 = -EFAULT;
-		if (fix->skip & 1) {
-			regs->r9 = 0;
-		}
-		regs->cr_iip += ((long) fix->skip) & ~15;
-		regs->cr_ipsr &= ~IA64_PSR_RI;	/* clear exception slot number */
+	/*
+	 * Since we have no vma's for region 5, we might get here even if the address is
+	 * valid, due to the VHPT walker inserting a non present translation that becomes
+	 * stale. If that happens, the non present fault handler already purged the stale
+	 * translation, which fixed the problem. So, we check to see if the translation is
+	 * valid, and return if it is.
+	 */
+	if (REGION_NUMBER(address) == 5 && mapped_kernel_page_is_present(address))
 		return;
-	}
+
+	if (done_with_exception(regs))
+		return;
 
 	/*
-	 * Oops. The kernel tried to access some bad page. We'll have
-	 * to terminate things with extreme prejudice.
+	 * Oops. The kernel tried to access some bad page. We'll have to terminate things
+	 * with extreme prejudice.
 	 */
-	printk(KERN_ALERT "Unable to handle kernel paging request at "
-	       "virtual address %016lx\n", address);
-	die_if_kernel("Oops", regs, isr);
+	bust_spinlocks(1);
+
+	if (address < PAGE_SIZE)
+		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
+	else
+		printk(KERN_ALERT "Unable to handle kernel paging request at "
+		       "virtual address %016lx\n", address);
+	die("Oops", regs, isr);
+	bust_spinlocks(0);
 	do_exit(SIGKILL);
 	return;
 
   out_of_memory:
-	up(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
+	if (current->pid == 1) {
+		yield();
+		goto survive;
+	}
+	up_read(&mm->mmap_sem);
+	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;

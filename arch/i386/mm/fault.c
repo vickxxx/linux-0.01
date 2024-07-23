@@ -17,6 +17,8 @@
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/tty.h>
+#include <linux/vt_kern.h>		/* For unblank_screen() */
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -51,8 +53,14 @@ good_area:
 	start &= PAGE_MASK;
 
 	for (;;) {
-		if (handle_mm_fault(current->mm, vma, start, 1) <= 0)
-			goto bad_area;
+	survive:
+		{
+			int fault = handle_mm_fault(current->mm, vma, start, 1);
+			if (!fault)
+				goto bad_area;
+			if (fault < 0)
+				goto out_of_memory;
+		}
 		if (!size)
 			break;
 		size--;
@@ -63,7 +71,7 @@ good_area:
 		if (!vma || vma->vm_start != start)
 			goto bad_area;
 		if (!(vma->vm_flags & VM_WRITE))
-			goto bad_area;;
+			goto bad_area;
 	}
 	return 1;
 
@@ -75,19 +83,45 @@ check_stack:
 
 bad_area:
 	return 0;
+
+out_of_memory:
+	if (current->pid == 1) {
+		yield();
+		goto survive;
+	}
+	goto bad_area;
 }
 
-extern spinlock_t console_lock, timerlist_lock;
+extern spinlock_t timerlist_lock;
 
 /*
  * Unlock any spinlocks which will prevent us from getting the
- * message out (timerlist_lock is aquired through the
+ * message out (timerlist_lock is acquired through the
  * console unblank code)
  */
-void bust_spinlocks(void)
+void bust_spinlocks(int yes)
 {
-	spin_lock_init(&console_lock);
 	spin_lock_init(&timerlist_lock);
+	if (yes) {
+		oops_in_progress = 1;
+#ifdef CONFIG_SMP
+		global_irq_lock = 0;	/* Many serial drivers do __global_cli() */
+#endif
+	} else {
+		int loglevel_save = console_loglevel;
+#ifdef CONFIG_VT
+		unblank_screen();
+#endif
+		oops_in_progress = 0;
+		/*
+		 * OK, the message is on the console.  Now we call printk()
+		 * without oops_in_progress set so that printk will give klogd
+		 * a poke.  Hold onto your hats...
+		 */
+		console_loglevel = 15;		/* NMI oopser may have shut the console up */
+		printk(" ");
+		console_loglevel = loglevel_save;
+	}
 }
 
 asmlinkage void do_invalid_op(struct pt_regs *, unsigned long);
@@ -117,6 +151,10 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	/* get the address */
 	__asm__("movl %%cr2,%0":"=r" (address));
 
+	/* It's safe to allow irq's after cr2 has been saved */
+	if (regs->eflags & X86_EFLAGS_IF)
+		local_irq_enable();
+
 	tsk = current;
 
 	/*
@@ -127,8 +165,12 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	 * be in an interrupt or a critical region, and should
 	 * only copy the information from the master page table,
 	 * nothing more.
+	 *
+	 * This verifies that the fault happens in kernel space
+	 * (error_code & 4) == 0, and that the fault was not a
+	 * protection error (error_code & 1) == 0.
 	 */
-	if (address >= TASK_SIZE)
+	if (address >= TASK_SIZE && !(error_code & 5))
 		goto vmalloc_fault;
 
 	mm = tsk->mm;
@@ -141,7 +183,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	if (in_interrupt() || !mm)
 		goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -188,6 +230,7 @@ good_area:
 				goto bad_area;
 	}
 
+ survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
@@ -214,7 +257,7 @@ good_area:
 		if (bit < 32)
 			tsk->thread.screen_bitmap |= 1 << bit;
 	}
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -222,13 +265,13 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
-bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (error_code & 4) {
 		tsk->thread.cr2 = address;
-		tsk->thread.error_code = error_code;
+		/* Kernel addresses are always protection faults */
+		tsk->thread.error_code = error_code | (address >= TASK_SIZE);
 		tsk->thread.trap_no = 14;
 		info.si_signo = SIGSEGV;
 		info.si_errno = 0;
@@ -264,7 +307,7 @@ no_context:
  * terminate things with extreme prejudice.
  */
 
-	bust_spinlocks();
+	bust_spinlocks(1);
 
 	if (address < PAGE_SIZE)
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
@@ -283,6 +326,7 @@ no_context:
 		printk(KERN_ALERT "*pte = %08lx\n", page);
 	}
 	die("Oops", regs, error_code);
+	bust_spinlocks(0);
 	do_exit(SIGKILL);
 
 /*
@@ -290,14 +334,18 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	if (tsk->pid == 1) {
+		yield();
+		goto survive;
+	}
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (error_code & 4)
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
@@ -306,7 +354,7 @@ do_sigbus:
 	tsk->thread.cr2 = address;
 	tsk->thread.error_code = error_code;
 	tsk->thread.trap_no = 14;
-	info.si_code = SIGBUS;
+	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *)address;
@@ -322,27 +370,32 @@ vmalloc_fault:
 		/*
 		 * Synchronize this task's top level page-table
 		 * with the 'reference' page table.
+		 *
+		 * Do _not_ use "tsk" here. We might be inside
+		 * an interrupt in the middle of a task switch..
 		 */
 		int offset = __pgd_offset(address);
 		pgd_t *pgd, *pgd_k;
 		pmd_t *pmd, *pmd_k;
+		pte_t *pte_k;
 
-		pgd = tsk->active_mm->pgd + offset;
+		asm("movl %%cr3,%0":"=r" (pgd));
+		pgd = offset + (pgd_t *)__va(pgd);
 		pgd_k = init_mm.pgd + offset;
 
-		if (!pgd_present(*pgd)) {
-			if (!pgd_present(*pgd_k))
-				goto bad_area_nosemaphore;
-			set_pgd(pgd, *pgd_k);
-			return;
-		}
-
+		if (!pgd_present(*pgd_k))
+			goto no_context;
+		set_pgd(pgd, *pgd_k);
+		
 		pmd = pmd_offset(pgd, address);
 		pmd_k = pmd_offset(pgd_k, address);
-
-		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
-			goto bad_area_nosemaphore;
+		if (!pmd_present(*pmd_k))
+			goto no_context;
 		set_pmd(pmd, *pmd_k);
+
+		pte_k = pte_offset(pmd_k, address);
+		if (!pte_present(*pte_k))
+			goto no_context;
 		return;
 	}
 }

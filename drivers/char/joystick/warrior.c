@@ -32,7 +32,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/serio.h>
 #include <linux/init.h>
@@ -210,3 +210,5 @@ void __exit warrior_exit(void)
 
 module_init(warrior_init);
 module_exit(warrior_exit);
+
+MODULE_LICENSE("GPL");

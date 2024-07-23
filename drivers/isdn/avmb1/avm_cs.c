@@ -1,17 +1,20 @@
-/*======================================================================
-
-    A PCMCIA client driver for AVM B1/M1/M2
-
-    Written by Carsten Paeth, calle@calle.in-berlin.de
-    
-======================================================================*/
+/* $Id: avm_cs.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+ *
+ * A PCMCIA client driver for AVM B1/M1/M2
+ *
+ * Copyright 1999 by Carsten Paeth <calle@calle.de>
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/tty.h>
@@ -32,6 +35,12 @@
 #include <linux/capi.h>
 #include <linux/b1lli.h>
 #include <linux/b1pcmcia.h>
+
+/*====================================================================*/
+
+MODULE_DESCRIPTION("CAPI4Linux: PCMCIA client driver for AVM B1/M1/M2");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
@@ -138,6 +147,8 @@ static dev_link_t *avmcs_attach(void)
     
     /* Initialize the dev_link_t structure */
     link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
+    if (!link)
+	return NULL;
     memset(link, 0, sizeof(struct dev_link_t));
     link->release.function = &avmcs_release;
     link->release.data = (u_long)link;
@@ -169,6 +180,8 @@ static dev_link_t *avmcs_attach(void)
 
     /* Allocate space for private device-specific data */
     local = kmalloc(sizeof(local_info_t), GFP_KERNEL);
+    if (!local)
+	return NULL;
     memset(local, 0, sizeof(local_info_t));
     link->priv = local;
     

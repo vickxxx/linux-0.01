@@ -1,7 +1,7 @@
 /*
  * drivers/video/clgenfb.c - driver for Cirrus Logic chipsets
  *
- * Copyright 1999,2000 Jeff Garzik <jgarzik@mandrakesoft.com>
+ * Copyright 1999-2001 Jeff Garzik <jgarzik@pobox.com>
  *
  * Contributors (thanks, all!)
  *
@@ -14,6 +14,9 @@
  *
  *	Lars Hecking:
  *	Amiga updates and testing.
+ *
+ *	Cliff Matthews <ctm@ardi.com>:
+ *	16bpp fix for CL-GD7548 (uses info from XFree86 4.2.0 source)
  *
  * Original clgenfb author:  Frank Neumann
  *
@@ -31,7 +34,7 @@
  *
  */
 
-#define CLGEN_VERSION "1.9.8"
+#define CLGEN_VERSION "1.9.9.1"
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -40,13 +43,13 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/selection.h>
 #include <asm/pgtable.h>
-#include <asm/io.h>
+
 #ifdef CONFIG_ZORRO
 #include <linux/zorro.h>
 #endif
@@ -55,6 +58,12 @@
 #endif
 #ifdef CONFIG_AMIGA
 #include <asm/amigahw.h>
+#endif
+#ifdef CONFIG_ALL_PPC
+#include <asm/processor.h>
+#define isPReP (_machine == _MACH_prep)
+#else
+#define isPReP 0
 #endif
 
 #include <video/fbcon.h>
@@ -79,7 +88,6 @@
 
 /* disable runtime assertions? */
 /* #define CLGEN_NDEBUG */
-
 
 /* debug output */
 #ifdef CLGEN_DEBUG
@@ -109,6 +117,7 @@
 #define FALSE 0
 
 #define MB_ (1024*1024)
+#define KB_ (1024)
 
 #define MAX_NUM_BOARDS 7
 
@@ -168,15 +177,15 @@ static const struct clgen_board_info_rec {
 		TRUE,
 		TRUE,
 		TRUE,
-		0xF0,		
+		0xF0,
 		0xF0,
 		0,		/* unused, does not multiplex */
 		0xF1,
 		0,		/* unused, does not multiplex */
-		0x20 },		
+		0x20 },
 	{ BT_PICCOLO,
 		"CL Piccolo",
-		90000,		
+		90000,
 		TRUE,
 		TRUE,
 		FALSE,
@@ -273,6 +282,8 @@ static const struct {
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_5434_8 },
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_5434_4 },
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_5430 }, /* GD-5440 has identical id */
+	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_7543 },
+	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_7548 },
 	{ BT_GD5480, NULL, PCI_DEVICE_ID_CIRRUS_5480 }, /* MacPicasso probably */
 	{ BT_PICASSO4, NULL, PCI_DEVICE_ID_CIRRUS_5446 }, /* Picasso 4 is a GD5446 */
 	{ BT_LAGUNA, "CL Laguna", PCI_DEVICE_ID_CIRRUS_5462 },
@@ -286,22 +297,28 @@ static const struct {
 static const struct {
 	clgen_board_t btype;
 	zorro_id id, id2;
+	unsigned long size;
 } clgen_zorro_probe_list[] __initdata = {
 	{ BT_SD64,
 		ZORRO_PROD_HELFRICH_SD64_RAM,
-		ZORRO_PROD_HELFRICH_SD64_REG },
+		ZORRO_PROD_HELFRICH_SD64_REG,
+		0x400000 },
 	{ BT_PICCOLO,
 		ZORRO_PROD_HELFRICH_PICCOLO_RAM,
-		ZORRO_PROD_HELFRICH_PICCOLO_REG },
+		ZORRO_PROD_HELFRICH_PICCOLO_REG,
+		0x200000 },
 	{ BT_PICASSO,
 		ZORRO_PROD_VILLAGE_TRONIC_PICASSO_II_II_PLUS_RAM,
-		ZORRO_PROD_VILLAGE_TRONIC_PICASSO_II_II_PLUS_REG },
+		ZORRO_PROD_VILLAGE_TRONIC_PICASSO_II_II_PLUS_REG,
+		0x200000 },
 	{ BT_SPECTRUM,
 		ZORRO_PROD_GVP_EGS_28_24_SPECTRUM_RAM,
-		ZORRO_PROD_GVP_EGS_28_24_SPECTRUM_REG },
+		ZORRO_PROD_GVP_EGS_28_24_SPECTRUM_REG,
+		0x200000 },
 	{ BT_PICASSO4,
 		ZORRO_PROD_VILLAGE_TRONIC_PICASSO_IV_Z3,
-		0 },
+		0,
+		0x400000 },
 };
 #endif /* CONFIG_ZORRO */
 
@@ -389,6 +406,9 @@ struct clgenfb_info {
 
 #ifdef CONFIG_PCI
 	struct pci_dev *pdev;
+#define IS_7548(x) ((x)->pdev->device == PCI_DEVICE_ID_CIRRUS_7548)
+#else
+#define IS_7548(x) (FALSE)
 #endif
 };
 
@@ -400,8 +420,7 @@ static struct display disp;
 static struct clgenfb_info boards[MAX_NUM_BOARDS];	/* the boards */
 
 static unsigned clgen_def_mode = 1;
-
-static int release_io_ports = 0;
+static int noaccel = 0;
 
 
 
@@ -426,12 +445,24 @@ static const struct {
 		 {0, 8, 0},
 		 {0, 8, 0},
 		 {0, 0, 0},
-	       0, 0, -1, -1, FB_ACCEL_NONE, 40000, 32, 32, 33, 10, 96, 2,
+	       0, 0, -1, -1, FB_ACCEL_NONE, 40000, 48, 16, 32, 8, 96, 4,
      FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
 	 }
 	},
 
-	/* 
+	{"800x600",		/* 800x600, 48 kHz, 76 Hz, 50 MHz PixClock */
+	 {
+		 800, 600, 800, 600, 0, 0, 8, 0,
+		 {0, 8, 0},
+		 {0, 8, 0},
+		 {0, 8, 0},
+		 {0, 0, 0},
+	       0, 0, -1, -1, FB_ACCEL_NONE, 20000, 128, 16, 24, 2, 96, 6,
+     0, FB_VMODE_NONINTERLACED
+	 }
+	},
+
+	/*
 	   Modeline from XF86Config:
 	   Mode "1024x768" 80  1024 1136 1340 1432  768 770 774 805
 	 */
@@ -442,8 +473,8 @@ static const struct {
 			{0, 8, 0},
 			{0, 8, 0},
 			{0, 0, 0},
-	      0, 0, -1, -1, FB_ACCEL_NONE, 12500, 92, 112, 31, 2, 204, 4,
-     FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
+	      0, 0, -1, -1, FB_ACCEL_NONE, 12500, 144, 32, 30, 2, 192, 6,
+     0, FB_VMODE_NONINTERLACED
 		}
 	}
 };
@@ -705,7 +736,7 @@ static long clgen_get_mclk (long freq, int bpp, long *div)
 	assert (div != NULL);
 
 	/* Calculate MCLK, in case VCLK is high enough to require > 50MHz.
-	 * Assume a 64-bit data path for now.  The formula is: 
+	 * Assume a 64-bit data path for now.  The formula is:
 	 * ((B * PCLK * 2)/W) * 1.2
 	 * B = bytes per pixel, PCLK = pixclock, W = data width in bytes */
 	mclk = ((bpp / 8) * freq * 2) / 4;
@@ -876,15 +907,15 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 	case 16:
 		_par->line_length = _par->var.xres_virtual * 2;
 		_par->visual = FB_VISUAL_DIRECTCOLOR;
-#ifdef CONFIG_PREP
-		_par->var.red.offset = 2;
-		_par->var.green.offset = -3;
-		_par->var.blue.offset = 8;
-#else
-		_par->var.red.offset = 10;
-		_par->var.green.offset = 5;
-		_par->var.blue.offset = 0;
-#endif
+		if(isPReP) {
+			_par->var.red.offset = 2;
+			_par->var.green.offset = -3;
+			_par->var.blue.offset = 8;
+		} else {
+			_par->var.red.offset = 10;
+			_par->var.green.offset = 5;
+			_par->var.blue.offset = 0;
+		}
 		_par->var.red.length = 5;
 		_par->var.green.length = 5;
 		_par->var.blue.length = 5;
@@ -893,15 +924,15 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 	case 24:
 		_par->line_length = _par->var.xres_virtual * 3;
 		_par->visual = FB_VISUAL_DIRECTCOLOR;
-#ifdef CONFIG_PREP
-		_par->var.red.offset = 8;
-		_par->var.green.offset = 16;
-		_par->var.blue.offset = 24;
-#else
-		_par->var.red.offset = 16;
-		_par->var.green.offset = 8;
-		_par->var.blue.offset = 0;
-#endif
+		if(isPReP) {
+			_par->var.red.offset = 8;
+			_par->var.green.offset = 16;
+			_par->var.blue.offset = 24;
+		} else {
+			_par->var.red.offset = 16;
+			_par->var.green.offset = 8;
+			_par->var.blue.offset = 0;
+		}
 		_par->var.red.length = 8;
 		_par->var.green.length = 8;
 		_par->var.blue.length = 8;
@@ -910,15 +941,15 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 	case 32:
 		_par->line_length = _par->var.xres_virtual * 4;
 		_par->visual = FB_VISUAL_DIRECTCOLOR;
-#ifdef CONFIG_PREP
-		_par->var.red.offset = 8;
-		_par->var.green.offset = 16;
-		_par->var.blue.offset = 24;
-#else
-		_par->var.red.offset = 16;
-		_par->var.green.offset = 8;
-		_par->var.blue.offset = 0;
-#endif
+		if(isPReP) {
+			_par->var.red.offset = 8;
+			_par->var.green.offset = 16;
+			_par->var.blue.offset = 24;
+		} else {
+			_par->var.red.offset = 16;
+			_par->var.green.offset = 8;
+			_par->var.blue.offset = 0;
+		}
 		_par->var.red.length = 8;
 		_par->var.green.length = 8;
 		_par->var.blue.length = 8;
@@ -945,7 +976,10 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 
 	DPRINTK ("desired pixclock: %ld kHz\n", freq);
 
-	maxclock = clgen_board_info[fb_info->btype].maxclock;
+	if (IS_7548(fb_info))
+		maxclock = 80100;
+	else
+		maxclock = clgen_board_info[fb_info->btype].maxclock;
 	_par->multiplexing = 0;
 
 	/* If the frequency is greater than we can support, we might be able
@@ -1211,7 +1245,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 		/* 1280x1024 */
 		vga_wcrt (fb_info->regs, VGA_CRTC_MODE, 0xc7);
 	else
-		/* mode control: VGA_CRTC_START_HI enable, ROTATE(?), 16bit 
+		/* mode control: VGA_CRTC_START_HI enable, ROTATE(?), 16bit
 		 * address wrap, no compat. */
 		vga_wcrt (fb_info->regs, VGA_CRTC_MODE, 0xc3);
 
@@ -1243,7 +1277,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 	 * 1 bpp
 	 *
 	 */
-	
+
 	/* programming for different color depths */
 	if (_par->var.bits_per_pixel == 1) {
 		DPRINTK ("clgen: preparing for 1 bit deep display\n");
@@ -1269,7 +1303,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			vga_wseq (fb_info->regs, CL_SEQR7,
 				vga_rseq (fb_info->regs, CL_SEQR7) & ~0x01);
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "clgen: unknown Board\n");
 			break;
@@ -1310,7 +1344,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			DPRINTK (" (for GD54xx)\n");
 			/* do nothing */
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "clgen: unknown Board\n");
 			break;
@@ -1325,13 +1359,13 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 		vga_wseq (fb_info->regs, VGA_SEQ_PLANE_WRITE, 0x01);	/* plane mask: only write to first plane */
 		offset = _par->var.xres_virtual / 16;
 	}
-	
+
 	/******************************************************
 	 *
 	 * 8 bpp
 	 *
 	 */
-	
+
 	else if (_par->var.bits_per_pixel == 8) {
 		DPRINTK ("clgen: preparing for 8 bit deep display\n");
 		switch (fb_info->btype) {
@@ -1353,7 +1387,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			vga_wseq (fb_info->regs, CL_SEQR7,
 				vga_rseq (fb_info->regs, CL_SEQR7) | 0x01);
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "clgen: unknown Board\n");
 			break;
@@ -1380,7 +1414,9 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			break;
 
 		case BT_PICASSO4:
+#ifdef CONFIG_ZORRO
 			vga_wseq (fb_info->regs, CL_SEQRF, 0xb8);	/* ### INCOMPLETE!! */
+#endif
 /*          vga_wseq (fb_info->regs, CL_SEQR1F, 0x1c); */
 			break;
 
@@ -1395,7 +1431,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			DPRINTK (" (for GD54xx)\n");
 			/* do nothing */
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "clgen: unknown Board\n");
 			break;
@@ -1411,13 +1447,13 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 		vga_wseq (fb_info->regs, VGA_SEQ_PLANE_WRITE, 0xff);	/* plane mask: enable writing to all 4 planes */
 		offset = _par->var.xres_virtual / 8;
 	}
-	
+
 	/******************************************************
 	 *
 	 * 16 bpp
 	 *
 	 */
-	
+
 	else if (_par->var.bits_per_pixel == 16) {
 		DPRINTK ("clgen: preparing for 16 bit deep display\n");
 		switch (fb_info->btype) {
@@ -1451,10 +1487,17 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 
 		case BT_ALPINE:
 			DPRINTK (" (for GD543x)\n");
-			if (_par->HorizRes >= 1024)
-				vga_wseq (fb_info->regs, CL_SEQR7, 0xa7);
-			else
-				vga_wseq (fb_info->regs, CL_SEQR7, 0xa3);
+			if (IS_7548(fb_info)) {
+				vga_wseq (fb_info->regs, CL_SEQR7, 
+					  (vga_rseq (fb_info->regs, CL_SEQR7) & 0xE0)
+					  | 0x17);
+				WHDR (fb_info, 0xC1);
+			} else {
+				if (_par->HorizRes >= 1024)
+					vga_wseq (fb_info->regs, CL_SEQR7, 0xa7);
+				else
+					vga_wseq (fb_info->regs, CL_SEQR7, 0xa3);
+			}	
 			clgen_set_mclk (fb_info, _par->mclk, _par->divMCLK);
 			break;
 
@@ -1469,7 +1512,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			vga_wseq (fb_info->regs, CL_SEQR7,
 				vga_rseq (fb_info->regs, CL_SEQR7) & ~0x01);
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "CLGEN: unknown Board\n");
 			break;
@@ -1479,20 +1522,21 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 		WGen (fb_info, VGA_PEL_MSK, 0xff);	/* pixel mask: pass-through all planes */
 #ifdef CONFIG_PCI
 		WHDR (fb_info, 0xc0);	/* Copy Xbh */
-#elif CONFIG_ZORRO
+#elif defined(CONFIG_ZORRO)
+		/* FIXME: CONFIG_PCI and CONFIG_ZORRO may be defined both */
 		WHDR (fb_info, 0xa0);	/* hidden dac reg: nothing special */
 #endif
 		vga_wseq (fb_info->regs, VGA_SEQ_MEMORY_MODE, 0x0a);	/* memory mode: chain4, ext. memory */
 		vga_wseq (fb_info->regs, VGA_SEQ_PLANE_WRITE, 0xff);	/* plane mask: enable writing to all 4 planes */
 		offset = _par->var.xres_virtual / 4;
 	}
-	
+
 	/******************************************************
 	 *
 	 * 32 bpp
 	 *
 	 */
-	
+
 	else if (_par->var.bits_per_pixel == 32) {
 		DPRINTK ("clgen: preparing for 24/32 bit deep display\n");
 		switch (fb_info->btype) {
@@ -1541,7 +1585,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			vga_wseq (fb_info->regs, CL_SEQR7,
 				vga_rseq (fb_info->regs, CL_SEQR7) & ~0x01);
 			break;
-			
+
 		default:
 			printk (KERN_WARNING "clgen: unknown Board\n");
 			break;
@@ -1554,18 +1598,23 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 		vga_wseq (fb_info->regs, VGA_SEQ_PLANE_WRITE, 0xff);	/* plane mask: enable writing to all 4 planes */
 		offset = _par->var.xres_virtual / 4;
 	}
-	
+
 	/******************************************************
 	 *
 	 * unknown/unsupported bpp
 	 *
 	 */
-	
+
 	else {
 		printk (KERN_ERR "clgen: What's this?? requested color depth == %d.\n",
 			_par->var.bits_per_pixel);
 	}
-	
+
+	if (IS_7548(fb_info)) {
+		vga_wseq (fb_info->regs, CL_SEQR2D, 
+			vga_rseq (fb_info->regs, CL_SEQR2D) | 0xC0);
+	}
+
 	vga_wcrt (fb_info->regs, VGA_CRTC_OFFSET, offset & 0xff);
 	tmp = 0x22;
 	if (offset & 0x100)
@@ -1674,24 +1723,24 @@ static int clgen_setcolreg (unsigned regno, unsigned red, unsigned green,
 
 	if (regno >= 16)
 		return 0;
-		
+
 	switch (fb_info->currentmode.var.bits_per_pixel) {
 
 #ifdef FBCON_HAS_CFB16
 	case 16:
 		assert (regno < 16);
-#ifdef CONFIG_PREP
-		fb_info->fbcon_cmap.cfb16[regno] =
-		    ((red & 0xf800) >> 9) |
-		    ((green & 0xf800) >> 14) |
-		    ((green & 0xf800) << 2) |
-		    ((blue & 0xf800) >> 3);
-#else
-		fb_info->fbcon_cmap.cfb16[regno] =
-		    ((red & 0xf800) >> 1) |
-		    ((green & 0xf800) >> 6) |
-		    ((blue & 0xf800) >> 11);
-#endif
+		if(isPReP) {
+			fb_info->fbcon_cmap.cfb16[regno] =
+			    ((red & 0xf800) >> 9) |
+			    ((green & 0xf800) >> 14) |
+			    ((green & 0xf800) << 2) |
+			    ((blue & 0xf800) >> 3);
+		} else {
+			fb_info->fbcon_cmap.cfb16[regno] =
+			    ((red & 0xf800) >> 1) |
+			    ((green & 0xf800) >> 6) |
+			    ((blue & 0xf800) >> 11);
+		}
 #endif /* FBCON_HAS_CFB16 */
 
 #ifdef FBCON_HAS_CFB24
@@ -1707,17 +1756,17 @@ static int clgen_setcolreg (unsigned regno, unsigned red, unsigned green,
 #ifdef FBCON_HAS_CFB32
 	case 32:
 		assert (regno < 16);
-#ifdef CONFIG_PREP
-		fb_info->fbcon_cmap.cfb32[regno] =
-		    ((red & 0xff00)) |
-		    ((green & 0xff00) << 8) |
-		    ((blue & 0xff00) << 16);
-#else
-		fb_info->fbcon_cmap.cfb32[regno] =
-		    ((red & 0xff00) << 8) |
-		    ((green & 0xff00)) |
-		    ((blue & 0xff00) >> 8);
-#endif
+		if(isPReP) {
+			fb_info->fbcon_cmap.cfb32[regno] =
+			    ((red & 0xff00)) |
+			    ((green & 0xff00) << 8) |
+			    ((blue & 0xff00) << 16);
+		} else {
+			fb_info->fbcon_cmap.cfb32[regno] =
+			    ((red & 0xff00) << 8) |
+			    ((green & 0xff00)) |
+			    ((blue & 0xff00) >> 8);
+		}
 		break;
 #endif /* FBCON_HAS_CFB32 */
 	default:
@@ -1871,11 +1920,11 @@ static int clgen_blank (int blank_mode, struct fb_info_gen *info)
 static void __init init_vgachip (struct clgenfb_info *fb_info)
 {
 	const struct clgen_board_info_rec *bi;
-	
+
 	DPRINTK ("ENTER\n");
 
 	assert (fb_info != NULL);
-	
+
 	bi = &clgen_board_info[fb_info->btype];
 
 	/* reset board globally */
@@ -1918,16 +1967,7 @@ static void __init init_vgachip (struct clgenfb_info *fb_info)
 		break;
 	}
 
-#ifdef CLGEN_USE_HARDCODED_RAM_SETTINGS
-	/* "pre-set" a RAMsize; if the test succeeds, double it */
-	if (fb_info->btype == BT_SD64 ||
-	    fb_info->btype == BT_PICASSO4)
-		fb_info->size = 0x400000;
-	else
-		fb_info->size = 0x200000;
-#else
 	assert (fb_info->size > 0); /* make sure RAM size set by this point */
-#endif
 
 	/* assume it's a "large memory" board (2/4 MB) */
 	fb_info->smallboard = FALSE;
@@ -2141,7 +2181,7 @@ static void switch_monitor (struct clgenfb_info *fb_info, int on)
 		default: /* do nothing */ break;
 		}
 	}
-	
+
 	DPRINTK ("EXIT\n");
 #endif /* CONFIG_ZORRO */
 }
@@ -2154,10 +2194,10 @@ static void clgen_set_disp (const void *par, struct display *disp,
 	int accel_text;
 
 	DPRINTK ("ENTER\n");
-	
+
 	assert (_par != NULL);
 	assert (fb_info != NULL);
-	
+
 	accel_text = _par->var.accel_flags & FB_ACCELF_TEXT;
 
 	printk ("Cirrus Logic video mode: ");
@@ -2374,7 +2414,7 @@ static void fbcon_clgen32_clear (struct vc_data *conp, struct display *p,
 
 
 
-#ifdef CONFIG_PREP
+#ifdef CONFIG_ALL_PPC
 #define PREP_VIDEO_BASE ((volatile unsigned long) 0xC0000000)
 #define PREP_IO_BASE    ((volatile unsigned char *) 0x80000000)
 static void __init get_prep_addrs (unsigned long *display, unsigned long *registers)
@@ -2387,34 +2427,41 @@ static void __init get_prep_addrs (unsigned long *display, unsigned long *regist
 	DPRINTK ("EXIT\n");
 }
 
-#endif				/* CONFIG_PREP */
+#endif				/* CONFIG_ALL_PPC */
 
 
 
 
 #ifdef CONFIG_PCI
+static int release_io_ports = 0;
+
 /* Pulled the logic from XFree86 Cirrus driver to get the memory size,
  * based on the DRAM bandwidth bit and DRAM bank switching bit.  This
  * works with 1MB, 2MB and 4MB configurations (which the Motorola boards
  * seem to have. */
 static unsigned int __init clgen_get_memsize (caddr_t regbase)
 {
-	unsigned long mem = 1 * MB_;
+	unsigned long mem;
 	unsigned char SRF;
 
 	DPRINTK ("ENTER\n");
 
 	SRF = vga_rseq (regbase, CL_SEQRF);
-	if ((SRF & 0x18) == 0x18) {
+	switch ((SRF & 0x18)) {
+	    case 0x08: mem = 512 * 1024; break;
+	    case 0x10: mem = 1024 * 1024; break;
 		/* 64-bit DRAM data bus width; assume 2MB. Also indicates 2MB memory
 		   * on the 5430. */
-		mem *= 2;
+	    case 0x18: mem = 2048 * 1024; break;
+	    default: printk ("CLgenfb: Unknown memory size!\n");
+		mem = 1024 * 1024;
 	}
 	if (SRF & 0x80) {
 		/* If DRAM bank switching is enabled, there must be twice as much
 		   * memory installed. (4MB on the 5434) */
 		mem *= 2;
 	}
+	/* TODO: Handling of GD5446/5480 (see XF86 sources ...) */
 	return mem;
 
 	DPRINTK ("EXIT\n");
@@ -2428,19 +2475,19 @@ static struct pci_dev * __init clgen_pci_dev_get (clgen_board_t *btype)
 	int i;
 
 	DPRINTK ("ENTER\n");
-	
+
 	for (i = 0; i < ARRAY_SIZE(clgen_pci_probe_list); i++) {
 		pdev = NULL;
 		while ((pdev = pci_find_device (PCI_VENDOR_ID_CIRRUS,
 				clgen_pci_probe_list[i].device, pdev)) != NULL) {
 			if (pci_enable_device(pdev) == 0) {
-				*btype = clgen_pci_probe_list[i - 1].btype;
+				*btype = clgen_pci_probe_list[i].btype;
 				DPRINTK ("EXIT, returning pdev=%p\n", pdev);
 				return pdev;
 			}
 		}
 	}
-	
+
 	DPRINTK ("EXIT, returning NULL\n");
 	return NULL;
 }
@@ -2500,7 +2547,7 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 
 	pdev = clgen_pci_dev_get (btype);
 	if (!pdev) {
-		printk (KERN_ERR " Couldn't find PCI device\n");
+		printk (KERN_INFO "clgenfb: couldn't find Cirrus Logic PCI device\n");
 		DPRINTK ("EXIT, returning 1\n");
 		return 1;
 	}
@@ -2510,26 +2557,26 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 
 	info->pdev = pdev;
 
-#ifdef CONFIG_PREP
-	/* Xbh does this, though 0 seems to be the init value */
-	pcibios_write_config_dword (0, pdev->devfn, PCI_BASE_ADDRESS_0, 0x00000000);
-#endif
+	if(isPReP) {
+		/* Xbh does this, though 0 seems to be the init value */
+		pcibios_write_config_dword (0, pdev->devfn, PCI_BASE_ADDRESS_0,
+			0x00000000);
 
-#ifdef CONFIG_PREP
-	get_prep_addrs (&board_addr, &info->fbregs_phys);
-#else				/* CONFIG_PREP */
-	DPRINTK ("Attempt to get PCI info for Cirrus Graphics Card\n");
-	get_pci_addrs (pdev, &board_addr, &info->fbregs_phys);
-#endif				/* CONFIG_PREP */
+#ifdef CONFIG_ALL_PPC
+		get_prep_addrs (&board_addr, &info->fbregs_phys);
+#endif
+	} else {
+		DPRINTK ("Attempt to get PCI info for Cirrus Graphics Card\n");
+		get_pci_addrs (pdev, &board_addr, &info->fbregs_phys);
+	}
 
 	DPRINTK ("Board address: 0x%lx, register address: 0x%lx\n", board_addr, info->fbregs_phys);
 
-#ifdef CONFIG_PREP
-	/* PReP dies if we ioremap the IO registers, but it works w/out... */
-	info->regs = (char *) info->fbregs_phys;
-#else
-	info->regs = 0;		/* FIXME: this forces VGA.  alternatives? */
-#endif
+	if(isPReP) {
+		/* PReP dies if we ioremap the IO registers, but it works w/out... */
+		info->regs = (char *) info->fbregs_phys;
+	} else
+		info->regs = 0;		/* FIXME: this forces VGA.  alternatives? */
 
 	if (*btype == BT_GD5480) {
 		board_size = 32 * MB_;
@@ -2557,9 +2604,9 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 	info->fbmem_phys = board_addr;
 	info->size = board_size;
 
-	printk (" RAM (%lu MB) at 0x%lx, ", info->size / MB_, board_addr);
+	printk (" RAM (%lu kB) at 0x%lx, ", info->size / KB_, board_addr);
 
-	printk (KERN_INFO "Cirrus Logic chipset on PCI bus\n");
+	printk ("Cirrus Logic chipset on PCI bus\n");
 
 	DPRINTK ("EXIT, returning 0\n");
 	return 0;
@@ -2572,7 +2619,7 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 #ifdef CONFIG_ZORRO
 static int __init clgen_zorro_find (struct zorro_dev **z_o,
 				    struct zorro_dev **z2_o,
-				    clgen_board_t *btype)
+				    clgen_board_t *btype, unsigned long *size)
 {
 	struct zorro_dev *z = NULL;
 	int i;
@@ -2590,14 +2637,16 @@ static int __init clgen_zorro_find (struct zorro_dev **z_o,
 			*z2_o = zorro_find_device(clgen_zorro_probe_list[i].id2, NULL);
 		else
 			*z2_o = NULL;
-		*btype = clgen_zorro_probe_list[i - 1].btype;
-		
+
+		*btype = clgen_zorro_probe_list[i].btype;
+		*size = clgen_zorro_probe_list[i].size;
+
 		printk (KERN_INFO "clgen: %s board detected; ",
 			clgen_board_info[*btype].name);
-		
+
 		return 0;
 	}
-	
+
 	printk (KERN_NOTICE "clgen: no supported board found.\n");
 	return -1;
 }
@@ -2608,11 +2657,11 @@ static void __exit clgen_zorro_unmap (struct clgenfb_info *info)
 	release_mem_region(info->board_addr, info->board_size);
 
 	if (info->btype == BT_PICASSO4) {
-		iounmap (info->board_addr);
-		iounmap (info->fbmem_phys);
+		iounmap ((void *)info->board_addr);
+		iounmap ((void *)info->fbmem_phys);
 	} else {
 		if (info->board_addr > 0x01000000)
-			iounmap (info->board_addr);
+			iounmap ((void *)info->board_addr);
 	}
 }
 
@@ -2621,20 +2670,21 @@ static int __init clgen_zorro_setup (struct clgenfb_info *info,
 				     clgen_board_t *btype)
 {
 	struct zorro_dev *z = NULL, *z2 = NULL;
-	unsigned long board_addr, board_size;
-	
+	unsigned long board_addr, board_size, size;
+
 	assert (info != NULL);
 	assert (btype != NULL);
 
-	if (clgen_zorro_find (&z, &z2, btype))
+	if (clgen_zorro_find (&z, &z2, btype, &size))
 		return -1;
 
 	assert (z > 0);
 	assert (z2 >= 0);
 	assert (*btype != BT_NONE);
-	
+
 	info->board_addr = board_addr = z->resource.start;
 	info->board_size = board_size = z->resource.end-z->resource.start+1;
+	info->size = size;
 
 	if (!request_mem_region(board_addr, board_size, "clgenfb")) {
 		printk(KERN_ERR "clgen: cannot reserve region 0x%lx, abort\n",
@@ -2675,7 +2725,7 @@ static int __init clgen_zorro_setup (struct clgenfb_info *info,
 	}
 
 	printk (KERN_INFO "Cirrus Logic chipset on Zorro bus\n");
-	
+
 	return 0;
 }
 #endif /* CONFIG_ZORRO */
@@ -2704,7 +2754,8 @@ int __init clgenfb_init(void)
 		return -ENXIO;
 	}
 
-#elif CONFIG_ZORRO
+#elif defined(CONFIG_ZORRO)
+	/* FIXME: CONFIG_PCI and CONFIG_ZORRO may both be defined */
 	if (clgen_zorro_setup (fb_info, &btype)) {
 		DPRINTK ("EXIT, returning -ENXIO\n");
 		return -ENXIO;
@@ -2721,6 +2772,23 @@ int __init clgenfb_init(void)
 	fb_info->btype = btype;
 
 	DPRINTK ("clgen: (RAM start set to: 0x%p)\n", fb_info->fbmem);
+
+	if (noaccel)
+	{
+		printk("clgen: disabling text acceleration support\n");
+#ifdef FBCON_HAS_CFB8
+		fbcon_clgen_8.bmove = fbcon_cfb8_bmove;
+		fbcon_clgen_8.clear = fbcon_cfb8_clear;
+#endif
+#ifdef FBCON_HAS_CFB16
+		fbcon_clgen_16.bmove = fbcon_cfb16_bmove;
+		fbcon_clgen_16.clear = fbcon_cfb16_clear;
+#endif
+#ifdef FBCON_HAS_CFB32
+		fbcon_clgen_32.bmove = fbcon_cfb32_bmove;
+		fbcon_clgen_32.clear = fbcon_cfb32_clear;
+#endif
+	}
 
 	init_vgachip (fb_info);
 
@@ -2808,23 +2876,25 @@ static void __exit clgenfb_cleanup (struct clgenfb_info *info)
 int __init clgenfb_setup(char *options) {
 	char *this_opt, s[32];
 	int i;
-	
+
 	DPRINTK ("ENTER\n");
-	
+
 	if (!options || !*options)
 		return 0;
-	
+
 	for (this_opt = strtok (options, ","); this_opt != NULL;
 	     this_opt = strtok (NULL, ",")) {
 		if (!*this_opt) continue;
-		
+
 		DPRINTK("clgenfb_setup: option '%s'\n", this_opt);
-		
+
 		for (i = 0; i < NUM_TOTAL_MODES; i++) {
 			sprintf (s, "mode:%s", clgenfb_predefined[i].name);
 			if (strcmp (this_opt, s) == 0)
 				clgen_def_mode = i;
 		}
+		if (!strcmp(this_opt, "noaccel"))
+			noaccel = 1;
 	}
 	return 0;
 }
@@ -2835,8 +2905,9 @@ int __init clgenfb_setup(char *options) {
      *  Modularization
      */
 
-MODULE_AUTHOR("Copyright 1999,2000 Jeff Garzik <jgarzik@mandrakesoft.com>");
+MODULE_AUTHOR("Copyright 1999,2000 Jeff Garzik <jgarzik@pobox.com>");
 MODULE_DESCRIPTION("Accelerated FBDev driver for Cirrus Logic chips");
+MODULE_LICENSE("GPL");
 
 static void __exit clgenfb_exit (void)
 {
@@ -2915,9 +2986,9 @@ static void AttrOn (const struct clgenfb_info *fb_info)
 }
 
 /*** WHDR() - write into the Hidden DAC register ***/
-/* as the HDR is the only extension register that requires special treatment 
+/* as the HDR is the only extension register that requires special treatment
  * (the other extension registers are accessible just like the "ordinary"
- * registers of their functional group) here is a specialized routine for 
+ * registers of their functional group) here is a specialized routine for
  * accessing the HDR
  */
 static void WHDR (const struct clgenfb_info *fb_info, unsigned char val)
@@ -2966,7 +3037,7 @@ static void WSFR (struct clgenfb_info *fb_info, unsigned char val)
 #ifdef CONFIG_ZORRO
 	assert (fb_info->regs != NULL);
 	fb_info->SFR = val;
-	writeb (val, fb_info->regs + 0x8000);
+	z_writeb (val, fb_info->regs + 0x8000);
 #endif
 }
 
@@ -2978,7 +3049,7 @@ static void WSFR2 (struct clgenfb_info *fb_info, unsigned char val)
 	/* to flip to Amiga display */
 	assert (fb_info->regs != NULL);
 	fb_info->SFR = val;
-	writeb (val, fb_info->regs + 0x9000);
+	z_writeb (val, fb_info->regs + 0x9000);
 #endif
 }
 
@@ -3040,7 +3111,7 @@ static void RClut (struct clgenfb_info *fb_info, unsigned char regnum, unsigned 
 *********************************************************************/
 
 /* FIXME: use interrupts instead */
-extern inline void clgen_WaitBLT (caddr_t regbase)
+static inline void clgen_WaitBLT (caddr_t regbase)
 {
 	/* now busy-wait until we're done */
 	while (vga_rgfx (regbase, CL_GR31) & 0x08)
@@ -3222,7 +3293,6 @@ static void clgen_RectFill (struct clgenfb_info *fb_info,
  * bestclock() - determine closest possible clock lower(?) than the
  * desired pixel clock
  **************************************************************************/
-#define abs(x) ((x)<0 ? -(x) : (x))
 static void bestclock (long freq, long *best, long *nom,
 		       long *den, long *div, long maxfreq)
 {
@@ -3383,7 +3453,7 @@ void clgen_dbg_print_regs (caddr_t regbase, clgen_dbg_reg_class_t reg_class,...)
  *
  * DESCRIPTION:
  */
- 
+
 static
 void clgen_dump (void)
 {

@@ -28,7 +28,7 @@
  *        Stanislav V. Voronyi <stas@uanet.kharkov.ua>
  *
  *  3/98: Change the IRQ detection, use of probe_irq_o*(),
- *	  supress TIOCSERGWILD and TIOCSERSWILD
+ *	  suppress TIOCSERGWILD and TIOCSERSWILD
  *	  Etienne Lorrain <etienne.lorrain@ibm.net>
  *
  *  4/98: Added changes to support the ARM architecture proposed by
@@ -54,13 +54,18 @@
  *  7/00: fix some returns on failure not using MOD_DEC_USE_COUNT.
  *	  Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  *
- * This module exports the following rs232 io functions:
+ * 10/00: add in optional software flow control for serial console.
+ *	  Kanoj Sarcar <kanoj@sgi.com>  (Modified by Theodore Ts'o)
  *
- *	int rs_init(void);
+ * 02/02: Fix for AMD Elan bug in transmit irq routine, by
+ *        Christer Weinigel <wingel@hog.ctrl-c.liu.se>,
+ *        Robert Schwebel <robert@schwebel.de>,
+ *        Juergen Beisert <jbeisert@eurodsn.de>,
+ *        Theodore Ts'o <tytso@mit.edu>
  */
 
-static char *serial_version = "5.02";
-static char *serial_revdate = "2000-08-09";
+static char *serial_version = "5.05c";
+static char *serial_revdate = "2001-07-08";
 
 /*
  * Serial driver configuration section.  Here are the various options:
@@ -85,6 +90,11 @@ static char *serial_revdate = "2000-08-09";
  * SERIAL_PARANOIA_CHECK
  * 		Check the magic number for the async_structure where
  * 		ever possible.
+ *
+ * CONFIG_SERIAL_ACPI
+ *		Enable support for serial console port and serial 
+ *		debug port as defined by the SPCR and DBGP tables in 
+ *		ACPI 2.0.
  */
 
 #include <linux/config.h>
@@ -111,6 +121,10 @@ static char *serial_revdate = "2000-08-09";
 #ifndef CONFIG_SERIAL_MANY_PORTS
 #define CONFIG_SERIAL_MANY_PORTS
 #endif
+#endif
+
+#ifdef CONFIG_SERIAL_ACPI
+#define ENABLE_SERIAL_ACPI
 #endif
 
 #if defined(CONFIG_ISAPNP)|| (defined(CONFIG_ISAPNP_MODULE) && defined(MODULE))
@@ -162,9 +176,6 @@ static char *serial_revdate = "2000-08-09";
  * End of serial driver configuration section.
  */
 
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
 #include <linux/module.h>
 
 #include <linux/types.h>
@@ -191,7 +202,7 @@ static char *serial_revdate = "2000-08-09";
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #if (LINUX_VERSION_CODE >= 131343)
 #include <linux/init.h>
 #endif
@@ -225,8 +236,8 @@ static char *serial_revdate = "2000-08-09";
 #include <asm/irq.h>
 #include <asm/bitops.h>
 
-#ifdef CONFIG_MAC_SERIAL
-#define SERIAL_DEV_OFFSET	2
+#if defined(CONFIG_MAC_SERIAL)
+#define SERIAL_DEV_OFFSET	((_machine == _MACH_prep || _machine == _MACH_chrp) ? 0 : 2)
 #else
 #define SERIAL_DEV_OFFSET	0
 #endif
@@ -315,17 +326,17 @@ MODULE_PARM(force_rsa, "1-" __MODULE_STRING(PORT_RSA_MAX) "i");
 MODULE_PARM_DESC(force_rsa, "Force I/O ports for RSA");
 #endif /* CONFIG_SERIAL_RSA  */
 
-static struct serial_state rs_table[RS_TABLE_SIZE] = {
+struct serial_state rs_table[RS_TABLE_SIZE] = {
 	SERIAL_PORT_DFNS	/* Defined in serial.h */
 };
 
 #define NR_PORTS	(sizeof(rs_table)/sizeof(struct serial_state))
+int serial_nr_ports = NR_PORTS;
 
 #if (defined(ENABLE_SERIAL_PCI) || defined(ENABLE_SERIAL_PNP))
 #define NR_PCI_BOARDS	8
 
 static struct pci_board_inst	serial_pci_board[NR_PCI_BOARDS];
-static int serial_pci_board_idx;
 
 #ifndef IS_PCI_REGION_IOPORT
 #define IS_PCI_REGION_IOPORT(dev, r) (pci_resource_flags((dev), (r)) & \
@@ -413,10 +424,6 @@ static _INLINE_ unsigned int serial_in(struct async_struct *info, int offset)
 	case SERIAL_IO_MEM:
 		return readb((unsigned long) info->iomem_base +
 			     (offset<<info->iomem_reg_shift));
-#ifdef CONFIG_SERIAL_GSC
-	case SERIAL_IO_GSC:
-		return gsc_readb(info->iomem_base + offset);
-#endif
 	default:
 		return inb(info->port + offset);
 	}
@@ -436,11 +443,6 @@ static _INLINE_ void serial_out(struct async_struct *info, int offset,
 		writeb(value, (unsigned long) info->iomem_base +
 			      (offset<<info->iomem_reg_shift));
 		break;
-#ifdef CONFIG_SERIAL_GSC
-	case SERIAL_IO_GSC:
-		gsc_writeb(value, info->iomem_base + offset);
-		break;
-#endif
 	default:
 		outb(value, info->port+offset);
 	}
@@ -564,14 +566,28 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch;
-	int ignored = 0;
 	struct	async_icount *icount;
+	int	max_count = 256;
 
 	icount = &info->state->icount;
 	do {
+		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
+			tty->flip.tqueue.routine((void *) tty);
+			if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
+				/* no room in flip buffer, discard rx FIFO contents to clear IRQ
+				 * *FIXME* Hardware with auto flow control
+				 * would benefit from leaving the data in the FIFO and
+				 * disabling the rx IRQ until space becomes available.
+				 */
+				do {
+					serial_inp(info, UART_RX);
+					icount->overrun++;
+					*status = serial_inp(info, UART_LSR);
+				} while ((*status & UART_LSR_DR) && (max_count-- > 0));
+				return;		// if TTY_DONT_FLIP is set
+			}
+		}
 		ch = serial_inp(info, UART_RX);
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-			goto ignore_char;
 		*tty->flip.char_buf_ptr = ch;
 		icount->rx++;
 		
@@ -612,15 +628,8 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 				icount->overrun++;
 
 			/*
-			 * Now check to see if character should be
-			 * ignored, and mask off conditions which
-			 * should be ignored.
+			 * Mask off conditions which should be ignored.
 			 */
-			if (*status & info->ignore_status_mask) {
-				if (++ignored > 100)
-					break;
-				goto ignore_char;
-			}
 			*status &= info->read_status_mask;
 
 #ifdef CONFIG_SERIAL_CONSOLE
@@ -639,19 +648,6 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 				*tty->flip.flag_buf_ptr = TTY_PARITY;
 			else if (*status & UART_LSR_FE)
 				*tty->flip.flag_buf_ptr = TTY_FRAME;
-			if (*status & UART_LSR_OE) {
-				/*
-				 * Overrun is special, since it's
-				 * reported immediately, and doesn't
-				 * affect the current character
-				 */
-				tty->flip.count++;
-				tty->flip.flag_buf_ptr++;
-				tty->flip.char_buf_ptr++;
-				*tty->flip.flag_buf_ptr = TTY_OVERRUN;
-				if (tty->flip.count >= TTY_FLIPBUF_SIZE)
-					goto ignore_char;
-			}
 		}
 #if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 		if (break_pressed && info->line == sercons.index) {
@@ -664,16 +660,32 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 			break_pressed = 0;
 		}
 #endif
-		tty->flip.flag_buf_ptr++;
-		tty->flip.char_buf_ptr++;
-		tty->flip.count++;
+		if ((*status & info->ignore_status_mask) == 0) {
+			tty->flip.flag_buf_ptr++;
+			tty->flip.char_buf_ptr++;
+			tty->flip.count++;
+		}
+		if ((*status & UART_LSR_OE) &&
+		    (tty->flip.count < TTY_FLIPBUF_SIZE)) {
+			/*
+			 * Overrun is special, since it's reported
+			 * immediately, and doesn't affect the current
+			 * character
+			 */
+			*tty->flip.flag_buf_ptr = TTY_OVERRUN;
+			tty->flip.count++;
+			tty->flip.flag_buf_ptr++;
+			tty->flip.char_buf_ptr++;
+		}
+#if defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
 	ignore_char:
+#endif
 		*status = serial_inp(info, UART_LSR);
-	} while (*status & UART_LSR_DR);
+	} while ((*status & UART_LSR_DR) && (max_count-- > 0));
 #if (LINUX_VERSION_CODE > 131394) /* 2.1.66 */
 	tty_flip_buffer_push(tty);
 #else
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
 #endif	
 }
 
@@ -797,7 +809,7 @@ static _INLINE_ void check_modem_status(struct async_struct *info)
  */
 static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	int status;
+	int status, iir;
 	struct async_struct * info;
 	int pass_counter = 0;
 	struct async_struct *end_mark = 0;
@@ -822,11 +834,14 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	do {
 		if (!info->tty ||
-		    (serial_in(info, UART_IIR) & UART_IIR_NO_INT)) {
+		    ((iir=serial_in(info, UART_IIR)) & UART_IIR_NO_INT)) {
 			if (!end_mark)
 				end_mark = info;
 			goto next;
 		}
+#ifdef SERIAL_DEBUG_INTR
+		printk("IIR = %x...", serial_in(info, UART_IIR));
+#endif
 		end_mark = 0;
 
 		info->last_active = jiffies;
@@ -838,8 +853,15 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		if (status & UART_LSR_DR)
 			receive_chars(info, &status, regs);
 		check_modem_status(info);
+#ifdef CONFIG_MELAN
+		if ((status & UART_LSR_THRE) ||
+			/* for buggy ELAN processors */
+			((iir & UART_IIR_ID) == UART_IIR_THRI))
+			transmit_chars(info, 0);
+#else
 		if (status & UART_LSR_THRE)
 			transmit_chars(info, 0);
+#endif
 
 	next:
 		info = info->next_port;
@@ -872,7 +894,7 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
  */
 static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 {
-	int status;
+	int status, iir;
 	int pass_counter = 0;
 	struct async_struct * info;
 #ifdef CONFIG_SERIAL_MULTIPORT	
@@ -894,6 +916,7 @@ static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 		first_multi = inb(multi->port_monitor);
 #endif
 
+	iir = serial_in(info, UART_IIR);
 	do {
 		status = serial_inp(info, UART_LSR);
 #ifdef SERIAL_DEBUG_INTR
@@ -902,15 +925,26 @@ static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 		if (status & UART_LSR_DR)
 			receive_chars(info, &status, regs);
 		check_modem_status(info);
+#ifdef CONFIG_MELAN
+		if ((status & UART_LSR_THRE) ||
+		    /* For buggy ELAN processors */
+		    ((iir & UART_IIR_ID) == UART_IIR_THRI))
+			transmit_chars(info, 0);
+#else
 		if (status & UART_LSR_THRE)
 			transmit_chars(info, 0);
+#endif
 		if (pass_counter++ > RS_ISR_PASS_LIMIT) {
-#if 0
+#ifdef SERIAL_DEBUG_INTR
 			printk("rs_single loop break.\n");
 #endif
 			break;
 		}
-	} while (!(serial_in(info, UART_IIR) & UART_IIR_NO_INT));
+		iir = serial_in(info, UART_IIR);
+#ifdef SERIAL_DEBUG_INTR
+		printk("IIR = %x...", iir);
+#endif
+	} while ((iir & UART_IIR_NO_INT) == 0);
 	info->last_active = jiffies;
 #ifdef CONFIG_SERIAL_MULTIPORT	
 	if (multi->port_monitor)
@@ -1034,17 +1068,15 @@ static void do_serial_bh(void)
 static void do_softint(void *private_)
 {
 	struct async_struct	*info = (struct async_struct *) private_;
-	struct tty_struct	*tty;
-	
+	struct tty_struct       *tty;
+
 	tty = info->tty;
 	if (!tty)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
+		
 #ifdef SERIAL_HAVE_POLL_WAIT
 		wake_up_interruptible(&tty->poll_wait);
 #endif
@@ -1310,7 +1342,7 @@ static int startup(struct async_struct * info)
 	 */
 	if (!(info->flags & ASYNC_BUGGY_UART) &&
 	    (serial_inp(info, UART_LSR) == 0xff)) {
-		printk("LSR safety check engaged!\n");
+		printk("ttyS%d: LSR safety check engaged!\n", state->line);
 		if (capable(CAP_SYS_ADMIN)) {
 			if (info->tty)
 				set_bit(TTY_IO_ERROR, &info->tty->flags);
@@ -1554,7 +1586,10 @@ static void shutdown(struct async_struct * info)
 		/* Arrange to enter sleep mode */
 		serial_outp(info, UART_LCR, 0xBF);
 		serial_outp(info, UART_EFR, UART_EFR_ECB);
+		serial_outp(info, UART_LCR, 0);
 		serial_outp(info, UART_IER, UART_IERX_SLEEP);
+		serial_outp(info, UART_LCR, 0xBF);
+		serial_outp(info, UART_EFR, 0);
 		serial_outp(info, UART_LCR, 0);
 	}
 	if (info->state->type == PORT_16750) {
@@ -1792,13 +1827,18 @@ static void change_speed(struct async_struct *info,
 
 static void rs_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	struct async_struct *info = (struct async_struct *)tty->driver_data;
+	struct async_struct *info;
 	unsigned long flags;
 
+	if (!tty)
+		return;
+	
+	info =  (struct async_struct *)tty->driver_data;
+	
 	if (serial_paranoia_check(info, tty->device, "rs_put_char"))
 		return;
 
-	if (!tty || !info->xmit.buf)
+	if (!info->xmit.buf)
 		return;
 
 	save_flags(flags); cli();
@@ -1838,13 +1878,18 @@ static int rs_write(struct tty_struct * tty, int from_user,
 		    const unsigned char *buf, int count)
 {
 	int	c, ret = 0;
-	struct async_struct *info = (struct async_struct *)tty->driver_data;
+	struct async_struct *info;
 	unsigned long flags;
 				
+	if (!tty)
+		return 0;
+
+	info = (struct async_struct *)tty->driver_data;
+	
 	if (serial_paranoia_check(info, tty->device, "rs_write"))
 		return 0;
 
-	if (!tty || !info->xmit.buf || !tmp_buf)
+	if (!info->xmit.buf || !tmp_buf)
 		return 0;
 
 	save_flags(flags);
@@ -1939,13 +1984,10 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit.head = info->xmit.tail = 0;
 	restore_flags(flags);
-	wake_up_interruptible(&tty->write_wait);
 #ifdef SERIAL_HAVE_POLL_WAIT
 	wake_up_interruptible(&tty->poll_wait);
 #endif
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 /*
@@ -2120,6 +2162,7 @@ static int set_serial_info(struct async_struct * info,
 	if (new_serial.type) {
 		for (i = 0 ; i < NR_PORTS; i++)
 			if ((state != &rs_table[i]) &&
+			    (rs_table[i].io_type == SERIAL_IO_PORT) &&
 			    (rs_table[i].port == new_port) &&
 			    rs_table[i].type)
 				return -EADDRINUSE;
@@ -2182,7 +2225,7 @@ static int set_serial_info(struct async_struct * info,
 
 	
 check_and_exit:
-	if (!state->port || !state->type)
+	if ((!state->port && !state->iomem_base) || !state->type)
 		return 0;
 	if (info->flags & ASYNC_INITIALIZED) {
 		if (((old_state.flags & ASYNC_SPD_MASK) !=
@@ -2237,7 +2280,7 @@ static int get_lsr_info(struct async_struct * info, unsigned int *value)
 	    ((CIRC_CNT(info->xmit.head, info->xmit.tail,
 		       SERIAL_XMIT_SIZE) > 0) &&
 	     !info->tty->stopped && !info->tty->hw_stopped))
-		result &= TIOCSER_TEMT;
+		result &= ~TIOCSER_TEMT;
 
 	if (copy_to_user(value, &result, sizeof(int)))
 		return -EFAULT;
@@ -2349,7 +2392,7 @@ static int do_autoconfig(struct async_struct * info)
 
 	autoconfig(info->state);
 	if ((info->state->flags & ASYNC_AUTO_IRQ) &&
-	    (info->state->port != 0) &&
+	    (info->state->port != 0  || info->state->iomem_base != 0) &&
 	    (info->state->type != PORT_UNKNOWN)) {
 		irq = detect_uart_irq(info->state);
 		if (irq > 0)
@@ -2807,8 +2850,8 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	 * the line discipline to only process XON/XOFF characters.
 	 */
 	tty->closing = 1;
-	if (info->closing_wait != ASYNC_CLOSING_WAIT_NONE)
-		tty_wait_until_sent(tty, info->closing_wait);
+	if (state->closing_wait != ASYNC_CLOSING_WAIT_NONE)
+		tty_wait_until_sent(tty, state->closing_wait);
 	/*
 	 * At this point we stop accepting input.  To do this, we
 	 * disable the receive line status interrupts, and tell the
@@ -2829,15 +2872,14 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
 	if (info->blocked_open) {
-		if (info->close_delay) {
+		if (state->close_delay) {
 			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(info->close_delay);
+			schedule_timeout(state->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -2906,7 +2948,6 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 		if (timeout && time_after(jiffies, orig_jiffies + timeout))
 			break;
 	}
-	set_current_state(TASK_RUNNING);
 #ifdef SERIAL_DEBUG_RS_WAIT_UNTIL_SENT
 	printk("lsr = %d (jiff=%lu)...done\n", lsr, jiffies);
 #endif
@@ -3121,6 +3162,10 @@ static int get_async_struct(int line, struct async_struct **ret_info)
  * enables interrupts for a serial port, linking in its async structure into
  * the IRQ chain.   It also performs the serial-specific
  * initialization for the tty structure.
+ *
+ * Note that on failure, we don't decrement the module use count - the tty
+ * later will call rs_close, which will decrement it for us as long as
+ * tty->driver_data is set non-NULL. --rmk
  */
 static int rs_open(struct tty_struct *tty, struct file * filp)
 {
@@ -3141,10 +3186,8 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	}
 	tty->driver_data = info;
 	info->tty = tty;
-	if (serial_paranoia_check(info, tty->device, "rs_open")) {
-		MOD_DEC_USE_COUNT;		
+	if (serial_paranoia_check(info, tty->device, "rs_open"))
 		return -ENODEV;
-	}
 
 #ifdef SERIAL_DEBUG_OPEN
 	printk("rs_open %s%d, count = %d\n", tty->driver.name, info->line,
@@ -3154,12 +3197,13 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	info->tty->low_latency = (info->flags & ASYNC_LOW_LATENCY) ? 1 : 0;
 #endif
 
+	/*
+	 *	This relies on lock_kernel() stuff so wants tidying for 2.5
+	 */
 	if (!tmp_buf) {
 		page = get_zeroed_page(GFP_KERNEL);
-		if (!page) {
-			MOD_DEC_USE_COUNT;
+		if (!page)
 			return -ENOMEM;
-		}
 		if (tmp_buf)
 			free_page(page);
 		else
@@ -3173,7 +3217,6 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	    (info->flags & ASYNC_CLOSING)) {
 		if (info->flags & ASYNC_CLOSING)
 			interruptible_sleep_on(&info->close_wait);
-		MOD_DEC_USE_COUNT;
 #ifdef SERIAL_DO_RESTART
 		return ((info->flags & ASYNC_HUP_NOTIFY) ?
 			-EAGAIN : -ERESTARTSYS);
@@ -3186,10 +3229,8 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	 * Start up serial port
 	 */
 	retval = startup(info);
-	if (retval) {
-		MOD_DEC_USE_COUNT;
+	if (retval)
 		return retval;
-	}
 
 	retval = block_til_ready(tty, filp, info);
 	if (retval) {
@@ -3197,7 +3238,6 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 		printk("rs_open returning after block_til_ready with %d\n",
 		       retval);
 #endif
-		MOD_DEC_USE_COUNT;
 		return retval;
 	}
 
@@ -3236,14 +3276,17 @@ static inline int line_info(char *buf, struct serial_state *state)
 	int	ret;
 	unsigned long flags;
 
+	/*
+	 * Return zero characters for ports not claimed by driver.
+	 */
+	if (state->type == PORT_UNKNOWN) {
+		return 0;	/* ignore unused ports */
+	}
+
 	ret = sprintf(buf, "%d: uart:%s port:%lX irq:%d",
 		      state->line, uart_config[state->type].name, 
-		      state->port, state->irq);
-
-	if (!state->port || (state->type == PORT_UNKNOWN)) {
-		ret += sprintf(buf+ret, "\n");
-		return ret;
-	}
+		      (state->port ? state->port : (long)state->iomem_base),
+		      state->irq);
 
 	/*
 	 * Figure out the current RS-232 lines
@@ -3254,6 +3297,10 @@ static inline int line_info(char *buf, struct serial_state *state)
 		info->magic = SERIAL_MAGIC;
 		info->port = state->port;
 		info->flags = state->flags;
+		info->hub6 = state->hub6;
+		info->io_type = state->io_type;
+		info->iomem_base = state->iomem_base;
+		info->iomem_reg_shift = state->iomem_reg_shift;
 		info->quot = 0;
 		info->tty = 0;
 	}
@@ -3304,8 +3351,8 @@ static inline int line_info(char *buf, struct serial_state *state)
 	return ret;
 }
 
-int rs_read_proc(char *page, char **start, off_t off, int count,
-		 int *eof, void *data)
+static int rs_read_proc(char *page, char **start, off_t off, int count,
+			int *eof, void *data)
 {
 	int i, len = 0, l;
 	off_t	begin = 0;
@@ -3370,6 +3417,10 @@ static char serial_options[] __initdata =
 #endif
 #ifdef ENABLE_SERIAL_PNP
        " ISAPNP"
+#define SERIAL_OPT
+#endif
+#ifdef ENABLE_SERIAL_ACPI
+       " SERIAL_ACPI"
 #define SERIAL_OPT
 #endif
 #ifdef SERIAL_OPT
@@ -3505,7 +3556,7 @@ static void autoconfig_startech_uarts(struct async_struct *info,
 				      struct serial_state *state,
 				      unsigned long flags)
 {
-	unsigned char scratch, scratch2, scratch3;
+	unsigned char scratch, scratch2, scratch3, scratch4;
 
 	/*
 	 * First we check to see if it's an Oxford Semiconductor UART.
@@ -3549,17 +3600,32 @@ static void autoconfig_startech_uarts(struct async_struct *info,
 	 * XR16C854.
 	 * 
 	 */
+
+	/* Save the DLL and DLM */
+
 	serial_outp(info, UART_LCR, UART_LCR_DLAB);
+	scratch3 = serial_inp(info, UART_DLL);
+	scratch4 = serial_inp(info, UART_DLM);
+
 	serial_outp(info, UART_DLL, 0);
 	serial_outp(info, UART_DLM, 0);
-	state->revision = serial_inp(info, UART_DLL);
+	scratch2 = serial_inp(info, UART_DLL);
 	scratch = serial_inp(info, UART_DLM);
 	serial_outp(info, UART_LCR, 0);
+
 	if (scratch == 0x10 || scratch == 0x14) {
+		if (scratch == 0x10)
+			state->revision = scratch2;
 		state->type = PORT_16850;
 		return;
 	}
 
+	/* Restore the DLL and DLM */
+
+	serial_outp(info, UART_LCR, UART_LCR_DLAB);
+	serial_outp(info, UART_DLL, scratch3);
+	serial_outp(info, UART_DLM, scratch4);
+	serial_outp(info, UART_LCR, 0);
 	/*
 	 * We distinguish between the '654 and the '650 by counting
 	 * how many bytes are in the FIFO.  I'm using this for now,
@@ -3695,7 +3761,14 @@ static void autoconfig(struct serial_state * state)
 		/* Check for Startech UART's */
 		serial_outp(info, UART_LCR, UART_LCR_DLAB);
 		if (serial_in(info, UART_EFR) == 0) {
+			serial_outp(info, UART_EFR, 0xA8);
+			if (serial_in(info, UART_EFR) == 0) {
+				/* We are a NS16552D/Motorola
+				 * 8xxx DUART, stop. */
+				goto out;
+			}
 			state->type = PORT_16650;
+			serial_outp(info, UART_EFR, 0);
 		} else {
 			serial_outp(info, UART_LCR, 0xBF);
 			if (serial_in(info, UART_EFR) == 0)
@@ -3744,6 +3817,7 @@ static void autoconfig(struct serial_state * state)
 		}
 	}
 #endif
+out:
 	serial_outp(info, UART_LCR, save_lcr);
 	if (state->type == PORT_16450) {
 		scratch = serial_in(info, UART_SCR);
@@ -3809,7 +3883,7 @@ static struct symbol_table serial_syms = {
 
 #if defined(ENABLE_SERIAL_PCI) || defined(ENABLE_SERIAL_PNP) 
 
-static void __init printk_pnp_dev_id(unsigned short vendor,
+static void __devinit printk_pnp_dev_id(unsigned short vendor,
 				     unsigned short device)
 {
 	printk("%c%c%c%x%x%x%x",
@@ -3861,7 +3935,42 @@ static _INLINE_ int get_pci_port(struct pci_dev *dev,
 			case 6: /* BAR 4*/
 			case 7: base_idx=idx-2; /* BAR 5*/
 		}
+
+	/* Some Titan cards are also a little weird */
+	if (dev->vendor == PCI_VENDOR_ID_TITAN &&
+	    (dev->device == PCI_DEVICE_ID_TITAN_400L ||
+	     dev->device == PCI_DEVICE_ID_TITAN_800L)) {
+		switch (idx) {
+		case 0: base_idx = 1;
+			break;
+		case 1: base_idx = 2;
+			break;
+		default:
+			base_idx = 4;
+			offset = 8 * (idx - 2);
+		}
+		
+	}
   
+	/* HP's Diva chip puts the 4th/5th serial port further out, and
+	 * some serial ports are supposed to be hidden on certain models.
+	 */
+	if (dev->vendor == PCI_VENDOR_ID_HP &&
+			dev->device == PCI_DEVICE_ID_HP_SAS) {
+		switch (dev->subsystem_device) {
+		case 0x104B: /* Maestro */
+			if (idx == 3) idx++;
+			break;
+		case 0x1282: /* Everest / Longs Peak */
+			if (idx > 0) idx++;
+			if (idx > 2) idx++;
+			break;
+		}
+		if (idx > 2) {
+			offset = 0x18;
+		}
+	}
+
 	port =  pci_resource_start(dev, base_idx) + offset;
 
 	if ((board->flags & SPCI_FL_BASE_TABLE) == 0)
@@ -3901,7 +4010,7 @@ static _INLINE_ int get_pci_irq(struct pci_dev *dev,
 /*
  * Common enabler code shared by both PCI and ISAPNP probes
  */
-static void __init start_pci_pnp_board(struct pci_dev *dev,
+static void __devinit start_pci_pnp_board(struct pci_dev *dev,
 				       struct pci_board *board)
 {
 	int k, line;
@@ -3910,20 +4019,15 @@ static void __init start_pci_pnp_board(struct pci_dev *dev,
 
        if (PREPARE_FUNC(dev) && (PREPARE_FUNC(dev))(dev) < 0) {
 	       printk("serial: PNP device '");
-	       printk_pnp_dev_id(board->vendor, board->device);
+	       printk_pnp_dev_id(dev->vendor, dev->device);
 	       printk("' prepare failed\n");
 	       return;
        }
 
        if (ACTIVATE_FUNC(dev) && (ACTIVATE_FUNC(dev))(dev) < 0) {
 	       printk("serial: PNP device '");
-	       printk_pnp_dev_id(board->vendor, board->device);
+	       printk_pnp_dev_id(dev->vendor, dev->device);
 	       printk("' activate failed\n");
-	       return;
-       }
-
-       if (!(board->flags & SPCI_FL_ISPNP) && pci_enable_device(dev)) {
-	       printk("serial: PCI device enable failed\n");
 	       return;
        }
 
@@ -3933,19 +4037,19 @@ static void __init start_pci_pnp_board(struct pci_dev *dev,
 	if (board->init_fn && ((board->init_fn)(dev, board, 1) != 0))
 		return;
 
-#ifdef MODULE
 	/*
 	 * Register the serial board in the array if we need to
-	 * shutdown the board on a module unload.
+	 * shutdown the board on a module unload or card removal
 	 */
 	if (DEACTIVATE_FUNC(dev) || board->init_fn) {
-		if (serial_pci_board_idx >= NR_PCI_BOARDS)
+		for (k=0; k < NR_PCI_BOARDS; k++)
+			if (serial_pci_board[k].dev == 0)
+				break;
+		if (k >= NR_PCI_BOARDS)
 			return;
-		serial_pci_board[serial_pci_board_idx].board = *board;
-		serial_pci_board[serial_pci_board_idx].dev = dev;
-		serial_pci_board_idx++;
+		serial_pci_board[k].board = *board;
+		serial_pci_board[k].dev = dev;
 	}
-#endif
 
 	base_baud = board->base_baud;
 	if (!base_baud)
@@ -3965,6 +4069,7 @@ static void __init start_pci_pnp_board(struct pci_dev *dev,
 		if (line < 0)
 			break;
 		rs_table[line].baud_base = base_baud;
+		rs_table[line].dev = dev;
 	}
 }
 #endif	/* ENABLE_SERIAL_PCI || ENABLE_SERIAL_PNP */
@@ -3976,10 +4081,7 @@ static void __init start_pci_pnp_board(struct pci_dev *dev,
  * seems to be mainly needed on card using the PLX which also use I/O
  * mapped memory.
  */
-static int
-#ifndef MODULE
-__init
-#endif
+static int __devinit
 pci_plx9050_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
 	u8 data, *p, irq_config;
@@ -4038,15 +4140,14 @@ pci_plx9050_fn(struct pci_dev *dev, struct pci_board *board, int enable)
  * interface chip and different configuration methods:
  *     - 10x cards have control registers in IO and/or memory space;
  *     - 20x cards have control registers in standard PCI configuration space.
+ *
+ * SIIG initialization functions exported for use by parport_serial.c module.
  */
 
 #define PCI_DEVICE_ID_SIIG_1S_10x (PCI_DEVICE_ID_SIIG_1S_10x_550 & 0xfffc)
 #define PCI_DEVICE_ID_SIIG_2S_10x (PCI_DEVICE_ID_SIIG_2S_10x_550 & 0xfff8)
 
-static int
-#ifndef MODULE
-__init
-#endif
+int __devinit
 pci_siig10x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
        u16 data, *p;
@@ -4071,14 +4172,12 @@ pci_siig10x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
        iounmap(p);
        return 0;
 }
+EXPORT_SYMBOL(pci_siig10x_fn);
 
 #define PCI_DEVICE_ID_SIIG_2S_20x (PCI_DEVICE_ID_SIIG_2S_20x_550 & 0xfffc)
 #define PCI_DEVICE_ID_SIIG_2S1P_20x (PCI_DEVICE_ID_SIIG_2S1P_20x_550 & 0xfffc)
 
-static int
-#ifndef MODULE
-__init
-#endif
+int __devinit
 pci_siig20x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
        u8 data;
@@ -4097,19 +4196,17 @@ pci_siig20x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
        }
        return 0;
 }
+EXPORT_SYMBOL(pci_siig20x_fn);
 
 /* Added for EKF Intel i960 serial boards */
-static int
-#ifndef MODULE
-__init
-#endif
+static int __devinit
 pci_inteli960ni_fn(struct pci_dev *dev,
 		   struct pci_board *board,
 		   int enable)
 {
 	unsigned long oldval;
 	
-	if (!(board->subdevice & 0x1000))
+	if (!(pci_get_subdevice(dev) & 0x1000))
 		return(-1);
 
 	if (!enable) /* is there something to deinit? */
@@ -4117,7 +4214,7 @@ pci_inteli960ni_fn(struct pci_dev *dev,
    
 #ifdef SERIAL_DEBUG_PCI
 	printk(KERN_DEBUG " Subsystem ID %lx (intel 960)\n",
-	       (unsigned long) board->subdevice);
+	       (unsigned long) dev->subsystem_device);
 #endif
 	/* is firmware started? */
 	pci_read_config_dword(dev, 0x44, (void*) &oldval); 
@@ -4160,10 +4257,7 @@ static struct timedia_struct {
 	{ 0, 0 }
 };
 
-static int
-#ifndef MODULE
-__init
-#endif
+static int __devinit
 pci_timedia_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
 	int	i, j;
@@ -4175,7 +4269,7 @@ pci_timedia_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 	for (i=0; timedia_data[i].num; i++) {
 		ids = timedia_data[i].ids;
 		for (j=0; ids[j]; j++) {
-			if (pci_get_subvendor(dev) == ids[j]) {
+			if (pci_get_subdevice(dev) == ids[j]) {
 				board->num_ports = timedia_data[i].num;
 				return 0;
 			}
@@ -4184,403 +4278,234 @@ pci_timedia_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 	return 0;
 }
 
+/*
+ * HP's Remote Management Console.  The Diva chip came in several
+ * different versions.  N-class, L2000 and A500 have two Diva chips, each
+ * with 3 UARTs (the third UART on the second chip is unused).  Superdome
+ * and Keystone have one Diva chip with 3 UARTs.  Some later machines have
+ * one Diva chip, but it has been expanded to 5 UARTs.
+ */
+static int __devinit
+pci_hp_diva(struct pci_dev *dev, struct pci_board *board, int enable)
+{
+	if (!enable)
+		return 0;
+
+	switch (dev->subsystem_device) {
+	case 0x1049: /* Prelude Diva 1 */
+	case 0x1223: /* Superdome */
+	case 0x1226: /* Keystone */
+	case 0x1282: /* Everest / Longs Peak */
+		board->num_ports = 3;
+		break;
+	case 0x104A: /* Prelude Diva 2 */
+		board->num_ports = 2;
+		break;
+	case 0x104B: /* Maestro */
+		board->num_ports = 4;
+		break;
+	case 0x1227: /* Powerbar */
+		board->num_ports = 1;
+		break;
+	}
+
+	return 0;
+}
+
+static int __devinit
+pci_xircom_fn(struct pci_dev *dev, struct pci_board *board, int enable)
+{
+	__set_current_state(TASK_UNINTERRUPTIBLE);
+	schedule_timeout(HZ/10);
+	return 0;
+}
 
 /*
  * This is the configuration table for all of the PCI serial boards
- * which we support.
+ * which we support.  It is directly indexed by the pci_board_num_t enum
+ * value, which is encoded in the pci_device_id PCI probe table's
+ * driver_data member.
  */
+enum pci_board_num_t {
+	pbn_b0_1_115200,
+	pbn_default = 0,
+
+	pbn_b0_2_115200,
+	pbn_b0_4_115200,
+
+	pbn_b0_1_921600,
+	pbn_b0_2_921600,
+	pbn_b0_4_921600,
+
+	pbn_b0_bt_1_115200,
+	pbn_b0_bt_2_115200,
+	pbn_b0_bt_1_460800,
+	pbn_b0_bt_2_460800,
+	pbn_b0_bt_2_921600,
+
+	pbn_b1_1_115200,
+	pbn_b1_2_115200,
+	pbn_b1_4_115200,
+	pbn_b1_8_115200,
+
+	pbn_b1_2_921600,
+	pbn_b1_4_921600,
+	pbn_b1_8_921600,
+
+	pbn_b1_2_1382400,
+	pbn_b1_4_1382400,
+	pbn_b1_8_1382400,
+
+	pbn_b2_1_115200,
+	pbn_b2_8_115200,
+	pbn_b2_4_460800,
+	pbn_b2_8_460800,
+	pbn_b2_16_460800,
+	pbn_b2_4_921600,
+	pbn_b2_8_921600,
+
+	pbn_b2_bt_1_115200,
+	pbn_b2_bt_2_115200,
+	pbn_b2_bt_4_115200,
+	pbn_b2_bt_2_921600,
+
+	pbn_panacom,
+	pbn_panacom2,
+	pbn_panacom4,
+	pbn_plx_romulus,
+	pbn_oxsemi,
+	pbn_timedia,
+	pbn_intel_i960,
+	pbn_sgi_ioc3,
+	pbn_hp_diva,
+#ifdef CONFIG_DDB5074
+	pbn_nec_nile4,
+#endif
+
+	pbn_dci_pccom4,
+	pbn_dci_pccom8,
+
+	pbn_xircom_combo,
+
+	pbn_siig10x_0,
+	pbn_siig10x_1,
+	pbn_siig10x_2,
+	pbn_siig10x_4,
+	pbn_siig20x_0,
+	pbn_siig20x_2,
+	pbn_siig20x_4,
+	
+	pbn_computone_4,
+	pbn_computone_6,
+	pbn_computone_8,
+};
+
 static struct pci_board pci_boards[] __devinitdata = {
 	/*
-	 * Vendor ID, 	Device ID,
-	 * Subvendor ID,	Subdevice ID,
 	 * PCI Flags, Number of Ports, Base (Maximum) Baud Rate,
 	 * Offset to get to next UART's registers,
 	 * Register shift to use for memory-mapped I/O,
 	 * Initialization function, first UART offset
 	 */
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_232,
-		SPCI_FL_BASE1, 8, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_232,
-		SPCI_FL_BASE1, 4, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_232,
-		SPCI_FL_BASE1, 2, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_232,
-		SPCI_FL_BASE1, 8, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_232,
-		SPCI_FL_BASE1, 4, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_232,
-		SPCI_FL_BASE1, 2, 1382400 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485,
-		SPCI_FL_BASE1, 8, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485_4_4,
-		SPCI_FL_BASE1, 8, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_485,
-		SPCI_FL_BASE1, 4, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_485_2_2,
-		SPCI_FL_BASE1, 4, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_485,
-		SPCI_FL_BASE1, 2, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485_2_6,
-		SPCI_FL_BASE1, 8, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH081101V1,
-		SPCI_FL_BASE1, 8, 921600 },
-	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
-		PCI_SUBVENDOR_ID_CONNECT_TECH,
-		PCI_SUBDEVICE_ID_CONNECT_TECH_BH041101V1,
-		SPCI_FL_BASE1, 4, 921600 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_U530,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 1, 115200 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM2,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM422,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 115200 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM232,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_COMM4,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 115200 },
-	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_COMM8,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 8, 115200 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_GTEK_SERIAL2,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_SPCOM200,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600 },
-	/* VScom SPCOM800, from sl@s.pl */
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_SPCOM800, 
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 8, 921600 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_1077,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 4, 921600 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_KEYSPAN,
-		PCI_SUBDEVICE_ID_KEYSPAN_SX2,
-		SPCI_FL_BASE2, 2, 921600, /* IOMEM */
+
+	/* Generic serial board, pbn_b0_1_115200, pbn_default */
+	{ SPCI_FL_BASE0, 1, 115200 },		/* pbn_b0_1_115200,
+						   pbn_default */
+
+	{ SPCI_FL_BASE0, 2, 115200 },		/* pbn_b0_2_115200 */
+	{ SPCI_FL_BASE0, 4, 115200 },		/* pbn_b0_4_115200 */
+
+	{ SPCI_FL_BASE0, 1, 921600 },		/* pbn_b0_1_921600 */
+	{ SPCI_FL_BASE0, 2, 921600 },		/* pbn_b0_2_921600 */
+	{ SPCI_FL_BASE0, 4, 921600 },		/* pbn_b0_4_921600 */
+
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 1, 115200 }, /* pbn_b0_bt_1_115200 */
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 115200 }, /* pbn_b0_bt_2_115200 */
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 1, 460800 }, /* pbn_b0_bt_1_460800 */
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 460800 }, /* pbn_b0_bt_2_460800 */
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600 }, /* pbn_b0_bt_2_921600 */
+
+	{ SPCI_FL_BASE1, 1, 115200 },		/* pbn_b1_1_115200 */
+	{ SPCI_FL_BASE1, 2, 115200 },		/* pbn_b1_2_115200 */
+	{ SPCI_FL_BASE1, 4, 115200 },		/* pbn_b1_4_115200 */
+	{ SPCI_FL_BASE1, 8, 115200 },		/* pbn_b1_8_115200 */
+
+	{ SPCI_FL_BASE1, 2, 921600 },		/* pbn_b1_2_921600 */
+	{ SPCI_FL_BASE1, 4, 921600 },		/* pbn_b1_4_921600 */
+	{ SPCI_FL_BASE1, 8, 921600 },		/* pbn_b1_8_921600 */
+
+	{ SPCI_FL_BASE1, 2, 1382400 },		/* pbn_b1_2_1382400 */
+	{ SPCI_FL_BASE1, 4, 1382400 },		/* pbn_b1_4_1382400 */
+	{ SPCI_FL_BASE1, 8, 1382400 },		/* pbn_b1_8_1382400 */
+
+	{ SPCI_FL_BASE2, 1, 115200 },		/* pbn_b2_1_115200 */
+	{ SPCI_FL_BASE2, 8, 115200 },		/* pbn_b2_8_115200 */
+	{ SPCI_FL_BASE2, 4, 460800 },		/* pbn_b2_4_460800 */
+	{ SPCI_FL_BASE2, 8, 460800 },		/* pbn_b2_8_460800 */
+	{ SPCI_FL_BASE2, 16, 460800 },		/* pbn_b2_16_460800 */
+	{ SPCI_FL_BASE2, 4, 921600 },		/* pbn_b2_4_921600 */
+	{ SPCI_FL_BASE2, 8, 921600 },		/* pbn_b2_8_921600 */
+
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 1, 115200 }, /* pbn_b2_bt_1_115200 */
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 115200 }, /* pbn_b2_bt_2_115200 */
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 115200 }, /* pbn_b2_bt_4_115200 */
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600 }, /* pbn_b2_bt_2_921600 */
+
+	{ SPCI_FL_BASE2, 2, 921600, /* IOMEM */		   /* pbn_panacom */
 		0x400, 7, pci_plx9050_fn },
-	{	PCI_VENDOR_ID_PANACOM, PCI_DEVICE_ID_PANACOM_QUADMODEM,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,   /* pbn_panacom2 */
 		0x400, 7, pci_plx9050_fn },
-	{	PCI_VENDOR_ID_PANACOM, PCI_DEVICE_ID_PANACOM_DUALMODEM,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,   /* pbn_panacom4 */
 		0x400, 7, pci_plx9050_fn },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
-		PCI_SUBDEVICE_ID_CHASE_PCIFAST4,
-		SPCI_FL_BASE2, 4, 460800 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
-		PCI_SUBDEVICE_ID_CHASE_PCIFAST8,
-		SPCI_FL_BASE2, 8, 460800 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
-		PCI_SUBDEVICE_ID_CHASE_PCIFAST16,
-		SPCI_FL_BASE2, 16, 460800 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
-		PCI_SUBDEVICE_ID_CHASE_PCIFAST16FMC,
-		SPCI_FL_BASE2, 16, 460800 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIRAS,
-		PCI_SUBDEVICE_ID_CHASE_PCIRAS4,
-		SPCI_FL_BASE2, 4, 460800 },
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-		PCI_SUBVENDOR_ID_CHASE_PCIRAS,
-		PCI_SUBDEVICE_ID_CHASE_PCIRAS8,
-		SPCI_FL_BASE2, 8, 460800 },
-	/* Megawolf Romulus PCI Serial Card, from Mike Hudson */
-	/* (Exoray@isys.ca) */
-	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_ROMULUS,
-		0x10b5, 0x106a,
-		SPCI_FL_BASE2, 4, 921600,
+	{ SPCI_FL_BASE2, 4, 921600,			   /* pbn_plx_romulus */
 		0x20, 2, pci_plx9050_fn, 0x03 },
-	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_QSC100,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE1, 4, 115200 },
-	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_DSC100,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE1, 2, 115200 },
-	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_ESC100D,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE1, 8, 115200 },
-	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_ESC100M,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE1, 8, 115200 },
-	{	PCI_VENDOR_ID_SPECIALIX, PCI_DEVICE_ID_OXSEMI_16PCI954,
-		PCI_VENDOR_ID_SPECIALIX, PCI_SUBDEVICE_ID_SPECIALIX_SPEED4,
-		SPCI_FL_BASE0 , 4, 921600 },
-	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI954,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 , 4, 115200 },
-	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI952,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 , 2, 115200 },
 		/* This board uses the size of PCI Base region 0 to
 		 * signal now many ports are available */
-	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI95N,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_REGION_SZ_CAP, 32, 115200 },
-	{	PCI_VENDOR_ID_TIMEDIA, PCI_DEVICE_ID_TIMEDIA_1889,
-		PCI_VENDOR_ID_TIMEDIA, PCI_ANY_ID,
-		SPCI_FL_BASE_TABLE, 1, 921600,
+	{ SPCI_FL_BASE0 | SPCI_FL_REGION_SZ_CAP, 32, 115200 }, /* pbn_oxsemi */
+	{ SPCI_FL_BASE_TABLE, 1, 921600,		   /* pbn_timedia */
 		0, 0, pci_timedia_fn },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_DSERIAL,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUATRO_A,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUATRO_B,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_PORT_PLUS,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 460800 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUAD_A,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 460800 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUAD_B,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 460800 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_SSERIAL,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 1, 115200 },
-	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_PORT_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 1, 460800 },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 460800,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 460800,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 460800,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2, 1, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig10x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_550,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_650,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig20x_fn },
-	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_850,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 4, 921600,
-		0, 0, pci_siig20x_fn },
-	/* Computone devices submitted by Doug McNash dmcnash@computone.com */
-	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
-		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG4,
-		SPCI_FL_BASE0, 4, 921600, /* IOMEM */
-		0x40, 2, NULL, 0x200 },
-	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
-		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG8,
-		SPCI_FL_BASE0, 8, 921600, /* IOMEM */
-		0x40, 2, NULL, 0x200 },
-	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
-		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG6,
-		SPCI_FL_BASE0, 6, 921600, /* IOMEM */
-		0x40, 2, NULL, 0x200 },
-	/* Digitan DS560-558, from jimd@esoft.com */
-	{	PCI_VENDOR_ID_ATT, PCI_DEVICE_ID_ATT_VENUS_MODEM,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE1, 1, 115200 },
-	/* 3Com US Robotics 56k Voice Internal PCI model 5610 */
-	{	PCI_VENDOR_ID_USR, 0x1008,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 115200 },
-	/* Titan Electronic cards */
-	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_100,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 921600 },
-	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_200,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 2, 921600 },
-	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_400,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 4, 921600 },
-	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_800B,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 4, 921600 },
 	/* EKF addition for i960 Boards form EKF with serial port */
-	{	PCI_VENDOR_ID_INTEL, 0x1960,
-		0xE4BF, PCI_ANY_ID,
-		SPCI_FL_BASE0, 32, 921600, /* max 256 ports */
+	{ SPCI_FL_BASE0, 32, 921600, /* max 256 ports */   /* pbn_intel_i960 */
 		8<<2, 2, pci_inteli960ni_fn, 0x10000},
-	/* RAStel 2 port modem, gerg@moreton.com.au */
-	{	PCI_VENDOR_ID_MORETON, PCI_DEVICE_ID_RASTEL_2PORT,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 115200 },
-	/*
-	 * Untested PCI modems, sent in from various folks...
-	 */
-	/* Elsa Model 56K PCI Modem, from Andreas Rath <arh@01019freenet.de> */
-	{	PCI_VENDOR_ID_ROCKWELL, 0x1004,
-		0x1048, 0x1500, 
-		SPCI_FL_BASE1, 1, 115200 },
-	{	PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC3,
-		0xFF00, 0, SPCI_FL_BASE0 | SPCI_FL_IRQRESOURCE,
+	{ SPCI_FL_BASE0 | SPCI_FL_IRQRESOURCE,		   /* pbn_sgi_ioc3 */
 		1, 458333, 0, 0, 0, 0x20178 },
-#if CONFIG_DDB5074
+	{ SPCI_FL_BASE0, 5, 115200, 8, 0, pci_hp_diva, 0},   /* pbn_hp_diva */
+#ifdef CONFIG_DDB5074
 	/*
 	 * NEC Vrc-5074 (Nile 4) builtin UART.
 	 * Conditionally compiled in since this is a motherboard device.
 	 */
-	{	PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NILE4,
-		PCI_ANY_ID, PCI_ANY_ID,
-		SPCI_FL_BASE0, 1, 520833,
+	{ SPCI_FL_BASE0, 1, 520833,			   /* pbn_nec_nile4 */
 		64, 3, NULL, 0x300 },
 #endif
-	/* Generic serial board */
-	{	0, 0,
-		0, 0,
-		SPCI_FL_BASE0, 1, 115200 },
+
+	{SPCI_FL_BASE3, 4, 115200, 8},			   /* pbn_dci_pccom4 */
+	{SPCI_FL_BASE3, 8, 115200, 8},			   /* pbn_dci_pccom8 */
+
+	{ SPCI_FL_BASE0, 1, 115200,			  /* pbn_xircom_combo */
+		0, 0, pci_xircom_fn },
+
+	{ SPCI_FL_BASE2, 1, 460800,			   /* pbn_siig10x_0 */
+		0, 0, pci_siig10x_fn },
+	{ SPCI_FL_BASE2, 1, 921600,			   /* pbn_siig10x_1 */
+		0, 0, pci_siig10x_fn },
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 2, 921600,   /* pbn_siig10x_2 */
+		0, 0, pci_siig10x_fn },
+	{ SPCI_FL_BASE2 | SPCI_FL_BASE_TABLE, 4, 921600,   /* pbn_siig10x_4 */
+		0, 0, pci_siig10x_fn },
+	{ SPCI_FL_BASE0, 1, 921600,			   /* pbn_siix20x_0 */
+		0, 0, pci_siig20x_fn },
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600,   /* pbn_siix20x_2 */
+		0, 0, pci_siig20x_fn },
+	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 4, 921600,   /* pbn_siix20x_4 */
+		0, 0, pci_siig20x_fn },
+
+	{ SPCI_FL_BASE0, 4, 921600, /* IOMEM */		   /* pbn_computone_4 */
+		0x40, 2, NULL, 0x200 },
+	{ SPCI_FL_BASE0, 6, 921600, /* IOMEM */		   /* pbn_computone_6 */
+		0x40, 2, NULL, 0x200 },
+	{ SPCI_FL_BASE0, 8, 921600, /* IOMEM */		   /* pbn_computone_8 */
+		0x40, 2, NULL, 0x200 },
 };
 
 /*
@@ -4588,7 +4513,7 @@ static struct pci_board pci_boards[] __devinitdata = {
  * guess what the configuration might be, based on the pitiful PCI
  * serial specs.  Returns 0 on success, 1 on failure.
  */
-static int _INLINE_ serial_pci_guess_board(struct pci_dev *dev,
+static int __devinit serial_pci_guess_board(struct pci_dev *dev,
 					   struct pci_board *board)
 {
 	int	num_iomem = 0, num_port = 0, first_port = -1;
@@ -4601,7 +4526,8 @@ static int _INLINE_ serial_pci_guess_board(struct pci_dev *dev,
 	 * (Should we try to make guesses for multiport serial devices
 	 * later?) 
 	 */
-	if ((dev->class >> 8) != PCI_CLASS_COMMUNICATION_SERIAL ||
+	if ((((dev->class >> 8) != PCI_CLASS_COMMUNICATION_SERIAL) &&
+	    ((dev->class >> 8) != PCI_CLASS_COMMUNICATION_MODEM)) ||
 	    (dev->class & 0xff) > 6)
 		return 1;
 
@@ -4626,6 +4552,418 @@ static int _INLINE_ serial_pci_guess_board(struct pci_dev *dev,
 	return 1;
 }
 
+static int __devinit serial_init_one(struct pci_dev *dev,
+				     const struct pci_device_id *ent)
+{
+	struct pci_board *board, tmp;
+	int rc;
+
+	board = &pci_boards[ent->driver_data];
+
+	rc = pci_enable_device(dev);
+	if (rc) return rc;
+
+	if (ent->driver_data == pbn_default &&
+	    serial_pci_guess_board(dev, board))
+		return -ENODEV;
+	else if (serial_pci_guess_board(dev, &tmp) == 0) {
+		printk(KERN_INFO "Redundant entry in serial pci_table.  "
+		       "Please send the output of\n"
+		       "lspci -vv, this message (%04x,%04x,%04x,%04x)\n"
+		       "and the manufacturer and name of "
+		       "serial board or modem board\n"
+		       "to serial-pci-info@lists.sourceforge.net.\n",
+		       dev->vendor, dev->device,
+		       pci_get_subvendor(dev), pci_get_subdevice(dev));
+	}
+		       
+	start_pci_pnp_board(dev, board);
+
+	return 0;
+}
+
+static void __devexit serial_remove_one(struct pci_dev *dev)
+{
+	int	i;
+
+	/*
+	 * Iterate through all of the ports finding those that belong
+	 * to this PCI device.
+	 */
+	for(i = 0; i < NR_PORTS; i++) {
+		if (rs_table[i].dev != dev)
+			continue;
+		unregister_serial(i);
+		rs_table[i].dev = 0;
+	}
+	/*
+	 * Now execute any board-specific shutdown procedure
+	 */
+	for (i=0; i < NR_PCI_BOARDS; i++) {
+		struct pci_board_inst *brd = &serial_pci_board[i];
+
+		if (serial_pci_board[i].dev != dev)
+			continue;
+		if (brd->board.init_fn)
+			(brd->board.init_fn)(brd->dev, &brd->board, 0);
+		if (DEACTIVATE_FUNC(brd->dev))
+			(DEACTIVATE_FUNC(brd->dev))(brd->dev);
+		serial_pci_board[i].dev = 0;
+	}
+}
+
+
+static struct pci_device_id serial_pci_tbl[] __devinitdata = {
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_232, 0, 0,
+		pbn_b1_8_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_232, 0, 0,
+		pbn_b1_4_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_232, 0, 0,
+		pbn_b1_2_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_232, 0, 0,
+		pbn_b1_8_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_232, 0, 0,
+		pbn_b1_4_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_232, 0, 0,
+		pbn_b1_2_1382400 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485, 0, 0,
+		pbn_b1_8_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485_4_4, 0, 0,
+		pbn_b1_8_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_485, 0, 0,
+		pbn_b1_4_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH4_485_2_2, 0, 0,
+		pbn_b1_4_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH2_485, 0, 0,
+		pbn_b1_2_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_485_2_6, 0, 0,
+		pbn_b1_8_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH081101V1, 0, 0,
+		pbn_b1_8_921600 },
+	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V351,
+		PCI_SUBVENDOR_ID_CONNECT_TECH,
+		PCI_SUBDEVICE_ID_CONNECT_TECH_BH041101V1, 0, 0,
+		pbn_b1_4_921600 },
+
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_U530,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_bt_1_115200 },
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM2,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_bt_2_115200 },
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM422,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_bt_4_115200 },
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_UCOMM232,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_bt_2_115200 },
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_COMM4,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_bt_4_115200 },
+	{	PCI_VENDOR_ID_SEALEVEL, PCI_DEVICE_ID_SEALEVEL_COMM8,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_8_115200 },
+
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_GTEK_SERIAL2,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b2_bt_2_115200 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_SPCOM200,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b2_bt_2_921600 },
+	/* VScom SPCOM800, from sl@s.pl */
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_SPCOM800, 
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_8_921600 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_1077,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b2_4_921600 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_KEYSPAN,
+		PCI_SUBDEVICE_ID_KEYSPAN_SX2, 0, 0,
+		pbn_panacom },
+	{	PCI_VENDOR_ID_PANACOM, PCI_DEVICE_ID_PANACOM_QUADMODEM,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_panacom4 },
+	{	PCI_VENDOR_ID_PANACOM, PCI_DEVICE_ID_PANACOM_DUALMODEM,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_panacom2 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
+		PCI_SUBDEVICE_ID_CHASE_PCIFAST4, 0, 0, 
+		pbn_b2_4_460800 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
+		PCI_SUBDEVICE_ID_CHASE_PCIFAST8, 0, 0, 
+		pbn_b2_8_460800 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
+		PCI_SUBDEVICE_ID_CHASE_PCIFAST16, 0, 0, 
+		pbn_b2_16_460800 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIFAST,
+		PCI_SUBDEVICE_ID_CHASE_PCIFAST16FMC, 0, 0, 
+		pbn_b2_16_460800 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIRAS,
+		PCI_SUBDEVICE_ID_CHASE_PCIRAS4, 0, 0, 
+		pbn_b2_4_460800 },
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
+		PCI_SUBVENDOR_ID_CHASE_PCIRAS,
+		PCI_SUBDEVICE_ID_CHASE_PCIRAS8, 0, 0, 
+		pbn_b2_8_460800 },
+	/* Megawolf Romulus PCI Serial Card, from Mike Hudson */
+	/* (Exoray@isys.ca) */
+	{	PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_ROMULUS,
+		0x10b5, 0x106a, 0, 0,
+		pbn_plx_romulus },
+	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_QSC100,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b1_4_115200 },
+	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_DSC100,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b1_2_115200 },
+	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_ESC100D,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b1_8_115200 },
+	{	PCI_VENDOR_ID_QUATECH, PCI_DEVICE_ID_QUATECH_ESC100M,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b1_8_115200 },
+	{	PCI_VENDOR_ID_SPECIALIX, PCI_DEVICE_ID_OXSEMI_16PCI954,
+		PCI_VENDOR_ID_SPECIALIX, PCI_SUBDEVICE_ID_SPECIALIX_SPEED4, 0, 0, 
+		pbn_b0_4_921600 },
+	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI954,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_4_115200 },
+	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI952,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_bt_2_921600 },
+
+	/* Digitan DS560-558, from jimd@esoft.com */
+	{	PCI_VENDOR_ID_ATT, PCI_DEVICE_ID_ATT_VENUS_MODEM,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b1_1_115200 },
+
+	/* 3Com US Robotics 56k Voice Internal PCI model 5610 */
+	{	PCI_VENDOR_ID_USR, 0x1008,
+		PCI_ANY_ID, PCI_ANY_ID, },
+
+	/* Titan Electronic cards */
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_100,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_1_921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_200,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_2_921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_400,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_4_921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_800B,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
+		pbn_b0_4_921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_100L,
+		PCI_ANY_ID, PCI_ANY_ID,
+		SPCI_FL_BASE1, 1, 921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_200L,
+		PCI_ANY_ID, PCI_ANY_ID,
+		SPCI_FL_BASE1 | SPCI_FL_BASE_TABLE, 2, 921600 },
+	/* The 400L and 800L have a custom hack in get_pci_port */
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_400L,
+		PCI_ANY_ID, PCI_ANY_ID,
+		SPCI_FL_BASE_TABLE, 4, 921600 },
+	{	PCI_VENDOR_ID_TITAN, PCI_DEVICE_ID_TITAN_800L,
+		PCI_ANY_ID, PCI_ANY_ID,
+		SPCI_FL_BASE_TABLE, 8, 921600 },
+
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_4 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_4 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_4 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_4 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_4 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_4 },
+
+	/* Computone devices submitted by Doug McNash dmcnash@computone.com */
+	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
+		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG4,
+		0, 0, pbn_computone_4 },
+	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
+		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG8,
+		0, 0, pbn_computone_8 },
+	{	PCI_VENDOR_ID_COMPUTONE, PCI_DEVICE_ID_COMPUTONE_PG,
+		PCI_SUBVENDOR_ID_COMPUTONE, PCI_SUBDEVICE_ID_COMPUTONE_PG6,
+		0, 0, pbn_computone_6 },
+
+	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI95N,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, pbn_oxsemi },
+	{	PCI_VENDOR_ID_TIMEDIA, PCI_DEVICE_ID_TIMEDIA_1889,
+		PCI_VENDOR_ID_TIMEDIA, PCI_ANY_ID, 0, 0, pbn_timedia },
+
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_DSERIAL,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_115200 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUATRO_A,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_115200 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUATRO_B,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_115200 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_PORT_PLUS,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_460800 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUAD_A,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_460800 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_QUAD_B,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_2_460800 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_SSERIAL,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_1_115200 },
+	{	PCI_VENDOR_ID_LAVA, PCI_DEVICE_ID_LAVA_PORT_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b0_bt_1_460800 },
+
+	/* RAStel 2 port modem, gerg@moreton.com.au */
+	{	PCI_VENDOR_ID_MORETON, PCI_DEVICE_ID_RASTEL_2PORT,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b2_bt_2_115200 },
+
+	/* EKF addition for i960 Boards form EKF with serial port */
+	{	PCI_VENDOR_ID_INTEL, 0x1960,
+		0xE4BF, PCI_ANY_ID, 0, 0,
+		pbn_intel_i960 },
+
+	/* Xircom Cardbus/Ethernet combos */
+	{	PCI_VENDOR_ID_XIRCOM, PCI_DEVICE_ID_XIRCOM_X3201_MDM,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_xircom_combo },
+
+	/*
+	 * Untested PCI modems, sent in from various folks...
+	 */
+
+	/* Elsa Model 56K PCI Modem, from Andreas Rath <arh@01019freenet.de> */
+	{	PCI_VENDOR_ID_ROCKWELL, 0x1004,
+		0x1048, 0x1500, 0, 0,
+		pbn_b1_1_115200 },
+
+	{	PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC3,
+		0xFF00, 0, 0, 0,
+		pbn_sgi_ioc3 },
+
+	/* HP Diva card */
+	{	PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_SAS,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_hp_diva },
+	{	PCI_VENDOR_ID_HP, 0x1290,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_b2_1_115200 },
+
+#ifdef CONFIG_DDB5074
+	/*
+	 * NEC Vrc-5074 (Nile 4) builtin UART.
+	 * Conditionally compiled in since this is a motherboard device.
+	 */
+	{	PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NILE4,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_nec_nile4 },
+#endif
+
+	{	PCI_VENDOR_ID_DCI, PCI_DEVICE_ID_DCI_PCCOM4,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_dci_pccom4 },
+	{	PCI_VENDOR_ID_DCI, PCI_DEVICE_ID_DCI_PCCOM8,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_dci_pccom8 },
+
+       { PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+	 PCI_CLASS_COMMUNICATION_SERIAL << 8, 0xffff00, },
+       { PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
+	 PCI_CLASS_COMMUNICATION_MODEM << 8, 0xffff00, },
+       { 0, }
+};
+
+MODULE_DEVICE_TABLE(pci, serial_pci_tbl);
+
+static struct pci_driver serial_pci_driver = {
+       name:           "serial",
+       probe:          serial_init_one,
+       remove:	       __devexit_p(serial_remove_one),
+       id_table:       serial_pci_tbl,
+};
 
 
 /*
@@ -4635,38 +4973,19 @@ static int _INLINE_ serial_pci_guess_board(struct pci_dev *dev,
  * Accept a maximum of eight boards
  *
  */
-static void __init probe_serial_pci(void) 
+static void __devinit probe_serial_pci(void) 
 {
-	struct pci_dev *dev = NULL;
-	struct pci_board *board;
-
 #ifdef SERIAL_DEBUG_PCI
 	printk(KERN_DEBUG "Entered probe_serial_pci()\n");
 #endif
-  
-	pci_for_each_dev(dev) {
-		for (board = pci_boards; board->vendor; board++) {
-			if (board->vendor != (unsigned short) PCI_ANY_ID &&
-			    dev->vendor != board->vendor)
-				continue;
-			if (board->device != (unsigned short) PCI_ANY_ID &&
-			    dev->device != board->device)
-				continue;
-			if (board->subvendor != (unsigned short) PCI_ANY_ID &&
-			    pci_get_subvendor(dev) != board->subvendor)
-				continue;
-			if (board->subdevice != (unsigned short) PCI_ANY_ID &&
-			    pci_get_subdevice(dev) != board->subdevice)
-				continue;
-			break;
-		}
-	
-		if (board->vendor == 0 && serial_pci_guess_board(dev, board))
-			continue;
-		
-		start_pci_pnp_board(dev, board);
-	}
-	
+
+	/* Register call PCI serial devices.  Null out
+	 * the driver name upon failure, as a signal
+	 * not to attempt to unregister the driver later
+	 */
+	if (pci_module_init (&serial_pci_driver) != 0)
+		serial_pci_driver.name = "";
+
 #ifdef SERIAL_DEBUG_PCI
 	printk(KERN_DEBUG "Leaving probe_serial_pci() (probe finished)\n");
 #endif
@@ -4682,7 +5001,7 @@ struct pnp_board {
 	unsigned short device;
 };
 
-static struct pnp_board pnp_devices[] __initdata = {
+static struct pnp_board pnp_devices[] __devinitdata = {
 	/* Archtek America Corp. */
 	/* Archtek SmartLink Modem 3334BT Plug & Play */
 	{	ISAPNP_VENDOR('A', 'A', 'C'), ISAPNP_DEVICE(0x000F) },
@@ -4954,7 +5273,7 @@ static struct pnp_board pnp_devices[] __initdata = {
 	{	0, }
 };
 
-static void inline avoid_irq_share(struct pci_dev *dev)
+static inline void avoid_irq_share(struct pci_dev *dev)
 {
 	int i, map = 0x1FF8;
 	struct serial_state *state = rs_table;
@@ -4972,14 +5291,14 @@ static void inline avoid_irq_share(struct pci_dev *dev)
 			irq->map = map;
 }
 
-static char *modem_names[] __initdata = {
+static char *modem_names[] __devinitdata = {
        "MODEM", "Modem", "modem", "FAX", "Fax", "fax",
        "56K", "56k", "K56", "33.6", "28.8", "14.4",
        "33,600", "28,800", "14,400", "33.600", "28.800", "14.400",
        "33600", "28800", "14400", "V.90", "V.34", "V.32", 0
 };
 
-static int __init check_name(char *name)
+static int __devinit check_name(char *name)
 {
        char **tmp = modem_names;
 
@@ -4991,7 +5310,7 @@ static int __init check_name(char *name)
        return 0;
 }
 
-static int inline check_compatible_id(struct pci_dev *dev)
+static inline int check_compatible_id(struct pci_dev *dev)
 {
        int i;
        for (i = 0; i < DEVICE_COUNT_COMPATIBLE; i++)
@@ -5041,7 +5360,7 @@ static int _INLINE_ serial_pnp_guess_board(struct pci_dev *dev,
        return 1;
 }
 
-static void __init probe_serial_pnp(void)
+static void __devinit probe_serial_pnp(void)
 {
        struct pci_dev *dev = NULL;
        struct pnp_board *pnp_board;
@@ -5072,11 +5391,9 @@ static void __init probe_serial_pnp(void)
 			       break;
 
 	       if (pnp_board->vendor) {
-		       board.vendor = pnp_board->vendor;
-		       board.device = pnp_board->device;
 		       /* Special case that's more efficient to hardcode */
-		       if ((board.vendor == ISAPNP_VENDOR('A', 'K', 'Y') &&
-			    board.device == ISAPNP_DEVICE(0x1021)))
+		       if ((pnp_board->vendor == ISAPNP_VENDOR('A', 'K', 'Y') &&
+			    pnp_board->device == ISAPNP_DEVICE(0x1021)))
 			       board.flags |= SPCI_FL_NO_SHIRQ;
 	       } else {
 		       if (serial_pnp_guess_board(dev, &board))
@@ -5145,6 +5462,7 @@ static int __init rs_init(void)
 #endif
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64 + SERIAL_DEV_OFFSET;
+	serial_driver.name_base = SERIAL_DEV_OFFSET;
 	serial_driver.num = NR_PORTS;
 	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
 	serial_driver.subtype = SERIAL_TYPE_NORMAL;
@@ -5222,6 +5540,10 @@ static int __init rs_init(void)
 			state->io_type = SERIAL_IO_HUB6;
 		if (state->port && check_region(state->port,8))
 			continue;
+#ifdef CONFIG_MCA			
+		if ((state->flags & ASYNC_BOOT_ONLYMCA) && !MCA_bus)
+			continue;
+#endif			
 		if (state->flags & ASYNC_BOOT_AUTOCONF)
 			autoconfig(state);
 	}
@@ -5230,13 +5552,22 @@ static int __init rs_init(void)
 			continue;
 		if (   (state->flags & ASYNC_BOOT_AUTOCONF)
 		    && (state->flags & ASYNC_AUTO_IRQ)
-		    && (state->port != 0))
+		    && (state->port != 0 || state->iomem_base != 0))
 			state->irq = detect_uart_irq(state);
-		printk(KERN_INFO "ttyS%02d%s at 0x%04lx (irq = %d) is a %s\n",
-		       state->line + SERIAL_DEV_OFFSET,
-		       (state->flags & ASYNC_FOURPORT) ? " FourPort" : "",
-		       state->port, state->irq,
-		       uart_config[state->type].name);
+		if (state->io_type == SERIAL_IO_MEM) {
+			printk(KERN_INFO"ttyS%02d%s at 0x%p (irq = %d) is a %s\n",
+	 		       state->line + SERIAL_DEV_OFFSET,
+			       (state->flags & ASYNC_FOURPORT) ? " FourPort" : "",
+			       state->iomem_base, state->irq,
+			       uart_config[state->type].name);
+		}
+		else {
+			printk(KERN_INFO "ttyS%02d%s at 0x%04lx (irq = %d) is a %s\n",
+	 		       state->line + SERIAL_DEV_OFFSET,
+			       (state->flags & ASYNC_FOURPORT) ? " FourPort" : "",
+			       state->port, state->irq,
+			       uart_config[state->type].name);
+		}
 		tty_register_devfs(&serial_driver, 0,
 				   serial_driver.minor_start + state->line);
 		tty_register_devfs(&callout_driver, 0,
@@ -5249,6 +5580,36 @@ static int __init rs_init(void)
        probe_serial_pnp();
 #endif
 	return 0;
+}
+
+/*
+ * This is for use by architectures that know their serial console 
+ * attributes only at run time. Not to be invoked after rs_init().
+ */
+int __init early_serial_setup(struct serial_struct *req)
+{
+	int i = req->line;
+
+	if (i >= NR_IRQS)
+		return(-ENOENT);
+	rs_table[i].magic = 0;
+	rs_table[i].baud_base = req->baud_base;
+	rs_table[i].port = req->port;
+	if (HIGH_BITS_OFFSET)
+		rs_table[i].port += (unsigned long) req->port_high << 
+							HIGH_BITS_OFFSET;
+	rs_table[i].irq = req->irq;
+	rs_table[i].flags = req->flags;
+	rs_table[i].close_delay = req->close_delay;
+	rs_table[i].io_type = req->io_type;
+	rs_table[i].hub6 = req->hub6;
+	rs_table[i].iomem_base = req->iomem_base;
+	rs_table[i].iomem_reg_shift = req->iomem_reg_shift;
+	rs_table[i].type = req->type;
+	rs_table[i].xmit_fifo_size = req->xmit_fifo_size;
+	rs_table[i].custom_divisor = req->custom_divisor;
+	rs_table[i].closing_wait = req->closing_wait;
+	return(0);
 }
 
 /*
@@ -5288,6 +5649,14 @@ int register_serial(struct serial_struct *req)
 		    (rs_table[i].iomem_base == req->iomem_base))
 			break;
 	}
+#ifdef __i386__
+	if (i == NR_PORTS) {
+		for (i = 4; i < NR_PORTS; i++)
+			if ((rs_table[i].type == PORT_UNKNOWN) &&
+			    (rs_table[i].count == 0))
+				break;
+	}
+#endif
 	if (i == NR_PORTS) {
 		for (i = 0; i < NR_PORTS; i++)
 			if ((rs_table[i].type == PORT_UNKNOWN) &&
@@ -5361,7 +5730,7 @@ void unregister_serial(int line)
 	if (state->info && state->info->tty)
 		tty_hangup(state->info->tty);
 	state->type = PORT_UNKNOWN;
-	printk(KERN_INFO "tty%02d unloaded\n", state->line);
+	printk(KERN_INFO "ttyS%02d unloaded\n", state->line);
 	/* These will be hidden, because they are devices that will no longer
 	 * be available to the system. (ie, PCMCIA modems, once ejected)
 	 */
@@ -5411,12 +5780,13 @@ static void __exit rs_fini(void)
 #endif
 	}
 #if defined(ENABLE_SERIAL_PCI) || defined(ENABLE_SERIAL_PNP)
-	for (i=0; i < serial_pci_board_idx; i++) {
+	for (i=0; i < NR_PCI_BOARDS; i++) {
 		struct pci_board_inst *brd = &serial_pci_board[i];
-		
+
+		if (serial_pci_board[i].dev == 0)
+			continue;
 		if (brd->board.init_fn)
 			(brd->board.init_fn)(brd->dev, &brd->board, 0);
-
 		if (DEACTIVATE_FUNC(brd->dev))
 			(DEACTIVATE_FUNC(brd->dev))(brd->dev);
 	}
@@ -5426,12 +5796,18 @@ static void __exit rs_fini(void)
 		tmp_buf = NULL;
 		free_page(pg);
 	}
+	
+#ifdef ENABLE_SERIAL_PCI
+	if (serial_pci_driver.name[0])
+		pci_unregister_driver (&serial_pci_driver);
+#endif
 }
 
 module_init(rs_init);
 module_exit(rs_fini);
 MODULE_DESCRIPTION("Standard/generic (dumb) serial driver");
 MODULE_AUTHOR("Theodore Ts'o <tytso@mit.edu>");
+MODULE_LICENSE("GPL");
 
 
 /*
@@ -5461,6 +5837,13 @@ static inline void wait_for_xmitr(struct async_struct *info)
 		if (--tmout == 0)
 			break;
 	} while((status & BOTH_EMPTY) != BOTH_EMPTY);
+
+	/* Wait for flow control if necessary */
+	if (info->flags & ASYNC_CONS_FLOW) {
+		tmout = 1000000;
+		while (--tmout &&
+		       ((serial_in(info, UART_MSR) & UART_MSR_CTS) == 0));
+	}	
 }
 
 
@@ -5468,7 +5851,7 @@ static inline void wait_for_xmitr(struct async_struct *info)
  *	Print a string to the serial port trying not to disturb
  *	any possible real use of the port...
  *
- *	The console_lock must be held when we get here.
+ *	The console must be locked when we get here.
  */
 static void serial_console_write(struct console *co, const char *s,
 				unsigned count)
@@ -5508,42 +5891,13 @@ static void serial_console_write(struct console *co, const char *s,
 	serial_out(info, UART_IER, ier);
 }
 
-/*
- *	Receive character from the serial port
- */
-static int serial_console_wait_key(struct console *co)
-{
-	static struct async_struct *info;
-	int ier, c;
-
-	info = &async_sercons;
-
-	/*
-	 *	First save the IER then disable the interrupts so
-	 *	that the real driver for the port does not get the
-	 *	character.
-	 */
-	ier = serial_in(info, UART_IER);
-	serial_out(info, UART_IER, 0x00);
- 
-	while ((serial_in(info, UART_LSR) & UART_LSR_DR) == 0);
-	c = serial_in(info, UART_RX);
-
-	/*
-	 *	Restore the interrupts
-	 */
-	serial_out(info, UART_IER, ier);
-
-	return c;
-}
-
 static kdev_t serial_console_device(struct console *c)
 {
 	return MKDEV(TTY_MAJOR, 64 + c->index);
 }
 
 /*
- *	Setup initial baud/bits/parity. We do two things here:
+ *	Setup initial baud/bits/parity/flow control. We do two things here:
  *	- construct a cflag setting for the first rs_open()
  *	- initialize the serial port
  *	Return non-zero if we didn't find a serial port.
@@ -5556,6 +5910,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 	int	baud = 9600;
 	int	bits = 8;
 	int	parity = 'n';
+	int	doflow = 0;
 	int	cflag = CREAD | HUPCL | CLOCAL;
 	int	quot = 0;
 	char	*s;
@@ -5566,7 +5921,8 @@ static int __init serial_console_setup(struct console *co, char *options)
 		while(*s >= '0' && *s <= '9')
 			s++;
 		if (*s) parity = *s++;
-		if (*s) bits   = *s - '0';
+		if (*s) bits   = *s++ - '0';
+		if (*s) doflow = (*s++ == 'r');
 	}
 
 	/*
@@ -5597,6 +5953,10 @@ static int __init serial_console_setup(struct console *co, char *options)
 		case 9600:
 		default:
 			cflag |= B9600;
+			/*
+			 * Set this to a sane value to prevent a divide error
+			 */
+			baud  = 9600;
 			break;
 	}
 	switch(bits) {
@@ -5622,6 +5982,8 @@ static int __init serial_console_setup(struct console *co, char *options)
 	 *	Divisor, bytesize and parity
 	 */
 	state = rs_table + co->index;
+	if (doflow)
+		state->flags |= ASYNC_CONS_FLOW;
 	info = &async_sercons;
 	info->magic = SERIAL_MAGIC;
 	info->state = state;
@@ -5669,7 +6031,6 @@ static struct console sercons = {
 	name:		"ttyS",
 	write:		serial_console_write,
 	device:		serial_console_device,
-	wait_key:	serial_console_wait_key,
 	setup:		serial_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

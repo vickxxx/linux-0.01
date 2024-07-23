@@ -59,7 +59,7 @@
 #include <linux/mm.h>
 #include <linux/major.h>
 #include <linux/blk.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <scsi/scsi.h> /* for SCSI_IOCTL_GET_IDLUN */
 typedef void Scsi_Device; /* hack to avoid including scsi.h */
@@ -292,9 +292,6 @@ static char pa_med_rem_cmd[6] = { 0x1e, 0, 0, 0, 0, 0 };
 		cmd[4] = (len);							\
 	} while(0)
 
-#define min(a,b)	(((a)<(b))?(a):(b))
-
-
 /* ACSI errors (from REQUEST SENSE); There are two tables, one for the
  * old Atari disks and one for SCSI on ACSI disks.
  */
@@ -377,7 +374,9 @@ static int acsi_revalidate (dev_t);
 /************************* End of Prototypes **************************/
 
 
-struct timer_list acsi_timer = { NULL, NULL, 0, 0, acsi_times_out };
+struct timer_list acsi_timer = {
+    function:	acsi_times_out
+};
 
 
 #ifdef CONFIG_ATARI_SLM
@@ -1137,10 +1136,8 @@ static int acsi_ioctl( struct inode *inode, struct file *file,
 		put_user( 0, &((Scsi_Idlun *) arg)->host_unique_id );
 		return 0;
 		
-	  case BLKGETSIZE:   /* Return device size */
-		return put_user(acsi_part[MINOR(inode->i_rdev)].nr_sects,
-				(long *) arg);
-
+	  case BLKGETSIZE:
+	  case BLKGETSIZE64:
 	  case BLKROSET:
 	  case BLKROGET:
 	  case BLKFLSBUF:
@@ -1195,7 +1192,6 @@ static int acsi_open( struct inode * inode, struct file * filp )
 		acsi_prevent_removal(device, 1);
 	}
 	access_count[device]++;
-	MOD_INC_USE_COUNT;
 
 	if (filp && filp->f_mode) {
 		check_disk_change( inode->i_rdev );
@@ -1220,7 +1216,6 @@ static int acsi_release( struct inode * inode, struct file * file )
 	int device = DEVICE_NR(MINOR(inode->i_rdev));
 	if (--access_count[device] == 0 && acsi_info[device].removable)
 		acsi_prevent_removal(device, 0);
-	MOD_DEC_USE_COUNT;
 	return( 0 );
 }
 
@@ -1389,16 +1384,14 @@ static int acsi_mode_sense( int target, int lun, SENSE_DATA *sd )
 extern struct block_device_operations acsi_fops;
 
 static struct gendisk acsi_gendisk = {
-	MAJOR_NR,		/* Major number */	
-	"ad",			/* Major name */
-	4,			/* Bits to shift to get real from partition */
-	1 << 4,			/* Number of partitions per real */
-	acsi_part,		/* hd struct */
-	acsi_sizes,		/* block sizes */
-	0,			/* number */
-	(void *)acsi_info,	/* internal */
-	NULL,			/* next */
-	&acsi_fops,		/* file operations */
+	major:		MAJOR_NR,
+	major_name:	"ad",
+	minor_shift:	4,
+	max_p:		1 << 4,
+	part:		acsi_part,
+	sizes:		acsi_sizes,
+	real_devices:	(void *)acsi_info,
+	fops:		&acsi_fops,
 };
 	
 #define MAX_SCSI_DEVICE_CODE 10
@@ -1658,6 +1651,7 @@ int SLM_devices[8];
 #endif
 
 static struct block_device_operations acsi_fops = {
+	owner:			THIS_MODULE,
 	open:			acsi_open,
 	release:		acsi_release,
 	ioctl:			acsi_ioctl,
@@ -1795,8 +1789,7 @@ int acsi_init( void )
 	
 	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;		/* 8 sector (4kB) read-ahead */
-	acsi_gendisk.next = gendisk_head;
-	gendisk_head = &acsi_gendisk;
+	add_gendisk(&acsi_gendisk);
 
 #ifdef CONFIG_ATARI_SLM
 	err = slm_init();
@@ -1808,6 +1801,9 @@ int acsi_init( void )
 
 
 #ifdef MODULE
+
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
 	int err;
@@ -1820,8 +1816,6 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	struct gendisk ** gdp;
-
 	del_timer( &acsi_timer );
 	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	atari_stram_free( acsi_buffer );
@@ -1829,13 +1823,7 @@ void cleanup_module(void)
 	if (devfs_unregister_blkdev( MAJOR_NR, "ad" ) != 0)
 		printk( KERN_ERR "acsi: cleanup_module failed\n");
 
-	for (gdp = &gendisk_head; *gdp; gdp = &((*gdp)->next))
-		if (*gdp == &acsi_gendisk)
-			break;
-	if (!*gdp)
-		printk( KERN_ERR "acsi: entry in disk chain missing!\n" );
-	else
-		*gdp = (*gdp)->next;
+	del_gendisk(&acsi_gendisk);
 }
 #endif
 
@@ -1886,13 +1874,7 @@ static int revalidate_acsidisk( int dev, int maxusage )
 
 	for( i = max_p - 1; i >= 0 ; i-- ) {
 		if (gdev->part[start + i].nr_sects != 0) {
-			kdev_t devp = MKDEV(MAJOR_NR, start + i);
-			struct super_block *sb = get_super(devp);
-
-			fsync_dev(devp);
-			if (sb)
-				invalidate_inodes(sb);
-			invalidate_buffers(devp);
+			invalidate_device(MKDEV(MAJOR_NR, start + i), 1);
 			gdev->part[start + i].nr_sects = 0;
 		}
 		gdev->part[start+i].start_sect = 0;

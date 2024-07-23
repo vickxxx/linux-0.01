@@ -1,7 +1,7 @@
 /*
- * $Id: input.c,v 1.7 2000/05/28 17:31:36 vojtech Exp $
+ * $Id: input.c,v 1.20 2001/05/17 15:50:27 vojtech Exp $
  *
- *  Copyright (c) 1999-2000 Vojtech Pavlik
+ *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
  *  The input layer module itself
  *
@@ -37,6 +37,8 @@
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_DESCRIPTION("Input layer module");
+MODULE_LICENSE("GPL");
+
 
 EXPORT_SYMBOL(input_register_device);
 EXPORT_SYMBOL(input_unregister_device);
@@ -124,6 +126,15 @@ void input_event(struct input_dev *dev, unsigned int type, unsigned int code, in
 
 			break;
 
+		case EV_MSC:
+
+			if (code > MSC_MAX || !test_bit(code, dev->mscbit))
+				return;
+
+			if (dev->event) dev->event(dev, type, code, value);	
+	
+			break;
+
 		case EV_LED:
 	
 			if (code > LED_MAX || !test_bit(code, dev->ledbit) || !!test_bit(code, dev->led) == value)
@@ -152,14 +163,11 @@ void input_event(struct input_dev *dev, unsigned int type, unsigned int code, in
 			if (dev->event) dev->event(dev, type, code, value);
 
 			break;
-	}
-/*
- * Add randomness.
- */
 
-#if 0 /* BUG */
-	add_input_randomness(((unsigned long) dev) ^ (type << 24) ^ (code << 16) ^ value);
-#endif
+		case EV_FF:
+			if (dev->event) dev->event(dev, type, code, value);
+			break;
+	}
 
 /*
  * Distribute the event to handler modules.
@@ -414,7 +422,7 @@ void input_unregister_minor(devfs_handle_t handle)
 static int __init input_init(void)
 {
 	if (devfs_register_chrdev(INPUT_MAJOR, "input", &input_fops)) {
-		printk(KERN_ERR "input: unable to register char major %d", INPUT_MAJOR);
+		printk(KERN_ERR "input: unable to register char major %d\n", INPUT_MAJOR);
 		return -EBUSY;
 	}
 	input_devfs_handle = devfs_mk_dir(NULL, "input", NULL);

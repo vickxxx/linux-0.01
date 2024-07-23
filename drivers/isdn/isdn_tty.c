@@ -1,30 +1,17 @@
-/* $Id: isdn_tty.c,v 1.94 2000/11/25 17:00:59 kai Exp $
-
+/* $Id: isdn_tty.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+ *
  * Linux ISDN subsystem, tty functions and AT-command emulator (linklevel).
  *
  * Copyright 1994-1999  by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1995,96    by Thinking Objects Software GmbH Wuerzburg
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 #undef ISDN_TTY_STAT_DEBUG
 
-#define __NO_VERSION__
 #include <linux/config.h>
-#include <linux/module.h>
 #include <linux/isdn.h>
 #include "isdn_common.h"
 #include "isdn_tty.h"
@@ -66,7 +53,7 @@ static int bit2si[8] =
 static int si2bit[8] =
 {4, 1, 4, 4, 4, 4, 4, 4};
 
-char *isdn_tty_revision = "$Revision: 1.94 $";
+char *isdn_tty_revision = "$Revision: 1.1.4.1 $";
 
 
 /* isdn_tty_try_read() is called from within isdn_tty_rcv_skb()
@@ -307,18 +294,13 @@ isdn_tty_rcv_skb(int i, int di, int channel, struct sk_buff *skb)
 void
 isdn_tty_cleanup_xmit(modem_info * info)
 {
-	struct sk_buff *skb;
 	unsigned long flags;
 
 	save_flags(flags);
 	cli();
-	if (skb_queue_len(&info->xmit_queue))
-		while ((skb = skb_dequeue(&info->xmit_queue)))
-			kfree_skb(skb);
+	skb_queue_purge(&info->xmit_queue);
 #ifdef CONFIG_ISDN_AUDIO
-	if (skb_queue_len(&info->dtmf_queue))
-		while ((skb = skb_dequeue(&info->dtmf_queue)))
-			kfree_skb(skb);
+	skb_queue_purge(&info->dtmf_queue);
 #endif
 	restore_flags(flags);
 }
@@ -339,10 +321,7 @@ isdn_tty_tint(modem_info * info)
 		info->send_outstanding++;
 		info->msr &= ~UART_MSR_CTS;
 		info->lsr &= ~UART_LSR_TEMT;
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup) (tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 		return;
 	}
 	if (slen < 0) {
@@ -732,9 +711,19 @@ void
 isdn_tty_modem_hup(modem_info * info, int local)
 {
 	isdn_ctrl cmd;
+	int di, ch;
 
 	if (!info)
 		return;
+
+	di = info->isdn_driver;
+	ch = info->isdn_channel;
+	if (di < 0 || ch < 0)
+		return;
+
+	info->isdn_driver = -1;
+	info->isdn_channel = -1;
+
 #ifdef ISDN_DEBUG_MODEM_HUP
 	printk(KERN_DEBUG "Mhup ttyI%d\n", info->line);
 #endif
@@ -775,19 +764,18 @@ isdn_tty_modem_hup(modem_info * info, int local)
 		isdn_tty_modem_result(RESULT_RUNG, info);
 	info->msr &= ~(UART_MSR_DCD | UART_MSR_RI);
 	info->lsr |= UART_LSR_TEMT;
-	if (info->isdn_driver >= 0) {
-		if (local) {
-			cmd.driver = info->isdn_driver;
-			cmd.command = ISDN_CMD_HANGUP;
-			cmd.arg = info->isdn_channel;
-			isdn_command(&cmd);
-		}
-		isdn_all_eaz(info->isdn_driver, info->isdn_channel);
-		info->emu.mdmreg[REG_RINGCNT] = 0;
-		isdn_free_channel(info->isdn_driver, info->isdn_channel, 0);
+
+	if (local) {
+		cmd.driver = di;
+		cmd.command = ISDN_CMD_HANGUP;
+		cmd.arg = ch;
+		isdn_command(&cmd);
 	}
-	info->isdn_driver = -1;
-	info->isdn_channel = -1;
+
+	isdn_all_eaz(di, ch);
+	info->emu.mdmreg[REG_RINGCNT] = 0;
+	isdn_free_channel(di, ch, 0);
+
 	if (info->drv_index >= 0) {
 		dev->m_idx[info->drv_index] = -1;
 		info->drv_index = -1;
@@ -1187,16 +1175,16 @@ isdn_tty_write(struct tty_struct *tty, int from_user, const u_char * buf, int co
 
 	if (isdn_tty_paranoia_check(info, tty->device, "isdn_tty_write"))
 		return 0;
-	if (!tty)
-		return 0;
 	if (from_user)
 		down(&info->write_sem);
 	/* See isdn_tty_senddown() */
 	atomic_inc(&info->xmit_lock);
 	while (1) {
-		c = MIN(count, info->xmit_size - info->xmit_count);
-		if (info->isdn_driver >= 0)
-			c = MIN(c, dev->drv[info->isdn_driver]->maxbufsize);
+		c = count;
+		if (c > info->xmit_size - info->xmit_count)
+			c = info->xmit_size - info->xmit_count;
+		if (info->isdn_driver >= 0 && c > dev->drv[info->isdn_driver]->maxbufsize)
+			c = dev->drv[info->isdn_driver]->maxbufsize;
 		if (c <= 0)
 			break;
 		if ((info->online > 1)
@@ -1223,10 +1211,7 @@ isdn_tty_write(struct tty_struct *tty, int from_user, const u_char * buf, int co
 						/* If DLE decoding results in zero-transmit, but
 						 * c originally was non-zero, do a wakeup.
 						 */
-						if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-						 tty->ldisc.write_wakeup)
-							(tty->ldisc.write_wakeup) (tty);
-						wake_up_interruptible(&tty->write_wait);
+						tty_wakeup(tty);
 						info->msr |= UART_MSR_CTS;
 						info->lsr |= UART_LSR_TEMT;
 					}
@@ -1344,10 +1329,7 @@ isdn_tty_flush_buffer(struct tty_struct *tty)
 	isdn_tty_cleanup_xmit(info);
 	info->xmit_count = 0;
 	restore_flags(flags);
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup) (tty);
+	tty_wakeup(tty);
 }
 
 static void
@@ -1425,8 +1407,7 @@ isdn_tty_get_lsr_info(modem_info * info, uint * value)
 	status = info->lsr;
 	restore_flags(flags);
 	result = ((status & UART_LSR_TEMT) ? TIOCSER_TEMT : 0);
-	put_user(result, (uint *) value);
-	return 0;
+	return put_user(result, (uint *) value);
 }
 
 
@@ -1449,8 +1430,7 @@ isdn_tty_get_modem_info(modem_info * info, uint * value)
 	    | ((status & UART_MSR_RI) ? TIOCM_RNG : 0)
 	    | ((status & UART_MSR_DSR) ? TIOCM_DSR : 0)
 	    | ((status & UART_MSR_CTS) ? TIOCM_CTS : 0);
-	put_user(result, (uint *) value);
-	return 0;
+	return put_user(result, (uint *) value);
 }
 
 static int
@@ -1459,7 +1439,8 @@ isdn_tty_set_modem_info(modem_info * info, uint cmd, uint * value)
 	uint arg;
 	int pre_dtr;
 
-	get_user(arg, (uint *) value);
+	if (get_user(arg, (uint *) value))
+		return -EFAULT;
 	switch (cmd) {
 		case TIOCMBIS:
 #ifdef ISDN_DEBUG_MODEM_IOCTL
@@ -1527,7 +1508,6 @@ isdn_tty_ioctl(struct tty_struct *tty, struct file *file,
 	       uint cmd, ulong arg)
 {
 	modem_info *info = (modem_info *) tty->driver_data;
-	int error;
 	int retval;
 
 	if (isdn_tty_paranoia_check(info, tty->device, "isdn_tty_ioctl"))
@@ -1557,19 +1537,13 @@ isdn_tty_ioctl(struct tty_struct *tty, struct file *file,
 #ifdef ISDN_DEBUG_MODEM_IOCTL
 			printk(KERN_DEBUG "ttyI%d ioctl TIOCGSOFTCAR\n", info->line);
 #endif
-			error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(long));
-			if (error)
-				return error;
-			put_user(C_CLOCAL(tty) ? 1 : 0, (ulong *) arg);
-			return 0;
+			return put_user(C_CLOCAL(tty) ? 1 : 0, (ulong *) arg);
 		case TIOCSSOFTCAR:
 #ifdef ISDN_DEBUG_MODEM_IOCTL
 			printk(KERN_DEBUG "ttyI%d ioctl TIOCSSOFTCAR\n", info->line);
 #endif
-			error = verify_area(VERIFY_READ, (void *) arg, sizeof(long));
-			if (error)
-				return error;
-			get_user(arg, (ulong *) arg);
+			if (get_user(arg, (ulong *) arg))
+				return -EFAULT;
 			tty->termios->c_cflag =
 			    ((tty->termios->c_cflag & ~CLOCAL) |
 			     (arg ? CLOCAL : 0));
@@ -1578,26 +1552,16 @@ isdn_tty_ioctl(struct tty_struct *tty, struct file *file,
 #ifdef ISDN_DEBUG_MODEM_IOCTL
 			printk(KERN_DEBUG "ttyI%d ioctl TIOCMGET\n", info->line);
 #endif
-			error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(uint));
-			if (error)
-				return error;
 			return isdn_tty_get_modem_info(info, (uint *) arg);
 		case TIOCMBIS:
 		case TIOCMBIC:
 		case TIOCMSET:
-			error = verify_area(VERIFY_READ, (void *) arg, sizeof(uint));
-			if (error)
-				return error;
 			return isdn_tty_set_modem_info(info, cmd, (uint *) arg);
 		case TIOCSERGETLSR:	/* Get line status register */
 #ifdef ISDN_DEBUG_MODEM_IOCTL
 			printk(KERN_DEBUG "ttyI%d ioctl TIOCSERGETLSR\n", info->line);
 #endif
-			error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(uint));
-			if (error)
-				return error;
-			else
-				return isdn_tty_get_lsr_info(info, (uint *) arg);
+			return isdn_tty_get_lsr_info(info, (uint *) arg);
 		default:
 #ifdef ISDN_DEBUG_MODEM_IOCTL
 			printk(KERN_DEBUG "UNKNOWN ioctl 0x%08x on ttyi%d\n", cmd, info->line);
@@ -1894,8 +1858,7 @@ isdn_tty_close(struct tty_struct *tty, struct file *filp)
 	isdn_tty_shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	info->tty = 0;
 	info->ncarrier = 0;
 	tty->closing = 0;
@@ -2623,11 +2586,11 @@ isdn_tty_check_esc(const u_char * p, u_char plus, int count, int *pluscount,
 		if (*(p++) == plus) {
 			if ((*pluscount)++) {
 				/* Time since last '+' > 0.5 sec. ? */
-				if ((jiffies - *lastplus) > PLUSWAIT1)
+				if (time_after(jiffies, *lastplus + PLUSWAIT1))
 					*pluscount = 1;
 			} else {
 				/* Time since last non-'+' < 1.5 sec. ? */
-				if ((jiffies - *lastplus) < PLUSWAIT2)
+				if (time_before(jiffies, *lastplus + PLUSWAIT2))
 					*pluscount = 0;
 			}
 			if ((*pluscount == 3) && (count == 1))
@@ -2734,6 +2697,10 @@ isdn_tty_modem_result(int code, modem_info * info)
 			    if (!(m->mdmreg[REG_CIDONCE] & BIT_CIDONCE)) {
 				    isdn_tty_at_cout("\r\nCALLER NUMBER: ", info);
 				    isdn_tty_at_cout(dev->num[info->drv_index], info);
+				    if (m->mdmreg[REG_CDN] & BIT_CDN) {
+					    isdn_tty_at_cout("\r\nCALLED NUMBER: ", info);
+					    isdn_tty_at_cout(info->emu.cpn, info);
+				    }
 			    }
 			}
 			isdn_tty_at_cout("\r\n", info);
@@ -2759,6 +2726,10 @@ isdn_tty_modem_result(int code, modem_info * info)
 						isdn_tty_at_cout("\r\n", info);
 						isdn_tty_at_cout("CALLER NUMBER: ", info);
 						isdn_tty_at_cout(dev->num[info->drv_index], info);
+						if (m->mdmreg[REG_CDN] & BIT_CDN) {
+							isdn_tty_at_cout("\r\nCALLED NUMBER: ", info);
+							isdn_tty_at_cout(info->emu.cpn, info);
+						}
 					}
 					break;
 				case RESULT_NO_CARRIER:
@@ -2810,8 +2781,7 @@ isdn_tty_modem_result(int code, modem_info * info)
 			restore_flags(flags);
 			return;
 		}
-		if (info->tty->ldisc.flush_buffer)
-			info->tty->ldisc.flush_buffer(info->tty);
+		tty_ldisc_flush(info->tty);
 		if ((info->flags & ISDN_ASYNC_CHECK_CD) &&
 		    (!((info->flags & ISDN_ASYNC_CALLOUT_ACTIVE) &&
 		       (info->flags & ISDN_ASYNC_CALLOUT_NOHUP)))) {
@@ -3773,7 +3743,7 @@ isdn_tty_parse_at(modem_info * info)
                                                 sprintf(ds, "\r\n%d", info->emu.charge);
                                                 isdn_tty_at_cout(ds, info);
                                                 break;
-					default:
+					default:;
 				}
 				break;
 #ifdef DUMMY_HAYES_AT
@@ -3993,7 +3963,7 @@ isdn_tty_modem_escape(void)
 				if (info->online) {
 					ton = 1;
 					if ((info->emu.pluscount == 3) &&
-					    ((jiffies - info->emu.lastplus) > PLUSWAIT2)) {
+					    time_after(jiffies , info->emu.lastplus + PLUSWAIT2)) {
 						info->emu.pluscount = 0;
 						info->online = 0;
 						isdn_tty_modem_result(RESULT_OK, info);

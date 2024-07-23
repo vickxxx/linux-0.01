@@ -17,6 +17,9 @@ SECTIONS
 		__arch_info_begin = .;
 			*(.arch.info)
 		__arch_info_end = .;
+		__tagtable_begin = .;
+			*(.taglist)
+		__tagtable_end = .;
 			*(.data.init)
 		. = ALIGN(16);
 		__setup_start = .;
@@ -40,21 +43,28 @@ SECTIONS
 			*(.text)
 			*(.fixup)
 			*(.gnu.warning)
-			*(.text.lock)	/* out-of-line lock text */
 			*(.rodata)
-			*(.kstrtab)
-		. = ALIGN(16);
-		__start___ex_table = .;	/* Exception table		*/
-			*(__ex_table)
-		__stop___ex_table = .;
-
-		__start___ksymtab = .;	/* Kernel symbol table		*/
-			*(__ksymtab)
-		__stop___ksymtab = .;
-
+			*(.rodata.*)
+			*(.glue_7)
+			*(.glue_7t)
 		*(.got)			/* Global offset table		*/
 
 		_etext = .;		/* End of text section		*/
+	}
+
+	.kstrtab : { *(.kstrtab) }
+
+	. = ALIGN(16);
+	__ex_table : {			/* Exception table		*/
+		__start___ex_table = .;
+			*(__ex_table)
+		__stop___ex_table = .;
+	}
+
+	__ksymtab : {			/* Kernel symbol table		*/
+		__start___ksymtab = .;
+			*(__ksymtab)
+		__stop___ksymtab = .;
 	}
 
 	. = ALIGN(8192);

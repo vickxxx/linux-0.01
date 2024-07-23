@@ -14,6 +14,8 @@
  * Richard L. Sites and Richard T. Witek.
  */
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <sys/fcntl.h>
@@ -25,7 +27,6 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #ifdef __ELF__
-# include <asm/elf.h>
 # include <linux/elf.h>
 #endif
 

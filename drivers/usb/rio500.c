@@ -24,6 +24,7 @@
  * Based upon mouse.c (Brad Keryan) and printer.c (Michael Gee).
  *
  * */
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -33,12 +34,20 @@
 #include <linux/random.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/smp_lock.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include "rio500_usb.h"
+
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.1"
+#define DRIVER_AUTHOR "Cesar Miquel <miquel@df.uba.ar>"
+#define DRIVER_DESC "USB Rio 500 driver"
 
 #define RIO_MINOR   64
 
@@ -52,6 +61,7 @@
 
 struct rio_usb_data {
         struct usb_device *rio_dev;     /* init: probe_rio */
+        devfs_handle_t devfs;           /* devfs device */
         unsigned int ifnum;             /* Interface number of the USB device */
         int isopen;                     /* nz if open */
         int present;                    /* Device is present on the bus */
@@ -60,6 +70,8 @@ struct rio_usb_data {
         wait_queue_head_t wait_q;       /* for timeouts */
 	struct semaphore lock;          /* general race avoidance */
 };
+
+extern devfs_handle_t usb_devfs_handle;	/* /dev/usb dir. */
 
 static struct rio_usb_data rio_instance;
 
@@ -108,13 +120,17 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned char *buffer;
 	int result, requesttype;
 	int retries;
-	int retval;
+	int retval=0;
 
+	down(&(rio->lock));
         /* Sanity check to make sure rio is connected, powered, etc */
         if ( rio == NULL ||
              rio->present == 0 ||
              rio->rio_dev == NULL )
-          return -1;
+	{
+		retval = -ENODEV;
+		goto err_out;
+	}
 
 	switch (cmd) {
 	case RIO_RECV_COMMAND:
@@ -125,13 +141,15 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 			retval = -EFAULT;
 			goto err_out;
 		}
-		if (rio_cmd.length > PAGE_SIZE) {
+		if (rio_cmd.length < 0 || rio_cmd.length > PAGE_SIZE) {
 			retval = -EINVAL;
 			goto err_out;
 		}
 		buffer = (unsigned char *) __get_free_page(GFP_KERNEL);
-		if (buffer == NULL)
-			return -ENOMEM;
+		if (buffer == NULL) {
+			retval = -ENOMEM;
+			goto err_out;
+		}
 		if (copy_from_user(buffer, rio_cmd.buffer, rio_cmd.length)) {
 			retval = -EFAULT;
 			free_page((unsigned long) buffer);
@@ -146,7 +164,6 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		     rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
-		down(&(rio->lock));
 		while (retries) {
 			result = usb_control_msg(rio->rio_dev,
 						 usb_rcvctrlpipe(rio-> rio_dev, 0),
@@ -168,7 +185,6 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 				     le32_to_cpu(*((long *) buffer)));
 				if (copy_to_user(rio_cmd.buffer, buffer,
 						 rio_cmd.length)) {
-					up(&(rio->lock));
 					free_page((unsigned long) buffer);
 					retval = -EFAULT;
 					goto err_out;
@@ -184,7 +200,6 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 			   be swapped at the app level */
 
 		}
-		up(&(rio->lock));
 		free_page((unsigned long) buffer);
 		break;
 
@@ -192,16 +207,23 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		data = (void *) arg;
 		if (data == NULL)
 			break;
-		if (copy_from_user(&rio_cmd, data, sizeof(struct RioCommand)))
-			return -EFAULT;
-		if (rio_cmd.length > PAGE_SIZE)
-			return -EINVAL;
+		if (copy_from_user(&rio_cmd, data, sizeof(struct RioCommand))) {
+			retval = -EFAULT;
+			goto err_out;
+		}
+		if (rio_cmd.length < 0 || rio_cmd.length > PAGE_SIZE) {
+			retval = -EINVAL;
+			goto err_out;
+		}
 		buffer = (unsigned char *) __get_free_page(GFP_KERNEL);
-		if (buffer == NULL)
-			return -ENOMEM;
+		if (buffer == NULL) {
+			retval = -ENOMEM;
+			goto err_out;
+		}
 		if (copy_from_user(buffer, rio_cmd.buffer, rio_cmd.length)) {
 			free_page((unsigned long)buffer);
-			return -EFAULT;
+			retval = -EFAULT;
+			goto err_out;
 		}
 
 		requesttype = rio_cmd.requesttype | USB_DIR_OUT |
@@ -211,7 +233,6 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		     rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
-		down(&(rio->lock));
 		while (retries) {
 			result = usb_control_msg(rio->rio_dev,
 						 usb_sndctrlpipe(rio-> rio_dev, 0),
@@ -235,18 +256,17 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 			}
 
 		}
-		up(&(rio->lock));
 		free_page((unsigned long) buffer);
 		break;
 
 	default:
-		return -ENOIOCTLCMD;
+		retval = -ENOTTY;
 		break;
 	}
 
-	return 0;
 
 err_out:
+	up(&(rio->lock));
 	return retval;
 }
 
@@ -264,13 +284,17 @@ write_rio(struct file *file, const char *buffer,
 	int maxretry;
 	int errn = 0;
 
+	down(&(rio->lock));
         /* Sanity check to make sure rio is connected, powered, etc */
         if ( rio == NULL ||
              rio->present == 0 ||
              rio->rio_dev == NULL )
-          return -1;
+	{
+		up(&(rio->lock));
+		return -ENODEV;
+	}
 
-	down(&(rio->lock));
+
 
 	do {
 		unsigned long thistime;
@@ -341,17 +365,22 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 	int this_read;
 	int result;
 	int maxretry = 10;
-	char *ibuf = rio->ibuf;
+	char *ibuf;
 
-        /* Sanity check to make sure rio is connected, powered, etc */
+	down(&(rio->lock));
+	/* Sanity check to make sure rio is connected, powered, etc */
         if ( rio == NULL ||
              rio->present == 0 ||
              rio->rio_dev == NULL )
-          return -1;
+	{
+		up(&(rio->lock));
+		return -ENODEV;
+	}
+
+	ibuf = rio->ibuf;
 
 	read_count = 0;
 
-	down(&(rio->lock));
 
 	while (count > 0) {
 		if (signal_pending(current)) {
@@ -389,7 +418,7 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 			     result, partial, this_read);
 			return -EIO;
 		} else {
-			unlock_kernel();
+			up(&(rio->lock));
 			return (0);
 		}
 
@@ -406,6 +435,15 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 	up(&(rio->lock));
 	return read_count;
 }
+
+static struct
+file_operations usb_rio_fops = {
+	read:		read_rio,
+	write:		write_rio,
+	ioctl:		ioctl_rio,
+	open:		open_rio,
+	release:	close_rio,
+};
 
 static void *probe_rio(struct usb_device *dev, unsigned int ifnum,
 		       const struct usb_device_id *id)
@@ -430,6 +468,14 @@ static void *probe_rio(struct usb_device *dev, unsigned int ifnum,
 	}
 	dbg("probe_rio: ibuf address:%p", rio->ibuf);
 
+	rio->devfs = devfs_register(usb_devfs_handle, "rio500",
+				    DEVFS_FL_DEFAULT, USB_MAJOR,
+				    RIO_MINOR,
+				    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP |
+				    S_IWGRP, &usb_rio_fops, NULL);
+	if (rio->devfs == NULL)
+		dbg("probe_rio: device node registration failed");
+
 	init_MUTEX(&(rio->lock));
 
 	return rio;
@@ -439,10 +485,14 @@ static void disconnect_rio(struct usb_device *dev, void *ptr)
 {
 	struct rio_usb_data *rio = (struct rio_usb_data *) ptr;
 
+	devfs_unregister(rio->devfs);
+
+	down(&(rio->lock));
 	if (rio->isopen) {
 		rio->isopen = 0;
 		/* better let it finish - the release will do whats needed */
 		rio->rio_dev = NULL;
+		up(&(rio->lock));
 		return;
 	}
 	kfree(rio->ibuf);
@@ -451,16 +501,8 @@ static void disconnect_rio(struct usb_device *dev, void *ptr)
 	info("USB Rio disconnected.");
 
 	rio->present = 0;
+	up(&(rio->lock));
 }
-
-static struct
-file_operations usb_rio_fops = {
-	read:		read_rio,
-	write:		write_rio,
-	ioctl:		ioctl_rio,
-	open:		open_rio,
-	release:	close_rio,
-};
 
 static struct usb_device_id rio_table [] = {
 	{ USB_DEVICE(0x0841, 1) }, 		/* Rio 500 */
@@ -483,7 +525,8 @@ int usb_rio_init(void)
 	if (usb_register(&rio_driver) < 0)
 		return -1;
 
-	info("USB Rio support registered.");
+	info(DRIVER_VERSION ":" DRIVER_DESC);
+
 	return 0;
 }
 
@@ -501,5 +544,7 @@ void usb_rio_cleanup(void)
 module_init(usb_rio_init);
 module_exit(usb_rio_cleanup);
 
-MODULE_AUTHOR("Cesar Miquel <miquel@df.uba.ar>");
-MODULE_DESCRIPTION("USB Rio 500 driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+

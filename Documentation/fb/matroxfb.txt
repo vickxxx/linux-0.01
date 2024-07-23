@@ -10,7 +10,7 @@ Advantages:
 
  * It provides a nice large console (128 cols + 48 lines with 1024x768)
    without using tiny, unreadable fonts.
- * You can run XF68_FBDev on top of /dev/fb0
+ * You can run XF{68,86}_FBDev or XFree86 fbdev driver on top of /dev/fb0
  * Most important: boot logo :-)
 
 Disadvantages:
@@ -27,9 +27,6 @@ or using `fbset' program.
 
 If you want, for example, enable a resolution of 1280x1024x24bpp you should
 pass to the kernel this command line: "video=matrox:vesa:0x1BB".
-Note that the same line, if 'appended' as a lilo parameter in lilo.conf will
-read "video=matrox:vesa:443" because lilo pass integer parameters as decimal
-numbers to the kernel.
 
 You should compile in both vgacon (to boot if you remove you Matrox from
 box) and matroxfb (for graphics mode). You should not compile-in vesafb
@@ -82,13 +79,16 @@ example 1600x1200x32bpp can be specified by `video=matrox:vesa:0x11C,depth:32'.
 X11
 ===
 
-XF68_FBDev should work just fine, but it is non-accelerated. On non-intel
+XF{68,86}_FBDev should work just fine, but it is non-accelerated. On non-intel
 architectures there are some glitches for 24bpp videomodes. 8, 16 and 32bpp
 works fine.
 
 Running another (accelerated) X-Server like XF86_SVGA works too. But (at least)
 XFree servers have big troubles in multihead configurations (even on first
-head, not even talking about second).
+head, not even talking about second). Running XFree86 4.x accelerated mga 
+driver is possible, but you must not enable DRI - if you do, resolution and
+color depth of your X desktop must match resolution and color depths of your
+virtual consoles, otherwise X will corrupt accelerator settings.
 
 
 SVGALib
@@ -173,9 +173,9 @@ nomtrr   - disables write combining on frame buffer. This slows down driver but
 mtrr     - enables write combining on frame buffer. It speeds up video accesses
            much. It is default. You must have MTRR support enabled in kernel
 	   and your CPU must have MTRR (f.e. Pentium II have them).
-sgram    - tells to driver that you have G200 with SGRAM memory. It has no
+sgram    - tells to driver that you have Gxx0 with SGRAM memory. It has no
            effect without `init'.
-sdram    - tells to driver that you have G200 with SDRAM memory.
+sdram    - tells to driver that you have Gxx0 with SDRAM memory.
            It is a default.
 inv24    - change timings parameters for 24bpp modes on Millenium and
            Millenium II. Specify this if you see strange color shadows around
@@ -216,6 +216,13 @@ dfp      - enables digital flat panel interface. This option is incompatible wit
            secondary (TV) output - if DFP is active, TV output must be
 	   inactive and vice versa. DFP always uses same timing as primary
 	   (monitor) output.
+dfp:X    - use settings X for digital flat panel interface. X is number from
+           0 to 0xFF, and meaning of each individual bit is described in
+	   G400 manual, in description of DAC register 0x1F. For normal operation
+	   you should set all bits to zero, except lowest bit. This lowest bit
+	   selects who is source of display clocks, whether G400, or panel.
+	   Default value is now read back from hardware - so you should specify
+	   this value only if you are also using `init' parameter.
 vesa:X   - selects startup videomode. X is number from 0 to 0x1FF, see table
            above for detailed explanation. Default is 640x480x8bpp if driver
 	   has 8bpp support. Otherwise first available of 640x350x4bpp,
@@ -279,7 +286,9 @@ Currently there are following known bugs:
  + 24bpp does not support correctly XF-FBDev on big-endian architectures.
  + interlaced text mode is not supported; it looks like hardware limitation,
    but I'm not sure.
- + G200 SGRAM/SDRAM is not autodetected.
+ + Gxx0 SGRAM/SDRAM is not autodetected.
+ + If you are using more than one framebuffer device, you must boot kernel
+   with 'video=scrollback:0'.
  + maybe more...
 And following misfeatures:
  + SVGALib does not restore screen on exit.
@@ -336,7 +345,7 @@ NOACCEL
 
 ACCEL, nofastfont
         8x16                 12x22                6x11
-	Millennium I  G200   Millennium I  G200    Millennium I G200
+	Millennium I  G200   Millennium I  G200   Millennium I  G200
 8bpp     7.79         7.24   13.55         7.78   30.00        21.01
 16bpp    9.13         7.78   16.16         7.78   30.00        21.01
 24bpp   14.17        10.72   18.69        10.24   34.99        21.01
@@ -344,7 +353,7 @@ ACCEL, nofastfont
 
 ACCEL, fastfont
         8x16                 12x22                6x11
-	Millennium I  G200    Millennium I G200   Millennium I  G200
+	Millennium I  G200   Millennium I  G200   Millennium I  G200
 8bpp     8.41         6.01    6.54         4.37   16.00        10.51
 16bpp    9.54         9.12    8.76         6.17   17.52        14.01
 24bpp   15.00        12.36   11.67        10.00   22.01        18.32
@@ -354,6 +363,8 @@ TEXT
         8x16
 	Millennium I  G200
 TEXT     3.29         1.50
+
+* Yes, it is slower than Millennium I.
 
 
 Dualhead G400
@@ -376,7 +387,22 @@ Driver supports dualhead G400 with some limitations:
  + if you compiled it as module, you must insert i2c-matroxfb, matroxfb_maven
    and matroxfb_crtc2 into kernel.
 
+
+Dualhead G450
+=============
+Driver supports dualhead G450 with some limitations:
+ + secondary head shares videomemory with primary head. It is not problem
+   if you have 32MB of videoram, but if you have only 16MB, you may have
+   to think twice before choosing videomode.
+ + due to hardware limitation, secondary head can use only 16 and 32bpp
+   videomodes.
+ + secondary head is not accelerated.
+ + secondary head always powerups in 640x480@60-32 videomode. You have to use
+   fbset to change this mode.
+ + TV output is not supported
+ + kernel is not fully multihead ready, so some things are impossible to do.
+ + if you compiled it as module, you must insert matroxfb_g450 and matroxfb_crtc2
+   into kernel.
 	
-* Yes, it is slower than Millennium I.
 --
 Petr Vandrovec <vandrove@vc.cvut.cz>

@@ -4,15 +4,18 @@
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/threads.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/string.h>
 
 #include <asm/page.h>
 #include <asm/oplib.h>
 #include <asm/system.h>
 #include <asm/smp.h>
+#include <asm/spitfire.h>
 
 struct prom_cpuinfo linux_cpus[64] __initdata = { { 0 } };
 unsigned prom_cpu_nodes[64];
@@ -50,8 +53,15 @@ void __init device_scan(void)
 			if(strcmp(node_str, "cpu") == 0) {
 				cpu_nds[cpu_ctr] = scan;
 				linux_cpus[cpu_ctr].prom_node = scan;
-				prom_getproperty(scan, "upa-portid",
-						 (char *) &thismid, sizeof(thismid));
+				thismid = 0;
+				if (tlb_type == spitfire) {
+					prom_getproperty(scan, "upa-portid",
+							 (char *) &thismid, sizeof(thismid));
+				} else if (tlb_type == cheetah ||
+					   tlb_type == cheetah_plus) {
+					prom_getproperty(scan, "portid",
+							 (char *) &thismid, sizeof(thismid));
+				}
 				linux_cpus[cpu_ctr].mid = thismid;
 				printk("Found CPU %d (node=%08x,mid=%d)\n",
 				       cpu_ctr, (unsigned) scan, thismid);
@@ -69,6 +79,15 @@ void __init device_scan(void)
 	linux_num_cpus = cpu_ctr;
 	
 	prom_cpu_nodes[0] = prom_node_cpu;
+
+#ifndef CONFIG_SMP
+	{
+		extern unsigned long up_clock_tick;
+		up_clock_tick = prom_getintdefault(prom_node_cpu,
+						   "clock-frequency",
+						   0);
+	}
+#endif
 
 	central_probe();
 

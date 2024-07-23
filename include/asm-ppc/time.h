@@ -1,14 +1,18 @@
 /*
- * $Id: time.h,v 1.12 1999/08/27 04:21:23 cort Exp $
  * Common time prototypes and such for all ppc machines.
  *
- * Written by Cort Dougan (cort@cs.nmt.edu) to merge
+ * Written by Cort Dougan (cort@fsmlabs.com) to merge
  * Paul Mackerras' version and mine for PReP and Pmac.
  */
 
 #ifdef __KERNEL__
+#ifndef __ASM_TIME_H__
+#define __ASM_TIME_H__
+
 #include <linux/config.h>
 #include <linux/mc146818rtc.h>
+#include <linux/threads.h>
+#include <linux/compiler.h>
 
 #include <asm/processor.h>
 
@@ -16,16 +20,24 @@
 extern unsigned tb_ticks_per_jiffy;
 extern unsigned tb_to_us;
 extern unsigned tb_last_stamp;
+extern unsigned long disarm_decr[NR_CPUS];
 
 extern void to_tm(int tim, struct rtc_time * tm);
 extern time_t last_rtc_update;
 
+extern void set_dec_cpu6(unsigned int val);
+
 int via_calibrate_decr(void);
 
-/* Accessor functions for the decrementer register. */
+/* Accessor functions for the decrementer register.
+ * The 40x doesn't even have a decrementer.  I tried to use the
+ * generic timer interrupt code, which seems OK, with the 40x PIT
+ * in auto-reload mode.  The problem is PIT stops counting when it
+ * hits zero.  If it would wrap, we could use it just like a decrementer.
+ */
 static __inline__ unsigned int get_dec(void)
 {
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_40x)
 	return (mfspr(SPRN_PIT));
 #else
 	return (mfspr(SPRN_DEC));
@@ -34,21 +46,19 @@ static __inline__ unsigned int get_dec(void)
 
 static __inline__ void set_dec(unsigned int val)
 {
-#if defined(CONFIG_4xx)
-	mtspr(SPRN_PIT, val);
-#else
-#ifdef CONFIG_8xx_CPU6
+#if defined(CONFIG_40x)
+	return;		/* Have to let it auto-reload */
+#elif defined(CONFIG_8xx_CPU6)
 	set_dec_cpu6(val);
 #else
 	mtspr(SPRN_DEC, val);
-#endif
 #endif
 }
 
 /* Accessor functions for the timebase (RTC on 601) registers. */
 /* If one day CONFIG_POWER is added just define __USE_RTC as 1 */
 #ifdef CONFIG_6xx
-extern __inline__ int const __USE_RTC(void) {
+extern __inline__ int __attribute_const__ __USE_RTC(void) {
 	return (mfspr(SPRN_PVR)>>16) == 1;
 }
 #else
@@ -59,6 +69,19 @@ extern __inline__ unsigned long get_tbl(void) {
 	unsigned long tbl;
 	asm volatile("mftb %0" : "=r" (tbl));
 	return tbl;
+}
+
+extern __inline__ unsigned long get_tbu(void) {
+	unsigned long tbl;
+	asm volatile("mftbu %0" : "=r" (tbl));
+	return tbl;
+}
+
+extern __inline__ void set_tb(unsigned int upper, unsigned int lower)
+{
+	mtspr(SPRN_TBWL, 0);
+	mtspr(SPRN_TBWU, upper);
+	mtspr(SPRN_TBWL, lower);
 }
 
 extern __inline__ unsigned long get_rtcl(void) {
@@ -114,4 +137,5 @@ extern __inline__ unsigned binary_tbl(void) {
 ({unsigned z; asm ("mulhwu %0,%1,%2" : "=r" (z) : "r" (x), "r" (y)); z;})
 
 unsigned mulhwu_scale_factor(unsigned, unsigned);
+#endif /* __ASM_TIME_H__ */
 #endif /* __KERNEL__ */

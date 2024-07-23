@@ -17,7 +17,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  * 
  * **********************
@@ -35,7 +35,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
@@ -104,11 +104,11 @@ static inline void regdump(struct net_device *dev) { }
 
 /* Parameters that can be set with 'insmod' */
 
-static int node = 0;
+static int node;
 static int timeout = 3;
-static int backplane = 0;
-static int clockp = 0;
-static int clockm = 0;
+static int backplane;
+static int clockp;
+static int clockm;
 
 MODULE_PARM(node, "i");
 MODULE_PARM(timeout, "i");
@@ -122,6 +122,7 @@ static int irq_list[4] = { -1 };
 
 MODULE_PARM(irq_mask, "i");
 MODULE_PARM(irq_list, "1-4i");
+MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
@@ -135,7 +136,7 @@ static dev_info_t dev_info = "com20020_cs";
 static dev_link_t *com20020_attach(void);
 static void com20020_detach(dev_link_t *);
 
-static dev_link_t *dev_list = NULL;
+static dev_link_t *dev_list;
 
 /*====================================================================*/
 

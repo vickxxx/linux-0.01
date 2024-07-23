@@ -9,6 +9,7 @@
  */
 #ifndef __ASSEMBLY__
 
+#include <asm/memory.h>
 #include <asm/page.h>
 
 /* forward-declare task_struct */
@@ -42,7 +43,7 @@ extern struct processor {
 	/*
 	 * Idle the processor
 	 */
-	int (*_do_idle)(int mode);
+	int (*_do_idle)(void);
 	/*
 	 * Processor architecture specific
 	 */
@@ -132,7 +133,7 @@ extern const struct processor sa110_processor_functions;
 #define cpu_proc_init()				processor._proc_init()
 #define cpu_proc_fin()				processor._proc_fin()
 #define cpu_reset(addr)				processor.reset(addr)
-#define cpu_do_idle(mode)			processor._do_idle(mode)
+#define cpu_do_idle()				processor._do_idle()
 
 #define cpu_cache_clean_invalidate_all()	processor.cache.clean_invalidate_all()
 #define cpu_cache_clean_invalidate_range(s,e,f)	processor.cache.clean_invalidate_range(s,e,f)
@@ -155,5 +156,14 @@ extern const struct processor sa110_processor_functions;
 #define cpu_set_pte(ptep, pte)			processor.pgtable.set_pte(ptep, pte)
 
 #define cpu_switch_mm(pgd,tsk)			cpu_set_pgd(__virt_to_phys((unsigned long)(pgd)))
+
+#define cpu_get_pgd()	\
+	({						\
+		unsigned long pg;			\
+		__asm__("mrc p15, 0, %0, c2, c0, 0"	\
+			 : "=r" (pg));			\
+		pg &= ~0x3fff;				\
+		(pgd_t *)phys_to_virt(pg);		\
+	})
 
 #endif

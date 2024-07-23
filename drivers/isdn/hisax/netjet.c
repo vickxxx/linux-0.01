@@ -1,12 +1,16 @@
-/* $Id: netjet.c,v 1.24.6.1 2000/12/06 16:59:20 kai Exp $
+/* $Id: netjet.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * netjet.c     low level stuff for Traverse Technologie NETJet ISDN cards
+ * low level stuff for Traverse Technologie NETJet ISDN cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Thanks to Traverse Technologie Australia for documents and informations
+ * Thanks to Traverse Technologies Australia for documents and information
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * 16-Apr-2002 - led code added - Guy Ellis (guy@traverse.com.au)
  *
  */
 
@@ -19,17 +23,10 @@
 #include <linux/pci.h>
 #include <linux/interrupt.h>
 #include <linux/ppp_defs.h>
+#include <asm/io.h>
 #include "netjet.h"
 
-#ifndef bus_to_virt
-#define bus_to_virt (u_int *)
-#endif
-
-#ifndef virt_to_bus
-#define virt_to_bus (u_int)
-#endif
-
-const char *NETjet_revision = "$Revision: 1.24.6.1 $";
+const char *NETjet_revision = "$Revision: 1.1.4.1 $";
 
 /* Interface functions */
 
@@ -138,6 +135,7 @@ void
 mode_tiger(struct BCState *bcs, int mode, int bc)
 {
 	struct IsdnCardState *cs = bcs->cs;
+        u_char led;
 
 	if (cs->debug & L1_DEB_HSCX)
 		debugl1(cs, "Tiger mode %d bchan %d/%d",
@@ -159,6 +157,15 @@ mode_tiger(struct BCState *bcs, int mode, int bc)
 					cs->hw.njet.dmactrl);
 				byteout(cs->hw.njet.base + NETJET_IRQMASK0, 0);
 			}
+                        if (cs->typ == ISDN_CTYPE_NETJET_S)
+                        {
+                                // led off
+                                led = bc & 0x01;
+                                led = 0x01 << (6 + led); // convert to mask
+                                led = ~led;
+                                cs->hw.njet.auxd &= led;
+                                byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
+                        }
 			break;
 		case (L1_MODE_TRANS):
 			break;
@@ -184,6 +191,14 @@ mode_tiger(struct BCState *bcs, int mode, int bc)
 			bcs->hw.tiger.sendp = bcs->hw.tiger.send;
 			bcs->hw.tiger.free = NETJET_DMA_TXSIZE;
 			test_and_set_bit(BC_FLG_EMPTY, &bcs->Flag);
+                        if (cs->typ == ISDN_CTYPE_NETJET_S)
+                        {
+                                // led on
+                                led = bc & 0x01;
+                                led = 0x01 << (6 + led); // convert to mask
+                                cs->hw.njet.auxd |= led;
+                                byteout(cs->hw.njet.auxa, cs->hw.njet.auxd);
+                        }
 			break;
 	}
 	if (cs->debug & L1_DEB_HSCX)
@@ -859,9 +874,13 @@ tiger_l2l1(struct PStack *st, int pr, void *arg)
 		case (PH_ACTIVATE | REQUEST):
 			test_and_set_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
 			mode_tiger(st->l1.bcs, st->l1.mode, st->l1.bc);
+			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG */
+			st->l1.bcs->cs->cardmsg(st->l1.bcs->cs, MDL_BC_ASSIGN, (void *)(&st->l1.bc));
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | REQUEST):
+			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG */
+			st->l1.bcs->cs->cardmsg(st->l1.bcs->cs, MDL_BC_RELEASE, (void *)(&st->l1.bc));
 			l1_msg_b(st, pr, arg);
 			break;
 		case (PH_DEACTIVATE | CONFIRM):
@@ -887,8 +906,8 @@ close_tigerstate(struct BCState *bcs)
 			kfree(bcs->hw.tiger.sendbuf);
 			bcs->hw.tiger.sendbuf = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;

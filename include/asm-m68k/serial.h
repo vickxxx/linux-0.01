@@ -1,17 +1,12 @@
 /*
  * include/asm-m68k/serial.h
  *
- * currently this seems usefull only for a Q40,
- * its an almost exact copy of ../asm/alpha/serial.h 
+ * currently this seems useful only for a Q40,
+ * it's an almost exact copy of ../asm-alpha/serial.h 
  *
  */
 
 #include <linux/config.h>
-#if 0
-#define rs_init serial_rs_init
-#define register_serial serial_register_serial
-#define unregister_serial serial_unregister_serial
-#endif
 
 /*
  * This assumes you have a 1.8432 MHz clock for your UART.

@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -67,9 +67,7 @@
 #include <linux/version.h>
 #endif
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #include <stdarg.h>
 #include <asm/irq.h>
@@ -89,7 +87,7 @@
 #include "scsi.h"
 #include "sd.h"
 #include "hosts.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include "inia100.h"
 
 static Scsi_Host_Template driver_template = INIA100;
@@ -796,4 +794,5 @@ int inia100_release(struct Scsi_Host *hreg)
         return 0;
 } 
 
+MODULE_LICENSE("Dual BSD/GPL");
 /*#include "inia100scsi.c" */

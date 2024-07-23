@@ -33,6 +33,7 @@ extern void paging_init(void);
 #define flush_dcache_page(page)			do { } while (0)
 #define flush_icache_range(start, end)		do { } while (0)
 #define flush_icache_page(vma,pg)		do { } while (0)
+#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
 
 #define __flush_tlb()							\
 	do {								\
@@ -81,11 +82,19 @@ extern unsigned long pgkern_mask;
 	} while (0)
 #endif
 
-#ifndef CONFIG_X86_INVLPG
-#define __flush_tlb_one(addr) __flush_tlb()
+#define __flush_tlb_single(addr) \
+	__asm__ __volatile__("invlpg %0": :"m" (*(char *) addr))
+
+#ifdef CONFIG_X86_INVLPG
+# define __flush_tlb_one(addr) __flush_tlb_single(addr)
 #else
-#define __flush_tlb_one(addr) \
-__asm__ __volatile__("invlpg %0": :"m" (*(char *) addr))
+# define __flush_tlb_one(addr)						\
+	do {								\
+		if (cpu_has_pge)					\
+			__flush_tlb_single(addr);			\
+		else							\
+			__flush_tlb();					\
+	} while (0)
 #endif
 
 /*
@@ -105,8 +114,20 @@ extern unsigned long empty_zero_page[1024];
 #ifndef __ASSEMBLY__
 #if CONFIG_X86_PAE
 # include <asm/pgtable-3level.h>
+
+/*
+ * Need to initialise the X86 PAE caches
+ */
+extern void pgtable_cache_init(void);
+
 #else
 # include <asm/pgtable-2level.h>
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
+
 #endif
 #endif
 
@@ -140,7 +161,11 @@ extern unsigned long empty_zero_page[1024];
 #define VMALLOC_START	(((unsigned long) high_memory + 2*VMALLOC_OFFSET-1) & \
 						~(VMALLOC_OFFSET-1))
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
-#define VMALLOC_END	(FIXADDR_START)
+#if CONFIG_HIGHMEM
+# define VMALLOC_END	(PKMAP_BASE-2*PAGE_SIZE)
+#else
+# define VMALLOC_END	(FIXADDR_START-2*PAGE_SIZE)
+#endif
 
 /*
  * The 4MB page is guessing..  Detailed in the infamous "Chapter H"
@@ -239,12 +264,6 @@ extern unsigned long empty_zero_page[1024];
 /* page table for 0-4MB for everybody */
 extern unsigned long pg0[1024];
 
-/*
- * Handling allocation failures during page table setup.
- */
-extern void __handle_bad_pmd(pmd_t * pmd);
-extern void __handle_bad_pmd_kernel(pmd_t * pmd);
-
 #define pte_present(x)	((x).pte_low & (_PAGE_PRESENT | _PAGE_PROTNONE))
 #define pte_clear(xp)	do { set_pte(xp, __pte(0)); } while (0)
 
@@ -253,11 +272,7 @@ extern void __handle_bad_pmd_kernel(pmd_t * pmd);
 #define pmd_clear(xp)	do { set_pmd(xp, __pmd(0)); } while (0)
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
 
-/*
- * Permanent address of a page. Obviously must never be
- * called on a highmem page.
- */
-#define page_address(page) ((page)->virtual)
+
 #define pages_to_mb(x) ((x) >> (20-PAGE_SHIFT))
 
 /*
@@ -339,6 +354,9 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 #define SWP_ENTRY(type, offset)		((swp_entry_t) { ((type) << 1) | ((offset) << 8) })
 #define pte_to_swp_entry(pte)		((swp_entry_t) { (pte).pte_low })
 #define swp_entry_to_pte(x)		((pte_t) { (x).val })
+
+struct page;
+int change_page_attr(struct page *, int, pgprot_t prot);
 
 #endif /* !__ASSEMBLY__ */
 

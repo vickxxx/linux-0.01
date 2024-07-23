@@ -1,32 +1,19 @@
-/* $Id: isdnif.h,v 1.37 2000/11/19 17:01:54 kai Exp $
-
- * Linux ISDN subsystem
+/* $Id: isdnif.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
  *
+ * Linux ISDN subsystem
  * Definition of the interface between the subsystem and its low-level drivers.
  *
  * Copyright 1994,95,96 by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1995,96    Thinking Objects Software GmbH Wuerzburg
  * 
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#ifndef isdnif_h
-#define isdnif_h
+#ifndef __ISDNIF_H__
+#define __ISDNIF_H__
 
-#include <linux/config.h>
 
 /*
  * Values for general protocol-selection
@@ -67,6 +54,7 @@
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
 #include <linux/skbuff.h>
 
 /***************************************************************************/
@@ -294,42 +282,42 @@ typedef struct setup_parm {
 
 typedef struct T30_s {
 	/* session parameters */
-	__u8 resolution		__attribute__ ((packed));
-	__u8 rate		__attribute__ ((packed));
-	__u8 width		__attribute__ ((packed));
-	__u8 length		__attribute__ ((packed));
-	__u8 compression	__attribute__ ((packed));
-	__u8 ecm		__attribute__ ((packed));
-	__u8 binary		__attribute__ ((packed));
-	__u8 scantime		__attribute__ ((packed));
-	__u8 id[FAXIDLEN]	__attribute__ ((packed));
+	__u8 resolution;
+	__u8 rate;
+	__u8 width;
+	__u8 length;
+	__u8 compression;
+	__u8 ecm;
+	__u8 binary;
+	__u8 scantime;
+	__u8 id[FAXIDLEN];
 	/* additional parameters */
-	__u8 phase		__attribute__ ((packed));
-	__u8 direction		__attribute__ ((packed));
-	__u8 code		__attribute__ ((packed));
-	__u8 badlin		__attribute__ ((packed));
-	__u8 badmul		__attribute__ ((packed));
-	__u8 bor		__attribute__ ((packed));
-	__u8 fet		__attribute__ ((packed));
-	__u8 pollid[FAXIDLEN]	__attribute__ ((packed));
-	__u8 cq			__attribute__ ((packed));
-	__u8 cr			__attribute__ ((packed));
-	__u8 ctcrty		__attribute__ ((packed));
-	__u8 minsp		__attribute__ ((packed));
-	__u8 phcto		__attribute__ ((packed));
-	__u8 rel		__attribute__ ((packed));
-	__u8 nbc		__attribute__ ((packed));
+	__u8 phase;
+	__u8 direction;
+	__u8 code;
+	__u8 badlin;
+	__u8 badmul;
+	__u8 bor;
+	__u8 fet;
+	__u8 pollid[FAXIDLEN];
+	__u8 cq;
+	__u8 cr;
+	__u8 ctcrty;
+	__u8 minsp;
+	__u8 phcto;
+	__u8 rel;
+	__u8 nbc;
 	/* remote station parameters */
-	__u8 r_resolution	__attribute__ ((packed));
-	__u8 r_rate		__attribute__ ((packed));
-	__u8 r_width		__attribute__ ((packed));
-	__u8 r_length		__attribute__ ((packed));
-	__u8 r_compression	__attribute__ ((packed));
-	__u8 r_ecm		__attribute__ ((packed));
-	__u8 r_binary		__attribute__ ((packed));
-	__u8 r_scantime		__attribute__ ((packed));
-	__u8 r_id[FAXIDLEN]	__attribute__ ((packed));
-	__u8 r_code		__attribute__ ((packed));
+	__u8 r_resolution;
+	__u8 r_rate;
+	__u8 r_width;
+	__u8 r_length;
+	__u8 r_compression;
+	__u8 r_ecm;
+	__u8 r_binary;
+	__u8 r_scantime;
+	__u8 r_id[FAXIDLEN];
+	__u8 r_code;
 } T30_s;
 
 #define ISDN_TTY_FAX_CONN_IN	0
@@ -433,6 +421,7 @@ typedef struct {
 #ifdef CONFIG_ISDN_TTY_FAX
 		T30_s	*fax;	/* Pointer to ttys fax struct		*/
 #endif
+		ulong userdata;	/* User Data */
 	} parm;
 } isdn_ctrl;
 
@@ -560,4 +549,5 @@ extern int register_isdn(isdn_if*);
 #include <asm/uaccess.h>
 
 #endif /* __KERNEL__ */
-#endif /* isdnif_h */
+
+#endif /* __ISDNIF_H__ */

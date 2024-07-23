@@ -16,9 +16,9 @@
 #include <linux/init.h>
 #include <linux/sysrq.h>
 #include <linux/interrupt.h>
+#include <linux/console.h>
 
 asmlinkage void sys_sync(void);	/* it's really int */
-extern void unblank_console(void);
 
 int panic_timeout;
 
@@ -32,13 +32,14 @@ static int __init panic_setup(char *str)
 
 __setup("panic=", panic_setup);
 
+int machine_paniced; 
+
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
  *
- *	Display a message, then unblank the console and perform
- *	cleanups. Functions in the panic notifier list are called
- *	after the filesystem cache is flushed (when possible).
+ *	Display a message, then perform cleanups. Functions in the panic
+ *	notifier list are called after the filesystem cache is flushed (when possible).
  *
  *	This function never returns.
  */
@@ -51,8 +52,14 @@ NORET_TYPE void panic(const char * fmt, ...)
         unsigned long caller = (unsigned long) __builtin_return_address(0);
 #endif
 
+#ifdef CONFIG_VT
+	disable_console_blank();
+#endif
+	machine_paniced = 1;
+	
+	bust_spinlocks(1);
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 	printk(KERN_EMERG "Kernel panic: %s\n",buf);
 	if (in_interrupt())
@@ -61,8 +68,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 		printk(KERN_EMERG "In idle task - not syncing\n");
 	else
 		sys_sync();
-
-	unblank_console();
+	bust_spinlocks(0);
 
 #ifdef CONFIG_SMP
 	smp_send_stop();
@@ -98,6 +104,51 @@ NORET_TYPE void panic(const char * fmt, ...)
 #endif
 	sti();
 	for(;;) {
+#if defined(CONFIG_X86) && defined(CONFIG_VT) && !defined(CONFIG_DUMMY_KEYB) 
+		extern void panic_blink(void);
+		panic_blink(); 
+#endif
 		CHECK_EMERGENCY_SYNC
 	}
+}
+
+/**
+ *	print_tainted - return a string to represent the kernel taint state.
+ *
+ *	The string is overwritten by the next call to print_taint().
+ */
+ 
+const char *print_tainted()
+{
+	static char buf[20];
+	if (tainted) {
+		snprintf(buf, sizeof(buf), "Tainted: %c%c",
+			tainted & 1 ? 'P' : 'G',
+			tainted & 2 ? 'F' : ' ');
+	}
+	else
+		snprintf(buf, sizeof(buf), "Not tainted");
+	return(buf);
+}
+
+int tainted = 0;
+
+/*
+ * A BUG() call in an inline function in a header should be avoided,
+ * because it can seriously bloat the kernel.  So here we have
+ * helper functions.
+ * We lose the BUG()-time file-and-line info this way, but it's
+ * usually not very useful from an inline anyway.  The backtrace
+ * tells us what we want to know.
+ */
+
+void __out_of_line_bug(int line)
+{
+	printk("kernel BUG in header file at line %d\n", line);
+
+	BUG();
+
+	/* Satisfy __attribute__((noreturn)) */
+	for ( ; ; )
+		;
 }

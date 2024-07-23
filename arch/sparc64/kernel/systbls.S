@@ -1,4 +1,4 @@
-/* $Id: systbls.S,v 1.77 2000/08/22 10:09:10 jj Exp $
+/* $Id: systbls.S,v 1.79 2001/10/18 08:27:05 davem Exp $
  * systbls.S: System call entry point tables for OS compatibility.
  *            The native Linux system call table lives here also.
  *
@@ -47,20 +47,20 @@ sys_call_table32:
 	.word sys_nis_syscall, sys32_setreuid16, sys32_setregid16, sys_rename, sys_truncate
 /*130*/	.word sys_ftruncate, sys_flock, sys_lstat64, sys_nis_syscall, sys_nis_syscall
 	.word sys_nis_syscall, sys_mkdir, sys_rmdir, sys32_utimes, sys_stat64
-/*140*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys32_getrlimit
+/*140*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_gettid, sys32_getrlimit
 	.word sys32_setrlimit, sys_pivot_root, sys32_prctl, sys32_pciconfig_read, sys32_pciconfig_write
 /*150*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_getdents64
 	.word sys32_fcntl64, sys_nis_syscall, sys32_statfs, sys32_fstatfs, sys_oldumount
 /*160*/	.word sys_nis_syscall, sys_nis_syscall, sys_getdomainname, sys_setdomainname, sys_nis_syscall
-	.word sys32_quotactl, sys_nis_syscall, sys32_mount, sys_ustat, sys_nis_syscall
-/*170*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys32_getdents
-	.word sys_setsid, sys_fchdir, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
-/*180*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys32_sigpending, sys32_query_module
-	.word sys_setpgid, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sparc64_newuname
+	.word sys32_quotactl, sys_nis_syscall, sys32_mount, sys_ustat, sys_setxattr
+/*170*/	.word sys_lsetxattr, sys_fsetxattr, sys_getxattr, sys_lgetxattr, sys32_getdents
+	.word sys_setsid, sys_fchdir, sys_fgetxattr, sys_listxattr, sys_llistxattr
+/*180*/	.word sys_flistxattr, sys_removexattr, sys_lremovexattr, sys32_sigpending, sys32_query_module
+	.word sys_setpgid, sys_fremovexattr, sys_tkill, sys_nis_syscall, sparc64_newuname
 /*190*/	.word sys32_init_module, sparc64_personality, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
 	.word sys_nis_syscall, sys_nis_syscall, sys_getppid, sys32_sigaction, sys_sgetmask
 /*200*/	.word sys_ssetmask, sys_sigsuspend, sys32_newlstat, sys_uselib, old32_readdir
-	.word sys_nis_syscall, sys32_socketcall, sys_syslog, sys_nis_syscall, sys_nis_syscall
+	.word sys32_readahead, sys32_socketcall, sys_syslog, sys_nis_syscall, sys_nis_syscall
 /*210*/	.word sys_nis_syscall, sys_nis_syscall, sys_waitpid, sys_swapoff, sys32_sysinfo
 	.word sys32_ipc, sys32_sigreturn, sys_clone, sys_nis_syscall, sys32_adjtimex
 /*220*/	.word sys32_sigprocmask, sys32_create_module, sys32_delete_module, sys32_get_kernel_syms, sys_getpgid
@@ -106,20 +106,20 @@ sys_call_table:
 	.word sys_recvfrom, sys_setreuid, sys_setregid, sys_rename, sys_truncate
 /*130*/	.word sys_ftruncate, sys_flock, sys_nis_syscall, sys_sendto, sys_shutdown
 	.word sys_socketpair, sys_mkdir, sys_rmdir, sys_utimes, sys_nis_syscall
-/*140*/	.word sys_nis_syscall, sys_getpeername, sys_nis_syscall, sys_nis_syscall, sys_getrlimit
+/*140*/	.word sys_nis_syscall, sys_getpeername, sys_nis_syscall, sys_gettid, sys_getrlimit
 	.word sys_setrlimit, sys_pivot_root, sys_prctl, sys_pciconfig_read, sys_pciconfig_write
 /*150*/	.word sys_getsockname, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_getdents64
 	.word sys_nis_syscall, sys_nis_syscall, sys_statfs, sys_fstatfs, sys_oldumount
 /*160*/	.word sys_nis_syscall, sys_nis_syscall, sys_getdomainname, sys_setdomainname, sys_utrap_install
-	.word sys_quotactl, sys_nis_syscall, sys_mount, sys_ustat, sys_nis_syscall
-/*170*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_getdents
-	.word sys_setsid, sys_fchdir, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
-/*180*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_query_module
-	.word sys_setpgid, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sparc64_newuname
+	.word sys_quotactl, sys_nis_syscall, sys_mount, sys_ustat, sys_setxattr
+/*170*/	.word sys_lsetxattr, sys_fsetxattr, sys_getxattr, sys_lgetxattr, sys_getdents
+	.word sys_setsid, sys_fchdir, sys_fgetxattr, sys_listxattr, sys_llistxattr
+/*180*/	.word sys_flistxattr, sys_removexattr, sys_lremovexattr, sys_nis_syscall, sys_query_module
+	.word sys_setpgid, sys_fremovexattr, sys_tkill, sys_nis_syscall, sparc64_newuname
 /*190*/	.word sys_init_module, sparc64_personality, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
 	.word sys_nis_syscall, sys_nis_syscall, sys_getppid, sys_nis_syscall, sys_sgetmask
 /*200*/	.word sys_ssetmask, sys_nis_syscall, sys_newlstat, sys_uselib, sys_nis_syscall
-	.word sys_nis_syscall, sys_socketcall, sys_syslog, sys_nis_syscall, sys_nis_syscall
+	.word sys_readahead, sys_socketcall, sys_syslog, sys_nis_syscall, sys_nis_syscall
 /*210*/	.word sys_nis_syscall, sys_nis_syscall, sys_waitpid, sys_swapoff, sys_sysinfo
 	.word sys_ipc, sys_nis_syscall, sys_clone, sys_nis_syscall, sys_adjtimex
 /*220*/	.word sys_nis_syscall, sys_create_module, sys_delete_module, sys_get_kernel_syms, sys_getpgid

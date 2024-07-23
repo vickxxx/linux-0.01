@@ -1,17 +1,20 @@
-/* $Id: su.c,v 1.43 2000/11/15 07:28:09 davem Exp $
+/* $Id: su.c,v 1.54 2001/11/07 14:52:30 davem Exp $
  * su.c: Small serial driver for keyboard/mouse interface on sparc32/PCI
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
- * Copyright (C) 1998-1999  Pete Zaitcev   (zaitcev@metabyte.com)
+ * Copyright (C) 1998-1999  Pete Zaitcev   (zaitcev@yahoo.com)
  *
  * This is mainly a variation of drivers/char/serial.c,
  * credits go to authors mentioned therein.
+ *
+ * Fixed to use tty_get_baud_rate().
+ *   Theodore Ts'o <tytso@mit.edu>, 2001-Oct-12
  */
 
 /*
  * Configuration section.
  */
-#define SERIAL_PARANOIA_CHECK
+#undef SERIAL_PARANOIA_CHECK
 #define CONFIG_SERIAL_NOPAUSE_IO	/* Unused on sparc */
 #define SERIAL_DO_RESTART
 
@@ -61,7 +64,7 @@ do {									\
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
 #include <linux/delay.h>
@@ -75,6 +78,9 @@ do {									\
 #include <asm/oplib.h>
 #include <asm/io.h>
 #include <asm/ebus.h>
+#ifdef CONFIG_SPARC64
+#include <asm/isa.h>
+#endif
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
@@ -225,9 +231,9 @@ static inline int serial_paranoia_check(struct su_struct *info,
 					kdev_t device, const char *routine)
 {
 #ifdef SERIAL_PARANOIA_CHECK
-	static const char *badmagic =
+	static const char *badmagic = KERN_WARNING
 		"Warning: bad magic number for serial struct (%s) in %s\n";
-	static const char *badinfo =
+	static const char *badinfo = KERN_WARNING
 		"Warning: null su_struct for (%s) in %s\n";
 
 	if (!info) {
@@ -335,7 +341,7 @@ static void su_start(struct tty_struct *tty)
  * This routine is used by the interrupt handler to schedule
  * processing in the software interrupt portion of the driver.
  */
-static __inline__ void
+static void
 su_sched_event(struct su_struct *info, int event)
 {
 	info->event |= 1 << event;
@@ -343,7 +349,7 @@ su_sched_event(struct su_struct *info, int event)
 	mark_bh(SERIAL_BH);
 }
 
-static __inline__ void
+static void
 receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs, int is_brk)
 {
 	unsigned char status = 0;
@@ -352,16 +358,16 @@ receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs, int is_brk)
 	do {
 		ch = serial_inp(info, UART_RX);
 		if (info->port_type == SU_PORT_KBD) {
-			if(ch == SUNKBD_RESET) {
+			if (ch == SUNKBD_RESET) {
                         	l1a_state.kbd_id = 1;
                         	l1a_state.l1_down = 0;
-                	} else if(l1a_state.kbd_id) {
+                	} else if (l1a_state.kbd_id) {
                         	l1a_state.kbd_id = 0;
-                	} else if(ch == SUNKBD_L1) {
+                	} else if (ch == SUNKBD_L1) {
                         	l1a_state.l1_down = 1;
-                	} else if(ch == (SUNKBD_L1|SUNKBD_UP)) {
+                	} else if (ch == (SUNKBD_L1|SUNKBD_UP)) {
                         	l1a_state.l1_down = 0;
-                	} else if(ch == SUNKBD_A && l1a_state.l1_down) {
+                	} else if (ch == SUNKBD_A && l1a_state.l1_down) {
                         	/* whee... */
                         	batten_down_hatches();
                         	/* Continue execution... */
@@ -378,7 +384,7 @@ receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs, int is_brk)
 	} while (status & UART_LSR_DR);
 }
 
-static __inline__ void
+static void
 receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
@@ -471,7 +477,7 @@ receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 		batten_down_hatches();
 }
 
-static __inline__ void
+static void
 transmit_chars(struct su_struct *info, int *intr_done)
 {
 	int count;
@@ -515,7 +521,7 @@ transmit_chars(struct su_struct *info, int *intr_done)
 	}
 }
 
-static __inline__ void
+static void
 check_modem_status(struct su_struct *info)
 {
 	int	status;
@@ -692,10 +698,7 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 }
 
@@ -929,27 +932,21 @@ shutdown(struct su_struct *info)
 	restore_flags(flags);
 }
 
-static __inline__ int
+static int
 su_get_baud_rate(struct su_struct *info)
 {
-	static int baud_table[] = {
-		0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400,
-		4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 0
-	};
-	int i;
+	static struct tty_struct c_tty;
+	static struct termios c_termios;
 
 	if (info->tty)
 		return tty_get_baud_rate(info->tty);
 
-	i = info->cflag & CBAUD;
-	if (i & CBAUDEX) {
-		i &= ~(CBAUDEX);
-		if (i < 1 || i > 4)
-			info->cflag &= ~(CBAUDEX);
-		else
-			i += 15;
-	}
-	return baud_table[i];
+	memset(&c_tty, 0, sizeof(c_tty));
+	memset(&c_termios, 0, sizeof(c_termios));
+	c_tty.termios = &c_termios;
+	c_termios.c_cflag = info->cflag;
+
+	return tty_get_baud_rate(&c_tty);
 }
 
 /*
@@ -1165,8 +1162,8 @@ su_change_mouse_baud(int baud)
 	if (info->port_type != SU_PORT_MS)
 		return;
 
-	info->cflag &= ~(CBAUDEX | CBAUD);
-	switch(baud) {
+	info->cflag &= ~CBAUD;
+	switch (baud) {
 		case 1200:
 			info->cflag |= B1200;
 			break;
@@ -1313,10 +1310,7 @@ su_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	restore_flags(flags);
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 /*
@@ -1411,6 +1405,41 @@ su_unthrottle(struct tty_struct * tty)
  */
 
 /*
+ * get_serial_info - handle TIOCGSERIAL ioctl()
+ *
+ * Purpose: Return standard serial struct information about
+ *          a serial port handled by this driver.
+ *
+ * Added:   11-May-2001 Lars Kellogg-Stedman <lars@larsshack.org>
+ */
+static int get_serial_info(struct su_struct * info,
+			   struct serial_struct * retinfo)
+{
+	struct serial_struct	tmp;
+
+	if (!retinfo)
+		return -EFAULT;
+	memset(&tmp, 0, sizeof(tmp));
+
+	tmp.type		= info->type;
+	tmp.line		= info->line;
+	tmp.port		= info->port;
+	tmp.irq			= info->irq;
+	tmp.flags		= info->flags;
+	tmp.xmit_fifo_size	= info->xmit_fifo_size;
+	tmp.baud_base		= info->baud_base;
+	tmp.close_delay		= info->close_delay;
+	tmp.closing_wait	= info->closing_wait;
+	tmp.custom_divisor	= info->custom_divisor;
+	tmp.hub6		= 0;
+
+	if (copy_to_user(retinfo,&tmp,sizeof(*retinfo)))
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
  * get_lsr_info - get line status register info
  *
  * Purpose: Let user call ioctl() to get info when the UART physically
@@ -1462,13 +1491,11 @@ get_modem_info(struct su_struct * info, unsigned int *value)
 static int
 set_modem_info(struct su_struct * info, unsigned int cmd, unsigned int *value)
 {
-	int error;
 	unsigned int arg;
 	unsigned long flags;
 
-	error = get_user(arg, value);
-	if (error)
-		return error;
+	if (get_user(arg, value))
+		return -EFAULT;
 	switch (cmd) {
 	case TIOCMBIS: 
 		if (arg & TIOCM_RTS)
@@ -1545,7 +1572,6 @@ static int
 su_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg)
 {
-	int error;
 	struct su_struct * info = (struct su_struct *)tty->driver_data;
 	struct async_icount cprev, cnow;	/* kernel counter temps */
 	struct serial_icounter_struct *p_cuser;	/* user space */
@@ -1567,6 +1593,9 @@ su_ioctl(struct tty_struct *tty, struct file * file,
 		case TIOCMBIC:
 		case TIOCMSET:
 			return set_modem_info(info, cmd, (unsigned int *) arg);
+
+		case TIOCGSERIAL:
+			return get_serial_info(info, (struct serial_struct *)arg);
 
 		case TIOCSERGETLSR: /* Get line status register */
 			return get_lsr_info(info, (unsigned int *) arg);
@@ -1622,14 +1651,11 @@ su_ioctl(struct tty_struct *tty, struct file * file,
 			cnow = info->icount;
 			sti();
 			p_cuser = (struct serial_icounter_struct *) arg;
-			error = put_user(cnow.cts, &p_cuser->cts);
-			if (error) return error;
-			error = put_user(cnow.dsr, &p_cuser->dsr);
-			if (error) return error;
-			error = put_user(cnow.rng, &p_cuser->rng);
-			if (error) return error;
-			error = put_user(cnow.dcd, &p_cuser->dcd);
-			if (error) return error;
+			if (put_user(cnow.cts, &p_cuser->cts) ||
+			    put_user(cnow.dsr, &p_cuser->dsr) ||
+			    put_user(cnow.rng, &p_cuser->rng) ||
+			    put_user(cnow.dcd, &p_cuser->dcd))
+				return -EFAULT;
 			return 0;
 
 		default:
@@ -1783,8 +1809,7 @@ su_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
@@ -2117,7 +2142,7 @@ su_open(struct tty_struct *tty, struct file * filp)
 /*
  * /proc fs routines....
  */
-static __inline__ int
+static int
 line_info(char *buf, struct su_struct *info)
 {
 	char		stat_buf[30], control, status;
@@ -2220,7 +2245,7 @@ done:
  */
 static __inline__ void __init show_su_version(void)
 {
-	char *revision = "$Revision: 1.43 $";
+	char *revision = "$Revision: 1.54 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2243,6 +2268,10 @@ autoconfig(struct su_struct *info)
 	unsigned char status1, status2, scratch, scratch2;
 	struct linux_ebus_device *dev = 0;
 	struct linux_ebus *ebus;
+#ifdef CONFIG_SPARC64
+	struct isa_bridge *isa_br;
+	struct isa_device *isa_dev;
+#endif
 #ifndef __sparc_v9__
 	struct linux_prom_registers reg0;
 #endif
@@ -2263,6 +2292,18 @@ autoconfig(struct su_struct *info)
 			}
 		}
 	}
+
+#ifdef CONFIG_SPARC64
+	for_each_isa(isa_br) {
+		for_each_isadev(isa_dev, isa_br) {
+			if (isa_dev->prom_node == info->port_node) {
+				info->port = isa_dev->resource.start;
+				info->irq = isa_dev->irq;
+				goto ebus_done;
+			}
+		}
+	}
+#endif
 
 #ifdef __sparc_v9__
 	/*
@@ -2578,6 +2619,30 @@ int __init su_kbd_ms_init(void)
 	return 0;
 }
 
+static int su_node_ok(int node, char *name, int namelen)
+{
+	if (strncmp(name, "su", namelen) == 0 ||
+	    strncmp(name, "su_pnp", namelen) == 0)
+		return 1;
+
+	if (strncmp(name, "serial", namelen) == 0) {
+		char compat[32];
+		int clen;
+
+		/* Is it _really_ a 'su' device? */
+		clen = prom_getproperty(node, "compatible", compat, sizeof(compat));
+		if (clen > 0) {
+			if (strncmp(compat, "sab82532", 8) == 0) {
+				/* Nope, Siemens serial, not for us. */
+				return 0;
+			}
+		}
+		return 1;
+	}
+
+	return 0;
+}
+
 /*
  * We got several platforms which present 'su' in different parts
  * of device tree. 'su' may be found under obio, ebus, isa and pci.
@@ -2593,9 +2658,7 @@ void __init su_probe_any(struct su_probe_scan *t, int sunode)
 	for (; sunode != 0; sunode = prom_getsibling(sunode)) {
 		len = prom_getproperty(sunode, "name", t->prop, SU_PROPSIZE);
 		if (len <= 1) continue;		/* Broken PROM node */
-		if (strncmp(t->prop, "su", len) == 0 ||
-		    strncmp(t->prop, "serial", len) == 0 ||
-		    strncmp(t->prop, "su_pnp", len) == 0) {
+		if (su_node_ok(sunode, t->prop, len)) {
 			info = &su_table[t->devices];
 			if (t->kbnode != 0 && sunode == t->kbnode) {
 				t->kbx = t->devices;
@@ -2784,40 +2847,6 @@ serial_console_write(struct console *co, const char *s,
 	su_outb(info, UART_IER, ier);
 }
 
-/*
- *	Receive character from the serial port
- */
-static int
-serial_console_wait_key(struct console *co)
-{
-	struct su_struct *info;
-	int ier;
-	int lsr;
-	int c;
-
-	info = su_table + co->index;
-
-	/*
-	 *	First save the IER then disable the interrupts so
-	 *	that the real driver for the port does not get the
-	 *	character.
-	 */
-	ier = su_inb(info, UART_IER);
-	su_outb(info, UART_IER, 0x00);
-
-	do {
-		lsr = su_inb(info, UART_LSR);
-	} while (!(lsr & UART_LSR_DR));
-	c = su_inb(info, UART_RX);
-
-	/*
-	 *	Restore the interrupts
-	 */
-	su_outb(info, UART_IER, ier);
-
-	return c;
-}
-
 static kdev_t
 serial_console_device(struct console *c)
 {
@@ -2844,7 +2873,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 	if (options) {
 		baud = simple_strtoul(options, NULL, 10);
 		s = options;
-		while(*s >= '0' && *s <= '9')
+		while (*s >= '0' && *s <= '9')
 			s++;
 		if (*s) parity = *s++;
 		if (*s) bits   = *s - '0';
@@ -2853,7 +2882,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 	/*
 	 *	Now construct a cflag setting.
 	 */
-	switch(baud) {
+	switch (baud) {
 		case 1200:
 			cflag |= B1200;
 			break;
@@ -2878,9 +2907,10 @@ static int __init serial_console_setup(struct console *co, char *options)
 		case 9600:
 		default:
 			cflag |= B9600;
+			baud = 9600;
 			break;
 	}
-	switch(bits) {
+	switch (bits) {
 		case 7:
 			cflag |= CS7;
 			break;
@@ -2889,7 +2919,7 @@ static int __init serial_console_setup(struct console *co, char *options)
 			cflag |= CS8;
 			break;
 	}
-	switch(parity) {
+	switch (parity) {
 		case 'o': case 'O':
 			cflag |= PARODD;
 			break;
@@ -2942,7 +2972,6 @@ static struct console sercons = {
 	name:		"ttyS",
 	write:		serial_console_write,
 	device:		serial_console_device,
-	wait_key:	serial_console_wait_key,
 	setup:		serial_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,
@@ -2956,14 +2985,16 @@ int su_console_registered = 0;
 int __init su_serial_console_init(void)
 {
 	extern int con_is_present(void);
+	int index;
 
 	if (con_is_present())
 		return 0;
 	if (serial_console == 0)
 		return 0;
-	if (su_table[0].port == 0 || su_table[0].port_node == 0)
+	index = serial_console - 1;
+	if (su_table[index].port == 0 || su_table[index].port_node == 0)
 		return 0;
-	sercons.index = 0;
+	sercons.index = index;
 	register_console(&sercons);
 	su_console_registered = 1;
 	return 0;

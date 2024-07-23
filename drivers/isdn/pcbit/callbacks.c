@@ -1,14 +1,12 @@
 /*
+ * Callbacks for the FSM
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        callbacks for the FSM
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
@@ -17,17 +15,12 @@
  * NULL pointer dereference in cb_in_1 (originally fixed in 2.0)
  */
 
-
-#define __NO_VERSION__
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/tqueue.h>
 #include <linux/skbuff.h>

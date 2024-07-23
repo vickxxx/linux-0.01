@@ -2,14 +2,15 @@
 #define _ASM_IA64_TIMEX_H
 
 /*
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ */
+/*
+ * 2001/01/18 davidm	Removed CLOCK_TICK_RATE.  It makes no sense on IA-64.
+ *			Also removed cacheflush_time as it's entirely unused.
  */
 
-#define CLOCK_TICK_RATE		1193180	/* Underlying HZ XXX fix me! */
-
 typedef unsigned long cycles_t;
-extern cycles_t cacheflush_time;
 
 static inline cycles_t
 get_cycles (void)
@@ -19,5 +20,8 @@ get_cycles (void)
 	__asm__ __volatile__ ("mov %0=ar.itc" : "=r"(ret));
 	return ret;
 }
+
+#define vxtime_lock()		do {} while (0)
+#define vxtime_unlock()		do {} while (0)
 
 #endif /* _ASM_IA64_TIMEX_H */

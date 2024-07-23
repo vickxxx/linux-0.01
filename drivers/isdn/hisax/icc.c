@@ -1,18 +1,18 @@
-// $Id: icc.c,v 1.5 2000/11/24 17:05:37 kai Exp $
-//-----------------------------------------------------------------------------
-//
-// ICC specific routines
-//
-// Author       Matt Henderson & Guy Ellis - Traverse Tecnologies Pty Ltd
-//              www.traverse.com.au
-//
-// 1999.6.25 Initial implementation of routines for Siemens ISDN
-// Communication Controler PEB 2070 based on the ISAC routines
-// written by Karsten Keil.
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
-//-----------------------------------------------------------------------------
+/* $Id: icc.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+ *
+ * ICC specific routines
+ *
+ * Author       Matt Henderson & Guy Ellis
+ * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * 1999.6.25 Initial implementation of routines for Siemens ISDN
+ * Communication Controller PEB 2070 based on the ISAC routines
+ * written by Karsten Keil.
+ *
+ */
 
 #define __NO_VERSION__
 #include <linux/init.h>
@@ -551,8 +551,8 @@ ICC_l1hw(struct PStack *st, int pr, void *arg)
 			}
 			break;
 		case (HW_DEACTIVATE | RESPONSE):
-			discard_queue(&cs->rq);
-			discard_queue(&cs->sq);
+			skb_queue_purge(&cs->rq);
+			skb_queue_purge(&cs->sq);
 			if (cs->tx_skb) {
 				dev_kfree_skb_any(cs->tx_skb);
 				cs->tx_skb = NULL;

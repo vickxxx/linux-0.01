@@ -31,6 +31,9 @@ unexport subdir-m
 unexport subdir-n
 unexport subdir-
 
+comma	:= ,
+EXTRA_CFLAGS_nostdinc := $(EXTRA_CFLAGS) $(kbuild_2_4_nostdinc)
+
 #
 # Get things started.
 #
@@ -48,15 +51,15 @@ ALL_SUB_DIRS	:= $(sort $(subdir-y) $(subdir-m) $(subdir-n) $(subdir-))
 #
 
 %.s: %.c
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -S $< -o $@
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) $(CFLAGS_$@) -S $< -o $@
 
 %.i: %.c
-	$(CPP) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) $< > $@
+	$(CPP) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) $(CFLAGS_$@) $< > $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -c -o $@ $<
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) $(CFLAGS_$@) -c -o $@ $<
 	@ ( \
-	    echo 'ifeq ($(strip $(subst $(comma),:,$(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@))),$$(strip $$(subst $$(comma),:,$$(CFLAGS) $$(EXTRA_CFLAGS) $$(CFLAGS_$@))))' ; \
+	    echo 'ifeq ($(strip $(subst $(comma),:,$(CFLAGS) $(EXTRA_CFLAGS_nostdinc) $(CFLAGS_$@))),$$(strip $$(subst $$(comma),:,$$(CFLAGS) $$(EXTRA_CFLAGS_nostdinc) $$(CFLAGS_$@))))' ; \
 	    echo 'FILES_FLAGS_UP_TO_DATE += $@' ; \
 	    echo 'endif' \
 	) > $(dir $@)/.$(notdir $@).flags
@@ -79,7 +82,7 @@ ifdef USE_STANDARD_AS_RULE
 endif
 
 %.lst: %.c
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -g -c -o $*.o $<
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) $(CFLAGS_$@) -g -c -o $*.o $<
 	$(TOPDIR)/scripts/makelst $* $(TOPDIR) $(OBJDUMP)
 #
 #
@@ -93,12 +96,12 @@ ifdef O_TARGET
 $(O_TARGET): $(obj-y)
 	rm -f $@
     ifneq "$(strip $(obj-y))" ""
-	$(LD) $(EXTRA_LDFLAGS) -r -o $@ $(filter $(obj-y), $^)
+	$(LD) $(LDFLAGS) $(EXTRA_LDFLAGS) -r -o $@ $(filter $(obj-y), $^)
     else
 	$(AR) rcs $@
     endif
 	@ ( \
-	    echo 'ifeq ($(strip $(subst $(comma),:,$(EXTRA_LDFLAGS) $(obj-y))),$$(strip $$(subst $$(comma),:,$$(EXTRA_LDFLAGS) $$(obj-y))))' ; \
+	    echo 'ifeq ($(strip $(subst $(comma),:,$(LDFLAGS) $(EXTRA_LDFLAGS) $(obj-y))),$$(strip $$(subst $$(comma),:,$$(LDFLAGS) $$(EXTRA_LDFLAGS) $$(obj-y))))' ; \
 	    echo 'FILES_FLAGS_UP_TO_DATE += $@' ; \
 	    echo 'endif' \
 	) > $(dir $@)/.$(notdir $@).flags
@@ -123,7 +126,7 @@ endif
 # This make dependencies quickly
 #
 fastdep: dummy
-	$(TOPDIR)/scripts/mkdep $(wildcard *.[chS] local.h.master) > .depend
+	$(TOPDIR)/scripts/mkdep $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -- $(wildcard *.[chS]) > .depend
 ifdef ALL_SUB_DIRS
 	$(MAKE) $(patsubst %,_sfdep_%,$(ALL_SUB_DIRS)) _FASTDEP_ALL_SUB_DIRS="$(ALL_SUB_DIRS)"
 endif
@@ -150,7 +153,7 @@ endif
 #
 ALL_MOBJS = $(filter-out $(obj-y), $(obj-m))
 ifneq "$(strip $(ALL_MOBJS))" ""
-PDWN=$(shell $(CONFIG_SHELL) $(TOPDIR)/scripts/pathdown.sh)
+MOD_DESTDIR := $(shell $(CONFIG_SHELL) $(TOPDIR)/scripts/pathdown.sh)
 endif
 
 unexport MOD_DIRS
@@ -172,8 +175,8 @@ modules: $(ALL_MOBJS) dummy \
 .PHONY: _modinst__
 _modinst__: dummy
 ifneq "$(strip $(ALL_MOBJS))" ""
-	mkdir -p $(MODLIB)/kernel/$(PDWN)
-	cp $(ALL_MOBJS) $(MODLIB)/kernel/$(PDWN)
+	mkdir -p $(MODLIB)/kernel/$(MOD_DESTDIR)
+	cp $(sort $(ALL_MOBJS)) $(MODLIB)/kernel/$(MOD_DESTDIR)
 endif
 
 .PHONY: modules_install
@@ -222,9 +225,9 @@ endif
 
 $(MODINCL)/%.ver: %.c
 	@if [ ! -r $(MODINCL)/$*.stamp -o $(MODINCL)/$*.stamp -ot $< ]; then \
-		echo '$(CC) $(CFLAGS) -E -D__GENKSYMS__ $<'; \
+		echo '$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -E -D__GENKSYMS__ $<'; \
 		echo '| $(GENKSYMS) $(genksyms_smp_prefix) -k $(VERSION).$(PATCHLEVEL).$(SUBLEVEL) > $@.tmp'; \
-		$(CC) $(CFLAGS) -E -D__GENKSYMS__ $< \
+		$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -E -D__GENKSYMS__ $< \
 		| $(GENKSYMS) $(genksyms_smp_prefix) -k $(VERSION).$(PATCHLEVEL).$(SUBLEVEL) > $@.tmp; \
 		if [ -r $@ ] && cmp -s $@ $@.tmp; then echo $@ is unchanged; rm -f $@.tmp; \
 		else echo mv $@.tmp $@; mv -f $@.tmp $@; fi; \
@@ -270,9 +273,9 @@ endif # CONFIG_MODVERSIONS
 
 ifneq "$(strip $(export-objs))" ""
 $(export-objs): $(export-objs:.o=.c) $(TOPDIR)/include/linux/modversions.h
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -DEXPORT_SYMTAB -c $(@:.o=.c)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS_nostdinc) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) $(CFLAGS_$@) -DEXPORT_SYMTAB -c $(@:.o=.c)
 	@ ( \
-	    echo 'ifeq ($(strip $(subst $(comma),:,$(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -DEXPORT_SYMTAB)),$$(strip $$(subst $$(comma),:,$$(CFLAGS) $$(EXTRA_CFLAGS) $$(CFLAGS_$@) -DEXPORT_SYMTAB)))' ; \
+	    echo 'ifeq ($(strip $(subst $(comma),:,$(CFLAGS) $(EXTRA_CFLAGS_nostdinc) $(CFLAGS_$@) -DEXPORT_SYMTAB)),$$(strip $$(subst $$(comma),:,$$(CFLAGS) $$(EXTRA_CFLAGS_nostdinc) $$(CFLAGS_$@) -DEXPORT_SYMTAB)))' ; \
 	    echo 'FILES_FLAGS_UP_TO_DATE += $@' ; \
 	    echo 'endif' \
 	) > $(dir $@)/.$(notdir $@).flags

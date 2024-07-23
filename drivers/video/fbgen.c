@@ -3,6 +3,9 @@
  *
  *  Created 3 Jan 1998 by Geert Uytterhoeven
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
@@ -25,9 +28,18 @@ static int currcon = 0;
 /* ---- `Generic' versions of the frame buffer device operations ----------- */
 
 
-    /*
-     *  Get the Fixed Part of the Display
-     */
+/**
+ *	fbgen_get_fix - get fixed part of display
+ *	@fix: fb_fix_screeninfo structure
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Get the fixed information part of the display and place it
+ *	into @fix for virtual console @con on device @info.
+ *
+ *	Returns negative errno on error, or zero on success.
+ *
+ */
 
 int fbgen_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
 {
@@ -48,9 +60,18 @@ int fbgen_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
 }
 
 
-    /*
-     *  Get the User Defined Part of the Display
-     */
+/**
+ *	fbgen_get_var - get user defined part of display
+ *	@var: fb_var_screeninfo structure
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Get the user defined part of the display and place it into @var
+ *	for virtual console @con on device @info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_get_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 {
@@ -67,15 +88,25 @@ int fbgen_get_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 }
 
 
-    /*
-     *  Set the User Defined Part of the Display
-     */
+/**
+ *	fbgen_set_var - set the user defined part of display
+ *	@var: fb_var_screeninfo user defined part of the display
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Set the user defined part of the display as dictated by @var
+ *	for virtual console @con on device @info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_set_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 {
     struct fb_info_gen *info2 = (struct fb_info_gen *)info;
     int err;
     int oldxres, oldyres, oldbpp, oldxres_virtual, oldyres_virtual, oldyoffset;
+    struct fb_bitfield oldred, oldgreen, oldblue;
 
     if ((err = fbgen_do_set_var(var, con == currcon, info2)))
 	return err;
@@ -85,12 +116,18 @@ int fbgen_set_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 	oldxres_virtual = fb_display[con].var.xres_virtual;
 	oldyres_virtual = fb_display[con].var.yres_virtual;
 	oldbpp = fb_display[con].var.bits_per_pixel;
+	oldred = fb_display[con].var.red;
+	oldgreen = fb_display[con].var.green;
+	oldblue = fb_display[con].var.blue;
 	oldyoffset = fb_display[con].var.yoffset;
 	fb_display[con].var = *var;
 	if (oldxres != var->xres || oldyres != var->yres ||
 	    oldxres_virtual != var->xres_virtual ||
 	    oldyres_virtual != var->yres_virtual ||
 	    oldbpp != var->bits_per_pixel ||
+	    (!(memcmp(&oldred, &(var->red), sizeof(struct fb_bitfield)))) || 
+	    (!(memcmp(&oldgreen, &(var->green), sizeof(struct fb_bitfield)))) ||
+	    (!(memcmp(&oldblue, &(var->blue), sizeof(struct fb_bitfield)))) ||
 	    oldyoffset != var->yoffset) {
 	    fbgen_set_disp(con, info2);
 	    if (info->changevar)
@@ -105,9 +142,19 @@ int fbgen_set_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 }
 
 
-    /*
-     *  Get the Colormap
-     */
+/**
+ *	fbgen_get_cmap - get the colormap
+ *	@cmap: frame buffer colormap structure
+ *	@kspc: boolean, 0 copy local, 1 put_user() function
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Gets the colormap for virtual console @con and places it into
+ *	@cmap for device @info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 		   struct fb_info *info)
@@ -128,9 +175,19 @@ int fbgen_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-    /*
-     *  Set the Colormap
-     */
+/**
+ *	fbgen_set_cmap - set the colormap
+ *	@cmap: frame buffer colormap structure
+ *	@kspc: boolean, 0 copy local, 1 get_user() function
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Sets the colormap @cmap for virtual console @con on
+ *	device @info.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 		   struct fb_info *info)
@@ -152,11 +209,20 @@ int fbgen_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-    /*
-     *  Pan or Wrap the Display
-     *
-     *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
-     */
+/**
+ *	fbgen_pan_display - pan or wrap the display
+ *	@var: frame buffer user defined part of display
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Pan or wrap virtual console @con for device @info.
+ *
+ *	This call looks only at xoffset, yoffset and the
+ *	FB_VMODE_YWRAP flag in @var.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_pan_display(struct fb_var_screeninfo *var, int con,
 		      struct fb_info *info)
@@ -193,9 +259,18 @@ int fbgen_pan_display(struct fb_var_screeninfo *var, int con,
 /* ---- Helper functions --------------------------------------------------- */
 
 
-    /*
-     *  Change the video mode
-     */
+/**
+ *	fbgen_do_set_var - change the video mode
+ *	@var: frame buffer user defined part of display
+ *	@isactive: boolean, 0 inactive, 1 active
+ *	@info: generic frame buffer info structure
+ *
+ *	Change the video mode settings for device @info.  If @isactive
+ *	is non-zero, the changes will be activated immediately.
+ *
+ *	Return negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_do_set_var(struct fb_var_screeninfo *var, int isactive,
 		     struct fb_info_gen *info)
@@ -214,6 +289,15 @@ int fbgen_do_set_var(struct fb_var_screeninfo *var, int isactive,
     return 0;
 }
 
+
+/**
+ *	fbgen_set_disp - set generic display
+ *	@con: virtual console number
+ *	@info: generic frame buffer info structure
+ *
+ *	Sets a display on virtual console @con for device @info.
+ *
+ */
 
 void fbgen_set_disp(int con, struct fb_info_gen *info)
 {
@@ -254,9 +338,15 @@ void fbgen_set_disp(int con, struct fb_info_gen *info)
 }
 
 
-    /*
-     *  Install the current colormap
-     */
+/**
+ *	fbgen_install_cmap - install the current colormap
+ *	@con: virtual console number
+ *	@info: generic frame buffer info structure
+ *
+ *	Installs the current colormap for virtual console @con on
+ *	device @info.
+ *
+ */
 
 void fbgen_install_cmap(int con, struct fb_info_gen *info)
 {
@@ -272,9 +362,18 @@ void fbgen_install_cmap(int con, struct fb_info_gen *info)
 }
 
 
-    /*
-     *  Update the `var' structure (called by fbcon.c)
-     */
+/**
+ *	fbgen_update_var - update user defined part of display
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Updates the user defined part of the display ('var'
+ *	structure) on virtual console @con for device @info.
+ *	This function is called by fbcon.c.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int fbgen_update_var(int con, struct fb_info *info)
 {
@@ -290,9 +389,16 @@ int fbgen_update_var(int con, struct fb_info *info)
 }
 
 
-    /*
-     *  Switch to a different virtual console
-     */
+/**
+ *	fbgen_switch - switch to a different virtual console.
+ *	@con: virtual console number
+ *	@info: frame buffer info structure
+ *
+ *	Switch to virtuall console @con on device @info.
+ *
+ *	Returns zero.
+ *
+ */
 
 int fbgen_switch(int con, struct fb_info *info)
 {
@@ -311,9 +417,14 @@ int fbgen_switch(int con, struct fb_info *info)
 }
 
 
-    /*
-     *  Blank the screen
-     */
+/**
+ *	fbgen_blank - blank the screen
+ *	@blank: boolean, 0 unblank, 1 blank
+ *	@info: frame buffer info structure
+ *
+ *	Blank the screen on device @info.
+ *
+ */
 
 void fbgen_blank(int blank, struct fb_info *info)
 {
@@ -336,3 +447,22 @@ void fbgen_blank(int blank, struct fb_info *info)
     } else
 	fbgen_install_cmap(currcon, info2);
 }
+MODULE_LICENSE("GPL");
+
+
+    /*
+     *  Visible symbols for modules
+     */
+
+EXPORT_SYMBOL(fbgen_get_var);
+EXPORT_SYMBOL(fbgen_get_cmap);
+EXPORT_SYMBOL(fbgen_get_fix);
+EXPORT_SYMBOL(fbgen_set_var);
+EXPORT_SYMBOL(fbgen_set_cmap);
+EXPORT_SYMBOL(fbgen_set_disp);
+EXPORT_SYMBOL(fbgen_install_cmap);
+EXPORT_SYMBOL(fbgen_pan_display);
+EXPORT_SYMBOL(fbgen_update_var);
+EXPORT_SYMBOL(fbgen_do_set_var);
+EXPORT_SYMBOL(fbgen_switch);
+EXPORT_SYMBOL(fbgen_blank);

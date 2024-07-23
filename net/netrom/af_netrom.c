@@ -31,6 +31,9 @@
  *	NET/ROM 007	Jonathan(G4KLX)	New timer architecture.
  *					Impmented Idle timer.
  *			Arnaldo C. Melo s/suser/capable/, micro cleanups
+ *			Jeroen(PE1RXQ)	Use sock_orphan() on release.
+ *			Tomi(OH2BNS)	Better frame type checking.
+ *					Device refcnt fixes.
  */
 
 #include <linux/config.h>
@@ -127,6 +130,7 @@ static void nr_remove_socket(struct sock *sk)
 
 	if ((s = nr_list) == sk) {
 		nr_list = s->next;
+		dev_put(sk->protinfo.nr->device);
 		restore_flags(flags);
 		return;
 	}
@@ -134,6 +138,7 @@ static void nr_remove_socket(struct sock *sk)
 	while (s != NULL && s->next != NULL) {
 		if (s->next == sk) {
 			s->next = sk->next;
+			dev_put(sk->protinfo.nr->device);
 			restore_flags(flags);
 			return;
 		}
@@ -407,6 +412,9 @@ static int nr_getsockopt(struct socket *sock, int level, int optname,
 	if (get_user(len, optlen))
 		return -EFAULT;
 
+	if (len < 0)
+		return -EINVAL;
+		
 	switch (optname) {
 		case NETROM_T1:
 			val = sk->protinfo.nr->t1 / HZ;
@@ -432,7 +440,7 @@ static int nr_getsockopt(struct socket *sock, int level, int optname,
 			return -ENOPROTOOPT;
 	}
 
-	len = min(len, sizeof(int));
+	len = min_t(unsigned int, len, sizeof(int));
 
 	if (put_user(len, optlen))
 		return -EFAULT;
@@ -569,9 +577,8 @@ static int nr_release(struct socket *sock)
 			sk->state                = TCP_CLOSE;
 			sk->shutdown            |= SEND_SHUTDOWN;
 			sk->state_change(sk);
-			sk->dead                 = 1;
+			sock_orphan(sk);
 			sk->destroy              = 1;
-			sk->socket               = NULL;
 			break;
 
 		default:
@@ -613,16 +620,20 @@ full_sockaddr_ax25))
 	 * Only the super user can set an arbitrary user callsign.
 	 */
 	if (addr->fsa_ax25.sax25_ndigis == 1) {
-		if (!capable(CAP_NET_BIND_SERVICE))
+		if (!capable(CAP_NET_BIND_SERVICE)) {
+			dev_put(dev);
 			return -EACCES;
+		}
 		sk->protinfo.nr->user_addr   = addr->fsa_digipeater[0];
 		sk->protinfo.nr->source_addr = addr->fsa_ax25.sax25_call;
 	} else {
 		source = &addr->fsa_ax25.sax25_call;
 
 		if ((user = ax25_findbyuid(current->euid)) == NULL) {
-			if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE))
+			if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE)) {
+				dev_put(dev);
 				return -EPERM;
+			}
 			user = source;
 		}
 
@@ -677,8 +688,10 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 		source = (ax25_address *)dev->dev_addr;
 
 		if ((user = ax25_findbyuid(current->euid)) == NULL) {
-			if (ax25_uid_policy && !capable(CAP_NET_ADMIN))
+			if (ax25_uid_policy && !capable(CAP_NET_ADMIN)) {
+				dev_put(dev);
 				return -EPERM;
+			}
 			user = source;
 		}
 
@@ -835,17 +848,38 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	frametype          = skb->data[19] & 0x0F;
 	flags              = skb->data[19] & 0xF0;
 
+	switch (frametype) {
+	case NR_PROTOEXT:
 #ifdef CONFIG_INET
-	/*
-	 * Check for an incoming IP over NET/ROM frame.
-	 */
-	if (frametype == NR_PROTOEXT && circuit_index == NR_PROTO_IP && circuit_id == NR_PROTO_IP) {
-		skb_pull(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
-		skb->h.raw = skb->data;
+		/*
+		 * Check for an incoming IP over NET/ROM frame.
+		 */
+		if (circuit_index == NR_PROTO_IP && circuit_id == NR_PROTO_IP) {
+			skb_pull(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
+			skb->h.raw = skb->data;
 
-		return nr_rx_ip(skb, dev);
-	}
+			return nr_rx_ip(skb, dev);
+		}
 #endif
+		return 0;
+
+	case NR_CONNREQ:
+	case NR_CONNACK:
+	case NR_DISCREQ:
+	case NR_DISCACK:
+	case NR_INFO:
+	case NR_INFOACK:
+		/*
+		 * These frame types we understand.
+		 */
+		break;
+
+	default:
+		/*
+		 * Everything else is ignored.
+		 */
+		return 0;
+	}
 
 	/*
 	 * Find an existing socket connection, based on circuit ID, if it's
@@ -952,6 +986,8 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	sk->ack_backlog++;
 	make->pair = sk;
 
+	dev_hold(make->protinfo.nr->device);
+
 	nr_insert_socket(make);
 
 	skb_queue_head(&sk->receive_queue, skb);
@@ -1010,7 +1046,7 @@ static int nr_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct s
 	SOCK_DEBUG(sk, "NET/ROM: sendto: building packet.\n");
 	size = len + AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + NR_NETWORK_LEN + NR_TRANSPORT_LEN;
 
-	if ((skb = sock_alloc_send_skb(sk, size, 0, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
+	if ((skb = sock_alloc_send_skb(sk, size, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
 
 	skb_reserve(skb, size - len);
@@ -1224,10 +1260,9 @@ static int nr_get_info(char *buffer, char **start, off_t offset, int length)
 	return(len);
 } 
 
-static struct net_proto_family nr_family_ops = 
-{
-	PF_NETROM,
-	nr_create
+static struct net_proto_family nr_family_ops = {
+	family:		PF_NETROM,
+	create:		nr_create,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(nr_proto_ops) = {
@@ -1248,21 +1283,28 @@ static struct proto_ops SOCKOPS_WRAPPED(nr_proto_ops) = {
 	sendmsg:	nr_sendmsg,
 	recvmsg:	nr_recvmsg,
 	mmap:		sock_no_mmap,
+	sendpage:	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
 SOCKOPS_WRAP(nr_proto, PF_NETROM);
 
 static struct notifier_block nr_dev_notifier = {
-	nr_device_event,
-	0
+	notifier_call:	nr_device_event,
 };
 
 static struct net_device *dev_nr;
 
+static char banner[] __initdata = KERN_INFO "G4KLX NET/ROM for Linux. Version 0.7 for AX25.037 Linux 2.4\n";
+
 static int __init nr_proto_init(void)
 {
 	int i;
+
+	if (nr_ndevs > 0x7fffffff/sizeof(struct net_device)) {
+		printk(KERN_ERR "NET/ROM: nr_proto_init - nr_ndevs parameter to large\n");
+		return -1;
+	}
 
 	if ((dev_nr = kmalloc(nr_ndevs * sizeof(struct net_device), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "NET/ROM: nr_proto_init - unable to allocate device structure\n");
@@ -1279,7 +1321,7 @@ static int __init nr_proto_init(void)
 
 	sock_register(&nr_family_ops);
 	register_netdevice_notifier(&nr_dev_notifier);
-	printk(KERN_INFO "G4KLX NET/ROM for Linux. Version 0.7 for AX25.037 Linux 2.4\n");
+	printk(banner);
 
 	ax25_protocol_register(AX25_P_NETROM, nr_route_frame);
 	ax25_linkfail_register(nr_link_failed);
@@ -1306,6 +1348,7 @@ MODULE_PARM_DESC(nr_ndevs, "number of NET/ROM devices");
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio NET/ROM network and transport layer protocol");
+MODULE_LICENSE("GPL");
 
 static void __exit nr_exit(void)
 {
@@ -1334,7 +1377,6 @@ static void __exit nr_exit(void)
 			dev_nr[i].priv = NULL;
 			unregister_netdev(&dev_nr[i]);
 		}
-		kfree(dev_nr[i].name);
 	}
 
 	kfree(dev_nr);

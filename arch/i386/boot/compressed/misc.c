@@ -9,8 +9,13 @@
  * High loaded stuff by Hans Lermen & Werner Almesberger, Feb. 1996
  */
 
+#define STANDALONE
+
+#include <linux/linkage.h>
 #include <linux/vmalloc.h>
+#include <linux/tty.h>
 #include <asm/io.h>
+
 /*
  * gzip declarations
  */
@@ -20,6 +25,14 @@
 
 #undef memset
 #undef memcpy
+
+/*
+ * Why do we do this? Don't ask me..
+ *
+ * Incomprehensible are the ways of bootloaders.
+ */
+static void* memset(void *, int, size_t);
+static void* memcpy(void *, __const void *, size_t);
 #define memzero(s, n)     memset ((s), 0, (n))
 
 typedef unsigned char  uch;
@@ -88,15 +101,11 @@ static long bytes_out = 0;
 static uch *output_data;
 static unsigned long output_ptr = 0;
 
- 
 static void *malloc(int size);
 static void free(void *where);
-static void error(char *m);
-static void gzip_mark(void **);
-static void gzip_release(void **);
- 
-static void puts(const char *);
-  
+
+static void putstr(const char *);
+
 extern int end;
 static long free_mem_ptr = (long)&end;
 static long free_mem_end_ptr;
@@ -156,7 +165,7 @@ static void scroll(void)
 		vidmem[i] = ' ';
 }
 
-static void puts(const char *s)
+static void putstr(const char *s)
 {
 	int x,y,pos;
 	char c;
@@ -193,7 +202,7 @@ static void puts(const char *s)
 	outb_p(0xff & (pos >> 1), vidport+1);
 }
 
-void* memset(void* s, int c, size_t n)
+static void* memset(void* s, int c, size_t n)
 {
 	int i;
 	char *ss = (char*)s;
@@ -202,7 +211,7 @@ void* memset(void* s, int c, size_t n)
 	return s;
 }
 
-void* memcpy(void* __dest, __const void* __src,
+static void* memcpy(void* __dest, __const void* __src,
 			    size_t __n)
 {
 	int i;
@@ -274,9 +283,9 @@ static void flush_window(void)
 
 static void error(char *x)
 {
-	puts("\n\n");
-	puts(x);
-	puts("\n\n -- System halted");
+	putstr("\n\n");
+	putstr(x);
+	putstr("\n\n -- System halted");
 
 	while(1);	/* Halt */
 }
@@ -290,7 +299,7 @@ struct {
 	short b;
 	} stack_start = { & user_stack [STACK_SIZE] , __KERNEL_DS };
 
-void setup_normal_output_buffer(void)
+static void setup_normal_output_buffer(void)
 {
 #ifdef STANDARD_MEMORY_BIOS_CALL
 	if (EXT_MEM_K < 1024) error("Less than 2MB of memory.\n");
@@ -306,7 +315,7 @@ struct moveparams {
 	uch *high_buffer_start; int hcount;
 };
 
-void setup_output_buffer_if_we_run_high(struct moveparams *mv)
+static void setup_output_buffer_if_we_run_high(struct moveparams *mv)
 {
 	high_buffer_start = (uch *)(((ulg)&end) + HEAP_SIZE);
 #ifdef STANDARD_MEMORY_BIOS_CALL
@@ -328,7 +337,7 @@ void setup_output_buffer_if_we_run_high(struct moveparams *mv)
 	mv->high_buffer_start = high_buffer_start;
 }
 
-void close_output_buffer_if_we_run_high(struct moveparams *mv)
+static void close_output_buffer_if_we_run_high(struct moveparams *mv)
 {
 	if (bytes_out > low_buffer_size) {
 		mv->lcount = low_buffer_size;
@@ -341,7 +350,7 @@ void close_output_buffer_if_we_run_high(struct moveparams *mv)
 }
 
 
-int decompress_kernel(struct moveparams *mv, void *rmode)
+asmlinkage int decompress_kernel(struct moveparams *mv, void *rmode)
 {
 	real_mode = rmode;
 
@@ -360,9 +369,9 @@ int decompress_kernel(struct moveparams *mv, void *rmode)
 	else setup_output_buffer_if_we_run_high(mv);
 
 	makecrc();
-	puts("Uncompressing Linux... ");
+	putstr("Uncompressing Linux... ");
 	gunzip();
-	puts("Ok, booting the kernel.\n");
+	putstr("Ok, booting the kernel.\n");
 	if (high_loaded) close_output_buffer_if_we_run_high(mv);
 	return high_loaded;
 }

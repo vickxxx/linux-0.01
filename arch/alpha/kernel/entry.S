@@ -10,7 +10,7 @@
 
 #define SIGCHLD 20
 
-#define NR_SYSCALLS 377
+#define NR_SYSCALLS 382
 
 /*
  * These offsets must match with alpha_mv in <asm/machvec.h>.
@@ -31,7 +31,7 @@
 #define TASK_STATE		0
 #define TASK_FLAGS		8
 #define TASK_SIGPENDING		16
-#define TASK_ADDR_LIMIT		24	
+#define TASK_ADDR_LIMIT		24
 #define TASK_EXEC_DOMAIN	32
 #define TASK_NEED_RESCHED	40
 #define TASK_PTRACE		48
@@ -231,12 +231,12 @@ kernel_clone:
 .end	kernel_clone
 
 /*
- * kernel_thread(fn, arg, clone_flags)
+ * arch_kernel_thread(fn, arg, clone_flags)
  */
 .align 3
-.globl	kernel_thread
-.ent	kernel_thread
-kernel_thread:
+.globl	arch_kernel_thread
+.ent	arch_kernel_thread
+arch_kernel_thread:
 	ldgp	$29,0($27)	/* we can be called from a module */
 	.frame $30, 4*8, $26
 	subq	$30,4*8,$30
@@ -265,7 +265,7 @@ kernel_thread:
 	mov	$0,$16
 	mov	$31,$26
 	jsr	$31,sys_exit
-.end	kernel_thread
+.end	arch_kernel_thread
 
 /*
  * __kernel_execve(path, argv, envp, regs)
@@ -576,15 +576,6 @@ entSys:
 .align 3
 ret_from_sys_call:
 	cmovne	$26,0,$19		/* $19 = 0 => non-restartable */
-	ldl	$3,TASK_PROCESSOR($8)
-	lda	$4,irq_stat		/* softirq_active */
-	sll	$3,L1_CACHE_SHIFT,$3
-	addq	$3,$4,$4
-	ldq	$4,0($4)		/* softirq_active[32] + softirq_mask[32] */
-	sll	$4,32,$3
-	and	$4,$3,$4
-	bne	$4,handle_softirq
-ret_from_softirq:
 	ldq	$0,SP_OFF($30)
 	and	$0,8,$0
 	beq	$0,restore_all
@@ -663,17 +654,6 @@ strace_error:
 	br	ret_from_sys_call
 
 	.align 3
-handle_softirq:
-	subq	$30,16,$30
-	stq	$19,0($30)	/* save syscall nr */
-	stq	$20,8($30)	/* and error indication (a3) */
-	jsr	$26,do_softirq
-	ldq	$19,0($30)
-	ldq	$20,8($30)
-	addq	$30,16,$30
-	br	ret_from_softirq
-	
-	.align 3
 syscall_error:
 	/*
 	 * Some system calls (e.g., ptrace) can return arbitrary
@@ -709,16 +689,14 @@ signal_return:
 	br	restore_all
 .end entSys
 
-#ifdef CONFIG_SMP
-        .globl  ret_from_smp_fork
+        .globl  ret_from_fork
 .align 3
-.ent ret_from_smp_fork
-ret_from_smp_fork:
+.ent ret_from_fork
+ret_from_fork:
 	lda	$26,ret_from_sys_call
 	mov	$17,$16
 	jsr	$31,schedule_tail
-.end ret_from_smp_fork
-#endif /* CONFIG_SMP */
+.end ret_from_fork
 
 .align 3
 .ent reschedule
@@ -761,9 +739,12 @@ sys_sigsuspend:
 	mov	$30,$17
 	br	$1,do_switch_stack
 	mov	$30,$18
+	subq	$30,16,$30
+	stq	$26,0($30)
 	jsr	$26,do_sigsuspend
-	lda	$30,SWITCH_STACK_SIZE($30)
-	br	ret_from_sys_call
+	ldq	$26,0($30)
+	lda	$30,SWITCH_STACK_SIZE+16($30)
+	ret	$31,($26),1
 .end sys_sigsuspend
 
 .align 3
@@ -772,9 +753,12 @@ sys_rt_sigsuspend:
 	mov	$30,$18
 	br	$1,do_switch_stack
 	mov	$30,$19
+	subq	$30,16,$30
+	stq	$26,0($30)
 	jsr	$26,do_rt_sigsuspend
-	lda	$30,SWITCH_STACK_SIZE($30)
-	br	ret_from_sys_call
+	ldq	$26,0($30)
+	lda	$30,SWITCH_STACK_SIZE+16($30)
+	ret	$31,($26),1
 .end sys_rt_sigsuspend
 
 	.data
@@ -902,8 +886,13 @@ sys_call_table:
 	.quad osf_getrusage
 	.quad sys_getsockopt
 	.quad alpha_ni_syscall
+#ifdef CONFIG_OSF4_COMPAT
+	.quad osf_readv				/* 120 */
+	.quad osf_writev
+#else
 	.quad sys_readv				/* 120 */
 	.quad sys_writev
+#endif
 	.quad osf_settimeofday
 	.quad sys_fchown
 	.quad sys_fchmod
@@ -1161,3 +1150,12 @@ sys_call_table:
 	.quad sys_mincore			/* 375 */
 	.quad sys_pciconfig_iobase
 	.quad sys_getdents64
+	.quad sys_gettid
+	.quad sys_readahead
+	.quad sys_ni_syscall			/* 380, sys_security */
+	.quad sys_tkill
+
+/* Remember to update everything, kids.  */
+.ifne (. - sys_call_table) - (NR_SYSCALLS * 8)
+.err
+.endif

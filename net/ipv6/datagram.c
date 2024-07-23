@@ -3,9 +3,9 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<roque@di.fc.ul.pt>	
+ *	Pedro Roque		<pedro_m@yahoo.com>	
  *
- *	$Id: datagram.c,v 1.21 2000/11/28 13:42:08 davem Exp $
+ *	$Id: datagram.c,v 1.23 2001/09/01 00:31:50 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -57,7 +57,7 @@ void ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err,
 	serr->port = port;
 
 	skb->h.raw = payload;
-	skb_pull(skb, payload - skb->data);
+	__skb_pull(skb, payload - skb->data);
 
 	if (sock_queue_err_skb(sk, skb))
 		kfree_skb(skb);
@@ -92,7 +92,7 @@ void ipv6_local_error(struct sock *sk, int err, struct flowi *fl, u32 info)
 	serr->port = fl->uli_u.ports.dport;
 
 	skb->h.raw = skb->tail;
-	skb_pull(skb, skb->tail - skb->data);
+	__skb_pull(skb, skb->tail - skb->data);
 
 	if (sock_queue_err_skb(sk, skb))
 		kfree_skb(skb);
@@ -123,7 +123,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 		msg->msg_flags |= MSG_TRUNC;
 		copied = len;
 	}
-	err = memcpy_toiovec(msg->msg_iov, skb->data, copied);
+	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 	if (err)
 		goto out_free_skb;
 
@@ -147,7 +147,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 			}
 		} else {
 			ipv6_addr_set(&sin->sin6_addr, 0, 0,
-				      __constant_htonl(0xffff),
+				      htonl(0xffff),
 				      *(u32*)(skb->nh.raw + serr->addr_offset));
 		}
 	}
@@ -158,6 +158,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	if (serr->ee.ee_origin != SO_EE_ORIGIN_LOCAL) {
 		sin->sin6_family = AF_INET6;
 		sin->sin6_flowinfo = 0;
+		sin->sin6_scope_id = 0;
 		if (serr->ee.ee_origin == SO_EE_ORIGIN_ICMP6) {
 			memcpy(&sin->sin6_addr, &skb->nh.ipv6h->saddr, 16);
 			if (sk->net_pinfo.af_inet6.rxopt.all)
@@ -168,7 +169,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 			}
 		} else {
 			ipv6_addr_set(&sin->sin6_addr, 0, 0,
-				      __constant_htonl(0xffff),
+				      htonl(0xffff),
 				      skb->nh.iph->saddr);
 			if (sk->protinfo.af_inet.cmsg_flags)
 				ip_cmsg_recv(msg, skb);
@@ -259,9 +260,7 @@ int datagram_send_ctl(struct msghdr *msg, struct flowi *fl,
 
 	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
 
-		if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
-		    (unsigned long)(((char*)cmsg - (char*)msg->msg_control)
-				    + cmsg->cmsg_len) > msg->msg_controllen) {
+		if (!CMSG_OK(msg, cmsg)) {
 			err = -EINVAL;
 			goto exit_f;
 		}
@@ -427,7 +426,8 @@ int datagram_send_ctl(struct msghdr *msg, struct flowi *fl,
 			break;
 
 		default:
-			printk(KERN_DEBUG "invalid cmsg type: %d\n", cmsg->cmsg_type);
+			if (net_ratelimit())
+				printk(KERN_DEBUG "invalid cmsg type: %d\n", cmsg->cmsg_type);
 			err = -EINVAL;
 			break;
 		};

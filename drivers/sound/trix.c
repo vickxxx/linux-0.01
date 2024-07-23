@@ -17,7 +17,6 @@
  *	Arnaldo C. de Melo	Got rid of attach_uart401
  */
  
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
 
@@ -544,3 +543,4 @@ static int __init setup_trix (char *str)
 
 __setup("trix=", setup_trix);
 #endif
+MODULE_LICENSE("GPL");

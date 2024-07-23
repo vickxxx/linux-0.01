@@ -5,8 +5,6 @@
  * These symbols are used by dmsdos.
  */
 
-#define ASC_LINUX_VERSION(V, P, S)	(((V) * 65536) + ((P) * 256) + (S))
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/init.h>
 
@@ -35,3 +33,4 @@ static void __exit exit_vfat_fs(void)
 
 module_init(init_vfat_fs)
 module_exit(exit_vfat_fs)
+MODULE_LICENSE("GPL");

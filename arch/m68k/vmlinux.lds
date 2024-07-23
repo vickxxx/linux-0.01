@@ -9,10 +9,9 @@ SECTIONS
   .text : {
 	*(.text)
 	*(.fixup)
-	*(.text.lock)		/* out-of-line lock text */
 	*(.gnu.warning)
 	} = 0x4e75
-  .rodata : { *(.rodata) }
+  .rodata : { *(.rodata) *(.rodata.*) }
   .kstrtab : { *(.kstrtab) }
 
   . = ALIGN(16);		/* Exception table */

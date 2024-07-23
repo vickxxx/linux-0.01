@@ -19,8 +19,8 @@
  *    KEY-5    (empty)     -           leave old empty file alone
  */
 
-#include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 
 #include <ctype.h>
 #include <errno.h>
@@ -115,10 +115,10 @@ int main(int argc, const char * argv [])
 
 	/* Make the output file name. */
 	str_config += sizeof("CONFIG_") - 1;
-	for (itarget = 0; !isspace(str_config[itarget]); itarget++)
+	for (itarget = 0; !isspace((int)str_config[itarget]); itarget++)
 	{
 	    char c = str_config[itarget];
-	    if (isupper(c)) c = tolower(c);
+	    if (isupper((int)c)) c = tolower((int)c);
 	    if (c == '_')   c = '/';
 	    ptarget[itarget] = c;
 	}
@@ -188,7 +188,7 @@ int main(int argc, const char * argv [])
      * So by having an initial \n, strstr will find exact matches.
      */
 
-    fp_find = popen("find * -type f -print", "r");
+    fp_find = popen("find * -type f -name \"*.h\" -print", "r");
     if (fp_find == 0)
 	ERROR_EXIT( "find" );
 

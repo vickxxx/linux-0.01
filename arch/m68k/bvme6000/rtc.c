@@ -9,12 +9,12 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/mc146818rtc.h>	/* For struct rtc_time and ioctls, etc */
+#include <linux/rtc.h>	/* For struct rtc_time and ioctls, etc */
 #include <linux/smp_lock.h>
 #include <asm/bvme6000hw.h>
 
@@ -54,6 +54,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
+		memset(&wtime, 0, sizeof(struct rtc_time));
 		do {
 			wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
 			wtime.tm_min =  BCD2BIN(rtc->bcd_min);
@@ -76,7 +77,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		unsigned char mon, day, hrs, min, sec, leap_yr;
 		unsigned int yrs;
 
-		if (!suser())
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 
 		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg,
@@ -94,7 +95,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		leap_yr = ((!(yrs % 4) && (yrs % 100)) || !(yrs % 400));
 
-		if ((mon > 12) || (day == 0))
+		if ((mon > 12) || (mon < 1) || (day == 0))
 			return -EINVAL;
 
 		if (day > (days_in_mo[mon] + ((mon == 2) && leap_yr)))
@@ -179,7 +180,6 @@ int __init rtc_DP8570A_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "DP8570A Real Time Clock Driver v%s\n", RTC_VERSION);
-	misc_register(&rtc_dev);
-	return 0;
+	return misc_register(&rtc_dev);
 }
 

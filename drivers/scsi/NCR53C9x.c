@@ -21,16 +21,14 @@
  * 4) Maybe change use of "esp" to something more "NCR"'ish.
  */
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -291,7 +289,7 @@ static inline void esp_advance_phase(Scsi_Cmnd *s, int newphase)
 #endif
 
 #ifdef DEBUG_ESP_CMDS
-extern inline void esp_cmd(struct NCR_ESP *esp, struct ESP_regs *eregs,
+inline void esp_cmd(struct NCR_ESP *esp, struct ESP_regs *eregs,
 			   unchar cmd)
 {
 	esp->espcmdlog[esp->espcmdent] = cmd;
@@ -919,7 +917,7 @@ static void esp_get_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 		if (esp->dma_mmu_get_scsi_one)
 			esp->dma_mmu_get_scsi_one(esp, sp);
 		else
-			sp->SCp.have_data_in = (int) sp->SCp.ptr =
+			sp->SCp.ptr =
 				(char *) virt_to_phys(sp->request_buffer);
 	} else {
 		sp->SCp.buffer = (struct scatterlist *) sp->buffer;
@@ -1820,7 +1818,7 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 		 * with ESP_CMD_DMA ...
 		 */
 
-		/* figure out how much needs to be transfered */
+		/* figure out how much needs to be transferred */
 		hmuch = SCptr->SCp.this_residual;
 		ESPDATA(("hmuch<%d> pio ", hmuch));
 		esp->current_transfer_size = hmuch;
@@ -1942,18 +1940,18 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 			/* check int. status */
 			if (esp->ireg & ESP_INTR_DC) {
 				/* disconnect */
-				ESPDATA(("disconnect; %d transfered ... ", i));
+				ESPDATA(("disconnect; %d transferred ... ", i));
 				break;
 			} else if (esp->ireg & ESP_INTR_FDONE) {
 				/* function done */
-				ESPDATA(("function done; %d transfered ... ", i));
+				ESPDATA(("function done; %d transferred ... ", i));
 				break;
 			}
 
 			/* XXX fixme: bail out on stall */
 			if (fifo_stuck > 10) {
 				/* we're stuck */
-				ESPDATA(("fifo stall; %d transfered ... ", i));
+				ESPDATA(("fifo stall; %d transferred ... ", i));
 				break;
 			}
 		}
@@ -1964,7 +1962,7 @@ static int esp_do_data(struct NCR_ESP *esp, struct ESP_regs *eregs)
 		if (thisphase == in_dataout)
 			hmuch += fifocnt; /* stuck?? adjust data pointer ...*/
 
-		/* tell do_data_finale how much was transfered */
+		/* tell do_data_finale how much was transferred */
 		esp->current_transfer_size -= hmuch;
 
 		/* still not completely sure on this one ... */		
@@ -3615,3 +3613,5 @@ void esp_release(void)
 	esps_running = esps_in_use;
 }
 #endif
+
+MODULE_LICENSE("GPL");

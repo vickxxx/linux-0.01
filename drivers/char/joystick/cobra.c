@@ -32,7 +32,7 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
@@ -131,7 +131,7 @@ static void cobra_timer(unsigned long private)
 			input_report_abs(dev, ABS_Y, ((data[i] >> 2) & 1) - ((data[i] >> 1) & 1));
 
 			for (j = 0; cobra_btn[j]; j++)
-				input_report_key(dev, cobra_btn[j], data[i] & (0x20 << i));
+				input_report_key(dev, cobra_btn[j], data[i] & (0x20 << j));
 
 		}
 
@@ -248,3 +248,5 @@ void __exit cobra_exit(void)
 
 module_init(cobra_init);
 module_exit(cobra_exit);
+
+MODULE_LICENSE("GPL");

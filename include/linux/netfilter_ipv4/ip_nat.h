@@ -11,8 +11,8 @@ enum ip_nat_manip_type
 	IP_NAT_MANIP_DST
 };
 
-/* SRC manip occurs only on POST_ROUTING */
-#define HOOK2MANIP(hooknum) ((hooknum) != NF_IP_POST_ROUTING)
+/* SRC manip occurs POST_ROUTING or LOCAL_IN */
+#define HOOK2MANIP(hooknum) ((hooknum) != NF_IP_POST_ROUTING && (hooknum) != NF_IP_LOCAL_IN)
 
 /* 2.3.19 (I hope) will define this in linux/netfilter_ipv4.h. */
 #ifndef SO_ORIGINAL_DST
@@ -23,6 +23,15 @@ enum ip_nat_manip_type
 #define IP_NAT_RANGE_PROTO_SPECIFIED 2
 /* Used internally by get_unique_tuple(). */
 #define IP_NAT_RANGE_FULL 4
+
+/* NAT sequence number modifications */
+struct ip_nat_seq {
+	/* position of the last TCP sequence number 
+	 * modification (if any) */
+	u_int32_t correction_pos;
+	/* sequence number offset before and after last modification */
+	int32_t offset_before, offset_after;
+};
 
 /* Single range specification. */
 struct ip_nat_range
@@ -46,22 +55,6 @@ struct ip_nat_multi_range
 	struct ip_nat_range range[1];
 };
 
-#ifdef __KERNEL__
-#include <linux/list.h>
-#include <linux/netfilter_ipv4/lockhelp.h>
-
-/* Protects NAT hash tables, and NAT-private part of conntracks. */
-DECLARE_RWLOCK_EXTERN(ip_nat_lock);
-
-/* Hashes for by-source and IP/protocol. */
-struct ip_nat_hash
-{
-	struct list_head list;
-
-	/* conntrack we're embedded in: NULL if not in hash. */
-	struct ip_conntrack *conntrack;
-};
-
 /* Worst case: local-out manip + 1 post-routing, and reverse dirn. */
 #define IP_NAT_MAX_MANIPS (2*3)
 
@@ -79,7 +72,23 @@ struct ip_nat_info_manip
 	/* Manipulations to occur at each conntrack in this dirn. */
 	struct ip_conntrack_manip manip;
 };
-	
+
+#ifdef __KERNEL__
+#include <linux/list.h>
+#include <linux/netfilter_ipv4/lockhelp.h>
+
+/* Protects NAT hash tables, and NAT-private part of conntracks. */
+DECLARE_RWLOCK_EXTERN(ip_nat_lock);
+
+/* Hashes for by-source and IP/protocol. */
+struct ip_nat_hash
+{
+	struct list_head list;
+
+	/* conntrack we're embedded in: NULL if not in hash. */
+	struct ip_conntrack *conntrack;
+};
+
 /* The structure embedded in the conntrack structure. */
 struct ip_nat_info
 {
@@ -91,13 +100,12 @@ struct ip_nat_info
 	/* Manipulations to be done on this conntrack. */
 	struct ip_nat_info_manip manips[IP_NAT_MAX_MANIPS];
 
-	/* The mapping type which created us (NULL for null mapping). */
-	const struct ip_nat_mapping_type *mtype;
-
 	struct ip_nat_hash bysource, byipsproto;
 
 	/* Helper (NULL if none). */
 	struct ip_nat_helper *helper;
+
+	struct ip_nat_seq seq[IP_CT_DIR_MAX];
 };
 
 /* Set up the info structure to map into this range. */

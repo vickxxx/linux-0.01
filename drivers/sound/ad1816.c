@@ -28,6 +28,8 @@
  *	Christoph Hellwig: Adapted to module_init/module_exit.	2000/03/03
  *
  *	Christoph Hellwig: Added isapnp support			2000/03/15
+ *
+ *	Arnaldo Carvalho de Melo: get rid of check_region	2001/10/07
  */
 
 #include <linux/config.h>
@@ -48,7 +50,7 @@
           timeout--; \
   } \
   if (timeout==0) {\
-          printk("ad1816: Check for power failed in %s line: %d\n",__FILE__,__LINE__); \
+          printk(KERN_WARNING "ad1816: Check for power failed in %s line: %d\n",__FILE__,__LINE__); \
   } \
 }
 
@@ -78,9 +80,9 @@ typedef struct
   
 } ad1816_info;
 
-static int nr_ad1816_devs = 0;
-static int ad1816_clockfreq=33000;
-static int options=0;
+static int nr_ad1816_devs;
+static int ad1816_clockfreq = 33000;
+static int options;
 
 /* for backward mapping of irq to sound device */
 
@@ -558,14 +560,15 @@ static void ad1816_interrupt (int irq, void *dev_id, struct pt_regs *dummy)
 
 	
 	if (irq < 0 || irq > 15) {
-	        printk ("ad1816: Got bogus interrupt %d\n", irq);
+	        printk(KERN_WARNING "ad1816: Got bogus interrupt %d\n", irq);
 		return;
 	}
 
 	dev = irq2dev[irq];
 	
 	if (dev < 0 || dev >= num_audiodevs) {
-	        printk ("ad1816: IRQ2AD1816-mapping failed for irq %d device %d\n", irq,dev);
+	        printk(KERN_WARNING "ad1816: IRQ2AD1816-mapping failed for "
+				    "irq %d device %d\n", irq,dev);
 		return;	        
 	}
 
@@ -1000,8 +1003,10 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	int *osp=hw_config->osp;
 	int tmp;
 
-	printk("ad1816: AD1816 sounddriver Copyright (C) 1998 by Thorsten Knabe\n");
-	printk("ad1816: io=0x%x, irq=%d, dma=%d, dma2=%d, clockfreq=%d, options=%d isadmabug=%d\n",
+	printk(KERN_INFO "ad1816: AD1816 sounddriver "
+			 "Copyright (C) 1998 by Thorsten Knabe\n");
+	printk(KERN_INFO "ad1816: io=0x%x, irq=%d, dma=%d, dma2=%d, "
+			 "clockfreq=%d, options=%d isadmabug=%d\n",
 	       hw_config->io_base,
 	       hw_config->irq,
 	       hw_config->dma,
@@ -1010,16 +1015,17 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	       options,
 	       isa_dma_bridge_buggy);
 
-	if (check_region (io_base, 16)) {
-		printk ("ad1816: I/O port 0x%03x not free\n", io_base);
-		return 0;
+	if (!request_region(io_base, 16, "AD1816 Sound")) {
+		printk(KERN_WARNING "ad1816: I/O port 0x%03x not free\n",
+				    io_base);
+		goto err;
 	}
 
 	DEBUGLOG(printk ("ad1816: detect(%x)\n", io_base));
 	
 	if (nr_ad1816_devs >= MAX_AUDIO_DEV) {
-		printk ("ad1816: detect error - step 0\n");
-		return 0;
+		printk(KERN_WARNING "ad1816: detect error - step 0\n");
+		goto out_release_region;
 	}
 
 	devc->base = io_base;
@@ -1032,7 +1038,7 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	tmp=inb(devc->base);
 	if ( (tmp&0x80)==0 || tmp==255 ) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 or chip is not active (Test 0)\n"));
-		return(0);
+		goto out_release_region;
 	}
 
 
@@ -1040,14 +1046,14 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	ad_write(devc,8,12345); 
 	if (ad_read(devc,9)!=12345) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 (Test 1)\n"));
-		return(0);
+		goto out_release_region;
 	}
   
 	/* writes to ireg 8 are copied to ireg 9 */
 	ad_write(devc,8,54321); 
 	if (ad_read(devc,9)!=54321) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 (Test 2)\n"));
-		return(0);
+		goto out_release_region;
 	}
 
 
@@ -1055,14 +1061,14 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	ad_write(devc,10,54321); 
 	if (ad_read(devc,11)!=54321) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 (Test 3)\n"));
-		return(0);
+		goto out_release_region;
 	}
 
 	/* writes to ireg 10 are copied to ireg 11 */
 	ad_write(devc,10,12345); 
 	if (ad_read(devc,11)!=12345) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 (Test 4)\n"));
-		return(0);
+		goto out_release_region;
 	}
 
 	/* bit in base +1 cannot be set to 1 */
@@ -1070,15 +1076,19 @@ static int __init probe_ad1816 ( struct address_info *hw_config )
 	outb(0xff,devc->base+1); 
 	if (inb(devc->base+1)!=tmp) {
 		DEBUGLOG (printk ("ad1816: Chip is not an AD1816 (Test 5)\n"));
-		return(0);
+		goto out_release_region;
 	}
 
   
 	DEBUGLOG (printk ("ad1816: detect() - Detected OK\n"));
 	DEBUGLOG (printk ("ad1816: AD1816 Version: %d\n",ad_read(devc,45)));
 
-	/*  detection was successful */
+	/* detection was successful */
 	return 1; 
+out_release_region:
+	release_region(io_base, 16);
+	/* detection was NOT successful */
+err:	return 0;
 }
 
 
@@ -1092,10 +1102,7 @@ static void __init attach_ad1816 (struct address_info *hw_config)
 	int             my_dev;
 	char            dev_name[100];
 	ad1816_info    *devc = &dev_info[nr_ad1816_devs];
-	
 
-	/* allocate i/o ports */
-       	request_region (hw_config->io_base, 16, "AD1816 Sound");
 	devc->base = hw_config->io_base;	
 
 	/* disable all interrupts */
@@ -1105,35 +1112,29 @@ static void __init attach_ad1816 (struct address_info *hw_config)
 	outb (0, devc->base+1);	
 
 	/* allocate irq */
-	if (hw_config->irq < 0 || hw_config->irq > 15) {
-		release_region(hw_config->io_base, 16);
-		return;	  
-	}
+	if (hw_config->irq < 0 || hw_config->irq > 15)
+		goto out_release_region;
 	if (request_irq(hw_config->irq, ad1816_interrupt,0,
-			"SoundPort",
-			hw_config->osp) < 0)	{
-	        printk ("ad1816: IRQ in use\n");
-		release_region(hw_config->io_base, 16);
-		return;
+			"SoundPort", hw_config->osp) < 0)	{
+	        printk(KERN_WARNING "ad1816: IRQ in use\n");
+		goto out_release_region;
 	}
 	devc->irq=hw_config->irq;
 
 	/* DMA stuff */
 	if (sound_alloc_dma (hw_config->dma, "Sound System")) {
-		printk ("ad1816: Can't allocate DMA%d\n", hw_config->dma);
-		free_irq(hw_config->irq,hw_config->osp);
-		release_region(hw_config->io_base, 16);
-		return;
+		printk(KERN_WARNING "ad1816: Can't allocate DMA%d\n",
+				    hw_config->dma);
+		goto out_free_irq;
 	}
 	devc->dma_playback=hw_config->dma;
 	
 	if ( hw_config->dma2 != -1 && hw_config->dma2 != hw_config->dma) {
-		if (sound_alloc_dma (hw_config->dma2, "Sound System (capture)")) {
-			printk ("ad1816: Can't allocate DMA%d\n", hw_config->dma2);
-			sound_free_dma(hw_config->dma);
-			free_irq(hw_config->irq,hw_config->osp);
-			release_region(hw_config->io_base, 16);
-			return;
+		if (sound_alloc_dma(hw_config->dma2,
+				    "Sound System (capture)")) {
+			printk(KERN_WARNING "ad1816: Can't allocate DMA%d\n",
+					    hw_config->dma2);
+			goto out_free_dma;
 		}
 		devc->dma_capture=hw_config->dma2;
 		devc->audio_mode=DMA_AUTOMODE|DMA_DUPLEX;
@@ -1157,15 +1158,8 @@ static void __init attach_ad1816 (struct address_info *hw_config)
 					      devc,
 					      hw_config->dma, 
 					      hw_config->dma2)) < 0) {
-		printk ("ad1816: Can't install sound driver\n");
-		if (devc->dma_capture>=0) {
-		        sound_free_dma(hw_config->dma2);
-		}
-		sound_free_dma(hw_config->dma);
-		free_irq(hw_config->irq,hw_config->osp);
-		release_region(hw_config->io_base, 16);
-		return;
-
+		printk(KERN_WARNING "ad1816: Can't install sound driver\n");
+		goto out_free_dma_2;
 	}
 
 	/* fill rest of structure with reasonable default values */
@@ -1211,6 +1205,17 @@ static void __init attach_ad1816 (struct address_info *hw_config)
 				       devc)) >= 0) {
 		audio_devs[my_dev]->min_fragment = 0;
 	}
+out:	return;
+out_free_dma_2:
+	if (devc->dma_capture >= 0)
+	        sound_free_dma(hw_config->dma2);
+out_free_dma:
+	sound_free_dma(hw_config->dma);
+out_free_irq:
+	free_irq(hw_config->irq,hw_config->osp);
+out_release_region:
+	release_region(hw_config->io_base, 16);
+	goto out;
 }
 
 static void __exit unload_card(ad1816_info *devc)
@@ -1242,9 +1247,8 @@ static void __exit unload_card(ad1816_info *devc)
 		
 		DEBUGLOG (printk("ad1816: Unloading card at base=%x was successful\n",devc->base));
 		
-	} else {
-		printk ("ad1816: no device/card specified\n");
-	}
+	} else
+		printk(KERN_WARNING "ad1816: no device/card specified\n");
 }
 
 static struct address_info cfg;
@@ -1314,41 +1318,37 @@ static struct pci_dev *ad1816_init_generic(struct pci_bus *bus, struct pci_dev *
 	return(ad1816_dev);
 }
 
-static struct {
-	unsigned short vendor;
-	unsigned short function;
-	struct pci_dev * (*initfunc)(struct pci_bus*, struct pci_dev *, struct address_info *);
-	char *name;
-} isapnp_ad1816_list[] __initdata = {
-	{ISAPNP_VENDOR('A','D','S'), ISAPNP_FUNCTION(0x7150), &ad1816_init_generic, "Analog Devices 1815" },
-	{ISAPNP_VENDOR('A','D','S'), ISAPNP_FUNCTION(0x7180), &ad1816_init_generic, "Analog Devices 1816A" },
+struct isapnp_device_id isapnp_ad1816_list[] __initdata = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('A','D','S'), ISAPNP_FUNCTION(0x7150), 
+		0 },
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('A','D','S'), ISAPNP_FUNCTION(0x7180),
+		0 },
 	{0}
 };
+
+MODULE_DEVICE_TABLE(isapnp, isapnp_ad1816_list);
 
 static int __init ad1816_init_isapnp(struct address_info *hw_config,
 	struct pci_bus *bus, struct pci_dev *card, int slot)
 {
+	char *busname = bus->name[0] ? bus->name : "Analog Devices AD1816a";
 	struct pci_dev *idev = NULL;
-	
-	/* You missed the init func? That's bad. */
-	if(isapnp_ad1816_list[slot].initfunc) {
-		char *busname = bus->name[0] ? bus->name : isapnp_ad1816_list[slot].name;
 		
-		printk(KERN_INFO "ad1816: %s detected\n", busname);
+	printk(KERN_INFO "ad1816: %s detected\n", busname);
 		
-		/* Initialize this baby. */
-		if((idev = isapnp_ad1816_list[slot].initfunc(bus, card, hw_config))) {
-			/* We got it. */
+	/* Initialize this baby. */
+	if ((idev = ad1816_init_generic(bus, card, hw_config))) {
+		/* We got it. */
 
-			printk(KERN_NOTICE "ad1816: ISAPnP reports '%s' at i/o %#x, irq %d, dma %d, %d\n",
-				busname,
-				hw_config->io_base, hw_config->irq, hw_config->dma,
-				hw_config->dma2);
-			return 1;
-		} else
-			printk(KERN_INFO "ad1816: Failed to initialize %s\n", busname);
+		printk(KERN_NOTICE "ad1816: ISAPnP reports '%s' at i/o %#x, irq %d, dma %d, %d\n",
+			busname,
+			hw_config->io_base, hw_config->irq, hw_config->dma,
+			hw_config->dma2);
+		return 1;
 	} else
-		printk(KERN_ERR "ad1816: Bad entry in ad1816.c PnP table\n");
+		printk(KERN_INFO "ad1816: Failed to initialize %s\n", busname);
 	
 	return 0;
 }
@@ -1457,3 +1457,4 @@ static int __init setup_ad1816(char *str)
 
 __setup("ad1816=", setup_ad1816);
 #endif
+MODULE_LICENSE("GPL");

@@ -1,5 +1,4 @@
-/* $Id: types.h,v 1.2 1999/12/04 03:59:12 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -32,12 +31,12 @@ typedef __signed__ long __s64;
 typedef unsigned long __u64;
 
 #else
- 
+
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
 typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
- 
+
 #endif
 
 /*
@@ -70,7 +69,10 @@ typedef unsigned long long u64;
 
 #define BITS_PER_LONG _MIPS_SZLONG
 
-typedef unsigned long dma_addr_t;
+typedef u64 dma_addr_t;
+typedef u64 dma64_addr_t;
+
+typedef unsigned long phys_t;
 
 #endif /* __KERNEL__ */
 

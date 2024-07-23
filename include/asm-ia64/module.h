@@ -7,7 +7,6 @@
  * Copyright (C) 2000 Mike Stephens <mike.stephens@intel.com>
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <asm/unwind.h>
@@ -28,47 +27,55 @@ struct archdata {
 	const char *gp;
 };
 
+static inline void
+arch_init_modules (struct module *kmod)
+{
+	static struct archdata archdata;
+	register char *kernel_gp asm ("gp");
+
+	archdata.gp = kernel_gp;
+	kmod->archdata_start = (const char *) &archdata;
+	kmod->archdata_end   = (const char *) (&archdata + 1);
+}
+
 /*
  * functions to add/remove a modules unwind info when
  * it is loaded or unloaded.
  */
 static inline int
-ia64_module_init(struct module *mod)
+ia64_module_init (struct module *mod)
 {
-#ifdef CONFIG_IA64_NEW_UNWIND
 	struct archdata *archdata;
 
 	if (!mod_member_present(mod, archdata_start) || !mod->archdata_start)
 		return 0;
 	archdata = (struct archdata *)(mod->archdata_start);
 
+	if (archdata->unw_start == 0)
+		return 0;
+
 	/*
 	 * Make sure the unwind pointers are sane.
 	 */
 
-	if (archdata->unw_table)
-	{
-		printk(KERN_ERR "arch_init_module: archdata->unw_table must be zero.\n");
+	if (archdata->unw_table) {
+		printk(KERN_ERR "module_arch_init: archdata->unw_table must be zero.\n");
 		return 1;
 	}
-	if (!mod_bound(archdata->gp, 0, mod))
-	{
-		printk(KERN_ERR "arch_init_module: archdata->gp out of bounds.\n");
+	if (!mod_bound(archdata->gp, 0, mod)) {
+		printk(KERN_ERR "module_arch_init: archdata->gp out of bounds.\n");
 		return 1;
 	}
-	if (!mod_bound(archdata->unw_start, 0, mod))
-	{
-		printk(KERN_ERR "arch_init_module: archdata->unw_start out of bounds.\n");
+	if (!mod_bound(archdata->unw_start, 0, mod)) {
+		printk(KERN_ERR "module_arch_init: archdata->unw_start out of bounds.\n");
 		return 1;
 	}
-	if (!mod_bound(archdata->unw_end, 0, mod))
-	{
-		printk(KERN_ERR "arch_init_module: archdata->unw_end out of bounds.\n");
+	if (!mod_bound(archdata->unw_end, 0, mod)) {
+		printk(KERN_ERR "module_arch_init: archdata->unw_end out of bounds.\n");
 		return 1;
 	}
-	if (!mod_bound(archdata->segment_base, 0, mod))
-	{
-		printk(KERN_ERR "arch_init_module: archdata->unw_table out of bounds.\n");
+	if (!mod_bound(archdata->segment_base, 0, mod)) {
+		printk(KERN_ERR "module_arch_init: archdata->segment_base out of bounds.\n");
 		return 1;
 	}
 
@@ -79,28 +86,24 @@ ia64_module_init(struct module *mod)
 						   (unsigned long) archdata->segment_base,
 						   (unsigned long) archdata->gp,
 						   archdata->unw_start, archdata->unw_end);
-#endif /* CONFIG_IA64_NEW_UNWIND */
 	return 0;
 }
 
 static inline void
-ia64_module_unmap(void * addr)
+ia64_module_unmap (void * addr)
 {
-#ifdef CONFIG_IA64_NEW_UNWIND
 	struct module *mod = (struct module *) addr;
 	struct archdata *archdata;
 
 	/*
 	 * Before freeing the module memory remove the unwind table entry
 	 */
-	if (mod_member_present(mod, archdata_start) && mod->archdata_start)
-	{
+	if (mod_member_present(mod, archdata_start) && mod->archdata_start) {
 		archdata = (struct archdata *)(mod->archdata_start);
 
 		if (archdata->unw_table != NULL)
 			unw_remove_unwind_table((void *) archdata->unw_table);
 	}
-#endif /* CONFIG_IA64_NEW_UNWIND */
 
 	vfree(addr);
 }

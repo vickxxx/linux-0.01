@@ -7,7 +7,7 @@
  */
 
 #define __HAVE_ARCH_STRCPY
-extern __inline__ char *strcpy(char *__dest, const char *__src)
+static __inline__ char *strcpy(char *__dest, const char *__src)
 {
 	register char *__xdest = __dest;
 	unsigned long __dummy;
@@ -26,7 +26,7 @@ extern __inline__ char *strcpy(char *__dest, const char *__src)
 }
 
 #define __HAVE_ARCH_STRNCPY
-extern __inline__ char *strncpy(char *__dest, const char *__src, size_t __n)
+static __inline__ char *strncpy(char *__dest, const char *__src, size_t __n)
 {
 	register char *__xdest = __dest;
 	unsigned long __dummy;
@@ -52,7 +52,7 @@ extern __inline__ char *strncpy(char *__dest, const char *__src, size_t __n)
 }
 
 #define __HAVE_ARCH_STRCMP
-extern __inline__ int strcmp(const char *__cs, const char *__ct)
+static __inline__ int strcmp(const char *__cs, const char *__ct)
 {
 	register int __res;
 	unsigned long __dummy;
@@ -78,7 +78,7 @@ extern __inline__ int strcmp(const char *__cs, const char *__ct)
 }
 
 #define __HAVE_ARCH_STRNCMP
-extern __inline__ int strncmp(const char *__cs, const char *__ct, size_t __n)
+static __inline__ int strncmp(const char *__cs, const char *__ct, size_t __n)
 {
 	register int __res;
 	unsigned long __dummy;
@@ -121,10 +121,10 @@ extern void *memmove(void *__dest, __const__ void *__src, size_t __n);
 #define __HAVE_ARCH_MEMCHR
 extern void *memchr(const void *__s, int __c, size_t __n);
 
+#define __HAVE_ARCH_STRLEN
+extern size_t strlen(const char *);
+
 /* Don't build bcopy at all ...  */
 #define __HAVE_ARCH_BCOPY
-
-#define __HAVE_ARCH_MEMSCAN
-#define memscan memchr
 
 #endif /* __ASM_SH_STRING_H */

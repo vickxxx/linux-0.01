@@ -5,7 +5,7 @@
 	See the skeleton.c file for further copyright information.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	The author may be reached as hamish@zot.apana.org.au
 
@@ -14,7 +14,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
 	"seeq8005.c:v1.00 8/07/95 Hamish Coleman (hamish@zot.apana.org.au)\n";
 
 /*
@@ -39,7 +39,7 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -101,8 +101,6 @@ static inline void wait_for_buffer(struct net_device *dev);
 /* Check for a network adaptor of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, allocate space for the device and return success
-   (detachable devices only).
    */
 
 int __init 
@@ -380,8 +378,17 @@ static void seeq8005_timeout(struct net_device *dev)
 static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-	unsigned char *buf = skb->data;
+	short length = skb->len;
+	unsigned char *buf;
+
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
+	buf = skb->data;
 
 	/* Block a timer-based transmit from overlapping */
 	netif_stop_queue(dev);
@@ -522,6 +529,7 @@ static void seeq8005_rx(struct net_device *dev)
 
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
 			lp->stats.rx_bytes += pkt_len;
 		}
@@ -712,8 +720,11 @@ inline void wait_for_buffer(struct net_device * dev)
 static struct net_device dev_seeq = { init: seeq8005_probe };
 static int io = 0x320;
 static int irq = 10;
+MODULE_LICENSE("GPL");
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "SEEQ 8005 I/O base address");
+MODULE_PARM_DESC(irq, "SEEQ 8005 IRQ number");
 
 int init_module(void)
 {

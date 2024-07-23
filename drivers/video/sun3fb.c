@@ -13,7 +13,7 @@
  *
  *  and SPARC console subsystem
  *
- *      Copyright (C) 1995 Peter Zaitcev (zaitcev@lab.ipmce.su)
+ *      Copyright (C) 1995 Peter Zaitcev (zaitcev@yahoo.com)
  *      Copyright (C) 1995-1997 David S. Miller (davem@caip.rutgers.edu)
  *      Copyright (C) 1995-1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  *      Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
@@ -32,7 +32,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -521,7 +521,7 @@ void sun3fb_palette(int enter)
     /*
      *  Initialisation
      */
-static void __init sun3fb_init_fb(int fbtype, unsigned long addr)
+static int __init sun3fb_init_fb(int fbtype, unsigned long addr)
 {
 	static struct linux_sbus_device sdb;
 	struct fb_fix_screeninfo *fix;
@@ -586,9 +586,11 @@ sizechange:
 	fb->cursor.hwsize.fbx = 32;
 	fb->cursor.hwsize.fby = 32;
 	
-	if (depth > 1 && !fb->color_map)
-		fb->color_map = kmalloc(256 * 3, GFP_ATOMIC);
-		
+	if (depth > 1 && !fb->color_map) {
+		if((fb->color_map = kmalloc(256 * 3, GFP_ATOMIC))==NULL)
+			return -ENOMEM;
+	}
+			
 	switch(fbtype) {
 #ifdef CONFIG_FB_CGSIX
 	case FBTYPE_SUNFAST_COLOR:
@@ -603,7 +605,7 @@ sizechange:
 	
 	if (!p) {
 		kfree(fb);
-		-ENODEV;
+		return -ENODEV;
 	}
 	
 	if (p == SBUSFBINIT_SIZECHANGE)
@@ -687,3 +689,5 @@ int __init sun3fb_init(void)
 	}
 #endif			
 }
+
+MODULE_LICENSE("GPL");

@@ -16,6 +16,7 @@
 #include <asm/page.h>
 #include <asm/ptrace.h>
 
+#ifdef __KERNEL__
 /*
  * Default implementation of macro that returns current
  * instruction pointer ("program counter").
@@ -41,13 +42,15 @@ struct cpuinfo_S390
         cpuid_t  cpu_id;
         __u16    cpu_addr;
         __u16    cpu_nr;
-        unsigned long loops_per_sec;
+        unsigned long loops_per_jiffy;
         unsigned long *pgd_quick;
         unsigned long *pte_quick;
         unsigned long pgtable_cache_sz;
 };
 
 extern void print_cpu_info(struct cpuinfo_S390 *);
+
+extern void show_trace(unsigned long* esp);
 
 /* Lazy FPU handling on uni-processor */
 extern struct task_struct *last_task_used_math;
@@ -64,8 +67,7 @@ extern struct task_struct *last_task_used_math;
 #define THREAD_SIZE (2*PAGE_SIZE)
 
 typedef struct {
-        unsigned long seg;
-        unsigned long acc4;
+        unsigned long ar4;
 } mm_segment_t;
 
 /* if you change the thread_struct structure, you must
@@ -74,8 +76,6 @@ typedef struct {
 
 struct thread_struct
  {
-
-        struct pt_regs *regs;         /* the user registers can be found on*/
 	s390_fp_regs fp_regs;
         __u32   ar2;                   /* kernel access register 2         */
         __u32   ar4;                   /* kernel access register 4         */
@@ -84,36 +84,29 @@ struct thread_struct
         __u32   error_code;            /* error-code of last prog-excep.   */
         __u32   prot_addr;             /* address of protection-excep.     */
         __u32   trap_no;
-        /* perform syscall argument validation (get/set_fs) */
-        mm_segment_t fs;
         per_struct per_info;/* Must be aligned on an 4 byte boundary*/
+	/* Used to give failing instruction back to user for ieee exceptions */
+	addr_t  ieee_instruction_pointer; 
+        /* pfault_wait is used to block the process on a pfault event */
+	addr_t  pfault_wait;
 };
 
 typedef struct thread_struct thread_struct;
 
-#define INIT_MMAP \
-{ &init_mm, 0, 0, NULL, PAGE_SHARED, \
-VM_READ | VM_WRITE | VM_EXEC, 1, NULL, &init_mm.mmap }
-
-#define INIT_THREAD { (struct pt_regs *) 0,                       \
-                    { 0,{{0},{0},{0},{0},{0},{0},{0},{0},{0},{0}, \
+#define INIT_THREAD {{0,{{0},{0},{0},{0},{0},{0},{0},{0},{0},{0}, \
 			    {0},{0},{0},{0},{0},{0}}},            \
                      0, 0,                                        \
                     sizeof(init_stack) + (__u32) &init_stack,     \
               (__pa((__u32) &swapper_pg_dir[0]) + _SEGMENT_TABLE),\
                      0,0,0,                                       \
-                     (mm_segment_t) { 0,1},                       \
-                     (per_struct) {{{{0,}}},0,0,0,0,{{0,}}}       \
+                     (per_struct) {{{{0,}}},0,0,0,0,{{0,}}},      \
+                     0, 0                                         \
 }
 
 /* need to define ... */
 #define start_thread(regs, new_psw, new_stackp) do {            \
-        unsigned long *u_stack = new_stackp;                    \
         regs->psw.mask  = _USER_PSW_MASK;                       \
-        regs->psw.addr  = new_psw | 0x80000000 ;                \
-        get_user(regs->gprs[2],u_stack);                        \
-        get_user(regs->gprs[3],u_stack+1);                      \
-        get_user(regs->gprs[4],u_stack+2);                      \
+        regs->psw.addr  = new_psw | 0x80000000;                 \
         regs->gprs[15]  = new_stackp ;                          \
 } while (0)
 
@@ -122,23 +115,32 @@ struct mm_struct;
 
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
-extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+extern int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 /* Copy and release all segment info associated with a VM */
 #define copy_segments(nr, mm)           do { } while (0)
 #define release_segments(mm)            do { } while (0)
 
 /*
- * Return saved PC of a blocked thread. used in kernel/sched
+ * Return saved PC of a blocked thread. used in kernel/sched.
+ * resume in entry.S does not create a new stack frame, it
+ * just stores the registers %r6-%r15 to the frame given by
+ * schedule. We want to return the address of the caller of
+ * schedule, so we have to walk the backchain one time to
+ * find the frame schedule() store its return address.
  */
 extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 {
-        return (t->regs) ? ((unsigned long)t->regs->psw.addr) : 0;
+	unsigned long bc;
+	bc = *((unsigned long *) t->ksp);
+	return *((unsigned long *) (bc+56));
 }
 
 unsigned long get_wchan(struct task_struct *p);
-#define KSTK_EIP(tsk)   ((tsk)->thread.regs->psw.addr)
-#define KSTK_ESP(tsk)   ((tsk)->thread.ksp)
+#define __KSTK_PTREGS(tsk) ((struct pt_regs *) \
+	(((unsigned long) tsk + THREAD_SIZE - sizeof(struct pt_regs)) & -8L))
+#define KSTK_EIP(tsk)	(__KSTK_PTREGS(tsk)->psw.addr)
+#define KSTK_ESP(tsk)	(__KSTK_PTREGS(tsk)->gprs[15])
 
 /* Allocation and freeing of basic task resources. */
 /*
@@ -151,6 +153,8 @@ unsigned long get_wchan(struct task_struct *p);
 
 #define init_task       (init_task_union.task)
 #define init_stack      (init_task_union.stack)
+
+#define cpu_relax()	do { } while (0)
 
 /*
  * Set of msr bits that gdb can change on behalf of a process.
@@ -166,19 +170,81 @@ unsigned long get_wchan(struct task_struct *p);
 #define PSW_PROBLEM_STATE       0x00010000UL
 
 /*
+ * Set PSW mask to specified value, while leaving the
+ * PSW addr pointing to the next instruction.
+ */
+
+static inline void __load_psw_mask (unsigned long mask)
+{
+	unsigned long addr;
+
+	psw_t psw;
+	psw.mask = mask;
+
+	asm volatile (
+		"    basr %0,0\n"
+		"0:  ahi  %0,1f-0b\n"
+		"    st   %0,4(%1)\n"
+		"    lpsw 0(%1)\n"
+		"1:"
+		: "=&d" (addr) : "a" (&psw) : "memory", "cc" );
+}
+ 
+/*
+ * Function to stop a processor until an interruption occured
+ */
+static inline void enabled_wait(void)
+{
+	unsigned long reg;
+	psw_t wait_psw;
+
+	wait_psw.mask = 0x070e0000;
+	asm volatile (
+		"    basr %0,0\n"
+		"0:  la   %0,1f-0b(%0)\n"
+		"    st   %0,4(%1)\n"
+		"    oi   4(%1),0x80\n"
+		"    lpsw 0(%1)\n"
+		"1:"
+		: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
+}
+
+/*
  * Function to drop a processor into disabled wait state
  */
 
 static inline void disabled_wait(unsigned long code)
 {
         char psw_buffer[2*sizeof(psw_t)];
+        char ctl_buf[4];
         psw_t *dw_psw = (psw_t *)(((unsigned long) &psw_buffer+sizeof(psw_t)-1)
                                   & -sizeof(psw_t));
 
         dw_psw->mask = 0x000a0000;
         dw_psw->addr = code;
-        /* load disabled wait psw, the processor is dead afterwards */
-        asm volatile ("lpsw 0(%0)" : : "a" (dw_psw));
+        /* 
+         * Store status and then load disabled wait psw,
+         * the processor is dead afterwards
+         */
+
+        asm volatile ("    stctl 0,0,0(%1)\n"
+                      "    ni    0(%1),0xef\n" /* switch off protection */
+                      "    lctl  0,0,0(%1)\n"
+                      "    stpt  0xd8\n"       /* store timer */
+                      "    stckc 0xe0\n"       /* store clock comparator */
+                      "    stpx  0x108\n"      /* store prefix register */
+                      "    stam  0,15,0x120\n" /* store access registers */
+                      "    std   0,0x160\n"    /* store f0 */
+                      "    std   2,0x168\n"    /* store f2 */
+                      "    std   4,0x170\n"    /* store f4 */
+                      "    std   6,0x178\n"    /* store f6 */
+                      "    stm   0,15,0x180\n" /* store general registers */
+                      "    stctl 0,15,0x1c0\n" /* store control registers */
+                      "    oi    0(%1),0x10\n" /* fake protection bit */
+                      "    lpsw 0(%0)"
+                      : : "a" (dw_psw), "a" (&ctl_buf) : "cc" );
 }
+
+#endif
 
 #endif                                 /* __ASM_S390_PROCESSOR_H           */

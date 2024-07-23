@@ -1,4 +1,4 @@
-/* $Id: sys_sunos32.c,v 1.55 2000/11/18 02:10:59 davem Exp $
+/* $Id: sys_sunos32.c,v 1.61 2001/08/13 14:40:07 davem Exp $
  * sys_sunos32.c: SunOS binary compatability layer on sparc64.
  *
  * Copyright (C) 1995, 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -27,7 +27,7 @@
 #include <linux/utsname.h>
 #include <linux/major.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/errno.h>
 #include <linux/smp.h>
@@ -100,12 +100,12 @@ asmlinkage u32 sunos_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u32 of
 	flags &= ~_MAP_NEW;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap(file,
 			 (unsigned long) addr, (unsigned long) len,
 			 (unsigned long) prot, (unsigned long) flags,
 			 (unsigned long) off);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < 0xf0000000) ? 0 : retval);
 out_putf:
@@ -126,7 +126,7 @@ asmlinkage int sunos_brk(u32 baddr)
 	unsigned long rlim;
 	unsigned long newbrk, oldbrk, brk = (unsigned long) baddr;
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	if (brk < current->mm->end_code)
 		goto out;
 	newbrk = PAGE_ALIGN(brk);
@@ -157,7 +157,7 @@ asmlinkage int sunos_brk(u32 baddr)
 	 * fool it, but this should catch most mistakes.
 	 */
 	freepages = atomic_read(&buffermem_pages) >> PAGE_SHIFT;
-	freepages += atomic_read(&page_cache_size);
+	freepages += page_cache_size;
 	freepages >>= 1;
 	freepages += nr_free_pages();
 	freepages += nr_swap_pages;
@@ -170,7 +170,7 @@ asmlinkage int sunos_brk(u32 baddr)
 	do_brk(oldbrk, newbrk-oldbrk);
 	retval = 0;
 out:
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	return retval;
 }
 
@@ -210,7 +210,7 @@ static char *vstrings[] = {
 
 asmlinkage void sunos_vadvise(u32 strategy)
 {
-	static int count = 0;
+	static int count;
 
 	/* I wanna see who uses this... */
 	if (count++ < 5)
@@ -277,7 +277,7 @@ struct sunos_dirent_callback {
 #define ROUND_UP(x) (((x)+sizeof(s32)-1) & ~(sizeof(s32)-1))
 
 static int sunos_filldir(void * __buf, const char * name, int namlen,
-			 off_t offset, ino_t ino, unsigned int d_type)
+			 loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_dirent * dirent;
 	struct sunos_dirent_callback * buf = (struct sunos_dirent_callback *) __buf;
@@ -296,7 +296,7 @@ static int sunos_filldir(void * __buf, const char * name, int namlen,
 	put_user(reclen, &dirent->d_reclen);
 	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
-	((char *) dirent) += reclen;
+	dirent = (void *) dirent + reclen;
 	buf->curr = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -359,7 +359,7 @@ struct sunos_direntry_callback {
 };
 
 static int sunos_filldirentry(void * __buf, const char * name, int namlen,
-			      off_t offset, ino_t ino, unsigned int d_type)
+			      loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_direntry * dirent;
 	struct sunos_direntry_callback * buf = (struct sunos_direntry_callback *) __buf;
@@ -376,7 +376,7 @@ static int sunos_filldirentry(void * __buf, const char * name, int namlen,
 	put_user(reclen, &dirent->d_reclen);
 	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
-	((char *) dirent) += reclen;
+	dirent = (void *) dirent + reclen;
 	buf->curr = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -446,7 +446,7 @@ asmlinkage int sunos_uname(struct sunos_utsname *name)
 	ret |= copy_to_user(&name->ver[0], &system_utsname.version[0], sizeof(name->ver) - 1);
 	ret |= copy_to_user(&name->mach[0], &system_utsname.machine[0], sizeof(name->mach) - 1);
 	up_read(&uts_sem);
-	return ret;
+	return (ret ? -EFAULT : 0);
 }
 
 asmlinkage int sunos_nosys(void)
@@ -456,6 +456,10 @@ asmlinkage int sunos_nosys(void)
 	static int cnt;
 
 	regs = current->thread.kregs;
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		regs->tnpc &= 0xffffffff;
+	}
 	info.si_signo = SIGSYS;
 	info.si_errno = 0;
 	info.si_code = __SI_FAULT|0x100;
@@ -580,8 +584,6 @@ struct sunos_nfs_mount_args {
 	char       *netname;   /* server's netname */
 };
 
-extern dev_t get_unnamed_dev(void);
-extern void put_unnamed_dev(dev_t);
 extern asmlinkage int sys_mount(char *, char *, char *, unsigned long, void *);
 extern asmlinkage int sys_connect(int fd, struct sockaddr *uservaddr, int addrlen);
 extern asmlinkage int sys_socket(int family, int type, int protocol);
@@ -652,8 +654,8 @@ static int get_default (int value, int def_value)
 /* XXXXXXXXXXXXXXXXXXXX */
 static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 {
-	int  server_fd;
-	char *the_name;
+	int  server_fd, err;
+	char *the_name, *mount_page;
 	struct nfs_mount_data linux_nfs_mount;
 	struct sunos_nfs_mount_args sunos_mount;
 
@@ -706,14 +708,23 @@ static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 	linux_nfs_mount.hostname [255] = 0;
 	putname (the_name);
 	
-	return do_mount ("", dir_name, "nfs", linux_flags, &linux_nfs_mount);
+	mount_page = (char *) get_zeroed_page(GFP_KERNEL);
+	if (!mount_page)
+		return -ENOMEM;
+
+	memcpy(mount_page, &linux_nfs_mount, sizeof(linux_nfs_mount));
+
+	err = do_mount("", dir_name, "nfs", linux_flags, mount_page);
+
+	free_page((unsigned long) mount_page);
+	return err;
 }
 
 /* XXXXXXXXXXXXXXXXXXXX */
 asmlinkage int
 sunos_mount(char *type, char *dir, int flags, void *data)
 {
-	int linux_flags = MS_MGC_MSK; /* new semantics */
+	int linux_flags = 0;
 	int ret = -EINVAL;
 	char *dev_fname = 0;
 	char *dir_page, *type_page;
@@ -1047,6 +1058,7 @@ asmlinkage int sunos_msgsys(int op, u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 			(current->thread.kregs->u_regs[UREG_FP] & 0xffffffffUL);
 		if(get_user(arg5, &sp->xxargs[0])) {
 			rval = -EFAULT;
+			kfree(kmbuf);
 			break;
 		}
 		set_fs(KERNEL_DS);
@@ -1196,8 +1208,8 @@ static inline int check_nonblock(int ret, int fd)
 	return ret;
 }
 
-extern asmlinkage int sys_read(unsigned int fd, char *buf, unsigned long count);
-extern asmlinkage int sys_write(unsigned int fd, char *buf, unsigned long count);
+extern asmlinkage ssize_t sys_read(unsigned int fd, char *buf, unsigned long count);
+extern asmlinkage ssize_t sys_write(unsigned int fd, char *buf, unsigned long count);
 extern asmlinkage int sys_recv(int fd, void *ubuf, size_t size, unsigned flags);
 extern asmlinkage int sys_send(int fd, void *buff, size_t len, unsigned flags);
 extern asmlinkage int sys_accept(int fd, struct sockaddr *sa, int *addrlen);
@@ -1297,10 +1309,12 @@ asmlinkage int sunos_sigaction (int sig, u32 act, u32 oact)
 
 	if (act) {
 		old_sigset_t32 mask;
+		u32 u_handler;
 
-		if (get_user((long)new_ka.sa.sa_handler, &((struct old_sigaction32 *)A(act))->sa_handler) ||
+		if (get_user(u_handler, &((struct old_sigaction32 *)A(act))->sa_handler) ||
 		    __get_user(new_ka.sa.sa_flags, &((struct old_sigaction32 *)A(act))->sa_flags))
 			return -EFAULT;
+		new_ka.sa.sa_handler = (void *) (long) u_handler;
 		__get_user(mask, &((struct old_sigaction32 *)A(act))->sa_mask);
 		new_ka.sa.sa_restorer = NULL;
 		new_ka.ka_restorer = NULL;

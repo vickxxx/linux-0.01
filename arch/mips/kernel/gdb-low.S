@@ -1,20 +1,27 @@
 /*
- * arch/mips/kernel/gdb-low.S
- *
  * gdb-low.S contains the low-level trap handler for the GDB stub.
  *
  * Copyright (C) 1995 Andreas Busse
- *
- * $Id: gdb-low.S,v 1.4 1997/12/01 17:57:26 ralf Exp $
  */
-
+#include <linux/config.h>
 #include <linux/sys.h>
 
 #include <asm/asm.h>
+#include <asm/errno.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
 #include <asm/gdb-stub.h>
+
+/*
+ * [jsun] We reserves about 2x GDB_FR_SIZE in stack.  The lower (addressed)
+ * part is used to store registers and passed to exception handler.
+ * The upper part is reserved for "call func" feature where gdb client
+ * saves some of the regs, setups call frame and passes args.
+ *
+ * A trace shows about 200 bytes are used to store about half of all regs.
+ * The rest should be big enough for frame setup and passing args.
+ */
 
 /*
  * The low level trap handler
@@ -30,13 +37,18 @@
 		move	k1,sp
 
 		/*
-		 * Called from user mode, new stack
+		 * Called from user mode, go somewhere else.
 		 */
-		lui	k1,%hi(kernelsp)
-		lw	k1,%lo(kernelsp)(k1)
+		lui	k1,%hi(saved_vectors)
+		mfc0	k0,CP0_CAUSE
+		andi	k0,k0,0x7c
+		add	k1,k1,k0
+		lw	k0,%lo(saved_vectors)(k1)
+		jr	k0
+		nop
 1:
 		move	k0,sp
-		subu	sp,k1,GDB_FR_SIZE
+		subu	sp,k1,GDB_FR_SIZE*2	# see comment above
 		sw	k0,GDB_FR_REG29(sp)
 		sw	v0,GDB_FR_REG2(sp)
 
@@ -95,7 +107,7 @@
 		sw	ra,GDB_FR_REG31(sp)
 
 		CLI				/* disable interrupts */
-		
+
 /*
  * Followed by the floating point registers
  */
@@ -143,9 +155,9 @@
  * FPU control registers
  */
 
-		mfc1	v0,CP1_STATUS
+		cfc1	v0,CP1_STATUS
 		sw	v0,GDB_FR_FSR(sp)
-		mfc1	v0,CP1_REVISION
+		cfc1	v0,CP1_REVISION
 		sw	v0,GDB_FR_FIR(sp)
 
 /*
@@ -209,7 +221,7 @@
 		lw	v0,GDB_FR_CP0_CONTEXT(sp)
 		mtc0	v1,CP0_INDEX
 		mtc0	v0,CP0_CONTEXT
-		
+
 
 /*
  * Next, the floating point registers
@@ -271,7 +283,7 @@
 		lw	v0,GDB_FR_HI(sp)
 		lw	v1,GDB_FR_LO(sp)
 		mthi	v0
-		mtlo	v0
+		mtlo	v1
 		lw	ra,GDB_FR_REG31(sp)
 		lw	fp,GDB_FR_REG30(sp)
 		lw	gp,GDB_FR_REG28(sp)
@@ -302,11 +314,44 @@
 		lw	v1,GDB_FR_REG3(sp)
 		lw	v0,GDB_FR_REG2(sp)
 		lw	$1,GDB_FR_REG1(sp)
-		lw	sp,GDB_FR_REG29(sp)		/* Deallocate stack */
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
+		lw	k0, GDB_FR_EPC(sp)
+		lw	sp, GDB_FR_REG29(sp)		/* Deallocate stack */
+		jr	k0
+		rfe
+#else
+		lw	sp, GDB_FR_REG29(sp)		/* Deallocate stack */
 
 		.set	mips3
 		eret
 		.set	mips0
+#endif
 		.set	at
 		.set	reorder
 		END(trap_low)
+
+LEAF(kgdb_read_byte)
+4:		lb	t0, (a0)
+		sb	t0, (a1)
+		li	v0, 0
+		jr	ra
+		.section __ex_table,"a"
+		PTR	4b, kgdbfault
+		.previous
+		END(kgdb_read_byte)
+
+LEAF(kgdb_write_byte)
+5:		sb	a0, (a1)
+		li	v0, 0
+		jr	ra
+		.section __ex_table,"a"
+		PTR	5b, kgdbfault
+		.previous
+		END(kgdb_write_byte)
+
+		.type	kgdbfault@function
+		.ent	kgdbfault
+
+kgdbfault:	li	v0, -EFAULT
+		jr	ra
+		.end	kgdbfault

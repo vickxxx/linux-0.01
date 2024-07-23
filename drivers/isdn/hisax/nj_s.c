@@ -1,7 +1,9 @@
-// $Id: nj_s.c,v 2.7.6.1 2000/11/29 16:00:14 kai Exp $
-//
-// This file is (c) under GNU PUBLIC LICENSE
-//
+/* $Id: nj_s.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
 
 #define __NO_VERSION__
 #include <linux/config.h>
@@ -14,7 +16,7 @@
 #include <linux/ppp_defs.h>
 #include "netjet.h"
 
-const char *NETjet_S_revision = "$Revision: 2.7.6.1 $";
+const char *NETjet_S_revision = "$Revision: 1.1.4.1 $";
 
 static u_char dummyrr(struct IsdnCardState *cs, int chan, u_char off)
 {
@@ -128,6 +130,7 @@ NETjet_S_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 			release_io_netjet(cs);
 			return(0);
 		case CARD_INIT:
+			reset_netjet_s(cs);
 			inittiger(cs);
 			clear_pending_isac_ints(cs);
 			initisac(cs);
@@ -171,6 +174,7 @@ setup_netjet_s(struct IsdnCard *card)
 			PCI_DEVICE_ID_TIGERJET_300,  dev_netjet))) {
 			if (pci_enable_device(dev_netjet))
 				return(0);
+			pci_set_master(dev_netjet);
 			cs->irq = dev_netjet->irq;
 			if (!cs->irq) {
 				printk(KERN_WARNING "NETjet-S: No IRQ for PCI card found\n");
@@ -181,6 +185,14 @@ setup_netjet_s(struct IsdnCard *card)
 				printk(KERN_WARNING "NETjet-S: No IO-Adr for PCI card found\n");
 				return(0);
 			}
+			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG www.formula-n.com */
+			if ((dev_netjet->subsystem_vendor == 0x55) &&
+				(dev_netjet->subsystem_device == 0x02)) {
+				printk(KERN_WARNING "Netjet: You tried to load this driver with an incompatible TigerJet-card\n");
+				printk(KERN_WARNING "Use type=41 for Formula-n enter:now ISDN PCI and compatible\n");
+				return(0);
+			}
+			/* end new code */
 		} else {
 			printk(KERN_WARNING "NETjet-S: No PCI card found\n");
 			return(0);
@@ -239,11 +251,11 @@ setup_netjet_s(struct IsdnCard *card)
 	bytecnt = 256;
 
 	printk(KERN_INFO
-		"NETjet-S: PCI card configured at 0x%x IRQ %d\n",
+		"NETjet-S: PCI card configured at %#lx IRQ %d\n",
 		cs->hw.njet.base, cs->irq);
 	if (check_region(cs->hw.njet.base, bytecnt)) {
 		printk(KERN_WARNING
-		       "HiSax: %s config port %x-%x already in use\n",
+		       "HiSax: %s config port %#lx-%#lx already in use\n",
 		       CardType[card->typ],
 		       cs->hw.njet.base,
 		       cs->hw.njet.base + bytecnt);
@@ -251,7 +263,6 @@ setup_netjet_s(struct IsdnCard *card)
 	} else {
 		request_region(cs->hw.njet.base, bytecnt, "netjet-s isdn");
 	}
-	reset_netjet_s(cs);
 	cs->readisac  = &NETjet_ReadIC;
 	cs->writeisac = &NETjet_WriteIC;
 	cs->readisacfifo  = &NETjet_ReadICfifo;

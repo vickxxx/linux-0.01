@@ -4,7 +4,6 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/if.h>
-
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
@@ -32,7 +31,8 @@ tcp_unique_tuple(struct ip_conntrack_tuple *tuple,
 		 enum ip_nat_manip_type maniptype,
 		 const struct ip_conntrack *conntrack)
 {
-	static u_int16_t port = 0, *portptr;
+	static u_int16_t port = 0;
+	u_int16_t *portptr;
 	unsigned int range_size, min, i;
 
 	if (maniptype == IP_NAT_MANIP_SRC)
@@ -92,10 +92,17 @@ tcp_manip_pkt(struct iphdr *iph, size_t len,
 		oldip = iph->daddr;
 		portptr = &hdr->dest;
 	}
-	hdr->check = ip_nat_cheat_check(~oldip, manip->ip,
+
+	/* this could be a inner header returned in icmp packet; in such
+	   cases we cannot update the checksum field since it is outside of
+	   the 8 bytes of transport layer headers we are guaranteed */
+	if(((void *)&hdr->check + sizeof(hdr->check) - (void *)iph) <= len) {
+		hdr->check = ip_nat_cheat_check(~oldip, manip->ip,
 					ip_nat_cheat_check(*portptr ^ 0xFFFF,
 							   manip->u.tcp.port,
 							   hdr->check));
+	}
+
 	*portptr = manip->u.tcp.port;
 }
 

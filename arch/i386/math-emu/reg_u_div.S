@@ -67,7 +67,7 @@ FPU_result_2:
 	.long	0
 FPU_ovfl_flag:
 	.byte	0
-#endif NON_REENTRANT_FPU
+#endif /* NON_REENTRANT_FPU */
 
 #define REGA	PARAM1
 #define REGB	PARAM2
@@ -79,7 +79,7 @@ ENTRY(FPU_u_div)
 	movl	%esp,%ebp
 #ifndef NON_REENTRANT_FPU
 	subl	$28,%esp
-#endif NON_REENTRANT_FPU
+#endif /* NON_REENTRANT_FPU */
 
 	pushl	%esi
 	pushl	%edi
@@ -89,10 +89,8 @@ ENTRY(FPU_u_div)
 	movl	REGB,%ebx
 	movl	DEST,%edi
 
-	movw	EXP(%esi),%dx
-	movw	EXP(%ebx),%ax
-	.byte	0x0f,0xbf,0xc0	/* movsx	%ax,%eax */
-	.byte	0x0f,0xbf,0xd2	/* movsx	%dx,%edx */
+	movswl	EXP(%esi),%edx
+	movswl	EXP(%ebx),%eax
 	subl	%eax,%edx
 	addl	EXP_BIAS,%edx
 
@@ -112,7 +110,7 @@ xExp_not_underflow:
 /*	je	L_bugged */
 	testl	$0x80000000, SIGH(%ebx)	/* Divisor */
 	je	L_bugged
-#endif PARANOID
+#endif /* PARANOID */ 
 
 /* Check if the divisor can be treated as having just 32 bits */
 	cmpl	$0,SIGL(%ebx)
@@ -248,7 +246,7 @@ LFirst_div_done:
 
 #ifdef PARANOID
 	jb	L_bugged_1
-#endif PARANOID
+#endif /* PARANOID */ 
 
 	/* need to subtract another once of the denom */
 	incl	FPU_result_2	/* Correct the answer */
@@ -261,7 +259,7 @@ LFirst_div_done:
 #ifdef PARANOID
 	sbbl	$0,FPU_accum_3
 	jne	L_bugged_1	/* Must check for non-zero result here */
-#endif PARANOID
+#endif /* PARANOID */ 
 
 /*----------------------------------------------------------------------*/
 /* Half of the main problem is done, there is just a reduced numerator
@@ -291,7 +289,7 @@ LPrevent_2nd_overflow:
 
 #ifdef PARANOID
 	je	L_bugged_2	/* Can't bump the result to 1.0 */
-#endif PARANOID
+#endif /* PARANOID */ 
 
 LDo_2nd_div:
 	cmpl	$0,%ecx		/* augmented denom msw */
@@ -314,7 +312,7 @@ LSecond_div_done:
 
 #ifdef PARANOID
 	jc	L_bugged_2
-#endif PARANOID
+#endif /* PARANOID */ 
 
 	movl	FPU_result_1,%eax	/* Get the result back */
 	mull	SIGL(%ebx)	/* now mul the ls dw of the denom */
@@ -325,14 +323,14 @@ LSecond_div_done:
 
 #ifdef PARANOID
 	jc	L_bugged_2
-#endif PARANOID
+#endif /* PARANOID */ 
 
 	jz	LDo_3rd_32_bits
 
 #ifdef PARANOID
 	cmpl	$1,FPU_accum_2
 	jne	L_bugged_2
-#endif PARANOID
+#endif /* PARANOID */
 
 	/* need to subtract another once of the denom */
 	movl	SIGL(%ebx),%eax
@@ -344,14 +342,14 @@ LSecond_div_done:
 #ifdef PARANOID
 	jc	L_bugged_2
 	jne	L_bugged_2
-#endif PARANOID
+#endif /* PARANOID */ 
 
 	addl	$1,FPU_result_1	/* Correct the answer */
 	adcl	$0,FPU_result_2
 
 #ifdef PARANOID
 	jc	L_bugged_2	/* Must check for non-zero result here */
-#endif PARANOID
+#endif /* PARANOID */
 
 /*----------------------------------------------------------------------*/
 /* The division is essentially finished here, we just need to perform
@@ -470,4 +468,4 @@ L_exit:
 
 	leave
 	ret
-#endif PARANOID
+#endif /* PARANOID */ 

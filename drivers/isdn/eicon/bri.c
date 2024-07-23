@@ -1,31 +1,14 @@
-
 /*
- *
  * Copyright (C) Eicon Technology Corporation, 2000.
- *
- * This source file is supplied for the exclusive use with Eicon
- * Technology Corporation's range of DIVA Server Adapters.
  *
  * Eicon File Revision :    1.8  
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY OF ANY KIND WHATSOEVER INCLUDING ANY 
- * implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#include <sys/types.h>
-
+#include "eicon.h"
 #include "sys.h"
 #include "idi.h"
 #include "divas.h"
@@ -36,9 +19,6 @@
 #include "adapter.h"
 #include "uxio.h"
 
-#define PCI_COMMAND	0x04
-#define PCI_STATUS	0x06
-#define PCI_LATENCY	0x0D
 #define PCI_BADDR0	0x10
 #define PCI_BADDR1	0x14
 #define PCI_BADDR2	0x18
@@ -63,6 +43,7 @@ void io_out_buffer(ADAPTER *a, void *adr, void *P, word length);
 void io_inc(ADAPTER *a, void *adr);
 
 static int diva_server_bri_test_int(card_t *card);
+static int bri_ISR (card_t* card);
 
 #define PLX_IOBASE		0
 #define	DIVAS_IOBASE	1
@@ -80,7 +61,6 @@ void UxCardPortIoOut(ux_diva_card_t *card, byte *base, int offset, byte);
 void UxCardPortIoOutW(ux_diva_card_t *card, byte *base, int offset, word);
 
 int DivasBRIInitPCI(card_t *card, dia_card_t *cfg);
-int bri_ISR (card_t* card);
 
 static
 int	diva_server_bri_reset(card_t *card)
@@ -361,7 +341,7 @@ int diva_server_bri_config(card_t *card, dia_config_t *config)
 	UxCardPortIoOut(card->hw, DivasIOBase, REG_DATA, config->nt2);
 
 	UxCardPortIoOutW(card->hw, DivasIOBase, REG_ADDRLO, 10);
-	UxCardPortIoOut(card->hw, DivasIOBase, REG_DATA, 0);
+	UxCardPortIoOut(card->hw, DivasIOBase, REG_DATA, config->sig_flags);
 
 	UxCardPortIoOutW(card->hw, DivasIOBase, REG_ADDRLO, 11);
 	UxCardPortIoOut(card->hw, DivasIOBase, REG_DATA, config->watchdog);

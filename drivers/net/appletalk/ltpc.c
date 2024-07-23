@@ -197,14 +197,14 @@
 */
 
 /* insmod-tweakable variables */
-static int debug=0;
+static int debug;
 #define DEBUG_VERBOSE 1
 #define DEBUG_UPPER 2
 #define DEBUG_LOWER 4
 
-static int io=0;
-static int irq=0;
-static int dma=0;
+static int io;
+static int irq;
+static int dma;
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -215,7 +215,7 @@ static int dma=0;
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -281,7 +281,7 @@ struct xmitQel {
 
 /* the transmit queue itself */
 
-static struct xmitQel *xmQhd=NULL,*xmQtl=NULL;
+static struct xmitQel *xmQhd, *xmQtl;
 
 static void enQ(struct xmitQel *qel)
 {
@@ -489,7 +489,7 @@ static void handlecommand(struct net_device *dev)
 static unsigned char rescbuf[2] = {LT_GETRESULT,0};
 static unsigned char resdbuf[2];
 
-static int QInIdle=0;
+static int QInIdle;
 
 /* idle expects to be called with the IRQ line high -- either because of
  * an interrupt, or because the line is tri-stated
@@ -787,6 +787,7 @@ static int sendup_buffer (struct net_device *dev)
 
 	/* toss it onwards */
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	return 0;
 }
 
@@ -909,7 +910,7 @@ static int ltpc_init(struct net_device *dev)
 	return 0;
 }
 
-static int ltpc_poll_counter = 0;
+static int ltpc_poll_counter;
 
 static void ltpc_poll(unsigned long l)
 {
@@ -1254,6 +1255,8 @@ __setup("ltpc=", ltpc_setup);
 static struct net_device dev_ltpc;
 
 #ifdef MODULE
+
+MODULE_LICENSE("GPL");
 MODULE_PARM(debug, "i");
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");

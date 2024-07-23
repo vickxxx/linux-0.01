@@ -32,6 +32,9 @@
  *   Support for PIO mode.  This allows the driver to work properly with
  *     multiport cards.
  *
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br> -
+ * several cleanups, use module_init/module_exit, etc
+ *
  * This module exports the following rs232 io functions:
  *
  *	int espserial_init(void);
@@ -61,7 +64,7 @@
 #include <asm/bitops.h>
 
 #include <asm/dma.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 
 #include <linux/hayesesp.h>
@@ -79,6 +82,8 @@ static unsigned int flow_off = ESP_FLOW_OFF;
 static unsigned int flow_on = ESP_FLOW_ON;
 static unsigned int rx_timeout = ESP_RX_TMOUT;
 static unsigned int pio_threshold = ESP_PIO_THRESHOLD;
+
+MODULE_LICENSE("GPL");
 
 MODULE_PARM(irq, "1-8i");
 MODULE_PARM(divisor, "1-8i");
@@ -100,8 +105,8 @@ static struct esp_pio_buffer *free_pio_buf;
 
 #define WAKEUP_CHARS 1024
 
-static char *serial_name = "ESP serial driver";
-static char *serial_version = "2.2";
+static char serial_name[] __initdata = "ESP serial driver";
+static char serial_version[] __initdata = "2.2";
 
 static DECLARE_TASK_QUEUE(tq_esp);
 
@@ -174,9 +179,9 @@ static inline int serial_paranoia_check(struct esp_struct *info,
 					kdev_t device, const char *routine)
 {
 #ifdef SERIAL_PARANOIA_CHECK
-	static const char *badmagic =
+	static const char badmagic[] = KERN_WARNING
 		"Warning: bad magic number for serial struct (%s) in %s\n";
-	static const char *badinfo =
+	static const char badinfo[] = KERN_WARNING
 		"Warning: null esp_struct for (%s) in %s\n";
 
 	if (!info) {
@@ -285,8 +290,7 @@ static _INLINE_ struct esp_pio_buffer *get_pio_buffer(void)
 		buf = free_pio_buf;
 		free_pio_buf = buf->next;
 	} else {
-		buf = (struct esp_pio_buffer *)
-			kmalloc(sizeof(struct esp_pio_buffer), GFP_ATOMIC);
+		buf = kmalloc(sizeof(struct esp_pio_buffer), GFP_ATOMIC);
 	}
 
 	return buf;
@@ -782,10 +786,7 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(ESP_EVENT_WRITE_WAKEUP, &info->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 }
 
@@ -887,17 +888,14 @@ static int startup(struct esp_struct * info)
 
 	save_flags(flags); cli();
 
-	if (info->flags & ASYNC_INITIALIZED) {
-		restore_flags(flags);
-		return retval;
-	}
+	if (info->flags & ASYNC_INITIALIZED)
+		goto out;
 
 	if (!info->xmit_buf) {
 		info->xmit_buf = (unsigned char *)get_free_page(GFP_KERNEL);
-		if (!info->xmit_buf) {
-			restore_flags(flags);
-			return -ENOMEM;
-		}
+		retval = -ENOMEM;
+		if (!info->xmit_buf)
+			goto out;
 	}
 
 #ifdef SERIAL_DEBUG_OPEN
@@ -944,9 +942,7 @@ static int startup(struct esp_struct * info)
 					&info->tty->flags);
 			retval = 0;
 		}
-		
-		restore_flags(flags);
-		return retval;
+		goto out;
 	}
 
 	if (!(info->stat_flags & ESP_STAT_USE_PIO) && !dma_buffer) {
@@ -957,7 +953,7 @@ static int startup(struct esp_struct * info)
 		if (!dma_buffer)
 			info->stat_flags |= ESP_STAT_USE_PIO;
 		else if (request_dma(dma, "esp serial")) {
-			free_pages((unsigned int)dma_buffer,
+			free_pages((unsigned long)dma_buffer,
 				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 			info->stat_flags |= ESP_STAT_USE_PIO;
@@ -1003,8 +999,9 @@ static int startup(struct esp_struct * info)
 	change_speed(info);
 
 	info->flags |= ASYNC_INITIALIZED;
-	restore_flags(flags);
-	return 0;
+	retval = 0;
+out:	restore_flags(flags);
+	return retval;
 }
 
 /*
@@ -1061,7 +1058,7 @@ static void shutdown(struct esp_struct * info)
 
 		if (!current_port) {
 			free_dma(dma);
-			free_pages((unsigned int)dma_buffer,
+			free_pages((unsigned long)dma_buffer,
 				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 		}		
@@ -1254,13 +1251,18 @@ static void change_speed(struct esp_struct *info)
 
 static void rs_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	struct esp_struct *info = (struct esp_struct *)tty->driver_data;
+	struct esp_struct *info;
 	unsigned long flags;
 
+	if (!tty)
+		return;
+
+	info = (struct esp_struct *)tty->driver_data;
+	
 	if (serial_paranoia_check(info, tty->device, "rs_put_char"))
 		return;
 
-	if (!tty || !info->xmit_buf)
+	if (!info->xmit_buf)
 		return;
 
 	save_flags(flags); cli();
@@ -1299,13 +1301,19 @@ static int rs_write(struct tty_struct * tty, int from_user,
 		    const unsigned char *buf, int count)
 {
 	int	c, t, ret = 0;
-	struct esp_struct *info = (struct esp_struct *)tty->driver_data;
+	struct esp_struct *info;
 	unsigned long flags;
+
+
+	if (!tty)
+		return 0;
+	
+	info = (struct esp_struct *)tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->device, "rs_write"))
 		return 0;
 
-	if (!tty || !info->xmit_buf || !tmp_buf)
+	if (!info->xmit_buf || !tmp_buf)
 		return 0;
 	    
 	if (from_user)
@@ -1395,10 +1403,7 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	cli();
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	sti();
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 /*
@@ -1500,10 +1505,7 @@ static int get_esp_config(struct esp_struct * info,
 	tmp.pio_threshold = info->config.pio_threshold;
 	tmp.dma_channel = (info->stat_flags & ESP_STAT_NEVER_DMA ? 0 : dma);
 
-	if (copy_to_user(retinfo,&tmp,sizeof(*retinfo)))
-		return -EFAULT;
-
-	return 0;
+	return copy_to_user(retinfo, &tmp, sizeof(*retinfo)) ? -EFAULT : 0;
 }
 
 static int set_serial_info(struct esp_struct * info,
@@ -1803,12 +1805,10 @@ static int get_modem_info(struct esp_struct * info, unsigned int *value)
 static int set_modem_info(struct esp_struct * info, unsigned int cmd,
 			  unsigned int *value)
 {
-	int error;
 	unsigned int arg;
 
-	error = get_user(arg, value);
-	if (error)
-		return error;
+	if (get_user(arg, value))
+		return -EFAULT;
 
 	switch (cmd) {
 	case TIOCMBIS: 
@@ -1866,7 +1866,6 @@ static void esp_break(struct tty_struct *tty, int break_state)
 static int rs_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg)
 {
-	int error;
 	struct esp_struct * info = (struct esp_struct *)tty->driver_data;
 	struct async_icount cprev, cnow;	/* kernel counter temps */
 	struct serial_icounter_struct *p_cuser;	/* user space */
@@ -1907,7 +1906,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			    return get_lsr_info(info, (unsigned int *) arg);
 
 		case TIOCSERSWILD:
-			if (!suser())
+			if (!capable(CAP_SYS_ADMIN))
 				return -EPERM;
 			return 0;
 
@@ -1929,13 +1928,19 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 				cli();
 				cnow = info->icount;	/* atomic copy */
 				sti();
-				if (cnow.rng == cprev.rng && cnow.dsr == cprev.dsr && 
-				    cnow.dcd == cprev.dcd && cnow.cts == cprev.cts)
+				if (cnow.rng == cprev.rng &&
+				    cnow.dsr == cprev.dsr && 
+				    cnow.dcd == cprev.dcd &&
+				    cnow.cts == cprev.cts)
 					return -EIO; /* no change => error */
-				if ( ((arg & TIOCM_RNG) && (cnow.rng != cprev.rng)) ||
-				     ((arg & TIOCM_DSR) && (cnow.dsr != cprev.dsr)) ||
-				     ((arg & TIOCM_CD)  && (cnow.dcd != cprev.dcd)) ||
-				     ((arg & TIOCM_CTS) && (cnow.cts != cprev.cts)) ) {
+				if (((arg & TIOCM_RNG) &&
+				     (cnow.rng != cprev.rng)) ||
+				     ((arg & TIOCM_DSR) &&
+				      (cnow.dsr != cprev.dsr)) ||
+				     ((arg & TIOCM_CD) &&
+				      (cnow.dcd != cprev.dcd)) ||
+				     ((arg & TIOCM_CTS) &&
+				      (cnow.cts != cprev.cts)) ) {
 					return 0;
 				}
 				cprev = cnow;
@@ -1953,22 +1958,17 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			cnow = info->icount;
 			sti();
 			p_cuser = (struct serial_icounter_struct *) arg;
-			if ((error = put_user(cnow.cts, &p_cuser->cts)))
-				return error;
-			if ((error = put_user(cnow.dsr, &p_cuser->dsr)))
-				return error;
-			if ((error = put_user(cnow.rng, &p_cuser->rng)))
-				return error;
-			if ((error = put_user(cnow.dcd, &p_cuser->dcd)))
-				return error;
+			if (put_user(cnow.cts, &p_cuser->cts) ||
+			    put_user(cnow.dsr, &p_cuser->dsr) ||
+			    put_user(cnow.rng, &p_cuser->rng) ||
+			    put_user(cnow.dcd, &p_cuser->dcd))
+				return -EFAULT;
 
 			return 0;
 	case TIOCGHAYESESP:
-		return (get_esp_config(info,
-				       (struct hayes_esp_config *)arg));
+		return (get_esp_config(info, (struct hayes_esp_config *)arg));
 	case TIOCSHAYESESP:
-		return (set_esp_config(info,
-				       (struct hayes_esp_config *)arg));
+		return (set_esp_config(info, (struct hayes_esp_config *)arg));
 
 		default:
 			return -ENOIOCTLCMD;
@@ -2050,9 +2050,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	
 	if (tty_hung_up_p(filp)) {
 		DBG_CNT("before DEC-hung");
-		MOD_DEC_USE_COUNT;
-		restore_flags(flags);
-		return;
+		goto out;
 	}
 	
 #ifdef SERIAL_DEBUG_OPEN
@@ -2077,9 +2075,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	}
 	if (info->count) {
 		DBG_CNT("before DEC-2");
-		MOD_DEC_USE_COUNT;
-		restore_flags(flags);
-		return;
+		goto out;
 	}
 	info->flags |= ASYNC_CLOSING;
 	/*
@@ -2124,15 +2120,14 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
 
 	if (info->blocked_open) {
 		if (info->close_delay) {
-			current->state = TASK_INTERRUPTIBLE;
+			set_current_state(TASK_INTERRUPTIBLE);
 			schedule_timeout(info->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
@@ -2140,7 +2135,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE|
 			 ASYNC_CLOSING);
 	wake_up_interruptible(&info->close_wait);
-	MOD_DEC_USE_COUNT;
+out:	MOD_DEC_USE_COUNT;
 	restore_flags(flags);
 }
 
@@ -2165,13 +2160,13 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 
 	while ((serial_in(info, UART_ESI_STAT1) != 0x03) ||
 		(serial_in(info, UART_ESI_STAT2) != 0xff)) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		schedule_timeout(char_time);
 
 		if (signal_pending(current))
 			break;
 
-		if (timeout && ((orig_jiffies + timeout) < jiffies))
+		if (timeout && time_after(jiffies, orig_jiffies + timeout))
 			break;
 
 		serial_out(info, UART_ESI_CMD1, ESI_NO_COMMAND);
@@ -2179,7 +2174,7 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 	}
 	
 	restore_flags(flags);
-	current->state = TASK_RUNNING;
+	set_current_state(TASK_RUNNING);
 }
 
 /*
@@ -2212,6 +2207,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
+	unsigned long	flags;
 
 	/*
 	 * If the device is in the middle of being closed, then block
@@ -2283,12 +2279,14 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	printk("block_til_ready before block: ttys%d, count = %d\n",
 	       info->line, info->count);
 #endif
+	save_flags(flags);
 	cli();
 	if (!tty_hung_up_p(filp)) 
 		info->count--;
-	sti();
+	restore_flags(flags);
 	info->blocked_open++;
 	while (1) {
+		save_flags(flags);
 		cli();
 		if (!(info->flags & ASYNC_CALLOUT_ACTIVE) &&
 			(tty->termios->c_cflag & CBAUD)) {
@@ -2302,7 +2300,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			serial_out(info, UART_ESI_CMD2,
 				scratch | UART_MCR_DTR | UART_MCR_RTS);
 		}
-		sti();
+		restore_flags(flags);
 		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
@@ -2335,7 +2333,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 #endif
 		schedule();
 	}
-	current->state = TASK_RUNNING;
+	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&info->open_wait, &wait);
 	if (!tty_hung_up_p(filp))
 		info->count++;
@@ -2360,7 +2358,6 @@ static int esp_open(struct tty_struct *tty, struct file * filp)
 {
 	struct esp_struct	*info;
 	int 			retval, line;
-	unsigned long		page;
 
 	line = MINOR(tty->device) - tty->driver.minor_start;
 	if ((line < 0) || (line >= NR_PORTS))
@@ -2388,13 +2385,9 @@ static int esp_open(struct tty_struct *tty, struct file * filp)
 	info->tty = tty;
 
 	if (!tmp_buf) {
-		page = get_free_page(GFP_KERNEL);
-		if (!page)
+		tmp_buf = (unsigned char *) get_free_page(GFP_KERNEL);
+		if (!tmp_buf)
 			return -ENOMEM;
-		if (tmp_buf)
-			free_page(page);
-		else
-			tmp_buf = (unsigned char *) page;
 	}
 	
 	/*
@@ -2613,8 +2606,7 @@ int __init espserial_init(void)
 		return 1;
 	}
 	
-	info = (struct esp_struct *)kmalloc(sizeof(struct esp_struct),
-		GFP_KERNEL);
+	info = kmalloc(sizeof(struct esp_struct), GFP_KERNEL);
 
 	if (!info)
 	{
@@ -2685,8 +2677,7 @@ int __init espserial_init(void)
 		if (!dma)
 			info->stat_flags |= ESP_STAT_NEVER_DMA;
 
-		info = (struct esp_struct *)kmalloc(sizeof(struct esp_struct),
-			GFP_KERNEL);
+		info = kmalloc(sizeof(struct esp_struct), GFP_KERNEL);
 		if (!info)
 		{
 			printk(KERN_ERR "Couldn't allocate memory for esp serial device information\n"); 
@@ -2714,14 +2705,7 @@ int __init espserial_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	return espserial_init();
-}
-
-void cleanup_module(void) 
+static void __exit espserial_exit(void) 
 {
 	unsigned long flags;
 	int e1, e2;
@@ -2770,7 +2754,7 @@ void cleanup_module(void)
 	}
 
 	if (dma_buffer)
-		free_pages((unsigned int)dma_buffer,
+		free_pages((unsigned long)dma_buffer,
 			get_order(DMA_BUFFER_SZ));
 
 	if (tmp_buf)
@@ -2782,4 +2766,6 @@ void cleanup_module(void)
 		free_pio_buf = pio_buf;
 	}
 }
-#endif /* MODULE */
+
+module_init(espserial_init);
+module_exit(espserial_exit);

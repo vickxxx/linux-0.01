@@ -1,4 +1,4 @@
-/* $Id: bwtwofb.c,v 1.13 2000/02/14 02:50:25 davem Exp $
+/* $Id: bwtwofb.c,v 1.15 2001/09/19 00:04:33 davem Exp $
  * bwtwofb.c: BWtwo frame buffer driver
  *
  * Copyright (C) 1998 Jakub Jelinek   (jj@ultra.linux.cz)
@@ -15,7 +15,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -263,3 +263,5 @@ char __init *bwtwofb_init(struct fb_info_sbusfb *fb)
 	
 	return idstring;
 }
+
+MODULE_LICENSE("GPL");

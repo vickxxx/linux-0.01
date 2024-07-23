@@ -3,14 +3,14 @@
  *
  * Copyright (C) 1996 David S. Miller
  * Copyright (C) 1997 Miguel de Icaza
- * Copyright (C) 1997, 1998 Ralf Baechle
+ * Copyright (C) 1997, 1998, 1999, 2000 Ralf Baechle
  */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/pagemap.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/swap.h>
 #include <linux/errno.h>
 #include <linux/timex.h>
@@ -27,7 +27,6 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
-#include <asm/sgialib.h>
 #include <asm/inventory.h>
 
 /* 2,191 lines of complete and utter shit coming up... */
@@ -110,7 +109,7 @@ asmlinkage int irix_prctl(struct pt_regs *regs)
 		if (error)
 			error = (task->run_list.next != NULL);
 		read_unlock(&tasklist_lock);
-		/* Can _your_ OS find this out that fast? */ 
+		/* Can _your_ OS find this out that fast? */
 		break;
 	}
 
@@ -333,7 +332,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		       current->comm, current->pid, name, value, retval);
 /*		if (retval == PROM_ENOENT)
 		  	retval = -ENOENT; */
-		break;				   
+		break;
 	}
 #endif
 
@@ -472,7 +471,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		if (retval)
 			return retval;
 
-		down(&mm->mmap_sem);
+		down_read(&mm->mmap_sem);
 		pgdp = pgd_offset(mm, addr);
 		pmdp = pmd_offset(pgdp, addr);
 		ptep = pte_offset(pmdp, addr);
@@ -485,7 +484,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 				                   PAGE_SHIFT, pageno);
 			}
 		}
-		up(&mm->mmap_sem);
+		up_read(&mm->mmap_sem);
 		break;
 	}
 
@@ -506,7 +505,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		}
 		break;
 	}
-	
+
 	default:
 		printk("irix_syssgi: Unsupported command %d\n", (int)cmd);
 		retval = -EINVAL;
@@ -535,7 +534,7 @@ asmlinkage int irix_brk(unsigned long brk)
 	struct mm_struct *mm = current->mm;
 	int ret;
 
-	down(&mm->mmap_sem);
+	down_write(&mm->mmap_sem);
 	if (brk < mm->end_code) {
 		ret = -ENOMEM;
 		goto out;
@@ -593,7 +592,7 @@ asmlinkage int irix_brk(unsigned long brk)
 	ret = 0;
 
 out:
-	up(&mm->mmap_sem);
+	up_write(&mm->mmap_sem);
 	return ret;
 }
 
@@ -625,8 +624,10 @@ asmlinkage int irix_stime(int value)
 	write_lock_irq(&xtime_lock);
 	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
-	time_maxerror = MAXPHASE;
-	time_esterror = MAXPHASE;
+	time_adjust = 0;			/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
 	write_unlock_irq(&xtime_lock);
 
 	return 0;
@@ -927,8 +928,8 @@ asmlinkage int irix_getdomainname(char *name, int len)
 		return error;
 
 	down_read(&uts_sem);
-	if(len > (__NEW_UTS_LEN - 1))
-		len = __NEW_UTS_LEN - 1;
+	if (len > __NEW_UTS_LEN)
+		len = __NEW_UTS_LEN;
 	error = 0;
 	if (copy_to_user(name, system_utsname.domainname, len))
 		error = -EFAULT;
@@ -1072,7 +1073,7 @@ asmlinkage unsigned long irix_mmap32(unsigned long addr, size_t len, int prot,
 		if (flags & IRIX_MAP_AUTOGROW) {
 			unsigned long old_pos;
 			long max_size = offset + len;
-			
+
 			if (max_size > file->f_dentry->d_inode->i_size) {
 				old_pos = sys_lseek (fd, max_size - 1, 0);
 				sys_write (fd, "", 1);
@@ -1083,9 +1084,9 @@ asmlinkage unsigned long irix_mmap32(unsigned long addr, size_t len, int prot,
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	retval = do_mmap(file, addr, len, prot, flags, offset);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 
@@ -1249,9 +1250,9 @@ static inline void irix_xstat64_xlate(struct stat *sb)
 
 	ks.st_blksize = (s32) sb->st_blksize;
 	ks.st_blocks = (long long) sb->st_blocks;
-	memcpy(&ks.st_fstype[0], &sb->st_fstype[0], 16);
-	ks.st_pad4[0] = ks.st_pad4[1] = ks.st_pad4[2] = ks.st_pad4[3] =
-		ks.st_pad4[4] = ks.st_pad4[5] = ks.st_pad4[6] = ks.st_pad4[7] = 0;
+	memset(ks.st_fstype, 0, 16);
+	ks.st_pad4[0] = ks.st_pad4[1] = ks.st_pad4[2] = ks.st_pad4[3] = 0;
+	ks.st_pad4[4] = ks.st_pad4[5] = ks.st_pad4[6] = ks.st_pad4[7] = 0;
 
 	/* Now write it all back. */
 	copy_to_user(sb, &ks, sizeof(struct xstat64));
@@ -1643,9 +1644,9 @@ asmlinkage int irix_mmap64(struct pt_regs *regs)
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 
 	if (file)
 		fput(file);
@@ -1711,7 +1712,7 @@ asmlinkage int irix_statvfs64(char *fname, struct irix_statvfs64 *buf)
 
 	printk("[%s:%d] Wheee.. irix_statvfs(%s,%p)\n",
 	       current->comm, current->pid, fname, buf);
-	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs));
+	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs64));
 	if(error)
 		goto out;
 	error = user_path_walk(fname, &nd);
@@ -1847,7 +1848,7 @@ struct irix_dirent32_callback {
 #define ROUND_UP32(x) (((x)+sizeof(u32)-1) & ~(sizeof(u32)-1))
 
 static int irix_filldir32(void *__buf, const char *name, int namlen,
-                          off_t offset, ino_t ino, unsigned int d_type)
+                          loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct irix_dirent32 *dirent;
 	struct irix_dirent32_callback *buf =
@@ -1877,7 +1878,8 @@ static int irix_filldir32(void *__buf, const char *name, int namlen,
 	return 0;
 }
 
-asmlinkage int irix_ngetdents(unsigned int fd, void * dirent, unsigned int count, int *eob)
+asmlinkage int irix_ngetdents(unsigned int fd, void * dirent,
+	unsigned int count, int *eob)
 {
 	struct file *file;
 	struct irix_dirent32 *lastdirent;
@@ -1901,6 +1903,7 @@ asmlinkage int irix_ngetdents(unsigned int fd, void * dirent, unsigned int count
 	error = vfs_readdir(file, irix_filldir32, &buf);
 	if (error < 0)
 		goto out_putf;
+
 	error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
@@ -1909,10 +1912,9 @@ asmlinkage int irix_ngetdents(unsigned int fd, void * dirent, unsigned int count
 	}
 
 	if (put_user(0, eob) < 0) {
-		error = EFAULT;
+		error = -EFAULT;
 		goto out_putf;
 	}
-
 
 #ifdef DEBUG_GETDENTS
 	printk("eob=%d returning %d\n", *eob, count - buf.count);
@@ -1943,7 +1945,7 @@ struct irix_dirent64_callback {
 #define ROUND_UP64(x) (((x)+sizeof(u64)-1) & ~(sizeof(u64)-1))
 
 static int irix_filldir64(void * __buf, const char * name, int namlen,
-			  off_t offset, ino_t ino, unsigned int d_type)
+			  loff_t offset, ino_t ino, unsigned int d_type)
 {
 	struct irix_dirent64 *dirent;
 	struct irix_dirent64_callback * buf =

@@ -5,6 +5,8 @@
 #define NETLINK_SKIP		1	/* Reserved for ENskip  			*/
 #define NETLINK_USERSOCK	2	/* Reserved for user mode socket protocols 	*/
 #define NETLINK_FIREWALL	3	/* Firewalling hook				*/
+#define NETLINK_TCPDIAG		4	/* TCP socket monitoring			*/
+#define NETLINK_NFLOG		5	/* netfilter/iptables ULOG */
 #define NETLINK_ARPD		8
 #define NETLINK_ROUTE6		11	/* af_inet6 route comm channel */
 #define NETLINK_IP6_FW		13
@@ -34,7 +36,7 @@ struct nlmsghdr
 
 #define NLM_F_REQUEST		1	/* It is request message. 	*/
 #define NLM_F_MULTI		2	/* Multipart message, terminated by NLMSG_DONE */
-#define NLM_F_ACK		4	/* If succeed, reply with ack	*/
+#define NLM_F_ACK		4	/* Reply with ack, with zero or error code */
 #define NLM_F_ECHO		8	/* Echo this request 		*/
 
 /* Modifiers to GET request */
@@ -65,7 +67,8 @@ struct nlmsghdr
 #define NLMSG_DATA(nlh)  ((void*)(((char*)nlh) + NLMSG_LENGTH(0)))
 #define NLMSG_NEXT(nlh,len)	 ((len) -= NLMSG_ALIGN((nlh)->nlmsg_len), \
 				  (struct nlmsghdr*)(((char*)(nlh)) + NLMSG_ALIGN((nlh)->nlmsg_len)))
-#define NLMSG_OK(nlh,len) ((len) > 0 && (nlh)->nlmsg_len >= sizeof(struct nlmsghdr) && \
+#define NLMSG_OK(nlh,len) ((len) >= (int)sizeof(struct nlmsghdr) && \
+			   (nlh)->nlmsg_len >= sizeof(struct nlmsghdr) && \
 			   (nlh)->nlmsg_len <= (len))
 #define NLMSG_PAYLOAD(nlh,len) ((nlh)->nlmsg_len - NLMSG_SPACE((len)))
 
@@ -108,13 +111,15 @@ extern int netlink_unicast(struct sock *ssk, struct sk_buff *skb, __u32 pid, int
 extern void netlink_broadcast(struct sock *ssk, struct sk_buff *skb, __u32 pid,
 			      __u32 group, int allocation);
 extern void netlink_set_err(struct sock *ssk, __u32 pid, __u32 group, int code);
+extern int netlink_register_notifier(struct notifier_block *nb);
+extern int netlink_unregister_notifier(struct notifier_block *nb);
+extern int netlink_proto_init(void);
 
 /*
  *	skb should fit one page. This choice is good for headerless malloc.
- *
- *      FIXME: What is the best size for SLAB???? --ANK
  */
-#define NLMSG_GOODSIZE (PAGE_SIZE - ((sizeof(struct sk_buff)+0xF)&~0xF))
+#define NLMSG_GOODORDER 0
+#define NLMSG_GOODSIZE (SKB_MAX_ORDER(0, NLMSG_GOODORDER))
 
 
 struct netlink_callback
@@ -127,7 +132,13 @@ struct netlink_callback
 	long		args[4];
 };
 
-extern __inline__ struct nlmsghdr *
+struct netlink_notify
+{
+	int pid;
+	int protocol;
+};
+
+static __inline__ struct nlmsghdr *
 __nlmsg_put(struct sk_buff *skb, u32 pid, u32 seq, int type, int len)
 {
 	struct nlmsghdr *nlh;
@@ -150,6 +161,10 @@ extern int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 			      struct nlmsghdr *nlh,
 			      int (*dump)(struct sk_buff *skb, struct netlink_callback*),
 			      int (*done)(struct netlink_callback*));
+
+#define NL_NONROOT_RECV 0x1
+#define NL_NONROOT_SEND 0x2
+extern void netlink_set_nonroot(int protocol, unsigned flag);
 
 
 #endif /* __KERNEL__ */

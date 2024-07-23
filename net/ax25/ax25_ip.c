@@ -56,9 +56,14 @@
 
 int ax25_encapsulate(struct sk_buff *skb, struct net_device *dev, unsigned short type, void *daddr, void *saddr, unsigned len)
 {
-  	/* header is an AX.25 UI frame from us to them */
- 	unsigned char *buff = skb_push(skb, AX25_HEADER_LEN);
+	unsigned char *buff;
 
+	/* they sometimes come back to us... */
+	if (type == ETH_P_AX25)
+		return 0;
+
+  	/* header is an AX.25 UI frame from us to them */
+ 	buff = skb_push(skb, AX25_HEADER_LEN);
   	*buff++ = 0x00;	/* KISS DATA */
 
 	if (daddr != NULL)
@@ -90,7 +95,7 @@ int ax25_encapsulate(struct sk_buff *skb, struct net_device *dev, unsigned short
   			*buff++ = AX25_P_ARP;
   			break;
   		default:
-  			printk(KERN_ERR "AX.25: ax25_encapsulate - wrong protocol type 0x%x2.2\n", type);
+  			printk(KERN_ERR "AX.25: ax25_encapsulate - wrong protocol type 0x%2.2x\n", type);
   			*buff++ = 0;
   			break;
  	}
@@ -155,12 +160,18 @@ int ax25_rebuild_header(struct sk_buff *skb)
 				skb_set_owner_w(ourskb, skb->sk);
 
 			kfree_skb(skb);
-
-			src_c = *src;
-			dst_c = *dst;
+			/* dl9sau: bugfix
+			 * after kfree_skb(), dst and src which were pointer
+			 * to bp which is part of skb->data would not be valid
+			 * anymore hope that after skb_pull(ourskb, ..) our
+			 * dsc_c and src_c will not become invalid
+			 */
+			bp  = ourskb->data;
+			dst_c = *(ax25_address *)(bp + 1);
+			src_c = *(ax25_address *)(bp + 8);
 
 			skb_pull(ourskb, AX25_HEADER_LEN - 1);	/* Keep PID */
-			skb->nh.raw = skb->data;
+			ourskb->nh.raw = ourskb->data;
 
 			ax25_send_frame(ourskb, ax25_dev->values[AX25_VALUES_PACLEN], &src_c, 
 &dst_c, route->digipeat, dev);

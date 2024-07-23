@@ -7,7 +7,7 @@
  *		handler for protocols to use and generic option handler.
  *
  *
- * Version:	$Id: sock.c,v 1.102 2000/12/11 23:00:24 davem Exp $
+ * Version:	$Id: sock.c,v 1.116 2001/11/08 04:20:06 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -79,6 +79,8 @@
  *		Jay Schulist	:	Added SO_ATTACH_FILTER and SO_DETACH_FILTER.
  *		Andi Kleen	:	Add sock_kmalloc()/sock_kfree_s()
  *		Andi Kleen	:	Fix write_space callback
+ *		Chris Evans	:	Security fixes - signedness again
+ *		Arnaldo C. Melo :       cleanups, use skb_queue_purge
  *
  * To Fix:
  *
@@ -106,30 +108,35 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/poll.h>
+#include <linux/tcp.h>
 #include <linux/init.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-#include <linux/inet.h>
 #include <linux/netdevice.h>
-#include <net/ip.h>
 #include <net/protocol.h>
-#include <net/arp.h>
-#include <net/route.h>
-#include <net/tcp.h>
-#include <net/udp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/raw.h>
-#include <net/icmp.h>
 #include <linux/ipsec.h>
 
 #ifdef CONFIG_FILTER
 #include <linux/filter.h>
 #endif
 
-#define min(a,b)	((a)<(b)?(a):(b))
+#ifdef CONFIG_INET
+#include <net/tcp.h>
+#endif
+
+/* Take into consideration the size of the struct sk_buff overhead in the
+ * determination of these values, since that is non-constant across
+ * platforms.  This makes socket queueing behavior and performance
+ * not depend upon such differences.
+ */
+#define _SK_MEM_PACKETS		256
+#define _SK_MEM_OVERHEAD	(sizeof(struct sk_buff) + 256)
+#define SK_WMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
+#define SK_RMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
 
 /* Run time adjustable parameters. */
 __u32 sysctl_wmem_max = SK_WMEM_MAX;
@@ -171,7 +178,6 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 #endif
 	int val;
 	int valbool;
-	int err;
 	struct linger ling;
 	int ret = 0;
 	
@@ -191,9 +197,8 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
   	if(optlen<sizeof(int))
   		return(-EINVAL);
   	
-	err = get_user(val, (int *)optval);
-	if (err)
-		return err;
+	if (get_user(val, (int *)optval))
+		return -EFAULT;
 	
   	valbool = val?1:0;
 
@@ -232,7 +237,10 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 				val = sysctl_wmem_max;
 
 			sk->userlocks |= SOCK_SNDBUF_LOCK;
-			sk->sndbuf = max(val*2,SOCK_MIN_SNDBUF);
+			if ((val * 2) < SOCK_MIN_SNDBUF)
+				sk->sndbuf = SOCK_MIN_SNDBUF;
+			else
+				sk->sndbuf = (val * 2);
 
 			/*
 			 *	Wake up sending tasks if we
@@ -252,7 +260,10 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 
 			sk->userlocks |= SOCK_RCVBUF_LOCK;
 			/* FIXME: is this lower bound the right one? */
-			sk->rcvbuf = max(val*2,SOCK_MIN_RCVBUF);
+			if ((val * 2) < SOCK_MIN_RCVBUF)
+				sk->rcvbuf = SOCK_MIN_RCVBUF;
+			else
+				sk->rcvbuf = (val * 2);
 			break;
 
 		case SO_KEEPALIVE:
@@ -425,11 +436,13 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 		struct timeval tm;
 	} v;
 	
-	int lv=sizeof(int),len;
+	unsigned int lv=sizeof(int),len;
   	
   	if(get_user(len,optlen))
   		return -EFAULT;
-
+	if(len < 0)
+		return -EINVAL;
+		
   	switch(optname) 
   	{
 		case SO_DEBUG:		
@@ -503,7 +516,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 				v.tm.tv_usec = 0;
 			} else {
 				v.tm.tv_sec = sk->rcvtimeo/HZ;
-				v.tm.tv_usec = ((sk->rcvtimeo%HZ)*1000)/HZ;
+				v.tm.tv_usec = ((sk->rcvtimeo%HZ)*1000000)/HZ;
 			}
 			break;
 
@@ -514,7 +527,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 				v.tm.tv_usec = 0;
 			} else {
 				v.tm.tv_sec = sk->sndtimeo/HZ;
-				v.tm.tv_usec = ((sk->sndtimeo%HZ)*1000)/HZ;
+				v.tm.tv_usec = ((sk->sndtimeo%HZ)*1000000)/HZ;
 			}
 			break;
 
@@ -531,9 +544,9 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			break;
 
 		case SO_PEERCRED:
-			lv=sizeof(sk->peercred);
-			len=min(len, lv);
-			if(copy_to_user((void*)optval, &sk->peercred, len))
+			if (len > sizeof(sk->peercred))
+				len = sizeof(sk->peercred);
+			if (copy_to_user(optval, &sk->peercred, len))
 				return -EFAULT;
 			goto lenout;
 
@@ -550,14 +563,22 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			goto lenout;
 		}
 
+		/* Dubious BSD thing... Probably nobody even uses it, but
+		 * the UNIX standard wants it for whatever reason... -DaveM
+		 */
+		case SO_ACCEPTCONN:
+			v.val = (sk->state == TCP_LISTEN);
+			break;
+
 		default:
 			return(-ENOPROTOOPT);
 	}
-	len=min(len,lv);
-	if(copy_to_user(optval,&v,len))
+	if (len > lv)
+		len = lv;
+	if (copy_to_user(optval, &v, len))
 		return -EFAULT;
 lenout:
-  	if(put_user(len, optlen))
+  	if (put_user(len, optlen))
   		return -EFAULT;
   	return 0;
 }
@@ -616,7 +637,7 @@ void __init sk_init(void)
 		sysctl_wmem_max = 32767;
 		sysctl_rmem_max = 32767;
 		sysctl_wmem_default = 32767;
-		sysctl_wmem_default = 32767;
+		sysctl_rmem_default = 32767;
 	} else if (num_physpages >= 131072) {
 		sysctl_wmem_max = 131071;
 		sysctl_rmem_max = 131071;
@@ -637,7 +658,8 @@ void sock_wfree(struct sk_buff *skb)
 
 	/* In case it might be waiting for more memory. */
 	atomic_sub(skb->truesize, &sk->wmem_alloc);
-	sk->write_space(sk);
+	if (!sk->use_write_queue)
+		sk->write_space(sk);
 	sock_put(sk);
 }
 
@@ -720,6 +742,8 @@ static long sock_wait_for_wmem(struct sock * sk, long timeo)
 	clear_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
 	add_wait_queue(sk->sleep, &wait);
 	for (;;) {
+		if (!timeo)
+			break;
 		if (signal_pending(current))
 			break;
 		set_bit(SOCK_NOSPACE, &sk->socket->flags);
@@ -742,57 +766,63 @@ static long sock_wait_for_wmem(struct sock * sk, long timeo)
  *	Generic send/receive buffer handlers
  */
 
-struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, 
-			unsigned long fallback, int noblock, int *errcode)
+struct sk_buff *sock_alloc_send_pskb(struct sock *sk, unsigned long header_len,
+				     unsigned long data_len, int noblock, int *errcode)
 {
-	int err;
 	struct sk_buff *skb;
 	long timeo;
+	int err;
 
 	timeo = sock_sndtimeo(sk, noblock);
-
 	while (1) {
-		unsigned long try_size = size;
-
 		err = sock_error(sk);
 		if (err != 0)
 			goto failure;
 
-		/*
-		 *	We should send SIGPIPE in these cases according to
-		 *	1003.1g draft 6.4. If we (the user) did a shutdown()
-		 *	call however we should not. 
-		 *
-		 *	Note: This routine isnt just used for datagrams and
-		 *	anyway some datagram protocols have a notion of
-		 *	close down.
-		 */
-
 		err = -EPIPE;
-		if (sk->shutdown&SEND_SHUTDOWN)
+		if (sk->shutdown & SEND_SHUTDOWN)
 			goto failure;
 
 		if (atomic_read(&sk->wmem_alloc) < sk->sndbuf) {
-			if (fallback) {
-				/* The buffer get won't block, or use the atomic queue.
-			 	* It does produce annoying no free page messages still.
-			 	*/
-				skb = alloc_skb(size, GFP_BUFFER);
-				if (skb)
+			skb = alloc_skb(header_len, sk->allocation);
+			if (skb) {
+				int npages;
+				int i;
+
+				/* No pages, we're done... */
+				if (!data_len)
 					break;
-				try_size = fallback;
-			}
-			skb = alloc_skb(try_size, sk->allocation);
-			if (skb)
+
+				npages = (data_len + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
+				skb->truesize += data_len;
+				skb_shinfo(skb)->nr_frags = npages;
+				for (i = 0; i < npages; i++) {
+					struct page *page;
+					skb_frag_t *frag;
+
+					page = alloc_pages(sk->allocation, 0);
+					if (!page) {
+						err = -ENOBUFS;
+						skb_shinfo(skb)->nr_frags = i;
+						kfree_skb(skb);
+						goto failure;
+					}
+
+					frag = &skb_shinfo(skb)->frags[i];
+					frag->page = page;
+					frag->page_offset = 0;
+					frag->size = (data_len >= PAGE_SIZE ?
+						      PAGE_SIZE :
+						      data_len);
+					data_len -= PAGE_SIZE;
+				}
+
+				/* Full success... */
 				break;
+			}
 			err = -ENOBUFS;
 			goto failure;
 		}
-
-		/*
-		 *	This means we have too many buffers for this socket already.
-		 */
-
 		set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
 		set_bit(SOCK_NOSPACE, &sk->socket->flags);
 		err = -EAGAIN;
@@ -811,6 +841,12 @@ interrupted:
 failure:
 	*errcode = err;
 	return NULL;
+}
+
+struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, 
+				    int noblock, int *errcode)
+{
+	return sock_alloc_send_pskb(sk, size, 0, noblock, errcode);
 }
 
 void __lock_sock(struct sock *sk)
@@ -914,14 +950,10 @@ static void sklist_destroy_timer(unsigned long data)
  
 void sklist_destroy_socket(struct sock **list,struct sock *sk)
 {
-	struct sk_buff *skb;
 	if(list)
 		sklist_remove_socket(list, sk);
 
-	while((skb=skb_dequeue(&sk->receive_queue))!=NULL)
-	{
-		kfree_skb(skb);
-	}
+	skb_queue_purge(&sk->receive_queue);
 
 	if(atomic_read(&sk->wmem_alloc) == 0 &&
 	   atomic_read(&sk->rmem_alloc) == 0 &&
@@ -1057,6 +1089,36 @@ int sock_no_mmap(struct file *file, struct socket *sock, struct vm_area_struct *
 {
 	/* Mirror missing mmap method error code */
 	return -ENODEV;
+}
+
+ssize_t sock_no_sendpage(struct socket *sock, struct page *page, int offset, size_t size, int flags)
+{
+	ssize_t res;
+	struct msghdr msg;
+	struct iovec iov;
+	mm_segment_t old_fs;
+	char *kaddr;
+
+	kaddr = kmap(page);
+
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_control = NULL;
+	msg.msg_controllen = 0;
+	msg.msg_flags = flags;
+
+	iov.iov_base = kaddr + offset;
+	iov.iov_len = size;
+
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	res = sock_sendmsg(sock, &msg, size);
+	set_fs(old_fs);
+
+	kunmap(page);
+	return res;
 }
 
 /*

@@ -39,14 +39,20 @@
 #define ERRbadshare 32          /* Share mode on file conflict with open mode */
 #define ERRlock 33              /* Lock request conflicts with existing lock */
 #define ERRfilexists 80         /* File in operation already exists */
-#define ERRundocumented1 123    /* Invalid name?? e.g. .tmp* */
 #define ERRbadpipe 230          /* Named pipe invalid */
 #define ERRpipebusy 231         /* All instances of pipe are busy */
 #define ERRpipeclosing 232      /* named pipe close in progress */
 #define ERRnotconnected 233     /* No process on other end of named pipe */
 #define ERRmoredata 234         /* More data to be returned */
-#define ERROR_EAS_DIDNT_FIT 275 /* Extended attributes didn't fit */
-#define ERROR_EAS_NOT_SUPPORTED 282 /* Extended attributes not supported */
+
+#define ERROR_INVALID_PARAMETER	 87
+#define ERROR_DISK_FULL		112
+#define ERROR_INVALID_NAME	123
+#define ERROR_DIR_NOT_EMPTY	145
+#define ERROR_NOT_LOCKED	158
+#define ERROR_ALREADY_EXISTS	183  /* see also 80 ? */
+#define ERROR_EAS_DIDNT_FIT	275 /* Extended attributes didn't fit */
+#define ERROR_EAS_NOT_SUPPORTED	282 /* Extended attributes not supported */
 
 /* Error codes for the ERRSRV class */
 
@@ -274,5 +280,65 @@
 #define TRANSACT2_FINDNOTIFYFIRST 11
 #define TRANSACT2_FINDNOTIFYNEXT  12
 #define TRANSACT2_MKDIR           13
+
+/* Information Levels -  Shared? */
+#define SMB_INFO_STANDARD		1
+#define SMB_INFO_QUERY_EA_SIZE		2
+#define SMB_INFO_QUERY_EAS_FROM_LIST	3
+#define SMB_INFO_QUERY_ALL_EAS		4
+#define SMB_INFO_IS_NAME_VALID		6
+
+/* Information Levels -  TRANSACT2_FINDFIRST */
+#define SMB_FIND_FILE_DIRECTORY_INFO		0x101
+#define SMB_FIND_FILE_FULL_DIRECTORY_INFO	0x102
+#define SMB_FIND_FILE_NAMES_INFO		0x103
+#define SMB_FIND_FILE_BOTH_DIRECTORY_INFO	0x104
+
+/* Information Levels -  TRANSACT2_QPATHINFO */
+#define SMB_QUERY_FILE_BASIC_INFO	0x101
+#define SMB_QUERY_FILE_STANDARD_INFO	0x102
+#define SMB_QUERY_FILE_EA_INFO		0x103
+#define SMB_QUERY_FILE_NAME_INFO	0x104
+#define SMB_QUERY_FILE_ALL_INFO		0x107
+#define SMB_QUERY_FILE_ALT_NAME_INFO	0x108
+#define SMB_QUERY_FILE_STREAM_INFO	0x109
+#define SMB_QUERY_FILE_COMPRESSION_INFO	0x10b
+
+/* Information Levels - TRANSACT2_SETFILEINFO */
+#define SMB_SET_FILE_BASIC_INFO		0x101
+#define SMB_SET_FILE_DISPOSITION_INFO	0x102
+#define SMB_SET_FILE_ALLOCATION_INFO	0x103
+#define SMB_SET_FILE_END_OF_FILE_INFO	0x104
+
+/*
+ * UNIX stuff  (from samba trans2.h)
+ */
+#define MIN_UNIX_INFO_LEVEL		0x200
+#define MAX_UNIX_INFO_LEVEL		0x2FF
+#define SMB_FIND_FILE_UNIX		0x202
+#define SMB_QUERY_FILE_UNIX_BASIC	0x200
+#define SMB_QUERY_FILE_UNIX_LINK	0x201
+#define SMB_QUERY_FILE_UNIX_HLINK	0x202
+#define SMB_SET_FILE_UNIX_BASIC		0x200
+#define SMB_SET_FILE_UNIX_LINK		0x201
+#define SMB_SET_FILE_UNIX_HLINK		0x203
+#define SMB_QUERY_CIFS_UNIX_INFO	0x200
+
+/* values which means "don't change it" */
+#define SMB_MODE_NO_CHANGE		0xFFFFFFFF
+#define SMB_UID_NO_CHANGE		0xFFFFFFFF
+#define SMB_GID_NO_CHANGE		0xFFFFFFFF
+#define SMB_TIME_NO_CHANGE		0xFFFFFFFFFFFFFFFFULL
+#define SMB_SIZE_NO_CHANGE		0xFFFFFFFFFFFFFFFFULL
+
+/* UNIX filetype mappings. */
+#define UNIX_TYPE_FILE		0
+#define UNIX_TYPE_DIR		1
+#define UNIX_TYPE_SYMLINK	2
+#define UNIX_TYPE_CHARDEV	3
+#define UNIX_TYPE_BLKDEV	4
+#define UNIX_TYPE_FIFO		5
+#define UNIX_TYPE_SOCKET	6
+#define UNIX_TYPE_UNKNOWN	0xFFFFFFFF
 
 #endif /* _SMBNO_H_ */

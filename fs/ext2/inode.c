@@ -28,6 +28,24 @@
 #include <linux/smp_lock.h>
 #include <linux/sched.h>
 #include <linux/highuid.h>
+#include <linux/quotaops.h>
+#include <linux/module.h>
+
+MODULE_AUTHOR("Remy Card and others");
+MODULE_DESCRIPTION("Second Extended Filesystem");
+MODULE_LICENSE("GPL");
+
+/*
+ * Test whether an inode is a fast symlink.
+ */
+static inline int ext2_inode_is_fast_symlink(struct inode *inode)
+{
+	int ea_blocks = inode->u.ext2_i.i_file_acl ?
+		(inode->i_sb->s_blocksize >> 9) : 0;
+
+	return (S_ISLNK(inode->i_mode) &&
+		inode->i_blocks - ea_blocks == 0);
+}
 
 static int ext2_update_inode(struct inode * inode, int do_sync);
 
@@ -99,16 +117,12 @@ static int ext2_alloc_block (struct inode * inode, unsigned long goal, int *err)
 		result = inode->u.ext2_i.i_prealloc_block++;
 		inode->u.ext2_i.i_prealloc_count--;
 		/* Writer: end */
-#ifdef EXT2FS_DEBUG
 		ext2_debug ("preallocation hit (%lu/%lu).\n",
 			    ++alloc_hits, ++alloc_attempts);
-#endif
 	} else {
 		ext2_discard_prealloc (inode);
-#ifdef EXT2FS_DEBUG
 		ext2_debug ("preallocation miss (%lu/%lu).\n",
 			    alloc_hits, ++alloc_attempts);
-#endif
 		if (S_ISREG(inode->i_mode))
 			result = ext2_new_block (inode, goal, 
 				 &inode->u.ext2_i.i_prealloc_count,
@@ -230,14 +244,13 @@ static int ext2_block_to_path(struct inode *inode, long i_block, int offsets[4])
  *	or when it reads all @depth-1 indirect blocks successfully and finds
  *	the whole chain, all way to the data (returns %NULL, *err == 0).
  */
-static inline Indirect *ext2_get_branch(struct inode *inode,
-					int depth,
-					int *offsets,
-					Indirect chain[4],
-					int *err)
+static Indirect *ext2_get_branch(struct inode *inode,
+				 int depth,
+				 int *offsets,
+				 Indirect chain[4],
+				 int *err)
 {
-	kdev_t dev = inode->i_dev;
-	int size = inode->i_sb->s_blocksize;
+	struct super_block *sb = inode->i_sb;
 	Indirect *p = chain;
 	struct buffer_head *bh;
 
@@ -247,7 +260,7 @@ static inline Indirect *ext2_get_branch(struct inode *inode,
 	if (!p->key)
 		goto no_block;
 	while (--depth) {
-		bh = bread(dev, le32_to_cpu(p->key), size);
+		bh = sb_bread(sb, le32_to_cpu(p->key));
 		if (!bh)
 			goto failure;
 		/* Reader: pointers */
@@ -367,7 +380,7 @@ static inline int ext2_find_goal(struct inode *inode,
  *	be placed into *branch->p to fill that gap.
  *
  *	If allocation fails we free all blocks we've allocated (and forget
- *	ther buffer_heads) and return the error value the from failed
+ *	their buffer_heads) and return the error value the from failed
  *	ext2_alloc_block() (normally -ENOSPC). Otherwise we set the chain
  *	as described above and return 0.
  */
@@ -396,16 +409,20 @@ static int ext2_alloc_branch(struct inode *inode,
 		 * Get buffer_head for parent block, zero it out and set 
 		 * the pointer to new one, then send parent to disk.
 		 */
-		bh = getblk(inode->i_dev, parent, blocksize);
-		if (!buffer_uptodate(bh))
-			wait_on_buffer(bh);
+		bh = sb_getblk(inode->i_sb, parent);
+		lock_buffer(bh);
 		memset(bh->b_data, 0, blocksize);
 		branch[n].bh = bh;
 		branch[n].p = (u32*) bh->b_data + offsets[n];
 		*branch[n].p = branch[n].key;
 		mark_buffer_uptodate(bh, 1);
+		unlock_buffer(bh);
 		mark_buffer_dirty_inode(bh, inode);
-		if (IS_SYNC(inode) || inode->u.ext2_i.i_osync) {
+		/* We used to sync bh here if IS_SYNC(inode).
+		 * But for S_ISREG files we now rely upon generic_osync_inode()
+		 * and b_inode_buffers
+		 */
+		if (S_ISDIR(inode->i_mode) && IS_SYNC(inode)) {
 			ll_rw_block (WRITE, 1, &bh);
 			wait_on_buffer (bh);
 		}
@@ -449,7 +466,7 @@ static inline int ext2_splice_branch(struct inode *inode,
 
 	/* Verify that place we are splicing to is still there and vacant */
 
-	/* Writer: pointers, ->i_next_alloc*, ->i_blocks */
+	/* Writer: pointers, ->i_next_alloc* */
 	if (!verify_chain(chain, where-1) || *where->p)
 		/* Writer: end */
 		goto changed;
@@ -459,7 +476,6 @@ static inline int ext2_splice_branch(struct inode *inode,
 	*where->p = where->key;
 	inode->u.ext2_i.i_next_alloc_block = block;
 	inode->u.ext2_i.i_next_alloc_goal = le32_to_cpu(where[num-1].key);
-	inode->i_blocks += num * inode->i_sb->s_blocksize/512;
 
 	/* Writer: end */
 
@@ -470,16 +486,13 @@ static inline int ext2_splice_branch(struct inode *inode,
 	/* had we spliced it onto indirect block? */
 	if (where->bh) {
 		mark_buffer_dirty_inode(where->bh, inode);
-		if (IS_SYNC(inode) || inode->u.ext2_i.i_osync) {
-			ll_rw_block (WRITE, 1, &where->bh);
+		if (S_ISDIR(inode->i_mode) && IS_SYNC(inode)) {
+			ll_rw_block(WRITE, 1, &where->bh);
 			wait_on_buffer(where->bh);
 		}
 	}
 
-	if (IS_SYNC(inode) || inode->u.ext2_i.i_osync)
-		ext2_sync_inode (inode);
-	else
-		mark_inode_dirty(inode);
+	mark_inode_dirty(inode);
 	return 0;
 
 changed:
@@ -551,6 +564,7 @@ out:
 	if (err == -EAGAIN)
 		goto changed;
 
+	goal = 0;
 	if (ext2_find_goal(inode, iblock, chain, partial, &goal) < 0)
 		goto changed;
 
@@ -568,86 +582,10 @@ out:
 
 changed:
 	while (partial > chain) {
-		bforget(partial->bh);
+		brelse(partial->bh);
 		partial--;
 	}
 	goto reread;
-}
-
-struct buffer_head * ext2_getblk(struct inode * inode, long block, int create, int * err)
-{
-	struct buffer_head dummy;
-	int error;
-
-	dummy.b_state = 0;
-	dummy.b_blocknr = -1000;
-	error = ext2_get_block(inode, block, &dummy, create);
-	*err = error;
-	if (!error && buffer_mapped(&dummy)) {
-		struct buffer_head *bh;
-		bh = getblk(dummy.b_dev, dummy.b_blocknr, inode->i_sb->s_blocksize);
-		if (buffer_new(&dummy)) {
-			if (!buffer_uptodate(bh))
-				wait_on_buffer(bh);
-			memset(bh->b_data, 0, inode->i_sb->s_blocksize);
-			mark_buffer_uptodate(bh, 1);
-			mark_buffer_dirty_inode(bh, inode);
-		}
-		return bh;
-	}
-	return NULL;
-}
-
-struct buffer_head * ext2_bread (struct inode * inode, int block, 
-				 int create, int *err)
-{
-	struct buffer_head * bh;
-	int prev_blocks;
-	
-	prev_blocks = inode->i_blocks;
-	
-	bh = ext2_getblk (inode, block, create, err);
-	if (!bh)
-		return bh;
-	
-	/*
-	 * If the inode has grown, and this is a directory, then perform
-	 * preallocation of a few more blocks to try to keep directory
-	 * fragmentation down.
-	 */
-	if (create && 
-	    S_ISDIR(inode->i_mode) && 
-	    inode->i_blocks > prev_blocks &&
-	    EXT2_HAS_COMPAT_FEATURE(inode->i_sb,
-				    EXT2_FEATURE_COMPAT_DIR_PREALLOC)) {
-		int i;
-		struct buffer_head *tmp_bh;
-		
-		for (i = 1;
-		     i < EXT2_SB(inode->i_sb)->s_es->s_prealloc_dir_blocks;
-		     i++) {
-			/* 
-			 * ext2_getblk will zero out the contents of the
-			 * directory for us
-			 */
-			tmp_bh = ext2_getblk(inode, block+i, create, err);
-			if (!tmp_bh) {
-				brelse (bh);
-				return 0;
-			}
-			brelse (tmp_bh);
-		}
-	}
-	
-	if (buffer_uptodate(bh))
-		return bh;
-	ll_rw_block (READ, 1, &bh);
-	wait_on_buffer (bh);
-	if (buffer_uptodate(bh))
-		return bh;
-	brelse (bh);
-	*err = -EIO;
-	return NULL;
 }
 
 static int ext2_writepage(struct page *page)
@@ -666,13 +604,18 @@ static int ext2_bmap(struct address_space *mapping, long block)
 {
 	return generic_block_bmap(mapping,block,ext2_get_block);
 }
+static int ext2_direct_IO(int rw, struct inode * inode, struct kiobuf * iobuf, unsigned long blocknr, int blocksize)
+{
+	return generic_direct_IO(rw, inode, iobuf, blocknr, blocksize, ext2_get_block);
+}
 struct address_space_operations ext2_aops = {
 	readpage: ext2_readpage,
 	writepage: ext2_writepage,
 	sync_page: block_sync_page,
 	prepare_write: ext2_prepare_write,
 	commit_write: generic_commit_write,
-	bmap: ext2_bmap
+	bmap: ext2_bmap,
+	direct_IO: ext2_direct_IO,
 };
 
 /*
@@ -782,7 +725,6 @@ no_top:
  */
 static inline void ext2_free_data(struct inode *inode, u32 *p, u32 *q)
 {
-	int blocks = inode->i_sb->s_blocksize / 512;
 	unsigned long block_to_free = 0, count = 0;
 	unsigned long nr;
 
@@ -796,11 +738,8 @@ static inline void ext2_free_data(struct inode *inode, u32 *p, u32 *q)
 			else if (block_to_free == nr - count)
 				count++;
 			else {
-				/* Writer: ->i_blocks */
-				inode->i_blocks -= blocks * count;
-				/* Writer: end */
-				ext2_free_blocks (inode, block_to_free, count);
 				mark_inode_dirty(inode);
+				ext2_free_blocks (inode, block_to_free, count);
 			free_this:
 				block_to_free = nr;
 				count = 1;
@@ -808,11 +747,8 @@ static inline void ext2_free_data(struct inode *inode, u32 *p, u32 *q)
 		}
 	}
 	if (count > 0) {
-		/* Writer: ->i_blocks */
-		inode->i_blocks -= blocks * count;
-		/* Writer: end */
-		ext2_free_blocks (inode, block_to_free, count);
 		mark_inode_dirty(inode);
+		ext2_free_blocks (inode, block_to_free, count);
 	}
 }
 
@@ -839,7 +775,7 @@ static void ext2_free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 			if (!nr)
 				continue;
 			*p = 0;
-			bh = bread (inode->i_dev, nr, inode->i_sb->s_blocksize);
+			bh = sb_bread(inode->i_sb, nr);
 			/*
 			 * A read failure? Report error and clear slot
 			 * (should be rare).
@@ -855,9 +791,6 @@ static void ext2_free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 					   (u32*)bh->b_data + addr_per_block,
 					   depth);
 			bforget(bh);
-			/* Writer: ->i_blocks */
-			inode->i_blocks -= inode->i_sb->s_blocksize / 512;
-			/* Writer: end */
 			ext2_free_blocks(inode, nr, 1);
 			mark_inode_dirty(inode);
 		}
@@ -879,6 +812,8 @@ void ext2_truncate (struct inode * inode)
 
 	if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 	    S_ISLNK(inode->i_mode)))
+		return;
+	if (ext2_inode_is_fast_symlink(inode))
 		return;
 	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
 		return;
@@ -917,10 +852,6 @@ void ext2_truncate (struct inode * inode)
 				   (u32*)partial->bh->b_data + addr_per_block,
 				   (chain+n-1) - partial);
 		mark_buffer_dirty_inode(partial->bh, inode);
-		if (IS_SYNC(inode)) {
-			ll_rw_block (WRITE, 1, &partial->bh);
-			wait_on_buffer (partial->bh);
-		}
 		brelse (partial->bh);
 		partial--;
 	}
@@ -952,10 +883,27 @@ do_indirects:
 			;
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	if (IS_SYNC(inode))
+	if (IS_SYNC(inode)) {
+		fsync_inode_buffers(inode);
 		ext2_sync_inode (inode);
-	else
+	} else {
 		mark_inode_dirty(inode);
+	}
+}
+
+void ext2_set_inode_flags(struct inode *inode)
+{
+	unsigned int flags = inode->u.ext2_i.i_flags;
+
+	inode->i_flags &= ~(S_SYNC|S_APPEND|S_IMMUTABLE|S_NOATIME);
+	if (flags & EXT2_SYNC_FL)
+		inode->i_flags |= S_SYNC;
+	if (flags & EXT2_APPEND_FL)
+		inode->i_flags |= S_APPEND;
+	if (flags & EXT2_IMMUTABLE_FL)
+		inode->i_flags |= S_IMMUTABLE;
+	if (flags & EXT2_NOATIME_FL)
+		inode->i_flags |= S_NOATIME;
 }
 
 void ext2_read_inode (struct inode * inode)
@@ -1000,7 +948,7 @@ void ext2_read_inode (struct inode * inode)
 		EXT2_INODE_SIZE(inode->i_sb);
 	block = le32_to_cpu(gdp[desc].bg_inode_table) +
 		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
-	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize))) {
+	if (!(bh = sb_bread(inode->i_sb, block))) {
 		ext2_error (inode->i_sb, "ext2_read_inode",
 			    "unable to read inode block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
@@ -1040,13 +988,13 @@ void ext2_read_inode (struct inode * inode)
 	inode->u.ext2_i.i_frag_no = raw_inode->i_frag;
 	inode->u.ext2_i.i_frag_size = raw_inode->i_fsize;
 	inode->u.ext2_i.i_file_acl = le32_to_cpu(raw_inode->i_file_acl);
-	if (S_ISDIR(inode->i_mode))
-		inode->u.ext2_i.i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
-	else {
-		inode->u.ext2_i.i_high_size = le32_to_cpu(raw_inode->i_size_high);
+	if (S_ISREG(inode->i_mode))
 		inode->i_size |= ((__u64)le32_to_cpu(raw_inode->i_size_high)) << 32;
-	}
+	else
+		inode->u.ext2_i.i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
 	inode->i_generation = le32_to_cpu(raw_inode->i_generation);
+ 	inode->u.ext2_i.i_state = 0;
+	inode->u.ext2_i.i_prealloc_count = 0;
 	inode->u.ext2_i.i_block_group = block_group;
 
 	/*
@@ -1066,8 +1014,9 @@ void ext2_read_inode (struct inode * inode)
 	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &ext2_dir_inode_operations;
 		inode->i_fop = &ext2_dir_operations;
+		inode->i_mapping->a_ops = &ext2_aops;
 	} else if (S_ISLNK(inode->i_mode)) {
-		if (!inode->i_blocks)
+		if (ext2_inode_is_fast_symlink(inode))
 			inode->i_op = &ext2_fast_symlink_inode_operations;
 		else {
 			inode->i_op = &page_symlink_inode_operations;
@@ -1078,22 +1027,7 @@ void ext2_read_inode (struct inode * inode)
 				   le32_to_cpu(raw_inode->i_block[0]));
 	brelse (bh);
 	inode->i_attr_flags = 0;
-	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL) {
-		inode->i_attr_flags |= ATTR_FLAG_SYNCRONOUS;
-		inode->i_flags |= S_SYNC;
-	}
-	if (inode->u.ext2_i.i_flags & EXT2_APPEND_FL) {
-		inode->i_attr_flags |= ATTR_FLAG_APPEND;
-		inode->i_flags |= S_APPEND;
-	}
-	if (inode->u.ext2_i.i_flags & EXT2_IMMUTABLE_FL) {
-		inode->i_attr_flags |= ATTR_FLAG_IMMUTABLE;
-		inode->i_flags |= S_IMMUTABLE;
-	}
-	if (inode->u.ext2_i.i_flags & EXT2_NOATIME_FL) {
-		inode->i_attr_flags |= ATTR_FLAG_NOATIME;
-		inode->i_flags |= S_NOATIME;
-	}
+	ext2_set_inode_flags(inode);
 	return;
 	
 bad_inode:
@@ -1142,7 +1076,7 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 		EXT2_INODE_SIZE(inode->i_sb);
 	block = le32_to_cpu(gdp[desc].bg_inode_table) +
 		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
-	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize))) {
+	if (!(bh = sb_bread(inode->i_sb, block))) {
 		ext2_error (inode->i_sb, "ext2_write_inode",
 			    "unable to read inode block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
@@ -1150,6 +1084,11 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 	}
 	offset &= EXT2_BLOCK_SIZE(inode->i_sb) - 1;
 	raw_inode = (struct ext2_inode *) (bh->b_data + offset);
+
+	/* For fields not tracked in the in-memory inode,
+	 * initialise them to zero for new inodes. */
+	if (inode->u.ext2_i.i_state & EXT2_STATE_NEW)
+		memset(raw_inode, 0, EXT2_SB(inode->i_sb)->s_inode_size);
 
 	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
 	if(!(test_opt(inode->i_sb, NO_UID32))) {
@@ -1184,11 +1123,11 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 	raw_inode->i_frag = inode->u.ext2_i.i_frag_no;
 	raw_inode->i_fsize = inode->u.ext2_i.i_frag_size;
 	raw_inode->i_file_acl = cpu_to_le32(inode->u.ext2_i.i_file_acl);
-	if (S_ISDIR(inode->i_mode))
+	if (!S_ISREG(inode->i_mode))
 		raw_inode->i_dir_acl = cpu_to_le32(inode->u.ext2_i.i_dir_acl);
 	else {
 		raw_inode->i_size_high = cpu_to_le32(inode->i_size >> 32);
-		if (raw_inode->i_size_high) {
+		if (inode->i_size > 0x7fffffffULL) {
 			struct super_block *sb = inode->i_sb;
 			if (!EXT2_HAS_RO_COMPAT_FEATURE(sb,
 					EXT2_FEATURE_RO_COMPAT_LARGE_FILE) ||
@@ -1223,6 +1162,7 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 			err = -EIO;
 		}
 	}
+	inode->u.ext2_i.i_state &= ~EXT2_STATE_NEW;
 	brelse (bh);
 	return err;
 }
@@ -1238,61 +1178,3 @@ int ext2_sync_inode (struct inode *inode)
 {
 	return ext2_update_inode (inode, 1);
 }
-
-int ext2_notify_change(struct dentry *dentry, struct iattr *iattr)
-{
-	struct inode *inode = dentry->d_inode;
-	int		retval;
-	unsigned int	flags;
-	
-	retval = -EPERM;
-	if (iattr->ia_valid & ATTR_ATTR_FLAG &&
-	    ((!(iattr->ia_attr_flags & ATTR_FLAG_APPEND) !=
-	      !(inode->u.ext2_i.i_flags & EXT2_APPEND_FL)) ||
-	     (!(iattr->ia_attr_flags & ATTR_FLAG_IMMUTABLE) !=
-	      !(inode->u.ext2_i.i_flags & EXT2_IMMUTABLE_FL)))) {
-		if (!capable(CAP_LINUX_IMMUTABLE))
-			goto out;
-	} else if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
-		goto out;
-
-	retval = inode_change_ok(inode, iattr);
-	if (retval != 0)
-		goto out;
-
-	inode_setattr(inode, iattr);
-	
-	flags = iattr->ia_attr_flags;
-	if (flags & ATTR_FLAG_SYNCRONOUS) {
-		inode->i_flags |= S_SYNC;
-		inode->u.ext2_i.i_flags |= EXT2_SYNC_FL;
-	} else {
-		inode->i_flags &= ~S_SYNC;
-		inode->u.ext2_i.i_flags &= ~EXT2_SYNC_FL;
-	}
-	if (flags & ATTR_FLAG_NOATIME) {
-		inode->i_flags |= S_NOATIME;
-		inode->u.ext2_i.i_flags |= EXT2_NOATIME_FL;
-	} else {
-		inode->i_flags &= ~S_NOATIME;
-		inode->u.ext2_i.i_flags &= ~EXT2_NOATIME_FL;
-	}
-	if (flags & ATTR_FLAG_APPEND) {
-		inode->i_flags |= S_APPEND;
-		inode->u.ext2_i.i_flags |= EXT2_APPEND_FL;
-	} else {
-		inode->i_flags &= ~S_APPEND;
-		inode->u.ext2_i.i_flags &= ~EXT2_APPEND_FL;
-	}
-	if (flags & ATTR_FLAG_IMMUTABLE) {
-		inode->i_flags |= S_IMMUTABLE;
-		inode->u.ext2_i.i_flags |= EXT2_IMMUTABLE_FL;
-	} else {
-		inode->i_flags &= ~S_IMMUTABLE;
-		inode->u.ext2_i.i_flags &= ~EXT2_IMMUTABLE_FL;
-	}
-	mark_inode_dirty(inode);
-out:
-	return retval;
-}
-

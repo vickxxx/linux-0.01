@@ -1,4 +1,4 @@
-/* $Id: processor.h,v 1.80 2000/12/31 10:05:43 davem Exp $
+/* $Id: processor.h,v 1.83 2001/10/08 09:32:13 davem Exp $
  * include/asm-sparc/processor.h
  *
  * Copyright (C) 1994 David S. Miller (davem@caip.rutgers.edu)
@@ -90,10 +90,6 @@ struct thread_struct {
 
 #define SPARC_FLAG_KTHREAD      0x1    /* task is a kernel thread */
 #define SPARC_FLAG_UNALIGNED    0x2    /* is allowed to do unaligned accesses */
-#define SPARC_FLAG_MMAPSHARED	0x4    /* task wants a shared mmap */
-
-#define INIT_MMAP { &init_mm, (0), (0), \
-		    NULL, __pgprot(0x0) , VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
 #define INIT_THREAD  { \
 /* uwinmask, kregs, ksp, kpc, kpsr, kwim */ \
@@ -144,13 +140,17 @@ extern __inline__ void start_thread(struct pt_regs * regs, unsigned long pc,
 			     "std\t%%g0, [%0 + %3 + 0x30]\n\t"
 			     "st\t%1, [%0 + %3 + 0x38]\n\t"
 			     "st\t%%g0, [%0 + %3 + 0x3c]"
-			     : : "r" (regs), "r" (sp - REGWIN_SZ), "r" (zero),
-			     "i" ((const unsigned long)(&((struct pt_regs *)0)->u_regs[0])));
+			     : /* no outputs */
+			     : "r" (regs),
+			       "r" (sp - sizeof(struct reg_window)),
+			       "r" (zero),
+			       "i" ((const unsigned long)(&((struct pt_regs *)0)->u_regs[0]))
+			     : "memory");
 }
 
 /* Free all resources held by a thread. */
 #define release_thread(tsk)		do { } while(0)
-extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+extern pid_t arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 
 #define copy_segments(tsk, mm)		do { } while (0)
@@ -204,6 +204,8 @@ BTFIXUPDEF_CALL(void, get_task_struct, struct task_struct *)
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
+
+#define cpu_relax()	barrier()
 
 #endif
 

@@ -1,20 +1,18 @@
 /*
+ * PCBIT-D low-layer interface definitions
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
  * 19991203 - Fernando Carvalho - takion@superbofh.org
  * Hacked to compile with egcs and run with current version of isdn modules
 */
-
-/*        
- *        PCBIT-D low-layer interface definitions
- */
 
 #ifndef LAYER2_H
 #define LAYER2_H
@@ -120,8 +118,6 @@ struct frame_buf {
 	unsigned int copied;
         struct frame_buf * next;
 };
-
-#define MIN(a,b) ((a<b)?a:b)
 
 extern int pcbit_l2_write(struct pcbit_dev * dev, ulong msg, ushort refnum, 
                           struct sk_buff *skb, unsigned short hdr_len);

@@ -1,5 +1,5 @@
 #
-# Makefile for the linux s390-specific parts of the memory manager.
+# arch/s390/boot/Makefile
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -10,12 +10,11 @@
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
 O_TARGET := 
-O_OBJS	 := 
 
 include $(TOPDIR)/Rules.make
 
 .S.o:
-	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
+	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
 
 %.lnk: %.o
 	$(LD) -Ttext 0x0 -o $@ $<
@@ -26,7 +25,7 @@ include $(TOPDIR)/Rules.make
 image: $(CONFIGURE) $(TOPDIR)/vmlinux \
 	iplfba.boot ipleckd.boot ipldump.boot
 	$(OBJCOPY) -O binary $(TOPDIR)/vmlinux image
-	$(NM) $(TOPDIR)/vmlinux | grep -v '\(compiled\)\|\( [aU] \)\|\(\.\)\|\(LASH[RL]DI\)' | sort > $(TOPDIR)/System.map
+	$(NM) $(TOPDIR)/vmlinux | grep -v '\(compiled\)\|\( [aUw] \)\|\(\.\)\|\(LASH[RL]DI\)' | sort > $(TOPDIR)/System.map
 
 listing: ../../../vmlinux
 	$(OBJDUMP) --disassemble --disassemble-all --disassemble-zeroes --reloc $(TOPDIR)/vmlinux > listing
@@ -35,4 +34,7 @@ dep:
 
 clean:
 	rm -f image listing iplfba.boot ipleckd.boot ipldump.boot
+
+install: $(CONFIGURE) $(BOOTIMAGE)
+	sh -x ./install.sh $(KERNELRELEASE) $(BOOTIMAGE) $(TOPDIR)/System.map $(TOPDIR)/Kerntypes "$(INSTALL_PATH)"
 

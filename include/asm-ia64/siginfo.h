@@ -2,8 +2,10 @@
 #define _ASM_IA64_SIGINFO_H
 
 /*
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-i386/siginfo.h>.
+ *
+ * Modified 1998-2002
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
 #include <linux/types.h>
@@ -57,7 +59,7 @@ typedef struct siginfo {
 		struct {
 			void *_addr;		/* faulting insn/memory ref. */
 			int _imm;		/* immediate value for "break" */
-			int _pad0;
+			unsigned int _flags;	/* see below */
 			unsigned long _isr;	/* isr */
 		} _sigfault;
 
@@ -66,6 +68,12 @@ typedef struct siginfo {
 			long _band;	/* POLL_IN, POLL_OUT, POLL_MSG (XPG requires a "long") */
 			int _fd;
 		} _sigpoll;
+		/* SIGPROF */
+		struct {
+			pid_t _pid;		/* which child */
+			uid_t _uid;		/* sender's uid */
+			unsigned long _pfm_ovfl_counters[4]; /* which PMU counter overflowed */
+		} _sigprof;
 	} _sifields;
 } siginfo_t;
 
@@ -82,9 +90,21 @@ typedef struct siginfo {
 #define si_ptr		_sifields._rt._sigval.sival_ptr
 #define si_addr		_sifields._sigfault._addr
 #define si_imm		_sifields._sigfault._imm	/* as per UNIX SysV ABI spec */
-#define si_isr		_sifields._sigfault._isr	/* valid if si_code==FPE_FLTxxx */
+#define si_flags	_sifields._sigfault._flags
+/*
+ * si_isr is valid for SIGILL, SIGFPE, SIGSEGV, SIGBUS, and SIGTRAP provided that
+ * si_code is non-zero and __ISR_VALID is set in si_flags.
+ */
+#define si_isr		_sifields._sigfault._isr
 #define si_band		_sifields._sigpoll._band
 #define si_fd		_sifields._sigpoll._fd
+#define si_pfm_ovfl	_sifields._sigprof._pfm_ovfl_counters
+
+/*
+ * Flag values for si_flags:
+ */
+#define __ISR_VALID_BIT	0
+#define __ISR_VALID	(1 << __ISR_VALID_BIT)
 
 /*
  * si_code values
@@ -98,6 +118,7 @@ typedef struct siginfo {
 #define __SI_FAULT	(3 << 16)
 #define __SI_CHLD	(4 << 16)
 #define __SI_RT		(5 << 16)
+#define __SI_PROF	(6 << 16)
 #define __SI_CODE(T,N)	((T) << 16 | ((N) & 0xffff))
 #else
 #define __SI_KILL	0
@@ -111,11 +132,12 @@ typedef struct siginfo {
 
 #define SI_USER		0		/* sent by kill, sigsend, raise */
 #define SI_KERNEL	0x80		/* sent by the kernel from somewhere */
-#define SI_QUEUE	-1		/* sent by sigqueue */
+#define SI_QUEUE	(-1)		/* sent by sigqueue */
 #define SI_TIMER __SI_CODE(__SI_TIMER,-2) /* sent by timer expiration */
-#define SI_MESGQ	-3		/* sent by real time mesq state change */
-#define SI_ASYNCIO	-4		/* sent by AIO completion */
-#define SI_SIGIO	-5		/* sent by queued SIGIO */
+#define SI_MESGQ	(-3)		/* sent by real time mesq state change */
+#define SI_ASYNCIO	(-4)		/* sent by AIO completion */
+#define SI_SIGIO	(-5)		/* sent by queued SIGIO */
+#define SI_TKILL	(-6)		/* sent by tkill system call */
 
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 #define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
@@ -133,7 +155,8 @@ typedef struct siginfo {
 #define ILL_BADSTK	(__SI_FAULT|8)	/* internal stack error */
 #define ILL_BADIADDR	(__SI_FAULT|9)	/* unimplemented instruction address */
 #define __ILL_BREAK	(__SI_FAULT|10)	/* illegal break */
-#define NSIGILL		10
+#define __ILL_BNDMOD	(__SI_FAULT|11)	/* bundle-update (modification) in progress */
+#define NSIGILL		11
 
 /*
  * SIGFPE si_codes
@@ -201,12 +224,16 @@ typedef struct siginfo {
 #define NSIGPOLL	6
 
 /*
+ * SIGPROF si_codes
+ */
+#define PROF_OVFL	(__SI_PROF|1)  /* some counters overflowed */
+
+/*
  * sigevent definitions
- * 
- * It seems likely that SIGEV_THREAD will have to be handled from 
- * userspace, libpthread transmuting it to SIGEV_SIGNAL, which the
- * thread manager then catches and does the appropriate nonsense.
- * However, everything is written out here so as to not get lost.
+ *
+ * It seems likely that SIGEV_THREAD will have to be handled from userspace, libpthread
+ * transmuting it to SIGEV_SIGNAL, which the thread manager then catches and does the
+ * appropriate nonsense.  However, everything is written out here so as to not get lost.
  */
 #define SIGEV_SIGNAL	0	/* notify via signal */
 #define SIGEV_NONE	1	/* other notification: meaningless */
@@ -241,11 +268,12 @@ copy_siginfo (siginfo_t *to, siginfo_t *from)
 	if (from->si_code < 0)
 		memcpy(to, from, sizeof(siginfo_t));
 	else
-		/* _sigchld is currently the largest know union member */
-		memcpy(to, from, 3*sizeof(int) + sizeof(from->_sifields._sigchld));
+		/* _sigprof is currently the largest know union member */
+		memcpy(to, from, 4*sizeof(int) + sizeof(from->_sifields._sigprof));
 }
 
 extern int copy_siginfo_to_user(siginfo_t *to, siginfo_t *from);
+extern int copy_siginfo_from_user(siginfo_t *to, siginfo_t *from);
 
 #endif /* __KERNEL__ */
 

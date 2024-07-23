@@ -16,7 +16,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -660,6 +660,7 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 
   /* XXX FIXME - should try to pick best refresh rate */
   /* for now, pick closest dot-clock within 3MHz*/
+#error "Floating point not allowed in kernel"  
   req_dot = (int)((1.0e3/1.0e6) / (1.0e-12 * (float)var->pixclock));
   printk(KERN_INFO "sgivwfb: requested pixclock=%d ps (%d KHz)\n", var->pixclock,
 	 req_dot);
@@ -845,7 +846,6 @@ static int sgivwfb_mmap(struct fb_info *info, struct file *file,
     return -EINVAL;
   offset += sgivwfb_mem_phys;
   pgprot_val(vma->vm_page_prot) = pgprot_val(vma->vm_page_prot) | _PAGE_PCD;
-  vma->vm_flags |= VM_IO;
   if (remap_page_range(vma->vm_start, offset, size, vma->vm_page_prot))
     return -EAGAIN;
   vma->vm_file = file;
@@ -862,8 +862,7 @@ int __init sgivwfb_setup(char *options)
   if (!options || !*options)
     return 0;
 
-  for (this_opt = strtok(options, ","); this_opt;
-       this_opt = strtok(NULL, ",")) {
+  while ((this_opt = strsep(&options, ",")) != NULL) {
     if (!strncmp(this_opt, "font:", 5))
       strcpy(fb_info.fontname, this_opt+5);
   }
@@ -955,6 +954,8 @@ static void sgivwfbcon_blank(int blank, struct fb_info *info)
 }
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
   return sgivwfb_init();

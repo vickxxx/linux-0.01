@@ -1,5 +1,5 @@
 /*
- * $Id: mtdcore.c,v 1.27 2000/12/10 01:10:09 dwmw2 Exp $
+ * $Id: mtdcore.c,v 1.34 2003/01/24 23:32:25 dwmw2 Exp $
  *
  * Core registration and callback routines for MTD
  * drivers and users.
@@ -11,13 +11,12 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
-#include <stdarg.h>
 #include <linux/mtd/compatmac.h>
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
@@ -203,11 +202,74 @@ struct mtd_info *__get_mtd_device(struct mtd_info *mtd, int num)
 	return ret;
 }
 
+
+/* default_mtd_writev - default mtd writev method for MTD devices that
+ *			dont implement their own
+ */
+
+int default_mtd_writev(struct mtd_info *mtd, const struct iovec *vecs,
+		       unsigned long count, loff_t to, size_t *retlen)
+{
+	unsigned long i;
+	size_t totlen = 0, thislen;
+	int ret = 0;
+
+	if(!mtd->write) {
+		ret = -EROFS;
+	} else {
+		for (i=0; i<count; i++) {
+			if (!vecs[i].iov_len)
+				continue;
+			ret = mtd->write(mtd, to, vecs[i].iov_len, &thislen, vecs[i].iov_base);
+			totlen += thislen;
+			if (ret || thislen != vecs[i].iov_len)
+				break;
+			to += vecs[i].iov_len;
+		}
+	}
+	if (retlen)
+		*retlen = totlen;
+	return ret;
+}
+
+
+/* default_mtd_readv - default mtd readv method for MTD devices that dont
+ *		       implement their own
+ */
+
+int default_mtd_readv(struct mtd_info *mtd, struct iovec *vecs,
+		      unsigned long count, loff_t from, size_t *retlen)
+{
+	unsigned long i;
+	size_t totlen = 0, thislen;
+	int ret = 0;
+
+	if(!mtd->read) {
+		ret = -EIO;
+	} else {
+		for (i=0; i<count; i++) {
+			if (!vecs[i].iov_len)
+				continue;
+			ret = mtd->read(mtd, from, vecs[i].iov_len, &thislen, vecs[i].iov_base);
+			totlen += thislen;
+			if (ret || thislen != vecs[i].iov_len)
+				break;
+			from += vecs[i].iov_len;
+		}
+	}
+	if (retlen)
+		*retlen = totlen;
+	return ret;
+}
+
+
 EXPORT_SYMBOL(add_mtd_device);
 EXPORT_SYMBOL(del_mtd_device);
 EXPORT_SYMBOL(__get_mtd_device);
 EXPORT_SYMBOL(register_mtd_user);
 EXPORT_SYMBOL(unregister_mtd_user);
+EXPORT_SYMBOL(default_mtd_writev);
+EXPORT_SYMBOL(default_mtd_readv);
 
 /*====================================================================*/
 /* Power management code */
@@ -258,8 +320,8 @@ static inline int mtd_proc_info (char *buf, int i)
 	if (!this)
 		return 0;
 
-	return sprintf(buf, "mtd%d: %8.8lx \"%s\"\n", i, this->size,
-		       this->name);
+	return sprintf(buf, "mtd%d: %8.8x %8.8x \"%s\"\n", i, this->size,
+		       this->erasesize, this->name);
 }
 
 static int mtd_read_proc ( char *page, char **start, off_t off,int count
@@ -270,11 +332,12 @@ static int mtd_read_proc ( char *page, char **start, off_t off,int count
 #endif
 			)
 {
-	int len = 0, l, i;
+	int len, l, i;
         off_t   begin = 0;
 
 	down(&mtd_table_mutex);
 
+	len = sprintf(page, "dev:    size   erasesize  name\n");
         for (i=0; i< MAX_MTD_DEVICES; i++) {
 
                 l = mtd_proc_info(page + len, i);
@@ -295,7 +358,7 @@ done:
 	up(&mtd_table_mutex);
         if (off >= len+begin)
                 return 0;
-        *start = page + (begin-off);
+        *start = page + (off-begin);
         return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -316,12 +379,7 @@ struct proc_dir_entry mtd_proc_entry = {
 /*====================================================================*/
 /* Init code */
 
-#if  LINUX_VERSION_CODE < 0x20212 && defined(MODULE)
-#define init_mtd init_module
-#define cleanup_mtd cleanup_module
-#endif
-
-mod_init_t init_mtd(void)
+int __init init_mtd(void)
 {
 #ifdef CONFIG_PROC_FS
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
@@ -342,7 +400,7 @@ mod_init_t init_mtd(void)
 	return 0;
 }
 
-mod_exit_t cleanup_mtd(void)
+static void __exit cleanup_mtd(void)
 {
 #ifdef CONFIG_PM
 	if (mtd_pm_dev) {
@@ -365,3 +423,6 @@ module_init(init_mtd);
 module_exit(cleanup_mtd);
 
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
+MODULE_DESCRIPTION("Core MTD registration and access routines");

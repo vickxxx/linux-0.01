@@ -2,7 +2,7 @@
  * linux/fs/hfs/trans.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains routines for converting between the Macintosh
  * character set and various other encodings.  This includes dealing
@@ -33,6 +33,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/compiler.h>
 
 /*================ File-local variables ================*/
 
@@ -78,7 +79,7 @@ static unsigned char mac2latin_map[128] = {
  *
  * Given a hexadecimal digit in ASCII, return the integer representation.
  */
-static inline const unsigned char dehex(char c) {
+static inline __attribute_const__ unsigned char dehex(char c) {
 	if ((c>='0')&&(c<='9')) {
 		return c-'0';
 	}

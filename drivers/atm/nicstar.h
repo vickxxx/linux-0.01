@@ -96,6 +96,7 @@
 /* ESI stuff ******************************************************************/
 
 #define NICSTAR_EPROM_MAC_ADDR_OFFSET 0x6C
+#define NICSTAR_EPROM_MAC_ADDR_OFFSET_ALT 0xF6
 
 
 /* #defines *******************************************************************/
@@ -613,7 +614,7 @@ enum ns_regs
 #define NS_CFG_SMBUFSIZE NS_CFG_SMBUFSIZE_48
 #elif (NS_SMBUFSIZE == 96)
 #define NS_CFG_SMBUFSIZE NS_CFG_SMBUFSIZE_96
-#eliif (NS_SMBUFSIZE == 240)
+#elif (NS_SMBUFSIZE == 240)
 #define NS_CFG_SMBUFSIZE NS_CFG_SMBUFSIZE_240
 #elif (NS_SMBUFSIZE == 2048)
 #define NS_CFG_SMBUFSIZE NS_CFG_SMBUFSIZE_2048
@@ -625,7 +626,7 @@ enum ns_regs
 #define NS_CFG_LGBUFSIZE NS_CFG_LGBUFSIZE_2048
 #elif (NS_LGBUFSIZE == 4096)
 #define NS_CFG_LGBUFSIZE NS_CFG_LGBUFSIZE_4096
-#eliif (NS_LGBUFSIZE == 8192)
+#elif (NS_LGBUFSIZE == 8192)
 #define NS_CFG_LGBUFSIZE NS_CFG_LGBUFSIZE_8192
 #elif (NS_LGBUFSIZE == 16384)
 #define NS_CFG_LGBUFSIZE NS_CFG_LGBUFSIZE_16384
@@ -747,6 +748,15 @@ typedef struct vc_map
                				   SCD. 0x00000000 for UBR/VBR/ABR */
    int tbd_count;
 } vc_map;
+
+
+struct ns_skb_data
+{
+	struct atm_vcc *vcc;
+	int iovcnt;
+};
+
+#define NS_SKB(skb) (((struct ns_skb_data *) (skb)->cb))
 
 
 typedef struct ns_dev

@@ -28,7 +28,7 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/p8022.h>
@@ -96,7 +96,7 @@ int llc_data_request(llcptr lp, struct sk_buff *skb)
 				else
 					llc_interpret_pseudo_code(lp, REJECT1, skb, NO_FRAME);
 				break;
-			default:
+			default:;
 		}
 		if(lp->llc_callbacks)
 		{
@@ -162,7 +162,7 @@ void connect_request(llcptr lp)
  *	Interpret_pseudo_code() executes the actions in the connection component
  *	state transition table. Table 4 in document on p88.
  *
- *	If this function is called to handle an incomming pdu, skb will point
+ *	If this function is called to handle an incoming pdu, skb will point
  *	to the buffer with the pdu and type will contain the decoded pdu type.
  *
  *	If called by data_request skb points to an skb that was skb_alloc-ed by 
@@ -497,7 +497,7 @@ void llc_interpret_pseudo_code(llcptr lp, int pc_label, struct sk_buff *skb,
 				else
 					lp->f_flag = fr->i_hdr.i_pflag;
 				break;
-			default:
+			default:;
 		}
 		pc++;	
 	}

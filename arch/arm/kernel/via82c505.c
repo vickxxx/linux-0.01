@@ -106,8 +106,8 @@ dummy_read_config_dword(struct pci_dev *dev, int where, u32 *value)
 	    break;
 	  case PCI_BASE_ADDRESS_0:
 	    if (size_wanted) {
-	      /* 0x00900000 bytes long */
-	      *value = 0xff700000;
+	      /* 0x00900000 bytes long (0xff700000) */
+	      *value = 0xff000000;
 	      size_wanted = 0;
 	    } else {
 	      *value = FB_START;
@@ -117,7 +117,7 @@ dummy_read_config_dword(struct pci_dev *dev, int where, u32 *value)
 	    *value = 6;
 	    break;
 	  default:
-	    *value=0;
+	    *value = 0;
 	  }
 	return PCIBIOS_SUCCESSFUL;
 }
@@ -152,16 +152,20 @@ static struct pci_ops dummy_ops = {
 };
 #endif
 
-void __init via82c505_init(struct arm_pci_sysdata *sysdata)
+void __init via82c505_init(void *sysdata)
 {
-	unsigned int pci_cmd = PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-				PCI_COMMAND_MASTER | PCI_COMMAND_INVALIDATE;
-	struct pci_dev *dev;
 	struct pci_bus *bus;
 
 	printk(KERN_DEBUG "PCI: VIA 82c505\n");
-	request_region(0xA8,2,"via config");
-	request_region(0xCF8,8,"pci config");
+	if (!request_region(0xA8,2,"via config")) {
+		printk(KERN_WARNING"VIA 82c505: Unable to request region 0xA8\n");
+		return;
+	}
+	if (!request_region(0xCF8,8,"pci config")) {
+		printk(KERN_WARNING"VIA 82c505: Unable to request region 0xCF8\n");
+		release_region(0xA8, 2);
+		return;
+	}
 
 	/* Enable compatible Mode */
 	outb(0x96,0xA8);
@@ -170,11 +174,6 @@ void __init via82c505_init(struct arm_pci_sysdata *sysdata)
 	outb(0xd0,0xA9);
 
 	pci_scan_bus(0, &via82c505_ops, sysdata);
-
-	pci_cmd |= sysdata->bus[0].features;
-
-	printk("PCI: Fast back to back transfers %sabled\n",
-	       (sysdata->bus[0].features & PCI_COMMAND_FAST_BACK) ? "en" : "dis");
 
 #ifdef CONFIG_ARCH_SHARK
 	/* 

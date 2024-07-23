@@ -22,7 +22,7 @@
 
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
@@ -99,18 +99,23 @@ static int proc_scsi_write(struct file * file, const char * buf,
 	char * page;
 	char *start;
     
+	if (hpnt->hostt->proc_info == NULL)
+		ret = -ENOSYS;
+
 	if (count > PROC_BLOCK_SIZE)
 		return -EOVERFLOW;
 
 	if (!(page = (char *) __get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
-	copy_from_user(page, buf, count);
+	if(copy_from_user(page, buf, count))
+	{
+		free_page((ulong) page);
+		return -EFAULT;
+	}
 
-	if (hpnt->hostt->proc_info == NULL)
-		ret = -ENOSYS;
-	else
-		ret = hpnt->hostt->proc_info(page, &start, 0, count,
-						hpnt->host_no, 1);
+	ret = hpnt->hostt->proc_info(page, &start, 0, count,
+				     hpnt->host_no, 1);
+
 	free_page((ulong) page);
 	return(ret);
 }
@@ -121,6 +126,10 @@ void build_proc_dir_entries(Scsi_Host_Template * tpnt)
 	char name[10];	/* see scsi_unregister_host() */
 
 	tpnt->proc_dir = proc_mkdir(tpnt->proc_name, proc_scsi);
+        if (!tpnt->proc_dir) {
+                printk(KERN_ERR "Unable to proc_mkdir in scsi.c/build_proc_dir_entries");
+                return;
+        }
 	tpnt->proc_dir->owner = tpnt->module;
 
 	hpnt = scsi_hostlist;
@@ -299,22 +308,3 @@ void proc_print_scsidevice(Scsi_Device * scd, char *buffer, int *size, int len)
 }
 
 #endif				/* CONFIG_PROC_FS */
-
-/*
- * Overrides for Emacs so that we get a uniform tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */

@@ -6,11 +6,12 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is a driver for WD8003 and WD8013 "compatible" ethercards.
 
@@ -24,7 +25,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
 	"wd.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -96,7 +97,7 @@ int __init wd_probe(struct net_device *dev)
 			return -EBUSY;
 		i = wd_probe1(dev, base_addr);
 		if (i != 0)  
-			release_resource(r);
+			release_region(base_addr, WD_IO_EXTENT);
 		else
 			r->name = dev->name;
 		return i;
@@ -113,7 +114,7 @@ int __init wd_probe(struct net_device *dev)
 			r->name = dev->name;
 			return 0;
 		}
-		release_resource(r);
+		release_region(ioaddr, WD_IO_EXTENT);
 	}
 
 	return -ENODEV;
@@ -126,7 +127,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 	int ancient = 0;			/* An old card without config registers. */
 	int word16 = 0;				/* 0 = 8 bit, 1 = 16 bit */
 	const char *model_name;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	for (i = 0; i < 8; i++)
 		checksum += inb(ioaddr + 8 + i);
@@ -150,7 +151,7 @@ static int __init wd_probe1(struct net_device *dev, int ioaddr)
 		printk(" %2.2X", dev->dev_addr[i] = inb(ioaddr + 8 + i));
 
 	/* The following PureData probe code was contributed by
-	   Mike Jagdis <jaggy@purplet.demon.co.uk>. Puredata does software
+	   Mike Jagdis <mjagdis@eris-associates.co.uk>. Puredata does software
 	   configuration differently from others so we have to check for them.
 	   This detects an 8 bit, 16 bit or dumb (Toshiba, jumpered) card.
 	   */
@@ -364,9 +365,11 @@ wd_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 	if (ei_status.word16)
 		outb(ISA16 | ei_status.reg5, wd_cmdreg+WD_CMDREG5);
 
-#ifdef notdef
+#ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
+	/* unfortunately it isn't endian aware of the struct               */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 #else
 	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
@@ -449,6 +452,12 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(mem_end, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (ignored for PureData boards)");
+MODULE_PARM_DESC(mem, "memory base address(es)(ignored for PureData boards)");
+MODULE_PARM_DESC(mem_end, "memory end address(es)");
+MODULE_DESCRIPTION("ISA Western Digital wd8003/wd8013 ; SMC Elite, Elite16 ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */

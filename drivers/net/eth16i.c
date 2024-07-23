@@ -6,7 +6,7 @@
    Based on skeleton.c and heavily on at1700.c by Donald Becker
 
    This software may be used and distributed according to the terms
-   of the GNU Public Licence, incorporated herein by reference.
+   of the GNU General Public License, incorporated herein by reference.
 
    The author may be reached as miku@iki.fi
 
@@ -28,7 +28,7 @@
    
    Sources:
      - skeleton.c  a sample network driver core for linux,
-       written by Donald Becker <becker@CESDIS.gsfc.nasa.gov>
+       written by Donald Becker <becker@scyld.com>
      - at1700.c a driver for Allied Telesis AT1700, written 
        by Donald Becker.
      - e16iSRV.asm a Netware 3.X Server Driver for ICL EtherTeam16i
@@ -155,7 +155,7 @@ static char *version =
 #include <linux/ptrace.h>		  
 #include <linux/ioport.h>		  
 #include <linux/in.h>		  
-#include <linux/malloc.h>		  
+#include <linux/slab.h>		  
 #include <linux/string.h>		  
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -354,21 +354,21 @@ static char *version =
 #define RESET                  ID_ROM_0
 
 /* This is the I/O address list to be probed when seeking the card */
-static unsigned int eth16i_portlist[] = {
+static unsigned int eth16i_portlist[] __initdata = {
 	0x260, 0x280, 0x2A0, 0x240, 0x340, 0x320, 0x380, 0x300, 0 
 };
 
-static unsigned int eth32i_portlist[] = { 
+static unsigned int eth32i_portlist[] __initdata = { 
 	0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000, 0x7000, 0x8000,
 	0x9000, 0xA000, 0xB000, 0xC000, 0xD000, 0xE000, 0xF000, 0 
 };
 
 /* This is the Interrupt lookup table for Eth16i card */
-static unsigned int eth16i_irqmap[] = { 9, 10, 5, 15, 0 };
+static unsigned int eth16i_irqmap[] __initdata = { 9, 10, 5, 15, 0 };
 #define NUM_OF_ISA_IRQS    4
 
 /* This is the Interrupt lookup table for Eth32i card */
-static unsigned int eth32i_irqmap[] = { 3, 5, 7, 9, 10, 11, 12, 15, 0 };  
+static unsigned int eth32i_irqmap[] __initdata = { 3, 5, 7, 9, 10, 11, 12, 15, 0 };  
 #define EISA_IRQ_REG	0xc89
 #define NUM_OF_EISA_IRQS   8
 
@@ -434,7 +434,7 @@ static ushort  eth16i_parse_mediatype(const char* s);
 
 static struct net_device_stats *eth16i_get_stats(struct net_device *dev);
 
-static char *cardname = "ICL EtherTeam 16i/32";
+static char cardname[] __initdata = "ICL EtherTeam 16i/32";
 
 int __init eth16i_probe(struct net_device *dev)
 {
@@ -832,7 +832,7 @@ static int eth16i_set_irq(struct net_device* dev)
 }
 #endif
 
-static int eth16i_get_irq(int ioaddr)
+static int __init eth16i_get_irq(int ioaddr)
 {
 	unsigned char cbyte;
 
@@ -850,7 +850,7 @@ static int eth16i_get_irq(int ioaddr)
 	}
 }
 
-static int eth16i_check_signature(int ioaddr)
+static int __init eth16i_check_signature(int ioaddr)
 {
 	int i;
 	unsigned char creg[4] = { 0 };
@@ -1056,10 +1056,18 @@ static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 	struct eth16i_local *lp = (struct eth16i_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 	int status = 0;
-	ushort length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-	unsigned char *buf = skb->data;
+	ushort length = skb->len;
+	unsigned char *buf;
 	unsigned long flags;
 
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
+	buf = skb->data;
 
 	netif_stop_queue(dev);
 		
@@ -1195,9 +1203,6 @@ static void eth16i_rx(struct net_device *dev)
 			}
 
 			skb->protocol=eth_type_trans(skb, dev);
-			netif_rx(skb);
-			lp->stats.rx_packets++;
-			lp->stats.rx_bytes += pkt_len;
 
 			if( eth16i_debug > 5 ) {
 				int i;
@@ -1207,6 +1212,10 @@ static void eth16i_rx(struct net_device *dev)
 					printk(KERN_DEBUG " %02x", skb->data[i]);
 				printk(KERN_DEBUG ".\n");
 			}
+			netif_rx(skb);
+			dev->last_rx = jiffies;
+			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 
 		} /* else */
 
@@ -1404,9 +1413,11 @@ static int debug = -1;
 #if (LINUX_VERSION_CODE >= 0x20115) 
 MODULE_AUTHOR("Mika Kuoppala <miku@iki.fi>");
 MODULE_DESCRIPTION("ICL EtherTeam 16i/32 driver");
+MODULE_LICENSE("GPL");
+
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ETH16I_CARDS) "i");
-MODULE_PARM_DESC(io, "eth16i io base address");
+MODULE_PARM_DESC(io, "eth16i I/O base address(es)");
 
 #if 0
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ETH16I_CARDS) "i");
@@ -1414,10 +1425,10 @@ MODULE_PARM_DESC(irq, "eth16i interrupt request number");
 #endif
 
 MODULE_PARM(mediatype, "1-" __MODULE_STRING(MAX_ETH16I_CARDS) "s");
-MODULE_PARM_DESC(mediatype, "eth16i interfaceport mediatype");
+MODULE_PARM_DESC(mediatype, "eth16i media type of interface(s) (bnc,tp,dix,auto,eprom)");
 
 MODULE_PARM(debug, "i");
-MODULE_PARM_DESC(debug, "eth16i debug level (0-4)");
+MODULE_PARM_DESC(debug, "eth16i debug level (0-6)");
 #endif
 
 int init_module(void)

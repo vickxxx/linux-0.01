@@ -18,7 +18,7 @@
 #include <linux/in.h>
 #include <linux/version.h>
 #include <linux/unistd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <linux/sunrpc/svc.h>
 #include <linux/nfsd/nfsd.h>
@@ -71,7 +71,7 @@ nfsd_proc_setattr(struct svc_rqst *rqstp, struct nfsd_sattrargs *argp,
 		argp->attrs.ia_valid, (long) argp->attrs.ia_size);
 
 	fh_copy(&resp->fh, &argp->fh);
-	return nfsd_setattr(rqstp, &resp->fh, &argp->attrs);
+	return nfsd_setattr(rqstp, &resp->fh, &argp->attrs,0, (time_t)0);
 }
 
 /*
@@ -86,8 +86,8 @@ nfsd_proc_lookup(struct svc_rqst *rqstp, struct nfsd_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: LOOKUP   %s %s\n",
-		SVCFH_fmt(&argp->fh), argp->name);
+	dprintk("nfsd: LOOKUP   %s %.*s\n",
+		SVCFH_fmt(&argp->fh), argp->len, argp->name);
 
 	fh_init(&resp->fh, NFS_FHSIZE);
 	nfserr = nfsd_lookup(rqstp, &argp->fh, argp->name, argp->len,
@@ -148,6 +148,7 @@ nfsd_proc_read(struct svc_rqst *rqstp, struct nfsd_readargs *argp,
 				argp->count);
 		argp->count = avail << 2;
 	}
+	svc_reserve(rqstp, (19<<2) + argp->count + 4);
 
 	resp->count = argp->count;
 	nfserr = nfsd_read(rqstp, fh_copy(&resp->fh, &argp->fh),
@@ -196,24 +197,18 @@ nfsd_proc_create(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 	struct iattr	*attr = &argp->attrs;
 	struct inode	*inode;
 	struct dentry	*dchild;
-	int		nfserr, type, mode, rdonly = 0;
+	int		nfserr, type, mode;
 	dev_t		rdev = NODEV;
 
-	dprintk("nfsd: CREATE   %s %s\n",
-		SVCFH_fmt(dirfhp), argp->name);
+	dprintk("nfsd: CREATE   %s %.*s\n",
+		SVCFH_fmt(dirfhp), argp->len, argp->name);
 
 	/* First verify the parent file handle */
 	nfserr = fh_verify(rqstp, dirfhp, S_IFDIR, MAY_EXEC);
 	if (nfserr)
 		goto done; /* must fh_put dirfhp even on error */
 
-	/* Check for MAY_WRITE separately. */
-	nfserr = nfsd_permission(dirfhp->fh_export, dirfhp->fh_dentry,
-				 MAY_WRITE);
-	if (nfserr == nfserr_rofs) {
-		rdonly = 1;	/* Non-fatal error for echo > /dev/null */
-	} else if (nfserr)
-		goto done;
+	/* Check for MAY_WRITE in nfsd_create if necessary */
 
 	nfserr = nfserr_acces;
 	if (!argp->len)
@@ -222,13 +217,13 @@ nfsd_proc_create(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 	if (isdotent(argp->name, argp->len))
 		goto done;
 	fh_lock(dirfhp);
-	dchild = lookup_one(argp->name, dirfhp->fh_dentry);
+	dchild = lookup_one_len(argp->name, dirfhp->fh_dentry, argp->len);
 	if (IS_ERR(dchild)) {
 		nfserr = nfserrno(PTR_ERR(dchild));
 		goto out_unlock;
 	}
 	fh_init(newfhp, NFS_FHSIZE);
-	nfserr = fh_compose(newfhp, dirfhp->fh_export, dchild);
+	nfserr = fh_compose(newfhp, dirfhp->fh_export, dchild, dirfhp);
 	if (!nfserr && !dchild->d_inode)
 		nfserr = nfserr_noent;
 	if (nfserr) {
@@ -252,8 +247,34 @@ nfsd_proc_create(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 	if (attr->ia_valid & ATTR_MODE) { 
 		type = attr->ia_mode & S_IFMT;
 		mode = attr->ia_mode & ~S_IFMT;
-		if (!type)	/* HP weirdness */
-			type = S_IFREG;
+		if (!type) {
+			/* no type, so if target exists, assume same as that,
+			 * else assume a file */
+			if (inode) {
+				type = inode->i_mode & S_IFMT;
+				switch(type) {
+				case S_IFCHR:
+				case S_IFBLK:
+					/* reserve rdev for later checking */
+					attr->ia_size = inode->i_rdev;
+					attr->ia_valid |= ATTR_SIZE;
+
+					/* FALLTHROUGH */
+				case S_IFIFO:
+					/* this is probably a permission check..
+					 * at least IRIX implements perm checking on
+					 *   echo thing > device-special-file-or-pipe
+					 * by doing a CREATE with type==0
+					 */
+					nfserr = nfsd_permission(newfhp->fh_export,
+								 newfhp->fh_dentry,
+								 MAY_WRITE|_NFSD_IRIX_BOGOSITY);
+					if (nfserr && nfserr != nfserr_rofs)
+						goto out_unlock;
+				}
+			} else
+				type = S_IFREG;
+		}
 	} else if (inode) {
 		type = inode->i_mode & S_IFMT;
 		mode = inode->i_mode & ~S_IFMT;
@@ -261,11 +282,6 @@ nfsd_proc_create(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 		type = S_IFREG;
 		mode = 0;	/* ??? */
 	}
-
-	/* This is for "echo > /dev/null" a la SunOS. Argh. */
-	nfserr = nfserr_rofs;
-	if (rdonly && (!inode || type == S_IFREG))
-		goto out_unlock;
 
 	attr->ia_valid |= ATTR_MODE;
 	attr->ia_mode = mode;
@@ -316,7 +332,7 @@ nfsd_proc_create(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 		 */
 		attr->ia_valid &= ATTR_SIZE;
 		if (attr->ia_valid)
-			nfserr = nfsd_setattr(rqstp, newfhp, attr);
+			nfserr = nfsd_setattr(rqstp, newfhp, attr, 0, (time_t)0);
 	}
 
 out_unlock:
@@ -334,7 +350,8 @@ nfsd_proc_remove(struct svc_rqst *rqstp, struct nfsd_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: REMOVE   %s %s\n", SVCFH_fmt(&argp->fh), argp->name);
+	dprintk("nfsd: REMOVE   %s %.*s\n", SVCFH_fmt(&argp->fh),
+		argp->len, argp->name);
 
 	/* Unlink. -SIFDIR means file must not be a directory */
 	nfserr = nfsd_unlink(rqstp, &argp->fh, -S_IFDIR, argp->name, argp->len);
@@ -348,10 +365,10 @@ nfsd_proc_rename(struct svc_rqst *rqstp, struct nfsd_renameargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RENAME   %s %s -> \n",
-		SVCFH_fmt(&argp->ffh), argp->fname);
-	dprintk("nfsd:        ->  %s %s\n",
-		SVCFH_fmt(&argp->tfh), argp->tname);
+	dprintk("nfsd: RENAME   %s %.*s -> \n",
+		SVCFH_fmt(&argp->ffh), argp->flen, argp->fname);
+	dprintk("nfsd:        ->  %s %.*s\n",
+		SVCFH_fmt(&argp->tfh), argp->tlen, argp->tname);
 
 	nfserr = nfsd_rename(rqstp, &argp->ffh, argp->fname, argp->flen,
 				    &argp->tfh, argp->tname, argp->tlen);
@@ -368,8 +385,9 @@ nfsd_proc_link(struct svc_rqst *rqstp, struct nfsd_linkargs *argp,
 
 	dprintk("nfsd: LINK     %s ->\n",
 		SVCFH_fmt(&argp->ffh));
-	dprintk("nfsd:    %s %s\n",
+	dprintk("nfsd:    %s %.*s\n",
 		SVCFH_fmt(&argp->tfh),
+		argp->tlen,
 		argp->tname);
 
 	nfserr = nfsd_link(rqstp, &argp->tfh, argp->tname, argp->tlen,
@@ -386,8 +404,9 @@ nfsd_proc_symlink(struct svc_rqst *rqstp, struct nfsd_symlinkargs *argp,
 	struct svc_fh	newfh;
 	int		nfserr;
 
-	dprintk("nfsd: SYMLINK  %s %s -> %s\n",
-		SVCFH_fmt(&argp->ffh), argp->fname, argp->tname);
+	dprintk("nfsd: SYMLINK  %s %.*s -> %.*s\n",
+		SVCFH_fmt(&argp->ffh), argp->flen, argp->fname,
+		argp->tlen, argp->tname);
 
 	fh_init(&newfh, NFS_FHSIZE);
 	/*
@@ -413,7 +432,7 @@ nfsd_proc_mkdir(struct svc_rqst *rqstp, struct nfsd_createargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: MKDIR    %s %s\n", SVCFH_fmt(&argp->fh), argp->name);
+	dprintk("nfsd: MKDIR    %s %.*s\n", SVCFH_fmt(&argp->fh), argp->len, argp->name);
 
 	if (resp->fh.fh_dentry) {
 		printk(KERN_WARNING
@@ -437,7 +456,7 @@ nfsd_proc_rmdir(struct svc_rqst *rqstp, struct nfsd_diropargs *argp,
 {
 	int	nfserr;
 
-	dprintk("nfsd: RMDIR    %s %s\n", SVCFH_fmt(&argp->fh), argp->name);
+	dprintk("nfsd: RMDIR    %s %.*s\n", SVCFH_fmt(&argp->fh), argp->len, argp->name);
 
 	nfserr = nfsd_unlink(rqstp, &argp->fh, S_IFDIR, argp->name, argp->len);
 	fh_put(&argp->fh);
@@ -504,7 +523,7 @@ nfsd_proc_statfs(struct svc_rqst * rqstp, struct nfsd_fhandle   *argp,
 #define nfssvc_release_none	NULL
 struct nfsd_void { int dummy; };
 
-#define PROC(name, argt, rest, relt, cache)	\
+#define PROC(name, argt, rest, relt, cache, respsize)	\
  { (svc_procfunc) nfsd_proc_##name,		\
    (kxdrproc_t) nfssvc_decode_##argt,		\
    (kxdrproc_t) nfssvc_encode_##rest,		\
@@ -512,27 +531,33 @@ struct nfsd_void { int dummy; };
    sizeof(struct nfsd_##argt),			\
    sizeof(struct nfsd_##rest),			\
    0,						\
-   cache					\
+   cache,					\
+   respsize,				       	\
  }
+
+#define ST 1		/* status */
+#define FH 8		/* filehandle */
+#define	AT 18		/* attributes */
+
 struct svc_procedure		nfsd_procedures2[18] = {
-  PROC(null,	 void,		void,		none,		RC_NOCACHE),
-  PROC(getattr,	 fhandle,	attrstat,	fhandle,	RC_NOCACHE),
-  PROC(setattr,  sattrargs,	attrstat,	fhandle,	RC_REPLBUFF),
-  PROC(none,	 void,		void,		none,		RC_NOCACHE),
-  PROC(lookup,	 diropargs,	diropres,	fhandle,	RC_NOCACHE),
-  PROC(readlink, fhandle,	readlinkres,	none,		RC_NOCACHE),
-  PROC(read,	 readargs,	readres,	fhandle,	RC_NOCACHE),
-  PROC(none,	 void,		void,		none,		RC_NOCACHE),
-  PROC(write,	 writeargs,	attrstat,	fhandle,	RC_REPLBUFF),
-  PROC(create,	 createargs,	diropres,	fhandle,	RC_REPLBUFF),
-  PROC(remove,	 diropargs,	void,		none,		RC_REPLSTAT),
-  PROC(rename,	 renameargs,	void,		none,		RC_REPLSTAT),
-  PROC(link,	 linkargs,	void,		none,		RC_REPLSTAT),
-  PROC(symlink,	 symlinkargs,	void,		none,		RC_REPLSTAT),
-  PROC(mkdir,	 createargs,	diropres,	fhandle,	RC_REPLBUFF),
-  PROC(rmdir,	 diropargs,	void,		none,		RC_REPLSTAT),
-  PROC(readdir,	 readdirargs,	readdirres,	none,		RC_REPLBUFF),
-  PROC(statfs,	 fhandle,	statfsres,	none,		RC_NOCACHE),
+  PROC(null,	 void,		void,		none,		RC_NOCACHE, ST),
+  PROC(getattr,	 fhandle,	attrstat,	fhandle,	RC_NOCACHE, ST+AT),
+  PROC(setattr,  sattrargs,	attrstat,	fhandle,	RC_REPLBUFF, ST+AT),
+  PROC(none,	 void,		void,		none,		RC_NOCACHE, ST),
+  PROC(lookup,	 diropargs,	diropres,	fhandle,	RC_NOCACHE, ST+FH+AT),
+  PROC(readlink, fhandle,	readlinkres,	none,		RC_NOCACHE, ST+1+NFS_MAXPATHLEN/4),
+  PROC(read,	 readargs,	readres,	fhandle,	RC_NOCACHE, ST+AT+1+NFSSVC_MAXBLKSIZE),
+  PROC(none,	 void,		void,		none,		RC_NOCACHE, ST),
+  PROC(write,	 writeargs,	attrstat,	fhandle,	RC_REPLBUFF, ST+AT),
+  PROC(create,	 createargs,	diropres,	fhandle,	RC_REPLBUFF, ST+FH+AT),
+  PROC(remove,	 diropargs,	void,		none,		RC_REPLSTAT, ST),
+  PROC(rename,	 renameargs,	void,		none,		RC_REPLSTAT, ST),
+  PROC(link,	 linkargs,	void,		none,		RC_REPLSTAT, ST),
+  PROC(symlink,	 symlinkargs,	void,		none,		RC_REPLSTAT, ST),
+  PROC(mkdir,	 createargs,	diropres,	fhandle,	RC_REPLBUFF, ST+FH+AT),
+  PROC(rmdir,	 diropargs,	void,		none,		RC_REPLSTAT, ST),
+  PROC(readdir,	 readdirargs,	readdirres,	none,		RC_REPLBUFF, 0),
+  PROC(statfs,	 fhandle,	statfsres,	none,		RC_NOCACHE, ST+5),
 };
 
 
@@ -569,6 +594,7 @@ nfserrno (int errno)
 		{ nfserr_dquot, -EDQUOT },
 #endif
 		{ nfserr_stale, -ESTALE },
+		{ nfserr_dropit, -ENOMEM },
 		{ -1, -EIO }
 	};
 	int	i;

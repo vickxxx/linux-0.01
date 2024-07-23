@@ -19,10 +19,6 @@
 
 typedef s390_fp_regs elf_fpregset_t;
 typedef s390_regs elf_gregset_t;
-/*
- * This is used to ensure we don't load something for the wrong architecture.
- */
-#define elf_check_arch(x) ((x)->e_machine == EM_S390) 
 
 /*
  * These are used to set parameters in the core dumps.
@@ -31,9 +27,16 @@ typedef s390_regs elf_gregset_t;
 #define ELF_DATA	ELFDATA2MSB
 #define ELF_ARCH	EM_S390
 
+/*
+ * This is used to ensure we don't load something for the wrong architecture.
+ */
+#define elf_check_arch(x) \
+	(((x)->e_machine == EM_S390 || (x)->e_machine == EM_S390_OLD) \
+         && (x)->e_ident[EI_CLASS] == ELF_CLASS) 
+
 /* For SVR4/S390 the function pointer to be registered with `atexit` is
    passed in R14. */
-#define ELF_PLAT_INIT(_r) \
+#define ELF_PLAT_INIT(_r, load_addr) \
 	_r->gprs[14] = 0
 
 #define USE_ELF_CORE_DUMP
@@ -73,8 +76,7 @@ typedef s390_regs elf_gregset_t;
 #define ELF_PLATFORM (NULL)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex, ibcs2) \
-	current->personality = (ibcs2 ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif

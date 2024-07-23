@@ -11,12 +11,11 @@
 
 #include <linux/config.h>
 
-#if _LANGUAGE_C
+#ifndef __ASSEMBLY__
 #include <linux/types.h>
-#endif /* _LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 #include <asm/addrspace.h>
-#include <asm/reg.h>
 #include <asm/sn/kldir.h>
 
 #if defined(CONFIG_SGI_IP27)
@@ -26,7 +25,7 @@
 #endif
 
 
-#if _LANGUAGE_C
+#ifndef __ASSEMBLY__
 
 #if defined(CONFIG_SGI_IO)	/* FIXME */
 #define PS_UINT_CAST		(__psunsigned_t)
@@ -38,13 +37,13 @@
 
 #define HUBREG_CAST		(volatile hubreg_t *)
 
-#elif _LANGUAGE_ASSEMBLY
+#else /* __ASSEMBLY__ */
 
 #define PS_UINT_CAST
 #define UINT64_CAST
 #define HUBREG_CAST
 
-#endif
+#endif /* __ASSEMBLY__ */
 
 
 #define NASID_GET_META(_n)	((_n) >> NASID_LOCAL_BITS)
@@ -254,14 +253,6 @@
  * for _x.
  */
 
-#ifdef _STANDALONE
-
-/* DO NOT USE THESE DIRECTLY IN THE KERNEL. SEE BELOW. */
-#define LOCAL_HUB(_x)		(HUBREG_CAST (IALIAS_BASE + (_x)))
-#define REMOTE_HUB(_n, _x)	(HUBREG_CAST (NODE_SWIN_BASE(_n, 1) +	\
-					      0x800000 + (_x)))
-#endif /* _STANDALONE */
-
 /*
  * WARNING:
  *	When certain Hub chip workaround are defined, it's not sufficient
@@ -278,7 +269,7 @@
 					      0x800000 + (_x)))
 #endif /* CONFIG_SGI_IP27 */
 
-#if _LANGUAGE_C
+#ifndef __ASSEMBLY__
 
 #define HUB_L(_a)			*(_a)
 #define	HUB_S(_a, _d)			*(_a) = (_d)
@@ -290,7 +281,7 @@
 #define REMOTE_HUB_PI_L(_n, _sn, _r)	HUB_L(REMOTE_HUB_PI_ADDR((_n), (_sn), (_r)))
 #define REMOTE_HUB_PI_S(_n, _sn, _r, _d) HUB_S(REMOTE_HUB_PI_ADDR((_n), (_sn), (_r)), (_d))
 
-#endif /* _LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 /*
  * The following macros are used to get to a hub/bridge register, given
@@ -328,20 +319,6 @@
 	PHYS_TO_K0(NODE_OFFSET(nasid) | ARCS_SPB_OFFSET)
 #define ARCS_SPB_SIZE		0x0400
 
-#ifdef _STANDALONE
-
-#define ARCS_TVECTOR_OFFSET	0x2800
-#define ARCS_PVECTOR_OFFSET	0x2c00
-
-/*
- * These addresses are used by the master CPU to install the transfer
- * and private vectors.  All others use the SPB to find them.
- */
-#define TVADDR	(NODE_CAC_BASE(get_nasid()) + ARCS_TVECTOR_OFFSET)
-#define PVADDR	(NODE_CAC_BASE(get_nasid()) + ARCS_PVECTOR_OFFSET)
-
-#endif /* _STANDALONE */
-
 #define KLDIR_OFFSET		0x2000
 #define KLDIR_ADDR(nasid)						\
 	TO_NODE_UNCAC((nasid), KLDIR_OFFSET)
@@ -367,7 +344,7 @@
 #define	KLI_KERN_XP		8
 #define	KLI_KERN_PARTID		9
 
-#if _LANGUAGE_C
+#ifndef __ASSEMBLY__
 
 #define KLD_BASE(nasid)		((kldir_ent_t *) KLDIR_ADDR(nasid))
 #define KLD_LAUNCH(nasid)	(KLD_BASE(nasid) + KLI_LAUNCH)
@@ -453,7 +430,7 @@
 
 #define GPDA_ADDR(nasid)	TO_NODE_CAC(nasid, GPDA_OFFSET)
 
-#endif /* _LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 
 #endif /* _ASM_SN_ADDRS_H */

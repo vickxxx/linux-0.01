@@ -11,7 +11,7 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/locks.h>
 #include <linux/smp_lock.h>
 #include <linux/binfmts.h>
@@ -110,3 +110,4 @@ static void __exit exit_em86_binfmt(void)
 
 module_init(init_em86_binfmt)
 module_exit(exit_em86_binfmt)
+MODULE_LICENSE("GPL");

@@ -5,6 +5,7 @@
 
 #include <asm/atomic.h>
 #include <linux/mount.h>
+#include <linux/kernel.h>
 
 /*
  * linux/include/linux/dcache.h
@@ -27,21 +28,28 @@ struct qstr {
 	unsigned int hash;
 };
 
+struct dentry_stat_t {
+	int nr_dentry;
+	int nr_unused;
+	int age_limit;          /* age in seconds */
+	int want_pages;         /* pages requested by system */
+	int dummy[2];
+};
+extern struct dentry_stat_t dentry_stat;
+
 /* Name hashing routines. Initial hash value */
+/* Hash courtesy of the R5 hash in reiserfs modulo sign bits */
 #define init_name_hash()		0
 
 /* partial hash update function. Assume roughly 4 bits per character */
 static __inline__ unsigned long partial_name_hash(unsigned long c, unsigned long prevhash)
 {
-	prevhash = (prevhash << 4) | (prevhash >> (8*sizeof(unsigned long)-4));
-	return prevhash ^ c;
+	return (prevhash + (c << 4) + (c >> 4)) * 11;
 }
 
 /* Finally: cut down the number of bits to a int value (and try to avoid losing bits) */
 static __inline__ unsigned long end_name_hash(unsigned long hash)
 {
-	if (sizeof(hash) > sizeof(unsigned int))
-		hash += hash >> 4*sizeof(hash);
 	return (unsigned int) hash;
 }
 
@@ -61,17 +69,17 @@ struct dentry {
 	unsigned int d_flags;
 	struct inode  * d_inode;	/* Where the name belongs to - NULL is negative */
 	struct dentry * d_parent;	/* parent directory */
-	struct list_head d_vfsmnt;
 	struct list_head d_hash;	/* lookup hash list */
 	struct list_head d_lru;		/* d_count = 0 LRU list */
 	struct list_head d_child;	/* child of parent list */
 	struct list_head d_subdirs;	/* our children */
 	struct list_head d_alias;	/* inode alias list */
+	int d_mounted;
 	struct qstr d_name;
 	unsigned long d_time;		/* used by d_revalidate */
 	struct dentry_operations  *d_op;
 	struct super_block * d_sb;	/* The root of the dentry tree */
-	unsigned long d_reftime;	/* last time referenced */
+	unsigned long d_vfs_flags;
 	void * d_fsdata;		/* fs-specific data */
 	unsigned char d_iname[DNAME_INLINE_LEN]; /* small names */
 };
@@ -164,12 +172,15 @@ extern int d_invalidate(struct dentry *);
 #define shrink_dcache() prune_dcache(0)
 struct zone_struct;
 /* dcache memory management */
-extern void shrink_dcache_memory(int, unsigned int);
+extern int shrink_dcache_memory(int, unsigned int);
 extern void prune_dcache(int);
 
 /* icache memory management (defined in linux/fs/inode.c) */
-extern void shrink_icache_memory(int, int);
+extern int shrink_icache_memory(int, int);
 extern void prune_icache(int);
+
+/* quota cache memory management (defined in linux/fs/dquot.c) */
+extern int shrink_dqcache_memory(int, unsigned int);
 
 /* only used at mount-time */
 extern struct dentry * d_alloc_root(struct inode *);
@@ -210,7 +221,7 @@ extern void d_move(struct dentry *, struct dentry *);
 extern struct dentry * d_lookup(struct dentry *, struct qstr *);
 
 /* validate "insecure" dentry pointer */
-extern int d_validate(struct dentry *, struct dentry *, unsigned int, unsigned int);
+extern int d_validate(struct dentry *, struct dentry *);
 
 extern char * __d_path(struct dentry *, struct vfsmount *, struct dentry *,
 	struct vfsmount *, char *, int);
@@ -234,7 +245,7 @@ static __inline__ struct dentry * dget(struct dentry *dentry)
 {
 	if (dentry) {
 		if (!atomic_read(&dentry->d_count))
-			BUG();
+			out_of_line_bug();
 		atomic_inc(&dentry->d_count);
 	}
 	return dentry;
@@ -258,9 +269,10 @@ extern void dput(struct dentry *);
 
 static __inline__ int d_mountpoint(struct dentry *dentry)
 {
-	return !list_empty(&dentry->d_vfsmnt);
+	return dentry->d_mounted;
 }
 
+extern struct vfsmount *lookup_mnt(struct vfsmount *, struct dentry *);
 #endif /* __KERNEL__ */
 
 #endif	/* __LINUX_DCACHE_H */

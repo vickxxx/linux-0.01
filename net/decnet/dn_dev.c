@@ -52,13 +52,11 @@ static unsigned char dn_eco_version[3]    = {0x02,0x00,0x00};
 
 extern struct neigh_table dn_neigh_table;
 
-struct net_device *decnet_default_device = NULL;
+struct net_device *decnet_default_device;
 
 static struct dn_dev *dn_dev_create(struct net_device *dev, int *err);
 static void dn_dev_delete(struct net_device *dev);
-#ifdef CONFIG_RTNETLINK
 static void rtmsg_ifa(int event, struct dn_ifaddr *ifa);
-#endif
 
 static int dn_eth_up(struct net_device *);
 static void dn_send_brd_hello(struct net_device *dev);
@@ -68,106 +66,77 @@ static void dn_send_ptp_hello(struct net_device *dev);
 
 static struct dn_dev_parms dn_dev_list[] =  {
 {
-	ARPHRD_ETHER, /* Ethernet */
-	DN_DEV_BCAST,
-	DN_DEV_S_RU,
-	0,
-	1498,
-	1,
-	10,
-	0,
-	"ethernet",
-	NET_DECNET_CONF_ETHER,
-	dn_eth_up,
-	NULL,
-	dn_send_brd_hello,
-	NULL
+	type:		ARPHRD_ETHER, /* Ethernet */
+	mode:		DN_DEV_BCAST,
+	state:		DN_DEV_S_RU,
+	blksize:	1498,
+	t2:		1,
+	t3:		10,
+	name:		"ethernet",
+	ctl_name:	NET_DECNET_CONF_ETHER,
+	up:		dn_eth_up,
+	timer3:		dn_send_brd_hello,
 },
 {
-	ARPHRD_IPGRE, /* DECnet tunneled over GRE in IP */
-	DN_DEV_BCAST,
-	DN_DEV_S_RU,
-	0,
-	1400,
-	1,
-	10,
-	0,
-	"ipgre",
-	NET_DECNET_CONF_GRE,
-	NULL,
-	NULL,
-	dn_send_brd_hello,
-	NULL
+	type:		ARPHRD_IPGRE, /* DECnet tunneled over GRE in IP */
+	mode:		DN_DEV_BCAST,
+	state:		DN_DEV_S_RU,
+	blksize:	1400,
+	t2:		1,
+	t3:		10,
+	name:		"ipgre",
+	ctl_name:	NET_DECNET_CONF_GRE,
+	timer3:		dn_send_brd_hello,
 },
 #if 0
 {
-	ARPHRD_X25, /* Bog standard X.25 */
-	DN_DEV_UCAST,
-	DN_DEV_S_DS,
-	0,
-	230,
-	1,
-	120,
-	0,
-	"x25",
-	NET_DECNET_CONF_X25,
-	NULL,
-	NULL,
-	dn_send_ptp_hello,
-	NULL
+	type:		ARPHRD_X25, /* Bog standard X.25 */
+	mode:		DN_DEV_UCAST,
+	state:		DN_DEV_S_DS,
+	blksize:	230,
+	t2:		1,
+	t3:		120,
+	name:		"x25",
+	ctl_name:	NET_DECNET_CONF_X25,
+	timer3:		dn_send_ptp_hello,
 },
 #endif
 #if 0
 {
-	ARPHRD_PPP, /* DECnet over PPP */
-	DN_DEV_BCAST,
-	DN_DEV_S_RU,
-	0,
-	230,
-	1,
-	10,
-	0,
-	"ppp",
-	NET_DECNET_CONF_PPP,
-	NULL,
-	NULL,
-	dn_send_brd_hello,
-	NULL
+	type:		ARPHRD_PPP, /* DECnet over PPP */
+	mode:		DN_DEV_BCAST,
+	state:		DN_DEV_S_RU,
+	blksize:	230,
+	t2:		1,
+	t3:		10,
+	name:		"ppp",
+	ctl_name:	NET_DECNET_CONF_PPP,
+	timer3:		dn_send_brd_hello,
 },
 #endif
 #if 0
 {
-	ARPHRD_DDCMP, /* DECnet over DDCMP */
-	DN_DEV_UCAST,
-	DN_DEV_S_DS,
-	0,
-	230,
-	1,
-	120,
-	0,
-	"ddcmp",
-	NET_DECNET_CONF_DDCMP,
-	NULL,
-	NULL,
-	dn_send_ptp_hello,
-	NULL
+	type:		ARPHRD_DDCMP, /* DECnet over DDCMP */
+	mode:		DN_DEV_UCAST,
+	state:		DN_DEV_S_DS,
+	blksize:	230,
+	t2:		1,
+	t3:		120,
+	name:		"ddcmp",
+	ctl_name:	NET_DECNET_CONF_DDCMP,
+	timer3:		dn_send_ptp_hello,
 },
 #endif
 {
-	ARPHRD_LOOPBACK, /* Loopback interface - always last */
-	DN_DEV_BCAST,
-	DN_DEV_S_RU,
-	0,
-	1498,
-	1,
-	10,
-	0,
-	"loopback",
-	NET_DECNET_CONF_LOOPBACK,
-	NULL,
-	NULL,
-	dn_send_brd_hello,
-	NULL
+	type:		ARPHRD_LOOPBACK, /* Loopback interface - always last */
+	mode:		DN_DEV_BCAST,
+	state:		DN_DEV_S_RU,
+	blksize:	1498,
+	t2:		1,
+	t3:		10,
+	name:		"loopback",
+	ctl_name:	NET_DECNET_CONF_LOOPBACK,
+	timer3:		dn_send_brd_hello,
 }
 };
 
@@ -182,7 +151,7 @@ static int max_t2[] = { 60 }; /* No max specified, but this seems sensible */
 static int min_t3[] = { 1 };
 static int max_t3[] = { 8191 }; /* Must fit in 16 bits when multiplied by BCT3MULT or T3MULT */
 
-static int min_priority[] = { 0 };
+static int min_priority[1];
 static int max_priority[] = { 127 }; /* From DECnet spec */
 
 static int dn_forwarding_proc(ctl_table *, int, struct file *,
@@ -344,7 +313,8 @@ static int dn_forwarding_sysctl(ctl_table *table, int *name, int nlen,
 		if (newlen != sizeof(int))
 			return -EINVAL;
 
-		get_user(value, (int *)newval);
+		if (get_user(value, (int *)newval))
+			return -EFAULT;
 		if (value < 0)
 			return -EINVAL;
 		if (value > 2)
@@ -397,9 +367,7 @@ static void dn_dev_del_ifa(struct dn_dev *dn_db, struct dn_ifaddr **ifap, int de
 
 	*ifap = ifa1->ifa_next;
 
-#ifdef CONFIG_RTNETLINK
 	rtmsg_ifa(RTM_DELADDR, ifa1);
-#endif /* CONFIG_RTNETLINK */
 
 	if (destroy) {
 		dn_dev_free_ifa(ifa1);
@@ -418,9 +386,7 @@ static int dn_dev_insert_ifa(struct dn_dev *dn_db, struct dn_ifaddr *ifa)
 	ifa->ifa_next = dn_db->ifa_list;
 	dn_db->ifa_list = ifa;
 
-#ifdef CONFIG_RTNETLINK
 	rtmsg_ifa(RTM_NEWADDR, ifa);
-#endif /* CONFIG_RTNETLINK */
 
 	return 0;
 }
@@ -529,7 +495,6 @@ rarok:
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static struct dn_dev *dn_dev_by_index(int ifindex)
 {
 	struct net_device *dev;
@@ -685,8 +650,6 @@ done:
 
 	return skb->len;
 }
-
-#endif /* CONFIG_RTNETLINK */
 
 static void dn_send_endnode_hello(struct net_device *dev)
 {
@@ -1098,31 +1061,39 @@ int dnet_gifconf(struct net_device *dev, char *buf, int len)
 {
 	struct dn_dev *dn_db = (struct dn_dev *)dev->dn_ptr;
 	struct dn_ifaddr *ifa;
-	struct ifreq *ifr = (struct ifreq *)buf;
+	char buffer[DN_IFREQ_SIZE];
+	struct ifreq *ifr = (struct ifreq *)buffer;
+	struct sockaddr_dn *addr = (struct sockaddr_dn *)&ifr->ifr_addr;
 	int done = 0;
 
 	if ((dn_db == NULL) || ((ifa = dn_db->ifa_list) == NULL))
 		return 0;
 
 	for(; ifa; ifa = ifa->ifa_next) {
-		if (!ifr) {
+		if (!buf) {
 			done += sizeof(DN_IFREQ_SIZE);
 			continue;
 		}
 		if (len < DN_IFREQ_SIZE)
 			return done;
-		memset(ifr, 0, DN_IFREQ_SIZE);
+		memset(buffer, 0, DN_IFREQ_SIZE);
 
 		if (ifa->ifa_label)
 			strcpy(ifr->ifr_name, ifa->ifa_label);
 		else
 			strcpy(ifr->ifr_name, dev->name);
 
-		(*(struct sockaddr_dn *) &ifr->ifr_addr).sdn_family = AF_DECnet;
-		(*(struct sockaddr_dn *) &ifr->ifr_addr).sdn_add.a_len = 2;
-		(*(dn_address *)(*(struct sockaddr_dn *) &ifr->ifr_addr).sdn_add.a_addr) = ifa->ifa_local;
+		addr->sdn_family = AF_DECnet;
+		addr->sdn_add.a_len = 2;
+		memcpy(addr->sdn_add.a_addr, &ifa->ifa_local,
+			sizeof(dn_address));
 
-		ifr = (struct ifreq *)((char *)ifr + DN_IFREQ_SIZE);
+		if (copy_to_user(buf, buffer, DN_IFREQ_SIZE)) {
+			done = -EFAULT;
+			break;
+		}
+
+		buf  += DN_IFREQ_SIZE;
 		len  -= DN_IFREQ_SIZE;
 		done += DN_IFREQ_SIZE;
 	}
@@ -1200,7 +1171,6 @@ static int decnet_dev_get_info(char *buffer, char **start, off_t offset, int len
 
 #endif /* CONFIG_PROC_FS */
 
-#ifdef CONFIG_RTNETLINK
 static struct rtnetlink_link dnet_rtnetlink_table[RTM_MAX-RTM_BASE+1] = 
 {
 	{ NULL,			NULL,			},
@@ -1241,7 +1211,6 @@ static struct rtnetlink_link dnet_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
 	{ NULL,			NULL,			}
 #endif
 };
-#endif /* CONFIG_RTNETLINK */
 
 void __init dn_dev_init(void)
 {
@@ -1251,9 +1220,7 @@ void __init dn_dev_init(void)
 	register_gifconf(PF_DECnet, dnet_gifconf);
 #endif /* CONFIG_DECNET_SIOCGIFCONF */
 
-#ifdef CONFIG_RTNETLINK
 	rtnetlink_links[PF_DECnet] = dnet_rtnetlink_table;
-#endif /* CONFIG_RTNETLINK */
 
 #ifdef CONFIG_PROC_FS
 	proc_net_create("decnet_dev", 0, decnet_dev_get_info);
@@ -1270,9 +1237,7 @@ void __init dn_dev_init(void)
 
 void __exit dn_dev_cleanup(void)
 {
-#ifdef CONFIG_RTNETLINK
 	rtnetlink_links[PF_DECnet] = NULL;
-#endif /* CONFIG_RTNETLINK */
 
 #ifdef CONFIG_DECNET_SIOCGIFCONF
 	unregister_gifconf(PF_DECnet);
@@ -1286,9 +1251,7 @@ void __exit dn_dev_cleanup(void)
 	}
 #endif /* CONFIG_SYSCTL */
 
-#ifdef CONFIG_PROC_FS
 	proc_net_remove("decnet_dev");
-#endif /* CONFIG_PROC_FS */
 
 	dn_dev_devices_off();
 }

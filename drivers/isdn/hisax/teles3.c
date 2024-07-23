@@ -1,27 +1,28 @@
-/* $Id: teles3.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+/* $Id: teles3.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * teles3.c     low level stuff for Teles 16.3 & PNP isdn cards
+ * low level stuff for Teles 16.3 & PNP isdn cards
  *
- *              based on the teles driver from Jan den Ouden
- *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *              Beat Doebeli
  *
- * This file is (c) under GNU PUBLIC LICENSE
- *
  */
 #define __NO_VERSION__
 #include <linux/init.h>
+#include <linux/isapnp.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *teles3_revision = "$Revision: 2.17 $";
+const char *teles3_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -254,6 +255,24 @@ Teles_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
+#ifdef __ISAPNP__
+static struct isapnp_device_id teles_ids[] __initdata = {
+	{ ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2110),
+	  ISAPNP_VENDOR('T', 'A', 'G'), ISAPNP_FUNCTION(0x2110), 
+	  (unsigned long) "Teles 16.3 PnP" },
+	{ ISAPNP_VENDOR('C', 'T', 'X'), ISAPNP_FUNCTION(0x0),
+	  ISAPNP_VENDOR('C', 'T', 'X'), ISAPNP_FUNCTION(0x0), 
+	  (unsigned long) "Creatix 16.3 PnP" },
+	{ ISAPNP_VENDOR('C', 'P', 'Q'), ISAPNP_FUNCTION(0x1002),
+	  ISAPNP_VENDOR('C', 'P', 'Q'), ISAPNP_FUNCTION(0x1002), 
+	  (unsigned long) "Compaq ISDN S0" },
+	{ 0, }
+};
+
+static struct isapnp_device_id *tdev = &teles_ids[0];
+static struct pci_bus *pnp_c __devinitdata = NULL;
+#endif
+
 int __devinit
 setup_teles3(struct IsdnCard *card)
 {
@@ -267,6 +286,47 @@ setup_teles3(struct IsdnCard *card)
 	    && (cs->typ != ISDN_CTYPE_TELESPCMCIA) && (cs->typ != ISDN_CTYPE_COMPAQ_ISA))
 		return (0);
 
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pci_bus *pb;
+		struct pci_dev *pd;
+
+		while(tdev->card_vendor) {
+			if ((pb = isapnp_find_card(tdev->card_vendor,
+				tdev->card_device, pnp_c))) {
+				pnp_c = pb;
+				pd = NULL;
+				if ((pd = isapnp_find_dev(pnp_c,
+					tdev->vendor, tdev->function, pd))) {
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)tdev->driver_data);
+					pd->prepare(pd);
+					pd->deactivate(pd);
+					pd->activate(pd);
+					card->para[3] = pd->resource[2].start;
+					card->para[2] = pd->resource[1].start;
+					card->para[1] = pd->resource[0].start;
+					card->para[0] = pd->irq_resource[0].start;
+					if (!card->para[0] || !card->para[1] || !card->para[2]) {
+						printk(KERN_ERR "Teles PnP:some resources are missing %ld/%lx/%lx\n",
+						card->para[0], card->para[1], card->para[2]);
+						pd->deactivate(pd);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "Teles PnP: PnP error card found, no device\n");
+				}
+			}
+			tdev++;
+			pnp_c=NULL;
+		} 
+		if (!tdev->card_vendor) {
+			printk(KERN_INFO "Teles PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	if (cs->typ == ISDN_CTYPE_16_3) {
 		cs->hw.teles3.cfg_reg = card->para[1];
 		switch (cs->hw.teles3.cfg_reg) {

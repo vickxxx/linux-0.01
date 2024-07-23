@@ -33,7 +33,7 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -301,7 +301,7 @@ static agp_memory *agp_allocate_memory_wrap(size_t pg_count, u32 type)
 	agp_memory *memory;
 
 	memory = agp_allocate_memory(pg_count, type);
-   	printk(KERN_DEBUG "memory : %p\n", memory);
+//   	printk(KERN_DEBUG "memory : %p\n", memory);
 	if (memory == NULL) {
 		return NULL;
 	}
@@ -749,11 +749,6 @@ err_out:
 }
 
 
-static long long agp_lseek(struct file *file, long long offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static ssize_t agp_read(struct file *file, char *buf,
 			size_t count, loff_t * ppos)
 {
@@ -852,6 +847,9 @@ static int agpioc_reserve_wrap(agp_file_private * priv, unsigned long arg)
 	if (copy_from_user(&reserve, (void *) arg, sizeof(agp_region))) {
 		return -EFAULT;
 	}
+	if ((unsigned) reserve.seg_count >= ~0U/sizeof(agp_segment))
+		return -EFAULT;
+
 	client = agp_find_client_by_pid(reserve.pid);
 
 	if (reserve.seg_count == 0) {
@@ -872,6 +870,9 @@ static int agpioc_reserve_wrap(agp_file_private * priv, unsigned long arg)
 	} else {
 		agp_segment *segment;
 
+		if (reserve.seg_count >= 16384)
+			return -EINVAL;
+			
 		segment = kmalloc((sizeof(agp_segment) * reserve.seg_count),
 				  GFP_KERNEL);
 
@@ -879,7 +880,7 @@ static int agpioc_reserve_wrap(agp_file_private * priv, unsigned long arg)
 			return -ENOMEM;
 		}
 		if (copy_from_user(segment, (void *) reserve.seg_list,
-				   GFP_KERNEL)) {
+				   sizeof(agp_segment) * reserve.seg_count)) {
 			kfree(segment);
 			return -EFAULT;
 		}
@@ -1077,7 +1078,7 @@ ioctl_out:
 static struct file_operations agp_fops =
 {
 	owner:		THIS_MODULE,
-	llseek:		agp_lseek,
+	llseek:		no_llseek,
 	read:		agp_read,
 	write:		agp_write,
 	ioctl:		agp_ioctl,
@@ -1109,3 +1110,4 @@ void __exit agp_frontend_cleanup(void)
 {
 	misc_deregister(&agp_miscdev);
 }
+

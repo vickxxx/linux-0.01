@@ -38,7 +38,7 @@ struct serial_struct {
 /*
  * Definitions for ZILOG_struct (and serial_struct) flags field
  */
-#define ZILOG_HUP_NOTIFY 0x0001 /* Notify getty on hangups and closes 
+#define ZILOG_HUP_NOTIFY 0x0001 /* Notify getty on hangups and closes
 				   on the callout port */
 #define ZILOG_FOURPORT  0x0002	/* Set OU1, OUT2 per AST Fourport settings */
 #define ZILOG_SAK	0x0004	/* Secure Attention Key (Orange book) */
@@ -74,7 +74,7 @@ struct serial_struct {
 #ifdef __KERNEL__
 /*
  * This is our internal structure for each serial port's state.
- * 
+ *
  * Many fields are paralleled by the structure used by the serial_struct
  * structure.
  *
@@ -89,6 +89,18 @@ struct dec_zschannel {
 	unsigned char curregs[NUM_ZSREGS];
 };
 
+struct dec_serial;
+
+struct zs_hook {
+	int (*init_channel)(struct dec_serial* info);
+	void (*init_info)(struct dec_serial* info);
+	void (*rx_char)(unsigned char ch, unsigned char stat);
+	int  (*poll_rx_char)(struct dec_serial* info);
+	int  (*poll_tx_char)(struct dec_serial* info,
+			     unsigned char ch);
+	unsigned cflags;
+};
+
 struct dec_serial {
 	struct dec_serial *zs_next;	/* For IRQ servicing chain */
 	struct dec_zschannel *zs_channel; /* Channel registers */
@@ -97,7 +109,7 @@ struct dec_serial {
 
 	char soft_carrier;  /* Use soft carrier on this channel */
 	char break_abort;   /* Is serial console in, so process brk/abrt */
-	char kgdb_channel;  /* Kgdb is running on this channel */
+	struct zs_hook *hook;  /* Hook on this channel */
 	char is_cons;       /* Is this our console. */
 	unsigned char tx_active; /* character is being xmitted */
 	unsigned char tx_stopped; /* output is suspended */
@@ -211,8 +223,9 @@ struct dec_serial {
 
 #define	RxINT_DISAB	0	/* Rx Int Disable */
 #define	RxINT_FCERR	0x8	/* Rx Int on First Character Only or Error */
-#define	INT_ALL_Rx	0x10	/* Int on all Rx Characters or error */
-#define	INT_ERR_Rx	0x18	/* Int on error only */
+#define	RxINT_ALL	0x10	/* Int on all Rx Characters or error */
+#define	RxINT_ERR	0x18	/* Int on error only */
+#define	RxINT_MASK	0x18
 
 #define	WT_RDY_RT	0x20	/* Wait/Ready on R/T */
 #define	WT_FN_RDYFN	0x40	/* Wait/FN/Ready FN */

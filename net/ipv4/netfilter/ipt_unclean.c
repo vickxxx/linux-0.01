@@ -76,7 +76,7 @@ check_icmp(const struct icmphdr *icmph,
 		    = { 12, 12, ICMP_NOT_ERROR, 0, 0 } };
 
 	/* Can't do anything if it's a fragment. */
-	if (!offset)
+	if (offset)
 		return 1;
 
 	/* Must cover type and code. */
@@ -87,7 +87,7 @@ check_icmp(const struct icmphdr *icmph,
 
 	/* If not embedded. */
 	if (!embedded) {
-		/* Bad checksum?  Don't print, just drop. */
+		/* Bad checksum?  Don't print, just ignore. */
 		if (!more_frags
 		    && ip_compute_csum((unsigned char *) icmph, datalen) != 0)
 			return 0;
@@ -108,6 +108,8 @@ check_icmp(const struct icmphdr *icmph,
 			   length of iph + 8 bytes. */
 			struct iphdr *inner = (void *)icmph + 8;
 
+			/* datalen > 8 since all ICMP_IS_ERROR types
+                           have min length > 8 */
 			if (datalen - 8 < sizeof(struct iphdr)) {
 				limpk("ICMP error internal way too short\n");
 				return 0;
@@ -155,6 +157,8 @@ check_icmp(const struct icmphdr *icmph,
 		u_int32_t arg = ntohl(icmph->un.gateway);
 
 		if (icmph->code == 0) {
+			/* Code 0 means that upper 8 bits is pointer
+                           to problem. */
 			if ((arg >> 24) >= iph->ihl*4) {
 				limpk("ICMP PARAMETERPROB ptr = %u\n",
 				      ntohl(icmph->un.gateway) >> 24);
@@ -196,7 +200,7 @@ check_udp(const struct iphdr *iph,
 	  int embedded)
 {
 	/* Can't do anything if it's a fragment. */
-	if (!offset)
+	if (offset)
 		return 1;
 
 	/* CHECK: Must cover UDP header. */
@@ -205,17 +209,16 @@ check_udp(const struct iphdr *iph,
 		return 0;
 	}
 
-	/* Bad checksum?  Don't print, just drop. */
+	/* Bad checksum?  Don't print, just say it's unclean. */
 	/* FIXME: SRC ROUTE packets won't match checksum --RR */
-	if (!more_frags && !embedded
+	if (!more_frags && !embedded && udph->check
 	    && csum_tcpudp_magic(iph->saddr, iph->daddr, datalen, IPPROTO_UDP,
 				 csum_partial((char *)udph, datalen, 0)) != 0)
 		return 0;
 
-	/* CHECK: Ports can't be zero. */
-	if (!udph->source || !udph->dest) {
-		limpk("UDP zero ports %u/%u\n",
-		      ntohs(udph->source), ntohs(udph->dest));
+	/* CHECK: Destination port can't be zero. */
+	if (!udph->dest) {
+		limpk("UDP zero destination port\n");
 		return 0;
 	}
 
@@ -253,6 +256,27 @@ check_udp(const struct iphdr *iph,
 #define	TH_PUSH	0x08
 #define	TH_ACK	0x10
 #define	TH_URG	0x20
+#define	TH_ECE	0x40
+#define	TH_CWR	0x80
+
+/* table of valid flag combinations - ECE and CWR are always valid */
+static u8 tcp_valid_flags[(TH_FIN|TH_SYN|TH_RST|TH_PUSH|TH_ACK|TH_URG) + 1] =
+{
+	[TH_SYN]			= 1,
+	[TH_SYN|TH_ACK]			= 1,
+	[TH_SYN|TH_ACK|TH_PUSH]		= 1,
+	[TH_RST]			= 1,
+	[TH_RST|TH_ACK]			= 1,
+	[TH_RST|TH_ACK|TH_PUSH]		= 1,
+	[TH_FIN|TH_ACK]			= 1,
+	[TH_ACK]			= 1,
+	[TH_ACK|TH_PUSH]		= 1,
+	[TH_ACK|TH_URG]			= 1,
+	[TH_ACK|TH_URG|TH_PUSH]		= 1,
+	[TH_FIN|TH_ACK|TH_PUSH]		= 1,
+	[TH_FIN|TH_ACK|TH_URG]		= 1,
+	[TH_FIN|TH_ACK|TH_URG|TH_PUSH]	= 1
+};
 
 /* TCP-specific checks. */
 static int
@@ -263,7 +287,8 @@ check_tcp(const struct iphdr *iph,
 	  int more_frags,
 	  int embedded)
 {
-	u_int8_t *opt = (u_int8_t *)(tcph + 1);
+	u_int8_t *opt = (u_int8_t *)tcph;
+	u_int8_t *endhdr = (u_int8_t *)tcph + tcph->doff * 4;
 	u_int8_t tcpflags;
 	int end_of_options = 0;
 	size_t i;
@@ -272,7 +297,7 @@ check_tcp(const struct iphdr *iph,
 	/* In fact, this is caught below (offset < 516). */
 
 	/* Can't do anything if it's a fragment. */
-	if (!offset)
+	if (offset)
 		return 1;
 
 	/* CHECK: Smaller than minimal TCP hdr. */
@@ -281,7 +306,8 @@ check_tcp(const struct iphdr *iph,
 			limpk("Packet length %u < TCP header.\n", datalen);
 			return 0;
 		}
-		/* Must have ports available (datalen >= 8). */
+		/* Must have ports available (datalen >= 8), from
+                   check_icmp which set embedded = 1 */
 		/* CHECK: TCP ports inside ICMP error */
 		if (!tcph->source || !tcph->dest) {
 			limpk("Zero TCP ports %u/%u.\n",
@@ -301,7 +327,7 @@ check_tcp(const struct iphdr *iph,
 			return 1;
 	}
 
-	/* Bad checksum?  Don't print, just drop. */
+	/* Bad checksum?  Don't print, just say it's unclean. */
 	/* FIXME: SRC ROUTE packets won't match checksum --RR */
 	if (!more_frags && !embedded
 	    && csum_tcpudp_magic(iph->saddr, iph->daddr, datalen, IPPROTO_TCP,
@@ -322,19 +348,8 @@ check_tcp(const struct iphdr *iph,
 	}
 
 	/* CHECK: TCP flags. */
-	tcpflags = ((u_int8_t *)tcph)[13];
-	if (tcpflags != TH_SYN
-	    && tcpflags != (TH_SYN|TH_ACK)
-	    && tcpflags != (TH_RST|TH_ACK)
-	    && tcpflags != (TH_RST|TH_ACK|TH_PUSH)
-	    && tcpflags != (TH_FIN|TH_ACK)
-	    && tcpflags != TH_ACK
-	    && tcpflags != (TH_ACK|TH_PUSH)
-	    && tcpflags != (TH_ACK|TH_URG)
-	    && tcpflags != (TH_ACK|TH_URG|TH_PUSH)
-	    && tcpflags != (TH_FIN|TH_ACK|TH_PUSH)
-	    && tcpflags != (TH_FIN|TH_ACK|TH_URG)
-	    && tcpflags != (TH_FIN|TH_ACK|TH_URG|TH_PUSH)) {
+	tcpflags = (((u_int8_t *)tcph)[13] & ~(TH_ECE|TH_CWR));
+	if (!tcp_valid_flags[tcpflags]) {
 		limpk("TCP flags bad: %u\n", tcpflags);
 		return 0;
 	}
@@ -368,11 +383,13 @@ check_tcp(const struct iphdr *iph,
 				return 0;
 			}
 			/* CHECK: oversize options. */
-			else if (opt[i+1] + i >= tcph->doff * 4) {
+			else if (&opt[i] + opt[i+1] > endhdr) {
 				limpk("TCP option %u at %Zu too long\n",
 				      (unsigned int) opt[i], i);
 				return 0;
 			}
+			/* Move to next option */
+			i += opt[i+1];
 		}
 	}
 
@@ -384,7 +401,8 @@ check_tcp(const struct iphdr *iph,
 static int
 check_ip(struct iphdr *iph, size_t length, int embedded)
 {
-	u_int8_t *opt = (u_int8_t *)(iph + 1);
+	u_int8_t *opt = (u_int8_t *)iph;
+	u_int8_t *endhdr = (u_int8_t *)iph + iph->ihl * 4;
 	int end_of_options = 0;
 	void *protoh;
 	size_t datalen;
@@ -430,41 +448,34 @@ check_ip(struct iphdr *iph, size_t length, int embedded)
 				      opt[i]);
 				return 0;
 			}
-			/* CHECK: zero-length options. */
-			else if (opt[i+1] == 0) {
-				limpk("IP option %u 0 len\n",
-				      opt[i]);
+			/* CHECK: zero-length or one-length options. */
+			else if (opt[i+1] < 2) {
+				limpk("IP option %u %u len\n",
+				      opt[i], opt[i+1]);
 				return 0;
 			}
 			/* CHECK: oversize options. */
-			else if (opt[i+1] + i >= iph->ihl * 4) {
+			else if (&opt[i] + opt[i+1] > endhdr) {
 				limpk("IP option %u at %u too long\n",
 				      opt[i], i);
 				return 0;
 			}
+			/* Move to next option */
+			i += opt[i+1];
 		}
 	}
 
 	/* Fragment checks. */
 
 	/* CHECK: More fragments, but doesn't fill 8-byte boundary. */
-	if ((ntohs(iph->frag_off) & IP_MF)
-	    && (ntohs(iph->tot_len) % 8) != 0) {
-		limpk("Truncated fragment %u long.\n", ntohs(iph->tot_len));
+	if ((ntohs(iph->frag_off) & IP_MF) && datalen % 8 != 0) {
+		limpk("Truncated fragment %u long.\n", datalen);
 		return 0;
 	}
 
 	/* CHECK: Oversize fragment a-la Ping of Death. */
 	if (offset * 8 + datalen > 65535) {
 		limpk("Oversize fragment to %u.\n", offset * 8);
-		return 0;
-	}
-
-	/* CHECK: DF set and offset or MF set. */
-	if ((ntohs(iph->frag_off) & IP_DF)
-	    && (offset || (ntohs(iph->frag_off) & IP_MF))) {
-		limpk("DF set and offset=%u, MF=%u.\n",
-		      offset, ntohs(iph->frag_off) & IP_MF);
 		return 0;
 	}
 
@@ -495,16 +506,26 @@ check_ip(struct iphdr *iph, size_t length, int embedded)
 		return 0;
 	}
 
-	/* CHECK: Min offset of frag = 128 - 60 (max IP hdr len). */
-	if (offset && offset * 8 < MIN_LIKELY_MTU - 60) {
+	/* CHECK: Min offset of frag = 128 - IP hdr len. */
+	if (offset && offset * 8 < MIN_LIKELY_MTU - iph->ihl * 4) {
 		limpk("Fragment starts at %u < %u\n", offset * 8,
-		      MIN_LIKELY_MTU-60);
+		      MIN_LIKELY_MTU - iph->ihl * 4);
 		return 0;
 	}
 
 	/* CHECK: Protocol specification non-zero. */
 	if (iph->protocol == 0) {
 		limpk("Zero protocol\n");
+		return 0;
+	}
+
+	/* CHECK: Do not use what is unused.
+	 * First bit of fragmentation flags should be unused.
+	 * May be used by OS fingerprinting tools.
+	 * 04 Jun 2002, Maciej Soltysiak, solt@dns.toxicfilms.tv
+	 */
+	if (ntohs(iph->frag_off)>>15) {
+		limpk("IP unused bit set\n");
 		return 0;
 	}
 
@@ -572,3 +593,4 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

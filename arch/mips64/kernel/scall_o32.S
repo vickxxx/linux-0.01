@@ -3,8 +3,9 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 - 2000 by Ralf Baechle
+ * Copyright (C) 1995 - 2000, 2001 by Ralf Baechle
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  *
  * Hairy, the userspace application uses a different argument passing
  * convention than the kernel, so we have to translate things from o32
@@ -15,18 +16,11 @@
 #include <linux/errno.h>
 #include <asm/current.h>
 #include <asm/mipsregs.h>
+#include <asm/offset.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
 #include <asm/unistd.h>
-
-/* This duplicates the definition from <linux/sched.h> */
-#define PT_TRACESYS	0x00000002	/* tracing system calls */
-
-/* This duplicates the definition from <asm/signal.h> */
-#define SIGILL		4		/* Illegal instruction (ANSI).  */
-
-/* Highest syscall used of any syscall flavour */
-#define MAX_SYSCALL_NO	__NR_Linux32 + __NR_Linux32_syscalls
+#include <asm/sysmips.h>
 
 	.align  5
 NESTED(handle_sys, PT_SIZE, sp)
@@ -34,79 +28,86 @@ NESTED(handle_sys, PT_SIZE, sp)
 	SAVE_SOME
 	STI
 	.set	at
-#if DEBUG_MIPS64
- jal dodebug
- ld $4, PT_R4(sp)
- ld $5, PT_R5(sp)
- ld $6, PT_R6(sp)
- ld $7, PT_R7(sp)
- ld $2, PT_R2(sp)
-#endif
 	ld	t1, PT_EPC(sp)		# skip syscall on return
 
-	subu	t0, v0, __NR_Linux32	# check syscall number
-	sltiu	t0, t0, __NR_Linux32_syscalls + 1
+	subu	t0, v0, __NR_O32_Linux	# check syscall number
+	sltiu	t0, t0, __NR_O32_Linux_syscalls + 1
 	daddiu	t1, 4			# skip to next instruction
-	beqz	t0, not_o32_scall
 	sd	t1, PT_EPC(sp)
+	beqz	t0, not_o32_scall
+#if 0
+ SAVE_ALL
+ move a1, v0
+ PRINT("Scall %ld\n")
+ RESTORE_ALL
+#endif
+
+	sll	a0, a0, 0
+	sll	a1, a1, 0
+	sll	a2, a2, 0
+	sll	a3, a3, 0
 
 	/* XXX Put both in one cacheline, should save a bit. */
 	dsll	t0, v0, 3		# offset into table
-	ld	t2, (sys_call_table - (__NR_Linux32 * 8))(t0) # syscall routine
-	lbu	t3, (sys_narg_table - __NR_Linux32)(v0)	# number of arguments
+	ld	t2, (sys_call_table - (__NR_O32_Linux * 8))(t0)
+	lbu	t3, (sys_narg_table - __NR_O32_Linux)(v0)
 
 	subu	t0, t3, 5		# 5 or more arguments?
 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
 	bgez	t0, stackargs
 
 stack_done:
-	ld	t0, TASK_PTRACE($28)	# syscall tracing enabled?
-	andi	t0, PT_TRACESYS
-	bnez	t0, trace_a_syscall
+		ld	t0, TASK_PTRACE($28)	# syscall tracing enabled?
+		andi	t0, _PT_TRACESYS
+		bnez	t0, trace_a_syscall
 
-	jalr	t2			# Do The Real Thing (TM)
+		jalr	t2			# Do The Real Thing (TM)
 
-	li	t0, -EMAXERRNO - 1	# error?
-	sltu	t0, t0, v0
-	sd	t0, PT_R7(sp)		# set error flag
-	beqz	t0, 1f
+		li	t0, -EMAXERRNO - 1	# error?
+		sltu	t0, t0, v0
+		sd	t0, PT_R7(sp)		# set error flag
+		beqz	t0, 1f
 
-	negu	v0			# error
-	sd	v0, PT_R0(sp)		# set flag for syscall restarting
-1:	sd	v0, PT_R2(sp)		# result
-	
+		negu	v0			# error
+		sd	v0, PT_R0(sp)		# flag for syscall restarting
+1:		sd	v0, PT_R2(sp)		# result
+
 FEXPORT(o32_ret_from_sys_call)
-	lw	t0, irq_stat		# softirq_active
-	lw	t1, irq_stat+4		# softirq_mask.  unused delay slot
-	and	t0, t1
-	bnez	t0, o32_handle_softirq
+		mfc0	t0, CP0_STATUS	# need_resched and signals atomic test
+		ori	t0, t0, 1
+		xori	t0, t0, 1
+		mtc0	t0, CP0_STATUS
+		SSNOP; SSNOP; SSNOP
 
-9:	ld	t0,PT_STATUS(sp)	# returning to kernel mode?
-	andi	t1, t0, 0x10
-	ld	t2, TASK_NEED_RESCHED($28)
-	beqz	t1, o32_return		# -> yes
-	bnez	t2, o32_reschedule
-	lw	v0, TASK_SIGPENDING($28)
-	move	a0, zero
-	beqz	v0, o32_return
-	move	a1, sp
-	SAVE_STATIC
-	jal	do_signal
+		ld	t2, TASK_NEED_RESCHED($28)
+		bnez	t2, o32_reschedule
+		lw	v0, TASK_SIGPENDING($28)
+		bnez	v0, signal_return
 
-o32_return:
-	RESTORE_SOME
-	RESTORE_SP
-	.set	mips3
-	eret
-	.set	mips0
+restore_all:	RESTORE_SOME
+		RESTORE_SP
+		.set	mips3
+		eret
+		.set	mips0
 
-o32_handle_softirq:
-	jal	do_softirq
-	b	9b
+signal_return:
+		.type	signal_return, @function
+
+		mfc0	t0, CP0_STATUS
+		ori	t0, t0, 1
+		mtc0	t0, CP0_STATUS
+
+		SAVE_STATIC
+		move	a0, zero
+		move	a1, sp
+		jal	do_signal
+		RESTORE_STATIC
+		b	restore_all
+
 o32_reschedule:
-	SAVE_STATIC
-	jal	schedule
-	b	o32_ret_from_sys_call
+		SAVE_STATIC
+		jal	schedule
+		j	ret_from_sys_call
 
 /* ------------------------------------------------------------------------ */
 
@@ -159,16 +160,20 @@ stackargs:
 	bltz	t0, bad_stack		# -> sp is bad
 
 	ld	t0, PT_R29(sp)		# get old user stack pointer
-	la	t1, 3f			# copy 1 to 2 arguments
+	PTR_LA	t1, 3f			# copy 1 to 2 arguments
 	sll	t3, t3, 2
 	subu	t1, t3
 	jr	t1
 
 	/* Ok, copy the args from the luser stack to the kernel stack */
+	.set	push
+	.set	noreorder
+	.set	nomacro
 1:	lw	a5, 20(t0)		# argument #6 from usp
 2:	lw	a4, 16(t0)		# argument #5 from usp
+3:	.set	pop
 
-3:	j	stack_done		# go back
+	j	stack_done		# go back
 
 	.section __ex_table,"a"
 	PTR	1b, bad_stack
@@ -187,9 +192,13 @@ bad_stack:
 	j	ret_from_sys_call
 
 not_o32_scall:
-	/* This is not an 32-bit compatibility syscall, pass it on to
+	/* This is not an o32 compatibility syscall, pass it on to
 	   the 64-bit syscall handlers.  */
+#ifdef CONFIG_MIPS32_N32
+	j	handle_sysn32
+#else
 	j	handle_sys64
+#endif
 
 illegal_syscall:
 	/* This also isn't a 64-bit syscall, throw an error.  */
@@ -200,8 +209,122 @@ illegal_syscall:
 	j	ret_from_sys_call
 	END(handle_sys)
 
+LEAF(mips_atomic_set)
+	andi	v0, a1, 3			# must be word aligned
+	bnez	v0, bad_alignment
+
+	ld	v1, THREAD_CURDS($28)		# in legal address range?
+	daddiu	a0, a1, 4
+	or	a0, a0, a1
+	and	a0, a0, v1
+	bnez	a0, bad_address
+
+	/* Ok, this is the ll/sc case.  World is sane :-)  */
+1:	ll	v0, (a1)
+	move	a0, a2
+2:	sc	a0, (a1)
+	beqz	a0, 1b
+
+	.section __ex_table,"a"
+	PTR	1b, bad_stack
+	PTR	2b, bad_stack
+	.previous
+
+1:	sd	v0, PT_R2(sp)		# result
+
+	/* Success, so skip usual error handling garbage.  */
+	ld	t0, TASK_PTRACE($28)	# syscall tracing enabled?
+	andi	t0, _PT_TRACESYS
+	bnez	t0, 1f
+	b	o32_ret_from_sys_call
+
+1:	SAVE_STATIC
+	jal	syscall_trace
+	li	a3, 0			# success
+	j	ret_from_sys_call
+
+bad_address:
+	li	v0, -EFAULT
+	jr	ra
+
+bad_alignment:
+	li	v0, -EINVAL
+	jr	ra
+	END(mips_atomic_set)
+
+LEAF(sys32_sysmips)
+	beq	a0, MIPS_ATOMIC_SET, mips_atomic_set
+	j	sys_sysmips
+	END(sys32_sysmips)
+
+LEAF(sys32_syscall)
+	ld	t0, PT_R29(sp)		# user sp
+
+	sltu	v0, a0, __NR_O32_Linux + __NR_O32_Linux_syscalls + 1
+	beqz	v0, enosys
+
+	dsll	v0, a0, 3
+	dla	v1, sys32_syscall
+	ld	t2, (sys_call_table - (__NR_O32_Linux * 8))(v0)
+	lbu	t3, (sys_narg_table - __NR_O32_Linux)(a0)
+
+	li	v0, -EINVAL
+	beq	t2, v1, out		# do not recurse
+
+	beqz	t2, enosys		# null function pointer?
+
+	andi	v0, t0, 0x3		# unaligned stack pointer?
+	bnez	v0, sigsegv
+
+	daddiu	v0, t0, 16		# v0 = usp + 16
+	daddu	t1, v0, 12		# 3 32-bit arguments
+	ld	v1, THREAD_CURDS($28)
+	or	v0, v0, t1
+	and	v1, v1, v0
+	bnez	v1, efault
+
+	move	a0, a1			# shift argument registers
+	move	a1, a2
+	move	a2, a3
+
+1:	lw	a3, 16(t0)
+2:	lw	t3, 20(t0)
+3:	lw	t1, 24(t0)
+
+	.section __ex_table,"a"
+	PTR	1b, efault
+	PTR	2b, efault
+	PTR	3b, efault
+	.previous
+
+	sw	t3, 16(sp)		# put into new stackframe
+	sw	t1, 20(sp)
+
+	bnez	t1, 1f			# zero arguments?
+	daddu	a0, sp, 32		# then pass sp in a0
+1:
+
+	sw	t3, 16(sp)
+	sw	v1, 20(sp)
+	jr	t2
+	/* Unreached */
+
+enosys:	li	v0, -ENOSYS
+	b	out
+
+sigsegv:
+	li	a0, _SIGSEGV
+	move	a1, $28
+	jal	force_sig
+	/* Fall through */
+
+efault:	li	v0, -EFAULT
+
+out:	jr	ra
+	END(sys32_syscall)
+
 	.macro	syscalltable
-	sys	sys_syscall	0			/* 4000 */
+	sys	sys32_syscall	0			/* 4000 */
 	sys	sys_exit	1
 	sys	sys_fork	0
 	sys	sys_read	3
@@ -219,7 +342,7 @@ illegal_syscall:
 	sys	sys_chmod	2			/* 4015 */
 	sys	sys_lchown	3
 	sys	sys_ni_syscall	0
-	sys	sys_stat	2
+	sys	sys_ni_syscall	0			/* was sys_stat */
 	sys	sys_lseek	3
 	sys	sys_getpid	0			/* 4020 */
 	sys	sys_mount	5
@@ -228,8 +351,8 @@ illegal_syscall:
 	sys	sys_getuid	0
 	sys	sys_stime	1			/* 4025 */
 	sys	sys32_ptrace	4
-	sys	sys32_alarm	1
-	sys	sys_fstat	2
+	sys	sys_alarm	1
+	sys	sys_ni_syscall	0			/* was sys_fstat */
 	sys	sys_pause	0
 	sys	sys32_utime	2			/* 4030 */
 	sys	sys_ni_syscall	0
@@ -263,7 +386,7 @@ illegal_syscall:
 	sys	sys_ni_syscall	0	/* was sys_olduname  */
 	sys	sys_umask	1			/* 4060 */
 	sys	sys_chroot	1
-	sys	sys_ustat	2
+	sys	sys32_ustat	2
 	sys	sys_dup2	2
 	sys	sys_getppid	0
 	sys	sys_getpgrp	0			/* 4065 */
@@ -283,9 +406,9 @@ illegal_syscall:
 	sys	sys32_settimeofday 2
 	sys	sys_getgroups	2			/* 4080 */
 	sys	sys_setgroups	2
-	sys	sys_ni_syscall	0 /* old_select */
+	sys	sys_ni_syscall	0			/* old_select */
 	sys	sys_symlink	2
-	sys	sys_lstat	2
+	sys	sys_ni_syscall	0			/* was sys_lstat */
 	sys	sys_readlink	3			/* 4085 */
 	sys	sys_uselib	1
 	sys	sys_swapon	2
@@ -303,7 +426,7 @@ illegal_syscall:
 	sys	sys32_statfs	2
 	sys	sys32_fstatfs	2			/* 4100 */
 	sys	sys_ni_syscall	0	/* sys_ioperm */
-	sys	sys_socketcall	2
+	sys	sys32_socketcall	2
 	sys	sys_syslog	3
 	sys	sys32_setitimer	3
 	sys	sys32_getitimer	2			/* 4105 */
@@ -317,7 +440,7 @@ illegal_syscall:
 	sys	sys_ni_syscall	0	/* sys_vm86 */
 	sys	sys32_wait4	4
 	sys	sys_swapoff	1			/* 4115 */
-	sys	sys_sysinfo	1
+	sys	sys32_sysinfo	1
 	sys	sys32_ipc		6
 	sys	sys_fsync	1
 	sys	sys32_sigreturn	0
@@ -328,10 +451,10 @@ illegal_syscall:
 	sys	sys32_adjtimex	1
 	sys	sys_mprotect	3			/* 4125 */
 	sys	sys32_sigprocmask	3
-	sys	sys_create_module 2
-	sys	sys_init_module	5
-	sys	sys_delete_module 1
-	sys	sys_get_kernel_syms 1			/* 4130 */
+	sys	sys32_create_module 2
+	sys	sys32_init_module	5
+	sys	sys32_delete_module 1
+	sys	sys32_get_kernel_syms 1			/* 4130 */
 	sys	sys_quotactl	0
 	sys	sys_getpgid	1
 	sys	sys_fchdir	1
@@ -350,7 +473,7 @@ illegal_syscall:
 	sys	sys32_writev	3
 	sys	sys_cacheflush	3
 	sys	sys_cachectl	3
-	sys	sys_sysmips	4
+	sys	sys32_sysmips	4
 	sys	sys_ni_syscall	0			/* 4150 */
 	sys	sys_getsid	1
 	sys	sys_fdatasync	0
@@ -388,7 +511,7 @@ illegal_syscall:
 	sys	sys_socketpair	4
 	sys	sys_setresuid	3			/* 4185 */
 	sys	sys_getresuid	3
-	sys	sys_query_module 5
+	sys	sys32_query_module 5
 	sys	sys_poll	3
 	sys	sys_nfsservctl	3
 	sys	sys_setresgid	3			/* 4190 */
@@ -408,12 +531,12 @@ illegal_syscall:
 	sys	sys_capget	2
 	sys	sys_capset	2			/* 4205 */
 	sys	sys32_sigaltstack	0
-	sys	sys_sendfile	3
+	sys	sys32_sendfile	4
 	sys	sys_ni_syscall	0
 	sys	sys_ni_syscall	0
-	sys	sys_mmap2	6			/* 4210 */
-	sys	sys_truncate64	2
-	sys	sys_ftruncate64	2
+	sys	sys32_mmap2	6			/* 4210 */
+	sys	sys32_truncate64	4
+	sys	sys32_ftruncate64	4
 	sys	sys_newstat	2
 	sys	sys_newlstat	2
 	sys	sys_newfstat	2			/* 4215 */
@@ -422,12 +545,34 @@ illegal_syscall:
 	sys	sys_madvise	3
 	sys	sys_getdents64	3
 	sys	sys32_fcntl64	3			/* 4220 */
+	sys	sys_ni_syscall	0
+	sys	sys_gettid	0
+	sys	sys32_readahead	5
+	sys	sys_setxattr	5
+	sys	sys_lsetxattr	5		/* 4225 */
+	sys	sys_fsetxattr	5
+	sys	sys_getxattr	4
+	sys	sys_lgetxattr	4
+	sys	sys_fgetxattr	4
+	sys	sys_listxattr	3		/* 4230 */
+	sys	sys_llistxattr	3
+	sys	sys_flistxattr	3
+	sys	sys_removexattr	2
+	sys	sys_lremovexattr 2
+	sys	sys_fremovexattr 2		/* 4235 */
+	sys	sys_tkill, 2
+	sys	sys_sendfile64, 5
+	sys	sys_ni_syscall, 0		/* res. for futex */
+	sys	sys_ni_syscall, 0		/* res. for sched_setaffinity */
+	sys	sys_ni_syscall, 0		/* 4240 res. for sched_getaffinity */
+
 	.endm
 
 	.macro	sys function, nargs
 	PTR	\function
 	.endm
 
+	.align	3
 sys_call_table:
 	syscalltable
 

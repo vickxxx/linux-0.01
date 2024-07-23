@@ -10,6 +10,7 @@
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
  *     Copyright (c) 1998-2000 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -44,6 +45,11 @@ typedef __u32 magic_t;
 #define FALSE 0
 #endif
 
+/* Hack to do small backoff when setting media busy in IrLAP */
+#ifndef SMALL
+#define SMALL 5
+#endif
+
 #ifndef IRDA_MIN /* Lets not mix this MIN with other header files */
 #define IRDA_MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif
@@ -71,7 +77,9 @@ if(!(expr)) { \
         func }
 #else
 #define IRDA_DEBUG(n, args...)
-#define ASSERT(expr, func)
+#define ASSERT(expr, func) \
+if(!(expr)) do { \
+        func } while (0)
 #endif /* CONFIG_IRDA_DEBUG */
 
 #define WARNING(args...) printk(KERN_WARNING args)
@@ -177,9 +185,10 @@ typedef union {
  */
 struct irda_skb_cb {
 	magic_t magic;       /* Be sure that we can trust the information */
-	__u32   speed;       /* The Speed this frame should be sent with */
+	__u32   next_speed;  /* The Speed to be set *after* this frame */
 	__u16   mtt;         /* Minimum turn around time */
 	__u16   xbofs;       /* Number of xbofs required, used by SIR mode */
+	__u16   next_xbofs;  /* Number of xbofs required *after* this frame */
 	void    *context;    /* May be used by drivers */
 	void    (*destructor)(struct sk_buff *skb); /* Used for flow control */
 	__u16   xbofs_delay; /* Number of xbofs used for generating the mtt */

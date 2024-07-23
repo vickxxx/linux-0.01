@@ -2,9 +2,24 @@
  *  linux/fs/read_write.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *  Minor pieces Copyright (C) 2002 Red Hat Inc, All Rights Reserved
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <linux/malloc.h> 
+#include <linux/slab.h> 
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
@@ -15,6 +30,7 @@
 #include <asm/uaccess.h>
 
 struct file_operations generic_ro_fops = {
+	llseek:		generic_file_llseek,
 	read:		generic_file_read,
 	mmap:		generic_file_mmap,
 };
@@ -22,6 +38,56 @@ struct file_operations generic_ro_fops = {
 ssize_t generic_read_dir(struct file *filp, char *buf, size_t siz, loff_t *ppos)
 {
 	return -EISDIR;
+}
+
+int rw_verify_area(int read_write, struct file *file, loff_t *ppos, size_t count)
+{
+	struct inode *inode;
+	loff_t pos;
+
+	if (unlikely(count > file->f_maxcount))
+		goto Einval;
+
+	pos = *ppos;
+
+	if (unlikely((pos < 0) || (loff_t) (pos + count) < 0))
+		goto Einval;
+
+	inode = file->f_dentry->d_inode;
+	if (inode->i_flock && MANDATORY_LOCK(inode))
+		return locks_mandatory_area(read_write == READ ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE, inode, file, *ppos, count);
+	return 0;
+
+Einval:
+	return -EINVAL;
+}
+
+loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+
+	switch (origin) {
+		case 2:
+			offset += file->f_dentry->d_inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset>=0 && offset<=file->f_dentry->d_inode->i_sb->s_maxbytes) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_reada = 0;
+			file->f_version = ++event;
+		}
+		retval = offset;
+	}
+	return retval;
+}
+
+loff_t no_llseek(struct file *file, loff_t offset, int origin)
+{
+	return -ESPIPE;
 }
 
 loff_t default_llseek(struct file *file, loff_t offset, int origin)
@@ -124,8 +190,8 @@ asmlinkage ssize_t sys_read(unsigned int fd, char * buf, size_t count)
 	file = fget(fd);
 	if (file) {
 		if (file->f_mode & FMODE_READ) {
-			ret = locks_verify_area(FLOCK_VERIFY_READ, file->f_dentry->d_inode,
-						file, file->f_pos, count);
+			ret = rw_verify_area(READ, file, &file->f_pos, count);
+
 			if (!ret) {
 				ssize_t (*read)(struct file *, char *, size_t, loff_t *);
 				ret = -EINVAL;
@@ -134,8 +200,7 @@ asmlinkage ssize_t sys_read(unsigned int fd, char * buf, size_t count)
 			}
 		}
 		if (ret > 0)
-			inode_dir_notify(file->f_dentry->d_parent->d_inode,
-				DN_ACCESS);
+			dnotify_parent(file->f_dentry, DN_ACCESS);
 		fput(file);
 	}
 	return ret;
@@ -150,9 +215,7 @@ asmlinkage ssize_t sys_write(unsigned int fd, const char * buf, size_t count)
 	file = fget(fd);
 	if (file) {
 		if (file->f_mode & FMODE_WRITE) {
-			struct inode *inode = file->f_dentry->d_inode;
-			ret = locks_verify_area(FLOCK_VERIFY_WRITE, inode, file,
-				file->f_pos, count);
+			ret = rw_verify_area(WRITE, file, &file->f_pos, count);
 			if (!ret) {
 				ssize_t (*write)(struct file *, const char *, size_t, loff_t *);
 				ret = -EINVAL;
@@ -161,8 +224,7 @@ asmlinkage ssize_t sys_write(unsigned int fd, const char * buf, size_t count)
 			}
 		}
 		if (ret > 0)
-			inode_dir_notify(file->f_dentry->d_parent->d_inode,
-				DN_MODIFY);
+			dnotify_parent(file->f_dentry, DN_MODIFY);
 		fput(file);
 	}
 	return ret;
@@ -182,7 +244,6 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	ssize_t ret, i;
 	io_fn_t fn;
 	iov_fn_t fnv;
-	struct inode *inode;
 
 	/*
 	 * First get the "struct iovec" from user memory and
@@ -206,26 +267,38 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	if (copy_from_user(iov, vector, count*sizeof(*vector)))
 		goto out;
 
-	/* BSD readv/writev returns EINVAL if one of the iov_len
-	   values < 0 or tot_len overflowed a 32-bit integer. -ink */
+	/*
+	 * Single unix specification:
+	 * We should -EINVAL if an element length is not >= 0 and fitting an ssize_t
+	 * The total length is fitting an ssize_t
+	 *
+	 * Be careful here because iov_len is a size_t not an ssize_t
+	 */
+	 
 	tot_len = 0;
 	ret = -EINVAL;
 	for (i = 0 ; i < count ; i++) {
-		size_t tmp = tot_len;
-		int len = iov[i].iov_len;
-		if (len < 0)
+		ssize_t len = (ssize_t) iov[i].iov_len;
+		if (len < 0)	/* size_t not fitting an ssize_t .. */
 			goto out;
-		(u32)tot_len += len;
-		if (tot_len < tmp || tot_len < (u32)len)
+		tot_len += len;
+		/* We must do this work unsigned - signed overflow is
+		   undefined and gcc 3.2 now uses that fact sometimes... 
+		   
+		   FIXME: put in a proper limits.h for each platform */
+#if BITS_PER_LONG==64
+		if (tot_len > 0x7FFFFFFFFFFFFFFFUL)
+#else
+		if (tot_len > 0x7FFFFFFFUL)
+#endif		
 			goto out;
 	}
 
-	inode = file->f_dentry->d_inode;
 	/* VERIFY_WRITE actually means a read, as we write to user space */
-	ret = locks_verify_area((type == VERIFY_WRITE
-				 ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE),
-				inode, file, file->f_pos, tot_len);
-	if (ret) goto out;
+	ret = rw_verify_area((type == VERIFY_WRITE ? READ : WRITE),
+				file, &file->f_pos, tot_len);
+	if (ret) 
+		goto out;
 
 	fnv = (type == VERIFY_WRITE ? file->f_op->readv : file->f_op->writev);
 	if (fnv) {
@@ -266,8 +339,8 @@ out:
 out_nofree:
 	/* VERIFY_WRITE actually means a read, as we write to user space */
 	if ((ret + (type == VERIFY_WRITE)) > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode,
-			(type == VERIFY_WRITE) ? DN_MODIFY : DN_ACCESS);
+		dnotify_parent(file->f_dentry,
+			(type == VERIFY_WRITE) ? DN_ACCESS : DN_MODIFY);
 	return ret;
 }
 
@@ -328,8 +401,8 @@ asmlinkage ssize_t sys_pread(unsigned int fd, char * buf,
 		goto bad_file;
 	if (!(file->f_mode & FMODE_READ))
 		goto out;
-	ret = locks_verify_area(FLOCK_VERIFY_READ, file->f_dentry->d_inode,
-				file, pos, count);
+	ret = rw_verify_area(READ, file, &pos, count);
+
 	if (ret)
 		goto out;
 	ret = -EINVAL;
@@ -339,7 +412,7 @@ asmlinkage ssize_t sys_pread(unsigned int fd, char * buf,
 		goto out;
 	ret = read(file, buf, count, &pos);
 	if (ret > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_ACCESS);
+		dnotify_parent(file->f_dentry, DN_ACCESS);
 out:
 	fput(file);
 bad_file:
@@ -359,8 +432,8 @@ asmlinkage ssize_t sys_pwrite(unsigned int fd, const char * buf,
 		goto bad_file;
 	if (!(file->f_mode & FMODE_WRITE))
 		goto out;
-	ret = locks_verify_area(FLOCK_VERIFY_WRITE, file->f_dentry->d_inode,
-				file, pos, count);
+	ret = rw_verify_area(WRITE, file, &pos, count);
+
 	if (ret)
 		goto out;
 	ret = -EINVAL;
@@ -371,7 +444,7 @@ asmlinkage ssize_t sys_pwrite(unsigned int fd, const char * buf,
 
 	ret = write(file, buf, count, &pos);
 	if (ret > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_MODIFY);
+		dnotify_parent(file->f_dentry, DN_MODIFY);
 out:
 	fput(file);
 bad_file:

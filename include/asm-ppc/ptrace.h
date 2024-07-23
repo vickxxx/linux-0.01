@@ -31,7 +31,7 @@ struct pt_regs {
 					/* Used on APUS to hold IPL value. */
 	unsigned long trap;		/* Reason for being here */
 	unsigned long dar;		/* Fault registers */
-	unsigned long dsisr;
+	unsigned long dsisr;		/* used for ESR on 4xx/Book-E */
 	unsigned long result; 		/* Result of a system call */
 };
 #endif
@@ -100,5 +100,8 @@ struct pt_regs {
 #define PT_FPR31 (PT_FPR0 + 2*31)
 #define PT_FPSCR (PT_FPR0 + 2*32 + 1)
 
-#endif
+/* Get/set all the altivec registers vr0..vr31, vscr, vrsave, in one go */
+#define PTRACE_GETVRREGS	18
+#define PTRACE_SETVRREGS	19
 
+#endif

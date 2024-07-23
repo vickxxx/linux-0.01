@@ -54,6 +54,7 @@
 
 MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>");
 MODULE_DESCRIPTION("Hardware driver for the LoCOMX board");
+MODULE_LICENSE("GPL");
 
 #define RX_DMA 3
 #define TX_DMA 1
@@ -153,11 +154,9 @@ static int LOCOMX_open(struct net_device *dev)
 		return -ENODEV;
 	}
 
-	if (check_region(dev->base_addr, hw->io_extent)) {
+	if (!request_region(dev->base_addr, hw->io_extent, dev->name)) {
 		return -EAGAIN;
 	}
-
-	request_region(dev->base_addr, hw->io_extent, dev->name);
 
 	hw->board.chanA.ctrlio=dev->base_addr + 5;
 	hw->board.chanA.dataio=dev->base_addr + 7;
@@ -324,7 +323,7 @@ static int locomx_read_proc(char *page, char **start, off_t off, int count,
 	if (count >= len - off) {
 		*eof = 1;
 	}
-	return ( min(count, len - off) );
+	return min_t(int, count, len - off);
 }
 
 static int locomx_write_proc(struct file *file, const char *buffer,
@@ -339,7 +338,7 @@ static int locomx_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count = min(count, PAGE_SIZE));
+	copy_from_user(page, buffer, count = min_t(unsigned long, count, PAGE_SIZE));
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}

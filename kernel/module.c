@@ -9,6 +9,7 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/kmod.h>
+#include <linux/seq_file.h>
 
 /*
  * Originally by Anonymous (as far as I know...)
@@ -23,6 +24,7 @@
  * Fix sys_init_module race, Andrew Morton <andrewm@uow.edu.au> Oct 2000
  *     http://www.uwsg.iu.edu/hypermail/linux/kernel/0008.3/0379.html
  * Replace xxx_module_symbol with inter_module_xxx.  Keith Owens <kaos@ocs.com.au> Oct 2000
+ * Add a module list lock for kernel fault race fixing. Alan Cox <alan@redhat.com>
  *
  * This source is covered by the GNU GPL, the same as all kernel sources.
  */
@@ -38,7 +40,7 @@ extern const struct exception_table_entry __stop___ex_table[];
 extern const char __start___kallsyms[] __attribute__ ((weak));
 extern const char __stop___kallsyms[] __attribute__ ((weak));
 
-static struct module kernel_module =
+struct module kernel_module =
 {
 	size_of_struct:		sizeof(struct module),
 	name: 			"",
@@ -64,6 +66,17 @@ struct module *module_list = &kernel_module;
 static struct list_head ime_list = LIST_HEAD_INIT(ime_list);
 static spinlock_t ime_lock = SPIN_LOCK_UNLOCKED;
 static int kmalloc_failed;
+
+/*
+ *	This lock prevents modifications that might race the kernel fault
+ *	fixups. It does not prevent reader walks that the modules code
+ *	does. The kernel lock does that.
+ *
+ *	Since vmalloc fault fixups occur in any context this lock is taken
+ *	irqsave at all times.
+ */
+ 
+spinlock_t modlist_lock = SPIN_LOCK_UNLOCKED;
 
 /**
  * inter_module_register - register a new set of inter module data.
@@ -234,9 +247,7 @@ void __init init_modules(void)
 {
 	kernel_module.nsyms = __stop___ksymtab - __start___ksymtab;
 
-#ifdef __alpha__
-	__asm__("stq $29,%0" : "=m"(kernel_module.gp));
-#endif
+	arch_init_modules(&kernel_module);
 }
 
 /*
@@ -283,6 +294,7 @@ sys_create_module(const char *name_user, size_t size)
 	char *name;
 	long namelen, error;
 	struct module *mod;
+	unsigned long flags;
 
 	if (!capable(CAP_SYS_MODULE))
 		return -EPERM;
@@ -291,7 +303,7 @@ sys_create_module(const char *name_user, size_t size)
 		error = namelen;
 		goto err0;
 	}
-	if (size < sizeof(struct module)+namelen) {
+	if (size < sizeof(struct module)+namelen+1) {
 		error = -EINVAL;
 		goto err1;
 	}
@@ -306,14 +318,16 @@ sys_create_module(const char *name_user, size_t size)
 
 	memset(mod, 0, sizeof(*mod));
 	mod->size_of_struct = sizeof(*mod);
-	mod->next = module_list;
 	mod->name = (char *)(mod + 1);
 	mod->size = size;
 	memcpy((char*)(mod+1), name, namelen+1);
 
 	put_mod_name(name);
 
+	spin_lock_irqsave(&modlist_lock, flags);
+	mod->next = module_list;
 	module_list = mod;	/* link it in */
+	spin_unlock_irqrestore(&modlist_lock, flags);
 
 	error = (long) mod;
 	goto err0;
@@ -331,10 +345,10 @@ err0:
 asmlinkage long
 sys_init_module(const char *name_user, struct module *mod_user)
 {
-	struct module mod_tmp, *mod;
+	struct module mod_tmp, *mod, *mod2 = NULL;
 	char *name, *n_name, *name_tmp = NULL;
 	long namelen, n_namelen, i, error;
-	unsigned long mod_user_size;
+	unsigned long mod_user_size, flags;
 	struct module_ref *dep;
 
 	if (!capable(CAP_SYS_MODULE))
@@ -373,11 +387,23 @@ sys_init_module(const char *name_user, struct module *mod_user)
 	}
 	strcpy(name_tmp, mod->name);
 
-	error = copy_from_user(mod, mod_user, mod_user_size);
+	/* Copying mod_user directly over mod breaks the module_list chain and
+	 * races against search_exception_table.  copy_from_user may sleep so it
+	 * cannot be under modlist_lock, do the copy in two stages.
+	 */
+	if (!(mod2 = vmalloc(mod_user_size))) {
+		error = -ENOMEM;
+		goto err2;
+	}
+	error = copy_from_user(mod2, mod_user, mod_user_size);
 	if (error) {
 		error = -EFAULT;
 		goto err2;
 	}
+	spin_lock_irqsave(&modlist_lock, flags);
+	memcpy(mod, mod2, mod_user_size);
+	mod->next = mod_tmp.next;
+	spin_unlock_irqrestore(&modlist_lock, flags);
 
 	/* Sanity check the size of the module.  */
 	error = -EINVAL;
@@ -425,12 +451,6 @@ sys_init_module(const char *name_user, struct module *mod_user)
 		printk(KERN_ERR "init_module: mod->flags invalid.\n");
 		goto err2;
 	}
-#ifdef __alpha__
-	if (!mod_bound(mod->gp - 0x8000, 0, mod)) {
-		printk(KERN_ERR "init_module: mod->gp out of bounds.\n");
-		goto err2;
-	}
-#endif
 	if (mod_member_present(mod, can_unload)
 	    && mod->can_unload && !mod_bound(mod->can_unload, 0, mod)) {
 		printk(KERN_ERR "init_module: mod->can_unload out of bounds.\n");
@@ -474,10 +494,10 @@ sys_init_module(const char *name_user, struct module *mod_user)
 		error = n_namelen;
 		goto err2;
 	}
-	if (namelen != n_namelen || strcmp(n_name, mod_tmp.name) != 0) {
+	if (namelen != n_namelen || strcmp(n_name, name_tmp) != 0) {
 		printk(KERN_ERR "init_module: changed module name to "
 				"`%s' from `%s'\n",
-		       n_name, mod_tmp.name);
+		       n_name, name_tmp);
 		goto err3;
 	}
 
@@ -497,7 +517,6 @@ sys_init_module(const char *name_user, struct module *mod_user)
 	   to make the I and D caches consistent.  */
 	flush_icache_range((unsigned long)mod, (unsigned long)mod + mod->size);
 
-	mod->next = mod_tmp.next;
 	mod->refs = NULL;
 
 	/* Sanity check the module's dependents */
@@ -539,8 +558,8 @@ sys_init_module(const char *name_user, struct module *mod_user)
 	put_mod_name(name);
 
 	/* Initialize the module.  */
-	mod->flags |= MOD_INITIALIZING;
 	atomic_set(&mod->uc.usecount,1);
+	mod->flags |= MOD_INITIALIZING;
 	if (mod->init && (error = mod->init()) != 0) {
 		atomic_set(&mod->uc.usecount,0);
 		mod->flags &= ~MOD_INITIALIZING;
@@ -563,6 +582,8 @@ err2:
 err1:
 	put_mod_name(name);
 err0:
+	if (mod2)
+		vfree(mod2);
 	unlock_kernel();
 	kfree(name_tmp);
 	return error;
@@ -598,11 +619,6 @@ sys_delete_module(const char *name_user)
 	if (name_user) {
 		if ((error = get_mod_name(name_user, &name)) < 0)
 			goto out;
-		if (error == 0) {
-			error = -EINVAL;
-			put_mod_name(name);
-			goto out;
-		}
 		error = -ENOENT;
 		if ((mod = find_module(name)) == NULL) {
 			put_mod_name(name);
@@ -628,6 +644,7 @@ sys_delete_module(const char *name_user)
 	/* Do automatic reaping */
 restart:
 	something_changed = 0;
+	
 	for (mod = module_list; mod != &kernel_module; mod = next) {
 		next = mod->next;
 		spin_lock(&unload_lock);
@@ -651,10 +668,13 @@ restart:
 			spin_unlock(&unload_lock);
 		}
 	}
+	
 	if (something_changed)
 		goto restart;
+		
 	for (mod = module_list; mod != &kernel_module; mod = mod->next)
 		mod->flags &= ~MOD_JUST_FREED;
+	
 	error = 0;
 out:
 	unlock_kernel();
@@ -828,7 +848,6 @@ qm_symbols(struct module *mod, char *buf, size_t bufsize, size_t *ret)
 		bufsize -= len;
 		space += len;
 	}
-
 	if (put_user(i, ret))
 		return -EFAULT;
 	else
@@ -857,8 +876,11 @@ qm_info(struct module *mod, char *buf, size_t bufsize, size_t *ret)
 		info.addr = (unsigned long)mod;
 		info.size = mod->size;
 		info.flags = mod->flags;
+		
+		/* usecount is one too high here - report appropriately to
+		   compensate for locking */
 		info.usecount = (mod_member_present(mod, can_unload)
-				 && mod->can_unload ? -1 : atomic_read(&mod->uc.usecount));
+				 && mod->can_unload ? -1 : atomic_read(&mod->uc.usecount)-1);
 
 		if (copy_to_user(buf, &info, sizeof(struct module_info)))
 			return -EFAULT;
@@ -890,15 +912,17 @@ sys_query_module(const char *name_user, int which, char *buf, size_t bufsize,
 			goto out;
 		}
 		err = -ENOENT;
-		if (namelen == 0)
-			mod = &kernel_module;
-		else if ((mod = find_module(name)) == NULL) {
+		if ((mod = find_module(name)) == NULL) {
 			put_mod_name(name);
 			goto out;
 		}
 		put_mod_name(name);
 	}
 
+	/* __MOD_ touches the flags. We must avoid that */
+	
+	atomic_inc(&mod->uc.usecount);
+		
 	switch (which)
 	{
 	case 0:
@@ -923,6 +947,8 @@ sys_query_module(const char *name_user, int which, char *buf, size_t bufsize,
 		err = -EINVAL;
 		break;
 	}
+	atomic_dec(&mod->uc.usecount);
+	
 out:
 	unlock_kernel();
 	return err;
@@ -1018,6 +1044,7 @@ free_module(struct module *mod, int tag_freed)
 {
 	struct module_ref *dep;
 	unsigned i;
+	unsigned long flags;
 
 	/* Let the module clean up.  */
 
@@ -1041,6 +1068,7 @@ free_module(struct module *mod, int tag_freed)
 
 	/* And from the main module list.  */
 
+	spin_lock_irqsave(&modlist_lock, flags);
 	if (mod == module_list) {
 		module_list = mod->next;
 	} else {
@@ -1049,6 +1077,7 @@ free_module(struct module *mod, int tag_freed)
 			continue;
 		p->next = mod->next;
 	}
+	spin_unlock_irqrestore(&modlist_lock, flags);
 
 	/* And free the memory.  */
 
@@ -1141,51 +1170,83 @@ fini:
  * Called by the /proc file system to return a current list of ksyms.
  */
 
-int
-get_ksyms_list(char *buf, char **start, off_t offset, int length)
-{
+struct mod_sym {
 	struct module *mod;
-	char *p = buf;
-	int len     = 0;	/* code from  net/ipv4/proc.c */
-	off_t pos   = 0;
-	off_t begin = 0;
+	int index;
+};
 
-	for (mod = module_list; mod; mod = mod->next) {
-		unsigned i;
-		struct module_symbol *sym;
+/* iterator */
 
-		if (!MOD_CAN_QUERY(mod))
-			continue;
+static void *s_start(struct seq_file *m, loff_t *pos)
+{
+	struct mod_sym *p = kmalloc(sizeof(*p), GFP_KERNEL);
+	struct module *v;
+	loff_t n = *pos;
 
-		for (i = mod->nsyms, sym = mod->syms; i > 0; --i, ++sym) {
-			p = buf + len;
-			if (*mod->name) {
-				len += sprintf(p, "%0*lx %s\t[%s]\n",
-					       (int)(2*sizeof(void*)),
-					       sym->value, sym->name,
-					       mod->name);
-			} else {
-				len += sprintf(p, "%0*lx %s\n",
-					       (int)(2*sizeof(void*)),
-					       sym->value, sym->name);
-			}
-			pos = begin + len;
-			if (pos < offset) {
-				len = 0;
-				begin = pos;
-			}
-			pos = begin + len;
-			if (pos > offset+length)
-				goto leave_the_loop;
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	lock_kernel();
+	for (v = module_list, n = *pos; v; n -= v->nsyms, v = v->next) {
+		if (n < v->nsyms) {
+			p->mod = v;
+			p->index = n;
+			return p;
 		}
 	}
-leave_the_loop:
-	*start = buf + (offset - begin);
-	len -= (offset - begin);
-	if (len > length)
-		len = length;
-	return len;
+	unlock_kernel();
+	kfree(p);
+	return NULL;
 }
+
+static void *s_next(struct seq_file *m, void *p, loff_t *pos)
+{
+	struct mod_sym *v = p;
+	(*pos)++;
+	if (++v->index >= v->mod->nsyms) {
+		do {
+			v->mod = v->mod->next;
+			if (!v->mod) {
+				unlock_kernel();
+				kfree(p);
+				return NULL;
+			}
+		} while (!v->mod->nsyms);
+		v->index = 0;
+	}
+	return p;
+}
+
+static void s_stop(struct seq_file *m, void *p)
+{
+	if (p && !IS_ERR(p)) {
+		unlock_kernel();
+		kfree(p);
+	}
+}
+
+static int s_show(struct seq_file *m, void *p)
+{
+	struct mod_sym *v = p;
+	struct module_symbol *sym;
+
+	if (!MOD_CAN_QUERY(v->mod))
+		return 0;
+	sym = &v->mod->syms[v->index];
+	if (*v->mod->name)
+		seq_printf(m, "%0*lx %s\t[%s]\n", (int)(2*sizeof(void*)),
+			       sym->value, sym->name, v->mod->name);
+	else
+		seq_printf(m, "%0*lx %s\n", (int)(2*sizeof(void*)),
+			       sym->value, sym->name);
+	return 0;
+}
+
+struct seq_operations ksyms_op = {
+	start:	s_start,
+	next:	s_next,
+	stop:	s_stop,
+	show:	s_show
+};
 
 #else		/* CONFIG_MODULES */
 

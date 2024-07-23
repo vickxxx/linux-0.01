@@ -1,46 +1,11 @@
-/*
- * $Id: b1dma.c,v 1.11 2000/11/19 17:02:47 kai Exp $
+/* $Id: b1dma.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  * 
  * Common module for AVM B1 cards that support dma with AMCC
  * 
- * (c) Copyright 2000 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 2000 by Carsten Paeth <calle@calle.de>
  * 
- * $Log: b1dma.c,v $
- * Revision 1.11  2000/11/19 17:02:47  kai
- * compatibility cleanup - part 3
- *
- * Revision 1.10  2000/11/19 17:01:53  kai
- * compatibility cleanup - part 2
- *
- * Revision 1.9  2000/11/01 14:05:02  calle
- * - use module_init/module_exit from linux/init.h.
- * - all static struct variables are initialized with "membername:" now.
- * - avm_cs.c, let it work with newer pcmcia-cs.
- *
- * Revision 1.8  2000/10/10 17:44:19  kai
- * changes from/for 2.2.18
- *
- * Revision 1.7  2000/08/04 12:20:08  calle
- * - Fix unsigned/signed warning in the right way ...
- *
- * Revision 1.6  2000/06/29 13:59:06  calle
- * Bugfix: reinit txdma without interrupt will confuse some AMCC chips.
- *
- * Revision 1.5  2000/06/19 16:51:53  keil
- * don't free skb in irq context
- *
- * Revision 1.4  2000/04/03 16:38:05  calle
- * made suppress_pollack static.
- *
- * Revision 1.3  2000/02/26 01:00:53  keil
- * changes from 2.3.47
- *
- * Revision 1.2  2000/01/25 14:44:47  calle
- * typo in b1pciv4_detect().
- *
- * Revision 1.1  2000/01/25 14:36:43  calle
- * common function for  T1 PCI and B1 PCI V4.
- *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -53,6 +18,7 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/capi.h>
+#include <linux/kernelcapi.h>
 #include <asm/io.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
@@ -62,11 +28,13 @@
 #include "capicmd.h"
 #include "capiutil.h"
 
-static char *revision = "$Revision: 1.11 $";
+static char *revision = "$Revision: 1.1.4.1 $";
 
 /* ------------------------------------------------------------- */
 
-MODULE_AUTHOR("Carsten Paeth <calle@calle.in-berlin.de>");
+MODULE_DESCRIPTION("CAPI4Linux: DMA support for active AVM cards");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 
 static int suppress_pollack = 0;
 MODULE_PARM(suppress_pollack, "0-1i");
@@ -719,7 +687,7 @@ static void b1dma_send_init(avmcard *card)
 	_put_byte(&p, 0);
 	_put_byte(&p, 0);
 	_put_byte(&p, SEND_INIT);
-	_put_word(&p, AVM_NAPPS);
+	_put_word(&p, CAPI_MAXAPPL);
 	_put_word(&p, AVM_NCCI_PER_CHANNEL*30);
 	_put_word(&p, card->cardnr - 1);
 	skb_put(skb, (__u8 *)p - (__u8 *)skb->data);
@@ -883,7 +851,7 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 	__u8 flag;
 	int len = 0;
 	char *s;
-	__u32 txaddr, txlen, rxaddr, rxlen, csr;
+	u_long txaddr, txlen, rxaddr, rxlen, csr;
 
 	len += sprintf(page+len, "%-16s %s\n", "name", card->name);
 	len += sprintf(page+len, "%-16s 0x%x\n", "io", card->port);
@@ -898,6 +866,7 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 	case avm_t1isa: s = "T1 ISA (HEMA)"; break;
 	case avm_t1pci: s = "T1 PCI"; break;
 	case avm_c4: s = "C4"; break;
+	case avm_c2: s = "C2"; break;
 	default: s = "???"; break;
 	}
 	len += sprintf(page+len, "%-16s %s\n", "type", s);
@@ -938,12 +907,12 @@ int b1dmactl_read_proc(char *page, char **start, off_t off,
 	save_flags(flags);
 	cli();
 
-	txaddr = (__u32)phys_to_virt(b1dmainmeml(card->mbase+0x2c));
-	txaddr -= (__u32)card->dma->sendbuf;
+	txaddr = (u_long)phys_to_virt(b1dmainmeml(card->mbase+0x2c));
+	txaddr -= (u_long)card->dma->sendbuf;
 	txlen  = b1dmainmeml(card->mbase+0x30);
 
-	rxaddr = (__u32)phys_to_virt(b1dmainmeml(card->mbase+0x24));
-	rxaddr -= (__u32)card->dma->recvbuf;
+	rxaddr = (u_long)phys_to_virt(b1dmainmeml(card->mbase+0x24));
+	rxaddr -= (u_long)card->dma->recvbuf;
 	rxlen  = b1dmainmeml(card->mbase+0x28);
 
 	csr  = b1dmainmeml(card->mbase+AMCC_INTCSR);
@@ -988,12 +957,13 @@ EXPORT_SYMBOL(b1dmactl_read_proc);
 int b1dma_init(void)
 {
 	char *p;
-	char rev[10];
+	char rev[32];
 
-	if ((p = strchr(revision, ':'))) {
-		strncpy(rev, p + 1, sizeof(rev));
-		p = strchr(rev, '$');
-		*p = 0;
+	if ((p = strchr(revision, ':')) != 0 && p[1]) {
+		strncpy(rev, p + 2, sizeof(rev));
+		rev[sizeof(rev)-1] = 0;
+		if ((p = strchr(rev, '$')) != 0 && p > rev)
+		   *(p-1) = 0;
 	} else
 		strcpy(rev, "1.0");
 

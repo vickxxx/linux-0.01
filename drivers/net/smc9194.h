@@ -3,7 +3,7 @@
  . Copyright (C) 1996 by Erik Stahlman 
  .
  . This software may be used and distributed according to the terms
- . of the GNU Public License, incorporated herein by reference.
+ . of the GNU General Public License, incorporated herein by reference.
  .
  . This file contains register information and access macros for 
  . the SMC91xxx chipset.   
@@ -169,7 +169,8 @@ static const char * chip_ids[ 15 ] =  {
 	/* 5 */ "SMC91C95",
 	NULL,
 	/* 7 */ "SMC91C100", 
-	NULL, NULL, NULL, NULL, 
+	/* 8 */ "SMC91C100FD", 
+	NULL, NULL, NULL, 
 	NULL, NULL, NULL};  
 
 /* 

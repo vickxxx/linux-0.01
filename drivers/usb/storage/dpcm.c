@@ -1,6 +1,6 @@
 /* Driver for Microtech DPCM-USB CompactFlash/SmartMedia reader
  *
- * $Id: dpcm.c,v 1.3 2000/08/25 00:13:51 mdharm Exp $
+ * $Id: dpcm.c,v 1.4 2001/06/11 02:54:25 mdharm Exp $
  *
  * DPCM driver v0.1:
  *
@@ -10,7 +10,7 @@
  *   (c) 2000 Brian Webb (webbb@earthlink.net)
  *
  * This device contains both a CompactFlash card reader, which
- * usest the Control/Bulk w/o Interrupt protocol and
+ * uses the Control/Bulk w/o Interrupt protocol and
  * a SmartMedia card reader that uses the same protocol
  * as the SDDR09.
  *

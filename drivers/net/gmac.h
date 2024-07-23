@@ -667,18 +667,18 @@
 /*
 ** MII Management Control Register
 */
-#define MII_CR_RST  0x8000         /* RESET the PHY chip */
-#define MII_CR_LPBK 0x4000         /* Loopback enable */
-#define MII_CR_SPD  0x2000         /* 0: 10Mb/s; 1: 100Mb/s */
-#define MII_CR_10   0x0000         /* Set 10Mb/s */
-#define MII_CR_100  0x2000         /* Set 100Mb/s */
-#define MII_CR_ASSE 0x1000         /* Auto Speed Select Enable */
-#define MII_CR_PD   0x0800         /* Power Down */
-#define MII_CR_ISOL 0x0400         /* Isolate Mode */
-#define MII_CR_RAN  0x0200         /* Restart Auto Negotiation */
-#define MII_CR_FDM  0x0100         /* Full Duplex Mode */
-#define MII_CR_CTE  0x0080         /* Collision Test Enable */
-
+#define MII_CR_RST	 0x8000         /* RESET the PHY chip */
+#define MII_CR_LPBK	 0x4000         /* Loopback enable */
+#define MII_CR_SPD 	 0x2000         /* 0: 10Mb/s; 1: 100Mb/s */
+#define MII_CR_10  	 0x0000         /* Set 10Mb/s */
+#define MII_CR_100 	 0x2000         /* Set 100Mb/s */
+#define MII_CR_ASSE	 0x1000         /* Auto Speed Select Enable */
+#define MII_CR_PD  	 0x0800         /* Power Down */
+#define MII_CR_ISOL	 0x0400         /* Isolate Mode */
+#define MII_CR_RAN 	 0x0200         /* Restart Auto Negotiation */
+#define MII_CR_FDM 	 0x0100         /* Full Duplex Mode */
+#define MII_CR_CTE 	 0x0080         /* Collision Test Enable */
+#define MII_CR_SPEEDSEL2 0x0040		/* Speed selection 2 on BCM */
 /*
 ** MII Management Status Register
 */
@@ -722,6 +722,13 @@
 #define MII_ANLPA_CSMA 0x0001      /* CSMA-CD Capable */
 #define MII_ANLPA_PAUS 0x0400 
 
+/* Generic PHYs
+ * 
+ * These GENERIC values assumes that the PHY devices follow 802.3u and
+ * allow parallel detection to set the link partner ability register.
+ * Detection of 100Base-TX [H/F Duplex] and 100Base-T4 is supported.
+ */
+
 /*
  * Model-specific PHY registers
  *
@@ -731,7 +738,10 @@
 
 /* Supported PHYs (phy_type field ) */
 #define PHY_B5400	0x5400
+#define PHY_B5401	0x5401
+#define PHY_B5411	0x5411
 #define PHY_B5201	0x5201
+#define PHY_B5221	0x5221
 #define PHY_LXT971	0x0971
 #define PHY_UNKNOWN	0
 
@@ -741,11 +751,26 @@
 #define MII_BCM5201_REV                         0x01
 #define MII_BCM5201_ID                          ((MII_BCM5201_OUI << 10) | (MII_BCM5201_MODEL << 4))
 #define MII_BCM5201_MASK                        0xfffffff0
+#define MII_BCM5221_OUI                         0x001018
+#define MII_BCM5221_MODEL                       0x1e
+#define MII_BCM5221_REV                         0x00
+#define MII_BCM5221_ID                          ((MII_BCM5221_OUI << 10) | (MII_BCM5221_MODEL << 4))
+#define MII_BCM5221_MASK                        0xfffffff0
 #define MII_BCM5400_OUI                         0x000818
 #define MII_BCM5400_MODEL                       0x04
 #define MII_BCM5400_REV                         0x01
 #define MII_BCM5400_ID                          ((MII_BCM5400_OUI << 10) | (MII_BCM5400_MODEL << 4))
 #define MII_BCM5400_MASK                        0xfffffff0
+#define MII_BCM5401_OUI                         0x000818
+#define MII_BCM5401_MODEL                       0x05
+#define MII_BCM5401_REV                         0x01
+#define MII_BCM5401_ID                          ((MII_BCM5401_OUI << 10) | (MII_BCM5401_MODEL << 4))
+#define MII_BCM5401_MASK                        0xfffffff0
+#define MII_BCM5411_OUI                         0x000818
+#define MII_BCM5411_MODEL                       0x07
+#define MII_BCM5411_REV                         0x01
+#define MII_BCM5411_ID                          ((MII_BCM5411_OUI << 10) | (MII_BCM5411_MODEL << 4))
+#define MII_BCM5411_MASK                        0xfffffff0
 #define MII_LXT971_OUI                          0x0004de
 #define MII_LXT971_MODEL                        0x0e
 #define MII_LXT971_REV                          0x00
@@ -789,7 +814,6 @@
 #define MII_LXT971_STATUS2_LINK			0x0400
 #define MII_LXT971_STATUS2_FULLDUPLEX		0x0200
 #define MII_LXT971_STATUS2_AUTONEG_COMPLETE	0x0080
-
 
 
 	/*
@@ -877,6 +901,7 @@ struct gmac {
 	u8				pci_devfn;
 	spinlock_t			lock;
 	int				opened;
+	int				sleeping;
 	struct net_device		*next_gmac;
 };
 

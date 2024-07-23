@@ -46,27 +46,12 @@
 #define ENABLE_PCI
 #endif
 
-#define NEW_MODULES
-#ifdef LOCAL_ROCKET_H		/* We're building standalone */
-#define MODULE
-#endif
-
-#ifdef NEW_MODULES
-#ifdef MODVERSIONS
-#include <linux/modversions.h>
-#endif
-#else /* !NEW_MODULES */
-#ifdef MODVERSIONS
-#define MODULE
-#endif
-#endif /* NEW_MODULES */
-
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/major.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 
 #include <linux/sched.h>
@@ -138,13 +123,6 @@
 
 #define _INLINE_ inline
 
-#ifndef NEW_MODULES
-/*
- * NB. we must include the kernel idenfication string in to install the module.
- */
-/*static*/ char kernel_version[] = UTS_RELEASE;
-#endif
-
 static struct r_port *rp_table[MAX_RP_PORTS];
 static struct tty_struct *rocket_table[MAX_RP_PORTS];
 static unsigned int xmit_flags[NUM_BOARDS];
@@ -179,6 +157,7 @@ static unsigned long time_counter;
 #if ((LINUX_VERSION_CODE > 0x020111) && defined(MODULE))
 MODULE_AUTHOR("Theodore Ts'o");
 MODULE_DESCRIPTION("Comtrol Rocketport driver");
+MODULE_LICENSE("GPL");
 MODULE_PARM(board1,     "i");
 MODULE_PARM_DESC(board1, "I/O port for (ISA) board #1");
 MODULE_PARM(board2,     "i");
@@ -262,9 +241,12 @@ static _INLINE_ void rp_do_receive(struct r_port *info, struct tty_struct *tty,
 				   CHANNEL_t *cp, unsigned int ChanStatus)
 {
 	unsigned int CharNStat;
-	int ToRecv, wRecv, space, count;
+	int ToRecv, wRecv, space = 0, count;
 	unsigned char	*cbuf;
 	char		*fbuf;
+	struct tty_ldisc *ld;
+
+	ld = tty_ldisc_ref(tty);
 	
 	ToRecv= sGetRxCnt(cp);
 	space = 2*TTY_FLIPBUF_SIZE;
@@ -369,8 +351,8 @@ static _INLINE_ void rp_do_receive(struct r_port *info, struct tty_struct *tty,
 		fbuf += ToRecv;
 		count += ToRecv;
 	}
-	tty->ldisc.receive_buf(tty, tty->flip.char_buf,
-			       tty->flip.flag_buf, count);
+	ld->receive_buf(tty, tty->flip.char_buf, tty->flip.flag_buf, count);
+	tty_ldisc_deref(ld);
 }
 
 /*
@@ -421,10 +403,7 @@ static _INLINE_ void rp_do_transmit(struct r_port *info)
 	if (info->xmit_cnt == 0)
 		xmit_flags[info->line >> 5] &= ~(1 << (info->line & 0x1f));
 	if (info->xmit_cnt < WAKEUP_CHARS) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 #ifdef ROCKET_DEBUG_INTR
 	printk("(%d,%d,%d,%d)...", info->xmit_cnt, info->xmit_head,
@@ -507,14 +486,10 @@ static void rp_do_poll(unsigned long dummy)
 	unsigned char CtlMask, AiopMask;
 
 #ifdef TIME_STAT
-	unsigned long low=0, high=0, loop_time;
+	unsigned long loop_time;
 	unsigned long long time_stat_tmp=0, time_stat_tmp2=0;
 
-	__asm__(".byte 0x0f,0x31"
-		:"=a" (low), "=d" (high));
-	time_stat_tmp = high;
-	time_stat_tmp <<= 32;
-	time_stat_tmp += low;
+	rdtscll(time_stat_tmp);
 #endif /* TIME_STAT */
 
 	for (ctrl=0; ctrl < max_board; ctrl++) {
@@ -554,11 +529,7 @@ static void rp_do_poll(unsigned long dummy)
 		mod_timer(&rocket_timer, jiffies + 1);
 	}
 #ifdef TIME_STAT
-	__asm__(".byte 0x0f,0x31"
-		:"=a" (low), "=d" (high));
-	time_stat_tmp2 = high;
-	time_stat_tmp2 <<= 32;
-	time_stat_tmp2 += low;
+	rdtscll(time_stat_tmp2);
 	time_stat_tmp2 -= time_stat_tmp;
 	time_stat += time_stat_tmp2;
 	if (time_counter == 0) 
@@ -1157,8 +1128,7 @@ static void rp_close(struct tty_struct *tty, struct file * filp)
 	}
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 
 	xmit_flags[info->line >> 5] &= ~(1 << (info->line & 0x1f));
 	if (info->blocked_open) {
@@ -1835,10 +1805,7 @@ end_intr:
 	restore_flags(flags);
 end:
 	if (info->xmit_cnt < WAKEUP_CHARS) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 	return retval;
 }
@@ -1897,9 +1864,7 @@ static void rp_flush_buffer(struct tty_struct *tty)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	sti();
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 	
 	cp = &info->channel;
 	
@@ -1973,6 +1938,10 @@ int __init register_PCI(int i, unsigned int bus, unsigned int device_fn)
 		str = "8J";
 		max_num_aiops = 1;
 		break;
+	case PCI_DEVICE_ID_RP4J:
+		str = "4J";
+		max_num_aiops = 1;
+		break;
 	case PCI_DEVICE_ID_RP16INTF:
 		str = "16";
 		max_num_aiops = 2;
@@ -2035,6 +2004,10 @@ static int __init init_PCI(int boards_found)
 			PCI_DEVICE_ID_RP8J, i, &bus, &device_fn)) 
 			if (register_PCI(count+boards_found, bus, device_fn))
 				count++;
+		if (!pcibios_find_device(PCI_VENDOR_ID_RP,
+			PCI_DEVICE_ID_RP4J, i, &bus, &device_fn)) 
+			if (register_PCI(count+boards_found, bus, device_fn))
+				count++;
 		if(!pcibios_find_device(PCI_VENDOR_ID_RP,
 			PCI_DEVICE_ID_RP8OCTA, i, &bus, &device_fn)) 
 			if(register_PCI(count+boards_found, bus, device_fn))
@@ -2057,6 +2030,10 @@ static int __init init_PCI(int boards_found)
 				count++;
 		if(!pcibios_find_device(PCI_VENDOR_ID_RP,
 			PCI_DEVICE_ID_RP8J, i, &bus, &device_fn)) 
+			if(register_PCI(count+boards_found, bus, device_fn))
+				count++;
+		if(!pcibios_find_device(PCI_VENDOR_ID_RP,
+			PCI_DEVICE_ID_RP4J, i, &bus, &device_fn)) 
 			if(register_PCI(count+boards_found, bus, device_fn))
 				count++;
 		if(!pcibios_find_device(PCI_VENDOR_ID_RP,
@@ -2215,7 +2192,11 @@ int __init rp_init(void)
 	 */
 	memset(&rocket_driver, 0, sizeof(struct tty_driver));
 	rocket_driver.magic = TTY_DRIVER_MAGIC;
+#ifdef CONFIG_DEVFS_FS
+	rocket_driver.name = "tts/R%d";
+#else
 	rocket_driver.name = "ttyR";
+#endif
 	rocket_driver.major = TTY_ROCKET_MAJOR;
 	rocket_driver.minor_start = 0;
 	rocket_driver.num = MAX_RP_PORTS;
@@ -2257,7 +2238,11 @@ int __init rp_init(void)
 	 * the minor number and the subtype code.
 	 */
 	callout_driver = rocket_driver;
+#ifdef CONFIG_DEVFS_FS
+	callout_driver.name = "cua/R%d";
+#else
 	callout_driver.name = "cur";
+#endif
 	callout_driver.major = CUA_ROCKET_MAJOR;
 	callout_driver.minor_start = 0;
 	callout_driver.subtype = SERIAL_TYPE_CALLOUT;

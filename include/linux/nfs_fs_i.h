@@ -12,7 +12,6 @@ struct nfs_inode_info {
 	/*
 	 * The 64bit 'inode number'
 	 */
-	__u64 fsid;
 	__u64 fileid;
 
 	/*
@@ -45,10 +44,15 @@ struct nfs_inode_info {
 	unsigned long		read_cache_jiffies;
 	__u64			read_cache_ctime;
 	__u64			read_cache_mtime;
-	__u64			read_cache_atime;
 	__u64			read_cache_isize;
 	unsigned long		attrtimeo;
 	unsigned long		attrtimeo_timestamp;
+
+	/*
+	 * Timestamp that dates the change made to read_cache_mtime.
+	 * This is of use for dentry revalidation
+	 */
+	unsigned long		cache_mtime_jiffies;
 
 	/*
 	 * This is the cookie verifier used for NFSv3 readdir
@@ -69,10 +73,8 @@ struct nfs_inode_info {
 				ncommit,
 				npages;
 
-	/* Flush daemon info */
-	struct inode		*hash_next,
-				*hash_prev;
-	unsigned long		nextscan;
+	/* Credentials for shared mmap */
+	struct rpc_cred		*mm_cred;
 };
 
 /*
@@ -83,6 +85,7 @@ struct nfs_inode_info {
 #define NFS_INO_REVALIDATING	0x0004		/* revalidating attrs */
 #define NFS_IS_SNAPSHOT		0x0010		/* a snapshot file */
 #define NFS_INO_FLUSH		0x0020		/* inode is due for flushing */
+#define NFS_INO_MAPPED		0x0040		/* page invalidation failed */
 
 /*
  * NFS lock info
@@ -97,5 +100,6 @@ struct nfs_lock_info {
  * Lock flag values
  */
 #define NFS_LCK_GRANTED		0x0001		/* lock has been granted */
+#define NFS_LCK_RECLAIM		0x0002		/* lock marked for reclaiming */
 
 #endif

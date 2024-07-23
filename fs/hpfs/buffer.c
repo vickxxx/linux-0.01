@@ -122,12 +122,11 @@ void hpfs_unlock_3inodes(struct inode *i1, struct inode *i2, struct inode *i3)
 void *hpfs_map_sector(struct super_block *s, unsigned secno, struct buffer_head **bhp,
 		 int ahead)
 {
-	kdev_t dev = s->s_dev;
 	struct buffer_head *bh;
 
-	if (!ahead || secno + ahead >= s->s_hpfs_fs_size)
-		*bhp = bh = bread(dev, secno, 512);
-	else *bhp = bh = bread(dev, secno, 512);
+	cond_resched();
+
+	*bhp = bh = sb_bread(s, secno);
 	if (bh != NULL)
 		return bh->b_data;
 	else {
@@ -143,7 +142,9 @@ void *hpfs_get_sector(struct super_block *s, unsigned secno, struct buffer_head 
 	struct buffer_head *bh;
 	/*return hpfs_map_sector(s, secno, bhp, 0);*/
 
-	if ((*bhp = bh = getblk(s->s_dev, secno, 512)) != NULL) {
+	cond_resched();
+
+	if ((*bhp = bh = sb_getblk(s, secno)) != NULL) {
 		if (!buffer_uptodate(bh)) wait_on_buffer(bh);
 		mark_buffer_uptodate(bh, 1);
 		return bh->b_data;
@@ -158,9 +159,10 @@ void *hpfs_get_sector(struct super_block *s, unsigned secno, struct buffer_head 
 void *hpfs_map_4sectors(struct super_block *s, unsigned secno, struct quad_buffer_head *qbh,
 		   int ahead)
 {
-	kdev_t dev = s->s_dev;
 	struct buffer_head *bh;
 	char *data;
+
+	cond_resched();
 
 	if (secno & 3) {
 		printk("HPFS: hpfs_map_4sectors: unaligned read\n");
@@ -173,24 +175,22 @@ void *hpfs_map_4sectors(struct super_block *s, unsigned secno, struct quad_buffe
 		goto bail;
 	}
 
-	if (!ahead || secno + 4 + ahead > s->s_hpfs_fs_size)
-		qbh->bh[0] = bh = bread(dev, secno, 512);
-	else qbh->bh[0] = bh = bread(dev, secno, 512);
+	qbh->bh[0] = bh = sb_bread(s, secno);
 	if (!bh)
 		goto bail0;
 	memcpy(data, bh->b_data, 512);
 
-	qbh->bh[1] = bh = bread(dev, secno + 1, 512);
+	qbh->bh[1] = bh = sb_bread(s, secno + 1);
 	if (!bh)
 		goto bail1;
 	memcpy(data + 512, bh->b_data, 512);
 
-	qbh->bh[2] = bh = bread(dev, secno + 2, 512);
+	qbh->bh[2] = bh = sb_bread(s, secno + 2);
 	if (!bh)
 		goto bail2;
 	memcpy(data + 2 * 512, bh->b_data, 512);
 
-	qbh->bh[3] = bh = bread(dev, secno + 3, 512);
+	qbh->bh[3] = bh = sb_bread(s, secno + 3);
 	if (!bh)
 		goto bail3;
 	memcpy(data + 3 * 512, bh->b_data, 512);
@@ -215,6 +215,8 @@ void *hpfs_map_4sectors(struct super_block *s, unsigned secno, struct quad_buffe
 void *hpfs_get_4sectors(struct super_block *s, unsigned secno,
                           struct quad_buffer_head *qbh)
 {
+	cond_resched();
+
 	if (secno & 3) {
 		printk("HPFS: hpfs_get_4sectors: unaligned read\n");
 		return 0;

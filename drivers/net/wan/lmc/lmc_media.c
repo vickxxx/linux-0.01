@@ -9,7 +9,7 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <asm/segment.h>
@@ -29,7 +29,7 @@
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include "../syncppp.h"
+#include <net/syncppp.h>
 #include <linux/inet.h>
 
 #if LINUX_VERSION_CODE >= 0x20200
@@ -56,7 +56,7 @@
   * Matt Thomas (matt@3am-software.com).
   *
   * This software may be used and distributed according to the terms
-  * of the GNU Public License version 2, incorporated herein by reference.
+  * of the GNU General Public License version 2, incorporated herein by reference.
   */
 
 /*

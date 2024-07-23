@@ -1,7 +1,7 @@
 /*
- * $Id: usbkbd.c,v 1.16 2000/08/14 21:05:26 vojtech Exp $
+ * $Id: usbkbd.c,v 1.20 2001/04/26 08:34:49 vojtech Exp $
  *
- *  Copyright (c) 1999-2000 Vojtech Pavlik
+ *  Copyright (c) 1999-2001 Vojtech Pavlik
  *
  *  USB HIDBP Keyboard support
  *
@@ -29,14 +29,22 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/input.h>
 #include <linux/init.h>
 #include <linux/usb.h>
 
-MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
-MODULE_DESCRIPTION("USB HID Boot Protocol keyboard driver");
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION ""
+#define DRIVER_AUTHOR "Vojtech Pavlik <vojtech@suse.cz>"
+#define DRIVER_DESC "USB HID Boot Protocol keyboard driver"
+
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
 
 static unsigned char usb_kbd_keycode[256] = {
 	  0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
@@ -63,7 +71,7 @@ struct usb_kbd {
 	unsigned char new[8];
 	unsigned char old[8];
 	struct urb irq, led;
-	devrequest dr;
+	struct usb_ctrlrequest dr;
 	unsigned char leds, newleds;
 	char name[128];
 	int open;
@@ -207,11 +215,11 @@ static void *usb_kbd_probe(struct usb_device *dev, unsigned int ifnum,
 	FILL_INT_URB(&kbd->irq, dev, pipe, kbd->new, maxp > 8 ? 8 : maxp,
 		usb_kbd_irq, kbd, endpoint->bInterval);
 
-	kbd->dr.requesttype = USB_TYPE_CLASS | USB_RECIP_INTERFACE;
-	kbd->dr.request = USB_REQ_SET_REPORT;
-	kbd->dr.value = 0x200;
-	kbd->dr.index = interface->bInterfaceNumber;
-	kbd->dr.length = 1;
+	kbd->dr.bRequestType = USB_TYPE_CLASS | USB_RECIP_INTERFACE;
+	kbd->dr.bRequest = USB_REQ_SET_REPORT;
+	kbd->dr.wValue = 0x200;
+	kbd->dr.wIndex = interface->bInterfaceNumber;
+	kbd->dr.wLength = 1;
 
 	kbd->dev.name = kbd->name;
 	kbd->dev.idbus = BUS_USB;
@@ -242,7 +250,7 @@ static void *usb_kbd_probe(struct usb_device *dev, unsigned int ifnum,
 			
 	input_register_device(&kbd->dev);
 
-	printk(KERN_INFO "input%d: %s on on usb%d:%d.%d\n",
+	printk(KERN_INFO "input%d: %s on usb%d:%d.%d\n",
 		 kbd->dev.number, kbd->name, dev->bus->busnum, dev->devnum, ifnum);
 
 	return kbd;
@@ -264,7 +272,7 @@ static struct usb_device_id usb_kbd_id_table [] = {
 MODULE_DEVICE_TABLE (usb, usb_kbd_id_table);
 
 static struct usb_driver usb_kbd_driver = {
-	name:		"keyboard",
+	name:		"usbkbd",
 	probe:		usb_kbd_probe,
 	disconnect:	usb_kbd_disconnect,
 	id_table:	usb_kbd_id_table,
@@ -273,6 +281,7 @@ static struct usb_driver usb_kbd_driver = {
 static int __init usb_kbd_init(void)
 {
 	usb_register(&usb_kbd_driver);
+	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
 }
 

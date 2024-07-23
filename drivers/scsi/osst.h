@@ -1,9 +1,10 @@
 /*
- *	$Header: /home/cvsroot/Driver/osst.h,v 1.9 2000/10/08 03:09:43 riede Exp $
+ *	$Header: /cvsroot/osst/Driver/osst.h,v 1.12 2001/10/11 00:30:15 riede Exp $
  */
 
 #include <asm/byteorder.h>
 #include <linux/config.h>
+#include <linux/completion.h>
 #ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
 #endif
@@ -440,7 +441,8 @@ typedef struct os_aux_s {
          * Linux specific fields:
          */
          __u32          next_mark_ppos;         /* when known, points to next marker */
-         __u8           linux_specific[28];
+	 __u32		last_mark_lbn;		/* storing log_blk_num of last mark is extends ADR spec */
+         __u8           linux_specific[24];
 
         __u8            reserved_256_511[256];
 } os_aux_t;
@@ -534,7 +536,7 @@ typedef struct {
   unsigned capacity;
   Scsi_Device* device;
   struct semaphore lock;       /* for serialization */
-  struct semaphore sem;        /* for SCSI commands */
+  struct completion wait;      /* for SCSI commands */
   OSST_buffer * buffer;
 
   /* Drive characteristics */
@@ -581,6 +583,8 @@ typedef struct {
   int min_block;
   int max_block;
   int recover_count;            /* from tape opening */
+  int write_count;
+  int read_count;
   int recover_erreg;            /* from last status call */
   /*
    * OnStream specific data
@@ -588,10 +592,11 @@ typedef struct {
   int	   os_fw_rev;			       /* the firmware revision * 10000 */
   unsigned char  raw;                          /* flag OnStream raw access (32.5KB block size) */
   unsigned char  poll;                         /* flag that this drive needs polling (IDE|firmware) */
-  unsigned char  logical_blk_in_buffer;	       /* flag that the block as per logical_blk_num
+  unsigned char  frame_in_buffer;	       /* flag that the frame as per frame_seq_number
 						* has been read into STp->buffer and is valid */
+  int      frame_seq_number;                   /* logical frame number */
   int      logical_blk_num;                    /* logical block number */
-  unsigned first_frame_position;               /* physical frame to be transfered to/from host */
+  unsigned first_frame_position;               /* physical frame to be transferred to/from host */
   unsigned last_frame_position;                /* physical frame to be transferd to/from tape */
   int      cur_frames;                         /* current number of frames in internal buffer */
   int      max_frames;                         /* max number of frames in internal buffer */
@@ -607,6 +612,7 @@ typedef struct {
   int      filemark_cnt;
   int      first_mark_ppos;
   int      last_mark_ppos;
+  int      last_mark_lbn;			/* storing log_blk_num of last mark is extends ADR spec */
   int      first_data_ppos;
   int      eod_frame_ppos;
   int      eod_frame_lfa;
@@ -632,3 +638,5 @@ typedef struct {
 #define OS_WRITE_HEADER    4
 #define OS_WRITE_FILLER    5
 
+/* Additional rw state */
+#define OS_WRITING_COMPLETE 3

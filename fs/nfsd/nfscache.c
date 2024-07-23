@@ -12,7 +12,7 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 
 #include <linux/sunrpc/svc.h>
@@ -38,7 +38,6 @@ static struct nfscache_head *	hash_list;
 static struct svc_cacherep *	lru_head;
 static struct svc_cacherep *	lru_tail;
 static struct svc_cacherep *	nfscache;
-static int			cache_initialized;
 static int			cache_disabled = 1;
 
 static int	nfsd_cache_append(struct svc_rqst *rqstp, struct svc_buf *data);
@@ -51,8 +50,6 @@ nfsd_cache_init(void)
 	size_t			i;
 	unsigned long		order;
 
-	if (cache_initialized)
-		return;
 
 	i = CACHESIZE * sizeof (struct svc_cacherep);
 	for (order = 0; (PAGE_SIZE << order) < i; order++)
@@ -90,7 +87,6 @@ nfsd_cache_init(void)
 	lru_head->c_lru_prev = NULL;
 	lru_tail->c_lru_next = NULL;
 
-	cache_initialized = 1;
 	cache_disabled = 0;
 }
 
@@ -101,15 +97,11 @@ nfsd_cache_shutdown(void)
 	size_t			i;
 	unsigned long		order;
 
-	if (!cache_initialized)
-		return;
-
 	for (rp = lru_head; rp; rp = rp->c_lru_next) {
 		if (rp->c_state == RC_DONE && rp->c_type == RC_REPLBUFF)
 			kfree(rp->c_replbuf.buf);
 	}
 
-	cache_initialized = 0;
 	cache_disabled = 1;
 
 	i = CACHESIZE * sizeof (struct svc_cacherep);
@@ -192,7 +184,7 @@ nfsd_cache_lookup(struct svc_rqst *rqstp, int type)
 		    xid == rp->c_xid && proc == rp->c_proc &&
 		    proto == rp->c_prot && vers == rp->c_vers &&
 		    time_before(jiffies, rp->c_timestamp + 120*HZ) &&
-		    memcmp((char*)&rqstp->rq_addr, (char*)&rp->c_addr, rqstp->rq_addrlen)==0) {
+		    memcmp((char*)&rqstp->rq_addr, (char*)&rp->c_addr, sizeof(rp->c_addr))==0) {
 			nfsdstats.rchits++;
 			goto found_entry;
 		}

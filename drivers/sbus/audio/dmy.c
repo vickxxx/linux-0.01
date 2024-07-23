@@ -1,4 +1,4 @@
-/* $Id: dmy.c,v 1.6 2000/12/13 05:06:26 davem Exp $
+/* $Id: dmy.c,v 1.10 2001/10/08 22:19:50 davem Exp $
  * drivers/sbus/audio/dummy.c
  *
  * Copyright 1998 Derrick J Brashear (shadow@andrew.cmu.edu)
@@ -13,7 +13,7 @@
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/soundcard.h>
 #include <linux/delay.h>
@@ -36,7 +36,7 @@ static int dummy_play_gain(struct sparcaudio_driver *drv, int value,
 static int dummy_record_gain(struct sparcaudio_driver *drv, int value, 
                             unsigned char balance);
 static int dummy_output_muted(struct sparcaudio_driver *drv, int value);
-static int dummy_attach(struct sparcaudio_driver *drv);
+static int dummy_attach(struct sparcaudio_driver *drv) __init;
 
 static int
 dummy_set_output_encoding(struct sparcaudio_driver *drv, int value)
@@ -710,25 +710,8 @@ static struct sparcaudio_operations dummy_ops = {
         dummy_get_formats,
 };
 
-/* Probe for the dummy chip and then attach the driver. */
-#ifdef MODULE
-int init_module(void)
-#else
-int __init dummy_init(void)
-#endif
-{
-        num_drivers = 0;
-      
-        /* Add support here for specifying multiple dummies to attach at once. */
-        if (dummy_attach(&drivers[num_drivers]) == 0)
-                num_drivers++;
-  
-        /* Only return success if we found some dummy chips. */
-        return (num_drivers > 0) ? 0 : -EIO;
-}
-
 /* Attach to an dummy chip given its PROM node. */
-static int dummy_attach(struct sparcaudio_driver *drv)
+static int __init dummy_attach(struct sparcaudio_driver *drv)
 {
         struct dummy_chip *dummy_chip;
         int err;
@@ -768,15 +751,27 @@ static int dummy_attach(struct sparcaudio_driver *drv)
         return 0;
 }
 
-#ifdef MODULE
 /* Detach from an dummy chip given the device structure. */
-static void dummy_detach(struct sparcaudio_driver *drv)
+static void __exit dummy_detach(struct sparcaudio_driver *drv)
 {
         unregister_sparcaudio_driver(drv, 2);
         kfree(drv->private);
 }
 
-void cleanup_module(void)
+/* Probe for the dummy chip and then attach the driver. */
+static int __init dummy_init(void)
+{
+	num_drivers = 0;
+      
+	/* Add support here for specifying multiple dummies to attach at once. */
+	if (dummy_attach(&drivers[num_drivers]) == 0)
+		num_drivers++;
+  
+	/* Only return success if we found some dummy chips. */
+	return (num_drivers > 0) ? 0 : -EIO;
+}
+
+static void __exit dummy_exit(void)
 {
         int i;
 
@@ -785,7 +780,10 @@ void cleanup_module(void)
                 num_drivers--;
         }
 }
-#endif
+
+module_init(dummy_init);
+module_exit(dummy_exit);
+MODULE_LICENSE("GPL");
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

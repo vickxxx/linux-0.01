@@ -41,8 +41,16 @@
 #include <linux/usbdevice_fs.h>
 #include <asm/uaccess.h>
 
+static struct inode_operations usbdevfs_bus_inode_operations;
+static struct file_operations usbdevfs_bus_file_operations;
+
 /* --------------------------------------------------------------------- */
 
+/*
+ * This list of superblocks is still used,
+ * but since usbdevfs became FS_SINGLE
+ * there is only one super_block.
+ */
 static LIST_HEAD(superlist);
 
 struct special {
@@ -153,10 +161,99 @@ static void free_inode(struct inode *inode)
 	inode->i_uid = inode->i_gid = 0;
 	inode->i_size = 0;
 	list_del(&inode->u.usbdev_i.slist);
-	INIT_LIST_HEAD(&inode->u.usbdev_i.slist);
 	list_del(&inode->u.usbdev_i.dlist);
-	INIT_LIST_HEAD(&inode->u.usbdev_i.dlist);
 	iput(inode);
+}
+
+static int parse_options(struct super_block *s, char *data)
+{
+	uid_t devuid = 0, busuid = 0, listuid = 0;
+	gid_t devgid = 0, busgid = 0, listgid = 0;
+	umode_t devmode = S_IWUSR | S_IRUGO, busmode = S_IXUGO | S_IRUGO, listmode = S_IRUGO;
+	char *curopt = NULL, *value;
+
+	/* parse options */
+	if (data)
+		curopt = strtok(data, ",");
+	for (; curopt; curopt = strtok(NULL, ",")) {
+		if ((value = strchr(curopt, '=')) != NULL)
+			*value++ = 0;
+		if (!strcmp(curopt, "devuid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			devuid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "devgid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			devgid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "devmode")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			devmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "busuid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			busuid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "busgid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			busgid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "busmode")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			busmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "listuid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			listuid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "listgid")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			listgid = simple_strtoul(value, &value, 0);
+			if (*value)
+				return -EINVAL;
+		}
+		if (!strcmp(curopt, "listmode")) {
+			if (!value || !value[0])
+				return -EINVAL;
+			listmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
+			if (*value)
+				return -EINVAL;
+		}
+	}
+
+	s->u.usbdevfs_sb.devuid = devuid;
+	s->u.usbdevfs_sb.devgid = devgid;
+	s->u.usbdevfs_sb.devmode = devmode;
+	s->u.usbdevfs_sb.busuid = busuid;
+	s->u.usbdevfs_sb.busgid = busgid;
+	s->u.usbdevfs_sb.busmode = busmode;
+	s->u.usbdevfs_sb.listuid = listuid;
+	s->u.usbdevfs_sb.listgid = listgid;
+	s->u.usbdevfs_sb.listmode = listmode;
+
+	return 0;
 }
 
 static struct usb_bus *usbdevfs_findbus(int busnr)
@@ -164,11 +261,15 @@ static struct usb_bus *usbdevfs_findbus(int busnr)
         struct list_head *list;
         struct usb_bus *bus;
 
+	down (&usb_bus_list_lock);
         for (list = usb_bus_list.next; list != &usb_bus_list; list = list->next) {
                 bus = list_entry(list, struct usb_bus, bus_list);
-                if (bus->busnum == busnr)
+                if (bus->busnum == busnr) {
+			up (&usb_bus_list_lock);
                         return bus;
+		}
         }
+	up (&usb_bus_list_lock);
         return NULL;
 }
 
@@ -316,7 +417,7 @@ static int usbdevfs_root_readdir(struct file *filp, void *dirent, filldir_t fill
 		if (i < 2+NRSPECIAL)
 			return 0;
 		i -= 2+NRSPECIAL;
-		lock_kernel();
+		down (&usb_bus_list_lock);
 		for (list = usb_bus_list.next; list != &usb_bus_list; list = list->next) {
 			if (i > 0) {
 				i--;
@@ -328,7 +429,7 @@ static int usbdevfs_root_readdir(struct file *filp, void *dirent, filldir_t fill
 				break;
 			filp->f_pos++;
 		}
-		unlock_kernel();
+		up (&usb_bus_list_lock);
 		return 0;
 	}
 }
@@ -412,8 +513,6 @@ static void usbdevfs_read_inode(struct inode *inode)
 	inode->i_ctime = inode->i_mtime = inode->i_atime = CURRENT_TIME;
 	inode->i_mode = S_IFREG;
 	inode->i_gid = inode->i_uid = 0;
-	INIT_LIST_HEAD(&inode->u.usbdev_i.dlist);
-	INIT_LIST_HEAD(&inode->u.usbdev_i.slist);
 	inode->u.usbdev_i.p.dev = NULL;
 	inode->u.usbdev_i.p.bus = NULL;
 	switch (ITYPE(inode->i_ino)) {
@@ -460,10 +559,47 @@ static int usbdevfs_statfs(struct super_block *sb, struct statfs *buf)
         return 0;
 }
 
+static int usbdevfs_remount(struct super_block *s, int *flags, char *data)
+{
+	struct list_head *ilist = s->u.usbdevfs_sb.ilist.next;
+	struct inode *inode;
+	int ret;
+
+	if ((ret = parse_options(s, data))) {
+		printk(KERN_WARNING "usbdevfs: remount parameter error\n");
+		return ret;
+	}
+
+	for (; ilist != &s->u.usbdevfs_sb.ilist; ilist = ilist->next) {
+		inode = list_entry(ilist, struct inode, u.usbdev_i.slist);
+
+		switch (ITYPE(inode->i_ino)) {
+			case ISPECIAL :
+				inode->i_uid = s->u.usbdevfs_sb.listuid;
+				inode->i_gid = s->u.usbdevfs_sb.listgid;
+				inode->i_mode = s->u.usbdevfs_sb.listmode | S_IFREG;
+				break;
+			case IBUS :
+				inode->i_uid = s->u.usbdevfs_sb.busuid;
+				inode->i_gid = s->u.usbdevfs_sb.busgid;
+				inode->i_mode = s->u.usbdevfs_sb.busmode | S_IFDIR;
+				break;
+			case IDEVICE :
+				inode->i_uid = s->u.usbdevfs_sb.devuid;
+				inode->i_gid = s->u.usbdevfs_sb.devgid;
+				inode->i_mode = s->u.usbdevfs_sb.devmode | S_IFREG;
+				break;
+		}
+	}
+
+	return 0;
+}
+
 static struct super_operations usbdevfs_sops = { 
 	read_inode:	usbdevfs_read_inode,
 	put_super:	usbdevfs_put_super,
 	statfs:		usbdevfs_statfs,
+	remount_fs:	usbdevfs_remount,
 };
 
 struct super_block *usbdevfs_read_super(struct super_block *s, void *data, int silent)
@@ -472,81 +608,12 @@ struct super_block *usbdevfs_read_super(struct super_block *s, void *data, int s
 	struct list_head *blist;
 	struct usb_bus *bus;
 	unsigned int i;
-	uid_t devuid = 0, busuid = 0, listuid = 0;
-	gid_t devgid = 0, busgid = 0, listgid = 0;
-	umode_t devmode = S_IWUSR | S_IRUGO, busmode = S_IXUGO | S_IRUGO, listmode = S_IRUGO;
-	char *curopt = NULL, *value;
 
-	/* parse options */
-	if (data)
-		curopt = strtok(data, ",");
-	for (; curopt; curopt = strtok(NULL, ",")) {
-		if ((value = strchr(curopt, '=')) != NULL)
-			*value++ = 0;
-		if (!strcmp(curopt, "devuid")) {
-			if (!value || !value[0])
-				goto opterr;
-			devuid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "devgid")) {
-			if (!value || !value[0])
-				goto opterr;
-			devgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "devmode")) {
-			if (!value || !value[0])
-				goto opterr;
-			devmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "busuid")) {
-			if (!value || !value[0])
-				goto opterr;
-			busuid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "busgid")) {
-			if (!value || !value[0])
-				goto opterr;
-			busgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "busmode")) {
-			if (!value || !value[0])
-				goto opterr;
-			busmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "listuid")) {
-			if (!value || !value[0])
-				goto opterr;
-			listuid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "listgid")) {
-			if (!value || !value[0])
-				goto opterr;
-			listgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				goto opterr;
-		}
-		if (!strcmp(curopt, "listmode")) {
-			if (!value || !value[0])
-				goto opterr;
-			listmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				goto opterr;
-		}
+	if (parse_options(s, data)) {
+		printk(KERN_WARNING "usbdevfs: mount parameter error\n");
+		return NULL;
 	}
+
 	/* fill superblock */
         s->s_blocksize = 1024;
         s->s_blocksize_bits = 10;
@@ -554,35 +621,31 @@ struct super_block *usbdevfs_read_super(struct super_block *s, void *data, int s
         s->s_op = &usbdevfs_sops;
 	INIT_LIST_HEAD(&s->u.usbdevfs_sb.slist);
 	INIT_LIST_HEAD(&s->u.usbdevfs_sb.ilist);
-	s->u.usbdevfs_sb.devuid = devuid;
-	s->u.usbdevfs_sb.devgid = devgid;
-	s->u.usbdevfs_sb.devmode = devmode;
-	s->u.usbdevfs_sb.busuid = busuid;
-	s->u.usbdevfs_sb.busgid = busgid;
-	s->u.usbdevfs_sb.busmode = busmode;
 	root_inode = iget(s, IROOT);
         if (!root_inode)
                 goto out_no_root;
         s->s_root = d_alloc_root(root_inode);
         if (!s->s_root)
                 goto out_no_root;
+	lock_kernel();
 	list_add_tail(&s->u.usbdevfs_sb.slist, &superlist);
 	for (i = 0; i < NRSPECIAL; i++) {
 		if (!(inode = iget(s, IROOT+1+i)))
 			continue;
-		inode->i_uid = listuid;
-		inode->i_gid = listgid;
-		inode->i_mode = listmode | S_IFREG;
+		inode->i_uid = s->u.usbdevfs_sb.listuid;
+		inode->i_gid = s->u.usbdevfs_sb.listgid;
+		inode->i_mode = s->u.usbdevfs_sb.listmode | S_IFREG;
 		special[i].inode = inode;
 		list_add_tail(&inode->u.usbdev_i.slist, &s->u.usbdevfs_sb.ilist);
 		list_add_tail(&inode->u.usbdev_i.dlist, &special[i].inodes);
 	}
-	lock_kernel();
+	down (&usb_bus_list_lock);
 	for (blist = usb_bus_list.next; blist != &usb_bus_list; blist = blist->next) {
 		bus = list_entry(blist, struct usb_bus, bus_list);
 		new_bus_inode(bus, s);
 		recurse_new_dev_inode(bus->root_hub, s);
 	}
+	up (&usb_bus_list_lock);
 	unlock_kernel();
         return s;
 
@@ -590,13 +653,15 @@ struct super_block *usbdevfs_read_super(struct super_block *s, void *data, int s
         printk("usbdevfs_read_super: get root inode failed\n");
         iput(root_inode);
         return NULL;
-
- opterr:
-        printk(KERN_WARNING "usbdevfs: mount parameter error\n");
-	return NULL;
 }
 
-static DECLARE_FSTYPE(usbdevice_fs_type, "usbdevfs", usbdevfs_read_super, 0);
+/*
+ * The usbdevfs name is now deprecated (as of 2.4.19).
+ * It will be removed when the 2.7.x development cycle is started.
+ * You have been warned :)
+ */
+static DECLARE_FSTYPE(usbdevice_fs_type, "usbdevfs", usbdevfs_read_super, FS_SINGLE);
+static DECLARE_FSTYPE(usbfs_type, "usbfs", usbdevfs_read_super, FS_SINGLE);
 
 /* --------------------------------------------------------------------- */
 
@@ -689,8 +754,15 @@ int __init usbdevfs_init(void)
 	}
 	if ((ret = usb_register(&usbdevfs_driver)))
 		return ret;
-	if ((ret = register_filesystem(&usbdevice_fs_type)))
+	if ((ret = register_filesystem(&usbdevice_fs_type))) {
 		usb_deregister(&usbdevfs_driver);
+		return ret;
+	}
+	if ((ret = register_filesystem(&usbfs_type))) {
+		usb_deregister(&usbdevfs_driver);
+		unregister_filesystem(&usbdevice_fs_type);
+		return ret;
+	}
 #ifdef CONFIG_PROC_FS		
 	/* create mount point for usbdevfs */
 	usbdir = proc_mkdir("usb", proc_bus);
@@ -702,6 +774,7 @@ void __exit usbdevfs_cleanup(void)
 {
 	usb_deregister(&usbdevfs_driver);
 	unregister_filesystem(&usbdevice_fs_type);
+	unregister_filesystem(&usbfs_type);
 #ifdef CONFIG_PROC_FS	
         if (usbdir)
                 remove_proc_entry("usb", proc_bus);

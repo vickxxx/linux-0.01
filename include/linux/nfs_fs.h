@@ -16,6 +16,7 @@
 
 #include <linux/sunrpc/debug.h>
 #include <linux/sunrpc/auth.h>
+#include <linux/sunrpc/clnt.h>
 
 #include <linux/nfs.h>
 #include <linux/nfs2.h>
@@ -63,6 +64,11 @@
  */
 #define NFS_SUPER_MAGIC			0x6969
 
+static inline struct nfs_inode_info *NFS_I(struct inode *inode)
+{
+	return &inode->u.nfs_i;
+}
+
 #define NFS_FH(inode)			(&(inode)->u.nfs_i.fh)
 #define NFS_SERVER(inode)		(&(inode)->i_sb->u.nfs_sb.s_server)
 #define NFS_CLIENT(inode)		(NFS_SERVER(inode)->client)
@@ -72,9 +78,9 @@
 #define NFS_CONGESTED(inode)		(RPC_CONGESTED(NFS_CLIENT(inode)))
 #define NFS_COOKIEVERF(inode)		((inode)->u.nfs_i.cookieverf)
 #define NFS_READTIME(inode)		((inode)->u.nfs_i.read_cache_jiffies)
+#define NFS_MTIME_UPDATE(inode)		((inode)->u.nfs_i.cache_mtime_jiffies)
 #define NFS_CACHE_CTIME(inode)		((inode)->u.nfs_i.read_cache_ctime)
 #define NFS_CACHE_MTIME(inode)		((inode)->u.nfs_i.read_cache_mtime)
-#define NFS_CACHE_ATIME(inode)		((inode)->u.nfs_i.read_cache_atime)
 #define NFS_CACHE_ISIZE(inode)		((inode)->u.nfs_i.read_cache_isize)
 #define NFS_NEXTSCAN(inode)		((inode)->u.nfs_i.nextscan)
 #define NFS_CACHEINV(inode) \
@@ -95,7 +101,6 @@ do { \
 #define NFS_STALE(inode)		(NFS_FLAGS(inode) & NFS_INO_STALE)
 
 #define NFS_FILEID(inode)		((inode)->u.nfs_i.fileid)
-#define NFS_FSID(inode)			((inode)->u.nfs_i.fsid)
 
 /* Inode Flags */
 #define NFS_USE_READDIRPLUS(inode)	((NFS_FLAGS(inode) & NFS_INO_ADVISE_RDPLUS) ? 1 : 0)
@@ -137,18 +142,18 @@ unsigned long page_index(struct page *page)
  * linux/fs/nfs/inode.c
  */
 extern struct super_block *nfs_read_super(struct super_block *, void *, int);
-extern int init_nfs_fs(void);
 extern void nfs_zap_caches(struct inode *);
 extern int nfs_inode_is_stale(struct inode *, struct nfs_fh *,
 				struct nfs_fattr *);
 extern struct inode *nfs_fhget(struct dentry *, struct nfs_fh *,
 				struct nfs_fattr *);
-extern int nfs_refresh_inode(struct inode *, struct nfs_fattr *);
+extern int __nfs_refresh_inode(struct inode *, struct nfs_fattr *);
 extern int nfs_revalidate(struct dentry *);
 extern int nfs_permission(struct inode *, int);
 extern int nfs_open(struct inode *, struct file *);
 extern int nfs_release(struct inode *, struct file *);
 extern int __nfs_revalidate_inode(struct nfs_server *, struct inode *);
+extern int nfs_check_stale(struct inode *);
 extern int nfs_notify_change(struct dentry *, struct iattr *);
 
 /*
@@ -161,10 +166,12 @@ extern struct address_space_operations nfs_file_aops;
 static __inline__ struct rpc_cred *
 nfs_file_cred(struct file *file)
 {
-	struct rpc_cred *cred = (struct rpc_cred *)(file->private_data);
+	struct rpc_cred *cred = NULL;
+	if (file)
+		cred = (struct rpc_cred *)file->private_data;
 #ifdef RPC_DEBUG
 	if (cred && cred->cr_magic != RPCAUTH_CRED_MAGIC)
-		BUG();
+		out_of_line_bug();
 #endif
 	return cred;
 }
@@ -202,12 +209,16 @@ extern int  nfs_updatepage(struct file *, struct page *, unsigned int, unsigned 
  * Try to write back everything synchronously (but check the
  * return value!)
  */
-extern int  nfs_sync_file(struct inode *, struct file *, unsigned long, unsigned int, int);
-extern int  nfs_flush_file(struct inode *, struct file *, unsigned long, unsigned int, int);
-extern int  nfs_flush_timeout(struct inode *, int);
+extern int  nfs_sync_file(struct inode *, unsigned long, unsigned int, int);
+extern int  nfs_flush_file(struct inode *, unsigned long, unsigned int, int);
+extern int  nfs_flush_list(struct list_head *, int, int);
+extern int  nfs_scan_lru_dirty(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_dirty_timeout(struct nfs_server *, struct list_head *);
 #ifdef CONFIG_NFS_V3
-extern int  nfs_commit_file(struct inode *, struct file *, unsigned long, unsigned int, int);
-extern int  nfs_commit_timeout(struct inode *, int);
+extern int  nfs_commit_file(struct inode *, int);
+extern int  nfs_commit_list(struct list_head *, int);
+extern int  nfs_scan_lru_commit(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_commit_timeout(struct nfs_server *, struct list_head *);
 #endif
 
 static inline int
@@ -225,7 +236,7 @@ nfs_have_writebacks(struct inode *inode)
 static inline int
 nfs_wb_all(struct inode *inode)
 {
-	int error = nfs_sync_file(inode, 0, 0, 0, FLUSH_WAIT);
+	int error = nfs_sync_file(inode, 0, 0, FLUSH_WAIT);
 	return (error < 0) ? error : 0;
 }
 
@@ -235,17 +246,7 @@ nfs_wb_all(struct inode *inode)
 static inline int
 nfs_wb_page(struct inode *inode, struct page* page)
 {
-	int error = nfs_sync_file(inode, 0, page_index(page), 1, FLUSH_WAIT | FLUSH_STABLE);
-	return (error < 0) ? error : 0;
-}
-
-/*
- * Write back all pending writes for one user.. 
- */
-static inline int
-nfs_wb_file(struct inode *inode, struct file *file)
-{
-	int error = nfs_sync_file(inode, file, 0, 0, FLUSH_WAIT);
+	int error = nfs_sync_file(inode, page_index(page), 1, FLUSH_WAIT | FLUSH_STABLE);
 	return (error < 0) ? error : 0;
 }
 
@@ -254,14 +255,28 @@ nfs_wb_file(struct inode *inode, struct file *file)
  */
 extern int  nfs_readpage(struct file *, struct page *);
 extern int  nfs_pagein_inode(struct inode *, unsigned long, unsigned int);
-extern int  nfs_pagein_timeout(struct inode *);
+extern int  nfs_pagein_list(struct list_head *, int);
+extern int  nfs_scan_lru_read(struct nfs_server *, struct list_head *);
+extern int  nfs_scan_lru_read_timeout(struct nfs_server *, struct list_head *);
+
+#define NFS_SetPageSync(page)		set_bit(PG_fs_1, &(page)->flags)
+#define NFS_ClearPageSync(page)		clear_bit(PG_fs_1, &(page)->flags)
+#define NFS_TestClearPageSync(page)	test_and_clear_bit(PG_fs_1, &(page)->flags)
+
+/*
+ * linux/fs/nfs/direct.c
+ */
+extern int  nfs_direct_IO(int, struct file *, struct kiobuf *, unsigned long, int);
 
 /*
  * linux/fs/mount_clnt.c
  * (Used only by nfsroot module)
  */
-extern int  nfs_mount(struct sockaddr_in *, char *, struct nfs_fh *);
-extern int  nfs3_mount(struct sockaddr_in *, char *, struct nfs_fh *);
+extern int  nfsroot_mount(struct sockaddr_in *, char *, struct nfs_fh *,
+		int, int);
+
+/* linux/net/ipv4/ipconfig.c: trims ip addr off front of name, too. */
+extern u32 root_nfs_parse_addr(char *name); /*__init*/
 
 /*
  * inline functions
@@ -272,6 +287,31 @@ nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
 	if (time_before(jiffies, NFS_READTIME(inode)+NFS_ATTRTIMEO(inode)))
 		return NFS_STALE(inode) ? -ESTALE : 0;
 	return __nfs_revalidate_inode(server, inode);
+}
+
+static inline int
+nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
+{
+	if ((fattr->valid & NFS_ATTR_FATTR) == 0)
+		return 0;
+	return __nfs_refresh_inode(inode,fattr);
+}
+
+/*
+ * This function will be used to simulate weak cache consistency
+ * under NFSv2 when the NFSv3 attribute patch is included.
+ * For the moment, we just call nfs_refresh_inode().
+ */
+static __inline__ int
+nfs_write_attributes(struct inode *inode, struct nfs_fattr *fattr)
+{
+	if ((fattr->valid & NFS_ATTR_FATTR) && !(fattr->valid & NFS_ATTR_WCC)) {
+		fattr->pre_size  = NFS_CACHE_ISIZE(inode);
+		fattr->pre_mtime = NFS_CACHE_MTIME(inode);
+		fattr->pre_ctime = NFS_CACHE_CTIME(inode);
+		fattr->valid |= NFS_ATTR_WCC;
+	}
+	return nfs_refresh_inode(inode, fattr);
 }
 
 static inline loff_t
@@ -314,6 +354,29 @@ extern void * nfs_root_data(void);
 		wait_event(wq, condition);				\
 	__retval;							\
 })
+
+#ifdef CONFIG_NFS_V3
+
+#define NFS_JUKEBOX_RETRY_TIME (5 * HZ)
+static inline int
+nfs_async_handle_jukebox(struct rpc_task *task)
+{
+	if (task->tk_status != -EJUKEBOX)
+		return 0;
+	task->tk_status = 0;
+	rpc_restart_call(task);
+	rpc_delay(task, NFS_JUKEBOX_RETRY_TIME);
+	return 1;
+}
+
+#else
+
+static inline int
+nfs_async_handle_jukebox(struct rpc_task *task)
+{
+	return 0;
+}
+#endif /* CONFIG_NFS_V3 */
 
 #endif /* __KERNEL__ */
 

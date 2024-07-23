@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.48 2000/12/15 00:41:24 davem Exp $
+# $Id: Makefile,v 1.49 2001/07/27 09:42:22 davem Exp $
 # sparc/Makefile
 #
 # Makefile for the architecture dependent flags and dependencies on the
@@ -16,7 +16,7 @@ SHELL  =/bin/bash
 # debugging of the kernel to get the proper debugging information.
 
 IS_EGCS := $(shell if $(CC) -m32 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo y; else echo n; fi; )
-NEW_GAS := $(shell if $(LD) --version 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
+NEW_GAS := $(shell if $(LD) -V 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
 
 ifeq ($(NEW_GAS),y)
 AS              := $(AS) -32
@@ -45,6 +45,7 @@ LIBS := $(TOPDIR)/lib/lib.a $(LIBS) $(TOPDIR)/arch/sparc/prom/promlib.a \
 	$(TOPDIR)/arch/sparc/lib/lib.a
 
 # This one has to come last
+_dir_arch/sparc/boot : $(patsubst %, _dir_%, $(SUBDIRS))
 SUBDIRS += arch/sparc/boot
 CORE_FILES_NO_BTFIX := $(CORE_FILES)
 CORE_FILES += arch/sparc/boot/btfix.o
@@ -60,7 +61,7 @@ archmrproper:
 
 archdep: check_asm
 
-check_asm:
+check_asm: include/linux/version.h
 	$(MAKE) -C arch/sparc/kernel check_asm
 
 tftpboot.img:

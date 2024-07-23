@@ -10,6 +10,8 @@
 #define CCB_SET_TERM_INT	0x04
 #define CCB_SET_TERM_CTL	0x05
 #define CCB_PROCESS_KEYCODE	0x06
+#define CCB_OPEN_CONSOLE	0x07
+#define CCB_CLOSE_CONSOLE	0x08
 
 #define CCB_OPEN		0x10
 #define CCB_CLOSE		0x11
@@ -22,8 +24,8 @@
 #define CCB_GET_ENV		0x22
 #define CCB_SAVE_ENV		0x23
 
-#define CCB_PSWITCH            0x30
-#define CCB_BIOS_EMUL          0x32
+#define CCB_PSWITCH		0x30
+#define CCB_BIOS_EMUL		0x32
 
 /*
  * Environment variable numbers
@@ -47,10 +49,15 @@
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 extern long callback_puts(long unit, const char *s, long length);
+extern long callback_getc(long unit);
+extern long callback_open_console(void);
+extern long callback_close_console(void);
 extern long callback_open(const char *device, long length);
 extern long callback_close(long unit);
 extern long callback_read(long channel, long count, const char *buf, long lbn);
 extern long callback_getenv(long id, const char *buf, unsigned long buf_size);
+extern long callback_setenv(long id, const char *buf, unsigned long buf_size);
+extern long callback_save_env(void);
 
 extern int srm_fixup(unsigned long new_callback_addr,
 		     unsigned long new_hwrpb_addr);

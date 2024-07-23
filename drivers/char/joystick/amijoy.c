@@ -42,6 +42,7 @@
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_PARM(amijoy, "1-2i");
+MODULE_LICENSE("GPL");
 
 static int amijoy[2] = { 0, 1 };
 static int amijoy_used[2] = { 0, 0 };
@@ -63,9 +64,9 @@ static void amijoy_interrupt(int irq, void *dummy, struct pt_regs *fp)
 
 			input_report_key(amijoy_dev + i, BTN_TRIGGER, button);
 
-			input_report_abs(amijoy_dev + i, ABS_X, ((data >> 1) & 1) - ((data >> 9) & 1);
+			input_report_abs(amijoy_dev + i, ABS_X, ((data >> 1) & 1) - ((data >> 9) & 1));
 			data = ~(data ^ (data << 1));
-			input_report_abs(amijoy_dev + i, ABS_Y, ((data >> 1) & 1) - ((data >> 9) & 1);
+			input_report_abs(amijoy_dev + i, ABS_Y, ((data >> 1) & 1) - ((data >> 9) & 1));
 		}
 }
 
@@ -113,7 +114,7 @@ static int __init amijoy_init(void)
 	for (i = 0; i < 2; i++)
 		if (amijoy[i]) {
 			if (!request_mem_region(CUSTOM_PHYSADDR+10+i*2, 2,
-						amijoy [Denise]")) {
+						"amijoy [Denise]")) {
 				if (i == 1 && amijoy[0]) {
 					input_unregister_device(amijoy_dev);
 					release_mem_region(CUSTOM_PHYSADDR+10, 2);

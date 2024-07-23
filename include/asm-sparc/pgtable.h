@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.106 2000/11/08 04:49:24 davem Exp $ */
+/* $Id: pgtable.h,v 1.109 2001/11/13 00:49:32 davem Exp $ */
 #ifndef _SPARC_PGTABLE_H
 #define _SPARC_PGTABLE_H
 
@@ -27,6 +27,7 @@
 #ifndef __ASSEMBLY__
 
 extern void load_mmu(void);
+extern unsigned long calc_highpages(void);
 			       
 BTFIXUPDEF_CALL(void, quick_kernel_fault, unsigned long)
 
@@ -292,9 +293,6 @@ BTFIXUPDEF_CALL_CONST(pte_t, pte_mkyoung, pte_t)
 #define page_pte_prot(page, prot)	mk_pte(page, prot)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
 
-/* Permanent address of a page. */
-#define page_address(page)  ((page)->virtual)
-
 BTFIXUPDEF_CALL(struct page *, pte_page, pte_t)
 #define pte_page(pte) BTFIXUP_CALL(pte_page)(pte)
 
@@ -347,6 +345,7 @@ BTFIXUPDEF_CALL(pte_t *, pte_offset, pmd_t *, unsigned long)
 extern unsigned int pg_iobits;
 
 #define flush_icache_page(vma, pg)      do { } while(0)
+#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
 
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -357,7 +356,8 @@ BTFIXUPDEF_CALL(void, set_pte, pte_t *, pte_t)
 
 #define set_pte(ptep,pteval) BTFIXUP_CALL(set_pte)(ptep,pteval)
 
-BTFIXUPDEF_CALL(int, mmu_info, char *)
+struct seq_file;
+BTFIXUPDEF_CALL(void, mmu_info, struct seq_file *)
 
 #define mmu_info(p) BTFIXUP_CALL(mmu_info)(p)
 
@@ -452,5 +452,10 @@ extern int io_remap_page_range(unsigned long from, unsigned long to,
 
 /* We provide our own get_unmapped_area to cope with VA holes for userland */
 #define HAVE_ARCH_UNMAPPED_AREA
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
 
 #endif /* !(_SPARC_PGTABLE_H) */

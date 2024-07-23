@@ -7,7 +7,7 @@
  */
  
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/locks.h>
 
 #include "swab.h"
@@ -23,7 +23,7 @@
 
 
 struct ufs_buffer_head * _ubh_bread_ (struct ufs_sb_private_info * uspi,
-	kdev_t dev, unsigned fragment, unsigned size)
+	struct super_block *sb, unsigned fragment, unsigned size)
 {
 	struct ufs_buffer_head * ubh;
 	unsigned i, j, count;
@@ -39,7 +39,7 @@ struct ufs_buffer_head * _ubh_bread_ (struct ufs_sb_private_info * uspi,
 	ubh->fragment = fragment;
 	ubh->count = count;
 	for (i = 0; i < count; i++)
-		if (!(ubh->bh[i] = bread (dev, fragment + i, uspi->s_fsize)))
+		if (!(ubh->bh[i] = sb_bread(sb, fragment + i)))
 			goto failed;
 	for (; i < UFS_MAXFRAG; i++)
 		ubh->bh[i] = NULL;
@@ -47,11 +47,12 @@ struct ufs_buffer_head * _ubh_bread_ (struct ufs_sb_private_info * uspi,
 failed:
 	for (j = 0; j < i; j++)
 		brelse (ubh->bh[j]);
+	kfree(ubh);
 	return NULL;
 }
 
 struct ufs_buffer_head * ubh_bread_uspi (struct ufs_sb_private_info * uspi,
-	kdev_t dev, unsigned fragment, unsigned size)
+	struct super_block *sb, unsigned fragment, unsigned size)
 {
 	unsigned i, j, count;
 	if (size & ~uspi->s_fmask)
@@ -62,7 +63,7 @@ struct ufs_buffer_head * ubh_bread_uspi (struct ufs_sb_private_info * uspi,
 	USPI_UBH->fragment = fragment;
 	USPI_UBH->count = count;
 	for (i = 0; i < count; i++)
-		if (!(USPI_UBH->bh[i] = bread (dev, fragment + i, uspi->s_fsize)))
+		if (!(USPI_UBH->bh[i] = sb_bread(sb, fragment + i)))
 			goto failed;
 	for (; i < UFS_MAXFRAG; i++)
 		USPI_UBH->bh[i] = NULL;
@@ -166,11 +167,11 @@ void _ubh_ubhcpymem_(struct ufs_sb_private_info * uspi,
 	unsigned char * mem, struct ufs_buffer_head * ubh, unsigned size)
 {
 	unsigned len, bhno;
-	if ( size > (ubh->count << uspi->s_fshift) )
+	if (size > (ubh->count << uspi->s_fshift))
 		size = ubh->count << uspi->s_fshift;
 	bhno = 0;
-	while ( size ) {
-		len = min (size, uspi->s_fsize);
+	while (size) {
+		len = min_t(unsigned int, size, uspi->s_fsize);
 		memcpy (mem, ubh->bh[bhno]->b_data, len);
 		mem += uspi->s_fsize;
 		size -= len;
@@ -182,11 +183,11 @@ void _ubh_memcpyubh_(struct ufs_sb_private_info * uspi,
 	struct ufs_buffer_head * ubh, unsigned char * mem, unsigned size)
 {
 	unsigned len, bhno;
-	if ( size > (ubh->count << uspi->s_fshift) )
+	if (size > (ubh->count << uspi->s_fshift))
 		size = ubh->count << uspi->s_fshift;
 	bhno = 0;
-	while ( size ) {
-		len = min (size, uspi->s_fsize);
+	while (size) {
+		len = min_t(unsigned int, size, uspi->s_fsize);
 		memcpy (ubh->bh[bhno]->b_data, mem, len);
 		mem += uspi->s_fsize;
 		size -= len;

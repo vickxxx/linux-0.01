@@ -2,7 +2,7 @@
 #define _LINUX_PROC_FS_H
 
 #include <linux/config.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 /*
  * The proc filesystem constants/structures
@@ -70,6 +70,7 @@ struct proc_dir_entry {
 	atomic_t count;		/* use count */
 	int deleted;		/* delete flag */
 	kdev_t	rdev;
+	void *set;
 };
 
 #define PROC_INODE_PROPER(inode) ((inode)->i_ino & ~0xffff)
@@ -79,6 +80,7 @@ struct proc_dir_entry {
 extern struct proc_dir_entry proc_root;
 extern struct proc_dir_entry *proc_root_fs;
 extern struct proc_dir_entry *proc_net;
+extern struct proc_dir_entry *proc_net_stat;
 extern struct proc_dir_entry *proc_bus;
 extern struct proc_dir_entry *proc_root_driver;
 extern struct proc_dir_entry *proc_root_kcore;
@@ -117,6 +119,7 @@ extern struct file_operations ppc_htab_operations;
 /*
  * proc_tty.c
  */
+struct tty_driver;
 extern void proc_tty_init(void);
 extern void proc_tty_register_driver(struct tty_driver *driver);
 extern void proc_tty_unregister_driver(struct tty_driver *driver);
@@ -126,13 +129,26 @@ extern void proc_tty_unregister_driver(struct tty_driver *driver);
  */
 extern void proc_device_tree_init(void);
 
+/*
+ * proc_rtas.c
+ */
+extern void proc_rtas_init(void);
+
+/*
+ * PPC64
+ */ 
+extern void proc_ppc64_init(void);
+extern void iSeries_proc_create(void);
+
 extern struct proc_dir_entry *proc_symlink(const char *,
 		struct proc_dir_entry *, const char *);
 extern struct proc_dir_entry *proc_mknod(const char *,mode_t,
 		struct proc_dir_entry *,kdev_t);
 extern struct proc_dir_entry *proc_mkdir(const char *,struct proc_dir_entry *);
+extern struct proc_dir_entry *proc_mkdir_mode(const char *name, mode_t mode,
+			struct proc_dir_entry *parent);
 
-extern inline struct proc_dir_entry *create_proc_read_entry(const char *name,
+static inline struct proc_dir_entry *create_proc_read_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, 
 	read_proc_t *read_proc, void * data)
 {
@@ -144,7 +160,7 @@ extern inline struct proc_dir_entry *create_proc_read_entry(const char *name,
 	return res;
 }
  
-extern inline struct proc_dir_entry *create_proc_info_entry(const char *name,
+static inline struct proc_dir_entry *create_proc_info_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, get_info_t *get_info)
 {
 	struct proc_dir_entry *res=create_proc_entry(name,mode,base);
@@ -152,47 +168,64 @@ extern inline struct proc_dir_entry *create_proc_info_entry(const char *name,
 	return res;
 }
  
-extern inline struct proc_dir_entry *proc_net_create(const char *name,
+static inline struct proc_dir_entry *proc_net_create(const char *name,
 	mode_t mode, get_info_t *get_info)
 {
 	return create_proc_info_entry(name,mode,proc_net,get_info);
 }
 
-extern inline void proc_net_remove(const char *name)
+static inline struct proc_dir_entry *proc_net_fops_create(const char *name,
+	mode_t mode, struct file_operations *fops)
+{
+	struct proc_dir_entry *res = create_proc_entry(name, mode, proc_net);
+
+	if (res)
+		res->proc_fops = fops;
+	return res;
+}
+
+static inline void proc_net_remove(const char *name)
 {
 	remove_proc_entry(name,proc_net);
 }
 
 #else
 
-extern inline struct proc_dir_entry *proc_net_create(const char *name, mode_t mode, 
-	get_info_t *get_info) {return NULL;}
-extern inline void proc_net_remove(const char *name) {}
+#define proc_root_driver NULL
 
-extern inline struct proc_dir_entry *create_proc_entry(const char *name,
+static inline struct proc_dir_entry *proc_net_create(const char *name, mode_t mode, 
+	get_info_t *get_info) {return NULL;}
+static inline void proc_net_remove(const char *name) {}
+
+static inline struct proc_dir_entry *create_proc_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *parent) { return NULL; }
 
-extern inline void remove_proc_entry(const char *name, struct proc_dir_entry *parent) {};
-extern inline struct proc_dir_entry *proc_symlink(const char *name,
+static inline void remove_proc_entry(const char *name, struct proc_dir_entry *parent) {};
+static inline struct proc_dir_entry *proc_symlink(const char *name,
 		struct proc_dir_entry *parent,char *dest) {return NULL;}
-extern inline struct proc_dir_entry *proc_mknod(const char *name,mode_t mode,
+static inline struct proc_dir_entry *proc_mknod(const char *name,mode_t mode,
 		struct proc_dir_entry *parent,kdev_t rdev) {return NULL;}
-extern inline struct proc_dir_entry *proc_mkdir(const char *name,
+static inline struct proc_dir_entry *proc_mkdir(const char *name,
 	struct proc_dir_entry *parent) {return NULL;}
 
-extern inline struct proc_dir_entry *create_proc_read_entry(const char *name,
+static inline struct proc_dir_entry *create_proc_read_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, 
 	int (*read_proc)(char *, char **, off_t, int, int *, void *),
 	void * data) { return NULL; }
-extern inline struct proc_dir_entry *create_proc_info_entry(const char *name,
+static inline struct proc_dir_entry *create_proc_info_entry(const char *name,
 	mode_t mode, struct proc_dir_entry *base, get_info_t *get_info)
 	{ return NULL; }
 
-extern inline void proc_tty_register_driver(struct tty_driver *driver) {};
-extern inline void proc_tty_unregister_driver(struct tty_driver *driver) {};
+static inline void proc_tty_register_driver(struct tty_driver *driver) {};
+static inline void proc_tty_unregister_driver(struct tty_driver *driver) {};
 
 extern struct proc_dir_entry proc_root;
 
 #endif /* CONFIG_PROC_FS */
+
+static inline struct proc_dir_entry *PDE(const struct inode *inode)
+{
+	return (struct proc_dir_entry *)inode->u.generic_ip;
+}
 
 #endif /* _LINUX_PROC_FS_H */

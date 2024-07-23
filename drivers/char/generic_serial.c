@@ -41,8 +41,8 @@ static int gs_debug;
 #define gs_dprintk(f, str...) /* nothing */
 #endif
 
-#define func_enter() gs_dprintk (GS_DEBUG_FLOW, "gs: enter " __FUNCTION__ "\n")
-#define func_exit()  gs_dprintk (GS_DEBUG_FLOW, "gs: exit  " __FUNCTION__ "\n")
+#define func_enter() gs_dprintk (GS_DEBUG_FLOW, "gs: enter %s\n", __FUNCTION__)
+#define func_exit()  gs_dprintk (GS_DEBUG_FLOW, "gs: exit  %s\n", __FUNCTION__)
 
 #if NEW_WRITE_LOCKING
 #define DECL      /* Nothing */
@@ -143,7 +143,12 @@ int gs_write(struct tty_struct * tty, int from_user,
 		/* Can't copy more? break out! */
 		if (c <= 0) break;
 		if (from_user)
-			copy_from_user (port->xmit_buf + port->xmit_head, buf, c);
+                       if (copy_from_user (port->xmit_buf + port->xmit_head, 
+                                           buf, c)) {
+                               up (& port->port_write_sem);
+                               return -EFAULT;
+                       }
+
 		else
 			memcpy         (port->xmit_buf + port->xmit_head, buf, c);
 
@@ -214,8 +219,13 @@ int gs_write(struct tty_struct * tty, int from_user,
 		while (1) {
 			c = count;
 
-			/* This is safe because we "OWN" the "head". Noone else can 
-			   change the "head": we own the port_write_sem. */
+			/* Note: This part can be done without
+			 * interrupt routine protection since
+			 * the interrupt routines may only modify
+			 * shared variables in safe ways, in the worst
+			 * case causing us to loop twice in the code
+			 * below. See comments below. */ 
+
 			/* Don't overrun the end of the buffer */
 			t = SERIAL_XMIT_SIZE - port->xmit_head;
 			if (t < c) c = t;
@@ -344,7 +354,7 @@ static int gs_wait_tx_flushed (void * ptr, int timeout)
 	struct gs_port *port = ptr;
 	long end_jiffies;
 	int jiffies_to_transmit, charsleft = 0, rv = 0;
-	int to, rcib;
+	int rcib;
 
 	func_enter();
 
@@ -368,6 +378,7 @@ static int gs_wait_tx_flushed (void * ptr, int timeout)
 		return rv;
 	}
 	/* stop trying: now + twice the time it would normally take +  seconds */
+	if (timeout == 0) timeout = MAX_SCHEDULE_TIMEOUT;
 	end_jiffies  = jiffies; 
 	if (timeout !=  MAX_SCHEDULE_TIMEOUT)
 		end_jiffies += port->baud?(2 * rcib * 10 * HZ / port->baud):0;
@@ -376,11 +387,9 @@ static int gs_wait_tx_flushed (void * ptr, int timeout)
 	gs_dprintk (GS_DEBUG_FLUSH, "now=%lx, end=%lx (%ld).\n", 
 		    jiffies, end_jiffies, end_jiffies-jiffies); 
 
-	to = 100;
 	/* the expression is actually jiffies < end_jiffies, but that won't
 	   work around the wraparound. Tricky eh? */
-	while (to-- &&
-	       (charsleft = gs_real_chars_in_buffer (port->tty)) &&
+	while ((charsleft = gs_real_chars_in_buffer (port->tty)) &&
 	        time_after (end_jiffies, jiffies)) {
 		/* Units check: 
 		   chars * (bits/char) * (jiffies /sec) / (bits/sec) = jiffies!
@@ -430,10 +439,7 @@ void gs_flush_buffer(struct tty_struct *tty)
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
 
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 	func_exit ();
 }
 
@@ -507,7 +513,7 @@ void gs_start(struct tty_struct * tty)
 
 void gs_shutdown_port (struct gs_port *port)
 {
-	long flags;
+	unsigned long flags;
 
 	func_enter();
 	
@@ -573,10 +579,7 @@ void gs_do_softint(void *private_)
 	if (!tty) return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+		tty_wakeup(tty);
 	}
 	func_exit ();
 }
@@ -590,6 +593,7 @@ int gs_block_til_ready(void *port_, struct file * filp)
 	int    do_clocal = 0;
 	int    CD;
 	struct tty_struct *tty;
+	unsigned long flags;
 
 	func_enter ();
 
@@ -605,7 +609,7 @@ int gs_block_til_ready(void *port_, struct file * filp)
 	 * until it's done, and then try again.
 	 */
 	if (tty_hung_up_p(filp) || port->flags & ASYNC_CLOSING) {
-	  interruptible_sleep_on(&port->close_wait);
+		interruptible_sleep_on(&port->close_wait);
 		if (port->flags & ASYNC_HUP_NOTIFY)
 			return -EAGAIN;
 		else
@@ -669,10 +673,11 @@ int gs_block_til_ready(void *port_, struct file * filp)
 	add_wait_queue(&port->open_wait, &wait);
 
 	gs_dprintk (GS_DEBUG_BTR, "after add waitq.\n"); 
+	save_flags(flags);
 	cli();
 	if (!tty_hung_up_p(filp))
 		port->count--;
-	sti();
+	restore_flags(flags);
 	port->blocked_open++;
 	while (1) {
 		CD = port->rd->get_CD (port);
@@ -718,8 +723,8 @@ void gs_close(struct tty_struct * tty, struct file * filp)
 {
 	unsigned long flags;
 	struct gs_port *port;
-
-	func_enter ();
+	
+	func_enter();
 
 	if (!tty) return;
 
@@ -792,8 +797,7 @@ void gs_close(struct tty_struct * tty, struct file * filp)
 
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 
 	port->event = 0;
@@ -1004,7 +1008,8 @@ int gs_setserial(struct gs_port *port, struct serial_struct *sp)
 {
 	struct serial_struct sio;
 
-	copy_from_user(&sio, sp, sizeof(struct serial_struct));
+	if (copy_from_user(&sio, sp, sizeof(struct serial_struct)))
+		return(-EFAULT);
 
 	if (!capable(CAP_SYS_ADMIN)) {
 		if ((sio.baud_base != port->baud_base) ||
@@ -1034,7 +1039,7 @@ int gs_setserial(struct gs_port *port, struct serial_struct *sp)
  *      Generate the serial struct info.
  */
 
-void gs_getserial(struct gs_port *port, struct serial_struct *sp)
+int gs_getserial(struct gs_port *port, struct serial_struct *sp)
 {
 	struct serial_struct    sio;
 
@@ -1056,8 +1061,24 @@ void gs_getserial(struct gs_port *port, struct serial_struct *sp)
 	if (port->rd->getserial)
 		port->rd->getserial (port, &sio);
 
-	copy_to_user(sp, &sio, sizeof(struct serial_struct));
+	if (copy_to_user(sp, &sio, sizeof(struct serial_struct)))
+		return -EFAULT;
+	return 0;
+
 }
+
+
+void gs_got_break(struct gs_port *port)
+{
+	if (port->flags & ASYNC_SAK) {
+		do_SAK (port->tty);
+	}
+	*(port->tty->flip.flag_buf_ptr) = TTY_BREAK;
+	port->tty->flip.flag_buf_ptr++;
+	port->tty->flip.char_buf_ptr++;
+	port->tty->flip.count++;
+}
+
 
 EXPORT_SYMBOL(gs_put_char);
 EXPORT_SYMBOL(gs_write);
@@ -1075,4 +1096,6 @@ EXPORT_SYMBOL(gs_set_termios);
 EXPORT_SYMBOL(gs_init_port);
 EXPORT_SYMBOL(gs_setserial);
 EXPORT_SYMBOL(gs_getserial);
+EXPORT_SYMBOL(gs_got_break);
 
+MODULE_LICENSE("GPL");

@@ -8,9 +8,12 @@
  * or architectures with incomplete PCI setup by the loader.
  */
 #define pcibios_assign_all_busses()	0
+#define pcibios_scan_all_fns()		0
 
 #define PCIBIOS_MIN_IO		0UL
 #define PCIBIOS_MIN_MEM		0UL
+
+#define PCI_IRQ_NONE		0xffffffff
 
 extern inline void pcibios_set_master(struct pci_dev *dev)
 {
@@ -24,6 +27,12 @@ extern inline void pcibios_penalize_isa_irq(int irq)
 
 /* Dynamic DMA mapping stuff.
  */
+
+/* The PCI address space does not equal the physical memory
+ * address space.  The networking and block device layers use
+ * this boolean for bounce buffer decisions.
+ */
+#define PCI_DMA_BUS_IS_PHYS     (0)
 
 #include <asm/scatterlist.h>
 
@@ -60,6 +69,20 @@ extern dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size, 
  * whatever the device wrote there.
  */
 extern void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr, size_t size, int direction);
+
+/* pci_unmap_{single,page} is not a nop, thus... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
 
 /* Map a set of buffers described by scatterlist in streaming
  * mode for DMA.  This is the scather-gather version of the
@@ -108,10 +131,15 @@ extern void pci_dma_sync_sg(struct pci_dev *hwdev, struct scatterlist *sg, int n
  * only drive the low 24-bits during PCI bus mastering, then
  * you would pass 0x00ffffff as the mask to this function.
  */
-extern inline int pci_dma_supported(struct pci_dev *hwdev, dma_addr_t mask)
+extern inline int pci_dma_supported(struct pci_dev *hwdev, u64 mask)
 {
 	return 1;
 }
+
+#define pci_dac_dma_supported(dev, mask)	(0)
+
+/* Return the index of the PCI controller for device PDEV. */
+#define pci_controller_num(PDEV)	(0)
 
 #endif /* __KERNEL__ */
 

@@ -157,11 +157,6 @@ struct baycom_state {
 
 /* --------------------------------------------------------------------- */
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
-
-/* --------------------------------------------------------------------- */
-
 static void __inline__ baycom_int_freq(struct baycom_state *bc)
 {
 #ifdef BAYCOM_DEBUG
@@ -498,6 +493,7 @@ MODULE_PARM_DESC(iobase, "baycom io base address");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Baycom par96 and picpar amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 /* --------------------------------------------------------------------- */
 
@@ -569,7 +565,7 @@ module_exit(cleanup_baycompar);
 
 static int __init baycom_par_setup(char *str)
 {
-        static unsigned nr_dev = 0;
+        static unsigned nr_dev;
 	int ints[2];
 
         if (nr_dev >= NR_PORTS)

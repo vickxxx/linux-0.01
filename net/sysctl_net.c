@@ -20,15 +20,7 @@
 extern ctl_table ipv4_table[];
 #endif
 
-#ifdef CONFIG_IPX
-extern ctl_table ipx_table[];
-#endif
-
 extern ctl_table core_table[];
-
-#ifdef CONFIG_UNIX
-extern ctl_table unix_table[];
-#endif
 
 #ifdef CONFIG_NET
 extern ctl_table ether_table[], e802_table[];
@@ -42,15 +34,8 @@ extern ctl_table ipv6_table[];
 extern ctl_table tr_table[];
 #endif
 
-#ifdef CONFIG_ECONET
-extern ctl_table econet_table[];
-#endif
-
 ctl_table net_table[] = {
 	{NET_CORE,   "core",      NULL, 0, 0555, core_table},      
-#ifdef CONFIG_UNIX
-        {NET_UNIX,   "unix",      NULL, 0, 0555, unix_table},
-#endif
 #ifdef CONFIG_NET
 	{NET_802,    "802",       NULL, 0, 0555, e802_table},
 	{NET_ETHER,  "ethernet",  NULL, 0, 0555, ether_table},
@@ -58,17 +43,11 @@ ctl_table net_table[] = {
 #ifdef CONFIG_INET
 	{NET_IPV4,   "ipv4",      NULL, 0, 0555, ipv4_table},
 #endif
-#ifdef CONFIG_IPX
-        {NET_IPX,    "ipx",       NULL, 0, 0555, ipx_table},
-#endif
 #ifdef CONFIG_IPV6
 	{NET_IPV6, "ipv6", NULL, 0, 0555, ipv6_table},
 #endif
 #ifdef CONFIG_TR
 	{NET_TR, "token-ring", NULL, 0, 0555, tr_table},
-#endif
-#ifdef CONFIG_ECONET
-	{NET_ECONET, "econet",    NULL, 0, 0555, econet_table},
 #endif
 	{0}
 };

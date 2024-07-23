@@ -19,7 +19,7 @@
 #define AUTOFS_IOC_COUNT     32
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/wait.h>
@@ -89,7 +89,8 @@ struct autofs_symlink {
 #define AUTOFS_FIRST_SYMLINK 2
 #define AUTOFS_FIRST_DIR_INO (AUTOFS_FIRST_SYMLINK+AUTOFS_MAX_SYMLINKS)
 
-#define AUTOFS_SYMLINK_BITMAP_LEN ((AUTOFS_MAX_SYMLINKS+31)/32)
+#define AUTOFS_SYMLINK_BITMAP_LEN \
+	((AUTOFS_MAX_SYMLINKS+((sizeof(long)*1)-1))/(sizeof(long)*8))
 
 #define AUTOFS_SBI_MAGIC 0x6d4a556d
 
@@ -103,10 +104,10 @@ struct autofs_sb_info {
 	struct autofs_wait_queue *queues; /* Wait queue pointer */
 	struct autofs_dirhash dirhash; /* Root directory hash */
 	struct autofs_symlink symlink[AUTOFS_MAX_SYMLINKS];
-	u32 symlink_bitmap[AUTOFS_SYMLINK_BITMAP_LEN];
+	unsigned long symlink_bitmap[AUTOFS_SYMLINK_BITMAP_LEN];
 };
 
-extern inline struct autofs_sb_info *autofs_sbi(struct super_block *sb)
+static inline struct autofs_sb_info *autofs_sbi(struct super_block *sb)
 {
 	return (struct autofs_sb_info *)(sb->u.generic_sbp);
 }
@@ -140,7 +141,6 @@ extern struct inode_operations autofs_root_inode_operations;
 extern struct inode_operations autofs_symlink_inode_operations;
 extern struct inode_operations autofs_dir_inode_operations;
 extern struct file_operations autofs_root_operations;
-extern struct file_operations autofs_dir_operations;
 
 /* Initializing function */
 

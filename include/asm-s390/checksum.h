@@ -36,14 +36,14 @@ csum_partial(const unsigned char * buff, int len, unsigned int sum);
 extern inline unsigned int 
 csum_partial_inline(const unsigned char * buff, int len, unsigned int sum)
 {
+	register_pair rp;
+
+	rp.subreg.even = (unsigned long) buff;
+	rp.subreg.odd = (unsigned long) len;
 	__asm__ __volatile__ (
-		"    lr   2,%1\n"    /* address in gpr 2 */
-		"    lr   3,%2\n"    /* length in gpr 3 */
-		"0:  cksm %0,2\n"    /* do checksum on longs */
+		"0:  cksm %0,%1\n"    /* do checksum on longs */
 		"    jo   0b\n"
-                : "+&d" (sum)
-		: "d" (buff), "d" (len)
-                : "cc", "2", "3" );
+                : "+&d" (sum), "+&a" (rp) : : "cc" );
 	return sum;
 }
 
@@ -67,19 +67,26 @@ csum_partial_copy(const char *src, char *dst, int len,unsigned int sum)
  *
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
+ *
+ * Copy from userspace and compute checksum.  If we catch an exception
+ * then zero the rest of the buffer.
  */
-
 extern inline unsigned int 
-csum_partial_copy_from_user(const char *src, char *dst,
-                            int len, unsigned int sum, int *errp)
+csum_partial_copy_from_user (const char *src, char *dst,
+                                          int len, unsigned int sum,
+                                          int *err_ptr)
 {
-	if (copy_from_user(dst, src, len)) {
-		*errp = -EFAULT;
-		memset(dst, 0, len);
-		return sum;
-        }
-        return csum_partial(dst, len, sum);
+	int missing;
+
+	missing = copy_from_user(dst, src, len);
+	if (missing) {
+		memset(dst + len - missing, 0, missing);
+		*err_ptr = -EFAULT;
+	}
+		
+	return csum_partial(dst, len, sum);
 }
+
 
 extern inline unsigned int
 csum_partial_copy_nocheck (const char *src, char *dst, int len, unsigned int sum)
@@ -97,14 +104,16 @@ unsigned short csum_fold(unsigned int sum);
 extern inline unsigned short
 csum_fold(unsigned int sum)
 {
+	register_pair rp;
+
 	__asm__ __volatile__ (
-		"    sr   3,3\n"   /* %0 = H*65536 + L */
-		"    lr   2,%0\n"  /* %0 = H L, R2/R3 = H L / 0 0 */
-		"    srdl 2,16\n"  /* %0 = H L, R2/R3 = 0 H / L 0 */
-		"    alr  2,3\n"   /* %0 = H L, R2/R3 = L H / L 0 */
-		"    alr  %0,2\n"  /* %0 = H+L+C L+H */
-                "    srl  %0,16\n" /* %0 = H+L+C */
-		: "+&d" (sum) : : "cc", "2", "3");
+		"    slr  %N1,%N1\n" /* %0 = H L */
+		"    lr   %1,%0\n"   /* %0 = H L, %1 = H L 0 0 */
+		"    srdl %1,16\n"   /* %0 = H L, %1 = 0 H L 0 */
+		"    alr  %1,%N1\n"  /* %0 = H L, %1 = L H L 0 */
+		"    alr  %0,%1\n"   /* %0 = H+L+C L+H */
+		"    srl  %0,16\n"   /* %0 = H+L+C */
+		: "+&d" (sum), "=d" (rp) : : "cc" );
 	return ((unsigned short) ~sum);
 }
 #endif
@@ -117,17 +126,16 @@ csum_fold(unsigned int sum)
 extern inline unsigned short
 ip_fast_csum(unsigned char *iph, unsigned int ihl)
 {
+	register_pair rp;
 	unsigned long sum;
 
+	rp.subreg.even = (unsigned long) iph;
+	rp.subreg.odd = (unsigned long) ihl*4;
         __asm__ __volatile__ (
 		"    sr   %0,%0\n"   /* set sum to zero */
-                "    lr   2,%1\n"    /* address in gpr 2 */
-                "    lr   3,%2\n"    /* length in gpr 3 */
-                "0:  cksm %0,2\n"    /* do checksum on longs */
+                "0:  cksm %0,%1\n"   /* do checksum on longs */
                 "    jo   0b\n"
-                : "=&d" (sum)
-                : "d" (iph), "d" (ihl*4)
-                : "cc", "2", "3" );
+                : "=&d" (sum), "+&a" (rp) : : "cc" );
         return csum_fold(sum);
 }
 
@@ -141,20 +149,24 @@ csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr,
                    unsigned int sum)
 {
 	__asm__ __volatile__ (
-		"    sll   %3,16\n"
-		"    or    %3,%4\n"  /* newproto=proto<<16 in hiword, len in lowword */
-		"    alr   %1,%2\n"  /* saddr+=daddr */
-		"    brc   12,0f\n"
-		"    ahi   %1,1\n"   /* add carry */
-		"0:  alr   %1,%3\n"  /* add saddr+=newproto */
-		"    brc   12,1f\n"
-		"    ahi   %1,1\n"   /* add carry again */
-		"1:  alr   %0,%1\n"  /* sum+=saddr */
+                "    alr   %0,%1\n"  /* sum += saddr */
+                "    brc   12,0f\n"
+		"    ahi   %0,1\n"   /* add carry */
+		"0:"
+		: "+&d" (sum) : "d" (saddr) : "cc" );
+	__asm__ __volatile__ (
+                "    alr   %0,%1\n"  /* sum += daddr */
+                "    brc   12,1f\n"
+                "    ahi   %0,1\n"   /* add carry */
+		"1:"
+		: "+&d" (sum) : "d" (daddr) : "cc" );
+	__asm__ __volatile__ (
+                "    alr   %0,%1\n"  /* sum += (len<<16) + (proto<<8) */
 		"    brc   12,2f\n"
-		"    ahi   %0,1\n"   /* add carry again */
+		"    ahi   %0,1\n"   /* add carry */
 		"2:"
 		: "+&d" (sum)
-		: "d" (saddr), "d" (daddr), "d" (proto), "d" (len)
+		: "d" (((unsigned int) len<<16) + (unsigned int) proto)
 		: "cc" );
 	return sum;
 }

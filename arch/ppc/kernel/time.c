@@ -1,5 +1,4 @@
 /*
- * $Id: time.c,v 1.57 1999/10/21 03:08:16 cort Exp $
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -50,6 +49,7 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/timex.h>
 #include <linux/kernel_stat.h>
@@ -67,7 +67,9 @@
 
 #include <asm/time.h>
 
-void smp_local_timer_interrupt(struct pt_regs *);
+unsigned long disarm_decr[NR_CPUS];
+
+extern int do_sys_settimeofday(struct timeval *tv, struct timezone *tz);
 
 /* keep track of when we need to update the rtc */
 time_t last_rtc_update;
@@ -82,7 +84,11 @@ unsigned tb_last_stamp;
 
 extern unsigned long wall_jiffies;
 
-static long time_offset;
+static long timezone_offset;
+
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+
+EXPORT_SYMBOL(rtc_lock);
 
 /* Timer interrupt helper function */
 static inline int tb_delta(unsigned *jiffy_stamp) {
@@ -97,6 +103,36 @@ static inline int tb_delta(unsigned *jiffy_stamp) {
 	return delta;
 }
 
+extern unsigned long prof_cpu_mask;
+extern unsigned int * prof_buffer;
+extern unsigned long prof_len;
+extern unsigned long prof_shift;
+extern char _stext;
+
+static inline void ppc_do_profile (unsigned long nip)
+{
+	if (!prof_buffer)
+		return;
+
+	/*
+	 * Only measure the CPUs specified by /proc/irq/prof_cpu_mask.
+	 * (default is all CPUs.)
+	 */
+	if (!((1<<smp_processor_id()) & prof_cpu_mask))
+		return;
+
+	nip -= (unsigned long) &_stext;
+	nip >>= prof_shift;
+	/*
+	 * Don't ignore out-of-bounds EIP values silently,
+	 * put them into the last histogram slot, so if
+	 * present, they will show up as a sharp peak.
+	 */
+	if (nip > prof_len-1)
+		nip = prof_len-1;
+	atomic_inc((atomic_t *)&prof_buffer[nip]);
+}
+
 /*
  * timer_interrupt - gets called when the decrementer overflows,
  * with interrupts disabled.
@@ -107,12 +143,25 @@ int timer_interrupt(struct pt_regs * regs)
 	int next_dec;
 	unsigned long cpu = smp_processor_id();
 	unsigned jiffy_stamp = last_jiffy_stamp(cpu);
+	extern void do_IRQ(struct pt_regs *);
+
+	if (atomic_read(&ppc_n_lost_interrupts) != 0)
+		do_IRQ(regs);
 
 	hardirq_enter(cpu);
-	
-	do { 
+
+	while ((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) <= 0) {
 		jiffy_stamp += tb_ticks_per_jiffy;
-	  	if (smp_processor_id()) continue;
+		if (!user_mode(regs))
+			ppc_do_profile(instruction_pointer(regs));
+		if (unlikely(!heartbeat_count(cpu)--)
+				&& heartbeat_reset(cpu)) {
+			ppc_md.heartbeat();
+			heartbeat_count(cpu) = heartbeat_reset(cpu);
+		}
+	  	if (cpu)
+			continue;
+
 		/* We are in an interrupt, no need to save/restore flags */
 		write_lock(&xtime_lock);
 		tb_last_stamp = jiffy_stamp;
@@ -134,29 +183,31 @@ int timer_interrupt(struct pt_regs * regs)
 		 * We should have an rtc call that only sets the minutes and
 		 * seconds like on Intel to avoid problems with non UTC clocks.
 		 */
-		if ( (time_status & STA_UNSYNC) == 0 &&
+		if ( ppc_md.set_rtc_time && (time_status & STA_UNSYNC) == 0 &&
 		     xtime.tv_sec - last_rtc_update >= 659 &&
 		     abs(xtime.tv_usec - (1000000-1000000/HZ)) < 500000/HZ &&
 		     jiffies - wall_jiffies == 1) {
-		  	if (ppc_md.set_rtc_time(xtime.tv_sec+1 + time_offset) == 0)
+		  	if (ppc_md.set_rtc_time(xtime.tv_sec+1 + timezone_offset) == 0)
 				last_rtc_update = xtime.tv_sec+1;
 			else
 				/* Try again one minute later */
 				last_rtc_update += 60;
 		}
 		write_unlock(&xtime_lock);
-	} while((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) < 0);
-	set_dec(next_dec);
+	}
+	if (!disarm_decr[cpu])
+		set_dec(next_dec);
 	last_jiffy_stamp(cpu) = jiffy_stamp;
 
 #ifdef CONFIG_SMP
 	smp_local_timer_interrupt(regs);
-#endif		
-	
-	if (ppc_md.heartbeat && !ppc_md.heartbeat_count--)
-		ppc_md.heartbeat();
-	
+#endif /* CONFIG_SMP */
+
 	hardirq_exit(cpu);
+
+	if (softirq_pending(cpu))
+		do_softirq();
+
 	return 1; /* lets ret_from_int know we can do checks */
 }
 
@@ -176,14 +227,14 @@ void do_gettimeofday(struct timeval *tv)
 	/* As long as timebases are not in sync, gettimeofday can only
 	 * have jiffy resolution on SMP.
 	 */
-	if (_machine != _MACH_Pmac)
+	if (!smp_tb_synchronized)
 		delta = 0;
 #endif /* CONFIG_SMP */
 	lost_ticks = jiffies - wall_jiffies;
 	read_unlock_irqrestore(&xtime_lock, flags);
 
 	usec += mulhwu(tb_to_us, tb_ticks_per_jiffy * lost_ticks + delta);
-	while (usec > 1000000) {
+	while (usec >= 1000000) {
 	  	sec++;
 		usec -= 1000000;
 	}
@@ -211,7 +262,7 @@ void do_settimeofday(struct timeval *tv)
 	 * harmful to relatively short timers.
 	 */
 
-	/* This works perfectly on SMP only if the tb are in sync but 
+	/* This works perfectly on SMP only if the tb are in sync but
 	 * guarantees an error < 1 jiffy even if they are off by eons,
 	 * still reasonable when gettimeofday resolution is 1 jiffy.
 	 */
@@ -220,13 +271,13 @@ void do_settimeofday(struct timeval *tv)
 	new_sec = tv->tv_sec;
 	new_usec = tv->tv_usec - mulhwu(tb_to_us, tb_delta);
 	while (new_usec <0) {
-		new_sec--; 
+		new_sec--;
 		new_usec += 1000000;
 	}
 	xtime.tv_usec = new_usec;
 	xtime.tv_sec = new_sec;
 
-	/* In case of a large backwards jump in time with NTP, we want the 
+	/* In case of a large backwards jump in time with NTP, we want the
 	 * clock to be updated as soon as the PLL is again in lock.
 	 */
 	last_rtc_update = new_sec - 658;
@@ -239,16 +290,14 @@ void do_settimeofday(struct timeval *tv)
 	write_unlock_irqrestore(&xtime_lock, flags);
 }
 
-
+/* This function is only called on the boot processor */
 void __init time_init(void)
 {
 	time_t sec, old_sec;
 	unsigned old_stamp, stamp, elapsed;
-	/* This function is only called on the boot processor */
-	unsigned long flags;
 
         if (ppc_md.time_init != NULL)
-                time_offset = ppc_md.time_init();
+                timezone_offset = ppc_md.time_init();
 
 	if (__USE_RTC()) {
 		/* 601 processor: dec counts down by 128 every 128ns */
@@ -259,52 +308,55 @@ void __init time_init(void)
                 ppc_md.calibrate_decr();
 	}
 
-	/* Now that the decrementer is calibrated, it can be used in case the 
+	/* Now that the decrementer is calibrated, it can be used in case the
 	 * clock is stuck, but the fact that we have to handle the 601
 	 * makes things more complex. Repeatedly read the RTC until the
-	 * next second boundary to try to achieve some precision...
+	 * next second boundary to try to achieve some precision.  If there
+	 * is no RTC, we still need to set tb_last_stamp and
+	 * last_jiffy_stamp(cpu 0) to the current stamp.
 	 */
 	stamp = get_native_tbl();
-	sec = ppc_md.get_rtc_time();
-	elapsed = 0;
-	do {
-		old_stamp = stamp; 
-		old_sec = sec;
-		stamp = get_native_tbl();
-		if (__USE_RTC() && stamp < old_stamp) old_stamp -= 1000000000;
-		elapsed += stamp - old_stamp;
+	if (ppc_md.get_rtc_time) {
 		sec = ppc_md.get_rtc_time();
-	} while ( sec == old_sec && elapsed < 2*HZ*tb_ticks_per_jiffy);
-	if (sec==old_sec) {
-		printk("Warning: real time clock seems stuck!\n");
+		elapsed = 0;
+		do {
+			old_stamp = stamp;
+			old_sec = sec;
+			stamp = get_native_tbl();
+			if (__USE_RTC() && stamp < old_stamp)
+				old_stamp -= 1000000000;
+			elapsed += stamp - old_stamp;
+			sec = ppc_md.get_rtc_time();
+		} while ( sec == old_sec && elapsed < 2*HZ*tb_ticks_per_jiffy);
+		if (sec == old_sec)
+			printk("Warning: real time clock seems stuck!\n");
+		xtime.tv_sec = sec;
+		xtime.tv_usec = 0;
+		/* No update now, we just read the time from the RTC ! */
+		last_rtc_update = xtime.tv_sec;
 	}
-	write_lock_irqsave(&xtime_lock, flags);
-	xtime.tv_sec = sec;
+
 	last_jiffy_stamp(0) = tb_last_stamp = stamp;
-	xtime.tv_usec = 0;
-	/* No update now, we just read the time from the RTC ! */
-	last_rtc_update = xtime.tv_sec;
-	write_unlock_irqrestore(&xtime_lock, flags);
+
 	/* Not exact, but the timer interrupt takes care of this */
 	set_dec(tb_ticks_per_jiffy);
 
 	/* If platform provided a timezone (pmac), we correct the time
 	 * using do_sys_settimeofday() which in turn calls warp_clock()
 	 */
-        if (time_offset) {
+        if (timezone_offset) {
         	struct timezone tz;
-        	tz.tz_minuteswest = -time_offset / 60;
+        	tz.tz_minuteswest = -timezone_offset / 60;
         	tz.tz_dsttime = 0;
         	do_sys_settimeofday(NULL, &tz);
         }
 }
 
-#define TICK_SIZE tick
-#define FEBRUARY	2
-#define	STARTOFTIME	1970
-#define SECDAY		86400L
-#define SECYR		(SECDAY * 365)
-#define	leapyear(year)		((year) % 4 == 0)
+#define FEBRUARY		2
+#define	STARTOFTIME		1970
+#define SECDAY			86400L
+#define SECYR			(SECDAY * 365)
+#define	leapyear(y)		((!(y % 4) && (y % 100)) || !(y % 400))
 #define	days_in_year(a) 	(leapyear(a) ? 366 : 365)
 #define	days_in_month(a) 	(month_days[(a) - 1])
 
@@ -312,55 +364,12 @@ static int month_days[12] = {
 	31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 };
 
-/*
- * This only works for the Gregorian calendar - i.e. after 1752 (in the UK)
- */
-void GregorianDay(struct rtc_time * tm)
-{
-	int leapsToDate;
-	int lastYear;
-	int day;
-	int MonthOffset[] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
-
-	lastYear=tm->tm_year-1;
-
-	/*
-	 * Number of leap corrections to apply up to end of last year
-	 */
-	leapsToDate = lastYear/4 - lastYear/100 + lastYear/400;
-
-	/*
-	 * This year is a leap year if it is divisible by 4 except when it is
-	 * divisible by 100 unless it is divisible by 400
-	 *
-	 * e.g. 1904 was a leap year, 1900 was not, 1996 is, and 2000 will be
-	 */
-	if((tm->tm_year%4==0) &&
-	   ((tm->tm_year%100!=0) || (tm->tm_year%400==0)) &&
-	   (tm->tm_mon>2))
-	{
-		/*
-		 * We are past Feb. 29 in a leap year
-		 */
-		day=1;
-	}
-	else
-	{
-		day=0;
-	}
-
-	day += lastYear*365 + leapsToDate + MonthOffset[tm->tm_mon-1] +
-		   tm->tm_mday;
-
-	tm->tm_wday=day%7;
-}
-
 void to_tm(int tim, struct rtc_time * tm)
 {
-	register int    i;
-	register long   hms, day;
+	register int i;
+	register long hms, day, gday;
 
-	day = tim / SECDAY;
+	gday = day = tim / SECDAY;
 	hms = tim % SECDAY;
 
 	/* Hours, minutes, seconds are easy */
@@ -385,9 +394,9 @@ void to_tm(int tim, struct rtc_time * tm)
 	tm->tm_mday = day + 1;
 
 	/*
-	 * Determine the day of week
+	 * Determine the day of week. Jan. 1, 1970 was a Thursday.
 	 */
-	GregorianDay(tm);
+	tm->tm_wday = (gday + 4) % 7;
 }
 
 /* Auxiliary function to compute scaling factors */

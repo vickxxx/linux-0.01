@@ -2,8 +2,10 @@
 #define _ASM_IA64_IOCTLS_H
 
 /*
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Based on <asm-i386/ioctls.h>
+ *
+ * Modified 1998, 1999
+ *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
  */
 
 #include <asm/ioctl.h>
@@ -11,7 +13,7 @@
 /* 0x54 is just a magic number to make these relatively unique ('T') */
 
 #define TCGETS		0x5401
-#define TCSETS		0x5402
+#define TCSETS		0x5402 /* Clashes with SNDCTL_TMR_START sound ioctl */
 #define TCSETSW		0x5403
 #define TCSETSF		0x5404
 #define TCGETA		0x5405
@@ -72,6 +74,7 @@
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
 #define TIOCGHAYESESP   0x545E  /* Get Hayes ESP configuration */
 #define TIOCSHAYESESP   0x545F  /* Set Hayes ESP configuration */
+#define FIOQSIZE	0x5460
 
 /* Used for packet mode */
 #define TIOCPKT_DATA		 0

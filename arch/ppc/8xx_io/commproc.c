@@ -1,4 +1,3 @@
-
 /*
  * General Purpose functions for the global management of the
  * Communication Processor Module.
@@ -28,12 +27,14 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
-#include <asm/irq.h>
+#include <linux/irq.h>
 #include <asm/mpc8xx.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/8xx_immap.h>
-#include "commproc.h"
+#include <asm/commproc.h>
+
+extern int get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep);
 
 static	uint	dp_alloc_base;	/* Starting offset in DP ram */
 static	uint	dp_alloc_top;	/* Max offset + 1 */
@@ -42,17 +43,69 @@ static	uint	host_end;	/* end + 1 */
 cpm8xx_t	*cpmp;		/* Pointer to comm processor space */
 
 /* CPM interrupt vector functions.
-*/
+ *
+ * The cpm_vecs structure is only needed to support the cpm_install_handler()
+ * mechanism of installing CPM interrupt handlers.
+ */
 struct	cpm_action {
-	void	(*handler)(void *);
+	void	(*handler)(void *, struct pt_regs * regs);
 	void	*dev_id;
 };
 static	struct	cpm_action cpm_vecs[CPMVEC_NR];
 static	void	cpm_interrupt(int irq, void * dev, struct pt_regs * regs);
-static	void	cpm_error_interrupt(void *);
+static	void	cpm_error_interrupt(int irq, void *, struct pt_regs * regs);
+static	void	alloc_host_memory(void);
+
+/* Define a table of names to identify CPM interrupt handlers in
+ * /proc/interrupts.
+ */
+const char *cpm_int_name[] =
+	{ "error",	"PC4",		"PC5",		"SMC2",
+	  "SMC1",	"SPI",		"PC6",		"Timer 4",
+	  "",		"PC7",		"PC8",		"PC9",
+	  "Timer 3",	"",		"PC10",		"PC11",
+	  "I2C",	"RISC Timer",	"Timer 2",	"",
+	  "IDMA2",	"IDMA1",	"SDMA error",	"PC12",
+	  "PC13",	"Timer 1",	"PC14",		"SCC4",
+	  "SCC3",	"SCC2",		"SCC1",		"PC15"
+	};
+
+static void
+cpm_mask_irq(unsigned int irq)
+{
+	int cpm_vec = irq - CPM_IRQ_OFFSET;
+
+	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr &= ~(1 << cpm_vec);
+}
+
+static void
+cpm_unmask_irq(unsigned int irq)
+{
+	int cpm_vec = irq - CPM_IRQ_OFFSET;
+
+	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr |= (1 << cpm_vec);
+}
+
+static void
+cpm_eoi(unsigned int irq)
+{
+	int cpm_vec = irq - CPM_IRQ_OFFSET;
+
+	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cisr = (1 << cpm_vec);
+}
+
+struct hw_interrupt_type cpm_pic = {
+	" CPM      ",
+	NULL,
+	NULL,
+	cpm_unmask_irq,
+	cpm_mask_irq,
+	NULL,
+	cpm_eoi
+};
 
 void
-m8xx_cpm_reset(uint host_page_addr)
+m8xx_cpm_reset()
 {
 	volatile immap_t	 *imp;
 	volatile cpm8xx_t	*commproc;
@@ -61,13 +114,7 @@ m8xx_cpm_reset(uint host_page_addr)
 	imp = (immap_t *)IMAP_ADDR;
 	commproc = (cpm8xx_t *)&imp->im_cpm;
 
-#ifdef notdef
-	/* We can't do this.  It seems to blow away the microcode
-	 * patch that EPPC-Bug loaded for us.  EPPC-Bug uses SCC1 for
-	 * Ethernet, SMC1 for the console, and I2C for serial EEPROM.
-	 * Our own drivers quickly reset all of these.
-	 */
-
+#ifdef CONFIG_UCODE_PATCH
 	/* Perform a reset.
 	*/
 	commproc->cp_cpcr = (CPM_CR_RST | CPM_CR_FLG);
@@ -75,6 +122,8 @@ m8xx_cpm_reset(uint host_page_addr)
 	/* Wait for it.
 	*/
 	while (commproc->cp_cpcr & CPM_CR_FLG);
+
+	cpm_load_patch(imp);
 #endif
 
 	/* Set SDMA Bus Request priority 5.
@@ -82,7 +131,7 @@ m8xx_cpm_reset(uint host_page_addr)
 	 * this is what we realy want for some applications, but the
 	 * manual recommends it.
 	 * Bit 25, FAM can also be set to use FEC aggressive mode (860T).
-	*/
+	 */
 	imp->im_siu_conf.sc_sdcr = 1;
 
 	/* Reclaim the DP memory for our use.
@@ -90,17 +139,23 @@ m8xx_cpm_reset(uint host_page_addr)
 	dp_alloc_base = CPM_DATAONLY_BASE;
 	dp_alloc_top = dp_alloc_base + CPM_DATAONLY_SIZE;
 
-	/* Set the host page for allocation.
-	*/
-	host_buffer = host_page_addr;	/* Host virtual page address */
-	host_end = host_page_addr + PAGE_SIZE;
-	pte = va_to_pte(host_page_addr);
-	pte_val(*pte) |= _PAGE_NO_CACHE;
-	flush_tlb_page(init_mm.mmap, host_buffer);
-
 	/* Tell everyone where the comm processor resides.
 	*/
 	cpmp = (cpm8xx_t *)commproc;
+}
+
+/* We used to do this earlier, but have to postpone as long as possible
+ * to ensure the kernel VM is now running.
+ */
+static void
+alloc_host_memory()
+{
+	uint	physaddr;
+
+	/* Set the host page for allocation.
+	*/
+	host_buffer = (uint)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &physaddr);
+	host_end = host_buffer + PAGE_SIZE;
 }
 
 /* This is called during init_IRQ.  We used to do it above, but this
@@ -109,6 +164,8 @@ m8xx_cpm_reset(uint host_page_addr)
 void
 cpm_interrupt_init(void)
 {
+	int i;
+
 	/* Initialize the CPM interrupt controller.
 	*/
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cicr =
@@ -116,41 +173,54 @@ cpm_interrupt_init(void)
 		((CPM_INTERRUPT/2) << 13) | CICR_HP_MASK;
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr = 0;
 
+        /* install the CPM interrupt controller routines for the CPM
+         * interrupt vectors
+         */
+        for ( i = CPM_IRQ_OFFSET ; i < CPM_IRQ_OFFSET + NR_CPM_INTS ; i++ )
+                irq_desc[i].handler = &cpm_pic;
+
 	/* Set our interrupt handler with the core CPU.
 	*/
-	if (request_8xxirq(CPM_INTERRUPT, cpm_interrupt, 0, "cpm", NULL) != 0)
+	if (request_irq(CPM_INTERRUPT, cpm_interrupt, 0, "CPM cascade",
+				NULL) != 0)
 		panic("Could not allocate CPM IRQ!");
 
 	/* Install our own error handler.
 	*/
-	cpm_install_handler(CPMVEC_ERROR, cpm_error_interrupt, NULL);
+	if (request_irq(CPM_IRQ_OFFSET + CPMVEC_ERROR, cpm_error_interrupt,
+				0, cpm_int_name[CPMVEC_ERROR], NULL) != 0)
+		panic("Could not allocate CPM error IRQ!");
+
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cicr |= CICR_IEN;
 }
 
-/* CPM interrupt controller interrupt.
-*/
-static	void
-cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
+/*
+ * Get the CPM interrupt vector.
+ */
+int
+cpm_get_irq(struct pt_regs *regs)
 {
-	uint	vec;
+	int cpm_vec;
 
 	/* Get the vector by setting the ACK bit and then reading
 	 * the register.
 	 */
 	((volatile immap_t *)IMAP_ADDR)->im_cpic.cpic_civr = 1;
-	vec = ((volatile immap_t *)IMAP_ADDR)->im_cpic.cpic_civr;
-	vec >>= 11;
+	cpm_vec = ((volatile immap_t *)IMAP_ADDR)->im_cpic.cpic_civr;
+	cpm_vec >>= 11;
 
-	if (cpm_vecs[vec].handler != 0)
-		(*cpm_vecs[vec].handler)(cpm_vecs[vec].dev_id);
-	else
-		((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr &= ~(1 << vec);
+	return cpm_vec;
+}
 
-	/* After servicing the interrupt, we have to remove the status
-	 * indicator.
+/* CPM interrupt controller cascade interrupt.
+*/
+static	void
+cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
+{
+	/* This interrupt handler never actually gets called.  It is
+	 * installed only to unmask the CPM cascade interrupt in the SIU
+	 * and to make the CPM cascade interrupt visible in /proc/interrupts.
 	 */
-	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cisr = (1 << vec);
-	
 }
 
 /* The CPM can generate the error interrupt when there is a race condition
@@ -159,31 +229,69 @@ cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
  * tests in the interrupt handler.
  */
 static	void
-cpm_error_interrupt(void *dev)
+cpm_error_interrupt(int irq, void *dev, struct pt_regs *regs)
 {
+}
+
+/* A helper function to translate the handler prototype required by
+ * request_irq() to the handler prototype required by cpm_install_handler().
+ */
+static void
+cpm_handler_helper(int irq, void *dev_id, struct pt_regs *regs)
+{
+	int cpm_vec = irq - CPM_IRQ_OFFSET;
+
+	(*cpm_vecs[cpm_vec].handler)(dev_id, regs);
 }
 
 /* Install a CPM interrupt handler.
-*/
+ * This routine accepts a CPM interrupt vector in the range 0 to 31.
+ * This routine is retained for backward compatibility.  Rather than using
+ * this routine to install a CPM interrupt handler, you can now use
+ * request_irq() with an IRQ in the range CPM_IRQ_OFFSET to
+ * CPM_IRQ_OFFSET + NR_CPM_INTS - 1 (16 to 47).
+ *
+ * Notice that the prototype of the interrupt handler function must be
+ * different depending on whether you install the handler with
+ * request_irq() or cpm_install_handler().
+ */
 void
-cpm_install_handler(int vec, void (*handler)(void *), void *dev_id)
+cpm_install_handler(int cpm_vec, void (*handler)(void *, struct pt_regs *regs),
+		    void *dev_id)
 {
-	if (cpm_vecs[vec].handler != 0)
-		printk("CPM interrupt %x replacing %x\n",
-			(uint)handler, (uint)cpm_vecs[vec].handler);
-	cpm_vecs[vec].handler = handler;
-	cpm_vecs[vec].dev_id = dev_id;
-	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr |= (1 << vec);
+	int err;
+
+	/* If null handler, assume we are trying to free the IRQ.
+	*/
+	if (!handler) {
+		free_irq(CPM_IRQ_OFFSET + cpm_vec, dev_id);
+		return;
+	}
+
+	if (cpm_vecs[cpm_vec].handler != 0)
+		printk(KERN_INFO "CPM interrupt %x replacing %x\n",
+			(uint)handler, (uint)cpm_vecs[cpm_vec].handler);
+	cpm_vecs[cpm_vec].handler = handler;
+	cpm_vecs[cpm_vec].dev_id = dev_id;
+
+	if ((err = request_irq(CPM_IRQ_OFFSET + cpm_vec, cpm_handler_helper,
+					0, cpm_int_name[cpm_vec], dev_id)))
+		printk(KERN_ERR "request_irq() returned %d for CPM vector %d\n",
+				err, cpm_vec);
 }
 
 /* Free a CPM interrupt handler.
-*/
+ * This routine accepts a CPM interrupt vector in the range 0 to 31.
+ * This routine is retained for backward compatibility.
+ */
 void
-cpm_free_handler(int vec)
+cpm_free_handler(int cpm_vec)
 {
-	cpm_vecs[vec].handler = NULL;
-	cpm_vecs[vec].dev_id = NULL;
-	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr &= ~(1 << vec);
+	request_irq(CPM_IRQ_OFFSET + cpm_vec, NULL, 0, 0,
+		cpm_vecs[cpm_vec].dev_id);
+
+	cpm_vecs[cpm_vec].handler = NULL;
+	cpm_vecs[cpm_vec].dev_id = NULL;
 }
 
 /* Allocate some memory from the dual ported ram.  We may want to
@@ -212,6 +320,9 @@ m8xx_cpm_hostalloc(uint size)
 {
 	uint	retloc;
 
+	if (host_buffer == 0)
+		alloc_host_memory();
+
 	if ((host_buffer + size) >= host_end)
 		return(0);
 
@@ -226,8 +337,9 @@ m8xx_cpm_hostalloc(uint size)
  * The internal baud rate clock is the system clock divided by 16.
  * This assumes the baudrate is 16x oversampled by the uart.
  */
-#define BRG_INT_CLK	(((bd_t *)__res)->bi_intfreq * 1000000)
-#define BRG_UART_CLK	(BRG_INT_CLK/16)
+#define BRG_INT_CLK		(((bd_t *)__res)->bi_intfreq)
+#define BRG_UART_CLK		(BRG_INT_CLK/16)
+#define BRG_UART_CLK_DIV16	(BRG_UART_CLK/16)
 
 void
 m8xx_cpm_setbrg(uint brg, uint rate)
@@ -238,6 +350,12 @@ m8xx_cpm_setbrg(uint brg, uint rate)
 	*/
 	bp = (uint *)&cpmp->cp_brgc1;
 	bp += brg;
-	*bp = ((BRG_UART_CLK / rate) << 1) | CPM_BRG_EN;
+	/* The BRG has a 12-bit counter.  For really slow baud rates (or
+	 * really fast processors), we may have to further divide by 16.
+	 */
+	if (((BRG_UART_CLK / rate) - 1) < 4096)
+		*bp = (((BRG_UART_CLK / rate) - 1) << 1) | CPM_BRG_EN;
+	else
+		*bp = (((BRG_UART_CLK_DIV16 / rate) - 1) << 1) |
+						CPM_BRG_EN | CPM_BRG_DIV16;
 }
-

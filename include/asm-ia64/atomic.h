@@ -9,12 +9,12 @@
  * "int" types were carefully placed so as to ensure proper operation
  * of the macros.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/types.h>
 
-#include <asm/system.h>
+#include <asm/intrinsics.h>
 
 /*
  * On IA-64, counter must always be volatile to ensure that that the
@@ -90,5 +90,11 @@ atomic_add_negative (int i, atomic_t *v)
 #define atomic_sub(i,v)			atomic_sub_return((i), (v))
 #define atomic_inc(v)			atomic_add(1, (v))
 #define atomic_dec(v)			atomic_sub(1, (v))
+
+/* Atomic operations are already serializing */
+#define smp_mb__before_atomic_dec()	barrier()
+#define smp_mb__after_atomic_dec()	barrier()
+#define smp_mb__before_atomic_inc()	barrier()
+#define smp_mb__after_atomic_inc()	barrier()
 
 #endif /* _ASM_IA64_ATOMIC_H */

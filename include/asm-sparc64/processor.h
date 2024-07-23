@@ -1,4 +1,4 @@
-/* $Id: processor.h,v 1.68 2000/12/31 10:05:43 davem Exp $
+/* $Id: processor.h,v 1.80.2.1 2002/02/02 02:11:52 kanoj Exp $
  * include/asm-sparc64/processor.h
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -20,6 +20,8 @@
 #include <asm/ptrace.h>
 #include <asm/signal.h>
 #include <asm/segment.h>
+#include <asm/page.h>
+#include <asm/delay.h>
 
 /* Bus types */
 #define EISA_bus 0
@@ -31,11 +33,29 @@
 #define wp_works_ok 1
 #define wp_works_ok__is_a_macro /* for versions in ksyms.c */
 
-/* User lives in his very own context, and cannot reference us. */
+/*
+ * User lives in his very own context, and cannot reference us. Note
+ * that TASK_SIZE is a misnomer, it really gives maximum user virtual 
+ * address that the kernel will allocate out.
+ */
+#define VA_BITS		44
 #ifndef __ASSEMBLY__
-#define TASK_SIZE	((unsigned long)-PGDIR_SIZE)
+#define VPTE_SIZE	(1UL << (VA_BITS - PAGE_SHIFT + 3))
 #else
-#define TASK_SIZE	0xfffffffc00000000
+#define VPTE_SIZE	(1 << (VA_BITS - PAGE_SHIFT + 3))
+#endif
+#define TASK_SIZE	((unsigned long)-VPTE_SIZE)
+
+/*
+ * The vpte base must be able to hold the entire vpte, half
+ * of which lives above, and half below, the base. And it
+ * is placed as close to the highest address range as possible.
+ */
+#define VPTE_BASE_SPITFIRE	(-(VPTE_SIZE/2))
+#if 1
+#define VPTE_BASE_CHEETAH	VPTE_BASE_SPITFIRE
+#else
+#define VPTE_BASE_CHEETAH	0xffe0000000000000
 #endif
 
 #ifndef __ASSEMBLY__
@@ -60,9 +80,17 @@ struct thread_struct {
 	/* D$ line 2, 3, 4 */
 	struct pt_regs *kregs;
 	unsigned long *utraps;
-	unsigned char gsr[7];
-	unsigned char __pad3;
+	unsigned long gsr[7];
 	unsigned long xfsr[7];
+
+#ifdef CONFIG_DEBUG_SPINLOCK
+	/* How many spinlocks held by this thread.
+	 * Used with spin lock debugging to catch tasks
+	 * sleeping illegally with locks held.
+	 */
+	int smp_lock_count;
+	unsigned int smp_lock_pc;
+#endif
 
 	struct reg_window reg_window[NSWINS];
 	unsigned long rwbuf_stkptrs[NSWINS];
@@ -80,16 +108,15 @@ struct thread_struct {
 #define SPARC_FLAG_32BIT        0x04    /* task is older 32-bit binary		*/
 #define SPARC_FLAG_NEWCHILD     0x08    /* task is just-spawned child process	*/
 #define SPARC_FLAG_PERFCTR	0x10    /* task has performance counters active	*/
-#define SPARC_FLAG_MMAPSHARED	0x20    /* task wants a shared mmap             */
+#define SPARC_FLAG_ABI_PENDING	0x20    /* change of SPARC_FLAG_32BIT pending	*/
+#define SPARC_FLAG_SYS_SUCCESS	0x40    /* Force successful syscall return.	*/
 
 #define FAULT_CODE_WRITE	0x01	/* Write access, implies D-TLB		*/
 #define FAULT_CODE_DTLB		0x02	/* Miss happened in D-TLB		*/
 #define FAULT_CODE_ITLB		0x04	/* Miss happened in I-TLB		*/
 #define FAULT_CODE_WINFIXUP	0x08	/* Miss happened during spill/fill	*/
 
-#define INIT_MMAP { &init_mm, 0xfffff80000000000, 0xfffff80001000000, \
-		    NULL, PAGE_SHARED , VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
-
+#ifndef CONFIG_DEBUG_SPINLOCK
 #define INIT_THREAD  {					\
 /* ksp, wstate, cwp, flags, current_ds, */ 		\
    0,   0,      0,   0,     KERNEL_DS,			\
@@ -97,8 +124,8 @@ struct thread_struct {
    0,       0,       0,          0,			\
 /* fault_address, fpsaved, __pad2, kregs, */		\
    0,             { 0 },   0,      0,			\
-/* utraps, gsr,   __pad3, xfsr, */			\
-   0,	   { 0 }, 0,      { 0 },			\
+/* utraps, gsr,   xfsr, */				\
+   0,	   { 0 }, { 0 },				\
 /* reg_window */					\
    { { { 0, }, { 0, } }, }, 				\
 /* rwbuf_stkptrs */					\
@@ -106,6 +133,34 @@ struct thread_struct {
 /* user_cntd0, user_cndd1, kernel_cntd0, kernel_cntd0, pcr_reg */ \
    0,          0,          0,		 0,            0, \
 }
+#else /* CONFIG_DEBUG_SPINLOCK */
+#define INIT_THREAD  {					\
+/* ksp, wstate, cwp, flags, current_ds, */ 		\
+   0,   0,      0,   0,     KERNEL_DS,			\
+/* w_saved, fpdepth, fault_code, use_blkcommit, */	\
+   0,       0,       0,          0,			\
+/* fault_address, fpsaved, __pad2, kregs, */		\
+   0,             { 0 },   0,      0,			\
+/* utraps, gsr,   xfsr,  smp_lock_count, smp_lock_pc, */\
+   0,	   { 0 }, { 0 }, 0,		 0,		\
+/* reg_window */					\
+   { { { 0, }, { 0, } }, }, 				\
+/* rwbuf_stkptrs */					\
+   { 0, 0, 0, 0, 0, 0, 0, },				\
+/* user_cntd0, user_cndd1, kernel_cntd0, kernel_cntd0, pcr_reg */ \
+   0,          0,          0,		 0,            0, \
+}
+#endif /* !(CONFIG_DEBUG_SPINLOCK) */
+
+#ifdef __KERNEL__
+#if PAGE_SHIFT == 13
+#define THREAD_SIZE (2*PAGE_SIZE)
+#define THREAD_SHIFT (PAGE_SHIFT + 1)
+#else /* PAGE_SHIFT == 13 */
+#define THREAD_SIZE PAGE_SIZE
+#define THREAD_SHIFT PAGE_SHIFT
+#endif /* PAGE_SHIFT == 13 */
+#endif /* __KERNEL__ */
 
 #ifndef __ASSEMBLY__
 
@@ -169,7 +224,7 @@ do { \
 	"stx		%%g0, [%0 + %2 + 0x78]\n\t" \
 	"wrpr		%%g0, (1 << 3), %%wstate\n\t" \
 	: \
-	: "r" (regs), "r" (sp - REGWIN_SZ - STACK_BIAS), \
+	: "r" (regs), "r" (sp - sizeof(struct reg_window) - STACK_BIAS), \
 	  "i" ((const unsigned long)(&((struct pt_regs *)0)->u_regs[0]))); \
 } while(0)
 
@@ -209,14 +264,14 @@ do { \
 	"stx		%%g0, [%0 + %2 + 0x78]\n\t" \
 	"wrpr		%%g0, (2 << 3), %%wstate\n\t" \
 	: \
-	: "r" (regs), "r" (sp - REGWIN32_SZ), \
+	: "r" (regs), "r" (sp - sizeof(struct reg_window32)), \
 	  "i" ((const unsigned long)(&((struct pt_regs *)0)->u_regs[0]))); \
 } while(0)
 
 /* Free all resources held by a thread. */
 #define release_thread(tsk)		do { } while(0)
 
-extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+extern pid_t arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 #define copy_segments(tsk, mm)		do { } while (0)
 #define release_segments(mm)		do { } while (0)
@@ -237,7 +292,7 @@ extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 	do { \
 		/* Bogus frame pointer? */ \
 		if (fp < (task_base + sizeof(struct task_struct)) || \
-		    fp >= (task_base + (2 * PAGE_SIZE))) \
+		    fp >= (task_base + THREAD_SIZE)) \
 			break; \
 		rw = (struct reg_window *) fp; \
 		pc = rw->ins[7]; \
@@ -255,14 +310,20 @@ __out:	__ret; \
 #define KSTK_ESP(tsk)  ((tsk)->thread.kregs->u_regs[UREG_FP])
 
 #ifdef __KERNEL__
-#define THREAD_SIZE (2*PAGE_SIZE)
 /* Allocation and freeing of task_struct and kernel stack. */
+#if PAGE_SHIFT == 13
 #define alloc_task_struct()   ((struct task_struct *)__get_free_pages(GFP_KERNEL, 1))
 #define free_task_struct(tsk) free_pages((unsigned long)(tsk),1)
+#else /* PAGE_SHIFT == 13 */
+#define alloc_task_struct()   ((struct task_struct *)__get_free_pages(GFP_KERNEL, 0))
+#define free_task_struct(tsk) free_pages((unsigned long)(tsk),0)
+#endif /* PAGE_SHIFT == 13 */
 #define get_task_struct(tsk)      atomic_inc(&virt_to_page(tsk)->count)
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
+
+#define cpu_relax()	do { udelay(1 + smp_processor_id()); barrier(); } while (0)
 
 #endif /* __KERNEL__ */
 

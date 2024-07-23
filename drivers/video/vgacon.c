@@ -34,6 +34,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
@@ -43,7 +44,7 @@
 #include <linux/console_struct.h>
 #include <linux/string.h>
 #include <linux/kd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vt_kern.h>
 #include <linux/selection.h>
 #include <linux/spinlock.h>
@@ -108,14 +109,7 @@ static int	       vga_can_do_color = 0;	/* Do we support colors? */
 static unsigned int    vga_default_font_height;	/* Height of default screen font */
 static unsigned char   vga_video_type;		/* Card type */
 static unsigned char   vga_hardscroll_enabled;
-#ifdef CONFIG_IA64_SOFTSDV_HACKS
-/*
- * SoftSDV doesn't have hardware assist VGA scrolling 
- */
-static unsigned char   vga_hardscroll_user_enable = 0;
-#else
 static unsigned char   vga_hardscroll_user_enable = 1;
-#endif
 static unsigned char   vga_font_is_default = 1;
 static int	       vga_vesa_blanked;
 static int	       vga_palette_blanked;
@@ -486,7 +480,7 @@ static int vgacon_switch(struct vc_data *c)
 	vga_video_num_columns = c->vc_cols;
 	vga_video_num_lines = c->vc_rows;
 	if (!vga_is_gfx)
-		scr_memcpyw_to((u16 *) c->vc_origin, (u16 *) c->vc_screenbuf, c->vc_screenbuf_size);
+		scr_memcpyw((u16 *) c->vc_origin, (u16 *) c->vc_screenbuf, c->vc_screenbuf_size);
 	return 0;	/* Redrawing not needed */
 }
 
@@ -977,7 +971,7 @@ static void vgacon_save_screen(struct vc_data *c)
 		c->vc_y = ORIG_Y;
 	}
 	if (!vga_is_gfx)
-		scr_memcpyw_from((u16 *) c->vc_screenbuf, (u16 *) c->vc_origin, c->vc_screenbuf_size);
+		scr_memcpyw((u16 *) c->vc_screenbuf, (u16 *) c->vc_origin, c->vc_screenbuf_size);
 }
 
 static int vgacon_scroll(struct vc_data *c, int t, int b, int dir, int lines)
@@ -1057,3 +1051,5 @@ const struct consw vga_con = {
 	con_build_attr:		vgacon_build_attr,
 	con_invert_region:	vgacon_invert_region,
 };
+
+MODULE_LICENSE("GPL");

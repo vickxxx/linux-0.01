@@ -1,6 +1,6 @@
 /* Low-level parallel port routines for Archimedes onboard hardware
  *
- * Author: Phil Blundell <Philip.Blundell@pobox.com>
+ * Author: Phil Blundell <philb@gnu.org>
  */
 
 /* This driver is for the parallel port hardware found on Acorn's old
@@ -20,7 +20,7 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/parport.h>
 
 #include <asm/ptrace.h>

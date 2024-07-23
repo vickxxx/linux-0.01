@@ -6,46 +6,84 @@
 
 #ifdef __KERNEL__
 
-#if LINUX_VERSION_CODE >= 0x020100
 #include <linux/poll.h>
-#endif
+#include <linux/mm.h>
 #include <linux/devfs_fs_kernel.h>
 
 struct video_device
 {
+	/* device info */
 	char name[32];
-	int type;
+	int type;       /* v4l1 */
+	int type2;      /* v4l2 */
 	int hardware;
+	int minor;
 
+	/* device ops + callbacks */
+	struct file_operations *fops;
+	void (*release)(struct video_device *vfd);
+
+	/* old, obsolete interface -- dropped in 2.5.x, don't use it */
 	int (*open)(struct video_device *, int mode);
 	void (*close)(struct video_device *);
 	long (*read)(struct video_device *, char *, unsigned long, int noblock);
-	/* Do we need a write method ? */
 	long (*write)(struct video_device *, const char *, unsigned long, int noblock);
-#if LINUX_VERSION_CODE >= 0x020100
 	unsigned int (*poll)(struct video_device *, struct file *, poll_table *);
-#endif
 	int (*ioctl)(struct video_device *, unsigned int , void *);
 	int (*mmap)(struct video_device *, const char *, unsigned long);
-	int (*initialize)(struct video_device *);	
-	void *priv;		/* Used to be 'private' but that upsets C++ */
-	int busy;
-	int minor;
-	devfs_handle_t devfs_handle;
+	int (*initialize)(struct video_device *);       
+
+#if 1 /* to be removed in 2.7.x */
+	/* obsolete -- fops->owner is used instead */
+	struct module *owner;
+	/* dev->driver_data will be used instead some day.
+	 * Use the video_{get|set}_drvdata() helper functions,
+	 * so the switch over will be transparent for you.
+	 * Or use {pci|usb}_{get|set}_drvdata() directly. */
+	void *priv;
+#endif
+
+	/* for videodev.c intenal usage -- please don't touch */
+	int users;                     /* video_exclusive_{open|close} ... */
+	struct semaphore lock;         /* ... helper function uses these   */
+	devfs_handle_t devfs_handle;   /* devfs */
 };
 
-extern int videodev_init(void);
 #define VIDEO_MAJOR	81
-extern int video_register_device(struct video_device *, int type);
 
 #define VFL_TYPE_GRABBER	0
 #define VFL_TYPE_VBI		1
 #define VFL_TYPE_RADIO		2
 #define VFL_TYPE_VTX		3
 
+extern int video_register_device(struct video_device *, int type, int nr);
 extern void video_unregister_device(struct video_device *);
-#endif
+extern struct video_device* video_devdata(struct file*);
 
+
+/* helper functions to alloc / release struct video_device, the
+   later can be used for video_device->release() */
+struct video_device *video_device_alloc(void);
+void video_device_release(struct video_device *vfd);
+
+/* helper functions to access driver private data. */
+static inline void *video_get_drvdata(struct video_device *dev)
+{
+	return dev->priv;
+}
+
+static inline void video_set_drvdata(struct video_device *dev, void *data)
+{
+	dev->priv = data;
+}
+
+extern int video_exclusive_open(struct inode *inode, struct file *file);
+extern int video_exclusive_release(struct inode *inode, struct file *file);
+extern int video_usercopy(struct inode *inode, struct file *file,
+			  unsigned int cmd, unsigned long arg,
+			  int (*func)(struct inode *inode, struct file *file,
+				      unsigned int cmd, void *arg));
+#endif /* __KERNEL__ */
 
 #define VID_TYPE_CAPTURE	1	/* Can capture */
 #define VID_TYPE_TUNER		2	/* Can tune */
@@ -93,7 +131,7 @@ struct video_tuner
 {
 	int tuner;
 	char name[32];
-	ulong rangelow, rangehigh;	/* Tuner range */
+	unsigned long rangelow, rangehigh;	/* Tuner range */
 	__u32 flags;
 #define VIDEO_TUNER_PAL		1
 #define VIDEO_TUNER_NTSC	2
@@ -151,6 +189,7 @@ struct video_audio
 #define VIDEO_AUDIO_VOLUME	4
 #define VIDEO_AUDIO_BASS	8
 #define VIDEO_AUDIO_TREBLE	16	
+#define VIDEO_AUDIO_BALANCE	32
 	char    name[16];
 #define VIDEO_SOUND_MONO	1
 #define VIDEO_SOUND_STEREO	2
@@ -187,7 +226,7 @@ struct video_capture
 {
 	__u32 	x,y;			/* Offsets into image */
 	__u32	width, height;		/* Area to capture */
-	__u16	decimation;		/* Decimation divder */
+	__u16	decimation;		/* Decimation divider */
 	__u16	flags;			/* Flags for capture */
 #define VIDEO_CAPTURE_ODD		0	/* Temporal */
 #define VIDEO_CAPTURE_EVEN		1
@@ -374,15 +413,20 @@ struct video_code
 #define VID_HARDWARE_ZR36067	26	/* Zoran ZR36067/36060 */
 #define VID_HARDWARE_OV511	27	
 #define VID_HARDWARE_ZR356700	28	/* Zoran 36700 series */
+#define VID_HARDWARE_W9966	29
+#define VID_HARDWARE_SE401	30	/* SE401 USB webcams */
+#define VID_HARDWARE_PWC	31	/* Philips webcams */
+#define VID_HARDWARE_MEYE	32	/* Sony Vaio MotionEye cameras */
+#define VID_HARDWARE_CPIA2	33
+#define VID_HARDWARE_VICAM      34
+#define VID_HARDWARE_SF16FMR2	35
+#define VID_HARDWARE_W9968CF	36
+#define VID_HARDWARE_SAA7114H	37
+
+#endif /* __LINUX_VIDEODEV_H */
 
 /*
- *	Initialiser list
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
  */
- 
-struct video_init
-{
-	char *name;
-	int (*init)(struct video_init *);
-};
-
-#endif

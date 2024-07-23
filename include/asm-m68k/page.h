@@ -6,10 +6,13 @@
 /* PAGE_SHIFT determines the page size */
 #ifndef CONFIG_SUN3
 #define PAGE_SHIFT	(12)
-#define PAGE_SIZE	(4096)
 #else
 #define PAGE_SHIFT	(13)
-#define PAGE_SIZE	(8192)
+#endif
+#ifdef __ASSEMBLY__
+#define PAGE_SIZE	(1 << PAGE_SHIFT)
+#else
+#define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #endif
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
@@ -101,7 +104,7 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 /* Pure 2^n version of get_order */
-extern __inline__ int get_order(unsigned long size)
+static inline int get_order(unsigned long size)
 {
 	int order;
 
@@ -124,6 +127,7 @@ extern __inline__ int get_order(unsigned long size)
 
 #ifndef CONFIG_SUN3
 
+#define WANT_PAGE_VIRTUAL
 #ifdef CONFIG_SINGLE_MEMORY_CHUNK
 extern unsigned long m68k_memoffset;
 
@@ -141,7 +145,7 @@ static inline unsigned long ___pa(unsigned long x)
 {
      if(x == 0)
 	  return 0;
-     if(x > PAGE_OFFSET)
+     if(x >= PAGE_OFFSET)
         return (x-PAGE_OFFSET);
      else
         return (x+0x2000000);
@@ -163,6 +167,7 @@ static inline void *__va(unsigned long x)
 #define virt_to_page(kaddr)	(mem_map + (((unsigned long)(kaddr)-PAGE_OFFSET) >> PAGE_SHIFT))
 #define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
+#ifdef CONFIG_DEBUG_BUGVERBOSE
 #ifndef CONFIG_SUN3
 #define BUG() do { \
 	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
@@ -174,12 +179,20 @@ static inline void *__va(unsigned long x)
 	panic("BUG!"); \
 } while (0)
 #endif
+#else
+#define BUG() do { \
+	asm volatile("illegal"); \
+} while (0)
+#endif
 
 #define PAGE_BUG(page) do { \
 	BUG(); \
 } while (0)
 
 #endif /* __ASSEMBLY__ */
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

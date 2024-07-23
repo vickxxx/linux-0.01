@@ -20,7 +20,7 @@
  *	license in recognition of the original copyright.
  *				-- Alan Cox.
  *
- *	$Id: ipfwadm_core.c,v 1.4 2000/07/26 01:04:21 davem Exp $
+ *	$Id: ipfwadm_core.c,v 1.9.2.2 2002/01/24 15:50:42 davem Exp $
  *
  *	Ported from BSD to Linux,
  *		Alan Cox 22/Nov/1994.
@@ -104,6 +104,7 @@
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -515,7 +516,7 @@ int ip_fw_chk(struct iphdr *ip, struct net_device *rif, __u16 *redirport,
 			}
 			continue;	/* Mismatch */
 
-		ifa_ok:
+		ifa_ok:;
 		}
 
 		/*
@@ -648,7 +649,9 @@ int ip_fw_chk(struct iphdr *ip, struct net_device *rif, __u16 *redirport,
 			struct sk_buff *skb=alloc_skb(128, GFP_ATOMIC);
 			if(skb)
 			{
-				int len=min(128,ntohs(ip->tot_len));
+				int len = min_t(unsigned int,
+					      128, ntohs(ip->tot_len));
+
 				skb_put(skb,len);
 				memcpy(skb->data,ip,len);
 				if(netlink_post(NETLINK_FIREWALL, skb))
@@ -685,6 +688,7 @@ static void free_fw_chain(struct ip_fw *volatile* chainptr)
 		ftmp = *chainptr;
 		*chainptr = ftmp->fw_next;
 		kfree(ftmp);
+		MOD_DEC_USE_COUNT;
 	}
 	restore_flags(flags);
 }
@@ -728,6 +732,7 @@ static int insert_in_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 	ftmp->fw_next = *chainptr;
        	*chainptr=ftmp;
 	restore_flags(flags);
+	MOD_INC_USE_COUNT;
 	return(0);
 }
 
@@ -778,6 +783,7 @@ static int append_to_chain(struct ip_fw *volatile* chainptr, struct ip_fw *frwl,
 	else
         	*chainptr=ftmp;
 	restore_flags(flags);
+	MOD_INC_USE_COUNT;
 	return(0);
 }
 
@@ -851,9 +857,10 @@ static int del_from_chain(struct ip_fw *volatile*chainptr, struct ip_fw *frwl)
 		 }
 	}
 	restore_flags(flags);
-	if (was_found)
+	if (was_found) {
+		MOD_DEC_USE_COUNT;
 		return 0;
-	else
+	} else
 		return(EINVAL);
 }
 
@@ -1097,9 +1104,8 @@ int ip_fw_ctl(int stage, void *m, int len)
 #endif /* CONFIG_IP_FIREWALL */
 
 #if defined(CONFIG_IP_FIREWALL) || defined(CONFIG_IP_ACCT)
-
 static int ip_chain_procinfo(int stage, char *buffer, char **start,
-			     off_t offset, int length, int reset)
+			     off_t offset, int length)
 {
 	off_t pos=0, begin=0;
 	struct ip_fw *i;
@@ -1170,12 +1176,6 @@ static int ip_chain_procinfo(int stage, char *buffer, char **start,
 			len = last_len;
 			break;
 		}
-		else if(reset)
-		{
-			/* This needs to be done at this specific place! */
-			i->fw_pcnt=0L;
-			i->fw_bcnt=0L;
-		}
 		last_len = len;
 		i=i->fw_next;
 	}
@@ -1189,69 +1189,30 @@ static int ip_chain_procinfo(int stage, char *buffer, char **start,
 #endif
 
 #ifdef CONFIG_IP_ACCT
-
 static int ip_acct_procinfo(char *buffer, char **start, off_t offset,
-			    int length
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,29)
-			    , int reset
-#endif
-	)
+			    int length)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
-	/* FIXME: No more `atomic' read and reset.  Wonderful 8-( --RR */
-	int reset = 0;
-#endif
-	return ip_chain_procinfo(IP_FW_ACCT, buffer,start, offset,length,
-				 reset);
+	return ip_chain_procinfo(IP_FW_ACCT, buffer,start, offset,length);
 }
-
 #endif
 
 #ifdef CONFIG_IP_FIREWALL
-
 static int ip_fw_in_procinfo(char *buffer, char **start, off_t offset,
-			      int length
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,29)
-			     , int reset
-#endif
-	)
+			      int length)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
-	/* FIXME: No more `atomic' read and reset.  Wonderful 8-( --RR */
-	int reset = 0;
-#endif
-	return ip_chain_procinfo(IP_FW_IN, buffer,start,offset,length,
-				 reset);
+	return ip_chain_procinfo(IP_FW_IN, buffer,start,offset,length);
 }
 
 static int ip_fw_out_procinfo(char *buffer, char **start, off_t offset,
-			      int length
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,29)
-			    , int reset
-#endif
-	)
+			      int length)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
-	/* FIXME: No more `atomic' read and reset.  Wonderful 8-( --RR */
-	int reset = 0;
-#endif
-	return ip_chain_procinfo(IP_FW_OUT, buffer,start,offset,length,
-				 reset);
+	return ip_chain_procinfo(IP_FW_OUT, buffer,start,offset,length);
 }
 
 static int ip_fw_fwd_procinfo(char *buffer, char **start, off_t offset,
-			      int length
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,29)
-			    , int reset
-#endif
-	)
+			      int length)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
-	/* FIXME: No more `atomic' read and reset.  Wonderful 8-( --RR */
-	int reset = 0;
-#endif
-	return ip_chain_procinfo(IP_FW_FWD, buffer,start,offset,length,
-				 reset);
+	return ip_chain_procinfo(IP_FW_FWD, buffer,start,offset,length);
 }
 #endif
 

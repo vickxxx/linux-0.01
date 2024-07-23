@@ -1,5 +1,4 @@
-/* $Id: csum_partial_copy.c,v 1.2 1999/12/04 03:59:00 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -17,7 +16,7 @@
 /*
  * copy while checksumming, otherwise like csum_partial
  */
-unsigned int csum_partial_copy(const char *src, char *dst, 
+unsigned int csum_partial_copy(const char *src, char *dst,
                                int len, unsigned int sum)
 {
 	/*
@@ -45,6 +44,6 @@ unsigned int csum_partial_copy_from_user (const char *src, char *dst,
 		memset(dst + len - missing, 0, missing);
 		*err_ptr = -EFAULT;
 	}
-		
+
 	return csum_partial(dst, len, sum);
 }

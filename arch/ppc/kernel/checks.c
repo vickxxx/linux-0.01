@@ -7,7 +7,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 
@@ -32,7 +32,7 @@ int main(void)
 			sizeof(struct thread_struct)%16);
 		ret = -1;
 	}
-#endif	
+#endif
 
 	if ( sizeof(struct pt_regs) % 16 )
 	{
@@ -41,7 +41,7 @@ int main(void)
 			sizeof(struct pt_regs),
 			sizeof(struct pt_regs)%16);
 		ret = -1;
-		
+
 	}
 
 	printf("Task size        : %d bytes\n"

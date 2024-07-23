@@ -15,13 +15,14 @@
 #include <linux/parport.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 
 #ifndef MODULE
 static int io[PARPORT_MAX+1] __initdata = { [0 ... PARPORT_MAX] = 0 };
 #ifdef CONFIG_PARPORT_PC
-static int io_hi[PARPORT_MAX+1] __initdata = { [0 ... PARPORT_MAX] = 0 };
+static int io_hi[PARPORT_MAX+1] __initdata =
+	{ [0 ... PARPORT_MAX] = PARPORT_IOHI_AUTO };
 #endif
 static int irq[PARPORT_MAX] __initdata = { [0 ... PARPORT_MAX-1] = PARPORT_IRQ_PROBEONLY };
 static int dma[PARPORT_MAX] __initdata = { [0 ... PARPORT_MAX-1] = PARPORT_DMA_NONE };
@@ -30,6 +31,7 @@ extern int parport_pc_init(int *io, int *io_hi, int *irq, int *dma);
 extern int parport_sunbpp_init(void);
 extern int parport_amiga_init(void);
 extern int parport_mfc3_init(void);
+extern int parport_atari_init(void);
 
 static int parport_setup_ptr __initdata = 0;
 
@@ -164,6 +166,8 @@ int __init parport_init (void)
 #endif
 	return 0;
 }
+
+__initcall(parport_init);
 
 #endif
 

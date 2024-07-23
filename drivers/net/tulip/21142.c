@@ -1,20 +1,21 @@
 /*
 	drivers/net/tulip/21142.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/networking/tulip.txt for more
-	information on this driver.
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
-#include "tulip.h"
 #include <linux/pci.h>
+#include "tulip.h"
 #include <linux/delay.h>
 
 
@@ -83,7 +84,7 @@ void t21142_timer(unsigned long data)
 			tp->csr6 &= 0x00D5;
 			tp->csr6 |= new_csr6;
 			outl(0x0301, ioaddr + CSR12);
-			tulip_restart_rxtx(tp, tp->csr6);
+			tulip_restart_rxtx(tp);
 		}
 		next_tick = 3*HZ;
 	}
@@ -99,10 +100,8 @@ void t21142_start_nway(struct net_device *dev)
 {
 	struct tulip_private *tp = (struct tulip_private *)dev->priv;
 	long ioaddr = dev->base_addr;
-	int csr14 = ((tp->to_advertise & 0x0780) << 9)  |
-		((tp->to_advertise&0x0020)<<1) | 0xffbf;
-
-	DPRINTK("ENTER\n");
+	int csr14 = ((tp->sym_advertise & 0x0780) << 9)  |
+		((tp->sym_advertise & 0x0020) << 1) | 0xffbf;
 
 	dev->if_port = 0;
 	tp->nway = tp->mediasense = 1;
@@ -113,11 +112,8 @@ void t21142_start_nway(struct net_device *dev)
 	outl(0x0001, ioaddr + CSR13);
 	udelay(100);
 	outl(csr14, ioaddr + CSR14);
-	if (tp->chip_id == PNIC2)
-	  tp->csr6 = 0x01a80000 | (tp->to_advertise & 0x0040 ? 0x0200 : 0);
-	else
-	  tp->csr6 = 0x82420000 | (tp->to_advertise & 0x0040 ? 0x0200 : 0);
-	tulip_outl_csr(tp, tp->csr6, CSR6);
+	tp->csr6 = 0x82420000 | (tp->sym_advertise & 0x0040 ? FullDuplex : 0);
+	outl(tp->csr6, ioaddr + CSR6);
 	if (tp->mtable  &&  tp->mtable->csr15dir) {
 		outl(tp->mtable->csr15dir, ioaddr + CSR15);
 		outl(tp->mtable->csr15val, ioaddr + CSR15);
@@ -125,6 +121,7 @@ void t21142_start_nway(struct net_device *dev)
 		outw(0x0008, ioaddr + CSR15);
 	outl(0x1301, ioaddr + CSR12); 		/* Trigger NWAY. */
 }
+
 
 
 void t21142_lnk_change(struct net_device *dev, int csr5)
@@ -140,7 +137,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 	/* If NWay finished and we have a negotiated partner capability. */
 	if (tp->nway  &&  !tp->nwayset  &&  (csr12 & 0x7000) == 0x5000) {
 		int setup_done = 0;
-		int negotiated = tp->to_advertise & (csr12 >> 16);
+		int negotiated = tp->sym_advertise & (csr12 >> 16);
 		tp->lpar = csr12 >> 16;
 		tp->nwayset = 1;
 		if (negotiated & 0x0100)		dev->if_port = 5;
@@ -149,7 +146,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 		else if (negotiated & 0x0020)	dev->if_port = 0;
 		else {
 			tp->nwayset = 0;
-			if ((csr12 & 2) == 0  &&  (tp->to_advertise & 0x0180))
+			if ((csr12 & 2) == 0  &&  (tp->sym_advertise & 0x0180))
 				dev->if_port = 3;
 		}
 		tp->full_duplex = (tulip_media_cap[dev->if_port] & MediaAlwaysFD) ? 1:0;
@@ -158,7 +155,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			if (tp->nwayset)
 				printk(KERN_INFO "%s: Switching to %s based on link "
 					   "negotiation %4.4x & %4.4x = %4.4x.\n",
-					   dev->name, medianame[dev->if_port], tp->to_advertise,
+					   dev->name, medianame[dev->if_port], tp->sym_advertise,
 					   tp->lpar, negotiated);
 			else
 				printk(KERN_INFO "%s: Autonegotiation failed, using %s,"
@@ -170,25 +167,26 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			int i;
 			for (i = 0; i < tp->mtable->leafcount; i++)
 				if (tp->mtable->mleaf[i].media == dev->if_port) {
+					int startup = ! ((tp->chip_id == DC21143 && tp->revision == 65));
 					tp->cur_index = i;
-					tulip_select_media(dev, 0);
+					tulip_select_media(dev, startup);
 					setup_done = 1;
 					break;
 				}
 		}
 		if ( ! setup_done) {
-			tp->csr6 = dev->if_port & 1 ? 0x83860000 : 0x82420000;
+			tp->csr6 = (dev->if_port & 1 ? 0x838E0000 : 0x82420000) | (tp->csr6 & 0x20ff);
 			if (tp->full_duplex)
 				tp->csr6 |= 0x0200;
 			outl(1, ioaddr + CSR13);
 		}
 #if 0							/* Restart shouldn't be needed. */
-		tulip_outl_csr(tp, tp->csr6 | csr6_sr, CSR6);
+		outl(tp->csr6 | RxOn, ioaddr + CSR6);
 		if (tulip_debug > 2)
 			printk(KERN_DEBUG "%s:  Restarting Tx and Rx, CSR5 is %8.8x.\n",
 				   dev->name, inl(ioaddr + CSR5));
 #endif
-		tulip_outl_csr(tp, tp->csr6 | csr6_st | csr6_sr, CSR6);
+		tulip_start_rxtx(tp);
 		if (tulip_debug > 2)
 			printk(KERN_DEBUG "%s:  Setting CSR6 %8.8x/%x CSR12 %8.8x.\n",
 				   dev->name, tp->csr6, inl(ioaddr + CSR6),
@@ -212,7 +210,8 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			t21142_start_nway(dev);
 			tp->timer.expires = RUN_AT(3*HZ);
 			add_timer(&tp->timer);
-		}
+		} else if (dev->if_port == 5)
+			outl(inl(ioaddr + CSR14) & ~0x080, ioaddr + CSR14);
 	} else if (dev->if_port == 0  ||  dev->if_port == 4) {
 		if ((csr12 & 4) == 0)
 			printk(KERN_INFO"%s: 21143 10baseT link beat good.\n",
@@ -231,10 +230,10 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			printk(KERN_INFO"%s: 21143 100baseTx sensed media.\n",
 				   dev->name);
 		dev->if_port = 3;
-		tp->csr6 = 0x83860000;
+		tp->csr6 = 0x838E0000 | (tp->csr6 & 0x20ff);
 		outl(0x0003FF7F, ioaddr + CSR14);
 		outl(0x0301, ioaddr + CSR12);
-		tulip_restart_rxtx(tp, tp->csr6);
+		tulip_restart_rxtx(tp);
 	}
 }
 

@@ -15,6 +15,7 @@
 #include <linux/proc_fs.h>
 #include <linux/sysctl.h>
 #include <linux/input.h>
+#include <linux/module.h>
 
 #ifdef CONFIG_MAC_ADBKEYCODES
 #include <linux/keyboard.h>
@@ -199,15 +200,16 @@ static unsigned char e0_keys[128] = {
 	0, 0, 0, KEY_KPCOMMA, 0, KEY_INTL3, 0, 0,		/* 0x00-0x07 */
 	0, 0, 0, 0, KEY_LANG1, KEY_LANG2, 0, 0,			/* 0x08-0x0f */
 	0, 0, 0, 0, 0, 0, 0, 0,					/* 0x10-0x17 */
-	0, 0, 0, 0, KEY_KPENTER, KEY_RIGHTCTRL, 0, 0,		/* 0x18-0x1f */
-	0, 0, 0, 0, 0, 0, 0, 0,					/* 0x20-0x27 */
+	0, 0, 0, 0, KEY_KPENTER, KEY_RIGHTCTRL, KEY_VOLUMEUP, 0,/* 0x18-0x1f */
+	0, 0, 0, 0, 0, KEY_VOLUMEDOWN, KEY_MUTE, 0,		/* 0x20-0x27 */
 	0, 0, 0, 0, 0, 0, 0, 0,					/* 0x28-0x2f */
 	0, 0, 0, 0, 0, KEY_KPSLASH, 0, KEY_SYSRQ,		/* 0x30-0x37 */
-	KEY_RIGHTALT, 0, 0, 0, 0, 0, 0, 0,			/* 0x38-0x3f */
+	KEY_RIGHTALT, KEY_BRIGHTNESSUP, KEY_BRIGHTNESSDOWN, 
+		KEY_EJECTCD, 0, 0, 0, 0,			/* 0x38-0x3f */
 	0, 0, 0, 0, 0, 0, 0, KEY_HOME,				/* 0x40-0x47 */
 	KEY_UP, KEY_PAGEUP, 0, KEY_LEFT, 0, KEY_RIGHT, 0, KEY_END, /* 0x48-0x4f */
 	KEY_DOWN, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE, 0, 0, 0, 0, /* 0x50-0x57 */
-	0, 0, 0, KEY_LEFTMETA, KEY_RIGHTMETA, KEY_COMPOSE, 0, 0, /* 0x58-0x5f */
+	0, 0, 0, KEY_LEFTMETA, KEY_RIGHTMETA, KEY_COMPOSE, KEY_POWER, 0, /* 0x58-0x5f */
 	0, 0, 0, 0, 0, 0, 0, 0,					/* 0x60-0x67 */
 	0, 0, 0, 0, 0, 0, 0, KEY_MACRO,				/* 0x68-0x6f */
 	0, 0, 0, 0, 0, 0, 0, 0,					/* 0x70-0x77 */
@@ -401,6 +403,8 @@ int mac_hid_keyboard_sends_linux_keycodes(void)
 	return keyboard_sends_linux_keycodes;
 }
 
+EXPORT_SYMBOL(mac_hid_keyboard_sends_linux_keycodes);
+
 static int __init mac_hid_setup(char *str)
 {
 	int ints[2];
@@ -448,6 +452,8 @@ int mac_hid_mouse_emulate_buttons(int caller, unsigned int keycode, int down)
 	return 0;
 }
 
+EXPORT_SYMBOL(mac_hid_mouse_emulate_buttons);
+
 static void emumousebtn_input_register(void)
 {
 	emumousebtn.name = "Macintosh mouse button emulation";
@@ -473,9 +479,19 @@ void __init mac_hid_init_hw(void)
 #ifdef CONFIG_MAC_ADBKEYCODES
 	memcpy(pc_key_maps_save, key_maps, sizeof(key_maps));
 
-	if (!keyboard_sends_linux_keycodes)
-		memcpy(key_maps, mac_key_maps_save, sizeof(key_maps));
+	if (!keyboard_sends_linux_keycodes) {
+#ifdef CONFIG_MAGIC_SYSRQ
+		ppc_md.ppc_kbd_sysrq_xlate   = mac_hid_kbd_sysrq_xlate;
+		SYSRQ_KEY                = 0x69;
 #endif
+		memcpy(key_maps, mac_key_maps_save, sizeof(key_maps));
+	} else {
+#ifdef CONFIG_MAGIC_SYSRQ
+		ppc_md.ppc_kbd_sysrq_xlate   = pckbd_sysrq_xlate;
+		SYSRQ_KEY                = 0x54;
+#endif
+	}
+#endif /* CONFIG_MAC_ADBKEYCODES */
 
 #ifdef CONFIG_MAC_EMUMOUSEBTN
 	emumousebtn_input_register();

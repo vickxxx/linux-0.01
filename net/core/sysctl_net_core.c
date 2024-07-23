@@ -12,6 +12,7 @@
 #ifdef CONFIG_SYSCTL
 
 extern int netdev_max_backlog;
+extern int weight_p;
 extern int no_cong_thresh;
 extern int no_cong;
 extern int lo_cong;
@@ -27,6 +28,7 @@ extern __u32 sysctl_rmem_default;
 
 extern int sysctl_core_destroy_delay;
 extern int sysctl_optmem_max;
+extern int sysctl_somaxconn;
 extern int sysctl_hot_list_len;
 
 #ifdef CONFIG_NET_DIVERT
@@ -47,11 +49,14 @@ ctl_table core_table[] = {
 	{NET_CORE_RMEM_DEFAULT, "rmem_default",
 	 &sysctl_rmem_default, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
+	{NET_CORE_DEV_WEIGHT, "dev_weight",
+	 &weight_p, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
 	{NET_CORE_MAX_BACKLOG, "netdev_max_backlog",
 	 &netdev_max_backlog, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
 	{NET_CORE_NO_CONG_THRESH, "no_cong_thresh",
-	 &no_cong, sizeof(int), 0644, NULL,
+	 &no_cong_thresh, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
 	{NET_CORE_NO_CONG, "no_cong",
 	 &no_cong, sizeof(int), 0644, NULL,
@@ -84,6 +89,9 @@ ctl_table core_table[] = {
 	 (void *)sysctl_divert_version, 32, 0444, NULL,
 	 &proc_dostring},
 #endif /* CONFIG_NET_DIVERT */
+	{NET_CORE_SOMAXCONN, "somaxconn",
+	 &sysctl_somaxconn, sizeof(int), 0644, NULL,
+	 &proc_dointvec },
 #endif /* CONFIG_NET */
 	{ 0 }
 };

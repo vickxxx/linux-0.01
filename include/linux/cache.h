@@ -1,6 +1,7 @@
 #ifndef __LINUX_CACHE_H
 #define __LINUX_CACHE_H
 
+#include <linux/config.h>
 #include <asm/cache.h>
 
 #ifndef L1_CACHE_ALIGN
@@ -15,6 +16,14 @@
 #define ____cacheline_aligned __attribute__((__aligned__(SMP_CACHE_BYTES)))
 #endif
 
+#ifndef ____cacheline_aligned_in_smp
+#ifdef CONFIG_SMP
+#define ____cacheline_aligned_in_smp ____cacheline_aligned
+#else
+#define ____cacheline_aligned_in_smp
+#endif /* CONFIG_SMP */
+#endif
+
 #ifndef __cacheline_aligned
 #ifdef MODULE
 #define __cacheline_aligned ____cacheline_aligned
@@ -24,5 +33,13 @@
 		 __section__(".data.cacheline_aligned")))
 #endif
 #endif /* __cacheline_aligned */
+
+#ifndef __cacheline_aligned_in_smp
+#ifdef CONFIG_SMP
+#define __cacheline_aligned_in_smp __cacheline_aligned
+#else
+#define __cacheline_aligned_in_smp
+#endif /* CONFIG_SMP */
+#endif
 
 #endif /* __LINUX_CACHE_H */

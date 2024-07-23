@@ -2516,7 +2516,7 @@ _mul64:
 	cmpi.b		%d0, &0x7		# is src mode Dn or other?
 	bgt.w		mul64_memop		# src is in memory
 
-# multiplier operand in the the data register file.
+# multiplier operand in the data register file.
 # must extract the register number and fetch the operand from the stack.
 mul64_regop:
 	andi.w		&0x7, %d0		# extract Dn
@@ -3835,7 +3835,7 @@ CAS2W2_FILLER:
 #	    assert LOCKE* for the final write operation.		#
 #	(13)Exit.							#
 # 									#
-# 	The algorithm is actually implemented slightly diferently	#
+# 	The algorithm is actually implemented slightly differently	#
 # depending on the size of the operation and the misalignment of the	#
 # operand. A misaligned operand must be written in aligned chunks or	#
 # else the BUSCR register control gets confused.			#

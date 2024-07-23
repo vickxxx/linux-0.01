@@ -17,6 +17,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
+#include <linux/tty.h>
 
 #include <asm/bitops.h>
 #include <asm/uaccess.h>
@@ -30,7 +31,6 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-asmlinkage int sys_wait4(int, int *, int, struct rusage *);
 asmlinkage void ret_from_sys_call(void);
 asmlinkage int do_signal(sigset_t *, struct pt_regs *,
 			 struct switch_stack *, unsigned long, unsigned long);
@@ -717,9 +717,7 @@ do_signal(sigset_t *oldset, struct pt_regs * regs, struct switch_stack * sw,
 
 			default:
 				lock_kernel();
-				sigaddset(&current->pending.signal, signr);
-				current->flags |= PF_SIGNALED;
-				do_exit(exit_code);
+				sig_exit(signr, exit_code, &info);
 				/* NOTREACHED */
 			}
 			continue;

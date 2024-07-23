@@ -21,6 +21,9 @@
  *
  * Big endian support and dynamic DMA mapping added
  * by Jakub Jelinek <jakub@redhat.com>.
+ *
+ * Conversion to final pci64 DMA interfaces
+ * by David S. Miller <davem@redhat.com>.
  */
 
 /*
@@ -63,31 +66,10 @@
 #include "sd.h"
 #include "hosts.h"
 
-#if 1
-/* Once pci64_ DMA mapping interface is in, kill this. */
-typedef dma_addr_t dma64_addr_t;
-#define pci64_alloc_consistent(d,s,p) pci_alloc_consistent((d),(s),(p))
-#define pci64_free_consistent(d,s,c,a) pci_free_consistent((d),(s),(c),(a))
-#define pci64_map_single(d,c,s,dir) pci_map_single((d),(c),(s),(dir))
-#define pci64_map_sg(d,s,n,dir) pci_map_sg((d),(s),(n),(dir))
-#define pci64_unmap_single(d,a,s,dir) pci_unmap_single((d),(a),(s),(dir))
-#define pci64_unmap_sg(d,s,n,dir) pci_unmap_sg((d),(s),(n),(dir))
-#if BITS_PER_LONG > 32
 #define pci64_dma_hi32(a) ((u32) (0xffffffff & (((u64)(a))>>32)))
 #define pci64_dma_lo32(a) ((u32) (0xffffffff & (((u64)(a)))))
-#else
-#define pci64_dma_hi32(a) 0
-#define pci64_dma_lo32(a) (a)
-#endif	/* BITS_PER_LONG */
-#define pci64_dma_build(hi,lo) (lo)
-#define sg_dma64_address(s) sg_dma_address(s)
-#define sg_dma64_len(s) sg_dma_len(s)
-#if BITS_PER_LONG > 32
-#define PCI64_DMA_BITS 64
-#else
-#define PCI64_DMA_BITS	32
-#endif 	/* BITS_PER_LONG */
-#endif
+#define pci64_dma_build(hi,lo) \
+	((dma_addr_t)(((u64)(lo))|(((u64)(hi))<<32)))
 
 #include "qlogicfc.h"
 
@@ -97,8 +79,6 @@ typedef dma_addr_t dma64_addr_t;
    version 1.17.30 of the isp2100's firmware and version 2.00.40 of the 
    isp2200's firmware. 
 */
-
-#define RELOAD_FIRMWARE		1
 
 #define USE_NVRAM_DEFAULTS      1
 
@@ -195,8 +175,8 @@ struct {
 #define FLASH_BIOS_ADDR	0x00
 #define FLASH_BIOS_DATA	0x02
 #define ISP_CTRL_STATUS	0x06	/* configuration register #1 */
-#define PCI_INTER_CTL	0x08	/* pci interupt control */
-#define PCI_INTER_STS	0x0a	/* pci interupt status */
+#define PCI_INTER_CTL	0x08	/* pci interrupt control */
+#define PCI_INTER_STS	0x0a	/* pci interrupt status */
 #define PCI_SEMAPHORE	0x0c	/* pci semaphore */
 #define PCI_NVRAM	0x0e	/* pci nvram interface */
 
@@ -227,7 +207,7 @@ struct {
 #define REQUEST_TRANSFER_ERROR		0x8003
 #define RESPONSE_TRANSFER_ERROR		0x8004
 #define REQUEST_QUEUE_WAKEUP		0x8005
-#define LIP_OCCURED                     0x8010
+#define LIP_OCCURRED                     0x8010
 #define LOOP_UP                         0x8011
 #define LOOP_DOWN                       0x8012
 #define LIP_RECEIVED                    0x8013
@@ -245,13 +225,8 @@ struct Entry_header {
 };
 
 /* entry header type commands */
-#if PCI64_DMA_BITS > 32
 #define ENTRY_COMMAND		0x19
 #define ENTRY_CONTINUATION	0x0a
-#else
-#define ENTRY_COMMAND		0x11
-#define ENTRY_CONTINUATION	0x02
-#endif
 
 #define ENTRY_STATUS		0x03
 #define ENTRY_MARKER		0x04
@@ -262,22 +237,11 @@ struct Entry_header {
 #define EFLAG_BAD_HEADER	4
 #define EFLAG_BAD_PAYLOAD	8
 
-#if PCI64_DMA_BITS > 32
-
 struct dataseg {
 	u_int d_base;
 	u_int d_base_hi;
 	u_int d_count;
 };
-
-#else
-
-struct dataseg {
-	u_int d_base;
-	u_int d_count;
-};
-
-#endif
 
 struct Command_Entry {
 	struct Entry_header hdr;
@@ -303,18 +267,10 @@ struct Command_Entry {
 #define CFLAG_READ		0x20
 #define CFLAG_WRITE		0x40
 
-#if PCI64_DMA_BITS > 32
 struct Continuation_Entry {
 	struct Entry_header hdr;
 	struct dataseg dataseg[DATASEGS_PER_CONT];
 };
-#else
-struct Continuation_Entry {
-	struct Entry_header hdr;
-        u32 rsvd;
-	struct dataseg dataseg[DATASEGS_PER_CONT];
-};
-#endif
 
 struct Marker_Entry {
 	struct Entry_header hdr;
@@ -369,7 +325,7 @@ struct Status_Entry {
 #define STF_ABORTED			0x0020
 #define STF_TIMEOUT			0x0040
 
-/* interupt control commands */
+/* interrupt control commands */
 #define ISP_EN_INT			0x8000
 #define ISP_EN_RISC			0x0008
 
@@ -440,13 +396,22 @@ struct Status_Entry {
 #define MBOX_SEND_CHANGE_REQUEST        0x0070
 #define MBOX_PORT_LOGOUT                0x0071
 
+/*
+ *	Firmware if needed (note this is a hack, it belongs in a seperate
+ *	module.
+ */
+ 
+#ifdef CONFIG_SCSI_QLOGIC_FC_FIRMWARE
 #include "qlogicfc_asm.c"
+#else
+static unsigned short risc_code_addr01 = 0x1000 ;
+#endif
 
 /* Each element in mbox_param is an 8 bit bitmap where each bit indicates
    if that mbox should be copied as input.  For example 0x2 would mean
    only copy mbox1. */
 
-const u_char mbox_param[] =
+static const u_char mbox_param[] =
 {
 	0x01,			/* MBOX_NO_OP */
 	0x1f,			/* MBOX_LOAD_RAM */
@@ -729,12 +694,12 @@ static inline void isp2x00_disable_irqs(struct Scsi_Host *host)
 int isp2x00_detect(Scsi_Host_Template * tmpt)
 {
 	int hosts = 0;
-	int wait_time;
+	unsigned long wait_time;
 	struct Scsi_Host *host = NULL;
 	struct isp2x00_hostdata *hostdata;
-	struct pci_dev *pdev = NULL;
+	struct pci_dev *pdev;
 	unsigned short device_ids[2];
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 	int i;
 
 
@@ -746,16 +711,27 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	tmpt->proc_name = "isp2x00";
 
 	if (pci_present() == 0) {
-		printk("qlogicfc : PCI not present\n");
+		printk(KERN_INFO "qlogicfc : PCI not present\n");
 		return 0;
 	}
 
 	for (i=0; i<2; i++){
+		pdev = NULL;
 	        while ((pdev = pci_find_device(PCI_VENDOR_ID_QLOGIC, device_ids[i], pdev))) {
 			if (pci_enable_device(pdev))
 				continue;
 
+			/* Try to configure DMA attributes. */
+			if (pci_set_dma_mask(pdev, (u64) 0xffffffffffffffffULL) &&
+			    pci_set_dma_mask(pdev, (u64) 0xffffffff))
+					continue;
+
 		        host = scsi_register(tmpt, sizeof(struct isp2x00_hostdata));
+			if (!host) {
+			        printk("qlogicfc%d : could not register host.\n", hosts);
+				continue;
+			}
+ 			scsi_set_pci_device(host, pdev);
 			host->max_id = QLOGICFC_MAX_ID + 1;
 			host->max_lun = QLOGICFC_MAX_LUN;
 			host->hostt->use_new_eh_code = 1;
@@ -763,10 +739,11 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 
 			memset(hostdata, 0, sizeof(struct isp2x00_hostdata));
 			hostdata->pci_dev = pdev;
-			hostdata->res = pci64_alloc_consistent(pdev, RES_SIZE + REQ_SIZE, &busaddr);
+			hostdata->res = pci_alloc_consistent(pdev, RES_SIZE + REQ_SIZE, &busaddr);
 
 			if (!hostdata->res){
-			        printk("qlogicfc%d : could not allocate memory for request and response queue.\n", hostdata->host_id);
+			        printk("qlogicfc%d : could not allocate memory for request and response queue.\n", hosts);
+				pci_free_consistent(pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 			        scsi_unregister(host);
 				continue;
 			}
@@ -799,7 +776,7 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			hostdata->host_id = hosts;
 
 			if (isp2x00_init(host) || isp2x00_reset_hardware(host)) {
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 			        scsi_unregister(host);
 				continue;
 			}
@@ -808,28 +785,28 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			if (request_irq(host->irq, do_isp2x00_intr_handler, SA_INTERRUPT | SA_SHIRQ, "qlogicfc", host)) {
 			        printk("qlogicfc%d : interrupt %d already in use\n",
 				       hostdata->host_id, host->irq);
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 				scsi_unregister(host);
 				continue;
 			}
-			if (check_region(host->io_port, 0xff)) {
+			if (!request_region(host->io_port, 0xff, "qlogicfc")) {
 			        printk("qlogicfc%d : i/o region 0x%lx-0x%lx already "
 				       "in use\n",
 				       hostdata->host_id, host->io_port, host->io_port + 0xff);
 				free_irq(host->irq, host);
-				pci64_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+				pci_free_consistent (pdev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 				scsi_unregister(host);
 				continue;
 			}
-			request_region(host->io_port, 0xff, "qlogicfc");
 
 			outw(0x0, host->io_port + PCI_SEMAPHORE);
 			outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 			isp2x00_enable_irqs(host);
 			/* wait for the loop to come up */
-			for (wait_time = jiffies + 10 * HZ; wait_time > jiffies && hostdata->adapter_state == AS_LOOP_DOWN;)
+			for (wait_time = jiffies + 10 * HZ; time_before(jiffies, wait_time) && hostdata->adapter_state == AS_LOOP_DOWN;) {
 			        barrier();
-
+				cpu_relax();
+			}
 			if (hostdata->adapter_state == AS_LOOP_DOWN) {
 			        printk("qlogicfc%d : link is not up\n", hostdata->host_id);
 			}
@@ -843,8 +820,10 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	   some time before recognizing it is attached to a fabric */
 
 #if ISP2x00_FABRIC
-	for (wait_time = jiffies + 5 * HZ; wait_time > jiffies;)
+	for (wait_time = jiffies + 5 * HZ; time_before(jiffies, wait_time);) {
 		barrier();
+		cpu_relax();
+	}
 #endif
 
 	LEAVE("isp2x00_detect");
@@ -977,7 +956,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 	u_int port_id;
 	struct sns_cb *req;
 	u_char *sns_response;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 	struct isp2x00_hostdata *hostdata;
 
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
@@ -994,7 +973,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 	}
 	printk("qlogicfc%d : Fabric found.\n", hostdata->host_id);
 
-	req = (struct sns_cb *)pci64_alloc_consistent(hostdata->pci_dev, sizeof(*req) + 608, &busaddr);
+	req = (struct sns_cb *)pci_alloc_consistent(hostdata->pci_dev, sizeof(*req) + 608, &busaddr);
 	
 	if (!req){
 		printk("qlogicfc%d : Could not allocate DMA resources for fabric initialization\n", hostdata->host_id);
@@ -1096,12 +1075,12 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 				done = 1;
 		} else {
 			printk("qlogicfc%d : Get All Next failed %x.\n", hostdata->host_id, param[0]);
-			pci64_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
+			pci_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
 			return 0;
 		}
 	}
 
-	pci64_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
+	pci_free_consistent(hostdata->pci_dev, sizeof(*req) + 608, req, busaddr);
 	return 1;
 }
 
@@ -1111,7 +1090,7 @@ int isp2x00_init_fabric(struct Scsi_Host *host, struct id_name_map *port_db, int
 int isp2x00_release(struct Scsi_Host *host)
 {
 	struct isp2x00_hostdata *hostdata;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 
 	ENTER("isp2x00_release");
 
@@ -1124,7 +1103,7 @@ int isp2x00_release(struct Scsi_Host *host)
 
 	busaddr = pci64_dma_build(le32_to_cpu(hostdata->control_block.res_queue_addr_high),
 				  le32_to_cpu(hostdata->control_block.res_queue_addr_lo));
-	pci64_free_consistent(hostdata->pci_dev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
+	pci_free_consistent(hostdata->pci_dev, RES_SIZE + REQ_SIZE, hostdata->res, busaddr);
 
 	LEAVE("isp2x00_release");
 
@@ -1268,7 +1247,7 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	if (Cmnd->use_sg) {
 		sg = (struct scatterlist *) Cmnd->request_buffer;
-		sg_count = pci64_map_sg(hostdata->pci_dev, sg, Cmnd->use_sg, scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		sg_count = pci_map_sg(hostdata->pci_dev, sg, Cmnd->use_sg, scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 		cmd->segment_cnt = cpu_to_le16(sg_count);
 		ds = cmd->dataseg;
 		/* fill in first two sg entries: */
@@ -1277,11 +1256,9 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 			n = DATASEGS_PER_COMMAND;
 
 		for (i = 0; i < n; i++) {
-			ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma64_address(sg)));
-#if PCI64_DMA_BITS > 32
-			ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma64_address(sg)));
-#endif
-			ds[i].d_count = cpu_to_le32(sg_dma64_len(sg));
+			ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma_address(sg)));
+			ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma_address(sg)));
+			ds[i].d_count = cpu_to_le32(sg_dma_len(sg));
 			++sg;
 		}
 		sg_count -= DATASEGS_PER_COMMAND;
@@ -1303,49 +1280,37 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 			if (n > DATASEGS_PER_CONT)
 				n = DATASEGS_PER_CONT;
 			for (i = 0; i < n; ++i) {
-				ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma64_address(sg)));
-#if PCI64_DMA_BITS > 32
-				ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma64_address(sg)));
-#endif
-				ds[i].d_count = cpu_to_le32(sg_dma64_len(sg));
+				ds[i].d_base = cpu_to_le32(pci64_dma_lo32(sg_dma_address(sg)));
+				ds[i].d_base_hi = cpu_to_le32(pci64_dma_hi32(sg_dma_address(sg)));
+				ds[i].d_count = cpu_to_le32(sg_dma_len(sg));
 				++sg;
 			}
 			sg_count -= n;
 		}
 	} else if (Cmnd->request_bufflen && Cmnd->sc_data_direction != PCI_DMA_NONE) {
-		dma64_addr_t busaddr = pci64_map_single(hostdata->pci_dev, Cmnd->request_buffer, Cmnd->request_bufflen,
-							scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		struct page *page = virt_to_page(Cmnd->request_buffer);
+		unsigned long offset = ((unsigned long)Cmnd->request_buffer &
+					~PAGE_MASK);
+		dma_addr_t busaddr = pci_map_page(hostdata->pci_dev,
+						  page, offset,
+						  Cmnd->request_bufflen,
+						  scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+		Cmnd->SCp.dma_handle = busaddr;
 
-		*(dma64_addr_t *)&Cmnd->SCp = busaddr;
 		cmd->dataseg[0].d_base = cpu_to_le32(pci64_dma_lo32(busaddr));
-#if PCI64_DMA_BITS > 32
 		cmd->dataseg[0].d_base_hi = cpu_to_le32(pci64_dma_hi32(busaddr));
-#endif
 		cmd->dataseg[0].d_count = cpu_to_le32(Cmnd->request_bufflen);
 		cmd->segment_cnt = cpu_to_le16(1);
 	} else {
 		cmd->dataseg[0].d_base = 0;
-#if PCI64_DMA_BITS > 32
 		cmd->dataseg[0].d_base_hi = 0;
-#endif
 		cmd->segment_cnt = cpu_to_le16(1); /* Shouldn't this be 0? */
 	}
 
-	switch (Cmnd->cmnd[0]) {
-	case TEST_UNIT_READY:
-	case START_STOP:
-	        break;
-	case WRITE_10:
-	case WRITE_6:
-	case WRITE_BUFFER:
-	case MODE_SELECT:
+	if (Cmnd->sc_data_direction == SCSI_DATA_WRITE)
 		cmd->control_flags = cpu_to_le16(CFLAG_WRITE);
-		break;
-	default:
+	else 
 		cmd->control_flags = cpu_to_le16(CFLAG_READ);
-		break;
-	}
-
 
 	if (Cmnd->device->tagged_supported) {
 		if ((jiffies - hostdata->tag_ages[Cmnd->target]) > (2 * SCSI_TIMEOUT)) {
@@ -1378,17 +1343,10 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+	host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	/* this is really gross */
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-			DEBUG(printk("qlogicfc%d.c crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	LEAVE("isp2x00_queuecommand");
 
@@ -1428,7 +1386,23 @@ static void redo_port_db(unsigned long arg)
 	        for (i = 0; i < QLOGICFC_REQ_QUEUE_LEN; i++){ 
 		        if (hostdata->handle_ptrs[i] && (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id > QLOGICFC_MAX_LOOP_ID || hostdata->adapter_state & AS_REDO_LOOP_PORTDB)){
                                 if (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id != hostdata->port_db[0].loop_id){
+					Scsi_Cmnd *Cmnd = hostdata->handle_ptrs[i];
+
+					 if (Cmnd->use_sg)
+						 pci_unmap_sg(hostdata->pci_dev,
+							      (struct scatterlist *)Cmnd->buffer,
+							      Cmnd->use_sg,
+							      scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					 else if (Cmnd->request_bufflen &&
+						  Cmnd->sc_data_direction != PCI_DMA_NONE) {
+						 pci_unmap_page(hostdata->pci_dev,
+								Cmnd->SCp.dma_handle,
+								Cmnd->request_bufflen,
+								scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					 }
+
 					 hostdata->handle_ptrs[i]->result = DID_SOFT_ERROR << 16;
+
 					 if (hostdata->handle_ptrs[i]->scsi_done){
 					   (*hostdata->handle_ptrs[i]->scsi_done) (hostdata->handle_ptrs[i]);
 					 }
@@ -1504,7 +1478,7 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 			if (hostdata->adapter_state == AS_LOOP_GOOD)
 				hostdata->adapter_state = AS_REDO_FABRIC_PORTDB;
 			break;		        
-		case LIP_OCCURED:
+		case LIP_OCCURRED:
 		case LIP_RECEIVED:
 		        printk("qlogicfc%d : Loop Reinitialized\n", hostdata->host_id);
 			if (hostdata->adapter_state == AS_LOOP_GOOD)
@@ -1521,6 +1495,17 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 			hostdata->handle_serials[handle] = 0;
 			hostdata->queued--;
 			if (Cmnd != NULL) {
+				if (Cmnd->use_sg)
+					pci_unmap_sg(hostdata->pci_dev,
+						     (struct scatterlist *)Cmnd->buffer,
+						     Cmnd->use_sg,
+						     scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+				else if (Cmnd->request_bufflen &&
+					 Cmnd->sc_data_direction != PCI_DMA_NONE)
+					pci_unmap_page(hostdata->pci_dev,
+						       Cmnd->SCp.dma_handle,
+						       Cmnd->request_bufflen,
+						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 				Cmnd->result = 0x0;
 				(*Cmnd->scsi_done) (Cmnd);
 			} else
@@ -1566,13 +1551,14 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 				hostdata->queued--;
 
 				if (Cmnd->use_sg)
-					pci64_unmap_sg(hostdata->pci_dev,
-						       (struct scatterlist *)Cmnd->buffer, Cmnd->use_sg,
-						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					pci_unmap_sg(hostdata->pci_dev,
+						     (struct scatterlist *)Cmnd->buffer, Cmnd->use_sg,
+						     scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 				else if (Cmnd->request_bufflen && Cmnd->sc_data_direction != PCI_DMA_NONE)
-					pci64_unmap_single(hostdata->pci_dev, *(dma64_addr_t *)&Cmnd->SCp,
-							   Cmnd->request_bufflen,
-							   scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
+					pci_unmap_page(hostdata->pci_dev,
+						       Cmnd->SCp.dma_handle,
+						       Cmnd->request_bufflen,
+						       scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
 
 				/* 
 				 * if any of the following are true we do not
@@ -1630,16 +1616,10 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+	host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-		        DEBUG(printk("qlogicfc%d : crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 	LEAVE_INTR("isp2x00_intr_handler");
@@ -1826,26 +1806,34 @@ int isp2x00_biosparam(Disk * disk, kdev_t n, int ip[])
 	return 0;
 }
 
-
 static int isp2x00_reset_hardware(struct Scsi_Host *host)
 {
 	u_short param[8];
 	struct isp2x00_hostdata *hostdata;
 	int loop_count;
-	dma64_addr_t busaddr;
+	dma_addr_t busaddr;
 
 	ENTER("isp2x00_reset_hardware");
 
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
+	/*
+	 *	This cannot be right - PCI writes are posted
+	 *	(apparently this is hardware design flaw not software ?)
+	 */
+	 
 	outw(0x01, host->io_port + ISP_CTRL_STATUS);
+	udelay(100);
 	outw(HCCR_RESET, host->io_port + HOST_HCCR);
+	udelay(100);
 	outw(HCCR_RELEASE, host->io_port + HOST_HCCR);
 	outw(HCCR_BIOS_DISABLE, host->io_port + HOST_HCCR);
 
 	loop_count = DEFAULT_LOOP_COUNT;
-	while (--loop_count && inw(host->io_port + HOST_HCCR) == RISC_BUSY)
+	while (--loop_count && inw(host->io_port + HOST_HCCR) == RISC_BUSY) {
 		barrier();
+		cpu_relax();
+	}
 	if (!loop_count)
 		printk("qlogicfc%d : reset_hardware loop timeout\n", hostdata->host_id);
 
@@ -1864,7 +1852,7 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 
 	DEBUG(printk("qlogicfc%d : verifying checksum\n", hostdata->host_id));
 
-#if RELOAD_FIRMWARE
+#if defined(CONFIG_SCSI_QLOGIC_FC_FIRMWARE)
 	{
 		int i;
 		unsigned short * risc_code = NULL;
@@ -1936,9 +1924,15 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 	hostdata->wwn |= (u64) (cpu_to_le16(hostdata->control_block.node_name[3]) & 0x00ff) << 8;
 	hostdata->wwn |= (u64) (cpu_to_le16(hostdata->control_block.node_name[3]) & 0xff00) >> 8;
 
-	/* FIXME: If the DMA transfer goes one way only, this should use PCI_DMA_TODEVICE and below as well. */
-	busaddr = pci64_map_single(hostdata->pci_dev, &hostdata->control_block, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+	/* FIXME: If the DMA transfer goes one way only, this should use
+	 *        PCI_DMA_TODEVICE and below as well.
+	 */
+	busaddr = pci_map_page(hostdata->pci_dev,
+			       virt_to_page(&hostdata->control_block),
+			       ((unsigned long) &hostdata->control_block &
+				~PAGE_MASK),
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 
 	param[0] = MBOX_INIT_FIRMWARE;
 	param[2] = (u_short) (pci64_dma_lo32(busaddr) >> 16);
@@ -1950,21 +1944,24 @@ static int isp2x00_reset_hardware(struct Scsi_Host *host)
 	isp2x00_mbox_command(host, param);
 	if (param[0] != MBOX_COMMAND_COMPLETE) {
 		printk("qlogicfc%d.c: Ouch 0x%04x\n", hostdata->host_id,  param[0]);
-		pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+		pci_unmap_page(hostdata->pci_dev, busaddr,
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 		return 1;
 	}
 	param[0] = MBOX_GET_FIRMWARE_STATE;
 	isp2x00_mbox_command(host, param);
 	if (param[0] != MBOX_COMMAND_COMPLETE) {
 		printk("qlogicfc%d.c: 0x%04x\n", hostdata->host_id,  param[0]);
-		pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-				   PCI_DMA_BIDIRECTIONAL);
+		pci_unmap_page(hostdata->pci_dev, busaddr,
+			       sizeof(hostdata->control_block),
+			       PCI_DMA_BIDIRECTIONAL);
 		return 1;
 	}
 
-	pci64_unmap_single(hostdata->pci_dev, busaddr, sizeof(hostdata->control_block),
-			   PCI_DMA_BIDIRECTIONAL);
+	pci_unmap_page(hostdata->pci_dev, busaddr,
+		       sizeof(hostdata->control_block),
+		       PCI_DMA_BIDIRECTIONAL);
 	LEAVE("isp2x00_reset_hardware");
 
 	return 0;
@@ -2113,8 +2110,10 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 		return 1;
 
 	loop_count = DEFAULT_LOOP_COUNT;
-	while (--loop_count && inw(host->io_port + HOST_HCCR) & 0x0080)
+	while (--loop_count && inw(host->io_port + HOST_HCCR) & 0x0080) {
 		barrier();
+		cpu_relax();
+	}
 	if (!loop_count) {
 		printk("qlogicfc%d : mbox_command loop timeout #1\n", hostdata->host_id);
 		param[0] = 0x4006;
@@ -2148,8 +2147,9 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 
 	while (1) {
 		loop_count = DEFAULT_LOOP_COUNT;
-		while (--loop_count && !(inw(host->io_port + PCI_INTER_STS) & 0x08)) {
+		while (--loop_count && !(inw(host->io_port + PCI_INTER_STS) & 0x08)) { 
 			barrier();
+			cpu_relax();
 		}
 
 		if (!loop_count) {
@@ -2167,6 +2167,7 @@ static int isp2x00_mbox_command(struct Scsi_Host *host, u_short param[])
 	loop_count = DEFAULT_LOOP_COUNT;
 	while (--loop_count && inw(host->io_port + MBOX0) == 0x04) {
 		barrier();
+		cpu_relax();
 	}
 	if (!loop_count)
 		printk("qlogicfc%d : mbox_command loop timeout #3\n", hostdata->host_id);
@@ -2225,6 +2226,7 @@ void isp2x00_print_scsi_cmd(Scsi_Cmnd * cmd)
 
 #endif				/* DEBUG_ISP2x00 */
 
+MODULE_LICENSE("GPL");
 
 static Scsi_Host_Template driver_template = QLOGICFC;
 

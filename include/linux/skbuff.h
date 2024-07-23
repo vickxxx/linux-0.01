@@ -18,10 +18,13 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/time.h>
+#include <linux/cache.h>
 
 #include <asm/atomic.h>
 #include <asm/types.h>
 #include <linux/spinlock.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>
 
 #define HAVE_ALLOC_SKB		/* For the drivers to know */
 #define HAVE_ALIGNABLE_SKB	/* Ditto 8)		   */
@@ -30,6 +33,49 @@
 #define CHECKSUM_NONE 0
 #define CHECKSUM_HW 1
 #define CHECKSUM_UNNECESSARY 2
+
+#define SKB_DATA_ALIGN(X)	(((X) + (SMP_CACHE_BYTES-1)) & ~(SMP_CACHE_BYTES-1))
+#define SKB_MAX_ORDER(X,ORDER)	(((PAGE_SIZE<<(ORDER)) - (X) - sizeof(struct skb_shared_info))&~(SMP_CACHE_BYTES-1))
+#define SKB_MAX_HEAD(X)		(SKB_MAX_ORDER((X),0))
+#define SKB_MAX_ALLOC		(SKB_MAX_ORDER(0,2))
+
+/* A. Checksumming of received packets by device.
+ *
+ *	NONE: device failed to checksum this packet.
+ *		skb->csum is undefined.
+ *
+ *	UNNECESSARY: device parsed packet and wouldbe verified checksum.
+ *		skb->csum is undefined.
+ *	      It is bad option, but, unfortunately, many of vendors do this.
+ *	      Apparently with secret goal to sell you new device, when you
+ *	      will add new protocol to your host. F.e. IPv6. 8)
+ *
+ *	HW: the most generic way. Device supplied checksum of _all_
+ *	    the packet as seen by netif_rx in skb->csum.
+ *	    NOTE: Even if device supports only some protocols, but
+ *	    is able to produce some skb->csum, it MUST use HW,
+ *	    not UNNECESSARY.
+ *
+ * B. Checksumming on output.
+ *
+ *	NONE: skb is checksummed by protocol or csum is not required.
+ *
+ *	HW: device is required to csum packet as seen by hard_start_xmit
+ *	from skb->h.raw to the end and to record the checksum
+ *	at skb->h.raw+skb->csum.
+ *
+ *	Device must show its capabilities in dev->features, set
+ *	at device setup time.
+ *	NETIF_F_HW_CSUM	- it is clever device, it is able to checksum
+ *			  everything.
+ *	NETIF_F_NO_CSUM - loopback or reliable single hop media.
+ *	NETIF_F_IP_CSUM - device is dumb. It is able to csum only
+ *			  TCP/UDP over IPv4. Sigh. Vendors like this
+ *			  way by an unknown reason. Though, see comment above
+ *			  about CHECKSUM_UNNECESSARY. 8)
+ *
+ *	Any questions? No questions, good. 		--ANK
+ */
 
 #ifdef __i386__
 #define NET_CALLER(arg) (*(((void**)&arg)-1))
@@ -57,6 +103,29 @@ struct sk_buff_head {
 	spinlock_t	lock;
 };
 
+struct sk_buff;
+
+#define MAX_SKB_FRAGS 6
+
+typedef struct skb_frag_struct skb_frag_t;
+
+struct skb_frag_struct
+{
+	struct page *page;
+	__u16 page_offset;
+	__u16 size;
+};
+
+/* This data is invariant across clones and lives at
+ * the end of the header data, ie. at skb->end.
+ */
+struct skb_shared_info {
+	atomic_t	dataref;
+	unsigned int	nr_frags;
+	struct sk_buff	*frag_list;
+	skb_frag_t	frags[MAX_SKB_FRAGS];
+};
+
 struct sk_buff {
 	/* These two members must be first. */
 	struct sk_buff	* next;			/* Next buffer in list 				*/
@@ -66,6 +135,10 @@ struct sk_buff {
 	struct sock	*sk;			/* Socket we are owned by 			*/
 	struct timeval	stamp;			/* Time we arrived				*/
 	struct net_device	*dev;		/* Device we arrived on/are leaving by		*/
+	struct net_device	*real_dev;	/* For support of point to point protocols 
+						   (e.g. 802.3ad) over bonding, we must save the
+						   physical device that got the packet before
+						   replacing skb->dev with the virtual device.  */
 
 	/* Transport layer header */
 	union
@@ -107,9 +180,10 @@ struct sk_buff {
 	char		cb[48];	 
 
 	unsigned int 	len;			/* Length of actual data			*/
+ 	unsigned int 	data_len;
 	unsigned int	csum;			/* Checksum 					*/
-	volatile char 	used;			/* Data moved to user and not MSG_PEEK		*/
-	unsigned char	cloned, 		/* head may be cloned (check refcnt to be sure). */
+	unsigned char 	__unused,		/* Dead field, may be reused			*/
+			cloned, 		/* head may be cloned (check refcnt to be sure). */
   			pkt_type,		/* Packet class					*/
   			ip_summed;		/* Driver fed us an IP checksum			*/
 	__u32		priority;		/* Packet queueing priority			*/
@@ -122,6 +196,7 @@ struct sk_buff {
 	unsigned char	*data;			/* Data head pointer				*/
 	unsigned char	*tail;			/* Tail pointer					*/
 	unsigned char 	*end;			/* End pointer					*/
+
 	void 		(*destructor)(struct sk_buff *);	/* Destruct function		*/
 #ifdef CONFIG_NETFILTER
 	/* Can be used for communication between hooks. */
@@ -146,39 +221,33 @@ struct sk_buff {
 #endif
 };
 
-#define SK_WMEM_MAX	65535
-#define SK_RMEM_MAX	65535
-
 #ifdef __KERNEL__
 /*
  *	Handling routines are only of interest to the kernel
  */
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/system.h>
 
 extern void			__kfree_skb(struct sk_buff *skb);
-extern struct sk_buff *		skb_peek_copy(struct sk_buff_head *list);
 extern struct sk_buff *		alloc_skb(unsigned int size, int priority);
 extern void			kfree_skbmem(struct sk_buff *skb);
 extern struct sk_buff *		skb_clone(struct sk_buff *skb, int priority);
 extern struct sk_buff *		skb_copy(const struct sk_buff *skb, int priority);
+extern struct sk_buff *		pskb_copy(struct sk_buff *skb, int gfp_mask);
+extern int			pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, int gfp_mask);
+extern struct sk_buff *		skb_realloc_headroom(struct sk_buff *skb, unsigned int headroom);
 extern struct sk_buff *		skb_copy_expand(const struct sk_buff *skb, 
 						int newheadroom,
 						int newtailroom,
 						int priority);
+extern struct sk_buff *		skb_pad(struct sk_buff *skb, int pad);
 #define dev_kfree_skb(a)	kfree_skb(a)
 extern void	skb_over_panic(struct sk_buff *skb, int len, void *here);
 extern void	skb_under_panic(struct sk_buff *skb, int len, void *here);
 
-/* Backwards compatibility */
-#define skb_realloc_headroom(skb, nhr) skb_copy_expand(skb, nhr, skb_tailroom(skb), GFP_ATOMIC)
-
 /* Internal */
-static inline atomic_t *skb_datarefp(struct sk_buff *skb)
-{
-	return (atomic_t *)(skb->end);
-}
+#define skb_shinfo(SKB)		((struct skb_shared_info *)((SKB)->end))
 
 /**
  *	skb_queue_empty - check if a queue is empty
@@ -221,15 +290,11 @@ static inline struct sk_buff *skb_get(struct sk_buff *skb)
  
 static inline void kfree_skb(struct sk_buff *skb)
 {
-	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
-		__kfree_skb(skb);
-}
-
-/* Use this if you didn't touch the skb state [for fast switching] */
-static inline void kfree_skb_fast(struct sk_buff *skb)
-{
-	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
-		kfree_skbmem(skb);	
+	if (likely(atomic_read(&skb->users) == 1))
+		smp_rmb();
+	else if (likely(!atomic_dec_and_test(&skb->users)))
+		return;
+	__kfree_skb(skb);
 }
 
 /**
@@ -243,7 +308,7 @@ static inline void kfree_skb_fast(struct sk_buff *skb)
 
 static inline int skb_cloned(struct sk_buff *skb)
 {
-	return skb->cloned && atomic_read(skb_datarefp(skb)) != 1;
+	return skb->cloned && atomic_read(&skb_shinfo(skb)->dataref) != 1;
 }
 
 /**
@@ -521,7 +586,7 @@ static inline struct sk_buff *__skb_dequeue(struct sk_buff_head *list)
 
 static inline struct sk_buff *skb_dequeue(struct sk_buff_head *list)
 {
-	long flags;
+	unsigned long flags;
 	struct sk_buff *result;
 
 	spin_lock_irqsave(&list->lock, flags);
@@ -670,7 +735,7 @@ static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 
 static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
 {
-	long flags;
+	unsigned long flags;
 	struct sk_buff *result;
 
 	spin_lock_irqsave(&list->lock, flags);
@@ -679,6 +744,20 @@ static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
 	return result;
 }
 
+static inline int skb_is_nonlinear(const struct sk_buff *skb)
+{
+	return skb->data_len;
+}
+
+static inline unsigned int skb_headlen(const struct sk_buff *skb)
+{
+	return skb->len - skb->data_len;
+}
+
+#define SKB_PAGE_ASSERT(skb) do { if (skb_shinfo(skb)->nr_frags) out_of_line_bug(); } while (0)
+#define SKB_FRAG_ASSERT(skb) do { if (skb_shinfo(skb)->frag_list) out_of_line_bug(); } while (0)
+#define SKB_LINEAR_ASSERT(skb) do { if (skb_is_nonlinear(skb)) out_of_line_bug(); } while (0)
+
 /*
  *	Add data to an sk_buff
  */
@@ -686,6 +765,7 @@ static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
 static inline unsigned char *__skb_put(struct sk_buff *skb, unsigned int len)
 {
 	unsigned char *tmp=skb->tail;
+	SKB_LINEAR_ASSERT(skb);
 	skb->tail+=len;
 	skb->len+=len;
 	return tmp;
@@ -704,6 +784,7 @@ static inline unsigned char *__skb_put(struct sk_buff *skb, unsigned int len)
 static inline unsigned char *skb_put(struct sk_buff *skb, unsigned int len)
 {
 	unsigned char *tmp=skb->tail;
+	SKB_LINEAR_ASSERT(skb);
 	skb->tail+=len;
 	skb->len+=len;
 	if(skb->tail>skb->end) {
@@ -742,6 +823,8 @@ static inline unsigned char *skb_push(struct sk_buff *skb, unsigned int len)
 static inline char *__skb_pull(struct sk_buff *skb, unsigned int len)
 {
 	skb->len-=len;
+	if (skb->len < skb->data_len)
+		out_of_line_bug();
 	return 	skb->data+=len;
 }
 
@@ -761,6 +844,33 @@ static inline unsigned char * skb_pull(struct sk_buff *skb, unsigned int len)
 	if (len > skb->len)
 		return NULL;
 	return __skb_pull(skb,len);
+}
+
+extern unsigned char * __pskb_pull_tail(struct sk_buff *skb, int delta);
+
+static inline char *__pskb_pull(struct sk_buff *skb, unsigned int len)
+{
+	if (len > skb_headlen(skb) &&
+	    __pskb_pull_tail(skb, len-skb_headlen(skb)) == NULL)
+		return NULL;
+	skb->len -= len;
+	return 	skb->data += len;
+}
+
+static inline unsigned char * pskb_pull(struct sk_buff *skb, unsigned int len)
+{	
+	if (len > skb->len)
+		return NULL;
+	return __pskb_pull(skb,len);
+}
+
+static inline int pskb_may_pull(struct sk_buff *skb, unsigned int len)
+{
+	if (len <= skb_headlen(skb))
+		return 1;
+	if (len > skb->len)
+		return 0;
+	return (__pskb_pull_tail(skb, len-skb_headlen(skb)) != NULL);
 }
 
 /**
@@ -784,7 +894,7 @@ static inline int skb_headroom(const struct sk_buff *skb)
 
 static inline int skb_tailroom(const struct sk_buff *skb)
 {
-	return skb->end-skb->tail;
+	return skb_is_nonlinear(skb) ? 0 : skb->end-skb->tail;
 }
 
 /**
@@ -802,11 +912,16 @@ static inline void skb_reserve(struct sk_buff *skb, unsigned int len)
 	skb->tail+=len;
 }
 
+extern int ___pskb_trim(struct sk_buff *skb, unsigned int len, int realloc);
 
 static inline void __skb_trim(struct sk_buff *skb, unsigned int len)
 {
-	skb->len = len;
-	skb->tail = skb->data+len;
+	if (!skb->data_len) {
+		skb->len = len;
+		skb->tail = skb->data+len;
+	} else {
+		___pskb_trim(skb, len, 0);
+	}
 }
 
 /**
@@ -823,6 +938,25 @@ static inline void skb_trim(struct sk_buff *skb, unsigned int len)
 	if (skb->len > len) {
 		__skb_trim(skb, len);
 	}
+}
+
+
+static inline int __pskb_trim(struct sk_buff *skb, unsigned int len)
+{
+	if (!skb->data_len) {
+		skb->len = len;
+		skb->tail = skb->data+len;
+		return 0;
+	} else {
+		return ___pskb_trim(skb, len, 1);
+	}
+}
+
+static inline int pskb_trim(struct sk_buff *skb, unsigned int len)
+{
+	if (len < skb->len)
+		return __pskb_trim(skb, len);
+	return 0;
 }
 
 /**
@@ -878,6 +1012,30 @@ static inline void __skb_queue_purge(struct sk_buff_head *list)
 }
 
 /**
+ *	__dev_alloc_skb - allocate an skbuff for sending
+ *	@length: length to allocate
+ *	@gfp_mask: get_free_pages mask, passed to alloc_skb
+ *
+ *	Allocate a new &sk_buff and assign it a usage count of one. The
+ *	buffer has unspecified headroom built in. Users should allocate
+ *	the headroom they think they need without accounting for the
+ *	built in space. The built in space is used for optimisations.
+ *
+ *	%NULL is returned in there is no free memory.
+ */
+ 
+static inline struct sk_buff *__dev_alloc_skb(unsigned int length,
+					      int gfp_mask)
+{
+	struct sk_buff *skb;
+
+	skb = alloc_skb(length+16, gfp_mask);
+	if (skb)
+		skb_reserve(skb,16);
+	return skb;
+}
+
+/**
  *	dev_alloc_skb - allocate an skbuff for sending
  *	@length: length to allocate
  *
@@ -892,41 +1050,81 @@ static inline void __skb_queue_purge(struct sk_buff_head *list)
  
 static inline struct sk_buff *dev_alloc_skb(unsigned int length)
 {
-	struct sk_buff *skb;
-
-	skb = alloc_skb(length+16, GFP_ATOMIC);
-	if (skb)
-		skb_reserve(skb,16);
-	return skb;
+	return __dev_alloc_skb(length, GFP_ATOMIC);
 }
 
 /**
- *	skb_cow - copy a buffer if need be
- *	@skb: buffer to copy
+ *	skb_cow - copy header of skb when it is required
+ *	@skb: buffer to cow
  *	@headroom: needed headroom
  *
- *	If the buffer passed lacks sufficient headroom or is a clone then
- *	it is copied and the additional headroom made available. If there
- *	is no free memory %NULL is returned. The new buffer is returned if
- *	a copy was made (and the old one dropped a reference). The existing
- *	buffer is returned otherwise.
+ *	If the skb passed lacks sufficient headroom or its data part
+ *	is shared, data is reallocated. If reallocation fails, an error
+ *	is returned and original skb is not changed.
  *
- *	This function primarily exists to avoid making two copies when making
- *	a writable copy of a buffer and then growing the headroom.
+ *	The result is skb with writable area skb->head...skb->tail
+ *	and at least @headroom of space at head.
  */
- 
 
-static inline struct sk_buff *
+static inline int
 skb_cow(struct sk_buff *skb, unsigned int headroom)
 {
-	headroom = (headroom+15)&~15;
+	int delta = (headroom > 16 ? headroom : 16) - skb_headroom(skb);
 
-	if ((unsigned)skb_headroom(skb) < headroom || skb_cloned(skb)) {
-		struct sk_buff *skb2 = skb_realloc_headroom(skb, headroom);
-		kfree_skb(skb);
-		skb = skb2;
-	}
-	return skb;
+	if (delta < 0)
+		delta = 0;
+
+	if (delta || skb_cloned(skb))
+		return pskb_expand_head(skb, (delta+15)&~15, 0, GFP_ATOMIC);
+	return 0;
+}
+
+/**
+ *	skb_padto	- pad an skbuff up to a minimal size
+ *	@skb: buffer to pad
+ *	@len: minimal length
+ *
+ *	Pads up a buffer to ensure the trailing bytes exist and are
+ *	blanked. If the buffer already contains sufficient data it
+ *	is untouched. Returns the buffer, which may be a replacement
+ *	for the original, or NULL for out of memory - in which case
+ *	the original buffer is still freed.
+ */
+ 
+static inline struct sk_buff *skb_padto(struct sk_buff *skb, unsigned int len)
+{
+	unsigned int size = skb->len;
+	if(likely(size >= len))
+		return skb;
+	return skb_pad(skb, len-size);
+}
+
+/**
+ *	skb_linearize - convert paged skb to linear one
+ *	@skb: buffer to linarize
+ *	@gfp: allocation mode
+ *
+ *	If there is no free memory -ENOMEM is returned, otherwise zero
+ *	is returned and the old skb data released.  */
+int skb_linearize(struct sk_buff *skb, int gfp);
+
+static inline void *kmap_skb_frag(const skb_frag_t *frag)
+{
+#ifdef CONFIG_HIGHMEM
+	if (in_irq())
+		out_of_line_bug();
+
+	local_bh_disable();
+#endif
+	return kmap_atomic(frag->page, KM_SKB_DATA_SOFTIRQ);
+}
+
+static inline void kunmap_skb_frag(void *vaddr)
+{
+	kunmap_atomic(vaddr, KM_SKB_DATA_SOFTIRQ);
+#ifdef CONFIG_HIGHMEM
+	local_bh_enable();
+#endif
 }
 
 #define skb_queue_walk(queue, skb) \
@@ -937,9 +1135,16 @@ skb_cow(struct sk_buff *skb, unsigned int headroom)
 
 extern struct sk_buff *		skb_recv_datagram(struct sock *sk,unsigned flags,int noblock, int *err);
 extern unsigned int		datagram_poll(struct file *file, struct socket *sock, struct poll_table_struct *wait);
-extern int			skb_copy_datagram(struct sk_buff *from, int offset, char *to,int size);
-extern int			skb_copy_datagram_iovec(struct sk_buff *from, int offset, struct iovec *to,int size);
+extern int			skb_copy_datagram(const struct sk_buff *from, int offset, char *to,int size);
+extern int			skb_copy_datagram_iovec(const struct sk_buff *from, int offset, struct iovec *to,int size);
+extern int			skb_copy_and_csum_datagram(const struct sk_buff *skb, int offset, u8 *to, int len, unsigned int *csump);
+extern int			skb_copy_and_csum_datagram_iovec(const struct sk_buff *skb, int hlen, struct iovec *iov);
 extern void			skb_free_datagram(struct sock * sk, struct sk_buff *skb);
+
+extern unsigned int		skb_checksum(const struct sk_buff *skb, int offset, int len, unsigned int csum);
+extern int			skb_copy_bits(const struct sk_buff *skb, int offset, void *to, int len);
+extern unsigned int		skb_copy_and_csum_bits(const struct sk_buff *skb, int offset, u8 *to, int len, unsigned int csum);
+extern void			skb_copy_and_csum_dev(const struct sk_buff *skb, u8 *to);
 
 extern void skb_init(void);
 extern void skb_add_mtu(int mtu);
@@ -957,7 +1162,18 @@ nf_conntrack_get(struct nf_ct_info *nfct)
 	if (nfct)
 		atomic_inc(&nfct->master->use);
 }
+static inline void
+nf_reset(struct sk_buff *skb)
+{
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
 #endif
+}
+#else /* CONFIG_NETFILTER */
+static inline void nf_reset(struct sk_buff *skb) {}
+#endif /* CONFIG_NETFILTER */
 
 #endif	/* __KERNEL__ */
 #endif	/* _LINUX_SKBUFF_H */

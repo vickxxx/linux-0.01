@@ -1,18 +1,20 @@
 /*
 	drivers/net/tulip/timer.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/networking/tulip.txt for more
-	information on this driver.
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
+#include <linux/pci.h>
 #include "tulip.h"
 
 
@@ -133,13 +135,13 @@ void tulip_timer(unsigned long data)
 				((csr12 & (1 << ((bitnum >> 1) & 7))) != 0)) {
 				if (tulip_debug > 2)
 					printk(KERN_DEBUG "%s: Link beat detected for %s.\n", dev->name,
-						   medianame[mleaf->media]);
+					       medianame[mleaf->media & MEDIA_MASK]);
 				if ((p[2] & 0x61) == 0x01)	/* Bogus Znyx board. */
 					goto actually_mii;
-				netif_carrier_on(dev);
+				/* netif_carrier_on(dev); */
 				break;
 			}
-			netif_carrier_off(dev);
+			/* netif_carrier_off(dev); */
 			if (tp->medialock)
 				break;
 	  select_next_media:
@@ -152,21 +154,21 @@ void tulip_timer(unsigned long data)
 				goto select_next_media; /* Skip FD entries. */
 			if (tulip_debug > 1)
 				printk(KERN_DEBUG "%s: No link beat on media %s,"
-					   " trying transceiver type %s.\n",
-					   dev->name, medianame[mleaf->media & 15],
-					   medianame[tp->mtable->mleaf[tp->cur_index].media]);
+				       " trying transceiver type %s.\n",
+				       dev->name, medianame[mleaf->media & MEDIA_MASK],
+				       medianame[tp->mtable->mleaf[tp->cur_index].media]);
 			tulip_select_media(dev, 0);
 			/* Restart the transmit process. */
-			tulip_restart_rxtx(tp, tp->csr6);
+			tulip_restart_rxtx(tp);
 			next_tick = (24*HZ)/10;
 			break;
 		}
 		case 1:  case 3:		/* 21140, 21142 MII */
 		actually_mii:
 			if (tulip_check_duplex(dev) < 0)
-				netif_carrier_off(dev);
+				{ /* netif_carrier_off(dev); */ }
 			else
-				netif_carrier_on(dev);
+				{ /* netif_carrier_on(dev); */ }
 			next_tick = 60*HZ;
 			break;
 		case 2:					/* 21142 serial block has no link beat. */
@@ -210,10 +212,16 @@ void comet_timer(unsigned long data)
 	if (tulip_debug > 1)
 		printk(KERN_DEBUG "%s: Comet link status %4.4x partner capability "
 			   "%4.4x.\n",
-			   dev->name, inl(ioaddr + 0xB8), inl(ioaddr + 0xC8));
+			   dev->name,
+			   tulip_mdio_read(dev, tp->phys[0], 1),
+			   tulip_mdio_read(dev, tp->phys[0], 5));
 	/* mod_timer synchronizes us with potential add_timer calls
 	 * from interrupts.
 	 */
+	if (tulip_check_duplex(dev) < 0)
+		{ netif_carrier_off(dev); }
+	else
+		{ netif_carrier_on(dev); }
 	mod_timer(&tp->timer, RUN_AT(next_tick));
 }
 

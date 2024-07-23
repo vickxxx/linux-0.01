@@ -9,6 +9,7 @@
 #define FIONBIO		_IOW('f', 126, int)
 #define FIONREAD	_IOR('f', 127, int)
 #define TIOCINQ		FIONREAD
+#define FIOQSIZE	_IOR('f', 128, loff_t)
 
 #define TIOCGETP	_IOR('t', 8, struct sgttyb)
 #define TIOCSETP	_IOW('t', 9, struct sgttyb)
@@ -65,6 +66,8 @@
 # define TIOCM_OUT2	0x4000
 # define TIOCM_LOOP	0x8000
 
+#define TIOCM_MODEM_BITS       TIOCM_OUT2      /* IRDA support */
+
 #define TIOCGSOFTCAR	0x5419
 #define TIOCSSOFTCAR	0x541A
 #define TIOCLINUX	0x541C
@@ -106,5 +109,7 @@
 
 #define TIOCMIWAIT	0x545C	/* wait for a change on serial input line(s) */
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
+#define TIOCGHAYESESP	0x545E  /* Get Hayes ESP configuration */
+#define TIOCSHAYESESP	0x545F  /* Set Hayes ESP configuration */
 
 #endif /* _ASM_ALPHA_IOCTLS_H */

@@ -2,7 +2,7 @@
  * framebuffer driver for VBE 2.0 compliant graphic boards
  *
  * switching to graphics mode happens at boot time (while
- * running in real mode, see arch/i386/video.S).
+ * running in real mode, see arch/i386/boot/video.S).
  *
  * (c) 1998 Gerd Knorr <kraxel@goldbach.in-berlin.de>
  *
@@ -14,7 +14,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/console.h>
@@ -93,7 +93,12 @@ static union {
 } fbcon_cmap;
 
 static int             inverse   = 0;
+#ifdef __x86_64__
+static int             mtrr      = 1;
+#else
 static int             mtrr      = 0;
+#endif
+static int	 vram __initdata = 0;	/* needed for vram boot option */
 static int             currcon   = 0;
 
 static int             pmi_setpal = 0;	/* pmi for palette changes ??? */
@@ -109,6 +114,7 @@ static struct display_switch vesafb_sw;
 static int vesafb_pan_display(struct fb_var_screeninfo *var, int con,
                               struct fb_info *info)
 {
+#ifdef __i386__
 	int offset;
 
 	if (!ypan)
@@ -130,6 +136,7 @@ static int vesafb_pan_display(struct fb_var_screeninfo *var, int con,
                   "c" (offset),         /* ECX */
                   "d" (offset >> 16),   /* EDX */
                   "D" (&pmi_start));    /* EDI */
+#endif
 	return 0;
 }
 
@@ -302,6 +309,7 @@ static int vesa_getcolreg(unsigned regno, unsigned *red, unsigned *green,
 
 static void vesa_setpalette(int regno, unsigned red, unsigned green, unsigned blue)
 {
+#ifdef i386
 	struct { u_char blue, green, red, pad; } entry;
 
 	if (pmi_setpal) {
@@ -325,6 +333,8 @@ static void vesa_setpalette(int regno, unsigned red, unsigned green, unsigned bl
 		outb_p(green >> 10, dac_val);
 		outb_p(blue  >> 10, dac_val);
 	}
+#endif
+
 }
 
 #endif
@@ -457,7 +467,7 @@ int __init vesafb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 	
-	for(this_opt=strtok(options,","); this_opt; this_opt=strtok(NULL,",")) {
+	while ((this_opt = strsep(&options, ",")) != NULL) {
 		if (!*this_opt) continue;
 		
 		if (! strcmp(this_opt, "inverse"))
@@ -474,6 +484,10 @@ int __init vesafb_setup(char *options)
 			pmi_setpal=1;
 		else if (! strcmp(this_opt, "mtrr"))
 			mtrr=1;
+		/* checks for vram boot option */
+		else if (! strncmp(this_opt, "vram:", 5))
+			vram = simple_strtoul(this_opt+5, NULL, 0);
+
 		else if (!strncmp(this_opt, "font:", 5))
 			strcpy(fb_info.fontname, this_opt+5);
 	}
@@ -515,15 +529,33 @@ int __init vesafb_init(void)
 	video_width         = screen_info.lfb_width;
 	video_height        = screen_info.lfb_height;
 	video_linelength    = screen_info.lfb_linelength;
-	video_size          = screen_info.lfb_size * 65536;
+
+	/* remap memory according to videomode, multiply by 2 to get space for doublebuffering */
+	video_size          = screen_info.lfb_width *	screen_info.lfb_height * video_bpp / 8 * 2;
+
+	/* check that we don't remap more memory than old cards have */
+	if (video_size > screen_info.lfb_size * 65536)
+		video_size = screen_info.lfb_size * 65536;
+	
+	/* FIXME: Should we clip against declared size for banked devices ? */
+	
+	/* sets video_size according to vram boot option */
+	if (vram && vram * 1024 * 1024 != video_size)
+		video_size = vram * 1024 * 1024;
+		
 	video_visual = (video_bpp == 8) ?
 		FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_TRUECOLOR;
 
+#ifndef __i386__
+	screen_info.vesapm_seg = 0;
+#endif
+
 	if (!request_mem_region(video_base, video_size, "vesafb")) {
-		printk(KERN_ERR
+		printk(KERN_WARNING
 		       "vesafb: abort, cannot reserve video memory at 0x%lx\n",
 			video_base);
-		return -EBUSY;
+		/* We cannot make this fatal. Sometimes this comes from magic
+		   spaces our resource handlers simply don't know about */
 	}
 
         video_vbase = ioremap(video_base, video_size);
@@ -635,7 +667,12 @@ int __init vesafb_init(void)
 
 	if (mtrr) {
 		int temp_size = video_size;
-		while (mtrr_add(video_base, temp_size, MTRR_TYPE_WRCOMB, 1)==-EINVAL) {
+		/* Find the largest power-of-two */
+		while (temp_size & (temp_size - 1))
+                	temp_size &= (temp_size - 1);
+                        
+                /* Try and find a power of two to add */
+		while (temp_size && mtrr_add(video_base, temp_size, MTRR_TYPE_WRCOMB, 1)==-EINVAL) {
 			temp_size >>= 1;
 		}
 	}
@@ -666,3 +703,5 @@ int __init vesafb_init(void)
  * c-basic-offset: 8
  * End:
  */
+
+MODULE_LICENSE("GPL");

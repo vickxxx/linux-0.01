@@ -86,22 +86,6 @@
 
 #include <linux/wavefront.h>
 
-/*
- *	This sucks, hopefully it'll get standardised
- */
- 
-#if defined(__alpha__)
-#ifdef CONFIG_SMP
-#define LOOPS_PER_TICK cpu_data[smp_processor_id()].loops_per_jiffy
-#else
-#define LOOPS_PER_TICK	loops_per_sec
-#endif
-#endif
-
-#if defined(__i386__)
-#define LOOPS_PER_TICK current_cpu_data.loops_per_jiffy
-#endif
- 
 #define _MIDI_SYNTH_C_
 #define MIDI_SYNTH_NAME	"WaveFront MIDI"
 #define MIDI_SYNTH_CAPS	SYNTH_CAP_INPUT
@@ -131,7 +115,7 @@
 #if    OSS_SUPPORT_LEVEL & OSS_SUPPORT_SEQ
 static int (*midi_load_patch) (int devno, int format, const char *addr,
 			       int offs, int count, int pmgr_flag) = NULL;
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */
 
 /* if WF_DEBUG not defined, no run-time debugging messages will
    be available via the debug flag setting. Given the current
@@ -166,7 +150,7 @@ static int (*midi_load_patch) (int devno, int format, const char *addr,
 
 /*** Module-accessible parameters ***************************************/
 
-int wf_raw = 0; /* we normally check for "raw state" to firmware
+int wf_raw;     /* we normally check for "raw state" to firmware
 		   loading. if set, then during driver loading, the
 		   state of the board is ignored, and we reset the
 		   board and load the firmware anyway.
@@ -179,7 +163,7 @@ int fx_raw = 1; /* if this is zero, we'll leave the FX processor in
 		   operation, whatever that means.
 		*/
 
-int debug_default = 0;  /* you can set this to control debugging
+int debug_default;      /* you can set this to control debugging
 			      during driver loading. it takes any combination
 			      of the WF_DEBUG_* flags defined in
 			      wavefront.h
@@ -191,21 +175,17 @@ char *ospath = "/etc/sound/wavefront.os"; /* where to find a processed
 					     version of the WaveFront OS
 					  */
 
-int wait_usecs = 150; /* This magic number seems to give pretty optimal
-			 throughput based on my limited experimentation.
-			 If you want to play around with it and find a better
-			 value, be my guest. Remember, the idea is to
-			 get a number that causes us to just busy wait
-			 for as many WaveFront commands as possible, without
-			 coming up with a number so large that we hog the
-			 whole CPU.
+int wait_polls = 2000;	/* This is a number of tries we poll the status register
+			   before resorting to sleeping. WaveFront being an ISA
+			   card each poll takes about 1.2us. So before going to
+			   sleep we wait up to 2.4ms in a loop.
+			*/
 
-			 Specifically, with this number, out of about 134,000
-			 status waits, only about 250 result in a sleep.
-		      */
+int sleep_length = HZ/100; /* This says how long we're going to sleep between polls.
+			      10ms sounds reasonable for fast response.
+			   */
 
-int sleep_interval = 100;     /* HZ/sleep_interval seconds per sleep */
-int sleep_tries = 50;       /* number of times we'll try to sleep */
+int sleep_tries = 50;       /* Wait for status 0.5 seconds total. */
 
 int reset_time = 2;        /* hundreths of a second we wait after a HW reset for
 			      the expected interrupt.
@@ -222,8 +202,8 @@ int osrun_time = 10;       /* time in seconds we wait for the OS to
 MODULE_PARM(wf_raw,"i");
 MODULE_PARM(fx_raw,"i");
 MODULE_PARM(debug_default,"i");
-MODULE_PARM(wait_usecs,"i");
-MODULE_PARM(sleep_interval,"i");
+MODULE_PARM(wait_polls,"i");
+MODULE_PARM(sleep_length,"i");
 MODULE_PARM(sleep_tries,"i");
 MODULE_PARM(ospath,"s");
 MODULE_PARM(reset_time,"i");
@@ -279,7 +259,7 @@ struct wf_config {
         int fx_mididev;                    /* devno for FX MIDI interface */
 #if OSS_SUPPORT_LEVEL & OSS_SUPPORT_SEQ
 	int oss_dev;                      /* devno for OSS sequencer synth */
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */
 
 	char fw_version[2];                /* major = [0], minor = [1] */
 	char hw_version[2];                /* major = [0], minor = [1] */
@@ -437,54 +417,30 @@ wavefront_status (void)
 }
 
 static int
-wavefront_sleep (int limit)
-
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(limit);
-
-	return signal_pending(current);
-}
-
-static int
 wavefront_wait (int mask)
 
 {
-	int             i;
-	static int      short_loop_cnt = 0;
+	int i;
 
-	/* Compute the loop count that lets us sleep for about the
-	   right amount of time, cache issues, bus speeds and all
-	   other issues being unequal but largely irrelevant.
-	*/
-
-	if (short_loop_cnt == 0) {
-		short_loop_cnt = wait_usecs *
-			(LOOPS_PER_TICK / (1000000 / HZ));
-	}
-
-	/* Spin for a short period of time, because >99% of all
-	   requests to the WaveFront can be serviced inline like this.
-	*/
-
-	for (i = 0; i < short_loop_cnt; i++) {
-		if (wavefront_status() & mask) {
+	for (i = 0; i < wait_polls; i++)
+		if (wavefront_status() & mask)
 			return 1;
-		}
-	}
 
 	for (i = 0; i < sleep_tries; i++) {
 
 		if (wavefront_status() & mask) {
+			set_current_state(TASK_RUNNING);
 			return 1;
 		}
 
-		if (wavefront_sleep (HZ/sleep_interval)) {
-			return (0);
-		}
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(sleep_length);
+		if (signal_pending(current))
+			break;
 	}
 
-	return (0);
+	set_current_state(TASK_RUNNING);
+	return 0;
 }
 
 static int
@@ -693,7 +649,7 @@ wavefront_cmd (int cmd, unsigned char *rbuf, unsigned char *wbuf)
 /***********************************************************************
 WaveFront: data munging   
 
-Things here are wierd. All data written to the board cannot 
+Things here are weird. All data written to the board cannot 
 have its most significant bit set. Any data item with values 
 potentially > 0x7F (127) must be split across multiple bytes.
 
@@ -702,7 +658,7 @@ the x86 side as 8-32 bit values. Sometimes, we need to munge data
 that is represented on the x86 side as an array of bytes. The most
 efficient approach to handling both cases seems to be to use 2
 different functions for munging and 2 for de-munging. This avoids
-wierd casting and worrying about bit-level offsets.
+weird casting and worrying about bit-level offsets.
 
 **********************************************************************/
 
@@ -1213,7 +1169,7 @@ wavefront_send_sample (wavefront_patch_info *header,
 	shptr = munge_int32 (*((UINT32 *) &header->hdr.s.sampleEndOffset),
 			     shptr, 4);
 	
-	/* This one is truly wierd. What kind of wierdo decided that in
+	/* This one is truly weird. What kind of weirdo decided that in
 	   a system dominated by 16 and 32 bit integers, they would use
 	   a just 12 bits ?
 	*/
@@ -1947,12 +1903,6 @@ wavefront_synth_control (int cmd, wavefront_control *wc)
 /* WaveFront: Linux file system interface (for access via raw synth)    */
 /***********************************************************************/
 
-static loff_t
-wavefront_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int 
 wavefront_open (struct inode *inode, struct file *file)
 {
@@ -2002,7 +1952,7 @@ wavefront_ioctl(struct inode *inode, struct file *file,
 
 static /*const*/ struct file_operations wavefront_fops = {
 	owner:		THIS_MODULE,
-	llseek:		wavefront_llseek,
+	llseek:		no_llseek,
 	ioctl:		wavefront_ioctl,
 	open:		wavefront_open,
 	release:	wavefront_release,
@@ -2045,19 +1995,17 @@ wavefront_oss_ioctl (int devno, unsigned int cmd, caddr_t arg)
 
 	switch (cmd) {
 	case SNDCTL_SYNTH_INFO:
-		memcpy (&((char *) arg)[0], &wavefront_info,
-			sizeof (wavefront_info));
+		if(copy_to_user(&((char *) arg)[0], &wavefront_info,
+			sizeof (wavefront_info)))
+			return -EFAULT;
 		return 0;
-		break;
 
 	case SNDCTL_SEQ_RESETSAMPLES:
-		printk (KERN_WARNING LOGNAME "driver cannot reset samples.\n");
+//		printk (KERN_WARNING LOGNAME "driver cannot reset samples.\n");
 		return 0; /* don't force an error */
-		break;
 
 	case SNDCTL_SEQ_PERCMODE:
 		return 0; /* don't force an error */
-		break;
 
 	case SNDCTL_SYNTH_MEMAVL:
 		if ((dev.freemem = wavefront_freemem ()) < 0) {
@@ -2069,10 +2017,11 @@ wavefront_oss_ioctl (int devno, unsigned int cmd, caddr_t arg)
 		break;
 
 	case SNDCTL_SYNTH_CONTROL:
-		copy_from_user (&wc, arg, sizeof (wc));
-
-		if ((err = wavefront_synth_control (cmd, &wc)) == 0) {
-			copy_to_user (arg, &wc, sizeof (wc));
+		if(copy_from_user (&wc, arg, sizeof (wc)))
+			err = -EFAULT;
+		else if ((err = wavefront_synth_control (cmd, &wc)) == 0) {
+			if(copy_to_user (arg, &wc, sizeof (wc)))
+				err = -EFAULT;
 		}
 
 		return err;
@@ -2139,7 +2088,7 @@ static struct synth_operations wavefront_operations =
 	bender:		midi_synth_bender,
 	setup_voice:	midi_synth_setup_voice
 };
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */
 
 #if OSS_SUPPORT_LEVEL & OSS_SUPPORT_STATIC_INSTALL
 
@@ -2158,7 +2107,7 @@ static void __exit unload_wavefront (struct address_info *hw_config)
     (void) uninstall_wavefront ();
 }
 
-#endif OSS_SUPPORT_STATIC_INSTALL
+#endif /* OSS_SUPPORT_STATIC_INSTALL */
 
 /***********************************************************************/
 /* WaveFront: Linux modular sound kernel installation interface        */
@@ -2534,11 +2483,11 @@ static int __init detect_wavefront (int irq, int io_base)
 #define __KERNEL_SYSCALLS__
 #include <linux/fs.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
-#include <linux/unistd.h>
+#include <linux/slab.h>
+static int my_errno;
+#define errno my_errno
+#include <asm/unistd.h>
 #include <asm/uaccess.h>
-
-static int errno; 
 
 static int
 wavefront_download_firmware (char *path)
@@ -2674,7 +2623,7 @@ static int __init wavefront_config_midi (void)
 		    &wavefront_oss_load_patch;
 	}
 
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */
 	
 	/* Turn on Virtual MIDI, but first *always* turn it off,
 	   since otherwise consectutive reloads of the driver will
@@ -2852,14 +2801,14 @@ static int __init install_wavefront (void)
 	} else {
 		synth_devs[dev.oss_dev] = &wavefront_operations;
 	}
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */
 
 	if (wavefront_init (1) < 0) {
 		printk (KERN_WARNING LOGNAME "initialization failed.\n");
 
 #if OSS_SUPPORT_LEVEL & OSS_SUPPORT_SEQ
 		sound_unload_synthdev (dev.oss_dev);
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */ 
 
 		return -1;
 	}
@@ -2890,7 +2839,7 @@ static void __exit uninstall_wavefront (void)
 
 #if OSS_SUPPORT_LEVEL & OSS_SUPPORT_SEQ
 	sound_unload_synthdev (dev.oss_dev);
-#endif OSS_SUPPORT_SEQ
+#endif /* OSS_SUPPORT_SEQ */ 
 	uninstall_wf_mpu ();
 }
 
@@ -3069,7 +3018,7 @@ wffx_ioctl (wavefront_fx_info *r)
    This code was developed using DOSEMU. The Turtle Beach SETUPSND
    utility was run with I/O tracing in DOSEMU enabled, and a reconstruction
    of the port I/O done, using the Yamaha faxback document as a guide
-   to add more logic to the code. Its really pretty wierd.
+   to add more logic to the code. Its really pretty weird.
 
    There was an alternative approach of just dumping the whole I/O
    sequence as a series of port/value pairs and a simple loop
@@ -3537,6 +3486,7 @@ static int irq = -1;
 
 MODULE_AUTHOR      ("Paul Barton-Davis <pbd@op.net>");
 MODULE_DESCRIPTION ("Turtle Beach WaveFront Linux Driver");
+MODULE_LICENSE("GPL");
 MODULE_PARM        (io,"i");
 MODULE_PARM        (irq,"i");
 

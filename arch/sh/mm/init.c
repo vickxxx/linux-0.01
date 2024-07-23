@@ -1,4 +1,4 @@
-/* $Id: init.c,v 1.17 2000-04-08 15:38:54+09 gniibe Exp $
+/* $Id: init.c,v 1.1.1.1.2.2 2003/07/07 11:23:21 trent Exp $
  *
  *  linux/arch/sh/mm/init.c
  *
@@ -34,119 +34,22 @@
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
+#include <asm/tlb.h>
+
+mmu_gather_t mmu_gathers[NR_CPUS];
 
 /*
  * Cache of MMU context last used.
  */
 unsigned long mmu_context_cache;
 
+#ifdef CONFIG_DISCONTIGMEM
+pg_data_t discontig_page_data[NR_NODES];
+bootmem_data_t discontig_node_bdata[NR_NODES];
+#endif
+
 static unsigned long totalram_pages;
 static unsigned long totalhigh_pages;
-
-extern unsigned long init_smp_mappings(unsigned long);
-
-/*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving an inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
- */
-
-unsigned long empty_bad_page[1024];
-pte_t empty_bad_pte_table[PTRS_PER_PTE];
-extern unsigned long empty_zero_page[1024];
-
-static pte_t * get_bad_pte_table(void)
-{
-	pte_t v;
-	int i;
-
-	v = pte_mkdirty(mk_pte_phys(__pa(empty_bad_page), PAGE_SHARED));
-
-	for (i = 0; i < PAGE_SIZE/sizeof(pte_t); i++)
-		empty_bad_pte_table[i] = v;
-
-	return empty_bad_pte_table;
-}
-
-void __handle_bad_pmd(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-	set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
-}
-
-void __handle_bad_pmd_kernel(pmd_t *pmd)
-{
-	pmd_ERROR(*pmd);
-	set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
-}
-
-pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *) __get_free_page(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			clear_page(pte);
-			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
-			return pte + offset;
-		}
-		set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
-		return NULL;
-	}
-	free_page((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	unsigned long pte;
-
-	pte = (unsigned long) __get_free_page(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			clear_page((void *)pte);
-			set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)));
-			return (pte_t *)pte + offset;
-		}
-		set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
-		return NULL;
-	}
-	free_page(pte);
-	if (pmd_bad(*pmd)) {
-		__handle_bad_pmd(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-int do_check_pgt_cache(int low, int high)
-{
-	int freed = 0;
-	if (pgtable_cache_size > high) {
-		do {
-			if (pgd_quicklist)
-				free_pgd_slow(get_pgd_fast()), freed++;
-			if (pmd_quicklist)
-				free_pmd_slow(get_pmd_fast()), freed++;
-			if (pte_quicklist)
-				free_pte_slow(get_pte_fast()), freed++;
-		} while (pgtable_cache_size > low);
-	}
-	return freed;
-}
 
 void show_mem(void)
 {
@@ -170,7 +73,6 @@ void show_mem(void)
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
-	printk("%ld pages in page table cache\n",pgtable_cache_size);
 	show_buffers();
 }
 
@@ -179,7 +81,7 @@ void show_mem(void)
 extern char _text, _etext, _edata, __bss_start, _end;
 extern char __init_begin, __init_end;
 
-pgd_t swapper_pg_dir[1024];
+pgd_t swapper_pg_dir[PTRS_PER_PGD];
 
 /* It'd be good if these lines were in the standard header file. */
 #define START_PFN	(NODE_DATA(0)->bdata->node_boot_start >> PAGE_SHIFT)
@@ -199,7 +101,7 @@ void __init paging_init(void)
 	/* We don't need kernel mapping as hardware support that. */
 	pg_dir = swapper_pg_dir;
 
-	for (i=0; i < USER_PTRS_PER_PGD*2; i++)
+	for (i=0; i < PTRS_PER_PGD; i++)
 		pgd_val(pg_dir[i]) = 0;
 
 	/* Enable MMU */
@@ -225,13 +127,19 @@ void __init paging_init(void)
 			zones_size[ZONE_DMA] = max_dma - start_pfn;
 			zones_size[ZONE_NORMAL] = low - max_dma;
 		}
-		free_area_init_node(0, 0, 0, zones_size, __MEMORY_START, 0);
+		free_area_init_node(0, NODE_DATA(0), 0, zones_size, __MEMORY_START, 0);
+#ifdef CONFIG_DISCONTIGMEM
+		zones_size[ZONE_DMA] = __MEMORY_SIZE_2ND >> PAGE_SHIFT;
+		zones_size[ZONE_NORMAL] = 0;
+		free_area_init_node(1, NODE_DATA(1), 0, zones_size, __MEMORY_START_2ND, 0);
+#endif
  	}
 }
 
 void __init mem_init(void)
 {
-	int codesize, reservedpages, datasize, initsize;
+	extern unsigned long empty_zero_page[1024];
+	int codesize, reservedpages, datasize, bsssize, initsize, pagemapsize;
 	int tmp;
 
 	max_mapnr = num_physpages = MAX_LOW_PFN - START_PFN;
@@ -239,10 +147,13 @@ void __init mem_init(void)
 
 	/* clear the zero-page */
 	memset(empty_zero_page, 0, PAGE_SIZE);
-	flush_page_to_ram(virt_to_page(empty_zero_page));
+	__flush_wback_region(empty_zero_page, PAGE_SIZE);
 
 	/* this will put all low memory onto the freelists */
-	totalram_pages += free_all_bootmem();
+	totalram_pages += free_all_bootmem_node(NODE_DATA(0));
+#ifdef CONFIG_DISCONTIGMEM
+	totalram_pages += free_all_bootmem_node(NODE_DATA(1));
+#endif
 	reservedpages = 0;
 	for (tmp = 0; tmp < num_physpages; tmp++)
 		/*
@@ -252,15 +163,21 @@ void __init mem_init(void)
 			reservedpages++;
 	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
 	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
+	bsssize  =  (unsigned long) &_end - (unsigned long) &__bss_start;
 	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
+	pagemapsize = (max_mapnr + 1)*sizeof(struct page);
 
-	printk("Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, %dk init)\n",
-		(unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
-		max_mapnr << (PAGE_SHIFT-10),
-		codesize >> 10,
-		reservedpages << (PAGE_SHIFT-10),
-		datasize >> 10,
-		initsize >> 10);
+	printk("Memory: %luk/%luk available (%dk reserved including: %dk kernel code, %dk data, %dk BSS, %dk init, %dk page map)\n",
+	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+	       max_mapnr << (PAGE_SHIFT-10),
+	       reservedpages << (PAGE_SHIFT-10),
+	       codesize >> 10,
+	       datasize >> 10,
+	       bsssize >> 10,
+	       initsize >> 10,
+	       pagemapsize >> 10);
+
+	p3_cache_init();
 }
 
 void free_initmem(void)
@@ -274,7 +191,7 @@ void free_initmem(void)
 		free_page(addr);
 		totalram_pages++;
 	}
-	printk ("Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
+	printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -287,7 +204,7 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 		free_page(p);
 		totalram_pages++;
 	}
-	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+	printk (KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 }
 #endif
 

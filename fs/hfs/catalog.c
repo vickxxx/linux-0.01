@@ -2,7 +2,7 @@
  * linux/fs/hfs/catalog.c
  *
  * Copyright (C) 1995-1997  Paul H. Hargrove
- * This file may be distributed under the terms of the GNU Public License.
+ * This file may be distributed under the terms of the GNU General Public License.
  *
  * This file contains the functions related to the catalog B-tree.
  *
@@ -100,7 +100,7 @@ static LIST_HEAD(entry_in_use);
 static LIST_HEAD(entry_unused);
 static struct list_head hash_table[C_HASHSIZE];
 
-spinlock_t entry_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t entry_lock = SPIN_LOCK_UNLOCKED;
 
 static struct {
         int nr_entries;

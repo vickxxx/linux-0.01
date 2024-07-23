@@ -2,6 +2,9 @@
  * 1999 Copyright (C) Pavel Machek, pavel@ucw.cz. This code is GPL.
  * 1999/11/04 Copyright (C) 1999 VMware, Inc. (Regis "HPReg" Duchesne)
  *            Made nbd_end_request() use the io_request_lock
+ * 2001 Copyright (C) Steven Whitehouse
+ *            New nbd_end_request() for compatibility with new linux block
+ *            layer code.
  */
 
 #ifndef LINUX_NBD_H
@@ -26,42 +29,6 @@
 
 #include <linux/blk.h>
 
-#ifdef PARANOIA
-extern int requests_in;
-extern int requests_out;
-#endif
-
-static int 
-nbd_end_request(struct request *req)
-{
-	unsigned long flags;
-	int ret = 0;
-
-#ifdef PARANOIA
-	requests_out++;
-#endif
-	/*
-	 * This is a very dirty hack that we have to do to handle
-	 * merged requests because end_request stuff is a bit
-	 * broken. The fact we have to do this only if there
-	 * aren't errors looks even more silly.
-	 */
-	if (!req->errors) {
-		req->sector += req->current_nr_sectors;
-		req->nr_sectors -= req->current_nr_sectors;
-	}
-
-	spin_lock_irqsave(&io_request_lock, flags);
-	if (end_that_request_first( req, !req->errors, "nbd" ))
-		goto out;
-	ret = 1;
-	end_that_request_last( req );
-
-out:
-	spin_unlock_irqrestore(&io_request_lock, flags);
-	return ret;
-}
-
 #define MAX_NBD 128
 
 struct nbd_device {
@@ -73,8 +40,9 @@ struct nbd_device {
 	struct socket * sock;
 	struct file * file; 		/* If == NULL, device is not ready, yet	*/
 	int magic;			/* FIXME: not if debugging is off	*/
+	spinlock_t queue_lock;
 	struct list_head queue_head;	/* Requests are added here...			*/
-	struct semaphore queue_lock;
+	struct semaphore tx_lock;
 };
 #endif
 

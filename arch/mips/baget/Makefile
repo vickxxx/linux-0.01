@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.3 1999/08/13 17:07:26 harald Exp $
 #
 # Makefile for the Baget specific kernel interface routines
 # under Linux.
@@ -9,25 +8,14 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-all: baget.a 
+all: baget.a
 
 O_TARGET := baget.a
-O_OBJS   := baget.o print.o setup.o time.o irq.o bagetIRQ.o reset.o wbflush.o
 
-ifeq ($(CONFIG_SERIAL),y)
-	OX_OBJS += vacserial.o
-else
-	ifeq ($(CONFIG_SERIAL),m)
-		MX_OBJS += vacserial.o
-	endif
-endif
-ifeq ($(CONFIG_VAC_RTC),y)
-	OX_OBJS += vacrtc.o
-else
-	ifeq ($(CONFIG_VAC_RTC),m)
-		MX_OBJS += vacrtc.o
-	endif
-endif
+export-objs		:= vacrtc.o
+obj-y			:= baget.o print.o setup.o time.o irq.o bagetIRQ.o \
+			   reset.o
+obj-$(CONFIG_VAC_RTC)	+= vacrtc.o
 
 bagetIRQ.o : bagetIRQ.S
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -50,7 +38,7 @@ dummy.c:
 dummy.o: dummy.c image.bin ramdisk.bin
 	$(CC) $(CFLAGS) -c -o $@ $<
 	$(OBJCOPY) --add-section=.vmlinux=image.bin \
-                   --add-section=.ramdisk=ramdisk.bin   $@ 
+                   --add-section=.ramdisk=ramdisk.bin   $@
 
 balo.h: image
 	$(NM) $< | awk ' \
@@ -61,13 +49,13 @@ balo.h: image
 	/balo_ramdisk_size/ { printf "#define RAMDISK_SIZE 0x%s\n", $$1 } \
                        ' > $@
 balo.o:   balo.c balo.h
-	$(CC) $(CFLAGS) -c $< 
+	$(CC) $(CFLAGS) -c $<
 
 balo_supp.o: balo_supp.S
 	$(CC) $(CFLAGS) -c $<
 
 balo:   balo.o dummy.o balo_supp.o print.o
-	$(LD) $(LDFLAGS) -T ld.script.balo -o $@ $^ 
+	$(LD) $(LDFLAGS) -T ld.script.balo -o $@ $^
 
 clean:
 	rm -f balo balo.h dummy.c image image.bin

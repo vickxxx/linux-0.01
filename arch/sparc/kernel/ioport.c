@@ -1,4 +1,4 @@
-/* $Id: ioport.c,v 1.42 2000/12/05 00:56:36 anton Exp $
+/* $Id: ioport.c,v 1.45 2001/10/30 04:54:21 davem Exp $
  * ioport.c:  Simple io mapping allocator.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -32,7 +32,7 @@
 #include <linux/types.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/pci.h>		/* struct pci_dev */
 #include <linux/proc_fs.h>
 
@@ -161,7 +161,7 @@ void sbus_iounmap(unsigned long addr, unsigned long size)
 static void *_sparc_alloc_io(unsigned int busno, unsigned long phys,
     unsigned long size, char *name)
 {
-	static int printed_full = 0;
+	static int printed_full;
 	struct xresource *xres;
 	struct resource *res;
 	char *tack;
@@ -221,19 +221,7 @@ _sparc_ioremap(struct resource *res, u32 bus, u32 pa, int sz)
 		pa += PAGE_SIZE;
 	}
 
-	/*
-	 * XXX Playing with implementation details here.
-	 * On sparc64 Ebus has resources with precise boundaries.
-	 * We share drivers with sparc64. Too clever drivers use
-	 * start of a resource instead of a base adress.
-	 *
-	 * XXX-2 This may be not valid anymore, clean when
-	 * interface to sbus_ioremap() is resolved.
-	 */
-	res->start += offset;
-	res->end = res->start + sz - 1;		/* not strictly necessary.. */
-
-	return (void *) res->start;
+	return (void *) (res->start + offset);
 }
 
 /*
@@ -244,7 +232,7 @@ static void _sparc_free_io(struct resource *res)
 	unsigned long plen;
 
 	plen = res->end - res->start + 1;
-	plen = (plen + PAGE_SIZE-1) & PAGE_MASK;
+	if ((plen & (PAGE_SIZE-1)) != 0) BUG();
 	while (plen != 0) {
 		plen -= PAGE_SIZE;
 		(*_sparc_unmapioaddr)(res->start + plen);
@@ -351,7 +339,7 @@ void sbus_free_consistent(struct sbus_dev *sdev, long n, void *p, u32 ba)
  * CPU view of this memory may be inconsistent with
  * a device view and explicit flushing is necessary.
  */
-u32 sbus_map_single(struct sbus_dev *sdev, void *va, long len, int direction)
+dma_addr_t sbus_map_single(struct sbus_dev *sdev, void *va, size_t len, int direction)
 {
 #if 0 /* This is the version that abuses consistent space */
 	unsigned long len_total = (len + PAGE_SIZE-1) & PAGE_MASK;
@@ -398,7 +386,7 @@ u32 sbus_map_single(struct sbus_dev *sdev, void *va, long len, int direction)
 #endif
 }
 
-void sbus_unmap_single(struct sbus_dev *sdev, u32 ba, long n, int direction)
+void sbus_unmap_single(struct sbus_dev *sdev, dma_addr_t ba, size_t n, int direction)
 {
 #if 0 /* This is the version that abuses consistent space */
 	struct resource *res;
@@ -445,7 +433,7 @@ void sbus_unmap_sg(struct sbus_dev *sdev, struct scatterlist *sg, int n, int dir
 
 /*
  */
-void sbus_dma_sync_single(struct sbus_dev *sdev, u32 ba, long size, int direction)
+void sbus_dma_sync_single(struct sbus_dev *sdev, dma_addr_t ba, size_t size, int direction)
 {
 #if 0
 	unsigned long va;
@@ -515,7 +503,7 @@ void *pci_alloc_consistent(struct pci_dev *pdev, size_t len, dma_addr_t *pba)
 	mmu_inval_dma_area(va, len_total);
 
 #if 1
-/* P3 */ printk("pci_alloc_consistent: kva %lx uncva %lx phys %lx size %x\n",
+/* P3 */ printk("pci_alloc_consistent: kva %lx uncva %lx phys %lx size %lx\n",
   (long)va, (long)res->start, (long)virt_to_phys(va), len_total);
 #endif
 	{
@@ -703,7 +691,7 @@ void pci_dma_sync_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents, i
 		}
 	}
 }
-#endif CONFIG_PCI
+#endif /* CONFIG_PCI */
 
 #ifdef CONFIG_PROC_FS
 
@@ -725,7 +713,7 @@ _sparc_io_get_info(char *buf, char **start, off_t fpos, int length, int *eof,
 	return p-buf;
 }
 
-#endif CONFIG_PROC_FS
+#endif /* CONFIG_PROC_FS */
 
 /*
  * This is a version of find_resource and it belongs to kernel/resource.c.
@@ -772,7 +760,7 @@ void ioport_init(void)
 	default:
 		printk("ioport_init: cpu type %d is unknown.\n",
 		    sparc_cpu_model);
-		halt();
+		prom_halt();
 	};
 
 }

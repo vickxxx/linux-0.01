@@ -82,16 +82,6 @@ extern void scrollfront(int);
 
 struct l1a_kbd_state l1a_state;
 
-#ifndef CONFIG_PCI
-DECLARE_WAIT_QUEUE_HEAD(keypress_wait);
-#endif
-
-int keyboard_wait_for_keypress(struct console *co)
-{
-	sleep_on(&keypress_wait);
-	return 0;
-}
-
 static spinlock_t sunkbd_lock = SPIN_LOCK_UNLOCKED;
 
 /*
@@ -115,12 +105,12 @@ static int dead_key_next;
  * return the value. I chose the former way.
  */
 #ifndef CONFIG_PCI
-/*static*/ int shift_state;
+int shift_state;
+struct kbd_struct kbd_table[MAX_NR_CONSOLES];
 #endif
 static int npadch = -1;			/* -1 or number assembled on pad */
 static unsigned char diacr;
 static char rep;			/* flag telling character repeat */
-struct kbd_struct kbd_table[MAX_NR_CONSOLES];
 static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
 static struct tty_struct * tty;
@@ -514,7 +504,7 @@ static void __sunkbd_inchar(unsigned char ch, struct pt_regs *regs)
 	}
 	
 	do_poke_blanked_console = 1;
-	tasklet_schedule(&console_tasklet);
+	schedule_console_callback();
 	add_keyboard_randomness(keycode);
 
 	tty = ttytab? ttytab[fg_console]: NULL;
@@ -629,7 +619,6 @@ void sunkbd_inchar(unsigned char ch, struct pt_regs *regs)
 
 static void put_queue(int ch)
 {
-	wake_up(&keypress_wait);
 	if (tty) {
 		tty_insert_flip_char(tty, ch, 0);
 		con_schedule_flip(tty);
@@ -638,7 +627,6 @@ static void put_queue(int ch)
 
 static void puts_queue(char *cp)
 {
-	wake_up(&keypress_wait);
 	if (!tty)
 		return;
 
@@ -789,7 +777,12 @@ static void compose(void)
 	set_leds();
 }
 
+#ifdef CONFIG_PCI
+extern int spawnpid, spawnsig;
+#else
 int spawnpid, spawnsig;
+#endif
+
 
 static void spawn_console(void)
 {
@@ -1521,15 +1514,17 @@ kbd_ioctl (struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
 static int
 kbd_open (struct inode *i, struct file *f)
 {
+	spin_lock_irq(&kbd_queue_lock);
 	kbd_active++;
 
 	if (kbd_opened)
-		return 0;
+		goto out;
 
 	kbd_opened = fg_console + 1;
 
-	spin_lock_irq(&kbd_queue_lock);
 	kbd_head = kbd_tail = 0;
+
+ out:
 	spin_unlock_irq(&kbd_queue_lock);
 
 	return 0;
@@ -1538,7 +1533,7 @@ kbd_open (struct inode *i, struct file *f)
 static int
 kbd_close (struct inode *i, struct file *f)
 {
-	lock_kernel();
+	spin_lock_irq(&kbd_queue_lock);
 	if (!--kbd_active) {
 		if (kbd_redirected)
 			kbd_table [kbd_redirected-1].kbdmode = VC_XLATE;
@@ -1546,7 +1541,8 @@ kbd_close (struct inode *i, struct file *f)
 		kbd_opened = 0;
 		kbd_fasync (-1, f, 0);
 	}
-	unlock_kernel();
+	spin_unlock_irq(&kbd_queue_lock);
+
 	return 0;
 }
 

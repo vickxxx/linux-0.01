@@ -32,9 +32,14 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
+#include <asm/constants.h>
 #include <asm/procinfo.h>
 #include <asm/hardware.h>
-#include "../lib/constants.h"
+
+/*
+ * and the page size
+ */
+#define PAGESIZE	4096
 
 /*
  * Function: arm720_cache_clean_invalidate_all (void)
@@ -86,8 +91,11 @@ ENTRY(cpu_arm720_tlb_invalidate_all)
  * Purpose : flush a TLB entry
  */
 ENTRY(cpu_arm720_tlb_invalidate_range)
+		sub	r3, r1, r0
+		cmp	r3, #256 * PAGESIZE		@ arbitary, should be tuned
+		bhi	cpu_arm720_tlb_invalidate_all
 1:		mcr	p15, 0, r0, c8, c7, 1		@ flush TLB (v4)
-		add	r0, r0, #4096
+		add	r0, r0, #PAGESIZE
 		cmp	r0, r1
 		blt	1b
 		mov	pc, lr
@@ -108,8 +116,12 @@ ENTRY(cpu_arm720_tlb_invalidate_page)
  * Function: arm720_data_abort ()
  *
  * Params  : r0 = address of aborted instruction
+ *         : r3 = saved SPSR
  *
  * Purpose : obtain information about current aborted instruction
+ * Note: we read user space.  This means we might cause a data
+ * abort here if the I-TLB and D-TLB aren't seeing the same
+ * picture.  Unfortunately, this does happen.  We live with it.
  *
  * Returns : r0 = address of abort
  *	   : r1 != 0 if writing
@@ -143,10 +155,12 @@ Ldata_simple:	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
 		mov	pc, lr
 
 ENTRY(cpu_arm720_data_abort)
+		tst	r3, #T_BIT
+		bne	.data_thumb_abort
 		ldr	r4, [r0]			@ read instruction causing problem
-		mov	r1, r4, lsr #19			@ r1 b1 = L
+		tst	r4, r4, lsr #21			@ C = bit 20
+		sbc	r1, r1, r1			@ r1 = C - 1
 		and	r2, r4, #15 << 24
-		and	r1, r1, #2			@ check read/write bit
 		add	pc, pc, r2, lsr #22		@ Now branch to the relevent processing routine
 		movs	pc, lr
 
@@ -169,9 +183,9 @@ ENTRY(cpu_arm720_data_abort)
 Ldata_unknown:	@ Part of jumptable
 		mov	r0, r2
 		mov	r1, r4
-		mov	r2, r3
+		mov	r2, sp
 		bl	baddataabort
-		b	ret_from_sys_call
+		b	ret_from_exception
 
 Ldata_lateldrhpre:
 		tst	r4, #1 << 21			@ check writeback bit
@@ -255,6 +269,77 @@ Ldata_lateldrpostreg:
 		addeq	r7, r0, r2
 		b	Ldata_saver7
 
+.data_thumb_abort:
+		ldrh	r4, [r0]			@ read instruction
+		tst	r4, r4, lsr #12			@ C = bit 11
+		sbc	r1, r1, r1			@ r1 = C - 1
+		and	r2, r4, #15 << 12
+		add	pc, pc, r2, lsr #10		@ lookup in table
+		nop
+
+/* 0 */		b	Ldata_unknown
+/* 1 */		b	Ldata_unknown
+/* 2 */		b	Ldata_unknown
+/* 3 */		b	Ldata_unknown
+/* 4 */		b	Ldata_unknown
+/* 5 */		b	.data_thumb_reg
+/* 6 */		b	Ldata_simple
+/* 7 */		b	Ldata_simple
+/* 8 */		b	Ldata_simple
+/* 9 */		b	Ldata_simple
+/* A */		b	Ldata_unknown
+/* B */		b	.data_thumb_pushpop
+/* C */		b	.data_thumb_ldmstm
+/* D */		b	Ldata_unknown
+/* E */		b	Ldata_unknown
+/* F */		b	Ldata_unknown
+
+.data_thumb_reg:
+		tst	r4, #1 << 9
+		beq	Ldata_simple
+		tst	r4, #1 << 10		@ If 'S' (signed) bit is set
+		movne	r1, #0			@ it must be a load instr
+		b	Ldata_simple
+
+.data_thumb_pushpop:
+		tst	r4, #1 << 10
+		beq	Ldata_unknown
+		mov	r7, #0x11
+		and	r0, r4, r7
+		and	r2, r4, r7, lsl #1
+		add	r0, r0, r2, lsr #1
+		and	r2, r4, r7, lsl #2
+		add	r0, r0, r2, lsr #2
+		and	r2, r4, r7, lsl #3
+		add	r0, r0, r2, lsr #3
+		add	r0, r0, r0, lsr #4
+		and	r2, r4, #0x0100			@ catch 'R' bit for push/pop
+		add	r0, r0, r2, lsr #8
+		and	r0, r0, #15			@ number of regs to transfer
+		ldr	r7, [sp, #13 << 2]
+		tst	r4, #1 << 11
+		addne	r7, r7, r0, lsl #2		@ increment SP if PUSH
+		subeq	r7, r7, r0, lsr #2		@ decrement SP if POP
+		str	r7, [sp, #13 << 2]
+		b	Ldata_simple
+
+.data_thumb_ldmstm:
+		mov	r7, #0x11
+		and	r0, r4, r7
+		and	r2, r4, r7, lsl #1
+		add	r0, r0, r2, lsr #1
+		and	r2, r4, r7, lsl #2
+		add	r0, r0, r2, lsr #2
+		and	r2, r4, r7, lsl #3
+		add	r0, r0, r2, lsr #3
+		add	r0, r0, r0, lsr #4
+		and	r0, r0, #15			@ number of regs to transfer
+		and	r5, r4, #7 << 8
+		ldr	r7, [sp, r5, lsr #6]
+		sub	r7, r7, r0, lsr #2		@ always decrement
+		str	r7, [sp, r5, lsr #6]
+		b	Ldata_simple
+
 /*
  * Function: arm720_check_bugs (void)
  *	   : arm720_proc_init (void)
@@ -283,23 +368,11 @@ ENTRY(cpu_arm720_proc_fin)
 		ldmfd	sp!, {pc}
 
 /*
- * Function: arm720_proc_do_idle (void)
- *
- * Params  : r0 = call type:
- *           0 = slow idle
- *           1 = fast idle
- *           2 = switch to slow processor clock
- *           3 = switch to fast processor clock
- *
+ * Function: arm720_proc_do_idle(void)
+ * Params  : r0 = unused
  * Purpose : put the processer in proper idle mode
  */
 ENTRY(cpu_arm720_do_idle)
-#if 0 /* FIXME: is this part of the processor? */
-		ldr	r2, =IO_BASE			@ Virt addr of IO
-		add	r2, r2, #0x00050000		@ Start of PMU regs
-		mov	r1, #0x01			@ Idle mode
-		str	r1, [r2, #4]
-#endif
 		mov	pc, lr
 
 /*
@@ -373,8 +446,6 @@ ENTRY(cpu_arm720_reset)
 		mov	pc, r0
 
 	
-cpu_armvlsi_name:
-		.asciz	"ARM"
 cpu_arm720_name:
 		.asciz	"ARM720T"
 		.align
@@ -389,11 +460,9 @@ __arm720_setup:	mov	r0, #0
 		mcr	p15, 0, r0, c3, c0		@ load domain access register
 
 		mrc	p15, 0, r0, c1, c0		@ get control register
-		bic	r0, r0, #0x2e00
-		bic	r0, r0, #0x000e
-		orr	r0, r0, #0x0031			@ ..V...RSBLDPWCAM
-		orr	r0, r0, #0x0100			@ .........111.... (old)
-		orr	r0, r0, #0x000c			@ ..0...01..111101 (new)
+		bic	r0, r0, #0x0e00			@ ..V. ..RS BLDP WCAM
+		orr	r0, r0, #0x2100			@ .... .... .111 .... (old)
+		orr	r0, r0, #0x003d			@ ..1. ..01 ..11 1101 (new)
 		mov	pc, lr				@ __ret (head-armv.S)
 
 /*
@@ -437,7 +506,7 @@ ENTRY(arm720_processor_functions)
 
 		.type	cpu_arm720_info, #object
 cpu_arm720_info:
-		.long	cpu_armvlsi_name
+		.long	0
 		.long	cpu_arm720_name
 		.size	cpu_arm720_info, . - cpu_arm720_info
 	
@@ -451,7 +520,7 @@ cpu_elf_name:	.asciz	"v4"
 		.align
 
 /*
- * See /include/asm-arm for a definition of this structure.
+ * See linux/include/asm-arm/procinfo.h for a definition of this structure.
  */
 	
 		.section ".proc.info", #alloc, #execinstr
@@ -464,7 +533,7 @@ __arm720_proc_info:
 		b	__arm720_setup				@ cpu_flush
 		.long	cpu_arch_name				@ arch_name
 		.long	cpu_elf_name				@ elf_name
-		.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT	@ elf_hwcap
+		.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB	@ elf_hwcap
 		.long	cpu_arm720_info				@ info
 		.long	arm720_processor_functions
 		.size	__arm720_proc_info, . - __arm720_proc_info

@@ -13,11 +13,6 @@
 
 #include "ncplib_kernel.h"
 
-static inline int min(int a, int b)
-{
-	return a < b ? a : b;
-}
-
 static inline void assert_server_locked(struct ncp_server *server)
 {
 	if (server->lock == 0) {
@@ -53,14 +48,6 @@ static void ncp_add_mem(struct ncp_server *server, const void *source, int size)
 {
 	assert_server_locked(server);
 	memcpy(&(server->packet[server->current_size]), source, size);
-	server->current_size += size;
-	return;
-}
-
-static void ncp_add_mem_fromfs(struct ncp_server *server, const char *source, int size)
-{
-	assert_server_locked(server);
-	copy_from_user(&(server->packet[server->current_size]), source, size);
 	server->current_size += size;
 	return;
 }
@@ -132,7 +119,7 @@ ncp_negotiate_buffersize(struct ncp_server *server, int size, int *target)
 		ncp_unlock_server(server);
 		return result;
 	}
-	*target = min(ntohs(ncp_reply_word(server, 0)), size);
+	*target = min_t(unsigned int, ntohs(ncp_reply_word(server, 0)), size);
 
 	ncp_unlock_server(server);
 	return 0;
@@ -163,7 +150,8 @@ ncp_negotiate_size_and_options(struct ncp_server *server,
 
 	/* NCP over UDP returns 0 (!!!) */
 	result = ntohs(ncp_reply_word(server, 0));
-	if (result >= NCP_BLOCK_SIZE) size=min(result, size);
+	if (result >= NCP_BLOCK_SIZE)
+		size = min(result, size);
 	*ret_size = size;
 	*ret_options = ncp_reply_byte(server, 4);
 
@@ -270,6 +258,7 @@ static void ncp_extract_file_info(void *structure, struct nw_info_struct *target
 	target->nameLen = *name_len;
 	memcpy(target->entryName, name_len + 1, *name_len);
 	target->entryName[*name_len] = '\0';
+	target->volNumber = le32_to_cpu(target->volNumber);
 	return;
 }
 
@@ -350,7 +339,7 @@ ncp_get_known_namespace(struct ncp_server *server, __u8 volume)
 	}
 
 	result = NW_NS_DOS;
-	no_namespaces = ncp_reply_word(server, 0);
+	no_namespaces = le16_to_cpu(ncp_reply_word(server, 0));
 	namespace = ncp_reply_data(server, 2);
 
 	while (no_namespaces > 0) {

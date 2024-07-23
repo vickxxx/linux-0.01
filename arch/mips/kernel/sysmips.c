@@ -1,11 +1,10 @@
 /*
- * MIPS specific syscalls
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997, 2000 by Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997, 2000, 2001 by Ralf Baechle
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  */
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -20,6 +19,8 @@
 #include <asm/pgalloc.h>
 #include <asm/sysmips.h>
 #include <asm/uaccess.h>
+
+extern asmlinkage void syscall_trace(void);
 
 /*
  * How long a hostname can we get from user space?
@@ -45,11 +46,10 @@ get_max_hostname(unsigned long address)
 }
 
 asmlinkage int
-sys_sysmips(int cmd, int arg1, int arg2, int arg3)
+_sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 {
-	int	*p;
 	char	*name;
-	int	flags, tmp, len, retval, errno;
+	int	tmp, len, retval;
 
 	switch(cmd) {
 	case SETNAME: {
@@ -61,36 +61,20 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 		name = (char *) arg1;
 
 		len = strncpy_from_user(nodename, name, sizeof(nodename));
-		if (len < 0) 
+		if (len < 0)
 			return -EFAULT;
 
 		down_write(&uts_sem);
-		strncpy(system_utsname.nodename, name, len);
+		strncpy(system_utsname.nodename, nodename, len);
+		system_utsname.nodename[len] = '\0';
 		up_write(&uts_sem);
-		system_utsname.nodename[len] = '\0'; 
 		return 0;
 	}
 
-	case MIPS_ATOMIC_SET: {
-		/* This is broken in case of page faults and SMP ...
-		    Risc/OS faults after maximum 20 tries with EAGAIN.  */
-		unsigned int tmp;
-
-		p = (int *) arg1;
-		errno = verify_area(VERIFY_WRITE, p, sizeof(*p));
-		if (errno)
-			return errno;
-		errno = 0;
-		save_and_cli(flags);
-		errno |= __get_user(tmp, p);
-		errno |= __put_user(arg2, p);
-		restore_flags(flags);
-
-		if (errno)
-			return tmp;
-
-		return tmp;             /* This is broken ...  */ 
-        }
+	case MIPS_ATOMIC_SET:
+		printk(KERN_CRIT "How did I get here?\n");
+		retval = -EINVAL;
+		goto out;
 
 	case MIPS_FIXADE:
 		tmp = current->thread.mflags & ~3;
@@ -99,7 +83,7 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 		goto out;
 
 	case FLUSH_CACHE:
-		flush_cache_all();
+		__flush_cache_all();
 		retval = 0;
 		goto out;
 

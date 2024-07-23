@@ -3,7 +3,7 @@
 
 /*
  * Include file for the interface to an APM BIOS
- * Copyright 1994-2000 Stephen Rothwell (sfr@linuxcare.com)
+ * Copyright 1994-2001 Stephen Rothwell (sfr@canb.auug.org.au)
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -52,6 +52,11 @@ struct apm_info {
 	struct apm_bios_info	bios;
 	unsigned short		connection_version;
 	int			get_power_status_broken;
+	int			get_power_status_swabinminutes;
+	int			allow_ints;
+	int			forbid_idle;
+	int			realmode_power_off;
+	int			disabled;
 };
 
 /*

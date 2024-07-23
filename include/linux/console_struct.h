@@ -9,6 +9,9 @@
  * to achieve effects such as fast scrolling by changing the origin.
  */
 
+#ifndef _LINUX_CONSOLE_STRUCT_H_
+#define _LINUX_CONSOLE_STRUCT_H_
+
 #define NPAR 16
 
 struct vc_data {
@@ -68,7 +71,7 @@ struct vc_data {
 	unsigned char	vc_utf		: 1;	/* Unicode UTF-8 encoding */
 	unsigned char	vc_utf_count;
 		 int	vc_utf_char;
-	unsigned int	vc_tab_stop[5];		/* Tab stops. 160 columns. */
+	unsigned int	vc_tab_stop[8];		/* Tab stops. 256 columns. */
 	unsigned char   vc_palette[16*3];       /* Colour palette for VGA+ */
 	unsigned short * vc_translate;
 	unsigned char 	vc_G0_charset;
@@ -107,3 +110,5 @@ extern struct vc vc_cons [MAX_NR_CONSOLES];
 #define CUR_DEFAULT CUR_UNDERLINE
 
 #define CON_IS_VISIBLE(conp) (*conp->vc_display_fg == conp)
+
+#endif /* _LINUX_CONSOLE_STRUCT_H_ */

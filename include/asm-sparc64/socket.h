@@ -1,10 +1,10 @@
-/* $Id: socket.h,v 1.8 2000/07/08 00:20:43 davem Exp $ */
+/* $Id: socket.h,v 1.10 2001/06/13 16:25:03 davem Exp $ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
 #include <asm/sockios.h>
 
-/* For setsockoptions(2) */
+/* For setsockopt(2) */
 #define SOL_SOCKET	0xffff
 
 #define SO_DEBUG	0x0001
@@ -22,6 +22,7 @@
 #define SO_SNDLOWAT     0x1000
 #define SO_RCVTIMEO     0x2000
 #define SO_SNDTIMEO     0x4000
+#define SO_ACCEPTCONN	0x8000
 
 /* wha!??? */
 #define SO_DONTLINGER   (~SO_LINGER)  /* Older SunOS compat. hack */
@@ -62,6 +63,7 @@
 					/* level.  For writing rarp and	*/
 					/* other similar things on the	*/
 					/* user level.			*/
+#define	SOCK_MAX	(SOCK_PACKET+1)
 #endif
 
 #endif /* _ASM_SOCKET_H */

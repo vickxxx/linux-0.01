@@ -1,18 +1,24 @@
 /*
 	drivers/net/tulip/media.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
-	Copyright 2000  The Linux Kernel Team
-	Written/copyright 1994-1999 by Donald Becker.
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001  The Linux Kernel Team
+	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	Please refer to Documentation/networking/tulip.txt for more
-	information on this driver.
+	Please refer to Documentation/DocBook/tulip.{pdf,ps,html}
+	for more information on this driver, or visit the project
+	Web page at http://sourceforge.net/projects/tulip/
 
 */
 
+#include <linux/kernel.h>
+#include <linux/mii.h>
+#include <linux/init.h>
+#include <linux/delay.h>
+#include <linux/pci.h>
 #include "tulip.h"
 
 
@@ -21,6 +27,25 @@
    No one knows what it should be, but if left at its default value some
    10base2(!) packets trigger a full-duplex-request interrupt. */
 #define FULL_DUPLEX_MAGIC	0x6969
+
+/* The maximum data clock rate is 2.5 Mhz.  The minimum timing is usually
+   met by back-to-back PCI I/O cycles, but we insert a delay to avoid
+   "overclocking" issues or future 66Mhz PCI. */
+#define mdio_delay() inl(mdio_addr)
+
+/* Read and write the MII registers using software-generated serial
+   MDIO protocol.  It is just different enough from the EEPROM protocol
+   to not share code.  The maxium data clock rate is 2.5 Mhz. */
+#define MDIO_SHIFT_CLK		0x10000
+#define MDIO_DATA_WRITE0	0x00000
+#define MDIO_DATA_WRITE1	0x20000
+#define MDIO_ENB		0x00000 /* Ignore the 0x02000 databook setting. */
+#define MDIO_ENB_IN		0x40000
+#define MDIO_DATA_READ		0x80000
+
+static const unsigned char comet_miireg2offset[32] = {
+	0xB4, 0xB8, 0xBC, 0xC0,  0xC4, 0xC8, 0xCC, 0,  0,0,0,0,  0,0,0,0,
+	0,0xD0,0,0,  0,0,0,0,  0,0,0,0, 0, 0xD4, 0xD8, 0xDC, };
 
 
 /* MII transceiver control section.
@@ -32,32 +57,34 @@ int tulip_mdio_read(struct net_device *dev, int phy_id, int location)
 {
 	struct tulip_private *tp = (struct tulip_private *)dev->priv;
 	int i;
-	int read_cmd = (0xf6 << 10) | (phy_id << 5) | location;
+	int read_cmd = (0xf6 << 10) | ((phy_id & 0x1f) << 5) | location;
 	int retval = 0;
 	long ioaddr = dev->base_addr;
 	long mdio_addr = ioaddr + CSR9;
+	unsigned long flags;
 
+	if (location & ~0x1f)
+		return 0xffff;
+
+	if (tp->chip_id == COMET  &&  phy_id == 30) {
+		if (comet_miireg2offset[location])
+			return inl(ioaddr + comet_miireg2offset[location]);
+		return 0xffff;
+	}
+
+	spin_lock_irqsave(&tp->mii_lock, flags);
 	if (tp->chip_id == LC82C168) {
 		int i = 1000;
 		outl(0x60020000 + (phy_id<<23) + (location<<18), ioaddr + 0xA0);
 		inl(ioaddr + 0xA0);
 		inl(ioaddr + 0xA0);
-		while (--i > 0)
+		while (--i > 0) {
+			barrier();
 			if ( ! ((retval = inl(ioaddr + 0xA0)) & 0x80000000))
-				return retval & 0xffff;
-		return 0xffff;
-	}
-
-	if (tp->chip_id == COMET) {
-		if (phy_id == 1) {
-			if (location < 7)
-				return inl(ioaddr + 0xB4 + (location<<2));
-			else if (location == 17)
-				return inl(ioaddr + 0xD0);
-			else if (location >= 29 && location <= 31)
-				return inl(ioaddr + 0xD4 + ((location-29)<<2));
+				break;
 		}
-		return 0xffff;
+		spin_unlock_irqrestore(&tp->mii_lock, flags);
+		return retval & 0xffff;
 	}
 
 	/* Establish sync by sending at least 32 logic ones. */
@@ -84,36 +111,39 @@ int tulip_mdio_read(struct net_device *dev, int phy_id, int location)
 		outl(MDIO_ENB_IN | MDIO_SHIFT_CLK, mdio_addr);
 		mdio_delay();
 	}
+
+	spin_unlock_irqrestore(&tp->mii_lock, flags);
 	return (retval>>1) & 0xffff;
 }
 
-void tulip_mdio_write(struct net_device *dev, int phy_id, int location, int value)
+void tulip_mdio_write(struct net_device *dev, int phy_id, int location, int val)
 {
 	struct tulip_private *tp = (struct tulip_private *)dev->priv;
 	int i;
-	int cmd = (0x5002 << 16) | (phy_id << 23) | (location<<18) | value;
+	int cmd = (0x5002 << 16) | ((phy_id & 0x1f) << 23) | (location<<18) | (val & 0xffff);
 	long ioaddr = dev->base_addr;
 	long mdio_addr = ioaddr + CSR9;
+	unsigned long flags;
 
-	if (tp->chip_id == LC82C168) {
-		int i = 1000;
-		outl(cmd, ioaddr + 0xA0);
-		do
-			if ( ! (inl(ioaddr + 0xA0) & 0x80000000))
-				break;
-		while (--i > 0);
+	if (location & ~0x1f)
+		return;
+
+	if (tp->chip_id == COMET && phy_id == 30) {
+		if (comet_miireg2offset[location])
+			outl(val, ioaddr + comet_miireg2offset[location]);
 		return;
 	}
 
-	if (tp->chip_id == COMET) {
-		if (phy_id != 1)
-			return;
-		if (location < 7)
-			outl(value, ioaddr + 0xB4 + (location<<2));
-		else if (location == 17)
-			outl(value, ioaddr + 0xD0);
-		else if (location >= 29 && location <= 31)
-			outl(value, ioaddr + 0xD4 + ((location-29)<<2));
+	spin_lock_irqsave(&tp->mii_lock, flags);
+	if (tp->chip_id == LC82C168) {
+		int i = 1000;
+		outl(cmd, ioaddr + 0xA0);
+		do {
+			barrier();
+			if ( ! (inl(ioaddr + 0xA0) & 0x80000000))
+				break;
+		} while (--i > 0);
+		spin_unlock_irqrestore(&tp->mii_lock, flags);
 		return;
 	}
 
@@ -139,6 +169,8 @@ void tulip_mdio_write(struct net_device *dev, int phy_id, int location, int valu
 		outl(MDIO_ENB_IN | MDIO_SHIFT_CLK, mdio_addr);
 		mdio_delay();
 	}
+
+	spin_unlock_irqrestore(&tp->mii_lock, flags);
 }
 
 
@@ -172,7 +204,7 @@ void tulip_select_media(struct net_device *dev, int startup)
 			for (i = 0; i < 5; i++)
 				setup[i] = get_u16(&p[i*2 + 1]);
 
-			dev->if_port = p[0] & 15;
+			dev->if_port = p[0] & MEDIA_MASK;
 			if (tulip_media_cap[dev->if_port] & MediaAlwaysFD)
 				tp->full_duplex = 1;
 
@@ -201,7 +233,7 @@ void tulip_select_media(struct net_device *dev, int startup)
 				outl(csr13val, ioaddr + CSR13);
 			} else {
 				csr13val = 1;
-				csr14val = 0x0003FF7F;
+				csr14val = 0;
 				csr15dir = (setup[0]<<16) | 0x0008;
 				csr15val = (setup[1]<<16) | 0x0008;
 				if (dev->if_port <= 4)
@@ -226,8 +258,7 @@ void tulip_select_media(struct net_device *dev, int startup)
 		case 1: case 3: {
 			int phy_num = p[0];
 			int init_length = p[1];
-			u16 *misc_info;
-			u16 to_advertise;
+			u16 *misc_info, tmp_info;
 
 			dev->if_port = 11;
 			new_csr6 = 0x020E0000;
@@ -254,18 +285,24 @@ void tulip_select_media(struct net_device *dev, int startup)
 				for (i = 0; i < init_length; i++)
 					outl(init_sequence[i], ioaddr + CSR12);
 			}
-			to_advertise = (get_u16(&misc_info[1]) & tp->to_advertise) | 1;
-			tp->advertising[phy_num] = to_advertise;
-			if (tulip_debug > 1)
-				printk(KERN_DEBUG "%s:  Advertising %4.4x on PHY %d (%d).\n",
-					   dev->name, to_advertise, phy_num, tp->phys[phy_num]);
-			/* Bogus: put in by a committee?  */
-			tulip_mdio_write(dev, tp->phys[phy_num], 4, to_advertise);
+			tmp_info = get_u16(&misc_info[1]);
+			if (tmp_info)
+				tp->advertising[phy_num] = tmp_info | 1;
+			if (tmp_info && startup < 2) {
+				if (tp->mii_advertise == 0)
+					tp->mii_advertise = tp->advertising[phy_num];
+				if (tulip_debug > 1)
+					printk(KERN_DEBUG "%s:  Advertising %4.4x on MII %d.\n",
+					       dev->name, tp->mii_advertise, tp->phys[phy_num]);
+				tulip_mdio_write(dev, tp->phys[phy_num], 4, tp->mii_advertise);
+			}
 			break;
 		}
 		case 5: case 6: {
 			u16 setup[5];
-			u32 csr13val, csr14val, csr15dir, csr15val;
+
+			new_csr6 = 0; /* FIXME */
+
 			for (i = 0; i < 5; i++)
 				setup[i] = get_u16(&p[i*2 + 1]);
 
@@ -353,9 +390,9 @@ void tulip_select_media(struct net_device *dev, int startup)
 		if (tulip_media_cap[dev->if_port] & MediaIsMII) {
 			new_csr6 = 0x020E0000;
 		} else if (tulip_media_cap[dev->if_port] & MediaIsFx) {
-			new_csr6 = 0x028600000;
+			new_csr6 = 0x02860000;
 		} else
-			new_csr6 = 0x038600000;
+			new_csr6 = 0x03860000;
 		if (tulip_debug > 1)
 			printk(KERN_DEBUG "%s: No media description table, assuming "
 				   "%s transceiver, CSR12 %2.2x.\n",
@@ -368,52 +405,160 @@ void tulip_select_media(struct net_device *dev, int startup)
 }
 
 /*
-  Check the MII negotiated duplex, and change the CSR6 setting if
+  Check the MII negotiated duplex and change the CSR6 setting if
   required.
   Return 0 if everything is OK.
   Return < 0 if the transceiver is missing or has no link beat.
   */
 int tulip_check_duplex(struct net_device *dev)
 {
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
-	int mii_reg1, mii_reg5, negotiated, duplex;
+	struct tulip_private *tp = dev->priv;
+	unsigned int bmsr, lpa, negotiated, new_csr6;
 
-	if (tp->full_duplex_lock)
-		return 0;
-	mii_reg1 = tulip_mdio_read(dev, tp->phys[0], 1);
-	mii_reg5 = tulip_mdio_read(dev, tp->phys[0], 5);
+	bmsr = tulip_mdio_read(dev, tp->phys[0], MII_BMSR);
+	lpa = tulip_mdio_read(dev, tp->phys[0], MII_LPA);
 	if (tulip_debug > 1)
 		printk(KERN_INFO "%s: MII status %4.4x, Link partner report "
-			   "%4.4x.\n", dev->name, mii_reg1, mii_reg5);
-	if (mii_reg1 == 0xffff)
+			   "%4.4x.\n", dev->name, bmsr, lpa);
+	if (bmsr == 0xffff)
 		return -2;
-	if ((mii_reg1 & 0x0004) == 0) {
-		int new_reg1 = tulip_mdio_read(dev, tp->phys[0], 1);
-		if ((new_reg1 & 0x0004) == 0) {
+	if ((bmsr & BMSR_LSTATUS) == 0) {
+		int new_bmsr = tulip_mdio_read(dev, tp->phys[0], MII_BMSR);
+		if ((new_bmsr & BMSR_LSTATUS) == 0) {
 			if (tulip_debug  > 1)
 				printk(KERN_INFO "%s: No link beat on the MII interface,"
-					   " status %4.4x.\n", dev->name, new_reg1);
+					   " status %4.4x.\n", dev->name, new_bmsr);
 			return -1;
 		}
 	}
-	negotiated = mii_reg5 & tp->advertising[0];
-	duplex = ((negotiated & 0x0300) == 0x0100
-			  || (negotiated & 0x00C0) == 0x0040);
-	/* 100baseTx-FD  or  10T-FD, but not 100-HD */
-	if (tp->full_duplex != duplex) {
-		tp->full_duplex = duplex;
-		if (negotiated & 0x038)	/* 100mbps. */
-			tp->csr6 &= ~0x00400000;
-		if (tp->full_duplex) tp->csr6 |= 0x0200;
-		else				 tp->csr6 &= ~0x0200;
-		tulip_restart_rxtx(tp, tp->csr6);
+	negotiated = lpa & tp->advertising[0];
+	tp->full_duplex = mii_duplex(tp->full_duplex_lock, negotiated);
+
+	new_csr6 = tp->csr6;
+
+	if (negotiated & LPA_100) new_csr6 &= ~TxThreshold;
+	else			  new_csr6 |= TxThreshold;
+	if (tp->full_duplex) new_csr6 |= FullDuplex;
+	else		     new_csr6 &= ~FullDuplex;
+
+	if (new_csr6 != tp->csr6) {
+		tp->csr6 = new_csr6;
+		tulip_restart_rxtx(tp);
+
 		if (tulip_debug > 0)
 			printk(KERN_INFO "%s: Setting %s-duplex based on MII"
 				   "#%d link partner capability of %4.4x.\n",
 				   dev->name, tp->full_duplex ? "full" : "half",
-				   tp->phys[0], mii_reg5);
+				   tp->phys[0], lpa);
 		return 1;
 	}
+
 	return 0;
 }
 
+void __devinit tulip_find_mii (struct net_device *dev, int board_idx)
+{
+	struct tulip_private *tp = dev->priv;
+	int phyn, phy_idx = 0;
+	int mii_reg0;
+	int mii_advert;
+	unsigned int to_advert, new_bmcr, ane_switch;
+
+	/* Find the connected MII xcvrs.
+	   Doing this in open() would allow detecting external xcvrs later,
+	   but takes much time. */
+	for (phyn = 1; phyn <= 32 && phy_idx < sizeof (tp->phys); phyn++) {
+		int phy = phyn & 0x1f;
+		int mii_status = tulip_mdio_read (dev, phy, MII_BMSR);
+		if ((mii_status & 0x8301) == 0x8001 ||
+		    ((mii_status & BMSR_100BASE4) == 0
+		     && (mii_status & 0x7800) != 0)) {
+			/* preserve Becker logic, gain indentation level */
+		} else {
+			continue;
+		}
+
+		mii_reg0 = tulip_mdio_read (dev, phy, MII_BMCR);
+		mii_advert = tulip_mdio_read (dev, phy, MII_ADVERTISE);
+		ane_switch = 0;
+
+		/* if not advertising at all, gen an
+		 * advertising value from the capability
+		 * bits in BMSR
+		 */
+		if ((mii_advert & ADVERTISE_ALL) == 0) {
+			unsigned int tmpadv = tulip_mdio_read (dev, phy, MII_BMSR);
+			mii_advert = ((tmpadv >> 6) & 0x3e0) | 1;
+		}
+
+		if (tp->mii_advertise) {
+			tp->advertising[phy_idx] =
+			to_advert = tp->mii_advertise;
+		} else if (tp->advertising[phy_idx]) {
+			to_advert = tp->advertising[phy_idx];
+		} else {
+			tp->advertising[phy_idx] =
+			tp->mii_advertise =
+			to_advert = mii_advert;
+		}
+
+		tp->phys[phy_idx++] = phy;
+
+		printk (KERN_INFO "tulip%d:  MII transceiver #%d "
+			"config %4.4x status %4.4x advertising %4.4x.\n",
+			board_idx, phy, mii_reg0, mii_status, mii_advert);
+
+		/* Fixup for DLink with miswired PHY. */
+		if (mii_advert != to_advert) {
+			printk (KERN_DEBUG "tulip%d:  Advertising %4.4x on PHY %d,"
+				" previously advertising %4.4x.\n",
+				board_idx, to_advert, phy, mii_advert);
+			tulip_mdio_write (dev, phy, 4, to_advert);
+		}
+
+		/* Enable autonegotiation: some boards default to off. */
+		if (tp->default_port == 0) {
+			new_bmcr = mii_reg0 | BMCR_ANENABLE;
+			if (new_bmcr != mii_reg0) {
+				new_bmcr |= BMCR_ANRESTART;
+				ane_switch = 1;
+			}
+		}
+		/* ...or disable nway, if forcing media */
+		else {
+			new_bmcr = mii_reg0 & ~BMCR_ANENABLE;
+			if (new_bmcr != mii_reg0)
+				ane_switch = 1;
+		}
+
+		/* clear out bits we never want at this point */
+		new_bmcr &= ~(BMCR_CTST | BMCR_FULLDPLX | BMCR_ISOLATE |
+			      BMCR_PDOWN | BMCR_SPEED100 | BMCR_LOOPBACK |
+			      BMCR_RESET);
+
+		if (tp->full_duplex)
+			new_bmcr |= BMCR_FULLDPLX;
+		if (tulip_media_cap[tp->default_port] & MediaIs100)
+			new_bmcr |= BMCR_SPEED100;
+
+		if (new_bmcr != mii_reg0) {
+			/* some phys need the ANE switch to
+			 * happen before forced media settings
+			 * will "take."  However, we write the
+			 * same value twice in order not to
+			 * confuse the sane phys.
+			 */
+			if (ane_switch) {
+				tulip_mdio_write (dev, phy, MII_BMCR, new_bmcr);
+				udelay (10);
+			}
+			tulip_mdio_write (dev, phy, MII_BMCR, new_bmcr);
+		}
+	}
+	tp->mii_cnt = phy_idx;
+	if (tp->mtable && tp->mtable->has_mii && phy_idx == 0) {
+		printk (KERN_INFO "tulip%d: ***WARNING***: No MII transceiver found!\n",
+			board_idx);
+		tp->phys[0] = 1;
+	}
+}

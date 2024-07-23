@@ -19,29 +19,25 @@
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/cache.h>
-#include "ppc_asm.h"
-
-#if defined(CONFIG_4xx) || defined(CONFIG_8xx)
-#define CACHE_LINE_SIZE		16
-#define LG_CACHE_LINE_SIZE	4
-#define MAX_COPY_PREFETCH	1
-#elif !defined(CONFIG_PPC64BRIDGE)
-#define CACHE_LINE_SIZE		32
-#define LG_CACHE_LINE_SIZE	5
-#define MAX_COPY_PREFETCH	4
-#else
-#define CACHE_LINE_SIZE		128
-#define LG_CACHE_LINE_SIZE	7
-#define MAX_COPY_PREFETCH	1
-#endif /* CONFIG_4xx || CONFIG_8xx */
+#include <asm/cputable.h>
+#include <asm/mmu.h>
+#include <asm/ppc_asm.h>
+#include "ppc_defs.h"
 
 	.text
+
+	.align	5
+_GLOBAL(__delay)
+	cmpwi	0,r3,0
+	mtctr	r3
+	beqlr
+1:	bdnz	1b
+	blr
 
 /*
  * Returns (address we're running at) - (address we were linked at)
  * for use before the text and data are mapped to KERNELBASE.
  */
-
 _GLOBAL(reloc_offset)
 	mflr	r0
 	bl	1f
@@ -52,14 +48,189 @@ _GLOBAL(reloc_offset)
 	mtlr	r0
 	blr
 
-/* void __no_use_save_flags(unsigned long *flags) */
-_GLOBAL(__no_use_save_flags)
+/*
+ * add_reloc_offset(x) returns x + reloc_offset().
+ */
+_GLOBAL(add_reloc_offset)
+	mflr	r0
+	bl	1f
+1:	mflr	r5
+	lis	r4,1b@ha
+	addi	r4,r4,1b@l
+	subf	r5,r4,r5
+	add	r3,r3,r5
+	mtlr	r0
+	blr
+
+/*
+ * sub_reloc_offset(x) returns x - reloc_offset().
+ */
+_GLOBAL(sub_reloc_offset)
+	mflr	r0
+	bl	1f
+1:	mflr	r5
+	lis	r4,1b@ha
+	addi	r4,r4,1b@l
+	subf	r5,r4,r5
+	subf	r3,r5,r3
+	mtlr	r0
+	blr
+
+/*
+ * reloc_got2 runs through the .got2 section adding an offset
+ * to each entry.
+ */
+_GLOBAL(reloc_got2)
+	mflr	r11
+	lis	r7,__got2_start@ha
+	addi	r7,r7,__got2_start@l
+	lis	r8,__got2_end@ha
+	addi	r8,r8,__got2_end@l
+	subf	r8,r7,r8
+	srwi.	r8,r8,2
+	beqlr
+	mtctr	r8
+	bl	1f
+1:	mflr	r0
+	lis	r4,1b@ha
+	addi	r4,r4,1b@l
+	subf	r0,r4,r0
+	add	r7,r0,r7
+2:	lwz	r0,0(r7)
+	add	r0,r0,r3
+	stw	r0,0(r7)
+	addi	r7,r7,4
+	bdnz	2b
+	mtlr	r11
+	blr
+
+/*
+ * identify_cpu,
+ * called with r3 = data offset and r4 = CPU number
+ * doesn't change r3
+ */
+_GLOBAL(identify_cpu)
+	addis	r8,r3,cpu_specs@ha
+	addi	r8,r8,cpu_specs@l
+	mfpvr	r7
+1:
+	lwz	r5,CPU_SPEC_PVR_MASK(r8)
+	and	r5,r5,r7
+	lwz	r6,CPU_SPEC_PVR_VALUE(r8)
+	cmplw	0,r6,r5
+	beq	1f
+	addi	r8,r8,CPU_SPEC_ENTRY_SIZE
+	b	1b
+1:
+	addis	r6,r3,cur_cpu_spec@ha
+	addi	r6,r6,cur_cpu_spec@l
+	slwi	r4,r4,2
+	sub	r8,r8,r3
+	stwx	r8,r4,r6
+	blr
+
+/*
+ * do_cpu_ftr_fixups - goes through the list of CPU feature fixups
+ * and writes nop's over sections of code that don't apply for this cpu.
+ * r3 = data offset (not changed)
+ */
+_GLOBAL(do_cpu_ftr_fixups)
+	/* Get CPU 0 features */
+	addis	r6,r3,cur_cpu_spec@ha
+	addi	r6,r6,cur_cpu_spec@l
+	lwz	r4,0(r6)
+	add	r4,r4,r3
+	lwz	r4,CPU_SPEC_FEATURES(r4)
+
+	/* Get the fixup table */
+	addis	r6,r3,__start___ftr_fixup@ha
+	addi	r6,r6,__start___ftr_fixup@l
+	addis	r7,r3,__stop___ftr_fixup@ha
+	addi	r7,r7,__stop___ftr_fixup@l
+
+	/* Do the fixup */
+1:	cmplw	0,r6,r7
+	bgelr
+	addi	r6,r6,16
+	lwz	r8,-16(r6)	/* mask */
+	and	r8,r8,r4
+	lwz	r9,-12(r6)	/* value */
+	cmplw	0,r8,r9
+	beq	1b
+	lwz	r8,-8(r6)	/* section begin */
+	lwz	r9,-4(r6)	/* section end */
+	subf.	r9,r8,r9
+	beq	1b
+	/* write nops over the section of code */
+	/* todo: if large section, add a branch at the start of it */
+	srwi	r9,r9,2
+	mtctr	r9
+	add	r8,r8,r3
+	lis	r0,0x60000000@h	/* nop */
+3:	stw	r0,0(r8)
+	andi.	r10,r4,CPU_FTR_SPLIT_ID_CACHE@l
+	beq	2f
+	dcbst	0,r8		/* suboptimal, but simpler */
+	sync
+	icbi	0,r8
+2:	addi	r8,r8,4
+	bdnz	3b
+	sync			/* additional sync needed on g4 */
+	isync
+	b	1b
+
+/*
+ * call_setup_cpu - call the setup_cpu function for this cpu
+ * r3 = data offset, r24 = cpu number
+ *
+ * Setup function is called with:
+ *   r3 = data offset
+ *   r4 = CPU number
+ *   r5 = ptr to CPU spec (relocated)
+ */
+_GLOBAL(call_setup_cpu)
+	addis	r5,r3,cur_cpu_spec@ha
+	addi	r5,r5,cur_cpu_spec@l
+	slwi	r4,r24,2
+	lwzx	r5,r4,r5
+	add	r5,r5,r3
+	lwz	r6,CPU_SPEC_SETUP(r5)
+	add	r6,r6,r3
+	mtctr	r6
+	mr	r4,r24
+	bctr
+
+/* void __save_flags_ptr(unsigned long *flags) */
+_GLOBAL(__save_flags_ptr)
 	mfmsr	r4
 	stw	r4,0(r3)
 	blr
+	/*
+	 * Need these nops here for taking over save/restore to
+	 * handle lost intrs
+	 * -- Cort
+	 */
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+_GLOBAL(__save_flags_ptr_end)
 
-/* void __no_use_restore_flags(unsigned long flags) */	
-_GLOBAL(__no_use_restore_flags)
+/* void __restore_flags(unsigned long flags) */
+_GLOBAL(__restore_flags)
 /*
  * Just set/clear the MSR_EE bit through restore/flags but do not
  * change anything else.  This is needed by the RT system and makes
@@ -74,71 +245,102 @@ _GLOBAL(__no_use_restore_flags)
 	 /* Check if things are setup the way we want _already_. */
 	cmpw	0,r3,r4
 	beqlr
-	/* are we enabling interrupts? */
-	rlwinm.	r0,r3,0,16,16
-	beq	1f
-	/* if so, check if there are any lost interrupts */
-	lis	r7,ppc_n_lost_interrupts@ha
-	lwz	r7,ppc_n_lost_interrupts@l(r7)
-	cmpi	0,r7,0		/* lost interrupts to process first? */
-	bne-	do_lost_interrupts
-1:	sync
+1:	SYNC
 	mtmsr	r3
-	isync
+	SYNC
 	blr
-	
-_GLOBAL(__no_use_cli)
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+_GLOBAL(__restore_flags_end)
+
+_GLOBAL(__cli)
 	mfmsr	r0		/* Get current interrupt state */
 	rlwinm	r3,r0,16+1,32-1,31	/* Extract old value of 'EE' */
 	rlwinm	r0,r0,0,17,15	/* clear MSR_EE in r0 */
-	sync			/* Some chip revs have problems here... */
+	SYNC			/* Some chip revs have problems here... */
 	mtmsr	r0		/* Update machine state */
 	blr			/* Done */
+	/*
+	 * Need these nops here for taking over save/restore to
+	 * handle lost intrs
+	 * -- Cort
+	 */
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+_GLOBAL(__cli_end)
 
-_GLOBAL(__no_use_sti)
-	lis	r4,ppc_n_lost_interrupts@ha
-	lwz	r4,ppc_n_lost_interrupts@l(r4)
+_GLOBAL(__sti)
 	mfmsr	r3		/* Get current state */
 	ori	r3,r3,MSR_EE	/* Turn on 'EE' bit */
-	cmpi	0,r4,0		/* lost interrupts to process first? */
-	bne-	do_lost_interrupts
-	sync			/* Some chip revs have problems here... */
+	SYNC			/* Some chip revs have problems here... */
 	mtmsr	r3		/* Update machine state */
 	blr
-
-/*
- * We were about to enable interrupts but we have to simulate
- * some interrupts that were lost by enable_irq first.
- */
-_GLOBAL(do_lost_interrupts)
-	stwu	r1,-16(r1)
-	mflr	r0
-	stw	r0,20(r1)
-	stw	r3,8(r1)
-1:	bl	fake_interrupt
-	lis	r4,ppc_n_lost_interrupts@ha
-	lwz	r4,ppc_n_lost_interrupts@l(r4)
-	cmpi	0,r4,0
-	bne-	1b
-	lwz	r3,8(r1)
-	sync
-	mtmsr	r3
-	lwz	r0,20(r1)
-	mtlr	r0
-	addi	r1,r1,16
-	blr
+	/*
+	 * Need these nops here for taking over save/restore to
+	 * handle lost intrs
+	 * -- Cort
+	 */
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+	nop
+_GLOBAL(__sti_end)
 
 
 /*
  * complement mask on the msr then "or" some values on.
  *     _nmask_and_or_msr(nmask, value_to_or)
  */
-	_GLOBAL(_nmask_and_or_msr)
+_GLOBAL(_nmask_and_or_msr)
 	mfmsr	r0		/* Get current msr */
 	andc	r0,r0,r3	/* And off the bits set in r3 (first parm) */
-	or	r0,r0,r4		/* Or on the bits in r4 (second parm) */
+	or	r0,r0,r4	/* Or on the bits in r4 (second parm) */
 	sync			/* Some chip revs have problems here... */
+	isync
 	mtmsr	r0		/* Update machine state */
+	isync
 	blr			/* Done */
 
 
@@ -146,9 +348,36 @@ _GLOBAL(do_lost_interrupts)
  * Flush MMU TLB
  */
 _GLOBAL(_tlbia)
+#if defined(CONFIG_40x) && defined(CONFIG_PIN_TLB)
+	/* This needs to be coordinated with other pinning functions since
+	 * we don't keep a memory location of number of entries to reduce
+	 * cache pollution during these operations.
+	 */
+	lis	r3, 0
+	sync
+1:
+	tlbwe	r3, r3, TLB_TAG		/* just ensure V is clear */
+	addi	r3, r3, 1		/*   so r3 works fine for that */
+	cmpwi	0, r3, 61		/* reserve last two entries */
+	ble	1b
+	isync
+#elif defined(CONFIG_44x)
+	lis	r3,0
+	sync
+1:
+	tlbwe	r3,r3,PPC44x_TLB_PAGEID
+	addi	r3,r3,1
+	/* Load high watermark */
+	lis	r4,tlb_44x_hwater@h
+	ori	r4,r4,tlb_44x_hwater@l
+	lwz	r5,0(r4)
+	cmpw	0,r3,r5
+	ble	1b
+	isync
+#else /* !(CONFIG_40x || CONFIG_44x) */
 #if defined(CONFIG_SMP)
 	mfmsr	r10
-	sync
+	SYNC
 	rlwinm	r0,r10,0,17,15		/* clear bit 16 (MSR_EE) */
 	mtmsr	r0
 	SYNC
@@ -159,30 +388,65 @@ _GLOBAL(_tlbia)
 10:	lwarx	r7,0,r9
 	cmpi	0,r7,0
 	bne-	10b
+	/* No 405 Erratum 77 fix needed here, because 4xx can't do SMP */
 	stwcx.	r8,0,r9
 	bne-	10b
-	eieio
 #endif /* CONFIG_SMP */
-	sync
+	isync
 	tlbia
 	sync
 #ifdef CONFIG_SMP
-	tlbsync
-	sync
+	TLBSYNC
 	li	r0,0
 	stw	r0,0(r9)		/* clear hash_table_lock */
 	mtmsr	r10
 	SYNC
-#endif
-	blr	
+#endif /* CONFIG_SMP */
+#endif /* defined(CONFIG_40x) && defined(CONFIG_PIN_TLB) */
+	blr
 
 /*
  * Flush MMU TLB for a particular address
  */
 _GLOBAL(_tlbie)
+#ifdef CONFIG_40x
+	tlbsx.	r3, 0, r3
+	bne	10f
+	sync
+	/* There are only 64 TLB entries, so r3 < 64, which means bit 25, is clear.
+	 * Since 25 is the V bit in the TLB_TAG, loading this value will invalidate
+	 * the TLB entry. */
+	tlbwe	r3, r3, TLB_TAG
+	isync
+10:
+#elif defined(CONFIG_44x)
+	mfspr	r4,SPRN_MMUCR			/* Get MMUCR */
+	lis	r5,PPC44x_MMUCR_STS@h
+	ori	r5,r5,PPC44x_MMUCR_TID@l	/* Create mask */
+	andc	r4,r4,r5			/* Clear out TID/STS bits */
+	mfspr	r5,SPRN_PID			/* Get PID */
+	or	r4,r4,r5			/* Set TID bits */
+	mfmsr	r6				/* Get MSR */
+	andi.	r6,r6,MSR_IS@l			/* TS=1? */
+	beq	11f				/* If not, leave STS=0 */
+	oris	r4,r4,PPC44x_MMUCR_STS@h	/* Set STS=1 */
+11:	mtspr	SPRN_MMUCR, r4			/* Put MMUCR */
+
+	tlbsx.	r3, 0, r3
+	bne	10f
+	sync
+	/* There are only 64 TLB entries, so r3 < 64,
+	 * which means bit 22, is clear.  Since 22 is
+	 * the V bit in the TLB_PAGEID, loading this
+	 * value will invalidate the TLB entry.
+	 */
+	tlbwe	r3, r3, PPC44x_TLB_PAGEID
+	isync
+10:
+#else /* !(CONFIG_40x || CONFIG_44x) */
 #if defined(CONFIG_SMP)
 	mfmsr	r10
-	sync
+	SYNC
 	rlwinm	r0,r10,0,17,15		/* clear bit 16 (MSR_EE) */
 	mtmsr	r0
 	SYNC
@@ -193,20 +457,21 @@ _GLOBAL(_tlbie)
 10:	lwarx	r7,0,r9
 	cmpi	0,r7,0
 	bne-	10b
+	PPC405_ERR77(0,r9)
 	stwcx.	r8,0,r9
 	bne-	10b
-	eieio
 #endif /* CONFIG_SMP */
+	isync
 	tlbie	r3
 	sync
 #ifdef CONFIG_SMP
-	tlbsync
-	sync
+	TLBSYNC
 	li	r0,0
 	stw	r0,0(r9)		/* clear hash_table_lock */
 	mtmsr	r10
 	SYNC
 #endif
+#endif /* CONFIG_40x */
 	blr
 
 /*
@@ -214,10 +479,22 @@ _GLOBAL(_tlbie)
  * This is a no-op on the 601.
  */
 _GLOBAL(flush_instruction_cache)
-#ifdef CONFIG_8xx
+#if defined(CONFIG_8xx)
 	isync
 	lis	r5, IDC_INVALL@h
 	mtspr	IC_CST, r5
+#elif CONFIG_4xx
+#ifdef CONFIG_403GCX
+	li      r3, 512
+	mtctr   r3
+	lis     r4, KERNELBASE@h
+1:	iccci   0, r4
+	addi    r4, r4, 16
+	bdnz    1b
+#else
+	lis	r3, KERNELBASE@h
+	iccci	0,r3
+#endif
 #else
 	mfspr	r3,PVR
 	rlwinm	r3,r3,16,16,31
@@ -227,8 +504,8 @@ _GLOBAL(flush_instruction_cache)
 	mfspr	r3,HID0
 	ori	r3,r3,HID0_ICFI
 	mtspr	HID0,r3
-#endif /* CONFIG_8xx */
-	SYNC
+#endif /* CONFIG_8xx/4xx */
+	isync
 	blr
 
 /*
@@ -243,45 +520,110 @@ _GLOBAL(flush_icache_range)
 	rlwinm	r5,r5,16,16,31
 	cmpi	0,r5,1
 	beqlr				/* for 601, do nothing */
-	li	r5,CACHE_LINE_SIZE-1
+	li	r5,L1_CACHE_LINE_SIZE-1
 	andc	r3,r3,r5
 	subf	r4,r3,r4
 	add	r4,r4,r5
-	srwi.	r4,r4,LG_CACHE_LINE_SIZE
+	srwi.	r4,r4,LG_L1_CACHE_LINE_SIZE
 	beqlr
 	mtctr	r4
 	mr	r6,r3
 1:	dcbst	0,r3
-	addi	r3,r3,CACHE_LINE_SIZE
+	addi	r3,r3,L1_CACHE_LINE_SIZE
 	bdnz	1b
 	sync				/* wait for dcbst's to get to ram */
 	mtctr	r4
 2:	icbi	0,r6
-	addi	r6,r6,CACHE_LINE_SIZE
+	addi	r6,r6,L1_CACHE_LINE_SIZE
 	bdnz	2b
-	sync
+	sync				/* additional sync needed on g4 */
 	isync
+	blr
+/*
+ * Write any modified data cache blocks out to memory.
+ * Does not invalidate the corresponding cache lines (especially for
+ * any corresponding instruction cache).
+ *
+ * clean_dcache_range(unsigned long start, unsigned long stop)
+ */
+_GLOBAL(clean_dcache_range)
+	li	r5,L1_CACHE_LINE_SIZE-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,LG_L1_CACHE_LINE_SIZE
+	beqlr
+	mtctr	r4
+
+1:	dcbst	0,r3
+	addi	r3,r3,L1_CACHE_LINE_SIZE
+	bdnz	1b
+	sync				/* wait for dcbst's to get to ram */
 	blr
 
 /*
- * Like above, but only do the D-cache.
+ * Write any modified data cache blocks out to memory and invalidate them.
+ * Does not invalidate the corresponding instruction cache blocks.
  *
  * flush_dcache_range(unsigned long start, unsigned long stop)
  */
 _GLOBAL(flush_dcache_range)
-       li      r5,CACHE_LINE_SIZE-1
-       andc    r3,r3,r5
-       subf    r4,r3,r4
-       add     r4,r4,r5
-       srwi.   r4,r4,LG_CACHE_LINE_SIZE
-       beqlr
-       mtctr   r4
+	li	r5,L1_CACHE_LINE_SIZE-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,LG_L1_CACHE_LINE_SIZE
+	beqlr
+	mtctr	r4
 
-1:     dcbst   0,r3
-       addi    r3,r3,CACHE_LINE_SIZE
-       bdnz    1b
-       sync                            /* wait for dcbst's to get to ram */
-       blr
+1:	dcbf	0,r3
+	addi	r3,r3,L1_CACHE_LINE_SIZE
+	bdnz	1b
+	sync				/* wait for dcbst's to get to ram */
+	blr
+
+/*
+ * Like above, but invalidate the D-cache.  This is used by the 8xx
+ * to invalidate the cache so the PPC core doesn't get stale data
+ * from the CPM (no cache snooping here :-).
+ *
+ * invalidate_dcache_range(unsigned long start, unsigned long stop)
+ */
+_GLOBAL(invalidate_dcache_range)
+	li	r5,L1_CACHE_LINE_SIZE-1
+	andc	r3,r3,r5
+	subf	r4,r3,r4
+	add	r4,r4,r5
+	srwi.	r4,r4,LG_L1_CACHE_LINE_SIZE
+	beqlr
+	mtctr	r4
+
+1:	dcbi	0,r3
+	addi	r3,r3,L1_CACHE_LINE_SIZE
+	bdnz	1b
+	sync				/* wait for dcbi's to get to ram */
+	blr
+
+#ifdef CONFIG_NOT_COHERENT_CACHE
+/*
+ * 40x cores have 8K or 16K dcache and 32 byte line size.
+ * 44x has a 32K dcache and 32 byte line size.
+ * 8xx has 1, 2, 4, 8K variants.
+ * For now, cover the worst case of the 440.
+ * Must be called with external interrupts disabled.
+ */
+#define CACHE_NWAYS	64
+#define CACHE_NLINES	16
+
+_GLOBAL(flush_dcache_all)
+	li	r4, (2 * CACHE_NWAYS * CACHE_NLINES)
+	mtctr	r4
+	lis     r5, KERNELBASE@h
+1:	lwz	r3, 0(r5)		/* Load one word from every line */
+	addi	r5, r5, L1_CACHE_LINE_SIZE
+	bdnz    1b
+	blr
+#endif /* CONFIG_NOT_COHERENT_CACHE */
 
 /*
  * Flush a particular page from the data cache to RAM.
@@ -289,58 +631,36 @@ _GLOBAL(flush_dcache_range)
  * snoop from the data cache.
  * This is a no-op on the 601 which has a unified cache.
  *
- *	void __flush_page_to_ram(void *page)
+ *	void __flush_dcache_icache(void *page)
  */
-_GLOBAL(__flush_page_to_ram)
+_GLOBAL(__flush_dcache_icache)
 	mfspr	r5,PVR
 	rlwinm	r5,r5,16,16,31
 	cmpi	0,r5,1
-	beqlr				/* for 601, do nothing */
-	rlwinm	r3,r3,0,0,19		/* Get page base address */
-	li	r4,4096/CACHE_LINE_SIZE	/* Number of lines in a page */
+	beqlr					/* for 601, do nothing */
+	rlwinm	r3,r3,0,0,19			/* Get page base address */
+	li	r4,4096/L1_CACHE_LINE_SIZE	/* Number of lines in a page */
 	mtctr	r4
 	mr	r6,r3
-0:	dcbst	0,r3			/* Write line to ram */
-	addi	r3,r3,CACHE_LINE_SIZE
+0:	dcbst	0,r3				/* Write line to ram */
+	addi	r3,r3,L1_CACHE_LINE_SIZE
 	bdnz	0b
 	sync
 	mtctr	r4
 1:	icbi	0,r6
-	addi	r6,r6,CACHE_LINE_SIZE
+	addi	r6,r6,L1_CACHE_LINE_SIZE
 	bdnz	1b
 	sync
 	isync
 	blr
 
 /*
- * Flush a particular page from the instruction cache.
- * Note: this is necessary because the instruction cache does *not*
- * snoop from the data cache.
- * This is a no-op on the 601 which has a unified cache.
- *
- *	void __flush_icache_page(void *page)
- */
-_GLOBAL(__flush_icache_page)
-	mfspr	r5,PVR
-	rlwinm	r5,r5,16,16,31
-	cmpi	0,r5,1
-	beqlr				/* for 601, do nothing */
-	li	r4,4096/CACHE_LINE_SIZE	/* Number of lines in a page */
-	mtctr	r4
-1:	icbi	0,r3
-	addi	r3,r3,CACHE_LINE_SIZE
-	bdnz	1b
-	sync
-	isync
-	blr
-	
-/*
  * Clear a page using the dcbz instruction, which doesn't cause any
  * memory traffic (except to write out any cache lines which get
  * displaced).  This only works on cacheable memory.
  */
 _GLOBAL(clear_page)
-	li	r0,4096/CACHE_LINE_SIZE
+	li	r0,4096/L1_CACHE_LINE_SIZE
 	mtctr	r0
 #ifdef CONFIG_8xx
 	li	r4, 0
@@ -351,7 +671,7 @@ _GLOBAL(clear_page)
 #else
 1:	dcbz	0,r3
 #endif
-	addi	r3,r3,CACHE_LINE_SIZE
+	addi	r3,r3,L1_CACHE_LINE_SIZE
 	bdnz	1b
 	blr
 
@@ -374,36 +694,43 @@ _GLOBAL(clear_page)
 _GLOBAL(copy_page)
 	addi	r3,r3,-4
 	addi	r4,r4,-4
+
+#ifdef CONFIG_8xx
+	/* don't use prefetch on 8xx */
+    	li	r0,4096/L1_CACHE_LINE_SIZE
+	mtctr	r0
+1:	COPY_16_BYTES
+	bdnz	1b
+	blr
+
+#else	/* not 8xx, we can prefetch */
 	li	r5,4
 
-#ifndef CONFIG_8xx
 #if MAX_COPY_PREFETCH > 1
 	li	r0,MAX_COPY_PREFETCH
 	li	r11,4
 	mtctr	r0
 11:	dcbt	r11,r4
-	addi	r11,r11,CACHE_LINE_SIZE
+	addi	r11,r11,L1_CACHE_LINE_SIZE
 	bdnz	11b
 #else /* MAX_COPY_PREFETCH == 1 */
 	dcbt	r5,r4
-	li	r11,CACHE_LINE_SIZE+4
+	li	r11,L1_CACHE_LINE_SIZE+4
 #endif /* MAX_COPY_PREFETCH */
-#endif /* CONFIG_8xx */
-
-	li	r0,4096/CACHE_LINE_SIZE
+	li	r0,4096/L1_CACHE_LINE_SIZE - MAX_COPY_PREFETCH
+	crclr	4*cr0+eq
+2:
 	mtctr	r0
 1:
-#ifndef CONFIG_8xx
 	dcbt	r11,r4
 	dcbz	r5,r3
-#endif
 	COPY_16_BYTES
-#if CACHE_LINE_SIZE >= 32
+#if L1_CACHE_LINE_SIZE >= 32
 	COPY_16_BYTES
-#if CACHE_LINE_SIZE >= 64
+#if L1_CACHE_LINE_SIZE >= 64
 	COPY_16_BYTES
 	COPY_16_BYTES
-#if CACHE_LINE_SIZE >= 128
+#if L1_CACHE_LINE_SIZE >= 128
 	COPY_16_BYTES
 	COPY_16_BYTES
 	COPY_16_BYTES
@@ -412,7 +739,12 @@ _GLOBAL(copy_page)
 #endif
 #endif
 	bdnz	1b
-	blr
+	beqlr
+	crnot	4*cr0+eq,4*cr0+eq
+	li	r0,MAX_COPY_PREFETCH
+	li	r11,4
+	b	2b
+#endif	/* CONFIG_8xx */
 
 /*
  * Atomic [test&set] exchange
@@ -424,108 +756,26 @@ _GLOBAL(copy_page)
 _GLOBAL(xchg_u32)
 	mr	r5,r3		/* Save pointer */
 10:	lwarx	r3,0,r5		/* Fetch old value & reserve */
+	PPC405_ERR77(0,r5)
 	stwcx.	r4,0,r5		/* Update with new value */
 	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
 	blr
 
 /*
- * Try to acquire a spinlock.
- * Only does the stwcx. if the load returned 0 - the Programming
- * Environments Manual suggests not doing unnecessary stcwx.'s
- * since they may inhibit forward progress by other CPUs in getting
- * a lock.
- */
-_GLOBAL(__spin_trylock)
-	mr	r4,r3
-	eieio			/* prevent reordering of stores */
-	li	r5,-1
-	lwarx	r3,0,r4		/* fetch old value, establish reservation */
-	cmpwi	0,r3,0		/* is it 0? */
-	bnelr-			/* return failure if not */
-	stwcx.	r5,0,r4		/* try to update with new value */
-	bne-	1f		/* if we failed */
-	eieio			/* prevent reordering of stores */
-	blr
-1:	li	r3,1		/* return non-zero for failure */
-	blr
-
-/*
- * Atomic add/sub/inc/dec operations
- *
- * void atomic_add(int c, int *v)
- * void atomic_sub(int c, int *v)
- * void atomic_inc(int *v)
- * void atomic_dec(int *v)
- * int atomic_dec_and_test(int *v)
- * int atomic_inc_return(int *v)
- * int atomic_dec_return(int *v)
  * void atomic_clear_mask(atomic_t mask, atomic_t *addr)
  * void atomic_set_mask(atomic_t mask, atomic_t *addr);
  */
-#if 0 /* now inline - paulus */
-_GLOBAL(atomic_add)
-10:	lwarx	r5,0,r4		/* Fetch old value & reserve */
-	add	r5,r5,r3	/* Perform 'add' operation */
-	stwcx.	r5,0,r4		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	blr
-_GLOBAL(atomic_add_return)
-10:	lwarx	r5,0,r4		/* Fetch old value & reserve */
-	add	r5,r5,r3	/* Perform 'add' operation */
-	stwcx.	r5,0,r4		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	mr	r3,r5
-	blr
-_GLOBAL(atomic_sub)
-10:	lwarx	r5,0,r4		/* Fetch old value & reserve */
-	sub	r5,r5,r3	/* Perform 'add' operation */
-	stwcx.	r5,0,r4		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	blr
-_GLOBAL(atomic_inc)
-10:	lwarx	r5,0,r3		/* Fetch old value & reserve */
-	addi	r5,r5,1		/* Perform 'add' operation */
-	stwcx.	r5,0,r3		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	blr
-_GLOBAL(atomic_inc_return)
-10:	lwarx	r5,0,r3		/* Fetch old value & reserve */
-	addi	r5,r5,1		/* Perform 'add' operation */
-	stwcx.	r5,0,r3		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	mr	r3,r5		/* Return new value */
-	blr
-_GLOBAL(atomic_dec)
-10:	lwarx	r5,0,r3		/* Fetch old value & reserve */
-	subi	r5,r5,1		/* Perform 'add' operation */
-	stwcx.	r5,0,r3		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	blr
-_GLOBAL(atomic_dec_return)
-10:	lwarx	r5,0,r3		/* Fetch old value & reserve */
-	subi	r5,r5,1		/* Perform 'add' operation */
-	stwcx.	r5,0,r3		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	mr	r3,r5		/* Return new value */
-	blr
-_GLOBAL(atomic_dec_and_test)
-10:	lwarx	r5,0,r3		/* Fetch old value & reserve */
-	subi	r5,r5,1		/* Perform 'add' operation */
-	stwcx.	r5,0,r3		/* Update with new value */
-	bne-	10b		/* Retry if "reservation" (i.e. lock) lost */
-	cntlzw	r3,r5
-	srwi	r3,r3,5
-	blr
-#endif /* 0 */
 _GLOBAL(atomic_clear_mask)
 10:	lwarx	r5,0,r4
 	andc	r5,r5,r3
+	PPC405_ERR77(0,r4)
 	stwcx.	r5,0,r4
 	bne-	10b
 	blr
 _GLOBAL(atomic_set_mask)
 10:	lwarx	r5,0,r4
 	or	r5,r5,r3
+	PPC405_ERR77(0,r4)
 	stwcx.	r5,0,r4
 	bne-	10b
 	blr
@@ -566,7 +816,7 @@ _GLOBAL(_outsb)
 	stb	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(_insw)
 	cmpwi	0,r5,0
@@ -586,9 +836,9 @@ _GLOBAL(_outsw)
 	blelr-
 00:	lhzu	r5,2(r4)
 	eieio
-	sthbrx	r5,0,r3	
+	sthbrx	r5,0,r3
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(_insl)
 	cmpwi	0,r5,0
@@ -610,7 +860,7 @@ _GLOBAL(_outsl)
 	stwbrx	r5,0,r3
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(ide_insw)
 _GLOBAL(_insw_ns)
@@ -634,7 +884,7 @@ _GLOBAL(_outsw_ns)
 	sth	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(_insl_ns)
 	cmpwi	0,r5,0
@@ -656,11 +906,11 @@ _GLOBAL(_outsl_ns)
 	stw	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 /*
  * Extended precision shifts.
- * 
+ *
  * Updated to be valid for shift counts from 0 to 63 inclusive.
  * -- Gabriel
  *
@@ -668,12 +918,12 @@ _GLOBAL(_outsl_ns)
  * R5    has shift count
  * result in R3/R4
  *
- *  ashrdi3: arithmetic right shift (sign propagation)	    
- *  lshrdi3: logical right shift	
+ *  ashrdi3: arithmetic right shift (sign propagation)
+ *  lshrdi3: logical right shift
  *  ashldi3: left shift
  */
 _GLOBAL(__ashrdi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	srw	r4,r4,r5	# LSW = count > 31 ? 0 : LSW >> count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	slw	r6,r3,r6	# t1 = count > 31 ? 0 : MSW << (32-count)
@@ -686,7 +936,7 @@ _GLOBAL(__ashrdi3)
 	blr
 
 _GLOBAL(__ashldi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	slw	r3,r3,r5	# MSW = count > 31 ? 0 : MSW << count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	srw	r6,r4,r6	# t1 = count > 31 ? 0 : LSW >> (32-count)
@@ -697,14 +947,14 @@ _GLOBAL(__ashldi3)
 	blr
 
 _GLOBAL(__lshrdi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	srw	r4,r4,r5	# LSW = count > 31 ? 0 : LSW >> count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	slw	r6,r3,r6	# t1 = count > 31 ? 0 : MSW << (32-count)
 	srw	r7,r3,r7	# t2 = count < 32 ? 0 : MSW >> (count-32)
 	or	r4,r4,r6	# LSW |= t1
 	srw	r3,r3,r5	# MSW = MSW >> count
-	or	r4,r4,r7	# LSW |= t2 
+	or	r4,r4,r7	# LSW |= t2
 	blr
 
 _GLOBAL(abs)
@@ -717,238 +967,6 @@ _GLOBAL(_get_SP)
 	mr	r3,r1		/* Close enough */
 	blr
 
-_GLOBAL(_get_THRM1)
-	mfspr	r3,THRM1
-	blr
-
-_GLOBAL(_get_THRM2)
-	mfspr	r3,THRM2
-	blr
-
-_GLOBAL(_get_THRM3)
-	mfspr	r3,THRM3
-	blr
-		
-_GLOBAL(_set_THRM1)
-	mtspr	THRM1,r3
-	blr
-
-_GLOBAL(_set_THRM2)
-	mtspr	THRM2,r3
-	blr
-
-_GLOBAL(_set_THRM3)
-	mtspr	THRM3,r3
-	blr
-	
-_GLOBAL(_get_PVR)
-	mfspr	r3,PVR
-	blr
-
-#ifdef CONFIG_8xx
-_GLOBAL(_get_IMMR)
-	mfspr	r3, 638
-	blr
-#endif
-	
-_GLOBAL(_get_HID0)
-	mfspr	r3,HID0
-	blr
-
-_GLOBAL(_get_ICTC)
-	mfspr	r3,ICTC
-	blr
-
-_GLOBAL(_set_ICTC)
-	mtspr	ICTC,r3
-	blr
-
-	
-/*
-	L2CR functions
-	Copyright © 1997-1998 by PowerLogix R & D, Inc.
-	
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-	
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-	
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-*/
-/*
-	Thur, Dec. 12, 1998.
-	- First public release, contributed by PowerLogix.
-	
-	Author:	Terry Greeniaus (tgree@phys.ualberta.ca)
-	Please e-mail updates to this file to me, thanks!
-*/
-/* Usage:
-	
-	When setting the L2CR register, you must do a few special
-	things.  If you are enabling the cache, you must perform a
-	global invalidate.  If you are disabling the cache, you must
-	flush the cache contents first.  This routine takes care of
-	doing these things.  When first enabling the cache, make sure
-	you pass in the L2CR you want, as well as passing in the
-	global invalidate bit set.  A global invalidate will only be
-	performed if the L2I bit is set in applyThis.  When enabling
-	the cache, you should also set the L2E bit in applyThis.  If
-	you want to modify the L2CR contents after the cache has been
-	enabled, the recommended procedure is to first call
-	__setL2CR(0) to disable the cache and then call it again with
-	the new values for L2CR.  Examples:
-
-	_setL2CR(0)		- disables the cache
-	_setL2CR(0xB3A04000)	- enables my G3 upgrade card:
-				- L2E set to turn on the cache
-				- L2SIZ set to 1MB
-				- L2CLK set to 1:1
-				- L2RAM set to pipelined synchronous late-write
-				- L2I set to perform a global invalidation
-				- L2OH set to 0.5 nS
-				- L2DF set because this upgrade card
-				  requires it
-
-	A similar call should work for your card.  You need to know
-	the correct setting for your card and then place them in the
-	fields I have outlined above.  Other fields support optional
-	features, such as L2DO which caches only data, or L2TS which
-	causes cache pushes from the L1 cache to go to the L2 cache
-	instead of to main memory.
-*/
-
-_GLOBAL(_set_L2CR)
-	/* Make sure this is a 750 chip */
-	mfspr	r4,PVR
-	rlwinm	r4,r4,16,16,31
-	cmplwi	r4,0x0008
-	beq	thisIs750
-	cmplwi	r4,0x000c
-	beq thisIs750
-	li	r3,-1
-	blr
-	
-thisIs750:
-	/* Get the current enable bit of the L2CR into r4 */
-	mfspr	r4,L2CR
-	mfmsr	r7
-	
-	/* See if we want to perform a global inval this time. */
-	rlwinm	r6,r3,0,10,10	/* r6 contains the new invalidate bit */
-	rlwinm.	r5,r3,0,0,0	/* r5 contains the new enable bit */
-	rlwinm	r3,r3,0,11,9	/* Turn off the invalidate bit */
-	rlwimi	r3,r4,0,0,0	/* Keep the enable bit the same as it was. */
-	bne	dontDisableCache /* Only disable the cache if L2CRApply
-				    has the enable bit off */
-
-disableCache:
-	/* Disable the cache.  First, we turn off interrupts.
-	   An interrupt while we are flushing the cache could bring
-	   in data which may not get properly flushed. */
-	rlwinm	r4,r7,0,17,15	/* Turn off EE bit */
-	sync
-	mtmsr	r4
-	sync
-	
-/*
-	Now, read the first 2MB of memory to put new data in the cache.
-	(Actually we only need the size of the L2 cache plus the size
-	of the L1 cache, but 2MB will cover everything just to be safe).
-*/
-	lis	r4,0x0001
-	mtctr	r4
-	lis	r4,KERNELBASE@h
-1:	lwzx	r0,r0,r4
-	addi	r4,r4,0x0020		/* Go to start of next cache line */
-	bdnz	1b
-	
-	/* Now, flush the first 2MB of memory */
-	lis	r4,0x0001
-	mtctr	r4
-	lis	r4,KERNELBASE@h
-	sync
-2:	dcbf	r0,r4
-	addi	r4,r4,0x0020	/* Go to start of next cache line */
-	bdnz	2b
-	
-	/* Turn off the L2CR enable bit. */
-	rlwinm	r3,r3,0,1,31
-	
-dontDisableCache:
-	/* Set up the L2CR configuration bits */
-	sync
-	mtspr	L2CR,r3
-	sync
-
-	/* Reenable interrupts if necessary. */
-	mtmsr	r7
-	sync
-	
-	cmplwi	r6,0
-	beq	noInval
-	
-	/* Perform a global invalidation */
-	oris	r3,r3,0x0020
-	sync
-	mtspr	L2CR,r3
-	sync
-
-	/* Wait for the invalidation to complete */
-3:	mfspr	r3,L2CR
-	rlwinm.	r4,r3,0,31,31
-	bne	3b
-	
-	rlwinm	r3,r3,0,11,9		/* Turn off the L2I bit */
-	sync
-	mtspr	L2CR,r3
-	sync
-	
-noInval:
-	/* See if we need to enable the cache */
-	cmplwi	r5,0
-	beqlr
-
-	/* Enable the cache */
-	oris	r3,r3,0x8000
-	mtspr	L2CR,r3
-	sync
-	blr
-
-_GLOBAL(_get_L2CR)
-	/* Make sure this is a 750 chip */
-	mfspr	r3,PVR
-	rlwinm	r3,r3,16,16,31
-	cmplwi	r3,0x0008
-	beq	1f
-	cmplwi	r3,0x000c
-	li	r3,0
-	bnelr
-1:	
-	/* Return the L2CR contents */
-	mfspr	r3,L2CR
-	blr
-
-/* --- End of PowerLogix code ---
- */
-
-/*
-_GLOBAL(_get_L2CR)
-	mfspr	r3,L2CR
-	blr
-
-_GLOBAL(_set_L2CR)
-	mtspr	L2CR,r3
-	blr
-		
-*/
-
 /*
  * These are used in the alignment trap handler when emulating
  * single-precision loads and stores.
@@ -956,7 +974,7 @@ _GLOBAL(_set_L2CR)
  * and exceptions as if the cpu had performed the load or store.
  */
 
-#if defined(CONFIG_4xx)
+#ifdef CONFIG_4xx
 _GLOBAL(cvt_fd)
 	lfs	0,0(r3)
 	stfd	0,0(r4)
@@ -986,38 +1004,29 @@ _GLOBAL(cvt_df)
 	blr
 #endif
 
-_GLOBAL(__clear_msr_me)
-        mfmsr   r0                      /* Get current interrupt state */
-        lis     r3,0
-        ori     r3,r3,MSR_ME
-        andc    r0,r0,r3                /* Clears bit in (r4) */
-        sync                            /* Some chip revs have problems here */
-        mtmsr   r0                      /* Update machine state */
-        blr
-
 /*
  * Create a kernel thread
- *   kernel_thread(fn, arg, flags)
+ *   arch_kernel_thread(fn, arg, flags)
  */
-_GLOBAL(kernel_thread)
+_GLOBAL(arch_kernel_thread)
 	mr	r6,r3		/* function */
 	ori	r3,r5,CLONE_VM	/* flags */
 	li	r0,__NR_clone
 	sc
 	cmpi	0,r3,0		/* parent or child? */
 	bnelr			/* return if parent */
-	li	r0,0		/* clear out p->thread.regs */
-	stw	r0,THREAD+PT_REGS(r2)	/* since we don't have user ctx */
+	li	r0,0		/* make top-level stack frame */
+	stwu	r0,-16(r1)
 	mtlr	r6              /* fn addr in lr */
 	mr	r3,r4	        /* load arg and call fn */
 	blrl
 	li	r0,__NR_exit	/* exit after child exits */
-        li	r3,0
+	li	r3,0
 	sc
 
 /*
  * This routine is just here to keep GCC happy - sigh...
- */	
+ */
 _GLOBAL(__main)
 	blr
 
@@ -1047,7 +1056,7 @@ SYSCALL(_exit)
 SYSCALL(lseek)
 SYSCALL(read)
 
-/* Why isn't this a) automatic, b) written in 'C'? */	
+/* Why isn't this a) automatic, b) written in 'C'? */
 	.data
 	.align 4
 _GLOBAL(sys_call_table)
@@ -1161,10 +1170,10 @@ _GLOBAL(sys_call_table)
 	.long sys_newlstat
 	.long sys_newfstat
 	.long sys_uname
-	.long sys_iopl		/* 110 */
+	.long sys_ni_syscall	/* 110 old iopl syscall */
 	.long sys_vhangup
 	.long sys_ni_syscall	/* old 'idle' syscall */
-	.long sys_vm86
+	.long sys_ni_syscall	/* old vm86 syscall */
 	.long sys_wait4
 	.long sys_swapoff	/* 115 */
 	.long sys_sysinfo
@@ -1174,7 +1183,7 @@ _GLOBAL(sys_call_table)
 	.long sys_clone		/* 120 */
 	.long sys_setdomainname
 	.long sys_newuname
-	.long sys_modify_ldt
+	.long sys_ni_syscall	/* old modify_ldt syscall */
 	.long sys_adjtimex
 	.long sys_mprotect	/* 125 */
 	.long sys_sigprocmask
@@ -1192,7 +1201,7 @@ _GLOBAL(sys_call_table)
 	.long sys_setfsuid
 	.long sys_setfsgid
 	.long sys_llseek	/* 140 */
-        .long sys_getdents
+	.long sys_getdents
 	.long ppc_select
 	.long sys_flock
 	.long sys_msync
@@ -1225,7 +1234,7 @@ _GLOBAL(sys_call_table)
 	.long sys_prctl
 	.long sys_rt_sigreturn
 	.long sys_rt_sigaction
-	.long sys_rt_sigprocmask	
+	.long sys_rt_sigprocmask
 	.long sys_rt_sigpending	/* 175 */
 	.long sys_rt_sigtimedwait
 	.long sys_rt_sigqueueinfo
@@ -1242,18 +1251,66 @@ _GLOBAL(sys_call_table)
 	.long sys_ni_syscall		/* streams2 */
 	.long sys_vfork
 	.long sys_getrlimit	/* 190 */
-	.long sys_ni_syscall		/* 191 */	/* Unused */
-	.long sys_ni_syscall		/* 192 - reserved - mmap2 */
-	.long sys_ni_syscall		/* 193 - reserved - truncate64 */
-	.long sys_ni_syscall		/* 194 - reserved - ftruncate64 */
-	.long sys_ni_syscall		/* 195 - reserved - stat64 */
-	.long sys_ni_syscall		/* 196 - reserved - lstat64 */
-	.long sys_ni_syscall		/* 197 - reserved - fstat64 */
-	.long sys_pciconfig_read	/* 198 */
-	.long sys_pciconfig_write 	/* 199 */
+	.long sys_readahead
+	.long sys_mmap2
+	.long sys_truncate64
+	.long sys_ftruncate64
+	.long sys_stat64	/* 195 */
+	.long sys_lstat64
+	.long sys_fstat64
+	.long sys_pciconfig_read
+	.long sys_pciconfig_write
 	.long sys_pciconfig_iobase 	/* 200 */
 	.long sys_ni_syscall		/* 201 - reserved - MacOnLinux - new */
-	.long sys_getdents64		/* 202 */
+	.long sys_getdents64
+	.long sys_pivot_root
+	.long sys_fcntl64
+	.long sys_madvise	/* 205 */
+	.long sys_mincore
+	.long sys_gettid
+	.long sys_tkill
+	.long sys_setxattr
+	.long sys_lsetxattr	/* 210 */
+	.long sys_fsetxattr
+	.long sys_getxattr
+	.long sys_lgetxattr
+	.long sys_fgetxattr
+	.long sys_listxattr	/* 215 */
+	.long sys_llistxattr
+	.long sys_flistxattr
+	.long sys_removexattr
+	.long sys_lremovexattr
+	.long sys_fremovexattr	/* 220  */
+	.long sys_ni_syscall 	/*	reserved for sys_futex */
+	.long sys_ni_syscall 	/*	reserved for sys_sched_setaffinity */
+	.long sys_ni_syscall 	/*	reserved for sys_sched_getaffinity */
+	.long sys_ni_syscall 	/*	reserved for sys_security */
+	.long sys_ni_syscall 	/* 225	reserved for Tux */
+	.long sys_ni_syscall 	/*	reserved for sys_sendfile64 */
+	.long sys_ni_syscall 	/*	reserved for sys_io_setup */
+	.long sys_ni_syscall 	/*	reserved for sys_io_destroy */
+	.long sys_ni_syscall 	/*	reserved for sys_io_getevents */
+	.long sys_ni_syscall 	/* 230	reserved for sys_io_submit */
+	.long sys_ni_syscall 	/*	reserved for sys_io_cancel */
+	.long sys_ni_syscall	/*	reserved for sys_set_tid_address */
+	.long sys_ni_syscall	/*	reserved for sys_fadvise64 */
+	.long sys_ni_syscall	/*	reserved for sys_exit_group */
+	.long sys_ni_syscall	/* 235	reserved for sys_lookup_dcookie */
+	.long sys_ni_syscall	/*	reserved for sys_epoll_create */
+	.long sys_ni_syscall	/*	reserved for sys_epoll_ctl */
+	.long sys_ni_syscall	/*	reserved for sys_epoll_wait */
+	.long sys_ni_syscall	/*	reserved for sys_remap_file_pages */
+	.long sys_ni_syscall	/* 240	reserved for sys_timer_create */
+	.long sys_ni_syscall	/*	reserved for sys_timer_settime */
+	.long sys_ni_syscall	/*	reserved for sys_timer_gettime */
+	.long sys_ni_syscall	/*	reserved for sys_timer_getoverrun */
+	.long sys_ni_syscall	/*	reserved for sys_timer_delete */
+	.long sys_ni_syscall	/* 245	reserved for sys_clock_settime */
+	.long sys_ni_syscall	/*	reserved for sys_clock_gettime */
+	.long sys_ni_syscall	/*	reserved for sys_clock_getres */
+	.long sys_ni_syscall	/*	reserved for sys_clock_nanosleep */
+	.long sys_swapcontext
+
 	.rept NR_syscalls-(.-sys_call_table)/4
 		.long sys_ni_syscall
 	.endr

@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.13 2000/03/07 12:05:24 gniibe Exp $
+/* $Id: fault.c,v 1.1.1.1.2.3 2002/10/24 05:52:58 mrbrown Exp $
  *
  *  linux/arch/sh/mm/fault.c
  *  Copyright (C) 1999  Niibe Yutaka
@@ -27,11 +27,11 @@
 #include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 
-extern void die(const char *,struct pt_regs *,long);
-static void __flush_tlb_page(unsigned long asid, unsigned long page);
-#if defined(__SH4__)
-static void __flush_tlb_phys(unsigned long phys);
+#if defined(CONFIG_SH_KGDB)
+#include <asm/kgdb.h>
 #endif
+
+extern void die(const char *,struct pt_regs *,long);
 
 /*
  * Ugly, ugly, but the goto's result in better assembly..
@@ -99,6 +99,11 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	unsigned long page;
 	unsigned long fixup;
 
+#if defined(CONFIG_SH_KGDB)
+	if (kgdb_nofault && kgdb_bus_err_hook)
+	  kgdb_bus_err_hook();
+#endif
+
 	tsk = current;
 	mm = tsk->mm;
 
@@ -109,7 +114,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	if (in_interrupt() || !mm)
 		goto no_context;
 
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -138,6 +143,7 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+survive:
 	switch (handle_mm_fault(mm, vma, address, writeaccess)) {
 	case 1:
 		tsk->min_flt++;
@@ -151,7 +157,7 @@ good_area:
 		goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -159,7 +165,7 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
 		tsk->thread.address = address;
@@ -208,14 +214,18 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	if (current->pid == 1) {
+		yield();
+		goto survive;
+	}
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
@@ -242,8 +252,16 @@ asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	pte_t *pte;
 	pte_t entry;
 
-	if (address >= VMALLOC_START && address < VMALLOC_END)
+#if defined(CONFIG_SH_KGDB)
+	if (kgdb_nofault && kgdb_bus_err_hook)
+	  kgdb_bus_err_hook();
+#endif
+	if (address >= P3SEG && address < P4SEG)
 		dir = pgd_offset_k(address);
+	else if (address >= TASK_SIZE)
+		return 1;
+	else if (!current->mm)
+		return 1;
 	else
 		dir = pgd_offset(current->mm, address);
 
@@ -257,7 +275,7 @@ asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	}
 	pte = pte_offset(pmd, address);
 	entry = *pte;
-	if (pte_none(entry) || !pte_present(entry)
+	if (pte_none(entry) || pte_not_present(entry)
 	    || (writeaccess && !pte_write(entry)))
 		return 1;
 
@@ -281,37 +299,35 @@ void update_mmu_cache(struct vm_area_struct * vma,
 {
 	unsigned long flags;
 	unsigned long pteval;
-	unsigned long pteaddr;
-	unsigned long ptea;
-
-	save_and_cli(flags);
-
+	unsigned long vpn;
 #if defined(__SH4__)
-	if (pte_shared(pte)) {
-		struct page *pg;
-
-		pteval = pte_val(pte);
-		pteval &= PAGE_MASK; /* Physicall page address */
-		__flush_tlb_phys(pteval);
-		pg = virt_to_page(__va(pteval));
-		flush_dcache_page(pg);
-	}
+	struct page *page;
+	unsigned long ptea;
 #endif
 
 	/* Ptrace may call this routine. */
-	if (vma && current->active_mm != vma->vm_mm) {
-		restore_flags(flags);
+	if (vma && current->active_mm != vma->vm_mm)
 		return;
+
+#if defined(__SH4__)
+	page = pte_page(pte);
+	if (VALID_PAGE(page) && !test_bit(PG_mapped, &page->flags)) {
+		unsigned long phys = pte_val(pte) & PTE_PHYS_MASK;
+		__flush_wback_region((void *)P1SEGADDR(phys), PAGE_SIZE);
+		__set_bit(PG_mapped, &page->flags);
 	}
+#endif
+
+	save_and_cli(flags);
 
 	/* Set PTEH register */
-	pteaddr = (address & MMU_VPN_MASK) | get_asid();
-	ctrl_outl(pteaddr, MMU_PTEH);
+	vpn = (address & MMU_VPN_MASK) | get_asid();
+	ctrl_outl(vpn, MMU_PTEH);
 
-	/* Set PTEA register */
-	/* TODO: make this look less hacky */
 	pteval = pte_val(pte);
 #if defined(__SH4__)
+	/* Set PTEA register */
+	/* TODO: make this look less hacky */
 	ptea = ((pteval >> 28) & 0xe) | (pteval & 0x1);
 	ctrl_outl(ptea, MMU_PTEA);
 #endif
@@ -326,7 +342,7 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	restore_flags(flags);
 }
 
-static void __flush_tlb_page(unsigned long asid, unsigned long page)
+void __flush_tlb_page(unsigned long asid, unsigned long page)
 {
 	unsigned long addr, data;
 
@@ -341,40 +357,13 @@ static void __flush_tlb_page(unsigned long asid, unsigned long page)
 	data = (page & 0xfffe0000) | asid; /* VALID bit is off */
 	ctrl_outl(data, addr);
 #elif defined(__SH4__)
-	jump_to_P2();
 	addr = MMU_UTLB_ADDRESS_ARRAY | MMU_PAGE_ASSOC_BIT;
 	data = page | asid; /* VALID bit is off */
+	jump_to_P2();
 	ctrl_outl(data, addr);
 	back_to_P1();
 #endif
 }
-
-#if defined(__SH4__)
-static void __flush_tlb_phys(unsigned long phys)
-{
-	int i;
-	unsigned long addr, data;
-
-	jump_to_P2();
-	for (i = 0; i < MMU_UTLB_ENTRIES; i++) {
-		addr = MMU_UTLB_DATA_ARRAY | (i<<MMU_U_ENTRY_SHIFT);
-		data = ctrl_inl(addr);
-		if ((data & MMU_UTLB_VALID) && (data&PAGE_MASK) == phys) {
-			data &= ~MMU_UTLB_VALID;
-			ctrl_outl(data, addr);
-		}
-	}
-	for (i = 0; i < MMU_ITLB_ENTRIES; i++) {
-		addr = MMU_ITLB_DATA_ARRAY | (i<<MMU_I_ENTRY_SHIFT);
-		data = ctrl_inl(addr);
-		if ((data & MMU_ITLB_VALID) && (data&PAGE_MASK) == phys) {
-			data &= ~MMU_ITLB_VALID;
-			ctrl_outl(data, addr);
-		}
-	}
-	back_to_P1();
-}
-#endif
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {

@@ -1,14 +1,18 @@
-/* $Id: avm_a1p.c,v 2.7 2000/11/24 17:05:37 kai Exp $
+/* $Id: avm_a1p.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * avm_a1p.c    low level stuff for the following AVM cards:
- *              A1 PCMCIA
- *		FRITZ!Card PCMCIA
- *		FRITZ!Card PCMCIA 2.0
+ * low level stuff for the following AVM cards:
+ * A1 PCMCIA
+ * FRITZ!Card PCMCIA
+ * FRITZ!Card PCMCIA 2.0
  *
- * Author       Carsten Paeth (calle@calle.in-berlin.de)
+ * Author       Carsten Paeth
+ * Copyright    by Carsten Paeth     <calle@calle.de>
  *
- *  This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  */
+
 #define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
@@ -53,7 +57,7 @@
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
 
-static const char *avm_revision = "$Revision: 2.7 $";
+static const char *avm_revision = "$Revision: 1.1.4.1 $";
 
 static inline u_char
 ReadISAC(struct IsdnCardState *cs, u_char offset)

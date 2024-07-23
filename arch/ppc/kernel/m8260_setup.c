@@ -1,6 +1,4 @@
 /*
- * $Id: m8xx_setup.c,v 1.4 1999/09/18 18:40:36 dmalek Exp $
- *
  *  linux/arch/ppc/kernel/setup.c
  *
  *  Copyright (C) 1995  Linus Torvalds
@@ -22,7 +20,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/tty.h>
@@ -33,6 +31,7 @@
 #include <linux/blk.h>
 #include <linux/ioport.h>
 #include <linux/ide.h>
+#include <linux/seq_file.h>
 
 #include <asm/mmu.h>
 #include <asm/processor.h>
@@ -41,60 +40,30 @@
 #include <asm/pgtable.h>
 #include <asm/ide.h>
 #include <asm/mpc8260.h>
-#include <asm/immap_8260.h>
+#include <asm/immap_cpm2.h>
 #include <asm/machdep.h>
-
+#include <asm/bootinfo.h>
 #include <asm/time.h>
-#include "ppc8260_pic.h"
+
+#include "cpm2_pic.h"
 
 static int m8260_set_rtc_time(unsigned long time);
-unsigned long m8260_get_rtc_time(void);
-void m8260_calibrate_decr(void);
-
-#if 0
-extern int mackbd_setkeycode(unsigned int scancode, unsigned int keycode);
-extern int mackbd_getkeycode(unsigned int scancode);
-extern int mackbd_pretranslate(unsigned char scancode, char raw_mode);
-extern int mackbd_translate(unsigned char scancode, unsigned char *keycode,
-			   char raw_mode);
-extern char mackbd_unexpected_up(unsigned char keycode);
-extern void mackbd_leds(unsigned char leds);
-extern void mackbd_init_hw(void);
-#endif
-
-extern unsigned long loops_per_sec;
+static unsigned long m8260_get_rtc_time(void);
+static void m8260_calibrate_decr(void);
 
 unsigned char __res[sizeof(bd_t)];
-unsigned long empty_zero_page[1024];
 
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;	/* starting block # of image */
-#endif
+extern void cpm2_reset(void);
 
-extern char saved_command_line[256];
-
-extern unsigned long find_available_memory(void);
-extern void m8260_cpm_reset(void);
-
-void __init adbdev_init(void)
-{
-}
-
-void __init
+static void __init
 m8260_setup_arch(void)
 {
-	extern char cmd_line[];
-	
-	printk("Boot arguments: %s\n", cmd_line);
-
 	/* Reset the Communication Processor Module.
 	*/
-	m8260_cpm_reset();
+	cpm2_reset();
 }
 
-void
+static void
 abort(void)
 {
 #ifdef CONFIG_XMON
@@ -107,12 +76,13 @@ abort(void)
 /* The decrementer counts at the system (internal) clock frequency
  * divided by four.
  */
-void __init m8260_calibrate_decr(void)
+static void __init
+m8260_calibrate_decr(void)
 {
 	bd_t	*binfo = (bd_t *)__res;
 	int freq, divisor;
 
-	freq = (binfo->bi_busfreq * 1000000);
+	freq = binfo->bi_busfreq;
         divisor = 4;
         tb_ticks_per_jiffy = freq / HZ / divisor;
 	tb_to_us = mulhwu_scale_factor(freq / divisor, 1000000);
@@ -121,7 +91,8 @@ void __init m8260_calibrate_decr(void)
 /* The 8260 has an internal 1-second timer update register that
  * we should use for this purpose.
  */
-static uint	rtc_time;
+static uint rtc_time;
+
 static int
 m8260_set_rtc_time(unsigned long time)
 {
@@ -129,7 +100,7 @@ m8260_set_rtc_time(unsigned long time)
 	return(0);
 }
 
-unsigned long __init
+static unsigned long
 m8260_get_rtc_time(void)
 {
 
@@ -138,7 +109,7 @@ m8260_get_rtc_time(void)
 	return((unsigned long)rtc_time);
 }
 
-void
+static void
 m8260_restart(char *cmd)
 {
 	extern void m8260_gorom(bd_t *bi, uint addr);
@@ -155,37 +126,37 @@ m8260_restart(char *cmd)
 			startaddr = simple_strtoul(&cmd[10], NULL, 0);
 	}
 
-	m8260_gorom((uint)__pa(__res), startaddr);
+	m8260_gorom((unsigned int)__pa(__res), startaddr);
 }
 
-void
+static void
 m8260_power_off(void)
 {
    m8260_restart(NULL);
 }
 
-void
+static void
 m8260_halt(void)
 {
    m8260_restart(NULL);
 }
 
 
-int m8260_setup_residual(char *buffer)
+static int
+m8260_show_percpuinfo(struct seq_file *m, int i)
 {
-        int     len = 0;
 	bd_t	*bp;
 
 	bp = (bd_t *)__res;
-			
-	len += sprintf(len+buffer,"core clock\t: %d MHz\n"
-		       "CPM  clock\t: %d MHz\n"
-		       "bus  clock\t: %d MHz\n",
-		       bp->bi_intfreq /*/ 1000000*/,
-		       bp->bi_cpmfreq /*/ 1000000*/,
-		       bp->bi_busfreq /*/ 1000000*/);
 
-	return len;
+	seq_printf(m, "core clock\t: %d MHz\n"
+		   "CPM  clock\t: %d MHz\n"
+		   "bus  clock\t: %d MHz\n",
+		   bp->bi_intfreq / 1000000,
+		   bp->bi_cpmfreq / 1000000,
+		   bp->bi_busfreq / 1000000);
+
+	return 0;
 }
 
 /* Initialize the internal interrupt controller.  The number of
@@ -194,37 +165,63 @@ int m8260_setup_residual(char *buffer)
  * External interrupts can be either edge or level triggered, and
  * need to be initialized by the appropriate driver.
  */
-void __init
+static void __init
 m8260_init_IRQ(void)
 {
 	int i;
 	void cpm_interrupt_init(void);
 
 #if 0
-        ppc8260_pic.irq_offset = 0;
+        cpm2_pic.irq_offset = 0;
 #endif
         for ( i = 0 ; i < NR_SIU_INTS ; i++ )
-                irq_desc[i].handler = &ppc8260_pic;
-	
+                irq_desc[i].handler = &cpm2_pic;
+
 	/* Initialize the default interrupt mapping priorities,
 	 * in case the boot rom changed something on us.
 	 */
-	immr->im_intctl.ic_sicr = 0;
-	immr->im_intctl.ic_siprr = 0x05309770;
-	immr->im_intctl.ic_scprrh = 0x05309770;
-	immr->im_intctl.ic_scprrl = 0x05309770;
+	cpm2_immr->im_intctl.ic_sicr = 0;
+	cpm2_immr->im_intctl.ic_siprr = 0x05309770;
+	cpm2_immr->im_intctl.ic_scprrh = 0x05309770;
+	cpm2_immr->im_intctl.ic_scprrl = 0x05309770;
 
 }
 
+/*
+ * Same hack as 8xx
+ */
+static unsigned long __init
+m8260_find_end_of_memory(void)
+{
+	bd_t	*binfo;
+	extern unsigned char __res[];
+
+	binfo = (bd_t *)__res;
+
+	return binfo->bi_memsize;
+}
+
+/* Map the IMMR, plus anything else we can cover
+ * in that upper space according to the memory controller
+ * chip select mapping.  Grab another bunch of space
+ * below that for stuff we can't cover in the upper.
+ */
+static void __init
+m8260_map_io(void)
+{
+	io_block_mapping(0xf0000000, 0xf0000000, 0x10000000, _PAGE_IO);
+	io_block_mapping(0xe0000000, 0xe0000000, 0x10000000, _PAGE_IO);
+}
 
 void __init
-m8260_init(unsigned long r3, unsigned long r4, unsigned long r5,
-	 unsigned long r6, unsigned long r7)
+platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
+	      unsigned long r6, unsigned long r7)
 {
+	parse_bootinfo(find_bootinfo());
 
 	if ( r3 )
 		memcpy( (void *)__res,(void *)(r3+KERNELBASE), sizeof(bd_t) );
-	
+
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* take care of initrd if we have one */
 	if ( r4 )
@@ -236,81 +233,36 @@ m8260_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	/* take care of cmd line */
 	if ( r6 )
 	{
-		
+
 		*(char *)(r7+KERNELBASE) = 0;
 		strcpy(cmd_line, (char *)(r6+KERNELBASE));
 	}
 
-	ppc_md.setup_arch     = m8260_setup_arch;
-	ppc_md.setup_residual = m8260_setup_residual;
-	ppc_md.get_cpuinfo    = NULL;
-	ppc_md.irq_cannonicalize = NULL;
-	ppc_md.init_IRQ       = m8260_init_IRQ;
-	ppc_md.get_irq	      = m8260_get_irq;
-	ppc_md.init           = NULL;
+	ppc_md.setup_arch		= m8260_setup_arch;
+	ppc_md.show_percpuinfo		= m8260_show_percpuinfo;
+	ppc_md.irq_cannonicalize	= NULL;
+	ppc_md.init_IRQ			= m8260_init_IRQ;
+	ppc_md.get_irq			= cpm2_get_irq;
+	ppc_md.init			= NULL;
 
-	ppc_md.restart        = m8260_restart;
-	ppc_md.power_off      = m8260_power_off;
-	ppc_md.halt           = m8260_halt;
+	ppc_md.restart			= m8260_restart;
+	ppc_md.power_off		= m8260_power_off;
+	ppc_md.halt			= m8260_halt;
 
-	ppc_md.time_init      = NULL;
-	ppc_md.set_rtc_time   = m8260_set_rtc_time;
-	ppc_md.get_rtc_time   = m8260_get_rtc_time;
-	ppc_md.calibrate_decr = m8260_calibrate_decr;
+	ppc_md.time_init		= NULL;
+	ppc_md.set_rtc_time		= m8260_set_rtc_time;
+	ppc_md.get_rtc_time		= m8260_get_rtc_time;
+	ppc_md.calibrate_decr		= m8260_calibrate_decr;
 
-#if 0
-	ppc_md.kbd_setkeycode    = pckbd_setkeycode;
-	ppc_md.kbd_getkeycode    = pckbd_getkeycode;
-	ppc_md.kbd_pretranslate  = pckbd_pretranslate;
-	ppc_md.kbd_translate     = pckbd_translate;
-	ppc_md.kbd_unexpected_up = pckbd_unexpected_up;
-	ppc_md.kbd_leds          = pckbd_leds;
-	ppc_md.kbd_init_hw       = pckbd_init_hw;
-#ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
-#endif
-#else
-	ppc_md.kbd_setkeycode    = NULL;
-	ppc_md.kbd_getkeycode    = NULL;
-	ppc_md.kbd_translate     = NULL;
-	ppc_md.kbd_unexpected_up = NULL;
-	ppc_md.kbd_leds          = NULL;
-	ppc_md.kbd_init_hw       = NULL;
-#ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.kbd_sysrq_xlate	 = NULL;
-#endif
-#endif
+	ppc_md.find_end_of_memory	= m8260_find_end_of_memory;
+	ppc_md.setup_io_mappings	= m8260_map_io;
 
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
-        ppc_ide_md.insw = m8xx_ide_insw;
-        ppc_ide_md.outsw = m8xx_ide_outsw;
-        ppc_ide_md.default_irq = m8xx_ide_default_irq;
-        ppc_ide_md.default_io_base = m8xx_ide_default_io_base;
-        ppc_ide_md.check_region = m8xx_ide_check_region;
-        ppc_ide_md.request_region = m8xx_ide_request_region;
-        ppc_ide_md.release_region = m8xx_ide_release_region;
-        ppc_ide_md.fix_driveid = m8xx_ide_fix_driveid;
-        ppc_ide_md.ide_init_hwif = m8xx_ide_init_hwif_ports;
-        ppc_ide_md.ide_request_irq = m8xx_ide_request_irq;
-
-        ppc_ide_md.io_base = _IO_BASE;
-#endif		
+	ppc_md.kbd_setkeycode		= NULL;
+	ppc_md.kbd_getkeycode		= NULL;
+	ppc_md.kbd_translate		= NULL;
+	ppc_md.kbd_unexpected_up	= NULL;
+	ppc_md.kbd_leds			= NULL;
+	ppc_md.kbd_init_hw		= NULL;
+	ppc_md.ppc_kbd_sysrq_xlate	= NULL;
 }
 
-void
-prom_init(uint r3, uint r4, uint r5, uint r6)
-{
-	/* Nothing to do now, but we are called immediatedly upon
-	 * kernel start up with MMU disabled, so if there is
-	 * anything we need to do......
-	 */
-}
-
-/* Mainly for ksyms.
-*/
-int
-request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
-		       unsigned long flag, const char *naem, void *dev)
-{
-	panic("request IRQ\n");
-}

@@ -1,4 +1,4 @@
-/* $Id: unistd.h,v 1.47 2000/08/14 05:39:07 jj Exp $ */
+/* $Id: unistd.h,v 1.49 2001/10/18 08:27:05 davem Exp $ */
 #ifndef _SPARC64_UNISTD_H
 #define _SPARC64_UNISTD_H
 
@@ -158,7 +158,7 @@
 /* #define __NR_adjtime         140    SunOS Specific                              */
 #define __NR_getpeername        141 /* Common                                      */
 /* #define __NR_gethostid       142    SunOS Specific                              */
-/* #define __NR_ni_syscall      143    ENOSYS under SunOS                          */
+#define __NR_gettid             143 /* ENOSYS under SunOS                          */
 #define __NR_getrlimit		144 /* Common                                      */
 #define __NR_setrlimit          145 /* Common                                      */
 #define __NR_pivot_root		146 /* Linux Specific, killpg under SunOS          */
@@ -184,25 +184,25 @@
 /* #define __NR_exportfs        166    SunOS Specific                              */
 #define __NR_mount              167 /* Common                                      */
 #define __NR_ustat              168 /* Common                                      */
-/* #define __NR_semsys          169    SunOS Specific                              */
-/* #define __NR_msgsys          170    SunOS Specific                              */
-/* #define __NR_shmsys          171    SunOS Specific                              */
-/* #define __NR_auditsys        172    SunOS Specific                              */
-/* #define __NR_rfssys          173    SunOS Specific                              */
+#define __NR_setxattr           169 /* SunOS: semsys                               */
+#define __NR_lsetxattr          170 /* SunOS: msgsys                               */
+#define __NR_fsetxattr          171 /* SunOS: shmsys                               */
+#define __NR_getxattr           172 /* SunOS: auditsys                             */
+#define __NR_lgetxattr          173 /* SunOS: rfssys                               */
 #define __NR_getdents           174 /* Common                                      */
 #define __NR_setsid             175 /* Common                                      */
 #define __NR_fchdir             176 /* Common                                      */
-/* #define __NR_fchroot         177    SunOS Specific                              */
-/* #define __NR_vpixsys         178    SunOS Specific                              */
-/* #define __NR_aioread         179    SunOS Specific                              */
-/* #define __NR_aiowrite        180    SunOS Specific                              */
-/* #define __NR_aiowait         181    SunOS Specific                              */
-/* #define __NR_aiocancel       182    SunOS Specific                              */
+#define __NR_fgetxattr          177 /* SunOS: fchroot                              */
+#define __NR_listxattr          178 /* SunOS: vpixsys                              */
+#define __NR_llistxattr         179 /* SunOS: aioread                              */
+#define __NR_flistxattr         180 /* SunOS: aiowrite                             */
+#define __NR_removexattr        181 /* SunOS: aiowait                              */
+#define __NR_lremovexattr       182 /* SunOS: aiocancel                            */
 #define __NR_sigpending         183 /* Common                                      */
 #define __NR_query_module	184 /* Linux Specific				   */
 #define __NR_setpgid            185 /* Common                                      */
-/* #define __NR_pathconf        186    SunOS Specific                              */
-/* #define __NR_fpathconf       187    SunOS Specific                              */
+#define __NR_fremovexattr       186 /* SunOS: pathconf                             */
+#define __NR_tkill              187 /* SunOS: fpathconf                            */
 /* #define __NR_sysconf         188    SunOS Specific                              */
 #define __NR_uname              189 /* Linux Specific                              */
 #define __NR_init_module        190 /* Linux Specific                              */
@@ -220,7 +220,7 @@
 #define __NR_oldlstat           202 /* Linux Specific                              */
 #define __NR_uselib             203 /* Linux Specific                              */
 #define __NR_readdir            204 /* Linux Specific                              */
-/* #define __NR_ioperm          205    Linux Specific - i386 specific, unused      */
+#define __NR_readahead          205 /* Linux Specific                              */
 #define __NR_socketcall         206 /* Linux Specific                              */
 #define __NR_syslog             207 /* Linux Specific                              */
 /* #define __NR_olduname        208    Linux Specific                              */
@@ -416,7 +416,6 @@ static __inline__ _syscall1(int,dup,int,fd)
 static __inline__ _syscall3(int,execve,__const__ char *,file,char **,argv,char **,envp)
 static __inline__ _syscall3(int,open,__const__ char *,file,int,flag,int,mode)
 static __inline__ _syscall1(int,close,int,fd)
-static __inline__ _syscall1(int,_exit,int,exitcode)
 static __inline__ _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
 static __inline__ _syscall1(int,delete_module,const char *,name)
 

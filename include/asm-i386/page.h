@@ -15,7 +15,7 @@
 
 #include <asm/mmx.h>
 
-#define clear_page(page)	mmx_clear_page(page)
+#define clear_page(page)	mmx_clear_page((void *)(page))
 #define copy_page(to,from)	mmx_copy_page(to,from)
 
 #else
@@ -41,11 +41,13 @@ typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
 typedef struct { unsigned long long pgd; } pgd_t;
 #define pte_val(x)	((x).pte_low | ((unsigned long long)(x).pte_high << 32))
+#define __pte(x) ({ pte_t __pte = {(x), (x) >> 32}; __pte; })
 #else
 typedef struct { unsigned long pte_low; } pte_t;
 typedef struct { unsigned long pmd; } pmd_t;
 typedef struct { unsigned long pgd; } pgd_t;
 #define pte_val(x)	((x).pte_low)
+#define __pte(x) ((pte_t) { (x) } )
 #endif
 #define PTE_MASK	PAGE_MASK
 
@@ -55,7 +57,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define pgd_val(x)	((x).pgd)
 #define pgprot_val(x)	((x).pgprot)
 
-#define __pte(x) ((pte_t) { (x) } )
 #define __pmd(x) ((pmd_t) { (x) } )
 #define __pgd(x) ((pgd_t) { (x) } )
 #define __pgprot(x)	((pgprot_t) { (x) } )
@@ -80,23 +81,37 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 
 #define __PAGE_OFFSET		(0xC0000000)
 
+/*
+ * This much address space is reserved for vmalloc() and iomap()
+ * as well as fixmap mappings.
+ */
+#define __VMALLOC_RESERVE	(128 << 20)
+
 #ifndef __ASSEMBLY__
 
 /*
  * Tell the user there is some problem. Beep too, so we can
  * see^H^H^Hhear bugs in early bootup as well!
+ * The offending file and line are encoded after the "officially
+ * undefined" opcode for parsing in the trap handler.
  */
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	__asm__ __volatile__(".byte 0x0f,0x0b"); \
-} while (0)
+
+#if 1	/* Set to zero for a slightly smaller kernel */
+#define BUG()				\
+ __asm__ __volatile__(	"ud2\n"		\
+			"\t.word %c0\n"	\
+			"\t.long %c1\n"	\
+			 : : "i" (__LINE__), "i" (__FILE__))
+#else
+#define BUG() __asm__ __volatile__("ud2\n")
+#endif
 
 #define PAGE_BUG(page) do { \
 	BUG(); \
 } while (0)
 
 /* Pure 2^n version of get_order */
-extern __inline__ int get_order(unsigned long size)
+static __inline__ int get_order(unsigned long size)
 {
 	int order;
 
@@ -112,11 +127,16 @@ extern __inline__ int get_order(unsigned long size)
 #endif /* __ASSEMBLY__ */
 
 #define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
+#define VMALLOC_RESERVE		((unsigned long)__VMALLOC_RESERVE)
+#define __MAXMEM		(-__PAGE_OFFSET-__VMALLOC_RESERVE)
+#define MAXMEM			((unsigned long)(-PAGE_OFFSET-VMALLOC_RESERVE))
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 #define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
 #define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

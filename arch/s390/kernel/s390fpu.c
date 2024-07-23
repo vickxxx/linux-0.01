@@ -57,10 +57,9 @@ int save_fp_regs1(s390_fp_regs *fpregs)
 
 void save_fp_regs(s390_fp_regs *fpregs)
 {
-#if CONFIG_IEEEFPU_EMULATION
+#if CONFIG_MATHEMU
 	s390_fp_regs *currentfprs;
-#endif
-#if CONFIG_IEEEFPU_EMULATION
+
 	if(!save_fp_regs1(fpregs))
 	{
 		currentfprs=&current->thread.fp_regs;
@@ -81,6 +80,11 @@ int restore_fp_regs1(s390_fp_regs *fpregs)
 {
 	int has_ieee=MACHINE_HAS_IEEE;
 
+	/* If we don't mask with the FPC_VALID_MASK here
+	 * we've got a very quick shutdown -h now command
+         * via a kernel specification exception.
+	 */
+	fpregs->fpc&=FPC_VALID_MASK;
 	asm volatile ("LD   0,8(%0)\n\t"
 		      "LD   2,24(%0)\n\t"
 		      "LD   4,40(%0)\n\t"
@@ -114,11 +118,9 @@ int restore_fp_regs1(s390_fp_regs *fpregs)
 
 void restore_fp_regs(s390_fp_regs *fpregs)
 {
-#if CONFIG_IEEEFPU_EMULATION
+#if CONFIG_MATHEMU
 	s390_fp_regs *currentfprs;
-#endif
 
-#if CONFIG_IEEEFPU_EMULATION
 	if(!restore_fp_regs1(fpregs))
 	{
 		currentfprs=&current->thread.fp_regs;
@@ -133,15 +135,4 @@ void restore_fp_regs(s390_fp_regs *fpregs)
 	restore_fp_regs1(fpregs);
 #endif
 }
-
-
-
-
-
-
-
-
-
-
-
 

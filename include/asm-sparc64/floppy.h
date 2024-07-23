@@ -1,4 +1,4 @@
-/* $Id: floppy.h,v 1.28 2000/02/18 13:50:54 davem Exp $
+/* $Id: floppy.h,v 1.32 2001/10/26 17:59:36 davem Exp $
  * asm-sparc64/floppy.h: Sparc specific parts of the Floppy driver.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -104,7 +104,6 @@ static int sun_floppy_types[2] = { 0, 0 };
 #define FLOPPY1_TYPE		sun_floppy_types[1]
 
 #define FDC1			((unsigned long)sun_fdc)
-static int FDC2 =		-1;
 
 #define N_FDC    1
 #define N_DRIVE  8
@@ -173,11 +172,6 @@ char *pdma_base = 0;
 unsigned long pdma_areasize;
 
 /* Common routines to all controller types on the Sparc. */
-static __inline__ void virtual_dma_init(void)
-{
-	/* nothing... */
-}
-
 static void sun_fd_disable_dma(void)
 {
 	doing_pdma = 0;
@@ -231,7 +225,7 @@ static int sun_fd_request_irq(void)
 		once = 1;
 
 		error = request_fast_irq(FLOPPY_IRQ, floppy_hardint, 
-					SA_INTERRUPT, "floppy", NULL);
+					 SA_INTERRUPT, "floppy", NULL);
 
 		return ((error == 0) ? 0 : -1);
 	}
@@ -267,13 +261,21 @@ static int sun_fd_eject(int drive)
 
 #ifdef CONFIG_PCI
 #include <asm/ebus.h>
+#include <asm/isa.h>
 #include <asm/ns87303.h>
 
 static struct linux_ebus_dma *sun_pci_fd_ebus_dma;
 static struct pci_dev *sun_pci_ebus_dev;
 static int sun_pci_broken_drive = -1;
-static unsigned int sun_pci_dma_addr = -1U;
-static int sun_pci_dma_len, sun_pci_dma_direction;
+
+struct sun_pci_dma_op {
+	unsigned int 	addr;
+	int		len;
+	int		direction;
+	char		*buf;
+};
+static struct sun_pci_dma_op sun_pci_dma_current = { -1U, 0, 0, NULL};
+static struct sun_pci_dma_op sun_pci_dma_pending = { -1U, 0, 0, NULL};
 
 extern void floppy_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
@@ -343,6 +345,29 @@ static void sun_pci_fd_enable_dma(void)
 {
 	unsigned int dcsr;
 
+	if((NULL == sun_pci_dma_pending.buf) 	||
+	   (0	== sun_pci_dma_pending.len) 	||
+	   (0	== sun_pci_dma_pending.direction)) {
+		goto enable; /* TODO: BUG() */
+	}
+
+	sun_pci_dma_current.buf = sun_pci_dma_pending.buf;
+	sun_pci_dma_current.len = sun_pci_dma_pending.len;
+	sun_pci_dma_current.direction = sun_pci_dma_pending.direction;
+
+	sun_pci_dma_pending.buf  = NULL;
+	sun_pci_dma_pending.len  = 0;
+	sun_pci_dma_pending.direction = 0;
+	sun_pci_dma_pending.addr = -1U;
+
+	sun_pci_dma_current.addr = 
+		pci_map_single(	sun_pci_ebus_dev,
+				sun_pci_dma_current.buf,
+				sun_pci_dma_current.len,
+				sun_pci_dma_current.direction);
+	writel(sun_pci_dma_current.addr, &sun_pci_fd_ebus_dma->dacr);
+
+enable:
 	dcsr = readl(&sun_pci_fd_ebus_dma->dcsr);
 	dcsr |= EBUS_DCSR_EN_DMA;
 	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
@@ -366,12 +391,12 @@ static void sun_pci_fd_disable_dma(void)
 			writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
 		}
 	}
-	if (sun_pci_dma_addr != -1U)
+	if (sun_pci_dma_current.addr != -1U)
 		pci_unmap_single(sun_pci_ebus_dev,
-				 sun_pci_dma_addr,
-				 sun_pci_dma_len,
-				 sun_pci_dma_direction);
-	sun_pci_dma_addr = -1U;
+				 sun_pci_dma_current.addr,
+				 sun_pci_dma_current.len,
+				 sun_pci_dma_current.direction);
+	sun_pci_dma_current.addr = -1U;
 }
 
 static void sun_pci_fd_set_dma_mode(int mode)
@@ -391,29 +416,23 @@ static void sun_pci_fd_set_dma_mode(int mode)
 	 */
 	if (mode == DMA_MODE_WRITE) {
 		dcsr &= ~(EBUS_DCSR_WRITE);
-		sun_pci_dma_direction = PCI_DMA_TODEVICE;
+		sun_pci_dma_pending.direction = PCI_DMA_TODEVICE;
 	} else {
 		dcsr |= EBUS_DCSR_WRITE;
-		sun_pci_dma_direction = PCI_DMA_FROMDEVICE;
+		sun_pci_dma_pending.direction = PCI_DMA_FROMDEVICE;
 	}
 	writel(dcsr, &sun_pci_fd_ebus_dma->dcsr);
 }
 
 static void sun_pci_fd_set_dma_count(int length)
 {
-	sun_pci_dma_len = length;
+	sun_pci_dma_pending.len = length;
 	writel(length, &sun_pci_fd_ebus_dma->dbcr);
 }
 
 static void sun_pci_fd_set_dma_addr(char *buffer)
 {
-	unsigned int addr;
-
-	addr = sun_pci_dma_addr = pci_map_single(sun_pci_ebus_dev,
-						 buffer,
-						 sun_pci_dma_len,
-						 sun_pci_dma_direction);
-	writel(addr, &sun_pci_fd_ebus_dma->dacr);
+	sun_pci_dma_pending.buf = buffer;
 }
 
 static unsigned int sun_pci_get_dma_residue(void)
@@ -565,6 +584,101 @@ static int sun_pci_fd_test_drive(unsigned long port, int drive)
 
 #endif /* CONFIG_PCI */
 
+#ifdef CONFIG_PCI
+static int __init ebus_fdthree_p(struct linux_ebus_device *edev)
+{
+	if (!strcmp(edev->prom_name, "fdthree"))
+		return 1;
+	if (!strcmp(edev->prom_name, "floppy")) {
+		char compat[16];
+		prom_getstring(edev->prom_node,
+			       "compatible",
+			       compat, sizeof(compat));
+		compat[15] = '\0';
+		if (!strcmp(compat, "fdthree"))
+			return 1;
+	}
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_PCI
+#undef ISA_FLOPPY_WORKS
+
+#ifdef ISA_FLOPPY_WORKS
+static unsigned long __init isa_floppy_init(void)
+{
+	struct isa_bridge *isa_br;
+	struct isa_device *isa_dev = NULL;
+
+	for_each_isa(isa_br) {
+		for_each_isadev(isa_dev, isa_br) {
+			if (!strcmp(isa_dev->prom_name, "dma")) {
+				struct isa_device *child = isa_dev->child;
+
+				while (child) {
+					if (!strcmp(child->prom_name, "floppy")) {
+						isa_dev = child;
+						goto isa_done;
+					}
+					child = child->next;
+				}
+			}
+		}
+	}
+isa_done:
+	if (!isa_dev)
+		return 0;
+
+	/* We could use DMA on devices behind the ISA bridge, but...
+	 *
+	 * There is a slight problem.  Normally on x86 kit the x86 processor
+	 * delays I/O port instructions when the ISA bus "dma in progress"
+	 * signal is active.  Well, sparc64 systems do not monitor this
+	 * signal thus we would need to block all I/O port accesses in software
+	 * when a dma transfer is active for some device.
+	 */
+
+	sun_fdc = (struct sun_flpy_controller *)isa_dev->resource.start;
+	FLOPPY_IRQ = isa_dev->irq;
+
+	sun_fdops.fd_inb = sun_pci_fd_inb;
+	sun_fdops.fd_outb = sun_pci_fd_outb;
+
+	can_use_virtual_dma = use_virtual_dma = 1;
+	sun_fdops.fd_enable_dma = sun_fd_enable_dma;
+	sun_fdops.fd_disable_dma = sun_fd_disable_dma;
+	sun_fdops.fd_set_dma_mode = sun_fd_set_dma_mode;
+	sun_fdops.fd_set_dma_addr = sun_fd_set_dma_addr;
+	sun_fdops.fd_set_dma_count = sun_fd_set_dma_count;
+	sun_fdops.get_dma_residue = sun_get_dma_residue;
+
+	sun_fdops.fd_enable_irq = sun_fd_enable_irq;
+	sun_fdops.fd_disable_irq = sun_fd_disable_irq;
+	sun_fdops.fd_request_irq = sun_fd_request_irq;
+	sun_fdops.fd_free_irq = sun_fd_free_irq;
+
+	/* Floppy eject is manual.   Actually, could determine this
+	 * via presence of 'manual' property in OBP node.
+	 */
+	sun_fdops.fd_eject = sun_pci_fd_eject;
+
+        fdc_status = (unsigned long) &sun_fdc->status_82077;
+	FLOPPY_MOTOR_MASK = 0xf0;
+
+	allowed_drive_mask = 0;
+	sun_floppy_types[0] = 0;
+	sun_floppy_types[1] = 4;
+
+	sun_pci_broken_drive = 1;
+	sun_fdops.fd_outb = sun_pci_fd_broken_outb;
+
+	return sun_floppy_types[0];
+}
+#endif /* ISA_FLOPPY_WORKS */
+
+#endif
+
 static unsigned long __init sun_floppy_init(void)
 {
 	char state[128];
@@ -592,13 +706,18 @@ static unsigned long __init sun_floppy_init(void)
 
 		for_each_ebus(ebus) {
 			for_each_ebusdev(edev, ebus) {
-				if (!strcmp(edev->prom_name, "fdthree"))
+				if (ebus_fdthree_p(edev))
 					goto ebus_done;
 			}
 		}
 	ebus_done:
-		if (!edev)
+		if (!edev) {
+#ifdef ISA_FLOPPY_WORKS
+			return isa_floppy_init();
+#else
 			return 0;
+#endif
+		}
 
 		prom_getproperty(edev->prom_node, "status",
 				 state, sizeof(state));
@@ -623,7 +742,7 @@ static unsigned long __init sun_floppy_init(void)
 		sun_fdops.fd_inb = sun_pci_fd_inb;
 		sun_fdops.fd_outb = sun_pci_fd_outb;
 
-		use_virtual_dma = 0;
+		can_use_virtual_dma = use_virtual_dma = 0;
 		sun_fdops.fd_enable_dma = sun_pci_fd_enable_dma;
 		sun_fdops.fd_disable_dma = sun_pci_fd_disable_dma;
 		sun_fdops.fd_set_dma_mode = sun_pci_fd_set_dma_mode;
@@ -700,9 +819,9 @@ static unsigned long __init sun_floppy_init(void)
 			ns87303_modify(config, ASC, ASC_DRV2_SEL, 0);
 			ns87303_modify(config, FCR, 0, FCR_LDE);
 
-			cfg = sun_floppy_types[0];
+			config = sun_floppy_types[0];
 			sun_floppy_types[0] = sun_floppy_types[1];
-			sun_floppy_types[1] = cfg;
+			sun_floppy_types[1] = config;
 
 			if (sun_pci_broken_drive != -1) {
 				sun_pci_broken_drive = 1 - sun_pci_broken_drive;
@@ -763,5 +882,7 @@ static unsigned long __init sun_floppy_init(void)
 
 	return sun_floppy_types[0];
 }
+
+#define EXTRA_FLOPPY_PARAMS
 
 #endif /* !(__ASM_SPARC64_FLOPPY_H) */

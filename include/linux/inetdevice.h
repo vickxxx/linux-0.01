@@ -17,6 +17,11 @@ struct ipv4_devconf
 	int	forwarding;
 	int	mc_forwarding;
 	int	tag;
+	int     arp_filter;
+	int	arp_announce;
+	int	arp_ignore;
+	int	medium_id;
+	int	force_igmp_version;
 	void	*sysctl;
 };
 
@@ -30,7 +35,17 @@ struct in_device
 	int			dead;
 	struct in_ifaddr	*ifa_list;	/* IP ifaddr chain		*/
 	struct ip_mc_list	*mc_list;	/* IP multicast filter chain    */
+	rwlock_t		mc_lock;	/* for mc_tomb */
+	struct ip_mc_list	*mc_tomb;
 	unsigned long		mr_v1_seen;
+	unsigned long		mr_v2_seen;
+	unsigned long		mr_maxdelay;
+	unsigned char		mr_qrv;
+	unsigned char		mr_gq_running;
+	unsigned char		mr_ifc_count;
+	struct timer_list	mr_gq_timer;	/* general query timer */
+	struct timer_list	mr_ifc_timer;	/* interface change timer */
+
 	struct neigh_parms	*arp_parms;
 	struct ipv4_devconf	cnf;
 };
@@ -47,12 +62,17 @@ struct in_device
 #define IN_DEV_TX_REDIRECTS(in_dev)	(ipv4_devconf.send_redirects || (in_dev)->cnf.send_redirects)
 #define IN_DEV_SEC_REDIRECTS(in_dev)	(ipv4_devconf.secure_redirects || (in_dev)->cnf.secure_redirects)
 #define IN_DEV_IDTAG(in_dev)		((in_dev)->cnf.tag)
+#define IN_DEV_MEDIUM_ID(in_dev)	((in_dev)->cnf.medium_id)
 
 #define IN_DEV_RX_REDIRECTS(in_dev) \
 	((IN_DEV_FORWARD(in_dev) && \
 	  (ipv4_devconf.accept_redirects && (in_dev)->cnf.accept_redirects)) \
 	 || (!IN_DEV_FORWARD(in_dev) && \
 	  (ipv4_devconf.accept_redirects || (in_dev)->cnf.accept_redirects)))
+
+#define IN_DEV_ARPFILTER(in_dev)	(ipv4_devconf.arp_filter || (in_dev)->cnf.arp_filter)
+#define IN_DEV_ARP_ANNOUNCE(in_dev)	(max(ipv4_devconf.arp_announce, (in_dev)->cnf.arp_announce))
+#define IN_DEV_ARP_IGNORE(in_dev)	(max(ipv4_devconf.arp_ignore, (in_dev)->cnf.arp_ignore))
 
 struct in_ifaddr
 {
@@ -79,10 +99,11 @@ extern void		devinet_init(void);
 extern struct in_device *inetdev_init(struct net_device *dev);
 extern struct in_device	*inetdev_by_index(int);
 extern u32		inet_select_addr(const struct net_device *dev, u32 dst, int scope);
+extern u32		inet_confirm_addr(const struct net_device *dev, u32 dst, u32 local, int scope);
 extern struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, u32 prefix, u32 mask);
-extern void		inet_forward_change(void);
+extern void		inet_forward_change(int);
 
-extern __inline__ int inet_ifa_match(u32 addr, struct in_ifaddr *ifa)
+static __inline__ int inet_ifa_match(u32 addr, struct in_ifaddr *ifa)
 {
 	return !((addr^ifa->ifa_address)&ifa->ifa_mask);
 }
@@ -91,7 +112,7 @@ extern __inline__ int inet_ifa_match(u32 addr, struct in_ifaddr *ifa)
  *	Check if a mask is acceptable.
  */
  
-extern __inline__ int bad_mask(u32 mask, u32 addr)
+static __inline__ int bad_mask(u32 mask, u32 addr)
 {
 	if (addr & (mask = ~mask))
 		return 1;
@@ -113,7 +134,7 @@ extern __inline__ int bad_mask(u32 mask, u32 addr)
 extern rwlock_t inetdev_lock;
 
 
-extern __inline__ struct in_device *
+static __inline__ struct in_device *
 in_dev_get(const struct net_device *dev)
 {
 	struct in_device *in_dev;
@@ -126,7 +147,7 @@ in_dev_get(const struct net_device *dev)
 	return in_dev;
 }
 
-extern __inline__ struct in_device *
+static __inline__ struct in_device *
 __in_dev_get(const struct net_device *dev)
 {
 	return (struct in_device*)dev->ip_ptr;
@@ -134,7 +155,7 @@ __in_dev_get(const struct net_device *dev)
 
 extern void in_dev_finish_destroy(struct in_device *idev);
 
-extern __inline__ void
+static __inline__ void
 in_dev_put(struct in_device *idev)
 {
 	if (atomic_dec_and_test(&idev->refcnt))
@@ -146,14 +167,14 @@ in_dev_put(struct in_device *idev)
 
 #endif /* __KERNEL__ */
 
-extern __inline__ __u32 inet_make_mask(int logmask)
+static __inline__ __u32 inet_make_mask(int logmask)
 {
 	if (logmask)
 		return htonl(~((1<<(32-logmask))-1));
 	return 0;
 }
 
-extern __inline__ int inet_mask_len(__u32 mask)
+static __inline__ int inet_mask_len(__u32 mask)
 {
 	if (!(mask = ntohl(mask)))
 		return 0;

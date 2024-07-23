@@ -16,7 +16,7 @@
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the
- * terms of the GNU Public License version 2 (the "GPL"), in which
+ * terms of the GNU General Public License version 2 (the "GPL"), in which
  * case the provisions of the GPL are applicable instead of the
  * above.  If you wish to allow the use of your version of this file
  * only under the terms of the GPL and not to allow others to use
@@ -36,8 +36,13 @@
 #include <sys/types.h>
 #endif
 
-typedef u_short	socket_t;
+#if defined(__arm__) || defined(__mips__)
+typedef u_int   ioaddr_t;
+#else
 typedef u_short	ioaddr_t;
+#endif
+
+typedef u_short	socket_t;
 typedef u_int	event_t;
 typedef u_char	cisdata_t;
 typedef u_short	page_t;

@@ -56,7 +56,7 @@ nlm4_decode_cookie(u32 *p, struct nlm_cookie *c)
 		c->len=4;
 		memset(c->data, 0, 4);	/* hockeypux brain damage */
 	}
-	else if(len<=8)
+	else if(len<=NLM_MAXCOOKIELEN)
 	{
 		c->len=len;
 		memcpy(c->data, p, len);
@@ -65,7 +65,7 @@ nlm4_decode_cookie(u32 *p, struct nlm_cookie *c)
 	else 
 	{
 		printk(KERN_NOTICE
-			"lockd: bad cookie size %d (only cookies under 8 bytes are supported.)\n", len);
+			"lockd: bad cookie size %d (only cookies under %d bytes are supported.)\n", len, NLM_MAXCOOKIELEN);
 		return NULL;
 	}
 	return p;
@@ -124,9 +124,9 @@ nlm4_decode_lock(u32 *p, struct nlm_lock *lock)
 {
 	struct file_lock	*fl = &lock->fl;
 	__s64			len, start, end;
-	int			tmp;
 
-	if (!(p = xdr_decode_string(p, &lock->caller, &tmp, NLM_MAXSTRLEN))
+	if (!(p = xdr_decode_string_inplace(p, &lock->caller,
+					    &lock->len, NLM_MAXSTRLEN))
 	 || !(p = nlm4_decode_fh(p, &lock->fh))
 	 || !(p = nlm4_decode_oh(p, &lock->oh)))
 		return NULL;
@@ -320,14 +320,14 @@ int
 nlm4svc_decode_shareargs(struct svc_rqst *rqstp, u32 *p, nlm_args *argp)
 {
 	struct nlm_lock	*lock = &argp->lock;
-	int		len;
 
 	memset(lock, 0, sizeof(*lock));
 	locks_init_lock(&lock->fl);
 	lock->fl.fl_pid = ~(u32) 0;
 
 	if (!(p = nlm4_decode_cookie(p, &argp->cookie))
-	 || !(p = xdr_decode_string(p, &lock->caller, &len, NLM_MAXSTRLEN))
+	 || !(p = xdr_decode_string_inplace(p, &lock->caller,
+					    &lock->len, NLM_MAXSTRLEN))
 	 || !(p = nlm4_decode_fh(p, &lock->fh))
 	 || !(p = nlm4_decode_oh(p, &lock->oh)))
 		return 0;
@@ -359,9 +359,9 @@ int
 nlm4svc_decode_notify(struct svc_rqst *rqstp, u32 *p, struct nlm_args *argp)
 {
 	struct nlm_lock	*lock = &argp->lock;
-	int		len;
 
-	if (!(p = xdr_decode_string(p, &lock->caller, &len, NLM_MAXSTRLEN)))
+	if (!(p = xdr_decode_string_inplace(p, &lock->caller,
+					    &lock->len, NLM_MAXSTRLEN)))
 		return 0;
 	argp->state = ntohl(*p++);
 	return xdr_argsize_check(rqstp, p);
@@ -370,10 +370,11 @@ nlm4svc_decode_notify(struct svc_rqst *rqstp, u32 *p, struct nlm_args *argp)
 int
 nlm4svc_decode_reboot(struct svc_rqst *rqstp, u32 *p, struct nlm_reboot *argp)
 {
-	if (!(p = xdr_decode_string(p, &argp->mon, &argp->len, SM_MAXSTRLEN)))
+	if (!(p = xdr_decode_string_inplace(p, &argp->mon, &argp->len, SM_MAXSTRLEN)))
 		return 0;
 	argp->state = ntohl(*p++);
-	argp->addr = ntohl(*p++);
+	/* Preserve the address in network byte order */
+	argp->addr = *p++;
 	return xdr_argsize_check(rqstp, p);
 }
 
@@ -539,7 +540,7 @@ nlm4clt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
  * Buffer requirements for NLM
  */
 #define NLM4_void_sz		0
-#define NLM4_cookie_sz		3	/* 1 len , 2 data */
+#define NLM4_cookie_sz		1+XDR_QUADLEN(NLM_MAXCOOKIELEN)
 #define NLM4_caller_sz		1+XDR_QUADLEN(NLM_MAXSTRLEN)
 #define NLM4_netobj_sz		1+XDR_QUADLEN(XDR_MAX_NETOBJ)
 /* #define NLM4_owner_sz		1+XDR_QUADLEN(NLM4_MAXOWNER) */
@@ -565,12 +566,11 @@ nlm4clt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
  */
 #define nlm4clt_decode_norep	NULL
 
-#define PROC(proc, argtype, restype)				\
-    { "nlm4_" #proc,						\
-      (kxdrproc_t) nlm4clt_encode_##argtype,			\
-      (kxdrproc_t) nlm4clt_decode_##restype,			\
-      MAX(NLM4_##argtype##_sz, NLM4_##restype##_sz) << 2,	\
-      0								\
+#define PROC(proc, argtype, restype)					\
+    { .p_procname  = "nlm4_" #proc,					\
+      .p_encode    = (kxdrproc_t) nlm4clt_encode_##argtype,		\
+      .p_decode    = (kxdrproc_t) nlm4clt_decode_##restype,		\
+      .p_bufsiz    = MAX(NLM4_##argtype##_sz, NLM4_##restype##_sz) << 2	\
     }
 
 static struct rpc_procinfo	nlm4_procedures[] = {

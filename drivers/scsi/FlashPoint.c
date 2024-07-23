@@ -629,7 +629,7 @@ typedef struct _SCCB {
 #if (FW_TYPE==_UCB_MGR_)  
    #define  HBA_AUTO_SENSE_FAIL        0x1B  
    #define  HBA_TQ_REJECTED            0x1C  
-   #define  HBA_UNSUPORTED_MSG         0x1D  
+   #define  HBA_UNSUPPORTED_MSG         0x1D  
    #define  HBA_HW_ERROR               0x20  
    #define  HBA_ATN_NOT_RESPONDED      0x21  
    #define  HBA_SCSI_RESET_BY_ADAPTER  0x22
@@ -3757,17 +3757,17 @@ STATIC int SetDevSyncRate(PSCCBcard pCurrCard, PUCB p_ucb)
 	}
 	if(currTar_Info->TarEEValue && EE_SYNC_MASK == syncVal)
 		return(0);
-	currTar_Info->TarEEValue = (currTar_Info->TarEEValue & !EE_SYNC_MASK)
+	currTar_Info->TarEEValue = (currTar_Info->TarEEValue & ~EE_SYNC_MASK)
 											| syncVal;
 	syncOffset = (SYNC_RATE_TBL + scsiID) / 2;
 	temp2.tempw = utilEERead(ioPort, syncOffset);
 	if(scsiID & 0x01)
 	{
-		temp2.tempb[0] = (temp2.tempb[0] & !EE_SYNC_MASK) | syncVal;
+		temp2.tempb[0] = (temp2.tempb[0] & ~EE_SYNC_MASK) | syncVal;
 	}
 	else
 	{
-		temp2.tempb[1] = (temp2.tempb[1] & !EE_SYNC_MASK) | syncVal;
+		temp2.tempb[1] = (temp2.tempb[1] & ~EE_SYNC_MASK) | syncVal;
 	}
 	utilEEWriteOnOff(ioPort, 1);
 	utilEEWrite(ioPort, temp2.tempw, syncOffset);

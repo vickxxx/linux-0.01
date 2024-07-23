@@ -2,7 +2,7 @@
  *
  * A  PCMCIA client driver for the Raylink wireless LAN card.
  * The starting point for this module was the skeleton.c in the
- * PCMCIA 2.9.12 package written by David Hinds, dhinds@allegro.stanford.edu
+ * PCMCIA 2.9.12 package written by David Hinds, dahinds@users.sourceforge.net
  *
  *
  * Copyright (c) 1998  Corey Thomas (corey@world.std.com)
@@ -34,7 +34,7 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/init.h>
@@ -48,6 +48,8 @@
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
 #include <linux/skbuff.h>
+#include <linux/ethtool.h>
+#include <asm/uaccess.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -82,7 +84,7 @@ typedef u_char	mac_addr[ETH_ALEN];	/* Hardware address */
 #define PCMCIA_DEBUG RAYLINK_DEBUG
 #endif
 #ifdef PCMCIA_DEBUG
-static int ray_debug = 0;
+static int ray_debug;
 static int pc_debug = PCMCIA_DEBUG;
 MODULE_PARM(pc_debug, "i");
 /* #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args); */
@@ -103,6 +105,9 @@ static int ray_dev_config(struct net_device *dev, struct ifmap *map);
 static struct net_device_stats *ray_get_stats(struct net_device *dev);
 static int ray_dev_init(struct net_device *dev);
 static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
+
+static struct ethtool_ops netdev_ethtool_ops;
+
 static int ray_open(struct net_device *dev);
 static int ray_dev_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -172,19 +177,19 @@ static int hop_dwell = 128;
 static int beacon_period = 256;
 
 /* power save mode (0 = off, 1 = save power) */
-static int psm = 0;
+static int psm;
 
 /* String for network's Extended Service Set ID. 32 Characters max */
-static char *essid = NULL;
+static char *essid;
 
 /* Default to encapsulation unless translation requested */
 static int translate = 1;
 
 static int country = USA;
 
-static int sniffer = 0;
+static int sniffer;
 
-static int bc = 0;
+static int bc;
 
 /* 48 bit physical card address if overriding card's real physical
  * address is required.  Since IEEE 802.11 addresses are 48 bits
@@ -221,6 +226,8 @@ static unsigned int ray_mem_speed = 500;
 
 MODULE_AUTHOR("Corey Thomas <corey@world.std.com>");
 MODULE_DESCRIPTION("Raylink/WebGear wireless LAN driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(irq_mask,"i");
 MODULE_PARM(net_type,"i");
 MODULE_PARM(hop_dwell,"i");
@@ -413,6 +420,7 @@ static dev_link_t *ray_attach(void)
     dev->set_config = &ray_dev_config;
     dev->get_stats  = &ray_get_stats;
     dev->do_ioctl = &ray_dev_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 #if WIRELESS_EXT > 7	/* If wireless extension exist in the kernel */
     dev->get_wireless_stats = ray_get_wireless_stats;
 #endif
@@ -997,7 +1005,9 @@ static int ray_event(event_t event, int priority,
 /*===========================================================================*/
 int ray_dev_init(struct net_device *dev)
 {
+#ifdef RAY_IMMEDIATE_INIT
     int i;
+#endif	/* RAY_IMMEDIATE_INIT */
     ray_dev_t *local = dev->priv;
     dev_link_t *link = local->finder;
 
@@ -1006,6 +1016,7 @@ int ray_dev_init(struct net_device *dev)
         DEBUG(2,"ray_dev_init - device not present\n");
         return -1;
     }
+#ifdef RAY_IMMEDIATE_INIT
     /* Download startup parameters */
     if ( (i = dl_startup_params(dev)) < 0)
     {
@@ -1013,7 +1024,14 @@ int ray_dev_init(struct net_device *dev)
            "returns 0x%x\n",i);
         return -1;
     }
-    
+#else	/* RAY_IMMEDIATE_INIT */
+    /* Postpone the card init so that we can still configure the card,
+     * for example using the Wireless Extensions. The init will happen
+     * in ray_open() - Jean II */
+    DEBUG(1,"ray_dev_init: postponing card init to ray_open() ; Status = %d\n",
+	  local->card_status);
+#endif	/* RAY_IMMEDIATE_INIT */
+
     /* copy mac and broadcast addresses to linux device */
     memcpy(&dev->dev_addr, &local->sparm.b4.a_mac_addr, ADDRLEN);
     memset(dev->broadcast, 0xff, ETH_ALEN);
@@ -1040,7 +1058,7 @@ static int ray_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     ray_dev_t *local = dev->priv;
     dev_link_t *link = local->finder;
-    short length;
+    short length = skb->len;
 
     if (!(link->state & DEV_PRESENT)) {
         DEBUG(2,"ray_dev_start_xmit - device not present\n");
@@ -1056,7 +1074,13 @@ static int ray_dev_start_xmit(struct sk_buff *skb, struct net_device *dev)
         }
     }
 
-    length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+    if(length < ETH_ZLEN)
+    {
+    	skb = skb_padto(skb, ETH_ZLEN);
+    	if(skb == NULL)
+    		return 0;
+    	length = ETH_ZLEN;
+    }
     switch (ray_hw_xmit( skb->data, length, dev, DATA_TYPE)) {
         case XMIT_NO_CCS:
         case XMIT_NEED_AUTH:
@@ -1212,7 +1236,22 @@ AP to AP        1    1        dest AP    src AP          dest     source
         }
     }
 } /* end encapsulate_frame */
+
+
 /*===========================================================================*/
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, "ray_cs");
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
+
+/*====================================================================*/
+
 static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
     ray_dev_t *local = (ray_dev_t *)dev->priv;
@@ -1243,6 +1282,22 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
       wrq->u.freq.e = 0;
       break;
 
+      /* Set frequency/channel */
+    case SIOCSIWFREQ:
+      /* Reject if card is already initialised */
+      if(local->card_status != CARD_AWAITING_PARAM)
+	{
+	  err = -EBUSY;
+	  break;
+	}
+
+      /* Setting by channel number */
+      if ((wrq->u.freq.m > USA_HOP_MOD) || (wrq->u.freq.e > 0))
+	err = -EOPNOTSUPP;
+      else
+	  local->sparm.b5.a_hop_pattern = wrq->u.freq.m;
+      break;
+
       /* Get current network name (ESSID) */
     case SIOCGIWESSID:
       if (wrq->u.data.pointer)
@@ -1259,6 +1314,49 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	  copy_to_user(wrq->u.data.pointer, essid, sizeof(essid));
 	}
       break;
+
+      /* Set desired network name (ESSID) */
+    case SIOCSIWESSID:
+      /* Reject if card is already initialised */
+      if(local->card_status != CARD_AWAITING_PARAM)
+	{
+	  err = -EBUSY;
+	  break;
+	}
+
+	if (wrq->u.data.pointer)
+	{
+	    char	card_essid[IW_ESSID_MAX_SIZE + 1];
+	    
+	    /* Check if we asked for `any' */
+	    if(wrq->u.data.flags == 0)
+	    {
+		/* Corey : can you do that ? */
+		err = -EOPNOTSUPP;
+	    }
+	    else
+	    {
+		/* Check the size of the string */
+		if(wrq->u.data.length >
+		   IW_ESSID_MAX_SIZE + 1)
+		{
+		    err = -E2BIG;
+		    break;
+		}
+		if (copy_from_user(card_essid,
+				   wrq->u.data.pointer,
+				   wrq->u.data.length)) {
+			err = -EFAULT;
+			break;
+		}
+		card_essid[IW_ESSID_MAX_SIZE] = '\0';
+
+		/* Set the ESSID in the card */
+		memcpy(local->sparm.b5.a_current_ess_id, card_essid,
+		       IW_ESSID_MAX_SIZE);
+	    }
+	}
+	break;
 
       /* Get current Access Point (BSSID in our case) */
     case SIOCGIWAP:
@@ -1302,6 +1400,34 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
       wrq->u.rts.fixed = 1;
       break;
 
+      /* Set the desired RTS threshold */
+    case SIOCSIWRTS:
+    {
+	int rthr = wrq->u.rts.value;
+
+      /* Reject if card is already initialised */
+      if(local->card_status != CARD_AWAITING_PARAM)
+	{
+	  err = -EBUSY;
+	  break;
+	}
+
+	/* if(wrq->u.rts.fixed == 0) we should complain */
+#if WIRELESS_EXT > 8
+	if(wrq->u.rts.disabled)
+	    rthr = 32767;
+	else
+#endif /* WIRELESS_EXT > 8 */
+	    if((rthr < 0) || (rthr > 2347)) /* What's the max packet size ??? */
+	    {
+		err = -EINVAL;
+		break;
+	    }
+	local->sparm.b5.a_rts_threshold[0] = (rthr >> 8) & 0xFF;
+	local->sparm.b5.a_rts_threshold[1] = rthr & 0xFF;
+    }
+    break;
+
       /* Get the current fragmentation threshold */
     case SIOCGIWFRAG:
       wrq->u.frag.value = (local->sparm.b5.a_frag_threshold[0] << 8)
@@ -1311,6 +1437,35 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 #endif /* WIRELESS_EXT > 8 */
       wrq->u.frag.fixed = 1;
       break;
+
+      /* Set the desired fragmentation threshold */
+    case SIOCSIWFRAG:
+    {
+	int fthr = wrq->u.frag.value;
+
+      /* Reject if card is already initialised */
+      if(local->card_status != CARD_AWAITING_PARAM)
+	{
+	  err = -EBUSY;
+	  break;
+	}
+
+	/* if(wrq->u.frag.fixed == 0) should complain */
+#if WIRELESS_EXT > 8
+	if(wrq->u.frag.disabled)
+	    fthr = 32767;
+	else
+#endif /* WIRELESS_EXT > 8 */
+	    if((fthr < 256) || (fthr > 2347)) /* To check out ! */
+	    {
+		err = -EINVAL;
+		break;
+	    }
+	local->sparm.b5.a_frag_threshold[0] = (fthr >> 8) & 0xFF;
+	local->sparm.b5.a_frag_threshold[1] = fthr & 0xFF;
+    }
+    break;
+
 #endif	/* WIRELESS_EXT > 7 */
 #if WIRELESS_EXT > 8
 
@@ -1321,6 +1476,33 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
       else
 	wrq->u.mode = IW_MODE_ADHOC;
       break;
+
+      /* Set the current mode of operation */
+    case SIOCSIWMODE:
+    {
+	char card_mode = 1;
+	
+      /* Reject if card is already initialised */
+      if(local->card_status != CARD_AWAITING_PARAM)
+	{
+	  err = -EBUSY;
+	  break;
+	}
+
+	switch (wrq->u.mode)
+	{
+	case IW_MODE_ADHOC:
+	    card_mode = 0;
+	    // Fall through
+	case IW_MODE_INFRA:
+	    local->sparm.b5.a_network_type = card_mode;
+	    break;
+	default:
+	    err = -EINVAL;
+	}
+    }
+    break;
+
 #endif /* WIRELESS_EXT > 8 */
 #if WIRELESS_EXT > 7
       /* ------------------ IWSPY SUPPORT ------------------ */
@@ -1332,8 +1514,14 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	  struct iw_range	range;
 	  memset((char *) &range, 0, sizeof(struct iw_range));
 
-	  /* Set the length (useless : its constant...) */
+	  /* Set the length (very important for backward compatibility) */
 	  wrq->u.data.length = sizeof(struct iw_range);
+
+#if WIRELESS_EXT > 10
+	  /* Set the Wireless Extension versions */
+	  range.we_version_compiled = WIRELESS_EXT;
+	  range.we_version_source = 9;
+#endif /* WIRELESS_EXT > 10 */
 
 	  /* Set information in the range struct */
 	  range.throughput = 1.1 * 1000 * 1000;	/* Put the right number here */
@@ -1443,9 +1631,12 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 #endif	/* WIRELESS_SPY */
 
       /* ------------------ PRIVATE IOCTL ------------------ */
-#define SIOCSIPFRAMING	SIOCDEVPRIVATE		/* Set framing mode */
-#define SIOCGIPFRAMING	SIOCDEVPRIVATE + 1	/* Get framing mode */
-#define SIOCGIPCOUNTRY	SIOCDEVPRIVATE + 3	/* Get country code */
+#ifndef SIOCIWFIRSTPRIV
+#define SIOCIWFIRSTPRIV	SIOCDEVPRIVATE
+#endif /* SIOCIWFIRSTPRIV */
+#define SIOCSIPFRAMING	SIOCIWFIRSTPRIV		/* Set framing mode */
+#define SIOCGIPFRAMING	SIOCIWFIRSTPRIV + 1	/* Get framing mode */
+#define SIOCGIPCOUNTRY	SIOCIWFIRSTPRIV + 3	/* Get country code */
     case SIOCSIPFRAMING:
       if(!capable(CAP_NET_ADMIN))	/* For private IOCTLs, we need to check permissions */
 	{
@@ -1538,6 +1729,21 @@ static int ray_open(struct net_device *dev)
     if (link->open == 0) local->num_multi = 0;
     link->open++;
 
+    /* If the card is not started, time to start it ! - Jean II */
+    if(local->card_status == CARD_AWAITING_PARAM) {
+	int i;
+
+	DEBUG(1,"ray_open: doing init now !\n");
+
+	/* Download startup parameters */
+	if ( (i = dl_startup_params(dev)) < 0)
+	  {
+	    printk(KERN_INFO "ray_dev_init dl_startup_params failed - "
+		   "returns 0x%x\n",i);
+	    return -1;
+	  }
+     }
+
     if (sniffer) netif_stop_queue(dev);
     else         netif_start_queue(dev);
 
@@ -1560,6 +1766,11 @@ static int ray_dev_close(struct net_device *dev)
     netif_stop_queue(dev);
     if (link->state & DEV_STALE_CONFIG)
 	mod_timer(&link->release, jiffies + HZ/20);
+
+    /* In here, we should stop the hardware (stop card from beeing active)
+     * and set local->card_status to CARD_AWAITING_PARAM, so that while the
+     * card is closed we can chage its configuration.
+     * Probably also need a COR reset to get sane state - Jean II */
 
     MOD_DEC_USE_COUNT;
 
@@ -2219,9 +2430,9 @@ static void rx_data(struct net_device *dev, struct rcs *prcs, unsigned int pkt_a
 
     skb->protocol = eth_type_trans(skb,dev);
     netif_rx(skb);
-
+    dev->last_rx = jiffies;
     local->stats.rx_packets++;
-    local->stats.rx_bytes += skb->len;
+    local->stats.rx_bytes += total_len;
 
     /* Gather signal strength per address */
 #ifdef WIRELESS_SPY

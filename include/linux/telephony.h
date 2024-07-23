@@ -4,7 +4,7 @@
  *
  *		Basic Linux Telephony Interface
  *
- *		(c) Copyright 1999 Quicknet Technologies, Inc.
+ *		(c) Copyright 1999-2001 Quicknet Technologies, Inc.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -17,14 +17,27 @@
  *    Contributors:  Alan Cox, <alan@redhat.com>
  *                   David W. Erhart, <derhart@quicknet.net>
  *
- * Version:       0.1.0 - December 19, 1999
+ * IN NO EVENT SHALL QUICKNET TECHNOLOGIES, INC. BE LIABLE TO ANY PARTY FOR
+ * DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES ARISING OUT
+ * OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF QUICKNET
+ * TECHNOLOGIES, INC. HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * Fixes:
- * 
+ * QUICKNET TECHNOLOGIES, INC. SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+ * AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ * ON AN "AS IS" BASIS, AND QUICKNET TECHNOLOGIES, INC. HAS NO OBLIGATION
+ * TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+ *
+ * Version:       $Revision: 4.2 $
+ *
+ * $Id: telephony.h,v 4.2 2001/08/06 07:09:43 craigs Exp $
+ *
  *****************************************************************************/
 
 #ifndef TELEPHONY_H
 #define TELEPHONY_H
+
+#define TELEPHONY_VERSION 3013
 
 #define PHONE_VENDOR_IXJ          1
 #define PHONE_VENDOR_QUICKNET	  PHONE_VENDOR_IXJ
@@ -43,6 +56,11 @@
  *  the telephony products they support under Linux)
  *
  *****************************************************************************/
+#define QTI_PHONEJACK		100
+#define QTI_LINEJACK		300
+#define QTI_PHONEJACK_LITE	400
+#define QTI_PHONEJACK_PCI	500
+#define QTI_PHONECARD		600
 
 /******************************************************************************
 *
@@ -91,12 +109,12 @@ typedef struct {
         int namelen;
         char name[80];
 } PHONE_CID;
-
+ 
 #define PHONE_RING			_IO  ('q', 0x83)
 #define PHONE_HOOKSTATE			_IO  ('q', 0x84)
 #define PHONE_MAXRINGS			_IOW ('q', 0x85, char)
 #define PHONE_RING_CADENCE		_IOW ('q', 0x86, short)
-#define OLD_PHONE_RING_START		_IO  ('q', 0x87)
+#define OLD_PHONE_RING_START            _IO  ('q', 0x87)
 #define PHONE_RING_START		_IOW ('q', 0x87, PHONE_CID *)
 #define PHONE_RING_STOP			_IO  ('q', 0x88)
 
@@ -108,6 +126,7 @@ typedef struct {
 #define PHONE_REC_DEPTH			_IOW ('q', 0x8C, int)
 #define PHONE_FRAME			_IOW ('q', 0x8D, int)
 #define PHONE_REC_VOLUME		_IOW ('q', 0x8E, int)
+#define PHONE_REC_VOLUME_LINEAR		_IOW ('q', 0xDB, int)
 #define PHONE_REC_LEVEL			_IO  ('q', 0x8F)
 
 #define PHONE_PLAY_CODEC		_IOW ('q', 0x90, int)
@@ -115,6 +134,7 @@ typedef struct {
 #define PHONE_PLAY_STOP			_IO  ('q', 0x92)
 #define PHONE_PLAY_DEPTH		_IOW ('q', 0x93, int)
 #define PHONE_PLAY_VOLUME		_IOW ('q', 0x94, int)
+#define PHONE_PLAY_VOLUME_LINEAR	_IOW ('q', 0xDC, int)
 #define PHONE_PLAY_LEVEL		_IO  ('q', 0x95)
 #define PHONE_DTMF_READY		_IOR ('q', 0x96, int)
 #define PHONE_GET_DTMF			_IOR ('q', 0x97, int)
@@ -148,7 +168,7 @@ typedef struct {
 * 
 ******************************************************************************/
 #define PHONE_WINK_DURATION		_IOW ('q', 0xA6, int)
-
+#define PHONE_WINK			_IOW ('q', 0xAA, int)
 
 /******************************************************************************
 * 
@@ -167,17 +187,18 @@ typedef enum {
 	ALAW = 9,
 	LINEAR16 = 10,
 	LINEAR8 = 11,
-	WSS = 12
+	WSS = 12,
+	G729B = 13
 } phone_codec;
 
 struct phone_codec_data
 {
-	phone_codec type;
-	unsigned short buf_min, buf_opt, buf_max;
+        phone_codec type;
+        unsigned short buf_min, buf_opt, buf_max;
 };
 
-#define PHONE_QUERY_CODEC		_IOWR ('q', 0xA7, struct phone_codec_data *)
-#define PHONE_PSTN_LINETEST		_IO ('q', 0xA8)
+#define PHONE_QUERY_CODEC               _IOWR ('q', 0xA7, struct phone_codec_data *)
+#define PHONE_PSTN_LINETEST             _IO ('q', 0xA8)
 
 /******************************************************************************
 * 
@@ -241,4 +262,5 @@ union telephony_exception {
 };
 
 
-#endif				/* TELEPHONY_H */
+#endif		/* TELEPHONY_H */
+

@@ -9,7 +9,7 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
- *		Donald J. Becker, <becker@super.org>
+ *		Donald J. Becker, <becker@scyld.com>
  *
  * Changelog:
  *		Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 09/1999
@@ -83,9 +83,9 @@ extern int sonic_probe(struct net_device *);
 extern int SK_init(struct net_device *);
 extern int seeq8005_probe(struct net_device *);
 extern int smc_init( struct net_device * );
-extern int sgiseeq_probe(struct net_device *);
 extern int atarilance_probe(struct net_device *);
 extern int sun3lance_probe(struct net_device *);
+extern int sun3_82586_probe(struct net_device *);
 extern int apne_probe(struct net_device *);
 extern int bionet_probe(struct net_device *);
 extern int pamsnet_probe(struct net_device *);
@@ -96,21 +96,17 @@ extern int bagetlance_probe(struct net_device *);
 extern int mvme147lance_probe(struct net_device *dev);
 extern int tc515_probe(struct net_device *dev);
 extern int lance_probe(struct net_device *dev);
-extern int mace68k_probe(struct net_device *dev);
+extern int mace_probe(struct net_device *dev);
 extern int macsonic_probe(struct net_device *dev);
 extern int mac8390_probe(struct net_device *dev);
 extern int mac89x0_probe(struct net_device *dev);
 extern int mc32_probe(struct net_device *dev);
   
-/* Gigabit Ethernet adapters */
-extern int yellowfin_probe(struct net_device *dev);
-
 /* Detachable devices ("pocket adaptors") */
 extern int de600_probe(struct net_device *);
 extern int de620_probe(struct net_device *);
 
 /* FDDI adapters */
-extern int apfddi_init(struct net_device *dev);
 extern int skfp_probe(struct net_device *dev);
 
 /* Fibre Channel adapters */
@@ -170,7 +166,7 @@ static int __init probe_list(struct net_device *dev, struct devprobe *plist)
  * drivers that probe for EISA cards (in the ISA group).  These are the
  * EISA only driver probes, and also the legacy PCI probes
  */
-struct devprobe eisa_probes[] __initdata = {
+static struct devprobe eisa_probes[] __initdata = {
 #ifdef CONFIG_DE4X5             /* DEC DE425, DE434, DE435 adapters */
 	{de4x5_probe, 0},
 #endif
@@ -193,7 +189,7 @@ struct devprobe eisa_probes[] __initdata = {
 };
 
 
-struct devprobe mca_probes[] __initdata = {
+static struct devprobe mca_probes[] __initdata = {
 #ifdef CONFIG_ULTRAMCA 
 	{ultramca_probe, 0},
 #endif
@@ -216,7 +212,7 @@ struct devprobe mca_probes[] __initdata = {
  * ISA probes that touch addresses < 0x400 (including those that also
  * look for EISA/PCI/MCA cards in addition to ISA cards).
  */
-struct devprobe isa_probes[] __initdata = {
+static struct devprobe isa_probes[] __initdata = {
 #ifdef CONFIG_EL3		/* ISA, EISA, MCA 3c5x9 */
 	{el3_probe, 0},
 #endif
@@ -319,7 +315,7 @@ struct devprobe isa_probes[] __initdata = {
 	{NULL, 0},
 };
 
-struct devprobe parport_probes[] __initdata = {
+static struct devprobe parport_probes[] __initdata = {
 #ifdef CONFIG_DE600		/* D-Link DE-600 adapter */
 	{de600_probe, 0},
 #endif
@@ -329,12 +325,15 @@ struct devprobe parport_probes[] __initdata = {
 	{NULL, 0},
 };
 
-struct devprobe m68k_probes[] __initdata = {
+static struct devprobe m68k_probes[] __initdata = {
 #ifdef CONFIG_ATARILANCE	/* Lance-based Atari ethernet boards */
 	{atarilance_probe, 0},
 #endif
 #ifdef CONFIG_SUN3LANCE         /* sun3 onboard Lance chip */
 	{sun3lance_probe, 0},
+#endif
+#ifdef CONFIG_SUN3_82586        /* sun3 onboard Intel 82586 chip */
+	{sun3_82586_probe, 0},
 #endif
 #ifdef CONFIG_APNE		/* A1200 PCMCIA NE2000 */
 	{apne_probe, 0},
@@ -352,7 +351,7 @@ struct devprobe m68k_probes[] __initdata = {
 	{mvme147lance_probe, 0},
 #endif
 #ifdef CONFIG_MACMACE		/* Mac 68k Quadra AV builtin Ethernet */
-	{mace68k_probe, 0},
+	{mace_probe, 0},
 #endif
 #ifdef CONFIG_MACSONIC		/* Mac SONIC-based Ethernet of all sorts */ 
 	{macsonic_probe, 0},
@@ -366,15 +365,7 @@ struct devprobe m68k_probes[] __initdata = {
 	{NULL, 0},
 };
 
-
-struct devprobe sgi_probes[] __initdata = {
-#ifdef CONFIG_SGISEEQ
-	{sgiseeq_probe, 0},
-#endif
-	{NULL, 0},
-};
-
-struct devprobe mips_probes[] __initdata = {
+static struct devprobe mips_probes[] __initdata = {
 #ifdef CONFIG_MIPS_JAZZ_SONIC
 	{sonic_probe, 0},
 #endif
@@ -407,8 +398,6 @@ static int __init ethif_probe(struct net_device *dev)
 	if (probe_list(dev, m68k_probes) == 0)
 		return 0;
 	if (probe_list(dev, mips_probes) == 0)
-		return 0;
-	if (probe_list(dev, sgi_probes) == 0)
 		return 0;
 	if (probe_list(dev, eisa_probes) == 0)
 		return 0;
@@ -544,7 +533,6 @@ static struct net_device eth0_dev = {
 #ifdef CONFIG_TR
 /* Token-ring device probe */
 extern int ibmtr_probe(struct net_device *);
-extern int olympic_probe(struct net_device *);
 extern int smctr_probe(struct net_device *);
 
 static int
@@ -553,9 +541,6 @@ trif_probe(struct net_device *dev)
     if (1
 #ifdef CONFIG_IBMTR
 	&& ibmtr_probe(dev)
-#endif
-#ifdef CONFIG_IBMOL
-	&& olympic_probe(dev)
 #endif
 #ifdef CONFIG_SMCTR
 	&& smctr_probe(dev)
@@ -640,47 +625,6 @@ static struct net_device tr0_dev = {
 #define	NEXT_DEV	(&sbni0_dev)
 #endif 
 	
-/* S/390 channels */
-#ifdef CONFIG_CTC
-    extern int ctc_probe(struct net_device *dev);
-    static struct net_device ctc7_dev =
-       {"ctc7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV,  ctc_probe};
-    static struct net_device ctc6_dev =
-       {"ctc6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc7_dev, ctc_probe};
-    static struct net_device ctc5_dev =
-       {"ctc5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc6_dev, ctc_probe};
-    static struct net_device ctc4_dev =
-       {"ctc4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc5_dev, ctc_probe};
-    static struct net_device ctc3_dev =
-       {"ctc3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc4_dev, ctc_probe};
-    static struct net_device ctc2_dev =
-       {"ctc2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc3_dev, ctc_probe};
-    static struct net_device ctc1_dev =
-       {"ctc1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc2_dev, ctc_probe};
-    static struct net_device ctc0_dev =
-       {"ctc0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc1_dev, ctc_probe}; 
-
-    static struct net_device escon7_dev =
-       {"escon7", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc0_dev,   ctc_probe};
-    static struct net_device escon6_dev =
-       {"escon6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon7_dev, ctc_probe};
-    static struct net_device escon5_dev =
-       {"escon5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon6_dev, ctc_probe};
-    static struct net_device escon4_dev =
-       {"escon4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon5_dev, ctc_probe};
-    static struct net_device escon3_dev =
-       {"escon3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon4_dev, ctc_probe};
-    static struct net_device escon2_dev =
-       {"escon2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon3_dev, ctc_probe};
-    static struct net_device escon1_dev =
-       {"escon1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon2_dev, ctc_probe};
-    static struct net_device escon0_dev =
-       {"escon0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon1_dev, ctc_probe}; 
-
-#undef  NEXT_DEV
-#define NEXT_DEV        (&escon0_dev)                                  
-#endif  
-
 /*
  *	The loopback device is global so it can be directly referenced
  *	by the network code. Also, it must be first on device list.

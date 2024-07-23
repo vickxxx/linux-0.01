@@ -15,7 +15,7 @@
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/uaccess.h>
@@ -96,11 +96,7 @@ static inline int inword(const unsigned char c) {
 /* set inwordLut contents. Invoked by ioctl(). */
 int sel_loadlut(const unsigned long arg)
 {
-	int err = -EFAULT;
-
-	if (!copy_from_user(inwordLut, (u32 *)(arg+4), 32))
-		err = 0;
-	return err;
+	return copy_from_user(inwordLut, (u32 *)(arg+4), 32) ? -EFAULT : 0;
 }
 
 /* does screen address p correspond to character at LH/RH edge of screen? */
@@ -130,15 +126,13 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 
 	  args = (unsigned short *)(arg + 1);
 	  if (user) {
-	  	  int err;
-		  err = verify_area(VERIFY_READ, args, sizeof(short) * 5);
-		  if (err)
-		  	return err;
-		  get_user(xs, args++);
-		  get_user(ys, args++);
-		  get_user(xe, args++);
-		  get_user(ye, args++);
-		  get_user(sel_mode, args);
+		  if (verify_area(VERIFY_READ, args, sizeof(short) * 5))
+		  	return -EFAULT;
+		  __get_user(xs, args++);
+		  __get_user(ys, args++);
+		  __get_user(xe, args++);
+		  __get_user(ye, args++);
+		  __get_user(sel_mode, args);
 	  } else {
 		  xs = *(args++); /* set selection from kernel */
 		  ys = *(args++);
@@ -296,9 +290,11 @@ int paste_selection(struct tty_struct *tty)
 {
 	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
 	int	pasted = 0, count;
+	struct  tty_ldisc *ld;
 	DECLARE_WAITQUEUE(wait, current);
 
 	poke_blanked_console();
+	ld = tty_ldisc_ref_wait(tty);
 	add_wait_queue(&vt->paste_wait, &wait);
 	while (sel_buffer && sel_buffer_lth > pasted) {
 		set_current_state(TASK_INTERRUPTIBLE);
@@ -307,12 +303,14 @@ int paste_selection(struct tty_struct *tty)
 			continue;
 		}
 		count = sel_buffer_lth - pasted;
-		count = MIN(count, tty->ldisc.receive_room(tty));
-		tty->ldisc.receive_buf(tty, sel_buffer + pasted, 0, count);
+		count = MIN(count, ld->receive_room(tty));
+		ld->receive_buf(tty, sel_buffer + pasted, 0, count);
 		pasted += count;
 	}
 	remove_wait_queue(&vt->paste_wait, &wait);
 	current->state = TASK_RUNNING;
+
+	tty_ldisc_deref(ld);
 	return 0;
 }
 

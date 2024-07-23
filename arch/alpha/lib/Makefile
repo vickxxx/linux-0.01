@@ -21,6 +21,7 @@ ifeq ($(CONFIG_ALPHA_EV67),y)
 endif
 
 OBJS =	__divqu.o __remqu.o __divlu.o __remlu.o \
+	udelay.o \
 	$(ev6)memset.o \
 	$(ev6)memcpy.o \
 	memmove.o \
@@ -42,9 +43,15 @@ OBJS =	__divqu.o __remqu.o __divlu.o __remlu.o \
 	$(ev6)strncpy_from_user.o \
 	$(ev67)strlen_user.o \
 	$(ev6)csum_ipv6_magic.o \
+	$(ev6)clear_page.o \
+	$(ev6)copy_page.o \
 	strcasecmp.o \
 	fpreg.o \
 	callback_srm.o srm_puts.o srm_printk.o
+
+ifeq ($(CONFIG_SMP),y)
+  OBJS += dec_and_lock.o
+endif
 
 lib.a: $(OBJS)
 	$(AR) rcs lib.a $(OBJS)

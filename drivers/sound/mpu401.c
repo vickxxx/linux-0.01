@@ -14,6 +14,8 @@
  * Thomas Sailer	ioctl code reworked (vmalloc/vfree removed)
  * Alan Cox		modularisation, use normal request_irq, use dev_id
  * Bartlomiej Zolnierkiewicz	removed some __init to allow using many drivers
+ * Chris Rankin		Update the module-usage counter for the coprocessor
+ * Zwane Mwaikambo	Changed attach/unload resource freeing
  */
 
 #include <linux/module.h>
@@ -73,7 +75,10 @@ struct mpu_config
 #define	COMDPORT(base)   (base+1)
 #define	STATPORT(base)   (base+1)
 
-static int mpu401_status(struct mpu_config *devc)
+
+static void mpu401_close(int dev);
+
+static inline int mpu401_status(struct mpu_config *devc)
 {
 	return inb(STATPORT(devc->base));
 }
@@ -81,17 +86,17 @@ static int mpu401_status(struct mpu_config *devc)
 #define input_avail(devc)		(!(mpu401_status(devc)&INPUT_AVAIL))
 #define output_ready(devc)		(!(mpu401_status(devc)&OUTPUT_READY))
 
-static void write_command(struct mpu_config *devc, unsigned char cmd)
+static inline void write_command(struct mpu_config *devc, unsigned char cmd)
 {
 	outb(cmd, COMDPORT(devc->base));
 }
 
-static int read_data(struct mpu_config *devc)
+static inline int read_data(struct mpu_config *devc)
 {
 	return inb(DATAPORT(devc->base));
 }
 
-static void write_data(struct mpu_config *devc, unsigned char byte)
+static inline void write_data(struct mpu_config *devc, unsigned char byte)
 {
 	outb(byte, DATAPORT(devc->base));
 }
@@ -465,6 +470,7 @@ static int mpu401_open(int dev, int mode,
 {
 	int err;
 	struct mpu_config *devc;
+	struct coproc_operations *coprocessor;
 
 	if (dev < 0 || dev >= num_midis || midi_devs[dev] == NULL)
 		return -ENXIO;
@@ -490,12 +496,15 @@ static int mpu401_open(int dev, int mode,
 		reset_mpu401(devc);
 	}
 
-	if (midi_devs[dev]->coproc)
+	if ( (coprocessor = midi_devs[dev]->coproc) != NULL )
 	{
-		if ((err = midi_devs[dev]->coproc->
-		     open(midi_devs[dev]->coproc->devc, COPR_MIDI)) < 0)
+		if (coprocessor->owner)
+			__MOD_INC_USE_COUNT(coprocessor->owner);
+
+		if ((err = coprocessor->open(coprocessor->devc, COPR_MIDI)) < 0)
 		{
-			printk("MPU-401: Can't access coprocessor device\n");
+			printk(KERN_WARNING "MPU-401: Can't access coprocessor device\n");
+			mpu401_close(dev);
 			return err;
 		}
 	}
@@ -515,6 +524,7 @@ static int mpu401_open(int dev, int mode,
 static void mpu401_close(int dev)
 {
 	struct mpu_config *devc;
+	struct coproc_operations *coprocessor;
 
 	devc = &dev_conf[dev];
 	if (devc->uart_mode)
@@ -524,8 +534,13 @@ static void mpu401_close(int dev)
 	devc->mode = 0;
 	devc->inputintr = NULL;
 
-	if (midi_devs[dev]->coproc)
-		midi_devs[dev]->coproc->close(midi_devs[dev]->coproc->devc, COPR_MIDI);
+	coprocessor = midi_devs[dev]->coproc;
+	if (coprocessor) {
+		coprocessor->close(coprocessor->devc, COPR_MIDI);
+
+		if (coprocessor->owner)
+			__MOD_DEC_USE_COUNT(coprocessor->owner);
+	}
 	devc->opened = 0;
 }
 
@@ -776,7 +791,8 @@ static int mpu_synth_ioctl(int dev,
 	{
 
 		case SNDCTL_SYNTH_INFO:
-			memcpy((&((char *) arg)[0]), (char *) &mpu_synth_info[midi_dev], sizeof(struct synth_info));
+			if(copy_to_user((&((char *) arg)[0]), (char *) &mpu_synth_info[midi_dev], sizeof(struct synth_info)))
+				return -EFAULT;
 			return 0;
 
 		case SNDCTL_SYNTH_MEMAVL:
@@ -791,6 +807,7 @@ static int mpu_synth_open(int dev, int mode)
 {
 	int midi_dev, err;
 	struct mpu_config *devc;
+	struct coproc_operations *coprocessor;
 
 	midi_dev = synth_devs[dev]->midi_dev;
 
@@ -822,13 +839,17 @@ static int mpu_synth_open(int dev, int mode)
 
 	devc->inputintr = NULL;
 
-	if (midi_devs[midi_dev]->coproc)
-		if ((err = midi_devs[midi_dev]->coproc->
-		 open(midi_devs[midi_dev]->coproc->devc, COPR_MIDI)) < 0)
+	coprocessor = midi_devs[midi_dev]->coproc;
+	if (coprocessor) {
+		if (coprocessor->owner)
+			__MOD_INC_USE_COUNT(coprocessor->owner);
+
+		if ((err = coprocessor->open(coprocessor->devc, COPR_MIDI)) < 0)
 		{
 			printk(KERN_WARNING "mpu401: Can't access coprocessor device\n");
 			return err;
 		}
+	}
 	devc->opened = mode;
 	reset_mpu401(devc);
 
@@ -845,6 +866,7 @@ static void mpu_synth_close(int dev)
 { 
 	int midi_dev;
 	struct mpu_config *devc;
+	struct coproc_operations *coprocessor;
 
 	midi_dev = synth_devs[dev]->midi_dev;
 
@@ -854,8 +876,13 @@ static void mpu_synth_close(int dev)
 
 	devc->inputintr = NULL;
 
-	if (midi_devs[midi_dev]->coproc)
-		midi_devs[midi_dev]->coproc->close(midi_devs[midi_dev]->coproc->devc, COPR_MIDI);
+	coprocessor = midi_devs[midi_dev]->coproc;
+	if (coprocessor) {
+		coprocessor->close(coprocessor->devc, COPR_MIDI);
+
+		if (coprocessor->owner)
+			__MOD_DEC_USE_COUNT(coprocessor->owner);
+	}
 	devc->opened = 0;
 	devc->mode = 0;
 }
@@ -940,12 +967,12 @@ static void mpu401_chk_version(int n, struct mpu_config *devc)
 	restore_flags(flags);
 }
 
-void attach_mpu401(struct address_info *hw_config, struct module *owner)
+int attach_mpu401(struct address_info *hw_config, struct module *owner)
 {
 	unsigned long flags;
 	char revision_char;
 
-	int m;
+	int m, ret;
 	struct mpu_config *devc;
 
 	hw_config->slots[1] = -1;
@@ -953,7 +980,8 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 	if (m == -1)
 	{
 		printk(KERN_WARNING "MPU-401: Too many midi devices detected\n");
-		return;
+		ret = -ENOMEM;
+		goto out_err;
 	}
 	devc = &dev_conf[m];
 	devc->base = hw_config->io_base;
@@ -983,16 +1011,16 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 		if (!reset_mpu401(devc))
 		{
 			printk(KERN_WARNING "mpu401: Device didn't respond\n");
-			sound_unload_mididev(m);
-			return;
+			ret = -ENODEV;
+			goto out_mididev;
 		}
 		if (!devc->shared_irq)
 		{
 			if (request_irq(devc->irq, mpuintr, 0, "mpu401", (void *)m) < 0)
 			{
 				printk(KERN_WARNING "mpu401: Failed to allocate IRQ%d\n", devc->irq);
-				sound_unload_mididev(m);
-				return;
+				ret = -ENOMEM;
+				goto out_mididev;
 			}
 		}
 		save_flags(flags);
@@ -1002,7 +1030,12 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 			mpu401_chk_version(m, devc);
 		restore_flags(flags);
 	}
-	request_region(hw_config->io_base, 2, "mpu401");
+
+	if (!request_region(hw_config->io_base, 2, "mpu401"))
+	{
+		ret = -ENOMEM;
+		goto out_irq;
+	}	
 
 	if (devc->version != 0)
 		if (mpu_cmd(m, 0xC5, 0) >= 0)	/* Set timebase OK */
@@ -1014,9 +1047,9 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 
 	if (mpu401_synth_operations[m] == NULL)
 	{
-		sound_unload_mididev(m);
 		printk(KERN_ERR "mpu401: Can't allocate memory\n");
-		return;
+		ret = -ENOMEM;
+		goto out_resource;
 	}
 	if (!(devc->capabilities & MPU_CAP_INTLG))	/* No intelligent mode */
 	{
@@ -1030,6 +1063,8 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 			(char *) &mpu401_synth_proto,
 			 sizeof(struct synth_operations));
 	}
+	if (owner)
+		mpu401_synth_operations[m]->owner = owner;
 
 	memcpy((char *) &mpu401_midi_operations[m],
 	       (char *) &mpu401_midi_proto,
@@ -1093,6 +1128,17 @@ void attach_mpu401(struct address_info *hw_config, struct module *owner)
 
 	hw_config->slots[1] = m;
 	sequencer_init();
+	
+	return 0;
+
+out_resource:
+	release_region(hw_config->io_base, 2);
+out_irq:
+	free_irq(devc->irq, (void *)m);
+out_mididev:
+	sound_unload_mididev(m);
+out_err:
+	return ret;
 }
 
 static int reset_mpu401(struct mpu_config *devc)
@@ -1200,19 +1246,21 @@ int probe_mpu401(struct address_info *hw_config)
 	return ok;
 }
 
-void __exit unload_mpu401(struct address_info *hw_config)
+void unload_mpu401(struct address_info *hw_config)
 {
 	void *p;
 	int n=hw_config->slots[1];
-	
-	release_region(hw_config->io_base, 2);
-	if (hw_config->always_detect == 0 && hw_config->irq > 0)
-		free_irq(hw_config->irq, (void *)n);
-	p=mpu401_synth_operations[n];
-	sound_unload_mididev(n);
-	sound_unload_timerdev(hw_config->slots[2]);
-	if(p)
-		kfree(p);
+		
+	if (n != -1) {
+		release_region(hw_config->io_base, 2);
+		if (hw_config->always_detect == 0 && hw_config->irq > 0)
+			free_irq(hw_config->irq, (void *)n);
+		p=mpu401_synth_operations[n];
+		sound_unload_mididev(n);
+		sound_unload_timerdev(hw_config->slots[2]);
+		if(p)
+			kfree(p);
+	}
 }
 
 /*****************************************************
@@ -1465,14 +1513,16 @@ static unsigned long mpu_timer_get_time(int dev)
 static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 {
 	int midi_dev = sound_timer_devs[dev]->devlink;
+	int *p = (int *)arg;
 
 	switch (command)
 	{
 		case SNDCTL_TMR_SOURCE:
 			{
 				int parm;
-	
-				parm = *(int *) arg;
+
+				if (get_user(parm, p))
+					return -EFAULT;
 				parm &= timer_caps;
 
 				if (parm != 0)
@@ -1484,7 +1534,9 @@ static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 					else if (timer_mode & TMR_MODE_SMPTE)
 						mpu_cmd(midi_dev, 0x3d, 0);		/* Use SMPTE sync */
 				}
-				return (*(int *) arg = timer_mode);
+				if (put_user(timer_mode, p))
+					return -EFAULT;
+				return timer_mode;
 			}
 			break;
 
@@ -1509,10 +1561,13 @@ static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 			{
 				int val;
 
-				val = *(int *) arg;
+				if (get_user(val, p))
+					return -EFAULT;
 				if (val)
 					set_timebase(midi_dev, val);
-				return (*(int *) arg = curr_timebase);
+				if (put_user(curr_timebase, p))
+					return -EFAULT;
+				return curr_timebase;
 			}
 			break;
 
@@ -1521,7 +1576,8 @@ static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 				int val;
 				int ret;
 
-				val = *(int *) arg;
+				if (get_user(val, p))
+					return -EFAULT;
 
 				if (val)
 				{
@@ -1536,7 +1592,9 @@ static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 					}
 					curr_tempo = val;
 				}
-				return (*(int *) arg = curr_tempo);
+				if (put_user(curr_tempo, p))
+					return -EFAULT;
+				return curr_tempo;
 			}
 			break;
 
@@ -1544,18 +1602,25 @@ static int mpu_timer_ioctl(int dev, unsigned int command, caddr_t arg)
 			{
 				int val;
 
-				val = *(int *) arg;
+				if (get_user(val, p))
+					return -EFAULT;
 				if (val != 0)		/* Can't change */
 					return -EINVAL;
-				return (*(int *) arg = ((curr_tempo * curr_timebase) + 30) / 60);
+				val = (curr_tempo * curr_timebase + 30) / 60;
+				if (put_user(val, p))
+					return -EFAULT;
+				return val;
 			}
 			break;
 
 		case SNDCTL_SEQ_GETTIME:
-			return (*(int *) arg = curr_ticks);
+			if (put_user(curr_ticks, p))
+				return -EFAULT;
+			return curr_ticks;
 
 		case SNDCTL_TMR_METRONOME:
-			metronome_mode = *(int *) arg;
+			if (get_user(metronome_mode, p))
+				return -EFAULT;
 			setup_metronome(midi_dev);
 			return 0;
 
@@ -1719,14 +1784,15 @@ EXPORT_SYMBOL(mpuintr);
 
 static struct address_info cfg;
 
-static int __initdata io = -1;
-static int __initdata irq = -1;
+static int io = -1;
+static int irq = -1;
 
 MODULE_PARM(irq, "i");
 MODULE_PARM(io, "i");
 
 int __init init_mpu401(void)
 {
+	int ret;
 	/* Can be loaded either for module use or to provide functions
 	   to others */
 	if (io != -1 && irq != -1) {
@@ -1734,7 +1800,8 @@ int __init init_mpu401(void)
 		cfg.io_base = io;
 		if (probe_mpu401(&cfg) == 0)
 			return -ENODEV;
-		attach_mpu401(&cfg, THIS_MODULE);
+		if ((ret = attach_mpu401(&cfg, THIS_MODULE)))
+			return ret;
 	}
 	
 	return 0;
@@ -1767,3 +1834,4 @@ static int __init setup_mpu401(char *str)
 
 __setup("mpu401=", setup_mpu401);
 #endif
+MODULE_LICENSE("GPL");

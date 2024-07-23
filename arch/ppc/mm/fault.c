@@ -1,7 +1,7 @@
 /*
  *  arch/ppc/mm/fault.c
  *
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  *  Derived from "arch/i386/mm/fault.c"
@@ -41,15 +41,51 @@ extern int (*debugger_dabr_match)(struct pt_regs *);
 int debugger_kernel_faults = 1;
 #endif
 
-unsigned long htab_reloads = 0; /* updated by head.S:hash_page() */
-unsigned long htab_evicts = 0;  /* updated by head.S:hash_page() */
-unsigned long pte_misses = 0; /* updated by do_page_fault() */
-unsigned long pte_errors = 0; /* updated by do_page_fault() */
-unsigned int probingmem = 0;
+unsigned long htab_reloads;	/* updated by hashtable.S:hash_page() */
+unsigned long htab_evicts; 	/* updated by hashtable.S:hash_page() */
+unsigned long htab_preloads;	/* updated by hashtable.S:add_hash_page() */
+unsigned long pte_misses;	/* updated by do_page_fault() */
+unsigned long pte_errors;	/* updated by do_page_fault() */
+unsigned int probingmem;
 
 extern void die_if_kernel(char *, struct pt_regs *, long);
-void bad_page_fault(struct pt_regs *, unsigned long);
+void bad_page_fault(struct pt_regs *, unsigned long, int sig);
 void do_page_fault(struct pt_regs *, unsigned long, unsigned long);
+
+/*
+ * Check whether the instruction at regs->nip is a store using
+ * an update addressing form which will update r1.
+ */
+static int store_updates_sp(struct pt_regs *regs)
+{
+	unsigned int inst;
+
+	if (get_user(inst, (unsigned int *)regs->nip))
+		return 0;
+	/* check for 1 in the rA field */
+	if (((inst >> 16) & 0x1f) != 1)
+		return 0;
+	/* check major opcode */
+	switch (inst >> 26) {
+	case 37:	/* stwu */
+	case 39:	/* stbu */
+	case 45:	/* sthu */
+	case 53:	/* stfsu */
+	case 55:	/* stfdu */
+		return 1;
+	case 31:
+		/* check minor opcode */
+		switch ((inst >> 1) & 0x3ff) {
+		case 183:	/* stwux */
+		case 247:	/* stbux */
+		case 439:	/* sthux */
+		case 695:	/* stfsux */
+		case 759:	/* stfdux */
+			return 1;
+		}
+	}
+	return 0;
+}
 
 /*
  * For 600- and 800-family processors, the error_code parameter is DSISR
@@ -64,7 +100,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 	struct mm_struct *mm = current->mm;
 	siginfo_t info;
 	int code = SEGV_MAPERR;
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_4xx) || defined (CONFIG_BOOKE)
 	int is_write = error_code & ESR_DST;
 #else
 	int is_write = 0;
@@ -79,14 +115,14 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 		error_code &= 0x48200000;
 	else
 		is_write = error_code & 0x02000000;
-#endif /* CONFIG_4xx */
+#endif /* CONFIG_4xx || CONFIG_BOOKE */
 
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	if (debugger_fault_handler && regs->trap == 0x300) {
 		debugger_fault_handler(regs);
 		return;
 	}
-#if !defined(CONFIG_4xx)
+#ifndef CONFIG_4xx 
 	if (error_code & 0x00400000) {
 		/* DABR match */
 		if (debugger_dabr_match(regs))
@@ -96,10 +132,10 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 #endif /* CONFIG_XMON || CONFIG_KGDB */
 
 	if (in_interrupt() || mm == NULL) {
-		bad_page_fault(regs, address);
+		bad_page_fault(regs, address, SIGSEGV);
 		return;
 	}
-	down(&mm->mmap_sem);
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -107,6 +143,40 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
+	if (!is_write)
+                goto bad_area;
+
+	/*
+	 * N.B. The rs6000/xcoff ABI allows programs to access up to
+	 * a few hundred bytes below the stack pointer.
+	 * The kernel signal delivery code writes up to about 1.5kB
+	 * below the stack pointer (r1) before decrementing it.
+	 * The exec code can write slightly over 640kB to the stack
+	 * before setting the user r1.  Thus we allow the stack to
+	 * expand to 1MB without further checks.
+	 */
+	if (address + 0x100000 < vma->vm_end) {
+		/* get user regs even if this fault is in kernel mode */
+		struct pt_regs *uregs = current->thread.regs;
+		if (uregs == NULL)
+			goto bad_area;
+
+		/*
+		 * A user-mode access to an address a long way below
+		 * the stack pointer is only valid if the instruction
+		 * is one which would update the stack pointer to the
+		 * address accessed if the instruction completed,
+		 * i.e. either stwu rs,n(r1) or stwux rs,r1,rb
+		 * (or the byte, halfword, float or double forms).
+		 *
+		 * If we don't check this then any write to the area
+		 * between the last mapped region and the stack will
+		 * expand the stack rather than segfaulting.
+		 */
+		if (address + 2048 < uregs->gpr[1]
+		    && (!user_mode(regs) || !store_updates_sp(regs)))
+			goto bad_area;
+	}
 	if (expand_stack(vma, address))
 		goto bad_area;
 
@@ -127,7 +197,7 @@ good_area:
                 /* Guarded storage error. */
 		goto bad_area;
 #endif /* CONFIG_8xx */
-	
+
 	/* a write */
 	if (is_write) {
 		if (!(vma->vm_flags & VM_WRITE))
@@ -146,6 +216,7 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+ survive:
         switch (handle_mm_fault(mm, vma, address, is_write)) {
         case 1:
                 current->min_flt++;
@@ -159,7 +230,7 @@ good_area:
                 goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	/*
 	 * keep track of tlb+htab misses that are good addrs but
 	 * just need pte's created via handle_mm_fault()
@@ -169,8 +240,8 @@ good_area:
 	return;
 
 bad_area:
-	up(&mm->mmap_sem);
-	pte_errors++;	
+	up_read(&mm->mmap_sem);
+	pte_errors++;
 
 	/* User mode accesses cause a SIGSEGV */
 	if (user_mode(regs)) {
@@ -182,7 +253,7 @@ bad_area:
 		return;
 	}
 
-	bad_page_fault(regs, address);
+	bad_page_fault(regs, address, SIGSEGV);
 	return;
 
 /*
@@ -190,22 +261,26 @@ bad_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	if (current->pid == 1) {
+		yield();
+		goto survive;
+	}
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
-	bad_page_fault(regs, address);
+	bad_page_fault(regs, address, SIGKILL);
 	return;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *)address;
 	force_sig_info (SIGBUS, &info, current);
 	if (!user_mode(regs))
-		bad_page_fault(regs, address);
+		bad_page_fault(regs, address, SIGBUS);
 }
 
 /*
@@ -214,8 +289,10 @@ do_sigbus:
  * in traps.c.
  */
 void
-bad_page_fault(struct pt_regs *regs, unsigned long address)
+bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 {
+	extern void die(const char *,struct pt_regs *,long);
+
 	unsigned long fixup;
 
 	/* Are we prepared to handle this fault?  */
@@ -225,14 +302,11 @@ bad_page_fault(struct pt_regs *regs, unsigned long address)
 	}
 
 	/* kernel has accessed a bad area */
-	show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	if (debugger_kernel_faults)
 		debugger(regs);
 #endif
-	print_backtrace( (unsigned long *)regs->gpr[1] );
-	panic("kernel access of bad area pc %lx lr %lx address %lX tsk %s/%d",
-	      regs->nip,regs->link,address,current->comm,current->pid);
+	die("kernel access of bad area", regs, sig);
 }
 
 #ifdef CONFIG_8xx
@@ -274,10 +348,10 @@ pte_t *va_to_pte(unsigned long address)
 unsigned long va_to_phys(unsigned long address)
 {
 	pte_t *pte;
-	
+
 	pte = va_to_pte(address);
 	if (pte)
-		return(((unsigned long)(pte_val(*pte)) & PAGE_MASK) | (address & ~(PAGE_MASK-1)));
+		return(((unsigned long)(pte_val(*pte)) & PAGE_MASK) | (address & ~(PAGE_MASK)));
 	return (0);
 }
 
@@ -297,7 +371,7 @@ print_8xx_pte(struct mm_struct *mm, unsigned long addr)
                         if (pte) {
                                 printk(" (0x%08lx)->(0x%08lx)->0x%08lx\n",
                                         (long)pgd, (long)pte, (long)pte_val(*pte));
-#define pp ((long)pte_val(*pte))				
+#define pp ((long)pte_val(*pte))
 				printk(" RPN: %05lx PP: %lx SPS: %lx SH: %lx "
 				       "CI: %lx v: %lx\n",
 				       pp>>12,    /* rpn */
@@ -307,7 +381,7 @@ print_8xx_pte(struct mm_struct *mm, unsigned long addr)
 				       (pp>>1)&1, /* cache inhibit */
 				       pp&1       /* valid */
 				       );
-#undef pp				
+#undef pp
                         }
                         else {
                                 printk("no pte\n");
@@ -343,34 +417,3 @@ get_8xx_pte(struct mm_struct *mm, unsigned long addr)
         return(retval);
 }
 #endif /* CONFIG_8xx */
-
-#if 0
-/*
- * Misc debugging functions.  Please leave them here. -- Cort
- */
-void print_pte(struct _PTE p)
-{
-	printk(
-"%08x %08x vsid: %06x h: %01x api: %02x rpn: %05x rcwimg: %d%d%d%d%d%d pp: %02x\n",
-		*((unsigned long *)(&p)), *((long *)&p+1),
-		p.vsid, p.h, p.api, p.rpn,
-		p.r,p.c,p.w,p.i,p.m,p.g,p.pp);
-}
-
-/*
- * Search the hw hash table for a mapping to the given physical
- * address. -- Cort
- */
-unsigned long htab_phys_to_va(unsigned long address)
-{
-	extern PTE *Hash, *Hash_end;
-	PTE *ptr;
-
-	for ( ptr = Hash ; ptr < Hash_end ; ptr++ )
-	{
-		if ( ptr->rpn == (address>>12) )
-			printk("phys %08lX -> va ???\n",
-			       address);
-	}
-}
-#endif

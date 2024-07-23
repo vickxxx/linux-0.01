@@ -1,8 +1,6 @@
 /*
  *    QuickCam Driver For Video4Linux.
  *
- *	This version only works as a module.
- *
  *	Video4Linux conversion work by Alan Cox.
  *	Parport compatibility by Phil Blundell.
  *	Busy loop avoidance by Mark Cooke.
@@ -70,7 +68,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/parport.h>
 #include <linux/sched.h>
@@ -83,33 +81,35 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 static unsigned int maxpoll=250;   /* Maximum busy-loop count for qcam I/O */
 static unsigned int yieldlines=4;  /* Yield after this many during capture */
+static int video_nr = -1;
 
 #if LINUX_VERSION_CODE >= 0x020117
 MODULE_PARM(maxpoll,"i");
 MODULE_PARM(yieldlines,"i");   
+MODULE_PARM(video_nr,"i");
 #endif
 
-extern __inline__ int read_lpstatus(struct qcam_device *q)
+static inline int read_lpstatus(struct qcam_device *q)
 {
 	return parport_read_status(q->pport);
 }
 
-extern __inline__ int read_lpcontrol(struct qcam_device *q)
+static inline int read_lpcontrol(struct qcam_device *q)
 {
 	return parport_read_control(q->pport);
 }
 
-extern __inline__ int read_lpdata(struct qcam_device *q)
+static inline int read_lpdata(struct qcam_device *q)
 {
 	return parport_read_data(q->pport);
 }
 
-extern __inline__ void write_lpdata(struct qcam_device *q, int d)
+static inline void write_lpdata(struct qcam_device *q, int d)
 {
 	parport_write_data(q->pport, d);
 }
 
-extern __inline__ void write_lpcontrol(struct qcam_device *q, int d)
+static inline void write_lpcontrol(struct qcam_device *q, int d)
 {
 	parport_write_control(q->pport, d);
 }
@@ -506,7 +506,7 @@ void qc_set(struct qcam_device *q)
    the supplied buffer.  It returns the number of bytes read,
    or -1 on error. */
 
-extern __inline__ int qc_readbytes(struct qcam_device *q, char buffer[])
+static inline int qc_readbytes(struct qcam_device *q, char buffer[])
 {
 	int ret=1;
 	unsigned int hi, lo;
@@ -696,13 +696,11 @@ long qc_capture(struct qcam_device * q, char *buf, unsigned long len)
 
 static int qcam_open(struct video_device *dev, int flags)
 {
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void qcam_close(struct video_device *dev)
 {
-	MOD_DEC_USE_COUNT;
 }
 
 static long qcam_write(struct video_device *v, const char *buf, unsigned long count, int noblock)
@@ -918,6 +916,7 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
  
 static struct video_device qcam_template=
 {
+	owner:		THIS_MODULE,
 	name:		"Connectix Quickcam",
 	type:		VID_TYPE_CAPTURE,
 	hardware:	VID_HARDWARE_QCAM_BW,
@@ -963,7 +962,7 @@ int init_bwqcam(struct parport *port)
 	
 	printk(KERN_INFO "Connectix Quickcam on %s\n", qcam->pport->name);
 	
-	if(video_register_device(&qcam->vdev, VFL_TYPE_GRABBER)==-1)
+	if(video_register_device(&qcam->vdev, VFL_TYPE_GRABBER, video_nr)==-1)
 	{
 		parport_unregister_device(qcam->pdev);
 		kfree(qcam);
@@ -990,11 +989,20 @@ static char *parport[MAX_CAMS] = { NULL, };
 MODULE_PARM(parport, "1-" __MODULE_STRING(MAX_CAMS) "s");
 #endif
 
-#ifdef MODULE
-int init_module(void)
+static void __exit exit_bw_qcams(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < num_cams; i++)
+		close_bwqcam(qcams[i]);
+}
+
+static int __init init_bw_qcams(void)
 {
 	struct parport *port;
+#ifdef MODULE
 	int n;
+	
 	if(parport[0] && strncmp(parport[0], "auto", 4)){
 		/* user gave parport parameters */
 		for(n=0; parport[n] && n<MAX_CAMS; n++){
@@ -1032,21 +1040,14 @@ int init_module(void)
 	}
 
 	return (num_cams)?0:-ENODEV;
-}
-
-void cleanup_module(void)
-{
-	unsigned int i;
-	for (i = 0; i < num_cams; i++)
-		close_bwqcam(qcams[i]);
-}
 #else
-int __init init_bw_qcams(struct video_init *unused)
-{
-	struct parport *port;
-
 	for (port = parport_enumerate(); port; port=port->next)
 		init_bwqcam(port);
 	return 0;
-}
 #endif
+}
+
+module_init(init_bw_qcams);
+module_exit(exit_bw_qcams);
+
+MODULE_LICENSE("GPL");

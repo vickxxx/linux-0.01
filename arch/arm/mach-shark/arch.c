@@ -1,10 +1,7 @@
 /*
  *  linux/arch/arm/mach-shark/arch.c
  *
- *  Architecture specific fixups.  This is where any
- *  parameters in the params struct are fixed up, or
- *  any additional architecture specific information
- *  is pulled from the params struct.
+ *  Architecture specific stuff.
  */
 #include <linux/tty.h>
 #include <linux/delay.h>
@@ -18,14 +15,13 @@
 
 #include <asm/mach/arch.h>
 
-extern void setup_initrd(unsigned int start, unsigned int size);
-extern void setup_ramdisk(int doload, int prompt, int start, unsigned int rd_sz);
-extern void __init footbridge_map_io(void);
-extern void __init shark_map_io(void);
+extern void shark_map_io(void);
+extern void genarch_init_irq(void);
 
 MACHINE_START(SHARK, "Shark")
 	MAINTAINER("Alexander Schulz")
 	BOOT_MEM(0x08000000, 0x40000000, 0xe0000000)
-	VIDEO(0x06000000, 0x061fffff)
+	BOOT_PARAMS(0x08003000)
 	MAPIO(shark_map_io)
+	INITIRQ(genarch_init_irq)
 MACHINE_END

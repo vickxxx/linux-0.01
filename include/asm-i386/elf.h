@@ -41,7 +41,7 @@ typedef struct user_fxsr_struct elf_fpxregset_t;
    We might as well make sure everything else is cleared too (except for %esp),
    just to make things more deterministic.
  */
-#define ELF_PLAT_INIT(_r)	do { \
+#define ELF_PLAT_INIT(_r, load_addr)	do { \
 	_r->ebx = 0; _r->ecx = 0; _r->edx = 0; \
 	_r->esi = 0; _r->edi = 0; _r->ebp = 0; \
 	_r->eax = 0; \
@@ -55,7 +55,7 @@ typedef struct user_fxsr_struct elf_fpxregset_t;
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
-#define ELF_ET_DYN_BASE         (2 * TASK_SIZE / 3)
+#define ELF_ET_DYN_BASE         (TASK_SIZE / 3 * 2)
 
 /* Wow, the "main" arch needs arch dependent functions too.. :) */
 

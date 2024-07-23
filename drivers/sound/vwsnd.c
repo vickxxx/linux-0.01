@@ -535,7 +535,7 @@ static int li_ad1843_wait(lithium_t *lith)
 {
 	unsigned long later = jiffies + 2;
 	while (li_readl(lith, LI_CODEC_COMMAND) & LI_CC_BUSY)
-		if (jiffies >= later)
+		if (time_after_eq(jiffies, later))
 			return -EBUSY;
 	return 0;
 }
@@ -1358,7 +1358,7 @@ static int __init ad1843_init(lithium_t *lith)
 	later = jiffies + HZ / 2;	/* roughly half a second */
 	DBGDO(shut_up++);
 	while (ad1843_read_bits(lith, &ad1843_PDNO)) {
-		if (jiffies > later) {
+		if (time_after(jiffies, later)) {
 			printk(KERN_ERR
 			       "vwsnd audio: AD1843 won't power up\n");
 			return -EIO;
@@ -2250,12 +2250,6 @@ static void vwsnd_audio_intr(int irq, void *dev_id, struct pt_regs *regs)
 	vwsnd_audio_write_intr(devc, status);
 }
 
-static loff_t vwsnd_audio_llseek(struct file *file, loff_t offset, int whence)
-{
-	DBGEV("(file=0x%p, offset=%Ld, whence=%d)\n", file, offset, whence);
-	return -ESPIPE;
-}
-
 static ssize_t vwsnd_audio_do_read(struct file *file,
 				   char *buffer,
 				   size_t count,
@@ -2656,7 +2650,7 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		DBGXV("SNDCTL_DSP_GETOSPACE returns { %d %d %d %d }\n",
 		     buf_info.fragments, buf_info.fragstotal,
 		     buf_info.fragsize, buf_info.bytes);
-		return copy_to_user((void *) arg, &buf_info, sizeof buf_info);
+		return copy_to_user((void *) arg, &buf_info, sizeof buf_info) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_GETISPACE:	/* _SIOR ('P',13, audio_buf_info) */
 		DBGX("SNDCTL_DSP_GETISPACE\n");
@@ -2673,7 +2667,7 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		DBGX("SNDCTL_DSP_GETISPACE returns { %d %d %d %d }\n",
 		     buf_info.fragments, buf_info.fragstotal,
 		     buf_info.fragsize, buf_info.bytes);
-		return copy_to_user((void *) arg, &buf_info, sizeof buf_info);
+		return copy_to_user((void *) arg, &buf_info, sizeof buf_info) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_NONBLOCK:	/* _SIO  ('P',14) */
 		DBGX("SNDCTL_DSP_NONBLOCK\n");
@@ -2731,7 +2725,7 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 			rport->frag_count = 0;
 		}
 		spin_unlock_irqrestore(&rport->lock, flags);
-		return copy_to_user((void *) arg, &info, sizeof info);
+		return copy_to_user((void *) arg, &info, sizeof info) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_GETOPTR:	/* _SIOR ('P',18, count_info) */
 		DBGX("SNDCTL_DSP_GETOPTR\n");
@@ -2753,7 +2747,7 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 			wport->frag_count = 0;
 		}
 		spin_unlock_irqrestore(&wport->lock, flags);
-		return copy_to_user((void *) arg, &info, sizeof info);
+		return copy_to_user((void *) arg, &info, sizeof info) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_GETODELAY:	/* _SIOR ('P', 23, int) */
 		DBGX("SNDCTL_DSP_GETODELAY\n");
@@ -3037,7 +3031,7 @@ static int vwsnd_audio_release(struct inode *inode, struct file *file)
 
 static struct file_operations vwsnd_audio_fops = {
 	owner:		THIS_MODULE,
-	llseek:		vwsnd_audio_llseek,
+	llseek:		no_llseek,
 	read:		vwsnd_audio_read,
 	write:		vwsnd_audio_write,
 	poll:		vwsnd_audio_poll,
@@ -3078,13 +3072,6 @@ static int vwsnd_mixer_release(struct inode *inode, struct file *file)
 	DBGEV("(inode=0x%p, file=0x%p)\n", inode, file);
 	DEC_USE_COUNT;
 	return 0;
-}
-
-/* seek is illegal on mixer. */
-
-static loff_t vwsnd_mixer_llseek(struct file *file, loff_t offset, int whence)
-{
-	return -ESPIPE;
 }
 
 /* mixer_read_ioctl handles all read ioctls on the mixer device. */
@@ -3234,7 +3221,7 @@ static int vwsnd_mixer_ioctl(struct inode *ioctl,
 
 static struct file_operations vwsnd_mixer_fops = {
 	owner:		THIS_MODULE,
-	llseek:		vwsnd_mixer_llseek,
+	llseek:		no_llseek,
 	ioctl:		vwsnd_mixer_ioctl,
 	open:		vwsnd_mixer_open,
 	release:	vwsnd_mixer_release,
@@ -3462,6 +3449,7 @@ static struct address_info the_hw_config = {
 
 MODULE_DESCRIPTION("SGI Visual Workstation sound module");
 MODULE_AUTHOR("Bob Miller <kbob@sgi.com>");
+MODULE_LICENSE("GPL");
 
 static int __init init_vwsnd(void)
 {

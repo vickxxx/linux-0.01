@@ -10,6 +10,8 @@
 #include <linux/dnotify.h>
 #include <linux/smp_lock.h>
 #include <linux/slab.h>
+#include <linux/iobuf.h>
+#include <linux/ptrace.h>
 
 #include <asm/poll.h>
 #include <asm/siginfo.h>
@@ -65,6 +67,10 @@ static int locate_fd(struct files_struct *files,
 
 	write_lock(&files->file_lock);
 	
+	error = -EINVAL;
+	if (orig_start >= current->rlim[RLIMIT_NOFILE].rlim_cur)
+		goto out;
+
 repeat:
 	/*
 	 * Someone might have closed fd's in the range
@@ -194,7 +200,7 @@ asmlinkage long sys_dup(unsigned int fildes)
 	return ret;
 }
 
-#define SETFL_MASK (O_APPEND | O_NONBLOCK | O_NDELAY | FASYNC)
+#define SETFL_MASK (O_APPEND | O_NONBLOCK | O_NDELAY | FASYNC | O_DIRECT)
 
 static int setfl(int fd, struct file * filp, unsigned long arg)
 {
@@ -215,6 +221,25 @@ static int setfl(int fd, struct file * filp, unsigned long arg)
 			if (error < 0)
 				return error;
 		}
+	}
+
+	if (arg & O_DIRECT) {
+		/*
+		 * alloc_kiovec() can sleep and we are only serialized by
+		 * the big kernel lock here, so abuse the i_sem to serialize
+		 * this case too. We of course wouldn't need to go deep down
+		 * to the inode layer, we could stay at the file layer, but
+		 * we don't want to pay for the memory of a semaphore in each
+		 * file structure too and we use the inode semaphore that we just
+		 * pay for anyways.
+		 */
+		error = 0;
+		down(&inode->i_sem);
+		if (!filp->f_iobuf)
+			error = alloc_kiovec(1, &filp->f_iobuf);
+		up(&inode->i_sem);
+		if (error < 0)
+			return error;
 	}
 
 	/* required for strict SunOS emulation */
@@ -258,7 +283,7 @@ static long do_fcntl(unsigned int fd, unsigned int cmd,
 			break;
 		case F_SETLK:
 		case F_SETLKW:
-			err = fcntl_setlk(fd, cmd, (struct flock *) arg);
+			err = fcntl_setlk(fd, filp, cmd, (struct flock *) arg);
 			break;
 		case F_GETOWN:
 			/*
@@ -269,6 +294,7 @@ static long do_fcntl(unsigned int fd, unsigned int cmd,
 			 * to fix this will be in libc.
 			 */
 			err = filp->f_owner.pid;
+			force_successful_syscall_return();
 			break;
 		case F_SETOWN:
 			lock_kernel();
@@ -338,22 +364,22 @@ asmlinkage long sys_fcntl64(unsigned int fd, unsigned int cmd, unsigned long arg
 	if (!filp)
 		goto out;
 
-	lock_kernel();
 	switch (cmd) {
 		case F_GETLK64:
 			err = fcntl_getlk64(fd, (struct flock64 *) arg);
 			break;
 		case F_SETLK64:
-			err = fcntl_setlk64(fd, cmd, (struct flock64 *) arg);
+			err = fcntl_setlk64(fd, filp, cmd,
+					(struct flock64 *) arg);
 			break;
 		case F_SETLKW64:
-			err = fcntl_setlk64(fd, cmd, (struct flock64 *) arg);
+			err = fcntl_setlk64(fd, filp, cmd,
+					(struct flock64 *) arg);
 			break;
 		default:
 			err = do_fcntl(fd, cmd, arg, filp);
 			break;
 	}
-	unlock_kernel();
 	fput(filp);
 out:
 	return err;
@@ -391,7 +417,7 @@ static void send_sigio_to_task(struct task_struct *p,
 			   back to SIGIO in that case. --sct */
 			si.si_signo = fown->signum;
 			si.si_errno = 0;
-		        si.si_code  = reason & ~__SI_MASK;
+		        si.si_code  = reason;
 			/* Make sure we are called with one of the POLL_*
 			   reasons, otherwise we could leak kernel stack into
 			   userspace.  */
@@ -507,7 +533,7 @@ void kill_fasync(struct fasync_struct **fp, int sig, int band)
 
 static int __init fasync_init(void)
 {
-	fasync_cache = kmem_cache_create("fasync cache",
+	fasync_cache = kmem_cache_create("fasync_cache",
 		sizeof(struct fasync_struct), 0, 0, NULL, NULL);
 	if (!fasync_cache)
 		panic("cannot create fasync slab cache");

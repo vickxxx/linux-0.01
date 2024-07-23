@@ -1,4 +1,4 @@
-/* $Id: eicon_mod.c,v 1.37 2000/09/02 11:16:47 armin Exp $
+/* $Id: eicon_mod.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
  * 
@@ -6,7 +6,10 @@
  * Copyright 1998-2000 by Armin Schindler (mac@melware.de) 
  * Copyright 1999,2000 Cytronics & Melware (info@melware.de)
  * 
- * Thanks to    Eicon Technology GmbH & Co. oHG for
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * Thanks to    Eicon Networks for
  *              documents, informations and hardware.
  *
  *		Deutsche Mailbox Saar-Lor-Lux GmbH
@@ -14,25 +17,11 @@
  *		capabilities with Diva Server cards.
  *		(dor@deutschemailbox.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
- *
  */
 
 #define DRIVERNAME "Eicon active ISDN driver"
 #define DRIVERRELEASE "2.0"
-#define DRIVERPATCH ".15"
+#define DRIVERPATCH ".16"
 
 
 #include <linux/config.h>
@@ -55,7 +44,7 @@
 static eicon_card *cards = (eicon_card *) NULL;   /* glob. var , contains
                                                      start of card-list   */
 
-static char *eicon_revision = "$Revision: 1.37 $";
+static char *eicon_revision = "$Revision: 1.1.4.1 $";
 
 extern char *eicon_pci_revision;
 extern char *eicon_isa_revision;
@@ -64,9 +53,6 @@ extern char *eicon_idi_revision;
 extern int do_ioctl(struct inode *pDivasInode, struct file *pDivasFile,
 			unsigned int command, unsigned long arg);
 extern void eicon_pci_init_conf(eicon_card *card);
-void mod_inc_use_count(void);
-void mod_dec_use_count(void);
-extern char *file_check(void);
 
 #ifdef MODULE
 #define MOD_USE_COUNT (GET_USE_COUNT (&__this_module))
@@ -87,9 +73,9 @@ static int   irq          = -1;
 #endif
 static char *id           = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
-MODULE_DESCRIPTION(             "Driver for Eicon active ISDN cards");
+MODULE_DESCRIPTION(             "ISDN4Linux: Driver for Eicon active ISDN cards");
 MODULE_AUTHOR(                  "Armin Schindler");
-MODULE_SUPPORTED_DEVICE(        "ISDN subsystem");
+MODULE_LICENSE(                 "GPL");
 MODULE_PARM_DESC(id,   		"ID-String of first card");
 MODULE_PARM(id,           	"s");
 #ifdef CONFIG_ISDN_DRV_EICON_ISA
@@ -377,7 +363,7 @@ eicon_command(eicon_card * card, isdn_ctrl * c)
 #ifdef MODULE
 				case EICON_IOCTL_FREEIT:
 					while (MOD_USE_COUNT > 0) MOD_DEC_USE_COUNT;
-					mod_inc_use_count();
+					MOD_INC_USE_COUNT;
 					return 0;
 #endif
 				case EICON_IOCTL_LOADPCI:
@@ -573,14 +559,10 @@ eicon_command(eicon_card * card, isdn_ctrl * c)
 			eicon_log(card, 1, "eicon CMD_GETSIL not implemented\n");
 			return 0;
 		case ISDN_CMD_LOCK:
-#ifdef MODULE
-			mod_inc_use_count();
-#endif
+			MOD_INC_USE_COUNT;
 			return 0;
 		case ISDN_CMD_UNLOCK:
-#ifdef MODULE
-			mod_dec_use_count();
-#endif
+			MOD_DEC_USE_COUNT;
 			return 0;
 #ifdef CONFIG_ISDN_TTY_FAX
 		case ISDN_CMD_FAXCMD:
@@ -683,8 +665,11 @@ if_readstatus(u_char * buf, int len, int user, int id, int channel)
 			else
 				cnt = skb->len;
 
-			if (user)
+			if (user) {
+				spin_unlock_irqrestore(&eicon_lock, flags);
 				copy_to_user(p, skb->data, cnt);
+				spin_lock_irqsave(&eicon_lock, flags);
+			}
 			else
 				memcpy(p, skb->data, cnt);
 
@@ -1177,8 +1162,7 @@ eicon_registercard(eicon_card * card)
         return 0;
 }
 
-#ifdef MODULE
-static void
+static void __exit
 unregister_card(eicon_card * card)
 {
         isdn_ctrl cmd;
@@ -1204,29 +1188,20 @@ unregister_card(eicon_card * card)
 			break;
         }
 }
-#endif /* MODULE */
 
 static void
 eicon_freecard(eicon_card *card) {
 	int i;
-	struct sk_buff *skb;
 
 	for(i = 0; i < (card->nchannels + 1); i++) {
-		while((skb = skb_dequeue(&card->bch[i].e.X)))
-			dev_kfree_skb(skb);
-		while((skb = skb_dequeue(&card->bch[i].e.R)))
-			dev_kfree_skb(skb);
+		skb_queue_purge(&card->bch[i].e.X);
+		skb_queue_purge(&card->bch[i].e.R);
 	}
-	while((skb = skb_dequeue(&card->sndq)))
-		dev_kfree_skb(skb);
-	while((skb = skb_dequeue(&card->rcvq)))
-		dev_kfree_skb(skb);
-	while((skb = skb_dequeue(&card->rackq)))
-		dev_kfree_skb(skb);
-	while((skb = skb_dequeue(&card->sackq)))
-		dev_kfree_skb(skb);
-	while((skb = skb_dequeue(&card->statq)))
-		dev_kfree_skb(skb);
+	skb_queue_purge(&card->sndq);
+	skb_queue_purge(&card->rcvq);
+	skb_queue_purge(&card->rackq);
+	skb_queue_purge(&card->sackq);
+	skb_queue_purge(&card->statq);
 
 #ifdef CONFIG_ISDN_DRV_EICON_PCI
 	kfree(card->sbufp);
@@ -1311,11 +1286,7 @@ eicon_addcard(int Type, int membase, int irq, char *id, int card_id)
 }
 
 
-#ifdef MODULE
-#define eicon_init init_module
-#endif
-
-int
+static int __init
 eicon_init(void)
 {
 	int card_count = 0;
@@ -1341,8 +1312,8 @@ eicon_init(void)
 #endif
 	strcpy(tmprev, eicon_idi_revision);
 	printk("%s\n", eicon_getrev(tmprev));
-        printk(KERN_INFO "%s Release: %s%s (%s)\n", DRIVERNAME,
-		DRIVERRELEASE, DRIVERPATCH, file_check());
+        printk(KERN_INFO "%s Release: %s%s\n", DRIVERNAME,
+		DRIVERRELEASE, DRIVERPATCH);
 
 #ifdef CONFIG_ISDN_DRV_EICON_ISA
 #ifdef CONFIG_MCA
@@ -1391,19 +1362,6 @@ eicon_init(void)
         return 0;
 }
 
-
-#ifdef MODULE
-
-void mod_inc_use_count(void)
-{
-        MOD_INC_USE_COUNT;
-}
-
-void mod_dec_use_count(void)
-{
-        MOD_DEC_USE_COUNT;
-}
-
 #ifdef CONFIG_ISDN_DRV_EICON_PCI
 void DIVA_DIDD_Write(DESCRIPTOR *, int);
 EXPORT_SYMBOL_NOVERS(DIVA_DIDD_Read);
@@ -1414,8 +1372,8 @@ int DivasCardNext;
 card_t DivasCards[1];
 #endif
 
-void
-cleanup_module(void)
+static void __exit
+eicon_exit(void)
 {
 #if CONFIG_PCI	
 #ifdef CONFIG_ISDN_DRV_EICON_PCI
@@ -1499,7 +1457,7 @@ cleanup_module(void)
         printk(KERN_INFO "%s unloaded\n", DRIVERNAME);
 }
 
-#else /* no module */
+#ifndef MODULE
 
 static int __init
 eicon_setup(char *line)
@@ -1595,7 +1553,7 @@ int eicon_mca_find_card(int type,          /* type-idx of eicon-card          */
             	};
 	};
 	/* all adapter flavors checked without match, finito with:            */
-        return ENODEV;
+        return -ENODEV;
 };
 
 
@@ -1642,14 +1600,14 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				membase = cards_membase;
 			} else {
 				if (membase != cards_membase)
-					return ENODEV;
+					return -ENODEV;
 			};
 			cards_irq=irq_array[((adf_pos0 & 0xC)>>2)];
 			if (irq == -1) { 
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return ENODEV;
+					return -ENODEV;
 			};
 			cards_io= 0xC00 + ((adf_pos0>>4)*0x10);
 			type = EICON_CTYPE_ISAPRI; 
@@ -1661,14 +1619,14 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				membase = cards_membase;
 			} else {
 				if (membase != cards_membase)
-					return ENODEV;
+					return -ENODEV;
 			};
 			cards_irq=irq_array[((adf_pos0 & 0xC)>>2)];
 			if (irq == -1) { 
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return ENODEV;
+					return -ENODEV;
 			};
 
 			cards_io= 0xC00 + ((adf_pos0>>4)*0x10);
@@ -1682,12 +1640,12 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return ENODEV;
+					return -ENODEV;
 			};
 			type = 0; 
 			break;
 		default:
-			return  ENODEV;
+			return -ENODEV;
 	};
 	/* matching membase & irq */
 	if ( 1 == eicon_addcard(type, membase, irq, id, 0)) { 
@@ -1706,9 +1664,11 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 			cards->mca_slot+1);
 		return  0 ; /* eicon_addcard added a card */
 	} else {
-		return ENODEV;
+		return -ENODEV;
 	};
 };
 #endif /* CONFIG_MCA */
 #endif /* CONFIG_ISDN_DRV_EICON_ISA */
 
+module_init(eicon_init);
+module_exit(eicon_exit);

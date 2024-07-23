@@ -1,4 +1,4 @@
-/* $Id: ppc-stub.c,v 1.6 1999/08/12 22:18:11 cort Exp $
+/*
  * ppc-stub.c:  KGDB support for the Linux kernel.
  *
  * adapted from arch/sparc/kernel/sparc-stub.c for the PowerPC
@@ -134,6 +134,9 @@ static const char hexchars[]="0123456789abcdef";
 /* struct tt_entry kgdb_savettable[256]; */
 /* typedef void (*trapfunc_t)(void); */
 
+static void kgdb_fault_handler(struct pt_regs *regs);
+static int handle_exception (struct pt_regs *regs);
+
 #if 0
 /* Install an exception handler for kgdb */
 static void exceptionHandler(int tnum, unsigned int *tfunc)
@@ -182,7 +185,7 @@ hex(unsigned char ch)
  * return 0.
  */
 static unsigned char *
-mem2hex(char *mem, char *buf, int count)
+mem2hex(const char *mem, char *buf, int count)
 {
 	unsigned char ch;
 
@@ -344,18 +347,6 @@ static void kgdb_flush_cache_all(void)
 	flush_instruction_cache();
 }
 
-static inline int get_msr(void)
-{
-	int msr;
-	asm volatile("mfmsr %0" : "=r" (msr):);
-	return msr;
-}
-
-static inline void set_msr(int msr)
-{
-	asm volatile("mtmsr %0" : : "r" (msr));
-}
-
 /* Set up exception handlers for tracing and breakpoints
  * [could be called kgdb_init()]
  */
@@ -396,14 +387,12 @@ static void kgdb_fault_handler(struct pt_regs *regs)
 
 int kgdb_bpt(struct pt_regs *regs)
 {
-	handle_exception(regs);
-	return 1;
+	return handle_exception(regs);
 }
 
 int kgdb_sstep(struct pt_regs *regs)
 {
-	handle_exception(regs);
-	return 1;
+	return handle_exception(regs);
 }
 
 void kgdb(struct pt_regs *regs)
@@ -413,16 +402,14 @@ void kgdb(struct pt_regs *regs)
 
 int kgdb_iabr_match(struct pt_regs *regs)
 {
-	printk("kgdb doesn't support iabr, what?!?\n");
-	handle_exception(regs);
-	return 1;
+	printk(KERN_ERR "kgdb doesn't support iabr, what?!?\n");
+	return handle_exception(regs);
 }
 
 int kgdb_dabr_match(struct pt_regs *regs)
 {
-	printk("kgdb doesn't support dabr, what?!?\n");
-	handle_exception(regs);
-	return 1;
+	printk(KERN_ERR "kgdb doesn't support dabr, what?!?\n");
+	return handle_exception(regs);
 }
 
 /* Convert the SPARC hardware trap type code to a unix signal number. */
@@ -468,7 +455,7 @@ static int computeSignal(unsigned int tt)
 /*
  * This function does all command processing for interfacing to gdb.
  */
-static void
+static int
 handle_exception (struct pt_regs *regs)
 {
 	int sigval;
@@ -477,14 +464,19 @@ handle_exception (struct pt_regs *regs)
 	char *ptr;
 	unsigned int msr;
 
+	/* We don't handle user-mode breakpoints. */
+	if (user_mode(regs))
+		return 0;
+
 	if (debugger_fault_handler) {
 		debugger_fault_handler(regs);
 		panic("kgdb longjump failed!\n");
 	}
 	if (kgdb_active) {
-		printk("interrupt while in kgdb, returning\n");
-		return;
+		printk(KERN_ERR "interrupt while in kgdb, returning\n");
+		return 0;
 	}
+
 	kgdb_active = 1;
 	kgdb_started = 1;
 
@@ -495,8 +487,8 @@ handle_exception (struct pt_regs *regs)
 
 	kgdb_interruptible(0);
 	lock_kernel();
-	msr = get_msr();
-	set_msr(msr & ~MSR_EE);	/* disable interrupts */
+	msr = mfmsr();
+	mtmsr(msr & ~MSR_EE);	/* disable interrupts */
 
 	if (regs->nip == (unsigned long)breakinst) {
 		/* Skip over breakpoint trap insn */
@@ -523,7 +515,7 @@ handle_exception (struct pt_regs *regs)
 	*ptr++ = hexchars[SP_REGNUM >> 4];
 	*ptr++ = hexchars[SP_REGNUM & 0xf];
 	*ptr++ = ':';
-	ptr = mem2hex(((char *)&regs) + SP_REGNUM*4, ptr, 4);
+	ptr = mem2hex(((char *)regs) + SP_REGNUM*4, ptr, 4);
 	*ptr++ = ';';
 #endif
 
@@ -682,21 +674,18 @@ handle_exception (struct pt_regs *regs)
  * some location may have changed something that is in the instruction cache.
  */
 			kgdb_flush_cache_all();
-			set_msr(msr);
+			mtmsr(msr);
 			kgdb_interruptible(1);
 			unlock_kernel();
 			kgdb_active = 0;
-			return;
+			return 1;
 
 		case 's':
 			kgdb_flush_cache_all();
 			regs->msr |= MSR_SE;
-#if 0
-			set_msr(msr | MSR_SE);
-#endif
 			unlock_kernel();
 			kgdb_active = 0;
-			return;
+			return 1;
 
 		case 'r':		/* Reset (if user process..exit ???)*/
 			panic("kgdb reset.");
@@ -724,13 +713,15 @@ breakpoint(void)
 		return;
 	}
 
-	asm("	.globl breakinst
-	     breakinst: .long 0x7d821008
-            ");
+	asm("	.globl breakinst	\n\
+	     breakinst: .long 0x7d821008");
 }
 
-/* Output string in GDB O-packet format if GDB has connected. If nothing
-   output, returns 0 (caller must then handle output). */
+#ifdef CONFIG_KGDB_CONSOLE
+/*
+ * Output string in GDB O-packet format if GDB has connected. If nothing
+ * output, returns 0 (caller must then handle output)
+ */
 int
 kgdb_output_string (const char* s, unsigned int count)
 {
@@ -739,7 +730,7 @@ kgdb_output_string (const char* s, unsigned int count)
         if (!kgdb_started)
             return 0;
 
-	count = (count <= (sizeof(buffer) / 2 - 2)) 
+	count = (count <= (sizeof(buffer) / 2 - 2))
 		? count : (sizeof(buffer) / 2 - 2);
 
 	buffer[0] = 'O';
@@ -747,15 +738,5 @@ kgdb_output_string (const char* s, unsigned int count)
 	putpacket(buffer);
 
         return 1;
- }
-
-#ifndef CONFIG_8xx
-
-/* I don't know why other platforms don't need this.  The function for
- * the 8xx is found in arch/ppc/8xx_io/uart.c.  -- Dan
- */
-void
-kgdb_map_scc(void)
-{
 }
 #endif

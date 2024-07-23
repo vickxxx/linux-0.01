@@ -2,7 +2,7 @@
  * Wrap-around code for a console using the
  * DECstation PROM io-routines.
  *
- * Copyright (c) 1998 Harald Koerfgen 
+ * Copyright (c) 1998 Harald Koerfgen
  */
 
 #include <linux/tty.h>
@@ -12,8 +12,7 @@
 #include <linux/console.h>
 #include <linux/fs.h>
 
-extern int (*prom_getchar) (void);
-extern int (*prom_printf) (char *,...);
+#include <asm/dec/prom.h>
 
 static void prom_console_write(struct console *co, const char *s,
 			       unsigned count)
@@ -30,11 +29,6 @@ static void prom_console_write(struct console *co, const char *s,
     }
 }
 
-static int prom_console_wait_key(struct console *co)
-{
-    return prom_getchar();
-}
-
 static int __init prom_console_setup(struct console *co, char *options)
 {
     return 0;
@@ -47,13 +41,12 @@ static kdev_t prom_console_device(struct console *c)
 
 static struct console sercons =
 {
-    name:	"ttyS",
-    write:	prom_console_write,
-    device:	prom_console_device,
-    wait_key:	prom_console_wait_key,
-    setup:	prom_console_setup,
-    flags:	CON_PRINTBUFFER,
-    index:	-1,
+    .name	= "ttyS",
+    .write	= prom_console_write,
+    .device	= prom_console_device,
+    .setup	= prom_console_setup,
+    .flags	= CON_PRINTBUFFER,
+    .index	= -1,
 };
 
 /*

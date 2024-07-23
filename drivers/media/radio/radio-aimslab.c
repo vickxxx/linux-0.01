@@ -1,6 +1,6 @@
 /* radiotrack (radioreveal) driver for Linux radio support
  * (c) 1997 M. Kirkwood
- * Coverted to new API by Alan Cox <Alan.Cox@linux.org>
+ * Converted to new API by Alan Cox <Alan.Cox@linux.org>
  * Various bugfixes and enhancements by Russell Kroll <rkroll@exploits.org>
  *
  * History:
@@ -42,6 +42,7 @@
 #endif
 
 static int io = CONFIG_RADIO_RTRACK_PORT; 
+static int radio_nr = -1;
 static int users = 0;
 static struct semaphore lock;
 
@@ -308,20 +309,19 @@ static int rt_open(struct video_device *dev, int flags)
 	if(users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void rt_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct rt_device rtrack_unit;
 
 static struct video_device rtrack_radio=
 {
+	owner:		THIS_MODULE,
 	name:		"RadioTrack radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_RTRACK,
@@ -346,7 +346,7 @@ static int __init rtrack_init(void)
 
 	rtrack_radio.priv=&rtrack_unit;
 	
-	if(video_register_device(&rtrack_radio, VFL_TYPE_RADIO)==-1)
+	if(video_register_device(&rtrack_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 	{
 		release_region(io, 2);
 		return -EINVAL;
@@ -370,8 +370,11 @@ static int __init rtrack_init(void)
 
 MODULE_AUTHOR("M.Kirkwood");
 MODULE_DESCRIPTION("A driver for the RadioTrack/RadioReveal radio card.");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the RadioTrack card (0x20f or 0x30f)");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 

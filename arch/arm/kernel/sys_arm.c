@@ -14,7 +14,7 @@
  */
 #include <linux/errno.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
@@ -28,9 +28,9 @@
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
 
-/*
- * Constant strings used in inlined functions in header files
- */
+extern unsigned long do_mremap(unsigned long addr, unsigned long old_len,
+			       unsigned long new_len, unsigned long flags,
+			       unsigned long new_addr);
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -55,19 +55,28 @@ inline long do_mmap2(
 	unsigned long prot, unsigned long flags,
 	unsigned long fd, unsigned long pgoff)
 {
-	int error = -EBADF;
+	int error = -EINVAL;
 	struct file * file = NULL;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	/*
+	 * If we are doing a fixed mapping, and address < PAGE_SIZE,
+	 * then deny it.
+	 */
+	if (flags & MAP_FIXED && addr < PAGE_SIZE && vectors_base() == 0)
+		goto out;
+
+	error = -EBADF;
 	if (!(flags & MAP_ANONYMOUS)) {
 		file = fget(fd);
 		if (!file)
 			goto out;
 	}
 
-	down(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
 	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up(&current->mm->mmap_sem);
+	up_write(&current->mm->mmap_sem);
 
 	if (file)
 		fput(file);
@@ -99,6 +108,29 @@ asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 	error = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset >> PAGE_SHIFT);
 out:
 	return error;
+}
+
+asmlinkage unsigned long
+sys_arm_mremap(unsigned long addr, unsigned long old_len,
+	       unsigned long new_len, unsigned long flags,
+	       unsigned long new_addr)
+{
+	unsigned long ret = -EINVAL;
+
+	/*
+	 * If we are doing a fixed mapping, and address < PAGE_SIZE,
+	 * then deny it.
+	 */
+	if (flags & MREMAP_FIXED && new_addr < PAGE_SIZE &&
+	    vectors_base() == 0)
+		goto out;
+
+	down_write(&current->mm->mmap_sem);
+	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
+	up_write(&current->mm->mmap_sem);
+
+out:
+	return ret;
 }
 
 /*

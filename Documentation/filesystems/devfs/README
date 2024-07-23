@@ -3,7 +3,16 @@ Devfs (Device File System) FAQ
 
 Linux Devfs (Device File System) FAQ
 Richard Gooch
-3-JUL-2000
+21-JUL-2002
+
+
+Document languages:
+
+
+
+
+
+
 
 -----------------------------------------------------------------------------
 
@@ -11,24 +20,23 @@ NOTE: the master copy of this document is available online at:
 
 http://www.atnf.csiro.au/~rgooch/linux/docs/devfs.html
 and looks much better than the text version distributed with the
-kernel sources.
+kernel sources. A mirror site is available at:
+
+http://www.ras.ucalgary.ca/~rgooch/linux/docs/devfs.html
 
 There is also an optional daemon that may be used with devfs. You can
 find out more about it at:
 
 http://www.atnf.csiro.au/~rgooch/linux/
 
-NEWFLASH: The official 2.3.46 kernel has
-included the devfs patch. Future patches will be released which
-build on this. These patches are rolled into Linus' tree from time to
-time.
-
 A mailing list is available which you may subscribe to. Send
 email
 to majordomo@oss.sgi.com with the following line in the
 body of the message:
 subscribe devfs
-The list is archived at
+To unsubscribe, send the message body:
+unsubscribe devfs
+instead. The list is archived at
 
 http://oss.sgi.com/projects/devfs/archive/.
 
@@ -54,6 +62,7 @@ All the way with Devfs
 Other Issues
 Kernel Naming Scheme
 Devfsd Naming Scheme
+Old Compatibility Names
 SCSI Host Probing Issues
 
 
@@ -66,9 +75,15 @@ Questions and Answers
 
 Making things work
 Alternatives to devfs
+What I don't like about devfs
+How to report bugs
+Strange kernel messages
+Compilation problems with devfsd
 
 
 Other resources
+
+Translations of this document
 
 
 -----------------------------------------------------------------------------
@@ -81,7 +96,7 @@ on your root filesystem. Kernel device drivers can register devices by
 name rather than major and minor numbers. These devices will appear in
 devfs automatically, with whatever default ownership and
 protection the driver specified. A daemon (devfsd) can be used to
-override these defaults.
+override these defaults. Devfs has been in the kernel since 2.3.46.
 
 NOTE that devfs is entirely optional. If you prefer the old
 disc-based device nodes, then simply leave CONFIG_DEVFS_FS=n (the
@@ -98,6 +113,7 @@ namespace. Changes made are global to all mounted devfs filesystems.
 Also, because the devfs namespace exists without any devfs mounts, you
 can easily mount the root filesystem by referring to an entry in the
 devfs namespace.
+
 
 The cost of devfs is a small increase in kernel code size and memory
 usage. About 7 pages of code (some of that in __init sections) and 72
@@ -157,6 +173,7 @@ usually find a MAKEDEV programme which creates all these (hundreds!)
 of nodes. This means that changes in the kernel must be reflected by
 changes in the MAKEDEV programme, or else the system administrator
 creates device nodes by hand.
+
 The basic problem is that there are two separate databases of
 major and minor numbers. One is in the kernel and one is in /dev (or
 in a MAKEDEV programme, if you want to look at it that way). This is
@@ -192,6 +209,7 @@ because disc is cheap these days. Embedded systems would care about
 256 kBytes of /dev inodes, but you could argue that embedded systems
 would have hand-tuned /dev directories. I've had to do just that on my
 embedded systems, but I would rather just leave it to devfs.
+
 Another issue is the time taken to lookup an inode when first
 referenced. Not only does this take time in scanning through a list in
 memory, but also the seek times to read the inodes off disc.
@@ -212,7 +230,7 @@ also provides this information).  Furthermore, such a system would
 likely be implemented in an ad-hoc fashion, as different drivers will
 provide their information in different ways.
 
-Devfs is much cleaner, because it (natually) has a uniform mechanism
+Devfs is much cleaner, because it (naturally) has a uniform mechanism
 to provide this information: the device nodes themselves!
 
 
@@ -253,7 +271,7 @@ Alternatively, you can use hashing to speed up the search.
 But why do that search at all if you don't have to? Once again, it
 seems pointless.
 
-Note thate devfs doesn't use the major&minor system. For devfs
+Note that devfs doesn't use the major&minor system. For devfs
 entries, the connection is done when you lookup the /dev entry. When
 devfs_register() is called, an internal table is appended which has
 the entry name and the file_operations. If the dentry cache doesn't
@@ -274,9 +292,9 @@ driver, in a scalable way.
 /dev as a system administration tool
 
 Right now /dev contains a list of conceivable devices, most of which I
-don't have. A devfs would only show those devices available on my
-system. This means that listing /dev would be a handy way of checking
-what devices were available.
+don't have. Devfs only shows those devices available on my
+system. This means that listing /dev is a handy way of checking what
+devices are available.
 
 Major&minor size
 
@@ -289,9 +307,9 @@ disc arrays. With devfs an arbitrary pointer can be associated with
 each device entry, which can be used to give an effective 32 bit
 device identifier (i.e. that's like having a 32 bit minor
 number). Since this is private to the kernel, there are no C library
-compatibility which you would have with increasing major and minor
-number sizes. See the section on "Allocation of Device Numbers" for
-details on maintaining compatibility with userspace.
+compatibility issues which you would have with increasing major and
+minor number sizes. See the section on "Allocation of Device Numbers"
+for details on maintaining compatibility with userspace.
 
 Solving this requires a kernel change.
 
@@ -375,9 +393,9 @@ possible to send a message (either synchronously or asynchronously) to
 devfsd on any event, such as registration/unregistration of device
 entries, opening and closing devices, looking up inodes, scanning
 directories and more. This has many possibilities. Some of these are
-already implemented.
+already implemented. See:
 
-See: 
+
 http://www.atnf.csiro.au/~rgooch/linux/
 
 Device entry registration events can be used by devfsd to change
@@ -414,6 +432,7 @@ Inode lookup events can be used to authenticate module autoload
 requests. Instead of using kmod directly, the event is sent to
 devfsd which can implement an arbitrary authentication before loading
 the module itself.
+
 Inode lookup events can also be used to construct arbitrary
 namespaces, without having to resort to populating devfs with symlinks
 to devices that don't exist.
@@ -447,10 +466,10 @@ openings.
 
 Who else does it?
 
-FreeBSD has a devfs implementation. Solaris 2 has a pseudo-devfs
-(something akin to scsidev but for all devices, with some unspecified
-kernel support). BeOS, Plan9 and QNX also have it. SGI's IRIX 6.4 and
-above also have a device filesystem.
+FreeBSD has a devfs implementation. Solaris and AIX each have a
+pseudo-devfs (something akin to scsidev but for all devices, with some
+unspecified kernel support). BeOS, Plan9 and QNX also have it. SGI's
+IRIX 6.4 and above also have a device filesystem.
 
 While we shouldn't just automatically do something because others do
 it, we should not ignore the work of others either. FreeBSD has a lot
@@ -551,8 +570,10 @@ options.
 
 Devfsd
 OK, if you're reading this, I assume you want to play with
-devfs. First you need to compile devfsd, the device management daemon,
-available at 
+devfs. First you should ensure that /usr/src/linux contains a
+recent kernel source tree. Then you need to compile devfsd, the device
+management daemon, available at
+
 http://www.atnf.csiro.au/~rgooch/linux/.
 Because the kernel has a naming scheme
 which is quite different from the old naming scheme, you need to
@@ -599,6 +620,20 @@ services. Unfortunately, it's also fragile, complex and undocumented
 has problems with symbolic links. Append the following lines to your
 /etc/securetty file:
 
+vc/1
+vc/2
+vc/3
+vc/4
+vc/5
+vc/6
+vc/7
+vc/8
+
+This will not weaken security. If you have a version of util-linux
+earlier than 2.10.h, please upgrade to 2.10.h or later. If you
+absolutely cannot upgrade, then also append the following lines to
+your /etc/securetty file:
+
 1
 2
 3
@@ -618,7 +653,8 @@ While not essential, it's probably a good idea to upgrade to XFree86
 4.0, as patches went in to make it more devfs-friendly. If you don't,
 you'll probably need to apply the following patch to
 /etc/security/console.perms so that ordinary users can run
-startx.
+startx. Note that not all distributions have this file (e.g. Debian),
+so if it's not present, don't worry about it.
 
 --- /etc/security/console.perms.orig    Sat Apr 17 16:26:47 1999 
 +++ /etc/security/console.perms Fri Feb 25 23:53:55 2000 
@@ -627,17 +663,25 @@ startx.
 
  # file classes -- these are regular expressions 
 -<console>=tty[0-9][0-9]* :[0-9]\.[0-9] :[0-9] 
-+<console>=tty[0-9][0-9]* [0-9][0-9]* :[0-9]\.[0-9] :[0-9] 
++<console>=tty[0-9][0-9]* vc/[0-9][0-9]* :[0-9]\.[0-9] :[0-9] 
 
  # device classes -- these are shell-style globs 
  <floppy>=/dev/fd[0-1]* 
+
+If the patch does not apply, then change the line:
+
+<console>=tty[0-9][0-9]* :[0-9]\.[0-9] :[0-9]
+
+with:
+
+<console>=tty[0-9][0-9]* vc/[0-9][0-9]* :[0-9]\.[0-9] :[0-9]
 
 
 Disable devpts
 I've had a report of devpts mounted on /dev/pts not working
 correctly. Since devfs will also manage /dev/pts, there is no
 need to mount devpts as well. You should either edit your
-/etc/fstab so devpts is not mounted, or disable devfs from
+/etc/fstab so devpts is not mounted, or disable devpts from
 your kernel configuration.
 
 Unsupported drivers
@@ -663,16 +707,27 @@ Alternatively, use the same technique used for unsupported drivers
 described above.
 
 The Kernel
-Finally, you need to make sure devfs is compiled into your
-kernel. Set CONFIG_DEVFS_FS=y and recompile your kernel. Next, you
-need to make sure devfs is mounted. The best solution is to pass
-devfs=mount at the kernel boot command line. You can edit
-/etc/lilo.conf and add the line:
+Finally, you need to make sure devfs is compiled into your kernel. Set
+CONFIG_EXPERIMENTAL=y, CONFIG_DEVFS_FS=y and CONFIG_DEVFS_MOUNT=y by
+using favourite configuration tool (i.e. make config or
+make xconfig) and then make dep; make clean and then
+recompile your kernel and modules. At boot, devfs will be mounted onto
+/dev.
 
-append = "devfs=mount"
+If you encounter problems booting (for example if you forgot a
+configuration step), you can pass devfs=nomount at the kernel
+boot command line. This will prevent the kernel from mounting devfs at
+boot time onto /dev.
 
-
-This will make the kernel mount devfs at boot time onto /dev.
+In general, a kernel built with CONFIG_DEVFS_FS=y but without mounting
+devfs onto /dev is completely safe, and requires no
+configuration changes. One exception to take note of is when
+LABEL= directives are used in /etc/fstab. In this
+case you will be unable to boot properly. This is because the
+mount(8) programme uses /proc/partitions as part of
+the volume label search process, and the device names it finds are not
+available, because setting CONFIG_DEVFS_FS=y changes the names in
+/proc/partitions, irrespective of whether devfs is mounted.
 
 Now you've finished all the steps required. You're now ready to boot
 your shiny new kernel. Enjoy.
@@ -701,7 +756,7 @@ A much better approach is to use devfsd to save and restore
 permissions. It may be configured to record changes in permissions and
 will save them in a database (in fact a directory tree), and restore
 these upon boot. This is an efficient method and results in immediate
-saving of current permissions (unlike the tar approach, which save
+saving of current permissions (unlike the tar approach, which saves
 permissions at some unspecified future time).
 
 The default configuration file supplied with devfsd has config entries
@@ -733,6 +788,9 @@ following to set this up:
 make sure the kernel does not mount devfs at boot time
 
 
+make sure you have a correct /dev/console entry in your
+root file-system (where your disc-based /dev lives)
+
 create the /dev-state directory
 
 
@@ -745,18 +803,48 @@ devfsd /dev
 
 
 
+
 add the following lines to your /etc/devfsd.conf file:
 
+REGISTER	^pt[sy]		IGNORE
+CREATE		^pt[sy]		IGNORE
+CHANGE		^pt[sy]		IGNORE
+DELETE		^pt[sy]		IGNORE
 REGISTER	.*		COPY	/dev-state/$devname $devpath
-CHANGE		.*		COPY	$devpath /dev-state/$devname
 CREATE		.*		COPY	$devpath /dev-state/$devname
+CHANGE		.*		COPY	$devpath /dev-state/$devname
+DELETE		.*		CFUNCTION GLOBAL unlink /dev-state/$devname
+RESTORE		/dev-state
 
+Note that the sample devfsd.conf file contains these lines,
+as well as other sample configurations you may find useful. See the
+devfsd distribution
 
 
 reboot.
 
 
 
+
+Permissions database stored in normal directory
+
+If you are using an older kernel which doesn't support VFS binding,
+then you won't be able to have the permissions database in a
+mounted-over /dev. However, you can still use a regular
+directory to store the database. The sample /etc/devfsd.conf
+file above may still be used. You will need to create the
+/dev-state directory prior to installing devfsd. If you have
+old permissions in /dev, then just copy (or move) the device
+nodes over to the new directory.
+
+Which method is better?
+
+The best method is to have the permissions database stored in the
+mounted-over /dev. This is because you will not need to copy
+device nodes over to /dev-state, and because it allows you to
+switch between devfs and non-devfs kernels, without requiring you to
+copy permissions between /dev-state (for devfs) and
+/dev (for non-devfs).
 
 
 Dealing with drivers without devfs support
@@ -769,8 +857,8 @@ device nodes. You can do this in your boot scripts. All your drivers
 will now work as before.
 
 Hopefully for most people devfs will have enough support so that they
-can mount devfs directly over /dev without loosing most functionality
-(i.e. loosing access to various devices). As of 22-JAN-1998 (devfs
+can mount devfs directly over /dev without losing most functionality
+(i.e. losing access to various devices). As of 22-JAN-1998 (devfs
 patch version 10) I am now running this way. All the devices I have
 are available in devfs, so I don't lose anything.
 
@@ -794,7 +882,8 @@ You can then slowly migrate your system to using the new device names
 (for example, by starting with /etc/fstab), and then limiting the
 compatibility entries that devfsd creates.
 
-MAKE SURE YOU INSTALL DEVFSD BEFORE YOU BOOT A DEVFS-ENABLED KERNEL!
+IF YOU CONFIGURE TO MOUNT DEVFS AT BOOT, MAKE SURE YOU INSTALL DEVFSD
+BEFORE YOU BOOT A DEVFS-ENABLED KERNEL!
 
 Now that devfs has gone into the 2.3.46 kernel, I'm getting a lot of
 reports back. Many of these are because people are trying to run
@@ -910,13 +999,48 @@ As of devfsd-v1.3.10, a generic /etc/modules.devfs
 configuration file is installed, which is used by the MODLOAD
 action. This should be sufficient for most configurations. If you
 require further configuration, edit your /etc/modules.conf
-file.
+file. The way module autoloading work with devfs is:
+
+
+a process attempts to lookup a device node (e.g. /dev/fred)
+
+
+if that device node does not exist, the full pathname is passed to
+devfsd as a string
+
+
+devfsd will pass the string to the modprobe programme (provided the
+configuration line shown above is present), and specifies that
+/etc/modules.devfs is the configuration file
+
+
+/etc/modules.devfs includes /etc/modules.conf to
+access local configurations
+
+modprobe will search it's configuration files, looking for an alias
+that translates the pathname into a module name
+
+
+the translated pathname is then used to load the module.
+
+
+If you wanted a lookup of /dev/fred to load the
+mymod module, you would require the following configuration
+line in /etc/modules.conf:
+
+alias    /dev/fred    mymod
+
+The /etc/modules.devfs configuration file provides many such
+aliases for standard device names. If you look closely at this file,
+you will note that some modules require multiple alias configuration
+lines. This is required to support module autoloading for old and new
+device names.
 
 Mounting root off a devfs device
 If you wish to mount root off a devfs device when you pass the
-"devfs=only" boot option, then you need to pass in the "root="
-option to the kernel when booting. If you use LILO, then you must have
-this in lilo.conf:
+"devfs=only" boot option, then you need to pass in the
+"root=<device>" option to the kernel when booting. If you use
+LILO, then you must have this in lilo.conf:
 
 append = "root=<device>"
 
@@ -926,12 +1050,12 @@ do):
 root = <device>
 
 
-then LILO will determine the device number of  and will write
-that device number into a special place in the kernel image before
-starting the kernel, and the kernel will use that device number to
-mount the root filesystem. So, using the "append" variety ensures that
-LILO passes the root filesystem device as a string, which devfs can
-then use.
+then LILO will determine the device number of <device> and will
+write that device number into a special place in the kernel image
+before starting the kernel, and the kernel will use that device number
+to mount the root filesystem. So, using the "append" variety ensures
+that LILO passes the root filesystem device as a string, which devfs
+can then use.
 
 Note that this isn't an issue if you don't pass "devfs=only".
 
@@ -952,6 +1076,13 @@ have a directory of entries, making it easy to see what devices of
 that class are available. Often, the entries are symbolic links into a
 directory tree that reflects the topology of available devices. The
 topological tree is useful for finding how your devices are arranged.
+
+Below is a list of the naming schemes for the most common drivers. A
+list of reserved device names is
+available for reference. Please send email to
+rgooch@atnf.csiro.au to obtain an allocation. Please be
+patient (the maintainer is busy). An alternative name may be allocated
+instead of the requested name, at the discretion of the maintainer.
 
 Disc Devices
 
@@ -1067,7 +1198,8 @@ The tty devices now appear as:
   --------                   --------                   -----------
   /dev/tts/{0,1,...}         /dev/ttyS{0,1,...}         Serial ports
   /dev/cua/{0,1,...}         /dev/cua{0,1,...}          Call out devices
-  /dev/vc/{0,1,...}          /dev/tty{1...63}           Virtual consoles
+  /dev/vc/0                  /dev/tty                   Current virtual console
+  /dev/vc/{1,2,...}          /dev/tty{1...63}           Virtual consoles
   /dev/vcc/{0,1,...}         /dev/vcs{1...63}           Virtual consoles
   /dev/pty/m{0,1,...}        /dev/ptyp??                PTY masters
   /dev/pty/s{0,1,...}        /dev/ttyp??                PTY slaves
@@ -1109,7 +1241,8 @@ the kernel-supplied namespace. In some
 cases, the kernel-supplied naming scheme is quite convenient, so
 devfsd does not provide another naming scheme. The convenience names
 that devfsd creates are in fact the same names as the original devfs
-kernel patch created (before Linus mandated the Big Name Change).
+kernel patch created (before Linus mandated the Big Name
+Change). These are referred to as "new compatibility entries".
 
 In order to configure devfsd to create these convenience names, the
 following lines should be placed in your /etc/devfsd.conf:
@@ -1158,9 +1291,10 @@ parameters:c=1,b=2,t=3,u=4 would appear as:
 
 SCSI Generic Devices
 
-All SCSI CD-ROMs are placed under /dev/sg. A similar naming
-scheme is used as for SCSI discs. A SCSI generic device with the
-parameters:c=1,b=2,t=3,u=4 would appear as:
+The generic (aka. raw) interface for all SCSI devices are placed under
+/dev/sg. A similar naming scheme is used as for SCSI discs. A
+SCSI generic device with the parameters:c=1,b=2,t=3,u=4 would appear
+as:
 
 	/dev/sg/c1b2t3u4
 
@@ -1198,6 +1332,24 @@ All XT discs are placed under /dev/xd. The first XT disc
 would appear as /dev/xd/c0t0.
 
 
+Old Compatibility Names
+
+The old compatibility names are the legacy device names, such as
+/dev/hda, /dev/sda, /dev/rtc and so on.
+Devfsd can be configured to create compatibility symlinks so that you
+may continue to use the old names in your configuration files and so
+that old applications will continue to function correctly.
+
+In order to configure devfsd to create these legacy names, the
+following lines should be placed in your /etc/devfsd.conf:
+
+REGISTER	.*		MKOLDCOMPAT
+UNREGISTER	.*		RMOLDCOMPAT
+
+This will cause devfsd to create (and destroy) symbolic links which
+point to the kernel-supplied names.
+
+
 SCSI Host Probing Issues
 
 Devfs allows you to identify SCSI discs based in part on SCSI host
@@ -1220,14 +1372,15 @@ of drivers used in the /proc filesystem. For example:
 
 means that devices connected to
 
-- first aha1542 controller   - will be c0b#t#u#
-- first parallel port ZIP    - will be c1b#t#u#
-- second aha1542 controller  - will be c2b#t#u#
-- first NCR53C7xx controller - will be c4b#t#u#
-- any extra controller       - will be c5b#t#u#, c6b#t#u#, etc
+- first aha1542 controller   - will be /dev/scsi/host0/bus#/target#/lun#
+- first parallel port ZIP    - will be /dev/scsi/host1/bus#/target#/lun#
+- second aha1542 controller  - will be /dev/scsi/host2/bus#/target#/lun#
+- first NCR53C7xx controller - will be /dev/scsi/host4/bus#/target#/lun#
+- any extra controller       - will be /dev/scsi/host5/bus#/target#/lun#,
+                                       /dev/scsi/host6/bus#/target#/lun#, etc
 - if any of above controllers will not be found - the reserved names will
   not be used by any other device.
-- c3b#t#u# names will never be used
+- /dev/scsi/host3/bus#/target#/lun# names will never be used
 
 
 You can use ',' instead of ':' as the separator character if you
@@ -1343,6 +1496,10 @@ Questions and Answers
 
 Making things work
 Alternatives to devfs
+What I don't like about devfs
+How to report bugs
+Strange kernel messages
+Compilation problems with devfsd
 
 
 
@@ -1377,6 +1534,96 @@ namespace. They are accessed via socket(2) and
 setsockopt(2) calls, and thus require no device nodes. I have
 raised the possibilty of moving network devices into the device
 namespace, but have had no response.
+
+
+How can I test if I have devfs compiled into my kernel?
+
+All filesystems built-in or currently loaded are listed in
+/proc/filesystems. If you see a devfs entry, then
+you know that devfs was compiled into your kernel. If you have
+correctly configured and rebuilt your kernel, then devfs will be
+built-in. If you think you've configured it in, but
+/proc/filesystems doesn't show it, you've made a mistake.
+Common mistakes include:
+
+Using a 2.2.x kernel without applying the devfs patch (if you
+don't know how to patch your kernel, use 2.4.x instead, don't bother
+asking me how to patch)
+Forgetting to set CONFIG_EXPERIMENTAL=y
+Forgetting to set CONFIG_DEVFS_FS=y
+Forgetting to set CONFIG_DEVFS_MOUNT=y (if you want devfs
+to be automatically mounted at boot)
+Editing your .config manually, instead of using make
+config or make xconfig
+Forgetting to run make dep; make clean after changing the
+configuration and before compiling
+Forgetting to compile your kernel and modules
+Forgetting to install your kernel
+Forgetting to install your modules
+
+Please check twice that you've done all these steps before sending in
+a bug report.
+
+
+
+How can I test if devfs is mounted on /dev?
+
+The device filesystem will always create an entry called
+".devfsd", which is used to communicate with the daemon. Even
+if the daemon is not running, this entry will exist. Testing for the
+existence of this entry is the approved method of determining if devfs
+is mounted or not. Note that the type of entry (i.e. regular file,
+character device, named pipe, etc.) may change without notice. Only
+the existence of the entry should be relied upon.
+
+
+When I start devfsd, I see the error:
+Error opening file: ".devfsd"   No such file or directory?
+
+This means that devfs is not mounted. Make sure you have devfs mounted.
+
+
+How do I mount devfs?
+
+First make sure you have devfs compiled into your kernel (see
+above). Then you will either need to:
+
+set CONFIG_DEVFS_MOUNT=y in your kernel config
+pass devfs=mount to your boot loader
+mount devfs manually in your boot scripts with:
+mount -t none devfs /dev
+
+
+
+Mount by volume LABEL=<label> doesn't work with
+devfs
+
+Most probably you are not mounting devfs onto /dev. What
+happens is that if your kernel config has CONFIG_DEVFS_FS=y
+then the contents of /proc/partitions will have the devfs
+names (such as scsi/host0/bus0/target0/lun0/part1). The
+contents of /proc/partitions are used by mount(8) when
+mounting by volume label. If devfs is not mounted on /dev,
+then mount(8) will fail to find devices. The solution is to
+make sure that devfs is mounted on /dev. See above for how to
+do that.
+
+
+I have extra or incorrect entries in /dev
+
+You may have stale entries in your dev-state area. Check for a
+RESTORE configuration line in your devfsd configuration
+(typically /etc/devfsd.conf). If you have this line, check
+the contents of the specified directory for stale entries. Remove
+any entries which are incorrect, then reboot.
+
+
+I get "Unable to open initial console" messages at boot
+
+This usually happens when you don't have devfs automounted onto
+/dev at boot time, and there is no valid
+/dev/console entry on your root file-system. Create a valid
+/dev/console device node.
 
 
 
@@ -1502,7 +1749,7 @@ unallocated major numbers. USB will also need to push beyond the 8 bit
 minor limitation
 
 
-simplying increasing the device number size is insufficient. Apart
+simply increasing the device number size is insufficient. Apart
 from causing a lot of pain, it doesn't solve the management issues
 of a /dev with thousands or more device nodes
 
@@ -1515,6 +1762,176 @@ want a dynamic /dev
 the standard response then becomes: "write a device management
 daemon", which brings us back to the
 proposal above
+
+
+
+
+What I don't like about devfs
+
+Here are some common complaints about devfs, and some suggestions and
+solutions that may make it more palatable for you. I can't please
+everybody, but I do try :-)
+
+I hate the naming scheme
+
+First, remember that no naming scheme will please everybody. You hate
+the scheme, others love it. Who's to say who's right and who's wrong?
+Ultimately, the person who writes the code gets to choose, and what
+exists now is a combination of the choices made by the
+devfs author and the
+kernel maintainer (Linus).
+
+However, not all is lost. If you want to create your own naming
+scheme, it is a simple matter to write a standalone script, hack
+devfsd, or write a script called by devfsd. You can create whatever
+naming scheme you like.
+
+Further, if you want to remove all traces of the devfs naming scheme
+from /dev, you can mount devfs elsewhere (say
+/devfs) and populate /dev with links into
+/devfs. This population can be automated using devfsd if you
+wish.
+
+You can even use the VFS binding facility to make the links, rather
+than using symbolic links. This way, you don't even have to see the
+"destination" of these symbolic links.
+
+Devfs puts policy into the kernel
+
+There's already policy in the kernel. Device numbers are in fact
+policy (why should the kernel dictate what device numbers I use?).
+Face it, some policy has to be in the kernel. The real difference
+between device names as policy and device numbers as policy is that
+no one will use device numbers directly, because device
+numbers are devoid of meaning to humans and are ugly. At least with
+the devfs device names, (even though you can add your own naming
+scheme) some people will use the devfs-supplied names directly. This
+offends some people :-)
+
+Devfs is bloatware
+
+This is not even remotely true. As shown above,
+both code and data size are quite modest.
+
+
+How to report bugs
+
+If you have (or think you have) a bug with devfs, please follow the
+steps below:
+
+
+
+make sure you have enabled debugging output when configuring your
+kernel. You will need to set (at least) the following config options:
+
+CONFIG_DEVFS_DEBUG=y
+CONFIG_DEBUG_KERNEL=y
+CONFIG_DEBUG_SLAB=y
+
+
+
+please make sure you have the latest devfs patches applied. The
+latest kernel version might not have the latest devfs patches applied
+yet (Linus is very busy)
+
+
+save a copy of your complete kernel logs (preferably by
+using the dmesg programme) for later inclusion in your bug
+report. You may need to use the -s switch to increase the
+internal buffer size so you can capture all the boot messages.
+Don't edit or trim the dmesg output
+
+
+
+
+try booting with devfs=dall passed to the kernel boot
+command line (read the documentation on your bootloader on how to do
+this), and save the result to a file. This may be quite verbose, and
+it may overflow the messages buffer, but try to get as much of it as
+you can
+
+
+if you get an Oops, run ksymoops to decode it so that the
+names of the offending functions are provided. A non-decoded Oops is
+pretty useless
+
+
+send a copy of your devfsd configuration file(s)
+
+send the bug report to me first.
+Don't expect that I will see it if you post it to the linux-kernel
+mailing list. Include all the information listed above, plus
+anything else that you think might be relevant. Put the string
+devfs somewhere in the subject line, so my mail filters mark
+it as urgent
+
+
+
+
+Here is a general guide on how to ask questions in a way that greatly
+improves your chances of getting a reply:
+
+http://www.tuxedo.org/~esr/faqs/smart-questions.html. If you have
+a bug to report, you should also read
+
+http://www.chiark.greenend.org.uk/~sgtatham/bugs.html.
+
+
+Strange kernel messages
+
+You may see devfs-related messages in your kernel logs. Below are some
+messages and what they mean (and what you should do about them, if
+anything).
+
+
+
+devfs_register(fred): could not append to parent, err: -17
+
+You need to check what the error code means, but usually 17 means
+EEXIST. This means that a driver attempted to create an entry
+fred in a directory, but there already was an entry with that
+name. This is often caused by flawed boot scripts which untar a bunch
+of inodes into /dev, as a way to restore permissions. This
+message is harmless, as the device nodes will still
+provide access to the driver (unless you use the devfs=only
+boot option, which is only for dedicated souls:-). If you want to get
+rid of these annoying messages, upgrade to devfsd-v1.3.20 and use the
+recommended RESTORE directive to restore permissions.
+
+
+devfs_mk_dir(bill): using old entry in dir: c1808724 ""
+
+This is similar to the message above, except that a driver attempted
+to create a directory named bill, and the parent directory
+has an entry with the same name. In this case, to ensure that drivers
+continue to work properly, the old entry is re-used and given to the
+driver. In 2.5 kernels, the driver is given a NULL entry, and thus,
+under rare circumstances, may not create the require device nodes.
+The solution is the same as above.
+
+
+
+
+
+Compilation problems with devfsd
+
+Usually, you can compile devfsd just by typing in
+make in the source directory, followed by a make
+install (as root). Sometimes, you may have problems, particularly
+on broken configurations.
+
+
+
+error messages relating to DEVFSD_NOTIFY_DELETE
+
+This happened because you have an ancient set of kernel headers
+installed in /usr/include/linux or /usr/src/linux.
+Install kernel 2.4.10 or later. You may need to pass the
+KERNEL_DIR variable to make (if you did not install
+the new kernel sources as /usr/src/linux), or you may copy
+the devfs_fs.h file in the kernel source tree into
+/usr/include/linux.
+
 
 
 
@@ -1539,7 +1956,7 @@ discusses the scsihosts= boot option
 
 Douglas Gilbert has written yet another useful document at
 
-http://www.torque.net/scsi/linux_scsi_24/ which
+http://www.torque.net/scsi/SCSI-2.4-HOWTO/ which
 discusses the Linux SCSI subsystem in 2.4.
 
 
@@ -1552,4 +1969,41 @@ http://johannes.erdfelt.com/hotswap.txt.
 Johannes has promised a HTML version will follow.
 
 
+I presented an invited 
+paper
+at the
 
+2nd Annual Storage Management Workshop held in Miamia, Florida,
+U.S.A. in October 2000.
+
+
+
+
+-----------------------------------------------------------------------------
+
+
+Translations of this document
+
+This document has been translated into other languages.
+
+
+
+
+The document master (in English) by rgooch@atnf.csiro.au is
+available at
+
+http://www.atnf.csiro.au/~rgooch/linux/docs/devfs.html
+
+
+
+A Korean translation by viatoris@nownuri.net is available at
+
+http://your.destiny.pe.kr/devfs/devfs.html
+
+
+
+
+-----------------------------------------------------------------------------
+Most flags courtesy of ITA's 
+Flags of All Countries
+used with permission. 

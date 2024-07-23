@@ -7,7 +7,7 @@
  * CONTACTS
  *	E-mail regarding any portion of the Linux UDF file system should be
  *	directed to the development team mailing list (run by majordomo):
- *		linux_udf@hootie.lvld.hp.com
+ *		linux_udf@hpesjro.fc.hp.com
  *
  * COPYRIGHT
  *	This file is distributed under the terms of the GNU General Public
@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1998-2000 Ben Fennema
+ *  (C) 1998-2001 Ben Fennema
  *
  * HISTORY
  *
@@ -44,7 +44,7 @@ void udf_free_inode(struct inode * inode)
 	 * Note: we must free any quota before locking the superblock,
 	 * as writing the quota to disk may need the lock as well.
 	 */
-	DQUOT_FREE_INODE(sb, inode);
+	DQUOT_FREE_INODE(inode);
 	DQUOT_DROP(inode);
 
 	lock_super(sb);
@@ -64,21 +64,21 @@ void udf_free_inode(struct inode * inode)
 		
 		mark_buffer_dirty(UDF_SB_LVIDBH(sb));
 	}
-
 	unlock_super(sb);
 
-	udf_free_blocks(inode, UDF_I_LOCATION(inode), 0, 1);
+	udf_free_blocks(sb, NULL, UDF_I_LOCATION(inode), 0, 1);
 }
 
-struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
+struct inode * udf_new_inode (struct inode *dir, int mode, int * err)
 {
 	struct super_block *sb;
 	struct inode * inode;
 	int block;
-	Uint32 start = UDF_I_LOCATION(dir).logicalBlockNum;
+	uint32_t start = UDF_I_LOCATION(dir).logicalBlockNum;
 
 	sb = dir->i_sb;
 	inode = new_inode(sb);
+
 	if (!inode)
 	{
 		*err = -ENOMEM;
@@ -86,7 +86,7 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 	}
 	*err = -ENOSPC;
 
-	block = udf_new_block(dir, UDF_I_LOCATION(dir).partitionReferenceNum,
+	block = udf_new_block(dir->i_sb, NULL, UDF_I_LOCATION(dir).partitionReferenceNum,
 		start, err);
 	if (*err)
 	{
@@ -97,9 +97,9 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 
 	if (UDF_SB_LVIDBH(sb))
 	{
-		struct LogicalVolHeaderDesc *lvhd;
-		Uint64 uniqueID;
-		lvhd = (struct LogicalVolHeaderDesc *)(UDF_SB_LVID(sb)->logicalVolContentsUse);
+		struct logicalVolHeaderDesc *lvhd;
+		uint64_t uniqueID;
+		lvhd = (struct logicalVolHeaderDesc *)(UDF_SB_LVID(sb)->logicalVolContentsUse);
 		if (S_ISDIR(mode))
 			UDF_SB_LVIDIU(sb)->numDirs =
 				cpu_to_le32(le32_to_cpu(UDF_SB_LVIDIU(sb)->numDirs) + 1);
@@ -114,7 +114,8 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 	}
 	inode->i_mode = mode;
 	inode->i_uid = current->fsuid;
-	if (dir->i_mode & S_ISGID) {
+	if (dir->i_mode & S_ISGID)
+	{
 		inode->i_gid = dir->i_gid;
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
@@ -137,21 +138,24 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 	else
 		UDF_I_EXTENDED_FE(inode) = 0;
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_AD_IN_ICB))
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_IN_ICB;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_IN_ICB;
 	else if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_SHORT;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_SHORT;
 	else
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_LONG;
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	UDF_I_UMTIME(inode) = UDF_I_UATIME(inode) = UDF_I_UCTIME(inode) = CURRENT_UTIME;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_LONG;
+	inode->i_mtime = inode->i_atime = inode->i_ctime =
+		UDF_I_CRTIME(inode) = CURRENT_TIME;
+	UDF_I_UMTIME(inode) = UDF_I_UCTIME(inode) =
+		UDF_I_UCRTIME(inode) = CURRENT_UTIME;
 	UDF_I_NEW_INODE(inode) = 1;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
 
 	unlock_super(sb);
-	if (DQUOT_ALLOC_INODE(sb, inode))
+	if (DQUOT_ALLOC_INODE(inode))
 	{
-		sb->dq_op->drop(inode);
+		DQUOT_DROP(inode);
+		inode->i_flags |= S_NOQUOTA;
 		inode->i_nlink = 0;
 		iput(inode);
 		*err = -EDQUOT;

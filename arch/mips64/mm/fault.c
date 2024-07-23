@@ -6,6 +6,7 @@
  * Copyright (C) 1995 - 2000 by Ralf Baechle
  * Copyright (C) 1999, 2000 by Silicon Graphics, Inc.
  */
+#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -20,6 +21,7 @@
 #include <linux/smp_lock.h>
 #include <linux/version.h>
 
+#include <asm/branch.h>
 #include <asm/hardirq.h>
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
@@ -30,22 +32,19 @@
 
 #define development_version (LINUX_VERSION_CODE & 0x100)
 
-extern void die(char *, struct pt_regs *, unsigned long write);
-
 /*
  * Macro for exception fixup code to access integer registers.
  */
 #define dpf_reg(r) (regs->regs[r])
 
-asmlinkage void
-dodebug(abi64_no_regargs, struct pt_regs regs)
+asmlinkage void dodebug(abi64_no_regargs, struct pt_regs regs)
 {
-	printk("Got syscall %ld, cpu %d proc %s:%d epc 0x%lx\n", regs.regs[2],
-	       smp_processor_id(), current->comm, current->pid, regs.cp0_epc);
+	printk(KERN_DEBUG "Got syscall %ld, cpu %d proc %s:%d epc 0x%lx\n",
+	       regs.regs[2], smp_processor_id(), current->comm, current->pid,
+	       regs.cp0_epc);
 }
 
-asmlinkage void
-dodebug2(abi64_no_regargs, struct pt_regs regs)
+asmlinkage void dodebug2(abi64_no_regargs, struct pt_regs regs)
 {
 	unsigned long retaddr;
 
@@ -54,20 +53,41 @@ dodebug2(abi64_no_regargs, struct pt_regs regs)
 		"add %0,$0,$31\n\t"
 		".set reorder"
 		: "=r" (retaddr));
-	printk("Got exception 0x%lx at 0x%lx\n", retaddr, regs.cp0_epc);
+	printk(KERN_DEBUG "Got exception 0x%lx at 0x%lx\n", retaddr,
+	       regs.cp0_epc);
 }
 
-extern spinlock_t console_lock, timerlist_lock;
+extern spinlock_t timerlist_lock;
 
 /*
  * Unlock any spinlocks which will prevent us from getting the
- * message out (timerlist_lock is aquired through the
+ * message out (timerlist_lock is acquired through the
  * console unblank code)
  */
-void bust_spinlocks(void)
+void bust_spinlocks(int yes)
 {
-	spin_lock_init(&console_lock);
 	spin_lock_init(&timerlist_lock);
+	if (yes) {
+		oops_in_progress = 1;
+#ifdef CONFIG_SMP
+		/* Many serial drivers do __global_cli() */
+		global_irq_lock = SPIN_LOCK_UNLOCKED;
+#endif
+	} else {
+		int loglevel_save = console_loglevel;
+#ifdef CONFIG_VT
+		unblank_screen();
+#endif
+		oops_in_progress = 0;
+		/*
+		 * OK, the message is on the console.  Now we call printk()
+		 * without oops_in_progress set so that printk will give klogd
+		 * a poke.  Hold onto your hats...
+		 */
+		console_loglevel = 15;		/* NMI oopser may have shut the console up */
+		printk(" ");
+		console_loglevel = loglevel_save;
+	}
 }
 
 /*
@@ -75,8 +95,8 @@ void bust_spinlocks(void)
  * and the problem, and then passes it off to one of the appropriate
  * routines.
  */
-asmlinkage void
-do_page_fault(struct pt_regs *regs, unsigned long write, unsigned long address)
+asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
+			      unsigned long address)
 {
 	struct vm_area_struct * vma;
 	struct task_struct *tsk = current;
@@ -84,18 +104,32 @@ do_page_fault(struct pt_regs *regs, unsigned long write, unsigned long address)
 	unsigned long fixup;
 	siginfo_t info;
 
+#if 0
+	printk("Cpu%d[%s:%d:%08lx:%ld:%08lx]\n", smp_processor_id(),
+		current->comm, current->pid, address, write, regs->cp0_epc);
+#endif
+
+	/*
+	 * We fault-in kernel-space virtual memory on-demand. The
+	 * 'reference' page table is init_mm.pgd.
+	 *
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (address >= VMALLOC_START)
+		goto vmalloc_fault;
+
 	info.si_code = SEGV_MAPERR;
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || mm == &init_mm)
+	if (in_interrupt() || !mm)
 		goto no_context;
-#if DEBUG_MIPS64
-	printk("Cpu%d[%s:%d:%08lx:%ld:%08lx]\n", smp_processor_id(), current->comm,
-		current->pid, address, write, regs->cp0_epc);
-#endif
-	down(&mm->mmap_sem);
+
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -120,6 +154,7 @@ good_area:
 			goto bad_area;
 	}
 
+survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
@@ -138,7 +173,7 @@ good_area:
 		goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	return;
 
 /*
@@ -146,15 +181,8 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
-	/*
-	 * Quickly check for vmalloc range faults.
-	 */
-	if ((!vma) && (address >= VMALLOC_START) && (address < VMALLOC_END)) {
-		printk("Fix vmalloc invalidate fault\n");
-		while(1);
-	}
 	if (user_mode(regs)) {
 		tsk->thread.cp0_badvaddr = address;
 		tsk->thread.error_code = write;
@@ -177,7 +205,7 @@ bad_area:
 
 no_context:
 	/* Are we prepared to handle this kernel fault?  */
-	fixup = search_exception_table(regs->cp0_epc);
+	fixup = search_exception_table(exception_epc(regs));
 	if (fixup) {
 		long new_epc;
 
@@ -195,35 +223,37 @@ no_context:
 	 * terminate things with extreme prejudice.
 	 */
 
-	bust_spinlocks();
+	bust_spinlocks(1);
 
 	printk(KERN_ALERT "Cpu %d Unable to handle kernel paging request at "
-	       "address %08lx, epc == %08x, ra == %08x\n",
-	       smp_processor_id(), address, (unsigned int) regs->cp0_epc,
-               (unsigned int) regs->regs[31]);
-	die("Oops", regs, write);
-	do_exit(SIGKILL);
+	       "address %016lx, epc == %016lx, ra == %016lx\n",
+	       smp_processor_id(), address, regs->cp0_epc, regs->regs[31]);
+	die("Oops", regs);
 
 /*
  * We ran out of memory, or some other thing happened to us that made
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
-	printk("VM: killing process %s\n", tsk->comm);
+	if (tsk->pid == 1) {
+		yield();
+		goto survive;
+	}
+	up_read(&mm->mmap_sem);
+	printk(KERN_NOTICE "VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
 
 do_sigbus:
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
 	 * or user mode.
 	 */
 	tsk->thread.cp0_badvaddr = address;
-	info.si_code = SIGBUS;
+	info.si_signo = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *) address;
@@ -232,4 +262,9 @@ do_sigbus:
 	/* Kernel mode? Handle exceptions or die */
 	if (!user_mode(regs))
 		goto no_context;
+
+	return;
+
+vmalloc_fault:
+	die("Pagefault for kernel virtual memory", regs);
 }

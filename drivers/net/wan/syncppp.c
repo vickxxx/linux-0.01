@@ -42,6 +42,7 @@
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/init.h>
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
 #include <linux/route.h>
@@ -50,8 +51,9 @@
 #include <linux/random.h>
 #include <linux/pkt_sched.h>
 #include <asm/byteorder.h>
+#include <asm/uaccess.h>
 #include <linux/spinlock.h>
-#include "syncppp.h"
+#include <net/syncppp.h>
 
 #define MAXALIVECNT     6               /* max. alive packets */
 
@@ -127,7 +129,7 @@ struct cisco_packet {
 
 static struct sppp *spppq;
 static struct timer_list sppp_keepalive_timer;
-static spinlock_t spppq_lock;
+static spinlock_t spppq_lock = SPIN_LOCK_UNLOCKED;
 
 static void sppp_keepalive (unsigned long dummy);
 static void sppp_cp_send (struct sppp *sp, u16 proto, u8 type,
@@ -145,9 +147,8 @@ static char *sppp_lcp_type_name (u8 type);
 static char *sppp_ipcp_type_name (u8 type);
 static void sppp_print_bytes (u8 *p, u16 len);
 
-static int debug = 0;
+static int debug;
 
-MODULE_PARM(debug,"1i");
 
 /*
  *	Interface down stub
@@ -155,7 +156,7 @@ MODULE_PARM(debug,"1i");
 
 static void if_down(struct net_device *dev)
 {
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
 
 	sp->pp_link_state=SPPP_LINK_DOWN;
 }
@@ -208,7 +209,7 @@ void sppp_input (struct net_device *dev, struct sk_buff *skb)
 	
 	skb->dev=dev;
 	skb->mac.raw=skb->data;
-	
+
 	if (dev->flags & IFF_RUNNING)
 	{
 		/* Count received bytes, add FCS and one flag */
@@ -517,8 +518,10 @@ badreq:
 		}
 		/* Send Configure-Ack packet. */
 		sp->pp_loopcnt = 0;
-		sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
-				h->ident, len-4, h+1);
+		if (sp->lcp.state != LCP_STATE_OPENED) {
+			sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
+					h->ident, len-4, h+1);
+		}
 		/* Change the state. */
 		switch (sp->lcp.state) {
 		case LCP_STATE_CLOSED:
@@ -534,7 +537,9 @@ badreq:
 			sp->ipcp.state = IPCP_STATE_CLOSED;
 			/* Initiate renegotiation. */
 			sppp_lcp_open (sp);
-			/* An ACK has already been sent. */
+			/* Send ACK after our REQ in attempt to break loop */
+			sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
+					h->ident, len-4, h+1);
 			sp->lcp.state = LCP_STATE_ACK_SENT;
 			break;
 		}
@@ -791,7 +796,7 @@ static void sppp_cp_send (struct sppp *sp, u16 proto, u8 type,
 		printk (">\n");
 	}
 	sp->obytes += skb->len;
-	/* Control is high priority so it doesnt get queued behind data */
+	/* Control is high priority so it doesn't get queued behind data */
 	skb->priority=TC_PRIO_CONTROL;
 	skb->dev = dev;
 	dev_queue_xmit(skb);
@@ -975,6 +980,14 @@ int sppp_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			if(ifr->ifr_flags)
 				sp->pp_flags|=PP_DEBUG;
 			break;
+		case SPPPIOCGFLAGS:
+			if(copy_to_user(ifr->ifr_data, &sp->pp_flags, sizeof(sp->pp_flags)))
+				return -EFAULT;
+			break;
+		case SPPPIOCSFLAGS:
+			if(copy_from_user(&sp->pp_flags, ifr->ifr_data, sizeof(sp->pp_flags)))
+				return -EFAULT;
+			break;
 		default:
 			return -EINVAL;
 	}
@@ -1048,7 +1061,6 @@ void sppp_attach(struct ppp_device *pd)
 	dev->hard_header_cache = NULL;
 	dev->header_cache_update = NULL;
 	dev->flags = IFF_MULTICAST|IFF_POINTOPOINT|IFF_NOARP;
-	dev_init_buffers(dev);
 }
 
 EXPORT_SYMBOL(sppp_attach);
@@ -1380,39 +1392,33 @@ static int sppp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_t
 	return 0;
 }
 
-
-struct packet_type sppp_packet_type=
-{
-	0,
-	NULL,
-	sppp_rcv,
-	NULL,
-	NULL
+struct packet_type sppp_packet_type = {
+	type:	__constant_htons(ETH_P_WAN_PPP),
+	func:	sppp_rcv,
 };
 
+static char banner[] __initdata = 
+	KERN_INFO "Cronyx Ltd, Synchronous PPP and CISCO HDLC (c) 1994\n"
+	KERN_INFO "Linux port (c) 1998 Building Number Three Ltd & "
+		  "Jan \"Yenya\" Kasprzak.\n";
 
-void sync_ppp_init(void)
-{
-	printk(KERN_INFO "Cronyx Ltd, Synchronous PPP and CISCO HDLC (c) 1994\n");
-	printk(KERN_INFO "Linux port (c) 1998 Building Number Three Ltd & Jan \"Yenya\" Kasprzak.\n");
-	spin_lock_init(&spppq_lock);
-	sppp_packet_type.type=htons(ETH_P_WAN_PPP);	
-	dev_add_pack(&sppp_packet_type);
-}
-
-#ifdef MODULE
-
-int init_module(void)
+static int __init sync_ppp_init(void)
 {
 	if(debug)
 		debug=PP_DEBUG;
-	sync_ppp_init();
+	printk(banner);
+	dev_add_pack(&sppp_packet_type);
 	return 0;
 }
 
-void cleanup_module(void)
+
+static void __exit sync_ppp_cleanup(void)
 {
 	dev_remove_pack(&sppp_packet_type);
 }
 
-#endif
+module_init(sync_ppp_init);
+module_exit(sync_ppp_cleanup);
+MODULE_PARM(debug,"1i");
+MODULE_LICENSE("GPL");
+

@@ -11,15 +11,29 @@
 #include <linux/linkage.h>
 #include <asm/mach-types.h>
 
-#ifndef CONFIG_ARCH_SA1100
-#error What am I doing here...
-#endif
-
-		.section        ".start", #alloc, #execinstr
+		.section        ".start", "ax"
 
 __SA1100_start:
 
 		@ Preserve r8/r7 i.e. kernel entry values
+
+#if defined(CONFIG_SA1100_GRAPHICSCLIENT) && !defined(CONFIG_ANGELBOOT)
+		mov	r7, #MACH_TYPE_GRAPHICSCLIENT
+		mov	r8, #0
+#endif
+#if defined(CONFIG_SA1100_GRAPHICSMASTER) && !defined(CONFIG_ANGELBOOT)
+		mov	r7, #MACH_TYPE_GRAPHICSMASTER
+		mov	r8, #0
+#endif
+#if defined(CONFIG_SA1100_ADSBITSY) && !defined(CONFIG_ANGELBOOT)
+		mov	r7, #MACH_TYPE_ADSBITSY
+		mov	r8, #0
+#endif
+
+#ifdef CONFIG_SA1100_PFS168
+		@ REVISIT_PFS168: Temporary until firmware updated to use assigned machine number
+		mov	r7, #MACH_TYPE_PFS168
+#endif
 
 #ifdef CONFIG_SA1100_VICTOR
 		teq	r7, #MACH_TYPE_VICTOR
@@ -54,6 +68,7 @@ __SA1100_start:
 		bic	r0, r0, #0x0d		@ clear WB, DC, MMU
 		bic	r0, r0, #0x1000		@ clear Icache
 		mcr	p15, 0, r0, c1, c0, 0
+
 /*
  * Pause for a short time so that we give enough time
  * for the host to start a terminal up.
@@ -61,3 +76,4 @@ __SA1100_start:
 		mov	r0, #0x00200000
 1:		subs	r0, r0, #1
 		bne	1b
+

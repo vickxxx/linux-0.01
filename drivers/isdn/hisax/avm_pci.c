@@ -1,13 +1,17 @@
-/* $Id: avm_pci.c,v 1.22.6.2 2000/11/29 16:00:14 kai Exp $
+/* $Id: avm_pci.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * avm_pci.c    low level stuff for AVM Fritz!PCI and ISA PnP isdn cards
- *              Thanks to AVM, Berlin for informations
+ * low level stuff for AVM Fritz!PCI and ISA PnP isdn cards
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ * Thanks to AVM, Berlin for information
  *
  */
+
 #define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/init.h>
@@ -15,10 +19,11 @@
 #include "isac.h"
 #include "isdnl1.h"
 #include <linux/pci.h>
+#include <linux/isapnp.h>
 #include <linux/interrupt.h>
 
 extern const char *CardType[];
-static const char *avm_pci_rev = "$Revision: 1.22.6.2 $";
+static const char *avm_pci_rev = "$Revision: 1.1.4.1 $";
 
 #define  AVM_FRITZ_PCI		1
 #define  AVM_FRITZ_PNP		2
@@ -286,7 +291,8 @@ hdlc_empty_fifo(struct BCState *bcs, int count)
 			debugl1(cs, "hdlc_empty_fifo: incoming packet too large");
 		return;
 	}
-	ptr = (u_int *) p = bcs->hw.hdlc.rcvbuf + bcs->hw.hdlc.rcvidx;
+	p = bcs->hw.hdlc.rcvbuf + bcs->hw.hdlc.rcvidx;
+	ptr = (u_int *)p;
 	bcs->hw.hdlc.rcvidx += count;
 	if (cs->subtyp == AVM_FRITZ_PCI) {
 		outl(idx, cs->hw.avm.cfg_reg + 4);
@@ -347,7 +353,8 @@ hdlc_fill_fifo(struct BCState *bcs)
 	}
 	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
 		debugl1(cs, "hdlc_fill_fifo %d/%ld", count, bcs->tx_skb->len);
-	ptr = (u_int *) p = bcs->tx_skb->data;
+	p = bcs->tx_skb->data;
+	ptr = (u_int *)p;
 	skb_pull(bcs->tx_skb, count);
 	bcs->tx_cnt -= count;
 	bcs->hw.hdlc.count += count;
@@ -591,8 +598,8 @@ close_hdlcstate(struct BCState *bcs)
 			kfree(bcs->blog);
 			bcs->blog = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
 			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
@@ -759,6 +766,10 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 static struct pci_dev *dev_avm __initdata = NULL;
+#ifdef __ISAPNP__
+static struct pci_bus *bus_avm __initdata = NULL;
+static struct pci_dev *pnp_avm __initdata = NULL;
+#endif
 
 int __init
 setup_avm_pcipnp(struct IsdnCard *card)
@@ -772,10 +783,47 @@ setup_avm_pcipnp(struct IsdnCard *card)
 	if (cs->typ != ISDN_CTYPE_FRITZPCI)
 		return (0);
 	if (card->para[1]) {
+		/* old manual method */
 		cs->hw.avm.cfg_reg = card->para[1];
 		cs->irq = card->para[0];
 		cs->subtyp = AVM_FRITZ_PNP;
 	} else {
+#ifdef __ISAPNP__
+		if (isapnp_present()) {
+			struct pci_bus *ba;
+			if ((ba = isapnp_find_card(
+				ISAPNP_VENDOR('A', 'V', 'M'),
+				ISAPNP_FUNCTION(0x0900), bus_avm))) {
+				bus_avm = ba;
+				pnp_avm = NULL;
+				if ((pnp_avm = isapnp_find_dev(bus_avm,
+					ISAPNP_VENDOR('A', 'V', 'M'),
+					ISAPNP_FUNCTION(0x0900), pnp_avm))) {
+					pnp_avm->prepare(pnp_avm);
+					pnp_avm->deactivate(pnp_avm);
+					pnp_avm->activate(pnp_avm);
+					cs->hw.avm.cfg_reg =
+						pnp_avm->resource[0].start;
+					cs->irq = 
+						pnp_avm->irq_resource[0].start;
+					if (!cs->irq) {
+						printk(KERN_ERR "FritzPnP:No IRQ\n");
+						pnp_avm->deactivate(pnp_avm);
+						return(0);
+					}
+					if (!cs->hw.avm.cfg_reg) {
+						printk(KERN_ERR "FritzPnP:No IO address\n");
+						pnp_avm->deactivate(pnp_avm);
+						return(0);
+					}
+					cs->subtyp = AVM_FRITZ_PNP;
+					goto ready;
+				}
+			}
+		} else {
+			printk(KERN_INFO "FritzPnP: no ISA PnP present\n");
+		}
+#endif
 #if CONFIG_PCI
 		if (!pci_present()) {
 			printk(KERN_ERR "FritzPCI: no PCI bus present\n");
@@ -806,6 +854,7 @@ setup_avm_pcipnp(struct IsdnCard *card)
 		return (0);
 #endif /* CONFIG_PCI */
 	}
+ready:
 	cs->hw.avm.isac = cs->hw.avm.cfg_reg + 0x10;
 	if (check_region((cs->hw.avm.cfg_reg), 32)) {
 		printk(KERN_WARNING

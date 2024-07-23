@@ -31,14 +31,24 @@
 #include <linux/config.h>
 #include <linux/kbd_ll.h>
 #include <linux/input.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/kbd_kern.h>
 
-#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(__alpha__) || defined(__mips__)
+#if defined(CONFIG_X86) || defined(CONFIG_IA64) || defined(__alpha__) || \
+    defined(__mips__) || defined(CONFIG_SPARC64) || defined(CONFIG_SUPERH) || \
+    defined(CONFIG_PPC) || defined(__mc68000__) || defined(__hppa__) || \
+    defined(__arm__)
 
 static int x86_sysrq_alt = 0;
+#ifdef CONFIG_SPARC64
+static int sparc_l1_a_state = 0;
+extern void batten_down_hatches(void);
+#endif
+
+static int jp_kbd_109 = 1;	/* Yes, .jp is the default. See 51142. */
 
 static unsigned short x86_keycodes[256] =
 	{ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
@@ -57,8 +67,46 @@ static unsigned short x86_keycodes[256] =
 	308,310,313,314,315,317,318,319,320,321,322,323,324,325,326,330,
 	332,340,341,342,343,344,345,346,356,359,365,368,369,370,371,372 };
 
+#ifdef CONFIG_MAC_EMUMOUSEBTN
+extern int mac_hid_mouse_emulate_buttons(int, int, int);
+#endif /* CONFIG_MAC_EMUMOUSEBTN */
+#ifdef CONFIG_MAC_ADBKEYCODES
+extern int mac_hid_keyboard_sends_linux_keycodes(void);
+#else
+#define mac_hid_keyboard_sends_linux_keycodes()	0
+#endif /* CONFIG_MAC_ADBKEYCODES */
+#if defined(CONFIG_MAC_ADBKEYCODES) || defined(CONFIG_ADB_KEYBOARD)
+static unsigned char mac_keycodes[256] = {
+	  0, 53, 18, 19, 20, 21, 23, 22, 26, 28, 25, 29, 27, 24, 51, 48,
+	 12, 13, 14, 15, 17, 16, 32, 34, 31, 35, 33, 30, 36, 54,128,  1,
+	  2,  3,  5,  4, 38, 40, 37, 41, 39, 50, 56, 42,  6,  7,  8,  9,
+	 11, 45, 46, 43, 47, 44,123, 67, 58, 49, 57,122,120, 99,118, 96,
+	 97, 98,100,101,109, 71,107, 89, 91, 92, 78, 86, 87, 88, 69, 83,
+	 84, 85, 82, 65, 42,  0, 10,103,111,  0,  0,  0,  0,  0,  0,  0,
+	 76,125, 75,105,124,110,115, 62,116, 59, 60,119, 61,121,114,117,
+	  0,  0,  0,  0,127, 81,  0,113,  0,  0,  0,  0, 95, 55, 55,  0,
+	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+	  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+	  0,  0,  0,  0,  0, 94,  0, 93,  0,  0,  0,  0,  0,  0,104,102 };
+#endif	/* CONFIG_MAC_ADBKEYCODES || CONFIG_ADB_KEYBOARD */
+ 
 static int emulate_raw(unsigned int keycode, int down)
 {
+#ifdef CONFIG_MAC_EMUMOUSEBTN
+	if (mac_hid_mouse_emulate_buttons(1, keycode, down))
+		return 0;
+#endif /* CONFIG_MAC_EMUMOUSEBTN */
+#if defined(CONFIG_MAC_ADBKEYCODES) || defined(CONFIG_ADB_KEYBOARD)
+	if (!mac_hid_keyboard_sends_linux_keycodes()) {
+		if (keycode > 255 || !mac_keycodes[keycode])
+			return -1;
+       
+		handle_scancode((mac_keycodes[keycode] & 0x7f), down);
+		return 0;
+	}
+#endif	/* CONFIG_MAC_ADBKEYCODES || CONFIG_ADB_KEYBOARD */
+
 	if (keycode > 255 || !x86_keycodes[keycode])
 		return -1; 
 
@@ -71,8 +119,16 @@ static int emulate_raw(unsigned int keycode, int down)
 
 	if (keycode == KEY_SYSRQ && x86_sysrq_alt) {
 		handle_scancode(0x54, down);
+
 		return 0;
 	}
+
+#ifdef CONFIG_SPARC64
+	if (keycode == KEY_A && sparc_l1_a_state) {
+		sparc_l1_a_state = 0;
+		batten_down_hatches();
+	}
+#endif
 
 	if (x86_keycodes[keycode] & 0x100)
 		handle_scancode(0xe0, 1);
@@ -86,46 +142,30 @@ static int emulate_raw(unsigned int keycode, int down)
 
 	if (keycode == KEY_LEFTALT || keycode == KEY_RIGHTALT)
 		x86_sysrq_alt = down;
-
-	return 0;
-}
-
-#elif defined(CONFIG_ADB_KEYBOARD)
-
-static unsigned char mac_keycodes[128] =
-	{ 0, 53, 18, 19, 20, 21, 23, 22, 26, 28, 25, 29, 27, 24, 51, 48,
-	 12, 13, 14, 15, 17, 16, 32, 34, 31, 35, 33, 30, 36, 54,128,  1,
-	  2,  3,  5,  4, 38, 40, 37, 41, 39, 50, 56, 42,  6,  7,  8,  9,
-	 11, 45, 46, 43, 47, 44,123, 67, 58, 49, 57,122,120, 99,118, 96,
-	 97, 98,100,101,109, 71,107, 89, 91, 92, 78, 86, 87, 88, 69, 83,
-	 84, 85, 82, 65, 42,  0, 10,103,111,  0,  0,  0,  0,  0,  0,  0,
-	 76,125, 75,105,124,  0,115, 62,116, 59, 60,119, 61,121,114,117,
-	  0,  0,  0,  0,127, 81,  0,113,  0,  0,  0,  0,  0, 55, 55 };
-
-static int emulate_raw(unsigned int keycode, int down)
-{
-	if (keycode > 127 || !mac_keycodes[keycode])
-		return -1;
-
-	handle_scancode(mac_keycodes[keycode] & 0x7f, down);
-
-	return 0;
-}
-
+#ifdef CONFIG_SPARC64
+	if (keycode == KEY_STOP)
+		sparc_l1_a_state = down;
 #endif
 
+	return 0;
+}
+
+#endif /* CONFIG_X86 || CONFIG_IA64 || __alpha__ || __mips__ || CONFIG_PPC */
+
 static struct input_handler keybdev_handler;
+
+static unsigned int ledstate = 0xff;
 
 void keybdev_ledfunc(unsigned int led)
 {
 	struct input_handle *handle;	
 
-	for (handle = keybdev_handler.handle; handle; handle = handle->hnext) {
+	ledstate = led;
 
+	for (handle = keybdev_handler.handle; handle; handle = handle->hnext) {
 		input_event(handle->dev, EV_LED, LED_SCROLLL, !!(led & 0x01));
 		input_event(handle->dev, EV_LED, LED_NUML,    !!(led & 0x02));
 		input_event(handle->dev, EV_LED, LED_CAPSL,   !!(led & 0x04));
-
 	}
 }
 
@@ -134,7 +174,8 @@ void keybdev_event(struct input_handle *handle, unsigned int type, unsigned int 
 	if (type != EV_KEY) return;
 
 	if (emulate_raw(code, down))
-		printk(KERN_WARNING "keyboard.c: can't emulate rawmode for keycode %d\n", code);
+		if(code < BTN_MISC)
+			printk(KERN_WARNING "keybdev.c: can't emulate rawmode for keycode %d\n", code);
 
 	tasklet_schedule(&keyboard_tasklet);
 }
@@ -162,14 +203,20 @@ static struct input_handle *keybdev_connect(struct input_handler *handler, struc
 
 	input_open_device(handle);
 
-	printk(KERN_INFO "keybdev.c: Adding keyboard: input%d\n", dev->number);
+//	printk(KERN_INFO "keybdev.c: Adding keyboard: input%d\n", dev->number);
+
+	if (ledstate != 0xff) {
+		input_event(dev, EV_LED, LED_SCROLLL, !!(ledstate & 0x01));
+		input_event(dev, EV_LED, LED_NUML,    !!(ledstate & 0x02));
+		input_event(dev, EV_LED, LED_CAPSL,   !!(ledstate & 0x04));
+	}
 
 	return handle;
 }
 
 static void keybdev_disconnect(struct input_handle *handle)
 {
-	printk(KERN_INFO "keybdev.c: Removing keyboard: input%d\n", handle->dev->number);
+//	printk(KERN_INFO "keybdev.c: Removing keyboard: input%d\n", handle->dev->number);
 	input_close_device(handle);
 	kfree(handle);
 }
@@ -184,6 +231,16 @@ static int __init keybdev_init(void)
 {
 	input_register_handler(&keybdev_handler);
 	kbd_ledfunc = keybdev_ledfunc;
+	kbd_refresh_leds();
+
+	if (jp_kbd_109) {
+		x86_keycodes[0xb5] = 0x73;	/* backslash, underscore */
+		x86_keycodes[0xb6] = 0x70;
+		x86_keycodes[0xb7] = 0x7d;	/* Yen, pipe */
+		x86_keycodes[0xb8] = 0x79;
+		x86_keycodes[0xb9] = 0x7b;
+	}
+
 	return 0;
 }
 
@@ -198,3 +255,5 @@ module_exit(keybdev_exit);
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_DESCRIPTION("Input driver to keyboard driver binding");
+MODULE_PARM(jp_kbd_109, "i");
+MODULE_LICENSE("GPL");

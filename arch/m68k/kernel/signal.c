@@ -16,7 +16,7 @@
  * 1997-12-01  Modified for POSIX.1b signals by Andreas Schwab
  *
  * mathemu support by Roman Zippel
- *  (Note: fpstate in the signal context is completly ignored for the emulator
+ *  (Note: fpstate in the signal context is completely ignored for the emulator
  *         and the internal floating point format is put on stack)
  */
 
@@ -38,6 +38,7 @@
 #include <linux/unistd.h>
 #include <linux/stddef.h>
 #include <linux/highuid.h>
+#include <linux/personality.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -47,8 +48,6 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
-			 int options, unsigned long *ru);
 asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs);
 
 const int frame_extra_sizes[16] = {
@@ -1120,14 +1119,17 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 					continue;
 				/* FALLTHRU */
 
-			case SIGSTOP:
+			case SIGSTOP: {
+				struct signal_struct *sig;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
-				if (!(current->p_pptr->sig->action[SIGCHLD-1]
-				      .sa.sa_flags & SA_NOCLDSTOP))
-					notify_parent(current, SIGCHLD);
+                                sig = current->p_pptr->sig;
+                                if (sig && !(sig->action[SIGCHLD-1].sa.sa_flags 
+& SA_NOCLDSTOP))
+                                        notify_parent(current, SIGCHLD);
 				schedule();
 				continue;
+			}
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGIOT: case SIGFPE: case SIGSEGV:
@@ -1137,10 +1139,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 				/* FALLTHRU */
 
 			default:
-				sigaddset(&current->pending.signal, signr);
-				recalc_sigpending(current);
-				current->flags |= PF_SIGNALED;
-				do_exit(exit_code);
+				sig_exit(signr, exit_code, &info);
 				/* NOTREACHED */
 			}
 		}

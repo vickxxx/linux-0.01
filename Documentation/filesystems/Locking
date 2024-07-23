@@ -45,6 +45,10 @@ prototypes:
 	int (*revalidate) (struct dentry *);
 	int (*setattr) (struct dentry *, struct iattr *);
 	int (*getattr) (struct dentry *, struct iattr *);
+	int (*setxattr) (struct dentry *, const char *, void *, size_t, int);
+	ssize_t (*getxattr) (struct dentry *, const char *, void *, size_t);
+	ssize_t (*listxattr) (struct dentry *, char *, size_t);
+	int (*removexattr) (struct dentry *, const char *);
 
 locking rules:
 	all may block
@@ -61,9 +65,13 @@ readlink:	no	no		no
 follow_link:	no	no		no
 truncate:	yes	yes		no		(see below)
 setattr:	yes	if ATTR_SIZE	no
-permssion:	yes	no		no
+permission:	yes	no		no
 getattr:						(see below)
 revalidate:	no					(see below)
+setxattr:	yes	yes		no
+getxattr:	yes	yes		no
+listxattr:	yes	yes		no
+removexattr:	yes	yes		no
 	Additionally, ->rmdir() has i_zombie on victim and so does ->rename()
 in case when target exists and is a directory.
 	->rename() on directories has (per-superblock) ->s_vfs_rename_sem.
@@ -85,6 +93,7 @@ prototypes:
 	void (*delete_inode) (struct inode *);
 	void (*put_super) (struct super_block *);
 	void (*write_super) (struct super_block *);
+	int (*sync_fs) (struct super_block *);
 	int (*statfs) (struct super_block *, struct statfs *);
 	int (*remount_fs) (struct super_block *, int *, char *);
 	void (*clear_inode) (struct inode *);
@@ -100,6 +109,7 @@ delete_inode:	no
 clear_inode:	no	
 put_super:	yes	yes	maybe		(see below)
 write_super:	yes	yes	maybe		(see below)
+sync_fs:	yes	no	maybe		(see below)
 statfs:		yes	no	no
 remount_fs:	yes	yes	maybe		(see below)
 umount_begin:	yes	no	maybe		(see below)
@@ -117,24 +127,31 @@ yes		yes	yes		maybe
 
 --------------------------- address_space_operations --------------------------
 prototypes:
-	int (*writepage)(struct file *, struct page *);
+	int (*writepage)(struct page *);
 	int (*readpage)(struct file *, struct page *);
 	int (*sync_page)(struct page *);
 	int (*prepare_write)(struct file *, struct page *, unsigned, unsigned);
 	int (*commit_write)(struct file *, struct page *, unsigned, unsigned);
 	int (*bmap)(struct address_space *, long);
+	int (*flushpage) (struct page *, unsigned long);
+	int (*releasepage) (struct page *, int);
+	int (*direct_IO)(int, struct inode *, struct kiobuf *, unsigned long, int);
+
 locking rules:
 	All may block
 		BKL	PageLocked(page)
-writepage:	no	yes
-readpage:	no	yes
+writepage:	no	yes, unlocks
+readpage:	no	yes, unlocks
 sync_page:	no	maybe
 prepare_write:	no	yes
 commit_write:	no	yes
 bmap:		yes
+flushpage:	no	yes
+releasepage:	no	yes
 
 	->prepare_write(), ->commit_write(), ->sync_page() and ->readpage()
 may be called from the request handler (/dev/loop).
+	->readpage() and ->writepage() unlock the page.
 	->sync_page() locking rules are not well-defined - usually it is called
 with lock on page, but that is not guaranteed. Considering the currently
 existing instances of this method ->sync_page() itself doesn't look
@@ -143,6 +160,15 @@ well-defined...
 filesystems and by the swapper. The latter will eventually go away. All
 instances do not actually need the BKL. Please, keep it that way and don't
 breed new callers.
+	->flushpage() is called when the filesystem must attempt to drop
+some or all of the buffers from the page when it is being truncated.  It
+returns zero on success.  If ->flushpage is zero, the kernel uses
+block_flushpage() instead.
+	->releasepage() is called when the kernel is about to try to drop the
+buffers from the page in preparation for freeing it.  It returns zero to
+indicate that the buffers are (or may be) freeable.  If ->releasepage is zero,
+the kernel assumes that the fs has no private interest in the buffers.
+
 	Note: currently almost all instances of address_space methods are
 using BKL for internal serialization and that's one of the worst sources
 of contention. Normally they are calling library functions (in fs/buffer.c)
@@ -285,26 +311,13 @@ transfer:	no
 prototypes:
 	void (*open)(struct vm_area_struct*);
 	void (*close)(struct vm_area_struct*);
-	void (*unmap)(struct vm_area_struct*, unsigned long, size_t);
-	void (*protect)(struct vm_area_struct*, unsigned long, size_t, unsigned);
-	int (*sync)(struct vm_area_struct*, unsigned long, size_t, unsigned);
 	struct page *(*nopage)(struct vm_area_struct*, unsigned long, int);
-	struct page *(*wppage)(struct vm_area_struct*, unsigned long, struct page*);
-	int (*swapout)(struct page *, struct file *);
 
 locking rules:
 		BKL	mmap_sem
 open:		no	yes
 close:		no	yes
-sync:		no	yes
-unmap:		no	yes
 nopage:		no	yes
-swapout:	yes	yes
-wpppage:				(see below)
-protect:				(see below)
-
-->wppage() and ->protect() have no instances and nothing calls them; looks like
-they must die...
 
 ================================================================================
 			Dubious stuff

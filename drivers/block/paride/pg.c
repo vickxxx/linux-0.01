@@ -1,6 +1,6 @@
 /* 
 	pg.c    (c) 1998  Grant R. Guenther <grant@torque.net>
-			  Under the terms of the GNU public license.
+			  Under the terms of the GNU General Public License.
 
 	The pg driver provides a simple character device interface for
 	sending ATAPI commands to a device.  With the exception of the
@@ -167,7 +167,7 @@ static int pg_drive_count;
 #include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mtio.h>
 #include <linux/pg.h>
 #include <linux/wait.h>
@@ -491,7 +491,8 @@ static void xs( char *buf, char *targ, int offs, int len )
 	for (k=0;k<len;k++) 
 	   if((buf[k+offs]!=0x20)||(buf[k+offs]!=l))
 		l=targ[j++]=buf[k+offs];
-	if (l==0x20) j--; targ[j]=0;
+	if (l==0x20) j--;
+	targ[j]=0;
 }
 
 static int pg_identify( int unit, int log )
@@ -627,7 +628,8 @@ static ssize_t pg_write(struct file * filp, const char * buf,
 	if (PG.busy) return -EBUSY;
 	if (count < hs) return -EINVAL;
 	
-	copy_from_user((char *)&hdr,buf,hs);
+	if (copy_from_user((char *)&hdr, buf, hs))
+		return -EFAULT;
 
 	if (hdr.magic != PG_MAGIC) return -EINVAL;
 	if (hdr.dlen > PG_MAX_DATA) return -EINVAL;
@@ -651,8 +653,8 @@ static ssize_t pg_write(struct file * filp, const char * buf,
 
 	PG.busy = 1;
 
-	copy_from_user(PG.bufptr,buf+hs,count-hs);
-
+	if (copy_from_user(PG.bufptr, buf + hs, count - hs))
+		return -EFAULT;
 	return count;
 }
 
@@ -686,11 +688,14 @@ static ssize_t pg_read(struct file * filp, char * buf,
 	hdr.duration = (jiffies - PG.start + HZ/2) / HZ;
 	hdr.scsi = PG.status & 0x0f;
 
-	copy_to_user(buf,(char *)&hdr,hs);
-	if (copy > 0) copy_to_user(buf+hs,PG.bufptr,copy);
-	
+	if (copy_to_user(buf, (char *)&hdr, hs))
+		return -EFAULT;
+	if (copy > 0)
+		if (copy_to_user(buf+hs,PG.bufptr,copy))
+			return -EFAULT;
 	return copy+hs;
 }
 
 /* end of pg.c */
 
+MODULE_LICENSE("GPL");

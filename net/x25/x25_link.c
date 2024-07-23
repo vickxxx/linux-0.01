@@ -20,8 +20,6 @@
  *	2000-09-04	Henner Eisen	  dev_hold() / dev_put() for x25_neigh.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_X25) || defined(CONFIG_X25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -42,9 +40,10 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 #include <net/x25.h>
 
-static struct x25_neigh *x25_neigh_list = NULL;
+static struct x25_neigh *x25_neigh_list /* = NULL initially */;
 
 static void x25_t20timer_expiry(unsigned long);
 
@@ -220,7 +219,7 @@ void x25_transmit_clear_request(struct x25_neigh *neigh, unsigned int lci, unsig
 
 	dptr = skb_put(skb, X25_STD_MIN_LEN + 2);
 
-	*dptr++ = ((lci >> 8) & 0x0F) | (neigh->extended) ? X25_GFI_EXTSEQ : X25_GFI_STDSEQ;
+	*dptr++ = ((lci >> 8) & 0x0F) | (neigh->extended ? X25_GFI_EXTSEQ : X25_GFI_STDSEQ);
 	*dptr++ = ((lci >> 0) & 0xFF);
 	*dptr++ = X25_CLEAR_REQUEST;
 	*dptr++ = cause;
@@ -310,10 +309,8 @@ static void x25_remove_neigh(struct x25_neigh *x25_neigh)
 {
 	struct x25_neigh *s;
 	unsigned long flags;
-	struct sk_buff *skb;
 
-	while ((skb = skb_dequeue(&x25_neigh->queue)) != NULL)
-		kfree_skb(skb);
+	skb_queue_purge(&x25_neigh->queue);
 
 	x25_stop_t20timer(x25_neigh);
 
@@ -422,12 +419,11 @@ int x25_subscr_ioctl(unsigned int cmd, void *arg)
 	return 0;
 }
 
-#ifdef MODULE
 
 /*
  *	Release all memory associated with X.25 neighbour structures.
  */
-void x25_link_free(void)
+void __exit x25_link_free(void)
 {
 	struct x25_neigh *neigh, *x25_neigh = x25_neigh_list;
 
@@ -438,7 +434,3 @@ void x25_link_free(void)
 		x25_remove_neigh(neigh);
 	}
 }
-
-#endif
-
-#endif

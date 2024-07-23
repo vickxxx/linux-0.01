@@ -226,18 +226,6 @@ void __init paging_init(void)
 		for (i = 0; i < 16; i++)
 			pgprot_val(protection_map[i]) |= _PAGE_CACHE040;
 	}
-	/* Fix the PAGE_NONE value. */
-	if (CPU_IS_040_OR_060) {
-		/* On the 680[46]0 we can use the _PAGE_SUPER bit.  */
-		pgprot_val(protection_map[0]) |= _PAGE_SUPER;
-		pgprot_val(protection_map[VM_SHARED]) |= _PAGE_SUPER;
-	} else {
-		/* Otherwise we must fake it. */
-		pgprot_val(protection_map[0]) &= ~_PAGE_PRESENT;
-		pgprot_val(protection_map[0]) |= _PAGE_FAKE_SUPER;
-		pgprot_val(protection_map[VM_SHARED]) &= ~_PAGE_PRESENT;
-		pgprot_val(protection_map[VM_SHARED]) |= _PAGE_FAKE_SUPER;
-	}
 
 	/*
 	 * Map the physical memory available into the kernel virtual
@@ -276,7 +264,7 @@ void __init paging_init(void)
 	printk ("before free_area_init\n");
 #endif
 	zones_size[0] = (mach_max_dma_address < (unsigned long)high_memory ?
-			 mach_max_dma_address : (unsigned long)high_memory);
+			 (mach_max_dma_address+1) : (unsigned long)high_memory);
 	zones_size[1] = (unsigned long)high_memory - zones_size[0];
 
 	zones_size[0] = (zones_size[0] - PAGE_OFFSET) >> PAGE_SHIFT;
@@ -286,6 +274,7 @@ void __init paging_init(void)
 }
 
 extern char __init_begin, __init_end;
+extern unsigned long totalram_pages;
 
 void free_initmem(void)
 {
@@ -296,6 +285,7 @@ void free_initmem(void)
 		virt_to_page(addr)->flags &= ~(1 << PG_reserved);
 		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
+		totalram_pages++;
 	}
 }
 

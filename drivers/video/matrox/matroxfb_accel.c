@@ -2,9 +2,9 @@
  *
  * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
  *
- * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998-2001 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
- * Version: 1.50 2000/08/10
+ * Version: 1.51 2001/06/18
  *
  * MTRR stuff: 1998 Tom Rini <trini@kernel.crashing.org>
  *
@@ -129,6 +129,10 @@ void matrox_cfbX_init(WPMINFO struct display* p) {
 	mga_outl(M_YDSTORG, curr_ydstorg(MINFO));
 	if (ACCESS_FBINFO(capable.plnwt))
 		mga_outl(M_PLNWT, -1);
+	if (ACCESS_FBINFO(capable.srcorg)) {
+		mga_outl(M_SRCORG, 0);
+		mga_outl(M_DSTORG, 0);
+	}
 	mga_outl(M_OPMODE, mopmode);
 	mga_outl(M_CXBNDRY, 0xFFFF0000);
 	mga_outl(M_YTOP, 0);
@@ -138,6 +142,8 @@ void matrox_cfbX_init(WPMINFO struct display* p) {
 	if (isMilleniumII(MINFO)) ACCESS_FBINFO(accel.m_dwg_rect) |= M_DWG_TRANSC;
 	ACCESS_FBINFO(accel.m_opmode) = mopmode;
 }
+
+EXPORT_SYMBOL(matrox_cfbX_init);
 
 static void matrox_cfbX_bmove(struct display* p, int sy, int sx, int dy, int dx, int height, int width) {
 	int pixx = p->var.xres_virtual, start, end;
@@ -650,13 +656,15 @@ static void matrox_cfbX_putcs(u_int32_t fgx, u_int32_t bgx, struct display* p, c
 
 #ifdef FBCON_HAS_CFB8
 static void matrox_cfb8_putcs(struct vc_data* conp, struct display* p, const unsigned short* s, int count, int yy, int xx) {
+	u_int16_t c;
 	u_int32_t fgx, bgx;
 	MINFO_FROM_DISP(p);
 
 	DBG_HEAVY("matroxfb_cfb8_putcs");
 
-	fgx = attr_fgcol(p, scr_readw(s));
-	bgx = attr_bgcol(p, scr_readw(s));
+	c = scr_readw(s);
+	fgx = attr_fgcol(p, c);
+	bgx = attr_bgcol(p, c);
 	fgx |= (fgx << 8);
 	fgx |= (fgx << 16);
 	bgx |= (bgx << 8);
@@ -667,13 +675,15 @@ static void matrox_cfb8_putcs(struct vc_data* conp, struct display* p, const uns
 
 #ifdef FBCON_HAS_CFB16
 static void matrox_cfb16_putcs(struct vc_data* conp, struct display* p, const unsigned short* s, int count, int yy, int xx) {
+	u_int16_t c;
 	u_int32_t fgx, bgx;
 	MINFO_FROM_DISP(p);
 
 	DBG_HEAVY("matroxfb_cfb16_putcs");
 
-	fgx = ((u_int16_t*)p->dispsw_data)[attr_fgcol(p, scr_readw(s))];
-	bgx = ((u_int16_t*)p->dispsw_data)[attr_bgcol(p, scr_readw(s))];
+	c = scr_readw(s);
+	fgx = ((u_int16_t*)p->dispsw_data)[attr_fgcol(p, c)];
+	bgx = ((u_int16_t*)p->dispsw_data)[attr_bgcol(p, c)];
 	fgx |= (fgx << 16);
 	bgx |= (bgx << 16);
 	ACCESS_FBINFO(curr.putcs)(fgx, bgx, p, s, count, yy, xx);
@@ -682,13 +692,15 @@ static void matrox_cfb16_putcs(struct vc_data* conp, struct display* p, const un
 
 #if defined(FBCON_HAS_CFB32) || defined(FBCON_HAS_CFB24)
 static void matrox_cfb32_putcs(struct vc_data* conp, struct display* p, const unsigned short* s, int count, int yy, int xx) {
+	u_int16_t c;
 	u_int32_t fgx, bgx;
 	MINFO_FROM_DISP(p);
 
 	DBG_HEAVY("matroxfb_cfb32_putcs");
 
-	fgx = ((u_int32_t*)p->dispsw_data)[attr_fgcol(p, scr_readw(s))];
-	bgx = ((u_int32_t*)p->dispsw_data)[attr_bgcol(p, scr_readw(s))];
+	c = scr_readw(s);
+	fgx = ((u_int32_t*)p->dispsw_data)[attr_fgcol(p, c)];
+	bgx = ((u_int32_t*)p->dispsw_data)[attr_bgcol(p, c)];
 	ACCESS_FBINFO(curr.putcs)(fgx, bgx, p, s, count, yy, xx);
 }
 #endif
@@ -746,6 +758,7 @@ static void matrox_cfb8_revc(struct display* p, int xx, int yy) {
 }
 #endif
 
+#if defined(FBCON_HAS_CFB16) || defined(FBCON_HAS_CFB24) || defined(FBCON_HAS_CFB32)
 static void matrox_cfbX_revc(struct display* p, int xx, int yy) {
 	CRITFLAGS
 	MINFO_FROM_DISP(p);
@@ -766,6 +779,7 @@ static void matrox_cfbX_revc(struct display* p, int xx, int yy) {
 
 	CRITEND
 }
+#endif
 
 static void matrox_cfbX_clear_margins(struct vc_data* conp, struct display* p, int bottom_only) {
 	unsigned int bottom_height, right_width;
@@ -896,12 +910,14 @@ static void matrox_text_putcs(struct vc_data* conp, struct display* p, const uns
 	unsigned int offs;
 	unsigned int attr;
 	unsigned int step;
+	u_int16_t c;
 	CRITFLAGS
 	MINFO_FROM_DISP(p);
 
 	step = ACCESS_FBINFO(devflags.textstep);
 	offs = yy * p->next_line + xx * step;
-	attr = attr_fgcol(p, scr_readw(s)) | (attr_bgcol(p, scr_readw(s)) << 4);
+	c = scr_readw(s);
+	attr = attr_fgcol(p, c) | (attr_bgcol(p, c) << 4);
 
 	CRITBEGIN
 
@@ -931,7 +947,7 @@ static void matrox_text_revc(struct display* p, int xx, int yy) {
 	CRITEND
 }
 
-void matrox_text_createcursor(WPMINFO struct display* p) {
+static void matrox_text_createcursor(WPMINFO struct display* p) {
 	CRITFLAGS
 
 	if (ACCESS_FBINFO(currcon_display) != p)
@@ -1016,6 +1032,8 @@ void matrox_text_round(CPMINFO struct fb_var_screeninfo* var, struct display* p)
 	}
 	var->xres_virtual = vxres * hf;
 }
+
+EXPORT_SYMBOL(matrox_text_round);
 
 static int matrox_text_setfont(struct display* p, int width, int height) {
 	DBG("matrox_text_setfont");
@@ -1211,6 +1229,8 @@ void initMatrox(WPMINFO struct display* p) {
 	}
 }
 
+EXPORT_SYMBOL(initMatrox);
+
 void matrox_init_putc(WPMINFO struct display* p, void (*dac_createcursor)(WPMINFO struct display* p)) {
 	int i;
 
@@ -1233,3 +1253,7 @@ void matrox_init_putc(WPMINFO struct display* p, void (*dac_createcursor)(WPMINF
 		ACCESS_FBINFO(curr.putcs) = matrox_cfbX_putcs;
 	}
 }
+
+EXPORT_SYMBOL(matrox_init_putc);
+
+MODULE_LICENSE("GPL");

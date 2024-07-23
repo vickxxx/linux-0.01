@@ -11,7 +11,7 @@
  *   Little mods for all variable to reside either into rodata or bss segments
  *   by marking constant variables with 'const' and initializing all the others
  *   at run-time only.  This allows for the kernel uncompressor to run
- *   directly from Flash or ROM memory on embeded systems.
+ *   directly from Flash or ROM memory on embedded systems.
  */
 
 /*
@@ -320,7 +320,7 @@ DEBG("huft1 ");
   {
     *t = (struct huft *)NULL;
     *m = 0;
-    return 0;
+    return 2;
   }
 
 DEBG("huft2 ");
@@ -368,6 +368,7 @@ DEBG("huft5 ");
     if ((j = *p++) != 0)
       v[x[j]++] = i;
   } while (++i < n);
+  n = x[g];                   /* set n to length of v */
 
 DEBG("h6 ");
 
@@ -404,12 +405,13 @@ DEBG1("1 ");
 DEBG1("2 ");
           f -= a + 1;           /* deduct codes from patterns left */
           xp = c + k;
-          while (++j < z)       /* try smaller tables up to z bits */
-          {
-            if ((f <<= 1) <= *++xp)
-              break;            /* enough codes to use up j bits */
-            f -= *xp;           /* else deduct codes from patterns */
-          }
+          if (j < z)
+            while (++j < z)       /* try smaller tables up to z bits */
+            {
+              if ((f <<= 1) <= *++xp)
+                break;            /* enough codes to use up j bits */
+              f -= *xp;           /* else deduct codes from patterns */
+            }
         }
 DEBG1("3 ");
         z = 1 << j;             /* table entries for j-bit table */
@@ -1009,7 +1011,7 @@ STATIC int inflate()
 
 static ulg crc_32_tab[256];
 static ulg crc;		/* initialized in makecrc() so it'll reside in bss */
-#define CRC_VALUE (crc ^ 0xffffffffL)
+#define CRC_VALUE (crc ^ 0xffffffffUL)
 
 /*
  * Code to compute the CRC-32 table. Borrowed from 
@@ -1049,7 +1051,7 @@ makecrc(void)
   }
 
   /* this is initialized here so this code could reside in ROM */
-  crc = (ulg)0xffffffffL; /* shift register contents */
+  crc = (ulg)0xffffffffUL; /* shift register contents */
 }
 
 /* gzip flag byte */

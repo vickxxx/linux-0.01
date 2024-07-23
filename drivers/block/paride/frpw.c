@@ -1,6 +1,6 @@
 /* 
 	frpw.c	(c) 1996-8  Grant R. Guenther <grant@torque.net>
-		            Under the terms of the GNU public license
+		            Under the terms of the GNU General Public License
 
 	frpw.c is a low-level protocol driver for the Freecom "Power"
 	parallel port IDE adapter.
@@ -322,3 +322,4 @@ void    cleanup_module(void)
 #endif
 
 /* end of frpw.c */
+MODULE_LICENSE("GPL");

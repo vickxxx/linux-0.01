@@ -1,6 +1,6 @@
 
 /* Overhauled routines for dealing with different mmap regions of flash */
-/* $Id: map.h,v 1.10 2000/12/04 13:18:33 dwmw2 Exp $ */
+/* $Id: map.h,v 1.29 2002/10/21 13:20:52 jocke Exp $ */
 
 #ifndef __LINUX_MTD_MAP_H__
 #define __LINUX_MTD_MAP_H__
@@ -8,7 +8,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/mtd/mtd.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 /* The map stuff is very simple. You fill in your struct map_info with
    a handful of routines for accessing the device, making sure they handle
@@ -33,6 +33,7 @@ struct map_info {
 	__u8 (*read8)(struct map_info *, unsigned long);
 	__u16 (*read16)(struct map_info *, unsigned long);
 	__u32 (*read32)(struct map_info *, unsigned long);  
+	__u64 (*read64)(struct map_info *, unsigned long);  
 	/* If it returned a 'long' I'd call it readl.
 	 * It doesn't.
 	 * I won't.
@@ -42,9 +43,13 @@ struct map_info {
 	void (*write8)(struct map_info *, __u8, unsigned long);
 	void (*write16)(struct map_info *, __u16, unsigned long);
 	void (*write32)(struct map_info *, __u32, unsigned long);
+	void (*write64)(struct map_info *, __u64, unsigned long);
 	void (*copy_to)(struct map_info *, unsigned long, const void *, ssize_t);
 
-	void (*set_vpp)(int);
+	u_char * (*point) (struct map_info *, loff_t, size_t);
+	void (*unpoint) (struct map_info *, u_char *, loff_t, size_t);
+
+	void (*set_vpp)(struct map_info *, int);
 	/* We put these two here rather than a single void *map_priv, 
 	   because we want mappers to be able to have quickly-accessible
 	   cache for the 'currently-mapped page' without the _extra_
@@ -53,47 +58,23 @@ struct map_info {
 	unsigned long map_priv_1;
 	unsigned long map_priv_2;
 	void *fldrv_priv;
-	void (*fldrv_destroy)(struct mtd_info *);
-	const char *im_name;
+	struct mtd_chip_driver *fldrv;
 };
 
-#ifdef CONFIG_MODULES
-/* 
- * Probe for the contents of a map device and make an MTD structure
- * if anything is recognised. Doesn't register it because the calling
- * map driver needs to set the 'module' field first.
- */
-static inline struct mtd_info *do_map_probe(struct map_info *map, const char *funcname, const char *modname)
-{
-	struct mtd_info *(*probe_p)(struct map_info *);
-	struct mtd_info *mtd = NULL;
 
-	if ((probe_p = inter_module_get_request(modname, funcname)))
-		mtd = (*probe_p)(map);	/* map->im_name is set by probe */
+struct mtd_chip_driver {
+	struct mtd_info *(*probe)(struct map_info *map);
+	void (*destroy)(struct mtd_info *);
+	struct module *module;
+	char *name;
+	struct list_head list;
+};
 
-	return mtd;
-}
+void register_mtd_chip_driver(struct mtd_chip_driver *);
+void unregister_mtd_chip_driver(struct mtd_chip_driver *);
 
+struct mtd_info *do_map_probe(const char *name, struct map_info *map);
 
-/* 
- * Commonly-used probe functions for different types of chip.
- */
-#define do_cfi_probe(x) do_map_probe(x, "cfi_probe", "cfi_probe")
-#define do_jedec_probe(x) do_map_probe(x, "jedec_probe", "jedec_probe")
-#define do_ram_probe(x) do_map_probe(x, "map_ram_probe", "map_ram")
-#define do_rom_probe(x) do_map_probe(x, "map_rom_probe", "map_rom")
-#else
-	/* without module support, call probe function directly */
-extern struct mtd_info *cfi_probe(struct map_info *);
-extern struct mtd_info *jedec_probe(struct map_info *);
-extern struct mtd_info *map_ram_probe(struct map_info *);
-extern struct mtd_info *map_rom_probe(struct map_info *);
-
-#define do_cfi_probe(x) cfi_probe(x)
-#define do_jedec_probe(x) jedec_probe(x)
-#define do_ram_probe(x) map_ram_probe(x)
-#define do_rom_probe(x) map_rom_probe(x)
-#endif
 
 /*
  * Destroy an MTD device which was created for a map device.
@@ -103,12 +84,16 @@ static inline void map_destroy(struct mtd_info *mtd)
 {
 	struct map_info *map = mtd->priv;
 
-	map->fldrv_destroy(mtd);
-	inter_module_put(map->im_name);
+	if (map->fldrv->destroy)
+		map->fldrv->destroy(mtd);
+#ifdef CONFIG_MODULES
+	if (map->fldrv->module)
+		__MOD_DEC_USE_COUNT(map->fldrv->module);
+#endif
 	kfree(mtd);
 }
 
-#define ENABLE_VPP(map) do { if(map->set_vpp) map->set_vpp(1); } while(0)
-#define DISABLE_VPP(map) do { if(map->set_vpp) map->set_vpp(0); } while(0)
+#define ENABLE_VPP(map) do { if(map->set_vpp) map->set_vpp(map, 1); } while(0)
+#define DISABLE_VPP(map) do { if(map->set_vpp) map->set_vpp(map, 0); } while(0)
 
 #endif /* __LINUX_MTD_MAP_H__ */

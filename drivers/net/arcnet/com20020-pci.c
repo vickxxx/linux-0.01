@@ -1,9 +1,10 @@
 /*
- * Linux ARCnet driver - COM20020 PCI support (Contemporary Controls PCI20)
+ * Linux ARCnet driver - COM20020 PCI support
+ * for Contemporary Controls PCI20 and SOHARD SH-ARC PCI with com20020 chipset
  * 
  * Written 1994-1999 by Avery Pennarun,
  *    based on an ISA version by David Woodhouse.
- * Written 1999-2000 by Martin Mares <mj@suse.cz>.
+ * Written 1999-2000 by Martin Mares <mj@ucw.cz>.
  * Derived from skeleton.c by Donald Becker.
  *
  * Special thanks to Contemporary Controls, Inc. (www.ccontrols.com)
@@ -16,7 +17,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -29,7 +30,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/init.h>
@@ -44,12 +45,12 @@
 
 /* Module parameters */
 
-static int node = 0;
+static int node;
 static char *device;		/* use eg. device="arc1" to change name */
 static int timeout = 3;
-static int backplane = 0;
-static int clockp = 0;
-static int clockm = 0;
+static int backplane;
+static int clockp;
+static int clockm;
 
 MODULE_PARM(node, "i");
 MODULE_PARM(device, "s");
@@ -57,6 +58,7 @@ MODULE_PARM(timeout, "i");
 MODULE_PARM(backplane, "i");
 MODULE_PARM(clockp, "i");
 MODULE_PARM(clockm, "i");
+MODULE_LICENSE("GPL");
 
 static void com20020pci_open_close(struct net_device *dev, bool open)
 {
@@ -78,12 +80,28 @@ static int __devinit com20020pci_probe(struct pci_dev *pdev, const struct pci_de
 	if (!dev)
 		return err;
 	lp = dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
-	if (!lp)
-		return -ENOMEM;
+	if (!lp) {
+		err = -ENOMEM;
+		goto out_dev;
+	}
 	memset(lp, 0, sizeof(struct arcnet_local));
-	pdev->driver_data = dev;
+	pci_set_drvdata(pdev, dev);
 
-	ioaddr = pci_resource_start(pdev, 2);
+	// SOHARD needs PCI base addr 4
+	if (pdev->vendor==0x10B5) {
+		BUGMSG(D_NORMAL, "SOHARD\n");
+		ioaddr = pci_resource_start(pdev, 4);
+	}
+	else {
+		BUGMSG(D_NORMAL, "Contemporary Controls\n");
+		ioaddr = pci_resource_start(pdev, 2);
+	}
+
+	// Dummy access after Reset
+	// ARCNET controller needs this access to detect bustype
+	outb(0x00,ioaddr+1);
+	inb(ioaddr+1);
+
 	dev->base_addr = ioaddr;
 	dev->irq = pdev->irq;
 	dev->dev_addr[0] = node;
@@ -98,22 +116,35 @@ static int __devinit com20020pci_probe(struct pci_dev *pdev, const struct pci_de
 	if (check_region(ioaddr, ARCNET_TOTAL_SIZE)) {
 		BUGMSG(D_INIT, "IO region %xh-%xh already allocated.\n",
 		       ioaddr, ioaddr + ARCNET_TOTAL_SIZE - 1);
-		return -EBUSY;
+		err = -EBUSY;
+		goto out_priv;
 	}
 	if (ASTATUS() == 0xFF) {
 		BUGMSG(D_NORMAL, "IO address %Xh was reported by PCI BIOS, "
 		       "but seems empty!\n", ioaddr);
-		return -EIO;
+		err = -EIO;
+		goto out_priv;
 	}
-	if (com20020_check(dev))
-		return -EIO;
+	if (com20020_check(dev)) {
+		err = -EIO;
+		goto out_priv;
+	}
 
-	return com20020_found(dev, SA_SHIRQ);
+	if ((err = com20020_found(dev, SA_SHIRQ)) != 0)
+	        goto out_priv;
+
+	return 0;
+
+out_priv:
+	kfree(dev->priv);
+out_dev:
+	kfree(dev);
+	return err;
 }
 
 static void __devexit com20020pci_remove(struct pci_dev *pdev)
 {
-	com20020_remove(pdev->driver_data);
+	com20020_remove(pci_get_drvdata(pdev));
 }
 
 static struct pci_device_id com20020pci_id_table[] __devinitdata = {
@@ -136,6 +167,7 @@ static struct pci_device_id com20020pci_id_table[] __devinitdata = {
 	{ 0x1571, 0xa204, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{ 0x1571, 0xa205, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{ 0x1571, 0xa206, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
+        { 0x10B5, 0x9050, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{0,}
 };
 
@@ -145,7 +177,7 @@ static struct pci_driver com20020pci_driver = {
 	name:		"com20020",
 	id_table:	com20020pci_id_table,
 	probe:		com20020pci_probe,
-	remove:		com20020pci_remove
+	remove:		__devexit_p(com20020pci_remove),
 };
 
 static int __init com20020pci_init(void)

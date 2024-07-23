@@ -29,7 +29,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Id: msnd_pinnacle.c,v 1.75 1999/03/21 16:50:09 andrewtv Exp $
+ * $Id: msnd_pinnacle.c,v 1.8 2000/12/30 00:33:21 sycamore Exp $
+ *
+ * 12-3-2000  Modified IO port validation  Steve Sycamore
+ *
+ *
+ * $$$: msnd_pinnacle.c,v 1.75 1999/03/21 16:50:09 andrewtv $$$ $
  *
  ********************************************************************/
 
@@ -37,7 +42,7 @@
 #include <linux/config.h>
 #include <linux/version.h>
 #include <linux/module.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/init.h>
@@ -47,7 +52,9 @@
 #include "sound_config.h"
 #include "sound_firmware.h"
 #ifdef MSND_CLASSIC
+# ifndef __alpha__
 #  define SLOWIO
+# endif
 #endif
 #include "msnd.h"
 #ifdef MSND_CLASSIC
@@ -557,11 +564,11 @@ static int mixer_ioctl(unsigned int cmd, unsigned long arg)
 		mixer_info info;
 		set_mixer_info();
 		info.modify_counter = dev.mixer_mod_count;
-		return copy_to_user((void *)arg, &info, sizeof(info));
+		return copy_to_user((void *)arg, &info, sizeof(info))?-EFAULT:0;
 	} else if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
 		set_mixer_info();
-		return copy_to_user((void *)arg, &info, sizeof(info));
+		return copy_to_user((void *)arg, &info, sizeof(info))?-EFAULT:0;
 	} else if (cmd == SOUND_MIXER_PRIVATE1) {
 		dev.nresets = 0;
 		dsp_full_reset();
@@ -797,7 +804,7 @@ static int dev_release(struct inode *inode, struct file *file)
 
 static __inline__ int pack_DARQ_to_DARF(register int bank)
 {
-	register int size, n, timeout = 3;
+	register int size, timeout = 3;
 	register WORD wTmp;
 	LPDAQD DAQD;
 
@@ -818,13 +825,10 @@ static __inline__ int pack_DARQ_to_DARF(register int bank)
 	/* Read data from the head (unprotected bank 1 access okay
            since this is only called inside an interrupt) */
 	outb(HPBLKSEL_1, dev.io + HP_BLKS);
-	if ((n = msnd_fifo_write(
+	msnd_fifo_write(
 		&dev.DARF,
 		(char *)(dev.base + bank * DAR_BUFF_SIZE),
-		size, 0)) <= 0) {
-		outb(HPBLKSEL_0, dev.io + HP_BLKS);
-		return n;
-	}
+		size);
 	outb(HPBLKSEL_0, dev.io + HP_BLKS);
 
 	return 1;
@@ -846,21 +850,16 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 		if (protect) {
 			/* Critical section: protect fifo in non-interrupt */
 			spin_lock_irqsave(&dev.lock, flags);
-			if ((n = msnd_fifo_read(
+			n = msnd_fifo_read(
 				&dev.DAPF,
 				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE, 0)) < 0) {
-				spin_unlock_irqrestore(&dev.lock, flags);
-				return n;
-			}
+				DAP_BUFF_SIZE);
 			spin_unlock_irqrestore(&dev.lock, flags);
 		} else {
-			if ((n = msnd_fifo_read(
+			n = msnd_fifo_read(
 				&dev.DAPF,
 				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE, 0)) < 0) {
-				return n;
-			}
+				DAP_BUFF_SIZE);
 		}
 		if (!n)
 			break;
@@ -887,21 +886,32 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 static int dsp_read(char *buf, size_t len)
 {
 	int count = len;
+	char *page = (char *)__get_free_page(PAGE_SIZE);
+
+	if (!page)
+		return -ENOMEM;
 
 	while (count > 0) {
-		int n;
+		int n, k;
 		unsigned long flags;
+
+		k = PAGE_SIZE;
+		if (k > count)
+			k = count;
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		if ((n = msnd_fifo_read(&dev.DARF, buf, count, 1)) < 0) {
-			printk(KERN_WARNING LOGNAME ": FIFO read error\n");
-			spin_unlock_irqrestore(&dev.lock, flags);
-			return n;
-		}
+		n = msnd_fifo_read(&dev.DARF, page, k);
 		spin_unlock_irqrestore(&dev.lock, flags);
+		if (copy_to_user(buf, page, n)) {
+			free_page((unsigned long)page);
+			return -EFAULT;
+		}
 		buf += n;
 		count -= n;
+
+		if (n == k && count)
+			continue;
 
 		if (!test_bit(F_READING, &dev.flags) && dev.mode & FMODE_READ) {
 			dev.last_recbank = -1;
@@ -909,8 +919,10 @@ static int dsp_read(char *buf, size_t len)
 				set_bit(F_READING, &dev.flags);
 		}
 
-		if (dev.rec_ndelay)
+		if (dev.rec_ndelay) {
+			free_page((unsigned long)page);
 			return count == len ? -EAGAIN : len - count;
+		}
 
 		if (count > 0) {
 			set_bit(F_READBLOCK, &dev.flags);
@@ -919,32 +931,46 @@ static int dsp_read(char *buf, size_t len)
 				get_rec_delay_jiffies(DAR_BUFF_SIZE)))
 				clear_bit(F_READING, &dev.flags);
 			clear_bit(F_READBLOCK, &dev.flags);
-			if (signal_pending(current))
+			if (signal_pending(current)) {
+				free_page((unsigned long)page);
 				return -EINTR;
+			}
 		}
 	}
-
+	free_page((unsigned long)page);
 	return len - count;
 }
 
 static int dsp_write(const char *buf, size_t len)
 {
 	int count = len;
+	char *page = (char *)__get_free_page(GFP_KERNEL);
+
+	if (!page)
+		return -ENOMEM;
 
 	while (count > 0) {
-		int n;
+		int n, k;
 		unsigned long flags;
+
+		k = PAGE_SIZE;
+		if (k > count)
+			k = count;
+
+		if (copy_from_user(page, buf, k)) {
+			free_page((unsigned long)page);
+			return -EFAULT;
+		}
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		if ((n = msnd_fifo_write(&dev.DAPF, buf, count, 1)) < 0) {
-			printk(KERN_WARNING LOGNAME ": FIFO write error\n");
-			spin_unlock_irqrestore(&dev.lock, flags);
-			return n;
-		}
+		n = msnd_fifo_write(&dev.DAPF, page, k);
 		spin_unlock_irqrestore(&dev.lock, flags);
 		buf += n;
 		count -= n;
+
+		if (count && n == k)
+			continue;
 
 		if (!test_bit(F_WRITING, &dev.flags) && (dev.mode & FMODE_WRITE)) {
 			dev.last_playbank = -1;
@@ -952,8 +978,10 @@ static int dsp_write(const char *buf, size_t len)
 				set_bit(F_WRITING, &dev.flags);
 		}
 
-		if (dev.play_ndelay)
+		if (dev.play_ndelay) {
+			free_page((unsigned long)page);
 			return count == len ? -EAGAIN : len - count;
+		}
 
 		if (count > 0) {
 			set_bit(F_WRITEBLOCK, &dev.flags);
@@ -961,11 +989,14 @@ static int dsp_write(const char *buf, size_t len)
 				&dev.writeblock,
 				get_play_delay_jiffies(DAP_BUFF_SIZE));
 			clear_bit(F_WRITEBLOCK, &dev.flags);
-			if (signal_pending(current))
+			if (signal_pending(current)) {
+				free_page((unsigned long)page);
 				return -EINTR;
+			}
 		}
 	}
 
+	free_page((unsigned long)page);
 	return len - count;
 }
 
@@ -1403,7 +1434,6 @@ static int __init attach_multisound(void)
 	return 0;
 }
 
-#ifdef MODULE
 static void __exit unload_multisound(void)
 {
 	release_region(dev.io, dev.numio);
@@ -1412,7 +1442,6 @@ static void __exit unload_multisound(void)
 	unregister_sound_dsp(dev.dsp_minor);
 	msnd_unregister(&dev);
 }
-#endif
 
 #ifndef MSND_CLASSIC
 
@@ -1566,11 +1595,12 @@ static int __init msnd_pinnacle_cfg_devices(int cfg, int reset, msnd_pinnacle_cf
 #ifdef MODULE
 MODULE_AUTHOR				("Andrew Veliath <andrewtv@usa.net>");
 MODULE_DESCRIPTION			("Turtle Beach " LONGNAME " Linux Driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM				(io, "i");
 MODULE_PARM				(irq, "i");
 MODULE_PARM				(mem, "i");
 MODULE_PARM				(write_ndelay, "i");
-MODULE_PARM				(major, "i");
 MODULE_PARM				(fifosize, "i");
 MODULE_PARM				(calibrate_signal, "i");
 #ifndef MSND_CLASSIC
@@ -1704,6 +1734,7 @@ static int __init msnd_init(void)
 	if (io == -1 || irq == -1 || mem == -1)
 		printk(KERN_WARNING LOGNAME ": io, irq and mem must be set\n");
 
+#ifdef MSND_CLASSIC
 	if (io == -1 ||
 	    !(io == 0x290 ||
 	      io == 0x260 ||
@@ -1716,6 +1747,15 @@ static int __init msnd_init(void)
 		printk(KERN_ERR LOGNAME ": \"io\" - DSP I/O base must be set to 0x210, 0x220, 0x230, 0x240, 0x250, 0x260, 0x290, or 0x3E0\n");
 		return -EINVAL;
 	}
+#else
+	if (io == -1 ||
+		io < 0x100 ||
+		io > 0x3e0 ||
+		(io % 0x10) != 0) {
+			printk(KERN_ERR LOGNAME ": \"io\" - DSP I/O base must within the range 0x100 to 0x3E0 and must be evenly divisible by 0x10\n");
+			return -EINVAL;
+	}
+#endif /* MSND_CLASSIC */
 
 	if (irq == -1 ||
 	    !(irq == 5 ||

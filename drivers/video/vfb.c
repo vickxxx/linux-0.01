@@ -14,7 +14,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -382,8 +382,7 @@ int __init vfb_setup(char *options)
     if (!options || !*options)
 	return 0;
 
-    for (this_opt = strtok(options, ","); this_opt;
-	 this_opt = strtok(NULL, ",")) {
+    while ((this_opt = strsep(&options, ",")) != NULL) {
 	if (!strncmp(this_opt, "font:", 5))
 	    strcpy(fb_info.fontname, this_opt+5);
     }
@@ -461,7 +460,7 @@ static u_long get_line_length(int xres_virtual, int bpp)
 {
     u_long length;
     
-    length = (xres_virtual+bpp-1)/bpp;
+    length = xres_virtual*bpp;
     length = (length+31)&-32;
     length >>= 3;
     return(length);
@@ -601,6 +600,8 @@ static void do_install_cmap(int con, struct fb_info *info)
 
 
 #ifdef MODULE
+MODULE_LICENSE("GPL");
+
 int init_module(void)
 {
     return vfb_init();

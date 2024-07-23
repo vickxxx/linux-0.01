@@ -33,7 +33,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
 
@@ -421,3 +421,5 @@ void __exit grip_exit(void)
 
 module_init(grip_init);
 module_exit(grip_exit);
+
+MODULE_LICENSE("GPL");

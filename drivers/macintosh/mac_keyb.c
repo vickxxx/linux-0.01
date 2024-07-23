@@ -256,7 +256,6 @@ int adb_button3_keycode = 0x7c; /* right option key */
 #endif
 
 extern struct kbd_struct kbd_table[];
-extern wait_queue_head_t keypress_wait;
 
 extern void handle_scancode(unsigned char, int);
 
@@ -305,7 +304,7 @@ int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
 	return 1;
 }
 
-int mackbd_unexpected_up(unsigned char keycode)
+char mackbd_unexpected_up(unsigned char keycode)
 {
 	return 0x80;
 }
@@ -423,7 +422,6 @@ static void mac_put_queue(int ch)
 	struct tty_struct *tty;
 
 	tty = console_driver.table? console_driver.table[fg_console]: NULL;
-	wake_up(&keypress_wait);
 	if (tty) {
 		tty_insert_flip_char(tty, ch, 0);
 		con_schedule_flip(tty);
@@ -908,6 +906,9 @@ init_trackpad(int id)
 	            r1_buffer[5],
 	            0x03, /*r1_buffer[6],*/
 	            r1_buffer[7]);
+
+	    /* Without this flush, the trackpad may be locked up */	    
+	    adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(id));
         }
 }
 

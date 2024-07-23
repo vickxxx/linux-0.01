@@ -80,7 +80,7 @@ struct console_cmdline
 	char	*options;			/* Options for the driver   */
 };
 #define MAX_CMDLINECONSOLES 8
-extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
+extern struct console_cmdline console_cmdline[MAX_CMDLINECONSOLES];
 
 /*
  *	The interface for a console, or any other device that
@@ -90,8 +90,7 @@ extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
 #define CON_PRINTBUFFER	(1)
 #define CON_CONSDEV	(2) /* Last on the command line */
 #define CON_ENABLED	(4)
-
-extern spinlock_t console_lock;
+#define CON_BOOT	(8) /* Only used for initial boot */
 
 struct console
 {
@@ -99,7 +98,6 @@ struct console
 	void	(*write)(struct console *, const char *, unsigned);
 	int	(*read)(struct console *, const char *, unsigned);
 	kdev_t	(*device)(struct console *);
-	int	(*wait_key)(struct console *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
 	short	flags;
@@ -111,6 +109,11 @@ struct console
 extern void register_console(struct console *);
 extern int unregister_console(struct console *);
 extern struct console *console_drivers;
+extern void acquire_console_sem(void);
+extern void release_console_sem(void);
+extern void console_conditional_schedule(void);
+extern void console_unblank(void);
+extern void disable_console_blank(void);
 
 /* VESA Blanking Levels */
 #define VESA_NO_BLANKING        0

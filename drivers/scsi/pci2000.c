@@ -711,6 +711,7 @@ int Pci2000_Detect (Scsi_Host_Template *tpnt)
 			goto unregister;
 			}
 		
+		scsi_set_pci_device(pshost, pdev);
 		pshost->irq = pdev->irq;
 		setirq = 1;
 		padapter->irqOwned = 0;
@@ -857,6 +858,7 @@ int Pci2000_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	}
 
 
+MODULE_LICENSE("Dual BSD/GPL");
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = PCI2000;
 

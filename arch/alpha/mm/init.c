@@ -32,8 +32,11 @@
 #include <asm/dma.h>
 #include <asm/mmu_context.h>
 #include <asm/console.h>
+#include <asm/tlb.h>
 
-static unsigned long totalram_pages;
+mmu_gather_t mmu_gathers[NR_CPUS];
+
+unsigned long totalram_pages;
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
 
@@ -42,20 +45,6 @@ struct thread_struct original_pcb;
 #ifndef CONFIG_SMP
 struct pgtable_cache_struct quicklists;
 #endif
-
-void
-__bad_pmd(pgd_t *pgd)
-{
-	printk("Bad pgd in pmd_alloc: %08lx\n", pgd_val(*pgd));
-	pgd_set(pgd, BAD_PAGETABLE);
-}
-
-void
-__bad_pte(pmd_t *pmd)
-{
-	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-	pmd_set(pmd, (pte_t *) BAD_PAGETABLE);
-}
 
 pgd_t *
 get_pgd_slow(void)
@@ -80,66 +69,26 @@ get_pgd_slow(void)
 	return ret;
 }
 
-pmd_t *
-get_pmd_slow(pgd_t *pgd, unsigned long offset)
-{
-	pmd_t *pmd;
-
-	pmd = (pmd_t *) __get_free_page(GFP_KERNEL);
-	if (pgd_none(*pgd)) {
-		if (pmd) {
-			clear_page((void *)pmd);
-			pgd_set(pgd, pmd);
-			return pmd + offset;
-		}
-		pgd_set(pgd, BAD_PAGETABLE);
-		return NULL;
-	}
-	free_page((unsigned long)pmd);
-	if (pgd_bad(*pgd)) {
-		__bad_pmd(pgd);
-		return NULL;
-	}
-	return (pmd_t *) pgd_page(*pgd) + offset;
-}
-
-pte_t *
-get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *) __get_free_page(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			clear_page((void *)pte);
-			pmd_set(pmd, pte);
-			return pte + offset;
-		}
-		pmd_set(pmd, (pte_t *) BAD_PAGETABLE);
-		return NULL;
-	}
-	free_page((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
 int do_check_pgt_cache(int low, int high)
 {
 	int freed = 0;
-        if(pgtable_cache_size > high) {
-                do {
-                        if(pgd_quicklist)
-                                free_pgd_slow(get_pgd_fast()), freed++;
-                        if(pmd_quicklist)
-                                free_pmd_slow(get_pmd_fast()), freed++;
-                        if(pte_quicklist)
-                                free_pte_slow(get_pte_fast()), freed++;
-                } while(pgtable_cache_size > low);
-        }
-        return freed;
+	if(pgtable_cache_size > high) {
+		do {
+			if(pgd_quicklist) {
+				free_pgd_slow(get_pgd_fast());
+				freed++;
+			}
+			if(pmd_quicklist) {
+				pmd_free_slow(pmd_alloc_one_fast(NULL, 0));
+				freed++;
+			}
+			if(pte_quicklist) {
+				pte_free_slow(pte_alloc_one_fast(NULL, 0));
+				freed++;
+			}
+		} while(pgtable_cache_size > low);
+	}
+	return freed;
 }
 
 /*
@@ -169,6 +118,7 @@ __bad_page(void)
 	return pte_mkdirty(mk_pte(virt_to_page(EMPTY_PGE), PAGE_SHARED));
 }
 
+#ifndef CONFIG_DISCONTIGMEM
 void
 show_mem(void)
 {
@@ -198,6 +148,7 @@ show_mem(void)
 	printk("%ld pages in page table cache\n",pgtable_cache_size);
 	show_buffers();
 }
+#endif
 
 static inline unsigned long
 load_PCB(struct thread_struct * pcb)
@@ -283,7 +234,8 @@ callback_init(void * kernel_end)
 	/* Allocate one PGD and one PMD.  In the case of SRM, we'll need
 	   these to actually remap the console.  There is an assumption
 	   here that only one of each is needed, and this allows for 8MB.
-	   Currently (late 1999), big consoles are still under 4MB.
+	   On systems with larger consoles, additional pages will be
+	   allocated as needed during the mapping process.
 
 	   In the case of not SRM, but not CONFIG_ALPHA_LARGE_VMALLOC,
 	   we need to allocate the PGD we use for vmalloc before we start
@@ -310,6 +262,15 @@ callback_init(void * kernel_end)
 			unsigned long paddr = crb->map[i].pa;
 			crb->map[i].va = vaddr;
 			for (j = 0; j < crb->map[i].count; ++j) {
+				/* Newer console's (especially on larger
+				   systems) may require more pages of
+				   PTEs. Grab additional pages as needed. */
+				if (pmd != pmd_offset(pgd, vaddr)) {
+					memset(kernel_end, 0, PAGE_SIZE);
+					pmd = pmd_offset(pgd, vaddr);
+					pmd_set(pmd, (pte_t *)kernel_end);
+					kernel_end += PAGE_SIZE;
+				}
 				set_pte(pte_offset(pmd, vaddr),
 					mk_pte_phys(paddr, PAGE_KERNEL));
 				paddr += PAGE_SIZE;
@@ -329,6 +290,7 @@ callback_init(void * kernel_end)
 }
 
 
+#ifndef CONFIG_DISCONTIGMEM
 /*
  * paging_init() sets up the memory map.
  */
@@ -341,16 +303,7 @@ paging_init(void)
 	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 	high_pfn = max_low_pfn;
 
-#define ORDER_MASK (~((1L << (MAX_ORDER-1))-1))
-#define ORDER_ALIGN(n)	(((n) +  ~ORDER_MASK) & ORDER_MASK)
-
-	dma_pfn = ORDER_ALIGN(dma_pfn);
-	high_pfn = ORDER_ALIGN(high_pfn);
-
-#undef ORDER_MASK
-#undef ORDER_ALIGN
-
-	if (dma_pfn > high_pfn)
+	if (dma_pfn >= high_pfn)
 		zones_size[ZONE_DMA] = high_pfn;
 	else {
 		zones_size[ZONE_DMA] = dma_pfn;
@@ -363,6 +316,7 @@ paging_init(void)
 	/* Initialize the kernel's ZERO_PGE. */
 	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
 }
+#endif /* CONFIG_DISCONTIGMEM */
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)
 void
@@ -381,6 +335,7 @@ srm_paging_stop (void)
 }
 #endif
 
+#ifndef CONFIG_DISCONTIGMEM
 static void __init
 printk_memory_info(void)
 {
@@ -420,21 +375,27 @@ mem_init(void)
 
 	printk_memory_info();
 }
+#endif /* CONFIG_DISCONTIGMEM */
 
 void
-free_initmem (void)
+free_reserved_mem(void *start, void *end)
 {
-	extern char __init_begin, __init_end;
-	unsigned long addr;
-
-	addr = (unsigned long)(&__init_begin);
-	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
-		free_page(addr);
+	void *__start = start;
+	for (; __start < end; __start += PAGE_SIZE) {
+		ClearPageReserved(virt_to_page(__start));
+		set_page_count(virt_to_page(__start), 1);
+		free_page((long)__start);
 		totalram_pages++;
 	}
-	printk ("Freeing unused kernel memory: %ldk freed\n",
+}
+
+void
+free_initmem(void)
+{
+	extern char __init_begin, __init_end;
+
+	free_reserved_mem(&__init_begin, &__init_end);
+	printk (KERN_INFO "Freeing unused kernel memory: %ldk freed\n",
 		(&__init_end - &__init_begin) >> 10);
 }
 
@@ -442,13 +403,9 @@ free_initmem (void)
 void
 free_initrd_mem(unsigned long start, unsigned long end)
 {
-	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
-		free_page(start);
-		totalram_pages++;
-	}
-	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+	free_reserved_mem((void *)start, (void *)end);
+	printk(KERN_INFO "Freeing initrd memory: %ldk freed\n",
+	       (end - start) >> 10);
 }
 #endif
 

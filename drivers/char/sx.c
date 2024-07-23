@@ -257,6 +257,11 @@
 #define PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8 0x2000
 #endif
 
+static struct pci_device_id sx_pci_tbl[] = {
+	{ PCI_VENDOR_ID_SPECIALIX, PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8, PCI_ANY_ID, PCI_ANY_ID },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(pci, sx_pci_tbl);
 
 /* Configurable options: 
    (Don't be too sure that it'll work if you toggle them) */
@@ -348,9 +353,11 @@ static int sx_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000,
                               0xc8000, 0xd8000, 0xe8000};
 static int si_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000, 
                               0xc8000, 0xd8000, 0xe8000, 0xa0000};
+static int si1_probe_addrs[]= { 0xd0000};
 
 #define NR_SX_ADDRS (sizeof(sx_probe_addrs)/sizeof (int))
 #define NR_SI_ADDRS (sizeof(si_probe_addrs)/sizeof (int))
+#define NR_SI1_ADDRS (sizeof(si1_probe_addrs)/sizeof (int))
 
 
 /* Set the mask to all-ones. This alas, only supports 32 interrupts. 
@@ -364,6 +371,8 @@ MODULE_PARM(sx_slowpoll, "i");
 MODULE_PARM(sx_maxints, "i");
 MODULE_PARM(sx_debug, "i");
 MODULE_PARM(sx_irqmask, "i");
+
+MODULE_LICENSE("GPL");
 
 static struct real_driver sx_real_driver = {
 	sx_disable_tx_interrupts,
@@ -398,11 +407,11 @@ static struct real_driver sx_real_driver = {
 
 
 
-#define func_enter() sx_dprintk (SX_DEBUG_FLOW, "sx: enter " __FUNCTION__ "\n")
-#define func_exit()  sx_dprintk (SX_DEBUG_FLOW, "sx: exit  " __FUNCTION__ "\n")
+#define func_enter() sx_dprintk (SX_DEBUG_FLOW, "sx: enter %s\b",__FUNCTION__)
+#define func_exit()  sx_dprintk (SX_DEBUG_FLOW, "sx: exit  %s\n", __FUNCTION__)
 
-#define func_enter2() sx_dprintk (SX_DEBUG_FLOW, "sx: enter " __FUNCTION__ \
-                                  "(port %d)\n", port->line)
+#define func_enter2() sx_dprintk (SX_DEBUG_FLOW, "sx: enter %s (port %d)\n", \
+					__FUNCTION__, port->line)
 
 
 
@@ -467,7 +476,7 @@ static void my_hd (unsigned char *addr, int len)
 	int i, j, ch;
 
 	for (i=0;i<len;i+=16) {
-		printk ("%08x ", (int) addr+i);
+		printk ("%p ", addr+i);
 		for (j=0;j<16;j++) {
 			printk ("%02x %s", addr[j+i], (j==7)?" ":"");
 		}
@@ -513,13 +522,13 @@ static int sx_busy_wait_eq (struct sx_board *board,
 
 	func_enter ();
 
-	for (i=0; i < TIMEOUT_1 > 0;i++) 
+	for (i=0; i < TIMEOUT_1 ;i++)
 		if ((read_sx_byte (board, offset) & mask) == correctval) {
 			func_exit ();
 			return 1;
 		}
 
-	for (i=0; i < TIMEOUT_2 > 0;i++) {
+	for (i=0; i < TIMEOUT_2 ;i++) {
 		if ((read_sx_byte (board, offset) & mask) == correctval) {
 			func_exit ();
 			return 1;
@@ -539,13 +548,13 @@ static int sx_busy_wait_neq (struct sx_board *board,
 
 	func_enter ();
 
-	for (i=0; i < TIMEOUT_1 > 0;i++) 
+	for (i=0; i < TIMEOUT_1 ;i++)
 		if ((read_sx_byte (board, offset) & mask) != badval) {
 			func_exit ();
 			return 1;
 		}
 
-	for (i=0; i < TIMEOUT_2 > 0;i++) {
+	for (i=0; i < TIMEOUT_2 ;i++) {
 		if ((read_sx_byte (board, offset) & mask) != badval) {
 			func_exit ();
 			return 1;
@@ -575,6 +584,8 @@ static int sx_reset (struct sx_board *board)
 		}
 	} else if (IS_EISA_BOARD(board)) {
 		outb(board->irq<<4, board->eisa_base+0xc02);
+	} else if (IS_SI1_BOARD(board)) {
+	        write_sx_byte (board, SI1_ISA_RESET,   0); // value does not matter
 	} else {
 		/* Gory details of the SI/ISA board */
 		write_sx_byte (board, SI2_ISA_RESET,    SI2_ISA_RESET_SET);
@@ -649,6 +660,9 @@ static int sx_start_board (struct sx_board *board)
 	} else if (IS_EISA_BOARD(board)) {
 		write_sx_byte(board, SI2_EISA_OFF, SI2_EISA_VAL);
 		outb((board->irq<<4)|4, board->eisa_base+0xc02);
+	} else if (IS_SI1_BOARD(board)) {
+		write_sx_byte (board, SI1_ISA_RESET_CLEAR, 0);
+		write_sx_byte (board, SI1_ISA_INTCL, 0);
 	} else {
 		/* Don't bug me about the clear_set. 
 		   I haven't the foggiest idea what it's about -- REW */
@@ -674,6 +688,9 @@ static int sx_start_interrupts (struct sx_board *board)
 		                                 SX_CONF_HOSTIRQ);
 	} else if (IS_EISA_BOARD(board)) {
 		inb(board->eisa_base+0xc03);  
+	} else if (IS_SI1_BOARD(board)) {
+	       write_sx_byte (board, SI1_ISA_INTCL,0);
+	       write_sx_byte (board, SI1_ISA_INTCL_CLEAR,0);
 	} else {
 		switch (board->irq) {
 		case 11:write_sx_byte (board, SI2_ISA_IRQ11, SI2_ISA_IRQ11_SET);break;
@@ -918,7 +935,6 @@ static int sx_set_real_termios (void *ptr)
 	                       SP_DCEN);
 
 	sx_write_channel_byte (port, hi_break, 
-	                       I_OTHER(port->gs.tty) ? 0:
 	                       (I_IGNBRK(port->gs.tty)?BR_IGN:0 |
 	                        I_BRKINT(port->gs.tty)?BR_INT:0));
 
@@ -1041,9 +1057,7 @@ static void sx_transmit_chars (struct sx_port *port)
 	}
 
 	if ((port->gs.xmit_cnt <= port->gs.wakeup_chars) && port->gs.tty) {
-		if ((port->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    port->gs.tty->ldisc.write_wakeup)
-			(port->gs.tty->ldisc.write_wakeup)(port->gs.tty);
+		tty_wakeup(port->gs.tty);
 		sx_dprintk (SX_DEBUG_TRANSMIT, "Waking up.... ldisc (%d)....\n",
 		            port->gs.wakeup_chars); 
 		wake_up_interruptible(&port->gs.tty->write_wait);
@@ -1140,9 +1154,7 @@ static inline void sx_check_modem_signals (struct sx_port *port)
 		sx_dprintk (SX_DEBUG_MODEMSIGNALS, "got a break.\n");
 
 		sx_write_channel_byte (port, hi_state, hi_state);
-		if (port->gs.flags & ASYNC_SAK) {
-			do_SAK (port->gs.tty);
-		}
+		gs_got_break (&port->gs);
 	}
 	if (hi_state & ST_DCD) {
 		hi_state &= ~ST_DCD;
@@ -1156,7 +1168,8 @@ static inline void sx_check_modem_signals (struct sx_port *port)
 				/* DCD went UP */
 				if( (~(port->gs.flags & ASYNC_NORMAL_ACTIVE) || 
 						 ~(port->gs.flags & ASYNC_CALLOUT_ACTIVE)) &&
-						(sx_read_channel_byte(port, hi_hstat) != HS_IDLE_CLOSED)) {
+						(sx_read_channel_byte(port, hi_hstat) != HS_IDLE_CLOSED) &&
+						!(port->gs.tty->termios->c_cflag & CLOCAL) ) {
 					/* Are we blocking in open?*/
 					sx_dprintk (SX_DEBUG_MODEMSIGNALS, "DCD active, unblocking open\n");
 					wake_up_interruptible(&port->gs.open_wait);
@@ -1166,7 +1179,8 @@ static inline void sx_check_modem_signals (struct sx_port *port)
 			} else {
 				/* DCD went down! */
 				if (!((port->gs.flags & ASYNC_CALLOUT_ACTIVE) &&
-				      (port->gs.flags & ASYNC_CALLOUT_NOHUP))) {
+				      (port->gs.flags & ASYNC_CALLOUT_NOHUP)) &&
+				    !(port->gs.tty->termios->c_cflag & CLOCAL) ) {
 					sx_dprintk (SX_DEBUG_MODEMSIGNALS, "DCD dropped. hanging up....\n");
 					tty_hangup (port->gs.tty);
 				} else {
@@ -1617,6 +1631,7 @@ static int do_memtest (struct sx_board *board, int min, int max)
 #define R0         if (read_sx_word (board, i) != 0x55aa) return 1
 #define R1         if (read_sx_word (board, i) != 0xaa55) return 1
 
+#if 0
 /* This memtest takes a human-noticable time. You normally only do it
    once a boot, so I guess that it is worth it. */
 static int do_memtest_w (struct sx_board *board, int min, int max)
@@ -1631,6 +1646,7 @@ static int do_memtest_w (struct sx_board *board, int min, int max)
 
 	return 0;
 }
+#endif
 
 
 static int sx_fw_ioctl (struct inode *inode, struct file *filp,
@@ -1639,7 +1655,8 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 	int rc = 0;
 	int *descr = (int *)arg, i;
 	static struct sx_board *board = NULL;
-	int nbytes, offset, data;
+	int nbytes, offset;
+	unsigned long data;
 	char *tmp;
 
 	func_enter();
@@ -1647,7 +1664,7 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 #if 0 
 	/* Removed superuser check: Sysops can use the permissions on the device
 	   file to restrict access. Recommendation: Root only. (root.root 600) */
-	if (!suser ()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		return -EPERM;
 	}
 #endif
@@ -1681,6 +1698,7 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 		if (IS_SX_BOARD (board)) rc = SX_TYPE_SX;
 		if (IS_CF_BOARD (board)) rc = SX_TYPE_CF;
 		if (IS_SI_BOARD (board)) rc = SX_TYPE_SI;
+		if (IS_SI1_BOARD (board)) rc = SX_TYPE_SI;
 		if (IS_EISA_BOARD (board)) rc = SX_TYPE_SI;
 		sx_dprintk (SX_DEBUG_FIRMWARE, "returning type= %d\n", rc);
 		break;
@@ -1711,8 +1729,13 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 		Get_user (data,	 descr++);
 		while (nbytes && data) {
 			for (i=0;i<nbytes;i += SX_CHUNK_SIZE) {
-				copy_from_user (tmp, (char *)data+i, 
-				                (i+SX_CHUNK_SIZE>nbytes)?nbytes-i:SX_CHUNK_SIZE);
+				if (copy_from_user(tmp, (char *)data + i, 
+						   (i + SX_CHUNK_SIZE >
+						    nbytes) ? nbytes - i :
+						   	      SX_CHUNK_SIZE)) {
+					kfree (tmp);
+					return -EFAULT;
+				}
 				memcpy_toio    ((char *) (board->base2 + offset + i), tmp, 
 				                (i+SX_CHUNK_SIZE>nbytes)?nbytes-i:SX_CHUNK_SIZE);
 			}
@@ -1767,6 +1790,20 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 }
 
 
+static void sx_break (struct tty_struct * tty, int flag)
+{
+	struct sx_port *port = tty->driver_data;
+	int rv;
+
+	if (flag) 
+		rv = sx_send_command (port, HS_START, -1, HS_IDLE_BREAK);
+	else 
+		rv = sx_send_command (port, HS_STOP, -1, HS_IDLE_OPEN);
+	if (rv != 1) printk (KERN_ERR "sx: couldn't send break (%x).\n",
+			read_sx_byte (port->board, CHAN_OFFSET (port, hi_hstat)));
+}
+
+
 static int sx_ioctl (struct tty_struct * tty, struct file * filp, 
                      unsigned int cmd, unsigned long arg)
 {
@@ -1794,7 +1831,7 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 	case TIOCGSERIAL:
 		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
 		                      sizeof(struct serial_struct))) == 0)
-			gs_getserial(&port->gs, (struct serial_struct *) arg);
+			rc = gs_getserial(&port->gs, (struct serial_struct *) arg);
 		break;
 	case TIOCSSERIAL:
 		if ((rc = verify_area(VERIFY_READ, (void *) arg,
@@ -1835,7 +1872,6 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 			sx_reconfigure_port(port);
 		}
 		break;
-
 	default:
 		rc = -ENOIOCTLCMD;
 		break;
@@ -2085,7 +2121,7 @@ static int probe_sx (struct sx_board *board)
 	func_enter();
 
 	if (!IS_CF_BOARD (board)) {    
-		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %x.\n", 
+		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %lx.\n", 
 		            board->base + SX_VPD_ROM);
 
 		if (sx_debug & SX_DEBUG_PROBE)
@@ -2110,7 +2146,7 @@ static int probe_sx (struct sx_board *board)
 	printheader ();
 
 	if (!IS_CF_BOARD (board)) {
-		printk (KERN_DEBUG "sx: Found an SX board at %x\n", board->hw_base);
+		printk (KERN_DEBUG "sx: Found an SX board at %lx\n", board->hw_base);
 		printk (KERN_DEBUG "sx: hw_rev: %d, assembly level: %d, uniq ID:%08x, ", 
 		        vpdp.hwrev, vpdp.hwass, vpdp.uniqid);
 		printk (           "Manufactured: %d/%d\n", 
@@ -2127,7 +2163,7 @@ static int probe_sx (struct sx_board *board)
 
 		if (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) == SX_ISA_UNIQUEID1) {
 			if (board->base & 0x8000) {
-				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %x.\n", board->base);
+				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %lx.\n", board->base);
 				printk (KERN_WARNING "sx: Read sx.txt for more info.\n");
 			}
 		}
@@ -2159,13 +2195,20 @@ static int probe_si (struct sx_board *board)
 	int i;
 
 	func_enter();
-	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature %x.\n", 
+	sx_dprintk (SX_DEBUG_PROBE, "Going to verify SI signature hw %lx at %lx.\n", board->hw_base,
 	            board->base + SI2_ISA_ID_BASE);
 
 	if (sx_debug & SX_DEBUG_PROBE)
 		my_hd ((char *)(board->base + SI2_ISA_ID_BASE), 0x8);
 
-	if (!IS_EISA_BOARD(board)) {
+	if (!IS_EISA_BOARD(board)  ) {
+	  if( IS_SI1_BOARD(board) ) 
+	    {
+		for (i=0;i<8;i++) {
+		  write_sx_byte (board, SI2_ISA_ID_BASE+7-i,i); 
+
+		}
+	    }
 		for (i=0;i<8;i++) {
 			if ((read_sx_byte (board, SI2_ISA_ID_BASE+7-i) & 7) != i) {
 				return 0;
@@ -2173,15 +2216,32 @@ static int probe_si (struct sx_board *board)
 		}
 	}
 
+	/* Now we're pretty much convinced that there is an SI board here, 
+	   but to prevent trouble, we'd better double check that we don't
+	   have an SI1 board when we're probing for an SI2 board.... */
+
+	write_sx_byte (board, SI2_ISA_ID_BASE,0x10); 
+	if ( IS_SI1_BOARD(board)) {
+		/* This should be an SI1 board, which has this
+		   location writable... */
+		if (read_sx_byte (board, SI2_ISA_ID_BASE) != 0x10)
+			return 0; 
+	} else {
+		/* This should be an SI2 board, which has the bottom
+		   3 bits non-writable... */
+		if (read_sx_byte (board, SI2_ISA_ID_BASE) == 0x10)
+			return 0; 
+	}
+
 	printheader ();
 
-	printk (KERN_DEBUG "sx: Found an SI board at %x\n", board->hw_base);
+	printk (KERN_DEBUG "sx: Found an SI board at %lx\n", board->hw_base);
 	/* Compared to the SX boards, it is a complete guess as to what
 		 this card is up to... */
 
 	board->nports = -1;
 
-	/* This resets the processor, and keeps it off the bus. */
+ 	/* This resets the processor, and keeps it off the bus. */
 	if (!sx_reset (board)) 
 		return 0;
 	sx_dprintk (SX_DEBUG_INIT, "reset the board...\n");
@@ -2215,6 +2275,7 @@ static int sx_init_drivers(void)
 	sx_driver.table = sx_table;
 	sx_driver.termios = sx_termios;
 	sx_driver.termios_locked = sx_termios_locked;
+	sx_driver.break_ctl = sx_break;
 
 	sx_driver.open	= sx_open;
 	sx_driver.close = gs_close;
@@ -2493,7 +2554,7 @@ static int __init sx_init(void)
 
 			board->irq = get_irq (pdev);
 
-			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%x(%d) %x.\n", 
+			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%lx(%d) %x.\n", 
 			            tint, boards[found].base, board->irq, board->flags);
 
 			if (probe_sx (board)) {
@@ -2536,6 +2597,21 @@ static int __init sx_init(void)
 			my_iounmap (board->hw_base, board->base);
 		}
 	}
+	for (i=0;i<NR_SI1_ADDRS;i++) {
+		board = &boards[found];
+		board->hw_base = si1_probe_addrs[i];
+		board->base2 =
+		board->base = (ulong) ioremap(board->hw_base, SI1_ISA_WINDOW_LEN);
+		board->flags &= ~SX_BOARD_TYPE;
+		board->flags |=  SI1_ISA_BOARD;
+		board->irq = sx_irqmask ?-1:0;
+
+		if (probe_si (board)) {
+			found++;
+		} else {
+			my_iounmap (board->hw_base, board->base);
+		}
+	}
 
         sx_dprintk(SX_DEBUG_PROBE, "Probing for EISA cards\n");
         for(eisa_slot=0x1000; eisa_slot<0x10000; eisa_slot+=0x1000)
@@ -2555,8 +2631,8 @@ static int __init sx_init(void)
 			board->base2 =
 			board->base = (ulong) ioremap(board->hw_base, SI2_EISA_WINDOW_LEN);
 
-			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %x\n", board->hw_base);
-			sx_dprintk(SX_DEBUG_PROBE, "base: %x\n", board->base);
+			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %lx\n", board->hw_base);
+			sx_dprintk(SX_DEBUG_PROBE, "base: %lx\n", board->base);
 			board->irq = inb(board->eisa_base+0xc02)>>4; 
 			sx_dprintk(SX_DEBUG_PROBE, "IRQ: %d\n", board->irq);
 			
@@ -2588,7 +2664,7 @@ static void __exit sx_exit (void)
 	for (i = 0; i < SX_NBOARDS; i++) {
 		board = &boards[i];
 		if (board->flags & SX_BOARD_INITIALIZED) {
-			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %x\n", board->base);
+			sx_dprintk (SX_DEBUG_CLEANUP, "Cleaning up board at %lx\n", board->base);
 			/* The board should stop messing with us.
 			   (actually I mean the interrupt) */
 			sx_reset (board);

@@ -1,4 +1,4 @@
-/* $Id: cgfourteenfb.c,v 1.8 2000/08/29 07:01:56 davem Exp $
+/* $Id: cgfourteenfb.c,v 1.11 2001/09/19 00:04:33 davem Exp $
  * cgfourteenfb.c: CGfourteen frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -12,7 +12,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -71,6 +71,8 @@
 #define CG14_MCR_PIXMODE_8		0
 #define CG14_MCR_PIXMODE_16		2
 #define CG14_MCR_PIXMODE_32		3
+
+MODULE_LICENSE("GPL");
 
 struct cg14_regs{
 	volatile u8 mcr;	/* Master Control Reg */
@@ -242,6 +244,11 @@ static void cg14_setcursor (struct fb_info_sbusfb *fb)
 		u8 tmp = sbus_readb(&cur->ccr);
 
 		tmp |= CG14_CCR_ENABLE;
+		sbus_writeb(tmp, &cur->ccr);
+	} else {
+		u8 tmp = sbus_readb(&cur->ccr);
+
+		tmp &= ~CG14_CCR_ENABLE;
 		sbus_writeb(tmp, &cur->ccr);
 	}
 	sbus_writew(((c->cpos.fbx - c->chot.fbx) & 0xfff), &cur->cursx);

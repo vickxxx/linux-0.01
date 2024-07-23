@@ -39,41 +39,40 @@
 
 /* setting this to other than a power of two may break some applications */
 #define WAVEOUT_MAXBUFSIZE	MAXBUFSIZE
-#define WAVEOUT_MINBUFSIZE	64
 
 #define WAVEOUT_DEFAULTFRAGLEN	20 /* Time to play a fragment in ms (latency) */
 #define WAVEOUT_DEFAULTBUFLEN	500 /* Time to play the entire buffer in ms */
 
-#define WAVEOUT_MINFRAGSHIFT	6
+#define WAVEOUT_MINFRAGSHIFT	6 /* Minimum fragment size in bytes is 2^6 */
+#define WAVEOUT_MINFRAGS	3 /* _don't_ go bellow 3, it would break silence filling */
+#define WAVEOUT_MAXVOICES	6
 
 struct waveout_buffer {
 	u16 ossfragshift;
-        u32 numfrags;
+	u32 numfrags;
 	u32 fragment_size;	/* in bytes units */
 	u32 size;		/* in bytes units */
 	u32 pages;		/* buffer size in page units*/
-	int emupageindex;
-	void *addr[BUFMAXPAGES];
-	dma_addr_t dma_handle[BUFMAXPAGES];
-        u32 silence_pos;	/* software cursor position (including silence) */
+	u32 silence_pos;	/* software cursor position (including silence bytes) */
 	u32 hw_pos;		/* hardware cursor position */
-	u32 bytestocopy;	/* free space on buffer (including silence) */
+	u32 free_bytes;		/* free bytes available on the buffer (not including silence bytes) */
 	u8 fill_silence;
-	u32 silence_bytes;      /* silence bytes in buffer */
+	u32 silence_bytes;      /* silence bytes on the buffer */
 };
 
 struct woinst 
 {
 	u8 state;
-	struct emu_voice voice;
+	u8 num_voices;
+	struct emu_voice voice[WAVEOUT_MAXVOICES];
 	struct emu_timer timer;
-        struct wave_format format;
+	struct wave_format format;
 	struct waveout_buffer buffer;
-        wait_queue_head_t wait_queue;
-        u8 mmapped;
-        u32 total_copied;	/* total number of bytes written() to the buffer (excluding silence) */
-        u32 total_played;	/* total number of bytes played including silence */
-        u32 blocks;
+	wait_queue_head_t wait_queue;
+	u8 mmapped;
+	u32 total_copied;	/* total number of bytes written() to the buffer (excluding silence) */
+	u32 total_played;	/* total number of bytes played including silence */
+	u32 blocks;
 	u8 device;
 	spinlock_t lock;
 };

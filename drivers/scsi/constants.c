@@ -74,6 +74,18 @@ static const char *group_2_commands[] = {
 };
 
 
+/* The following are 16 byte commands in group 4 */
+static const char *group_4_commands[] = {
+/* 80-84 */ unknown, unknown, unknown, unknown, unknown,
+/* 85-89 */ "Memory Export In (16)", unknown, unknown, unknown,
+            "Memory Export Out (16)",
+/* 8a-8f */ unknown, unknown, unknown, unknown, unknown, unknown,
+/* 90-94 */ unknown, unknown, unknown, unknown, unknown,
+/* 95-99 */ unknown, unknown, unknown, unknown, unknown,
+/* 9a-9f */ unknown, unknown, unknown, unknown, unknown, unknown,
+};
+
+
 /* The following are 12 byte commands in group 5 */
 static const char *group_5_commands[] = {
 /* a0-a5 */ unknown, unknown, unknown, unknown, unknown,
@@ -97,7 +109,7 @@ static const char *group_5_commands[] = {
 
 static const char **commands[] = {
     group_0_commands, group_1_commands, group_2_commands, 
-    (const char **) RESERVED_GROUP, (const char **) RESERVED_GROUP, 
+    (const char **) RESERVED_GROUP, group_4_commands, 
     group_5_commands, (const char **) VENDOR_GROUP, 
     (const char **) VENDOR_GROUP
 };
@@ -689,7 +701,7 @@ void print_sense_internal(const char * devclass,
 			  kdev_t dev)
 {
     int i, s;
-    int sense_class, valid, code;
+    int sense_class, valid, code, info;
     const char * error = NULL;
     
     sense_class = (sense_buffer[0] >> 4) & 0x07;
@@ -701,11 +713,14 @@ void print_sense_internal(const char * devclass,
 	if(s > SCSI_SENSE_BUFFERSIZE)
 	   s = SCSI_SENSE_BUFFERSIZE;
 	
-	if (!valid)
-	    printk("[valid=0] ");
-	printk("Info fld=0x%x, ", (int)((sense_buffer[3] << 24) |
-	       (sense_buffer[4] << 16) | (sense_buffer[5] << 8) |
-	       sense_buffer[6]));
+	info = ((sense_buffer[3] << 24) | (sense_buffer[4] << 16) |
+		(sense_buffer[5] << 8) | sense_buffer[6]);
+	if (info || valid) {
+		printk("Info fld=0x%x", info);
+		if (!valid)	/* info data not according to standard */
+			printk(" (nonstd)");
+		printk(", ");
+	}
 	if (sense_buffer[2] & 0x80)
            printk( "FMK ");	/* current command has read a filemark */
 	if (sense_buffer[2] & 0x40)
@@ -776,7 +791,7 @@ void print_sense_internal(const char * devclass,
 	    printk("%s%s: sns = %2x %2x\n", devclass,
 	      kdevname(dev), sense_buffer[0], sense_buffer[2]);
 	
-	printk("Non-extended sense class %d code 0x%0x ", sense_class, code);
+	printk("Non-extended sense class %d code 0x%0x\n", sense_class, code);
 	s = 4;
     }
     

@@ -1,5 +1,6 @@
 /* Masquerade.  Simple mapping which alters range to a local IP address
    (depending on route). */
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -31,7 +32,7 @@ masquerade_check(const char *tablename,
 	const struct ip_nat_multi_range *mr = targinfo;
 
 	if (strcmp(tablename, "nat") != 0) {
-		DEBUGP("masquerade_check: bad table `%s'.\n", table);
+		DEBUGP("masquerade_check: bad table `%s'.\n", tablename);
 		return 0;
 	}
 	if (targinfosize != IPT_ALIGN(sizeof(*mr))) {
@@ -68,6 +69,7 @@ masquerade_target(struct sk_buff **pskb,
 	struct ip_nat_multi_range newrange;
 	u_int32_t newsrc;
 	struct rtable *rt;
+	struct rt_key key;
 
 	IP_NF_ASSERT(hooknum == NF_IP_POST_ROUTING);
 
@@ -77,17 +79,30 @@ masquerade_target(struct sk_buff **pskb,
 		return NF_ACCEPT;
 
 	ct = ip_conntrack_get(*pskb, &ctinfo);
-	IP_NF_ASSERT(ct && (ctinfo == IP_CT_NEW
-				  || ctinfo == IP_CT_RELATED));
+	IP_NF_ASSERT(ct && (ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED
+	                    || ctinfo == IP_CT_RELATED + IP_CT_IS_REPLY));
 
 	mr = targinfo;
 
-	if (ip_route_output(&rt, (*pskb)->nh.iph->daddr,
-			    0,
-			    RT_TOS((*pskb)->nh.iph->tos)|RTO_CONN,
-			    out->ifindex) != 0) {
-		/* Shouldn't happen */
-		printk("MASQUERADE: No route: Rusty's brain broke!\n");
+	key.dst = (*pskb)->nh.iph->daddr;
+	key.src = 0; /* Unknown: that's what we're trying to establish */
+	key.tos = RT_TOS((*pskb)->nh.iph->tos)|RTO_CONN;
+	key.oif = 0;
+#ifdef CONFIG_IP_ROUTE_FWMARK
+	key.fwmark = (*pskb)->nfmark;
+#endif
+	if (ip_route_output_key(&rt, &key) != 0) {
+                /* Funky routing can do this. */
+                if (net_ratelimit())
+                        printk("MASQUERADE:"
+                               " No route: Rusty's brain broke!\n");
+                return NF_DROP;
+        }
+        if (rt->u.dst.dev != out) {
+                if (net_ratelimit())
+                        printk("MASQUERADE:"
+                               " Route sent us somewhere else.\n");
+			ip_rt_put(rt);
 		return NF_DROP;
 	}
 
@@ -110,7 +125,7 @@ masquerade_target(struct sk_buff **pskb,
 }
 
 static inline int
-device_cmp(const struct ip_conntrack *i, void *ifindex)
+device_cmp(struct ip_conntrack *i, void *ifindex)
 {
 	int ret;
 
@@ -121,28 +136,49 @@ device_cmp(const struct ip_conntrack *i, void *ifindex)
 	return ret;
 }
 
-int masq_device_event(struct notifier_block *this,
-		      unsigned long event,
-		      void *ptr)
+static int masq_device_event(struct notifier_block *this,
+			     unsigned long event,
+			     void *ptr)
 {
 	struct net_device *dev = ptr;
 
-	if (event == NETDEV_DOWN || event == NETDEV_CHANGEADDR) {
-		/* Device was downed/changed (diald)  Search entire table for
+	if (event == NETDEV_DOWN) {
+		/* Device was downed.  Search entire table for
+		   conntracks which were associated with that device,
+		   and forget them. */
+		IP_NF_ASSERT(dev->ifindex != 0);
+ 
+		ip_ct_iterate_cleanup(device_cmp, (void *)(long)dev->ifindex);
+	}
+
+	return NOTIFY_DONE;
+}
+
+
+static int masq_inet_event(struct notifier_block *this,
+			   unsigned long event,
+			   void *ptr)
+{
+	struct net_device *dev = ((struct in_ifaddr *)ptr)->ifa_dev->dev;
+
+	if (event == NETDEV_DOWN) {
+		/* IP address was deleted.  Search entire table for
 		   conntracks which were associated with that device,
 		   and forget them. */
 		IP_NF_ASSERT(dev->ifindex != 0);
 
-		ip_ct_selective_cleanup(device_cmp, (void *)(long)dev->ifindex);
+		ip_ct_iterate_cleanup(device_cmp, (void *)(long)dev->ifindex);
 	}
 
 	return NOTIFY_DONE;
 }
 
 static struct notifier_block masq_dev_notifier = {
-	masq_device_event,
-	NULL,
-	0
+	.notifier_call  = masq_device_event,
+};
+
+static struct notifier_block masq_inet_notifier = {
+	.notifier_call = masq_inet_event
 };
 
 static struct ipt_target masquerade
@@ -158,6 +194,8 @@ static int __init init(void)
 	if (ret == 0) {
 		/* Register for device down reports */
 		register_netdevice_notifier(&masq_dev_notifier);
+		/* Register IP address change reports */
+		register_inetaddr_notifier(&masq_inet_notifier);
 	}
 
 	return ret;
@@ -167,7 +205,9 @@ static void __exit fini(void)
 {
 	ipt_unregister_target(&masquerade);
 	unregister_netdevice_notifier(&masq_dev_notifier);
+	unregister_inetaddr_notifier(&masq_inet_notifier);	
 }
 
 module_init(init);
 module_exit(fini);
+MODULE_LICENSE("GPL");

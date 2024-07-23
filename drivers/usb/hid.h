@@ -2,10 +2,10 @@
 #define __HID_H
 
 /*
- * $Id: hid.h,v 1.7 2000/05/31 22:57:48 vojtech Exp $
+ * $Id: hid.h,v 1.10 2001/05/10 15:56:07 vojtech Exp $
  *
  *  Copyright (c) 1999 Andreas Gal
- *  Copyright (c) 2000 Vojtech Pavlik
+ *  Copyright (c) 2000-2001 Vojtech Pavlik
  *
  *  Sponsored by SuSE
  */
@@ -31,7 +31,7 @@
  */
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/list.h>
 
 /*
@@ -184,10 +184,15 @@ struct hid_item {
 
 #define HID_QUIRK_INVERT	0x01
 #define HID_QUIRK_NOTOUCH	0x02
+#define HID_QUIRK_IGNORE	0x04
+#define HID_QUIRK_NOGET		0x08
+#define HID_QUIRK_HIDDEV	0x10
+#define HID_QUIRK_BADPAD	0x20
+#define HID_QUIRK_MULTI_INPUT	0x40
 
 /*
- * This is the global enviroment of the parser. This information is
- * persistent for main-items. The global enviroment can be saved and
+ * This is the global environment of the parser. This information is
+ * persistent for main-items. The global environment can be saved and
  * restored with PUSH/POP statements.
  */
 
@@ -205,14 +210,17 @@ struct hid_global {
 };
 
 /*
- * This is the local enviroment. It is resistent up the the next main-item.
+ * This is the local environment. It is persistent up the next main-item.
  */
 
 #define HID_MAX_DESCRIPTOR_SIZE		4096
 #define HID_MAX_USAGES			1024
+#define HID_MAX_APPLICATIONS		16
+#define HID_DEFAULT_NUM_COLLECTIONS	16
 
 struct hid_local {
 	unsigned usage[HID_MAX_USAGES]; /* usage array */
+	unsigned collection_index[HID_MAX_USAGES]; /* collection index array */
 	unsigned usage_index;
 	unsigned usage_minimum;
 	unsigned delimiter_depth;
@@ -227,18 +235,22 @@ struct hid_local {
 struct hid_collection {
 	unsigned type;
 	unsigned usage;
+	unsigned level;
 };
 
 struct hid_usage {
 	unsigned  hid;			/* hid usage code */
+	unsigned  collection_index;	/* index into collection array */
 	__u16     code;			/* input driver code */
 	__u8      type;			/* input driver type */
-	__u8	  hat;			/* hat switch fun */
+	__s8	  hat_min;		/* hat switch fun */
+	__s8	  hat_max;		/* ditto */
 };
 
 struct hid_field {
 	unsigned  physical;		/* physical usage for this field */
 	unsigned  logical;		/* logical usage for this field */
+	unsigned  application;		/* application usage for this field */
 	struct hid_usage *usage;	/* usage table for this function */
 	unsigned  maxusage;		/* maximum usage index */
 	unsigned  flags;		/* main-item flags (i.e. volatile,array,constant) */
@@ -254,6 +266,7 @@ struct hid_field {
 	unsigned  unit_exponent;
 	unsigned  unit;
 	struct hid_report *report;	/* associated report */
+	unsigned index;			/* index into report->field[] */
 };
 
 #define HID_MAX_FIELDS 64
@@ -265,6 +278,8 @@ struct hid_report {
 	struct hid_field *field[HID_MAX_FIELDS];	/* fields of the report */
 	unsigned maxfield;				/* maximum valid field index */
 	unsigned size;					/* size of the report (bits) */
+	unsigned idx;					/* where we're in data */
+	unsigned char *data;				/* data for multi-packet reports */
 	struct hid_device *device;			/* associated device */
 };
 
@@ -280,14 +295,28 @@ struct hid_report_enum {
 #define HID_CONTROL_FIFO_SIZE	8
 
 struct hid_control_fifo {
-	devrequest dr;
+	struct usb_ctrlrequest dr;
 	char buffer[HID_BUFFER_SIZE];
+};
+
+#define HID_CLAIMED_INPUT	1
+#define HID_CLAIMED_HIDDEV	2
+
+#define HID_OUT_RUNNING		2
+
+struct hid_input {
+	struct list_head list;
+	struct hid_report *report;
+	struct input_dev input;
 };
 
 struct hid_device {							/* device report descriptor */
 	 __u8 *rdesc;
 	unsigned rsize;
-	unsigned application;						/* HID application, i.e. Digitizer */
+	struct hid_collection *collection;                              /* List of HID collections */
+	unsigned collection_size;                                       /* Number of allocated hid_collections */
+	unsigned maxcollection;                                         /* Number of parsed collections */
+	unsigned maxapplication;					/* Number of applications */
 	unsigned version;						/* HID version */
 	unsigned country;						/* HID country */
 	struct hid_report_enum report_enum[HID_REPORT_TYPES];
@@ -295,16 +324,24 @@ struct hid_device {							/* device report descriptor */
 	struct usb_device *dev;						/* USB device */
 	int ifnum;							/* USB interface number */
 
+	unsigned long iofl;						/* I/O flags (CTRL_RUNNING, OUT_RUNNING) */
+
 	struct urb urb;							/* USB URB structure */
 	char buffer[HID_BUFFER_SIZE];					/* Rx buffer */
 
 	struct urb urbout;						/* Output URB */
 	struct hid_control_fifo out[HID_CONTROL_FIFO_SIZE];		/* Transmit buffer */
 	unsigned char outhead, outtail;					/* Tx buffer head & tail */
+	spinlock_t outlock;						/* Output fifo spinlock */
 
-	struct input_dev input;						/* input device structure */
-	int open;							/* is the device open by input? */
-	int quirks;							/* Various nasty tricks the device can pull on us */
+	unsigned claimed;						/* Claimed by hidinput, hiddev? */	
+	unsigned quirks;						/* Various quirks the device can pull on us */
+
+	struct list_head inputs;					/* The list of inputs */
+	void *hiddev;							/* The hiddev structure */
+	int minor;							/* Hiddev minor number */
+
+	int open;							/* is the device open by anyone? */
 	char name[128];							/* Device name */
 };
 
@@ -316,7 +353,7 @@ struct hid_parser {
 	struct hid_global     global_stack[HID_GLOBAL_STACK_SIZE];
 	unsigned              global_stack_ptr;
 	struct hid_local      local;
-	struct hid_collection collection_stack[HID_COLLECTION_STACK_SIZE];
+	unsigned              collection_stack[HID_COLLECTION_STACK_SIZE];
 	unsigned              collection_stack_ptr;
 	struct hid_device    *device;
 };
@@ -337,5 +374,31 @@ struct hid_descriptor {
 } __attribute__ ((packed));
 
 
+#ifdef DEBUG
+#include "hid-debug.h"
+#else
+#define hid_dump_input(a,b)	do { } while (0)
+#define hid_dump_device(c)	do { } while (0)
 #endif
 
+#endif
+
+#ifdef CONFIG_USB_HIDINPUT
+#define IS_INPUT_APPLICATION(a) (((a >= 0x00010000) && (a <= 0x00010008)) || (a == 0x00010080) || ( a == 0x000c0001))
+extern void hidinput_hid_event(struct hid_device *, struct hid_field *, struct hid_usage *, __s32);
+extern int hidinput_connect(struct hid_device *);
+extern void hidinput_disconnect(struct hid_device *);
+#else
+#define IS_INPUT_APPLICATION(a) (0)
+static inline void hidinput_hid_event(struct hid_device *hid, struct hid_field *field, struct hid_usage *usage, __s32 value) { }
+static inline int hidinput_connect(struct hid_device *hid) { return -ENODEV; }
+static inline void hidinput_disconnect(struct hid_device *hid) { }
+#endif
+
+int hid_open(struct hid_device *);
+void hid_close(struct hid_device *);
+int hid_find_field(struct hid_device *, unsigned int, unsigned int, struct hid_field **);
+int hid_set_field(struct hid_field *, unsigned, __s32);
+void hid_write_report(struct hid_device *, struct hid_report *);
+void hid_read_report(struct hid_device *, struct hid_report *);
+void hid_init_reports(struct hid_device *hid);

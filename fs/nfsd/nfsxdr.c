@@ -26,7 +26,7 @@
  * Mapping of S_IF* types to NFS file types
  */
 static u32	nfs_ftypes[] = {
-	NFNON,  NFFIFO, NFCHR, NFBAD,
+	NFNON,  NFCHR,  NFCHR, NFBAD,
 	NFDIR,  NFBAD,  NFBLK, NFBAD,
 	NFREG,  NFBAD,  NFLNK, NFBAD,
 	NFSOCK, NFBAD,  NFLNK, NFBAD,
@@ -65,12 +65,11 @@ decode_filename(u32 *p, char **namp, int *lenp)
 	char		*name;
 	int		i;
 
-	if ((p = xdr_decode_string(p, namp, lenp, NFS_MAXNAMLEN)) != NULL) {
+	if ((p = xdr_decode_string_inplace(p, namp, lenp, NFS_MAXNAMLEN)) != NULL) {
 		for (i = 0, name = *namp; i < *lenp; i++, name++) {
 			if (*name == '\0' || *name == '/')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -87,7 +86,6 @@ decode_pathname(u32 *p, char **namp, int *lenp)
 			if (*name == '\0')
 				return NULL;
 		}
-		*name = '\0';
 	}
 
 	return p;
@@ -129,29 +127,50 @@ decode_sattr(u32 *p, struct iattr *iap)
 	if (tmp != (u32)-1 && tmp1 != (u32)-1) {
 		iap->ia_valid |= ATTR_MTIME | ATTR_MTIME_SET;
 		iap->ia_mtime = tmp;
+		/*
+		 * Passing the invalid value useconds=1000000 for mtime
+		 * is a Sun convention for "set both mtime and atime to
+		 * current server time".  It's needed to make permissions
+		 * checks for the "touch" program across v2 mounts to
+		 * Solaris and Irix boxes work correctly. See description of
+		 * sattr in section 6.1 of "NFS Illustrated" by
+		 * Brent Callaghan, Addison-Wesley, ISBN 0-201-32750-5
+		 */
+		if (tmp1 == 1000000)
+			iap->ia_valid &= ~(ATTR_ATIME_SET|ATTR_MTIME_SET);
 	}
 	return p;
 }
 
 static inline u32 *
-encode_fattr(struct svc_rqst *rqstp, u32 *p, struct inode *inode)
+encode_fattr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 {
-	if (!inode)
-		return 0;
-	*p++ = htonl(nfs_ftypes[(inode->i_mode & S_IFMT) >> 12]);
+	struct inode *inode = fhp->fh_dentry->d_inode;
+	int type = (inode->i_mode & S_IFMT);
+
+	*p++ = htonl(nfs_ftypes[type >> 12]);
 	*p++ = htonl((u32) inode->i_mode);
 	*p++ = htonl((u32) inode->i_nlink);
 	*p++ = htonl((u32) nfsd_ruid(rqstp, inode->i_uid));
 	*p++ = htonl((u32) nfsd_rgid(rqstp, inode->i_gid));
-	if (S_ISLNK(inode->i_mode) && inode->i_size > NFS_MAXPATHLEN) {
+
+	if (S_ISLNK(type) && inode->i_size > NFS_MAXPATHLEN) {
 		*p++ = htonl(NFS_MAXPATHLEN);
 	} else {
 		*p++ = htonl((u32) inode->i_size);
 	}
 	*p++ = htonl((u32) inode->i_blksize);
-	*p++ = htonl((u32) inode->i_rdev);
+	if (S_ISCHR(type) || S_ISBLK(type))
+		*p++ = htonl((u32) inode->i_rdev);
+	else
+		*p++ = htonl(0xffffffff);
 	*p++ = htonl((u32) inode->i_blocks);
-	*p++ = htonl((u32) inode->i_dev);
+	if (rqstp->rq_reffh->fh_version == 1 
+	    && rqstp->rq_reffh->fh_fsid_type == 1
+	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
+		*p++ = htonl((u32) fhp->fh_export->ex_fsid);
+	else
+		*p++ = htonl((u32) inode->i_dev);
 	*p++ = htonl((u32) inode->i_ino);
 	*p++ = htonl((u32) inode->i_atime);
 	*p++ = 0;
@@ -330,8 +349,7 @@ int
 nfssvc_encode_attrstat(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_attrstat *resp)
 {
-	if (!(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fattr(rqstp, p, &resp->fh);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -339,9 +357,8 @@ int
 nfssvc_encode_diropres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_diropres *resp)
 {
-	if (!(p = encode_fh(p, &resp->fh))
-	 || !(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fh(p, &resp->fh);
+	p = encode_fattr(rqstp, p, &resp->fh);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -358,8 +375,7 @@ int
 nfssvc_encode_readres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_readres *resp)
 {
-	if (!(p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode)))
-		return 0;
+	p = encode_fattr(rqstp, p, &resp->fh);
 	*p++ = htonl(resp->count);
 	p += XDR_QUADLEN(resp->count);
 
@@ -380,7 +396,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 {
 	struct statfs	*stat = &resp->stats;
 
-	*p++ = htonl(8 * 1024);		/* max transfer size */
+	*p++ = htonl(NFSSVC_MAXBLKSIZE);	/* max transfer size */
 	*p++ = htonl(stat->f_bsize);
 	*p++ = htonl(stat->f_blocks);
 	*p++ = htonl(stat->f_bfree);
@@ -390,7 +406,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 
 int
 nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
-		    int namlen, off_t offset, ino_t ino, unsigned int d_type)
+		    int namlen, loff_t offset, ino_t ino, unsigned int d_type)
 {
 	u32	*p = cd->buffer;
 	int	buflen, slen;

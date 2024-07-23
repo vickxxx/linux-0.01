@@ -1,27 +1,15 @@
-/* $Id: hysdn_net.c,v 1.8 2000/11/13 22:51:47 kai Exp $
-
+/* $Id: hysdn_net.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * Linux driver for HYSDN cards, net (ethernet type) handling routines.
  *
- * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Author    Werner Cornelius (werner@titro.de) for Hypercope GmbH
+ * Copyright 1999 by Werner Cornelius (werner@titro.de)
  *
- * Copyright 1999  by Werner Cornelius (werner@titro.de)
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * This net module has been inspired by the skeleton driver from
  * Donald Becker (becker@CESDIS.gsfc.nasa.gov)
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
 
@@ -37,8 +25,11 @@
 
 #include "hysdn_defs.h"
 
+unsigned int hynet_enable = 0xffffffff; 
+MODULE_PARM(hynet_enable, "i");
+
 /* store the actual version for log reporting */
-char *hysdn_net_revision = "$Revision: 1.8 $";
+char *hysdn_net_revision = "$Revision: 1.1.4.1 $";
 
 #define MAX_SKB_BUFFERS 20	/* number of buffers for keeping TX-data */
 
@@ -301,8 +292,7 @@ hysdn_net_create(hysdn_card * card)
 	hysdn_net_release(card);	/* release an existing net device */
 	if ((dev = kmalloc(sizeof(struct net_local), GFP_KERNEL)) == NULL) {
 		printk(KERN_WARNING "HYSDN: unable to allocate mem\n");
-		if (card->debug_flags & LOG_NET_INIT)
-			return (-ENOMEM);
+		return (-ENOMEM);
 	}
 	memset(dev, 0, sizeof(struct net_local));	/* clean the structure */
 
@@ -350,7 +340,7 @@ hysdn_net_release(hysdn_card * card)
 	if (card->debug_flags & LOG_NET_INIT)
 		hysdn_addlog(card, "network device deleted");
 
-	return (0);		/* always successfull */
+	return (0);		/* always successful */
 }				/* hysdn_net_release */
 
 /*****************************************************************************/

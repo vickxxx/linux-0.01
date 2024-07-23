@@ -43,6 +43,13 @@
 #include "dabusb.h"
 #include "dabfirmware.h"
 
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.54"
+#define DRIVER_AUTHOR "Deti Fliegl, deti@fliegl.de"
+#define DRIVER_DESC "DAB-USB Interface Driver for Linux (c)1999"
+
 /* --------------------------------------------------------------------- */
 
 #define NRDABUSB 4
@@ -76,7 +83,7 @@ static int dabusb_add_buf_tail (pdabusb_t s, struct list_head *dst, struct list_
 }
 /*-------------------------------------------------------------------*/
 #ifdef DEBUG 
-static void dump_urb (purb_t purb)
+static void dump_urb (struct urb *purb)
 {
 	dbg("urb                   :%p", purb);
 	dbg("next                  :%p", purb->next);
@@ -160,7 +167,7 @@ static int dabusb_free_buffers (pdabusb_t s)
 	return 0;
 }
 /*-------------------------------------------------------------------*/
-static void dabusb_iso_complete (purb_t purb)
+static void dabusb_iso_complete (struct urb *purb)
 {
 	pbuff_t b = purb->context;
 	pdabusb_t s = b->s;
@@ -217,7 +224,7 @@ static int dabusb_alloc_buffers (pdabusb_t s)
 			err("kmalloc(sizeof(buff_t))==NULL");
 			goto err;
 		}
-		memset (b, sizeof (buff_t), 0);
+		memset (b, 0, sizeof (buff_t));
 		b->s = s;
 		b->purb = usb_alloc_urb(packets);
 		if (!b->purb) {
@@ -415,11 +422,6 @@ static int dabusb_fpga_download (pdabusb_t s, const char *fname)
 	return ret;
 }
 
-static loff_t dabusb_llseek (struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int dabusb_stop (pdabusb_t s)
 {
 	dbg("dabusb_stop");
@@ -480,7 +482,7 @@ static ssize_t dabusb_read (struct file *file, char *buf, size_t count, loff_t *
 	int rem;
 	int cnt;
 	pbuff_t b;
-	purb_t purb = NULL;
+	struct urb *purb = NULL;
 
 	dbg("dabusb_read");
 
@@ -603,6 +605,7 @@ static int dabusb_open (struct inode *inode, struct file *file)
 	}
 	if (usb_set_interface (s->usbdev, _DABUSB_IF, 1) < 0) {
 		err("set_interface failed");
+		up(&s->mutex);
 		return -EINVAL;
 	}
 	s->opened = 1;
@@ -698,7 +701,7 @@ static int dabusb_ioctl (struct inode *inode, struct file *file, unsigned int cm
 static struct file_operations dabusb_fops =
 {
 	owner:		THIS_MODULE,
-	llseek:		dabusb_llseek,
+	llseek:		no_llseek,
 	read:		dabusb_read,
 	ioctl:		dabusb_ioctl,
 	open:		dabusb_open,
@@ -829,6 +832,9 @@ static int __init dabusb_init (void)
 		return -1;
 
 	dbg("dabusb_init: driver registered");
+
+	info(DRIVER_VERSION ":" DRIVER_DESC);
+
 	return 0;
 }
 
@@ -841,8 +847,10 @@ static void __exit dabusb_cleanup (void)
 
 /* --------------------------------------------------------------------- */
 
-MODULE_AUTHOR ("Deti Fliegl, deti@fliegl.de");
-MODULE_DESCRIPTION ("DAB-USB Interface Driver for Linux (c)1999");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
 MODULE_PARM (buffers, "i");
 MODULE_PARM_DESC (buffers, "Number of buffers (default=256)");
 

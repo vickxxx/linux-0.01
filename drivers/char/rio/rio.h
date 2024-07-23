@@ -210,21 +210,11 @@ static char *_rio_h_sccs_ = "@(#)rio.h	1.3";
 #define RIO_PORT(DEV,FIRST_MAJ)	( (major(DEV) - FIRST_MAJ) * PORTS_PER_HOST) \
 					+ minor(DEV)
 
-/*
-**	Min and Max
-*/
-#ifndef min
-#define	min(A,B)	((A)<(B)?(A):(B))
-#endif
-#ifndef max
-#define	max(A,B)	((A)>(B)?(A):(B))
-#endif
-
 #define	splrio	spltty
 
 #define	RIO_IPL	5
 #define	RIO_PRI	(PZERO+10)
-#define RIO_CLOSE_PRI	PZERO-1	/* uninteruptible sleeps for close */
+#define RIO_CLOSE_PRI	PZERO-1	/* uninterruptible sleeps for close */
 
 typedef struct DbInf
 {

@@ -23,6 +23,10 @@ extern void init_fpu(void);
 extern void save_init_fpu( struct task_struct *tsk );
 extern void restore_fpu( struct task_struct *tsk );
 
+extern void kernel_fpu_begin(void);
+#define kernel_fpu_end() stts()
+
+
 #define unlazy_fpu( tsk ) do { \
 	if ( tsk->flags & PF_USEDFPU ) \
 		save_init_fpu( tsk ); \
@@ -30,7 +34,7 @@ extern void restore_fpu( struct task_struct *tsk );
 
 #define clear_fpu( tsk ) do { \
 	if ( tsk->flags & PF_USEDFPU ) { \
-		asm volatile("fwait"); \
+		asm volatile("fnclex ; fwait"); \
 		tsk->flags &= ~PF_USEDFPU; \
 		stts(); \
 	} \
@@ -50,10 +54,8 @@ extern void set_fpu_twd( struct task_struct *tsk, unsigned short twd );
 extern void set_fpu_mxcsr( struct task_struct *tsk, unsigned short mxcsr );
 
 #define load_mxcsr( val ) do { \
-	if ( cpu_has_xmm ) { \
-		unsigned long __mxcsr = ((unsigned long)(val) & 0xffff); \
-		asm volatile( "ldmxcsr %0" : : "m" (__mxcsr) ); \
-	} \
+	unsigned long __mxcsr = ((unsigned long)(val) & 0xffbf); \
+	asm volatile( "ldmxcsr %0" : : "m" (__mxcsr) ); \
 } while (0)
 
 /*
@@ -74,6 +76,7 @@ extern int get_fpxregs( struct user_fxsr_struct *buf,
 			struct task_struct *tsk );
 extern int set_fpxregs( struct task_struct *tsk,
 			struct user_fxsr_struct *buf );
+extern void load_empty_fpu(struct task_struct *);
 
 /*
  * FPU state for core dumps...

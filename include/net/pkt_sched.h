@@ -8,6 +8,7 @@
 #define PSCHED_CLOCK_SOURCE	PSCHED_JIFFIES
 
 #include <linux/config.h>
+#include <linux/types.h>
 #include <linux/pkt_sched.h>
 #include <net/pkt_cls.h>
 
@@ -58,7 +59,7 @@ struct Qdisc_ops
 	int 			(*enqueue)(struct sk_buff *, struct Qdisc *);
 	struct sk_buff *	(*dequeue)(struct Qdisc *);
 	int 			(*requeue)(struct sk_buff *, struct Qdisc *);
-	int			(*drop)(struct Qdisc *);
+	unsigned int		(*drop)(struct Qdisc *);
 
 	int			(*init)(struct Qdisc *, struct rtattr *arg);
 	void			(*reset)(struct Qdisc *);
@@ -77,13 +78,14 @@ struct Qdisc
 	unsigned		flags;
 #define TCQ_F_BUILTIN	1
 #define TCQ_F_THROTTLED	2
-#define TCQ_F_INGRES	4
+#define TCQ_F_INGRESS	4
 	struct Qdisc_ops	*ops;
-	struct Qdisc		*next;
 	u32			handle;
+	u32			parent;
 	atomic_t		refcnt;
 	struct sk_buff_head	q;
 	struct net_device	*dev;
+	struct list_head	list;
 
 	struct tc_stats		stats;
 	int			(*reshape_fail)(struct sk_buff *skb, struct Qdisc *q);
@@ -197,6 +199,7 @@ typedef long		psched_tdiff_t;
 
 #define PSCHED_GET_TIME(stamp) do_gettimeofday(&(stamp))
 #define PSCHED_US2JIFFIE(usecs) (((usecs)+(1000000/HZ-1))/(1000000/HZ))
+#define PSCHED_JIFFIE2US(delay) ((delay)*(1000000/HZ))
 
 #define PSCHED_EXPORTLIST EXPORT_SYMBOL(psched_tod_diff);
 
@@ -211,17 +214,21 @@ extern psched_time_t	psched_time_base;
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_JIFFIES
 
-#if HZ == 100
+#if HZ < 96
+#define PSCHED_JSCALE 14
+#elif HZ >= 96 && HZ < 192
 #define PSCHED_JSCALE 13
-#elif HZ == 1024
+#elif HZ >= 192 && HZ < 384
+#define PSCHED_JSCALE 12
+#elif HZ >= 384 && HZ < 768
+#define PSCHED_JSCALE 11
+#elif HZ >= 768
 #define PSCHED_JSCALE 10
-#else
-#define PSCHED_JSCALE 0
 #endif
 
 #define PSCHED_EXPORTLIST_2
 
-#if ~0UL == 0xFFFFFFFF
+#if BITS_PER_LONG <= 32
 
 #define PSCHED_WATCHER unsigned long
 
@@ -241,6 +248,7 @@ extern PSCHED_WATCHER psched_time_mark;
 #endif
 
 #define PSCHED_US2JIFFIE(delay) (((delay)+(1<<PSCHED_JSCALE)-1)>>PSCHED_JSCALE)
+#define PSCHED_JIFFIE2US(delay) ((delay)<<PSCHED_JSCALE)
 
 #elif PSCHED_CLOCK_SOURCE == PSCHED_CPU
 
@@ -251,6 +259,7 @@ extern int psched_clock_scale;
                             EXPORT_SYMBOL(psched_clock_scale);
 
 #define PSCHED_US2JIFFIE(delay) (((delay)+psched_clock_per_hz-1)/psched_clock_per_hz)
+#define PSCHED_JIFFIE2US(delay) ((delay)*psched_clock_per_hz)
 
 #ifdef CONFIG_X86_TSC
 
@@ -358,8 +367,8 @@ extern int psched_tod_diff(int delta_sec, int bound);
 #define PSCHED_TDIFF(tv1, tv2) (long)((tv1) - (tv2))
 #define PSCHED_TDIFF_SAFE(tv1, tv2, bound, guard) \
 ({ \
-	   long __delta = (tv1) - (tv2); \
-	   if ( __delta > (bound)) {  __delta = (bound); guard; } \
+	   long long __delta = (tv1) - (tv2); \
+	   if ( __delta > (long long)(bound)) {  __delta = (bound); guard; } \
 	   __delta; \
 })
 

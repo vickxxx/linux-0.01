@@ -1,5 +1,5 @@
 <!-- -*- sgml -*- -->
-<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V3.1//EN"[]>
+<!DOCTYPE book PUBLIC "-//OASIS//DTD DocBook V4.1//EN"[]>
 
 <book id="ParportGuide">
  <bookinfo>
@@ -184,10 +184,10 @@
 
    <mediaobject>
     <imageobject>
-     <imagedata fileref="parport-share.eps" format=ps>
+     <imagedata fileref="parport-share" format="eps">
     </imageobject>
     <imageobject>
-     <imagedata fileref="parport-share.jpeg" format=jpeg>
+     <imagedata fileref="parport-share.png" format="png">
     </imageobject>
    </mediaobject>
 
@@ -270,10 +270,10 @@
 
   <mediaobject>
    <imageobject>
-    <imagedata format=eps fileref="parport-structure.eps">
+    <imagedata fileref="parport-structure" format="eps">
    </imageobject>
    <imageobject>
-    <imagedata format=jpeg fileref="parport-structure.jpeg">
+    <imagedata fileref="parport-structure.png" format="png">
    </imageobject>
   </mediaobject>
 
@@ -461,10 +461,10 @@
 
    <mediaobject>
     <imageobject>
-     <imagedata format=eps fileref="parport-multi.eps">
+     <imagedata fileref="parport-multi" format="eps">
     </imageobject>
     <imageobject>
-     <imagedata format=jpeg fileref="parport-multi.jpeg">
+     <imagedata fileref="parport-multi.png" format="png">
     </imageobject>
    </mediaobject>
 
@@ -595,7 +595,7 @@
    So, the first thing for the device driver to do is tell
    <literal>parport</literal> that it wants to know what parallel
    ports are on the system.  To do this, it uses the
-   <function>parport_register_device</function> function:
+   <function>parport_register_driver</function> function:
   </para>
 
   <funcsynopsis>
@@ -771,6 +771,7 @@ struct parport_driver {
    <funcprototype>
     <funcdef>struct pardevice *<function>parport_open</function></funcdef>
     <paramdef>int <parameter>devnum</parameter></paramdef>
+    <paramdef>const char *<parameter>name</parameter></paramdef>
     <paramdef>int <parameter>(*pf)</parameter>
      <funcparams>void *</funcparams></paramdef>
     <paramdef>int <parameter>(*kf)</parameter>
@@ -1653,6 +1654,16 @@ struct parport_operations {
 
       </listitem></varlistentry>
 
+     <varlistentry><term><constant>PPGETMODE</constant></term>
+      <listitem>
+
+       <para>
+	Retrieves the current IEEE 1284 mode to use for
+	<function>read</function> and <function>write</function>.
+       </para>
+
+      </listitem></varlistentry>
+
      <varlistentry><term><constant>PPGETTIME</constant></term>
       <listitem>
 
@@ -1680,6 +1691,36 @@ struct parport_operations {
 	should be a pointer to a <structname>struct
 	timeval</structname>.
        </para>
+
+      </listitem></varlistentry>
+
+     <varlistentry><term><constant>PPGETMODES</constant></term>
+      <listitem>
+
+       <para>
+	Retrieves the capabilities of the hardware (i.e. the
+	<structfield>modes</structfield> field of the
+	<structname>parport</structname> structure).
+       </para>
+
+      </listitem></varlistentry>
+
+     <varlistentry><term><constant>PPSETFLAGS</constant></term>
+      <listitem>
+
+       <para>
+	Sets flags on the <literal>ppdev</literal> device which can
+	affect future I/O operations.  Available flags are:
+       </para>
+
+       <itemizedlist spacing=compact>
+	<listitem><para>
+	  <constant>PP_FASTWRITE</constant></para></listitem>
+	<listitem><para>
+	  <constant>PP_FASTREAD</constant></para></listitem>
+	<listitem><para>
+	  <constant>PP_W91284PIC</constant></para></listitem>
+       </itemizedlist>
 
       </listitem></varlistentry>
 
@@ -2079,7 +2120,7 @@ ssize_t write_printer (int fd, const void *ptr, size_t count)
                               | PARPORT_STATUS_BUSY);
         unsigned char val = (PARPORT_STATUS_ERROR
                               | PARPORT_STATUS_BUSY);
-        struct parport_frob_struct frob;
+        struct ppdev_frob_struct frob;
         struct timespec ts;
 
         /* Wait for printer to be ready */

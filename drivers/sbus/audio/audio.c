@@ -1,4 +1,4 @@
-/* $Id: audio.c,v 1.56 2000/10/19 00:50:02 davem Exp $
+/* $Id: audio.c,v 1.62 2001/10/08 22:19:50 davem Exp $
  * drivers/sbus/audio/audio.c
  *
  * Copyright 1996 Thomas K. Dyas (tdyas@noc.rutgers.edu)
@@ -28,14 +28,15 @@
 #include <linux/mm.h>
 #include <linux/tqueue.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/soundcard.h>
-#include <linux/version.h>
 #include <linux/devfs_fs_kernel.h>
-#include <asm/delay.h>
+#include <linux/delay.h>
+#include <linux/poll.h>
 #include <asm/pgtable.h>
+#include <asm/uaccess.h>
 
 #include <asm/audioio.h>
 
@@ -64,6 +65,14 @@
 #define tprintk(x)
 #endif
 
+static int  audio_input_buffers = 8;
+MODULE_PARM(audio_input_buffers, "i");
+MODULE_PARM_DESC(audio_input_buffers,"Number of input 8KB buffers.");
+
+static int  audio_output_buffers = 8;
+MODULE_PARM(audio_output_buffers, "i");
+MODULE_PARM_DESC(audio_output_buffers,"Number of output 8KB buffer.");
+
 static short lis_get_elist_ent( strevent_t *list, pid_t pid );
 static int lis_add_to_elist( strevent_t **list, pid_t pid, short events );
 static int lis_del_from_elist( strevent_t **list, pid_t pid, short events );
@@ -73,24 +82,6 @@ static void kill_procs( struct strevent *elist, int sig, short e);
 static struct sparcaudio_driver *drivers[SPARCAUDIO_MAX_DEVICES];
 static devfs_handle_t devfs_handle;
  
-/* This crap to be pulled off into a local include file */
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-
-#define COPY_IN(arg, get) verify_area(VERIFY_READ, (void *)arg, sizeof(long)); memcpy_fromfs(&get, (long *)arg, sizeof(get));
-#define COPY_OUT(arg, ret) verify_area(VERIFY_WRITE, (void *)arg, sizeof(long)); memcpy_tofs((long *)arg, &ret, sizeof(ret));
-#define copy_to_user memcpy_tofs
-#define copy_from_user memcpy_fromfs
-#define signal_pending(x) (((x)->signal) & ~((x)->blocked))
-
-#else
-
-#include <asm/uaccess.h>
-#include <linux/poll.h>
-#define COPY_IN(arg, get) get_user(get, (int *)arg)
-#define COPY_OUT(arg, ret) put_user(ret, (int *)arg)
-#define sparcaudio_select sparcaudio_poll
-
-#endif
 
 void sparcaudio_output_done(struct sparcaudio_driver * drv, int status)
 {
@@ -215,37 +206,6 @@ void sparcaudio_input_done(struct sparcaudio_driver * drv, int status)
  *	VFS layer interface
  */
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static int sparcaudio_select(struct inode * inode, struct file * file,
-			    int sel_type, select_table * wait)
-{
-        struct sparcaudio_driver *drv = drivers[(MINOR(inode->i_rdev) >>
-                                                 SPARCAUDIO_DEVICE_SHIFT)];
-  
-        switch (sel_type) {
-        case SEL_IN:
-                if (((!file->f_flags & O_NONBLOCK) && drv->input_count) ||
-                    (drv->input_size > drv->buffer_size)) {
-                        dprintk(("read ready: c%d o%d\n",
-                                 drv->input_count, drv->input_offset));
-                        return 1;
-                }
-                select_wait(&drv->input_read_wait, wait);
-                break;
-        case SEL_OUT:
-                dprintk(("sel out: c%d o%d p%d\n",
-                         drv->output_count, drv->output_offset, drv->playing_count));
-                if ((drv->output_count + drv->playing_count) < (drv->num_output_buffers))
-                        return 1;
-                select_wait(&drv->output_write_wait, wait);
-                break;
-        case SEL_EX:
-                break;
-        };
-
-        return 0;
-}
-#else
 static unsigned int sparcaudio_poll(struct file *file, poll_table * wait)
 {
         unsigned int mask = 0;
@@ -264,29 +224,11 @@ static unsigned int sparcaudio_poll(struct file *file, poll_table * wait)
         }
         return mask;
 }
-#endif
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static int sparcaudio_lseek(struct inode * inode, struct file * file,
-			    off_t offset, int origin)
-#else
-static loff_t sparcaudio_lseek(struct file * file, loff_t offset, int origin)
-#endif
-{
-	return -ESPIPE;
-}
-
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static int sparcaudio_read(struct inode * inode, struct file * file,
-			   char *buf, int count)
-#else
 static ssize_t sparcaudio_read(struct file * file, char *buf, 
                                size_t count, loff_t *ppos)
-#endif
 {
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x200ff
         struct inode *inode = file->f_dentry->d_inode;
-#endif
         struct sparcaudio_driver *drv = drivers[(MINOR(inode->i_rdev) >>
                                                  SPARCAUDIO_DEVICE_SHIFT)];
         int bytes_to_copy, bytes_read = 0, err;
@@ -358,17 +300,10 @@ static void sparcaudio_sync_output(struct sparcaudio_driver * drv)
         restore_flags(flags);
 }
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static int sparcaudio_write(struct inode * inode, struct file * file,
-			    const char *buf, int count)
-#else
 static ssize_t sparcaudio_write(struct file * file, const char *buf,
                                 size_t count, loff_t *ppos)
-#endif
 {
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x200ff
         struct inode *inode = file->f_dentry->d_inode;
-#endif
         struct sparcaudio_driver *drv = drivers[(MINOR(inode->i_rdev) >>
                                                  SPARCAUDIO_DEVICE_SHIFT)];
         int bytes_written = 0, bytes_to_copy, err;
@@ -499,7 +434,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
 
         switch (cmd) {
         case SOUND_MIXER_WRITE_RECLEV:
-                if(COPY_IN(arg, k))
+                if (get_user(k, (int *)arg))
                         return -EFAULT;
         iretry:
                 oprintk(("setting input volume (0x%x)", k));
@@ -511,7 +446,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                         m = drv->ops->get_input_balance(drv);
                 i = OSS_TO_GAIN(k);
                 j = OSS_TO_BAL(k);
-                oprintk((" for stereo to to %d (bal %d):", i, j));
+                oprintk((" for stereo to do %ld (bal %ld):", i, j));
                 if (drv->ops->set_input_volume)
                         drv->ops->set_input_volume(drv, i);
                 if (drv->ops->set_input_balance)
@@ -531,9 +466,9 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                         oprintk((" try 0x%x\n", k));
                         goto iretry;
                 }
-                return COPY_OUT(arg, i);
+                return put_user(i, (int *)arg);
         case SOUND_MIXER_WRITE_VOLUME:
-                if(COPY_IN(arg, k))
+                if (get_user(k, (int *)arg))
                         return -EFAULT;
                 if (drv->ops->get_output_muted && drv->ops->set_output_muted) {
                         i = drv->ops->get_output_muted(drv);
@@ -546,9 +481,9 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                 if (drv->ops->get_output_muted) 
                         i = drv->ops->get_output_muted(drv);
                 k = 0x6464 * (1 - i);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_WRITE_PCM:
-                if(COPY_IN(arg, k))
+                if (get_user(k, (int *)arg))
                         return -EFAULT;
         oretry:
                 oprintk(("setting output volume (0x%x)\n", k));
@@ -561,7 +496,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                 oprintk((" started as (0x%x)\n", BAL_TO_OSS(l,m)));
                 i = OSS_TO_GAIN(k);
                 j = OSS_TO_BAL(k);
-                oprintk((" for stereo to %d (bal %d)\n", i, j));
+                oprintk((" for stereo to %ld (bal %ld)\n", i, j));
                 if (drv->ops->set_output_volume)
                         drv->ops->set_output_volume(drv, i);
                 if (drv->ops->set_output_balance)
@@ -582,25 +517,25 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                         oprintk((" try 0x%x\n", k));
                         goto oretry;
                 }
-                return COPY_OUT(arg, i);
+                return put_user(i, (int *)arg);
         case SOUND_MIXER_READ_SPEAKER:
                 k = OSS_PORT_AUDIO(drv, AUDIO_SPEAKER);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_MIC:
                 k = OSS_IPORT_AUDIO(drv, AUDIO_MICROPHONE);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_CD:
                 k = OSS_IPORT_AUDIO(drv, AUDIO_CD);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_LINE:
                 k = OSS_IPORT_AUDIO(drv, AUDIO_LINE_IN);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_LINE1:
                 k = OSS_PORT_AUDIO(drv, AUDIO_HEADPHONE);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_LINE2:
                 k = OSS_PORT_AUDIO(drv, AUDIO_LINE_OUT);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
 
         case SOUND_MIXER_WRITE_MIC:
         case SOUND_MIXER_WRITE_CD:
@@ -608,7 +543,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
         case SOUND_MIXER_WRITE_LINE1:
         case SOUND_MIXER_WRITE_LINE2:
         case SOUND_MIXER_WRITE_SPEAKER:
-                if(COPY_IN(arg, k))
+                if (get_user(k, (int *)arg))
                         return -EFAULT;
                 OSS_TWIDDLE_IPORT(drv, cmd, SOUND_MIXER_WRITE_LINE, AUDIO_LINE_IN, k);
                 OSS_TWIDDLE_IPORT(drv, cmd, SOUND_MIXER_WRITE_MIC, AUDIO_MICROPHONE, k);
@@ -617,7 +552,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                 OSS_TWIDDLE_PORT(drv, cmd, SOUND_MIXER_WRITE_SPEAKER, AUDIO_SPEAKER, k);
                 OSS_TWIDDLE_PORT(drv, cmd, SOUND_MIXER_WRITE_LINE1, AUDIO_HEADPHONE, k);
                 OSS_TWIDDLE_PORT(drv, cmd, SOUND_MIXER_WRITE_LINE2, AUDIO_LINE_OUT, k);
-                return COPY_OUT(arg, k);
+                return put_user(k, (int *)arg);
         case SOUND_MIXER_READ_RECSRC: 
                 if (drv->ops->get_input_port)
                         i = drv->ops->get_input_port(drv);
@@ -627,21 +562,21 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                 if (i & AUDIO_LINE_IN) j = SOUND_MASK_LINE;
                 if (i & AUDIO_MICROPHONE) j = SOUND_MASK_MIC;
     
-                return COPY_OUT(arg, j);
+                return put_user(j, (int *)arg);
   case SOUND_MIXER_WRITE_RECSRC: 
           if (!drv->ops->set_input_port)
                   return -EINVAL;
-          if(COPY_IN(arg, k))
+          if (get_user(k, (int *)arg))
                   return -EFAULT;
 
           /* only one should ever be selected */
           if (k & SOUND_MASK_CD) j = AUDIO_CD;
           if (k & SOUND_MASK_LINE) j = AUDIO_LINE_IN;
           if (k & SOUND_MASK_MIC) j = AUDIO_MICROPHONE;
-          oprintk(("setting inport to %d\n", j));
+          oprintk(("setting inport to %ld\n", j));
           i = drv->ops->set_input_port(drv, j);
     
-          return COPY_OUT(arg, i);
+          return put_user(i, (int *)arg);
         case SOUND_MIXER_READ_RECMASK: 
                 if (drv->ops->get_input_ports)
                         i = drv->ops->get_input_ports(drv);
@@ -650,10 +585,10 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
                 if (i & AUDIO_LINE_IN) j |= SOUND_MASK_LINE;
                 if (i & AUDIO_CD) j |= SOUND_MASK_CD;
     
-                return COPY_OUT(arg, j);
+                return put_user(j, (int *)arg);
         case SOUND_MIXER_READ_CAPS: /* mixer capabilities */
                 i = SOUND_CAP_EXCL_INPUT;
-                return COPY_OUT(arg, i);
+                return put_user(i, (int *)arg);
 
         case SOUND_MIXER_READ_DEVMASK: /* all supported devices */
                 if (drv->ops->get_input_ports)
@@ -676,7 +611,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
 
                 if (cmd == SOUND_MIXER_READ_STEREODEVS)
                         j &= ~(MONO_DEVICES);
-                return COPY_OUT(arg, j);
+                return put_user(j, (int *)arg);
         default:
                 return -EINVAL;
         };
@@ -742,7 +677,7 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                 case I_GETSIG:
                 case I_GETSIG_SOLARIS:
                         j = (int) lis_get_elist_ent(drv->sd_siglist,current->pid);
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         retval = drv->input_count;
                         break;
 
@@ -773,7 +708,7 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                          * as its retval. (streamio(7I)) This should work.
                          */
                         j = (drv->input_count > 0) ? drv->input_buffer_size : 0;
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         retval = drv->input_count;
                         break;
 
@@ -859,11 +794,11 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                 if (drv->ops->get_output_pause(drv))
                                         j |= PCM_ENABLE_OUTPUT;
                         }
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         break;
                 case SNDCTL_DSP_GETBLKSIZE:
                         j = drv->input_buffer_size;
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         break;
                 case SNDCTL_DSP_SPEED:
                         if ((!drv->ops->set_output_rate) && 
@@ -871,12 +806,12 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                 retval = -EINVAL;
                                 break;
                         }
-                        COPY_IN(arg, i);
+                        get_user(i, (int *)arg);
                         tprintk(("setting speed to %d\n", i));
                         drv->ops->set_input_rate(drv, i);
                         drv->ops->set_output_rate(drv, i);
                         j = drv->ops->get_output_rate(drv);
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         break;
                 case SNDCTL_DSP_GETCAPS:
                         /* All Sparc audio hardware is full duplex.
@@ -884,19 +819,19 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                          * Pause functionality emulates trigger
                          */
                         j = DSP_CAP_DUPLEX | DSP_CAP_TRIGGER | DSP_CAP_REALTIME;
-                        COPY_OUT(arg, j);
+                        put_user(j, (int *)arg);
                         break;
                 case SNDCTL_DSP_GETFMTS:
                         if (drv->ops->get_formats) {
                                 j = drv->ops->get_formats(drv);
-                                COPY_OUT(arg, j);
+                                put_user(j, (int *)arg);
                         } else {
                                 retval = -EINVAL;
                         }
                         break;
                 case SNDCTL_DSP_SETFMT:
                         /* need to decode into encoding, precision */
-                        COPY_IN(arg, i);
+                        get_user(i, (int *)arg);
 	    
                         /* handle special case here */
                         if (i == AFMT_QUERY) {
@@ -926,7 +861,7 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                                 break;
                                         };
                                 } 
-                                COPY_OUT(arg, i);
+                                put_user(i, (int *)arg);
                                 break;
                         }
 
@@ -991,7 +926,7 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                 dprintk(("setting format: failed\n"));
                                 return -EINVAL;
                         }
-                        COPY_OUT(arg, i);
+                        put_user(i, (int *)arg);
                         break;
                 case SNDCTL_DSP_CHANNELS:
                         if ((!drv->ops->set_output_channels) && 
@@ -999,11 +934,11 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                 retval = -EINVAL;
                                 break;
                         }
-                        COPY_IN(arg, i);
+                        get_user(i, (int *)arg);
                         drv->ops->set_input_channels(drv, i);
                         drv->ops->set_output_channels(drv, i);
                         i = drv->ops->get_output_channels(drv);
-                        COPY_OUT(arg, i);
+                        put_user(i, (int *)arg);
                         break;
                 case SNDCTL_DSP_STEREO:
                         if ((!drv->ops->set_output_channels) && 
@@ -1011,11 +946,11 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
                                 retval = -EINVAL;
                                 break;
                         }
-                        COPY_IN(arg, i);
+                        get_user(i, (int *)arg);
                         drv->ops->set_input_channels(drv, (i + 1));
                         drv->ops->set_output_channels(drv, (i + 1));
                         i = ((drv->ops->get_output_channels(drv)) - 1);
-                        COPY_OUT(arg, i);
+                        put_user(i, (int *)arg);
                         break;
                 case SNDCTL_DSP_POST:
                 case SNDCTL_DSP_SYNC:
@@ -1761,14 +1696,14 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 	default:
                 eprintk(("unknown minor device number\n"));
                 retval = -EINVAL;
-	};
+	}
 	
 	return retval;
 }
 
 static struct file_operations sparcaudioctl_fops = {
 	owner:		THIS_MODULE,
-	poll:		sparcaudio_select,
+	poll:		sparcaudio_poll,
 	ioctl:		sparcaudio_ioctl,
 };
 
@@ -1960,10 +1895,10 @@ static int sparcaudio_release(struct inode * inode, struct file * file)
 
 static struct file_operations sparcaudio_fops = {
 	owner:		THIS_MODULE,
-	llseek:		sparcaudio_lseek,
+	llseek:		no_llseek,
 	read:		sparcaudio_read,
 	write:		sparcaudio_write,
-	poll:		sparcaudio_select,
+	poll:		sparcaudio_poll,
 	ioctl:		sparcaudio_ioctl,
 	open:		sparcaudio_open,
 	release:	sparcaudio_release,
@@ -2028,18 +1963,14 @@ int register_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
          * Input buffers, on the other hand, always fill completely,
          * so we don't need input counts - each contains input_buffer_size
          * bytes of audio data.
-         *
-         * TODO: Make number of input/output buffers tunable parameters
          */
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x202ff
         init_waitqueue_head(&drv->open_wait);
         init_waitqueue_head(&drv->output_write_wait);
         init_waitqueue_head(&drv->output_drain_wait);
         init_waitqueue_head(&drv->input_read_wait);
-#endif
 
-        drv->num_output_buffers = 8;
+        drv->num_output_buffers = audio_output_buffers;
 	drv->output_buffer_size = (4096 * 2);
 	drv->playing_count = 0;
 	drv->output_offset = 0;
@@ -2072,7 +2003,7 @@ int register_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
         }
 
         /* Setup the circular queue of input buffers. */
-        drv->num_input_buffers = 8;
+        drv->num_input_buffers = audio_input_buffers;
 	drv->input_buffer_size = (4096 * 2);
 	drv->recording_count = 0;
         drv->input_front = 0;
@@ -2204,20 +2135,6 @@ static int __init sparcaudio_init(void)
 		return -EIO;
 
 	devfs_handle = devfs_mk_dir (NULL, "sound", NULL);
-	
-#ifdef CONFIG_SPARCAUDIO_AMD7930
-	amd7930_init();
-#endif
-#ifdef CONFIG_SPARCAUDIO_DBRI
-        dbri_init();
-#endif
-#ifdef CONFIG_SPARCAUDIO_CS4231
-	cs4231_init();
-#endif
-#ifdef CONFIG_SPARCAUDIO_DUMMY
-	dummy_init();
-#endif
-
 	return 0;
 }
 
@@ -2227,8 +2144,9 @@ static void __exit sparcaudio_exit(void)
 	devfs_unregister (devfs_handle);
 }
 
-module_init(sparcaudio_init)
-module_exit(sparcaudio_exit)
+module_init(sparcaudio_init);
+module_exit(sparcaudio_exit);
+MODULE_LICENSE("GPL");
 
 /*
  * Code from Linux Streams, Copyright 1995 by

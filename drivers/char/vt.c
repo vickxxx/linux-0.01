@@ -7,6 +7,7 @@
  *  Dynamic keymap and string allocation - aeb@cwi.nl - May 1994
  *  Restrict VT switching via ioctl() - grif@cs.ucr.edu - Dec 1995
  *  Some code moved for less code duplication - Andi Kleen - Mar 1997
+ *  Check put/get_user, cleanups - acme@conectiva.com.br - Jun 2001
  */
 
 #include <linux/config.h>
@@ -19,17 +20,13 @@
 #include <linux/kd.h>
 #include <linux/vt.h>
 #include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/console.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
-
-#if defined(__mc68000__) || defined(CONFIG_APUS)
-#include <asm/machdep.h>
-#endif
 
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
@@ -93,9 +90,10 @@ unsigned int video_scan_lines;
  * comments - KDMKTONE doesn't put the process to sleep.
  */
 
-#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) \
-    || (defined(__mips__) && !defined(CONFIG_SGI_IP22)) \
-    || (defined(__arm__) && defined(CONFIG_HOST_FOOTBRIDGE))
+#if defined(__i386__) || defined(__alpha__) || defined(CONFIG_PPC_ISATIMER) \
+    || (defined(__mips__) && defined(CONFIG_ISA)) \
+    || (defined(__arm__) && defined(CONFIG_HOST_FOOTBRIDGE)) \
+    || defined(__x86_64__)
 
 static void
 kd_nosound(unsigned long ignored)
@@ -146,8 +144,13 @@ _kd_mksound(unsigned int hz, unsigned int ticks)
 
 #endif
 
-void (*kd_mksound)(unsigned int hz, unsigned int ticks) = _kd_mksound;
+int _kbd_rate(struct kbd_repeat *rep)
+{
+	return -EINVAL;
+}
 
+void (*kd_mksound)(unsigned int hz, unsigned int ticks) = _kd_mksound;
+int (*kbd_rate)(struct kbd_repeat *rep) = _kbd_rate;
 
 #define i (tmp.kb_index)
 #define s (tmp.kb_table)
@@ -162,6 +165,9 @@ do_kdsk_ioctl(int cmd, struct kbentry *user_kbe, int perm, struct kbd_struct *kb
 		return -EFAULT;
 	if (i >= NR_KEYS || s >= MAX_NR_KEYMAPS)
 		return -EINVAL;	
+
+	if (!capable(CAP_SYS_TTY_CONFIG))
+		perm = 0;
 
 	switch (cmd) {
 	case KDGKBENT:
@@ -273,6 +279,9 @@ do_kdgkb_ioctl(int cmd, struct kbsentry *user_kdgkb, int perm)
 	char *first_free, *fj, *fnw;
 	int i, j, k;
 
+	if (!capable(CAP_SYS_TTY_CONFIG))
+		perm = 0;
+
 	/* we mostly copy too much here (512bytes), but who cares ;) */
 	if (copy_from_user(&tmp, user_kdgkb, sizeof(struct kbsentry)))
 		return -EFAULT;
@@ -289,8 +298,10 @@ do_kdgkb_ioctl(int cmd, struct kbsentry *user_kdgkb, int perm)
 		p = func_table[i];
 		if(p)
 			for ( ; *p && sz; p++, sz--)
-				put_user(*p, q++);
-		put_user('\0', q);
+				if (put_user(*p, q++))
+					return -EFAULT;
+		if (put_user('\0', q))
+			return -EFAULT;
 		return ((p && *p) ? -EOVERFLOW : 0);
 	case KDSKBSENT:
 		if (!perm)
@@ -476,7 +487,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ucval = keyboard_type;
 		goto setchar;
 
-#if !defined(__alpha__) && !defined(__ia64__) && !defined(__mips__) && !defined(__arm__) && !defined(__sh__)
+#if defined(CONFIG_X86)
 		/*
 		 * These cannot be implemented on any machine that implements
 		 * ioperm() in user level (such as Alpha PCs).
@@ -497,26 +508,25 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				  (cmd == KDENABIO)) ? -ENXIO : 0;
 #endif
 
-#if defined(__mc68000__) || defined(CONFIG_APUS)
-	/* Linux/m68k interface for setting the keyboard delay/repeat rate */
+	/* Linux m68k/i386 interface for setting the keyboard delay/repeat rate */
 		
 	case KDKBDREP:
 	{
 		struct kbd_repeat kbrep;
 		
-		if (!mach_kbdrate) return( -EINVAL );
-		if (!suser()) return( -EPERM );
+		if (!capable(CAP_SYS_ADMIN))
+			return -EPERM;
 
 		if (copy_from_user(&kbrep, (void *)arg,
 				   sizeof(struct kbd_repeat)))
 			return -EFAULT;
-		if ((i = mach_kbdrate( &kbrep ))) return( i );
+		if ((i = kbd_rate( &kbrep )))
+			return i;
 		if (copy_to_user((void *)arg, &kbrep,
 				 sizeof(struct kbd_repeat)))
 			return -EFAULT;
 		return 0;
 	}
-#endif
 
 	case KDSETMODE:
 		/*
@@ -584,8 +594,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		  default:
 			return -EINVAL;
 		}
-		if (tty->ldisc.flush_buffer)
-			tty->ldisc.flush_buffer(tty);
+		tty_ldisc_flush(tty);
 		return 0;
 
 	case KDGKBMODE:
@@ -741,10 +750,8 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		struct vt_stat *vtstat = (struct vt_stat *)arg;
 		unsigned short state, mask;
 
-		i = verify_area(VERIFY_WRITE,(void *)vtstat, sizeof(struct vt_stat));
-		if (i)
-			return i;
-		put_user(fg_console + 1, &vtstat->v_active);
+		if (put_user(fg_console + 1, &vtstat->v_active))
+			return -EFAULT;
 		state = 1;	/* /dev/tty0 is always open */
 		for (i = 0, mask = 2; i < MAX_NR_CONSOLES && mask; ++i, mask <<= 1)
 			if (VT_IS_IN_USE(i))
@@ -833,9 +840,9 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				 * make sure we are atomic with respect to
 				 * other console switches..
 				 */
-				spin_lock_irq(&console_lock);
+				acquire_console_sem();
 				complete_change_console(newvt);
-				spin_unlock_irq(&console_lock);
+				release_console_sem();
 			}
 		}
 
@@ -880,11 +887,9 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ushort ll,cc;
 		if (!perm)
 			return -EPERM;
-		i = verify_area(VERIFY_READ, (void *)vtsizes, sizeof(struct vt_sizes));
-		if (i)
-			return i;
-		get_user(ll, &vtsizes->v_rows);
-		get_user(cc, &vtsizes->v_cols);
+		if (get_user(ll, &vtsizes->v_rows) ||
+		    get_user(cc, &vtsizes->v_cols))
+			return -EFAULT;
 		return vc_resize_all(ll, cc);
 	}
 
@@ -894,15 +899,15 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ushort ll,cc,vlin,clin,vcol,ccol;
 		if (!perm)
 			return -EPERM;
-		i = verify_area(VERIFY_READ, (void *)vtconsize, sizeof(struct vt_consize));
-		if (i)
-			return i;
-		get_user(ll, &vtconsize->v_rows);
-		get_user(cc, &vtconsize->v_cols);
-		get_user(vlin, &vtconsize->v_vlin);
-		get_user(clin, &vtconsize->v_clin);
-		get_user(vcol, &vtconsize->v_vcol);
-		get_user(ccol, &vtconsize->v_ccol);
+		if (verify_area(VERIFY_READ, (void *)vtconsize,
+				sizeof(struct vt_consize)))
+			return -EFAULT;
+		__get_user(ll, &vtconsize->v_rows);
+		__get_user(cc, &vtconsize->v_cols);
+		__get_user(vlin, &vtconsize->v_vlin);
+		__get_user(clin, &vtconsize->v_clin);
+		__get_user(vcol, &vtconsize->v_vcol);
+		__get_user(ccol, &vtconsize->v_ccol);
 		vlin = vlin ? vlin : video_scan_lines;
 		if ( clin )
 		  {
@@ -1069,10 +1074,6 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 
 			if (!perm)
 				return -EPERM;
-			i = verify_area(VERIFY_READ, (void *) arg,
-					sizeof(struct vc_mode));
-			if (i)
-				return i;
 			if (copy_from_user(&mode, (void *) arg, sizeof(mode)))
 				return -EFAULT;
 			return console_setmode(&mode, cmd == VC_SETMODE);
@@ -1090,10 +1091,6 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				   was changed from 0x766a to 0x766c */
 				return console_powermode((int) arg);
 			}
-			i = verify_area(VERIFY_READ, (void *) arg,
-					sizeof(int));
-			if (i)
-				return i;
 			if (get_user(cmap_size, (int *) arg))
 				return -EFAULT;
 			if (cmap_size % 3)
@@ -1169,7 +1166,8 @@ void reset_vc(unsigned int new_console)
 	vt_cons[new_console]->vt_mode.frsig = 0;
 	vt_cons[new_console]->vt_pid = -1;
 	vt_cons[new_console]->vt_newvt = -1;
-	reset_palette (new_console) ;
+	if (!in_interrupt())    /* Via keyboard.c:SAK() - akpm */
+		reset_palette(new_console) ;
 }
 
 /*
@@ -1188,6 +1186,24 @@ void complete_change_console(unsigned int new_console)
 	 */
 	old_vc_mode = vt_cons[fg_console]->vc_mode;
 	switch_screen(new_console);
+
+	/*
+	 * This can't appear below a successful kill_proc().  If it did,
+	 * then the *blank_screen operation could occur while X, having
+	 * received acqsig, is waking up on another processor.  This
+	 * condition can lead to overlapping accesses to the VGA range
+	 * and the framebuffer (causing system lockups).
+	 *
+	 * To account for this we duplicate this code below only if the
+	 * controlling process is gone and we've called reset_vc.
+	 */
+	if (old_vc_mode != vt_cons[new_console]->vc_mode)
+	{
+		if (vt_cons[new_console]->vc_mode == KD_TEXT)
+			unblank_screen();
+		else
+			do_blank_screen(1);
+	}
 
 	/*
 	 * If this new console is under process control, send it a signal
@@ -1215,19 +1231,15 @@ void complete_change_console(unsigned int new_console)
 		 * to account for and tracking tty count may be undesirable.
 		 */
 		        reset_vc(new_console);
-		}
-	}
 
-	/*
-	 * We do this here because the controlling process above may have
-	 * gone, and so there is now a new vc_mode
-	 */
-	if (old_vc_mode != vt_cons[new_console]->vc_mode)
-	{
-		if (vt_cons[new_console]->vc_mode == KD_TEXT)
-			unblank_screen();
-		else
-			do_blank_screen(1);
+			if (old_vc_mode != vt_cons[new_console]->vc_mode)
+			{
+				if (vt_cons[new_console]->vc_mode == KD_TEXT)
+					unblank_screen();
+				else
+					do_blank_screen(1);
+			}
+		}
 	}
 
 	/*

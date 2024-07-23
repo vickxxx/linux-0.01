@@ -13,8 +13,8 @@ export-objs := wanmain.o
 
 obj-y :=  wanproc.o wanmain.o
 obj-m := $(O_TARGET)
+ifneq ($(CONFIG_VENDOR_SANGOMA),n)
+	obj-m += $(O_TARGET)
+endif
 
 include $(TOPDIR)/Rules.make
-
-tar:
-	tar -cvf /dev/f1 .

@@ -1,7 +1,7 @@
 /*
  *	NET3	IP device support routines.
  *
- *	Version: $Id: devinet.c,v 1.39 2000/12/10 22:24:11 davem Exp $
+ *	Version: $Id: devinet.c,v 1.44 2001/10/31 21:55:54 davem Exp $
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -20,6 +20,10 @@
  *	Changes:
  *	        Alexey Kuznetsov:	pa_* fields are replaced with ifaddr lists.
  *		Cyrus Durgin:		updated for kmod
+ *		Matthias Andree:	in devinet_ioctl, compare label and 
+ *					address (4.4BSD alias style support),
+ *					fall back to comparing just the label
+ *					if no match found.
  */
 
 #include <linux/config.h>
@@ -50,9 +54,7 @@
 #ifdef CONFIG_SYSCTL
 #include <linux/sysctl.h>
 #endif
-#ifdef CONFIG_KMOD
 #include <linux/kmod.h>
-#endif
 
 #include <net/ip.h>
 #include <net/route.h>
@@ -61,11 +63,7 @@
 struct ipv4_devconf ipv4_devconf = { 1, 1, 1, 1, 0, };
 static struct ipv4_devconf ipv4_devconf_dflt = { 1, 1, 1, 1, 1, };
 
-#ifdef CONFIG_RTNETLINK
 static void rtmsg_ifa(int event, struct in_ifaddr *);
-#else
-#define rtmsg_ifa(a,b)	do { } while(0)
-#endif
 
 static struct notifier_block *inetaddr_chain;
 static void inet_del_ifa(struct in_device *in_dev, struct in_ifaddr **ifap, int destroy);
@@ -153,7 +151,8 @@ struct in_device *inetdev_init(struct net_device *dev)
 #ifdef CONFIG_SYSCTL
 	devinet_sysctl_register(in_dev, &in_dev->cnf);
 #endif
-	if (dev->flags&IFF_UP)
+	ip_mc_init_dev(in_dev);
+	if (dev->flags & IFF_UP)
 		ip_mc_up(in_dev);
 	return in_dev;
 }
@@ -357,8 +356,6 @@ struct in_ifaddr *inet_ifa_byprefix(struct in_device *in_dev, u32 prefix, u32 ma
 	return NULL;
 }
 
-#ifdef CONFIG_RTNETLINK
-
 int
 inet_rtm_deladdr(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 {
@@ -435,8 +432,6 @@ inet_rtm_newaddr(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 	return inet_insert_ifa(ifa);
 }
 
-#endif
-
 /* 
  *	Determine a default network mask, based on the IP address. 
  */
@@ -465,6 +460,7 @@ static __inline__ int inet_abc_len(u32 addr)
 int devinet_ioctl(unsigned int cmd, void *arg)
 {
 	struct ifreq ifr;
+	struct sockaddr_in sin_orig;
 	struct sockaddr_in *sin = (struct sockaddr_in *)&ifr.ifr_addr;
 	struct in_device *in_dev;
 	struct in_ifaddr **ifap = NULL;
@@ -472,6 +468,7 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 	struct net_device *dev;
 	char *colon;
 	int ret = 0;
+	int tryaddrmatch = 0;
 
 	/*
 	 *	Fetch the caller's info block into kernel space
@@ -480,6 +477,9 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 	if (copy_from_user(&ifr, arg, sizeof(struct ifreq)))
 		return -EFAULT;
 	ifr.ifr_name[IFNAMSIZ-1] = 0;
+
+	/* save original address for comparison */
+	memcpy(&sin_orig, sin, sizeof(*sin));
 
 	colon = strchr(ifr.ifr_name, ':');
 	if (colon)
@@ -494,10 +494,11 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 	case SIOCGIFBRDADDR:	/* Get the broadcast address */
 	case SIOCGIFDSTADDR:	/* Get the destination address */
 	case SIOCGIFNETMASK:	/* Get the netmask for the interface */
-		/* Note that this ioctls will not sleep,
+		/* Note that these ioctls will not sleep,
 		   so that we do not impose a lock.
 		   One day we will be forced to put shlock here (I mean SMP)
 		 */
+		tryaddrmatch = (sin_orig.sin_family == AF_INET);
 		memset(sin, 0, sizeof(*sin));
 		sin->sin_family = AF_INET;
 		break;
@@ -531,9 +532,27 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 		*colon = ':';
 
 	if ((in_dev=__in_dev_get(dev)) != NULL) {
-		for (ifap=&in_dev->ifa_list; (ifa=*ifap) != NULL; ifap=&ifa->ifa_next)
-			if (strcmp(ifr.ifr_name, ifa->ifa_label) == 0)
-				break;
+		if (tryaddrmatch) {
+			/* Matthias Andree */
+			/* compare label and address (4.4BSD style) */
+			/* note: we only do this for a limited set of ioctls
+			   and only if the original address family was AF_INET.
+			   This is checked above. */
+			for (ifap=&in_dev->ifa_list; (ifa=*ifap) != NULL; ifap=&ifa->ifa_next) {
+				if ((strcmp(ifr.ifr_name, ifa->ifa_label) == 0)
+				    && (sin_orig.sin_addr.s_addr == ifa->ifa_address)) {
+					break; /* found */
+				}
+			}
+		}
+		/* we didn't get a match, maybe the application is
+		   4.3BSD-style and passed in junk so we fall back to 
+		   comparing just the label */
+		if (ifa == NULL) {
+			for (ifap=&in_dev->ifa_list; (ifa=*ifap) != NULL; ifap=&ifa->ifa_next)
+				if (strcmp(ifr.ifr_name, ifa->ifa_label) == 0)
+					break;
+		}
 	}
 
 	if (ifa == NULL && cmd != SIOCSIFADDR && cmd != SIOCSIFFLAGS) {
@@ -643,7 +662,23 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 			if (ifa->ifa_mask != sin->sin_addr.s_addr) {
 				inet_del_ifa(in_dev, ifap, 0);
 				ifa->ifa_mask = sin->sin_addr.s_addr;
-				ifa->ifa_prefixlen = inet_mask_len(ifa->ifa_mask);
+				ifa->ifa_prefixlen =
+					inet_mask_len(ifa->ifa_mask);
+
+				/* See if current broadcast address matches
+				 * with current netmask, then recalculate
+				 * the broadcast address. Otherwise it's a
+				 * funny address, so don't touch it since
+				 * the user seems to know what (s)he's doing...
+				 */
+				if ((dev->flags & IFF_BROADCAST) &&
+				    (ifa->ifa_prefixlen < 31) &&
+				    (ifa->ifa_broadcast ==
+				     (ifa->ifa_local|~ifa->ifa_mask))) {
+					ifa->ifa_broadcast =
+						(ifa->ifa_local |
+						 ~sin->sin_addr.s_addr);
+				}
 				inet_insert_ifa(ifa);
 			}
 			break;
@@ -754,6 +789,84 @@ u32 inet_select_addr(const struct net_device *dev, u32 dst, int scope)
 	return 0;
 }
 
+static u32 confirm_addr_indev(struct in_device *in_dev, u32 dst,
+			      u32 local, int scope)
+{
+	int same = 0;
+	u32 addr = 0;
+
+	for_ifa(in_dev) {
+		if (!addr &&
+		    (local == ifa->ifa_local || !local) &&
+		    ifa->ifa_scope <= scope) {
+			addr = ifa->ifa_local;
+			if (same)
+				break;
+		}
+		if (!same) {
+			same = (!local || inet_ifa_match(local, ifa)) &&
+				(!dst || inet_ifa_match(dst, ifa));
+			if (same && addr) {
+				if (local || !dst)
+					break;
+				/* Is the selected addr into dst subnet? */
+				if (inet_ifa_match(addr, ifa))
+					break;
+				/* No, then can we use new local src? */
+				if (ifa->ifa_scope <= scope) {
+					addr = ifa->ifa_local;
+					break;
+				}
+				/* search for large dst subnet for addr */
+				same = 0;
+			}
+		}
+	} endfor_ifa(in_dev);
+
+	return same? addr : 0;
+}
+
+/*
+ * Confirm that local IP address exists using wildcards:
+ * - dev: only on this interface, 0=any interface
+ * - dst: only in the same subnet as dst, 0=any dst
+ * - local: address, 0=autoselect the local address
+ * - scope: maximum allowed scope value for the local address
+ */
+u32 inet_confirm_addr(const struct net_device *dev, u32 dst, u32 local, int scope)
+{
+	u32 addr = 0;
+	struct in_device *in_dev;
+
+	if (dev) {
+		read_lock(&inetdev_lock);
+		if ((in_dev = __in_dev_get(dev))) {
+			read_lock(&in_dev->lock);
+			addr = confirm_addr_indev(in_dev, dst, local, scope);
+			read_unlock(&in_dev->lock);
+		}
+		read_unlock(&inetdev_lock);
+
+		return addr;
+	}
+
+	read_lock(&dev_base_lock);
+	read_lock(&inetdev_lock);
+	for (dev = dev_base; dev; dev = dev->next) {
+		if ((in_dev = __in_dev_get(dev))) {
+			read_lock(&in_dev->lock);
+			addr = confirm_addr_indev(in_dev, dst, local, scope);
+			read_unlock(&in_dev->lock);
+			if (addr)
+				break;
+		}
+	}
+	read_unlock(&inetdev_lock);
+	read_unlock(&dev_base_lock);
+
+	return addr;
+}
+
 /*
  *	Device notifier
  */
@@ -767,6 +880,34 @@ int unregister_inetaddr_notifier(struct notifier_block *nb)
 {
 	return notifier_chain_unregister(&inetaddr_chain,nb);
 }
+
+/* Rename ifa_labels for a device name change. Make some effort to preserve existing
+ * alias numbering and to create unique labels if possible.
+*/
+static void inetdev_changename(struct net_device *dev, struct in_device *in_dev)
+{ 
+	struct in_ifaddr *ifa;
+	int named = 0;
+
+	for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next) { 
+		char old[IFNAMSIZ], *dot; 
+
+		memcpy(old, ifa->ifa_label, IFNAMSIZ);
+		memcpy(ifa->ifa_label, dev->name, IFNAMSIZ); 
+		if (named++ == 0)
+			continue;
+		dot = strchr(ifa->ifa_label, ':');
+		if (dot == NULL) { 
+			sprintf(old, ":%d", named); 
+			dot = old;
+		}
+		if (strlen(dot) + strlen(dev->name) < IFNAMSIZ) { 
+			strcat(ifa->ifa_label, dot); 
+		} else { 
+			strcpy(ifa->ifa_label + (IFNAMSIZ - strlen(dot) - 1), dot); 
+		} 
+	}	
+} 
 
 /* Called only under RTNL semaphore */
 
@@ -815,27 +956,19 @@ static int inetdev_event(struct notifier_block *this, unsigned long event, void 
 		inetdev_destroy(in_dev);
 		break;
 	case NETDEV_CHANGENAME:
-		if (in_dev->ifa_list) {
-			struct in_ifaddr *ifa;
-			for (ifa = in_dev->ifa_list; ifa; ifa = ifa->ifa_next)
-				memcpy(ifa->ifa_label, dev->name, IFNAMSIZ);
-			/* Do not notify about label change, this event is
-			   not interesting to applications using netlink.
-			 */
-		}
+		/* Do not notify about label change, this event is
+		 * not interesting to applications using netlink.
+		 */
+		inetdev_changename(dev, in_dev);
 		break;
 	}
 
 	return NOTIFY_DONE;
 }
 
-struct notifier_block ip_netdev_notifier={
-	inetdev_event,
-	NULL,
-	0
+struct notifier_block ip_netdev_notifier = {
+	notifier_call:	inetdev_event,
 };
-
-#ifdef CONFIG_RTNETLINK
 
 static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
 			    u32 pid, u32 seq, int event)
@@ -845,6 +978,7 @@ static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
 	unsigned char	 *b = skb->tail;
 
 	nlh = NLMSG_PUT(skb, pid, seq, event, sizeof(*ifm));
+	if (pid) nlh->nlmsg_flags |= NLM_F_MULTI;
 	ifm = NLMSG_DATA(nlh);
 	ifm->ifa_family = AF_INET;
 	ifm->ifa_prefixlen = ifa->ifa_prefixlen;
@@ -970,15 +1104,12 @@ static struct rtnetlink_link inet_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
 #endif
 };
 
-#endif /* CONFIG_RTNETLINK */
-
 
 #ifdef CONFIG_SYSCTL
 
-void inet_forward_change()
+void inet_forward_change(int on)
 {
 	struct net_device *dev;
-	int on = ipv4_devconf.forwarding;
 
 	ipv4_devconf.accept_redirects = !on;
 	ipv4_devconf_dflt.forwarding = on;
@@ -1009,7 +1140,7 @@ int devinet_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 
 	if (write && *valp != val) {
 		if (valp == &ipv4_devconf.forwarding)
-			inet_forward_change();
+			inet_forward_change(*valp);
 		else if (valp != &ipv4_devconf_dflt.forwarding)
 			rt_cache_flush(0);
 	}
@@ -1020,7 +1151,7 @@ int devinet_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 static struct devinet_sysctl_table
 {
 	struct ctl_table_header *sysctl_header;
-	ctl_table devinet_vars[13];
+	ctl_table devinet_vars[20];
 	ctl_table devinet_dev[2];
 	ctl_table devinet_conf_dir[2];
 	ctl_table devinet_proto_dir[2];
@@ -1054,6 +1185,9 @@ static struct devinet_sysctl_table
 	{NET_IPV4_CONF_PROXY_ARP, "proxy_arp",
          &ipv4_devconf.proxy_arp, sizeof(int), 0644, NULL,
          &proc_dointvec},
+	{NET_IPV4_CONF_MEDIUM_ID, "medium_id",
+         &ipv4_devconf.medium_id, sizeof(int), 0644, NULL,
+         &proc_dointvec},
 	{NET_IPV4_CONF_BOOTP_RELAY, "bootp_relay",
          &ipv4_devconf.bootp_relay, sizeof(int), 0644, NULL,
          &proc_dointvec},
@@ -1062,6 +1196,18 @@ static struct devinet_sysctl_table
          &proc_dointvec},
 	{NET_IPV4_CONF_TAG, "tag",
 	 &ipv4_devconf.tag, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_IPV4_CONF_ARPFILTER, "arp_filter",
+	 &ipv4_devconf.arp_filter, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_IPV4_CONF_ARP_ANNOUNCE, "arp_announce",
+	 &ipv4_devconf.arp_announce, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_IPV4_CONF_ARP_IGNORE, "arp_ignore",
+	 &ipv4_devconf.arp_ignore, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
+	{NET_IPV4_CONF_FORCE_IGMP_VERSION, "force_igmp_version",
+	 &ipv4_devconf.force_igmp_version, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
 	 {0}},
 
@@ -1123,9 +1269,7 @@ void __init devinet_init(void)
 {
 	register_gifconf(PF_INET, inet_gifconf);
 	register_netdevice_notifier(&ip_netdev_notifier);
-#ifdef CONFIG_RTNETLINK
 	rtnetlink_links[PF_INET] = inet_rtnetlink_table;
-#endif
 #ifdef CONFIG_SYSCTL
 	devinet_sysctl.sysctl_header =
 		register_sysctl_table(devinet_sysctl.devinet_root_dir, 0);

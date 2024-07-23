@@ -1,24 +1,13 @@
-/*
- *  $Id: message.c,v 1.5 1999/09/04 06:20:07 keil Exp $
- *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
+/* $Id: message.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
  *
- *  message.c - functions for sending and receiving control messages
+ * functions for sending and receiving control messages
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
+ * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- *  For more information, please contact gpl-info@spellcast.com or write:
+ * For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -38,55 +27,12 @@ extern board *adapter[];
 extern unsigned int cinst;
 
 /*
- * Obligitory function prototypes
+ * Obligatory function prototypes
  */
 extern int indicate_status(int,ulong,char*);
 extern int scm_command(isdn_ctrl *);
 extern void *memcpy_fromshmem(int, void *, const void *, size_t);
 
-/*
- * Dump message queue in shared memory to screen
- */
-void dump_messages(int card) 
-{
-	DualPortMemory dpm;
-	unsigned long flags;
-
-	int i =0;
-	
-	if (!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-	}
-
-	save_flags(flags);
-	cli();
-	outb(adapter[card]->ioport[adapter[card]->shmem_pgport], 
-		(adapter[card]->shmem_magic >> 14) | 0x80);
-	memcpy_fromshmem(card, &dpm, 0, sizeof(dpm));
-	restore_flags(flags);
-
-	pr_debug("%s: Dumping Request Queue\n", adapter[card]->devicename);
-	for (i = 0; i < dpm.req_head; i++) {
-		pr_debug("%s: Message #%d: (%d,%d,%d), link: %d\n",
-				adapter[card]->devicename, i,
-				dpm.req_queue[i].type,
-				dpm.req_queue[i].class,
-				dpm.req_queue[i].code,
-				dpm.req_queue[i].phy_link_no);
-	}
-
-	pr_debug("%s: Dumping Response Queue\n", adapter[card]->devicename);
-	for (i = 0; i < dpm.rsp_head; i++) {
-		pr_debug("%s: Message #%d: (%d,%d,%d), link: %d, status: %d\n",
-				adapter[card]->devicename, i,
-				dpm.rsp_queue[i].type,
-				dpm.rsp_queue[i].class,
-				dpm.rsp_queue[i].code,
-				dpm.rsp_queue[i].phy_link_no,
-				dpm.rsp_queue[i].rsp_status);
-	}
-
-}	
 
 /*
  * receive a message from the board

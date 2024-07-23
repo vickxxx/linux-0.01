@@ -16,7 +16,7 @@
  */
 
 #include <linux/config.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/shm.h>
 #include <linux/init.h>
 #include <linux/file.h>
@@ -71,7 +71,9 @@ static int shm_tot; /* total number of shared memory pages */
 void __init shm_init (void)
 {
 	ipc_init_ids(&shm_ids, 1);
+#ifdef CONFIG_PROC_FS
 	create_proc_read_entry("sysvipc/shm", 0, 0, sysvipc_shm_read_proc, NULL);
+#endif
 }
 
 static inline int shm_checkid(struct shmid_kernel *s, int id)
@@ -115,12 +117,15 @@ static void shm_open (struct vm_area_struct *shmd)
  *
  * @shp: struct to free
  *
- * It has to be called with shp and shm_ids.sem locked
+ * It has to be called with shp and shm_ids.sem locked,
+ * but returns with shp unlocked and freed.
  */
 static void shm_destroy (struct shmid_kernel *shp)
 {
 	shm_tot -= (shp->shm_segsz + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	shm_rmid (shp->id);
+	shm_unlock(shp->id);
+	shmem_lock(shp->shm_file, 0);
 	fput (shp->shm_file);
 	kfree (shp);
 }
@@ -147,8 +152,8 @@ static void shm_close (struct vm_area_struct *shmd)
 	if(shp->shm_nattch == 0 &&
 	   shp->shm_flags & SHM_DEST)
 		shm_destroy (shp);
-
-	shm_unlock(id);
+	else
+		shm_unlock(id);
 	up (&shm_ids.sem);
 }
 
@@ -156,6 +161,8 @@ static int shm_mmap(struct file * file, struct vm_area_struct * vma)
 {
 	UPDATE_ATIME(file->f_dentry->d_inode);
 	vma->vm_ops = &shm_vm_ops;
+	if (!(vma->vm_flags & VM_WRITE))
+		vma->vm_flags &= ~VM_MAYWRITE;
 	shm_inc(file->f_dentry->d_inode->i_ino);
 	return 0;
 }
@@ -345,6 +352,7 @@ static inline unsigned long copy_shminfo_to_user(void *buf, struct shminfo64 *in
 
 static void shm_get_stat (unsigned long *rss, unsigned long *swp) 
 {
+	struct shmem_inode_info *info;
 	int i;
 
 	*rss = 0;
@@ -358,10 +366,11 @@ static void shm_get_stat (unsigned long *rss, unsigned long *swp)
 		if(shp == NULL)
 			continue;
 		inode = shp->shm_file->f_dentry->d_inode;
-		spin_lock (&inode->u.shmem_i.lock);
+		info = SHMEM_I(inode);
+		spin_lock (&info->lock);
 		*rss += inode->i_mapping->nrpages;
-		*swp += inode->u.shmem_i.swapped;
-		spin_unlock (&inode->u.shmem_i.lock);
+		*swp += info->swapped;
+		spin_unlock (&info->lock);
 	}
 }
 
@@ -467,10 +476,10 @@ asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		if(err)
 			goto out_unlock;
 		if(cmd==SHM_LOCK) {
-			shp->shm_file->f_dentry->d_inode->u.shmem_i.locked = 1;
+			shmem_lock(shp->shm_file, 1);
 			shp->shm_flags |= SHM_LOCKED;
 		} else {
-			shp->shm_file->f_dentry->d_inode->u.shmem_i.locked = 0;
+			shmem_lock(shp->shm_file, 0);
 			shp->shm_flags &= ~SHM_LOCKED;
 		}
 		shm_unlock(shmid);
@@ -494,16 +503,21 @@ asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		if (shp == NULL) 
 			goto out_up;
 		err = shm_checkid(shp, shmid);
-		if (err == 0) {
-			if (shp->shm_nattch){
-				shp->shm_flags |= SHM_DEST;
-				/* Do not find it any more */
-				shp->shm_perm.key = IPC_PRIVATE;
-			} else
-				shm_destroy (shp);
+		if(err)
+			goto out_unlock_up;
+		if (current->euid != shp->shm_perm.uid &&
+		    current->euid != shp->shm_perm.cuid && 
+		    !capable(CAP_SYS_ADMIN)) {
+			err=-EPERM;
+			goto out_unlock_up;
 		}
-		/* Unlock */
-		shm_unlock(shmid);
+		if (shp->shm_nattch){
+			shp->shm_flags |= SHM_DEST;
+			/* Do not find it any more */
+			shp->shm_perm.key = IPC_PRIVATE;
+			shm_unlock(shmid);
+		} else
+			shm_destroy (shp);
 		up(&shm_ids.sem);
 		return err;
 	}
@@ -557,6 +571,7 @@ asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 {
 	struct shmid_kernel *shp;
 	unsigned long addr;
+	unsigned long size;
 	struct file * file;
 	int    err;
 	unsigned long flags;
@@ -576,8 +591,12 @@ asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 				return -EINVAL;
 		}
 		flags = MAP_SHARED | MAP_FIXED;
-	} else
+	} else {
+		if ((shmflg & SHM_REMAP))
+			return -EINVAL;
+
 		flags = MAP_SHARED;
+	}
 
 	if (shmflg & SHM_RDONLY) {
 		prot = PROT_READ;
@@ -591,22 +610,43 @@ asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 
 	/*
 	 * We cannot rely on the fs check since SYSV IPC does have an
-	 * aditional creator id...
+	 * additional creator id...
 	 */
 	shp = shm_lock(shmid);
 	if(shp == NULL)
 		return -EINVAL;
+	err = shm_checkid(shp,shmid);
+	if (err) {
+		shm_unlock(shmid);
+		return err;
+	}
 	if (ipcperms(&shp->shm_perm, acc_mode)) {
 		shm_unlock(shmid);
 		return -EACCES;
 	}
 	file = shp->shm_file;
+	size = file->f_dentry->d_inode->i_size;
 	shp->shm_nattch++;
 	shm_unlock(shmid);
 
-	down(&current->mm->mmap_sem);
-	user_addr = (void *) do_mmap (file, addr, file->f_dentry->d_inode->i_size, prot, flags, 0);
-	up(&current->mm->mmap_sem);
+	down_write(&current->mm->mmap_sem);
+	if (addr && !(shmflg & SHM_REMAP)) {
+		user_addr = ERR_PTR(-EINVAL);
+		if (find_vma_intersection(current->mm, addr, addr + size))
+			goto invalid;
+		/*
+		 * If shm segment goes below stack, make sure there is some
+		 * space left for the stack to grow (at least 4 pages).
+		 */
+		if (addr < current->mm->start_stack &&
+		    addr > current->mm->start_stack - size - PAGE_SIZE * 5)
+			goto invalid;
+	}
+		
+	user_addr = (void*) do_mmap (file, addr, size, prot, flags, 0);
+
+invalid:
+	up_write(&current->mm->mmap_sem);
 
 	down (&shm_ids.sem);
 	if(!(shp = shm_lock(shmid)))
@@ -615,7 +655,8 @@ asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 	if(shp->shm_nattch == 0 &&
 	   shp->shm_flags & SHM_DEST)
 		shm_destroy (shp);
-	shm_unlock(shmid);
+	else
+		shm_unlock(shmid);
 	up (&shm_ids.sem);
 
 	*raddr = (unsigned long) user_addr;
@@ -634,16 +675,19 @@ asmlinkage long sys_shmdt (char *shmaddr)
 {
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *shmd, *shmdnext;
+	int retval = -EINVAL;
 
-	down(&mm->mmap_sem);
+	down_write(&mm->mmap_sem);
 	for (shmd = mm->mmap; shmd; shmd = shmdnext) {
 		shmdnext = shmd->vm_next;
 		if (shmd->vm_ops == &shm_vm_ops
-		    && shmd->vm_start - (shmd->vm_pgoff << PAGE_SHIFT) == (ulong) shmaddr)
+		    && shmd->vm_start - (shmd->vm_pgoff << PAGE_SHIFT) == (ulong) shmaddr) {
 			do_munmap(mm, shmd->vm_start, shmd->vm_end - shmd->vm_start);
+			retval = 0;
+		}
 	}
-	up(&mm->mmap_sem);
-	return 0;
+	up_write(&mm->mmap_sem);
+	return retval;
 }
 
 #ifdef CONFIG_PROC_FS

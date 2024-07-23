@@ -6,11 +6,12 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	This is a device driver for the Allied Telesis AT1700, and
         Fujitsu FMV-181/182/181A/182A/183/184/183A/184A, which are
@@ -34,9 +35,6 @@
 	response to inb()s from other device probes!
 */
 
-static const char *version =
-	"at1700.c:v1.15 4/7/98  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
-
 #include <linux/config.h>
 #include <linux/module.h>
 
@@ -48,9 +46,10 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -63,6 +62,9 @@ static const char *version =
 
 #include <linux/mca.h>
 
+static char version[] __initdata =
+	"at1700.c:v1.15 4/7/98  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+
 /* Tunable parameters. */
 
 /* When to switch from the 64-entry multicast filter to Rx-all-multicast. */
@@ -70,7 +72,7 @@ static const char *version =
 
 /* These unusual address orders are used to verify the CONFIG register. */
 
-static int fmv18x_probe_list[] = {
+static int fmv18x_probe_list[] __initdata = {
 	0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x300, 0x340, 0
 };
 
@@ -78,7 +80,7 @@ static int fmv18x_probe_list[] = {
  *	ISA
  */
 
-static int at1700_probe_list[] = {
+static int at1700_probe_list[] __initdata = {
 	0x260, 0x280, 0x2a0, 0x240, 0x340, 0x320, 0x380, 0x300, 0
 };
 
@@ -86,15 +88,15 @@ static int at1700_probe_list[] = {
  *	MCA
  */
 #ifdef CONFIG_MCA	
-static int at1700_ioaddr_pattern[] = {
+static int at1700_ioaddr_pattern[] __initdata = {
 	0x00, 0x04, 0x01, 0x05, 0x02, 0x06, 0x03, 0x07
 };
 
-static int at1700_mca_probe_list[] = {
+static int at1700_mca_probe_list[] __initdata = {
 	0x400, 0x1400, 0x2400, 0x3400, 0x4400, 0x5400, 0x6400, 0x7400, 0
 };
 
-static int at1700_irq_pattern[] = {
+static int at1700_irq_pattern[] __initdata = {
 	0x00, 0x00, 0x00, 0x30, 0x70, 0xb0, 0x00, 0x00,
 	0x00, 0xf0, 0x34, 0x74, 0xb4, 0x00, 0x00, 0xf4, 0x00
 };
@@ -157,7 +159,7 @@ struct net_local {
 extern int at1700_probe(struct net_device *dev);
 
 static int at1700_probe1(struct net_device *dev, int ioaddr);
-static int read_eeprom(int ioaddr, int location);
+static int read_eeprom(long ioaddr, int location);
 static int net_open(struct net_device *dev);
 static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
@@ -175,10 +177,10 @@ struct at1720_mca_adapters_struct {
 };
 /* rEnE : maybe there are others I don't know off... */
 
-struct at1720_mca_adapters_struct at1720_mca_adapters[] = {
+static struct at1720_mca_adapters_struct at1720_mca_adapters[] __initdata = {
 	{ "Allied Telesys AT1720AT",	0x6410 },
 	{ "Allied Telesys AT1720BT", 	0x6413 },
-	{ "Allied Telesys AT1720T",		0x6416 },
+	{ "Allied Telesys AT1720T",	0x6416 },
 	{ NULL, 0 },
 };
 #endif
@@ -218,7 +220,7 @@ int __init at1700_probe(struct net_device *dev)
    that can be done is checking a few bits and then diving right into an
    EEPROM read. */
 
-static int at1700_probe1(struct net_device *dev, int ioaddr)
+static int __init at1700_probe1(struct net_device *dev, int ioaddr)
 {
 	char fmv_irqmap[4] = {3, 7, 10, 15};
 	char fmv_irqmap_pnp[8] = {3, 4, 5, 7, 9, 10, 11, 15};
@@ -309,7 +311,6 @@ static int at1700_probe1(struct net_device *dev, int ioaddr)
 		&& inb(ioaddr + SAPROM + 2) == 0x0e)
 		is_fmv18x = 1;
 	else {
-		ret = -ENODEV;
 		goto err_out;
 	}
 			
@@ -334,11 +335,10 @@ found:
 			}
 			if (i == 8) {
 				goto err_out;
-				ret = -ENODEV;
 			}
 		} else {
 			if (fmv18x_probe_list[inb(ioaddr + IOCONFIG) & 0x07] != ioaddr)
-				return -ENODEV;
+				goto err_out;
 			irq = fmv_irqmap[(inb(ioaddr + IOCONFIG)>>6) & 0x03];
 		}
 	}
@@ -463,19 +463,19 @@ err_out:
 #define EE_DATA_READ	0x80	/* EEPROM chip data out, in reg. 17. */
 
 /* Delay between EEPROM clock transitions. */
-#define eeprom_delay()	do {} while (0);
+#define eeprom_delay()	do { } while (0)
 
 /* The EEPROM commands include the alway-set leading bit. */
 #define EE_WRITE_CMD	(5 << 6)
 #define EE_READ_CMD		(6 << 6)
 #define EE_ERASE_CMD	(7 << 6)
 
-static int read_eeprom(int ioaddr, int location)
+static int __init read_eeprom(long ioaddr, int location)
 {
 	int i;
 	unsigned short retval = 0;
-	int ee_addr = ioaddr + EEPROM_Ctrl;
-	int ee_daddr = ioaddr + EEPROM_Data;
+	long ee_addr = ioaddr + EEPROM_Ctrl;
+	long ee_daddr = ioaddr + EEPROM_Data;
 	int read_cmd = location | EE_READ_CMD;
 
 	/* Shift the read command bits out. */
@@ -576,7 +576,9 @@ static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 	struct net_local *lp = (struct net_local *) dev->priv;
 	int ioaddr = dev->base_addr;
 	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	short len = skb->len;
 	unsigned char *buf = skb->data;
+	static u8 pad[ETH_ZLEN];
 
 	netif_stop_queue (dev);
 
@@ -588,7 +590,17 @@ static int net_send_packet (struct sk_buff *skb, struct net_device *dev)
 	lp->tx_queue_ready = 0;
 	{
 		outw (length, ioaddr + DATAPORT);
-		outsw (ioaddr + DATAPORT, buf, (length + 1) >> 1);
+		/* Packet data */
+		outsw (ioaddr + DATAPORT, buf, len >> 1);
+		/* Check for dribble byte */
+		if(len & 1)
+		{
+			outw(skb->data[skb->len-1], ioaddr + DATAPORT);
+			len++;
+		}
+		/* Check for packet padding */
+		if(length != skb->len)
+			outsw(ioaddr + DATAPORT, pad, (length - len + 1) >> 1);
 
 		lp->tx_queue++;
 		lp->tx_queue_len += length + 2;
@@ -737,7 +749,9 @@ net_rx(struct net_device *dev)
 			insw(ioaddr + DATAPORT, skb_put(skb,pkt_len), (pkt_len + 1) >> 1);
 			skb->protocol=eth_type_trans(skb, dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 		if (--boguscount <= 0)
 			break;
@@ -801,34 +815,13 @@ net_get_stats(struct net_device *dev)
   Set the multicast/promiscuous mode for this adaptor.
 */
 
-/* The little-endian AUTODIN II ethernet CRC calculation.
-   N.B. Do not use for bulk data, use a table-based routine instead.
-   This is common code and should be moved to net/core/crc.c */
-static unsigned const ethernet_polynomial_le = 0xedb88320U;
-static inline unsigned ether_crc_le(int length, unsigned char *data)
-{
-	unsigned int crc = 0xffffffff;	/* Initial value. */
-	while(--length >= 0) {
-		unsigned char current_octet = *data++;
-		int bit;
-		for (bit = 8; --bit >= 0; current_octet >>= 1) {
-			if ((crc ^ current_octet) & 1) {
-				crc >>= 1;
-				crc ^= ethernet_polynomial_le;
-			} else
-				crc >>= 1;
-		}
-	}
-	return crc;
-}
-
 static void
 set_rx_mode(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 	struct net_local *lp = (struct net_local *)dev->priv;
 	unsigned char mc_filter[8];		 /* Multicast hash filter */
-	long flags;
+	unsigned long flags;
 	int i;
 
 	if (dev->flags & IFF_PROMISC) {
@@ -853,6 +846,7 @@ set_rx_mode(struct net_device *dev)
 			 i++, mclist = mclist->next)
 			set_bit(ether_crc_le(ETH_ALEN, mclist->dmi_addr) >> 26,
 					mc_filter);
+		outb(0x02, ioaddr + RX_MODE);	/* Use normal mode. */
 	}
 
 	save_flags(flags);
@@ -878,6 +872,9 @@ static int irq;
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(net_debug, "i");
+MODULE_PARM_DESC(io, "AT1700/FMV18X I/O base address");
+MODULE_PARM_DESC(irq, "AT1700/FMV18X IRQ number");
+MODULE_PARM_DESC(net_debug, "AT1700/FMV18X debug level (0-6)");
 
 int init_module(void)
 {
@@ -912,6 +909,8 @@ cleanup_module(void)
 	release_region(dev_at1700.base_addr, AT1700_IO_EXTENT);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

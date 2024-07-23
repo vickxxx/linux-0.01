@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.51 2000/09/14 06:22:32 anton Exp $
+/* $Id: fault.c,v 1.58.2.2 2002/03/12 12:25:15 davem Exp $
  * arch/sparc64/mm/fault.c: Page fault handlers for the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -22,10 +22,65 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/uaccess.h>
+#include <asm/asi.h>
+#include <asm/lsu.h>
 
 #define ELEMENTS(arr) (sizeof (arr)/sizeof (arr[0]))
 
 extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
+
+/*
+ * To debug kernel during syscall entry.
+ */
+void syscall_trace_entry(struct pt_regs *regs)
+{
+	printk("scall entry: %s[%d]/cpu%d: %d\n", current->comm, current->pid, smp_processor_id(), (int) regs->u_regs[UREG_G1]);
+}
+
+/*
+ * To debug kernel during syscall exit.
+ */
+void syscall_trace_exit(struct pt_regs *regs)
+{
+	printk("scall exit: %s[%d]/cpu%d: %d\n", current->comm, current->pid, smp_processor_id(), (int) regs->u_regs[UREG_G1]);
+}
+
+/*
+ * To debug kernel to catch accesses to certain virtual/physical addresses.
+ * Mode = 0 selects physical watchpoints, mode = 1 selects virtual watchpoints.
+ * flags = VM_READ watches memread accesses, flags = VM_WRITE watches memwrite accesses.
+ * Caller passes in a 64bit aligned addr, with mask set to the bytes that need to be
+ * watched. This is only useful on a single cpu machine for now. After the watchpoint
+ * is detected, the process causing it will be killed, thus preventing an infinite loop.
+ */
+void set_brkpt(unsigned long addr, unsigned char mask, int flags, int mode)
+{
+	unsigned long lsubits;
+
+	__asm__ __volatile__("ldxa [%%g0] %1, %0"
+			     : "=r" (lsubits)
+			     : "i" (ASI_LSU_CONTROL));
+	lsubits &= ~(LSU_CONTROL_PM | LSU_CONTROL_VM |
+		     LSU_CONTROL_PR | LSU_CONTROL_VR |
+		     LSU_CONTROL_PW | LSU_CONTROL_VW);
+
+	__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+			     "membar	#Sync"
+			     : /* no outputs */
+			     : "r" (addr), "r" (mode ? VIRT_WATCHPOINT : PHYS_WATCHPOINT),
+			       "i" (ASI_DMMU));
+
+	lsubits |= ((unsigned long)mask << (mode ? 25 : 33));
+	if (flags & VM_READ)
+		lsubits |= (mode ? LSU_CONTROL_VR : LSU_CONTROL_PR);
+	if (flags & VM_WRITE)
+		lsubits |= (mode ? LSU_CONTROL_VW : LSU_CONTROL_PW);
+	__asm__ __volatile__("stxa %0, [%%g0] %1\n\t"
+			     "membar #Sync"
+			     : /* no outputs */
+			     : "r" (lsubits), "i" (ASI_LSU_CONTROL)
+			     : "memory");
+}
 
 /* Nice, simple, prom library does all the sweating for us. ;) */
 unsigned long __init prom_probe_memory (void)
@@ -74,8 +129,8 @@ unsigned long __init prom_probe_memory (void)
 	return tally;
 }
 
-void unhandled_fault(unsigned long address, struct task_struct *tsk,
-                     struct pt_regs *regs)
+static void unhandled_fault(unsigned long address, struct task_struct *tsk,
+			    struct pt_regs *regs)
 {
 	if ((unsigned long) address < PAGE_SIZE) {
 		printk(KERN_ALERT "Unable to handle kernel NULL "
@@ -92,6 +147,26 @@ void unhandled_fault(unsigned long address, struct task_struct *tsk,
 	die_if_kernel("Oops", regs);
 }
 
+extern void show_trace_raw(struct task_struct *, unsigned long);
+
+static void bad_kernel_pc(struct pt_regs *regs)
+{
+	unsigned long ksp;
+
+	printk(KERN_CRIT "OOPS: Bogus kernel PC [%016lx] in fault handler\n",
+	       regs->tpc);
+	__asm__("mov %%sp, %0" : "=r" (ksp));
+	show_trace_raw(current, ksp);
+	unhandled_fault(regs->tpc, current, regs);
+}
+
+/*
+ * We now make sure that mmap_sem is held in all paths that call 
+ * this. Additionally, to prevent kswapd from ripping ptes from
+ * under us, raise interrupts around the time that we look at the
+ * pte, kswapd will have to wait to get his smp ipi response from
+ * us. This saves us having to get page_table_lock.
+ */
 static unsigned int get_user_insn(unsigned long tpc)
 {
 	pgd_t *pgdp = pgd_offset(current->mm, tpc);
@@ -99,13 +174,17 @@ static unsigned int get_user_insn(unsigned long tpc)
 	pte_t *ptep, pte;
 	unsigned long pa;
 	u32 insn = 0;
+	unsigned long pstate;
 
 	if (pgd_none(*pgdp))
-		goto out;
+		goto outret;
 	pmdp = pmd_offset(pgdp, tpc);
 	if (pmd_none(*pmdp))
-		goto out;
+		goto outret;
 	ptep = pte_offset(pmdp, tpc);
+	__asm__ __volatile__("rdpr %%pstate, %0" : "=r" (pstate));
+	__asm__ __volatile__("wrpr %0, %1, %%pstate"
+				: : "r" (pstate), "i" (PSTATE_IE));
 	pte = *ptep;
 	if (!pte_present(pte))
 		goto out;
@@ -119,17 +198,26 @@ static unsigned int get_user_insn(unsigned long tpc)
 			     : "r" (pa), "i" (ASI_PHYS_USE_EC));
 
 out:
+	__asm__ __volatile__("wrpr %0, 0x0, %%pstate" : : "r" (pstate));
+outret:
 	return insn;
 }
 
-static void do_fault_siginfo(int code, int sig, unsigned long address)
+extern unsigned long compute_effective_address(struct pt_regs *, unsigned int, unsigned int);
+
+static void do_fault_siginfo(int code, int sig, struct pt_regs *regs,
+			     unsigned int insn, int fault_code)
 {
 	siginfo_t info;
 
 	info.si_code = code;
 	info.si_signo = sig;
 	info.si_errno = 0;
-	info.si_addr = (void *) address;
+	if (fault_code & FAULT_CODE_ITLB)
+		info.si_addr = (void *) regs->tpc;
+	else
+		info.si_addr = (void *)
+			compute_effective_address(regs, insn, 0);
 	info.si_trapno = 0;
 	force_sig_info(sig, &info, current);
 }
@@ -137,28 +225,35 @@ static void do_fault_siginfo(int code, int sig, unsigned long address)
 extern int handle_ldf_stq(u32, struct pt_regs *);
 extern int handle_ld_nf(u32, struct pt_regs *);
 
+static inline unsigned int get_fault_insn(struct pt_regs *regs, unsigned int insn)
+{
+	if (!insn) {
+		if (!regs->tpc || (regs->tpc & 0x3))
+			return 0;
+		if (regs->tstate & TSTATE_PRIV) {
+			insn = *(unsigned int *) regs->tpc;
+		} else {
+			insn = get_user_insn(regs->tpc);
+		}
+	}
+	return insn;
+}
+
 static void do_kernel_fault(struct pt_regs *regs, int si_code, int fault_code,
 			    unsigned int insn, unsigned long address)
 {
 	unsigned long g2;
 	unsigned char asi = ASI_P;
-		
-	if (!insn) {
-		if (regs->tstate & TSTATE_PRIV) {
-			if (!regs->tpc || (regs->tpc & 0x3))
-				goto cannot_handle;
-			insn = *(unsigned int *)regs->tpc;
-		} else {
-			insn = get_user_insn(regs->tpc);
-		}
-	}
+ 
+	if ((!insn) && (regs->tstate & TSTATE_PRIV))
+		goto cannot_handle;
 
 	/* If user insn could be read (thus insn is zero), that
 	 * is fine.  We will just gun down the process with a signal
 	 * in that case.
 	 */
 
-	if (!(fault_code & FAULT_CODE_WRITE) &&
+	if (!(fault_code & (FAULT_CODE_WRITE|FAULT_CODE_ITLB)) &&
 	    (insn & 0xc0800000) == 0xc0800000) {
 		if (insn & 0x2000)
 			asi = (regs->tstate >> 24);
@@ -203,7 +298,7 @@ static void do_kernel_fault(struct pt_regs *regs, int si_code, int fault_code,
 		/* The si_code was set to make clear whether
 		 * this was a SEGV_MAPERR or SEGV_ACCERR fault.
 		 */
-		do_fault_siginfo(si_code, SIGSEGV, address);
+		do_fault_siginfo(si_code, SIGSEGV, regs, insn, fault_code);
 		return;
 	}
 
@@ -227,14 +322,33 @@ asmlinkage void do_sparc64_fault(struct pt_regs *regs)
 	    (fault_code & FAULT_CODE_DTLB))
 		BUG();
 
+	if (regs->tstate & TSTATE_PRIV) {
+		unsigned long tpc = regs->tpc;
+		extern unsigned int _etext;
+
+		/* Sanity check the PC. */
+		if ((tpc >= KERNBASE && tpc < (unsigned long) &_etext) ||
+		    (tpc >= MODULES_VADDR && tpc < MODULES_END)) {
+			/* Valid, no problems... */
+		} else {
+			bad_kernel_pc(regs);
+			return;
+		}
+	}
+
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
 	if (in_interrupt() || !mm)
-		goto handle_kernel_fault;
+		goto intr_or_no_mm;
 
-	down(&mm->mmap_sem);
+	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		regs->tpc &= 0xffffffff;
+		address &= 0xffffffff;
+	}
+
+	down_read(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -250,16 +364,9 @@ asmlinkage void do_sparc64_fault(struct pt_regs *regs)
 	if (((fault_code &
 	      (FAULT_CODE_DTLB | FAULT_CODE_WRITE | FAULT_CODE_WINFIXUP)) == FAULT_CODE_DTLB) &&
 	    (vma->vm_flags & VM_WRITE) != 0) {
-		unsigned long tpc = regs->tpc;
-
-		if (tpc & 0x3)
+		insn = get_fault_insn(regs, 0);
+		if (!insn)
 			goto continue_fault;
-
-		if (regs->tstate & TSTATE_PRIV)
-			insn = *(unsigned int *)tpc;
-		else
-			insn = get_user_insn(tpc);
-
 		if ((insn & 0xc0200000) == 0xc0200000 &&
 		    (insn & 0x1780000) != 0x1680000) {
 			/* Don't bother updating thread struct value,
@@ -275,6 +382,20 @@ continue_fault:
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
+	if (!(fault_code & FAULT_CODE_WRITE)) {
+		/* Non-faulting loads shouldn't expand stack. */
+		insn = get_fault_insn(regs, insn);
+		if ((insn & 0xc0800000) == 0xc0800000) {
+			unsigned char asi;
+
+			if (insn & 0x2000)
+				asi = (regs->tstate >> 24);
+			else
+				asi = (insn >> 5);
+			if ((asi & 0xf2) == 0x82)
+				goto bad_area;
+		}
+	}
 	if (expand_stack(vma, address))
 		goto bad_area;
 	/*
@@ -283,10 +404,25 @@ continue_fault:
 	 */
 good_area:
 	si_code = SEGV_ACCERR;
+
+	/* If we took a ITLB miss on a non-executable page, catch
+	 * that here.
+	 */
+	if ((fault_code & FAULT_CODE_ITLB) && !(vma->vm_flags & VM_EXEC)) {
+		BUG_ON(address != regs->tpc);
+		BUG_ON(regs->tstate & TSTATE_PRIV);
+		goto bad_area;
+	}
+
 	if (fault_code & FAULT_CODE_WRITE) {
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-		if ((vma->vm_flags & VM_EXEC) != 0 &&
+
+		/* Spitfire has an icache which does not snoop
+		 * processor stores.  Later processors do...
+		 */
+		if (tlb_type == spitfire &&
+		    (vma->vm_flags & VM_EXEC) != 0 &&
 		    vma->vm_file != NULL)
 			current->thread.use_blkcommit = 1;
 	} else {
@@ -308,7 +444,7 @@ good_area:
 		goto out_of_memory;
 	}
 
-	up(&mm->mmap_sem);
+	up_read(&mm->mmap_sem);
 	goto fault_done;
 
 	/*
@@ -316,7 +452,8 @@ good_area:
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
-	up(&mm->mmap_sem);
+	insn = get_fault_insn(regs, insn);
+	up_read(&mm->mmap_sem);
 
 handle_kernel_fault:
 	do_kernel_fault(regs, si_code, fault_code, insn, address);
@@ -328,20 +465,26 @@ handle_kernel_fault:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	up(&mm->mmap_sem);
+	insn = get_fault_insn(regs, insn);
+	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", current->comm);
 	if (!(regs->tstate & TSTATE_PRIV))
 		do_exit(SIGKILL);
 	goto handle_kernel_fault;
 
+intr_or_no_mm:
+	insn = get_fault_insn(regs, 0);
+	goto handle_kernel_fault;
+
 do_sigbus:
-	up(&mm->mmap_sem);
+	insn = get_fault_insn(regs, insn);
+	up_read(&mm->mmap_sem);
 
 	/*
 	 * Send a sigbus, regardless of whether we were in kernel
 	 * or user mode.
 	 */
-	do_fault_siginfo(BUS_ADRERR, SIGBUS, address);
+	do_fault_siginfo(BUS_ADRERR, SIGBUS, regs, insn, fault_code);
 
 	/* Kernel mode? Handle exceptions or die */
 	if (regs->tstate & TSTATE_PRIV)

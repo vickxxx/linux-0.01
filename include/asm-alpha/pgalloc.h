@@ -70,8 +70,7 @@ flush_tlb_other(struct mm_struct *mm)
 }
 
 /* We need to flush the userspace icache after setting breakpoints in
-   ptrace.  I don't think it's needed in do_swap_page, or do_no_page,
-   but I don't know how to get rid of it either.
+   ptrace.
 
    Instead of indiscriminately using imb, take advantage of the fact
    that icache entries are tagged with the ASN and load a new mm context.  */
@@ -79,7 +78,8 @@ flush_tlb_other(struct mm_struct *mm)
 
 #ifndef CONFIG_SMP
 static inline void
-flush_icache_page(struct vm_area_struct *vma, struct page *page)
+flush_icache_user_range(struct vm_area_struct *vma, struct page *page,
+			unsigned long addr, int len)
 {
 	if (vma->vm_flags & VM_EXEC) {
 		struct mm_struct *mm = vma->vm_mm;
@@ -90,8 +90,12 @@ flush_icache_page(struct vm_area_struct *vma, struct page *page)
 	}
 }
 #else
-extern void flush_icache_page(struct vm_area_struct *vma, struct page *page);
+extern void flush_icache_user_range(struct vm_area_struct *vma,
+		struct page *page, unsigned long addr, int len);
 #endif
+
+/* this is used only in do_no_page and do_swap_page */
+#define flush_icache_page(vma, page)	flush_icache_user_range((vma), (page), 0, 0)
 
 /*
  * Flush just one page in the current TLB set.
@@ -229,6 +233,7 @@ extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
 #ifndef CONFIG_SMP
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
+	unsigned long *pmd_cache;
 	unsigned long *pte_cache;
 	unsigned long pgtable_cache_sz;
 } quicklists;
@@ -237,9 +242,12 @@ extern struct pgtable_cache_struct {
 #define quicklists cpu_data[smp_processor_id()]
 #endif
 #define pgd_quicklist (quicklists.pgd_cache)
-#define pmd_quicklist ((unsigned long *)0)
+#define pmd_quicklist (quicklists.pmd_cache)
 #define pte_quicklist (quicklists.pte_cache)
 #define pgtable_cache_size (quicklists.pgtable_cache_sz)
+
+#define pmd_populate(mm, pmd, pte)	pmd_set(pmd, pte)
+#define pgd_populate(mm, pgd, pmd)	pgd_set(pgd, pmd)
 
 extern pgd_t *get_pgd_slow(void);
 
@@ -249,7 +257,7 @@ static inline pgd_t *get_pgd_fast(void)
 
 	if ((ret = pgd_quicklist) != NULL) {
 		pgd_quicklist = (unsigned long *)(*ret);
-		ret[0] = ret[1];
+		ret[0] = 0;
 		pgtable_cache_size--;
 	} else
 		ret = (unsigned long *)get_pgd_slow();
@@ -268,106 +276,74 @@ static inline void free_pgd_slow(pgd_t *pgd)
 	free_page((unsigned long)pgd);
 }
 
-extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_premasked);
+static inline pmd_t *pmd_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pmd_t *ret = (pmd_t *)__get_free_page(GFP_KERNEL);
+	if (ret)
+		clear_page(ret);
+	return ret;
+}
 
-static inline pmd_t *get_pmd_fast(void)
+static inline pmd_t *pmd_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long *ret;
 
 	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
 		pte_quicklist = (unsigned long *)(*ret);
-		ret[0] = ret[1];
+		ret[0] = 0;
 		pgtable_cache_size--;
 	}
 	return (pmd_t *)ret;
 }
 
-static inline void free_pmd_fast(pmd_t *pmd)
+static inline void pmd_free_fast(pmd_t *pmd)
 {
 	*(unsigned long *)pmd = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
-static inline void free_pmd_slow(pmd_t *pmd)
+static inline void pmd_free_slow(pmd_t *pmd)
 {
 	free_page((unsigned long)pmd);
 }
 
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
+static inline pte_t *pte_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL);
+	if (pte)
+		clear_page(pte);
+	return pte;
+}
 
-static inline pte_t *get_pte_fast(void)
+static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long *ret;
 
 	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
 		pte_quicklist = (unsigned long *)(*ret);
-		ret[0] = ret[1];
+		ret[0] = 0;
 		pgtable_cache_size--;
 	}
 	return (pte_t *)ret;
 }
 
-static inline void free_pte_fast(pte_t *pte)
+static inline void pte_free_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-static inline void free_pte_slow(pte_t *pte)
+static inline void pte_free_slow(pte_t *pte)
 {
 	free_page((unsigned long)pte);
 }
 
-extern void __bad_pte(pmd_t *pmd);
-extern void __bad_pmd(pgd_t *pgd);
-
-#define pte_free_kernel(pte)	free_pte_fast(pte)
-#define pte_free(pte)		free_pte_fast(pte)
-#define pmd_free_kernel(pmd)	free_pmd_fast(pmd)
-#define pmd_free(pmd)		free_pmd_fast(pmd)
+#define pte_free(pte)		pte_free_fast(pte)
+#define pmd_free(pmd)		pmd_free_fast(pmd)
 #define pgd_free(pgd)		free_pgd_fast(pgd)
-#define pgd_alloc()		get_pgd_fast()
-
-static inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
-{
-	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-	if (pmd_none(*pmd)) {
-		pte_t *page = get_pte_fast();
-		
-		if (!page)
-			return get_pte_slow(pmd, address);
-		pmd_set(pmd, page);
-		return page + address;
-	}
-	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + address;
-}
-
-static inline pmd_t * pmd_alloc(pgd_t *pgd, unsigned long address)
-{
-	address = (address >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
-	if (pgd_none(*pgd)) {
-		pmd_t *page = get_pmd_fast();
-		
-		if (!page)
-			return get_pmd_slow(pgd, address);
-		pgd_set(pgd, page);
-		return page + address;
-	}
-	if (pgd_bad(*pgd)) {
-		__bad_pmd(pgd);
-		return NULL;
-	}
-	return (pmd_t *) pgd_page(*pgd) + address;
-}
-
-#define pte_alloc_kernel	pte_alloc
-#define pmd_alloc_kernel	pmd_alloc
+#define pgd_alloc(mm)		get_pgd_fast()
 
 extern int do_check_pgt_cache(int, int);
 

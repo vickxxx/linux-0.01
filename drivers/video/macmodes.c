@@ -7,6 +7,9 @@
  *      - Ani Joshi
  *      - Brad Douglas <brad@neruo.com>
  *
+ *	2001 - Documented with DocBook
+ *	- Brad Douglas <brad@neruo.com>
+ *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License. See the file COPYING in the main directory of this archive for
  *  more details.
@@ -91,7 +94,15 @@ static const struct fb_videomode mac_modedb[] = {
 	/* 1280x1024, 75 Hz, Non-Interlaced (135.00 MHz dotclock) */
 	"mac20", 75, 1280, 1024, 7408, 232, 64, 38, 1, 112, 3,
 	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
-    },
+    }, {
+	/* 1152x768, 60 Hz, Titanium PowerBook */
+	"mac21", 60, 1152, 768, 15386, 158, 26, 29, 3, 136, 6,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
+    }, {
+	/* 1600x1024, 60 Hz, Non-Interlaced (112.27 MHz dotclock) */
+	"mac22", 60, 1600, 1024, 8908, 88, 104, 1, 10, 16, 1,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT, FB_VMODE_NONINTERLACED
+    }
 
 #if 0
     /* Anyone who has timings for these? */
@@ -151,12 +162,16 @@ static const struct mode_map {
     { VMODE_1024_768_75V, &mac_modedb[9] },
     { VMODE_1024_768_70, &mac_modedb[8] },
     { VMODE_1024_768_60, &mac_modedb[7] },
+    /* 1152x768 */
+    { VMODE_1152_768_60, &mac_modedb[14] },
     /* 1152x870 */
     { VMODE_1152_870_75, &mac_modedb[11] },
     /* 1280x960 */
     { VMODE_1280_960_75, &mac_modedb[12] },
     /* 1280x1024 */
     { VMODE_1280_1024_75, &mac_modedb[13] },
+    /* 1600x1024 */
+    { VMODE_1600_1024_60, &mac_modedb[15] },
     { -1, NULL }
 };
 
@@ -188,6 +203,7 @@ static const struct monitor_map {
     { 0x730, VMODE_768_576_50I },	/* PAL (Alternate) */
     { 0x73a, VMODE_1152_870_75 },	/* 3rd party 19" */
     { 0x73f, VMODE_640_480_67 },	/* no sense lines connected at all */
+    { 0xBEEF, VMODE_1600_1024_60 },	/* 22" Apple Cinema Display */
     { -1,    VMODE_640_480_60 },	/* catch-all, must be last */
 };
 
@@ -203,11 +219,38 @@ static struct fb_cmap palette_cmap = {
 };
 
 
+/**
+ *	console_getmode - get current mode
+ *	@mode: virtual console mode structure
+ *
+ *	Populates @mode with the current mode held in the global
+ *	display_info structure.
+ *
+ *	Note, this function is only for XPMAC compatibility.
+ *
+ *	Returns zero.
+ */
+
 int console_getmode(struct vc_mode *mode)
 {
     *mode = display_info;
     return 0;
 }
+
+
+/**
+ *	console_setmode - sets current console mode
+ *	@mode: virtual console mode structure
+ *	@doit: boolean, 0 test mode, 1 test and activate mode
+ *
+ *	Sets @mode for all virtual consoles if @doit is non-zero,
+ *	otherwise, test a mode for validity.
+ *
+ *	Note, this function is only for XPMAC compatibility.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int console_setmode(struct vc_mode *mode, int doit)
 {
@@ -255,6 +298,23 @@ int console_setmode(struct vc_mode *mode, int doit)
     return 0;
 }
 
+
+/**
+ *	console_setcmap - sets palette color map for console
+ *	@n_entries: number of entries in the palette (max 16)
+ *	@red: value for red component of palette
+ *	@green: value for green component of palette
+ *	@blue: value for blue component of palette
+ *
+ *	Sets global palette_cmap structure and activates the palette
+ *	on the current console.
+ *
+ *	Note, this function is only for XPMAC compatibility.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
+
 int console_setcmap(int n_entries, unsigned char *red, unsigned char *green,
                     unsigned char *blue)
 {
@@ -285,6 +345,21 @@ int console_setcmap(int n_entries, unsigned char *red, unsigned char *green,
     return 0;
 }
 
+
+/**
+ *	console_powermode - sets monitor power mode
+ *	@mode: power state to set
+ *
+ *	Sets power state as dictated by @mode.
+ *
+ *	Note that this function is only for XPMAC compatibility and
+ *	doesn't do much.
+ *
+ *	Returns 0 for %VC_POWERMODE_INQUIRY, -EINVAL for VESA power
+ *	settings, or -ENIXIO on failure.
+ *
+ */
+
 int console_powermode(int mode)
 {
     if (mode == VC_POWERMODE_INQUIRY)
@@ -297,9 +372,18 @@ int console_powermode(int mode)
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 
 
-    /*
-     *  Convert a MacOS vmode/cmode pair to a frame buffer video mode structure
-     */
+/**
+ *	mac_vmode_to_var - converts vmode/cmode pair to var structure
+ *	@vmode: MacOS video mode
+ *	@cmode: MacOS color mode
+ *	@var: frame buffer video mode structure
+ *
+ *	Converts a MacOS vmode/cmode pair to a frame buffer video
+ *	mode structure.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int mac_vmode_to_var(int vmode, int cmode, struct fb_var_screeninfo *var)
 {
@@ -370,9 +454,18 @@ int mac_vmode_to_var(int vmode, int cmode, struct fb_var_screeninfo *var)
 }
 
 
-    /*
-     *  Convert a frame buffer video mode structure to a MacOS vmode/cmode pair
-     */
+/**
+ *	mac_var_to_vmode - convert var structure to MacOS vmode/cmode pair
+ *	@var: frame buffer video mode structure
+ *	@vmode: MacOS video mode
+ *	@cmode: MacOS color mode
+ *
+ *	Converts a frame buffer video mode structure to a MacOS
+ *	vmode/cmode pair.
+ *
+ *	Returns negative errno on error, or zero for success.
+ *
+ */
 
 int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
 		     int *cmode)
@@ -406,9 +499,16 @@ int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
 }
 
 
-    /*
-     *  Convert a Mac monitor sense number to a MacOS vmode number
-     */
+/**
+ *	mac_map_monitor_sense - Convert monitor sense to vmode
+ *	@sense: Macintosh monitor sense number
+ *
+ *	Converts a Macintosh monitor sense number to a MacOS
+ *	vmode number.
+ *
+ *	Returns MacOS vmode video mode number.
+ *
+ */
 
 int mac_map_monitor_sense(int sense)
 {
@@ -421,12 +521,25 @@ int mac_map_monitor_sense(int sense)
 }
 
 
-    /*
-     *  Find a suitable video mode
-     *
-     *  If the name of the wanted mode begins with `mac', use the Mac video
-     *  mode database, else fall back to the standard video mode database.
-     */
+/**
+ *	mac_find_mode - find a video mode
+ *	@var: frame buffer user defined part of display
+ *	@info: frame buffer info structure
+ *	@mode_option: video mode name (see mac_modedb[])
+ *	@default_bpp: default color depth in bits per pixel
+ *
+ *	Finds a suitable video mode.  Tries to set mode specified
+ *	by @mode_option.  If the name of the wanted mode begins with
+ *	'mac', the Mac video mode database will be used, otherwise it
+ *	will fall back to the standard video mode database.
+ *
+ *	Note: Function marked as __init and can only be used during
+ *	system boot.
+ *
+ *	Returns error code from fb_find_mode (see fb_find_mode
+ *	function).
+ *
+ */
 
 int __init mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
 			 const char *mode_option, unsigned int default_bpp)

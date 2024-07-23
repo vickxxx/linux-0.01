@@ -15,11 +15,12 @@ void set_bit(int nr, volatile void * addr)
 	unsigned long old;
 	unsigned long mask = 1 << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
-	
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%3
-	or	%0,%0,%2
-	stwcx.	%0,0,%3
+
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%3 \n\
+	or	%0,%0,%2 \n"
+	PPC405_ERR77(0,%3)
+"	stwcx.	%0,0,%3 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=m" (*p)
@@ -33,10 +34,11 @@ void clear_bit(int nr, volatile void *addr)
 	unsigned long mask = 1 << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
 
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%3
-	andc	%0,%0,%2
-	stwcx.	%0,0,%3
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%3 \n\
+	andc	%0,%0,%2 \n"
+	PPC405_ERR77(0,%3)
+"	stwcx.	%0,0,%3 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=m" (*p)
@@ -50,10 +52,11 @@ void change_bit(int nr, volatile void *addr)
 	unsigned long mask = 1 << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
 
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%3
-	xor	%0,%0,%2
-	stwcx.	%0,0,%3
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%3 \n\
+	xor	%0,%0,%2 \n"
+	PPC405_ERR77(0,%3)
+"	stwcx.	%0,0,%3 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=m" (*p)
@@ -67,10 +70,11 @@ int test_and_set_bit(int nr, volatile void *addr)
 	unsigned int mask = 1 << (nr & 0x1f);
 	volatile unsigned int *p = ((volatile unsigned int *)addr) + (nr >> 5);
 
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%4
-	or	%1,%0,%3
-	stwcx.	%1,0,%4
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%4 \n\
+	or	%1,%0,%3 \n"
+	PPC405_ERR77(0,%4)
+"	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)
@@ -86,10 +90,11 @@ int test_and_clear_bit(int nr, volatile void *addr)
 	unsigned int mask = 1 << (nr & 0x1f);
 	volatile unsigned int *p = ((volatile unsigned int *)addr) + (nr >> 5);
 
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%4
-	andc	%1,%0,%3
-	stwcx.	%1,0,%4
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%4 \n\
+	andc	%1,%0,%3 \n"
+	PPC405_ERR77(0,%4)
+"	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)
@@ -105,10 +110,11 @@ int test_and_change_bit(int nr, volatile void *addr)
 	unsigned int mask = 1 << (nr & 0x1f);
 	volatile unsigned int *p = ((volatile unsigned int *)addr) + (nr >> 5);
 
-	__asm__ __volatile__(SMP_WMB "\
-1:	lwarx	%0,0,%4
-	xor	%1,%0,%3
-	stwcx.	%1,0,%4
+	__asm__ __volatile__(SMP_WMB "\n\
+1:	lwarx	%0,0,%4 \n\
+	xor	%1,%0,%3 \n"
+	PPC405_ERR77(0,%4)
+"	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)

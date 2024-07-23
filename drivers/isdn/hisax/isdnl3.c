@@ -1,11 +1,14 @@
-/* $Id: isdnl3.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+/* $Id: isdnl3.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
@@ -18,7 +21,7 @@
 #include "isdnl3.h"
 #include <linux/config.h>
 
-const char *l3_revision = "$Revision: 2.17 $";
+const char *l3_revision = "$Revision: 1.1.4.1 $";
 
 static struct Fsm l3fsm;
 
@@ -404,7 +407,7 @@ releasestack_isdnl3(struct PStack *st)
 		st->l3.global = NULL;
 	}
 	FsmDelTimer(&st->l3.l3m_timer, 54);
-	discard_queue(&st->l3.squeue);
+	skb_queue_purge(&st->l3.squeue);
 }
 
 void
@@ -520,7 +523,7 @@ lc_release_ind(struct FsmInst *fi, int event, void *arg)
 
 	FsmDelTimer(&st->l3.l3m_timer, 52);
 	FsmChangeState(fi, ST_L3_LC_REL);
-	discard_queue(&st->l3.squeue);
+	skb_queue_purge(&st->l3.squeue);
 	l3ml3p(st, DL_RELEASE | INDICATION);
 }
 
@@ -530,7 +533,7 @@ lc_release_cnf(struct FsmInst *fi, int event, void *arg)
 	struct PStack *st = fi->userdata;
 
 	FsmChangeState(fi, ST_L3_LC_REL);
-	discard_queue(&st->l3.squeue);
+	skb_queue_purge(&st->l3.squeue);
 	l3ml3p(st, DL_RELEASE | CONFIRM);
 }
 
@@ -566,7 +569,7 @@ l3_msg(struct PStack *st, int pr, void *arg)
 			} else {
 				struct sk_buff *skb = arg;
 
-				skb_queue_head(&st->l3.squeue, skb);
+				skb_queue_tail(&st->l3.squeue, skb);
 				FsmEvent(&st->l3.l3m, EV_ESTABLISH_REQ, NULL); 
 			}
 			break;
@@ -591,14 +594,14 @@ l3_msg(struct PStack *st, int pr, void *arg)
 	}
 }
 
-void __init
+int __init
 Isdnl3New(void)
 {
 	l3fsm.state_count = L3_STATE_COUNT;
 	l3fsm.event_count = L3_EVENT_COUNT;
 	l3fsm.strEvent = strL3Event;
 	l3fsm.strState = strL3State;
-	FsmNew(&l3fsm, L3FnList, L3_FN_COUNT);
+	return FsmNew(&l3fsm, L3FnList, L3_FN_COUNT);
 }
 
 void

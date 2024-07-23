@@ -60,8 +60,10 @@
 #include <net/ax25.h> 
 #endif /* CONFIG_AX25 || CONFIG_AX25_MODULE */
 
+static int my_errno;
+#define errno my_errno
 #define __KERNEL_SYSCALLS__
-#include <linux/unistd.h>
+#include <asm/unistd.h>
 
 /* --------------------------------------------------------------------- */
 
@@ -246,11 +248,6 @@ struct baycom_state {
 
 /* --------------------------------------------------------------------- */
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
-
-/* --------------------------------------------------------------------- */
-
 #define KISS_VERBOSE
 
 /* --------------------------------------------------------------------- */
@@ -307,7 +304,7 @@ static const unsigned short crc_ccitt_table[] = {
 /*---------------------------------------------------------------------------*/
 
 #if 0
-extern inline void append_crc_ccitt(unsigned char *buffer, int len)
+static inline void append_crc_ccitt(unsigned char *buffer, int len)
 {
  	unsigned int crc = 0xffff;
 
@@ -321,7 +318,7 @@ extern inline void append_crc_ccitt(unsigned char *buffer, int len)
 
 /*---------------------------------------------------------------------------*/
 
-extern inline int check_crc_ccitt(const unsigned char *buf, int cnt)
+static inline int check_crc_ccitt(const unsigned char *buf, int cnt)
 {
 	unsigned int crc = 0xffff;
 
@@ -332,7 +329,7 @@ extern inline int check_crc_ccitt(const unsigned char *buf, int cnt)
 
 /*---------------------------------------------------------------------------*/
 
-extern inline int calc_crc_ccitt(const unsigned char *buf, int cnt)
+static inline int calc_crc_ccitt(const unsigned char *buf, int cnt)
 {
 	unsigned int crc = 0xffff;
 
@@ -374,8 +371,6 @@ static void inline baycom_int_freq(struct baycom_state *bc)
 static char eppconfig_path[256] = "/usr/sbin/eppfpga";
 
 static char *envp[] = { "HOME=/", "TERM=linux", "PATH=/usr/bin:/bin", NULL };
-
-static int errno;
 
 static int exec_eppfpga(void *b)
 {
@@ -483,14 +478,14 @@ static void inline do_kiss_params(struct baycom_state *bc,
  */
 
 #define ENCODEITERA(j)                         \
-({                                             \
+do {                                           \
         if (!(notbitstream & (0x1f0 << j)))    \
                 goto stuff##j;                 \
-  encodeend##j:                                \
-})
+  encodeend##j: ;                              \
+} while (0)
 
 #define ENCODEITERB(j)                                          \
-({                                                              \
+do {                                                            \
   stuff##j:                                                     \
         bitstream &= ~(0x100 << j);                             \
         bitbuf = (bitbuf & (((2 << j) << numbit) - 1)) |        \
@@ -498,7 +493,7 @@ static void inline do_kiss_params(struct baycom_state *bc,
         numbit++;                                               \
         notbitstream = ~bitstream;                              \
         goto encodeend##j;                                      \
-})
+} while (0)
 
 
 static void encode_hdlc(struct baycom_state *bc)
@@ -615,7 +610,7 @@ static int transmit(struct baycom_state *bc, int cnt, unsigned char stat)
 	while (cnt > 0) {
 		switch (bc->hdlctx.state) {
 		case tx_keyup:
-			i = min(cnt, bc->hdlctx.flags);
+			i = min_t(int, cnt, bc->hdlctx.flags);
 			cnt -= i;
 			bc->hdlctx.flags -= i;
 			if (bc->hdlctx.flags <= 0)
@@ -638,7 +633,7 @@ static int transmit(struct baycom_state *bc, int cnt, unsigned char stat)
 					break;
 				}
 			}
-			i = min(cnt, bc->hdlctx.bufcnt);
+			i = min_t(int, cnt, bc->hdlctx.bufcnt);
 			bc->hdlctx.bufcnt -= i;
 			cnt -= i;
 			if (i != pp->ops->epp_write_data(pp, bc->hdlctx.bufptr, i, 0))
@@ -652,7 +647,7 @@ static int transmit(struct baycom_state *bc, int cnt, unsigned char stat)
 				bc->hdlctx.state = tx_data;
 				break;
 			}
-			i = min(cnt, bc->hdlctx.flags);
+			i = min_t(int, cnt, bc->hdlctx.flags);
 			if (i) {
 				cnt -= i;
 				bc->hdlctx.flags -= i;
@@ -669,7 +664,7 @@ static int transmit(struct baycom_state *bc, int cnt, unsigned char stat)
 		default:  /* fall through */
 			if (bc->hdlctx.calibrate <= 0)
 				return 0;
-			i = min(cnt, bc->hdlctx.calibrate);
+			i = min_t(int, cnt, bc->hdlctx.calibrate);
 			cnt -= i;
 			bc->hdlctx.calibrate -= i;
 			memset(tmp, 0, sizeof(tmp));
@@ -715,16 +710,16 @@ static void do_rxpacket(struct net_device *dev)
 }
 
 #define DECODEITERA(j)                                                        \
-({                                                                            \
+do {                                                                          \
         if (!(notbitstream & (0x0fc << j)))              /* flag or abort */  \
                 goto flgabrt##j;                                              \
         if ((bitstream & (0x1f8 << j)) == (0xf8 << j))   /* stuffed bit */    \
                 goto stuff##j;                                                \
-  enditer##j:                                                                 \
-})
+  enditer##j: ;                                                               \
+} while (0)
 
 #define DECODEITERB(j)                                                                 \
-({                                                                                     \
+do {                                                                                   \
   flgabrt##j:                                                                          \
         if (!(notbitstream & (0x1fc << j))) {              /* abort received */        \
                 state = 0;                                                             \
@@ -743,7 +738,7 @@ static void do_rxpacket(struct net_device *dev)
         numbits--;                                                                     \
         bitbuf = (bitbuf & ((~0xff) << j)) | ((bitbuf & ~((~0xff) << j)) << 1);        \
         goto enditer##j;                                                               \
-})
+} while (0)
         
 static int receive(struct net_device *dev, int cnt)
 {
@@ -1379,8 +1374,6 @@ static int baycom_probe(struct net_device *dev)
 	dev->get_stats = baycom_get_stats;
 
 	/* Fill in the fields of the device structure */
-	dev_init_buffers(dev);
-
 	bc->skb = NULL;
 	
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
@@ -1421,6 +1414,7 @@ MODULE_PARM_DESC(iobase, "baycom io base address");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Baycom epp amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 /* --------------------------------------------------------------------- */
 

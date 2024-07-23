@@ -1,8 +1,8 @@
 /*
  * Belkin USB Serial Adapter Driver
  *
- *  Copyright (C) 2000
- *      William Greathouse (wgreathouse@smva.com)
+ *  Copyright (C) 2000		William Greathouse (wgreathouse@smva.com)
+ *  Copyright (C) 2000-2001 	Greg Kroah-Hartman (greg@kroah.com)
  *
  *  This program is largely derived from work by the linux-usb group
  *  and associated source files.  Please see the usb/serial files for
@@ -24,7 +24,20 @@
  * -- Add support for flush commands
  * -- Add everything that is missing :)
  *
- * (11/06/2000) gkh
+ * 27-Nov-2001 gkh
+ * 	compressed all the differnent device entries into 1.
+ *
+ * 30-May-2001 gkh
+ *	switched from using spinlock to a semaphore, which fixes lots of problems.
+ *
+ * 08-Apr-2001 gb
+ *	- Identify version on module load.
+ *
+ * 12-Mar-2001 gkh
+ *	- Added support for the GoHubs GO-COM232 device which is the same as the
+ *	  Peracom device.
+ *
+ * 06-Nov-2000 gkh
  *	- Added support for the old Belkin and Peracom devices.
  *	- Made the port able to be opened multiple times.
  *	- Added some defaults incase the line settings are things these devices
@@ -52,28 +65,32 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/signal.h>
 #include <linux/errno.h>
-#include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/malloc.h>
-#include <linux/fcntl.h>
+#include <linux/slab.h>
+#include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/tty.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <asm/uaccess.h>
+#include <linux/usb.h>
 
 #ifdef CONFIG_USB_SERIAL_DEBUG
- 	#define DEBUG
+ 	static int debug = 1;
 #else
- 	#undef DEBUG
+ 	static int debug;
 #endif
-#include <linux/usb.h>
 
 #include "usb-serial.h"
 #include "belkin_sa.h"
+
+/*
+ * Version Information
+ */
+#define DRIVER_VERSION "v1.2"
+#define DRIVER_AUTHOR "William Greathouse <wgreathouse@smva.com>"
+#define DRIVER_DESC "USB Belkin Serial converter driver"
 
 /* function prototypes for a Belkin USB Serial Adapter F5U103 */
 static int  belkin_sa_startup		(struct usb_serial *serial);
@@ -86,92 +103,35 @@ static int  belkin_sa_ioctl		(struct usb_serial_port *port, struct file * file, 
 static void belkin_sa_break_ctl		(struct usb_serial_port *port, int break_state );
 
 
-static __devinitdata struct usb_device_id id_table_combined [] = {
+static struct usb_device_id id_table_combined [] = {
 	{ USB_DEVICE(BELKIN_SA_VID, BELKIN_SA_PID) },
 	{ USB_DEVICE(BELKIN_OLD_VID, BELKIN_OLD_PID) },
 	{ USB_DEVICE(PERACOM_VID, PERACOM_PID) },
-	{ }							/* Terminating entry */
-};
-
-static __devinitdata struct usb_device_id belkin_sa_table [] = {
-	{ USB_DEVICE(BELKIN_SA_VID, BELKIN_SA_PID) },
-	{ }							/* Terminating entry */
-};
-
-static __devinitdata struct usb_device_id belkin_old_table [] = {
-	{ USB_DEVICE(BELKIN_OLD_VID, BELKIN_OLD_PID) },
-	{ }							/* Terminating entry */
-};
-
-static __devinitdata struct usb_device_id peracom_table [] = {
-	{ USB_DEVICE(PERACOM_VID, PERACOM_PID) },
+	{ USB_DEVICE(GOHUBS_VID, GOHUBS_PID) },
+	{ USB_DEVICE(GOHUBS_VID, HANDYLINK_PID) },
+	{ USB_DEVICE(BELKIN_DOCKSTATION_VID, BELKIN_DOCKSTATION_PID) },
 	{ }							/* Terminating entry */
 };
 
 MODULE_DEVICE_TABLE (usb, id_table_combined);
 
-/* All of the device info needed for the Belkin serial converter */
-struct usb_serial_device_type belkin_sa_device = {
-	name:			"Belkin F5U103 USB Serial Adapter",
-	id_table:		belkin_sa_table,		/* the Belkin F5U103 device */
-	needs_interrupt_in:	MUST_HAVE,			/* this device must have an interrupt in endpoint */
-	needs_bulk_in:		MUST_HAVE,			/* this device must have a bulk in endpoint */
-	needs_bulk_out:		MUST_HAVE,			/* this device must have a bulk out endpoint */
-	num_interrupt_in:	1,
-	num_bulk_in:		1,
-	num_bulk_out:		1,
-	num_ports:		1,
-	open:			belkin_sa_open,
-	close:			belkin_sa_close,
-	read_int_callback:	belkin_sa_read_int_callback,	/* How we get the status info */
-	ioctl:			belkin_sa_ioctl,
-	set_termios:		belkin_sa_set_termios,
-	break_ctl:		belkin_sa_break_ctl,
-	startup:		belkin_sa_startup,
-	shutdown:		belkin_sa_shutdown,
-};
-
-
-/* This driver also supports the "old" school Belkin single port adaptor */
-struct usb_serial_device_type belkin_old_device = {
-	name:			"Belkin USB Serial Adapter",
-	id_table:		belkin_old_table,		/* the old Belkin device */
-	needs_interrupt_in:	MUST_HAVE,			/* this device must have an interrupt in endpoint */
-	needs_bulk_in:		MUST_HAVE,			/* this device must have a bulk in endpoint */
-	needs_bulk_out:		MUST_HAVE,			/* this device must have a bulk out endpoint */
-	num_interrupt_in:	1,
-	num_bulk_in:		1,
-	num_bulk_out:		1,
-	num_ports:		1,
-	open:			belkin_sa_open,
-	close:			belkin_sa_close,
-	read_int_callback:	belkin_sa_read_int_callback,	/* How we get the status info */
-	ioctl:			belkin_sa_ioctl,
-	set_termios:		belkin_sa_set_termios,
-	break_ctl:		belkin_sa_break_ctl,
-	startup:		belkin_sa_startup,
-	shutdown:		belkin_sa_shutdown,
-};
-
-/* this driver also works for the Peracom single port adapter */
-struct usb_serial_device_type peracom_device = {
-	name:			"Peracom single port USB Serial Adapter",
-	id_table:		peracom_table,			/* the Peracom device */
-	needs_interrupt_in:	MUST_HAVE,			/* this device must have an interrupt in endpoint */
-	needs_bulk_in:		MUST_HAVE,			/* this device must have a bulk in endpoint */
-	needs_bulk_out:		MUST_HAVE,			/* this device must have a bulk out endpoint */
-	num_interrupt_in:	1,
-	num_bulk_in:		1,
-	num_bulk_out:		1,
-	num_ports:		1,
-	open:			belkin_sa_open,
-	close:			belkin_sa_close,
-	read_int_callback:	belkin_sa_read_int_callback,	/* How we get the status info */
-	ioctl:			belkin_sa_ioctl,
-	set_termios:		belkin_sa_set_termios,
-	break_ctl:		belkin_sa_break_ctl,
-	startup:		belkin_sa_startup,
-	shutdown:		belkin_sa_shutdown,
+/* All of the device info needed for the serial converters */
+static struct usb_serial_device_type belkin_device = {
+	.owner =		THIS_MODULE,
+	.name =			"Belkin / Peracom / GoHubs USB Serial Adapter",
+	.id_table =		id_table_combined,
+	.num_interrupt_in =	1,
+	.num_bulk_in =		1,
+	.num_bulk_out =		1,
+	.num_ports =		1,
+	.open =			belkin_sa_open,
+	.close =		belkin_sa_close,
+	.read_int_callback =	belkin_sa_read_int_callback,	/* How we get the status info */
+	.ioctl =		belkin_sa_ioctl,
+	.set_termios =		belkin_sa_set_termios,
+	.break_ctl =		belkin_sa_break_ctl,
+	.startup =		belkin_sa_startup,
+	.shutdown =		belkin_sa_shutdown,
 };
 
 
@@ -225,80 +185,70 @@ static void belkin_sa_shutdown (struct usb_serial *serial)
 {
 	int i;
 	
-	dbg (__FUNCTION__);
+	dbg ("%s", __FUNCTION__);
 
 	/* stop reads and writes on all ports */
 	for (i=0; i < serial->num_ports; ++i) {
-		while (serial->port[i].open_count > 0) {
-			belkin_sa_close (&serial->port[i], NULL);
-		}
 		/* My special items, the standard routines free my urbs */
-		if (serial->port->private)
-			kfree(serial->port->private);
+		if (serial->port[i].private)
+			kfree(serial->port[i].private);
 	}
 }
 
 
 static int  belkin_sa_open (struct usb_serial_port *port, struct file *filp)
 {
-	unsigned long flags;
+	int retval = 0;
 
-	dbg(__FUNCTION__" port %d", port->number);
+	dbg("%s port %d", __FUNCTION__, port->number);
 
-	spin_lock_irqsave (&port->port_lock, flags);
-	
-	++port->open_count;
-	MOD_INC_USE_COUNT;
-	
-	if (!port->active) {
-		port->active = 1;
-
-		/*Start reading from the device*/
-		/* TODO: Look at possibility of submitting mulitple URBs to device to
-		 *       enhance buffering.  Win trace shows 16 initial read URBs.
-		 */
-		port->read_urb->dev = port->serial->dev;
-		if (usb_submit_urb(port->read_urb))
-			err("usb_submit_urb(read bulk) failed");
-
-		port->interrupt_in_urb->dev = port->serial->dev;
-		if (usb_submit_urb(port->interrupt_in_urb))
-			err(" usb_submit_urb(read int) failed");
+	/*Start reading from the device*/
+	/* TODO: Look at possibility of submitting mulitple URBs to device to
+	 *       enhance buffering.  Win trace shows 16 initial read URBs.
+	 */
+	port->read_urb->dev = port->serial->dev;
+	retval = usb_submit_urb(port->read_urb);
+	if (retval) {
+		err("usb_submit_urb(read bulk) failed");
+		goto exit;
 	}
-	
-	spin_unlock_irqrestore (&port->port_lock, flags);
 
-	return 0;
+	port->interrupt_in_urb->dev = port->serial->dev;
+	retval = usb_submit_urb(port->interrupt_in_urb);
+	if (retval)
+		err(" usb_submit_urb(read int) failed");
+
+exit:
+	return retval;
 } /* belkin_sa_open */
 
 
 static void belkin_sa_close (struct usb_serial_port *port, struct file *filp)
 {
-	unsigned long flags;
+	struct usb_serial *serial;
 
-	dbg(__FUNCTION__" port %d", port->number);
+	if (port_paranoia_check (port, __FUNCTION__))
+		return;
 
-	spin_lock_irqsave (&port->port_lock, flags);
+	serial = get_usb_serial (port, __FUNCTION__);
+	if (!serial)
+		return;
 
-	--port->open_count;
-	MOD_DEC_USE_COUNT;
+	dbg("%s port %d", __FUNCTION__, port->number);
 
-	if (port->open_count <= 0) {
+	if (serial->dev) {
 		/* shutdown our bulk reads and writes */
 		usb_unlink_urb (port->write_urb);
 		usb_unlink_urb (port->read_urb);
-		usb_unlink_urb (port->interrupt_in_urb);	/* wgg - do I need this? I think so. */
-		port->active = 0;
+		usb_unlink_urb (port->interrupt_in_urb);
 	}
-	
-	spin_unlock_irqrestore (&port->port_lock, flags);
 } /* belkin_sa_close */
 
 
 static void belkin_sa_read_int_callback (struct urb *urb)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
-	struct belkin_sa_private *priv = (struct belkin_sa_private *)port->private;
+	struct belkin_sa_private *priv;
 	struct usb_serial *serial;
 	unsigned char *data = urb->transfer_buffer;
 
@@ -306,16 +256,17 @@ static void belkin_sa_read_int_callback (struct urb *urb)
 	if (urb->status)
 		return;
 	
-	if (port_paranoia_check (port, "belkin_sa_read_interrupt")) return;
+	if (port_paranoia_check (port, __FUNCTION__)) return;
 
 	serial = port->serial;
-	if (serial_paranoia_check (serial, "belkin_sa_read_interrupt")) return;
+	if (serial_paranoia_check (serial, __FUNCTION__)) return;
 	
 	usb_serial_debug_data (__FILE__, __FUNCTION__, urb->actual_length, data);
 
 	/* Handle known interrupt data */
 	/* ignore data[0] and data[1] */
 
+	priv = (struct belkin_sa_private *)port->private;
 	priv->last_msr = data[BELKIN_SA_MSR_INDEX];
 	
 	/* Record Control Line states */
@@ -371,12 +322,31 @@ static void belkin_sa_set_termios (struct usb_serial_port *port, struct termios 
 {
 	struct usb_serial *serial = port->serial;
 	struct belkin_sa_private *priv = (struct belkin_sa_private *)port->private;
-	unsigned int iflag = port->tty->termios->c_iflag;
-	unsigned int cflag = port->tty->termios->c_cflag;
-	unsigned int old_iflag = old_termios->c_iflag;
-	unsigned int old_cflag = old_termios->c_cflag;
+	unsigned int iflag;
+	unsigned int cflag;
+	unsigned int old_iflag = 0;
+	unsigned int old_cflag = 0;
 	__u16 urb_value = 0; /* Will hold the new flags */
 	
+	if ((!port->tty) || (!port->tty->termios)) {
+		dbg ("%s - no tty or termios structure", __FUNCTION__);
+		return;
+	}
+
+	iflag = port->tty->termios->c_iflag;
+	cflag = port->tty->termios->c_cflag;
+
+	/* check that they really want us to change something */
+	if (old_termios) {
+		if ((cflag == old_termios->c_cflag) &&
+		    (RELEVANT_IFLAG(port->tty->termios->c_iflag) == RELEVANT_IFLAG(old_termios->c_iflag))) {
+			dbg("%s - nothing to change...", __FUNCTION__);
+			return;
+		}
+		old_iflag = old_termios->c_iflag;
+		old_cflag = old_termios->c_cflag;
+	}
+
 	/* Set the baud rate */
 	if( (cflag&CBAUD) != (old_cflag&CBAUD) ) {
 		/* reassert DTR and (maybe) RTS on transition from B0 */
@@ -504,7 +474,8 @@ static int belkin_sa_ioctl (struct usb_serial_port *port, struct file * file, un
 	case TIOCMSET: /* Turns on and off the lines as specified by the mask */
 	case TIOCMBIS: /* turns on (Sets) the lines as specified by the mask */
 	case TIOCMBIC: /* turns off (Clears) the lines as specified by the mask */
-		if ((ret = get_user(mask, (unsigned long *) arg))) return ret;
+		if (get_user(mask, (unsigned long *) arg))
+			return -EFAULT;
 
 		if ((cmd == TIOCMSET) || (mask & TIOCM_RTS)) {
 			/* RTS needs set */
@@ -555,22 +526,25 @@ static int belkin_sa_ioctl (struct usb_serial_port *port, struct file * file, un
 
 static int __init belkin_sa_init (void)
 {
-	usb_serial_register (&belkin_sa_device);
-	usb_serial_register (&belkin_old_device);
-	usb_serial_register (&peracom_device);
+	usb_serial_register (&belkin_device);
+	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
 }
 
 
 static void __exit belkin_sa_exit (void)
 {
-	usb_serial_deregister (&belkin_sa_device);
-	usb_serial_deregister (&belkin_old_device);
-	usb_serial_deregister (&peracom_device);
+	usb_serial_deregister (&belkin_device);
 }
 
 
 module_init (belkin_sa_init);
 module_exit (belkin_sa_exit);
 
-MODULE_DESCRIPTION("USB Belkin Serial converter driver");
+MODULE_AUTHOR( DRIVER_AUTHOR );
+MODULE_DESCRIPTION( DRIVER_DESC );
+MODULE_LICENSE("GPL");
+
+MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "Debug enabled or not");
+

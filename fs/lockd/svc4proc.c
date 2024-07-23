@@ -9,7 +9,7 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/clnt.h>
@@ -254,6 +254,8 @@ nlm4svc_proc_test_msg(struct svc_rqst *rqstp, struct nlm_args *argp,
 
 	dprintk("lockd: TEST_MSG      called\n");
 
+	memset(&res, 0, sizeof(res));
+
 	if ((stat = nlm4svc_proc_test(rqstp, argp, &res)) == 0)
 		stat = nlm4svc_callback(rqstp, NLMPROC_TEST_RES, &res);
 	return stat;
@@ -420,6 +422,8 @@ nlm4svc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 					      void	        *resp)
 {
 	struct sockaddr_in	saddr = rqstp->rq_addr;
+	int			vers = rqstp->rq_vers;
+	int			prot = rqstp->rq_prot;
 	struct nlm_host		*host;
 
 	dprintk("lockd: SM_NOTIFY     called\n");
@@ -435,8 +439,8 @@ nlm4svc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 	/* Obtain the host pointer for this NFS server and try to
 	 * reclaim all locks we hold on this server.
 	 */
-	saddr.sin_addr.s_addr = argp->addr;	
-	if ((host = nlm_lookup_host(NULL, &saddr, IPPROTO_UDP, 1)) != NULL) {
+	saddr.sin_addr.s_addr = argp->addr;
+	if ((host = nlmclnt_lookup_host(&saddr, prot, vers)) != NULL) {
 		nlmclnt_recovery(host, argp->state);
 		nlm_release_host(host);
 	}
@@ -444,7 +448,7 @@ nlm4svc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 	/* If we run on an NFS server, delete all locks held by the client */
 	if (nlmsvc_ops != NULL) {
 		struct svc_client	*clnt;
-		saddr.sin_addr.s_addr = argp->addr;	
+		saddr.sin_addr.s_addr = argp->addr;
 		if ((clnt = nlmsvc_ops->exp_getclient(&saddr)) != NULL 
 		 && (host = nlm_lookup_host(clnt, &saddr, 0, 0)) != NULL) {
 			nlmsvc_free_host_resources(host);
@@ -454,6 +458,24 @@ nlm4svc_proc_sm_notify(struct svc_rqst *rqstp, struct nlm_reboot *argp,
 
 	return rpc_success;
 }
+
+/*
+ * client sent a GRANTED_RES, let's remove the associated block
+ */
+static int
+nlm4svc_proc_granted_res(struct svc_rqst *rqstp, struct nlm_res  *argp,
+                                                void            *resp)
+{
+        if (!nlmsvc_ops)
+                return rpc_success;
+
+        dprintk("lockd: GRANTED_RES   called\n");
+
+        nlmsvc_grant_reply(rqstp, &argp->cookie, argp->status);
+        return rpc_success;
+}
+
+
 
 /*
  * This is the generic lockd callback for async RPC calls
@@ -518,11 +540,10 @@ nlm4svc_callback_exit(struct rpc_task *task)
 #define nlm4svc_proc_lock_res	nlm4svc_proc_null
 #define nlm4svc_proc_cancel_res	nlm4svc_proc_null
 #define nlm4svc_proc_unlock_res	nlm4svc_proc_null
-#define nlm4svc_proc_granted_res	nlm4svc_proc_null
 
 struct nlm_void			{ int dummy; };
 
-#define PROC(name, xargt, xrest, argt, rest)	\
+#define PROC(name, xargt, xrest, argt, rest, respsize)	\
  { (svc_procfunc) nlm4svc_proc_##name,	\
    (kxdrproc_t) nlm4svc_decode_##xargt,	\
    (kxdrproc_t) nlm4svc_encode_##xrest,	\
@@ -530,34 +551,38 @@ struct nlm_void			{ int dummy; };
    sizeof(struct nlm_##argt),		\
    sizeof(struct nlm_##rest),		\
    0,					\
-   0					\
+   0,					\
+   respsize,				\
  }
+#define	Ck	(1+8)	/* cookie */
+#define	No	(1+1024/4)	/* netobj */
+#define	St	1	/* status */
+#define	Rg	4	/* range (offset + length) */
 struct svc_procedure		nlmsvc_procedures4[] = {
-  PROC(null,		void,		void,		void,	void),
-  PROC(test,		testargs,	testres,	args,	res),
-  PROC(lock,		lockargs,	res,		args,	res),
-  PROC(cancel,		cancargs,	res,		args,	res),
-  PROC(unlock,		unlockargs,	res,		args,	res),
-  PROC(granted,		testargs,	res,		args,	res),
-  PROC(test_msg,	testargs,	norep,		args,	void),
-  PROC(lock_msg,	lockargs,	norep,		args,	void),
-  PROC(cancel_msg,	cancargs,	norep,		args,	void),
-  PROC(unlock_msg,	unlockargs,	norep,		args,	void),
-  PROC(granted_msg,	testargs,	norep,		args,	void),
-  PROC(test_res,	testres,	norep,		res,	void),
-  PROC(lock_res,	lockres,	norep,		res,	void),
-  PROC(cancel_res,	cancelres,	norep,		res,	void),
-  PROC(unlock_res,	unlockres,	norep,		res,	void),
-  PROC(granted_res,	grantedres,	norep,		res,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(none,		void,		void,		void,	void),
-  PROC(share,		shareargs,	shareres,	args,	res),
-  PROC(unshare,		shareargs,	shareres,	args,	res),
-  PROC(nm_lock,		lockargs,	res,		args,	res),
-  PROC(free_all,	notify,		void,		args,	void),
-
+  PROC(null,		void,		void,		void,	void, 1),
+  PROC(test,		testargs,	testres,	args,	res, Ck+St+2+No+Rg),
+  PROC(lock,		lockargs,	res,		args,	res, Ck+St),
+  PROC(cancel,		cancargs,	res,		args,	res, Ck+St),
+  PROC(unlock,		unlockargs,	res,		args,	res, Ck+St),
+  PROC(granted,		testargs,	res,		args,	res, Ck+St),
+  PROC(test_msg,	testargs,	norep,		args,	void, 1),
+  PROC(lock_msg,	lockargs,	norep,		args,	void, 1),
+  PROC(cancel_msg,	cancargs,	norep,		args,	void, 1),
+  PROC(unlock_msg,	unlockargs,	norep,		args,	void, 1),
+  PROC(granted_msg,	testargs,	norep,		args,	void, 1),
+  PROC(test_res,	testres,	norep,		res,	void, 1),
+  PROC(lock_res,	lockres,	norep,		res,	void, 1),
+  PROC(cancel_res,	cancelres,	norep,		res,	void, 1),
+  PROC(unlock_res,	unlockres,	norep,		res,	void, 1),
+  PROC(granted_res,	res,		norep,		res,	void, 1),
   /* statd callback */
-  PROC(sm_notify,	reboot,		void,		reboot,	void),
+  PROC(sm_notify,	reboot,		void,		reboot,	void, 1),
+  PROC(none,		void,		void,		void,	void, 0),
+  PROC(none,		void,		void,		void,	void, 0),
+  PROC(none,		void,		void,		void,	void, 0),
+  PROC(share,		shareargs,	shareres,	args,	res, Ck+St+1),
+  PROC(unshare,		shareargs,	shareres,	args,	res, Ck+St+1),
+  PROC(nm_lock,		lockargs,	res,		args,	res, Ck+St),
+  PROC(free_all,	notify,		void,		args,	void, 1),
+
 };

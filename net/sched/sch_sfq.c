@@ -105,6 +105,7 @@ struct sfq_sched_data
 /* Parameters */
 	int		perturb_period;
 	unsigned	quantum;	/* Allotment per round: MUST BE >= MTU */
+	int		limit;
 
 /* Variables */
 	struct timer_list perturb_timer;
@@ -129,10 +130,6 @@ static __inline__ unsigned sfq_fold_hash(struct sfq_sched_data *q, u32 h, u32 h1
 	h ^= h>>10;
 	return h & 0x3FF;
 }
-
-#ifndef IPPROTO_ESP
-#define IPPROTO_ESP 50
-#endif
 
 static unsigned sfq_hash(struct sfq_sched_data *q, struct sk_buff *skb)
 {
@@ -212,11 +209,12 @@ extern __inline__ void sfq_inc(struct sfq_sched_data *q, sfq_index x)
 	sfq_link(q, x);
 }
 
-static int sfq_drop(struct Qdisc *sch)
+static unsigned int sfq_drop(struct Qdisc *sch)
 {
 	struct sfq_sched_data *q = (struct sfq_sched_data *)sch->data;
 	sfq_index d = q->max_depth;
 	struct sk_buff *skb;
+	unsigned int len;
 
 	/* Queue is full! Find the longest slot and
 	   drop a packet from it */
@@ -224,12 +222,13 @@ static int sfq_drop(struct Qdisc *sch)
 	if (d > 1) {
 		sfq_index x = q->dep[d+SFQ_DEPTH].next;
 		skb = q->qs[x].prev;
+		len = skb->len;
 		__skb_unlink(skb, &q->qs[x]);
 		kfree_skb(skb);
 		sfq_dec(q, x);
 		sch->q.qlen--;
 		sch->stats.drops++;
-		return 1;
+		return len;
 	}
 
 	if (d == 1) {
@@ -238,13 +237,14 @@ static int sfq_drop(struct Qdisc *sch)
 		q->next[q->tail] = q->next[d];
 		q->allot[q->next[d]] += q->quantum;
 		skb = q->qs[d].prev;
+		len = skb->len;
 		__skb_unlink(skb, &q->qs[d]);
 		kfree_skb(skb);
 		sfq_dec(q, d);
 		sch->q.qlen--;
 		q->ht[q->hash[d]] = SFQ_DEPTH;
 		sch->stats.drops++;
-		return 1;
+		return len;
 	}
 
 	return 0;
@@ -275,7 +275,7 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 			q->tail = x;
 		}
 	}
-	if (++sch->q.qlen < SFQ_DEPTH-1) {
+	if (++sch->q.qlen < q->limit-1) {
 		sch->stats.bytes += skb->len;
 		sch->stats.packets++;
 		return 0;
@@ -310,7 +310,7 @@ sfq_requeue(struct sk_buff *skb, struct Qdisc* sch)
 			q->tail = x;
 		}
 	}
-	if (++sch->q.qlen < SFQ_DEPTH-1)
+	if (++sch->q.qlen < q->limit - 1)
 		return 0;
 
 	sch->stats.drops++;
@@ -341,6 +341,7 @@ sfq_dequeue(struct Qdisc* sch)
 
 	/* Is the slot empty? */
 	if (q->qs[a].qlen == 0) {
+		q->ht[q->hash[a]] = SFQ_DEPTH;
 		a = q->next[a];
 		if (a == old_a) {
 			q->tail = SFQ_DEPTH;
@@ -390,6 +391,11 @@ static int sfq_change(struct Qdisc *sch, struct rtattr *opt)
 	sch_tree_lock(sch);
 	q->quantum = ctl->quantum ? : psched_mtu(sch->dev);
 	q->perturb_period = ctl->perturb_period*HZ;
+	if (ctl->limit)
+		q->limit = min_t(u32, ctl->limit, SFQ_DEPTH);
+
+	while (sch->q.qlen >= q->limit-1)
+		sfq_drop(sch);
 
 	del_timer(&q->perturb_timer);
 	if (q->perturb_period) {
@@ -416,6 +422,7 @@ static int sfq_init(struct Qdisc *sch, struct rtattr *opt)
 		q->dep[i+SFQ_DEPTH].next = i+SFQ_DEPTH;
 		q->dep[i+SFQ_DEPTH].prev = i+SFQ_DEPTH;
 	}
+	q->limit = SFQ_DEPTH;
 	q->max_depth = 0;
 	q->tail = SFQ_DEPTH;
 	if (opt == NULL) {
@@ -439,7 +446,6 @@ static void sfq_destroy(struct Qdisc *sch)
 	MOD_DEC_USE_COUNT;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int sfq_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct sfq_sched_data *q = (struct sfq_sched_data *)sch->data;
@@ -449,9 +455,9 @@ static int sfq_dump(struct Qdisc *sch, struct sk_buff *skb)
 	opt.quantum = q->quantum;
 	opt.perturb_period = q->perturb_period/HZ;
 
-	opt.limit = SFQ_DEPTH;
+	opt.limit = q->limit;
 	opt.divisor = SFQ_HASH_DIVISOR;
-	opt.flows = SFQ_DEPTH;
+	opt.flows = q->limit;
 
 	RTA_PUT(skb, TCA_OPTIONS, sizeof(opt), &opt);
 
@@ -461,7 +467,6 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 struct Qdisc_ops sfq_qdisc_ops =
 {
@@ -480,9 +485,7 @@ struct Qdisc_ops sfq_qdisc_ops =
 	sfq_destroy,
 	NULL, /* sfq_change */
 
-#ifdef CONFIG_RTNETLINK
 	sfq_dump,
-#endif
 };
 
 #ifdef MODULE
@@ -496,3 +499,4 @@ void cleanup_module(void)
 	unregister_qdisc(&sfq_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

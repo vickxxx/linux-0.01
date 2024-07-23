@@ -8,17 +8,27 @@
 extern inline void cpu_bh_disable(int cpu)
 {
 	local_bh_count(cpu)++;
-	mb();
+	barrier();
 }
 
-extern inline void cpu_bh_enable(int cpu)
+extern inline void __cpu_bh_enable(int cpu)
 {
-	mb();
+	barrier();
 	local_bh_count(cpu)--;
 }
 
-#define local_bh_enable()	cpu_bh_enable(smp_processor_id())
+#define __local_bh_enable()	__cpu_bh_enable(smp_processor_id())
 #define local_bh_disable()	cpu_bh_disable(smp_processor_id())
+
+#define local_bh_enable()					\
+do {								\
+	int cpu;						\
+								\
+	barrier();						\
+	cpu = smp_processor_id();				\
+	if (!--local_bh_count(cpu) && softirq_pending(cpu))	\
+		do_softirq();					\
+} while (0)
 
 #define in_softirq() (local_bh_count(smp_processor_id()) != 0)
 

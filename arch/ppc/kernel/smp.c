@@ -1,6 +1,4 @@
 /*
- * $Id: smp.c,v 1.68 1999/09/17 19:38:05 cort Exp $
- *
  * Smp support for ppc.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) borrowing a great
@@ -8,8 +6,6 @@
  *
  * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
  *
- * Support for PReP (Motorola MTX/MVME) SMP by Troy Benjegerdes
- * (troy@microux.com, hozer@drgw.net)
  */
 
 #include <linux/config.h>
@@ -23,8 +19,8 @@
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
 #include <linux/init.h>
-#include <linux/openpic.h>
 #include <linux/spinlock.h>
+#include <linux/cache.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -33,62 +29,64 @@
 #include <asm/pgtable.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
-#include <asm/init.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/smp.h>
-#include <asm/gemini.h>
-
+#include <asm/residual.h>
 #include <asm/time.h>
-#include "open_pic.h"
+
 int smp_threads_ready;
 volatile int smp_commenced;
 int smp_num_cpus = 1;
+int smp_tb_synchronized;
 struct cpuinfo_PPC cpu_data[NR_CPUS];
 struct klock_info_struct klock_info = { KLOCK_CLEAR, 0 };
-volatile unsigned char active_kernel_processor = NO_PROC_ID;	/* Processor holding kernel spinlock		*/
-volatile unsigned long ipi_count;
-spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
+atomic_t ipi_recv;
+atomic_t ipi_sent;
+spinlock_t kernel_flag __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
 unsigned int prof_multiplier[NR_CPUS];
 unsigned int prof_counter[NR_CPUS];
 cycles_t cacheflush_time;
-
-/* this has to go in the data section because it is accessed from prom_init */
+static int max_cpus __initdata = NR_CPUS;
+unsigned long cpu_online_map;
 int smp_hw_index[NR_CPUS];
+static struct smp_ops_t *smp_ops;
 
 /* all cpu mappings are 1-1 -- Cort */
 volatile unsigned long cpu_callin_map[NR_CPUS];
 
+#define TB_SYNC_PASSES 4
+volatile unsigned long __initdata tb_sync_flag = 0;
+volatile unsigned long __initdata tb_offset = 0;
+
 int start_secondary(void *);
 extern int cpu_idle(void *unused);
-u_int openpic_read(volatile u_int *addr);
 void smp_call_function_interrupt(void);
-void smp_message_pass(int target, int msg, unsigned long data, int wait);
 
-/* register for interrupting the primary processor on the powersurge */
-/* N.B. this is actually the ethernet ROM! */
-#define PSURGE_PRI_INTR	0xf3019000
-/* register for interrupting the secondary processor on the powersurge */
-#define PSURGE_SEC_INTR	0xf80000c0
-/* register for storing the start address for the secondary processor */
-#define PSURGE_START	0xf2800000
-/* virtual addresses for the above */
-volatile u32 *psurge_pri_intr;
-volatile u32 *psurge_sec_intr;
-volatile u32 *psurge_start;
+/* Low level assembly function used to backup CPU 0 state */
+extern void __save_cpu_setup(void);
 
-/* Since OpenPIC has only 4 IPIs, we use slightly different message numbers. */
+/* Since OpenPIC has only 4 IPIs, we use slightly different message numbers.
+ *
+ * Make sure this matches openpic_request_IPIs in open_pic.c, or what shows up
+ * in /proc/interrupts will be wrong!!! --Troy */
 #define PPC_MSG_CALL_FUNCTION	0
 #define PPC_MSG_RESCHEDULE	1
 #define PPC_MSG_INVALIDATE_TLB	2
 #define PPC_MSG_XMON_BREAK	3
 
-static inline void set_tb(unsigned int upper, unsigned int lower)
+static inline void
+smp_message_pass(int target, int msg, unsigned long data, int wait)
 {
-	mtspr(SPRN_TBWU, upper);
-	mtspr(SPRN_TBWL, lower);
+	if (smp_ops){
+		atomic_inc(&ipi_sent);
+		smp_ops->message_pass(target,msg,data,wait);
+	}
 }
 
+/*
+ * Common functions
+ */
 void smp_local_timer_interrupt(struct pt_regs * regs)
 {
 	int cpu = smp_processor_id();
@@ -101,13 +99,13 @@ void smp_local_timer_interrupt(struct pt_regs * regs)
 
 void smp_message_recv(int msg, struct pt_regs *regs)
 {
-	ipi_count++;
-	
+	atomic_inc(&ipi_recv);
+
 	switch( msg ) {
 	case PPC_MSG_CALL_FUNCTION:
 		smp_call_function_interrupt();
 		break;
-	case PPC_MSG_RESCHEDULE: 
+	case PPC_MSG_RESCHEDULE:
 		current->need_resched = 1;
 		break;
 	case PPC_MSG_INVALIDATE_TLB:
@@ -125,57 +123,18 @@ void smp_message_recv(int msg, struct pt_regs *regs)
 	}
 }
 
-/*
- * As it is now, if we're sending two message at the same time
- * we have race conditions on Pmac.  The PowerSurge doesn't easily
- * allow us to send IPI messages so we put the messages in
- * smp_message[].
- *
- * This is because don't have several IPI's on the PowerSurge even though
- * we do on the chrp.  It would be nice to use actual IPI's such as with
- * openpic rather than this.
- *  -- Cort
- */
-int pmac_smp_message[NR_CPUS];
-void pmac_smp_message_recv(struct pt_regs *regs)
-{
-	int cpu = smp_processor_id();
-	int msg;
-
-	/* clear interrupt */
-	if (cpu == 1)
-		out_be32(psurge_sec_intr, ~0);
-
-	if (smp_num_cpus < 2)
-		return;
-
-	/* make sure there is a message there */
-	msg = pmac_smp_message[cpu];
-	if (msg == 0)
-		return;
-
- 	/* reset message */
-	pmac_smp_message[cpu] = 0;
-
-	smp_message_recv(msg - 1, regs);
-}
-
-void
-pmac_primary_intr(int irq, void *d, struct pt_regs *regs)
-{
-	pmac_smp_message_recv(regs);
-}
-
+#ifdef CONFIG_750_SMP
 /*
  * 750's don't broadcast tlb invalidates so
  * we have to emulate that behavior.
  *   -- Cort
  */
-void smp_send_tlb_invalidate(int cpu)
+void smp_ppc750_send_tlb_invalidate(int cpu)
 {
-	if ( (_get_PVR()>>16) == 8 )
+	if ( PVR_VER(mfspr(PVR)) == 8 )
 		smp_message_pass(MSG_ALL_BUT_SELF, PPC_MSG_INVALIDATE_TLB, 0, 0);
 }
+#endif
 
 void smp_send_reschedule(int cpu)
 {
@@ -220,7 +179,7 @@ void smp_send_stop(void)
  */
 static spinlock_t call_lock = SPIN_LOCK_UNLOCKED;
 
-static volatile struct call_data_struct {
+static struct call_data_struct {
 	void (*func) (void *info);
 	void *info;
 	atomic_t started;
@@ -317,101 +276,22 @@ void smp_call_function_interrupt(void)
 		atomic_inc(&call_data->finished);
 }
 
-void smp_message_pass(int target, int msg, unsigned long data, int wait)
-{
-	if ( !(_machine & (_MACH_Pmac|_MACH_chrp|_MACH_prep|_MACH_gemini)) )
-		return;
-
-	switch (_machine) {
-	case _MACH_Pmac:
-		/*
-		 * IPI's on the Pmac are a hack but without reasonable
-		 * IPI hardware SMP on Pmac is a hack.
-		 *
-		 * We assume here that the msg is not -1.  If it is,
-		 * the recipient won't know the message was destined
-		 * for it. -- Cort
-		 */
-		if (smp_processor_id() == 0) {
-			/* primary cpu */
-			if (target == 1 || target == MSG_ALL_BUT_SELF
-			    || target == MSG_ALL) {
-				pmac_smp_message[1] = msg + 1;
-				/* interrupt secondary processor */
-				out_be32(psurge_sec_intr, ~0);
-				out_be32(psurge_sec_intr, 0);
-			}
-		} else {
-			/* secondary cpu */
-			if (target == 0 || target == MSG_ALL_BUT_SELF
-			    || target == MSG_ALL) {
-				pmac_smp_message[0] = msg + 1;
-				/* interrupt primary processor */
-				in_be32(psurge_pri_intr);
-			}
-		}
-		if (target == smp_processor_id() || target == MSG_ALL) {
-			/* sending a message to ourself */
-			/* XXX maybe we shouldn't do this if ints are off */
-			smp_message_recv(msg, NULL);
-		}
-		break;
-	case _MACH_chrp:
-	case _MACH_prep:
-	case _MACH_gemini:
-#ifndef CONFIG_POWER4
-		/* make sure we're sending something that translates to an IPI */
-		if ( msg > 0x3 )
-			break;
-		switch ( target )
-		{
-		case MSG_ALL:
-			openpic_cause_IPI(smp_processor_id(), msg, 0xffffffff);
-			break;
-		case MSG_ALL_BUT_SELF:
-			openpic_cause_IPI(smp_processor_id(), msg,
-					  0xffffffff & ~(1 << smp_processor_id()));
-			break;
-		default:
-			openpic_cause_IPI(smp_processor_id(), msg, 1<<target);
-			break;
-		}
-#else /* CONFIG_POWER4 */
-		/* for now, only do reschedule messages
-		   since we only have one IPI */
-		if (msg != PPC_MSG_RESCHEDULE)
-			break;
-		for (i = 0; i < smp_num_cpus; ++i) {
-			if (target == MSG_ALL || target == i
-			    || (target == MSG_ALL_BUT_SELF
-				&& i != smp_processor_id()))
-				xics_cause_IPI(i);
-		}
-#endif /* CONFIG_POWER4 */
-		break;
-	}
-}
-
 void __init smp_boot_cpus(void)
 {
 	extern struct task_struct *current_set[NR_CPUS];
-	extern unsigned long smp_chrp_cpu_nr;
-	extern void __secondary_start_psurge(void);
-	extern void __secondary_start_chrp(void);
 	int i, cpu_nr;
 	struct task_struct *p;
-	unsigned long a;
 
 	printk("Entering SMP Mode...\n");
 	smp_num_cpus = 1;
         smp_store_cpu_info(0);
+	cpu_online_map = 1UL;
 
 	/*
 	 * assume for now that the first cpu booted is
 	 * cpu 0, the master -- Cort
 	 */
 	cpu_callin_map[0] = 1;
-        active_kernel_processor = 0;
 	current->processor = 0;
 
 	init_idle();
@@ -427,47 +307,45 @@ void __init smp_boot_cpus(void)
 	 */
 	cacheflush_time = 5 * 1024;
 
-	if ( !(_machine & (_MACH_Pmac|_MACH_chrp|_MACH_gemini)) )
-	{
+	smp_ops = ppc_md.smp_ops;
+	if (smp_ops == NULL) {
 		printk("SMP not supported on this machine.\n");
 		return;
 	}
-	
-	switch ( _machine )
-	{
-	case _MACH_Pmac:
-		/* assume powersurge board - 2 processors -- Cort */
-		cpu_nr = 2;
-		psurge_pri_intr = ioremap(PSURGE_PRI_INTR, 4);
-		psurge_sec_intr = ioremap(PSURGE_SEC_INTR, 4);
-		psurge_start = ioremap(PSURGE_START, 4);
-		break;
-	case _MACH_chrp:
-		if (OpenPIC)
-			for ( i = 0; i < 4 ; i++ )
-				openpic_enable_IPI(i);
-		cpu_nr = smp_chrp_cpu_nr;
-		break;
-	case _MACH_gemini:
-		for ( i = 0; i < 4 ; i++ )
-			openpic_enable_IPI(i);
-                cpu_nr = (readb(GEMINI_CPUSTAT) & GEMINI_CPU_COUNT_MASK)>>2;
-                cpu_nr = (cpu_nr == 0) ? 4 : cpu_nr;
-		break;
+
+#ifndef CONFIG_750_SMP
+	/* check for 750's, they just don't work with linux SMP.
+	 * If you actually have 750 SMP hardware and want to try to get
+	 * it to work, send me a patch to make it work and
+	 * I'll make CONFIG_750_SMP a config option.  -- Troy (hozer@drgw.net)
+	 */
+	if ( PVR_VER(mfspr(PVR)) == 8 ){
+		printk("SMP not supported on 750 cpus. %s line %d\n",
+				__FILE__, __LINE__);
+		return;
 	}
+#endif
+
+
+	/* Probe arch for CPUs */
+	cpu_nr = smp_ops->probe();
+
+	/* Backup CPU 0 state */
+	__save_cpu_setup();
 
 	/*
 	 * only check for cpus we know exist.  We keep the callin map
 	 * with cpus at the bottom -- Cort
 	 */
-	for ( i = 1 ; i < cpu_nr; i++ )
-	{
+	if (cpu_nr > max_cpus)
+		cpu_nr = max_cpus;
+	for (i = 1; i < cpu_nr; i++) {
 		int c;
 		struct pt_regs regs;
-		
+
 		/* create a process for the processor */
-		/* we don't care about the values in regs since we'll
-		   never reschedule the forked task. */
+		/* only regs.msr is actually used, and 0 is OK for it */
+		memset(&regs, 0, sizeof(struct pt_regs));
 		if (do_fork(CLONE_VM|CLONE_PID, 0, &regs, 0) < 0)
 			panic("failed fork for CPU %d", i);
 		p = init_task.prev_task;
@@ -478,79 +356,122 @@ void __init smp_boot_cpus(void)
 		init_tasks[i] = p;
 
 		p->processor = i;
-		p->has_cpu = 1;
+		p->cpus_runnable = 1 << i; /* we schedule the first task manually */
 		current_set[i] = p;
 
-		/* need to flush here since secondary bats aren't setup */
-		for (a = KERNELBASE; a < KERNELBASE + 0x800000; a += 32)
-			asm volatile("dcbf 0,%0" : : "r" (a) : "memory");
-		asm volatile("sync");
+		/*
+		 * There was a cache flush loop here to flush the cache
+		 * to memory for the first 8MB of RAM.  The cache flush
+		 * has been pushed into the kick_cpu function for those
+		 * platforms that need it.
+		 */
 
 		/* wake up cpus */
-		switch ( _machine )
-		{
-		case _MACH_Pmac:
-			/* setup entry point of secondary processor */
-			out_be32(psurge_start, __pa(__secondary_start_psurge));
-			/* interrupt secondary to begin executing code */
-			out_be32(psurge_sec_intr, ~0);
-			udelay(1);
-			out_be32(psurge_sec_intr, 0);
-			break;
-		case _MACH_chrp:
-			*(unsigned long *)KERNELBASE = i;
-			asm volatile("dcbf 0,%0"::"r"(KERNELBASE):"memory");
-			break;
-		case _MACH_gemini:
-			openpic_init_processor( 1<<i );
-			openpic_init_processor( 0 );
-			break;
-		}
-		
+		smp_ops->kick_cpu(i);
+
 		/*
 		 * wait to see if the cpu made a callin (is actually up).
 		 * use this value that I found through experimentation.
 		 * -- Cort
 		 */
-		for ( c = 1000; c && !cpu_callin_map[i] ; c-- )
+		for ( c = 10000; c && !cpu_callin_map[i] ; c-- )
 			udelay(100);
-		
+
 		if ( cpu_callin_map[i] )
 		{
+			char buf[32];
+			sprintf(buf, "found cpu %d", i);
+			if (ppc_md.progress) ppc_md.progress(buf, 0x350+i);
 			printk("Processor %d found.\n", i);
 			smp_num_cpus++;
 		} else {
+			char buf[32];
+			sprintf(buf, "didn't find cpu %d", i);
+			if (ppc_md.progress) ppc_md.progress(buf, 0x360+i);
 			printk("Processor %d is stuck.\n", i);
 		}
 	}
 
-	if (OpenPIC && (_machine & (_MACH_gemini|_MACH_chrp|_MACH_prep)))
-		do_openpic_setup_cpu();
+	/* Setup CPU 0 last (important) */
+	smp_ops->setup_cpu(0);
 
-	if ( _machine == _MACH_Pmac )
-	{
-		/* reset the entry point so if we get another intr we won't
-		 * try to startup again */
-		out_be32(psurge_start, 0x100);
-		if (request_irq(30, pmac_primary_intr, 0, "primary IPI", 0))
-			printk(KERN_ERR "Couldn't get primary IPI interrupt");
-		/*
-		 * The decrementers of both cpus are frozen at this point
-		 * until we give the secondary cpu another interrupt.
-		 * We set them both to decrementer_count and then send
-		 * the interrupt.  This should get the decrementers
-		 * synchronized.
-		 * -- paulus.
-		 */
-		set_dec(tb_ticks_per_jiffy);
-		if ((_get_PVR() >> 16) != 1) {
-			set_tb(0, 0);	/* set timebase if not 601 */
-			last_jiffy_stamp(0) = 0;
+	if (smp_num_cpus < 2)
+		smp_tb_synchronized = 1;
+}
+
+void __init smp_software_tb_sync(int cpu)
+{
+#define PASSES 4	/* 4 passes.. */
+	int pass;
+	int i, j;
+
+	/* stop - start will be the number of timebase ticks it takes for cpu0
+	 * to send a message to all others and the first reponse to show up.
+	 *
+	 * ASSUMPTION: this time is similiar for all cpus
+	 * ASSUMPTION: the time to send a one-way message is ping/2
+	 */
+	register unsigned long start = 0;
+	register unsigned long stop = 0;
+	register unsigned long temp = 0;
+
+	set_tb(0, 0);
+
+	/* multiple passes to get in l1 cache.. */
+	for (pass = 2; pass < 2+PASSES; pass++){
+		if (cpu == 0){
+			mb();
+			for (i = j = 1; i < smp_num_cpus; i++, j++){
+				/* skip stuck cpus */
+				while (!cpu_callin_map[j])
+					++j;
+				while (cpu_callin_map[j] != pass)
+					barrier();
+			}
+			mb();
+			tb_sync_flag = pass;
+			start = get_tbl();	/* start timing */
+			while (tb_sync_flag)
+				mb();
+			stop = get_tbl();	/* end timing */
+			/* theoretically, the divisor should be 2, but
+			 * I get better results on my dual mtx. someone
+			 * please report results on other smp machines..
+			 */
+			tb_offset = (stop-start)/4;
+			mb();
+			tb_sync_flag = pass;
+			udelay(10);
+			mb();
+			tb_sync_flag = 0;
+			mb();
+			set_tb(0,0);
+			mb();
+		} else {
+			cpu_callin_map[cpu] = pass;
+			mb();
+			while (!tb_sync_flag)
+				mb();		/* wait for cpu0 */
+			mb();
+			tb_sync_flag = 0;	/* send response for timing */
+			mb();
+			while (!tb_sync_flag)
+				mb();
+			temp = tb_offset;	/* make sure offset is loaded */
+			while (tb_sync_flag)
+				mb();
+			set_tb(0,temp);		/* now, set the timebase */
+			mb();
 		}
-		out_be32(psurge_sec_intr, ~0);
-		udelay(1);
-		out_be32(psurge_sec_intr, 0);
 	}
+	if (cpu == 0) {
+		smp_tb_synchronized = 1;
+		printk("smp_software_tb_sync: %d passes, final offset: %ld\n",
+			PASSES, tb_offset);
+	}
+	/* so time.c doesn't get confused */
+	set_dec(tb_ticks_per_jiffy);
+	last_jiffy_stamp(cpu) = 0;
 }
 
 void __init smp_commence(void)
@@ -558,8 +479,49 @@ void __init smp_commence(void)
 	/*
 	 *	Lets the callin's below out of their loop.
 	 */
+	if (ppc_md.progress) ppc_md.progress("smp_commence", 0x370);
 	wmb();
 	smp_commenced = 1;
+
+	/* if the smp_ops->setup_cpu function has not already synched the
+	 * timebases with a nicer hardware-based method, do so now
+	 *
+	 * I am open to suggestions for improvements to this method
+	 * -- Troy <hozer@drgw.net>
+	 *
+	 * NOTE: if you are debugging, set smp_tb_synchronized for now
+	 * since if this code runs pretty early and needs all cpus that
+	 * reported in in smp_callin_map to be working
+	 *
+	 * NOTE2: this code doesn't seem to work on > 2 cpus. -- paulus/BenH
+	 */
+	if (!smp_tb_synchronized && smp_num_cpus == 2) {
+		unsigned long flags;
+		__save_and_cli(flags);
+		smp_software_tb_sync(0);
+		__restore_flags(flags);
+	}
+}
+
+void __init smp_callin(void)
+{
+	int cpu = current->processor;
+
+        smp_store_cpu_info(cpu);
+	smp_ops->setup_cpu(cpu);
+	set_dec(tb_ticks_per_jiffy);
+	cpu_online_map |= 1UL << cpu;
+	mb();
+	cpu_callin_map[cpu] = 1;
+
+	while(!smp_commenced)
+		barrier();
+
+	/* see smp_commence for more info */
+	if (!smp_tb_synchronized && smp_num_cpus == 2) {
+		smp_software_tb_sync(cpu);
+	}
+	__sti();
 }
 
 /* intel needs this */
@@ -576,37 +538,6 @@ int __init start_secondary(void *unused)
 	return cpu_idle(NULL);
 }
 
-void __init smp_callin(void)
-{
-        smp_store_cpu_info(current->processor);
-	set_dec(tb_ticks_per_jiffy);
-	if (_machine == _MACH_Pmac && (_get_PVR() >> 16) != 1) {
-		set_tb(0, 0);	/* set timebase if not 601 */
-		last_jiffy_stamp(current->processor) = 0;
-	}
-	init_idle();
-	cpu_callin_map[current->processor] = 1;
-
-#ifndef CONFIG_POWER4
-	/*
-	 * Each processor has to do this and this is the best
-	 * place to stick it for now.
-	 *  -- Cort
-	 */
-	if (OpenPIC && _machine & (_MACH_gemini|_MACH_chrp|_MACH_prep))
-		do_openpic_setup_cpu();
-#else
-	xics_setup_cpu();
-#endif /* CONFIG_POWER4 */
-#ifdef CONFIG_GEMINI	
-	if ( _machine == _MACH_gemini )
-		gemini_init_l2();
-#endif
-	while(!smp_commenced)
-		barrier();
-	__sti();
-}
-
 void __init smp_setup(char *str, int *ints)
 {
 }
@@ -621,6 +552,14 @@ void __init smp_store_cpu_info(int id)
         struct cpuinfo_PPC *c = &cpu_data[id];
 
 	/* assume bogomips are same for everything */
-        c->loops_per_sec = loops_per_sec;
-        c->pvr = _get_PVR();
+        c->loops_per_jiffy = loops_per_jiffy;
+        c->pvr = mfspr(PVR);
 }
+
+static int __init maxcpus(char *str)
+{
+	get_option(&str, &max_cpus);
+	return 1;
+}
+
+__setup("maxcpus=", maxcpus);

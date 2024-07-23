@@ -25,11 +25,10 @@
 	Limited full-duplex support.
 */
 
-/* These identify the driver base version and may not be removed. */
-static const char version1[] =
-"ne2k-pci.c:v1.02 10/19/2000 D. Becker/P. Gortmaker\n";
-static const char version2[] =
-"  http://www.scyld.com/network/ne2k-pci.html\n";
+#define DRV_NAME	"ne2k-pci"
+#define DRV_VERSION	"1.02"
+#define DRV_RELDATE	"10/19/2000"
+
 
 /* The user-configurable values.
    These may be modified when a driver module is loaded.*/
@@ -51,14 +50,22 @@ static int options[MAX_UNITS];
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/ethtool.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/uaccess.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
+
+/* These identify the driver base version and may not be removed. */
+static char version[] __devinitdata =
+KERN_INFO DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " D. Becker/P. Gortmaker\n"
+KERN_INFO "  http://www.scyld.com/network/ne2k-pci.html\n";
 
 #if defined(__powerpc__)
 #define inl_le(addr)  le32_to_cpu(inl(addr))
@@ -67,11 +74,18 @@ static int options[MAX_UNITS];
 #define outsl outsl_ns
 #endif
 
+#define PFX DRV_NAME ": "
+
 MODULE_AUTHOR("Donald Becker / Paul Gortmaker");
 MODULE_DESCRIPTION("PCI NE2000 clone driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(debug, "i");
 MODULE_PARM(options, "1-" __MODULE_STRING(MAX_UNITS) "i");
 MODULE_PARM(full_duplex, "1-" __MODULE_STRING(MAX_UNITS) "i");
+MODULE_PARM_DESC(debug, "debug level (1-2)");
+MODULE_PARM_DESC(options, "Bit 5: full duplex");
+MODULE_PARM_DESC(full_duplex, "full duplex setting(s) (1)");
 
 /* Some defines that people can play with if so inclined. */
 
@@ -102,6 +116,7 @@ enum ne2k_pci_chipsets {
 	CH_Winbond_W89C940F,
 	CH_Holtek_HT80232,
 	CH_Holtek_HT80229,
+	CH_Winbond_89C940_8c4a,
 };
 
 
@@ -119,11 +134,12 @@ static struct {
 	{"Winbond W89C940F", 0},
 	{"Holtek HT80232", ONLY_16BIT_IO | HOLTEK_FDX},
 	{"Holtek HT80229", ONLY_32BIT_IO | HOLTEK_FDX | STOP_PG_0x60 },
+	{"Winbond W89C940(misprogrammed)", 0},
 	{0,}
 };
 
 
-static struct pci_device_id ne2k_pci_tbl[] __devinitdata = {
+static struct pci_device_id ne2k_pci_tbl[] = {
 	{ 0x10ec, 0x8029, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RealTek_RTL_8029 },
 	{ 0x1050, 0x0940, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Winbond_89C940 },
 	{ 0x11f6, 0x1401, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Compex_RL2000 },
@@ -134,6 +150,7 @@ static struct pci_device_id ne2k_pci_tbl[] __devinitdata = {
 	{ 0x1050, 0x5a5a, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Winbond_W89C940F },
 	{ 0x12c3, 0x0058, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Holtek_HT80232 },
 	{ 0x12c3, 0x5598, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Holtek_HT80229 },
+	{ 0x8c4a, 0x1980, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_Winbond_89C940_8c4a },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, ne2k_pci_tbl);
@@ -161,6 +178,7 @@ static void ne2k_pci_block_input(struct net_device *dev, int count,
 			  struct sk_buff *skb, int ring_offset);
 static void ne2k_pci_block_output(struct net_device *dev, const int count,
 		const unsigned char *buf, const int start_page);
+static struct ethtool_ops ne2k_pci_ethtool_ops;
 
 
 
@@ -199,23 +217,29 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 	long ioaddr;
 	int flags = pci_clone_list[chip_idx].flags;
 
-	if (fnd_cnt++ == 0)
-		printk(KERN_INFO "%s" KERN_INFO "%s", version1, version2);
+/* when built into the kernel, we only print version if device is found */
+#ifndef MODULE
+	static int printed_version;
+	if (!printed_version++)
+		printk(version);
+#endif
 
-	ioaddr = pci_resource_start (pdev, 0);
-	irq = pdev->irq;
-
-	if (!ioaddr || ((pci_resource_flags (pdev, 0) & IORESOURCE_IO) == 0)) {
-		printk (KERN_ERR "ne2k-pci: no I/O resource at PCI BAR #0\n");
-		return -ENODEV;
-	}
+	fnd_cnt++;
 
 	i = pci_enable_device (pdev);
 	if (i)
 		return i;
 
-	if (request_region (ioaddr, NE_IO_EXTENT, "ne2k-pci") == NULL) {
-		printk (KERN_ERR "ne2k-pci: I/O resource 0x%x @ 0x%lx busy\n",
+	ioaddr = pci_resource_start (pdev, 0);
+	irq = pdev->irq;
+
+	if (!ioaddr || ((pci_resource_flags (pdev, 0) & IORESOURCE_IO) == 0)) {
+		printk (KERN_ERR PFX "no I/O resource at PCI BAR #0\n");
+		return -ENODEV;
+	}
+
+	if (request_region (ioaddr, NE_IO_EXTENT, DRV_NAME) == NULL) {
+		printk (KERN_ERR PFX "I/O resource 0x%x @ 0x%lx busy\n",
 			NE_IO_EXTENT, ioaddr);
 		return -EBUSY;
 	}
@@ -239,9 +263,10 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 		}
 	}
 
-	dev = init_etherdev(NULL, 0);
+	/* Allocate net_device, dev->priv; fill in 8390 specific dev fields. */
+	dev = alloc_ei_netdev();
 	if (!dev) {
-		printk (KERN_ERR "ne2k-pci: cannot allocate ethernet device\n");
+		printk (KERN_ERR PFX "cannot allocate ethernet device\n");
 		goto err_out_free_res;
 	}
 	SET_MODULE_OWNER(dev);
@@ -258,7 +283,7 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 		while ((inb(ioaddr + EN0_ISR) & ENISR_RESET) == 0)
 			/* Limit wait: '2' avoids jiffy roll-over. */
 			if (jiffies - reset_start_time > 2) {
-				printk("ne2k-pci: Card failure (no reset ack).\n");
+				printk(KERN_ERR PFX "Card failure (no reset ack).\n");
 				goto err_out_free_netdev;
 			}
 
@@ -310,19 +335,6 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 	dev->base_addr = ioaddr;
 	pci_set_drvdata(pdev, dev);
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (KERN_ERR "%s: unable to get memory for dev->priv.\n", dev->name);
-		goto err_out_free_netdev;
-	}
-
-	printk("%s: %s found at %#lx, IRQ %d, ",
-		   dev->name, pci_clone_list[chip_idx].name, ioaddr, dev->irq);
-	for(i = 0; i < 6; i++) {
-		printk("%2.2X%s", SA_prom[i], i == 5 ? ".\n": ":");
-		dev->dev_addr[i] = SA_prom[i];
-	}
-
 	ei_status.name = pci_clone_list[chip_idx].name;
 	ei_status.tx_start_page = start_page;
 	ei_status.stop_page = stop_page;
@@ -343,16 +355,30 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 	ei_status.block_input = &ne2k_pci_block_input;
 	ei_status.block_output = &ne2k_pci_block_output;
 	ei_status.get_8390_hdr = &ne2k_pci_get_8390_hdr;
+	ei_status.priv = (unsigned long) pdev;
 	dev->open = &ne2k_pci_open;
 	dev->stop = &ne2k_pci_close;
+	dev->ethtool_ops = &ne2k_pci_ethtool_ops;
 	NS8390_init(dev, 0);
+
+	i = register_netdev(dev);
+	if (i)
+		goto err_out_free_netdev;
+
+	printk("%s: %s found at %#lx, IRQ %d, ",
+		   dev->name, pci_clone_list[chip_idx].name, ioaddr, dev->irq);
+	for(i = 0; i < 6; i++) {
+		printk("%2.2X%s", SA_prom[i], i == 5 ? ".\n": ":");
+		dev->dev_addr[i] = SA_prom[i];
+	}
+
 	return 0;
 
 err_out_free_netdev:
-	unregister_netdev (dev);
 	kfree (dev);
 err_out_free_res:
 	release_region (ioaddr, NE_IO_EXTENT);
+	pci_set_drvdata (pdev, NULL);
 	return -ENODEV;
 
 }
@@ -479,8 +505,12 @@ static void ne2k_pci_block_input(struct net_device *dev, int count,
 		insl(NE_BASE + NE_DATAPORT, buf, count>>2);
 		if (count & 3) {
 			buf += count & ~3;
-			if (count & 2)
-				*((u16*)buf)++ = le16_to_cpu(inw(NE_BASE + NE_DATAPORT));
+			if (count & 2) {
+				u16 *b = (u16 *)buf;
+
+				*b++ = le16_to_cpu(inw(NE_BASE + NE_DATAPORT));
+				buf = (char *)b;
+			}
 			if (count & 1)
 				*buf = inb(NE_BASE + NE_DATAPORT);
 		}
@@ -540,8 +570,12 @@ static void ne2k_pci_block_output(struct net_device *dev, int count,
 		outsl(NE_BASE + NE_DATAPORT, buf, count>>2);
 		if (count & 3) {
 			buf += count & ~3;
-			if (count & 2)
-				outw(cpu_to_le16(*((u16*)buf)++), NE_BASE + NE_DATAPORT);
+			if (count & 2) {
+				u16 *b = (u16 *)buf;
+
+				outw(cpu_to_le16(*b++), NE_BASE + NE_DATAPORT);
+				buf = (char *)b;
+			}
 		}
 	}
 
@@ -560,6 +594,22 @@ static void ne2k_pci_block_output(struct net_device *dev, int count,
 	return;
 }
 
+static void ne2k_pci_get_drvinfo(struct net_device *dev,
+				 struct ethtool_drvinfo *info)
+{
+	struct ei_device *ei = dev->priv;
+	struct pci_dev *pci_dev = (struct pci_dev *) ei->priv;
+
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	strcpy(info->bus_info, pci_name(pci_dev));
+}
+
+static struct ethtool_ops ne2k_pci_ethtool_ops = {
+	.get_drvinfo		= ne2k_pci_get_drvinfo,
+	.get_tx_csum		= ethtool_op_get_tx_csum,
+	.get_sg			= ethtool_op_get_sg,
+};
 
 static void __devexit ne2k_pci_remove_one (struct pci_dev *pdev)
 {
@@ -571,20 +621,25 @@ static void __devexit ne2k_pci_remove_one (struct pci_dev *pdev)
 	unregister_netdev(dev);
 	release_region(dev->base_addr, NE_IO_EXTENT);
 	kfree(dev);
+	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
 }
 
 
 static struct pci_driver ne2k_driver = {
-	name:		"ne2k-pci",
-	probe:		ne2k_pci_init_one,
-	remove:		ne2k_pci_remove_one,
-	id_table:	ne2k_pci_tbl,
+	.name		= DRV_NAME,
+	.probe		= ne2k_pci_init_one,
+	.remove		= __devexit_p(ne2k_pci_remove_one),
+	.id_table	= ne2k_pci_tbl,
 };
 
 
 static int __init ne2k_pci_init(void)
 {
+/* when a module, this is printed whether or not devices are found in probe */
+#ifdef MODULE
+	printk(version);
+#endif
 	return pci_module_init (&ne2k_driver);
 }
 

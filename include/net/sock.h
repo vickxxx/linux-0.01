@@ -49,6 +49,9 @@
 #include <linux/icmp.h>
 #endif
 #include <linux/tcp.h>		/* struct tcphdr */
+#if defined(CONFIG_IP_SCTP) || defined (CONFIG_IP_SCTP_MODULE)
+#include <net/sctp/structs.h>	/* struct sctp_opt */
+#endif
 
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>	/* struct sk_buff */
@@ -56,6 +59,10 @@
 #if defined(CONFIG_X25) || defined(CONFIG_X25_MODULE)
 #include <net/x25.h>
 #endif
+#if defined(CONFIG_WAN_ROUTER) || defined(CONFIG_WAN_ROUTER_MODULE)
+#include <linux/if_wanpipe.h>
+#endif
+
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <net/ax25.h>
 #if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
@@ -167,9 +174,11 @@ struct ipv6_pinfo {
 	__u8			mc_loop:1,
 	                        recverr:1,
 	                        sndflow:1,
-	                        pmtudisc:2;
+	                        pmtudisc:2,
+				ipv6only:1;
 
 	struct ipv6_mc_socklist	*ipv6_mc_list;
+	struct ipv6_ac_socklist	*ipv6_ac_list;
 	struct ipv6_fl_socklist *ipv6_fl_list;
 	__u32			dst_cookie;
 
@@ -184,6 +193,12 @@ struct raw6_opt {
 	struct icmp6_filter	filter;
 };
 
+#define __ipv6_only_sock(sk)	((sk)->net_pinfo.af_inet6.ipv6only)
+#define ipv6_only_sock(sk)	((sk)->family == PF_INET6 && \
+				 (sk)->net_pinfo.af_inet6.ipv6only)
+#else
+#define __ipv6_only_sock(sk)	0
+#define ipv6_only_sock(sk)	0
 #endif /* IPV6 */
 
 #if defined(CONFIG_INET) || defined(CONFIG_INET_MODULE)
@@ -204,6 +219,7 @@ struct inet_opt
 	__u8			mc_loop;		/* Loopback */
 	unsigned		recverr : 1,
 				freebind : 1;
+	__u16			id;			/* ID counter for DF pkts */
 	__u8			pmtudisc;
 	int			mc_index;		/* Multicast device index */
 	__u32			mc_addr;
@@ -240,6 +256,13 @@ struct tcp_sack_block {
 	__u32	end_seq;
 };
 
+enum tcp_congestion_algo {
+ 	TCP_RENO=0,
+ 	TCP_VEGAS,
+ 	TCP_WESTWOOD,
+ 	TCP_BIC,
+};
+ 
 struct tcp_opt {
 	int	tcp_header_len;	/* Bytes of tcp header to send		*/
 
@@ -278,9 +301,9 @@ struct tcp_opt {
 	/* Data for direct copy to user */
 	struct {
 		struct sk_buff_head	prequeue;
-		int			memory;
 		struct task_struct	*task;
 		struct iovec		*iov;
+		int			memory;
 		int			len;
 	} ucopy;
 
@@ -331,6 +354,8 @@ struct tcp_opt {
 
 	struct tcp_func		*af_specific;	/* Operations which are AF_INET{4,6} specific	*/
 	struct sk_buff		*send_head;	/* Front of stuff to transmit			*/
+	struct page		*sndmsg_page;	/* Cached page for sendmsg			*/
+	u32			sndmsg_off;	/* Cached offset for sendmsg			*/
 
  	__u32	rcv_wnd;	/* Current receiver window		*/
 	__u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
@@ -381,8 +406,6 @@ struct tcp_opt {
 				 * the first SYN. */
 	__u32	undo_marker;	/* tracking retrans started here. */
 	int	undo_retrans;	/* number of undoable retransmissions. */
-	__u32	syn_seq;	/* Seq of received SYN. */
-	__u32	fin_seq;	/* Seq of received FIN. */
 	__u32	urg_seq;	/* Seq of received urgent pointer */
 	__u16	urg_data;	/* Saved octet of OOB data and control flags */
 	__u8	pending;	/* Scheduled timer event	*/
@@ -411,6 +434,58 @@ struct tcp_opt {
 	unsigned int		keepalive_time;	  /* time before keep alive takes place */
 	unsigned int		keepalive_intvl;  /* time interval between keep alive probes */
 	int			linger2;
+
+	__u8			adv_cong;    /* Using Vegas, Westwood, or BIC */
+	__u8                    frto_counter; /* Number of new acks after RTO */
+	__u32                   frto_highmark; /* snd_nxt when RTO occurred */
+
+	unsigned long last_synq_overflow; 
+
+/* Receiver side RTT estimation */
+	struct {
+		__u32	rtt;
+		__u32	seq;
+		__u32	time;
+	} rcv_rtt_est;
+
+/* Receiver queue space */
+	struct {
+		int	space;
+		__u32	seq;
+		__u32	time;
+	} rcvq_space;
+
+/* TCP Westwood structure */
+        struct {
+                __u32    bw_ns_est;        /* first bandwidth estimation..not too smoothed 8) */
+                __u32    bw_est;           /* bandwidth estimate */
+                __u32    rtt_win_sx;       /* here starts a new evaluation... */
+                __u32    bk;
+                __u32    snd_una;          /* used for evaluating the number of acked bytes */
+                __u32    cumul_ack;
+                __u32    accounted;
+                __u32    rtt;
+                __u32    rtt_min;          /* minimum observed RTT */
+        } westwood;
+
+/* Vegas variables */
+	struct {
+		__u32	beg_snd_nxt;	/* right edge during last RTT */
+		__u32	beg_snd_una;	/* left edge  during last RTT */
+		__u32	beg_snd_cwnd;	/* saves the size of the cwnd */
+		__u8	doing_vegas_now;/* if true, do vegas for this RTT */
+		__u16	cntRTT;		/* # of RTTs measured within last RTT */
+		__u32	minRTT;		/* min of RTTs measured within last RTT (in usec) */
+		__u32	baseRTT;	/* the min of all Vegas RTT measurements seen (in usec) */
+	} vegas;
+
+	/* BI TCP Parameters */
+	struct {
+		__u32	cnt;		/* increase cwnd by 1 after this number of ACKs */
+		__u32 	last_max_cwnd;	/* last maximium snd_cwnd */
+		__u32	last_cwnd;	/* the last snd_cwnd */
+		__u32   last_stamp;     /* time when updated last_cwnd */
+	} bictcp;
 };
 
  	
@@ -477,7 +552,7 @@ typedef struct {
 do {	spin_lock_init(&((__sk)->lock.slock)); \
 	(__sk)->lock.users = 0; \
 	init_waitqueue_head(&((__sk)->lock.wq)); \
-} while(0);
+} while(0)
 
 struct sock {
 	/* Socket demultiplex comparisons on incoming packets. */
@@ -534,7 +609,10 @@ struct sock {
 				bsdism;
 	unsigned char		debug;
 	unsigned char		rcvtstamp;
+	unsigned char		use_write_queue;
 	unsigned char		userlocks;
+	/* Hole of 3 bytes. Try to pack. */
+	int			route_caps;
 	int			proc;
 	unsigned long	        lingertime;
 
@@ -565,6 +643,9 @@ struct sock {
 
 	union {
 		struct tcp_opt		af_tcp;
+#if defined(CONFIG_IP_SCTP) || defined (CONFIG_IP_SCTP_MODULE)
+		struct sctp_opt		af_sctp;
+#endif
 #if defined(CONFIG_INET) || defined (CONFIG_INET_MODULE)
 		struct raw_opt		tp_raw4;
 #endif
@@ -633,9 +714,7 @@ struct sock {
 #if defined(CONFIG_PPPOE) || defined(CONFIG_PPPOE_MODULE)
 		struct pppox_opt	*pppox;
 #endif
-#ifdef CONFIG_NETLINK
 		struct netlink_opt	*af_netlink;
-#endif
 #if defined(CONFIG_ECONET) || defined(CONFIG_ECONET_MODULE)
 		struct econet_opt	*af_econet;
 #endif
@@ -644,6 +723,9 @@ struct sock {
 #endif
 #if defined(CONFIG_IRDA) || defined(CONFIG_IRDA_MODULE)
 		struct irda_sock        *irda;
+#endif
+#if defined(CONFIG_WAN_ROUTER) || defined(CONFIG_WAN_ROUTER_MODULE)
+               struct wanpipe_opt      *af_wanpipe;
 #endif
 	} protinfo;  		
 
@@ -730,12 +812,12 @@ struct proto {
 };
 
 /* Called with local bh disabled */
-static void __inline__ sock_prot_inc_use(struct proto *prot)
+static __inline__ void sock_prot_inc_use(struct proto *prot)
 {
 	prot->stats[smp_processor_id()].inuse++;
 }
 
-static void __inline__ sock_prot_dec_use(struct proto *prot)
+static __inline__ void sock_prot_dec_use(struct proto *prot)
 {
 	prot->stats[smp_processor_id()].inuse--;
 }
@@ -792,26 +874,6 @@ do {	spin_lock_bh(&((__sk)->lock.slock)); \
 #define bh_lock_sock(__sk)	spin_lock(&((__sk)->lock.slock))
 #define bh_unlock_sock(__sk)	spin_unlock(&((__sk)->lock.slock))
 
-/*
- *	This might not be the most appropriate place for this two	 
- *	but since they are used by a lot of the net related code
- *	at least they get declared on a include that is common to all
- */
-
-static __inline__ int min(unsigned int a, unsigned int b)
-{
-	if (a > b)
-		a = b; 
-	return a;
-}
-
-static __inline__ int max(unsigned int a, unsigned int b)
-{
-	if (a < b)
-		a = b;
-	return a;
-}
-
 extern struct sock *		sk_alloc(int family, int priority, int zero_it);
 extern void			sk_free(struct sock *sk);
 
@@ -833,13 +895,15 @@ extern int			sock_getsockopt(struct socket *sock, int level,
 						int *optlen);
 extern struct sk_buff 		*sock_alloc_send_skb(struct sock *sk,
 						     unsigned long size,
-						     unsigned long fallback,
 						     int noblock,
 						     int *errcode);
+extern struct sk_buff 		*sock_alloc_send_pskb(struct sock *sk,
+						      unsigned long header_len,
+						      unsigned long data_len,
+						      int noblock,
+						      int *errcode);
 extern void *sock_kmalloc(struct sock *sk, int size, int priority);
 extern void sock_kfree_s(struct sock *sk, void *mem, int size);
-
-extern int copy_and_csum_toiovec(struct iovec *iov, struct sk_buff *skb, int hlen);
 
 /*
  * Functions to fill in entries in struct proto_ops when a protocol
@@ -877,6 +941,10 @@ extern int                      sock_no_recvmsg(struct socket *,
 extern int			sock_no_mmap(struct file *file,
 					     struct socket *sock,
 					     struct vm_area_struct *vma);
+extern ssize_t			sock_no_sendpage(struct socket *sock,
+						struct page *page,
+						int offset, size_t size, 
+						int flags);
 
 /*
  *	Default socket callbacks and setup code
@@ -895,27 +963,41 @@ extern void sklist_destroy_socket(struct sock **list, struct sock *sk);
 
 /**
  *	sk_filter - run a packet through a socket filter
+ *	@sk: sock associated with &sk_buff
  *	@skb: buffer to filter
- *	@filter: filter to apply
+ *	@needlock: set to 1 if the sock is not locked by caller.
  *
  * Run the filter code and then cut skb->data to correct size returned by
  * sk_run_filter. If pkt_len is 0 we toss packet. If skb->len is smaller
  * than pkt_len we keep whole skb->data. This is the socket level
  * wrapper to sk_run_filter. It returns 0 if the packet should
- * be accepted or 1 if the packet should be tossed.
+ * be accepted or -EPERM if the packet should be tossed.
  */
- 
-static inline int sk_filter(struct sk_buff *skb, struct sk_filter *filter)
+
+static inline int sk_filter(struct sock *sk, struct sk_buff *skb, int needlock)
 {
-	int pkt_len;
+	int err = 0;
 
-        pkt_len = sk_run_filter(skb, filter->insns, filter->len);
-        if(!pkt_len)
-                return 1;	/* Toss Packet */
-        else
-                skb_trim(skb, pkt_len);
+	if (sk->filter) {
+		struct sk_filter *filter;
+		
+		if (needlock)
+			bh_lock_sock(sk);
+		
+		filter = sk->filter;
+		if (filter) {
+			int pkt_len = sk_run_filter(skb, filter->insns,
+						    filter->len);
+			if (!pkt_len)
+				err = -EPERM;
+			else
+				skb_trim(skb, pkt_len);
+		}
 
-	return 0;
+		if (needlock)
+			bh_unlock_sock(sk);
+	}
+	return err;
 }
 
 /**
@@ -940,6 +1022,13 @@ static inline void sk_filter_charge(struct sock *sk, struct sk_filter *fp)
 {
 	atomic_inc(&fp->refcnt);
 	atomic_add(sk_filter_len(fp), &sk->omem_alloc);
+}
+
+#else
+
+static inline int sk_filter(struct sock *sk, struct sk_buff *skb, int needlock)
+{
+	return 0;
 }
 
 #endif /* CONFIG_FILTER */
@@ -1148,36 +1237,40 @@ static inline void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 
 static inline int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
+	int err = 0;
+	int skb_len;
+
 	/* Cast skb->rcvbuf to unsigned... It's pointless, but reduces
 	   number of warnings when compiling with -W --ANK
 	 */
-	if (atomic_read(&sk->rmem_alloc) + skb->truesize >= (unsigned)sk->rcvbuf)
-                return -ENOMEM;
-
-#ifdef CONFIG_FILTER
-	if (sk->filter) {
-		int err = 0;
-		struct sk_filter *filter;
-
-		/* It would be deadlock, if sock_queue_rcv_skb is used
-		   with socket lock! We assume that users of this
-		   function are lock free.
-		 */
-		bh_lock_sock(sk);
-		if ((filter = sk->filter) != NULL && sk_filter(skb, filter))
-			err = -EPERM;
-		bh_unlock_sock(sk);
-		if (err)
-			return err;	/* Toss packet */
+	if (atomic_read(&sk->rmem_alloc) + skb->truesize >= (unsigned)sk->rcvbuf) {
+		err = -ENOMEM;
+		goto out;
 	}
-#endif /* CONFIG_FILTER */
+
+	/* It would be deadlock, if sock_queue_rcv_skb is used
+	   with socket lock! We assume that users of this
+	   function are lock free.
+	*/
+	err = sk_filter(sk, skb, 1);
+	if (err)
+		goto out;
 
 	skb->dev = NULL;
 	skb_set_owner_r(skb, sk);
+
+	/* Cache the SKB length before we tack it onto the receive
+	 * queue.  Once it is added it no longer belongs to us and
+	 * may be freed by other threads of control pulling packets
+	 * from the queue.
+	 */
+	skb_len = skb->len;
+
 	skb_queue_tail(&sk->receive_queue, skb);
 	if (!sk->dead)
-		sk->data_ready(sk,skb->len);
-	return 0;
+		sk->data_ready(sk,skb_len);
+out:
+	return err;
 }
 
 static inline int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
@@ -1224,16 +1317,13 @@ static inline void sk_wake_async(struct sock *sk, int how, int band)
 
 #define SOCK_MIN_SNDBUF 2048
 #define SOCK_MIN_RCVBUF 256
-/* Must be less or equal SOCK_MIN_SNDBUF */
-#define SOCK_MIN_WRITE_SPACE	SOCK_MIN_SNDBUF
 
 /*
  *	Default write policy as shown to user space via poll/select/SIGIO
- *	Kernel internally doesn't use the MIN_WRITE_SPACE threshold.
  */
 static inline int sock_writeable(struct sock *sk) 
 {
-	return sock_wspace(sk) >= SOCK_MIN_WRITE_SPACE;
+	return atomic_read(&sk->wmem_alloc) < (sk->sndbuf / 2);
 }
 
 static inline int gfp_any(void)
@@ -1253,7 +1343,7 @@ static inline long sock_sndtimeo(struct sock *sk, int noblock)
 
 static inline int sock_rcvlowat(struct sock *sk, int waitall, int len)
 {
-	return (waitall ? len : min(sk->rcvlowat, len)) ? : 1;
+	return (waitall ? len : min_t(int, sk->rcvlowat, len)) ? : 1;
 }
 
 /* Alas, with timeout socket operations are not restartable.

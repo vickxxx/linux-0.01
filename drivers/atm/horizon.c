@@ -359,8 +359,8 @@ static struct timer_list housekeeping;
 
 static unsigned short debug = 0;
 static unsigned short vpi_bits = 0;
-static unsigned short max_tx_size = 9000;
-static unsigned short max_rx_size = 9000;
+static int max_tx_size = 9000;
+static int max_rx_size = 9000;
 static unsigned char pci_lat = 0;
 
 /********** access functions **********/
@@ -481,6 +481,7 @@ static inline void dump_skb (char * prefix, unsigned int vc, struct sk_buff * sk
   return;
 }
 
+#if 0 /* unused and in conflict with <asm-ppc/system.h> */
 static inline void dump_regs (hrz_dev * dev) {
 #ifdef DEBUG_HORIZON
   PRINTD (DBG_REGS, "CONTROL 0: %#x", rd_regl (dev, CONTROL_0_REG));
@@ -494,6 +495,7 @@ static inline void dump_regs (hrz_dev * dev) {
 #endif
   return;
 }
+#endif
 
 static inline void dump_framer (hrz_dev * dev) {
 #ifdef DEBUG_HORIZON
@@ -1765,17 +1767,20 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   
   {
     unsigned int tx_len = skb->len;
-    unsigned int tx_iovcnt = ATM_SKB(skb)->iovcnt;
+    unsigned int tx_iovcnt = skb_shinfo(skb)->nr_frags;
     // remember this so we can free it later
     dev->tx_skb = skb;
     
     if (tx_iovcnt) {
       // scatter gather transfer
       dev->tx_regions = tx_iovcnt;
-      dev->tx_iovec = (struct iovec *) skb->data;
+      dev->tx_iovec = 0;		/* @@@ needs rewritten */
       dev->tx_bytes = 0;
       PRINTD (DBG_TX|DBG_BUS, "TX start scatter-gather transfer (iovec %p, len %d)",
 	      skb->data, tx_len);
+      tx_release (dev);
+      hrz_kfree_skb (skb);
+      return -EIO;
     } else {
       // simple transfer
       dev->tx_regions = 0;
@@ -2765,15 +2770,13 @@ static int __init hrz_probe (void) {
     u32 * membase = bus_to_virt (pci_resource_start (pci_dev, 1));
     u8 irq = pci_dev->irq;
     
-    // check IO region
-    if (check_region (iobase, HRZ_IO_EXTENT)) {
-      PRINTD (DBG_WARN, "IO range already in use");
-      continue;
-    }
+    /* XXX DEV_LABEL is a guess */
+    if (!request_region (iobase, HRZ_IO_EXTENT, DEV_LABEL))
+  	  continue;
 
     if (pci_enable_device (pci_dev))
       continue;
-
+    
     dev = kmalloc (sizeof(hrz_dev), GFP_KERNEL);
     if (!dev) {
       // perhaps we should be nice: deregister all adapters and abort?
@@ -2806,9 +2809,6 @@ static int __init hrz_probe (void) {
 		dev->atm_dev->number, dev, dev->atm_dev);
 	dev->atm_dev->dev_data = (void *) dev;
 	dev->pci_dev = pci_dev; 
-	
-	/* XXX DEV_LABEL is a guess */
-	request_region (iobase, HRZ_IO_EXTENT, DEV_LABEL);
 	
 	// enable bus master accesses
 	pci_set_master (pci_dev);
@@ -2901,8 +2901,10 @@ static int __init hrz_probe (void) {
 	atm_dev_deregister (dev->atm_dev);
       } /* atm_dev_register */
       free_irq (irq, dev);
+	
     } /* request_irq */
     kfree (dev);
+    release_region(iobase, HRZ_IO_EXTENT);
   } /* kmalloc and while */
   return devs;
 }
@@ -2919,11 +2921,11 @@ static void __init hrz_check_args (void) {
     PRINTK (KERN_ERR, "vpi_bits has been limited to %hu",
 	    vpi_bits = HRZ_MAX_VPI);
   
-  if (max_tx_size > TX_AAL5_LIMIT)
+  if (max_tx_size < 0 || max_tx_size > TX_AAL5_LIMIT)
     PRINTK (KERN_NOTICE, "max_tx_size has been limited to %hu",
 	    max_tx_size = TX_AAL5_LIMIT);
   
-  if (max_rx_size > RX_AAL5_LIMIT)
+  if (max_rx_size < 0 || max_rx_size > RX_AAL5_LIMIT)
     PRINTK (KERN_NOTICE, "max_rx_size has been limited to %hu",
 	    max_rx_size = RX_AAL5_LIMIT);
   
@@ -2935,10 +2937,11 @@ EXPORT_NO_SYMBOLS;
 
 MODULE_AUTHOR(maintainer_string);
 MODULE_DESCRIPTION(description_string);
+MODULE_LICENSE("GPL");
 MODULE_PARM(debug, "h");
 MODULE_PARM(vpi_bits, "h");
-MODULE_PARM(max_tx_size, "h");
-MODULE_PARM(max_rx_size, "h");
+MODULE_PARM(max_tx_size, "i");
+MODULE_PARM(max_rx_size, "i");
 MODULE_PARM(pci_lat, "b");
 MODULE_PARM_DESC(debug, "debug bitmap, see .h file");
 MODULE_PARM_DESC(vpi_bits, "number of bits (0..4) to allocate to VPIs");

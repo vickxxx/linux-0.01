@@ -8,7 +8,7 @@
  *    RadioTrack II driver for Linux radio support (C) 1998 Ben Pfaff
  * 
  *    Based on RadioTrack I/RadioReveal (C) 1997 M. Kirkwood
- *    Coverted to new API by Alan Cox <Alan.Cox@linux.org>
+ *    Converted to new API by Alan Cox <Alan.Cox@linux.org>
  *    Various bugfixes and enhancements by Russell Kroll <rkroll@exploits.org>
  *
  * TODO: Allow for more than one of these foolish entities :-)
@@ -30,6 +30,7 @@
 #endif
 
 static int io = CONFIG_RADIO_GEMTEK_PORT; 
+static int radio_nr = -1;
 static int users = 0;
 static spinlock_t lock;
 
@@ -235,20 +236,19 @@ static int gemtek_open(struct video_device *dev, int flags)
 	if(users)
 		return -EBUSY;
 	users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static void gemtek_close(struct video_device *dev)
 {
 	users--;
-	MOD_DEC_USE_COUNT;
 }
 
 static struct gemtek_device gemtek_unit;
 
 static struct video_device gemtek_radio=
 {
+	owner:		THIS_MODULE,
 	name:		"GemTek radio",
 	type:		VID_TYPE_TUNER,
 	hardware:	VID_HARDWARE_GEMTEK,
@@ -273,7 +273,7 @@ static int __init gemtek_init(void)
 
 	gemtek_radio.priv=&gemtek_unit;
 	
-	if(video_register_device(&gemtek_radio, VFL_TYPE_RADIO)==-1)
+	if(video_register_device(&gemtek_radio, VFL_TYPE_RADIO, radio_nr)==-1)
 	{
 		release_region(io, 4);
 		return -EINVAL;
@@ -281,21 +281,24 @@ static int __init gemtek_init(void)
 	printk(KERN_INFO "GemTek Radio Card driver.\n");
 
 	spin_lock_init(&lock);
- 	/* mute card - prevents noisy bootups */
-	outb(0x10, io);
-	udelay(5);
-	gemtek_unit.muted = 1;
 
 	/* this is _maybe_ unnecessary */
 	outb(0x01, io);
+
+ 	/* mute card - prevents noisy bootups */
+	gemtek_unit.muted = 0;
+	gemtek_mute(&gemtek_unit);
 
 	return 0;
 }
 
 MODULE_AUTHOR("Jonas Munsin");
 MODULE_DESCRIPTION("A driver for the GemTek Radio Card");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the GemTek card (0x20c, 0x30c, 0x24c or 0x34c (0x20c or 0x248 have been reported to work for the combined sound/radiocard)).");
+MODULE_PARM(radio_nr, "i");
 
 EXPORT_NO_SYMBOLS;
 

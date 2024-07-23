@@ -1,6 +1,3 @@
-/* $Id: mffs.c,v 1.1 1999/08/23 19:00:14 cort Exp $
- */
-
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <asm/uaccess.h>

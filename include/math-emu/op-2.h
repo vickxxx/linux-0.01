@@ -22,6 +22,9 @@
    not, write to the Free Software Foundation, Inc.,
    59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
 
+#ifndef __MATH_EMU_OP_2_H__
+#define __MATH_EMU_OP_2_H__
+
 #define _FP_FRAC_DECL_2(X)	_FP_W_TYPE X##_f0, X##_f1
 #define _FP_FRAC_COPY_2(D,S)	(D##_f0 = S##_f0, D##_f1 = S##_f1)
 #define _FP_FRAC_SET_2(X,I)	__FP_FRAC_SET_2(X, I)
@@ -79,7 +82,7 @@
     else								\
       {									\
 	X##_f0 = (X##_f1 >> ((N) - _FP_W_TYPE_SIZE) |			\
-		  (((X##_f1 << (sz - (N))) | X##_f0) != 0));		\
+		(((X##_f1 << (2*_FP_W_TYPE_SIZE - (N))) | X##_f0) != 0)); \
 	X##_f1 = 0;							\
       }									\
   } while (0)
@@ -111,6 +114,7 @@
 #define _FP_FRAC_NEGP_2(X)	((_FP_WS_TYPE)X##_f1 < 0)
 #define _FP_FRAC_ZEROP_2(X)	((X##_f1 | X##_f0) == 0)
 #define _FP_FRAC_OVERP_2(fs,X)	(_FP_FRAC_HIGH_##fs(X) & _FP_OVERFLOW_##fs)
+#define _FP_FRAC_CLEAR_OVERP_2(fs,X)	(_FP_FRAC_HIGH_##fs(X) &= ~_FP_OVERFLOW_##fs)
 #define _FP_FRAC_EQ_2(X, Y)	(X##_f1 == Y##_f1 && X##_f0 == Y##_f0)
 #define _FP_FRAC_GT_2(X, Y)	\
   (X##_f1 > Y##_f1 || (X##_f1 == Y##_f1 && X##_f0 > Y##_f0))
@@ -606,3 +610,4 @@
     _FP_FRAC_SLL_2(D, (_FP_WFRACBITS_##dfs - _FP_WFRACBITS_##sfs));	\
   } while (0)
 
+#endif

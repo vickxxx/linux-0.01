@@ -20,7 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/sched.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/poll.h>
@@ -28,10 +28,11 @@
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
 
+#include <asm/bitops.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-static unsigned open_map;
+static long open_map;
 static struct socket *netlink_user[MAX_LINKS];
 
 /*
@@ -97,11 +98,6 @@ static ssize_t netlink_read(struct file * file, char * buf,
 	return sock_recvmsg(sock, &msg, count, msg.msg_flags);
 }
 
-static loff_t netlink_lseek(struct file * file, loff_t offset, int origin)
-{
-	return -ESPIPE;
-}
-
 static int netlink_open(struct inode * inode, struct file * file)
 {
 	unsigned int minor = MINOR(inode->i_rdev);
@@ -111,10 +107,8 @@ static int netlink_open(struct inode * inode, struct file * file)
 
 	if (minor>=MAX_LINKS)
 		return -ENODEV;
-	if (open_map&(1<<minor))
+	if (test_and_set_bit(minor, &open_map))
 		return -EBUSY;
-
-	open_map |= (1<<minor);
 
 	err = sock_create(PF_NETLINK, SOCK_RAW, minor, &sock);
 	if (err < 0)
@@ -132,7 +126,7 @@ static int netlink_open(struct inode * inode, struct file * file)
 	return 0;
 
 out:
-	open_map &= ~(1<<minor);
+	clear_bit(minor, &open_map);
 	return err;
 }
 
@@ -141,11 +135,9 @@ static int netlink_release(struct inode * inode, struct file * file)
 	unsigned int minor = MINOR(inode->i_rdev);
 	struct socket *sock;
 
-	lock_kernel();
 	sock = netlink_user[minor];
 	netlink_user[minor] = NULL;
-	open_map &= ~(1<<minor);
-	unlock_kernel();
+	clear_bit(minor, &open_map);
 	sock_release(sock);
 	return 0;
 }
@@ -169,7 +161,7 @@ static int netlink_ioctl(struct inode *inode, struct file *file,
 
 static struct file_operations netlink_fops = {
 	owner:		THIS_MODULE,
-	llseek:		netlink_lseek,
+	llseek:		no_llseek,
 	read:		netlink_read,
 	write:		netlink_write,
 	poll:		netlink_poll,
@@ -198,11 +190,13 @@ int __init init_netlink(void)
 	/*  Someone tell me the official names for the uppercase ones  */
 	make_devfs_entries ("route", 0);
 	make_devfs_entries ("skip", 1);
-	make_devfs_entries ("USERSOCK", 2);
+	make_devfs_entries ("usersock", 2);
 	make_devfs_entries ("fwmonitor", 3);
-	make_devfs_entries ("ARPD", 8);
-	make_devfs_entries ("ROUTE6", 11);
-	make_devfs_entries ("IP6_FW", 13);
+	make_devfs_entries ("tcpdiag", 4);
+	make_devfs_entries ("arpd", 8);
+	make_devfs_entries ("route6", 11);
+	make_devfs_entries ("ip6_fw", 13);
+	make_devfs_entries ("dnrtmsg", 13);
 	devfs_register_series (devfs_handle, "tap%u", 16, DEVFS_FL_DEFAULT,
 			       NETLINK_MAJOR, 16,
 			       S_IFCHR | S_IRUSR | S_IWUSR,
@@ -211,6 +205,8 @@ int __init init_netlink(void)
 }
 
 #ifdef MODULE
+
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

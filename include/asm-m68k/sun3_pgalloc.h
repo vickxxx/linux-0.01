@@ -15,9 +15,9 @@
 #define pgtable_cache_size (0L)
 
 /* Allocation and deallocation of various flavours of pagetables. */
-extern inline int free_pmd_fast (pmd_t *pmdp) { return 0; }
-extern inline int free_pmd_slow (pmd_t *pmdp) { return 0; }
-extern inline pmd_t *get_pmd_fast (void) { return (pmd_t *) 0; }
+static inline int free_pmd_fast(pmd_t *pmdp) { return 0; }
+static inline int free_pmd_slow(pmd_t *pmdp) { return 0; }
+static inline pmd_t *get_pmd_fast (void) { return (pmd_t *) 0; }
 
 //todo: implement the following properly.
 #define get_pte_fast() ((pte_t *) 0)
@@ -29,14 +29,14 @@ extern inline pmd_t *get_pmd_fast (void) { return (pmd_t *) 0; }
 /* erm, now that it's compiling, what do we do with it? */
 #define _KERNPG_TABLE 0
 
-extern inline void pte_free_kernel(pte_t * pte)
+static inline void pte_free_kernel(pte_t *pte)
 {
         free_page((unsigned long) pte);
 }
 
 extern const char bad_pmd_string[];
 
-extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
+static inline pte_t *pte_alloc_kernel(pmd_t *pmd, unsigned long address)
 {
         address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
         if (pmd_none(*pmd)) {
@@ -64,77 +64,56 @@ extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
  * inside the pgd, so has no extra memory associated with it.
  */
-extern inline void pmd_free_kernel(pmd_t * pmd)
+static inline void pmd_free_kernel(pmd_t *pmd)
 {
 //        pmd_val(*pmd) = 0;
 }
 
-extern inline pmd_t * pmd_alloc_kernel(pgd_t * pgd, unsigned long address)
+static inline pmd_t *pmd_alloc_kernel(pgd_t *pgd, unsigned long address)
 {
         return (pmd_t *) pgd;
 }
 
-extern inline void pte_free(pte_t * pte)
+#define pmd_alloc_one_fast(mm, address) ({ BUG(); ((pmd_t *)1); })
+#define pmd_alloc_one(mm,address)       ({ BUG(); ((pmd_t *)2); })
+
+static inline void pte_free(pte_t *pte)
 {
         free_page((unsigned long) pte);
 }
 
-extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
-{
-	address = (address >> (PAGE_SHIFT-2)) & 4*(PTRS_PER_PTE - 1);
-
-repeat:
-	if (pmd_none(*pmd))
-		goto getnew;
-	if (pmd_bad(*pmd))
-		goto fix;
-	return (pte_t *) (__pmd_page(*pmd) + address);
-
-getnew:
+static inline pte_t *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long page = __get_free_page(GFP_KERNEL);
-	if (!pmd_none(*pmd))
-		goto freenew;
+
 	if (!page)
-		goto oom;
+		return NULL;
+		
 	memset((void *)page, 0, PAGE_SIZE);
 //	pmd_val(*pmd) = SUN3_PMD_MAGIC + __pa(page);
-	pmd_val(*pmd) = __pa(page);
-	return (pte_t *) (page + address);
-freenew:
-	free_page(page);
-	goto repeat;
+/*	pmd_val(*pmd) = __pa(page); */
+	return (pte_t *) (page);
 }
 
-fix:
-	printk(bad_pmd_string, pmd_val(*pmd));
-	printk("in normal pgd offset %08x\n", (unsigned int)pmd);
-oom:
-//	pmd_val(*pmd) = SUN3_PMD_MAGIC + __pa(BAD_PAGETABLE);
-	pmd_val(*pmd) = __pa(BAD_PAGETABLE);
-	return NULL;
-}
+#define pte_alloc_one_fast(mm,addr) pte_alloc_one(mm,addr)
+
+#define pmd_populate(mm, pmd, pte) (pmd_val(*pmd) = __pa((unsigned long)pte))
 
 /*
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
  * inside the pgd, so has no extra memory associated with it.
  */
-extern inline void pmd_free(pmd_t * pmd)
+static inline void pmd_free(pmd_t *pmd)
 {
         pmd_val(*pmd) = 0;
 }
 
-extern inline pmd_t * pmd_alloc(pgd_t * pgd, unsigned long address)
-{
-        return (pmd_t *) pgd;
-}
-
-extern inline void pgd_free(pgd_t * pgd)
+static inline void pgd_free(pgd_t *pgd)
 {
         free_page((unsigned long) pgd);
 }
 
-extern inline pgd_t * pgd_alloc(void)
+static inline pgd_t *pgd_alloc(struct mm_struct *mm)
 {
      pgd_t *new_pgd;
 
@@ -144,12 +123,14 @@ extern inline pgd_t * pgd_alloc(void)
      return new_pgd;
 }
 
+#define pgd_populate(mm, pmd, pte) BUG()
+
 /* FIXME: the sun3 doesn't have a page table cache! 
    (but the motorola routine should just return 0) */
 
 extern int do_check_pgt_cache(int, int);
 
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
+static inline void set_pgdir(unsigned long address, pgd_t entry)
 {
 }
 
@@ -266,7 +247,7 @@ static inline void flush_tlb_kernel_page (unsigned long addr)
 	sun3_put_segmap (addr & ~(SUN3_PMEG_SIZE - 1), SUN3_INVALID_PMEG);
 }
 
-extern inline void flush_tlb_pgtables(struct mm_struct *mm,
+static inline void flush_tlb_pgtables(struct mm_struct *mm,
 				      unsigned long start, unsigned long end)
 {
 }

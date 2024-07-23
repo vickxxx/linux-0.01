@@ -30,7 +30,7 @@
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/blk.h>
@@ -1156,13 +1156,4 @@ int fc_do_prli(fc_channel *fc, unsigned char alpa)
 	return status;
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-	return 0;
-}
-
-void cleanup_module(void)
-{
-}
-#endif
+MODULE_LICENSE("GPL");

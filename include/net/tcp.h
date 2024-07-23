@@ -21,17 +21,16 @@
 #define TCP_DEBUG 1
 #define FASTRETRANS_DEBUG 1
 
-/* Be paranoid about data immediately beyond right edge of window. */
-#undef  TCP_FORMAL_WINDOW
-
 /* Cancel timers, when they are not required. */
 #undef TCP_CLEAR_TIMERS
 
 #include <linux/config.h>
 #include <linux/tcp.h>
 #include <linux/slab.h>
+#include <linux/cache.h>
 #include <net/checksum.h>
 #include <net/sock.h>
+#include <net/snmp.h>
 
 /* This is for all connections with a full identity, no wildcards.
  * New scheme, half the table is for TIME_WAIT, the other half is
@@ -78,7 +77,7 @@ struct tcp_ehash_bucket {
  */
 struct tcp_bind_bucket {
 	unsigned short		port;
-	unsigned short		fastreuse;
+	signed short		fastreuse;
 	struct tcp_bind_bucket	*next;
 	struct sock		*owners;
 	struct tcp_bind_bucket	**pprev;
@@ -120,8 +119,7 @@ extern struct tcp_hashinfo {
 	 * Now align to a new cache line as all the following members
 	 * are often dirty.
 	 */
-	rwlock_t __tcp_lhash_lock
-		__attribute__((__aligned__(SMP_CACHE_BYTES)));
+	rwlock_t __tcp_lhash_lock ____cacheline_aligned;
 	atomic_t __tcp_lhash_users;
 	wait_queue_head_t __tcp_lhash_wait;
 	spinlock_t __tcp_portalloc_lock;
@@ -182,7 +180,6 @@ struct tcp_tw_bucket {
 	__u32			rcv_nxt;
 	__u32			snd_nxt;
 	__u32			rcv_wnd;
-	__u32			syn_seq;
         __u32			ts_recent;
         long			ts_recent_stamp;
 	unsigned long		ttd;
@@ -270,13 +267,13 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
  * Never offer a window over 32767 without using window scaling. Some
  * poor stacks do signed 16bit maths! 
  */
-#define MAX_TCP_WINDOW		32767
+#define MAX_TCP_WINDOW		32767U
 
 /* Minimal accepted MSS. It is (60+60+8) - (20+20). */
-#define TCP_MIN_MSS		88
+#define TCP_MIN_MSS		88U
 
 /* Minimal RCV_MSS. */
-#define TCP_MIN_RCVMSS		536
+#define TCP_MIN_RCVMSS		536U
 
 /* After receiving this amount of duplicate ACKs fast retransmit starts. */
 #define TCP_FASTRETRANS_THRESH 3
@@ -285,7 +282,7 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 #define TCP_MAX_REORDERING	127
 
 /* Maximal number of ACKs sent quickly to accelerate slow-start. */
-#define TCP_MAX_QUICKACKS	16
+#define TCP_MAX_QUICKACKS	16U
 
 /* urg_data states */
 #define TCP_URG_VALID	0x0100
@@ -327,21 +324,21 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 				  * TIME-WAIT timer.
 				  */
 
-#define TCP_DELACK_MAX	(HZ/5)	/* maximal time to delay before sending an ACK */
+#define TCP_DELACK_MAX	((unsigned)(HZ/5))	/* maximal time to delay before sending an ACK */
 #if HZ >= 100
-#define TCP_DELACK_MIN	(HZ/25)	/* minimal time to delay before sending an ACK */
-#define TCP_ATO_MIN	(HZ/25)
+#define TCP_DELACK_MIN	((unsigned)(HZ/25))	/* minimal time to delay before sending an ACK */
+#define TCP_ATO_MIN	((unsigned)(HZ/25))
 #else
-#define TCP_DELACK_MIN	4
-#define TCP_ATO_MIN	4
+#define TCP_DELACK_MIN	4U
+#define TCP_ATO_MIN	4U
 #endif
-#define TCP_RTO_MAX	(120*HZ)
-#define TCP_RTO_MIN	(HZ/5)
-#define TCP_TIMEOUT_INIT (3*HZ)	/* RFC 1122 initial RTO value	*/
+#define TCP_RTO_MAX	((unsigned)(120*HZ))
+#define TCP_RTO_MIN	((unsigned)(HZ/5))
+#define TCP_TIMEOUT_INIT ((unsigned)(3*HZ))	/* RFC 1122 initial RTO value	*/
 
-#define TCP_RESOURCE_PROBE_INTERVAL (HZ/2) /* Maximal interval between probes
-					    * for local resources.
-					    */
+#define TCP_RESOURCE_PROBE_INTERVAL ((unsigned)(HZ/2U)) /* Maximal interval between probes
+					                 * for local resources.
+					                 */
 
 #define TCP_KEEPALIVE_TIME	(120*60*HZ)	/* two hours */
 #define TCP_KEEPALIVE_PROBES	9		/* Max of 9 keepalive probes	*/
@@ -357,7 +354,7 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 #define TCP_TWKILL_PERIOD	(TCP_TIMEWAIT_LEN/TCP_TWKILL_SLOTS)
 
 #define TCP_SYNQ_INTERVAL	(HZ/5)	/* Period of SYNACK timer */
-#define TCP_SYNQ_HSIZE		64	/* Size of SYNACK hash table */
+#define TCP_SYNQ_HSIZE		512	/* Size of SYNACK hash table */
 
 #define TCP_PAWS_24DAYS	(60 * 60 * 24 * 24)
 #define TCP_PAWS_MSL	60		/* Per-host timestamps are invalidated
@@ -397,6 +394,24 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 #else
 # define TCP_TW_RECYCLE_TICK (12+2-TCP_TW_RECYCLE_SLOTS_LOG)
 #endif
+
+#define BICTCP_BETA_SCALE    1024	/* Scale factor beta calculation
+					 * max_cwnd = snd_cwnd * beta
+					 */
+#define BICTCP_MAX_INCREMENT 32		/*
+					 * Limit on the amount of
+					 * increment allowed during
+					 * binary search.
+					 */
+#define BICTCP_FUNC_OF_MIN_INCR 11	/*
+					 * log(B/Smin)/log(B/(B-1))+1,
+					 * Smin:min increment
+					 * B:log factor
+					 */
+#define BICTCP_B		4	 /*
+					  * In binary search,
+					  * go to point (max+min)/N
+					  */
 
 /*
  *	TCP option
@@ -451,7 +466,6 @@ extern int sysctl_tcp_syncookies;
 extern int sysctl_tcp_retrans_collapse;
 extern int sysctl_tcp_stdurg;
 extern int sysctl_tcp_rfc1337;
-extern int sysctl_tcp_tw_recycle;
 extern int sysctl_tcp_abort_on_overflow;
 extern int sysctl_tcp_max_orphans;
 extern int sysctl_tcp_max_tw_buckets;
@@ -464,6 +478,21 @@ extern int sysctl_tcp_wmem[3];
 extern int sysctl_tcp_rmem[3];
 extern int sysctl_tcp_app_win;
 extern int sysctl_tcp_adv_win_scale;
+extern int sysctl_tcp_tw_reuse;
+extern int sysctl_tcp_frto;
+extern int sysctl_tcp_low_latency;
+extern int sysctl_tcp_westwood;
+extern int sysctl_tcp_vegas_cong_avoid;
+extern int sysctl_tcp_vegas_alpha;
+extern int sysctl_tcp_vegas_beta;
+extern int sysctl_tcp_vegas_gamma;
+extern int sysctl_tcp_nometrics_save;
+extern int sysctl_tcp_bic;
+extern int sysctl_tcp_bic_fast_convergence;
+extern int sysctl_tcp_bic_low_window;
+extern int sysctl_tcp_bic_beta;
+extern int sysctl_tcp_default_win_scale;
+extern int sysctl_tcp_moderate_rcvbuf;
 
 extern atomic_t tcp_memory_allocated;
 extern atomic_t tcp_sockets_allocated;
@@ -502,7 +531,7 @@ struct open_request {
 	__u16			rmt_port;
 	__u16			mss;
 	__u8			retrans;
-	__u8			index;
+	__u8			__pad;
 	__u16	snd_wscale : 4, 
 		rcv_wscale : 4, 
 		tstamp_ok : 1,
@@ -556,7 +585,8 @@ static inline void tcp_openreq_free(struct open_request *req)
  */
 
 struct tcp_func {
-	int			(*queue_xmit)		(struct sk_buff *skb);
+	int			(*queue_xmit)		(struct sk_buff *skb,
+							 int ipfragok);
 
 	void			(*send_check)		(struct sock *sk,
 							 struct tcphdr *th,
@@ -572,9 +602,7 @@ struct tcp_func {
 							 struct sk_buff *skb,
 							 struct open_request *req,
 							 struct dst_entry *dst);
-	
-	int			(*hash_connecting)	(struct sock *sk);
-
+    
 	int			(*remember_stamp)	(struct sock *sk);
 
 	__u16			net_header_len;
@@ -603,19 +631,19 @@ struct tcp_func {
  * and worry about wraparound (automatic with unsigned arithmetic).
  */
 
-extern __inline int before(__u32 seq1, __u32 seq2)
+static inline int before(__u32 seq1, __u32 seq2)
 {
         return (__s32)(seq1-seq2) < 0;
 }
 
-extern __inline int after(__u32 seq1, __u32 seq2)
+static inline int after(__u32 seq1, __u32 seq2)
 {
 	return (__s32)(seq2-seq1) < 0;
 }
 
 
 /* is s2<=s1<=s3 ? */
-extern __inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
+static inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
 {
 	return seq3 - seq2 >= seq1 - seq2;
 }
@@ -627,24 +655,25 @@ extern struct tcp_mib tcp_statistics[NR_CPUS*2];
 #define TCP_INC_STATS(field)		SNMP_INC_STATS(tcp_statistics, field)
 #define TCP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(tcp_statistics, field)
 #define TCP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(tcp_statistics, field)
+#define TCP_ADD_STATS_BH(field, val)	SNMP_ADD_STATS_BH(tcp_statistics, field, val)
+#define TCP_ADD_STATS_USER(field, val)	SNMP_ADD_STATS_USER(tcp_statistics, field, val)
 
 extern void			tcp_put_port(struct sock *sk);
 extern void			__tcp_put_port(struct sock *sk);
 extern void			tcp_inherit_port(struct sock *sk, struct sock *child);
 
-extern void			tcp_v4_err(struct sk_buff *skb,
-					   unsigned char *, int);
+extern void			tcp_v4_err(struct sk_buff *skb, u32);
 
 extern void			tcp_shutdown (struct sock *sk, int how);
 
-extern int			tcp_v4_rcv(struct sk_buff *skb,
-					   unsigned short len);
+extern int			tcp_v4_rcv(struct sk_buff *skb);
 
 extern int			tcp_v4_remember_stamp(struct sock *sk);
 
 extern int		    	tcp_v4_tw_remember_stamp(struct tcp_tw_bucket *tw);
 
 extern int			tcp_sendmsg(struct sock *sk, struct msghdr *msg, int size);
+extern ssize_t			tcp_sendpage(struct socket *sock, struct page *page, int offset, size_t size, int flags);
 
 extern int			tcp_ioctl(struct sock *sk, 
 					  int cmd, 
@@ -659,6 +688,8 @@ extern int			tcp_rcv_established(struct sock *sk,
 						    struct sk_buff *skb,
 						    struct tcphdr *th, 
 						    unsigned len);
+
+extern void			tcp_rcv_space_adjust(struct sock *sk);
 
 enum tcp_ack_state_t
 {
@@ -717,6 +748,7 @@ extern struct sock *		tcp_check_req(struct sock *sk,struct sk_buff *skb,
 extern int			tcp_child_process(struct sock *parent,
 						  struct sock *child,
 						  struct sk_buff *skb);
+extern void			tcp_enter_frto(struct sock *sk);
 extern void			tcp_enter_loss(struct sock *sk, int how);
 extern void			tcp_clear_retrans(struct tcp_opt *tp);
 extern void			tcp_update_metrics(struct sock *sk);
@@ -777,8 +809,7 @@ extern int			tcp_v4_connect(struct sock *sk,
 					       struct sockaddr *uaddr,
 					       int addr_len);
 
-extern int			tcp_connect(struct sock *sk,
-					    struct sk_buff *skb);
+extern int			tcp_connect(struct sock *sk);
 
 extern struct sk_buff *		tcp_make_synack(struct sock *sk,
 						struct dst_entry *dst,
@@ -799,7 +830,7 @@ extern __u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb,
 
 /* tcp_output.c */
 
-extern int tcp_write_xmit(struct sock *);
+extern int tcp_write_xmit(struct sock *, int nonagle);
 extern int tcp_retransmit_skb(struct sock *, struct sk_buff *);
 extern void tcp_xmit_retransmit_queue(struct sock *);
 extern void tcp_simple_retransmit(struct sock *);
@@ -812,6 +843,7 @@ extern void tcp_send_active_reset(struct sock *sk, int priority);
 extern int  tcp_send_synack(struct sock *);
 extern int  tcp_transmit_skb(struct sock *, struct sk_buff *);
 extern void tcp_send_skb(struct sock *, struct sk_buff *, int force_queue, unsigned mss_now);
+extern void tcp_push_one(struct sock *, unsigned mss_now);
 extern void tcp_send_ack(struct sock *sk);
 extern void tcp_send_delayed_ack(struct sock *sk);
 
@@ -825,6 +857,11 @@ extern int tcp_sync_mss(struct sock *sk, u32 pmtu);
 
 extern const char timer_bug_msg[];
 
+/* Read 'sendfile()'-style from a TCP socket */
+typedef int (*sk_read_actor_t)(read_descriptor_t *, struct sk_buff *,
+				unsigned int, size_t);
+extern int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
+			 sk_read_actor_t recv_actor);
 
 static inline void tcp_clear_xmit_timer(struct sock *sk, int what)
 {
@@ -923,11 +960,13 @@ static __inline__ unsigned int tcp_current_mss(struct sock *sk)
 static inline void tcp_initialize_rcv_mss(struct sock *sk)
 {
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-	int hint = min(tp->advmss, tp->mss_cache);
+	unsigned int hint = min(tp->advmss, tp->mss_cache);
 
 	hint = min(hint, tp->rcv_wnd/2);
-		
-	tp->ack.rcv_mss = max(min(hint, TCP_MIN_RCVMSS), TCP_MIN_MSS);
+	hint = min(hint, TCP_MIN_RCVMSS);
+	hint = max(hint, TCP_MIN_MSS);
+
+	tp->ack.rcv_mss = hint;
 }
 
 static __inline__ void __tcp_fast_path_on(struct tcp_opt *tp, u32 snd_wnd)
@@ -940,6 +979,15 @@ static __inline__ void __tcp_fast_path_on(struct tcp_opt *tp, u32 snd_wnd)
 static __inline__ void tcp_fast_path_on(struct tcp_opt *tp)
 {
 	__tcp_fast_path_on(tp, tp->snd_wnd>>tp->snd_wscale);
+}
+
+static inline void tcp_fast_path_check(struct sock *sk, struct tcp_opt *tp)
+{
+	if (skb_queue_len(&tp->out_of_order_queue) == 0 &&
+	    tp->rcv_wnd &&
+	    atomic_read(&sk->rmem_alloc) < sk->rcvbuf &&
+	    !tp->urg_data)
+		tcp_fast_path_on(tp);
 }
 
 /* Compute the actual receive window we are currently advertising.
@@ -1057,19 +1105,94 @@ static inline int tcp_wspace(struct sock *sk)
  *	"Packets left network, but not honestly ACKed yet" PLUS
  *	"Packets fast retransmitted"
  */
-static __inline__ int tcp_packets_in_flight(struct tcp_opt *tp)
+static __inline__ unsigned int tcp_packets_in_flight(struct tcp_opt *tp)
 {
 	return tp->packets_out - tp->left_out + tp->retrans_out;
 }
 
+/*
+ * Which congestion algorithim is in use on the connection.
+ */
+#define tcp_is_vegas(__tp)	((__tp)->adv_cong == TCP_VEGAS)
+#define tcp_is_westwood(__tp)	((__tp)->adv_cong == TCP_WESTWOOD)
+#define tcp_is_bic(__tp)	((__tp)->adv_cong == TCP_BIC)
+
 /* Recalculate snd_ssthresh, we want to set it to:
  *
+ * Reno:
  * 	one half the current congestion window, but no
  *	less than two segments
+ *
+ * BIC:
+ *	behave like Reno until low_window is reached,
+ *	then increase congestion window slowly
  */
 static inline __u32 tcp_recalc_ssthresh(struct tcp_opt *tp)
 {
-	return max(tp->snd_cwnd>>1, 2);
+	if (tcp_is_bic(tp)) {
+		if (sysctl_tcp_bic_fast_convergence &&
+		    tp->snd_cwnd < tp->bictcp.last_max_cwnd)
+			tp->bictcp.last_max_cwnd = (tp->snd_cwnd * 
+						    (BICTCP_BETA_SCALE
+						     + sysctl_tcp_bic_beta))
+				/ (2 * BICTCP_BETA_SCALE);
+		else
+			tp->bictcp.last_max_cwnd = tp->snd_cwnd;
+
+		if (tp->snd_cwnd > sysctl_tcp_bic_low_window)
+			return max((tp->snd_cwnd * sysctl_tcp_bic_beta)
+				   / BICTCP_BETA_SCALE, 2U);
+	}
+
+	return max(tp->snd_cwnd >> 1U, 2U);
+}
+
+/* Stop taking Vegas samples for now. */
+#define tcp_vegas_disable(__tp)	((__tp)->vegas.doing_vegas_now = 0)
+    
+static inline void tcp_vegas_enable(struct tcp_opt *tp)
+{
+	/* There are several situations when we must "re-start" Vegas:
+	 *
+	 *  o when a connection is established
+	 *  o after an RTO
+	 *  o after fast recovery
+	 *  o when we send a packet and there is no outstanding
+	 *    unacknowledged data (restarting an idle connection)
+	 *
+	 * In these circumstances we cannot do a Vegas calculation at the
+	 * end of the first RTT, because any calculation we do is using
+	 * stale info -- both the saved cwnd and congestion feedback are
+	 * stale.
+	 *
+	 * Instead we must wait until the completion of an RTT during
+	 * which we actually receive ACKs.
+	 */
+    
+	/* Begin taking Vegas samples next time we send something. */
+	tp->vegas.doing_vegas_now = 1;
+     
+	/* Set the beginning of the next send window. */
+	tp->vegas.beg_snd_nxt = tp->snd_nxt;
+
+	tp->vegas.cntRTT = 0;
+	tp->vegas.minRTT = 0x7fffffff;
+}
+
+/* Should we be taking Vegas samples right now? */
+#define tcp_vegas_enabled(__tp)	((__tp)->vegas.doing_vegas_now)
+
+extern void tcp_ca_init(struct tcp_opt *tp);
+
+static inline void tcp_set_ca_state(struct tcp_opt *tp, u8 ca_state)
+{
+	if (tcp_is_vegas(tp)) {
+		if (ca_state == TCP_CA_Open) 
+			tcp_vegas_enable(tp);
+		else
+			tcp_vegas_disable(tp);
+	}
+	tp->ca_state = ca_state;
 }
 
 /* If cwnd > ssthresh, we may raise ssthresh to be half-way to cwnd.
@@ -1081,7 +1204,16 @@ static inline __u32 tcp_current_ssthresh(struct tcp_opt *tp)
 	if ((1<<tp->ca_state)&(TCPF_CA_CWR|TCPF_CA_Recovery))
 		return tp->snd_ssthresh;
 	else
-		return max(tp->snd_ssthresh, (tp->snd_cwnd>>1)+(tp->snd_cwnd>>2));
+		return max(tp->snd_ssthresh,
+			   ((tp->snd_cwnd >> 1) +
+			    (tp->snd_cwnd >> 2)));
+}
+
+static inline void tcp_sync_left_out(struct tcp_opt *tp)
+{
+	if (tp->sack_ok && tp->sacked_out >= tp->packets_out - tp->lost_out)
+		tp->sacked_out = tp->packets_out - tp->lost_out;
+	tp->left_out = tp->sacked_out + tp->lost_out;
 }
 
 extern void tcp_cwnd_application_limited(struct sock *sk);
@@ -1109,7 +1241,8 @@ static inline void __tcp_enter_cwr(struct tcp_opt *tp)
 {
 	tp->undo_marker = 0;
 	tp->snd_ssthresh = tcp_recalc_ssthresh(tp);
-	tp->snd_cwnd = min(tp->snd_cwnd, tcp_packets_in_flight(tp)+1);
+	tp->snd_cwnd = min(tp->snd_cwnd,
+			   tcp_packets_in_flight(tp) + 1U);
 	tp->snd_cwnd_cnt = 0;
 	tp->high_seq = tp->snd_nxt;
 	tp->snd_cwnd_stamp = tcp_time_stamp;
@@ -1121,7 +1254,7 @@ static inline void tcp_enter_cwr(struct tcp_opt *tp)
 	tp->prior_ssthresh = 0;
 	if (tp->ca_state < TCP_CA_CWR) {
 		__tcp_enter_cwr(tp);
-		tp->ca_state = TCP_CA_CWR;
+		tcp_set_ca_state(tp, TCP_CA_CWR);
 	}
 }
 
@@ -1229,7 +1362,7 @@ static __inline__ void __tcp_push_pending_frames(struct sock *sk,
 		if (!tcp_skb_is_last(sk, skb))
 			nonagle = 1;
 		if (!tcp_snd_test(tp, skb, cur_mss, nonagle) ||
-		    tcp_write_xmit(sk))
+		    tcp_write_xmit(sk, nonagle))
 			tcp_check_probe_timer(sk, tp);
 	}
 	tcp_cwnd_validate(sk, tp);
@@ -1275,7 +1408,7 @@ static __inline__ u16 tcp_v4_check(struct tcphdr *th, int len,
 
 static __inline__ int __tcp_checksum_complete(struct sk_buff *skb)
 {
-	return (unsigned short)csum_fold(csum_partial(skb->h.raw, skb->len, skb->csum));
+	return (unsigned short)csum_fold(skb_checksum(skb, 0, skb->len, skb->csum));
 }
 
 static __inline__ int tcp_checksum_complete(struct sk_buff *skb)
@@ -1299,23 +1432,32 @@ static __inline__ void tcp_prequeue_init(struct tcp_opt *tp)
  * idea (VJ's mail "Re: query about TCP header on tcp-ip" of 07 Sep 93)
  * failed somewhere. Latency? Burstiness? Well, at least now we will
  * see, why it failed. 8)8)				  --ANK
+ *
+ * NOTE: is this not too big to inline?
  */
 static __inline__ int tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
-	if (tp->ucopy.task) {
-		if ((tp->ucopy.memory += skb->truesize) <= (sk->rcvbuf<<1)) {
-			__skb_queue_tail(&tp->ucopy.prequeue, skb);
-			if (skb_queue_len(&tp->ucopy.prequeue) == 1) {
-				wake_up_interruptible(sk->sleep);
-				if (!tcp_ack_scheduled(tp))
-					tcp_reset_xmit_timer(sk, TCP_TIME_DACK, (3*TCP_RTO_MIN)/4);
+	if (!sysctl_tcp_low_latency && tp->ucopy.task) {
+		__skb_queue_tail(&tp->ucopy.prequeue, skb);
+		tp->ucopy.memory += skb->truesize;
+		if (tp->ucopy.memory > sk->rcvbuf) {
+			struct sk_buff *skb1;
+
+			if (sk->lock.users)
+				out_of_line_bug();
+
+			while ((skb1 = __skb_dequeue(&tp->ucopy.prequeue)) != NULL) {
+				sk->backlog_rcv(sk, skb1);
+				NET_INC_STATS_BH(TCPPrequeueDropped);
 			}
-		} else {
-			NET_INC_STATS_BH(TCPPrequeueDropped);
-			tp->ucopy.memory -= skb->truesize;
-			__kfree_skb(skb);
+
+			tp->ucopy.memory = 0;
+		} else if (skb_queue_len(&tp->ucopy.prequeue) == 1) {
+			wake_up_interruptible(sk->sleep);
+			if (!tcp_ack_scheduled(tp))
+				tcp_reset_xmit_timer(sk, TCP_TIME_DACK, (3*TCP_RTO_MIN)/4);
 		}
 		return 1;
 	}
@@ -1344,6 +1486,9 @@ static __inline__ void tcp_set_state(struct sock *sk, int state)
 		break;
 
 	case TCP_CLOSE:
+		if (oldstate == TCP_CLOSE_WAIT || oldstate == TCP_ESTABLISHED)
+			TCP_INC_STATS(TcpEstabResets);
+
 		sk->prot->unhash(sk);
 		if (sk->prev && !(sk->userlocks&SOCK_BINDPORT_LOCK))
 			tcp_put_port(sk);
@@ -1458,20 +1603,22 @@ static inline void tcp_syn_build_options(__u32 *ptr, int mss, int ts, int sack,
  * be a multiple of mss if possible. We assume here that mss >= 1.
  * This MUST be enforced by all callers.
  */
-static inline void tcp_select_initial_window(int space, __u32 mss,
+static inline void tcp_select_initial_window(int __space, __u32 mss,
 	__u32 *rcv_wnd,
 	__u32 *window_clamp,
 	int wscale_ok,
 	__u8 *rcv_wscale)
 {
+	unsigned int space = (__space < 0 ? 0 : __space);
+
 	/* If no clamp set the clamp to the max possible scaled window */
 	if (*window_clamp == 0)
-		(*window_clamp) = (65535<<14);
-	space = min(*window_clamp,space);
+		(*window_clamp) = (65535 << 14);
+	space = min(*window_clamp, space);
 
 	/* Quantize space offering to a multiple of mss if possible. */
 	if (space > mss)
-		space = (space/mss)*mss;
+		space = (space / mss) * mss;
 
 	/* NOTE: offering an initial window larger than 32767
 	 * will break some buggy TCP stacks. We try to be nice.
@@ -1490,6 +1637,9 @@ static inline void tcp_select_initial_window(int space, __u32 mss,
 		if (*rcv_wscale && sysctl_tcp_app_win && space>=mss &&
 		    space - max((space>>sysctl_tcp_app_win), mss>>*rcv_wscale) < 65536/2)
 			(*rcv_wscale)--;
+
+		*rcv_wscale = max((__u8)sysctl_tcp_default_win_scale,
+				  *rcv_wscale);
 	}
 
 	/* Set initial window to value enough for senders,
@@ -1506,7 +1656,7 @@ static inline void tcp_select_initial_window(int space, __u32 mss,
 			*rcv_wnd = init_cwnd*mss;
 	}
 	/* Set the clamp no higher than max representable value */
-	(*window_clamp) = min(65535<<(*rcv_wscale),*window_clamp);
+	(*window_clamp) = min(65535U << (*rcv_wscale), *window_clamp);
 }
 
 static inline int tcp_win_from_space(int space)
@@ -1565,6 +1715,7 @@ struct tcp_listen_opt
 	int			qlen;
 	int			qlen_young;
 	int			clock_hand;
+	u32			hash_rnd;
 	struct open_request	*syn_table[TCP_SYNQ_HSIZE];
 };
 
@@ -1677,19 +1828,40 @@ static inline void tcp_moderate_sndbuf(struct sock *sk)
 	}
 }
 
-static inline struct sk_buff *tcp_alloc_skb(struct sock *sk, int size, int gfp)
+static inline struct sk_buff *tcp_alloc_pskb(struct sock *sk, int size, int mem, int gfp)
 {
-	struct sk_buff *skb = alloc_skb(size, gfp);
+	struct sk_buff *skb = alloc_skb(size+MAX_TCP_HEADER, gfp);
 
 	if (skb) {
+		skb->truesize += mem;
 		if (sk->forward_alloc >= (int)skb->truesize ||
-		    tcp_mem_schedule(sk, skb->truesize, 0))
+		    tcp_mem_schedule(sk, skb->truesize, 0)) {
+			skb_reserve(skb, MAX_TCP_HEADER);
 			return skb;
+		}
 		__kfree_skb(skb);
 	} else {
 		tcp_enter_memory_pressure();
 		tcp_moderate_sndbuf(sk);
 	}
+	return NULL;
+}
+
+static inline struct sk_buff *tcp_alloc_skb(struct sock *sk, int size, int gfp)
+{
+	return tcp_alloc_pskb(sk, size, 0, gfp);
+}
+
+static inline struct page * tcp_alloc_page(struct sock *sk)
+{
+	if (sk->forward_alloc >= (int)PAGE_SIZE ||
+	    tcp_mem_schedule(sk, PAGE_SIZE, 0)) {
+		struct page *page = alloc_pages(sk->allocation, 0);
+		if (page)
+			return page;
+	}
+	tcp_enter_memory_pressure();
+	tcp_moderate_sndbuf(sk);
 	return NULL;
 }
 
@@ -1777,6 +1949,145 @@ static inline int tcp_paws_check(struct tcp_opt *tp, int rst)
 	return 1;
 }
 
-#define TCP_CHECK_TIMER(sk) do { } while (0);
+#define TCP_CHECK_TIMER(sk) do { } while (0)
+
+static inline int tcp_use_frto(const struct sock *sk)
+{
+	const struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
+	
+	/* F-RTO must be activated in sysctl and there must be some
+	 * unsent new data, and the advertised window should allow
+	 * sending it.
+	 */
+	return (sysctl_tcp_frto && tp->send_head &&
+		!after(TCP_SKB_CB(tp->send_head)->end_seq,
+		       tp->snd_una + tp->snd_wnd));
+}
+
+static inline void tcp_mib_init(void)
+{
+	/* See RFC 2012 */
+	TCP_ADD_STATS_USER(TcpRtoAlgorithm, 1);
+	TCP_ADD_STATS_USER(TcpRtoMin, TCP_RTO_MIN*1000/HZ);
+	TCP_ADD_STATS_USER(TcpRtoMax, TCP_RTO_MAX*1000/HZ);
+	TCP_ADD_STATS_USER(TcpMaxConn, -1);
+}
+
+
+/* TCP Westwood functions and constants */
+
+#define TCP_WESTWOOD_INIT_RTT               20*HZ           /* maybe too conservative?! */
+#define TCP_WESTWOOD_RTT_MIN                HZ/20           /* 50ms */
+
+static inline void tcp_westwood_update_rtt(struct tcp_opt *tp, __u32 rtt_seq)
+{
+	if (tcp_is_westwood(tp))
+		tp->westwood.rtt = rtt_seq;
+}
+
+void __tcp_westwood_fast_bw(struct sock *, struct sk_buff *);
+void __tcp_westwood_slow_bw(struct sock *, struct sk_buff *);
+
+/*
+ * This function initializes fields used in TCP Westwood+. We can't
+ * get no information about RTTmin at this time so we simply set it to
+ * TCP_WESTWOOD_INIT_RTT. This value was chosen to be too conservative
+ * since in this way we're sure it will be updated in a consistent
+ * way as soon as possible. It will reasonably happen within the first
+ * RTT period of the connection lifetime.
+ */
+
+static inline void __tcp_init_westwood(struct sock *sk)
+{
+	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+
+	tp->westwood.bw_ns_est = 0;
+	tp->westwood.bw_est = 0;
+	tp->westwood.accounted = 0;
+	tp->westwood.cumul_ack = 0;
+	tp->westwood.rtt_win_sx = tcp_time_stamp;
+	tp->westwood.rtt = TCP_WESTWOOD_INIT_RTT;
+	tp->westwood.rtt_min = TCP_WESTWOOD_INIT_RTT;
+	tp->westwood.snd_una = tp->snd_una;
+}
+
+static inline void tcp_init_westwood(struct sock *sk)
+{
+	__tcp_init_westwood(sk);
+}
+
+static inline void tcp_westwood_fast_bw(struct sock *sk, struct sk_buff *skb)
+{
+	if (tcp_is_westwood(&(sk->tp_pinfo.af_tcp)))
+		__tcp_westwood_fast_bw(sk, skb);
+}
+
+static inline void tcp_westwood_slow_bw(struct sock *sk, struct sk_buff *skb)
+{
+	if (tcp_is_westwood(&(sk->tp_pinfo.af_tcp)))
+		__tcp_westwood_slow_bw(sk, skb);
+}
+
+static inline __u32 __tcp_westwood_bw_rttmin(struct tcp_opt *tp)
+{
+	return (__u32) ((tp->westwood.bw_est) * (tp->westwood.rtt_min) /
+			(__u32) (tp->mss_cache));
+}
+
+static inline __u32 tcp_westwood_bw_rttmin(struct tcp_opt *tp)
+{
+	__u32 ret = 0;
+
+	if (tcp_is_westwood(tp))
+		ret = (__u32) (max(__tcp_westwood_bw_rttmin(tp), 2U));
+
+	return ret;
+}
+
+static inline int tcp_westwood_ssthresh(struct tcp_opt *tp)
+{
+	int ret = 0;
+	__u32 ssthresh;
+
+	if (tcp_is_westwood(tp)) {
+		if (!(ssthresh = tcp_westwood_bw_rttmin(tp)))
+			return ret;
+
+		tp->snd_ssthresh = ssthresh;
+		ret = 1;
+	}
+
+	return ret;
+}
+
+static inline int tcp_westwood_cwnd(struct tcp_opt *tp)
+{
+	int ret = 0;
+	__u32 cwnd;
+
+	if (tcp_is_westwood(tp)) {
+		if (!(cwnd = tcp_westwood_bw_rttmin(tp)))
+			return ret;
+
+		tp->snd_cwnd = cwnd;
+		ret = 1;
+	}
+
+	return ret;
+}
+
+static inline int tcp_westwood_complete_cwr(struct tcp_opt *tp) 
+{
+	int ret = 0;
+
+	if (tcp_is_westwood(tp)) {
+		if (tcp_westwood_cwnd(tp)) {
+			tp->snd_ssthresh = tp->snd_cwnd;
+			ret = 1;
+		}
+	}
+
+	return ret;
+}
 
 #endif	/* _TCP_H */

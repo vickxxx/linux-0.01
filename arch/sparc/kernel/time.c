@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.57 2000/09/16 07:33:45 davem Exp $
+/* $Id: time.c,v 1.59.2.1 2002/01/23 14:35:45 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -44,6 +44,7 @@
 extern rwlock_t xtime_lock;
 
 enum sparc_clock_type sp_clock_typ;
+spinlock_t mostek_lock = SPIN_LOCK_UNLOCKED;
 unsigned long mstk48t02_regs = 0UL;
 static struct mostek48t08 *mstk48t08_regs = 0;
 static int set_rtc_mmss(unsigned long);
@@ -114,7 +115,7 @@ __volatile__ unsigned int *master_l10_limit;
 void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
-	static long last_rtc_update=0;
+	static long last_rtc_update;
 
 #ifndef CONFIG_SMP
 	if(!user_mode(regs))
@@ -158,11 +159,15 @@ static void __init kick_start_clock(void)
 
 	prom_printf("CLOCK: Clock was stopped. Kick start ");
 
+	spin_lock_irq(&mostek_lock);
+
 	/* Turn on the kick start bit to start the oscillator. */
 	regs->creg |= MSTK_CREG_WRITE;
 	regs->sec &= ~MSTK_STOP;
 	regs->hour |= MSTK_KICK_START;
 	regs->creg &= ~MSTK_CREG_WRITE;
+
+	spin_unlock_irq(&mostek_lock);
 
 	/* Delay to allow the clock oscillator to start. */
 	sec = MSTK_REG_SEC(regs);
@@ -174,6 +179,8 @@ static void __init kick_start_clock(void)
 		sec = regs->sec;
 	}
 	prom_printf("\n");
+
+	spin_lock_irq(&mostek_lock);
 
 	/* Turn off kick start and set a "valid" time and date. */
 	regs->creg |= MSTK_CREG_WRITE;
@@ -187,12 +194,17 @@ static void __init kick_start_clock(void)
 	MSTK_SET_REG_YEAR(regs,1996 - MSTK_YEAR_ZERO);
 	regs->creg &= ~MSTK_CREG_WRITE;
 
+	spin_unlock_irq(&mostek_lock);
+
 	/* Ensure the kick start bit is off. If it isn't, turn it off. */
 	while (regs->hour & MSTK_KICK_START) {
 		prom_printf("CLOCK: Kick start still on!\n");
+
+		spin_lock_irq(&mostek_lock);
 		regs->creg |= MSTK_CREG_WRITE;
 		regs->hour &= ~MSTK_KICK_START;
 		regs->creg &= ~MSTK_CREG_WRITE;
+		spin_unlock_irq(&mostek_lock);
 	}
 
 	prom_printf("CLOCK: Kick start procedure successful.\n");
@@ -204,10 +216,12 @@ static __inline__ int has_low_battery(void)
 	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
 	unsigned char data1, data2;
 
+	spin_lock_irq(&mostek_lock);
 	data1 = regs->eeprom[0];	/* Read some data. */
 	regs->eeprom[0] = ~data1;	/* Write back the complement. */
 	data2 = regs->eeprom[0];	/* Read back the complement. */
 	regs->eeprom[0] = data1;	/* Restore the original value. */
+	spin_unlock_irq(&mostek_lock);
 
 	return (data1 == data2);	/* Was the write blocked? */
 }
@@ -357,7 +371,6 @@ void __init sbus_time_init(void)
 	struct intersil *iregs;
 #endif
 
-	do_get_fast_time = do_gettimeofday;
 	BTFIXUPSET_CALL(bus_do_settimeofday, sbus_do_settimeofday, BTFIXUPCALL_NORM);
 	btfixup();
 
@@ -366,7 +379,7 @@ void __init sbus_time_init(void)
 	else
 		clock_probe();
 
-	init_timers(timer_interrupt);
+	sparc_init_timers(timer_interrupt);
 	
 #ifdef CONFIG_SUN4
 	if(idprom->id_machtype == (SM_SUN4 | SM_4_330)) {
@@ -376,6 +389,7 @@ void __init sbus_time_init(void)
 		prom_printf("Something wrong, clock regs not mapped yet.\n");
 		prom_halt();
 	}		
+	spin_lock_irq(&mostek_lock);
 	mregs->creg |= MSTK_CREG_READ;
 	sec = MSTK_REG_SEC(mregs);
 	min = MSTK_REG_MIN(mregs);
@@ -386,6 +400,7 @@ void __init sbus_time_init(void)
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
 	xtime.tv_usec = 0;
 	mregs->creg &= ~MSTK_CREG_READ;
+	spin_unlock_irq(&mostek_lock);
 #ifdef CONFIG_SUN4
 	} else if(idprom->id_machtype == (SM_SUN4 | SM_4_260) ) {
 		/* initialise the intersil on sun4 */
@@ -459,36 +474,39 @@ void do_gettimeofday(struct timeval *tv)
 	 * is guarenteed to be atomic, this is why we can run this
 	 * with interrupts on full blast.  Don't touch this... -DaveM
 	 */
-	__asm__ __volatile__("
-	sethi	%hi(master_l10_counter), %o1
-	ld	[%o1 + %lo(master_l10_counter)], %g3
-	sethi	%hi(xtime), %g2
-1:	ldd	[%g2 + %lo(xtime)], %o4
-	ld	[%g3], %o1
-	ldd	[%g2 + %lo(xtime)], %o2
-	xor	%o4, %o2, %o2
-	xor	%o5, %o3, %o3
-	orcc	%o2, %o3, %g0
-	bne	1b
-	 cmp	%o1, 0
-	bge	1f
-	 srl	%o1, 0xa, %o1
-	sethi	%hi(tick), %o3
-	ld	[%o3 + %lo(tick)], %o3
-	sethi	%hi(0x1fffff), %o2
-	or	%o2, %lo(0x1fffff), %o2
-	add	%o5, %o3, %o5
-	and	%o1, %o2, %o1
-1:	add	%o5, %o1, %o5
-	sethi	%hi(1000000), %o2
-	or	%o2, %lo(1000000), %o2
-	cmp	%o5, %o2
-	bl,a	1f
-	 st	%o4, [%o0 + 0x0]
-	add	%o4, 0x1, %o4
-	sub	%o5, %o2, %o5
-	st	%o4, [%o0 + 0x0]
-1:	st	%o5, [%o0 + 0x4]");
+	__asm__ __volatile__(
+	"sethi	%hi(master_l10_counter), %o1\n\t"
+	"ld	[%o1 + %lo(master_l10_counter)], %g3\n\t"
+	"sethi	%hi(xtime), %g2\n"
+	"1:\n\t"
+	"ldd	[%g2 + %lo(xtime)], %o4\n\t"
+	"ld	[%g3], %o1\n\t"
+	"ldd	[%g2 + %lo(xtime)], %o2\n\t"
+	"xor	%o4, %o2, %o2\n\t"
+	"xor	%o5, %o3, %o3\n\t"
+	"orcc	%o2, %o3, %g0\n\t"
+	"bne	1b\n\t"
+	" cmp	%o1, 0\n\t"
+	"bge	1f\n\t"
+	" srl	%o1, 0xa, %o1\n\t"
+	"sethi	%hi(tick), %o3\n\t"
+	"ld	[%o3 + %lo(tick)], %o3\n\t"
+	"sethi	%hi(0x1fffff), %o2\n\t"
+	"or	%o2, %lo(0x1fffff), %o2\n\t"
+	"add	%o5, %o3, %o5\n\t"
+	"and	%o1, %o2, %o1\n"
+	"1:\n\t"
+	"add	%o5, %o1, %o5\n\t"
+	"sethi	%hi(1000000), %o2\n\t"
+	"or	%o2, %lo(1000000), %o2\n\t"
+	"cmp	%o5, %o2\n\t"
+	"bl,a	1f\n\t"
+	" st	%o4, [%o0 + 0x0]\n\t"
+	"add	%o4, 0x1, %o4\n\t"
+	"sub	%o5, %o2, %o5\n\t"
+	"st	%o4, [%o0 + 0x0]\n"
+	"1:\n\t"
+	"st	%o5, [%o0 + 0x4]\n");
 }
 
 void do_settimeofday(struct timeval *tv)
@@ -520,6 +538,7 @@ static int set_rtc_mmss(unsigned long nowtime)
 {
 	int real_seconds, real_minutes, mostek_minutes;
 	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
+	unsigned long flags;
 #ifdef CONFIG_SUN4
 	struct intersil *iregs = intersil_clock;
 	int temp;
@@ -557,6 +576,8 @@ static int set_rtc_mmss(unsigned long nowtime)
 		}
 #endif
 	}
+
+	spin_lock_irqsave(&mostek_lock, flags);
 	/* Read the current RTC minutes. */
 	regs->creg |= MSTK_CREG_READ;
 	mostek_minutes = MSTK_REG_MIN(regs);
@@ -579,8 +600,10 @@ static int set_rtc_mmss(unsigned long nowtime)
 		MSTK_SET_REG_SEC(regs,real_seconds);
 		MSTK_SET_REG_MIN(regs,real_minutes);
 		regs->creg &= ~MSTK_CREG_WRITE;
-	} else
+		spin_unlock_irqrestore(&mostek_lock, flags);
+		return 0;
+	} else {
+		spin_unlock_irqrestore(&mostek_lock, flags);
 		return -1;
-
-	return 0;
+	}
 }

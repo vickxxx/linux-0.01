@@ -1,9 +1,9 @@
 /*
- * Platform dependent support for Intel SoftSDV simulator.
+ * Platform dependent support for DIG64 platforms.
  *
  * Copyright (C) 1999 Intel Corp.
- * Copyright (C) 1999 Hewlett-Packard Co
- * Copyright (C) 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999, 2001 Hewlett-Packard Co
+ * Copyright (C) 1999, 2001, 2003 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
@@ -33,8 +33,7 @@
  * is sufficient (the IDE driver will autodetect the drive geometry).
  */
 char drive_info[4*16];
-
-unsigned char aux_device_present = 0xaa;	/* XXX remove this when legacy I/O is gone */
+extern int pcat_compat;
 
 void __init
 dig_setup (char **cmdline_p)
@@ -48,30 +47,26 @@ dig_setup (char **cmdline_p)
 	 */
 	ROOT_DEV = to_kdev_t(0x0802);		/* default to second partition on first drive */
 
-#ifdef	CONFIG_IA64_SOFTSDV_HACKS
-	ROOT_DEV = to_kdev_t(0x0302);		/* 2nd partion on 1st IDE */
-#endif /* CONFIG_IA64_SOFTSDV_HACKS */
-
 #ifdef CONFIG_SMP
 	init_smp_config();
 #endif
 
 	memset(&screen_info, 0, sizeof(screen_info));
 
-	if (!ia64_boot_param.console_info.num_rows
-	    || !ia64_boot_param.console_info.num_cols)
+	if (!ia64_boot_param->console_info.num_rows
+	    || !ia64_boot_param->console_info.num_cols)
 	{
-		printk("dig_setup: warning: invalid screen-info, guessing 80x25\n");
+		printk(KERN_WARNING "dig_setup: warning: invalid screen-info, guessing 80x25\n");
 		orig_x = 0;
 		orig_y = 0;
 		num_cols = 80;
 		num_rows = 25;
 		font_height = 16;
 	} else {
-		orig_x = ia64_boot_param.console_info.orig_x;
-		orig_y = ia64_boot_param.console_info.orig_y;
-		num_cols = ia64_boot_param.console_info.num_cols;
-		num_rows = ia64_boot_param.console_info.num_rows;
+		orig_x = ia64_boot_param->console_info.orig_x;
+		orig_y = ia64_boot_param->console_info.orig_y;
+		num_cols = ia64_boot_param->console_info.num_cols;
+		num_rows = ia64_boot_param->console_info.num_rows;
 		font_height = 400 / num_rows;
 	}
 
@@ -85,13 +80,7 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
 }
 
-void
+void __init
 dig_irq_init (void)
 {
-	/*
-	 * Disable the compatibility mode interrupts (8259 style), needs IN/OUT support
-	 * enabled.
-	 */
-	outb(0xff, 0xA1);
-	outb(0xff, 0x21);
 }

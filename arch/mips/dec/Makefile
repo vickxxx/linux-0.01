@@ -6,31 +6,20 @@
 # unless it's something special (ie not a .c file).
 #
 
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
+USE_STANDARD_AS_RULE := true
+
+O_TARGET := dec.o
 
 all: dec.o
-O_TARGET := dec.o
-O_OBJS	 := int-handler.o setup.o irq.o time.o reset.o rtc-dec.o
 
-ifdef CONFIG_PROM_CONSOLE
-O_OBJS   += promcon.o
-endif
+export-objs	:= rtc-dec.o setup.o wbflush.o
 
-ifdef CONFIG_SERIAL
-O_OBJS   += serial.o
-endif
+obj-y		:= ecc-berr.o int-handler.o ioasic-irq.o kn02-irq.o reset.o \
+		   rtc-dec.o setup.o time.o
 
-ifeq ($(CONFIG_MODULES),y)
- OX_OBJS  = wbflush.o
-else
- O_OBJS   += wbflush.o
-endif
+obj-$(CONFIG_PROM_CONSOLE)	+= promcon.o
+obj-$(CONFIG_CPU_HAS_WB)	+= wbflush.o
 
 int-handler.o:	int-handler.S
-
-clean:
 
 include $(TOPDIR)/Rules.make

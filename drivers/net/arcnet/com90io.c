@@ -3,7 +3,7 @@
  * 
  * Written 1997 by David Woodhouse.
  * Written 1994-1999 by Avery Pennarun.
- * Written 1999-2000 by Martin Mares <mj@suse.cz>.
+ * Written 1999-2000 by Martin Mares <mj@ucw.cz>.
  * Derived from skeleton.c by Donald Becker.
  *
  * Special thanks to Contemporary Controls, Inc. (www.ccontrols.com)
@@ -16,7 +16,7 @@
  * skeleton.c Written 1993 by Donald Becker.
  * Copyright 1993 United States Government as represented by the
  * Director, National Security Agency.  This software may only be used
- * and distributed according to the terms of the GNU Public License as
+ * and distributed according to the terms of the GNU General Public License as
  * modified by SRC, incorporated herein by reference.
  *
  * **********************
@@ -28,7 +28,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/bootmem.h>
@@ -241,7 +241,10 @@ static int __init com90io_found(struct net_device *dev)
 		return -ENODEV;
 	}
 	/* Reserve the I/O region - guaranteed to work by check_region */
-	request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)");
+	if (!request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)")) {
+		free_irq(dev->irq, dev);
+		return -EBUSY;
+	}
 
 	/* Initialize the rest of the device structure. */
 	dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
@@ -373,13 +376,14 @@ static struct net_device *my_dev;
 
 /* Module parameters */
 
-static int io = 0x0;		/* use the insmod io= irq= shmem= options */
-static int irq = 0;
+static int io;			/* use the insmod io= irq= shmem= options */
+static int irq;
 static char *device;		/* use eg. device=arc1 to change name */
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(device, "s");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

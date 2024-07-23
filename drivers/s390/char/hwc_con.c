@@ -4,7 +4,7 @@
  *
  *  S390 version
  *    Copyright (C) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Martin Peschke <peschke@fh-brandenburg.de>
+ *    Author(s): Martin Peschke <mpeschke@de.ibm.com>
  */
 
 #include <linux/config.h>
@@ -19,26 +19,24 @@
 
 #include "hwc_rw.h"
 
-extern void hwc_tty_init (void);
-
 #ifdef CONFIG_HWC_CONSOLE
 
 #define  hwc_console_major 4
-#define  hwc_console_minor 0
+#define  hwc_console_minor 64
 #define  hwc_console_name  "console"
 
 void hwc_console_write (struct console *, const char *, unsigned int);
 kdev_t hwc_console_device (struct console *);
+void hwc_console_unblank (void);
 
 #define  HWC_CON_PRINT_HEADER "hwc console driver: "
 
-struct console hwc_console =
-{
-
-	name:		hwc_console_name,
-	write:		hwc_console_write,
-	device:		hwc_console_device,
-	flags:		CON_PRINTBUFFER,
+struct console hwc_console = {
+	name:	hwc_console_name,
+	write:	hwc_console_write,
+	device:	hwc_console_device,
+	unblank:hwc_console_unblank,
+	flags:	CON_PRINTBUFFER,
 };
 
 void 
@@ -64,27 +62,26 @@ hwc_console_device (struct console * c)
 	return MKDEV (hwc_console_major, hwc_console_minor);
 }
 
+void 
+hwc_console_unblank (void)
+{
+	hwc_unblank ();
+}
+
 #endif
 
 void __init 
 hwc_console_init (void)
 {
-
-#ifdef CONFIG_3215
-	if (MACHINE_IS_VM)
-		return;
-#endif
-	if (MACHINE_IS_P390)
+	if (!MACHINE_HAS_HWC)
 		return;
 
 	if (hwc_init () == 0) {
-
 #ifdef CONFIG_HWC_CONSOLE
 
-		register_console (&hwc_console);
+		if (CONSOLE_IS_HWC)
+			register_console (&hwc_console);
 #endif
-
-		hwc_tty_init ();
 	} else
 		panic (HWC_CON_PRINT_HEADER "hwc initialisation failed !");
 

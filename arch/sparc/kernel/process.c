@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.154 2000/10/05 06:12:57 anton Exp $
+/*  $Id: process.c,v 1.158 2001/11/26 23:45:00 davem Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -19,7 +19,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/config.h>
@@ -27,6 +27,7 @@
 #include <linux/smp_lock.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
+#include <linux/pm.h>
 
 #include <asm/auxio.h>
 #include <asm/oplib.h>
@@ -39,6 +40,25 @@
 #include <asm/processor.h>
 #include <asm/psr.h>
 #include <asm/elf.h>
+
+/* 
+ * Power management idle function 
+ * Set in pm platform drivers
+ */
+void (*pm_idle)(void);
+
+/* 
+ * Power-off handler instantiation for pm.h compliance
+ * This is done via auxio, but could be used as a fallback
+ * handler when auxio is not present-- unused for now...
+ */
+void (*pm_power_off)(void);
+
+/*
+ * sysctl - toggle power-off restriction for serial console 
+ * systems in machine_power_off()
+ */
+int scons_pwroff = 1;
 
 extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 
@@ -67,9 +87,9 @@ int cpu_idle(void)
 	for (;;) {
 		if (ARCH_SUN4C_SUN4) {
 			static int count = HZ;
-			static unsigned long last_jiffies = 0;
-			static unsigned long last_faults = 0;
-			static unsigned long fps = 0;
+			static unsigned long last_jiffies;
+			static unsigned long last_faults;
+			static unsigned long fps;
 			unsigned long now;
 			unsigned long faults;
 			unsigned long flags;
@@ -87,7 +107,7 @@ int cpu_idle(void)
 				fps = (fps + (faults - last_faults)) >> 1;
 				last_faults = faults;
 #if 0
-				printk("kernel faults / second = %d\n", fps);
+				printk("kernel faults / second = %ld\n", fps);
 #endif
 				if (fps >= SUN4C_FAULT_HIGH) {
 					sun4c_grow_kernel_ring();
@@ -95,8 +115,13 @@ int cpu_idle(void)
 			}
 			restore_flags(flags);
 		}
-		check_pgt_cache();
+
+		while((!current->need_resched) && pm_idle) {
+				(*pm_idle)();
+		}
+
 		schedule();
+		check_pgt_cache();
 	}
 	ret = 0;
 out:
@@ -170,7 +195,7 @@ void machine_restart(char * cmd)
 void machine_power_off(void)
 {
 #ifdef CONFIG_SUN_AUXIO
-	if (auxio_power_register && !serial_console)
+	if (auxio_power_register && (!serial_console || scons_pwroff))
 		*auxio_power_register |= AUXIO_POWER_OFF;
 #endif
 	machine_halt();
@@ -268,8 +293,8 @@ void show_stackframe(struct sparc_stackf *sf)
 
 void show_regs(struct pt_regs * regs)
 {
-        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx\n", regs->psr,
-	       regs->pc, regs->npc, regs->y);
+        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n", regs->psr,
+	       regs->pc, regs->npc, regs->y, print_tainted());
 	printk("g0: %08lx g1: %08lx g2: %08lx g3: %08lx ",
 	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
 	       regs->u_regs[3]);
@@ -285,37 +310,29 @@ void show_regs(struct pt_regs * regs)
 	show_regwindow((struct reg_window *)regs->u_regs[14]);
 }
 
-#if NOTUSED
-void show_thread(struct thread_struct *thread)
+void show_trace_task(struct task_struct *tsk)
 {
-	int i;
+	unsigned long pc, fp;
+	unsigned long task_base = (unsigned long) tsk;
+	struct reg_window *rw;
+	int count = 0;
 
-	printk("uwinmask:          0x%08lx  kregs:             0x%08lx\n", thread->uwinmask, (unsigned long)thread->kregs);
-	show_regs(thread->kregs);
-	printk("ksp:               0x%08lx  kpc:               0x%08lx\n", thread->ksp, thread->kpc);
-	printk("kpsr:              0x%08lx  kwim:              0x%08lx\n", thread->kpsr, thread->kwim);
-	printk("fork_kpsr:         0x%08lx  fork_kwim:         0x%08lx\n", thread->fork_kpsr, thread->fork_kwim);
+	if (!tsk)
+		return;
 
-	for (i = 0; i < NSWINS; i++) {
-		if (!thread->rwbuf_stkptrs[i])
-			continue;
-		printk("reg_window[%d]:\n", i);
-		printk("stack ptr:         0x%08lx\n", thread->rwbuf_stkptrs[i]);
-		show_regwindow(&thread->reg_window[i]);
-	}
-	printk("w_saved:           0x%08lx\n", thread->w_saved);
-
-	/* XXX missing: float_regs */
-	printk("fsr:               0x%08lx  fpqdepth:          0x%08lx\n", thread->fsr, thread->fpqdepth);
-	/* XXX missing: fpqueue */
-
-	printk("flags:             0x%08lx  current_ds:        0x%08lx\n", thread->flags, thread->current_ds.seg);
-	
-	show_regwindow((struct reg_window *)thread->ksp);
-
-	/* XXX missing: core_exec */
+	fp = tsk->thread.ksp;
+	do {
+		/* Bogus frame pointer? */
+		if (fp < (task_base + sizeof(struct task_struct)) ||
+		    fp >= (task_base + (PAGE_SIZE << 1)))
+			break;
+		rw = (struct reg_window *) fp;
+		pc = rw->ins[7];
+		printk("[%08lx] ", pc);
+		fp = rw->ins[6];
+	} while (++count < 16);
+	printk("\n");
 }
-#endif
 
 /*
  * Free current thread data structures etc..
@@ -373,54 +390,6 @@ void flush_thread(void)
 	}
 }
 
-static __inline__ void copy_regs(struct pt_regs *dst, struct pt_regs *src)
-{
-	__asm__ __volatile__("ldd\t[%1 + 0x00], %%g2\n\t"
-			     "ldd\t[%1 + 0x08], %%g4\n\t"
-			     "ldd\t[%1 + 0x10], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x00]\n\t"
-			     "std\t%%g4, [%0 + 0x08]\n\t"
-			     "std\t%%o4, [%0 + 0x10]\n\t"
-			     "ldd\t[%1 + 0x18], %%g2\n\t"
-			     "ldd\t[%1 + 0x20], %%g4\n\t"
-			     "ldd\t[%1 + 0x28], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x18]\n\t"
-			     "std\t%%g4, [%0 + 0x20]\n\t"
-			     "std\t%%o4, [%0 + 0x28]\n\t"
-			     "ldd\t[%1 + 0x30], %%g2\n\t"
-			     "ldd\t[%1 + 0x38], %%g4\n\t"
-			     "ldd\t[%1 + 0x40], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x30]\n\t"
-			     "std\t%%g4, [%0 + 0x38]\n\t"
-			     "ldd\t[%1 + 0x48], %%g2\n\t"
-			     "std\t%%o4, [%0 + 0x40]\n\t"
-			     "std\t%%g2, [%0 + 0x48]\n\t" : :
-			     "r" (dst), "r" (src) :
-			     "g2", "g3", "g4", "g5", "o4", "o5");
-}
-
-static __inline__ void copy_regwin(struct reg_window *dst, struct reg_window *src)
-{
-	__asm__ __volatile__("ldd\t[%1 + 0x00], %%g2\n\t"
-			     "ldd\t[%1 + 0x08], %%g4\n\t"
-			     "ldd\t[%1 + 0x10], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x00]\n\t"
-			     "std\t%%g4, [%0 + 0x08]\n\t"
-			     "std\t%%o4, [%0 + 0x10]\n\t"
-			     "ldd\t[%1 + 0x18], %%g2\n\t"
-			     "ldd\t[%1 + 0x20], %%g4\n\t"
-			     "ldd\t[%1 + 0x28], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x18]\n\t"
-			     "std\t%%g4, [%0 + 0x20]\n\t"
-			     "std\t%%o4, [%0 + 0x28]\n\t"
-			     "ldd\t[%1 + 0x30], %%g2\n\t"
-			     "ldd\t[%1 + 0x38], %%g4\n\t"
-			     "std\t%%g2, [%0 + 0x30]\n\t"
-			     "std\t%%g4, [%0 + 0x38]\n\t" : :
-			     "r" (dst), "r" (src) :
-			     "g2", "g3", "g4", "g5", "o4", "o5");
-}
-
 static __inline__ struct sparc_stackf *
 clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
 {
@@ -455,19 +424,14 @@ clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
  *       allocate the task_struct and kernel stack in
  *       do_fork().
  */
-#ifdef CONFIG_SMP
-extern void ret_from_smpfork(void);
-#else
-extern void ret_from_syscall(void);
-#endif
+extern void ret_from_fork(void);
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
-	struct reg_window *new_stack;
-	unsigned long stack_offset;
+	char *new_stack;
 
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
@@ -482,24 +446,22 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 #endif
 	}
 
-	/* Calculate offset to stack_frame & pt_regs */
-	stack_offset = TASK_UNION_SIZE - TRACEREG_SZ;
-
-	if(regs->psr & PSR_PS)
-		stack_offset -= REGWIN_SZ;
-	childregs = ((struct pt_regs *) (((unsigned long)p) + stack_offset));
-	copy_regs(childregs, regs);
-	new_stack = (((struct reg_window *) childregs) - 1);
-	copy_regwin(new_stack, (((struct reg_window *) regs) - 1));
+	/*
+	 *  p                      new_stack   childregs
+	 *  !                      !           !             {if(PSR_PS) }
+	 *  V                      V (stk.fr.) V  (pt_regs)  { (stk.fr.) }
+	 *  +----- - - - - - ------+===========+============={+==========}+
+	 */
+	new_stack = (char*)p + TASK_UNION_SIZE;
+	if (regs->psr & PSR_PS)
+		new_stack -= STACKFRAME_SZ;
+	new_stack -= STACKFRAME_SZ + TRACEREG_SZ;
+	memcpy(new_stack, (char *)regs - STACKFRAME_SZ, STACKFRAME_SZ + TRACEREG_SZ);
+	childregs = (struct pt_regs *) (new_stack + STACKFRAME_SZ);
 
 	p->thread.ksp = (unsigned long) new_stack;
-#ifdef CONFIG_SMP
-	p->thread.kpc = (((unsigned long) ret_from_smpfork) - 0x8);
-	p->thread.kpsr = current->thread.fork_kpsr | PSR_PIL;
-#else
-	p->thread.kpc = (((unsigned long) ret_from_syscall) - 0x8);
+	p->thread.kpc = (((unsigned long) ret_from_fork) - 0x8);
 	p->thread.kpsr = current->thread.fork_kpsr;
-#endif
 	p->thread.kwim = current->thread.fork_kwim;
 
 	/* This is used for sun4c only */
@@ -509,16 +471,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		extern struct pt_regs fake_swapper_regs;
 
 		p->thread.kregs = &fake_swapper_regs;
-		new_stack = (struct reg_window *)
-			((((unsigned long)p) +
-			  (TASK_UNION_SIZE)) -
-			 (REGWIN_SZ));
+		new_stack += STACKFRAME_SZ + TRACEREG_SZ;
 		childregs->u_regs[UREG_FP] = (unsigned long) new_stack;
 		p->thread.flags |= SPARC_FLAG_KTHREAD;
 		p->thread.current_ds = KERNEL_DS;
-		memcpy((void *)new_stack,
-		       (void *)regs->u_regs[UREG_FP],
-		       sizeof(struct reg_window));
+		memcpy(new_stack, (void *)regs->u_regs[UREG_FP], STACKFRAME_SZ);
 		childregs->u_regs[UREG_G6] = (unsigned long) p;
 	} else {
 		p->thread.kregs = childregs;
@@ -554,6 +511,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 			childregs->u_regs[UREG_FP] = (unsigned long)childstack;
 		}
 	}
+
+#ifdef CONFIG_SMP
+	/* FPU must be disabled on SMP. */
+	childregs->psr &= ~PSR_EF;
+#endif
 
 	/* Set the return value for the child. */
 	childregs->u_regs[UREG_I0] = current->pid;
@@ -674,7 +636,7 @@ out:
  * a system call from a "real" process, but the process memory space will
  * not be free'd until both the parent and the child have exited.
  */
-pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+pid_t arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval;
 

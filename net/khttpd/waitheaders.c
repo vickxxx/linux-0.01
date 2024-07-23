@@ -134,7 +134,7 @@ int WaitForHeaders(const int CPUNR)
 		CurrentRequest = CurrentRequest->Next;
 	}
 
-	LeaveFunction("WaitHeaders");
+	LeaveFunction("WaitForHeaders");
 	return count;
 }
 
@@ -178,6 +178,12 @@ static int DecodeHeader(const int CPUNR, struct http_request *Request)
 	
 	EnterFunction("DecodeHeader");
 	
+	if (Buffer[CPUNR] == NULL) {
+		/* see comments in main.c regarding buffer managemnet - dank */
+		printk(KERN_CRIT "khttpd: lost my buffer");
+		BUG();
+	}
+
 	/* First, read the data */
 
 	msg.msg_name     = 0;
@@ -244,7 +250,7 @@ static int DecodeHeader(const int CPUNR, struct http_request *Request)
 		Request->Time       = Request->filp->f_dentry->d_inode->i_mtime;
 		Request->IMS_Time   = mimeTime_to_UnixTime(Request->IMS);
 		sprintf(Request->LengthS,"%i",Request->FileLength);
-		time_Unix2RFC(min(Request->Time,CurrentTime_i),Request->TimeS);
+		time_Unix2RFC(min_t(unsigned int, Request->Time,CurrentTime_i),Request->TimeS);
    	        /* The min() is required by rfc1945, section 10.10:
    	           It is not allowed to send a filetime in the future */
 

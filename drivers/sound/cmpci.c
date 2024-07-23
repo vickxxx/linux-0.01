@@ -1,12 +1,16 @@
 /*****************************************************************************/
-
 /*
  *      cmpci.c  --  C-Media PCI audio driver.
  *
- *      Copyright (C) 1999  ChenLi Tien (cltien@home.com)
+ *      Copyright (C) 1999  ChenLi Tien (cltien@cmedia.com.tw)
+ *      		    C-media support (support@cmedia.com.tw)
  *
- *	Based on the PCI drivers by Thomas Sailer (sailer@ife.ee.ethz.ch)
+ *      Based on the PCI drivers by Thomas Sailer (sailer@ife.ee.ethz.ch)
  *
+ * 	For update, visit:
+ * 		http://members.home.net/puresoft/cmedia.html
+ * 		http://www.cmedia.com.tw
+ * 	
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
  *      the Free Software Foundation; either version 2 of the License, or
@@ -57,8 +61,6 @@
  *                     reported by Johan Maes <joma@telindus.be>
  *    22.03.99   0.12  return EAGAIN instead of EBUSY when O_NONBLOCK
  *                     read/write cannot be executed
- *    20 09 99   0.13  merged the generic changes in sonicvibes since this
- *		       diverged.
  *    18.08.99   1.5   Only deallocate DMA buffer when unloading.
  *    02.09.99   1.6   Enable SPDIF LOOP
  *                     Change the mixer read back
@@ -66,168 +68,255 @@
  *                     Add support for modem, S/PDIF loop and 4 channels.
  *                     (8738 only)
  *                     Fix bug cause x11amp cannot play.
- *    $Log: cmpci.c,v $
- *    Revision 2.41  1999/10/27 02:00:05  cltien
- *    Now the fragsize for modem is activated by parameter.
  *
- *    Revision 2.40  1999/10/26 23:38:26  cltien
- *    Remove debugging message in cm_write which may cause module counter not 0.
+ *    Fixes:
+ *    Arnaldo Carvalho de Melo <acme@conectiva.com.br>
+ *    18/05/2001 - .bss nitpicks, fix a bug in set_dac_channels where it
+ *    		   was calling prog_dmabuf with s->lock held, call missing
+ *    		   unlock_kernel in cm_midi_release
+ *    08/10/2001 - use set_current_state in some more places
  *
- *    Revision 2.39  1999/10/26 21:52:50  cltien
- *    I forgor too adjust mic recording volume, as it should be moved to 5MUTEMONO.
- *    Change the DYNAMIC macro to FIXEDDMA, which means static DMA buffer.
- *
- *    Revision 2.38  1999/10/08 21:59:03  cltien
- *    Set FLINKON and reset FLINKOFF for modem.
- *
- *    Revision 2.37  1999/09/28 02:57:04  cltien
- *    Add set_bus_master() to make sure bus master enabled.
- *
- *    Revision 2.36  1999/09/22 14:15:03  cltien
- *    Use open_sem to avoid multiple access to open_mode.
- *    Use wakeup in IntrClose to activate process in waiting queue.
- *
- *    Revision 2.35  1999/09/22 13:20:53  cltien
- *    Use open_mode to check if DAC in used. Also more check in IntrWrite and IntrClose. Now the modem can access DAC safely.
- *
- *    Revision 2.34  1999/09/22 03:29:57  cltien
- *    Use module count to decide which one to access the dac.
- *
+ *	Carlos Eduardo Gorges <carlos@techlinux.com.br>
+ *	Fri May 25 2001 
+ *	- SMP support ( spin[un]lock* revision )
+ *	- speaker mixer support 
+ *	Mon Aug 13 2001
+ *	- optimizations and cleanups
+ *    03/01/2003 - open_mode fixes from Georg Acher <acher@in.tum.de>
  *
  */
- 
 /*****************************************************************************/
       
-#include <linux/config.h>
 #include <linux/version.h>
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/sound.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/soundcard.h>
 #include <linux/pci.h>
-#include <linux/wrapper.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/spinlock.h>
 #include <linux/smp_lock.h>
+#include <linux/wrapper.h>
 #include <asm/uaccess.h>
 #include <asm/hardirq.h>
+#include <linux/gameport.h>
+#include <linux/bitops.h>
 
 #include "dm.h"
 
 /* --------------------------------------------------------------------- */
-
 #undef OSS_DOCUMENTED_MIXER_SEMANTICS
-
+#undef DMABYTEIO
 /* --------------------------------------------------------------------- */
-
-#ifndef PCI_VENDOR_ID_CMEDIA
-#define PCI_VENDOR_ID_CMEDIA         0x13F6
-#endif
-#ifndef PCI_DEVICE_ID_CMEDIA_CM8338A
-#define PCI_DEVICE_ID_CMEDIA_CM8338A 0x0100
-#endif
-#ifndef PCI_DEVICE_ID_CMEDIA_CM8338B
-#define PCI_DEVICE_ID_CMEDIA_CM8338B 0x0101
-#endif
-#ifndef PCI_DEVICE_ID_CMEDIA_CM8738
-#define PCI_DEVICE_ID_CMEDIA_CM8738  0x0111
-#endif
 
 #define CM_MAGIC  ((PCI_VENDOR_ID_CMEDIA<<16)|PCI_DEVICE_ID_CMEDIA_CM8338A)
 
-/*
- * CM8338 registers definition
- */
+/* CM8338 registers definition ****************/
 
-#define CODEC_CMI_FUNCTRL0      (0x00)
-#define CODEC_CMI_FUNCTRL1      (0x04)
-#define CODEC_CMI_CHFORMAT      (0x08)
-#define CODEC_CMI_INT_HLDCLR    (0x0C)
-#define CODEC_CMI_INT_STATUS    (0x10)
-#define CODEC_CMI_LEGACY_CTRL   (0x14)
-#define CODEC_CMI_MISC_CTRL     (0x18)
-#define CODEC_CMI_TDMA_POS      (0x1C)
-#define CODEC_CMI_MIXER         (0x20)
-#define CODEC_SB16_DATA         (0x22)
-#define CODEC_SB16_ADDR         (0x23)
-#define CODEC_CMI_MIXER1        (0x24)
-#define CODEC_CMI_MIXER2        (0x25)
-#define CODEC_CMI_AUX_VOL       (0x26)
-#define CODEC_CMI_MISC          (0x27)
-#define CODEC_CMI_AC97          (0x28)
+#define CODEC_CMI_FUNCTRL0		(0x00)
+#define CODEC_CMI_FUNCTRL1		(0x04)
+#define CODEC_CMI_CHFORMAT		(0x08)
+#define CODEC_CMI_INT_HLDCLR		(0x0C)
+#define CODEC_CMI_INT_STATUS		(0x10)
+#define CODEC_CMI_LEGACY_CTRL		(0x14)
+#define CODEC_CMI_MISC_CTRL		(0x18)
+#define CODEC_CMI_TDMA_POS		(0x1C)
+#define CODEC_CMI_MIXER			(0x20)
+#define CODEC_SB16_DATA			(0x22)
+#define CODEC_SB16_ADDR			(0x23)
+#define CODEC_CMI_MIXER1		(0x24)
+#define CODEC_CMI_MIXER2		(0x25)
+#define CODEC_CMI_AUX_VOL		(0x26)
+#define CODEC_CMI_MISC			(0x27)
+#define CODEC_CMI_AC97			(0x28)
 
-#define CODEC_CMI_CH0_FRAME1    (0x80)
-#define CODEC_CMI_CH0_FRAME2    (0x84)
-#define CODEC_CMI_CH1_FRAME1    (0x88)
-#define CODEC_CMI_CH1_FRAME2    (0x8C)
+#define CODEC_CMI_CH0_FRAME1		(0x80)
+#define CODEC_CMI_CH0_FRAME2		(0x84)
+#define CODEC_CMI_CH1_FRAME1		(0x88)
+#define CODEC_CMI_CH1_FRAME2		(0x8C)
 
-#define CODEC_CMI_EXT_REG       (0xF0)
-#define UCHAR	unsigned char
-/*
-**  Mixer registers for SB16
-*/
+#define CODEC_CMI_EXT_REG		(0xF0)
 
-#define DSP_MIX_DATARESETIDX    ((UCHAR)(0x00))
+/*  Mixer registers for SB16 ******************/
 
-#define DSP_MIX_MASTERVOLIDX_L  ((UCHAR)(0x30))
-#define DSP_MIX_MASTERVOLIDX_R  ((UCHAR)(0x31))
-#define DSP_MIX_VOICEVOLIDX_L   ((UCHAR)(0x32))
-#define DSP_MIX_VOICEVOLIDX_R   ((UCHAR)(0x33))
-#define DSP_MIX_FMVOLIDX_L      ((UCHAR)(0x34))
-#define DSP_MIX_FMVOLIDX_R      ((UCHAR)(0x35))
-#define DSP_MIX_CDVOLIDX_L      ((UCHAR)(0x36))
-#define DSP_MIX_CDVOLIDX_R      ((UCHAR)(0x37))
-#define DSP_MIX_LINEVOLIDX_L    ((UCHAR)(0x38))
-#define DSP_MIX_LINEVOLIDX_R    ((UCHAR)(0x39))
+#define DSP_MIX_DATARESETIDX		((unsigned char)(0x00))
 
-#define DSP_MIX_MICVOLIDX       ((UCHAR)(0x3A))
-#define DSP_MIX_SPKRVOLIDX      ((UCHAR)(0x3B))
+#define DSP_MIX_MASTERVOLIDX_L		((unsigned char)(0x30))
+#define DSP_MIX_MASTERVOLIDX_R		((unsigned char)(0x31))
+#define DSP_MIX_VOICEVOLIDX_L		((unsigned char)(0x32))
+#define DSP_MIX_VOICEVOLIDX_R		((unsigned char)(0x33))
+#define DSP_MIX_FMVOLIDX_L		((unsigned char)(0x34))
+#define DSP_MIX_FMVOLIDX_R		((unsigned char)(0x35))
+#define DSP_MIX_CDVOLIDX_L		((unsigned char)(0x36))
+#define DSP_MIX_CDVOLIDX_R		((unsigned char)(0x37))
+#define DSP_MIX_LINEVOLIDX_L		((unsigned char)(0x38))
+#define DSP_MIX_LINEVOLIDX_R		((unsigned char)(0x39))
 
-#define DSP_MIX_OUTMIXIDX       ((UCHAR)(0x3C))
+#define DSP_MIX_MICVOLIDX		((unsigned char)(0x3A))
+#define DSP_MIX_SPKRVOLIDX		((unsigned char)(0x3B))
 
-#define DSP_MIX_ADCMIXIDX_L     ((UCHAR)(0x3D))
-#define DSP_MIX_ADCMIXIDX_R     ((UCHAR)(0x3E))
+#define DSP_MIX_OUTMIXIDX		((unsigned char)(0x3C))
 
-#define DSP_MIX_INGAINIDX_L     ((UCHAR)(0x3F))
-#define DSP_MIX_INGAINIDX_R     ((UCHAR)(0x40))
-#define DSP_MIX_OUTGAINIDX_L    ((UCHAR)(0x41))
-#define DSP_MIX_OUTGAINIDX_R    ((UCHAR)(0x42))
+#define DSP_MIX_ADCMIXIDX_L		((unsigned char)(0x3D))
+#define DSP_MIX_ADCMIXIDX_R		((unsigned char)(0x3E))
 
-#define DSP_MIX_AGCIDX          ((UCHAR)(0x43))
+#define DSP_MIX_INGAINIDX_L		((unsigned char)(0x3F))
+#define DSP_MIX_INGAINIDX_R		((unsigned char)(0x40))
+#define DSP_MIX_OUTGAINIDX_L		((unsigned char)(0x41))
+#define DSP_MIX_OUTGAINIDX_R		((unsigned char)(0x42))
 
-#define DSP_MIX_TREBLEIDX_L     ((UCHAR)(0x44))
-#define DSP_MIX_TREBLEIDX_R     ((UCHAR)(0x45))
-#define DSP_MIX_BASSIDX_L       ((UCHAR)(0x46))
-#define DSP_MIX_BASSIDX_R       ((UCHAR)(0x47))
-#define CM_CH0_RESET	  0x04
-#define CM_CH1_RESET	  0x08
+#define DSP_MIX_AGCIDX			((unsigned char)(0x43))
+
+#define DSP_MIX_TREBLEIDX_L		((unsigned char)(0x44))
+#define DSP_MIX_TREBLEIDX_R		((unsigned char)(0x45))
+#define DSP_MIX_BASSIDX_L		((unsigned char)(0x46))
+#define DSP_MIX_BASSIDX_R		((unsigned char)(0x47))
+#define DSP_MIX_EXTENSION		((unsigned char)(0xf0))
+// pseudo register for AUX
+#define	DSP_MIX_AUXVOL_L		((unsigned char)(0x50))
+#define	DSP_MIX_AUXVOL_R		((unsigned char)(0x51))
+
+// I/O length
 #define CM_EXTENT_CODEC	  0x100
 #define CM_EXTENT_MIDI	  0x2
 #define CM_EXTENT_SYNTH	  0x4
-#define CM_INT_CH0	  1
-#define CM_INT_CH1	  2
+#define CM_EXTENT_GAME	  0x8
 
-#define CM_CFMT_STEREO     0x01
-#define CM_CFMT_16BIT      0x02
-#define CM_CFMT_MASK       0x03
-#define CM_CFMT_DACSHIFT   0   
+// Function Control Register 0 (00h)
+#define CHADC0    	0x01
+#define CHADC1    	0x02
+#define PAUSE0	  	0x04
+#define PAUSE1	  	0x08
+ 
+// Function Control Register 0+2 (02h)
+#define CHEN0     	0x01
+#define CHEN1     	0x02
+#define RST_CH0	  	0x04
+#define RST_CH1	  	0x08
+ 
+// Function Control Register 1 (04h)
+#define JYSTK_EN	0x02
+#define UART_EN		0x04
+#define	SPDO2DAC	0x40
+#define	SPDFLOOP	0x80
+ 
+// Function Control Register 1+1 (05h)
+#define	SPDF_0		0x01
+#define	SPDF_1		0x02
+#define	ASFC		0xe0
+#define	DSFC		0x1c
+#define	SPDIF2DAC	(SPDF_0 << 8 | SPDO2DAC)
+
+// Channel Format Register (08h)
+#define CM_CFMT_STEREO	0x01
+#define CM_CFMT_16BIT	0x02
+#define CM_CFMT_MASK	0x03
+#define	POLVALID	0x20
+#define	INVSPDIFI	0x80
+
+// Channel Format Register+2 (0ah)
+#define SPD24SEL	0x20
+
+// Channel Format Register+3 (0bh)
+#define CHB3D		0x20
+#define CHB3D5C		0x80
+
+// Interrupt Hold/Clear Register+2 (0eh)
+#define	CH0_INT_EN	0x01
+#define	CH1_INT_EN	0x02
+
+// Interrupt Register (10h)
+#define CHINT0		0x01
+#define CHINT1		0x02
+#define	CH0BUSY		0x04
+#define	CH1BUSY		0x08
+
+// Legacy Control/Status Register+1 (15h)
+#define	EXBASEN		0x10
+#define	BASE2LIN	0x20
+#define	CENTR2LIN	0x40
+#define	CB2LIN		(BASE2LIN|CENTR2LIN)
+#define	CHB3D6C		0x80
+
+// Legacy Control/Status Register+2 (16h)
+#define	DAC2SPDO	0x20
+#define	SPDCOPYRHT	0x40
+#define	ENSPDOUT	0x80
+
+// Legacy Control/Status Register+3 (17h)
+#define	FMSEL		0x03
+#define	VSBSEL		0x0c
+#define	VMPU		0x60
+#define	NXCHG		0x80
+ 
+// Miscellaneous Control Register (18h)
+#define	REAR2LIN	0x20
+#define	MUTECH1		0x40
+#define	ENCENTER	0x80
+ 
+// Miscellaneous Control Register+1 (19h)
+#define	SELSPDIFI2	0x01
+#define	SPDF_AC97	0x80
+ 
+// Miscellaneous Control Register+2 (1ah)
+#define	AC3_EN		0x04
+#define	FM_EN		0x08
+#define	SPD32SEL	0x20
+#define	XCHGDAC		0x40
+#define	ENDBDAC		0x80
+ 
+// Miscellaneous Control Register+3 (1bh)
+#define	SPDIFI48K	0x01
+#define	SPDO5V		0x02
+#define	N4SPK3D		0x04
+#define	RESET		0x40
+#define	PWD		0x80
+#define	SPDIF48K	(SPDIFI48K << 24 | SPDF_AC97 << 8)
+ 
+// Mixer1 (24h)
+#define	CDPLAY		0x01
+#define	X3DEN		0x02
+#define	REAR2FRONT	0x10
+#define	SPK4		0x20
+#define	WSMUTE		0x40
+ 
+// Miscellaneous Register (27h)
+#define	SPDVALID	0x02
+#define	CENTR2MIC	0x04
+
+#define CM_CFMT_DACSHIFT   0
 #define CM_CFMT_ADCSHIFT   2
+#define CM_FREQ_DACSHIFT   2
+#define CM_FREQ_ADCSHIFT   5
+#define	RSTDAC		RST_CH0
+#define	RSTADC		RST_CH1
+#define	ENDAC		CHEN0
+#define	ENADC		CHEN1
+#define	PAUSEDAC	PAUSE0
+#define	PAUSEADC	PAUSE1
+#define CODEC_CMI_DAC_FRAME1	CODEC_CMI_CH0_FRAME1
+#define CODEC_CMI_DAC_FRAME2	CODEC_CMI_CH0_FRAME2
+#define CODEC_CMI_ADC_FRAME1	CODEC_CMI_CH1_FRAME1
+#define CODEC_CMI_ADC_FRAME2	CODEC_CMI_CH1_FRAME2
+#define	DACINT		CHINT0
+#define	ADCINT		CHINT1
+#define	DACBUSY		CH0BUSY
+#define	ADCBUSY		CH1BUSY
+#define	ENDACINT	CH0_INT_EN
+#define	ENADCINT	CH1_INT_EN
 
 static const unsigned sample_size[] = { 1, 2, 2, 4 };
-static const unsigned sample_shift[] = { 0, 1, 1, 2 };
+static const unsigned sample_shift[]	= { 0, 1, 1, 2 };
 
-#define CM_CENABLE_RE      0x2
-#define CM_CENABLE_PE      0x1
-
-
-/* MIDI buffer sizes */
+/* MIDI buffer sizes **************************/
 
 #define MIDIINBUF  256
 #define MIDIOUTBUF 256
@@ -238,34 +327,39 @@ static const unsigned sample_shift[] = { 0, 1, 1, 2 };
 
 #define FMODE_DMFM 0x10
 
-/* --------------------------------------------------------------------- */
+#define SND_DEV_DSP16   5 
+
+#define NR_DEVICE 3		/* maximum number of devices */
+
+static unsigned int devindex = 0;
+
+//*********************************************/
 
 struct cm_state {
 	/* magic */
 	unsigned int magic;
 
-	/* we keep cm cards in a linked list */
-	struct cm_state *next;
+	/* list of cmedia devices */
+	struct list_head devs;
 
-	/* soundcore stuff */
-	int dev_audio;
+	/* the corresponding pci_dev structure */
+	struct pci_dev *dev;
+
+	int dev_audio;			/* soundcore stuff */
 	int dev_mixer;
 	int dev_midi;
 	int dev_dmfm;
 
-	/* hardware resources */
-	unsigned int iosb, iobase, iosynth, iomidi, iogame, irq;
+	unsigned int iosb, iobase, iosynth,
+			 iomidi, iogame, irq;	/* hardware resources */
+	unsigned short deviceid;		/* pci_id */
 
-        /* mixer stuff */
-        struct {
+        struct {				/* mixer stuff */
                 unsigned int modcnt;
-#ifndef OSS_DOCUMENTED_MIXER_SEMANTICS
 		unsigned short vol[13];
-#endif /* OSS_DOCUMENTED_MIXER_SEMANTICS */
         } mix;
 
-	/* wave stuff */
-	unsigned int rateadc, ratedac;
+	unsigned int rateadc, ratedac;		/* wave stuff */
 	unsigned char fmt, enable;
 
 	spinlock_t lock;
@@ -275,21 +369,22 @@ struct cm_state {
 
 	struct dmabuf {
 		void *rawbuf;
+		unsigned rawphys;
 		unsigned buforder;
 		unsigned numfrag;
 		unsigned fragshift;
 		unsigned hwptr, swptr;
 		unsigned total_bytes;
 		int count;
-		unsigned error; /* over/underrun */
+		unsigned error;		/* over/underrun */
 		wait_queue_head_t wait;
-		/* redundant, but makes calculations easier */
-		unsigned fragsize;
+		
+		unsigned fragsize;	/* redundant, but makes calculations easier */
 		unsigned dmasize;
 		unsigned fragsamples;
 		unsigned dmasamples;
-		/* OSS stuff */
-		unsigned mapped:1;
+		
+		unsigned mapped:1;	/* OSS stuff */
 		unsigned ready:1;
 		unsigned endcleared:1;
 		unsigned ossfragshift;
@@ -297,8 +392,7 @@ struct cm_state {
 		unsigned subdivision;
 	} dma_dac, dma_adc;
 
-	/* midi stuff */
-	struct {
+	struct {			/* midi stuff */
 		unsigned ird, iwr, icnt;
 		unsigned ord, owr, ocnt;
 		wait_queue_head_t iwait;
@@ -307,123 +401,231 @@ struct cm_state {
 		unsigned char ibuf[MIDIINBUF];
 		unsigned char obuf[MIDIOUTBUF];
 	} midi;
+
+	struct gameport gameport;
+
+	int	chip_version;		
+	int	max_channels;
+	int	curr_channels;		
+	int	speakers;		/* number of speakers */
+	int	capability;		/* HW capability, various for chip versions */
+
+	int	status;			/* HW or SW state */
+	
+	int	spdif_counter;		/* spdif frame counter */
 };
 
+/* flags used for capability */
+#define	CAN_AC3_HW		0x00000001		/* 037 or later */
+#define	CAN_AC3_SW		0x00000002		/* 033 or later */
+#define	CAN_AC3			(CAN_AC3_HW | CAN_AC3_SW)
+#define CAN_DUAL_DAC		0x00000004		/* 033 or later */
+#define	CAN_MULTI_CH_HW		0x00000008		/* 039 or later */
+#define	CAN_MULTI_CH		(CAN_MULTI_CH_HW | CAN_DUAL_DAC)
+#define	CAN_LINE_AS_REAR	0x00000010		/* 033 or later */
+#define	CAN_LINE_AS_BASS	0x00000020		/* 039 or later */
+#define	CAN_MIC_AS_BASS		0x00000040		/* 039 or later */
+
+/* flags used for status */
+#define	DO_AC3_HW		0x00000001
+#define	DO_AC3_SW		0x00000002
+#define	DO_AC3			(DO_AC3_HW | DO_AC3_SW)
+#define	DO_DUAL_DAC		0x00000004
+#define	DO_MULTI_CH_HW		0x00000008
+#define	DO_MULTI_CH		(DO_MULTI_CH_HW | DO_DUAL_DAC)
+#define	DO_LINE_AS_REAR		0x00000010		/* 033 or later */
+#define	DO_LINE_AS_BASS		0x00000020		/* 039 or later */
+#define	DO_MIC_AS_BASS		0x00000040		/* 039 or later */
+#define	DO_SPDIF_OUT		0x00000100
+#define	DO_SPDIF_IN		0x00000200
+#define	DO_SPDIF_LOOP		0x00000400
+
+static LIST_HEAD(devs);
+
 /* --------------------------------------------------------------------- */
 
-static struct cm_state *devs = NULL;
-static unsigned long wavetable_mem = 0;
-
-/* --------------------------------------------------------------------- */
-
-extern __inline__ unsigned ld2(unsigned int x)
+static inline unsigned ld2(unsigned int x)
 {
-	unsigned r = 0;
+	unsigned exp=16,l=5,r=0;
+	static const unsigned num[]={0x2,0x4,0x10,0x100,0x10000};
+
+	/* num: 2, 4, 16, 256, 65536 */
+	/* exp: 1, 2,  4,   8,    16 */
 	
-	if (x >= 0x10000) {
-		x >>= 16;
-		r += 16;
+	while(l--) {
+		if( x >= num[l] ) {
+			if(num[l]>2) x >>= exp;
+			r+=exp;
+		}
+		exp>>=1;
 	}
-	if (x >= 0x100) {
-		x >>= 8;
-		r += 8;
-	}
-	if (x >= 0x10) {
-		x >>= 4;
-		r += 4;
-	}
-	if (x >= 4) {
-		x >>= 2;
-		r += 2;
-	}
-	if (x >= 2)
-		r++;
+
 	return r;
 }
 
-/*
- * hweightN: returns the hamming weight (i.e. the number
- * of bits set) of a N-bit word
- */
-
-#ifdef hweight32
-#undef hweight32
-#endif
-
-extern __inline__ unsigned int hweight32(unsigned int w)
-{
-        unsigned int res = (w & 0x55555555) + ((w >> 1) & 0x55555555);
-        res = (res & 0x33333333) + ((res >> 2) & 0x33333333);
-        res = (res & 0x0F0F0F0F) + ((res >> 4) & 0x0F0F0F0F);
-        res = (res & 0x00FF00FF) + ((res >> 8) & 0x00FF00FF);
-        return (res & 0x0000FFFF) + ((res >> 16) & 0x0000FFFF);
-}
-
 /* --------------------------------------------------------------------- */
 
-static void set_dmadac(struct cm_state *s, unsigned int addr, unsigned int count)
+static void maskb(unsigned int addr, unsigned int mask, unsigned int value)
 {
-	count--;
-	outl(addr, s->iobase + CODEC_CMI_CH0_FRAME1);
-	outw(count, s->iobase + CODEC_CMI_CH0_FRAME2);
-	outb(inb(s->iobase + CODEC_CMI_FUNCTRL0) & ~1, s->iobase + CODEC_CMI_FUNCTRL0);
-//	outb(inb(s->iobase + CODEC_CMI_FUNCTRL0 + 2) | 1, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	outb((inb(addr) & mask) | value, addr);
+}
+
+static void maskw(unsigned int addr, unsigned int mask, unsigned int value)
+{
+	outw((inw(addr) & mask) | value, addr);
+}
+
+static void maskl(unsigned int addr, unsigned int mask, unsigned int value)
+{
+	outl((inl(addr) & mask) | value, addr);
+}
+
+static void set_dmadac1(struct cm_state *s, unsigned int addr, unsigned int count)
+{
+	if (addr)
+	    outl(addr, s->iobase + CODEC_CMI_ADC_FRAME1);
+	outw(count - 1, s->iobase + CODEC_CMI_ADC_FRAME2);
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~CHADC1, 0);
 }
 
 static void set_dmaadc(struct cm_state *s, unsigned int addr, unsigned int count)
 {
-	count--;
-	outl(addr, s->iobase + CODEC_CMI_CH1_FRAME1);
-	outw(count, s->iobase + CODEC_CMI_CH1_FRAME2);
-	outb(inb(s->iobase + CODEC_CMI_FUNCTRL0) | 2, s->iobase + CODEC_CMI_FUNCTRL0);
-//	outb(inb(s->iobase + CODEC_CMI_FUNCTRL0 + 2) | 2, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	outl(addr, s->iobase + CODEC_CMI_ADC_FRAME1);
+	outw(count - 1, s->iobase + CODEC_CMI_ADC_FRAME2);
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~0, CHADC1);
 }
 
-extern __inline__ unsigned get_dmadac(struct cm_state *s)
+static void set_dmadac(struct cm_state *s, unsigned int addr, unsigned int count)
+{
+	outl(addr, s->iobase + CODEC_CMI_DAC_FRAME1);
+	outw(count - 1, s->iobase + CODEC_CMI_DAC_FRAME2);
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~CHADC0, 0);
+	if (s->status & DO_DUAL_DAC)
+		set_dmadac1(s, 0, count);
+}
+
+static void set_countadc(struct cm_state *s, unsigned count)
+{
+	outw(count - 1, s->iobase + CODEC_CMI_ADC_FRAME2 + 2);
+}
+
+static void set_countdac(struct cm_state *s, unsigned count)
+{
+	outw(count - 1, s->iobase + CODEC_CMI_DAC_FRAME2 + 2);
+	if (s->status & DO_DUAL_DAC)
+	    set_countadc(s, count);
+}
+
+static unsigned get_dmadac(struct cm_state *s)
 {
 	unsigned int curr_addr;
 
-	if (!s->dma_dac.dmasize || !(s->enable & CM_CENABLE_PE))
-		return 0;
-
-	curr_addr = inl(s->iobase + CODEC_CMI_CH0_FRAME1);
-	curr_addr -= virt_to_bus(s->dma_dac.rawbuf);
+	curr_addr = inw(s->iobase + CODEC_CMI_DAC_FRAME2) + 1;
+	curr_addr <<= sample_shift[(s->fmt >> CM_CFMT_DACSHIFT) & CM_CFMT_MASK];
 	curr_addr = s->dma_dac.dmasize - curr_addr;
-	curr_addr &= ~(sample_size[(s->fmt >> CM_CFMT_DACSHIFT) & CM_CFMT_MASK]-1);
+
 	return curr_addr;
 }
 
-extern __inline__ unsigned get_dmaadc(struct cm_state *s)
+static unsigned get_dmaadc(struct cm_state *s)
 {
 	unsigned int curr_addr;
 
-	if (!s->dma_adc.dmasize || !(s->enable & CM_CENABLE_RE))
-		return 0;
-
-	curr_addr = inl(s->iobase + CODEC_CMI_CH1_FRAME1);
-	curr_addr -= virt_to_bus(s->dma_adc.rawbuf);
+	curr_addr = inw(s->iobase + CODEC_CMI_ADC_FRAME2) + 1;
+	curr_addr <<= sample_shift[(s->fmt >> CM_CFMT_ADCSHIFT) & CM_CFMT_MASK];
 	curr_addr = s->dma_adc.dmasize - curr_addr;
-	curr_addr &= ~(sample_size[(s->fmt >> CM_CFMT_ADCSHIFT) & CM_CFMT_MASK]-1);
+
 	return curr_addr;
 }
 
 static void wrmixer(struct cm_state *s, unsigned char idx, unsigned char data)
 {
+	unsigned char regval, pseudo;
+
+	// pseudo register
+	if (idx == DSP_MIX_AUXVOL_L) {
+		data >>= 4;
+		data &= 0x0f;
+		regval = inb(s->iobase + CODEC_CMI_AUX_VOL) & ~0x0f;
+		outb(regval | data, s->iobase + CODEC_CMI_AUX_VOL);
+		return;
+	}
+	if (idx == DSP_MIX_AUXVOL_R) {
+		data &= 0xf0;
+		regval = inb(s->iobase + CODEC_CMI_AUX_VOL) & ~0xf0;
+		outb(regval | data, s->iobase + CODEC_CMI_AUX_VOL);
+		return;
+	}
 	outb(idx, s->iobase + CODEC_SB16_ADDR);
 	udelay(10);
+	// pseudo bits
+	if (idx == DSP_MIX_OUTMIXIDX) {
+		pseudo = data & ~0x1f;
+		pseudo >>= 1;	
+		regval = inb(s->iobase + CODEC_CMI_MIXER2) & ~0x30;
+		outb(regval | pseudo, s->iobase + CODEC_CMI_MIXER2);
+	}
+	if (idx == DSP_MIX_ADCMIXIDX_L) {
+		pseudo = data & 0x80;
+		pseudo >>= 1;
+		regval = inb(s->iobase + CODEC_CMI_MIXER2) & ~0x40;
+		outb(regval | pseudo, s->iobase + CODEC_CMI_MIXER2);
+	}
+	if (idx == DSP_MIX_ADCMIXIDX_R) {
+		pseudo = data & 0x80;
+		regval = inb(s->iobase + CODEC_CMI_MIXER2) & ~0x80;
+		outb(regval | pseudo, s->iobase + CODEC_CMI_MIXER2);
+	}
 	outb(data, s->iobase + CODEC_SB16_DATA);
 	udelay(10);
 }
 
 static unsigned char rdmixer(struct cm_state *s, unsigned char idx)
 {
-	unsigned char v;
-
+	unsigned char v, pseudo;
+	
+	// pseudo register
+	if (idx == DSP_MIX_AUXVOL_L) {
+		v = inb(s->iobase + CODEC_CMI_AUX_VOL) & 0x0f;
+		v <<= 4;
+		return v;
+	}
+	if (idx == DSP_MIX_AUXVOL_L) {
+		v = inb(s->iobase + CODEC_CMI_AUX_VOL) & 0xf0;
+		return v;
+	}
 	outb(idx, s->iobase + CODEC_SB16_ADDR);
 	udelay(10);
 	v = inb(s->iobase + CODEC_SB16_DATA);
 	udelay(10);
+	// pseudo bits
+	if (idx == DSP_MIX_OUTMIXIDX) {
+		pseudo = inb(s->iobase + CODEC_CMI_MIXER2) & 0x30;
+		pseudo <<= 1;
+		v |= pseudo;
+	}
+	if (idx == DSP_MIX_ADCMIXIDX_L) {
+		pseudo = inb(s->iobase + CODEC_CMI_MIXER2) & 0x40;
+		pseudo <<= 1;
+		v |= pseudo;
+	}
+	if (idx == DSP_MIX_ADCMIXIDX_R) {
+		pseudo = inb(s->iobase + CODEC_CMI_MIXER2) & 0x80;
+		v |= pseudo;
+	}
 	return v;
+}
+
+static void set_fmt_unlocked(struct cm_state *s, unsigned char mask, unsigned char data)
+{
+	if (mask)
+	{
+		s->fmt = inb(s->iobase + CODEC_CMI_CHFORMAT);
+		udelay(10);
+	}
+	s->fmt = (s->fmt & mask) | data;
+	outb(s->fmt, s->iobase + CODEC_CMI_CHFORMAT);
+	udelay(10);
 }
 
 static void set_fmt(struct cm_state *s, unsigned char mask, unsigned char data)
@@ -431,14 +633,8 @@ static void set_fmt(struct cm_state *s, unsigned char mask, unsigned char data)
 	unsigned long flags;
 
 	spin_lock_irqsave(&s->lock, flags);
-	if (mask) {
-		s->fmt = inb(s->iobase + CODEC_CMI_CHFORMAT);
-		udelay(10);
-	}
-	s->fmt = (s->fmt & mask) | data;
-	outb(s->fmt, s->iobase + CODEC_CMI_CHFORMAT);
+	set_fmt_unlocked(s,mask,data);
 	spin_unlock_irqrestore(&s->lock, flags);
-	udelay(10);
 }
 
 static void frobindir(struct cm_state *s, unsigned char idx, unsigned char mask, unsigned char data)
@@ -463,125 +659,548 @@ static struct {
 	{ 22050,	(16000 + 22050) / 2,	(22050 + 32000) / 2,	2 },
 	{ 32000,	(22050 + 32000) / 2,	(32000 + 44100) / 2,	6 },
 	{ 44100,	(32000 + 44100) / 2,	(44100 + 48000) / 2,	3 },
-	{ 48000,	(44100 + 48000) /2,	48000,			7 }
+	{ 48000,	(44100 + 48000) / 2,	48000,			7 }
 };
 
-static void set_dac_rate(struct cm_state *s, unsigned rate)
+static void set_spdif_copyright(struct cm_state *s, int spdif_copyright)
+{
+	/* enable SPDIF-in Copyright */
+	maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 2, ~SPDCOPYRHT, spdif_copyright ? SPDCOPYRHT : 0);
+}
+
+static void set_spdif_loop(struct cm_state *s, int spdif_loop)
+{
+	/* enable SPDIF loop */
+	if (spdif_loop) {
+		s->status |= DO_SPDIF_LOOP;
+		/* turn on spdif-in to spdif-out */
+		maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0, SPDFLOOP);
+	} else {
+		s->status &= ~DO_SPDIF_LOOP;
+		/* turn off spdif-in to spdif-out */
+		maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~SPDFLOOP, 0);
+	}
+}
+
+static void set_spdif_monitor(struct cm_state *s, int channel)
+{
+	// SPDO2DAC
+	maskw(s->iobase + CODEC_CMI_FUNCTRL1, ~SPDO2DAC, channel == 2 ? SPDO2DAC : 0);
+	// CDPLAY
+	if (s->chip_version >= 39)
+		maskb(s->iobase + CODEC_CMI_MIXER1, ~CDPLAY, channel ? CDPLAY : 0);
+}
+
+static void set_spdifout_level(struct cm_state *s, int level5v)
+{
+	/* SPDO5V */
+	maskb(s->iobase + CODEC_CMI_MISC_CTRL + 3, ~SPDO5V, level5v ? SPDO5V : 0);
+}
+
+static void set_spdifin_inverse(struct cm_state *s, int spdif_inverse)
+{
+	if (spdif_inverse) {
+		/* turn on spdif-in inverse */
+		if (s->chip_version >= 39)
+			maskb(s->iobase + CODEC_CMI_CHFORMAT, ~0, INVSPDIFI);
+		else
+			maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~0, 1);
+	} else {
+		/* turn off spdif-ininverse */
+		if (s->chip_version >= 39) 
+			maskb(s->iobase + CODEC_CMI_CHFORMAT, ~INVSPDIFI, 0);
+		else
+			maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~1, 0);
+	}
+}
+
+static void set_spdifin_channel2(struct cm_state *s, int channel2)
+{
+	/* SELSPDIFI2 */
+	if (s->chip_version >= 39)
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 1, ~SELSPDIFI2, channel2 ? SELSPDIFI2 : 0);
+}
+
+static void set_spdifin_valid(struct cm_state *s, int valid)
+{
+	/* SPDVALID */
+	maskb(s->iobase + CODEC_CMI_MISC, ~SPDVALID, valid ? SPDVALID : 0);
+}
+
+static void set_spdifout_unlocked(struct cm_state *s, unsigned rate)
+{
+	if (rate == 48000 || rate == 44100) {
+		// SPDF_0
+		maskw(s->iobase + CODEC_CMI_FUNCTRL1, ~0, SPDF_0);
+		// SPDIFI48K SPDF_ACc97
+		maskl(s->iobase + CODEC_CMI_MISC_CTRL, ~SPDIF48K, rate == 48000 ? SPDIF48K : 0);
+		// ENSPDOUT
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 2, ~0, ENSPDOUT);
+		// monitor SPDIF out
+		set_spdif_monitor(s, 2);
+		s->status |= DO_SPDIF_OUT;
+	} else {
+		maskw(s->iobase + CODEC_CMI_FUNCTRL1, ~SPDF_0, 0);
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 2, ~ENSPDOUT, 0);
+		// monitor none
+		set_spdif_monitor(s, 0);
+		s->status &= ~DO_SPDIF_OUT;
+	}
+}
+
+static void set_spdifout(struct cm_state *s, unsigned rate)
 {
 	unsigned long flags;
-	unsigned char freq = 4, val;
-	int	i;
 
-	if (rate > 48000)
-		rate = 48000;
-	if (rate < 5512)
-		rate = 5512;
-	for (i = 0; i < sizeof(rate_lookup) / sizeof(rate_lookup[0]); i++)
-	{
-		if (rate > rate_lookup[i].lower && rate <= rate_lookup[i].upper)
-		{
-			rate = rate_lookup[i].rate;
-			freq = rate_lookup[i].freq;
-			break;
-	    	}
-	}
-	s->ratedac = rate;
-	freq <<= 2;
 	spin_lock_irqsave(&s->lock, flags);
-	val = inb(s->iobase + CODEC_CMI_FUNCTRL1 + 1) & ~0x1c; 
-	outb(val | freq, s->iobase + CODEC_CMI_FUNCTRL1 + 1);
+	set_spdifout_unlocked(s,rate);
 	spin_unlock_irqrestore(&s->lock, flags);
 }
 
-static void set_adc_rate(struct cm_state *s, unsigned rate)
+static void set_spdifin_unlocked(struct cm_state *s, unsigned rate)
+{
+	if (rate == 48000 || rate == 44100) {
+		// SPDF_1
+		maskw(s->iobase + CODEC_CMI_FUNCTRL1, ~0, SPDF_1);
+		// SPDIFI48K SPDF_AC97
+		maskl(s->iobase + CODEC_CMI_MISC_CTRL, ~SPDIF48K, rate == 48000 ? SPDIF48K : 0);
+		s->status |= DO_SPDIF_IN;
+	} else {
+		maskw(s->iobase + CODEC_CMI_FUNCTRL1, ~SPDF_1, 0);
+		s->status &= ~DO_SPDIF_IN;
+	}
+}
+
+static void set_spdifin(struct cm_state *s, unsigned rate)
 {
 	unsigned long flags;
-	unsigned char freq = 4, val;
+
+	spin_lock_irqsave(&s->lock, flags);
+	set_spdifin_unlocked(s,rate);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+//* find parity for bit 4~30 */
+static unsigned parity(unsigned data)
+{
+	unsigned parity = 0;
+	int counter = 4;
+
+	data >>= 4;	// start from bit 4
+	while (counter <= 30) {
+		if (data & 1)
+			parity++;
+		data >>= 1;
+		counter++;
+	}
+	return parity & 1;
+}
+
+static void set_ac3_unlocked(struct cm_state *s, unsigned rate)
+{
+	/* enable AC3 */
+	if (rate == 48000 || rate == 44100) {
+		// mute DAC
+		maskb(s->iobase + CODEC_CMI_MIXER1, ~0, WSMUTE);
+		// AC3EN for 039, 0x04
+		if (s->chip_version >= 39)
+			maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~0, AC3_EN);
+		// AC3EN for 037, 0x10
+		else if (s->chip_version == 37)
+			maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~0, 0x10);
+		if (s->capability & CAN_AC3_HW) {
+			// SPD24SEL for 039, 0x20, but cannot be set
+			if (s->chip_version >= 39)
+				maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~0, SPD24SEL);
+			// SPD24SEL for 037, 0x02
+			else if (s->chip_version == 37)
+				maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~0, 0x02);
+			s->status |= DO_AC3_HW;
+			if (s->chip_version >= 39)
+				maskb(s->iobase + CODEC_CMI_MIXER1, ~CDPLAY, 0);
+		 } else {
+			// SPD32SEL for 037 & 039, 0x20
+			maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~0, SPD32SEL);
+			// set 176K sample rate to fix 033 HW bug
+			if (s->chip_version == 33) {
+				if (rate == 48000)
+					maskb(s->iobase + CODEC_CMI_CHFORMAT + 1, ~0, 0x08);
+				else
+					maskb(s->iobase + CODEC_CMI_CHFORMAT + 1, ~0x08, 0);
+			}
+			s->status |= DO_AC3_SW;
+		}
+	} else {
+		maskb(s->iobase + CODEC_CMI_MIXER1, ~WSMUTE, 0);
+		maskb(s->iobase + CODEC_CMI_CHFORMAT + 2, ~0x32, 0);
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~(SPD32SEL|AC3_EN), 0);
+		if (s->chip_version == 33)
+			maskb(s->iobase + CODEC_CMI_CHFORMAT + 1, ~0x08, 0);
+		if (s->chip_version >= 39)
+			maskb(s->iobase + CODEC_CMI_MIXER1, ~0, CDPLAY);
+		s->status &= ~DO_AC3;
+	}
+	s->spdif_counter = 0;
+}
+
+static void set_ac3(struct cm_state *s, unsigned rate)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	set_spdifout_unlocked(s, rate);
+	set_ac3_unlocked(s,rate);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+static int trans_ac3(struct cm_state *s, void *dest, const char *source, int size)
+{
+	int   i = size / 2;
+	unsigned long data;
+	unsigned long *dst = (unsigned long *) dest;
+	unsigned short *src = (unsigned short *)source;
+	int err;
+
+	do {
+		if ((err = __get_user(data, src)))
+			return err;
+		src++;
+		data <<= 12;			// ok for 16-bit data
+		if (s->spdif_counter == 2 || s->spdif_counter == 3)
+			data |= 0x40000000;	// indicate AC-3 raw data
+		if (parity(data))
+			data |= 0x80000000;	// parity
+		if (s->spdif_counter == 0)
+			data |= 3;		// preamble 'M'
+		else if (s->spdif_counter & 1)
+			data |= 5;		// odd, 'W'
+		else
+			data |= 9;		// even, 'M'
+		*dst++ = data;
+		s->spdif_counter++;
+		if (s->spdif_counter == 384)
+			s->spdif_counter = 0;
+	} while (--i);
+
+	return 0;
+}
+
+static void set_adc_rate_unlocked(struct cm_state *s, unsigned rate)
+{
+	unsigned char freq = 4;
 	int	i;
 
 	if (rate > 48000)
 		rate = 48000;
-	if (rate < 5512)
-		rate = 5512;
-	for (i = 0; i < sizeof(rate_lookup) / sizeof(rate_lookup[0]); i++)
-	{
-		if (rate > rate_lookup[i].lower && rate <= rate_lookup[i].upper)
-		{
+	if (rate < 8000)
+		rate = 8000;
+	for (i = 0; i < sizeof(rate_lookup) / sizeof(rate_lookup[0]); i++) {
+		if (rate > rate_lookup[i].lower && rate <= rate_lookup[i].upper) {
 			rate = rate_lookup[i].rate;
 			freq = rate_lookup[i].freq;
 			break;
 	    	}
 	}
 	s->rateadc = rate;
-	freq <<= 5;
+	freq <<= CM_FREQ_ADCSHIFT;
+
+	maskb(s->iobase + CODEC_CMI_FUNCTRL1 + 1, ~ASFC, freq);
+}
+
+static void set_adc_rate(struct cm_state *s, unsigned rate)
+{
+	unsigned long flags;
+	unsigned char freq = 4;
+	int	i;
+
+	if (rate > 48000)
+		rate = 48000;
+	if (rate < 8000)
+		rate = 8000;
+	for (i = 0; i < sizeof(rate_lookup) / sizeof(rate_lookup[0]); i++) {
+		if (rate > rate_lookup[i].lower && rate <= rate_lookup[i].upper) {
+			rate = rate_lookup[i].rate;
+			freq = rate_lookup[i].freq;
+			break;
+	    	}
+	}
+	s->rateadc = rate;
+	freq <<= CM_FREQ_ADCSHIFT;
+
 	spin_lock_irqsave(&s->lock, flags);
-	val = inb(s->iobase + CODEC_CMI_FUNCTRL1 + 1) & ~0xe0; 
-	outb(val | freq, s->iobase + CODEC_CMI_FUNCTRL1 + 1);
+	maskb(s->iobase + CODEC_CMI_FUNCTRL1 + 1, ~ASFC, freq);
 	spin_unlock_irqrestore(&s->lock, flags);
 }
 
+static void set_dac_rate(struct cm_state *s, unsigned rate)
+{
+	unsigned long flags;
+	unsigned char freq = 4;
+	int	i;
+
+	if (rate > 48000)
+		rate = 48000;
+	if (rate < 8000)
+		rate = 8000;
+	for (i = 0; i < sizeof(rate_lookup) / sizeof(rate_lookup[0]); i++) {
+		if (rate > rate_lookup[i].lower && rate <= rate_lookup[i].upper) {
+			rate = rate_lookup[i].rate;
+			freq = rate_lookup[i].freq;
+			break;
+	    	}
+	}
+	s->ratedac = rate;
+	freq <<= CM_FREQ_DACSHIFT;
+
+	spin_lock_irqsave(&s->lock, flags);
+	maskb(s->iobase + CODEC_CMI_FUNCTRL1 + 1, ~DSFC, freq);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	if (s->curr_channels <=  2)
+		set_spdifout(s, rate);
+	if (s->status & DO_DUAL_DAC)
+		set_adc_rate(s, rate);
+}
+
 /* --------------------------------------------------------------------- */
-
-extern inline void stop_adc(struct cm_state *s)
+static inline void reset_adc(struct cm_state *s)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&s->lock, flags);
-	/* disable channel */
-	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	s->enable &= ~CM_CENABLE_RE;
-	/* disable interrupt */
-	outb(inb(s->iobase + CODEC_CMI_INT_HLDCLR + 2) & ~2, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-	/* reset */
-	outb(s->enable | CM_CH1_RESET, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	/* reset bus master */
+	outb(s->enable | RSTADC, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
 	udelay(10);
-	outb(s->enable & ~CM_CH1_RESET, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	spin_unlock_irqrestore(&s->lock, flags);
-}	
+	outb(s->enable & ~RSTADC, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+}
 
-extern inline void stop_dac(struct cm_state *s)
+static inline void reset_dac(struct cm_state *s)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&s->lock, flags);
-	/* disable channel */
-	s->enable &= ~CM_CENABLE_PE;
-	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	/* disable interrupt */
-	outb(inb(s->iobase + CODEC_CMI_INT_HLDCLR + 2) & ~1, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-	/* reset */
-	outb(s->enable | CM_CH0_RESET, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	/* reset bus master */
+	outb(s->enable | RSTDAC, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
 	udelay(10);
-	outb(s->enable & ~CM_CH0_RESET, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	spin_unlock_irqrestore(&s->lock, flags);
-}	
+	outb(s->enable & ~RSTDAC, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	if (s->status & DO_DUAL_DAC)
+		reset_adc(s);
+}
 
-static void start_dac(struct cm_state *s)
+static inline void pause_adc(struct cm_state *s)
 {
-	unsigned long flags;
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~0, PAUSEADC);
+}
 
-	spin_lock_irqsave(&s->lock, flags);
-	if ((s->dma_dac.mapped || s->dma_dac.count > 0) && s->dma_dac.ready) {
-		outb(inb(s->iobase + CODEC_CMI_INT_HLDCLR + 2) | 1, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-		s->enable |= CM_CENABLE_PE;
+static inline void pause_dac(struct cm_state *s)
+{
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~0, PAUSEDAC);
+	if (s->status & DO_DUAL_DAC)
+		pause_adc(s);
+}
+
+static inline void disable_adc(struct cm_state *s)
+{
+	/* disable channel */
+	s->enable &= ~ENADC;
+	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	reset_adc(s);
+}
+
+static inline void disable_dac(struct cm_state *s)
+{
+	/* disable channel */
+	s->enable &= ~ENDAC;
+	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	reset_dac(s);
+	if (s->status & DO_DUAL_DAC)
+		disable_adc(s);
+}
+
+static inline void enable_adc(struct cm_state *s)
+{
+	if (!(s->enable & ENADC)) {
+		/* enable channel */
+		s->enable |= ENADC;
 		outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
 	}
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~PAUSEADC, 0);
+}
+
+static inline void enable_dac_unlocked(struct cm_state *s)
+{
+	if (!(s->enable & ENDAC)) {
+		/* enable channel */
+		s->enable |= ENDAC;
+		outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	}
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~PAUSEDAC, 0);
+
+	if (s->status & DO_DUAL_DAC)
+		enable_adc(s);
+}
+
+static inline void enable_dac(struct cm_state *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	enable_dac_unlocked(s);
 	spin_unlock_irqrestore(&s->lock, flags);
-}	
+}
+
+static inline void stop_adc_unlocked(struct cm_state *s)
+{
+	if (s->enable & ENADC) {
+		/* disable interrupt */
+		maskb(s->iobase + CODEC_CMI_INT_HLDCLR + 2, ~ENADCINT, 0);
+		disable_adc(s);
+	}
+}
+
+static inline void stop_adc(struct cm_state *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	stop_adc_unlocked(s);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+}
+
+static inline void stop_dac_unlocked(struct cm_state *s)
+{
+	if (s->enable & ENDAC) {
+		/* disable interrupt */
+		maskb(s->iobase + CODEC_CMI_INT_HLDCLR + 2, ~ENDACINT, 0);
+		disable_dac(s);
+	}
+	if (s->status & DO_DUAL_DAC)
+		stop_adc_unlocked(s);
+}
+
+static inline void stop_dac(struct cm_state *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	stop_dac_unlocked(s);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
+static inline void start_adc_unlocked(struct cm_state *s)
+{
+	if ((s->dma_adc.mapped || s->dma_adc.count < (signed)(s->dma_adc.dmasize - 2*s->dma_adc.fragsize))
+	    && s->dma_adc.ready) {
+		/* enable interrupt */
+		maskb(s->iobase + CODEC_CMI_INT_HLDCLR + 2, ~0, ENADCINT);
+		enable_adc(s);
+	}
+}
 
 static void start_adc(struct cm_state *s)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&s->lock, flags);
-	if ((s->dma_adc.mapped || s->dma_adc.count < (signed)(s->dma_adc.dmasize - 2*s->dma_adc.fragsize)) 
-	    && s->dma_adc.ready) {
-		outb(inb(s->iobase + CODEC_CMI_INT_HLDCLR + 2) | 2, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-		s->enable |= CM_CENABLE_RE;
-		outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	}
+	start_adc_unlocked(s);
 	spin_unlock_irqrestore(&s->lock, flags);
 }	
+
+static void start_dac1_unlocked(struct cm_state *s)
+{
+	if ((s->dma_adc.mapped || s->dma_adc.count > 0) && s->dma_adc.ready) {
+		/* enable interrupt */
+		maskb(s->iobase + CODEC_CMI_INT_HLDCLR + 2, ~0, ENADCINT);
+ 		enable_dac_unlocked(s);
+	}
+}
+
+static void start_dac_unlocked(struct cm_state *s)
+{
+	if ((s->dma_dac.mapped || s->dma_dac.count > 0) && s->dma_dac.ready) {
+		/* enable interrupt */
+		maskb(s->iobase + CODEC_CMI_INT_HLDCLR + 2, ~0, ENDACINT);
+		enable_dac_unlocked(s);
+	}
+	if (s->status & DO_DUAL_DAC)
+		start_dac1_unlocked(s);
+}
+
+static void start_dac(struct cm_state *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	start_dac_unlocked(s);
+	spin_unlock_irqrestore(&s->lock, flags);
+}	
+
+static int prog_dmabuf(struct cm_state *s, unsigned rec);
+
+static int set_dac_channels(struct cm_state *s, int channels)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&s->lock, flags);
+
+	if ((channels > 2) && (channels <= s->max_channels)
+	 && (((s->fmt >> CM_CFMT_DACSHIFT) & CM_CFMT_MASK) == (CM_CFMT_STEREO | CM_CFMT_16BIT))) {
+	    set_spdifout_unlocked(s, 0);
+	    if (s->capability & CAN_MULTI_CH_HW) {
+		// NXCHG
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 3, ~0, NXCHG);
+		// CHB3D or CHB3D5C
+	       	maskb(s->iobase + CODEC_CMI_CHFORMAT + 3, ~(CHB3D5C|CHB3D), channels > 4 ? CHB3D5C : CHB3D);
+		// CHB3D6C
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 1, ~CHB3D6C, channels == 6 ? CHB3D6C : 0);
+		// ENCENTER 
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL, ~ENCENTER, channels == 6 ? ENCENTER : 0);
+		s->status |= DO_MULTI_CH_HW;
+	    } else if (s->capability & CAN_DUAL_DAC) {
+		unsigned char fmtm = ~0, fmts = 0;
+		ssize_t ret;
+
+		// ENDBDAC, turn on double DAC mode
+		// XCHGDAC, CH0 -> back, CH1->front
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~0, ENDBDAC|XCHGDAC);
+		s->status |= DO_DUAL_DAC;
+		// prepare secondary buffer
+
+		spin_unlock_irqrestore(&s->lock, flags);
+		ret = prog_dmabuf(s, 1);
+		if (ret) return ret;
+		spin_lock_irqsave(&s->lock, flags);
+
+		// copy the hw state
+		fmtm &= ~((CM_CFMT_STEREO | CM_CFMT_16BIT) << CM_CFMT_DACSHIFT);
+		fmtm &= ~((CM_CFMT_STEREO | CM_CFMT_16BIT) << CM_CFMT_ADCSHIFT);
+		// the HW only support 16-bit stereo
+		fmts |= CM_CFMT_16BIT << CM_CFMT_DACSHIFT;
+		fmts |= CM_CFMT_16BIT << CM_CFMT_ADCSHIFT;
+		fmts |= CM_CFMT_STEREO << CM_CFMT_DACSHIFT;
+		fmts |= CM_CFMT_STEREO << CM_CFMT_ADCSHIFT;
+		
+		set_fmt_unlocked(s, fmtm, fmts);
+		set_adc_rate_unlocked(s, s->ratedac);
+
+	    }
+
+	    // N4SPK3D, disable 4 speaker mode (analog duplicate)
+	    if (s->speakers > 2)
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 3, ~N4SPK3D, 0);
+	    s->curr_channels = channels;
+	} else {
+	    if (s->status & DO_MULTI_CH_HW) {
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 3, ~NXCHG, 0);
+		maskb(s->iobase + CODEC_CMI_CHFORMAT + 3, ~(CHB3D5C|CHB3D), 0);
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 1, ~CHB3D6C, 0);
+	    } else if (s->status & DO_DUAL_DAC) {
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~ENDBDAC, 0);
+	    }
+	    // N4SPK3D, enable 4 speaker mode (analog duplicate)
+	    if (s->speakers > 2)
+		maskb(s->iobase + CODEC_CMI_MISC_CTRL + 3, ~0, N4SPK3D);
+	    s->status &= ~DO_MULTI_CH;
+	    s->curr_channels = s->fmt & (CM_CFMT_STEREO << CM_CFMT_DACSHIFT) ? 2 : 1;
+	}
+
+	spin_unlock_irqrestore(&s->lock, flags);
+	return s->curr_channels;
+}
 
 /* --------------------------------------------------------------------- */
 
@@ -591,7 +1210,7 @@ static void start_adc(struct cm_state *s)
 static void dealloc_dmabuf(struct dmabuf *db)
 {
 	struct page *pstart, *pend;
-
+	
 	if (db->rawbuf) {
 		/* undo marking the pages as reserved */
 		pend = virt_to_page(db->rawbuf + (PAGE_SIZE << db->buforder) - 1);
@@ -603,8 +1222,7 @@ static void dealloc_dmabuf(struct dmabuf *db)
 	db->mapped = db->ready = 0;
 }
 
-
-/* Ch0 is used for playback, Ch1 is used for recording */
+/* Ch1 is used for playback, Ch0 is used for recording */
 
 static int prog_dmabuf(struct cm_state *s, unsigned rec)
 {
@@ -617,17 +1235,15 @@ static int prog_dmabuf(struct cm_state *s, unsigned rec)
 	unsigned char fmt;
 	unsigned long flags;
 
-	spin_lock_irqsave(&s->lock, flags);
 	fmt = s->fmt;
 	if (rec) {
-		s->enable &= ~CM_CENABLE_RE;
+		stop_adc(s);
 		fmt >>= CM_CFMT_ADCSHIFT;
 	} else {
-		s->enable &= ~CM_CENABLE_PE;
+		stop_dac(s);
 		fmt >>= CM_CFMT_DACSHIFT;
 	}
-	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
-	spin_unlock_irqrestore(&s->lock, flags);
+
 	fmt &= CM_CFMT_MASK;
 	db->hwptr = db->swptr = db->total_bytes = db->count = db->error = db->endcleared = 0;
 	if (!db->rawbuf) {
@@ -638,12 +1254,13 @@ static int prog_dmabuf(struct cm_state *s, unsigned rec)
 		if (!db->rawbuf)
 			return -ENOMEM;
 		db->buforder = order;
-		if ((virt_to_bus(db->rawbuf) ^ (virt_to_bus(db->rawbuf) + (PAGE_SIZE << db->buforder) - 1)) & ~0xffff)
+		db->rawphys = virt_to_bus(db->rawbuf);
+		if ((db->rawphys ^ (db->rawphys + (PAGE_SIZE << db->buforder) - 1)) & ~0xffff)
 			printk(KERN_DEBUG "cmpci: DMA buffer crosses 64k boundary: busaddr 0x%lx  size %ld\n", 
-			       virt_to_bus(db->rawbuf), PAGE_SIZE << db->buforder);
-		if ((virt_to_bus(db->rawbuf) + (PAGE_SIZE << db->buforder) - 1) & ~0xffffff)
+			       (long) db->rawphys, PAGE_SIZE << db->buforder);
+		if ((db->rawphys + (PAGE_SIZE << db->buforder) - 1) & ~0xffffff)
 			printk(KERN_DEBUG "cmpci: DMA buffer beyond 16MB: busaddr 0x%lx  size %ld\n", 
-			       virt_to_bus(db->rawbuf), PAGE_SIZE << db->buforder);
+			       (long) db->rawphys, PAGE_SIZE << db->buforder);
 		/* now mark the pages as reserved; otherwise remap_page_range doesn't do what we want */
 		pend = virt_to_page(db->rawbuf + (PAGE_SIZE << db->buforder) - 1);
 		for (pstart = virt_to_page(db->rawbuf); pstart <= pend; pstart++)
@@ -670,40 +1287,33 @@ static int prog_dmabuf(struct cm_state *s, unsigned rec)
 	if (db->ossmaxfrags >= 4 && db->ossmaxfrags < db->numfrag)
 		db->numfrag = db->ossmaxfrags;
  	/* to make fragsize >= 4096 */
-#if 0 	
- 	if(s->modem)
- 	{
-	 	while (db->fragsize < 4096 && db->numfrag >= 4)
-		{
-			db->fragsize *= 2;
- 			db->fragshift++;
- 			db->numfrag /= 2;
- 		}
-	}
-#endif	
 	db->fragsamples = db->fragsize >> sample_shift[fmt];
 	db->dmasize = db->numfrag << db->fragshift;
 	db->dmasamples = db->dmasize >> sample_shift[fmt];
 	memset(db->rawbuf, (fmt & CM_CFMT_16BIT) ? 0 : 0x80, db->dmasize);
 	spin_lock_irqsave(&s->lock, flags);
 	if (rec) {
-		set_dmaadc(s, virt_to_bus(db->rawbuf), db->dmasize >> sample_shift[fmt]);
+		if (s->status & DO_DUAL_DAC)
+		    set_dmadac1(s, db->rawphys, db->dmasize >> sample_shift[fmt]);
+		else
+		    set_dmaadc(s, db->rawphys, db->dmasize >> sample_shift[fmt]);
 		/* program sample counts */
-		outw(db->fragsamples-1, s->iobase + CODEC_CMI_CH1_FRAME2 + 2);
+		set_countdac(s, db->fragsamples);
 	} else {
-		set_dmadac(s, virt_to_bus(db->rawbuf), db->dmasize >> sample_shift[fmt]);
+		set_dmadac(s, db->rawphys, db->dmasize >> sample_shift[fmt]);
 		/* program sample counts */
-		outw(db->fragsamples-1, s->iobase + CODEC_CMI_CH0_FRAME2 + 2);
+		set_countdac(s, db->fragsamples);
 	}
 	spin_unlock_irqrestore(&s->lock, flags);
 	db->ready = 1;
 	return 0;
 }
 
-extern __inline__ void clear_advance(struct cm_state *s)
+static inline void clear_advance(struct cm_state *s)
 {
 	unsigned char c = (s->fmt & (CM_CFMT_16BIT << CM_CFMT_DACSHIFT)) ? 0 : 0x80;
 	unsigned char *buf = s->dma_dac.rawbuf;
+	unsigned char *buf1 = s->dma_adc.rawbuf;
 	unsigned bsize = s->dma_dac.dmasize;
 	unsigned bptr = s->dma_dac.swptr;
 	unsigned len = s->dma_dac.fragsize;
@@ -711,11 +1321,14 @@ extern __inline__ void clear_advance(struct cm_state *s)
 	if (bptr + len > bsize) {
 		unsigned x = bsize - bptr;
 		memset(buf + bptr, c, x);
+		if (s->status & DO_DUAL_DAC)
+			memset(buf1 + bptr, c, x);
 		bptr = 0;
 		len -= x;
 	}
 	memset(buf + bptr, c, len);
-	outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+	if (s->status & DO_DUAL_DAC)
+		memset(buf1 + bptr, c, len);
 }
 
 /* call with spinlock held! */
@@ -726,7 +1339,29 @@ static void cm_update_ptr(struct cm_state *s)
 
 	/* update ADC pointer */
 	if (s->dma_adc.ready) {
-		hwptr = (s->dma_adc.dmasize - get_dmaadc(s)) % s->dma_adc.dmasize;
+	    if (s->status & DO_DUAL_DAC) {
+		hwptr = get_dmaadc(s) % s->dma_adc.dmasize;
+		diff = (s->dma_adc.dmasize + hwptr - s->dma_adc.hwptr) % s->dma_adc.dmasize;
+		s->dma_adc.hwptr = hwptr;
+		s->dma_adc.total_bytes += diff;
+		if (s->dma_adc.mapped) {
+			s->dma_adc.count += diff;
+			if (s->dma_adc.count >= (signed)s->dma_adc.fragsize)
+				wake_up(&s->dma_adc.wait);
+		} else {
+			s->dma_adc.count -= diff;
+			if (s->dma_adc.count <= 0) {
+				pause_adc(s);
+				s->dma_adc.error++;
+			} else if (s->dma_adc.count <= (signed)s->dma_adc.fragsize && !s->dma_adc.endcleared) {
+				clear_advance(s);
+				s->dma_adc.endcleared = 1;
+			}
+			if (s->dma_dac.count + (signed)s->dma_dac.fragsize <= (signed)s->dma_dac.dmasize)
+				wake_up(&s->dma_adc.wait);
+		}
+	    } else {
+		hwptr = get_dmaadc(s) % s->dma_adc.dmasize;
 		diff = (s->dma_adc.dmasize + hwptr - s->dma_adc.hwptr) % s->dma_adc.dmasize;
 		s->dma_adc.hwptr = hwptr;
 		s->dma_adc.total_bytes += diff;
@@ -735,15 +1370,15 @@ static void cm_update_ptr(struct cm_state *s)
 			wake_up(&s->dma_adc.wait);
 		if (!s->dma_adc.mapped) {
 			if (s->dma_adc.count > (signed)(s->dma_adc.dmasize - ((3 * s->dma_adc.fragsize) >> 1))) {
-				s->enable &= ~CM_CENABLE_RE;
-				outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+				pause_adc(s);
 				s->dma_adc.error++;
 			}
 		}
+	    }
 	}
 	/* update DAC pointer */
 	if (s->dma_dac.ready) {
-		hwptr = (s->dma_dac.dmasize - get_dmadac(s)) % s->dma_dac.dmasize;
+		hwptr = get_dmadac(s) % s->dma_dac.dmasize;
 		diff = (s->dma_dac.dmasize + hwptr - s->dma_dac.hwptr) % s->dma_dac.dmasize;
 		s->dma_dac.hwptr = hwptr;
 		s->dma_dac.total_bytes += diff;
@@ -754,8 +1389,7 @@ static void cm_update_ptr(struct cm_state *s)
 		} else {
 			s->dma_dac.count -= diff;
 			if (s->dma_dac.count <= 0) {
-				s->enable &= ~CM_CENABLE_PE;
-				outb(s->enable, s->iobase + CODEC_CMI_FUNCTRL0 + 2);
+				pause_dac(s);
 				s->dma_dac.error++;
 			} else if (s->dma_dac.count <= (signed)s->dma_dac.fragsize && !s->dma_dac.endcleared) {
 				clear_advance(s);
@@ -767,6 +1401,7 @@ static void cm_update_ptr(struct cm_state *s)
 	}
 }
 
+#ifdef CONFIG_SOUND_CMPCI_MIDI
 /* hold spinlock for the following! */
 static void cm_handle_midi(struct cm_state *s)
 {
@@ -796,11 +1431,13 @@ static void cm_handle_midi(struct cm_state *s)
 	if (wake)
 		wake_up(&s->midi.owait);
 }
+#endif
 
 static void cm_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
         struct cm_state *s = (struct cm_state *)dev_id;
 	unsigned int intsrc, intstat;
+	unsigned char mask = 0;
 	
 	/* fastpath out, to ease interrupt sharing */
 	intsrc = inl(s->iobase + CODEC_CMI_INT_STATUS);
@@ -809,23 +1446,20 @@ static void cm_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	spin_lock(&s->lock);
 	intstat = inb(s->iobase + CODEC_CMI_INT_HLDCLR + 2);
 	/* acknowledge interrupt */
-	if (intsrc & CM_INT_CH0)
-	{
-		outb(intstat & ~1, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-		udelay(10);
-		outb(intstat | 1, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-	}
-	if (intsrc & CM_INT_CH1)
-	{
-		outb(intstat & ~2, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-		udelay(10);
-		outb(intstat | 2, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
-	}
+	if (intsrc & ADCINT)
+		mask |= ENADCINT;
+	if (intsrc & DACINT)
+		mask |= ENDACINT;
+	outb(intstat & ~mask, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
+	outb(intstat | mask, s->iobase + CODEC_CMI_INT_HLDCLR + 2);
 	cm_update_ptr(s);
+#ifdef CONFIG_SOUND_CMPCI_MIDI
 	cm_handle_midi(s);
+#endif
 	spin_unlock(&s->lock);
 }
 
+#ifdef CONFIG_SOUND_CMPCI_MIDI
 static void cm_midi_timer(unsigned long data)
 {
 	struct cm_state *s = (struct cm_state *)data;
@@ -837,6 +1471,7 @@ static void cm_midi_timer(unsigned long data)
 	s->midi.timer.expires = jiffies+1;
 	add_timer(&s->midi.timer);
 }
+#endif
 
 /* --------------------------------------------------------------------- */
 
@@ -874,61 +1509,10 @@ static const struct {
 	[SOUND_MIXER_MIC]    = { DSP_MIX_MICVOLIDX,      DSP_MIX_MICVOLIDX,      MT_5MUTEMONO, 0x01, 0x01 },
 	[SOUND_MIXER_SYNTH]  = { DSP_MIX_FMVOLIDX_L,  	 DSP_MIX_FMVOLIDX_R,     MT_5MUTE,     0x40, 0x00 },
 	[SOUND_MIXER_VOLUME] = { DSP_MIX_MASTERVOLIDX_L, DSP_MIX_MASTERVOLIDX_R, MT_5MUTE,     0x00, 0x00 },
-	[SOUND_MIXER_PCM]    = { DSP_MIX_VOICEVOLIDX_L,  DSP_MIX_VOICEVOLIDX_R,  MT_5MUTE,     0x00, 0x00 }
+	[SOUND_MIXER_PCM]    = { DSP_MIX_VOICEVOLIDX_L,  DSP_MIX_VOICEVOLIDX_R,  MT_5MUTE,     0x00, 0x00 },
+	[SOUND_MIXER_LINE1]  = { DSP_MIX_AUXVOL_L,       DSP_MIX_AUXVOL_R,       MT_5MUTE,     0x80, 0x20 },
+	[SOUND_MIXER_SPEAKER]= { DSP_MIX_SPKRVOLIDX,	 DSP_MIX_SPKRVOLIDX,	 MT_5MUTEMONO, 0x01, 0x01 }
 };
-
-#ifdef OSS_DOCUMENTED_MIXER_SEMANTICS
-
-static int return_mixval(struct cm_state *s, unsigned i, int *arg)
-{
-	unsigned long flags;
-	unsigned char l, r, rl, rr;
-
-	spin_lock_irqsave(&s->lock, flags);
-	l = rdmixer(s, mixtable[i].left);
-	r = rdmixer(s, mixtable[i].right);
-	spin_unlock_irqrestore(&s->lock, flags);
-	switch (mixtable[i].type) {
-	case MT_4:
-		r &= 0xf;
-		l &= 0xf;
-		rl = 10 + 6 * (l & 15);
-		rr = 10 + 6 * (r & 15);
-		break;
-
-	case MT_4MUTEMONO:
-		rl = 55 - 3 * (l & 15);
-		if (r & 0x10)
-			rl += 45;
-		rr = rl;
-		r = l;
-		break;
-
-	case MT_5MUTEMONO:
-		r = l;
-		rl = 100 - 3 * ((l >> 3) & 31);
-		rr = rl;
-		break;
-				
-	case MT_5MUTE:
-	default:
-		rl = 100 - 3 * ((l >> 3) & 31);
-		rr = 100 - 3 * ((r >> 3) & 31);
-		break;
-				
-	case MT_6MUTE:
-		rl = 100 - 3 * (l & 63) / 2;
-		rr = 100 - 3 * (r & 63) / 2;
-		break;
-	}
-	if (l & 0x80)
-		rl = 0;
-	if (r & 0x80)
-		rr = 0;
-	return put_user((rr << 8) | rl, arg);
-}
-
-#else /* OSS_DOCUMENTED_MIXER_SEMANTICS */
 
 static const unsigned char volidx[SOUND_MIXER_NRDEVICES] = 
 {
@@ -937,10 +1521,24 @@ static const unsigned char volidx[SOUND_MIXER_NRDEVICES] =
 	[SOUND_MIXER_MIC]    = 3,
 	[SOUND_MIXER_SYNTH]  = 4,
 	[SOUND_MIXER_VOLUME] = 5,
-	[SOUND_MIXER_PCM]    = 6
+	[SOUND_MIXER_PCM]    = 6,
+	[SOUND_MIXER_LINE1]  = 7,
+	[SOUND_MIXER_SPEAKER]= 8
 };
 
-#endif /* OSS_DOCUMENTED_MIXER_SEMANTICS */
+static unsigned mixer_outmask(struct cm_state *s)
+{
+	unsigned long flags;
+	int i, j, k;
+
+	spin_lock_irqsave(&s->lock, flags);
+	j = rdmixer(s, DSP_MIX_OUTMIXIDX);
+	spin_unlock_irqrestore(&s->lock, flags);
+	for (k = i = 0; i < SOUND_MIXER_NRDEVICES; i++)
+		if (j & mixtable[i].play)
+			k |= 1 << i;
+	return k;
+}
 
 static unsigned mixer_recmask(struct cm_state *s)
 {
@@ -950,7 +1548,6 @@ static unsigned mixer_recmask(struct cm_state *s)
 	spin_lock_irqsave(&s->lock, flags);
 	j = rdmixer(s, DSP_MIX_ADCMIXIDX_L);
 	spin_unlock_irqrestore(&s->lock, flags);
-	j &= 0x7f;
 	for (k = i = 0; i < SOUND_MIXER_NRDEVICES; i++)
 		if (j & mixtable[i].rec)
 			k |= 1 << i;
@@ -983,15 +1580,15 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 	}
 	if (cmd == OSS_GETVERSION)
 		return put_user(SOUND_VERSION, (int *)arg);
-	if (_IOC_TYPE(cmd) != 'M' || _SIOC_SIZE(cmd) != sizeof(int))
+	if (_IOC_TYPE(cmd) != 'M' || _IOC_SIZE(cmd) != sizeof(int))
                 return -EINVAL;
-        if (_SIOC_DIR(cmd) == _SIOC_READ) {
+        if (_IOC_DIR(cmd) == _IOC_READ) {
                 switch (_IOC_NR(cmd)) {
                 case SOUND_MIXER_RECSRC: /* Arg contains a bit for each recording source */
 			return put_user(mixer_recmask(s), (int *)arg);
 			
                 case SOUND_MIXER_OUTSRC: /* Arg contains a bit for each recording source */
-			return put_user(mixer_recmask(s), (int *)arg);//need fix
+			return put_user(mixer_outmask(s), (int *)arg);
 			
                 case SOUND_MIXER_DEVMASK: /* Arg contains a bit for each supported device */
 			for (val = i = 0; i < SOUND_MIXER_NRDEVICES; i++)
@@ -1024,23 +1621,19 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 			i = _IOC_NR(cmd);
                         if (i >= SOUND_MIXER_NRDEVICES || !mixtable[i].type)
                                 return -EINVAL;
-#ifdef OSS_DOCUMENTED_MIXER_SEMANTICS
-			return return_mixval(s, i, (int *)arg);
-#else /* OSS_DOCUMENTED_MIXER_SEMANTICS */
 			if (!volidx[i])
 				return -EINVAL;
 			return put_user(s->mix.vol[volidx[i]-1], (int *)arg);
-#endif /* OSS_DOCUMENTED_MIXER_SEMANTICS */
 		}
 	}
-        if (_SIOC_DIR(cmd) != (_SIOC_READ|_SIOC_WRITE)) 
+        if (_IOC_DIR(cmd) != (_IOC_READ|_IOC_WRITE)) 
 		return -EINVAL;
 	s->mix.modcnt++;
 	switch (_IOC_NR(cmd)) {
 	case SOUND_MIXER_RECSRC: /* Arg contains a bit for each recording source */
 		if (get_user(val, (int *)arg))
 			return -EFAULT;
-		i = hweight32(val);
+		i = generic_hweight32(val);
 		for (j = i = 0; i < SOUND_MIXER_NRDEVICES; i++) {
 			if (!(val & (1 << i)))
 				continue;
@@ -1052,7 +1645,7 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 		}
 		spin_lock_irqsave(&s->lock, flags);
 		wrmixer(s, DSP_MIX_ADCMIXIDX_L, j);
-		wrmixer(s, DSP_MIX_ADCMIXIDX_R, (j & 1) | (j>>1));
+		wrmixer(s, DSP_MIX_ADCMIXIDX_R, (j & 1) | (j>>1) | (j & 0x80));
 		spin_unlock_irqrestore(&s->lock, flags);
 		return 0;
 
@@ -1069,11 +1662,11 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 			j |= mixtable[i].play;
 		}
 		spin_lock_irqsave(&s->lock, flags);
-		frobindir(s, DSP_MIX_OUTMIXIDX, 0x1f, j);
+		wrmixer(s, DSP_MIX_OUTMIXIDX, j);
 		spin_unlock_irqrestore(&s->lock, flags);
 		return 0;
 
-		default:
+	default:
 		i = _IOC_NR(cmd);
 		if (i >= SOUND_MIXER_NRDEVICES || !mixtable[i].type)
 			return -EINVAL;
@@ -1100,15 +1693,28 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 			rl = (l < 4 ? 0 : (l - 5) / 3) & 31;
 			rr = (rl >> 2) & 7;
 			wrmixer(s, mixtable[i].left, rl<<3);
-			outb((inb(s->iobase + CODEC_CMI_MIXER2) & ~0x0e) | rr<<1, s->iobase + CODEC_CMI_MIXER2);
+			if (i == SOUND_MIXER_MIC)
+				maskb(s->iobase + CODEC_CMI_MIXER2, ~0x0e, rr<<1);
 			break;
 			
 		case MT_5MUTEMONO:
 			r = l;
 			rl = l < 4 ? 0 : (l - 5) / 3;
-			rr = rl >> 2;
  			wrmixer(s, mixtable[i].left, rl<<3);
-			outb((inb(s->iobase + CODEC_CMI_MIXER2) & ~0x0e) | rr<<1, s->iobase + CODEC_CMI_MIXER2);
+			l = rdmixer(s, DSP_MIX_OUTMIXIDX) & ~mixtable[i].play;
+			rr = rl ? mixtable[i].play : 0;
+			wrmixer(s, DSP_MIX_OUTMIXIDX, l | rr);
+			/* for recording */
+			if (i == SOUND_MIXER_MIC) {
+				if (s->chip_version >= 39) {
+					rr = rl >> 1;
+					maskb(s->iobase + CODEC_CMI_MIXER2, ~0x0e, rr&0x07);
+					frobindir(s, DSP_MIX_EXTENSION, 0x01, rr>>3);
+				} else {
+					rr = rl >> 2;
+					maskb(s->iobase + CODEC_CMI_MIXER2, ~0x0e, rr<<1);
+				}
+			}
 			break;
 				
 		case MT_5MUTE:
@@ -1116,8 +1722,12 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 			rr = r < 4 ? 0 : (r - 5) / 3;
  			wrmixer(s, mixtable[i].left, rl<<3);
 			wrmixer(s, mixtable[i].right, rr<<3);
+			l = rdmixer(s, DSP_MIX_OUTMIXIDX);
+			l &= ~mixtable[i].play;
+			r = (rl|rr) ? mixtable[i].play : 0;
+			wrmixer(s, DSP_MIX_OUTMIXIDX, l | r);
 			break;
-				
+
 		case MT_6MUTE:
 			if (l < 6)
 				rl = 0x00;
@@ -1132,22 +1742,12 @@ static int mixer_ioctl(struct cm_state *s, unsigned int cmd, unsigned long arg)
 			break;
 		}
 		spin_unlock_irqrestore(&s->lock, flags);
-#ifdef OSS_DOCUMENTED_MIXER_SEMANTICS
-                return return_mixval(s, i, (int *)arg);
-#else /* OSS_DOCUMENTED_MIXER_SEMANTICS */
+
 		if (!volidx[i])
 			return -EINVAL;
 		s->mix.vol[volidx[i]-1] = val;
 		return put_user(s->mix.vol[volidx[i]-1], (int *)arg);
-#endif /* OSS_DOCUMENTED_MIXER_SEMANTICS */
 	}
-}
-
-/* --------------------------------------------------------------------- */
-
-static loff_t cm_llseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
 }
 
 /* --------------------------------------------------------------------- */
@@ -1155,12 +1755,16 @@ static loff_t cm_llseek(struct file *file, loff_t offset, int origin)
 static int cm_open_mixdev(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct cm_state *s = devs;
+	struct list_head *list;
+	struct cm_state *s;
 
-	while (s && s->dev_mixer != minor)
-		s = s->next;
-	if (!s)
-		return -ENODEV;
+	for (list = devs.next; ; list = list->next) {
+		if (list == &devs)
+			return -ENODEV;
+		s = list_entry(list, struct cm_state, devs);
+		if (s->dev_mixer == minor)
+			break;
+	}
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	return 0;
@@ -1181,17 +1785,18 @@ static int cm_ioctl_mixdev(struct inode *inode, struct file *file, unsigned int 
 
 static /*const*/ struct file_operations cm_mixer_fops = {
 	owner:		THIS_MODULE,
-	llseek:		cm_llseek,
+	llseek:		no_llseek,
 	ioctl:		cm_ioctl_mixdev,
 	open:		cm_open_mixdev,
 	release:	cm_release_mixdev,
 };
 
+
 /* --------------------------------------------------------------------- */
 
 static int drain_dac(struct cm_state *s, int nonblock)
 {
-        DECLARE_WAITQUEUE(wait, current);
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	int count, tmo;
 
@@ -1199,7 +1804,7 @@ static int drain_dac(struct cm_state *s, int nonblock)
 		return 0;
         add_wait_queue(&s->dma_dac.wait, &wait);
         for (;;) {
-		set_current_state(TASK_INTERRUPTIBLE);
+        	__set_current_state(TASK_INTERRUPTIBLE);
                 spin_lock_irqsave(&s->lock, flags);
 		count = s->dma_dac.count;
                 spin_unlock_irqrestore(&s->lock, flags);
@@ -1209,16 +1814,16 @@ static int drain_dac(struct cm_state *s, int nonblock)
                         break;
                 if (nonblock) {
                         remove_wait_queue(&s->dma_dac.wait, &wait);
-                        current->state = TASK_RUNNING;
+                        set_current_state(TASK_RUNNING);
                         return -EBUSY;
                 }
-		tmo = (count * HZ) / s->ratedac;
+		tmo = 3 * HZ * (count + s->dma_dac.fragsize) / 2 / s->ratedac;
 		tmo >>= sample_shift[(s->fmt >> CM_CFMT_DACSHIFT) & CM_CFMT_MASK];
-		if (!schedule_timeout(tmo ? : 1) && tmo)
+		if (!schedule_timeout(tmo + 1))
 			printk(KERN_DEBUG "cmpci: dma timed out??\n");
         }
         remove_wait_queue(&s->dma_dac.wait, &wait);
-        current->state = TASK_RUNNING;
+        set_current_state(TASK_RUNNING);
         if (signal_pending(current))
                 return -ERESTARTSYS;
         return 0;
@@ -1229,6 +1834,7 @@ static int drain_dac(struct cm_state *s, int nonblock)
 static ssize_t cm_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
 	struct cm_state *s = (struct cm_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned swptr;
@@ -1244,58 +1850,70 @@ static ssize_t cm_read(struct file *file, char *buffer, size_t count, loff_t *pp
 	if (!access_ok(VERIFY_WRITE, buffer, count))
 		return -EFAULT;
 	ret = 0;
-#if 0
-   spin_lock_irqsave(&s->lock, flags);
-   cm_update_ptr(s);
-   spin_unlock_irqrestore(&s->lock, flags);
-#endif
+
+        add_wait_queue(&s->dma_adc.wait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		swptr = s->dma_adc.swptr;
 		cnt = s->dma_adc.dmasize-swptr;
 		if (s->dma_adc.count < cnt)
 			cnt = s->dma_adc.count;
+		if (cnt <= 0)
+			__set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
 			start_adc(s);
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EAGAIN;
-			if (!interruptible_sleep_on_timeout(&s->dma_adc.wait, HZ)) {
+			if (file->f_flags & O_NONBLOCK) {
+				if (!ret)
+					ret = -EAGAIN;
+				goto out;
+			}
+			if (!schedule_timeout(HZ)) {
 				printk(KERN_DEBUG "cmpci: read: chip lockup? dmasz %u fragsz %u count %i hwptr %u swptr %u\n",
 				       s->dma_adc.dmasize, s->dma_adc.fragsize, s->dma_adc.count,
 				       s->dma_adc.hwptr, s->dma_adc.swptr);
-				stop_adc(s);
 				spin_lock_irqsave(&s->lock, flags);
-				set_dmaadc(s, virt_to_bus(s->dma_adc.rawbuf), s->dma_adc.dmasamples);
+				stop_adc_unlocked(s);
+				set_dmaadc(s, s->dma_adc.rawphys, s->dma_adc.dmasamples);
 				/* program sample counts */
-				outw(s->dma_adc.fragsamples-1, s->iobase + CODEC_CMI_CH1_FRAME2 + 2);
+				set_countadc(s, s->dma_adc.fragsamples);
 				s->dma_adc.count = s->dma_adc.hwptr = s->dma_adc.swptr = 0;
 				spin_unlock_irqrestore(&s->lock, flags);
 			}
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+			if (signal_pending(current)) {
+				if (!ret)
+					ret = -ERESTARTSYS;
+				goto out;
+			}
 			continue;
 		}
-		if (copy_to_user(buffer, s->dma_adc.rawbuf + swptr, cnt))
-			return ret ? ret : -EFAULT;
+		if (copy_to_user(buffer, s->dma_adc.rawbuf + swptr, cnt)) {
+			if (!ret)
+				ret = -EFAULT;
+			goto out;
+		}
 		swptr = (swptr + cnt) % s->dma_adc.dmasize;
 		spin_lock_irqsave(&s->lock, flags);
 		s->dma_adc.swptr = swptr;
 		s->dma_adc.count -= cnt;
-		spin_unlock_irqrestore(&s->lock, flags);
 		count -= cnt;
 		buffer += cnt;
 		ret += cnt;
-		start_adc(s);
+		start_adc_unlocked(s);
+		spin_unlock_irqrestore(&s->lock, flags);
 	}
+out:
+	remove_wait_queue(&s->dma_adc.wait, &wait);
+	set_current_state(TASK_RUNNING);
 	return ret;
 }
 
 static ssize_t cm_write(struct file *file, const char *buffer, size_t count, loff_t *ppos)
 {
 	struct cm_state *s = (struct cm_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned swptr;
@@ -1310,62 +1928,127 @@ static ssize_t cm_write(struct file *file, const char *buffer, size_t count, lof
 		return ret;
 	if (!access_ok(VERIFY_READ, buffer, count))
 		return -EFAULT;
+	if (s->status & DO_DUAL_DAC) {
+		if (s->dma_adc.mapped)
+			return -ENXIO;
+		if (!s->dma_adc.ready && (ret = prog_dmabuf(s, 1)))
+			return ret;
+	}
+	if (!access_ok(VERIFY_READ, buffer, count))
+		return -EFAULT;
 	ret = 0;
-#if 0
-   spin_lock_irqsave(&s->lock, flags);
-   cm_update_ptr(s);
-   spin_unlock_irqrestore(&s->lock, flags);
-#endif
+
+        add_wait_queue(&s->dma_dac.wait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		if (s->dma_dac.count < 0) {
 			s->dma_dac.count = 0;
 			s->dma_dac.swptr = s->dma_dac.hwptr;
 		}
+		if (s->status & DO_DUAL_DAC) {
+			s->dma_adc.swptr = s->dma_dac.swptr;
+			s->dma_adc.count = s->dma_dac.count;
+			s->dma_adc.endcleared = s->dma_dac.endcleared;
+		}
 		swptr = s->dma_dac.swptr;
 		cnt = s->dma_dac.dmasize-swptr;
-		if (s->dma_dac.count + cnt > s->dma_dac.dmasize)
-			cnt = s->dma_dac.dmasize - s->dma_dac.count;
+		if (s->status & DO_AC3_SW) {
+			if (s->dma_dac.count + 2 * cnt > s->dma_dac.dmasize)
+				cnt = (s->dma_dac.dmasize - s->dma_dac.count) / 2;
+		} else {
+			if (s->dma_dac.count + cnt > s->dma_dac.dmasize)
+				cnt = s->dma_dac.dmasize - s->dma_dac.count;
+		}
+		if (cnt <= 0)
+			__set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
+		if ((s->status & DO_DUAL_DAC) && (cnt > count / 2))
+		    cnt = count / 2;
 		if (cnt <= 0) {
 			start_dac(s);
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EAGAIN;
-			if (!interruptible_sleep_on_timeout(&s->dma_dac.wait, HZ)) {
+			if (file->f_flags & O_NONBLOCK) {
+				if (!ret)
+					ret = -EAGAIN;
+				goto out;
+			}
+			if (!schedule_timeout(HZ)) {
 				printk(KERN_DEBUG "cmpci: write: chip lockup? dmasz %u fragsz %u count %i hwptr %u swptr %u\n",
 				       s->dma_dac.dmasize, s->dma_dac.fragsize, s->dma_dac.count,
 				       s->dma_dac.hwptr, s->dma_dac.swptr);
-				stop_dac(s);
 				spin_lock_irqsave(&s->lock, flags);
-				set_dmadac(s, virt_to_bus(s->dma_dac.rawbuf), s->dma_dac.dmasamples);
+				stop_dac_unlocked(s);
+				set_dmadac(s, s->dma_dac.rawphys, s->dma_dac.dmasamples);
 				/* program sample counts */
-				outw(s->dma_dac.fragsamples-1, s->iobase + CODEC_CMI_CH0_FRAME2 + 2);
+				set_countdac(s, s->dma_dac.fragsamples);
 				s->dma_dac.count = s->dma_dac.hwptr = s->dma_dac.swptr = 0;
+				if (s->status & DO_DUAL_DAC)  {
+					set_dmadac1(s, s->dma_adc.rawphys, s->dma_adc.dmasamples);
+					s->dma_adc.count = s->dma_adc.hwptr = s->dma_adc.swptr = 0;
+				}
 				spin_unlock_irqrestore(&s->lock, flags);
 			}
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+			if (signal_pending(current)) {
+				if (!ret)
+					ret = -ERESTARTSYS;
+				goto out;
+			}
 			continue;
 		}
-		if (copy_from_user(s->dma_dac.rawbuf + swptr, buffer, cnt))
-			return ret ? ret : -EFAULT;
-		swptr = (swptr + cnt) % s->dma_dac.dmasize;
+		if (s->status & DO_AC3_SW) {
+			// clip exceeded data, caught by 033 and 037
+			if (swptr + 2 * cnt > s->dma_dac.dmasize)
+				cnt = (s->dma_dac.dmasize - swptr) / 2;
+			if ((ret = trans_ac3(s, s->dma_dac.rawbuf + swptr, buffer, cnt)))
+				goto out;
+			swptr = (swptr + 2 * cnt) % s->dma_dac.dmasize;
+		} else if (s->status & DO_DUAL_DAC) {
+			int	i;
+			unsigned long *src, *dst0, *dst1;
+
+			src = (unsigned long *) buffer;
+			dst0 = (unsigned long *) (s->dma_dac.rawbuf + swptr);
+			dst1 = (unsigned long *) (s->dma_adc.rawbuf + swptr);
+			// copy left/right sample at one time
+			for (i = 0; i <= cnt / 4; i++) {
+				if ((ret = __get_user(*dst0++, src++)))
+					goto out;
+				if ((ret = __get_user(*dst1++, src++)))
+					goto out;
+			}
+			swptr = (swptr + cnt) % s->dma_dac.dmasize;
+		} else {
+			if (copy_from_user(s->dma_dac.rawbuf + swptr, buffer, cnt)) {
+				if (!ret)
+					ret = -EFAULT;
+				goto out;
+			}
+			swptr = (swptr + cnt) % s->dma_dac.dmasize;
+		}
 		spin_lock_irqsave(&s->lock, flags);
 		s->dma_dac.swptr = swptr;
 		s->dma_dac.count += cnt;
+		if (s->status & DO_AC3_SW)
+			s->dma_dac.count += cnt;
 		s->dma_dac.endcleared = 0;
 		spin_unlock_irqrestore(&s->lock, flags);
 		count -= cnt;
 		buffer += cnt;
 		ret += cnt;
+		if (s->status & DO_DUAL_DAC) {
+			count -= cnt;
+			buffer += cnt;
+			ret += cnt;
+		}
 		start_dac(s);
 	}
+out:
+	remove_wait_queue(&s->dma_dac.wait, &wait);
+	set_current_state(TASK_RUNNING);
 	return ret;
 }
 
-/* No kernel lock - fine (we have our own spinlock) */
 static unsigned int cm_poll(struct file *file, struct poll_table_struct *wait)
 {
 	struct cm_state *s = (struct cm_state *)file->private_data;
@@ -1373,17 +2056,10 @@ static unsigned int cm_poll(struct file *file, struct poll_table_struct *wait)
 	unsigned int mask = 0;
 
 	VALIDATE_STATE(s);
-	if (file->f_mode & FMODE_WRITE) {
-		if (!s->dma_dac.ready && prog_dmabuf(s, 0))
-			return 0;
+	if (file->f_mode & FMODE_WRITE)
 		poll_wait(file, &s->dma_dac.wait, wait);
-	}
-	if (file->f_mode & FMODE_READ) {
-		if (!s->dma_adc.ready && prog_dmabuf(s, 1))
-			return 0;
+	if (file->f_mode & FMODE_READ)
 		poll_wait(file, &s->dma_adc.wait, wait);
-	}
-
 	spin_lock_irqsave(&s->lock, flags);
 	cm_update_ptr(s);
 	if (file->f_mode & FMODE_READ) {
@@ -1413,14 +2089,14 @@ static int cm_mmap(struct file *file, struct vm_area_struct *vma)
 	VALIDATE_STATE(s);
 	lock_kernel();
 	if (vma->vm_flags & VM_WRITE) {
-		if ((ret = prog_dmabuf(s, 1)) != 0)
+		if ((ret = prog_dmabuf(s, 0)) != 0)
 			goto out;
 		db = &s->dma_dac;
 	} else if (vma->vm_flags & VM_READ) {
-		if ((ret = prog_dmabuf(s, 0)) != 0)
+		if ((ret = prog_dmabuf(s, 1)) != 0)
 			goto out;
 		db = &s->dma_adc;
-	} else 
+	} else
 		goto out;
 	ret = -EINVAL;
 	if (vma->vm_pgoff != 0)
@@ -1428,7 +2104,7 @@ static int cm_mmap(struct file *file, struct vm_area_struct *vma)
 	size = vma->vm_end - vma->vm_start;
 	if (size > (PAGE_SIZE << db->buforder))
 		goto out;
-	ret = -EAGAIN;
+	ret = -EINVAL;
 	if (remap_page_range(vma->vm_start, virt_to_phys(db->rawbuf), size, vma->vm_page_prot))
 		goto out;
 	db->mapped = 1;
@@ -1437,6 +2113,16 @@ out:
 	unlock_kernel();
 	return ret;
 }
+
+#define SNDCTL_SPDIF_COPYRIGHT	_SIOW('S',  0, int)       // set/reset S/PDIF copy protection
+#define SNDCTL_SPDIF_LOOP	_SIOW('S',  1, int)       // set/reset S/PDIF loop
+#define SNDCTL_SPDIF_MONITOR	_SIOW('S',  2, int)       // set S/PDIF monitor
+#define SNDCTL_SPDIF_LEVEL	_SIOW('S',  3, int)       // set/reset S/PDIF out level
+#define SNDCTL_SPDIF_INV	_SIOW('S',  4, int)       // set/reset S/PDIF in inverse
+#define SNDCTL_SPDIF_SEL2	_SIOW('S',  5, int)       // set S/PDIF in #2
+#define SNDCTL_SPDIF_VALID	_SIOW('S',  6, int)       // set S/PDIF valid
+#define SNDCTL_SPDIFOUT		_SIOW('S',  7, int)       // set S/PDIF out
+#define SNDCTL_SPDIFIN		_SIOW('S',  8, int)       // set S/PDIF out
 
 static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
@@ -1463,13 +2149,15 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return 0;
 
 	case SNDCTL_DSP_GETCAPS:
-		return put_user(DSP_CAP_DUPLEX | DSP_CAP_REALTIME | DSP_CAP_TRIGGER | DSP_CAP_MMAP, (int *)arg);
+		return put_user(DSP_CAP_DUPLEX | DSP_CAP_REALTIME | DSP_CAP_TRIGGER | DSP_CAP_MMAP | DSP_CAP_BIND, (int *)arg);
 		
         case SNDCTL_DSP_RESET:
 		if (file->f_mode & FMODE_WRITE) {
 			stop_dac(s);
 			synchronize_irq();
 			s->dma_dac.swptr = s->dma_dac.hwptr = s->dma_dac.count = s->dma_dac.total_bytes = 0;
+			if (s->status & DO_DUAL_DAC)
+				s->dma_adc.swptr = s->dma_adc.hwptr = s->dma_adc.count = s->dma_adc.total_bytes = 0;
 		}
 		if (file->f_mode & FMODE_READ) {
 			stop_adc(s);
@@ -1479,24 +2167,28 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return 0;
 
         case SNDCTL_DSP_SPEED:
-                if (get_user(val, (int *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		if (val >= 0) {
 			if (file->f_mode & FMODE_READ) {
-				stop_adc(s);
+			 	spin_lock_irqsave(&s->lock, flags);
+				stop_adc_unlocked(s);
 				s->dma_adc.ready = 0;
-				set_adc_rate(s, val);
+				set_adc_rate_unlocked(s, val);
+				spin_unlock_irqrestore(&s->lock, flags);
 			}
 			if (file->f_mode & FMODE_WRITE) {
 				stop_dac(s);
 				s->dma_dac.ready = 0;
+				if (s->status & DO_DUAL_DAC)
+					s->dma_adc.ready = 0;
 				set_dac_rate(s, val);
 			}
 		}
 		return put_user((file->f_mode & FMODE_READ) ? s->rateadc : s->ratedac, (int *)arg);
-		
+
         case SNDCTL_DSP_STEREO:
-                if (get_user(val, (int *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		fmtd = 0;
 		fmtm = ~0;
@@ -1515,12 +2207,19 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 				fmtd |= CM_CFMT_STEREO << CM_CFMT_DACSHIFT;
 			else
 				fmtm &= ~(CM_CFMT_STEREO << CM_CFMT_DACSHIFT);
+			if (s->status & DO_DUAL_DAC) {
+				s->dma_adc.ready = 0;
+				if (val)
+					fmtd |= CM_CFMT_STEREO << CM_CFMT_ADCSHIFT;
+				else
+					fmtm &= ~(CM_CFMT_STEREO << CM_CFMT_ADCSHIFT);
+			}
 		}
 		set_fmt(s, fmtm, fmtd);
 		return 0;
 
         case SNDCTL_DSP_CHANNELS:
-                if (get_user(val, (int *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		if (val != 0) {
 			fmtd = 0;
@@ -1540,14 +2239,26 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 					fmtd |= CM_CFMT_STEREO << CM_CFMT_DACSHIFT;
 				else
 					fmtm &= ~(CM_CFMT_STEREO << CM_CFMT_DACSHIFT);
+				if (s->status & DO_DUAL_DAC) {
+					s->dma_adc.ready = 0;
+					if (val >= 2)
+						fmtd |= CM_CFMT_STEREO << CM_CFMT_ADCSHIFT;
+					else
+						fmtm &= ~(CM_CFMT_STEREO << CM_CFMT_ADCSHIFT);
+				}
 			}
 			set_fmt(s, fmtm, fmtd);
-		}
+			if ((s->capability & CAN_MULTI_CH)
+			     && (file->f_mode & FMODE_WRITE)) {
+				val = set_dac_channels(s, val);
+				return put_user(val, (int *)arg);
+			}
+		}            
 		return put_user((s->fmt & ((file->f_mode & FMODE_READ) ? (CM_CFMT_STEREO << CM_CFMT_ADCSHIFT) 
 					   : (CM_CFMT_STEREO << CM_CFMT_DACSHIFT))) ? 2 : 1, (int *)arg);
 		
 	case SNDCTL_DSP_GETFMTS: /* Returns a mask */
-                return put_user(AFMT_S16_LE|AFMT_U8, (int *)arg);
+                return put_user(AFMT_S16_LE|AFMT_U8|AFMT_AC3, (int *)arg);
 		
 	case SNDCTL_DSP_SETFMT: /* Selects ONE fmt*/
 		if (get_user(val, (int *)arg))
@@ -1566,27 +2277,47 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 			if (file->f_mode & FMODE_WRITE) {
 				stop_dac(s);
 				s->dma_dac.ready = 0;
-				if (val == AFMT_S16_LE)
+				if (val == AFMT_S16_LE || val == AFMT_AC3)
 					fmtd |= CM_CFMT_16BIT << CM_CFMT_DACSHIFT;
 				else
 					fmtm &= ~(CM_CFMT_16BIT << CM_CFMT_DACSHIFT);
+				if (val == AFMT_AC3) {
+					fmtd |= CM_CFMT_STEREO << CM_CFMT_DACSHIFT;
+					set_ac3(s, s->ratedac);
+				} else
+					set_ac3(s, 0);
+				if (s->status & DO_DUAL_DAC) {
+					s->dma_adc.ready = 0;
+					if (val == AFMT_S16_LE)
+						fmtd |= CM_CFMT_STEREO << CM_CFMT_ADCSHIFT;
+					else
+						fmtm &= ~(CM_CFMT_STEREO << CM_CFMT_ADCSHIFT);
+				}
 			}
 			set_fmt(s, fmtm, fmtd);
 		}
-		return put_user((s->fmt & ((file->f_mode & FMODE_READ) ? (CM_CFMT_16BIT << CM_CFMT_ADCSHIFT) 
+		if (s->status & DO_AC3) return put_user(AFMT_AC3, (int *)arg);
+		return put_user((s->fmt & ((file->f_mode & FMODE_READ) ? (CM_CFMT_16BIT << CM_CFMT_ADCSHIFT)
 					   : (CM_CFMT_16BIT << CM_CFMT_DACSHIFT))) ? AFMT_S16_LE : AFMT_U8, (int *)arg);
-		
+
 	case SNDCTL_DSP_POST:
                 return 0;
 
         case SNDCTL_DSP_GETTRIGGER:
 		val = 0;
-		if (file->f_mode & FMODE_READ && s->enable & CM_CENABLE_RE) 
+		if (s->status & DO_DUAL_DAC) {
+			if (file->f_mode & FMODE_WRITE &&
+			 (s->enable & ENDAC) &&
+			 (s->enable & ENADC))
+				val |= PCM_ENABLE_OUTPUT;
+			return put_user(val, (int *)arg);
+		}
+		if (file->f_mode & FMODE_READ && s->enable & ENADC) 
 			val |= PCM_ENABLE_INPUT;
-		if (file->f_mode & FMODE_WRITE && s->enable & CM_CENABLE_PE) 
+		if (file->f_mode & FMODE_WRITE && s->enable & ENDAC) 
 			val |= PCM_ENABLE_OUTPUT;
 		return put_user(val, (int *)arg);
-		
+
 	case SNDCTL_DSP_SETTRIGGER:
 		if (get_user(val, (int *)arg))
 			return -EFAULT;
@@ -1602,6 +2333,10 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 			if (val & PCM_ENABLE_OUTPUT) {
 				if (!s->dma_dac.ready && (ret = prog_dmabuf(s, 0)))
 					return ret;
+				if (s->status & DO_DUAL_DAC) {
+					if (!s->dma_adc.ready && (ret = prog_dmabuf(s, 1)))
+						return ret;
+				}
 				start_dac(s);
 			} else
 				stop_dac(s);
@@ -1611,22 +2346,22 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	case SNDCTL_DSP_GETOSPACE:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf(s, 0)))
-			return ret;
+		if (!(s->enable & ENDAC) && (val = prog_dmabuf(s, 0)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		cm_update_ptr(s);
 		abinfo.fragsize = s->dma_dac.fragsize;
                 abinfo.bytes = s->dma_dac.dmasize - s->dma_dac.count;
                 abinfo.fragstotal = s->dma_dac.numfrag;
-                abinfo.fragments = abinfo.bytes >> s->dma_dac.fragshift;      
+                abinfo.fragments = abinfo.bytes >> s->dma_dac.fragshift;
 		spin_unlock_irqrestore(&s->lock, flags);
 		return copy_to_user((void *)arg, &abinfo, sizeof(abinfo)) ? -EFAULT : 0;
 
 	case SNDCTL_DSP_GETISPACE:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
-		if (!s->dma_adc.ready && (ret =  prog_dmabuf(s, 1)))
-			return ret;
+		if (!(s->enable & ENADC) && (val = prog_dmabuf(s, 1)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		cm_update_ptr(s);
 		abinfo.fragsize = s->dma_adc.fragsize;
@@ -1643,8 +2378,6 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
         case SNDCTL_DSP_GETODELAY:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf(s, 0)))
-			return ret;
 		spin_lock_irqsave(&s->lock, flags);
 		cm_update_ptr(s);
                 val = s->dma_dac.count;
@@ -1654,8 +2387,6 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
         case SNDCTL_DSP_GETIPTR:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
-		if (!s->dma_adc.ready && (ret =  prog_dmabuf(s, 1)))
-			return ret;
 		spin_lock_irqsave(&s->lock, flags);
 		cm_update_ptr(s);
                 cinfo.bytes = s->dma_adc.total_bytes;
@@ -1664,13 +2395,11 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo))  ? -EFAULT : 0;
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!s->dma_dac.ready && (ret = prog_dmabuf(s, 0)))
-			return ret;
 		spin_lock_irqsave(&s->lock, flags);
 		cm_update_ptr(s);
                 cinfo.bytes = s->dma_dac.total_bytes;
@@ -1678,13 +2407,22 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
                 cinfo.ptr = s->dma_dac.hwptr;
 		if (s->dma_dac.mapped)
 			s->dma_dac.count &= s->dma_dac.fragsize-1;
+		if (s->status & DO_DUAL_DAC) {
+			if (s->dma_adc.mapped)
+				s->dma_adc.count &= s->dma_adc.fragsize-1;
+		}
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
 			if ((val = prog_dmabuf(s, 0)))
 				return val;
+			if (s->status & DO_DUAL_DAC) {
+				if ((val = prog_dmabuf(s, 1)))
+					return val;
+				return put_user(2 * s->dma_dac.fragsize, (int *)arg);
+			}
 			return put_user(s->dma_dac.fragsize, (int *)arg);
 		}
 		if ((val = prog_dmabuf(s, 1)))
@@ -1692,7 +2430,7 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return put_user(s->dma_adc.fragsize, (int *)arg);
 
         case SNDCTL_DSP_SETFRAGMENT:
-                if (get_user(val, (int *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		if (file->f_mode & FMODE_READ) {
 			s->dma_adc.ossfragshift = val & 0xffff;
@@ -1713,6 +2451,10 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 				s->dma_dac.ossfragshift = 15;
 			if (s->dma_dac.ossmaxfrags < 4)
 				s->dma_dac.ossmaxfrags = 4;
+			if (s->status & DO_DUAL_DAC) {
+				s->dma_adc.ossfragshift = s->dma_dac.ossfragshift;
+				s->dma_adc.ossmaxfrags = s->dma_dac.ossmaxfrags;
+			}
 		}
 		return 0;
 
@@ -1720,14 +2462,17 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		if ((file->f_mode & FMODE_READ && s->dma_adc.subdivision) ||
 		    (file->f_mode & FMODE_WRITE && s->dma_dac.subdivision))
 			return -EINVAL;
-                if (get_user(val, (int *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		if (val != 1 && val != 2 && val != 4)
 			return -EINVAL;
 		if (file->f_mode & FMODE_READ)
 			s->dma_adc.subdivision = val;
-		if (file->f_mode & FMODE_WRITE)
+		if (file->f_mode & FMODE_WRITE) {
 			s->dma_dac.subdivision = val;
+			if (s->status & DO_DUAL_DAC)
+				s->dma_adc.subdivision = val;
+		}
 		return 0;
 
         case SOUND_PCM_READ_RATE:
@@ -1742,10 +2487,115 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
         case SOUND_PCM_READ_FILTER:
 		return put_user((file->f_mode & FMODE_READ) ? s->rateadc : s->ratedac, (int *)arg);
 
-        case SOUND_PCM_WRITE_FILTER:
+	case SNDCTL_DSP_GETCHANNELMASK:
+		return put_user(DSP_BIND_FRONT|DSP_BIND_SURR|DSP_BIND_CENTER_LFE|DSP_BIND_SPDIF, (int *)arg);
+		
+	case SNDCTL_DSP_BIND_CHANNEL:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		if (val == DSP_BIND_QUERY) {
+			val = DSP_BIND_FRONT;
+			if (s->status & DO_SPDIF_OUT)
+				val |= DSP_BIND_SPDIF;
+			else {
+				if (s->curr_channels == 4)
+					val |= DSP_BIND_SURR;
+				if (s->curr_channels > 4)
+					val |= DSP_BIND_CENTER_LFE;
+			}
+		} else {
+			if (file->f_mode & FMODE_READ) {
+				stop_adc(s);
+				s->dma_adc.ready = 0;
+				if (val & DSP_BIND_SPDIF) {
+					set_spdifin(s, s->rateadc);
+					if (!(s->status & DO_SPDIF_OUT))
+						val &= ~DSP_BIND_SPDIF;
+				}
+			}
+			if (file->f_mode & FMODE_WRITE) {
+				stop_dac(s);
+				s->dma_dac.ready = 0;
+				if (val & DSP_BIND_SPDIF) {
+					set_spdifout(s, s->ratedac);
+					set_dac_channels(s, s->fmt & (CM_CFMT_STEREO << CM_CFMT_DACSHIFT) ? 2 : 1);
+					if (!(s->status & DO_SPDIF_OUT))
+						val &= ~DSP_BIND_SPDIF;
+				} else {
+					int channels;
+					int mask;
+
+					mask = val & (DSP_BIND_FRONT|DSP_BIND_SURR|DSP_BIND_CENTER_LFE);
+					switch (mask) {
+					    case DSP_BIND_FRONT:
+						channels = 2;
+						break;
+					    case DSP_BIND_FRONT|DSP_BIND_SURR:
+						channels = 4;
+						break;
+					    case DSP_BIND_FRONT|DSP_BIND_SURR|DSP_BIND_CENTER_LFE:
+						channels = 6;
+						break;
+					    default:
+						channels = s->fmt & (CM_CFMT_STEREO << CM_CFMT_DACSHIFT) ? 2 : 1;
+						break;
+					}
+					set_dac_channels(s, channels);
+				}
+			}
+		}
+		return put_user(val, (int *)arg);
+
+	case SOUND_PCM_WRITE_FILTER:
+	case SNDCTL_DSP_MAPINBUF:
+	case SNDCTL_DSP_MAPOUTBUF:
         case SNDCTL_DSP_SETSYNCRO:
                 return -EINVAL;
-		
+	case SNDCTL_SPDIF_COPYRIGHT:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdif_copyright(s, val);
+                return 0;
+	case SNDCTL_SPDIF_LOOP:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdif_loop(s, val);
+                return 0;
+	case SNDCTL_SPDIF_MONITOR:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdif_monitor(s, val);
+                return 0;
+	case SNDCTL_SPDIF_LEVEL:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifout_level(s, val);
+                return 0;
+	case SNDCTL_SPDIF_INV:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifin_inverse(s, val);
+                return 0;
+	case SNDCTL_SPDIF_SEL2:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifin_channel2(s, val);
+                return 0;
+	case SNDCTL_SPDIF_VALID:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifin_valid(s, val);
+                return 0;
+	case SNDCTL_SPDIFOUT:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifout(s, val ? s->ratedac : 0);
+                return 0;
+	case SNDCTL_SPDIFIN:
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		set_spdifin(s, val ? s->rateadc : 0);
+                return 0;
 	}
 	return mixer_ioctl(s, cmd, arg);
 }
@@ -1753,13 +2603,18 @@ static int cm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 static int cm_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct cm_state *s = devs;
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned char fmtm = ~0, fmts = 0;
+	struct list_head *list;
+	struct cm_state *s;
 
-	while (s && ((s->dev_audio ^ minor) & ~0xf))
-		s = s->next;
-	if (!s)
-		return -ENODEV;
+	for (list = devs.next; ; list = list->next) {
+		if (list == &devs)
+			return -ENODEV;
+		s = list_entry(list, struct cm_state, devs);
+		if (!((s->dev_audio ^ minor) & ~0xf))
+			break;
+	}
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -1769,8 +2624,12 @@ static int cm_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+		add_wait_queue(&s->open_wait, &wait);
+		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+		schedule();
+		remove_wait_queue(&s->open_wait, &wait);
+		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -1781,6 +2640,8 @@ static int cm_open(struct inode *inode, struct file *file)
 			fmts |= CM_CFMT_16BIT << CM_CFMT_ADCSHIFT;
 		s->dma_adc.ossfragshift = s->dma_adc.ossmaxfrags = s->dma_adc.subdivision = 0;
 		set_adc_rate(s, 8000);
+		// spdif-in is turnned off by default
+		set_spdifin(s, 0);
 	}
 	if (file->f_mode & FMODE_WRITE) {
 		fmtm &= ~((CM_CFMT_STEREO | CM_CFMT_16BIT) << CM_CFMT_DACSHIFT);
@@ -1788,6 +2649,12 @@ static int cm_open(struct inode *inode, struct file *file)
 			fmts |= CM_CFMT_16BIT << CM_CFMT_DACSHIFT;
 		s->dma_dac.ossfragshift = s->dma_dac.ossmaxfrags = s->dma_dac.subdivision = 0;
 		set_dac_rate(s, 8000);
+		// clear previous multichannel, spdif, ac3 state
+		set_spdifout(s, 0);
+		if (s->deviceid == PCI_DEVICE_ID_CMEDIA_CM8738) {
+			set_ac3(s, 0);
+			set_dac_channels(s, 1);
+		}
 	}
 	set_fmt(s, fmtm, fmts);
 	s->open_mode |= file->f_mode & (FMODE_READ | FMODE_WRITE);
@@ -1806,13 +2673,23 @@ static int cm_release(struct inode *inode, struct file *file)
 	down(&s->open_sem);
 	if (file->f_mode & FMODE_WRITE) {
 		stop_dac(s);
+
 		dealloc_dmabuf(&s->dma_dac);
+		if (s->status & DO_DUAL_DAC)
+			dealloc_dmabuf(&s->dma_adc);
+
+		if (s->status & DO_MULTI_CH)
+			set_dac_channels(s, 0);
+		if (s->status & DO_AC3)
+			set_ac3(s, 0);
+		if (s->status & DO_SPDIF_OUT)
+			set_spdifout(s, 0);
 	}
 	if (file->f_mode & FMODE_READ) {
 		stop_adc(s);
 		dealloc_dmabuf(&s->dma_adc);
 	}
-	s->open_mode &= (~file->f_mode) & (FMODE_READ|FMODE_WRITE);
+	s->open_mode &= ~(file->f_mode & (FMODE_READ|FMODE_WRITE));
 	up(&s->open_sem);
 	wake_up(&s->open_wait);
 	unlock_kernel();
@@ -1821,7 +2698,7 @@ static int cm_release(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations cm_audio_fops = {
 	owner:		THIS_MODULE,
-	llseek:		cm_llseek,
+	llseek:		no_llseek,
 	read:		cm_read,
 	write:		cm_write,
 	poll:		cm_poll,
@@ -1831,6 +2708,7 @@ static /*const*/ struct file_operations cm_audio_fops = {
 	release:	cm_release,
 };
 
+#ifdef CONFIG_SOUND_CMPCI_MIDI
 /* --------------------------------------------------------------------- */
 
 static ssize_t cm_midi_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
@@ -1847,29 +2725,28 @@ static ssize_t cm_midi_read(struct file *file, char *buffer, size_t count, loff_
 		return -ESPIPE;
 	if (!access_ok(VERIFY_WRITE, buffer, count))
 		return -EFAULT;
-	if (count == 0)
-		return 0;
 	ret = 0;
 	add_wait_queue(&s->midi.iwait, &wait);
 	while (count > 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
 		spin_lock_irqsave(&s->lock, flags);
 		ptr = s->midi.ird;
 		cnt = MIDIINBUF - ptr;
 		if (s->midi.icnt < cnt)
 			cnt = s->midi.icnt;
+		if (cnt <= 0)
+			__set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
-			if (file->f_flags & O_NONBLOCK) 
+			if (file->f_flags & O_NONBLOCK)
 			{
 				if (!ret)
 					ret = -EAGAIN;
 				break;
 			}
 			schedule();
-			if (signal_pending(current)) 
+			if (signal_pending(current))
 			{
 				if (!ret)
 					ret = -ERESTARTSYS;
@@ -1877,7 +2754,8 @@ static ssize_t cm_midi_read(struct file *file, char *buffer, size_t count, loff_
 			}
 			continue;
 		}
-		if (copy_to_user(buffer, s->midi.ibuf + ptr, cnt)) {
+		if (copy_to_user(buffer, s->midi.ibuf + ptr, cnt))
+		{
 			if (!ret)
 				ret = -EFAULT;
 			break;
@@ -1916,19 +2794,21 @@ static ssize_t cm_midi_write(struct file *file, const char *buffer, size_t count
 	ret = 0;
 	add_wait_queue(&s->midi.owait, &wait);
 	while (count > 0) {
-		set_current_state(TASK_INTERRUPTIBLE);
 		spin_lock_irqsave(&s->lock, flags);
 		ptr = s->midi.owr;
 		cnt = MIDIOUTBUF - ptr;
 		if (s->midi.ocnt + cnt > MIDIOUTBUF)
 			cnt = MIDIOUTBUF - s->midi.ocnt;
-		if (cnt <= 0)
+		if (cnt <= 0) {
+			__set_current_state(TASK_INTERRUPTIBLE);
 			cm_handle_midi(s);
+		}
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
-			if (file->f_flags & O_NONBLOCK) {
+			if (file->f_flags & O_NONBLOCK)
+			{
 				if (!ret)
 					ret = -EAGAIN;
 				break;
@@ -1941,7 +2821,8 @@ static ssize_t cm_midi_write(struct file *file, const char *buffer, size_t count
 			}
 			continue;
 		}
-		if (copy_from_user(s->midi.obuf + ptr, buffer, cnt)) {
+		if (copy_from_user(s->midi.obuf + ptr, buffer, cnt))
+		{
 			if (!ret)
 				ret = -EFAULT;
 			break;
@@ -1990,13 +2871,18 @@ static unsigned int cm_midi_poll(struct file *file, struct poll_table_struct *wa
 static int cm_midi_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct cm_state *s = devs;
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
+	struct list_head *list;
+	struct cm_state *s;
 
-	while (s && s->dev_midi != minor)
-		s = s->next;
-	if (!s)
-		return -ENODEV;
+	for (list = devs.next; ; list = list->next) {
+		if (list == &devs)
+			return -ENODEV;
+		s = list_entry(list, struct cm_state, devs);
+		if (s->dev_midi == minor)
+			break;
+	}
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -2006,8 +2892,12 @@ static int cm_midi_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+ 		add_wait_queue(&s->open_wait, &wait);
+ 		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+ 		schedule();
+ 		remove_wait_queue(&s->open_wait, &wait);
+ 		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -2017,7 +2907,7 @@ static int cm_midi_open(struct inode *inode, struct file *file)
 		s->midi.ird = s->midi.iwr = s->midi.icnt = 0;
 		s->midi.ord = s->midi.owr = s->midi.ocnt = 0;
 		/* enable MPU-401 */
-		outb(inb(s->iobase + CODEC_CMI_FUNCTRL1) | 4, s->iobase + CODEC_CMI_FUNCTRL1);
+		maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0, UART_EN);
 		outb(0xff, s->iomidi+1); /* reset command */
 		if (!(inb(s->iomidi+1) & 0x80))
 			inb(s->iomidi);
@@ -2040,23 +2930,24 @@ static int cm_midi_open(struct inode *inode, struct file *file)
 	spin_unlock_irqrestore(&s->lock, flags);
 	s->open_mode |= (file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ | FMODE_MIDI_WRITE);
 	up(&s->open_sem);
+	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int cm_midi_release(struct inode *inode, struct file *file)
 {
 	struct cm_state *s = (struct cm_state *)file->private_data;
-        DECLARE_WAITQUEUE(wait, current);
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	unsigned count, tmo;
 
 	VALIDATE_STATE(s);
-
 	lock_kernel();
+
 	if (file->f_mode & FMODE_WRITE) {
+		__set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&s->midi.owait, &wait);
 		for (;;) {
-			set_current_state(TASK_INTERRUPTIBLE);
 			spin_lock_irqsave(&s->lock, flags);
 			count = s->midi.ocnt;
 			spin_unlock_irqrestore(&s->lock, flags);
@@ -2067,6 +2958,7 @@ static int cm_midi_release(struct inode *inode, struct file *file)
 			if (file->f_flags & O_NONBLOCK) {
 				remove_wait_queue(&s->midi.owait, &wait);
 				set_current_state(TASK_RUNNING);
+				unlock_kernel();
 				return -EBUSY;
 			}
 			tmo = (count * HZ) / 3100;
@@ -2077,7 +2969,7 @@ static int cm_midi_release(struct inode *inode, struct file *file)
 		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
-	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
+	s->open_mode &= ~((file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE));
 	spin_lock_irqsave(&s->lock, flags);
 	if (!(s->open_mode & (FMODE_MIDI_READ | FMODE_MIDI_WRITE))) {
 		del_timer(&s->midi.timer);		
@@ -2085,7 +2977,7 @@ static int cm_midi_release(struct inode *inode, struct file *file)
 		if (!(inb(s->iomidi+1) & 0x80))
 			inb(s->iomidi);
 		/* disable MPU-401 */
-		outb(inb(s->iobase + CODEC_CMI_FUNCTRL1) & ~4, s->iobase + CODEC_CMI_FUNCTRL1);
+		maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~UART_EN, 0);
 	}
 	spin_unlock_irqrestore(&s->lock, flags);
 	up(&s->open_sem);
@@ -2096,16 +2988,18 @@ static int cm_midi_release(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations cm_midi_fops = {
 	owner:		THIS_MODULE,
-	llseek:		cm_llseek,
+	llseek:		no_llseek,
 	read:		cm_midi_read,
 	write:		cm_midi_write,
 	poll:		cm_midi_poll,
 	open:		cm_midi_open,
 	release:	cm_midi_release,
 };
+#endif
 
 /* --------------------------------------------------------------------- */
 
+#ifdef CONFIG_SOUND_CMPCI_FM
 static int cm_dmfm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	static const unsigned char op_offset[18] = {
@@ -2197,21 +3091,24 @@ static int cm_dmfm_ioctl(struct inode *inode, struct file *file, unsigned int cm
 		outb(5, s->iosynth+2);
 		outb(arg & 1, s->iosynth+3);
 		return 0;
-
-	default:
-		return -EINVAL;
 	}
+	return -EINVAL;
 }
 
 static int cm_dmfm_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct cm_state *s = devs;
+	DECLARE_WAITQUEUE(wait, current);
+	struct list_head *list;
+	struct cm_state *s;
 
-	while (s && s->dev_dmfm != minor)
-		s = s->next;
-	if (!s)
-		return -ENODEV;
+	for (list = devs.next; ; list = list->next) {
+		if (list == &devs)
+			return -ENODEV;
+		s = list_entry(list, struct cm_state, devs);
+		if (s->dev_dmfm == minor)
+			break;
+	}
        	VALIDATE_STATE(s);
 	file->private_data = s;
 	/* wait for device to become free */
@@ -2221,8 +3118,12 @@ static int cm_dmfm_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+		add_wait_queue(&s->open_wait, &wait);
+		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+		schedule();
+		remove_wait_queue(&s->open_wait, &wait);
+		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -2236,6 +3137,7 @@ static int cm_dmfm_open(struct inode *inode, struct file *file)
 	outb(1, s->iosynth+3);  /* enable OPL3 */
 	s->open_mode |= FMODE_DMFM;
 	up(&s->open_sem);
+	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -2262,69 +3164,148 @@ static int cm_dmfm_release(struct inode *inode, struct file *file)
 
 static /*const*/ struct file_operations cm_dmfm_fops = {
 	owner:		THIS_MODULE,
-	llseek:		cm_llseek,
+	llseek:		no_llseek,
 	ioctl:		cm_dmfm_ioctl,
 	open:		cm_dmfm_open,
 	release:	cm_dmfm_release,
 };
+#endif /* CONFIG_SOUND_CMPCI_FM */
 
-/* --------------------------------------------------------------------- */
 
-/* maximum number of devices */
-#define NR_DEVICE 5
-
-#if 0
-static int reverb[NR_DEVICE] = { 0, };
-
-static int wavetable[NR_DEVICE] = { 0, };
-#endif
-
-/* --------------------------------------------------------------------- */
 
 static struct initvol {
 	int mixch;
 	int vol;
 } initvol[] __initdata = {
-	{ SOUND_MIXER_WRITE_CD, 0x4040 },
-	{ SOUND_MIXER_WRITE_LINE, 0x4040 },
-	{ SOUND_MIXER_WRITE_MIC, 0x4040 },
-	{ SOUND_MIXER_WRITE_SYNTH, 0x4040 },
-	{ SOUND_MIXER_WRITE_VOLUME, 0x4040 },
-	{ SOUND_MIXER_WRITE_PCM, 0x4040 }
+	{ SOUND_MIXER_WRITE_CD, 0x4f4f },
+	{ SOUND_MIXER_WRITE_LINE, 0x4f4f },
+	{ SOUND_MIXER_WRITE_MIC, 0x4f4f },
+	{ SOUND_MIXER_WRITE_SYNTH, 0x4f4f },
+	{ SOUND_MIXER_WRITE_VOLUME, 0x4f4f },
+	{ SOUND_MIXER_WRITE_PCM, 0x4f4f }
 };
 
-#ifdef MODULE
-static int	spdif_loop = 0;
-static int	four_ch = 0;
-static int	rear_out = 0;
-MODULE_PARM(spdif_loop, "i");
-MODULE_PARM(four_ch, "i");
-MODULE_PARM(rear_out, "i");
-#else
-#ifdef CONFIG_SOUND_CMPCI_SPDIFLOOP
-static int	spdif_loop = 1;
-#else
-static int	spdif_loop = 0;
-#endif
-#ifdef CONFIG_SOUND_CMPCI_4CH
-static int	four_ch = 1;
-#else
-static int	four_ch = 0;
-#endif
-#ifdef CONFIG_SOUND_CMPCI_REAR
-static int	rear_out = 1;
-#else
-static int	rear_out = 0;
-#endif
-#endif
+/* check chip version and capability */
+static int query_chip(struct cm_state *s)
+{
+	int ChipVersion = -1;
+	unsigned char RegValue;
 
-static int __init init_cmpci(void)
+	// check reg 0Ch, bit 24-31
+	RegValue = inb(s->iobase + CODEC_CMI_INT_HLDCLR + 3);
+	if (RegValue == 0) {
+	    // check reg 08h, bit 24-28
+	    RegValue = inb(s->iobase + CODEC_CMI_CHFORMAT + 3);
+	    RegValue &= 0x1f;
+	    if (RegValue == 0) {
+		ChipVersion = 33;
+		s->max_channels = 4;
+		s->capability |= CAN_AC3_SW;
+		s->capability |= CAN_DUAL_DAC;
+	    } else {
+		ChipVersion = 37;
+		s->max_channels = 4;
+		s->capability |= CAN_AC3_HW;
+		s->capability |= CAN_DUAL_DAC;
+	    }
+	} else {
+	    // check reg 0Ch, bit 26
+	    if (RegValue & (1 << (26-24))) {
+		ChipVersion = 39;
+	    	if (RegValue & (1 << (24-24)))
+		    s->max_channels  = 6;
+	    	else
+		    s->max_channels = 4;
+		s->capability |= CAN_AC3_HW;
+		s->capability |= CAN_DUAL_DAC;
+		s->capability |= CAN_MULTI_CH_HW;
+	    } else {
+		ChipVersion = 55; // 4 or 6 channels
+		s->max_channels  = 6;
+		s->capability |= CAN_AC3_HW;
+		s->capability |= CAN_DUAL_DAC;
+		s->capability |= CAN_MULTI_CH_HW;
+	    }
+	}
+	// still limited to number of speakers
+	if (s->max_channels > s->speakers)
+		s->max_channels = s->speakers;
+	return ChipVersion;
+}
+
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+static	int	mpuio = CONFIG_SOUND_CMPCI_MPUIO;
+#else
+static	int	mpuio;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_FM
+static	int	fmio = CONFIG_SOUND_CMPCI_FMIO;
+#else
+static	int	fmio;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_SPDIFINVERSE
+static	int	spdif_inverse = 1;
+#else
+static	int	spdif_inverse;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_SPDIFLOOP
+static	int	spdif_loop = 1;
+#else
+static	int	spdif_loop;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_SPEAKERS
+static	int	speakers = CONFIG_SOUND_CMPCI_SPEAKERS;
+#else
+static	int	speakers = 2;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_LINE_REAR
+static	int	use_line_as_rear = 1;
+#else
+static	int	use_line_as_rear;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_LINE_BASS
+static	int	use_line_as_bass = 1;
+#else
+static	int	use_line_as_bass;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_MIC_BASS
+static	int	use_mic_as_bass = 1;
+#else
+static	int	use_mic_as_bass = 0;
+#endif
+#ifdef CONFIG_SOUND_CMPCI_JOYSTICK
+static	int	joystick = 1;
+#else
+static	int	joystick;
+#endif
+static	int	mic_boost = 0;
+MODULE_PARM(mpuio, "i");
+MODULE_PARM(fmio, "i");
+MODULE_PARM(spdif_inverse, "i");
+MODULE_PARM(spdif_loop, "i");
+MODULE_PARM(speakers, "i");
+MODULE_PARM(use_line_as_rear, "i");
+MODULE_PARM(use_line_as_bass, "i");
+MODULE_PARM(use_mic_as_bass, "i");
+MODULE_PARM(joystick, "i");
+MODULE_PARM(mic_boost, "i");
+MODULE_PARM_DESC(mpuio, "(0x330, 0x320, 0x310, 0x300) Base of MPU-401, 0 to disable");
+MODULE_PARM_DESC(fmio, "(0x388, 0x3C8, 0x3E0) Base of OPL3, 0 to disable");
+MODULE_PARM_DESC(spdif_inverse, "(1/0) Invert S/PDIF-in signal");
+MODULE_PARM_DESC(spdif_loop, "(1/0) Route S/PDIF-in to S/PDIF-out directly");
+MODULE_PARM_DESC(speakers, "(2-6) Number of speakers you connect");
+MODULE_PARM_DESC(use_line_as_rear, "(1/0) Use line-in jack as rear-out");
+MODULE_PARM_DESC(use_line_as_bass, "(1/0) Use line-in jack as bass/center");
+MODULE_PARM_DESC(use_mic_as_bass, "(1/0) Use mic-in jack as bass/center");
+MODULE_PARM_DESC(joystick, "(1/0) Enable joystick interface, still need joystick driver");
+MODULE_PARM_DESC(mic_boost, "(1/0) Enable microphone boost");
+
+static int __devinit cm_probe(struct pci_dev *pcidev, const struct pci_device_id *pciid)
 {
 	struct cm_state *s;
-	struct pci_dev *pcidev = NULL;
 	mm_segment_t fs;
-	int i, val, index = 0;
-	
+	int i, val, ret;
+	unsigned char reg_mask = 0;
 	struct {
 		unsigned short	deviceid;
 		char		*devicename;
@@ -2333,216 +3314,355 @@ static int __init init_cmpci(void)
 		{ PCI_DEVICE_ID_CMEDIA_CM8338A, "CM8338A" },
 		{ PCI_DEVICE_ID_CMEDIA_CM8338B, "CM8338B" },
 		{ PCI_DEVICE_ID_CMEDIA_CM8738,  "CM8738" },
+		{ PCI_DEVICE_ID_CMEDIA_CM8738B, "CM8738B" },
 	};
 	char	*devicename = "unknown";
-
-#ifdef CONFIG_PCI
-	if (!pci_present())   /* No PCI bus in this machine! */
-#endif
+	if ((ret = pci_enable_device(pcidev)))
+		return ret;
+	if (pcidev->irq == 0)
 		return -ENODEV;
-	printk(KERN_INFO "cmpci: version v2.41-nomodem time " __TIME__ " " __DATE__ "\n");
-#if 0
-	if (!(wavetable_mem = __get_free_pages(GFP_KERNEL, 20-PAGE_SHIFT)))
-		printk(KERN_INFO "cmpci: cannot allocate 1MB of contiguous nonpageable memory for wavetable data\n");
-#endif
-	while (index < NR_DEVICE && pcidev == NULL && (
- 	       (pcidev = pci_find_device(PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8338A, pcidev)) ||
-	       (pcidev = pci_find_device(PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8338B, pcidev)) ||
-	       (pcidev = pci_find_device(PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8738, pcidev)))) {
-		if (pci_enable_device(pcidev))
-			continue;
-		if (pcidev->irq == 0)
-			continue;
-		if (!(s = kmalloc(sizeof(struct cm_state), GFP_KERNEL))) {
-			printk(KERN_WARNING "cmpci: out of memory\n");
-			continue;
-		}
-		/* search device name */
-		for (i = 0; i < sizeof(devicetable) / sizeof(devicetable[0]); i++)
+	s = kmalloc(sizeof(*s), GFP_KERNEL);
+	if (!s) {
+		printk(KERN_WARNING "cmpci: out of memory\n");
+		return -ENOMEM;
+	}
+	/* search device name */
+	for (i = 0; i < sizeof(devicetable) / sizeof(devicetable[0]); i++) {
+		if (devicetable[i].deviceid == pcidev->device)
 		{
-			if (devicetable[i].deviceid == pcidev->device)
-			{
-				devicename = devicetable[i].devicename;
-				break;
-			}
+			devicename = devicetable[i].devicename;
+			break;
 		}
-		memset(s, 0, sizeof(struct cm_state));
-		init_waitqueue_head(&s->dma_adc.wait);
-		init_waitqueue_head(&s->dma_dac.wait);
-		init_waitqueue_head(&s->open_wait);
-		init_waitqueue_head(&s->midi.iwait);
-		init_waitqueue_head(&s->midi.owait);
-		init_MUTEX(&s->open_sem);
-		spin_lock_init(&s->lock);
-		s->magic = CM_MAGIC;
-		s->iobase = pci_resource_start(pcidev, 0);
-		s->iosynth = 0x388;
-		s->iomidi = 0x330;
-		spin_lock_init(&s->lock);
-		if (s->iobase == 0)
-			continue;
-		s->irq = pcidev->irq;
-
-		if (!request_region(s->iobase, CM_EXTENT_CODEC, "cmpci")) {
-			printk(KERN_ERR "cmpci: io ports %#x-%#x in use\n", s->iobase, s->iobase+CM_EXTENT_CODEC-1);
-			goto err_region5;
-		}
-		if (!request_region(s->iomidi, CM_EXTENT_MIDI, "cmpci Midi")) {
-			printk(KERN_WARNING "cmpci: io ports %#x-%#x in use, midi disabled.\n", s->iomidi, s->iomidi+CM_EXTENT_MIDI-1);
-			s->iomidi = 0;
-		}
-		else
-		{
-			/* set IO based at 0x330 */
-			outb(inb(s->iobase + CODEC_CMI_LEGACY_CTRL + 3) & ~0x60, s->iobase + CODEC_CMI_LEGACY_CTRL + 3);
-		}
-		if (!request_region(s->iosynth, CM_EXTENT_SYNTH, "cmpci FM")) {
-			printk(KERN_WARNING "cmpci: io ports %#x-%#x in use, synth disabled.\n", s->iosynth, s->iosynth+CM_EXTENT_SYNTH-1);
-			s->iosynth = 0;
-		}
-		else
-		{
-			/* enable FM */
-			outb(inb(s->iobase + CODEC_CMI_MISC_CTRL + 2) | 8, s->iobase + CODEC_CMI_MISC_CTRL);
-		}
-		/* initialize codec registers */
-		outb(0, s->iobase + CODEC_CMI_INT_HLDCLR + 2);  /* disable ints */
-		outb(0, s->iobase + CODEC_CMI_FUNCTRL0 + 2); /* disable channels */
-		/* reset mixer */
-		wrmixer(s, DSP_MIX_DATARESETIDX, 0);
-
-		/* request irq */
-		if (request_irq(s->irq, cm_interrupt, SA_SHIRQ, "cmpci", s)) {
-			printk(KERN_ERR "cmpci: irq %u in use\n", s->irq);
-			goto err_irq;
-		}
-		printk(KERN_INFO "cmpci: found %s adapter at io %#06x irq %u\n",
-		       devicename, s->iobase, s->irq);
-		/* register devices */
-		if ((s->dev_audio = register_sound_dsp(&cm_audio_fops, -1)) < 0)
-			goto err_dev1;
-		if ((s->dev_mixer = register_sound_mixer(&cm_mixer_fops, -1)) < 0)
-			goto err_dev2;
-		if (s->iomidi && (s->dev_midi = register_sound_midi(&cm_midi_fops, -1)) < 0)
-			goto err_dev3;
-		if (s->iosynth && (s->dev_dmfm = register_sound_special(&cm_dmfm_fops, 15 /* ?? */)) < 0)
-			goto err_dev4;
-		pci_set_master(pcidev);
-		/* initialize the chips */
-		fs = get_fs();
-		set_fs(KERNEL_DS);
-		/* set mixer output */
-		frobindir(s, DSP_MIX_OUTMIXIDX, 0x1f, 0x1f);
-		/* set mixer input */
-		val = SOUND_MASK_LINE|SOUND_MASK_SYNTH|SOUND_MASK_CD|SOUND_MASK_MIC;
-		mixer_ioctl(s, SOUND_MIXER_WRITE_RECSRC, (unsigned long)&val);
-		for (i = 0; i < sizeof(initvol)/sizeof(initvol[0]); i++) {
-			val = initvol[i].vol;
-			mixer_ioctl(s, initvol[i].mixch, (unsigned long)&val);
-		}
-		set_fs(fs);
-		if (pcidev->device == PCI_DEVICE_ID_CMEDIA_CM8738)
-		{
-			/* enable SPDIF loop */
-			if (spdif_loop)
-			{
-				/* turn on spdif-in to spdif-out */
-				outb(inb(s->iobase + CODEC_CMI_FUNCTRL1) | 0x80, s->iobase + CODEC_CMI_FUNCTRL1);
-				printk(KERN_INFO "cmpci: Enable SPDIF loop\n");
-			}
-			else
-				outb(inb(s->iobase + CODEC_CMI_FUNCTRL1) & ~0x80, s->iobase + CODEC_CMI_FUNCTRL1);
-			/* enable 4 channels mode */
-			if (four_ch)
-			{
-				/* 4 channel mode (analog duplicate) */
-				outb(inb(s->iobase + CODEC_CMI_MISC_CTRL + 3) | 0x04, s->iobase + CODEC_CMI_MISC_CTRL + 3);
-				printk(KERN_INFO "cmpci: Enable 4 channels mode\n");
-				/* has separate rear-out jack ? */
-				if (rear_out)
-				{
-					/* has separate rear out jack */
-					outb(inb(s->iobase + CODEC_CMI_MIXER1) & ~0x20, s->iobase + CODEC_CMI_MIXER1);
-				}
-				else
-				{
-					outb(inb(s->iobase + CODEC_CMI_MIXER1) | 0x20, s->iobase + CODEC_CMI_MIXER1);
-					printk(KERN_INFO "cmpci: line-in routed as rear-out\n");
-				}
-			}
-			else
-				outb(inb(s->iobase + CODEC_CMI_MISC_CTRL + 3) & ~0x04, s->iobase + CODEC_CMI_MISC_CTRL + 3);
-		}
-		/* queue it for later freeing */
-		s->next = devs;
-		devs = s;
-		index++;
-		continue;
-
-	err_dev4:
-		unregister_sound_midi(s->dev_midi);
-	err_dev3:
-		unregister_sound_mixer(s->dev_mixer);
-	err_dev2:
-		unregister_sound_dsp(s->dev_audio);
-	err_dev1:
-		printk(KERN_ERR "cmpci: cannot register misc device\n");
-		free_irq(s->irq, s);
-	err_irq:
-		if(s->iosynth)
-			release_region(s->iosynth, CM_EXTENT_SYNTH);
-		if(s->iomidi)
-			release_region(s->iomidi, CM_EXTENT_MIDI);
-		release_region(s->iobase, CM_EXTENT_CODEC);
-	err_region5:
+	}
+	memset(s, 0, sizeof(struct cm_state));
+	init_waitqueue_head(&s->dma_adc.wait);
+	init_waitqueue_head(&s->dma_dac.wait);
+	init_waitqueue_head(&s->open_wait);
+	init_waitqueue_head(&s->midi.iwait);
+	init_waitqueue_head(&s->midi.owait);
+	init_MUTEX(&s->open_sem);
+	spin_lock_init(&s->lock);
+	s->magic = CM_MAGIC;
+	s->iobase = pci_resource_start(pcidev, 0);
+#ifdef CONFIG_IA64
+	/* The IA64 quirk handler didn't fix us up */
+	if (s->iobase == 0xff00)
+	{
 		kfree(s);
-	}
-	if (!devs) {
-		if (wavetable_mem)
-			free_pages(wavetable_mem, 20-PAGE_SHIFT);
 		return -ENODEV;
 	}
+#endif
+	s->iosynth = fmio;
+	s->iomidi = mpuio;
+	s->gameport.io = 0x200;
+	s->status = 0;
+	/* range check */
+	if (speakers < 2)
+		speakers = 2;
+	else if (speakers > 6)
+		speakers = 6;
+	s->speakers = speakers;
+	if (s->iobase == 0)
+	{
+		kfree(s);
+		return -ENODEV;
+	}
+	s->irq = pcidev->irq;
+
+	if (!request_region(s->iobase, CM_EXTENT_CODEC, "cmpci")) {
+		printk(KERN_ERR "cmpci: io ports %#x-%#x in use\n", s->iobase, s->iobase+CM_EXTENT_CODEC-1);
+		goto err_region5;
+	}
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	/* disable MPU-401 */
+	maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0x04, 0);
+	if (s->iomidi) {
+	    if (!request_region(s->iomidi, CM_EXTENT_MIDI, "cmpci Midi")) {
+		printk(KERN_ERR "cmpci: io ports %#x-%#x in use\n", s->iomidi, s->iomidi+CM_EXTENT_MIDI-1);
+		s->iomidi = 0;
+	    } else {
+		/* set IO based at 0x330 */
+		switch (s->iomidi) {
+		    case 0x330:
+			reg_mask = 0;
+			break;
+		    case 0x320:
+			reg_mask = 0x20;
+			break;
+		    case 0x310:
+			reg_mask = 0x40;
+			break;
+		    case 0x300:
+			reg_mask = 0x60;
+			break;
+		    default:
+			s->iomidi = 0;
+			break;
+		}
+		outb((inb(s->iobase + CODEC_CMI_LEGACY_CTRL + 3) & ~0x60) | reg_mask, s->iobase + CODEC_CMI_LEGACY_CTRL + 3);
+		/* enable MPU-401 */
+		if (s->iomidi) {
+		    maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0, 0x04);
+		}
+	    }
+	}
+#endif
+#ifdef CONFIG_SOUND_CMPCI_FM
+	/* disable FM */
+	maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~8, 0);
+	if (s->iosynth) {
+	    if (!request_region(s->iosynth, CM_EXTENT_SYNTH, "cmpci FM")) {
+		printk(KERN_ERR "cmpci: io ports %#x-%#x in use\n", s->iosynth, s->iosynth+CM_EXTENT_SYNTH-1);
+		s->iosynth = 0;
+	    } else {
+		/* set IO based at 0x388 */
+		switch (s->iosynth) {
+		    case 0x388:
+			reg_mask = 0;
+			break;
+		    case 0x3C8:
+			reg_mask = 0x01;
+			break;
+		    case 0x3E0:
+			reg_mask = 0x02;
+			break;
+		    case 0x3E8:
+			reg_mask = 0x03;
+			break;
+		    default:
+			s->iosynth = 0;
+			break;
+		}
+		maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 3, ~0x03, reg_mask);
+		/* enable FM */
+		if (s->iosynth) {
+		    maskb(s->iobase + CODEC_CMI_MISC_CTRL + 2, ~0, 8);
+		}
+	    }
+	}
+#endif
+	/* enable joystick */
+	if (joystick) {
+		if (s->gameport.io && !request_region(s->gameport.io, CM_EXTENT_GAME, "cmpci GAME")) {
+			printk(KERN_ERR "cmpci: gameport io ports in use\n");
+			s->gameport.io = 0;
+	       	} else
+			maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0, 0x02);
+	} else {
+		maskb(s->iobase + CODEC_CMI_FUNCTRL1, ~0x02, 0);
+		s->gameport.io = 0;
+	}
+	/* initialize codec registers */
+	outb(0, s->iobase + CODEC_CMI_INT_HLDCLR + 2);  /* disable ints */
+	outb(0, s->iobase + CODEC_CMI_FUNCTRL0 + 2); /* disable channels */
+	/* reset mixer */
+	wrmixer(s, DSP_MIX_DATARESETIDX, 0);
+
+	/* request irq */
+	if (request_irq(s->irq, cm_interrupt, SA_SHIRQ, "cmpci", s)) {
+		printk(KERN_ERR "cmpci: irq %u in use\n", s->irq);
+		goto err_irq;
+	}
+	printk(KERN_INFO "cmpci: found %s adapter at io %#x irq %u\n",
+	       devicename, s->iobase, s->irq);
+	/* register devices */
+	if ((s->dev_audio = register_sound_dsp(&cm_audio_fops, -1)) < 0) {
+		ret = s->dev_audio;
+		goto err_dev1;
+	}
+	if ((s->dev_mixer = register_sound_mixer(&cm_mixer_fops, -1)) < 0) {
+		ret = s->dev_mixer;
+		goto err_dev2;
+	}
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	if ((s->dev_midi = register_sound_midi(&cm_midi_fops, -1)) < 0) {
+		ret = s->dev_midi;
+		goto err_dev3;
+	}
+#endif
+#ifdef CONFIG_SOUND_CMPCI_FM
+	if ((s->dev_dmfm = register_sound_special(&cm_dmfm_fops, 15 /* ?? */)) < 0) {
+		ret = s->dev_dmfm;
+		goto err_dev4;
+	}
+#endif
+	pci_set_master(pcidev);	/* enable bus mastering */
+	/* initialize the chips */
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+	/* set mixer output */
+	frobindir(s, DSP_MIX_OUTMIXIDX, 0x1f, 0x1f);
+	/* set mixer input */
+	val = SOUND_MASK_LINE|SOUND_MASK_SYNTH|SOUND_MASK_CD|SOUND_MASK_MIC;
+	mixer_ioctl(s, SOUND_MIXER_WRITE_RECSRC, (unsigned long)&val);
+	for (i = 0; i < sizeof(initvol)/sizeof(initvol[0]); i++) {
+		val = initvol[i].vol;
+		mixer_ioctl(s, initvol[i].mixch, (unsigned long)&val);
+	}
+	/* use channel 1 for record, channel 0 for play */
+	maskb(s->iobase + CODEC_CMI_FUNCTRL0, ~0, CHADC1);
+	/* turn off VMIC3 - mic boost */
+	if (mic_boost)
+		maskb(s->iobase + CODEC_CMI_MIXER2, ~1, 0);
+	else
+		maskb(s->iobase + CODEC_CMI_MIXER2, ~0, 1);
+	s->deviceid = pcidev->device;
+
+	if (pcidev->device == PCI_DEVICE_ID_CMEDIA_CM8738) {
+
+		/* chip version and hw capability check */
+		s->chip_version = query_chip(s);
+		printk(KERN_INFO "cmpci: chip version = 0%d\n", s->chip_version);
+
+		/* seet SPDIF-in inverse before enable SPDIF loop */
+		set_spdifin_inverse(s, spdif_inverse);
+
+		/* enable SPDIF loop */
+		set_spdif_loop(s, spdif_loop);
+
+		/* use SPDIF in #1 */
+		set_spdifin_channel2(s, 0);
+
+		if (use_line_as_rear) {
+			s->capability |= CAN_LINE_AS_REAR;
+			s->status |= DO_LINE_AS_REAR;
+			maskb(s->iobase + CODEC_CMI_MIXER1, ~0, SPK4);
+		} else
+			maskb(s->iobase + CODEC_CMI_MIXER1, ~SPK4, 0);
+		if (s->chip_version >= 39) {
+			if (use_line_as_bass) {
+				s->capability |= CAN_LINE_AS_BASS;
+				s->status |= DO_LINE_AS_BASS;
+				maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 1, ~0, CB2LIN);
+			} else
+				maskb(s->iobase + CODEC_CMI_LEGACY_CTRL + 1, ~CB2LIN, 0);
+			if (use_mic_as_bass) {
+				s->capability |= CAN_MIC_AS_BASS;
+				s->status |= DO_MIC_AS_BASS;
+				maskb(s->iobase + CODEC_CMI_MISC, ~0, 0x04);
+			} else
+				maskb(s->iobase + CODEC_CMI_MISC, ~0x04, 0);
+		}
+	} else {
+		s->chip_version = 0;
+		/* 8338 will fall here */
+		s->max_channels = 2;
+	}
+	/* register gameport */
+	if (joystick)
+		gameport_register_port(&s->gameport);
+	/* store it in the driver field */
+	pci_set_drvdata(pcidev, s);
+	/* put it into driver list */
+	list_add_tail(&s->devs, &devs);
+	/* increment devindex */
+	if (devindex < NR_DEVICE-1)
+		devindex++;
 	return 0;
+
+#ifdef CONFIG_SOUND_CMPCI_FM
+	unregister_sound_special(s->dev_dmfm);
+err_dev4:
+#endif
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	unregister_sound_midi(s->dev_midi);
+err_dev3:
+#endif
+	unregister_sound_mixer(s->dev_mixer);
+err_dev2:
+	unregister_sound_dsp(s->dev_audio);
+err_dev1:
+	printk(KERN_ERR "cmpci: cannot register misc device\n");
+	free_irq(s->irq, s);
+err_irq:
+	if (s->gameport.io)
+		release_region(s->gameport.io, CM_EXTENT_GAME);
+#ifdef CONFIG_SOUND_CMPCI_FM
+	if (s->iosynth) release_region(s->iosynth, CM_EXTENT_SYNTH);
+#endif
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	if (s->iomidi) release_region(s->iomidi, CM_EXTENT_MIDI);
+#endif
+	release_region(s->iobase, CM_EXTENT_CODEC);
+err_region5:
+	kfree(s);
+	return ret;
 }
 
 /* --------------------------------------------------------------------- */
 
-MODULE_AUTHOR("ChenLi Tien, cltien@home.com");
-MODULE_DESCRIPTION("CMPCI Audio Driver");
+MODULE_AUTHOR("ChenLi Tien, cltien@cmedia.com.tw");
+MODULE_DESCRIPTION("CM8x38 Audio Driver");
+MODULE_LICENSE("GPL");
+
+static void __devexit cm_remove(struct pci_dev *dev)
+{
+	struct cm_state *s = pci_get_drvdata(dev);
+
+	if (!s)
+		return;
+	list_del(&s->devs);
+	outb(0, s->iobase + CODEC_CMI_INT_HLDCLR + 2);  /* disable ints */
+	synchronize_irq();
+	outb(0, s->iobase + CODEC_CMI_FUNCTRL0 + 2); /* disable channels */
+	free_irq(s->irq, s);
+
+	/* reset mixer */
+	wrmixer(s, DSP_MIX_DATARESETIDX, 0);
+
+	if (s->gameport.io) {
+		gameport_unregister_port(&s->gameport);
+		release_region(s->gameport.io, CM_EXTENT_GAME);
+	}
+	release_region(s->iobase, CM_EXTENT_CODEC);
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	if (s->iomidi) release_region(s->iomidi, CM_EXTENT_MIDI);
+#endif
+#ifdef CONFIG_SOUND_CMPCI_FM
+	if (s->iosynth) release_region(s->iosynth, CM_EXTENT_SYNTH);
+#endif
+	unregister_sound_dsp(s->dev_audio);
+	unregister_sound_mixer(s->dev_mixer);
+#ifdef CONFIG_SOUND_CMPCI_MIDI
+	unregister_sound_midi(s->dev_midi);
+#endif
+#ifdef CONFIG_SOUND_CMPCI_FM
+	unregister_sound_special(s->dev_dmfm);
+#endif
+	kfree(s);
+	pci_set_drvdata(dev, NULL);
+}
+
+static struct pci_device_id id_table[] __devinitdata = {
+	{ PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8738, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
+ 	{ PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8338A, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
+	{ PCI_VENDOR_ID_CMEDIA, PCI_DEVICE_ID_CMEDIA_CM8338B, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
+	{ 0, }
+};
+
+MODULE_DEVICE_TABLE(pci, id_table);
+
+static struct pci_driver cm_driver = {
+	.name		= "cmpci",
+	.id_table	= id_table,
+	.probe		= cm_probe,
+	.remove		= __devexit_p(cm_remove)
+};
+ 
+static int __init init_cmpci(void)
+{
+	if (!pci_present())   /* No PCI bus in this machine! */
+		return -ENODEV;
+	printk(KERN_INFO "cmpci: version $Revision: 6.16 $ time " __TIME__ " " __DATE__ "\n");
+	return pci_module_init(&cm_driver);
+}
 
 static void __exit cleanup_cmpci(void)
 {
-	struct cm_state *s;
-
-	while ((s = devs)) {
-		devs = devs->next;
-		outb(0, s->iobase + CODEC_CMI_INT_HLDCLR + 2);  /* disable ints */
-		synchronize_irq();
-		outb(0, s->iobase + CODEC_CMI_FUNCTRL0 + 2); /* disable channels */
-		free_irq(s->irq, s);
-
-		/* reset mixer */
-		wrmixer(s, DSP_MIX_DATARESETIDX, 0);
-
-		release_region(s->iobase, CM_EXTENT_CODEC);
-		if(s->iomidi)
-		{
-			release_region(s->iomidi, CM_EXTENT_MIDI);
-			unregister_sound_midi(s->dev_midi);
-		}
-		if(s->iosynth)
-		{
-			release_region(s->iosynth, CM_EXTENT_SYNTH);
-			unregister_sound_special(s->dev_dmfm);
-		}
-		unregister_sound_dsp(s->dev_audio);
-		unregister_sound_mixer(s->dev_mixer);
-		kfree(s);
-	}
-	if (wavetable_mem)
-		free_pages(wavetable_mem, 20-PAGE_SHIFT);
 	printk(KERN_INFO "cmpci: unloading\n");
+	pci_unregister_driver(&cm_driver);
 }
 
 module_init(init_cmpci);
 module_exit(cleanup_cmpci);
+

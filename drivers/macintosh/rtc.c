@@ -17,7 +17,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
@@ -34,14 +34,13 @@ static int rtc_busy = 0;
 void get_rtc_time(struct rtc_time *t)
 {
 	unsigned long nowtime;
-    
+
 	nowtime = (ppc_md.get_rtc_time)();
 
 	to_tm(nowtime, t);
 
 	t->tm_year -= 1900;
-	t->tm_mon -= 1;
-	t->tm_wday -= 1;
+	t->tm_mon -= 1; /* Make sure userland has a 0-based month */
 }
 
 /* Set the current date and time in the real time clock. */
@@ -49,18 +48,10 @@ void set_rtc_time(struct rtc_time *t)
 {
 	unsigned long nowtime;
 
-	printk(KERN_INFO "rtc.c:set_rtc_time: %04d-%02d-%02d %02d:%02d:%02d.\n", t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
-
-	nowtime = mktime(t->tm_year+1900, t->tm_mon+1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
-
-	printk(KERN_INFO "rtc.c:set_rtc_time: set rtc time to %ld seconds.\n", nowtime);
+	nowtime = mktime(t->tm_year+1900, t->tm_mon+1, t->tm_mday,
+			t->tm_hour, t->tm_min, t->tm_sec);
 
 	(ppc_md.set_rtc_time)(nowtime);
-}
-
-static loff_t rtc_lseek(struct file *file, loff_t offset, int origin)
-{
-	return -ESPIPE;
 }
 
 static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
@@ -73,6 +64,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	case RTC_RD_TIME:
 		if (ppc_md.get_rtc_time)
 		{
+			memset(&rtc_tm, 0, sizeof(struct rtc_time));
 			get_rtc_time(&rtc_tm);
 
 			if (copy_to_user((struct rtc_time*)arg, &rtc_tm, sizeof(struct rtc_time)))
@@ -125,7 +117,7 @@ static int rtc_release(struct inode *inode, struct file *file)
 
 static struct file_operations rtc_fops = {
 	owner:		THIS_MODULE,
-	llseek:		rtc_lseek,
+	llseek:		no_llseek,
 	ioctl:		rtc_ioctl,
 	open:		rtc_open,
 	release:	rtc_release
@@ -155,3 +147,4 @@ static void __exit rtc_exit(void)
 
 module_init(rtc_init);
 module_exit(rtc_exit);
+MODULE_LICENSE("GPL");

@@ -102,6 +102,7 @@ static ssize_t isapnp_info_entry_read(struct file *file, char *buffer,
 				      size_t count, loff_t * offset)
 {
 	isapnp_info_buffer_t *buf;
+	loff_t pos = *offset;
 	long size = 0, size1;
 	int mode;
 
@@ -111,15 +112,15 @@ static ssize_t isapnp_info_entry_read(struct file *file, char *buffer,
 	buf = (isapnp_info_buffer_t *) file->private_data;
 	if (!buf)
 		return -EIO;
-	if (file->f_pos >= buf->size)
+	if (pos != (unsigned) pos || pos >= buf->size)
 		return 0;
 	size = buf->size < count ? buf->size : count;
-	size1 = buf->size - file->f_pos;
+	size1 = buf->size - pos;
 	if (size1 < size)
 		size = size1;
-	if (copy_to_user(buffer, buf->buffer + file->f_pos, size))
+	if (copy_to_user(buffer, buf->buffer + pos, size))
 		return -EFAULT;
-	file->f_pos += size;
+	*offset = pos + size;
 	return size;
 }
 
@@ -128,6 +129,7 @@ static ssize_t isapnp_info_entry_write(struct file *file, const char *buffer,
 {
 	isapnp_info_buffer_t *buf;
 	long size = 0, size1;
+	loff_t pos = *offset;
 	int mode;
 
 	mode = file->f_flags & O_ACCMODE;
@@ -136,19 +138,19 @@ static ssize_t isapnp_info_entry_write(struct file *file, const char *buffer,
 	buf = (isapnp_info_buffer_t *) file->private_data;
 	if (!buf)
 		return -EIO;
-	if (file->f_pos < 0)
+	if (pos < 0)
 		return -EINVAL;
-	if (file->f_pos >= buf->len)
+	if (pos >= buf->len)
 		return -ENOMEM;
 	size = buf->len < count ? buf->len : count;
-	size1 = buf->len - file->f_pos;
+	size1 = buf->len - pos;
 	if (size1 < size)
 		size = size1;
-	if (copy_from_user(buf->buffer + file->f_pos, buffer, size))
+	if (copy_from_user(buf->buffer + pos, buffer, size))
 		return -EFAULT;
-	if (buf->size < file->f_pos + size)
-		buf->size = file->f_pos + size;
-	file->f_pos += size;
+	if (buf->size < pos + size)
+		buf->size = pos + size;
+	*offset = pos + size;
 	return size;
 }
 
@@ -240,14 +242,15 @@ static ssize_t isapnp_proc_bus_read(struct file *file, char *buf, size_t nbytes,
 	struct inode *ino = file->f_dentry->d_inode;
 	struct proc_dir_entry *dp = ino->u.generic_ip;
 	struct pci_dev *dev = dp->data;
-	int pos = *ppos;
+	loff_t n = *ppos;
+	unsigned pos = n;
 	int cnt, size = 256;
 
-	if (pos >= size)
+	if (pos != n || pos >= size)
 		return 0;
 	if (nbytes >= size)
 		nbytes = size;
-	if (pos + nbytes > size)
+	if (nbytes > size - pos)
 		nbytes = size - pos;
 	cnt = nbytes;
 
@@ -783,7 +786,10 @@ static int isapnp_set_card(char *line)
 	unsigned int id;
 	char index[16], value[32];
 
-	isapnp_info_card = NULL;
+	if (isapnp_info_card) {
+		isapnp_cfg_end();
+		isapnp_info_card = NULL;
+	}
 	line = isapnp_get_str(index, line, sizeof(index));
 	isapnp_get_str(value, line, sizeof(value));
 	idx = idx1 = simple_strtoul(index, NULL, 0);
@@ -853,10 +859,7 @@ static int isapnp_set_device(char *line)
 
 static int isapnp_autoconfigure(void)
 {
-	if (isapnp_info_device == NULL) {
-		printk("isapnp: device is not set\n");
-		return 0;
-	}
+	isapnp_cfg_end();
 	if (isapnp_info_device->active)
 		isapnp_info_device->deactivate(isapnp_info_device);
 	if (isapnp_info_device->prepare(isapnp_info_device) < 0) {
@@ -867,6 +870,13 @@ static int isapnp_autoconfigure(void)
 		printk("isapnp: cannot activate device");
 		return 0;
 	}
+	if (isapnp_cfg_begin(isapnp_info_card->number, -1)<0) {
+		printk("isapnp: configuration start sequence for card %d failed\n", isapnp_info_card->number);
+		isapnp_info_card = NULL;
+		isapnp_info_device = NULL;
+		return 1;
+	}
+	isapnp_device(isapnp_info_device->devfn);
 	return 0;
 }
 
@@ -936,6 +946,22 @@ static void isapnp_set_dmaresource(struct resource *res, int dma)
 {
 	res->start = res->end = dma;
 	res->flags = IORESOURCE_DMA;
+}
+
+extern int isapnp_allow_dma0;
+static int isapnp_set_allow_dma0(char *line)
+{
+	int i;
+	char value[32];
+
+	isapnp_get_str(value, line, sizeof(value));
+	i = simple_strtoul(value, NULL, 0);
+	if (i < 0 || i > 1) {
+		printk("isapnp: wrong value %i for allow_dma0\n", i);
+		return 1;
+	}
+	isapnp_allow_dma0 = i;
+	return 0;
 }
  
 static int isapnp_set_dma(char *line)
@@ -1023,6 +1049,8 @@ static int isapnp_decode_line(char *line)
 	char cmd[32];
 
 	line = isapnp_get_str(cmd, line, sizeof(cmd));
+	if (!strcmp(cmd, "allow_dma0"))
+		return isapnp_set_allow_dma0(line);
 	if (!strcmp(cmd, "card"))
 		return isapnp_set_card(line);
 	if (!strcmp(cmd, "csn"))

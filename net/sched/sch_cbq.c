@@ -282,6 +282,7 @@ cbq_classify(struct sk_buff *skb, struct Qdisc *sch)
 		case TC_POLICE_SHOT:
 			return NULL;
 		default:
+			break;
 		}
 #endif
 		if (cl->level == 0)
@@ -506,7 +507,7 @@ static void cbq_ovl_classic(struct cbq_class *cl)
 			}
 		}
 
-		q->wd_expires = delay;
+		q->wd_expires = base_delay;
 	}
 }
 
@@ -1053,13 +1054,11 @@ cbq_dequeue(struct Qdisc *sch)
 
 	if (sch->q.qlen) {
 		sch->stats.overlimits++;
-		if (q->wd_expires && !netif_queue_stopped(sch->dev)) {
+		if (q->wd_expires) {
 			long delay = PSCHED_US2JIFFIE(q->wd_expires);
-			del_timer(&q->wd_timer);
 			if (delay <= 0)
 				delay = 1;
-			q->wd_timer.expires = jiffies + delay;
-			add_timer(&q->wd_timer);
+			mod_timer(&q->wd_timer, jiffies + delay);
 			sch->flags |= TCQ_F_THROTTLED;
 		}
 	}
@@ -1232,11 +1231,12 @@ static void cbq_link_class(struct cbq_class *this)
 	}
 }
 
-static int cbq_drop(struct Qdisc* sch)
+static unsigned int cbq_drop(struct Qdisc* sch)
 {
 	struct cbq_sched_data *q = (struct cbq_sched_data *)sch->data;
 	struct cbq_class *cl, *cl_head;
 	int prio;
+	unsigned int len;
 
 	for (prio = TC_CBQ_MAXPRIO; prio >= 0; prio--) {
 		if ((cl_head = q->active[prio]) == NULL)
@@ -1244,8 +1244,10 @@ static int cbq_drop(struct Qdisc* sch)
 
 		cl = cl_head;
 		do {
-			if (cl->q->ops->drop && cl->q->ops->drop(cl->q))
-				return 1;
+			if (cl->q->ops->drop && (len = cl->q->ops->drop(cl->q))) {
+				sch->q.qlen--;
+				return len;
+			}
 		} while ((cl = cl->next_alive) != cl_head);
 	}
 	return 0;
@@ -1454,8 +1456,6 @@ static int cbq_init(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
-
 static __inline__ int cbq_dump_rate(struct sk_buff *skb, struct cbq_class *cl)
 {
 	unsigned char	 *b = skb->tail;
@@ -1641,7 +1641,6 @@ cbq_dump_class(struct Qdisc *sch, unsigned long arg,
 	cl->xstats.undertime = 0;
 	if (!PSCHED_IS_PASTPERFECT(cl->undertime))
 		cl->xstats.undertime = PSCHED_TDIFF(cl->undertime, q->now);
-	q->link.xstats.avgidle = q->link.avgidle;
 	if (cbq_copy_xstats(skb, &cl->xstats)) {
 		spin_unlock_bh(&sch->dev->queue_lock);
 		goto rtattr_failure;
@@ -1654,8 +1653,6 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-
-#endif
 
 static int cbq_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 		     struct Qdisc **old)
@@ -1675,6 +1672,7 @@ static int cbq_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 		sch_tree_lock(sch);
 		*old = cl->q;
 		cl->q = new;
+		sch->q.qlen -= (*old)->q.qlen;
 		qdisc_reset(*old);
 		sch_tree_unlock(sch);
 
@@ -1709,19 +1707,24 @@ static void cbq_destroy_filters(struct cbq_class *cl)
 
 	while ((tp = cl->filter_list) != NULL) {
 		cl->filter_list = tp->next;
-		tp->ops->destroy(tp);
+		tcf_destroy(tp);
 	}
 }
 
-static void cbq_destroy_class(struct cbq_class *cl)
+static void cbq_destroy_class(struct Qdisc *sch, struct cbq_class *cl)
 {
+	struct cbq_sched_data *q = (struct cbq_sched_data *)sch->data;
+
+	BUG_TRAP(!cl->filters);
+
 	cbq_destroy_filters(cl);
 	qdisc_destroy(cl->q);
 	qdisc_put_rtab(cl->R_tab);
 #ifdef CONFIG_NET_ESTIMATOR
 	qdisc_kill_estimator(&cl->stats);
 #endif
-	kfree(cl);
+	if (cl != &q->link)
+		kfree(cl);
 }
 
 static void
@@ -1734,18 +1737,24 @@ cbq_destroy(struct Qdisc* sch)
 #ifdef CONFIG_NET_CLS_POLICE
 	q->rx_class = NULL;
 #endif
-	for (h = 0; h < 16; h++) {
+	/*
+	 * Filters must be destroyed first because we don't destroy the
+	 * classes from root to leafs which means that filters can still
+	 * be bound to classes which have been destroyed already. --TGR '04
+	 */
+	for (h = 0; h < 16; h++)
 		for (cl = q->classes[h]; cl; cl = cl->next)
 			cbq_destroy_filters(cl);
-	}
 
 	for (h = 0; h < 16; h++) {
-		for (cl = q->classes[h]; cl; cl = cl->next)
-			if (cl != &q->link)
-				cbq_destroy_class(cl);
+		struct cbq_class *next;
+
+		for (cl = q->classes[h]; cl; cl = next) {
+			next = cl->next;
+			cbq_destroy_class(sch, cl);
+		}
 	}
 
-	qdisc_put_rtab(q->link.R_tab);
 	MOD_DEC_USE_COUNT;
 }
 
@@ -1763,7 +1772,7 @@ static void cbq_put(struct Qdisc *sch, unsigned long arg)
 		spin_unlock_bh(&sch->dev->queue_lock);
 #endif
 
-		cbq_destroy_class(cl);
+		cbq_destroy_class(sch, cl);
 	}
 }
 
@@ -1997,7 +2006,7 @@ static int cbq_delete(struct Qdisc *sch, unsigned long arg)
 	sch_tree_unlock(sch);
 
 	if (--cl->refcnt == 0)
-		cbq_destroy_class(cl);
+		cbq_destroy_class(sch, cl);
 
 	return 0;
 }
@@ -2075,9 +2084,7 @@ static struct Qdisc_class_ops cbq_class_ops =
 	cbq_bind_filter,
 	cbq_unbind_filter,
 
-#ifdef CONFIG_RTNETLINK
 	cbq_dump_class,
-#endif
 };
 
 struct Qdisc_ops cbq_qdisc_ops =
@@ -2097,9 +2104,7 @@ struct Qdisc_ops cbq_qdisc_ops =
 	cbq_destroy,
 	NULL /* cbq_change */,
 
-#ifdef CONFIG_RTNETLINK
 	cbq_dump,
-#endif
 };
 
 #ifdef MODULE
@@ -2113,3 +2118,4 @@ void cleanup_module(void)
 	unregister_qdisc(&cbq_qdisc_ops);
 }
 #endif
+MODULE_LICENSE("GPL");

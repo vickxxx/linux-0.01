@@ -18,7 +18,7 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/utsname.h>
@@ -28,6 +28,7 @@
 #include <linux/mman.h>
 #include <linux/elfcore.h>
 #include <linux/reboot.h>
+#include <linux/tty.h>
 #include <linux/console.h>
 
 #include <asm/reg.h>
@@ -49,7 +50,6 @@
  */
 
 unsigned long init_user_stack[1024] = { STACK_MAGIC, };
-static struct vm_area_struct init_mmap = INIT_MMAP;
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
 static struct signal_struct init_signals = INIT_SIGNALS;
@@ -83,10 +83,11 @@ cpu_idle(void)
 
 		/* Although we are an idle CPU, we do not want to 
 		   get into the scheduler unnecessarily.  */
-		if (current->need_resched) {
-			schedule();
-			check_pgt_cache();
-		}
+		long oldval = xchg(&current->need_resched, -1UL);
+		if (!oldval)
+			while (current->need_resched < 0);
+		schedule();
+		check_pgt_cache();
 	}
 }
 
@@ -158,7 +159,7 @@ common_shutdown_1(void *generic_ptr)
 		/* This has the effect of resetting the VGA video origin.  */
 		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
 #endif
-		/* reset_for_srm(); */
+		pci_restore_srm_config();
 		set_hae(srm_hae);
 	}
 
@@ -211,7 +212,10 @@ machine_power_off(void)
 void
 show_regs(struct pt_regs * regs)
 {
-	printk("\nps: %04lx pc: [<%016lx>]\n", regs->ps, regs->pc);
+	printk("\n");
+	printk("Pid: %d, comm: %20s\n", current->pid, current->comm);
+	printk("ps: %04lx pc: [<%016lx>] CPU %d    %s\n",
+	       regs->ps, regs->pc, smp_processor_id(), print_tainted());
 	printk("rp: [<%016lx>] sp: %p\n", regs->r26, regs+1);
 	printk(" r0: %016lx  r1: %016lx  r2: %016lx  r3: %016lx\n",
 	       regs->r0, regs->r1, regs->r2, regs->r3);
@@ -303,7 +307,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	    struct task_struct * p, struct pt_regs * regs)
 {
 	extern void ret_from_sys_call(void);
-	extern void ret_from_smp_fork(void);
+	extern void ret_from_fork(void);
 
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
@@ -322,11 +326,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
-#ifdef CONFIG_SMP
-	childstack->r26 = (unsigned long) ret_from_smp_fork;
-#else
-	childstack->r26 = (unsigned long) ret_from_sys_call;
-#endif
+	childstack->r26 = (unsigned long) ret_from_fork;
 	p->thread.usp = usp;
 	p->thread.ksp = (unsigned long) childstack;
 	p->thread.pal_flags = 1;	/* set FEN, clear everything else */
@@ -336,7 +336,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 }
 
 /*
- * fill in the user structure for a core dump..
+ * Fill in the user structure for an ECOFF core dump.
  */
 void
 dump_thread(struct pt_regs * pt, struct user * dump)
@@ -396,6 +396,55 @@ dump_thread(struct pt_regs * pt, struct user * dump)
 	memcpy((char *)dump->regs + EF_SIZE, sw->fp, 32 * 8);
 }
 
+/*
+ * Fill in the user structure for a ELF core dump.
+ */
+void
+dump_elf_thread(elf_gregset_t dest, struct pt_regs *pt,
+		struct task_struct *task)
+{
+	/* switch stack follows right below pt_regs: */
+	struct switch_stack * sw = ((struct switch_stack *) pt) - 1;
+
+	dest[ 0] = pt->r0;
+	dest[ 1] = pt->r1;
+	dest[ 2] = pt->r2;
+	dest[ 3] = pt->r3;
+	dest[ 4] = pt->r4;
+	dest[ 5] = pt->r5;
+	dest[ 6] = pt->r6;
+	dest[ 7] = pt->r7;
+	dest[ 8] = pt->r8;
+	dest[ 9] = sw->r9;
+	dest[10] = sw->r10;
+	dest[11] = sw->r11;
+	dest[12] = sw->r12;
+	dest[13] = sw->r13;
+	dest[14] = sw->r14;
+	dest[15] = sw->r15;
+	dest[16] = pt->r16;
+	dest[17] = pt->r17;
+	dest[18] = pt->r18;
+	dest[19] = pt->r19;
+	dest[20] = pt->r20;
+	dest[21] = pt->r21;
+	dest[22] = pt->r22;
+	dest[23] = pt->r23;
+	dest[24] = pt->r24;
+	dest[25] = pt->r25;
+	dest[26] = pt->r26;
+	dest[27] = pt->r27;
+	dest[28] = pt->r28;
+	dest[29] = pt->gp;
+	dest[30] = rdusp();
+	dest[31] = pt->pc;
+
+	/* Once upon a time this was the PS value.  Which is stupid
+	   since that is always 8 for usermode.  Usurped for the more
+	   useful value of the thread's UNIQUE field.  */
+	dest[32] = task->thread.unique;
+}
+
 int
 dump_fpu(struct pt_regs * regs, elf_fpregset_t *r)
 {
@@ -416,22 +465,20 @@ dump_fpu(struct pt_regs * regs, elf_fpregset_t *r)
  * Don't do this at home.
  */
 asmlinkage int
-sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
-	unsigned long a3, unsigned long a4, unsigned long a5,
-	struct pt_regs regs)
+sys_execve(char *ufilename, char **argv, char **envp,
+	   unsigned long a3, unsigned long a4, unsigned long a5,
+	   struct pt_regs regs)
 {
 	int error;
-	char * filename;
+	char *filename;
 
-	lock_kernel();
-	filename = getname((char *) a0);
+	filename = getname(ufilename);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
-	error = do_execve(filename, (char **) a1, (char **) a2, &regs);
+	error = do_execve(filename, argv, envp, &regs);
 	putname(filename);
 out:
-	unlock_kernel();
 	return error;
 }
 

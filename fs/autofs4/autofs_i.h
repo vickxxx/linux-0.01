@@ -20,7 +20,7 @@
 #define AUTOFS_IOC_COUNT     32
 
 #include <linux/kernel.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/wait.h>
@@ -139,7 +139,6 @@ int autofs4_expire_multi(struct super_block *, struct vfsmount *,
 extern struct inode_operations autofs4_symlink_inode_operations;
 extern struct inode_operations autofs4_dir_inode_operations;
 extern struct inode_operations autofs4_root_inode_operations;
-extern struct file_operations autofs4_dir_operations;
 extern struct file_operations autofs4_root_operations;
 
 /* Initializing function */

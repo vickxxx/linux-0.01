@@ -3,20 +3,30 @@
 	Written 1997-1998 by Donald Becker.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	This driver is for the 3Com ISA EtherLink XL "Corkscrew" 3c515 ethercard.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
 	2/2/00- Added support for kernel-level ISAPnP 
 		by Stephen Frost <sfrost@snowman.net> and Alessandro Zummo
 	Cleaned up for 2.3.x/softnet by Jeff Garzik and Alan Cox.
+	
+	11/17/2001 - Added ethtool support (jgarzik)
+
 */
 
-static char *version = "3c515.c:v0.99-sn 2000/02/12 becker@cesdis.gsfc.nasa.gov and others\n";
+#define DRV_NAME		"3c515"
+#define DRV_VERSION		"0.99t"
+#define DRV_RELDATE		"17-Nov-2001"
+
+static char *version =
+DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " becker@scyld.com and others\n";
 
 #define CORKSCREW 1
 
@@ -46,6 +56,7 @@ static int max_interrupt_work = 20;
 #define RX_RING_SIZE	16
 #define PKT_BUF_SZ		1536	/* Size of each temporary Rx buffer. */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/isapnp.h>
@@ -57,9 +68,12 @@ static int max_interrupt_work = 20;
 #include <linux/errno.h>
 #include <linux/in.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/timer.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -77,13 +91,20 @@ static int max_interrupt_work = 20;
 #define REQUEST_IRQ(i,h,f,n, instance) request_irq(i,h,f,n, instance)
 #define IRQ(irq, dev_id, pt_regs) (irq, dev_id, pt_regs)
 
-MODULE_AUTHOR("Donald Becker <becker@cesdis.gsfc.nasa.gov>");
+#define MAX_UNITS 8
+
+MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("3Com 3c515 Corkscrew driver");
+MODULE_LICENSE("GPL");
+
 MODULE_PARM(debug, "i");
-MODULE_PARM(options, "1-" __MODULE_STRING(8) "i");
-MODULE_PARM(full_duplex, "1-" __MODULE_STRING(8) "i");
+MODULE_PARM(options, "1-" __MODULE_STRING(MAX_UNITS) "i");
 MODULE_PARM(rx_copybreak, "i");
 MODULE_PARM(max_interrupt_work, "i");
+MODULE_PARM_DESC(debug, "3c515 debug level (0-6)");
+MODULE_PARM_DESC(options, "3c515: Bits 0-2: media type, bit 3: full duplex, bit 4: bus mastering");
+MODULE_PARM_DESC(rx_copybreak, "3c515 copy breakpoint for copy-only-tiny-frames");
+MODULE_PARM_DESC(max_interrupt_work, "3c515 maximum events handled per interrupt");
 
 /* "Knobs" for adjusting internal parameters. */
 /* Put out somewhat more debugging messages. (0 - no msg, 1 minimal msgs). */
@@ -105,9 +126,9 @@ static int rx_nocopy, rx_copy, queued_packet;
 #define CORKSCREW_TOTAL_SIZE 0x20
 
 #ifdef DRIVER_DEBUG
-int corkscrew_debug = DRIVER_DEBUG;
+static int corkscrew_debug = DRIVER_DEBUG;
 #else
-int corkscrew_debug = 1;
+static int corkscrew_debug = 1;
 #endif
 
 #define CORKSCREW_ID 10
@@ -351,21 +372,20 @@ static struct media_table {
 	{ "Default", 0, 0xFF, XCVR_10baseT, 10000},
 };
 
-#ifdef __ISAPNP__
-struct corkscrew_isapnp_adapters_struct {
-	unsigned short vendor, function;
-	char *name;
-};
-struct corkscrew_isapnp_adapters_struct corkscrew_isapnp_adapters[] = {
-	{ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5051), "3Com Fast EtherLink ISA"},
-	{0, }
-};
-int corkscrew_isapnp_phys_addr[3] = {
-	0, 0, 0
+#ifdef CONFIG_ISAPNP
+static struct isapnp_device_id corkscrew_isapnp_adapters[] = {
+	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
+		ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5051),
+		(long) "3Com Fast EtherLink ISA" },
+	{ }	/* terminate list */
 };
 
+MODULE_DEVICE_TABLE(isapnp, corkscrew_isapnp_adapters);
+
+static int corkscrew_isapnp_phys_addr[3];
+
 static int nopnp;
-#endif
+#endif /* CONFIG_ISAPNP */
 
 static int corkscrew_scan(struct net_device *dev);
 static struct net_device *corkscrew_found_device(struct net_device *dev,
@@ -386,6 +406,7 @@ static int corkscrew_close(struct net_device *dev);
 static void update_stats(int addr, struct net_device *dev);
 static struct net_device_stats *corkscrew_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* 
@@ -402,12 +423,12 @@ static void set_rx_mode(struct net_device *dev);
 */
 /* This driver uses 'options' to pass the media type, full-duplex flag, etc. */
 /* Note: this is the only limit on the number of cards supported!! */
-static int options[8] = { -1, -1, -1, -1, -1, -1, -1, -1, };
+static int options[MAX_UNITS] = { -1, -1, -1, -1, -1, -1, -1, -1, };
 
 #ifdef MODULE
 static int debug = -1;
 /* A list of all installed Vortex devices, for removing the driver module. */
-static struct net_device *root_corkscrew_dev = NULL;
+static struct net_device *root_corkscrew_dev;
 
 int init_module(void)
 {
@@ -419,7 +440,7 @@ int init_module(void)
 		printk(version);
 
 	root_corkscrew_dev = NULL;
-	cards_found = corkscrew_scan(0);
+	cards_found = corkscrew_scan(NULL);
 	return cards_found ? 0 : -ENODEV;
 }
 
@@ -443,12 +464,12 @@ static int corkscrew_scan(struct net_device *dev)
 {
 	int cards_found = 0;
 	static int ioaddr;
-#ifdef __ISAPNP__
+#ifdef CONFIG_ISAPNP
 	short i;
-	static int pnp_cards = 0;
+	static int pnp_cards;
 #endif
 
-#ifdef __ISAPNP__
+#ifdef CONFIG_ISAPNP
 	if(nopnp == 1)
 		goto no_pnp;
 	for(i=0; corkscrew_isapnp_adapters[i].vendor != 0; i++) {
@@ -475,7 +496,7 @@ static int corkscrew_scan(struct net_device *dev)
 			irq = idev->irq_resource[0].start;
 			if(corkscrew_debug)
 				printk ("ISAPNP reports %s at i/o 0x%x, irq %d\n",
-					corkscrew_isapnp_adapters[i].name,ioaddr, irq);
+					(char*) corkscrew_isapnp_adapters[i].driver_data, ioaddr, irq);
 					
 			if ((inw(ioaddr + 0x2002) & 0x1f0) != (ioaddr & 0x1f0))
 				continue;
@@ -506,17 +527,17 @@ static int corkscrew_scan(struct net_device *dev)
 		}
 	}
 no_pnp:
-#endif /* not __ISAPNP__ */
+#endif /* CONFIG_ISAPNP */
 
 	/* Check all locations on the ISA bus -- evil! */
 	for (ioaddr = 0x100; ioaddr < 0x400; ioaddr += 0x20) {
 		int irq;
-#ifdef __ISAPNP__
+#ifdef CONFIG_ISAPNP
 		/* Make sure this was not already picked up by isapnp */
 		if(ioaddr == corkscrew_isapnp_phys_addr[0]) continue;
 		if(ioaddr == corkscrew_isapnp_phys_addr[1]) continue;
 		if(ioaddr == corkscrew_isapnp_phys_addr[2]) continue;
-#endif
+#endif /* CONFIG_ISAPNP */
 		if (check_region(ioaddr, CORKSCREW_TOTAL_SIZE))
 			continue;
 		/* Check the resource configuration for a matching ioaddr. */
@@ -539,9 +560,10 @@ no_pnp:
 		printk(KERN_INFO "3c515 Resource configuration register %#4.4x, DCR %4.4x.\n",
 		     inl(ioaddr + 0x2002), inw(ioaddr + 0x2000));
 		irq = inw(ioaddr + 0x2002) & 15;
-		corkscrew_found_device(dev, ioaddr, irq, CORKSCREW_ID, dev
-				       && dev->mem_start ? dev->
-				       mem_start : options[cards_found]);
+		corkscrew_found_device(dev, ioaddr, irq, CORKSCREW_ID,
+				       dev && dev->mem_start ?  dev->mem_start :
+				         (cards_found >= MAX_UNITS ? -1 :
+						options[cards_found]));
 		dev = 0;
 		cards_found++;
 	}
@@ -590,15 +612,17 @@ static struct net_device *corkscrew_found_device(struct net_device *dev,
 	ether_setup(dev);
 	vp->next_module = root_corkscrew_dev;
 	root_corkscrew_dev = dev;
+	SET_MODULE_OWNER(dev);
 	if (register_netdev(dev) != 0) {
 		kfree(dev);
 		return NULL;
 	}
-	SET_MODULE_OWNER(dev);
 #else				/* not a MODULE */
 	/* Caution: quad-word alignment required for rings! */
 	dev->priv =
 	    kmalloc(sizeof(struct corkscrew_private), GFP_KERNEL);
+	if (!dev->priv)
+		return NULL;
 	memset(dev->priv, 0, sizeof(struct corkscrew_private));
 	dev = init_etherdev(dev, sizeof(struct corkscrew_private));
 	dev->base_addr = ioaddr;
@@ -712,6 +736,7 @@ static int corkscrew_probe1(struct net_device *dev)
 	dev->stop = &corkscrew_close;
 	dev->get_stats = &corkscrew_get_stats;
 	dev->set_multicast_list = &set_rx_mode;
+	dev->ethtool_ops = &netdev_ethtool_ops;
 
 	return 0;
 }
@@ -1079,6 +1104,7 @@ static int corkscrew_start_xmit(struct sk_buff *skb,
 	}
 	/* Put out the doubleword header... */
 	outl(skb->len, ioaddr + TX_FIFO);
+	vp->stats.tx_bytes += skb->len;
 #ifdef VORTEX_BUS_MASTER
 	if (vp->bus_master) {
 		/* Set the bus-master controller to transfer the packet. */
@@ -1137,7 +1163,6 @@ static int corkscrew_start_xmit(struct sk_buff *skb,
 			outb(0x00, ioaddr + TxStatus);	/* Pop the status stack. */
 		}
 	}
-	vp->stats.tx_bytes += skb->len;
 	return 0;
 }
 
@@ -1164,7 +1189,7 @@ static void corkscrew_interrupt(int irq, void *dev_id,
 		printk("%s: interrupt, status %4.4x, timer %d.\n",
 			dev->name, status, latency);
 	if ((status & 0xE000) != 0xE000) {
-		static int donedidthis = 0;
+		static int donedidthis;
 		/* Some interrupt controllers store a bogus interrupt from boot-time.
 		   Ignore a single early interrupt, but don't hang the machine for
 		   other interrupt problems. */
@@ -1217,7 +1242,7 @@ static void corkscrew_interrupt(int irq, void *dev_id,
 #ifdef VORTEX_BUS_MASTER
 		if (status & DMADone) {
 			outw(0x1000, ioaddr + Wn7_MasterStatus);	/* Ack the event. */
-			dev_kfree_skb_irq(lp->tx_skb);	/* Release the transfered buffer */
+			dev_kfree_skb_irq(lp->tx_skb);	/* Release the transferred buffer */
 			netif_wake_queue(dev);
 		}
 #endif
@@ -1232,7 +1257,7 @@ static void corkscrew_interrupt(int irq, void *dev_id,
 				outw(AckIntr | RxEarly, ioaddr + EL3_CMD);
 			}
 			if (status & StatsFull) {	/* Empty statistics. */
-				static int DoneDidThat = 0;
+				static int DoneDidThat;
 				if (corkscrew_debug > 4)
 					printk("%s: Updating stats.\n",
 					       dev->name);
@@ -1340,7 +1365,7 @@ static int corkscrew_rx(struct net_device *dev)
 				netif_rx(skb);
 				dev->last_rx = jiffies;
 				vp->stats.rx_packets++;
-				vp->stats.rx_bytes += skb->len;
+				vp->stats.rx_bytes += pkt_len;
 				/* Wait a limited time to go to next packet. */
 				for (i = 200; i >= 0; i--)
 					if (! (inw(ioaddr + EL3_STATUS) & CmdInProgress)) 
@@ -1582,6 +1607,31 @@ static void set_rx_mode(struct net_device *dev)
 
 	outw(new_mode, ioaddr + EL3_CMD);
 }
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return corkscrew_debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	corkscrew_debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+};
+
 
 #ifdef MODULE
 void cleanup_module(void)

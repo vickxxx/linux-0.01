@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.6 2000/06/10 03:03:52 gniibe Exp $
+# $Id: Makefile,v 1.1.1.1.2.5 2003/10/23 22:08:56 yoshii Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -12,11 +12,6 @@
 # this architecture
 #
 
-#
-# Select the object file format to substitute into the linker script.
-#
-tool_prefix	= sh-linux-gnu-
-
 ifdef CONFIG_CPU_LITTLE_ENDIAN
 CFLAGS		+= -ml
 AFLAGS		+= -ml
@@ -29,9 +24,17 @@ AFLAGS		+= -mb
 LDFLAGS		:= -EB
 endif
 
-# ifdef CONFIG_CROSSCOMPILE
-CROSS_COMPILE  = $(tool_prefix)
-# endif
+ifdef CONFIG_SH_DSP
+AFLAGS += -Wa,-dsp
+endif
+
+ifdef CONFIG_SH_KGDB
+CFLAGS :=$(CFLAGS:-fomit-frame-pointer=) -g
+AFLAGS += -g
+ifdef CONFIG_KGDB_MORE
+CFLAGS += $(shell echo $(CONFIG_KGDB_OPTIONS) | sed -e 's/"//g')
+endif
+endif
 
 LD	=$(CROSS_COMPILE)ld $(LDFLAGS)
 OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -R .stab -R .stabstr -S
@@ -46,8 +49,8 @@ CFLAGS		+= -m3
 AFLAGS		+= -m3
 endif
 ifdef CONFIG_CPU_SH4
-CFLAGS		+= -m4-nofpu
-AFLAGS		+= -m4-nofpu
+CFLAGS		+= -m4 -mno-implicit-fp
+AFLAGS		+= -m4 -mno-implicit-fp
 endif
 
 #
@@ -75,6 +78,11 @@ LIBS := $(TOPDIR)/arch/sh/lib/lib.a $(LIBS) $(TOPDIR)/arch/sh/lib/lib.a \
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
+ifneq ($(CONFIG_SH_GENERIC)$(CONFIG_SH_STB1_HARP)$(CONFIG_SH_STB1_OVERDRIVE),)
+SUBDIRS += arch/sh/stboards
+CORE_FILES += arch/sh/stboards/stboards.o
+endif
+
 vmlinux: arch/sh/vmlinux.lds
 
 arch/sh/vmlinux.lds: arch/sh/vmlinux.lds.S FORCE
@@ -83,7 +91,7 @@ arch/sh/vmlinux.lds: arch/sh/vmlinux.lds.S FORCE
 FORCE: ;
 
 zImage: vmlinux
-	@$(MAKEBOOT) zImage
+	@$(MAKEBOOT) $@
 
 compressed: zImage
 
@@ -93,6 +101,7 @@ zdisk: vmlinux
 archclean:
 	@$(MAKEBOOT) clean
 	$(MAKE) -C arch/$(ARCH)/kernel clean
+	$(MAKE) -C arch/$(ARCH)/stboards clean
 #	$(MAKE) -C arch/$(ARCH)/tools clean
 
 archmrproper:

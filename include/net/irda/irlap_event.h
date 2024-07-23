@@ -12,6 +12,7 @@
  * 
  *     Copyright (c) 1998-1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -103,6 +104,7 @@ typedef enum {
 	DISCOVERY_TIMER_EXPIRED,
 	WD_TIMER_EXPIRED,
 	BACKOFF_TIMER_EXPIRED,
+	MEDIA_BUSY_TIMER_EXPIRED,
 } IRLAP_EVENT;
 
 /*
@@ -132,7 +134,6 @@ extern const char *irlap_state[];
 
 void irlap_do_event(struct irlap_cb *self, IRLAP_EVENT event, 
 		    struct sk_buff *skb, struct irlap_info *info);
-void irlap_next_state(struct irlap_cb *self, IRLAP_STATE state);
 void irlap_print_event(IRLAP_EVENT event);
 
 extern int irlap_qos_negotiate(struct irlap_cb *self, struct sk_buff *skb);

@@ -143,7 +143,9 @@ common_init_rtc(void)
 
 	/* Reset periodic interrupt frequency.  */
 	x = CMOS_READ(RTC_FREQ_SELECT) & 0x3f;
-	if (x != 0x26 && x != 0x19 && x != 0x06) {
+	/* Test includes known working values on various platforms
+	   where 0x26 is wrong; we refuse to change those. */
+	if (x != 0x26 && x != 0x25 && x != 0x19 && x != 0x06) {
 		printk("Setting RTC_FREQ to 1024 Hz (%x)\n", x);
 		CMOS_WRITE(0x26, RTC_FREQ_SELECT);
 	}
@@ -169,6 +171,121 @@ common_init_rtc(void)
 	init_rtc_irq();
 }
 
+
+/* Validate a computed cycle counter result against the known bounds for
+   the given processor core.  There's too much brokenness in the way of
+   timing hardware for any one method to work everywhere.  :-(
+
+   Return 0 if the result cannot be trusted, otherwise return the argument.  */
+
+static unsigned long __init
+validate_cc_value(unsigned long cc)
+{
+	static struct bounds {
+		unsigned int min, max;
+	} cpu_hz[] __initdata = {
+		[EV3_CPU]    = {   50000000,  200000000 },	/* guess */
+		[EV4_CPU]    = {  100000000,  300000000 },
+		[LCA4_CPU]   = {  100000000,  300000000 },	/* guess */
+		[EV45_CPU]   = {  200000000,  300000000 },
+		[EV5_CPU]    = {  250000000,  433000000 },
+		[EV56_CPU]   = {  333000000,  667000000 },
+		[PCA56_CPU]  = {  400000000,  600000000 },	/* guess */
+		[PCA57_CPU]  = {  500000000,  600000000 },	/* guess */
+		[EV6_CPU]    = {  466000000,  600000000 },
+		[EV67_CPU]   = {  600000000,  750000000 },
+		[EV68AL_CPU] = {  750000000,  940000000 },
+		[EV68CB_CPU] = { 1000000000, 1333333333 },
+		/* None of the following are shipping as of 2001-11-01.  */
+		[EV68CX_CPU] = { 1000000000, 1700000000 },	/* guess */
+		[EV69_CPU]   = { 1000000000, 1700000000 },	/* guess */
+		[EV7_CPU]    = {  800000000, 1400000000 },	/* guess */
+		[EV79_CPU]   = { 1000000000, 2000000000 },	/* guess */
+	};
+
+	/* Allow for some drift in the crystal.  10MHz is more than enough.  */
+	const unsigned int deviation = 10000000;
+
+	struct percpu_struct *cpu;
+	unsigned int index;
+
+	cpu = (struct percpu_struct *)((char*)hwrpb + hwrpb->processor_offset);
+	index = cpu->type & 0xffffffff;
+
+	/* If index out of bounds, no way to validate.  */
+	if (index >= sizeof(cpu_hz)/sizeof(cpu_hz[0]))
+		return cc;
+
+	/* If index contains no data, no way to validate.  */
+	if (cpu_hz[index].max == 0)
+		return cc;
+
+	if (cc < cpu_hz[index].min - deviation
+	    || cc > cpu_hz[index].max + deviation)
+		return 0;
+
+	return cc;
+}
+
+
+/*
+ * Calibrate CPU clock using legacy 8254 timer/counter. Stolen from
+ * arch/i386/time.c.
+ */
+
+#define CALIBRATE_LATCH	(52 * LATCH)
+#define CALIBRATE_TIME	(52 * 1000020 / HZ)
+
+static unsigned long __init
+calibrate_cc_with_pic(void)
+{
+	int cc, count = 0;
+
+	/* Set the Gate high, disable speaker */
+	outb((inb(0x61) & ~0x02) | 0x01, 0x61);
+
+	/*
+	 * Now let's take care of CTC channel 2
+	 *
+	 * Set the Gate high, program CTC channel 2 for mode 0,
+	 * (interrupt on terminal count mode), binary count,
+	 * load 5 * LATCH count, (LSB and MSB) to begin countdown.
+	 */
+	outb(0xb0, 0x43);		/* binary, mode 0, LSB/MSB, Ch 2 */
+	outb(CALIBRATE_LATCH & 0xff, 0x42);	/* LSB of count */
+	outb(CALIBRATE_LATCH >> 8, 0x42);	/* MSB of count */
+
+	cc = rpcc();
+	do {
+	  count += 100; /* by 1 takes too long to timeout from 0 */
+	} while ((inb(0x61) & 0x20) == 0 && count > 0);
+	cc = rpcc() - cc;
+
+	/* Error: ECTCNEVERSET or ECPUTOOFAST.  */
+	if (count <= 100)
+		return 0;
+
+	/* Error: ECPUTOOSLOW.  */
+	if (cc <= CALIBRATE_TIME)
+		return 0;
+
+	return (cc * 1000000UL) / CALIBRATE_TIME;
+}
+
+/* The Linux interpretation of the CMOS clock register contents:
+   When the Update-In-Progress (UIP) flag goes from 1 to 0, the
+   RTC registers show the second which has precisely just started.
+   Let's hope other operating systems interpret the RTC the same way.  */
+
+static unsigned long __init
+rpcc_after_update_in_progress(void)
+{
+	do { } while (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP));
+	do { } while (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP);
+
+	return rpcc();
+}
+
 void __init
 time_init(void)
 {
@@ -176,42 +293,37 @@ time_init(void)
 	unsigned long cycle_freq, one_percent;
 	long diff;
 
-	/*
-	 * The Linux interpretation of the CMOS clock register contents:
-	 * When the Update-In-Progress (UIP) flag goes from 1 to 0, the
-	 * RTC registers show the second which has precisely just started.
-	 * Let's hope other operating systems interpret the RTC the same way.
-	 */
-	do { } while (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP));
-	do { } while (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP);
+	/* Calibrate CPU clock -- attempt #1.  */
+	if (!est_cycle_freq)
+		est_cycle_freq = validate_cc_value(calibrate_cc_with_pic());
 
-	/* Read cycle counter exactly on falling edge of update flag */
-	cc1 = rpcc();
+	cc1 = rpcc_after_update_in_progress();
 
+	/* Calibrate CPU clock -- attempt #2.  */
 	if (!est_cycle_freq) {
-		/* Sometimes the hwrpb->cycle_freq value is bogus. 
-		   Go another round to check up on it and see.  */
-		do { } while (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP));
-		do { } while (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP);
-		cc2 = rpcc();
-		est_cycle_freq = cc2 - cc1;
+		cc2 = rpcc_after_update_in_progress();
+		est_cycle_freq = validate_cc_value(cc2 - cc1);
 		cc1 = cc2;
 	}
 
-	/* If the given value is within 1% of what we calculated, 
-	   accept it.  Otherwise, use what we found.  */
 	cycle_freq = hwrpb->cycle_freq;
-	one_percent = cycle_freq / 100;
-	diff = cycle_freq - est_cycle_freq;
-	if (diff < 0)
-		diff = -diff;
-	if (diff > one_percent) {
-		cycle_freq = est_cycle_freq;
-		printk("HWRPB cycle frequency bogus.  Estimated %lu Hz\n",
-		       cycle_freq);
-	}
-	else {
-		est_cycle_freq = 0;
+	if (est_cycle_freq) {
+		/* If the given value is within 1% of what we calculated, 
+		   accept it.  Otherwise, use what we found.  */
+		one_percent = cycle_freq / 100;
+		diff = cycle_freq - est_cycle_freq;
+		if (diff < 0)
+			diff = -diff;
+		if (diff > one_percent) {
+			cycle_freq = est_cycle_freq;
+			printk("HWRPB cycle frequency bogus.  "
+			       "Estimated %lu Hz\n", cycle_freq);
+		} else {
+			est_cycle_freq = 0;
+		}
+	} else if (! validate_cc_value (cycle_freq)) {
+		printk("HWRPB cycle frequency bogus, "
+		       "and unable to estimate a proper value!\n");
 	}
 
 	/* From John Bowman <bowman@math.ualberta.ca>: allow the values
@@ -238,7 +350,9 @@ time_init(void)
 
 	/* PC-like is standard; used for year < 20 || year >= 70 */
 	epoch = 1900;
-	if (year >= 20 && year < 48)
+	if (year < 20)
+		epoch = 2000;
+	else if (year >= 20 && year < 48)
 		/* NT epoch */
 		epoch = 1980;
 	else if (year >= 48 && year < 70)
@@ -266,8 +380,6 @@ time_init(void)
 
 	/* Startup the timer source. */
 	alpha_mv.init_rtc();
-
-	do_get_fast_time = do_gettimeofday;
 }
 
 /*

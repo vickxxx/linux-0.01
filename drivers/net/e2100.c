@@ -5,13 +5,15 @@
 	Copyright 1994 by Donald Becker.
 	Copyright 1993 United States Government as represented by the
 	Director, National Security Agency.  This software may be used and
-	distributed according to the terms of the GNU Public License,
+	distributed according to the terms of the GNU General Public License,
 	incorporated herein by reference.
 
 	This is a driver for the Cabletron E2100 series ethercards.
 
-	The Author may be reached as becker@cesdis.gsfc.nasa.gov, or
-	C/O Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The Author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	The E2100 series ethercard is a fairly generic shared memory 8390
 	implementation.  The only unusual aspect is the way the shared memory
@@ -31,7 +33,7 @@
 	If this happens, you must power down the machine for about 30 seconds.
 */
 
-static const char *version =
+static const char version[] =
 	"e2100.c:v1.01 7/21/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -70,17 +72,17 @@ static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 #define E21_SAPROM		0x10	/* Offset to station address data. */
 #define E21_IO_EXTENT	 0x20
 
-extern inline void mem_on(short port, volatile char *mem_base,
+static inline void mem_on(short port, unsigned long mem_base,
 						  unsigned char start_page )
 {
 	/* This is a little weird: set the shared memory window by doing a
 	   read.  The low address bits specify the starting page. */
-	readb(mem_base+start_page);
+	isa_readb(mem_base+start_page);
 	inb(port + E21_MEM_ENABLE);
 	outb(E21_MEM_ON, port + E21_MEM_ENABLE + E21_MEM_ON);
 }
 
-extern inline void mem_off(short port)
+static inline void mem_off(short port)
 {
 	inb(port + E21_MEM_ENABLE);
 	outb(0x00, port + E21_MEM_ENABLE);
@@ -140,7 +142,7 @@ static int __init e21_probe1(struct net_device *dev, int ioaddr)
 {
 	int i, status, retval;
 	unsigned char *station_addr = dev->dev_addr;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 
 	if (!request_region(ioaddr, E21_IO_EXTENT, dev->name))
 		return -EBUSY;
@@ -298,15 +300,15 @@ e21_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 {
 
 	short ioaddr = dev->base_addr;
-	char *shared_mem = (char *)dev->mem_start;
+	unsigned long shared_mem = dev->mem_start;
 
 	mem_on(ioaddr, shared_mem, ring_page);
 
 #ifdef notdef
 	/* Officially this is what we are doing, but the readl() is faster */
-	memcpy_fromio(hdr, shared_mem, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, shared_mem, sizeof(struct e8390_pkt_hdr));
 #else
-	((unsigned int*)hdr)[0] = readl(shared_mem);
+	((unsigned int*)hdr)[0] = isa_readl(shared_mem);
 #endif
 
 	/* Turn off memory access: we would need to reprogram the window anyway. */
@@ -321,12 +323,11 @@ static void
 e21_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	short ioaddr = dev->base_addr;
-	char *shared_mem = (char *)dev->mem_start;
 
-	mem_on(ioaddr, shared_mem, (ring_offset>>8));
+	mem_on(ioaddr, dev->mem_start, (ring_offset>>8));
 
 	/* Packet is always in one chunk -- we can copy + cksum. */
-	eth_io_copy_and_sum(skb, dev->mem_start + (ring_offset & 0xff), count, 0);
+	isa_eth_io_copy_and_sum(skb, dev->mem_start + (ring_offset & 0xff), count, 0);
 
 	mem_off(ioaddr);
 }
@@ -336,14 +337,14 @@ e21_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				 int start_page)
 {
 	short ioaddr = dev->base_addr;
-	volatile char *shared_mem = (char *)dev->mem_start;
+	unsigned long shared_mem = dev->mem_start;
 
 	/* Set the shared memory window start by doing a read, with the low address
 	   bits specifying the starting page. */
-	readb(shared_mem + start_page);
+	isa_readb(shared_mem + start_page);
 	mem_on(ioaddr, shared_mem, start_page);
 
-	memcpy_toio(shared_mem, buf, count);
+	isa_memcpy_toio(shared_mem, buf, count);
 	mem_off(ioaddr);
 }
 
@@ -386,6 +387,12 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, " memory base address(es)");
+MODULE_PARM_DESC(xcvr, "tranceiver(s) (0=internal, 1=external)");
+MODULE_DESCRIPTION("Cabletron E2100 ISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -434,6 +441,7 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+
 
 /*
  * Local variables:

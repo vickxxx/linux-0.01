@@ -16,6 +16,9 @@
 #ifndef HZ
 #define HZ 100
 #endif
+#if defined(__KERNEL__) && (HZ == 100)
+#define hz_to_std(a) (a)
+#endif
 
 #ifndef NGROUPS
 #define NGROUPS         32
@@ -27,6 +30,10 @@
 
 /* max length of hostname */
 #define MAXHOSTNAMELEN  64
+
+#ifdef __KERNEL__
+# define CLOCKS_PER_SEC	HZ
+#endif
 
 #endif
 

@@ -1,5 +1,5 @@
 /*
- *	$Id: setup_hd64461.c,v 1.1 2000/06/10 21:45:18 yaegashi Exp $
+ *	$Id: setup_hd64461.c,v 1.9 2001/07/15 23:26:56 gniibe Exp $
  *	Copyright (C) 2000 YAEGASHI Takeshi
  *	Hitachi HD64461 companion chip support
  */
@@ -57,7 +57,8 @@ static void mask_and_ack_hd64461(unsigned int irq)
 
 static void end_hd64461_irq(unsigned int irq)
 {
-	enable_hd64461_irq(irq);
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		enable_hd64461_irq(irq);
 }
 
 
@@ -88,7 +89,7 @@ static struct hw_interrupt_type hd64461_irq_type = {
 static void hd64461_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	printk(KERN_INFO
-	       "HD64461: spurious interrupt, nirr: 0x%lx nimr: 0x%lx\n",
+	       "HD64461: spurious interrupt, nirr: 0x%x nimr: 0x%x\n",
 	       inw(HD64461_NIRR), inw(HD64461_NIMR));
 }
 
@@ -104,7 +105,7 @@ int hd64461_irq_demux(int irq)
 		if (irq == 16) irq = CONFIG_HD64461_IRQ;
 		else irq += HD64461_IRQBASE;
 	}
-	return irq;
+	return __irq_demux(irq);
 }
 
 static struct irqaction irq0  = { hd64461_interrupt, SA_INTERRUPT, 0, "HD64461", NULL, NULL};
@@ -120,10 +121,9 @@ int __init setup_hd64461(void)
 	printk(KERN_INFO "HD64461 configured at 0x%x on irq %d(mapped into %d to %d)\n",
 	       CONFIG_HD64461_IOBASE, CONFIG_HD64461_IRQ,
 	       HD64461_IRQBASE, HD64461_IRQBASE+15);
-#ifdef CONFIG_CPU_SUBTYPE_SH7709
-	/* IRQ line for HD64461 should be set level trigger mode("10"). */
-	/* And this should be done earlier than the kernel starts. */
-	ctrl_outw(0x0200, INTC_ICR1); /* when connected to IRQ4. */
+
+#if defined(CONFIG_CPU_SUBTYPE_SH7709) /* Should be at processor specific part.. */
+	outw(0x2240, INTC_ICR1);
 #endif
 	outw(0xffff, HD64461_NIMR);
 
@@ -135,7 +135,7 @@ int __init setup_hd64461(void)
 
 #ifdef CONFIG_HD64461_ENABLER
 	printk(KERN_INFO "HD64461: enabling PCMCIA devices\n");
-	outb(0x04, HD64461_PCC1CSCIER);
+	outb(0x4c, HD64461_PCC1CSCIER);
 	outb(0x00, HD64461_PCC1CSCR);
 #endif
 
