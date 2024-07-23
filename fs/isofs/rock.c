@@ -5,9 +5,6 @@
  *
  *  Rock Ridge Extensions to iso9660
  */
-#ifdef MODULE
-#include <linux/module.h>
-#endif
 
 #include <linux/stat.h>
 #include <linux/sched.h>
@@ -258,6 +255,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 			   struct inode * inode){
   int len;
   unsigned char * chr;
+  int symlink_len = 0;
   CONTINUE_DECLS;
 
   if (!inode->i_sb->u.isofs_sb.s_rock) return 0;
@@ -306,14 +304,14 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	  high = isonum_733(rr->u.PN.dev_high);
 	  low = isonum_733(rr->u.PN.dev_low);
 	  /*
-	   * The Rock Ridge standard specifies that if sizeof(dev_t) <=4,
+	   * The Rock Ridge standard specifies that if sizeof(dev_t) <= 4,
 	   * then the high field is unused, and the device number is completely
 	   * stored in the low field.  Some writers may ignore this subtlety,
 	   * and as a result we test to see if the entire device number is
 	   * stored in the low field, and use that.
 	   */
-	  if(MINOR(low) != low && high == 0) {
-	    inode->i_rdev = low;
+	  if((low & ~0xff) && high == 0) {
+	    inode->i_rdev = MKDEV(low >> 8, low & 0xff);
 	  } else {
 	    inode->i_rdev = MKDEV(high, low);
 	  }
@@ -321,7 +319,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	break;
       case SIG('T','F'):
 	/* Some RRIP writers incorrectly place ctime in the TF_CREATE field.
-	   Try and handle this correctly for either case. */
+	   Try to handle this correctly for either case. */
 	cnt = 0; /* Rock ridge never appears on a High Sierra disk */
 	if(rr->u.TF.flags & TF_CREATE) 
 	  inode->i_ctime = iso_date(rr->u.TF.times[cnt++].time, 0);
@@ -337,7 +335,7 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 	 struct SL_component * slp;
 	 slen = rr->len - 5;
 	 slp = &rr->u.SL.link;
-	 inode->i_size = 0;
+	 inode->i_size = symlink_len;
 	 while (slen > 1){
 	   rootflag = 0;
 	   switch(slp->flags &~1){
@@ -362,8 +360,9 @@ int parse_rock_ridge_inode(struct iso_directory_record * de,
 
 	   if(slen < 2) break;
 	   if(!rootflag) inode->i_size += 1;
-	 };
-       };
+	 }
+	}
+	symlink_len = inode->i_size;
 	break;
       case SIG('R','E'):
 	printk("Attempt to read inode for relocated directory\n");
@@ -461,7 +460,6 @@ char * get_rock_ridge_symlink(struct inode * inode)
   
  repeat:
   while (len > 1){ /* There may be one byte for padding somewhere */
-    if (rpnt) break;
     rr = (struct rock_ridge *) chr;
     if (rr->len == 0) goto out; /* Something got screwed up here */
     sig = (chr[0] << 8) + chr[1];
@@ -510,6 +508,9 @@ char * get_rock_ridge_symlink(struct inode * inode)
 	 if(slen < 2) break;
 	 if(!rootflag) strcat(rpnt,"/");
        };
+       break;
+     case SIG('C','E'):
+       CHECK_CE; /* This tells is if there is a continuation record */
        break;
      default:
        break;

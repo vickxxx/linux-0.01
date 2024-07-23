@@ -7,34 +7,14 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.s:
-	$(CC) $(CFLAGS) -S $<
+O_TARGET := netrom.o
+O_OBJS	 := af_netrom.o sysctl_net_netrom.o
 
-
-OBJS	:= af_netrom.o
-
-ifdef CONFIG_AX25
-
-OBJS	:= $(OBJS) nr_dev.o nr_in.o nr_out.o nr_route.o nr_subr.o nr_timer.o
-
+ifdef CONFIG_NETROM
+O_OBJS	+= nr_dev.o nr_in.o nr_out.o nr_route.o nr_subr.o nr_timer.o
 endif
 
-netrom.o:		$(OBJS)
-		$(LD) -r -o netrom.o $(OBJS)
-
-dep:
-		$(CPP) -M *.c > .depend
+include $(TOPDIR)/Rules.make
 
 tar:
 		tar -cvf /dev/f1 .
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif

@@ -92,8 +92,8 @@ static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	int i,j;
 	int max = -1;
 
-	for (j = 0 ; j < __FDSET_LONGS ; j++) {
-		i = j << 5;
+	for (j = 0 ; j < __FDSET_INTS ; j++) {
+		i = j * __NFDBITS;
 		if (i >= n)
 			break;
 		set = in->fds_bits[j] | out->fds_bits[j] | ex->fds_bits[j];
@@ -154,9 +154,10 @@ repeat:
  * We do a VERIFY_WRITE here even though we are only reading this time:
  * we'll write to it eventually..
  */
-static int __get_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdset)
+static int __get_fd_set(int nr, unsigned int * fs_pointer, fd_set * fdset)
 {
-	int error;
+	int error, i;
+	unsigned int * tmp;
 
 	FD_ZERO(fdset);
 	if (!fs_pointer)
@@ -164,32 +165,39 @@ static int __get_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdse
 	error = verify_area(VERIFY_WRITE,fs_pointer,sizeof(fd_set));
 	if (error)
 		return error;
-	while (nr > 0) {
-		*fdset = get_user(fs_pointer);
-		fdset++;
+	tmp = fdset->fds_bits;
+	for (i = __FDSET_INTS; i > 0; i--) {
+		if (nr <= 0)
+			break;
+		*tmp = get_user(fs_pointer);
+		tmp++;
 		fs_pointer++;
-		nr -= 8 * sizeof(unsigned long);
+		nr -= 8 * sizeof(unsigned int);
 	}
 	return 0;
 }
 
-static void __set_fd_set(int nr, unsigned long * fs_pointer, unsigned long * fdset)
+static void __set_fd_set(int nr, unsigned int * fs_pointer, unsigned int * fdset)
 {
+	int i;
+
 	if (!fs_pointer)
 		return;
-	while (nr > 0) {
+	for (i = __FDSET_INTS; i > 0; i--) {
+		if (nr <= 0)
+			break;
 		put_user(*fdset, fs_pointer);
 		fdset++;
 		fs_pointer++;
-		nr -= 8 * sizeof(unsigned long);
+		nr -= 8 * sizeof(unsigned int);
 	}
 }
 
 #define get_fd_set(nr,fsp,fdp) \
-__get_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
+__get_fd_set(nr, (unsigned int *) (fsp), fdp)
 
 #define set_fd_set(nr,fsp,fdp) \
-__set_fd_set(nr, (unsigned long *) (fsp), (unsigned long *) (fdp))
+__set_fd_set(nr, (unsigned int *) (fsp), (unsigned int *) (fdp))
 
 /*
  * We can actually return ERESTARTSYS instead of EINTR, but I'd
@@ -219,8 +227,8 @@ asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct 
 		i = verify_area(VERIFY_WRITE, tvp, sizeof(*tvp));
 		if (i)
 			return i;
-		timeout = ROUND_UP(get_fs_long((unsigned long *)&tvp->tv_usec),(1000000/HZ));
-		timeout += get_fs_long((unsigned long *)&tvp->tv_sec) * HZ;
+		timeout = ROUND_UP(get_user(&tvp->tv_usec),(1000000/HZ));
+		timeout += get_user(&tvp->tv_sec) * (unsigned long) HZ;
 		if (timeout)
 			timeout += jiffies + 1;
 	}
@@ -231,10 +239,10 @@ asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct 
 	if ((long) timeout < 0)
 		timeout = 0;
 	if (tvp && !(current->personality & STICKY_TIMEOUTS)) {
-		put_fs_long(timeout/HZ, (unsigned long *) &tvp->tv_sec);
+		put_user(timeout/HZ, &tvp->tv_sec);
 		timeout %= HZ;
 		timeout *= (1000000/HZ);
-		put_fs_long(timeout, (unsigned long *) &tvp->tv_usec);
+		put_user(timeout, &tvp->tv_usec);
 	}
 	if (i < 0)
 		return i;
@@ -244,29 +252,4 @@ asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct 
 	set_fd_set(n, outp, &res_out);
 	set_fd_set(n, exp, &res_ex);
 	return i;
-}
-
-/*
- * Perform the select(nd, in, out, ex, tv) system call.
- * Linux/i386 didn't use to be able to handle 5 system call
- * parameters, so the old select used a memory block for
- * parameter passing..
- */
-asmlinkage int old_select(unsigned long *buffer)
-{
-	int n;
-	fd_set *inp;
-	fd_set *outp;
-	fd_set *exp;
-	struct timeval *tvp;
-
-	n = verify_area(VERIFY_READ, buffer, 5*sizeof(unsigned long));
-	if (n)
-		return n;
-	n = get_user(buffer);
-	inp = (fd_set *) get_user(buffer+1);
-	outp = (fd_set *) get_user(buffer+2);
-	exp = (fd_set *) get_user(buffer+3);
-	tvp = (struct timeval *) get_user(buffer+4);
-	return sys_select(n, inp, outp, exp, tvp);
 }

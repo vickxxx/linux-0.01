@@ -14,6 +14,11 @@
 #include <linux/termios.h>
 #include <linux/mm.h>
 
+/*
+ * Define this if you want SunOS compatibility wrt braindead
+ * select behaviour on FIFO's.
+ */
+#undef FIFO_SUNOS_BRAINDAMAGE
 
 /* We don't use the head/tail construction any more. Now we use the start/len*/
 /* construction providing full use of PIPE_BUF (multiple of PAGE_SIZE) */
@@ -69,7 +74,7 @@ static int pipe_read(struct inode * inode, struct file * filp, char * buf, int c
 	return 0;
 }
 	
-static int pipe_write(struct inode * inode, struct file * filp, char * buf, int count)
+static int pipe_write(struct inode * inode, struct file * filp, const char * buf, int count)
 {
 	int chars = 0, free = 0, written = 0;
 	char *pipebuf;
@@ -121,7 +126,12 @@ static int pipe_lseek(struct inode * inode, struct file * file, off_t offset, in
 	return -ESPIPE;
 }
 
-static int bad_pipe_rw(struct inode * inode, struct file * filp, char * buf, int count)
+static int bad_pipe_r(struct inode * inode, struct file * filp, char * buf, int count)
+{
+	return -EBADF;
+}
+
+static int bad_pipe_w(struct inode * inode, struct file * filp, const char * buf, int count)
 {
 	return -EBADF;
 }
@@ -135,7 +145,7 @@ static int pipe_ioctl(struct inode *pino, struct file * filp,
 		case FIONREAD:
 			error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(int));
 			if (!error)
-				put_fs_long(PIPE_SIZE(*pino),(int *) arg);
+				put_user(PIPE_SIZE(*pino),(int *) arg);
 			return error;
 		default:
 			return -EINVAL;
@@ -151,7 +161,7 @@ static int pipe_select(struct inode * inode, struct file * filp, int sel_type, s
 			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
 		case SEL_OUT:
-			if (!PIPE_FULL(*inode) || !PIPE_READERS(*inode))
+			if (PIPE_EMPTY(*inode) || !PIPE_READERS(*inode))
 				return 1;
 			select_wait(&PIPE_WAIT(*inode), wait);
 			return 0;
@@ -164,6 +174,7 @@ static int pipe_select(struct inode * inode, struct file * filp, int sel_type, s
 	return 0;
 }
 
+#ifdef FIFO_SUNOS_BRAINDAMAGE
 /*
  * Arggh. Why does SunOS have to have different select() behaviour
  * for pipes and fifos? Hate-Hate-Hate. See difference in SEL_IN..
@@ -189,6 +200,11 @@ static int fifo_select(struct inode * inode, struct file * filp, int sel_type, s
 	}
 	return 0;
 }
+#else
+
+#define fifo_select pipe_select
+
+#endif /* FIFO_SUNOS_BRAINDAMAGE */
 
 /*
  * The 'connect_xxx()' functions are needed for named pipes when
@@ -235,10 +251,6 @@ static int connect_select(struct inode * inode, struct file * filp, int sel_type
 	return 0;
 }
 
-/*
- * Ok, these three routines NOW keep track of readers/writers,
- * Linus previously did it with inode->i_count checking.
- */
 static void pipe_read_release(struct inode * inode, struct file * filp)
 {
 	PIPE_READERS(*inode)--;
@@ -253,9 +265,32 @@ static void pipe_write_release(struct inode * inode, struct file * filp)
 
 static void pipe_rdwr_release(struct inode * inode, struct file * filp)
 {
-	PIPE_READERS(*inode)--;
-	PIPE_WRITERS(*inode)--;
+	if (filp->f_mode & FMODE_READ)
+		PIPE_READERS(*inode)--;
+	if (filp->f_mode & FMODE_WRITE)
+		PIPE_WRITERS(*inode)--;
 	wake_up_interruptible(&PIPE_WAIT(*inode));
+}
+
+static int pipe_read_open(struct inode * inode, struct file * filp)
+{
+	PIPE_READERS(*inode)++;
+	return 0;
+}
+
+static int pipe_write_open(struct inode * inode, struct file * filp)
+{
+	PIPE_WRITERS(*inode)++;
+	return 0;
+}
+
+static int pipe_rdwr_open(struct inode * inode, struct file * filp)
+{
+	if (filp->f_mode & FMODE_READ)
+		PIPE_READERS(*inode)++;
+	if (filp->f_mode & FMODE_WRITE)
+		PIPE_WRITERS(*inode)++;
+	return 0;
 }
 
 /*
@@ -265,12 +300,12 @@ static void pipe_rdwr_release(struct inode * inode, struct file * filp)
 struct file_operations connecting_fifo_fops = {
 	pipe_lseek,
 	connect_read,
-	bad_pipe_rw,
+	bad_pipe_w,
 	NULL,		/* no readdir */
 	connect_select,
 	pipe_ioctl,
 	NULL,		/* no mmap on pipes.. surprise */
-	NULL,		/* no special open code */
+	pipe_read_open,
 	pipe_read_release,
 	NULL
 };
@@ -278,25 +313,25 @@ struct file_operations connecting_fifo_fops = {
 struct file_operations read_fifo_fops = {
 	pipe_lseek,
 	pipe_read,
-	bad_pipe_rw,
+	bad_pipe_w,
 	NULL,		/* no readdir */
 	fifo_select,
 	pipe_ioctl,
 	NULL,		/* no mmap on pipes.. surprise */
-	NULL,		/* no special open code */
+	pipe_read_open,
 	pipe_read_release,
 	NULL
 };
 
 struct file_operations write_fifo_fops = {
 	pipe_lseek,
-	bad_pipe_rw,
+	bad_pipe_r,
 	pipe_write,
 	NULL,		/* no readdir */
 	fifo_select,
 	pipe_ioctl,
 	NULL,		/* mmap */
-	NULL,		/* no special open code */
+	pipe_write_open,
 	pipe_write_release,
 	NULL
 };
@@ -309,7 +344,7 @@ struct file_operations rdwr_fifo_fops = {
 	fifo_select,
 	pipe_ioctl,
 	NULL,		/* mmap */
-	NULL,		/* no special open code */
+	pipe_rdwr_open,
 	pipe_rdwr_release,
 	NULL
 };
@@ -317,25 +352,25 @@ struct file_operations rdwr_fifo_fops = {
 struct file_operations read_pipe_fops = {
 	pipe_lseek,
 	pipe_read,
-	bad_pipe_rw,
+	bad_pipe_w,
 	NULL,		/* no readdir */
 	pipe_select,
 	pipe_ioctl,
 	NULL,		/* no mmap on pipes.. surprise */
-	NULL,		/* no special open code */
+	pipe_read_open,
 	pipe_read_release,
 	NULL
 };
 
 struct file_operations write_pipe_fops = {
 	pipe_lseek,
-	bad_pipe_rw,
+	bad_pipe_r,
 	pipe_write,
 	NULL,		/* no readdir */
 	pipe_select,
 	pipe_ioctl,
 	NULL,		/* mmap */
-	NULL,		/* no special open code */
+	pipe_write_open,
 	pipe_write_release,
 	NULL
 };
@@ -348,7 +383,7 @@ struct file_operations rdwr_pipe_fops = {
 	pipe_select,
 	pipe_ioctl,
 	NULL,		/* mmap */
-	NULL,		/* no special open code */
+	pipe_rdwr_open,
 	pipe_rdwr_release,
 	NULL
 };
@@ -366,6 +401,8 @@ struct inode_operations pipe_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	NULL,			/* truncate */
 	NULL			/* permission */
@@ -386,6 +423,7 @@ int do_pipe(int *fd)
 			break;
 	if (j < 2) {
 		iput(inode);
+		iput(inode);
 		if (j)
 			f[0]->f_count--;
 		return -ENFILE;
@@ -397,6 +435,7 @@ int do_pipe(int *fd)
 			j++;
 		}
 	if (j<2) {
+		iput(inode);
 		iput(inode);
 		f[0]->f_count--;
 		f[1]->f_count--;

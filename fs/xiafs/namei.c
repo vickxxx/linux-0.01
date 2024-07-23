@@ -9,10 +9,6 @@
  *  This software may be redistributed per Linux Copyright.
  */
 
-#ifdef MODULE
-#include <linux/module.h>
-#endif
-
 #include <linux/sched.h>
 #include <linux/xia_fs.h>
 #include <linux/kernel.h>
@@ -20,6 +16,7 @@
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/errno.h>
+
 #include <asm/segment.h>
 
 #include "xiafs_mac.h"
@@ -317,7 +314,7 @@ int xiafs_mknod(struct inode *dir, const char *name, int len, int mode, int rdev
     else if (S_ISFIFO(inode->i_mode))
     	init_fifo(inode);
     if (S_ISBLK(mode) || S_ISCHR(mode))
-        inode->i_rdev = rdev;
+        inode->i_rdev = to_kdev_t(rdev);
     inode->i_atime = inode->i_ctime = inode->i_atime = CURRENT_TIME;
     inode->i_dirt = 1;
     bh = xiafs_add_entry(dir, name, len, &de, NULL);

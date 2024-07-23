@@ -7,34 +7,15 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.s:
-	$(CC) $(CFLAGS) -S $<
 
-
-OBJS	:= af_ax25.o
+O_TARGET := ax25.o
+O_OBJS	 := af_ax25.o sysctl_net_ax25.o
 
 ifdef CONFIG_AX25
-
-OBJS	:= $(OBJS) ax25_in.o ax25_out.o ax25_route.o ax25_subr.o ax25_timer.o
-
+O_OBJS	+= ax25_in.o ax25_out.o ax25_route.o ax25_subr.o ax25_timer.o
 endif
 
-ax25.o:		$(OBJS)
-		$(LD) -r -o ax25.o $(OBJS)
-
-dep:
-		$(CPP) -M *.c > .depend
+include $(TOPDIR)/Rules.make
 
 tar:
 		tar -cvf /dev/f1 .
-
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif

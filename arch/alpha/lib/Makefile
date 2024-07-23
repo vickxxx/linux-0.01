@@ -2,18 +2,14 @@
 # Makefile for alpha-specific library files..
 #
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-
-OBJS  = __divqu.o __remqu.o __divlu.o __remlu.o memset.o memcpy.o io.o
+OBJS  = __divqu.o __remqu.o __divlu.o __remlu.o memset.o memcpy.o io.o \
+	checksum.o strlen.o
 
 lib.a: $(OBJS)
 	$(AR) rcs lib.a $(OBJS)
-	sync
+
+memset.o: memset.S
+	$(CC) -c -o memset.o memset.S
 
 __divqu.o: divide.S
 	$(CC) -DDIV -c -o __divqu.o divide.S
@@ -29,10 +25,4 @@ __remlu.o: divide.S
 
 dep:
 
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
-
+include $(TOPDIR)/Rules.make

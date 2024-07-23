@@ -49,7 +49,10 @@
    April 23, 1995 (dp) Fixed ioctl so it works properly with piconfig program
                        when changing the baud rate or clock mode.
                        version 0.8 ALPHA
-         
+   July 17, 1995 (ac)  Finally polishing of AX25.030+ support
+   Oct  29, 1995 (ac)  A couple of minor fixes before this, and this release changes
+   		       to the proper set_mac_address semantics which will break 
+   		       a few programs I suspect.
 */
 
 /* The following #define invokes a hack that will improve performance (baud)
@@ -59,7 +62,7 @@
    of each transmitted packet. If this causes you to lose sleep, #undefine it.
 */
 
-#define STUFF2 1
+/*#define STUFF2 1*/
 
 /* The default configuration */
 #define PI_DMA 3
@@ -78,10 +81,7 @@
 #define DEF_B_SQUELDELAY 3	/* 30 mS */
 #define DEF_B_CLOCKMODE 0	/* Normal clock mode */
 
-struct device *init_etherdev(struct device *dev, int sizeof_private,
-			     unsigned long *mem_startp);
-
-static char *version =
+static const char *version =
 "PI: V0.8 ALPHA April 23 1995 David Perry (dp@hydra.carleton.ca)\n";
 
 /* The following #define is only really required for the PI card, not
@@ -91,10 +91,9 @@ static char *version =
 #define PI2_MODULE 0
 
 #if PI2_MODULE > 0
-#include <linux/modules.h>
+#include <linux/module.h>
 #endif
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -116,9 +115,10 @@ static char *version =
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/timer.h>
+#include <linux/if_arp.h>
 #include "pi2.h"
 #include "z8530.h"
-#include "ax25.h"
+#include <net/ax25.h>
 
 
 struct mbuf {
@@ -149,7 +149,7 @@ static struct device pi0b = { "pi0b", 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, pi0_prepr
 static int pi_probe(struct device *dev, int card_type);
 static int pi_open(struct device *dev);
 static int pi_send_packet(struct sk_buff *skb, struct device *dev);
-static void pi_interrupt(int reg_ptr, struct pt_regs *regs);
+static void pi_interrupt(int reg_ptr, void *dev_id, struct pt_regs *regs);
 static int pi_close(struct device *dev);
 static int pi_ioctl(struct device *dev, struct ifreq *ifr, int cmd);
 static struct enet_statistics *pi_get_stats(struct device *dev);
@@ -510,6 +510,7 @@ static void a_rxint(struct device *dev, struct pi_local *lp)
     struct sk_buff *skb;
     int sksize, pkt_len;
     struct mbuf *cur_buf;
+    unsigned char *cfix;
 
     save_flags(flags);
     cli();			/* disable interrupts */
@@ -550,22 +551,24 @@ static void a_rxint(struct device *dev, struct pi_local *lp)
 	    /* Malloc up new buffer. */
 	    sksize = pkt_len;
 
-	    skb = alloc_skb(sksize, GFP_ATOMIC);
+	    skb = dev_alloc_skb(sksize);
 	    if (skb == NULL) {
 		printk("PI: %s: Memory squeeze, dropping packet.\n", dev->name);
 		lp->stats.rx_dropped++;
 		restore_flags(flags);
 		return;
 	    }
-	    skb->len = (unsigned long) pkt_len;
 	    skb->dev = dev;
 
 	    /* KISS kludge -  prefix with a 0 byte */
-	    skb->data[0] = 0;
+	    cfix=skb_put(skb,pkt_len);
+	    *cfix++=0;
 	    /* 'skb->data' points to the start of sk_buff data area. */
-	    memcpy(&skb->data[1], (char *) cur_buf->data,
+	    memcpy(cfix, (char *) cur_buf->data,
 		   pkt_len - 1);
-	    skb->protocol=ntohs(ETH_P_AX25);
+	    skb->protocol=htons(ETH_P_AX25);
+	    skb->mac.raw=skb->data;
+	    IS_SKB(skb);
 	    netif_rx(skb);
 	    lp->stats.rx_packets++;
 	}			/* end good frame */
@@ -582,6 +585,7 @@ static void b_rxint(struct device *dev, struct pi_local *lp)
     struct sk_buff *skb;
     int sksize;
     int pkt_len;
+    unsigned char *cfix;
 
     save_flags(flags);
     cli();			/* disable interrupts */
@@ -636,21 +640,23 @@ static void b_rxint(struct device *dev, struct pi_local *lp)
 
 		/* Malloc up new buffer. */
 		sksize = pkt_len;
-		skb = alloc_skb(sksize, GFP_ATOMIC);
+		skb = dev_alloc_skb(sksize);
 		if (skb == NULL) {
 		    printk("PI: %s: Memory squeeze, dropping packet.\n", dev->name);
 		    lp->stats.rx_dropped++;
 		    restore_flags(flags);
 		    return;
 		}
-		skb->len = pkt_len;
 		skb->dev = dev;
 
 		/* KISS kludge -  prefix with a 0 byte */
-		skb->data[0] = 0;
+		cfix=skb_put(skb,pkt_len);
+		*cfix++=0;
 		/* 'skb->data' points to the start of sk_buff data area. */
-		memcpy(&skb->data[1], lp->rcvbuf->data, pkt_len - 1);
+		memcpy(cfix, lp->rcvbuf->data, pkt_len - 1);
 		skb->protocol=ntohs(ETH_P_AX25);
+		skb->mac.raw=skb->data;
+		IS_SKB(skb);
 		netif_rx(skb);
 		lp->stats.rx_packets++;
 		/* packet queued - initialize buffer for next frame */
@@ -1068,10 +1074,10 @@ static void rts(struct pi_local *lp, int x)
 }
 
 /* Fill in the MAC-level header. */
-static int pi_header(unsigned char *buff, struct device *dev, unsigned short type,
-	     void *daddr, void *saddr, unsigned len, struct sk_buff *skb)
+static int pi_header(struct sk_buff *skb, struct device *dev, unsigned short type,
+	     void *daddr, void *saddr, unsigned len)
 {
-    return ax25_encapsulate(buff, dev, type, daddr, saddr, len, skb);
+    return ax25_encapsulate(skb, dev, type, daddr, saddr, len);
 }
 
 /* Rebuild the MAC-level header. */
@@ -1200,7 +1206,7 @@ static void chipset_init(struct device *dev)
 }
 
 
-unsigned long pi_init(unsigned long mem_start, unsigned long mem_end)
+int pi_init(void)
 {
     int *port;
     int ioaddr = 0;
@@ -1229,7 +1235,7 @@ unsigned long pi_init(unsigned long mem_start, unsigned long mem_end)
 	break;
     default:
 	printk("PI: ERROR: No card found\n");
-	return mem_start;
+	return -EIO;
     }
 
     /* Link a couple of device structures into the chain */
@@ -1240,9 +1246,7 @@ unsigned long pi_init(unsigned long mem_start, unsigned long mem_end)
     */
     register_netdev(&pi0a);
     
-    pi0a.priv=(void *)mem_start;
-    mem_start+=sizeof(struct pi_local) + (DMA_BUFF_SIZE + sizeof(struct mbuf)) * 4
-			 + 8;	/* for alignment */
+    pi0a.priv = kmalloc(sizeof(struct pi_local) + (DMA_BUFF_SIZE + sizeof(struct mbuf)) * 4, GFP_KERNEL | GFP_DMA);
 			
     pi0a.dma = PI_DMA;
     pi0a.base_addr = ioaddr + 2;
@@ -1252,9 +1256,7 @@ unsigned long pi_init(unsigned long mem_start, unsigned long mem_end)
     register_netdev(&pi0b);
     pi0b.base_addr = ioaddr;
     pi0b.irq = 0;
-    pi0b.priv=(void *)mem_start;
-    mem_start+=sizeof(struct pi_local) + (DMA_BUFF_SIZE + sizeof(struct mbuf)) * 4
-			 + 8;	/* for alignment */
+    pi0b.priv = kmalloc(sizeof(struct pi_local) + (DMA_BUFF_SIZE + sizeof(struct mbuf)) * 4, GFP_KERNEL | GFP_DMA);
 
     /* Now initialize them */
     pi_probe(&pi0a, card_type);
@@ -1262,7 +1264,7 @@ unsigned long pi_init(unsigned long mem_start, unsigned long mem_end)
 
     pi0b.irq = pi0a.irq;	/* IRQ is shared */
     
-    return mem_start;
+    return 0;
 }
 
 static int valid_dma_page(unsigned long addr, unsigned long dev_buffsize)
@@ -1273,10 +1275,10 @@ static int valid_dma_page(unsigned long addr, unsigned long dev_buffsize)
 	return 0;
 }
 
-static int pi_set_mac_address(struct device *dev, void *addr)
+static int pi_set_mac_address(struct device *dev, struct sockaddr *sa)
 {
-    memcpy(dev->dev_addr, addr, 7);	/* addr is an AX.25 shifted ASCII */
-    return 0;			/* mac address */
+    memcpy(dev->dev_addr, sa->sa_data, dev->addr_len);	/* addr is an AX.25 shifted ASCII */
+    return 0;						/* mac address */
 }
 
 /* Allocate a buffer which does not cross a DMA page boundary */
@@ -1396,7 +1398,7 @@ static int pi_probe(struct device *dev, int card_type)
 		   now.  There is no point in waiting since no other device can use
 		   the interrupt, and this marks the 'irqaction' as busy. */
 	{
-	    int irqval = request_irq(dev->irq, &pi_interrupt,0, "pi2");
+	    int irqval = request_irq(dev->irq, &pi_interrupt,0, "pi2", NULL);
 	    if (irqval) {
 		printk("PI: unable to get IRQ %d (irqval=%d).\n",
 		       dev->irq, irqval);
@@ -1405,7 +1407,7 @@ static int pi_probe(struct device *dev, int card_type)
 	}
 
 	/* Grab the region */
-	snarf_region(ioaddr & 0x3f0, PI_TOTAL_SIZE);
+	request_region(ioaddr & 0x3f0, PI_TOTAL_SIZE, "pi2" );
 
 
     }				/* Only for A port */
@@ -1424,13 +1426,10 @@ static int pi_probe(struct device *dev, int card_type)
     dev->rebuild_header = pi_rebuild_header;
     dev->set_mac_address = pi_set_mac_address;
 
-    dev->type = AF_AX25;	/* AF_AX25 device */
-    dev->hard_header_len = 17;	/* We don't do digipeaters */
-    dev->mtu = 1500;		/* eth_mtu is the default */
-    dev->addr_len = 7;		/* sizeof an ax.25 address */
-    for (i = 0; i < ETH_ALEN; i++) {
-	dev->broadcast[i] = 0xff;
-    }
+    dev->type = ARPHRD_AX25;			/* AF_AX25 device */
+    dev->hard_header_len = 73;			/* We do digipeaters now */
+    dev->mtu = 1500;				/* eth_mtu is the default */
+    dev->addr_len = 7;				/* sizeof an ax.25 address */
     memcpy(dev->broadcast, ax25_bcast, 7);
     memcpy(dev->dev_addr, ax25_test, 7);
 
@@ -1440,7 +1439,7 @@ static int pi_probe(struct device *dev, int card_type)
     dev->pa_addr = 0;
     dev->pa_brdaddr = 0;
     dev->pa_mask = 0;
-    dev->pa_alen = sizeof(unsigned long);
+    dev->pa_alen = 4;
 
     return 0;
 }
@@ -1462,7 +1461,7 @@ static int pi_open(struct device *dev)
     if (dev->base_addr & 2) {	/* if A channel */
 	if (first_time) {
 	    if (request_dma(dev->dma,"pi2")) {
-		free_irq(dev->irq);
+		free_irq(dev->irq, NULL);
 		return -EAGAIN;
 	    }
 	    irq2dev_map[dev->irq] = dev;
@@ -1510,7 +1509,7 @@ static int pi_send_packet(struct sk_buff *skb, struct device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void pi_interrupt(int reg_ptr, struct pt_regs *regs)
+static void pi_interrupt(int reg_ptr, void *dev_id, struct pt_regs *regs)
 {
 /*    int irq = -(((struct pt_regs *) reg_ptr)->orig_eax + 2);*/
     struct pi_local *lp;

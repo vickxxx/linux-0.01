@@ -6,10 +6,6 @@
  *  minix directory handling functions
  */
 
-#ifdef MODULE
-#include <linux/module.h>
-#endif
-
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -54,6 +50,8 @@ struct inode_operations minix_dir_inode_operations = {
 	minix_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	minix_truncate,		/* truncate */
 	NULL			/* permission */

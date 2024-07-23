@@ -63,17 +63,19 @@ struct inode_operations ext2_dir_inode_operations = {
 	ext2_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
 	NULL,			/* bmap */
 	ext2_truncate,		/* truncate */
 	ext2_permission,	/* permission */
 	NULL			/* smap */
 };
 
-int ext2_check_dir_entry (char * function, struct inode * dir,
+int ext2_check_dir_entry (const char * function, struct inode * dir,
 			  struct ext2_dir_entry * de, struct buffer_head * bh,
 			  unsigned long offset)
 {
-	char * error_msg = NULL;
+	const char * error_msg = NULL;
 
 	if (de->rec_len < EXT2_DIR_REC_LEN(1))
 		error_msg = "rec_len is smaller than minimal";
@@ -88,10 +90,10 @@ int ext2_check_dir_entry (char * function, struct inode * dir,
 		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
-		ext2_error (dir->i_sb, function, "bad directory entry: %s\n"
+		ext2_error (dir->i_sb, function, "bad entry in directory #%lu: %s - "
 			    "offset=%lu, inode=%lu, rec_len=%d, name_len=%d",
-			    error_msg, offset, (unsigned long) de->inode, de->rec_len,
-			    de->name_len);
+			    dir->i_ino, error_msg, offset, (unsigned long) de->inode,
+			    de->rec_len, de->name_len);
 	return error_msg == NULL ? 1 : 0;
 }
 
@@ -104,7 +106,7 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 	struct buffer_head * bh, * tmp, * bha[16];
 	struct ext2_dir_entry * de;
 	struct super_block * sb;
-	int err, version;
+	int err;
 
 	if (!inode || !S_ISDIR(inode->i_mode))
 		return -EBADF;
@@ -118,6 +120,9 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 		blk = (filp->f_pos) >> EXT2_BLOCK_SIZE_BITS(sb);
 		bh = ext2_bread (inode, blk, 0, &err);
 		if (!bh) {
+			ext2_error (sb, "ext2_readdir",
+				    "directory #%lu contains a hole at offset %lu",
+				    inode->i_ino, (unsigned long)filp->f_pos);
 			filp->f_pos += sb->s_blocksize - offset;
 			continue;
 		}
@@ -129,7 +134,7 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 			for (i = 16 >> (EXT2_BLOCK_SIZE_BITS(sb) - 9), num = 0;
 			     i > 0; i--) {
 				tmp = ext2_getblk (inode, ++blk, 0, &err);
-				if (tmp && !tmp->b_uptodate && !tmp->b_lock)
+				if (tmp && !buffer_uptodate(tmp) && !buffer_locked(tmp))
 					bha[num++] = tmp;
 				else
 					brelse (tmp);
@@ -186,6 +191,8 @@ revalidate:
 				 * version stamp to detect whether or
 				 * not the directory has been modified
 				 * during the copy operation. */
+				unsigned long version;
+				dcache_add(inode, de->name, de->name_len, de->inode);
 				version = inode->i_version;
 				error = filldir(dirent, de->name, de->name_len, filp->f_pos, de->inode);
 				if (error)

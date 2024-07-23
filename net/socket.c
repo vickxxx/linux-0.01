@@ -32,6 +32,9 @@
  *		Alan Cox	:	Made sock_alloc()/sock_release() public
  *					for NetROM and future kernel nfsd type
  *					stuff.
+ *		Alan Cox	:	sendmsg/recvmsg basics.
+ *		Tom Dyas	:	Export net symbols.
+ *		Marcin Dalecki	:	Fixed problems with CONFIG_NET="n".
  *
  *
  *		This program is free software; you can redistribute it and/or
@@ -61,15 +64,27 @@
 #include <linux/net.h>
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
+#include <linux/proc_fs.h>
+#include <linux/firewall.h>
+
+#ifdef CONFIG_KERNELD
+#include <linux/kerneld.h>
+#endif
+
+#include <net/netlink.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
+
+#if defined(CONFIG_MODULES) && defined(CONFIG_NET)
+extern void export_net_symbols(void);
+#endif
 
 static int sock_lseek(struct inode *inode, struct file *file, off_t offset,
 		      int whence);
 static int sock_read(struct inode *inode, struct file *file, char *buf,
 		     int size);
-static int sock_write(struct inode *inode, struct file *file, char *buf,
+static int sock_write(struct inode *inode, struct file *file, const char *buf,
 		      int size);
 
 static void sock_close(struct inode *inode, struct file *file);
@@ -77,7 +92,6 @@ static int sock_select(struct inode *inode, struct file *file, int which, select
 static int sock_ioctl(struct inode *inode, struct file *file,
 		      unsigned int cmd, unsigned long arg);
 static int sock_fasync(struct inode *inode, struct file *filp, int on);
-		   
 
 
 /*
@@ -115,7 +129,7 @@ static int sockets_in_use  = 0;
 
 #define MAX_SOCK_ADDR	128		/* 108 for Unix domain - 16 for IP, 16 for IPX, about 80 for AX.25 */
  
-static int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr)
+int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr)
 {
 	int err;
 	if(ulen<0||ulen>MAX_SOCK_ADDR)
@@ -128,7 +142,7 @@ static int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr)
 	return 0;
 }
 
-static int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
+int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 {
 	int err;
 	int len;
@@ -136,7 +150,7 @@ static int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 		
 	if((err=verify_area(VERIFY_WRITE,ulen,sizeof(*ulen)))<0)
 		return err;
-	len=get_fs_long(ulen);
+	len=get_user(ulen);
 	if(len>klen)
 		len=klen;
 	if(len<0 || len> MAX_SOCK_ADDR)
@@ -147,7 +161,7 @@ static int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 			return err;
 		memcpy_tofs(uaddr,kaddr,len);
 	}
- 	put_fs_long(len,ulen);
+ 	put_user(len,ulen);
  	return 0;
 }
 
@@ -197,7 +211,8 @@ static int get_fd(struct inode *inode)
  * The original socket implementation wasn't very clever, which is
  * why this exists at all..
  */
-inline struct socket *socki_lookup(struct inode *inode)
+
+__inline struct socket *socki_lookup(struct inode *inode)
 {
 	return &inode->u.socket_i;
 }
@@ -206,7 +221,7 @@ inline struct socket *socki_lookup(struct inode *inode)
  *	Go from a file number to its socket slot.
  */
 
-static inline struct socket *sockfd_lookup(int fd, struct file **pfile)
+extern __inline struct socket *sockfd_lookup(int fd, struct file **pfile)
 {
 	struct file *file;
 	struct inode *inode;
@@ -250,6 +265,7 @@ struct socket *sock_alloc(void)
 	sock->conn = NULL;
 	sock->iconn = NULL;
 	sock->next = NULL;
+	sock->file = NULL;
 	sock->wait = &inode->i_wait;
 	sock->inode = inode;		/* "backlink": we could use pointer arithmetic instead */
 	sock->fasync_list = NULL;
@@ -297,6 +313,7 @@ void sock_release(struct socket *sock)
 	if (peersock)
 		sock_release_peer(peersock);
 	--sockets_in_use;	/* Bookkeeping.. */
+	sock->file=NULL;
 	iput(SOCK_INODE(sock));
 }
 
@@ -318,6 +335,8 @@ static int sock_read(struct inode *inode, struct file *file, char *ubuf, int siz
 {
 	struct socket *sock;
 	int err;
+	struct iovec iov;
+	struct msghdr msg;
   
 	sock = socki_lookup(inode); 
 	if (sock->flags & SO_ACCEPTCON) 
@@ -329,7 +348,14 @@ static int sock_read(struct inode *inode, struct file *file, char *ubuf, int siz
 		return 0;
 	if ((err=verify_area(VERIFY_WRITE,ubuf,size))<0)
 	  	return err;
-	return(sock->ops->read(sock, ubuf, size, (file->f_flags & O_NONBLOCK)));
+	msg.msg_name=NULL;
+	msg.msg_iov=&iov;
+	msg.msg_iovlen=1;
+	msg.msg_accrights=NULL;
+	iov.iov_base=ubuf;
+	iov.iov_len=size;
+
+	return(sock->ops->recvmsg(sock, &msg, size,(file->f_flags & O_NONBLOCK), 0,&msg.msg_namelen));
 }
 
 /*
@@ -337,10 +363,12 @@ static int sock_read(struct inode *inode, struct file *file, char *ubuf, int siz
  *	readable by the user process.
  */
 
-static int sock_write(struct inode *inode, struct file *file, char *ubuf, int size)
+static int sock_write(struct inode *inode, struct file *file, const char *ubuf, int size)
 {
 	struct socket *sock;
 	int err;
+	struct msghdr msg;
+	struct iovec iov;
 	
 	sock = socki_lookup(inode); 
 
@@ -351,15 +379,23 @@ static int sock_write(struct inode *inode, struct file *file, char *ubuf, int si
 		return -EINVAL;
 	if(size==0)		/* Match SYS5 behaviour */
 		return 0;
-		
+	
 	if ((err=verify_area(VERIFY_READ,ubuf,size))<0)
 	  	return err;
-	return(sock->ops->write(sock, ubuf, size,(file->f_flags & O_NONBLOCK)));
+	
+	msg.msg_name=NULL;
+	msg.msg_iov=&iov;
+	msg.msg_iovlen=1;
+	msg.msg_accrights=NULL;
+	iov.iov_base=(void *)ubuf;
+	iov.iov_len=size;
+	
+	return(sock->ops->sendmsg(sock, &msg, size,(file->f_flags & O_NONBLOCK),0));
 }
 
 /*
  *	With an ioctl arg may well be a user mode pointer, but we don't know what to do
- *	with it - thats up to the protocol still.
+ *	with it - that's up to the protocol still.
  */
 
 int sock_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
@@ -476,104 +512,46 @@ int sock_wake_async(struct socket *sock, int how)
 	return 0;
 }
 
-	
-/*
- *	Wait for a connection.
- */
-
-int sock_awaitconn(struct socket *mysock, struct socket *servsock, int flags)
-{
-	struct socket *last;
-
-	/*
-	 *	We must be listening
-	 */
-	if (!(servsock->flags & SO_ACCEPTCON)) 
-	{
-		return(-EINVAL);
-	}
-
-  	/*
-  	 *	Put ourselves on the server's incomplete connection queue. 
-  	 */
-  	 
-	mysock->next = NULL;
-	cli();
-	if (!(last = servsock->iconn)) 
-		servsock->iconn = mysock;
-	else 
-	{
-		while (last->next) 
-			last = last->next;
-		last->next = mysock;
-	}
-	mysock->state = SS_CONNECTING;
-	mysock->conn = servsock;
-	sti();
-
-	/*
-	 * Wake up server, then await connection. server will set state to
-	 * SS_CONNECTED if we're connected.
-	 */
-	wake_up_interruptible(servsock->wait);
-	sock_wake_async(servsock, 0);
-
-	if (mysock->state != SS_CONNECTED) 
-	{
-		if (flags & O_NONBLOCK)
-			return -EINPROGRESS;
-
-		interruptible_sleep_on(mysock->wait);
-		if (mysock->state != SS_CONNECTED &&
-		    mysock->state != SS_DISCONNECTING) 
-		{
-		/*
-		 * if we're not connected we could have been
-		 * 1) interrupted, so we need to remove ourselves
-		 *    from the server list
-		 * 2) rejected (mysock->conn == NULL), and have
-		 *    already been removed from the list
-		 */
-			if (mysock->conn == servsock) 
-			{
-				cli();
-				if ((last = servsock->iconn) == mysock)
-					servsock->iconn = mysock->next;
-				else 
-				{
-					while (last->next != mysock) 
-						last = last->next;
-					last->next = mysock->next;
-				}
-				sti();
-			}
-			return(mysock->conn ? -EINTR : -EACCES);
-		}
-	}
-	return(0);
-}
-
 
 /*
  *	Perform the socket system call. we locate the appropriate
  *	family, then create a fresh socket.
  */
 
-static int sock_socket(int family, int type, int protocol)
+static int find_protocol_family(int family)
+{
+	register int i;
+	for (i = 0; i < NPROTO; i++)
+	{
+		if (pops[i] == NULL)
+			continue;
+		if (pops[i]->family == family)
+			return i;
+	}
+	return -1;
+}
+
+asmlinkage int sys_socket(int family, int type, int protocol)
 {
 	int i, fd;
 	struct socket *sock;
 	struct proto_ops *ops;
 
 	/* Locate the correct protocol family. */
-	for (i = 0; i < NPROTO; ++i) 
-	{
-		if (pops[i] == NULL) continue;
-		if (pops[i]->family == family) 
-			break;
-	}
+	i = find_protocol_family(family);
 
-	if (i == NPROTO) 
+#ifdef CONFIG_KERNELD
+	/* Attempt to load a protocol module if the find failed. */
+	if (i < 0)
+	{
+		char module_name[30];
+		sprintf(module_name,"net-pf-%d",family);
+		request_module(module_name);
+		i = find_protocol_family(family);
+	}
+#endif
+
+	if (i < 0)
 	{
   		return -EINVAL;
 	}
@@ -599,7 +577,7 @@ static int sock_socket(int family, int type, int protocol)
 
 	if (!(sock = sock_alloc())) 
 	{
-		printk("NET: sock_socket: no more sockets\n");
+		printk("NET: sys_socket: no more sockets\n");
 		return(-ENOSR);	/* Was: EAGAIN, but we are out of
 				   system resources! */
 	}
@@ -618,6 +596,8 @@ static int sock_socket(int family, int type, int protocol)
 		return(-EINVAL);
 	}
 
+	sock->file=current->files->fd[fd];
+
 	return(fd);
 }
 
@@ -625,7 +605,7 @@ static int sock_socket(int family, int type, int protocol)
  *	Create a pair of connected sockets.
  */
 
-static int sock_socketpair(int family, int type, int protocol, unsigned long usockvec[2])
+asmlinkage int sys_socketpair(int family, int type, int protocol, int usockvec[2])
 {
 	int fd1, fd2, i;
 	struct socket *sock1, *sock2;
@@ -636,7 +616,7 @@ static int sock_socketpair(int family, int type, int protocol, unsigned long uso
 	 * supports the socketpair call.
 	 */
 
-	if ((fd1 = sock_socket(family, type, protocol)) < 0) 
+	if ((fd1 = sys_socket(family, type, protocol)) < 0) 
 		return(fd1);
 	sock1 = sockfd_lookup(fd1, NULL);
 	if (!sock1->ops->socketpair) 
@@ -649,7 +629,7 @@ static int sock_socketpair(int family, int type, int protocol, unsigned long uso
 	 *	Now grab another socket and try to connect the two together. 
 	 */
 
-	if ((fd2 = sock_socket(family, type, protocol)) < 0) 
+	if ((fd2 = sys_socket(family, type, protocol)) < 0) 
 	{
 		sys_close(fd1);
 		return(-EINVAL);
@@ -668,15 +648,15 @@ static int sock_socketpair(int family, int type, int protocol, unsigned long uso
 	sock1->state = SS_CONNECTED;
 	sock2->state = SS_CONNECTED;
 
-	er=verify_area(VERIFY_WRITE, usockvec, 2 * sizeof(int));
+	er=verify_area(VERIFY_WRITE, usockvec, sizeof(usockvec));
 	if(er)
 	{
 		sys_close(fd1);
 		sys_close(fd2);
 	 	return er;
 	}
-	put_fs_long(fd1, &usockvec[0]);
-	put_fs_long(fd2, &usockvec[1]);
+	put_user(fd1, &usockvec[0]);
+	put_user(fd2, &usockvec[1]);
 
 	return(0);
 }
@@ -690,7 +670,7 @@ static int sock_socketpair(int family, int type, int protocol, unsigned long uso
  *	the protocol layer (having also checked the address is ok).
  */
  
-static int sock_bind(int fd, struct sockaddr *umyaddr, int addrlen)
+asmlinkage int sys_bind(int fd, struct sockaddr *umyaddr, int addrlen)
 {
 	struct socket *sock;
 	int i;
@@ -720,24 +700,26 @@ static int sock_bind(int fd, struct sockaddr *umyaddr, int addrlen)
  *	ready for listening.
  */
 
-static int sock_listen(int fd, int backlog)
+asmlinkage int sys_listen(int fd, int backlog)
 {
 	struct socket *sock;
-
+	int err=-EOPNOTSUPP;
+	
 	if (fd < 0 || fd >= NR_OPEN || current->files->fd[fd] == NULL)
 		return(-EBADF);
 	if (!(sock = sockfd_lookup(fd, NULL))) 
 		return(-ENOTSOCK);
 
 	if (sock->state != SS_UNCONNECTED) 
-	{
 		return(-EINVAL);
-	}
 
 	if (sock->ops && sock->ops->listen)
-		sock->ops->listen(sock, backlog);
-	sock->flags |= SO_ACCEPTCON;
-	return(0);
+	{
+		err=sock->ops->listen(sock, backlog);
+		if(!err)
+			sock->flags |= SO_ACCEPTCON;
+	}
+	return(err);
 }
 
 
@@ -749,7 +731,7 @@ static int sock_listen(int fd, int backlog)
  *	we open the socket then return an error.
  */
 
-static int sock_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrlen)
+asmlinkage int sys_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrlen)
 {
 	struct file *file;
 	struct socket *sock, *newsock;
@@ -796,7 +778,8 @@ static int sock_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrl
 		sock_release(newsock);
 		return(-EINVAL);
 	}
-
+	sock->file=current->files->fd[fd];
+	
 	if (upeer_sockaddr)
 	{
 		newsock->ops->getname(newsock, (struct sockaddr *)address, &len, 1);
@@ -811,7 +794,7 @@ static int sock_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_addrl
  *	is in user space so we verify it is OK and move it to kernel space.
  */
  
-static int sock_connect(int fd, struct sockaddr *uservaddr, int addrlen)
+asmlinkage int sys_connect(int fd, struct sockaddr *uservaddr, int addrlen)
 {
 	struct socket *sock;
 	struct file *file;
@@ -862,7 +845,7 @@ static int sock_connect(int fd, struct sockaddr *uservaddr, int addrlen)
  *	name to user space.
  */
 
-static int sock_getsockname(int fd, struct sockaddr *usockaddr, int *usockaddr_len)
+asmlinkage int sys_getsockname(int fd, struct sockaddr *usockaddr, int *usockaddr_len)
 {
 	struct socket *sock;
 	char address[MAX_SOCK_ADDR];
@@ -887,7 +870,7 @@ static int sock_getsockname(int fd, struct sockaddr *usockaddr, int *usockaddr_l
  *	name to user space.
  */
  
-static int sock_getpeername(int fd, struct sockaddr *usockaddr, int *usockaddr_len)
+asmlinkage int sys_getpeername(int fd, struct sockaddr *usockaddr, int *usockaddr_len)
 {
 	struct socket *sock;
 	char address[MAX_SOCK_ADDR];
@@ -912,11 +895,13 @@ static int sock_getpeername(int fd, struct sockaddr *usockaddr, int *usockaddr_l
  *	in user space. We check it can be read.
  */
 
-static int sock_send(int fd, void * buff, int len, unsigned flags)
+asmlinkage int sys_send(int fd, void * buff, int len, unsigned flags)
 {
 	struct socket *sock;
 	struct file *file;
 	int err;
+	struct msghdr msg;
+	struct iovec iov;
 
 	if (fd < 0 || fd >= NR_OPEN || ((file = current->files->fd[fd]) == NULL))
 		return(-EBADF);
@@ -928,7 +913,14 @@ static int sock_send(int fd, void * buff, int len, unsigned flags)
 	err=verify_area(VERIFY_READ, buff, len);
 	if(err)
 		return err;
-	return(sock->ops->send(sock, buff, len, (file->f_flags & O_NONBLOCK), flags));
+		
+	iov.iov_base=buff;
+	iov.iov_len=len;
+	msg.msg_name=NULL;
+	msg.msg_iov=&iov;
+	msg.msg_iovlen=1;
+	msg.msg_accrights=NULL;
+	return(sock->ops->sendmsg(sock, &msg, len, (file->f_flags & O_NONBLOCK), flags));
 }
 
 /*
@@ -937,13 +929,15 @@ static int sock_send(int fd, void * buff, int len, unsigned flags)
  *	the protocol.
  */
 
-static int sock_sendto(int fd, void * buff, int len, unsigned flags,
+asmlinkage int sys_sendto(int fd, void * buff, int len, unsigned flags,
 	   struct sockaddr *addr, int addr_len)
 {
 	struct socket *sock;
 	struct file *file;
 	char address[MAX_SOCK_ADDR];
 	int err;
+	struct msghdr msg;
+	struct iovec iov;
 	
 	if (fd < 0 || fd >= NR_OPEN || ((file = current->files->fd[fd]) == NULL))
 		return(-EBADF);
@@ -958,22 +952,27 @@ static int sock_sendto(int fd, void * buff, int len, unsigned flags,
   	
 	if((err=move_addr_to_kernel(addr,addr_len,address))<0)
 	  	return err;
-
-	return(sock->ops->sendto(sock, buff, len, (file->f_flags & O_NONBLOCK),
-		flags, (struct sockaddr *)address, addr_len));
+	  	
+	iov.iov_base=buff;
+	iov.iov_len=len;
+	msg.msg_name=address;
+	msg.msg_namelen=addr_len;
+	msg.msg_iov=&iov;
+	msg.msg_iovlen=1;
+	msg.msg_accrights=NULL;
+	return(sock->ops->sendmsg(sock, &msg, len, (file->f_flags & O_NONBLOCK),
+		flags));
 }
 
 
 /*
- *	Receive a datagram from a socket. This isn't really right. The BSD manual
- *	pages explicitly state that recv is recvfrom with a NULL to argument. The
- *	Linux stack gets the right results for the wrong reason and this need to
- *	be tidied in the inet layer and removed from here.
- *	We check the buffer is writable and valid.
+ *	Receive a datagram from a socket. Call the protocol recvmsg method
  */
 
-static int sock_recv(int fd, void * buff, int len, unsigned flags)
+asmlinkage int sys_recv(int fd, void * ubuf, int size, unsigned flags)
 {
+	struct iovec iov;
+	struct msghdr msg;
 	struct socket *sock;
 	struct file *file;
 	int err;
@@ -984,15 +983,22 @@ static int sock_recv(int fd, void * buff, int len, unsigned flags)
 	if (!(sock = sockfd_lookup(fd, NULL))) 
 		return(-ENOTSOCK);
 		
-	if(len<0)
+	if(size<0)
 		return -EINVAL;
-	if(len==0)
+	if(size==0)
 		return 0;
-	err=verify_area(VERIFY_WRITE, buff, len);
+	err=verify_area(VERIFY_WRITE, ubuf, size);
 	if(err)
 		return err;
+		
+	msg.msg_name=NULL;
+	msg.msg_iov=&iov;
+	msg.msg_iovlen=1;
+	msg.msg_accrights=NULL;
+	iov.iov_base=ubuf;
+	iov.iov_len=size;
 
-	return(sock->ops->recv(sock, buff, len,(file->f_flags & O_NONBLOCK), flags));
+	return(sock->ops->recvmsg(sock, &msg, size,(file->f_flags & O_NONBLOCK), flags,&msg.msg_namelen));
 }
 
 /*
@@ -1001,11 +1007,13 @@ static int sock_recv(int fd, void * buff, int len, unsigned flags)
  *	sender address from kernel to user space.
  */
 
-static int sock_recvfrom(int fd, void * buff, int len, unsigned flags,
+asmlinkage int sys_recvfrom(int fd, void * ubuf, int size, unsigned flags,
 	     struct sockaddr *addr, int *addr_len)
 {
 	struct socket *sock;
 	struct file *file;
+	struct iovec iov;
+	struct msghdr msg;
 	char address[MAX_SOCK_ADDR];
 	int err;
 	int alen;
@@ -1013,24 +1021,31 @@ static int sock_recvfrom(int fd, void * buff, int len, unsigned flags,
 		return(-EBADF);
 	if (!(sock = sockfd_lookup(fd, NULL))) 
 	  	return(-ENOTSOCK);
-	if(len<0)
+	if(size<0)
 		return -EINVAL;
-	if(len==0)
+	if(size==0)
 		return 0;
 
-	err=verify_area(VERIFY_WRITE,buff,len);
+	err=verify_area(VERIFY_WRITE,ubuf,size);
 	if(err)
 	  	return err;
   
-	len=sock->ops->recvfrom(sock, buff, len, (file->f_flags & O_NONBLOCK),
-		     flags, (struct sockaddr *)address, &alen);
+  	msg.msg_accrights=NULL;
+  	msg.msg_iovlen=1;
+  	msg.msg_iov=&iov;
+  	iov.iov_len=size;
+  	iov.iov_base=ubuf;
+  	msg.msg_name=address;
+  	msg.msg_namelen=MAX_SOCK_ADDR;
+	size=sock->ops->recvmsg(sock, &msg, size, (file->f_flags & O_NONBLOCK),
+		     flags, &alen);
 
-	if(len<0)
-	 	return len;
+	if(size<0)
+	 	return size;
 	if(addr!=NULL && (err=move_addr_to_user(address,alen, addr, addr_len))<0)
 	  	return err;
 
-	return len;
+	return size;
 }
 
 /*
@@ -1038,7 +1053,7 @@ static int sock_recvfrom(int fd, void * buff, int len, unsigned flags,
  *	to pass the user mode parameter for the protocols to sort out.
  */
  
-static int sock_setsockopt(int fd, int level, int optname, char *optval, int optlen)
+asmlinkage int sys_setsockopt(int fd, int level, int optname, char *optval, int optlen)
 {
 	struct socket *sock;
 	struct file *file;
@@ -1056,7 +1071,7 @@ static int sock_setsockopt(int fd, int level, int optname, char *optval, int opt
  *	to pass a user mode parameter for the protocols to sort out.
  */
 
-static int sock_getsockopt(int fd, int level, int optname, char *optval, int *optlen)
+asmlinkage int sys_getsockopt(int fd, int level, int optname, char *optval, int *optlen)
 {
 	struct socket *sock;
 	struct file *file;
@@ -1076,7 +1091,7 @@ static int sock_getsockopt(int fd, int level, int optname, char *optval, int *op
  *	Shutdown a socket.
  */
  
-static int sock_shutdown(int fd, int how)
+asmlinkage int sys_shutdown(int fd, int how)
 {
 	struct socket *sock;
 	struct file *file;
@@ -1087,6 +1102,108 @@ static int sock_shutdown(int fd, int how)
 		return(-ENOTSOCK);
 
 	return(sock->ops->shutdown(sock, how));
+}
+
+/*
+ *	BSD sendmsg interface
+ */
+ 
+asmlinkage int sys_sendmsg(int fd, struct msghdr *msg, unsigned int flags)
+{
+	struct socket *sock;
+	struct file *file;
+	char address[MAX_SOCK_ADDR];
+	struct iovec iov[MAX_IOVEC];
+	struct msghdr msg_sys;
+	int err;
+	int total_len;
+	
+	if (fd < 0 || fd >= NR_OPEN || ((file = current->files->fd[fd]) == NULL))
+		return(-EBADF);
+	if (!(sock = sockfd_lookup(fd, NULL)))
+		return(-ENOTSOCK);
+	
+	if(sock->ops->sendmsg==NULL)
+		return -EOPNOTSUPP;
+
+
+	err=verify_area(VERIFY_READ, msg,sizeof(struct msghdr));
+	if(err)
+		return err;
+
+	memcpy_fromfs(&msg_sys,msg,sizeof(struct msghdr));
+
+	/* do not move before msg_sys is valid */
+	if(msg_sys.msg_iovlen>MAX_IOVEC)
+		return -EINVAL;
+
+	/* This will also move the address data into kernel space */
+	err = verify_iovec(&msg_sys, iov, address, VERIFY_READ);
+	if (err < 0)
+		return err;
+	total_len=err;
+
+	return sock->ops->sendmsg(sock, &msg_sys, total_len, (file->f_flags&O_NONBLOCK), flags);
+}
+
+/*
+ *	BSD recvmsg interface
+ */
+ 
+asmlinkage int sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
+{
+	struct socket *sock;
+	struct file *file;
+	struct iovec iov[MAX_IOVEC];
+	struct msghdr msg_sys;
+	int err;
+	int total_len;
+	int len;
+
+	/* kernel mode address */
+	char addr[MAX_SOCK_ADDR];
+	int addr_len;
+
+	/* user mode address pointers */
+	struct sockaddr *uaddr;
+	int *uaddr_len;
+	
+	if (fd < 0 || fd >= NR_OPEN || ((file = current->files->fd[fd]) == NULL))
+		return(-EBADF);
+	if (!(sock = sockfd_lookup(fd, NULL)))
+		return(-ENOTSOCK);
+	
+	err=verify_area(VERIFY_READ, msg,sizeof(struct msghdr));
+	if(err)
+		return err;
+	memcpy_fromfs(&msg_sys,msg,sizeof(struct msghdr));
+	if(msg_sys.msg_iovlen>MAX_IOVEC)
+		return -EINVAL;
+
+	/*
+	 * save the user-mode address (verify_iovec will change the
+	 * kernel msghdr to use the kernel address space)
+	 */
+	uaddr = msg_sys.msg_name;
+	uaddr_len = &msg->msg_namelen;
+	err=verify_iovec(&msg_sys,iov,addr, VERIFY_WRITE);
+	if(err<0)
+		return err;
+
+	total_len=err;
+	
+	if(sock->ops->recvmsg==NULL)
+		return -EOPNOTSUPP;
+	len=sock->ops->recvmsg(sock, &msg_sys, total_len, (file->f_flags&O_NONBLOCK), flags, &addr_len);
+	if(len<0)
+		return len;
+
+	if (uaddr != NULL) {
+		err = move_addr_to_user(addr, addr_len, uaddr, uaddr_len);
+		if (err)
+			return err;
+	}
+	return len;
 }
 
 
@@ -1120,84 +1237,92 @@ int sock_fcntl(struct file *filp, unsigned int cmd, unsigned long arg)
 asmlinkage int sys_socketcall(int call, unsigned long *args)
 {
 	int er;
-	unsigned char nargs[16]={0,3,3,3,2,3,3,3,
-				 4,4,4,6,6,2,5,5};
+	unsigned char nargs[18]={0,3,3,3,2,3,3,3,
+				 4,4,4,6,6,2,5,5,3,3};
 
 	unsigned long a0,a1;
 				 
-	if(call<1||call>SYS_GETSOCKOPT)
+	if(call<1||call>SYS_RECVMSG)
 		return -EINVAL;
 		
 	er=verify_area(VERIFY_READ, args, nargs[call] * sizeof(unsigned long));
 	if(er)
 		return er;
 		
-	a0=get_fs_long(args);
-	a1=get_fs_long(args+1);
+	a0=get_user(args);
+	a1=get_user(args+1);
 	
 		
 	switch(call) 
 	{
 		case SYS_SOCKET:
-			return(sock_socket(a0,a1,get_fs_long(args+2)));
+			return(sys_socket(a0,a1,get_user(args+2)));
 		case SYS_BIND:
-			return(sock_bind(a0,(struct sockaddr *)a1,
-				get_fs_long(args+2)));
+			return(sys_bind(a0,(struct sockaddr *)a1,
+					get_user(args+2)));
 		case SYS_CONNECT:
-			return(sock_connect(a0, (struct sockaddr *)a1,
-				get_fs_long(args+2)));
+			return(sys_connect(a0, (struct sockaddr *)a1,
+					   get_user(args+2)));
 		case SYS_LISTEN:
-			return(sock_listen(a0,a1));
+			return(sys_listen(a0,a1));
 		case SYS_ACCEPT:
-			return(sock_accept(a0,(struct sockaddr *)a1,
-				(int *)get_fs_long(args+2)));
+			return(sys_accept(a0,(struct sockaddr *)a1,
+					  (int *)get_user(args+2)));
 		case SYS_GETSOCKNAME:
-			return(sock_getsockname(a0,(struct sockaddr *)a1,
-				(int *)get_fs_long(args+2)));
+			return(sys_getsockname(a0,(struct sockaddr *)a1,
+					       (int *)get_user(args+2)));
 		case SYS_GETPEERNAME:
-			return(sock_getpeername(a0, (struct sockaddr *)a1,
-				(int *)get_fs_long(args+2)));
+			return(sys_getpeername(a0, (struct sockaddr *)a1,
+					       (int *)get_user(args+2)));
 		case SYS_SOCKETPAIR:
-			return(sock_socketpair(a0,a1,
-				get_fs_long(args+2),
-				(unsigned long *)get_fs_long(args+3)));
+			return(sys_socketpair(a0,a1,
+					      get_user(args+2),
+					      (int *)get_user(args+3)));
 		case SYS_SEND:
-			return(sock_send(a0,
+			return(sys_send(a0,
 				(void *)a1,
-				get_fs_long(args+2),
-				get_fs_long(args+3)));
+				get_user(args+2),
+				get_user(args+3)));
 		case SYS_SENDTO:
-			return(sock_sendto(a0,(void *)a1,
-				get_fs_long(args+2),
-				get_fs_long(args+3),
-				(struct sockaddr *)get_fs_long(args+4),
-				get_fs_long(args+5)));
+			return(sys_sendto(a0,(void *)a1,
+				get_user(args+2),
+				get_user(args+3),
+				(struct sockaddr *)get_user(args+4),
+				get_user(args+5)));
 		case SYS_RECV:
-			return(sock_recv(a0,
+			return(sys_recv(a0,
 				(void *)a1,
-				get_fs_long(args+2),
-				get_fs_long(args+3)));
+				get_user(args+2),
+				get_user(args+3)));
 		case SYS_RECVFROM:
-			return(sock_recvfrom(a0,
+			return(sys_recvfrom(a0,
 				(void *)a1,
-				get_fs_long(args+2),
-				get_fs_long(args+3),
-				(struct sockaddr *)get_fs_long(args+4),
-				(int *)get_fs_long(args+5)));
+				get_user(args+2),
+				get_user(args+3),
+				(struct sockaddr *)get_user(args+4),
+				(int *)get_user(args+5)));
 		case SYS_SHUTDOWN:
-			return(sock_shutdown(a0,a1));
+			return(sys_shutdown(a0,a1));
 		case SYS_SETSOCKOPT:
-			return(sock_setsockopt(a0,
+			return(sys_setsockopt(a0,
 				a1,
-				get_fs_long(args+2),
-				(char *)get_fs_long(args+3),
-				get_fs_long(args+4)));
+				get_user(args+2),
+				(char *)get_user(args+3),
+				get_user(args+4)));
 		case SYS_GETSOCKOPT:
-			return(sock_getsockopt(a0,
+			return(sys_getsockopt(a0,
 				a1,
-				get_fs_long(args+2),
-				(char *)get_fs_long(args+3),
-				(int *)get_fs_long(args+4)));
+				get_user(args+2),
+				(char *)get_user(args+3),
+				(int *)get_user(args+4)));
+		case SYS_SENDMSG:
+				return sys_sendmsg(a0,
+					(struct msghdr *) a1,
+					get_user(args+2));
+		case SYS_RECVMSG:
+				return sys_recvmsg(a0,
+					(struct msghdr *) a1,
+					get_user(args+2));
 	}
 	return -EINVAL; /* to keep gcc happy */
 }
@@ -1241,7 +1366,7 @@ int sock_unregister(int family)
 	{
 		if (pops[i] == NULL) 
 			continue;
-		if(pops[i]->family == family)
+		if (pops[i]->family == family)
 		{
 			pops[i]=NULL;
 			sti();
@@ -1272,13 +1397,36 @@ void sock_init(void)
 {
 	int i;
 
-	printk("Swansea University Computer Society NET3.029 Snap #6 for Linux 1.3.0\n");
+	printk("Swansea University Computer Society NET3.034 for Linux 1.3.77\n");
 
 	/*
 	 *	Initialize all address (protocol) families. 
 	 */
 	 
 	for (i = 0; i < NPROTO; ++i) pops[i] = NULL;
+	
+	/*
+	 *	The netlink device handler may be needed early.
+	 */
+
+#ifdef CONFIG_NETLINK
+	init_netlink();
+#endif		 
+	/*
+	 *	Attach the routing/device information port.
+	 */
+
+#if defined(CONFIG_RTNETLINK)
+	netlink_attach(NETLINK_ROUTE, netlink_donothing);
+#endif
+
+	/*
+	 *	Attach the firewall module if configured
+	 */
+	 
+#ifdef CONFIG_FIREWALL	 
+	fwchain_init();
+#endif
 
 	/*
 	 *	Initialize the protocols module. 
@@ -1286,20 +1434,13 @@ void sock_init(void)
 
 	proto_init();
 
-#ifdef CONFIG_NET
-	/* 
-	 *	Initialize the DEV module. 
-	 */
-
-	dev_init();
-  
 	/*
-	 *	And the bottom half handler 
+	 *	Export networking symbols to the world.
 	 */
 
-	bh_base[NET_BH].routine= net_bh;
-	enable_bh(NET_BH);
-#endif  
+#if defined(CONFIG_MODULES) && defined(CONFIG_NET)
+	export_net_symbols();
+#endif
 }
 
 int socket_get_info(char *buffer, char **start, off_t offset, int length)

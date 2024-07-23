@@ -5,17 +5,7 @@
 
 #ifndef __STRUCT_EXEC_OVERRIDE__
 
-struct exec
-{
-  unsigned long a_info;		/* Use macros N_MAGIC, etc for access */
-  unsigned a_text;		/* length of text, in bytes */
-  unsigned a_data;		/* length of data, in bytes */
-  unsigned a_bss;		/* length of uninitialized data area for file, in bytes */
-  unsigned a_syms;		/* length of symbol table data in file, in bytes */
-  unsigned a_entry;		/* start address */
-  unsigned a_trsize;		/* length of relocation info for text, in bytes */
-  unsigned a_drsize;		/* length of relocation info for data, in bytes */
-};
+#include <asm/a.out.h>
 
 #endif /* __STRUCT_EXEC_OVERRIDE__ */
 
@@ -43,6 +33,8 @@ enum machine_type {
 #endif
   /* skip a bunch so we don't run into any of sun's numbers */
   M_386 = 100,
+  M_MIPS1 = 151,	/* MIPS R3000/R3000 binary */
+  M_MIPS2 = 152,	/* MIPS R6000/R4000 binary */
 };
 
 #if !defined (N_MAGIC)
@@ -137,7 +129,13 @@ enum machine_type {
 
 #ifdef linux
 #include <asm/page.h>
+#if defined(__i386__) || defined(__mc68000__)
 #define SEGMENT_SIZE	1024
+#else
+#ifndef SEGMENT_SIZE
+#define SEGMENT_SIZE	PAGE_SIZE
+#endif
+#endif
 #endif
 
 #define _N_SEGMENT_ROUND(x) (((x) + SEGMENT_SIZE - 1) & ~(SEGMENT_SIZE - 1))

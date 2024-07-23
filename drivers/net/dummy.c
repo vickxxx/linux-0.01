@@ -24,17 +24,14 @@
 	misguided packets.
 
 			Nick Holloway, 27th May 1994
-	[I tweaked this explanation a little but thats all]
+	[I tweaked this explanation a little but that's all]
 			Alan Cox, 30th May 1994
 */
 
 /* To have statistics (just packets sent) define this */
 #undef DUMMY_STATS
 
-#ifdef MODULE
 #include <linux/module.h>
-#include <linux/version.h>
-#endif
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -73,7 +70,6 @@ static int dummy_close(struct device *dev)
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
-
 #endif
 
 
@@ -88,6 +84,8 @@ int dummy_init(struct device *dev)
 
 #if DUMMY_STATS
 	dev->priv = kmalloc(sizeof(struct enet_statistics), GFP_KERNEL);
+	if (dev->priv == NULL)
+		return -ENOMEM;
 	memset(dev->priv, 0, sizeof(struct enet_statistics));
 	dev->get_stats		= dummy_get_stats;
 #endif
@@ -133,7 +131,6 @@ dummy_get_stats(struct device *dev)
 #endif
 
 #ifdef MODULE
-char kernel_version[] = UTS_RELEASE;
 
 static int dummy_probe(struct device *dev)
 {
@@ -157,6 +154,8 @@ int init_module(void)
 		sprintf(dev_dummy.name,"dummy%d",ct);
 		ct++;
 	}
+	if(ct==100)
+		return -ENFILE;
 	
 	if (register_netdev(&dev_dummy) != 0)
 		return -EIO;
@@ -165,11 +164,8 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	if (MOD_IN_USE)
-		printk("dummy: device busy, remove delayed\n");
-	else
-	{
-		unregister_netdev(&dev_dummy);
-	}
+	unregister_netdev(&dev_dummy);
+	kfree(dev_dummy.priv);
+	dev_dummy.priv = NULL;
 }
 #endif /* MODULE */

@@ -11,7 +11,7 @@
  *		the status register flipped, I'll fix this "RSN"
  *
  *      This card does all the I/O via memory mapped I/O, so there is no need
- *      to check or snarf a region of the I/O address space.
+ *      to check or allocate a region of the I/O address space.
  */
 
 /*
@@ -46,6 +46,7 @@
  *	transfer rate if handshaking isn't working correctly.
  */
 
+#include <linux/module.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -53,12 +54,19 @@
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/config.h>
+#include <linux/proc_fs.h>
 
-#include "../block/blk.h"
+#include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "seagate.h"
 #include "constants.h"
+#include<linux/stat.h>
+
+struct proc_dir_entry proc_scsi_seagate = {
+    PROC_SCSI_SEAGATE, 7, "seagate",
+    S_IFDIR | S_IRUGO | S_IXUGO, 2
+};
 
 
 #ifndef IRQ
@@ -91,7 +99,7 @@ static int incommand;			/*
 						in some command phase.
 					*/
 
-static void *base_address = NULL;	/*
+static const void *base_address = NULL;	/*
 						Where the card ROM starts,
 						used to calculate memory mapped
 						register location.
@@ -149,7 +157,7 @@ static const char *  seagate_bases[] = {
 };
 
 typedef struct {
-	char *signature ;
+	const char *signature ;
 	unsigned offset;
 	unsigned length;
 	unsigned char type;
@@ -195,7 +203,7 @@ static const Signature signatures[] = {
  */
 
 static int hostno = -1;
-static void seagate_reconnect_intr(int, struct pt_regs *);
+static void seagate_reconnect_intr(int, void *, struct pt_regs *);
 
 #ifdef FAST
 static int fast = 1;
@@ -280,6 +288,7 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 	int i,j;
 #endif 
 
+     tpnt->proc_dir = &proc_scsi_seagate;
 /*
  *	First, we try for the manual override.
  */
@@ -294,7 +303,7 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 		}
 
       /* If the user specified the controller type from the command line,
-         controller_type will be non-zero, so don't try and detect one */
+	 controller_type will be non-zero, so don't try to detect one */
 
 	if (!controller_type) {
 #ifdef OVERRIDE
@@ -323,10 +332,10 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 
 	for (i = 0; i < (sizeof (seagate_bases) / sizeof (char  * )); ++i)
 		for (j = 0; !base_address && j < NUM_SIGNATURES; ++j)
-		if (!memcmp ((void *) (seagate_bases[i] +
-		    signatures[j].offset), (void *) signatures[j].signature,
+		if (!memcmp ((const void *) (seagate_bases[i] +
+		    signatures[j].offset), (const void *) signatures[j].signature,
 		    signatures[j].length)) {
-			base_address = (void *) seagate_bases[i];
+			base_address = (const void *) seagate_bases[i];
 			controller_type = signatures[j].type;
 		}
 #endif /* OVERRIDE */
@@ -337,8 +346,8 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 
 	if (base_address)
 		{
-		st0x_cr_sr =(void *) (((unsigned char *) base_address) + (controller_type == SEAGATE ? 0x1a00 : 0x1c00)); 
-		st0x_dr = (void *) (((unsigned char *) base_address ) + (controller_type == SEAGATE ? 0x1c00 : 0x1e00));
+		st0x_cr_sr =(void *) (((const unsigned char *) base_address) + (controller_type == SEAGATE ? 0x1a00 : 0x1c00)); 
+		st0x_dr = (void *) (((const unsigned char *) base_address ) + (controller_type == SEAGATE ? 0x1c00 : 0x1e00));
 #ifdef DEBUG
 		printk("%s detected. Base address = %x, cr = %x, dr = %x\n", tpnt->name, base_address, st0x_cr_sr, st0x_dr);
 #endif
@@ -349,11 +358,13 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 		instance = scsi_register(tpnt, 0);
 		hostno = instance->host_no;
 		if (request_irq((int) irq, seagate_reconnect_intr, SA_INTERRUPT,
-		   (controller_type == SEAGATE) ? "seagate" : "tmc-8xx")) {
+		   (controller_type == SEAGATE) ? "seagate" : "tmc-8xx", NULL)) {
 			printk("scsi%d : unable to allocate IRQ%d\n",
 				hostno, (int) irq);
 			return 0;
 		}
+		instance->irq = irq;
+		instance->io_port = (unsigned int) base_address;
 #ifdef SLOW_HANDSHAKE
 		borken_init();
 #endif
@@ -375,7 +386,7 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 #ifdef LINKED
 		" LINKED"
 #endif
-              "\n", tpnt->name);
+	      "\n", tpnt->name);
 		return 1;
 		}
 	else
@@ -389,10 +400,37 @@ int seagate_st0x_detect (Scsi_Host_Template * tpnt)
 	 
 const char *seagate_st0x_info(struct Scsi_Host * shpnt) {
       static char buffer[64];
-        sprintf(buffer, "%s at irq %d, address 0x%05X", 
+	sprintf(buffer, "%s at irq %d, address 0x%05X", 
 		(controller_type == SEAGATE) ? ST0X_ID_STR : FD_ID_STR,
 		irq, (unsigned int)base_address);
-        return buffer;
+	return buffer;
+}
+
+int seagate_st0x_proc_info(char *buffer, char **start, off_t offset,
+                               int length, int hostno, int inout)
+{
+       const char *info = seagate_st0x_info(NULL);
+       int len;
+       int pos;
+       int begin;
+
+       if (inout) return(-ENOSYS);
+
+       begin = 0;
+       strcpy(buffer,info);
+       strcat(buffer,"\n");
+
+       pos = len = strlen(buffer);
+
+       if (pos<offset) {
+               len = 0;
+               begin = pos;
+               }
+
+       *start = buffer + (offset - begin);
+       len -= (offset - begin);
+       if ( len > length ) len = length;
+       return(len);
 }
 
 /*
@@ -455,7 +493,7 @@ static int should_reconnect = 0;
  * asserting SEL.
  */
 
-static void seagate_reconnect_intr(int irq, struct pt_regs * regs)
+static void seagate_reconnect_intr(int irq, void *dev_id, struct pt_regs *regs)
 	{
 	int temp;
 	Scsi_Cmnd * SCtmp;
@@ -707,9 +745,9 @@ static int internal_command(unsigned char target, unsigned char lun, const void 
 			}
 
 		buffer=current_buffer;	
-                cmnd=current_cmnd;      /* WDE add */
-                data=current_data;      /* WDE add */
-                len=current_bufflen;    /* WDE add */
+		cmnd=current_cmnd;      /* WDE add */
+		data=current_data;      /* WDE add */
+		len=current_bufflen;    /* WDE add */
 		nobuffs=current_nobuffs;
 
 /*
@@ -778,7 +816,7 @@ connect_loop :
 
 #if !defined (ARBITRATE) 
 		while (((STATUS |  STATUS | STATUS) & 
-		         (STAT_BSY | STAT_SEL)) && 
+			 (STAT_BSY | STAT_SEL)) && 
 			 (!st0x_aborted) && (jiffies < clock));
 
 		if (jiffies > clock)
@@ -894,7 +932,7 @@ connect_loop :
 
 /* Establish current pointers.  Take into account scatter / gather */
 
-        if ((nobuffs = SCint->use_sg)) {
+	if ((nobuffs = SCint->use_sg)) {
 #if (DEBUG & DEBUG_SG)
 	{
 	int i;
@@ -906,17 +944,17 @@ connect_loop :
 	}
 #endif
 		
-                buffer = (struct scatterlist *) SCint->buffer;
-                len = buffer->length;
-                data = (unsigned char *) buffer->address;
-        } else {
+		buffer = (struct scatterlist *) SCint->buffer;
+		len = buffer->length;
+		data = (unsigned char *) buffer->address;
+	} else {
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : scatter gather not requested.\n", hostno);
 #endif
-                buffer = NULL;
-                len = SCint->request_bufflen;
-                data = (unsigned char *) SCint->request_buffer;
-        }
+		buffer = NULL;
+		len = SCint->request_bufflen;
+		data = (unsigned char *) SCint->request_buffer;
+	}
 
 #if (DEBUG & (PHASE_DATAIN | PHASE_DATAOUT))
 	printk("scsi%d : len = %d\n", hostno, len);
@@ -1034,12 +1072,12 @@ connect_loop :
 #ifdef FAST 
 if (!len) {
 #if 0 
-        printk("scsi%d: underflow to target %d lun %d \n", 
-                hostno, target, lun);
-        st0x_aborted = DID_ERROR;
-        fast = 0;
+	printk("scsi%d: underflow to target %d lun %d \n", 
+		hostno, target, lun);
+	st0x_aborted = DID_ERROR;
+	fast = 0;
 #endif
-        break;
+	break;
 }
 
 if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
@@ -1048,12 +1086,12 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 	) {
 #if (DEBUG & DEBUG_FAST) 
-        printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
-               "         len = %d, data = %08x\n", hostno, SCint->underflow, 
-               SCint->transfersize, len, data);
+	printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
+	       "         len = %d, data = %08x\n", hostno, SCint->underflow, 
+	       SCint->transfersize, len, data);
 #endif
 
-        __asm__("
+	__asm__("
 	cld;
 "
 #ifdef FAST32
@@ -1063,14 +1101,14 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "
 #else
 "1:	lodsb;
-        movb %%al, (%%edi);
+	movb %%al, (%%edi);
 "
 #endif
 "	loop 1b;" : :
-        /* input */
-        "D" (st0x_dr), "S" (data), "c" (SCint->transfersize) :
-        /* clobbered */
-        "eax", "ecx", "esi" );
+	/* input */
+	"D" (st0x_dr), "S" (data), "c" (SCint->transfersize) :
+	/* clobbered */
+	"eax", "ecx", "esi" );
 
 	len -= transfersize;
 	data += transfersize;
@@ -1105,8 +1143,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 
 	cld
 
-	movl _st0x_cr_sr, %%ebx
-	movl _st0x_dr, %%edi
+	movl " SYMBOL_NAME_STR(st0x_cr_sr) ", %%ebx
+	movl " SYMBOL_NAME_STR(st0x_dr) ", %%edi
 	
 1:	movb (%%ebx), %%al\n"
 /*
@@ -1140,16 +1178,16 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "eax", "ebx", "edi"); 
 }
 
-                        if (!len && nobuffs) {
-                                --nobuffs;
-                                ++buffer;
-                                len = buffer->length;
-                                data = (unsigned char *) buffer->address;
+			if (!len && nobuffs) {
+				--nobuffs;
+				++buffer;
+				len = buffer->length;
+				data = (unsigned char *) buffer->address;
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : next scatter-gather buffer len = %d address = %08x\n",
 		hostno, len, data);
 #endif
-                        }
+			}
 			break;
 
 		case REQ_DATAIN : 
@@ -1175,11 +1213,11 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 	) {
 #if (DEBUG & DEBUG_FAST) 
-        printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
-               "         len = %d, data = %08x\n", hostno, SCint->underflow, 
-               SCint->transfersize, len, data);
+	printk("scsi%d : FAST transfer, underflow = %d, transfersize = %d\n"
+	       "         len = %d, data = %08x\n", hostno, SCint->underflow, 
+	       SCint->transfersize, len, data);
 #endif
-        __asm__("
+	__asm__("
 	cld;
 "
 #ifdef FAST32
@@ -1189,15 +1227,15 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 "
 #else
 "1:	movb (%%esi), %%al;
-        stosb;
+	stosb;
 "
 #endif
 
 "	loop 1b;" : :
-        /* input */
-        "S" (st0x_dr), "D" (data), "c" (SCint->transfersize) :
-        /* clobbered */
-        "eax", "ecx", "edi");
+	/* input */
+	"S" (st0x_dr), "D" (data), "c" (SCint->transfersize) :
+	/* clobbered */
+	"eax", "ecx", "edi");
 
 	len -= transfersize;
 	data += transfersize;
@@ -1241,8 +1279,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 	jz 2f
 
 	cld
-	movl _st0x_cr_sr, %%esi
-	movl _st0x_dr, %%ebx
+	movl " SYMBOL_NAME_STR(st0x_cr_sr) ", %%esi
+	movl " SYMBOL_NAME_STR(st0x_dr) ", %%ebx
 
 1:	movb (%%esi), %%al\n"
 /*
@@ -1286,16 +1324,16 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 #endif
 }
 	
-                        if (!len && nobuffs) {
-                                --nobuffs;
-                                ++buffer;
-                                len = buffer->length;
-                                data = (unsigned char *) buffer->address;
+			if (!len && nobuffs) {
+				--nobuffs;
+				++buffer;
+				len = buffer->length;
+				data = (unsigned char *) buffer->address;
 #if (DEBUG & DEBUG_SG)
 	printk("scsi%d : next scatter-gather buffer len = %d address = %08x\n",
 		hostno, len, data);
 #endif
-                        }
+			}
 
 			break;
 
@@ -1303,8 +1341,8 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 			while (((status_read = STATUS) & STAT_BSY) && 
 			       ((status_read & REQ_MASK) == REQ_CMDOUT))
 				if (status_read & STAT_REQ) {
-					DATA = *(unsigned char *) cmnd;
-					cmnd = 1+(unsigned char *) cmnd;
+					DATA = *(const unsigned char *) cmnd;
+					cmnd = 1+(const unsigned char *) cmnd;
 #ifdef SLOW_HANDSHAKE
 					if (borken) 
 						borken_wait();
@@ -1358,9 +1396,9 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 			switch (message = DATA) {
 			case DISCONNECT :
 				should_reconnect = 1;
-                                current_data = data;    /* WDE add */
+				current_data = data;    /* WDE add */
 				current_buffer = buffer;
-                                current_bufflen = len;  /* WDE add */
+				current_bufflen = len;  /* WDE add */
 				current_nobuffs = nobuffs;
 #ifdef LINKED
 				linked_connected = 0;
@@ -1392,7 +1430,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 				break;
 			case SAVE_POINTERS :
 				current_buffer = buffer;
-                                current_bufflen = len;  /* WDE add */
+				current_bufflen = len;  /* WDE add */
 				current_data = data;	/* WDE mod */
 				current_nobuffs = nobuffs;
 #if (DEBUG & PHASE_MSGIN)
@@ -1471,7 +1509,7 @@ if (fast && transfersize && !(len % transfersize) && (len >= transfersize)
 	printk("\n");
 #endif
 	printk("scsi%d : status = ", hostno);
-        print_status(status);
+	print_status(status);
 	printk("message = %02x\n", message);
 #endif
 
@@ -1594,12 +1632,13 @@ int seagate_st0x_reset (Scsi_Cmnd * SCpnt)
 
 #include <asm/segment.h>
 #include "sd.h"
-#include "scsi_ioctl.h"
+#include <scsi/scsi_ioctl.h>
 
-int seagate_st0x_biosparam(Disk * disk, int dev, int* ip) {
+int seagate_st0x_biosparam(Disk * disk, kdev_t dev, int* ip) {
   unsigned char buf[256 + sizeof(int) * 2], cmd[6], *data, *page;
   int *sizes, result, formatted_sectors, total_sectors;
   int cylinders, heads, sectors;
+  int capacity;
 
 /*
  * Only SCSI-I CCS drives and later implement the necessary mode sense 
@@ -1679,13 +1718,23 @@ printk("scsi%d : heads = %d cylinders = %d sectors = %d total = %d formatted = %
  * 256 heads * 64 sectors. 
  */
 
-      if ((cylinders > 1024) || (sectors > 64)) 
-	result = -1;
-      else {
-	ip[0] = heads;
-	ip[1] = sectors;
-	ip[2] = cylinders;
+      if ((cylinders > 1024) || (sectors > 64)) {
+	/* The Seagate's seem to have some mapping
+	 * Multiple heads * sectors * cyl to get capacity
+	 * Then start rounding down. */
+	capacity = heads * sectors * cylinders;
+	sectors = 17;	/* Old MFM Drives use this, so does the Seagate */
+	heads = 2;
+	capacity = capacity / sectors;
+	while (cylinders > 1024)
+	{
+		heads *= 2;	/* For some reason, they go in multiples */
+		cylinders = capacity / heads;
+	}
       }
+      ip[0] = heads;
+      ip[1] = sectors;
+      ip[2] = cylinders;
 
 /* 
  * There should be an alternate mapping for things the seagate doesn't
@@ -1697,3 +1746,10 @@ printk("scsi%d : heads = %d cylinders = %d sectors = %d total = %d formatted = %
     
   return result;
 }
+
+#ifdef MODULE
+/* Eventually this will go into an include file, but this will be later */
+Scsi_Host_Template driver_template = SEAGATE_ST0X;
+
+#include "scsi_module.c"
+#endif

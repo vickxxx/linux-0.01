@@ -2,8 +2,9 @@
  * sound/sb_dsp.c
  *
  * The low level driver for the SoundBlaster DS chips.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -24,12 +25,13 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#if defined(CONFIGURE_SOUNDCARD) && !defined(EXCLUDE_SB) && !defined(EXCLUDE_MIDI)
+#if defined(CONFIG_SB) && defined(CONFIG_MIDI)
 
 #include "sb.h"
 #undef SB_TEST_IRQ
@@ -61,6 +63,8 @@ extern int      sb_intr_active;
 int             input_opened = 0;
 static int      my_dev;
 
+extern int     *sb_osp;
+
 void            (*midi_input_intr) (int dev, unsigned char data);
 
 static int
@@ -74,31 +78,31 @@ sb_midi_open (int dev, int mode,
   if (!sb_dsp_ok)
     {
       printk ("SB Error: MIDI hardware not installed\n");
-      return RET_ERROR (ENXIO);
+      return -ENXIO;
     }
 
   if (sb_midi_busy)
-    return RET_ERROR (EBUSY);
+    return -EBUSY;
 
   if (mode != OPEN_WRITE && !sb_duplex_midi)
     {
       if (num_midis == 1)
 	printk ("SoundBlaster: Midi input not currently supported\n");
-      return RET_ERROR (EPERM);
+      return -EPERM;
     }
 
   sb_midi_mode = NORMAL_MIDI;
   if (mode != OPEN_WRITE)
     {
       if (sb_dsp_busy || sb_intr_active)
-	return RET_ERROR (EBUSY);
+	return -EBUSY;
       sb_midi_mode = UART_MIDI;
     }
 
   if (sb_dsp_highspeed)
     {
       printk ("SB Error: Midi output not possible during stereo or high speed audio\n");
-      return RET_ERROR (EBUSY);
+      return -EBUSY;
     }
 
   if (sb_midi_mode == UART_MIDI)
@@ -108,8 +112,8 @@ sb_midi_open (int dev, int mode,
       sb_reset_dsp ();
 
       if (!sb_dsp_command (0x35))
-	return RET_ERROR (EIO);	/*
-				 * Enter the UART mode
+	return -EIO;		/*
+				   * Enter the UART mode
 				 */
       sb_intr_active = 1;
 
@@ -151,12 +155,13 @@ sb_midi_out (int dev, unsigned char midi_byte)
 
   if (sb_midi_mode == NORMAL_MIDI)
     {
-      DISABLE_INTR (flags);
+      save_flags (flags);
+      cli ();
       if (sb_dsp_command (0x38))
 	sb_dsp_command (midi_byte);
       else
 	printk ("SB Error: Unable to send a MIDI byte\n");
-      RESTORE_INTR (flags);
+      restore_flags (flags);
     }
   else
     sb_dsp_command (midi_byte);	/*
@@ -172,7 +177,7 @@ sb_midi_start_read (int dev)
   if (sb_midi_mode != UART_MIDI)
     {
       printk ("SoundBlaster: MIDI input not implemented.\n");
-      return RET_ERROR (EPERM);
+      return -EPERM;
     }
   return 0;
 }
@@ -189,9 +194,9 @@ sb_midi_end_read (int dev)
 }
 
 static int
-sb_midi_ioctl (int dev, unsigned cmd, unsigned arg)
+sb_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
-  return RET_ERROR (EPERM);
+  return -EPERM;
 }
 
 void
@@ -200,13 +205,14 @@ sb_midi_interrupt (int dummy)
   unsigned long   flags;
   unsigned char   data;
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
-  data = INB (DSP_READ);
+  data = inb (DSP_READ);
   if (input_opened)
     midi_input_intr (my_dev, data);
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 }
 
 #define MIDI_SYNTH_NAME	"SoundBlaster Midi"
@@ -217,6 +223,7 @@ static struct midi_operations sb_midi_operations =
 {
   {"SoundBlaster", 0, 0, SNDCARD_SB},
   &std_midi_synth,
+  {0},
   sb_midi_open,
   sb_midi_close,
   sb_midi_ioctl,

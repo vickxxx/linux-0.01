@@ -38,7 +38,7 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	do {
 		pte_t entry = *pte;
 		if (pte_present(entry))
-			*pte = pte_modify(entry, newprot);
+			set_pte(pte, pte_modify(entry, newprot));
 		address += PAGE_SIZE;
 		pte++;
 	} while (address < end);
@@ -72,14 +72,16 @@ static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
 static void change_protection(unsigned long start, unsigned long end, pgprot_t newprot)
 {
 	pgd_t *dir;
+	unsigned long beg = start;
 
-	dir = pgd_offset(current, start);
+	dir = pgd_offset(current->mm, start);
+	flush_cache_range(current->mm, beg, end);
 	while (start < end) {
 		change_pmd_range(dir, start, end - start, newprot);
 		start = (start + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	}
-	invalidate();
+	flush_tlb_range(current->mm, beg, end);
 	return;
 }
 

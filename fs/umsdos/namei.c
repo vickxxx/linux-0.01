@@ -5,10 +5,7 @@
  *	Inspired from linux/fs/msdos/... by Werner Almesberger
  *
  * Maintain and access the --linux alternate directory file.
-*/
-#ifdef MODULE
-#include <linux/module.h>
-#endif
+ */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -126,7 +123,6 @@ void umsdos_startlookup (struct inode *dir)
 	while (umsdos_waitcreate (dir) != 0);
 	dir->u.umsdos_i.u.dir_info.looking++;
 }
-void check_page_tables(void);
 
 /*
 	Unlock the directory.
@@ -437,7 +433,7 @@ static int umsdos_symlink_x(
 		in unused entry of the EMD file. The other is to have a separate
 		file dedicated to hold all symbolic links data.
 
-		Lets go for simplicity...
+		Let's go for simplicity...
 	*/
 	struct inode *inode;
 	int ret;
@@ -450,7 +446,7 @@ static int umsdos_symlink_x(
 		struct file filp;
 		filp.f_pos = 0;
 		/* Make the inode acceptable to MSDOS */
-		ret = umsdos_file_write_kmem (inode,&filp,(char*)symname,len);
+		ret = umsdos_file_write_kmem (inode,&filp,symname,len);
 		iput (inode);
 		if (ret >= 0){
 			if (ret != len){

@@ -2,8 +2,9 @@
  * sound/sb16_midi.c
  *
  * The low level driver for the MPU-401 UART emulation of the SB16.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -24,14 +25,13 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#ifdef CONFIGURE_SOUNDCARD
-
-#if !defined(EXCLUDE_SB) && !defined(EXCLUDE_SB16) && !defined(EXCLUDE_MIDI)
+#if defined(CONFIG_SB) && defined(CONFIG_MIDI)
 
 #include "sb.h"
 
@@ -39,12 +39,31 @@
 #define	COMDPORT   (sb16midi_base+1)
 #define	STATPORT   (sb16midi_base+1)
 
-#define sb16midi_status()		INB(STATPORT)
+extern int     *sb_osp;
+static int      sb16midi_base = 0;
+
+static int 
+sb16midi_status (void)
+{
+  return inb (STATPORT);
+}
 #define input_avail()		(!(sb16midi_status()&INPUT_AVAIL))
 #define output_ready()		(!(sb16midi_status()&OUTPUT_READY))
-#define sb16midi_cmd(cmd)		OUTB(cmd, COMDPORT)
-#define sb16midi_read()		INB(DATAPORT)
-#define sb16midi_write(byte)	OUTB(byte, DATAPORT)
+static void 
+sb16midi_cmd (unsigned char cmd)
+{
+  outb (cmd, COMDPORT);
+}
+static int 
+sb16midi_read (void)
+{
+  return inb (DATAPORT);
+}
+static void 
+sb16midi_write (unsigned char byte)
+{
+  outb (byte, DATAPORT);
+}
 
 #define	OUTPUT_READY	0x40
 #define	INPUT_AVAIL	0x80
@@ -53,13 +72,16 @@
 #define	UART_MODE_ON	0x3F
 
 static int      sb16midi_opened = 0;
-static int      sb16midi_base = 0x330;
 static int      sb16midi_detected = 0;
 static int      my_dev;
 extern int      sbc_base;
 
+extern int      Jazz16_detected;
+extern int      AudioDrive;
+
 static int      reset_sb16midi (void);
 static void     (*midi_input_intr) (int dev, unsigned char data);
+static volatile unsigned char input_byte;
 
 static void
 sb16midi_input_loop (void)
@@ -68,13 +90,25 @@ sb16midi_input_loop (void)
     {
       unsigned char   c = sb16midi_read ();
 
-      if (sb16midi_opened & OPEN_READ)
+      if (c == MPU_ACK)
+	input_byte = c;
+      else if (sb16midi_opened & OPEN_READ && midi_input_intr)
 	midi_input_intr (my_dev, c);
     }
 }
 
 void
 sb16midiintr (int unit)
+{
+  if (sb16midi_base == 0)
+    return;
+
+  if (input_avail ())
+    sb16midi_input_loop ();
+}
+
+void
+sbmidiintr (int irq, void *dev_id, struct pt_regs *dummy)
 {
   if (input_avail ())
     sb16midi_input_loop ();
@@ -88,10 +122,11 @@ sb16midi_open (int dev, int mode,
 {
   if (sb16midi_opened)
     {
-      return RET_ERROR (EBUSY);
+      return -EBUSY;
     }
 
-  sb16midi_input_loop ();
+  while (input_avail ())
+    sb16midi_read ();
 
   midi_input_intr = input;
   sb16midi_opened = mode;
@@ -115,12 +150,13 @@ sb16midi_out (int dev, unsigned char midi_byte)
    * Test for input since pending input seems to block the output.
    */
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   if (input_avail ())
     sb16midi_input_loop ();
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   /*
    * Sometimes it takes about 13000 loops before the output becomes ready
@@ -154,9 +190,9 @@ sb16midi_end_read (int dev)
 }
 
 static int
-sb16midi_ioctl (int dev, unsigned cmd, unsigned arg)
+sb16midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
-  return RET_ERROR (EINVAL);
+  return -EINVAL;
 }
 
 static void
@@ -172,14 +208,15 @@ sb16midi_buffer_status (int dev)
 				 */
 }
 
-#define MIDI_SYNTH_NAME	"SoundBlaster 16 Midi"
+#define MIDI_SYNTH_NAME	"SoundBlaster MPU"
 #define MIDI_SYNTH_CAPS	SYNTH_CAP_INPUT
 #include "midi_synth.h"
 
 static struct midi_operations sb16midi_operations =
 {
-  {"SoundBlaster 16 Midi", 0, 0, SNDCARD_SB16MIDI},
+  {"SoundBlaster MPU", 0, 0, SNDCARD_SB16MIDI},
   &std_midi_synth,
+  {0},
   sb16midi_open,
   sb16midi_close,
   sb16midi_ioctl,
@@ -192,31 +229,40 @@ static struct midi_operations sb16midi_operations =
   NULL
 };
 
-
-long
-attach_sb16midi (long mem_start, struct address_info *hw_config)
+static void
+enter_uart_mode (void)
 {
   int             ok, timeout;
   unsigned long   flags;
 
-  sb16midi_base = hw_config->io_base;
+  save_flags (flags);
+  cli ();
+  for (timeout = 30000; timeout < 0 && !output_ready (); timeout--);
 
-  if (!sb16midi_detected)
-    return RET_ERROR (EIO);
-
-  DISABLE_INTR (flags);
-  for (timeout = 30000; timeout < 0 && !output_ready (); timeout--);	/*
-									 * Wait
-									 */
+  input_byte = 0;
   sb16midi_cmd (UART_MODE_ON);
 
   ok = 0;
   for (timeout = 50000; timeout > 0 && !ok; timeout--)
-    if (input_avail ())
+    if (input_byte == MPU_ACK)
+      ok = 1;
+    else if (input_avail ())
       if (sb16midi_read () == MPU_ACK)
 	ok = 1;
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
+}
+
+long
+attach_sb16midi (long mem_start, struct address_info *hw_config)
+{
+  sb16midi_base = hw_config->io_base;
+
+  if (!sb16midi_detected)
+    return mem_start;
+
+  request_region (hw_config->io_base, 4, "SB MIDI");
+  enter_uart_mode ();
 
   if (num_midis >= MAX_MIDI_DEV)
     {
@@ -224,7 +270,7 @@ attach_sb16midi (long mem_start, struct address_info *hw_config)
       return mem_start;
     }
 
-  printk (" <SoundBlaster MPU-401>");
+  conf_printf ("SoundBlaster MPU-401", hw_config);
 
   std_midi_synth.midi_dev = my_dev = num_midis;
   midi_devs[num_midis++] = &sb16midi_operations;
@@ -234,7 +280,6 @@ attach_sb16midi (long mem_start, struct address_info *hw_config)
 static int
 reset_sb16midi (void)
 {
-  unsigned long   flags;
   int             ok, timeout, n;
 
   /*
@@ -243,13 +288,14 @@ reset_sb16midi (void)
 
   ok = 0;
 
-  DISABLE_INTR (flags);
+  /*save_flags(flags);cli(); */
 
   for (n = 0; n < 2 && !ok; n++)
     {
       for (timeout = 30000; timeout < 0 && !output_ready (); timeout--);	/*
 										 * Wait
 										 */
+      input_byte = 0;
       sb16midi_cmd (MPU_RESET);	/*
 				 * Send MPU-401 RESET Command
 				 */
@@ -260,7 +306,9 @@ reset_sb16midi (void)
        */
 
       for (timeout = 50000; timeout > 0 && !ok; timeout--)
-	if (input_avail ())
+	if (input_byte == MPU_ACK)	/* Interrupt */
+	  ok = 1;
+	else if (input_avail ())
 	  if (sb16midi_read () == MPU_ACK)
 	    ok = 1;
 
@@ -272,11 +320,10 @@ reset_sb16midi (void)
 				 * Flush input before enabling interrupts
 				 */
 
-  RESTORE_INTR (flags);
+  /* restore_flags(flags); */
 
   return ok;
 }
-
 
 int
 probe_sb16midi (struct address_info *hw_config)
@@ -284,7 +331,17 @@ probe_sb16midi (struct address_info *hw_config)
   int             ok = 0;
   extern int      sbc_major;
 
-  if (sbc_major < 4)
+  extern void     ess_midi_init (struct address_info *hw_config);
+  extern void     Jazz16_midi_init (struct address_info *hw_config);
+
+  if (check_region (hw_config->io_base, 4))
+    return 0;
+
+  if (AudioDrive)
+    ess_midi_init (hw_config);
+  else if (Jazz16_detected)
+    Jazz16_midi_init (hw_config);
+  else if (sbc_major < 4)
     return 0;			/* Not a SB16 */
 
   sb16midi_base = hw_config->io_base;
@@ -298,6 +355,10 @@ probe_sb16midi (struct address_info *hw_config)
   return ok;
 }
 
-#endif
+void
+unload_sb16midi (struct address_info *hw_config)
+{
+  release_region (hw_config->io_base, 4);
+}
 
 #endif

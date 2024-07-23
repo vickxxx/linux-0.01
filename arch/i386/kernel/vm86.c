@@ -74,7 +74,7 @@ static void mark_screen_rdonly(struct task_struct * tsk)
 	pte_t *pte;
 	int i;
 
-	pgd = pgd_offset(tsk, 0xA0000);
+	pgd = pgd_offset(tsk->mm, 0xA0000);
 	if (pgd_none(*pgd))
 		return;
 	if (pgd_bad(*pgd)) {
@@ -93,10 +93,10 @@ static void mark_screen_rdonly(struct task_struct * tsk)
 	pte = pte_offset(pmd, 0xA0000);
 	for (i = 0; i < 32; i++) {
 		if (pte_present(*pte))
-			*pte = pte_wrprotect(*pte);
+			set_pte(pte, pte_wrprotect(*pte));
 		pte++;
 	}
-	invalidate();
+	flush_tlb();
 }
 
 asmlinkage int sys_vm86(struct vm86_struct * v86)
@@ -217,6 +217,8 @@ static inline unsigned long get_vflags(struct vm86_regs * regs)
 
 static inline int is_revectored(int nr, struct revectored_struct * bitmap)
 {
+	if (verify_area(VERIFY_READ, bitmap, 256/8) < 0)
+		return 1;
 	__asm__ __volatile__("btl %2,%%fs:%1\n\tsbbl %0,%0"
 		:"=r" (nr)
 		:"m" (*bitmap),"r" (nr));
@@ -298,22 +300,32 @@ __res; })
 
 static void do_int(struct vm86_regs *regs, int i, unsigned char * ssp, unsigned long sp)
 {
-	unsigned short seg = get_fs_word((void *) ((i<<2)+2));
+	unsigned short *intr_ptr, seg;
 
-	if (seg == BIOSSEG || regs->cs == BIOSSEG ||
-	    is_revectored(i, &current->tss.vm86_info->int_revectored))
-		return_to_32bit(regs, VM86_INTx + (i << 8));
+	if (regs->cs == BIOSSEG)
+		goto cannot_handle;
+	if (is_revectored(i, &current->tss.vm86_info->int_revectored))
+		goto cannot_handle;
 	if (i==0x21 && is_revectored(AH(regs),&current->tss.vm86_info->int21_revectored))
-		return_to_32bit(regs, VM86_INTx + (i << 8));
+		goto cannot_handle;
+	intr_ptr = (unsigned short *) (i << 2);
+	if (verify_area(VERIFY_READ, intr_ptr, 4) < 0)
+		goto cannot_handle;
+	seg = get_fs_word(intr_ptr+1);
+	if (seg == BIOSSEG)
+		goto cannot_handle;
 	pushw(ssp, sp, get_vflags(regs));
 	pushw(ssp, sp, regs->cs);
 	pushw(ssp, sp, IP(regs));
 	regs->cs = seg;
 	SP(regs) -= 6;
-	IP(regs) = get_fs_word((void *) (i<<2));
+	IP(regs) = get_fs_word(intr_ptr+0);
 	clear_TF(regs);
 	clear_IF(regs);
 	return;
+
+cannot_handle:
+	return_to_32bit(regs, VM86_INTx + (i << 8));
 }
 
 void handle_vm86_debug(struct vm86_regs * regs, long error_code)
@@ -367,6 +379,7 @@ void handle_vm86_fault(struct vm86_regs * regs, long error_code)
 			set_vflags_long(popl(ssp, sp), regs);
 			return;
 		}
+		break;
 
 	/* pushf */
 	case 0x9c:
@@ -413,8 +426,10 @@ void handle_vm86_fault(struct vm86_regs * regs, long error_code)
 		IP(regs)++;
 		set_IF(regs);
 		return;
-
-	default:
-		return_to_32bit(regs, VM86_UNKNOWN);
 	}
+
+	/*
+	 * We didn't recognize it, let the emulator take care of it..
+	 */
+	return_to_32bit(regs, VM86_UNKNOWN);
 }

@@ -1,26 +1,41 @@
+/* $Id: fault.c,v 1.62 1996/04/25 06:09:26 davem Exp $
+ * fault.c:  Page fault handlers for the Sparc.
+ *
+ * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ */
+
+#include <asm/head.h>
+
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
+#include <linux/tasks.h>
+#include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/openprom.h>
+#include <asm/idprom.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
+#include <asm/memreg.h>
+#include <asm/openprom.h>
+#include <asm/oplib.h>
+#include <asm/smp.h>
+#include <asm/traps.h>
+#include <asm/kdebug.h>
 
-extern unsigned long pg0[1024];		/* page table for 0-4MB for everybody */
-extern struct sparc_phys_banks sp_banks[14];
+#define ELEMENTS(arr) (sizeof (arr)/sizeof (arr[0]))
 
-extern void die_if_kernel(char *,struct pt_regs *,long);
+extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
+extern int prom_node_root;
+
+extern void die_if_kernel(char *,struct pt_regs *);
 
 struct linux_romvec *romvec;
-
-/* foo */
-
-int tbase_needs_unmapping;
 
 /* At boot time we determine these two values necessary for setting
  * up the segment maps and page table entries (pte's).
@@ -35,139 +50,218 @@ int vac_size, vac_linesize, vac_do_hw_vac_flushes;
 int vac_entries_per_context, vac_entries_per_segment;
 int vac_entries_per_page;
 
-/*
- * Define this if things work differently on a i386 and a i486:
- * it will (on a i486) warn about kernel memory accesses that are
- * done without a 'verify_area(VERIFY_WRITE,..)'
- */
-#undef CONFIG_TEST_VERIFY_AREA
+/* Nice, simple, prom library does all the sweating for us. ;) */
+int prom_probe_memory (void)
+{
+	register struct linux_mlist_v0 *mlist;
+	register unsigned long bytes, base_paddr, tally;
+	register int i;
+
+	i = 0;
+	mlist= *prom_meminfo()->v0_available;
+	bytes = tally = mlist->num_bytes;
+	base_paddr = (unsigned long) mlist->start_adr;
+  
+	sp_banks[0].base_addr = base_paddr;
+	sp_banks[0].num_bytes = bytes;
+
+	while (mlist->theres_more != (void *) 0){
+		i++;
+		mlist = mlist->theres_more;
+		bytes = mlist->num_bytes;
+		tally += bytes;
+		if (i >= SPARC_PHYS_BANKS-1) {
+			printk ("The machine has more banks that this kernel can support\n"
+				"Increase the SPARC_PHYS_BANKS setting (currently %d)\n",
+				SPARC_PHYS_BANKS);
+			i = SPARC_PHYS_BANKS-1;
+			break;
+		}
+    
+		sp_banks[i].base_addr = (unsigned long) mlist->start_adr;
+		sp_banks[i].num_bytes = mlist->num_bytes;
+	}
+
+	i++;
+	sp_banks[i].base_addr = 0xdeadbeef;
+	sp_banks[i].num_bytes = 0;
+
+	/* Now mask all bank sizes on a page boundary, it is all we can
+	 * use anyways.
+	 */
+	for(i=0; sp_banks[i].num_bytes != 0; i++)
+		sp_banks[i].num_bytes &= PAGE_MASK;
+
+	return tally;
+}
 
 /* Traverse the memory lists in the prom to see how much physical we
  * have.
  */
-
 unsigned long
 probe_memory(void)
 {
-  register struct linux_romvec *lprom;
-  register struct linux_mlist_v0 *mlist;
-  register unsigned long bytes, base_paddr, tally;
-  register int i;
+	int total;
 
-  bytes = tally = 0;
-  base_paddr = 0;
-  i=0;
-  lprom = romvec;
-  switch(lprom->pv_romvers)
-    {
-    case 0:
-      mlist=(*(lprom->pv_v0mem.v0_totphys));
-      bytes = tally = mlist->num_bytes;
-      base_paddr = (unsigned long) mlist->start_adr;
+	total = prom_probe_memory();
 
-      sp_banks[0].base_addr = base_paddr;
-      sp_banks[0].num_bytes = bytes;
-
-      if(mlist->theres_more != (void *)0) {
-	  i++;
-	  mlist=mlist->theres_more;
-	  bytes=mlist->num_bytes;
-	  tally += bytes;
-	  sp_banks[i].base_addr = (unsigned long) mlist->start_adr;
-	  sp_banks[i].num_bytes = mlist->num_bytes;
-	}
-      break;
-    case 2:
-      printk("no v2 memory probe support yet.\n");
-      (*(lprom->pv_halt))();
-      break;
-    }
-
-  i++;
-  sp_banks[i].base_addr = 0xdeadbeef;
-  sp_banks[i].num_bytes = 0;
-
-  return tally;
+	/* Oh man, much nicer, keep the dirt in promlib. */
+	return total;
 }
 
-/* Sparc routine to reserve the mapping of the open boot prom */
+extern void sun4c_complete_all_stores(void);
 
-/* uncomment this for FAME and FORTUNE! */
-/* #define DEBUG_MAP_PROM */
-
-int
-map_the_prom(int curr_num_segs)
+/* Whee, a level 15 NMI interrupt memory error.  Let's have fun... */
+asmlinkage void sparc_lvl15_nmi(struct pt_regs *regs, unsigned long serr,
+				unsigned long svaddr, unsigned long aerr,
+				unsigned long avaddr)
 {
-  register unsigned long prom_va_begin;
-  register unsigned long prom_va_end;
-  register int segmap_entry, i;
-
-  prom_va_begin = LINUX_OPPROM_BEGVM;
-  prom_va_end   = LINUX_OPPROM_ENDVM;
-
-#ifdef DEBUG_MAP_PROM
-  printk("\ncurr_num_segs = 0x%x\n", curr_num_segs);
-#endif
-
-  while( prom_va_begin < prom_va_end)
-    {
-      segmap_entry=get_segmap(prom_va_begin);
-
-      curr_num_segs = ((segmap_entry<curr_num_segs) 
-		       ? segmap_entry : curr_num_segs);
-
-      for(i = num_contexts; --i > 0;)
-	  (*romvec->pv_setctxt)(i, (char *) prom_va_begin,
-				segmap_entry);
-
-      if(segmap_entry == invalid_segment)
-	{
-
-#ifdef DEBUG_MAP_PROM
-	  printk("invalid_segments, virt_addr 0x%x\n", prom_va_begin);
-#endif
-
-	  prom_va_begin += 0x40000;  /* num bytes per segment entry */
-	  continue;
-	}
-
-      /* DUH, prom maps itself so that users can access it. This is
-       * broken.
-       */
-
-#ifdef DEBUG_MAP_PROM
-      printk("making segmap for prom privileged, va = 0x%x\n",
-	     prom_va_begin);
-#endif
-
-      for(i = 0x40; --i >= 0; prom_va_begin+=4096)
-	{
-	  put_pte(prom_va_begin, get_pte(prom_va_begin) | 0x20000000);
-	}
-
-    }
-
-  printk("Mapped the PROM in all contexts...\n");
-
-#ifdef DEBUG_MAP_PROM
-  printk("curr_num_segs = 0x%x\n", curr_num_segs);
-#endif
-
-  return curr_num_segs;
-
+	sun4c_complete_all_stores();
+	printk("FAULT: NMI received\n");
+	printk("SREGS: Synchronous Error %08lx\n", serr);
+	printk("       Synchronous Vaddr %08lx\n", svaddr);
+	printk("      Asynchronous Error %08lx\n", aerr);
+	printk("      Asynchronous Vaddr %08lx\n", avaddr);
+	printk("REGISTER DUMP:\n");
+	show_regs(regs);
+	prom_halt();
 }
 
-/*
- * This routine handles page faults.  It determines the address,
- * and the problem, and then passes it off to one of the appropriate
- * routines.
- */
-asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
+asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
+			       unsigned long address)
 {
-	die_if_kernel("Oops", regs, error_code);
-	do_exit(SIGKILL);
+	struct vm_area_struct *vma;
+	int from_user = !(regs->psr & PSR_PS);
+
+#if 0
+	printk("CPU[%d]: f<pid=%d,tf=%d,wr=%d,addr=%08lx",
+	       smp_processor_id(), current->pid, text_fault,
+	       write, address);
+	printk(",pc=%08lx> ", regs->pc);
+#endif
+
+	if(text_fault)
+		address = regs->pc;
+
+	/* Now actually handle the fault.  Do kernel faults special,
+	 * because on the sun4c we could have faulted trying to read
+	 * the vma area of the task and without the following code
+	 * we'd fault recursively until all our stack is gone. ;-(
+	 */
+	if(!from_user && address >= KERNBASE) {
+#ifdef __SMP__
+		printk("CPU[%d]: Kernel faults at addr=%08lx\n",
+		       smp_processor_id(), address);
+		while(1)
+			;
+#else
+		quick_kernel_fault(address);
+		return;
+#endif
+	}
+
+	vma = find_vma(current, address);
+	if(!vma)
+		goto bad_area;
+	if(vma->vm_start <= address)
+		goto good_area;
+	if(!(vma->vm_flags & VM_GROWSDOWN))
+		goto bad_area;
+	if(expand_stack(vma, address))
+		goto bad_area;
+	/*
+	 * Ok, we have a good vm_area for this memory access, so
+	 * we can handle it..
+	 */
+good_area:
+	if(write) {
+		if(!(vma->vm_flags & VM_WRITE))
+			goto bad_area;
+	} else {
+		/* Allow reads even for write-only mappings */
+		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
+			goto bad_area;
+	}
+	handle_mm_fault(vma, address, write);
+	return;
+	/*
+	 * Something tried to access memory that isn't in our memory map..
+	 * Fix it, but check if it's kernel or user first..
+	 */
+bad_area:
+	if(from_user) {
+#if 0
+		printk("%s [%d]: segfaults at %08lx pc=%08lx\n",
+		       current->comm, current->pid, address, regs->pc);
+#endif
+		current->tss.sig_address = address;
+		current->tss.sig_desc = SUBSIG_NOMAPPING;
+		send_sig(SIGSEGV, current, 1);
+		return;
+	}
+	if((unsigned long) address < PAGE_SIZE) {
+		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
+	} else
+		printk(KERN_ALERT "Unable to handle kernel paging request");
+	printk(" at virtual address %08lx\n",address);
+	printk(KERN_ALERT "current->mm->context = %08lx\n",
+	       (unsigned long) current->mm->context);
+	printk(KERN_ALERT "current->mm->pgd = %08lx\n",
+	       (unsigned long) current->mm->pgd);
+	die_if_kernel("Oops", regs);
 }
 
+/* This always deals with user addresses. */
+inline void force_user_fault(unsigned long address, int write)
+{
+	struct vm_area_struct *vma;
 
+	vma = find_vma(current, address);
+	if(!vma)
+		goto bad_area;
+	if(vma->vm_start <= address)
+		goto good_area;
+	if(!(vma->vm_flags & VM_GROWSDOWN))
+		goto bad_area;
+	if(expand_stack(vma, address))
+		goto bad_area;
+good_area:
+	if(write)
+		if(!(vma->vm_flags & VM_WRITE))
+			goto bad_area;
+	else
+		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
+			goto bad_area;
+	handle_mm_fault(vma, address, write);
+	return;
+bad_area:
+	current->tss.sig_address = address;
+	current->tss.sig_desc = SUBSIG_NOMAPPING;
+	send_sig(SIGSEGV, current, 1);
+	return;
+}
 
+void window_overflow_fault(void)
+{
+	unsigned long sp = current->tss.rwbuf_stkptrs[0];
 
+	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
+		force_user_fault(sp + 0x38, 1);
+	force_user_fault(sp, 1);
+}
+
+void window_underflow_fault(unsigned long sp)
+{
+	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
+		force_user_fault(sp + 0x38, 0);
+	force_user_fault(sp, 0);
+}
+
+void window_ret_fault(struct pt_regs *regs)
+{
+	unsigned long sp = regs->u_regs[UREG_FP];
+
+	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
+		force_user_fault(sp + 0x38, 0);
+	force_user_fault(sp, 0);
+}

@@ -1,29 +1,28 @@
 /*
  *	opl3.h	- Definitions of the OPL-3 registers
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
+ * modification, are permitted provided that the following conditions are
+ * met: 1. Redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer. 2.
+ * Redistributions in binary form must reproduce the above copyright notice,
+ * this list of conditions and the following disclaimer in the documentation
+ * and/or other materials provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
 
 /*
@@ -80,6 +79,7 @@
 
 #define OPL3_MODE_REGISTER			0x05	/* Right side */
 #define   OPL3_ENABLE			0x01
+#define   OPL4_ENABLE			0x02
 
 #define KBD_SPLIT_REGISTER			0x08	/* Left side */
 #define   COMPOSITE_SINE_WAVE_MODE	0x80		/* Don't use with OPL-3? */
@@ -101,12 +101,12 @@
  *
  *	AM/VIB/EG/KSR/Multiple (0x20 to 0x35)
  */
- #define AM_VIB					0x20
- #define   TREMOLO_ON			0x80
- #define   VIBRATO_ON			0x40
- #define   SUSTAIN_ON			0x20
- #define   KSR				0x10 	/* Key scaling rate */
- #define   MULTIPLE_MASK		0x0f	/* Frequency multiplier */
+#define AM_VIB					0x20
+#define   TREMOLO_ON			0x80
+#define   VIBRATO_ON			0x40
+#define   SUSTAIN_ON			0x20
+#define   KSR				0x10 	/* Key scaling rate */
+#define   MULTIPLE_MASK		0x0f	/* Frequency multiplier */
 
  /*
   *	KSL/Total level (0x40 to 0x55)
@@ -230,7 +230,7 @@ struct physical_voice_info {
 #define USE_LEFT	0
 #define USE_RIGHT	1
 
-static struct physical_voice_info physical_voices[18] =
+static struct physical_voice_info pv_map[18] =
 {
 /*       No Mode Side		OP1	OP2	OP3   OP4	*/
 /*	---------------------------------------------------	*/

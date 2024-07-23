@@ -60,12 +60,19 @@ struct msg {
     struct msg *msg_next;   /* next message on queue */
     long  msg_type;          
     char *msg_spot;         /* message text address */
+    time_t msg_stime;       /* msgsnd time */
     short msg_ts;           /* message text size */
 };
 
 /* ipcs ctl commands */
 #define MSG_STAT 11
 #define MSG_INFO 12
+
+asmlinkage int sys_msgget (key_t key, int msgflg);
+asmlinkage int sys_msgsnd (int msqid, struct msgbuf *msgp, size_t msgsz, int msgflg);
+asmlinkage int sys_msgrcv (int msqid, struct msgbuf *msgp, size_t msgsz, long msgtyp,
+		       int msgflg);
+asmlinkage int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf);
 
 #endif /* __KERNEL__ */
 

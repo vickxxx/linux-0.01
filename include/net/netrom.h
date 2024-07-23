@@ -7,6 +7,12 @@
 #ifndef _NETROM_H
 #define _NETROM_H 
 #include <linux/netrom.h>
+
+#define	NR_T1CLAMPLO   (1 * PR_SLOWHZ)	/* If defined, clamp at 1 second **/
+#define	NR_T1CLAMPHI (300 * PR_SLOWHZ)	/* If defined, clamp at 30 seconds **/
+
+#define	NR_NETWORK_LEN		15
+#define	NR_TRANSPORT_LEN	5
  
 #define	NR_PROTO_IP		0x0C
 
@@ -29,28 +35,32 @@
 #define NR_STATE_2		2
 #define NR_STATE_3		3
 
-#define NR_DEFAULT_T1		(120 * PR_SLOWHZ)	/* Outstanding frames - 10 seconds */
-#define NR_DEFAULT_T2		(5   * PR_SLOWHZ)	/* Response delay     - 3 seconds */
+#define NR_DEFAULT_T1		(120 * PR_SLOWHZ)	/* Outstanding frames - 120 seconds */
+#define NR_DEFAULT_T2		(5   * PR_SLOWHZ)	/* Response delay     - 5 seconds */
 #define NR_DEFAULT_N2		3			/* Number of Retries */
 #define	NR_DEFAULT_T4		(180 * PR_SLOWHZ)	/* Transport Busy Delay */
 #define	NR_DEFAULT_WINDOW	4			/* Default Window Size	*/
-#define	NR_DEFAULT_OBS		6			/* Default Obscolesence Count */
+#define	NR_DEFAULT_OBS		6			/* Default Obsolescence Count */
 #define	NR_DEFAULT_QUAL		10			/* Default Neighbour Quality */
 #define	NR_DEFAULT_TTL		16			/* Default Time To Live */
 #define NR_MODULUS 		256
 #define NR_MAX_WINDOW_SIZE	127			/* Maximum Window Allowable */
+#define	NR_DEFAULT_PACLEN	236			/* Default Packet Length */
 
 typedef struct {
 	ax25_address		user_addr, source_addr, dest_addr;
-	unsigned char		my_index,    my_id;
-	unsigned char		your_index,  your_id;
-	unsigned char		state;
+	struct device		*device;
+	unsigned char		my_index,   my_id;
+	unsigned char		your_index, your_id;
+	unsigned char		state, condition, bpqext, hdrincl;
 	unsigned short		vs, vr, va, vl;
-	unsigned char		condition;
 	unsigned char		n2, n2count;
 	unsigned short		t1, t2, rtt;
 	unsigned short		t1timer, t2timer, t4timer;
-	struct sk_buff_head	ack_queue, reseq_queue;
+	unsigned short		fraglen, paclen;
+	struct sk_buff_head	ack_queue;
+	struct sk_buff_head	reseq_queue;
+	struct sk_buff_head	frag_queue;
 	struct sock		*sk;		/* Backlink to socket */
 } nr_cb;
 
@@ -72,6 +82,7 @@ struct nr_node {
 struct nr_neigh {
 	struct nr_neigh *next;
 	ax25_address    callsign;
+	ax25_digi       *digipeat;
 	struct device   *dev;
 	unsigned char   quality;
 	unsigned char   locked;
@@ -79,27 +90,25 @@ struct nr_neigh {
 	unsigned short  number;
 };
 
-/* netrom.c */
+/* af_netrom.c */
 extern struct nr_parms_struct nr_default;
 extern int  nr_rx_frame(struct sk_buff *, struct device *);
 extern void nr_destroy_socket(struct sock *);
-extern int  nr_get_info(char *, char **, off_t, int);
 
 /* nr_dev.c */
 extern int  nr_rx_ip(struct sk_buff *, struct device *);
 extern int  nr_init(struct device *);
 
-#include "nrcall.h"
+#include <net/nrcall.h>
 
 /* nr_in.c */
 extern int  nr_process_rx_frame(struct sock *, struct sk_buff *);
 
 /* nr_out.c */
-extern int  nr_output(struct sock *, struct sk_buff *);
+extern void nr_output(struct sock *, struct sk_buff *);
 extern void nr_send_nak_frame(struct sock *);
 extern void nr_kick(struct sock *);
 extern void nr_transmit_buffer(struct sock *, struct sk_buff *);
-extern void nr_nr_error_recovery(struct sock *);
 extern void nr_establish_data_link(struct sock *);
 extern void nr_enquiry_response(struct sock *);
 extern void nr_check_iframes_acked(struct sock *, unsigned short);
@@ -110,12 +119,12 @@ extern struct device *nr_dev_first(void);
 extern struct device *nr_dev_get(ax25_address *);
 extern int  nr_rt_ioctl(unsigned int, void *);
 extern void nr_link_failed(ax25_address *, struct device *);
-extern int  nr_route_frame(struct sk_buff *, struct device *);
-extern int  nr_nodes_get_info(char *, char **, off_t, int);
-extern int  nr_neigh_get_info(char *, char **, off_t, int);
+extern int  nr_route_frame(struct sk_buff *, ax25_cb *);
+extern int  nr_nodes_get_info(char *, char **, off_t, int, int);
+extern int  nr_neigh_get_info(char *, char **, off_t, int, int);
 
 /* nr_subr.c */
-extern void nr_clear_tx_queue(struct sock *);
+extern void nr_clear_queues(struct sock *);
 extern void nr_frames_acked(struct sock *, unsigned short);
 extern void nr_requeue_frames(struct sock *);
 extern int  nr_validate_nr(struct sock *, unsigned short);

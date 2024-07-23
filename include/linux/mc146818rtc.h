@@ -14,17 +14,16 @@
 
 #ifndef RTC_PORT
 #define RTC_PORT(x)	(0x70 + (x))
-#define RTC_ADDR(x)	(0x80 | (x))
 #define RTC_ALWAYS_BCD	1
 #endif
 
 #define CMOS_READ(addr) ({ \
-outb_p(RTC_ADDR(addr),RTC_PORT(0)); \
+outb_p((addr),RTC_PORT(0)); \
 inb_p(RTC_PORT(1)); \
 })
 #define CMOS_WRITE(val, addr) ({ \
-outb_p(RTC_ADDR(addr),RTC_PORT(0)); \
-outb_p(val,RTC_PORT(1)); \
+outb_p((addr),RTC_PORT(0)); \
+outb_p((val),RTC_PORT(1)); \
 })
 
 /**********************************************************************
@@ -106,5 +105,41 @@ outb_p(val,RTC_PORT(1)); \
 #ifndef BIN_TO_BCD
 #define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
 #endif
+
+/*
+ * ioctl calls that are permitted to the /dev/rtc interface, if 
+ * CONFIG_RTC was enabled.
+ */
+
+#define RTC_AIE_ON	0x01		/* Alarm int. enable on		*/
+#define RTC_AIE_OFF	0x02		/* ... off			*/
+#define RTC_UIE_ON	0x03		/* Update int. enable on	*/
+#define RTC_UIE_OFF	0x04		/* ... off			*/
+#define RTC_PIE_ON	0x05		/* Periodic int. enable on	*/
+#define RTC_PIE_OFF	0x06		/* ... off			*/
+#define RTC_ALM_SET	0x07		/* Set alarm (struct tm)	*/
+#define RTC_ALM_READ	0x08		/* Read alarm (struct tm)	*/
+#define RTC_RD_TIME	0x09		/* Read RTC time (struct tm)	*/
+#define RTC_SET_TIME	0x0a		/* Set time of RTC (not used)	*/
+#define RTC_IRQP_READ	0x0b		/* Read periodic IRQ rate (Hz)	*/
+#define RTC_IRQP_SET	0x0c		/* Set periodic IRQ rate (Hz)	*/
+
+/*
+ * The struct used to pass data via the above ioctl. Similar to the
+ * struct tm in <time.h>, but it needs to be here so that the kernel 
+ * source is self contained, allowing cross-compiles, etc. etc.
+ */
+
+struct rtc_time {
+	int tm_sec;
+	int tm_min;
+	int tm_hour;
+	int tm_mday;
+	int tm_mon;
+	int tm_year;
+	int tm_wday;
+	int tm_yday;
+	int tm_isdst;
+};
 
 #endif /* _MC146818RTC_H */

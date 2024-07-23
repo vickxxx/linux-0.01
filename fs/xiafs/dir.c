@@ -9,17 +9,14 @@
  *  This software may be redistributed per Linux Copyright.
  */
 
-#ifdef MODULE
-#include <linux/module.h>
-#endif
-
-#include <asm/segment.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/xia_fs.h>
 #include <linux/stat.h>
+
+#include <asm/segment.h>
 
 #include "xiafs_mac.h"
 
@@ -55,6 +52,8 @@ struct inode_operations xiafs_dir_inode_operations = {
     xiafs_rename,			/* rename */
     NULL,			/* readlink */
     NULL,			/* follow_link */
+    NULL,			/* readpage */
+    NULL,			/* writepage */
     NULL,			/* bmap */
     xiafs_truncate,		/* truncate */
     NULL			/* permission */

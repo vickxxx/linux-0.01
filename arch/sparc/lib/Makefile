@@ -1,21 +1,21 @@
-#
+# $Id: Makefile,v 1.9 1996/03/23 01:37:15 davem Exp $
 # Makefile for Sparc library files..
 #
 
 CFLAGS := $(CFLAGS) -ansi
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
-
-OBJS  = mul.o rem.o sdiv.o udiv.o umul.o urem.o ashrdi3.o
+OBJS  = mul.o rem.o sdiv.o udiv.o umul.o urem.o ashrdi3.o memcpy.o memset.o \
+        strlen.o
 
 lib.a: $(OBJS)
 	$(AR) rcs lib.a $(OBJS)
 	sync
+
+memcpy.o: memcpy.S
+	$(CC) -ansi -c -o memcpy.o memcpy.S
+
+strlen.o: strlen.S
+	$(CC) -ansi -c -o strlen.o strlen.S
 
 mul.o: mul.S
 	$(CC) -c -o mul.o mul.S
@@ -40,9 +40,4 @@ ashrdi3.o: ashrdi3.S
 
 dep:
 
-#
-# include a dependency file if one exists
-#
-ifeq (.depend,$(wildcard .depend))
-include .depend
-endif
+include $(TOPDIR)/Rules.make

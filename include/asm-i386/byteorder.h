@@ -6,12 +6,17 @@
 #undef htonl
 #undef htons
 
-#ifndef LITTLE_ENDIAN
-#define LITTLE_ENDIAN 1234
+#ifndef __LITTLE_ENDIAN
+#define __LITTLE_ENDIAN 1234
 #endif
 
-#ifndef LITTLE_ENDIAN_BITFIELD
-#define LITTLE_ENDIAN_BITFIELD
+#ifndef __LITTLE_ENDIAN_BITFIELD
+#define __LITTLE_ENDIAN_BITFIELD
+#endif
+
+/* For avoiding bswap on i386 */
+#ifdef __KERNEL__
+#include <linux/config.h>
 #endif
 
 extern unsigned long int	ntohl(unsigned long int);
@@ -19,19 +24,23 @@ extern unsigned short int	ntohs(unsigned short int);
 extern unsigned long int	htonl(unsigned long int);
 extern unsigned short int	htons(unsigned short int);
 
-extern unsigned long int	__ntohl(unsigned long int);
-extern unsigned short int	__ntohs(unsigned short int);
-extern unsigned long int	__constant_ntohl(unsigned long int);
-extern unsigned short int	__constant_ntohs(unsigned short int);
+extern __inline__ unsigned long int	__ntohl(unsigned long int);
+extern __inline__ unsigned short int	__ntohs(unsigned short int);
+extern __inline__ unsigned long int	__constant_ntohl(unsigned long int);
+extern __inline__ unsigned short int	__constant_ntohs(unsigned short int);
 
 extern __inline__ unsigned long int
 __ntohl(unsigned long int x)
 {
+#if defined(__KERNEL__) && !defined(CONFIG_M386)
+	__asm__("bswap %0" : "=r" (x) : "0" (x));
+#else
 	__asm__("xchgb %b0,%h0\n\t"	/* swap lower bytes	*/
 		"rorl $16,%0\n\t"	/* swap words		*/
 		"xchgb %b0,%h0"		/* swap higher bytes	*/
 		:"=q" (x)
 		: "0" (x));
+#endif	
 	return x;
 }
 

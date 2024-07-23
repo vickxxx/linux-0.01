@@ -17,11 +17,11 @@
  *	Changes:
  *		Alan Cox	:	Added a name field and a frag handler
  *					field for later.
+ *		Alan Cox	:	Cleaned up, and sorted types.
  */
  
 #ifndef _PROTOCOL_H
 #define _PROTOCOL_H
-
 
 #define MAX_INET_PROTOS	32		/* Must be a power of 2		*/
 
@@ -29,22 +29,18 @@
 /* This is used to register protocols. */
 struct inet_protocol {
   int			(*handler)(struct sk_buff *skb, struct device *dev,
-				   struct options *opt, unsigned long daddr,
-				   unsigned short len, unsigned long saddr,
+				   struct options *opt, __u32 daddr,
+				   unsigned short len, __u32 saddr,
 				   int redo, struct inet_protocol *protocol);
-  int			(*frag_handler)(struct sk_buff *skb, struct device *dev,
-				   struct options *opt, unsigned long daddr,
-				   unsigned short len, unsigned long saddr,
-				   int redo, struct inet_protocol *protocol);
-  void			(*err_handler)(int err, unsigned char *buff,
-				       unsigned long daddr,
-				       unsigned long saddr,
+  void			(*err_handler)(int type, int code, unsigned char *buff,
+				       __u32 daddr,
+				       __u32 saddr,
 				       struct inet_protocol *protocol);
   struct inet_protocol *next;
   unsigned char		protocol;
   unsigned char		copy:1;
   void			*data;
-  char 			*name;
+  const char		*name;
 };
 
 

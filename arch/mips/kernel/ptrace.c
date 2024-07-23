@@ -11,6 +11,7 @@
 #include <linux/user.h>
 
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 #include <asm/system.h>
 
 #if 0
@@ -89,7 +90,7 @@ static unsigned long get_long(struct vm_area_struct * vma, unsigned long addr)
 	unsigned long page;
 
 repeat:
-	pgdir = PAGE_DIR_OFFSET(vma->vm_task, addr);
+	pgdir = PAGE_DIR_OFFSET(vma->vm_mm, addr);
 	if (pgd_none(*pgdir)) {
 		do_no_page(vma, addr, 0);
 		goto repeat;
@@ -129,7 +130,7 @@ static void put_long(struct vm_area_struct * vma, unsigned long addr,
 	unsigned long page;
 
 repeat:
-	pgdir = PAGE_DIR_OFFSET(vma->vm_task, addr);
+	pgdir = PAGE_DIR_OFFSET(vma->vm_mm, addr);
 	if (!pgd_present(*pgdir)) {
 		do_no_page(vma, addr, 1);
 		goto repeat;
@@ -150,13 +151,11 @@ repeat:
 		goto repeat;
 	}
 /* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page < high_memory) {
-		page += addr & ~PAGE_MASK;
-		*(unsigned long *) page = data;
-	}
+	if (page < high_memory)
+		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
-	*pgtable = pte_mkdirty(mk_pte(page, vma->vm_page_prot));
+	set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
 	invalidate();
 }
 
@@ -448,7 +447,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			else
 				child->flags &= ~PF_TRACESYS;
 			child->exit_code = data;
-			child->state = TASK_RUNNING;
+			wake_up_process(child);
 	/* make sure the single step bit is not set. */
 			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) & ~TRAP_FLAG;
 			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
@@ -463,7 +462,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		case PTRACE_KILL: {
 			long tmp;
 
-			child->state = TASK_RUNNING;
+			if (child->state == TASK_ZOMBIE)	/* already dead */
+				return 0;
+			wake_up_process(child);
 			child->exit_code = SIGKILL;
 	/* make sure the single step bit is not set. */
 			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) & ~TRAP_FLAG;
@@ -479,7 +480,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			child->flags &= ~PF_TRACESYS;
 			tmp = get_stack_long(child, sizeof(long)*EFL-MAGICNUMBER) | TRAP_FLAG;
 			put_stack_long(child, sizeof(long)*EFL-MAGICNUMBER,tmp);
-			child->state = TASK_RUNNING;
+			wake_up_process(child);
 			child->exit_code = data;
 	/* give it a chance to run. */
 			return 0;
@@ -491,7 +492,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			if ((unsigned long) data > NSIG)
 				return -EIO;
 			child->flags &= ~(PF_PTRACED|PF_TRACESYS);
-			child->state = TASK_RUNNING;
+			wake_up_process(child);
 			child->exit_code = data;
 			REMOVE_LINKS(child);
 			child->p_pptr = child->p_opptr;

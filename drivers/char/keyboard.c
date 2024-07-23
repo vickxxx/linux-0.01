@@ -13,6 +13,7 @@
  * Diacriticals redone & other small changes, aeb@cwi.nl, June 1993
  * Added decr/incr_console, dynamic keymaps, Unicode support,
  * dynamic function/string keys, led setting,  Sept 1994
+ * `Sticky' modifier keys, 951006.
  * 
  */
 
@@ -27,12 +28,24 @@
 #include <linux/signal.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
+#include <linux/random.h>
 
 #include <asm/bitops.h>
 
 #include "kbd_kern.h"
 #include "diacr.h"
 #include "vt_kern.h"
+
+/*
+ * On non-x86 hardware we do a full keyboard controller
+ * initialization, in case the bootup software hasn't done
+ * it. On a x86, the BIOS will already have initialized the
+ * keyboard.
+ */
+#ifndef __i386__
+#define INIT_KBD
+static int initialize_kbd(void);
+#endif
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -70,16 +83,8 @@
 extern void poke_blanked_console(void);
 extern void ctrl_alt_del(void);
 extern void reset_vc(unsigned int new_console);
-extern void change_console(unsigned int new_console);
 extern void scrollback(int);
 extern void scrollfront(int);
-extern int vc_cons_allocated(unsigned int);
-
-#ifdef __i386__
-#define fake_keyboard_interrupt() __asm__ __volatile__("int $0x21")
-#else
-#define fake_keyboard_interrupt() do ; while (0)
-#endif
 
 unsigned char kbd_read_mask = 0x01;	/* modified by psaux.c */
 
@@ -95,8 +100,6 @@ static unsigned char k_down[NR_SHIFT] = {0, };
 #define BITS_PER_LONG (8*sizeof(unsigned long))
 static unsigned long key_down[256/BITS_PER_LONG] = { 0, };
 
-extern int last_console;
-static int want_console = -1;
 static int dead_key_next = 0;
 /* 
  * In order to retrieve the shift_state (for the mouse server), either
@@ -124,12 +127,12 @@ typedef void (k_handfn)(unsigned char value, char up_flag);
 
 static k_handfn
 	do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
-	do_meta, do_ascii, do_lock, do_lowercase, do_ignore;
+	do_meta, do_ascii, do_lock, do_lowercase, do_slock, do_ignore;
 
 static k_hand key_handler[16] = {
 	do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
-	do_meta, do_ascii, do_lock, do_lowercase,
-	do_ignore, do_ignore, do_ignore, do_ignore
+	do_meta, do_ascii, do_lock, do_lowercase, do_slock,
+	do_ignore, do_ignore, do_ignore
 };
 
 typedef void (*void_fnp)(void);
@@ -151,7 +154,8 @@ static void_fnp spec_fn_table[] = {
 const int max_vals[] = {
 	255, SIZE(func_table) - 1, SIZE(spec_fn_table) - 1, NR_PAD - 1,
 	NR_DEAD - 1, 255, 3, NR_SHIFT - 1,
-	255, NR_ASCII - 1, NR_LOCK - 1, 255
+	255, NR_ASCII - 1, NR_LOCK - 1, 255,
+	NR_LOCK - 1
 };
 
 const int NR_TYPES = SIZE(max_vals);
@@ -333,18 +337,36 @@ int getkeycode(unsigned int scancode)
 	    e0_keys[scancode - 128];
 }
 
-static void keyboard_interrupt(int irq, struct pt_regs *regs)
+static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	unsigned char scancode, keycode;
 	static unsigned int prev_scancode = 0;   /* remember E0, E1 */
 	char up_flag;				 /* 0 or 0200 */
 	char raw_mode;
+	int status;
 
 	pt_regs = regs;
 	send_cmd(0xAD);		/* disable keyboard */
 	kb_wait();
-	if ((inb_p(0x64) & kbd_read_mask) != 0x01)
-		goto end_kbd_intr;
+	status = inb_p(0x64);
+	if ((status & kbd_read_mask) != 0x01) {
+	  /*
+	   * On some platforms (Alpha XL for one), the init code may leave
+	   *  an interrupt hanging, yet with status indicating no data.
+	   * After making sure that there's no data indicated and its not a
+	   *  mouse interrupt, we will read the data register to clear it.
+	   * If we don't do this, the data reg stays full and will not
+	   *  allow new data or interrupt from the keyboard. Sigh...
+	   */
+	  if (!(status & 0x21)) { /* neither ODS nor OBF */
+	    scancode = inb(0x60); /* read data anyway */
+#if 0
+	    printk("keyboard: status 0x%x  mask 0x%x  data 0x%x\n",
+		   status, kbd_read_mask, scancode);
+#endif
+	  }
+	  goto end_kbd_intr;
+	}
 	scancode = inb(0x60);
 	mark_bh(KEYBOARD_BH);
 	if (reply_expected) {
@@ -371,6 +393,9 @@ static void keyboard_interrupt(int irq, struct pt_regs *regs)
 		prev_scancode = 0;
 		goto end_kbd_intr;
 	}
+	do_poke_blanked_console = 1;
+	mark_bh(CONSOLE_BH);
+	add_keyboard_randomness(scancode);
 
 	tty = ttytab[fg_console];
  	kbd = kbd_table + fg_console;
@@ -527,7 +552,7 @@ static void keyboard_interrupt(int irq, struct pt_regs *regs)
 		u_char type;
 
 		/* the XOR below used to be an OR */
-		int shift_final = shift_state ^ kbd->lockstate;
+		int shift_final = shift_state ^ kbd->lockstate ^ kbd->slockstate;
 		ushort *key_map = key_maps[shift_final];
 
 		if (key_map != NULL) {
@@ -545,6 +570,8 @@ static void keyboard_interrupt(int irq, struct pt_regs *regs)
 				}
 			    }
 			    (*key_handler[type])(keysym & 0xff, up_flag);
+			    if (type != KT_SLOCK)
+			      kbd->slockstate = 0;
 			} else {
 			    /* maybe only if (kbd->kbdmode == VC_UNICODE) ? */
 			    if (!up_flag)
@@ -665,7 +692,7 @@ static void bare_num(void)
 static void lastcons(void)
 {
 	/* switch to the last used console, ChN */
-	want_console = last_console;
+	set_console(last_console);
 }
 
 static void decr_console(void)
@@ -678,7 +705,7 @@ static void decr_console(void)
 		if (vc_cons_allocated(i))
 			break;
 	}
-	want_console = i;
+	set_console(i);
 }
 
 static void incr_console(void)
@@ -691,7 +718,7 @@ static void incr_console(void)
 		if (vc_cons_allocated(i))
 			break;
 	}
-	want_console = i;
+	set_console(i);
 }
 
 static void send_intr(void)
@@ -840,7 +867,7 @@ static void do_cons(unsigned char value, char up_flag)
 {
 	if (up_flag)
 		return;
-	want_console = value;
+	set_console(value);
 }
 
 static void do_fn(unsigned char value, char up_flag)
@@ -856,8 +883,8 @@ static void do_fn(unsigned char value, char up_flag)
 
 static void do_pad(unsigned char value, char up_flag)
 {
-	static char *pad_chars = "0123456789+-*/\015,.?";
-	static char *app_map = "pqrstuvwxylSRQMnn?";
+	static const char *pad_chars = "0123456789+-*/\015,.?";
+	static const char *app_map = "pqrstuvwxylSRQMnn?";
 
 	if (up_flag)
 		return;		/* no action, if this is a key release */
@@ -913,7 +940,7 @@ static void do_pad(unsigned char value, char up_flag)
 
 static void do_cur(unsigned char value, char up_flag)
 {
-	static char *cur_chars = "BDCA";
+	static const char *cur_chars = "BDCA";
 	if (up_flag)
 		return;
 
@@ -1023,6 +1050,13 @@ static void do_lock(unsigned char value, char up_flag)
 	if (up_flag || rep)
 		return;
 	chg_vc_kbd_lock(kbd, value);
+}
+
+static void do_slock(unsigned char value, char up_flag)
+{
+	if (up_flag || rep)
+		return;
+	chg_vc_kbd_slock(kbd, value);
 }
 
 /*
@@ -1137,7 +1171,7 @@ static inline unsigned char getleds(void){
  * used, but this allows for easy and efficient race-condition
  * prevention later on.
  */
-static void kbd_bh(void * unused)
+static void kbd_bh(void)
 {
 	unsigned char leds = getleds();
 
@@ -1146,23 +1180,9 @@ static void kbd_bh(void * unused)
 		if (!send_data(0xed) || !send_data(leds))
 			send_data(0xf4);	/* re-enable kbd if any errors */
 	}
-	if (want_console >= 0) {
-		if (want_console != fg_console) {
-			change_console(want_console);
-			/* we only changed when the console had already
-			   been allocated - a new console is not created
-			   in an interrupt routine */
-		}
-		want_console = -1;
-	}
-	poke_blanked_console();
-	cli();
-	if ((inb_p(0x64) & kbd_read_mask) == 0x01)
-		fake_keyboard_interrupt();
-	sti();
 }
 
-unsigned long kbd_init(unsigned long kmem_start)
+int kbd_init(void)
 {
 	int i;
 	struct kbd_struct kbd0;
@@ -1171,6 +1191,7 @@ unsigned long kbd_init(unsigned long kmem_start)
 	kbd0.ledflagstate = kbd0.default_ledflagstate = KBD_DEFLEDS;
 	kbd0.ledmode = LED_SHOW_FLAGS;
 	kbd0.lockstate = KBD_DEFLOCK;
+	kbd0.slockstate = 0;
 	kbd0.modeflags = KBD_DEFMODE;
 	kbd0.kbdmode = VC_XLATE;
  
@@ -1179,21 +1200,188 @@ unsigned long kbd_init(unsigned long kmem_start)
 
 	ttytab = console_driver.table;
 
-	bh_base[KEYBOARD_BH].routine = kbd_bh;
-	request_irq(KEYBOARD_IRQ, keyboard_interrupt, 0, "keyboard");
-	request_region(0x60,1,"kbd");
-	request_region(0x64,1,"kbd");
-#ifdef __alpha__
-	/* enable keyboard interrupts, PC/AT mode */
-	kb_wait();
-	outb(0x60,0x64);	/* write PS/2 Mode Register */
-	kb_wait();
-	outb(0x65,0x60);	/* KCC | DMS | SYS | EKI */
-	kb_wait();
-	if (!send_data(0xf0) || !send_data(0x02))
-		printk("Scanmode 2 change failed\n");
+	request_irq(KEYBOARD_IRQ, keyboard_interrupt, 0, "keyboard", NULL);
+	request_region(0x60,16,"kbd");
+#ifdef INIT_KBD
+	initialize_kbd();
 #endif
+	init_bh(KEYBOARD_BH, kbd_bh);
 	mark_bh(KEYBOARD_BH);
-	enable_bh(KEYBOARD_BH);
-	return kmem_start;
+	return 0;
 }
+
+#ifdef INIT_KBD
+/*
+ * keyboard controller registers
+ */
+#define KBD_STATUS_REG      (unsigned int) 0x64
+#define KBD_CNTL_REG        (unsigned int) 0x64
+#define KBD_DATA_REG	    (unsigned int) 0x60
+/*
+ * controller commands
+ */
+#define KBD_READ_MODE	    (unsigned int) 0x20
+#define KBD_WRITE_MODE	    (unsigned int) 0x60
+#define KBD_SELF_TEST	    (unsigned int) 0xAA
+#define KBD_SELF_TEST2	    (unsigned int) 0xAB
+#define KBD_CNTL_ENABLE	    (unsigned int) 0xAE
+/*
+ * keyboard commands
+ */
+#define KBD_ENABLE	    (unsigned int) 0xF4
+#define KBD_DISABLE	    (unsigned int) 0xF5
+#define KBD_RESET	    (unsigned int) 0xFF
+/*
+ * keyboard replies
+ */
+#define KBD_ACK		    (unsigned int) 0xFA
+#define KBD_POR		    (unsigned int) 0xAA
+/*
+ * status register bits
+ */
+#define KBD_OBF		    (unsigned int) 0x01
+#define KBD_IBF		    (unsigned int) 0x02
+#define KBD_GTO		    (unsigned int) 0x40
+#define KBD_PERR	    (unsigned int) 0x80
+/*
+ * keyboard controller mode register bits
+ */
+#define KBD_EKI		    (unsigned int) 0x01
+#define KBD_SYS		    (unsigned int) 0x04
+#define KBD_DMS		    (unsigned int) 0x20
+#define KBD_KCC		    (unsigned int) 0x40
+
+#define TIMEOUT_CONST	500000
+
+static int kbd_wait_for_input(void)
+{
+        int     n;
+        int     status, data;
+
+        n = TIMEOUT_CONST;
+        do {
+                status = inb(KBD_STATUS_REG);
+                /*
+                 * Wait for input data to become available.  This bit will
+                 * then be cleared by the following read of the DATA
+                 * register.
+                 */
+
+                if (!(status & KBD_OBF))
+			continue;
+
+		data = inb(KBD_DATA_REG);
+
+                /*
+                 * Check to see if a timeout error has occurred.  This means
+                 * that transmission was started but did not complete in the
+                 * normal time cycle.  PERR is set when a parity error occurred
+                 * in the last transmission.
+                 */
+                if (status & (KBD_GTO | KBD_PERR)) {
+			continue;
+                }
+		return (data & 0xff);
+        } while (--n);
+        return (-1);	/* timed-out if fell through to here... */
+}
+
+static void kbd_write(int address, int data)
+{
+	int status;
+
+	do {
+		status = inb(KBD_STATUS_REG);  /* spin until input buffer empty*/
+	} while (status & KBD_IBF);
+	outb(data, address);               /* write out the data*/
+}
+
+static int initialize_kbd(void)
+{
+	unsigned long flags;
+
+	save_flags(flags); cli();
+
+	/* Flush any pending input. */
+	while (kbd_wait_for_input() != -1)
+		continue;
+
+	/*
+	 * Test the keyboard interface.
+	 * This seems to be the only way to get it going.
+	 * If the test is successful a x55 is placed in the input buffer.
+	 */
+	kbd_write(KBD_CNTL_REG, KBD_SELF_TEST);
+	if (kbd_wait_for_input() != 0x55) {
+		printk("initialize_kbd: keyboard failed self test.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	/*
+	 * Perform a keyboard interface test.  This causes the controller
+	 * to test the keyboard clock and data lines.  The results of the
+	 * test are placed in the input buffer.
+	 */
+	kbd_write(KBD_CNTL_REG, KBD_SELF_TEST2);
+	if (kbd_wait_for_input() != 0x00) {
+		printk("initialize_kbd: keyboard failed self test 2.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	/* Enable the keyboard by allowing the keyboard clock to run. */
+	kbd_write(KBD_CNTL_REG, KBD_CNTL_ENABLE);
+
+	/*
+	 * Reset keyboard. If the read times out
+	 * then the assumption is that no keyboard is
+	 * plugged into the machine.
+	 * This defaults the keyboard to scan-code set 2.
+	 */
+	kbd_write(KBD_DATA_REG, KBD_RESET);
+	if (kbd_wait_for_input() != KBD_ACK) {
+		printk("initialize_kbd: reset kbd failed, no ACK.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	if (kbd_wait_for_input() != KBD_POR) {
+		printk("initialize_kbd: reset kbd failed, not POR.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	/*
+	 * now do a DEFAULTS_DISABLE always
+	 */
+	kbd_write(KBD_DATA_REG, KBD_DISABLE);
+	if (kbd_wait_for_input() != KBD_ACK) {
+		printk("initialize_kbd: disable kbd failed, no ACK.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	/*
+	 * Enable keyboard interrupt, operate in "sys" mode,
+	 *  enable keyboard (by clearing the disable keyboard bit),
+	 *  disable mouse, do conversion of keycodes.
+	 */
+	kbd_write(KBD_CNTL_REG, KBD_WRITE_MODE);
+	kbd_write(KBD_DATA_REG, KBD_EKI|KBD_SYS|KBD_DMS|KBD_KCC);
+
+	/*
+	 * now ENABLE the keyboard to set it scanning...
+	 */
+	kbd_write(KBD_DATA_REG, KBD_ENABLE);
+	if (kbd_wait_for_input() != KBD_ACK) {
+		printk("initialize_kbd: keyboard enable failed.\n");
+		restore_flags(flags);
+		return(-1);
+	}
+
+	restore_flags(flags);
+
+	return (1);
+}
+#endif /* INIT_KBD */

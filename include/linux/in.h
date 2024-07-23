@@ -18,6 +18,7 @@
 #ifndef _LINUX_IN_H
 #define _LINUX_IN_H
 
+#include <linux/types.h>
 
 /* Standard well-defined IP protocols.  */
 enum {
@@ -38,7 +39,7 @@ enum {
 
 /* Internet address. */
 struct in_addr {
-	unsigned long int	s_addr;
+	__u32	s_addr;
 };
 
 /* Request struct for multicast socket ops */
@@ -107,6 +108,7 @@ struct sockaddr_in {
 
 /* Address to loopback in software to local host.  */
 #define	INADDR_LOOPBACK		0x7f000001	/* 127.0.0.1   */
+#define	IN_LOOPBACK(a)		((((long int) (a)) & 0xff000000) == 0x7f000000)
 
 /* Defines for Multicast INADDR */
 #define INADDR_UNSPEC_GROUP   	0xe0000000      /* 224.0.0.0   */
@@ -116,5 +118,32 @@ struct sockaddr_in {
 /* <asm/byteorder.h> contains the htonl type stuff.. */
 
 #include <asm/byteorder.h> 
+
+/* Some random defines to make it easier in the kernel.. */
+#ifdef __KERNEL__
+
+#define LOOPBACK(x)	(((x) & htonl(0xff000000)) == htonl(0x7f000000))
+#define MULTICAST(x)	(((x) & htonl(0xf0000000)) == htonl(0xe0000000))
+
+#endif
+
+/*
+ *	IPv6 definitions as we start to include them. This is just
+ *	a beginning -- don't get excited 8)
+ */
+ 
+struct in_addr6
+{
+	unsigned char s6_addr[16];
+};
+
+struct sockaddr_in6
+{
+	unsigned short sin6_family;
+	unsigned short sin6_port;
+	unsigned long sin6_flowinfo;
+	struct in_addr6 sin6_addr;
+};
+
 
 #endif	/* _LINUX_IN_H */

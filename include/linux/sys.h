@@ -27,6 +27,4 @@
  * These are system calls that haven't been implemented yet
  * but have an entry in the table for future expansion..
  */
-#define _sys_quotactl	_sys_ni_syscall
-
 #endif

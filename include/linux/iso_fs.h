@@ -122,6 +122,7 @@ struct iso_directory_record {
 
 #define ISOFS_BUFFER_SIZE(INODE) ((INODE)->i_sb->s_blocksize)
 #define ISOFS_BUFFER_BITS(INODE) ((INODE)->i_sb->s_blocksize_bits)
+#define ISOFS_ZONE_BITS(INODE)   ((INODE)->i_sb->u.isofs_sb.s_log_zone_size)
 
 #if 0
 #ifdef ISOFS_FIXED_BLOCKSIZE
@@ -167,7 +168,7 @@ extern int find_rock_ridge_relocation(struct iso_directory_record *, struct inod
 extern int isofs_open(struct inode * inode, struct file * filp);
 extern void isofs_release(struct inode * inode, struct file * filp);
 extern int isofs_lookup(struct inode * dir,const char * name, int len,
-	struct inode ** result);
+			struct inode ** result);
 extern unsigned long isofs_count_free_inodes(struct super_block *sb);
 extern int isofs_new_block(int dev);
 extern int isofs_free_block(int dev, int block);
@@ -175,6 +176,7 @@ extern int isofs_bmap(struct inode *,int);
 
 extern void isofs_put_super(struct super_block *);
 extern struct super_block *isofs_read_super(struct super_block *,void *,int);
+extern int init_iso9660_fs(void);
 extern void isofs_read_inode(struct inode *);
 extern void isofs_put_inode(struct inode *);
 extern void isofs_statfs(struct super_block *, struct statfs *, int);

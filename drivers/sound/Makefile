@@ -5,29 +5,65 @@
 #
 #
 
-VERSION		= 2.90-2
+VERSION		= `head -1 .version`
 TARGET_OS	= linux
+USRINCDIR	= /usr/include
+MODULEDIR	= /lib/modules/misc
 
-.c.s:
-	$(CC) $(CFLAGS) -S $<
-.s.o:
-	$(AS) -c -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c $<
+FIXEDOBJS	= soundcard.o dev_table.o sound_switch.o
 
-OBJS   = soundcard.o audio.o dmabuf.o sb_dsp.o dev_table.o \
+ifeq (.defines,$(wildcard .defines))
+include .defines
+include .objects
+else
+OBJS   = audio.o dmabuf.o sb_dsp.o \
 	 opl3.o sequencer.o midibuf.o sb_card.o pas2_card.o adlib_card.o \
 	 pas2_pcm.o pas2_mixer.o pas2_midi.o gus_card.o gus_wave.o mpu401.o \
 	 gus_midi.o gus_vol.o patmgr.o sb_mixer.o sb16_dsp.o sb_midi.o \
-	 sb16_midi.o sound_switch.o midi_synth.o uart6850.o sound_timer.o \
-	 sys_timer.o ics2101.o ad1848.o pss.o
+	 sb16_midi.o midi_synth.o uart6850.o sound_timer.o \
+	 sys_timer.o ics2101.o ad1848.o pss.o sscape.o trix.o aedsp16.o \
+	 mad16.o mad16_sb_midi.o cs4232.o maui.o
+endif
+
+ifndef TOPDIR
+TOPDIR=/usr/src/linux
+endif
+
+
+ifndef HOSTCC
+build:
+	@echo Compiling modularized sound driver
+	@make sound.o
+	@echo Sound module compiled.
+
+install:	sound.o
+	cp sound.o $(MODULEDIR)
+endif
+
+.c.o:
+	$(CC) $(CFLAGS) -c $<
+
+ifeq ($(CONFIG_SOUND),y)
 
 all:	local.h sound.a
 
-/usr/include/sys/soundcard.h:
-	@echo "WARNING! Your /usr/include/sys/soundcard.h not found."
-	@echo "Please make a new /usr/include/sys/soundcard.h containing"
-	@echo "just a line #include <linux/soundcard.h>"
+OBJS += $(FIXEDOBJS)
+
+else
+all:
+endif
+
+ifndef HOSTCC
+#
+#	Running outside the kernel build.
+#
+CC	= gcc
+HOSTCC	= gcc
+CFLAGS	= -D__KERNEL__ -DMODULE -I/usr/src/linux/include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -pipe -m486
+USE_DEPEND=y
+else
+include $(TOPDIR)/Rules.make
+endif
 
 sound.a: $(OBJS) 
 	-rm -f sound.a
@@ -35,47 +71,87 @@ sound.a: $(OBJS)
 	sync
 
 clean:
-	rm -f core core.* *.o *.a tmp_make *~ x z *%
-	rm -f configure sound_stub.c
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+	rm -f core core.* *.o *.a tmp_make *~ x y z *%
+	rm -f configure sound_stub.c objects/*.o
 
 indent:
 	for n in *.c;do echo indent $$n;indent $$n;done
 
-local.h:
+local.h: 
 	$(MAKE) clean
-	$(MAKE) config
+	$(MAKE) setup-$(TARGET_OS)
+	$(MAKE) oldconfig
 	$(MAKE) dep
+	@echo
+	@echo
+	@echo
+	@echo "NOTE! Object file dependencies may not be up to date. Run"
+	@echo "make again if kernel/driver doesn't link properly. Restarting"
+	@echo "it now may save some time."
+	@echo
+	@echo
 
-config: configure /usr/include/sys/soundcard.h
-	@echo Compiling Sound Driver v $(VERSION) for Linux
+config: configure
+	@$(MAKE) setup-$(TARGET_OS)
 	@./configure > local.h
-	@echo \#define SOUND_VERSION_STRING \"$(VERSION)\" >> local.h
 	@echo \#define SOUND_CONFIG_DATE \"`date`\" >> local.h
 	@echo \#define SOUND_CONFIG_BY \"`whoami`\" >> local.h
-	@echo \#define SOUND_CONFIG_HOST \"`hostname`\" >> local.h
-	@if [ -x /bin/dnsdomainname ]; then \
-           echo \#define SOUND_CONFIG_DOMAIN \"`dnsdomainname`\"; \
-         else \
-           echo \#define SOUND_CONFIG_DOMAIN \"`domainname`\"; \
-         fi >> local.h
+#	@echo \#define SOUND_CONFIG_HOST \"`hostname`\" >> local.h 2>/dev/null
+#	@echo \#define SOUND_CONFIG_DOMAIN \"`hostname -d`\" >> local.h 2>/dev/null
+	@echo \#define SOUND_UNAME_A \"`uname -a`\" >> local.h
+
+oldconfig: setup-$(TARGET_OS) configure
+	@./configure -o > local.h
+	@echo \#define SOUND_CONFIG_DATE \"`date`\" >> local.h
+	@echo \#define SOUND_CONFIG_BY \"`whoami`\" >> local.h
+#	@echo \#define SOUND_CONFIG_HOST \"`hostname`\" >> local.h 2>/dev/null
+#	@echo \#define SOUND_CONFIG_DOMAIN \"`hostname -d`\" >> local.h 2>/dev/null
+	@echo \#define SOUND_UNAME_A \"`uname -a`\" >> local.h
+
+kernelconfig: setup-$(TARGET_OS)
+	rm -f configure
+	$(HOSTCC) -o configure configure.c
+	./configure fixedlocal > local.h
+	./configure fixeddefines > .defines
+	@echo \#define SOUND_CONFIG_DATE \"`date`\" >> local.h
+	@echo \#define SOUND_CONFIG_BY \"`whoami`\" >> local.h
+#	@echo \#define SOUND_CONFIG_HOST \"`hostname`\" >> local.h 2>/dev/null
+#	@echo \#define SOUND_CONFIG_DOMAIN \"`hostname -d`\" >> local.h 2>/dev/null
+	@echo \#define SOUND_UNAME_A \"`uname -a`\" >> local.h
+
+mkscript: setup-$(TARGET_OS)
+	rm -f configure
+	$(HOSTCC) -o configure configure.c
+	./configure script > Config.in
+	./configure fixedlocal > local.h
+	./configure fixeddefines > .defines
 
 clrconf:
-	rm -f local.h .depend
+	rm -f local.h .depend synth-ld.h trix_boot.h smw-midi0001.h .defines
 
-configure: configure.c /usr/include/sys/soundcard.h
+configure: configure.c
 	$(HOSTCC) -o configure configure.c
 	@cat .blurb
 
 dep:
-	$(MAKE) /usr/include/sys/soundcard.h
 	$(CPP) -M *.c > .depend
 
-modules:
+setup-linux:
+	@echo Compiling Sound Driver v $(VERSION) for Linux
 
+sound.o: local.h $(FIXEDOBJS) sound.a
+	-rm -f sound.o
+	$(LD) -r -o sound.o $(FIXEDOBJS) sound.a
+
+modules: local.h sound.o
+	ln -fs `pwd`/sound.o $(TOPDIR)/modules/sound.o
+
+
+ifdef USE_DEPEND
 #
 # include a dependency file if one exists
 #
 ifeq (.depend,$(wildcard .depend))
 include .depend
+endif
 endif

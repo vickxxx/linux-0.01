@@ -363,7 +363,7 @@ int pcibios_write_config_dword (unsigned char bus,
 	return (int) (ret & 0xff00) >> 8;
 }
 
-char *pcibios_strerror (int error)
+const char *pcibios_strerror (int error)
 {
 	static char buf[80];
 
@@ -382,6 +382,12 @@ char *pcibios_strerror (int error)
 
 		case PCIBIOS_BAD_REGISTER_NUMBER:
 			return "BAD_REGISTER_NUMBER";
+
+                case PCIBIOS_SET_FAILED:          
+			return "SET_FAILED";
+
+                case PCIBIOS_BUFFER_TOO_SMALL:    
+			return "BUFFER_TOO_SMALL";
 
 		default:
 			sprintf (buf, "UNKNOWN RETURN 0x%x", error);
@@ -452,6 +458,3 @@ unsigned long pcibios_init(unsigned long memory_start, unsigned long memory_end)
 #endif
 	return memory_start;
 }
-
-
-

@@ -13,11 +13,9 @@
 #include <linux/fcntl.h>
 #include <linux/string.h>
 
-extern int fcntl_getlk(unsigned int, struct flock *);
-extern int fcntl_setlk(unsigned int, unsigned int, struct flock *);
 extern int sock_fcntl (struct file *, unsigned int cmd, unsigned long arg);
 
-static int dupfd(unsigned int fd, unsigned int arg)
+static inline int dupfd(unsigned int fd, unsigned int arg)
 {
 	if (fd >= NR_OPEN || !current->files->fd[fd])
 		return -EBADF;
@@ -41,19 +39,9 @@ asmlinkage int sys_dup2(unsigned int oldfd, unsigned int newfd)
 		return -EBADF;
 	if (newfd == oldfd)
 		return newfd;
-	/*
-	 * errno's for dup2() are slightly different than for fcntl(F_DUPFD)
-	 * for historical reasons.
-	 */
-	if (newfd > NR_OPEN)	/* historical botch - should have been >= */
-		return -EBADF;	/* dupfd() would return -EINVAL */
-#if 1
-	if (newfd == NR_OPEN)
-		return -EBADF;	/* dupfd() does return -EINVAL and that may
-				 * even be the standard!  But that is too
-				 * weird for now.
-				 */
-#endif
+	if (newfd >= NR_OPEN)
+		return -EBADF;	/* following POSIX.1 6.2.1 */
+
 	sys_close(newfd);
 	return dupfd(oldfd,newfd);
 }
@@ -97,6 +85,10 @@ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			if (!(arg & FASYNC) && (filp->f_flags & FASYNC) &&
 			    filp->f_op->fasync)
 				filp->f_op->fasync(filp->f_inode, filp, 0);
+			/* required for SunOS emulation */
+			if (O_NONBLOCK != O_NDELAY)
+			       if (arg & O_NDELAY)
+				   arg |= O_NONBLOCK;
 			filp->f_flags &= ~(O_APPEND | O_NONBLOCK | FASYNC);
 			filp->f_flags |= arg & (O_APPEND | O_NONBLOCK |
 						FASYNC);

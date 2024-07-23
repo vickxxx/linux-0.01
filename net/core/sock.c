@@ -3,7 +3,7 @@
  *		operating system.  INET is implemented using the  BSD Socket
  *		interface as the means of communication with the user level.
  *
- *		Generic socket support routines. Memory allocators, sk->inuse/release
+ *		Generic socket support routines. Memory allocators, socket lock/release
  *		handler for protocols to use and generic option handler.
  *
  *
@@ -64,6 +64,12 @@
  *		Alan Cox	:	Make SO_DEBUG superuser only.
  *		Alan Cox	:	Allow anyone to clear SO_DEBUG
  *					(compatibility fix)
+ *		Alan Cox	:	Added optimistic memory grabbing for AF_UNIX throughput.
+ *		Alan Cox	:	Allocator for a socket is settable.
+ *		Alan Cox	:	SO_ERROR includes soft errors.
+ *		Alan Cox	:	Allow NULL arguments on some SO_ opts
+ *		Alan Cox	: 	Generic socket allocation to make hooks
+ *					easier (suggested by Craig Metz).
  *
  * To Fix:
  *
@@ -122,6 +128,19 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 	int err;
 	struct linger ling;
 
+	/*
+	 *	Options without arguments
+	 */
+
+#ifdef SO_DONTLINGER		/* Compatibility item... */
+	switch(optname)
+	{
+		case SO_DONTLINGER:
+			sk->linger=0;
+			return 0;
+	}
+#endif	
+		
   	if (optval == NULL) 
   		return(-EINVAL);
 
@@ -129,7 +148,7 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
   	if(err)
   		return err;
   	
-  	val = get_fs_long((unsigned long *)optval);
+  	val = get_user((int *)optval);
   	valbool = val?1:0;
   	
   	switch(optname) 
@@ -152,19 +171,19 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 			sk->broadcast=valbool;
 			return 0;
 		case SO_SNDBUF:
-			if(val>32767)
-				val=32767;
-			if(val<256)
-				val=256;
-			sk->sndbuf=val;
+			if(val > SK_WMEM_MAX*2)
+				val = SK_WMEM_MAX*2;
+			if(val < 256)
+				val = 256;
+			sk->sndbuf = val;
 			return 0;
 
 		case SO_RCVBUF:
-			if(val>32767)
-				val=32767;
-			if(val<256)
-				val=256;
-			sk->rcvbuf=val;
+			if(val > SK_RMEM_MAX*2)
+			 	val = SK_RMEM_MAX*2;
+			if(val < 256)
+				val = 256;
+			sk->rcvbuf = val;
 			return(0);
 
 		case SO_KEEPALIVE:
@@ -205,7 +224,10 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 			}
 			return 0;
 
-
+		case SO_BSDCOMPAT:
+			sk->bsdism = valbool;
+			return 0;
+			
 		default:
 		  	return(-ENOPROTOOPT);
   	}
@@ -254,8 +276,9 @@ int sock_getsockopt(struct sock *sk, int level, int optname,
 			break;
 
 		case SO_ERROR:
-			val = sk->err;
-			sk->err = 0;
+			val = sock_error(sk);
+			if(val==0)
+				val=xchg(&sk->err_soft,0);
 			break;
 
 		case SO_OOBINLINE:
@@ -283,7 +306,9 @@ int sock_getsockopt(struct sock *sk, int level, int optname,
 			memcpy_tofs(optval,&ling,sizeof(ling));
 			return 0;
 		
-
+		case SO_BSDCOMPAT:
+			val = sk->bsdism;
+			break;
 
 		default:
 			return(-ENOPROTOOPT);
@@ -301,50 +326,47 @@ int sock_getsockopt(struct sock *sk, int level, int optname,
   	return(0);
 }
 
-
-struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int priority)
+struct sock *sk_alloc(int priority)
 {
-	if (sk) 
-	{
-		if (sk->wmem_alloc + size < sk->sndbuf || force) 
-		{
-			struct sk_buff * c = alloc_skb(size, priority);
-			if (c) 
-			{
-				unsigned long flags;
-				save_flags(flags);
-				cli();
-				sk->wmem_alloc+= c->mem_len;
-				restore_flags(flags); /* was sti(); */
-			}
-			return c;
-		}
-		return(NULL);
-	}
-	return(alloc_skb(size, priority));
+	struct sock *sk=(struct sock *)kmalloc(sizeof(*sk), priority);
+	if(!sk)
+		return NULL;
+	memset(sk, 0, sizeof(*sk));
+	return sk;
+}
+
+void sk_free(struct sock *sk)
+{
+	kfree_s(sk,sizeof(*sk));
 }
 
 
+struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int priority)
+{
+	if (sk) {
+		if (force || sk->wmem_alloc + size < sk->sndbuf) {
+			struct sk_buff * skb = alloc_skb(size, priority);
+			if (skb)
+				atomic_add(skb->truesize, &sk->wmem_alloc);
+			return skb;
+		}
+		return NULL;
+	}
+	return alloc_skb(size, priority);
+}
+
 struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int priority)
 {
-	if (sk) 
-	{
-		if (sk->rmem_alloc + size < sk->rcvbuf || force) 
-		{
-			struct sk_buff *c = alloc_skb(size, priority);
-			if (c) 
-			{
-				unsigned long flags;
-				save_flags(flags);
-				cli();
-				sk->rmem_alloc += c->mem_len;
-				restore_flags(flags); /* was sti(); */
-			}
-			return(c);
+	if (sk) {
+		if (force || sk->rmem_alloc + size < sk->rcvbuf) {
+			struct sk_buff *skb = alloc_skb(size, priority);
+			if (skb)
+				atomic_add(skb->truesize, &sk->rmem_alloc);
+			return skb;
 		}
-		return(NULL);
+		return NULL;
 	}
-	return(alloc_skb(size, priority));
+	return alloc_skb(size, priority);
 }
 
 
@@ -373,45 +395,38 @@ unsigned long sock_wspace(struct sock *sk)
 			return(0);
 		if (sk->wmem_alloc >= sk->sndbuf)
 			return(0);
-		return(sk->sndbuf-sk->wmem_alloc );
+		return sk->sndbuf - sk->wmem_alloc;
 	}
 	return(0);
 }
 
 
-void sock_wfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
+void sock_wfree(struct sock *sk, struct sk_buff *skb)
 {
-#ifdef CONFIG_SKB_CHECK
+	int s=skb->truesize;
+#if CONFIG_SKB_CHECK
 	IS_SKB(skb);
 #endif
-	kfree_skbmem(skb, size);
+	kfree_skbmem(skb);
 	if (sk) 
 	{
-		unsigned long flags;
-		save_flags(flags);
-		cli();
-		sk->wmem_alloc -= size;
-		restore_flags(flags);
 		/* In case it might be waiting for more memory. */
 		sk->write_space(sk);
-		return;
+		atomic_sub(s, &sk->wmem_alloc);
 	}
 }
 
 
-void sock_rfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
+void sock_rfree(struct sock *sk, struct sk_buff *skb)
 {
-#ifdef CONFIG_SKB_CHECK
+	int s=skb->truesize;
+#if CONFIG_SKB_CHECK
 	IS_SKB(skb);
 #endif	
-	kfree_skbmem(skb, size);
+	kfree_skbmem(skb);
 	if (sk) 
 	{
-		unsigned long flags;
-		save_flags(flags);
-		cli();
-		sk->rmem_alloc -= size;
-		restore_flags(flags);
+		atomic_sub(s, &sk->rmem_alloc);
 	}
 }
 
@@ -419,13 +434,11 @@ void sock_rfree(struct sock *sk, struct sk_buff *skb, unsigned long size)
  *	Generic send/receive buffer handlers
  */
 
-struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, int noblock, int *errcode)
+struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigned long fallback, int noblock, int *errcode)
 {
 	struct sk_buff *skb;
 	int err;
 
-	sk->inuse=1;
-		
 	do
 	{
 		if(sk->err!=0)
@@ -444,8 +457,21 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, int nob
 			return NULL;
 		}
 		
-		skb = sock_wmalloc(sk, size, 0, GFP_KERNEL);
+		if(!fallback)
+			skb = sock_wmalloc(sk, size, 0, sk->allocation);
+		else
+		{
+			/* The buffer get won't block, or use the atomic queue. It does
+			   produce annoying no free page messages still.... */
+			skb = sock_wmalloc(sk, size, 0 , GFP_BUFFER);
+			if(!skb)
+				skb=sock_wmalloc(sk, fallback, 0, GFP_KERNEL);
+		}
 		
+		/*
+		 *	This means we have too many buffers for this socket already.
+		 */
+		 
 		if(skb==NULL)
 		{
 			unsigned long tmp;
@@ -470,7 +496,19 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, int nob
 				return NULL;
 			}
 			
+#if 1
 			if( tmp <= sk->wmem_alloc)
+#else
+			/* ANK: Line above seems either incorrect
+			 *	or useless. sk->wmem_alloc has a tiny chance to change
+			 *	between tmp = sk->w... and cli(),
+			 *	but it might(?) change earlier. In real life
+			 *	it does not (I never seen the message).
+			 *	In any case I'd delete this check at all, or
+			 *	change it to:
+			 */
+			if (sk->wmem_alloc + size >= sk->sndbuf) 
+#endif
 			{
 				sk->socket->flags &= ~SO_NOSPACE;
 				interruptible_sleep_on(sk->sleep);
@@ -490,53 +528,22 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, int nob
 }
 
 
-void release_sock(struct sock *sk)
+void __release_sock(struct sock *sk)
 {
-	unsigned long flags;
 #ifdef CONFIG_INET
-	struct sk_buff *skb;
-#endif
-
-	if (!sk->prot)
+	if (!sk->prot || !sk->prot->rcv)
 		return;
-	/*
-	 *	Make the backlog atomic. If we don't do this there is a tiny
-	 *	window where a packet may arrive between the sk->blog being 
-	 *	tested and then set with sk->inuse still 0 causing an extra 
-	 *	unwanted re-entry into release_sock().
-	 */
-
-	save_flags(flags);
-	cli();
-	if (sk->blog) 
-	{
-		restore_flags(flags);
-		return;
-	}
-	sk->blog=1;
-	sk->inuse = 1;
-	restore_flags(flags);
-#ifdef CONFIG_INET
+		
 	/* See if we have any packets built up. */
-	while((skb = skb_dequeue(&sk->back_log)) != NULL) 
-	{
-		sk->blog = 1;
-		if (sk->prot->rcv) 
-			sk->prot->rcv(skb, skb->dev, sk->opt,
-				 skb->saddr, skb->len, skb->daddr, 1,
-				/* Only used for/by raw sockets. */
-				(struct inet_protocol *)sk->pair); 
+	start_bh_atomic();
+	while (!skb_queue_empty(&sk->back_log)) {
+		struct sk_buff * skb = sk->back_log.next;
+		__skb_unlink(skb, &sk->back_log);
+		sk->prot->rcv(skb, skb->dev, (struct options*)skb->proto_priv,
+			      skb->saddr, skb->len, skb->daddr, 1,
+			      /* Only used for/by raw sockets. */
+			      (struct inet_protocol *)sk->pair); 
 	}
-#endif  
-	sk->blog = 0;
-	sk->inuse = 0;
-#ifdef CONFIG_INET  
-	if (sk->dead && sk->state == TCP_CLOSE) 
-	{
-		/* Should be about 2 rtt's */
-		reset_timer(sk, TIME_DONE, min(sk->rtt * 2, TCP_DONE_TIME));
-	}
+	end_bh_atomic();
 #endif  
 }
-
-

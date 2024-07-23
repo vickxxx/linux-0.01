@@ -8,9 +8,9 @@
 
 #ifdef __KERNEL__
 
-#define CONFIG_STRICT_MM_TYPECHECKS
+#define STRICT_MM_TYPECHECKS
 
-#ifdef CONFIG_STRICT_MM_TYPECHECKS
+#ifdef STRICT_MM_TYPECHECKS
 /*
  * These are used to make use of C type-checking..
  */
@@ -50,18 +50,12 @@ typedef unsigned long pgprot_t;
 
 #endif
 
-#define invalidate() \
-__asm__ __volatile__("movl %%cr3,%%eax\n\tmovl %%eax,%%cr3": : :"ax")
-
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 /* This handles the memory map.. */
 #define PAGE_OFFSET		0
 #define MAP_NR(addr)		(((unsigned long)(addr)) >> PAGE_SHIFT)
-#define MAP_PAGE_RESERVED	(1<<15)
-
-typedef unsigned short mem_map_t;
 
 #endif /* __KERNEL__ */
 

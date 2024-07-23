@@ -97,13 +97,11 @@ static struct buffer_head * ext2_find_entry (struct inode * dir,
 			break;
 		bh = ext2_getblk (dir, block, 0, &err);
 		bh_use[block] = bh;
-		if (bh && !bh->b_uptodate)
+		if (bh && !buffer_uptodate(bh))
 			bh_read[toread++] = bh;
 	}
 
-	block = 0;
-	offset = 0;
-	while (offset < dir->i_size) {
+	for (block = 0, offset = 0; offset < dir->i_size; block++) {
 		struct buffer_head * bh;
 		struct ext2_dir_entry * de;
 		char * dlimit;
@@ -113,11 +111,15 @@ static struct buffer_head * ext2_find_entry (struct inode * dir,
 			toread = 0;
 		}
 		bh = bh_use[block % NAMEI_RA_SIZE];
-		if (!bh)
-			ext2_panic (sb, "ext2_find_entry",
-				    "buffer head pointer is NULL");
+		if (!bh) {
+			ext2_error (sb, "ext2_find_entry",
+				    "directory #%lu contains a hole at offset %lu",
+				    dir->i_ino, offset);
+			offset += sb->s_blocksize;
+			continue;
+		}
 		wait_on_buffer (bh);
-		if (!bh->b_uptodate) {
+		if (!buffer_uptodate(bh)) {
 			/*
 			 * read error: all bets are off
 			 */
@@ -149,8 +151,8 @@ static struct buffer_head * ext2_find_entry (struct inode * dir,
 			bh = NULL;
 		else
 			bh = ext2_getblk (dir, block + NAMEI_RA_SIZE, 0, &err);
-		bh_use[block++ % NAMEI_RA_SIZE] = bh;
-		if (bh && !bh->b_uptodate)
+		bh_use[block % NAMEI_RA_SIZE] = bh;
+		if (bh && !buffer_uptodate(bh))
 			bh_read[toread++] = bh;
 	}
 
@@ -373,10 +375,10 @@ int ext2_create (struct inode * dir,const char * name, int len, int mode,
 	*result = NULL;
 	if (!dir)
 		return -ENOENT;
-	inode = ext2_new_inode (dir, mode);
+	inode = ext2_new_inode (dir, mode, &err);
 	if (!inode) {
 		iput (dir);
-		return -ENOSPC;
+		return err;
 	}
 	inode->i_op = &ext2_file_inode_operations;
 	inode->i_mode = mode;
@@ -419,10 +421,10 @@ int ext2_mknod (struct inode * dir, const char * name, int len, int mode,
 		iput (dir);
 		return -EEXIST;
 	}
-	inode = ext2_new_inode (dir, mode);
+	inode = ext2_new_inode (dir, mode, &err);
 	if (!inode) {
 		iput (dir);
-		return -ENOSPC;
+		return err;
 	}
 	inode->i_uid = current->fsuid;
 	inode->i_mode = mode;
@@ -443,7 +445,7 @@ int ext2_mknod (struct inode * dir, const char * name, int len, int mode,
 	else if (S_ISFIFO(inode->i_mode)) 
 		init_fifo(inode);
 	if (S_ISBLK(mode) || S_ISCHR(mode))
-		inode->i_rdev = rdev;
+		inode->i_rdev = to_kdev_t(rdev);
 	inode->i_dirt = 1;
 	bh = ext2_add_entry (dir, name, len, &de, &err);
 	if (!bh) {
@@ -486,10 +488,10 @@ int ext2_mkdir (struct inode * dir, const char * name, int len, int mode)
 		iput (dir);
 		return -EMLINK;
 	}
-	inode = ext2_new_inode (dir, S_IFDIR);
+	inode = ext2_new_inode (dir, S_IFDIR, &err);
 	if (!inode) {
 		iput (dir);
-		return -ENOSPC;
+		return err;
 	}
 	inode->i_op = &ext2_dir_inode_operations;
 	inode->i_size = inode->i_sb->s_blocksize;
@@ -558,7 +560,8 @@ static int empty_dir (struct inode * inode)
 	if (inode->i_size < EXT2_DIR_REC_LEN(1) + EXT2_DIR_REC_LEN(2) ||
 	    !(bh = ext2_bread (inode, 0, 0, &err))) {
 	    	ext2_warning (inode->i_sb, "empty_dir",
-			      "bad directory (dir %lu)", inode->i_ino);
+			      "bad directory (dir #%lu) - no data block",
+			      inode->i_ino);
 		return 1;
 	}
 	de = (struct ext2_dir_entry *) bh->b_data;
@@ -566,7 +569,8 @@ static int empty_dir (struct inode * inode)
 	if (de->inode != inode->i_ino || !de1->inode || 
 	    strcmp (".", de->name) || strcmp ("..", de1->name)) {
 	    	ext2_warning (inode->i_sb, "empty_dir",
-			      "bad directory (dir %lu)", inode->i_ino);
+			      "bad directory (dir #%lu) - no `.' or `..'",
+			      inode->i_ino);
 		return 1;
 	}
 	offset = de->rec_len + de1->rec_len;
@@ -576,6 +580,9 @@ static int empty_dir (struct inode * inode)
 			brelse (bh);
 			bh = ext2_bread (inode, offset >> EXT2_BLOCK_SIZE_BITS(sb), 1, &err);
 			if (!bh) {
+				ext2_error (sb, "empty_dir",
+					    "directory #%lu contains a hole at offset %lu",
+					    inode->i_ino, offset);
 				offset += sb->s_blocksize;
 				continue;
 			}
@@ -615,6 +622,8 @@ repeat:
 	retval = -EPERM;
 	if (!(inode = iget (dir->i_sb, de->inode)))
 		goto end_rmdir;
+	if (inode->i_sb->dq_op)
+		inode->i_sb->dq_op->initialize (inode, -1);
 	if (inode->i_dev != dir->i_dev)
 		goto end_rmdir;
 	if (de->inode != inode->i_ino) {
@@ -695,6 +704,8 @@ repeat:
 		goto end_unlink;
 	if (!(inode = iget (dir->i_sb, de->inode)))
 		goto end_unlink;
+	if (inode->i_sb->dq_op)
+		inode->i_sb->dq_op->initialize (inode, -1);
 	retval = -EPERM;
 	if (S_ISDIR(inode->i_mode))
 		goto end_unlink;
@@ -750,16 +761,16 @@ int ext2_symlink (struct inode * dir, const char * name, int len,
 	int l;
 	char c;
 
-	if (!(inode = ext2_new_inode (dir, S_IFLNK))) {
+	if (!(inode = ext2_new_inode (dir, S_IFLNK, &err))) {
 		iput (dir);
-		return -ENOSPC;
+		return err;
 	}
 	inode->i_mode = S_IFLNK | S_IRWXUGO;
 	inode->i_op = &ext2_symlink_inode_operations;
 	for (l = 0; l < inode->i_sb->s_blocksize - 1 &&
 	     symname [l]; l++)
 		;
-	if (l >= EXT2_N_BLOCKS * sizeof (unsigned long)) {
+	if (l >= sizeof (inode->u.ext2_i.i_data)) {
 
 		ext2_debug ("l=%d, normal symlink\n", l);
 
@@ -788,6 +799,7 @@ int ext2_symlink (struct inode * dir, const char * name, int len,
 	}
 	inode->i_size = i;
 	inode->i_dirt = 1;
+
 	bh = ext2_find_entry (dir, name, len, &de);
 	if (bh) {
 		inode->i_nlink--;
@@ -960,6 +972,9 @@ start_up:
 		if (!new_inode) {
 			brelse (new_bh);
 			new_bh = NULL;
+		} else {
+			if (new_inode->i_sb->dq_op)
+				new_inode->i_sb->dq_op->initialize (new_inode, -1);
 		}
 	}
 	if (new_inode == old_inode) {

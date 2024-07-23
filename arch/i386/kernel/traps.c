@@ -10,6 +10,7 @@
  * to mainly kill the offending process (probably by giving it a signal,
  * but possibly by killing it outright if necessary).
  */
+#include <linux/config.h>
 #include <linux/head.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -26,7 +27,7 @@
 
 asmlinkage int system_call(void);
 asmlinkage void lcall7(void);
-struct desc_struct default_ldt;
+struct desc_struct default_ldt = { 0, 0 };
 
 static inline void console_verbose(void)
 {
@@ -39,9 +40,7 @@ asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
 { \
 	tsk->tss.error_code = error_code; \
 	tsk->tss.trap_no = trapnr; \
-	if (signr == SIGTRAP && current->flags & PF_PTRACED) \
-		current->blocked &= ~(1 << (SIGTRAP-1)); \
-	send_sig(signr, tsk, 1); \
+	force_sig(signr, tsk); \
 	die_if_kernel(str,regs,error_code); \
 }
 
@@ -93,13 +92,13 @@ int kstack_depth_to_print = 24;
 #define VMALLOC_OFFSET (8*1024*1024)
 #define MODULE_RANGE (8*1024*1024)
 
-/*static*/ void die_if_kernel(char * str, struct pt_regs * regs, long err)
+/*static*/ void die_if_kernel(const char * str, struct pt_regs * regs, long err)
 {
 	int i;
 	unsigned long esp;
 	unsigned short ss;
 	unsigned long *stack, addr, module_start, module_end;
-	extern char start_kernel, etext;
+	extern char start_kernel, _etext;
 
 	esp = (unsigned long) &regs->esp;
 	ss = KERNEL_DS;
@@ -111,7 +110,8 @@ int kstack_depth_to_print = 24;
 	}
 	console_verbose();
 	printk("%s: %04lx\n", str, err & 0xffff);
-	printk("EIP:    %04x:%08lx\nEFLAGS: %08lx\n", 0xffff & regs->cs,regs->eip,regs->eflags);
+	printk("CPU:    %d\n", smp_processor_id());
+	printk("EIP:    %04x:[<%08lx>]\nEFLAGS: %08lx\n", 0xffff & regs->cs,regs->eip,regs->eflags);
 	printk("eax: %08lx   ebx: %08lx   ecx: %08lx   edx: %08lx\n",
 		regs->eax, regs->ebx, regs->ecx, regs->edx);
 	printk("esi: %08lx   edi: %08lx   ebp: %08lx   esp: %08lx\n",
@@ -147,11 +147,11 @@ int kstack_depth_to_print = 24;
 		 * out the call path that was taken.
 		 */
 		if (((addr >= (unsigned long) &start_kernel) &&
-		     (addr <= (unsigned long) &etext)) ||
+		     (addr <= (unsigned long) &_etext)) ||
 		    ((addr >= module_start) && (addr <= module_end))) {
 			if (i && ((i % 8) == 0))
 				printk("\n       ");
-			printk("%08lx ", addr);
+			printk("[<%08lx>] ", addr);
 			i++;
 		}
 	}
@@ -185,16 +185,20 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 	die_if_kernel("general protection",regs,error_code);
 	current->tss.error_code = error_code;
 	current->tss.trap_no = 13;
-	send_sig(SIGSEGV, current, 1);	
+	force_sig(SIGSEGV, current);	
 }
 
 asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 {
+#ifdef CONFIG_SMP_NMI_INVAL
+	smp_flush_tlb_rcv();
+#else
 #ifndef CONFIG_IGNORE_NMI
 	printk("Uhhuh. NMI received. Dazed and confused, but trying to continue\n");
 	printk("You probably have a hardware problem with your RAM chips or a\n");
 	printk("power saving mode enabled.\n");
 #endif	
+#endif
 }
 
 asmlinkage void do_debug(struct pt_regs * regs, long error_code)
@@ -203,9 +207,7 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 		handle_vm86_debug((struct vm86_regs *) regs, error_code);
 		return;
 	}
-	if (current->flags & PF_PTRACED)
-		current->blocked &= ~(1 << (SIGTRAP-1));
-	send_sig(SIGTRAP, current, 1);
+	force_sig(SIGTRAP, current);
 	current->tss.trap_no = 1;
 	current->tss.error_code = error_code;
 	if ((regs->cs & 3) == 0) {
@@ -235,24 +237,29 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
  */
 void math_error(void)
 {
-	struct i387_hard_struct * env;
+	struct task_struct * task;
 
 	clts();
-	if (!last_task_used_math) {
+#ifdef __SMP__
+	task = current;
+#else
+	task = last_task_used_math;
+	last_task_used_math = NULL;
+	if (!task) {
 		__asm__("fnclex");
 		return;
 	}
-	env = &last_task_used_math->tss.i387.hard;
-	send_sig(SIGFPE, last_task_used_math, 1);
-	last_task_used_math->tss.trap_no = 16;
-	last_task_used_math->tss.error_code = 0;
-	__asm__ __volatile__("fnsave %0":"=m" (*env));
-	last_task_used_math = NULL;
+#endif
+	/*
+	 *	Save the info for the exception handler
+	 */
+	__asm__ __volatile__("fnsave %0":"=m" (task->tss.i387.hard));
+	task->flags&=~PF_USEDFPU;
 	stts();
-	env->fcs = (env->swd & 0x0000ffff) | (env->fcs & 0xffff0000);
-	env->fos = env->twd;
-	env->swd &= 0xffff3800;
-	env->twd = 0xffffffff;
+
+	force_sig(SIGFPE, task);
+	task->tss.trap_no = 16;
+	task->tss.error_code = 0;
 }
 
 asmlinkage void do_coprocessor_error(struct pt_regs * regs, long error_code)
@@ -270,23 +277,37 @@ asmlinkage void do_coprocessor_error(struct pt_regs * regs, long error_code)
  */
 asmlinkage void math_state_restore(void)
 {
-	__asm__ __volatile__("clts");
+	__asm__ __volatile__("clts");		/* Allow maths ops (or we recurse) */
+
+/*
+ *	SMP is actually simpler than uniprocessor for once. Because
+ *	we can't pull the delayed FPU switching trick Linus does
+ *	we simply have to do the restore each context switch and
+ *	set the flag. switch_to() will always save the state in
+ *	case we swap processors. We also don't use the coprocessor
+ *	timer - IRQ 13 mode isn't used with SMP machines (thank god).
+ */
+#ifndef __SMP__
 	if (last_task_used_math == current)
 		return;
-	timer_table[COPRO_TIMER].expires = jiffies+50;
-	timer_active |= 1<<COPRO_TIMER;	
 	if (last_task_used_math)
 		__asm__("fnsave %0":"=m" (last_task_used_math->tss.i387));
 	else
 		__asm__("fnclex");
 	last_task_used_math = current;
-	if (current->used_math) {
+#endif
+
+	if(current->used_math)
 		__asm__("frstor %0": :"m" (current->tss.i387));
-	} else {
+	else
+	{
+		/*
+		 *	Our first FPU usage, clean the chip.
+		 */
 		__asm__("fninit");
-		current->used_math=1;
+		current->used_math = 1;
 	}
-	timer_active &= ~(1<<COPRO_TIMER);
+	current->flags|=PF_USEDFPU;		/* So we fnsave on switch_to() */
 }
 
 #ifndef CONFIG_MATH_EMULATION
@@ -295,7 +316,7 @@ asmlinkage void math_emulate(long arg)
 {
   printk("math-emulation not enabled and no coprocessor found.\n");
   printk("killing %s.\n",current->comm);
-  send_sig(SIGFPE,current,1);
+  force_sig(SIGFPE,current);
   schedule();
 }
 
@@ -305,7 +326,15 @@ void trap_init(void)
 {
 	int i;
 	struct desc_struct * p;
-
+	static int smptrap=0;
+	
+	if(smptrap)
+	{
+		__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
+		load_ldt(0);
+		return;
+	}
+	smptrap++;
 	if (strncmp((char*)0x0FFFD9, "EISA", 4) == 0)
 		EISA_bus = 1;
 	set_call_gate(&default_ldt,lcall7);

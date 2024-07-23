@@ -3,8 +3,9 @@
  * sound/pas2_card.c
  *
  * Detection routine for the Pro Audio Spectrum cards.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -25,12 +26,13 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#if defined(CONFIGURE_SOUNDCARD) && !defined(EXCLUDE_PAS)
+#if defined(CONFIG_PAS)
 
 #define DEFINE_TRANSLATIONS
 #include "pas.h"
@@ -44,12 +46,14 @@ int             translat_code;
 static int      pas_intr_mask = 0;
 static int      pas_irq = 0;
 
-static char     pas_model;
+int            *pas_osp;
+
+char            pas_model;
 static char    *pas_model_names[] =
 {"", "Pro AudioSpectrum+", "CDPC", "Pro AudioSpectrum 16", "Pro AudioSpectrum 16D"};
 
 /*
- * pas_read() and pas_write() are equivalents of INB() and OUTB()
+ * pas_read() and pas_write() are equivalents of inb and outb 
  */
 /*
  * These routines perform the I/O address translation required
@@ -57,17 +61,18 @@ static char    *pas_model_names[] =
 /*
  * to support other than the default base address
  */
+extern void     mix_write (unsigned char data, int ioaddr);
 
 unsigned char
 pas_read (int ioaddr)
 {
-  return INB (ioaddr ^ translat_code);
+  return inb (ioaddr ^ translat_code);
 }
 
 void
 pas_write (unsigned char data, int ioaddr)
 {
-  OUTB (data, ioaddr ^ translat_code);
+  outb (data, ioaddr ^ translat_code);
 }
 
 void
@@ -79,28 +84,26 @@ pas2_msg (char *foo)
 /******************* Begin of the Interrupt Handler ********************/
 
 void
-pasintr (int unused, struct pt_regs * regs)
+pasintr (int irq, void *dev_id, struct pt_regs *dummy)
 {
   int             status;
 
   status = pas_read (INTERRUPT_STATUS);
-  pas_write (status, INTERRUPT_STATUS);	/*
-						 * Clear interrupt
+  pas_write (status, INTERRUPT_STATUS);		/*
+						   * Clear interrupt
 						 */
 
   if (status & I_S_PCM_SAMPLE_BUFFER_IRQ)
     {
-#ifndef EXCLUDE_AUDIO
+#ifdef CONFIG_AUDIO
       pas_pcm_interrupt (status, 1);
 #endif
       status &= ~I_S_PCM_SAMPLE_BUFFER_IRQ;
     }
   if (status & I_S_MIDI_IRQ)
     {
-#ifndef EXCLUDE_MIDI
-#ifdef EXCLUDE_PRO_MIDI
+#ifdef CONFIG_MIDI
       pas_midi_interrupt ();
-#endif
 #endif
       status &= ~I_S_MIDI_IRQ;
     }
@@ -110,16 +113,9 @@ pasintr (int unused, struct pt_regs * regs)
 int
 pas_set_intr (int mask)
 {
-  int             err;
-
   if (!mask)
     return 0;
 
-  if (!pas_intr_mask)
-    {
-      if ((err = snd_set_irq_handler (pas_irq, pasintr)) < 0)
-	return err;
-    }
   pas_intr_mask |= mask;
 
   pas_write (pas_intr_mask, INTERRUPT_MASK);
@@ -135,10 +131,6 @@ pas_remove_intr (int mask)
   pas_intr_mask &= ~mask;
   pas_write (pas_intr_mask, INTERRUPT_MASK);
 
-  if (!pas_intr_mask)
-    {
-      snd_release_irq (pas_irq);
-    }
   return 0;
 }
 
@@ -182,9 +174,13 @@ config_pas_hw (struct address_info *hw_config)
   pas_write (S_M_PCM_RESET | S_M_FM_RESET | S_M_SB_RESET | S_M_MIXER_RESET	/*
 										 * |
 										 * S_M_OPL3_DUAL_MONO
-	     	     	     	     	     	     	     	     	     	     	     	     	     	     	     	     										 */ , SERIAL_MIXER);
+										 */ , SERIAL_MIXER);
 
-  pas_write (I_C_1_BOOT_RESET_ENABLE, IO_CONFIGURATION_1);
+  pas_write (I_C_1_BOOT_RESET_ENABLE
+#ifdef PAS_JOYSTICK_ENABLE
+	     | I_C_1_JOYSTICK_ENABLE
+#endif
+	     ,IO_CONFIGURATION_1);
 
   if (pas_irq < 0 || pas_irq > 15)
     {
@@ -201,6 +197,11 @@ config_pas_hw (struct address_info *hw_config)
 	  printk ("PAS2: Invalid IRQ %d", pas_irq);
 	  ok = 0;
 	}
+      else
+	{
+	  if (snd_set_irq_handler (pas_irq, pasintr, "PAS16", hw_config->osp) < 0)
+	    ok = 0;
+	}
     }
 
   if (hw_config->dma < 0 || hw_config->dma > 7)
@@ -216,15 +217,23 @@ config_pas_hw (struct address_info *hw_config)
 	  printk ("PAS2: Invalid DMA selection %d", hw_config->dma);
 	  ok = 0;
 	}
+      else
+	{
+	  if (sound_alloc_dma (hw_config->dma, "PAS16"))
+	    {
+	      printk ("pas2_card.c: Can't allocate DMA channel\n");
+	      ok = 0;
+	    }
+	}
     }
 
   /*
- * This fixes the timing problems of the PAS due to the Symphony chipset
- * as per Media Vision.  Only define this if your PAS doesn't work correctly.
- */
+     * This fixes the timing problems of the PAS due to the Symphony chipset
+     * as per Media Vision.  Only define this if your PAS doesn't work correctly.
+   */
 #ifdef SYMPHONY_PAS
-  OUTB (0x05, 0xa8);
-  OUTB (0x60, 0xa9);
+  outb (0x05, 0xa8);
+  outb (0x60, 0xa9);
 #endif
 
 #ifdef BROKEN_BUS_CLOCK
@@ -247,16 +256,12 @@ config_pas_hw (struct address_info *hw_config)
 								 * rate * of
 								 * 17.897 kHz
 								 */
+  pas_write (8, PRESCALE_DIVIDER);
 
-  if (pas_model == PAS_16 || pas_model == PAS_16D)
-    pas_write (8, PRESCALE_DIVIDER);
-  else
-    pas_write (0, PRESCALE_DIVIDER);
+  mix_write (P_M_MV508_ADDRESS | 5, PARALLEL_MIXER);
+  mix_write (5, PARALLEL_MIXER);
 
-  pas_write (P_M_MV508_ADDRESS | 5, PARALLEL_MIXER);
-  pas_write (5, PARALLEL_MIXER);
-
-#if !defined(EXCLUDE_SB_EMULATION) || !defined(EXCLUDE_SB)
+#if !defined(DISABLE_SB_EMULATION) && defined(CONFIG_SB)
 
   {
     struct address_info *sb_config;
@@ -294,7 +299,11 @@ config_pas_hw (struct address_info *hw_config)
 
 	pas_write (irq_dma, EMULATION_CONFIGURATION);
       }
+    else
+      pas_write (0x00, COMPATIBILITY_ENABLE);
   }
+#else
+  pas_write (0x00, COMPATIBILITY_ENABLE);
 #endif
 
   if (!ok)
@@ -315,11 +324,11 @@ detect_pas_hw (struct address_info *hw_config)
    * you have something on base port 0x388. SO be forewarned.
    */
 
-  OUTB (0xBC, MASTER_DECODE);	/*
-				 * Talk to first board
+  outb (0xBC, MASTER_DECODE);	/*
+				   * Talk to first board
 				 */
-  OUTB (hw_config->io_base >> 2, MASTER_DECODE);	/*
-							 * Set base address
+  outb (hw_config->io_base >> 2, MASTER_DECODE);	/*
+							   * Set base address
 							 */
   translat_code = PAS_DEFAULT_BASE ^ hw_config->io_base;
   pas_write (1, WAIT_STATE);	/*
@@ -340,7 +349,7 @@ detect_pas_hw (struct address_info *hw_config)
   foo = board_id ^ 0xe0;
 
   pas_write (foo, INTERRUPT_MASK);
-  foo = INB (INTERRUPT_MASK);
+  foo = inb (INTERRUPT_MASK);
   pas_write (board_id, INTERRUPT_MASK);
 
   if (board_id != foo)		/*
@@ -348,7 +357,7 @@ detect_pas_hw (struct address_info *hw_config)
 				 */
     return 0;
 
-  pas_model = O_M_1_to_card[pas_read (OPERATION_MODE_1) & 0x0f];
+  pas_model = pas_read (CHIP_REV);
 
   return pas_model;
 }
@@ -357,23 +366,29 @@ long
 attach_pas_card (long mem_start, struct address_info *hw_config)
 {
   pas_irq = hw_config->irq;
+  pas_osp = hw_config->osp;
 
   if (detect_pas_hw (hw_config))
     {
 
-      if ((pas_model = O_M_1_to_card[pas_read (OPERATION_MODE_1) & 0x0f]))
+      if ((pas_model = pas_read (CHIP_REV)))
 	{
-	  printk (" <%s rev %d>", pas_model_names[(int) pas_model], pas_read (BOARD_REV_ID));
+	  char            temp[100];
+
+	  sprintf (temp,
+		   "%s rev %d", pas_model_names[(int) pas_model],
+		   pas_read (BOARD_REV_ID));
+	  conf_printf (temp, hw_config);
 	}
 
       if (config_pas_hw (hw_config))
 	{
 
-#ifndef EXCLUDE_AUDIO
+#ifdef CONFIG_AUDIO
 	  mem_start = pas_pcm_init (mem_start, hw_config);
 #endif
 
-#if !defined(EXCLUDE_SB_EMULATION) && !defined(EXCLUDE_SB)
+#if !defined(DISABLE_SB_EMULATION) && defined(CONFIG_SB)
 
 	  sb_dsp_disable_midi ();	/*
 					 * The SB emulation don't support *
@@ -381,14 +396,9 @@ attach_pas_card (long mem_start, struct address_info *hw_config)
 					 */
 #endif
 
-#ifndef EXCLUDE_YM3812
-	  enable_opl3_mode (0x388, 0x38a, 0);
-#endif
 
-#ifndef EXCLUDE_MIDI
-#ifdef EXCLUDE_PRO_MIDI
+#ifdef CONFIG_MIDI
 	  mem_start = pas_midi_init (mem_start);
-#endif
 #endif
 
 	  pas_init_mixer ();
@@ -401,7 +411,15 @@ attach_pas_card (long mem_start, struct address_info *hw_config)
 int
 probe_pas (struct address_info *hw_config)
 {
+  pas_osp = hw_config->osp;
   return detect_pas_hw (hw_config);
+}
+
+void
+unload_pas (struct address_info *hw_config)
+{
+  sound_free_dma (hw_config->dma);
+  snd_release_irq (hw_config->irq);
 }
 
 #endif

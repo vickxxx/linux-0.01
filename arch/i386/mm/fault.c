@@ -4,7 +4,6 @@
  *  Copyright (C) 1995  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/head.h>
@@ -20,7 +19,7 @@
 #include <asm/segment.h>
 #include <asm/pgtable.h>
 
-extern void die_if_kernel(char *,struct pt_regs *,long);
+extern void die_if_kernel(const char *,struct pt_regs *,long);
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -47,10 +46,18 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
-	if (vma->vm_end - address > current->rlim[RLIMIT_STACK].rlim_cur)
+	if (error_code & 4) {
+		/*
+		 * accessing the stack below %esp is always a bug.
+		 * The "+ 32" is there due to some instructions (like
+		 * pusha) doing pre-decrement on the stack and that
+		 * doesn't show up until later..
+		 */
+		if (address + 32 < regs->esp)
+			goto bad_area;
+	}
+	if (expand_stack(vma, address))
 		goto bad_area;
-	vma->vm_offset -= vma->vm_start - (address & PAGE_MASK);
-	vma->vm_start = (address & PAGE_MASK);
 /*
  * Ok, we have a good vm_area for this memory access, so
  * we can handle it..
@@ -78,14 +85,14 @@ good_area:
 			current->tss.screen_bitmap |= 1 << bit;
 	}
 	if (error_code & 1) {
-#ifdef CONFIG_TEST_VERIFY_AREA
+#ifdef TEST_VERIFY_AREA
 		if (regs->cs == KERNEL_CS)
 			printk("WP fault at %08x\n", regs->eip);
 #endif
-		do_wp_page(vma, address, error_code & 2);
+		do_wp_page(current, vma, address, error_code & 2);
 		return;
 	}
-	do_no_page(vma, address, error_code & 2);
+	do_no_page(current, vma, address, error_code & 2);
 	return;
 
 /*
@@ -97,7 +104,7 @@ bad_area:
 		current->tss.cr2 = address;
 		current->tss.error_code = error_code;
 		current->tss.trap_no = 14;
-		send_sig(SIGSEGV, current, 1);
+		force_sig(SIGSEGV, current);
 		return;
 	}
 /*
@@ -109,7 +116,7 @@ bad_area:
 	if (wp_works_ok < 0 && address == TASK_SIZE && (error_code & 1)) {
 		wp_works_ok = 1;
 		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
-		invalidate();
+		flush_tlb();
 		printk("This processor honours the WP bit even when in supervisor mode. Good.\n");
 		return;
 	}

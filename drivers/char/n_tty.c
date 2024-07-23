@@ -255,24 +255,31 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 					tail = (tail+1) & (N_TTY_BUF_SIZE-1);
 				}
 
+				/* should never happen */
+				if (tty->column > 0x80000000)
+					tty->column = 0; 
+
 				/* Now backup to that column. */
 				while (tty->column > col) {
 					/* Can't use opost here. */
 					put_char('\b', tty);
-					tty->column--;
+					if (tty->column > 0)
+						tty->column--;
 				}
 			} else {
 				if (iscntrl(c) && L_ECHOCTL(tty)) {
 					put_char('\b', tty);
 					put_char(' ', tty);
 					put_char('\b', tty);
-					tty->column--;
+					if (tty->column > 0)
+						tty->column--;
 				}
 				if (!iscntrl(c) || L_ECHOCTL(tty)) {
 					put_char('\b', tty);
 					put_char(' ', tty);
 					put_char('\b', tty);
-					tty->column--;
+					if (tty->column > 0)
+						tty->column--;
 				}
 			}
 		}
@@ -525,10 +532,10 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 	put_tty_queue(c, tty);
 }	
 
-static void n_tty_receive_buf(struct tty_struct *tty, unsigned char *cp,
+static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 			      char *fp, int count)
 {
-	unsigned char *p;
+	const unsigned char *p;
 	char *f, flags = 0;
 	int	i;
 
@@ -611,7 +618,7 @@ static int n_tty_receive_room(struct tty_struct *tty)
 int is_ignored(int sig)
 {
 	return ((current->blocked & (1<<(sig-1))) ||
-	        (current->sigaction[sig-1].sa_handler == SIG_IGN));
+	        (current->sig->action[sig-1].sa_handler == SIG_IGN));
 }
 
 static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
@@ -696,6 +703,8 @@ static int n_tty_open(struct tty_struct *tty)
 	}
 	memset(tty->read_buf, 0, N_TTY_BUF_SIZE);
 	tty->read_head = tty->read_tail = tty->read_cnt = 0;
+	tty->canon_head = tty->canon_data = tty->erasing = 0;
+	tty->column = 0;
 	memset(tty->read_flags, 0, sizeof(tty->read_flags));
 	n_tty_set_termios(tty, 0);
 	tty->minimum_to_wake = 1;
@@ -803,7 +812,7 @@ do_it_again:
 		if (tty->packet && tty->link->ctrl_status) {
 			if (b != buf)
 				break;
-			put_fs_byte(tty->link->ctrl_status, b++);
+			put_user(tty->link->ctrl_status, b++);
 			tty->link->ctrl_status = 0;
 			break;
 		}
@@ -817,7 +826,7 @@ do_it_again:
 			tty->minimum_to_wake = (minimum - (b - buf));
 		
 		if (!input_available_p(tty, 0)) {
-			if (tty->flags & (1 << TTY_SLAVE_CLOSED)) {
+			if (tty->flags & (1 << TTY_OTHER_CLOSED)) {
 				retval = -EIO;
 				break;
 			}
@@ -840,7 +849,7 @@ do_it_again:
 
 		/* Deal with packet mode. */
 		if (tty->packet && b == buf) {
-			put_fs_byte(TIOCPKT_DATA, b++);
+			put_user(TIOCPKT_DATA, b++);
 			nr--;
 		}
 
@@ -861,7 +870,7 @@ do_it_again:
 				tty->read_cnt--;
 				enable_bh(TQUEUE_BH);
 				if (!eol) {
-					put_fs_byte(c, b++);
+					put_user(c, b++);
 					if (--nr)
 						continue;
 					break;
@@ -870,7 +879,7 @@ do_it_again:
 					tty->canon_data = 0;
 				}
 				if (c != __DISABLED_CHAR) {
-					put_fs_byte(c, b++);
+					put_user(c, b++);
 					nr--;
 				}
 				break;
@@ -912,11 +921,11 @@ do_it_again:
 }
 
 static int write_chan(struct tty_struct * tty, struct file * file,
-		      unsigned char * buf, unsigned int nr)
+		      const unsigned char * buf, unsigned int nr)
 {
 	struct wait_queue wait = { current, NULL };
 	int c;
-	unsigned char *b = buf;
+	const unsigned char *b = buf;
 	int retval = 0;
 
 	/* Job control check -- must be done at start (POSIX.1 7.1.1.4). */
@@ -939,7 +948,7 @@ static int write_chan(struct tty_struct * tty, struct file * file,
 		}
 		if (O_OPOST(tty)) {
 			while (nr > 0) {
-				c = get_fs_byte(b);
+				c = get_user(b);
 				if (opost(c, tty) < 0)
 					break;
 				b++; nr--;
@@ -976,7 +985,7 @@ static int normal_select(struct tty_struct * tty, struct inode * inode,
 		case SEL_EX:
 			if (tty->packet && tty->link->ctrl_status)
 				return 1;
-			if (tty->flags & (1 << TTY_SLAVE_CLOSED))
+			if (tty->flags & (1 << TTY_OTHER_CLOSED))
 				return 1;
 			if (tty_hung_up_p(file))
 				return 1;

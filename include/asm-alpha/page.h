@@ -8,9 +8,9 @@
 
 #ifdef __KERNEL__
 
-#define CONFIG_STRICT_MM_TYPECHECKS
+#define STRICT_MM_TYPECHECKS
 
-#ifdef CONFIG_STRICT_MM_TYPECHECKS
+#ifdef STRICT_MM_TYPECHECKS
 /*
  * These are used to make use of C type-checking..
  */
@@ -48,26 +48,11 @@ typedef unsigned long pgprot_t;
 
 #endif
 
-#define invalidate_all() \
-__asm__ __volatile__( \
-	"lda $16,-2($31)\n\t" \
-	".long 51" \
-	: : :"$1", "$16", "$17", "$22","$23","$24","$25")
-
-#define invalidate() \
-__asm__ __volatile__( \
-	"lda $16,-1($31)\n\t" \
-	".long 51" \
-	: : :"$1", "$16", "$17", "$22","$23","$24","$25")
-
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)		(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-#define PAGE_OFFSET		0xFFFFFC0000000000
+#define PAGE_OFFSET		0xFFFFFC0000000000UL
 #define MAP_NR(addr)		((((unsigned long) (addr)) - PAGE_OFFSET) >> PAGE_SHIFT)
-#define MAP_PAGE_RESERVED	(1<<31)
-
-typedef unsigned int mem_map_t;
 
 #endif /* __KERNEL__ */
 

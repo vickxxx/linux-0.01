@@ -1,5 +1,5 @@
 /*
- *	NET/ROM release 002
+ *	NET/ROM release 003
  *
  *	This is ALPHA test software. This code may break your machine, randomly fail to work with new 
  *	releases, misbehave and/or generally screw up. It might even work. 
@@ -58,7 +58,7 @@ void nr_set_timer(struct sock *sk)
 	sk->timer.data     = (unsigned long)sk;
 	sk->timer.function = &nr_timer;
 
-	sk->timer.expires = 10;
+	sk->timer.expires = jiffies+10;
 	add_timer(&sk->timer);
 }
 
@@ -73,7 +73,7 @@ static void nr_reset_timer(struct sock *sk)
 
 	sk->timer.data     = (unsigned long)sk;
 	sk->timer.function = &nr_timer;
-	sk->timer.expires  = 10;
+	sk->timer.expires  = jiffies+10;
 	add_timer(&sk->timer);
 }
 
@@ -90,8 +90,8 @@ static void nr_timer(unsigned long param)
 	switch (sk->nr->state) {
 		case NR_STATE_0:
 			/* Magic here: If we listen() and a new link dies before it
-			   is accepted() it isnt 'dead' so doesnt get removed. */
-			if (sk->dead) {
+			   is accepted() it isn't 'dead' so doesn't get removed. */
+			if (sk->destroy || (sk->state == TCP_LISTEN && sk->dead)) {
 				del_timer(&sk->timer);
 				nr_destroy_socket(sk);
 				return;
@@ -140,7 +140,7 @@ static void nr_timer(unsigned long param)
 	switch (sk->nr->state) {
 		case NR_STATE_1: 
 			if (sk->nr->n2count == sk->nr->n2) {
-				nr_clear_tx_queue(sk);
+				nr_clear_queues(sk);
 				sk->nr->state = NR_STATE_0;
 				sk->state     = TCP_CLOSE;
 				sk->err       = ETIMEDOUT;
@@ -155,7 +155,7 @@ static void nr_timer(unsigned long param)
 
 		case NR_STATE_2:
 			if (sk->nr->n2count == sk->nr->n2) {
-				nr_clear_tx_queue(sk);
+				nr_clear_queues(sk);
 				sk->nr->state = NR_STATE_0;
 				sk->state     = TCP_CLOSE;
 				sk->err       = ETIMEDOUT;
@@ -170,7 +170,7 @@ static void nr_timer(unsigned long param)
 
 		case NR_STATE_3:
 			if (sk->nr->n2count == sk->nr->n2) {
-				nr_clear_tx_queue(sk);
+				nr_clear_queues(sk);
 				sk->nr->state = NR_STATE_0;
 				sk->state     = TCP_CLOSE;
 				sk->err       = ETIMEDOUT;

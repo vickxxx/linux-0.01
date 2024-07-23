@@ -2,8 +2,9 @@
  * sound/pas2_midi.c
  *
  * The low level driver for the PAS Midi Interface.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -24,16 +25,15 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#ifdef CONFIGURE_SOUNDCARD
-
 #include "pas.h"
 
-#if !defined(EXCLUDE_PAS) && !defined(EXCLUDE_MIDI) && defined(EXCLUDE_PRO_MIDI)
+#if defined(CONFIG_PAS) && defined(CONFIG_MIDI)
 
 static int      midi_busy = 0, input_opened = 0;
 static int      my_dev;
@@ -59,7 +59,7 @@ pas_midi_open (int dev, int mode,
   if (midi_busy)
     {
       printk ("PAS2: Midi busy\n");
-      return RET_ERROR (EBUSY);
+      return -EBUSY;
     }
 
   /*
@@ -68,7 +68,8 @@ pas_midi_open (int dev, int mode,
   pas_write (M_C_RESET_INPUT_FIFO | M_C_RESET_OUTPUT_FIFO,
 	     MIDI_CONTROL);
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   if ((err = pas_set_intr (I_M_MIDI_IRQ_ENABLE)) < 0)
     return err;
@@ -83,8 +84,8 @@ pas_midi_open (int dev, int mode,
 
   if (mode == OPEN_READ || mode == OPEN_READWRITE)
     {
-      ctrl |= M_C_ENA_INPUT_IRQ;/*
-					 * Enable input
+      ctrl |= M_C_ENA_INPUT_IRQ;	/*
+					   * Enable input
 					 */
       input_opened = 1;
     }
@@ -107,7 +108,7 @@ pas_midi_open (int dev, int mode,
   pas_write (0xff, MIDI_STATUS);
   ofifo_bytes = 0;
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   midi_busy = 1;
   qlen = qhead = qtail = 0;
@@ -134,9 +135,9 @@ dump_to_midi (unsigned char midi_byte)
 
   fifo_space = ((x = pas_read (MIDI_FIFO_STATUS)) >> 4) & 0x0f;
 
-  if (fifo_space == 15 || (fifo_space < 2 && ofifo_bytes > 13))	/*
-									 * Fifo
-									 * full
+  if (fifo_space == 15 || (fifo_space < 2 && ofifo_bytes > 13))		/*
+									   * Fifo
+									   * full
 									 */
     {
       return 0;			/*
@@ -161,7 +162,8 @@ pas_midi_out (int dev, unsigned char midi_byte)
    * Drain the local queue first
    */
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   while (qlen && dump_to_midi (tmp_queue[qhead]))
     {
@@ -169,7 +171,7 @@ pas_midi_out (int dev, unsigned char midi_byte)
       qhead++;
     }
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   /*
    * Output the byte if the local queue is empty.
@@ -190,13 +192,14 @@ pas_midi_out (int dev, unsigned char midi_byte)
 				 * Local queue full
 				 */
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   tmp_queue[qtail] = midi_byte;
   qlen++;
   qtail++;
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   return 1;
 }
@@ -214,9 +217,9 @@ pas_midi_end_read (int dev)
 }
 
 static int
-pas_midi_ioctl (int dev, unsigned cmd, unsigned arg)
+pas_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
-  return RET_ERROR (EINVAL);
+  return -EINVAL;
 }
 
 static void
@@ -228,7 +231,7 @@ pas_midi_kick (int dev)
 static int
 pas_buffer_status (int dev)
 {
-  return !qlen;
+  return qlen;
 }
 
 #define MIDI_SYNTH_NAME	"Pro Audio Spectrum Midi"
@@ -239,6 +242,7 @@ static struct midi_operations pas_midi_operations =
 {
   {"Pro Audio Spectrum", 0, 0, SNDCARD_PAS},
   &std_midi_synth,
+  {0},
   pas_midi_open,
   pas_midi_close,
   pas_midi_ioctl,
@@ -308,7 +312,8 @@ pas_midi_interrupt (void)
 	  ofifo_bytes = 0;
 	}
 
-      DISABLE_INTR (flags);
+      save_flags (flags);
+      cli ();
 
       while (qlen && dump_to_midi (tmp_queue[qhead]))
 	{
@@ -316,11 +321,9 @@ pas_midi_interrupt (void)
 	  qhead++;
 	}
 
-      RESTORE_INTR (flags);
+      restore_flags (flags);
     }
 
-  if (stat & M_S_FRAMING_ERROR)
-    printk ("MIDI framing error\n");
 
   if (stat & M_S_OUTPUT_OVERRUN)
     {
@@ -328,11 +331,9 @@ pas_midi_interrupt (void)
       ofifo_bytes = 100;
     }
 
-  pas_write (stat, MIDI_STATUS);/*
-					 * Acknowledge interrupts
+  pas_write (stat, MIDI_STATUS);	/*
+					   * Acknowledge interrupts
 					 */
 }
-
-#endif
 
 #endif

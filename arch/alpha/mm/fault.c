@@ -4,7 +4,6 @@
  *  Copyright (C) 1995  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/head.h>
@@ -19,12 +18,24 @@
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/pgtable.h>
+#include <asm/mmu_context.h>
+
+unsigned long asn_cache = ASN_FIRST_VERSION;
+
+#ifndef BROKEN_ASN
+/*
+ * Select a new ASN and reload the context. This is
+ * not inlined as this expands to a pretty large
+ * function.
+ */
+void get_new_asn_and_reload(struct task_struct *tsk, struct mm_struct *mm)
+{
+	get_new_mmu_context(tsk, mm, asn_cache);
+	reload_context(tsk);
+}
+#endif
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
-extern void tbi(unsigned long type, unsigned long arg);
-#define tbisi(x) tbi(1,(x))
-#define tbisd(x) tbi(2,(x))
-#define tbis(x)  tbi(3,(x))
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -55,10 +66,8 @@ asmlinkage void do_page_fault(unsigned long address, unsigned long mmcsr, long c
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
-	if (vma->vm_end - address > current->rlim[RLIMIT_STACK].rlim_cur)
+	if (expand_stack(vma, address))
 		goto bad_area;
-	vma->vm_offset -= vma->vm_start - (address & PAGE_MASK);
-	vma->vm_start = (address & PAGE_MASK);
 /*
  * Ok, we have a good vm_area for this memory access, so
  * we can handle it..
@@ -85,16 +94,18 @@ good_area:
  */
 bad_area:
 	if (user_mode(&regs)) {
-		printk("memory violation at pc=%08lx (%08lx)\n", regs.pc, address);
+		printk("%s: memory violation at pc=%08lx rp=%08lx (bad address = %08lx)\n",
+			current->comm, regs.pc, regs.r26, address);
 		die_if_kernel("oops", &regs, cause);
-		send_sig(SIGSEGV, current, 1);
+		force_sig(SIGSEGV, current);
 		return;
 	}
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
  * terminate things with extreme prejudice.
  */
-	printk(KERN_ALERT "Unable to handle kernel paging request at virtual address %08lx\n",address);
+	printk(KERN_ALERT 
+	       "Unable to handle kernel paging request at virtual address %016lx\n", address);
 	die_if_kernel("Oops", &regs, cause);
 	do_exit(SIGKILL);
 }

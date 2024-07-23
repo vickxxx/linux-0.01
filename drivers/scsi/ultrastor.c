@@ -124,23 +124,33 @@
  * Release ICM slot by clearing first byte on 24F.
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/stddef.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
-
+#include <linux/proc_fs.h>
 #include <asm/io.h>
 #include <asm/bitops.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 
 #define ULTRASTOR_PRIVATE	/* Get the private stuff from ultrastor.h */
-#include "../block/blk.h"
+#include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "ultrastor.h"
 #include "sd.h"
+#include<linux/stat.h>
+
+struct proc_dir_entry proc_scsi_ultrastor = {
+    PROC_SCSI_ULTRASTOR, 9, "ultrastor",
+    S_IFDIR | S_IRUGO | S_IXUGO, 2
+};
 
 #define FALSE 0
 #define TRUE 1
@@ -283,7 +293,7 @@ static const unsigned short ultrastor_ports_14f[] = {
 };
 #endif
 
-static void ultrastor_interrupt(int, struct pt_regs *);
+static void ultrastor_interrupt(int, void *, struct pt_regs *);
 static inline void build_sg_list(struct mscp *, Scsi_Cmnd *SCpnt);
 
 
@@ -497,7 +507,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
     config.mscp_free = ~0;
 #endif
 
-    if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor")) {
+    if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor", NULL)) {
 	printk("Unable to allocate IRQ%u for UltraStor controller.\n",
 	       config.interrupt);
 	return FALSE;
@@ -505,7 +515,7 @@ static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
     if (config.dma_channel && request_dma(config.dma_channel,"Ultrastor")) {
 	printk("Unable to allocate DMA channel %u for UltraStor controller.\n",
 	       config.dma_channel);
-	free_irq(config.interrupt);
+	free_irq(config.interrupt, NULL);
 	return FALSE;
     }
     tpnt->sg_tablesize = ULTRASTOR_14F_MAX_SG;
@@ -567,7 +577,7 @@ static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
 	  printk("U24F: invalid IRQ\n");
 	  return FALSE;
 	}
-      if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor"))
+      if (request_irq(config.interrupt, ultrastor_interrupt, 0, "Ultrastor", NULL))
 	{
 	  printk("Unable to allocate IRQ%u for UltraStor controller.\n",
 		 config.interrupt);
@@ -621,6 +631,7 @@ static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
 
 int ultrastor_detect(Scsi_Host_Template * tpnt)
 {
+    tpnt->proc_dir = &proc_scsi_ultrastor;
   return ultrastor_14f_detect(tpnt) || ultrastor_24f_detect(tpnt);
 }
 
@@ -629,14 +640,14 @@ const char *ultrastor_info(struct Scsi_Host * shpnt)
     static char buf[64];
 
     if (config.slot)
-      sprintf(buf, "UltraStor 24F SCSI @ Slot %u IRQ%u\n",
+      sprintf(buf, "UltraStor 24F SCSI @ Slot %u IRQ%u",
 	      config.slot, config.interrupt);
     else if (config.subversion)
-      sprintf(buf, "UltraStor 34F SCSI @ Port %03X BIOS %05X IRQ%u\n",
+      sprintf(buf, "UltraStor 34F SCSI @ Port %03X BIOS %05X IRQ%u",
 	      config.port_address, (int)config.bios_segment,
 	      config.interrupt);
     else
-      sprintf(buf, "UltraStor 14F SCSI @ Port %03X BIOS %05X IRQ%u DMA%u\n",
+      sprintf(buf, "UltraStor 14F SCSI @ Port %03X BIOS %05X IRQ%u DMA%u",
 	      config.port_address, (int)config.bios_segment,
 	      config.interrupt, config.dma_channel);
     return buf;
@@ -873,7 +884,7 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
 	printk("Ux4F: abort while completed command pending\n");
 	restore_flags(flags);
 	cli();
-	ultrastor_interrupt(0, NULL);
+	ultrastor_interrupt(0, NULL, NULL);
 	restore_flags(flags);
 	return SCSI_ABORT_SUCCESS;  /* FIXME - is this correct? -ERY */
       }
@@ -999,7 +1010,7 @@ int ultrastor_reset(Scsi_Cmnd * SCpnt)
 
 }
 
-int ultrastor_biosparam(Disk * disk, int dev, int * dkinfo)
+int ultrastor_biosparam(Disk * disk, kdev_t dev, int * dkinfo)
 {
     int size = disk->capacity;
     unsigned int s = config.heads * config.sectors;
@@ -1014,7 +1025,7 @@ int ultrastor_biosparam(Disk * disk, int dev, int * dkinfo)
     return 0;
 }
 
-static void ultrastor_interrupt(int irq, struct pt_regs *regs)
+static void ultrastor_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     unsigned int status;
 #if ULTRASTOR_MAX_CMDS > 1
@@ -1140,3 +1151,10 @@ static void ultrastor_interrupt(int irq, struct pt_regs *regs)
     printk("USx4F: interrupt: returning\n");
 #endif
 }
+
+#ifdef MODULE
+/* Eventually this will go into an include file, but this will be later */
+Scsi_Host_Template driver_template = ULTRASTOR_14F;
+
+#include "scsi_module.c"
+#endif

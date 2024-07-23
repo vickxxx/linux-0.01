@@ -7,9 +7,14 @@
 #ifndef __ASM_I386_PROCESSOR_H
 #define __ASM_I386_PROCESSOR_H
 
+#include <asm/vm86.h>
+#include <asm/math_emu.h>
+
 /*
  * System setup and hardware bug flags..
+ * [Note we don't test the 386 multiply bug or popad bug]
  */
+
 extern char hard_math;
 extern char x86;		/* lower 4 bits */
 extern char x86_vendor_id[13];
@@ -18,8 +23,9 @@ extern char x86_mask;		/* lower 4 bits */
 extern int  x86_capability;	/* field of flags */
 extern int  fdiv_bug;		
 extern char ignore_irq13;
-extern char wp_works_ok;		/* doesn't work on a 386 */
+extern char wp_works_ok;	/* doesn't work on a 386 */
 extern char hlt_works_ok;	/* problems on some 486Dx4's and old 386's */
+extern int  have_cpuid;		/* We have a CPUID */
 
 /*
  * Bus types (default is ISA, but people can check others with these..)
@@ -49,6 +55,7 @@ struct i387_hard_struct {
 	long	foo;
 	long	fos;
 	long	st_space[20];	/* 8*10 bytes for each FP-reg = 80 bytes */
+	long	status;		/* software status information */
 };
 
 struct i387_soft_struct {
@@ -106,7 +113,7 @@ struct thread_struct {
 	unsigned long v86flags, v86mask, v86mode;
 };
 
-#define INIT_MMAP { &init_task, 0, 0x40000000, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC }
+#define INIT_MMAP { &init_mm, 0, 0x40000000, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC }
 
 #define INIT_TSS  { \
 	0,0, \
@@ -124,12 +131,23 @@ struct thread_struct {
 	NULL, 0, 0, 0, 0 /* vm86_info */ \
 }
 
+#define alloc_kernel_stack()    get_free_page(GFP_KERNEL)
+#define free_kernel_stack(page) free_page((page))
+
 static inline void start_thread(struct pt_regs * regs, unsigned long eip, unsigned long esp)
 {
 	regs->cs = USER_CS;
 	regs->ds = regs->es = regs->ss = regs->fs = regs->gs = USER_DS;
 	regs->eip = eip;
 	regs->esp = esp;
+}
+
+/*
+ * Return saved PC of a blocked thread.
+ */
+extern inline unsigned long thread_saved_pc(struct thread_struct *t)
+{
+	return ((unsigned long *)t->esp)[3];
 }
 
 #endif /* __ASM_I386_PROCESSOR_H */

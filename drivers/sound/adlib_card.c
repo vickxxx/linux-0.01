@@ -2,8 +2,10 @@
  * sound/adlib_card.c
  *
  * Detection routine for the AdLib card.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -24,28 +26,42 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#if defined(CONFIGURE_SOUNDCARD) && !defined(EXCLUDE_YM3812)
+#if defined(CONFIG_YM3812)
 
 long
 attach_adlib_card (long mem_start, struct address_info *hw_config)
 {
 
-  if (opl3_detect (FM_MONO))
-    {
-      mem_start = opl3_init (mem_start);
-    }
+  mem_start = opl3_init (mem_start, hw_config->io_base, hw_config->osp);
+  request_region (hw_config->io_base, 4, "OPL3/OPL2");
+
   return mem_start;
 }
 
 int
 probe_adlib (struct address_info *hw_config)
 {
-  return opl3_detect (FM_MONO);
+
+  if (check_region (hw_config->io_base, 4))
+    {
+      printk ("\n\nopl3.c: I/O port %x already in use\n\n", hw_config->io_base);
+      return 0;
+    }
+
+  return opl3_detect (hw_config->io_base, hw_config->osp);
 }
+
+void
+unload_adlib (struct address_info *hw_config)
+{
+  release_region (hw_config->io_base, 4);
+}
+
 
 #endif

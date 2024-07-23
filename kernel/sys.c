@@ -4,6 +4,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -17,6 +18,14 @@
 #include <linux/stat.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/pagemap.h>
+#include <linux/swap.h>
+#include <linux/fcntl.h>
+#include <linux/acct.h>
+#include <linux/tty.h>
+#if defined(CONFIG_APM) && defined(CONFIG_APM_POWER_OFF)
+#include <linux/apm_bios.h>
+#endif
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -24,11 +33,9 @@
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
-static int C_A_D = 1;
+int C_A_D = 1;
 
 extern void adjust_clock(void);
-
-#define	PZERO	15
 
 asmlinkage int sys_ni_syscall(void)
 {
@@ -37,69 +44,100 @@ asmlinkage int sys_ni_syscall(void)
 
 static int proc_sel(struct task_struct *p, int which, int who)
 {
-	switch (which) {
-		case PRIO_PROCESS:
-			if (!who && p == current)
-				return 1;
-			return(p->pid == who);
-		case PRIO_PGRP:
-			if (!who)
-				who = current->pgrp;
-			return(p->pgrp == who);
-		case PRIO_USER:
-			if (!who)
-				who = current->uid;
-			return(p->uid == who);
+	if(p->pid)
+	{
+		switch (which) {
+			case PRIO_PROCESS:
+				if (!who && p == current)
+					return 1;
+				return(p->pid == who);
+			case PRIO_PGRP:
+				if (!who)
+					who = current->pgrp;
+				return(p->pgrp == who);
+			case PRIO_USER:
+				if (!who)
+					who = current->uid;
+				return(p->uid == who);
+		}
 	}
 	return 0;
 }
 
 asmlinkage int sys_setpriority(int which, int who, int niceval)
 {
-	struct task_struct **p;
+	struct task_struct *p;
 	int error = ESRCH;
-	int priority;
+	unsigned int priority;
 
 	if (which > 2 || which < 0)
 		return -EINVAL;
 
-	if ((priority = PZERO - niceval) <= 0)
-		priority = 1;
+	/* normalize: avoid signed division (rounding problems) */
+	priority = niceval;
+	if (niceval < 0)
+		priority = -niceval;
+	if (priority > 20)
+		priority = 20;
+	priority = (priority * DEF_PRIORITY + 10) / 20 + DEF_PRIORITY;
 
-	for(p = &LAST_TASK; p > &FIRST_TASK; --p) {
-		if (!*p || !proc_sel(*p, which, who))
+	if (niceval >= 0) {
+		priority = 2*DEF_PRIORITY - priority;
+		if (!priority)
+			priority = 1;
+	}
+
+	for_each_task(p) {
+		if (!proc_sel(p, which, who))
 			continue;
-		if ((*p)->uid != current->euid &&
-			(*p)->uid != current->uid && !suser()) {
+		if (p->uid != current->euid &&
+			p->uid != current->uid && !suser()) {
 			error = EPERM;
 			continue;
 		}
 		if (error == ESRCH)
 			error = 0;
-		if (priority > (*p)->priority && !suser())
+		if (priority > p->priority && !suser())
 			error = EACCES;
 		else
-			(*p)->priority = priority;
+			p->priority = priority;
 	}
 	return -error;
 }
 
+/*
+ * Ugh. To avoid negative return values, "getpriority()" will
+ * not return the normal nice-value, but a value that has been
+ * offset by 20 (ie it returns 0..40 instead of -20..20)
+ */
 asmlinkage int sys_getpriority(int which, int who)
 {
-	struct task_struct **p;
-	int max_prio = 0;
+	struct task_struct *p;
+	long max_prio = -ESRCH;
 
 	if (which > 2 || which < 0)
 		return -EINVAL;
 
-	for(p = &LAST_TASK; p > &FIRST_TASK; --p) {
-		if (!*p || !proc_sel(*p, which, who))
+	for_each_task (p) {
+		if (!proc_sel(p, which, who))
 			continue;
-		if ((*p)->priority > max_prio)
-			max_prio = (*p)->priority;
+		if (p->priority > max_prio)
+			max_prio = p->priority;
 	}
-	return(max_prio ? max_prio : -ESRCH);
+
+	/* scale the priority from timeslice to 0..40 */
+	if (max_prio > 0)
+		max_prio = (max_prio * 20 + DEF_PRIORITY/2) / DEF_PRIORITY;
+	return max_prio;
 }
+
+#ifndef __alpha__
+
+/*
+ * Why do these exist?  Binary compatibility with some other standard?
+ * If so, maybe they should be moved into the appropriate arch
+ * directory.
+ */
 
 asmlinkage int sys_profil(void)
 {
@@ -131,6 +169,8 @@ asmlinkage int sys_prof(void)
 	return -ENOSYS;
 }
 
+#endif
+
 extern void hard_reset_now(void);
 extern asmlinkage sys_kill(int, int);
 
@@ -157,6 +197,9 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 	else if (flag == 0xCDEF0123) {
 		printk(KERN_EMERG "System halted\n");
 		sys_kill(-1, SIGKILL);
+#if defined(CONFIG_APM) && defined(CONFIG_APM_POWER_OFF)
+		apm_set_power_state(APM_STATE_OFF);
+#endif
 		do_exit(0);
 	} else
 		return -EINVAL;
@@ -173,7 +216,7 @@ void ctrl_alt_del(void)
 	if (C_A_D)
 		hard_reset_now();
 	else
-		send_sig(SIGINT,task[1],1);
+		kill_proc(1, SIGINT, 1);
 }
 	
 
@@ -195,6 +238,7 @@ void ctrl_alt_del(void)
 asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 {
 	int old_rgid = current->gid;
+	int old_egid = current->egid;
 
 	if (rgid != (gid_t) -1) {
 		if ((old_rgid == rgid) ||
@@ -209,7 +253,7 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 		    (current->egid == egid) ||
 		    (current->sgid == egid) ||
 		    suser())
-			current->egid = egid;
+			current->fsgid = current->egid = egid;
 		else {
 			current->gid = old_rgid;
 			return(-EPERM);
@@ -219,6 +263,8 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 	    (egid != (gid_t) -1 && egid != old_rgid))
 		current->sgid = current->egid;
 	current->fsgid = current->egid;
+	if (current->egid != old_egid)
+		current->dumpable = 0;
 	return 0;
 }
 
@@ -227,19 +273,134 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
  */
 asmlinkage int sys_setgid(gid_t gid)
 {
+	int old_egid = current->egid;
+
 	if (suser())
 		current->gid = current->egid = current->sgid = current->fsgid = gid;
 	else if ((gid == current->gid) || (gid == current->sgid))
 		current->egid = current->fsgid = gid;
 	else
 		return -EPERM;
+	if (current->egid != old_egid)
+		current->dumpable = 0;
 	return 0;
 }
+  
+static char acct_active = 0;
+static struct file acct_file;
 
-asmlinkage int sys_acct(void)
+int acct_process(long exitcode)
 {
-	return -ENOSYS;
+   struct acct ac;
+   unsigned short fs;
+
+   if (acct_active) {
+      strncpy(ac.ac_comm, current->comm, ACCT_COMM);
+      ac.ac_comm[ACCT_COMM-1] = '\0';
+      ac.ac_utime = current->utime;
+      ac.ac_stime = current->stime;
+      ac.ac_btime = CT_TO_SECS(current->start_time) + (xtime.tv_sec - (jiffies / HZ));
+      ac.ac_etime = CURRENT_TIME - ac.ac_btime;
+      ac.ac_uid   = current->uid;
+      ac.ac_gid   = current->gid;
+      ac.ac_tty   = (current)->tty == NULL ? -1 :
+	  MKDEV(4, current->tty->device);
+      ac.ac_flag  = 0;
+      if (current->flags & PF_FORKNOEXEC)
+         ac.ac_flag |= AFORK;
+      if (current->flags & PF_SUPERPRIV)
+         ac.ac_flag |= ASU;
+      if (current->flags & PF_DUMPCORE)
+         ac.ac_flag |= ACORE;
+      if (current->flags & PF_SIGNALED)
+         ac.ac_flag |= AXSIG;
+      ac.ac_minflt = current->min_flt;
+      ac.ac_majflt = current->maj_flt;
+      ac.ac_exitcode = exitcode;
+
+      /* Kernel segment override */
+      fs = get_fs();
+      set_fs(KERNEL_DS);
+
+      acct_file.f_op->write(acct_file.f_inode, &acct_file,
+                             (char *)&ac, sizeof(struct acct));
+
+      set_fs(fs);
+   }
+   return 0;
 }
+
+asmlinkage int sys_acct(const char *name)
+{
+   struct inode *inode = (struct inode *)0;
+   char *tmp;
+   int error;
+
+   if (!suser())
+      return -EPERM;
+
+   if (name == (char *)0) {
+      if (acct_active) {
+         if (acct_file.f_op->release)
+            acct_file.f_op->release(acct_file.f_inode, &acct_file);
+
+         if (acct_file.f_inode != (struct inode *) 0)
+            iput(acct_file.f_inode);
+
+         acct_active = 0;
+      }
+      return 0;
+   } else {
+      if (!acct_active) {
+
+         if ((error = getname(name, &tmp)) != 0)
+            return (error);
+
+         error = open_namei(tmp, O_RDWR, 0600, &inode, 0);
+         putname(tmp);
+
+         if (error)
+            return (error);
+
+         if (!S_ISREG(inode->i_mode)) {
+            iput(inode);
+            return -EACCES;
+         }
+
+         if (!inode->i_op || !inode->i_op->default_file_ops || 
+             !inode->i_op->default_file_ops->write) {
+            iput(inode);
+            return -EIO;
+         }
+
+         acct_file.f_mode = 3;
+         acct_file.f_flags = 0;
+         acct_file.f_count = 1;
+         acct_file.f_inode = inode;
+         acct_file.f_pos = inode->i_size;
+         acct_file.f_reada = 0;
+         acct_file.f_op = inode->i_op->default_file_ops;
+
+         if (acct_file.f_op->open)
+            if (acct_file.f_op->open(acct_file.f_inode, &acct_file)) {
+               iput(inode);
+               return -EIO;
+            }
+
+         acct_active = 1;
+         return 0;
+      } else
+         return -EBUSY;
+   }
+}
+
+#ifndef __alpha__
+
+/*
+ * Why do these exist?  Binary compatibility with some other standard?
+ * If so, maybe they should be moved into the appropriate arch
+ * directory.
+ */
 
 asmlinkage int sys_phys(void)
 {
@@ -266,6 +427,8 @@ asmlinkage int sys_old_syscall(void)
 	return -ENOSYS;
 }
 
+#endif
+
 /*
  * Unprivileged users may change the real uid to the effective uid
  * or vice versa.  (BSD-style)
@@ -284,6 +447,7 @@ asmlinkage int sys_old_syscall(void)
 asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 {
 	int old_ruid = current->uid;
+	int old_euid = current->euid;
 
 	if (ruid != (uid_t) -1) {
 		if ((old_ruid == ruid) || 
@@ -298,7 +462,7 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 		    (current->euid == euid) ||
 		    (current->suid == euid) ||
 		    suser())
-			current->euid = euid;
+			current->fsuid = current->euid = euid;
 		else {
 			current->uid = old_ruid;
 			return(-EPERM);
@@ -308,6 +472,8 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 	    (euid != (uid_t) -1 && euid != old_ruid))
 		current->suid = current->euid;
 	current->fsuid = current->euid;
+	if (current->euid != old_euid)
+		current->dumpable = 0;
 	return 0;
 }
 
@@ -324,12 +490,16 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
  */
 asmlinkage int sys_setuid(uid_t uid)
 {
+	int old_euid = current->euid;
+
 	if (suser())
 		current->uid = current->euid = current->suid = current->fsuid = uid;
 	else if ((uid == current->uid) || (uid == current->suid))
 		current->fsuid = current->euid = uid;
 	else
 		return -EPERM;
+	if (current->euid != old_euid)
+		current->dumpable = 0;
 	return(0);
 }
 
@@ -346,6 +516,8 @@ asmlinkage int sys_setfsuid(uid_t uid)
 	if (uid == current->uid || uid == current->euid ||
 	    uid == current->suid || uid == current->fsuid || suser())
 		current->fsuid = uid;
+	if (current->fsuid != old_fsuid)
+		current->dumpable = 0;
 	return old_fsuid;
 }
 
@@ -359,19 +531,21 @@ asmlinkage int sys_setfsgid(gid_t gid)
 	if (gid == current->gid || gid == current->egid ||
 	    gid == current->sgid || gid == current->fsgid || suser())
 		current->fsgid = gid;
+	if (current->fsgid != old_fsgid)
+		current->dumpable = 0;
 	return old_fsgid;
 }
 
-asmlinkage int sys_times(struct tms * tbuf)
+asmlinkage long sys_times(struct tms * tbuf)
 {
 	if (tbuf) {
 		int error = verify_area(VERIFY_WRITE,tbuf,sizeof *tbuf);
 		if (error)
 			return error;
-		put_fs_long(current->utime,(unsigned long *)&tbuf->tms_utime);
-		put_fs_long(current->stime,(unsigned long *)&tbuf->tms_stime);
-		put_fs_long(current->cutime,(unsigned long *)&tbuf->tms_cutime);
-		put_fs_long(current->cstime,(unsigned long *)&tbuf->tms_cstime);
+		put_user(current->utime,&tbuf->tms_utime);
+		put_user(current->stime,&tbuf->tms_stime);
+		put_user(current->cutime,&tbuf->tms_cutime);
+		put_user(current->cstime,&tbuf->tms_cstime);
 	}
 	return jiffies;
 }
@@ -415,11 +589,13 @@ asmlinkage unsigned long sys_brk(unsigned long brk)
 	 * simple, it hopefully works in most obvious cases.. Easy to
 	 * fool it, but this should catch most mistakes.
 	 */
-	freepages = buffermem >> 12;
+	freepages = buffermem >> PAGE_SHIFT;
+	freepages += page_cache_size;
+	freepages >>= 1;
 	freepages += nr_free_pages;
 	freepages += nr_swap_pages;
-	freepages -= (high_memory - 0x100000) >> 16;
-	freepages -= (newbrk-oldbrk) >> 12;
+	freepages -= MAP_NR(high_memory) >> 4;
+	freepages -= (newbrk-oldbrk) >> PAGE_SHIFT;
 	if (freepages < 0)
 		return current->mm->brk;
 #if 0
@@ -439,8 +615,8 @@ asmlinkage unsigned long sys_brk(unsigned long brk)
 }
 
 /*
- * This needs some heave checking ...
- * I just haven't get the stomach for it. I also don't fully
+ * This needs some heavy checking ...
+ * I just haven't the stomach for it. I also don't fully
  * understand sessions/pgrp etc. Let somebody who does explain it.
  *
  * OK, I think I have the protection semantics right.... this is really
@@ -509,6 +685,19 @@ asmlinkage int sys_getpgrp(void)
 	return current->pgrp;
 }
 
+asmlinkage int sys_getsid(pid_t pid)
+{
+	struct task_struct * p;
+
+	if (!pid)
+		return current->session;
+	for_each_task(p) {
+		if (p->pid == pid)
+			return p->session;
+	}
+	return -ESRCH;
+}
+
 asmlinkage int sys_setsid(void)
 {
 	if (current->leader)
@@ -553,8 +742,11 @@ asmlinkage int sys_setgroups(int gidsetsize, gid_t *grouplist)
 		return -EPERM;
 	if (gidsetsize > NGROUPS)
 		return -EINVAL;
+	i = verify_area(VERIFY_READ, grouplist, sizeof(gid_t) * gidsetsize);
+	if (i)
+		return i;
 	for (i = 0; i < gidsetsize; i++, grouplist++) {
-		current->groups[i] = get_fs_word((unsigned short *) grouplist);
+		current->groups[i] = get_user(grouplist);
 	}
 	if (i < NGROUPS)
 		current->groups[i] = NOGROUP;
@@ -589,6 +781,12 @@ asmlinkage int sys_newuname(struct new_utsname * name)
 	return error;
 }
 
+#ifndef __alpha__
+
+/*
+ * Move these to arch dependent dir since they are for
+ * backward compatibility only?
+ */
 asmlinkage int sys_uname(struct old_utsname * name)
 {
 	int error;
@@ -619,17 +817,19 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	if (error)
 		return error;
 	memcpy_tofs(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
-	put_fs_byte(0,name->sysname+__OLD_UTS_LEN);
+	put_user(0,name->sysname+__OLD_UTS_LEN);
 	memcpy_tofs(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
-	put_fs_byte(0,name->nodename+__OLD_UTS_LEN);
+	put_user(0,name->nodename+__OLD_UTS_LEN);
 	memcpy_tofs(&name->release,&system_utsname.release,__OLD_UTS_LEN);
-	put_fs_byte(0,name->release+__OLD_UTS_LEN);
+	put_user(0,name->release+__OLD_UTS_LEN);
 	memcpy_tofs(&name->version,&system_utsname.version,__OLD_UTS_LEN);
-	put_fs_byte(0,name->version+__OLD_UTS_LEN);
+	put_user(0,name->version+__OLD_UTS_LEN);
 	memcpy_tofs(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
-	put_fs_byte(0,name->machine+__OLD_UTS_LEN);
+	put_user(0,name->machine+__OLD_UTS_LEN);
 	return 0;
 }
+
+#endif
 
 asmlinkage int sys_sethostname(char *name, int len)
 {
@@ -669,17 +869,17 @@ asmlinkage int sys_gethostname(char *name, int len)
  */
 asmlinkage int sys_setdomainname(char *name, int len)
 {
-	int	i;
+	int error;
 	
 	if (!suser())
 		return -EPERM;
-	if (len > __NEW_UTS_LEN)
+	if (len < 0 || len > __NEW_UTS_LEN)
 		return -EINVAL;
-	for (i=0; i < len; i++) {
-		if ((system_utsname.domainname[i] = get_fs_byte(name+i)) == 0)
-			return 0;
-	}
-	system_utsname.domainname[i] = 0;
+	error = verify_area(VERIFY_READ, name, len);
+	if (error)
+		return error;
+	memcpy_fromfs(system_utsname.domainname, name, len);
+	system_utsname.domainname[len] = 0;
 	return 0;
 }
 
@@ -743,24 +943,27 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 			r.ru_utime.tv_usec = CT_TO_USECS(p->utime);
 			r.ru_stime.tv_sec = CT_TO_SECS(p->stime);
 			r.ru_stime.tv_usec = CT_TO_USECS(p->stime);
-			r.ru_minflt = p->mm->min_flt;
-			r.ru_majflt = p->mm->maj_flt;
+			r.ru_minflt = p->min_flt;
+			r.ru_majflt = p->maj_flt;
+			r.ru_nswap = p->nswap;
 			break;
 		case RUSAGE_CHILDREN:
 			r.ru_utime.tv_sec = CT_TO_SECS(p->cutime);
 			r.ru_utime.tv_usec = CT_TO_USECS(p->cutime);
 			r.ru_stime.tv_sec = CT_TO_SECS(p->cstime);
 			r.ru_stime.tv_usec = CT_TO_USECS(p->cstime);
-			r.ru_minflt = p->mm->cmin_flt;
-			r.ru_majflt = p->mm->cmaj_flt;
+			r.ru_minflt = p->cmin_flt;
+			r.ru_majflt = p->cmaj_flt;
+			r.ru_nswap = p->cnswap;
 			break;
 		default:
 			r.ru_utime.tv_sec = CT_TO_SECS(p->utime + p->cutime);
 			r.ru_utime.tv_usec = CT_TO_USECS(p->utime + p->cutime);
 			r.ru_stime.tv_sec = CT_TO_SECS(p->stime + p->cstime);
 			r.ru_stime.tv_usec = CT_TO_USECS(p->stime + p->cstime);
-			r.ru_minflt = p->mm->min_flt + p->mm->cmin_flt;
-			r.ru_majflt = p->mm->maj_flt + p->mm->cmaj_flt;
+			r.ru_minflt = p->min_flt + p->cmin_flt;
+			r.ru_majflt = p->maj_flt + p->cmaj_flt;
+			r.ru_nswap = p->nswap + p->cnswap;
 			break;
 	}
 	memcpy_tofs(ru, &r, sizeof(r));

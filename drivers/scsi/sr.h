@@ -9,7 +9,7 @@
  *
  *	<drew@colorado.edu>
  *
- *       Modified by Eric Youngdale eric@tantalus.nrl.navy.mil to
+ *       Modified by Eric Youngdale eric@aib.com to
  *       add scatter-gather, multiple outstanding request, and other
  *       enhancements.
  */
@@ -32,6 +32,7 @@ typedef struct
 	unsigned 	ten:1;			/* support ten byte commands		*/
 	unsigned 	remap:1;		/* support remapping			*/
 	unsigned 	use:1;			/* is this device still supportable	*/
+	unsigned	auto_eject:1;		/* auto-eject medium on last release.	*/
 	} Scsi_CD;
 	
 extern Scsi_CD * scsi_CDs;

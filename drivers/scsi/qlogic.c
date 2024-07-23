@@ -110,26 +110,30 @@
 #define MODULE
 #endif 
 
-#if defined(MODULE)
-#include <linux/config.h>
 #include <linux/module.h>
-#endif
 
 #ifdef PCMCIA
 #undef MODULE
 #endif 
 
-#include "../block/blk.h"	/* to get disk capacity */
+#include <linux/blk.h>	/* to get disk capacity */
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
+#include <linux/proc_fs.h>
 #include <linux/unistd.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include "sd.h"
 #include "hosts.h"
 #include "qlogic.h"
+#include<linux/stat.h>
+
+struct proc_dir_entry proc_scsi_qlogic = {
+    PROC_SCSI_QLOGIC, 6, "qlogic",
+    S_IFDIR | S_IRUGO | S_IXUGO, 2
+};
 
 /*----------------------------------------------------------------*/
 /* driver state info, local to driver */
@@ -442,7 +446,7 @@ rtrc(0)
 #if QL_USE_IRQ
 /*----------------------------------------------------------------*/
 /* interrupt handler */
-static void		    ql_ihandl(int irq, struct pt_regs * regs)
+static void	       ql_ihandl(int irq, void *dev_id, struct pt_regs * regs)
 {
 Scsi_Cmnd	   *icmd;
 	REG0;
@@ -536,6 +540,8 @@ int	qltyp;			/* type of chip */
 struct	Scsi_Host	*hreg;	/* registered host structure */
 unsigned long	flags;
 
+host->proc_dir =  &proc_scsi_qlogic;
+
 /* Qlogic Cards only exist at 0x230 or 0x330 (the chip itself decodes the
    address - I check 230 first since MIDI cards are typically at 330
 
@@ -603,7 +609,7 @@ unsigned long	flags;
 	else
 		printk( "Ql: Using preset IRQ %d\n", qlirq );
 
-	if (qlirq >= 0 && !request_irq(qlirq, ql_ihandl, 0, "qlogic"))
+	if (qlirq >= 0 && !request_irq(qlirq, ql_ihandl, 0, "qlogic", NULL))
 		host->can_queue = 1;
 #endif
 	request_region( qbase , 0x10 ,"qlogic");
@@ -623,7 +629,7 @@ unsigned long	flags;
 
 /*----------------------------------------------------------------*/
 /* return bios parameters */
-int	qlogic_biosparam(Disk * disk, int dev, int ip[])
+int	qlogic_biosparam(Disk * disk, kdev_t dev, int ip[])
 {
 /* This should mimic the DOS Qlogic driver's behavior exactly */
 	ip[0] = 0x40;

@@ -5,36 +5,21 @@
  *
  *  Extended MS-DOS directory handling functions
  */
-#ifdef MODULE
-#include <linux/module.h>
-#endif
 
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/kernel.h>
-#include <asm/segment.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/msdos_fs.h>
 #include <linux/umsdos_fs.h>
 
+#include <asm/segment.h>
+
 #define PRINTK(x)
 #define Printk(x) printk x
 
-int umsdos_readdir_kmem(
-	struct inode *inode,
-	struct file *filp,
-	struct dirent *dirent,
-	int count)
-{
-	int ret;
-	int old_fs = get_fs();
-	set_fs (KERNEL_DS);
-	ret = msdos_readdir(inode,filp,dirent,count);
-	set_fs (old_fs);
-	return ret;
-}
 /*
 	Read a file into kernel space memory
 */
@@ -47,7 +32,7 @@ int umsdos_file_read_kmem(
 	int ret;
 	int old_fs = get_fs();	
 	set_fs (KERNEL_DS);
-	ret = msdos_file_read(inode,filp,buf,count);
+	ret = fat_file_read(inode,filp,buf,count);
 	set_fs (old_fs);
 	return ret;
 }
@@ -57,13 +42,13 @@ int umsdos_file_read_kmem(
 int umsdos_file_write_kmem(
 	struct inode *inode,
 	struct file *filp,
-	char *buf,
+	const char *buf,
 	int count)
 {
 	int ret;
 	int old_fs = get_fs();
 	set_fs (KERNEL_DS);
-	ret = msdos_file_write(inode,filp,buf,count);
+	ret = fat_file_write(inode,filp,buf,count);
 	set_fs (old_fs);
 	return ret;
 }
@@ -102,7 +87,8 @@ int umsdos_emd_dir_read (
 	filp->f_flags = 0;
 	sizeread = umsdos_file_read_kmem (emd_dir,filp,buf,count);
 	if (sizeread != count){
-		printk ("UMSDOS: problem with EMD file. Can't read\n");
+		printk ("UMSDOS: problem with EMD file. Can't read pos = %Ld (%d != %d)\n"
+			,filp->f_pos,sizeread,count);
 		ret = -EIO;
 	}
 	return ret;

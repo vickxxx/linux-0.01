@@ -2,8 +2,9 @@
  * sound/gus2_midi.c
  *
  * The low level driver for the GUS Midi Interface.
- *
- * Copyright by Hannu Savolainen 1993
+ */
+/*
+ * Copyright by Hannu Savolainen 1993-1996
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -24,16 +25,15 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
- *
  */
+#include <linux/config.h>
+
 
 #include "sound_config.h"
 
-#ifdef CONFIGURE_SOUNDCARD
-
 #include "gus_hw.h"
 
-#if !defined(EXCLUDE_GUS) && !defined(EXCLUDE_MIDI)
+#if defined(CONFIG_GUS) && defined(CONFIG_MIDI)
 
 static int      midi_busy = 0, input_opened = 0;
 static int      my_dev;
@@ -46,8 +46,13 @@ static unsigned char tmp_queue[256];
 static volatile int qlen;
 static volatile unsigned char qhead, qtail;
 extern int      gus_base, gus_irq, gus_dma;
+extern int     *gus_osp;
 
-#define GUS_MIDI_STATUS()	INB(u_MidiStatus)
+static int 
+GUS_MIDI_STATUS (void)
+{
+  return inb (u_MidiStatus);
+}
 
 static int
 gus_midi_open (int dev, int mode,
@@ -59,10 +64,10 @@ gus_midi_open (int dev, int mode,
   if (midi_busy)
     {
       printk ("GUS: Midi busy\n");
-      return RET_ERROR (EBUSY);
+      return -EBUSY;
     }
 
-  OUTB (MIDI_RESET, u_MidiControl);
+  outb (MIDI_RESET, u_MidiControl);
   gus_delay ();
 
   gus_midi_control = 0;
@@ -74,14 +79,8 @@ gus_midi_open (int dev, int mode,
       input_opened = 1;
     }
 
-  if (mode == OPEN_WRITE || mode == OPEN_READWRITE)
-    {
-      gus_midi_control |= MIDI_ENABLE_XMIT;
-    }
 
-  OUTB (gus_midi_control, u_MidiControl);	/*
-						 * Enable
-						 */
+  outb (gus_midi_control, u_MidiControl);	/* Enable */
 
   midi_busy = 1;
   qlen = qhead = qtail = output_used = 0;
@@ -98,12 +97,13 @@ dump_to_midi (unsigned char midi_byte)
 
   output_used = 1;
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   if (GUS_MIDI_STATUS () & MIDI_XMIT_EMPTY)
     {
       ok = 1;
-      OUTB (midi_byte, u_MidiData);
+      outb (midi_byte, u_MidiData);
     }
   else
     {
@@ -111,10 +111,10 @@ dump_to_midi (unsigned char midi_byte)
        * Enable Midi xmit interrupts (again)
        */
       gus_midi_control |= MIDI_ENABLE_XMIT;
-      OUTB (gus_midi_control, u_MidiControl);
+      outb (gus_midi_control, u_MidiControl);
     }
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
   return ok;
 }
 
@@ -125,7 +125,7 @@ gus_midi_close (int dev)
    * Reset FIFO pointers, disable intrs
    */
 
-  OUTB (MIDI_RESET, u_MidiControl);
+  outb (MIDI_RESET, u_MidiControl);
   midi_busy = 0;
 }
 
@@ -139,7 +139,8 @@ gus_midi_out (int dev, unsigned char midi_byte)
    * Drain the local queue first
    */
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   while (qlen && dump_to_midi (tmp_queue[qhead]))
     {
@@ -147,7 +148,7 @@ gus_midi_out (int dev, unsigned char midi_byte)
       qhead++;
     }
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   /*
    * Output the byte if the local queue is empty.
@@ -168,13 +169,14 @@ gus_midi_out (int dev, unsigned char midi_byte)
 				 * Local queue full
 				 */
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   tmp_queue[qtail] = midi_byte;
   qlen++;
   qtail++;
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   return 1;
 }
@@ -192,9 +194,9 @@ gus_midi_end_read (int dev)
 }
 
 static int
-gus_midi_ioctl (int dev, unsigned cmd, unsigned arg)
+gus_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
-  return RET_ERROR (EINVAL);
+  return -EINVAL;
 }
 
 static void
@@ -210,7 +212,8 @@ gus_midi_buffer_status (int dev)
   if (!output_used)
     return 0;
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
   if (qlen && dump_to_midi (tmp_queue[qhead]))
     {
@@ -218,7 +221,7 @@ gus_midi_buffer_status (int dev)
       qhead++;
     }
 
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 
   return (qlen > 0) | !(GUS_MIDI_STATUS () & MIDI_XMIT_EMPTY);
 }
@@ -231,6 +234,7 @@ static struct midi_operations gus_midi_operations =
 {
   {"Gravis UltraSound Midi", 0, 0, SNDCARD_GUS},
   &std_midi_synth,
+  {0},
   gus_midi_open,
   gus_midi_close,
   gus_midi_ioctl,
@@ -254,7 +258,7 @@ gus_midi_init (long mem_start)
       return mem_start;
     }
 
-  OUTB (MIDI_RESET, u_MidiControl);
+  outb (MIDI_RESET, u_MidiControl);
 
   std_midi_synth.midi_dev = my_dev = num_midis;
   midi_devs[num_midis++] = &gus_midi_operations;
@@ -264,46 +268,44 @@ gus_midi_init (long mem_start)
 void
 gus_midi_interrupt (int dummy)
 {
-  unsigned char   stat, data;
+  volatile unsigned char stat, data;
   unsigned long   flags;
+  int             timeout = 10;
 
-  DISABLE_INTR (flags);
+  save_flags (flags);
+  cli ();
 
-  stat = GUS_MIDI_STATUS ();
-
-  if (stat & MIDI_RCV_FULL)
+  while (timeout-- > 0 && (stat = GUS_MIDI_STATUS ()) & (MIDI_RCV_FULL | MIDI_XMIT_EMPTY))
     {
-      data = INB (u_MidiData);
-      if (input_opened)
-	midi_input_intr (my_dev, data);
-    }
-
-  if (stat & MIDI_XMIT_EMPTY)
-    {
-      while (qlen && dump_to_midi (tmp_queue[qhead]))
+      if (stat & MIDI_RCV_FULL)
 	{
-	  qlen--;
-	  qhead++;
+	  data = inb (u_MidiData);
+	  if (input_opened)
+	    midi_input_intr (my_dev, data);
 	}
 
-      if (!qlen)
+      if (stat & MIDI_XMIT_EMPTY)
 	{
-	  /*
-	   * Disable Midi output interrupts, since no data in the buffer
-	   */
-	  gus_midi_control &= ~MIDI_ENABLE_XMIT;
-	  OUTB (gus_midi_control, u_MidiControl);
+	  while (qlen && dump_to_midi (tmp_queue[qhead]))
+	    {
+	      qlen--;
+	      qhead++;
+	    }
+
+	  if (!qlen)
+	    {
+	      /*
+	       * Disable Midi output interrupts, since no data in the buffer
+	       */
+	      gus_midi_control &= ~MIDI_ENABLE_XMIT;
+	      outb (gus_midi_control, u_MidiControl);
+	      outb (gus_midi_control, u_MidiControl);
+	    }
 	}
+
     }
 
-  if (stat & MIDI_FRAME_ERR)
-    printk ("Midi framing error\n");
-  if (stat & MIDI_OVERRUN && input_opened)
-    printk ("GUS: Midi input overrun\n");
-
-  RESTORE_INTR (flags);
+  restore_flags (flags);
 }
-
-#endif
 
 #endif

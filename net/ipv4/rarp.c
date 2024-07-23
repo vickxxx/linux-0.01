@@ -25,24 +25,31 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  *
+ * Fixes
+ *	Alan Cox	:	Rarp delete on device down needed as
+ *				reported by Walter Wolfgang.
+ *
  */
+
+#include <linux/module.h>
 
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/errno.h>
+#include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/in.h>
+#include <linux/config.h>
+
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <stdarg.h>
 #include <linux/inet.h>
-#include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -55,8 +62,10 @@
 #ifdef CONFIG_AX25
 #include <net/ax25.h>
 #endif
+#include <linux/proc_fs.h>
+#include <linux/stat.h>
 
-#ifdef CONFIG_INET_RARP
+extern int (*rarp_ioctl_hook)(unsigned int,void*);
 
 /*
  *	This structure defines the RARP mapping cache. As long as we make 
@@ -75,6 +84,7 @@ struct rarp_table
 
 struct rarp_table *rarp_tables = NULL;
 
+static int rarp_rcv(struct sk_buff *, struct device *, struct packet_type *);
 
 static struct packet_type rarp_packet_type =
 {
@@ -87,16 +97,6 @@ static struct packet_type rarp_packet_type =
 
 static initflag = 1;
 
-/*
- *	Called once when data first added to rarp cache with ioctl.
- */
-
-static void rarp_init (void)
-{
-	/* Register the packet type */
-	rarp_packet_type.type=htons(ETH_P_RARP);
-	dev_add_pack(&rarp_packet_type);
-}
 
 /*
  *	Release the memory for this entry.
@@ -105,6 +105,7 @@ static void rarp_init (void)
 static inline void rarp_release_entry(struct rarp_table *entry)
 {
 	kfree_s(entry, sizeof(struct rarp_table));
+	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -133,6 +134,56 @@ static void rarp_destroy(unsigned long ip_addr)
 	sti();
 }
 
+/*
+ *	Flush a device.
+ */
+
+static void rarp_destroy_dev(struct device *dev)
+{
+	struct rarp_table *entry;
+	struct rarp_table **pentry;
+  
+	cli();
+	pentry = &rarp_tables;
+	while ((entry = *pentry) != NULL)
+	{
+		if (entry->dev == dev)
+		{
+			*pentry = entry->next;
+			sti();
+			rarp_release_entry(entry);
+		}
+		else
+			pentry = &entry->next;
+	}
+	sti();
+}
+
+static int rarp_device_event(struct notifier_block *this, unsigned long event, void *ptr)
+{
+	if(event!=NETDEV_DOWN)
+		return NOTIFY_DONE;
+	rarp_destroy_dev((struct device *)ptr);
+	return NOTIFY_DONE;
+}
+
+/*
+ *	Called once when data first added to rarp cache with ioctl.
+ */
+ 
+static struct notifier_block rarp_dev_notifier={
+	rarp_device_event,
+	NULL,
+	0
+};
+ 
+static void rarp_init_pkt (void)
+{
+	/* Register the packet type */
+	rarp_packet_type.type=htons(ETH_P_RARP);
+	dev_add_pack(&rarp_packet_type);
+	register_netdevice_notifier(&rarp_dev_notifier);
+}
 
 /*
  *	Receive an arp request by the device layer.  Maybe it should be 
@@ -140,17 +191,17 @@ static void rarp_destroy(unsigned long ip_addr)
  *	"overhead" time isn't that high...
  */
 
-int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+static int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 {
 /*
  *	We shouldn't use this type conversion. Check later.
  */
-	struct arphdr *rarp = (struct arphdr *)skb->h.raw;
-	unsigned char *rarp_ptr = (unsigned char *)(rarp+1);
+	struct arphdr *rarp = (struct arphdr *) skb->data;
+	unsigned char *rarp_ptr = skb_pull(skb,sizeof(struct arphdr));
 	struct rarp_table *entry;
 	long sip,tip;
 	unsigned char *sha,*tha;            /* s for "source", t for "target" */
-  
+	
 /*
  *	If this test doesn't pass, it's not IP, or we should ignore it anyway
  */
@@ -182,12 +233,12 @@ int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		(rarp->ar_pro != htons(ETH_P_IP) && dev->type != ARPHRD_AX25)
 		|| rarp->ar_pln != 4)
 	{
-	/*
-	 *	This packet is not for us. Remove it. 
-	 */
-	kfree_skb(skb, FREE_READ);
-	return 0;
-}
+		/*
+		 *	This packet is not for us. Remove it. 
+		 */
+		kfree_skb(skb, FREE_READ);
+		return 0;
+	}
   
 /*
  *	Extract variable width fields
@@ -216,7 +267,7 @@ int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		sti();
 
 		arp_send(ARPOP_RREPLY, ETH_P_RARP, sip, dev, dev->pa_addr, sha, 
-			dev->dev_addr);
+			dev->dev_addr, sha);
 	}
 	else
 		sti();
@@ -238,6 +289,7 @@ static int rarp_req_set(struct arpreq *req)
 	int htype, hlen;
 	unsigned long ip;
 	struct rtable *rt;
+	struct device * dev;
   
 	memcpy_fromfs(&r, req, sizeof(r));
   
@@ -276,9 +328,11 @@ static int rarp_req_set(struct arpreq *req)
  *	Is it reachable directly ?
  */
   
-	rt = ip_rt_route(ip, NULL, NULL);
+	rt = ip_rt_route(ip, 0);
 	if (rt == NULL)
 		return -ENETUNREACH;
+	dev = rt->rt_dev;
+	ip_rt_put(rt);
 
 /*
  *	Is there an existing entry for this address?  Find out...
@@ -302,9 +356,9 @@ static int rarp_req_set(struct arpreq *req)
 			sti();
 			return -ENOMEM;
 		}
-		if(initflag)
+		if (initflag)
 		{
-			rarp_init();
+			rarp_init_pkt();
 			initflag=0;
 		}
 
@@ -316,7 +370,10 @@ static int rarp_req_set(struct arpreq *req)
 	entry->hlen = hlen;
 	entry->htype = htype;
 	memcpy(&entry->ha, &r.arp_ha.sa_data, hlen);
-	entry->dev = rt->rt_dev;
+	entry->dev = dev;
+
+	/* Don't unlink if we have entries to serve. */
+	MOD_INC_USE_COUNT;
 
 	sti();  
 
@@ -424,7 +481,7 @@ int rarp_ioctl(unsigned int cmd, void *arg)
 	return 0;
 }
 
-int rarp_get_info(char *buffer, char **start, off_t offset, int length)
+int rarp_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
 	int len=0;
 	off_t begin=0;
@@ -433,7 +490,7 @@ int rarp_get_info(char *buffer, char **start, off_t offset, int length)
 	struct rarp_table *entry;
 	char ipbuffer[20];
 	unsigned long netip;
-	if(initflag)
+	if (initflag)
 	{
 		size = sprintf(buffer,"RARP disabled until entries added to cache.\n");
 		pos+=size;
@@ -481,11 +538,47 @@ int rarp_get_info(char *buffer, char **start, off_t offset, int length)
 		sti();
 	}      
 
-	*start=buffer+(offset-begin);	/* Start of wanted data */
-	len-=(offset-begin);		/* Start slop */
-	if(len>length)
-		len=length;		        /* Ending slop */
+	*start = buffer+(offset-begin);	/* Start of wanted data */
+	len   -= (offset-begin);	/* Start slop */
+	if (len>length)
+		len = length;		/* Ending slop */
 	return len;
 }
 
+void
+rarp_init(void)
+{
+	proc_net_register(&(struct proc_dir_entry) {
+		PROC_NET_RARP, 4, "rarp",
+		S_IFREG | S_IRUGO, 1, 0, 0,
+		0, &proc_net_inode_operations,
+		rarp_get_info
+	});
+	rarp_ioctl_hook = rarp_ioctl;
+}
+
+#ifdef MODULE
+
+int init_module(void)
+{
+	rarp_init();
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	struct rarp_table *rt, *rt_next;
+	proc_net_unregister(PROC_NET_RARP);
+	rarp_ioctl_hook = NULL;
+	cli();
+	/* Destroy the RARP-table */
+	rt = rarp_tables;
+	rarp_tables = NULL;
+	sti();
+	/* ... and free it. */
+	for ( ; rt != NULL; rt = rt_next) {
+		rt_next = rt->next;
+		rarp_release_entry(rt);
+	}
+}
 #endif

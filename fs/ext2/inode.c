@@ -27,12 +27,17 @@
 #include <linux/locks.h>
 #include <linux/mm.h>
 
+static int ext2_update_inode(struct inode * inode, int do_sync);
+
 void ext2_put_inode (struct inode * inode)
 {
 	ext2_discard_prealloc (inode);
 	if (inode->i_nlink || inode->i_ino == EXT2_ACL_IDX_INO ||
 	    inode->i_ino == EXT2_ACL_DATA_INO)
 		return;
+	inode->u.ext2_i.i_dtime	= CURRENT_TIME;
+	inode->i_dirt = 1;
+	ext2_update_inode(inode, IS_SYNC(inode));
 	inode->i_size = 0;
 	if (inode->i_blocks)
 		ext2_truncate (inode);
@@ -41,7 +46,7 @@ void ext2_put_inode (struct inode * inode)
 
 #define inode_bmap(inode, nr) ((inode)->u.ext2_i.i_data[(nr)])
 
-static int block_bmap (struct buffer_head * bh, int nr)
+static inline int block_bmap (struct buffer_head * bh, int nr)
 {
 	int tmp;
 
@@ -62,17 +67,17 @@ static int block_bmap (struct buffer_head * bh, int nr)
 void ext2_discard_prealloc (struct inode * inode)
 {
 #ifdef EXT2_PREALLOCATE
+	unsigned short total;
+
 	if (inode->u.ext2_i.i_prealloc_count) {
-		int i = inode->u.ext2_i.i_prealloc_count;
+		total = inode->u.ext2_i.i_prealloc_count;
 		inode->u.ext2_i.i_prealloc_count = 0;
-		ext2_free_blocks (inode->i_sb,
-				  inode->u.ext2_i.i_prealloc_block,
-				  i);
+		ext2_free_blocks (inode, inode->u.ext2_i.i_prealloc_block, total);
 	}
 #endif
 }
 
-static int ext2_alloc_block (struct inode * inode, unsigned long goal)
+static int ext2_alloc_block (struct inode * inode, unsigned long goal, int * err)
 {
 #ifdef EXT2FS_DEBUG
 	static unsigned long alloc_hits = 0, alloc_attempts = 0;
@@ -102,7 +107,7 @@ static int ext2_alloc_block (struct inode * inode, unsigned long goal)
 			return 0;
 		}
 		memset(bh->b_data, 0, inode->i_sb->s_blocksize);
-		bh->b_uptodate = 1;
+		mark_buffer_uptodate(bh, 1);
 		mark_buffer_dirty(bh, 1);
 		brelse (bh);
 	} else {
@@ -110,15 +115,14 @@ static int ext2_alloc_block (struct inode * inode, unsigned long goal)
 		ext2_debug ("preallocation miss (%lu/%lu).\n",
 			    alloc_hits, ++alloc_attempts);
 		if (S_ISREG(inode->i_mode))
-			result = ext2_new_block
-				(inode->i_sb, goal,
+			result = ext2_new_block (inode, goal,
 				 &inode->u.ext2_i.i_prealloc_count,
-				 &inode->u.ext2_i.i_prealloc_block);
+				 &inode->u.ext2_i.i_prealloc_block, err);
 		else
-			result = ext2_new_block (inode->i_sb, goal, 0, 0);
+			result = ext2_new_block (inode, goal, 0, 0, err);
 	}
 #else
-	result = ext2_new_block (inode->i_sb, goal, 0, 0);
+	result = ext2_new_block (inode, goal, 0, 0, err);
 #endif
 
 	return result;
@@ -129,14 +133,15 @@ int ext2_bmap (struct inode * inode, int block)
 {
 	int i;
 	int addr_per_block = EXT2_ADDR_PER_BLOCK(inode->i_sb);
+	int addr_per_block_bits = EXT2_ADDR_PER_BLOCK_BITS(inode->i_sb);
 
 	if (block < 0) {
 		ext2_warning (inode->i_sb, "ext2_bmap", "block < 0");
 		return 0;
 	}
 	if (block >= EXT2_NDIR_BLOCKS + addr_per_block +
-		     addr_per_block * addr_per_block +
-		     addr_per_block * addr_per_block * addr_per_block) {
+		(1 << (addr_per_block_bits * 2)) +
+		((1 << (addr_per_block_bits * 2)) << addr_per_block_bits)) {
 		ext2_warning (inode->i_sb, "ext2_bmap", "block > big");
 		return 0;
 	}
@@ -151,29 +156,29 @@ int ext2_bmap (struct inode * inode, int block)
 					  inode->i_sb->s_blocksize), block);
 	}
 	block -= addr_per_block;
-	if (block < addr_per_block * addr_per_block) {
+	if (block < (1 << (addr_per_block_bits * 2))) {
 		i = inode_bmap (inode, EXT2_DIND_BLOCK);
 		if (!i)
 			return 0;
 		i = block_bmap (bread (inode->i_dev, i,
 				       inode->i_sb->s_blocksize),
-				block / addr_per_block);
+				block >> addr_per_block_bits);
 		if (!i)
 			return 0;
 		return block_bmap (bread (inode->i_dev, i,
 					  inode->i_sb->s_blocksize),
 				   block & (addr_per_block - 1));
 	}
-	block -= addr_per_block * addr_per_block;
+	block -= (1 << (addr_per_block_bits * 2));
 	i = inode_bmap (inode, EXT2_TIND_BLOCK);
 	if (!i)
 		return 0;
 	i = block_bmap (bread (inode->i_dev, i, inode->i_sb->s_blocksize),
-			block / (addr_per_block * addr_per_block));
+			block >> (addr_per_block_bits * 2));
 	if (!i)
 		return 0;
 	i = block_bmap (bread (inode->i_dev, i, inode->i_sb->s_blocksize),
-			(block / addr_per_block) & (addr_per_block - 1));
+			(block >> addr_per_block_bits) & (addr_per_block - 1));
 	if (!i)
 		return 0;
 	return block_bmap (bread (inode->i_dev, i, inode->i_sb->s_blocksize),
@@ -224,12 +229,12 @@ repeat:
 
 	ext2_debug ("goal = %d.\n", goal);
 
-	tmp = ext2_alloc_block (inode, goal);
+	tmp = ext2_alloc_block (inode, goal, err);
 	if (!tmp)
 		return NULL;
 	result = getblk (inode->i_dev, tmp, inode->i_sb->s_blocksize);
 	if (*p) {
-		ext2_free_blocks (inode->i_sb, tmp, 1);
+		ext2_free_blocks (inode, tmp, 1);
 		brelse (result);
 		goto repeat;
 	}
@@ -257,10 +262,10 @@ static struct buffer_head * block_getblk (struct inode * inode,
 
 	if (!bh)
 		return NULL;
-	if (!bh->b_uptodate) {
+	if (!buffer_uptodate(bh)) {
 		ll_rw_block (READ, 1, &bh);
 		wait_on_buffer (bh);
-		if (!bh->b_uptodate) {
+		if (!buffer_uptodate(bh)) {
 			brelse (bh);
 			return NULL;
 		}
@@ -296,14 +301,14 @@ repeat:
 		if (!goal)
 			goal = bh->b_blocknr;
 	}
-	tmp = ext2_alloc_block (inode, goal);
+	tmp = ext2_alloc_block (inode, goal, err);
 	if (!tmp) {
 		brelse (bh);
 		return NULL;
 	}
 	result = getblk (bh->b_dev, tmp, blocksize);
 	if (*p) {
-		ext2_free_blocks (inode->i_sb, tmp, 1);
+		ext2_free_blocks (inode, tmp, 1);
 		brelse (result);
 		goto repeat;
 	}
@@ -335,10 +340,11 @@ static int block_getcluster (struct inode * inode, struct buffer_head * bh,
 
 	if(!bh) return 0;
 
-	if(nr % (PAGE_SIZE / inode->i_sb->s_blocksize) != 0) goto out;
+	if((nr & ((PAGE_SIZE >> EXT2_BLOCK_SIZE_BITS(inode->i_sb)) - 1)) != 0)
+		goto out;
 	if(nr + 3 > EXT2_ADDR_PER_BLOCK(inode->i_sb)) goto out;
 
-	for(i=0; i< (PAGE_SIZE / inode->i_sb->s_blocksize); i++) {
+	for(i=0; i< (PAGE_SIZE >> EXT2_BLOCK_SIZE_BITS(inode->i_sb)); i++) {
 	  p = (u32 *) bh->b_data + nr + i;
 	  
 	  /* All blocks in cluster must already be allocated */
@@ -363,15 +369,16 @@ struct buffer_head * ext2_getblk (struct inode * inode, long block,
 	struct buffer_head * bh;
 	unsigned long b;
 	unsigned long addr_per_block = EXT2_ADDR_PER_BLOCK(inode->i_sb);
+	int addr_per_block_bits = EXT2_ADDR_PER_BLOCK_BITS(inode->i_sb);
 
 	*err = -EIO;
 	if (block < 0) {
 		ext2_warning (inode->i_sb, "ext2_getblk", "block < 0");
 		return NULL;
 	}
-	if (block > EXT2_NDIR_BLOCKS + addr_per_block  +
-		    addr_per_block * addr_per_block +
-		    addr_per_block * addr_per_block * addr_per_block) {
+	if (block > EXT2_NDIR_BLOCKS + addr_per_block +
+		(1 << (addr_per_block_bits * 2)) +
+		((1 << (addr_per_block_bits * 2)) << addr_per_block_bits)) {
 		ext2_warning (inode->i_sb, "ext2_getblk", "block > big");
 		return NULL;
 	}
@@ -401,18 +408,18 @@ struct buffer_head * ext2_getblk (struct inode * inode, long block,
 				     inode->i_sb->s_blocksize, b, err);
 	}
 	block -= addr_per_block;
-	if (block < addr_per_block * addr_per_block) {
+	if (block < (1 << (addr_per_block_bits * 2))) {
 		bh = inode_getblk (inode, EXT2_DIND_BLOCK, create, b, err);
-		bh = block_getblk (inode, bh, block / addr_per_block, create,
-				   inode->i_sb->s_blocksize, b, err);
+		bh = block_getblk (inode, bh, block >> addr_per_block_bits,
+				   create, inode->i_sb->s_blocksize, b, err);
 		return block_getblk (inode, bh, block & (addr_per_block - 1),
 				     create, inode->i_sb->s_blocksize, b, err);
 	}
-	block -= addr_per_block * addr_per_block;
+	block -= (1 << (addr_per_block_bits * 2));
 	bh = inode_getblk (inode, EXT2_TIND_BLOCK, create, b, err);
-	bh = block_getblk (inode, bh, block/(addr_per_block * addr_per_block),
+	bh = block_getblk (inode, bh, block >> (addr_per_block_bits * 2),
 			   create, inode->i_sb->s_blocksize, b, err);
-	bh = block_getblk (inode, bh, (block/addr_per_block) & (addr_per_block - 1),
+	bh = block_getblk (inode, bh, (block >> addr_per_block_bits) & (addr_per_block - 1),
 			   create, inode->i_sb->s_blocksize, b, err);
 	return block_getblk (inode, bh, block & (addr_per_block - 1), create,
 			     inode->i_sb->s_blocksize, b, err);
@@ -424,6 +431,7 @@ int ext2_getcluster (struct inode * inode, long block)
 	int err, create;
 	unsigned long b;
 	unsigned long addr_per_block = EXT2_ADDR_PER_BLOCK(inode->i_sb);
+	int addr_per_block_bits = EXT2_ADDR_PER_BLOCK_BITS(inode->i_sb);
 
 	create = 0;
 	err = -EIO;
@@ -431,9 +439,9 @@ int ext2_getcluster (struct inode * inode, long block)
 		ext2_warning (inode->i_sb, "ext2_getblk", "block < 0");
 		return 0;
 	}
-	if (block > EXT2_NDIR_BLOCKS + addr_per_block  +
-		    addr_per_block * addr_per_block +
-		    addr_per_block * addr_per_block * addr_per_block) {
+	if (block > EXT2_NDIR_BLOCKS + addr_per_block +
+		(1 << (addr_per_block_bits * 2)) +
+		((1 << (addr_per_block_bits * 2)) << addr_per_block_bits)) {
 		ext2_warning (inode->i_sb, "ext2_getblk", "block > big");
 		return 0;
 	}
@@ -450,18 +458,18 @@ int ext2_getcluster (struct inode * inode, long block)
 					 inode->i_sb->s_blocksize);
 	}
 	block -= addr_per_block;
-	if (block < addr_per_block * addr_per_block) {
+	if (block < (1 << (addr_per_block_bits * 2))) {
 		bh = inode_getblk (inode, EXT2_DIND_BLOCK, create, b, &err);
-		bh = block_getblk (inode, bh, block / addr_per_block, create,
-				   inode->i_sb->s_blocksize, b, &err);
+		bh = block_getblk (inode, bh, block >> addr_per_block_bits,
+				   create, inode->i_sb->s_blocksize, b, &err);
 		return block_getcluster (inode, bh, block & (addr_per_block - 1),
 				     inode->i_sb->s_blocksize);
 	}
-	block -= addr_per_block * addr_per_block;
+	block -= (1 << (addr_per_block_bits * 2));
 	bh = inode_getblk (inode, EXT2_TIND_BLOCK, create, b, &err);
-	bh = block_getblk (inode, bh, block/(addr_per_block * addr_per_block),
+	bh = block_getblk (inode, bh, block >> (addr_per_block_bits * 2),
 			   create, inode->i_sb->s_blocksize, b, &err);
-	bh = block_getblk (inode, bh, (block/addr_per_block) & (addr_per_block - 1),
+	bh = block_getblk (inode, bh, (block >> addr_per_block_bits) & (addr_per_block - 1),
 			   create, inode->i_sb->s_blocksize, b, &err);
 	return block_getcluster (inode, bh, block & (addr_per_block - 1),
 				 inode->i_sb->s_blocksize);
@@ -473,11 +481,11 @@ struct buffer_head * ext2_bread (struct inode * inode, int block,
 	struct buffer_head * bh;
 
 	bh = ext2_getblk (inode, block, create, err);
-	if (!bh || bh->b_uptodate)
+	if (!bh || buffer_uptodate(bh))
 		return bh;
 	ll_rw_block (READ, 1, &bh);
 	wait_on_buffer (bh);
-	if (bh->b_uptodate)
+	if (buffer_uptodate(bh))
 		return bh;
 	brelse (bh);
 	*err = -EIO;
@@ -492,10 +500,12 @@ void ext2_read_inode (struct inode * inode)
 	unsigned long group_desc;
 	unsigned long desc;
 	unsigned long block;
+	unsigned long offset;
 	struct ext2_group_desc * gdp;
 
 	if ((inode->i_ino != EXT2_ROOT_INO && inode->i_ino != EXT2_ACL_IDX_INO &&
-	     inode->i_ino != EXT2_ACL_DATA_INO && inode->i_ino < EXT2_FIRST_INO) ||
+	     inode->i_ino != EXT2_ACL_DATA_INO &&
+	     inode->i_ino < EXT2_FIRST_INO(inode->i_sb)) ||
 	    inode->i_ino > inode->i_sb->u.ext2_sb.s_es->s_inodes_count) {
 		ext2_error (inode->i_sb, "ext2_read_inode",
 			    "bad inode number: %lu", inode->i_ino);
@@ -505,22 +515,27 @@ void ext2_read_inode (struct inode * inode)
 	if (block_group >= inode->i_sb->u.ext2_sb.s_groups_count)
 		ext2_panic (inode->i_sb, "ext2_read_inode",
 			    "group >= groups count");
-	group_desc = block_group / EXT2_DESC_PER_BLOCK(inode->i_sb);
-	desc = block_group % EXT2_DESC_PER_BLOCK(inode->i_sb);
+	group_desc = block_group >> EXT2_DESC_PER_BLOCK_BITS(inode->i_sb);
+	desc = block_group & (EXT2_DESC_PER_BLOCK(inode->i_sb) - 1);
 	bh = inode->i_sb->u.ext2_sb.s_group_desc[group_desc];
 	if (!bh)
 		ext2_panic (inode->i_sb, "ext2_read_inode",
 			    "Descriptor not loaded");
 	gdp = (struct ext2_group_desc *) bh->b_data;
+	/*
+	 * Figure out the offset within the block group inode table
+	 */
+	offset = ((inode->i_ino - 1) % EXT2_INODES_PER_GROUP(inode->i_sb)) *
+		EXT2_INODE_SIZE(inode->i_sb);
 	block = gdp[desc].bg_inode_table +
-		(((inode->i_ino - 1) % EXT2_INODES_PER_GROUP(inode->i_sb))
-		 / EXT2_INODES_PER_BLOCK(inode->i_sb));
+		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
 	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize)))
 		ext2_panic (inode->i_sb, "ext2_read_inode",
 			    "unable to read i-node block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
-	raw_inode = ((struct ext2_inode *) bh->b_data) +
-		(inode->i_ino - 1) % EXT2_INODES_PER_BLOCK(inode->i_sb);
+	offset &= (EXT2_BLOCK_SIZE(inode->i_sb) - 1);
+	raw_inode = (struct ext2_inode *) (bh->b_data + offset);
+
 	inode->i_mode = raw_inode->i_mode;
 	inode->i_uid = raw_inode->i_uid;
 	inode->i_gid = raw_inode->i_gid;
@@ -530,9 +545,10 @@ void ext2_read_inode (struct inode * inode)
 	inode->i_ctime = raw_inode->i_ctime;
 	inode->i_mtime = raw_inode->i_mtime;
 	inode->u.ext2_i.i_dtime = raw_inode->i_dtime;
-	inode->i_blksize = inode->i_sb->s_blocksize;
+	inode->i_blksize = PAGE_SIZE;	/* This is the optimal IO size (for stat), not the fs block size */
 	inode->i_blocks = raw_inode->i_blocks;
 	inode->i_version = ++event;
+	inode->u.ext2_i.i_new_inode = 0;
 	inode->u.ext2_i.i_flags = raw_inode->i_flags;
 	inode->u.ext2_i.i_faddr = raw_inode->i_faddr;
 	inode->u.ext2_i.i_frag_no = raw_inode->i_frag;
@@ -548,7 +564,7 @@ void ext2_read_inode (struct inode * inode)
 		ext2_error (inode->i_sb, "ext2_read_inode",
 			    "New inode has non-zero prealloc count!");
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-		inode->i_rdev = raw_inode->i_block[0];
+		inode->i_rdev = to_kdev_t(raw_inode->i_block[0]);
 	else for (block = 0; block < EXT2_N_BLOCKS; block++)
 		inode->u.ext2_i.i_data[block] = raw_inode->i_block[block];
 	brelse (bh);
@@ -576,7 +592,7 @@ void ext2_read_inode (struct inode * inode)
 		inode->i_flags |= S_IMMUTABLE;
 }
 
-static struct buffer_head * ext2_update_inode (struct inode * inode)
+static int ext2_update_inode(struct inode * inode, int do_sync)
 {
 	struct buffer_head * bh;
 	struct ext2_inode * raw_inode;
@@ -584,9 +600,12 @@ static struct buffer_head * ext2_update_inode (struct inode * inode)
 	unsigned long group_desc;
 	unsigned long desc;
 	unsigned long block;
+	unsigned long offset;
+	int err = 0;
 	struct ext2_group_desc * gdp;
 
-	if ((inode->i_ino != EXT2_ROOT_INO && inode->i_ino < EXT2_FIRST_INO) ||
+	if ((inode->i_ino != EXT2_ROOT_INO &&
+	     inode->i_ino < EXT2_FIRST_INO(inode->i_sb)) ||
 	    inode->i_ino > inode->i_sb->u.ext2_sb.s_es->s_inodes_count) {
 		ext2_error (inode->i_sb, "ext2_write_inode",
 			    "bad inode number: %lu", inode->i_ino);
@@ -596,22 +615,27 @@ static struct buffer_head * ext2_update_inode (struct inode * inode)
 	if (block_group >= inode->i_sb->u.ext2_sb.s_groups_count)
 		ext2_panic (inode->i_sb, "ext2_write_inode",
 			    "group >= groups count");
-	group_desc = block_group / EXT2_DESC_PER_BLOCK(inode->i_sb);
-	desc = block_group % EXT2_DESC_PER_BLOCK(inode->i_sb);
+	group_desc = block_group >> EXT2_DESC_PER_BLOCK_BITS(inode->i_sb);
+	desc = block_group & (EXT2_DESC_PER_BLOCK(inode->i_sb) - 1);
 	bh = inode->i_sb->u.ext2_sb.s_group_desc[group_desc];
 	if (!bh)
 		ext2_panic (inode->i_sb, "ext2_write_inode",
 			    "Descriptor not loaded");
 	gdp = (struct ext2_group_desc *) bh->b_data;
+	/*
+	 * Figure out the offset within the block group inode table
+	 */
+	offset = ((inode->i_ino - 1) % EXT2_INODES_PER_GROUP(inode->i_sb)) *
+		EXT2_INODE_SIZE(inode->i_sb);
 	block = gdp[desc].bg_inode_table +
-		(((inode->i_ino - 1) % EXT2_INODES_PER_GROUP(inode->i_sb))
-		 / EXT2_INODES_PER_BLOCK(inode->i_sb));
+		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
 	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize)))
 		ext2_panic (inode->i_sb, "ext2_write_inode",
 			    "unable to read i-node block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
-	raw_inode = ((struct ext2_inode *)bh->b_data) +
-		(inode->i_ino - 1) % EXT2_INODES_PER_BLOCK(inode->i_sb);
+	offset &= EXT2_BLOCK_SIZE(inode->i_sb) - 1;
+	raw_inode = (struct ext2_inode *) (bh->b_data + offset);
+
 	raw_inode->i_mode = inode->i_mode;
 	raw_inode->i_uid = inode->i_uid;
 	raw_inode->i_gid = inode->i_gid;
@@ -630,40 +654,32 @@ static struct buffer_head * ext2_update_inode (struct inode * inode)
 	raw_inode->i_dir_acl = inode->u.ext2_i.i_dir_acl;
 	raw_inode->i_version = inode->u.ext2_i.i_version;
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-		raw_inode->i_block[0] = inode->i_rdev;
+		raw_inode->i_block[0] = kdev_t_to_nr(inode->i_rdev);
 	else for (block = 0; block < EXT2_N_BLOCKS; block++)
 		raw_inode->i_block[block] = inode->u.ext2_i.i_data[block];
 	mark_buffer_dirty(bh, 1);
 	inode->i_dirt = 0;
-	return bh;
+	if (do_sync) {
+		ll_rw_block (WRITE, 1, &bh);
+		wait_on_buffer (bh);
+		if (buffer_req(bh) && !buffer_uptodate(bh)) {
+			printk ("IO error syncing ext2 inode ["
+				"%s:%08lx]\n",
+				kdevname(inode->i_dev), inode->i_ino);
+			err = -1;
+		}
+	}
+	brelse (bh);
+	return err;
 }
 
 void ext2_write_inode (struct inode * inode)
 {
-	struct buffer_head * bh;
-	bh = ext2_update_inode (inode);
-	brelse (bh);
+	ext2_update_inode (inode, 0);
 }
 
 int ext2_sync_inode (struct inode *inode)
 {
-	int err = 0;
-	struct buffer_head *bh;
-
-	bh = ext2_update_inode (inode);
-	if (bh && bh->b_dirt)
-	{
-		ll_rw_block (WRITE, 1, &bh);
-		wait_on_buffer (bh);
-		if (bh->b_req && !bh->b_uptodate)
-		{
-			printk ("IO error syncing ext2 inode [%04x:%08lx]\n",
-				inode->i_dev, inode->i_ino);
-			err = -1;
-		}
-	}
-	else if (!bh)
-		err = -1;
-	brelse (bh);
-	return err;
+	return ext2_update_inode (inode, 1);
 }
+

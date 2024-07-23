@@ -11,75 +11,86 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/tty.h>
-#include <linux/mouse.h>
+#include <linux/miscdevice.h>
 #include <linux/tpqic02.h>
+#include <linux/ftape.h>
 #include <linux/malloc.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/random.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 
 #ifdef CONFIG_SOUND
-extern long soundcard_init(long mem_start);
+void soundcard_init(void);
+#endif
+#ifdef CONFIG_ISDN
+void isdn_init(void);
 #endif
 
-static int read_ram(struct inode * inode, struct file * file,char * buf, int count)
+static int read_ram(struct inode * inode, struct file * file, char * buf, int count)
 {
 	return -EIO;
 }
 
-static int write_ram(struct inode * inode, struct file * file,char * buf, int count)
+static int write_ram(struct inode * inode, struct file * file, const char * buf, int count)
 {
 	return -EIO;
 }
 
-static int read_mem(struct inode * inode, struct file * file,char * buf, int count)
+static int read_mem(struct inode * inode, struct file * file, char * buf, int count)
 {
 	unsigned long p = file->f_pos;
 	int read;
 
+	p += PAGE_OFFSET;
 	if (count < 0)
 		return -EINVAL;
-	if (p >= high_memory)
+	if (MAP_NR(p) >= MAP_NR(high_memory))
 		return 0;
 	if (count > high_memory - p)
 		count = high_memory - p;
 	read = 0;
-	while (p < PAGE_SIZE && count > 0) {
-		put_fs_byte(0,buf);
+#if defined(__i386__) || defined(__sparc__) /* we don't have page 0 mapped on x86/sparc.. */
+	while (p < PAGE_OFFSET + PAGE_SIZE && count > 0) {
+		put_user(0,buf);
 		buf++;
 		p++;
 		count--;
 		read++;
 	}
-	memcpy_tofs(buf,(void *) p,count);
+#endif
+	memcpy_tofs(buf, (void *) p, count);
 	read += count;
 	file->f_pos += read;
 	return read;
 }
 
-static int write_mem(struct inode * inode, struct file * file,char * buf, int count)
+static int write_mem(struct inode * inode, struct file * file, const char * buf, int count)
 {
 	unsigned long p = file->f_pos;
 	int written;
 
+	p += PAGE_OFFSET;
 	if (count < 0)
 		return -EINVAL;
-	if (p >= high_memory)
+	if (MAP_NR(p) >= MAP_NR(high_memory))
 		return 0;
 	if (count > high_memory - p)
 		count = high_memory - p;
 	written = 0;
-	while (p < PAGE_SIZE && count > 0) {
+#if defined(__i386__) || defined(__sparc__) /* we don't have page 0 mapped on x86/sparc.. */
+	while (PAGE_OFFSET + p < PAGE_SIZE && count > 0) {
 		/* Hmm. Do something? */
 		buf++;
 		p++;
 		count--;
 		written++;
 	}
-	memcpy_fromfs((void *) p,buf,count);
+#endif
+	memcpy_fromfs((void *) p, buf, count);
 	written += count;
 	file->f_pos += written;
 	return count;
@@ -120,13 +131,13 @@ static int read_kmem(struct inode *inode, struct file *file, char *buf, int coun
 	return read1 + read2;
 }
 
-static int read_port(struct inode * inode,struct file * file,char * buf, int count)
+static int read_port(struct inode * inode, struct file * file,char * buf, int count)
 {
 	unsigned int i = file->f_pos;
 	char * tmp = buf;
 
 	while (count-- > 0 && i < 65536) {
-		put_fs_byte(inb(i),tmp);
+		put_user(inb(i),tmp);
 		i++;
 		tmp++;
 	}
@@ -134,13 +145,13 @@ static int read_port(struct inode * inode,struct file * file,char * buf, int cou
 	return tmp-buf;
 }
 
-static int write_port(struct inode * inode,struct file * file,char * buf, int count)
+static int write_port(struct inode * inode, struct file * file, const char * buf, int count)
 {
 	unsigned int i = file->f_pos;
-	char * tmp = buf;
+	const char * tmp = buf;
 
 	while (count-- > 0 && i < 65536) {
-		outb(get_fs_byte(tmp),i);
+		outb(get_user(tmp),i);
 		i++;
 		tmp++;
 	}
@@ -148,22 +159,22 @@ static int write_port(struct inode * inode,struct file * file,char * buf, int co
 	return tmp-buf;
 }
 
-static int read_null(struct inode * node,struct file * file,char * buf,int count)
+static int read_null(struct inode * node, struct file * file, char * buf, int count)
 {
 	return 0;
 }
 
-static int write_null(struct inode * inode,struct file * file,char * buf, int count)
+static int write_null(struct inode * inode, struct file * file, const char * buf, int count)
 {
 	return count;
 }
 
-static int read_zero(struct inode * node,struct file * file,char * buf,int count)
+static int read_zero(struct inode * node, struct file * file, char * buf, int count)
 {
 	int left;
 
 	for (left = count; left > 0; left--) {
-		put_fs_byte(0,buf);
+		put_user(0,buf);
 		buf++;
 	}
 	return count;
@@ -178,12 +189,12 @@ static int mmap_zero(struct inode * inode, struct file * file, struct vm_area_st
 	return 0;
 }
 
-static int read_full(struct inode * node,struct file * file,char * buf,int count)
+static int read_full(struct inode * node, struct file * file, char * buf,int count)
 {
 	return count;
 }
 
-static int write_full(struct inode * inode,struct file * file,char * buf, int count)
+static int write_full(struct inode * inode, struct file * file, const char * buf, int count)
 {
 	return -ENOSPC;
 }
@@ -198,7 +209,7 @@ static int null_lseek(struct inode * inode, struct file * file, off_t offset, in
 	return file->f_pos=0;
 }
 /*
- * The memory devices use the full 32 bits of the offset, and so we cannot
+ * The memory devices use the full 32/64 bits of the offset, and so we cannot
  * check against negative addresses: they are ok. The return value is weird,
  * though, in that case (0).
  *
@@ -340,6 +351,12 @@ static int memory_open(struct inode * inode, struct file * filp)
 		case 7:
 			filp->f_op = &full_fops;
 			break;
+		case 8:
+			filp->f_op = &random_fops;
+			break;
+		case 9:
+			filp->f_op = &urandom_fops;
+			break;
 		default:
 			return -ENODEV;
 	}
@@ -361,38 +378,32 @@ static struct file_operations memory_fops = {
 	NULL		/* fsync */
 };
 
-#ifdef CONFIG_FTAPE
-char* ftape_big_buffer;
-#endif
-
-long chr_dev_init(long mem_start, long mem_end)
+int chr_dev_init(void)
 {
 	if (register_chrdev(MEM_MAJOR,"mem",&memory_fops))
 		printk("unable to get major %d for memory devs\n", MEM_MAJOR);
-	mem_start = tty_init(mem_start);
+	rand_initialize();
+	tty_init();
 #ifdef CONFIG_PRINTER
-	mem_start = lp_init(mem_start);
+	lp_init();
 #endif
-#if defined (CONFIG_BUSMOUSE) || defined (CONFIG_82C710_MOUSE) || \
+#if defined (CONFIG_BUSMOUSE) || defined(CONFIG_UMISC) || \
     defined (CONFIG_PSMOUSE) || defined (CONFIG_MS_BUSMOUSE) || \
-    defined (CONFIG_ATIXL_BUSMOUSE)
-	mem_start = mouse_init(mem_start);
+    defined (CONFIG_ATIXL_BUSMOUSE) || defined(CONFIG_SOFT_WATCHDOG) || \
+    defined (CONFIG_APM) || defined (CONFIG_RTC) || defined (CONFIG_SUN_MOUSE)
+	misc_init();
 #endif
 #ifdef CONFIG_SOUND
-	mem_start = soundcard_init(mem_start);
+	soundcard_init();
 #endif
 #if CONFIG_QIC02_TAPE
-	mem_start = qic02_tape_init(mem_start);
+	qic02_tape_init();
 #endif
-/*
- *      Rude way to allocate kernel memory buffer for tape device
- */
+#if CONFIG_ISDN
+	isdn_init();
+#endif
 #ifdef CONFIG_FTAPE
-        /* allocate NR_FTAPE_BUFFERS 32Kb buffers at aligned address */
-        ftape_big_buffer= (char*) ((mem_start + 0x7fff) & ~0x7fff);
-        printk( "ftape: allocated %d buffers aligned at: %p\n",
-               NR_FTAPE_BUFFERS, ftape_big_buffer);
-        mem_start = (long) ftape_big_buffer + NR_FTAPE_BUFFERS * 0x8000;
-#endif 
-	return mem_start;
+	ftape_init();
+#endif
+	return 0;
 }

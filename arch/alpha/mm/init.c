@@ -15,14 +15,14 @@
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/swap.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/pgtable.h>
 #include <asm/hwrpb.h>
+#include <asm/dma.h>
 
-extern void scsi_mem_init(unsigned long);
-extern void sound_mem_init(void);
 extern void die_if_kernel(char *,struct pt_regs *,long);
 extern void show_net_buffers(void);
 
@@ -51,12 +51,6 @@ pte_t __bad_page(void)
 	return pte_mkdirty(mk_pte((unsigned long) EMPTY_PGE, PAGE_SHARED));
 }
 
-unsigned long __zero_page(void)
-{
-	memset((void *) ZERO_PGE, 0, PAGE_SIZE);
-	return (unsigned long) ZERO_PGE;
-}
-
 void show_mem(void)
 {
 	int i,free = 0,total = 0,reserved = 0;
@@ -68,12 +62,12 @@ void show_mem(void)
 	i = MAP_NR(high_memory);
 	while (i-- > 0) {
 		total++;
-		if (mem_map[i] & MAP_PAGE_RESERVED)
+		if (PageReserved(mem_map+i))
 			reserved++;
-		else if (!mem_map[i])
+		else if (!mem_map[i].count)
 			free++;
 		else
-			shared += mem_map[i]-1;
+			shared += mem_map[i].count-1;
 	}
 	printk("%d pages of RAM\n",total);
 	printk("%d free pages\n",free);
@@ -127,12 +121,12 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 			continue;
 
 		while (nr--)
-			mem_map[pfn++] = 0;
+			clear_bit(PG_reserved, &mem_map[pfn++].flags);
 	}
 
 	/* unmap the console stuff: we don't need it, and we don't want it */
 	/* Also set up the real kernel PCB while we're at it.. */
-	memset((void *) ZERO_PGE, 0, PAGE_SIZE);
+	memset((void *) ZERO_PAGE, 0, PAGE_SIZE);
 	memset(swapper_pg_dir, 0, PAGE_SIZE);
 	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
 	pgd_val(swapper_pg_dir[1023]) = (newptbr << 32) | pgprot_val(PAGE_KERNEL);
@@ -141,7 +135,7 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 	init_task.kernel_stack_page = INIT_STACK;
 	load_PCB(&init_task.tss);
 
-	invalidate_all();
+	flush_tlb_all();
 	return start_mem;
 }
 
@@ -158,22 +152,16 @@ void mem_init(unsigned long start_mem, unsigned long end_mem)
 	 */
 	tmp = KERNEL_START;
 	while (tmp < start_mem) {
-		mem_map[MAP_NR(tmp)] = MAP_PAGE_RESERVED;
+		set_bit(PG_reserved, &mem_map[MAP_NR(tmp)].flags);
 		tmp += PAGE_SIZE;
 	}
 
-
-#ifdef CONFIG_SCSI
-	scsi_mem_init(high_memory);
-#endif
-#ifdef CONFIG_SOUND
-	sound_mem_init();
-#endif
-
 	for (tmp = PAGE_OFFSET ; tmp < high_memory ; tmp += PAGE_SIZE) {
-		if (mem_map[MAP_NR(tmp)])
+		if (tmp >= MAX_DMA_ADDRESS)
+			clear_bit(PG_DMA, &mem_map[MAP_NR(tmp)].flags);
+		if (PageReserved(mem_map+MAP_NR(tmp)))
 			continue;
-		mem_map[MAP_NR(tmp)] = 1;
+		mem_map[MAP_NR(tmp)].count = 1;
 		free_page(tmp);
 	}
 	tmp = nr_free_pages << PAGE_SHIFT;
@@ -191,12 +179,12 @@ void si_meminfo(struct sysinfo *val)
 	val->freeram = nr_free_pages << PAGE_SHIFT;
 	val->bufferram = buffermem;
 	while (i-- > 0)  {
-		if (mem_map[i] & MAP_PAGE_RESERVED)
+		if (PageReserved(mem_map+i))
 			continue;
 		val->totalram++;
-		if (!mem_map[i])
+		if (!mem_map[i].count)
 			continue;
-		val->sharedram += mem_map[i]-1;
+		val->sharedram += mem_map[i].count-1;
 	}
 	val->totalram <<= PAGE_SHIFT;
 	val->sharedram <<= PAGE_SHIFT;
