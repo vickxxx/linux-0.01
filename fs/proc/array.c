@@ -14,7 +14,7 @@
  *                      EVERY character on the current page.
  *                      <middelin@polyware.iaf.nl>
  *
- * Danny ter Haar    :	added cpuinfo 
+ * Danny ter Haar    :	added cpuinfo
  *			<dth@cistron.nl>
  *
  * Alessandro Rubini :  profile extension.
@@ -33,14 +33,16 @@
  *                      and /proc/<pid>/cpu extension
  *                      <forissier@isia.cma.fr>
  *			- Incorporation and non-SMP safe operation
- *			of forissier patch in 2.1.78 by 
+ *			of forissier patch in 2.1.78 by
  *			Hans Marcus <crowbar@concepts.nl>
  *
  * aeb@cwi.nl        :  /proc/partitions
  *
  *
- * Alan Cox	     :  security fixes. 
+ * Alan Cox	     :  security fixes.
  *			<Alan.Cox@linux.org>
+ *
+ * Andi Kleen	     :  Race Fixes. 	
  *
  */
 
@@ -60,7 +62,6 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/signal.h>
@@ -141,7 +142,7 @@ static struct file_operations proc_kcore_operations = {
 };
 
 struct inode_operations proc_kcore_inode_operations = {
-	&proc_kcore_operations, 
+	&proc_kcore_operations,
 };
 
 /*
@@ -197,7 +198,7 @@ static ssize_t write_profile(struct file * file, const char * buf,
 			return -EINVAL;
 	}
 #endif
-  
+
 	memset(prof_buffer, 0, prof_len * sizeof(*prof_buffer));
 	return count;
 }
@@ -209,7 +210,7 @@ static struct file_operations proc_profile_operations = {
 };
 
 struct inode_operations proc_profile_inode_operations = {
-	&proc_profile_operations, 
+	&proc_profile_operations,
 };
 
 
@@ -372,28 +373,6 @@ static int get_meminfo(char * buffer)
 		i.freeswap >> 10);
 }
 
-static int get_swapstats(char * buffer)
-{
-	unsigned long *w = swapstats.kswap_wakeups;
-	
-	return sprintf(buffer,
-		       "ProcFreeTry:    %8lu\n"
-		       "ProcFreeSucc:   %8lu\n"
-		       "ProcShrinkTry:  %8lu\n"
-		       "ProcShrinkSucc: %8lu\n"
-		       "KswapFreeTry:   %8lu\n"
-		       "KswapFreeSucc:  %8lu\n"
-		       "KswapWakeups:	%8lu %lu %lu %lu\n",
-		       swapstats.gfp_freepage_attempts,
-		       swapstats.gfp_freepage_successes,
-		       swapstats.gfp_shrink_attempts,
-		       swapstats.gfp_shrink_successes,
-		       swapstats.kswap_freepage_attempts,
-		       swapstats.kswap_freepage_successes,
-		       w[0], w[1], w[2], w[3]
-		       );
-}
-
 static int get_version(char * buffer)
 {
 	extern char *linux_banner;
@@ -409,21 +388,46 @@ static int get_cmdline(char * buffer)
 	return sprintf(buffer, "%s\n", saved_command_line);
 }
 
-static unsigned long get_phys_addr(struct task_struct * p, unsigned long ptr)
+/*
+ * Caller must release_mm the mm_struct later.
+ * You don't get any access to init_mm.
+ */
+static struct mm_struct *get_mm_and_lock(int pid)
+{
+	struct mm_struct *mm = NULL;
+	struct task_struct *tsk;
+
+	read_lock(&tasklist_lock);
+	tsk = find_task_by_pid(pid);
+	if (tsk && tsk->mm && tsk->mm != &init_mm)
+		mmget(mm = tsk->mm);
+	read_unlock(&tasklist_lock);
+	if (mm != NULL)
+		down(&mm->mmap_sem);
+	return mm;
+}
+
+static void release_mm(struct mm_struct *mm)
+{
+	up(&mm->mmap_sem);
+	mmput(mm);
+}
+
+static unsigned long get_phys_addr(struct mm_struct *mm, unsigned long ptr)
 {
 	pgd_t *page_dir;
 	pmd_t *page_middle;
 	pte_t pte;
 
-	if (!p || !p->mm || ptr >= TASK_SIZE)
+	if (ptr >= TASK_SIZE)
 		return 0;
 	/* Check for NULL pgd .. shouldn't happen! */
-	if (!p->mm->pgd) {
-		printk("get_phys_addr: pid %d has NULL pgd!\n", p->pid);
+	if (!mm->pgd) {
+		printk(KERN_DEBUG "missing pgd for mm %p\n", mm);
 		return 0;
 	}
 
-	page_dir = pgd_offset(p->mm,ptr);
+	page_dir = pgd_offset(mm,ptr);
 	if (pgd_none(*page_dir))
 		return 0;
 	if (pgd_bad(*page_dir)) {
@@ -445,7 +449,7 @@ static unsigned long get_phys_addr(struct task_struct * p, unsigned long ptr)
 	return pte_page(pte) + (ptr & ~PAGE_MASK);
 }
 
-static int get_array(struct task_struct *p, unsigned long start, unsigned long end, char * buffer)
+static int get_array(struct mm_struct *mm, unsigned long start, unsigned long end, char * buffer)
 {
 	unsigned long addr;
 	int size = 0, result = 0;
@@ -454,7 +458,7 @@ static int get_array(struct task_struct *p, unsigned long start, unsigned long e
 	if (start >= end)
 		return result;
 	for (;;) {
-		addr = get_phys_addr(p, start);
+		addr = get_phys_addr(mm, start);
 		if (!addr)
 			return result;
 		do {
@@ -476,27 +480,28 @@ static int get_array(struct task_struct *p, unsigned long start, unsigned long e
 
 static int get_env(int pid, char * buffer)
 {
-	struct task_struct *p;
-	
-	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	struct mm_struct *mm;
+	int res = 0;
 
-	if (!p || !p->mm)
-		return 0;
-	return get_array(p, p->mm->env_start, p->mm->env_end, buffer);
+	mm = get_mm_and_lock(pid);
+	if (mm) {
+		res = get_array(mm, mm->env_start, mm->env_end, buffer);
+		release_mm(mm);
+	}
+	return res;
 }
 
 static int get_arg(int pid, char * buffer)
 {
-	struct task_struct *p;
+	struct mm_struct *mm;
+	int res = 0;
 
-	read_lock(&tasklist_lock);
-	p = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
-	if (!p || !p->mm)
-		return 0;
-	return get_array(p, p->mm->arg_start, p->mm->arg_end, buffer);
+	mm = get_mm_and_lock(pid);
+	if (mm) {
+		res = get_array(mm, mm->arg_start, mm->arg_end, buffer);
+		release_mm(mm);
+	}
+	return res;
 }
 
 /*
@@ -749,11 +754,14 @@ static inline char * task_mem(struct task_struct *p, char *buffer)
 {
 	struct mm_struct * mm = p->mm;
 
-	if (mm && mm != &init_mm) {
-		struct vm_area_struct * vma = mm->mmap;
+	if (!mm)
+		return buffer;
+	if (mm != &init_mm) {
+		struct vm_area_struct * vma;
 		unsigned long data = 0, stack = 0;
 		unsigned long exec = 0, lib = 0;
 
+		down(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next) {
 			unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
 			if (!vma->vm_file) {
@@ -771,6 +779,7 @@ static inline char * task_mem(struct task_struct *p, char *buffer)
 				lib += len;
 			}
 		}	
+		up(&mm->mmap_sem);
 		buffer += sprintf(buffer,
 			"VmSize:\t%8lu kB\n"
 			"VmLck:\t%8lu kB\n"
@@ -840,15 +849,31 @@ extern inline char *task_cap(struct task_struct *p, char *buffer)
 			    cap_t(p->cap_effective));
 }
 
+static struct task_struct *grab_task(int pid)
+{
+	struct task_struct *tsk = current;
+	if (pid != tsk->pid) {
+		read_lock(&tasklist_lock);
+		tsk = find_task_by_pid(pid);
+		if (tsk && tsk->mm && tsk->mm != &init_mm)
+			mmget(tsk->mm);
+		read_unlock(&tasklist_lock);
+	}	
+	return tsk;
+}
+
+static void release_task(struct task_struct *tsk)
+{
+	if (tsk != current && tsk->mm && tsk->mm != &init_mm)
+		mmput(tsk->mm);
+}
 
 static int get_status(int pid, char * buffer)
 {
 	char * orig = buffer;
 	struct task_struct *tsk;
-
-	read_lock(&tasklist_lock);
-	tsk = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	
+	tsk = grab_task(pid);
 	if (!tsk)
 		return 0;
 	buffer = task_name(tsk, buffer);
@@ -856,6 +881,7 @@ static int get_status(int pid, char * buffer)
 	buffer = task_mem(tsk, buffer);
 	buffer = task_sig(tsk, buffer);
 	buffer = task_cap(tsk, buffer);
+	release_task(tsk);
 	return buffer - orig;
 }
 
@@ -867,20 +893,22 @@ static int get_stat(int pid, char * buffer)
 	int tty_pgrp;
 	sigset_t sigign, sigcatch;
 	char state;
+	int res;
 
-	read_lock(&tasklist_lock);
-	tsk = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	tsk = grab_task(pid);
 	if (!tsk)
 		return 0;
 	state = *get_task_state(tsk);
 	vsize = eip = esp = 0;
 	if (tsk->mm && tsk->mm != &init_mm) {
-		struct vm_area_struct *vma = tsk->mm->mmap;
-		while (vma) {
+		struct vm_area_struct *vma;
+
+		down(&tsk->mm->mmap_sem);
+		for (vma = tsk->mm->mmap; vma; vma = vma->vm_next) {
 			vsize += vma->vm_end - vma->vm_start;
-			vma = vma->vm_next;
 		}
+		up(&tsk->mm->mmap_sem);
+		
 		eip = KSTK_EIP(tsk);
 		esp = KSTK_ESP(tsk);
 	}
@@ -901,7 +929,7 @@ static int get_stat(int pid, char * buffer)
 	nice = tsk->priority;
 	nice = 20 - (nice * 20 + DEF_PRIORITY / 2) / DEF_PRIORITY;
 
-	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
+	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu %lu %lu %lu %lu %d\n",
 		pid,
@@ -946,6 +974,9 @@ static int get_stat(int pid, char * buffer)
 		tsk->nswap,
 		tsk->cnswap,
 		tsk->exit_signal);
+
+	release_task(tsk);
+	return res;
 }
 		
 static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned long size,
@@ -1023,19 +1054,15 @@ static void statm_pgd_range(pgd_t * pgd, unsigned long address, unsigned long en
 
 static int get_statm(int pid, char * buffer)
 {
-	struct task_struct *tsk;
 	int size=0, resident=0, share=0, trs=0, lrs=0, drs=0, dt=0;
+	struct mm_struct *mm;
 
-	read_lock(&tasklist_lock);
-	tsk = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
-	if (!tsk)
-		return 0;
-	if (tsk->mm && tsk->mm != &init_mm) {
-		struct vm_area_struct * vma = tsk->mm->mmap;
+	mm = get_mm_and_lock(pid);
+	if (mm) {
+		struct vm_area_struct * vma = mm->mmap;
 
 		while (vma) {
-			pgd_t *pgd = pgd_offset(tsk->mm, vma->vm_start);
+			pgd_t *pgd = pgd_offset(mm, vma->vm_start);
 			int pages = 0, shared = 0, dirty = 0, total = 0;
 
 			statm_pgd_range(pgd, vma->vm_start, vma->vm_end, &pages, &shared, &dirty, &total);
@@ -1053,6 +1080,7 @@ static int get_statm(int pid, char * buffer)
 				drs += pages;
 			vma = vma->vm_next;
 		}
+		release_mm(mm);
 	}
 	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
 		       size, resident, share, trs, lrs, drs, dt);
@@ -1090,7 +1118,7 @@ static int get_statm(int pid, char * buffer)
 
 #define MAPS_LINE_MAX	MAPS_LINE_MAX8
 
-
+/* FIXME: this does not do proper mm locking */
 static ssize_t read_maps (int pid, struct file * file, char * buf,
 			  size_t count, loff_t *ppos)
 {
@@ -1138,7 +1166,7 @@ static ssize_t read_maps (int pid, struct file * file, char * buf,
 		int flags;
 		kdev_t dev;
 		unsigned long ino;
-		int maxlen = (sizeof(void*) == 4) ? 
+		int maxlen = (sizeof(void*) == 4) ?
 			MAPS_LINE_MAX4 :  MAPS_LINE_MAX8;
 		int len;
 
@@ -1222,15 +1250,11 @@ out:
 #ifdef __SMP__
 static int get_pidcpu(int pid, char * buffer)
 {
-	struct task_struct * tsk = current ;
+	struct task_struct * tsk;
 	int i, len;
 
-	read_lock(&tasklist_lock);
-	if (pid != tsk->pid)
-		tsk = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
-
-	if (tsk == NULL)
+	tsk = grab_task(pid);
+	if (!tsk)
 		return 0;
 
 	len = sprintf(buffer,
@@ -1244,6 +1268,7 @@ static int get_pidcpu(int pid, char * buffer)
 			tsk->per_cpu_utime[cpu_logical_map(i)],
 			tsk->per_cpu_stime[cpu_logical_map(i)]);
 
+	release_task(tsk);
 	return len;
 }
 #endif
@@ -1279,9 +1304,6 @@ static long get_root_array(char * page, int type, char **start,
 
 		case PROC_MEMINFO:
 			return get_meminfo(page);
-
-		case PROC_SWAPSTATS:
-			return get_swapstats(page);
 
 #ifdef CONFIG_PCI_OLD_PROC
   	        case PROC_PCI:
@@ -1373,10 +1395,9 @@ static int process_unauthorized(int type, int pid)
 	read_lock(&tasklist_lock);
 	
 	/*
-	 *	Grab the lock, find the task, save the uid and 
+	 *	Grab the lock, find the task, save the uid and
 	 *	check it has an mm still (ie its not dead)
 	 */
-	 
 	p = find_task_by_pid(pid);
 	if(p)
 	{
@@ -1397,6 +1418,7 @@ static int process_unauthorized(int type, int pid)
 		case PROC_PID_STAT:
 		case PROC_PID_MAPS:
 		case PROC_PID_CMDLINE:
+		case PROC_PID_CPU:
 			return 0;	
 	}
 	if(capable(CAP_DAC_OVERRIDE) || current->fsuid == euid)
@@ -1446,6 +1468,7 @@ static ssize_t array_read(struct file * file, char * buf,
 	ssize_t end;
 	unsigned int type, pid;
 	struct proc_dir_entry *dp;
+	int err;
 
 	if (count > PROC_BLOCK_SIZE)
 		count = PROC_BLOCK_SIZE;
@@ -1474,8 +1497,10 @@ static ssize_t array_read(struct file * file, char * buf,
 		return length;
 	}
 	if (start != NULL) {
+		if (length > count)
+			length = count;
 		/* We have had block-adjusting processing! */
-		copy_to_user(buf, start, length);
+		err = copy_to_user(buf, start, length);
 		*ppos += length;
 		count = length;
 	} else {
@@ -1487,11 +1512,11 @@ static ssize_t array_read(struct file * file, char * buf,
 		if (count + *ppos > length)
 			count = length - *ppos;
 		end = count + *ppos;
-		copy_to_user(buf, (char *) page + *ppos, count);
+		err = copy_to_user(buf, (char *) page + *ppos, count);
 		*ppos = end;
 	}
 	free_page(page);
-	return count;
+	return err ? -EFAULT : count;
 }
 
 static struct file_operations proc_array_operations = {

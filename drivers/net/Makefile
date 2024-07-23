@@ -826,7 +826,7 @@ ifdef CONFIG_8390_BUILTIN
 L_OBJS += 8390.o
 else
   ifdef CONFIG_8390_MODULE
-  M_OBJS += 8390.o
+  MX_OBJS += 8390.o
   endif
 endif
 
@@ -1035,13 +1035,6 @@ endif
 #
 # HIPPI adapters
 #
-ifeq ($(CONFIG_CERN_HIPPI),y)
-L_OBJS += cern_hippi.o
-else
-  ifeq ($(CONFIG_CERN_HIPPI),m)
-  M_OBJS += cern_hippi.o
-  endif
-endif
 
 ifeq ($(CONFIG_ROADRUNNER),y)
 L_OBJS += rrunner.o
@@ -1067,5 +1060,5 @@ clean:
 wanpipe.o: $(WANPIPE_OBJS)
 	ld -r -o $@ $(WANPIPE_OBJS)
 
-rcpci.o: rcpci45.o rcmtl.o
-	$(LD) -r -o rcpci.o rcpci45.o rcmtl.o
+rcpci.o: rcpci45.o rclanmtl.o
+	$(LD) -r -o rcpci.o rcpci45.o rclanmtl.o

@@ -140,10 +140,17 @@ int cpu_idle(void *unused)
 	current->priority = 0;
 	current->counter = -100;
 	while(1) {
-		if (current_cpu_data.hlt_works_ok && !hlt_counter && !current->need_resched)
+		if (current_cpu_data.hlt_works_ok && !hlt_counter &&
+				 !current->need_resched)
 			__asm__("hlt");
-		schedule();
-		check_pgt_cache();
+		/*
+		 * although we are an idle CPU, we do not want to
+		 * get into the scheduler unnecessarily.
+		 */
+		if (current->need_resched) {
+			schedule();
+			check_pgt_cache();
+		}
 	}
 }
 
@@ -468,22 +475,25 @@ void free_task_struct(struct task_struct *p)
 
 void release_segments(struct mm_struct *mm)
 {
+	if (mm->segments) {
+		void * ldt = mm->segments;
+		mm->segments = NULL;
+		vfree(ldt);
+	}
+}
+
+void forget_segments(void)
+{
 	/* forget local segments */
 	__asm__ __volatile__("movl %w0,%%fs ; movl %w0,%%gs"
 		: /* no outputs */
 		: "r" (0));
-	if (mm->segments) {
-		void * ldt = mm->segments;
 
-		/*
-		 * Get the LDT entry from init_task.
-		 */
-		current->tss.ldt = _LDT(0);
-		load_ldt(0);
-
-		mm->segments = NULL;
-		vfree(ldt);
-	}
+	/*
+	 * Get the LDT entry from init_task.
+	 */
+	current->tss.ldt = _LDT(0);
+	load_ldt(0);
 }
 
 /*
@@ -772,6 +782,21 @@ asmlinkage int sys_clone(struct pt_regs regs)
 	if (!newsp)
 		newsp = regs.esp;
 	return do_fork(clone_flags, newsp, &regs);
+}
+
+/*
+ * This is trivial, and on the face of it looks like it
+ * could equally well be done in user mode.
+ *
+ * Not so, for quite unobvious reasons - register pressure.
+ * In user mode vfork() cannot have a stack frame, and if
+ * done by calling the "clone()" system call directly, you
+ * do not have enough call-clobbered registers to hold all
+ * the information you need.
+ */
+asmlinkage int sys_vfork(struct pt_regs regs)
+{
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.esp, &regs);
 }
 
 /*

@@ -88,7 +88,7 @@ extern struct proc_dir_entry proc_scsi_ini9100u;
 extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 #endif
 
-#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03b"
+#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03d"
 
 #if LINUX_VERSION_CODE < CVT_LINUX_VERSION(1, 3, 0)
 #define INI9100U	{ \
@@ -207,6 +207,7 @@ extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 #define SENSE_SIZE		14
 
 #define INI_VENDOR_ID   0x1101	/* Initio's PCI vendor ID       */
+#define DMX_VENDOR_ID   0x134a	/* Domex's PCI vendor ID       */
 #define I950_DEVICE_ID	0x9500	/* Initio's inic-950 product ID   */
 #define I940_DEVICE_ID	0x9400	/* Initio's inic-940 product ID   */
 #define I935_DEVICE_ID	0x9401	/* Initio's inic-935 product ID   */

@@ -95,18 +95,6 @@
  * [10-Sep-98 Alan Modra] Another symlink change.
  */
 
-static inline char * get_page(void)
-{
-	char * res;
-	res = (char*)__get_free_page(GFP_KERNEL);
-	return res;
-}
-
-inline void putname(char * name)
-{
-	free_page((unsigned long) name); 
-}
-
 /* In order to reduce some races, while at the same time doing additional
  * checking and hopefully speeding things up, we copy filenames to the
  * kernel data space before using them..
@@ -139,7 +127,7 @@ char * getname(const char * filename)
 	char *tmp, *result;
 
 	result = ERR_PTR(-ENOMEM);
-	tmp = get_page();
+	tmp = __getname();
 	if (tmp)  {
 		int retval = do_getname(filename, tmp);
 
@@ -573,6 +561,20 @@ static inline void unlock_dir(struct dentry *dir)
 }
 
 /*
+ * We need to do a check-parent every time
+ * after we have locked the parent - to verify
+ * that the parent is still our parent and
+ * that we are still hashed onto it..
+ *
+ * This is requied in case two processes race
+ * on removing (or moving) the same entry: the
+ * parent lock will serialize them, but the
+ * other process will be too late..
+ */
+#define check_parent(dir, dentry) \
+	((dir) == (dentry)->d_parent && !list_empty(&dentry->d_hash))
+
+/*
  * Locking the parent is needed to:
  *  - serialize directory operations
  *  - make sure the parent doesn't change from
@@ -589,16 +591,40 @@ static inline struct dentry *lock_parent(struct dentry *dentry)
 	struct dentry *dir = dget(dentry->d_parent);
 
 	down(&dir->d_inode->i_sem);
-
-	/* Un-hashed or moved?  Punt if so.. */
-	if (dir != dentry->d_parent || list_empty(&dentry->d_hash)) {
-		if (dir != dentry) {
-			unlock_dir(dir);
-			dir = ERR_PTR(-ENOENT);
-		}
-	}
 	return dir;
 }
+
+/*
+ * Whee.. Deadlock country. Happily there are only two VFS
+ * operations that do this..
+ */
+static inline void double_lock(struct dentry *d1, struct dentry *d2)
+{
+	struct semaphore *s1 = &d1->d_inode->i_sem;
+	struct semaphore *s2 = &d2->d_inode->i_sem;
+
+	if (s1 != s2) {
+		if ((unsigned long) s1 < (unsigned long) s2) {
+			struct semaphore *tmp = s2;
+			s2 = s1; s1 = tmp;
+		}
+		down(s1);
+	}
+	down(s2);
+}
+
+static inline void double_unlock(struct dentry *d1, struct dentry *d2)
+{
+	struct semaphore *s1 = &d1->d_inode->i_sem;
+	struct semaphore *s2 = &d2->d_inode->i_sem;
+
+	up(s1);
+	if (s1 != s2)
+		up(s2);
+	dput(d1);
+	dput(d2);
+}
+
 
 /* 
  * Special case: O_CREAT|O_EXCL implies O_NOFOLLOW for security
@@ -652,14 +678,28 @@ struct dentry * open_namei(const char * pathname, int flag, int mode)
 	if (flag & O_CREAT) {
 		struct dentry *dir;
 
-		error = -EEXIST;
-		if (dentry->d_inode && (flag & O_EXCL))
+		if (dentry->d_inode) {
+			if (!(flag & O_EXCL))
+				goto nocreate;
+			error = -EEXIST;
 			goto exit;
+		}
 
 		dir = lock_parent(dentry);
-		error = PTR_ERR(dir);
-		if (IS_ERR(dir))
+		if (!check_parent(dir, dentry)) {
+			/*
+			 * Really nasty race happened. What's the 
+			 * right error code? We had a dentry, but
+			 * before we could use it it was removed
+			 * by somebody else. We could just re-try
+			 * everything, I guess.
+			 *
+			 * ENOENT is definitely wrong.
+			 */
+			error = -ENOENT;
+			unlock_dir(dir);
 			goto exit;
+		}
 
 		/*
 		 * Somebody might have created the file while we
@@ -686,6 +726,7 @@ struct dentry * open_namei(const char * pathname, int flag, int mode)
 			goto exit;
 	}
 
+nocreate:
 	error = -ENOENT;
 	inode = dentry->d_inode;
 	if (!inode)
@@ -772,9 +813,9 @@ struct dentry * do_mknod(const char * filename, int mode, dev_t dev)
 		return dentry;
 
 	dir = lock_parent(dentry);
-	retval = dir;
-	if (IS_ERR(dir))
-		goto exit;
+	error = -ENOENT;
+	if (!check_parent(dir, dentry))
+		goto exit_lock;
 
 	error = may_create(dir->d_inode, dentry);
 	if (error)
@@ -791,7 +832,6 @@ exit_lock:
 	if (!error)
 		retval = dget(dentry);
 	unlock_dir(dir);
-exit:
 	dput(dentry);
 	return retval;
 }
@@ -846,10 +886,18 @@ static inline int do_mkdir(const char * pathname, int mode)
 	if (IS_ERR(dentry))
 		goto exit;
 
+	/*
+	 * EEXIST is kind of a strange error code to
+	 * return, but basically if the dentry was moved
+	 * or unlinked while we locked the parent, we
+	 * do know that it _did_ exist before, and as
+	 * such it makes perfect sense.. In contrast,
+	 * ENOENT doesn't make sense for mkdir.
+	 */
 	dir = lock_parent(dentry);
-	error = PTR_ERR(dir);
-	if (IS_ERR(dir))
-		goto exit_dput;
+	error = -EEXIST;
+	if (!check_parent(dir, dentry))
+		goto exit_lock;
 
 	error = may_create(dir->d_inode, dentry);
 	if (error)
@@ -865,7 +913,6 @@ static inline int do_mkdir(const char * pathname, int mode)
 
 exit_lock:
 	unlock_dir(dir);
-exit_dput:
 	dput(dentry);
 exit:
 	return error;
@@ -886,39 +933,6 @@ asmlinkage int sys_mkdir(const char * pathname, int mode)
 	unlock_kernel();
 	return error;
 }
-
-/*
- * Whee.. Deadlock country. Happily there are only two VFS
- * operations that do this..
- */
-static inline void double_lock(struct dentry *d1, struct dentry *d2)
-{
-	struct semaphore *s1 = &d1->d_inode->i_sem;
-	struct semaphore *s2 = &d2->d_inode->i_sem;
-
-	if (s1 != s2) {
-		if ((unsigned long) s1 < (unsigned long) s2) {
-			struct semaphore *tmp = s2;
-			s2 = s1; s1 = tmp;
-		}
-		down(s1);
-	}
-	down(s2);
-}
-
-static inline void double_unlock(struct dentry *d1, struct dentry *d2)
-{
-	struct semaphore *s1 = &d1->d_inode->i_sem;
-	struct semaphore *s2 = &d2->d_inode->i_sem;
-
-	up(s1);
-	if (s1 != s2)
-		up(s2);
-	dput(d1);
-	dput(d2);
-}
-
-
 
 int vfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
@@ -988,7 +1002,9 @@ static inline int do_rmdir(const char * name)
 	dentry->d_count++;
 	double_lock(dir, dentry);
 
-	error = vfs_rmdir(dir->d_inode, dentry);
+	error = -ENOENT;
+	if (check_parent(dir, dentry))
+		error = vfs_rmdir(dir->d_inode, dentry);
 
 	double_unlock(dentry, dir);
 exit_dput:
@@ -1044,14 +1060,11 @@ static inline int do_unlink(const char * name)
 		goto exit;
 
 	dir = lock_parent(dentry);
-	error = PTR_ERR(dir);
-	if (IS_ERR(dir))
-		goto exit_dput;
-
-	error = vfs_unlink(dir->d_inode, dentry);
+	error = -ENOENT;
+	if (check_parent(dir, dentry))
+		error = vfs_unlink(dir->d_inode, dentry);
 
         unlock_dir(dir);
-exit_dput:
 	dput(dentry);
 exit:
 	return error;
@@ -1086,9 +1099,9 @@ static inline int do_symlink(const char * oldname, const char * newname)
 		goto exit;
 
 	dir = lock_parent(dentry);
-	error = PTR_ERR(dir);
-	if (IS_ERR(dir))
-		goto exit_dput;
+	error = -ENOENT;
+	if (!check_parent(dir, dentry))
+		goto exit_lock;
 
 	error = may_create(dir->d_inode, dentry);
 	if (error)
@@ -1103,7 +1116,6 @@ static inline int do_symlink(const char * oldname, const char * newname)
 
 exit_lock:
 	unlock_dir(dir);
-exit_dput:
 	dput(dentry);
 exit:
 	return error;
@@ -1157,9 +1169,9 @@ static inline int do_link(const char * oldname, const char * newname)
 		goto exit_old;
 
 	dir = lock_parent(new_dentry);
-	error = PTR_ERR(dir);
-	if (IS_ERR(dir))
-		goto exit_new;
+	error = -ENOENT;
+	if (!check_parent(dir, new_dentry))
+		goto exit_lock;
 
 	error = -ENOENT;
 	inode = old_dentry->d_inode;
@@ -1190,7 +1202,6 @@ static inline int do_link(const char * oldname, const char * newname)
 
 exit_lock:
 	unlock_dir(dir);
-exit_new:
 	dput(new_dentry);
 exit_old:
 	dput(old_dentry);
@@ -1284,8 +1295,10 @@ static inline int do_rename(const char * oldname, const char * newname)
 
 	double_lock(new_dir, old_dir);
 
-	error = vfs_rename(old_dir->d_inode, old_dentry,
-			   new_dir->d_inode, new_dentry);
+	error = -ENOENT;
+	if (check_parent(old_dir, old_dentry) && check_parent(new_dir, new_dentry))
+		error = vfs_rename(old_dir->d_inode, old_dentry,
+				   new_dir->d_inode, new_dentry);
 
 	double_unlock(new_dir, old_dir);
 	dput(new_dentry);

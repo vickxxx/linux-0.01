@@ -1,5 +1,5 @@
 /*
- * $Id: time.c,v 1.38 1998/11/16 15:56:15 cort Exp $
+ * $Id: time.c,v 1.39 1998/12/28 10:28:51 paulus Exp $
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -17,6 +17,9 @@
  * This is then divided by 4, providing a 8192 Hz clock into the PIT.
  * Since it is not possible to get a nice 100 Hz clock out of this, without
  * creating a software PLL, I have set HZ to 128.  -- Dan
+ *
+ * 1997-09-10	Updated NTP code according to technical memorandum Jan '96
+ *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 
 #include <linux/config.h>
@@ -78,6 +81,26 @@ void timer_interrupt(struct pt_regs * regs)
 	unsigned dcache_locked = unlock_dcache();
 	
 	hardirq_enter(cpu);
+#ifdef __SMP__
+	{
+		unsigned int loops = 100000000;
+		while (test_bit(0, &global_irq_lock)) {
+			if (smp_processor_id() == global_irq_holder) {
+				printk("uh oh, interrupt while we hold global irq lock!\n");
+#ifdef CONFIG_XMON
+				xmon(0);
+#endif
+				break;
+			}
+			if (loops-- == 0) {
+				printk("do_IRQ waiting for irq lock (holder=%d)\n", global_irq_holder);
+#ifdef CONFIG_XMON
+				xmon(0);
+#endif
+			}
+		}
+	}
+#endif /* __SMP__ */			
 	
 	while ((dval = get_dec()) < 0) {
 		/*
@@ -150,12 +173,15 @@ void do_gettimeofday(struct timeval *tv)
 	save_flags(flags);
 	cli();
 	*tv = xtime;
+	/* XXX we don't seem to have the decrementers synced properly yet */
+#ifndef __SMP__
 	tv->tv_usec += (decrementer_count - get_dec())
 	    * count_period_num / count_period_den;
 	if (tv->tv_usec >= 1000000) {
 		tv->tv_usec -= 1000000;
 		tv->tv_sec++;
 	}
+#endif
 	restore_flags(flags);
 }
 
@@ -172,6 +198,11 @@ void do_settimeofday(struct timeval *tv)
 	xtime.tv_sec = tv->tv_sec;
 	xtime.tv_usec = tv->tv_usec - frac_tick;
 	set_dec(frac_tick * count_period_den / count_period_num);
+	time_adjust = 0;		/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_state = TIME_ERROR;	/* p. 24, (a) */
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
 	restore_flags(flags);
 }
 

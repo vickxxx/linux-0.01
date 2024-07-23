@@ -4,7 +4,7 @@
  * A low level driver for Yamaha OPL3-SA2 and SA3 cards.
  * SAx cards should work, as they are just variants of the SA3.
  *
- * Copyright 1998 Scott Murray <scottm@interlog.com>
+ * Copyright 1998, 1999 Scott Murray <scottm@interlog.com>
  *
  * Originally based on the CS4232 driver (in cs4232.c) by Hannu Savolainen
  * and others.  Now incorporates code/ideas from pss.c, also by Hannu
@@ -26,6 +26,12 @@
  * Scott Murray            Original driver (Jun 14, 1998)
  * Paul J.Y. Lahaie        Changed probing / attach code order
  * Scott Murray            Added mixer support (Dec 03, 1998)
+ * Scott Murray            Changed detection code to be more forgiving,
+ *                         added force option as last resort,
+ *                         fixed ioctl return values. (Dec 30, 1998)
+ * Scott Murray            Simpler detection code should work all the time now
+ *                         (with thanks to Ben Hutchings for the heuristic),
+ *                         removed now unnecessary force option. (Jan 5, 1999)
  *
  */
 
@@ -51,6 +57,11 @@
 #define DEFAULT_TIMBRE 0
 
 #define CHIPSET_UNKNOWN -1
+
+/*
+ * These are used both as masks against what the card returns,
+ * and as constants.
+ */
 #define CHIPSET_OPL3SA2  1
 #define CHIPSET_OPL3SA3  2
 #define CHIPSET_OPL3SAX  4
@@ -59,7 +70,7 @@
 #ifdef CONFIG_OPL3SA2
 
 /* What's my version? */
-static int chipset_version = CHIPSET_UNKNOWN;
+static int chipset = CHIPSET_UNKNOWN;
 
 /* Oh well, let's just cache the name */
 static char chipset_name[16];
@@ -276,43 +287,47 @@ static int opl3sa2_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 					return call_ad_mixer(devc, cmd, arg);
 				else
 				{
-					if(*(int *)arg != 0)
+					if(*(int*)arg != 0)
 						return -EINVAL;
 					return 0;
 				}
 
 			case SOUND_MIXER_VOLUME:
-				arg_to_volume_stereo(*(unsigned int *)arg,
+				arg_to_volume_stereo(*(unsigned int*)arg,
 						     &devc->volume_l,
 						     &devc->volume_r); 
 				opl3sa2_set_volume(devc, devc->volume_l,
 						   devc->volume_r);
-				return ret_vol_stereo(devc->volume_l,
-						      devc->volume_r);
+				*(int*)arg = ret_vol_stereo(devc->volume_l,
+							     devc->volume_r);
+				return 0;
 		  
 			case SOUND_MIXER_MIC:
-				arg_to_volume_mono(*(unsigned int *)arg,
+				arg_to_volume_mono(*(unsigned int*)arg,
 						   &devc->mic);
 				opl3sa2_set_mic(devc, devc->mic);
-				return ret_vol_mono(devc->mic);
+				*(int*)arg = ret_vol_mono(devc->mic);
+				return 0;
 		  
 			case SOUND_MIXER_BASS:
-				if(chipset_version != CHIPSET_OPL3SA2)
+				if(chipset != CHIPSET_OPL3SA2)
 				{
-					arg_to_volume_mono(*(unsigned int *)arg,
+					arg_to_volume_mono(*(unsigned int*)arg,
 							   &devc->bass);
 					opl3sa3_set_bass(devc, devc->bass);
-					return ret_vol_mono(devc->bass);
+					*(int*)arg = ret_vol_mono(devc->bass);
+					return 0;
 				}
 				return -EINVAL;
 		  
 			case SOUND_MIXER_TREBLE:
-				if(chipset_version != CHIPSET_OPL3SA2)
+				if(chipset != CHIPSET_OPL3SA2)
 				{
 					arg_to_volume_mono(*(unsigned int *)arg,
 							   &devc->treble);
 					opl3sa3_set_treble(devc, devc->treble);
-					return ret_vol_mono(devc->treble);
+					*(int*)arg = ret_vol_mono(devc->treble);
+					return 0;
 				}
 				return -EINVAL;
 		  
@@ -331,55 +346,83 @@ static int opl3sa2_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 				if(call_ad_mixer(devc, cmd, arg) == -EINVAL)
 					*(int*)arg = 0; /* no mixer devices */
 
-				if(chipset_version != CHIPSET_OPL3SA2)
-					return (*(int*)arg |= SOUND_MASK_VOLUME |
-						              SOUND_MASK_MIC |
-						              SOUND_MASK_BASS |
-						              SOUND_MASK_TREBLE);
+				*(int*)arg |= (SOUND_MASK_VOLUME | SOUND_MASK_MIC);
+
 				/* OPL3-SA2 has no bass and treble mixers */
-				return (*(int*)arg |= SOUND_MASK_VOLUME |
-					              SOUND_MASK_MIC);
+				if(chipset != CHIPSET_OPL3SA2)
+					*(int*)arg |= (SOUND_MASK_BASS |
+						       SOUND_MASK_TREBLE);
+				return 0;
 		  
 			case SOUND_MIXER_STEREODEVS:
 				if(call_ad_mixer(devc, cmd, arg) == -EINVAL)
 					*(int*)arg = 0; /* no stereo devices */
-				return (*(int*)arg |= SOUND_MASK_VOLUME);
+				*(int*)arg |= SOUND_MASK_VOLUME;
+				return 0;
 		  
 			case SOUND_MIXER_RECMASK:
 				if(devc->ad_mixer_dev != -1)
+				{
 					return call_ad_mixer(devc, cmd, arg);
+				}
 				else
-					return (*(int*)arg = 0); /* no record devices */
+				{
+					/* No recording devices */
+					return (*(int*)arg = 0);
+				}
 
 			case SOUND_MIXER_CAPS:
 				if(devc->ad_mixer_dev != -1)
+				{
 					return call_ad_mixer(devc, cmd, arg);
+				}
 				else
-					return (*(int*)arg = SOUND_CAP_EXCL_INPUT);
+				{
+					*(int*)arg = SOUND_CAP_EXCL_INPUT;
+					return 0;
+				}
 
 			case SOUND_MIXER_RECSRC:
 				if(devc->ad_mixer_dev != -1)
+				{
 					return call_ad_mixer(devc, cmd, arg);
+				}
 				else
-					return (*(int*)arg = 0); /* no record source */
+				{
+					/* No recording source */
+					return (*(int*)arg = 0);
+				}
 
 			case SOUND_MIXER_VOLUME:
-				return (*(int*)arg = ret_vol_stereo(devc->volume_l,
-								    devc->volume_r));
+				*(int*)arg = ret_vol_stereo(devc->volume_l,
+							    devc->volume_r);
+				return 0;
 			  
 			case SOUND_MIXER_MIC:
-				return (*(int*)arg = ret_vol_mono(devc->mic));
+				*(int*)arg = ret_vol_mono(devc->mic);
+				return 0;
 
 			case SOUND_MIXER_BASS:
-				if(chipset_version != CHIPSET_OPL3SA2)
-					return (*(int*)arg = ret_vol_mono(devc->bass));
-				return -EINVAL;
-
+				if(chipset != CHIPSET_OPL3SA2)
+				{
+					*(int*)arg = ret_vol_mono(devc->bass);
+					return 0;
+				}
+				else
+				{
+					return -EINVAL;
+				}
 			  
 			case SOUND_MIXER_TREBLE:
-				if(chipset_version != CHIPSET_OPL3SA2)
-					return (*(int*)arg = ret_vol_mono(devc->treble));
-				return -EINVAL;
+				if(chipset != CHIPSET_OPL3SA2)
+				{
+					*(int*)arg = ret_vol_mono(devc->treble);
+					return 0;
+				}
+				else
+				{
+					return -EINVAL;
+				}
 			  
 			default:
 				return -EINVAL;
@@ -481,6 +524,7 @@ static void unload_opl3sa2_mss(struct address_info *hw_config)
 
 int probe_opl3sa2(struct address_info *hw_config)
 {
+	unsigned char version = 0;
 	char tag;
 
 	/*
@@ -489,47 +533,63 @@ int probe_opl3sa2(struct address_info *hw_config)
 	if(check_region(hw_config->io_base, 2))
 	{
 	    printk(KERN_ERR
-		   "opl3sa2.c: Control I/O port 0x%03x not free\n",
+		   "%s: Control I/O port 0x%03x not free\n",
+		   __FILE__,
 		   hw_config->io_base);
 	    return 0;
 	}
 
 	/*
+	 * Determine chipset type (SA2, SA3, or SAx)
+	 */
+
+	/*
 	 * Look at chipset version in lower 3 bits of index 0x0A, miscellaneous
 	 */
-	chipset_version = 0;
 	opl3sa2_read(hw_config->io_base,
 		     OPL3SA2_MISC,
-		     (unsigned char*) &chipset_version);
-	chipset_version &= 0x0007;
-	switch(chipset_version)
+		     (unsigned char*) &version);
+	version &= 0x07;
+
+	/* Match version number to appropiate chipset */
+	if(version & CHIPSET_OPL3SAX)
 	{
-		case CHIPSET_OPL3SA2:
-			printk(KERN_INFO "Found OPL3-SA2 (YMF711)\n");
-			tag = '2';
-			break;
-
-		case CHIPSET_OPL3SA3:
-			printk(KERN_INFO "Found OPL3-SA3 (YMF715)\n");
+		chipset = CHIPSET_OPL3SAX;
+		tag = 'x';
+		printk(KERN_INFO "Found OPL3-SAx (YMF719)\n");
+	}
+	else
+	{
+ 		if(version & CHIPSET_OPL3SA3)
+		{
+			chipset = CHIPSET_OPL3SA3;
 			tag = '3';
-			break;
-
-		case CHIPSET_OPL3SAX:
-			printk(KERN_INFO "Found OPL3-SAx (YMF719)\n");
-			tag = 'x';
-			break;
-
-		default:
-			printk(KERN_ERR "No Yamaha audio controller found\n");
-			printk(KERN_INFO
-			       "opl3sa2.c: chipset version = %x\n",
-			       chipset_version);
-			chipset_version = CHIPSET_UNKNOWN;
-			tag = '?';
-			break;
+			printk(KERN_INFO "Found OPL3-SA3 (YMF715)\n");
+		}
+		else
+		{
+			if(version & CHIPSET_OPL3SA2)
+			{
+				chipset = CHIPSET_OPL3SA2;
+				tag = '2';
+				printk(KERN_INFO "Found OPL3-SA2 (YMF711)\n");
+			}
+			else
+			{
+				chipset = CHIPSET_UNKNOWN;
+				tag = '?';
+				printk(KERN_ERR
+				       "Unknown Yamaha audio controller version\n");
+				printk(KERN_INFO
+				       "%s: chipset version = %x\n",
+				       __FILE__,
+				       version);
+			}
+		}
 	}
 
-	if(chipset_version != CHIPSET_UNKNOWN) {
+	if(chipset != CHIPSET_UNKNOWN)
+	{
 		/* Generate a pretty name */
 		sprintf(chipset_name, "OPL3-SA%c", tag);
 		return 1;
@@ -581,7 +641,7 @@ MODULE_PARM_DESC(mss_irq, "Set MSS (audio) IRQ (5, 7, 9, 10, 11, 12)");
 MODULE_PARM(dma, "i");
 MODULE_PARM_DESC(dma, "Set MSS (audio) first DMA channel (0, 1, 3)");
 
-MODULE_PARM(dma2,"i");
+MODULE_PARM(dma2, "i");
 MODULE_PARM_DESC(dma2, "Set MSS (audio) second DMA channel (0, 1, 3)");
 
 MODULE_DESCRIPTION("Module for OPL3-SA2 and SA3 sound cards (uses AD1848 MSS driver).");
@@ -605,7 +665,9 @@ int init_module(void)
 
 	if(io == -1 || irq == -1 || dma == -1 || dma2 == -1 || mss_io == -1)
 	{
-		printk(KERN_ERR "opl3sa2.c: io, mss_io, irq, dma, and dma2 must be set.\n");
+		printk(KERN_ERR
+		       "%s: io, mss_io, irq, dma, and dma2 must be set.\n",
+		       __FILE__);
 		return -EINVAL;
 	}
    
@@ -614,7 +676,7 @@ int init_module(void)
 	cfg.irq     = irq;
 	cfg.dma     = dma;
 	cfg.dma2    = dma2;
-
+	
         /* The MSS config: */
 	mss_cfg.io_base      = mss_io;
 	mss_cfg.irq          = irq;

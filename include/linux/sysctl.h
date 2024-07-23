@@ -112,7 +112,7 @@ enum
 	VM_PAGECACHE=7,		/* struct: Set cache memory thresholds */
 	VM_PAGERDAEMON=8,	/* struct: Control kswapd behaviour */
 	VM_PGT_CACHE=9,		/* struct: Set page table cache parameters */
-	VM_PAGE_CLUSTER=10	/* int: set log2 number of pages to swap together */
+	VM_PAGE_CLUSTER=10	/* int: set number of pages to swap together */
 };
 
 
@@ -207,7 +207,8 @@ enum
 	NET_IPV4_ICMP_TIMEEXCEED_RATE=61,
 	NET_IPV4_ICMP_PARAMPROB_RATE=62,
 	NET_IPV4_ICMP_ECHOREPLY_RATE=63,
-	NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES=64
+	NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES=64,
+	NET_IPV4_IGMP_MAX_MEMBERSHIPS=65
 };
 
 enum {
@@ -376,11 +377,12 @@ enum
 
 /* /proc/sys/net/decnet */
 enum {
-	NET_DECNET_NODE_TYPE=1,
-	NET_DECNET_NODE_ADDRESS=2,
-	NET_DECNET_NODE_NAME=3,
-	NET_DECNET_DEFAULT_DEVICE=4,
-	NET_DECNET_DEBUG_LEVEL=255
+	NET_DECNET_DEF_T3_BROADCAST=1,
+	NET_DECNET_DEF_T3_POINTTOPOINT=2,
+	NET_DECNET_DEF_T1=3,
+	NET_DECNET_DEF_BCT1=4,
+	NET_DECNET_CACHETIMEOUT=5,
+	NET_DECNET_DEBUG_LEVEL=6
 };
 
 /* CTL_PROC names: */
@@ -397,7 +399,7 @@ enum
 	FS_MAXFILE=7,	/* int:maximum number of filedescriptors that can be allocated */
 	FS_DENTRY=8,
 	FS_NRSUPER=9,	/* int:current number of allocated super_blocks */
-	FS_MAXSUPER=10	/* int:maximum number of super_blocks that can be allocated */
+	FS_MAXSUPER=10 	/* int:maximum number of super_blocks that can be allocated */
 };
 
 /* CTL_DEBUG names: */

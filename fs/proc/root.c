@@ -348,6 +348,32 @@ int proc_register(struct proc_dir_entry * dir, struct proc_dir_entry * dp)
 	return 0;
 }
 
+/*
+ * Kill an inode that got unregistered..
+ */
+static void proc_kill_inodes(int ino)
+{
+	struct file *filp;
+
+	/* inuse_filps is protected by the single kernel lock */
+	for (filp = inuse_filps; filp; filp = filp->f_next) {
+		struct dentry * dentry;
+		struct inode * inode;
+
+		dentry = filp->f_dentry;
+		if (!dentry)
+			continue;
+		if (dentry->d_op != &proc_dentry_operations)
+			continue;
+		inode = dentry->d_inode;
+		if (!inode)
+			continue;
+		if (inode->i_ino != ino)
+			continue;
+		filp->f_op = NULL;
+	}
+}
+
 int proc_unregister(struct proc_dir_entry * dir, int ino)
 {
 	struct proc_dir_entry **p = &dir->subdir, *dp;
@@ -362,6 +388,7 @@ int proc_unregister(struct proc_dir_entry * dir, int ino)
 			    ino < PROC_DYNAMIC_FIRST+PROC_NDYNAMIC)
 				clear_bit(ino-PROC_DYNAMIC_FIRST, 
 					  (void *) proc_alloc_map);
+			proc_kill_inodes(ino);
 			return 0;
 		}
 		p = &dp->next;
@@ -490,11 +517,6 @@ static struct proc_dir_entry proc_root_uptime = {
 };
 static struct proc_dir_entry proc_root_meminfo = {
 	PROC_MEMINFO, 7, "meminfo",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_array_inode_operations
-};
-static struct proc_dir_entry proc_root_swapstats = {
-	PROC_SWAPSTATS, 9, "swapstats",
 	S_IFREG | S_IRUGO, 1, 0, 0,
 	0, &proc_array_inode_operations
 };
@@ -653,7 +675,6 @@ __initfunc(void proc_root_init(void))
 	proc_register(&proc_root, &proc_root_loadavg);
 	proc_register(&proc_root, &proc_root_uptime);
 	proc_register(&proc_root, &proc_root_meminfo);
-	proc_register(&proc_root, &proc_root_swapstats);
 	proc_register(&proc_root, &proc_root_kmsg);
 	proc_register(&proc_root, &proc_root_version);
 	proc_register(&proc_root, &proc_root_cpuinfo);

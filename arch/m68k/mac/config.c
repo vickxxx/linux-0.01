@@ -55,9 +55,6 @@ extern char m68k_command_line[CL_SIZE];
 
 void *mac_env;		/* Loaded by the boot asm */
 
-/* The logical video addr. determined by head.S - testing */
-extern unsigned long mac_videobase;
-
 /* The phys. video addr. - might be bogus on some machines */
 unsigned long mac_orig_videoaddr;
 
@@ -65,7 +62,6 @@ unsigned long mac_orig_videoaddr;
 extern int mac_keyb_init(void);
 extern int mac_kbdrate(struct kbd_repeat *k);
 extern void mac_kbd_leds(unsigned int leds);
-extern void mac_kbd_reset_setup(char*, int);
 
 /* Mac specific irq functions */
 extern void mac_init_IRQ (void);
@@ -241,9 +237,7 @@ __initfunc(int mac_parse_bootinfo(const struct bi_record *record))
 	    mac_bi_data.id = *data;
 	    break;
 	case BI_MAC_VADDR:
-	    /* save booter supplied videobase; use the one mapped in head.S! */
-	    mac_orig_videoaddr = *data;
-	    mac_bi_data.videoaddr = mac_videobase;
+	    mac_bi_data.videoaddr = VIDEOMEMBASE + (*data & ~VIDEOMEMMASK);
 	    break;
 	case BI_MAC_VDEPTH:
 	    mac_bi_data.videodepth = *data;
@@ -307,7 +301,6 @@ __initfunc(void config_mac(void))
     mach_keyb_init       = mac_keyb_init;
     mach_kbdrate         = mac_kbdrate;
     mach_kbd_leds        = mac_kbd_leds;
-    kbd_reset_setup      = mac_kbd_reset_setup;
     mach_init_IRQ        = mac_init_IRQ;
     mach_request_irq     = mac_request_irq;
     mach_free_irq        = mac_free_irq;
@@ -423,7 +416,7 @@ static struct mac_model mac_data_table[]=
 	 */
 
 	{	MAC_MODEL_CLII, "Classic II",		MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,     MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_CCL,  "Color Classic",	MAC_ADB_IISI,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,     MAC_ETHER_NONE,	MAC_NUBUS},
+	{	MAC_MODEL_CCL,  "Color Classic",	MAC_ADB_CUDA,	MAC_VIA_IIci,	MAC_SCSI_OLD,	MAC_IDE_NONE,	MAC_SCC_II,     MAC_ETHER_NONE,	MAC_NUBUS},
 
 	/*
 	 *	Some Mac LC machines. Basically the same as the IIci, ADB like IIsi
@@ -475,8 +468,8 @@ static struct mac_model mac_data_table[]=
 	 *	Centris - just guessing again; maybe like Quadra
 	 */
 
-	{	MAC_MODEL_C610, "Centris 610",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
-	{	MAC_MODEL_C650, "Centris 650",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
+	{	MAC_MODEL_C610, "Centris 610",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_SONIC, MAC_NUBUS},
+	{	MAC_MODEL_C650, "Centris 650",   MAC_ADB_II,   MAC_VIA_QUADRA, MAC_SCSI_QUADRA,  MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_SONIC, MAC_NUBUS},
 	{	MAC_MODEL_C660, "Centris 660AV", MAC_ADB_CUDA, MAC_VIA_QUADRA, MAC_SCSI_QUADRA3, MAC_IDE_NONE, MAC_SCC_QUADRA,	MAC_ETHER_NONE,	MAC_NUBUS},
 
 	/*

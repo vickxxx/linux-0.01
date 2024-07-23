@@ -16,6 +16,13 @@ D: One of assisting postmasters for vger.rutgers.edu's lists
 S: (ask for current address)
 S: Finland
 
+N: Dave Airlie
+E: airlied@linux.ie
+W: http://www.csn.ul.ie/~airlied
+D: NFS over TCP patches
+S: University of Limerick
+S: Ireland
+
 N: Werner Almesberger
 E: werner.almesberger@lrc.di.epfl.ch
 D: dosfs, LILO, some fd features, various other hacks here and there
@@ -84,6 +91,14 @@ S: 20 Ames Street
 S: Cambridge, Massachusetts 02139
 S: USA
 
+N: Jens Axboe
+E: axboe@image.dk
+D: Linux CD-ROM maintainer
+D: jiffies wrap fixes + schedule timeouts depending on HZ == 100
+S: Peter Bangs Vej 258, 2TH
+S: 2500 Valby
+S: Denmark
+
 N: John Aycock
 E: aycock@cpsc.ucalgary.ca
 D: Adaptec 274x driver
@@ -139,7 +154,8 @@ M: Krzysztof G. Baranowski
 E: kgb@manjak.knm.org.pl
 P: 1024/FA6F16D1 96 D1 1A CF 5F CA 69 EC  F9 4F 36 1F 6D 60 7B DA
 D: Maintainer of the System V file system.
-D: SystemV fs update for 2.1.x dcache.
+D: System V fs update for 2.1.x dcache.
+D: Forward ported a couple of SCSI drivers.
 D: Various bugfixes.
 S: ul. Koscielna 12a
 S: 62-300 Wrzesnia
@@ -756,9 +772,9 @@ S: 34131 Kassel
 S: Germany
 
 N: Richard Henderson
+E: rth@twiddle.net
 E: rth@cygnus.com
-E: richard@gnu.org
-D: Alpha/ELF, gcc, binutils, and glibc
+D: Alpha hacker, kernel and userland
 S: 50 E. Middlefield #10
 S: Mountain View, California 94043
 S: USA
@@ -901,7 +917,9 @@ S: Czech Republic
 N: Niels Kristian Bech Jensen
 E: nkbj@image.dk
 W: http://www.image.dk/~nkbj
-D: 4.4BSD and NeXTstep support in read-only ufs
+D: 4.4BSD and NeXTstep filesystem support in the old ufs.
+D: Openstep filesystem support in the new ufs.
+D: Danish HOWTO, Linux+FreeBSD mini-HOWTO.
 S: Dr. Holsts Vej 34, lejl. 164
 S: DK-8230 Åbyhøj
 S: Denmark
@@ -1141,8 +1159,8 @@ D: NTFS driver
 
 N: Mark Lord
 E: mlord@pobox.com
-D: Author of IDE driver (ide.c), hd.c support
-D: Triton Bus Master IDE driver
+D: EIDE driver, hd.c support
+D: EIDE PCI and bus-master DMA support
 D: Hard Disk Parameter (hdparm) utility
 S: 33 Ridgefield Cr
 S: Nepean, Ontario
@@ -1498,7 +1516,12 @@ D: modularized BSD Unix domain sockets
 
 N: Reed H. Petty
 E: rhp@draper.net
+W: http://www.draper.net
 D: Loop device driver extensions
+D: Encryption transfer modules (no export)
+S: Post Office Box 1815
+S: Harrison, Arkansas  72602-1815
+S: USA
 
 N: Kai Petzke
 E: wpp@marie.physik.tu-berlin.de
@@ -1572,8 +1595,8 @@ S: 75019 Paris
 S: France
 
 N: Rik van Riel
-E: H.H.vanRiel@phys.uu.nl
-W: http://www.phys.uu.nl/~riel/
+E: H.H.vanRiel@humbolt.geo.uu.nl
+W: http://humbolt.geo.uu.nl/
 D: Maintainer of the mm-patches page (see www.linuxhq.com)
 D: Documentation/sysctl/*, kswapd fixes, random kernel hacker
 S: Vorenkampsweg 1
@@ -1621,6 +1644,14 @@ S: France
 N: Alessandro Rubini
 E: rubini@ipvvis.unipv.it
 D: the gpm mouse server and kernel support for it
+
+N: Philipp Rumpf
+E: prumpf@jcsbs.lanobis.de
+D: ipi_count for x86
+D: random bugfixes
+S: Rueting 4
+S: 23743 Groemitz
+S: Germany
 
 N: Paul Russell
 E: Paul.Russell@rustcorp.com.au
@@ -1696,11 +1727,11 @@ S: Beaverton, Oregon 97008
 S: USA
 
 N: Mike Shaver
-E: shaver@netscape.com
-W: http://people.netscape.com/shaver/
+E: shaver@hungry.org
+W: http://www.hungry.org/~shaver/
 D: MIPS work, /proc/sys/net, misc net hacking
 S: 149 Union St.
-S: Ottawa, Ontario
+S: Kingston, Ontario
 S: Canada K7L 2P4
 
 N: John Shifflett
@@ -1710,6 +1741,16 @@ D: Always IN2000 SCSI driver
 D: wd33c93 SCSI driver (linux-m68k)
 S: San Jose, California
 S: USA
+
+N: Jaspreet Singh
+E: jaspreet@sangoma.com
+W: www.sangoma.com
+D: WANPIPE driver for Sangoma S508/FT1 cards 
+S: Sangoma Technologies Inc.,
+S: 1001 Denison Street
+S: Suite 101
+S: Markham, Ontario L3R 2Z6
+S: Canada
 
 N: Rick Sladkey
 E: jrs@world.std.com
@@ -2053,6 +2094,14 @@ S: University of Nijmegen
 S: Geert-Grooteplein Noord 21
 S: 6525 EZ Nijmegen
 S: The Netherlands
+
+N: Ulrich Windl
+E: Ulrich.Windl@rz.uni-regensburg.de
+P: 1024/E843660D CF D7 43 A1 5A 49 14 25  7C 04 A0 6E 4C 3A AC 6D
+D: Supports NTP on Linux.  Added PPS code.  Fixed bugs in adjtimex().
+S: Alte Regensburger Str. 11a
+S: 93149 Nittenau
+S: Germany
 
 N: Lars Wirzenius
 E: liw@iki.fi

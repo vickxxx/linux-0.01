@@ -125,10 +125,16 @@ int shrink_mmap(int priority, int gfp_mask)
 	struct page * page;
 	int count;
 
-	count = (limit<<1) >> (priority);
+	count = limit >> priority;
 
 	page = mem_map + clock;
 	do {
+		int referenced;
+
+		/* This works even in the presence of PageSkip because
+		 * the first two entries at the beginning of a hole will
+		 * be marked, not just the first.
+		 */
 		page++;
 		clock++;
 		if (clock >= max_mapnr) {
@@ -138,14 +144,11 @@ int shrink_mmap(int priority, int gfp_mask)
 		if (PageSkip(page)) {
 			/* next_hash is overloaded for PageSkip */
 			page = page->next_hash;
-			clock = page->map_nr;
+			clock = page - mem_map;
 		}
 		
-		if (test_and_clear_bit(PG_referenced, &page->flags))
-			continue;
+		referenced = test_and_clear_bit(PG_referenced, &page->flags);
 
-		/* Decrement count only for non-referenced pages */
-		count--;
 		if (PageLocked(page))
 			continue;
 
@@ -156,50 +159,42 @@ int shrink_mmap(int priority, int gfp_mask)
 		if (atomic_read(&page->count) != 1)
 			continue;
 
+		count--;
+
+		/*
+		 * Is it a page swap page? If so, we want to
+		 * drop it if it is no longer used, even if it
+		 * were to be marked referenced..
+		 */
+		if (PageSwapCache(page)) {
+			if (referenced && swap_count(page->offset) != 1)
+				continue;
+			delete_from_swap_cache(page);
+			return 1;
+		}	
+
+		if (referenced)
+			continue;
+
 		/* Is it a buffer page? */
 		if (page->buffers) {
-			struct buffer_head *bh = page->buffers;
 			if (buffer_under_min())
 				continue;
-			if (!try_to_free_buffer(bh, &bh))
+			if (!try_to_free_buffers(page))
 				continue;
 			return 1;
 		}
 
-		/* is it a swap-cache or page-cache page? */
+		/* is it a page-cache page? */
 		if (page->inode) {
 			if (pgcache_under_min())
 				continue;
-			if (PageSwapCache(page)) {
-				delete_from_swap_cache(page);
-				return 1;
-			}
 			remove_inode_page(page);
 			return 1;
 		}
 
 	} while (count > 0);
 	return 0;
-}
-
-/*
- * This is called from try_to_swap_out() when we try to get rid of some
- * pages..  If we're unmapping the last occurrence of this page, we also
- * free it from the page hash-queues etc, as we don't want to keep it
- * in-core unnecessarily.
- */
-unsigned long page_unuse(struct page * page)
-{
-	int count = atomic_read(&page->count);
-
-	if (count != 2)
-		return count;
-	if (!page->inode)
-		return count;
-	if (PageSwapCache(page))
-		panic ("Doing a normal page_unuse of a swap cache page");
-	remove_inode_page(page);
-	return 1;
 }
 
 /*
@@ -1091,22 +1086,6 @@ static int filemap_write_page(struct vm_area_struct * vma,
 	struct file * file;
 	struct dentry * dentry;
 	struct inode * inode;
-	struct buffer_head * bh;
-
-	bh = mem_map[MAP_NR(page)].buffers;
-	if (bh) {
-		/* whee.. just mark the buffer heads dirty */
-		struct buffer_head * tmp = bh;
-		do {
-			/*
-			 * WSH: There's a race here: mark_buffer_dirty()
-			 * could block, and the buffers aren't pinned down.
-			 */
-			mark_buffer_dirty(tmp, 0);
-			tmp = tmp->b_this_page;
-		} while (tmp != bh);
-		return 0;
-	}
 
 	file = vma->vm_file;
 	dentry = file->f_dentry;
@@ -1128,49 +1107,14 @@ static int filemap_write_page(struct vm_area_struct * vma,
 
 
 /*
- * Swapping to a shared file: while we're busy writing out the page
- * (and the page still exists in memory), we save the page information
- * in the page table, so that "filemap_swapin()" can re-use the page
- * immediately if it is called while we're busy swapping it out..
- *
- * Once we've written it all out, we mark the page entry "empty", which
- * will result in a normal page-in (instead of a swap-in) from the now
- * up-to-date disk file.
+ * The page cache takes care of races between somebody
+ * trying to swap something out and swap something in
+ * at the same time..
  */
-int filemap_swapout(struct vm_area_struct * vma,
-	unsigned long offset,
-	pte_t *page_table)
+int filemap_swapout(struct vm_area_struct * vma, struct page * page)
 {
-	int error;
-	unsigned long page = pte_page(*page_table);
-	unsigned long entry = SWP_ENTRY(SHM_SWP_TYPE, MAP_NR(page));
-
-	flush_cache_page(vma, (offset + vma->vm_start - vma->vm_offset));
-	set_pte(page_table, __pte(entry));
-	flush_tlb_page(vma, (offset + vma->vm_start - vma->vm_offset));
-	error = filemap_write_page(vma, offset, page);
-	if (pte_val(*page_table) == entry)
-		pte_clear(page_table);
-	return error;
+	return filemap_write_page(vma, page->offset, page_address(page));
 }
-
-/*
- * filemap_swapin() is called only if we have something in the page
- * tables that is non-zero (but not present), which we know to be the
- * page index of a page that is busy being swapped out (see above).
- * So we just use it directly..
- */
-static pte_t filemap_swapin(struct vm_area_struct * vma,
-	unsigned long offset,
-	unsigned long entry)
-{
-	unsigned long page = SWP_OFFSET(entry);
-
-	atomic_inc(&mem_map[page].count);
-	page = (page << PAGE_SHIFT) + PAGE_OFFSET;
-	return mk_pte(page,vma->vm_page_prot);
-}
-
 
 static inline int filemap_sync_pte(pte_t * ptep, struct vm_area_struct *vma,
 	unsigned long address, unsigned int flags)
@@ -1312,7 +1256,7 @@ static struct vm_operations_struct file_shared_mmap = {
 	filemap_nopage,		/* nopage */
 	NULL,			/* wppage */
 	filemap_swapout,	/* swapout */
-	filemap_swapin,		/* swapin */
+	NULL,			/* swapin */
 };
 
 /*

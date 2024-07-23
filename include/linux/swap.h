@@ -1,6 +1,8 @@
 #ifndef _LINUX_SWAP_H
 #define _LINUX_SWAP_H
 
+#include <asm/page.h>
+
 #define SWAP_FLAG_PREFER	0x8000	/* set if swap priority specified */
 #define SWAP_FLAG_PRIO_MASK	0x7fff
 #define SWAP_FLAG_PRIO_SHIFT	0
@@ -25,6 +27,13 @@ union swap_header {
 };
 
 #ifdef __KERNEL__
+
+/*
+ * Max bad pages in the new format..
+ */
+#define __swapoffset(x) ((unsigned long)&((union swap_header *)0)->x)
+#define MAX_SWAP_BADPAGES \
+	((__swapoffset(magic.magic) - __swapoffset(info.badpages)) / sizeof(int))
 
 #undef DEBUG_SWAP
 
@@ -61,15 +70,6 @@ extern struct inode swapper_inode;
 extern unsigned long page_cache_size;
 extern int buffermem;
 
-struct swap_stats 
-{
-	long	proc_freepage_attempts;
-	long	proc_freepage_successes;
-	long	kswap_freepage_attempts;
-	long	kswap_freepage_successes;
-};
-extern struct swap_stats swap_stats;
-
 /* Incomplete types for prototype declarations: */
 struct task_struct;
 struct vm_area_struct;
@@ -82,11 +82,12 @@ extern int shm_swap (int, int);
 extern void swap_setup (void);
 
 /* linux/mm/vmscan.c */
-extern int try_to_free_pages(unsigned int gfp_mask, int count);
+extern int try_to_free_pages(unsigned int gfp_mask);
 
 /* linux/mm/page_io.c */
 extern void rw_swap_page(int, unsigned long, char *, int);
 extern void rw_swap_page_nocache(int, unsigned long, char *);
+extern void rw_swap_page_nolock(int, unsigned long, char *, int);
 extern void swap_after_unlock_page (unsigned long entry);
 
 /* linux/mm/page_alloc.c */
@@ -138,9 +139,7 @@ asmlinkage int sys_swapon(const char *, int);
 
 #ifdef SWAP_CACHE_INFO
 extern unsigned long swap_cache_add_total;
-extern unsigned long swap_cache_add_success;
 extern unsigned long swap_cache_del_total;
-extern unsigned long swap_cache_del_success;
 extern unsigned long swap_cache_find_total;
 extern unsigned long swap_cache_find_success;
 #endif
@@ -165,12 +164,7 @@ static inline int is_page_shared(struct page *page)
 		return 1;
 	count = atomic_read(&page->count);
 	if (PageSwapCache(page))
-	{
-		/* PARANOID */
-		if (page->inode != &swapper_inode)
-			panic("swap cache page has wrong inode\n");
 		count += swap_count(page->offset) - 2;
-	}
 	if (PageFreeAfter(page))
 		count--;
 	return  count > 1;

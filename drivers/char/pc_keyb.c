@@ -55,6 +55,7 @@ unsigned char pckbd_sysrq_xlate[128] =
 #endif
 
 static void kbd_write(int address, int data);
+static unsigned char handle_kbd_event(void);
 
 spinlock_t kbd_controller_lock = SPIN_LOCK_UNLOCKED;
 
@@ -64,7 +65,7 @@ static volatile unsigned char acknowledge = 0;
 static volatile unsigned char resend = 0;
 
 
-#if defined(CONFIG_PSMOUSE)
+#if defined CONFIG_PSMOUSE
 /*
  *	PS/2 Auxiliary Device
  */
@@ -78,15 +79,15 @@ static int aux_count = 0;
 #define AUX_INTS_ON  (KBD_MODE_KCC | KBD_MODE_SYS | KBD_MODE_MOUSE_INT | KBD_MODE_KBD_INT)
 
 #define MAX_RETRIES	60		/* some aux operations take long time*/
-#if defined(__alpha__) && !defined(CONFIG_PCI)
-# define AUX_IRQ	9		/* Jensen is odd indeed */
-#else
+
+#ifndef AUX_IRQ
 # define AUX_IRQ	12
 #endif
+
 #endif /* CONFIG_PSMOUSE */
 
 /*
- * Wait for keyboard controller input buffer is empty.
+ * Wait for keyboard controller input buffer to drain.
  *
  * Don't use 'jiffies' so that we don't depend on
  * interrupts..
@@ -101,16 +102,15 @@ static int aux_count = 0;
 static inline void kb_wait(void)
 {
 	unsigned long timeout = KBC_TIMEOUT;
-	unsigned char status;
 
 	do {
-		status = inb_p(KBD_STATUS_REG);
-		if (status & KBD_STAT_OBF) {
-			if (status & KBD_STAT_MOUSE_OBF)
-			inb_p(KBD_DATA_REG); /* Flush. */
-		}
+		/*
+		 * "handle_kbd_event()" will handle any incoming events
+		 * while we wait - keypresses or mouse movement.
+		 */
+		unsigned char status = handle_kbd_event();
 
-		if (! (inb_p(KBD_STATUS_REG) & KBD_STAT_IBF))
+		if (! (status & KBD_STAT_IBF))
 			return;
 		mdelay(1);
 		timeout--;
@@ -256,25 +256,6 @@ int pckbd_getkeycode(unsigned int scancode)
 	    e0_keys[scancode - 128];
 }
 
-#if DISABLE_KBD_DURING_INTERRUPTS
-static inline void send_cmd(unsigned char c)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&kbd_controller_lock, flags);
-	kb_wait();
-	outb(c, KBD_CNTL_REG);
-	spin_unlock_irqrestore(&kbd_controller_lock, flags);
-}
-
-/* #define disable_keyboard()	do { send_cmd(KBD_CCMD_KBD_DISABLE); kb_wait(); } while (0) */
-#define disable_keyboard()	send_cmd(KBD_CCMD_KBD_DISABLE)
-#define enable_keyboard()	send_cmd(KBD_CCMD_KBD_ENABLE)
-#else
-#define disable_keyboard()	/* nothing */
-#define enable_keyboard()	/* nothing */
-#endif
-
 static int do_acknowledge(unsigned char scancode)
 {
 	if (reply_expected) {
@@ -419,16 +400,17 @@ char pckbd_unexpected_up(unsigned char keycode)
 	    return 0200;
 }
 
-static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+/*
+ * This reads the keyboard status port, and does the
+ * appropriate action.
+ *
+ * It requires that we hold the keyboard controller
+ * spinlock.
+ */
+static unsigned char handle_kbd_event(void)
 {
-	unsigned long flags;
-	unsigned char status;
+	unsigned char status = inb(KBD_STATUS_REG);
 
-	disable_keyboard();
-	spin_lock_irqsave(&kbd_controller_lock, flags);
-	kbd_pt_regs = regs;
-
-	status = inb(KBD_STATUS_REG);
 	while (status & KBD_STAT_OBF) {
 		unsigned char scancode;
 
@@ -459,8 +441,19 @@ static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		status = inb(KBD_STATUS_REG);
 	}
 
+	return status;
+}
+
+
+static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	unsigned long flags;
+
+	kbd_pt_regs = regs;
+
+	spin_lock_irqsave(&kbd_controller_lock, flags);
+	handle_kbd_event();
 	spin_unlock_irqrestore(&kbd_controller_lock, flags);
-	enable_keyboard();
 }
 
 /*
@@ -716,6 +709,52 @@ void __init pckbd_init_hw(void)
 }
 
 #if defined CONFIG_PSMOUSE
+
+/*
+ * Check if this is a dual port controller.
+ */
+static int __init detect_auxiliary_port(void)
+{
+	unsigned long flags;
+	unsigned char status;
+	unsigned char val;
+	int loops = 5;
+	int retval = 0;
+
+	spin_lock_irqsave(&kbd_controller_lock, flags);
+
+	/* Put the value 0x5A in the output buffer using the "Write
+	 * Auxiliary Device Output Buffer" command (0xD3). Poll the
+	 * Status Register for a while to see if the value really
+	 * turns up in the Data Register. If the KBD_STAT_MOUSE_OBF
+	 * bit is also set to 1 in the Status Register, we assume this
+	 * controller has an Auxiliary Port (a.k.a. Mouse Port).
+	 */
+	kb_wait();
+	outb(KBD_CCMD_WRITE_AUX_OBUF, KBD_CNTL_REG);
+
+	kb_wait();
+	outb(0x5a, KBD_DATA_REG); /* 0x5a is a random dummy value. */
+
+	status = inb(KBD_STATUS_REG);
+	while (!(status & KBD_STAT_OBF) && loops--) {
+		mdelay(1);
+		status = inb(KBD_STATUS_REG);
+	}
+
+	if (status & KBD_STAT_OBF) {
+		val = inb(KBD_DATA_REG);
+		if (status & KBD_STAT_MOUSE_OBF) {
+			printk(KERN_INFO "Detected PS/2 Mouse Port.\n");
+			retval = 1;
+		}
+	}
+
+	spin_unlock_irqrestore(&kbd_controller_lock, flags);
+
+	return retval;
+}
+
 /*
  * Send a byte to the mouse.
  */
@@ -761,18 +800,19 @@ static int fasync_aux(int fd, struct file *filp, int on)
 }
 
 
+/*
+ * Random magic cookie for the aux device
+ */
+#define AUX_DEV ((void *)queue)
+
 static int release_aux(struct inode * inode, struct file * file)
 {
 	fasync_aux(-1, file, 0);
 	if (--aux_count)
 		return 0;
 	kbd_write_cmd(AUX_INTS_OFF);			    /* Disable controller ints */
-	kbd_write(KBD_CCMD_MOUSE_DISABLE, KBD_CNTL_REG);
-#ifdef CONFIG_MCA
-	free_irq(AUX_IRQ, inode);
-#else
-	free_irq(AUX_IRQ, NULL);
-#endif
+	kbd_write(KBD_CNTL_REG, KBD_CCMD_MOUSE_DISABLE);
+	free_irq(AUX_IRQ, AUX_DEV);
 	return 0;
 }
 
@@ -787,15 +827,11 @@ static int open_aux(struct inode * inode, struct file * file)
 		return 0;
 	}
 	queue->head = queue->tail = 0;		/* Flush input queue */
-#ifdef CONFIG_MCA
-	if (request_irq(AUX_IRQ, keyboard_interrupt, MCA_bus ? SA_SHIRQ : 0, "PS/2 Mouse", inode)) {
-#else
-	if (request_irq(AUX_IRQ, keyboard_interrupt, 0, "PS/2 Mouse", NULL)) {
-#endif
+	if (request_irq(AUX_IRQ, keyboard_interrupt, SA_SHIRQ, "PS/2 Mouse", AUX_DEV)) {
 		aux_count--;
 		return -EBUSY;
 	}
-	kbd_write(KBD_CCMD_MOUSE_ENABLE, KBD_CNTL_REG);	/* Enable the
+	kbd_write(KBD_CNTL_REG, KBD_CCMD_MOUSE_ENABLE);	/* Enable the
 							   auxiliary port on
 							   controller. */
 	aux_write_dev(AUX_ENABLE_DEV); /* Enable aux device */
@@ -904,18 +940,9 @@ static struct miscdevice psaux_mouse = {
 
 static int __init psaux_init(void)
 {
-#if 0
-	/*
-	 * Don't bother with the BIOS flag: even if we don't have
-	 * a mouse connected at bootup we may still want to connect
-	 * one later, and we don't want to just let the BIOS tell
-	 * us that it has no mouse..
-	 */
-	if (aux_device_present != 0xaa)
+	if (!detect_auxiliary_port())
 		return -EIO;
 
-	printk(KERN_INFO "PS/2 auxiliary pointing device detected -- driver installed.\n");
-#endif
 	misc_register(&psaux_mouse);
 	queue = (struct aux_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
 	memset(queue, 0, sizeof(*queue));
@@ -923,14 +950,14 @@ static int __init psaux_init(void)
 	queue->proc_list = NULL;
 
 #ifdef INITIALIZE_MOUSE
-	kbd_write(KBD_CCMD_MOUSE_ENABLE, KBD_CNTL_REG);	/* Enable Aux. */
+	kbd_write(KBD_CNTL_REG, KBD_CCMD_MOUSE_ENABLE);	/* Enable Aux. */
 	aux_write_dev(AUX_SET_SAMPLE);
 	aux_write_dev(100);			/* 100 samples/sec */
 	aux_write_dev(AUX_SET_RES);
 	aux_write_dev(3);			/* 8 counts per mm */
 	aux_write_dev(AUX_SET_SCALE21);		/* 2:1 scaling */
 #endif /* INITIALIZE_MOUSE */
-	kbd_write(KBD_CCMD_MOUSE_DISABLE, KBD_CNTL_REG); /* Disable aux device. */
+	kbd_write(KBD_CNTL_REG, KBD_CCMD_MOUSE_DISABLE); /* Disable aux device. */
 	kbd_write_cmd(AUX_INTS_OFF); /* Disable controller ints. */
 
 	return 0;

@@ -27,8 +27,12 @@
 * May 17, 1998  K. Baranowski	Fixed SNAP encapsulation in wan_encapsulate
 * Dec 15, 1998  Arnaldo Melo    support for firmwares of up to 128000 bytes
 *                               check wandev->setup return value
+* Dec 22, 1998  Arnaldo Melo    vmalloc/vfree used in device_setup to allocate
+*                               kernel memory and copy configuration data to
+*                               kernel space (for big firmwares)
 *****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/kernel.h>
@@ -36,6 +40,7 @@
 #include <linux/malloc.h>	/* kmalloc(), kfree() */
 #include <linux/mm.h>		/* verify_area(), etc. */
 #include <linux/string.h>	/* inline mem*, str* functions */
+#include <linux/vmalloc.h>	/* vmalloc, vfree */
 #include <asm/segment.h>	/* kernel <-> user copy */
 #include <asm/byteorder.h>	/* htons(), etc. */
 #include <asm/uaccess.h>	/* copy_to/from_user */
@@ -83,10 +88,8 @@ static int delete_interface (wan_device_t* wandev, char* name, int forse);
  *	Global Data
  */
 
-#ifdef MODULE
 static char fullname[]		= "WAN Router";
 static char copyright[]		= "(c) 1995-1997 Sangoma Technologies Inc.";
-#endif
 static char modname[]		= ROUTER_NAME;	/* short module name */
 wan_device_t * router_devlist	= NULL;	/* list of registered devices */
 static int devcnt		= 0;
@@ -100,7 +103,30 @@ static unsigned char oui_ether[] = { 0x00, 0x00, 0x00 };
 static unsigned char oui_802_2[] = { 0x00, 0x80, 0xC2 };
 #endif
 
-#ifdef MODULE
+#ifndef MODULE
+
+int wanrouter_init(void)
+{
+	int err;
+	extern void wanpipe_init(void);
+
+	printk(KERN_INFO "%s v%u.%u %s\n",
+		fullname, ROUTER_VERSION, ROUTER_RELEASE, copyright);
+	err = wanrouter_proc_init();
+	if (err)
+		printk(KERN_ERR "%s: can't create entry in proc filesystem!\n", modname);		
+
+	/*
+	 *	Initialise compiled in boards
+	 */		
+	 
+#ifdef CONFIG_VENDOR_SANGOMA
+	wanpipe_init();
+#endif	
+	return err;
+}
+
+#else
 
 /*
  *	Kernel Loadable Module Entry Points
@@ -139,14 +165,6 @@ void cleanup_module (void)
 	wanrouter_proc_cleanup();
 }
 
-#else
-
-__initfunc(void wanrouter_init(void))
-{
-	int err = wanrouter_proc_init();
-	if (err) printk(KERN_ERR
-		"%s: can't create entry in proc filesystem!\n", modname);
-}
 #endif
 
 /*
@@ -440,7 +458,7 @@ int wanrouter_ioctl(struct inode* inode, struct file* file,
 static int device_setup (wan_device_t* wandev, wandev_conf_t* u_conf)
 {
 	void* data;
-	wandev_conf_t* conf;
+	wandev_conf_t *conf;
 	int err= -EINVAL;
 
 	if (wandev->setup == NULL)	/* Nothing to do ? */
@@ -464,7 +482,7 @@ static int device_setup (wan_device_t* wandev, wandev_conf_t* u_conf)
 		if(conf->data_size > 128000 || conf->data_size < 0){
 			goto bail;
 		}
-		data = kmalloc(conf->data_size, GFP_KERNEL);
+		data = vmalloc(conf->data_size);
 		if (data)
 		{
 			if(!copy_from_user(data, conf->data, conf->data_size))
@@ -473,10 +491,13 @@ static int device_setup (wan_device_t* wandev, wandev_conf_t* u_conf)
 				err = wandev->setup(wandev,conf);
 			}
 			else 
-				err = -ENOBUFS;
+				err = -EFAULT;
 		}
+		else
+			err = -ENOBUFS;
+			
 		if (data)
-			kfree(data);
+			vfree(data);
 	}
 bail:
 	kfree(conf);

@@ -279,6 +279,9 @@ static struct dev_info device_list[] =
 {"MATSHITA","PD","*", BLIST_FORCELUN | BLIST_SINGLELUN},
 {"YAMAHA","CDR100","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
 {"YAMAHA","CDR102","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"iomega","jaz 1GB","J.86", BLIST_NOTQ | BLIST_NOLUN},
+{"IBM","DPES-","*", BLIST_NOTQ | BLIST_NOLUN},
+{"WDIGTL","WDE","*", BLIST_NOTQ | BLIST_NOLUN},
 /*
  * Must be at end of list...
  */
@@ -530,7 +533,7 @@ static void scan_scsis (struct Scsi_Host *shpnt,
       for (dev = 0; dev < shpnt->max_id; ++dev) {
         if( shpnt->reverse_ordering)
         	/* Shift to scanning 15,14,13... or 7,6,5,4, */
-        	order_dev = shpnt->max_channel-dev-1;
+        	order_dev = shpnt->max_id-dev-1;
         else
         	order_dev = dev;
         	
@@ -1746,7 +1749,7 @@ scsi_finish_command(Scsi_Cmnd * SCpnt)
         host_active = NULL;
         
         /* For block devices "wake_up" is done in end_scsi_request */
-        if (!SCSI_BLK_MAJOR(SCpnt->request.rq_dev)) {
+        if (!SCSI_BLK_MAJOR(MAJOR(SCpnt->request.rq_dev))) {
             struct Scsi_Host * next;
             
             for (next = host->block; next != host; next = next->block)

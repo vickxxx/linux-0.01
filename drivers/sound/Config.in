@@ -9,20 +9,18 @@
 
 # Prompt user for primary drivers.
 
-if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  dep_tristate 'Ensoniq AudioPCI (ES1370)' CONFIG_SOUND_ES1370 $CONFIG_SOUND
-  if [ "$CONFIG_SOUND_ES1370" = "y" ]; then
-     bool 'Joystick support at boot time' CONFIG_SOUND_ES1370_JOYPORT_BOOT
-  fi  
-  dep_tristate 'Creative Ensoniq AudioPCI 97 (ES1371)' CONFIG_SOUND_ES1371 $CONFIG_SOUND
-  if [ "$CONFIG_SOUND_ES1371" = "y" ]; then
-     bool 'Joystick support at boot time' CONFIG_SOUND_ES1371_JOYPORT_BOOT
-     if [ "$CONFIG_SOUND_ES1371_JOYPORT_BOOT" = "y" ]; then
-        hex 'Gameport I/O 200,208,210,218' CONFIG_SOUND_ES1371_GAMEPORT 200
-     fi
-  fi
-  dep_tristate 'S3 SonicVibes' CONFIG_SOUND_SONICVIBES $CONFIG_SOUND
+dep_tristate 'Ensoniq AudioPCI (ES1370)' CONFIG_SOUND_ES1370 $CONFIG_SOUND
+if [ "$CONFIG_SOUND_ES1370" = "y" ]; then
+   bool 'Joystick support at boot time' CONFIG_SOUND_ES1370_JOYPORT_BOOT
+fi  
+dep_tristate 'Creative Ensoniq AudioPCI 97 (ES1371)' CONFIG_SOUND_ES1371 $CONFIG_SOUND
+if [ "$CONFIG_SOUND_ES1371" = "y" ]; then
+   bool 'Joystick support at boot time' CONFIG_SOUND_ES1371_JOYPORT_BOOT
+   if [ "$CONFIG_SOUND_ES1371_JOYPORT_BOOT" = "y" ]; then
+      hex 'Gameport I/O 200,208,210,218' CONFIG_SOUND_ES1371_GAMEPORT 200
+   fi
 fi
+dep_tristate 'S3 SonicVibes' CONFIG_SOUND_SONICVIBES $CONFIG_SOUND
 
 dep_tristate 'Support for Turtle Beach MultiSound Classic, Tahiti, Monterey' CONFIG_SOUND_MSNDCLAS $CONFIG_SOUND
 if [ "$CONFIG_SOUND_MSNDCLAS" = "y" -o "$CONFIG_SOUND_MSNDCLAS" = "m" ]; then
@@ -131,7 +129,7 @@ if [ "$CONFIG_SOUND_OSS" = "y" -o "$CONFIG_SOUND_OSS" = "m" ]; then
       int 'PSS MIDI IRQ 3, 4, 5, 7, 9, 10, 11, 12' CONFIG_PSS_MPU_IRQ 9
       bool '  Have DSPxxx.LD firmware file' CONFIG_PSS_HAVE_BOOT
       if [ "$CONFIG_PSS_HAVE_BOOT" = "y" ]; then
-         string '  Full pathname of DSPxxx.LD firmware file' CONFIG_PSS_BOOT_FILE
+         string '  Full pathname of DSPxxx.LD firmware file' CONFIG_PSS_BOOT_FILE /etc/sound/dsp001.ld
       fi
   fi
   if [ "$CONFIG_SOUND_PSS" = "y" -o "$CONFIG_SOUND_PSS" = "m" ]; then
@@ -168,7 +166,7 @@ if [ "$CONFIG_SOUND_OSS" = "y" -o "$CONFIG_SOUND_OSS" = "m" ]; then
       int 'TRIX SB DMA 1 or 3' CONFIG_TRIX_SB_DMA 1
       bool '  Have TRXPRO.HEX firmware file' CONFIG_TRIX_HAVE_BOOT
       if [ "$CONFIG_TRIX_HAVE_BOOT" = "y" ]; then
-  	string '  Full pathname of TRXPRO.HEX firmware file' CONFIG_TRIX_BOOT_FILE
+  	string '  Full pathname of TRXPRO.HEX firmware file' CONFIG_TRIX_BOOT_FILE /etc/sound/trxpro.hex
       fi
   fi
   
@@ -185,7 +183,7 @@ if [ "$CONFIG_SOUND_OSS" = "y" -o "$CONFIG_SOUND_OSS" = "m" ]; then
       int 'MAD16 MIDI IRQ 5, 7, 9 or 10' CONFIG_MAD16_MPU_IRQ 9
   fi
   
-  dep_tristate 'Full support for Turtle Beach WaveFront (Tropez Plus, Tropez, Maui) synth/soundcards' CONFIG_SOUND_WAVEFRONT $CONFIG_SOUND_OSS
+  dep_tristate 'Full support for Turtle Beach WaveFront (Tropez Plus, Tropez, Maui) synth/soundcards' CONFIG_SOUND_WAVEFRONT $CONFIG_SOUND_OSS m
   if [ "$CONFIG_SOUND_WAVEFRONT" = "y" ]; then
       hex 'I/O base for WaveFront 210, 230, 260, 290, 300, 320, 338 or 330' CONFIG_WAVEFRONT_BASE 330
       int 'WaveFront IRQ 5, 9, 12 or 15' CONFIG_WAVEFRONT_IRQ 9
@@ -203,6 +201,7 @@ if [ "$CONFIG_SOUND_OSS" = "y" -o "$CONFIG_SOUND_OSS" = "m" ]; then
 
   dep_tristate 'Support for Yamaha OPL3-SA2, SA3, and SAx based PnP cards' CONFIG_SOUND_OPL3SA2 $CONFIG_SOUND_OSS
   if [ "$CONFIG_SOUND_OPL3SA2" = "y" ]; then
+      int 'Chipset (-1 for autoprobe, 2, or 3)' CONFIG_OPL3SA2_CHIPSET -1
       hex 'OPL3SA2 audio I/O base (530 - F48 valid)' CONFIG_OPL3SA2_BASE 530
       int 'OPL3SA2 audio IRQ 5, 7, 9, 11, 12 or 15' CONFIG_OPL3SA2_IRQ 9
       int 'OPL3SA2 audio DMA 0, 1 or 3' CONFIG_OPL3SA2_DMA 0
@@ -218,7 +217,7 @@ if [ "$CONFIG_SOUND_OSS" = "y" -o "$CONFIG_SOUND_OSS" = "m" ]; then
       int 'Maui IRQ 5, 9, 12 or 15' CONFIG_MAUI_IRQ 9
       bool '  Have OSWF.MOT firmware file' CONFIG_MAUI_HAVE_BOOT
       if [ "$CONFIG_MAUI_HAVE_BOOT" = "y" ]; then
-  	string '  Full pathname of OSWF.MOT firmware file' CONFIG_MAUI_BOOT_FILE
+  	string '  Full pathname of OSWF.MOT firmware file' CONFIG_MAUI_BOOT_FILE /etc/sound/oswf.mot
       fi
   fi
 
