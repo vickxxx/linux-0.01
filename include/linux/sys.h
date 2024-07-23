@@ -7,13 +7,9 @@
 #define NR_syscalls 256
 
 /*
- * These are system calls with the same entry-point
- */
-#define _sys_clone _sys_fork
-
-/*
  * These are system calls that will be removed at some time
  * due to newer versions existing..
+ * (please be careful - ibcs2 may need some of these).
  */
 #ifdef notdef
 #define _sys_waitpid	_sys_old_syscall	/* _sys_wait4 */
@@ -32,6 +28,5 @@
  * but have an entry in the table for future expansion..
  */
 #define _sys_quotactl	_sys_ni_syscall
-#define _sys_bdflush	_sys_ni_syscall
 
 #endif

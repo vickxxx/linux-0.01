@@ -1,7 +1,8 @@
 /*
- *  linux/kernel/blk_dev/ll_rw.c
+ *  linux/drivers/block/ll_rw_blk.c
  *
  * Copyright (C) 1991, 1992 Linus Torvalds
+ * Copyright (C) 1994,      Karl Keyte: Added support for disk statistics
  */
 
 /*
@@ -14,14 +15,11 @@
 #include <linux/string.h>
 #include <linux/config.h>
 #include <linux/locks.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
-
+#include <asm/io.h>
 #include "blk.h"
-
-#ifdef CONFIG_SBPCD
-extern u_long sbpcd_init(u_long, u_long);
-#endif CONFIG_SBPCD
 
 /*
  * The request-struct contains all necessary data
@@ -43,16 +41,29 @@ int read_ahead[MAX_BLKDEV] = {0, };
  *	next-request
  */
 struct blk_dev_struct blk_dev[MAX_BLKDEV] = {
-	{ NULL, NULL },		/* no_dev */
-	{ NULL, NULL },		/* dev mem */
-	{ NULL, NULL },		/* dev fd */
-	{ NULL, NULL },		/* dev hd */
-	{ NULL, NULL },		/* dev ttyx */
-	{ NULL, NULL },		/* dev tty */
-	{ NULL, NULL },		/* dev lp */
-	{ NULL, NULL },		/* dev pipes */
-	{ NULL, NULL },		/* dev sd */
-	{ NULL, NULL }		/* dev st */
+	{ NULL, NULL },		/* 0 no_dev */
+	{ NULL, NULL },		/* 1 dev mem */
+	{ NULL, NULL },		/* 2 dev fd */
+	{ NULL, NULL },		/* 3 dev ide0 or hd */
+	{ NULL, NULL },		/* 4 dev ttyx */
+	{ NULL, NULL },		/* 5 dev tty */
+	{ NULL, NULL },		/* 6 dev lp */
+	{ NULL, NULL },		/* 7 dev pipes */
+	{ NULL, NULL },		/* 8 dev sd */
+	{ NULL, NULL },		/* 9 dev st */
+	{ NULL, NULL },		/* 10 */
+	{ NULL, NULL },		/* 11 */
+	{ NULL, NULL },		/* 12 */
+	{ NULL, NULL },		/* 13 */
+	{ NULL, NULL },		/* 14 */
+	{ NULL, NULL },		/* 15 */
+	{ NULL, NULL },		/* 16 */
+	{ NULL, NULL },		/* 17 */
+	{ NULL, NULL },		/* 18 */
+	{ NULL, NULL },		/* 19 */
+	{ NULL, NULL },		/* 20 */
+	{ NULL, NULL },		/* 21 */
+	{ NULL, NULL }		/* 22 dev ide1 */
 };
 
 /*
@@ -73,6 +84,20 @@ int * blk_size[MAX_BLKDEV] = { NULL, NULL, };
  * if (!blksize_size[MAJOR]) then 1024 bytes is assumed.
  */
 int * blksize_size[MAX_BLKDEV] = { NULL, NULL, };
+
+/*
+ * hardsect_size contains the size of the hardware sector of a device.
+ *
+ * hardsect_size[MAJOR][MINOR]
+ *
+ * if (!hardsect_size[MAJOR])
+ *		then 512 bytes is assumed.
+ * else
+ *		sector_size is hardsect_size[MAJOR][MINOR]
+ * This is currently set by some scsi device and read by the msdos fs driver
+ * This might be a some uses later.
+ */
+int * hardsect_size[MAX_BLKDEV] = { NULL, NULL, };
 
 /*
  * look for a free request in the first N entries.
@@ -152,11 +177,26 @@ void set_device_ro(int dev,int flag)
 static void add_request(struct blk_dev_struct * dev, struct request * req)
 {
 	struct request * tmp;
+	short		 disk_index;
+
+	switch (MAJOR(req->dev)) {
+		case SCSI_DISK_MAJOR:	disk_index = (MINOR(req->dev) & 0x0070) >> 4;
+					if (disk_index < 4)
+						kstat.dk_drive[disk_index]++;
+					break;
+		case HD_MAJOR:
+		case XT_DISK_MAJOR:	disk_index = (MINOR(req->dev) & 0x0040) >> 6;
+					kstat.dk_drive[disk_index]++;
+					break;
+		case IDE1_MAJOR:	disk_index = ((MINOR(req->dev) & 0x0040) >> 6) + 2;
+					kstat.dk_drive[disk_index]++;
+		default:		break;
+	}
 
 	req->next = NULL;
 	cli();
 	if (req->bh)
-		req->bh->b_dirt = 0;
+		mark_buffer_clean(req->bh);
 	if (!(tmp = dev->current_request)) {
 		dev->current_request = req;
 		(dev->request_fn)();
@@ -205,8 +245,13 @@ static void make_request(int major,int rw, struct buffer_head * bh)
 	if (blk_size[major])
 		if (blk_size[major][MINOR(bh->b_dev)] < (sector + count)>>1) {
 			bh->b_dirt = bh->b_uptodate = 0;
+			bh->b_req = 0;
 			return;
 		}
+	/* Uhhuh.. Nasty dead-lock possible here.. */
+	if (bh->b_lock)
+		return;
+	/* Maybe the above fixes it, and maybe it doesn't boot. Life is interesting */
 	lock_buffer(bh);
 	if ((rw == WRITE && !bh->b_dirt) || (rw == READ && bh->b_uptodate)) {
 		unlock_buffer(bh);
@@ -224,44 +269,50 @@ static void make_request(int major,int rw, struct buffer_head * bh)
 repeat:
 	cli();
 
-/* The scsi disk drivers completely remove the request from the queue when
- * they start processing an entry.  For this reason it is safe to continue
- * to add links to the top entry for scsi devices.
+/* The scsi disk drivers and the IDE driver completely remove the request
+ * from the queue when they start processing an entry.  For this reason
+ * it is safe to continue to add links to the top entry for those devices.
  */
-	if ((major == HD_MAJOR
+	if ((   major == IDE0_MAJOR	/* same as HD_MAJOR */
+	     || major == IDE1_MAJOR
+	     || major == FLOPPY_MAJOR
 	     || major == SCSI_DISK_MAJOR
 	     || major == SCSI_CDROM_MAJOR)
 	    && (req = blk_dev[major].current_request))
 	{
-	        if (major == HD_MAJOR)
+#ifdef CONFIG_BLK_DEV_HD
+	        if (major == HD_MAJOR || major == FLOPPY_MAJOR)
+#else
+		if (major == FLOPPY_MAJOR)
+#endif CONFIG_BLK_DEV_HD
 			req = req->next;
 		while (req) {
 			if (req->dev == bh->b_dev &&
-			    !req->waiting &&
+			    !req->sem &&
 			    req->cmd == rw &&
 			    req->sector + req->nr_sectors == sector &&
-			    req->nr_sectors < 254)
+			    req->nr_sectors < 244)
 			{
 				req->bhtail->b_reqnext = bh;
 				req->bhtail = bh;
 				req->nr_sectors += count;
-				bh->b_dirt = 0;
+				mark_buffer_clean(bh);
 				sti();
 				return;
 			}
 
 			if (req->dev == bh->b_dev &&
-			    !req->waiting &&
+			    !req->sem &&
 			    req->cmd == rw &&
 			    req->sector - count == sector &&
-			    req->nr_sectors < 254)
+			    req->nr_sectors < 244)
 			{
 			    	req->nr_sectors += count;
 			    	bh->b_reqnext = req->bh;
 			    	req->buffer = bh->b_data;
 			    	req->current_nr_sectors = count;
 			    	req->sector = sector;
-			    	bh->b_dirt = 0;
+				mark_buffer_clean(bh);
 			    	req->bh = bh;
 			    	sti();
 			    	return;
@@ -296,7 +347,7 @@ repeat:
 	req->nr_sectors = count;
 	req->current_nr_sectors = count;
 	req->buffer = bh->b_data;
-	req->waiting = NULL;
+	req->sem = NULL;
 	req->bh = bh;
 	req->bhtail = bh;
 	req->next = NULL;
@@ -307,6 +358,7 @@ void ll_rw_page(int rw, int dev, int page, char * buffer)
 {
 	struct request * req;
 	unsigned int major = MAJOR(dev);
+	struct semaphore sem = MUTEX_LOCKED;
 
 	if (major >= MAX_BLKDEV || !(blk_dev[major].request_fn)) {
 		printk("Trying to read nonexistent block-device %04x (%d)\n",dev,page*8);
@@ -328,12 +380,11 @@ void ll_rw_page(int rw, int dev, int page, char * buffer)
 	req->nr_sectors = 8;
 	req->current_nr_sectors = 8;
 	req->buffer = buffer;
-	req->waiting = current;
+	req->sem = &sem;
 	req->bh = NULL;
 	req->next = NULL;
-	current->state = TASK_SWAPPING;
 	add_request(major+blk_dev,req);
-	schedule();
+	down(&sem);
 }
 
 /* This function can be used to request a number of buffers from a block
@@ -374,7 +425,7 @@ void ll_rw_block(int rw, int nr, struct buffer_head * bh[])
 			correct_size = i;
 	}
 
-	/* Verify requested block sizees.  */
+	/* Verify requested block sizes.  */
 	for (i = 0; i < nr; i++) {
 		if (bh[i] && bh[i]->b_size != correct_size) {
 			printk(
@@ -435,6 +486,7 @@ void ll_rw_swap_file(int rw, int dev, unsigned int *b, int nb, char *buf)
 	int buffersize;
 	struct request * req;
 	unsigned int major = MAJOR(dev);
+	struct semaphore sem = MUTEX_LOCKED;
 
 	if (major >= MAX_BLKDEV || !(blk_dev[major].request_fn)) {
 		printk("ll_rw_swap_file: trying to swap nonexistent block-device\n");
@@ -463,12 +515,11 @@ void ll_rw_swap_file(int rw, int dev, unsigned int *b, int nb, char *buf)
 		req->nr_sectors = buffersize >> 9;
 		req->current_nr_sectors = buffersize >> 9;
 		req->buffer = buf;
-		req->waiting = current;
+		req->sem = &sem;
 		req->bh = NULL;
 		req->next = NULL;
-		current->state = TASK_UNINTERRUPTIBLE;
 		add_request(major+blk_dev,req);
-		schedule();
+		down(&sem);
 	}
 }
 
@@ -485,14 +536,28 @@ long blk_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_BLK_DEV_HD
 	mem_start = hd_init(mem_start,mem_end);
 #endif
+#ifdef CONFIG_BLK_DEV_IDE
+	mem_start = ide_init(mem_start,mem_end);
+#endif
 #ifdef CONFIG_BLK_DEV_XD
 	mem_start = xd_init(mem_start,mem_end);
 #endif
 #ifdef CONFIG_CDU31A
 	mem_start = cdu31a_init(mem_start,mem_end);
 #endif
+#ifdef CONFIG_CDU535
+	mem_start = sony535_init(mem_start,mem_end);
+#endif
 #ifdef CONFIG_MCD
 	mem_start = mcd_init(mem_start,mem_end);
+#endif
+#ifdef CONFIG_AZTCD
+        mem_start = aztcd_init(mem_start,mem_end);
+#endif
+#ifdef CONFIG_BLK_DEV_FD
+	floppy_init();
+#else
+	outb_p(0xc, 0x3f2);
 #endif
 #ifdef CONFIG_SBPCD
 	mem_start = sbpcd_init(mem_start, mem_end);

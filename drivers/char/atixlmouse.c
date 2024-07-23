@@ -63,7 +63,7 @@ static struct mouse_status {
 	struct wait_queue *wait;
 } mouse;
 
-void mouse_interrupt(int unused)
+void mouse_interrupt(int irq, struct pt_regs * regs)
 {
 	char dx, dy, buttons;
 
@@ -104,7 +104,7 @@ static int open_mouse(struct inode * inode, struct file * file)
 	mouse.dx = 0;
 	mouse.dy = 0;
 	mouse.buttons = mouse.latch_buttons = 0;
-	if (request_irq(ATIXL_MOUSE_IRQ, mouse_interrupt)) {
+	if (request_irq(ATIXL_MOUSE_IRQ, mouse_interrupt, 0, "ATIXL mouse")) {
 		mouse.active = 0;
 		return -EBUSY;
 	}

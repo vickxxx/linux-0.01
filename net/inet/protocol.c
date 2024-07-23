@@ -27,17 +27,20 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/in.h>
-#include "inet.h"
-#include "dev.h"
+#include <linux/inet.h>
+#include <linux/netdevice.h>
+#include <linux/timer.h>
 #include "ip.h"
 #include "protocol.h"
 #include "tcp.h"
-#include "skbuff.h"
+#include <linux/skbuff.h>
 #include "sock.h"
 #include "icmp.h"
 #include "udp.h"
+#include <linux/igmp.h>
 
 
 static struct inet_protocol tcp_protocol = {
@@ -75,8 +78,23 @@ static struct inet_protocol icmp_protocol = {
   "ICMP"		/* name			*/
 };
 
-
+#ifndef CONFIG_IP_MULTICAST
 struct inet_protocol *inet_protocol_base = &icmp_protocol;
+#else
+static struct inet_protocol igmp_protocol = {
+  igmp_rcv,		/* IGMP handler		*/
+  NULL,			/* IGMP never fragments anyway */
+  NULL,			/* IGMP error control	*/
+  &icmp_protocol,	/* next			*/
+  IPPROTO_IGMP,		/* protocol ID		*/
+  0,			/* copy			*/
+  NULL,			/* data			*/
+  "IGMP"		/* name			*/
+};
+
+struct inet_protocol *inet_protocol_base = &igmp_protocol;
+#endif
+
 struct inet_protocol *inet_protos[MAX_INET_PROTOS] = {
   NULL
 };
@@ -88,10 +106,8 @@ inet_get_protocol(unsigned char prot)
   unsigned char hash;
   struct inet_protocol *p;
 
-  DPRINTF((DBG_PROTO, "get_protocol (%d)\n ", prot));
   hash = prot & (MAX_INET_PROTOS - 1);
   for (p = inet_protos[hash] ; p != NULL; p=p->next) {
-	DPRINTF((DBG_PROTO, "trying protocol %d\n", p->protocol));
 	if (p->protocol == prot) return((struct inet_protocol *) p);
   }
   return(NULL);
@@ -139,7 +155,7 @@ inet_del_protocol(struct inet_protocol *prot)
 	/*
 	 * We have to worry if the protocol being deleted is
 	 * the last one on the list, then we may need to reset
-	 * someones copied bit.
+	 * someone's copied bit.
 	 */
 	if (p->next != NULL && p->next == prot) {
 		/*

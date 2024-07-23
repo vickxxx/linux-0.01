@@ -1,7 +1,8 @@
 #ifndef _LINUX_FCNTL_H
 #define _LINUX_FCNTL_H
 
-/* open/fcntl - O_SYNC isn't implemented yet */
+/* open/fcntl - O_SYNC is only implemented on blocks devices and on files
+   located on an ext2 file system */
 #define O_ACCMODE	  0003
 #define O_RDONLY	    00
 #define O_WRONLY	    01
@@ -14,6 +15,7 @@
 #define O_NONBLOCK	 04000
 #define O_NDELAY	O_NONBLOCK
 #define O_SYNC		010000
+#define FASYNC		020000	/* fcntl, for BSD compatibility */
 
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get f_flags */

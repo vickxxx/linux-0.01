@@ -1,44 +1,21 @@
+Changes for NET3.017
 
-NET2Debugged 1.24 README
-------------------------
+This is mostly small stuff as follows:
 
-Major Changes
+o	accept()ed socket don't end up with an invalid sk->socket and give bogus
+	netstat output.
+o	FASYNC/SIGIO now works with sockets.
+o	Fixed the permissions on F_SETOWN for all. Its now as broken/working
+	as other systems. Really we need something like a 32bit generation
+	number on processes.
+o	ARP allows proxy for whole networks (a la cisco routers)
+o	TCP sendto() reports ENOTCONN in the right cases
+o	Removed some surplus uncommented code from tcp.c
+o	Fixed protocol violation during closedown in tcp.c
+	[Still not got the window < MSS bug fix included]
 
-o	PLIP driver sort of works
-o	UDP and RAW have been partially rewritten for speed
-o	Internals heavily cleaned up, and memory monitoring of network
-	memory is now done. (On shift-scroll-lock)
-o	ARP should now not generate garbage
-o	Using MSG_PEEK can't cause race conditions and crashes
-o	Support for bootp clients.
-o	Supports RFC931 TAP authd
-o	NFS problems with certain types of network configuration are
-	fixed.
-o	Doesn't forward packets for other subnet (can cause packet storms)
-o	TCP won't ack rst frames causing packet storms (especially with
-	Lan workplace for DOS).
-o	Numerous fixes for solidity
-o	Verify_area used properly.
-o	MSG_PEEK is faster again
-o	Minor TCP fixes. Hopefully no more TCP lockups (ha!)
-o	Donald's promiscuous mode. Go forth and write protocol analysers...
--------------------------------------------------------------------------
-NOTE:
-	Drivers for this stack set must be using alloc_skb() not just
-kmalloc. If you get millions of 'non sk_buff...' errors please check the
-driver you are using. All Donald's drivers know about this. If you have
-a problem driver replace all cases of
-	
-	.. =(struct sk_buff *)kmalloc(sizeof(struct sk_buff)+...
+Fixes for 1.1.58
 
-With
-	..=alloc_skb(sizeof(struct sk_buff)+...
+o	non blocking connect fail gets the error code right.
+o	select() not reporting read ok after an urgent read fixed.
 
-And if it uses kfree_s on the packet change that to use kfree_skbmem().
-
--------------------------------------------------------------------------
-Bug fixes and improvements for this section of the code should be mailed to
-iiitac@pyr.swan.ac.uk.
-
-
-Alan

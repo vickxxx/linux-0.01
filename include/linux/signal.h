@@ -1,7 +1,7 @@
 #ifndef _LINUX_SIGNAL_H
 #define _LINUX_SIGNAL_H
 
-typedef unsigned int sigset_t;		/* 32 bits */
+typedef unsigned long sigset_t;		/* at least 32 bits */
 
 #define _NSIG             32
 #define NSIG		_NSIG
@@ -13,7 +13,7 @@ typedef unsigned int sigset_t;		/* 32 bits */
 #define SIGTRAP		 5
 #define SIGABRT		 6
 #define SIGIOT		 6
-#define SIGUNUSED	 7
+#define SIGBUS		 7
 #define SIGFPE		 8
 #define SIGKILL		 9
 #define SIGUSR1		10
@@ -29,32 +29,19 @@ typedef unsigned int sigset_t;		/* 32 bits */
 #define SIGTSTP		20
 #define SIGTTIN		21
 #define SIGTTOU		22
-
-/*
- * Most of these aren't used yet (and perhaps never will),
- * so they are commented out.
- */
-
-
-#define SIGIO		23
-#define SIGPOLL		SIGIO
-#define SIGURG		SIGIO
+#define SIGURG		23
 #define SIGXCPU		24
 #define SIGXFSZ		25
-
-
 #define SIGVTALRM	26
 #define SIGPROF		27
-
 #define SIGWINCH	28
-
+#define SIGIO		29
+#define SIGPOLL		SIGIO
 /*
 #define SIGLOST		29
 */
 #define SIGPWR		30
-
-/* Arggh. Bad user source code wants this.. */
-#define SIGBUS		SIGUNUSED
+#define	SIGUNUSED	31
 
 /*
  * sa_flags values: SA_STACK is not currently supported, but will allow the
@@ -85,8 +72,14 @@ typedef void (*__sighandler_t)(int);
 struct sigaction {
 	__sighandler_t sa_handler;
 	sigset_t sa_mask;
-	int sa_flags;
+	unsigned long sa_flags;
 	void (*sa_restorer)(void);
 };
+
+#ifdef __KERNEL__
+
+#include <asm/signal.h>
+
+#endif
 
 #endif

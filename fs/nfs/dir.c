@@ -6,6 +6,10 @@
  *  nfs directory handling functions
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
@@ -17,6 +21,9 @@
 #include <linux/mm.h>
 
 #include <asm/segment.h>	/* for fs functions */
+
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
 
 static int nfs_dir_read(struct inode *, struct file *filp, char *buf,
 			int count);
@@ -153,7 +160,7 @@ static int nfs_readdir(struct inode *inode, struct file *filp,
 		put_fs_long(entry->fileid, &dirent->d_ino);
 		put_fs_word(i, &dirent->d_reclen);
 		filp->f_pos = entry->cookie;
-		return i;
+		return ROUND_UP(NAME_OFFSET(dirent)+i+1);
 	}
 	return 0;
 }

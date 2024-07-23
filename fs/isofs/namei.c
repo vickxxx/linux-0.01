@@ -6,6 +6,10 @@
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/sched.h>
 #include <linux/iso_fs.h>
 #include <linux/kernel.h>
@@ -26,32 +30,28 @@
  */
 static int isofs_match(int len,const char * name, char * compare, int dlen)
 {
-	register int same __asm__("ax");
-	
-	if (!compare) return 0;
-	/* "" means "." ---> so paths like "/usr/lib//libc.a" work */
-	if (!len && (compare[0]==0) && (dlen==1))
-		return 1;
-	
-	if (compare[0]==0 && dlen==1 && len == 1)
-		compare = ".";
- 	if (compare[0]==1 && dlen==1 && len == 2) {
-		compare = "..";
-		dlen = 2;
-	};
+	if (!compare)
+		return 0;
+
+	/* check special "." and ".." files */
+	if (dlen == 1) {
+		/* "." */
+		if (compare[0] == 0) {
+			if (!len)
+				return 1;
+			compare = ".";
+		} else if (compare[0] == 1) {
+			compare = "..";
+			dlen = 2;
+		}
+	}
 #if 0
 	if (len <= 2) printk("Match: %d %d %s %d %d \n",len,dlen,compare,de->name[0], dlen);
 #endif
 	
 	if (dlen != len)
 		return 0;
-	__asm__("cld\n\t"
-		"repe ; cmpsb\n\t"
-		"setz %%al"
-		:"=a" (same)
-		:"0" (0),"S" ((long) name),"D" ((long) compare),"c" (len)
-		:"cx","di","si");
-	return same;
+	return !memcmp(name, compare, len);
 }
 
 /*
@@ -63,7 +63,7 @@ static int isofs_match(int len,const char * name, char * compare, int dlen)
  * entry - you'll have to do that yourself if you want to.
  */
 static struct buffer_head * isofs_find_entry(struct inode * dir,
-	const char * name, int namelen, int * ino, int * ino_back)
+	const char * name, int namelen, unsigned long * ino, unsigned long * ino_back)
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(dir);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(dir);
@@ -115,18 +115,21 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 		/* Handle case where the directory entry spans two blocks.
 		   Usually 1024 byte boundaries */
 		if (offset >= bufsize) {
-			cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-			memcpy(cpnt, bh->b_data, bufsize);
-			de = (struct iso_directory_record *)
-			  ((char *)cpnt + old_offset);
+		        unsigned int frag1;
+			frag1 = bufsize - old_offset;
+			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+			if (!cpnt) return 0;
+			memcpy(cpnt, bh->b_data + old_offset, frag1);
+
+			de = (struct iso_directory_record *) cpnt;
 			brelse(bh);
 			offset = f_pos & (bufsize - 1);
 			block = isofs_bmap(dir,f_pos>>bufbits);
 			if (!block || !(bh = bread(dir->i_dev,block,bufsize))) {
-			        kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			        kfree(cpnt);
 				return 0;
 			};
-			memcpy((char *)cpnt+bufsize,bh->b_data,bufsize);
+			memcpy((char *)cpnt+frag1, bh->b_data, offset);
 		}
 		
 		/* Handle the '.' case */
@@ -141,12 +144,11 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 		if (de->name[0]==1 && de->name_len[0]==1) {
 #if 0
 			printk("Doing .. (%d %d)",
-			       dir->i_sb->s_firstdatazone << bufbits,
+			       dir->i_sb->s_firstdatazone,
 			       dir->i_ino);
 #endif
-			if((dir->i_sb->u.isofs_sb.s_firstdatazone
-			    << bufbits) != dir->i_ino)
-				inode_number = dir->u.isofs_i.i_backlink;
+			if((dir->i_sb->u.isofs_sb.s_firstdatazone) != dir->i_ino)
+ 				inode_number = dir->u.isofs_i.i_backlink;
 			else
 				inode_number = dir->i_ino;
 			backlink = 0;
@@ -178,7 +180,7 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 		}
 		match = isofs_match(namelen,name,dpnt,dlen);
 		if (cpnt) {
-			kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			kfree(cpnt);
 			cpnt = NULL;
 		}
 
@@ -202,7 +204,7 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 	}
  out:
 	if (cpnt)
-		kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+		kfree(cpnt);
 	brelse(bh);
 	return NULL;
 }
@@ -210,7 +212,7 @@ static struct buffer_head * isofs_find_entry(struct inode * dir,
 int isofs_lookup(struct inode * dir,const char * name, int len,
 	struct inode ** result)
 {
-	int ino, ino_back;
+	unsigned long ino, ino_back;
 	struct buffer_head * bh;
 
 #ifdef DEBUG
@@ -226,25 +228,16 @@ int isofs_lookup(struct inode * dir,const char * name, int len,
 	}
 
 	ino = 0;
-	if (dir->i_dev == cache.dev && 
-	    dir->i_ino == cache.dir &&
-	    len == cache.dlen && 
-	    isofs_match(len, name, cache.filename, cache.dlen))
-	  {
-	    ino = cache.ino;
-	    ino_back = dir->i_ino;
-	    /* These two cases are special, but since they are at the start
-	       of the directory, we can just as easily search there */
-	    if (cache.dlen == 1 && cache.filename[0] == '.') ino = 0;
-	    if (cache.dlen == 2 && cache.filename[0] == '.' && 
-		cache.filename[1] == '.') ino = 0;
-	  };
+
+	if (dcache_lookup(dir, name, len, &ino)) ino_back = dir->i_ino;
 
 	if (!ino) {
 	  if (!(bh = isofs_find_entry(dir,name,len, &ino, &ino_back))) {
 	    iput(dir);
 	    return -ENOENT;
 	  }
+	  if (ino_back == dir->i_ino)
+		dcache_add(dir, name, len, ino);
 	  brelse(bh);
 	};
 

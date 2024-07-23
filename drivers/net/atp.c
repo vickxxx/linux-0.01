@@ -1,23 +1,30 @@
-/* atp.c: Attached (pocket) ethernet adaptor driver for linux. */
+/* atp.c: Attached (pocket) ethernet adapter driver for linux. */
 /*
-	Written 1993 by Donald Becker.
-	Copyright 1993 United States Government as represented by the Director,
-	National Security Agency.  This software may only be used and distributed
-	according to the terms of the GNU Public License as modified by SRC,
-	incorported herein by reference.
+	This is a driver for a commonly OEMed pocket (parallel port)
+	ethernet adapter.  
 
-	The author may be reached as becker@super.org or
-	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+	Written 1993,1994,1995 by Donald Becker.
 
+	Copyright 1993 United States Government as represented by the
+	Director, National Security Agency.
+
+	This software may be used and distributed according to the terms
+	of the GNU Public License, incorporated herein by reference.
+
+	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
+	Center of Excellence in Space Data and Information Sciences
+		Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+
+	The timer-based reset code was written by Bill Carlson, wwc@super.org.
 */
 
 static char *version =
-	"atp.c:v0.04 2/25/94 Donald Becker (becker@super.org)\n";
+	"atp.c:v1.01 1/18/95 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 /*
 	This file is a device driver for the RealTek (aka AT-Lan-Tec) pocket
-	ethernet adaptor.  This is a common low-cost OEM pocket ethernet
-	adaptor, sold under many names.
+	ethernet adapter.  This is a common low-cost OEM pocket ethernet
+	adapter, sold under many names.
 
   Sources:
 	This driver was written from the packet driver assembly code provided by
@@ -28,7 +35,7 @@ static char *version =
 
 					Theory of Operation
 	
-	The RTL8002 adaptor seems to be built around a custom spin of the SEEQ
+	The RTL8002 adapter seems to be built around a custom spin of the SEEQ
 	controller core.  It probably has a 16K or 64K internal packet buffer, of
 	which the first 4K is devoted to transmit and the rest to receive.
 	The controller maintains the queue of received packet and the packet buffer
@@ -40,7 +47,7 @@ static char *version =
 	The station address is stored in a standard bit-serial EEPROM which must be
 	read (ughh) by the device driver.  (Provisions have been made for
 	substituting a 74S288 PROM, but I haven't gotten reports of any models
-	using it.)  Unlike built-in devices, a pocket adaptor can temporarily lose
+	using it.)  Unlike built-in devices, a pocket adapter can temporarily lose
 	power without indication to the device driver.  The major effect is that
 	the station address, receive filter (promiscuous, etc.) and transceiver
 	must be reset.
@@ -53,7 +60,7 @@ static char *version =
 
 	Since the bulk data transfer of the actual packets through the slow
 	parallel port dominates the driver's running time, four distinct data
-	(non-register) transfer modes are provided by the adaptor, two in each
+	(non-register) transfer modes are provided by the adapter, two in each
 	direction.  In the first mode timing for the nibble transfers is
 	provided through the data port.  In the second mode the same timing is
 	provided through the control port.  In either case the data is read from
@@ -65,7 +72,7 @@ static char *version =
 	it to stabilize.  This delay seems to be needed on most machines.
 
 	The data transfer mode is stored in the 'dev->if_port' field.  Its default
-	value is '4'.  It may be overriden at boot-time using the third parameter
+	value is '4'.  It may be overridden at boot-time using the third parameter
 	to the "ether=..." initialization.
 
 	The header file <atp.h> provides inline functions that encapsulate the
@@ -74,7 +81,6 @@ static char *version =
 	interpretations of the device registers.
 */
 
-#include <linux/config.h>		/* Used only to override default values. */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -89,50 +95,39 @@ static char *version =
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <errno.h>
+#include <linux/errno.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 
 #include "atp.h"
 
-/* Compatibility definitions for earlier kernel versions. */
-#ifndef HAVE_AUTOIRQ
-/* From auto_irq.c, in ioport.h for later versions. */
-extern void autoirq_setup(int waittime);
-extern int autoirq_report(int waittime);
-/* The map from IRQ number (as passed to the interrupt handler) to
-   'struct device'. */
-extern struct device *irq2dev_map[16];
-#endif
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#define kfree_skbmem(addr, size) kfree_s(addr,size);
-#endif
-
-#ifndef HAVE_PORTRESERVE
-#define check_region(ioaddr, size)		0
-#define snarf_region(ioaddr, size);		do ; while (0)
-#endif
-
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifndef NET_DEBUG
-#define NET_DEBUG 4
+#define NET_DEBUG 1
 #endif
 static unsigned int net_debug = NET_DEBUG;
 
 /* The number of low I/O ports used by the ethercard. */
 #define ETHERCARD_TOTAL_SIZE	3
 
+/* This code, written by wwc@super.org, resets the adapter every
+   TIMED_CHECKER ticks.  This recovers from an unknown error which
+   hangs the device. */
+#define TIMED_CHECKER (HZ/4)
+#ifdef TIMED_CHECKER
+#include <linux/timer.h>
+static void atp_timed_checker(unsigned long ignored);
+static struct device *atp_timed_dev;
+static struct timer_list atp_timer = {NULL, NULL, 0, 0, atp_timed_checker};
+#endif
+
 /* Index to functions, as function prototypes. */
 
 extern int atp_probe(struct device *dev);
 
 static int atp_probe1(struct device *dev, short ioaddr);
-static void init_dev(struct device *dev);
 static void get_node_ID(struct device *dev);
 static unsigned short eeprom_op(short ioaddr, unsigned int cmd);
 static int net_open(struct device *dev);
@@ -140,20 +135,18 @@ static void hardware_init(struct device *dev);
 static void write_packet(short ioaddr, int length, unsigned char *packet, int mode);
 static void trigger_send(short ioaddr, int length);
 static int	net_send_packet(struct sk_buff *skb, struct device *dev);
-static void net_interrupt(int reg_ptr);
+static void net_interrupt(int irq, struct pt_regs *regs);
 static void net_rx(struct device *dev);
 static void read_block(short ioaddr, int length, unsigned char *buffer, int data_mode);
 static int net_close(struct device *dev);
 static struct enet_statistics *net_get_stats(struct device *dev);
-#ifdef HAVE_MULTICAST
 static void set_multicast_list(struct device *dev, int num_addrs, void *addrs);
-#endif
 
 
-/* Check for a network adaptor of this type, and return '0' iff one exists.
+/* Check for a network adapter of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, alloate space for the device and return success
+   If dev->base_addr == 2, allocate space for the device and return success
    (detachable devices only).
    */
 int
@@ -194,7 +187,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 	status = read_nibble(ioaddr, CMR1);
 
 	if ((status & 0x78) != 0x08) {
-		/* The pocket adaptor probe failed, restore the control register. */
+		/* The pocket adapter probe failed, restore the control register. */
 		outb(saved_ctrl_reg, ioaddr + PAR_CONTROL);
 		return 1;
 	}
@@ -212,7 +205,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 		dev->irq = 7;
 	else
 		dev->irq = 5;
-	write_reg_high(ioaddr, CMR1, CMR1h_TxRxOFF); /* Diable Tx and Rx units. */
+	write_reg_high(ioaddr, CMR1, CMR1h_TxRxOFF); /* Disable Tx and Rx units. */
 	write_reg(ioaddr, CMR2, CMR2_NULL);
 
 	dev->base_addr = ioaddr;
@@ -220,7 +213,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 	/* Read the station address PROM.  */
 	get_node_ID(dev);
 
-	printk("%s: Pocket adaptor found at %#3x, IRQ %d, SAPROM "
+	printk("%s: Pocket adapter found at %#3x, IRQ %d, SAPROM "
 		   "%02X:%02X:%02X:%02X:%02X:%02X.\n", dev->name, dev->base_addr,
 		   dev->irq, dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
 		   dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
@@ -232,7 +225,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 		printk(version);
 
 	/* Initialize the device structure. */
-	init_dev(dev);
+	ether_setup(dev);
 	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
 	memset(dev->priv, 0, sizeof(struct net_local));
 
@@ -242,7 +235,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 		lp->addr_mode = CMR2h_Normal;
 	}
 
-	/* For the ATP adaptor the "if_port" is really the data transfer mode. */
+	/* For the ATP adapter the "if_port" is really the data transfer mode. */
 	dev->if_port = (dev->mem_start & 0xf) ? dev->mem_start & 0x7 : 4;
 	if (dev->mem_end & 0xf)
 		net_debug = dev->mem_end & 7;
@@ -251,43 +244,15 @@ static int atp_probe1(struct device *dev, short ioaddr)
 	dev->stop		= net_close;
 	dev->hard_start_xmit = net_send_packet;
 	dev->get_stats	= net_get_stats;
-#ifdef HAVE_MULTICAST
 	dev->set_multicast_list = &set_multicast_list;
+
+#ifdef TIMED_CHECKER
+	del_timer(&atp_timer);
+	atp_timer.expires = TIMED_CHECKER;
+	atp_timed_dev = dev;
+	add_timer(&atp_timer);
 #endif
-
 	return 0;
-}
-
-/* Fill in the fields of the device structure with ethernet-generic values.
-   This should be in a common file instead of per-driver.  */
-static void init_dev(struct device *dev)
-{
-	int i;
-
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp		= eth_add_arp;
-	dev->queue_xmit		= dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans		= eth_type_trans;
-
-	dev->type			= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu			= 1500; /* eth_mtu */
-	dev->addr_len		= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags			= IFF_BROADCAST;
-	dev->family			= AF_INET;
-	dev->pa_addr		= 0;
-	dev->pa_brdaddr		= 0;
-	dev->pa_mask		= 0;
-	dev->pa_alen		= sizeof(unsigned long);
 }
 
 /* Read the station address PROM, usually a word-wide EEPROM. */
@@ -299,7 +264,7 @@ static void get_node_ID(struct device *dev)
 	
 	write_reg(ioaddr, CMR2, CMR2_EEPROM);	  /* Point to the EEPROM control registers. */
 	
-	/* Some adaptors have the station address at offset 15 instead of offset
+	/* Some adapters have the station address at offset 15 instead of offset
 	   zero.  Check for it, and fix it if needed. */
 	if (eeprom_op(ioaddr, EE_READ(0)) == 0xffff)
 		sa_offset = 15;
@@ -361,7 +326,7 @@ static int net_open(struct device *dev)
 	   port or interrupt may be shared. */
 	if (irq2dev_map[dev->irq] != 0
 		|| (irq2dev_map[dev->irq] = dev) == 0
-		|| request_irq(dev->irq, &net_interrupt)) {
+		|| request_irq(dev->irq, &net_interrupt, 0, "ATP")) {
 		return -EAGAIN;
 	}
 
@@ -371,7 +336,7 @@ static int net_open(struct device *dev)
 }
 
 /* This routine resets the hardware.  We initialize everything, assuming that
-   the hardware may have been temporarily detacted. */
+   the hardware may have been temporarily detached. */
 static void hardware_init(struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
@@ -461,7 +426,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 			   inb(ioaddr + PAR_CONTROL) & 0x10 ? "network cable problem"
 			   :  "IRQ conflict");
 		lp->stats.tx_errors++;
-		/* Try to restart the adaptor. */
+		/* Try to restart the adapter. */
 		hardware_init(dev);
 		dev->tbusy=0;
 		dev->trans_start = jiffies;
@@ -474,15 +439,6 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		dev_tint(dev);
 		return 0;
 	}
-
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
 
 	/* Block a timer-based transmit from overlapping.  This could better be
 	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
@@ -506,7 +462,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		lp->pac_cnt_in_tx_buf++;
 		if (lp->tx_unit_busy == 0) {
 			trigger_send(ioaddr, length);
-			lp->saved_tx_size = 0; 				/* Redundent */
+			lp->saved_tx_size = 0; 				/* Redundant */
 			lp->re_tx = 0;
 			lp->tx_unit_busy = 1;
 		} else
@@ -518,8 +474,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		write_reg_high(ioaddr, IMR, ISRh_RxErr);
 	}
 
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	return 0;
 }
@@ -527,9 +482,8 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
 static void
-net_interrupt(int reg_ptr)
+net_interrupt(int irq, struct pt_regs * regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = (struct device *)(irq2dev_map[irq]);
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 20;
@@ -547,7 +501,7 @@ net_interrupt(int reg_ptr)
 	/* Disable additional spurious interrupts. */
 	outb(Ctrl_SelData, ioaddr + PAR_CONTROL);
 
-	/* The adaptor's output is currently the IRQ line, switch it to data. */
+	/* The adapter's output is currently the IRQ line, switch it to data. */
 	write_reg(ioaddr, CMR2, CMR2_NULL);
 	write_reg(ioaddr, IMR, 0);
 
@@ -582,7 +536,7 @@ net_interrupt(int reg_ptr)
 		} else if (status & ((ISR_TxErr + ISR_TxOK)<<3)) {
 			if (net_debug > 6)  printk("handling Tx done..");
 			/* Clear the Tx interrupt.  We should check for too many failures
-			   and reinitialize the adaptor. */
+			   and reinitialize the adapter. */
 			write_reg(ioaddr, ISR, ISR_TxErr + ISR_TxOK);
 			if (status & (ISR_TxErr<<3)) {
 				lp->stats.collisions++;
@@ -605,7 +559,7 @@ net_interrupt(int reg_ptr)
 				} else
 					lp->tx_unit_busy = 0;
 				dev->tbusy = 0;
-				mark_bh(INET_BH);	/* Inform upper layers. */
+				mark_bh(NET_BH);	/* Inform upper layers. */
 			}
 			num_tx_since_rx++;
 		} else if (num_tx_since_rx > 8
@@ -624,14 +578,19 @@ net_interrupt(int reg_ptr)
     }
 
 	/* This following code fixes a rare (and very difficult to track down)
-	   problem where the adaptor forgets its ethernet address. */
+	   problem where the adapter forgets its ethernet address. */
 	{
 		int i;
 		for (i = 0; i < 6; i++)
 			write_reg_byte(ioaddr, PAR0 + i, dev->dev_addr[i]);
+#ifdef TIMED_CHECKER
+		del_timer(&atp_timer);
+		atp_timer.expires = TIMED_CHECKER;
+		add_timer(&atp_timer);
+#endif
 	}
 
-	/* Tell the adaptor that it can go back to using the output line as IRQ. */
+	/* Tell the adapter that it can go back to using the output line as IRQ. */
     write_reg(ioaddr, CMR2, CMR2_IRQOUT);
 	/* Enable the physical interrupt line, which is sure to be low until.. */
 	outb(Ctrl_SelData + Ctrl_IRQEN, ioaddr + PAR_CONTROL);
@@ -645,6 +604,41 @@ net_interrupt(int reg_ptr)
 
 	return;
 }
+
+#ifdef TIMED_CHECKER
+/* This following code fixes a rare (and very difficult to track down)
+   problem where the adapter forgets its ethernet address. */
+static void atp_timed_checker(unsigned long ignored)
+{
+  int i;
+  int ioaddr = atp_timed_dev->base_addr;
+
+  if (!atp_timed_dev->interrupt)
+	{
+	  for (i = 0; i < 6; i++)
+#if 0
+		if (read_cmd_byte(ioaddr, PAR0 + i) != atp_timed_dev->dev_addr[i])
+		  {
+			struct net_local *lp = (struct net_local *)atp_timed_dev->priv;
+			write_reg_byte(ioaddr, PAR0 + i, atp_timed_dev->dev_addr[i]);
+			if (i == 2)
+			  lp->stats.tx_errors++;
+			else if (i == 3)
+			  lp->stats.tx_dropped++;
+			else if (i == 4)
+			  lp->stats.collisions++;
+			else
+			  lp->stats.rx_errors++;
+		  }
+#else
+	  write_reg_byte(ioaddr, PAR0 + i, atp_timed_dev->dev_addr[i]);
+#endif
+	}
+  del_timer(&atp_timer);
+  atp_timer.expires = TIMED_CHECKER;
+  add_timer(&atp_timer);
+}
+#endif
 
 /* We have a good packet(s), get it/them out of the buffers. */
 static void net_rx(struct device *dev)
@@ -674,17 +668,14 @@ static void net_rx(struct device *dev)
 	} else {
 		/* Malloc up new buffer. */
 		int pkt_len = (rx_head.rx_count & 0x7ff) - 4; 		/* The "-4" is omits the FCS (CRC). */
-		int sksize = sizeof(struct sk_buff) + pkt_len;
 		struct sk_buff *skb;
 		
-		skb = alloc_skb(sksize, GFP_ATOMIC);
+		skb = alloc_skb(pkt_len, GFP_ATOMIC);
 		if (skb == NULL) {
 			printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 			lp->stats.rx_dropped++;
 			goto done;
 		}
-		skb->mem_len = sksize;
-		skb->mem_addr = skb;
 		skb->len = pkt_len;
 		skb->dev = dev;
 		
@@ -699,16 +690,7 @@ static void net_rx(struct device *dev)
 				   data[12], data[13]);
 		}
 		
-#ifdef HAVE_NETIF_RX
 		netif_rx(skb);
-#else
-		skb->lock = 0;
-		if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-			kfree_s(skb, sksize);
-			lp->stats.rx_dropped++;
-			break;
-		}
-#endif
 		lp->stats.rx_packets++;
 	}
  done:
@@ -770,8 +752,7 @@ net_get_stats(struct device *dev)
 	return &lp->stats;
 }
 
-#ifdef HAVE_MULTICAST
-/* Set or clear the multicast filter for this adaptor.
+/* Set or clear the multicast filter for this adapter.
    num_addrs == -1	Promiscuous mode, receive all packets
    num_addrs == 0	Normal mode, clear multicast list
    num_addrs > 0	Multicast mode, receive normal and MC packets, and do
@@ -785,7 +766,6 @@ set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 	lp->addr_mode = num_addrs ? CMR2h_PROMISC : CMR2h_Normal;
 	write_reg_high(ioaddr, CMR2, lp->addr_mode);
 }
-#endif
 
 /*
  * Local variables:

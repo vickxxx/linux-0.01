@@ -1,6 +1,22 @@
 /*
  * linux/fs/binfmt_elf.c
+ *
+ * These are the functions used to load ELF format executables as used
+ * on SVr4 machines.  Information on the format may be found in the book
+ * "UNIX SYSTEM V RELEASE 4 Programmers Guide: Ansi C and Programming Support
+ * Tools".
+ *
+ * Copyright 1993, 1994: Eric Youngdale (ericy@cais.com).
  */
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -14,36 +30,52 @@
 #include <linux/ptrace.h>
 #include <linux/malloc.h>
 #include <linux/shm.h>
+#include <linux/personality.h>
 
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 
-asmlinkage int sys_exit(int exit_code);
-asmlinkage int sys_close(unsigned fd);
-asmlinkage int sys_open(const char *, int, int);
-asmlinkage int sys_brk(unsigned long);
+#include <linux/config.h>
+
+#include <linux/unistd.h>
+typedef int (*sysfun_p)(int);
+extern sysfun_p sys_call_table[];
+#define SYS(name)	(sys_call_table[__NR_##name])
 
 #define DLINFO_ITEMS 8
 
 #include <linux/elf.h>
+
+static int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs);
+static int load_elf_library(int fd);
+
+struct linux_binfmt elf_format = {
+#ifndef MODULE
+	NULL, NULL, load_elf_binary, load_elf_library, NULL
+#else
+	NULL, &mod_use_count_, load_elf_binary, load_elf_library, NULL
+#endif
+};
 
 /* We need to explicitly zero any fractional pages
    after the data section (i.e. bss).  This would
    contain the junk from the file that should not
    be in memory */
 
-static void padzero(int elf_bss){
-  unsigned int fpnt, nbyte;
+
+static void padzero(unsigned long elf_bss)
+{
+	unsigned long fpnt, nbyte;
   
-  if(elf_bss & 0xfff) {
-    
-    nbyte = (PAGE_SIZE - (elf_bss & 0xfff)) & 0xfff;
-    if(nbyte){
-      verify_area(VERIFY_WRITE, (void *) elf_bss, nbyte);
-      
-      fpnt = elf_bss;
-      while(fpnt & 0xfff) put_fs_byte(0, fpnt++);
-    };
-  };
+	nbyte = elf_bss & (PAGE_SIZE-1);
+	if (nbyte) {
+		nbyte = PAGE_SIZE - nbyte;
+		verify_area(VERIFY_WRITE, (void *) elf_bss, nbyte);
+		fpnt = elf_bss;
+		do {
+			put_fs_byte(0, fpnt++);
+		} while (--nbyte);
+	}
 }
 
 unsigned long * create_elf_tables(char * p,int argc,int envc,struct elfhdr * exec, unsigned int load_addr, int ibcs)
@@ -57,13 +89,23 @@ unsigned long * create_elf_tables(char * p,int argc,int envc,struct elfhdr * exe
 		mpnt->vm_task = current;
 		mpnt->vm_start = PAGE_MASK & (unsigned long) p;
 		mpnt->vm_end = TASK_SIZE;
-		mpnt->vm_page_prot = PAGE_PRIVATE|PAGE_DIRTY;
-		mpnt->vm_share = NULL;
+		mpnt->vm_page_prot = PAGE_COPY;
+#ifdef VM_STACK_FLAGS
+		mpnt->vm_flags = VM_STACK_FLAGS;
+		mpnt->vm_pte = 0;
+#else
+#  ifdef VM_GROWSDOWN
+		mpnt->vm_flags = VM_GROWSDOWN;
+#  endif
+#endif
 		mpnt->vm_inode = NULL;
 		mpnt->vm_offset = 0;
 		mpnt->vm_ops = NULL;
 		insert_vm_struct(current, mpnt);
-		current->stk_vma = mpnt;
+#ifndef VM_GROWSDOWN
+		current->mm->stk_vma = mpnt;
+#endif
+
 	}
 	sp = (unsigned long *) (0xfffffffc & (unsigned long) p);
 	if(exec) sp -= DLINFO_ITEMS*2;
@@ -94,25 +136,25 @@ unsigned long * create_elf_tables(char * p,int argc,int envc,struct elfhdr * exe
 	};
 
 	put_fs_long((unsigned long)argc,--sp);
-	current->arg_start = (unsigned long) p;
+	current->mm->arg_start = (unsigned long) p;
 	while (argc-->0) {
 		put_fs_long((unsigned long) p,argv++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,argv);
-	current->arg_end = current->env_start = (unsigned long) p;
+	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
 		put_fs_long((unsigned long) p,envp++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,envp);
-	current->env_end = (unsigned long) p;
+	current->mm->env_end = (unsigned long) p;
 	return sp;
 }
 
 
 /* This is much more generalized than the library routine read function,
-   so we keep this separate.  Techincally the library read function
+   so we keep this separate.  Technically the library read function
    is only provided so that we can read a.out libraries that have
    an ELF header */
 
@@ -139,7 +181,7 @@ static unsigned int load_elf_interp(struct elfhdr * interp_elf_ex,
 	if((interp_elf_ex->e_type != ET_EXEC && 
 	    interp_elf_ex->e_type != ET_DYN) || 
 	   (interp_elf_ex->e_machine != EM_386 && interp_elf_ex->e_machine != EM_486) ||
-	   (!interpreter_inode->i_op || !interpreter_inode->i_op->bmap || 
+	   (!interpreter_inode->i_op ||
 	    !interpreter_inode->i_op->default_file_ops->mmap)){
 		return 0xffffffff;
 	};
@@ -161,7 +203,7 @@ static unsigned int load_elf_interp(struct elfhdr * interp_elf_ex,
 	
 	elf_exec_fileno = open_inode(interpreter_inode, O_RDONLY);
 	if (elf_exec_fileno < 0) return 0xffffffff;
-	file = current->filp[elf_exec_fileno];
+	file = current->files->fd[elf_exec_fileno];
 
 	eppnt = elf_phdata;
 	for(i=0; i<interp_elf_ex->e_phnum; i++, eppnt++)
@@ -170,7 +212,7 @@ static unsigned int load_elf_interp(struct elfhdr * interp_elf_ex,
 			    eppnt->p_vaddr & 0xfffff000,
 			    eppnt->p_filesz + (eppnt->p_vaddr & 0xfff),
 			    PROT_READ | PROT_WRITE | PROT_EXEC,
-			    MAP_PRIVATE | (interp_elf_ex->e_type == ET_EXEC ? MAP_FIXED : 0),
+			    MAP_PRIVATE | MAP_DENYWRITE | (interp_elf_ex->e_type == ET_EXEC ? MAP_FIXED : 0),
 			    eppnt->p_offset & 0xfffff000);
 	    
 	    if(!load_addr && interp_elf_ex->e_type == ET_DYN)
@@ -185,7 +227,7 @@ static unsigned int load_elf_interp(struct elfhdr * interp_elf_ex,
 	/* Now use mmap to map the library into memory. */
 
 	
-	sys_close(elf_exec_fileno);
+	SYS(close)(elf_exec_fileno);
 	if(error < 0 && error > -1024) {
 	        kfree(elf_phdata);
 		return 0xffffffff;
@@ -210,9 +252,9 @@ static unsigned int load_aout_interp(struct exec * interp_ex,
   int retval;
   unsigned int elf_entry;
   
-  current->brk = interp_ex->a_bss +
-    (current->end_data = interp_ex->a_data +
-     (current->end_code = interp_ex->a_text));
+  current->mm->brk = interp_ex->a_bss +
+    (current->mm->end_data = interp_ex->a_data +
+     (current->mm->end_code = interp_ex->a_text));
   elf_entry = interp_ex->a_entry;
   
   
@@ -251,7 +293,9 @@ static unsigned int load_aout_interp(struct exec * interp_ex,
 #define INTERPRETER_AOUT 1
 #define INTERPRETER_ELF 2
 
-int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+
+static int
+load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct elfhdr elf_ex;
 	struct elfhdr interp_elf_ex;
@@ -260,6 +304,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	struct inode *interpreter_inode;
 	unsigned int load_addr;
 	unsigned int interpreter_type = INTERPRETER_NONE;
+	unsigned char ibcs2_interpreter;
 	int i;
 	int old_fs;
 	int error;
@@ -274,13 +319,18 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	unsigned int elf_stack;
 	char passed_fileno[6];
 	
+	MOD_INC_USE_COUNT;
+
+	ibcs2_interpreter = 0;
 	status = 0;
 	load_addr = 0;
 	elf_ex = *((struct elfhdr *) bprm->buf);	  /* exec-header */
 	
 	if (elf_ex.e_ident[0] != 0x7f ||
-	    strncmp(&elf_ex.e_ident[1], "ELF",3) != 0)
+	    strncmp(&elf_ex.e_ident[1], "ELF",3) != 0) {
+		MOD_DEC_USE_COUNT;
 		return  -ENOEXEC;
+	}
 	
 	
 	/* First of all, some simple consistency checks */
@@ -288,6 +338,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	   (elf_ex.e_machine != EM_386 && elf_ex.e_machine != EM_486) ||
 	   (!bprm->inode->i_op || !bprm->inode->i_op->default_file_ops ||
 	    !bprm->inode->i_op->default_file_ops->mmap)){
+		MOD_DEC_USE_COUNT;
 		return -ENOEXEC;
 	};
 	
@@ -303,6 +354,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	set_fs(old_fs);
 	if (retval < 0) {
 	        kfree (elf_phdata);
+		MOD_DEC_USE_COUNT;
 		return retval;
 	}
 	
@@ -315,10 +367,11 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 	if (elf_exec_fileno < 0) {
 	        kfree (elf_phdata);
+		MOD_DEC_USE_COUNT;
 		return elf_exec_fileno;
 	}
 	
-	file = current->filp[elf_exec_fileno];
+	file = current->files->fd[elf_exec_fileno];
 	
 	elf_stack = 0xffffffff;
 	elf_interpreter = NULL;
@@ -339,6 +392,12 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			
 			retval = read_exec(bprm->inode,elf_ppnt->p_offset,elf_interpreter,
 					   elf_ppnt->p_filesz);
+			/* If the program interpreter is one of these two,
+			   then assume an iBCS2 image. Otherwise assume
+			   a native linux image. */
+			if (strcmp(elf_interpreter,"/usr/lib/libc.so.1") == 0 ||
+			    strcmp(elf_interpreter,"/usr/lib/ld.so.1") == 0)
+			  ibcs2_interpreter = 1;
 #if 0
 			printk("Using ELF interpreter %s\n", elf_interpreter);
 #endif
@@ -355,6 +414,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			if(retval < 0) {
 			  kfree (elf_phdata);
 			  kfree(elf_interpreter);
+			  MOD_DEC_USE_COUNT;
 			  return retval;
 			};
 		};
@@ -369,6 +429,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		if(retval < 0) {
 			kfree(elf_interpreter);
 			kfree(elf_phdata);
+			MOD_DEC_USE_COUNT;
 			return -ELIBACC;
 		};
 		/* Now figure out which format our binary is */
@@ -385,6 +446,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		  {
 		    kfree(elf_interpreter);
 		    kfree(elf_phdata);
+		    MOD_DEC_USE_COUNT;
 		    return -ELIBBAD;
 		  };
 	}
@@ -409,6 +471,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			      kfree(elf_interpreter);
 			}
 		        kfree (elf_phdata);
+			MOD_DEC_USE_COUNT;
 			return -E2BIG;
 		}
 	}
@@ -416,17 +479,17 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	/* OK, This is the point of no return */
 	flush_old_exec(bprm);
 
-	current->end_data = 0;
-	current->end_code = 0;
-	current->start_mmap = ELF_START_MMAP;
-	current->mmap = NULL;
+	current->mm->end_data = 0;
+	current->mm->end_code = 0;
+	current->mm->start_mmap = ELF_START_MMAP;
+	current->mm->mmap = NULL;
 	elf_entry = (unsigned int) elf_ex.e_entry;
 	
 	/* Do this so that we can load the interpreter, if need be.  We will
 	   change some of these later */
-	current->rss = 0;
-	bprm->p += change_ldt(0, bprm->page);
-	current->start_stack = bprm->p;
+	current->mm->rss = 0;
+	bprm->p += setup_arg_pages(0, bprm->page);
+	current->mm->start_stack = bprm->p;
 	
 	/* Now we do a little grungy work by mmaping the ELF image into
 	   the correct location in memory.  At this point, we assume that
@@ -460,6 +523,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		    printk("Unable to load interpreter\n");
 		    kfree(elf_phdata);
 		    send_sig(SIGSEGV, current, 0);
+		    MOD_DEC_USE_COUNT;
 		    return 0;
 		  };
 		};
@@ -470,7 +534,7 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 					elf_ppnt->p_vaddr & 0xfffff000,
 					elf_ppnt->p_filesz + (elf_ppnt->p_vaddr & 0xfff),
 					PROT_READ | PROT_WRITE | PROT_EXEC,
-					MAP_FIXED | MAP_PRIVATE,
+					MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 					elf_ppnt->p_offset & 0xfffff000);
 			
 #ifdef LOW_ELF_STACK
@@ -496,10 +560,24 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	
 	kfree(elf_phdata);
 	
-	if(!elf_interpreter) sys_close(elf_exec_fileno);
-	current->elf_executable = 1;
+	if(interpreter_type != INTERPRETER_AOUT) SYS(close)(elf_exec_fileno);
+	current->personality = (ibcs2_interpreter ? PER_SVR4 : PER_LINUX);
+
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)--;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)--;
+	current->exec_domain = lookup_exec_domain(current->personality);
+	current->binfmt = &elf_format;
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)++;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)++;
+
+#ifndef VM_STACK_FLAGS
 	current->executable = bprm->inode;
 	bprm->inode->i_count++;
+#endif
 #ifdef LOW_ELF_STACK
 	current->start_stack = p = elf_stack - 4;
 #endif
@@ -512,21 +590,30 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			load_addr,    
 			(interpreter_type == INTERPRETER_AOUT ? 0 : 1));
 	if(interpreter_type == INTERPRETER_AOUT)
-	  current->arg_start += strlen(passed_fileno) + 1;
-	current->start_brk = current->brk = elf_brk;
-	current->end_code = end_code;
-	current->start_code = start_code;
-	current->end_data = end_data;
-	current->start_stack = bprm->p;
-	current->suid = current->euid = bprm->e_uid;
-	current->sgid = current->egid = bprm->e_gid;
+	  current->mm->arg_start += strlen(passed_fileno) + 1;
+	current->mm->start_brk = current->mm->brk = elf_brk;
+	current->mm->end_code = end_code;
+	current->mm->start_code = start_code;
+	current->mm->end_data = end_data;
+	current->mm->start_stack = bprm->p;
+	current->suid = current->euid = current->fsuid = bprm->e_uid;
+	current->sgid = current->egid = current->fsgid = bprm->e_gid;
 
 	/* Calling sys_brk effectively mmaps the pages that we need for the bss and break
 	   sections */
-	current->brk = (elf_bss + 0xfff) & 0xfffff000;
-	sys_brk((elf_brk + 0xfff) & 0xfffff000);
+	current->mm->brk = (elf_bss + 0xfff) & 0xfffff000;
+	SYS(brk)((elf_brk + 0xfff) & 0xfffff000);
 
 	padzero(elf_bss);
+
+#if 0
+	printk("(start_brk) %x\n" , current->mm->start_brk);
+	printk("(end_code) %x\n" , current->mm->end_code);
+	printk("(start_code) %x\n" , current->mm->start_code);
+	printk("(end_data) %x\n" , current->mm->end_data);
+	printk("(start_stack) %x\n" , current->mm->start_stack);
+	printk("(brk) %x\n" , current->mm->brk);
+#endif
 
 	/* Why this, you ask???  Well SVr4 maps page 0 as read-only,
 	   and some applications "depend" upon this behavior.
@@ -535,17 +622,18 @@ int load_elf_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	error = do_mmap(NULL, 0, 4096, PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE, 0);
 
-	regs->eip = elf_entry;		/* eip, magic happens :-) */
-	regs->esp = bprm->p;			/* stack pointer */
+	start_thread(regs, elf_entry, bprm->p);
 	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
+	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 /* This is really simpleminded and specialized - we are loading an
    a.out library that is given an ELF header. */
 
-int load_elf_library(int fd){
+static int
+load_elf_library(int fd){
         struct file * file;
 	struct elfhdr elf_ex;
 	struct elf_phdr *elf_phdata  =  NULL;
@@ -556,35 +644,41 @@ int load_elf_library(int fd){
 	unsigned int bss;
 	int error;
 	int i,j, k;
-	
+
+	MOD_INC_USE_COUNT;
 	len = 0;
-	file = current->filp[fd];
+	file = current->files->fd[fd];
 	inode = file->f_inode;
 	elf_bss = 0;
 	
 	set_fs(KERNEL_DS);
 	if (file->f_op->read(inode, file, (char *) &elf_ex, sizeof(elf_ex)) != sizeof(elf_ex)) {
-		sys_close(fd);
+		SYS(close)(fd);
+		MOD_DEC_USE_COUNT;
 		return -EACCES;
 	}
 	set_fs(USER_DS);
 	
 	if (elf_ex.e_ident[0] != 0x7f ||
-	    strncmp(&elf_ex.e_ident[1], "ELF",3) != 0)
+	    strncmp(&elf_ex.e_ident[1], "ELF",3) != 0) {
+		MOD_DEC_USE_COUNT;
 		return -ENOEXEC;
+	}
 	
 	/* First of all, some simple consistency checks */
 	if(elf_ex.e_type != ET_EXEC || elf_ex.e_phnum > 2 ||
 	   (elf_ex.e_machine != EM_386 && elf_ex.e_machine != EM_486) ||
-	   (!inode->i_op || !inode->i_op->bmap || 
-	    !inode->i_op->default_file_ops->mmap)){
+	   (!inode->i_op || !inode->i_op->default_file_ops->mmap)){
+		MOD_DEC_USE_COUNT;
 		return -ENOEXEC;
 	};
 	
 	/* Now read in all of the header information */
 	
-	if(sizeof(struct elf_phdr) * elf_ex.e_phnum > PAGE_SIZE) 
+	if(sizeof(struct elf_phdr) * elf_ex.e_phnum > PAGE_SIZE) {
+		MOD_DEC_USE_COUNT;
 		return -ENOEXEC;
+	}
 	
 	elf_phdata =  (struct elf_phdr *) 
 		kmalloc(sizeof(struct elf_phdr) * elf_ex.e_phnum, GFP_KERNEL);
@@ -601,6 +695,7 @@ int load_elf_library(int fd){
 	
 	if(j != 1)  {
 		kfree(elf_phdata);
+		MOD_DEC_USE_COUNT;
 		return -ENOEXEC;
 	};
 	
@@ -611,15 +706,16 @@ int load_elf_library(int fd){
 			elf_phdata->p_vaddr & 0xfffff000,
 			elf_phdata->p_filesz + (elf_phdata->p_vaddr & 0xfff),
 			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_FIXED | MAP_PRIVATE,
+			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			elf_phdata->p_offset & 0xfffff000);
 
 	k = elf_phdata->p_vaddr + elf_phdata->p_filesz;
 	if(k > elf_bss) elf_bss = k;
 	
-	sys_close(fd);
+	SYS(close)(fd);
 	if (error != elf_phdata->p_vaddr & 0xfffff000) {
 	        kfree(elf_phdata);
+		MOD_DEC_USE_COUNT;
 		return error;
 	}
 
@@ -632,5 +728,28 @@ int load_elf_library(int fd){
 		  PROT_READ|PROT_WRITE|PROT_EXEC,
 		  MAP_FIXED|MAP_PRIVATE, 0);
 	kfree(elf_phdata);
+	MOD_DEC_USE_COUNT;
 	return 0;
 }
+
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+
+int init_module(void) {
+	/* Install the COFF, ELF and XOUT loaders.
+	 * N.B. We *rely* on the table being the right size with the
+	 * right number of free slots...
+	 */
+	register_binfmt(&elf_format);
+	return 0;
+}
+
+void cleanup_module( void) {
+	
+	if (MOD_IN_USE)
+		printk(KERN_INFO "iBCS: module is in use, remove delayed\n");
+
+	/* Remove the COFF and ELF loaders. */
+	unregister_binfmt(&elf_format);
+}
+#endif

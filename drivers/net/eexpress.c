@@ -1,10 +1,11 @@
+
 /* eexpress.c: Intel EtherExpress device driver for Linux. */
 /*
 	Written 1993 by Donald Becker.
 	Copyright 1993 United States Government as represented by the Director,
 	National Security Agency.  This software may only be used and distributed
 	according to the terms of the GNU Public License as modified by SRC,
-	incorported herein by reference.
+	incorporated herein by reference.
 
 	The author may be reached as becker@super.org or
 	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
@@ -16,6 +17,9 @@
 	Move the theory of operation and memory map documentation.
 	Rework the board error reset
 	The statistics need to be updated correctly.
+
+        Modularized by Pauline Middelink <middelin@polyware.iaf.nl>
+        Changed to support io= irq= by Alan Cox <Alan.Cox@linux.org>
 */
 
 static char *version =
@@ -27,12 +31,17 @@ static char *version =
   Sources:
 	This driver wouldn't have been written with the availability of the
 	Crynwr driver source code.	It provided a known-working implementation
-	that filled in the gaping holes of the Intel documention.  Three cheers
+	that filled in the gaping holes of the Intel documentation.  Three cheers
 	for Russ Nelson.
 
 	Intel Microcommunications Databook, Vol. 1, 1990. It provides just enough
 	info that the casual reader might think that it documents the i82586.
 */
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -41,25 +50,18 @@ static char *version =
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
+#include <linux/string.h>
 #include <linux/in.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <errno.h>
-#include <memory.h>
+#include <linux/errno.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#else
-/* This isn't quite right, but it's the best version define I can find right now. */
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 #include <linux/malloc.h>
-#endif
 
 /* use 0 for production, 1 for verification, 2..7 for debug */
 #ifndef NET_DEBUG
@@ -71,7 +73,7 @@ static unsigned int net_debug = NET_DEBUG;
   			Details of the i82586.
 
    You'll really need the databook to understand the details of this part,
-   but the outline is that the i82586 has two seperate processing units.
+   but the outline is that the i82586 has two separate processing units.
 
    The Rx unit uses a list of frame descriptors and a list of data buffer
    descriptors.  We use full-sized (1518 byte) data buffers, so there is
@@ -288,13 +290,11 @@ extern int express_probe(struct device *dev);	/* Called from Space.c */
 static int	eexp_probe1(struct device *dev, short ioaddr);
 static int	eexp_open(struct device *dev);
 static int	eexp_send_packet(struct sk_buff *skb, struct device *dev);
-static void	eexp_interrupt(int reg_ptr);
+static void	eexp_interrupt(int irq, struct pt_regs *regs);
 static void eexp_rx(struct device *dev);
 static int	eexp_close(struct device *dev);
 static struct enet_statistics *eexp_get_stats(struct device *dev);
-#ifdef HAVE_MULTICAST
 static void set_multicast_list(struct device *dev, int num_addrs, void *addrs);
-#endif
 
 static int read_eeprom(int ioaddr, int location);
 static void hardware_send_packet(struct device *dev, void *buf, short length);
@@ -305,7 +305,7 @@ static void init_rx_bufs(struct device *dev);
 /* Check for a network adaptor of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, (detachable devices only) alloate space for the
+   If dev->base_addr == 2, (detachable devices only) allocate space for the
    device and return success.
    */
 int
@@ -355,7 +355,7 @@ int eexp_probe1(struct device *dev, short ioaddr)
 	station_addr[1] = read_eeprom(ioaddr, 3);
 	station_addr[2] = read_eeprom(ioaddr, 4);
 
-	/* Check the first three octets of the S.A. for the manufactor's code. */
+	/* Check the first three octets of the S.A. for the manufacturer's code. */
 	if (station_addr[2] != 0x00aa || (station_addr[1] & 0xff00) != 0x0000) {
 		printk(" rejected (invalid address %04x%04x%04x).\n",
 			   station_addr[2], station_addr[1], station_addr[0]);
@@ -363,7 +363,7 @@ int eexp_probe1(struct device *dev, short ioaddr)
 	}
 
 	/* We've committed to using the board, and can start filling in *dev. */
-	snarf_region(ioaddr, 16);
+	request_region(ioaddr, 16,"eexpress");
 	dev->base_addr = ioaddr;
 
 	for (i = 0; i < 6; i++) {
@@ -405,37 +405,12 @@ int eexp_probe1(struct device *dev, short ioaddr)
 	dev->stop		= eexp_close;
 	dev->hard_start_xmit = eexp_send_packet;
 	dev->get_stats	= eexp_get_stats;
-#ifdef HAVE_MULTICAST
 	dev->set_multicast_list = &set_multicast_list;
-#endif
 
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp	= eth_add_arp;
-	dev->queue_xmit = dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans = eth_type_trans;
-
-	dev->type		= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu		= 1500; /* eth_mtu */
-	dev->addr_len	= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags		= IFF_BROADCAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= sizeof(unsigned long);
-
+	/* Fill in the fields of the device structure with ethernet-generic values. */
+	
+	ether_setup(dev);
+	
 	return 0;
 }
 
@@ -454,7 +429,7 @@ eexp_open(struct device *dev)
 	if (irq2dev_map[dev->irq] != 0
 		/* This is always true, but avoid the false IRQ. */
 		|| (irq2dev_map[dev->irq] = dev) == 0
-		|| request_irq(dev->irq, &eexp_interrupt)) {
+		|| request_irq(dev->irq, &eexp_interrupt, 0, "EExpress")) {
 		return -EAGAIN;
 	}
 
@@ -467,6 +442,9 @@ eexp_open(struct device *dev)
 	dev->tbusy = 0;
 	dev->interrupt = 0;
 	dev->start = 1;
+#ifdef MODULE
+	MOD_INC_USE_COUNT;
+#endif
 	return 0;
 }
 
@@ -511,15 +489,6 @@ eexp_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
 	/* Block a timer-based transmit from overlapping. */
 	if (set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
@@ -535,8 +504,7 @@ eexp_send_packet(struct sk_buff *skb, struct device *dev)
 		outb(0x08 | irqrmap[dev->irq], ioaddr + SET_IRQ);
 	}
 
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	/* You might need to clean up and record Tx statistics here. */
 	lp->stats.tx_aborted_errors++;
@@ -547,9 +515,8 @@ eexp_send_packet(struct sk_buff *skb, struct device *dev)
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
 static void
-eexp_interrupt(int reg_ptr)
+eexp_interrupt(int irq, struct pt_regs *regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = (struct device *)(irq2dev_map[irq]);
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
@@ -586,7 +553,7 @@ eexp_interrupt(int reg_ptr)
 			lp->stats.tx_packets++;
 			lp->stats.collisions += tx_status & 0xf;
 			dev->tbusy = 0;
-			mark_bh(INET_BH);	/* Inform upper layers. */
+			mark_bh(NET_BH);	/* Inform upper layers. */
 		} else {
 			lp->stats.tx_errors++;
 			if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
@@ -687,8 +654,14 @@ eexp_close(struct device *dev)
 
 	irq2dev_map[dev->irq] = 0;
 
+	/* release the ioport-region */
+	release_region(ioaddr, 16);
+
 	/* Update the statistics here. */
 
+#ifdef MODULE
+	MOD_DEC_USE_COUNT;
+#endif
 	return 0;
 }
 
@@ -704,7 +677,6 @@ eexp_get_stats(struct device *dev)
 	return &lp->stats;
 }
 
-#ifdef HAVE_MULTICAST
 /* Set or clear the multicast filter for this adaptor.
    num_addrs == -1	Promiscuous mode, receive all packets
    num_addrs == 0	Normal mode, clear multicast list
@@ -714,6 +686,8 @@ eexp_get_stats(struct device *dev)
 static void
 set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 {
+/* This doesn't work yet */
+#if 0
 	short ioaddr = dev->base_addr;
 	if (num_addrs < 0) {
 		/* Not written yet, this requires expanding the init_words config
@@ -730,8 +704,8 @@ set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 		   cmd. */
 		outw(99, ioaddr);		/* Disable promiscuous mode, use normal mode */
 	}
-}
 #endif
+}
 
 /* The horrible routine to read a word from the serial EEPROM. */
 
@@ -964,19 +938,15 @@ eexp_rx(struct device *dev)
 			if (frame_status & 0x0080) lp->stats.rx_length_errors++;
 		} else {
 			/* Malloc up new buffer. */
-			int sksize;
 			struct sk_buff *skb;
 
 			pkt_len &= 0x3fff;
-			sksize = sizeof(struct sk_buff) + pkt_len;
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
 				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
 			skb->len = pkt_len;
 			skb->dev = dev;
 
@@ -984,16 +954,7 @@ eexp_rx(struct device *dev)
 
 			insw(ioaddr, skb->data, (pkt_len + 1) >> 1);
 		
-#ifdef HAVE_NETIF_RX
 			netif_rx(skb);
-#else
-			skb->lock = 0;
-			if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-				kfree_s(skb, sksize);
-				lp->stats.rx_dropped++;
-				break;
-			}
-#endif
 			lp->stats.rx_packets++;
 		}
 
@@ -1038,6 +999,38 @@ eexp_rx(struct device *dev)
 	outw(saved_write_ptr, ioaddr + WRITE_PTR);
 }
 
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+static struct device dev_eexpress = {
+	"        " /*"eexpress"*/, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, express_probe };
+	
+
+int irq=0;
+int io=0;	
+
+int
+init_module(void)
+{
+	dev_eexpress.base_addr=io;
+	dev_eexpress.irq=irq;
+	if (register_netdev(&dev_eexpress) != 0)
+		return -EIO;
+	return 0;
+}
+
+void
+cleanup_module(void)
+{
+	if (MOD_IN_USE)
+		printk("express: device busy, remove delayed\n");
+	else
+	{
+		unregister_netdev(&dev_eexpress);
+		kfree_s(dev_eexpress.priv,sizeof(struct net_local));
+		dev_eexpress.priv=NULL;
+	}
+}
+#endif /* MODULE */
 /*
  * Local variables:
  *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -I/usr/src/linux/drivers/net -Wall -Wstrict-prototypes -O6 -m486 -c eexpress.c"

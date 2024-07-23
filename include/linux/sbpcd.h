@@ -3,20 +3,34 @@
  */
 
 /*
- * these definitions can get overridden by the kernel command line
- * ("lilo boot option"). Examples:
+ * the definitions for the first controller can get overridden by
+ * the kernel command line ("lilo boot option").
+ * Examples:
  *                                 sbpcd=0x230,SoundBlaster
  *                             or
  *                                 sbpcd=0x300,LaserMate
- * these strings are case sensitive !!!
+ *                             or
+ *                                 sbpcd=0x330,SPEA
+ *
+ * These strings are case sensitive !!!
  */
 
-/* 
- * change this to select the type of your interface board:
+/*
+ * put your CDROM port base address into CDROM_PORT
+ * and specify the type of your interface in SBPRO.
+ *
+ * SBPRO addresses typically are 0x0230 (=0x220+0x10), 0x0250, ...
+ * LASERMATE (CI-101P, WDH-7001C) addresses typically are 0x0300, 0x0310, ...
+ * SPEA addresses are 0x320, 0x330, 0x340, 0x350
+ * there are some soundcards on the market with 0x0630, 0x0650, ...
+ *
+ * example: if your SBPRO audio address is 0x220, specify 0x230.
+ *
  *
  * set SBPRO to 1 for "true" SoundBlaster card
  * set SBPRO to 0 for "poor" (no sound) interface cards
  *                and for "compatible" soundcards.
+ * set SBPRO to 2 for the SPEA Media FX card
  *
  * most "compatible" sound boards like Galaxy need to set SBPRO to 0 !!!
  * if SBPRO gets set wrong, the drive will get found - but any
@@ -27,32 +41,60 @@
  * (currently I do not know any "compatible" with SBPRO 1)
  * then I can include better information with the next release.
  */
-#define SBPRO     1
+#if !(SBPCD_ISSUE-1) /* first (or if you have only one) interface board: */
+#define CDROM_PORT 0x0340
+#define SBPRO     0
+#endif
 
 /*
- * put your CDROM port base address here:
- * SBPRO addresses typically are 0x0230 (=0x220+0x10), 0x0250, ...
- * LASERMATE (CI-101P) adresses typically are 0x0300, 0x0310, ...
- * there are some soundcards on the market with 0x0630, 0x0650, ...
+ * If you have a "compatible" soundcard of type "SBPRO 0" or "SBPRO 2",
+ * enter your sound card's base address here if you want sbpcd to turn
+ * the CD sound channels on.
  *
- * example: if your SBPRO audio address is 0x220, specify 0x230.
- *
+ * Example: #define SOUND_BASE 0x220 enables the sound card's CD channels
+ *          #define SOUND_BASE 0     leaves the soundcard untouched
  */
-#define CDROM_PORT 0x0230
+#define SOUND_BASE 0x220
 
+/* ignore the rest if you have only one interface board & driver */
+
+#if !(SBPCD_ISSUE-2) /* second interface board: */
+#define CDROM_PORT 0x0320
+#define SBPRO     0
+#endif
+#if !(SBPCD_ISSUE-3) /* third interface board: */
+#define CDROM_PORT 0x0630
+#define SBPRO     1
+#endif
+#if !(SBPCD_ISSUE-4) /* fourth interface board: */
+#define CDROM_PORT 0x0634
+#define SBPRO     0
+#endif
 
 /*==========================================================================*/
 /*==========================================================================*/
 /*
  * nothing to change below here if you are not experimenting
  */
+#ifndef _LINUX_SBPCD_H
+
+#define _LINUX_SBPCD_H
+
 /*==========================================================================*/
+/*==========================================================================*/
+/*
+ * DDI interface definitions
+ * "invented" by Fred N. van Kempen..
+ */
+#define DDIOCSDBG	0x9000
+#define DPRINTF(x)	sbpcd_dprintf x
+
 /*==========================================================================*/
 /*
  * Debug output levels
  */
 #define DBG_INF		1	/* necessary information */
-#define DBG_IRQ		2	/* interrupt trace */
+#define DBG_BSZ		2	/* BLOCK_SIZE trace */
 #define DBG_REA		3	/* "read" status trace */
 #define DBG_CHK		4	/* "media check" trace */
 #define DBG_TIM		5	/* datarate timer test */
@@ -71,7 +113,16 @@
 #define DBG_SPI		18	/* SpinUp test */
 #define DBG_IOS		19	/* ioctl trace: "subchannel" */
 #define DBG_IO2		20	/* ioctl trace: general */
-#define DBG_000		21	/* unnecessary information */
+#define DBG_UPC		21	/* show UPC information */
+#define DBG_XA 		22	/* XA mode debugging */
+#define DBG_LCK		23	/* door (un)lock info */
+#define DBG_SQ 		24	/* dump SubQ frame */
+#define DBG_AUD		25      /* "read audio" debugging */
+#define DBG_SEQ		26      /* Sequoia interface configuration trace */
+#define DBG_LCS		27      /* Longshine LCS-7260 debugging trace */
+#define DBG_TEA		28      /* TEAC CD-55A debugging trace */
+#define DBG_CD2		29      /* MKE CD200 debugging trace */
+#define DBG_000		30      /* unnecessary information */
 
 /*==========================================================================*/
 /*==========================================================================*/
@@ -79,38 +130,37 @@
 /*
  * bits of flags_cmd_out:
  */
-#define f_respo3 0x100
-#define f_putcmd 0x80
-#define f_respo2 0x40
-#define f_lopsta 0x20
-#define f_getsta 0x10
-#define f_ResponseStatus 0x08
-#define f_obey_p_check 0x04
-#define f_bit1 0x02
-#define f_wait_if_busy 0x01
+#define f_respo3		0x100
+#define f_putcmd		0x80
+#define f_respo2		0x40
+#define f_lopsta		0x20
+#define f_getsta		0x10
+#define f_ResponseStatus	0x08
+#define f_obey_p_check		0x04
+#define f_bit1			0x02
+#define f_wait_if_busy		0x01
 
 /*
  * diskstate_flags:
  */
-#define upc_bit 0x40
-#define volume_bit 0x20
-#define toc_bit 0x10
-#define multisession_bit 0x08
-#define cd_size_bit 0x04
-#define subq_bit 0x02
-#define frame_size_bit 0x01
+#define x80_bit			0x80
+#define upc_bit			0x40
+#define volume_bit		0x20
+#define toc_bit			0x10
+#define multisession_bit	0x08
+#define cd_size_bit		0x04
+#define subq_bit		0x02
+#define frame_size_bit		0x01
 
 /*
  * disk states (bits of diskstate_flags):
  */
-#define upc_valid (DS[d].diskstate_flags&upc_bit)
-#define volume_valid (DS[d].diskstate_flags&volume_bit)
-#define toc_valid (DS[d].diskstate_flags&toc_bit)
-#define multisession_valid (DS[d].diskstate_flags&multisession_bit)
-#define cd_size_valid (DS[d].diskstate_flags&cd_size_bit)
-#define subq_valid (DS[d].diskstate_flags&subq_bit)
-#define frame_size_valid (DS[d].diskstate_flags&frame_size_bit)
-
+#define upc_valid (DriveStruct[d].diskstate_flags&upc_bit)
+#define volume_valid (DriveStruct[d].diskstate_flags&volume_bit)
+#define toc_valid (DriveStruct[d].diskstate_flags&toc_bit)
+#define cd_size_valid (DriveStruct[d].diskstate_flags&cd_size_bit)
+#define subq_valid (DriveStruct[d].diskstate_flags&subq_bit)
+#define frame_size_valid (DriveStruct[d].diskstate_flags&frame_size_bit)
 
 /*
  * bits of the status_byte (result of xx_ReadStatus):
@@ -121,8 +171,10 @@
 #define p_check 0x10
 #define p_busy_new 0x08
 #define p_door_locked 0x04
-#define p_bit_1 0x02
+#define p_bit_1 0x02 /* hopefully unused now */
+#define p_lcs_door_locked 0x02 /* new use of old bit */
 #define p_disk_ok 0x01
+#define p_lcs_door_closed 0x01 /* new use of old bit */
 /*
  * "old" drives status result bits:
  */
@@ -131,15 +183,45 @@
 #define p_busy_old 0x04
 
 /*
+ * "generation specific" defs of the status_byte:
+ */
+#define p0_door_closed	0x80
+#define p0_caddy_in	0x40
+#define p0_spinning	0x20
+#define p0_check	0x10
+#define p0_success	0x08 /* unused */
+#define p0_busy		0x04
+#define p0_bit_1	0x02 /* unused */
+#define p0_disk_ok	0x01
+
+#define p1_door_closed	0x80
+#define p1_disk_in	0x40
+#define p1_spinning	0x20
+#define p1_check	0x10
+#define p1_busy		0x08
+#define p1_door_locked	0x04
+#define p1_bit_1	0x02 /* unused */
+#define p1_disk_ok	0x01
+
+#define p2_disk_ok	0x80
+#define p2_door_locked	0x40
+#define p2_spinning	0x20
+#define p2_busy2	0x10
+#define p2_busy1	0x08
+#define p2_door_closed	0x04
+#define p2_disk_in	0x02
+#define p2_check	0x01
+
+/*
  * used drive states:
  */
-#define st_door_closed (DS[d].status_byte&p_door_closed)
-#define st_caddy_in (DS[d].status_byte&p_caddy_in)
-#define st_spinning (DS[d].status_byte&p_spinning)
-#define st_check (DS[d].status_byte&p_check)
-#define st_busy (DS[d].status_byte&p_busy_new)
-#define st_door_locked (DS[d].status_byte&p_door_locked)
-#define st_diskok (DS[d].status_byte&p_disk_ok)
+#define st_door_closed (DriveStruct[d].status_byte&p_door_closed)
+#define st_caddy_in (DriveStruct[d].status_byte&p_caddy_in)
+#define st_spinning (DriveStruct[d].status_byte&p_spinning)
+#define st_check (DriveStruct[d].status_byte&p_check)
+#define st_busy (DriveStruct[d].status_byte&p_busy_new)
+#define st_door_locked (DriveStruct[d].status_byte&p_door_locked)
+#define st_diskok (DriveStruct[d].status_byte&p_disk_ok)
 
 /*
  * bits of the CDi_status register:
@@ -157,21 +239,32 @@
 /*
  * drive types (firmware versions):
  */
-#define drv_199 0       /* <200 */
-#define drv_200 1       /* <201 */
-#define drv_201 2       /* <210 */
-#define drv_210 3       /* <211 */
-#define drv_211 4       /* <300 */
-#define drv_300 5       /* else */
-#define drv_099 0x10    /* new,  <100 */
-#define drv_100 0x11    /* new, >=100 */
-#define drv_new 0x10    /* all new drives have that bit set */
-#define drv_old 0x00    /*  */
+#define drv_fam0 0x08   /* CR-52x family */
+#define drv_199 (drv_fam0+0x01)    /* <200 */
+#define drv_200 (drv_fam0+0x02)    /* <201 */
+#define drv_201 (drv_fam0+0x03)    /* <210 */
+#define drv_210 (drv_fam0+0x04)    /* <211 */
+#define drv_211 (drv_fam0+0x05)    /* <300 */
+#define drv_300 (drv_fam0+0x06)    /* >=300 */
 
-/*
- * drv_099 and drv_100 are the "new" drives
- */
-#define new_drive (DS[d].drv_type&0x10)
+#define drv_famL 0x10    /* Longshine family */
+#define drv_260 (drv_famL+0x01)    /* LCS-7260 */
+
+#define drv_fam1 0x20    /* CR-56x family */
+#define drv_099 (drv_fam1+0x01)    /* <100 */
+#define drv_100 (drv_fam1+0x02)    /* >=100 */
+
+#define drv_famT 0x40    /* TEAC CD-55A */
+#define drv_fam2 0x80    /* CD200 family */
+
+#define fam0_drive (DriveStruct[d].drv_type&drv_fam0)
+#define famL_drive (DriveStruct[d].drv_type&drv_famL)
+#define fam1_drive (DriveStruct[d].drv_type&drv_fam1)
+#define famT_drive (DriveStruct[d].drv_type&drv_famT)
+#define fam2_drive (DriveStruct[d].drv_type&drv_fam2)
+#define fam0L_drive (DriveStruct[d].drv_type&(drv_fam0|drv_famL))
+#define fam1L_drive (DriveStruct[d].drv_type&(drv_fam1|drv_famL))
+#define fam01_drive (DriveStruct[d].drv_type&(drv_fam0|drv_fam1))
 
 /*
  * audio states:
@@ -182,38 +275,28 @@
 /*
  * drv_pattern, drv_options:
  */
-#define speed_auto 0x80
-#define speed_300 0x40
-#define speed_150 0x20
-#define sax_a 0x04
-#define sax_xn2 0x02
-#define sax_xn1 0x01
+#define speed_auto	0x80
+#define speed_300	0x40
+#define speed_150	0x20
+#define audio_mono	0x04
 
 /*
  * values of cmd_type (0 else):
  */
-#define cmd_type_READ_M1  0x01 /* "data mode 1": 2048 bytes per frame */
-#define cmd_type_READ_M2  0x02 /* "data mode 2": 12+2048+280 bytes per frame */
-#define cmd_type_READ_SC  0x04 /* "subchannel info": 96 bytes per frame */
+#define READ_M1  0x01 /* "data mode 1": 2048 bytes per frame */
+#define READ_M2  0x02 /* "data mode 2": 12+2048+280 bytes per frame */
+#define READ_SC  0x04 /* "subchannel info": 96 bytes per frame */
+#define READ_AU  0x08 /* "audio frame": 2352 bytes per frame */
 
 /*
- * sense byte: used only if new_drive
- *                  only during cmd 09 00 xx ah al 00 00
+ * sense_byte:
  *
  *          values: 00
- *                  82
+ *                  01
+ *                  81
+ *                  82 "raw audio" mode
  *                  xx from infobuf[0] after 85 00 00 00 00 00 00
  */
-
-
-#define CD_MINS                   75  /* minutes per CD                  */
-#define CD_SECS                   60  /* seconds per minutes             */
-#define CD_FRAMES                 75  /* frames per second               */
-#define CD_FRAMESIZE            2048  /* bytes per frame, data mode      */
-#define CD_FRAMESIZE_XA	        2340  /* bytes per frame, "xa" mode      */
-#define CD_FRAMESIZE_RAW        2352  /* bytes per frame, "raw" mode     */
-#define CD_BLOCK_OFFSET          150  /* offset of first logical frame   */
-
 
 /* audio status (bin) */
 #define aud_00 0x00 /* Audio status byte not supported or not valid */
@@ -229,6 +312,57 @@
 #define aud_13 0x13 /* Audio play operation successfully completed  */
 #define aud_14 0x14 /* Audio play operation stopped due to error    */
 #define aud_15 0x15 /* No current audio status to return            */
+
+
+/*
+ * highest allowed drive number (MINOR+1)
+ */
+#define NR_SBPCD 4
+
+/*
+ * we try to never disable interrupts - seems to work
+ */
+#define SBPCD_DIS_IRQ 0
+
+/*
+ * "write byte to port"
+ */
+#define OUT(x,y) outb(y,x)
+
+/*
+ * use "REP INSB" for strobing the data in:
+ */
+#define READ_DATA(port, buf, nr) insb(port, buf, nr)
+
+/*==========================================================================*/
+
+#define MIXER_CD_Volume	0x28 /* internal SB Pro register address */
+
+/*==========================================================================*/
+/*
+ * Creative Labs Programmers did this:
+ */
+#define MAX_TRACKS	120 /* why more than 99? */
+
+/*==========================================================================*/
+/*
+ * To make conversions easier (machine dependent!)
+ */
+typedef union _msf
+{
+  u_int n;
+  u_char c[4];
+}
+MSF;
+
+typedef union _blk
+{
+  u_int n;
+  u_char c[4];
+}
+BLK;
+
+/*==========================================================================*/
 
 /*============================================================================
 ==============================================================================
@@ -340,7 +474,7 @@ read:    02 xx-xx-xx nn-nn fl. (??)  read nn-nn blocks of 2048 bytes,
 
 Read XA-Data:
 read:    03 xx-xx-xx nn-nn fl. (??)  read nn-nn blocks of 2340 bytes, 
-                                     starting at block xx-xx-xx  
+                                     starting at block xx-xx-xx
                                      fl=0: "lba"-, =2:"msf-bcd"-coded xx-xx-xx
 
 Read SUB_Q:
@@ -381,86 +515,134 @@ Read XA Parameter:
 ==============================================================================
 ============================================================================*/
 
+/*
+ * commands
+ *
+ * CR-52x:      CMD0_
+ * CR-56x:      CMD1_
+ * CD200:       CMD2_
+ * LCS-7260:    CMDL_
+ * TEAC CD-55A: CMDT_
+ */
+#define CMD1_RESET	0x0a
+#define CMD2_RESET	0x01
+#define CMDT_RESET	0xc0
+#define CMD1_LOCK_CTL	0x0c
+#define CMD2_LOCK_CTL	0x1e
+#define CMDL_LOCK_CTL	0x0e
+#define CMDT_LOCK_CTL	0x1e
+#define CMD1_TRAY_CTL	0x07
+#define CMD2_TRAY_CTL	0x1b
+#define CMDL_TRAY_CTL	0x0d
+#define CMDT_TRAY_CTL	0x1b
+#define CMD1_MULTISESS	0x8d
+#define CMDL_MULTISESS	0x8c
+#define CMD1_SUBCHANINF	0x11
+#define CMD2_SUBCHANINF	0x
+#define CMD2_x02	0x02
+#define CMD1_x08	0x08
+#define CMD2_x08	0x08
+#define CMDT_x08	0x08
+#define CMD2_SETSPEED	0xda
+
+#define CMD0_PATH_CHECK	0x00
+#define CMD1_PATH_CHECK	0x00
+#define CMD2_PATH_CHECK	0x
+#define CMDL_PATH_CHECK	0x00
+#define CMD0_SEEK	0x01
+#define CMD1_SEEK	0x01
+#define CMD2_SEEK	0x2b
+#define CMDL_SEEK	0x01
+#define CMDT_SEEK	0x2b
+#define CMD0_READ	0x02
+#define CMD1_READ	0x10
+#define CMD2_READ	0x28
+#define CMDL_READ	0x02
+#define CMDT_READ	0x28
+#define CMD0_READ_XA	0x03
+#define CMD2_READ_XA	0xd4
+#define CMDL_READ_XA	0x03 /* really ?? */
+#define CMD0_READ_HEAD	0x04
+#define CMD0_SPINUP	0x05
+#define CMD1_SPINUP	0x02
+#define CMD2_SPINUP	CMD2_TRAY_CTL
+#define CMDL_SPINUP	0x05
+#define CMD0_SPINDOWN	0x06 /* really??? */
+#define CMD1_SPINDOWN	0x06
+#define CMD2_SPINDOWN	CMD2_TRAY_CTL
+#define CMDL_SPINDOWN	0x0d
+#define CMD0_DIAG	0x07
+#define CMD0_READ_UPC	0x08
+#define CMD1_READ_UPC	0x88
+#define CMD2_READ_UPC	0x
+#define CMDL_READ_UPC	0x08
+#define CMD0_READ_ISRC	0x09
+#define CMD0_PLAY	0x0a
+#define CMD1_PLAY	0x
+#define CMD2_PLAY	0x
+#define CMDL_PLAY	0x0a
+#define CMD0_PLAY_MSF	0x0b
+#define CMD1_PLAY_MSF	0x0e
+#define CMD2_PLAY_MSF	0x47
+#define CMDL_PLAY_MSF	0x
+#define CMDT_PLAY_MSF	0x47
+#define CMD0_PLAY_TI	0x0c
+#define CMD0_STATUS	0x81
+#define CMD1_STATUS	0x05
+#define CMD2_STATUS	0x00
+#define CMDL_STATUS	0x81
+#define CMDT_STATUS	0x00
+#define CMD0_READ_ERR	0x82
+#define CMD1_READ_ERR	0x82
+#define CMD2_READ_ERR	0x03
+#define CMDL_READ_ERR	0x82
+#define CMDT_READ_ERR	0x03 /* get audio status */
+#define CMD0_READ_VER	0x83
+#define CMD1_READ_VER	0x83
+#define CMD2_READ_VER	0x12
+#define CMDT_READ_VER	0x12 /* ??? (unused) */
+#define CMDL_READ_VER	0x83
+#define CMD0_SETMODE	0x84
+#define CMD1_SETMODE	0x09
+#define CMD2_SETMODE	0x55
+#define CMDL_SETMODE	0x84
+#define CMDT_SETMODE	0x55
+#define CMD0_GETMODE	0x85
+#define CMD1_GETMODE	0x84
+#define CMD2_GETMODE	0x5a
+#define CMDL_GETMODE	0x85
+#define CMDT_GETMODE	0x5a
+#define CMD0_SET_XA	0x86
+#define CMD0_GET_XA	0x87
+#define CMD0_CAPACITY	0x88
+#define CMD1_CAPACITY	0x85
+#define CMD2_CAPACITY	0x25
+#define CMDL_CAPACITY	0x88
+#define CMD0_READSUBQ	0x89
+#define CMD1_READSUBQ	0x87
+#define CMD2_READSUBQ	0x42
+#define CMDL_READSUBQ	0x89
+#define CMDT_READSUBQ	0x42
+#define CMD0_DISKCODE	0x8a
+#define CMD0_DISKINFO	0x8b
+#define CMD1_DISKINFO	0x8b
+#define CMD2_DISKINFO	0x43
+#define CMDL_DISKINFO	0x8b
+#define CMDT_DISKINFO	0x43
+#define CMD0_READTOC	0x8c
+#define CMD1_READTOC	0x8c
+#define CMD2_READTOC	0x
+#define CMDL_READTOC	0x8c
+#define CMD0_PAU_RES	0x8d
+#define CMD1_PAU_RES	0x0d
+#define CMD2_PAU_RES	0x4b
+#define CMDL_PAU_RES	0x8d
+#define CMDT_PAU_RES	0x4b
+#define CMD0_PACKET	0x8e
+#define CMD1_PACKET	0x8e
+#define CMD2_PACKET	0x
+#define CMDL_PACKET	0x8e
+
 /*==========================================================================*/
 /*==========================================================================*/
-
-/*
- * highest allowed drive number (MINOR+1)
- * currently only one controller, maybe later up to 4
- */
-#define NR_SBPCD 4
-
-/*
- * we try to never disable interrupts - seems to work
- */
-#define SBPCD_DIS_IRQ 0
-
-/*
- * we don't use the IRQ line - leave it free for the sound driver
- */
-#define SBPCD_USE_IRQ	0
-
-/*
- * you can set the interrupt number of your interface board here:
- * It is not used at this time. No need to set it correctly.
- */
-#define SBPCD_INTR_NR	7            
-
-/*
- * "write byte to port"
- */
-#define OUT(x,y) outb(y,x)
-
-
-#define MIXER_CD_Volume	0x28
-
-/*==========================================================================*/
-/*
- * use "REP INSB" for strobing the data in:
- */
-#define READ_DATA(port, buf, nr) insb(port, buf, nr)
-
-/*==========================================================================*/
-/*
- * to fork and execute a function after some elapsed time:
- * one "jifs" unit is 10 msec.
- */
-#define SET_TIMER(func, jifs) \
-        ((timer_table[SBPCD_TIMER].expires = jiffies + jifs), \
-        (timer_table[SBPCD_TIMER].fn = func), \
-        (timer_active |= 1<<SBPCD_TIMER))
-
-#define CLEAR_TIMER	timer_active &= ~(1<<SBPCD_TIMER)
-
-/*==========================================================================*/
-/*
- * Creative Labs Programmers did this:
- */
-#define MAX_TRACKS	120 /* why more than 99? */
-
-
-/*==========================================================================*/
-/*
- * To make conversions easier (machine dependent!)
- */
-typedef union _msf
-{
-  u_int n;
-  u_char c[4];
-}
-MSF;
-
-typedef union _blk
-{
-  u_int n;
-  u_char c[4];
-}
-BLK;
-
-/*==========================================================================*/
-
-
-
-
-
-
+#endif _LINUX_SBPCD_H

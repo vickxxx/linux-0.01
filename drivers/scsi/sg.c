@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/mtio.h>
 #include <linux/ioctl.h>
@@ -21,11 +22,20 @@
 
 #include "../block/blk.h"
 #include "scsi.h"
+#include "hosts.h"
 #include "scsi_ioctl.h"
 #include "sg.h"
 
-int NR_SG=0;
-int MAX_SG=0;
+static void sg_init(void);
+static int sg_attach(Scsi_Device *);
+static int sg_detect(Scsi_Device *);
+static void sg_detach(Scsi_Device *);
+
+
+struct Scsi_Device_Template sg_template = {NULL, NULL, "sg", 0xff, 
+					     SCSI_GENERIC_MAJOR, 0, 0, 0, 0,
+					     sg_detect, sg_init,
+					     NULL, sg_attach, sg_detach};
 
 #ifdef SG_BIG_BUFF
 static char *big_buff;
@@ -50,12 +60,13 @@ struct scsi_generic
  };
 
 static struct scsi_generic *scsi_generics=NULL;
+static void sg_free(char *buff,int size);
 
 static int sg_ioctl(struct inode * inode,struct file * file,
 	     unsigned int cmd_in, unsigned long arg)
  {
   int dev = MINOR(inode->i_rdev);
-  if ((dev<0) || (dev>=NR_SG))
+  if ((dev<0) || (dev>=sg_template.dev_max))
    return -ENXIO;
   switch(cmd_in)
    {
@@ -73,7 +84,7 @@ static int sg_open(struct inode * inode, struct file * filp)
  {
   int dev=MINOR(inode->i_rdev);
   int flags=filp->f_flags;
-  if (dev>=NR_SG)
+  if (dev>=sg_template.dev_max || !scsi_generics[dev].device)
    return -ENXIO;
   if (O_RDWR!=(flags & O_ACCMODE))
    return -EACCES;
@@ -100,11 +111,15 @@ static int sg_open(struct inode * inode, struct file * filp)
     }
   if (!scsi_generics[dev].users && scsi_generics[dev].pending && scsi_generics[dev].complete)
    {
-    scsi_free(scsi_generics[dev].buff,scsi_generics[dev].buff_len);
+    if (scsi_generics[dev].buff != NULL)
+      sg_free(scsi_generics[dev].buff,scsi_generics[dev].buff_len);
+    scsi_generics[dev].buff=NULL;
     scsi_generics[dev].pending=0;
    }
   if (!scsi_generics[dev].users)
    scsi_generics[dev].timeout=SG_DEFAULT_TIMEOUT;
+  if (scsi_generics[dev].device->host->hostt->usage_count)
+    (*scsi_generics[dev].device->host->hostt->usage_count)++;
   scsi_generics[dev].users++;
   return 0;
  }
@@ -113,6 +128,8 @@ static void sg_close(struct inode * inode, struct file * filp)
  {
   int dev=MINOR(inode->i_rdev);
   scsi_generics[dev].users--;
+  if (scsi_generics[dev].device->host->hostt->usage_count)
+    (*scsi_generics[dev].device->host->hostt->usage_count)--;
   scsi_generics[dev].exclude=0;
   wake_up(&scsi_generics[dev].generic_wait);
  }
@@ -173,11 +190,14 @@ static int sg_read(struct inode *inode,struct file *filp,char *buf,int count)
     buf+=sizeof(struct sg_header);
     if (count>device->header.pack_len)
      count=device->header.pack_len;
-    memcpy_tofs(buf,device->buff,count-sizeof(struct sg_header));
+    if (count > sizeof(struct sg_header)) {
+       memcpy_tofs(buf,device->buff,count-sizeof(struct sg_header));
+    }
    }
   else
    count=0;
   sg_free(device->buff,device->buff_len);
+  device->buff = NULL;
   device->pending=0;
   wake_up(&device->write_wait);
   return count;
@@ -193,6 +213,7 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
     SCpnt->request.dev=-1;
     return;
    }
+  memcpy(device->header.sense_buffer, SCpnt->sense_buffer, sizeof(SCpnt->sense_buffer));
   if (SCpnt->sense_buffer[0])
    {
     device->header.result=EIO;
@@ -209,11 +230,17 @@ static int sg_write(struct inode *inode,struct file *filp,char *buf,int count)
   int dev=MINOR(inode->i_rdev);
   Scsi_Cmnd *SCpnt;
   int bsize,size,amt,i;
+  unsigned char opcode;
   unsigned char cmnd[MAX_COMMAND_SIZE];
   struct scsi_generic *device=&scsi_generics[dev];
+
   if ((i=verify_area(VERIFY_READ,buf,count)))
    return i;
-  if (count<sizeof(struct sg_header))
+  /*
+   * The minimum scsi command length is 6 bytes.  If we get anything less than this,
+   * it is clearly bogus.
+   */
+  if (count<(sizeof(struct sg_header) + 6))
    return -EIO;
   /* make sure we can fit */
   while(device->pending)
@@ -248,11 +275,12 @@ static int sg_write(struct inode *inode,struct file *filp,char *buf,int count)
 #ifdef DEBUG
   printk("allocating device\n");
 #endif
-  if (!(SCpnt=allocate_device(NULL,device->device->index, !(filp->f_flags & O_NONBLOCK))))
+  if (!(SCpnt=allocate_device(NULL,device->device, !(filp->f_flags & O_NONBLOCK))))
    {
     device->pending=0;
     wake_up(&device->write_wait);
     sg_free(device->buff,device->buff_len);
+    device->buff = NULL;
     return -EWOULDBLOCK;
    } 
 #ifdef DEBUG
@@ -261,7 +289,22 @@ static int sg_write(struct inode *inode,struct file *filp,char *buf,int count)
   /* now issue command */
   SCpnt->request.dev=dev;
   SCpnt->sense_buffer[0]=0;
-  size=COMMAND_SIZE(get_fs_byte(buf));
+  opcode = get_fs_byte(buf);
+  size=COMMAND_SIZE(opcode);
+  if (opcode >= 0xc0 && device->header.twelve_byte) size = 12;
+  SCpnt->cmd_len = size;
+  /*
+   * Verify that the user has actually passed enough bytes for this command.
+   */
+  if (count<(sizeof(struct sg_header) + size))
+    {
+      device->pending=0;
+      wake_up(&device->write_wait);
+      sg_free(device->buff,device->buff_len);
+      device->buff = NULL;
+      return -EIO;
+    }
+
   memcpy_fromfs(cmnd,buf,size);
   buf+=size;
   memcpy_fromfs(device->buff,buf,device->header.pack_len-size-sizeof(struct sg_header));
@@ -270,7 +313,8 @@ static int sg_write(struct inode *inode,struct file *filp,char *buf,int count)
   printk("do cmd\n");
 #endif
   scsi_do_cmd (SCpnt,(void *) cmnd,
-               (void *) device->buff,amt,sg_command_done,device->timeout,SG_DEFAULT_RETRIES);
+               (void *) device->buff,amt,
+	       sg_command_done,device->timeout,SG_DEFAULT_RETRIES);
 #ifdef DEBUG
   printk("done cmd\n");
 #endif               
@@ -291,46 +335,107 @@ static struct file_operations sg_fops = {
 };
 
 
+static int sg_detect(Scsi_Device * SDp){
+  ++sg_template.dev_noticed;
+  return 1;
+}
+
 /* Driver initialization */
-unsigned long sg_init(unsigned long mem_start, unsigned long mem_end)
+static void sg_init()
  {
-  if (register_chrdev(SCSI_GENERIC_MAJOR,"sg",&sg_fops)) 
-   {
-    printk("Unable to get major %d for generic SCSI device\n",
-	   SCSI_GENERIC_MAJOR);
-    return mem_start;
+   static int sg_registered = 0;
+   
+   if (sg_template.dev_noticed == 0) return;
+
+   if(!sg_registered) {
+     if (register_chrdev(SCSI_GENERIC_MAJOR,"sg",&sg_fops)) 
+       {
+	 printk("Unable to get major %d for generic SCSI device\n",
+		SCSI_GENERIC_MAJOR);
+	 return;
+       }
+     sg_registered++;
    }
-  if (NR_SG == 0) return mem_start;
+
+   /* If we have already been through here, return */
+   if(scsi_generics) return;
 
 #ifdef DEBUG
   printk("sg: Init generic device.\n");
 #endif
 
 #ifdef SG_BIG_BUFF
-  big_buff= (char *) mem_start;
-  mem_start+=SG_BIG_BUFF;
+  big_buff= (char *) scsi_init_malloc(SG_BIG_BUFF, GFP_ATOMIC | GFP_DMA);
 #endif
-  return mem_start;
+
+   scsi_generics = (struct scsi_generic *) 
+     scsi_init_malloc((sg_template.dev_noticed + SG_EXTRA_DEVS) 
+		      * sizeof(struct scsi_generic), GFP_ATOMIC);
+   memset(scsi_generics, 0, (sg_template.dev_noticed + SG_EXTRA_DEVS)
+	  * sizeof(struct scsi_generic));
+
+   sg_template.dev_max = sg_template.dev_noticed + SG_EXTRA_DEVS;
  }
 
-unsigned long sg_init1(unsigned long mem_start, unsigned long mem_end)
+static int sg_attach(Scsi_Device * SDp)
  {
-  scsi_generics = (struct scsi_generic *) mem_start;
-  mem_start += MAX_SG * sizeof(struct scsi_generic);
-  return mem_start;
+   struct scsi_generic * gpnt;
+   int i;
+
+   if(sg_template.nr_dev >= sg_template.dev_max) 
+     {
+       SDp->attached--;
+       return 1;
+     }
+
+   for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++) 
+     if(!gpnt->device) break;
+
+   if(i >= sg_template.dev_max) panic ("scsi_devices corrupt (sg)");
+
+   scsi_generics[i].device=SDp;
+   scsi_generics[i].users=0;
+   scsi_generics[i].generic_wait=NULL;
+   scsi_generics[i].read_wait=NULL;
+   scsi_generics[i].write_wait=NULL;
+   scsi_generics[i].buff=NULL;
+   scsi_generics[i].exclude=0;
+   scsi_generics[i].pending=0;
+   scsi_generics[i].timeout=SG_DEFAULT_TIMEOUT;
+   sg_template.nr_dev++;
+   return 0;
  };
 
-void sg_attach(Scsi_Device * SDp)
- {
-  if(NR_SG >= MAX_SG) 
-   panic ("scsi_devices corrupt (sg)");
-  scsi_generics[NR_SG].device=SDp;
-  scsi_generics[NR_SG].users=0;
-  scsi_generics[NR_SG].generic_wait=NULL;
-  scsi_generics[NR_SG].read_wait=NULL;
-  scsi_generics[NR_SG].write_wait=NULL;
-  scsi_generics[NR_SG].exclude=0;
-  scsi_generics[NR_SG].pending=0;
-  scsi_generics[NR_SG].timeout=SG_DEFAULT_TIMEOUT;
-  NR_SG++;
- };
+
+
+static void sg_detach(Scsi_Device * SDp)
+{
+  struct scsi_generic * gpnt;
+  int i;
+  
+  for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++) 
+    if(gpnt->device == SDp) {
+      gpnt->device = NULL;
+      SDp->attached--;
+      sg_template.nr_dev--;
+      return;
+    }
+  return;
+}
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

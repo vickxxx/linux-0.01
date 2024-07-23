@@ -2,32 +2,35 @@
 #define _AHA152X_H
 
 /*
- * $Id: aha152x.h,v 1.0 1994/03/25 12:52:00 root Exp $
+ * $Id: aha152x.h,v 1.8 1995/01/21 22:11:07 root Exp root $
  */
+
+#if defined(__KERNEL__)
 
 #include "../block/blk.h"
 #include "scsi.h"
-#if defined(__KERNEL__)
 #include <asm/io.h>
 
-int        aha152x_detect(int);
-const char *aha152x_info(void);
+int        aha152x_detect(Scsi_Host_Template *);
 int        aha152x_command(Scsi_Cmnd *);
 int        aha152x_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int        aha152x_abort(Scsi_Cmnd *, int);
+int        aha152x_abort(Scsi_Cmnd *);
 int        aha152x_reset(Scsi_Cmnd *);
-int        aha152x_biosparam(int, int, int*);
+int        aha152x_biosparam(Disk *, int, int*);
 
 /* number of queueable commands
    (unless we support more than 1 cmd_per_lun this should do) */
 #define AHA152X_MAXQUEUE	7		
 
-#define AHA152X_REVID	"Adaptec 152x SCSI driver; $Revision: 1.0 $"
+#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.8 $"
 
 /* Initial value of Scsi_Host entry */
-#define AHA152X       { /* name */		AHA152X_REVID, \
+#define AHA152X       { /* next */		NULL,			    \
+			/* usage_count */  	NULL,			    \
+			/* name */		AHA152X_REVID, 		    \
 			/* detect */		aha152x_detect,             \
-			/* info */		aha152x_info,               \
+			/* release */		NULL,			    \
+			/* info */		NULL,		            \
 			/* command */		aha152x_command,            \
 			/* queuecommand */	aha152x_queue,              \
                         /* abort */		aha152x_abort,              \
@@ -39,7 +42,8 @@ int        aha152x_biosparam(int, int, int*);
                         /* sg_tablesize */	SG_ALL,                     \
                         /* cmd_per_lun */	1,                          \
                         /* present */		0,                          \
-                        /* unchecked_isa_dma */	0 }
+                        /* unchecked_isa_dma */	0,			    \
+			/* use_clustering */	DISABLE_CLUSTERING }
 #endif
 
 
@@ -332,5 +336,26 @@ typedef union {
 
 #define TESTLO(PORT, BITS)	\
 	((inb(PORT) & (BITS)) == 0)
+
+#ifdef DEBUG_AHA152X
+enum {
+        debug_skipports =0x0001,
+        debug_queue     =0x0002,
+        debug_intr      =0x0004,
+        debug_selection =0x0008,
+        debug_msgo      =0x0010,
+        debug_msgi      =0x0020,
+        debug_status    =0x0040,
+        debug_cmd       =0x0080,
+        debug_datai     =0x0100,
+        debug_datao     =0x0200,
+        debug_abort     =0x0400,
+        debug_done      =0x0800,
+        debug_biosparam =0x1000,
+        debug_phases    =0x2000,
+        debug_queues    =0x4000,
+        debug_reset     =0x8000,
+};
+#endif
 
 #endif /* _AHA152X_H */

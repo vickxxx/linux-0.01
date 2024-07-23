@@ -26,13 +26,24 @@
 #  CONFIG_PLIP		The Crynwr-protocol PL/IP driver
 #	INITIALTIMEOUTFACTOR	Timing parameters.
 #	MAXTIMEOUTFACTOR
-#  D_LINK		The D-Link DE-600 Portable Ethernet Adaptor.
-#	  D_LINK_IO	The D-Link I/O address (0x378 == typical)
-#	  D_LINK_IRQ	The D-Link IRQ number to use (IRQ7 == typical)
-#	  D_LINK_DEBUG	Enable or disable D-Link debugging
-#  DEPCA		The DIGITAL series of AT Ethernet Cards (DE100, DE200)
-#	  DEPCA_IRQ	Set the desired IRQ (=0, for autoprobe)
-#	  DEPCA_DEBUG	Set the desired debug level
+#  DE600		The D-Link DE-600 Portable Ethernet Adaptor.
+#	  DE600_IO	The DE600 I/O-port address (0x378 == default)
+#	  DE600_IRQ	The DE600 IRQ number to use (IRQ7 == default)
+#	  DE600_DEBUG	Enable or disable DE600 debugging (default off)
+#  DE620		The D-Link DE-600 Portable Ethernet Adaptor.
+#	  DE620_IO	The DE620 I/O-port address (0x378 == default)
+#	  DE620_IRQ	The DE620 IRQ number to use (IRQ7 == default)
+#	  DE620_DEBUG	Enable or disable DE600 debugging (default off)
+#  DEPCA		The DIGITAL series of LANCE based Ethernet Cards
+#			(DEPCA, DE100, DE200/1/2, DE210, DE422 (EISA))
+#  EWRK3		The DIGITAL series of AT Ethernet Cards (DE203/4/5)
+#       EWRK3_DEBUG	Set the desired debug level
+#
+#  DE4x5		The DIGITAL series of PCI/EISA Ethernet Cards,
+#			DE425, DE434 and DE435
+#       DE4x5_DEBUG	Set the desired debug level
+#	IS_ZYNX         May allow driver to work with Zynx cards - 
+#			see linux/drivers/net/README.de4x5
 #
 
 # The following options exist, but cannot be set in this file.
@@ -43,7 +54,7 @@
 
 
 # Most drivers also have a *_DEBUG setting that may be adjusted.
-# The 8390 drivers share the EI_DEBUG settting.
+# The 8390 drivers share the EI_DEBUG setting.
 
 # General options for Space.c
 OPTS		= # -DETH0_ADDR=0x300 -DETH0_IRQ=11
@@ -53,7 +64,6 @@ EL2_OPTS	= #-DEL2_AUI
 NE_OPTS		=
 HP_OPTS		=
 PLIP_OPTS	=
-DEPCA_OPTS	= -DDEPCA_IRQ=0 -DDEPCA_DEBUG=1
-
-# The following are the only parameters that must be set in this file.
-DL_OPTS		= -DD_LINK_IO=0x378 -DD_LINK_IRQ=7 -UD_LINK_DEBUG
+DEPCA_OPTS	= -DDEPCA_DEBUG=1
+EWRK3_OPTS	= -DEWRK3_DEBUG=1
+DE4x5_OPTS	= -DDE4x5_DEBUG=1

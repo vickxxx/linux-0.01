@@ -12,9 +12,12 @@
 #include <linux/stat.h>
 #include <linux/locks.h>
 #include <linux/limits.h>
+#include <linux/config.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
+
+extern unsigned long prof_len;
 
 void proc_put_inode(struct inode *inode)
 {
@@ -41,6 +44,37 @@ static struct super_operations proc_sops = {
 	NULL
 };
 
+
+static int parse_options(char *options,uid_t *uid,gid_t *gid)
+{
+	char *this_char,*value;
+
+	*uid = current->uid;
+	*gid = current->gid;
+	if (!options) return 1;
+	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+		if ((value = strchr(this_char,'=')) != NULL)
+			*value++ = 0;
+		if (!strcmp(this_char,"uid")) {
+			if (!value || !*value)
+				return 0;
+			*uid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else if (!strcmp(this_char,"gid")) {
+			if (!value || !*value)
+				return 0;
+			*gid = simple_strtoul(value,&value,0);
+			if (*value)
+				return 0;
+		}
+		else return 0;
+	}
+	return 1;
+}
+
+
 struct super_block *proc_read_super(struct super_block *s,void *data, 
 				    int silent)
 {
@@ -55,6 +89,7 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 		printk("get root inode failed\n");
 		return NULL;
 	}
+	parse_options(data, &s->s_mounted->i_uid, &s->s_mounted->i_gid);
 	return s;
 }
 
@@ -103,27 +138,54 @@ void proc_read_inode(struct inode * inode)
 		inode->i_op = &proc_root_inode_operations;
 		return;
 	}
-	if ((ino >= 128) && (ino <= 160)) { /* files within /proc/net */
+
+#ifdef CONFIG_IP_ACCT
+	/* this file may be opened R/W by root to reset the accounting */
+	if (ino == PROC_NET_IPACCT) {
+		inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+		inode->i_op = &proc_net_inode_operations;
+		return;
+	}
+#endif
+#ifdef CONFIG_IP_FIREWALL
+	/* these files may be opened R/W by root to reset the counters */
+	if ((ino == PROC_NET_IPFWFWD) || (ino == PROC_NET_IPFWBLK)) {
+		inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+		inode->i_op = &proc_net_inode_operations;
+		return;
+	}
+#endif
+
+	/* other files within /proc/net */
+	if ((ino >= PROC_NET_UNIX) && (ino < PROC_NET_LAST)) {
 		inode->i_mode = S_IFREG | S_IRUGO;
 		inode->i_op = &proc_net_inode_operations;
 		return;
 	}
+
 	if (!pid) {
 		switch (ino) {
-			case 5:
-				inode->i_mode = S_IFREG | S_IRUGO;
+			case PROC_KMSG:
+				inode->i_mode = S_IFREG | S_IRUSR;
 				inode->i_op = &proc_kmsg_inode_operations;
 				break;
-			case 8: /* for the net directory */
+			case PROC_NET:
 				inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
 				inode->i_nlink = 2;
 				inode->i_op = &proc_net_inode_operations;
 				break;
-			case 14:
+			case PROC_KCORE:
 				inode->i_mode = S_IFREG | S_IRUSR;
-				inode->i_op = &proc_array_inode_operations;
+				inode->i_op = &proc_kcore_inode_operations;
 				inode->i_size = high_memory + PAGE_SIZE;
 				break;
+#ifdef CONFIG_PROFILE
+			case PROC_PROFILE:
+				inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
+				inode->i_op = &proc_profile_inode_operations;
+				inode->i_size = (1+prof_len) * sizeof(unsigned long);
+				break;
+#endif
 			default:
 				inode->i_mode = S_IFREG | S_IRUGO;
 				inode->i_op = &proc_array_inode_operations;
@@ -135,60 +197,54 @@ void proc_read_inode(struct inode * inode)
 	inode->i_uid = p->euid;
 	inode->i_gid = p->egid;
 	switch (ino) {
-		case 2:
+		case PROC_PID_INO:
 			inode->i_nlink = 4;
 			inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
 			inode->i_op = &proc_base_inode_operations;
 			return;
-		case 3:
+		case PROC_PID_MEM:
 			inode->i_op = &proc_mem_inode_operations;
 			inode->i_mode = S_IFREG | S_IRUSR | S_IWUSR;
 			return;
-		case 4:
-		case 5:
-		case 6:
+		case PROC_PID_CWD:
+		case PROC_PID_ROOT:
+		case PROC_PID_EXE:
 			inode->i_op = &proc_link_inode_operations;
 			inode->i_size = 64;
 			inode->i_mode = S_IFLNK | S_IRWXU;
 			return;
-		case 7:
-		case 8:
+		case PROC_PID_FD:
 			inode->i_mode = S_IFDIR | S_IRUSR | S_IXUSR;
 			inode->i_op = &proc_fd_inode_operations;
 			inode->i_nlink = 2;
 			return;
-		case 9:
-		case 10:
-		case 11:
-		case 12:
-		case 15:
+		case PROC_PID_ENVIRON:
+			inode->i_mode = S_IFREG | S_IRUSR;
+			inode->i_op = &proc_array_inode_operations;
+			return;
+		case PROC_PID_CMDLINE:
+		case PROC_PID_STAT:
+		case PROC_PID_STATM:
 			inode->i_mode = S_IFREG | S_IRUGO;
 			inode->i_op = &proc_array_inode_operations;
 			return;
+		case PROC_PID_MAPS:
+			inode->i_mode = S_IFIFO | S_IRUGO;
+			inode->i_op = &proc_arraylong_inode_operations;
+			return;
 	}
 	switch (ino >> 8) {
-		case 1:
+		case PROC_PID_FD_DIR:
 			ino &= 0xff;
-			if (ino >= NR_OPEN || !p->filp[ino])
+			if (ino >= NR_OPEN || !p->files->fd[ino])
 				return;
 			inode->i_op = &proc_link_inode_operations;
 			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
-			return;
-		case 2:
-			ino &= 0xff;
-			{
-				int j = 0;
-				struct vm_area_struct * mpnt;
-				for (mpnt = p->mmap ; mpnt ; mpnt = mpnt->vm_next)
-					if(mpnt->vm_inode)
-						j++;
-				if (ino >= j)
-					return;
-			}
-			inode->i_op = &proc_link_inode_operations;
-			inode->i_size = 64;
-			inode->i_mode = S_IFLNK | S_IRWXU;
+			inode->i_mode = S_IFLNK;
+			if (p->files->fd[ino]->f_mode & 1)
+				inode->i_mode |= S_IRUSR | S_IXUSR;
+			if (p->files->fd[ino]->f_mode & 2)
+				inode->i_mode |= S_IWUSR | S_IXUSR;
 			return;
 	}
 	return;

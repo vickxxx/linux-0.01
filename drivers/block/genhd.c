@@ -10,10 +10,10 @@
  *  in the early extended-partition checks and added DM partitions
  */
 
-#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/genhd.h>
 #include <linux/kernel.h>
+#include <linux/major.h>
 
 struct gendisk *gendisk_head = NULL;
 
@@ -22,6 +22,19 @@ extern int *blk_size[];
 extern void rd_load(void);
 extern int ramdisk_size;
 
+static char minor_name (struct gendisk *hd, int minor)
+{
+	char base_name = (hd->major == IDE1_MAJOR) ? 'c' : 'a';
+	return base_name + (minor >> hd->minor_shift);
+}
+
+static void add_partition (struct gendisk *hd, int minor, int start, int size)
+{
+	hd->part[minor].start_sect = start;
+	hd->part[minor].nr_sects   = size;
+	printk(" %s%c%d", hd->major_name, minor_name(hd, minor),
+		minor & ((1 << hd->minor_shift) - 1));
+}
 /*
  * Create devices for each logical partition in an extended partition.
  * The logical partitions form a linked list, with each entry being
@@ -52,21 +65,18 @@ static void extended_partition(struct gendisk *hd, int dev)
 	   * This block is from a device that we're about to stomp on.
 	   * So make sure nobody thinks this block is usable.
 	   */
-		bh->b_dirt=0;
-		bh->b_uptodate=0;
+		bh->b_dirt = 0;
+		bh->b_uptodate = 0;
+		bh->b_req = 0;
 		if (*(unsigned short *) (bh->b_data+510) == 0xAA55) {
 			p = (struct partition *) (0x1BE + bh->b_data);
 		/*
 		 * Process the first entry, which should be the real
 		 * data partition.
 		 */
-			if (p->sys_ind == EXTENDED_PARTITION ||
-			    !(hd->part[current_minor].nr_sects = p->nr_sects))
+			if (p->sys_ind == EXTENDED_PARTITION || !p->nr_sects)
 				goto done;  /* shouldn't happen */
-			hd->part[current_minor].start_sect = this_sector + p->start_sect;
-			printk(" %s%c%d", hd->major_name,
-				'a'+(current_minor >> hd->minor_shift),
-				mask & current_minor);
+			add_partition(hd, current_minor, this_sector+p->start_sect, p->nr_sects);
 			current_minor++;
 			p++;
 		/*
@@ -103,19 +113,28 @@ static void check_partition(struct gendisk *hd, unsigned int dev)
 		printk("Partition check:\n");
 	first_time = 0;
 	first_sector = hd->part[MINOR(dev)].start_sect;
+
+	/*
+	 * This is a kludge to allow the partition check to be
+	 * skipped for specific drives (ie. IDE cd-rom drives)
+	 */
+	if ((int)first_sector == -1) {
+		hd->part[MINOR(dev)].start_sect = 0;
+		return;
+	}
+
 	if (!(bh = bread(dev,0,1024))) {
 		printk("  unable to read partition table of device %04x\n",dev);
 		return;
 	}
-	printk("  %s%c:", hd->major_name, 'a'+(minor >> hd->minor_shift));
-	current_minor += 4;  /* first "extra" minor */
+	printk("  %s%c:", hd->major_name, minor_name(hd, minor));
+	current_minor += 4;  /* first "extra" minor (for extended partitions) */
 	if (*(unsigned short *) (bh->b_data+510) == 0xAA55) {
 		p = (struct partition *) (0x1BE + bh->b_data);
 		for (i=1 ; i<=4 ; minor++,i++,p++) {
-			if (!(hd->part[minor].nr_sects = p->nr_sects))
+			if (!p->nr_sects)
 				continue;
-			hd->part[minor].start_sect = first_sector + p->start_sect;
-			printk(" %s%c%d", hd->major_name,'a'+(minor >> hd->minor_shift), i);
+			add_partition(hd, minor, first_sector+p->start_sect, p->nr_sects);
 			if ((current_minor & 0x3f) >= 60)
 				continue;
 			if (p->sys_ind == EXTENDED_PARTITION) {
@@ -135,11 +154,7 @@ static void check_partition(struct gendisk *hd, unsigned int dev)
 					break;
 				if (!(p->start_sect && p->nr_sects))
 					continue;
-				hd->part[current_minor].start_sect = p->start_sect;
-				hd->part[current_minor].nr_sects = p->nr_sects;
-				printk(" %s%c%d", hd->major_name,
-					'a'+(current_minor >> hd->minor_shift),
-					current_minor & mask);
+				add_partition(hd, current_minor, p->start_sect, p->nr_sects);
 			}
 		}
 	} else
@@ -193,16 +208,10 @@ static void setup_dev(struct gendisk *dev)
 	blk_size[dev->major] = dev->sizes;
 }
 	
-/* This may be used only once, enforced by 'static int callable' */
-asmlinkage int sys_setup(void * BIOS)
+void device_setup(void)
 {
-	static int callable = 1;
 	struct gendisk *p;
 	int nr=0;
-
-	if (!callable)
-		return -1;
-	callable = 0;
 
 	for (p = gendisk_head ; p ; p=p->next) {
 		setup_dev(p);
@@ -211,6 +220,4 @@ asmlinkage int sys_setup(void * BIOS)
 		
 	if (ramdisk_size)
 		rd_load();
-	mount_root();
-	return (0);
 }

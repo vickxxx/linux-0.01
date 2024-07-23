@@ -22,15 +22,7 @@
 
 #define NFS_READDIR_CACHE_SIZE		64
 
-/*
- * WARNING!  The I/O buffer size cannot be bigger than about 3900 for now.
- * It needs to fit inside a 4096-byte page and leave room for the RPC and
- * NFS headers.  But it ought to at least be a multiple of 512 and probably
- * should be a power of 2.  I don't think Linux TCP/IP can handle more than
- * about 1800 yet.
- */
-
-#define NFS_MAX_FILE_IO_BUFFER_SIZE	(7*512)
+#define NFS_MAX_FILE_IO_BUFFER_SIZE	16384
 #define NFS_DEF_FILE_IO_BUFFER_SIZE	1024
 
 /*
@@ -42,7 +34,7 @@
 
 /*
  * Size of the lookup cache in units of number of entries cached.
- * It is better not to make this too large although the optimimum
+ * It is better not to make this too large although the optimum
  * depends on a usage and environment.
  */
 
@@ -52,6 +44,8 @@
 
 #define NFS_SERVER(inode)		(&(inode)->i_sb->u.nfs_sb.s_server)
 #define NFS_FH(inode)			(&(inode)->u.nfs_i.fhandle)
+
+#ifdef __KERNEL__
 
 /* linux/fs/nfs/proc.c */
 
@@ -63,10 +57,11 @@ extern int nfs_proc_lookup(struct nfs_server *server, struct nfs_fh *dir,
 			   const char *name, struct nfs_fh *fhandle,
 			   struct nfs_fattr *fattr);
 extern int nfs_proc_readlink(struct nfs_server *server, struct nfs_fh *fhandle,
-			     char *res);
+			int **p0, char **string, unsigned int *len,
+			unsigned int maxlen);
 extern int nfs_proc_read(struct nfs_server *server, struct nfs_fh *fhandle,
 			 int offset, int count, char *data,
-			 struct nfs_fattr *fattr);
+			 struct nfs_fattr *fattr, int fs);
 extern int nfs_proc_write(struct nfs_server *server, struct nfs_fh *fhandle,
 			  int offset, int count, char *data,
 			  struct nfs_fattr *fattr);
@@ -94,7 +89,7 @@ extern int nfs_proc_statfs(struct nfs_server *server, struct nfs_fh *fhandle,
 
 /* linux/fs/nfs/sock.c */
 
-extern int nfs_rpc_call(struct nfs_server *server, int *start, int *end);
+extern int nfs_rpc_call(struct nfs_server *server, int *start, int *end, int size);
 
 /* linux/fs/nfs/inode.c */
 
@@ -118,7 +113,8 @@ extern struct inode_operations nfs_symlink_inode_operations;
 
 /* linux/fs/nfs/mmap.c */
 
-extern int nfs_mmap(struct inode * inode, struct file * file,
-               unsigned long addr, size_t len, int prot, unsigned long off);
+extern int nfs_mmap(struct inode * inode, struct file * file, struct vm_area_struct * vma);
+
+#endif /* __KERNEL__ */
 
 #endif

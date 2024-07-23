@@ -1,13 +1,16 @@
 /* 3c507.c: An EtherLink16 device driver for Linux. */
 /*
-	Written 1993 by Donald Becker.
-	Copyright 1993 United States Government as represented by the Director,
-	National Security Agency.  This software may only be used and distributed
-	according to the terms of the GNU Public License as modified by SRC,
-	incorported herein by reference.
+	Written 1993,1994 by Donald Becker.
 
-	The author may be reached as becker@super.org or
-	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+	Copyright 1993 United States Government as represented by the
+	Director, National Security Agency.
+
+	This software may be used and distributed according to the terms
+	of the GNU Public License, incorporated herein by reference.
+
+	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
+	Center of Excellence in Space Data and Information Sciences
+	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
 
 	Thanks go to jennings@Montrouge.SMR.slb.com ( Patrick Jennings)
 	and jrs@world.std.com (Rick Sladkey) for testing and bugfixes.
@@ -21,7 +24,7 @@
 */
 
 static char *version =
-	"3c507.c:v0.99-15f 2/17/94 Donald Becker (becker@super.org)\n";
+	"3c507.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/config.h>
 
@@ -29,11 +32,11 @@ static char *version =
   Sources:
 	This driver wouldn't have been written with the availability of the
 	Crynwr driver source code.	It provided a known-working implementation
-	that filled in the gaping holes of the Intel documention.  Three cheers
+	that filled in the gaping holes of the Intel documentation.  Three cheers
 	for Russ Nelson.
 
-	Intel Microcommunications Databook, Vol. 1, 1990. It provides just enough
-	info that the casual reader might think that it documents the i82586.
+	Intel Microcommunications Databook, Vol. 1, 1990.  It provides just enough
+	info that the casual reader might think that it documents the i82586 :-<.
 */
 
 #include <linux/kernel.h>
@@ -44,24 +47,21 @@ static char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
+#include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <errno.h>
-#include <memory.h>
+#include <linux/errno.h>
 
-#include "dev.h"
-#include "eth.h"
-#include "skbuff.h"
-#include "arp.h"
-
-#ifndef HAVE_ALLOC_SKB
-#define alloc_skb(size, priority) (struct sk_buff *) kmalloc(size,priority)
-#define kfree_skbmem(addr, size) kfree_s(addr,size);
-#else
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 #include <linux/malloc.h>
-#endif
+
+extern struct device *init_etherdev(struct device *dev, int sizeof_private,
+									unsigned long *mem_startp);
+
 
 /* use 0 for production, 1 for verification, 2..7 for debug */
 #ifndef NET_DEBUG
@@ -69,14 +69,18 @@ static char *version =
 #endif
 static unsigned int net_debug = NET_DEBUG;
 
+/* A zero-terminated list of common I/O addresses to be probed. */
+static unsigned int netcard_portlist[] =
+	{ 0x300, 0x320, 0x340, 0x280, 0};
+
 /*
   			Details of the i82586.
 
    You'll really need the databook to understand the details of this part,
-   but the outline is that the i82586 has two seperate processing units.
+   but the outline is that the i82586 has two separate processing units.
    Both are started from a list of three configuration tables, of which only
    the last, the System Control Block (SCB), is used after reset-time.  The SCB
-   has the following fileds:
+   has the following fields:
 		Status word
 		Command word
 		Tx/Command block addr.
@@ -137,6 +141,7 @@ struct net_local {
 #define ROM_CONFIG	13
 #define MEM_CONFIG	14
 #define IRQ_CONFIG	15
+#define EL16_IO_EXTENT 16
 
 /* The ID port is used at boot-time to locate the ethercard. */
 #define ID_PORT		0x100
@@ -149,7 +154,7 @@ struct net_local {
 
 /*  Since the 3c507 maps the shared memory window so that the last byte is
 	at 82586 address FFFF, the first byte is at 82586 address 0, 16K, 32K, or
-	48K cooresponding to window sizes of 64K, 48K, 32K and 16K respectively. 
+	48K corresponding to window sizes of 64K, 48K, 32K and 16K respectively. 
 	We can account for this be setting the 'SBC Base' entry in the ISCP table
 	below for all the 16 bit offset addresses, and also adding the 'SCB Base'
 	value to all 24 bit physical addresses (in the SCP table and the TX and RX
@@ -274,10 +279,10 @@ unsigned short init_words[] = {
 
 extern int el16_probe(struct device *dev);	/* Called from Space.c */
 
-static int	el16_probe1(struct device *dev, short ioaddr);
+static int	el16_probe1(struct device *dev, int ioaddr);
 static int	el16_open(struct device *dev);
 static int	el16_send_packet(struct sk_buff *skb, struct device *dev);
-static void	el16_interrupt(int reg_ptr);
+static void	el16_interrupt(int irq, struct pt_regs *regs);
 static void el16_rx(struct device *dev);
 static int	el16_close(struct device *dev);
 static struct enet_statistics *el16_get_stats(struct device *dev);
@@ -286,79 +291,86 @@ static void hardware_send_packet(struct device *dev, void *buf, short length);
 void init_82586_mem(struct device *dev);
 
 
+#ifdef HAVE_DEVLIST
+struct netdev_entry netcard_drv =
+{"3c507", el16_probe1, EL16_IO_EXTENT, netcard_portlist};
+#endif
+
 /* Check for a network adaptor of this type, and return '0' iff one exists.
 	If dev->base_addr == 0, probe all likely locations.
 	If dev->base_addr == 1, always return failure.
-	If dev->base_addr == 2, (detachable devices only) alloate space for the
+	If dev->base_addr == 2, (detachable devices only) allocate space for the
 	device and return success.
 	*/
 int
 el16_probe(struct device *dev)
 {
-	/* Don't probe all settable addresses, 0x[23][0-F]0, just common ones. */
-	int *port, ports[] = {0x300, 0x320, 0x340, 0x280, 0};
-	int base_addr = dev->base_addr;
-	ushort lrs_state = 0xff, i;
+	int base_addr = dev ? dev->base_addr : 0;
+	int i;
 
 	if (base_addr > 0x1ff)	/* Check a single specified location. */
 		return el16_probe1(dev, base_addr);
-	else if (base_addr > 0)
+	else if (base_addr != 0)
 		return ENXIO;		/* Don't probe at all. */
 
-	/* Send the ID sequence to the ID_PORT to enable the board. */
-	outb(0x00, ID_PORT);
-	for(i = 0; i < 255; i++) {
-		outb(lrs_state, ID_PORT);
-		lrs_state <<= 1;
-		if (lrs_state & 0x100)
-			lrs_state ^= 0xe7;
-	}
-	outb(0x00, ID_PORT);
-
-	for (port = &ports[0]; *port; port++) {
-		short ioaddr = *port;
-#if 0
-		/* This is my original code. */
-		if (inb(ioaddr) == '*' && inb(ioaddr+1) == '3'
-			&& inb(ioaddr+2) == 'C' && inb(ioaddr+3) == 'O'
-			&& el16_probe1(dev, *port) == 0)
+	for (i = 0; netcard_portlist[i]; i++) {
+		int ioaddr = netcard_portlist[i];
+		if (check_region(ioaddr, EL16_IO_EXTENT))
+			continue;
+		if (el16_probe1(dev, ioaddr) == 0)
 			return 0;
-#else
-	/* This is code from jennings@Montrouge.SMR.slb.com, done so that
-	   the string can be printed out. */
-		char res[5];
-		res[0] = inb(ioaddr); res[1] = inb(ioaddr+1);
-		res[2] = inb(ioaddr+2); res[3] = inb(ioaddr+3);
-		res[4] = 0;
-		if (res[0] == '*' && res[1] == '3'
-			&& res[2] == 'C' && res[3] == 'O'
-			&& el16_probe1(dev, *port) == 0)
-		  return 0;
-#endif
 	}
 
 	return ENODEV;			/* ENODEV would be more accurate. */
 }
 
-int el16_probe1(struct device *dev, short ioaddr)
+int el16_probe1(struct device *dev, int ioaddr)
 {
+	static unsigned char init_ID_done = 0, version_printed = 0;
 	int i, irq, irqval;
+
+	if (init_ID_done == 0) {
+		ushort lrs_state = 0xff;
+		/* Send the ID sequence to the ID_PORT to enable the board(s). */
+		outb(0x00, ID_PORT);
+		for(i = 0; i < 255; i++) {
+			outb(lrs_state, ID_PORT);
+			lrs_state <<= 1;
+			if (lrs_state & 0x100)
+				lrs_state ^= 0xe7;
+		}
+		outb(0x00, ID_PORT);
+		init_ID_done = 1;
+	}
+
+	if (inb(ioaddr) == '*' && inb(ioaddr+1) == '3'
+		&& inb(ioaddr+2) == 'C' && inb(ioaddr+3) == 'O')
+		;
+	else
+		return ENODEV;
+
+	/* Allocate a new 'dev' if needed. */
+	if (dev == NULL)
+		dev = init_etherdev(0, sizeof(struct net_local), 0);
+
+	if (net_debug  &&  version_printed++ == 0)
+		printk(version);
 
 	printk("%s: 3c507 at %#x,", dev->name, ioaddr);
 
 	/* We should make a few more checks here, like the first three octets of
-	   the S.A. for the manufactor's code. */ 
+	   the S.A. for the manufacturer's code. */ 
 
 	irq = inb(ioaddr + IRQ_CONFIG) & 0x0f;
 
-	irqval = request_irq(irq, &el16_interrupt);
+	irqval = request_irq(irq, &el16_interrupt, 0, "3c507");
 	if (irqval) {
 		printk ("unable to get IRQ %d (irqval=%d).\n", irq, irqval);
 		return EAGAIN;
 	}
 	
 	/* We've committed to using the board, and can start filling in *dev. */
-	snarf_region(ioaddr, 16);
+	request_region(ioaddr, EL16_IO_EXTENT,"3c507");
 	dev->base_addr = ioaddr;
 
 	outb(0x01, ioaddr + MISC_CTRL);
@@ -401,7 +413,8 @@ int el16_probe1(struct device *dev, short ioaddr)
 		printk(version);
 
 	/* Initialize the device structure. */
-	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (dev->priv == NULL)
+		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
 	memset(dev->priv, 0, sizeof(struct net_local));
 
 	dev->open		= el16_open;
@@ -409,32 +422,7 @@ int el16_probe1(struct device *dev, short ioaddr)
 	dev->hard_start_xmit = el16_send_packet;
 	dev->get_stats	= el16_get_stats;
 
-	/* Fill in the fields of the device structure with ethernet-generic values.
-	   This should be in a common file instead of per-driver.  */
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		dev->buffs[i] = NULL;
-
-	dev->hard_header	= eth_header;
-	dev->add_arp	= eth_add_arp;
-	dev->queue_xmit = dev_queue_xmit;
-	dev->rebuild_header = eth_rebuild_header;
-	dev->type_trans = eth_type_trans;
-
-	dev->type		= ARPHRD_ETHER;
-	dev->hard_header_len = ETH_HLEN;
-	dev->mtu		= 1500; /* eth_mtu */
-	dev->addr_len	= ETH_ALEN;
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->broadcast[i]=0xff;
-	}
-
-	/* New-style flags. */
-	dev->flags		= IFF_BROADCAST;
-	dev->family		= AF_INET;
-	dev->pa_addr	= 0;
-	dev->pa_brdaddr = 0;
-	dev->pa_mask	= 0;
-	dev->pa_alen	= sizeof(unsigned long);
+	ether_setup(dev);	/* Generic ethernet behaviour */
 
 	return 0;
 }
@@ -496,15 +484,6 @@ el16_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 
-	/* For ethernet, fill in the header.  This should really be done by a
-	   higher level, rather than duplicated for each ethernet adaptor. */
-	if (!skb->arp  &&  dev->rebuild_header(skb->data, dev)) {
-		skb->dev = dev;
-		arp_queue (skb);
-		return 0;
-	}
-	skb->arp=1;
-
 	/* Block a timer-based transmit from overlapping. */
 	if (set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
@@ -520,8 +499,7 @@ el16_send_packet(struct sk_buff *skb, struct device *dev)
 		outb(0x84, ioaddr + MISC_CTRL);
 	}
 
-	if (skb->free)
-		kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb, FREE_WRITE);
 
 	/* You might need to clean up and record Tx statistics here. */
 
@@ -531,9 +509,8 @@ el16_send_packet(struct sk_buff *skb, struct device *dev)
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
 static void
-el16_interrupt(int reg_ptr)
+el16_interrupt(int irq, struct pt_regs *regs)
 {
-	int irq = -(((struct pt_regs *)reg_ptr)->orig_eax+2);
 	struct device *dev = (struct device *)(irq2dev_map[irq]);
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
@@ -571,7 +548,7 @@ el16_interrupt(int reg_ptr)
 		lp->stats.tx_packets++;
 		lp->stats.collisions += tx_status & 0xf;
 		dev->tbusy = 0;
-		mark_bh(INET_BH);		/* Inform upper layers. */
+		mark_bh(NET_BH);		/* Inform upper layers. */
 	  } else {
 		lp->stats.tx_errors++;
 		if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
@@ -855,35 +832,22 @@ el16_rx(struct device *dev)
 			if (frame_status & 0x0080) lp->stats.rx_length_errors++;
 		} else {
 			/* Malloc up new buffer. */
-			int sksize;
 			struct sk_buff *skb;
 
 			pkt_len &= 0x3fff;
-			sksize = sizeof(struct sk_buff) + pkt_len;
-			skb = alloc_skb(sksize, GFP_ATOMIC);
+			skb = alloc_skb(pkt_len, GFP_ATOMIC);
 			if (skb == NULL) {
 				printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
 				break;
 			}
-			skb->mem_len = sksize;
-			skb->mem_addr = skb;
 			skb->len = pkt_len;
 			skb->dev = dev;
 
 			/* 'skb->data' points to the start of sk_buff data area. */
 			memcpy(skb->data, data_frame + 5, pkt_len);
 		
-#ifdef HAVE_NETIF_RX
 			netif_rx(skb);
-#else
-			skb->lock = 0;
-			if (dev_rint((unsigned char*)skb, pkt_len, IN_SKBUFF, dev) != 0) {
-				kfree_skbmem(skb, sksize);
-				lp->stats.rx_dropped++;
-				break;
-			}
-#endif
 			lp->stats.rx_packets++;
 		}
 

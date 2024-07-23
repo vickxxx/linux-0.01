@@ -1,5 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 #include <asm/segment.h>
 #include <linux/errno.h>
@@ -14,23 +15,20 @@
 
 #define IOCTL_RETRIES 3
 /* The CDROM is fairly slow, so we need a little extra time */
-#define IOCTL_TIMEOUT 200
+/* In fact, it is very slow if it has to spin up first */
+#define IOCTL_TIMEOUT 3000
 
 extern int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg);
 
 static void sr_ioctl_done(Scsi_Cmnd * SCpnt)
 {
   struct request * req;
-  struct task_struct * p;
   
   req = &SCpnt->request;
   req->dev = 0xfffe; /* Busy, but indicate request done */
   
-  if ((p = req->waiting) != NULL) {
-    req->waiting = NULL;
-    p->state = TASK_RUNNING;
-    if (p->counter > current->counter)
-      need_resched = 1;
+  if (req->sem != NULL) {
+    up(req->sem);
   }
 }
 
@@ -43,15 +41,17 @@ static int do_ioctl(int target, unsigned char * sr_cmd, void * buffer, unsigned 
 	Scsi_Cmnd * SCpnt;
 	int result;
 
-	SCpnt = allocate_device(NULL, scsi_CDs[target].device->index, 1);
+	SCpnt = allocate_device(NULL, scsi_CDs[target].device, 1);
 	scsi_do_cmd(SCpnt,
 		    (void *) sr_cmd, buffer, buflength, sr_ioctl_done, 
 		    IOCTL_TIMEOUT, IOCTL_RETRIES);
 
 
 	if (SCpnt->request.dev != 0xfffe){
-	  SCpnt->request.waiting = current;
-	  current->state = TASK_UNINTERRUPTIBLE;
+	  struct semaphore sem = MUTEX_LOCKED;
+	  SCpnt->request.sem = &sem;
+	  down(&sem);
+	  /* Hmm.. Have to ask about this */
 	  while (SCpnt->request.dev != 0xfffe) schedule();
 	};
 
@@ -85,7 +85,7 @@ static int do_ioctl(int target, unsigned char * sr_cmd, void * buffer, unsigned 
 
 	result = SCpnt->result;
 	SCpnt->request.dev = -1; /* Deallocate */
-	wake_up(&scsi_devices[SCpnt->index].device_wait);
+	wake_up(&SCpnt->device->device_wait);
 	/* Wake up a process waiting for device*/
       	return result;
 }
@@ -98,7 +98,9 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 	int result, target, err;
 
 	target = MINOR(dev);
-	if (target >= NR_SR) return -ENXIO;
+
+	if (target >= sr_template.nr_dev ||
+	    !scsi_CDs[target].device) return -ENXIO;
 
 	switch (cmd) 
 		{
@@ -384,9 +386,64 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 			return -EINVAL;
 		case CDROMREADMODE1:
 			return -EINVAL;
+			
+		/* block-copy from ../block/sbpcd.c with some adjustments... */
+		case CDROMMULTISESSION: /* tell start-of-last-session to user */
+			{
+			  struct cdrom_multisession  ms_info;
+			  long                       lba;
+			  
+			  err = verify_area(VERIFY_READ, (void *) arg,
+					    sizeof(struct cdrom_multisession));
+			  if (err) return (err);
+			
+			  memcpy_fromfs(&ms_info, (void *) arg, sizeof(struct cdrom_multisession));
 
+			  if (ms_info.addr_format==CDROM_MSF) { /* MSF-bin requested */
+			    lba = scsi_CDs[target].mpcd_sector+CD_BLOCK_OFFSET;
+			    ms_info.addr.msf.minute = lba / (CD_SECS*CD_FRAMES);
+			    lba %= CD_SECS*CD_FRAMES;
+			    ms_info.addr.msf.second = lba / CD_FRAMES;
+			    ms_info.addr.msf.frame  = lba % CD_FRAMES;
+			  } else if (ms_info.addr_format==CDROM_LBA) /* lba requested */
+			    ms_info.addr.lba=scsi_CDs[target].mpcd_sector;
+			  else return (-EINVAL);
+			
+			  ms_info.xa_flag=scsi_CDs[target].xa_flags & 0x01;
+			 			  
+			  err=verify_area(VERIFY_WRITE,(void *) arg,
+					  sizeof(struct cdrom_multisession));
+			  if (err) return (err);
+
+			  memcpy_tofs((void *) arg, &ms_info, sizeof(struct cdrom_multisession));
+			  return (0);
+			}
+
+		case BLKRASET:
+			if(!suser())  return -EACCES;
+			if(!inode->i_rdev) return -EINVAL;
+			if(arg > 0xff) return -EINVAL;
+			read_ahead[MAJOR(inode->i_rdev)] = arg;
+			return 0;
 		RO_IOCTLS(dev,arg);
 		default:
 			return scsi_ioctl(scsi_CDs[target].device,cmd,(void *) arg);
 		}
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

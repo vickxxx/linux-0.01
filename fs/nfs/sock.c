@@ -4,9 +4,24 @@
  *  Copyright (C) 1992, 1993  Rick Sladkey
  *
  *  low-level nfs remote procedure call interface
+ *
+ * FIXES
+ *
+ * 2/7/94 James Bottomley and Jon Peatfield DAMTP, Cambridge University
+ *
+ * An xid mismatch no longer causes the request to be trashed.
+ *
+ * Peter Eriksson - incorrect XID used to confuse Linux
+ * Florian La Roche - use the correct max size, if reading a packet and
+ *                    also verify, if the whole packet has been read...
+ *                    more checks should be done in proc.c...
+ *
  */
 
-#include <linux/config.h>
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/sched.h>
 #include <linux/nfs_fs.h>
 #include <linux/errno.h>
@@ -15,9 +30,12 @@
 #include <asm/segment.h>
 #include <linux/in.h>
 #include <linux/net.h>
+#include <linux/mm.h>
 
-
-extern struct socket *socki_lookup(struct inode *inode);
+/* JEJB/JSP 2/7/94
+ * this must match the value of NFS_SLACK_SPACE in linux/fs/nfs/proc.c 
+ * ***FIXME*** should probably put this in nfs_fs.h */
+#define NFS_SLACK_SPACE 1024
 
 #define _S(nr) (1<<((nr)-1))
 
@@ -31,7 +49,7 @@ extern struct socket *socki_lookup(struct inode *inode);
  * to the server socket.
  */
 
-static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
+static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end, int size)
 {
 	struct file *file;
 	struct inode *inode;
@@ -51,13 +69,16 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 	int n;
 	int addrlen;
 	unsigned long old_mask;
+	/* JEJB/JSP 2/7/94
+	 * This is for a 4 byte recv of the xid only */
+	int recv_xid;
 
 	xid = start[0];
 	len = ((char *) end) - ((char *) start);
 	file = server->file;
 	inode = file->f_inode;
 	select = file->f_op->select;
-	sock = socki_lookup(inode);
+	sock = &inode->u.socket_i;
 	if (!sock) {
 		printk("nfs_rpc_call: socki_lookup failed\n");
 		return -EBADF;
@@ -92,8 +113,14 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 		current->state = TASK_INTERRUPTIBLE;
 		if (!select(inode, file, SEL_IN, &wait_table)
 		    && !select(inode, file, SEL_IN, NULL)) {
-			if (timeout > max_timeout)
-				timeout = max_timeout;
+			if (timeout > max_timeout) {
+			  /* JEJB/JSP 2/7/94
+			   * This is useful to see if the system is
+			   * hanging */
+			  printk("NFS max timeout reached on %s\n",
+				 server_name);
+			  timeout = max_timeout;
+			}
 			current->timeout = jiffies + timeout;
 			schedule();
 			remove_wait_queue(entry.wait_address, &entry.wait);
@@ -116,8 +143,8 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 				timeout = init_timeout;
 				init_timeout <<= 1;
 				if (!major_timeout_seen) {
-					printk("NFS server %s not responding, "
-						"still trying\n", server_name);
+				  printk("NFS server %s not responding, "
+					 "still trying\n", server_name);
 				}
 				major_timeout_seen = 1;
 				continue;
@@ -129,8 +156,13 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 			remove_wait_queue(entry.wait_address, &entry.wait);
 		current->state = TASK_RUNNING;
 		addrlen = 0;
-		result = sock->ops->recvfrom(sock, (void *) start, PAGE_SIZE, 1, 0,
-			NULL, &addrlen);
+		/* JEJB/JSP 2/7/94
+		 * Get the xid from the next packet using a peek, so keep it
+		 * on the recv queue.  If it is wrong, it will be some reply
+		 * we don't now need, so discard it */
+		result = sock->ops->recvfrom(sock, (void *)&recv_xid,
+					     sizeof(recv_xid), 1, MSG_PEEK,
+					     NULL, &addrlen);
 		if (result < 0) {
 			if (result == -EAGAIN) {
 #if 0
@@ -150,14 +182,39 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 			}
 			break;
 		}
-		if (*start == xid) {
+		if (recv_xid == xid) {
 			if (major_timeout_seen)
 				printk("NFS server %s OK\n", server_name);
 			break;
 		}
+		/* JEJB/JSP 2/7/94
+		 * we have xid mismatch, so discard the packet and start
+		 * again.  What a hack! but I can't call recvfrom with
+		 * a null buffer yet. */
+		(void)sock->ops->recvfrom(sock, (void *)&recv_xid,
+					  sizeof(recv_xid), 1, 0, NULL,
+					  &addrlen);
 #if 0
 		printk("nfs_rpc_call: XID mismatch\n");
 #endif
+		goto re_select;
+	}
+	/* JEJB/JSP 2/7/94
+	 *
+	 * we have the correct xid, so read into the correct place and
+	 * return it
+	 *
+	 */
+	result=sock->ops->recvfrom(sock, (void *)start, 
+				  size + 1024, 1, 0, NULL,
+			/* Here is NFS_SLACK_SPACE..., hack */
+				  &addrlen);
+	if (result < 0) {
+		printk("NFS: notice message: result=%d\n", result);
+	} else if (result < addrlen) {
+		printk("NFS: just caught a too small read memory size..., email to NET channel\n");
+		printk("NFS: result=%d,addrlen=%d\n", result, addrlen);
+		result = -EIO;
 	}
 	current->blocked = old_mask;
 	set_fs(fs);
@@ -165,19 +222,19 @@ static int do_nfs_rpc_call(struct nfs_server *server, int *start, int *end)
 }
 
 /*
- * For now we lock out other simulaneous nfs calls for the same filesytem
+ * For now we lock out other simultaneous nfs calls for the same filesystem
  * because we are single-threaded and don't want to get mismatched
  * RPC replies.
  */
 
-int nfs_rpc_call(struct nfs_server *server, int *start, int *end)
+int nfs_rpc_call(struct nfs_server *server, int *start, int *end, int size)
 {
 	int result;
 
 	while (server->lock)
 		sleep_on(&server->wait);
 	server->lock = 1;
-	result = do_nfs_rpc_call(server, start, end);
+	result = do_nfs_rpc_call(server, start, end, size);
 	server->lock = 0;
 	wake_up(&server->wait);
 	return result;

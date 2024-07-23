@@ -28,6 +28,7 @@
 #include <linux/busmouse.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/mm.h>
 
 #include <asm/io.h>
 #include <asm/segment.h>
@@ -43,7 +44,7 @@ void bmouse_setup(char *str, int *ints)
 		mouse_irq=ints[1];
 }
 
-static void mouse_interrupt(int unused)
+static void mouse_interrupt(int irq, struct pt_regs *regs)
 {
 	char dx, dy;
 	unsigned char buttons;
@@ -112,7 +113,7 @@ static int open_mouse(struct inode * inode, struct file * file)
 	mouse.dx = 0;
 	mouse.dy = 0;
 	mouse.buttons = 0x87;
-	if (request_irq(mouse_irq, mouse_interrupt))
+	if (request_irq(mouse_irq, mouse_interrupt, 0, "Busmouse"))
 		return -EBUSY;
 	mouse.active = 1;
 	MSE_INT_ON();
@@ -234,6 +235,7 @@ unsigned long bus_mouse_init(unsigned long kmem_start)
 	mouse.dx = 0;
 	mouse.dy = 0;
 	mouse.wait = NULL;
-	printk("Logitech Bus mouse detected and installed.\n");
+	printk("Logitech Bus mouse detected and installed with IRQ %d.\n",
+	       mouse_irq);
 	return kmem_start;
 }

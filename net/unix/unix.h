@@ -4,7 +4,7 @@
  *		BSD Socket interface as the means of communication with
  *		the user level.
  *
- *		This file descibes some things of the UNIX protocol family
+ *		This file describes some things of the UNIX protocol family
  *		module.  It is mainly used for the "proc" sub-module now,
  *		but it may be useful for cleaning up the UNIX module as a
  *		whole later.
@@ -43,10 +43,10 @@ struct unix_proto_data {
 	int		lock_flag;
 };
 
-extern struct unix_proto_data unix_datas[NSOCKETS];
+extern struct unix_proto_data unix_datas[NSOCKETS_UNIX];
 
 
-#define last_unix_data		(unix_datas + NSOCKETS - 1)
+#define last_unix_data		(unix_datas + NSOCKETS_UNIX - 1)
 
 
 #define UN_DATA(SOCK) 		((struct unix_proto_data *)(SOCK)->data)
@@ -66,4 +66,4 @@ extern struct unix_proto_data unix_datas[NSOCKETS];
 #endif	/* _LINUX_UN_H */
 
 
-extern void	unix_proto_init(struct ddi_proto *pro);
+extern void	unix_proto_init(struct net_proto *pro);

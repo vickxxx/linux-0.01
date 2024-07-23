@@ -52,21 +52,34 @@ struct inode_operations proc_root_inode_operations = {
 };
 
 static struct proc_dir_entry root_dir[] = {
-	{ 1,1,"." },
-	{ 1,2,".." },
-	{ 2,7,"loadavg" },
-	{ 3,6,"uptime" },
-	{ 4,7,"meminfo" },
-	{ 5,4,"kmsg" },
-	{ 6,7,"version" },
-	{ 7,4,"self" },	/* will change inode # */
-	{ 8,3,"net" },
-#ifdef CONFIG_DEBUG_MALLOC
-	{13,6,"malloc" },
+	{ PROC_ROOT_INO,	1, "." },
+	{ PROC_ROOT_INO,	2, ".." },
+	{ PROC_LOADAVG,		7, "loadavg" },
+	{ PROC_UPTIME,		6, "uptime" },
+	{ PROC_MEMINFO,		7, "meminfo" },
+	{ PROC_KMSG,		4, "kmsg" },
+	{ PROC_VERSION,		7, "version" },
+#ifdef CONFIG_PCI
+	{ PROC_PCI,             3, "pci"  },
 #endif
-	{14,5,"kcore" },
-   	{16,7,"modules" },
-   	{17,4,"stat" },
+	{ PROC_CPUINFO,		7, "cpuinfo" },
+	{ PROC_SELF,		4, "self" },	/* will change inode # */
+	{ PROC_NET,		3, "net" },
+#ifdef CONFIG_DEBUG_MALLOC
+	{ PROC_MALLOC,		6, "malloc" },
+#endif
+	{ PROC_KCORE,		5, "kcore" },
+   	{ PROC_MODULES,		7, "modules" },
+   	{ PROC_STAT,		4, "stat" },
+   	{ PROC_DEVICES,		7, "devices" },
+	{ PROC_INTERRUPTS,	10,"interrupts" },
+   	{ PROC_FILESYSTEMS,	11,"filesystems" },
+   	{ PROC_KSYMS,		5, "ksyms" },
+   	{ PROC_DMA,		3, "dma" },
+	{ PROC_IOPORTS,		7, "ioports"},
+#ifdef CONFIG_PROFILE
+	{ PROC_PROFILE,		7, "profile"},
+#endif
 };
 
 #define NR_ROOT_DIRENTRY ((sizeof (root_dir))/(sizeof (root_dir[0])))
@@ -89,11 +102,11 @@ static int proc_lookuproot(struct inode * dir,const char * name, int len,
 		/* nothing */;
 	if (i >= 0) {
 		ino = root_dir[i].low_ino;
-		if (ino == 1) {
+		if (ino == PROC_ROOT_INO) {
 			*result = dir;
 			return 0;
 		}
-		if (ino == 7) /* self modifying inode ... */
+		if (ino == PROC_SELF) /* self modifying inode ... */
 			ino = (current->pid << 16) + 2;
 	} else {
 		pid = 0;

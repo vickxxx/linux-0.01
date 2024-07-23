@@ -11,6 +11,10 @@
  *  Copyright (C) 1993  Bruno Haible
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -25,16 +29,11 @@
 static inline int namecompare(int len, int maxlen,
 	const char * name, const char * buffer)
 {
-	if (len >= maxlen || !buffer[len]) {
-		unsigned char same;
-		__asm__("repe ; cmpsb ; setz %0"
-			:"=q" (same)
-			:"S" ((long) name),"D" ((long) buffer),"c" (len)
-			:"cx","di","si");
-		return same;
-	}
-	/* if (len<maxlen && buffer[len]) then buffer is longer than name */
-	return 0;
+	if (len > maxlen)
+		return 0;
+	if (len < maxlen && buffer[len])
+		return 0;
+	return !memcmp(name, buffer, len);
 }
 
 /*
@@ -68,7 +67,6 @@ static struct buffer_head * sysv_find_entry(struct inode * dir,
 	struct super_block * sb;
 	unsigned long pos, block, offset; /* pos = block * block_size + offset */
 	struct buffer_head * bh;
-	char * bh_data;
 
 	*res_dir = NULL;
 	if (!dir)
@@ -83,7 +81,7 @@ static struct buffer_head * sysv_find_entry(struct inode * dir,
 	pos = block = offset = 0;
 	while (pos < dir->i_size) {
 		if (!bh) {
-			bh = sysv_file_bread(dir,block,0,&bh_data);
+			bh = sysv_file_bread(dir,block,0);
 			if (!bh) {
 				/* offset = 0; */ block++;
 				pos += sb->sv_block_size;
@@ -91,7 +89,7 @@ static struct buffer_head * sysv_find_entry(struct inode * dir,
 			}
 		}
 		if (sysv_match(namelen, name,
-			       *res_dir = (struct sysv_dir_entry *) (bh_data + offset) ))
+			       *res_dir = (struct sysv_dir_entry *) (bh->b_data + offset) ))
 			return bh;
 		pos += SYSV_DIRSIZE;
 		offset += SYSV_DIRSIZE;
@@ -153,7 +151,6 @@ static int sysv_add_entry(struct inode * dir,
 	int i;
 	unsigned long pos, block, offset; /* pos = block * block_size + offset */
 	struct buffer_head * bh;
-	char * bh_data;
 	struct sysv_dir_entry * de;
 
 	*res_buf = NULL;
@@ -172,11 +169,11 @@ static int sysv_add_entry(struct inode * dir,
 	pos = block = offset = 0;
 	while (1) {
 		if (!bh) {
-			bh = sysv_file_bread(dir,block,1,&bh_data);
+			bh = sysv_file_bread(dir,block,1);
 			if (!bh)
 				return -ENOSPC;
 		}
-		de = (struct sysv_dir_entry *) (bh_data + offset);
+		de = (struct sysv_dir_entry *) (bh->b_data + offset);
 		pos += SYSV_DIRSIZE;
 		offset += SYSV_DIRSIZE;
 		if (pos > dir->i_size) {
@@ -191,9 +188,10 @@ static int sysv_add_entry(struct inode * dir,
 			}
 		} else {
 			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
+			dir->i_dirt = 1;
 			for (i = 0; i < SYSV_NAMELEN ; i++)
 				de->name[i] = (i < namelen) ? name[i] : 0;
-			bh->b_dirt = 1;
+			mark_buffer_dirty(bh, 1);
 			*res_dir = de;
 			break;
 		}
@@ -223,10 +221,7 @@ int sysv_create(struct inode * dir,const char * name, int len, int mode,
 		iput(dir);
 		return -ENOSPC;
 	}
-	if (inode->i_sb->sv_block_size_ratio_bits == 0) /* block_size == BLOCK_SIZE ? */
-		inode->i_op = &sysv_file_inode_operations_with_bmap;
-	else
-		inode->i_op = &sysv_file_inode_operations;
+	inode->i_op = &sysv_file_inode_operations;
 	inode->i_mode = mode;
 	inode->i_dirt = 1;
 	error = sysv_add_entry(dir,name,len, &bh ,&de);
@@ -238,7 +233,7 @@ int sysv_create(struct inode * dir,const char * name, int len, int mode,
 		return error;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	*result = inode;
@@ -265,14 +260,11 @@ int sysv_mknod(struct inode * dir, const char * name, int len, int mode, int rde
 		iput(dir);
 		return -ENOSPC;
 	}
-	inode->i_uid = current->euid;
+	inode->i_uid = current->fsuid;
 	inode->i_mode = mode;
 	inode->i_op = NULL;
 	if (S_ISREG(inode->i_mode))
-		if (inode->i_sb->sv_block_size_ratio_bits == 0) /* block_size == BLOCK_SIZE ? */
-			inode->i_op = &sysv_file_inode_operations_with_bmap;
-		else
-			inode->i_op = &sysv_file_inode_operations;
+		inode->i_op = &sysv_file_inode_operations;
 	else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &sysv_dir_inode_operations;
 		if (dir->i_mode & S_ISGID)
@@ -298,7 +290,7 @@ int sysv_mknod(struct inode * dir, const char * name, int len, int mode, int rde
 		return error;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	iput(inode);
@@ -310,7 +302,6 @@ int sysv_mkdir(struct inode * dir, const char * name, int len, int mode)
 	int error;
 	struct inode * inode;
 	struct buffer_head * bh, *dir_block;
-	char * bh_data;
 	struct sysv_dir_entry * de;
 
 	if (!dir) {
@@ -334,7 +325,7 @@ int sysv_mkdir(struct inode * dir, const char * name, int len, int mode)
 	}
 	inode->i_op = &sysv_dir_inode_operations;
 	inode->i_size = 2 * SYSV_DIRSIZE;
-	dir_block = sysv_file_bread(inode,0,1,&bh_data);
+	dir_block = sysv_file_bread(inode,0,1);
 	if (!dir_block) {
 		iput(dir);
 		inode->i_nlink--;
@@ -342,16 +333,16 @@ int sysv_mkdir(struct inode * dir, const char * name, int len, int mode)
 		iput(inode);
 		return -ENOSPC;
 	}
-	de = (struct sysv_dir_entry *) (bh_data + 0*SYSV_DIRSIZE);
+	de = (struct sysv_dir_entry *) (dir_block->b_data + 0*SYSV_DIRSIZE);
 	de->inode = inode->i_ino;
 	strcpy(de->name,"."); /* rest of de->name is zero, see sysv_new_block */
-	de = (struct sysv_dir_entry *) (bh_data + 1*SYSV_DIRSIZE);
+	de = (struct sysv_dir_entry *) (dir_block->b_data + 1*SYSV_DIRSIZE);
 	de->inode = dir->i_ino;
 	strcpy(de->name,".."); /* rest of de->name is zero, see sysv_new_block */
 	inode->i_nlink = 2;
-	dir_block->b_dirt = 1;
+	mark_buffer_dirty(dir_block, 1);
 	brelse(dir_block);
-	inode->i_mode = S_IFDIR | (mode & 0777 & ~current->umask);
+	inode->i_mode = S_IFDIR | (mode & 0777 & ~current->fs->umask);
 	if (dir->i_mode & S_ISGID)
 		inode->i_mode |= S_ISGID;
 	inode->i_dirt = 1;
@@ -363,7 +354,7 @@ int sysv_mkdir(struct inode * dir, const char * name, int len, int mode)
 		return error;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	dir->i_nlink++;
 	dir->i_dirt = 1;
 	iput(dir);
@@ -380,7 +371,6 @@ static int empty_dir(struct inode * inode)
 	struct super_block * sb;
 	unsigned long pos, block, offset; /* pos = block * block_size + offset */
 	struct buffer_head * bh;
-	char * bh_data;
 	struct sysv_dir_entry * de;
 
 	if (!inode)
@@ -392,26 +382,26 @@ static int empty_dir(struct inode * inode)
 		goto bad_dir;
 	if (inode->i_size < pos)
 		goto bad_dir;
-	bh = sysv_file_bread(inode,0,0,&bh_data);
+	bh = sysv_file_bread(inode,0,0);
 	if (!bh)
 		goto bad_dir;
-	de = (struct sysv_dir_entry *) (bh_data + 0*SYSV_DIRSIZE);
+	de = (struct sysv_dir_entry *) (bh->b_data + 0*SYSV_DIRSIZE);
 	if (!de->inode || strcmp(de->name,"."))
 		goto bad_dir;
-	de = (struct sysv_dir_entry *) (bh_data + 1*SYSV_DIRSIZE);
+	de = (struct sysv_dir_entry *) (bh->b_data + 1*SYSV_DIRSIZE);
 	if (!de->inode || strcmp(de->name,".."))
 		goto bad_dir;
 	sb = inode->i_sb;
 	while (pos < inode->i_size) {
 		if (!bh) {
-			bh = sysv_file_bread(inode,block,0,&bh_data);
+			bh = sysv_file_bread(inode,block,0);
 			if (!bh) {
 				/* offset = 0; */ block++;
 				pos += sb->sv_block_size;
 				continue;
 			}
 		}
-		de = (struct sysv_dir_entry *) (bh_data + offset);
+		de = (struct sysv_dir_entry *) (bh->b_data + offset);
 		pos += SYSV_DIRSIZE;
 		offset += SYSV_DIRSIZE;
 		if (de->inode) {
@@ -447,8 +437,9 @@ int sysv_rmdir(struct inode * dir, const char * name, int len)
 	retval = -EPERM;
 	if (!(inode = iget(dir->i_sb, de->inode)))
 		goto end_rmdir;
-	if ((dir->i_mode & S_ISVTX) && current->euid &&
-	    inode->i_uid != current->euid)
+        if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+            current->fsuid != inode->i_uid &&
+            current->fsuid != dir->i_uid)
 		goto end_rmdir;
 	if (inode->i_dev != dir->i_dev)
 		goto end_rmdir;
@@ -473,7 +464,7 @@ int sysv_rmdir(struct inode * dir, const char * name, int len)
 	if (inode->i_nlink != 2)
 		printk("empty directory has nlink!=2 (%d)\n",inode->i_nlink);
 	de->inode = 0;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	inode->i_nlink=0;
 	inode->i_dirt=1;
 	dir->i_nlink--;
@@ -512,9 +503,9 @@ repeat:
 		schedule();
 		goto repeat;
 	}
-	if ((dir->i_mode & S_ISVTX) && !suser() &&
-	    current->euid != inode->i_uid &&
-	    current->euid != dir->i_uid)
+	if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+	    current->fsuid != inode->i_uid &&
+	    current->fsuid != dir->i_uid)
 		goto end_unlink;
 	if (de->inode != inode->i_ino) {
 		retval = -ENOENT;
@@ -526,7 +517,7 @@ repeat:
 		inode->i_nlink=1;
 	}
 	de->inode = 0;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_dirt = 1;
 	inode->i_nlink--;
@@ -557,7 +548,7 @@ int sysv_symlink(struct inode * dir, const char * name, int len, const char * sy
 	}
 	inode->i_mode = S_IFLNK | 0777;
 	inode->i_op = &sysv_symlink_inode_operations;
-	name_block = sysv_file_bread(inode,0,1,&name_block_data);
+	name_block = sysv_file_bread(inode,0,1);
 	if (!name_block) {
 		iput(dir);
 		inode->i_nlink--;
@@ -566,11 +557,12 @@ int sysv_symlink(struct inode * dir, const char * name, int len, const char * sy
 		return -ENOSPC;
 	}
 	sb = inode->i_sb;
+	name_block_data = name_block->b_data;
 	i = 0;
 	while (i < sb->sv_block_size_1 && (c = *(symname++)))
 		name_block_data[i++] = c;
 	name_block_data[i] = 0;
-	name_block->b_dirt = 1;
+	mark_buffer_dirty(name_block, 1);
 	brelse(name_block);
 	inode->i_size = i;
 	inode->i_dirt = 1;
@@ -592,7 +584,7 @@ int sysv_symlink(struct inode * dir, const char * name, int len, const char * sy
 		return i;
 	}
 	de->inode = inode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	iput(inode);
@@ -629,7 +621,7 @@ int sysv_link(struct inode * oldinode, struct inode * dir, const char * name, in
 		return error;
 	}
 	de->inode = oldinode->i_ino;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	iput(dir);
 	oldinode->i_nlink++;
@@ -682,7 +674,6 @@ static int do_sysv_rename(struct inode * old_dir, const char * old_name, int old
 {
 	struct inode * old_inode, * new_inode;
 	struct buffer_head * old_bh, * new_bh, * dir_bh;
-	char * dir_bh_data;
 	struct sysv_dir_entry * old_de, * new_de;
 	int retval;
 
@@ -707,8 +698,8 @@ start_up:
 		goto end_rename;
 	retval = -EPERM;
 	if ((old_dir->i_mode & S_ISVTX) && 
-	    current->euid != old_inode->i_uid &&
-	    current->euid != old_dir->i_uid && !suser())
+	    current->fsuid != old_inode->i_uid &&
+	    current->fsuid != old_dir->i_uid && !fsuser())
 		goto end_rename;
 	new_bh = sysv_find_entry(new_dir,new_name,new_len,&new_de);
 	if (new_bh) {
@@ -738,8 +729,8 @@ start_up:
 	}
 	retval = -EPERM;
 	if (new_inode && (new_dir->i_mode & S_ISVTX) && 
-	    current->euid != new_inode->i_uid &&
-	    current->euid != new_dir->i_uid && !suser())
+	    current->fsuid != new_inode->i_uid &&
+	    current->fsuid != new_dir->i_uid && !fsuser())
 		goto end_rename;
 	if (S_ISDIR(old_inode->i_mode)) {
 		retval = -ENOTDIR;
@@ -749,10 +740,10 @@ start_up:
 		if (subdir(new_dir, old_inode))
 			goto end_rename;
 		retval = -EIO;
-		dir_bh = sysv_file_bread(old_inode,0,0,&dir_bh_data);
+		dir_bh = sysv_file_bread(old_inode,0,0);
 		if (!dir_bh)
 			goto end_rename;
-		if (PARENT_INO(dir_bh_data) != old_dir->i_ino)
+		if (PARENT_INO(dir_bh->b_data) != old_dir->i_ino)
 			goto end_rename;
 		retval = -EMLINK;
 		if (!new_inode && new_dir->i_nlink >= new_dir->i_sb->sv_link_max)
@@ -782,11 +773,11 @@ start_up:
 		new_inode->i_ctime = CURRENT_TIME;
 		new_inode->i_dirt = 1;
 	}
-	old_bh->b_dirt = 1;
-	new_bh->b_dirt = 1;
+	mark_buffer_dirty(old_bh, 1);
+	mark_buffer_dirty(new_bh, 1);
 	if (dir_bh) {
-		PARENT_INO(dir_bh_data) = new_dir->i_ino;
-		dir_bh->b_dirt = 1;
+		PARENT_INO(dir_bh->b_data) = new_dir->i_ino;
+		mark_buffer_dirty(dir_bh, 1);
 		old_dir->i_nlink--;
 		old_dir->i_dirt = 1;
 		if (new_inode) {

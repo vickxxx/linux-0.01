@@ -25,15 +25,13 @@
  *		2 of the License, or (at your option) any later version.
  */
 #include <linux/config.h>
-#include <linux/ddi.h>
-#include "dev.h"
-
-#define LOOPBACK			/* always present, right?	*/
+#include <linux/netdevice.h>
+#include <linux/errno.h>
 
 #define	NEXT_DEV	NULL
 
 
-/* A unifed ethernet device probe.  This is the easiest way to have every
+/* A unified ethernet device probe.  This is the easiest way to have every
    ethernet adaptor have the name "eth[0123...]".
    */
 
@@ -42,21 +40,32 @@ extern int wd_probe(struct device *dev);
 extern int el2_probe(struct device *dev);
 extern int ne_probe(struct device *dev);
 extern int hp_probe(struct device *dev);
+extern int hp_plus_probe(struct device *dev);
 extern int znet_probe(struct device *);
 extern int express_probe(struct device *);
 extern int el3_probe(struct device *);
 extern int at1500_probe(struct device *);
 extern int at1700_probe(struct device *);
 extern int depca_probe(struct device *);
+extern int apricot_probe(struct device *);
+extern int ewrk3_probe(struct device *);
+extern int de4x5_probe(struct device *);
 extern int el1_probe(struct device *);
+#if	defined(CONFIG_WAVELAN)
+extern int wavelan_probe(struct device *);
+#endif	/* defined(CONFIG_WAVELAN) */
 extern int el16_probe(struct device *);
 extern int elplus_probe(struct device *);
 extern int ac3200_probe(struct device *);
 extern int e2100_probe(struct device *);
+extern int ni52_probe(struct device *);
+extern int ni65_probe(struct device *);
+extern int SK_init(struct device *);
 
-/* Detachable devices ("pocket adaptors" and special PCMCIA drivers). */
+/* Detachable devices ("pocket adaptors") */
 extern int atp_init(struct device *);
-extern int d_link_init(struct device *);
+extern int de600_probe(struct device *);
+extern int de620_probe(struct device *);
 
 static int
 ethif_probe(struct device *dev)
@@ -82,6 +91,9 @@ ethif_probe(struct device *dev)
 #if defined(CONFIG_HPLAN) || defined(HPLAN)
 	&& hp_probe(dev)
 #endif
+#if defined(CONFIG_HPLAN_PLUS)
+	&& hp_plus_probe(dev)
+#endif
 #ifdef CONFIG_AT1500
 	&& at1500_probe(dev)
 #endif
@@ -100,9 +112,21 @@ ethif_probe(struct device *dev)
 #ifdef CONFIG_DEPCA		/* DEC DEPCA */
 	&& depca_probe(dev)
 #endif
+#ifdef CONFIG_EWRK3             /* DEC EtherWORKS 3 */
+        && ewrk3_probe(dev)
+#endif
+#ifdef CONFIG_DE4X5             /* DEC DE425, DE434, DE435 adapters */
+        && de4x5_probe(dev)
+#endif
+#ifdef CONFIG_APRICOT		/* Apricot I82596 */
+	&& apricot_probe(dev)
+#endif
 #ifdef CONFIG_EL1		/* 3c501 */
 	&& el1_probe(dev)
 #endif
+#if	defined(CONFIG_WAVELAN)	/* WaveLAN */
+	&& wavelan_probe(dev)
+#endif	/* defined(CONFIG_WAVELAN) */
 #ifdef CONFIG_EL16		/* 3c507 */
 	&& el16_probe(dev)
 #endif
@@ -115,6 +139,21 @@ ethif_probe(struct device *dev)
 #ifdef CONFIG_E2100		/* Cabletron E21xx series. */
 	&& e2100_probe(dev)
 #endif
+#ifdef CONFIG_DE600		/* D-Link DE-600 adapter */
+	&& de600_probe(dev)
+#endif
+#ifdef CONFIG_DE620		/* D-Link DE-620 adapter */
+	&& de620_probe(dev)
+#endif
+#if defined(CONFIG_SK_G16)
+	&& SK_init(dev)
+#endif
+#ifdef CONFIG_NI52
+	&& ni52_probe(dev)
+#endif
+#ifdef CONFIG_NI65
+	&& ni65_probe(dev)
+#endif
 	&& 1 ) {
 	return 1;	/* -ENODEV or -EAGAIN would be more accurate. */
     }
@@ -122,13 +161,6 @@ ethif_probe(struct device *dev)
 }
 
 
-/* This remains seperate because it requires the addr and IRQ to be set. */
-#if defined(D_LINK) || defined(CONFIG_DE600)
-static struct device d_link_dev = {
-    "dl0", 0, 0, 0, 0, D_LINK_IO, D_LINK_IRQ, 0, 0, 0, NEXT_DEV, d_link_init };
-#   undef NEXT_DEV
-#   define NEXT_DEV	(&d_link_dev)
-#endif
 
 /* Run-time ATtachable (Pocket) devices have a different (not "eth#") name. */
 #ifdef CONFIG_ATP		/* AT-LAN-TEC (RealTek) pocket adaptor. */
@@ -176,6 +208,25 @@ static struct device eth0_dev = {
 
 #if defined(SLIP) || defined(CONFIG_SLIP)
     extern int slip_init(struct device *);
+    
+#ifdef SL_SLIP_LOTS
+
+    static struct device slip15_dev={"sl15",0,0,0,0,15,0,0,0,0,NEXT_DEV,slip_init};
+    static struct device slip14_dev={"sl14",0,0,0,0,14,0,0,0,0,&slip15_dev,slip_init};
+    static struct device slip13_dev={"sl13",0,0,0,0,13,0,0,0,0,&slip14_dev,slip_init};
+    static struct device slip12_dev={"sl12",0,0,0,0,12,0,0,0,0,&slip13_dev,slip_init};
+    static struct device slip11_dev={"sl11",0,0,0,0,11,0,0,0,0,&slip12_dev,slip_init};
+    static struct device slip10_dev={"sl10",0,0,0,0,10,0,0,0,0,&slip11_dev,slip_init};
+    static struct device slip9_dev={"sl9",0,0,0,0,9,0,0,0,0,&slip10_dev,slip_init};
+    static struct device slip8_dev={"sl8",0,0,0,0,8,0,0,0,0,&slip9_dev,slip_init};
+    static struct device slip7_dev={"sl7",0,0,0,0,7,0,0,0,0,&slip8_dev,slip_init};
+    static struct device slip6_dev={"sl6",0,0,0,0,6,0,0,0,0,&slip7_dev,slip_init};
+    static struct device slip5_dev={"sl5",0,0,0,0,5,0,0,0,0,&slip6_dev,slip_init};
+    static struct device slip4_dev={"sl4",0,0,0,0,4,0,0,0,0,&slip5_dev,slip_init};
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&slip4_dev)
+#endif	/* SL_SLIP_LOTS */
+    
     static struct device slip3_dev = {
 	"sl3",			/* Internal SLIP driver, channel 3	*/
 	0x0,			/* recv memory end			*/
@@ -242,9 +293,24 @@ static struct device ppp0_dev = {
 #define NEXT_DEV (&ppp0_dev)
 #endif   /* PPP */
 
-#ifdef LOOPBACK
-    extern int loopback_init(struct device *dev);
-    static struct device loopback_dev = {
+#ifdef CONFIG_ARCNET
+    extern int arcnet_probe(struct device *dev);
+    static struct device arcnet_dev = {
+	"arc0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, arcnet_probe, };
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&arcnet_dev)
+#endif
+
+#ifdef CONFIG_DUMMY
+    extern int dummy_init(struct device *dev);
+    static struct device dummy_dev = {
+	"dummy", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, dummy_init, };
+#   undef	NEXT_DEV
+#   define	NEXT_DEV	(&dummy_dev)
+#endif
+
+extern int loopback_init(struct device *dev);
+struct device loopback_dev = {
 	"lo",			/* Software Loopback interface		*/
 	0x0,			/* recv memory end			*/
 	0x0,			/* recv memory start			*/
@@ -255,10 +321,6 @@ static struct device ppp0_dev = {
 	0, 0, 0,		/* flags				*/
 	NEXT_DEV,		/* next device				*/
 	loopback_init		/* loopback_init should set up the rest	*/
-    };
-#   undef	NEXT_DEV
-#   define	NEXT_DEV	(&loopback_dev)
-#endif
+};
 
-
-struct device *dev_base = NEXT_DEV;
+struct device *dev_base = &loopback_dev;

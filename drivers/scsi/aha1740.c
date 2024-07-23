@@ -31,6 +31,7 @@
 #include "../block/blk.h"
 #include "scsi.h"
 #include "hosts.h"
+#include "sd.h"
 
 #include "aha1740.h"
 
@@ -84,7 +85,7 @@ sense[0],sense[1],sense[2],sense[3]);
     {
 	if ( (status[1]&0x18) || status_word.sc ) /*Additional info available*/
 	{
-	    /* Use the supplied info for futher diagnostics */
+	    /* Use the supplied info for further diagnostics */
 	    switch ( status[2] )
 	    {
 	    case 0x12:
@@ -162,14 +163,8 @@ int aha1740_test_port(void)
     return 0;
 }
 
-const char *aha1740_info(void)
-{
-    static char buffer[] = "Adaptec 174x (EISA)";
-    return buffer;
-}
-
 /* A "high" level interrupt handler */
-void aha1740_intr_handle(int foo)
+void aha1740_intr_handle(int irq, struct pt_regs * regs)
 {
     void (*my_done)(Scsi_Cmnd *);
     int errstatus, adapstat;
@@ -195,7 +190,19 @@ void aha1740_intr_handle(int foo)
 					((ulong) inb(MBOXIN2) <<16) +
 					((ulong) inb(MBOXIN3) <<24) );
 	    outb(G2CNTRL_HRDY,G2CNTRL); /* Host Ready -> Mailbox in complete */
+	    if (!ecbptr)
+	    {
+		printk("Aha1740 null ecbptr in interrupt (%x,%x,%x,%d)\n",
+			inb(G2STAT),adapstat,inb(G2INTST),number_serviced++);
+		continue;
+	    }
 	    SCtmp = ecbptr->SCpnt;
+	    if (!SCtmp)
+	    {
+		printk("Aha1740 null SCtmp in interrupt (%x,%x,%x,%d)\n",
+			inb(G2STAT),adapstat,inb(G2INTST),number_serviced++);
+		continue;
+	    }
 	    if (SCtmp->host_scribble)
 		scsi_free(SCtmp->host_scribble, 512);
 	  /* Fetch the sense data, and tuck it away, in the required slot.  The
@@ -240,6 +247,7 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     unchar direction;
     unchar *cmd = (unchar *) SCpnt->cmnd;
     unchar target = SCpnt->target;
+    unsigned long flags;
     void *buff = SCpnt->request_buffer;
     int bufflen = SCpnt->request_bufflen;
     int ecbno;
@@ -251,7 +259,6 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
         if (bufflen != sizeof(SCpnt->sense_buffer))
 	{
 	    printk("Wrong buffer length supplied for request sense (%d)\n",bufflen);
-	    panic("aha1740.c");
         }
         SCpnt->result = 0;
         done(SCpnt); 
@@ -267,12 +274,13 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
         i = -1;
     printk("aha1740_queuecommand: dev %d cmd %02x pos %d len %d ", target, *cmd, i, bufflen);
     printk("scsi cmd:");
-    for (i = 0; i < (COMMAND_SIZE(*cmd)); i++) printk("%02x ", cmd[i]);
+    for (i = 0; i < SCpnt->cmd_len; i++) printk("%02x ", cmd[i]);
     printk("\n");
 #endif
 
     /* locate an available ecb */
 
+    save_flags(flags);
     cli();
     ecbno = aha1740_last_ecb_used + 1;		/* An optimization */
     if (ecbno >= AHA1740_ECBS) ecbno = 0;
@@ -290,13 +298,13 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     ecb[ecbno].cmdw = AHA1740CMD_INIT;	/* SCSI Initiator Command doubles as reserved flag */
 
     aha1740_last_ecb_used = ecbno;    
-    sti();
+    restore_flags(flags);
 
 #ifdef DEBUG
     printk("Sending command (%d %x)...",ecbno, done);
 #endif
 
-    ecb[ecbno].cdblen = COMMAND_SIZE(*cmd);	/* SCSI Command Descriptor Block Length */
+    ecb[ecbno].cdblen = SCpnt->cmd_len;	/* SCSI Command Descriptor Block Length */
 
     direction = 0;
     if (*cmd == READ_10 || *cmd == READ_6)
@@ -362,13 +370,14 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	  I when I wrote it, but the Adaptec Spec says the card is so fast,
 	  that this problem virtually never occurs so I've kept it.  We
           do printk a warning first, so that you'll know if it happens.
-	  In practive the only time we've seen this message is when some-
+	  In practice the only time we've seen this message is when some-
 	  thing else is in the driver was broken, like _makecode(), or
 	  when a scsi device hung the scsi bus.  Even under these conditions,
 	  The loop actually only cycled < 3 times (we instrumented it). */
         ulong adrs;
 
 	DEB(printk("aha1740[%d] critical section\n",ecbno));
+	save_flags(flags);
 	cli();
 	if ( ! (inb(G2STAT) & G2STAT_MBXOUT) )
 	{
@@ -388,7 +397,7 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	}
 	while ( inb(G2STAT) & G2STAT_BUSY );		/* And Again! */
 	outb(ATTN_START | (target & 7), ATTN);	/* Start it up */
-	sti();
+	restore_flags(flags);
 	DEB(printk("aha1740[%d] request queued.\n",ecbno));
     }
     else
@@ -425,7 +434,7 @@ void aha1740_getconfig(void)
   irq_level = intab [ inb(INTDEF)&0x7 ];
 }
 
-int aha1740_detect(int hostnum)
+int aha1740_detect(Scsi_Host_Template * tpnt)
 {
     memset(&ecb, 0, sizeof(struct ecb));
     DEB(printk("aha1740_detect: \n"));
@@ -457,12 +466,12 @@ int aha1740_detect(int hostnum)
 
     DEB(printk("aha1740_detect: enable interrupt channel %d\n", irq_level));
 
-    if (request_irq(irq_level,aha1740_intr_handle))
+    if (request_irq(irq_level,aha1740_intr_handle, 0, "aha1740"))
     {
         printk("Unable to allocate IRQ for adaptec controller.\n");
         return 0;
     }
-    snarf_region(base, 0x5c);  /* Reserve the space that we need to use */
+    request_region(base, 0x5c,"aha1740");  /* Reserve the space that we need to use */
     return 1;
 }
 
@@ -474,10 +483,10 @@ but it hasn't happened yet, and doing aborts brings the Adaptec to its
 knees.  I cannot (at this moment in time) think of any reason to reset the
 card once it's running.  So there. */
 
-int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
+int aha1740_abort(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_abort called\n"));
-    return 0;
+    return SCSI_ABORT_SNOOZE;
 }
 
 /* We do not implement a reset function here, but the upper level code assumes
@@ -487,12 +496,12 @@ int aha1740_abort(Scsi_Cmnd * SCpnt, int i)
 int aha1740_reset(Scsi_Cmnd * SCpnt)
 {
     DEB(printk("aha1740_reset called\n"));
-    if (SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-    return 0;
+    return SCSI_RESET_PUNT;
 }
 
-int aha1740_biosparam(int size, int dev, int* ip)
+int aha1740_biosparam(Disk * disk, int dev, int* ip)
 {
+  int size = disk->capacity;
 DEB(printk("aha1740_biosparam\n"));
   ip[0] = 64;
   ip[1] = 32;

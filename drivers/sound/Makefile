@@ -5,7 +5,7 @@
 #
 #
 
-VERSION		= 2.4
+VERSION		= 2.90-2
 TARGET_OS	= linux
 
 .c.s:
@@ -19,7 +19,8 @@ OBJS   = soundcard.o audio.o dmabuf.o sb_dsp.o dev_table.o \
 	 opl3.o sequencer.o midibuf.o sb_card.o pas2_card.o adlib_card.o \
 	 pas2_pcm.o pas2_mixer.o pas2_midi.o gus_card.o gus_wave.o mpu401.o \
 	 gus_midi.o gus_vol.o patmgr.o sb_mixer.o sb16_dsp.o sb_midi.o \
-	 sb16_midi.o sound_switch.o
+	 sb16_midi.o sound_switch.o midi_synth.o uart6850.o sound_timer.o \
+	 sys_timer.o ics2101.o ad1848.o pss.o
 
 all:	local.h sound.a
 
@@ -53,7 +54,11 @@ config: configure /usr/include/sys/soundcard.h
 	@echo \#define SOUND_CONFIG_DATE \"`date`\" >> local.h
 	@echo \#define SOUND_CONFIG_BY \"`whoami`\" >> local.h
 	@echo \#define SOUND_CONFIG_HOST \"`hostname`\" >> local.h
-	@echo \#define SOUND_CONFIG_DOMAIN \"`domainname`\" >> local.h
+	@if [ -x /bin/dnsdomainname ]; then \
+           echo \#define SOUND_CONFIG_DOMAIN \"`dnsdomainname`\"; \
+         else \
+           echo \#define SOUND_CONFIG_DOMAIN \"`domainname`\"; \
+         fi >> local.h
 
 clrconf:
 	rm -f local.h .depend
@@ -65,6 +70,8 @@ configure: configure.c /usr/include/sys/soundcard.h
 dep:
 	$(MAKE) /usr/include/sys/soundcard.h
 	$(CPP) -M *.c > .depend
+
+modules:
 
 #
 # include a dependency file if one exists

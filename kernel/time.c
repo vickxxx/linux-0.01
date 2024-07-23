@@ -14,30 +14,53 @@
  *      Created file with time related functions from sched.c and adjtimex() 
  * 08 Oct 93    Torsten Duwe
  *      adjtime interface update and CMOS clock write code
+ * 02 Jul 94	Alan Modra
+ *	fixed set_rtc_mmss, fixed time.year for >= 2000, new mktime
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
 
 #include <linux/mc146818rtc.h>
-#define RTC_ALWAYS_BCD 1
-
 #include <linux/timex.h>
-extern struct timeval xtime;
 
-#include <linux/mktime.h>
-extern long kernel_mktime(struct mktime * time);
+/* converts date to days since 1/1/1970
+ * assumes year,mon,day in normal date format
+ * ie. 1/1/1970 => year=1970, mon=1, day=1
+ *
+ * For the Julian calendar (which was used in Russia before 1917,
+ * Britain & colonies before 1752, anywhere else before 1582,
+ * and is still in use by some communities) leave out the
+ * -year/100+year/400 terms, and add 10.
+ *
+ * This algorithm was first published by Gauss (I think).
+ */
+static inline unsigned long mktime(unsigned int year, unsigned int mon,
+	unsigned int day, unsigned int hour,
+	unsigned int min, unsigned int sec)
+{
+	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
+		mon += 12;	/* Puts Feb last since it has leap day */
+		year -= 1;
+	}
+	return (((
+	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
+	      year*365 - 719499
+	    )*24 + hour /* now have hours */
+	   )*60 + min /* now have minutes */
+	  )*60 + sec; /* finally seconds */
+}
 
 void time_init(void)
 {
-	struct mktime time;
+	unsigned int year, mon, day, hour, min, sec;
 	int i;
 
 	/* checking for Update-In-Progress could be done more elegantly
@@ -53,25 +76,27 @@ void time_init(void)
 		if (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP))
 			break;
 	do { /* Isn't this overkill ? UIP above should guarantee consistency */
-		time.sec = CMOS_READ(RTC_SECONDS);
-		time.min = CMOS_READ(RTC_MINUTES);
-		time.hour = CMOS_READ(RTC_HOURS);
-		time.day = CMOS_READ(RTC_DAY_OF_MONTH);
-		time.mon = CMOS_READ(RTC_MONTH);
-		time.year = CMOS_READ(RTC_YEAR);
-	} while (time.sec != CMOS_READ(RTC_SECONDS));
+		sec = CMOS_READ(RTC_SECONDS);
+		min = CMOS_READ(RTC_MINUTES);
+		hour = CMOS_READ(RTC_HOURS);
+		day = CMOS_READ(RTC_DAY_OF_MONTH);
+		mon = CMOS_READ(RTC_MONTH);
+		year = CMOS_READ(RTC_YEAR);
+	} while (sec != CMOS_READ(RTC_SECONDS));
 	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
 	  {
-	    BCD_TO_BIN(time.sec);
-	    BCD_TO_BIN(time.min);
-	    BCD_TO_BIN(time.hour);
-	    BCD_TO_BIN(time.day);
-	    BCD_TO_BIN(time.mon);
-	    BCD_TO_BIN(time.year);
+	    BCD_TO_BIN(sec);
+	    BCD_TO_BIN(min);
+	    BCD_TO_BIN(hour);
+	    BCD_TO_BIN(day);
+	    BCD_TO_BIN(mon);
+	    BCD_TO_BIN(year);
 	  }
-	time.mon--;
-	xtime.tv_sec = kernel_mktime(&time);
-      }
+	if ((year += 1900) < 1970)
+		year += 100;
+	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
+	xtime.tv_usec = 0;
+}
 /* 
  * The timezone where the local system is located.  Used as a default by some
  * programs who obtain this value by using gettimeofday.
@@ -92,12 +117,19 @@ asmlinkage int sys_time(long * tloc)
 	return i;
 }
 
-asmlinkage int sys_stime(long * tptr)
+asmlinkage int sys_stime(unsigned long * tptr)
 {
+	int error;
+	unsigned long value;
+
 	if (!suser())
 		return -EPERM;
+	error = verify_area(VERIFY_READ, tptr, sizeof(*tptr));
+	if (error)
+		return error;
+	value = get_fs_long(tptr);
 	cli();
-	xtime.tv_sec = get_fs_long((unsigned long *) tptr);
+	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
 	time_status = TIME_BAD;
 	time_maxerror = 0x70000000;
@@ -164,22 +196,21 @@ static inline unsigned long do_gettimeoffset(void)
 /*
  * This version of gettimeofday has near microsecond resolution.
  */
-static inline void do_gettimeofday(struct timeval *tv)
+void do_gettimeofday(struct timeval *tv)
 {
-#ifdef __i386__
+	unsigned long flags;
+
+	save_flags(flags);
 	cli();
 	*tv = xtime;
+#if defined (__i386__) || defined (__mips__)
 	tv->tv_usec += do_gettimeoffset();
 	if (tv->tv_usec >= 1000000) {
 		tv->tv_usec -= 1000000;
 		tv->tv_sec++;
 	}
-	sti();
-#else /* not __i386__ */
-	cli();
-	*tv = xtime;
-	sti();
-#endif /* not __i386__ */
+#endif /* !defined (__i386__) && !defined (__mips__) */
+	restore_flags(flags);
 }
 
 asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
@@ -240,12 +271,25 @@ inline static void warp_clock(void)
 asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
 {
 	static int	firsttime = 1;
+	struct timeval	new_tv;
+	struct timezone new_tz;
 
 	if (!suser())
 		return -EPERM;
+	if (tv) {
+		int error = verify_area(VERIFY_READ, tv, sizeof(*tv));
+		if (error)
+			return error;
+		memcpy_fromfs(&new_tv, tv, sizeof(*tv));
+	}
 	if (tz) {
-		sys_tz.tz_minuteswest = get_fs_long((unsigned long *) tz);
-		sys_tz.tz_dsttime = get_fs_long(((unsigned long *) tz)+1);
+		int error = verify_area(VERIFY_READ, tz, sizeof(*tz));
+		if (error)
+			return error;
+		memcpy_fromfs(&new_tz, tz, sizeof(*tz));
+	}
+	if (tz) {
+		sys_tz = new_tz;
 		if (firsttime) {
 			firsttime = 0;
 			if (!tv)
@@ -253,11 +297,6 @@ asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
 		}
 	}
 	if (tv) {
-		int sec, usec;
-
-		sec = get_fs_long((unsigned long *)tv);
-		usec = get_fs_long(((unsigned long *)tv)+1);
-	
 		cli();
 		/* This is revolting. We need to set the xtime.tv_usec
 		 * correctly. However, the value in this location is
@@ -265,15 +304,14 @@ asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
 		 * Discover what correction gettimeofday
 		 * would have done, and then undo it!
 		 */
-		usec -= do_gettimeoffset();
+		new_tv.tv_usec -= do_gettimeoffset();
 
-		if (usec < 0)
-		{
-			usec += 1000000;
-			sec--;
+		if (new_tv.tv_usec < 0) {
+			new_tv.tv_usec += 1000000;
+			new_tv.tv_sec--;
 		}
-		xtime.tv_sec = sec;
-		xtime.tv_usec = usec;
+
+		xtime = new_tv;
 		time_status = TIME_BAD;
 		time_maxerror = 0x70000000;
 		time_esterror = 0x70000000;
@@ -310,7 +348,7 @@ asmlinkage int sys_adjtimex(struct timex *txc_p)
 	/* Now we validate the data before disabling interrupts
 	 */
 
-	if (txc.mode & ADJ_OFFSET)
+	if (txc.mode != ADJ_OFFSET_SINGLESHOT && (txc.mode & ADJ_OFFSET))
 	  /* Microsec field limited to -131000 .. 131000 usecs */
 	  if (txc.offset <= -(1 << (31 - SHIFT_UPDATE))
 	      || txc.offset >= (1 << (31 - SHIFT_UPDATE)))
@@ -403,8 +441,8 @@ asmlinkage int sys_adjtimex(struct timex *txc_p)
 int set_rtc_mmss(unsigned long nowtime)
 {
   int retval = 0;
-  short real_seconds = nowtime % 60, real_minutes = (nowtime / 60) % 60;
-  unsigned char save_control, save_freq_select, cmos_minutes;
+  int real_seconds, real_minutes, cmos_minutes;
+  unsigned char save_control, save_freq_select;
 
   save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
   CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
@@ -419,11 +457,15 @@ int set_rtc_mmss(unsigned long nowtime)
   /* since we're only adjusting minutes and seconds,
    * don't interfere with hour overflow. This avoids
    * messing with unknown time zones but requires your
-   * RTC not to be off by more than 30 minutes
+   * RTC not to be off by more than 15 minutes
    */
-  if (((cmos_minutes < real_minutes) ?
-       (real_minutes - cmos_minutes) :
-       (cmos_minutes - real_minutes)) < 30)
+  real_seconds = nowtime % 60;
+  real_minutes = nowtime / 60;
+  if (((abs(real_minutes - cmos_minutes) + 15)/30) & 1)
+    real_minutes += 30;		/* correct for half hour time zone */
+  real_minutes %= 60;
+
+  if (abs(real_minutes - cmos_minutes) < 30)
     {
       if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
 	{

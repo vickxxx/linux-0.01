@@ -5,10 +5,13 @@
  */
 
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
+
 #include <asm/segment.h>
 
 static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
@@ -25,6 +28,8 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -33,9 +38,10 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 
 static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 {
-	struct new_stat tmp = {0, };
+	struct new_stat tmp;
 	unsigned int blocks, indirect;
 
+	memset(&tmp, 0, sizeof(tmp));
 	tmp.st_dev = inode->i_dev;
 	tmp.st_ino = inode->i_ino;
 	tmp.st_mode = inode->i_mode;
@@ -44,6 +50,8 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -159,7 +167,7 @@ asmlinkage int sys_fstat(unsigned int fd, struct old_stat * statbuf)
 	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
 	if (error)
 		return error;
-	if (fd >= NR_OPEN || !(f=current->filp[fd]) || !(inode=f->f_inode))
+	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
 		return -EBADF;
 	cp_old_stat(inode,statbuf);
 	return 0;
@@ -174,7 +182,7 @@ asmlinkage int sys_newfstat(unsigned int fd, struct new_stat * statbuf)
 	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
 	if (error)
 		return error;
-	if (fd >= NR_OPEN || !(f=current->filp[fd]) || !(inode=f->f_inode))
+	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
 		return -EBADF;
 	cp_new_stat(inode,statbuf);
 	return 0;

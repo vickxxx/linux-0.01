@@ -36,22 +36,71 @@
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/segment.h>
 #include <linux/malloc.h>
-
-#include <asm/system.h>
-
 #include <linux/binfmts.h>
+#include <linux/personality.h>
 
-#include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/segment.h>
+#include <asm/pgtable.h>
+
+#include <linux/config.h>
 
 asmlinkage int sys_exit(int exit_code);
-asmlinkage int sys_close(unsigned fd);
-asmlinkage int sys_open(const char *, int, int);
 asmlinkage int sys_brk(unsigned long);
 
-extern void shm_exit (void);
+static int load_aout_binary(struct linux_binprm *, struct pt_regs * regs);
+static int load_aout_library(int fd);
+static int aout_core_dump(long signr, struct pt_regs * regs);
+
+extern void dump_thread(struct pt_regs *, struct user *);
+
+/*
+ * Here are the actual binaries that will be accepted:
+ * add more with "register_binfmt()"..
+ */
+extern struct linux_binfmt elf_format;
+
+static struct linux_binfmt aout_format = {
+#ifndef CONFIG_BINFMT_ELF
+ 	NULL, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#else
+ 	&elf_format, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#endif
+};
+
+static struct linux_binfmt *formats = &aout_format;
+
+int register_binfmt(struct linux_binfmt * fmt)
+{
+	struct linux_binfmt ** tmp = &formats;
+
+	if (!fmt)
+		return -EINVAL;
+	if (fmt->next)
+		return -EBUSY;
+	while (*tmp) {
+		if (fmt == *tmp)
+			return -EBUSY;
+		tmp = &(*tmp)->next;
+	}
+	*tmp = fmt;
+	return 0;	
+}
+
+int unregister_binfmt(struct linux_binfmt * fmt)
+{
+	struct linux_binfmt ** tmp = &formats;
+
+	while (*tmp) {
+		if (fmt == *tmp) {
+			*tmp = fmt->next;
+			return 0;
+		}
+		tmp = &(*tmp)->next;
+	}
+	return -EINVAL;
+}
 
 int open_inode(struct inode * inode, int mode)
 {
@@ -62,14 +111,16 @@ int open_inode(struct inode * inode, int mode)
 		return -EINVAL;
 	f = get_empty_filp();
 	if (!f)
-		return -EMFILE;
+		return -ENFILE;
 	fd = 0;
-	fpp = current->filp;
+	fpp = current->files->fd;
 	for (;;) {
 		if (!*fpp)
 			break;
-		if (++fd > NR_OPEN)
-			return -ENFILE;
+		if (++fd >= NR_OPEN) {
+			f->f_count--;
+			return -EMFILE;
+		}
 		fpp++;
 	}
 	*fpp = f;
@@ -113,15 +164,14 @@ if (file.f_op->lseek) { \
  * field, which also makes sure the core-dumps won't be recursive if the
  * dumping of the process results in another error..
  */
-int core_dump(long signr, struct pt_regs * regs)
+static int aout_core_dump(long signr, struct pt_regs * regs)
 {
 	struct inode * inode = NULL;
 	struct file file;
 	unsigned short fs;
 	int has_dumped = 0;
 	char corefile[6+sizeof(current->comm)];
-	int i;
-	register int dump_start, dump_size;
+	unsigned long dump_start, dump_size;
 	struct user dump;
 
 	if (!current->dumpable)
@@ -147,6 +197,8 @@ int core_dump(long signr, struct pt_regs * regs)
 		goto end_coredump;
 	if (!inode->i_op || !inode->i_op->default_file_ops)
 		goto end_coredump;
+	if (get_write_access(inode))
+		goto end_coredump;
 	file.f_mode = 3;
 	file.f_flags = 0;
 	file.f_count = 1;
@@ -156,48 +208,26 @@ int core_dump(long signr, struct pt_regs * regs)
 	file.f_op = inode->i_op->default_file_ops;
 	if (file.f_op->open)
 		if (file.f_op->open(inode,&file))
-			goto end_coredump;
+			goto done_coredump;
 	if (!file.f_op->write)
 		goto close_coredump;
 	has_dumped = 1;
-/* changed the size calculations - should hopefully work better. lbt */
-	dump.magic = CMAGIC;
-	dump.start_code = 0;
-	dump.start_stack = regs->esp & ~(PAGE_SIZE - 1);
-	dump.u_tsize = ((unsigned long) current->end_code) >> 12;
-	dump.u_dsize = ((unsigned long) (current->brk + (PAGE_SIZE-1))) >> 12;
-	dump.u_dsize -= dump.u_tsize;
-	dump.u_ssize = 0;
-	for(i=0; i<8; i++) dump.u_debugreg[i] = current->debugreg[i];  
-	if (dump.start_stack < TASK_SIZE)
-		dump.u_ssize = ((unsigned long) (TASK_SIZE - dump.start_stack)) >> 12;
+       	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
+	dump.u_ar0 = (struct pt_regs *)(((unsigned long)(&dump.regs)) - ((unsigned long)(&dump)));
+	dump.signal = signr;
+	dump_thread(regs, &dump);
+
 /* If the size of the dump file exceeds the rlimit, then see what would happen
    if we wrote the stack, but not the data area.  */
 	if ((dump.u_dsize+dump.u_ssize+1) * PAGE_SIZE >
 	    current->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_dsize = 0;
+
 /* Make sure we have enough room to write the stack and data areas. */
 	if ((dump.u_ssize+1) * PAGE_SIZE >
 	    current->rlim[RLIMIT_CORE].rlim_cur)
 		dump.u_ssize = 0;
-       	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
-	dump.u_ar0 = (struct pt_regs *)(((int)(&dump.regs)) -((int)(&dump)));
-	dump.signal = signr;
-	dump.regs = *regs;
-/* Flag indicating the math stuff is valid. We don't support this for the
-   soft-float routines yet */
-	if (hard_math) {
-		if ((dump.u_fpvalid = current->used_math) != 0) {
-			if (last_task_used_math == current)
-				__asm__("clts ; fnsave %0": :"m" (dump.i387));
-			else
-				memcpy(&dump.i387,&current->tss.i387.hard,sizeof(dump.i387));
-		}
-	} else {
-		/* we should dump the emulator state here, but we need to
-		   convert it into standard 387 format first.. */
-		dump.u_fpvalid = 0;
-	}
+
 	set_fs(KERNEL_DS);
 /* struct user */
 	DUMP_WRITE(&dump,sizeof(dump));
@@ -210,19 +240,21 @@ int core_dump(long signr, struct pt_regs * regs)
 		dump_start = dump.u_tsize << 12;
 		dump_size = dump.u_dsize << 12;
 		DUMP_WRITE(dump_start,dump_size);
-	};
+	}
 /* Now prepare to dump the stack area */
 	if (dump.u_ssize != 0) {
 		dump_start = dump.start_stack;
 		dump_size = dump.u_ssize << 12;
 		DUMP_WRITE(dump_start,dump_size);
-	};
+	}
 /* Finally dump the task struct.  Not be used by gdb, but could be useful */
 	set_fs(KERNEL_DS);
 	DUMP_WRITE(current,sizeof(*current));
 close_coredump:
 	if (file.f_op->release)
 		file.f_op->release(inode,&file);
+done_coredump:
+	put_write_access(inode);
 end_coredump:
 	set_fs(fs);
 	iput(inode);
@@ -244,17 +276,17 @@ asmlinkage int sys_uselib(const char * library)
 	fd = sys_open(library, 0, 0);
 	if (fd < 0)
 		return fd;
-	file = current->filp[fd];
+	file = current->files->fd[fd];
 	retval = -ENOEXEC;
 	if (file && file->f_inode && file->f_op && file->f_op->read) {
-		fmt = formats;
-		do {
+		for (fmt = formats ; fmt ; fmt = fmt->next) {
 			int (*fn)(int) = fmt->load_shlib;
 			if (!fn)
 				break;
 			retval = fn(fd);
-			fmt++;
-		} while (retval == -ENOEXEC);
+			if (retval != -ENOEXEC)
+				break;
+		}
 	}
 	sys_close(fd);
   	return retval;
@@ -276,13 +308,13 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		mpnt->vm_task = current;
 		mpnt->vm_start = PAGE_MASK & (unsigned long) p;
 		mpnt->vm_end = TASK_SIZE;
-		mpnt->vm_page_prot = PAGE_PRIVATE|PAGE_DIRTY;
-		mpnt->vm_share = NULL;
-		mpnt->vm_inode = NULL;
-		mpnt->vm_offset = 0;
+		mpnt->vm_page_prot = PAGE_COPY;
+		mpnt->vm_flags = VM_STACK_FLAGS;
 		mpnt->vm_ops = NULL;
+		mpnt->vm_offset = 0;
+		mpnt->vm_inode = NULL;
+		mpnt->vm_pte = 0;
 		insert_vm_struct(current, mpnt);
-		current->stk_vma = mpnt;
 	}
 	sp = (unsigned long *) (0xfffffffc & (unsigned long) p);
 	sp -= envc+1;
@@ -294,34 +326,44 @@ unsigned long * create_tables(char * p,int argc,int envc,int ibcs)
 		put_fs_long((unsigned long)argv,--sp);
 	}
 	put_fs_long((unsigned long)argc,--sp);
-	current->arg_start = (unsigned long) p;
+	current->mm->arg_start = (unsigned long) p;
 	while (argc-->0) {
 		put_fs_long((unsigned long) p,argv++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,argv);
-	current->arg_end = current->env_start = (unsigned long) p;
+	current->mm->arg_end = current->mm->env_start = (unsigned long) p;
 	while (envc-->0) {
 		put_fs_long((unsigned long) p,envp++);
 		while (get_fs_byte(p++)) /* nothing */ ;
 	}
 	put_fs_long(0,envp);
-	current->env_end = (unsigned long) p;
+	current->mm->env_end = (unsigned long) p;
 	return sp;
 }
 
 /*
  * count() counts the number of arguments/envelopes
+ *
+ * We also do some limited EFAULT checking: this isn't complete, but
+ * it does cover most cases. I'll have to do this correctly some day..
  */
 static int count(char ** argv)
 {
-	int i=0;
-	char ** tmp;
+	int error, i = 0;
+	char ** tmp, *p;
 
-	if ((tmp = argv) != 0)
-		while (get_fs_long((unsigned long *) (tmp++)))
+	if ((tmp = argv) != NULL) {
+		error = verify_area(VERIFY_READ, tmp, sizeof(char *));
+		if (error)
+			return error;
+		while ((p = (char *) get_fs_long((unsigned long *) (tmp++))) != NULL) {
 			i++;
-
+			error = verify_area(VERIFY_READ, p, 1);
+			if (error)
+				return error;
+		}
+	}
 	return i;
 }
 
@@ -339,7 +381,7 @@ static int count(char ** argv)
  *    2          kernel space  kernel space
  * 
  * We do this by playing games with the fs segment register.  Since it
- * it is expensive to load a segment register, we try to avoid calling
+ * is expensive to load a segment register, we try to avoid calling
  * set_fs() unless we absolutely have to.
  */
 unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
@@ -392,7 +434,7 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 	return p;
 }
 
-unsigned long change_ldt(unsigned long text_size,unsigned long * page)
+unsigned long setup_arg_pages(unsigned long text_size,unsigned long * page)
 {
 	unsigned long code_limit,data_limit,code_base,data_base;
 	int i;
@@ -400,12 +442,12 @@ unsigned long change_ldt(unsigned long text_size,unsigned long * page)
 	code_limit = TASK_SIZE;
 	data_limit = TASK_SIZE;
 	code_base = data_base = 0;
-	current->start_code = code_base;
+	current->mm->start_code = code_base;
 	data_base += data_limit;
 	for (i=MAX_ARG_PAGES-1 ; i>=0 ; i--) {
 		data_base -= PAGE_SIZE;
 		if (page[i]) {
-			current->rss++;
+			current->mm->rss++;
 			put_dirty_page(current,page[i],data_base);
 		}
 	}
@@ -466,7 +508,6 @@ void flush_old_exec(struct linux_binprm * bprm)
 	int i;
 	int ch;
 	char * name;
-	struct vm_area_struct * mpnt, *mpnt1;
 
 	current->dumpable = 1;
 	name = bprm->filename;
@@ -478,42 +519,14 @@ void flush_old_exec(struct linux_binprm * bprm)
 				current->comm[i++] = ch;
 	}
 	current->comm[i] = '\0';
-	if (current->shm)
-		shm_exit();
-	if (current->executable) {
-		iput(current->executable);
-		current->executable = NULL;
-	}
+
 	/* Release all of the old mmap stuff. */
+	exit_mmap(current);
 
-	mpnt = current->mmap;
-	current->mmap = NULL;
-	current->stk_vma = NULL;
-	while (mpnt) {
-		mpnt1 = mpnt->vm_next;
-		if (mpnt->vm_ops && mpnt->vm_ops->close)
-			mpnt->vm_ops->close(mpnt);
-		kfree(mpnt);
-		mpnt = mpnt1;
-	}
-
-	/* Flush the old ldt stuff... */
-	if (current->ldt) {
-		free_page((unsigned long) current->ldt);
-		current->ldt = NULL;
-		for (i=1 ; i<NR_TASKS ; i++) {
-			if (task[i] == current)  {
-				set_ldt_desc(gdt+(i<<1)+
-					     FIRST_LDT_ENTRY,&default_ldt, 1);
-				load_ldt(i);
-			}
-		}	
-	}
-
-	for (i=0 ; i<8 ; i++) current->debugreg[i] = 0;
+	flush_thread();
 
 	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
-	    !permission(bprm->inode,MAY_READ))
+	    permission(bprm->inode,MAY_READ))
 		current->dumpable = 0;
 	current->signal = 0;
 	for (i=0 ; i<32 ; i++) {
@@ -523,20 +536,19 @@ void flush_old_exec(struct linux_binprm * bprm)
 			current->sigaction[i].sa_handler = NULL;
 	}
 	for (i=0 ; i<NR_OPEN ; i++)
-		if (FD_ISSET(i,&current->close_on_exec))
+		if (FD_ISSET(i,&current->files->close_on_exec))
 			sys_close(i);
-	FD_ZERO(&current->close_on_exec);
+	FD_ZERO(&current->files->close_on_exec);
 	clear_page_tables(current);
 	if (last_task_used_math == current)
 		last_task_used_math = NULL;
 	current->used_math = 0;
-	current->elf_executable = 0;
 }
 
 /*
  * sys_execve() executes a new program.
  */
-static int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs)
+int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs)
 {
 	struct linux_binprm bprm;
 	struct linux_binfmt * fmt;
@@ -545,8 +557,6 @@ static int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs
 	int retval;
 	int sh_bang = 0;
 
-	if (regs->cs != USER_CS)
-		return -EINVAL;
 	bprm.p = PAGE_SIZE*MAX_ARG_PAGES-4;
 	for (i=0 ; i<MAX_ARG_PAGES ; i++)	/* clear page-table */
 		bprm.page[i] = 0;
@@ -554,8 +564,10 @@ static int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs
 	if (retval)
 		return retval;
 	bprm.filename = filename;
-	bprm.argc = count(argv);
-	bprm.envc = count(envp);
+	if ((bprm.argc = count(argv)) < 0)
+		return bprm.argc;
+	if ((bprm.envc = count(envp)) < 0)
+		return bprm.envc;
 	
 restart_interp:
 	if (!S_ISREG(bprm.inode->i_mode)) {	/* must be regular file */
@@ -572,8 +584,7 @@ restart_interp:
 	}
 	i = bprm.inode->i_mode;
 	if (IS_NOSUID(bprm.inode) && (((i & S_ISUID) && bprm.inode->i_uid != current->
-	    euid) || ((i & S_ISGID) && !in_group_p(bprm.inode->i_gid))) &&
-	    !suser()) {
+	    euid) || ((i & S_ISGID) && !in_group_p(bprm.inode->i_gid))) && !suser()) {
 		retval = -EPERM;
 		goto exec_error2;
 	}
@@ -585,13 +596,15 @@ restart_interp:
 		bprm.e_uid = (i & S_ISUID) ? bprm.inode->i_uid : current->euid;
 		bprm.e_gid = (i & S_ISGID) ? bprm.inode->i_gid : current->egid;
 	}
-	if (current->euid == bprm.inode->i_uid)
-		i >>= 6;
-	else if (in_group_p(bprm.inode->i_gid))
-		i >>= 3;
-	if (!(i & 1) &&
-	    !((bprm.inode->i_mode & 0111) && suser())) {
+	if ((retval = permission(bprm.inode, MAY_EXEC)) != 0)
+		goto exec_error2;
+	if (!(bprm.inode->i_mode & 0111) && fsuser()) {
 		retval = -EACCES;
+		goto exec_error2;
+	}
+	/* better not execute files which are being written to */
+	if (bprm.inode->i_wcount > 0) {
+		retval = -ETXTBSY;
 		goto exec_error2;
 	}
 	memset(bprm.buf,0,sizeof(bprm.buf));
@@ -684,19 +697,19 @@ restart_interp:
 	}
 
 	bprm.sh_bang = sh_bang;
-	fmt = formats;
-	do {
+	for (fmt = formats ; fmt ; fmt = fmt->next) {
 		int (*fn)(struct linux_binprm *, struct pt_regs *) = fmt->load_binary;
 		if (!fn)
 			break;
 		retval = fn(&bprm, regs);
-		if (retval == 0) {
+		if (retval >= 0) {
 			iput(bprm.inode);
 			current->did_exec = 1;
-			return 0;
+			return retval;
 		}
-		fmt++;
-	} while (retval == -ENOEXEC);
+		if (retval != -ENOEXEC)
+			break;
+	}
 exec_error2:
 	iput(bprm.inode);
 exec_error1:
@@ -705,66 +718,29 @@ exec_error1:
 	return(retval);
 }
 
-/*
- * sys_execve() executes a new program.
- */
-asmlinkage int sys_execve(struct pt_regs regs)
+static void set_brk(unsigned long start, unsigned long end)
 {
-	int error;
-	char * filename;
-
-	error = getname((char *) regs.ebx, &filename);
-	if (error)
-		return error;
-	error = do_execve(filename, (char **) regs.ecx, (char **) regs.edx, &regs);
-	putname(filename);
-	return error;
+	start = PAGE_ALIGN(start);
+	end = PAGE_ALIGN(end);
+	if (end <= start)
+		return;
+	do_mmap(NULL, start, end - start,
+		PROT_READ | PROT_WRITE | PROT_EXEC,
+		MAP_FIXED | MAP_PRIVATE, 0);
 }
-
-/*
- * These are  the prototypes for the  functions in the  dispatch table, as
- * well as the  dispatch  table itself.
- */
-
-extern int load_aout_binary(struct linux_binprm *,
-			    struct pt_regs * regs);
-extern int load_aout_library(int fd);
-
-#ifdef CONFIG_BINFMT_ELF
-extern int load_elf_binary(struct linux_binprm *,
-			    struct pt_regs * regs);
-extern int load_elf_library(int fd);
-#endif
-
-#ifdef CONFIG_BINFMT_COFF
-extern int load_coff_binary(struct linux_binprm *,
-			    struct pt_regs * regs);
-extern int load_coff_library(int fd);
-#endif
-
-/* Here are the actual binaries that will be accepted  */
-struct linux_binfmt formats[] = {
-	{load_aout_binary, load_aout_library},
-#ifdef CONFIG_BINFMT_ELF
-	{load_elf_binary, load_elf_library},
-#endif
-#ifdef CONFIG_BINFMT_COFF
-	{load_coff_binary, load_coff_library},
-#endif
-	{NULL, NULL}
-};
 
 /*
  * These are the functions used to load a.out style executables and shared
  * libraries.  There is no binary dependent code anywhere else.
  */
 
-int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct exec ex;
 	struct file * file;
 	int fd, error;
 	unsigned long p = bprm->p;
+	unsigned long fd_offset;
 
 	ex = *((struct exec *) bprm->buf);		/* exec-header */
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC && 
@@ -774,29 +750,31 @@ int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		return -ENOEXEC;
 	}
 
-	if (N_MAGIC(ex) == ZMAGIC &&
-	    (N_TXTOFF(ex) < bprm->inode->i_sb->s_blocksize)) {
-		printk("N_TXTOFF < BLOCK_SIZE. Please convert binary.");
+	current->personality = PER_LINUX;
+	fd_offset = N_TXTOFF(ex);
+	if (N_MAGIC(ex) == ZMAGIC && fd_offset != BLOCK_SIZE) {
+		printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
 		return -ENOEXEC;
 	}
 
-	if (N_TXTOFF(ex) != BLOCK_SIZE && N_MAGIC(ex) == ZMAGIC) {
-		printk("N_TXTOFF != BLOCK_SIZE. See a.out.h.");
+	if (N_MAGIC(ex) == ZMAGIC && ex.a_text &&
+	    (fd_offset < bprm->inode->i_sb->s_blocksize)) {
+		printk(KERN_NOTICE "N_TXTOFF < BLOCK_SIZE. Please convert binary.\n");
 		return -ENOEXEC;
 	}
-	
+
 	/* OK, This is the point of no return */
 	flush_old_exec(bprm);
 
-	current->end_code = N_TXTADDR(ex) + ex.a_text;
-	current->end_data = ex.a_data + current->end_code;
-	current->start_brk = current->brk = current->end_data;
-	current->start_code += N_TXTADDR(ex);
-	current->rss = 0;
-	current->suid = current->euid = bprm->e_uid;
-	current->mmap = NULL;
-	current->executable = NULL;  /* for OMAGIC files */
-	current->sgid = current->egid = bprm->e_gid;
+	current->mm->brk = ex.a_bss +
+		(current->mm->start_brk =
+		(current->mm->end_data = ex.a_data +
+		(current->mm->end_code = ex.a_text +
+		(current->mm->start_code = N_TXTADDR(ex)))));
+	current->mm->rss = 0;
+	current->mm->mmap = NULL;
+	current->suid = current->euid = current->fsuid = bprm->e_uid;
+	current->sgid = current->egid = current->fsgid = bprm->e_gid;
 	if (N_MAGIC(ex) == OMAGIC) {
 		do_mmap(NULL, 0, ex.a_text+ex.a_data,
 			PROT_READ|PROT_WRITE|PROT_EXEC,
@@ -804,59 +782,72 @@ int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		read_exec(bprm->inode, 32, (char *) 0, ex.a_text+ex.a_data);
 	} else {
 		if (ex.a_text & 0xfff || ex.a_data & 0xfff)
-			printk("%s: executable not page aligned\n", current->comm);
+			printk(KERN_NOTICE "executable not page aligned\n");
 		
 		fd = open_inode(bprm->inode, O_RDONLY);
 		
 		if (fd < 0)
 			return fd;
-		file = current->filp[fd];
+		file = current->files->fd[fd];
 		if (!file->f_op || !file->f_op->mmap) {
 			sys_close(fd);
 			do_mmap(NULL, 0, ex.a_text+ex.a_data,
 				PROT_READ|PROT_WRITE|PROT_EXEC,
 				MAP_FIXED|MAP_PRIVATE, 0);
-			read_exec(bprm->inode, N_TXTOFF(ex),
+			read_exec(bprm->inode, fd_offset,
 				  (char *) N_TXTADDR(ex), ex.a_text+ex.a_data);
 			goto beyond_if;
 		}
+
 		error = do_mmap(file, N_TXTADDR(ex), ex.a_text,
-				PROT_READ | PROT_EXEC,
-				MAP_FIXED | MAP_SHARED, N_TXTOFF(ex));
+			PROT_READ | PROT_EXEC,
+			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
+			fd_offset);
 
 		if (error != N_TXTADDR(ex)) {
 			sys_close(fd);
-			send_sig(SIGSEGV, current, 0);
-			return 0;
-		};
+			send_sig(SIGKILL, current, 0);
+			return error;
+		}
 		
  		error = do_mmap(file, N_TXTADDR(ex) + ex.a_text, ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
-				MAP_FIXED | MAP_PRIVATE, N_TXTOFF(ex) + ex.a_text);
+				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
+				fd_offset + ex.a_text);
 		sys_close(fd);
 		if (error != N_TXTADDR(ex) + ex.a_text) {
-			send_sig(SIGSEGV, current, 0);
-			return 0;
-		};
-		current->executable = bprm->inode;
-		bprm->inode->i_count++;
+			send_sig(SIGKILL, current, 0);
+			return error;
+		}
 	}
 beyond_if:
-	sys_brk(current->brk+ex.a_bss);
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)--;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)--;
+	current->exec_domain = lookup_exec_domain(current->personality);
+	current->binfmt = &aout_format;
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)++;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)++;
+
+	set_brk(current->mm->start_brk, current->mm->brk);
 	
-	p += change_ldt(ex.a_text,bprm->page);
+	p += setup_arg_pages(ex.a_text,bprm->page);
 	p -= MAX_ARG_PAGES*PAGE_SIZE;
-	p = (unsigned long) create_tables((char *)p,bprm->argc,bprm->envc,0);
-	current->start_stack = p;
-	regs->eip = ex.a_entry;		/* eip, magic happens :-) */
-	regs->esp = p;			/* stack pointer */
+	p = (unsigned long)create_tables((char *)p,
+					bprm->argc, bprm->envc,
+					current->personality != PER_LINUX);
+	current->mm->start_stack = p;
+	start_thread(regs, ex.a_entry, p);
 	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
 }
 
 
-int load_aout_library(int fd)
+static int load_aout_library(int fd)
 {
         struct file * file;
 	struct exec ex;
@@ -866,7 +857,7 @@ int load_aout_library(int fd)
 	unsigned int start_addr;
 	int error;
 	
-	file = current->filp[fd];
+	file = current->files->fd[fd];
 	inode = file->f_inode;
 	
 	set_fs(KERNEL_DS);
@@ -896,7 +887,8 @@ int load_aout_library(int fd)
 
 	/* Now use mmap to map the library into memory. */
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
-			PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_PRIVATE,
+			PROT_READ | PROT_WRITE | PROT_EXEC,
+			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
 	if (error != start_addr)
 		return error;

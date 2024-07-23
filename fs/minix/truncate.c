@@ -4,6 +4,10 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
@@ -96,7 +100,7 @@ repeat:
 			continue;
 		}
 		*ind = 0;
-		ind_bh->b_dirt = 1;
+		mark_buffer_dirty(ind_bh, 1);
 		brelse(bh);
 		minix_free_block(inode->i_sb,tmp);
 	}
@@ -144,7 +148,7 @@ repeat:
 			goto repeat;
 		dind = i+(unsigned short *) dind_bh->b_data;
 		retry |= trunc_indirect(inode,7+512+(i<<9),dind);
-		dind_bh->b_dirt = 1;
+		mark_buffer_dirty(dind_bh, 1);
 	}
 	dind = (unsigned short *) dind_bh->b_data;
 	for (i = 0; i < 512; i++)

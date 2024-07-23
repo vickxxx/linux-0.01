@@ -4,7 +4,6 @@
 /*
  * The MS-DOS filesystem constants/structures
  */
-
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/fd.h>
@@ -12,8 +11,8 @@
 #define MSDOS_ROOT_INO  1 /* == MINIX_ROOT_INO */
 #define SECTOR_SIZE     512 /* sector size (bytes) */
 #define SECTOR_BITS	9 /* log2(SECTOR_SIZE) */
-#define MSDOS_DPB	(MSDOS_DPS*2) /* dir entries per block */
-#define MSDOS_DPB_BITS	5 /* log2(MSDOS_DPB) */
+#define MSDOS_DPB	(MSDOS_DPS) /* dir entries per block */
+#define MSDOS_DPB_BITS	4 /* log2(MSDOS_DPB) */
 #define MSDOS_DPS	(SECTOR_SIZE/sizeof(struct msdos_dir_entry))
 #define MSDOS_DPS_BITS	4 /* log2(MSDOS_DPS) */
 #define MSDOS_DIR_BITS	5 /* log2(sizeof(struct msdos_dir_entry)) */
@@ -63,29 +62,29 @@
 
 
 struct msdos_boot_sector {
-	char ignored[3];	    /* Boot strap short or near jump */
-	char system_id[8];	    /* Name - can be used to special case
-				       partition manager volumes */
-	unsigned char sector_size[2];/* bytes per logical sector */
-	unsigned char cluster_size; /* sectors/cluster */
-	unsigned short reserved;    /* reserved sectors */
-	unsigned char fats;	    /* number of FATs */
-	unsigned char dir_entries[2];/* root directory entries */
-	unsigned char sectors[2];   /* number of sectors */
-	unsigned char media;	    /* media code (unused) */
-	unsigned short fat_length;  /* sectors/FAT */
-	unsigned short secs_track;  /* sectors per track */
-	unsigned short heads;	    /* number of heads */
-	unsigned long hidden;	    /* hidden sectors (unused) */
-	unsigned long total_sect;   /* number of sectors (if sectors == 0) */
+	__s8	ignored[3];	/* Boot strap short or near jump */
+	__s8	system_id[8];	/* Name - can be used to special case
+				   partition manager volumes */
+	__u8	sector_size[2];	/* bytes per logical sector */
+	__u8	cluster_size;	/* sectors/cluster */
+	__u16	reserved;	/* reserved sectors */
+	__u8	fats;		/* number of FATs */
+	__u8	dir_entries[2];	/* root directory entries */
+	__u8	sectors[2];	/* number of sectors */
+	__u8	media;		/* media code (unused) */
+	__u16	fat_length;	/* sectors/FAT */
+	__u16	secs_track;	/* sectors per track */
+	__u16	heads;		/* number of heads */
+	__u32	hidden;		/* hidden sectors (unused) */
+	__u32	total_sect;	/* number of sectors (if sectors == 0) */
 };
 
 struct msdos_dir_entry {
-	char name[8],ext[3]; /* name and extension */
-	unsigned char attr;  /* attribute bits */
-	char unused[10];
-	unsigned short time,date,start; /* time, date and first cluster */
-	unsigned long size;  /* file size (in bytes) */
+	__s8	name[8],ext[3];	/* name and extension */
+	__u8	attr;		/* attribute bits */
+	__u8	unused[10];
+	__u16	time,date,start;/* time, date and first cluster */
+	__u32	size;		/* file size (in bytes) */
 };
 
 struct fat_cache {
@@ -109,17 +108,7 @@ struct fat_cache {
 
 #define MSDOS_MKATTR(m) ((m & S_IWUGO) ? ATTR_NONE : ATTR_RO)
 
-
-static inline struct buffer_head *msdos_sread(int dev,int sector,void **start)
-{
- 	struct buffer_head *bh;
-
-	if (!(bh = bread(dev,sector >> 1, 1024)))
-		return NULL;
-    	*start = bh->b_data+((sector & 1) << SECTOR_BITS);
-	return bh;
-}
-
+#ifdef __KERNEL__
 
 /* misc.c */
 
@@ -130,10 +119,9 @@ extern void unlock_creation(void);
 extern void lock_fat(struct super_block *sb);
 extern void unlock_fat(struct super_block *sb);
 extern int msdos_add_cluster(struct inode *inode);
-extern int date_dos2unix(unsigned short time,unsigned short date);
-extern void date_unix2dos(int unix_date,unsigned short *time,
-    unsigned short *date);
-extern int msdos_get_entry(struct inode *dir,off_t *pos,struct buffer_head **bh,
+extern int date_dos2unix(__u16 time, __u16 date);
+extern void date_unix2dos(int unix_date,__u16 *time, __u16 *date);
+extern int msdos_get_entry(struct inode *dir,loff_t *pos,struct buffer_head **bh,
     struct msdos_dir_entry **de);
 extern int msdos_scan(struct inode *dir,char *name,struct buffer_head **res_bh,
     struct msdos_dir_entry **res_de,int *ino);
@@ -161,6 +149,7 @@ extern int msdos_create(struct inode *dir,const char *name,int len,int mode,
 extern int msdos_mkdir(struct inode *dir,const char *name,int len,int mode);
 extern int msdos_rmdir(struct inode *dir,const char *name,int len);
 extern int msdos_unlink(struct inode *dir,const char *name,int len);
+extern int msdos_unlink_umsdos(struct inode *dir,const char *name,int len);
 extern int msdos_rename(struct inode *old_dir,const char *old_name,int old_len,
 	struct inode *new_dir,const char *new_name,int new_len);
 
@@ -174,17 +163,26 @@ extern void msdos_statfs(struct super_block *sb,struct statfs *buf);
 extern int msdos_bmap(struct inode *inode,int block);
 extern void msdos_read_inode(struct inode *inode);
 extern void msdos_write_inode(struct inode *inode);
-extern int msdos_notify_change(int flags,struct inode *inode);
+extern int msdos_notify_change(struct inode *,struct iattr *);
 
 /* dir.c */
 
 extern struct inode_operations msdos_dir_inode_operations;
-
+extern int msdos_readdir (struct inode *inode, struct file *filp,
+	struct dirent *dirent, int count);
 /* file.c */
 
 extern struct inode_operations msdos_file_inode_operations;
+extern struct inode_operations msdos_file_inode_operations_1024;
+extern int msdos_file_read(struct inode *, struct file *, char *, int);
+extern int msdos_file_write(struct inode *, struct file *, char *, int);
 extern struct inode_operations msdos_file_inode_operations_no_bmap;
 
 extern void msdos_truncate(struct inode *inode);
+
+/* mmap.c */
+extern int msdos_mmap(struct inode *, struct file *, struct vm_area_struct *);
+
+#endif /* __KERNEL__ */
 
 #endif

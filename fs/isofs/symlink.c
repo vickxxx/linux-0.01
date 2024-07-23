@@ -9,6 +9,10 @@
  *  extensions to iso9660
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <asm/segment.h>
 
 #include <linux/errno.h>
@@ -49,7 +53,7 @@ static int isofs_follow_link(struct inode * dir, struct inode * inode,
 	char * pnt;
 
 	if (!dir) {
-		dir = current->root;
+		dir = current->fs->root;
 		dir->i_count++;
 	}
 	if (!inode) {

@@ -4,6 +4,14 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#else
+#define MOD_INC_USE_COUNT
+#define MOD_DEC_USE_COUNT
+#endif
+
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
 #include <linux/kernel.h>
@@ -28,7 +36,7 @@ void minix_put_inode(struct inode *inode)
 static void minix_commit_super (struct super_block * sb,
 			       struct minix_super_block * ms)
 {
-	sb->u.minix_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(sb->u.minix_sb.s_sbh, 1);
 	sb->s_dirt = 0;
 }
 
@@ -54,7 +62,7 @@ void minix_put_super(struct super_block *sb)
 	lock_super(sb);
 	if (!(sb->s_flags & MS_RDONLY)) {
 		sb->u.minix_sb.s_ms->s_state = sb->u.minix_sb.s_mount_state;
-		sb->u.minix_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.minix_sb.s_sbh, 1);
 	}
 	sb->s_dev = 0;
 	for(i = 0 ; i < MINIX_I_MAP_SLOTS ; i++)
@@ -63,6 +71,7 @@ void minix_put_super(struct super_block *sb)
 		brelse(sb->u.minix_sb.s_zmap[i]);
 	brelse (sb->u.minix_sb.s_sbh);
 	unlock_super(sb);
+	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -90,7 +99,7 @@ int minix_remount (struct super_block * sb, int * flags, char * data)
 			return 0;
 		/* Mounting a rw partition read-only. */
 		ms->s_state = sb->u.minix_sb.s_mount_state;
-		sb->u.minix_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.minix_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 		minix_commit_super (sb, ms);
 	}
@@ -98,7 +107,7 @@ int minix_remount (struct super_block * sb, int * flags, char * data)
 	  	/* Mount a partition which is read-only, read-write. */
 		sb->u.minix_sb.s_mount_state = ms->s_state;
 		ms->s_state &= ~MINIX_VALID_FS;
-		sb->u.minix_sb.s_sbh->b_dirt = 1;
+		mark_buffer_dirty(sb->u.minix_sb.s_sbh, 1);
 		sb->s_dirt = 1;
 
 		if (!(sb->u.minix_sb.s_mount_state & MINIX_VALID_FS))
@@ -121,11 +130,14 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 
 	if (32 != sizeof (struct minix_inode))
 		panic("bad i-node size");
+	MOD_INC_USE_COUNT;
 	lock_super(s);
+	set_blocksize(dev, BLOCK_SIZE);
 	if (!(bh = bread(dev,1,BLOCK_SIZE))) {
 		s->s_dev=0;
 		unlock_super(s);
 		printk("MINIX-fs: unable to read superblock\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	ms = (struct minix_super_block *) bh->b_data;
@@ -154,6 +166,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		brelse(bh);
 		if (!silent)
 			printk("VFS: Can't find a minix filesystem on dev 0x%04x.\n", dev);
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	for (i=0;i < MINIX_I_MAP_SLOTS;i++)
@@ -180,6 +193,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		unlock_super(s);
 		brelse(bh);
 		printk("MINIX-fs: bad superblock or unable to read bitmaps\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	set_bit(0,s->u.minix_sb.s_imap[0]->b_data);
@@ -193,11 +207,12 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		s->s_dev = 0;
 		brelse(bh);
 		printk("MINIX-fs: get root inode failed\n");
+		MOD_DEC_USE_COUNT;
 		return NULL;
 	}
 	if (!(s->s_flags & MS_RDONLY)) {
 		ms->s_state &= ~MINIX_VALID_FS;
-		bh->b_dirt = 1;
+		mark_buffer_dirty(bh, 1);
 		s->s_dirt = 1;
 	}
 	if (!(s->u.minix_sb.s_mount_state & MINIX_VALID_FS))
@@ -349,7 +364,7 @@ repeat:
 		goto repeat;
 	}
 	*p = tmp;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	return result;
 }
@@ -477,7 +492,7 @@ static struct buffer_head * minix_update_inode(struct inode * inode)
 	else for (block = 0; block < 9; block++)
 		raw_inode->i_zone[block] = inode->u.minix_i.i_data[block];
 	inode->i_dirt=0;
-	bh->b_dirt=1;
+	mark_buffer_dirty(bh, 1);
 	return bh;
 }
 
@@ -510,3 +525,25 @@ int minix_sync_inode(struct inode * inode)
 	brelse (bh);
 	return err;
 }
+
+#ifdef MODULE
+
+char kernel_version[] = UTS_RELEASE;
+
+static struct file_system_type minix_fs_type = {
+	minix_read_super, "minix", 1, NULL
+};
+
+int init_module(void)
+{
+	register_filesystem(&minix_fs_type);
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	unregister_filesystem(&minix_fs_type);
+}
+
+#endif
+

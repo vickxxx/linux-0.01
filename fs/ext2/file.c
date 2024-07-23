@@ -51,7 +51,10 @@ static struct file_operations ext2_file_operations = {
 	generic_mmap,  		/* mmap */
 	NULL,			/* no special open is needed */
 	ext2_release_file,	/* release */
-	ext2_sync_file		/* fsync */
+	ext2_sync_file,		/* fsync */
+	NULL,			/* fasync */
+	NULL,			/* check_media_change */
+	NULL			/* revalidate */
 };
 
 struct inode_operations ext2_file_inode_operations = {
@@ -69,7 +72,8 @@ struct inode_operations ext2_file_inode_operations = {
 	NULL,			/* follow_link */
 	ext2_bmap,		/* bmap */
 	ext2_truncate,		/* truncate */
-	ext2_permission		/* permission */
+	ext2_permission,	/* permission */
+	NULL			/* smap */
 };
 
 static int ext2_file_read (struct inode * inode, struct file * filp,
@@ -78,6 +82,7 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	int read, left, chars;
 	int block, blocks, offset;
 	int bhrequest, uptodate;
+	int clusterblocks;
 	struct buffer_head ** bhb, ** bhe;
 	struct buffer_head * bhreq[NBUF];
 	struct buffer_head * buflist[NBUF];
@@ -112,8 +117,8 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	blocks = (left + offset + sb->s_blocksize - 1) >> EXT2_BLOCK_SIZE_BITS(sb);
 	bhb = bhe = buflist;
 	if (filp->f_reada) {
-		blocks += read_ahead[MAJOR(inode->i_dev)] >>
-			(EXT2_BLOCK_SIZE_BITS(sb) - 9);
+	        if (blocks < read_ahead[MAJOR(inode->i_dev)] >> (EXT2_BLOCK_SIZE_BITS(sb) - 9))
+	            blocks = read_ahead[MAJOR(inode->i_dev)] >> (EXT2_BLOCK_SIZE_BITS(sb) - 9);
 		if (block + blocks > size)
 			blocks = size - block;
 	}
@@ -130,11 +135,18 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 	 * buffers and caches.
 	 */
 
+	clusterblocks = 0;
+
 	do {
 		bhrequest = 0;
 		uptodate = 1;
 		while (blocks) {
 			--blocks;
+#if 1
+			if(!clusterblocks) clusterblocks = ext2_getcluster(inode, block);
+			if(clusterblocks) clusterblocks--;
+#endif
+
 			*bhb = ext2_getblk (inode, block++, 0, &err);
 			if (*bhb && !(*bhb)->b_uptodate) {
 				uptodate = 0;
@@ -218,13 +230,17 @@ static int ext2_file_read (struct inode * inode, struct file * filp,
 static int ext2_file_write (struct inode * inode, struct file * filp,
 			    char * buf, int count)
 {
-	off_t pos;
+	const loff_t two_gb = 2147483647;
+	loff_t pos;
+	off_t pos2;
 	int written, c;
-	struct buffer_head * bh;
+	struct buffer_head * bh, *bufferlist[NBUF];
 	char * p;
 	struct super_block * sb;
 	int err;
+	int i,buffercount,write_error;
 
+	write_error = buffercount = 0;
 	if (!inode) {
 		printk("ext2_file_write: inode = NULL\n");
 		return -EINVAL;
@@ -237,7 +253,7 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 		return -ENOSPC;
 
 	if (!S_ISREG(inode->i_mode)) {
-		ext2_warning (sb, "ext2_file_write", "mode = %07o\n",
+		ext2_warning (sb, "ext2_file_write", "mode = %07o",
 			      inode->i_mode);
 		return -EINVAL;
 	}
@@ -246,15 +262,29 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 		pos = inode->i_size;
 	else
 		pos = filp->f_pos;
+	pos2 = (off_t) pos;
+	/*
+	 * If a file has been opened in synchronous mode, we have to ensure
+	 * that meta-data will also be written synchronously.  Thus, we
+	 * set the i_osync field.  This field is tested by the allocation
+	 * routines.
+	 */
+	if (filp->f_flags & O_SYNC)
+		inode->u.ext2_i.i_osync++;
 	written = 0;
 	while (written < count) {
-		bh = ext2_getblk (inode, pos / sb->s_blocksize, 1, &err);
+		if (pos > two_gb) {
+			if (!written)
+				written = -EFBIG;
+			break;
+		}
+		bh = ext2_getblk (inode, pos2 / sb->s_blocksize, 1, &err);
 		if (!bh) {
 			if (!written)
 				written = err;
 			break;
 		}
-		c = sb->s_blocksize - (pos % sb->s_blocksize);
+		c = sb->s_blocksize - (pos2 % sb->s_blocksize);
 		if (c > count-written)
 			c = count - written;
 		if (c != sb->s_blocksize && !bh->b_uptodate) {
@@ -267,19 +297,44 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 				break;
 			}
 		}
-		p = (pos % sb->s_blocksize) + bh->b_data;
+		p = (pos2 % sb->s_blocksize) + bh->b_data;
+		pos2 += c;
 		pos += c;
-		if (pos > inode->i_size) {
-			inode->i_size = pos;
-			inode->i_dirt = 1;
-		}
 		written += c;
 		memcpy_fromfs (p, buf, c);
 		buf += c;
 		bh->b_uptodate = 1;
-		bh->b_dirt = 1;
-		brelse (bh);
+		mark_buffer_dirty(bh, 0);
+		if (filp->f_flags & O_SYNC)
+			bufferlist[buffercount++] = bh;
+		else
+			brelse(bh);
+		if (buffercount == NBUF){
+			ll_rw_block(WRITE, buffercount, bufferlist);
+			for(i=0; i<buffercount; i++){
+				wait_on_buffer(bufferlist[i]);
+				if (!bufferlist[i]->b_uptodate)
+					write_error=1;
+				brelse(bufferlist[i]);
+			}
+			buffercount=0;
+		}
+		if(write_error)
+			break;
 	}
+	if ( buffercount ){
+		ll_rw_block(WRITE, buffercount, bufferlist);
+		for(i=0; i<buffercount; i++){
+			wait_on_buffer(bufferlist[i]);
+			if (!bufferlist[i]->b_uptodate)
+				write_error=1;
+			brelse(bufferlist[i]);
+		}
+	}		
+	if (pos > inode->i_size)
+		inode->i_size = pos;
+	if (filp->f_flags & O_SYNC)
+		inode->u.ext2_i.i_osync--;
 	up(&inode->i_sem);
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
 	filp->f_pos = pos;

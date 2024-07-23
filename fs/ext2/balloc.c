@@ -32,89 +32,7 @@
 
 #include <asm/bitops.h>
 
-#define clear_block(addr,size) \
-	__asm__("cld\n\t" \
-		"rep\n\t" \
-		"stosl" \
-		: \
-		:"a" (0), "c" (size / 4), "D" ((long) (addr)) \
-		:"cx", "di")
-
 #define in_range(b, first, len)		((b) >= (first) && (b) <= (first) + (len) - 1)
-
-static inline int find_first_zero_bit (unsigned long * addr, unsigned size)
-{
-	int res;
-
-	if (!size)
-		return 0;
-	__asm__("
-		cld
-		movl $-1,%%eax
-		repe; scasl
-		je 1f
-		subl $4,%%edi
-		movl (%%edi),%%eax
-		notl %%eax
-		bsfl %%eax,%%edx
-		jmp 2f
-1:		xorl %%edx,%%edx
-2:		subl %%ebx,%%edi
-		shll $3,%%edi
-		addl %%edi,%%edx"
-		:"=d" (res)
-		:"c" ((size + 31) >> 5), "D" (addr), "b" (addr)
-		:"ax", "bx", "cx", "di");
-	return res;
-}
-
-static inline int find_next_zero_bit (unsigned long * addr, int size,
-				      int offset)
-{
-	unsigned long * p = ((unsigned long *) addr) + (offset >> 5);
-	int set = 0, bit = offset & 31, res;
-	
-	if (bit) {
-		/*
-		 * Look for zero in first byte
-		 */
-		__asm__("
-			bsfl %1,%0
-			jne 1f
-			movl $32, %0
-1:			"
-			: "=r" (set)
-			: "r" (~(*p >> bit)));
-		if (set < (32 - bit))
-			return set + offset;
-		set = 32 - bit;
-		p++;
-	}
-	/*
-	 * No zero yet, search remaining full bytes for a zero
-	 */
-	res = find_first_zero_bit (p, size - 32 * (p - addr));
-	return (offset + set + res);
-}
-
-static inline char * find_first_zero_byte (char * addr, int size)
-{
-	char *res;
-
-	if (!size)
-		return 0;
-	__asm__("
-		cld
-		mov $0,%%eax
-		repnz; scasb
-		jnz 1f
-		dec %%edi
-1:		"
-		: "=D" (res)
-		: "0" (addr), "c" (size)
-		: "ax");
-	return res;
-}
 
 static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 						unsigned int block_group,
@@ -126,7 +44,7 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 
 	if (block_group >= sb->u.ext2_sb.s_groups_count)
 		ext2_panic (sb, "get_group_desc",
-			    "block_group >= groups_count\n"
+			    "block_group >= groups_count - "
 			    "block_group = %d, groups_count = %lu",
 			    block_group, sb->u.ext2_sb.s_groups_count);
 
@@ -134,7 +52,7 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 	desc = block_group % EXT2_DESC_PER_BLOCK(sb);
 	if (!sb->u.ext2_sb.s_group_desc[group_desc])
 		ext2_panic (sb, "get_group_desc",
-			    "Group descriptor not loaded\n"
+			    "Group descriptor not loaded - "
 			    "block_group = %d, group_desc = %lu, desc = %lu",
 			     block_group, group_desc, desc);
 	gdp = (struct ext2_group_desc *) 
@@ -155,9 +73,9 @@ static void read_block_bitmap (struct super_block * sb,
 	bh = bread (sb->s_dev, gdp->bg_block_bitmap, sb->s_blocksize);
 	if (!bh)
 		ext2_panic (sb, "read_block_bitmap",
-			    "Cannot read block bitmap\n"
+			    "Cannot read block bitmap - "
 			    "block_group = %d, block_bitmap = %lu",
-			    block_group, gdp->bg_block_bitmap);
+			    block_group, (unsigned long) gdp->bg_block_bitmap);
 	sb->u.ext2_sb.s_block_bitmap_number[bitmap_nr] = block_group;
 	sb->u.ext2_sb.s_block_bitmap[bitmap_nr] = bh;
 }
@@ -182,7 +100,7 @@ static int load__block_bitmap (struct super_block * sb,
 
 	if (block_group >= sb->u.ext2_sb.s_groups_count)
 		ext2_panic (sb, "load_block_bitmap",
-			    "block_group >= groups_count\n"
+			    "block_group >= groups_count - "
 			    "block_group = %d, groups_count = %lu",
 			    block_group, sb->u.ext2_sb.s_groups_count);
 
@@ -267,7 +185,7 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
 	if (block < es->s_first_data_block || 
 	    (block + count) > es->s_blocks_count) {
 		ext2_error (sb, "ext2_free_blocks",
-			    "Freeing blocks not in datazone\n"
+			    "Freeing blocks not in datazone - "
 			    "block = %lu, count = %lu", block, count);
 		unlock_super (sb);
 		return;
@@ -280,7 +198,7 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
 	bit = (block - es->s_first_data_block) % EXT2_BLOCKS_PER_GROUP(sb);
 	if (bit + count > EXT2_BLOCKS_PER_GROUP(sb))
 		ext2_panic (sb, "ext2_free_blocks",
-			    "Freeing blocks across group boundary\n"
+			    "Freeing blocks across group boundary - "
 			    "Block = %lu, count = %lu",
 			    block, count);
 	bitmap_nr = load_block_bitmap (sb, block_group);
@@ -295,7 +213,7 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
 	     in_range (block + count - 1, gdp->bg_inode_table,
 		       sb->u.ext2_sb.s_itb_per_group)))
 		ext2_panic (sb, "ext2_free_blocks",
-			    "Freeing blocks in system zones\n"
+			    "Freeing blocks in system zones - "
 			    "Block = %lu, count = %lu",
 			    block, count);
 
@@ -310,11 +228,11 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
 		}
 	}
 	
-	bh2->b_dirt = 1;
-	sb->u.ext2_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(bh2, 1);
+	mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 
-	bh->b_dirt = 1;
-	if (sb->s_flags & MS_SYNC) {
+	mark_buffer_dirty(bh, 1);
+	if (sb->s_flags & MS_SYNCHRONOUS) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
@@ -331,8 +249,8 @@ void ext2_free_blocks (struct super_block * sb, unsigned long block,
  * bitmap, and then for any free bit if that fails.
  */
 int ext2_new_block (struct super_block * sb, unsigned long goal,
-		    unsigned long * prealloc_count,
-		    unsigned long * prealloc_block)
+		    u32 * prealloc_count,
+		    u32 * prealloc_block)
 {
 	struct buffer_head * bh;
 	struct buffer_head * bh2;
@@ -352,7 +270,10 @@ int ext2_new_block (struct super_block * sb, unsigned long goal,
 	}
 	lock_super (sb);
 	es = sb->u.ext2_sb.s_es;
-	if (es->s_free_blocks_count <= es->s_r_blocks_count && !suser()) {
+	if (es->s_free_blocks_count <= es->s_r_blocks_count &&
+	    (!fsuser() && (sb->u.ext2_sb.s_resuid != current->fsuid) &&
+	     (sb->u.ext2_sb.s_resgid == 0 ||
+	      !in_group_p (sb->u.ext2_sb.s_resgid)))) {
 		unlock_super (sb);
 		return 0;
 	}
@@ -398,10 +319,7 @@ repeat:
 			else
 				lmap |= 0xffffffff << (31 - (j & 31));
 			if (lmap != 0xffffffffl) {
-				__asm__ ("bsfl %1,%0"
-					 : "=r" (k)
-					 : "r" (~lmap));
-				k++;
+				k = ffz(lmap) + 1;
 				if ((j + k) < EXT2_BLOCKS_PER_GROUP(sb)) {
 					j += k;
 					goto got_block;
@@ -418,11 +336,10 @@ repeat:
 		 * the bitmap and then for any free bit.
 		 * 
 		 * Search first in the remainder of the current group; then,
-		 * cyclicly search throught the rest of the groups.
+		 * cyclicly search through the rest of the groups.
 		 */
 		p = ((char *) bh->b_data) + (j >> 3);
-		r = find_first_zero_byte (p, 
-					  (EXT2_BLOCKS_PER_GROUP(sb) - j + 7) >> 3);
+		r = memscan(p, 0, (EXT2_BLOCKS_PER_GROUP(sb) - j + 7) >> 3);
 		k = (r - ((char *) bh->b_data)) << 3;
 		if (k < EXT2_BLOCKS_PER_GROUP(sb)) {
 			j = k;
@@ -457,8 +374,7 @@ repeat:
 	}
 	bitmap_nr = load_block_bitmap (sb, i);
 	bh = sb->u.ext2_sb.s_block_bitmap[bitmap_nr];
-	r = find_first_zero_byte (bh->b_data, 
-				  EXT2_BLOCKS_PER_GROUP(sb) >> 3);
+	r = memscan(bh->b_data, 0, EXT2_BLOCKS_PER_GROUP(sb) >> 3);
 	j = (r - bh->b_data) << 3;
 	if (j < EXT2_BLOCKS_PER_GROUP(sb))
 		goto search_back;
@@ -491,7 +407,7 @@ got_block:
 	     tmp == gdp->bg_inode_bitmap ||
 	     in_range (tmp, gdp->bg_inode_table, sb->u.ext2_sb.s_itb_per_group)))
 		ext2_panic (sb, "ext2_new_block",
-			    "Allocating block in system zone\n"
+			    "Allocating block in system zone - "
 			    "block = %u", tmp);
 
 	if (set_bit (j, bh->b_data)) {
@@ -524,15 +440,15 @@ got_block:
 
 	j = tmp;
 
-	bh->b_dirt = 1;
-	if (sb->s_flags & MS_SYNC) {
+	mark_buffer_dirty(bh, 1);
+	if (sb->s_flags & MS_SYNCHRONOUS) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
 
 	if (j >= es->s_blocks_count) {
 		ext2_error (sb, "ext2_new_block",
-			    "block >= blocks count\n"
+			    "block >= blocks count - "
 			    "block_group = %d, block=%d", i, j);
 		unlock_super (sb);
 		return 0;
@@ -542,18 +458,18 @@ got_block:
 		unlock_super (sb);
 		return 0;
 	}
-	clear_block (bh->b_data, sb->s_blocksize);
+	memset(bh->b_data, 0, sb->s_blocksize);
 	bh->b_uptodate = 1;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse (bh);
 
 	ext2_debug ("allocating block %d. "
 		    "Goal hits %d of %d.\n", j, goal_hits, goal_attempts);
 
 	gdp->bg_free_blocks_count--;
-	bh2->b_dirt = 1;
+	mark_buffer_dirty(bh2, 1);
 	es->s_free_blocks_count--;
-	sb->u.ext2_sb.s_sbh->b_dirt = 1;
+	mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
 	sb->s_dirt = 1;
 	unlock_super (sb);
 	return j;
@@ -661,6 +577,6 @@ void ext2_check_blocks_bitmap (struct super_block * sb)
 		ext2_error (sb, "ext2_check_blocks_bitmap",
 			    "Wrong free blocks count in super block, "
 			    "stored = %lu, counted = %lu",
-			    es->s_free_blocks_count, bitmap_count);
+			    (unsigned long) es->s_free_blocks_count, bitmap_count);
 	unlock_super (sb);
 }

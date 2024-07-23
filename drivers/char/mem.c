@@ -1,5 +1,5 @@
 /*
- *  linux/kernel/chr_drv/mem.c
+ *  linux/drivers/char/mem.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -15,6 +15,7 @@
 #include <linux/tpqic02.h>
 #include <linux/malloc.h>
 #include <linux/mman.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -83,33 +84,24 @@ static int write_mem(struct inode * inode, struct file * file,char * buf, int co
 	return count;
 }
 
-static int mmap_mem(struct inode * inode, struct file * file,
-	unsigned long addr, size_t len, int prot, unsigned long off)
+static int mmap_mem(struct inode * inode, struct file * file, struct vm_area_struct * vma)
 {
-	struct vm_area_struct * mpnt;
-
-	if (off & 0xfff || off + len < off)
+	if (vma->vm_offset & ~PAGE_MASK)
 		return -ENXIO;
-	if (x86 > 3 && off >= high_memory)
-		prot |= PAGE_PCD;
-	if (remap_page_range(addr, off, len, prot))
+#if 0 && defined(__i386__)
+	/*
+	 * hmm.. This disables high-memory caching, as the XFree86 team wondered
+	 * about that at one time. It doesn't seem to make a difference, though:
+	 * the surround logic should disable caching for the high device addresses
+	 * anyway.
+	 */
+	if (x86 > 3 && vma->vm_offset >= high_memory)
+		vma->vm_page_prot |= PAGE_PCD;
+#endif
+	if (remap_page_range(vma->vm_start, vma->vm_offset, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
-/* try to create a dummy vmm-structure so that the rest of the kernel knows we are here */
-	mpnt = (struct vm_area_struct * ) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
-	if (!mpnt)
-		return 0;
-
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = prot;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = inode;
+	vma->vm_inode = inode;
 	inode->i_count++;
-	mpnt->vm_offset = off;
-	mpnt->vm_ops = NULL;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, NULL, NULL);
 	return 0;
 }
 
@@ -120,7 +112,7 @@ static int read_kmem(struct inode *inode, struct file *file, char *buf, int coun
 	read1 = read_mem(inode, file, buf, count);
 	if (read1 < 0)
 		return read1;
-	read2 = vread(buf + read1, (char *) file->f_pos, count - read1);
+	read2 = vread(buf + read1, (char *) ((unsigned long) file->f_pos), count - read1);
 	if (read2 < 0)
 		return read2;
 	file->f_pos += read2;
@@ -176,33 +168,12 @@ static int read_zero(struct inode * node,struct file * file,char * buf,int count
 	return count;
 }
 
-static int mmap_zero(struct inode * inode, struct file * file,
-	unsigned long addr, size_t len, int prot, unsigned long off)
+static int mmap_zero(struct inode * inode, struct file * file, struct vm_area_struct * vma)
 {
-	struct vm_area_struct *mpnt;
-
-	if (prot & PAGE_RW)
+	if (vma->vm_flags & VM_SHARED)
 		return -EINVAL;
-	if (zeromap_page_range(addr, len, prot))
+	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
-	/*
-	 * try to create a dummy vmm-structure so that the
-	 * rest of the kernel knows we are here
-	 */
-	mpnt = (struct vm_area_struct *)kmalloc(sizeof(*mpnt), GFP_KERNEL);
-	if (!mpnt)
-		return 0;
-
-	mpnt->vm_task = current;
-	mpnt->vm_start = addr;
-	mpnt->vm_end = addr + len;
-	mpnt->vm_page_prot = prot;
-	mpnt->vm_share = NULL;
-	mpnt->vm_inode = NULL;
-	mpnt->vm_offset = off;
-	mpnt->vm_ops = NULL;
-	insert_vm_struct(current, mpnt);
-	merge_segments(current->mmap, ignoff_mergep, inode);
 	return 0;
 }
 
@@ -409,8 +380,8 @@ long chr_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_SOUND
 	mem_start = soundcard_init(mem_start);
 #endif
-#if CONFIG_TAPE_QIC02
-	mem_start = tape_qic02_init(mem_start);
+#if CONFIG_QIC02_TAPE
+	mem_start = qic02_tape_init(mem_start);
 #endif
 /*
  *      Rude way to allocate kernel memory buffer for tape device
@@ -418,7 +389,7 @@ long chr_dev_init(long mem_start, long mem_end)
 #ifdef CONFIG_FTAPE
         /* allocate NR_FTAPE_BUFFERS 32Kb buffers at aligned address */
         ftape_big_buffer= (char*) ((mem_start + 0x7fff) & ~0x7fff);
-        printk( "ftape: allocated %d buffers alligned at: %p\n",
+        printk( "ftape: allocated %d buffers aligned at: %p\n",
                NR_FTAPE_BUFFERS, ftape_big_buffer);
         mem_start = (long) ftape_big_buffer + NR_FTAPE_BUFFERS * 0x8000;
 #endif 

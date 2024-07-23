@@ -5,6 +5,7 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 
 #include "../block/blk.h"
@@ -13,7 +14,7 @@
 #include "scsi_ioctl.h"
 
 #define MAX_RETRIES 5	
-#define MAX_TIMEOUT 200
+#define MAX_TIMEOUT 900
 #define MAX_BUF 4096
 
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -33,12 +34,17 @@ static int ioctl_probe(struct Scsi_Host * host, void *buffer)
 	
 	if ((temp = host->hostt->present) && buffer) {
 		len = get_fs_long ((unsigned long *) buffer);
-		string = host->hostt->info();
-		slen = strlen(string);
-		if (len > slen)
-			len = slen + 1;
-		verify_area(VERIFY_WRITE, buffer, len);
-		memcpy_tofs (buffer, string, len);
+		if(host->hostt->info)
+		  string = host->hostt->info(host);
+		else 
+		  string = host->hostt->name;
+		if(string) {
+		  slen = strlen(string);
+		  if (len > slen)
+		    len = slen + 1;
+		  verify_area(VERIFY_WRITE, buffer, len);
+		  memcpy_tofs (buffer, string, len);
+		}
 	}
 	return temp;
 }
@@ -73,16 +79,12 @@ static int ioctl_probe(struct Scsi_Host * host, void *buffer)
 static void scsi_ioctl_done (Scsi_Cmnd * SCpnt)
 {
   struct request * req;
-  struct task_struct * p;
   
   req = &SCpnt->request;
   req->dev = 0xfffe; /* Busy, but indicate request done */
   
-  if ((p = req->waiting) != NULL) {
-    req->waiting = NULL;
-    p->state = TASK_RUNNING;
-    if (p->counter > current->counter)
-      need_resched = 1;
+  if (req->sem != NULL) {
+    up(req->sem);
   }
 }	
 
@@ -91,14 +93,16 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
 	int result;
 	Scsi_Cmnd * SCpnt;
 
-	SCpnt = allocate_device(NULL, dev->index, 1);
+	SCpnt = allocate_device(NULL, dev, 1);
 	scsi_do_cmd(SCpnt,  cmd, NULL,  0,
 			scsi_ioctl_done,  MAX_TIMEOUT,
 			MAX_RETRIES);
 
 	if (SCpnt->request.dev != 0xfffe){
-	  SCpnt->request.waiting = current;
-	  current->state = TASK_UNINTERRUPTIBLE;
+	  struct semaphore sem = MUTEX_LOCKED;
+	  SCpnt->request.sem = &sem;
+	  down(&sem);
+	  /* Hmm.. Have to ask about this one */
 	  while (SCpnt->request.dev != 0xfffe) schedule();
 	};
 
@@ -134,8 +138,8 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
 	  };
 
 	result = SCpnt->result;
-	SCpnt->request.dev = -1;  /* Mark as not busy */
-	wake_up(&scsi_devices[SCpnt->index].device_wait);
+	SCpnt->request.dev = -1;
+	wake_up(&SCpnt->device->device_wait);
 	return result;
 }
 
@@ -147,7 +151,7 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 	Scsi_Cmnd * SCpnt;
 	unsigned char opcode;
 	int inlen, outlen, cmdlen;
-	int needed;
+	int needed, buf_needed;
 	int result;
 
 	if (!buffer)
@@ -159,12 +163,13 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 	cmd_in = (char *) ( ((int *)buffer) + 2);
 	opcode = get_fs_byte(cmd_in); 
 
-	needed = (inlen > outlen ? inlen : outlen);
-	if(needed){
-	  needed = (needed + 511) & ~511;
-	  if (needed > MAX_BUF) needed = MAX_BUF;
-	  buf = (char *) scsi_malloc(needed);
+	needed = buf_needed = (inlen > outlen ? inlen : outlen);
+	if(buf_needed){
+	  buf_needed = (buf_needed + 511) & ~511;
+	  if (buf_needed > MAX_BUF) buf_needed = MAX_BUF;
+	  buf = (char *) scsi_malloc(buf_needed);
 	  if (!buf) return -ENOMEM;
+	  memset(buf, 0, buf_needed);
 	} else
 	  buf = NULL;
 
@@ -175,14 +180,16 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 
 #ifndef DEBUG_NO_CMD
 	
-	SCpnt = allocate_device(NULL, dev->index, 1);
+	SCpnt = allocate_device(NULL, dev, 1);
 
 	scsi_do_cmd(SCpnt,  cmd,  buf, needed,  scsi_ioctl_done,  MAX_TIMEOUT, 
 			MAX_RETRIES);
 
 	if (SCpnt->request.dev != 0xfffe){
-	  SCpnt->request.waiting = current;
-	  current->state = TASK_UNINTERRUPTIBLE;
+	  struct semaphore sem = MUTEX_LOCKED;
+	  SCpnt->request.sem = &sem;
+	  down(&sem);
+	  /* Hmm.. Have to ask about this one */
 	  while (SCpnt->request.dev != 0xfffe) schedule();
 	};
 
@@ -202,8 +209,12 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 	};
 	result = SCpnt->result;
 	SCpnt->request.dev = -1;  /* Mark as not busy */
-	if (buf) scsi_free(buf, needed);
-	wake_up(&scsi_devices[SCpnt->index].device_wait);
+	if (buf) scsi_free(buf, buf_needed);
+
+	if(SCpnt->device->scsi_request_fn)
+	  (*SCpnt->device->scsi_request_fn)();
+
+	wake_up(&SCpnt->device->device_wait);
 	return result;
 #else
 	{
@@ -223,8 +234,6 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 #endif
 }
 
-	
-
 /*
 	the scsi_ioctl() function differs from most ioctls in that it does
 	not take a major/minor number as the dev filed.  Rather, it takes
@@ -234,8 +243,8 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 {
         char scsi_cmd[12];
 
-	if ((cmd != 0 && dev->index > NR_SCSI_DEVICES))
-		return -ENXIO;
+	/* No idea how this happens.... */
+	if (!dev) return -ENXIO;
 	
 	switch (cmd) {
 	        case SCSI_IOCTL_GET_IDLUN:
@@ -303,3 +312,19 @@ int kernel_scsi_ioctl (Scsi_Device *dev, int cmd, void *arg) {
   return tmp;
 }
 
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 8
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -8
+ * c-argdecl-indent: 8
+ * c-label-offset: -8
+ * c-continued-statement-offset: 8
+ * c-continued-brace-offset: 0
+ * End:
+ */

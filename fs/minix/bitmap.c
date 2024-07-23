@@ -6,6 +6,10 @@
 
 /* bitmap.c contains the code that handles the inode and block bitmaps */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
@@ -13,28 +17,6 @@
 #include <linux/string.h>
 
 #include <asm/bitops.h>
-
-#define clear_block(addr) \
-__asm__("cld\n\t" \
-	"rep\n\t" \
-	"stosl" \
-	: \
-	:"a" (0),"c" (BLOCK_SIZE/4),"D" ((long) (addr)):"cx","di")
-
-#define find_first_zero(addr) ({ \
-int __res; \
-__asm__("cld\n" \
-	"1:\tlodsl\n\t" \
-	"notl %%eax\n\t" \
-	"bsfl %%eax,%%edx\n\t" \
-	"jne 2f\n\t" \
-	"addl $32,%%ecx\n\t" \
-	"cmpl $8192,%%ecx\n\t" \
-	"jl 1b\n\t" \
-	"xorl %%edx,%%edx\n" \
-	"2:\taddl %%edx,%%ecx" \
-	:"=c" (__res):"0" (0),"S" (addr):"ax","dx","si"); \
-__res;})
 
 static int nibblemap[] = { 0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4 };
 
@@ -93,7 +75,7 @@ void minix_free_block(struct super_block * sb, int block)
 	}
 	if (!clear_bit(bit,bh->b_data))
 		printk("free_block (%04x:%d): bit already cleared\n",sb->s_dev,block);
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	return;
 }
 
@@ -110,7 +92,7 @@ repeat:
 	j = 8192;
 	for (i=0 ; i<8 ; i++)
 		if ((bh=sb->u.minix_sb.s_zmap[i]) != NULL)
-			if ((j=find_first_zero(bh->b_data))<8192)
+			if ((j=find_first_zero_bit(bh->b_data, 8192)) < 8192)
 				break;
 	if (i>=8 || !bh || j>=8192)
 		return 0;
@@ -118,7 +100,7 @@ repeat:
 		printk("new_block: bit already set");
 		goto repeat;
 	}
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	j += i*8192 + sb->u.minix_sb.s_firstdatazone-1;
 	if (j < sb->u.minix_sb.s_firstdatazone ||
 	    j >= sb->u.minix_sb.s_nzones)
@@ -127,9 +109,9 @@ repeat:
 		printk("new_block: cannot get block");
 		return 0;
 	}
-	clear_block(bh->b_data);
+	memset(bh->b_data, 0, BLOCK_SIZE);
 	bh->b_uptodate = 1;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	brelse(bh);
 	return j;
 }
@@ -175,7 +157,7 @@ void minix_free_inode(struct inode * inode)
 	clear_inode(inode);
 	if (!clear_bit(ino & 8191, bh->b_data))
 		printk("free_inode: bit %lu already cleared.\n",ino);
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 }
 
 struct inode * minix_new_inode(const struct inode * dir)
@@ -193,7 +175,7 @@ struct inode * minix_new_inode(const struct inode * dir)
 	j = 8192;
 	for (i=0 ; i<8 ; i++)
 		if ((bh = inode->i_sb->u.minix_sb.s_imap[i]) != NULL)
-			if ((j=find_first_zero(bh->b_data))<8192)
+			if ((j=find_first_zero_bit(bh->b_data, 8192)) < 8192)
 				break;
 	if (!bh || j >= 8192) {
 		iput(inode);
@@ -204,7 +186,7 @@ struct inode * minix_new_inode(const struct inode * dir)
 		iput(inode);
 		return NULL;
 	}
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	j += i*8192;
 	if (!j || j >= inode->i_sb->u.minix_sb.s_ninodes) {
 		iput(inode);
@@ -213,8 +195,8 @@ struct inode * minix_new_inode(const struct inode * dir)
 	inode->i_count = 1;
 	inode->i_nlink = 1;
 	inode->i_dev = sb->s_dev;
-	inode->i_uid = current->euid;
-	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->egid;
+	inode->i_uid = current->fsuid;
+	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
 	inode->i_dirt = 1;
 	inode->i_ino = j;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;

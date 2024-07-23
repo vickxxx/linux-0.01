@@ -43,8 +43,6 @@
 static int ext2_match (int len, const char * const name,
 		       struct ext2_dir_entry * de)
 {
-	unsigned char same;
-
 	if (!de || !de->inode || len > EXT2_NAME_LEN)
 		return 0;
 	/*
@@ -55,13 +53,7 @@ static int ext2_match (int len, const char * const name,
 		return 1;
 	if (len != de->name_len)
 		return 0;
-	__asm__("cld\n\t"
-		"repe ; cmpsb\n\t"
-		"setz %0"
-		:"=q" (same)
-		:"S" ((long) name), "D" ((long) de->name), "c" (len)
-		:"cx", "di", "si");
-	return (int) same;
+	return !memcmp(name, de->name, len);
 }
 
 /*
@@ -181,22 +173,28 @@ int ext2_lookup (struct inode * dir, const char * name, int len,
 		iput (dir);
 		return -ENOENT;
 	}
-#ifndef DONT_USE_DCACHE
-	if (!(ino = ext2_dcache_lookup (dir->i_dev, dir->i_ino, name, len))) {
-#endif
-		if (!(bh = ext2_find_entry (dir, name, len, &de))) {
-			iput (dir);
+	if (dcache_lookup(dir, name, len, &ino)) {
+		if (!ino) {
+			iput(dir);
 			return -ENOENT;
 		}
-		ino = de->inode;
-#ifndef DONT_USE_DCACHE
-		ext2_dcache_add (dir->i_dev, dir->i_ino, de->name,
-				 de->name_len, ino);
-#endif
-		brelse (bh);
-#ifndef DONT_USE_DCACHE
+		if (!(*result = iget (dir->i_sb, ino))) {
+			iput (dir);
+			return -EACCES;
+		}
+		iput (dir);
+		return 0;
 	}
-#endif
+	ino = dir->i_version;
+	if (!(bh = ext2_find_entry (dir, name, len, &de))) {
+		if (ino == dir->i_version)
+			dcache_add(dir, name, len, 0);
+		iput (dir);
+		return -ENOENT;
+	}
+	ino = de->inode;
+	dcache_add(dir, name, len, ino);
+	brelse (bh);
 	if (!(*result = iget (dir->i_sb, ino))) {
 		iput (dir);
 		return -EACCES;
@@ -275,9 +273,6 @@ static struct buffer_head * ext2_add_entry (struct inode * dir,
 				de->rec_len = sb->s_blocksize;
 				dir->i_size = offset + sb->s_blocksize;
 				dir->i_dirt = 1;
-#if 0 /* XXX don't update any times until successful completion of syscall */
-				dir->i_ctime = CURRENT_TIME;
-#endif
 			} else {
 
 				ext2_debug ("skipping to next block\n");
@@ -323,7 +318,8 @@ static struct buffer_head * ext2_add_entry (struct inode * dir,
 			 */
 			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 			dir->i_dirt = 1;
-			bh->b_dirt = 1;
+			dir->i_version = ++event;
+			mark_buffer_dirty(bh, 1);
 			*res_dir = de;
 			*err = 0;
 			return bh;
@@ -393,11 +389,9 @@ int ext2_create (struct inode * dir,const char * name, int len, int mode,
 		return err;
 	}
 	de->inode = inode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_add (dir->i_dev, dir->i_ino, de->name, de->name_len,
-			 de->inode);
-#endif
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	dcache_add(dir, de->name, de->name_len, de->inode);
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -429,7 +423,7 @@ int ext2_mknod (struct inode * dir, const char * name, int len, int mode,
 		iput (dir);
 		return -ENOSPC;
 	}
-	inode->i_uid = current->euid;
+	inode->i_uid = current->fsuid;
 	inode->i_mode = mode;
 	inode->i_op = NULL;
 	if (S_ISREG(inode->i_mode))
@@ -449,14 +443,6 @@ int ext2_mknod (struct inode * dir, const char * name, int len, int mode,
 		init_fifo(inode);
 	if (S_ISBLK(mode) || S_ISCHR(mode))
 		inode->i_rdev = rdev;
-#if 0
-	/*
-	 * XXX we may as well use the times set by ext2_new_inode().  The
-	 * following usually does nothing, but sometimes it invalidates
-	 * inode->i_ctime.
-	 */
-	inode->i_mtime = inode->i_atime = CURRENT_TIME;
-#endif
 	inode->i_dirt = 1;
 	bh = ext2_add_entry (dir, name, len, &de, &err);
 	if (!bh) {
@@ -467,11 +453,9 @@ int ext2_mknod (struct inode * dir, const char * name, int len, int mode,
 		return err;
 	}
 	de->inode = inode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_add (dir->i_dev, dir->i_ino, de->name, de->name_len,
-			 de->inode);
-#endif
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	dcache_add(dir, de->name, de->name_len, de->inode);
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -508,9 +492,6 @@ int ext2_mkdir (struct inode * dir, const char * name, int len, int mode)
 	}
 	inode->i_op = &ext2_dir_inode_operations;
 	inode->i_size = inode->i_sb->s_blocksize;
-#if 0 /* XXX as above */
-	inode->i_mtime = inode->i_atime = CURRENT_TIME;
-#endif
 	dir_block = ext2_bread (inode, 0, 1, &err);
 	if (!dir_block) {
 		iput (dir);
@@ -531,9 +512,9 @@ int ext2_mkdir (struct inode * dir, const char * name, int len, int mode)
 	de->name_len = 2;
 	strcpy (de->name, "..");
 	inode->i_nlink = 2;
-	dir_block->b_dirt = 1;
+	mark_buffer_dirty(dir_block, 1);
 	brelse (dir_block);
-	inode->i_mode = S_IFDIR | (mode & S_IRWXUGO & ~current->umask);
+	inode->i_mode = S_IFDIR | (mode & S_IRWXUGO & ~current->fs->umask);
 	if (dir->i_mode & S_ISGID)
 		inode->i_mode |= S_ISGID;
 	inode->i_dirt = 1;
@@ -546,11 +527,9 @@ int ext2_mkdir (struct inode * dir, const char * name, int len, int mode)
 		return err;
 	}
 	de->inode = inode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_add (dir->i_dev, dir->i_ino, de->name, de->name_len,
-			 de->inode);
-#endif
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	dcache_add(dir, de->name, de->name_len, de->inode);
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -644,8 +623,9 @@ repeat:
 		schedule();
 		goto repeat;
 	}
-	if ((dir->i_mode & S_ISVTX) && current->euid &&
-	    inode->i_uid != current->euid)
+        if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+            current->fsuid != inode->i_uid &&
+            current->fsuid != dir->i_uid)
 		goto end_rmdir;
 	if (inode == dir)	/* we may not delete ".", but "../dir" is ok */
 		goto end_rmdir;
@@ -670,26 +650,21 @@ repeat:
 			inode->i_size = 0;
 		}
 		retval = ext2_delete_entry (de, bh);
+		dir->i_version = ++event;
 	}
 	up(&inode->i_sem);
 	if (retval)
 		goto end_rmdir;
-	bh->b_dirt = 1;
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_remove(inode->i_dev, inode->i_ino, ".", 1);
-	ext2_dcache_remove(inode->i_dev, inode->i_ino, "..", 2);
-#endif
 	if (inode->i_nlink != 2)
 		ext2_warning (inode->i_sb, "ext2_rmdir",
 			      "empty directory has nlink!=2 (%d)",
 			      inode->i_nlink);
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_remove (dir->i_dev, dir->i_ino, de->name, de->name_len);
-#endif
+	inode->i_version = ++event;
 	inode->i_nlink = 0;
 	inode->i_dirt = 1;
 	dir->i_nlink--;
@@ -722,6 +697,8 @@ repeat:
 	retval = -EPERM;
 	if (S_ISDIR(inode->i_mode))
 		goto end_unlink;
+	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+		goto end_unlink;
 	if (de->inode != inode->i_ino) {
 		iput(inode);
 		brelse(bh);
@@ -729,9 +706,9 @@ repeat:
 		schedule();
 		goto repeat;
 	}
-	if ((dir->i_mode & S_ISVTX) && !suser() &&
-	    current->euid != inode->i_uid &&
-	    current->euid != dir->i_uid)
+	if ((dir->i_mode & S_ISVTX) && !fsuser() &&
+	    current->fsuid != inode->i_uid &&
+	    current->fsuid != dir->i_uid)
 		goto end_unlink;
 	if (!inode->i_nlink) {
 		ext2_warning (inode->i_sb, "ext2_unlink",
@@ -742,14 +719,12 @@ repeat:
 	retval = ext2_delete_entry (de, bh);
 	if (retval)
 		goto end_unlink;
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_remove (dir->i_dev, dir->i_ino, de->name, de->name_len);
-#endif
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_dirt = 1;
 	inode->i_nlink--;
@@ -807,7 +782,7 @@ int ext2_symlink (struct inode * dir, const char * name, int len,
 		link[i++] = c;
 	link[i] = 0;
 	if (name_block) {
-		name_block->b_dirt = 1;
+		mark_buffer_dirty(name_block, 1);
 		brelse (name_block);
 	}
 	inode->i_size = i;
@@ -830,11 +805,9 @@ int ext2_symlink (struct inode * dir, const char * name, int len,
 		return err;
 	}
 	de->inode = inode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_add (dir->i_dev, dir->i_ino, de->name, de->name_len,
-			 de->inode);
-#endif
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	dcache_add(dir, de->name, de->name_len, de->inode);
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -853,6 +826,11 @@ int ext2_link (struct inode * oldinode, struct inode * dir,
 	int err;
 
 	if (S_ISDIR(oldinode->i_mode)) {
+		iput (oldinode);
+		iput (dir);
+		return -EPERM;
+	}
+	if (IS_APPEND(oldinode) || IS_IMMUTABLE(oldinode)) {
 		iput (oldinode);
 		iput (dir);
 		return -EPERM;
@@ -876,11 +854,9 @@ int ext2_link (struct inode * oldinode, struct inode * dir,
 		return err;
 	}
 	de->inode = oldinode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_add (dir->i_dev, dir->i_ino, de->name, de->name_len,
-			 de->inode);
-#endif
-	bh->b_dirt = 1;
+	dir->i_version = ++event;
+	dcache_add(dir, de->name, de->name_len, de->inode);
+	mark_buffer_dirty(bh, 1);
 	if (IS_SYNC(dir)) {
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
@@ -948,8 +924,10 @@ static int do_ext2_rename (struct inode * old_dir, const char * old_name,
 
 	goto start_up;
 try_again:
-	if (new_bh && new_de)
+	if (new_bh && new_de) {
 		ext2_delete_entry(new_de, new_bh);
+		new_dir->i_version = ++event;
+	}
 	brelse (old_bh);
 	brelse (new_bh);
 	brelse (dir_bh);
@@ -970,8 +948,10 @@ start_up:
 		goto end_rename;
 	retval = -EPERM;
 	if ((old_dir->i_mode & S_ISVTX) && 
-	    current->euid != old_inode->i_uid &&
-	    current->euid != old_dir->i_uid && !suser())
+	    current->fsuid != old_inode->i_uid &&
+	    current->fsuid != old_dir->i_uid && !fsuser())
+		goto end_rename;
+	if (IS_APPEND(old_inode) || IS_IMMUTABLE(old_inode))
 		goto end_rename;
 	new_bh = ext2_find_entry (new_dir, new_name, new_len, &new_de);
 	if (new_bh) {
@@ -1001,8 +981,8 @@ start_up:
 	}
 	retval = -EPERM;
 	if (new_inode && (new_dir->i_mode & S_ISVTX) &&
-	    current->euid != new_inode->i_uid &&
-	    current->euid != new_dir->i_uid && !suser())
+	    current->fsuid != new_inode->i_uid &&
+	    current->fsuid != new_dir->i_uid && !fsuser())
 		goto end_rename;
 	if (S_ISDIR(old_inode->i_mode)) {
 		retval = -ENOTDIR;
@@ -1025,6 +1005,7 @@ start_up:
 					 &retval);
 	if (!new_bh)
 		goto end_rename;
+	new_dir->i_version = ++event;
 	/*
 	 * sanity checking before doing the rename - avoid races
 	 */
@@ -1038,17 +1019,13 @@ start_up:
 	 * ok, that's it
 	 */
 	new_de->inode = old_inode->i_ino;
-#ifndef DONT_USE_DCACHE
-	ext2_dcache_remove (old_dir->i_dev, old_dir->i_ino, old_de->name,
-			    old_de->name_len);
-	ext2_dcache_add (new_dir->i_dev, new_dir->i_ino, new_de->name,
-			 new_de->name_len, new_de->inode);
-#endif
+	dcache_add(new_dir, new_de->name, new_de->name_len, new_de->inode);
 	retval = ext2_delete_entry (old_de, old_bh);
 	if (retval == -ENOENT)
 		goto try_again;
 	if (retval)
 		goto end_rename;
+	old_dir->i_version = ++event;
 	if (new_inode) {
 		new_inode->i_nlink--;
 		new_inode->i_ctime = CURRENT_TIME;
@@ -1056,19 +1033,10 @@ start_up:
 	}
 	old_dir->i_ctime = old_dir->i_mtime = CURRENT_TIME;
 	old_dir->i_dirt = 1;
-	old_bh->b_dirt = 1;
-	if (IS_SYNC(old_dir)) {
-		ll_rw_block (WRITE, 1, &old_bh);
-		wait_on_buffer (old_bh);
-	}
-	new_bh->b_dirt = 1;
-	if (IS_SYNC(new_dir)) {
-		ll_rw_block (WRITE, 1, &new_bh);
-		wait_on_buffer (new_bh);
-	}
 	if (dir_bh) {
 		PARENT_INO(dir_bh->b_data) = new_dir->i_ino;
-		dir_bh->b_dirt = 1;
+		dcache_add(old_inode, "..", 2, new_dir->i_ino);
+		mark_buffer_dirty(dir_bh, 1);
 		old_dir->i_nlink--;
 		old_dir->i_dirt = 1;
 		if (new_inode) {
@@ -1078,6 +1046,16 @@ start_up:
 			new_dir->i_nlink++;
 			new_dir->i_dirt = 1;
 		}
+	}
+	mark_buffer_dirty(old_bh,  1);
+	if (IS_SYNC(old_dir)) {
+		ll_rw_block (WRITE, 1, &old_bh);
+		wait_on_buffer (old_bh);
+	}
+	mark_buffer_dirty(new_bh, 1);
+	if (IS_SYNC(new_dir)) {
+		ll_rw_block (WRITE, 1, &new_bh);
+		wait_on_buffer (new_bh);
 	}
 	retval = 0;
 end_rename:

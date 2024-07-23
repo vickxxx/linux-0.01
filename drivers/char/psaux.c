@@ -1,5 +1,5 @@
 /*
- * linux/kernel/chr_drv/psaux.c
+ * linux/drivers/char/psaux.c
  *
  * Driver for PS/2 type mouse by Johan Myreen.
  *
@@ -25,11 +25,11 @@
 
 /* #define INITIALIZE_DEVICE */
 
-#include <linux/timer.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/fcntl.h>
 #include <linux/errno.h>
+#include <linux/timer.h>
 
 #include <asm/io.h>
 #include <asm/segment.h>
@@ -192,7 +192,7 @@ static inline int queue_empty(void)
  * is waiting in the keyboard/aux controller.
  */
 
-static void aux_interrupt(int cpl)
+static void aux_interrupt(int cpl, struct pt_regs * regs)
 {
 	int head = queue->head;
 	int maxhead = (queue->tail-1) & (AUX_BUF_SIZE-1);
@@ -213,7 +213,7 @@ static void aux_interrupt(int cpl)
  */
 
 #ifdef CONFIG_82C710_MOUSE
-static void qp_interrupt(int cpl)
+static void qp_interrupt(int cpl, struct pt_regs * regs)
 {
 	int head = queue->head;
 	int maxhead = (queue->tail-1) & (AUX_BUF_SIZE-1);
@@ -272,7 +272,7 @@ static int open_aux(struct inode * inode, struct file * file)
 		return -EBUSY;
 	aux_busy = 1;
 	queue->head = queue->tail = 0;	        /* Flush input queue */
-	if (request_irq(AUX_IRQ, aux_interrupt)) {
+	if (request_irq(AUX_IRQ, aux_interrupt, 0, "PS/2 Mouse")) {
 		aux_busy = 0;
 		return -EBUSY;
 	}
@@ -302,7 +302,7 @@ static int open_qp(struct inode * inode, struct file * file)
 	if (qp_busy)
 		return -EBUSY;
 
-	if (request_irq(QP_IRQ, qp_interrupt))
+	if (request_irq(QP_IRQ, qp_interrupt, 0, "PS/2 Mouse"))
 		return -EBUSY;
 
 	qp_busy = 1;

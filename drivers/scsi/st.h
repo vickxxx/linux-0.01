@@ -11,7 +11,6 @@
 
 typedef struct {
   int in_use;
-  struct mtget * mt_status;
   int buffer_size;
   int buffer_blocks;
   int buffer_bytes;
@@ -26,19 +25,31 @@ typedef struct {
   unsigned capacity;
   struct wait_queue * waiting;
   Scsi_Device* device;
-  unsigned dirty:1;
-  unsigned rw:2;
-  unsigned eof:2;
-  unsigned write_prot:1;
-  unsigned in_use:1;
-  unsigned eof_hit:1;
-  unsigned drv_buffer:3;
+  unsigned char dirty;
+  unsigned char rw;
+  unsigned char ready;
+  unsigned char eof;
+  unsigned char write_prot;
+  unsigned char drv_write_prot;
+  unsigned char in_use;
+  unsigned char eof_hit;
+  unsigned char drv_buffer;
+  unsigned char do_buffer_writes;
+  unsigned char do_async_writes;
+  unsigned char do_read_ahead;
+  unsigned char two_fm;
+  unsigned char fast_mteom;
   unsigned char density;
   ST_buffer * buffer;
   int block_size;
   int min_block;
   int max_block;
+  int write_threshold;
   int recover_count;
+  int drv_block;	/* The block where the drive head is */
+  unsigned char moves_after_eof;
+  unsigned char at_sm;
+  struct mtget * mt_status;
   Scsi_Cmnd SCpnt;
 } Scsi_Tape;
 
@@ -47,11 +58,17 @@ typedef struct {
 #define	ST_FM		1
 #define	ST_EOM_OK	2
 #define ST_EOM_ERROR	3
+#define ST_EOD		4
 
 /* Values of rw */
 #define	ST_IDLE		0
 #define	ST_READING	1
 #define	ST_WRITING	2
+
+/* Values of ready state */
+#define ST_READY	0
+#define ST_NOT_READY	1
+#define ST_NO_TAPE	2
 
 /* Positioning SCSI-commands for Tandberg, etc. drives */
 #define	QFA_REQUEST_BLOCK	0x02

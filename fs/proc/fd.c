@@ -62,11 +62,10 @@ static int proc_lookupfd(struct inode * dir,const char * name, int len,
 	ino = dir->i_ino;
 	pid = ino >> 16;
 	ino &= 0x0000ffff;
-	ino -= 7;
 	if (!dir)
 		return -ENOENT;
 	sb = dir->i_sb;
-	if (!pid || ino > 1 || !S_ISDIR(dir->i_mode)) {
+	if (!pid || ino != PROC_PID_FD || !S_ISDIR(dir->i_mode)) {
 		iput(dir);
 		return -ENOENT;
 	}
@@ -76,7 +75,7 @@ static int proc_lookupfd(struct inode * dir,const char * name, int len,
 			*result = dir;
 			return 0;
 		}
-		if (!(*result = iget(sb,(pid << 16)+2))) {
+		if (!(*result = iget(sb,(pid << 16)+PROC_PID_INO))) {
 			iput(dir);
 			return -ENOENT;
 		}
@@ -104,20 +103,12 @@ static int proc_lookupfd(struct inode * dir,const char * name, int len,
 			break;
 	if (!pid || i >= NR_TASKS)
 		return -ENOENT;
-	if (!ino) {
-		if (fd >= NR_OPEN || !p->filp[fd] || !p->filp[fd]->f_inode)
-			return -ENOENT;
-		ino = (pid << 16) + 0x100 + fd;
-	} else {
-		int j = 0;
-		struct vm_area_struct * mpnt;
-		for (mpnt = p->mmap; mpnt; mpnt = mpnt->vm_next)
-			if (mpnt->vm_inode)
-				j++;
-		if (fd >= j)
-			return -ENOENT;
-		ino = (pid << 16) + 0x200 + fd;
-	}
+
+	if (fd >= NR_OPEN || !p->files->fd[fd] || !p->files->fd[fd]->f_inode)
+	  return -ENOENT;
+
+	ino = (pid << 16) + (PROC_PID_FD_DIR << 8) + fd;
+
 	if (!(*result = iget(sb,ino)))
 		return -ENOENT;
 	return 0;
@@ -135,8 +126,7 @@ static int proc_readfd(struct inode * inode, struct file * filp,
 	ino = inode->i_ino;
 	pid = ino >> 16;
 	ino &= 0x0000ffff;
-	ino -= 7;
-	if (ino > 1)
+	if (ino != PROC_PID_FD)
 		return 0;
 	while (1) {
 		fd = filp->f_pos;
@@ -146,7 +136,7 @@ static int proc_readfd(struct inode * inode, struct file * filp,
 			if (!fd)
 				fd = inode->i_ino;
 			else
-				fd = (inode->i_ino & 0xffff0000) | 2;
+				fd = (inode->i_ino & 0xffff0000) | PROC_PID_INO;
 			put_fs_long(fd, &dirent->d_ino);
 			put_fs_word(i, &dirent->d_reclen);
 			put_fs_byte(0, i+dirent->d_name);
@@ -160,20 +150,12 @@ static int proc_readfd(struct inode * inode, struct file * filp,
 				break;
 		if (i >= NR_TASKS)
 			return 0;
-		if (!ino) {
-			if (fd >= NR_OPEN)
-				break;
-			if (!p->filp[fd] || !p->filp[fd]->f_inode)
-				continue;
-		} else {
-			int j = 0;
-			struct vm_area_struct * mpnt;
-			for (mpnt = p->mmap ; mpnt ; mpnt = mpnt->vm_next)
-				if (mpnt->vm_inode)
-					j++;
-			if (fd >= j)
-				break;
-		}
+		if (fd >= NR_OPEN)
+		  break;
+
+		if (!p->files->fd[fd] || !p->files->fd[fd]->f_inode)
+		  continue;
+
 		j = 10;
 		i = 1;
 		while (fd >= j) {
@@ -181,10 +163,8 @@ static int proc_readfd(struct inode * inode, struct file * filp,
 			i++;
 		}
 		j = i;
-		if (!ino)
-			ino = (pid << 16) + 0x100 + fd;
-		else
-			ino = (pid << 16) + 0x200 + fd;
+		ino = (pid << 16) + (PROC_PID_FD_DIR << 8) + fd;
+
 		put_fs_long(ino, &dirent->d_ino);
 		put_fs_word(i, &dirent->d_reclen);
 		put_fs_byte(0, i+dirent->d_name);

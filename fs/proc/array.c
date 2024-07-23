@@ -1,3 +1,4 @@
+#define THREE_LEVEL
 /*
  *  linux/fs/proc/array.c
  *
@@ -10,9 +11,21 @@
  *
  * Pauline Middelink :  Made cmdline,envline only break at '\0's, to
  *                      make sure SET_PROCTITLE works. Also removed
- *                      bad '!' which forced addres recalculation for
+ *                      bad '!' which forced address recalculation for
  *                      EVERY character on the current page.
- *                      <middelin@calvin.iaf.nl>
+ *                      <middelin@polyware.iaf.nl>
+ *
+ * Danny ter Haar    :	Some minor additions for cpuinfo
+ *			<danny@ow.nl>
+ *
+ * Alessandro Rubini :  profile extension.
+ *                      <rubini@ipvvis.unipv.it>
+ *
+ * Jeff Tranter      :  added BogoMips field to cpuinfo
+ *                      <Jeff_Tranter@Mitel.COM>
+ *
+ * Bruno Haible      :  remove 4K limit for the maps file
+ * <haible@ma2s2.mathematik.uni-karlsruhe.de>
  */
 
 #include <linux/types.h>
@@ -25,8 +38,14 @@
 #include <linux/a.out.h>
 #include <linux/string.h>
 #include <linux/mman.h>
+#include <linux/proc_fs.h>
+#include <linux/ioport.h>
+#include <linux/config.h>
+#include <linux/delay.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
+#include <asm/pgtable.h>
 #include <asm/io.h>
 
 #define LOAD_INT(x) ((x) >> FSHIFT)
@@ -35,6 +54,7 @@
 #ifdef CONFIG_DEBUG_MALLOC
 int get_malloc(char * buffer);
 #endif
+
 
 static int read_core(struct inode * inode, struct file * file,char * buf, int count)
 {
@@ -80,6 +100,75 @@ static int read_core(struct inode * inode, struct file * file,char * buf, int co
 	file->f_pos += read;
 	return read;
 }
+
+static struct file_operations proc_kcore_operations = {
+	NULL,           /* lseek */
+	read_core,
+};
+
+struct inode_operations proc_kcore_inode_operations = {
+	&proc_kcore_operations, 
+};
+
+
+#ifdef CONFIG_PROFILE
+
+extern unsigned long prof_len;
+extern unsigned long * prof_buffer;
+/*
+ * This function accesses profiling information. The returned data is
+ * binary: the sampling step and the actual contents of the profile
+ * buffer. Use of the program readprofile is recommended in order to
+ * get meaningful info out of these data.
+ */
+static int read_profile(struct inode *inode, struct file *file, char *buf, int count)
+{
+    unsigned long p = file->f_pos;
+	int read;
+	char * pnt;
+	unsigned long sample_step = 1 << CONFIG_PROFILE_SHIFT;
+
+	if (count < 0)
+	    return -EINVAL;
+	if (p >= (prof_len+1)*sizeof(unsigned long))
+	    return 0;
+	if (count > (prof_len+1)*sizeof(unsigned long) - p)
+	    count = (prof_len+1)*sizeof(unsigned long) - p;
+    read = 0;
+
+    while (p < sizeof(unsigned long) && count > 0) {
+        put_fs_byte(*((char *)(&sample_step)+p),buf);
+		buf++; p++; count--; read++;
+    }
+    pnt = (char *)prof_buffer + p - sizeof(unsigned long);
+	memcpy_tofs(buf,(void *)pnt,count);
+	read += count;
+	file->f_pos += read;
+	return read;
+}
+
+/* Writing to /proc/profile resets the counters */
+static int write_profile(struct inode * inode, struct file * file, char * buf, int count)
+{
+    int i=prof_len;
+
+    while (i--)
+	    prof_buffer[i]=0UL;
+    return count;
+}
+
+static struct file_operations proc_profile_operations = {
+	NULL,           /* lseek */
+	read_profile,
+	write_profile,
+};
+
+struct inode_operations proc_profile_inode_operations = {
+	&proc_profile_operations, 
+};
+
+#endif /* CONFIG_PROFILE */
+
 
 static int get_loadavg(char * buffer)
 {
@@ -138,11 +227,29 @@ static int get_uptime(char * buffer)
 
 	uptime = jiffies;
 	idle = task[0]->utime + task[0]->stime;
+
+	/* The formula for the fraction parts really is ((t * 100) / HZ) % 100, but
+	   that would overflow about every five days at HZ == 100.
+	   Therefore the identity a = (a / b) * b + a % b is used so that it is
+	   calculated as (((t / HZ) * 100) + ((t % HZ) * 100) / HZ) % 100.
+	   The part in front of the '+' always evaluates as 0 (mod 100). All divisions
+	   in the above formulas are truncating. For HZ being a power of 10, the
+	   calculations simplify to the version in the #else part (if the printf
+	   format is adapted to the same number of digits as zeroes in HZ.
+	 */
+#if HZ!=100
+	return sprintf(buffer,"%lu.%02lu %lu.%02lu\n",
+		uptime / HZ,
+		(((uptime % HZ) * 100) / HZ) % 100,
+		idle / HZ,
+		(((idle % HZ) * 100) / HZ) % 100);
+#else
 	return sprintf(buffer,"%lu.%02lu %lu.%02lu\n",
 		uptime / HZ,
 		uptime % HZ,
 		idle / HZ,
 		idle % HZ);
+#endif
 }
 
 static int get_meminfo(char * buffer)
@@ -166,6 +273,56 @@ static int get_version(char * buffer)
 	return strlen(buffer);
 }
 
+static int get_cpuinfo(char * buffer)
+{
+#ifdef __i386__
+	char *model[2][9]={{"DX","SX","DX/2","4","SX/2","6",
+				"DX/2-WB","DX/4"},
+			{"Pentium 60/66","Pentium 90/100","3",
+				"4","5","6","7","8"}};
+	char mask[2];
+	mask[0] = x86_mask+'@';
+	mask[1] = '\0';
+	return sprintf(buffer,"cpu\t\t: %c86\n"
+			      "model\t\t: %s\n"
+			      "mask\t\t: %s\n"
+			      "vid\t\t: %s\n"
+			      "fdiv_bug\t: %s\n"
+			      "math\t\t: %s\n"
+			      "hlt\t\t: %s\n"
+			      "wp\t\t: %s\n"
+			      "Integrated NPU\t: %s\n"
+			      "Enhanced VM86\t: %s\n"
+			      "IO Breakpoints\t: %s\n"
+			      "4MB Pages\t: %s\n"
+			      "TS Counters\t: %s\n"
+			      "Pentium MSR\t: %s\n"
+			      "Mach. Ch. Exep.\t: %s\n"
+			      "CMPXCHGB8B\t: %s\n"
+		              "BogoMips\t: %lu.%02lu\n",
+			      x86+'0', 
+			      x86_model ? model[x86-4][x86_model-1] : "Unknown",
+			      x86_mask ? mask : "Unknown",
+			      x86_vendor_id,
+			      fdiv_bug ? "yes" : "no",
+			      hard_math ? "yes" : "no",
+			      hlt_works_ok ? "yes" : "no",
+			      wp_works_ok ? "yes" : "no",
+			      x86_capability & 1 ? "yes" : "no",
+			      x86_capability & 2 ? "yes" : "no",
+			      x86_capability & 4 ? "yes" : "no",
+			      x86_capability & 8 ? "yes" : "no",
+			      x86_capability & 16 ? "yes" : "no",
+			      x86_capability & 32 ? "yes" : "no",
+			      x86_capability & 128 ? "yes" : "no",
+			      x86_capability & 256 ? "yes" : "no",
+		              loops_per_sec/500000, (loops_per_sec/5000) % 100
+			      );
+#else
+	return 0;
+#endif
+}
+
 static struct task_struct ** get_task(pid_t pid)
 {
 	struct task_struct ** p;
@@ -178,23 +335,34 @@ static struct task_struct ** get_task(pid_t pid)
 	return NULL;
 }
 
-static unsigned long get_phys_addr(struct task_struct ** p, unsigned long ptr)
+static unsigned long get_phys_addr(struct task_struct * p, unsigned long ptr)
 {
-	unsigned long page;
+	pgd_t *page_dir;
+	pmd_t *page_middle;
+	pte_t pte;
 
-	if (!p || !*p || ptr >= TASK_SIZE)
+	if (!p || ptr >= TASK_SIZE)
 		return 0;
-	page = *PAGE_DIR_OFFSET((*p)->tss.cr3,ptr);
-	if (!(page & PAGE_PRESENT))
+	page_dir = pgd_offset(p,ptr);
+	if (pgd_none(*page_dir))
 		return 0;
-	page &= PAGE_MASK;
-	page += PAGE_PTR(ptr);
-	page = *(unsigned long *) page;
-	if (!(page & PAGE_PRESENT))
+	if (pgd_bad(*page_dir)) {
+		printk("bad page directory entry %08lx\n", pgd_val(*page_dir));
+		pgd_clear(page_dir);
 		return 0;
-	page &= PAGE_MASK;
-	page += ptr & ~PAGE_MASK;
-	return page;
+	}
+	page_middle = pmd_offset(page_dir,ptr);
+	if (pmd_none(*page_middle))
+		return 0;
+	if (pmd_bad(*page_middle)) {
+		printk("bad page middle entry %08lx\n", pmd_val(*page_middle));
+		pmd_clear(page_middle);
+		return 0;
+	}
+	pte = *pte_offset(page_middle,ptr);
+	if (!pte_present(pte))
+		return 0;
+	return pte_page(pte) + (ptr & ~PAGE_MASK);
 }
 
 static int get_array(struct task_struct ** p, unsigned long start, unsigned long end, char * buffer)
@@ -206,7 +374,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 	if (start >= end)
 		return result;
 	for (;;) {
-		addr = get_phys_addr(p, start);
+		addr = get_phys_addr(*p, start);
 		if (!addr)
 			goto ready;
 		do {
@@ -224,7 +392,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 		} while (addr & ~PAGE_MASK);
 	}
 ready:
-	/* remove the trailing blanks, used to fillout argv,envp space */
+	/* remove the trailing blanks, used to fill out argv,envp space */
 	while (result>0 && buffer[result-1]==' ')
 		result--;
 	return result;
@@ -236,7 +404,7 @@ static int get_env(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->env_start, (*p)->env_end, buffer);
+	return get_array(p, (*p)->mm->env_start, (*p)->mm->env_end, buffer);
 }
 
 static int get_arg(int pid, char * buffer)
@@ -245,11 +413,12 @@ static int get_arg(int pid, char * buffer)
 
 	if (!p || !*p)
 		return 0;
-	return get_array(p, (*p)->arg_start, (*p)->arg_end, buffer);
+	return get_array(p, (*p)->mm->arg_start, (*p)->mm->arg_end, buffer);
 }
 
 static unsigned long get_wchan(struct task_struct *p)
 {
+#ifdef __i386__
 	unsigned long ebp, eip;
 	unsigned long stack_page;
 	int count = 0;
@@ -269,6 +438,7 @@ static unsigned long get_wchan(struct task_struct *p)
 			return eip;
 		ebp = *(unsigned long *) ebp;
 	} while (count++ < 16);
+#endif
 	return 0;
 }
 
@@ -294,25 +464,24 @@ static int get_stat(int pid, char * buffer)
 	if (vsize) {
 		eip = KSTK_EIP(vsize);
 		esp = KSTK_ESP(vsize);
-		vsize = (*p)->brk - (*p)->start_code + PAGE_SIZE-1;
+		vsize = (*p)->mm->brk - (*p)->mm->start_code + PAGE_SIZE-1;
 		if (esp)
 			vsize += TASK_SIZE - esp;
 	}
 	wchan = get_wchan(*p);
 	for(i=0; i<32; ++i) {
-		switch((int) (*p)->sigaction[i].sa_handler) {
+		switch((unsigned long) (*p)->sigaction[i].sa_handler) {
 		case 1: sigignore |= bit; break;
 		case 0: break;
 		default: sigcatch |= bit;
 		} bit <<= 1;
 	}
-	tty_pgrp = (*p)->tty;
-	if (tty_pgrp > 0 && tty_table[tty_pgrp])
-		tty_pgrp = tty_table[tty_pgrp]->pgrp;
+	if ((*p)->tty)
+		tty_pgrp = (*p)->tty->pgrp;
 	else
 		tty_pgrp = -1;
 	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %u %u %lu %lu %lu %lu %lu %lu \
+%lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu\n",
 		pid,
 		(*p)->comm,
@@ -320,13 +489,13 @@ static int get_stat(int pid, char * buffer)
 		(*p)->p_pptr->pid,
 		(*p)->pgrp,
 		(*p)->session,
-		(*p)->tty,
+	        (*p)->tty ? (*p)->tty->device : 0,
 		tty_pgrp,
 		(*p)->flags,
-		(*p)->min_flt,
-		(*p)->cmin_flt,
-		(*p)->maj_flt,
-		(*p)->cmaj_flt,
+		(*p)->mm->min_flt,
+		(*p)->mm->cmin_flt,
+		(*p)->mm->maj_flt,
+		(*p)->mm->cmaj_flt,
 		(*p)->utime,
 		(*p)->stime,
 		(*p)->cutime,
@@ -339,11 +508,11 @@ static int get_stat(int pid, char * buffer)
 		(*p)->it_real_value,
 		(*p)->start_time,
 		vsize,
-		(*p)->rss, /* you might want to shift this left 3 */
+		(*p)->mm->rss, /* you might want to shift this left 3 */
 		(*p)->rlim[RLIMIT_RSS].rlim_cur,
-		(*p)->start_code,
-		(*p)->end_code,
-		(*p)->start_stack,
+		(*p)->mm->start_code,
+		(*p)->mm->end_code,
+		(*p)->mm->start_stack,
 		esp,
 		eip,
 		(*p)->signal,
@@ -352,98 +521,181 @@ static int get_stat(int pid, char * buffer)
 		sigcatch,
 		wchan);
 }
+		
+static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned long size,
+	int * pages, int * shared, int * dirty, int * total)
+{
+	pte_t * pte;
+	unsigned long end;
+
+	if (pmd_none(*pmd))
+		return;
+	if (pmd_bad(*pmd)) {
+		printk("statm_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_clear(pmd);
+		return;
+	}
+	pte = pte_offset(pmd, address);
+	address &= ~PMD_MASK;
+	end = address + size;
+	if (end > PMD_SIZE)
+		end = PMD_SIZE;
+	do {
+		pte_t page = *pte;
+
+		address += PAGE_SIZE;
+		pte++;
+		if (pte_none(page))
+			continue;
+		++*total;
+		if (!pte_present(page))
+			continue;
+		++*pages;
+		if (pte_dirty(page))
+			++*dirty;
+		if (pte_page(page) >= high_memory)
+			continue;
+		if (mem_map[MAP_NR(pte_page(page))] > 1)
+			++*shared;
+	} while (address < end);
+}
+
+static inline void statm_pmd_range(pgd_t * pgd, unsigned long address, unsigned long size,
+	int * pages, int * shared, int * dirty, int * total)
+{
+	pmd_t * pmd;
+	unsigned long end;
+
+	if (pgd_none(*pgd))
+		return;
+	if (pgd_bad(*pgd)) {
+		printk("statm_pmd_range: bad pgd (%08lx)\n", pgd_val(*pgd));
+		pgd_clear(pgd);
+		return;
+	}
+	pmd = pmd_offset(pgd, address);
+	address &= ~PGDIR_MASK;
+	end = address + size;
+	if (end > PGDIR_SIZE)
+		end = PGDIR_SIZE;
+	do {
+		statm_pte_range(pmd, address, end - address, pages, shared, dirty, total);
+		address = (address + PMD_SIZE) & PMD_MASK;
+		pmd++;
+	} while (address < end);
+}
+
+static void statm_pgd_range(pgd_t * pgd, unsigned long address, unsigned long end,
+	int * pages, int * shared, int * dirty, int * total)
+{
+	while (address < end) {
+		statm_pmd_range(pgd, address, end - address, pages, shared, dirty, total);
+		address = (address + PGDIR_SIZE) & PGDIR_MASK;
+		pgd++;
+	}
+}
 
 static int get_statm(int pid, char * buffer)
 {
 	struct task_struct ** p = get_task(pid);
-	int i, tpag;
 	int size=0, resident=0, share=0, trs=0, lrs=0, drs=0, dt=0;
-	unsigned long ptbl, *buf, *pte, *pagedir, map_nr;
 
 	if (!p || !*p)
 		return 0;
-	tpag = (*p)->end_code / PAGE_SIZE;
 	if ((*p)->state != TASK_ZOMBIE) {
-	  pagedir = (unsigned long *) (*p)->tss.cr3;
-	  for (i = 0; i < 0x300; ++i) {
-	    if ((ptbl = pagedir[i]) == 0) {
-	      tpag -= PTRS_PER_PAGE;
-	      continue;
-	    }
-	    buf = (unsigned long *)(ptbl & PAGE_MASK);
-	    for (pte = buf; pte < (buf + PTRS_PER_PAGE); ++pte) {
-	      if (*pte != 0) {
-		++size;
-		if (*pte & 1) {
-		  ++resident;
-		  if (tpag > 0)
-		    ++trs;
-		  else
-		    ++drs;
-		  if (i >= 15 && i < 0x2f0) {
-		    ++lrs;
-		    if (*pte & 0x40)
-		      ++dt;
-		    else
-		      --drs;
-		  }
-		  map_nr = MAP_NR(*pte);
-		  if (map_nr < (high_memory / PAGE_SIZE) && mem_map[map_nr] > 1)
-		    ++share;
+		struct vm_area_struct * vma = (*p)->mm->mmap;
+
+		while (vma) {
+			pgd_t *pgd = pgd_offset(*p, vma->vm_start);
+			int pages = 0, shared = 0, dirty = 0, total = 0;
+
+			statm_pgd_range(pgd, vma->vm_start, vma->vm_end, &pages, &shared, &dirty, &total);
+			resident += pages;
+			share += shared;
+			dt += dirty;
+			size += total;
+			if (vma->vm_flags & VM_EXECUTABLE)
+				trs += pages;	/* text */
+			else if (vma->vm_flags & VM_GROWSDOWN)
+				drs += pages;	/* stack */
+			else if (vma->vm_end > 0x60000000)
+				lrs += pages;	/* library */
+			else
+				drs += pages;
+			vma = vma->vm_next;
 		}
-	      }
-	      --tpag;
-	    }
-	  }
 	}
 	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
 		       size, resident, share, trs, lrs, drs, dt);
 }
 
-static int get_maps(int pid, char *buf)
+/*
+ * The way we support synthetic files > 4K
+ * - without storing their contents in some buffer and
+ * - without walking through the entire synthetic file until we reach the
+ *   position of the requested data
+ * is to cleverly encode the current position in the file's f_pos field.
+ * There is no requirement that a read() call which returns `count' bytes
+ * of data increases f_pos by exactly `count'.
+ *
+ * This idea is Linus' one. Bruno implemented it.
+ */
+
+/*
+ * For the /proc/<pid>/maps file, we use fixed length records, each containing
+ * a single line.
+ */
+#define MAPS_LINE_LENGTH	1024
+#define MAPS_LINE_SHIFT		10
+/*
+ * f_pos = (number of the vma in the task->mm->mmap list) * MAPS_LINE_LENGTH
+ *         + (index into the line)
+ */
+#define MAPS_LINE_FORMAT	  "%08lx-%08lx %s %08lx %02x:%02x %lu\n"
+#define MAPS_LINE_MAX	49 /* sum of 8  1  8  1 4 1 8  1  2 1  2 1 10 1 */
+
+static int read_maps (int pid, struct file * file, char * buf, int count)
 {
-	int sz = 0;
-	struct task_struct **p = get_task(pid);
-	struct vm_area_struct *map;
+	struct task_struct ** p = get_task(pid);
+	char * destptr;
+	loff_t lineno;
+	int column;
+	struct vm_area_struct * map;
+	int i;
 
 	if (!p || !*p)
+		return -EINVAL;
+
+	if (count == 0)
 		return 0;
 
-	for(map = (*p)->mmap; map != NULL; map = map->vm_next) {
-		char str[7], *cp = str;
-		int prot = map->vm_page_prot;
-		int perms, flags;
-		int end = sz + 80;	/* Length of line */
+	/* decode f_pos */
+	lineno = file->f_pos >> MAPS_LINE_SHIFT;
+	column = file->f_pos & (MAPS_LINE_LENGTH-1);
+
+	/* quickly go to line lineno */
+	for (map = (*p)->mm->mmap, i = 0; map && (i < lineno); map = map->vm_next, i++)
+		continue;
+
+	destptr = buf;
+
+	for ( ; map ; ) {
+		/* produce the next line */
+		char line[MAPS_LINE_MAX+1];
+		char str[5], *cp = str;
+		int flags;
 		dev_t dev;
 		unsigned long ino;
+		int len;
 
-		/*
-		 * This tries to get an "rwxsp" string out of silly
-		 * intel page permissions.  The vm_area_struct should
-		 * probably have the original mmap args preserved.
-		 */
-		
-		flags = perms = 0;
+		flags = map->vm_flags;
 
-		if ((prot & PAGE_READONLY) == PAGE_READONLY)
-			perms |= PROT_READ | PROT_EXEC;
-		if (prot & (PAGE_COW|PAGE_RW)) {
-			perms |= PROT_WRITE | PROT_READ;
-			flags = prot & PAGE_COW ? MAP_PRIVATE : MAP_SHARED;
-		}
-
-		*cp++ = perms & PROT_READ ? 'r' : '-';
-		*cp++ = perms & PROT_WRITE ? 'w' : '-';
-		*cp++ = perms & PROT_EXEC ? 'x' : '-';
-		*cp++ = flags & MAP_SHARED ? 's' : '-';
-		*cp++ = flags & MAP_PRIVATE ? 'p' : '-';
+		*cp++ = flags & VM_READ ? 'r' : '-';
+		*cp++ = flags & VM_WRITE ? 'w' : '-';
+		*cp++ = flags & VM_EXEC ? 'x' : '-';
+		*cp++ = flags & VM_MAYSHARE ? 's' : 'p';
 		*cp++ = 0;
-		
-		if (end >= PAGE_SIZE) {
-			sprintf(buf+sz, "...\n");
-			break;
-		}
-		
+
 		if (map->vm_inode != NULL) {
 			dev = map->vm_inode->i_dev;
 			ino = map->vm_inode->i_ino;
@@ -452,89 +704,161 @@ static int get_maps(int pid, char *buf)
 			ino = 0;
 		}
 
-		sz += sprintf(buf+sz, "%08lx-%08lx %s %08lx %02x:%02x %lu\n",
+		len = sprintf(line, MAPS_LINE_FORMAT,
 			      map->vm_start, map->vm_end, str, map->vm_offset,
 			      MAJOR(dev),MINOR(dev), ino);
-		if (sz > end) {
-			printk("get_maps: end(%d) < sz(%d)\n", end, sz);
-			break;
+
+		if (column >= len) {
+			column = 0; /* continue with next line at column 0 */
+			lineno++;
+			map = map->vm_next;
+			continue;
 		}
+
+		i = len-column;
+		if (i > count)
+			i = count;
+		memcpy_tofs(destptr, line+column, i);
+		destptr += i; count -= i;
+		column += i;
+		if (column >= len) {
+			column = 0; /* next time: next line at column 0 */
+			lineno++;
+			map = map->vm_next;
+		}
+
+		/* done? */
+		if (count == 0)
+			break;
+
+		/* By writing to user space, we might have slept.
+		 * Stop the loop, to avoid a race condition.
+		 */
+		if (*p != current)
+			break;
 	}
-	
-	return sz;
+
+	/* encode f_pos */
+	file->f_pos = (lineno << MAPS_LINE_SHIFT) + column;
+
+	return destptr-buf;
 }
 
 extern int get_module_list(char *);
+extern int get_device_list(char *);
+extern int get_filesystem_list(char *);
+extern int get_ksyms_list(char *);
+extern int get_irq_list(char *);
+extern int get_dma_list(char *);
+extern int get_cpuinfo(char *);
+extern int get_pci_list(char*);
+
+static int get_root_array(char * page, int type)
+{
+	switch (type) {
+		case PROC_LOADAVG:
+			return get_loadavg(page);
+
+		case PROC_UPTIME:
+			return get_uptime(page);
+
+		case PROC_MEMINFO:
+			return get_meminfo(page);
+
+#ifdef CONFIG_PCI
+  	        case PROC_PCI:
+			return get_pci_list(page);
+#endif
+			
+		case PROC_CPUINFO:
+			return get_cpuinfo(page);
+
+		case PROC_VERSION:
+			return get_version(page);
+
+#ifdef CONFIG_DEBUG_MALLOC
+		case PROC_MALLOC:
+			return get_malloc(page);
+#endif
+
+		case PROC_MODULES:
+			return get_module_list(page);
+
+		case PROC_STAT:
+			return get_kstat(page);
+
+		case PROC_DEVICES:
+			return get_device_list(page);
+
+		case PROC_INTERRUPTS:
+			return get_irq_list(page);
+
+		case PROC_FILESYSTEMS:
+			return get_filesystem_list(page);
+
+		case PROC_KSYMS:
+			return get_ksyms_list(page);
+
+		case PROC_DMA:
+			return get_dma_list(page);
+
+		case PROC_IOPORTS:
+			return get_ioport_list(page);
+	}
+	return -EBADF;
+}
+
+static int get_process_array(char * page, int pid, int type)
+{
+	switch (type) {
+		case PROC_PID_ENVIRON:
+			return get_env(pid, page);
+		case PROC_PID_CMDLINE:
+			return get_arg(pid, page);
+		case PROC_PID_STAT:
+			return get_stat(pid, page);
+		case PROC_PID_STATM:
+			return get_statm(pid, page);
+	}
+	return -EBADF;
+}
+
+
+static inline int fill_array(char * page, int pid, int type)
+{
+	if (pid)
+		return get_process_array(page, pid, type);
+	return get_root_array(page, type);
+}
 
 static int array_read(struct inode * inode, struct file * file,char * buf, int count)
 {
-	char * page;
+	unsigned long page;
 	int length;
 	int end;
 	unsigned int type, pid;
 
 	if (count < 0)
 		return -EINVAL;
-	if (!(page = (char*) __get_free_page(GFP_KERNEL)))
+	if (!(page = __get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
 	type = inode->i_ino;
 	pid = type >> 16;
 	type &= 0x0000ffff;
-	switch (type) {
-		case 2:
-			length = get_loadavg(page);
-			break;
-		case 3:
-			length = get_uptime(page);
-			break;
-		case 4:
-			length = get_meminfo(page);
-			break;
-		case 6:
-			length = get_version(page);
-			break;
-		case 9:
-			length = get_env(pid, page);
-			break;
-		case 10:
-			length = get_arg(pid, page);
-			break;
-		case 11:
-			length = get_stat(pid, page);
-			break;
-		case 12:
-			length = get_statm(pid, page);
-			break;
-#ifdef CONFIG_DEBUG_MALLOC
-		case 13:
-			length = get_malloc(page);
-			break;
-#endif
-		case 14:
-			free_page((unsigned long) page);
-			return read_core(inode, file, buf, count);
-		case 15:
-			length = get_maps(pid, page);
-			break;
-		case 16:
-			length = get_module_list(page);
-			break;
-		case 17:
-			length = get_kstat(page);
-			break;
-		default:
-			free_page((unsigned long) page);
-			return -EBADF;
+	length = fill_array((char *) page, pid, type);
+	if (length < 0) {
+		free_page(page);
+		return length;
 	}
 	if (file->f_pos >= length) {
-		free_page((unsigned long) page);
+		free_page(page);
 		return 0;
 	}
 	if (count + file->f_pos > length)
 		count = length - file->f_pos;
 	end = count + file->f_pos;
-	memcpy_tofs(buf, page + file->f_pos, count);
-	free_page((unsigned long) page);
+	memcpy_tofs(buf, (char *) page + file->f_pos, count);
+	free_page(page);
 	file->f_pos = end;
 	return count;
 }
@@ -554,6 +878,52 @@ static struct file_operations proc_array_operations = {
 
 struct inode_operations proc_array_inode_operations = {
 	&proc_array_operations,	/* default base directory file-ops */
+	NULL,			/* create */
+	NULL,			/* lookup */
+	NULL,			/* link */
+	NULL,			/* unlink */
+	NULL,			/* symlink */
+	NULL,			/* mkdir */
+	NULL,			/* rmdir */
+	NULL,			/* mknod */
+	NULL,			/* rename */
+	NULL,			/* readlink */
+	NULL,			/* follow_link */
+	NULL,			/* bmap */
+	NULL,			/* truncate */
+	NULL			/* permission */
+};
+
+static int arraylong_read (struct inode * inode, struct file * file, char * buf, int count)
+{
+	unsigned int pid = inode->i_ino >> 16;
+	unsigned int type = inode->i_ino & 0x0000ffff;
+
+	if (count < 0)
+		return -EINVAL;
+
+	switch (type) {
+		case PROC_PID_MAPS:
+			return read_maps(pid, file, buf, count);
+	}
+	return -EINVAL;
+}
+
+static struct file_operations proc_arraylong_operations = {
+	NULL,		/* array_lseek */
+	arraylong_read,
+	NULL,		/* array_write */
+	NULL,		/* array_readdir */
+	NULL,		/* array_select */
+	NULL,		/* array_ioctl */
+	NULL,		/* mmap */
+	NULL,		/* no special open code */
+	NULL,		/* no special release code */
+	NULL		/* can't fsync */
+};
+
+struct inode_operations proc_arraylong_inode_operations = {
+	&proc_arraylong_operations,	/* default base directory file-ops */
 	NULL,			/* create */
 	NULL,			/* lookup */
 	NULL,			/* link */
