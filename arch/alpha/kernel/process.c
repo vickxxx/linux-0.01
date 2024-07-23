@@ -25,6 +25,7 @@
 #include <linux/major.h>
 #include <linux/stat.h>
 #include <linux/mman.h>
+#include <linux/elfcore.h>
 
 #include <asm/reg.h>
 #include <asm/segment.h>
@@ -77,6 +78,17 @@ void show_regs(struct pt_regs * regs)
 	       regs->r23, regs->r24, regs->r25, regs->r26);
 	printk("r27: %016lx r28: %016lx r29: %016lx hae: %016lx\n",
 	       regs->r27, regs->r28, regs->gp, regs->hae);
+}
+
+/*
+ * Re-start a thread when doing execve()
+ */
+void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
+{
+	set_fs(USER_DS);
+	regs->pc = pc;
+	regs->ps = 8;
+	wrusp(sp);
 }
 
 /*
@@ -145,7 +157,8 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	childstack->r26 = (unsigned long) ret_from_sys_call;
 	p->tss.usp = usp;
 	p->tss.ksp = (unsigned long) childstack;
-	p->tss.flags = 1;
+	p->tss.pal_flags = 1;	/* set FEN, clear everything else */
+	p->tss.flags = current->tss.flags;
 	p->mm->context = 0;
 }
 
@@ -205,6 +218,14 @@ void dump_thread(struct pt_regs * pt, struct user * dump)
 	dump->regs[EF_A1]  = pt->r17;
 	dump->regs[EF_A2]  = pt->r18;
 	memcpy((char *)dump->regs + EF_SIZE, sw->fp, 32 * 8);
+}
+
+int dump_fpu (struct pt_regs * regs, elf_fpregset_t *r)
+{
+	/* switch stack follows right below pt_regs: */
+	struct switch_stack * sw = ((struct switch_stack *) regs) - 1;
+	memcpy(r, sw->fp, 32 * 8);
+	return 1;
 }
 
 /*

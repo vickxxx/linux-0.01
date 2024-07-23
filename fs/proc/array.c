@@ -25,6 +25,9 @@
  *
  * Bruno Haible      :  remove 4K limit for the maps file
  * <haible@ma2s2.mathematik.uni-karlsruhe.de>
+ *
+ * Yves Arrouye      :  remove removal of trailing spaces in get_array.
+ *			<Yves.Arrouye@marin.fdn.fr>
  */
 
 #include <linux/types.h>
@@ -56,7 +59,8 @@ int get_malloc(char * buffer);
 #endif
 
 
-static int read_core(struct inode * inode, struct file * file,char * buf, int count)
+static long read_core(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned long p = file->f_pos, memsize;
 	int read;
@@ -71,14 +75,12 @@ static int read_core(struct inode * inode, struct file * file,char * buf, int co
 
 	memset(&dump, 0, sizeof(struct user));
 	dump.magic = CMAGIC;
-	dump.u_dsize = MAP_NR(high_memory);
+	dump.u_dsize = max_mapnr;
 #ifdef __alpha__
 	dump.start_data = PAGE_OFFSET;
 #endif
 
-	if (count < 0)
-		return -EINVAL;
-	memsize = MAP_NR(high_memory + PAGE_SIZE) << PAGE_SHIFT;
+	memsize = (max_mapnr + 1) << PAGE_SHIFT;
 	if (p >= memsize)
 		return 0;
 	if (count > memsize - p)
@@ -126,15 +128,14 @@ struct inode_operations proc_kcore_inode_operations = {
  * buffer. Use of the program readprofile is recommended in order to
  * get meaningful info out of these data.
  */
-static int read_profile(struct inode *inode, struct file *file, char *buf, int count)
+static long read_profile(struct inode *inode, struct file *file,
+	char *buf, unsigned long count)
 {
 	unsigned long p = file->f_pos;
 	int read;
 	char * pnt;
 	unsigned int sample_step = 1 << prof_shift;
 
-	if (count < 0)
-		return -EINVAL;
 	if (p >= (prof_len+1)*sizeof(unsigned int))
 		return 0;
 	if (count > (prof_len+1)*sizeof(unsigned int) - p)
@@ -153,7 +154,8 @@ static int read_profile(struct inode *inode, struct file *file, char *buf, int c
 }
 
 /* Writing to /proc/profile resets the counters */
-static int write_profile(struct inode * inode, struct file * file, const char * buf, int count)
+static long write_profile(struct inode * inode, struct file * file,
+	const char * buf, unsigned long count)
 {
     int i=prof_len;
 
@@ -370,7 +372,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 	for (;;) {
 		addr = get_phys_addr(*p, start);
 		if (!addr)
-			goto ready;
+			return result;
 		do {
 			c = *(char *) addr;
 			if (!c)
@@ -378,17 +380,13 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 			if (size < PAGE_SIZE)
 				buffer[size++] = c;
 			else
-				goto ready;
+				return result;
 			addr++;
 			start++;
 			if (!c && start >= end)
-				goto ready;
+				return result;
 		} while (addr & ~PAGE_MASK);
 	}
-ready:
-	/* remove the trailing blanks, used to fill out argv,envp space */
-	while (result>0 && buffer[result-1]==' ')
-		result--;
 	return result;
 }
 
@@ -428,8 +426,8 @@ static unsigned long get_wchan(struct task_struct *p)
 			if (ebp < stack_page || ebp >= 4092+stack_page)
 				return 0;
 			eip = *(unsigned long *) (ebp+4);
-			if ((void *)eip != sleep_on &&
-			    (void *)eip != interruptible_sleep_on)
+			if (eip < (unsigned long) interruptible_sleep_on
+			    || eip >= (unsigned long) add_timer)
 				return eip;
 			ebp = *(unsigned long *) ebp;
 		} while (count++ < 16);
@@ -763,7 +761,7 @@ static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned 
 		++*pages;
 		if (pte_dirty(page))
 			++*dirty;
-		if (pte_page(page) >= high_memory)
+		if (MAP_NR(pte_page(page)) >= max_mapnr)
 			continue;
 		if (mem_map[MAP_NR(pte_page(page))].count > 1)
 			++*shared;
@@ -861,15 +859,19 @@ static int get_statm(int pid, char * buffer)
  * f_pos = (number of the vma in the task->mm->mmap list) * MAPS_LINE_LENGTH
  *         + (index into the line)
  */
-#ifdef __alpha__
-#define MAPS_LINE_FORMAT	  "%016lx-%016lx %s %016lx %s %lu\n"
-#define MAPS_LINE_MAX	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
-#else
-#define MAPS_LINE_FORMAT	  "%08lx-%08lx %s %08lx %s %lu\n"
-#define MAPS_LINE_MAX	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
-#endif
+/* for systems with sizeof(void*) == 4: */
+#define MAPS_LINE_FORMAT4	  "%08lx-%08lx %s %08lx %s %lu\n"
+#define MAPS_LINE_MAX4	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
 
-static int read_maps (int pid, struct file * file, char * buf, int count)
+/* for systems with sizeof(void*) == 8: */
+#define MAPS_LINE_FORMAT8	  "%016lx-%016lx %s %016lx %s %lu\n"
+#define MAPS_LINE_MAX8	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
+
+#define MAPS_LINE_MAX	MAPS_LINE_MAX8
+
+
+static long read_maps (int pid, struct file * file,
+	char * buf, unsigned long count)
 {
 	struct task_struct ** p = get_task(pid);
 	char * destptr;
@@ -919,7 +921,8 @@ static int read_maps (int pid, struct file * file, char * buf, int count)
 			ino = 0;
 		}
 
-		len = sprintf(line, MAPS_LINE_FORMAT,
+		len = sprintf(line,
+			      sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8,
 			      map->vm_start, map->vm_end, str, map->vm_offset,
 			      kdevname(dev), ino);
 
@@ -977,7 +980,8 @@ extern int get_locks_status (char *);
 extern int get_smp_prof_list(char *);
 #endif
 
-static int get_root_array(char * page, int type, char **start, off_t offset, int length)
+static long get_root_array(char * page, int type, char **start,
+	off_t offset, unsigned long length)
 {
 	switch (type) {
 		case PROC_LOADAVG:
@@ -1080,7 +1084,8 @@ static inline int fill_array(char * page, int pid, int type, char **start, off_t
 
 #define PROC_BLOCK_SIZE	(3*1024)		/* 4K page size but our output routines use some slack for overruns */
 
-static int array_read(struct inode * inode, struct file * file,char * buf, int count)
+static long array_read(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned long page;
 	char *start;
@@ -1089,8 +1094,6 @@ static int array_read(struct inode * inode, struct file * file,char * buf, int c
 	unsigned int type, pid;
 	struct proc_dir_entry *dp;
 
-	if (count < 0)
-		return -EINVAL;
 	if (count > PROC_BLOCK_SIZE)
 		count = PROC_BLOCK_SIZE;
 	if (!(page = __get_free_page(GFP_KERNEL)))
@@ -1164,13 +1167,11 @@ struct inode_operations proc_array_inode_operations = {
 	NULL			/* permission */
 };
 
-static int arraylong_read (struct inode * inode, struct file * file, char * buf, int count)
+static long arraylong_read(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned int pid = inode->i_ino >> 16;
 	unsigned int type = inode->i_ino & 0x0000ffff;
-
-	if (count < 0)
-		return -EINVAL;
 
 	switch (type) {
 		case PROC_PID_MAPS:

@@ -105,6 +105,9 @@
  *                        special help from Jeff Lightfoot 
  *                        <jeffml@netcom.com>
  * 3.15a July 9, 1996 -- Improved Sanyo 3 CD changer identification
+ * 3.16  Jul 28, 1996 -- Fix from Gadi to reduce kernel stack usage for ioctl.
+ * 3.17  Sep 17, 1996 -- Tweak audio reads for some drives.
+ *                       Start changing CDROMLOADFROMSLOT to CDROM_SELECT_DISC.
  *
  * NOTE: Direct audio reads will only work on some types of drive.
  * So far, i've received reports of success for Sony and Toshiba drives.
@@ -131,6 +134,7 @@
 #include <linux/errno.h>
 #include <linux/hdreg.h>
 #include <linux/cdrom.h>
+#include <linux/ucdrom.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/byteorder.h>
@@ -164,6 +168,13 @@
 
 #ifndef NO_DOOR_LOCKING
 #define NO_DOOR_LOCKING 0
+#endif
+
+
+/* Size of buffer to allocate, in blocks, for audio reads. */
+
+#ifndef CDROM_NBLOCKS_BUFFER
+#define CDROM_NBLOCKS_BUFFER 8
 #endif
 
 
@@ -1917,7 +1928,7 @@ int cdrom_get_toc_entry (ide_drive_t *drive, int track,
 
 
 static int
-cdrom_read_block (ide_drive_t *drive, int format, int lba,
+cdrom_read_block (ide_drive_t *drive, int format, int lba, int nblocks,
 		  char *buf, int buflen,
 		  struct atapi_request_sense *reqbuf)
 {
@@ -1943,8 +1954,13 @@ cdrom_read_block (ide_drive_t *drive, int format, int lba,
 
 	pc.c[1] = (format << 2);
 	put_unaligned(htonl(lba), (unsigned int *) &pc.c[2]);
-	pc.c[8] = 1;  /* one block */
-	pc.c[9] = 0x10;
+	pc.c[8] = (nblocks & 0xff);
+	pc.c[7] = ((nblocks>>8) & 0xff);
+	pc.c[6] = ((nblocks>>16) & 0xff);
+	if (format <= 1)
+		pc.c[9] = 0xf0;
+	else
+		pc.c[9] = 0x10;
 
 	stat = cdrom_queue_packet_command (drive, &pc);
 
@@ -1958,8 +1974,8 @@ cdrom_read_block (ide_drive_t *drive, int format, int lba,
 			"trying opcode 0xd4\n",
 			drive->name);
 		CDROM_CONFIG_FLAGS (drive)->old_readcd = 1;
-		return cdrom_read_block (drive, format, lba, buf, buflen,
-					 reqbuf);
+		return cdrom_read_block (drive, format, lba, nblocks,
+					 buf, buflen, reqbuf);
 	}
 #endif  /* not STANDARD_ATAPI */
 
@@ -2308,7 +2324,7 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		int stat, lba;
 		struct atapi_toc *toc;
 		struct cdrom_read_audio ra;
-		char buf[CD_FRAMESIZE_RAW];
+		char *buf;
 
 		/* Make sure the TOC is up to date. */
 		stat = cdrom_read_toc (drive, NULL);
@@ -2342,17 +2358,29 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		if (lba < 0 || lba >= toc->capacity)
 			return -EINVAL;
 
+		buf = (char *) kmalloc (CDROM_NBLOCKS_BUFFER*CD_FRAMESIZE_RAW,
+					GFP_KERNEL);
+		if (buf == NULL)
+			return -ENOMEM;
+
 		while (ra.nframes > 0) {
-			stat = cdrom_read_block (drive, 1, lba, buf,
-						 CD_FRAMESIZE_RAW, NULL);
-			if (stat) return stat;
-			memcpy_tofs (ra.buf, buf, CD_FRAMESIZE_RAW);
-			ra.buf += CD_FRAMESIZE_RAW;
-			--ra.nframes;
-			++lba;
+			int this_nblocks = ra.nframes;
+			if (this_nblocks > CDROM_NBLOCKS_BUFFER)
+				this_nblocks = CDROM_NBLOCKS_BUFFER;
+			stat = cdrom_read_block
+				(drive, 1, lba, this_nblocks,
+				 buf, this_nblocks * CD_FRAMESIZE_RAW, NULL);
+			if (stat) break;
+
+			memcpy_tofs (ra.buf, buf,
+				     this_nblocks * CD_FRAMESIZE_RAW);
+			ra.buf += this_nblocks * CD_FRAMESIZE_RAW;
+			ra.nframes -= this_nblocks;
+			lba += this_nblocks;
 		}
 
-		return 0;
+		kfree (buf);
+		return stat;
 	}
 
 	case CDROMREADMODE1:
@@ -2360,7 +2388,7 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		struct cdrom_msf msf;
 		int blocksize, format, stat, lba;
 		struct atapi_toc *toc;
-		char buf[CD_FRAMESIZE_RAW0];
+		char *buf;
 
 		if (cmd == CDROMREADMODE1) {
 			blocksize = CD_FRAMESIZE;
@@ -2388,12 +2416,17 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		if (lba < 0 || lba >= toc->capacity)
 			return -EINVAL;
 
-		stat = cdrom_read_block (drive, format, lba, buf, blocksize,
-					 NULL);
-		if (stat) return stat;
+		buf = (char *) kmalloc (CD_FRAMESIZE_RAW0, GFP_KERNEL);
+		if (buf == NULL)
+			return -ENOMEM;
 
-		memcpy_tofs ((char *)arg, buf, blocksize);
-		return 0;
+		stat = cdrom_read_block (drive, format, lba, 1, buf, blocksize,
+					 NULL);
+		if (stat == 0)
+			memcpy_tofs ((char *)arg, buf, blocksize);
+
+		kfree (buf);
+		return stat;
 	}
 
 	case CDROM_GET_UPC: {
@@ -2420,7 +2453,12 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		return stat;
 	}
 
-	case CDROMLOADFROMSLOT: {
+	case CDROMLOADFROMSLOT:
+		printk ("%s: Use CDROM_SELECT_DISC "
+			" instead of CDROMLOADFROMSLOT.\n", drive->name);
+		/* Fall through. */
+
+	case CDROM_SELECT_DISC: {
 		struct atapi_request_sense my_reqbuf;
 		int stat;
 

@@ -5,7 +5,7 @@
 *             mike@i-Connect.Net                        *
 *             neuffer@mail.uni-mainz.de                 *
 *********************************************************
-* last change: 95/05/05                                 *
+* last change: 96/08/14                                 *
 ********************************************************/
 
 
@@ -68,6 +68,12 @@
 #define SG_SIZE		 64 
 #define SG_SIZE_BIG	 252	       /* max. 8096 elements, 64k */
 
+#define UPPER_DEVICE_QUEUE_LIMIT 24    /* The limit we have to set for the 
+					* device queue to keep the broken 
+					* midlevel SCSI code from producing
+					* bogus timeouts
+					*/
+
 #define TYPE_DISK_QUEUE  16
 #define TYPE_TAPE_QUEUE  4
 #define TYPE_ROM_QUEUE   4
@@ -90,10 +96,10 @@
 #define CD(cmd)	 ((struct eata_ccb *)(cmd->host_scribble))
 #define SD(host) ((hostdata *)&(host->hostdata))
 
-#define DELAY(x) { __u32 i; ulong flags;          \
+#define DELAY(x) { ulong flags, i;                \
                    save_flags(flags); sti();      \
                    i = jiffies + (x * HZ);        \
-                   while (jiffies < i) barrier(); \
+                   while (jiffies < i);           \
                    restore_flags(flags); }
 
 /***********************************************
@@ -130,6 +136,11 @@
 #define EATA_COLD_BOOT_HBA       0x06	   /* Only as a last resort	*/
 #define EATA_FORCE_IO            0x07
 
+#define HA_CTRLREG     0x206       /* control register for HBA    */
+#define HA_CTRL_DISINT 0x02        /* CTRLREG: disable interrupts */
+#define HA_CTRL_RESCPU 0x04        /* CTRLREG: reset processor    */
+#define HA_CTRL_8HEADS 0x08        /* CTRLREG: set for drives with* 
+				    * >=8 heads (WD1003 rudimentary :-) */
 
 #define HA_WCOMMAND    0x07	   /* command register offset	*/
 #define HA_WIFC        0x06	   /* immediate command offset  */
@@ -350,10 +361,6 @@ typedef struct hstd {
     __u32  reads_lat[12][4];
     __u32  writes_lat[12][4];
     __u32  all_lat[4];
-				 /* state of Target (RESET,..) */
-    __u8   t_state[MAXCHANNEL][MAXTARGET];   
-				 /* timeouts on target	       */
-    __u32  t_timeout[MAXCHANNEL][MAXTARGET]; 
     __u8   resetlevel[MAXCHANNEL]; 
     __u32  last_ccb;		 /* Last used ccb	       */
     __u32  cplen;		 /* size of CP in words	       */

@@ -299,7 +299,7 @@ unsigned long setup_arg_pages(unsigned long p, struct linux_binprm * bprm)
 		mpnt->vm_offset = 0;
 		mpnt->vm_inode = NULL;
 		mpnt->vm_pte = 0;
-		insert_vm_struct(current, mpnt);
+		insert_vm_struct(current->mm, mpnt);
 		current->mm->total_vm = (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT;
 	}
 
@@ -338,8 +338,8 @@ int read_exec(struct inode *inode, unsigned long offset,
 			goto end_readexec;
 	if (!file.f_op || !file.f_op->read)
 		goto close_readexec;
-	if (file.f_op->lseek) {
-		if (file.f_op->lseek(inode,&file,offset,0) != offset)
+	if (file.f_op->llseek) {
+		if (file.f_op->llseek(inode,&file,offset,0) != offset)
  			goto close_readexec;
 	} else
 		file.f_pos = offset;

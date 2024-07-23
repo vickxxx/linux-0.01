@@ -41,6 +41,7 @@
 
 #define MAJOR_NR SCSI_TAPE_MAJOR
 #include <linux/blk.h>
+
 #include "scsi.h"
 #include "hosts.h"
 #include <scsi/scsi_ioctl.h>
@@ -2552,7 +2553,7 @@ st_ioctl(struct inode * inode,struct file * file,
 	 }
        }
 
-       i = flush_buffer(inode, file, mtc.mt_op == MTSEEK ||
+       i = flush_buffer(inode, file, /* mtc.mt_op == MTSEEK || */
 			mtc.mt_op == MTREW || mtc.mt_op == MTOFFL ||
 			mtc.mt_op == MTRETEN || mtc.mt_op == MTEOM ||
 			mtc.mt_op == MTLOCK || mtc.mt_op == MTLOAD ||

@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fcntl.h>
+#include <linux/file.h>
 #include <linux/mm.h>
 #include <linux/uio.h>
 
@@ -24,8 +25,8 @@ asmlinkage long sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 		return -EBADF;
 	if (origin > 2)
 		return -EINVAL;
-	if (file->f_op && file->f_op->lseek)
-		return file->f_op->lseek(file->f_inode,file,offset,origin);
+	if (file->f_op && file->f_op->llseek)
+		return file->f_op->llseek(file->f_inode,file,offset,origin);
 
 /* this is the default handler if no lseek handler is present */
 	switch (origin) {
@@ -68,13 +69,8 @@ asmlinkage int sys_llseek(unsigned int fd, unsigned long offset_high,
 		return err;
 	offset = (loff_t) (((unsigned long long) offset_high << 32) | offset_low);
 
-	/* if there is a fs-specific handler, we can't just ignore it.. */
-	/* accept llseek() only for the signed long subset of long long */
-	if (file->f_op && file->f_op->lseek) {
-		if (offset != (long) offset)
-			return -EINVAL;
-		return file->f_op->lseek(file->f_inode,file,offset,origin);
-	}
+	if (file->f_op && file->f_op->llseek)
+		return file->f_op->llseek(file->f_inode,file,offset,origin);
 
 	switch (origin) {
 		case 0:
@@ -100,50 +96,68 @@ asmlinkage int sys_llseek(unsigned int fd, unsigned long offset_high,
 	return 0;
 }
 
-asmlinkage int sys_read(unsigned int fd,char * buf,int count)
+asmlinkage long sys_read(unsigned int fd, char * buf, unsigned long count)
 {
 	int error;
 	struct file * file;
 	struct inode * inode;
 
-	if (fd>=NR_OPEN || !(file=current->files->fd[fd]) || !(inode=file->f_inode))
-		return -EBADF;
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto bad_file;
+	inode = file->f_inode;
+	if (!inode)
+		goto out;
+	error = -EBADF;
 	if (!(file->f_mode & 1))
-		return -EBADF;
+		goto out;
+	error = -EINVAL;
 	if (!file->f_op || !file->f_op->read)
-		return -EINVAL;
+		goto out;
+	error = 0;
 	if (count <= 0)
-		return 0;
+		goto out;
 	error = locks_verify_area(FLOCK_VERIFY_READ,inode,file,file->f_pos,count);
 	if (error)
-		return error;
+		goto out;
 	error = verify_area(VERIFY_WRITE,buf,count);
 	if (error)
-		return error;
-	return file->f_op->read(inode,file,buf,count);
+		goto out;
+	error = file->f_op->read(inode,file,buf,count);
+out:
+	fput(file, inode);
+bad_file:
+	return error;
 }
 
-asmlinkage int sys_write(unsigned int fd,char * buf,unsigned int count)
+asmlinkage long sys_write(unsigned int fd, const char * buf, unsigned long count)
 {
 	int error;
 	struct file * file;
 	struct inode * inode;
-	int written;
-	
-	if (fd>=NR_OPEN || !(file=current->files->fd[fd]) || !(inode=file->f_inode))
-		return -EBADF;
+
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto bad_file;
+	inode = file->f_inode;
+	if (!inode)
+		goto out;
 	if (!(file->f_mode & 2))
-		return -EBADF;
+		goto out;
+	error = -EINVAL;
 	if (!file->f_op || !file->f_op->write)
-		return -EINVAL;
+		goto out;
+	error = 0;
 	if (!count)
-		return 0;
+		goto out;
 	error = locks_verify_area(FLOCK_VERIFY_WRITE,inode,file,file->f_pos,count);
 	if (error)
-		return error;
+		goto out;
 	error = verify_area(VERIFY_READ,buf,count);
 	if (error)
-		return error;
+		goto out;
 	/*
 	 * If data has been written to the file, remove the setuid and
 	 * the setgid bits. We do it anyway otherwise there is an
@@ -164,12 +178,15 @@ asmlinkage int sys_write(unsigned int fd,char * buf,unsigned int count)
 	}
 
 	down(&inode->i_sem);
-	written = file->f_op->write(inode,file,buf,count);
+	error = file->f_op->write(inode,file,buf,count);
 	up(&inode->i_sem);
-	return written;
+out:
+	fput(file, inode);
+bad_file:
+	return error;
 }
 
-static int sock_readv_writev(int type, struct inode * inode, struct file * file,
+static long sock_readv_writev(int type, struct inode * inode, struct file * file,
 	const struct iovec * iov, long count, long size)
 {
 	struct msghdr msg;
@@ -197,14 +214,14 @@ static int sock_readv_writev(int type, struct inode * inode, struct file * file,
 		(file->f_flags & O_NONBLOCK), 0);
 }
 
-typedef int (*IO_fn_t)(struct inode *, struct file *, char *, int);
+typedef long (*IO_fn_t)(struct inode *, struct file *, char *, unsigned long);
 
-static int do_readv_writev(int type, struct inode * inode, struct file * file,
+static long do_readv_writev(int type, struct inode * inode, struct file * file,
 	const struct iovec * vector, unsigned long count)
 {
-	size_t tot_len;
+	unsigned long tot_len;
 	struct iovec iov[UIO_MAXIOV];
-	int retval, i;
+	long retval, i;
 	IO_fn_t fn;
 
 	/*
@@ -269,7 +286,7 @@ static int do_readv_writev(int type, struct inode * inode, struct file * file,
 	return retval;
 }
 
-asmlinkage int sys_readv(unsigned long fd, const struct iovec * vector, long count)
+asmlinkage long sys_readv(unsigned long fd, const struct iovec * vector, unsigned long count)
 {
 	struct file * file;
 	struct inode * inode;
@@ -281,7 +298,7 @@ asmlinkage int sys_readv(unsigned long fd, const struct iovec * vector, long cou
 	return do_readv_writev(VERIFY_WRITE, inode, file, vector, count);
 }
 
-asmlinkage int sys_writev(unsigned long fd, const struct iovec * vector, long count)
+asmlinkage long sys_writev(unsigned long fd, const struct iovec * vector, unsigned long count)
 {
 	int error;
 	struct file * file;

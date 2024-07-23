@@ -43,7 +43,7 @@
 
 int securelevel = 0;			/* system security level */
 
-long tick = 1000000 / HZ;		/* timer interrupt period */
+long tick = (1000000 + HZ/2) / HZ;	/* timer interrupt period */
 volatile struct timeval xtime;		/* The current time */
 int tickadj = 500/HZ;			/* microsecs */
 
@@ -64,7 +64,7 @@ long time_precision = 1;	/* clock precision (us) */
 long time_maxerror = MAXPHASE;	/* maximum error (us) */
 long time_esterror = MAXPHASE;	/* estimated error (us) */
 long time_phase = 0;		/* phase offset (scaled us) */
-long time_freq = 0;		/* frequency offset (scaled ppm) */
+long time_freq = ((1000000 + HZ/2) % HZ - HZ/2) << SHIFT_USEC;	/* frequency offset (scaled ppm) */
 long time_adj = 0;		/* tick adjust (scaled 1 / HZ) */
 long time_reftime = 0;		/* time at last adjustment (s) */
 
@@ -431,64 +431,139 @@ asmlinkage int sys_pause(void)
  */
 void wake_up(struct wait_queue **q)
 {
-	struct wait_queue *tmp;
-	struct task_struct * p;
+	struct wait_queue *next;
+	struct wait_queue *head;
 
-	if (!q || !(tmp = *q))
+	if (!q || !(next = *q))
 		return;
-	do {
-		if ((p = tmp->task) != NULL) {
+	head = WAIT_QUEUE_HEAD(q);
+	while (next != head) {
+		struct task_struct *p = next->task;
+		next = next->next;
+		if (p != NULL) {
 			if ((p->state == TASK_UNINTERRUPTIBLE) ||
 			    (p->state == TASK_INTERRUPTIBLE))
 				wake_up_process(p);
 		}
-		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %p)\n",
-				__builtin_return_address(0));
-			printk("        q = %p\n",q);
-			printk("       *q = %p\n",*q);
-			printk("      tmp = %p\n",tmp);
-			break;
-		}
-		tmp = tmp->next;
-	} while (tmp != *q);
+		if (!next)
+			goto bad;
+	}
+	return;
+bad:
+	printk("wait_queue is bad (eip = %p)\n",
+		__builtin_return_address(0));
+	printk("        q = %p\n",q);
+	printk("       *q = %p\n",*q);
 }
 
 void wake_up_interruptible(struct wait_queue **q)
 {
-	struct wait_queue *tmp;
-	struct task_struct * p;
+	struct wait_queue *next;
+	struct wait_queue *head;
 
-	if (!q || !(tmp = *q))
+	if (!q || !(next = *q))
 		return;
-	do {
-		if ((p = tmp->task) != NULL) {
+	head = WAIT_QUEUE_HEAD(q);
+	while (next != head) {
+		struct task_struct *p = next->task;
+		next = next->next;
+		if (p != NULL) {
 			if (p->state == TASK_INTERRUPTIBLE)
 				wake_up_process(p);
 		}
-		if (!tmp->next) {
-			printk("wait_queue is bad (eip = %p)\n",
-				__builtin_return_address(0));
-			printk("        q = %p\n",q);
-			printk("       *q = %p\n",*q);
-			printk("      tmp = %p\n",tmp);
-			break;
-		}
-		tmp = tmp->next;
-	} while (tmp != *q);
+		if (!next)
+			goto bad;
+	}
+	return;
+bad:
+	printk("wait_queue is bad (eip = %p)\n",
+		__builtin_return_address(0));
+	printk("        q = %p\n",q);
+	printk("       *q = %p\n",*q);
+}
+
+/*
+ * Semaphores are implemented using a two-way counter:
+ * The "count" variable is decremented for each process
+ * that tries to sleep, while the "waiting" variable is
+ * incremented _while_ the process is sleeping on that
+ * semaphore. 
+ *
+ * Notably, the inline "up()" and "down()" functions can
+ * efficiently test if they need to do any extra work (up
+ * needs to do something only if count was negative before
+ * the increment operation.
+ */
+static inline void normalize_semaphore(struct semaphore *sem)
+{
+	atomic_add(xchg(&sem->waiting,0), &sem->count);
+}
+
+/*
+ * When __up() is called, the count was negative before
+ * incrementing it, and we need to wake up somebody. In
+ * most cases "waiting" will be positive, and the normalization
+ * will allow things to continue. However, if somebody has
+ * /just/ done a down(), it may be that count was negative
+ * without waiting being positive (or in the generic case
+ * "count is more negative than waiting is positive"), and
+ * the waiter needs to check this itself (see __down).
+ *
+ * Note that these functions are only called when there is
+ * contention on the lock, and as such all this is the
+ * "non-critical" part of the whole semaphore business. The
+ * critical part is the inline stuff in <asm/semaphore.h>
+ * where we want to avoid any extra jumps and calls.
+ */
+void __up(struct semaphore *sem)
+{
+	normalize_semaphore(sem);
+	wake_up(&sem->wait);
 }
 
 void __down(struct semaphore * sem)
 {
-	struct wait_queue wait = { current, NULL };
+	struct task_struct *tsk = current;
+	struct wait_queue wait = { tsk, NULL };
+
+	/*
+	 * The order here is important. We add ourselves to the
+	 * wait queues and mark ourselves sleeping _first_. That
+	 * way, if a "up()" comes in here, we'll either get
+	 * woken up (up happens after the wait queues are set up)
+	 * OR we'll have "waiting > 0".
+	 */
+	tsk->state = TASK_UNINTERRUPTIBLE;
 	add_wait_queue(&sem->wait, &wait);
-	current->state = TASK_UNINTERRUPTIBLE;
-	while (sem->count <= 0) {
-		schedule();
-		current->state = TASK_UNINTERRUPTIBLE;
+	atomic_inc(&sem->waiting);
+
+	/*
+	 * Ok, we're set up. The only race here is really that
+	 * an "up()" might have incremented count before we got
+	 * here, so we check "count+waiting". If that is larger
+	 * than zero, we shouldn't sleep, but re-try the lock.
+	 */
+	if (sem->count+sem->waiting <= 0) {
+		/*
+		 * If "count+waiting" <= 0, we have to wait
+		 * for a up(), which will normalize the count.
+		 * Remember, at this point we have decremented
+		 * count, and incremented up, so if count is
+		 * zero or positive we need to return to re-try
+		 * the lock.  It _may_ be that both count and
+		 * waiting is zero and that it is still locked,
+		 * but we still want to re-try the lock in that
+		 * case to make count go negative again so that
+		 * the optimized "up()" wake_up sequence works.
+		 */
+		do {
+			schedule();
+			tsk->state = TASK_UNINTERRUPTIBLE;
+		} while (sem->count < 0);
 	}
-	current->state = TASK_RUNNING;
+	tsk->state = TASK_RUNNING;
 	remove_wait_queue(&sem->wait, &wait);
+	normalize_semaphore(sem);
 }
 
 static inline void __sleep_on(struct wait_queue **p, int state)
@@ -501,11 +576,13 @@ static inline void __sleep_on(struct wait_queue **p, int state)
 	if (current == task[0])
 		panic("task[0] trying to sleep");
 	current->state = state;
-	add_wait_queue(p, &wait);
 	save_flags(flags);
+	cli();
+	__add_wait_queue(p, &wait);
 	sti();
 	schedule();
-	remove_wait_queue(p, &wait);
+	cli();
+	__remove_wait_queue(p, &wait);
 	restore_flags(flags);
 }
 
@@ -938,7 +1015,7 @@ static void update_process_times(unsigned long ticks, unsigned long system)
 			if (cpu == i) {
 				utime = ticks-system;
 				stime = system;
-			} else if (smp_proc_in_lock[i]) {
+			} else if (smp_proc_in_lock[j]) {
 				utime = 0;
 				stime = ticks;
 			}
@@ -997,23 +1074,11 @@ static void timer_bh(void)
 	run_timer_list();
 }
 
-/*
- * Run the bottom half stuff only about 100 times a second,
- * we'd just use up unnecessary CPU time for timer handling
- * otherwise
- */
-#if HZ > 100
-#define should_run_timers(x) ((x) >= HZ/100)
-#else
-#define should_run_timers(x) (1)
-#endif
-
 void do_timer(struct pt_regs * regs)
 {
 	(*(unsigned long *)&jiffies)++;
 	lost_ticks++;
-	if (should_run_timers(lost_ticks))
-		mark_bh(TIMER_BH);
+	mark_bh(TIMER_BH);
 	if (!user_mode(regs)) {
 		lost_ticks_system++;
 		if (prof_buffer && current->pid) {
@@ -1186,8 +1251,10 @@ static int setscheduler(pid_t pid, int policy,
 
 	p->policy = policy;
 	p->rt_priority = lp.sched_priority;
+	cli();
 	if (p->next_run)
 		move_last_runqueue(p);
+	sti();
 	schedule();
 
 	return 0;
@@ -1243,8 +1310,9 @@ asmlinkage int sys_sched_getparam(pid_t pid, struct sched_param *param)
 
 asmlinkage int sys_sched_yield(void)
 {
+	cli();
 	move_last_runqueue(current);
-
+	sti();
 	return 0;
 }
 

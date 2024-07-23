@@ -32,7 +32,6 @@ int
 smb_make_open(struct inode *i, int right)
 {
         struct smb_dirent *dirent;
-        int open_result;
 
         if (i == NULL) {
                 printk("smb_make_open: got NULL inode\n");
@@ -45,13 +44,13 @@ smb_make_open(struct inode *i, int right)
 
         if ((dirent->opened) == 0) {
                 /* tries max. rights */
-                open_result = smb_proc_open(SMB_SERVER(i),
-                                            dirent->path, dirent->len,
-                                            dirent);
-                if (open_result) 
+		int open_result = smb_proc_open(SMB_SERVER(i),
+						dirent->path, dirent->len,
+						dirent);
+                if (open_result)
+		{
                         return open_result;
-
-                dirent->opened = 1;
+		}
         }
 
         if (   ((right == O_RDONLY) && (   (dirent->access == O_RDONLY)
@@ -64,8 +63,8 @@ smb_make_open(struct inode *i, int right)
         return -EACCES;
 }
 
-static int 
-smb_file_read(struct inode *inode, struct file *file, char *buf, int count)
+static long
+smb_file_read(struct inode *inode, struct file *file, char *buf, unsigned long count)
 {
 	int result, bufsize, to_read, already_read;
 	off_t pos;
@@ -141,8 +140,9 @@ smb_file_read(struct inode *inode, struct file *file, char *buf, int count)
         return already_read;
 }
 
-static int 
-smb_file_write(struct inode *inode, struct file *file, const char *buf, int count)
+static long
+smb_file_write(struct inode *inode, struct file *file, const char *buf,
+	       unsigned long count)
 {
 	int result, bufsize, to_write, already_written;
         off_t pos;
@@ -161,7 +161,7 @@ smb_file_write(struct inode *inode, struct file *file, const char *buf, int coun
 
         DPRINTK("smb_file_write: enter %s\n", SMB_FINFO(inode)->path);
 
-	if (count <= 0)
+	if (!count)
 		return 0;
 
         if ((errno = smb_make_open(inode, O_RDWR)) != 0)

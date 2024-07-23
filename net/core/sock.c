@@ -70,6 +70,7 @@
  *		Alan Cox	:	Allow NULL arguments on some SO_ opts
  *		Alan Cox	: 	Generic socket allocation to make hooks
  *					easier (suggested by Craig Metz).
+ *		Michael Pall	:	SO_ERROR returns positive errno again
  *
  * To Fix:
  *
@@ -280,7 +281,7 @@ int sock_getsockopt(struct sock *sk, int level, int optname,
 			break;
 
 		case SO_ERROR:
-			val = sock_error(sk);
+			val = -sock_error(sk);
 			if(val==0)
 				val=xchg(&sk->err_soft,0);
 			break;
@@ -348,7 +349,7 @@ void sk_free(struct sock *sk)
 struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int priority)
 {
 	if (sk) {
-		if (force || sk->wmem_alloc + size < sk->sndbuf) {
+		if (force || sk->wmem_alloc < sk->sndbuf) {
 			struct sk_buff * skb = alloc_skb(size, priority);
 			if (skb)
 				atomic_add(skb->truesize, &sk->wmem_alloc);
@@ -362,7 +363,7 @@ struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int
 struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int priority)
 {
 	if (sk) {
-		if (force || sk->rmem_alloc + size < sk->rcvbuf) {
+		if (force || sk->rmem_alloc < sk->rcvbuf) {
 			struct sk_buff *skb = alloc_skb(size, priority);
 			if (skb)
 				atomic_add(skb->truesize, &sk->rmem_alloc);

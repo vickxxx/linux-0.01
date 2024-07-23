@@ -726,12 +726,7 @@ static int tcp_select(struct sock *sk, int sel_type, select_table *wait)
 			return 0;
 		if (sk->state == TCP_SYN_SENT || sk->state == TCP_SYN_RECV)
 			break;
-		/*
-		 * This is now right thanks to a small fix
-		 * by Matt Dillon.
-		 */
-
-		if (sock_wspace(sk) < sk->mtu+128+sk->prot->max_header)
+		if (sk->wmem_alloc*2 > sk->sndbuf)
 			break;
 		return 1;
 
@@ -861,21 +856,35 @@ static void wait_for_tcp_connect(struct sock * sk)
 	lock_sock(sk);
 }
 
+static inline int tcp_memory_free(struct sock *sk)
+{
+	return sk->wmem_alloc < sk->sndbuf;
+}
+
 /*
  *	Wait for more memory for a socket
  */
 static void wait_for_tcp_memory(struct sock * sk)
 {
 	release_sock(sk);
-	cli();
-	if (sk->wmem_alloc*2 > sk->sndbuf &&
-	    (sk->state == TCP_ESTABLISHED||sk->state == TCP_CLOSE_WAIT)
-		&& sk->err == 0)
-	{
+	if (!tcp_memory_free(sk)) {
+		struct wait_queue wait = { current, NULL };
+
 		sk->socket->flags &= ~SO_NOSPACE;
-		interruptible_sleep_on(sk->sleep);
+		add_wait_queue(sk->sleep, &wait);
+		for (;;) {
+			current->state = TASK_INTERRUPTIBLE;
+			if (tcp_memory_free(sk))
+				break;
+			if (sk->shutdown & SEND_SHUTDOWN)
+				break;
+			if (sk->err)
+				break;
+			schedule();
+		}
+		current->state = TASK_RUNNING;
+		remove_wait_queue(sk->sleep, &wait);
 	}
-	sti();
 	lock_sock(sk);
 }
 
@@ -949,6 +958,7 @@ static int do_tcp_sendmsg(struct sock *sk,
 			{
 				if (copied)
 					return copied;
+				send_sig(SIGPIPE,current,0);
 				return -EPIPE;
 			}
 
@@ -969,16 +979,20 @@ static int do_tcp_sendmsg(struct sock *sk,
 			 */
 #ifndef CONFIG_NO_PATH_MTU_DISCOVERY
 			/*
-			 *	FIXME:  I'm almost sure that this fragment is BUG,
-			 *		but it works... I do not know why 8) --ANK
-			 *
 			 *	Really, we should rebuild all the queues...
 			 *	It's difficult. Temporary hack is to send all
 			 *	queued segments with allowed fragmentation.
 			 */
 			{
+				/*
+				 *	new_mss may be zero. That indicates
+				 *	we don't have a window estimate for
+				 *	the remote box yet. 
+				 *		-- AC
+				 */
+				
 				int new_mss = min(sk->mtu, sk->max_window);
-				if (new_mss < sk->mss)
+				if (new_mss && new_mss < sk->mss)
 				{
 					tcp_send_partial(sk);
 					sk->mss = new_mss;
@@ -1433,7 +1447,7 @@ static int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 		if (copied)
 			break;
 
-		if (sk->err)
+		if (sk->err && !(flags&MSG_PEEK))
 		{
 			copied = sock_error(sk);
 			break;

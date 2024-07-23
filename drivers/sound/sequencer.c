@@ -549,6 +549,7 @@ seq_chn_voice_event (unsigned char *event_rec)
 	  if (chn == 9)
 	    {
 	      synth_devs[dev]->set_instr (dev, voice, 128 + note);
+              synth_devs[dev]->chn_info[chn].pgm_num = 128 + note;
 	      note = 60;	/* Middle C */
 
 	    }
@@ -1543,7 +1544,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 
       if (seq_mode != SEQ_2)
 	return -(EINVAL);
-      pending_timer = get_fs_long ((long *) arg);
+      pending_timer = get_user ((int *) arg);
 
       if (pending_timer < 0 || pending_timer >= num_sound_timers)
 	{
@@ -1590,7 +1591,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 				 */
 	return -(EIO);
 
-      midi_dev = get_fs_long ((long *) arg);
+      midi_dev = get_user ((int *) arg);
       if (midi_dev >= max_mididev)
 	return -(ENXIO);
 
@@ -1638,7 +1639,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
       if (seq_mode == SEQ_2)
 	return tmr->ioctl (tmr_no, cmd, arg);
 
-      if (get_fs_long ((long *) arg) != 0)
+      if (get_user ((int *) arg) != 0)
 	return -(EINVAL);
 
       return snd_ioctl_return ((int *) arg, HZ);
@@ -1648,7 +1649,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
       {
 	int             err;
 
-	dev = get_fs_long ((long *) arg);
+	dev = get_user ((int *) arg);
 	if (dev < 0 || dev >= num_synths)
 	  {
 	    return -(ENXIO);
@@ -1677,7 +1678,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 
     case SNDCTL_SYNTH_MEMAVL:
       {
-	int             dev = get_fs_long ((long *) arg);
+	int             dev = get_user ((int *) arg);
 
 	if (dev < 0 || dev >= num_synths)
 	  return -(ENXIO);
@@ -1691,7 +1692,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 
     case SNDCTL_FM_4OP_ENABLE:
       {
-	int             dev = get_fs_long ((long *) arg);
+	int             dev = get_user ((int *) arg);
 
 	if (dev < 0 || dev >= num_synths)
 	  return -(ENXIO);
@@ -1832,7 +1833,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 
     case SNDCTL_SEQ_THRESHOLD:
       {
-	int             tmp = get_fs_long ((long *) arg);
+	int             tmp = get_user ((int *) arg);
 
 	if (dev)		/*
 				 * Patch manager
@@ -1850,7 +1851,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 
     case SNDCTL_MIDI_PRETIME:
       {
-	int             val = get_fs_long ((long *) arg);
+	int             val = get_user ((int *) arg);
 
 	if (val < 0)
 	  val = 0;

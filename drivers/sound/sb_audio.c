@@ -500,9 +500,9 @@ sbpro_audio_prepare_for_output (int dev, int bsize, int bcount)
     {
       tmp = sb_getmixer (devc, 0x0e);
       if (devc->channels == 1)
-	tmp &= ~0x20;
+	tmp &= ~0x02;
       else
-	tmp |= 0x20;
+	tmp |= 0x02;
       sb_setmixer (devc, 0x0e, tmp);
     }
   restore_flags (flags);
@@ -629,7 +629,7 @@ ess_audio_prepare_for_input (int dev, int bsize, int bcount)
 
   if (devc->channels == 1)
     {
-      if (devc->bits == AFMT_U8 == 0)
+      if (devc->bits == AFMT_U8)
 	{			/* 8 bit mono */
 	  ess_write (devc, 0xb7, 0x51);
 	  ess_write (devc, 0xb7, 0xd0);

@@ -69,6 +69,7 @@ struct pci_dev_info dev_info[] = {
 	DEVICE( DEC,		DEC_TULIP_FAST,	"DC21140"),
 	DEVICE( DEC,		DEC_FDDI,	"DEFPA"),
 	DEVICE( DEC,		DEC_TULIP_PLUS,	"DC21041"),
+	DEVICE( DEC,		DEC_21052_AB,	"DC21052-AB"),
 	DEVICE( CIRRUS,		CIRRUS_5430,	"GD 5430"),
 	DEVICE( CIRRUS,		CIRRUS_5434_4,	"GD 5434"),
 	DEVICE( CIRRUS,		CIRRUS_5434_8,	"GD 5434"),
@@ -205,7 +206,9 @@ struct pci_dev_info dev_info[] = {
 	DEVICE( CYCLADES,	CYCLOM_Z_Hi,	"Cyclom-Z above 1Mbyte"),
 	DEVICE( SYMPHONY,	SYMPHONY_101,	"82C101"),
 	DEVICE( TEKRAM,		TEKRAM_DC290,	"DC-290"),
+	DEVICE( 3DLABS,		3DLABS_300SX,	"GLINT 300SX"),
 	DEVICE( AVANCE,		AVANCE_2302,	"ALG-2302"),
+	DEVICE( S3,		S3_ViRGE,	"ViRGE"),
 	DEVICE( S3,		S3_811,		"Trio32/Trio64"),
 	DEVICE( S3,		S3_868,	"Vision 868"),
 	DEVICE( S3,		S3_928,		"Vision 928-P"),
@@ -228,11 +231,14 @@ struct pci_dev_info dev_info[] = {
 	DEVICE( INTEL,		INTEL_82371_1,	"82371 Triton PIIX"),
 	DEVICE( INTEL,		INTEL_82441,	"82441FX Natoma"),
 	DEVICE( INTEL,		INTEL_82439,	"82439HX Triton II"),
-	DEVICE(	INTEL,		INTEL_82371SB_0,"82371SB Natoma/Triton II PIIX"),
-	DEVICE(	INTEL,		INTEL_82371SB_1,"82371SB Natoma/Triton II PIIX"),
+	DEVICE(	INTEL,		INTEL_82371SB_0,"82371SB Natoma/Triton II PIIX3"),
+	DEVICE(	INTEL,		INTEL_82371SB_1,"82371SB Natoma/Triton II PIIX3"),
+	DEVICE( INTEL,		INTEL_82371SB_2,"82371SB Natoma/Triton II PIIX3"),
+	DEVICE( INTEL,		INTEL_82437VX,	"82437VX Triton II"),
 	DEVICE( INTEL,		INTEL_P6,	"Orion P6"),
 	DEVICE( ADAPTEC,	ADAPTEC_7850,	"AIC-7850"),
 	DEVICE( ADAPTEC,	ADAPTEC_7855,	"AIC-7855"),
+	DEVICE( ADAPTEC,	ADAPTEC_7860,	"AIC-7860"),
 	DEVICE( ADAPTEC,	ADAPTEC_7870,	"AIC-7870"),
 	DEVICE( ADAPTEC,	ADAPTEC_7871,	"AIC-7871"),
 	DEVICE( ADAPTEC,	ADAPTEC_7872,	"AIC-7872"),
@@ -430,6 +436,7 @@ const char *pci_strclass (unsigned int class)
 	      case PCI_CLASS_SERIAL_FIREWIRE:		return "FireWire (IEEE 1394)";
 	      case PCI_CLASS_SERIAL_ACCESS:		return "ACCESS Bus";
 	      case PCI_CLASS_SERIAL_SSA:		return "SSA";
+	      case PCI_CLASS_SERIAL_USB:		return "USB Controller";
 	      case PCI_CLASS_SERIAL_FIBER:		return "Fiber Channel";
 
 	      default:					return "Unknown class";
@@ -508,6 +515,7 @@ const char *pci_strvendor(unsigned int vendor)
 	      case PCI_VENDOR_ID_CYCLADES:	return "Cyclades";
 	      case PCI_VENDOR_ID_SYMPHONY:	return "Symphony";
 	      case PCI_VENDOR_ID_TEKRAM:	return "Tekram";
+	      case PCI_VENDOR_ID_3DLABS:	return "3Dlabs";
 	      case PCI_VENDOR_ID_AVANCE:	return "Avance";
 	      case PCI_VENDOR_ID_S3:		return "S3 Inc.";
 	      case PCI_VENDOR_ID_INTEL:		return "Intel";

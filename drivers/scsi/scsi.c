@@ -167,19 +167,6 @@ struct proc_dir_entry proc_scsi_scsi = {
 #endif
 
 /*
- *  As the scsi do command functions are intelligent, and may need to
- *  redo a command, we need to keep track of the last command
- *  executed on each one.
- */
-
-#define WAS_RESET       0x01
-#define WAS_TIMEDOUT    0x02
-#define WAS_SENSE       0x04
-#define IS_RESETTING    0x08
-#define IS_ABORTING     0x10
-#define ASKED_FOR_SENSE 0x20
-
-/*
  *  This is the number  of clock ticks we should wait before we time out
  *  and abort the command.  This is for  where the scsi.c module generates
  *  the command, not where it originates from a higher level, in which
@@ -665,6 +652,8 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
     SDpnt->manufacturer = SCSI_MAN_SONY;
   else if (!strncmp (scsi_result + 8, "PIONEER", 7))
     SDpnt->manufacturer = SCSI_MAN_PIONEER;
+  else if (!strncmp (scsi_result + 8, "MATSHITA", 8))
+    SDpnt->manufacturer = SCSI_MAN_MATSHITA;
   else
     SDpnt->manufacturer = SCSI_MAN_UNKNOWN;
 
@@ -878,8 +867,7 @@ static void scsi_times_out (Scsi_Cmnd * SCpnt)
 	SCpnt->internal_timeout |= IN_RESET2;
         scsi_reset (SCpnt,
 		    SCSI_RESET_ASYNCHRONOUS | SCSI_RESET_SUGGEST_BUS_RESET);
-	return;
-	
+        return;
     case (IN_ABORT | IN_RESET | IN_RESET2):
 	/* Obviously the bus reset didn't work.
 	 * Let's try even harder and call for an HBA reset.
@@ -1204,6 +1192,15 @@ inline void internal_cmnd (Scsi_Cmnd * SCpnt)
 #ifdef DEBUG_DELAY
     unsigned long clock;
 #endif
+
+#if DEBUG
+    unsigned long *ret = 0;
+#ifdef __mips__
+    __asm__ __volatile__ ("move\t%0,$31":"=r"(ret));
+#else
+   ret =  __builtin_return_address(0);
+#endif
+#endif
     
     host = SCpnt->host;
     
@@ -1393,9 +1390,9 @@ void scsi_do_cmd (Scsi_Cmnd * SCpnt, const void *cmnd ,
     SCpnt->serial_number = 0;
     SCpnt->bufflen = bufflen;
     SCpnt->buffer = buffer;
-    SCpnt->flags=0;
-    SCpnt->retries=0;
-    SCpnt->allowed=retries;
+    SCpnt->flags = 0;
+    SCpnt->retries = 0;
+    SCpnt->allowed = retries;
     SCpnt->done = done;
     SCpnt->timeout_per_command = timeout;
 
@@ -1413,7 +1410,7 @@ void scsi_do_cmd (Scsi_Cmnd * SCpnt, const void *cmnd ,
 
     /* Start the timer ticking.  */
 
-    SCpnt->internal_timeout = 0;
+    SCpnt->internal_timeout = NORMAL_TIMEOUT;
     SCpnt->abort_reason = 0;
     internal_cmnd (SCpnt);
 
@@ -1580,7 +1577,8 @@ static void scsi_done (Scsi_Cmnd * SCpnt)
 		if (SCpnt->flags & WAS_SENSE)
 		{
 #ifdef DEBUG
-		    printk ("In scsi_done, GOOD status, COMMAND COMPLETE, parsing sense information.\n");
+		    printk ("In scsi_done, GOOD status, COMMAND COMPLETE, "
+                            "parsing sense information.\n");
 #endif
 		    SCpnt->flags &= ~WAS_SENSE;
 #if 0	/* This cannot possibly be correct. */
@@ -1628,7 +1626,8 @@ static void scsi_done (Scsi_Cmnd * SCpnt)
 		else
 		{
 #ifdef DEBUG
-		    printk("COMMAND COMPLETE message returned, status = FINISHED. \n");
+		    printk("COMMAND COMPLETE message returned, "
+                           "status = FINISHED. \n");
 #endif
 		    exit =  DRIVER_OK;
 		    status = FINISHED;
@@ -2119,7 +2118,18 @@ int scsi_reset (Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 		
 		host->last_reset = jiffies;
 		temp = host->hostt->reset(SCpnt, reset_flags);
-		host->last_reset = jiffies;
+		/*
+		  This test allows the driver to introduce an additional bus
+		  settle time delay by setting last_reset up to 20 seconds in
+		  the future.  In the normal case where the driver does not
+		  modify last_reset, it must be assumed that the actual bus
+		  reset occurred immediately prior to the return to this code,
+		  and so last_reset must be updated to the current time, so
+		  that the delay in internal_cmnd will guarantee at least a
+		  MIN_RESET_DELAY bus settle time.
+		*/
+		if (host->last_reset - jiffies > 20UL * HZ)
+		  host->last_reset = jiffies;
 	    }
 	    else
 	    {
@@ -2128,7 +2138,9 @@ int scsi_reset (Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 		host->last_reset = jiffies;
 	        SCpnt->flags |= (WAS_RESET | IS_RESETTING);
 		temp = host->hostt->reset(SCpnt, reset_flags);
-		host->last_reset = jiffies;
+		if ((host->last_reset < jiffies) || 
+		    (host->last_reset > (jiffies + 20 * HZ)))
+		  host->last_reset = jiffies;
 		if (!host->block) host->host_busy--;
 	    }
 	    
@@ -2402,8 +2414,15 @@ int scsi_free(void *obj, unsigned int len)
 {
     unsigned int page, sector, nbits, mask;
     unsigned long flags;
-    
+
 #ifdef DEBUG
+    unsigned long ret = 0;
+
+#ifdef __mips__
+    __asm__ __volatile__ ("move\t%0,$31":"=r"(ret));
+#else
+   ret = __builtin_return_address(0);
+#endif
     printk("scsi_free %p %d\n",obj, len);
 #endif
     
@@ -2422,9 +2441,14 @@ int scsi_free(void *obj, unsigned int len)
 
             save_flags(flags);
             cli();
-            if((dma_malloc_freelist[page] & (mask << sector)) != (mask<<sector))
+            if((dma_malloc_freelist[page] & 
+                (mask << sector)) != (mask<<sector)){
+#ifdef DEBUG
+		printk("scsi_free(obj=%p, len=%d) called from %08lx\n", 
+                       obj, len, ret);
+#endif
                 panic("scsi_free:Trying to free unused memory");
-
+            }
             dma_free_sectors += nbits;
             dma_malloc_freelist[page] &= ~(mask << sector);
             restore_flags(flags);
@@ -2863,7 +2887,7 @@ static void resize_dma_pool(void)
 	
     new_dma_sectors = 2*SECTORS_PER_PAGE;		/* Base value we use */
 
-    if (high_memory-1 > ISA_DMA_THRESHOLD)
+    if (__pa(high_memory)-1 > ISA_DMA_THRESHOLD)
 	scsi_need_isa_bounce_buffers = 1;
     else
 	scsi_need_isa_bounce_buffers = 0;

@@ -42,9 +42,9 @@
 #define MITSUMI_X_CDROM_MAJOR 20
 #define SCSI_GENERIC_MAJOR 21
 #define Z8530_MAJOR 34
-#define DIGI_MAJOR 22
+#define DIGI_MAJOR 23
 #define IDE1_MAJOR	22
-#define DIGICU_MAJOR 23
+#define DIGICU_MAJOR 22
 #define MITSUMI_CDROM_MAJOR 23
 #define CDU535_CDROM_MAJOR 24
 #define STL_SERIALMAJOR 24
@@ -73,14 +73,12 @@
  * Tests for SCSI devices.
  */
 
-#define SCSI_MAJOR(M) \
+#define SCSI_BLK_MAJOR(M) \
   ((M) == SCSI_DISK_MAJOR	\
-   || (M) == SCSI_TAPE_MAJOR	\
-   || (M) == SCSI_CDROM_MAJOR	\
-   || (M) == SCSI_GENERIC_MAJOR)
+   || (M) == SCSI_CDROM_MAJOR)
 
-static inline int scsi_major(int m) {
-	return SCSI_MAJOR(m);
+static __inline__ int scsi_blk_major(int m) {
+	return SCSI_BLK_MAJOR(m);
 }
 
 #endif

@@ -79,7 +79,7 @@ static inline int try_to_swap_out(struct task_struct * tsk, struct vm_area_struc
 	if (!pte_present(pte))
 		return 0;
 	page = pte_page(pte);
-	if (MAP_NR(page) >= MAP_NR(high_memory))
+	if (MAP_NR(page) >= max_mapnr)
 		return 0;
 
 	page_map = mem_map + MAP_NR(page);
@@ -108,8 +108,13 @@ static inline int try_to_swap_out(struct task_struct * tsk, struct vm_area_struc
 		} else {
 			if (page_map->count != 1)
 				return 0;
-			if (!(entry = get_swap_page()))
-				return -1;	/* Aieee!!! Out of swap space! */
+			if (!(entry = get_swap_page())) {
+				/* Aieee!!! Out of swap space! */
+				int retval = -1;
+				if (nr_swapfiles == 0)
+					retval = 0;
+				return retval;
+			}
 			vma->vm_mm->rss--;
 			flush_cache_page(vma, address);
 			set_pte(page_table, __pte(entry));
@@ -253,7 +258,7 @@ static int swap_out_process(struct task_struct * p, int dma, int wait)
 	/*
 	 * Find the proper vm-area
 	 */
-	vma = find_vma(p, address);
+	vma = find_vma(p->mm, address);
 	if (!vma)
 		return 0;
 	if (address < vma->vm_start)
@@ -312,6 +317,7 @@ static int swap_out(unsigned int priority, int dma, int wait)
 		if (!--p->swap_cnt)
 			swap_task++;
 		switch (swap_out_process(p, dma, wait)) {
+			/* out of swap space? */
 			case -1:
 				return 0;
 			case 0:
@@ -428,7 +434,6 @@ void swap_tick(void)
 		if (!kswapd_awake && kswapd_ctl.maxpages > 0) {
 			wake_up(&kswapd_wait);
 			need_resched = 1;
-			kswapd_awake = 1;
 		}
 		next_swap_jiffies = jiffies + swapout_interval;
 	}

@@ -40,7 +40,7 @@ static inline int mlock_fixup_start(struct vm_area_struct * vma,
 		n->vm_inode->i_count++;
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current, n);
+	insert_vm_struct(current->mm, n);
 	return 0;
 }
 
@@ -61,7 +61,7 @@ static inline int mlock_fixup_end(struct vm_area_struct * vma,
 		n->vm_inode->i_count++;
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current, n);
+	insert_vm_struct(current->mm, n);
 	return 0;
 }
 
@@ -93,8 +93,8 @@ static inline int mlock_fixup_middle(struct vm_area_struct * vma,
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	insert_vm_struct(current, left);
-	insert_vm_struct(current, right);
+	insert_vm_struct(current->mm, left);
+	insert_vm_struct(current->mm, right);
 	return 0;
 }
 
@@ -148,7 +148,7 @@ static int do_mlock(unsigned long start, size_t len, int on)
 		return -EINVAL;
 	if (end == start)
 		return 0;
-	vma = find_vma(current, start);
+	vma = find_vma(current->mm, start);
 	if (!vma || vma->vm_start > start)
 		return -ENOMEM;
 
@@ -178,7 +178,7 @@ static int do_mlock(unsigned long start, size_t len, int on)
 			break;
 		}
 	}
-	merge_segments(current, start, end);
+	merge_segments(current->mm, start, end);
 	return error;
 }
 
@@ -202,7 +202,7 @@ asmlinkage int sys_mlock(unsigned long start, size_t len)
 
 	/* we may lock at most half of physical memory... */
 	/* (this check is pretty bogus, but doesn't hurt) */
-	if (locked > MAP_NR(high_memory)/2)
+	if (locked > max_mapnr/2)
 		return -ENOMEM;
 
 	return do_mlock(start, len, 1);
@@ -240,7 +240,7 @@ static int do_mlockall(int flags)
 		if (error)
 			break;
 	}
-	merge_segments(current, 0, TASK_SIZE);
+	merge_segments(current->mm, 0, TASK_SIZE);
 	return error;
 }
 
@@ -259,7 +259,7 @@ asmlinkage int sys_mlockall(int flags)
 
 	/* we may lock at most half of physical memory... */
 	/* (this check is pretty bogus, but doesn't hurt) */
-	if (current->mm->total_vm > MAP_NR(high_memory)/2)
+	if (current->mm->total_vm > max_mapnr/2)
 		return -ENOMEM;
 
 	return do_mlockall(flags);

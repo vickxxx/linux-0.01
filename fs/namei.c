@@ -32,7 +32,7 @@ static inline int get_max_filename(unsigned long address)
 
 	if (get_fs() == KERNEL_DS)
 		return 0;
-	vma = find_vma(current, address);
+	vma = find_vma(current->mm, address);
 	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
 		return -EFAULT;
 	address = vma->vm_end - address;
@@ -585,7 +585,7 @@ static int do_mkdir(const char * pathname, int mode)
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
 	down(&dir->i_sem);
-	error = dir->i_op->mkdir(dir, basename, namelen, mode & 0777 & ~current->fs->umask);
+	error = dir->i_op->mkdir(dir, basename, namelen, mode & 01777 & ~current->fs->umask);
 	up(&dir->i_sem);
 	iput(dir);
 	return error;

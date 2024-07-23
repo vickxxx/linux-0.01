@@ -1,5 +1,5 @@
 static char rcsid[] =
-"$Revision: 1.36.3.7 $$Date: 1996/04/19 21:06:18 $";
+"$Revision: 1.36.3.7A $$Date: 1996/07/27 10:25:50 $";
 /*
  *  linux/drivers/char/cyclades.c
  *
@@ -30,7 +30,7 @@ static char rcsid[] =
  * remove unused diagnostic statements; minor 0 is first;
  *
  * Revision 1.36.3.6  1996/03/13 13:21:17  marcio
- * The kernel function vremap (available only in later 1.3.xx kernels)
+ * The kernel function ioremap (available only in later 1.3.xx kernels)
  * allows the access to memory addresses above the RAM. This revision
  * of the driver supports PCI boards below 1Mb (device id 0x100) and
  * above 1Mb (device id 0x101).
@@ -2250,6 +2250,13 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
                         (unsigned long *) arg);
             break;
         case TIOCSSOFTCAR:
+            error = verify_area(VERIFY_READ, (void *) arg
+                                 ,sizeof(unsigned long *));
+            if (error) {
+                 ret_val = error;
+                 break;
+            }
+
             arg = get_fs_long((unsigned long *) arg);
             tty->termios->c_cflag =
                     ((tty->termios->c_cflag & ~CLOCAL) |
@@ -2275,6 +2282,12 @@ cy_ioctl(struct tty_struct *tty, struct file * file,
                                    (struct serial_struct *) arg);
             break;
         case TIOCSSERIAL:
+            error = verify_area(VERIFY_READ, (void *) arg
+                                ,sizeof(struct serial_struct));
+            if (error){
+                ret_val = error;
+                break;
+            }
             ret_val = set_serial_info(info,
                                    (struct serial_struct *) arg);
             break;
@@ -2646,6 +2659,8 @@ cy_open(struct tty_struct *tty, struct file * filp)
 	return retval;
     }
 
+    MOD_INC_USE_COUNT;
+
     retval = block_til_ready(tty, filp, info);
     if (retval) {
 #ifdef SERIAL_DEBUG_OPEN
@@ -2661,7 +2676,6 @@ cy_open(struct tty_struct *tty, struct file * filp)
 #ifdef SERIAL_DEBUG_OPEN
     printk("cy_open done\n");/**/
 #endif
-    MOD_INC_USE_COUNT;
     return 0;
 } /* cy_open */
 
@@ -3069,7 +3083,7 @@ cy_detect_pci()
 		cy_pci_address &= 0xfffffff0;
 		if ((ulong)cy_pci_address >= 0x100000) { /* above 1M? */
 			cy_pci_address =
-			    (unsigned int) vremap(cy_pci_address,0x4000);
+			    (unsigned int) ioremap(cy_pci_address,0x4000);
 		}
 		cy_pci_io  &= 0xfffffffc;
 		cy_pci_nchan = 4 * cy_init_card((unsigned char *)

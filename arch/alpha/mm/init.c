@@ -59,7 +59,7 @@ void show_mem(void)
 	printk("\nMem-info:\n");
 	show_free_areas();
 	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-	i = MAP_NR(high_memory);
+	i = max_mapnr;
 	while (i-- > 0) {
 		total++;
 		if (PageReserved(mem_map+i))
@@ -131,7 +131,8 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
 	pgd_val(swapper_pg_dir[1023]) = (newptbr << 32) | pgprot_val(PAGE_KERNEL);
 	init_task.tss.ptbr = newptbr;
-	init_task.tss.flags = 1;
+	init_task.tss.pal_flags = 1;	/* set FEN, clear everything else */
+	init_task.tss.flags = 0;
 	init_task.kernel_stack_page = INIT_STACK;
 	load_PCB(&init_task.tss);
 
@@ -144,7 +145,8 @@ void mem_init(unsigned long start_mem, unsigned long end_mem)
 	unsigned long tmp;
 
 	end_mem &= PAGE_MASK;
-	high_memory = end_mem;
+	max_mapnr = MAP_NR(end_mem);
+	high_memory = (void *) end_mem;
 	start_mem = PAGE_ALIGN(start_mem);
 
 	/*
@@ -156,7 +158,7 @@ void mem_init(unsigned long start_mem, unsigned long end_mem)
 		tmp += PAGE_SIZE;
 	}
 
-	for (tmp = PAGE_OFFSET ; tmp < high_memory ; tmp += PAGE_SIZE) {
+	for (tmp = PAGE_OFFSET ; tmp < end_mem ; tmp += PAGE_SIZE) {
 		if (tmp >= MAX_DMA_ADDRESS)
 			clear_bit(PG_DMA, &mem_map[MAP_NR(tmp)].flags);
 		if (PageReserved(mem_map+MAP_NR(tmp)))
@@ -173,7 +175,7 @@ void si_meminfo(struct sysinfo *val)
 {
 	int i;
 
-	i = MAP_NR(high_memory);
+	i = max_mapnr;
 	val->totalram = 0;
 	val->sharedram = 0;
 	val->freeram = nr_free_pages << PAGE_SHIFT;

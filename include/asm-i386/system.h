@@ -5,11 +5,12 @@
 
 /*
  * Entry into gdt where to find first TSS. GDT layout:
- *   0 - nul
- *   1 - kernel code segment
- *   2 - kernel data segment
- *   3 - user code segment
- *   4 - user data segment
+ *   0 - null
+ *   1 - not used
+ *   2 - kernel code segment
+ *   3 - kernel data segment
+ *   4 - user code segment
+ *   5 - user data segment
  * ...
  *   8 - TSS #0
  *   9 - LDT #0
@@ -95,6 +96,7 @@ __asm__("pushl %%edx\n\t" \
 		loaddebug(prev,2); \
 		loaddebug(prev,3); \
 		loaddebug(prev,6); \
+		loaddebug(prev,7); \
 	} \
 } while (0)
 
@@ -116,6 +118,7 @@ __asm__("movl %2,"SYMBOL_NAME_STR(current_set)"\n\t" \
 		loaddebug(prev,2); \
 		loaddebug(prev,3); \
 		loaddebug(prev,6); \
+		loaddebug(prev,7); \
 	} \
 } while (0)
 #endif
@@ -274,7 +277,7 @@ __asm__ __volatile__ ("movw $" #limit ",%1\n\t" \
 	"movb %%ah,%6\n\t" \
 	"rorl $16,%%eax" \
 	: /* no output */ \
-	:"a" (addr+0xc0000000), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
+	:"a" (addr), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
 	 "m" (*(n+5)), "m" (*(n+6)), "m" (*(n+7)) \
 	)
 

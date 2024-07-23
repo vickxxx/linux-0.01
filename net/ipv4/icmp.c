@@ -36,6 +36,8 @@
  *	Willy Konynenberg	:	Transparent proxying support.
  *		Keith Owens	:	RFC1191 correction for 4.2BSD based 
  *					path MTU bug.
+ *		Thomas Quinot	:	ICMP Dest Unreach codes up to 15 are
+ *					valid (RFC 1812).
  *
  *
  * RFC1122 (Host Requirements -- Comm. Layer) Status:
@@ -618,7 +620,9 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info, s
 	 *	Build and send the packet.
 	 */
 
-	icmp_build_xmit(&icmp_param, saddr, iph->saddr, ((iph->tos & 0x38) | 6));
+	icmp_build_xmit(&icmp_param, saddr, iph->saddr, 
+			icmp_pointers[type].error ? 
+			(iph->tos & 0x1E) | 0xC0 : iph->tos);
 }
 
 
@@ -730,7 +734,7 @@ static void icmp_unreach(struct icmphdr *icmph, struct sk_buff *skb, struct devi
 			default:
 				break;
 		}
-		if(icmph->code>12)	/* Invalid type */
+		if(icmph->code>15)	/* Invalid type */
 			return;
 	}
 	

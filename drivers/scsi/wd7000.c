@@ -98,6 +98,35 @@
  *  one of the FD boards, it would be nice to come up with a signature
  *  for it.
  *                                                           J.B. Jan 1994.
+ *
+ *
+ *  Revisions by Miroslav Zagorac <zaga@fly.cc.fer.hr>
+ *
+ *  08/24/1996.
+ *
+ *  Enhancement for wd7000_detect function has been made, so you don't have
+ *  to enter BIOS ROM adress in initialisation data (see struct Config).
+ *  We cannot detect IRQ, DMA and I/O base address for now, so we have to
+ *  enter them as arguments while wd_7000 is detected. If someone has IRQ,
+ *  DMA or I/O base address set to some other value, he can enter them in
+ *  configuration without any problem. Also I wrote a function wd7000_setup,
+ *  so now you can enter WD-7000 definition as kernel arguments,
+ *  as in lilo.conf:
+ *
+ *     append="wd7000=IRQ,DMA,IO"
+ *
+ *  PS: If card BIOS ROM is disabled, function wd7000_detect now will recognize
+ *      adapter, unlike the old one. Anyway, BIOS ROM from WD7000 adapter is
+ *      useless for Linux. B^)
+ *
+ *
+ *  09/06/1996.
+ *
+ *  Autodetecting of I/O base address from wd7000_detect function is removed,
+ *  some little bugs removed, etc...
+ *
+ *  Thanks to Roger Scott for driver debugging.
+ *
  */
 
 #ifdef MODULE
@@ -121,7 +150,7 @@
 #include "hosts.h"
 #include "sd.h"
 
-#define ANY2SCSI_INLINE    /* undef this to use old macros */
+#define ANY2SCSI_INLINE		/* undef this to use old macros */
 #undef DEBUG
 
 #include "wd7000.h"
@@ -158,7 +187,7 @@ struct proc_dir_entry proc_scsi_wd7000 = {
  */
 typedef volatile struct mailbox{
   unchar status;
-  unchar scbptr[3];             /* SCSI-style - MSB first (big endian) */
+  unchar scbptr[3];		/* SCSI-style - MSB first (big endian) */
 } Mailbox;
 
 /*
@@ -167,17 +196,17 @@ typedef volatile struct mailbox{
  *
  */
 typedef struct adapter {
-  struct Scsi_Host *sh;             /* Pointer to Scsi_Host structure */
-  int iobase;                       /* This adapter's I/O base address */
-  int irq;                          /* This adapter's IRQ level */
-  int dma;                          /* This adapter's DMA channel */
-  struct {                          /* This adapter's mailboxes */
-    Mailbox ogmb[OGMB_CNT];             /* Outgoing mailboxes */
-    Mailbox icmb[ICMB_CNT];             /* Incoming mailboxes */
+  struct Scsi_Host *sh;		/* Pointer to Scsi_Host structure */
+  int iobase;			/* This adapter's I/O base address */
+  int irq;			/* This adapter's IRQ level */
+  int dma;			/* This adapter's DMA channel */
+  struct {			/* This adapter's mailboxes */
+    Mailbox ogmb[OGMB_CNT];	/* Outgoing mailboxes */
+    Mailbox icmb[ICMB_CNT];	/* Incoming mailboxes */
   } mb;
-  int next_ogmb;                    /* to reduce contention at mailboxes */
-  unchar control;                   /* shadows CONTROL port value */
-  unchar rev1, rev2;                /* filled in by wd7000_revision */
+  int next_ogmb;		/* to reduce contention at mailboxes */
+  unchar control;		/* shadows CONTROL port value */
+  unchar rev1, rev2;		/* filled in by wd7000_revision */
 } Adapter;
 
 /*
@@ -186,22 +215,48 @@ typedef struct adapter {
  * Note that if SA_INTERRUPT is not used, wd7000_intr_handle must be
  * changed to pick up the IRQ level correctly.
  */
-Adapter *irq2host[16] = {NULL};  /* Possible IRQs are 0-15 */
+Adapter *irq2host[16] = {NULL};	/* Possible IRQs are 0-15 */
 
+/*
+ * (linear) base address for ROM BIOS
+ */
+static const long wd7000_biosaddr[] = {
+  0xc0000, 0xc2000, 0xc4000, 0xc6000, 0xc8000, 0xca000, 0xcc000, 0xce000,
+  0xd0000, 0xd2000, 0xd4000, 0xd6000, 0xd8000, 0xda000, 0xdc000, 0xde000
+};
+#define NUM_ADDRS (sizeof(wd7000_biosaddr)/sizeof(long))
+
+static const unsigned short wd7000_iobase[] = {
+  0x0300, 0x0308, 0x0310, 0x0318, 0x0320, 0x0328, 0x0330, 0x0338,
+  0x0340, 0x0348, 0x0350, 0x0358, 0x0360, 0x0368, 0x0370, 0x0378,
+  0x0380, 0x0388, 0x0390, 0x0398, 0x03a0, 0x03a8, 0x03b0, 0x03b8,
+  0x03c0, 0x03c8, 0x03d0, 0x03d8, 0x03e0, 0x03e8, 0x03f0, 0x03f8
+};
+#define NUM_IOPORTS (sizeof(wd7000_iobase)/sizeof(unsigned short))
+
+static const short wd7000_irq[] = { 3, 4, 5, 7, 9, 10, 11, 12, 14, 15 };
+#define NUM_IRQS (sizeof(wd7000_irq)/sizeof(short))
+
+static const short wd7000_dma[] = { 5, 6, 7 };
+#define NUM_DMAS (sizeof(wd7000_dma)/sizeof(short))
+  
 /*
  *  Standard Adapter Configurations - used by wd7000_detect
  */
 typedef struct {
-  const void *bios;             /* (linear) base address for ROM BIOS */
-  int iobase;                   /* I/O ports base address */
-  int irq;                      /* IRQ level */
-  int dma;                      /* DMA channel */
+  int      irq;			/* IRQ level        */
+  int      dma;			/* DMA channel      */
+  unsigned iobase;		/* I/O base address */
 } Config;
 
+/*
+ * Add here your configuration...
+ */
 static const Config configs[] = {
-  {(void *) 0xce000, 0x350, 15, 6},  /* defaults for single adapter */
-  {(void *) 0xc8000, 0x330, 11, 5},  /* defaults for second adapter */
-  {(void *) 0xd8000, 0x350, 15, 6},  /* Arghhh.... who added this ? */
+  { 15,  6, 0x350 },		/* defaults for single adapter */
+  { 11,  5, 0x320 },		/* defaults for second adapter */
+  {  7,  6, 0x350 },		/* My configuration (Zaga)     */
+  { -1, -1, 0x0   }		/* Empty slot                  */
 };
 #define NUM_CONFIGS (sizeof(configs)/sizeof(Config))
 
@@ -211,13 +266,13 @@ static const Config configs[] = {
  *  added for the Future Domain version.
  */
 typedef struct signature {
-    const void *sig;           /* String to look for */
-    unsigned    ofs;           /* offset from BIOS base address */
-    unsigned    len;           /* length of string */
+    const void *sig;		/* String to look for */
+    unsigned    ofs;		/* offset from BIOS base address */
+    unsigned    len;		/* length of string */
 } Signature;
 
 static const Signature signatures[] = {
-  {"SSTBIOS",0x0000d,7}                  /* "SSTBIOS" @ offset 0x0000d */
+  { "SSTBIOS", 0x0000d, 7 }	/* "SSTBIOS" @ offset 0x0000d */
 };
 #define NUM_SIGNATURES (sizeof(signatures)/sizeof(Signature))
 
@@ -226,19 +281,20 @@ static const Signature signatures[] = {
  *  I/O Port Offsets and Bit Definitions
  *  4 addresses are used.  Those not defined here are reserved.
  */
-#define ASC_STAT        0       /* Status,  Read */
-#define ASC_COMMAND     0       /* Command, Write */
-#define ASC_INTR_STAT   1       /* Interrupt Status, Read */
-#define ASC_INTR_ACK    1       /* Acknowledge, Write */
-#define ASC_CONTROL     2       /* Control, Write */
+#define ASC_STAT        0	/* Status,  Read */
+#define ASC_COMMAND     0	/* Command, Write */
+#define ASC_INTR_STAT   1	/* Interrupt Status, Read */
+#define ASC_INTR_ACK    1	/* Acknowledge, Write */
+#define ASC_CONTROL     2	/* Control, Write */
 
-/* ASC Status Port
+/*
+ * ASC Status Port
  */
-#define INT_IM		0x80		/* Interrupt Image Flag */
-#define CMD_RDY		0x40		/* Command Port Ready */
-#define CMD_REJ		0x20		/* Command Port Byte Rejected */
-#define ASC_INIT        0x10		/* ASC Initialized Flag */
-#define ASC_STATMASK    0xf0		/* The lower 4 Bytes are reserved */
+#define INT_IM		0x80	/* Interrupt Image Flag */
+#define CMD_RDY		0x40	/* Command Port Ready */
+#define CMD_REJ		0x20	/* Command Port Byte Rejected */
+#define ASC_INIT        0x10	/* ASC Initialized Flag */
+#define ASC_STATMASK    0xf0	/* The lower 4 Bytes are reserved */
 
 /* COMMAND opcodes
  *
@@ -248,31 +304,31 @@ static const Signature signatures[] = {
  *  discernible effect whatsoever.  I think they may be related to certain
  *  ICB commands, but again, the OEM manual doesn't make that clear.
  */
-#define NO_OP             0     /* NO-OP toggles CMD_RDY bit in ASC_STAT */
-#define INITIALIZATION    1     /* initialization (10 bytes) */
-#define DISABLE_UNS_INTR  2     /* disable unsolicited interrupts */
-#define ENABLE_UNS_INTR   3     /* enable unsolicited interrupts */
-#define INTR_ON_FREE_OGMB 4     /* interrupt on free OGMB */
-#define SOFT_RESET        5     /* SCSI bus soft reset */
-#define HARD_RESET_ACK    6     /* SCSI bus hard reset acknowledge */
-#define START_OGMB        0x80  /* start command in OGMB (n) */
-#define SCAN_OGMBS        0xc0  /* start multiple commands, signature (n) */
+#define NO_OP             0	/* NO-OP toggles CMD_RDY bit in ASC_STAT */
+#define INITIALIZATION    1	/* initialization (10 bytes) */
+#define DISABLE_UNS_INTR  2	/* disable unsolicited interrupts */
+#define ENABLE_UNS_INTR   3	/* enable unsolicited interrupts */
+#define INTR_ON_FREE_OGMB 4	/* interrupt on free OGMB */
+#define SOFT_RESET        5	/* SCSI bus soft reset */
+#define HARD_RESET_ACK    6	/* SCSI bus hard reset acknowledge */
+#define START_OGMB        0x80	/* start command in OGMB (n) */
+#define SCAN_OGMBS        0xc0	/* start multiple commands, signature (n) */
 				/*    where (n) = lower 6 bits */
 /* For INITIALIZATION:
  */
 typedef struct initCmd {
-  unchar op;                   /* command opcode (= 1) */
-  unchar ID;                   /* Adapter's SCSI ID */
-  unchar bus_on;               /* Bus on time, x 125ns (see below) */
-  unchar bus_off;              /* Bus off time, ""         ""      */
-  unchar rsvd;                 /* Reserved */
-  unchar mailboxes[3];         /* Address of Mailboxes, MSB first  */
-  unchar ogmbs;                /* Number of outgoing MBs, max 64, 0,1 = 1 */
-  unchar icmbs;                /* Number of incoming MBs,   ""       ""   */
+  unchar op;			/* command opcode (= 1) */
+  unchar ID;			/* Adapter's SCSI ID */
+  unchar bus_on;		/* Bus on time, x 125ns (see below) */
+  unchar bus_off;		/* Bus off time, ""         ""      */
+  unchar rsvd;			/* Reserved */
+  unchar mailboxes[3];		/* Address of Mailboxes, MSB first  */
+  unchar ogmbs;			/* Number of outgoing MBs, max 64, 0,1 = 1 */
+  unchar icmbs;			/* Number of incoming MBs,   ""       ""   */
 } InitCmd;
 
-#define BUS_ON            64    /* x 125ns = 8000ns (BIOS default) */
-#define BUS_OFF           15    /* x 125ns = 1875ns (BIOS default) */
+#define BUS_ON            64	/* x 125ns = 8000ns (BIOS default) */
+#define BUS_OFF           15	/* x 125ns = 1875ns (BIOS default) */
  
 /* Interrupt Status Port - also returns diagnostic codes at ASC reset
  *
@@ -301,29 +357,29 @@ typedef struct initCmd {
 #define ASC_RES		0x01	/* ASC Reset		*/
 
 /*
-   Driver data structures:
-   - mb and scbs are required for interfacing with the host adapter.
-     An SCB has extra fields not visible to the adapter; mb's
-     _cannot_ do this, since the adapter assumes they are contiguous in
-     memory, 4 bytes each, with ICMBs following OGMBs, and uses this fact
-     to access them.
-   - An icb is for host-only (non-SCSI) commands.  ICBs are 16 bytes each;
-     the additional bytes are used only by the driver.
-   - For now, a pool of SCBs are kept in global storage by this driver,
-     and are allocated and freed as needed.
-
-  The 7000-FASST2 marks OGMBs empty as soon as it has _started_ a command,
-  not when it has finished.  Since the SCB must be around for completion,
-  problems arise when SCBs correspond to OGMBs, which may be reallocated
-  earlier (or delayed unnecessarily until a command completes).
-  Mailboxes are used as transient data structures, simply for
-  carrying SCB addresses to/from the 7000-FASST2.
-
-  Note also since SCBs are not "permanently" associated with mailboxes,
-  there is no need to keep a global list of Scsi_Cmnd pointers indexed
-  by OGMB.   Again, SCBs reference their Scsi_Cmnds directly, so mailbox
-  indices need not be involved.
-*/
+ *   Driver data structures:
+ *   - mb and scbs are required for interfacing with the host adapter.
+ *     An SCB has extra fields not visible to the adapter; mb's
+ *     _cannot_ do this, since the adapter assumes they are contiguous in
+ *     memory, 4 bytes each, with ICMBs following OGMBs, and uses this fact
+ *     to access them.
+ *   - An icb is for host-only (non-SCSI) commands.  ICBs are 16 bytes each;
+ *     the additional bytes are used only by the driver.
+ *   - For now, a pool of SCBs are kept in global storage by this driver,
+ *     and are allocated and freed as needed.
+ *
+ *  The 7000-FASST2 marks OGMBs empty as soon as it has _started_ a command,
+ *  not when it has finished.  Since the SCB must be around for completion,
+ *  problems arise when SCBs correspond to OGMBs, which may be reallocated
+ *  earlier (or delayed unnecessarily until a command completes).
+ *  Mailboxes are used as transient data structures, simply for
+ *  carrying SCB addresses to/from the 7000-FASST2.
+ *
+ *  Note also since SCBs are not "permanently" associated with mailboxes,
+ *  there is no need to keep a global list of Scsi_Cmnd pointers indexed
+ *  by OGMB.   Again, SCBs reference their Scsi_Cmnds directly, so mailbox
+ *  indices need not be involved.
+ */
 
 /*
  *  WD7000-specific scatter/gather element structure
@@ -483,8 +539,112 @@ static Scb *scbfree = NULL;      /* free list */
 static int freescbs = MAX_SCBS;  /* free list counter */
 
 /*
+ *
+ */
+static short wd7000_setupIRQ[NUM_CONFIGS];
+static short wd7000_setupDMA[NUM_CONFIGS];
+static short wd7000_setupIO[NUM_CONFIGS];
+static short wd7000_card_num = 0;
+
+/*
  *  END of data/declarations - code follows.
  */
+
+
+/*
+ * Note: You can now set these options from the kernel's "command line".
+ * The syntax is:
+ *
+ *     wd7000=IRQ,DMA,IO
+ * eg:
+ *     wd7000=7,6,0x350
+ *
+ * will configure the driver for a WD-7000 controller
+ * using IRQ 15 with a DMA channel 6, at IO base address 0x350.
+ */
+void wd7000_setup (char *str, int *ints)
+{
+    short i, j;
+
+    if (wd7000_card_num >= NUM_CONFIGS) {
+        printk ("wd7000_setup: Too many \"wd7000=\" configurations in "
+	        "command line!\n");
+
+        return;
+    }
+
+    if (ints[0] != 3)
+	printk ("wd7000_setup: Error in command line!  "
+	        "Usage: wd7000=IRQ,DMA,IO\n");
+    else {
+	for (i = 0; i < NUM_IRQS; i++)
+	    if (ints[1] == wd7000_irq[i])
+		break;
+
+	if (i == NUM_IRQS) {
+	    printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+		    "invalid IRQ.\n", ints[1], ints[2], ints[3]);
+	    return;
+	}
+	else
+ 	    wd7000_setupIRQ[wd7000_card_num] = ints[1];
+
+	for (i = 0; i < NUM_DMAS; i++)
+	    if (ints[2] == wd7000_dma[i])
+		break;
+
+	if (i == NUM_DMAS) {
+	    printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+		    "invalid DMA channel.\n", ints[1], ints[2], ints[3]);
+	    return;
+	}
+	else
+	    wd7000_setupDMA[wd7000_card_num] = ints[2];
+
+	for (i = 0; i < NUM_IOPORTS; i++)
+	    if (ints[3] == wd7000_iobase[i])
+		break;
+
+	if (i == NUM_IOPORTS) {
+	    printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+		    "invalid I/O base address.\n", ints[1], ints[2], ints[3]);
+	    return;
+	}
+	else
+	    wd7000_setupIO[wd7000_card_num] = ints[3];
+
+	if (wd7000_card_num)
+	    for (i = 0; i < (wd7000_card_num - 1); i++)
+	        for (j = i + 1; j < wd7000_card_num; j++)
+	            if (wd7000_setupIRQ[i] == wd7000_setupIRQ[j]) {
+	                printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+			        "duplicated IRQ!\n",
+				ints[1], ints[2], ints[3]);
+		        return;
+	            }
+	            else if (wd7000_setupDMA[i] == wd7000_setupDMA[j]) {
+	                printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+			        "duplicated DMA channel!\n",
+				ints[1], ints[2], ints[3]);
+		        return;
+	            }
+	            else if (wd7000_setupIO[i] == wd7000_setupIO[j]) {
+	                printk ("wd7000_setup: \"wd7000=%d,%d,0x%x\" -> "
+			        "duplicated I/O base address!\n",
+				ints[1], ints[2], ints[3]);
+		        return;
+	            }
+
+#ifdef DEBUG
+	printk ("wd7000_setup: IRQ=%d, DMA=%d, I/O=0x%x\n",
+	        wd7000_setupIRQ[wd7000_card_num],
+		wd7000_setupDMA[wd7000_card_num],
+		wd7000_setupIO[wd7000_card_num]);
+#endif
+
+	wd7000_card_num++;
+    }
+}
 
 
 #ifdef ANY2SCSI_INLINE
@@ -555,16 +715,20 @@ static inline void wd7000_enable_dma(Adapter *host)
 
 #define WAITnexttimeout 200  /* 2 seconds */
 
-#define WAIT(port, mask, allof, noneof)					\
- { register volatile unsigned WAITbits; 				\
-   register unsigned long WAITtimeout = jiffies + WAITnexttimeout;	\
-   while (1) {								\
-     WAITbits = inb(port) & (mask);					\
-     if ((WAITbits & (allof)) == (allof) && ((WAITbits & (noneof)) == 0)) \
-       break;                                                         	\
-     if (jiffies > WAITtimeout) goto fail;				\
-   }									\
- }
+static inline short WAIT (unsigned port, unsigned mask, unsigned allof, unsigned noneof)
+{
+    register unsigned WAITbits;
+    register unsigned long WAITtimeout = jiffies + WAITnexttimeout;
+
+    while (jiffies <= WAITtimeout) {
+     	WAITbits = inb (port) & mask;
+
+	if (((WAITbits & allof) == allof) && ((WAITbits & noneof) == 0))
+	    return (0);
+    }
+
+    return (1);
+}
 
 
 static inline void delay( unsigned how_long )
@@ -577,17 +741,19 @@ static inline void delay( unsigned how_long )
 
 static inline int command_out(Adapter *host, unchar *cmd, int len)
 {
-    WAIT(host->iobase+ASC_STAT,ASC_STATMASK,CMD_RDY,0);
-    while (len--)  {
-	do  {
-	    outb(*cmd, host->iobase+ASC_COMMAND);
-	    WAIT(host->iobase+ASC_STAT, ASC_STATMASK, CMD_RDY, 0);
-	}  while (inb(host->iobase+ASC_STAT) & CMD_REJ);
-	cmd++;
-    }
-    return 1;
+    if (! WAIT (host->iobase+ASC_STAT,ASC_STATMASK,CMD_RDY,0)) {
+	while (len--)  {
+	    do  {
+		outb(*cmd, host->iobase+ASC_COMMAND);
+		WAIT(host->iobase+ASC_STAT, ASC_STATMASK, CMD_RDY, 0);
+	    }  while (inb(host->iobase+ASC_STAT) & CMD_REJ);
 
-fail:
+	    cmd++;
+	}
+
+	return 1;
+    }
+
     printk("wd7000 command_out: WAIT failed(%d)\n", len+1);
     return 0;
 }
@@ -627,7 +793,8 @@ static inline Scb *alloc_scbs(int needed)
 	timeout = jiffies + WAITnexttimeout;
 	do {
 	    sti();	/* Yes this is really needed here */
-	    now = jiffies;   while (jiffies == now) /* wait a jiffy */;
+	    now = jiffies;
+	    while (jiffies == now); /* wait a jiffy */
 	    cli();
 	}  while (freescbs < needed && jiffies <= timeout);
 	/*
@@ -699,7 +866,7 @@ static int mail_out( Adapter *host, Scb *scbptr )
     Mailbox *ogmbs = host->mb.ogmb;
     int *next_ogmb = &(host->next_ogmb);
 #ifdef DEBUG
-    printk("wd7000 mail_out: %06x",(unsigned int) scbptr);
+    printk("wd7000 mail_out: 0x%06lx",(long) scbptr);
 #endif
     /* We first look for a free outgoing mailbox */
     save_flags(flags);
@@ -708,7 +875,7 @@ static int mail_out( Adapter *host, Scb *scbptr )
     for (i = 0; i < OGMB_CNT; i++) {
 	if (ogmbs[ogmb].status == 0)  {
 #ifdef DEBUG
-	    printk(" using OGMB %x",ogmb);
+	    printk(" using OGMB 0x%x",ogmb);
 #endif
 	    ogmbs[ogmb].status = 1;
 	    any2scsi((unchar *) ogmbs[ogmb].scbptr, (int) scbptr);
@@ -720,7 +887,7 @@ static int mail_out( Adapter *host, Scb *scbptr )
     }
     restore_flags(flags);
 #ifdef DEBUG
-    printk(", scb is %x",(unsigned int) scbptr);
+    printk(", scb is 0x%06lx",(long) scbptr);
 #endif
     if (i >= OGMB_CNT) {
 	/*
@@ -790,7 +957,7 @@ int make_code(unsigned hosterr, unsigned scsierr)
 	}
 #ifdef DEBUG
     if (scsierr||hosterr)
-	printk("\nSCSI command error: SCSI %02x host %04x return %d",
+	printk("\nSCSI command error: SCSI 0x%02x host 0x%04x return %d\n",
 	       scsierr,in_error,hosterr);
 #endif
     return scsierr | (hosterr << 16);
@@ -800,7 +967,7 @@ int make_code(unsigned hosterr, unsigned scsierr)
 static void wd7000_scsi_done(Scsi_Cmnd * SCpnt)
 {
 #ifdef DEBUG
-    printk("wd7000_scsi_done: %06x\n",(unsigned int) SCpnt);
+    printk ("wd7000_scsi_done: 0x%06lx\n", (long) SCpnt);
 #endif
     SCpnt->SCp.phase = 0;
 }
@@ -819,12 +986,12 @@ void wd7000_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
     Mailbox *icmbs = host->mb.icmb;
 
 #ifdef DEBUG
-    printk("wd7000_intr_handle: irq = %d, host = %06x\n", irq, host);
+    printk("wd7000_intr_handle: irq = %d, host = 0x%06lx\n", irq, (long) host);
 #endif
 
     flag = inb(host->iobase+ASC_INTR_STAT);
 #ifdef DEBUG
-    printk("wd7000_intr_handle: intr stat = %02x\n",flag);
+    printk("wd7000_intr_handle: intr stat = 0x%02x\n",flag);
 #endif
 
     if (!(inb(host->iobase+ASC_STAT) & INT_IM))  {
@@ -847,7 +1014,7 @@ void wd7000_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
 	/* The interrupt is for a mailbox */
 	if (!(flag & IMB_INTR)) {
 #ifdef DEBUG
-	    printk("wd7000_intr_handle: free outgoing mailbox");
+	    printk("wd7000_intr_handle: free outgoing mailbox\n");
 #endif
 	    /*
 	     * If sleep_on() and the "interrupt on free OGMB" command are
@@ -862,7 +1029,7 @@ void wd7000_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
 	    icmb_status = icmbs[icmb].status;
 	    if (icmb_status & 0x80)  {  /* unsolicited - result in ICMB */
 #ifdef DEBUG
- 		printk("wd7000_intr_handle: unsolicited interrupt %02xh\n",
+ 		printk("wd7000_intr_handle: unsolicited interrupt 0x%02xh\n",
 		       icmb_status);
 #endif
 		wd7000_intr_ack(host);
@@ -983,7 +1150,7 @@ int wd7000_diagnostics( Adapter *host, int code )
 	return 0;
     }
     if (make_code(icb.vue|(icb.status << 8),0))  {
-	printk("wd7000_diagnostics: failed (%02x,%02x)\n",
+	printk("wd7000_diagnostics: failed (0x%02x,0x%02x)\n",
 	       icb.vue, icb.status);
 	return 0;
     }
@@ -1000,17 +1167,22 @@ int wd7000_init( Adapter *host )
     int diag;
 
     /*
-       Reset the adapter - only.  The SCSI bus was initialized at power-up,
-       and we need to do this just so we control the mailboxes, etc.
-    */
+     *  Reset the adapter - only.  The SCSI bus was initialized at power-up,
+     *  and we need to do this just so we control the mailboxes, etc.
+     */
     outb(ASC_RES, host->iobase+ASC_CONTROL);
     delay(1);  /* reset pulse: this is 10ms, only need 25us */
     outb(0,host->iobase+ASC_CONTROL);
     host->control = 0;   /* this must always shadow ASC_CONTROL */
-    WAIT(host->iobase+ASC_STAT, ASC_STATMASK, CMD_RDY, 0);
 
-    if ((diag = inb(host->iobase+ASC_INTR_STAT)) != 1)  {
+    if (WAIT (host->iobase+ASC_STAT, ASC_STATMASK, CMD_RDY, 0)) {
+        printk ("wd7000_init: WAIT timed out.\n"); 
+        return 0;					/* 0 = not ok */
+    }
+
+    if ((diag = inb(host->iobase+ASC_INTR_STAT)) != 1) {
 	printk("wd7000_init: ");
+
 	switch (diag)  {
 	case 2:
 	  printk("RAM failure.\n");
@@ -1031,8 +1203,7 @@ int wd7000_init( Adapter *host )
 	  printk("ROM checksum error.\n");
 	  break;
 	default:
-	  printk("diagnostic code %02Xh received.\n", diag);
-	  break;
+	  printk("diagnostic code 0x%02Xh received.\n", diag);
 	}
 	return 0;
     }
@@ -1046,7 +1217,11 @@ int wd7000_init( Adapter *host )
 	printk("wd7000_init: adapter initialization failed.\n"); 
 	return 0;
     }
-    WAIT(host->iobase+ASC_STAT, ASC_STATMASK, ASC_INIT, 0);
+
+    if (WAIT (host->iobase+ASC_STAT, ASC_STATMASK, ASC_INIT, 0)) {
+        printk ("wd7000_init: WAIT timed out.\n"); 
+        return 0;
+    }
 
     if (request_irq(host->irq, wd7000_intr_handle, SA_INTERRUPT, "wd7000", NULL)) {
 	printk("wd7000_init: can't get IRQ %d.\n", host->irq);
@@ -1067,10 +1242,6 @@ int wd7000_init( Adapter *host )
     }
 
     return 1;
-
-  fail:
-    printk("wd7000_init: WAIT timed out.\n"); 
-    return 0;					/* 0 = not ok */
 }
 
 
@@ -1093,8 +1264,7 @@ void wd7000_revision(Adapter *host)
 }
 
 
-int wd7000_detect(Scsi_Host_Template * tpnt)
-/* 
+/*
  *  Returns the number of adapters this driver is supporting.
  *
  *  The source for hosts.c says to wait to call scsi_register until 100%
@@ -1104,37 +1274,88 @@ int wd7000_detect(Scsi_Host_Template * tpnt)
  *  calling scsi_unregister.
  *
  */
+int wd7000_detect (Scsi_Host_Template *tpnt)
 {
-    int i,j, present = 0;
-    const Config *cfg;
-    const Signature *sig;
+    short present = 0, biosaddr_ptr, cfg_ptr, sig_ptr, i, pass;
+    short biosptr[NUM_CONFIGS];
+    unsigned iobase;
     Adapter *host = NULL;
     struct Scsi_Host *sh;
 
+    for (i = 0; i < NUM_CONFIGS; biosptr[i++] = -1);
+
     tpnt->proc_dir = &proc_scsi_wd7000;
 
-    /* Set up SCB free list, which is shared by all adapters */
-    init_scbs();
+    /*
+     * Set up SCB free list, which is shared by all adapters
+     */
+    init_scbs ();
 
-    cfg = configs;
-    for (i = 0; i < NUM_CONFIGS; i++)  {
-	sig = signatures;
-	for (j = 0; j < NUM_SIGNATURES; j++)  {
-	    if (!memcmp(cfg->bios+sig->ofs, sig->sig, sig->len))  {
-		/* matched this one */
+    for (pass = 0, cfg_ptr = 0; pass < NUM_CONFIGS; pass++) {
+        for (biosaddr_ptr = 0; biosaddr_ptr < NUM_ADDRS; biosaddr_ptr++)
+	    for (sig_ptr = 0; sig_ptr < NUM_SIGNATURES; sig_ptr++) {
+	        for (i = 0; i < pass; i++)
+	            if (biosptr[i] == biosaddr_ptr)
+		        break;
+
+		if ((i == pass) &&
+		    !memcmp ((void *) (wd7000_biosaddr[biosaddr_ptr] +
+		             signatures[sig_ptr].ofs), signatures[sig_ptr].sig,
+		             signatures[sig_ptr].len))
+		    goto bios_matched;
+	    }
+
+bios_matched:
+
 #ifdef DEBUG
-		printk("WD-7000 SST BIOS detected at %04X: checking...\n",
-		       (int) cfg->bios);
+	printk ("wd7000_detect: pass %d\n", pass + 1);
+
+        if (biosaddr_ptr == NUM_ADDRS)
+	    printk ("WD-7000 SST BIOS not detected...\n");
+	else
+	    printk ("WD-7000 SST BIOS detected at 0x%lx: checking...\n",
+	            wd7000_biosaddr[biosaddr_ptr]);
 #endif
-		/*
-		 *  We won't explicitly test the configuration (in this
-		 *  version); instead, we'll just see if it works to
-		 *  setup the adapter; if it does, we'll use it.
-		 */
-		if (check_region(cfg->iobase, 4))  {  /* ports in use */
-		    printk("IO %xh already in use.\n", host->iobase);
-		    continue;
-		}
+
+	if (wd7000_card_num) 
+	    iobase = wd7000_setupIO[wd7000_card_num - 1];
+	else {
+	    if (configs[cfg_ptr++].irq < 0)
+		continue;
+
+	    iobase = configs[cfg_ptr - 1].iobase;
+	}
+
+#ifdef DEBUG
+ 	printk ("wd7000_detect: check IO 0x%x region...\n", iobase);
+#endif
+
+	if (! check_region (iobase, 4)) {
+
+#ifdef DEBUG
+ 	    printk ("wd7000_detect: ASC reset (IO 0x%x) ...", iobase);
+#endif
+
+ 	    /*
+  	     * ASC reset...
+ 	     */
+ 	    outb (ASC_RES, iobase + ASC_CONTROL);
+ 	    delay (1);
+ 	    outb (0, iobase + ASC_CONTROL);
+
+ 	    if (WAIT (iobase + ASC_STAT, ASC_STATMASK, CMD_RDY, 0))
+#ifdef DEBUG
+ 	    {
+  		printk ("failed!\n");
+  		continue;
+ 	    }
+ 	    else
+  		printk ("ok!\n");
+#else
+	    continue;
+#endif
+
+	    if (inb (iobase + ASC_INTR_STAT) == 1) {
 		/*
 		 *  We register here, to get a pointer to the extra space,
 		 *  which we'll use as the Adapter structure (host) for
@@ -1142,49 +1363,82 @@ int wd7000_detect(Scsi_Host_Template * tpnt)
 		 *  Scsi_Host structure (sh), and is located by the empty
 		 *  array hostdata.
 		 */
-		sh = scsi_register(tpnt, sizeof(Adapter) );
+		sh = scsi_register (tpnt, sizeof (Adapter));
 		host = (Adapter *) sh->hostdata;
+
 #ifdef DEBUG
-		printk("wd7000_detect: adapter allocated at %06x\n",
-		       (int)host);
+		printk ("wd7000_detect: adapter allocated at 0x%x\n",
+			(int) host);
 #endif
-		memset( host, 0, sizeof(Adapter) );
-		host->sh = sh;
-		host->irq = cfg->irq;
-		host->iobase = cfg->iobase;
-		host->dma = cfg->dma;
+
+		memset (host, 0, sizeof (Adapter));
+
+		if (wd7000_card_num) {
+		    host->irq = wd7000_setupIRQ[--wd7000_card_num];
+		    host->dma = wd7000_setupDMA[wd7000_card_num];
+		}
+		else {
+		    host->irq = configs[cfg_ptr - 1].irq;
+		    host->dma = configs[cfg_ptr - 1].dma;
+		}
+
+	    	host->sh = sh;
+    		host->iobase = iobase;
 		irq2host[host->irq] = host;
 
-		if (!wd7000_init(host))  {  /* Initialization failed */
+#ifdef DEBUG
+		printk ("wd7000_detect: Trying init WD-7000 card at IO "
+			"0x%x, IRQ %d, DMA %d...\n",
+			host->iobase, host->irq, host->dma);
+#endif
+
+		if (! wd7000_init (host)) {  /* Initialization failed */
 		    scsi_unregister (sh);
+
 		    continue;
 		}
 
 		/*
 		 *  OK from here - we'll use this adapter/configuration.
 		 */
-		wd7000_revision(host);   /* important for scatter/gather */
+		wd7000_revision (host);   /* important for scatter/gather */
 
-		printk("Western Digital WD-7000 (%d.%d) ",
-		       host->rev1, host->rev2);
-		printk("using IO %xh IRQ %d DMA %d.\n",
-		       host->iobase, host->irq, host->dma);
-
-		request_region(host->iobase, 4,"wd7000"); /* Register our ports */
 		/*
-		 *  For boards before rev 6.0, scatter/gather isn't supported.
+		 * Register our ports.
 		 */
-		if (host->rev1 < 6)  sh->sg_tablesize = SG_NONE;
+		request_region (host->iobase, 4, "wd7000");
 
-		present++;                      /* count it */
-		break;                          /* don't try any more sigs */
+		/*
+		 *  For boards before rev 6.0, scatter/gather
+		 *  isn't supported.
+		 */
+		if (host->rev1 < 6)
+		    sh->sg_tablesize = SG_NONE;
+
+		present++;		/* count it */
+
+		if (biosaddr_ptr != NUM_ADDRS)
+		    biosptr[pass] = biosaddr_ptr;
+
+		printk ("Western Digital WD-7000 (rev %d.%d) ",
+			host->rev1, host->rev2);
+		printk ("using IO 0x%x, IRQ %d, DMA %d.\n", 
+			host->iobase, host->irq, host->dma);
 	    }
-	    sig++;  /* try next signature with this configuration */
 	}
-	cfg++;      /* try next configuration */
+
+#ifdef DEBUG
+	else
+ 	    printk ("wd7000_detect: IO 0x%x region already allocated!\n",
+		    iobase);
+#endif
+
     }
 
-    return present;
+    if (! present)
+       printk ("Failed initialization of WD-7000 SCSI card!\n");
+
+    return (present);
 }
 
 

@@ -794,7 +794,7 @@ static int copy_mount_options (const void * data, unsigned long *where)
 	if (!data)
 		return 0;
 
-	vma = find_vma(current, (unsigned long) data);
+	vma = find_vma(current->mm, (unsigned long) data);
 	if (!vma || (unsigned long) data < vma->vm_start)
 		return -EFAULT;
 	if (!(vma->vm_flags & VM_READ))
@@ -948,7 +948,7 @@ static void do_mount_root(void)
 				current->fs->root = inode;
 				ROOT_DEV = sb->s_dev;
 				printk (KERN_NOTICE "VFS: Mounted root (nfs filesystem).\n");
-				vfsmnt = add_vfsmnt(ROOT_DEV, "rootfs", "/");
+				vfsmnt = add_vfsmnt(ROOT_DEV, "/dev/root", "/");
 				if (!vfsmnt)
 					panic("VFS: add_vfsmnt failed for NFS root.\n");
 				vfsmnt->mnt_sb = sb;
@@ -967,6 +967,9 @@ static void do_mount_root(void)
 #ifdef CONFIG_BLK_DEV_FD
 	if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {
 		floppy_eject();
+#ifndef CONFIG_BLK_DEV_RAM
+		printk(KERN_NOTICE "(Warning, this kernel has no ramdisk support)\n");
+#endif
 		printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
 		wait_for_keypress();
 	}
@@ -1007,7 +1010,7 @@ static void do_mount_root(void)
 			printk ("VFS: Mounted root (%s filesystem)%s.\n",
 				fs_type->name,
 				(sb->s_flags & MS_RDONLY) ? " readonly" : "");
-			vfsmnt = add_vfsmnt(ROOT_DEV, "rootfs", "/");
+			vfsmnt = add_vfsmnt(ROOT_DEV, "/dev/root", "/");
 			if (!vfsmnt)
 				panic("VFS: add_vfsmnt failed for root fs");
 			vfsmnt->mnt_sb = sb;
@@ -1065,14 +1068,14 @@ int change_root(kdev_t new_root_dev,const char *put_old)
 		umount_error = do_umount(old_root_dev,1);
 		if (umount_error) printk(KERN_ERR "error %d\n",umount_error);
 		else {
-			printk(KERN_NOTICE "okay\n");
+			printk("okay\n");
 			invalidate_buffers(old_root_dev);
 		}
 		return umount_error ? error : 0;
 	}
 	iput(old_root); /* sb->s_covered */
 	remove_vfsmnt(old_root_dev);
-	vfsmnt = add_vfsmnt(old_root_dev,"old_rootfs",put_old);
+	vfsmnt = add_vfsmnt(old_root_dev,"/dev/root.old",put_old);
 	if (!vfsmnt) printk(KERN_CRIT "Trouble: add_vfsmnt failed\n");
 	else {
 		vfsmnt->mnt_sb = old_root->i_sb;

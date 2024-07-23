@@ -1,5 +1,5 @@
 /*
- * linux/drivers/block/ide-tape.h	Version 1.5 - ALPHA	Apr  12, 1996
+ * linux/drivers/block/ide-tape.h	Version 1.8 - ALPHA	Sep  26, 1996
  *
  * Copyright (C) 1995, 1996 Gadi Oxman <gadio@netvision.net.il>
  */
@@ -53,7 +53,7 @@
  
 #define	IDETAPE_MIN_PIPELINE_STAGES		100
 #define	IDETAPE_MAX_PIPELINE_STAGES		200
-#define	IDETAPE_INCREASE_STAGES_RATE		0.2
+#define	IDETAPE_INCREASE_STAGES_RATE		20
 
 /*
  *	Assuming the tape shares an interface with another device, the default
@@ -234,11 +234,20 @@
 #define IDETAPE_ANTICIPATE_READ_WRITE_DSC	1
 
 /*
+ *	The following parameter is used to select the point in the internal
+ *	tape fifo in which we will start to refill the buffer. Decreasing
+ *	the following parameter will improve the system's latency and
+ *	interactive response, while using a high value might improve sytem
+ *	throughput.
+ */
+#define	IDETAPE_FIFO_THRESHOLD 			2
+
+/*
  *	DSC timings.
  */
  
 #define	IDETAPE_DSC_READ_WRITE_FALLBACK_FREQUENCY   5*HZ/100	/* 50 msec */
-#define IDETAPE_DSC_READ_WRITE_LOWEST_FREQUENCY	30*HZ/100	/* 300 msec */
+#define IDETAPE_DSC_READ_WRITE_LOWEST_FREQUENCY	40*HZ/100	/* 400 msec */
 #define	IDETAPE_DSC_FAST_MEDIA_ACCESS_FREQUENCY	1*HZ		/* 1 second */
 #define	IDETAPE_FAST_SLOW_THRESHOLD		5*60*HZ		/* 5 minutes */
 #define IDETAPE_DSC_SLOW_MEDIA_ACCESS_FREQUENCY	60*HZ		/* 1 minute */

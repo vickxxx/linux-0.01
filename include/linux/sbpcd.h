@@ -106,16 +106,6 @@
 /* Set this to 0 once you have configured your interface definitions right. */
 #define DISTRIBUTION 1
 
-#if DISTRIBUTION
-#define READ_AUDIO 0
-#define KLOGD_PAUSE 55
-#else
-/* max. number of audio frames to read with one     */
-/* request (allocates n* 2352 bytes kernel memory!) */
-/* may be freely adjusted, f.e. 75 (= 1 sec.), at   */
-/* runtime by use of the CDROMAUDIOBUFSIZ ioctl.    */
-#define READ_AUDIO 75
-
 /*
  * Time to wait after giving a message.
  * This gets important if you enable non-standard DBG_xxx flags.
@@ -124,23 +114,58 @@
  */
 #define KLOGD_PAUSE 1
 
-/* tray control: eject tray if no disk is in (0 or 1) */
+/* tray control: eject tray if no disk is in */
+#if DISTRIBUTION
+#define JUKEBOX 0
+#else
 #define JUKEBOX 1
+#endif DISTRIBUTION
 
-/* tray control: eject tray after last use (0 or 1) */
+/* tray control: eject tray after last use */
+#if DISTRIBUTION
+#define EJECT 0
+#else
 #define EJECT 1
 #endif DISTRIBUTION
+
+/* max. number of audio frames to read with one     */
+/* request (allocates n* 2352 bytes kernel memory!) */
+/* may be freely adjusted, f.e. 75 (= 1 sec.), at   */
+/* runtime by use of the CDROMAUDIOBUFSIZ ioctl.    */
+#define READ_AUDIO 0
+
+/* Optimizations for the Teac CD-55A drive read performance.
+ * SBP_TEAC_SPEED can be changed here, or one can set the 
+ * variable "teac" when loading as a module.
+ * Valid settings are:
+ *   0 - very slow - the recommended "DISTRIBUTION 1" setup.
+ *   1 - 2x performance with little overhead. No busy waiting.
+ *   2 - 4x performance with 5ms overhead per read. Busy wait.
+ *
+ * Setting SBP_TEAC_SPEED or the variable 'teac' to anything
+ * other than 0 may cause problems. If you run into them, first
+ * change SBP_TEAC_SPEED back to 0 and see if your drive responds
+ * normally. If yes, you are "allowed" to report your case - to help
+ * me with the driver, not to solve your hassle. Don´t mail if you
+ * simply are stuck into your own "tuning" experiments, you know?
+ */
+#define SBP_TEAC_SPEED 1
 
 /*==========================================================================*/
 /*==========================================================================*/
 /*
- * nothing to change below here if you are not experimenting
+ * nothing to change below here if you are not fully aware what you're doing
  */
 #ifndef _LINUX_SBPCD_H
 
 #define _LINUX_SBPCD_H
 /*==========================================================================*/
 /*==========================================================================*/
+/*
+ * driver's own read_ahead, data mode
+ */
+#define SBP_BUFFER_FRAMES 8 
+
 #define LONG_TIMING 0 /* test against timeouts with "gold" CDs on CR-521 */
 #undef  FUTURE
 #undef SAFE_MIXED
@@ -148,9 +173,14 @@
 #define TEST_UPC 0
 #define SPEA_TEST 0
 #define TEST_STI 0
+#define OLD_BUSY 0
 #undef PATH_CHECK
 #ifndef SOUND_BASE
 #define SOUND_BASE 0
+#endif
+#if DISTRIBUTION
+#undef SBP_TEAC_SPEED
+#define SBP_TEAC_SPEED 0
 #endif
 /*==========================================================================*/
 /*
@@ -449,6 +479,8 @@
 /*==========================================================================*/
 
 #define MAX_TRACKS	99
+
+#define ERR_DISKCHANGE 615
 
 /*==========================================================================*/
 /*

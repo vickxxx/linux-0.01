@@ -662,7 +662,7 @@ static int disk_change(int drive)
 {
 	int fdc=FDC(drive);
 #ifdef FLOPPY_SANITY_CHECK
-	if (jiffies < UDP->select_delay + UDRS->select_date)
+	if (jiffies - UDRS->select_date < UDP->select_delay)
 		DPRINT("WARNING disk change called early\n");
 	if (!(FDCS->dor & (0x10 << UNIT(drive))) ||
 	   (FDCS->dor & 3) != UNIT(drive) ||
@@ -966,7 +966,7 @@ static int wait_for_completion(int delay, timeout_fn function)
 		return 1;
 	}
 
-	if (jiffies < delay){
+	if ((signed) (jiffies - delay) < 0){
 		del_timer(&fd_timer);
 		fd_timer.function = function;
 		fd_timer.expires = delay;
@@ -1043,7 +1043,7 @@ static void setup_DMA(void)
 	fd_cacheflush(raw_cmd->kernel_data, raw_cmd->length);
 	fd_set_dma_mode((raw_cmd->flags & FD_RAW_READ)?
 			DMA_MODE_READ : DMA_MODE_WRITE);
-	fd_set_dma_addr(virt_to_bus(raw_cmd->kernel_data));
+	fd_set_dma_addr(raw_cmd->kernel_data);
 	fd_set_dma_count(raw_cmd->length);
 	virtual_dma_port = FDCS->address;
 	fd_enable_dma();
@@ -1231,7 +1231,6 @@ static void fdc_specify(void)
 		/*DPRINT("FIFO enabled\n");*/
 	}
 
-#ifndef __sparc__
 	switch (raw_cmd->rate & 0x03) {
 		case 3:
 			dtr = 1000;
@@ -1286,7 +1285,6 @@ static void fdc_specify(void)
 		output_byte(FDCS->spec1 = spec1);
 		output_byte(FDCS->spec2 = spec2);
 	}
-#endif
 } /* fdc_specify */
 
 /* Set the FDC's data transfer rate on behalf of the specified drive.
@@ -1417,7 +1415,7 @@ static void setup_rw_floppy(void)
 		 * again just before spinup completion. Beware that
 		 * after scandrives, we must again wait for selection.
 		 */
-		if (ready_date > jiffies + DP->select_delay){
+		if ((signed) (ready_date - jiffies) > DP->select_delay){
 			ready_date -= DP->select_delay;
 			function = (timeout_fn) floppy_start;
 		} else
@@ -1687,14 +1685,12 @@ void floppy_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		} while ((ST0 & 0x83) != UNIT(current_drive) && inr == 2);
 	}
 	if (handler) {
-		if(intr_count >= 2)
-			{
-				/* expected interrupt */
-				floppy_tq.routine = (void *)(void *) handler;
-				queue_task_irq(&floppy_tq, &tq_immediate);
-				mark_bh(IMMEDIATE_BH);
-			}
-		else
+		if(intr_count >= 2) {
+			/* expected interrupt */
+			floppy_tq.routine = (void *)(void *) handler;
+			queue_task_irq(&floppy_tq, &tq_immediate);
+			mark_bh(IMMEDIATE_BH);
+		} else
 			handler();
 	} else
 		FDCS->reset = 1;
@@ -1934,7 +1930,7 @@ static int wait_til_done(void (*handler)(void), int interruptible)
 
 	floppy_tq.routine = (void *)(void *) handler;
 	queue_task(&floppy_tq, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+ 	mark_bh(IMMEDIATE_BH);
 	INT_OFF;
 	while(command_status < 2 && NO_SIGNAL){
 		is_alive("wait_til_done");
@@ -2091,7 +2087,7 @@ static void setup_format_params(int track)
 
 	/* determine interleave */
 	il = 1;
-	if (_floppy->sect > DP->interleave_sect && F_SIZECODE == 2)
+	if (_floppy->fmt_gap < 0x22)
 		il++;
 
 	/* initialize field */
@@ -3489,8 +3485,8 @@ static void config_types(void)
 		printk("\n");
 }
 
-static int floppy_read(struct inode * inode, struct file * filp,
-		       char * buf, int count)
+static long floppy_read(struct inode * inode, struct file * filp,
+		       char * buf, unsigned long count)
 {
 	int drive = DRIVE(inode->i_rdev);
 
@@ -3500,8 +3496,8 @@ static int floppy_read(struct inode * inode, struct file * filp,
 	return block_read(inode, filp, buf, count);
 }
 
-static int floppy_write(struct inode * inode, struct file * filp,
-			const char * buf, int count)
+static long floppy_write(struct inode * inode, struct file * filp,
+			const char * buf, unsigned long count)
 {
 	int block;
 	int ret;
@@ -3660,7 +3656,7 @@ static int check_floppy_change(kdev_t dev)
 	if (UTESTF(FD_DISK_CHANGED) || UTESTF(FD_VERIFY))
 		return 1;
 
-	if (UDRS->last_checked + UDP->checkfreq < jiffies){
+	if (UDP->checkfreq < jiffies - UDRS->last_checked){
 		lock_fdc(drive,0);
 		poll_drive(0,0);
 		process_fd_request();
@@ -4071,12 +4067,16 @@ static int floppy_grab_irq_and_dma(void)
 	if (fd_request_irq()) {
 		DPRINT("Unable to grab IRQ%d for the floppy driver\n",
 			FLOPPY_IRQ);
+		MOD_DEC_USE_COUNT;
+		usage_count--;
 		return -1;
 	}
 	if (fd_request_dma()) {
 		DPRINT("Unable to grab DMA%d for the floppy driver\n",
 			FLOPPY_DMA);
 		fd_free_irq();
+		MOD_DEC_USE_COUNT;
+		usage_count--;
 		return -1;
 	}
 	for (fdc = 0; fdc < N_FDC; fdc++)
@@ -4102,7 +4102,6 @@ static void floppy_release_irq_and_dma(void)
 		return;
 	}
 	INT_ON;
-	MOD_DEC_USE_COUNT;
 	fd_disable_dma();
 	fd_free_dma();
 	fd_disable_irq();
@@ -4135,6 +4134,7 @@ static void floppy_release_irq_and_dma(void)
 	if (floppy_tq.sync)
 		printk("task queue still active\n");
 #endif
+	MOD_DEC_USE_COUNT;
 }
 
 

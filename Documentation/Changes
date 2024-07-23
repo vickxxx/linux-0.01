@@ -20,13 +20,21 @@ prefer a HTML-ized shopping list.
 
    Para aquellos que prefieran una version en castellano de este
 documento, consultad la traduccion de Alfredo Sanjuan en
-http://slug.ctv.es/~alfredo/Cambios.html.
+http://slug.ctv.es/~alfredo/Cambios.html (Spanish translation).
 
    Akik magyarul szeretnenek olvasni az uj kernellel kapcsolatos
 valtozasokrol, az alabbi cimen megtalaljak Nyitrai Tamas forditasat:
-http://www.datanet.hu/generations/linux/newkernel.html.
+http://www.datanet.hu/generations/linux/newkernel.html (Hungarian
+translation).
 
-Last updated: July 21, 1996.
+   Tamas also maintains a version of this file at
+http://www.datanet.hu/generations/linux/Changes.html (English).
+
+   For people who prefer Japanese (thanks to Mitsuhiro Kojima): Kono
+bunshou no nihongo ban wa
+http://jf.gee.kyoto-u.ac.jp/JF/v2.0/Changes-2.0.html ni arimasu.
+
+Last updated: September 10, 1996.
 Current Author: Chris Ricker (gt1355b@prism.gatech.edu).
 
 Current Releases
@@ -41,7 +49,7 @@ Current Releases
 - Linux C++ Library	 2.7.1.4
 - Termcap		 2.0.8
 - Procps		 1.01
-- Gpm			 1.09
+- Gpm			 1.10
 - SysVinit		 2.64
 - Util-linux		 2.5
 - Mount                  2.5k
@@ -66,6 +74,14 @@ distributions like Caldera).  If you're running one of these, edit
 /etc/sysconfig/network-scripts/ifup-lo, changing the line `route add
 -net $(IPADDR)' to `route add -net 127.0.0.0' and you should be fine.
 
+   People have also reported problems due to the naming of the dummy
+network interface driver.  If the dummy driver is compiled into the
+kernel, its name is "dummy."  If the dummy driver is compiled as a
+module, its name is "dummy0."  Furthermore, more than one dummy driver
+can be loaded if compiled as a module.  Each subsequent loading of the
+driver adds a new dummy interface whose name is incremented by one
+("dummy1," "dummy2," etc.).
+
 Booting Changes
 ===============
 
@@ -81,6 +97,11 @@ LOADLIN is at
 ftp://sunsite.unc.edu/pub/Linux/system/Linux-boot/lodlin16.tgz.  If
 you're using more unusual loaders like SysLinux or etherboot, the
 latest versions are 1.3 and 2.0, respectively.
+
+   Ramdisk support does not work with the latest kernels if ramdisk=0
+option is present.  Many older distributions (mainly Slackware) have
+this option in their lilo.config file.  Comment it out and re-run lilo
+if you need ramdisks.
 
 The Linux C Library
 ===================
@@ -123,14 +144,28 @@ the old libc).  If you're feeling lazy, just comment out
 
    in linux/fs/locks.c and recompile.  If you're still running a.out,
 there's an unofficial libc-4.7.6 release out to which you can upgrade
-to fix this problem.
+to fix this problem.  Libc is available from
+ftp://sunsite.unc.edu/pub/Linux/GCC/.
 
-The Termcap Library
+GCC Signal 11 error
 ===================
 
-   The current Termcap release is 2.0.8. If you upgrade to this release
-read the `README' file contained into the package to get some important
-information about the `tgetent' function changes!
+   Many people have been reporting messages like the following,
+especially when compiling a new kernel:
+
+   `gcc:  Internal compiler error:  program cc1 got fatal signal 11'.
+
+   This is NOT a kernel bug.  Rather, these messages are generally
+caused by hardware problems.  See http://www.bitwizard.nl/sig11/ for
+the sig11 FAQ.
+
+   On the other hand, if you're using a gcc patched for Pentium
+optimization and are getting these errors, downgrade to a standard GNU
+gcc before assuming your hardware (or the kernel) is to blame.
+
+   On a related note, if you get random OOPses that don't seem to be
+related to anything and you have a motherboard with APM support, try
+disabling the APM support and/or compiling the kernel with APM support.
 
 Procps utilities
 ================
@@ -138,18 +173,17 @@ Procps utilities
    Due to changes in the structure of the /proc filesystem, you need to
 upgrade procps to the latest release, currently 1.01.  Otherwise,
 you'll get floating point errors with some ps commands or other similar
-surprises.
+surprises.  Grab
+ftp://sunsite.unc.edu/pub/Linux/system/Status/ps/procps-1.01.tgz.
 
 Kernel Modules
 ==============
 
    Almost all drivers in 2.0.x can be modules, and kerneld is now
 incorporated into the kernel.  To take advantage of this, you'll need
-the latest version of the module support apps, currently 2.0.0. These
-should be available at the same place you picked up your kernel
-(ftp://ftp.funet.fi/pub/Linux/kernel/src/) or the home page,
-http://www.pi.se/blox/modules/index.html.  Note: If you try to load a
-module and get a message like
+the latest version of the module support apps. These are available at
+http://www.pi.se/blox/modules/modules-2.0.0.tar.gz.  Note: If you try to
+load a module and get a message like
 
    `gcc2_compiled, undefined Failed to load module!  The symbols from
 kernel 1.3.foo don't match 1.3.foo'
@@ -168,6 +202,15 @@ have to mount at startup have to have their necessary file system and
 device drivers compiled into the kernel, so don't get grandiose ideas
 about going completely modular and then forget to compile ext2fs
 support and ide/SCSI drive support into your kernel ;-).
+
+Kernel messages
+===============
+
+   Kernel messages without a specific log level use the kernel's
+default log level.  In 1.2 kernels, the default log level was 6
+(information), while in 2.0.x kernels it is 4 (warning).  Adjust your
+configuration of syslogd appropriately (or edit printk.c in the kernel
+source ;-).
 
 PPP driver
 ==========
@@ -190,7 +233,8 @@ ftp://sunsite.unc.edu/pub/Linux/system/Daemons/init/sysvinit-2.64.tar.gz.
 
    If you're trying to run NCSA httpd, you might have problems with
 pre-spawning daemons.  Upgrade to the latest release (1.5.2), available
-from http://hoohoo.ncsa.uiuc.edu/.
+from http://hoohoo.ncsa.uiuc.edu/ or check out Apache
+(http://www.apache.org/).
 
    The new named pipe behavior also causes problems with Hylafax.  If
 you're running the hylafax daemon, it will just keep eating up CPU time
@@ -223,7 +267,7 @@ Uugetty
 
    Older uugettys will not allow use of a bidirectional serial line.  To
 fix this problem, upgrade to
-ftp://sunsite.unc.edu/pub/Linux/system/Serial/getty_ps-2.0.7h.tar.gz.
+ftp://sunsite.unc.edu/pub/Linux/system/Serial/getty_ps-2.0.7i.tar.gz.
 
 Kbd
 ===
@@ -253,7 +297,14 @@ the following as root:
    ln -s /usr/lib/terminfo/l/linux /usr/lib/terminfo/c/console
 
    Better yet, just get the latest official Linux termcap from
-ftp://sunsite.unc.edu/pub/Linux/GCC/termcap-2.0.8.tar.gz
+ftp://sunsite.unc.edu/pub/Linux/GCC/termcap-2.0.8.tar.gz.  If you
+upgrade to this release read the `README' file contained into the
+package to get some important information about the `tgetent' function
+changes!  Note that there is now a fixed version at
+ftp://sunsite.unc.edu/pub/Linux/GCC/termcap-2.0.8.fix.  If some of your
+apps complain that termcap entries are too long and you don't need some
+of the more esoteric terms in the standard 2.0.8 termcap, just download
+termcap-2.0.8.fix and move it to /etc/termcap.
 
    Also, the console driver is now responsible for keeping track of
 correspondence between character codes and glyph bitmaps.  If you
@@ -265,7 +316,7 @@ Hdparm
 
    Hdparm has been upgraded to take advantage of the latest features of
 the kernel drivers.  The latest non-beta version can be found at
-ftp://sunsite.unc.edu/pub/Linux/kernel/patches/diskdrives/hdparm-2.9.tar.gz.
+ftp://sunsite.unc.edu/pub/Linux/kernel/patches/diskdrives/hdparm-3.1.tar.gz.
 
 IP Accounting
 =============
@@ -279,7 +330,7 @@ direction (either incoming or outgoing).
    There also exists a possibility to match on device names and/or
 device addresses, so that only packets coming in/going out via that
 device (network interface) match with a rule.  You'll need to get
-ipfwadm from ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.2.tar.gz to
+ipfwadm from ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.3.0.tar.gz to
 use this.
 
 IP Firewalls
@@ -292,7 +343,7 @@ exists a possibility to match on device names and/or device addresses,
 so that only packets coming in/going out via that device (network
 interface) match with a rule.  This is especially useful to prevent
 spoofing.  You'll need to get
-ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.2.tar.gz to use this.
+ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.3.0.tar.gz to use this.
 
 IP Masquerading
 ===============
@@ -301,14 +352,25 @@ IP Masquerading
 always need to load separate modules (ip_masq_ftp.o and/or
 ip_masq_irc.o) if you are going to use FTP or IRC in combination with
 masquerading.  You'll need to get
-ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.2.tar.gz to use this.
+ftp://ftp.xos.nl/pub/linux/ipfwadm/ipfwadm-2.3.0.tar.gz to use this.
 
 ISDN support
 ============
 
    The new kernels support ISDN.  You'll need ISDN utils available from
-ftp://ftp.franken.de/pub/isdn4linux/isdn4k-utils-2.0.0.tar.gz to try
+ftp://ftp.franken.de/pub/isdn4linux/v2.0/isdn4k-utils-2.0.tar.gz to try
 this.
+
+Frame Relay
+===========
+
+   Frame relay support for Linux is now available as well.  Currently,
+only Sangoma cards are supported, but the interface is such that others
+will be as drivers become available.  To use this, grab
+ftp://linux.invlogic.com/pub/fr/frad-0.15.tgz (soon to be
+frad-0.20.tgz).  Another package of interest is
+ftp://linux.invlogic.com/pub/routing/routing.tgz (which allows Linux to
+make routing decisions based on packet source).
 
 Networking
 ==========
@@ -369,30 +431,30 @@ like encrypted file systems and such.  To use it, you'll need a
 modified version of mount from
 ftp://ftp.win.tue.nl/pub/linux/util/mount-2.5k.tar.gz; preliminary work
 on encrypted file system support can be found in
-ftp.funet.fi:/pub/OS/Linux/BETA/loop/des.1.tar.gz.
+ftp.funet.fi:/pub/Linux/BETA/loop/des.1.tar.gz.
 
 Multiple device
 ===============
 
    Multiple device support (allowing you to group several partitions
 into one logical device) has also been added.  Check out
-ftp://sweet-smoke.ufr-info-p7.ibp.fr/pub/Linux/md034.tar.gz to try this
+ftp://sweet-smoke.ufr-info-p7.ibp.fr/pub/Linux/md035.tar.gz to try this
 out.
 
 Arp
 ===
 
    Arp daemon support has been added.  Check out
-http://www.loran.com/~layes/arpd/index.html for more info and a copy of
-arpd.
+http://www.loran.com/~layes/arpd/index.html for more info and
+http://www.loran.com/~layes/arpd/arpd-1.0.2.tar.gz for a copy of arpd.
 
 Quota
 =====
 
    Quota support has also been added.  You need to get quotas-1.55 from
-ftp://ftp.funet.fi/pub/Linux/PEOPLE/Linus/subsystems/quota/all.tar.gz.
-You may need to copy its mntent.h over to /usr/include/mntent.h to get
-it to compile.
+ftp://ftp.funet.fi/pub/Linux/kernel/src/subsystems/quota/all.tar.gz. You
+may need to copy its mntent.h over to /usr/include/mntent.h to get it to
+compile.
 
 Process Accounting
 ==================
@@ -401,13 +463,18 @@ Process Accounting
 kernels. To use this feature, you'll need to get
 ftp://iguana.hut.fi/pub/linux/Kernel/process_accounting/acct_1.3.73.tar.gz.
 
-Bdflush
-=======
+Bdflush and Updated
+===================
 
    Bdflush has also been integrated into the new kernels, so those of
 you using it on older systems no longer need to hunt for the patches to
 implement it once you upgrade to 2.0.x.  You do still need to run the
-update daemon, however.
+update daemon, however.  You should probably upgrade to the latest
+updated, currently
+ftp://sunsite.unc.edu/pub/Linux/system/Daemons/updated-1.2.tar.gz.  This
+(and later) versions will not spawn a bdflush daemon, since that is now
+done by the kernel (kflushd).  If you upgrade, be sure to leave update
+in your init scripts and remove bdflush.
 
 APM support
 ===========
@@ -426,7 +493,7 @@ ftp://tsx-11.mit.edu/pub/linux/BETA/ibcs2/ibcs-2.0-960610.tar.gz
 
    For a version of Dosemu that works (well, at least as well as DOS
 ever works ;-), get
-ftp://tsx-11.mit.edu/pub/linux/ALPHA/dosemu/Development/dosemu-0.63.1.36.tgz
+ftp://tsx-11.mit.edu/pub/linux/ALPHA/dosemu/Development/dosemu-0.63.1.55.tgz
 or check out http://www.ednet.ns.ca/auto/rddc. Be sure to follow the
 instructions in README.newkernels about patching your include files, or
 it will not compile.
@@ -449,7 +516,15 @@ ftp://sunsite.unc.edu/pub/Linux/system/Misc/fdutils-4.3.src.tar.gz.
    In the future, fdformat might disappear entirely, so get used to
 using superformat instead.
 
-NCR 83c510 SCSI Driver
+Cyclades Serial Driver
+======================
+
+   The Cyclades driver has been changed so that the minor numbers start
+at 0 instead of 32 (for example, ttyC0 should be major 19, minor 0 for
+2.0.x kernels; in older kernels, it would have been major 19, minor
+32).  Use mknod or a sufficiently new version of MAKEDEV to fix this.
+
+NCR 53c810 SCSI Driver
 ======================
 
    Drivers for this card are now included in the standard linux source.
@@ -464,14 +539,15 @@ Perl
 
    While we're on the subject, changes made for the 2.0.x series cause
 the connect() Perl (both 4 and 5) call to time out while connecting to
-remote systems.  If you need the connect call for your program, use C
-instead of Perl.
+remote systems.  The problem is not actually in the connect() call;
+rather, the optional bind() call usually used with connect() causes the
+problem.  Remove the bind() call and your Perl scripts should connect.
 
    Also, Perl scripts using the readdir call now misbehave if you're
 using an old version of Perl, due to changes in libc.  Upgrade to a
 more current Perl to avoid any unpleasantness.
 
-groff
+Groff
 =====
 
    Those of you running Slackware may experience weirdness with man
@@ -480,7 +556,18 @@ when present at the end of a line, try setting an appropriate value
 (many have reported success with "latin1", for example) for the
 environmental variable LESSCHARSET.  Another, and probably better,
 solution is to edit the file /usr/lib/man.config and change all
-`-Tlatin1' options to `-Tascii'.
+`-Tlatin1' options to `-Tascii'.  An alternate solution, for those of
+you who can't reformat your man files in .../cat* directories is to
+edit /usr/lib/man.config, setting the PAGER to `PAGER
+(LESSCHARSET=latin1;export LESSCHARSET;/usr/bin/less -is)'.
+
+E2fsprogs
+=========
+
+   e2fsprogs 1.02 will work with the latest kernels, but it cannot be
+compiled on them.  If you need (or want) to compile your own copy,
+you'll need to get the latest version, currently available at
+ftp://tsx-11.mit.edu/pub/linux/packages/ext2fs/e2fsprogs-1.04.tar.gz.
 
 How to know the version of the installed programs
 *************************************************
@@ -573,8 +660,8 @@ ftp://sunsite.unc.edu/pub/Linux/system/Status/ps/procps-1.01.tgz
 Gpm mouse utilities
 ===================
 
-ftp://iride.unipv.it/pub/gpm/gpm-1.09.tar.gz
-ftp://sunsite.unc.edu/pub/Linux/system/Daemons/gpm-1.09.tar.gz
+ftp://iride.unipv.it/pub/gpm/gpm-1.10.tar.gz
+ftp://sunsite.unc.edu/pub/Linux/system/Daemons/gpm-1.10.tar.gz
 
 SysVinit utilities
 ==================
@@ -611,11 +698,14 @@ upgrade to install.  Almost everything you need is available in
 ftp://ftp.redhat.com/pub/current/i386/updates/2.0-kernel/ and its
 mirrors.
 
-   For others, especially those of you running Slackware 3.0, David
-Bourgin has put together a Slackware-compatible package of everything
+   For others, David Bourgin has put together a package of everything
 necessary to quickly and easily upgrade to 2.0.x.  See
 ftp://ftp.wsc.com/pub/freeware/linux/update.linux/ for more information
-and the files.
+and the files.  This package also includes many bug-fixes, including
+one for a recently discovered bug in sendmail-8.7.5 (just look at
+/pub/freeware/linux/update.linux/updat2-0.addon1/sendmail-8.7.5a.tar.gz
+if you only need the bug fix).  There's also an alternate lightweight
+termcap in the same directory that works well for many people.
 
 Please send info about any other packages that 2.0.x "broke" or about
 any new features of 2.0.x that require extra or new packages for use to

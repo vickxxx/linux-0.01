@@ -19,6 +19,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/ptrace.h>
 #include <linux/sys.h>
 #include <linux/utsname.h>
@@ -121,8 +122,6 @@ struct symbol_table symbol_table = {
 	X(verify_area),
 	X(do_mmap),
 	X(do_munmap),
-	X(insert_vm_struct),
-	X(merge_segments),
 	X(exit_mm),
 
 	/* internal kernel memory management */
@@ -131,10 +130,10 @@ struct symbol_table symbol_table = {
 	X(kmalloc),
 	X(kfree),
 	X(vmalloc),
-	X(vremap),
 	X(vfree),
  	X(mem_map),
  	X(remap_page_range),
+	X(max_mapnr),
 	X(high_memory),
 	X(update_vm_cache),
 
@@ -335,6 +334,7 @@ struct symbol_table symbol_table = {
 	X(insert_inode_hash),
 	X(event),
 	X(__down),
+	X(__up),
 	X(securelevel),
 /* all busmice */
 	X(add_mouse_randomness),

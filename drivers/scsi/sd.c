@@ -428,7 +428,7 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 		   SCpnt->host->host_no, (int) SCpnt->channel, 
 		   (int) SCpnt->target, (int) SCpnt->lun);
 	    print_command(SCpnt->cmnd);
-	    print_sense("sr", SCpnt);
+	    print_sense("sd", SCpnt);
 	    SCpnt = end_scsi_request(SCpnt, 0, block_sectors);
 	    requeue_sd_request(SCpnt);
 	    return;
@@ -490,6 +490,9 @@ static void do_sd_request (void)
 	    if( SDev->removable && !intr_count )
 	    {
                 scsi_ioctl(SDev, SCSI_IOCTL_DOORLOCK, 0);
+		/* scsi_ioctl may allow CURRENT to change, so start over. */
+		SDev->was_reset = 0;
+		continue;
 	    }
 	    SDev->was_reset = 0;
         }

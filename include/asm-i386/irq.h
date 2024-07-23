@@ -21,7 +21,10 @@ extern void enable_irq(unsigned int);
 
 #define __STR(x) #x
 #define STR(x) __STR(x)
- 
+
+#define GET_CURRENT \
+	"movl " SYMBOL_NAME_STR(current_set) ",%ebx\n\t"
+
 #define SAVE_ALL \
 	"cld\n\t" \
 	"push %gs\n\t" \
@@ -38,8 +41,6 @@ extern void enable_irq(unsigned int);
 	"movl $" STR(KERNEL_DS) ",%edx\n\t" \
 	"mov %dx,%ds\n\t" \
 	"mov %dx,%es\n\t" \
-	"movl $" STR(USER_DS) ",%edx\n\t" \
-	"mov %dx,%fs\n\t"   \
 	"movl $0,%edx\n\t"  \
 	"movl %edx,%db7\n\t"
 
@@ -81,7 +82,7 @@ extern void enable_irq(unsigned int);
  * a bit - without them it seems that the harddisk driver won't work on
  * all hardware. Arghh.
  */
-#define ACK_FIRST(mask) \
+#define ACK_FIRST(mask,nr) \
 	"inb $0x21,%al\n\t" \
 	"jmp 1f\n" \
 	"1:\tjmp 1f\n" \
@@ -93,7 +94,7 @@ extern void enable_irq(unsigned int);
 	"1:\tmovb $0x20,%al\n\t" \
 	"outb %al,$0x20\n\t"
 
-#define ACK_SECOND(mask) \
+#define ACK_SECOND(mask,nr) \
 	"inb $0xA1,%al\n\t" \
 	"jmp 1f\n" \
 	"1:\tjmp 1f\n" \
@@ -143,7 +144,10 @@ extern void enable_irq(unsigned int);
 	"movl "SYMBOL_NAME_STR(apic_reg)", %edx\n\t" \
 	"movl 32(%edx), %eax\n\t" \
 	"shrl $24,%eax\n\t" \
-	"andb $0x0F,%al\n"
+	"andb $0x0F,%al\n\t"
+
+#define GET_CURRENT \
+	"movl " SYMBOL_NAME_STR(current_set) "(,%eax,4),%ebx\n\t"
 	
 #define	ENTER_KERNEL \
 	"pushl %eax\n\t" \
@@ -151,6 +155,7 @@ extern void enable_irq(unsigned int);
 	"pushfl\n\t" \
 	"cli\n\t" \
 	GET_PROCESSOR_ID \
+	GET_CURRENT \
 	"btsl $" STR(SMP_FROM_INT) ","SYMBOL_NAME_STR(smp_proc_in_lock)"(,%eax,4)\n\t" \
 	"1: " \
 	"lock\n\t" \
@@ -207,11 +212,11 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	"pushl $-"#nr"-2\n\t" \
 	SAVE_ALL \
 	ENTER_KERNEL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
 	"sti\n\t" \
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
 	"addl $8,%esp\n\t" \
@@ -224,7 +229,7 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
 	ENTER_KERNEL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_fast_IRQ)"\n\t" \
@@ -238,7 +243,7 @@ SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 SYMBOL_NAME_STR(bad_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
 	ENTER_KERNEL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	LEAVE_KERNEL \
 	RESTORE_MOST);
 	
@@ -255,10 +260,10 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	"pushl $-"#nr"-2\n\t" \
 	SAVE_ALL \
 	ENTER_KERNEL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
 	"addl $8,%esp\n\t" \
@@ -283,11 +288,11 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	"pushl $-"#nr"-2\n\t" \
 	SAVE_ALL \
 	ENTER_KERNEL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
 	"sti\n\t" \
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
 	"addl $8,%esp\n\t" \
@@ -301,7 +306,7 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	SMP_PROF_IPI_CNT \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_fast_IRQ)"\n\t" \
@@ -312,7 +317,7 @@ SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(bad_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	RESTORE_MOST);
 
 #define BUILD_RESCHEDIRQ(nr) \
@@ -325,8 +330,8 @@ SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	ENTER_KERNEL \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
 	"sti\n\t" \
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(smp_reschedule_irq)"\n\t" \
 	"addl $8,%esp\n\t" \
@@ -345,22 +350,23 @@ __asm__( \
 SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	"pushl $-"#nr"-2\n\t" \
 	SAVE_ALL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
 	"sti\n\t" \
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
 	"addl $8,%esp\n\t" \
 	"cli\n\t" \
 	UNBLK_##chip(mask) \
 	"decl "SYMBOL_NAME_STR(intr_count)"\n\t" \
+	GET_CURRENT \
 	"jmp ret_from_sys_call\n" \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_fast_IRQ)"\n\t" \
@@ -372,7 +378,7 @@ SYMBOL_NAME_STR(fast_IRQ) #nr "_interrupt:\n\t" \
 "\n"__ALIGN_STR"\n" \
 SYMBOL_NAME_STR(bad_IRQ) #nr "_interrupt:\n\t" \
 	SAVE_MOST \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	RESTORE_MOST);
 	
 #define BUILD_TIMER_IRQ(chip,nr,mask) \
@@ -386,16 +392,17 @@ SYMBOL_NAME_STR(bad_IRQ) #nr "_interrupt:\n\t" \
 SYMBOL_NAME_STR(IRQ) #nr "_interrupt:\n\t" \
 	"pushl $-"#nr"-2\n\t" \
 	SAVE_ALL \
-	ACK_##chip(mask) \
+	ACK_##chip(mask,(nr&7)) \
 	"incl "SYMBOL_NAME_STR(intr_count)"\n\t"\
-	"movl %esp,%ebx\n\t" \
-	"pushl %ebx\n\t" \
+	"movl %esp,%eax\n\t" \
+	"pushl %eax\n\t" \
 	"pushl $" #nr "\n\t" \
 	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
 	"addl $8,%esp\n\t" \
 	"cli\n\t" \
 	UNBLK_##chip(mask) \
 	"decl "SYMBOL_NAME_STR(intr_count)"\n\t" \
+	GET_CURRENT \
 	"jmp ret_from_sys_call\n");
 
 #endif

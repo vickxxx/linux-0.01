@@ -134,7 +134,8 @@ int kstack_depth_to_print = 24;
 	printk("\nCall Trace: ");
 	stack = (unsigned long *) esp;
 	i = 1;
-	module_start = ((high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
+	module_start = PAGE_OFFSET + (max_mapnr << PAGE_SHIFT);
+	module_start = ((module_start + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
 	module_end = module_start + MODULE_RANGE;
 	while (((long) stack & 4095) != 0) {
 		addr = get_seg_long(ss, stack++);
@@ -173,8 +174,12 @@ DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun
 DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
 DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present, current)
 DO_ERROR(12, SIGBUS,  "stack segment", stack_segment, current)
-DO_ERROR(15, SIGSEGV, "reserved", reserved, current)
 DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
+
+asmlinkage void do_reserved(struct pt_regs * regs, long error_code)
+{
+	printk("Uhhuh.. Reserved trap code, whazzup? (%ld)\n", error_code);
+}
 
 asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 {
@@ -325,7 +330,7 @@ void trap_init(void)
 		return;
 	}
 	smptrap++;
-	if (strncmp((char*)0x0FFFD9, "EISA", 4) == 0)
+	if (strncmp((char*)phys_to_virt(0x0FFFD9), "EISA", 4) == 0)
 		EISA_bus = 1;
 	set_call_gate(&default_ldt,lcall7);
 	set_trap_gate(0,&divide_error);

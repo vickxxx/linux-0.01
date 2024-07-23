@@ -86,7 +86,7 @@ M	gpg109@rsphy1.anu.edu.au
 L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
-ETHEREXPRESS NETWORK DRIVER
+ETHEREXPRESS-16 NETWORK DRIVER
 P:	Philip Blundell
 M:	pjb27@cam.ac.uk
 L:	linux-net@vger.rutgers.edu
@@ -106,10 +106,10 @@ W:	http://www.dgii.com/linux/
 S:	Maintained
 
 APM DRIVER
-P:      Rik Faith & Stephen Rothwell
-M:      faith@cs.unc.edu, Stephen.Rothwell@canb.auug.org.au
-L:      linux-laptop@vger.rutgers.edu
-S:      Maintained
+P:	Rik Faith & Stephen Rothwell
+M:	faith@cs.unc.edu, Stephen.Rothwell@canb.auug.org.au
+L:	linux-laptop@vger.rutgers.edu
+S:	Maintained
 
 APPLETALK NETWORK LAYER
 P:	Alan Cox & University Of Michigan
@@ -150,13 +150,19 @@ S:	Maintained
 EATA-DMA SCSI DRIVER
 P:	Michael Neuffer
 M:	mike@i-Connect.Net
-L:	linux-scsi@vger.rutgers.edu
+L:	linux-eata@i-connect.net, linux-scsi@vger.rutgers.edu
 S:	Maintained
 
 EATA-PIO SCSI DRIVER
 P:	Michael Neuffer
 M:	mike@i-Connect.Net
-L:	linux-scsi@vger.rutgers.edu
+L:	linux-eata@i-connect.net, linux-scsi@vger.rutgers.edu
+S:	Maintained
+
+FILE LOCKING (flock() and fcntl()/lockf())
+P:	Andy Walker
+M:	andy@lysaker.kvaerner.no
+L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
 FRAME RELAY DLCI/FRAD (Sangoma drivers too)
@@ -166,21 +172,20 @@ L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
 FUTURE DOMAIN TMC-16x0 SCSI DRIVER (16-bit)
-P:      Rik Faith
-M:      faith@cs.unc.edu
-L:      linux-scsi@vger.rutgers.edu
-S:      Odd fixes (e.g., new signatures)
+P:	Rik Faith
+M:	faith@cs.unc.edu
+L:	linux-scsi@vger.rutgers.edu
+S:	Odd fixes (e.g., new signatures)
 
 SCSI TAPE DRIVER
-P:	Kai Mdkisara
+P:	Kai Mäkisara
 M:	Kai.Makisara@metla.fi
 L:	linux-scsi@vger.rutgers.edu
 S:	Maintained
 
 FTAPE/QIC-117:
-P:	Kai Harrekilde-Petersen
-M:	khp@dolphinics.no
-W:	http://www.dolphinics.no/~khp/ftape.html
+P:	Claus-Justus Heine
+M:	claus@momo.math.rwth-aachen.de
 L:	linux-tape@vger.rutgers.edu
 S:	Maintained
 
@@ -246,10 +251,10 @@ L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
 STARMODE RADIO IP (STRIP) PROTOCOL DRIVER
-P:     Stuart Cheshire
-M:     cheshire@cs.stanford.edu
-W:     http://mosquitonet.Stanford.EDU/strip.html
-S:     Maintained
+P:	Stuart Cheshire
+M:	cheshire@cs.stanford.edu
+W:	http://mosquitonet.Stanford.EDU/strip.html
+S:	Maintained
 
 SMB FILESYSTEM:
 P:	Volker Lendecke
@@ -322,6 +327,18 @@ AHA152X SCSI DRIVER
 P:	Juergen E. Fischer
 M:	Juergen Fischer <fischer@et-inf.fho-emden.de>
 L:	linux-scsi@vger.rutgers.edu
+S:	Maintained
+
+SBPCD CDROM DRIVER
+P:	Eberhard Moenkeberg
+M:	emoenke@gwdg.de
+L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
+NON-IDE/NON-SCSI CDROM DRIVERS [GENERAL] (come on, crew - mark your responsibility)
+P:	Eberhard Moenkeberg
+M:	emoenke@gwdg.de
+L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
 CREDITS FILE

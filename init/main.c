@@ -94,9 +94,11 @@ extern void BusLogic_Setup(char *str, int *ints);
 extern void fdomain_setup(char *str, int *ints);
 extern void in2000_setup(char *str, int *ints);
 extern void NCR53c406a_setup(char *str, int *ints);
+extern void wd7000_setup(char *str, int *ints);
 extern void ppa_setup(char *str, int *ints);
 extern void scsi_luns_setup(char *str, int *ints);
 extern void sound_setup(char *str, int *ints);
+extern void reboot_setup(char *str, int *ints);
 #ifdef CONFIG_CDU31A
 extern void cdu31a_setup(char *str, int *ints);
 #endif CONFIG_CDU31A
@@ -267,6 +269,7 @@ struct {
 #ifdef CONFIG_BUGi386
 	{ "no-hlt", no_halt },
 	{ "no387", no_387 },
+	{ "reboot=", reboot_setup },
 #endif
 #ifdef CONFIG_INET
 	{ "ether=", eth_setup },
@@ -329,6 +332,9 @@ struct {
 #endif
 #ifdef CONFIG_SCSI_IN2000
 	{ "in2000=", in2000_setup},
+#endif
+#ifdef CONFIG_SCSI_7000FASST
+	{ "wd7000=", wd7000_setup},
 #endif
 #ifdef CONFIG_SCSI_PPA
         { "ppa=", ppa_setup },
@@ -795,6 +801,7 @@ asmlinkage void start_kernel(void)
 		prof_len = (unsigned long) &_etext - (unsigned long) &_stext;
 		prof_len >>= prof_shift;
 		memory_start += prof_len * sizeof(unsigned int);
+		memset(prof_buffer, 0, prof_len * sizeof(unsigned int));
 	}
 	memory_start = console_init(memory_start,memory_end);
 #ifdef CONFIG_PCI
@@ -955,8 +962,17 @@ static int init(void * unused)
 		}
 	}
 #endif
+	
+	/*
+	 *	This keeps serial console MUCH cleaner, but does assume
+	 *	the console driver checks there really is a video device
+	 *	attached (Sparc effectively does).
+	 */
 
-	(void) open("/dev/tty1",O_RDWR,0);
+	if ((open("/dev/tty1",O_RDWR,0) < 0) &&
+	    (open("/dev/ttyS0",O_RDWR,0) < 0))
+		printk("Unable to open an initial console.\n");
+			
 	(void) dup(0);
 	(void) dup(0);
 

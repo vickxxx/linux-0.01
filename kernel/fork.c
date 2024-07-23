@@ -19,7 +19,6 @@
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
 #include <linux/malloc.h>
-#include <linux/ldt.h>
 #include <linux/smp.h>
 
 #include <asm/segment.h>
@@ -100,12 +99,12 @@ static inline int dup_mmap(struct mm_struct * mm)
 			mpnt->vm_next_share = tmp;
 			tmp->vm_prev_share = mpnt;
 		}
-		if (tmp->vm_ops && tmp->vm_ops->open)
-			tmp->vm_ops->open(tmp);
 		if (copy_page_range(mm, current->mm, tmp)) {
 			exit_mmap(mm);
 			return -ENOMEM;
 		}
+		if (tmp->vm_ops && tmp->vm_ops->open)
+			tmp->vm_ops->open(tmp);
 		*p = tmp;
 		p = &tmp->vm_next;
 	}
@@ -247,6 +246,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	p->prev_run = NULL;
 	p->p_pptr = p->p_opptr = current;
 	p->p_cptr = NULL;
+	init_waitqueue(&p->wait_chldexit);
 	p->signal = 0;
 	p->it_real_value = p->it_virt_value = p->it_prof_value = 0;
 	p->it_real_incr = p->it_virt_incr = p->it_prof_incr = 0;

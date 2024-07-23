@@ -10,6 +10,7 @@
 #include <linux/stat.h>
 #include <linux/kernel.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/ncp_fs.h>
 #include <asm/segment.h>
@@ -252,7 +253,7 @@ ncp_readdir(struct inode *inode, struct file *filp,
 	if (c_entry == NULL) 
 	{
 		i = sizeof (struct ncp_dirent) * NCP_READDIR_CACHE_SIZE;
-		c_entry = (struct ncp_dirent *) ncp_kmalloc(i, GFP_KERNEL);
+		c_entry = (struct ncp_dirent *) vmalloc(i);
 		if (c_entry == NULL)
 		{
 			printk("ncp_readdir: no MEMORY for cache\n");
@@ -560,9 +561,8 @@ ncp_free_dir_cache(void)
                 return;
 	}
 
-        ncp_kfree_s(c_entry,
-                    sizeof(struct ncp_dirent) * NCP_READDIR_CACHE_SIZE);
-        c_entry = NULL;
+	vfree(c_entry);
+	c_entry = NULL;
 
         DPRINTK("ncp_free_dir_cache: exit\n");
 }
@@ -1229,13 +1229,15 @@ extern struct timezone sys_tz;
 static int
 utc2local(int time)
 {
-        return time - sys_tz.tz_minuteswest*60;
+        return time - sys_tz.tz_minuteswest*60 +
+	    (sys_tz.tz_dsttime ? 3600 : 0);
 }
 
 static int
 local2utc(int time)
 {
-        return time + sys_tz.tz_minuteswest*60;
+        return time + sys_tz.tz_minuteswest*60 -
+	    (sys_tz.tz_dsttime ? 3600 : 0);
 }
 
 /* Convert a MS-DOS time/date pair to a UNIX date (seconds since 1 1 70). */

@@ -167,7 +167,8 @@ static void rw_intr (Scsi_Cmnd * SCpnt)
 	if (driver_byte(result) != 0 &&		    /* An error occurred */
 	    SCpnt->sense_buffer[0] == 0xF0 &&	    /* Sense data is valid */
 	    (SCpnt->sense_buffer[2] == MEDIUM_ERROR ||
-	     SCpnt->sense_buffer[2] == VOLUME_OVERFLOW))
+	     SCpnt->sense_buffer[2] == VOLUME_OVERFLOW ||
+	     SCpnt->sense_buffer[2] == ILLEGAL_REQUEST))
 	  {
 	    long error_sector = (SCpnt->sense_buffer[3] << 24) |
 				(SCpnt->sense_buffer[4] << 16) |
@@ -427,8 +428,8 @@ void sr_photocd(struct inode *inode)
 	printk(KERN_DEBUG "sr_photocd: use NEC code\n");
 #endif
 	memset(buf,0,40);
-	*((unsigned long*)buf)   = 0x0;   /* we send nothing...     */
-	*((unsigned long*)buf+1) = 0x16;  /* and receive 0x16 bytes */
+	*((unsigned int*)buf)   = 0x0;   /* we send nothing...     */
+	*((unsigned int*)buf+1) = 0x16;  /* and receive 0x16 bytes */
 	cmd[0] = 0xde;
 	cmd[1] = 0x03;
 	cmd[2] = 0xb0;
@@ -464,10 +465,10 @@ void sr_photocd(struct inode *inode)
 	/* we request some disc information (is it a XA-CD ?,
 	 * where starts the last session ?) */
 	memset(buf,0,40);
-	*((unsigned long*)buf)   = 0;
-	*((unsigned long*)buf+1) = 4;  /* we receive 4 bytes from the drive */
-	cmd[0] = 0xc7;
-	cmd[1] = 3;
+	*((unsigned int*)buf)   = (unsigned int) 0;
+	*((unsigned int*)buf+1) = (unsigned int) 4;  /* receive 4 bytes */
+	cmd[0]                  = (unsigned char) 0x00c7;
+	cmd[1]                  = (unsigned char) 3;
 	rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 			       SCSI_IOCTL_SEND_COMMAND, buf);
 	if (rc != 0) {
@@ -499,11 +500,11 @@ void sr_photocd(struct inode *inode)
 	
 	/* now we do a get_density... */
 	memset(buf,0,40);
-	*((unsigned long*)buf)   = 0;
-	*((unsigned long*)buf+1) = 12;
-	cmd[0] = MODE_SENSE;
-	cmd[2] = 1;
-	cmd[4] = 12;
+	*((unsigned int*)buf)   = (unsigned int) 0;
+	*((unsigned int*)buf+1) = (unsigned int) 12;
+	cmd[0]                  = (unsigned char) MODE_SENSE;
+	cmd[2]                  = (unsigned char) 1;
+	cmd[4]                  = (unsigned char) 12;
 	rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 			       SCSI_IOCTL_SEND_COMMAND, buf);
 	if (rc != 0) {
@@ -520,15 +521,17 @@ void sr_photocd(struct inode *inode)
 	    printk(KERN_DEBUG "sr_photocd: doing set_density\n");
 #endif
 	    memset(buf,0,40);
-	    *((unsigned long*)buf)   = 12;  /* sending 12 bytes... */
-	    *((unsigned long*)buf+1) = 0;
-	    cmd[0] = MODE_SELECT;
-	    cmd[1] = (1 << 4);
-	    cmd[4] = 12;
-	    send = &cmd[6];                 /* this is a 6-Byte command    */
-	    send[ 3] = 0x08;                /* the data for the command    */
-	    send[ 4] = (is_xa) ? 0x81 : 0;  /* density 0x81 for XA, 0 else */
-	    send[10] = 0x08;
+	    *((unsigned int*)buf)   = (unsigned int) 12;  /* send 12 bytes */
+	    *((unsigned int*)buf+1) = (unsigned int) 0;
+	    cmd[0]                  = (unsigned char) MODE_SELECT;
+	    cmd[1]                  = (unsigned char) (1 << 4);
+	    cmd[4]                  = (unsigned char) 12;
+            send = &cmd[6]; 		/* this is a 6-Byte command    */
+            send[ 3]                = (unsigned char) 0x08; /* data for cmd */
+            /* density 0x81 for XA, 0 else */
+            send[ 4]                = (is_xa) ? 
+                                    (unsigned char) 0x81 : (unsigned char) 0;  
+            send[10]                = (unsigned char) 0x08;
 	    rc = kernel_scsi_ioctl(scsi_CDs[MINOR(inode->i_rdev)].device,
 				   SCSI_IOCTL_SEND_COMMAND, buf);
 	    if (rc != 0) {
@@ -542,13 +545,14 @@ void sr_photocd(struct inode *inode)
 
     case SCSI_MAN_SONY: /* Thomas QUINOT <thomas@melchior.cuivre.fdn.fr> */
     case SCSI_MAN_PIONEER:
+    case SCSI_MAN_MATSHITA:
 #ifdef DEBUG
-	printk(KERN_DEBUG "sr_photocd: use SONY/PIONEER code\n");
+	printk(KERN_DEBUG "sr_photocd: use SONY/PIONEER/MATSHITA code\n");
 #endif
 	get_sectorsize(MINOR(inode->i_rdev));	/* spinup (avoid timeout) */
 	memset(buf,0,40);
-	*((unsigned long*)buf)   = 0x0;   /* we send nothing...     */
-	*((unsigned long*)buf+1) = 0x0c;  /* and receive 0x0c bytes */
+	*((unsigned int*)buf)   = 0x0;   /* we send nothing...     */
+	*((unsigned int*)buf+1) = 0x0c;  /* and receive 0x0c bytes */
 	cmd[0] = READ_TOC;
 	cmd[8] = 0x0c;
 	cmd[9] = 0x40;
@@ -557,11 +561,11 @@ void sr_photocd(struct inode *inode)
 	
 	if (rc != 0) {
             if (rc != 0x28000002) /* drop "not ready" */
-                printk(KERN_WARNING "sr_photocd: ioctl error (SONY/PIONEER): 0x%x\n",rc);
+                printk(KERN_WARNING "sr_photocd: ioctl error (SONY/PIONEER/MATSHITA): 0x%x\n",rc);
 	    break;
 	}
 	if ((rec[0] << 8) + rec[1] != 0x0a) {
-	    printk(KERN_INFO "sr_photocd: (SONY/PIONEER) Hmm, seems the CDROM doesn't support multisession CD's\n");
+	    printk(KERN_INFO "sr_photocd: (SONY/PIONEER/MATSHITA) Hmm, seems the CDROM doesn't support multisession CD's\n");
 	    no_multi = 1;
 	    break;
 	}
@@ -856,8 +860,8 @@ void requeue_sr_request (Scsi_Cmnd * SCpnt)
 		    if (count+1 != SCpnt->use_sg) panic("Bad sr request list");
 		    break;
 		};
-		if (((long) sgpnt[count].address) + sgpnt[count].length > ISA_DMA_THRESHOLD &&
-		  SCpnt->host->unchecked_isa_dma) {
+		if (((long) sgpnt[count].address) + sgpnt[count].length - 1 >
+		    ISA_DMA_THRESHOLD && SCpnt->host->unchecked_isa_dma) {
 		    sgpnt[count].alt_address = sgpnt[count].address;
 		    /* We try to avoid exhausting the DMA pool, since it is easier
 		     * to control usage here.  In other places we might have a more

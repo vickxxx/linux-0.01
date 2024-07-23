@@ -33,13 +33,21 @@ extern void die_if_kernel(const char *,struct pt_regs *,long);
  */
 asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 {
+	void (*handler)(struct task_struct *,
+			struct vm_area_struct *,
+			unsigned long,
+			int);
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct * vma;
 	unsigned long address;
 	unsigned long page;
+	int write;
 
 	/* get the address */
 	__asm__("movl %%cr2,%0":"=r" (address));
-	vma = find_vma(current, address);
+	down(&mm->mmap_sem);
+	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
 	if (vma->vm_start <= address)
@@ -63,36 +71,37 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
  * we can handle it..
  */
 good_area:
-	/*
-	 * was it a write?
-	 */
-	if (error_code & 2) {
-		if (!(vma->vm_flags & VM_WRITE))
+	write = 0;
+	handler = do_no_page;
+	switch (error_code & 3) {
+		default:	/* 3: write, present */
+			handler = do_wp_page;
+#ifdef TEST_VERIFY_AREA
+			if (regs->cs == KERNEL_CS)
+				printk("WP fault at %08lx\n", regs->eip);
+#endif
+			/* fall through */
+		case 2:		/* write, not present */
+			if (!(vma->vm_flags & VM_WRITE))
+				goto bad_area;
+			write++;
+			break;
+		case 1:		/* read, present */
 			goto bad_area;
-	} else {
-		/* read with protection fault? */
-		if (error_code & 1)
-			goto bad_area;
-		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
-			goto bad_area;
+		case 0:		/* read, not present */
+			if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
+				goto bad_area;
 	}
+	handler(tsk, vma, address, write);
+	up(&mm->mmap_sem);
 	/*
 	 * Did it hit the DOS screen memory VA from vm86 mode?
 	 */
 	if (regs->eflags & VM_MASK) {
 		unsigned long bit = (address - 0xA0000) >> PAGE_SHIFT;
 		if (bit < 32)
-			current->tss.screen_bitmap |= 1 << bit;
+			tsk->tss.screen_bitmap |= 1 << bit;
 	}
-	if (error_code & 1) {
-#ifdef TEST_VERIFY_AREA
-		if (regs->cs == KERNEL_CS)
-			printk("WP fault at %08x\n", regs->eip);
-#endif
-		do_wp_page(current, vma, address, error_code & 2);
-		return;
-	}
-	do_no_page(current, vma, address, error_code & 2);
 	return;
 
 /*
@@ -100,11 +109,12 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
+	up(&mm->mmap_sem);
 	if (error_code & 4) {
-		current->tss.cr2 = address;
-		current->tss.error_code = error_code;
-		current->tss.trap_no = 14;
-		force_sig(SIGSEGV, current);
+		tsk->tss.cr2 = address;
+		tsk->tss.error_code = error_code;
+		tsk->tss.trap_no = 14;
+		force_sig(SIGSEGV, tsk);
 		return;
 	}
 /*
@@ -113,14 +123,14 @@ bad_area:
  *
  * First we check if it was the bootup rw-test, though..
  */
-	if (wp_works_ok < 0 && address == TASK_SIZE && (error_code & 1)) {
+	if (wp_works_ok < 0 && !address && (error_code & 1)) {
 		wp_works_ok = 1;
 		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
 		flush_tlb();
 		printk("This processor honours the WP bit even when in supervisor mode. Good.\n");
 		return;
 	}
-	if ((unsigned long) (address-TASK_SIZE) < PAGE_SIZE) {
+	if (address < PAGE_SIZE) {
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
 		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
 	} else
@@ -128,13 +138,13 @@ bad_area:
 	printk(" at virtual address %08lx\n",address);
 	__asm__("movl %%cr3,%0" : "=r" (page));
 	printk(KERN_ALERT "current->tss.cr3 = %08lx, %%cr3 = %08lx\n",
-		current->tss.cr3, page);
-	page = ((unsigned long *) page)[address >> 22];
+		tsk->tss.cr3, page);
+	page = ((unsigned long *) __va(page))[address >> 22];
 	printk(KERN_ALERT "*pde = %08lx\n", page);
 	if (page & 1) {
 		page &= PAGE_MASK;
 		address &= 0x003ff000;
-		page = ((unsigned long *) page)[address >> PAGE_SHIFT];
+		page = ((unsigned long *) __va(page))[address >> PAGE_SHIFT];
 		printk(KERN_ALERT "*pte = %08lx\n", page);
 	}
 	die_if_kernel("Oops", regs, error_code);

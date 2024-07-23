@@ -119,7 +119,7 @@ repeat:
 	}
 	page = pte_page(*pgtable);
 /* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page >= high_memory)
+	if (MAP_NR(page) >= max_mapnr)
 		return 0;
 	page += addr & ~PAGE_MASK;
 	return *(unsigned long *) page;
@@ -174,7 +174,7 @@ repeat:
 		goto repeat;
 	}
 /* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page < high_memory)
+	if (MAP_NR(page) < max_mapnr)
 		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
@@ -187,7 +187,7 @@ static struct vm_area_struct * find_extend_vma(struct task_struct * tsk, unsigne
 	struct vm_area_struct * vma;
 
 	addr &= PAGE_MASK;
-	vma = find_vma(tsk,addr);
+	vma = find_vma(tsk->mm,addr);
 	if (!vma)
 		return NULL;
 	if (vma->vm_start <= addr)
