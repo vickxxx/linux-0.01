@@ -41,7 +41,7 @@
 #define	ENOSYS		38	/* Function not implemented */
 #define	ENOTEMPTY	39	/* Directory not empty */
 #define	ELOOP		40	/* Too many symbolic links encountered */
-#define	EWOULDBLOCK	41	/* Operation would block */
+#define	EWOULDBLOCK	EAGAIN	/* Operation would block */
 #define	ENOMSG		42	/* No message of desired type */
 #define	EIDRM		43	/* Identifier removed */
 #define	ECHRNG		44	/* Channel number out of range */
@@ -122,9 +122,11 @@
 #define	ENAVAIL		119	/* No XENIX semaphores available */
 #define	EISNAM		120	/* Is a named type file */
 #define	EREMOTEIO	121	/* Remote I/O error */
+#define	EDQUOT		122	/* Quota exceeded */
 
 /* Should never be seen by user programs */
 #define ERESTARTSYS	512
 #define ERESTARTNOINTR	513
+#define ERESTARTNOHAND	514	/* restart if no handler.. */
 
 #endif

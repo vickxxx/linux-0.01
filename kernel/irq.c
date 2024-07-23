@@ -24,14 +24,92 @@
 
 #include <linux/ptrace.h>
 #include <linux/errno.h>
+#include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
+#include <linux/interrupt.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
-void irq13(void);
+#define CR0_NE 32
+
+static unsigned char cache_21 = 0xff;
+static unsigned char cache_A1 = 0xff;
+
+unsigned long intr_count = 0;
+unsigned long bh_active = 0;
+unsigned long bh_mask = 0xFFFFFFFF;
+struct bh_struct bh_base[32]; 
+
+void disable_irq(unsigned int irq_nr)
+{
+	unsigned long flags;
+	unsigned char mask;
+
+	mask = 1 << (irq_nr & 7);
+	save_flags(flags);
+	if (irq_nr < 8) {
+		cli();
+		cache_21 |= mask;
+		outb(cache_21,0x21);
+		restore_flags(flags);
+		return;
+	}
+	cli();
+	cache_A1 |= mask;
+	outb(cache_A1,0xA1);
+	restore_flags(flags);
+}
+
+void enable_irq(unsigned int irq_nr)
+{
+	unsigned long flags;
+	unsigned char mask;
+
+	mask = ~(1 << (irq_nr & 7));
+	save_flags(flags);
+	if (irq_nr < 8) {
+		cli();
+		cache_21 &= mask;
+		outb(cache_21,0x21);
+		restore_flags(flags);
+		return;
+	}
+	cli();
+	cache_A1 &= mask;
+	outb(cache_A1,0xA1);
+	restore_flags(flags);
+}
+
+/*
+ * do_bottom_half() runs at normal kernel priority: all interrupts
+ * enabled.  do_bottom_half() is atomic with respect to itself: a
+ * bottom_half handler need not be re-entrant.
+ */
+asmlinkage void do_bottom_half(void)
+{
+	unsigned long active;
+	unsigned long mask, left;
+	struct bh_struct *bh;
+
+	bh = bh_base;
+	active = bh_active & bh_mask;
+	for (mask = 1, left = ~0 ; left & active ; bh++,mask += mask,left += left) {
+		if (mask & active) {
+			void (*fn)(void *);
+			bh_active &= ~mask;
+			fn = bh->routine;
+			if (!fn)
+				goto bad_bh;
+			fn(bh->data);
+		}
+	}
+	return;
+bad_bh:
+	printk ("irq.c:bad bottom half entry\n");
+}
 
 /*
  * This builds up the IRQ handler stubs using some ugly macros in irq.h
@@ -115,16 +193,16 @@ static struct sigaction irq_sigaction[16] = {
 /*
  * do_IRQ handles IRQ's that have been installed without the
  * SA_INTERRUPT flag: it uses the full signal-handling return
- * and runs with other interrupts disabled. All relatively slow
+ * and runs with other interrupts enabled. All relatively slow
  * IRQ's should use this format: notably the keyboard/timer
  * routines.
  */
-int do_IRQ(int irq, struct pt_regs * regs)
+asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 {
 	struct sigaction * sa = irq + irq_sigaction;
 
+	kstat.interrupts++;
 	sa->sa_handler((int) regs);
-	return 0;		/* re-enable the irq when returning */
 }
 
 /*
@@ -132,15 +210,15 @@ int do_IRQ(int irq, struct pt_regs * regs)
  * stuff - the handler is also running with interrupts disabled unless
  * it explicitly enables them later.
  */
-int do_fast_IRQ(int irq)
+asmlinkage void do_fast_IRQ(int irq)
 {
 	struct sigaction * sa = irq + irq_sigaction;
 
-	sa->sa_handler(0);
-	return 0;		/* re-enable the irq when returning */
+	kstat.interrupts++;
+	sa->sa_handler(irq);
 }
 
-int irqaction(unsigned int irq, struct sigaction * new)
+int irqaction(unsigned int irq, struct sigaction * new_sa)
 {
 	struct sigaction * sa;
 	unsigned long flags;
@@ -150,22 +228,26 @@ int irqaction(unsigned int irq, struct sigaction * new)
 	sa = irq + irq_sigaction;
 	if (sa->sa_mask)
 		return -EBUSY;
-	if (!new->sa_handler)
+	if (!new_sa->sa_handler)
 		return -EINVAL;
-	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=r" (flags));
-	*sa = *new;
+	save_flags(flags);
+	cli();
+	*sa = *new_sa;
 	sa->sa_mask = 1;
 	if (sa->sa_flags & SA_INTERRUPT)
 		set_intr_gate(0x20+irq,fast_interrupt[irq]);
 	else
 		set_intr_gate(0x20+irq,interrupt[irq]);
-	if (irq < 8)
-		outb(inb_p(0x21) & ~(1<<irq),0x21);
-	else {
-		outb(inb_p(0x21) & ~(1<<2),0x21);
-		outb(inb_p(0xA1) & ~(1<<(irq-8)),0xA1);
+	if (irq < 8) {
+		cache_21 &= ~(1<<irq);
+		outb(cache_21,0x21);
+	} else {
+		cache_21 &= ~(1<<2);
+		cache_A1 &= ~(1<<(irq-8));
+		outb(cache_21,0x21);
+		outb(cache_A1,0xA1);
 	}
-	__asm__ __volatile__("pushl %0 ; popfl"::"r" (flags));
+	restore_flags(flags);
 	return 0;
 }
 		
@@ -193,25 +275,40 @@ void free_irq(unsigned int irq)
 		printk("Trying to free free IRQ%d\n",irq);
 		return;
 	}
-	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=r" (flags));
-	if (irq < 8)
-		outb(inb_p(0x21) | (1<<irq),0x21);
-	else
-		outb(inb_p(0xA1) | (1<<(irq-8)),0xA1);
+	save_flags(flags);
+	cli();
+	if (irq < 8) {
+		cache_21 |= 1 << irq;
+		outb(cache_21,0x21);
+	} else {
+		cache_A1 |= 1 << (irq-8);
+		outb(cache_A1,0xA1);
+	}
 	set_intr_gate(0x20+irq,bad_interrupt[irq]);
 	sa->sa_handler = NULL;
 	sa->sa_flags = 0;
 	sa->sa_mask = 0;
 	sa->sa_restorer = NULL;
-	__asm__ __volatile__("pushl %0 ; popfl"::"r" (flags));
+	restore_flags(flags);
 }
 
-extern void do_coprocessor_error(long,long);
-
+/*
+ * Note that on a 486, we don't want to do a SIGFPE on a irq13
+ * as the irq is unreliable, and exception 16 works correctly
+ * (ie as explained in the intel litterature). On a 386, you
+ * can't use exception 16 due to bad IBM design, so we have to
+ * rely on the less exact irq13.
+ *
+ * Careful.. Not only is IRQ13 unreliable, but it is also
+ * leads to races. IBM designers who came up with it should
+ * be shot.
+ */
 static void math_error_irq(int cpl)
 {
 	outb(0,0xF0);
-	do_coprocessor_error(0,0);
+	if (ignore_irq13)
+		return;
+	math_error();
 }
 
 static void no_action(int cpl) { }
@@ -233,4 +330,12 @@ void init_IRQ(void)
 		printk("Unable to get IRQ2 for cascade\n");
 	if (request_irq(13,math_error_irq))
 		printk("Unable to get IRQ13 for math-error handler\n");
+
+	/* intialize the bottom half routines. */
+	for (i = 0; i < 32; i++) {
+		bh_base[i].routine = NULL;
+		bh_base[i].data = NULL;
+	}
+	bh_active = 0;
+	intr_count = 0;
 }

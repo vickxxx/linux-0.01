@@ -14,43 +14,17 @@
 .c.s:
 	$(CC) $(CFLAGS) -S $<
 
-OBJS	= memory.o swap.o mmap.o
+OBJS	= memory.o swap.o mmap.o kmalloc.o vmalloc.o
 
 mm.o: $(OBJS)
 	$(LD) -r -o mm.o $(OBJS)
 
-clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
-
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
-	cp tmp_make Makefile
+	$(CPP) -M *.c > .depend
 
-### Dependencies:
-memory.o : memory.c /usr/src/linux/include/asm/system.h /usr/src/linux/include/linux/signal.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/linux/limits.h /usr/src/linux/include/linux/wait.h /usr/src/linux/include/linux/types.h \
-  /usr/src/linux/include/linux/dirent.h /usr/src/linux/include/linux/vfs.h /usr/src/linux/include/linux/minix_fs_sb.h \
-  /usr/src/linux/include/linux/ext_fs_sb.h /usr/src/linux/include/linux/msdos_fs_sb.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/time.h \
-  /usr/src/linux/include/linux/param.h /usr/src/linux/include/linux/resource.h \
-  /usr/src/linux/include/linux/string.h 
-mmap.o : mmap.c /usr/src/linux/include/linux/stat.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/linux/limits.h \
-  /usr/src/linux/include/linux/wait.h /usr/src/linux/include/linux/types.h /usr/src/linux/include/linux/dirent.h \
-  /usr/src/linux/include/linux/vfs.h /usr/src/linux/include/linux/minix_fs_sb.h \
-  /usr/src/linux/include/linux/ext_fs_sb.h /usr/src/linux/include/linux/msdos_fs_sb.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/signal.h \
-  /usr/src/linux/include/linux/time.h /usr/src/linux/include/linux/param.h /usr/src/linux/include/linux/resource.h \
-  /usr/src/linux/include/linux/errno.h /usr/src/linux/include/asm/segment.h /usr/src/linux/include/asm/system.h \
-  /usr/src/linux/include/sys/mman.h 
-swap.o : swap.c /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/linux/limits.h /usr/src/linux/include/linux/wait.h /usr/src/linux/include/linux/types.h \
-  /usr/src/linux/include/linux/dirent.h /usr/src/linux/include/linux/vfs.h /usr/src/linux/include/linux/minix_fs_sb.h \
-  /usr/src/linux/include/linux/ext_fs_sb.h /usr/src/linux/include/linux/msdos_fs_sb.h \
-  /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/signal.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/time.h \
-  /usr/src/linux/include/linux/param.h /usr/src/linux/include/linux/resource.h \
-  /usr/src/linux/include/linux/errno.h /usr/src/linux/include/linux/string.h /usr/src/linux/include/linux/stat.h 
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif

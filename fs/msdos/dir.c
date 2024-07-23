@@ -1,34 +1,39 @@
 /*
  *  linux/fs/msdos/dir.c
  *
- *  Written 1992 by Werner Almesberger
+ *  Written 1992,1993 by Werner Almesberger
  *
  *  MS-DOS directory handling functions
  */
 
 #include <asm/segment.h>
 
-#include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
 
-static int msdos_dummy_read(struct inode *inode,struct file *filp,char *buf,
-    int count);
+
+static int msdos_dir_read(struct inode * inode,struct file * filp, char * buf,int count)
+{
+	return -EISDIR;
+}
+
 static int msdos_readdir(struct inode *inode,struct file *filp,
     struct dirent *dirent,int count);
 
 
 static struct file_operations msdos_dir_operations = {
 	NULL,			/* lseek - default */
-	msdos_dummy_read,	/* read */
+	msdos_dir_read,		/* read */
 	NULL,			/* write - bad */
 	msdos_readdir,		/* readdir */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
 	NULL,			/* no special open code */
-	NULL			/* no special release code */
+	NULL,			/* no special release code */
+	file_fsync		/* fsync */
 };
 
 struct inode_operations msdos_dir_inode_operations = {
@@ -45,24 +50,9 @@ struct inode_operations msdos_dir_inode_operations = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	msdos_bmap,		/* bmap */
-	NULL			/* truncate */
+	NULL,			/* truncate */
+	NULL			/* permission */
 };
-
-
-/* So  grep *  doesn't complain in the presence of directories. */
-
-static int msdos_dummy_read(struct inode *inode,struct file *filp,char *buf,
-    int count)
-{
-	static long last_warning = 0;
-
-	if (CURRENT_TIME-last_warning >= 10) {
-		printk("COMPATIBILITY WARNING: reading a directory\r\n");
-		last_warning = CURRENT_TIME;
-	}
-	return 0;
-}
-
 
 static int msdos_readdir(struct inode *inode,struct file *filp,
     struct dirent *dirent,int count)
@@ -89,8 +79,7 @@ static int msdos_readdir(struct inode *inode,struct file *filp,
 	if (filp->f_pos & (sizeof(struct msdos_dir_entry)-1)) return -ENOENT;
 	bh = NULL;
 	while ((ino = msdos_get_entry(inode,&filp->f_pos,&bh,&de)) > -1) {
-		if (de->name[0] && ((unsigned char *) (de->name))[0] !=
-		    DELETED_FLAG && !(de->attr & ATTR_VOLUME)) {
+		if (!IS_FREE(de->name) && !(de->attr & ATTR_VOLUME)) {
 			for (i = last = 0; i < 8; i++) {
 				if (!(c = de->name[i])) break;
 				if (c >= 'A' && c <= 'Z') c += 32;
@@ -98,18 +87,16 @@ static int msdos_readdir(struct inode *inode,struct file *filp,
 				put_fs_byte(c,i+dirent->d_name);
 			}
 			i = last;
-			if (de->ext[0] && de->ext[0] != ' ') {
-				put_fs_byte('.',i+dirent->d_name);
+			put_fs_byte('.',i+dirent->d_name);
+			i++;
+			for (i2 = 0; i2 < 3; i2++) {
+				if (!(c = de->ext[i2])) break;
+				if (c >= 'A' && c <= 'Z') c += 32;
+				if (c != ' ') last = i+1;
+				put_fs_byte(c,i+dirent->d_name);
 				i++;
-				for (i2 = 0; i2 < 3; i2++) {
-					if (!(c = de->ext[i2])) break;
-					if (c >= 'A' && c <= 'Z') c += 32;
-					put_fs_byte(c,i+dirent->d_name);
-					i++;
-					if (c != ' ') last = i;
-				}
 			}
-			if (i = last) {
+			if ((i = last) != 0) {
 				if (!strcmp(de->name,MSDOS_DOT))
 					ino = inode->i_ino;
 				else if (!strcmp(de->name,MSDOS_DOTDOT))

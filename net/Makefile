@@ -7,6 +7,13 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
+# only these two lines should need to be changed to remove inet sockets.
+# (and the inet/tcpip.o in net.o)
+
+SUBDIRS     := unix inet
+
+SUBOBJS     := $(foreach f,$(SUBDIRS),$f/$f.o)
+
 .c.o:
 	$(CC) $(CFLAGS) -c $<
 .s.o:
@@ -14,39 +21,31 @@
 .c.s:
 	$(CC) $(CFLAGS) -S $<
 
-OBJS	=  socket.o unix.o
+OBJS	=  Space.o ddi.o socket.o
 
-net.o: $(OBJS)
-	$(LD) -r -o net.o $(OBJS)
+all:		subdirs net.o
 
-clean:
-	rm -f core *.o *.a tmp_make
-	for i in *.c;do rm -f `basename $$i .c`.s;done
+net.o:		$(OBJS) network.a
+		$(LD) -r -o net.o $(OBJS) network.a
+
+network.a:	$(SUBOBJS)
+		rm -f $@
+		ar rc $@ $(SUBOBJS)
+		ranlib $@
+
+subdirs:	dummy
+		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
 
 dep:
-	sed '/\#\#\# Dependencies/q' < Makefile > tmp_make
-	for i in *.c;do $(CPP) -M $$i;done >> tmp_make
-	cp tmp_make Makefile
+		$(CPP) -M *.c > .depend
+		set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i dep; done
 
-### Dependencies:
-socket.o : socket.c /usr/src/linux/include/linux/signal.h /usr/src/linux/include/linux/errno.h \
-  /usr/src/linux/include/linux/sched.h /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h \
-  /usr/src/linux/include/linux/limits.h /usr/src/linux/include/linux/wait.h /usr/src/linux/include/linux/types.h \
-  /usr/src/linux/include/linux/dirent.h /usr/src/linux/include/linux/vfs.h /usr/src/linux/include/linux/minix_fs_sb.h \
-  /usr/src/linux/include/linux/ext_fs_sb.h /usr/src/linux/include/linux/msdos_fs_sb.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/time.h \
-  /usr/src/linux/include/linux/param.h /usr/src/linux/include/linux/resource.h \
-  /usr/src/linux/include/linux/stat.h /usr/src/linux/include/linux/socket.h /usr/src/linux/include/linux/fcntl.h \
-  /usr/src/linux/include/linux/termios.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/asm/segment.h \
-  kern_sock.h socketcall.h 
-unix.o : unix.c /usr/src/linux/include/linux/signal.h /usr/src/linux/include/linux/sched.h \
-  /usr/src/linux/include/linux/head.h /usr/src/linux/include/linux/fs.h /usr/src/linux/include/linux/limits.h \
-  /usr/src/linux/include/linux/wait.h /usr/src/linux/include/linux/types.h /usr/src/linux/include/linux/dirent.h \
-  /usr/src/linux/include/linux/vfs.h /usr/src/linux/include/linux/minix_fs_sb.h \
-  /usr/src/linux/include/linux/ext_fs_sb.h /usr/src/linux/include/linux/msdos_fs_sb.h \
-  /usr/src/linux/include/linux/mm.h /usr/src/linux/include/linux/kernel.h /usr/src/linux/include/linux/time.h \
-  /usr/src/linux/include/linux/param.h /usr/src/linux/include/linux/resource.h \
-  /usr/src/linux/include/linux/errno.h /usr/src/linux/include/linux/string.h /usr/src/linux/include/linux/stat.h \
-  /usr/src/linux/include/linux/socket.h /usr/src/linux/include/linux/un.h /usr/src/linux/include/linux/fcntl.h \
-  /usr/src/linux/include/linux/termios.h /usr/src/linux/include/asm/system.h /usr/src/linux/include/asm/segment.h \
-  kern_sock.h 
+dummy:
+
+#
+# include a dependency file if one exists
+#
+ifeq (.depend,$(wildcard .depend))
+include .depend
+endif
+

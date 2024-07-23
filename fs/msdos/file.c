@@ -1,7 +1,7 @@
 /*
  *  linux/fs/msdos/file.c
  *
- *  Written 1992 by Werner Almesberger
+ *  Written 1992,1993 by Werner Almesberger
  *
  *  MS-DOS regular file handling primitives
  */
@@ -32,8 +32,10 @@ static struct file_operations msdos_file_operations = {
 	NULL,			/* readdir - bad */
 	NULL,			/* select - default */
 	NULL,			/* ioctl - default */
+	NULL,			/* mmap */
 	NULL,			/* no special open is needed */
-	NULL			/* release */
+	NULL,			/* release */
+	file_fsync		/* fsync */
 };
 
 struct inode_operations msdos_file_inode_operations = {
@@ -50,7 +52,8 @@ struct inode_operations msdos_file_inode_operations = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	msdos_bmap,		/* bmap */
-	msdos_truncate		/* truncate */
+	msdos_truncate,		/* truncate */
+	NULL			/* permission */
 };
 
 /* No bmap for MS-DOS FS' that don't align data at kByte boundaries. */
@@ -69,7 +72,8 @@ struct inode_operations msdos_file_inode_operations_no_bmap = {
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
 	NULL,			/* bmap */
-	msdos_truncate		/* truncate */
+	msdos_truncate,		/* truncate */
+	NULL			/* permission */
 };
 
 
@@ -82,9 +86,9 @@ static int msdos_file_read(struct inode *inode,struct file *filp,char *buf,
 	struct buffer_head *bh;
 	void *data;
 
-/* printk("msdos_file_read\r\n"); */
+/* printk("msdos_file_read\n"); */
 	if (!inode) {
-		printk("msdos_file_read: inode = NULL\r\n");
+		printk("msdos_file_read: inode = NULL\n");
 		return -EINVAL;
 	}
 	if (!S_ISREG(inode->i_mode)) {
@@ -93,13 +97,13 @@ static int msdos_file_read(struct inode *inode,struct file *filp,char *buf,
 	}
 	if (filp->f_pos >= inode->i_size || count <= 0) return 0;
 	start = buf;
-	while (left = MIN(inode->i_size-filp->f_pos,count-(buf-start))) {
+	while ((left = MIN(inode->i_size-filp->f_pos,count-(buf-start))) > 0){
 		if (!(sector = msdos_smap(inode,filp->f_pos >> SECTOR_BITS)))
 			break;
 		offset = filp->f_pos & (SECTOR_SIZE-1);
 		if (!(bh = msdos_sread(inode->i_dev,sector,&data))) break;
 		filp->f_pos += (size = MIN(SECTOR_SIZE-offset,left));
-		if (inode->i_data[D_BINARY]) {
+		if (MSDOS_I(inode)->i_binary) {
 			memcpy_tofs(buf,data+offset,size);
 			buf += size;
 		}
@@ -111,6 +115,10 @@ static int msdos_file_read(struct inode *inode,struct file *filp,char *buf,
 					else {
 						filp->f_pos = inode->i_size;
 						brelse(bh);
+						if (start != buf
+						    && !IS_RDONLY(inode))
+							inode->i_atime
+							    = CURRENT_TIME;
 						return buf-start;
 					}
 				}
@@ -118,6 +126,8 @@ static int msdos_file_read(struct inode *inode,struct file *filp,char *buf,
 		brelse(bh);
 	}
 	if (start == buf) return -EIO;
+	if (!IS_RDONLY(inode))
+		inode->i_atime = CURRENT_TIME;
 	return buf-start;
 }
 
@@ -149,21 +159,24 @@ static int msdos_file_write(struct inode *inode,struct file *filp,char *buf,
 	for (start = buf; count || carry; count -= size) {
 		while (!(sector = msdos_smap(inode,filp->f_pos >> SECTOR_BITS)))
 			if ((error = msdos_add_cluster(inode)) < 0) break;
-		if (error) break;
+		if (error) {
+			msdos_truncate(inode);
+			break;
+		}
 		offset = filp->f_pos & (SECTOR_SIZE-1);
 		size = MIN(SECTOR_SIZE-offset,MAX(carry,count));
 		if (!(bh = msdos_sread(inode->i_dev,sector,&data))) {
 			error = -EIO;
 			break;
 		}
-		if (inode->i_data[D_BINARY]) {
+		if (MSDOS_I(inode)->i_binary) {
 			memcpy_fromfs(data+(filp->f_pos & (SECTOR_SIZE-1)),
 			    buf,written = size);
 			buf += size;
 		}
 		else {
 			written = left = SECTOR_SIZE-offset;
-			to = data+(filp->f_pos & (SECTOR_SIZE-1));
+			to = (char *) data+(filp->f_pos & (SECTOR_SIZE-1));
 			if (carry) {
 				*to++ = '\n';
 				left--;
@@ -190,10 +203,12 @@ static int msdos_file_write(struct inode *inode,struct file *filp,char *buf,
 		bh->b_dirt = 1;
 		brelse(bh);
 	}
+	if (start == buf)
+		return error;
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_data[D_ATTRS] |= ATTR_ARCH;
+	MSDOS_I(inode)->i_attrs |= ATTR_ARCH;
 	inode->i_dirt = 1;
-	return start == buf ? error : buf-start;
+	return buf-start;
 }
 
 
@@ -203,6 +218,6 @@ void msdos_truncate(struct inode *inode)
 
 	cluster = SECTOR_SIZE*MSDOS_SB(inode->i_sb)->cluster_size;
 	(void) fat_free(inode,(inode->i_size+(cluster-1))/cluster);
-	inode->i_data[D_ATTRS] |= ATTR_ARCH;
+	MSDOS_I(inode)->i_attrs |= ATTR_ARCH;
 	inode->i_dirt = 1;
 }
