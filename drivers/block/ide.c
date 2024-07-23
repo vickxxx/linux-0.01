@@ -1,19 +1,22 @@
 /*
- *  linux/drivers/block/ide.c	Version 5.41  May 9, 1996
+ *  linux/drivers/block/ide.c	Version 5.43  May 14, 1996
  *
  *  Copyright (C) 1994-1996  Linus Torvalds & authors (see below)
  */
 #define _IDE_C		/* needed by <linux/blk.h> */
 
 /*
+ *  Maintained by Mark Lord  <mlord@pobox.com>
+ *            and Gadi Oxman <gadio@netvision.net.il>
+ *
  * This is the multiple IDE interface driver, as evolved from hd.c.
  * It supports up to four IDE interfaces, on one or more IRQs (usually 14 & 15).
  * There can be up to two drives per interface, as per the ATA-2 spec.
  *
- * Primary i/f:    ide0: major=3;  (hda)         minor=0; (hdb)         minor=64
- * Secondary i/f:  ide1: major=22; (hdc or hd1a) minor=0; (hdd or hd1b) minor=64
- * Tertiary i/f:   ide2: major=33; (hde)         minor=0; (hdf)         minor=64
- * Quaternary i/f: ide3: major=34; (hdg)         minor=0; (hdh)         minor=64
+ * Primary:    ide0, port 0x1f0; major=3;  hda is minor=0; hdb is minor=64
+ * Secondary:  ide1, port 0x170; major=22; hdc is minor=0; hdd is minor=64
+ * Tertiary:   ide2, port 0x???; major=33; hde is minor=0; hdf is minor=64
+ * Quaternary: ide3, port 0x???; major=34; hdg is minor=0; hdh is minor=64
  *
  * It is easy to extend ide.c to handle more than four interfaces:
  *
@@ -51,10 +54,7 @@
  *
  *	Mark Lord	(mlord@pobox.com)		(IDE Perf.Pkg)
  *	Delman Lee	(delman@mipg.upenn.edu)		("Mr. atdisk2")
- *	Petri Mattila	(ptjmatti@kruuna.helsinki.fi)	(EIDE stuff)
  *	Scott Snyder	(snyder@fnald0.fnal.gov)	(ATAPI IDE cd-rom)
- *
- *  Maintained by Mark Lord (mlord@pobox.com):  ide.c, ide.h, triton.c, hd.c, ..
  *
  *  This was a rewrite of just about everything from hd.c, though some original
  *  code is still sprinkled about.  Think of it as a major evolution, with
@@ -235,6 +235,9 @@
  *			help sharing by masking device irq after probing
  * Version 5.41		more fixes to irq sharing/serialize detection
  *			disable io_32bit by default on drive reset
+ * Version 5.42		simplify irq-masking after probe
+ *			fix NULL pointer deref in save_match()
+ * Version 5.43		Ugh.. unexpected_intr is back: try to exterminate it
  *
  *  Some additional driver compile-time options are in ide.h
  *
@@ -2422,9 +2425,11 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 		irqs = probe_irq_off(irqs);	/* get our irq number */
 		if (irqs > 0) {
 			HWIF(drive)->irq = irqs; /* save it for later */
-			irqs = probe_irq_on();  /* grab irqs, to ignore next edge */
+			irqs = probe_irq_on();
 			OUT_BYTE(drive->ctl|2,IDE_CONTROL_REG); /* mask device irq */
-			(void) probe_irq_off(irqs); /* restore irqs again */
+			udelay(5);
+			(void) GET_STAT();	/* clear drive IRQ */
+			(void) probe_irq_off(irqs);
 		} else {	/* Mmmm.. multiple IRQs.. don't know which was ours */
 			printk("%s: IRQ probe failed (%d)\n", drive->name, irqs);
 #ifdef CONFIG_BLK_DEV_CMD640
@@ -3032,7 +3037,7 @@ static void save_match (ide_hwif_t *hwif, ide_hwif_t *new, ide_hwif_t **match)
 			return;
 		printk("%s: potential irq problem with %s and %s\n", hwif->name, new->name, m->name);
 	}
-	if (m->irq != hwif->irq) /* don't undo a prior perfect match */
+	if (!m || m->irq != hwif->irq) /* don't undo a prior perfect match */
 		*match = new;
 }
 #endif /* MAX_HWIFS > 1 */
@@ -3109,7 +3114,7 @@ static int init_irq (ide_hwif_t *hwif)
 	 * Allocate the irq, if not already obtained for another hwif
 	 */
 	if (!match || match->irq != hwif->irq) {
-		if (request_irq(hwif->irq, ide_intr, SA_INTERRUPT|SA_SAMPLE_RANDOM, hwif->name, hwgroup)) {
+		if (request_irq(hwif->irq, ide_intr, SA_INTERRUPT, hwif->name, hwgroup)) {
 			if (!match)
 				kfree(hwgroup);
 			restore_flags(flags);
@@ -3202,6 +3207,7 @@ static void probe_for_hwifs (void)
 		 * and then add 1.
 		 */
 		ide_probe_pci (PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371_0, &ide_init_triton, 1);
+		ide_probe_pci (PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371SB_1, &ide_init_triton, 0);
 #endif /* CONFIG_BLK_DEV_TRITON */
 	}
 #endif /* CONFIG_PCI */

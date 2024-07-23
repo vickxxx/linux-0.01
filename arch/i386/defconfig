@@ -24,7 +24,6 @@ CONFIG_PCI=y
 CONFIG_SYSVIPC=y
 CONFIG_BINFMT_AOUT=y
 CONFIG_BINFMT_ELF=y
-# CONFIG_BINFMT_JAVA is not set
 CONFIG_KERNEL_ELF=y
 # CONFIG_M386 is not set
 # CONFIG_M486 is not set
@@ -38,20 +37,24 @@ CONFIG_BLK_DEV_FD=y
 CONFIG_BLK_DEV_IDE=y
 
 #
-# Please see drivers/block/README.ide for help/info on IDE drives
+# Please see Documentation/ide.txt for help/info on IDE drives
 #
 # CONFIG_BLK_DEV_HD_IDE is not set
 CONFIG_BLK_DEV_IDECD=y
 # CONFIG_BLK_DEV_IDETAPE is not set
 # CONFIG_BLK_DEV_IDE_PCMCIA is not set
 CONFIG_BLK_DEV_CMD640=y
-CONFIG_BLK_DEV_RZ1000=y
 # CONFIG_BLK_DEV_TRITON is not set
+CONFIG_BLK_DEV_RZ1000=y
 # CONFIG_IDE_CHIPSETS is not set
-# CONFIG_BLK_DEV_RAM is not set
+
+#
+# Additional Block Devices
+#
 # CONFIG_BLK_DEV_LOOP is not set
-# CONFIG_BLK_DEV_XD is not set
 # CONFIG_BLK_DEV_MD is not set
+# CONFIG_BLK_DEV_RAM is not set
+# CONFIG_BLK_DEV_XD is not set
 
 #
 # Networking options
@@ -69,7 +72,6 @@ CONFIG_INET=y
 # CONFIG_INET_PCTCP is not set
 # CONFIG_INET_RARP is not set
 # CONFIG_NO_PATH_MTU_DISCOVERY is not set
-# CONFIG_TCP_NAGLE_OFF is not set
 CONFIG_IP_NOSR=y
 CONFIG_SKB_LARGE=y
 
@@ -124,6 +126,7 @@ CONFIG_EL3=y
 # Filesystems
 #
 # CONFIG_QUOTA is not set
+# CONFIG_LOCK_MANDATORY is not set
 CONFIG_MINIX_FS=y
 # CONFIG_EXT_FS is not set
 CONFIG_EXT2_FS=y
@@ -139,7 +142,6 @@ CONFIG_NFS_FS=y
 CONFIG_ISO9660_FS=y
 # CONFIG_HPFS_FS is not set
 # CONFIG_SYSV_FS is not set
-# CONFIG_AFFS_FS is not set
 # CONFIG_UFS_FS is not set
 
 #
@@ -151,10 +153,7 @@ CONFIG_SERIAL=y
 # CONFIG_STALDRV is not set
 # CONFIG_RISCOM8 is not set
 # CONFIG_PRINTER is not set
-# CONFIG_BUSMOUSE is not set
-# CONFIG_PSMOUSE is not set
-# CONFIG_MS_BUSMOUSE is not set
-# CONFIG_ATIXL_BUSMOUSE is not set
+# CONFIG_MOUSE is not set
 # CONFIG_UMISC is not set
 # CONFIG_QIC02_TAPE is not set
 # CONFIG_FTAPE is not set

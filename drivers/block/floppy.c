@@ -213,13 +213,6 @@ static inline int __get_order(unsigned long size)
 static unsigned int fake_change = 0;
 static int initialising=1;
 
-#ifdef __sparc__
-/* We hold the FIFO configuration here.  We want to have Polling and
- * Implied Seek enabled on Sun controllers.
- */
-unsigned char fdc_cfg = 0;
-#endif
-
 static inline int TYPE(kdev_t x) {
 	return  (MINOR(x)>>2) & 0x1f;
 }
@@ -254,6 +247,9 @@ static inline int DRIVE(kdev_t x) {
 #define STRETCH(floppy) ((floppy)->stretch & FD_STRETCH)
 
 #define CLEARSTRUCT(x) memset((x), 0, sizeof(*(x)))
+
+#define INT_OFF save_flags(flags); cli()
+#define INT_ON  restore_flags(flags)
 
 /* read/write */
 #define COMMAND raw_cmd->cmd[0]
@@ -378,7 +374,7 @@ static struct floppy_struct floppy_type[32] = {
 	{ 1440, 9,2,80,0,0x23,0x01,0xDF,0x50,"h720"  },	/*  6 720KB AT      */
 	{ 2880,18,2,80,0,0x1B,0x00,0xCF,0x6C,"H1440" },	/*  7 1.44MB 3.5"   */
 	{ 5760,36,2,80,0,0x1B,0x43,0xAF,0x54,"E2880" },	/*  8 2.88MB 3.5"   */
-	{ 5760,36,2,80,0,0x1B,0x43,0xAF,0x54,"CompaQ"},	/*  9 2.88MB 3.5"   */
+	{ 6240,39,2,80,0,0x1B,0x43,0xAF,0x28,"E3120"},	/*  9 3.12MB 3.5"   */
 
 	{ 2880,18,2,80,0,0x25,0x00,0xDF,0x02,"h1440" }, /* 10 1.44MB 5.25"  */
 	{ 3360,21,2,80,0,0x1C,0x00,0xCF,0x0C,"H1680" }, /* 11 1.68MB 3.5"   */
@@ -482,7 +478,6 @@ static void floppy_start(void);
 static void process_fd_request(void);
 static void recalibrate_floppy(void);
 static void floppy_shutdown(void);
-static void unexpected_floppy_interrupt(void);
 
 static int floppy_grab_irq_and_dma(void);
 static void floppy_release_irq_and_dma(void);
@@ -525,19 +520,8 @@ static unsigned char current_drive = 0;
 static long current_count_sectors = 0;
 static unsigned char sector_t; /* sector in track */
 
-
 #ifndef fd_eject
-#ifdef __sparc__
-static int fd_eject(int drive)
-{
-	set_dor(0, ~0, 0x90);
-	udelay(500);
-	set_dor(0, ~0x80, 0);
-	udelay(500);
-}
-#else
 #define fd_eject(x) -EINVAL
-#endif
 #endif
 
 
@@ -814,20 +798,22 @@ static void set_fdc(int drive)
 /* locks the driver */
 static int lock_fdc(int drive, int interruptible)
 {
+	unsigned long flags;
+
 	if (!usage_count){
 		printk("trying to lock fdc while usage count=0\n");
 		return -1;
 	}
 	floppy_grab_irq_and_dma();
-	cli();
+	INT_OFF;
 	while (fdc_busy && NO_SIGNAL)
 		interruptible_sleep_on(&fdc_wait);
 	if (fdc_busy){
-		sti();
+		INT_ON;
 		return -EINTR;
 	}
 	fdc_busy = 1;
-	sti();
+	INT_ON;
 	command_status = FD_COMMAND_NONE;
 	reschedule_timeout(drive, "lock fdc", 0);
 	set_fdc(drive);
@@ -929,7 +915,7 @@ static void empty(void)
 }
 
 static struct tq_struct floppy_tq =
-{ 0, 0, (void *) (void *) unexpected_floppy_interrupt, 0 };
+{ 0, 0, 0, 0 };
 
 static struct timer_list fd_timer ={ NULL, NULL, 0, 0, 0 };
 
@@ -993,34 +979,36 @@ static int hlt_disabled=0;
 static void floppy_disable_hlt(void)
 {
 	unsigned long flags;
-	save_flags(flags);
-	cli();
+
+	INT_OFF;
 	if (!hlt_disabled){
 		hlt_disabled=1;
 #ifdef HAVE_DISABLE_HLT
 		disable_hlt();
 #endif
 	}
-	restore_flags(flags);
+	INT_ON;
 }
 
 static void floppy_enable_hlt(void)
 {
 	unsigned long flags;
-	save_flags(flags);
-	cli();
+
+	INT_OFF;
 	if (hlt_disabled){
 		hlt_disabled=0;
 #ifdef HAVE_DISABLE_HLT
 		enable_hlt();
 #endif
 	}
-	restore_flags(flags);
+	INT_ON;
 }
 
 
 static void setup_DMA(void)
 {
+	unsigned long flags;
+
 #ifdef FLOPPY_SANITY_CHECK
 	if (raw_cmd->length == 0){
 		int i;
@@ -1048,7 +1036,7 @@ static void setup_DMA(void)
 		return;
 	}
 #endif
-	cli();
+	INT_OFF;
 	fd_disable_dma();
 	fd_clear_dma_ff();
 	fd_set_dma_mode((raw_cmd->flags & FD_RAW_READ)?
@@ -1057,7 +1045,7 @@ static void setup_DMA(void)
 	fd_set_dma_count(raw_cmd->length);
 	virtual_dma_port = FDCS->address;
 	fd_enable_dma();
-	sti();
+	INT_ON;
 	floppy_disable_hlt();
 }
 
@@ -1196,15 +1184,10 @@ static int fdc_configure(void)
 {
 	/* Turn on FIFO */
 	output_byte(FD_CONFIGURE);
-#ifdef __sparc__ 
-	output_byte(0x64);	/* Motor off timeout */
-	output_byte(fdc_cfg | 0x0A);
-#else
 	if(need_more_output() != MORE_OUTPUT)
 		return 0;
 	output_byte(0);
 	output_byte(0x10 | (no_fifo & 0x20) | (fifo_depth & 0xf));
-#endif
 	output_byte(0);	/* pre-compensation from track 
 			   0 upwards */
 	return 1;
@@ -1246,12 +1229,7 @@ static void fdc_specify(void)
 		/*DPRINT("FIFO enabled\n");*/
 	}
 
-#ifdef __sparc__
-	/* If doing implied seeks, no specify necessary */
-	if(fdc_cfg&0x40)
-		return;
-#endif
-
+#ifndef __sparc__
 	switch (raw_cmd->rate & 0x03) {
 		case 3:
 			dtr = 1000;
@@ -1306,6 +1284,7 @@ static void fdc_specify(void)
 		output_byte(FDCS->spec1 = spec1);
 		output_byte(FDCS->spec2 = spec2);
 	}
+#endif
 } /* fdc_specify */
 
 /* Set the FDC's data transfer rate on behalf of the specified drive.
@@ -1584,15 +1563,6 @@ static void seek_floppy(void)
 		}
 	}
 
-#ifdef __sparc__
-	if (fdc_cfg&0x40) {
-		/* Implied seeks being done... */
-		DRS->track = raw_cmd->track;
-		setup_rw_floppy();
-		return;
-	}
-#endif
-
 	SET_INTR(seek_interrupt);
 	output_byte(FD_SEEK);
 	output_byte(UNIT(current_drive));
@@ -1659,40 +1629,22 @@ static void recal_interrupt(void)
 	floppy_ready();
 }
 
-/*
- * Unexpected interrupt - Print as much debugging info as we can...
- * All bets are off...
- */
-static void unexpected_floppy_interrupt(void)
+static void print_result(char *message, int inr)
 {
 	int i;
-	if (initialising)
-		return;
-	if (print_unex){
-		DPRINT("unexpected interrupt\n");
-		if (inr >= 0)
-			for (i=0; i<inr; i++)
-				printk("%d %x\n", i, reply_buffer[i]);
-	}
-	FDCS->reset = 0;        /* Allow SENSEI to be sent. */
-	while(1){
-		output_byte(FD_SENSEI);
-		inr=result();
-		if (inr != 2)
-			break;
-		if (print_unex){
-			printk("sensei\n");
-			for (i=0; i<inr; i++)
-				printk("%d %x\n", i, reply_buffer[i]);
-		}
-	}
-	FDCS->reset = 1;
+
+	DPRINT("%s ", message);
+	if (inr >= 0)
+		for (i=0; i<inr; i++)
+			printk("repl[%d]=%x ", i, reply_buffer[i]);
+	printk("\n");
 }
 
 /* interrupt handler */
 void floppy_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	void (*handler)(void) = DEVICE_INTR;
+	int do_print;
 
 	lasthandler = handler;
 	interruptjiffies = jiffies;
@@ -1708,20 +1660,36 @@ void floppy_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		is_alive("bizarre fdc");
 		return;
 	}
+
+	FDCS->reset = 0;
+	/* We have to clear the reset flag here, because apparently on boxes
+	 * with level triggered interrupts (PS/2, Sparc, ...), it is needed to
+	 * emit SENSEI's to clear the interrupt line. And FDCS->reset blocks the
+	 * emission of the SENSEI's.
+	 * It is OK to emit floppy commands because we are in an interrupt
+	 * handler here, and thus we have to fear no interference of other
+	 * activity.
+	 */
+
+	do_print = !handler && print_unex && !initialising;
+
 	inr = result();
-	if (!handler){
-		unexpected_floppy_interrupt();
-		is_alive("unexpected");
-		return;
-	}
+	if(do_print)
+		print_result("unexpected interrupt", inr);
 	if (inr == 0){
 		do {
 			output_byte(FD_SENSEI);
 			inr = result();
+			if(do_print)
+				print_result("sensei", inr);
 		} while ((ST0 & 0x83) != UNIT(current_drive) && inr == 2);
 	}
-	floppy_tq.routine = (void *)(void *) handler;
-	queue_task_irq(&floppy_tq, &tq_timer);
+	if (handler) {
+		/* expected interrupt */
+		floppy_tq.routine = (void *)(void *) handler;
+		queue_task_irq(&floppy_tq, &tq_timer);
+	} else
+		FDCS->reset = 1;
 	is_alive("normal interrupt end");
 }
 
@@ -1954,11 +1922,12 @@ static struct cont_t intr_cont={
 static int wait_til_done(void (*handler)(void), int interruptible)
 {
 	int ret;
+	unsigned long flags;
 
 	floppy_tq.routine = (void *)(void *) handler;
 	queue_task(&floppy_tq, &tq_timer);
 
-	cli();
+	INT_OFF;
 	while(command_status < 2 && NO_SIGNAL){
 		is_alive("wait_til_done");
 		if (interruptible)
@@ -1970,10 +1939,10 @@ static int wait_til_done(void (*handler)(void), int interruptible)
 		cancel_activity();
 		cont = &intr_cont;
 		reset_fdc();
-		sti();
+		INT_ON;
 		return -EINTR;
 	}
-	sti();
+	INT_ON;
 
 	if (FDCS->reset)
 		command_status = FD_COMMAND_ERROR;
@@ -3831,19 +3800,9 @@ static char get_fdc_version(void)
 	}
 	switch (reply_buffer[0] >> 5) {
 		case 0x0:
-			output_byte(FD_SAVE);
-			r = result();
-			if (r != 16) {
-				printk("FDC %d init: SAVE: unexpected return of %d bytes.\n", fdc, r);
-				return FDC_UNKNOWN;
-			}
-			if (!(reply_buffer[0] & 0x40)) {
-				printk(KERN_INFO "FDC %d is a 3Volt 82078SL.\n",fdc);
-				return FDC_82078;
-			}
 			/* Either a 82078-1 or a 82078SL running at 5Volt */
-			printk(KERN_INFO "FDC %d is an 82078-1.\n",fdc);
-			return FDC_82078_1;
+			printk(KERN_INFO "FDC %d is an 82078.\n",fdc);
+			return FDC_82078;
 		case 0x1:
 			printk(KERN_INFO "FDC %d is a 44pin 82078\n",fdc);
 			return FDC_82078;
@@ -3989,8 +3948,6 @@ int floppy_init(void)
 
 	raw_cmd = 0;
 
-	sti();
-
 	if (register_blkdev(MAJOR_NR,"fd",&floppy_fops)) {
 		printk("Unable to get major %d for floppy\n",MAJOR_NR);
 		return -EBUSY;
@@ -4006,9 +3963,6 @@ int floppy_init(void)
 	blksize_size[MAJOR_NR] = floppy_blocksizes;
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
 	reschedule_timeout(MAXTIMEOUT, "floppy init", MAXTIMEOUT);
-#ifdef __sparc__
-	fdc_cfg = (0x40 | 0x10); /* ImplSeek+Polling+FIFO */
-#endif
 	config_types();
 
 	for (i = 0; i < N_FDC; i++) {
@@ -4089,20 +4043,23 @@ int floppy_init(void)
 static int floppy_grab_irq_and_dma(void)
 {
 	int i;
-	cli();
+	unsigned long flags;
+
+	INT_OFF;
 	if (usage_count++){
-		sti();
+		INT_ON;
 		return 0;
 	}
-	sti();
+	INT_ON;
 	MOD_INC_USE_COUNT;
 	for (i=0; i< N_FDC; i++){
-		if (FDCS->address != -1){
+		if (fdc_state[i].address != -1){
 			fdc = i;
 			reset_fdc_info(1);
 			fd_outb(FDCS->dor, FD_DOR);
 		}
 	}
+	fdc = 0;
 	set_dor(0, ~0, 8);  /* avoid immediate interrupt */
 
 	if (fd_request_irq()) {
@@ -4131,13 +4088,14 @@ static void floppy_release_irq_and_dma(void)
 #endif
 	long tmpsize;
 	unsigned long tmpaddr;
+	unsigned long flags;
 
-	cli();
+	INT_OFF;
 	if (--usage_count){
-		sti();
+		INT_ON;
 		return;
 	}
-	sti();
+	INT_ON;
 	MOD_DEC_USE_COUNT;
 	fd_disable_dma();
 	fd_free_dma();

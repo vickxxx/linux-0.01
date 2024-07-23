@@ -1,7 +1,7 @@
 /*
  *  linux/fs/affs/namei.c
  *
- *  (c) 1996  Hans-Joachim Widmaier - Heavily hacked up.
+ *  (c) 1996  Hans-Joachim Widmaier - Rewritten
  *
  *  (C) 1993  Ray Burr - Modified for Amiga FFS filesystem.
  *
@@ -10,12 +10,12 @@
 
 #include <linux/sched.h>
 #include <linux/affs_fs.h>
-#include <linux/amigaffs.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/locks.h>
+#include <linux/amigaffs.h>
 #include <asm/segment.h>
 
 #include <linux/errno.h>
@@ -100,7 +100,7 @@ affs_find_entry(struct inode *dir, const char *name, int namelen,
 {
 	struct buffer_head *bh;
 	int	 intl;
-	ULONG	 key;
+	int	 key;
 
 	pr_debug("AFFS: find_entry(%.*s)=\n",namelen,name);
 
@@ -137,7 +137,6 @@ affs_find_entry(struct inode *dir, const char *name, int namelen,
 			break;
 		key = htonl(FILE_END(bh->b_data,dir)->hash_chain);
 	}
-	pr_debug("%lu\n",key);
 	*ino = key;
 	return bh;
 }
@@ -235,9 +234,13 @@ affs_create(struct inode *dir, const char *name, int len, int mode, struct inode
 		iput (dir);
 		return -ENOSPC;
 	}
-	inode->i_op   = &affs_file_inode_operations;
 	inode->i_mode = mode;
-	error         = affs_add_entry(dir,NULL,inode,name,len,ST_FILE);
+	if (dir->i_sb->u.affs_sb.s_flags & SF_OFS)
+		inode->i_op = &affs_file_inode_operations_ofs;
+	else
+		inode->i_op = &affs_file_inode_operations;
+
+	error = affs_add_entry(dir,NULL,inode,name,len,ST_FILE);
 	if (error) {
 		iput(dir);
 		inode->i_nlink = 0;
@@ -375,7 +378,6 @@ affs_symlink(struct inode *dir, const char *name, int len, const char *symname)
 	char			 c, lc;
 
 	pr_debug("AFFS: symlink(%lu,\"%.*s\" -> \"%s\")\n",dir->i_ino,len,name,symname);
-	printk("AFFS: symlink(%lu,\"%.*s\" -> \"%s\")\n",dir->i_ino,len,name,symname);
 	
 	maxlen = 4 * AFFS_I2HSIZE(dir) - 1;
 	inode  = affs_new_inode(dir);
@@ -544,7 +546,7 @@ affs_rename(struct inode *old_dir, const char *old_name, int old_len,
 	int			 retval;
 
 	pr_debug("AFFS: rename(old=%lu,\"%*s\" to new=%lu,\"%*s\")\n",old_dir->i_ino,old_len,old_name,
-		new_dir->i_ino,new_len,new_name);
+		 new_dir->i_ino,new_len,new_name);
 	
 	if (new_len > 30)
 		new_len = 30;
@@ -648,8 +650,8 @@ end_rename:
 int
 affs_fixup(struct buffer_head *bh, struct inode *inode)
 {
-	ULONG			 key, link_key;
-	LONG			 type;
+	int			 key, link_key;
+	int			 type;
 	struct buffer_head	*nbh;
 	struct inode		*ofinode;
 

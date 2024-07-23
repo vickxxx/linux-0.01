@@ -55,8 +55,6 @@ static struct module *find_module( const char *name);
 static int get_mod_name( char *user_name, char *buf);
 static int free_modules( void);
 
-static int module_init_flag = 0; /* Hmm... */
-
 extern struct symbol_table symbol_table; /* in kernel/ksyms.c */
 
 /*
@@ -147,18 +145,10 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 	/* A little bit of protection... we "know" where the user stack is... */
 
 	if (symtab && ((unsigned long)symtab > 0xb0000000)) {
-		printk("warning: you are using an old insmod, no symbols will be inserted!\n");
+		printk(KERN_WARNING "warning: you are using an old insmod, no symbols will be inserted!\n");
 		symtab = NULL;
 	}
 #endif
-
-	/*
-	 * First reclaim any memory from dead modules that where not
-	 * freed when deleted. Should I think be done by timers when
-	 * the module was deleted - Jon.
-	 */
-	free_modules();
-
 	if ((error = get_mod_name(module_name, name)) != 0)
 		return error;
 	pr_debug("initializing module `%s', %d (0x%x) bytes\n",
@@ -211,7 +201,7 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 			newtab->n_refs * sizeof(struct module_ref);
 
 		if ((newtab->n_symbols < 0) || (newtab->n_refs < 0) || (legal_start > size)) {
-			printk("Rejecting illegal symbol table (n_symbols=%d,n_refs=%d)\n",
+			printk(KERN_WARNING "Rejecting illegal symbol table (n_symbols=%d,n_refs=%d)\n",
 			       newtab->n_symbols, newtab->n_refs);
 			kfree_s(newtab, size);
 			return -EINVAL;
@@ -220,7 +210,7 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 		/* relocate name pointers, index referred from start of table */
 		for (sym = &(newtab->symbol[0]), i = 0; i < newtab->n_symbols; ++sym, ++i) {
 			if ((unsigned long)sym->name < legal_start || size <= (unsigned long)sym->name) {
-				printk("Rejecting illegal symbol table\n");
+				printk(KERN_WARNING "Rejecting illegal symbol table\n");
 				kfree_s(newtab, size);
 				return -EINVAL;
 			}
@@ -246,7 +236,7 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 				link = link->next;
 
 			if (link == (struct module *)0) {
-				printk("Non-module reference! Rejected!\n");
+				printk(KERN_WARNING "Non-module reference! Rejected!\n");
 				return -EINVAL;
 			}
 
@@ -256,12 +246,12 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 		}
 	}
 
-	module_init_flag = 1; /* Hmm... */
+	GET_USE_COUNT(mp) += 1;
 	if ((*rt.init)() != 0) {
-		module_init_flag = 0; /* Hmm... */
+		GET_USE_COUNT(mp) = 0;
 		return -EBUSY;
 	}
-	module_init_flag = 0; /* Hmm... */
+	GET_USE_COUNT(mp) -= 1;
 	mp->state = MOD_RUNNING;
 
 	return 0;
@@ -282,9 +272,10 @@ sys_delete_module(char *module_name)
 			return error;
 		if ((mp = find_module(name)) == NULL)
 			return -ENOENT;
-		if ((mp->ref != NULL) || ((GET_USE_COUNT(mp) & ~MOD_AUTOCLEAN) != 0))
+		if ((mp->ref != NULL) ||
+		    ((GET_USE_COUNT(mp) & ~(MOD_AUTOCLEAN | MOD_VISITED)) != 0))
 			return -EBUSY;
-		GET_USE_COUNT(mp) &= ~MOD_AUTOCLEAN;
+		GET_USE_COUNT(mp) &= ~(MOD_AUTOCLEAN | MOD_VISITED);
 		if (mp->state == MOD_RUNNING)
 			(*mp->cleanup)();
 		mp->state = MOD_DELETED;
@@ -292,15 +283,23 @@ sys_delete_module(char *module_name)
 	}
 	/* for automatic reaping */
 	else {
-		for (mp = module_list; mp != &kernel_module; mp = mp->next) {
-			if ((mp->ref == NULL) && (GET_USE_COUNT(mp) == MOD_AUTOCLEAN) &&
-			    (mp->state == MOD_RUNNING)) {
-				GET_USE_COUNT(mp) &= ~MOD_AUTOCLEAN;
-				(*mp->cleanup)();
-				mp->state = MOD_DELETED;
+		struct module *mp_next;
+		for (mp = module_list; mp != &kernel_module; mp = mp_next) {
+			mp_next = mp->next;
+			if ((mp->ref == NULL) && (mp->state == MOD_RUNNING) &&
+			    ((GET_USE_COUNT(mp) & ~MOD_VISITED) == MOD_AUTOCLEAN)) {
+			    	if ((GET_USE_COUNT(mp) & MOD_VISITED)) {
+					/* Don't reap until one "cycle" after last _use_ */
+			   		GET_USE_COUNT(mp) &= ~MOD_VISITED;
+				}
+				else {
+					GET_USE_COUNT(mp) &= ~(MOD_AUTOCLEAN | MOD_VISITED);
+					(*mp->cleanup)();
+					mp->state = MOD_DELETED;
+					free_modules();
+				}
 			}
 		}
-		free_modules();
 	}
 	return 0;
 }
@@ -520,8 +519,8 @@ int get_module_list(char *buf)
 		while (*q)
 			*p++ = *q++;
 
+		*p++ = '\t';
 		if ((ref = mp->ref) != NULL) {
-			*p++ = '\t';
 			*p++ = '[';
 			for (; ref; ref = ref->next) {
 				q = ref->module->name;
@@ -534,7 +533,7 @@ int get_module_list(char *buf)
 		}
 		if (mp->state == MOD_RUNNING) {
 			sprintf(size,"\t%ld%s",
-				GET_USE_COUNT(mp) & ~MOD_AUTOCLEAN,
+				GET_USE_COUNT(mp) & ~(MOD_AUTOCLEAN | MOD_VISITED),
 				((GET_USE_COUNT(mp) & MOD_AUTOCLEAN)?
 					" (autoclean)":""));
 			q = size;
@@ -622,7 +621,7 @@ int get_ksyms_list(char *buf, char **start, off_t offset, int length)
 static struct symbol_table nulltab;
 
 int
-register_symtab(struct symbol_table *intab)
+register_symtab_from(struct symbol_table *intab, long *from)
 {
 	struct module *mp;
 	struct module *link;
@@ -639,11 +638,16 @@ register_symtab(struct symbol_table *intab)
 			intab->n_symbols +=1;
 	}
 
-#if 1
-	if (module_init_flag == 0) { /* Hmm... */
-#else
-	if (module_list == &kernel_module) {
-#endif
+	for (mp = module_list; mp != &kernel_module; mp = mp->next) {
+		/*
+		 * "from" points to "mod_use_count_" (== start of module)
+		 * or is == 0 if called from a non-module
+		 */
+		if ((unsigned long)(mp->addr) == (unsigned long)from)
+			break;
+	}
+
+	if (mp == &kernel_module) {
 		/* Aha! Called from an "internal" module */
 		if (!intab)
 			return 0; /* or -ESILLY_PROGRAMMER :-) */
@@ -651,7 +655,7 @@ register_symtab(struct symbol_table *intab)
 		/* create a pseudo module! */
 		if (!(mp = (struct module*) kmalloc(MODSIZ, GFP_KERNEL))) {
 			/* panic time! */
-			printk("Out of memory for new symbol table!\n");
+			printk(KERN_ERR "Out of memory for new symbol table!\n");
 			return -ENOMEM;
 		}
 		/* else  OK */
@@ -674,7 +678,6 @@ register_symtab(struct symbol_table *intab)
 	 * call to  init_module  i.e. when loading the module!!
 	 * Or else...
 	 */
-	mp = module_list; /* true when doing init_module! */
 
 	/* Any table there before? */
 	if ((oldtab = mp->symtab) == (struct symbol_table*)0) {
@@ -684,12 +687,6 @@ register_symtab(struct symbol_table *intab)
 	}
 
 	/* else  ****** we have to replace the module symbol table ******/
-#if 0
-	if (oldtab->n_symbols > 0) {
-		/* Oh dear, I have to drop the old ones... */
-		printk("Warning, dropping old symbols\n");
-	}
-#endif
 
 	if (oldtab->n_refs == 0) { /* no problems! */
 		mp->symtab = intab;
@@ -714,7 +711,7 @@ register_symtab(struct symbol_table *intab)
 			oldtab->n_refs * REFSIZ,
 		GFP_KERNEL))) {
 		/* panic time! */
-		printk("Out of memory for new symbol table!\n");
+		printk(KERN_ERR "Out of memory for new symbol table!\n");
 		return -ENOMEM;
 	}
 
@@ -778,7 +775,7 @@ asmlinkage int sys_get_kernel_syms(void)
 	return -ENOSYS;
 }
 
-int register_symtab(struct symbol_table *intab)
+int register_symtab_from(struct symbol_table *intab, long *from)
 {
 	return 0;
 }

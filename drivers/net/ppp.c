@@ -6,7 +6,7 @@
  *  Dynamic PPP devices by Jim Freeman <jfree@caldera.com>.
  *  ppp_tty_receive ``noisy-raise-bug'' fixed by Ove Ewerlid <ewerlid@syscon.uu.se>
  *
- *  ==FILEVERSION 960303==
+ *  ==FILEVERSION 960528==
  *
  *  NOTE TO MAINTAINERS:
  *     If you modify this file at all, please set the number above to the
@@ -400,6 +400,7 @@ ppp_init_dev (struct device *dev)
 	dev->get_stats	      = ppp_dev_stats;
 	dev->do_ioctl	      = ppp_dev_ioctl;
 	dev->addr_len	      = 0;
+	dev->tx_queue_len     = 10;
 	dev->type	      = ARPHRD_PPP;
 
 	for (indx = 0; indx < DEV_NUMBUFFS; indx++)

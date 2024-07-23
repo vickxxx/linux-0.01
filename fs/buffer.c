@@ -348,7 +348,7 @@ static inline void remove_from_lru_list(struct buffer_head * bh)
 
 static inline void remove_from_free_list(struct buffer_head * bh)
 {
-        int isize = BUFSIZE_INDEX(bh->b_size);
+	int isize = BUFSIZE_INDEX(bh->b_size);
 	if (!(bh->b_prev_free) || !(bh->b_next_free))
 		panic("VFS: Free block list corrupted");
 	if(bh->b_dev != B_FREE)
@@ -369,7 +369,7 @@ static inline void remove_from_free_list(struct buffer_head * bh)
 
 static inline void remove_from_queues(struct buffer_head * bh)
 {
-        if(bh->b_dev == B_FREE) {
+	if(bh->b_dev == B_FREE) {
 		remove_from_free_list(bh); /* Free list entries should not be
 					      in the hash queue */
 		return;
@@ -410,7 +410,7 @@ static inline void put_last_lru(struct buffer_head * bh)
 
 static inline void put_last_free(struct buffer_head * bh)
 {
-        int isize;
+	int isize;
 	if (!bh)
 		return;
 
@@ -432,7 +432,7 @@ static inline void put_last_free(struct buffer_head * bh)
 static inline void insert_into_queues(struct buffer_head * bh)
 {
 	/* put at end of free list */
-        if(bh->b_dev == B_FREE) {
+	if(bh->b_dev == B_FREE) {
 		put_last_free(bh);
 		return;
 	}
@@ -556,7 +556,7 @@ void refill_freelist(int size)
 	struct buffer_head * bh, * tmp;
 	struct buffer_head * candidate[NR_LIST];
 	unsigned int best_time, winner;
-        int isize = BUFSIZE_INDEX(size);
+	int isize = BUFSIZE_INDEX(size);
 	int buffers[NR_LIST];
 	int i;
 	int needed;
@@ -748,7 +748,7 @@ repeat0:
 struct buffer_head * getblk(kdev_t dev, int block, int size)
 {
 	struct buffer_head * bh;
-        int isize = BUFSIZE_INDEX(size);
+	int isize = BUFSIZE_INDEX(size);
 
 	/* Update this for the buffer size lav. */
 	buffer_usage[isize]++;
@@ -789,7 +789,7 @@ repeat:
 
 void set_writetime(struct buffer_head * buf, int flag)
 {
-        int newtime;
+	int newtime;
 
 	if (buffer_dirty(buf)) {
 		/* Move buffer to dirty list if jiffies is clear */
@@ -1099,27 +1099,26 @@ no_grow:
 static inline void after_unlock_page (struct page * page)
 {
 	if (clear_bit(PG_decr_after, &page->flags))
-		nr_async_pages--;
+		atomic_dec(&nr_async_pages);
 	if (clear_bit(PG_free_after, &page->flags))
 		free_page(page_address(page));
 	if (clear_bit(PG_swap_unlock_after, &page->flags))
 		swap_after_unlock_page(page->swap_unlock_entry);
 }
 
-/* Free all temporary buffers belonging to a page. */
+/*
+ * Free all temporary buffers belonging to a page.
+ * This needs to be called with interrupts disabled.
+ */
 static inline void free_async_buffers (struct buffer_head * bh)
 {
 	struct buffer_head * tmp;
-	unsigned long flags;
 
 	tmp = bh;
-	save_flags(flags);
-	cli();
 	do {
 		if (!test_bit(BH_FreeOnIO, &tmp->b_state)) {
 			printk ("Whoops: unlock_buffer: "
 				"async IO mismatch on page.\n");
-			restore_flags(flags);
 			return;
 		}
 		tmp->b_next_free = reuse_list;
@@ -1127,7 +1126,6 @@ static inline void free_async_buffers (struct buffer_head * bh)
 		clear_bit(BH_FreeOnIO, &tmp->b_state);
 		tmp = tmp->b_this_page;
 	} while (tmp != bh);
-	restore_flags(flags);
 }
 
 /*
@@ -1145,6 +1143,7 @@ int brw_page(int rw, unsigned long address, kdev_t dev, int b[], int size, int b
 	if (!PageLocked(page))
 		panic("brw_page: page not locked for I/O");
 	clear_bit(PG_uptodate, &page->flags);
+	clear_bit(PG_error, &page->flags);
 	/*
 	 * Allocate buffer heads pointing to this page, just for I/O.
 	 * They do _not_ show up in the buffer hash table!
@@ -1170,11 +1169,12 @@ int brw_page(int rw, unsigned long address, kdev_t dev, int b[], int size, int b
 		next->b_flushtime = 0;
 		set_bit(BH_Uptodate, &next->b_state);
 
-		/* When we use bmap, we define block zero to represent
-                   a hole.  ll_rw_page, however, may legitimately
-                   access block zero, and we need to distinguish the
-                   two cases. 
-		   */
+		/*
+		 * When we use bmap, we define block zero to represent
+		 * a hole.  ll_rw_page, however, may legitimately
+		 * access block zero, and we need to distinguish the
+		 * two cases.
+		 */
 		if (bmap && !block) {
 			memset(next->b_data, 0, size);
 			next->b_count--;
@@ -1210,10 +1210,14 @@ int brw_page(int rw, unsigned long address, kdev_t dev, int b[], int size, int b
 		/* The rest of the work is done in mark_buffer_uptodate()
 		 * and unlock_buffer(). */
 	} else {
+		unsigned long flags;
 		clear_bit(PG_locked, &page->flags);
 		set_bit(PG_uptodate, &page->flags);
 		wake_up(&page->wait);
+		save_flags(flags);
+		cli();
 		free_async_buffers(bh);
+		restore_flags(flags);
 		after_unlock_page(page);
 	}
 	++current->maj_flt;
@@ -1246,6 +1250,7 @@ void mark_buffer_uptodate(struct buffer_head * bh, int on)
  */
 void unlock_buffer(struct buffer_head * bh)
 {
+	unsigned long flags;
 	struct buffer_head *tmp;
 	struct page *page;
 
@@ -1256,30 +1261,56 @@ void unlock_buffer(struct buffer_head * bh)
 		return;
 	/* This is a temporary buffer used for page I/O. */
 	page = mem_map + MAP_NR(bh->b_data);
-	if (!PageLocked(page)) {
-		printk ("Whoops: unlock_buffer: "
-			"async io complete on unlocked page\n");
-		return;
-	}
-	if (bh->b_count != 1) {
-		printk ("Whoops: unlock_buffer: b_count != 1 on async io.\n");
-		return;
-	}
-	/* Async buffer_heads are here only as labels for IO, and get
-           thrown away once the IO for this page is complete.  IO is
-           deemed complete once all buffers have been visited
-           (b_count==0) and are now unlocked. */
+	if (!PageLocked(page))
+		goto not_locked;
+	if (bh->b_count != 1)
+		goto bad_count;
+
+	if (!test_bit(BH_Uptodate, &bh->b_state))
+		set_bit(PG_error, &page->flags);
+
+	/*
+	 * Be _very_ careful from here on. Bad things can happen if
+	 * two buffer heads end IO at almost the same time and both
+	 * decide that the page is now completely done.
+	 *
+	 * Async buffer_heads are here only as labels for IO, and get
+	 * thrown away once the IO for this page is complete.  IO is
+	 * deemed complete once all buffers have been visited
+	 * (b_count==0) and are now unlocked. We must make sure that
+	 * only the _last_ buffer that decrements its count is the one
+	 * that free's the page..
+	 */
+	save_flags(flags);
+	cli();
 	bh->b_count--;
-	for (tmp = bh; tmp=tmp->b_this_page, tmp!=bh; ) {
-		if (test_bit(BH_Lock, &tmp->b_state) || tmp->b_count)
-			return;
-	}
+	tmp = bh;
+	do {
+		if (tmp->b_count)
+			goto still_busy;
+		tmp = tmp->b_this_page;
+	} while (tmp != bh);
+
 	/* OK, the async IO on this page is complete. */
+	free_async_buffers(bh);
+	restore_flags(flags);
 	clear_bit(PG_locked, &page->flags);
 	wake_up(&page->wait);
-	free_async_buffers(bh);
 	after_unlock_page(page);
 	wake_up(&buffer_wait);
+	return;
+
+still_busy:
+	restore_flags(flags);
+	return;
+
+not_locked:
+	printk ("Whoops: unlock_buffer: async io complete on unlocked page\n");
+	return;
+
+bad_count:
+	printk ("Whoops: unlock_buffer: b_count != 1 on async io.\n");
+	return;
 }
 
 /*

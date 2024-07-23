@@ -362,7 +362,8 @@ struct ext2_super_block {
 	__u16	s_block_group_nr; 	/* block group # of this superblock */
 	__u32	s_feature_compat; 	/* compatible feature set */
 	__u32	s_feature_incompat; 	/* incompatible feature set */
-	__u32	s_reserved[231];	/* Padding to the end of the block */
+	__u32	s_feature_ro_compat; 	/* readonly-compatible feature set */
+	__u32	s_reserved[230];	/* Padding to the end of the block */
 };
 
 /*
@@ -418,6 +419,7 @@ struct ext2_dir_entry {
  */
 #define EXT2_FEATURE_COMPAT_SUPP	0
 #define EXT2_FEATURE_INCOMPAT_SUPP	0
+#define EXT2_FEATURE_RO_COMPAT_SUPP	0
 
 #ifdef __KERNEL__
 /*
@@ -428,15 +430,9 @@ struct ext2_dir_entry {
  * Ok, these declarations are also in <linux/kernel.h> but none of the
  * ext2 source programs needs to include it so they are duplicated here.
  */
-#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 5)
-# define NORET_TYPE    __volatile__
-# define ATTRIB_NORET  /**/
-# define NORET_AND     /**/
-#else
 # define NORET_TYPE    /**/
 # define ATTRIB_NORET  __attribute__((noreturn))
 # define NORET_AND     noreturn,
-#endif
 
 /* acl.c */
 extern int ext2_permission (struct inode *, int);

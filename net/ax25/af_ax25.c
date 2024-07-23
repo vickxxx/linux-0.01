@@ -636,8 +636,10 @@ static int ax25_ctl_ioctl(const unsigned int cmd, void *arg)
 	  	case AX25_PACLEN:
 	  		if (ax25_ctl.arg < 16 || ax25_ctl.arg > 65535) 
 	  			return -EINVAL;
+#if 0
 	  		if (ax25_ctl.arg > 256) /* we probably want this */
-	  			printk("ax25_ctl_ioctl: Warning --- huge paclen %d\n", (int)ax25_ctl.arg);
+	  			printk(KERN_WARNING "ax25_ctl_ioctl: Warning --- huge paclen %d\n", (int)ax25_ctl.arg);
+#endif	  			
 	  		ax25->paclen = ax25_ctl.arg;
 	  		break;
 
@@ -1597,7 +1599,7 @@ static int ax25_rcv(struct sk_buff *skb, struct device *dev, ax25_address *dev_a
 	skb->h.raw = skb->data;
 	
 #ifdef CONFIG_FIREWALL
-	if (call_in_firewall(PF_AX25, skb->dev, skb->h.raw) != FW_ACCEPT) {
+	if (call_in_firewall(PF_AX25, skb->dev, skb->h.raw, NULL) != FW_ACCEPT) {
 		kfree_skb(skb, FREE_READ);
 		return 0;
 	}
@@ -1655,7 +1657,7 @@ static int ax25_rcv(struct sk_buff *skb, struct device *dev, ax25_address *dev_a
 
 			build_ax25_addr(skb->data, &src, &dest, &dp, type, MODULUS);
 #ifdef CONFIG_FIREWALL
-			if (call_fw_firewall(PF_AX25, skb->dev, skb->data) != FW_ACCEPT) {
+			if (call_fw_firewall(PF_AX25, skb->dev, skb->data, NULL) != FW_ACCEPT) {
 				kfree_skb(skb, FREE_READ);
 				return 0;
 			}
@@ -1948,7 +1950,7 @@ static int ax25_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 		return sock_error(sk);
 	}
 
-	if (flags|| msg->msg_accrights)
+	if (flags|| msg->msg_control)
 		return -EINVAL;
 
 	if (sk->zapped)
@@ -2393,7 +2395,7 @@ void ax25_proto_init(struct net_proto *pro)
 	dev_add_pack(&bpq_packet_type);
 #endif
 	register_netdevice_notifier(&ax25_dev_notifier);
-			  
+#ifdef CONFIG_PROC_FS			  
 	proc_net_register(&(struct proc_dir_entry) {
 		PROC_NET_AX25_ROUTE, 10, "ax25_route",
 		S_IFREG | S_IRUGO, 1, 0, 0,
@@ -2412,8 +2414,9 @@ void ax25_proto_init(struct net_proto *pro)
 		0, &proc_net_inode_operations,
 		ax25_cs_get_info
 	});
+#endif	
 
-	printk("G4KLX/GW4PTS AX.25 for Linux. Version 0.32 BETA for Linux NET3.034 (Linux 1.3.77)\n");
+	printk(KERN_INFO "G4KLX/GW4PTS AX.25 for Linux. Version 0.32 for Linux NET3.035 (Linux 2.0)\n");
 
 #ifdef CONFIG_BPQETHER
 	proc_net_register(&(struct proc_dir_entry) {
@@ -2423,7 +2426,7 @@ void ax25_proto_init(struct net_proto *pro)
 		ax25_bpq_get_info
 	});
 
-	printk("G8BPQ Encapsulation of AX.25 frames enabled\n");
+	printk(KERN_INFO "G8BPQ Encapsulation of AX.25 frames enabled\n");
 #endif
 }
 
@@ -2437,7 +2440,7 @@ void ax25_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 	unsigned char *ptr;
 	
 #ifdef CONFIG_FIREWALL
-	if (call_out_firewall(PF_AX25, skb->dev, skb->data) != FW_ACCEPT) {
+	if (call_out_firewall(PF_AX25, skb->dev, skb->data, NULL) != FW_ACCEPT) {
 		dev_kfree_skb(skb, FREE_WRITE);
 		return;
 	}
@@ -2451,7 +2454,7 @@ void ax25_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 		int size;
 
 		if(skb_headroom(skb) < AX25_BPQ_HEADER_LEN) {
-			printk("ax25_queue_xmit: not enough space to add BPQ Ether header\n");
+			printk(KERN_CRIT "ax25_queue_xmit: not enough space to add BPQ Ether header\n");
 			dev_kfree_skb(skb, FREE_WRITE);
 			return;
 		}
@@ -2522,7 +2525,7 @@ int ax25_encapsulate(struct sk_buff *skb, struct device *dev, unsigned short typ
   			*buff++ = AX25_P_ARP;
   			break;
   		default:
-  			printk("wrong protocol type 0x%x2.2\n", type);
+  			printk(KERN_ERR "wrong protocol type 0x%x2.2\n", type);
   			*buff++ = 0;
   			break;
  	}

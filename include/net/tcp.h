@@ -155,7 +155,7 @@ extern void tcp_send_fin(struct sock *sk);
 extern void tcp_send_synack(struct sock *, struct sock *, struct sk_buff *);
 extern void tcp_send_skb(struct sock *, struct sk_buff *);
 extern void tcp_send_ack(struct sock *sk);
-extern void tcp_send_delayed_ack(struct sock *sk, int timeout);
+extern void tcp_send_delayed_ack(struct sock *sk, int max_timeout, unsigned long timeout);
 extern void tcp_send_reset(unsigned long saddr, unsigned long daddr, struct tcphdr *th,
 	  struct proto *prot, struct options *opt, struct device *dev, int tos, int ttl);
 
@@ -164,6 +164,9 @@ extern struct sk_buff * tcp_dequeue_partial(struct sock *);
 
 /* tcp_input.c */
 extern void tcp_cache_zap(void);
+
+/* CONFIG_IP_TRANSPARENT_PROXY */
+extern int tcp_chkaddr(struct sk_buff *);
 
 /* tcp_timer.c */
 #define     tcp_reset_msl_timer(x,y,z)	reset_timer(x,y,z)
@@ -211,13 +214,15 @@ static __inline__ int tcp_raise_window(struct sock * sk)
 static __inline__ unsigned short tcp_select_window(struct sock *sk)
 {
 	int window = tcp_new_window(sk);
+	int oldwin = tcp_old_window(sk);
 
 	/* Don't allow a shrinking window */
-	if (window > tcp_old_window(sk)) {
+	if (window > oldwin) {
 		sk->window = window;
 		sk->lastwin_seq = sk->acked_seq;
+		oldwin = window;
 	}
-	return sk->window;
+	return oldwin;
 }
 
 /*

@@ -14,6 +14,7 @@ struct irqaction {
 	struct irqaction *next;
 };
 
+extern unsigned long intr_count;
 
 extern int bh_mask_count[32];
 extern unsigned long bh_active;
@@ -32,6 +33,7 @@ enum {
 	DIGI_BH,
 	SERIAL_BH,
 	RISCOM8_BH,
+	BAYCOM_BH,
 	NET_BH,
 	IMMEDIATE_BH,
 	KEYBOARD_BH,

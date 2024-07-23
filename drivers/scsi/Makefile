@@ -35,7 +35,10 @@ TOPDIR = ../..
 endif
 
 ifeq ($(CONFIG_SCSI),y)
-L_OBJS += hosts.o scsi.o scsi_ioctl.o constants.o scsicam.o scsi_proc.o
+L_OBJS += hosts.o scsi.o scsi_ioctl.o constants.o scsicam.o
+  ifeq ($(CONFIG_PROC_FS),y)
+    L_OBJS += scsi_proc.o
+  endif
 LX_OBJS += scsi_syms.o
 else
   ifeq ($(CONFIG_SCSI),m)
@@ -124,13 +127,23 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_QLOGIC),y)
-L_OBJS += qlogic.o
+ifeq ($(CONFIG_SCSI_QLOGIC_FAS),y)
+L_OBJS += qlogicfas.o
 else
-  ifeq ($(CONFIG_SCSI_QLOGIC),m)
-  M_OBJS += qlogic.o
+  ifeq ($(CONFIG_SCSI_QLOGIC_FAS),m)
+  M_OBJS += qlogicfas.o
   endif
 endif
+
+
+ifeq ($(CONFIG_SCSI_QLOGIC_ISP),y)
+L_OBJS += qlogicisp.o 
+else
+  ifeq ($(CONFIG_SCSI_QLOGIC_ISP),m)
+  M_OBJS += qlogicisp.o 
+  endif
+endif
+
 
 ifeq ($(CONFIG_SCSI_AHA152X),y)
 L_OBJS += aha152x.o

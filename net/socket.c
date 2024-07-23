@@ -351,7 +351,7 @@ static int sock_read(struct inode *inode, struct file *file, char *ubuf, int siz
 	msg.msg_name=NULL;
 	msg.msg_iov=&iov;
 	msg.msg_iovlen=1;
-	msg.msg_accrights=NULL;
+	msg.msg_control=NULL;
 	iov.iov_base=ubuf;
 	iov.iov_len=size;
 
@@ -386,7 +386,7 @@ static int sock_write(struct inode *inode, struct file *file, const char *ubuf, 
 	msg.msg_name=NULL;
 	msg.msg_iov=&iov;
 	msg.msg_iovlen=1;
-	msg.msg_accrights=NULL;
+	msg.msg_control=NULL;
 	iov.iov_base=(void *)ubuf;
 	iov.iov_len=size;
 	
@@ -577,7 +577,7 @@ asmlinkage int sys_socket(int family, int type, int protocol)
 
 	if (!(sock = sock_alloc())) 
 	{
-		printk("NET: sys_socket: no more sockets\n");
+		printk(KERN_WARNING "socket: no more sockets\n");
 		return(-ENOSR);	/* Was: EAGAIN, but we are out of
 				   system resources! */
 	}
@@ -754,7 +754,7 @@ asmlinkage int sys_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_ad
 
 	if (!(newsock = sock_alloc())) 
 	{
-		printk("NET: sock_accept: no more sockets\n");
+		printk(KERN_WARNING "accept: no more sockets\n");
 		return(-ENOSR);	/* Was: EAGAIN, but we are out of system
 				   resources! */
 	}
@@ -919,7 +919,7 @@ asmlinkage int sys_send(int fd, void * buff, int len, unsigned flags)
 	msg.msg_name=NULL;
 	msg.msg_iov=&iov;
 	msg.msg_iovlen=1;
-	msg.msg_accrights=NULL;
+	msg.msg_control=NULL;
 	return(sock->ops->sendmsg(sock, &msg, len, (file->f_flags & O_NONBLOCK), flags));
 }
 
@@ -959,7 +959,7 @@ asmlinkage int sys_sendto(int fd, void * buff, int len, unsigned flags,
 	msg.msg_namelen=addr_len;
 	msg.msg_iov=&iov;
 	msg.msg_iovlen=1;
-	msg.msg_accrights=NULL;
+	msg.msg_control=NULL;
 	return(sock->ops->sendmsg(sock, &msg, len, (file->f_flags & O_NONBLOCK),
 		flags));
 }
@@ -994,7 +994,7 @@ asmlinkage int sys_recv(int fd, void * ubuf, int size, unsigned flags)
 	msg.msg_name=NULL;
 	msg.msg_iov=&iov;
 	msg.msg_iovlen=1;
-	msg.msg_accrights=NULL;
+	msg.msg_control=NULL;
 	iov.iov_base=ubuf;
 	iov.iov_len=size;
 
@@ -1030,7 +1030,7 @@ asmlinkage int sys_recvfrom(int fd, void * ubuf, int size, unsigned flags,
 	if(err)
 	  	return err;
   
-  	msg.msg_accrights=NULL;
+  	msg.msg_control=NULL;
   	msg.msg_iovlen=1;
   	msg.msg_iov=&iov;
   	iov.iov_len=size;
@@ -1113,7 +1113,7 @@ asmlinkage int sys_sendmsg(int fd, struct msghdr *msg, unsigned int flags)
 	struct socket *sock;
 	struct file *file;
 	char address[MAX_SOCK_ADDR];
-	struct iovec iov[MAX_IOVEC];
+	struct iovec iov[UIO_MAXIOV];
 	struct msghdr msg_sys;
 	int err;
 	int total_len;
@@ -1134,7 +1134,7 @@ asmlinkage int sys_sendmsg(int fd, struct msghdr *msg, unsigned int flags)
 	memcpy_fromfs(&msg_sys,msg,sizeof(struct msghdr));
 
 	/* do not move before msg_sys is valid */
-	if(msg_sys.msg_iovlen>MAX_IOVEC)
+	if(msg_sys.msg_iovlen>UIO_MAXIOV)
 		return -EINVAL;
 
 	/* This will also move the address data into kernel space */
@@ -1154,7 +1154,7 @@ asmlinkage int sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 {
 	struct socket *sock;
 	struct file *file;
-	struct iovec iov[MAX_IOVEC];
+	struct iovec iov[UIO_MAXIOV];
 	struct msghdr msg_sys;
 	int err;
 	int total_len;
@@ -1177,7 +1177,7 @@ asmlinkage int sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 	if(err)
 		return err;
 	memcpy_fromfs(&msg_sys,msg,sizeof(struct msghdr));
-	if(msg_sys.msg_iovlen>MAX_IOVEC)
+	if(msg_sys.msg_iovlen>UIO_MAXIOV)
 		return -EINVAL;
 
 	/*
@@ -1397,7 +1397,7 @@ void sock_init(void)
 {
 	int i;
 
-	printk("Swansea University Computer Society NET3.034 for Linux 1.3.77\n");
+	printk(KERN_INFO "Swansea University Computer Society NET3.035 for Linux 2.0\n");
 
 	/*
 	 *	Initialize all address (protocol) families. 

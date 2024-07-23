@@ -6,7 +6,7 @@
  *  linux/kernel/ptrace.c is by Ross Biro 1/23/92, edited by Linus Torvalds
  *
  * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file README.legal in the main directory of
+ * Public License.  See the file COPYING in the main directory of
  * this archive for more details.
  */
 
@@ -342,8 +342,10 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			return -EPERM;
 		if ((!child->dumpable ||
 		    (current->uid != child->euid) ||
+		    (current->uid != child->suid) ||
 		    (current->uid != child->uid) ||
 	 	    (current->gid != child->egid) ||
+		    (current->gid != child->sgid) ||
 	 	    (current->gid != child->gid)) && !suser())
 			return -EPERM;
 		/* the same process cannot be attached many times */

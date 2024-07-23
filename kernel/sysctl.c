@@ -5,6 +5,7 @@
  * Added /proc support, Dec 1995
  * Added bdflush entry and intvec min/max checking, 2/23/96, Tom Dyas.
  * Added hooks for /proc/sys/net (minor, minor patch), 96/4/1, Mike Shaver.
+ * Added kernel/java-{interpreter,appletviewer}, 96/5/10, Mike Shaver.
  */
 
 #include <linux/config.h>
@@ -97,6 +98,8 @@ extern int bdf_prm[], bdflush_min[], bdflush_max[];
 static int do_securelevel_strategy (ctl_table *, int *, int, void *, size_t *,
 				    void *, size_t, void **);
 
+extern char binfmt_java_interpreter[], binfmt_java_appletviewer[];
+
 /* The default sysctl tables: */
 
 static ctl_table root_table[] = {
@@ -138,6 +141,12 @@ static ctl_table kern_table[] = {
 	 0644, NULL, &proc_dostring, &sysctl_string },
 	{KERN_NFSRNAME, "nfs-root-addrs", nfs_root_addrs, NFS_ROOT_ADDRS_LEN,
 	 0644, NULL, &proc_dostring, &sysctl_string },
+#endif
+#ifdef CONFIG_BINFMT_JAVA
+	{KERN_JAVA_INTERPRETER, "java-interpreter", binfmt_java_interpreter,
+	 64, 0644, NULL, &proc_dostring, &sysctl_string },
+	{KERN_JAVA_APPLETVIEWER, "java-appletviewer", binfmt_java_appletviewer,
+	 64, 0644, NULL, &proc_dostring, &sysctl_string },
 #endif
 	{0}
 };
@@ -517,15 +526,13 @@ int proc_dostring(ctl_table *table, int write, struct file *filp,
 		((char *) table->data)[len] = 0;
 		filp->f_pos += *lenp;
 	} else {
-		len = strlen(table->data) + 1;
+		len = strlen(table->data);
 		if (len > table->maxlen)
 			len = table->maxlen;
 		if (len > *lenp)
 			len = *lenp;
-		if (len) {			
-			memcpy_tofs(buffer, table->data, len-1);
-			put_user(0, ((char *) buffer) + len - 1);
-		}
+		if (len)
+			memcpy_tofs(buffer, table->data, len);
 		if (len < *lenp) {
 			put_user('\n', ((char *) buffer) + len);
 			len++;

@@ -21,6 +21,8 @@
  */
 #include <scsi/scsi.h>
 
+#include <linux/random.h>
+
 
 /*
  * Some defs, in case these are not defined elsewhere.
@@ -521,11 +523,12 @@ static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors
     if (req->bh){
 	req->buffer = bh->b_data;
 	return SCpnt;
-    };
+    }
     DEVICE_OFF(req->rq_dev);
     if (req->sem != NULL) {
 	up(req->sem);
     }
+    add_blkdev_randomness(MAJOR(req->rq_dev));
     
     if (SCpnt->host->block) {
 	struct Scsi_Host * next;

@@ -30,21 +30,16 @@
 
 #include <asm/system.h>
 
-#ifdef __alpha__
 /*
- * On the Alpha, we get unaligned access exceptions on
- *  p->nr_sects and p->start_sect, when the partition table
- *  is not on a 4-byte boundary, which is frequently the case.
- * This code uses unaligned load instructions to prevent
- *  such exceptions.
+ * Many architectures don't like unaligned accesses, which is
+ * frequently the case with the nr_sects and start_sect partition
+ * table entries.
  */
 #include <asm/unaligned.h>
-#define NR_SECTS(p)	ldl_u(&p->nr_sects)
-#define START_SECT(p)	ldl_u(&p->start_sect)
-#else /* __alpha__ */
-#define NR_SECTS(p)	p->nr_sects
-#define START_SECT(p)	p->start_sect
-#endif /* __alpha__ */
+
+#define NR_SECTS(p)	get_unaligned(&p->nr_sects)
+#define START_SECT(p)	get_unaligned(&p->start_sect)
+
 
 struct gendisk *gendisk_head = NULL;
 
@@ -213,7 +208,7 @@ done:
  * Create devices for BSD partitions listed in a disklabel, under a
  * dos-like partition. See extended_partition() for more information.
  */
-static void bsd_disklabel_partition(struct gendisk *hd, int dev)
+static void bsd_disklabel_partition(struct gendisk *hd, kdev_t dev)
 {
 	struct buffer_head *bh;
 	struct bsd_disklabel *l;
@@ -470,7 +465,7 @@ static int osf_partition(struct gendisk *hd, unsigned int dev, unsigned long fir
 
 #ifdef CONFIG_SUN_PARTITION
 
-static int sun_partition(struct gendisk *hd, unsigned int dev, unsigned long first_sector)
+static int sun_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sector)
 {
 	int i, csum;
 	unsigned short *ush;
@@ -512,13 +507,15 @@ static int sun_partition(struct gendisk *hd, unsigned int dev, unsigned long fir
 				 : (__u32)(x))
 
 	if(!(bh = bread(dev, 0, 1024))) {
-		printk("Dev %d: unable to read partition table\n", dev);
+		printk("Dev %s: unable to read partition table\n",
+		       kdevname(dev));
 		return -1;
 	}
 	label = (struct sun_disklabel *) bh->b_data;
 	p = label->partitions;
 	if (label->magic != SUN_LABEL_MAGIC && label->magic != SUN_LABEL_MAGIC_SWAPPED) {
-		printk("Dev %d Sun disklabel: bad magic %04x\n", dev, label->magic);
+		printk("Dev %s Sun disklabel: bad magic %04x\n",
+		       kdevname(dev), label->magic);
 		brelse(bh);
 		return 0;
 	}
@@ -528,7 +525,8 @@ static int sun_partition(struct gendisk *hd, unsigned int dev, unsigned long fir
 	for(csum = 0; ush >= ((unsigned short *) label);)
 		csum ^= *ush--;
 	if(csum) {
-		printk("Dev %d Sun disklabel: Csum bad, label corrupted\n", dev);
+		printk("Dev %s Sun disklabel: Csum bad, label corrupted\n",
+		       kdevname(dev));
 		brelse(bh);
 		return 0;
 	}

@@ -43,6 +43,7 @@
  *			protocol private area for ipx data.
  *	Revision 0.34:	Module support. <Jim Freeman>
  *	Revision 0.35:  Checksum support. <Neil Turton>, hooked in by <Alan Cox>
+ *			Handles WIN95 discovery packets <Volker Lendecke>
  *
  *	Protect the module by a MOD_INC_USE_COUNT/MOD_DEC_USE_COUNT
  *	pair. Also, now usage count is managed this way
@@ -732,7 +733,7 @@ static int ipxitf_rcv(ipx_interface *intrfc, struct sk_buff *skb)
 	 *	We firewall first, ask questions later.
 	 */
 	 
-	if (call_in_firewall(PF_IPX, skb->dev, ipx)!=FW_ACCEPT)
+	if (call_in_firewall(PF_IPX, skb->dev, ipx, NULL)!=FW_ACCEPT)
 	{
 		kfree_skb(skb, FREE_READ);
 		return 0;
@@ -756,7 +757,7 @@ static int ipxitf_rcv(ipx_interface *intrfc, struct sk_buff *skb)
 		} 
 		else 
 		{
-			printk("IPX: Network number collision %lx\n\t%s %s and %s %s\n",
+			printk(KERN_WARNING "IPX: Network number collision %lx\n        %s %s and %s %s\n",
 				htonl(ipx->ipx_source.net), 
 				ipx_device_name(i),
 				ipx_frame_name(i->if_dlink_type),
@@ -776,7 +777,7 @@ static int ipxitf_rcv(ipx_interface *intrfc, struct sk_buff *skb)
 		/*
 		 *	See if we are allowed to firewall forward
 		 */
-		if (call_fw_firewall(PF_IPX, skb->dev, ipx)!=FW_ACCEPT)
+		if (call_fw_firewall(PF_IPX, skb->dev, ipx, NULL)!=FW_ACCEPT)
 		{
 			kfree_skb(skb, FREE_READ);
 			return 0;
@@ -1344,7 +1345,7 @@ static int ipxrtr_route_packet(ipx_socket *sk, struct sockaddr_ipx *usipx, struc
 		ipx->ipx_checksum=ipx_set_checksum(ipx, len+sizeof(ipx_packet));
 
 #ifdef CONFIG_FIREWALL	
-	if(call_out_firewall(PF_IPX, skb->dev, ipx)!=FW_ACCEPT)
+	if(call_out_firewall(PF_IPX, skb->dev, ipx, NULL)!=FW_ACCEPT)
 	{
 		kfree_skb(skb, FREE_WRITE);
 		return -EPERM;
@@ -2068,7 +2069,9 @@ int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	intrfc = ipxitf_find_using_phys(dev, pt->type);
 	if (intrfc == NULL) 
 	{
-		if (ipxcfg_auto_create_interfaces) {
+		if (ipxcfg_auto_create_interfaces &&
+		    ntohl(ipx->ipx_dest.net)!=0L) 
+		{
 			intrfc = ipxitf_auto_create(dev, pt->type);
 		}
 
@@ -2353,21 +2356,22 @@ ipx_proto_init(struct net_proto *pro)
 	dev_add_pack(&ipx_8023_packet_type);
 	
 	if ((p8022_datalink = register_8022_client(ipx_8022_type, ipx_rcv)) == NULL)
-		printk("IPX: Unable to register with 802.2\n");
+		printk(KERN_CRIT "IPX: Unable to register with 802.2\n");
 
 	if ((p8022tr_datalink = register_8022tr_client(ipx_8022_type, ipx_rcv)) == NULL)
-		printk("IPX: Unable to register with 802.2TR\n");
+		printk(KERN_CRIT "IPX: Unable to register with 802.2TR\n");
  
 	if ((pSNAP_datalink = register_snap_client(ipx_snap_id, ipx_rcv)) == NULL)
-		printk("IPX: Unable to register with SNAP\n");
+		printk(KERN_CRIT "IPX: Unable to register with SNAP\n");
 	
 	register_netdevice_notifier(&ipx_dev_notifier);
-
+#ifdef CONFIG_PROC_FS
 	proc_net_register(&ipx_procinfo);
 	proc_net_register(&ipx_if_procinfo);
 	proc_net_register(&ipx_rt_procinfo);
+#endif	
 		
-	printk(KERN_INFO "Swansea University Computer Society IPX 0.34 for NET3.034\n");
+	printk(KERN_INFO "Swansea University Computer Society IPX 0.34 for NET3.035\n");
 	printk(KERN_INFO "IPX Portions Copyright (c) 1995 Caldera, Inc.\n");
 }
 
@@ -2396,9 +2400,11 @@ ipx_proto_finito(void)
 		ipxitf_down(ifc);
 	}
 
+#ifdef CONFIG_PROC_FS
 	proc_net_unregister(PROC_NET_IPX_ROUTE);
 	proc_net_unregister(PROC_NET_IPX_INTERFACE);
 	proc_net_unregister(PROC_NET_IPX);
+#endif	
 
 	unregister_netdevice_notifier(&ipx_dev_notifier);
 

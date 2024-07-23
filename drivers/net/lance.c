@@ -165,6 +165,10 @@ tx_full and tbusy flags.
  *	- added support for Linux/Alpha, but removed most of it, because
  *        it worked only for the PCI chip. 
  *      - added hook for the 32bit lance driver
+ *      - added PCnetPCI II (79C970A) to chip table
+ *
+ *	Paul Gortmaker (gpg109@rsphy1.anu.edu.au):
+ *	- hopefully fix above so Linux/Alpha can use ISA cards too.
  */
 
 /* Set the number of Tx and Rx buffers, using Log_2(# buffers).
@@ -265,12 +269,15 @@ static struct lance_chip_type {
 	{0x2430, "PCnet32",					/* 79C965 PCnet for VL bus. */
 		LANCE_ENABLE_AUTOSELECT + LANCE_MUST_REINIT_RING +
 			LANCE_HAS_MISSED_FRAME},
+        {0x2621, "PCnet/PCI-II 79C970A",        /* 79C970A PCInetPCI II. */
+                LANCE_ENABLE_AUTOSELECT + LANCE_MUST_REINIT_RING +
+                        LANCE_HAS_MISSED_FRAME},
 	{0x0, 	 "PCnet (unknown)",
 		LANCE_ENABLE_AUTOSELECT + LANCE_MUST_REINIT_RING +
 			LANCE_HAS_MISSED_FRAME},
 };
 
-enum {OLD_LANCE = 0, PCNET_ISA=1, PCNET_ISAP=2, PCNET_PCI=3, PCNET_VLB=4, LANCE_UNKNOWN=5};
+enum {OLD_LANCE = 0, PCNET_ISA=1, PCNET_ISAP=2, PCNET_PCI=3, PCNET_VLB=4, PCNET_PCI_II=5, LANCE_UNKNOWN=6};
 
 /* Non-zero only if the current card is a PCI with BIOS-set IRQ. */
 static unsigned char pci_irq_line = 0;
@@ -280,6 +287,7 @@ static unsigned char pci_irq_line = 0;
 static unsigned char lance_need_isa_bounce_buffers = 1;
 
 static int lance_open(struct device *dev);
+static int lance_open_fail(struct device *dev);
 static void lance_init_ring(struct device *dev);
 static int lance_start_xmit(struct sk_buff *skb, struct device *dev);
 static int lance_rx(struct device *dev);
@@ -298,9 +306,7 @@ static void set_multicast_list(struct device *dev);
 
 int lance_init(void)
 {
-#ifndef __alpha__    
 	int *port;
-#endif    
 
 	if (high_memory <= 16*1024*1024)
 		lance_need_isa_bounce_buffers = 0;
@@ -344,8 +350,6 @@ int lance_init(void)
 	}
 #endif  /* defined(CONFIG_PCI) */
 
-/* On the Alpha don't look for PCnet chips on the ISA bus */
-#ifndef __alpha__
 	for (port = lance_portlist; *port; port++) {
 		int ioaddr = *port;
 
@@ -359,8 +363,6 @@ int lance_init(void)
 				lance_probe1(ioaddr);
 		}
 	}
-#endif
-
 	return 0;
 }
 
@@ -376,15 +378,14 @@ void lance_probe1(int ioaddr)
 	int hp_builtin = 0;					/* HP on-board ethernet. */
 	static int did_version = 0;			/* Already printed version info. */
 
-#ifndef __alpha__
 	/* First we look for special cases.
 	   Check for HP's on-board ethernet by looking for 'HP' in the BIOS.
 	   There are two HP versions, check the BIOS for the configuration port.
 	   This method provided by L. Julliard, Laurent_Julliard@grenoble.hp.com.
 	   */
-	if ( *((unsigned short *) 0x000f0102) == 0x5048)  {
+	if (readw(0x000f0102) == 0x5048)  {
 		static const short ioaddr_table[] = { 0x300, 0x320, 0x340, 0x360};
-		int hp_port = ( *((unsigned char *) 0x000f00f1) & 1)  ? 0x499 : 0x99;
+		int hp_port = (readl(0x000f00f1) & 1)  ? 0x499 : 0x99;
 		/* We can have boards other than the built-in!  Verify this is on-board. */
 		if ((inb(hp_port) & 0xc0) == 0x80
 			&& ioaddr_table[inb(hp_port) & 3] == ioaddr)
@@ -393,7 +394,6 @@ void lance_probe1(int ioaddr)
 	/* We also recognize the HP Vectra on-board here, but check below. */
 	hpJ2405A = (inb(ioaddr) == 0x08 && inb(ioaddr+1) == 0x00
 				&& inb(ioaddr+2) == 0x09);
-#endif
 
 	/* Reset the LANCE.	 */
 	reset_val = inw(ioaddr+LANCE_RESET); /* Reset the LANCE */
@@ -427,6 +427,7 @@ void lance_probe1(int ioaddr)
 	}
 
 	dev = init_etherdev(0, 0);
+	dev->open = lance_open_fail;
 	chipname = chip_table[lance_version].name;
 	printk("%s: %s at %#3x,", dev->name, chipname, ioaddr);
 
@@ -440,7 +441,7 @@ void lance_probe1(int ioaddr)
 
 #ifdef CONFIG_LANCE32
         /* look if it's a PCI or VLB chip */
-        if (lance_version == PCNET_PCI || lance_version == PCNET_VLB) {
+        if (lance_version == PCNET_PCI || lance_version == PCNET_VLB || lance_version == PCNET_PCI_II) {
 	    extern void lance32_probe1 (struct device *dev, const char *chipname, int pci_irq_line);
 	    
 	    lance32_probe1 (dev, chipname, pci_irq_line);
@@ -593,14 +594,21 @@ void lance_probe1(int ioaddr)
 		printk(version);
 
 	/* The LANCE-specific entries in the device structure. */
-	dev->open = &lance_open;
-	dev->hard_start_xmit = &lance_start_xmit;
-	dev->stop = &lance_close;
-	dev->get_stats = &lance_get_stats;
-	dev->set_multicast_list = &set_multicast_list;
+	dev->open = lance_open;
+	dev->hard_start_xmit = lance_start_xmit;
+	dev->stop = lance_close;
+	dev->get_stats = lance_get_stats;
+	dev->set_multicast_list = set_multicast_list;
 
 	return;
 }
+
+static int
+lance_open_fail(struct device *dev)
+{
+	return -ENODEV;
+}
+
 
 
 static int

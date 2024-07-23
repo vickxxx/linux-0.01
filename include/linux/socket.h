@@ -16,22 +16,22 @@ struct linger {
 	int		l_linger;	/* How long to linger for	*/
 };
 
+/*
+ *	As we do 4.4BSD message passing we use a 4.4BSD message passing
+ *	system, not 4.3. Thus msg_accrights(len) are now missing. They
+ *	belong in an obscure libc emulation or the bin.
+ */
+ 
 struct msghdr 
 {
 	void	*	msg_name;	/* Socket name			*/
 	int		msg_namelen;	/* Length of name		*/
 	struct iovec *	msg_iov;	/* Data blocks			*/
 	int 		msg_iovlen;	/* Number of blocks		*/
-	void 	*	msg_accrights;	/* Per protocol magic (eg BSD file descriptor passing) */
-	int		msg_accrightslen;	/* Length of rights list */
+	void 	*	msg_control;	/* Per protocol magic (eg BSD file descriptor passing) */
+	int		msg_controllen;	/* Length of rights list */
+	int		msg_flags;	/* 4.4 BSD item we dont use      */
 };
-
-/*
- *	4.4BSD changed to these new names for no apparent reason.
- */
- 
-#define msg_control	msg_accrights	
-#define msg_controllen	msg_accrightslen
 
 /* Control Messages */
 
@@ -86,6 +86,7 @@ struct msghdr
 #define MSG_PEEK	2
 #define MSG_DONTROUTE	4
 /*#define MSG_CTRUNC	8	- We need to support this for BSD oddments */
+#define MSG_PROXY	16	/* Supply or ask second address. */
 
 /* Setsockoptions(2) level. Thanks to BSD these must match IPPROTO_xxx */
 #define SOL_IP		0

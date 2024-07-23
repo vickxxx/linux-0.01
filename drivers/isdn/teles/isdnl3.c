@@ -1,6 +1,29 @@
-/* $Id: isdnl3.c,v 1.2 1996/04/20 16:45:05 fritz Exp $
+/* $Id: isdnl3.c,v 1.9 1996/06/06 14:22:27 fritz Exp $
  *
  * $Log: isdnl3.c,v $
+ * Revision 1.9  1996/06/06 14:22:27  fritz
+ * Changed level of "non-digital call..." message, since
+ * with audio support, this is quite normal.
+ *
+ * Revision 1.8  1996/06/03 20:35:04  fritz
+ * Fixed typos.
+ *
+ * Revision 1.7  1996/06/03 20:03:39  fritz
+ * Fixed typos.
+ *
+ * Revision 1.6  1996/05/21 11:33:50  keil
+ * Adding SETUP_ACKNOWLEDGE as answer of a SETUP message.
+ *
+ * Revision 1.5  1996/05/18 01:37:16  fritz
+ * Added spelling corrections and some minor changes
+ * to stay in sync with kernel.
+ *
+ * Revision 1.4  1996/05/17 03:46:16  fritz
+ * General cleanup.
+ *
+ * Revision 1.3  1996/04/30 21:57:53  isdn4dev
+ * remove some debugging code, improve callback   Karsten Keil
+ *
  * Revision 1.2  1996/04/20 16:45:05  fritz
  * Changed to report all incoming calls to Linklevel, not just those
  * with Service 7.
@@ -123,17 +146,9 @@ l3s5(struct PStack *st, byte pr,
 		  *p++ = 0x90;	/* Packet-Mode 64kbps                      */
 		  break;
 	}
-/*
- * What about info2? Mapping to High-Layer-Compatibility?
- */
-
-#if 0				/* user-user not allowed in The Netherlands! */
-	*p++ = 0x7f;
-	*p++ = 0x2;
-	*p++ = 0x0;
-	*p++ = 66;
-#endif
-
+	/*
+	 * What about info2? Mapping to High-Layer-Compatibility?
+	 */
 	if (st->pa->calling[0] != '\0') {
 		*p++ = 0x6c;
 		*p++ = strlen(st->pa->calling) + 1;
@@ -293,7 +308,7 @@ l3s12(struct PStack *st, byte pr, void *arg)
 
         if (bcfound) {
                 if (st->pa->info != 7) {
-                        printk(KERN_WARNING "non-digital call: %s -> %s\n",
+                        printk(KERN_DEBUG "non-digital call: %s -> %s\n",
                                st->pa->calling,
                                st->pa->called);
                 }
@@ -307,15 +322,6 @@ l3s13(struct PStack *st, byte pr, void *arg)
 {
 	newl3state(st, 0);
 }
-
-#ifdef DEFINED_BUT_NOT_USED
-static void
-l3s15(struct PStack *st, byte pr, void *arg)
-{
-	newl3state(st, 0);
-	st->l3.l3l4(st, CC_REJECT, NULL);
-}
-#endif
 
 static void
 l3s16(struct PStack *st, byte pr,
@@ -428,6 +434,7 @@ static struct stateentry datastatelist[] =
 {
         {0,MT_SETUP,l3s12},
         {1,MT_CALL_PROCEEDING,l3s6},
+        {1,MT_SETUP_ACKNOWLEDGE,l3s6},
         {1,MT_RELEASE_COMPLETE,l3s4},
         {1,MT_RELEASE,l3s19},
         {1,MT_DISCONNECT,l3s7},
@@ -475,11 +482,6 @@ l3up(struct PStack *st,
 		ptr = DATAPTR(ibh);
 		ptr += st->l2.ihsize;
 		size = ibh->datasize - st->l2.ihsize;
-		if (DEBUG_1TR6 > 6) {
-			printk(KERN_INFO "isdnl3/l3up DL_DATA size=%d\n", size);
-			for (i = 0; i < size; i++)
-				printk(KERN_INFO "l3up data %x\n", ptr[i]);
-		}
 		mt = ptr[3];
 		switch (ptr[0]) {
 #ifdef P_1TR6
@@ -494,8 +496,8 @@ l3up(struct PStack *st,
 			  if (i == datasl_1tr6t_len) {
 				  BufPoolRelease(ibh);
 				  if (DEBUG_1TR6 > 0)
-					  printk(KERN_INFO "isdnl3up unhandled 1tr6 state %d MT %s\n",
-						 st->l3.state, mt_trans(PROTO_DIS_N1, mt));
+					  printk(KERN_INFO "isdnl3up unhandled 1tr6 state %d MT %x\n",
+						 st->l3.state, mt);
 			  } else
 				  datastatelist_1tr6t[i].rout(st, pr, ibh);
 			  break;
@@ -507,6 +509,9 @@ l3up(struct PStack *st,
 					  break;
 			  if (i == datasllen) {
 				  BufPoolRelease(ibh);
+				  if (DEBUG_1TR6 > 0)
+			  	  	printk(KERN_INFO "isdnl3up unhandled E-DSS1 state %d MT %x\n",
+				 		st->l3.state, mt);
 			  } else
 				  datastatelist[i].rout(st, pr, ibh);
 		}
@@ -514,11 +519,6 @@ l3up(struct PStack *st,
 		ptr = DATAPTR(ibh);
 		ptr += st->l2.uihsize;
 		size = ibh->datasize - st->l2.uihsize;
-		if (DEBUG_1TR6 > 6) {
-			printk(KERN_INFO "isdnl3/l3up DL_UNIT_DATA size=%d\n", size);
-			for (i = 0; i < size; i++)
-				printk(KERN_INFO "l3up data %x\n", ptr[i]);
-		}
 		mt = ptr[3];
 		switch (ptr[0]) {
 #ifdef P_1TR6
@@ -532,8 +532,8 @@ l3up(struct PStack *st,
 					  break;
 			  if (i == datasl_1tr6t_len) {
 				  if (DEBUG_1TR6 > 0) {
-					  printk(KERN_INFO "isdnl3up unhandled 1tr6 state %d MT %s\n"
-						 ,st->l3.state, mt_trans(PROTO_DIS_N1, mt));
+					  printk(KERN_INFO "isdnl3up unhandled 1tr6 state %d MT %x\n"
+						 ,st->l3.state, mt);
 				  }
 				  BufPoolRelease(ibh);
 			  } else
@@ -547,6 +547,9 @@ l3up(struct PStack *st,
 					  break;
 			  if (i == datasllen) {
 				  BufPoolRelease(ibh);
+				  if (DEBUG_1TR6 > 0)
+			  	  	printk(KERN_INFO "isdnl3up unhandled E-DSS1 state %d MT %x\n",
+				 		st->l3.state, mt);
 			  } else
 				  datastatelist[i].rout(st, pr, ibh);
 		}
@@ -581,6 +584,9 @@ l3down(struct PStack *st,
 			      (pr == downstatelist[i].primitive))
 				  break;
 		  if (i == downsllen) {
+			  if (DEBUG_1TR6 > 0) {
+				  printk(KERN_INFO "isdnl3down unhandled E-DSS1 state %d primitive %x\n", st->l3.state, pr);
+			  }
 		  } else
 			  downstatelist[i].rout(st, pr, ibh);
 	}

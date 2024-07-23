@@ -26,8 +26,12 @@
 #define IP_MASQ_F_NO_DPORT    		0x04	/* no dport set yet */
 #define IP_MASQ_F_NO_DADDR      	0x08 	/* no daddr yet */
 #define IP_MASQ_F_HASHED		0x10 	/* hashed entry */
-#define IP_MASQ_F_SAW_FIN		0x20 	/* tcp fin pkt seen */
-#define IP_MASQ_F_SAW_RST		0x40 	/* tcp rst pkt seen */
+#define IP_MASQ_F_SAW_RST		0x20 	/* tcp rst pkt seen */
+#define IP_MASQ_F_SAW_FIN_IN		0x40 	/* tcp fin pkt seen incoming */
+#define IP_MASQ_F_SAW_FIN_OUT		0x80 	/* tcp fin pkt seen outgoing */
+#define IP_MASQ_F_SAW_FIN		(IP_MASQ_F_SAW_FIN_IN | \
+					 IP_MASQ_F_SAW_FIN_OUT)
+						/* tcp fin pkts seen */
 
 #ifdef __KERNEL__
 
@@ -84,7 +88,8 @@ extern int ip_masq_init(void);
 /*
  *	functions called from ip layer
  */
-extern void ip_fw_masquerade(struct sk_buff **, struct device *);
+extern int ip_fw_masquerade(struct sk_buff **, struct device *);
+extern int ip_fw_masq_icmp(struct sk_buff **, struct device *);
 extern int ip_fw_demasquerade(struct sk_buff **, struct device *);
 
 /*
@@ -149,6 +154,7 @@ extern int ip_masq_app_pkt_in(struct ip_masq *, struct sk_buff **skb_p, struct d
  *	service routine(s).
  */
 extern struct ip_masq * ip_masq_out_get_2(int protocol, __u32 s_addr, __u16 s_port, __u32 d_addr, __u16 d_port);
+extern struct ip_masq * ip_masq_in_get_2(int protocol, __u32 s_addr, __u16 s_port, __u32 d_addr, __u16 d_port);
 
 /*
  *	/proc/net entry

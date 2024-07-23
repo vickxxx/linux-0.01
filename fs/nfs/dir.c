@@ -450,7 +450,12 @@ static int nfs_mknod(struct inode *dir, const char *name, int len,
 	error = nfs_proc_create(NFS_SERVER(dir), NFS_FH(dir),
 		name, &sattr, &fhandle, &fattr);
 	if (!error)
+	{
 		nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
+		/* The parent dir inode count may have changed ! */
+		nfs_lookup_cache_remove( NULL, dir, NULL);
+	}
+		
 	iput(dir);
 	return error;
 }
@@ -476,8 +481,12 @@ static int nfs_mkdir(struct inode *dir, const char *name, int len, int mode)
 	sattr.atime.seconds = sattr.mtime.seconds = (unsigned) -1;
 	error = nfs_proc_mkdir(NFS_SERVER(dir), NFS_FH(dir),
 		name, &sattr, &fhandle, &fattr);
-	if (!error)
-		nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
+	if (!error) {
+		if (fattr.fileid == dir->i_ino)
+			printk("Sony NewsOS 4.1R buggy nfs server?\n");
+		else
+			nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
+	}
 	iput(dir);
 	return error;
 }

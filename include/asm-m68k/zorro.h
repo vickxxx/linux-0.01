@@ -4,12 +4,14 @@
  * Copyright (C) 1995 Geert Uytterhoeven
  *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
+ * License.  See the file COPYING in the main directory of this archive
  * for more details.
  */
 
 #ifndef _ASM_M68K_ZORRO_H_
 #define _ASM_M68K_ZORRO_H_
+
+#ifndef __ASSEMBLY__
 
 #include <linux/config.h>
 #include <asm/amigatypes.h>
@@ -84,11 +86,12 @@
 #define PROD_GVPIISCSI_2       (0x09)	/* evidence that the driver works
 					   for this product code also */
 #define PROD_GVPIIRAM          (0x0A)	/* GVP Series II RAM */
-#define PROD_GFORCE_040_SCSI   (0x16)	/* GForce 040 with SCSI (new) */
-#define PROD_GVPIV_24          (0x20)	/* GVP IV-24 Graphics Board */
 #define PROD_GVP               (0x0B)	/* This code is used by a wide range of
 					   GVP products - use the epc to
 					   identify it correctly */
+#define PROD_GVP_A2000_030     (0x0D)	/* GVP A2000 68030 Turbo Board */
+#define PROD_GFORCE_040_SCSI   (0x16)	/* GForce 040 with SCSI (new) */
+#define PROD_GVPIV_24          (0x20)	/* GVP IV-24 Graphics Board */
 /* #define PROD_GVPIO_EXT      (0xFF)*/	/* GVP I/O Extender */
 
 #define MANUF_PPI              (0x07EA)	/* Progressive Peripherals Inc. */
@@ -115,6 +118,9 @@
 
 #define MANUF_HARDITAL_SYNTHES (0x0817)	/* Hardital Synthesis */
 #define PROD_HARDITAL_SCSI     (0x01)	/* Hardital Synthesis SCSI Controller */
+
+#define MANUF_HARDITAL2        (0x0820)	/* Hardital Synthesis */
+#define PROD_TQM               (0x14)	/* TQM 68030+68882 Turbo Board */
 
 #define MANUF_BSC2             (0x082C)	/* BSC */
 #define PROD_OKTAGON_SCSI      (0x05)	/* BSC Oktagon 2008 SCSI Controller */
@@ -191,6 +197,7 @@
 #define MANUF_PHASE5           (0x2140)	/* Phase5 */
 #define PROD_FASTLANE_RAM      (0x0A)	/* FastLane RAM */
 #define PROD_FASTLANE_SCSI     (0x0B)	/* FastLane/Blizzard 1230-II SCSI */
+#define PROD_CYBERSTORM_SCSI   (0x0C)	/* CyberStorm Fast SCSI-II Controller */
 #define PROD_BLIZZARD_1230_III (0x0D)	/* Blizzard 1230-III Turbo Board */
 #define PROD_BLIZZARD_1230_IV  (0x11)	/* Blizzard 1230-IV Turbo Board */
 #define PROD_CYBERVISION       (0x22)	/* CyberVision64 Graphics Board */
@@ -209,6 +216,7 @@
 #define PROD_RETINA_Z2         (0x06)	/* Retina Z2 Graphics Board */
 #define PROD_MULTI_EVOLUTION   (0x08)	/* MultiEvolution */
 #define PROD_RETINA_Z3         (0x10)	/* Retina Z3 Graphics Board */
+#define PROD_FALCON_040        (0xFD)	/* Falcon '040 Turbo Board */
 
 
 /* Illegal Manufacturer IDs. These do NOT appear in amiga/zorro.c! */
@@ -302,6 +310,44 @@ struct ConfigDev {
     u_long		cd_Unused[4];	/* for whatever the driver wants */
 };
 
+#else	/* __ASSEMBLY__ */
+
+LN_Succ		= 0
+LN_Pred		= LN_Succ+4
+LN_Type		= LN_Pred+4
+LN_Pri		= LN_Type+1
+LN_Name		= LN_Pri+1
+LN_sizeof	= LN_Name+4
+
+ER_Type		= 0
+ER_Product	= ER_Type+1
+ER_Flags	= ER_Product+1
+ER_Reserved03	= ER_Flags+1
+ER_Manufacturer	= ER_Reserved03+1
+ER_SerialNumber	= ER_Manufacturer+2
+ER_InitDiagVec	= ER_SerialNumber+4
+ER_Reserved0c	= ER_InitDiagVec+2
+ER_Reserved0d	= ER_Reserved0c+1
+ER_Reserved0e	= ER_Reserved0d+1
+ER_Reserved0f	= ER_Reserved0e+1
+ER_sizeof	= ER_Reserved0f+1
+
+CD_Node		= 0
+CD_Flags	= CD_Node+LN_sizeof
+CD_Pad		= CD_Flags+1
+CD_Rom		= CD_Pad+1
+CD_BoardAddr	= CD_Rom+ER_sizeof
+CD_BoardSize	= CD_BoardAddr+4
+CD_SlotAddr	= CD_BoardSize+4
+CD_SlotSize	= CD_SlotAddr+2
+CD_Driver	= CD_SlotSize+2
+CD_NextCD	= CD_Driver+4
+CD_Unused	= CD_NextCD+4
+CD_sizeof	= CD_Unused+(4*4)
+
+#endif	/* __ASSEMBLY__ */
+
+#ifndef __ASSEMBLY__
 
 /*
  * Zorro Functions
@@ -341,5 +387,6 @@ extern void zorro_identify(void);
 extern int zorro_get_list(char *buffer);
 #endif CONFIG_ZORRO
 
+#endif	/* __ASSEMBLY__ */
 
 #endif /* _ASM_M68K_ZORRO_H_ */

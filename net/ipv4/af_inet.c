@@ -48,6 +48,8 @@
  *		Alan Cox	:	Only sendmsg/recvmsg now supported.
  *		Alan Cox	:	Locked down bind (see security list).
  *		Alan Cox	:	Loosened bind a little.
+ *		Mike McLagan	:	ADD/DEL DLCI Ioctls
+ *	Willy Konynenberg	:	Transparent proxying support.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -112,6 +114,14 @@ extern int afinet_get_info(char *, char **, off_t, int, int);
 extern int tcp_get_info(char *, char **, off_t, int, int);
 extern int udp_get_info(char *, char **, off_t, int, int);
 
+#ifdef CONFIG_DLCI
+extern int dlci_ioctl(unsigned int, void*);
+#endif
+
+#ifdef CONFIG_DLCI_MODULE
+int (*dlci_ioctl_hook)(unsigned int, void *) = NULL;
+#endif
+
 int (*rarp_ioctl_hook)(unsigned int,void*) = NULL;
 
 /*
@@ -151,10 +161,10 @@ unsigned short get_new_socknum(struct proto *prot, unsigned short base)
 	struct sock *sk;
 
 	if (base == 0) 
-		base = PROT_SOCK+1+(start % 1024);
+		base = PROT_SOCK+1+(start & 1023);
 	if (base <= PROT_SOCK) 
 	{
-		base += PROT_SOCK+(start % 1024);
+		base += PROT_SOCK+(start & 1023);
 	}
 
 	/*
@@ -172,7 +182,7 @@ unsigned short get_new_socknum(struct proto *prot, unsigned short base)
 		}
 		if (j == 0) 
 		{
-			start =(i+1+start )%1024;
+			start =(i+1+start )&1023;
 			return(i+base+1);
 		}
 		if (j < size) 
@@ -372,6 +382,8 @@ void destroy_sock(struct sock *sk)
 		skb = skb2;
 	}
 	sk->send_head = NULL;
+	sk->send_tail = NULL;
+	sk->send_next = NULL;
 	sti();
 
   	/*
@@ -417,11 +429,8 @@ void destroy_sock(struct sock *sk)
 	{
 		/* this should never happen. */
 		/* actually it can if an ack has just been sent. */
-		/*
-		 *	Make this a NETDEBUG at 2.0pre
-		 */
-		/*NETDEBUG(*/printk("Socket destroy delayed (r=%d w=%d)\n",
-			sk->rmem_alloc, sk->wmem_alloc)/*)*/;
+		NETDEBUG(printk("Socket destroy delayed (r=%d w=%d)\n",
+			sk->rmem_alloc, sk->wmem_alloc));
 		sk->destroy = 1;
 		sk->ack_backlog = 0;
 		release_sock(sk);
@@ -832,11 +841,25 @@ static int inet_bind(struct socket *sock, struct sockaddr *uaddr,
 	}
 	
 	chk_addr_ret = ip_chk_addr(addr->sin_addr.s_addr);
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+	/*
+	 * Superuser may bind to any address to allow transparent proxying.
+	 */
+	if (addr->sin_addr.s_addr != 0 && chk_addr_ret != IS_MYADDR && chk_addr_ret != IS_MULTICAST && chk_addr_ret != IS_BROADCAST && !suser())
+#else
 	if (addr->sin_addr.s_addr != 0 && chk_addr_ret != IS_MYADDR && chk_addr_ret != IS_MULTICAST && chk_addr_ret != IS_BROADCAST)
+#endif
 		return(-EADDRNOTAVAIL);	/* Source address MUST be ours! */
 
+#ifndef CONFIG_IP_TRANSPARENT_PROXY
+	/*
+	 * Am I just thick or is this test really always true after the one
+	 * above?  Just taking the test out appears to be the easiest way to
+	 * make binds to remote addresses for transparent proxying work.
+	 */
 	if (chk_addr_ret || addr->sin_addr.s_addr == 0)
 	{
+#endif
 		/*
 		 *      We keep a pair of addresses. rcv_saddr is the one
 		 *      used by get_sock_*(), and saddr is used for transmit.
@@ -850,7 +873,9 @@ static int inet_bind(struct socket *sock, struct sockaddr *uaddr,
 			sk->saddr = 0;  /* Use device */
 		else
 			sk->saddr = addr->sin_addr.s_addr;
+#ifndef CONFIG_IP_TRANSPARENT_PROXY
 	}
+#endif
 	if(sock->type != SOCK_RAW)
 	{
 		/* Make sure we are allowed to bind here. */
@@ -1292,6 +1317,24 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			return -ENOPKG;
 #endif						
 			
+		case SIOCADDDLCI:
+		case SIOCDELDLCI:
+#ifdef CONFIG_DLCI
+			return(dlci_ioctl(cmd, (void *) arg));
+#endif
+
+#ifdef CONFIG_DLCI_MODULE
+
+#ifdef CONFIG_KERNELD
+			if (dlci_ioctl_hook == NULL)
+				request_module("dlci");
+#endif
+
+			if (dlci_ioctl_hook)
+				return((*dlci_ioctl_hook)(cmd, (void *) arg));
+#endif
+			return -ENOPKG;
+
 		default:
 			if ((cmd >= SIOCDEVPRIVATE) &&
 			   (cmd <= (SIOCDEVPRIVATE + 15)))
@@ -1305,6 +1348,36 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	return(0);
 }
 
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+/*
+ * Some routines for the for loop in get_sock which sometimes needs to walk
+ * two linked lists in sequence.  Could use macros as well.
+ * Does anyone know a nicer way to code this?
+ */
+static __inline__ struct sock *secondlist(unsigned short hpnum, struct sock *s,
+				int *pfirstpass, struct proto *prot)
+{
+	if (hpnum && s == NULL && (*pfirstpass)-- )
+		return prot->sock_array[hpnum & (SOCK_ARRAY_SIZE - 1)];
+	else
+		return s;
+}
+static __inline__ struct sock *get_sock_loop_init(unsigned short hnum,
+			unsigned short hpnum, struct sock *s,
+			int *pfirstpass, struct proto *prot)
+{
+	s = prot->sock_array[hnum & (SOCK_ARRAY_SIZE - 1)];
+	return secondlist(hpnum, s, pfirstpass, prot);
+}
+static __inline__ struct sock *get_sock_loop_next(unsigned short hnum,
+			unsigned short hpnum, struct sock *s,
+			int *pfirstpass, struct proto *prot)
+{
+	s = s->next;
+	return secondlist(hpnum, s, pfirstpass, prot);
+}
+#endif
+
 /*
  * This routine must find a socket given a TCP or UDP header.
  * Everything is assumed to be in net order.
@@ -1316,14 +1389,22 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 struct sock *get_sock(struct proto *prot, unsigned short num,
 				unsigned long raddr,
-				unsigned short rnum, unsigned long laddr)
+				unsigned short rnum, unsigned long laddr,
+				unsigned long paddr, unsigned short pnum)
 {
-	struct sock *s;
+	struct sock *s = 0;
 	struct sock *result = NULL;
 	int badness = -1;
 	unsigned short hnum;
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+	unsigned short hpnum;
+	int firstpass = 1;
+#endif 
 
 	hnum = ntohs(num);
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+	hpnum = ntohs(pnum);
+#endif 
 
 	/*
 	 * SOCK_ARRAY_SIZE must be a power of two.  This will work better
@@ -1334,19 +1415,43 @@ struct sock *get_sock(struct proto *prot, unsigned short num,
 	 * socket number when we choose an arbitrary one.
 	 */
 
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+	for(s = get_sock_loop_init(hnum, hpnum, s, &firstpass, prot);
+		s != NULL;
+		s = get_sock_loop_next(hnum, hpnum, s, &firstpass, prot))
+#else
 	for(s = prot->sock_array[hnum & (SOCK_ARRAY_SIZE - 1)];
 			s != NULL; s = s->next) 
+#endif
 	{
 		int score = 0;
 
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+		/* accept the addressed port or the redirect (proxy) port */
+		if (s->num != hnum && (hpnum == 0 || s->num != hpnum))
+#else
 		if (s->num != hnum) 
+#endif
 			continue;
 
 		if(s->dead && (s->state == TCP_CLOSE))
 			continue;
 		/* local address matches? */
 		if (s->rcv_saddr) {
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+			/*
+			 * If this is redirected traffic, it must either
+			 * match on the redirected port/ip-address or on
+			 * the actual destination, not on a mixture.
+			 * There must be a simpler way to express this...
+			 */
+			if (hpnum
+			    ? ((s->num != hpnum || s->rcv_saddr != paddr)
+			      && (s->num != hnum || s->rcv_saddr != laddr))
+			    : (s->rcv_saddr != laddr))
+#else
 			if (s->rcv_saddr != laddr)
+#endif
 				continue;
 			score++;
 		}
@@ -1363,11 +1468,23 @@ struct sock *get_sock(struct proto *prot, unsigned short num,
 			score++;
 		}
 		/* perfect match? */
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+		if (score == 3 && s->num == hnum)
+#else
 		if (score == 3)
+#endif
 			return s;
 		/* no, check if this is the best so far.. */
 		if (score <= badness)
 			continue;
+#ifdef CONFIG_IP_TRANSPARENT_PROXY
+		/* don't accept near matches on the actual destination
+		 * port with IN_ADDR_ANY for redirected traffic, but do
+		 * allow explicit remote address listens.  (disputable)
+		 */
+		if (hpnum && s->num != hpnum && !s->rcv_saddr)
+			continue;
+#endif
 		result = s;
 		badness = score;
   	}

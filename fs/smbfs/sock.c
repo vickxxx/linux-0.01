@@ -37,7 +37,7 @@ static int _recvfrom(struct socket *sock, unsigned char *ubuf, int size, int nob
         msg.msg_namelen   = 0;
         if (addr_len)
                 msg.msg_namelen = *addr_len;
-        msg.msg_accrights = NULL;
+        msg.msg_control = NULL;
         msg.msg_iov       = &iov;
         msg.msg_iovlen    = 1;
 
@@ -53,7 +53,7 @@ static int _send(struct socket *sock, const void *buff, int len, int nonblock, u
 
         msg.msg_name      = NULL;
         msg.msg_namelen   = 0;
-        msg.msg_accrights = NULL;
+        msg.msg_control = NULL;
         msg.msg_iov       = &iov;
         msg.msg_iovlen    = 1;
 
@@ -768,20 +768,3 @@ smb_request_write_raw(struct smb_server *server,
 
 	return result;
 }
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 8
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -8
- * c-argdecl-indent: 8
- * c-label-offset: -8
- * c-continued-statement-offset: 8
- * c-continued-brace-offset: 0
- * End:
- */

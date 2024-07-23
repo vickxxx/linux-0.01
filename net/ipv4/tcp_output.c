@@ -18,12 +18,17 @@
  *		Matthew Dillon, <dillon@apollo.west.oic.com>
  *		Arnt Gulbrandsen, <agulbra@nvg.unit.no>
  *		Jorge Cwik, <jorge@laser.satlink.net>
+ *
+ * Fixes:	Eric Schenk	: avoid multiple retransmissions in one
+ *				: round trip timeout.
  */
 
 #include <linux/config.h>
 #include <net/tcp.h>
-
+#include <linux/ip_fw.h>
+#include <linux/firewall.h>
 #include <linux/interrupt.h>
+
 
 /*
  * RFC 1122 says:
@@ -120,7 +125,7 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 	 
 	if (size < sizeof(struct tcphdr) || size > skb->len) 
 	{
-		printk("tcp_send_skb: bad skb (skb = %p, data = %p, th = %p, len = %lu)\n",
+		printk(KERN_ERR "tcp_send_skb: bad skb (skb = %p, data = %p, th = %p, len = %lu)\n",
 			skb, skb->data, th, skb->len);
 		kfree_skb(skb, FREE_WRITE);
 		return;
@@ -136,20 +141,29 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 		/* If it's got a syn or fin it's notionally included in the size..*/
 		if(!th->syn && !th->fin) 
 		{
-			printk("tcp_send_skb: attempt to queue a bogon.\n");
+			printk(KERN_ERR "tcp_send_skb: attempt to queue a bogon.\n");
 			kfree_skb(skb,FREE_WRITE);
 			return;
 		}
 	}
 
 	/*
+	 * Jacobson recommends this in the appendix of his SIGCOMM'88 paper.
+	 * The idea is to do a slow start again if we haven't been doing
+	 * anything for a long time, in which case we have no reason to
+	 * believe that our congestion window is still correct.
+	 */
+	if (sk->send_head == 0 && (jiffies - sk->idletime) > sk->rto)
+		sk->cong_window = 1;
+
+	/*
 	 *	Actual processing.
 	 */
-	 
+
 	tcp_statistics.TcpOutSegs++;  
 	skb->seq = ntohl(th->seq);
 	skb->end_seq = skb->seq + size - 4*th->doff;
-	
+
 	/*
 	 *	We must queue if
 	 *
@@ -167,7 +181,7 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 		th->check = 0;
 		if (skb->next != NULL) 
 		{
-			printk("tcp_send_partial: next != NULL\n");
+			printk(KERN_ERR "tcp_send_partial: next != NULL\n");
 			skb_unlink(skb);
 		}
 		skb_queue_tail(&sk->write_queue, skb);
@@ -175,7 +189,7 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 		if (before(sk->window_seq, sk->write_queue.next->end_seq) &&
 		    sk->send_head == NULL && sk->ack_backlog == 0)
 			tcp_reset_xmit_timer(sk, TIME_PROBE0, sk->rto);
-	} 
+	}
 	else 
 	{
 		/*
@@ -188,7 +202,7 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 		tcp_send_check(th, sk->saddr, sk->daddr, size, skb);
 
 		sk->sent_seq = sk->write_seq;
-		
+
 		/*
 		 *	This is mad. The tcp retransmit queue is put together
 		 *	by the ip layer. This causes half the problems with
@@ -198,9 +212,9 @@ void tcp_send_skb(struct sock *sk, struct sk_buff *skb)
 		sk->prot->queue_xmit(sk, skb->dev, skb, 0);
 		
 		/*
-		 *	Set for next retransmit based on expected ACK time.
-		 *	FIXME: We set this every time which means our 
-		 *	retransmits are really about a window behind.
+		 *	Set for next retransmit based on expected ACK time
+		 *	of the first packet in the resend queue.
+		 *	This is no longer a window behind.
 		 */
 
 		tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);
@@ -364,10 +378,6 @@ void tcp_write_xmit(struct sock *sk)
 
 			clear_delayed_acks(sk);
 
-			/*
-			 *	Again we slide the timer wrongly
-			 */
-			 
 			tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);
 		}
 	}
@@ -384,11 +394,18 @@ void tcp_do_retransmit(struct sock *sk, int all)
 	struct sk_buff * skb;
 	struct proto *prot;
 	struct device *dev;
-	int ct=0;
 	struct rtable *rt;
 
 	prot = sk->prot;
-	skb = sk->send_head;
+	if (!all) {
+		/*
+		 * If we are just retransmitting one packet reset
+		 * to the start of the queue.
+		 */
+		sk->send_next = sk->send_head;
+		sk->packets_out = 0;
+	}
+	skb = sk->send_next;
 
 	while (skb != NULL)
 	{
@@ -399,7 +416,7 @@ void tcp_do_retransmit(struct sock *sk, int all)
 		dev = skb->dev;
 		IS_SKB(skb);
 		skb->when = jiffies;
-		
+
 		/* dl1bke 960201 - @%$$! Hope this cures strange race conditions    */
 		/*		   with AX.25 mode VC. (esp. DAMA)		    */
 		/*		   if the buffer is locked we should not retransmit */
@@ -462,6 +479,11 @@ void tcp_do_retransmit(struct sock *sk, int all)
 				skb->sk->err_soft=ENETUNREACH;
 				skb->sk->error_report(skb->sk);
 			}
+			/* Can't transmit this packet, no reason
+			 * to transmit the later ones, even if
+			 * the congestion window allows.
+			 */
+			break;
 		}
 		else
 		{
@@ -469,6 +491,17 @@ void tcp_do_retransmit(struct sock *sk, int all)
 			skb->raddr=rt->rt_gateway;
 			skb->dev=dev;
 			skb->arp=1;
+#ifdef CONFIG_FIREWALL
+        		if (call_out_firewall(PF_INET, skb->dev, iph, NULL) < FW_ACCEPT) {
+				/* The firewall wants us to dump the packet.
+			 	* We have to check this here, because
+			 	* the drop in ip_queue_xmit only catches the
+			 	* first time we send it. We must drop on
+				* every resend as well.
+			 	*/
+				break;
+        		}
+#endif 
 			if (rt->rt_hh)
 			{
 				memcpy(skb_push(skb,dev->hard_header_len),rt->rt_hh->hh_data,dev->hard_header_len);
@@ -523,19 +556,30 @@ void tcp_do_retransmit(struct sock *sk, int all)
 					/* Now queue it */
 					ip_statistics.IpOutRequests++;
 					dev_queue_xmit(skb, dev, sk->priority);
+					sk->packets_out++;
 				}
 			}
 		}
-		
+
 		/*
 		 *	Count retransmissions
 		 */
 		 
-		ct++;
-		sk->retransmits++;
 		sk->prot->retransmits++;
 		tcp_statistics.TcpRetransSegs++;
+
+		/*
+		 * Record the high sequence number to help avoid doing
+		 * to much fast retransmission.
+		 */
+		if (sk->retransmits)
+			sk->high_seq = sk->sent_seq;
 		
+		/*
+	         * Advance the send_next pointer so we don't keep
+		 * retransmitting the same stuff every time we get an ACK.
+		 */
+		sk->send_next = skb->link3;
 
 		/*
 		 *	Only one retransmit requested.
@@ -548,8 +592,9 @@ void tcp_do_retransmit(struct sock *sk, int all)
 		 *	This should cut it off before we send too many packets.
 		 */
 
-		if (ct >= sk->cong_window)
+		if (sk->packets_out >= sk->cong_window)
 			break;
+
 		skb = skb->link3;
 	}
 }
@@ -648,7 +693,7 @@ void tcp_send_fin(struct sock *sk)
 	if (buff == NULL)
 	{
 		/* This is a disaster if it occurs */
-		printk("tcp_send_fin: Impossible malloc failure");
+		printk(KERN_CRIT "tcp_send_fin: Impossible malloc failure");
 		return;
 	}
 
@@ -713,7 +758,7 @@ void tcp_send_fin(struct sock *sk)
   		buff->free = 0;
 		if (buff->next != NULL) 
 		{
-			printk("tcp_send_fin: next != NULL\n");
+			printk(KERN_ERR "tcp_send_fin: next != NULL\n");
 			skb_unlink(buff);
 		}
 		skb_queue_tail(&sk->write_queue, buff);
@@ -821,18 +866,26 @@ void tcp_send_synack(struct sock * newsk, struct sock * sk, struct sk_buff * skb
  *      - delay time <= 0.5 HZ
  *      - must send at least every 2 full sized packets
  *      - we don't have a window update to send
+ *
+ * 	additional thoughts:
+ *	- we should not delay sending an ACK if we have ato > 0.5 HZ.
+ *	  My thinking about this is that in this case we will just be
+ *	  systematically skewing the RTT calculation. (The rule about
+ *	  sending every two full sized packets will never need to be
+ *	  invoked, the delayed ack will be sent before the ATO timeout
+ *	  every time. Of course, the relies on our having a good estimate
+ *	  for packet interarrival times.)
  */
-void tcp_send_delayed_ack(struct sock * sk, int max_timeout)
+void tcp_send_delayed_ack(struct sock * sk, int max_timeout, unsigned long timeout)
 {
-	unsigned long timeout, now;
+	unsigned long now;
 
 	/* Calculate new timeout */
 	now = jiffies;
-	timeout = sk->ato;
 	if (timeout > max_timeout)
 		timeout = max_timeout;
 	timeout += now;
-	if (sk->bytes_rcv > sk->max_unacked) {
+	if (sk->bytes_rcv >= sk->max_unacked) {
 		timeout = now;
 		mark_bh(TIMER_BH);
 	}
@@ -873,10 +926,10 @@ void tcp_send_ack(struct sock *sk)
 	    && skb_queue_empty(&sk->write_queue)
 	    && sk->ip_xmit_timeout == TIME_WRITE)
 	{
-		if(sk->keepopen)
+		if (sk->keepopen)
 			tcp_reset_xmit_timer(sk,TIME_KEEPOPEN,TCP_TIMEOUT_LEN);
 		else
-			delete_timer(sk);
+			del_timer(&sk->retransmit_timer);
 	}
 
 	/*
@@ -894,7 +947,7 @@ void tcp_send_ack(struct sock *sk)
 		 *	resend packets. 
 		 */
 
-		tcp_send_delayed_ack(sk, HZ/2);
+		tcp_send_delayed_ack(sk, HZ/2, HZ/2);
 		return;
 	}
 
@@ -931,7 +984,7 @@ void tcp_send_ack(struct sock *sk)
 
   	tcp_send_check(t1, sk->saddr, sk->daddr, sizeof(*t1), buff);
   	if (sk->debug)
-  		 printk("\rtcp_ack: seq %x ack %x\n", sk->sent_seq, sk->acked_seq);
+  		 printk(KERN_ERR "\rtcp_ack: seq %x ack %x\n", sk->sent_seq, sk->acked_seq);
   	sk->prot->queue_xmit(sk, dev, buff, 1);
   	tcp_statistics.TcpOutSegs++;
 }

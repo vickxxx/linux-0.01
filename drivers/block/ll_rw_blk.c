@@ -92,10 +92,12 @@ void unplug_device(void * data)
 	save_flags(flags);
 	cli();
 	if (dev->current_request == &dev->plug) {
-		dev->current_request = dev->plug.next;
-		dev->plug.next = NULL;
-		if (dev->current_request)
+		struct request * next = dev->plug.next;
+		dev->current_request = next;
+		if (next) {
+			dev->plug.next = NULL;
 			(dev->request_fn)();
+		}
 	}
 	restore_flags(flags);
 }
@@ -286,9 +288,17 @@ static void make_request(int major,int rw, struct buffer_head * bh)
 
 	count = bh->b_size >> 9;
 	sector = bh->b_rsector;
+
+	/* Uhhuh.. Nasty dead-lock possible here.. */
+	if (buffer_locked(bh))
+		return;
+	/* Maybe the above fixes it, and maybe it doesn't boot. Life is interesting */
+
+	lock_buffer(bh);
+
 	if (blk_size[major])
 		if (blk_size[major][MINOR(bh->b_rdev)] < (sector + count)>>1) {
-			bh->b_state = 0;
+			bh->b_state &= (1 << BH_Lock) | (1 << BH_FreeOnIO);
                         /* This may well happen - the kernel calls bread()
                            without checking the size of the device, e.g.,
                            when mounting a device. */
@@ -298,13 +308,9 @@ static void make_request(int major,int rw, struct buffer_head * bh)
                                kdevname(bh->b_rdev), rw,
                                (sector + count)>>1,
                                blk_size[major][MINOR(bh->b_rdev)]);
+			unlock_buffer(bh);
 			return;
 		}
-	/* Uhhuh.. Nasty dead-lock possible here.. */
-	if (buffer_locked(bh))
-		return;
-	/* Maybe the above fixes it, and maybe it doesn't boot. Life is interesting */
-	lock_buffer(bh);
 
 	rw_ahead = 0;	/* normal case; gets changed below for READA/WRITEA */
 	switch (rw) {
@@ -485,8 +491,11 @@ void ll_rw_block(int rw, int nr, struct buffer_head * bh[])
 #ifdef CONFIG_BLK_DEV_MD
 		if (major==MD_MAJOR &&
 		    md_map (MINOR(bh[i]->b_dev), &bh[i]->b_rdev,
-			    &bh[i]->b_rsector, bh[i]->b_size >> 9))
+			    &bh[i]->b_rsector, bh[i]->b_size >> 9)) {
+		        printk (KERN_ERR
+				"Bad md_map in ll_rw_block\n");
 		        goto sorry;
+		}
 #endif
 	}
 
@@ -557,7 +566,7 @@ void ll_rw_swap_file(int rw, kdev_t dev, unsigned int *b, int nb, char *buf)
 			    md_map (MINOR(dev), &rdev,
 				    &rsector, buffersize >> 9)) {
 			        printk (KERN_ERR
-                                        "Bad md_map in ll_rw_page_size\n");
+                                        "Bad md_map in ll_rw_swap_file\n");
 				return;
 			}
 #endif

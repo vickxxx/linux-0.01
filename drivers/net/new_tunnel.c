@@ -86,7 +86,6 @@
 #define TUNL_HLEN	(((ETH_HLEN+15)&~15)+tunnel_hlen)
 
 
-#ifdef MODULE
 static int tunnel_open(struct device *dev)
 {
 	MOD_INC_USE_COUNT;
@@ -98,8 +97,6 @@ static int tunnel_close(struct device *dev)
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
-
-#endif
 
 #ifdef TUNNEL_DEBUG
 void print_ip(struct iphdr *ip)
@@ -264,6 +261,7 @@ printk("Required room: %d, Tunnel hlen: %d\n", max_headroom, TUNL_HLEN);
 		 * and new_skb->ip_hdr is the IP header of the old packet.
 		 */
 		new_skb->ip_hdr = (struct iphdr *) skb_put(new_skb, skb->len);
+		new_skb->dev = skb->dev;
 		memcpy(new_skb->ip_hdr, skb->data, skb->len);
 		memset(new_skb->proto_priv, 0, sizeof(skb->proto_priv));
 
@@ -348,10 +346,8 @@ int tunnel_init(struct device *dev)
 	}
 
 	/* Add our tunnel functions to the device */
-#ifdef MODULE
 	dev->open		= tunnel_open;
 	dev->stop		= tunnel_close;
-#endif
 	dev->hard_start_xmit	= tunnel_xmit;
 	dev->get_stats		= tunnel_get_stats;
 	dev->priv = kmalloc(sizeof(struct enet_statistics), GFP_KERNEL);

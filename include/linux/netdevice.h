@@ -204,6 +204,7 @@ struct packet_type {
 
 #ifdef __KERNEL__
 
+#include <linux/interrupt.h>
 #include <linux/notifier.h>
 
 /* Used by dev_rint */
@@ -231,9 +232,9 @@ extern int		dev_open(struct device *dev);
 extern int		dev_close(struct device *dev);
 extern void		dev_queue_xmit(struct sk_buff *skb, struct device *dev,
 				       int pri);
+				      
 #define HAVE_NETIF_RX 1
 extern void		netif_rx(struct sk_buff *skb);
-extern void		dev_transmit(void);
 extern void		net_bh(void);
 extern void		dev_tint(struct device *dev);
 extern int		dev_get_info(char *buffer, char **start, off_t offset, int length, int dummy);

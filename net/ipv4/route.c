@@ -604,7 +604,8 @@ static __inline__ void fib_add_1(short flags, __u32 dst, __u32 mask,
 		 *	but less metric. We'll delete it 
 		 *	after instantiation of new route.
 		 */
-		if (f1->fib_info->fib_gateway == gw)
+		if (f1->fib_info->fib_gateway == gw &&
+		    (gw || f1->fib_info->fib_dev == dev))
 			dup_fp = fp;
 		fp = &f1->fib_next;
 	}
@@ -643,7 +644,8 @@ static __inline__ void fib_add_1(short flags, __u32 dst, __u32 mask,
 
 	while ((f1 = *fp) != NULL && f1->fib_dst == dst)
 	{
-		if (f1->fib_info->fib_gateway == gw)
+		if (f1->fib_info->fib_gateway == gw &&
+		    (gw || f1->fib_info->fib_dev == dev))
 		{
 			cli();
 			*fp = f1->fib_next;
@@ -672,7 +674,7 @@ static int rt_flush_list(struct fib_node ** fp, struct device *dev)
  *	discard it too.
  */
 		if (f->fib_info->fib_dev != dev &&
-		    (dev != &loopback_dev || f->fib_dst != dev->pa_addr)) {
+		    (f->fib_info->fib_dev != &loopback_dev || f->fib_dst != dev->pa_addr)) {
 			fp = &f->fib_next;
 			continue;
 		}
@@ -1712,8 +1714,13 @@ void ip_rt_advice(struct rtable **rp, int advice)
 
 void ip_rt_update(int event, struct device *dev)
 {
+/*
+ *	This causes too much grief to do now.
+ */
+#ifdef COMING_IN_2_1
 	if (event == NETDEV_UP)
 		rt_add(RTF_HOST|RTF_UP, dev->pa_addr, ~0, 0, dev, 0, 0, 0, 0);
 	else if (event == NETDEV_DOWN)
 		rt_del(dev->pa_addr, ~0, dev, 0, RTF_HOST|RTF_UP, 0);
+#endif		
 }

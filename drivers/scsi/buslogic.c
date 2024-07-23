@@ -24,8 +24,8 @@
 */
 
 
-#define BusLogic_DriverVersion		"1.3.2"
-#define BusLogic_DriverDate		"16 April 1996"
+#define BusLogic_DriverVersion		"2.0.4"
+#define BusLogic_DriverDate		"5 June 1996"
 
 
 #include <linux/module.h>
@@ -69,6 +69,15 @@ static BusLogic_CommandLineEntry_T
 
 
 /*
+  BusLogic_ProbeOptions is a bit mask of Probe Options to be applied
+  across all Host Adapters.
+*/
+
+static int
+  BusLogic_ProbeOptions =		0;
+
+
+/*
   BusLogic_GlobalOptions is a bit mask of Global Options to be applied
   across all Host Adapters.
 */
@@ -91,7 +100,7 @@ static BusLogic_HostAdapter_T
   which BusLogic Host Adapters may potentially be found.
 */
 
-static unsigned short
+static unsigned int
   BusLogic_IO_StandardAddresses[] =
     { 0x330, 0x334, 0x230, 0x234, 0x130, 0x134, 0 };
 
@@ -103,19 +112,18 @@ static unsigned short
   standard BusLogic I/O Addresses.
 */
 
-static unsigned short
+static unsigned int
   BusLogic_IO_AddressProbeList[BusLogic_IO_MaxProbeAddresses+1] =   { 0 };
 
 
 /*
   BusLogic_IRQ_UsageCount stores a count of the number of Host Adapters using
   a given IRQ Channel, which is necessary to support PCI, EISA, or MCA shared
-  interrupts.  Only IRQ Channels 9, 10, 11, 12, 14, and 15 are supported by
-  BusLogic Host Adapters.
+  interrupts.
 */
 
-static short
-  BusLogic_IRQ_UsageCount[7] =		{ 0 };
+static int
+  BusLogic_IRQ_UsageCount[NR_IRQS] =	{ 0 };
 
 
 /*
@@ -310,7 +318,7 @@ static void BusLogic_DestroyCCBs(BusLogic_HostAdapter_T *HostAdapter)
 
 static BusLogic_CCB_T *BusLogic_AllocateCCB(BusLogic_HostAdapter_T *HostAdapter)
 {
-  static unsigned int SerialNumber = 0;
+  static unsigned long SerialNumber = 0;
   BusLogic_CCB_T *CCB;
   int Allocated;
   CCB = HostAdapter->Free_CCBs;
@@ -397,8 +405,7 @@ static int BusLogic_Command(BusLogic_HostAdapter_T *HostAdapter,
   unsigned char *ParameterPointer = (unsigned char *) ParameterData;
   unsigned char *ReplyPointer = (unsigned char *) ReplyData;
   unsigned char StatusRegister = 0, InterruptRegister;
-  long TimeoutCounter;
-  int ReplyBytes = 0;
+  int ReplyBytes = 0, TimeoutCounter;
   /*
     Clear out the Reply Data if provided.
   */
@@ -570,7 +577,7 @@ static int BusLogic_Command(BusLogic_HostAdapter_T *HostAdapter,
 
 static void BusLogic_InitializeAddressProbeList(void)
 {
-  int DestinationIndex = 0, SourceIndex = 0;
+  int ProbeAddressCount = 0, StandardAddressIndex = 0;
   /*
     If BusLogic_Setup has provided an I/O Address probe list, do not override
     the Kernel Command Line specifications.
@@ -582,7 +589,7 @@ static void BusLogic_InitializeAddressProbeList(void)
   */
   if (pcibios_present())
     {
-      unsigned short BusDeviceFunction[BusLogic_IO_MaxProbeAddresses];
+      unsigned int BusDeviceFunction[BusLogic_IO_MaxProbeAddresses];
       unsigned short Index = 0, VendorID, DeviceID;
       boolean NonIncreasingScanningOrder = false;
       unsigned char Bus, DeviceFunction;
@@ -601,31 +608,35 @@ static void BusLogic_InitializeAddressProbeList(void)
 	    (BaseAddress0 & PCI_BASE_ADDRESS_SPACE) ==
 	      PCI_BASE_ADDRESS_SPACE_IO)
 	  {
-	    BusLogic_IO_AddressProbeList[DestinationIndex] =
+	    BusLogic_IO_AddressProbeList[ProbeAddressCount] =
 	      BaseAddress0 & PCI_BASE_ADDRESS_IO_MASK;
-	    BusDeviceFunction[DestinationIndex] = (Bus << 8) | DeviceFunction;
-	    if (DestinationIndex > 0 &&
-		BusDeviceFunction[DestinationIndex] <
-		  BusDeviceFunction[DestinationIndex-1])
+	    BusDeviceFunction[ProbeAddressCount] = (Bus << 8) | DeviceFunction;
+	    if (ProbeAddressCount > 0 &&
+		BusDeviceFunction[ProbeAddressCount] <
+		  BusDeviceFunction[ProbeAddressCount-1])
 	      NonIncreasingScanningOrder = true;
-	    DestinationIndex++;
+	    ProbeAddressCount++;
 	  }
       /*
 	If there are multiple BusLogic PCI SCSI Host Adapters present and if
 	they are enumerated by the PCI BIOS in an order other than by strictly
 	increasing Bus Number and Device Number, then interrogate the setting
 	of the AutoSCSI "Use Bus And Device # For PCI Scanning Seq." option.
-	If it is ON, sort the PCI Host Adapter I/O Addresses by increasing Bus
-	Number and Device Number so that the Host Adapters are recognized in
-	the same order by the Linux kernel as by the Host Adapter's BIOS.
+	If it is ON, and if the first enumeratedBusLogic Host Adapter is a
+	BT-948/958/958D, then sort the PCI Host Adapter I/O Addresses by
+	increasing Bus Number and Device Number so that the Host Adapters are
+	recognized in the same order by the Linux kernel as by the Host
+	Adapter's BIOS.
       */
-      if (DestinationIndex > 1 && NonIncreasingScanningOrder)
+      if (ProbeAddressCount > 1 && NonIncreasingScanningOrder &&
+	  !(BusLogic_ProbeOptions & BusLogic_NoSortPCI))
 	{
+	  BusLogic_HostAdapter_T HostAdapterPrototype;
+	  BusLogic_HostAdapter_T *HostAdapter = &HostAdapterPrototype;
 	  BusLogic_FetchHostAdapterLocalRAMRequest_T
 	    FetchHostAdapterLocalRAMRequest;
 	  BusLogic_AutoSCSIByte45_T AutoSCSIByte45;
-	  BusLogic_HostAdapter_T HostAdapterPrototype;
-	  BusLogic_HostAdapter_T *HostAdapter = &HostAdapterPrototype;
+	  BusLogic_BoardID_T BoardID;
 	  HostAdapter->IO_Address = BusLogic_IO_AddressProbeList[0];
 	  FetchHostAdapterLocalRAMRequest.ByteOffset =
 	    BusLogic_AutoSCSI_BaseOffset + 45;
@@ -636,13 +647,18 @@ static void BusLogic_InitializeAddressProbeList(void)
 			   &FetchHostAdapterLocalRAMRequest,
 			   sizeof(FetchHostAdapterLocalRAMRequest),
 			   &AutoSCSIByte45, sizeof(AutoSCSIByte45));
-	  if (AutoSCSIByte45.ForceBusDeviceScanningOrder)
+	  BoardID.FirmwareVersion1stDigit = '\0';
+	  BusLogic_Command(HostAdapter, BusLogic_InquireBoardID,
+			   NULL, 0, &BoardID, sizeof(BoardID));
+	  if (BoardID.FirmwareVersion1stDigit == '5' &&
+	      AutoSCSIByte45.ForceBusDeviceScanningOrder)
 	    {
 	      /*
-		Sort the I/O Addresses such that the corresponding PCI devices
-		are in ascending order by Bus Number and Device Number.
+		Sort the I/O Addresses such that the corresponding
+		PCI devices are in ascending order by Bus Number and
+		Device Number.
 	      */
-	      int LastInterchange = DestinationIndex-1, Bound, j;
+	      int LastInterchange = ProbeAddressCount-1, Bound, j;
 	      while (LastInterchange > 0)
 		{
 		  Bound = LastInterchange;
@@ -650,7 +666,7 @@ static void BusLogic_InitializeAddressProbeList(void)
 		  for (j = 0; j < Bound; j++)
 		    if (BusDeviceFunction[j] > BusDeviceFunction[j+1])
 		      {
-			unsigned short Temp;
+			unsigned int Temp;
 			Temp = BusDeviceFunction[j];
 			BusDeviceFunction[j] = BusDeviceFunction[j+1];
 			BusDeviceFunction[j+1] = Temp;
@@ -668,11 +684,12 @@ static void BusLogic_InitializeAddressProbeList(void)
   /*
     Append the list of standard BusLogic ISA I/O Addresses.
   */
-  while (DestinationIndex < BusLogic_IO_MaxProbeAddresses &&
-	 BusLogic_IO_StandardAddresses[SourceIndex] > 0)
-    BusLogic_IO_AddressProbeList[DestinationIndex++] =
-      BusLogic_IO_StandardAddresses[SourceIndex++];
-  BusLogic_IO_AddressProbeList[DestinationIndex] = 0;
+  if (!(BusLogic_ProbeOptions & BusLogic_NoProbeISA))
+    while (ProbeAddressCount < BusLogic_IO_MaxProbeAddresses &&
+	   BusLogic_IO_StandardAddresses[StandardAddressIndex] > 0)
+      BusLogic_IO_AddressProbeList[ProbeAddressCount++] =
+	BusLogic_IO_StandardAddresses[StandardAddressIndex++];
+  BusLogic_IO_AddressProbeList[ProbeAddressCount] = 0;
 }
 
 
@@ -746,7 +763,7 @@ static boolean BusLogic_HardResetHostAdapter(BusLogic_HostAdapter_T
 					     *HostAdapter)
 {
   boolean TraceHardReset = (BusLogic_GlobalOptions & BusLogic_TraceHardReset);
-  long TimeoutCounter = loops_per_sec >> 2;
+  int TimeoutCounter = loops_per_sec >> 2;
   unsigned char StatusRegister = 0;
   /*
     Issue a Hard Reset Command to the Host Adapter.  The Host Adapter should
@@ -939,18 +956,6 @@ static boolean BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T
       != sizeof(FirmwareVersion3rdDigit))
     return BusLogic_Failure(HostAdapter, "INQUIRE FIRMWARE 3RD DIGIT");
   /*
-    Issue the Inquire Firmware Version Letter command.
-  */
-  FirmwareVersionLetter = '\0';
-  if (BoardID.FirmwareVersion1stDigit > '3' ||
-      (BoardID.FirmwareVersion1stDigit == '3' &&
-       BoardID.FirmwareVersion2ndDigit >= '3'))
-    if (BusLogic_Command(HostAdapter, BusLogic_InquireFirmwareVersionLetter,
-			 NULL, 0, &FirmwareVersionLetter,
-			 sizeof(FirmwareVersionLetter))
-	!= sizeof(FirmwareVersionLetter))
-      return BusLogic_Failure(HostAdapter, "INQUIRE FIRMWARE VERSION LETTER");
-  /*
     BusLogic Host Adapters can be identified by their model number and
     the major version number of their firmware as follows:
 
@@ -965,54 +970,6 @@ static boolean BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T
 		  BT-542B/742A (revision G and below)
     0.xx	AMI FastDisk VLB/EISA BusLogic Clone Host Adapter
   */
-  /*
-    Issue the Inquire Generic I/O Port Information command to read the
-    termination information from "W" Series Host Adapters.
-  */
-  if (BoardID.FirmwareVersion1stDigit == '5')
-    {
-      if (BusLogic_Command(HostAdapter,
-			   BusLogic_InquireGenericIOPortInformation,
-			   NULL, 0, &GenericIOPortInformation,
-			   sizeof(GenericIOPortInformation))
-	  != sizeof(GenericIOPortInformation))
-	return BusLogic_Failure(HostAdapter,
-				"INQUIRE GENERIC I/O PORT INFORMATION");
-      /*
-	Save the Termination Information in the Host Adapter structure.
-      */
-      if (GenericIOPortInformation.Valid)
-	{
-	  HostAdapter->TerminationInfoValid = true;
-	  HostAdapter->LowByteTerminated =
-	    GenericIOPortInformation.LowByteTerminated;
-	  HostAdapter->HighByteTerminated =
-	    GenericIOPortInformation.HighByteTerminated;
-	}
-    }
-  /*
-    Issue the Fetch Host Adapter Local RAM command to read the termination
-    information from the AutoSCSI area of "C" Series Host Adapters.
-  */
-  if (BoardID.FirmwareVersion1stDigit == '4')
-    {
-      FetchHostAdapterLocalRAMRequest.ByteOffset =
-	BusLogic_AutoSCSI_BaseOffset + 15;
-      FetchHostAdapterLocalRAMRequest.ByteCount = sizeof(AutoSCSIByte15);
-      if (BusLogic_Command(HostAdapter,
-			   BusLogic_FetchHostAdapterLocalRAM,
-			   &FetchHostAdapterLocalRAMRequest,
-			   sizeof(FetchHostAdapterLocalRAMRequest),
-			   &AutoSCSIByte15, sizeof(AutoSCSIByte15))
-	  != sizeof(AutoSCSIByte15))
-	return BusLogic_Failure(HostAdapter, "FETCH HOST ADAPTER LOCAL RAM");
-      /*
-	Save the Termination Information in the Host Adapter structure.
-      */
-      HostAdapter->TerminationInfoValid = true;
-      HostAdapter->LowByteTerminated = AutoSCSIByte15.LowByteTerminated;
-      HostAdapter->HighByteTerminated = AutoSCSIByte15.HighByteTerminated;
-    }
   /*
     Save the Model Name and Board Name in the Host Adapter structure.
   */
@@ -1039,33 +996,94 @@ static boolean BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T
   *TargetPointer++ = BoardID.FirmwareVersion2ndDigit;
   if (FirmwareVersion3rdDigit != ' ' && FirmwareVersion3rdDigit != '\0')
     *TargetPointer++ = FirmwareVersion3rdDigit;
-  if (FirmwareVersionLetter != ' ' && FirmwareVersionLetter != '\0')
-    *TargetPointer++ = FirmwareVersionLetter;
-  *TargetPointer++ = '\0';
+  *TargetPointer = '\0';
+  /*
+    Issue the Inquire Firmware Version Letter command.
+  */
+  if (strcmp(HostAdapter->FirmwareVersion, "3.3") >= 0)
+    {
+      if (BusLogic_Command(HostAdapter, BusLogic_InquireFirmwareVersionLetter,
+			   NULL, 0, &FirmwareVersionLetter,
+			   sizeof(FirmwareVersionLetter))
+	  != sizeof(FirmwareVersionLetter))
+	return BusLogic_Failure(HostAdapter, "INQUIRE FIRMWARE VERSION LETTER");
+      if (FirmwareVersionLetter != ' ' && FirmwareVersionLetter != '\0')
+	*TargetPointer++ = FirmwareVersionLetter;
+      *TargetPointer = '\0';
+    }
+  /*
+    Issue the Inquire Generic I/O Port Information command to read the
+    IRQ Channel from all PCI Host Adapters, and the Termination Information
+    from "W" Series Host Adapters.
+  */
+  if (HostAdapter->ModelName[3] == '9' &&
+      strcmp(HostAdapter->FirmwareVersion, "4.25") >= 0)
+    {
+      if (BusLogic_Command(HostAdapter,
+			   BusLogic_InquireGenericIOPortInformation,
+			   NULL, 0, &GenericIOPortInformation,
+			   sizeof(GenericIOPortInformation))
+	  != sizeof(GenericIOPortInformation))
+	return BusLogic_Failure(HostAdapter,
+				"INQUIRE GENERIC I/O PORT INFORMATION");
+      /*
+	Save the IRQ Channel in the Host Adapter structure.
+      */
+      HostAdapter->IRQ_Channel = GenericIOPortInformation.PCIAssignedIRQChannel;
+      /*
+	Save the Termination Information in the Host Adapter structure.
+      */
+      if (HostAdapter->FirmwareVersion[0] == '5' &&
+	  GenericIOPortInformation.Valid)
+	{
+	  HostAdapter->TerminationInfoValid = true;
+	  HostAdapter->LowByteTerminated =
+	    GenericIOPortInformation.LowByteTerminated;
+	  HostAdapter->HighByteTerminated =
+	    GenericIOPortInformation.HighByteTerminated;
+	}
+    }
+  /*
+    Issue the Fetch Host Adapter Local RAM command to read the Termination
+    Information from the AutoSCSI area of "C" Series Host Adapters.
+  */
+  if (HostAdapter->FirmwareVersion[0] == '4')
+    {
+      FetchHostAdapterLocalRAMRequest.ByteOffset =
+	BusLogic_AutoSCSI_BaseOffset + 15;
+      FetchHostAdapterLocalRAMRequest.ByteCount = sizeof(AutoSCSIByte15);
+      if (BusLogic_Command(HostAdapter,
+			   BusLogic_FetchHostAdapterLocalRAM,
+			   &FetchHostAdapterLocalRAMRequest,
+			   sizeof(FetchHostAdapterLocalRAMRequest),
+			   &AutoSCSIByte15, sizeof(AutoSCSIByte15))
+	  != sizeof(AutoSCSIByte15))
+	return BusLogic_Failure(HostAdapter, "FETCH HOST ADAPTER LOCAL RAM");
+      /*
+	Save the Termination Information in the Host Adapter structure.
+      */
+      HostAdapter->TerminationInfoValid = true;
+      HostAdapter->LowByteTerminated = AutoSCSIByte15.LowByteTerminated;
+      HostAdapter->HighByteTerminated = AutoSCSIByte15.HighByteTerminated;
+    }
   /*
     Determine the IRQ Channel and save it in the Host Adapter structure.
   */
-  if (Configuration.IRQ_Channel9)
-    HostAdapter->IRQ_Channel = 9;
-  else if (Configuration.IRQ_Channel10)
-    HostAdapter->IRQ_Channel = 10;
-  else if (Configuration.IRQ_Channel11)
-    HostAdapter->IRQ_Channel = 11;
-  else if (Configuration.IRQ_Channel12)
-    HostAdapter->IRQ_Channel = 12;
-  else if (Configuration.IRQ_Channel14)
-    HostAdapter->IRQ_Channel = 14;
-  else if (Configuration.IRQ_Channel15)
-    HostAdapter->IRQ_Channel = 15;
-  /*
-    Determine the DMA Channel and save it in the Host Adapter structure.
-  */
-  if (Configuration.DMA_Channel5)
-    HostAdapter->DMA_Channel = 5;
-  else if (Configuration.DMA_Channel6)
-    HostAdapter->DMA_Channel = 6;
-  else if (Configuration.DMA_Channel7)
-    HostAdapter->DMA_Channel = 7;
+  if (HostAdapter->IRQ_Channel == 0)
+    {
+      if (Configuration.IRQ_Channel9)
+	HostAdapter->IRQ_Channel = 9;
+      else if (Configuration.IRQ_Channel10)
+	HostAdapter->IRQ_Channel = 10;
+      else if (Configuration.IRQ_Channel11)
+	HostAdapter->IRQ_Channel = 11;
+      else if (Configuration.IRQ_Channel12)
+	HostAdapter->IRQ_Channel = 12;
+      else if (Configuration.IRQ_Channel14)
+	HostAdapter->IRQ_Channel = 14;
+      else if (Configuration.IRQ_Channel15)
+	HostAdapter->IRQ_Channel = 15;
+    }
   /*
     Save the Host Adapter SCSI ID in the Host Adapter structure.
   */
@@ -1079,28 +1097,30 @@ static boolean BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T
   HostAdapter->ParityChecking = SetupInformation.ParityCheckEnabled;
   /*
     Determine the Bus Type and save it in the Host Adapter structure,
-    overriding the DMA Channel if it is inappropriate for the bus type.
+    and determine and save the DMA Channel for ISA Host Adapters.
   */
   switch (HostAdapter->ModelName[3])
     {
     case '4':
       HostAdapter->BusType = BusLogic_VESA_Bus;
-      HostAdapter->DMA_Channel = 0;
       break;
     case '5':
       HostAdapter->BusType = BusLogic_ISA_Bus;
+      if (Configuration.DMA_Channel5)
+	HostAdapter->DMA_Channel = 5;
+      else if (Configuration.DMA_Channel6)
+	HostAdapter->DMA_Channel = 6;
+      else if (Configuration.DMA_Channel7)
+	HostAdapter->DMA_Channel = 7;
       break;
     case '6':
       HostAdapter->BusType = BusLogic_MCA_Bus;
-      HostAdapter->DMA_Channel = 0;
       break;
     case '7':
       HostAdapter->BusType = BusLogic_EISA_Bus;
-      HostAdapter->DMA_Channel = 0;
       break;
     case '9':
       HostAdapter->BusType = BusLogic_PCI_Bus;
-      HostAdapter->DMA_Channel = 0;
       break;
     }
   /*
@@ -1322,7 +1342,7 @@ static boolean BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T
     printk("%d, ", HostAdapter->DMA_Channel);
   else printk("None, ");
   if (HostAdapter->BIOS_Address > 0)
-    printk("BIOS Address: 0x%lX, ", HostAdapter->BIOS_Address);
+    printk("BIOS Address: 0x%X, ", HostAdapter->BIOS_Address);
   else printk("BIOS Address: None, ");
   printk("Host Adapter SCSI ID: %d\n", HostAdapter->SCSI_ID);
   printk("scsi%d:   Scatter/Gather Limit: %d of %d segments, "
@@ -1413,13 +1433,13 @@ static boolean BusLogic_AcquireResources(BusLogic_HostAdapter_T *HostAdapter)
     Acquire exclusive or shared access to the IRQ Channel.  A usage count is
     maintained so that PCI, EISA, or MCA shared interrupts can be supported.
   */
-  if (BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel - 9]++ == 0)
+  if (BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel]++ == 0)
     {
       if (request_irq(HostAdapter->IRQ_Channel, BusLogic_InterruptHandler,
 		      SA_INTERRUPT | SA_SHIRQ,
 		      HostAdapter->InterruptLabel, NULL) < 0)
 	{
-	  BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel - 9]--;
+	  BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel]--;
 	  printk("scsi%d: UNABLE TO ACQUIRE IRQ CHANNEL %d - DETACHING\n",
 		 HostAdapter->HostNumber, HostAdapter->IRQ_Channel);
 	  return false;
@@ -1479,7 +1499,7 @@ static void BusLogic_ReleaseResources(BusLogic_HostAdapter_T *HostAdapter)
     Release exclusive or shared access to the IRQ Channel.
   */
   if (HostAdapter->IRQ_ChannelAcquired)
-    if (--BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel - 9] == 0)
+    if (--BusLogic_IRQ_UsageCount[HostAdapter->IRQ_Channel] == 0)
       free_irq(HostAdapter->IRQ_Channel, NULL);
   /*
     Release exclusive access to the DMA Channel.
@@ -1582,7 +1602,8 @@ static boolean BusLogic_InitializeHostAdapter(BusLogic_HostAdapter_T
     Initialize the Host Adapter's Pointer to the Outgoing/Incoming Mailboxes.
   */
   ExtendedMailboxRequest.MailboxCount = HostAdapter->MailboxCount;
-  ExtendedMailboxRequest.BaseMailboxAddress = HostAdapter->FirstOutgoingMailbox;
+  ExtendedMailboxRequest.BaseMailboxAddress =
+    Virtual_to_Bus(HostAdapter->FirstOutgoingMailbox);
   if (BusLogic_Command(HostAdapter, BusLogic_InitializeExtendedMailbox,
 		       &ExtendedMailboxRequest,
 		       sizeof(ExtendedMailboxRequest), NULL, 0) < 0)
@@ -1839,12 +1860,14 @@ static void BusLogic_SelectQueueDepths(SCSI_Host_T *Host,
 	else UntaggedDeviceCount++;
       }
   if (TaggedQueueDepth == 0 && TaggedDeviceCount > 0)
-    TaggedQueueDepth =
-      1 + ((HostAdapter->TotalQueueDepth
-	    - UntaggedDeviceCount * UntaggedQueueDepth)
-	   / TaggedDeviceCount);
-  if (TaggedQueueDepth > BusLogic_MaxTaggedQueueDepth)
-    TaggedQueueDepth = BusLogic_MaxTaggedQueueDepth;
+    {
+      TaggedQueueDepth =
+	1 + ((HostAdapter->TotalQueueDepth
+	      - UntaggedDeviceCount * UntaggedQueueDepth)
+	     / TaggedDeviceCount);
+      if (TaggedQueueDepth > BusLogic_PreferredTaggedQueueDepth)
+	TaggedQueueDepth = BusLogic_PreferredTaggedQueueDepth;
+    }
   for (Device = DeviceList; Device != NULL; Device = Device->next)
     if (Device->host == Host)
       {
@@ -1871,6 +1894,7 @@ int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *HostTemplate)
 {
   int BusLogicHostAdapterCount = 0, CommandLineEntryIndex = 0;
   int AddressProbeIndex = 0;
+  if (BusLogic_ProbeOptions & BusLogic_NoProbe) return 0;
   BusLogic_InitializeAddressProbeList();
   while (BusLogic_IO_AddressProbeList[AddressProbeIndex] > 0)
     {
@@ -2160,7 +2184,8 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 		      NextIncomingMailbox->CompletionCode) !=
 		     BusLogic_IncomingMailboxFree)
 		{
-		  BusLogic_CCB_T *CCB = NextIncomingMailbox->CCB;
+		  BusLogic_CCB_T *CCB =
+		    (BusLogic_CCB_T *) Bus_to_Virtual(NextIncomingMailbox->CCB);
 		  if (MailboxCompletionCode != BusLogic_AbortedCommandNotFound)
 		    if (CCB->Status == BusLogic_CCB_Active ||
 			CCB->Status == BusLogic_CCB_Reset)
@@ -2191,11 +2216,11 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 			  is not marked as status Active or Reset, then there
 			  is most likely a bug in the Host Adapter firmware.
 			*/
-			printk("scsi%d: Illegal CCB #%d status %d in "
+			printk("scsi%d: Illegal CCB #%ld status %d in "
 			       "Incoming Mailbox\n", HostAdapter->HostNumber,
 			       CCB->SerialNumber, CCB->Status);
 		      }
-		  else printk("scsi%d: Aborted CCB #%d to Target %d "
+		  else printk("scsi%d: Aborted CCB #%ld to Target %d "
 			      "Not Found\n", HostAdapter->HostNumber,
 			      CCB->SerialNumber, CCB->TargetID);
 		  NextIncomingMailbox->CompletionCode =
@@ -2232,8 +2257,8 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
       */
       if (CCB->Opcode == BusLogic_BusDeviceReset)
 	{
-	  unsigned char TargetID = CCB->TargetID;
-	  printk("scsi%d: Bus Device Reset CCB #%d to Target %d Completed\n",
+	  int TargetID = CCB->TargetID;
+	  printk("scsi%d: Bus Device Reset CCB #%ld to Target %d Completed\n",
 		 HostAdapter->HostNumber, CCB->SerialNumber, TargetID);
 	  HostAdapter->TotalCommandCount[TargetID] = 0;
 	  HostAdapter->TaggedQueuingActive[TargetID] = false;
@@ -2281,7 +2306,7 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 	    {
 	    case BusLogic_IncomingMailboxFree:
 	    case BusLogic_AbortedCommandNotFound:
-	      printk("scsi%d: CCB #%d to Target %d Impossible State\n",
+	      printk("scsi%d: CCB #%ld to Target %d Impossible State\n",
 		     HostAdapter->HostNumber, CCB->SerialNumber, CCB->TargetID);
 	      break;
 	    case BusLogic_CommandCompletedWithoutError:
@@ -2289,7 +2314,7 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 	      Command->result = DID_OK << 16;
 	      break;
 	    case BusLogic_CommandAbortedAtHostRequest:
-	      printk("scsi%d: CCB #%d to Target %d Aborted\n",
+	      printk("scsi%d: CCB #%ld to Target %d Aborted\n",
 		     HostAdapter->HostNumber, CCB->SerialNumber, CCB->TargetID);
 	      Command->result = DID_ABORT << 16;
 	      break;
@@ -2301,7 +2326,7 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 		if (CCB->HostAdapterStatus != BusLogic_SCSISelectionTimeout)
 		  {
 		    int i;
-		    printk("scsi%d: CCB #%d Target %d: Result %X "
+		    printk("scsi%d: CCB #%ld Target %d: Result %X "
 			   "Host Adapter Status %02X Target Status %02X\n",
 			   HostAdapter->HostNumber, CCB->SerialNumber,
 			   CCB->TargetID, Command->result,
@@ -2312,7 +2337,7 @@ static void BusLogic_InterruptHandler(int IRQ_Channel,
 		    printk("\n");
 		    printk("scsi%d: Sense ", HostAdapter->HostNumber);
 		    for (i = 0; i < CCB->SenseDataLength; i++)
-		      printk(" %02X", (*CCB->SenseDataPointer)[i]);
+		      printk(" %02X", Command->sense_buffer[i]);
 		    printk("\n");
 		  }
 	      break;
@@ -2368,7 +2393,7 @@ static boolean BusLogic_WriteOutgoingMailbox(BusLogic_HostAdapter_T
 	the Host Adapter is operating asynchronously and the locking code
 	does not protect against simultaneous access by the Host Adapter.
       */
-      NextOutgoingMailbox->CCB = CCB;
+      NextOutgoingMailbox->CCB = Virtual_to_Bus(CCB);
       NextOutgoingMailbox->ActionCode = ActionCode;
       BusLogic_StartMailboxCommand(HostAdapter);
       if (++NextOutgoingMailbox > HostAdapter->LastOutgoingMailbox)
@@ -2393,9 +2418,9 @@ int BusLogic_QueueCommand(SCSI_Command_T *Command,
   BusLogic_HostAdapter_T *HostAdapter =
     (BusLogic_HostAdapter_T *) Command->host->hostdata;
   unsigned char *CDB = Command->cmnd;
-  unsigned char CDB_Length = Command->cmd_len;
-  unsigned char TargetID = Command->target;
-  unsigned char LogicalUnit = Command->lun;
+  int CDB_Length = Command->cmd_len;
+  int TargetID = Command->target;
+  int LogicalUnit = Command->lun;
   void *BufferPointer = Command->request_buffer;
   int BufferLength = Command->request_bufflen;
   int SegmentCount = Command->use_sg;
@@ -2441,7 +2466,7 @@ int BusLogic_QueueCommand(SCSI_Command_T *Command,
     {
       CCB->Opcode = BusLogic_InitiatorCCB;
       CCB->DataLength = BufferLength;
-      CCB->DataPointer = BufferPointer;
+      CCB->DataPointer = Virtual_to_Bus(BufferPointer);
     }
   else
     {
@@ -2449,13 +2474,13 @@ int BusLogic_QueueCommand(SCSI_Command_T *Command,
       int Segment;
       CCB->Opcode = BusLogic_InitiatorCCB_ScatterGather;
       CCB->DataLength = SegmentCount * sizeof(BusLogic_ScatterGatherSegment_T);
-      CCB->DataPointer = CCB->ScatterGatherList;
+      CCB->DataPointer = Virtual_to_Bus(CCB->ScatterGatherList);
       for (Segment = 0; Segment < SegmentCount; Segment++)
 	{
 	  CCB->ScatterGatherList[Segment].SegmentByteCount =
 	    ScatterList[Segment].length;
 	  CCB->ScatterGatherList[Segment].SegmentDataPointer =
-	    ScatterList[Segment].address;
+	    Virtual_to_Bus(ScatterList[Segment].address);
 	}
     }
   switch (CDB[0])
@@ -2495,13 +2520,13 @@ int BusLogic_QueueCommand(SCSI_Command_T *Command,
     the Host Adapter and Target Device can establish Synchronous and Wide
     Transfer before Queue Tag messages can interfere with the Synchronous and
     Wide Negotiation message.  By waiting to enable Tagged Queuing until after
-    the first BusLogic_MaxTaggedQueueDepth commands have been sent, it is
+    the first BusLogic_PreferredQueueDepth commands have been sent, it is
     assured that after a Reset any pending commands are resent before Tagged
     Queuing is enabled and that the Tagged Queuing message will not occur while
     the partition table is being printed.
   */
   if (HostAdapter->TotalCommandCount[TargetID]++ ==
-        BusLogic_MaxTaggedQueueDepth &&
+        BusLogic_PreferredTaggedQueueDepth &&
       (HostAdapter->TaggedQueuingPermitted & (1 << TargetID)) &&
       Command->device->tagged_supported)
     {
@@ -2544,7 +2569,7 @@ int BusLogic_QueueCommand(SCSI_Command_T *Command,
 	}
     }
   memcpy(CCB->CDB, CDB, CDB_Length);
-  CCB->SenseDataPointer = (SCSI_SenseData_T *) &Command->sense_buffer;
+  CCB->SenseDataPointer = Virtual_to_Bus(&Command->sense_buffer);
   CCB->Command = Command;
   Command->scsi_done = CompletionRoutine;
   /*
@@ -2588,7 +2613,7 @@ int BusLogic_AbortCommand(SCSI_Command_T *Command)
 {
   BusLogic_HostAdapter_T *HostAdapter =
     (BusLogic_HostAdapter_T *) Command->host->hostdata;
-  unsigned char TargetID = Command->target;
+  int TargetID = Command->target;
   BusLogic_Lock_T Lock;
   BusLogic_CCB_T *CCB;
   int Result;
@@ -2646,7 +2671,7 @@ int BusLogic_AbortCommand(SCSI_Command_T *Command)
   if (HostAdapter->TaggedQueuingActive[TargetID] &&
       HostAdapter->FirmwareVersion[0] < '5')
     {
-      printk("scsi%d: Unable to Abort CCB #%d to Target %d - "
+      printk("scsi%d: Unable to Abort CCB #%ld to Target %d - "
 	     "Abort Tag Not Supported\n", HostAdapter->HostNumber,
 	     CCB->SerialNumber, TargetID);
       Result = SCSI_ABORT_SNOOZE;
@@ -2654,13 +2679,13 @@ int BusLogic_AbortCommand(SCSI_Command_T *Command)
   else if (BusLogic_WriteOutgoingMailbox(HostAdapter,
 					 BusLogic_MailboxAbortCommand, CCB))
     {
-      printk("scsi%d: Aborting CCB #%d to Target %d\n",
+      printk("scsi%d: Aborting CCB #%ld to Target %d\n",
 	     HostAdapter->HostNumber, CCB->SerialNumber, TargetID);
       Result = SCSI_ABORT_PENDING;
     }
   else
     {
-      printk("scsi%d: Unable to Abort CCB #%d to Target %d - "
+      printk("scsi%d: Unable to Abort CCB #%ld to Target %d - "
 	     "No Outgoing Mailboxes\n", HostAdapter->HostNumber,
 	     CCB->SerialNumber, TargetID);
       Result = SCSI_ABORT_BUSY;
@@ -2807,7 +2832,7 @@ static int BusLogic_SendBusDeviceReset(BusLogic_HostAdapter_T *HostAdapter,
 				       SCSI_Command_T *Command,
 				       unsigned int ResetFlags)
 {
-  unsigned char TargetID = Command->target;
+  int TargetID = Command->target;
   BusLogic_Lock_T Lock;
   BusLogic_CCB_T *CCB;
   int Result = -1;
@@ -2851,6 +2876,12 @@ static int BusLogic_SendBusDeviceReset(BusLogic_HostAdapter_T *HostAdapter,
 	  Result = SCSI_RESET_PENDING;
 	  goto Done;
 	}
+      else if (HostAdapter->BusDeviceResetPendingCCB[TargetID] != NULL)
+	{
+	  printk("scsi%d: Bus Device Reset already pending to Target %d\n",
+		 HostAdapter->HostNumber, TargetID);
+	  goto Done;
+	}
     }
   /*
     If this is a Synchronous Reset and a Bus Device Reset is already pending
@@ -2863,6 +2894,8 @@ static int BusLogic_SendBusDeviceReset(BusLogic_HostAdapter_T *HostAdapter,
       {
 	Command->reset_chain = CCB->Command;
 	CCB->Command = Command;
+	printk("scsi%d: Unable to Reset Command to Target %d - "
+	       "Reset Pending\n", HostAdapter->HostNumber, TargetID);
 	Result = SCSI_RESET_PENDING;
 	goto Done;
       }
@@ -2885,7 +2918,7 @@ static int BusLogic_SendBusDeviceReset(BusLogic_HostAdapter_T *HostAdapter,
   */
   CCB = BusLogic_AllocateCCB(HostAdapter);
   if (CCB == NULL) goto Done;
-  printk("scsi%d: Sending Bus Device Reset CCB #%d to Target %d\n",
+  printk("scsi%d: Sending Bus Device Reset CCB #%ld to Target %d\n",
 	 HostAdapter->HostNumber, CCB->SerialNumber, TargetID);
   CCB->Opcode = BusLogic_BusDeviceReset;
   CCB->TargetID = TargetID;
@@ -2956,9 +2989,8 @@ int BusLogic_ResetCommand(SCSI_Command_T *Command, unsigned int ResetFlags)
 {
   BusLogic_HostAdapter_T *HostAdapter =
     (BusLogic_HostAdapter_T *) Command->host->hostdata;
-  unsigned char TargetID = Command->target;
-  unsigned char ErrorRecoveryStrategy =
-    HostAdapter->ErrorRecoveryStrategy[TargetID];
+  int TargetID = Command->target;
+  int ErrorRecoveryStrategy = HostAdapter->ErrorRecoveryStrategy[TargetID];
   /*
     Disable Tagged Queuing if it is active for this Target Device and if
     it has been less than 10 minutes since the last reset occurred, or since
@@ -3139,9 +3171,8 @@ int BusLogic_BIOSDiskParameters(SCSI_Disk_T *Disk, KernelDevice_T Device,
   defaults to 0.  Note that Global Options are applied across all Host
   Adapters.
 
-  The string options are used to provide control over Tagged Queuing and Error
-  Recovery. If both Tagged Queuing and Error Recovery strings are provided, the
-  Tagged Queuing specification string must come first.
+  The string options are used to provide control over Tagged Queuing, Error
+  Recovery, and Host Adapter Probing.
 
   The Tagged Queuing specification begins with "TQ:" and allows for explicitly
   specifying whether Tagged Queuing is permitted on Target Devices that support
@@ -3207,6 +3238,20 @@ int BusLogic_BIOSDiskParameters(SCSI_Disk_T *Disk, KernelDevice_T Device,
 			the sequence of "D", "H", "B", and "N" characters does
 			not cover all the possible Target Devices, unspecified
 			characters are assumed to be "D".
+
+  The Host Adapter Probing specification comprises the following strings:
+
+  NoProbe		No probing of any kind is to be performed, and hence
+			no BusLogic Host Adapters will be detected.
+
+  NoProbeISA		No probing of the standard ISA I/O Addresses will
+			be done, and hence only PCI Host Adapters will be
+			detected.
+
+  NoSortPCI		PCI Host Adapters will be enumerated in the order
+			provided by the PCI BIOS, ignoring any setting of
+			the AutoSCSI "Use Bus And Device # For PCI Scanning
+			Seq." option.
 */
 
 void BusLogic_Setup(char *Strings, int *Integers)
@@ -3214,7 +3259,8 @@ void BusLogic_Setup(char *Strings, int *Integers)
   BusLogic_CommandLineEntry_T *CommandLineEntry =
     &BusLogic_CommandLineEntries[BusLogic_CommandLineEntryCount++];
   static int ProbeListIndex = 0;
-  int IntegerCount = Integers[0], TargetID, i;
+  int IntegerCount = Integers[0];
+  int TargetID, i;
   CommandLineEntry->IO_Address = 0;
   CommandLineEntry->TaggedQueueDepth = 0;
   CommandLineEntry->BusSettleTime = 0;
@@ -3228,7 +3274,7 @@ void BusLogic_Setup(char *Strings, int *Integers)
     printk("BusLogic: Unexpected Command Line Integers ignored\n");
   if (IntegerCount >= 1)
     {
-      unsigned short IO_Address = Integers[1];
+      unsigned int IO_Address = Integers[1];
       if (IO_Address > 0)
 	{
 	  for (i = 0; ; i++)
@@ -3277,97 +3323,120 @@ void BusLogic_Setup(char *Strings, int *Integers)
       return;
     }
   if (Strings == NULL) return;
-  if (strncmp(Strings, "TQ:", 3) == 0)
+  while (*Strings != '\0')
     {
-      Strings += 3;
-      if (strncmp(Strings, "Default", 7) == 0)
-	Strings += 7;
-      else if (strncmp(Strings, "Enable", 6) == 0)
+      if (strncmp(Strings, "TQ:", 3) == 0)
 	{
-	  Strings += 6;
-	  CommandLineEntry->TaggedQueuingPermitted = 0xFFFF;
-	  CommandLineEntry->TaggedQueuingPermittedMask = 0xFFFF;
+	  Strings += 3;
+	  if (strncmp(Strings, "Default", 7) == 0)
+	    Strings += 7;
+	  else if (strncmp(Strings, "Enable", 6) == 0)
+	    {
+	      Strings += 6;
+	      CommandLineEntry->TaggedQueuingPermitted = 0xFFFF;
+	      CommandLineEntry->TaggedQueuingPermittedMask = 0xFFFF;
+	    }
+	  else if (strncmp(Strings, "Disable", 7) == 0)
+	    {
+	      Strings += 7;
+	      CommandLineEntry->TaggedQueuingPermitted = 0x0000;
+	      CommandLineEntry->TaggedQueuingPermittedMask = 0xFFFF;
+	    }
+	  else
+	    for (TargetID = 0; TargetID < BusLogic_MaxTargetDevices; TargetID++)
+	      switch (*Strings++)
+		{
+		case 'Y':
+		  CommandLineEntry->TaggedQueuingPermitted |= 1 << TargetID;
+		  CommandLineEntry->TaggedQueuingPermittedMask |= 1 << TargetID;
+		  break;
+		case 'N':
+		  CommandLineEntry->TaggedQueuingPermittedMask |= 1 << TargetID;
+		  break;
+		case 'X':
+		  break;
+		default:
+		  Strings--;
+		  TargetID = BusLogic_MaxTargetDevices;
+		  break;
+		}
 	}
-      else if (strncmp(Strings, "Disable", 7) == 0)
+      else if (strncmp(Strings, "ER:", 3) == 0)
+	{
+	  Strings += 3;
+	  if (strncmp(Strings, "Default", 7) == 0)
+	    Strings += 7;
+	  else if (strncmp(Strings, "HardReset", 9) == 0)
+	    {
+	      Strings += 9;
+	      memset(CommandLineEntry->ErrorRecoveryStrategy,
+		     BusLogic_ErrorRecovery_HardReset,
+		     sizeof(CommandLineEntry->ErrorRecoveryStrategy));
+	    }
+	  else if (strncmp(Strings, "BusDeviceReset", 14) == 0)
+	    {
+	      Strings += 14;
+	      memset(CommandLineEntry->ErrorRecoveryStrategy,
+		     BusLogic_ErrorRecovery_BusDeviceReset,
+		     sizeof(CommandLineEntry->ErrorRecoveryStrategy));
+	    }
+	  else if (strncmp(Strings, "None", 4) == 0)
+	    {
+	      Strings += 4;
+	      memset(CommandLineEntry->ErrorRecoveryStrategy,
+		     BusLogic_ErrorRecovery_None,
+		     sizeof(CommandLineEntry->ErrorRecoveryStrategy));
+	    }
+	  else
+	    for (TargetID = 0; TargetID < BusLogic_MaxTargetDevices; TargetID++)
+	      switch (*Strings++)
+		{
+		case 'D':
+		  CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
+		    BusLogic_ErrorRecovery_Default;
+		  break;
+		case 'H':
+		  CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
+		    BusLogic_ErrorRecovery_HardReset;
+		  break;
+		case 'B':
+		  CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
+		    BusLogic_ErrorRecovery_BusDeviceReset;
+		  break;
+		case 'N':
+		  CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
+		    BusLogic_ErrorRecovery_None;
+		  break;
+		default:
+		  Strings--;
+		  TargetID = BusLogic_MaxTargetDevices;
+		  break;
+		}
+	}
+      else if (strcmp(Strings, "NoProbe") == 0 ||
+	       strcmp(Strings, "noprobe") == 0)
 	{
 	  Strings += 7;
-	  CommandLineEntry->TaggedQueuingPermitted = 0x0000;
-	  CommandLineEntry->TaggedQueuingPermittedMask = 0xFFFF;
+	  BusLogic_ProbeOptions |= BusLogic_NoProbe;
 	}
-      else
-	for (TargetID = 0; TargetID < BusLogic_MaxTargetDevices; TargetID++)
-	  switch (*Strings++)
-	    {
-	    case 'Y':
-	      CommandLineEntry->TaggedQueuingPermitted |= 1 << TargetID;
-	      CommandLineEntry->TaggedQueuingPermittedMask |= 1 << TargetID;
-	      break;
-	    case 'N':
-	      CommandLineEntry->TaggedQueuingPermittedMask |= 1 << TargetID;
-	      break;
-	    case 'X':
-	      break;
-	    default:
-	      Strings--;
-	      TargetID = BusLogic_MaxTargetDevices;
-	      break;
-	    }
-    }
-  if (*Strings == ',') Strings++;
-  if (strncmp(Strings, "ER:", 3) == 0)
-    {
-      Strings += 3;
-      if (strncmp(Strings, "Default", 7) == 0)
-	Strings += 7;
-      else if (strncmp(Strings, "HardReset", 9) == 0)
+      else if (strncmp(Strings, "NoProbeISA", 10) == 0)
+	{
+	  Strings += 10;
+	  BusLogic_ProbeOptions |= BusLogic_NoProbeISA;
+	}
+      else if (strncmp(Strings, "NoSortPCI", 9) == 0)
 	{
 	  Strings += 9;
-	  memset(CommandLineEntry->ErrorRecoveryStrategy,
-		 BusLogic_ErrorRecovery_HardReset,
-		 sizeof(CommandLineEntry->ErrorRecoveryStrategy));
-	}
-      else if (strncmp(Strings, "BusDeviceReset", 14) == 0)
-	{
-	  Strings += 14;
-	  memset(CommandLineEntry->ErrorRecoveryStrategy,
-		 BusLogic_ErrorRecovery_BusDeviceReset,
-		 sizeof(CommandLineEntry->ErrorRecoveryStrategy));
-	}
-      else if (strncmp(Strings, "None", 4) == 0)
-	{
-	  Strings += 4;
-	  memset(CommandLineEntry->ErrorRecoveryStrategy,
-		 BusLogic_ErrorRecovery_None,
-		 sizeof(CommandLineEntry->ErrorRecoveryStrategy));
+	  BusLogic_ProbeOptions |= BusLogic_NoSortPCI;
 	}
       else
-	for (TargetID = 0; TargetID < BusLogic_MaxTargetDevices; TargetID++)
-	  switch (*Strings++)
-	    {
-	    case 'D':
-	      CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
-		BusLogic_ErrorRecovery_Default;
-	      break;
-	    case 'H':
-	      CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
-		BusLogic_ErrorRecovery_HardReset;
-	      break;
-	    case 'B':
-	      CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
-		BusLogic_ErrorRecovery_BusDeviceReset;
-	      break;
-	    case 'N':
-	      CommandLineEntry->ErrorRecoveryStrategy[TargetID] =
-		BusLogic_ErrorRecovery_None;
-	      break;
-	    default:
-	      Strings--;
-	      TargetID = BusLogic_MaxTargetDevices;
-	      break;
-	    }
+	{
+	  printk("BusLogic: Unexpected Command Line String '%s' ignored\n",
+		 Strings);
+	  break;
+	}
+      if (*Strings == ',') Strings++;
     }
-  if (*Strings != '\0')
-    printk("BusLogic: Unexpected Command Line String '%s' ignored\n", Strings);
 }
 
 

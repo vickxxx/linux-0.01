@@ -12,6 +12,8 @@
 #include <linux/mman.h>
 #include <linux/string.h>
 #include <linux/malloc.h>
+#include <linux/pagemap.h>
+#include <linux/swap.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -38,6 +40,101 @@ pgprot_t protection_map[16] = {
 	__P000, __P001, __P010, __P011, __P100, __P101, __P110, __P111,
 	__S000, __S001, __S010, __S011, __S100, __S101, __S110, __S111
 };
+
+/*
+ * Check that a process has enough memory to allocate a
+ * new virtual mapping.
+ */
+static inline int vm_enough_memory(long pages)
+{
+	/*
+	 * stupid algorithm to decide if we have enough memory: while
+	 * simple, it hopefully works in most obvious cases.. Easy to
+	 * fool it, but this should catch most mistakes.
+	 */
+	long freepages;
+	freepages = buffermem >> PAGE_SHIFT;
+	freepages += page_cache_size;
+	freepages >>= 1;
+	freepages += nr_free_pages;
+	freepages += nr_swap_pages;
+	freepages -= MAP_NR(high_memory) >> 4;
+	return freepages > pages;
+}
+
+asmlinkage unsigned long sys_brk(unsigned long brk)
+{
+	unsigned long rlim;
+	unsigned long newbrk, oldbrk;
+
+	if (brk < current->mm->end_code)
+		return current->mm->brk;
+	newbrk = PAGE_ALIGN(brk);
+	oldbrk = PAGE_ALIGN(current->mm->brk);
+	if (oldbrk == newbrk)
+		return current->mm->brk = brk;
+
+	/*
+	 * Always allow shrinking brk
+	 */
+	if (brk <= current->mm->brk) {
+		current->mm->brk = brk;
+		do_munmap(newbrk, oldbrk-newbrk);
+		return brk;
+	}
+	/*
+	 * Check against rlimit and stack..
+	 */
+	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
+	if (rlim >= RLIM_INFINITY)
+		rlim = ~0;
+	if (brk - current->mm->end_code > rlim)
+		return current->mm->brk;
+
+	/*
+	 * Check against existing mmap mappings.
+	 */
+	if (find_vma_intersection(current, oldbrk, newbrk+PAGE_SIZE))
+		return current->mm->brk;
+
+	/*
+	 * Check if we have enough memory..
+	 */
+	if (!vm_enough_memory((newbrk-oldbrk) >> PAGE_SHIFT))
+		return current->mm->brk;
+
+	/*
+	 * Ok, looks good - let it rip.
+	 */
+	current->mm->brk = brk;
+	do_mmap(NULL, oldbrk, newbrk-oldbrk,
+		PROT_READ|PROT_WRITE|PROT_EXEC,
+		MAP_FIXED|MAP_PRIVATE, 0);
+	return brk;
+}
+
+/*
+ * Combine the mmap "prot" and "flags" argument into one "vm_flags" used
+ * internally. Essentially, translate the "PROT_xxx" and "MAP_xxx" bits
+ * into "VM_xxx".
+ */
+static inline unsigned long vm_flags(unsigned long prot, unsigned long flags)
+{
+#define _trans(x,bit1,bit2) \
+((bit1==bit2)?(x&bit1):(x&bit1)?bit2:0)
+
+	unsigned long prot_bits, flag_bits;
+	prot_bits =
+		_trans(prot, PROT_READ, VM_READ) |
+		_trans(prot, PROT_WRITE, VM_WRITE) |
+		_trans(prot, PROT_EXEC, VM_EXEC);
+	flag_bits =
+		_trans(flags, MAP_GROWSDOWN, VM_GROWSDOWN) |
+		_trans(flags, MAP_DENYWRITE, VM_DENYWRITE) |
+		_trans(flags, MAP_EXECUTABLE, VM_EXECUTABLE);
+	return prot_bits | flag_bits;
+#undef _trans
+}
 
 unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off)
@@ -126,9 +223,7 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	vma->vm_mm = current->mm;
 	vma->vm_start = addr;
 	vma->vm_end = addr + len;
-	vma->vm_flags = prot & (VM_READ | VM_WRITE | VM_EXEC);
-	vma->vm_flags |= flags & (VM_GROWSDOWN | VM_DENYWRITE | VM_EXECUTABLE);
-	vma->vm_flags |= current->mm->def_flags;
+	vma->vm_flags = vm_flags(prot,flags) | current->mm->def_flags;
 
 	if (file) {
 		if (file->f_mode & 1)
@@ -157,6 +252,14 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	vma->vm_pte = 0;
 
 	do_munmap(addr, len);	/* Clear old maps */
+
+	/* Private writable mapping? Check memory availability.. */
+	if ((vma->vm_flags & (VM_SHARED | VM_WRITE)) == VM_WRITE) {
+		if (!vm_enough_memory(len >> PAGE_SHIFT)) {
+			kfree(vma);
+			return -ENOMEM;
+		}
+	}
 
 	if (file) {
 		int error = file->f_op->mmap(file->f_inode, file, vma);

@@ -63,7 +63,7 @@ static const char *group_1_commands[] = {
 
 static const char *group_2_commands[] = {
 /* 40-41 */ "Change Definition", "Write Same", 
-/* 42-48 */ unknown, unknown, unknown, unknown, unknown, unknown, unknown, 
+/* 42-48 */ unknown, "Read TOC", unknown, unknown, unknown, unknown, unknown, 
 /* 49-4f */ unknown, unknown, unknown, "Log Select", "Log Sense", unknown, unknown,
 /* 50-55 */ unknown, unknown, unknown, unknown, unknown, "Mode Select (10)",
 /* 56-5b */ unknown, unknown, unknown, unknown, "Mode Sense (10)", unknown,
@@ -101,7 +101,11 @@ static void print_opcode(int opcode) {
 	printk("%s(0x%02x) ", vendor, opcode); 
 	break;
     default:
-	printk("%s ",table[opcode & 0x1f]);
+	if (table[opcode & 0x1f] != unknown)
+	    printk("%s ",table[opcode & 0x1f]);
+	else
+	    printk("%s(0x%02x) ", unknown, opcode);
+	break;
     }
 }
 #else /* CONST & CONST_COMMAND */
@@ -365,12 +369,28 @@ static struct error_info additional[] =
 
 #if (CONSTANTS & CONST_SENSE)
 static const char *snstext[] = {
-    "None","Recovered Error","Not Ready","Medium Error","Hardware Error",
-    "Illegal Request","Unit Attention","Data Protect","Blank Check",
-    "Key=9","Copy Aborted","Aborted Command","End-Of-Medium",
-    "Volume Overflow", "Miscompare", "Key=15"};
+    "None",                     /* There is no sense information */
+    "Recovered Error",          /* The last command completed successfully
+                                   but used error correction */
+    "Not Ready",                /* The addressed target is not ready */
+    "Medium Error",             /* Data error detected on the medium */
+    "Hardware Error",           /* Controller or device failure */
+    "Illegal Request",
+    "Unit Attention",           /* Removable medium was changed, or
+                                   the target has been reset */
+    "Data Protect",             /* Access to the data is blocked */
+    "Blank Check",              /* Reached unexpected written or unwritten
+                                   region of the medium */
+    "Key=9",                    /* Vendor specific */
+    "Copy Aborted",             /* COPY or COMPARE was aborted */
+    "Aborted Command",          /* The target aborted the command */
+    "Equal",                    /* A SEARCH DATA command found data equal */
+    "Volume Overflow",          /* Medium full with still data to be written */
+    "Miscompare",               /* Source data and data on the medium
+                                   do not agree */
+    "Key=15"                    /* Reserved */
+};
 #endif
-
 
 /* Print sense information */
 void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
@@ -384,23 +404,29 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
     code = sense_buffer[0] & 0xf;
     valid = sense_buffer[0] & 0x80;
     
-    if (sense_class == 7) { 
+    if (sense_class == 7) {	/* extended sense data */
 	s = sense_buffer[7] + 8;
-	if(s > sizeof(SCpnt->sense_buffer)) s = sizeof(SCpnt->sense_buffer);
+	if(s > sizeof(SCpnt->sense_buffer))
+           s = sizeof(SCpnt->sense_buffer);
 	
 	if (!valid)
 	    printk("extra data not valid ");
 	
-	if (sense_buffer[2] & 0x80) printk( "FMK ");
-	if (sense_buffer[2] & 0x40) printk( "EOM ");
-	if (sense_buffer[2] & 0x20) printk( "ILI ");
+	if (sense_buffer[2] & 0x80)
+           printk( "FMK ");	/* current command has read a filemark */
+	if (sense_buffer[2] & 0x40)
+           printk( "EOM ");	/* end-of-medium condition exists */
+	if (sense_buffer[2] & 0x20)
+           printk( "ILI ");	/* incorrect block length requested */
 	
 	switch (code) {
 	case 0x0:
-	    error = "Current";
+	    error = "Current";	/* error concerns current command */
 	    break;
 	case 0x1:
-	    error = "Deferred";
+	    error = "Deferred";	/* error concerns some earlier command */
+            	/* e.g., an earlier write to disk cache succeeded, but
+                   now the disk discovers that it cannot write the data */
 	    break;
 	default:
 	    error = "Invalid";
@@ -437,7 +463,15 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
 #else
 	printk("ASC=%2x ASCQ=%2x\n", sense_buffer[12], sense_buffer[13]);
 #endif
-    } else { 
+    } else {	/* non-extended sense data */
+
+         /*
+          * Standard says:
+          *    sense_buffer[0] & 0200 : address valid
+          *    sense_buffer[0] & 0177 : vendor-specific error code
+          *    sense_buffer[1] & 0340 : vendor-specific
+          *    sense_buffer[1..3] : 21-bit logical block address
+          */
 	
 #if (CONSTANTS & CONST_SENSE)
 	if (sense_buffer[0] < 15)

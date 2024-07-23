@@ -101,7 +101,14 @@ unsigned long file_table_init(unsigned long start, unsigned long end)
 struct file * get_empty_filp(void)
 {
 	int i;
+	int max = max_files;
 	struct file * f;
+
+	/*
+	 * Reserve a few files for the super-user..
+	 */
+	if (current->euid)
+		max -= 10;
 
 	/* if the return is taken, we are in deep trouble */
 	if (!first_file && !grow_files())
@@ -117,14 +124,14 @@ struct file * get_empty_filp(void)
 				f->f_version = ++event;
 				return f;
 			}
-	} while (nr_files < max_files && grow_files());
+	} while (nr_files < max && grow_files());
 
 	return NULL;
 }
 
 #ifdef CONFIG_QUOTA
 
-void add_dquot_ref(dev_t dev, short type)
+void add_dquot_ref(kdev_t dev, short type)
 {
 	struct file *filp;
 	int cnt;
@@ -139,7 +146,7 @@ void add_dquot_ref(dev_t dev, short type)
 	}
 }
 
-void reset_dquot_ptrs(dev_t dev, short type)
+void reset_dquot_ptrs(kdev_t dev, short type)
 {
 	struct file *filp;
 	int cnt;

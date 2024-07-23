@@ -109,8 +109,12 @@
 #include "pas16.h"
 #endif
 
-#ifdef CONFIG_SCSI_QLOGIC
-#include "qlogic.h"
+#ifdef CONFIG_SCSI_QLOGIC_FAS
+#include "qlogicfas.h"
+#endif
+
+#ifdef CONFIG_SCSI_QLOGIC_ISP
+#include "qlogicisp.h"
 #endif
 
 #ifdef CONFIG_SCSI_SEAGATE
@@ -250,8 +254,8 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_NCR53C406A	/* 53C406A should come before QLOGIC */
     NCR53c406a,
 #endif
-#ifdef CONFIG_SCSI_QLOGIC
-    QLOGIC,
+#ifdef CONFIG_SCSI_QLOGIC_FAS
+    QLOGICFAS,
 #endif
 #ifdef CONFIG_SCSI_PAS16
     MV_PAS16,
@@ -282,6 +286,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #ifdef CONFIG_SCSI_AM53C974
     AM53C974,
+#endif
+#ifdef CONFIG_SCSI_QLOGIC_ISP
+    QLOGICISP,
 #endif
 #ifdef CONFIG_SCSI_PPA
     PPA,

@@ -21,24 +21,24 @@ This will override the configuration in mcdx.h.
 
 This driver:
 
-	o	handles XA (and hopefully) multi session CDs as well as
-		ordinary CDs;
-	o	supports up to 5 drives (of course, you'll need free 
-		IRQs, i/o ports and slots);
-	o	uses much less kernel memory than the standard mcd driver
-		(no extra driver internal buffers!).
-    o   plays audio (like the `old' driver, I hope)
+    o   handles XA (and hopefully) multi session CDs as well as
+        ordinary CDs;
+    o   supports up to 5 drives (of course, you'll need free 
+        IRQs, i/o ports and slots);
+    o   uses much less kernel memory than the standard mcd driver
+        (no extra driver internal buffers!).
+        o   plays audio (like the `old' driver, I hope)
 
 This version doesn't support yet:
 
-	o	shared IRQs (but it seems to be possible - I've successfully
+    o   shared IRQs (but it seems to be possible - I've successfully
                 connected two drives to the same irq.  So it's `only' a 
                 problem of the driver.)
 
 This driver never will:
 
-	o	Read digital audio (i.e. copy directly), due to missing
-		hardware features. 
+    o   Read digital audio (i.e. copy directly), due to missing
+        hardware features. 
 
 
 heiko@lotte.sax.de

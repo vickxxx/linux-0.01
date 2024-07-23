@@ -53,7 +53,7 @@
     achieved by letting the driver autoprobe as if it were compiled into the
     kernel, except that there is no autoprobing of the IRQ lines. This is of
     no great  consequence except do make sure  you're not sharing interrupts
-    with  anything that cannot  accommodate  interrupt sharing!  The existing
+    with  anything that cannot  accommodate  interrupt sharing! The existing
     register_netdevice() code will only allow one device to be registered at
     a time. 
 
@@ -108,7 +108,7 @@
     applies most particularly to the DC21140 based cards).
 
     I've changed the timing routines to  use the kernel timer and scheduling
-    functions  so that the  hangs  and other assorted  problems that occurred
+    functions  so that the  hangs  and other assorted problems that occurred
     while autosensing the  media  should be gone.  A  bonus  for the DC21040
     auto  media sense algorithm is  that it can now  use one that is more in
     line with the  rest (the DC21040  chip doesn't  have a hardware  timer).
@@ -820,7 +820,7 @@ de4x5_hw_init(struct device *dev, u_long iobase)
 	** Set up the RX descriptor ring (Intels)
 	** Allocate contiguous receive buffers, long word aligned (Alphas) 
 	*/
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(DE4X5_DO_MEMCPY)
 	for (i=0; i<NUM_RX_DESC; i++) {
 	    lp->rx_ring[i].status = 0;
 	    lp->rx_ring[i].des1 = RX_BUFF_SZ;
@@ -2627,7 +2627,7 @@ de4x5_alloc_rx_buff(struct device *dev, int index, int len)
     struct de4x5_private *lp = (struct de4x5_private *)dev->priv;
     struct sk_buff *p;
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(DE4X5_DO_MEMCPY)
     struct sk_buff *ret;
     u_long i=0, tmp;
 
@@ -2642,7 +2642,9 @@ de4x5_alloc_rx_buff(struct device *dev, int index, int len)
 
     ret = lp->rx_skb[index];
     lp->rx_skb[index] = p;
-    skb_put(ret, len);
+
+    if ((unsigned long) ret > 1)
+	    skb_put(ret, len);
 
     return ret;
 
@@ -2673,7 +2675,7 @@ de4x5_free_rx_buffs(struct device *dev)
     int i;
 
     for (i=0; i<lp->rxRingSize; i++) {
-	if (lp->rx_skb[i]) {
+	if ((unsigned long) lp->rx_skb[i] > 1) {
 	    dev_kfree_skb(lp->rx_skb[i], FREE_WRITE);
 	}
 	lp->rx_ring[i].status = 0;

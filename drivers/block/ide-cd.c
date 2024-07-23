@@ -97,6 +97,9 @@
  * 3.12  May  7, 1996 -- Rudimentary changer support.  Based on patches
  *                        from Gerhard Zuber <zuber@berlin.snafu.de>.
  *                       Let open succeed even if there's no loaded disc.
+ * 3.13  May 19, 1996 -- Fixes for changer code.
+ * 3.14  May 29, 1996 -- Add work-around for Vertos 600.
+ *                        (From Hennus Bergman <hennus@sky.ow.nl>.)
  *
  * NOTE: Direct audio reads will only work on some types of drive.
  * So far, i've received reports of success for Sony and Toshiba drives.
@@ -106,6 +109,7 @@
  * uses a different protocol.
  *
  * ATAPI cd-rom driver.  To be used with ide.c.
+ * See Documentation/cdrom/ide-cd for usage information.
  *
  * Copyright (C) 1994, 1995, 1996  scott snyder  <snyder@fnald0.fnal.gov>
  * May be copied or modified under the terms of the GNU General Public License
@@ -130,9 +134,7 @@
 #include <asm/io.h>
 #include <asm/byteorder.h>
 #include <asm/segment.h>
-#ifdef __alpha__
-# include <asm/unaligned.h>
-#endif
+#include <asm/unaligned.h>
 
 #include "ide.h"
 
@@ -1149,11 +1151,7 @@ static void cdrom_start_read_continuation (ide_drive_t *drive)
 	pc.c[0] = READ_10;
 	pc.c[7] = (nframes >> 8);
 	pc.c[8] = (nframes & 0xff);
-#ifdef __alpha__
-	stl_u (htonl (frame), (unsigned int *) &pc.c[2]);
-#else
-	*(int *)(&pc.c[2]) = htonl (frame);
-#endif
+	put_unaligned(htonl (frame), (unsigned int *) &pc.c[2]);
 
 	/* Send the command to the drive and return. */
 	(void) cdrom_transfer_packet_command (drive, pc.c, sizeof (pc.c),
@@ -1937,11 +1935,7 @@ cdrom_read_block (ide_drive_t *drive, int format, int lba,
 		pc.c[0] = READ_CD;
 
 	pc.c[1] = (format << 2);
-#ifdef __alpha__
-	stl_u(htonl (lba), (unsigned int *) &pc.c[2]);
-#else
-	*(int *)(&pc.c[2]) = htonl (lba);
-#endif
+	put_unaligned(htonl(lba), (unsigned int *) &pc.c[2]);
 	pc.c[8] = 1;  /* one block */
 	pc.c[9] = 0x10;
 
@@ -1968,7 +1962,7 @@ cdrom_read_block (ide_drive_t *drive, int format, int lba,
 
 /* If SLOT<0, unload the current slot.  Otherwise, try to load SLOT. */
 static int
-cdrom_load_unload (ide_drive_t *drive, unsigned long slot,
+cdrom_load_unload (ide_drive_t *drive, int slot,
 		   struct atapi_request_sense *reqbuf)
 {
 	struct packet_command pc;
@@ -2403,16 +2397,14 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		if (drive->usage > 1)
 			return -EBUSY;
 
-		stat = cdrom_load_unload (drive, -1, NULL);
-		if (stat) return stat;
+		(void) cdrom_load_unload (drive, -1, NULL);
 
                 cdrom_saw_media_change (drive);
                 if (arg == -1) {
 			(void) cdrom_lockdoor (drive, 0, NULL);
 			return 0;
 		}
-		stat = cdrom_load_unload (drive, arg, NULL);
-		if (stat) return stat;
+		(void) cdrom_load_unload (drive, (int)arg, NULL);
 
 		stat = cdrom_check_status (drive, &my_reqbuf);
 		if (stat && my_reqbuf.sense_key == NOT_READY) {
@@ -2607,6 +2599,13 @@ void ide_cdrom_setup (ide_drive_t *drive)
 			CDROM_CONFIG_FLAGS (drive)->subchan_as_bcd = 1;
 		}
 
+		else if (strcmp (drive->id->model, "V006E0DS") == 0 &&
+		    drive->id->fw_rev[4] == '1' &&
+		    drive->id->fw_rev[6] <= '2') {
+			/* Vertos 600 ESD. */
+			CDROM_CONFIG_FLAGS (drive)->toctracks_as_bcd = 1;
+		}
+
 		else if (strcmp (drive->id->model,
 				 "NEC CD-ROM DRIVE:260") == 0 &&
 			 strcmp (drive->id->fw_rev, "1.01") == 0) {
@@ -2634,15 +2633,15 @@ void ide_cdrom_setup (ide_drive_t *drive)
 
 
 /*
- * TODO:
- *  CDROMRESET
- *  Lock the door when a read request completes successfully and the
- *   door is not already locked.  Also try to reorganize to reduce
- *   duplicated functionality between read and ioctl paths?
- *  Establish interfaces for an IDE port driver, and break out the cdrom
- *   code into a loadable module.
- *  Support changers better.
- *  Write some real documentation.
+ * TODO (for 2.1?):
+ *  Avoid printing error messages for expected errors from the drive.
+ *  Integrate with generic cdrom driver.
+ *  Query the drive to find what features are available
+ *   before trying to use them.
+ *  Integrate spindown time adjustment patch.
+ *  Modularize.
+ *  CDROMRESET ioctl.
+ *  Better support for changers.
  */
 
 

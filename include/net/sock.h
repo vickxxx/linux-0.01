@@ -196,6 +196,7 @@ struct sock
 	struct sock		*prev; /* Doubly linked chain.. */
 	struct sock		*pair;
 	struct sk_buff		* volatile send_head;
+	struct sk_buff		* volatile send_next;
 	struct sk_buff		* volatile send_tail;
 	struct sk_buff_head	back_log;
 	struct sk_buff		*partial;
@@ -211,8 +212,10 @@ struct sock
 	unsigned short		max_unacked;
 	unsigned short		window;
 	__u32                   lastwin_seq;    /* sequence number when we last updated the window we offer */
+	__u32			high_seq;	/* sequence number when we did current fast retransmit */
 	volatile unsigned long  ato;            /* ack timeout */
-	volatile unsigned long  lrcvtime;       /* jiffies at last rcv */
+	volatile unsigned long  lrcvtime;       /* jiffies at last data rcv */
+	volatile unsigned long  idletime;       /* jiffies at last rcv */
 	unsigned short		bytes_rcv;
 /*
  *	mss is min(mtu, max_window) 
@@ -222,10 +225,10 @@ struct sock
 	volatile unsigned short	user_mss;  /* mss requested by user in ioctl */
 	volatile unsigned short	max_window;
 	unsigned long 		window_clamp;
+	unsigned int		ssthresh;
 	unsigned short		num;
 	volatile unsigned short	cong_window;
 	volatile unsigned short	cong_count;
-	volatile unsigned short	ssthresh;
 	volatile unsigned short	packets_out;
 	volatile unsigned short	shutdown;
 	volatile unsigned long	rtt;
@@ -389,7 +392,7 @@ struct proto
 #define SOCK_DESTROY_TIME (10*HZ)
 
 /*
- *	Sockets 0-1023 can't be bound too unless you are superuser 
+ *	Sockets 0-1023 can't be bound to unless you are superuser 
  */
  
 #define PROT_SOCK	1024
@@ -412,7 +415,7 @@ extern void __release_sock(struct sock *sk);
 
 static inline void lock_sock(struct sock *sk)
 {
-#if 1
+#if 0
 /* debugging code: the test isn't even 100% correct, but it can catch bugs */
 /* Note that a double lock is ok in theory - it's just _usually_ a bug */
 	if (sk->users) {
@@ -428,7 +431,7 @@ here:
 static inline void release_sock(struct sock *sk)
 {
 	barrier();
-#if 1
+#if 0
 /* debugging code: remove me when ok */
 	if (sk->users == 0) {
 		__label__ here;
@@ -437,7 +440,7 @@ static inline void release_sock(struct sock *sk)
 here:
 	}
 #endif
-	if (!--sk->users)
+	if ((sk->users = sk->users-1) == 0)
 		__release_sock(sk);
 }
 
@@ -450,7 +453,8 @@ extern unsigned short		get_new_socknum(struct proto *,
 extern void			put_sock(unsigned short, struct sock *); 
 extern struct sock		*get_sock(struct proto *, unsigned short,
 					  unsigned long, unsigned short,
-					  unsigned long);
+					  unsigned long,
+					  unsigned long, unsigned short);
 extern struct sock		*get_sock_mcast(struct sock *, unsigned short,
 					  unsigned long, unsigned short,
 					  unsigned long);
@@ -498,6 +502,18 @@ extern __inline__ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 		return -ENOMEM;
 	atomic_add(skb->truesize, &sk->rmem_alloc);
 	skb->sk=sk;
+	skb_queue_tail(&sk->receive_queue,skb);
+	if (!sk->dead)
+		sk->data_ready(sk,skb->len);
+	return 0;
+}
+
+extern __inline__ int __sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+{
+	if (sk->rmem_alloc + skb->truesize >= sk->rcvbuf)
+		return -ENOMEM;
+	atomic_add(skb->truesize, &sk->rmem_alloc);
+	skb->sk=sk;
 	__skb_queue_tail(&sk->receive_queue,skb);
 	if (!sk->dead)
 		sk->data_ready(sk,skb->len);
@@ -529,6 +545,6 @@ extern void net_timer (unsigned long);
  *	Enable debug/info messages 
  */
 
-#define NETDEBUG(x)		x
+#define NETDEBUG(x)	do { } while (0)
 
 #endif	/* _SOCK_H */

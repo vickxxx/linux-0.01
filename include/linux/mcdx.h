@@ -1,7 +1,7 @@
 /*
  * Definitions for the Mitsumi CDROM interface
- * Copyright (C) 1995 Heiko Schlittermann <heiko@lotte.sax.de>
- * VERSION: 1.9
+ * Copyright (C) 1995 1996 Heiko Schlittermann <heiko@lotte.sax.de>
+ * VERSION: @VERSION@
  * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@
  *  Nils Faerber and Roger E. Wolff (extensively tested the LU portion)
  *  Andreas Kies (testing the mysterious hang up's)
  *  ... somebody forgotten?
+ *  Marcin Dalecki
  *  
  */
 
@@ -76,24 +77,12 @@
 /* *** make the following line uncommented, if you're sure,
  * *** all configuration is done */
 /* #define I_WAS_HERE */
+#define I_WAS_HERE   /* delete this line, it's for heiko only */
 
 /*	The name of the device */
 #define MCDX "mcdx"	
 
-#if MCDX_QUIET == 1
-#define INFO(x)  
-#define xinfo(fmt, args...)
-#else
-#define INFO(x) warn x
-#define xinfo(fmt, args...) _warn(fmt, ## args)
-#endif
-
-#define WARN(x) warn x
-#define xwarn(fmt, args...) _warn(fmt, ## args)
-#define _warn warn
-
-#if MCDX_DEBUG == 1
-#define TRACE(x) trace x
+/* Flags for DEBUGGING */
 #define INIT 		0
 #define MALLOC 		0
 #define IOCTL 		0
@@ -107,12 +96,9 @@
 #define HW		    0
 #define TALK		0
 #define IRQ 		0
-#define TRANSFER 	0
+#define XFER 		0
 #define REQUEST	 	0
 #define SLEEP		0
-#else
-#define TRACE(x)
-#endif
 
 /*	The following addresses are taken from the Mitsumi Reference 
  *  and describe the possible i/o range for the controller.

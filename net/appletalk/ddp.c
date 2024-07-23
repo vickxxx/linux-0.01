@@ -830,7 +830,7 @@ int atif_ioctl(int cmd, void *arg)
 				limit=ntohs(nr->nr_lastnet);
 				if(limit-ntohs(nr->nr_firstnet) > 256)
 				{
-					printk("Too many routes/iface.\n");
+					printk(KERN_WARNING "Too many routes/iface.\n");
 					return -EINVAL;
 				}
 				for(ct=ntohs(nr->nr_firstnet);ct<=limit;ct++)
@@ -1451,7 +1451,7 @@ static int atalk_rcv(struct sk_buff *skb, struct device *dev, struct packet_type
 
 #ifdef CONFIG_FIREWALL
 	
-	if(call_in_firewall(AF_APPLETALK, skb->dev, ddp)!=FW_ACCEPT)
+	if(call_in_firewall(AF_APPLETALK, skb->dev, ddp, NULL)!=FW_ACCEPT)
 	{
 		kfree_skb(skb, FREE_READ);
 		return 0;
@@ -1485,7 +1485,7 @@ static int atalk_rcv(struct sk_buff *skb, struct device *dev, struct packet_type
 		 *	Check firewall allows this routing
 		 */
 		
-		if(call_fw_firewall(AF_APPLETALK, skb->dev, ddp)!=FW_ACCEPT)
+		if(call_fw_firewall(AF_APPLETALK, skb->dev, ddp, NULL)!=FW_ACCEPT)
 		{
 			kfree_skb(skb, FREE_READ);
 			return(0);
@@ -1746,7 +1746,7 @@ static int atalk_sendmsg(struct socket *sock, struct msghdr *msg, int len, int n
 		
 #ifdef CONFIG_FIREWALL
 
-	if(call_out_firewall(AF_APPLETALK, skb->dev, ddp)!=FW_ACCEPT)
+	if(call_out_firewall(AF_APPLETALK, skb->dev, ddp, NULL)!=FW_ACCEPT)
 	{
 		kfree_skb(skb, FREE_WRITE);
 		return -EPERM;
@@ -2013,7 +2013,7 @@ void atalk_proto_init(struct net_proto *pro)
 {
 	(void) sock_register(atalk_proto_ops.family, &atalk_proto_ops);
 	if ((ddp_dl = register_snap_client(ddp_snap_id, atalk_rcv)) == NULL)
-		printk("Unable to register DDP with SNAP.\n");
+		printk(KERN_CRIT "Unable to register DDP with SNAP.\n");
 	
 	ltalk_packet_type.type=htons(ETH_P_LOCALTALK);	
 	dev_add_pack(&ltalk_packet_type);
@@ -2024,6 +2024,7 @@ void atalk_proto_init(struct net_proto *pro)
 	register_netdevice_notifier(&ddp_notifier);
 	aarp_proto_init();
 
+#ifdef CONFIG_PROC_FS
 	proc_net_register(&(struct proc_dir_entry) {
 		PROC_NET_ATALK, 9, "appletalk",
 		S_IFREG | S_IRUGO, 1, 0, 0,
@@ -2042,8 +2043,9 @@ void atalk_proto_init(struct net_proto *pro)
 		0, &proc_net_inode_operations,
 		atalk_if_get_info
 	});
+#endif	
 
-	printk(KERN_INFO "Appletalk 0.17 for Linux NET3.034\n");
+	printk(KERN_INFO "Appletalk 0.17 for Linux NET3.035\n");
 }
 
 #ifdef MODULE
@@ -2095,9 +2097,11 @@ void cleanup_module(void)
 
 	aarp_cleanup_module();
 
+#ifdef CONFIG_PROC_FS
 	proc_net_unregister(PROC_NET_ATALK);
 	proc_net_unregister(PROC_NET_AT_ROUTE);
 	proc_net_unregister(PROC_NET_ATIF);
+#endif	
 	unregister_netdevice_notifier(&ddp_notifier);
 	dev_remove_pack(&ltalk_packet_type);
 	dev_remove_pack(&ppptalk_packet_type);

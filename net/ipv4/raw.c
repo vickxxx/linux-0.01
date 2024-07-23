@@ -113,7 +113,7 @@ static inline void raw_rcv_skb(struct sock * sk, struct sk_buff * skb)
 {
 	/* Charge it to the socket. */
 	
-	if (sock_queue_rcv_skb(sk,skb)<0)
+	if (__sock_queue_rcv_skb(sk,skb)<0)
 	{
 		ip_statistics.IpInDiscards++;
 		skb->sk=NULL;
@@ -204,7 +204,8 @@ static void raw_getrawfrag(const void *p, __u32 saddr, char *to, unsigned int of
 	 	 *	Deliberate breach of modularity to keep 
 	 	 *	ip_build_xmit clean (well less messy).
 		 */
-		iph->id = htons(ip_id_count++);
+		if (!iph->id)
+			iph->id = htons(ip_id_count++);
 		iph->check=ip_fast_csum((unsigned char *)iph, iph->ihl);
 	}
 }

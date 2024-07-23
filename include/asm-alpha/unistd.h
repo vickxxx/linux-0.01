@@ -142,7 +142,7 @@
 #define __NR_mlockall		316
 #define __NR_munlockall		317
 #define __NR_sysinfo		318
-#define __NR_sysctl		319
+#define __NR__sysctl		319
 #define __NR_idle		320
 #define __NR_umount		321
 #define __NR_swapon		322
@@ -164,6 +164,7 @@
 #define __NR_afs_syscall		338
 #define __NR_uname			339
 #define __NR_nanosleep			340
+#define __NR_mremap			341
 
 #ifdef __LIBRARY__
 

@@ -24,9 +24,10 @@ processors.}
 \hfill Alan Cox, 1995
 
 
-The author wishes to thank Caldera Inc whose donation of an ASUS dual 
-pentium board made this project possible, and Thomas Radke, whose initial 
-work on multiprocessor Linux formed the backbone of this project.
+The author wishes to thank Caldera Inc ( http://www.caldera.com )
+whose donation of an ASUS dual pentium board made this project possible, 
+and Thomas Radke, whose initial work on multiprocessor Linux formed 
+the backbone of this project.
 
 \section{Background: The Intel MP specification.}
 Most IBM PC style multiprocessor motherboards combine Intel 486 or Pentium 
@@ -66,7 +67,7 @@ effectively atomic with respect to other processes and greatly simplifies
 many operation. Secondly interrupts may pre-empt a kernel running process, 
 but will always return to that process. A process in kernel mode may 
 disable interrupts on the processor and guarantee such an interruption will 
-not occur. The final guarantee is that an interrupt will not bne pre-empted 
+not occur. The final guarantee is that an interrupt will not be pre-empted 
 by a kernel task. That is interrupts will run to completion or be 
 pre-empted by other interrupts only.
 

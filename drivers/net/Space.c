@@ -224,15 +224,6 @@ ethif_probe(struct device *dev)
 #   define NEXT_DEV	(&sdla0_dev)
 #endif
 
-/* This must be AFTER the various FRADs so it initializes FIRST! */
-
-#ifdef CONFIG_DLCI
-    extern int dlci_init(struct device *);
-    static struct device dlci_dev = { "dlci", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, dlci_init, };
-#   undef NEXT_DEV
-#   define NEXT_DEV	(&dlci_dev)
-#endif
-
 #ifdef CONFIG_NETROM
 	extern int nr_init(struct device *);
 	
@@ -272,8 +263,16 @@ static struct device atp_dev = {
    which means "don't probe".  These entries exist to only to provide empty
    slots which may be enabled at boot-time. */
 
+static struct device eth7_dev = {
+    "eth7", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, NEXT_DEV, ethif_probe };
+static struct device eth6_dev = {
+    "eth6", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, &eth7_dev, ethif_probe };
+static struct device eth5_dev = {
+    "eth5", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, &eth6_dev, ethif_probe };
+static struct device eth4_dev = {
+    "eth4", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, &eth5_dev, ethif_probe };
 static struct device eth3_dev = {
-    "eth3", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, NEXT_DEV, ethif_probe };
+    "eth3", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, &eth4_dev, ethif_probe };
 static struct device eth2_dev = {
     "eth2", 0,0,0,0,0xffe0 /* I/O base*/, 0,0,0,0, &eth3_dev, ethif_probe };
 static struct device eth1_dev = {

@@ -200,7 +200,9 @@
  *					against machines running Solaris,
  *					and seems to result in general
  *					improvement.
- *
+ *	Stefan Magdalinski	:	adjusted tcp_readable() to fix FIONREAD
+ *	Willy Konynenberg	:	Transparent proxying support.
+ *					
  * To Fix:
  *		Fast path the code. Two things here - fix the window calculation
  *		so it doesn't iterate over the queue, also spot packets with no funny
@@ -510,7 +512,7 @@ void tcp_err(int type, int code, unsigned char *header, __u32 daddr,
 	struct iphdr *iph=(struct iphdr *)(header-sizeof(struct iphdr));
 #endif
 	th =(struct tcphdr *)header;
-	sk = get_sock(&tcp_prot, th->source, daddr, th->dest, saddr);
+	sk = get_sock(&tcp_prot, th->source, daddr, th->dest, saddr, 0, 0);
 
 	if (sk == NULL)
 		return;
@@ -519,11 +521,13 @@ void tcp_err(int type, int code, unsigned char *header, __u32 daddr,
 	{
 		/*
 		 * FIXME:
-		 * For now we will just trigger a linear backoff.
-		 * The slow start code should cause a real backoff here.
+		 * Follow BSD for now and just reduce cong_window to 1 again.
+		 * It is possible that we just want to reduce the
+		 * window by 1/2, or that we want to reduce ssthresh by 1/2
+		 * here as well.
 		 */
-		if (sk->cong_window > 4)
-			sk->cong_window--;
+		sk->cong_window = 1;
+		sk->high_seq = sk->sent_seq;
 		return;
 	}
 
@@ -644,7 +648,7 @@ static int tcp_readable(struct sock *sk)
 		 */
 		if (skb->h.th->urg)
 			amount--;	/* don't count urg data */
-		if (amount && skb->h.th->psh) break;
+/*		if (amount && skb->h.th->psh) break;*/
 		skb = skb->next;
 	}
 	while(skb != (struct sk_buff *)&sk->receive_queue);
@@ -985,7 +989,7 @@ static int do_tcp_sendmsg(struct sock *sk,
 					copy = min(sk->mss - tcp_size, seglen);
 					if (copy <= 0)
 					{
-						printk("TCP: **bug**: \"copy\" <= 0\n");
+						printk(KERN_CRIT "TCP: **bug**: \"copy\" <= 0\n");
 				  		return -EFAULT;
 					}
 					tcp_size += copy;
@@ -1023,7 +1027,7 @@ static int do_tcp_sendmsg(struct sock *sk,
 				copy = seglen;
 			if (copy <= 0)
 			{
-				printk("TCP: **bug**: copy=%d, sk->mss=%d\n", copy, sk->mss);
+				printk(KERN_CRIT "TCP: **bug**: copy=%d, sk->mss=%d\n", copy, sk->mss);
 		  		return -EFAULT;
 			}
 
@@ -1183,8 +1187,6 @@ out:
 
 /*
  *	Send an ack if one is backlogged at this point.
- *
- *	This is called for delayed acks also.
  */
 
 void tcp_read_wakeup(struct sock *sk)
@@ -1762,6 +1764,19 @@ static void tcp_close(struct sock *sk, unsigned long timeout)
 	 * free'ing up the memory.
 	 */
 	tcp_cache_zap();	/* Kill the cache again. */
+
+	/* Now that the socket is dead, if we are in the FIN_WAIT2 state
+	 * we may need to set up a timer.
+         */
+	if (sk->state==TCP_FIN_WAIT2)
+	{
+		int timer_active=del_timer(&sk->timer);
+		if(timer_active)
+			add_timer(&sk->timer);
+		else
+			tcp_reset_msl_timer(sk, TIME_CLOSE, TCP_FIN_TIMEOUT);
+	}
+
 	release_sock(sk);
 	sk->dead = 1;
 }
@@ -1999,10 +2014,7 @@ static int tcp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
 	sk->delack_timer.data = (unsigned long) sk;
 	sk->retransmit_timer.function = tcp_retransmit_timer;
 	sk->retransmit_timer.data = (unsigned long)sk;
-	tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);	/* Timer for repeating the SYN until an answer  */
-	sk->retransmits = 0;				/* Now works the right way instead of a hacked
-											initial setting */
-
+	sk->retransmits = 0;
 	sk->prot->queue_xmit(sk, dev, buff, 0);
 	tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);
 	tcp_statistics.TcpActiveOpens++;

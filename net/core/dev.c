@@ -45,6 +45,8 @@
  *		Alan Cox	:	Cleaned up the backlog initialise.
  *		Craig Metz	:	SIOCGIFCONF fix if space for under
  *					1 device.
+ *	    Thomas Bogendoerfer :	Return ENODEV for dev_open, if there
+ *					is no device open function.
  *
  */
 
@@ -184,7 +186,7 @@ void dev_remove_pack(struct packet_type *pt)
 			return;
 		}
 	}
-	printk("dev_remove_pack: %p not found.\n", pt);
+	printk(KERN_WARNING "dev_remove_pack: %p not found.\n", pt);
 }
 
 /*****************************************************************************************
@@ -236,7 +238,7 @@ extern __inline__ void dev_load(const char *name)
  
 int dev_open(struct device *dev)
 {
-	int ret = 0;
+	int ret = -ENODEV;
 
 	/*
 	 *	Call device private open method
@@ -330,7 +332,7 @@ int unregister_netdevice_notifier(struct notifier_block *nb)
  *	rest of the magic.
  */
 
-void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
+static void do_dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 {
 	unsigned long flags;
 	struct sk_buff_head *list;
@@ -360,7 +362,7 @@ void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 #ifdef CONFIG_NET_DEBUG
 	if (pri >= DEV_NUMBUFFS) 
 	{
-		printk("bad priority in dev_queue_xmit.\n");
+		printk(KERN_WARNING "bad priority in dev_queue_xmit.\n");
 		pri = 1;
 	}
 #endif
@@ -411,14 +413,8 @@ void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 				dev_kfree_skb(skb, FREE_WRITE);
 				return;
 			}
-			cli();
-			skb_device_unlock(skb);		/* Buffer is on the device queue and can be freed safely */
-			__skb_queue_tail(list, skb);
-			skb = __skb_dequeue(list);
-			skb_device_lock(skb);		/* New buffer needs locking down */
-			restore_flags(flags);
 		}
-		
+
 		/* copy outgoing packets to any sniffer packet handlers */
 		if (dev_nit) {
 			struct packet_type *ptype;
@@ -440,16 +436,22 @@ void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 				}
 			}
 		}
+
+		if (skb_queue_len(list)) {
+			cli();
+			skb_device_unlock(skb);		/* Buffer is on the device queue and can be freed safely */
+			__skb_queue_tail(list, skb);
+			skb = __skb_dequeue(list);
+			skb_device_lock(skb);		/* New buffer needs locking down */
+			restore_flags(flags);
+		}
 	}
-	start_bh_atomic();
 	if (dev->hard_start_xmit(skb, dev) == 0) {
 		/*
 		 *	Packet is now solely the responsibility of the driver
 		 */
-		end_bh_atomic();
 		return;
 	}
-	end_bh_atomic();
 
 	/*
 	 *	Transmission failed, put skb back into a list. Once on the list it's safe and
@@ -459,6 +461,13 @@ void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 	skb_device_unlock(skb);
 	__skb_queue_head(list,skb);
 	restore_flags(flags);
+}
+
+void dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
+{
+	start_bh_atomic();
+	do_dev_queue_xmit(skb, dev, pri);
+	end_bh_atomic();
 }
 
 /*
@@ -519,7 +528,7 @@ void netif_rx(struct sk_buff *skb)
  *	This routine causes all interfaces to try to send some data. 
  */
  
-void dev_transmit(void)
+static void dev_transmit(void)
 {
 	struct device *dev;
 
@@ -756,7 +765,7 @@ void dev_tint(struct device *dev)
 			 *	Feed them to the output stage and if it fails
 			 *	indicate they re-queue at the front.
 			 */
-			dev_queue_xmit(skb,dev,-i - 1);
+			do_dev_queue_xmit(skb,dev,-i - 1);
 			/*
 			 *	If we can take no more then stop here.
 			 */

@@ -68,6 +68,12 @@ S: Status, one of the following:
 			it has been replaced by a better system and you
 			should be using that.
 
+EXT2 FILE SYSTEM
+P:	Remy Card
+M:	Remy.Card@linux.org
+L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
 3C501 NETWORK DRIVER
 P:	Alan Cox
 M:	net-patches@lxorguk.ukuu.org.uk
@@ -174,6 +180,7 @@ S:	Maintained
 FTAPE/QIC-117:
 P:	Kai Harrekilde-Petersen
 M:	khp@dolphinics.no
+W:	http://www.dolphinics.no/~khp/ftape.html
 L:	linux-tape@vger.rutgers.edu
 S:	Maintained
 
@@ -210,7 +217,7 @@ S:	Maintained
 
 NCP FILESYSTEM:
 P:	Volker Lendecke
-M:	lendecke@namu01.gwdg.de
+M:	lendecke@namu01.Num.Math.Uni-Goettingen.de
 L:	linware@sh.cvut.cz
 S:	Maintained
 
@@ -246,7 +253,7 @@ S:     Maintained
 
 SMB FILESYSTEM:
 P:	Volker Lendecke
-M:	lendecke@namu01.gwdg.de
+M:	lendecke@namu01.Num.Math.Uni-Goettingen.de
 L:	samba@listproc.anu.edu.au
 S:	Odd Fixes
 
@@ -257,8 +264,8 @@ L:	linux-smp@vger.rutgers.edu
 S:	Maintained
 
 SPARC:
-P:	David S. Miller
-M:	davem@caip.rutgers.edu
+P:	Eddie C. Dost
+M:	ecd@skynet.be
 L:	sparclinux@vger.rutgers.edu
 S:	Maintained
 
@@ -309,6 +316,17 @@ ADVANSYS SCSI DRIVER
 P:	Bob Frey
 M:	Bob Frey <bobf@advansys.com>
 W:	http://www.advansys.com/linux
+S:	Maintained
+
+AHA152X SCSI DRIVER
+P:	Juergen E. Fischer
+M:	Juergen Fischer <fischer@et-inf.fho-emden.de>
+L:	linux-scsi@vger.rutgers.edu
+S:	Maintained
+
+CREDITS FILE
+P:	John A. Martin
+M:	jam@acm.org
 S:	Maintained
 
 REST:

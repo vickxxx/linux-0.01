@@ -12,9 +12,12 @@
 #include <linux/binfmts.h>
 #include <paths.h>
 
-#define _PATH_JAVA	"/usr/local/java/bin/java"
-#define _PATH_APPLET	"/usr/local/java/bin/appletviewer"
-#define _PATH_BASH	"/bin/bash"
+#define _PATH_JAVA	"/usr/bin/java"
+#define _PATH_APPLET	"/usr/bin/appletviewer"
+#define _PATH_SH	"/bin/bash"
+
+char binfmt_java_interpreter[65] = _PATH_JAVA;
+char binfmt_java_appletviewer[65] = _PATH_APPLET;
 
 static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
@@ -29,7 +32,7 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 
 	/*
 	 * OK, we've set the interpreter name
-	 * Splice in (1) the interpreter's name for argv[0] (_PATH_BASH)
+	 * Splice in (1) the interpreter's name for argv[0] (_PATH_SH)
 	 *           (2) the name of the java wrapper for argv[1] (_PATH_JAVA)
 	 *           (3) filename of Java class (replace argv[0])
 	 *               without leading path or trailing '.class'
@@ -47,12 +50,12 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	strcpy (bprm->buf, _PATH_JAVA);
+	strcpy (bprm->buf, binfmt_java_interpreter);
 	cp = bprm->buf;
 	bprm->p = copy_strings(1, &cp, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	strcpy (bprm->buf, _PATH_BASH);
+	strcpy (bprm->buf, _PATH_SH);
 	interp = bprm->buf;
 	if ((i_name = strrchr (bprm->buf, '/')) != NULL)
 		i_name++;
@@ -102,12 +105,12 @@ static int do_load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	strcpy (bprm->buf, _PATH_APPLET);
+	strcpy (bprm->buf, binfmt_java_appletviewer);
 	cp = bprm->buf;
 	bprm->p = copy_strings(1, &cp, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	strcpy (bprm->buf, _PATH_BSHELL);
+	strcpy (bprm->buf, _PATH_SH);
 	interp = bprm->buf;
 	if ((i_name = strrchr (bprm->buf, '/')) != NULL)
 		i_name++;

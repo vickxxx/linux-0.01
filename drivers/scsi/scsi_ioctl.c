@@ -22,7 +22,7 @@
 #include <scsi/scsi_ioctl.h>
 
 #define MAX_RETRIES 5   
-#define MAX_TIMEOUT 900
+#define MAX_TIMEOUT (9 * HZ)
 #define MAX_BUF 4096
 
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -150,7 +150,7 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
     result = SCpnt->result;
     SCpnt->request.rq_status = RQ_INACTIVE;
 
-    if(SCpnt->device->scsi_request_fn)
+    if (!SCpnt->device->was_reset && SCpnt->device->scsi_request_fn)
 	(*SCpnt->device->scsi_request_fn)();
 
     wake_up(&SCpnt->device->device_wait);
@@ -171,7 +171,7 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
     unsigned char opcode;
     int inlen, outlen, cmdlen;
     int needed, buf_needed;
-    int result;
+    int timeout, retries, result;
     
     if (!buffer)
 	return -EINVAL;
@@ -239,6 +239,22 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
      */
     cmd[1] = ( cmd[1] & 0x1f ) | (dev->lun << 5);
     
+    switch (opcode)
+      {
+      case FORMAT_UNIT:
+	timeout =  2 * 60 * 60 * HZ; /* 2 Hours */
+	retries = 1;
+	break;
+      case START_STOP:
+	timeout =  60 * HZ;	/* 60 seconds */
+	retries = 1;
+	break;
+      default:
+	timeout = MAX_TIMEOUT;
+	retries = MAX_RETRIES;
+	break;
+      }
+
 #ifndef DEBUG_NO_CMD
     
     SCpnt = allocate_device(NULL, dev, 1);
@@ -246,8 +262,8 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
     {
 	struct semaphore sem = MUTEX_LOCKED;
 	SCpnt->request.sem = &sem;
-	scsi_do_cmd(SCpnt,  cmd,  buf, needed,  scsi_ioctl_done,  MAX_TIMEOUT, 
-		    MAX_RETRIES);
+	scsi_do_cmd(SCpnt,  cmd,  buf, needed,  scsi_ioctl_done,
+		    timeout, retries);
 	down(&sem);
     }
     
@@ -298,7 +314,7 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
 
 /*
  * the scsi_ioctl() function differs from most ioctls in that it does
- * not take a major/minor number as the dev filed.  Rather, it takes
+ * not take a major/minor number as the dev field.  Rather, it takes
  * a pointer to a scsi_devices[] element, a structure. 
  */
 int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
@@ -326,13 +342,13 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 	if(!dev->tagged_supported) return -EINVAL;
 	dev->tagged_queue = 1;
 	dev->current_tag = 1;
-	break;
+	return 0;
     case SCSI_IOCTL_TAGGED_DISABLE:
 	if(!suser())  return -EACCES;
 	if(!dev->tagged_supported) return -EINVAL;
 	dev->tagged_queue = 0;
 	dev->current_tag = 0;
-	break;
+	return 0;
     case SCSI_IOCTL_PROBE_HOST:
 	return ioctl_probe(dev->host, arg);
     case SCSI_IOCTL_SEND_COMMAND:

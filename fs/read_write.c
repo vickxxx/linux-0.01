@@ -15,7 +15,7 @@
 
 #include <asm/segment.h>
 
-asmlinkage int sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
+asmlinkage long sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 {
 	struct file * file;
 	long tmp = -1;
@@ -100,7 +100,7 @@ asmlinkage int sys_llseek(unsigned int fd, unsigned long offset_high,
 	return 0;
 }
 
-asmlinkage int sys_read(unsigned int fd,char * buf,unsigned int count)
+asmlinkage int sys_read(unsigned int fd,char * buf,int count)
 {
 	int error;
 	struct file * file;
@@ -112,7 +112,7 @@ asmlinkage int sys_read(unsigned int fd,char * buf,unsigned int count)
 		return -EBADF;
 	if (!file->f_op || !file->f_op->read)
 		return -EINVAL;
-	if (!count)
+	if (count <= 0)
 		return 0;
 	error = locks_verify_area(FLOCK_VERIFY_READ,inode,file,file->f_pos,count);
 	if (error)
@@ -180,7 +180,7 @@ static int sock_readv_writev(int type, struct inode * inode, struct file * file,
 		return -EOPNOTSUPP;
 	msg.msg_name = NULL;
 	msg.msg_namelen = 0;
-	msg.msg_accrights = NULL;
+	msg.msg_control = NULL;
 	msg.msg_iov = (struct iovec *) iov;
 	msg.msg_iovlen = count;
 
@@ -203,7 +203,7 @@ static int do_readv_writev(int type, struct inode * inode, struct file * file,
 	const struct iovec * vector, unsigned long count)
 {
 	size_t tot_len;
-	struct iovec iov[MAX_IOVEC];
+	struct iovec iov[UIO_MAXIOV];
 	int retval, i;
 	IO_fn_t fn;
 
@@ -213,7 +213,7 @@ static int do_readv_writev(int type, struct inode * inode, struct file * file,
 	 */
 	if (!count)
 		return 0;
-	if (count > MAX_IOVEC)
+	if (count > UIO_MAXIOV)
 		return -EINVAL;
 	retval = verify_area(VERIFY_READ, vector, count*sizeof(*vector));
 	if (retval)

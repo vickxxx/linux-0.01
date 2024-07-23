@@ -8,10 +8,14 @@
  * Authors:	see ip.c
  *
  * Fixes:
- *		Many		:	Split from ip.c , see ip_input.c for history.
- *		Dave Gregorich	:	NULL ip_rt_put fix for multicast routing.
+ *		Many		:	Split from ip.c , see ip_input.c for 
+ *					history.
+ *		Dave Gregorich	:	NULL ip_rt_put fix for multicast 
+ *					routing.
  *		Jos Vos		:	Add call_out_firewall before sending,
  *					use output device for accounting.
+ *		Jos Vos		:	Call forward firewall after routing
+ *					(always use output device).
  */
 
 #include <linux/config.h>
@@ -105,28 +109,6 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 #endif /* CONFIG_IP_MASQUERADE */
 #endif /* CONFIG_FIREWALL */
 	
-	/* 
-	 *	See if we are allowed to forward this.
- 	 *	Note: demasqueraded fragments are always 'back'warded.
-	 */
-	
-#ifdef CONFIG_FIREWALL
-	if(!(is_frag&IPFWD_MASQUERADED))
-	{
-		fw_res=call_fw_firewall(PF_INET, dev, skb->h.iph);
-		switch (fw_res) {
-		case FW_ACCEPT:
-		case FW_MASQUERADE:
-			break;
-		case FW_REJECT:
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev);
-			/* fall thru */
-		default:
-			return -1;
-		}
-	}
-#endif
-
 	/*
 	 *	According to the RFC, we must first decrease the TTL field. If
 	 *	that reaches zero, we must reply an ICMP control message telling
@@ -237,6 +219,49 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 	}
 #endif	
 	
+	/* 
+	 *	See if we are allowed to forward this.
+ 	 *	Note: demasqueraded fragments are always 'back'warded.
+	 */
+	
+#ifdef CONFIG_FIREWALL
+	if(!(is_frag&IPFWD_MASQUERADED))
+	{
+#ifdef CONFIG_IP_MASQUERADE
+		/* 
+		 *	Check that any ICMP packets are not for a 
+		 *	masqueraded connection.  If so rewrite them
+		 *	and skip the firewall checks
+		 */
+		if (iph->protocol == IPPROTO_ICMP)
+		{
+			if ((fw_res = ip_fw_masq_icmp(&skb, dev2)) < 0)
+				/* Problem - ie bad checksum */
+				return -1;
+
+			if (fw_res)
+				/* ICMP matched - skip firewall */
+				goto skip_call_fw_firewall;
+		}
+#endif
+		fw_res=call_fw_firewall(PF_INET, dev2, iph, NULL);
+		switch (fw_res) {
+		case FW_ACCEPT:
+		case FW_MASQUERADE:
+			break;
+		case FW_REJECT:
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev);
+			/* fall thru */
+		default:
+			return -1;
+		}
+
+#ifdef CONFIG_IP_MASQUERADE
+		skip_call_fw_firewall:
+#endif		
+	}
+#endif
+
 	/*
 	 * We now may allocate a new buffer, and copy the datagram into it.
 	 * If the indicated interface is up and running, kick it.
@@ -250,7 +275,15 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 		 * (Don't masquerade de-masqueraded fragments)
 		 */
 		if (!(is_frag&IPFWD_MASQUERADED) && fw_res==FW_MASQUERADE)
-			ip_fw_masquerade(&skb, dev2);
+			if (ip_fw_masquerade(&skb, dev2) < 0)
+			{
+				/*
+				 * Masquerading failed; silently discard this packet.
+				 */
+				if (rt)
+					ip_rt_put(rt);
+				return -1;
+			}
 #endif
 		IS_SKB(skb);
 
@@ -353,7 +386,7 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 #endif			
 		}
 #ifdef CONFIG_FIREWALL
-		if((fw_res = call_out_firewall(PF_INET, skb2->dev, iph)) < FW_ACCEPT)
+		if((fw_res = call_out_firewall(PF_INET, skb2->dev, iph, NULL)) < FW_ACCEPT)
 		{
 			/* FW_ACCEPT and FW_MASQUERADE are treated equal:
 			   masquerading is only supported via forward rules */
@@ -399,7 +432,7 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 					optptr[2] = srrptr+4;
 				}
 				else
-				        printk("ip_forward(): Argh! Destination lost!\n");
+				        printk(KERN_CRIT "ip_forward(): Argh! Destination lost!\n");
 			}
 			if (opt->ts_needaddr) 
 			{
@@ -436,7 +469,7 @@ int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag,
 			 *	Count mapping we shortcut
 			 */
 			 
-			ip_fw_chk(iph,dev2,ip_acct_chain,IP_FW_F_ACCEPT,1);
+			ip_fw_chk(iph,dev2,NULL,ip_acct_chain,0,IP_FW_MODE_ACCT_OUT);
 #endif			
 			
 			/*

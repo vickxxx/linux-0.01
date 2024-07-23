@@ -2,7 +2,8 @@
 	contributed to the linux project.  It is sorted by name, and
 	formatted in a format that allows for easy grepping and
 	beautification by scripts.  The fields are: name (N), email (E),
-	web-address (W), description (D) and snail-mail address (S).
+	web-address (W), PGP key ID and fingerprint (P), description (D)
+	and snail-mail address (S). 
 	Thanks,
 
 			Linus
@@ -122,6 +123,10 @@ E: hennus@sky.ow.nl [My uucp-fed Linux box at home]
 D: Author and maintainer of the QIC-02 tape driver
 S: The Netherlands
 
+N: Ross Biro
+E: bir7@leland.Stanford.Edu
+D: Original author of the Linux networking code
+
 N: Thomas Bogendoerfer
 E: tsbogend@bigbug.franken.de
 D: Lance32 driver
@@ -129,10 +134,6 @@ D: strace for Linux/Alpha
 S: Baumgartenweg 5
 S: 91452 Wilhermsdorf
 S: Germany
-
-N: Ross Biro
-E: bir7@leland.Stanford.Edu
-D: Original author of the Linux networking code
 
 N: Bill Bogstad
 E: bogstad@cs.jhu.edu
@@ -161,6 +162,12 @@ D: random Linux hacker
 S: Bessemerstraat 21
 S: Amsterdam
 S: The Netherlands
+
+N: Ray Burr
+E: ryb@nightmare.com
+D: Original author of Amiga FFS filesystem
+S: Orlando, Florida
+S: USA
 
 N: Michael Callahan
 E: callahan@maths.ox.ac.uk
@@ -220,7 +227,12 @@ S: Stanford, California 94305, USA
 
 N: Juan Jose Ciarlante
 E: jjciarla@raiz.uncu.edu.ar
+E: juanjo@irriga.uncu.edu.ar
 D: Network driver alias support
+D: IP masq hashing and app modules
+S: Las Cuevas 2385 - Bo Guemes
+S: Las Heras, Mendoza CP 5539
+S: Argentina
 
 N: Hamish Coleman
 E: hamish@zot.apana.org.au
@@ -294,6 +306,14 @@ S: 5800 Corporate Drive
 S: Pittsburgh, Pennsylvania 15237-5829
 S: USA
 
+N: Eddie C. Dost
+E: ecd@skynet.be
+D: Linux/Sparc kernel hacker
+D: New Linux/Sparc maintainer (while davem is at SGI)
+S: Rue de la Chapelle 51
+S: 4850 Moresnet
+S: Belgium
+
 N: Thomas Dunbar
 E: tdunbar@vtaix.cc.vt.edu
 D: TeX & METAFONT hacking/maintenance
@@ -318,6 +338,16 @@ D: Boot sector "..." printing
 S: 2255 Spruce
 S: Boulder, Colorado 80302
 S: USA
+
+N: Heiko Eissfeldt
+E: heiko@colossus.escape.de heiko@unifix.de
+D: verify_area stuff, generic scsi fixes
+D: SCSI Programming HOWTO
+D: POSIX.1 compliance testing
+S: Unifix Software GmbH
+S: Bueltenweg 27a
+S: D-38106 Braunschweig
+S: Germany
 
 N: Bjorn Ekwall
 E: bj0rn@blox.se
@@ -418,12 +448,31 @@ N: Philip Gladstone
 E: philipg@onsett.com
 D: Kernel / timekeeping stuff
 
+N: Michael A. Griffith
+E: grif@cs.ucr.edu
+W: http://www.cs.ucr.edu/~grif
+D: Loopback speedup, qlogic scsi hacking, VT_LOCKSWITCH
+S: Department of Computer Science
+S: University of California, Riverside
+S: Riverside, CA  92521-0304
+S: USA
+
 N: Dmitry S. Gorodchanin
 E: begemot@bgm.rosprint.net
 D: RISCom/8 driver, misc kernel fixes.
 S: 6/1 M.Koneva bl, apt #125 
 S: Poltava 314023
 S: Ukraine
+
+N: Paul Gortmaker
+E: gpg109@rsphy1.anu.edu.au
+W: http://rsphy1.anu.edu.au/~gpg109
+D: Real Time Clock driver author.
+D: 8390 net driver hacker (ne2000, wd8013, smc-ultra, 3c503, etc.) 
+D: Ethernet-HowTo and BootPrompt-HowTo author.
+D: Added many new CONFIG options (modules, ramdisk, generic-serial, etc.)
+D: Implemented 1st "official" kernel thread (moved user bdflush to kflushd)
+D: Various other random hacks, patches and utilities.
 
 N: John E. Gotts
 E: jgotts@engin.umich.edu
@@ -461,13 +510,21 @@ S: 25360 Georgia Tech Station
 S: Atlanta, Georgia 30332
 S: USA
 
+N: Angelo Haritsis
+E: ah@doc.ic.ac.uk
+D: kernel patches (serial, watchdog)
+D: xringd, vuzkern, greekXfonts
+S: 58 Henfield Close
+S: London N19 3UL
+S: United Kingdom
+
 N: Kai Harrekilde-Petersen
 E: khp@dolphinics.no
-W: http://www.pip.dknet.dk/~pip93
-D: ftape-HOWTO, i82078 fdc detection code, various ftape related stuff.
-S: Dolphin Interconnect Solutions A/S
-S: P.O. Box 70, Borgerud
-S: N-0621 Oslo
+W: http://www.dolphinics.no/~khp
+P: 1024/D2CDF895 F6 33 E0 4E 01 17 85 8C  4F 7F 1F F8 14 E7 86 1D
+D: ftape-HOWTO, i82078 fdc detection code, ftape maintainer.
+S: Peder Holters vei 13
+S: 1168 Oslo
 S: Norway
 
 N: Andrew Haylett
@@ -475,7 +532,8 @@ E: ajh@primag.co.uk
 D: Selection mechanism
 
 N: Jochen Hein
-E: Hein@Informatik.TU-Clausthal.de
+E: jochen.hein@informatik.tu-clausthal.de
+P: 1024/4A27F015 25 72 FB E3 85 9F DE 3B  CB 0A DA DA 40 77 05 6C
 D: National Language Support
 D: German Support-Disks for SLS/Slackware called SLT
 D: Linux Internationalization Project
@@ -570,6 +628,8 @@ S: United Kingdom
 
 N: Michael K. Johnson
 E: johnsonm@redhat.com
+W: http://www.redhat.com/~johnsonm
+P: 1024/4536A8DD 2A EC 88 08 40 64 CE D8  DD F8 12 2B 61 43 83 15
 D: The Linux Documentation Project
 D: Kernel Hackers' Guide
 D: Procps
@@ -579,6 +639,14 @@ D: LP driver
 S: 201 Howell Street, Apartment 1C
 S: Chapel Hill, North Carolina 27514-4818
 S: USA
+
+N: Bernhard Kaindl
+E: bartelt@computerhaus.at
+D: Author of a menu based configuration tool, kmenu, which 
+D: is the predecessor of 'make menuconfig' and 'make xconfig'.
+S: Tallak 95
+S: 8103 Rein
+S: Austria
 
 N: Fred N. van Kempen
 E: waltje@uwalt.nl.mugnet.org
@@ -630,19 +698,28 @@ N: Rudolf Koenig
 E: rfkoenig@immd4.informatik.uni-erlangen.de
 D: The Linux Support Team Erlangen
 
-N: Markus Kuhn
-E: mskuhn@cip.informatik.uni-erlangen.de
-W: http://wwwcip.informatik.uni-erlangen.de/user/mskuhn
-D: Unicode, real-time, time, standards
-S: Schlehenweg 9
-S: D-91080 Uttenreuth
-S: Germany
+N: Willy Konynenberg
+E: willy@xos.nl
+W: http://www.xos.nl/
+D: IP transparent proxy support
+S: X/OS Experts in Open Systems BV
+S: Kruislaan 419
+S: 1098 VA Amsterdam 
+S: The Netherlands
 
 N: Gero Kuhlmann
 E: gero@gkminix.han.de
 D: mounting root via NFS
 S: Donarweg 4
 S: D-30657 Hannover
+S: Germany
+
+N: Markus Kuhn
+E: mskuhn@cip.informatik.uni-erlangen.de
+W: http://wwwcip.informatik.uni-erlangen.de/user/mskuhn
+D: Unicode, real-time, time, standards
+S: Schlehenweg 9
+S: D-91080 Uttenreuth
 S: Germany
 
 N: Bas Laarhoven
@@ -658,7 +735,7 @@ D: Author of the dialog utility, foundation
 D: for Menuconfig's lxdialog.
 
 N: Volker Lendecke
-E: lendecke@namu01.gwdg.de
+E: lendecke@namu01.Num.Math.Uni-Goettingen.de
 D: Kernel smbfs (to mount WfW, NT and OS/2 network drives.)
 D: NCP filesystem support (to mount NetWare volumes)
 S: Innersteweg 11
@@ -734,7 +811,8 @@ D: SLS distribution
 D: Initial implementation of VC's, pty's and select()
 
 N: James B. MacLean
-E: jmaclean@fox.nstn.ns.ca
+E: macleajb@ednet.ns.ca
+W: http://www.ednet.ns.ca/~macleajb/dosemu.html
 D: Coordinator of DOSEMU releases
 D: Program in DOSEMU
 S: PO BOX 220, HFX. CENTRAL
@@ -767,7 +845,7 @@ D: Credit file compilator
 N: Kevin E. Martin
 E: martin@cs.unc.edu
 D: Developed original accelerated X servers included in XFree86
-D: XF86_Mach64 (forthcoming -- please don't ask when)
+D: XF86_Mach64
 D: XF86_Mach32
 D: XF86_Mach8
 D: XF86_8514
@@ -805,6 +883,14 @@ S: Lehrstuhl fuer angewandte Mathematik insb. Informatik
 S: RWTH-Aachen
 S: D-52056 Aachen
 S: Germany
+
+N: Nigel Metheringham
+E: Nigel.Metheringham@ThePLAnet.net
+D: IP Masquerading work and minor fixes
+S: Planet Online
+S: The White House, Melbourne Street, LEEDS
+S: LS2  7PS,   UK
+P: 1024/31455639 B7 99 BD B8 00 17 BD 46  C1 15 B8 AB 87 BC 25 FA
 
 N: Craig Metz
 E: cmetz@tjhsst.edu
@@ -945,11 +1031,14 @@ S: CANADA P7C 5M9
 
 N: Kai Petzke
 E: wpp@marie.physik.tu-berlin.de
+W: http://physik.tu-berlin.de/~wpp
+P: 1024/B42868C1 D9 59 B9 98 BB 93 05 38  2E 3E 31 79 C3 65 5D E1 
 D: Driver for Laser Magnetic Storage CD-ROM
-D: Some kernel bug fixes, new swapping routine
+D: Some kernel bug fixes
 D: Port of the database Postgres
-S: Stresemannstr. 62
-S: 10963 Berlin
+D: "Unix fuer Jedermann" a German introduction to linux (see my web page)
+S: M"ullerstr. 69
+S: 13349 Berlin
 S: Germany
 
 N: Ken Pizzini
@@ -983,18 +1072,10 @@ D: Instigator, FHS standard
 D: Keeper of the Jargon File and curator of the Retrocomputing Museum
 D: Author, Emacs VC and GUD modes
 
-N: Bernhard Kaindl
-E: bartelt@computerhaus.at
-D: Author of a menu based configuration tool, kmenu, which 
-D: is the predecessor of 'make menuconfig' and 'make xconfig'.
-S: Tallak 95
-S: 8103 Rein
-S: Austria
-
 N: Stefan Reinauer
 E: stepan@home.culture.mipt.ru
 W: http://home.culture.mipt.ru/~stepan
-D: Modulized affs and ufs. Minor fixes.
+D: Modularized affs and ufs. Minor fixes.
 S: Rebmannsweg 34h
 S: 79539 Loerrach
 S: Germany
@@ -1034,6 +1115,13 @@ N: Alessandro Rubini
 E: rubini@ipvvis.unipv.it
 D: the gpm mouse server and kernel support for it
 
+N: Thomas Sailer
+E: sailer@ife.ee.ethz.ch
+D: Baycom radio modem driver
+S: Weinbergstrasse 76
+S: 8408 Winterthur
+S: Switzerland
+
 N: Robert Sanders
 E: gt8134b@prism.gatech.edu
 D: Dosemu
@@ -1044,6 +1132,16 @@ D: Kernel sound drivers
 S: Hiekkalaiturintie 3 A 8
 S: 00980 Helsinki
 S: Finland
+
+N: Eric Schenk
+E: schenk@cs.toronto.edu
+D: Random kernel debugging.
+D: SYSV Semaphore code rewrite.
+D: Network layer debugging.
+D: Dial on demand facility (diald).
+S: 7 Borden Street
+S: Toronto, Ontario
+S: Canada M5S 2M8
 
 N: Peter De Schrijver
 E: stud11@cc4.kuleuven.ac.be
@@ -1075,6 +1173,14 @@ D: SCSI debugging
 D: Maintainer of the Debian Kernel packages
 S: 14355 SW Allen Blvd., Suite #140
 S: Beaverton, OR 97008
+S: USA
+
+N: John Shifflett
+E: john@geolog.com
+E: jshiffle@netcom.com
+D: Always IN2000 SCSI driver
+D: wd33c93 SCSI driver (linux-m68k)
+S: San Jose, CA
 S: USA
 
 N: Rick Sladkey
@@ -1135,20 +1241,23 @@ S: DK-1860 Frederiksberg C
 S: Denmark
 
 N: Drew Sullivan
-E: drew@lethe.north.net
+W: http://www.ss.org/
+E: drew@ss.org
 D: iBCS2 developer
 S: 22 Irvington Cres.
 S: Willowdale, Ontario
 S: Canada M2N 2Z1
+P: 1024/ACFFA969 5A 9C 42 AB E4 24 82 31  99 56 00 BF D3 2B 25 46
 
 N: Tommy Thorn
-E: Tommy.Thorn@daimi.aau.dk
+E: Tommy.Thorn@irisa.fr
+W: http://www.irisa.fr/prive/thorn/index.html
+P: 512/B4AFC909 BC BF 6D B1 52 26 1E D6  E3 2F A3 24 2A 84 FE 21
 D: Device driver hacker (aha1542 & plip)
-S: Aarhus University
-S: Computer Science Department
-S: Ny Munkegade 116
-S: DK-8000 Aarhus C
-S: Denmark
+S: IRISA
+S: Universit=E9 de Rennes I
+S: F-35042 Rennes Cedex
+S: FRANCE
 
 N: Jon Tombs
 E: jon@gtex02.us.es
@@ -1161,6 +1270,8 @@ S: Spain
 
 N: Linus Torvalds
 E: Linus.Torvalds@Helsinki.FI
+W: http://www.cs.helsinki.fi/~torvalds/
+P: 1024/A86B35C5 96 54 50 29 EC 11 44 7A  BE 67 3C 24 03 13 62 C8
 D: General kernel hacker
 S: Kalevankatu 55 B 37
 S: 00180 Helsinki
@@ -1225,8 +1336,10 @@ S: USA
 
 N: Stephen Tweedie
 E: sct@dcs.ed.ac.uk
+P: 1024/E7A417AD E2 FE A4 20 34 EC ED FC 7D 7E 67 8D E0 31 D1 69
 D: Second extended file system developer
 D: General filesystem hacker
+D: kswap vm management code
 S: Dept. of Computer Science
 S: University of Edinburgh
 S: JCMB, The King's Buildings
@@ -1275,6 +1388,15 @@ S: 301 15th Street S.
 S: Moorhead, Minnesota 56560
 S: USA 
 
+N: Jos Vos
+E: jos@xos.nl
+W: http://www.xos.nl/
+D: Various IP firewall updates, ipfwadm
+S: X/OS Experts in Open Systems BV
+S: Kruislaan 419
+S: 1098 VA Amsterdam 
+S: The Netherlands
+
 N: Juergen Weigert
 E: jnweiger@immd4.informatik.uni-erlangen.de
 D: The Linux Support Team Erlangen
@@ -1305,20 +1427,19 @@ S: Roger Maris Cancer Center
 S: 820 4th St. N.
 S: Fargo, ND  58122
 
+N: Hans-Joachim Widmaier
+E: jbhr@sofal.tynet.sub.org
+D: AFFS rewrite
+S: Eichenweg 16
+S: 73650 Winterbach
+S: Germany
+
 N: Marco van Wieringen
 E: mvw@mercury.mcs.nl.mugnet.org
 D: Author of acct and quota
 S: Breeburgsingel 12
 S: 2135 CN Hoofddorp
 S: The Netherlands
-
-N: Stephen D. Williams
-E: sdw@lig.net
-E: sdw@meaddata.com
-D: Consultant, entrepreneur, developer
-S: 2464 Rosina Drive
-S: Dayton, Ohio 45342-6430
-S: USA
 
 N: G\"unter Windau
 E: gunter@mbfys.kun.nl

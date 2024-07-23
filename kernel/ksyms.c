@@ -74,6 +74,8 @@ extern int sys_tz;
 extern int request_dma(unsigned int dmanr, char * deviceID);
 extern void free_dma(unsigned int dmanr);
 
+extern void hard_reset_now(void);
+
 struct symbol_table symbol_table = {
 #include <linux/symtab_begin.h>
 #ifdef MODVERSIONS
@@ -82,7 +84,7 @@ struct symbol_table symbol_table = {
 #endif
 
 	/* stackable module support */
-	X(register_symtab),
+	X(register_symtab_from),
 #ifdef CONFIG_KERNELD
 	X(kerneld_send),
 #endif
@@ -161,7 +163,6 @@ struct symbol_table symbol_table = {
 	X(__bforget),
 	X(ll_rw_block),
 	X(__wait_on_buffer),
-	X(__wait_on_page),
 	X(mark_buffer_uptodate),
 	X(unlock_buffer),
 	X(dcache_lookup),
@@ -196,6 +197,9 @@ struct symbol_table symbol_table = {
 	X(get_blkfops),
 	X(blkdev_open),
 	X(blkdev_release),
+	X(gendisk_head),
+	X(resetup_one_dev),
+
 #ifdef CONFIG_SERIAL	
 	/* Module creation of serial units */
 	X(register_serial),
@@ -292,6 +296,7 @@ struct symbol_table symbol_table = {
 	X(simple_strtoul),
 	X(system_utsname),
 	X(sys_call_table),
+	X(hard_reset_now),
 
 	/* Signal interfaces */
 	X(send_sig),
@@ -307,17 +312,6 @@ struct symbol_table symbol_table = {
 	/* Miscellaneous access points */
 	X(si_meminfo),
 
-#ifndef CONFIG_SCSI
-	/*
-	 * With no scsi configured, we still need to export a few
-	 * symbols so that scsi can be loaded later via insmod.
-	 * Don't remove this unless you are 100% sure of what you are
-	 * doing.  If you want to remove this, you don't know what
-	 * you are doing!
-	 */
-	X(gendisk_head),
-	X(resetup_one_dev),
-#endif
 	/* Added to make file system as module */
 	X(set_writetime),
 	X(sys_tz),

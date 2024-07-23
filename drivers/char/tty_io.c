@@ -1520,6 +1520,10 @@ static int tty_ioctl(struct inode * inode, struct file * file,
 			retval = tty_check_change(tty);
 			if (retval)
 				return retval;
+			retval = verify_area(VERIFY_READ, (void *) arg,
+					     sizeof (int));
+			if (retval)
+				return retval;
 			arg = get_user((int *) arg);
 			return tty_set_ldisc(tty, arg);
 		case TIOCLINUX:
@@ -1558,9 +1562,15 @@ static int tty_ioctl(struct inode * inode, struct file * file,
 			 * kernel-internal variable; programs not closely
 			 * related to the kernel should not use this.
 			 */
+					retval = verify_area(VERIFY_WRITE, (void *) arg, 1);
+					if (retval)
+						return retval;
 					put_user(shift_state,(char *) arg);
 					return 0;
 				case 7:
+					retval = verify_area(VERIFY_WRITE, (void *) arg, 1);
+					if (retval)
+						return retval;
 					put_user(mouse_reporting(),(char *) arg);
 					return 0;
 				case 10:
@@ -1873,6 +1883,9 @@ int tty_init(void)
 #endif
 #ifdef CONFIG_RISCOM8
 	riscom8_init();
+#endif
+#ifdef CONFIG_BAYCOM
+	baycom_init();
 #endif
 	pty_init();
 	vcs_init();

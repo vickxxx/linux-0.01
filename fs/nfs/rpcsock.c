@@ -115,7 +115,7 @@ rpc_sendmsg(struct rpc_sock *rsock, struct iovec *iov, int nr, int len,
 	msg.msg_iovlen	= nr;
 	msg.msg_name	= sap;
 	msg.msg_namelen = salen;
-	msg.msg_accrights = NULL;
+	msg.msg_control = NULL;
 
 	oldfs = get_fs();
 	set_fs(get_ds());
@@ -142,7 +142,7 @@ rpc_recvmsg(struct rpc_sock *rsock, struct iovec *iov,
 	msg.msg_iovlen	= nr;
 	msg.msg_name	= &sa;
 	msg.msg_namelen = sizeof(sa);
-	msg.msg_accrights = NULL;
+	msg.msg_control = NULL;
 
 	oldfs = get_fs();
 	set_fs(get_ds());
@@ -302,7 +302,7 @@ static inline int
 rpc_send(struct rpc_sock *rsock, struct rpc_wait *slot)
 {
 	struct rpc_ioreq *req = slot->w_req;
-	struct iovec	iov[MAX_IOVEC];
+	struct iovec	iov[UIO_MAXIOV];
 
 	if (rsock->shutdown)
 		return -EIO;
@@ -336,7 +336,7 @@ rpc_grok(struct rpc_sock *rsock)
 {
 	struct rpc_wait	*rovr;
 	struct rpc_ioreq *req;
-	struct iovec	iov[MAX_IOVEC];
+	struct iovec	iov[UIO_MAXIOV];
 	u32		xid;
 	int		safe, result;
 

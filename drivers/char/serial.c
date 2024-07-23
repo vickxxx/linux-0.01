@@ -15,6 +15,10 @@
  *
  *  03/96: Modularised by Angelo Haritsis <ah@doc.ic.ac.uk>
  *
+ *  rs_set_termios fixed to look also for changes of the input
+ *      flags INPCK, BRKINT, PARMRK, IGNPAR and IGNBRK.
+ *                                            Bernd Anhäupl 05/17/96.
+ * 
  * This module exports the following rs232 io functions:
  *
  *	int rs_init(void);
@@ -45,7 +49,7 @@
 #include <asm/bitops.h>
 
 static char *serial_name = "Serial driver";
-static char *serial_version = "4.12";
+static char *serial_version = "4.13";
 
 DECLARE_TASK_QUEUE(tq_serial);
 
@@ -405,7 +409,9 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 			break;
 		tty->flip.count++;
 		if (*status & (UART_LSR_BI)) {
+#ifdef SERIAL_DEBUG_INTR
 			printk("handling break....");
+#endif
 			*tty->flip.flag_buf_ptr++ = TTY_BREAK;
 			if (info->flags & ASYNC_SAK)
 				do_SAK(tty);
@@ -1266,6 +1272,8 @@ static void change_speed(struct async_struct *info)
 	/*
 	 * Set up parity check flag
 	 */
+#define RELEVANT_IFLAG(iflag) (iflag & (IGNBRK|BRKINT|IGNPAR|PARMRK|INPCK))
+
 	info->read_status_mask = UART_LSR_OE | UART_LSR_THRE | UART_LSR_DR;
 	if (I_INPCK(info->tty))
 		info->read_status_mask |= UART_LSR_FE | UART_LSR_PE;
@@ -1273,10 +1281,13 @@ static void change_speed(struct async_struct *info)
 		info->read_status_mask |= UART_LSR_BI;
 	
 	info->ignore_status_mask = 0;
+#if 0
+	/* This should be safe, but for some broken bits of hardware... */
 	if (I_IGNPAR(info->tty)) {
 		info->ignore_status_mask |= UART_LSR_PE | UART_LSR_FE;
 		info->read_status_mask |= UART_LSR_PE | UART_LSR_FE;
 	}
+#endif
 	if (I_IGNBRK(info->tty)) {
 		info->ignore_status_mask |= UART_LSR_BI;
 		info->read_status_mask |= UART_LSR_BI;
@@ -1285,11 +1296,12 @@ static void change_speed(struct async_struct *info)
 		 * overruns too.  (For real raw support).
 		 */
 		if (I_IGNPAR(info->tty)) {
-			info->ignore_status_mask |= UART_LSR_OE;
-			info->read_status_mask |= UART_LSR_OE;
+			info->ignore_status_mask |= UART_LSR_OE | \
+				UART_LSR_PE | UART_LSR_FE;
+			info->read_status_mask |= UART_LSR_OE | \
+				UART_LSR_PE | UART_LSR_FE;
 		}
 	}
-	
 	cli();
 	serial_outp(info, UART_LCR, cval | UART_LCR_DLAB);	/* set DLAB */
 	serial_outp(info, UART_DLL, quot & 0xff);	/* LS of divisor */
@@ -1932,6 +1944,9 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 				    (unsigned long *) arg);
 			return 0;
 		case TIOCSSOFTCAR:
+			error = verify_area(VERIFY_READ, (void *) arg,sizeof(long));
+			if (error)
+				return error;
 			arg = get_fs_long((unsigned long *) arg);
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
@@ -1955,6 +1970,10 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			return get_serial_info(info,
 					       (struct serial_struct *) arg);
 		case TIOCSSERIAL:
+			error = verify_area(VERIFY_READ, (void *) arg,
+						sizeof(struct serial_struct));
+			if (error)
+				return error;
 			return set_serial_info(info,
 					       (struct serial_struct *) arg);
 		case TIOCSERCONFIG:
@@ -1979,6 +1998,9 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 		case TIOCSERSWILD:
 			if (!suser())
 				return -EPERM;
+			error = verify_area(VERIFY_READ, (void *) arg,sizeof(long));
+			if (error)
+				return error;
 			rs_wild_int_mask = get_fs_long((unsigned long *) arg);
 			if (rs_wild_int_mask < 0)
 				rs_wild_int_mask = check_wild_interrupts(0);
@@ -2001,6 +2023,10 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			return get_multiport_struct(info,
 				       (struct serial_multiport_struct *) arg);
 		case TIOCSERSETMULTI:
+			error = verify_area(VERIFY_READ, (void *) arg,
+				    sizeof(struct serial_multiport_struct));
+			if (error)
+				return error;
 			return set_multiport_struct(info,
 				       (struct serial_multiport_struct *) arg);
 		/*
@@ -2065,8 +2091,10 @@ static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 {
 	struct async_struct *info = (struct async_struct *)tty->driver_data;
 
-	if (tty->termios->c_cflag == old_termios->c_cflag)
-		return;
+	if (   (tty->termios->c_cflag == old_termios->c_cflag)
+	    && (   RELEVANT_IFLAG(tty->termios->c_iflag) 
+		== RELEVANT_IFLAG(old_termios->c_iflag)))
+	  return;
 
 	change_speed(info);
 
@@ -2792,11 +2820,13 @@ int rs_init(void)
 		info->prev_port = 0;
 		if (info->irq == 2)
 			info->irq = 9;
-		if (!(info->flags & ASYNC_BOOT_AUTOCONF))
-			continue;
-		autoconfig(info);
-		if (info->type == PORT_UNKNOWN)
-			continue;
+		if (info->type == PORT_UNKNOWN) {
+			if (!(info->flags & ASYNC_BOOT_AUTOCONF))
+				continue;
+			autoconfig(info);
+			if (info->type == PORT_UNKNOWN)
+				continue;
+		}
 		printk(KERN_INFO "tty%02d%s at 0x%04x (irq = %d)", info->line, 
 		       (info->flags & ASYNC_FOURPORT) ? " FourPort" : "",
 		       info->port, info->irq);

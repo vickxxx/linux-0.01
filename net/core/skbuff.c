@@ -69,13 +69,13 @@ extern atomic_t ip_frag_mem;
 
 void show_net_buffers(void)
 {
-	printk("Networking buffers in use          : %u\n",net_skbcount);
-	printk("Network buffers locked by drivers  : %u\n",net_locked);
-	printk("Total network buffer allocations   : %u\n",net_allocs);
-	printk("Total failed network buffer allocs : %u\n",net_fails);
-	printk("Total free while locked events     : %u\n",net_free_locked);
+	printk(KERN_INFO "Networking buffers in use          : %u\n",net_skbcount);
+	printk(KERN_INFO "Network buffers locked by drivers  : %u\n",net_locked);
+	printk(KERN_INFO "Total network buffer allocations   : %u\n",net_allocs);
+	printk(KERN_INFO "Total failed network buffer allocs : %u\n",net_fails);
+	printk(KERN_INFO "Total free while locked events     : %u\n",net_free_locked);
 #ifdef CONFIG_INET
-	printk("IP fragment buffer size            : %u\n",ip_frag_mem);
+	printk(KERN_INFO "IP fragment buffer size            : %u\n",ip_frag_mem);
 #endif	
 }
 
@@ -283,7 +283,6 @@ void skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
 
 void __skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
 {
-	unsigned long flags;
 	struct sk_buff *list = (struct sk_buff *)list_;
 
 	if (newsk->next || newsk->prev)
@@ -308,7 +307,7 @@ void __skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
 
 struct sk_buff *skb_dequeue(struct sk_buff_head *list_)
 {
-	long flags;
+	unsigned long flags;
 	struct sk_buff *result;
 	struct sk_buff *list = (struct sk_buff *)list_;
 
@@ -578,7 +577,7 @@ void kfree_skb(struct sk_buff *skb, int rw)
 {
 	if (skb == NULL)
 	{
-		printk("kfree_skb: skb = NULL (from %p)\n",
+		printk(KERN_CRIT "kfree_skb: skb = NULL (from %p)\n",
 			__builtin_return_address(0));
 		return;
   	}
@@ -592,10 +591,10 @@ void kfree_skb(struct sk_buff *skb, int rw)
 		return;
   	}
   	if (skb->free == 2)
-		printk("Warning: kfree_skb passed an skb that nobody set the free flag on! (from %p)\n",
+		printk(KERN_WARNING "Warning: kfree_skb passed an skb that nobody set the free flag on! (from %p)\n",
 			__builtin_return_address(0));
 	if (skb->list)
-	 	printk("Warning: kfree_skb passed an skb still on a list (from %p).\n",
+	 	printk(KERN_WARNING "Warning: kfree_skb passed an skb still on a list (from %p).\n",
 			__builtin_return_address(0));
 
 	if(skb->destructor)
@@ -641,7 +640,7 @@ struct sk_buff *alloc_skb(unsigned int size,int priority)
 	{
 		static int count = 0;
 		if (++count < 5) {
-			printk("alloc_skb called nonatomically from interrupt %p\n",
+			printk(KERN_ERR "alloc_skb called nonatomically from interrupt %p\n",
 				__builtin_return_address(0));
 			priority = GFP_ATOMIC;
 		}
@@ -833,7 +832,8 @@ struct sk_buff *skb_copy(struct sk_buff *skb, int priority)
 void skb_device_lock(struct sk_buff *skb)
 {
 	if(skb->lock)
-		printk("double lock on device queue!\n");
+		printk("double lock on device queue, lock=%d caller=%p\n",
+			skb->lock, (&skb)[-1]);
 	else
 		net_locked++;
 	skb->lock++;
