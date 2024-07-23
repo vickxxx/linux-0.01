@@ -1926,7 +1926,6 @@ scsi_error_handler(void * data)
 	int	               rtn;
 	struct semaphore sem = MUTEX_LOCKED;
         unsigned long flags;
-        struct fs_struct *fs;
 
 	lock_kernel();
 
@@ -1937,22 +1936,16 @@ scsi_error_handler(void * data)
 	 */
 	exit_mm(current);
 
+
 	current->session = 1;
 	current->pgrp = 1;
-	
-	/* Become as one with the init task */
-
- 	exit_files(current);
-	current->files = init_task.files;
-	atomic_inc(&current->files->count);
- 		
-	exit_fs(current);	/* current->fs->count--; */
-	fs = init_task.fs;
-	current->fs = fs;
-	atomic_inc(&fs->count);
+        /*
+         * FIXME(eric) this is still a child process of the one that did the insmod.
+         * This needs to be attached to task[0] instead.
+         */
 
 	siginitsetinv(&current->blocked, SHUTDOWN_SIGS);
-
+        current->fs->umask = 0;
 
 	/*
 	 * Set the name of this process.

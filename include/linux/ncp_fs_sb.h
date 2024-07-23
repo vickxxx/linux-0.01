@@ -8,7 +8,6 @@
 #ifndef _NCP_FS_SB
 #define _NCP_FS_SB
 
-#include <asm/semaphore.h>
 #include <linux/ncp_mount.h>
 #include <linux/types.h>
 
@@ -45,7 +44,7 @@ struct ncp_server {
 				   receive replies */
 
 	int lock;		/* To prevent mismatch in protocols. */
-	struct semaphore sem;
+	struct wait_queue *wait;
 
 	int current_size;	/* for packet preparation */
 	int has_subfunction;

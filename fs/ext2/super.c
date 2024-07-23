@@ -134,7 +134,7 @@ static struct super_operations ext2_sops = {
 	ext2_write_inode,
 	ext2_put_inode,
 	ext2_delete_inode,
-	ext2_notify_change,
+	NULL,
 	ext2_put_super,
 	ext2_write_super,
 	ext2_statfs,
@@ -184,7 +184,7 @@ static int parse_options (char * options, unsigned long * sb_block,
 		else if (!strcmp (this_char, "errors")) {
 			if (!value || !*value) {
 				printk ("EXT2-fs: the errors option requires "
-					"an argument\n");
+					"an argument");
 				return 0;
 			}
 			if (!strcmp (value, "continue")) {

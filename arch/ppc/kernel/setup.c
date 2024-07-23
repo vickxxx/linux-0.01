@@ -1,5 +1,5 @@
 /*
- * $Id: setup.c,v 1.132.2.6 1999/10/19 04:32:33 paulus Exp $
+ * $Id: setup.c,v 1.132 1999/03/24 00:32:19 cort Exp $
  * Common prep/pmac/chrp boot and setup code.
  */
 
@@ -31,7 +31,7 @@
 #endif
 #include <asm/bootx.h>
 #include <asm/machdep.h>
-#include <asm/uaccess.h>
+#include <asm/ide.h>
 
 extern void pmac_init(unsigned long r3,
                       unsigned long r4,
@@ -63,16 +63,6 @@ extern void apus_init(unsigned long r3,
                       unsigned long r6,
                       unsigned long r7);
 
-extern void gemini_init(unsigned long r3,
-                      unsigned long r4,
-                      unsigned long r5,
-                      unsigned long r6,
-                      unsigned long r7);
-
-#ifdef CONFIG_XMON
-extern void xmon_map_scc(void);
-#endif
-
 extern boot_infos_t *boot_infos;
 extern char cmd_line[512];
 char saved_command_line[256];
@@ -96,12 +86,6 @@ int is_powerplus = 0;
 
 struct machdep_calls ppc_md;
 
-#ifdef CONFIG_MAGIC_SYSRQ
-unsigned long SYSRQ_KEY;
-#endif /* CONFIG_MAGIC_SYSRQ */
-#ifdef CONFIG_VGA_CONSOLE
-unsigned long vgacon_remap_base;
-#endif
 
 /* copy of the residual data */
 #ifndef CONFIG_MBX
@@ -267,9 +251,6 @@ int get_cpuinfo(char *buffer)
 		case 10:
 			len += sprintf(len+buffer, "604ev5 (MachV)\n");
 			break;
-		case 12:
-			len += sprintf(len+buffer, "7400 (G4)\n");
-			break;
 		case 50:
 			len += sprintf(len+buffer, "821\n");
 		case 80:
@@ -292,17 +273,7 @@ int get_cpuinfo(char *buffer)
 			
 			cpu_node = find_type_devices("cpu");
 			if ( !cpu_node ) break;
-			{
-				int s;
-				for ( s = 0; (s < i) && cpu_node->next ;
-				      s++, cpu_node = cpu_node->next )
-					/* nothing */ ;
-				if ( s != i )
-					printk("get_cpuinfo(): ran out of "
-					       "cpu nodes.\n");
-			}
 			fp = (int *) get_property(cpu_node, "clock-frequency", NULL);
-			
 			if ( !fp ) break;
 			len += sprintf(len+buffer, "clock\t\t: %dMHz\n",
 				       *fp / 1000000);
@@ -317,10 +288,18 @@ int get_cpuinfo(char *buffer)
 			       (GET_PVR & 0xff00) >> 8, GET_PVR & 0xff);
 
 		len += sprintf(buffer+len, "bogomips\t: %lu.%02lu\n",
-			       (CD(loops_per_jiffy)+2500)/(500000/HZ),
-			       (CD(loops_per_jiffy)+2500)/(5000/HZ) % 100);
-		bogosum += CD(loops_per_jiffy);
+			       (CD(loops_per_sec)+2500)/500000,
+			       (CD(loops_per_sec)+2500)/5000 % 100);
+		bogosum += CD(loops_per_sec);
 	}
+
+#ifdef __SMP__
+	if ( i )
+		len += sprintf(buffer+len, "\n");
+	len += sprintf(buffer+len,"total bogomips\t: %lu.%02lu\n",
+		       (bogosum+2500)/500000,
+		       (bogosum+2500)/5000 % 100);
+#endif /* __SMP__ */
 
 	/*
 	 * Ooh's and aah's info about zero'd pages in idle task
@@ -354,6 +333,7 @@ unsigned long __init
 identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 		 unsigned long r6, unsigned long r7)
 {
+	
 #ifdef __SMP__
 	if ( first_cpu_booted ) return 0;
 #endif /* __SMP__ */
@@ -371,30 +351,34 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 		is_prep = 1;
 	} else {
 		char *model;
-		struct device_node *root;
 
 		have_of = 1;
-
+		
 		/* prom_init has already been called from __start */
-		if (boot_infos)
-			relocate_nodes();
-
+		finish_device_tree();
 		/* ask the OF info if we're a chrp or pmac */
-		/* we need to set _machine before calling finish_device_tree */
-		root = find_path_device("/");
-		if (root != 0) {
-			model = get_property(root, "device_type", NULL);
-			if (model && !strncmp("chrp", model, 4))
+		model = get_property(find_path_device("/"), "device_type", NULL);
+		if ( model && !strncmp("chrp",model,4) )
+		{
+			_machine = _MACH_chrp;
+			is_chrp = 1;
+		}
+		else
+		{
+			model = get_property(find_path_device("/"),
+					     "model", NULL);
+			if ( model && !strncmp(model, "IBM", 3))
+			{
+				_machine = _MACH_chrp;
 				is_chrp = 1;
-			else {
-				model = get_property(root, "model", NULL);
-				if (model && !strncmp(model, "IBM", 3))
-					is_chrp = 1;
+			}
+			else
+			{
+				_machine = _MACH_Pmac;
+				is_prep = 1;
 			}
 		}
-		_machine = is_chrp? _MACH_chrp: _MACH_Pmac;
 
-		finish_device_tree();
 	}
 #else /* CONFIG_MACH_SPECIFIC */
 
@@ -414,8 +398,6 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 	_machine = _MACH_fads;
 #elif defined(CONFIG_APUS)
 	_machine = _MACH_apus;
-#elif defined(CONFIG_GEMINI)
-	_machine = _MACH_gemini;
 #else
 #error "Machine not defined correctly"
 #endif /* CONFIG_APUS */
@@ -425,8 +407,6 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 	{
 #ifdef CONFIG_MACH_SPECIFIC
 		/* prom_init has already been called from __start */
-		if (boot_infos)
-			relocate_nodes();
 		finish_device_tree();
 #endif /* CONFIG_MACH_SPECIFIC	*/
 		/*
@@ -462,15 +442,11 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 			char *p;
 			
 #ifdef CONFIG_BLK_DEV_INITRD
-			/* Removed check < 0x800000, yaboot loads the kernel at +16Mb
-			 * and the ramdisk _after_ the kernel */
-			if (r3 && r4 && r4 != 0xdeadbeef) {
-				if (r3 < KERNELBASE)
-					r3 += KERNELBASE;
+			if (r3 - KERNELBASE < 0x800000
+			    && r4 != 0 && r4 != 0xdeadbeef) {
 				initrd_start = r3;
 				initrd_end = r3 + r4;
 				ROOT_DEV = MKDEV(RAMDISK_MAJOR, 0);
-				initrd_below_start_ok = 1;
 			}
 #endif
 			cmd_line[0] = 0;
@@ -486,21 +462,15 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 
 	switch (_machine)
 	{
-#ifdef CONFIG_POWERMAC
 	case _MACH_Pmac:
                 pmac_init(r3, r4, r5, r6, r7);
 		break;
-#endif
-#if defined(CONFIG_ALL_PPC) || defined(CONFIG_PREP)
 	case _MACH_prep:
                 prep_init(r3, r4, r5, r6, r7);
 		break;
-#endif
-#if defined(CONFIG_ALL_PPC) || defined(CONFIG_CHRP)
 	case _MACH_chrp:
                 chrp_init(r3, r4, r5, r6, r7);
 		break;
-#endif
 #ifdef CONFIG_APUS
 	case _MACH_apus:
                 apus_init(r3, r4, r5, r6, r7);
@@ -511,11 +481,6 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
                 mbx_init(r3, r4, r5, r6, r7);
                 break;
 #endif
-#ifdef CONFIG_GEMINI
-	case _MACH_gemini:
-                gemini_init(r3, r4, r5, r6, r7);
-		break;
-#endif
 	default:
 		printk("Unknown machine type in identify_machine!\n");
 	}
@@ -525,28 +490,6 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 		extern int __map_without_bats;
 		__map_without_bats = 1;
 	}
-
-	/* Look for mem= option on command line */
-	if (strstr(cmd_line, "mem=")) {
-		char *p, *q;
-		unsigned long maxmem = 0;
-		extern unsigned long __max_memory;
-
-		for (q = cmd_line; (p = strstr(q, "mem=")) != 0; ) {
-			q = p + 4;
-			if (p > cmd_line && p[-1] != ' ')
-				continue;
-			maxmem = simple_strtoul(q, &q, 0);
-			if (*q == 'k' || *q == 'K') {
-				maxmem <<= 10;
-				++q;
-			} else if (*q == 'm' || *q == 'M') {
-				maxmem <<= 20;
-				++q;
-			}
-		}
-		__max_memory = maxmem;
-	}
 	
 	return 0;
 }
@@ -554,13 +497,12 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 /* Checks "l2cr=xxxx" command-line option */
 void ppc_setup_l2cr(char *str, int *ints)
 {
-	if ( ((_get_PVR() >> 16) == 8) || ((_get_PVR() >> 16) == 12) )
+	if ( (_get_PVR() >> 16) == 8)
 	{
 		unsigned long val = simple_strtoul(str, NULL, 0);
 		printk(KERN_INFO "l2cr set to %lx\n", val);
 		_set_L2CR(0);
-		if (val)
-			_set_L2CR(val);
+		_set_L2CR(val);
 	}
 }
 
@@ -573,7 +515,7 @@ __initfunc(void
 }
 
 __initfunc(void setup_arch(char **cmdline_p,
-		unsigned long * memory_start_p, unsigned long * memory_end_p))
+			   unsigned long * memory_start_p, unsigned long * memory_end_p))
 {
 	extern int panic_timeout;
 	extern char _etext[], _edata[];
@@ -581,16 +523,11 @@ __initfunc(void setup_arch(char **cmdline_p,
 	extern unsigned long find_available_memory(void);
 	extern unsigned long *end_of_DRAM;
 
-
 #ifdef CONFIG_XMON
-	{
-		char *p;
-
-		xmon_map_scc();
-		p = strstr(cmd_line, "xmon");
-		if (p != NULL && (p == cmd_line || p[-1] == ' '))
-			xmon(0);
-	}
+	extern void xmon_map_scc(void);
+	xmon_map_scc();
+	if (strstr(cmd_line, "xmon"))
+		xmon(0);
 #endif /* CONFIG_XMON */
  
 	/* reboot on panic */	
@@ -603,22 +540,13 @@ __initfunc(void setup_arch(char **cmdline_p,
 
 	/* Save unparsed command line copy for /proc/cmdline */
 	strcpy(saved_command_line, cmd_line);
-
 	*cmdline_p = cmd_line;
 
 	*memory_start_p = find_available_memory();
 	*memory_end_p = (unsigned long) end_of_DRAM;
 
 	ppc_md.setup_arch(memory_start_p, memory_end_p);
-
-	sort_exception_table();
 }
-
-#ifndef CONFIG_POWERMAC
-void note_bootable_part(kdev_t dev, int part, int goodness)
-{
-}
-#endif
 
 void ppc_generic_ide_fix_driveid(struct hd_driveid *id)
 {
@@ -721,7 +649,7 @@ void ppc_generic_ide_fix_driveid(struct hd_driveid *id)
 	id->word123        = __le16_to_cpu(id->word123);
 	id->word124        = __le16_to_cpu(id->word124);
 	id->word125        = __le16_to_cpu(id->word125);
-	id->last_lun       = __le16_to_cpu(id->last_lun);
+	id->word126        = __le16_to_cpu(id->word126);
 	id->word127        = __le16_to_cpu(id->word127);
 	id->security       = __le16_to_cpu(id->security);
 	for (i=0; i<127; i++)

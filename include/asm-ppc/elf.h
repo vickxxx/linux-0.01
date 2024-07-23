@@ -5,11 +5,9 @@
  * ELF register definitions..
  */
 #include <asm/ptrace.h>
-#include <asm/types.h>
 
 #define ELF_NGREG	48	/* includes nip, msr, lr, etc. */
 #define ELF_NFPREG	33	/* includes fpscr */
-#define ELF_NVRREG	33	/* includes vscr */
 
 /*
  * This is used to ensure we don't load something for the wrong architecture.
@@ -38,10 +36,6 @@ typedef elf_greg_t elf_gregset_t[ELF_NGREG];
 
 typedef double elf_fpreg_t;
 typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
-
-/* Altivec registers */
-typedef vector128 elf_vrreg_t;
-typedef elf_vrreg_t elf_vrregset_t[ELF_NVRREG];
 
 #define ELF_CORE_COPY_REGS(gregs, regs) \
 	memcpy(gregs, regs, \

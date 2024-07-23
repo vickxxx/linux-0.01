@@ -61,7 +61,6 @@
  * 		Check the magic number for the async_structure where
  * 		ever possible.
  */
-#include <linux/config.h>
 
 #undef SERIAL_PARANOIA_CHECK
 #define CONFIG_SERIAL_NOPAUSE_IO
@@ -104,8 +103,7 @@
 #define RS_STROBE_TIME (10*HZ)
 #define RS_ISR_PASS_LIMIT 256
 
-#define IRQ_T(state) \
- ((state->flags & ASYNC_SHARE_IRQ) ? SA_SHIRQ : SA_INTERRUPT)
+#define IRQ_T(info) ((info->flags & ASYNC_SHARE_IRQ) ? SA_SHIRQ : SA_INTERRUPT)
 
 #define SERIAL_INLINE
   
@@ -120,6 +118,7 @@
  * End of serial driver configuration section.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
@@ -149,12 +148,6 @@
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/serial.h>
-
-#ifdef CONFIG_MAC_SERIAL
-#define SERIAL_DEV_OFFSET	4
-#else
-#define SERIAL_DEV_OFFSET	0
-#endif
 
 #ifdef SERIAL_INLINE
 #define _INLINE_ inline
@@ -822,7 +815,6 @@ static void do_softint(void *private_)
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
-		wake_up_interruptible(&tty->poll_wait);
 	}
 }
 
@@ -1011,7 +1003,7 @@ static int startup(struct async_struct * info)
 		} else 
 			handler = rs_interrupt_single;
 
-		retval = request_irq(state->irq, handler, IRQ_T(state),
+		retval = request_irq(state->irq, handler, IRQ_T(info),
 				     "serial", NULL);
 		if (retval) {
 			if (capable(CAP_SYS_ADMIN)) {
@@ -1176,7 +1168,7 @@ static void shutdown(struct async_struct * info)
 		if (IRQ_ports[state->irq]) {
 			free_irq(state->irq, NULL);
 			retval = request_irq(state->irq, rs_interrupt_single,
-					     IRQ_T(state), "serial", NULL);
+					     IRQ_T(info), "serial", NULL);
 			
 			if (retval)
 				printk("serial shutdown: request_irq: error %d"
@@ -1390,13 +1382,8 @@ static void change_speed(struct async_struct *info,
 	if (info->state->type == PORT_16750)
 		serial_outp(info, UART_FCR, fcr); 	/* set fcr */
 	serial_outp(info, UART_LCR, cval);		/* reset DLAB */
-	if (info->state->type != PORT_16750) {
-		if (fcr & UART_FCR_ENABLE_FIFO) {
-			/* emulated UARTs (Lucent Venus 167x) need two steps */
-			serial_outp(info, UART_FCR, UART_FCR_ENABLE_FIFO);
-		}
+	if (info->state->type != PORT_16750)
 		serial_outp(info, UART_FCR, fcr); 	/* set fcr */
-	}
 	restore_flags(flags);
 }
 
@@ -1544,7 +1531,6 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	restore_flags(flags);
 	wake_up_interruptible(&tty->write_wait);
-	wake_up_interruptible(&tty->poll_wait);
 	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 	    tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
@@ -1706,7 +1692,7 @@ static int set_serial_info(struct async_struct * info,
 	if ((new_serial.type != state->type) ||
 	    (new_serial.xmit_fifo_size <= 0))
 		new_serial.xmit_fifo_size =
-			uart_config[new_serial.type].dfl_xmit_fifo_size;
+			uart_config[state->type].dfl_xmit_fifo_size;
 
 	/* Make sure address is not already in use */
 	if (new_serial.type) {
@@ -2031,7 +2017,7 @@ static int set_multiport_struct(struct async_struct * info,
 		else
 			handler = rs_interrupt;
 
-		retval = request_irq(state->irq, handler, IRQ_T(state),
+		retval = request_irq(state->irq, handler, IRQ_T(info),
 				     "serial", NULL);
 		if (retval) {
 			printk("Couldn't reallocate serial interrupt "
@@ -2788,31 +2774,29 @@ static inline int line_info(char *buf, struct serial_state *state)
 	return ret;
 }
 
-int rs_read_proc(char *page, char **start, off_t idx, ssize_t count,
+int rs_read_proc(char *page, char **start, off_t off, int count,
 		 int *eof, void *data)
 {
-	int n;
+	int i, len = 0, l;
+	off_t	begin = 0;
 
-	*start = (char *) 1L;
-
-	if (!idx) {
-		n = sprintf(page, "serinfo:1.0 driver:%s\n", serial_version);
-		goto out;
+	len += sprintf(page, "serinfo:1.0 driver:%s\n", serial_version);
+	for (i = 0; i < NR_PORTS && len < 4000; i++) {
+		l = line_info(page + len, &rs_table[i]);
+		len += l;
+		if (len+begin > off+count)
+			goto done;
+		if (len+begin < off) {
+			begin += len;
+			len = 0;
+		}
 	}
-	idx--;
-
-	n = 0;
-	if (idx >= NR_PORTS || idx < 0)
-		goto out;
-
-	n = line_info(page, &rs_table[idx]);
-	if (idx + 1 == NR_PORTS)
-		*eof = 1;
-
- out:
-	if (n > count)
-		n = 0;
-	return n;
+	*eof = 1;
+done:
+	if (off >= len+begin)
+		return 0;
+	*start = page + (begin-off);
+	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
 /*
@@ -3136,7 +3120,7 @@ __initfunc(int rs_init(void))
 	serial_driver.driver_name = "serial";
 	serial_driver.name = "ttyS";
 	serial_driver.major = TTY_MAJOR;
-	serial_driver.minor_start = 64 + SERIAL_DEV_OFFSET;
+	serial_driver.minor_start = 64;
 	serial_driver.num = NR_PORTS;
 	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
 	serial_driver.subtype = SERIAL_TYPE_NORMAL;
@@ -3200,22 +3184,11 @@ __initfunc(int rs_init(void))
 		state->icount.frame = state->icount.parity = 0;
 		state->icount.overrun = state->icount.brk = 0;
 		state->irq = irq_cannonicalize(state->irq);
-#ifdef CONFIG_PPC
-		/* PowerMacs don't have legacy serial ports on IOs and would machine check */
-		if (_machine != _MACH_Pmac) {
-#endif		
-			if (check_region(state->port,8))
-				continue;
-			if (state->flags & ASYNC_BOOT_AUTOCONF)
-				autoconfig(state);
-#ifdef CONFIG_PPC
-		}
-#endif		
+		if (check_region(state->port,8))
+			continue;
+		if (state->flags & ASYNC_BOOT_AUTOCONF)
+			autoconfig(state);
 	}
-#ifdef CONFIG_PPC
-	if (_machine == _MACH_Pmac)
-		return 0;
-#endif
 	/*
 	 * Detect the IRQ only once every port is initialised,
 	 * because some 16450 do not reset to 0 the MCR register.
@@ -3285,22 +3258,22 @@ int register_serial(struct serial_struct *req)
 		state->irq = detect_uart_irq(state);
 
 	printk(KERN_INFO "tty%02d at 0x%04x (irq = %d) is a %s\n",
-	       state->line + SERIAL_DEV_OFFSET, state->port, state->irq,
+	       state->line, state->port, state->irq,
 	       uart_config[state->type].name);
-	return state->line + SERIAL_DEV_OFFSET;
+	return state->line;
 }
 
 void unregister_serial(int line)
 {
 	unsigned long flags;
-	struct serial_state *state = &rs_table[line + SERIAL_DEV_OFFSET];
+	struct serial_state *state = &rs_table[line];
 
 	save_flags(flags);
 	cli();
 	if (state->info && state->info->tty)
 		tty_hangup(state->info->tty);
 	state->type = PORT_UNKNOWN;
-	printk(KERN_INFO "tty%02d unloaded\n", state->line + SERIAL_DEV_OFFSET);
+	printk(KERN_INFO "tty%02d unloaded\n", state->line);
 	restore_flags(flags);
 }
 
@@ -3315,7 +3288,6 @@ void cleanup_module(void)
 	unsigned long flags;
 	int e1, e2;
 	int i;
-	struct async_struct *info;
 
 	/* printk("Unloading %s: version %s\n", serial_name, serial_version); */
 	save_flags(flags);
@@ -3335,11 +3307,6 @@ void cleanup_module(void)
 	for (i = 0; i < NR_PORTS; i++) {
 		if (rs_table[i].type != PORT_UNKNOWN)
 			release_region(rs_table[i].port, 8);
-		info = rs_table[i].info;
-		if (info) {
-			rs_table[i].info = NULL;
-			kfree_s(info, sizeof(struct async_struct));
-		}
 	}
 	if (tmp_buf) {
 		free_page((unsigned long) tmp_buf);

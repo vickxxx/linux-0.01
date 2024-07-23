@@ -106,7 +106,7 @@ __KINLINE struct cmsghdr * __cmsg_nxthdr(void *__ctl, __kernel_size_t __size,
 
 	__ptr = (struct cmsghdr*)(((unsigned char *) __cmsg) +  CMSG_ALIGN(__cmsg->cmsg_len));
 	if ((unsigned long)((char*)(__ptr+1) - (char *) __ctl) > __size)
-		return (struct cmsghdr*)0;
+		return NULL;
 
 	return __ptr;
 }
@@ -128,6 +128,18 @@ struct ucred {
 	__u32	gid;
 };
 
+/* Socket types. */
+
+#define SOCK_STREAM	1		/* stream (connection) socket	*/
+#define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
+#define SOCK_RAW	3		/* raw socket			*/
+#define SOCK_RDM	4		/* reliably-delivered message	*/
+#define SOCK_SEQPACKET	5		/* sequential packet socket	*/
+#define SOCK_PACKET	10		/* linux specific way of	*/
+					/* getting packets at the dev	*/
+					/* level.  For writing rarp and	*/
+					/* other similar things on the	*/
+					/* user level.			*/
 
 /* Supported address families. */
 #define AF_UNSPEC	0
@@ -146,7 +158,7 @@ struct ucred {
 #define AF_DECnet	12	/* Reserved for DECnet project	*/
 #define AF_NETBEUI	13	/* Reserved for 802.2LLC project*/
 #define AF_SECURITY	14	/* Security callback pseudo AF */
-#define AF_KEY   15      /* PF_KEY key management API */
+#define pseudo_AF_KEY   15      /* PF_KEY key management API */
 #define AF_NETLINK	16
 #define AF_ROUTE	AF_NETLINK /* Alias to emulate 4.4BSD */
 #define AF_PACKET	17	/* Packet family		*/
@@ -174,7 +186,7 @@ struct ucred {
 #define PF_DECnet	AF_DECnet
 #define PF_NETBEUI	AF_NETBEUI
 #define PF_SECURITY	AF_SECURITY
-#define PF_KEY      AF_KEY
+#define PF_KEY          pseudo_AF_KEY
 #define PF_NETLINK	AF_NETLINK
 #define PF_ROUTE	AF_ROUTE
 #define PF_PACKET	AF_PACKET
@@ -261,20 +273,4 @@ extern int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr);
 extern int put_cmsg(struct msghdr*, int level, int type, int len, void *data);
 #endif
 #endif /* not kernel and not glibc */
-
-#if !defined(__KERNEL__) && (!defined(__GLIBC__) || (__GLIBC__ < 2))
-
-/* Socket types for libc5 compatibility -- KTK */
-
-#define SOCK_STREAM    1		/* stream (connection) socket	*/
-#define SOCK_DGRAM     2		/* datagram (conn.less) socket	*/
-#define SOCK_RAW       3		/* raw socket			*/
-#define SOCK_RDM       4		/* reliably-delivered message	*/
-#define SOCK_SEQPACKET 5		/* sequential packet socket	*/
-#define SOCK_PACKET    10		/* linux specific way of	*/
-					/* getting packets at the dev	*/
-					/* level.  For writing rarp and */
-					/* other similar things on the	*/
-					/* user level.			*/
-#endif /* libc<=5 && !kernel */
 #endif /* _LINUX_SOCKET_H */

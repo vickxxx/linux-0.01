@@ -30,7 +30,7 @@
 
 struct __sysctl_args {
 	int *name;
-	unsigned nlen;
+	int nlen;
 	void *oldval;
 	size_t *oldlenp;
 	void *newval;
@@ -78,7 +78,7 @@ enum
 	KERN_NODENAME=7,
 	KERN_DOMAINNAME=8,
 
-	KERN_CAP_BSET=14,	/* int: capability bounding set */
+	KERN_SECURELVL=14,	/* int: system security level */
 	KERN_PANIC=15,		/* int: panic timeout */
 	KERN_REALROOTDEV=16,	/* real root device to mount after initrd */
 
@@ -102,12 +102,7 @@ enum
 	KERN_SHMMAX=34,         /* int: Maximum shared memory segment */
 	KERN_MSGMAX=35,         /* int: Maximum size of a messege */
 	KERN_MSGMNB=36,         /* int: Maximum message queue size */
-	KERN_MSGPOOL=37,         /* int: Maximum system message pool size */
-	KERN_SYSRQ=38,		/* int: Sysreq enable */
-	KERN_SHMALL=41,		/* int: maximum size of shared memory */
-	KERN_SPARC_STOP_A=44,	/* int: Sparc Stop-A enable */
-	KERN_HOTPLUG=49,	/* string: path to hotplug policy agent */
-	KERN_IEEE_EMULATION_WARNINGS=50 /* int: unimplemented ieee instructions */
+	KERN_MSGPOOL=37         /* int: Maximum system message pool size */
 };
 
 
@@ -168,8 +163,7 @@ enum
 	NET_CORE_FASTROUTE=7,
 	NET_CORE_MSG_COST=8,
 	NET_CORE_MSG_BURST=9,
-	NET_CORE_OPTMEM_MAX=10,
-	NET_CORE_DIVERT_VERSION=12
+	NET_CORE_OPTMEM_MAX=10
 };
 
 /* /proc/sys/net/ethernet */
@@ -229,9 +223,7 @@ enum
 	NET_IPV4_ICMP_PARAMPROB_RATE=62,
 	NET_IPV4_ICMP_ECHOREPLY_RATE=63,
 	NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES=64,
-	NET_IPV4_IGMP_MAX_MEMBERSHIPS=65,
-	NET_IPV4_ALWAYS_DEFRAG=67,
-	NET_IPV4_IP_MASQ_UDP_DLOOSE=68
+	NET_IPV4_IGMP_MAX_MEMBERSHIPS=65
 };
 
 enum {
@@ -272,9 +264,7 @@ enum
 	NET_IPV4_CONF_RP_FILTER=8,
 	NET_IPV4_CONF_ACCEPT_SOURCE_ROUTE=9,
 	NET_IPV4_CONF_BOOTP_RELAY=10,
-	NET_IPV4_CONF_LOG_MARTIANS=11,
-	NET_IPV4_CONF_HIDDEN=12,
-	NET_IPV4_CONF_ARPFILTER=13
+	NET_IPV4_CONF_LOG_MARTIANS=11
 };
 
 /* /proc/sys/net/ipv6 */
@@ -434,28 +424,12 @@ enum
 /* CTL_DEV names: */
 enum {
 	DEV_CDROM=1,
-	DEV_HWMON=2,
-	DEV_MAC_HID=5
+	DEV_HWMON=2
 };
 
 /* /proc/sys/dev/cdrom */
 enum {
-	DEV_CDROM_INFO=1,
-	DEV_CDROM_AUTOCLOSE=2,
-	DEV_CDROM_AUTOEJECT=3,
-	DEV_CDROM_DEBUG=4,
-	DEV_CDROM_LOCK=5,
-	DEV_CDROM_CHECK_MEDIA=6
-};
-
-/* /proc/sys/dev/mac_hid */
-enum {
-	DEV_MAC_HID_KEYBOARD_SENDS_LINUX_KEYCODES=1,
-	DEV_MAC_HID_KEYBOARD_LOCK_KEYCODES=2,
-	DEV_MAC_HID_MOUSE_BUTTON_EMULATION=3,
-	DEV_MAC_HID_MOUSE_BUTTON2_KEYCODE=4,
-	DEV_MAC_HID_MOUSE_BUTTON3_KEYCODE=5,
-	DEV_MAC_HID_ADB_MOUSE_SENDS_KEYCODES=6
+	DEV_CDROM_INFO=1
 };
 
 #ifdef __KERNEL__
@@ -465,7 +439,7 @@ extern void sysctl_init(void);
 
 typedef struct ctl_table ctl_table;
 
-typedef int ctl_handler (ctl_table *table, int *name, unsigned nlen,
+typedef int ctl_handler (ctl_table *table, int *name, int nlen,
 			 void *oldval, size_t *oldlenp,
 			 void *newval, size_t newlen, 
 			 void **context);
@@ -477,25 +451,22 @@ extern int proc_dostring(ctl_table *, int, struct file *,
 			 void *, size_t *);
 extern int proc_dointvec(ctl_table *, int, struct file *,
 			 void *, size_t *);
-extern int proc_dointvec_bset(ctl_table *, int, struct file *,
-			      void *, size_t *);
 extern int proc_dointvec_minmax(ctl_table *, int, struct file *,
 				void *, size_t *);
 extern int proc_dointvec_jiffies(ctl_table *, int, struct file *,
 				 void *, size_t *);
 
-extern int do_sysctl (int *name, unsigned nlen,
+extern int do_sysctl (int *name, int nlen,
 		      void *oldval, size_t *oldlenp,
 		      void *newval, size_t newlen);
 
 extern int do_sysctl_strategy (ctl_table *table, 
-			       int *name, unsigned nlen,
+			       int *name, int nlen,
 			       void *oldval, size_t *oldlenp,
 			       void *newval, size_t newlen, void ** context);
 
 extern ctl_handler sysctl_string;
 extern ctl_handler sysctl_intvec;
-extern ctl_handler sysctl_jiffies;
 
 extern int do_string (
 	void *oldval, size_t *oldlenp, void *newval, size_t newlen,

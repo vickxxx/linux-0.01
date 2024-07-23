@@ -1,5 +1,5 @@
 /*
- * $Id: idle.c,v 1.61.2.2 1999/06/15 16:54:14 cort Exp $
+ * $Id: idle.c,v 1.61 1999/03/18 04:15:45 cort Exp $
  *
  * Idle daemon for PowerPC.  Idle daemon will handle any action
  * that needs to be taken when the system becomes idle.
@@ -50,7 +50,6 @@ int idled(void *unused)
 	/* endless loop with no priority at all */
 	current->priority = 0;
 	current->counter = -100;
-	init_idle();	
 	for (;;)
 	{
 		__sti();
@@ -298,7 +297,7 @@ void power_save(void)
 	case 7:			/* 603ev */
 	case 8:			/* 750 */
 		save_flags(msr);
-		__cli();
+		cli();
 		if (!current->need_resched) {
 			asm("mfspr %0,1008" : "=r" (hid0) :);
 			hid0 &= ~(HID0_NAP | HID0_SLEEP | HID0_DOZE);

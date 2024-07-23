@@ -129,17 +129,6 @@ static int tty_fasync(int fd, struct file * filp, int on);
 extern long console_8xx_init(long, long);
 extern int rs_8xx_init(void);
 #endif /* CONFIG_8xx */
-#ifdef CONFIG_MAC_SERIAL
-extern long mac_scc_console_init(long, long);
-#endif
-#ifdef CONFIG_3215
-extern long con3215_init(long, long);
-#endif /* CONFIG_3215 */
-#ifdef CONFIG_HWC_CONSOLE
-extern long hwc_console_init(long);
-#endif
-extern int rio_init(void);
-extern int sx_init(void);
 
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
@@ -442,7 +431,6 @@ void do_tty_hangup(void *data)
 
 	wake_up_interruptible(&tty->write_wait);
 	wake_up_interruptible(&tty->read_wait);
-	wake_up_interruptible(&tty->poll_wait);
 
 	/*
 	 * Shutdown the current line discipline, and reset it to
@@ -583,7 +571,6 @@ void stop_tty(struct tty_struct *tty)
 		tty->ctrl_status &= ~TIOCPKT_START;
 		tty->ctrl_status |= TIOCPKT_STOP;
 		wake_up_interruptible(&tty->link->read_wait);
-		wake_up_interruptible(&tty->link->poll_wait);
 	}
 	if (tty->driver.stop)
 		(tty->driver.stop)(tty);
@@ -598,7 +585,6 @@ void start_tty(struct tty_struct *tty)
 		tty->ctrl_status &= ~TIOCPKT_STOP;
 		tty->ctrl_status |= TIOCPKT_START;
 		wake_up_interruptible(&tty->link->read_wait);
-		wake_up_interruptible(&tty->link->poll_wait);
 	}
 	if (tty->driver.start)
 		(tty->driver.start)(tty);
@@ -606,7 +592,6 @@ void start_tty(struct tty_struct *tty)
 	    tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
 	wake_up_interruptible(&tty->write_wait);
-	wake_up_interruptible(&tty->poll_wait);
 }
 
 static ssize_t tty_read(struct file * file, char * buf, size_t count, 
@@ -667,37 +652,33 @@ static inline ssize_t do_tty_write(
 	struct inode *inode = file->f_dentry->d_inode;
 	
 	up(&inode->i_sem);
-	if (down_interruptible(&tty->atomic_write)) {
+	if (down_interruptible(&inode->i_atomic_write)) {
 		down(&inode->i_sem);
 		return -ERESTARTSYS;
 	}
-	if ( test_bit(TTY_NO_WRITE_SPLIT, &tty->flags) )
-		written = write(tty, file, buf, count);
-	else {
-		for (;;) {
-			unsigned long size = PAGE_SIZE*2;
-			if (size > count)
-				size = count;
-			ret = write(tty, file, buf, size);
-			if (ret <= 0)
-				break;
-			written += ret;
-			buf += ret;
-			count -= ret;
-			if (!count)
-				break;
-			ret = -ERESTARTSYS;
-			if (signal_pending(current))
-				break;
-			if (current->need_resched)
-				schedule();
-		}
+	for (;;) {
+		unsigned long size = PAGE_SIZE*2;
+		if (size > count)
+			size = count;
+		ret = write(tty, file, buf, size);
+		if (ret <= 0)
+			break;
+		written += ret;
+		buf += ret;
+		count -= ret;
+		if (!count)
+			break;
+		ret = -ERESTARTSYS;
+		if (signal_pending(current))
+			break;
+		if (current->need_resched)
+			schedule();
 	}
 	if (written) {
 		file->f_dentry->d_inode->i_mtime = CURRENT_TIME;
 		ret = written;
 	}
-	up(&tty->atomic_write);
+	up(&inode->i_atomic_write);
 	down(&inode->i_sem);
 	return ret;
 }
@@ -1118,10 +1099,6 @@ static void release_dev(struct file * filp)
 				wake_up(&tty->read_wait);
 				do_sleep++;
 			}
-			if (waitqueue_active(&tty->poll_wait)) {
-				wake_up(&tty->poll_wait);
-				do_sleep++;
-			}
 			if (waitqueue_active(&tty->write_wait)) {
 				wake_up(&tty->write_wait);
 				do_sleep++;
@@ -1134,10 +1111,6 @@ static void release_dev(struct file * filp)
 			}
 			if (waitqueue_active(&o_tty->write_wait)) {
 				wake_up(&o_tty->write_wait);
-				do_sleep++;
-			}
-			if (waitqueue_active(&o_tty->poll_wait)) {
-				wake_up(&o_tty->poll_wait);
 				do_sleep++;
 			}
 		}
@@ -1468,7 +1441,7 @@ static int tty_fasync(int fd, struct file * filp, int on)
 		return retval;
 
 	if (on) {
-		if (!waitqueue_active(&tty->read_wait) && !waitqueue_active(&tty->poll_wait))
+		if (!waitqueue_active(&tty->read_wait))
 			tty->minimum_to_wake = 1;
 		if (filp->f_owner.pid == 0) {
 			filp->f_owner.pid = (-tty->pgrp) ? : current->pid;
@@ -1476,7 +1449,7 @@ static int tty_fasync(int fd, struct file * filp, int on)
 			filp->f_owner.euid = current->euid;
 		}
 	} else {
-		if (!tty->fasync && !waitqueue_active(&tty->read_wait) && !waitqueue_active(&tty->poll_wait))
+		if (!tty->fasync && !waitqueue_active(&tty->read_wait))
 			tty->minimum_to_wake = N_TTY_BUF_SIZE;
 	}
 	return 0;
@@ -1519,11 +1492,10 @@ static int tiocswinsz(struct tty_struct *tty, struct tty_struct *real_tty,
 	return 0;
 }
 
-static int tioccons(struct inode *inode,
-	struct tty_struct *tty, struct tty_struct *real_tty)
+static int tioccons(struct tty_struct *tty, struct tty_struct *real_tty)
 {
-	if (inode->i_rdev == SYSCONS_DEV ||
-	    inode->i_rdev == CONSOLE_DEV) {
+	if (tty->driver.type == TTY_DRIVER_TYPE_CONSOLE ||
+	    tty->driver.type == TTY_DRIVER_TYPE_SYSCONS) {
 		if (!suser())
 			return -EPERM;
 		redirect = NULL;
@@ -1733,7 +1705,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 		case TIOCSWINSZ:
 			return tiocswinsz(tty, real_tty, (struct winsize *) arg);
 		case TIOCCONS:
-			return tioccons(inode, tty, real_tty);
+			return tioccons(tty, real_tty);
 		case FIONBIO:
 			return fionbio(file, (int *) arg);
 		case TIOCEXCL:
@@ -1962,8 +1934,6 @@ static void initialize_tty_struct(struct tty_struct *tty)
 	tty->tq_hangup.routine = do_tty_hangup;
 	tty->tq_hangup.data = tty;
 	sema_init(&tty->atomic_read, 1);
-	sema_init(&tty->atomic_write, 1);
-	spin_lock_init(&tty->read_lock);
 }
 
 /*
@@ -2009,8 +1979,7 @@ int tty_unregister_driver(struct tty_driver *driver)
 {
 	int	retval;
 	struct tty_driver *p;
-	int	i, found = 0;
-	struct termios *tp;
+	int	found = 0;
 	const char *othername = NULL;
 	
 	if (*driver->refcount)
@@ -2041,23 +2010,6 @@ int tty_unregister_driver(struct tty_driver *driver)
 	if (driver->next)
 		driver->next->prev = driver->prev;
 
-	/*
-	 * Free the termios and termios_locked structures because
-	 * we don't want to get memory leaks when modular tty
-	 * drivers are removed from the kernel.
-	 */
-	for (i = 0; i < driver->num; i++) {
-		tp = driver->termios[i];
-		if (tp) {
-			driver->termios[i] = NULL;
-			kfree_s(tp, sizeof(struct termios));
-		}
-		tp = driver->termios_locked[i];
-		if (tp) {
-			driver->termios_locked[i] = NULL;
-			kfree_s(tp, sizeof(struct termios));
-		}
-	}
 	proc_tty_unregister_driver(driver);
 	return 0;
 }
@@ -2094,20 +2046,12 @@ long __init console_init(long kmem_start, long kmem_end)
 #ifdef CONFIG_VT
 	kmem_start = con_init(kmem_start);
 #endif
-#ifdef CONFIG_HWC
-        kmem_start = hwc_console_init(kmem_start);
-#endif
 #ifdef CONFIG_SERIAL_CONSOLE
 #ifdef CONFIG_8xx
 	kmem_start = console_8xx_init(kmem_start, kmem_end);
-#elif defined(CONFIG_MAC_SERIAL)
-	kmem_start = mac_scc_console_init(kmem_start, kmem_end);
 #else 	
 	kmem_start = serial_console_init(kmem_start, kmem_end);
 #endif /* CONFIG_8xx */
-#endif
-#ifdef CONFIG_3215
-       kmem_start = con3215_init(kmem_start, kmem_end);
 #endif
 	return kmem_start;
 }
@@ -2192,9 +2136,6 @@ __initfunc(int tty_init(void))
 #ifdef CONFIG_SERIAL
 	rs_init();
 #endif
-#ifdef CONFIG_COMPUTONE
-	ip2_init();
-#endif
 #ifdef CONFIG_MAC_SERIAL
 	macserial_init();
 #endif
@@ -2225,22 +2166,10 @@ __initfunc(int tty_init(void))
 #ifdef CONFIG_SPECIALIX
 	specialix_init();
 #endif
-#ifdef CONFIG_SX
-	sx_init();
-#endif
-#ifdef CONFIG_RIO
-	rio_init();
-#endif
 #ifdef CONFIG_8xx
         rs_8xx_init();
 #endif /* CONFIG_8xx */
 	pty_init();
-#ifdef CONFIG_MOXA_SMARTIO
-	mxser_init();
-#endif	
-#ifdef CONFIG_MOXA_INTELLIO
-	moxa_init();
-#endif	
 #ifdef CONFIG_VT
 	vcs_init();
 #endif

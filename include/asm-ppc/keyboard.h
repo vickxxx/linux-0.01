@@ -16,11 +16,11 @@
 #ifdef __KERNEL__
 
 #include <linux/config.h>
+#include <asm/adb.h>
 #include <asm/machdep.h>
-
-#include <linux/kernel.h>
-#include <linux/ioport.h>
-#include <asm/io.h>
+#ifdef CONFIG_APUS
+#include <asm-m68k/keyboard.h>
+#else
 
 #define KEYBOARD_IRQ			1
 #define DISABLE_KBD_DURING_INTERRUPTS	0
@@ -28,76 +28,44 @@
 
 static inline int kbd_setkeycode(unsigned int scancode, unsigned int keycode)
 {
-	if ( ppc_md.kbd_setkeycode )
-		return ppc_md.kbd_setkeycode(scancode, keycode);
-	else
-		return 0;
+	return ppc_md.kbd_setkeycode(scancode, keycode);
 }
   
 static inline int kbd_getkeycode(unsigned int scancode)
 {
-	if ( ppc_md.kbd_getkeycode )
-		return ppc_md.kbd_getkeycode(scancode);
-	else
-		return 0;
+	return ppc_md.kbd_getkeycode(scancode);
 }
   
 static inline int kbd_translate(unsigned char keycode, unsigned char *keycodep,
 				char raw_mode)
 {
-	if ( ppc_md.kbd_translate )
-		return ppc_md.kbd_translate(keycode, keycodep, raw_mode);
-	else
-		return 0;
+	return ppc_md.kbd_translate(keycode, keycodep, raw_mode);
 }
   
 static inline int kbd_unexpected_up(unsigned char keycode)
 {
-	if ( ppc_md.kbd_unexpected_up )
-		return ppc_md.kbd_unexpected_up(keycode);
-	else
-		return 0;
+	return ppc_md.kbd_unexpected_up(keycode);
 }
   
 static inline void kbd_leds(unsigned char leds)
 {
-	if ( ppc_md.kbd_leds )
-		ppc_md.kbd_leds(leds);
+	ppc_md.kbd_leds(leds);
 }
   
 static inline void kbd_init_hw(void)
 {
-	if ( ppc_md.kbd_init_hw )
-		ppc_md.kbd_init_hw();
+	ppc_md.kbd_init_hw();
 }
 
-#define kbd_sysrq_xlate	(ppc_md.sysrq_xlate)
-extern unsigned long SYSRQ_KEY;
+#define kbd_sysrq_xlate	(ppc_md.kbd_sysrq_xlate)
 
-/* resource allocation */
-#define kbd_request_region()
-#define kbd_request_irq(handler) request_irq(KEYBOARD_IRQ, handler, 0, \
-                                             "keyboard", NULL)
+#ifdef CONFIG_MAC_KEYBOARD
+# define SYSRQ_KEY 0x69
+#else
+# define SYSRQ_KEY 0x54
+#endif
 
-/* How to access the keyboard macros on this platform.  */
-#define kbd_read_input() inb(KBD_DATA_REG)
-#define kbd_read_status() inb(KBD_STATUS_REG)
-#define kbd_write_output(val) outb(val, KBD_DATA_REG)
-#define kbd_write_command(val) outb(val, KBD_CNTL_REG)
-
-/* Some stoneage hardware needs delays after some operations.  */
-#define kbd_pause() do { } while(0)
-
-/*
- * Machine specific bits for the PS/2 driver
- */
-
-#define AUX_IRQ 12
-
-#define aux_request_irq(hand, dev_id)					\
-	request_irq(AUX_IRQ, hand, SA_SHIRQ, "PS/2 Mouse", dev_id)
-
-#define aux_free_irq(dev_id) free_irq(AUX_IRQ, dev_id)
+#endif /* CONFIG_APUS */
 
 #endif /* __KERNEL__ */
 

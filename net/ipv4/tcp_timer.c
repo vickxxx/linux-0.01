@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_timer.c,v 1.62.2.9 2000/05/27 04:04:43 davem Exp $
+ * Version:	$Id: tcp_timer.c,v 1.62 1999/05/08 21:09:55 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -31,6 +31,7 @@ int sysctl_tcp_retries2 = TCP_RETR2;
 static void tcp_sltimer_handler(unsigned long);
 static void tcp_syn_recv_timer(unsigned long);
 static void tcp_keepalive(unsigned long data);
+static void tcp_bucketgc(unsigned long);
 static void tcp_twkill(unsigned long);
 
 struct timer_list	tcp_slow_timer = {
@@ -43,7 +44,8 @@ struct timer_list	tcp_slow_timer = {
 struct tcp_sl_timer tcp_slt_array[TCP_SLT_MAX] = {
 	{ATOMIC_INIT(0), TCP_SYNACK_PERIOD, 0, tcp_syn_recv_timer},/* SYNACK	*/
 	{ATOMIC_INIT(0), TCP_KEEPALIVE_PERIOD, 0, tcp_keepalive},  /* KEEPALIVE	*/
-	{ATOMIC_INIT(0), TCP_TWKILL_PERIOD, 0, tcp_twkill}         /* TWKILL	*/
+	{ATOMIC_INIT(0), TCP_TWKILL_PERIOD, 0, tcp_twkill},        /* TWKILL	*/
+	{ATOMIC_INIT(0), TCP_BUCKETGC_PERIOD, 0, tcp_bucketgc}     /* BUCKETGC	*/
 };
 
 const char timer_bug_msg[] = KERN_DEBUG "tcpbug: unknown timer value\n";
@@ -131,7 +133,6 @@ static int tcp_write_err(struct sock *sk, int force)
 	} else {
 		/* Clean up time. */
 		tcp_set_state(sk, TCP_CLOSE);
-		sk->shutdown |= SHUTDOWN_MASK;
 		return 0;
 	}
 	return 1;
@@ -141,47 +142,26 @@ static int tcp_write_err(struct sock *sk, int force)
 static int tcp_write_timeout(struct sock *sk)
 {
 	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
-	unsigned char orig_state = sk->state;
-	int ret;
 
 	/* Look for a 'soft' timeout. */
-	if ((orig_state == TCP_ESTABLISHED &&
+	if ((sk->state == TCP_ESTABLISHED &&
 	     tp->retransmits && (tp->retransmits % TCP_QUICK_TRIES) == 0) ||
-	    (orig_state != TCP_ESTABLISHED && tp->retransmits > sysctl_tcp_retries1)) {
+	    (sk->state != TCP_ESTABLISHED && tp->retransmits > sysctl_tcp_retries1)) {
 		dst_negative_advice(&sk->dst_cache);
 	}
 	
 	/* Have we tried to SYN too many times (repent repent 8)) */
-	if(tp->retransmits > sysctl_tcp_syn_retries && orig_state==TCP_SYN_SENT) {
+	if(tp->retransmits > sysctl_tcp_syn_retries && sk->state==TCP_SYN_SENT) {
 		tcp_write_err(sk, 1);
-
 		/* Don't FIN, we got nothing back */
-		ret = 0;
-	} else {
-		/* Has it gone just too far? */
-		if (tp->retransmits > sysctl_tcp_retries2) 
-			ret = tcp_write_err(sk, 0);
-		else
-			ret = 1;
+		return 0;
 	}
 
-	/* Did we timeout a connecting socket?  The check must be
-	 * like this just in case someone sets syn_retries larger
-	 * than retries2, which is silly but handle it.  -DaveM
-	 */
-	if (orig_state == TCP_SYN_SENT && sk->state == TCP_CLOSE) {
-		/* Back out identity changes done by connect.
-		 * The move to TCP_CLOSE has unhashed us and
-		 * killed the bind bucket reference, making this
-		 * safe. -DaveM
-		 */
-		sk->dport = 0;
-		sk->daddr = 0;
-		sk->num = 0;
-		tcp_clear_xmit_timer(sk, TIME_RETRANS);
-	}
+	/* Has it gone just too far? */
+	if (tp->retransmits > sysctl_tcp_retries2) 
+		return tcp_write_err(sk, 0);
 
-	return ret;
+	return 1;
 }
 
 void tcp_delack_timer(unsigned long data)
@@ -266,6 +246,40 @@ static __inline__ int tcp_keepopen_proc(struct sock *sk)
 		}
 	}
 	return res;
+}
+
+/* Garbage collect TCP bind buckets. */
+static void tcp_bucketgc(unsigned long data)
+{
+	int i, reaped = 0;;
+
+	for(i = 0; i < TCP_BHTABLE_SIZE; i++) {
+		struct tcp_bind_bucket *tb = tcp_bound_hash[i];
+
+		while(tb) {
+			struct tcp_bind_bucket *next = tb->next;
+
+			if((tb->owners == NULL) &&
+			   !(tb->flags & TCPB_FLAG_LOCKED)) {
+				reaped++;
+
+				/* Unlink bucket. */
+				if(tb->next)
+					tb->next->pprev = tb->pprev;
+				*tb->pprev = tb->next;
+
+				/* Finally, free it up. */
+				kmem_cache_free(tcp_bucket_cachep, tb);
+			}
+			tb = next;
+		}
+	}
+	if(reaped != 0) {
+		struct tcp_sl_timer *slt = (struct tcp_sl_timer *)data;
+
+		/* Eat timer references. */
+		atomic_sub(reaped, &slt->count);
+	}
 }
 
 /* Kill off TIME_WAIT sockets once their lifetime has expired. */
@@ -385,22 +399,20 @@ static void tcp_keepalive(unsigned long data)
 	int count = 0;
 	int i;
 	
-	for(i = chain_start; i < (chain_start + ((tcp_ehash_size/2) >> 2)); i++) {
-		struct sock *sk = tcp_ehash[i];
+	for(i = chain_start; i < (chain_start + ((TCP_HTABLE_SIZE/2) >> 2)); i++) {
+		struct sock *sk = tcp_established_hash[i];
 		while(sk) {
-			struct sock *sk_next = sk->next;
-
 			if(!atomic_read(&sk->sock_readers) && sk->keepopen) {
 				count += tcp_keepopen_proc(sk);
 				if(count == sysctl_tcp_max_ka_probes)
 					goto out;
 			}
-			sk = sk_next;
+			sk = sk->next;
 		}
 	}
 out:
-	chain_start = ((chain_start + ((tcp_ehash_size/2)>>2)) &
-		       ((tcp_ehash_size/2) - 1));
+	chain_start = ((chain_start + ((TCP_HTABLE_SIZE/2)>>2)) &
+		       ((TCP_HTABLE_SIZE/2) - 1));
 }
 
 /*
@@ -430,15 +442,6 @@ void tcp_retransmit_timer(unsigned long data)
 	if (atomic_read(&sk->sock_readers)) {
 		/* Try again later */  
 		tcp_reset_xmit_timer(sk, TIME_RETRANS, HZ/20);
-		return;
-	}
-
-	/* Unfortunately, here in 2.2.x on SMP this timer can race
-	 * with the user level context.  It is fixed properly in 2.3.x
-	 * and later, but for now we have to use this hack.
-	 */
-	if (tp->packets_out == 0) {
-		tcp_clear_xmit_timer(sk, TIME_RETRANS);
 		return;
 	}
 
@@ -534,11 +537,14 @@ static void tcp_syn_recv_timer(unsigned long data)
 					conn = req;
 					req = req->dl_next;
 
-					if (conn->sk ||
-					    ((long)(now - conn->expires)) <= 0) {
+					if (conn->sk) {
 						prev = conn; 
 						continue; 
 					}
+
+					if ((long)(now - conn->expires) <= 0)
+						break;
+
 
 					tcp_synq_unlink(tp, conn, prev);
 					if (conn->retrans >= sysctl_tcp_retries1) {

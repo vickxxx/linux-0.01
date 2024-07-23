@@ -48,12 +48,9 @@ struct thread_struct {
 	/*
 	 * The fields below are Linux-specific:
 	 *
-	 * bit 1..6: IEEE_TRAP_ENABLE bits (see fpu.h)
-	 * bit 7..8: IEEE_MAP_XXX bits (see fpu.h)
-	 * bit 14..16: UAC bits (see sysinfo.h)
-	 * bit 17..22: IEEE_STATUS_MASK bits (see fpu.h)
-	 * bit 32..33: Current IEEE rounding mode (only used
-	 *             during floating emulation - see fpu.h)
+	 * bit 1..5: IEEE_TRAP_ENABLE bits (see fpu.h)
+	 * bit 6..8: UAC bits (see sysinfo.h)
+	 * bit 17..21: IEEE_STATUS_MASK bits (see fpu.h)
 	 * bit 63: die_if_kernel recursion lock
 	 */
 	unsigned long flags;
@@ -125,12 +122,5 @@ extern void release_thread(struct task_struct *);
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
-
-extern long __kernel_thread(unsigned long, int (*)(void *), void *);
-
-static inline long kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-	return __kernel_thread(flags | CLONE_VM, fn, arg);
-}
 
 #endif /* __ASM_ALPHA_PROCESSOR_H */

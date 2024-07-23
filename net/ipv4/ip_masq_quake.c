@@ -44,7 +44,7 @@ typedef struct
 
 struct quake_priv_data {
 	/* Have we seen a client connect message */
-	signed char	cl_connect;
+	char	cl_connect;
 };
 
 static int

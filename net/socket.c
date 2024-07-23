@@ -521,7 +521,6 @@ static int sock_fasync(int fd, struct file *filp, int on)
 		if(fa!=NULL)
 		{
 			fa->fa_fd=fd;
-			synchronize_irq();
 			kfree_s(fna,sizeof(struct fasync_struct));
 			release_sock(sock->sk); 
 			return 0;
@@ -537,7 +536,6 @@ static int sock_fasync(int fd, struct file *filp, int on)
 		if (fa!=NULL)
 		{
 			*prev=fa->fa_next;
-			synchronize_irq();
 			kfree_s(fa,sizeof(struct fasync_struct));
 		}
 	}
@@ -579,7 +577,7 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 	 *	Check protocol is in range
 	 */
 	if(family<0||family>=NPROTO)
-		return -EAFNOSUPPORT;
+		return -EINVAL;
 		
 #if defined(CONFIG_KMOD) && defined(CONFIG_NET)
 	/* Attempt to load a protocol module if the find failed. 
@@ -597,7 +595,7 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 #endif
 
 	if (net_families[family]==NULL)
-		return -EAFNOSUPPORT;
+		return -EINVAL;
 
 /*
  *	Check that this is a type that we know how to manipulate and
@@ -1048,10 +1046,7 @@ asmlinkage int sys_setsockopt(int fd, int level, int optname, char *optval, int 
 {
 	int err;
 	struct socket *sock;
-
-	if(optlen < 0)	
-		return -EINVAL;
-		
+	
 	lock_kernel();
 	if ((sock = sockfd_lookup(fd, &err))!=NULL)
 	{
@@ -1168,6 +1163,7 @@ asmlinkage int sys_sendmsg(int fd, struct msghdr *msg, unsigned flags)
 			/* Note - when this code becomes multithreaded on
 			 * SMP machines you have a race to fix here.
 			 */
+			err = -ENOBUFS;
 			ctl_buf = sock_kmalloc(sock->sk, ctl_len, GFP_KERNEL);
 			if (ctl_buf == NULL) 
 				goto out_freeiov;

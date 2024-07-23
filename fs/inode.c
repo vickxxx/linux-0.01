@@ -10,7 +10,6 @@
 #include <linux/dcache.h>
 #include <linux/init.h>
 #include <linux/quotaops.h>
-#include <linux/random.h>
 
 /*
  * New inode.c implementation.
@@ -45,11 +44,9 @@
  * allowing for low-overhead inode sync() operations.
  */
 
-LIST_HEAD(inode_in_use);
+static LIST_HEAD(inode_in_use);
 static LIST_HEAD(inode_unused);
 static struct list_head inode_hashtable[HASH_SIZE];
-
-__u32 inode_generation_count = 0;
 
 /*
  * A simple spinlock to protect the list manipulations.
@@ -299,7 +296,6 @@ static int invalidate_list(struct list_head *head, struct super_block * sb, stru
 			INIT_LIST_HEAD(&inode->i_hash);
 			list_del(&inode->i_list);
 			list_add(&inode->i_list, dispose);
-			inode->i_state |= I_FREEING;
 			continue;
 		}
 		busy = 1;
@@ -343,11 +339,12 @@ int invalidate_inodes(struct super_block * sb)
 	(((inode)->i_count | (inode)->i_state) == 0)
 #define INODE(entry)	(list_entry(entry, struct inode, i_list))
 
-static int __free_inodes(struct list_head * freeable)
+static int free_inodes(void)
 {
-	struct list_head *entry;
+	struct list_head list, *entry, *freeable = &list;
 	int found = 0;
 
+	INIT_LIST_HEAD(freeable);
 	entry = inode_in_use.next;
 	while (entry != &inode_in_use) {
 		struct list_head *tmp = entry;
@@ -359,18 +356,13 @@ static int __free_inodes(struct list_head * freeable)
 		list_del(&INODE(tmp)->i_hash);
 		INIT_LIST_HEAD(&INODE(tmp)->i_hash);
 		list_add(tmp, freeable);
-		list_entry(tmp, struct inode, i_list)->i_state = I_FREEING;
-		found++;
+		found = 1;
 	}
 
-	return found;
-}
+	if (found)
+		dispose_list(freeable);
 
-static void free_inodes(void)
-{
-	LIST_HEAD(throw_away);
-	if (__free_inodes(&throw_away))
-		dispose_list(&throw_away);
+	return found;
 }
 
 /*
@@ -380,36 +372,6 @@ static void free_inodes(void)
  */
 static void try_to_free_inodes(int goal)
 {
-	static int block;
-	static struct wait_queue * wait_inode_freeing;
-	LIST_HEAD(throw_away);
-	
-	/* We must make sure to not eat the inodes
-	   while the blocker task sleeps otherwise
-	   the blocker task may find none inode
-	   available. */
-	if (block)
-	{
-		struct wait_queue __wait;
-
-		__wait.task = current;
-		add_wait_queue(&wait_inode_freeing, &__wait);
-		for (;;)
-		{
-			/* NOTE: we rely only on the inode_lock to be sure
-			   to not miss the unblock event */
-			current->state = TASK_UNINTERRUPTIBLE;
-			spin_unlock(&inode_lock);
-			schedule();
-			spin_lock(&inode_lock);
-			if (!block)
-				break;
-		}
-		remove_wait_queue(&wait_inode_freeing, &__wait);
-		current->state = TASK_RUNNING;
-	}
-
-	block = 1;
 	/*
 	 * First stry to just get rid of unused inodes.
 	 *
@@ -417,25 +379,23 @@ static void try_to_free_inodes(int goal)
 	 * to try to shrink the dcache and sync existing
 	 * inodes..
 	 */
-	goal -= __free_inodes(&throw_away);
+	free_inodes();
+	goal -= inodes_stat.nr_free_inodes;
 	if (goal > 0) {
 		spin_unlock(&inode_lock);
-		prune_dcache(0, goal);
+		select_dcache(goal, 0);
+		prune_dcache(goal);
 		spin_lock(&inode_lock);
 		sync_all_inodes();
-		__free_inodes(&throw_away);
+		free_inodes();
 	}
-	if (!list_empty(&throw_away))
-		dispose_list(&throw_away);
-	block = 0;
-	wake_up(&wait_inode_freeing);
 }
 
 /*
  * This is the externally visible routine for
  * inode memory management.
  */
-void free_inode_memory(void)
+void free_inode_memory(int goal)
 {
 	spin_lock(&inode_lock);
 	free_inodes();
@@ -473,10 +433,6 @@ static struct inode * grow_inodes(void)
 			inode = list_entry(tmp, struct inode, i_list);
 			return inode;
 		}
-		spin_unlock(&inode_lock);
-		printk(KERN_WARNING
-		       "grow_inodes: inode-max limit reached\n");
-		return NULL;
 	}
 		
 	spin_unlock(&inode_lock);
@@ -507,7 +463,7 @@ static struct inode * grow_inodes(void)
 	 * If the allocation failed, do an extensive pruning of 
 	 * the dcache and then try again to free some inodes.
 	 */
-	prune_dcache(0, inodes_stat.nr_inodes >> 2);
+	prune_dcache(inodes_stat.nr_inodes >> 2);
 
 	spin_lock(&inode_lock);
 	free_inodes();
@@ -529,7 +485,7 @@ static struct inode * grow_inodes(void)
 /*
  * Called with the inode lock held.
  */
-static struct inode * find_inode(struct super_block * sb, unsigned long ino, struct list_head *head, find_inode_t find_actor, void *opaque)
+static struct inode * find_inode(struct super_block * sb, unsigned long ino, struct list_head *head)
 {
 	struct list_head *tmp;
 	struct inode * inode;
@@ -544,8 +500,6 @@ static struct inode * find_inode(struct super_block * sb, unsigned long ino, str
 		if (inode->i_sb != sb)
 			continue;
 		if (inode->i_ino != ino)
-			continue;
-		if (find_actor && !find_actor(inode, ino, opaque))
 			continue;
 		inode->i_count++;
 		break;
@@ -621,7 +575,7 @@ add_new_inode:
  * We no longer cache the sb_flags in i_flags - see fs.h
  *	-- rmk@arm.uk.linux.org
  */
-static struct inode * get_new_inode(struct super_block *sb, unsigned long ino, struct list_head *head, find_inode_t find_actor, void *opaque)
+static struct inode * get_new_inode(struct super_block *sb, unsigned long ino, struct list_head *head)
 {
 	struct inode * inode;
 	struct list_head * tmp = inode_unused.next;
@@ -666,7 +620,7 @@ add_new_inode:
 	inode = grow_inodes();
 	if (inode) {
 		/* We released the lock, so.. */
-		struct inode * old = find_inode(sb, ino, head, find_actor, opaque);
+		struct inode * old = find_inode(sb, ino, head);
 		if (!old)
 			goto add_new_inode;
 		list_add(&inode->i_list, &inode_unused);
@@ -681,54 +635,17 @@ add_new_inode:
 static inline unsigned long hash(struct super_block *sb, unsigned long i_ino)
 {
 	unsigned long tmp = i_ino | (unsigned long) sb;
-	tmp = tmp + (tmp >> HASH_BITS);
+	tmp = tmp + (tmp >> HASH_BITS) + (tmp >> HASH_BITS*2);
 	return tmp & HASH_MASK;
 }
 
-/* Yeah, I know about quadratic hash. Maybe, later. */
-ino_t iunique(struct super_block *sb, ino_t max_reserved)
-{
-	static ino_t counter = 0;
-	struct inode *inode;
-	struct list_head * head;
-	ino_t res;
-	spin_lock(&inode_lock);
-retry:
-	if (counter > max_reserved) {
-		head = inode_hashtable + hash(sb,counter);
-		inode = find_inode(sb, res = counter++, head, NULL, NULL);
-		if (!inode) {
-			spin_unlock(&inode_lock);
-			return res;
-		}
-		inode->i_count--; /* compensate find_inode() */
-	} else {
-		counter = max_reserved + 1;
-	}
-	goto retry;
-	
-}
-
-struct inode *igrab(struct inode *inode)
-{
-	spin_lock(&inode_lock);
-	if (inode->i_state & I_FREEING)
-		inode = NULL;
-	else
-		inode->i_count++;
-	spin_unlock(&inode_lock);
-	if (inode)
-		wait_on_inode(inode);
-	return inode;
-}
-
-struct inode *iget4(struct super_block *sb, unsigned long ino, find_inode_t find_actor, void *opaque)
+struct inode *iget(struct super_block *sb, unsigned long ino)
 {
 	struct list_head * head = inode_hashtable + hash(sb,ino);
 	struct inode * inode;
 
 	spin_lock(&inode_lock);
-	inode = find_inode(sb, ino, head, find_actor, opaque);
+	inode = find_inode(sb, ino, head);
 	if (inode) {
 		spin_unlock(&inode_lock);
 		wait_on_inode(inode);
@@ -739,12 +656,7 @@ struct inode *iget4(struct super_block *sb, unsigned long ino, find_inode_t find
 	 * the inode lock and re-trying the search in case it
 	 * had to block at any point.
 	 */
-	return get_new_inode(sb, ino, head, find_actor, opaque);
-}
-
-struct inode *iget(struct super_block *sb, unsigned long ino)
-{
-	return iget4(sb, ino, NULL, NULL);
+	return get_new_inode(sb, ino, head);
 }
 
 void insert_inode_hash(struct inode *inode)
@@ -780,7 +692,6 @@ void iput(struct inode *inode)
 				INIT_LIST_HEAD(&inode->i_hash);
 				list_del(&inode->i_list);
 				INIT_LIST_HEAD(&inode->i_list);
-				inode->i_state|=I_FREEING;
 				if (op && op->delete_inode) {
 					void (*delete)(struct inode *) = op->delete_inode;
 					spin_unlock(&inode_lock);
@@ -791,7 +702,6 @@ void iput(struct inode *inode)
 			if (list_empty(&inode->i_hash)) {
 				list_del(&inode->i_list);
 				INIT_LIST_HEAD(&inode->i_list);
-				inode->i_state|=I_FREEING;
 				spin_unlock(&inode_lock);
 				clear_inode(inode);
 				spin_lock(&inode_lock);
@@ -858,10 +768,6 @@ void __init inode_init(void)
 	if (max > MAX_INODE)
 		max = MAX_INODE;
 	max_inodes = max;
-
-	/* Get a random number. */
-	get_random_bytes (&inode_generation_count,
-			  sizeof (inode_generation_count));
 }
 
 /* This belongs in file_table.c, not here... */
@@ -897,48 +803,3 @@ void update_atime (struct inode *inode)
     inode->i_atime = CURRENT_TIME;
     mark_inode_dirty (inode);
 }   /*  End Function update_atime  */
-
-/* This function is called by nfsd. */
-struct inode *iget_in_use(struct super_block *sb, unsigned long ino)
-{
-	struct list_head * head = inode_hashtable + hash(sb,ino);
-	struct inode * inode;
-
-	spin_lock(&inode_lock);
-	inode = find_inode(sb, ino, head, NULL, NULL);
-	if (inode) {
-		spin_unlock(&inode_lock);
-		wait_on_inode(inode);
-	}
-	else
-		inode = get_new_inode (sb, ino, head, NULL, NULL);
-
-	/* When we get the inode, we have to check if it is in use. We
-	   have to release it if it is not. */
-	if (inode) {
-		spin_lock(&inode_lock);
-		if (inode->i_nlink == 0 && inode->i_count == 1) {
-			--inode->i_count;
-			list_del(&inode->i_hash);
-			INIT_LIST_HEAD(&inode->i_hash);
-			list_del(&inode->i_list);
-			INIT_LIST_HEAD(&inode->i_list);
-			if (list_empty(&inode->i_hash)) {
-				list_del(&inode->i_list);
-				INIT_LIST_HEAD(&inode->i_list);
-				spin_unlock(&inode_lock);
-				clear_inode(inode);
-				spin_lock(&inode_lock);
-				list_add(&inode->i_list, &inode_unused);
-				inodes_stat.nr_free_inodes++;
-			}
-			else if (!(inode->i_state & I_DIRTY)) {
-				list_del(&inode->i_list);
-				list_add(&inode->i_list, &inode_in_use);
-			}
-			inode = NULL;
-		}
-		spin_unlock(&inode_lock);
-	}
-	return inode;
-}

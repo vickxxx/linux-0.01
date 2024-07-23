@@ -411,15 +411,16 @@ static int eql_enslave(struct device *dev, slaving_request_t *srqp)
 	slaving_request_t srq;
 	int err;
 
-	err = copy_from_user(&srq, srqp, sizeof (slaving_request_t));
+	err = verify_area(VERIFY_READ, (void *)srqp, sizeof (slaving_request_t));
 	if (err)  
 	  {
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
-		printk ("EQL enslave: error detected by copy_from_user\n");
+		printk ("EQL enslave: error detected by verify_area\n");
 #endif  
 		return err;
 	  }
+	copy_from_user (&srq, srqp, sizeof (slaving_request_t));
 
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
@@ -472,10 +473,11 @@ static int eql_emancipate(struct device *dev, slaving_request_t *srqp)
 	slaving_request_t srq;
 	int err;
 
-	err = copy_from_user(&srq, srqp, sizeof (slaving_request_t));
+	err = verify_area(VERIFY_READ, (void *)srqp, sizeof (slaving_request_t));
 	if (err) 
 		return err;
 
+	copy_from_user (&srq, srqp, sizeof (slaving_request_t));
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
 		printk ("%s: emancipate `%s`\n", dev->name, srq.slave_name);
@@ -502,10 +504,11 @@ static int eql_g_slave_cfg(struct device *dev, slave_config_t *scp)
 	slave_config_t sc;
 	int err;
 
-	err = copy_from_user (&sc, scp, sizeof (slave_config_t));
+	err = verify_area(VERIFY_READ, (void *)scp, sizeof (slave_config_t));
 	if (err) 
 		return err;
 
+	copy_from_user (&sc, scp, sizeof (slave_config_t));
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
 		printk ("%s: get config for slave `%s'\n", dev->name, sc.slave_name);
@@ -538,7 +541,7 @@ static int eql_s_slave_cfg(struct device *dev, slave_config_t *scp)
 	slave_config_t sc;
 	int err;
 
-	err = copy_from_user (&sc, scp, sizeof (slave_config_t));
+	err = verify_area(VERIFY_READ, (void *)scp, sizeof (slave_config_t));
 	if (err) 
 		return err;
 
@@ -547,6 +550,7 @@ static int eql_s_slave_cfg(struct device *dev, slave_config_t *scp)
 		printk ("%s: set config for slave `%s'\n", dev->name, sc.slave_name);
 #endif
   
+	copy_from_user (&sc, scp, sizeof (slave_config_t));
 
 	eql = (equalizer_t *) dev->priv;
 	slave_dev = dev_get (sc.slave_name);
@@ -579,12 +583,13 @@ static int eql_g_master_cfg(struct device *dev, master_config_t *mcp)
 	if ( eql_is_master (dev) )
 	{
 		int err;
+		err = verify_area(VERIFY_WRITE, (void *)mcp, sizeof (master_config_t));
+		if (err) 
+			return err;
 		eql = (equalizer_t *) dev->priv;
 		mc.max_slaves = eql->max_slaves;
 		mc.min_slaves = eql->min_slaves;
-		err = copy_to_user (mcp, &mc, sizeof (master_config_t));
-		if (err) 
-			return err;
+		copy_to_user (mcp, &mc, sizeof (master_config_t));
 		return 0;
 	}
 	return -EINVAL;
@@ -597,13 +602,14 @@ static int eql_s_master_cfg(struct device *dev, master_config_t *mcp)
 	master_config_t mc;
 	int err;
 
-	err = copy_from_user (&mc, mcp, sizeof (master_config_t));
+	err = verify_area(VERIFY_READ, (void *)mcp, sizeof (master_config_t));
 	if (err)
 		return err;
 #if EQL_DEBUG
 	if (eql_debug >= 20)
 		printk ("%s: set master config\n", dev->name);
 #endif
+	copy_from_user (&mc, mcp, sizeof (master_config_t));
 	if ( eql_is_master (dev) )
 	{
 		eql = (equalizer_t *) dev->priv;
@@ -1030,8 +1036,6 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	kfree(((equalizer_t *)dev_eql.priv)->stats );
-	kfree(dev_eql.priv);
 	unregister_netdev(&dev_eql);
 }
 #endif /* MODULE */

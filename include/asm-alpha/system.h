@@ -86,39 +86,17 @@ struct el_common_EV5_uncorrectable_mcheck {
         unsigned long   ld_lock;          /* Contents of EV5 LD_LOCK register*/
 };
 
-struct el_common_EV6_mcheck {
-	unsigned int FrameSize;		/* Bytes, including this field */
-	unsigned int FrameFlags;	/* <31> = Retry, <30> = Second Error */
-	unsigned int CpuOffset;		/* Offset to CPU-specific info */
-	unsigned int SystemOffset;	/* Offset to system-specific info */
-	unsigned int MCHK_Code;
-	unsigned int MCHK_Frame_Rev;
-	unsigned long I_STAT;		/* EV6 Internal Processor Registers */
-	unsigned long DC_STAT;		/* (See the 21264 Spec) */
-	unsigned long C_ADDR;
-	unsigned long DC1_SYNDROME;
-	unsigned long DC0_SYNDROME;
-	unsigned long C_STAT;
-	unsigned long C_STS;
-	unsigned long RESERVED0;
-	unsigned long EXC_ADDR;
-	unsigned long IER_CM;
-	unsigned long ISUM;
-	unsigned long MM_STAT;
-	unsigned long PAL_BASE;
-	unsigned long I_CTL;
-	unsigned long PCTX;
-};
+
+extern void wrent(void *, unsigned long);
+extern void wrkgp(unsigned long);
+extern void wrusp(unsigned long);
+extern unsigned long rdusp(void);
+extern unsigned long rdmces (void);
+extern void wrmces (unsigned long);
+extern unsigned long whami(void);
+extern void wripir(unsigned long);
 
 extern void halt(void) __attribute__((noreturn));
-
-#ifdef CONFIG_SMP
-#define ctx_cli()	__cli()
-#define ctx_sti()	__sti()
-#else
-#define ctx_cli()	do { } while(0)
-#define ctx_sti()	do { } while(0)
-#endif
 
 #define switch_to(prev,next,last)			\
 do {							\
@@ -126,7 +104,6 @@ do {							\
 	current = (next);				\
 	pcbb = virt_to_phys(&current->tss);		\
 	(last) = alpha_switch_to(pcbb, (prev));		\
-	ctx_sti();					\
 } while (0)
 
 extern struct task_struct* alpha_switch_to(unsigned long, struct task_struct*);
@@ -145,9 +122,6 @@ __asm__ __volatile__ ("call_pal %0 #imb" : : "i" (PAL_imb) : "memory")
 
 #define draina() \
 __asm__ __volatile__ ("call_pal %0 #draina" : : "i" (PAL_draina) : "memory")
-
-#define __halt() \
-__asm__ __volatile__ ("call_pal %0 #halt" : : "i" (PAL_halt))
 
 enum implver_enum {
 	IMPLVER_EV4,
@@ -173,98 +147,78 @@ enum implver_enum {
 #endif
 #endif
 
-enum amask_enum {
-	AMASK_BWX = (1UL << 0),
-	AMASK_FIX = (1UL << 1),
-	AMASK_MAX = (1UL << 8),
-	AMASK_PRECISE_TRAP = (1UL << 9),
-};
-
 #define amask(mask)						\
 ({ unsigned long __amask, __input = (mask);			\
    __asm__ ("amask %1,%0" : "=r"(__amask) : "rI"(__input));	\
    __amask; })
 
-#define __CALL_PAL_R0(NAME, TYPE)				\
-static inline TYPE NAME(void)					\
-{								\
-	register TYPE __r0 __asm__("$0");			\
-	__asm__ __volatile__(					\
-		"call_pal %1 # " #NAME				\
-		:"=r" (__r0)					\
-		:"i" (PAL_ ## NAME)				\
-		:"$1", "$16", "$22", "$23", "$24", "$25");	\
-	return __r0;						\
+static inline unsigned long 
+wrperfmon(unsigned long perf_fun, unsigned long arg)
+{
+          register unsigned long __r0 __asm__("$0");
+	  register unsigned long __r16 __asm__("$16");
+	  register unsigned long __r17 __asm__("$17");
+	  __r16 = perf_fun;
+	  __r17 = arg;
+	  __asm__ __volatile__(
+		  "call_pal %1"
+		  : "=r"(__r0)
+		  : "i"(PAL_wrperfmon), "r"(__r16), "r"(__r17)
+		  : "$1", "$22", "$23", "$24", "$25", "$26");
+	  return __r0;
 }
 
-#define __CALL_PAL_W1(NAME, TYPE0)				\
-static inline void NAME(TYPE0 arg0)				\
-{								\
-	register TYPE0 __r16 __asm__("$16") = arg0;		\
+
+#define call_pal1(palno,arg)						\
+({									\
+	register unsigned long __r0 __asm__("$0");			\
+	register unsigned long __r16 __asm__("$16"); __r16 = arg;	\
+	__asm__ __volatile__(						\
+		"call_pal %3 #call_pal1"				\
+		:"=r" (__r0),"=r" (__r16)				\
+		:"1" (__r16),"i" (palno)				\
+		:"$1", "$22", "$23", "$24", "$25", "memory");		\
+	__r0;								\
+})
+
+#define getipl()							\
+({									\
+	register unsigned long r0 __asm__("$0");			\
+	__asm__ __volatile__(						\
+		"call_pal %1 #getipl"					\
+		:"=r" (r0)						\
+		:"i" (PAL_rdps)						\
+		:"$1", "$16", "$22", "$23", "$24", "$25", "memory");	\
+	r0;								\
+})
+
+#define setipl(ipl)							\
+({									\
+	register unsigned long __r16 __asm__("$16"); __r16 = (ipl);	\
+	__asm__ __volatile__(						\
+		"call_pal %2 #setipl"					\
+		:"=r" (__r16)						\
+		:"0" (__r16),"i" (PAL_swpipl)				\
+		:"$0", "$1", "$22", "$23", "$24", "$25", "memory");	\
+})
+
+#define swpipl(ipl)						\
+({								\
+	register unsigned long __r0 __asm__("$0");		\
+	register unsigned long __r16 __asm__("$16") = (ipl);	\
 	__asm__ __volatile__(					\
-		"call_pal %1 # "#NAME				\
-		: "=r"(__r16)					\
-		: "i"(PAL_ ## NAME), "0"(__r16)			\
-		: "$1", "$22", "$23", "$24", "$25");		\
-}
+		"call_pal %3 #swpipl"				\
+		:"=r" (__r0),"=r" (__r16)			\
+		:"1" (__r16),"i" (PAL_swpipl)			\
+		:"$1", "$22", "$23", "$24", "$25", "memory");	\
+	__r0;							\
+})
 
-#define __CALL_PAL_W2(NAME, TYPE0, TYPE1)			\
-static inline void NAME(TYPE0 arg0, TYPE1 arg1)			\
-{								\
-	register TYPE0 __r16 __asm__("$16") = arg0;		\
-	register TYPE1 __r17 __asm__("$17") = arg1;		\
-	__asm__ __volatile__(					\
-		"call_pal %2 # "#NAME				\
-		: "=r"(__r16), "=r"(__r17)			\
-		: "i"(PAL_ ## NAME), "0"(__r16), "1"(__r17)	\
-		: "$1", "$22", "$23", "$24", "$25");		\
-}
-
-#define __CALL_PAL_RW1(NAME, RTYPE, TYPE0)			\
-static inline RTYPE NAME(TYPE0 arg0)				\
-{								\
-	register RTYPE __r0 __asm__("$0");			\
-	register TYPE0 __r16 __asm__("$16") = arg0;		\
-	__asm__ __volatile__(					\
-		"call_pal %2 # "#NAME				\
-		: "=r"(__r16), "=r"(__r0)			\
-		: "i"(PAL_ ## NAME), "0"(__r16)			\
-		: "$1", "$22", "$23", "$24", "$25");		\
-	return __r0;						\
-}
-
-#define __CALL_PAL_RW2(NAME, RTYPE, TYPE0, TYPE1)		\
-static inline RTYPE NAME(TYPE0 arg0, TYPE1 arg1)		\
-{								\
-	register RTYPE __r0 __asm__("$0");			\
-	register TYPE0 __r16 __asm__("$16") = arg0;		\
-	register TYPE1 __r17 __asm__("$17") = arg1;		\
-	__asm__ __volatile__(					\
-		"call_pal %3 # "#NAME				\
-		: "=r"(__r16), "=r"(__r17), "=r"(__r0)		\
-		: "i"(PAL_ ## NAME), "0"(__r16), "1"(__r17)	\
-		: "$1", "$22", "$23", "$24", "$25");		\
-	return __r0;						\
-}
-
-__CALL_PAL_R0(rdmces, unsigned long);
-__CALL_PAL_R0(rdps, unsigned long);
-__CALL_PAL_R0(rdusp, unsigned long);
-__CALL_PAL_RW1(swpipl, unsigned long, unsigned long);
-__CALL_PAL_R0(whami, unsigned long);
-__CALL_PAL_W2(wrent, void*, unsigned long);
-__CALL_PAL_W1(wripir, unsigned long);
-__CALL_PAL_W1(wrkgp, unsigned long);
-__CALL_PAL_W1(wrmces, unsigned long);
-__CALL_PAL_RW2(wrperfmon, unsigned long, unsigned long, unsigned long);
-__CALL_PAL_W1(wrusp, unsigned long);
-__CALL_PAL_W1(wrvptptr, unsigned long);
-
-#define __cli()			((void) swpipl(7))
-#define __sti()			((void) swpipl(0))
-#define __save_flags(flags)	((flags) = rdps())
+#define __cli()			setipl(7)
+#define __sti()			setipl(0)
+#define __save_flags(flags)	((flags) = getipl())
 #define __save_and_cli(flags)	((flags) = swpipl(7))
-#define __restore_flags(flags)	((void) swpipl(flags))
+#define __restore_flags(flags)	setipl(flags)
 
 #ifdef __SMP__
 
@@ -328,7 +282,6 @@ extern __inline__ unsigned long xchg_u32(volatile int *m, unsigned long val)
 	"	bis $31,%3,%1\n"
 	"	stl_c %1,%2\n"
 	"	beq %1,2f\n"
-	"	mb\n"
 	".section .text2,\"ax\"\n"
 	"2:	br 1b\n"
 	".previous"
@@ -347,7 +300,6 @@ extern __inline__ unsigned long xchg_u64(volatile long * m, unsigned long val)
 	"	bis $31,%3,%1\n"
 	"	stq_c %1,%2\n"
 	"	beq %1,2f\n"
-	"	mb\n"
 	".section .text2,\"ax\"\n"
 	"2:	br 1b\n"
 	".previous"
@@ -383,95 +335,6 @@ __xchg(unsigned long x, volatile void * ptr, int size)
 #define xchg(ptr,x) \
   ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 #define tas(ptr) (xchg((ptr),1))
-#define gethere() ({ here: && here;  })
-
-/* 
- * Atomic compare and exchange.  Compare OLD with MEM, if identical,
- * store NEW in MEM.  Return the initial value in MEM.  Success is
- * indicated by comparing RETURN with OLD.
- *
- * The memory barrier should be placed in SMP only when we actually
- * make the change. If we don't change anything (so if the returned
- * prev is equal to old) then we aren't acquiring anything new and
- * we don't need any memory barrier as far I can tell.
- */
-
-#define __HAVE_ARCH_CMPXCHG 1
-
-extern __inline__ unsigned long
-__cmpxchg_u32(volatile int *m, int old, int new)
-{
-	unsigned long prev, cmp;
-
-	__asm__ __volatile__(
-	"1:	ldl_l %0,%5\n"
-	"	cmpeq %0,%3,%1\n"
-	"	beq %1,2f\n"
-	"	mov %4,%1\n"
-	"	stl_c %1,%2\n"
-	"	beq %1,3f\n"
-#ifdef CONFIG_SMP
-	"	mb\n"
-#endif
-	"2:\n"
-	".subsection 2\n"
-	"3:	br 1b\n"
-	".previous"
-	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m) : "memory");
-
-	return prev;
-}
-
-extern __inline__ unsigned long
-__cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
-{
-	unsigned long prev, cmp;
-
-	__asm__ __volatile__(
-	"1:	ldq_l %0,%5\n"
-	"	cmpeq %0,%3,%1\n"
-	"	beq %1,2f\n"
-	"	mov %4,%1\n"
-	"	stq_c %1,%2\n"
-	"	beq %1,3f\n"
-#ifdef CONFIG_SMP
-	"	mb\n"
-#endif
-	"2:\n"
-	".subsection 2\n"
-	"3:	br 1b\n"
-	".previous"
-	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m) : "memory");
-
-	return prev;
-}
-
-/* This function doesn't exist, so you'll get a linker error
-   if something tries to do an invalid cmpxchg().  */
-extern void __cmpxchg_called_with_bad_pointer(void);
-
-static __inline__ unsigned long
-__cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
-{
-	switch (size) {
-		case 4:
-			return __cmpxchg_u32(ptr, old, new);
-		case 8:
-			return __cmpxchg_u64(ptr, old, new);
-	}
-	__cmpxchg_called_with_bad_pointer();
-	return old;
-}
-
-#define cmpxchg(ptr,o,n)						 \
-  ({									 \
-     __typeof__(*(ptr)) _o_ = (o);					 \
-     __typeof__(*(ptr)) _n_ = (n);					 \
-     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
-				    (unsigned long)_n_, sizeof(*(ptr))); \
-  })
 
 #endif /* __ASSEMBLY__ */
 

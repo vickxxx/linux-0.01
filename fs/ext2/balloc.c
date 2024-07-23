@@ -213,7 +213,7 @@ static inline int load_block_bitmap (struct super_block * sb,
 	 */
 	if (sb->u.ext2_sb.s_loaded_block_bitmaps > 0 &&
 	    sb->u.ext2_sb.s_block_bitmap_number[0] == block_group &&
-	    sb->u.ext2_sb.s_block_bitmap[0]) {
+	    sb->u.ext2_sb.s_block_bitmap[block_group]) {
 		return 0;
 	}
 	/*
@@ -368,10 +368,11 @@ int ext2_new_block (const struct inode * inode, unsigned long goal,
 	struct super_block * sb;
 	struct ext2_group_desc * gdp;
 	struct ext2_super_block * es;
+
+	*err = -ENOSPC;
 #ifdef EXT2FS_DEBUG
 	static int goal_hits = 0, goal_attempts = 0;
 #endif
-	*err = -ENOSPC;
 	sb = inode->i_sb;
 	if (!sb) {
 		printk ("ext2_new_block: nonexistent device");
@@ -553,21 +554,20 @@ got_block:
 	 * Do block preallocation now if required.
 	 */
 #ifdef EXT2_PREALLOCATE
-	if (prealloc_count && !*prealloc_count) {
+	if (prealloc_block) {
 		int	prealloc_goal;
-		unsigned long	next_block = tmp + 1;
 
 		prealloc_goal = es->s_prealloc_blocks ?
 			es->s_prealloc_blocks : EXT2_DEFAULT_PREALLOC_BLOCKS;
 
-		*prealloc_block = next_block;
+		*prealloc_count = 0;
+		*prealloc_block = tmp + 1;
 		for (k = 1;
 		     k < prealloc_goal && (j + k) < EXT2_BLOCKS_PER_GROUP(sb);
-		     k++, next_block++) {
+		     k++) {
 			if (DQUOT_PREALLOC_BLOCK(sb, inode, 1))
 				break;
-			if (*prealloc_block + *prealloc_count != next_block ||
-			    ext2_set_bit (j + k, bh->b_data)) {
+			if (ext2_set_bit (j + k, bh->b_data)) {
 				DQUOT_FREE_BLOCK(sb, inode, 1);
  				break;
 			}
@@ -575,12 +575,12 @@ got_block:
 		}	
 		gdp->bg_free_blocks_count =
 			cpu_to_le16(le16_to_cpu(gdp->bg_free_blocks_count) -
-			       (k - 1));
+			       *prealloc_count);
 		es->s_free_blocks_count =
 			cpu_to_le32(le32_to_cpu(es->s_free_blocks_count) -
-			       (k - 1));
+			       *prealloc_count);
 		ext2_debug ("Preallocated a further %lu bits.\n",
-			       (k - 1));
+			    *prealloc_count);
 	}
 #endif
 
@@ -604,8 +604,6 @@ got_block:
 		unlock_super (sb);
 		return 0;
 	}
-	if (!buffer_uptodate(bh))
-		wait_on_buffer(bh);
 	memset(bh->b_data, 0, sb->s_blocksize);
 	mark_buffer_uptodate(bh, 1);
 	mark_buffer_dirty(bh, 1);

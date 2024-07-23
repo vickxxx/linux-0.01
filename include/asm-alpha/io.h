@@ -29,16 +29,15 @@
  */
 static inline void __set_hae(unsigned long new_hae)
 {
-	unsigned long flags;
-	__save_and_cli(flags);
+	unsigned long ipl = swpipl(7);
 
 	alpha_mv.hae_cache = new_hae;
 	*alpha_mv.hae_register = new_hae;
 	mb();
+
 	/* Re-read to make sure it was written.  */
 	new_hae = *alpha_mv.hae_register;
-
-	__restore_flags(flags);
+	setipl(ipl);
 }
 
 static inline void set_hae(unsigned long new_hae)
@@ -144,10 +143,6 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # include <asm/jensen.h>
 #elif defined(CONFIG_ALPHA_RX164)
 # include <asm/core_polaris.h>
-#elif defined(CONFIG_ALPHA_LX164)
-# include <asm/core_pyxis.h>
-#elif defined(CONFIG_ALPHA_IRONGATE)
-# include <asm/core_irongate.h>
 #else
 #error "What system is this?"
 #endif
@@ -262,8 +257,6 @@ static inline void * ioremap(unsigned long offset, unsigned long size)
 static inline void iounmap(void *addr)
 {
 }
-
-#define ioremap_nocache(offset, size) ioremap((offset),(size))
 
 #ifndef readb
 # define readb(a)	_readb((unsigned long)(a))

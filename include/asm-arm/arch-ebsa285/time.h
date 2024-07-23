@@ -115,9 +115,6 @@ static void isa_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		else
 			last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
-
-	if (!user_mode(regs))
-		do_profile(instruction_pointer(regs));
 }
 
 static struct irqaction isa_timer_irq = {
@@ -260,9 +257,6 @@ static void __ebsa285_text timer1_interrupt(int irq, void *dev_id, struct pt_reg
 		else
 			last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
-
-	if (!user_mode(regs))
-		do_profile(instruction_pointer(regs));
 }
 
 static struct irqaction __ebsa285_data timer1_irq = {
@@ -285,20 +279,22 @@ set_dummy_time(unsigned long secs)
  */
 extern __inline__ void setup_timer(void)
 {
-	if (machine_arch_type == MACH_TYPE_CO285)
+	switch(machine_arch_type) {
+	case MACH_TYPE_CO285:
 		/*
 		 * Add-in 21285s shouldn't access the RTC
 		 */
 		rtc_base = 0;
-	else
+		break;
+
+	default:
 		rtc_base = 0x70;
+		break;
+	}
 
 	if (rtc_base) {
 		int reg_d, reg_b;
 
-		/*
-		 * Probe for the RTC.
-		 */
 		reg_d = CMOS_READ(RTC_REG_D);
 
 		/*
@@ -318,7 +314,7 @@ extern __inline__ void setup_timer(void)
 		    CMOS_READ(RTC_REG_B) == reg_b) {
 
 			/*
-			 * We have a RTC.  Check the battery
+			 * Check the battery
 			 */
 			if ((reg_d & 0x80) == 0)
 				printk(KERN_WARNING "RTC: *** warning: CMOS battery bad\n");
@@ -336,7 +332,8 @@ extern __inline__ void setup_timer(void)
 		xtime.tv_sec = mktime(1970, 1, 1, 0, 0, 0);
 		set_rtc_mmss = set_dummy_time;
 	}
-	if (machine_is_ebsa285() || machine_is_co285()) {
+
+	if (machine_is_ebsa285()) {
 		gettimeoffset = timer1_gettimeoffset;
 
 		*CSR_TIMER1_CLR  = 0;

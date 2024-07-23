@@ -52,23 +52,6 @@ struct sound_unit
 	struct sound_unit *next;
 };
 
-extern int init_cmpci(void);
-extern int init_sonicvibes(void);
-extern int init_maestro(void);
-extern int init_trident(void);
-extern int i810_probe(void);
-extern int init_es1370(void);
-extern int init_es1371(void);
-extern int msnd_classic_init(void);
-extern int msnd_pinnacle_init(void);
-extern int init_solo1(void);
-extern int init_ymf7xxsb_module(void);
-extern int cs_probe(void);
-extern int cs4281_probe(void);
-extern void init_vwsnd(void);
-extern int ymf_probe(void);
-
-
 /*
  *	Low level list operator. Scan the ordered list, find a hole and
  *	join into it. Called with the lock asserted
@@ -149,7 +132,7 @@ static void __sound_remove_unit(struct sound_unit **list, int unit)
  *	This lock guards the sound loader list.
  */
 
-spinlock_t sound_loader_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t sound_loader_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  *	Allocate the controlling structure and add it to the sound driver
@@ -396,12 +379,6 @@ int soundcore_init(void)
 	/*
 	 *	Now init non OSS drivers
 	 */
-#ifdef CONFIG_SOUND_CMPCI
-        init_cmpci();
-#endif
-#ifdef CONFIG_SOUND_VWSND
-	init_vwsnd();
-#endif
 #ifdef CONFIG_SOUND_SONICVIBES
 	init_sonicvibes();
 #endif
@@ -411,38 +388,11 @@ int soundcore_init(void)
 #ifdef CONFIG_SOUND_ES1371
 	init_es1371();
 #endif
-#ifdef CONFIG_SOUND_MAESTRO
-	init_maestro();
-#endif
-#ifdef CONFIG_SOUND_MAESTRO3
-    init_maestro3();
-#endif
-#ifdef CONFIG_SOUND_TRIDENT
-	init_trident();
-#endif
 #ifdef CONFIG_SOUND_MSNDCLAS
 	msnd_classic_init();
 #endif
 #ifdef CONFIG_SOUND_MSNDPIN
 	msnd_pinnacle_init();
-#endif
-#ifdef CONFIG_SOUND_ESSSOLO1
-	init_solo1();
-#endif
-#ifdef CONFIG_SOUND_ICH
-	i810_probe();
-#endif
-#ifdef CONFIG_SOUND_YMPCI
-	init_ymf7xxsb_module();
-#endif
-#ifdef CONFIG_SOUND_FUSION
-	cs_probe();
-#endif
-#ifdef CONFIG_SOUND_CS4281
-	cs4281_probe();
-#endif
-#ifdef CONFIG_SOUND_YMFPCI
-	ymf_probe();
 #endif
 	return 0;
 }

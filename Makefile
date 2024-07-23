@@ -1,7 +1,7 @@
 VERSION = 2
-PATCHLEVEL = 2
-SUBLEVEL = 19
-EXTRAVERSION = 
+PATCHLEVEL = 3
+SUBLEVEL = 0
+EXTRAVERSION =
 
 ARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ -e s/arm.*/arm/ -e s/sa110/arm/)
 
@@ -22,20 +22,11 @@ CROSS_COMPILE 	=
 
 AS	=$(CROSS_COMPILE)as
 LD	=$(CROSS_COMPILE)ld
-#
-#	foo-bar-gcc for cross builds
-#	gcc272 for Debian's old compiler for kernels
-#	kgcc for Conectiva, Mandrake and Red Hat 7
-#	otherwise 'cc'
-#
-CC	=$(shell if [ -n "$(CROSS_COMPILE)" ]; then echo $(CROSS_COMPILE)gcc; else \
-	$(CONFIG_SHELL) scripts/kwhich gcc272 2>/dev/null || $(CONFIG_SHELL) scripts/kwhich kgcc 2>/dev/null || echo cc; fi) \
-	-D__KERNEL__ -I$(HPATH)
+CC	=$(CROSS_COMPILE)gcc -D__KERNEL__ -I$(HPATH)
 CPP	=$(CC) -E
 AR	=$(CROSS_COMPILE)ar
 NM	=$(CROSS_COMPILE)nm
 STRIP	=$(CROSS_COMPILE)strip
-OBJCOPY	=$(CROSS_COMPILE)objcopy
 OBJDUMP	=$(CROSS_COMPILE)objdump
 MAKE	=make
 GENKSYMS=/sbin/genksyms
@@ -79,7 +70,7 @@ KERNELRELEASE=$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)
 #
 # INSTALL_MOD_PATH specifies a prefix to MODLIB for module directory 
 # relocations required by build roots.  This is not defined in the
-# makefile but the argument can be passed to make if needed.
+# makefile but the arguement can be passed to make if needed.
 #
 
 #
@@ -96,9 +87,6 @@ SVGA_MODE=	-DSVGA_MODE=NORMAL_VGA
 #
 
 CFLAGS = -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer
-
-# use '-fno-strict-aliasing', but only if the compiler can take it
-CFLAGS += $(shell if $(CC) -fno-strict-aliasing -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-fno-strict-aliasing"; fi)
 
 ifdef CONFIG_SMP
 CFLAGS += -D__SMP__
@@ -119,7 +107,7 @@ CORE_FILES	=kernel/kernel.o mm/mm.o fs/fs.o ipc/ipc.o
 FILESYSTEMS	=fs/filesystems.a
 NETWORKS	=net/network.a
 DRIVERS		=drivers/block/block.a \
-		 drivers/char/char.o \
+		 drivers/char/char.a \
 	         drivers/misc/misc.a
 LIBS		=$(TOPDIR)/lib/lib.a
 SUBDIRS		=kernel drivers mm fs net ipc lib
@@ -143,7 +131,7 @@ DRIVERS := $(DRIVERS) drivers/cdrom/cdrom.a
 endif
 
 ifeq ($(CONFIG_SOUND),y)
-DRIVERS := $(DRIVERS) drivers/sound/sounddrivers.o
+DRIVERS := $(DRIVERS) drivers/sound/sound.a
 endif
 
 ifdef CONFIG_PCI
@@ -166,20 +154,12 @@ ifeq ($(CONFIG_FC4),y)
 DRIVERS := $(DRIVERS) drivers/fc4/fc4.a
 endif
 
-ifeq ($(CONFIG_NET_FC),y)
-DRIVERS := $(DRIVERS) drivers/net/fc/fc.a
-endif
-
-ifdef CONFIG_POWERMAC
-DRIVERS := $(DRIVERS) drivers/macintosh/macintosh.o
+ifdef CONFIG_PPC
+DRIVERS := $(DRIVERS) drivers/macintosh/macintosh.a
 endif
 
 ifdef CONFIG_PNP
 DRIVERS := $(DRIVERS) drivers/pnp/pnp.a
-endif
-
-ifdef CONFIG_SGI
-DRIVERS := $(DRIVERS) drivers/sgi/sgi.a
 endif
 
 ifdef CONFIG_VT
@@ -194,12 +174,8 @@ ifdef CONFIG_HAMRADIO
 DRIVERS := $(DRIVERS) drivers/net/hamradio/hamradio.a
 endif
 
-ifeq ($(CONFIG_TC),y)
-DRIVERS := $(DRIVERS) drivers/tc/tc.a
-endif
-
 ifeq ($(CONFIG_USB),y)
-DRIVERS := $(DRIVERS) drivers/usb/usbdrv.o
+DRIVERS := $(DRIVERS) drivers/usb/usb.a
 endif
 
 ifeq ($(CONFIG_I2O),y)
@@ -208,14 +184,6 @@ endif
 
 ifeq ($(CONFIG_IRDA),y)
 DRIVERS := $(DRIVERS) drivers/net/irda/irda_drivers.a
-endif
-
-ifeq ($(CONFIG_I2O),y)
-DRIVERS := $(DRIVERS) drivers/i2o/i2o.a
-endif
-
-ifeq ($(CONFIG_PHONE),y)
-DRIVERS := $(DRIVERS) drivers/telephony/telephony.a
 endif
 
 include arch/$(ARCH)/Makefile
@@ -290,8 +258,8 @@ include/linux/compile.h: $(CONFIGURATION) include/linux/version.h newversion
 	@echo -n \#define UTS_VERSION \"\#`cat .version` > .ver
 	@if [ -n "$(CONFIG_SMP)" ] ; then echo -n " SMP" >> .ver; fi
 	@if [ -f .name ]; then  echo -n \-`cat .name` >> .ver; fi
-	@echo ' '`LANG=C date`'"' >> .ver
-	@echo \#define LINUX_COMPILE_TIME \"`LANG=C date +%T`\" >> .ver
+	@echo ' '`date`'"' >> .ver
+	@echo \#define LINUX_COMPILE_TIME \"`date +%T`\" >> .ver
 	@echo \#define LINUX_COMPILE_BY \"`whoami`\" >> .ver
 	@echo \#define LINUX_COMPILE_HOST \"`hostname`\" >> .ver
 	@if [ -x /bin/dnsdomainname ]; then \
@@ -319,13 +287,13 @@ init/main.o: init/main.c include/config/MARKER
 fs lib mm ipc kernel drivers net: dummy
 	$(MAKE) $(subst $@, _dir_$@, $@)
 
-MODFLAGS += -DMODULE
+MODFLAGS = -DMODULE
 ifdef CONFIG_MODULES
 ifdef CONFIG_MODVERSIONS
 MODFLAGS += -DMODVERSIONS -include $(HPATH)/linux/modversions.h
 endif
 
-modules: include/config/MARKER $(patsubst %, _mod_%, $(SUBDIRS))  
+modules: $(patsubst %, _mod_%, $(SUBDIRS))
 
 $(patsubst %, _mod_%, $(SUBDIRS)) : include/linux/version.h
 	$(MAKE) -C $(patsubst _mod_%, %, $@) CFLAGS="$(CFLAGS) $(MODFLAGS)" MAKING_MODULES=1 modules
@@ -333,16 +301,13 @@ $(patsubst %, _mod_%, $(SUBDIRS)) : include/linux/version.h
 modules_install:
 	@( \
 	MODLIB=$(INSTALL_MOD_PATH)/lib/modules/$(KERNELRELEASE); \
-	mkdir -p $$MODLIB; \
-	rm -f $$MODLIB/build; \
-	[ `/sbin/insmod -V 2>&1 | head -1 | awk '/^insmod version /{split($$3, a, /\./); printf "%d%03d%03d\n", a[1], a[2], a[3];}'`0 -ge 20030140 ] && \
-	ln -s `pwd` $$MODLIB/build; \
 	cd modules; \
 	MODULES=""; \
 	inst_mod() { These="`cat $$1`"; MODULES="$$MODULES $$These"; \
 		mkdir -p $$MODLIB/$$2; cp $$These $$MODLIB/$$2; \
 		echo Installing modules under $$MODLIB/$$2; \
 	}; \
+	mkdir -p $$MODLIB; \
 	\
 	if [ -f BLOCK_MODULES ]; then inst_mod BLOCK_MODULES block; fi; \
 	if [ -f NET_MODULES   ]; then inst_mod NET_MODULES   net;   fi; \
@@ -357,12 +322,8 @@ modules_install:
 	if [ -f VIDEO_MODULES ]; then inst_mod VIDEO_MODULES video; fi; \
 	if [ -f FC4_MODULES   ]; then inst_mod FC4_MODULES   fc4;   fi; \
 	if [ -f IRDA_MODULES  ]; then inst_mod IRDA_MODULES  net;   fi; \
-	if [ -f USB_MODULES   ]; then inst_mod USB_MODULES   usb;   fi; \
-	if [ -f USB_SERIAL_MODULES ]; then inst_mod USB_SERIAL_MODULES usb; fi; \
-	if [ -f SK98LIN_MODULES ]; then inst_mod SK98LIN_MODULES  net;   fi; \
-	if [ -f SKFP_MODULES ]; then inst_mod SKFP_MODULES   net;   fi; \
 	\
-	for f in *.o; do [ -r $$f ] && echo $$f; done | sort > $$MODLIB/.allmods; \
+	ls *.o > $$MODLIB/.allmods; \
 	echo $$MODULES | tr ' ' '\n' | sort | comm -23 $$MODLIB/.allmods - > $$MODLIB/.misc; \
 	if [ -s $$MODLIB/.misc ]; then inst_mod $$MODLIB/.misc misc; fi; \
 	rm -f $$MODLIB/.misc $$MODLIB/.allmods; \
@@ -382,8 +343,8 @@ endif
 
 clean:	archclean
 	rm -f kernel/ksyms.lst include/linux/compile.h
-	rm -f core `find . -name '*.[oas]' ! \( -regex '.*lxdialog/.*' \
-		-o -regex '.*ksymoops/.*' \) -print`
+	rm -f core `find . -name '*.[oas]' ! -regex '.*lxdialog/.*' \
+		! -regex '.*ksymoops/.*' -print`
 	rm -f core `find . -type f -name 'core' -print`
 	rm -f core `find . -name '.*.flags' -print`
 	rm -f vmlinux System.map
@@ -404,10 +365,6 @@ mrproper: clean archmrproper
 	rm -f drivers/net/hamradio/soundmodem/gentbl
 	rm -f drivers/char/hfmodem/gentbl drivers/char/hfmodem/tables.h
 	rm -f drivers/sound/*_boot.h drivers/sound/.*.boot
-	rm -f drivers/sound/msndinit.c
-	rm -f drivers/sound/msndperm.c
-	rm -f drivers/sound/pndsperm.c
-	rm -f drivers/sound/pndspini.c
 	rm -f .version .config* config.in config.old
 	rm -f scripts/tkparse scripts/kconfig.tk scripts/kconfig.tmp
 	rm -f scripts/lxdialog/*.o scripts/lxdialog/lxdialog
@@ -434,7 +391,7 @@ backup: mrproper
 sums:
 	find . -type f -print | sort | xargs sum > .SUMS
 
-dep-files: scripts/mkdep archdep include/linux/version.h new-genksyms
+dep-files: scripts/mkdep archdep include/linux/version.h
 	scripts/mkdep init/*.c > .depend
 	scripts/mkdep `find $(FINDHPATH) -follow -name \*.h ! -name modversions.h -print` > .hdepend
 #	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i fastdep ;done
@@ -444,19 +401,7 @@ dep-files: scripts/mkdep archdep include/linux/version.h new-genksyms
 MODVERFILE :=
 
 ifdef CONFIG_MODVERSIONS
-
 MODVERFILE := $(TOPDIR)/include/linux/modversions.h
-
-new-genksyms:
-	@$(GENKSYMS) -k $(VERSION).$(PATCHLEVEL).$(SUBLEVEL) </dev/null \
-	2>/dev/null || ( echo -e "\nYou need a new version of the genksyms\
-	program, which is part of\nthe modutils package. Please read the file\
-	Documentation/Changes\nfor more information.\n"; exit 1 )
-
-else
-
-new-genksyms:
-
 endif
 
 depend dep: dep-files $(MODVERFILE)

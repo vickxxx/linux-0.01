@@ -68,7 +68,6 @@ struct serial_struct {
 #define ZILOG_CLOSING		0x08000000 /* Serial port is closing */
 #define ZILOG_CTS_FLOW		0x04000000 /* Do CTS flow control */
 #define ZILOG_CHECK_CD		0x02000000 /* i.e., CLOCAL */
-#define ZILOG_SLEEPING		0x01000000 /* have shut it down for sleep */
 
 /* Software state per channel */
 
@@ -92,13 +91,6 @@ struct mac_zschannel {
 	struct mac_serial*	parent;
 };
 
-struct mac_dma {
-	volatile struct dbdma_regs	dma;
-	volatile unsigned short		res_count;
-	volatile unsigned short		command;
-	volatile unsigned int		buf_addr;
-};
-
 struct mac_serial {
 	struct mac_serial *zs_next;	/* For IRQ servicing chain */
 	struct mac_zschannel *zs_channel; /* Channel registers */
@@ -110,9 +102,8 @@ struct mac_serial {
 	char break_abort;   /* Is serial console in, so process brk/abrt */
 	char kgdb_channel;  /* Kgdb is running on this channel */
 	char is_cons;       /* Is this our console. */
-	char is_internal_modem; /* is connected to an internal modem */
 	char is_cobalt_modem;	/* is a gatwick-based cobalt modem */
-	char is_irda;		/* is connected to an IrDA codec */
+	char is_pwbk_ir;	/* is connected to an IR led on powerbooks */
 	unsigned char tx_active; /* character is being xmitted */
 	unsigned char tx_stopped; /* output is suspended */
 
@@ -164,28 +155,6 @@ struct mac_serial {
 	struct termios		callout_termios;
 	struct wait_queue	*open_wait;
 	struct wait_queue	*close_wait;
-
-	volatile struct dbdma_regs *tx_dma;
-	int			tx_dma_irq;
-	volatile struct dbdma_cmd *tx_cmds;
-	volatile struct mac_dma *rx;
-	int 			rx_dma_irq;
-	volatile struct dbdma_cmd **rx_cmds;
-	unsigned char		**rx_char_buf;
-	unsigned char		**rx_flag_buf;
-#define	RX_BUF_SIZE	256
-	int			rx_nbuf;
-	int			rx_done_bytes;
-	int			rx_ubuf;
-	int			rx_fbuf;
-#define	RX_NO_FBUF	(-1)
-	int			rx_cbuf;
-	spinlock_t		rx_dma_lock;
-	int			has_dma;
-	int			dma_initted;
-	void			*dma_priv;
-	struct timer_list	poll_dma_timer;
-#define RX_DMA_TIMER	(jiffies + 10*HZ/1000)
 };
 
 
@@ -256,9 +225,9 @@ struct mac_serial {
 #define	INT_ALL_Rx	0x10	/* Int on all Rx Characters or error */
 #define	INT_ERR_Rx	0x18	/* Int on error only */
 
-#define	WT_RDY_RT	0x20	/* W/Req reflects recv if 1, xmit if 0 */
-#define	WT_FN_RDYFN	0x40	/* W/Req pin is DMA request if 1, wait if 0 */
-#define	WT_RDY_ENAB	0x80	/* Enable W/Req pin */
+#define	WT_RDY_RT	0x20	/* Wait/Ready on R/T */
+#define	WT_FN_RDYFN	0x40	/* Wait/FN/Ready FN */
+#define	WT_RDY_ENAB	0x80	/* Wait/Ready Enable */
 
 /* Write Register #2 (Interrupt Vector) */
 
@@ -315,9 +284,6 @@ struct mac_serial {
 /* Write Register 6 (Sync bits 0-7/SDLC Address Field) */
 
 /* Write Register 7 (Sync bits 8-15/SDLC 01111110) */
-
-/* Write Register 7' (Some enhanced feature control) */
-#define	ENEXREAD	0x40	/* Enable read of some write registers */
 
 /* Write Register 8 (transmit buffer) */
 
@@ -379,9 +345,7 @@ struct mac_serial {
 #define	SNRZI	0xe0	/* Set NRZI mode */
 
 /* Write Register 15 (external/status interrupt control) */
-#define	EN85C30	1	/* Enable some 85c30-enhanced registers */
 #define	ZCIE	2	/* Zero count IE */
-#define	ENSTFIFO 4	/* Enable status FIFO (SDLC) */
 #define	DCDIE	8	/* DCD IE */
 #define	SYNCIE	0x10	/* Sync/hunt IE */
 #define	CTSIE	0x20	/* CTS IE */
@@ -417,15 +381,6 @@ struct mac_serial {
 #define	END_FR		0x80	/* End of Frame (SDLC) */
 
 /* Read Register 2 (channel b only) - Interrupt vector */
-#define	CHB_Tx_EMPTY	0x00
-#define	CHB_EXT_STAT	0x02
-#define	CHB_Rx_AVAIL	0x04
-#define	CHB_SPECIAL	0x06
-#define	CHA_Tx_EMPTY	0x08
-#define	CHA_EXT_STAT	0x0a
-#define	CHA_Rx_AVAIL	0x0c
-#define	CHA_SPECIAL	0x0e
-#define	STATUS_MASK	0x06
 
 /* Read Register 3 (interrupt pending register) ch a only */
 #define	CHBEXT	0x1		/* Channel B Ext/Stat IP */

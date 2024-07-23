@@ -12,7 +12,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
+
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
@@ -26,19 +26,28 @@ static int mem[MAX_PCBIT_CARDS] = {0, };
 static int irq[MAX_PCBIT_CARDS] = {0, };
 
 static int num_boards;
-struct pcbit_dev * dev_pcbit[MAX_PCBIT_CARDS] = {0, };
+struct pcbit_dev * dev_pcbit[MAX_PCBIT_CARDS] = {0, 0, 0, 0};
+
+int init_module(void);
+void cleanup_module(void);
 
 extern void pcbit_terminate(int board);
 extern int pcbit_init_dev(int board, int mem_base, int irq);
 
-static int __init pcbit_init(void)
+#ifdef MODULE
+MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
+#define pcbit_init init_module
+#endif
+
+int pcbit_init(void)
 {
 	int board;
 
 	num_boards = 0;
 
-	printk(KERN_NOTICE 
-	       "PCBIT-D device driver v 0.5-fjpc0 19991204 - "
+	printk(KERN_INFO 
+	       "PCBIT-D device driver v 0.5 - "
 	       "Copyright (C) 1996 Universidade de Lisboa\n");
 
 	if (mem[0] || irq[0]) 
@@ -74,23 +83,29 @@ static int __init pcbit_init(void)
 		else
 			return -EIO;
 	}
+
+	/* No symbols to export, hide all symbols */
+	EXPORT_NO_SYMBOLS;
+
 	return 0;
 }
 
-static void  pcbit_exit(void)
+#ifdef MODULE
+void cleanup_module(void)
 {
 	int board;
 
 	for (board = 0; board < num_boards; board++)
 		pcbit_terminate(board);
-	printk(KERN_NOTICE 
+	printk(KERN_INFO 
 	       "PCBIT-D module unloaded\n");
 }
 
-#ifndef MODULE
+#else
 void pcbit_setup(char *str, int *ints)
 {
 	int i, j, argc;
+
 	argc = ints[0];
 	i = 0;
 	j = 1;
@@ -112,9 +127,5 @@ void pcbit_setup(char *str, int *ints)
 }
 #endif
 
-MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
-MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_PCBIT_CARDS) "i");
 
-module_init(pcbit_init);
-module_exit(pcbit_exit);
 

@@ -156,10 +156,8 @@ int dev_mc_add(struct device *dev, void *addr, int alen, int glbl)
 		}
 	}
 
-	if ((dmi=dmi1)==NULL) {
-		end_bh_atomic();
+	if ((dmi=dmi1)==NULL)
 		return -ENOMEM;
-	}
 	memcpy(dmi->dmi_addr, addr, alen);
 	dmi->dmi_addrlen=alen;
 	dmi->next=dev->mc_list;

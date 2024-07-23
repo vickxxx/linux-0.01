@@ -209,9 +209,6 @@ struct parport {
 	spinlock_t pardevice_lock;
 	spinlock_t waitlist_lock;
 	rwlock_t cad_lock;
-
-	/* PCI parallel I/O card support. */
-	unsigned long base_hi;  /* base address (hi - ECR) */
 };
 
 /* parport_register_port registers a new parallel port at the given address (if

@@ -79,6 +79,7 @@ _exception(int signr, struct pt_regs *regs)
 		debugger(regs);
 #endif
 		print_backtrace((unsigned long *)regs->gpr[1]);
+		instruction_dump((unsigned long *)regs->nip);
 		panic("Exception in kernel pc %lx signal %d",regs->nip,signr);
 	}
 	force_sig(signr, current);
@@ -100,33 +101,33 @@ MachineCheckException(struct pt_regs *regs)
 			return;
 		}
 #endif
-		printk("Machine check in kernel mode.  (regs at %p)\n", regs);
-		printk("Caused by (from srr1): ");
-		switch( regs->msr & 0x001F0000) {
-		case 0x100000:
-			printk("L2 data cache parity error\n");
+		printk("Machine check in kernel mode.\n");
+		printk("Caused by (from msr): ");
+		printk("regs %p ",regs);
+		switch( regs->msr & 0x0000F000)
+		{
+		case (1<<12) :
+			printk("Machine check signal - probably due to mm fault\n"
+				"with mmu off\n");
 			break;
-		case 0x80000:
-			printk("Machine check signal\n");
-			printk("(probably due to access of bad physical address\n");
-			break;
-		case 0x40000:
+		case (1<<13) :
 			printk("Transfer error ack signal\n");
 			break;
-		case 0x20000:
+		case (1<<14) :
 			printk("Data parity signal\n");
 			break;
-		case 0x10000:
+		case (1<<15) :
 			printk("Address parity signal\n");
 			break;
 		default:
-			printk("Unknown values in srr1\n");
+			printk("Unknown values in msr\n");
 		}
 		show_regs(regs);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 		debugger(regs);
 #endif
 		print_backtrace((unsigned long *)regs->gpr[1]);
+		instruction_dump((unsigned long *)regs->nip);
 		panic("machine check");
 	}
 	_exception(SIGSEGV, regs);	
@@ -156,52 +157,9 @@ RunModeException(struct pt_regs *regs)
 	_exception(SIGTRAP, regs);	
 }
 
-/* Illegal instruction emulation support.  Originally written to
- * provide the PVR to user applications using the mfspr rd, PVR.
- * Return non-zero if we can't emulate, or EFAULT if the associated
- * memory access caused an access fault.  Return zero on success.
- *
- * There are a couple of ways to do this, either "decode" the instruction
- * or directly match lots of bits.  In this case, matching lots of
- * bits is faster and easier.
- *
- */
-#define INST_MFSPR_PVR		0x7c1f42a6
-#define INST_MFSPR_PVR_MASK	0xfc1fffff
-
-static int
-emulate_instruction(struct pt_regs *regs)
-{
-	uint    instword;
-	uint    rd;
-	int    retval;
-
-	retval = EINVAL;
-	if (!user_mode(regs))
-		return retval;
-
-	retval = EFAULT;
-	if (get_user(instword, (uint *)(regs->nip)))
-		return retval;
-
-	/* Emulate the mfspr rD, PVR.
-	 */
-	retval = EINVAL;
-	if ((instword & INST_MFSPR_PVR_MASK) == INST_MFSPR_PVR) {
-		rd = (instword >> 21) & 0x1f;
-		regs->gpr[rd] = _get_PVR();
-		retval = 0;
-	}
-	if (retval == 0)
-		regs->nip += 4;
-	return(retval);
-}
-
 void
 ProgramCheckException(struct pt_regs *regs)
 {
-	int errcode;
-
 	if (regs->msr & 0x100000) {
 		/* IEEE FP exception */
 		_exception(SIGFPE, regs);
@@ -213,13 +171,7 @@ ProgramCheckException(struct pt_regs *regs)
 #endif
 		_exception(SIGTRAP, regs);
 	} else {
-		/* Try to emulate it if we should. */
-		if ((errcode = emulate_instruction(regs))) {
-			if (errcode == EFAULT)
-				_exception(SIGBUS, regs);
-			else
-				_exception(SIGILL, regs);
-		}
+		_exception(SIGILL, regs);
 	}
 }
 
@@ -264,6 +216,7 @@ StackOverflow(struct pt_regs *regs)
 #endif
 	show_regs(regs);
 	print_backtrace((unsigned long *)regs->gpr[1]);
+	instruction_dump((unsigned long *)regs->nip);
 	panic("kernel stack overflow");
 }
 

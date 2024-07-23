@@ -24,7 +24,6 @@
 #define flush_cache_page(vma, vmaddr)		do { } while (0)
 #define flush_page_to_ram(page)			do { } while (0)
 #define flush_icache_range(start, end)		do { } while (0)
-#define flush_dcache_page(page)			do { } while (0)
 
 /*
  * TLB flushing:
@@ -43,7 +42,7 @@
 do { unsigned long tmpreg; __asm__ __volatile__("movl %%cr3,%0\n\tmovl %0,%%cr3":"=r" (tmpreg) : :"memory"); } while (0)
 
 #ifndef CONFIG_X86_INVLPG
-#define __flush_tlb_one(addr) __flush_tlb()
+#define __flush_tlb_one(addr) flush_tlb()
 #else
 #define __flush_tlb_one(addr) \
 __asm__ __volatile__("invlpg %0": :"m" (*(char *) addr))
@@ -287,7 +286,7 @@ extern pte_t * __bad_pagetable(void);
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE(vaddr) ((unsigned long) empty_zero_page)
+#define ZERO_PAGE ((unsigned long) empty_zero_page)
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR			(8*sizeof(unsigned long))

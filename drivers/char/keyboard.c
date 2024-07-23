@@ -32,7 +32,6 @@
 #include <linux/string.h>
 #include <linux/random.h>
 #include <linux/init.h>
-#include <linux/module.h>
 
 #include <asm/keyboard.h>
 #include <asm/bitops.h>
@@ -61,9 +60,7 @@
 #define KBD_DEFLOCK 0
 #endif
 
-void (*kbd_ledfunc)(unsigned int led) = NULL;
 EXPORT_SYMBOL(handle_scancode);
-EXPORT_SYMBOL(kbd_ledfunc);
 
 extern void ctrl_alt_del(void);
 
@@ -250,7 +247,7 @@ void handle_scancode(unsigned char scancode, int down)
 		sysrq_pressed = !up_flag;
 		return;
 	} else if (sysrq_pressed) {
-		if (!up_flag && sysrq_enabled)
+		if (!up_flag)
 			handle_sysrq(kbd_sysrq_xlate[keycode], kbd_pt_regs, kbd, tty);
 		return;
 	}
@@ -315,7 +312,7 @@ void handle_scancode(unsigned char scancode, int down)
 #if 1			/* how? two almost equivalent choices follow */
 			compute_shiftstate();
 #else
-			keysym = U(key_maps[0][keycode]);
+			keysym = U(plain_map[keycode]);
 			type = KTYP(keysym);
 			if (type == KT_SHIFT)
 			  (*key_handler[type])(keysym & 0xff, up_flag);
@@ -324,22 +321,7 @@ void handle_scancode(unsigned char scancode, int down)
 	}
 }
 
-#ifdef CONFIG_FORWARD_KEYBOARD
-extern int forward_chars;
 
-void put_queue(int ch)
-{
-	if (forward_chars == fg_console+1){
-		kbd_forward_char (ch);
-	} else {
-		wake_up(&keypress_wait);
-		if (tty) {
-			tty_insert_flip_char(tty, ch, 0);
-			con_schedule_flip(tty);
-		}
-	}
-}
-#else
 void put_queue(int ch)
 {
 	wake_up(&keypress_wait);
@@ -348,7 +330,6 @@ void put_queue(int ch)
 		con_schedule_flip(tty);
 	}
 }
-#endif
 
 static void puts_queue(char *cp)
 {
@@ -759,7 +740,7 @@ void compute_shiftstate(void)
 	    k = i*BITS_PER_LONG;
 	    for(j=0; j<BITS_PER_LONG; j++,k++)
 	      if(test_bit(k, key_down)) {
-		sym = U(key_maps[0][k]);
+		sym = U(plain_map[k]);
 		if(KTYP(sym) == KT_SHIFT) {
 		  val = KVAL(sym);
 		  if (val == KVAL(K_CAPSSHIFT))
@@ -907,7 +888,6 @@ static void kbd_bh(void)
 	if (leds != ledstate) {
 		ledstate = leds;
 		kbd_leds(leds);
-		if (kbd_ledfunc) kbd_ledfunc(leds);
 	}
 }
 

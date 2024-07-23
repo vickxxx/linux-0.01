@@ -146,7 +146,6 @@ enum net_directory_inos {
 	PROC_NET_IPFW_CHAIN_NAMES,
 	PROC_NET_AT_AARP,
 	PROC_NET_BRIDGE,
-	PROC_NET_PNP,
 	PROC_NET_LAST
 };
 
@@ -195,25 +194,18 @@ enum scsi_directory_inos {
 	PROC_SCSI_AMIGA7XX,
 	PROC_SCSI_MVME16x,
 	PROC_SCSI_BVME6000,
-	PROC_SCSI_SIM710,
 	PROC_SCSI_A3000,
 	PROC_SCSI_A2091,
 	PROC_SCSI_GVP11,
 	PROC_SCSI_ATARI,
 	PROC_SCSI_MAC,
 	PROC_SCSI_IDESCSI,
-	PROC_SCSI_SGIWD93,
 	PROC_SCSI_MESH,
 	PROC_SCSI_53C94,
 	PROC_SCSI_PLUTO,
 	PROC_SCSI_INI9100U,
-	PROC_SCSI_INIA100,
- 	PROC_SCSI_IPH5526_FC,
+ 	PROC_SCSI_INIA100,
 	PROC_SCSI_FCAL,
-	PROC_SCSI_I2O,
-	PROC_SCSI_3W_XXXX,
-	PROC_SCSI_USB_SCSI,
-	PROC_SCSI_CPQFCTS,
 	PROC_SCSI_SCSI_DEBUG,	
 	PROC_SCSI_NOT_PRESENT,
 	PROC_SCSI_FILE,                        /* I'm assuming here that we */
@@ -437,12 +429,6 @@ struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 					 struct proc_dir_entry *parent);
 void remove_proc_entry(const char *name, struct proc_dir_entry *parent);
 
-#define create_proc_info_entry(n, m, b, g) \
-	{ \
-		struct proc_dir_entry *r = create_proc_entry(n, m, b); \
-		if (r) r->get_info = g; \
-	}
-
 /*
  * proc_tty.c
  */
@@ -457,12 +443,12 @@ extern void proc_device_tree_init(void);
 
 #else
 
-extern inline int proc_register(struct proc_dir_entry *a, struct proc_dir_entry *b) { return 0; };
-extern inline int proc_unregister(struct proc_dir_entry *a, int b) { return 0; };
-extern inline int proc_net_register(struct proc_dir_entry *a) { return 0; };
-extern inline int proc_net_unregister(int x) { return 0; };
-extern inline int proc_scsi_register(struct proc_dir_entry *b, struct proc_dir_entry *c) { return 0; };
-extern inline int proc_scsi_unregister(struct proc_dir_entry *a, int x) { return 0; };
+extern inline int proc_register(struct proc_dir_entry *a, struct proc_dir_entry *b) {};
+extern inline int proc_unregister(struct proc_dir_entry *a, int b) {};
+extern inline int proc_net_register(struct proc_dir_entry *a) {};
+extern inline int proc_net_unregister(int x) {};
+extern inline int proc_scsi_register(struct proc_dir_entry *b, struct proc_dir_entry *c) {};
+extern inline int proc_scsi_unregister(struct proc_dir_entry *a, int x);
 
 extern inline struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 					 struct proc_dir_entry *parent)
@@ -470,22 +456,11 @@ extern inline struct proc_dir_entry *create_proc_entry(const char *name, mode_t 
 	return NULL;
 }
 
-#define create_proc_info_entry(n, m, b, g) \
-	{ \
-		struct proc_dir_entry *r = create_proc_entry(n, m, b); \
-		if (r) r->get_info = g; \
-	}
-
-
 extern inline void remove_proc_entry(const char *name, struct proc_dir_entry *parent) {};
 
 extern inline void proc_tty_register_driver(struct tty_driver *driver) {};
 extern inline void proc_tty_unregister_driver(struct tty_driver *driver) {};
 
-extern struct proc_dir_entry proc_root;
 
-#endif /* CONFIG_PROC_FS */
-
-#define proc_mkdir(buf, usbdir)	create_proc_entry(buf, S_IFDIR, usbdir)
-
+#endif
 #endif /* _LINUX_PROC_FS_H */

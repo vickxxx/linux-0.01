@@ -1,8 +1,6 @@
 #ifndef _M68K_PAGE_H
 #define _M68K_PAGE_H
 
-#include <linux/config.h>
-
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT	12
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
@@ -11,7 +9,6 @@
 #ifdef __KERNEL__
 
 #include <asm/setup.h>
-#include <asm/bootinfo.h>
 
 #define STRICT_MM_TYPECHECKS
 
@@ -125,29 +122,11 @@ extern inline void *__va(unsigned long physaddr)
 #ifdef CONFIG_AMIGA
 	if (MACH_IS_AMIGA && (physaddr < 16*1024*1024))
 		return (void *)0xffffffff;
+	else
 #endif
-#ifdef CONFIG_MAC
-	if (MACH_IS_MAC && (physaddr >= mac_bi_data.videoaddr) &&
-	    (physaddr < mac_bi_data.videoaddr +
-	     (mac_bi_data.videorow * (mac_bi_data.dimensions>>16))))
-		return (void *)0xffffffff;
-#endif
-	return (void *)(physaddr+PAGE_OFFSET);
+		return (void *)(physaddr+PAGE_OFFSET);
 }
 #define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
-
-extern __inline__ int get_order(unsigned long size)
-{
-        int order;
-
-        size = (size-1) >> (PAGE_SHIFT-1);
-        order = -1;
-        do {
-                size >>= 1;
-                order++;
-        } while (size);
-        return order;
-}
 
 #endif /* __KERNEL__ */
 

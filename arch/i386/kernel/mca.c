@@ -112,25 +112,21 @@ static int mca_default_procfn(char* buf, int slot);
 static ssize_t proc_mca_read(struct file*, char*, size_t, loff_t *);
 
 static struct file_operations proc_mca_operations = {
-	NULL,			/* llseek */
-	proc_mca_read,		/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	NULL,			/* ioctl */
+	NULL,			/* array_lseek */
+	proc_mca_read,		/* array_read */
+	NULL,			/* array_write */
+	NULL,			/* array_readdir */
+	NULL,			/* array_poll */
+	NULL,			/* array_ioctl */
 	NULL,			/* mmap */
-	NULL,			/* open */
+	NULL,			/* no special open code */
 	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fascync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	NULL,			/* no special release code */
+	NULL			/* can't fsync */
 };
 
 static struct inode_operations proc_mca_inode_operations = {
-	&proc_mca_operations,	/* default file-ops */
+	&proc_mca_operations,	/* default base directory file-ops */
 	NULL,			/* create */
 	NULL,			/* lookup */
 	NULL,			/* link */
@@ -146,10 +142,7 @@ static struct inode_operations proc_mca_inode_operations = {
 	NULL,			/* writepage */
 	NULL,			/* bmap */
 	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL,			/* updatepage */
-	NULL			/* revalidate */
+	NULL			/* permission */
 };
 #endif
 
@@ -227,19 +220,18 @@ __initfunc(void mca_init(void))
 	if(!MCA_bus)
 		return;
 	printk("Micro Channel bus detected.\n");
+	save_flags(flags);
+	cli();
 
 	/* Allocate MCA_info structure (at address divisible by 8) */
 
-	mca_info = (struct MCA_info *)kmalloc(sizeof(struct MCA_info), GFP_KERNEL);
+	mca_info = kmalloc(sizeof(struct MCA_info), GFP_KERNEL);
 
 	if(mca_info == NULL) {
 		printk("Failed to allocate memory for mca_info!");
+		restore_flags(flags);
 		return;
 	}
-	memset(mca_info, 0, sizeof(struct MCA_info));
-
-	save_flags(flags);
-	cli();
 
 	/* Make sure adapter setup is off */
 
@@ -713,15 +705,12 @@ __initfunc(void mca_do_proc_init(void))
 		mca_info->slot[i].dev = 0;
 
 		if(!mca_isadapter(i)) continue;
-
-		node = (struct proc_dir_entry *)kmalloc(sizeof(struct proc_dir_entry), GFP_KERNEL);
+		node = kmalloc(sizeof(struct proc_dir_entry), GFP_KERNEL);
 
 		if(node == NULL) {
 			printk("Failed to allocate memory for MCA proc-entries!");
 			return;
 		}
-		memset(node, 0, sizeof(struct proc_dir_entry));
-
 		if(i < MCA_MAX_SLOT_NR) {
 			node->low_ino = PROC_MCA_SLOT + i;
 			node->namelen = sprintf(mca_info->slot[i].procname,
@@ -865,7 +854,7 @@ static ssize_t proc_mca_read(struct file* file,
 	type = inode->i_ino;
 	pid = type >> 16;
 	type &= 0x0000ffff;
-	start = NULL;
+	start = 0;
 	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 	length = mca_fill((char *) page, pid, type,
 			  &start, ppos, count);
@@ -873,7 +862,7 @@ static ssize_t proc_mca_read(struct file* file,
 		free_page(page);
 		return length;
 	}
-	if(start != NULL) {
+	if(start != 0) {
 		/* We have had block-adjusting processing! */
 
 		copy_to_user(buf, start, length);

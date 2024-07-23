@@ -1,4 +1,5 @@
-/* $Id: ide-std.c,v 1.3.2.2 1999/06/17 12:06:41 ralf Exp $
+/*
+ * include/asm-mips/types.h
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -8,8 +9,6 @@
  *
  * Copyright (C) 1998 by Ralf Baechle
  */
-#include <linux/sched.h>
-#include <linux/ioport.h>
 #include <linux/hdreg.h>
 #include <asm/ptrace.h>
 #include <asm/ide.h>

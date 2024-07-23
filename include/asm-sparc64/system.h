@@ -1,4 +1,4 @@
-/* $Id: system.h,v 1.50.2.2 2000/09/05 00:10:58 davem Exp $ */
+/* $Id: system.h,v 1.50 1999/05/08 03:03:22 davem Exp $ */
 #ifndef __SPARC64_SYSTEM_H
 #define __SPARC64_SYSTEM_H
 
@@ -106,16 +106,7 @@ extern void __global_restore_flags(unsigned long flags);
 #define read_pcr(__p)  __asm__ __volatile__("rd	%%pcr, %0" : "=r" (__p))
 #define write_pcr(__p) __asm__ __volatile__("wr	%0, 0x0, %%pcr" : : "r" (__p));
 #define read_pic(__p)  __asm__ __volatile__("rd %%pic, %0" : "=r" (__p))
-
-/* Blackbird errata workaround.  See commentary in
- * arch/sparc64/kernel/smp.c:smp_percpu_timer_interrupt()
- * for more information.
- */
-#define reset_pic()    						\
-	__asm__ __volatile__("ba,pt	%xcc, 99f\n\t"		\
-			     ".align	64\n"			\
-			  "99:wr	%g0, 0x0, %pic\n\t"	\
-			     "rd	%pic, %g0")
+#define reset_pic()    __asm__ __volatile__("wr	%g0, 0x0, %pic");
 
 #ifndef __ASSEMBLY__
 
@@ -252,63 +243,6 @@ static __inline__ unsigned long __xchg(unsigned long x, __volatile__ void * ptr,
 }
 
 extern void die_if_kernel(char *str, struct pt_regs *regs) __attribute__ ((noreturn));
-
-/* 
- * Atomic compare and exchange.  Compare OLD with MEM, if identical,
- * store NEW in MEM.  Return the initial value in MEM.  Success is
- * indicated by comparing RETURN with OLD.
- */
-
-#define __HAVE_ARCH_CMPXCHG 1
-
-extern __inline__ unsigned long
-__cmpxchg_u32(volatile int *m, int old, int new)
-{
-	__asm__ __volatile__("cas [%2], %3, %0\n\t"
-			     "membar #StoreStore | #StoreLoad"
-			     : "=&r" (new)
-			     : "0" (new), "r" (m), "r" (old)
-			     : "memory");
-
-	return new;
-}
-
-extern __inline__ unsigned long
-__cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
-{
-	__asm__ __volatile__("casx [%2], %3, %0\n\t"
-			     "membar #StoreStore | #StoreLoad"
-			     : "=&r" (new)
-			     : "0" (new), "r" (m), "r" (old)
-			     : "memory");
-
-	return new;
-}
-
-/* This function doesn't exist, so you'll get a linker error
-   if something tries to do an invalid cmpxchg().  */
-extern void __cmpxchg_called_with_bad_pointer(void);
-
-static __inline__ unsigned long
-__cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
-{
-	switch (size) {
-		case 4:
-			return __cmpxchg_u32(ptr, old, new);
-		case 8:
-			return __cmpxchg_u64(ptr, old, new);
-	}
-	__cmpxchg_called_with_bad_pointer();
-	return old;
-}
-
-#define cmpxchg(ptr,o,n)						 \
-  ({									 \
-     __typeof__(*(ptr)) _o_ = (o);					 \
-     __typeof__(*(ptr)) _n_ = (n);					 \
-     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
-				    (unsigned long)_n_, sizeof(*(ptr))); \
-  })
 
 #endif /* !(__ASSEMBLY__) */
 

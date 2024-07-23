@@ -23,14 +23,10 @@ M_OBJS += fpe.o
 endif
 
 #
-# SGIs have very different interrupt/timer hardware.
+# SGI's have very different interrupt/timer hardware.
 #
 ifndef CONFIG_SGI
-  ifndef CONFIG_DECSTATION
-    ifndef CONFIG_BAGET_MIPS
-      O_OBJS += irq.o time.o
-    endif
-  endif
+O_OBJS += irq.o time.o
 endif
 
 #

@@ -1,4 +1,4 @@
-/* $Id: resource.h,v 1.7.2.1 1999/08/13 18:30:47 davem Exp $
+/* $Id: resource.h,v 1.7 1998/11/19 20:01:44 davem Exp $
  * resource.h: Resource definitions.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -31,7 +31,7 @@
     {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
     {LONG_MAX, LONG_MAX}, {_STK_LIM, LONG_MAX},				\
     {       0, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
-    {INR_OPEN, INR_OPEN}, {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER},	\
+    {NR_OPEN, NR_OPEN}, {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER},	\
     {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX}                          \
 }
 

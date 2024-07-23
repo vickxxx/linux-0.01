@@ -151,19 +151,17 @@ mikasa_primo_pci_fixup(void)
 	common_pci_fixup(mikasa_map_irq, common_swizzle);
 }
 
-#if defined(CONFIG_ALPHA_GENERIC) || !defined(CONFIG_ALPHA_PRIMO)
 static void
-mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
+mikasa_machine_check(unsigned long vector, unsigned long la_ptr,
 		     struct pt_regs * regs)
 {
-#define MCHK_NO_DEVSEL 0x205U
-#define MCHK_NO_TABT 0x204U
+#define MCHK_NO_DEVSEL 0x205L
+#define MCHK_NO_TABT 0x204L
 
 	struct el_common *mchk_header;
 	struct el_apecs_procdata *mchk_procdata;
 	struct el_apecs_mikasa_sysdata_mcheck *mchk_sysdata;
 	unsigned long *ptr;
-	unsigned int code; /* workaround EGCS problem */
 	int i;
 
 	mchk_header = (struct el_common *)la_ptr;
@@ -176,14 +174,14 @@ mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 		(la_ptr + mchk_header->sys_offset);
 
 #ifdef DEBUG
-	printk("mikasa_apecs_machine_check: vector=0x%lx la_ptr=0x%lx\n",
+	printk("mikasa_machine_check: vector=0x%lx la_ptr=0x%lx\n",
 	       vector, la_ptr);
 	printk("        pc=0x%lx size=0x%x procoffset=0x%x sysoffset 0x%x\n",
 	       regs->pc, mchk_header->size, mchk_header->proc_offset,
 	       mchk_header->sys_offset);
-	printk("mikasa_apecs_machine_check: expected %d DCSR 0x%lx"
-	       " PEAR 0x%lx\n", apecs_mcheck_expected,
-	       mchk_sysdata->epic_dcsr, mchk_sysdata->epic_pear);
+	printk("mikasa_machine_check: expected %d DCSR 0x%lx PEAR 0x%lx\n",
+	       apecs_mcheck_expected, mchk_sysdata->epic_dcsr,
+	       mchk_sysdata->epic_pear);
 	ptr = (unsigned long *)la_ptr;
 	for (i = 0; i < mchk_header->size / sizeof(long); i += 2) {
 		printk(" +%lx %lx %lx\n", i*sizeof(long), ptr[i], ptr[i+1]);
@@ -195,11 +193,9 @@ mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 	 * ignore the machine check.
 	 */
 
-	code = mchk_header->code; /* workaround EGCS problem */
-
-	if (apecs_mcheck_expected &&
-	    (code == MCHK_NO_DEVSEL || code == MCHK_NO_TABT))
-	{
+	if (apecs_mcheck_expected
+	    && ((unsigned int)mchk_header->code == MCHK_NO_DEVSEL
+		|| (unsigned int)mchk_header->code == MCHK_NO_TABT)) {
 		apecs_mcheck_expected = 0;
 		apecs_mcheck_taken = 1;
 		mb();
@@ -214,13 +210,13 @@ mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 		wrmces(0x1f);
 		mb();
 		draina();
-		printk("mikasa_apecs_machine_check: HW correctable (0x%lx)\n",
+		printk("mikasa_machine_check: HW correctable (0x%lx)\n",
 		       vector);
 	}
 	else {
-		printk(KERN_CRIT "MIKASA APECS machine check:\n");
-		printk(KERN_CRIT "  vector=0x%lx la_ptr=0x%lx code=0x%x\n",
-		       vector, la_ptr, code);
+		printk(KERN_CRIT "APECS machine check:\n");
+		printk(KERN_CRIT "  vector=0x%lx la_ptr=0x%lx\n",
+		       vector, la_ptr);
 		printk(KERN_CRIT
 		       "  pc=0x%lx size=0x%x procoffset=0x%x sysoffset 0x%x\n",
 		       regs->pc, mchk_header->size, mchk_header->proc_offset,
@@ -240,7 +236,6 @@ mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 #endif
 	}
 }
-#endif
 
 
 /*
@@ -254,7 +249,7 @@ struct alpha_machine_vector mikasa_mv __initmv = {
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
 	DO_APECS_BUS,
-	machine_check:		mikasa_apecs_machine_check,
+	machine_check:		mikasa_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
 
 	nr_irqs:		32,
@@ -279,7 +274,7 @@ struct alpha_machine_vector mikasa_primo_mv __initmv = {
 	DO_DEFAULT_RTC,
 	DO_CIA_IO,
 	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
+	machine_check:		mikasa_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
 
 	nr_irqs:		32,

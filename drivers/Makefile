@@ -9,8 +9,8 @@
 
 SUB_DIRS     := block char net misc sound
 MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS) pci sgi scsi sbus cdrom isdn pnp \
-				macintosh video dio zorro fc4 nubus usb telephony i2o
+ALL_SUB_DIRS := $(SUB_DIRS) pci scsi sbus cdrom isdn pnp \
+				 macintosh video dio zorro fc4 usb
 
 ifdef CONFIG_DIO
 SUB_DIRS += dio
@@ -34,16 +34,12 @@ ifdef CONFIG_NUBUS
 SUB_DIRS += nubus
 endif
 
-ifdef CONFIG_TC
-SUB_DIRS += tc
-endif
-
 ifdef CONFIG_VT
 SUB_DIRS += video
 MOD_SUB_DIRS += video
 endif
 
-ifdef CONFIG_POWERMAC
+ifdef CONFIG_PPC
 SUB_DIRS += macintosh
 MOD_SUB_DIRS += macintosh
 endif
@@ -56,11 +52,6 @@ else
   MOD_SUB_DIRS += usb
   endif
 endif 
-
-ifdef CONFIG_SGI
-SUB_DIRS += sgi
-MOD_SUB_DIRS += sgi
-endif
 
 # If CONFIG_SCSI is set, the core of SCSI support will be added to the kernel,
 # but some of the low-level things may also be modules.
@@ -109,26 +100,6 @@ else
   MOD_SUB_DIRS += fc4
   endif
 endif
-
-ifeq ($(CONFIG_PHONE),y)
-SUB_DIRS += telephony
-MOD_SUB_DIRS += telephony
-else
-  ifeq ($(CONFIG_PHONE),m)
-  MOD_SUB_DIRS += telephony
-  endif
-endif
-
-ifeq ($(CONFIG_I2O),y)
-SUB_DIRS += i2o
-MOD_SUB_DIRS += i2o
-else
-  ifeq ($(CONFIG_I2O),m)
-  MOD_SUB_DIRS += i2o
-  endif
-endif
-
-
 
 # When MOD_LIST_NAME is set, make will try to add $(MOD_SUB_DIRS).o to
 # modules/MOD_LIST_NAME.  We don't have hamradio.o and Linus

@@ -10,7 +10,7 @@
 # modified by Cort (cort@cs.nmt.edu)
 #
 .c.s:
-	$(CC) $(CFLAGS) -I$(HPATH) -S -o $*.s $<
+	$(CC) $(CFLAGS) -S -o $*.s $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.o:
@@ -25,26 +25,10 @@ ZSZ = 0
 IOFF = 0
 ISZ = 0
 
-ifeq ($(CONFIG_ALL_PPC),y)
-CONFIG_PREP=y
-endif
-
 ifeq ($(CONFIG_SMP),y)
-TFTPIMAGE=/tftpboot/zImage.prep.smp$(MSIZE)
+TFTPIMAGE=/tftpboot/zImage.prep.smp
 else
-TFTPIMAGE=/tftpboot/zImage.prep$(MSIZE)
-endif
-
-ifeq ($(CONFIG_SMP),y)
-TFTPSIMAGE=/tftpboot/sImage.smp
-else
-TFTPSIMAGE=/tftpboot/sImage
-endif
-
-ifeq ($(CONFIG_PPC64),y)
-MSIZE=.64
-else
-MSIZE=
+TFTPIMAGE=/tftpboot/zImage.prep
 endif
 
 ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00800000
@@ -53,23 +37,20 @@ GZIP_FLAGS = -v9
 
 OBJECTS := head.o misc.o ../coffboot/zlib.o
 CFLAGS = -O2 -DSTDC_HEADERS -fno-builtin -I$(TOPDIR)/include
-ifeq ($(CONFIG_SMP),y)
-CFLAGS += -D__SMP__
-endif
 OBJCOPY = $(CROSS_COMPILE)objcopy
 OBJCOPY_ARGS = -O elf32-powerpc
 
 OBJECTS += vreset.o kbd.o of1275.o
-ifeq ($(CONFIG_SERIAL_CONSOLE),y)
-OBJECTS += ns16550.o
-endif
+ ifeq ($(CONFIG_SERIAL_CONSOLE),y)
+  OBJECTS += ns16550.o
+ endif
 
 all:	zImage
 
 zvmlinux.initrd: zvmlinux
 	$(LD) $(ZLINKFLAGS) -o zvmlinux.initrd.tmp $(OBJECTS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
-		--add-section=initrd=../coffboot/ramdisk.image.gz \
+		--add-section=initrd=ramdisk.image.gz \
 		--add-section=image=../coffboot/vmlinux.gz \
 		zvmlinux.initrd.tmp zvmlinux.initrd
 	$(CC) $(CFLAGS) -DINITRD_OFFSET=`sh offset $(OBJDUMP) zvmlinux.initrd initrd` \
@@ -79,25 +60,16 @@ zvmlinux.initrd: zvmlinux
 		-c -o misc.o misc.c
 	$(LD) $(ZLINKFLAGS) -o zvmlinux.initrd.tmp $(OBJECTS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
-		--add-section=initrd=../coffboot/ramdisk.image.gz \
+		--add-section=initrd=ramdisk.image.gz \
 		--add-section=image=../coffboot/vmlinux.gz \
 		zvmlinux.initrd.tmp $@
 	rm zvmlinux.initrd.tmp
 
-zImage: zvmlinux mkprep sImage
-ifdef CONFIG_PREP
+zImage: zvmlinux mkprep
 	./mkprep -pbp zvmlinux zImage
-endif
-
-sImage: ../../../vmlinux
-ifdef CONFIG_GEMINI
-	$(OBJCOPY) -I elf32-powerpc -O binary ../../../vmlinux sImage
-endif
 
 zImage.initrd: zvmlinux.initrd mkprep
-ifdef CONFIG_PREP
 	./mkprep -pbp zvmlinux.initrd zImage.initrd
-endif
 
 zvmlinux: $(OBJECTS) ../coffboot/vmlinux.gz
 #
@@ -126,18 +98,13 @@ mkprep : mkprep.c
 	$(HOSTCC) -o mkprep mkprep.c
 
 znetboot : zImage
-ifdef CONFIG_PREP
 	cp zImage $(TFTPIMAGE)
-endif
-ifdef CONFIG_GEMINI
-	cp sImage $(TFTPSIMAGE)
-endif
 
 znetboot.initrd : zImage.initrd
 	cp zImage.initrd $(TFTPIMAGE)
 
 clean:
-	rm -f vmlinux* zvmlinux* mkprep zImage* sImage*
+	rm -f vmlinux* zvmlinux* mkprep zImage*
 
 fastdep:
 	$(TOPDIR)/scripts/mkdep *.[Sch] > .depend

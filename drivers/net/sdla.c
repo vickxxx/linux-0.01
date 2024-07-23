@@ -1218,10 +1218,7 @@ static int sdla_xfer(struct device *dev, struct sdla_mem *info, int read)
 			return(-ENOMEM);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
-		{
-			kfree(temp);
 			return -EFAULT;
-		}
 		kfree(temp);
 	}
 	else
@@ -1230,10 +1227,7 @@ static int sdla_xfer(struct device *dev, struct sdla_mem *info, int read)
 		if (!temp)
 			return(-ENOMEM);
 		if(copy_from_user(temp, mem.data, mem.len))
-		{
-			kfree(temp);
 			return -EFAULT;
-		}
 		sdla_write(dev, mem.addr, temp, mem.len);
 		kfree(temp);
 	}
@@ -1672,7 +1666,7 @@ __initfunc(int sdla_init(struct device *dev))
 	return(0);
 }
 
-__initfunc(void sdla_c_setup(void))
+__initfunc(void sdla_setup(void))
 {
 	printk("%s.\n", version);
 	register_frad(devname);
@@ -1685,7 +1679,7 @@ int init_module(void)
 {
 	int result;
 
-	sdla_c_setup();
+	sdla_setup();
 	if ((result = register_netdev(&sdla0)) != 0)
 		return result;
 	return 0;

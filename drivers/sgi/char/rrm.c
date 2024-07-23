@@ -12,10 +12,6 @@
 #include <asm/uaccess.h>
 #include <asm/rrm.h>
 
-#ifdef MODULE
-#include <linux/module.h>
-#endif
-
 int
 rrm_open_rn (int rnid, void *arg)
 {
@@ -70,3 +66,4 @@ rrm_close (struct inode *inode, struct file *file)
 	/* This routine is invoked when the device is closed */
 	return 0;
 }
+

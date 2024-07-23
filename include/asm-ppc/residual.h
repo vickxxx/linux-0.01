@@ -25,7 +25,7 @@
 /*               Public structures...                                         */
 /*----------------------------------------------------------------------------*/
 
-#include <asm/pnp.h>
+#include "pnp.h"
 
 typedef enum _L1CACHE_TYPE {
   NoneCAC = 0,

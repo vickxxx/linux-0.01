@@ -4,20 +4,13 @@
  *
  * Author: Miguel de Icaza
  */
-
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <asm/types.h>
 #include <asm/gfx.h>
 #include <asm/ng1.h>
 #include <asm/uaccess.h>
-#include <asm/newport.h>
-#include <linux/config.h>
-#include <linux/module.h>
-
-struct newport_regs *npregs;
-
-EXPORT_SYMBOL(npregs);
+#include "newport.h"
 
 /* Kernel routines for supporting graphics context switching */
 
@@ -174,6 +167,7 @@ newport_ioctl (int card, int cmd, unsigned long arg)
 {
 	switch (cmd){
 	case NG1_SETDISPLAYMODE: {
+		int i;
 		struct ng1_setdisplaymode_args request;
 		
 		if (copy_from_user (&request, (void *) arg, sizeof (request)))

@@ -41,11 +41,9 @@
 #error You really need /proc support for binfmt_misc. Please reconfigure!
 #endif
 
-enum {
-	VERBOSE_STATUS = 1 /* define as zero to save 400 bytes kernel memory */
-};
+#define VERBOSE_STATUS /* undef this to save 400 bytes kernel memory */
 
-typedef struct binfmt_entry {
+struct binfmt_entry {
 	struct binfmt_entry *next;
 	long id;
 	int flags;			/* type, status, etc. */
@@ -54,15 +52,16 @@ typedef struct binfmt_entry {
 	char *magic;			/* magic or filename extension */
 	char *mask;			/* mask, NULL for exact match */
 	char *interpreter;		/* filename of interpreter */
-	char *name;
+	char *proc_name;
 	struct proc_dir_entry *proc_dir;
-} Node;
+};
 
-enum { Enabled, Magic };
+#define ENTRY_ENABLED 1		/* the old binfmt_entry.enabled */
+#define	ENTRY_MAGIC 8		/* not filename detection */
 
 static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs);
-static void entry_proc_cleanup(Node *e);
-static int entry_proc_setup(Node *e);
+static void entry_proc_cleanup(struct binfmt_entry *e);
+static int entry_proc_setup(struct binfmt_entry *e);
 
 static struct linux_binfmt misc_format = {
 #ifndef MODULE
@@ -74,7 +73,7 @@ static struct linux_binfmt misc_format = {
 
 static struct proc_dir_entry *bm_dir = NULL;
 
-static Node *entries = NULL;
+static struct binfmt_entry *entries = NULL;
 static int free_id = 1;
 static int enabled = 1;
 
@@ -86,7 +85,7 @@ static rwlock_t entries_lock __attribute__((unused)) = RW_LOCK_UNLOCKED;
  */
 static void clear_entry(int id)
 {
-	Node **ep, *e;
+	struct binfmt_entry **ep, *e;
 
 	write_lock(&entries_lock);
 	ep = &entries;
@@ -107,7 +106,7 @@ static void clear_entry(int id)
  */
 static void clear_entries(void)
 {
-	Node *e, *n;
+	struct binfmt_entry *e, *n;
 
 	write_lock(&entries_lock);
 	n = entries;
@@ -124,9 +123,9 @@ static void clear_entries(void)
 /*
  * Find entry through id and lock it
  */
-static Node *get_entry(int id)
+static struct binfmt_entry *get_entry(int id)
 {
-	Node *e;
+	struct binfmt_entry *e;
 
 	read_lock(&entries_lock);
 	e = entries;
@@ -140,7 +139,7 @@ static Node *get_entry(int id)
 /*
  * unlock entry
  */
-static inline void put_entry(Node *e)
+static inline void put_entry(struct binfmt_entry *e)
 {
 	if (e)
 		read_unlock(&entries_lock);
@@ -149,19 +148,19 @@ static inline void put_entry(Node *e)
 
 /* 
  * Check if we support the binfmt
- * if we do, return the node, else NULL
+ * if we do, return the binfmt_entry, else NULL
  * locking is done in load_misc_binary
  */
-static Node *check_file(struct linux_binprm *bprm)
+static struct binfmt_entry *check_file(struct linux_binprm *bprm)
 {
-	Node *e;
+	struct binfmt_entry *e;
 	char *p = strrchr(bprm->filename, '.');
 	int j;
 
 	e = entries;
 	while (e) {
-		if (test_bit(Enabled, &e->flags)) {
-			if (!test_bit(Magic, &e->flags)) {
+		if (e->flags & ENTRY_ENABLED) {
+			if (!(e->flags & ENTRY_MAGIC)) {
 				if (p && !strcmp(e->magic, p + 1))
 					return e;
 			} else {
@@ -184,7 +183,7 @@ static Node *check_file(struct linux_binprm *bprm)
  */
 static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 {
-	Node *fmt;
+	struct binfmt_entry *fmt;
 	struct dentry * dentry;
 	char iname[128];
 	char *iname_addr = iname;
@@ -215,8 +214,8 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	bprm->argc++;
 	bprm->p = copy_strings(1, &iname_addr, bprm->page, bprm->p, 2);
 	bprm->argc++;
-	retval = (long)bprm->p;
-	if ((long)bprm->p < 0)
+	retval = -E2BIG;
+	if (!bprm->p)
 		goto _ret;
 	bprm->filename = iname;	/* for binfmt_script */
 
@@ -234,44 +233,46 @@ _ret:
 	return retval;
 }
 
+
+
+/*
+ * /proc handling routines
+ */
+
 /*
  * parses and copies one argument enclosed in del from *sp to *dp,
  * recognising the \x special.
  * returns pointer to the copied argument or NULL in case of an
  * error (and sets err) or null argument length.
  */
-static char *scanarg(char *s, char del)
+static char *copyarg(char **dp, const char **sp, int *count,
+		     char del, int special, int *err)
 {
-	char c;
+	char c = 0, *res = *dp;
 
-	while ((c = *s++) != del) {
-		if (c == '\\' && *s == 'x') {
-			s++;
-			if (!isxdigit(*s++))
-				return NULL;
-			if (!isxdigit(*s++))
-				return NULL;
+	while (!*err && ((c = *((*sp)++)), (*count)--) && (c != del)) {
+		switch (c) {
+		case '\\':
+			if (special && (**sp == 'x')) {
+				if (!isxdigit(c = toupper(*(++*sp))))
+					*err = -EINVAL;
+				**dp = (c - (isdigit(c) ? '0' : 'A' - 10)) * 16;
+				if (!isxdigit(c = toupper(*(++*sp))))
+					*err = -EINVAL;
+				*((*dp)++) += c - (isdigit(c) ? '0' : 'A' - 10);
+				++*sp;
+				*count -= 3;
+				break;
+			}
+		default:
+			*((*dp)++) = c;
 		}
 	}
-	return s;
-}
-
-static int unquote(char *from)
-{
-	char c = 0, *s = from, *p = from;
-
-	while ((c = *s++) != '\0') {
-		if (c == '\\' && *s == 'x') {
-			s++;
-			c = toupper(*s++);
-			*p = (c - (isdigit(c) ? '0' : 'A' - 10)) << 4;
-			c = toupper(*s++);
-			*p++ |= c - (isdigit(c) ? '0' : 'A' - 10);
-			continue;
-		}
-		*p++ = c;
-	}
-	return p - from;
+	if (*err || (c != del) || (res == *dp))
+		res = NULL;
+	else if (!special)
+		*((*dp)++) = '\0';
+	return res;
 }
 
 /*
@@ -279,197 +280,59 @@ static int unquote(char *from)
  * ':name:type:offset:magic:mask:interpreter:'
  * where the ':' is the IFS, that can be chosen with the first char
  */
-static Node *create_entry(const char *buffer, size_t count)
+static int proc_write_register(struct file *file, const char *buffer,
+			       unsigned long count, void *data)
 {
-	Node *e;
-	int memsize, err;
-	char *buf, *p;
-	char del;
+	const char *sp;
+	char del, *dp;
+	struct binfmt_entry *e;
+	int memsize, cnt = count - 1, err;
 
 	/* some sanity checks */
 	err = -EINVAL;
 	if ((count < 11) || (count > 256))
-		goto out;
+		goto _err;
 
 	err = -ENOMEM;
-	memsize = sizeof(Node) + count + 8;
-	e = (Node *) kmalloc(memsize, GFP_USER);
-	if (!e)
-		goto out;
+	memsize = sizeof(struct binfmt_entry) + count;
+	if (!(e = (struct binfmt_entry *) kmalloc(memsize, GFP_USER)))
+		goto _err;
 
-	p = buf = (char *)e + sizeof(Node);
+	err = 0;
+	sp = buffer + 1;
+	del = buffer[0];
+	dp = (char *)e + sizeof(struct binfmt_entry);
 
-	memset(e, 0, sizeof(Node));
-	if (copy_from_user(buf, buffer, count))
-		goto Efault;
+	e->proc_name = copyarg(&dp, &sp, &cnt, del, 0, &err);
 
-	del = *p++;	/* delimeter */
+	/* we can use bit 3 of type for ext/magic
+	   flag due to the nice encoding of E and M */
+	if ((*sp & ~('E' | 'M')) || (sp[1] != del))
+		err = -EINVAL;
+	else
+		e->flags = (*sp++ & (ENTRY_MAGIC | ENTRY_ENABLED));
+	cnt -= 2; sp++;
 
-	memset(buf+count, del, 8);
+	e->offset = 0;
+	while (cnt-- && isdigit(*sp))
+		e->offset = e->offset * 10 + *sp++ - '0';
+	if (*sp++ != del)
+		err = -EINVAL;
 
-	e->name = p;
-	p = strchr(p, del);
-	if (!p)
-		goto Einval;
-	*p++ = '\0';
-	if (!e->name[0] ||
-	    !strcmp(e->name, ".") ||
-	    !strcmp(e->name, "..") ||
-	    strchr(e->name, '/'))
-		goto Einval;
-	switch (*p++) {
-		case 'E': e->flags = 1<<Enabled; break;
-		case 'M': e->flags = (1<<Enabled) | (1<<Magic); break;
-		default: goto Einval;
-	}
-	if (*p++ != del)
-		goto Einval;
-	if (test_bit(Magic, &e->flags)) {
-		char *s = strchr(p, del);
-		if (!s)
-			goto Einval;
-		*s++ = '\0';
-		e->offset = simple_strtoul(p, &p, 10);
-		if (*p++)
-			goto Einval;
-		e->magic = p;
-		p = scanarg(p, del);
-		if (!p)
-			goto Einval;
-		p[-1] = '\0';
-		if (!e->magic[0])
-			goto Einval;
-		e->mask = p;
-		p = scanarg(p, del);
-		if (!p)
-			goto Einval;
-		p[-1] = '\0';
-		if (!e->mask[0])
-			e->mask = NULL;
-		e->size = unquote(e->magic);
-		if (e->mask && unquote(e->mask) != e->size)
-			goto Einval;
-		if (e->size + e->offset > 128)
-			goto Einval;
-	} else {
-		p = strchr(p, del);
-		if (!p)
-			goto Einval;
-		*p++ = '\0';
-		e->magic = p;
-		p = strchr(p, del);
-		if (!p)
-			goto Einval;
-		*p++ = '\0';
-		if (!e->magic[0] || strchr(e->magic, '/'))
-			goto Einval;
-		p = strchr(p, del);
-		if (!p)
-			goto Einval;
-		*p++ = '\0';
-	}
-	e->interpreter = p;
-	p = strchr(p, del);
-	if (!p)
-		goto Einval;
-	*p++ = '\0';
-	if (!e->interpreter[0])
-		goto Einval;
+	e->magic = copyarg(&dp, &sp, &cnt, del, (e->flags & ENTRY_MAGIC), &err);
+	e->size = dp - e->magic;
+	e->mask = copyarg(&dp, &sp, &cnt, del, 1, &err);
+	if (e->mask && ((dp - e->mask) != e->size))
+		err = -EINVAL;
+	e->interpreter = copyarg(&dp, &sp, &cnt, del, 0, &err);
+	e->id = free_id++;
 
-	if (*p == '\n')
-		p++;
-	if (p != buf + count)
-		goto Einval;
-	return e;
-
-out:
-	return ERR_PTR(err);
-
-Efault:
-	kfree(e);
-	return ERR_PTR(-EFAULT);
-Einval:
-	kfree(e);
-	return ERR_PTR(-EINVAL);
-}
-
-/*
- * Set status of entry/binfmt_misc:
- * '1' enables, '0' disables and '-1' clears entry/binfmt_misc
- */
-static int parse_command(const char *buffer, size_t count)
-{
-	char s[4];
-
-	if (!count)
-		return 0;
-	if (count > 3)
-		return -EINVAL;
-	if (copy_from_user(s, buffer, count))
-		return -EFAULT;
-	if (s[count-1] == '\n')
-		count--;
-	if (count == 1 && s[0] == '0')
-		return 1;
-	if (count == 1 && s[0] == '1')
-		return 2;
-	if (count == 2 && s[0] == '-' && s[1] == '1')
-		return 3;
-	return -EINVAL;
-}
-
-static void entry_status(Node *e, char *page)
-{
-	char *dp;
-	char *status = "disabled";
-
-	if (test_bit(Enabled, &e->flags))
-		status = "enabled";
-
-	if (!VERBOSE_STATUS) {
-		sprintf(page, "%s\n", status);
-		return;
-	}
-
-	sprintf(page, "%s\ninterpreter %s\n", status, e->interpreter);
-	dp = page + strlen(page);
-	if (!test_bit(Magic, &e->flags)) {
-		sprintf(dp, "extension .%s\n", e->magic);
-	} else {
-		int i;
-
-		sprintf(dp, "offset %i\nmagic ", e->offset);
-		dp = page + strlen(page);
-		for (i = 0; i < e->size; i++) {
-			sprintf(dp, "%02x", 0xff & (int) (e->magic[i]));
-			dp += 2;
-		}
-		if (e->mask) {
-			sprintf(dp, "\nmask ");
-			dp += 6;
-			for (i = 0; i < e->size; i++) {
-				sprintf(dp, "%02x", 0xff & (int) (e->mask[i]));
-				dp += 2;
-			}
-		}
-		*dp++ = '\n';
-		*dp = '\0';
-	}
-}
-
-static int proc_write_register(struct file *file, const char *buffer,
-			       unsigned long count, void *data)
-{
-	Node *e = create_entry(buffer, count);
-	int err;
-
-	if (IS_ERR(e))
-		return PTR_ERR(e);
-	
-	if (entry_proc_setup(e))
+	/* more sanity checks */
+	if (err || !(!cnt || (!(--cnt) && (*sp == '\n'))) ||
+	    (e->size < 1) || ((e->size + e->offset) > 127) ||
+	    !(e->proc_name) || !(e->interpreter) || entry_proc_setup(e))
 		goto free_err;
 
-	e->id = free_id++;
 	write_lock(&entries_lock);
 	e->next = entries;
 	entries = e;
@@ -492,24 +355,68 @@ free_err:
 static int proc_read_status(char *page, char **start, off_t off,
 			    int count, int *eof, void *data)
 {
-	Node *e;
-	int elen;
+	struct binfmt_entry *e;
+	char *dp;
+	int elen, i, err;
 
-	if (!data) {
-		sprintf(page, "%s\n", (enabled ? "enabled" : "disabled"));
+#ifndef VERBOSE_STATUS
+	if (data) {
+		if (!(e = get_entry((int) data))) {
+			err = -ENOENT;
+			goto _err;
+		}
+		i = e->flags & ENTRY_ENABLED;
+		put_entry(e);
 	} else {
-		if (!(e = get_entry((long) data)))
-			return -ENOENT;
-		entry_status(e, page);
+		i = enabled;
+	} 
+	sprintf(page, "%s\n", (i ? "enabled" : "disabled"));
+#else
+	if (!data)
+		sprintf(page, "%s\n", (enabled ? "enabled" : "disabled"));
+	else {
+		if (!(e = get_entry((long) data))) {
+			err = -ENOENT;
+			goto _err;
+		}
+		sprintf(page, "%s\ninterpreter %s\n",
+		        (e->flags & ENTRY_ENABLED ? "enabled" : "disabled"),
+			e->interpreter);
+		dp = page + strlen(page);
+		if (!(e->flags & ENTRY_MAGIC)) {
+			sprintf(dp, "extension .%s\n", e->magic);
+			dp = page + strlen(page);
+		} else {
+			sprintf(dp, "offset %i\nmagic ", e->offset);
+			dp = page + strlen(page);
+			for (i = 0; i < e->size; i++) {
+				sprintf(dp, "%02x", 0xff & (int) (e->magic[i]));
+				dp += 2;
+			}
+			if (e->mask) {
+				sprintf(dp, "\nmask ");
+				dp += 6;
+				for (i = 0; i < e->size; i++) {
+					sprintf(dp, "%02x", 0xff & (int) (e->mask[i]));
+					dp += 2;
+				}
+			}
+			*dp++ = '\n';
+			*dp = '\0';
+		}
 		put_entry(e);
 	}
+#endif
 
 	elen = strlen(page) - off;
 	if (elen < 0)
 		elen = 0;
 	*eof = (elen <= count) ? 1 : 0;
 	*start = page + off;
-	return elen;
+	err = elen;
+
+_err:
+	return err;
 }
 
 /*
@@ -519,50 +426,45 @@ static int proc_read_status(char *page, char **start, off_t off,
 static int proc_write_status(struct file *file, const char *buffer,
 			     unsigned long count, void *data)
 {
-	Node *e;
-	int res = parse_command(buffer, count);
+	struct binfmt_entry *e;
+	int res = count;
 
-	switch(res) {
-		case 1: if (data) {
-				if ((e = get_entry((long) data)))
-					clear_bit(Enabled, &e->flags);
-				put_entry(e);
-			} else {
-				enabled = 0;
-			}
-			break;
-		case 2: if (data) {
-				if ((e = get_entry((long) data)))
-					set_bit(Enabled, &e->flags);
-				put_entry(e);
-			} else {
-				enabled = 1;
-			}
-			break;
-		case 3: if (data)
-				clear_entry((long) data);
-			else
-				clear_entries();
-			break;
-		default: return res;
+	if (buffer[count-1] == '\n')
+		count--;
+	if ((count == 1) && !(buffer[0] & ~('0' | '1'))) {
+		if (data) {
+			if ((e = get_entry((long) data)))
+				e->flags = (e->flags & ~ENTRY_ENABLED)
+					    | (int)(buffer[0] - '0');
+			put_entry(e);
+		} else {
+			enabled = buffer[0] - '0';
+		}
+	} else if ((count == 2) && (buffer[0] == '-') && (buffer[1] == '1')) {
+		if (data)
+			clear_entry((long) data);
+		else
+			clear_entries();
+	} else {
+		res = -EINVAL;
 	}
-	return count;
+	return res;
 }
 
 /*
  * Remove the /proc-dir entries of one binfmt
  */
-static void entry_proc_cleanup(Node *e)
+static void entry_proc_cleanup(struct binfmt_entry *e)
 {
-	remove_proc_entry(e->name, bm_dir);
+	remove_proc_entry(e->proc_name, bm_dir);
 }
 
 /*
  * Create the /proc-dir entry for binfmt
  */
-static int entry_proc_setup(Node *e)
+static int entry_proc_setup(struct binfmt_entry *e)
 {
-	if (!(e->proc_dir = create_proc_entry(e->name,
+	if (!(e->proc_dir = create_proc_entry(e->proc_name,
 			 	S_IFREG | S_IRUGO | S_IWUSR, bm_dir)))
 	{
 		printk(KERN_WARNING "Unable to create /proc entry.\n");
@@ -643,3 +545,4 @@ void cleanup_module(void)
 	remove_proc_entry("sys/fs/binfmt_misc", NULL);
 }
 #endif
+#undef VERBOSE_STATUS

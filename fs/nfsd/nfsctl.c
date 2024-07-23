@@ -11,13 +11,14 @@
 #include <linux/module.h>
 #include <linux/version.h>
 
-#include <linux/kernel.h>
+#include <linux/linkage.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/fcntl.h>
 #include <linux/net.h>
 #include <linux/in.h>
+#include <linux/version.h>
 #include <linux/unistd.h>
 #include <linux/malloc.h>
 #include <linux/proc_fs.h>
@@ -28,7 +29,6 @@
 #include <linux/nfsd/cache.h>
 #include <linux/nfsd/xdr.h>
 #include <linux/nfsd/syscall.h>
-#include <linux/lockd/syscall.h>
 
 #if LINUX_VERSION_CODE >= 0x020100
 #include <asm/uaccess.h>
@@ -40,6 +40,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 
+extern void nfsd_fh_init(void);
 extern long sys_call_table[];
 
 static int	nfsctl_svc(struct nfsctl_svc *data);
@@ -56,72 +57,15 @@ static int	initialized = 0;
 int exp_procfs_exports(char *buffer, char **start, off_t offset,
                              int length, int *eof, void *data);
 
-struct long_maxmin
+void proc_export_init(void)
 {
-	long *value;
-	long min_value;
-	long max_value;
-};
+	struct proc_dir_entry *nfs_export_ent = NULL;
 
-/* In seconds. */
-#define TIME_DIFF_MARGIN	10
-#define MIN_TIME_DIFF_MARGIN	0
-#define MAX_TIME_DIFF_MARGIN	600
-
-long nfsd_time_diff_margin = TIME_DIFF_MARGIN;
-
-static struct long_maxmin time_diff_margin =
-{
-	&nfsd_time_diff_margin,
-	MIN_TIME_DIFF_MARGIN,
-	MAX_TIME_DIFF_MARGIN
-};
-
-static int
-nfsd_proc_read_long_maxmin(char *buffer, char **start, off_t offset,
-			  int length, int *eof, void *data)
-{
-	int len;
-	struct long_maxmin *x = (struct long_maxmin *) data;
-	len = sprintf(buffer, "%ld\n", *x->value) - offset;
-	if (len < length) {
-		*eof = 1;
-		if (len <= 0)
-			 return 0;
-	} else
-		len = length;
-	*start = buffer + offset;
-	return len;
-}
-
-static int
-nfsd_proc_write_long_maxmin(struct file *file, const char *buffer,
-			   unsigned long count, void *data)
-{
-	long v;
-	struct long_maxmin *x = (struct long_maxmin *) data;
-	v = simple_strtoul(buffer, NULL, 10);
-	if (v < x->min_value || v > x->max_value)
-		return -EINVAL;
-	*x->value = v;
-	return count;
-}
-
-static void nfsd_proc_init(void)
-{
-	struct proc_dir_entry *nfsd_ent = NULL;
-
-	if (!(nfsd_ent = create_proc_entry("fs/nfs", S_IFDIR, 0)))
+	if (!(nfs_export_ent = create_proc_entry("fs/nfs", S_IFDIR, 0)))
 		return;
-	if (!(nfsd_ent = create_proc_entry("fs/nfs/exports", 0, 0)))
+	if (!(nfs_export_ent = create_proc_entry("fs/nfs/exports", 0, 0)))
 		return;
-	nfsd_ent->read_proc = exp_procfs_exports;
-	if (!(nfsd_ent = create_proc_entry("fs/nfs/time-diff-margin",
-					   S_IFREG|S_IRUGO|S_IWUSR, 0)))
-		return;
-	nfsd_ent->read_proc = nfsd_proc_read_long_maxmin;
-	nfsd_ent->write_proc = nfsd_proc_write_long_maxmin;
-	nfsd_ent->data = (void *) &time_diff_margin;
+	nfs_export_ent->read_proc = exp_procfs_exports;
 }
 
 
@@ -131,11 +75,13 @@ static void nfsd_proc_init(void)
 static void
 nfsd_init(void)
 {
+	nfsd_xdr_init();	/* XDR */
 	nfsd_stat_init();	/* Statistics */
 	nfsd_cache_init();	/* RPC reply cache */
 	nfsd_export_init();	/* Exports table */
 	nfsd_lockd_init();	/* lockd->nfsd callbacks */
-	nfsd_proc_init();
+	nfsd_fh_init();		/* FH table */
+	proc_export_init();
 	initialized = 1;
 }
 
@@ -263,11 +209,6 @@ asmlinkage handle_sys_nfsservctl(int cmd, void *opaque_argp, void *opaque_resp)
 		goto done;
 	}
 
-	if (cmd >= NFSCTL_LOCKD) {
-		err = lockdctl(cmd, argp, resp);
-		goto done;
-	}
-
 	switch(cmd) {
 	case NFSCTL_SVC:
 		err = nfsctl_svc(&arg->ca_svc);
@@ -343,7 +284,7 @@ void nfsd_modcount(struct inode *inode, int fill)
 int
 init_module(void)
 {
-	printk(KERN_INFO "Installing knfsd (copyright (C) 1996 okir@monad.swb.de)\n");
+	printk("Installing knfsd (copyright (C) 1996 okir@monad.swb.de).\n");
 	do_nfsservctl = handle_sys_nfsservctl;
 	return 0;
 }
@@ -361,7 +302,7 @@ cleanup_module(void)
 	do_nfsservctl = NULL;
 	nfsd_export_shutdown();
 	nfsd_cache_shutdown();
-	remove_proc_entry("fs/nfs/time-diff-margin", NULL);
+	nfsd_fh_free();
 	remove_proc_entry("fs/nfs/exports", NULL);
 	remove_proc_entry("fs/nfs", NULL);
 	nfsd_stat_shutdown();

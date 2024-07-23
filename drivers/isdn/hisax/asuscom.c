@@ -1,26 +1,28 @@
-/* $Id: asuscom.c,v 1.11 2000/11/24 17:05:37 kai Exp $
- *
+/* $Id: asuscom.c,v 1.2 1998/02/02 13:27:06 keil Exp $
+
  * asuscom.c     low level stuff for ASUSCOM NETWORK INC. ISDNLink cards
  *
- * Author     Karsten Keil (keil@isdn4linux.de)
+ * Author     Karsten Keil (keil@temic-ech.spacenet.de)
  *
  * Thanks to  ASUSCOM NETWORK INC. Taiwan and  Dynalink NL for informations
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ *
+ * $Log: asuscom.c,v $
+ * Revision 1.2  1998/02/02 13:27:06  keil
+ * New
+ *
  *
  */
 
 #define __NO_VERSION__
-#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
-#include "ipac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
 
-const char *Asuscom_revision = "$Revision: 1.11 $";
+const char *Asuscom_revision = "$Revision: 1.2 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -30,12 +32,6 @@ const char *Asuscom_revision = "$Revision: 1.11 $";
 #define ASUS_ADR	2
 #define ASUS_CTRL_U7	3
 #define ASUS_CTRL_POTS	5
-
-#define ASUS_IPAC_ALE	0
-#define ASUS_IPAC_DATA	1
-
-#define ASUS_ISACHSCX	1
-#define ASUS_IPAC	2
 
 /* CARD_ADR (Write) */
 #define ASUS_RESET      0x80	/* Bit 7 Reset-Leitung */
@@ -111,30 +107,6 @@ WriteISACfifo(struct IsdnCardState *cs, u_char * data, int size)
 }
 
 static u_char
-ReadISAC_IPAC(struct IsdnCardState *cs, u_char offset)
-{
-	return (readreg(cs->hw.asus.adr, cs->hw.asus.isac, offset|0x80));
-}
-
-static void
-WriteISAC_IPAC(struct IsdnCardState *cs, u_char offset, u_char value)
-{
-	writereg(cs->hw.asus.adr, cs->hw.asus.isac, offset|0x80, value);
-}
-
-static void
-ReadISACfifo_IPAC(struct IsdnCardState *cs, u_char * data, int size)
-{
-	readfifo(cs->hw.asus.adr, cs->hw.asus.isac, 0x80, data, size);
-}
-
-static void
-WriteISACfifo_IPAC(struct IsdnCardState *cs, u_char * data, int size)
-{
-	writefifo(cs->hw.asus.adr, cs->hw.asus.isac, 0x80, data, size);
-}
-
-static u_char
 ReadHSCX(struct IsdnCardState *cs, int hscx, u_char offset)
 {
 	return (readreg(cs->hw.asus.adr,
@@ -169,7 +141,7 @@ static void
 asuscom_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val;
+	u_char val, stat = 0;
 
 	if (!cs) {
 		printk(KERN_WARNING "ISDNLink: Spurious interrupt!\n");
@@ -177,12 +149,16 @@ asuscom_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
-	if (val)
+	if (val) {
 		hscx_int_main(cs, val);
+		stat |= 1;
+	}
 	val = readreg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val)
+	if (val) {
 		isac_interrupt(cs, val);
+		stat |= 2;
+	}
 	val = readreg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_ISTA + 0x40);
 	if (val) {
 		if (cs->debug & L1_DEB_HSCX)
@@ -195,58 +171,16 @@ asuscom_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ISAC IntStat after IntRoutine");
 		goto Start_ISAC;
 	}
-	writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK, 0xFF);
-	writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK + 0x40, 0xFF);
-	writereg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_MASK, 0xFF);
-	writereg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_MASK, 0x0);
-	writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK, 0x0);
-	writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK + 0x40, 0x0);
-}
-
-static void
-asuscom_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
-{
-	struct IsdnCardState *cs = dev_id;
-	u_char ista, val, icnt = 5;
-
-	if (!cs) {
-		printk(KERN_WARNING "ISDNLink: Spurious interrupt!\n");
-		return;
+	if (stat & 1) {
+		writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK, 0xFF);
+		writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK + 0x40, 0xFF);
+		writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK, 0x0);
+		writereg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_MASK + 0x40, 0x0);
 	}
-	ista = readreg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_ISTA);
-Start_IPAC:
-	if (cs->debug & L1_DEB_IPAC)
-		debugl1(cs, "IPAC ISTA %02X", ista);
-	if (ista & 0x0f) {
-		val = readreg(cs->hw.asus.adr, cs->hw.asus.hscx, HSCX_ISTA + 0x40);
-		if (ista & 0x01)
-			val |= 0x01;
-		if (ista & 0x04)
-			val |= 0x02;
-		if (ista & 0x08)
-			val |= 0x04;
-		if (val)
-			hscx_int_main(cs, val);
+	if (stat & 2) {
+		writereg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_MASK, 0xFF);
+		writereg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_MASK, 0x0);
 	}
-	if (ista & 0x20) {
-		val = 0xfe & readreg(cs->hw.asus.adr, cs->hw.asus.isac, ISAC_ISTA | 0x80);
-		if (val) {
-			isac_interrupt(cs, val);
-		}
-	}
-	if (ista & 0x10) {
-		val = 0x01;
-		isac_interrupt(cs, val);
-	}
-	ista  = readreg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_ISTA);
-	if ((ista & 0x3f) && icnt) {
-		icnt--;
-		goto Start_IPAC;
-	}
-	if (!icnt)
-		printk(KERN_WARNING "ASUS IRQ LOOP\n");
-	writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_MASK, 0xFF);
-	writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_MASK, 0xC0);
 }
 
 void
@@ -263,27 +197,14 @@ reset_asuscom(struct IsdnCardState *cs)
 {
 	long flags;
 
-	if (cs->subtyp == ASUS_IPAC)
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_POTA2, 0x20);
-	else
-		byteout(cs->hw.asus.adr, ASUS_RESET);	/* Reset On */
+	byteout(cs->hw.asus.adr, ASUS_RESET);	/* Reset On */
 	save_flags(flags);
 	sti();
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
-	if (cs->subtyp == ASUS_IPAC)
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_POTA2, 0x0);
-	else
-		byteout(cs->hw.asus.adr, 0);	/* Reset Off */
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
-	if (cs->subtyp == ASUS_IPAC) {
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_CONF, 0x0);
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_ACFG, 0xff);
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_AOE, 0x0);
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_MASK, 0xc0);
-		writereg(cs->hw.asus.adr, cs->hw.asus.isac, IPAC_PCFG, 0x12);
-	}
+	current->state = TASK_INTERRUPTIBLE;
+	schedule_timeout(1);
+	byteout(cs->hw.asus.adr, 0);	/* Reset Off */
+	current->state = TASK_INTERRUPTIBLE;
+	schedule_timeout(1);
 	restore_flags(flags);
 }
 
@@ -297,9 +218,14 @@ Asus_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_asuscom(cs);
 			return(0);
+		case CARD_SETIRQ:
+			return(request_irq(cs->irq, &asuscom_interrupt,
+					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
-			cs->debug |= L1_DEB_IPAC;
-			inithscxisac(cs, 3);
+			clear_pending_isac_ints(cs);
+			clear_pending_hscx_ints(cs);
+			initisac(cs);
+			inithscx(cs);
 			return(0);
 		case CARD_TEST:
 			return(0);
@@ -307,12 +233,11 @@ Asus_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
-setup_asuscom(struct IsdnCard *card)
+__initfunc(int
+setup_asuscom(struct IsdnCard *card))
 {
 	int bytecnt;
 	struct IsdnCardState *cs = card->cs;
-	u_char val;
 	char tmp[64];
 
 	strcpy(tmp, Asuscom_revision);
@@ -323,6 +248,12 @@ setup_asuscom(struct IsdnCard *card)
 	bytecnt = 8;
 	cs->hw.asus.cfg_reg = card->para[1];
 	cs->irq = card->para[0];
+	cs->hw.asus.adr = cs->hw.asus.cfg_reg + ASUS_ADR;
+	cs->hw.asus.isac = cs->hw.asus.cfg_reg + ASUS_ISAC;
+	cs->hw.asus.hscx = cs->hw.asus.cfg_reg + ASUS_HSCX;
+	cs->hw.asus.u7 = cs->hw.asus.cfg_reg + ASUS_CTRL_U7;
+	cs->hw.asus.pots = cs->hw.asus.cfg_reg + ASUS_CTRL_POTS;
+
 	if (check_region((cs->hw.asus.cfg_reg), bytecnt)) {
 		printk(KERN_WARNING
 		       "HiSax: %s config port %x-%x already in use\n",
@@ -333,47 +264,27 @@ setup_asuscom(struct IsdnCard *card)
 	} else {
 		request_region(cs->hw.asus.cfg_reg, bytecnt, "asuscom isdn");
 	}
-	printk(KERN_INFO "ISDNLink: defined at 0x%x IRQ %d\n",
-		cs->hw.asus.cfg_reg, cs->irq);
+
+	printk(KERN_INFO
+	       "ISDNLink: defined at 0x%x IRQ %d\n",
+	       cs->hw.asus.cfg_reg,
+	       cs->irq);
+	printk(KERN_INFO "ISDNLink: resetting card\n");
+	reset_asuscom(cs);
+	cs->readisac = &ReadISAC;
+	cs->writeisac = &WriteISAC;
+	cs->readisacfifo = &ReadISACfifo;
+	cs->writeisacfifo = &WriteISACfifo;
 	cs->BC_Read_Reg = &ReadHSCX;
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &Asus_card_msg;
-	val = readreg(cs->hw.asus.cfg_reg + ASUS_IPAC_ALE, 
-		cs->hw.asus.cfg_reg + ASUS_IPAC_DATA, IPAC_ID);
-	if (val == 1) {
-		cs->subtyp = ASUS_IPAC;
-		cs->hw.asus.adr  = cs->hw.asus.cfg_reg + ASUS_IPAC_ALE;
-		cs->hw.asus.isac = cs->hw.asus.cfg_reg + ASUS_IPAC_DATA;
-		cs->hw.asus.hscx = cs->hw.asus.cfg_reg + ASUS_IPAC_DATA;
-		test_and_set_bit(HW_IPAC, &cs->HW_Flags);
-		cs->readisac = &ReadISAC_IPAC;
-		cs->writeisac = &WriteISAC_IPAC;
-		cs->readisacfifo = &ReadISACfifo_IPAC;
-		cs->writeisacfifo = &WriteISACfifo_IPAC;
-		cs->irq_func = &asuscom_interrupt_ipac;
-		printk(KERN_INFO "Asus: IPAC version %x\n", val);
-	} else {
-		cs->subtyp = ASUS_ISACHSCX;
-		cs->hw.asus.adr = cs->hw.asus.cfg_reg + ASUS_ADR;
-		cs->hw.asus.isac = cs->hw.asus.cfg_reg + ASUS_ISAC;
-		cs->hw.asus.hscx = cs->hw.asus.cfg_reg + ASUS_HSCX;
-		cs->hw.asus.u7 = cs->hw.asus.cfg_reg + ASUS_CTRL_U7;
-		cs->hw.asus.pots = cs->hw.asus.cfg_reg + ASUS_CTRL_POTS;
-		cs->readisac = &ReadISAC;
-		cs->writeisac = &WriteISAC;
-		cs->readisacfifo = &ReadISACfifo;
-		cs->writeisacfifo = &WriteISACfifo;
-		cs->irq_func = &asuscom_interrupt;
-		ISACVersion(cs, "ISDNLink:");
-		if (HscxVersion(cs, "ISDNLink:")) {
-			printk(KERN_WARNING
-		     	"ISDNLink: wrong HSCX versions check IO address\n");
-			release_io_asuscom(cs);
-			return (0);
-		}
+	ISACVersion(cs, "ISDNLink:");
+	if (HscxVersion(cs, "ISDNLink:")) {
+		printk(KERN_WARNING
+		     "ISDNLink: wrong HSCX versions check IO address\n");
+		release_io_asuscom(cs);
+		return (0);
 	}
-	printk(KERN_INFO "ISDNLink: resetting card\n");
-	reset_asuscom(cs);
 	return (1);
 }

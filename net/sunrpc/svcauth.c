@@ -4,9 +4,6 @@
  * The generic interface for RPC authentication on the server side.
  * 
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
- *
- * CHANGES
- * 19-Apr-2000 Chris Evans      - Security fix
  */
 
 #include <linux/types.h>
@@ -120,8 +117,7 @@ svcauth_unix(struct svc_rqst *rqstp, u32 *statp, u32 *authp)
 	struct svc_buf	*resp = &rqstp->rq_resbuf;
 	struct svc_cred	*cred = &rqstp->rq_cred;
 	u32		*bufp = argp->buf;
-	int		len   = argp->len;
-	u32		slen, i;
+	int		len   = argp->len, slen, i;
 
 	if ((len -= 3) < 0) {
 		*statp = rpc_garbage_args;
@@ -131,7 +127,7 @@ svcauth_unix(struct svc_rqst *rqstp, u32 *statp, u32 *authp)
 	bufp++;					/* length */
 	bufp++;					/* time stamp */
 	slen = (ntohl(*bufp++) + 3) >> 2;	/* machname length */
-	if (slen > 64 || (len -= slen + 3) < 0)
+	if (slen > 64 || (len -= slen) < 0)
 		goto badcred;
 	bufp += slen;				/* skip machname */
 

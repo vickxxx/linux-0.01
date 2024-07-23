@@ -1,7 +1,7 @@
 /*
  * NETLINK      Kernel-user communication protocol.
  *
- * 		Authors:	Alan Cox <alan@redhat.com>
+ * 		Authors:	Alan Cox <alan@cymru.net>
  * 				Alexey Kuznetsov <kuznet@ms2.inr.ac.ru>
  *
  *		This program is free software; you can redistribute it and/or
@@ -203,7 +203,7 @@ static int netlink_release(struct socket *sock, struct socket *peer)
 	 */
 
 	while (netlink_locked(sk)) {
-		current->policy |= SCHED_YIELD;
+		current->counter = 0;
 		schedule();
 	}
 

@@ -18,8 +18,6 @@
  .
  . author:
  . 	Erik Stahlman				( erik@vt.edu )
- . contributors:
- .      Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  .
  . Hardware multicast code from Peter Cammaert ( pc@denkart.be )
  .
@@ -47,13 +45,10 @@
  .				 Fixed bug reported by Gardner Buchanan in
  .				   smc_enable, with outw instead of outb
  .	03/06/96  Erik Stahlman  Added hardware multicast from Peter Cammaert
- .	04/14/00  Heiko Pruessing (SMA Regelsysteme)  Fixed bug in chip memory
- .				 allocation
- .      08/20/00  Arnaldo Melo   fix kfree(skb) in smc_hardware_send_packet
  ----------------------------------------------------------------------------*/
 
 static const char *version =
-	"smc9194.c:v0.13 04/14/00 by Erik Stahlman (erik@vt.edu)\n";
+	"smc9194.c:v0.12 03/06/96 by Erik Stahlman (erik@vt.edu)\n";
 
 #ifdef MODULE
 #include <linux/module.h>
@@ -567,15 +562,11 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct device * dev )
 
 	length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 
-		
 	/*
-	** The MMU wants the number of pages to be the number of 256 bytes
-	** 'pages', minus 1 ( since a packet can't ever have 0 pages :) )
-	**
-	** Pkt size for allocating is data length +6 (for additional status words,
-	** length and ctl!) If odd size last byte is included in this header.
+	. the MMU wants the number of pages to be the number of 256 bytes
+    	. 'pages', minus 1 ( since a packet can't ever have 0 pages :) )
 	*/
-	numPages =  ((length & 0xfffe) + 6) / 256;
+	numPages = length / 256;
 
 	if (numPages > 7 ) {
 		printk(CARDNAME": Far too big packet error. \n");
@@ -670,7 +661,7 @@ static void smc_hardware_send_packet( struct device * dev )
 	if ( packet_no & 0x80 ) {
 		/* or isn't there?  BAD CHIP! */
 		printk(KERN_DEBUG CARDNAME": Memory allocation failed. \n");
-		kfree_skb(skb);
+		kfree(skb);
 		lp->saved_skb = NULL;
 		dev->tbusy = 0;
 		return;

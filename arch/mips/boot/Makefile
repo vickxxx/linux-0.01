@@ -1,10 +1,11 @@
-# $Id: Makefile,v 1.9 1999/04/07 18:45:23 harald Exp $
+#
+# arch/mips/boot/Makefile
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995, 1998 by Ralf Baechle
+# Copyright (C) 1995 by Ralf Baechle
 #
 
 .S.s:
@@ -15,37 +16,35 @@
 OBJS  = milo.o a.out.o
 
 #
-# Some DECstations need all possible sections of an ECOFF executable
-#
-ifdef CONFIG_DECSTATION
-  E2EFLAGS = -a
-else
-  E2EFLAGS =
-endif
-
-#
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
 drop-sections	= .reginfo .mdebug
 strip-flags	= $(addprefix --remove-section=,$(drop-sections))
 
-all: vmlinux.ecoff addinitrd
+#
+# Fake compressed boot
+#
+zImage:	$(CONFIGURE) mkboot $(TOPDIR)/vmlinux
+	$(OBJCOPY) $(strip-flags) $(TOPDIR)/vmlinux zImage.tmp
+	./mkboot zImage.tmp zImage
+	rm -f zImage.tmp
 
-vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(TOPDIR)/vmlinux
-	./elf2ecoff $(TOPDIR)/vmlinux vmlinux.ecoff $(E2EFLAGS)
-
-elf2ecoff: elf2ecoff.c
+mkboot: mkboot.c
 	$(HOSTCC) -o $@ $^
 
-addinitrd: addinitrd.c
-	$(HOSTCC) -o $@ $^
+zdisk:	zImage
+	if [ -f /etc/remote-mcopy ]; then \
+		ssh rio mcopy -o - a:vmlinux <zImage; \
+	else \
+		mcopy -o zImage a:vmlinux; \
+	fi
 
 # Don't build dependencies, this may die if $(CC) isn't gcc
 dep:
 
 clean:
-	rm -f vmlinux.ecoff
+	rm -f zImage zImage.tmp mkboot
 
 dummy:
 

@@ -1,6 +1,10 @@
 # File: drivers/hamradio/Makefile
 #
 # Makefile for the Linux AX.25 and HFMODEM device drivers.
+#
+# 19971130 	Moved the amateur radio related network drivers from 
+#		drivers/net/ to drivers/hamradio for easier maintainance.
+#               Joerg Reuter DL1BKE <jreuter@poboxes.com>
 
 
 SUB_DIRS     := 
@@ -46,14 +50,6 @@ L_OBJS += 6pack.o
 else
   ifeq ($(CONFIG_6PACK),m)
   M_OBJS += 6pack.o
-  endif
-endif
-
-ifeq ($(CONFIG_YAM),y)
-L_OBJS += yam.o
-else
-  ifeq ($(CONFIG_YAM),m)
-  M_OBJS += yam.o
   endif
 endif
 

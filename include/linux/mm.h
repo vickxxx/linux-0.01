@@ -47,7 +47,7 @@ struct vm_area_struct {
 	struct vm_area_struct * vm_avl_left;
 	struct vm_area_struct * vm_avl_right;
 
-	/* For areas with inode, the list inode->i_mmap{,_shared}, for shm areas,
+	/* For areas with inode, the list inode->i_mmap, for shm areas,
 	 * the list of attaches, otherwise unused.
 	 */
 	struct vm_area_struct *vm_next_share;
@@ -275,8 +275,7 @@ extern int low_on_memory;
 
 #define free_page(addr) free_pages((addr),0)
 extern void FASTCALL(free_pages(unsigned long addr, unsigned long order));
-#define __free_page(page) __free_pages((page),0)
-extern void FASTCALL(__free_pages(struct page *, unsigned long));
+extern void FASTCALL(__free_page(struct page *));
 
 extern void show_free_areas(void);
 extern unsigned long put_dirty_page(struct task_struct * tsk,unsigned long page,
@@ -293,7 +292,7 @@ extern int zeromap_page_range(unsigned long from, unsigned long size, pgprot_t p
 
 extern void vmtruncate(struct inode * inode, unsigned long offset);
 extern int handle_mm_fault(struct task_struct *tsk,struct vm_area_struct *vma, unsigned long address, int write_access);
-extern int make_pages_present(unsigned long addr, unsigned long end);
+extern void make_pages_present(unsigned long addr, unsigned long end);
 
 extern int pgt_cache_water[2];
 extern int check_pgt_cache(void);
@@ -301,6 +300,7 @@ extern int check_pgt_cache(void);
 extern unsigned long paging_init(unsigned long start_mem, unsigned long end_mem);
 extern void mem_init(unsigned long start_mem, unsigned long end_mem);
 extern void show_mem(void);
+extern void oom(struct task_struct * tsk);
 extern void si_meminfo(struct sysinfo * val);
 
 /* mmap.c */
@@ -335,7 +335,7 @@ extern void put_cached_page(unsigned long);
 
 #define __GFP_DMA	0x80
 
-#define GFP_BUFFER	(__GFP_MED | __GFP_WAIT)
+#define GFP_BUFFER	(__GFP_LOW | __GFP_WAIT)
 #define GFP_ATOMIC	(__GFP_HIGH)
 #define GFP_USER	(__GFP_LOW | __GFP_WAIT | __GFP_IO)
 #define GFP_KERNEL	(__GFP_MED | __GFP_WAIT | __GFP_IO)
@@ -355,11 +355,10 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 
 	address &= PAGE_MASK;
 	grow = vma->vm_start - address;
-	if ((vma->vm_end - address
-	    > current->rlim[RLIMIT_STACK].rlim_cur) ||
-	    ((current->rlim[RLIMIT_AS].rlim_cur < RLIM_INFINITY) &&
-	    ((vma->vm_mm->total_vm << PAGE_SHIFT) + grow
-	    > current->rlim[RLIMIT_AS].rlim_cur)))
+	if (vma->vm_end - address
+	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur ||
+	    (vma->vm_mm->total_vm << PAGE_SHIFT) + grow
+	    > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
 		return -ENOMEM;
 	vma->vm_start = address;
 	vma->vm_offset -= grow;

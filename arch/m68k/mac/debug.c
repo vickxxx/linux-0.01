@@ -243,7 +243,7 @@ void mac_scca_console_write (struct console *co, const char *str,
     }
 }
 
-#if defined(CONFIG_SERIAL_CONSOLE) || defined(DEBUG_SERIAL)
+#ifdef CONFIG_SERIAL_CONSOLE
 int mac_sccb_console_wait_key(struct console *co)
 {
     int i;
@@ -384,16 +384,6 @@ void mac_init_scc_port( int cflag, int port )
     mac_SCC_init_done = 1;
 }
 #endif /* DEBUG_SERIAL */
-
-void mac_init_scca_port( int cflag )
-{
-	mac_init_scc_port(cflag, 0);
-}
-
-void mac_init_sccb_port( int cflag )
-{
-	mac_init_scc_port(cflag, 1);
-}
 
 __initfunc(void mac_debug_init(void))
 {

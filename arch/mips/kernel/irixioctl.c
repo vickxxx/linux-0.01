@@ -1,4 +1,4 @@
-/* $Id: irixioctl.c,v 1.6 1999/02/06 05:12:56 adevries Exp $
+/* $Id: irixioctl.c,v 1.4 1998/03/04 12:17:41 ralf Exp $
  * irixioctl.c: A fucking mess...
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
@@ -11,7 +11,6 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/tty.h>
-#include <linux/file.h>
 
 #include <asm/uaccess.h>
 #include <asm/ioctl.h>
@@ -34,13 +33,15 @@ static struct tty_struct *get_tty(int fd)
 {
 	struct file *filp;
 
-	if(!(filp = fcheck(fd)))
+	file = fcheck(fd);
+	if(!file)
 		return ((struct tty_struct *) 0);
 	if(filp->private_data) {
 		struct tty_struct *ttyp = (struct tty_struct *) filp->private_data;
 
-		if(ttyp->magic == TTY_MAGIC)
+		if(ttyp->magic == TTY_MAGIC) {
 			return ttyp;
+		}
 	}
 	return ((struct tty_struct *) 0);
 }

@@ -9,6 +9,8 @@
  * creates a client control block and adds it to the hash
  * table. Then, you call NFSCTL_EXPORT for each fs.
  *
+ * You cannot currently read the export information from the
+ * kernel. It would be nice to have a /proc file though.
  *
  * Copyright (C) 1995, 1996 Olaf Kirch, <okir@monad.swb.de>
  */
@@ -103,6 +105,20 @@ out:
 	return exp;
 }
 
+/*
+ * Check whether there are any exports for a device.
+ */
+static int
+exp_device_in_use(kdev_t dev)
+{
+	struct svc_client *clp;
+
+	for (clp = clients; clp; clp = clp->cl_next) {
+		if (exp_find(clp, dev))
+			return 1;
+	}
+	return 0;
+}
 
 /*
  * Look up the device of the parent fs.
@@ -152,8 +168,9 @@ else
 					}
 				} while (NULL != (exp = exp->ex_next));
 		} while (nfsd_parentdev(&xdev));
-		if (IS_ROOT(xdentry))
+		if (xdentry == xdentry->d_parent) {
 			break;
+		}
 	} while ((xdentry = xdentry->d_parent));
 	exp = NULL;
 out:
@@ -187,7 +204,7 @@ dprintk("nfsd: exp_child mount under submount.\n");
 #endif
 						goto out;
 					}
-					if (IS_ROOT(ndentry))
+					if (ndentry == ndentry->d_parent)
 						break;
 				}
 		} while (NULL != (exp = exp->ex_next));
@@ -270,12 +287,6 @@ exp_export(struct nfsctl_export *nxp)
 		goto finish;
 
 	err = -EINVAL;
-	if (!(inode->i_sb->s_type->fs_flags & FS_REQUIRES_DEV) ||
-	    inode->i_sb->s_op->read_inode == NULL) {
-		dprintk("exp_export: export of invalid fs type.\n");
-		goto finish;
-	}
-
 	if ((parent = exp_child(clp, dev, dentry)) != NULL) {
 		dprintk("exp_export: export not valid (Rule 3).\n");
 		goto finish;
@@ -353,6 +364,16 @@ exp_do_unexport(svc_export *unexp)
 		for (exp = clp->cl_export[i]; exp; exp = exp->ex_next)
 			if (exp->ex_parent == unexp)
 				exp->ex_parent = unexp->ex_parent;
+	}
+
+	/*
+	 * Check whether this is the last export for this device,
+	 * and if so flush any cached dentries.
+	 */
+	if (!exp_device_in_use(unexp->ex_dev)) {
+printk("exp_do_unexport: %s last use, flushing cache\n",
+	kdevname(unexp->ex_dev));
+		nfsd_fh_flush(unexp->ex_dev);
 	}
 
 	dentry = unexp->ex_dentry;
@@ -445,7 +466,7 @@ exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
 	if (path) {
 		if (!(dentry = lookup_dentry(path, NULL, 0))) {
 			printk("nfsd: exp_rootfh path not found %s", path);
-			return err;
+			return -EPERM;
 		}
 		dev = dentry->d_inode->i_dev;
 		ino = dentry->d_inode->i_ino;
@@ -607,9 +628,7 @@ struct flags {
 	{ NFSEXP_UIDMAP, {"uidmap", ""}},
 	{ NFSEXP_KERBEROS, { "kerberos", ""}},
 	{ NFSEXP_SUNSECURE, { "sunsecure", ""}},
-	{ NFSEXP_CROSSMNT, {"nohide", ""}},
-	{ NFSEXP_NOSUBTREECHECK, {"no_subtree_check", ""}},
-	{ NFSEXP_NOAUTHNLM, {"insecure_locks", ""}},
+	{ NFSEXP_CROSSMNT, {"crossmnt", ""}},
 	{ 0, {"", ""}}
 };
 
@@ -666,7 +685,7 @@ exp_procfs_exports(char *buffer, char **start, off_t offset,
 							if (first++) len += sprintf(buffer+len, "%s", " ");
 							if (tmp->h_client != clp)
 								len += sprintf(buffer+len, "(");
-							len += sprintf(buffer+len, "%d.%d.%d.%d",
+							len += sprintf(buffer+len, "%ld.%ld.%ld.%ld",
 									htonl(addr.s_addr) >> 24 & 0xff,
 									htonl(addr.s_addr) >> 16 & 0xff,
 									htonl(addr.s_addr) >>  8 & 0xff,

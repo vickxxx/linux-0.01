@@ -6,10 +6,9 @@
  * Status:        Experimental.
  * Author:        Thomas Davis, <ratbert@radiks.net>
  * Created at:    Sat Feb 21 21:33:24 1998
- * Modified at:   Wed Jan  5 22:45:14 2000
+ * Modified at:   Tue Apr  6 19:07:06 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
- *
- *     Copyright (c) 1998-2000, Dag Brattli <dagb@cs.uit.no>
+ * 
  *     Copyright (c) 1998, Thomas Davis, <ratbert@radiks.net>, 
  *     All Rights Reserved.
  *      
@@ -21,10 +20,9 @@
  *     I, Thomas Davis, provide no warranty for any of this software. 
  *     This material is provided "AS-IS" and at no charge. 
  *     
+ *     Portions lifted from the linux/fs/procfs/ files.
+ *
  ********************************************************************/
-
-#define __NO_VERSION__    /* irmod.c defines module_kernel_version */
-#include <linux/module.h>
 
 #include <linux/miscdevice.h>
 #include <linux/proc_fs.h>
@@ -34,6 +32,8 @@
 #include <net/irda/irlap.h>
 #include <net/irda/irlmp.h>
 
+extern int irda_device_proc_read(char *buf, char **start, off_t offset, 
+				 int len, int unused);
 extern int irlap_proc_read(char *buf, char **start, off_t offset, int len, 
 			   int unused);
 extern int irlmp_proc_read(char *buf, char **start, off_t offset, int len, 
@@ -45,15 +45,29 @@ extern int irias_proc_read(char *buf, char **start, off_t offset, int len,
 extern int discovery_proc_read(char *buf, char **start, off_t offset, int len, 
 			       int unused);
 
+enum irda_directory_inos {
+	PROC_IRDA_LAP = 1,
+	PROC_IRDA_LMP,
+	PROC_IRDA_TTP,
+	PROC_IRDA_LPT,
+	PROC_IRDA_COMM,
+ 	PROC_IRDA_IRDA_DEVICE,
+	PROC_IRDA_IRIAS
+};
+
 struct irda_entry {
 	char *name;
-	int (*fn)(char*, char**, off_t, int, int);
+	int (*fn)(char*,char**,off_t,int,int);
 };
 
 struct proc_dir_entry *proc_irda;
- 
+
 static struct irda_entry dir[] = {
+#if 0 
+	{"lpt", irlpt_proc_read},
+#endif
 	{"discovery",	discovery_proc_read},
+	{"irda_device",	irda_device_proc_read},
 	{"irttp",	irttp_proc_read},
 	{"irlmp",	irlmp_proc_read},
 	{"irlap",	irlap_proc_read},
@@ -61,22 +75,19 @@ static struct irda_entry dir[] = {
 };
 
 #define IRDA_ENTRIES_NUM (sizeof(dir)/sizeof(dir[0]))
- 
+
 /*
  * Function irda_proc_register (void)
  *
  *    Register irda entry in /proc file system
  *
  */
-void irda_proc_register(void) 
-{
+void irda_proc_register(void) {
 	int i;
-
 	proc_irda = create_proc_entry("net/irda", S_IFDIR, NULL);
 #ifdef MODULE
 	proc_irda->fill_inode = &irda_proc_modcount;
 #endif /* MODULE */
-
 	for (i=0;i<IRDA_ENTRIES_NUM;i++)
 		create_proc_entry(dir[i].name,0,proc_irda)->get_info=dir[i].fn;
 }
@@ -87,14 +98,9 @@ void irda_proc_register(void)
  *    Unregister irda entry in /proc file system
  *
  */
-void irda_proc_unregister(void) 
-{
+void irda_proc_unregister(void) {
 	int i;
-
 	for (i=0;i<IRDA_ENTRIES_NUM;i++)
 		remove_proc_entry(dir[i].name, proc_irda);
-
 	remove_proc_entry("net/irda", NULL);
 }
-
-

@@ -211,8 +211,6 @@ typedef	struct _READ_CAPACITY_DATA
 	}	READ_CAPACITY_DATA, *PREAD_CAPACITY_DATA;
 
 // SCSI inquiry data
-#ifndef HOSTS_C
-
 typedef struct _INQUIRYDATA
 	{
 	UCHAR DeviceType			:5;
@@ -237,7 +235,6 @@ typedef struct _INQUIRYDATA
     UCHAR VendorSpecific[20];
     UCHAR Reserved3[40];
 	}	INQUIRYDATA, *PINQUIRYDATA;
-#endif
 
 // IDE IDENTIFY data
 typedef struct _IDENTIFY_DATA

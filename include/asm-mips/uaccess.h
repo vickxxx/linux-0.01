@@ -7,7 +7,7 @@
  *
  * Copyright (C) 1996, 1997, 1998 by Ralf Baechle
  *
- * $Id: uaccess.h,v 1.8 1999/01/04 16:09:27 ralf Exp $
+ * $Id: uaccess.h,v 1.15 1998/05/03 11:13:54 ralf Exp $
  */
 #ifndef __ASM_MIPS_UACCESS_H
 #define __ASM_MIPS_UACCESS_H
@@ -265,21 +265,6 @@ __asm__ __volatile__( \
 
 extern void __put_user_unknown(void);
 
-/*
- * We're generating jump to subroutines which will be outside the range of
- * jump instructions
- */
-#ifdef MODULE
-#define __MODULE_JAL(destination) \
-	".set\tnoat\n\t" \
-	"la\t$1, " #destination "\n\t" \
-	"jalr\t$1\n\t" \
-	".set\tat\n\t"
-#else
-#define __MODULE_JAL(destination) \
-	"jal\t" #destination "\n\t"
-#endif
-
 #define copy_to_user_ret(to,from,n,retval) ({ \
 if (copy_to_user(to,from,n)) \
         return retval; \
@@ -304,7 +289,7 @@ extern size_t __copy_user(void *__to, const void *__from, size_t __n);
 		"move\t$4, %1\n\t" \
 		"move\t$5, %2\n\t" \
 		"move\t$6, %3\n\t" \
-		__MODULE_JAL(__copy_user) \
+		"jal\t__copy_user\n\t" \
 		"move\t%0, $6" \
 		: "=r" (__cu_len) \
 		: "r" (__cu_to), "r" (__cu_from), "r" (__cu_len) \
@@ -328,7 +313,7 @@ extern size_t __copy_user(void *__to, const void *__from, size_t __n);
 		".set\tnoat\n\t" \
 		"addu\t$1, %2, %3\n\t" \
 		".set\tat\n\t" \
-		__MODULE_JAL(__copy_user) \
+		"jal\t__copy_user\n\t" \
 		"move\t%0, $6" \
 		: "=r" (__cu_len) \
 		: "r" (__cu_to), "r" (__cu_from), "r" (__cu_len) \
@@ -350,7 +335,7 @@ extern size_t __copy_user(void *__to, const void *__from, size_t __n);
 			"move\t$4, %1\n\t" \
 			"move\t$5, %2\n\t" \
 			"move\t$6, %3\n\t" \
-			__MODULE_JAL(__copy_user) \
+			"jal\t__copy_user\n\t" \
 			"move\t%0, $6" \
 			: "=r" (__cu_len) \
 			: "r" (__cu_to), "r" (__cu_from), "r" (__cu_len) \
@@ -375,7 +360,7 @@ extern size_t __copy_user(void *__to, const void *__from, size_t __n);
 			".set\tnoat\n\t" \
 			"addu\t$1, %2, %3\n\t" \
 			".set\tat\n\t" \
-			__MODULE_JAL(__copy_user) \
+			"jal\t__copy_user\n\t" \
 			"move\t%0, $6" \
 			: "=r" (__cu_len) \
 			: "r" (__cu_to), "r" (__cu_from), "r" (__cu_len) \
@@ -393,7 +378,7 @@ __clear_user(void *addr, __kernel_size_t size)
 		"move\t$4, %1\n\t"
 		"move\t$5, $0\n\t"
 		"move\t$6, %2\n\t"
-		__MODULE_JAL(__bzero)
+		"jal\t__bzero\n\t"
 		"move\t%0, $6"
 		: "=r" (res)
 		: "r" (addr), "r" (size)
@@ -422,7 +407,7 @@ __strncpy_from_user(char *__to, const char *__from, long __len)
 		"move\t$4, %1\n\t"
 		"move\t$5, %2\n\t"
 		"move\t$6, %3\n\t"
-		__MODULE_JAL(__strncpy_from_user_nocheck_asm)
+		"jal\t__strncpy_from_user_nocheck_asm\n\t"
 		"move\t%0, $2"
 		: "=r" (res)
 		: "r" (__to), "r" (__from), "r" (__len)
@@ -440,7 +425,7 @@ strncpy_from_user(char *__to, const char *__from, long __len)
 		"move\t$4, %1\n\t"
 		"move\t$5, %2\n\t"
 		"move\t$6, %3\n\t"
-		__MODULE_JAL(__strncpy_from_user_asm)
+		"jal\t__strncpy_from_user_asm\n\t"
 		"move\t%0, $2"
 		: "=r" (res)
 		: "r" (__to), "r" (__from), "r" (__len)
@@ -457,7 +442,7 @@ extern inline long __strlen_user(const char *s)
 
 	__asm__ __volatile__(
 		"move\t$4, %1\n\t"
-		__MODULE_JAL(__strlen_user_nocheck_asm)
+		"jal\t__strlen_user_nocheck_asm\n\t"
 		"move\t%0, $2"
 		: "=r" (res)
 		: "r" (s)
@@ -472,7 +457,7 @@ extern inline long strlen_user(const char *s)
 
 	__asm__ __volatile__(
 		"move\t$4, %1\n\t"
-		__MODULE_JAL(__strlen_user_asm)
+		"jal\t__strlen_user_asm\n\t"
 		"move\t%0, $2"
 		: "=r" (res)
 		: "r" (s)

@@ -32,7 +32,7 @@
  * Web page
  * --------
  *	I try to maintain a web page with the Wireless LAN Howto at :
- *	    http://www.hpl.hp.com/personal/Jean_Tourrilhes/Linux/Wavelan.html
+ *		http://www-uk.hpl.hp.com/people/jt/Linux/Wavelan.html
  *
  * Debugging and options
  * ---------------------
@@ -164,7 +164,7 @@
  *	Marc Meertens <Marc.Meertens@Utrecht.NCR.com>,
  *	Pauline Middelink <middelin@polyware.iaf.nl>,
  *	Robert Morris <rtm@das.harvard.edu>,
- *	Jean Tourrilhes <jt@hpl.hp.com>,
+ *	Jean Tourrilhes <jt@hplb.hpl.hp.com>,
  *	Girish Welling <welling@paul.rutgers.edu>,
  *	Clark Woodworth <clark@hiway1.exit109.com>
  *	Yongguang Zhang <ygz@isl.hrl.hac.com>
@@ -292,22 +292,9 @@
  *	- Rectify a lot of (useless) debugging code
  *	- Change the way to `#ifdef SET_PSA_CRC'
  *
- * Changes made for release in 2.2.11 & 2.3.13 :
- * -------------------------------------------
- *	- Change e-mail and web page addresses
- *	- Watchdog timer is now correctly expressed in HZ, not in jiffies
- *	- Add channel number to the list of frequencies in range
- *	- Add the (short) list of bit-rates in range
- *	- Developp a new sensitivity... (sens.value & sens.fixed)
- *
- * Changes made for release in 2.2.14 & 2.3.23 :
- * -------------------------------------------
- *	- Fix check for root permission (break instead of exit)
- *	- New nwid & encoding setting (Wireless Extension 9)
- *
  * Wishes & dreams:
  * ----------------
- *	- roaming (see Pcmcia driver)
+ *	- roaming
  */
 
 /***************************** INCLUDES *****************************/
@@ -395,11 +382,11 @@
 /************************ CONSTANTS & MACROS ************************/
 
 #ifdef DEBUG_VERSION_SHOW
-static const char	*version	= "wavelan.c : v21 (wireless extensions) 16/10/99\n";
+static const char	*version	= "wavelan.c : v19 (wireless extensions) 20/4/99\n";
 #endif
 
 /* Watchdog temporisation */
-#define	WATCHDOG_JIFFIES	(256*HZ/100)
+#define	WATCHDOG_JIFFIES	256	/* TODO:  express in HZ. */
 
 /* Macro to get the number of elements in an array */
 #define	NELS(a)				(sizeof(a) / sizeof(a[0]))

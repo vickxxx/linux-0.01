@@ -1,4 +1,4 @@
-/* $Id: traps.c,v 1.58.2.3 1999/12/19 23:59:28 davem Exp $
+/* $Id: traps.c,v 1.58 1999/03/29 12:38:10 jj Exp $
  * arch/sparc64/kernel/traps.c
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -26,7 +26,6 @@
 #include <asm/uaccess.h>
 #include <asm/fpumacro.h>
 #include <asm/lsu.h>
-#include <asm/psrcompat.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
@@ -392,146 +391,14 @@ void do_iae(struct pt_regs *regs)
 	unlock_kernel();
 }
 
-static char ecc_syndrome_table[] = {
-	0x4c, 0x40, 0x41, 0x48, 0x42, 0x48, 0x48, 0x49,
-	0x43, 0x48, 0x48, 0x49, 0x48, 0x49, 0x49, 0x4a,
-	0x44, 0x48, 0x48, 0x20, 0x48, 0x39, 0x4b, 0x48,
-	0x48, 0x25, 0x31, 0x48, 0x28, 0x48, 0x48, 0x2c,
-	0x45, 0x48, 0x48, 0x21, 0x48, 0x3d, 0x04, 0x48,
-	0x48, 0x4b, 0x35, 0x48, 0x2d, 0x48, 0x48, 0x29,
-	0x48, 0x00, 0x01, 0x48, 0x0a, 0x48, 0x48, 0x4b,
-	0x0f, 0x48, 0x48, 0x4b, 0x48, 0x49, 0x49, 0x48,
-	0x46, 0x48, 0x48, 0x2a, 0x48, 0x3b, 0x27, 0x48,
-	0x48, 0x4b, 0x33, 0x48, 0x22, 0x48, 0x48, 0x2e,
-	0x48, 0x19, 0x1d, 0x48, 0x1b, 0x4a, 0x48, 0x4b,
-	0x1f, 0x48, 0x4a, 0x4b, 0x48, 0x4b, 0x4b, 0x48,
-	0x48, 0x4b, 0x24, 0x48, 0x07, 0x48, 0x48, 0x36,
-	0x4b, 0x48, 0x48, 0x3e, 0x48, 0x30, 0x38, 0x48,
-	0x49, 0x48, 0x48, 0x4b, 0x48, 0x4b, 0x16, 0x48,
-	0x48, 0x12, 0x4b, 0x48, 0x49, 0x48, 0x48, 0x4b,
-	0x47, 0x48, 0x48, 0x2f, 0x48, 0x3f, 0x4b, 0x48,
-	0x48, 0x06, 0x37, 0x48, 0x23, 0x48, 0x48, 0x2b,
-	0x48, 0x05, 0x4b, 0x48, 0x4b, 0x48, 0x48, 0x32,
-	0x26, 0x48, 0x48, 0x3a, 0x48, 0x34, 0x3c, 0x48,
-	0x48, 0x11, 0x15, 0x48, 0x13, 0x4a, 0x48, 0x4b,
-	0x17, 0x48, 0x4a, 0x4b, 0x48, 0x4b, 0x4b, 0x48,
-	0x49, 0x48, 0x48, 0x4b, 0x48, 0x4b, 0x1e, 0x48,
-	0x48, 0x1a, 0x4b, 0x48, 0x49, 0x48, 0x48, 0x4b,
-	0x48, 0x08, 0x0d, 0x48, 0x02, 0x48, 0x48, 0x49,
-	0x03, 0x48, 0x48, 0x49, 0x48, 0x4b, 0x4b, 0x48,
-	0x49, 0x48, 0x48, 0x49, 0x48, 0x4b, 0x10, 0x48,
-	0x48, 0x14, 0x4b, 0x48, 0x4b, 0x48, 0x48, 0x4b,
-	0x49, 0x48, 0x48, 0x49, 0x48, 0x4b, 0x18, 0x48,
-	0x48, 0x1c, 0x4b, 0x48, 0x4b, 0x48, 0x48, 0x4b,
-	0x4a, 0x0c, 0x09, 0x48, 0x0e, 0x48, 0x48, 0x4b,
-	0x0b, 0x48, 0x48, 0x4b, 0x48, 0x4b, 0x4b, 0x4a
-};
-
-/* cee_trap in entry.S encodes AFSR/UDBH/UDBL error status
- * in the following format.  The AFAR is left as is, with
- * reserved bits cleared, and is a raw 40-bit physical
- * address.
- */
-#define CE_STATUS_UDBH_UE		(1UL << (43 + 9))
-#define CE_STATUS_UDBH_CE		(1UL << (43 + 8))
-#define CE_STATUS_UDBH_ESYNDR		(0xffUL << 43)
-#define CE_STATUS_UDBH_SHIFT		43
-#define CE_STATUS_UDBL_UE		(1UL << (33 + 9))
-#define CE_STATUS_UDBL_CE		(1UL << (33 + 8))
-#define CE_STATUS_UDBL_ESYNDR		(0xffUL << 33)
-#define CE_STATUS_UDBL_SHIFT		33
-#define CE_STATUS_AFSR_MASK		(0x1ffffffffUL)
-#define CE_STATUS_AFSR_ME		(1UL << 32)
-#define CE_STATUS_AFSR_PRIV		(1UL << 31)
-#define CE_STATUS_AFSR_ISAP		(1UL << 30)
-#define CE_STATUS_AFSR_ETP		(1UL << 29)
-#define CE_STATUS_AFSR_IVUE		(1UL << 28)
-#define CE_STATUS_AFSR_TO		(1UL << 27)
-#define CE_STATUS_AFSR_BERR		(1UL << 26)
-#define CE_STATUS_AFSR_LDP		(1UL << 25)
-#define CE_STATUS_AFSR_CP		(1UL << 24)
-#define CE_STATUS_AFSR_WP		(1UL << 23)
-#define CE_STATUS_AFSR_EDP		(1UL << 22)
-#define CE_STATUS_AFSR_UE		(1UL << 21)
-#define CE_STATUS_AFSR_CE		(1UL << 20)
-#define CE_STATUS_AFSR_ETS		(0xfUL << 16)
-#define CE_STATUS_AFSR_ETS_SHIFT	16
-#define CE_STATUS_AFSR_PSYND		(0xffffUL << 0)
-#define CE_STATUS_AFSR_PSYND_SHIFT	0
-
-/* Layout of Ecache TAG Parity Syndrome of AFSR */
-#define AFSR_ETSYNDROME_7_0		0x1UL /* E$-tag bus bits  <7:0> */
-#define AFSR_ETSYNDROME_15_8		0x2UL /* E$-tag bus bits <15:8> */
-#define AFSR_ETSYNDROME_21_16		0x4UL /* E$-tag bus bits <21:16> */
-#define AFSR_ETSYNDROME_24_22		0x8UL /* E$-tag bus bits <24:22> */
-
-static char *syndrome_unknown = "<Unknown>";
-
-asmlinkage void cee_log(unsigned long ce_status,
-			unsigned long afar,
-			struct pt_regs *regs)
-{
-	char memmod_str[64];
-	char *p;
-	unsigned short scode, udb_reg;
-
-	printk(KERN_WARNING "CPU[%d]: Correctable ECC Error "
-	       "AFSR[%lx] AFAR[%016lx] UDBL[%lx] UDBH[%lx]\n",
-	       smp_processor_id(),
-	       (ce_status & CE_STATUS_AFSR_MASK),
-	       afar,
-	       ((ce_status >> CE_STATUS_UDBL_SHIFT) & 0x3ffUL),
-	       ((ce_status >> CE_STATUS_UDBH_SHIFT) & 0x3ffUL));
-
-	udb_reg = ((ce_status >> CE_STATUS_UDBL_SHIFT) & 0x3ffUL);
-	if (udb_reg & (1 << 8)) {
-		scode = ecc_syndrome_table[udb_reg & 0xff];
-		if (prom_getunumber(scode, afar,
-				    memmod_str, sizeof(memmod_str)) == -1)
-			p = syndrome_unknown;
-		else
-			p = memmod_str;
-		printk(KERN_WARNING "CPU[%d]: UDBL Syndrome[%x] "
-		       "Memory Module \"%s\"\n",
-		       smp_processor_id(), scode, p);
-	}
-
-	udb_reg = ((ce_status >> CE_STATUS_UDBH_SHIFT) & 0x3ffUL);
-	if (udb_reg & (1 << 8)) {
-		scode = ecc_syndrome_table[udb_reg & 0xff];
-		if (prom_getunumber(scode, afar,
-				    memmod_str, sizeof(memmod_str)) == -1)
-			p = syndrome_unknown;
-		else
-			p = memmod_str;
-		printk(KERN_WARNING "CPU[%d]: UDBH Syndrome[%x] "
-		       "Memory Module \"%s\"\n",
-		       smp_processor_id(), scode, p);
-	}
-}
-
 void do_fpe_common(struct pt_regs *regs)
 {
 	if(regs->tstate & TSTATE_PRIV) {
 		regs->tpc = regs->tnpc;
 		regs->tnpc += 4;
 	} else {
-		unsigned long fsr = current->tss.xfsr[0];
-
 		current->tss.sig_address = regs->tpc;
 		current->tss.sig_desc = SUBSIG_FPERROR;
-		if ((fsr & 0x1c000) == (1 << 14)) {
-			if (fsr & 0x01)
-				current->tss.sig_desc = SUBSIG_FPINEXACT;
-			else if (fsr & 0x02)
-				current->tss.sig_desc = SUBSIG_FPDIVZERO;
-			else if (fsr & 0x04)
-				current->tss.sig_desc = SUBSIG_FPUNFLOW;
-			else if (fsr & 0x08)
-				current->tss.sig_desc = SUBSIG_FPOVFLOW;
-			else if (fsr & 0x10)
-				current->tss.sig_desc = SUBSIG_FPINTOVFL;
-		}
 		send_sig(SIGFPE, current, 1);
 	}
 }
@@ -575,9 +442,7 @@ void do_tof(struct pt_regs *regs)
 
 void do_div0(struct pt_regs *regs)
 {
-	current->tss.sig_address = regs->tpc;
-	current->tss.sig_desc = SUBSIG_IDIVZERO;
-	send_sig(SIGFPE, current, 1);
+	send_sig(SIGILL, current, 1);
 }
 
 void instruction_dump (unsigned int *pc)
@@ -702,12 +567,10 @@ void do_priv_instruction(struct pt_regs *regs, unsigned long pc, unsigned long n
 	send_sig(SIGILL, current, 1);
 }
 
-void handle_hw_divzero(struct pt_regs *regs, unsigned long pc,
-		       unsigned long npc, unsigned long psr)
+void handle_hw_divzero(struct pt_regs *regs, unsigned long pc, unsigned long npc,
+		       unsigned long psr)
 {
-	current->tss.sig_address = regs->tpc;
-	current->tss.sig_desc = SUBSIG_IDIVZERO;
-	send_sig(SIGFPE, current, 1);
+	send_sig(SIGILL, current, 1);
 }
 
 /* Trap level 1 stuff or other traps we should never see... */
@@ -833,13 +696,6 @@ void cache_flush_trap(struct pt_regs *regs)
 #endif
 }
 #endif
-
-void do_getpsr(struct pt_regs *regs)
-{
-	regs->u_regs[UREG_I0] = tstate_to_psr(regs->tstate);
-	regs->tpc   = regs->tnpc;
-	regs->tnpc += 4;
-}
 
 void trap_init(void)
 {

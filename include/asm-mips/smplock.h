@@ -1,4 +1,4 @@
-/* $Id: smplock.h,v 1.1 1998/08/25 09:22:02 ralf Exp $
+/* $Id$
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -18,6 +18,8 @@ extern spinlock_t kernel_flag;
 do { \
 	if (task->lock_depth >= 0) \
 		spin_unlock(&kernel_flag); \
+	release_irqlock(cpu); \
+	__sti(); \
 } while (0)
 
 /*

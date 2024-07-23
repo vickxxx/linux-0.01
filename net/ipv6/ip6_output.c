@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: ip6_output.c,v 1.17.2.1 2000/09/13 01:27:53 davem Exp $
+ *	$Id: ip6_output.c,v 1.17 1999/04/22 10:07:42 davem Exp $
  *
  *	Based on linux/net/ipv4/ip_output.c
  *
@@ -121,7 +121,7 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 
 		if (skb_headroom(skb) < head_room) {
 			struct sk_buff *skb2 = skb_realloc_headroom(skb, head_room);
-			kfree_skb(skb);
+			kfree(skb);
 			skb = skb2;
 			if (skb == NULL)
 				return -ENOBUFS;

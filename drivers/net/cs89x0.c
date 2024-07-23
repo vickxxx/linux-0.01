@@ -27,12 +27,10 @@
                     : is running from all accounts.
                     
   Alan Cox          : Removed 1.2 support, added 2.1 extra counters.
-
-  Arnaldo Melo	    : release resources on failure in cs89x0_probe1
 */
 
 static char *version =
-"cs89x0.c:v1.03 11/26/96 Russell Nelson <nelson@crynwr.com>\n";
+"cs89x0.c:v1.02 11/26/96 Russell Nelson <nelson@crynwr.com>\n";
 
 /* ======================= configure the driver here ======================= */
 
@@ -251,17 +249,13 @@ __initfunc(static int cs89x0_probe1(struct device *dev, int ioaddr))
 	struct net_local *lp;
 	static unsigned version_printed = 0;
 	int i;
-	char priv_alloced_here = 0;
 	unsigned rev_type = 0;
 	int eeprom_buff[CHKSUM_LEN];
 
 	/* Initialize the device structure. */
 	if (dev->priv == NULL) {
 		dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-		if (!dev->priv)
-			return -ENOMEM;
                 memset(dev->priv, 0, sizeof(struct net_local));
-		priv_alloced_here = 1;
         }
 	lp = (struct net_local *)dev->priv;
 
@@ -271,12 +265,12 @@ __initfunc(static int cs89x0_probe1(struct device *dev, int ioaddr))
 	if (ioaddr & 1) {
 		ioaddr &= ~1;
 		if ((inw(ioaddr + ADD_PORT) & ADD_MASK) != ADD_SIG)
-			goto err;
+			return ENODEV;
 		outw(PP_ChipID, ioaddr + ADD_PORT);
 	}
 
 	if (inw(ioaddr + DATA_PORT) != CHIP_EISA_ID_SIG)
-		goto err;
+		return ENODEV;
 
 	/* Fill in the 'dev' fields. */
 	dev->base_addr = ioaddr;
@@ -312,7 +306,7 @@ __initfunc(static int cs89x0_probe1(struct device *dev, int ioaddr))
 	else if (get_eeprom_data(dev, START_EEPROM_DATA,CHKSUM_LEN,eeprom_buff) < 0) {
 		printk("\ncs89x0: EEPROM read failed, relying on command line.\n");
         } else if (get_eeprom_cksum(START_EEPROM_DATA,CHKSUM_LEN,eeprom_buff) < 0) {
-                printk("\ncs89x0: EEPROM checksum bad, relying on command line\n");
+                printk("\ncs89x0: EEPROM checksum bad, relyong on command line\n");
         } else {
                 /* get transmission control word  but keep the autonegotiation bits */
                 if (!lp->auto_neg_cnf) lp->auto_neg_cnf = eeprom_buff[AUTO_NEG_CNF_OFFSET/2];
@@ -394,11 +388,6 @@ __initfunc(static int cs89x0_probe1(struct device *dev, int ioaddr))
 
 	printk("\n");
 	return 0;
-err:	if (priv_alloced_here) {
-		kfree(dev->priv);
-		dev->priv = NULL;
-	}
-	return -ENODEV;
 }
 
 
@@ -750,7 +739,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		if (tickssofar < 5)
 			return 1;
 		if (net_debug > 0) printk("%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict ?" : "network cable problem");
+			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
 		/* Try to restart the adaptor. */
 		dev->tbusy=0;
 		dev->trans_start = jiffies;
@@ -854,13 +843,6 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
                                 lp->send_underrun++;
                                 if (lp->send_underrun == 3) lp->send_cmd = TX_AFTER_381;
                                 else if (lp->send_underrun == 6) lp->send_cmd = TX_AFTER_ALL;
-				/* transmit cycle is done, although
-				   frame wasn't transmitted - this
-				   avoids having to wait for the upper
-				   layers to timeout on us, in the
-				   event of a tx underrun */
-				dev->tbusy = 0;
-				mark_bh(NET_BH);	/* Inform upper layers. */
                         }
 			break;
 		case ISQ_RX_MISS_EVENT:
@@ -1018,15 +1000,16 @@ static int duplex=-1;
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(debug, "i");
-MODULE_PARM(media, "c8");
+MODULE_PARM(media, "s");
 MODULE_PARM(duplex, "i");
 
 EXPORT_NO_SYMBOLS;
 
 /*
-* media=rj45             - specify media type
-   or media=bnc
+* media=t             - specify media type
+   or media=2
    or media=aui
+   or medai=auto
 * duplex=0            - specify forced half/full/autonegotiate duplex
 * debug=#             - debug level
 

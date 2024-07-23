@@ -47,17 +47,13 @@ struct sppp
 	u32		ipkts,opkts;	/* Packets in/out */
 	struct timer_list	pp_timer;
 	struct device	*pp_if;
-	char		pp_link_state;
 };
 
 struct ppp_device
 {	
-	struct device *dev;	/* Network device pointer */
+	struct device dev;	/* Network device */
 	struct sppp sppp;	/* Synchronous PPP */
 };
-
-#define sppp_of(dev)   \
-	    (&((struct ppp_device *)(*(unsigned long *)((dev)->priv)))->sppp)
 
 #define PP_KEEPALIVE    0x01    /* use keepalive protocol */
 #define PP_CISCO        0x02    /* use Cisco protocol instead of PPP */
@@ -76,9 +72,6 @@ struct ppp_device
 #define IPCP_STATE_ACK_SENT     2       /* IPCP state: conf-ack sent */
 #define IPCP_STATE_OPENED       3       /* IPCP state: opened */
 
-#define SPPP_LINK_DOWN		0	/* link down - no keepalive */
-#define SPPP_LINK_UP		1	/* link is up - keepalive ok */
-
 void sppp_attach (struct ppp_device *pd);
 void sppp_detach (struct device *dev);
 void sppp_input (struct device *dev, struct sk_buff *m);
@@ -89,13 +82,10 @@ void sppp_flush (struct device *dev);
 int sppp_open (struct device *dev);
 int sppp_reopen (struct device *dev);
 int sppp_close (struct device *dev);
-void sync_ppp_init (void);
 #endif
 
 #define SPPPIOCCISCO	(SIOCDEVPRIVATE)
 #define SPPPIOCPPP	(SIOCDEVPRIVATE+1)
 #define SPPPIOCDEBUG	(SIOCDEVPRIVATE+2)
-#define SPPPIOCSFLAGS	(SIOCDEVPRIVATE+3)
-#define SPPPIOCGFLAGS	(SIOCDEVPRIVATE+4)
 
 #endif /* _SYNCPPP_H_ */

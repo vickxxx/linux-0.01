@@ -5,10 +5,6 @@
 # unless it's something special (ie not a .c file).
 #
 
-SUB_DIRS     := 
-MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS)
-
 L_TARGET := scsi.a
 L_OBJS   := 
 M_OBJS   := 
@@ -58,14 +54,6 @@ L_OBJS += st.o
 else
   ifeq ($(CONFIG_CHR_DEV_ST),m)
   M_OBJS += st.o
-  endif
-endif
-
-ifeq ($(CONFIG_CHR_DEV_OSST),y)
-L_OBJS += osst.o
-else
-  ifeq ($(CONFIG_CHR_DEV_OSST),m)
-  M_OBJS += osst.o
   endif
 endif
 
@@ -138,14 +126,6 @@ L_OBJS += bvme6000.o 53c7xx.o
 else
   ifeq ($(CONFIG_BVME6000_SCSI),m)
   M_OBJS += bvme6000.o 53c7xx.o
-  endif
-endif
-
-ifeq ($(CONFIG_SCSI_SIM710),y)
-L_OBJS += sim710.o
-else
-  ifeq ($(CONFIG_SCSI_SIM710),m)
-  M_OBJS += sim710.o
   endif
 endif
 
@@ -285,7 +265,6 @@ else
   endif
 endif
 
-
 ifeq ($(CONFIG_SCSI_QLOGIC_FAS),y)
 L_OBJS += qlogicfas.o
 else
@@ -335,14 +314,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_CPQFCTS),y)
-L_OBJS += cpqfc.o 
-else
-  ifeq ($(CONFIG_SCSI_CPQFCTS),m)   
-  M_OBJS += cpqfc.o 
-  endif
-endif
-
 ifeq ($(CONFIG_SCSI_AHA152X),y)
 L_OBJS += aha152x.o
 else
@@ -372,14 +343,6 @@ L_OBJS += aic7xxx.o
 else
   ifeq ($(CONFIG_SCSI_AIC7XXX),m)
   M_OBJS += aic7xxx.o
-  endif
-endif
-
-ifeq ($(CONFIG_SCSI_IPS),y)
-L_OBJS += ips.o
-else
-  ifeq ($(CONFIG_SCSI_IPS),m)
-  M_OBJS += ips.o
   endif
 endif
 
@@ -660,14 +623,6 @@ ifeq ($(CONFIG_JAZZ_ESP),y)
 L_OBJS += NCR53C9x.o jazz_esp.o
 endif
 
-ifeq ($(CONFIG_BLK_DEV_3W_XXXX_RAID),y)
-L_OBJS += 3w-xxxx.o
-else
-  ifeq ($(CONFIG_BLK_DEV_3W_XXXX_RAID),m)
-  M_OBJS += 3w-xxxx.o
-  endif
-endif
-
 include $(TOPDIR)/Rules.make
 
 53c8xx_d.h: 53c7,8xx.scr script_asm.pl
@@ -690,40 +645,6 @@ include $(TOPDIR)/Rules.make
 
 53c7xx.o : 53c7xx_d.h 53c7xx.c
 	$(CC) $(CFLAGS) -c 53c7xx.c
-
-sim710_d.h: sim710.scr script_asm.pl
-	ln -sf sim710.scr fake7.c
-#	$(CPP) -traditional -DCHIP=810 fake7.c | grep -v '^#' | perl -s script_asm.pl
-	$(CPP) -traditional -DCHIP=710 fake7.c | grep -v '^#' | perl -s script_asm.pl -ncr7x0_family
-	mv script.h sim710_d.h
-	mv scriptu.h sim710_u.h
-	rm fake7.c
-
-sim710_u.h: sim710_d.h
-
-sim710.o : sim710_d.h
-
-# if we have a triggerable HBA (extra circuit addition for
-# TTL level output on GPIO line), build in the trigger file
-
-#CPQTRIGGER_FILE = cpqfcTStrigger.c
-
-CPQTRIG = cpqfcTStrigger.o
-
-cpqfcTStrigger.o: cpqfcTStrigger.c
-
-cpqfcTSinit.o: cpqfcTSinit.c cpqfcTSstructs.h cpqfcTSchip.h cpqfcTSioctl.h
-
-cpqfcTScontrol.o: cpqfcTScontrol.c cpqfcTSstructs.h cpqfcTSchip.h 
-
-cpqfcTSi2c.o: cpqfcTSi2c.c cpqfcTSchip.h 
-
-cpqfcTSworker.o: cpqfcTSworker.c cpqfcTSchip.h cpqfcTSstructs.h cpqfcTSioctl.h
-
-cpqfc.o: cpqfcTSinit.o cpqfcTScontrol.o cpqfcTSi2c.o cpqfcTSworker.o $(CPQTRIG)
-	$(LD) -r -o cpqfc.o cpqfcTSinit.o cpqfcTScontrol.o \
-	cpqfcTSi2c.o cpqfcTSworker.o $(CPQTRIG)
-
 
 initio.o: ini9100u.c i91uscsi.c
 	$(CC) $(CFLAGS) -c ini9100u.c -o ini9100u.o
@@ -748,4 +669,3 @@ sr_mod.o: sr.o sr_ioctl.o sr_vendor.o
 
 sd_mod.o: sd.o sd_ioctl.o
 	$(LD) $(LD_RFLAG) -r -o $@ sd.o sd_ioctl.o
-

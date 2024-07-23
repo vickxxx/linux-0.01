@@ -1,8 +1,8 @@
-/* $Id: capi.h,v 1.6 2000/11/12 16:32:06 kai Exp $
+/* $Id: capi.h,v 1.4 1997/10/01 09:21:04 fritz Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
  * Thanks to Friedemann Baitinger and IBM Germany
  *
  * This program is free software; you can redistribute it and/or modify
@@ -18,6 +18,22 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ *
+ * $Log: capi.h,v $
+ * Revision 1.4  1997/10/01 09:21:04  fritz
+ * Removed old compatibility stuff for 2.0.X kernels.
+ * From now on, this code is for 2.1.X ONLY!
+ * Old stuff is still in the separate branch.
+ *
+ * Revision 1.3  1997/09/25 17:25:41  fritz
+ * Support for adding cards at runtime.
+ * Support for new Firmware.
+ *
+ * Revision 1.2  1997/09/24 19:44:15  fritz
+ * Added MSN mapping support, some cleanup.
+ *
+ * Revision 1.1  1997/09/23 18:00:10  fritz
+ * New driver for IBM Active 2000.
  *
  */
 
@@ -303,6 +319,19 @@ typedef struct actcapi_msg {
 			__u16 plci;
 			__u16 info;
 		} select_b3_protocol_conf;
+#if 0
+		struct listen_req {
+			__u32 controller;
+			__u32 infomask;  
+			__u32 cipmask;
+			__u32 cipmask2;
+			__u16 dummy; /* 2 Length-bytes of 2 Structs MUST always be 0!!! */
+		} listen_req;
+		struct listen_conf {
+			__u32  controller;
+			__u16 info;
+		} listen_conf;
+#else
 		struct listen_req {
 			__u8  controller;
 			__u32 infomask __attribute__ ((packed));  
@@ -313,6 +342,7 @@ typedef struct actcapi_msg {
 			__u8  controller;
 			__u16 info __attribute__ ((packed));
 		} listen_conf;
+#endif
 		struct data_b3_req {
 			__u16 fakencci;
 			__u16 datalen;

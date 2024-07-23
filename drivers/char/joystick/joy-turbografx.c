@@ -1,9 +1,7 @@
 /*
  *  joy-turbografx.c  Version 1.2
  *
- *  Copyright (c) 1998-1999 Vojtech Pavlik
- *
- *  Sponsored by SuSE
+ *  Copyright (c) 1998 Vojtech Pavlik
  */
 
 /*
@@ -28,7 +26,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  * 
  * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
+ * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
@@ -41,10 +39,9 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 
 
-MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
+MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
 MODULE_PARM(js_tg, "2-8i");
 MODULE_PARM(js_tg_2, "2-8i");
 MODULE_PARM(js_tg_3, "2-8i");
@@ -60,14 +57,18 @@ MODULE_PARM(js_tg_3, "2-8i");
 #define JS_TG_BUTTON4	0x01
 #define JS_TG_BUTTON5	0x08
 
-static struct js_port* js_tg_port __initdata = NULL;
+static struct js_port* js_tg_port = NULL;
 
 static int js_tg[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
 static int js_tg_2[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
 static int js_tg_3[] __initdata = { -1, 0, 0, 0, 0, 0, 0, 0 };
 
 struct js_tg_info {
+#ifdef USE_PARPORT
 	struct pardevice *port;	/* parport device */
+#else
+	int port;		/* hw port */
+#endif
 	int sticks;		/* joysticks connected */
 };
 
@@ -108,7 +109,9 @@ int js_tg_open(struct js_dev *dev)
 	struct js_tg_info *info = dev->port->info;
 
 	if (!MOD_IN_USE) {
+#ifdef USE_PARPORT
 		if (parport_claim(info->port)) return -EBUSY; 
+#endif
 		JS_PAR_CTRL_OUT(0x04, info->port);
 	}
 	MOD_INC_USE_COUNT;
@@ -126,7 +129,9 @@ int js_tg_close(struct js_dev *dev)
         MOD_DEC_USE_COUNT;
 	if (!MOD_IN_USE) {
 		JS_PAR_CTRL_OUT(0x00, info->port);
+#ifdef USE_PARPORT
         	parport_release(info->port);
+#endif
 	}
         return 0;
 }
@@ -137,12 +142,16 @@ void cleanup_module(void)
 	struct js_tg_info *info;
 	int i;
 
-	while (js_tg_port) {
+	while (js_tg_port != NULL) {
 		for (i = 0; i < js_tg_port->ndevs; i++)
-			if (js_tg_port->devs[i])
+			if (js_tg_port->devs[i] != NULL)
 				js_unregister_device(js_tg_port->devs[i]);
 		info = js_tg_port->info;
+#ifdef USE_PARPORT
 		parport_unregister_device(info->port);
+#else
+		release_region(info->port, 3);
+#endif
 		js_tg_port = js_unregister_port(js_tg_port);
 	}
 }
@@ -177,25 +186,33 @@ static struct js_port __init *js_tg_probe(int *config, struct js_port *port)
 {
 	struct js_tg_info iniinfo;
 	struct js_tg_info *info = &iniinfo;
-	struct parport *pp;
 	int i;
 
 	if (config[0] < 0) return port;
 
+#ifdef USE_PARPORT
+	{
+		struct parport *pp;
 
-	if (config[0] > 0x10)
-		for (pp=parport_enumerate(); pp && (pp->base!=config[0]); pp=pp->next);
-	else
-		for (pp=parport_enumerate(); pp && (config[0]>0); pp=pp->next) config[0]--;
+		if (config[0] > 0x10)
+			for (pp=parport_enumerate(); pp != NULL && (pp->base!=config[0]); pp=pp->next);
+		else
+			for (pp=parport_enumerate(); pp != NULL && (config[0]>0); pp=pp->next) config[0]--;
 
-	if (!pp) {
-		printk(KERN_ERR "joy-tg: no such parport\n");
-		return port;
+		if (pp == NULL) {
+			printk(KERN_ERR "joy-tg: no such parport\n");
+			return port;
+		}
+
+		info->port = parport_register_device(pp, "joystick (turbografx)", NULL, NULL, NULL, PARPORT_DEV_EXCL, NULL);
+		if (!info->port)
+			return port;
 	}
-
-	info->port = parport_register_device(pp, "joystick (turbografx)", NULL, NULL, NULL, PARPORT_DEV_EXCL, NULL);
-	if (!info->port)
-		return port;
+#else
+	info->port = config[0];
+	if (check_region(info->port, 3)) return port;
+	request_region(info->port, 3, "joystick (turbografx)");
+#endif
 
 	port = js_register_port(port, info, 7, sizeof(struct js_tg_info), js_tg_read);
 	info = port->info;
@@ -204,14 +221,24 @@ static struct js_port __init *js_tg_probe(int *config, struct js_port *port)
 
 	for (i = 0; i < 7; i++)
 		if (config[i+1] > 0 && config[i+1] < 6) {
+#ifdef USE_PARPORT
 			printk(KERN_INFO "js%d: Multisystem joystick on %s\n",
 				js_register_device(port, i, 2, config[i+1], "Multisystem joystick", js_tg_open, js_tg_close),
 				info->port->port->name);
+#else
+			printk(KERN_INFO "js%d: Multisystem joystick at %#x\n",
+				js_register_device(port, i, 2, config[i+1], "Multisystem joystick", js_tg_open, js_tg_close),
+				info->port);
+#endif
 			info->sticks |= (1 << i);
 		}
 
         if (!info->sticks) {
+#ifdef USE_PARPORT
 		parport_unregister_device(info->port);
+#else
+		release_region(info->port, 3);
+#endif
 		return port;
         }
 		
@@ -221,30 +248,18 @@ static struct js_port __init *js_tg_probe(int *config, struct js_port *port)
 }
 
 #ifndef MODULE
-int __init js_tg_setup(SETUP_PARAM)
+void __init js_tg_setup(char *str, int *ints)
 {
 	int i;
-	SETUP_PARSE(2);
-	for (i = 0; i <= ints[0] && i < 2; i++) js_tg[i] = ints[i+1];
-	return 1;
+
+	if (!strcmp(str,"js_tg"))
+		for (i = 0; i <= ints[0] && i < 2; i++) js_tg[i] = ints[i+1];
+	if (!strcmp(str,"js_tg_2"))
+		for (i = 0; i <= ints[0] && i < 2; i++) js_tg_2[i] = ints[i+1];
+	if (!strcmp(str,"js_tg_3"))
+		for (i = 0; i <= ints[0] && i < 2; i++) js_tg_3[i] = ints[i+1];
+
 }
-int __init js_tg_setup_2(SETUP_PARAM)
-{
-	int i;
-	SETUP_PARSE(2);
-	for (i = 0; i <= ints[0] && i < 2; i++) js_tg_2[i] = ints[i+1];
-	return 1;
-}
-int __init js_tg_setup_3(SETUP_PARAM)
-{
-	int i;
-	SETUP_PARSE(2);
-	for (i = 0; i <= ints[0] && i < 2; i++) js_tg_3[i] = ints[i+1];
-	return 1;
-}
-__setup("js_tg=", js_tg_setup);
-__setup("js_tg_2=", js_tg_setup_2);
-__setup("js_tg_3=", js_tg_setup_3);
 #endif
 
 #ifdef MODULE

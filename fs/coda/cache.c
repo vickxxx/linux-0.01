@@ -24,49 +24,82 @@
 #include <linux/coda_fs_i.h>
 #include <linux/coda_cache.h>
 
-/* create a new acl cache entry and enlist it */
-static struct coda_cache *coda_cache_create(struct inode *inode)
+static void coda_ccinsert(struct coda_cache *el, struct super_block *sb);
+static void coda_cninsert(struct coda_cache *el, struct coda_inode_info *cii);
+static void coda_ccremove(struct coda_cache *el);
+static void coda_cnremove(struct coda_cache *el);
+static void coda_cache_create(struct inode *inode, int mask);
+static struct coda_cache * coda_cache_find(struct inode *inode);
+
+
+/* insert a acl-cache entry in sb list */
+static void coda_ccinsert(struct coda_cache *el, struct super_block *sb)
+{
+	struct coda_sb_info *sbi = coda_sbp(sb);
+	ENTRY;
+	/* third test verifies cc was initialized before adding it 
+	   to the sblist. Probably superfluous */
+	if ( !sbi || !el || !list_empty(&el->cc_cclist) ) {
+		printk("coda_ccinsert: NULL sbi or el->cc_cclist not empty!\n");
+		return ;
+	}
+
+	list_add(&el->cc_cclist, &sbi->sbi_cchead);
+}
+
+/* insert a acl-cache entry in the inode list */
+static void coda_cninsert(struct coda_cache *el, struct coda_inode_info *cii)
+{
+	ENTRY;
+	if ( !cii ||  !el || ! list_empty(&el->cc_cnlist)) {
+		printk("coda_cninsert: NULL cii or el->cc_cnlist not empty!\n");
+		return ;
+	}
+	list_add(&el->cc_cnlist, &cii->c_cnhead);
+}
+
+/* remove a cache entry from the superblock list */
+static void coda_ccremove(struct coda_cache *el)
+{
+	ENTRY;
+        if ( ! list_empty(&el->cc_cclist) )
+	        list_del(&el->cc_cclist);
+	else
+		printk("coda_cnremove: loose cc entry!");
+}
+
+/* remove a cache entry from the inode's list */
+static void coda_cnremove(struct coda_cache *el)
+{
+	ENTRY;
+	if ( ! list_empty(&el->cc_cnlist) )
+		list_del(&el->cc_cnlist);
+	else
+		printk("coda_cnremove: loose cn entry!");
+}
+
+/* create a new cache entry and enlist it */
+static void coda_cache_create(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-	struct coda_sb_info *sbi = coda_sbp(inode->i_sb);
+	struct super_block *sb = inode->i_sb;
 	struct coda_cache *cc = NULL;
 	ENTRY;
 
-	if ( !sbi || !cii ) {
-		printk("coda_cache_create: NULL sbi or cii!\n");
-		return NULL;
-	}
+	CODA_ALLOC(cc, struct coda_cache *, sizeof(*cc));
 
-	CODA_ALLOC(cc, struct coda_cache *, sizeof(struct coda_cache));
 	if ( !cc ) {
-		printk("Out of memory in coda_cache_create!\n");
-		return NULL;
-	}
-
-	coda_load_creds(&cc->cc_cred);
-	cc->cc_mask = 0;
-
-	INIT_LIST_HEAD(&cc->cc_cclist);
-	INIT_LIST_HEAD(&cc->cc_cnlist);
-	list_add(&cc->cc_cclist, &sbi->sbi_cchead);
-	list_add(&cc->cc_cnlist, &cii->c_cnhead);
-
-	return cc;
-}
-
-/* destroy an acl cache entry */
-static void coda_cache_destroy(struct coda_cache *el)
-{
-	ENTRY;
-
-	if (list_empty(&el->cc_cclist) || list_empty(&el->cc_cnlist)) {
-		printk("coda_cache_destroy: loose entry!");
+		printk("Out of memory in coda_cache_enter!\n");
 		return;
 	}
 
-	list_del(&el->cc_cclist);
-	list_del(&el->cc_cnlist);
-	CODA_FREE(el, sizeof(struct coda_cache));
+	INIT_LIST_HEAD(&cc->cc_cclist);
+	INIT_LIST_HEAD(&cc->cc_cnlist);
+
+	coda_load_creds(&cc->cc_cred);
+	cc->cc_mask = mask;
+	coda_cninsert(cc, cii);
+	coda_ccinsert(cc, sb);
 }
 
 /* see if there is a match for the current 
@@ -74,11 +107,11 @@ static void coda_cache_destroy(struct coda_cache *el)
 static struct coda_cache * coda_cache_find(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-	struct list_head *le;
+	struct list_head *lh, *le;
 	struct coda_cache *cc = NULL;
 	
-	for(le = cii->c_cnhead.next; le != &cii->c_cnhead; le = le->next)
-	{
+	le = lh = &cii->c_cnhead;
+	while( (le = le->next ) != lh )  {
 		/* compare name and creds */
 		cc = list_entry(le, struct coda_cache, cc_cnlist);
 		if ( !coda_cred_ok(&cc->cc_cred) )
@@ -86,7 +119,7 @@ static struct coda_cache * coda_cache_find(struct inode *inode)
 		CDEBUG(D_CACHE, "HIT for ino %ld\n", inode->i_ino );
 		return cc; /* cache hit */
 	}
-	return NULL;
+		return NULL;
 }
 
 /* create or extend an acl cache hit */
@@ -96,17 +129,17 @@ void coda_cache_enter(struct inode *inode, int mask)
 
 	cc = coda_cache_find(inode);
 
-	if (!cc)
-		coda_cache_create(inode);
-
-	if (cc)
+	if ( cc ) {
 		cc->cc_mask |= mask;
+	} else {
+		coda_cache_create(inode, mask);
+	}
 }
 
 /* remove all cached acl matches from an inode */
 void coda_cache_clear_inode(struct inode *inode)
 {
-	struct list_head *le;
+	struct list_head *lh, *le;
 	struct coda_inode_info *cii;
 	struct coda_cache *cc;
 	ENTRY;
@@ -117,18 +150,19 @@ void coda_cache_clear_inode(struct inode *inode)
 	}
 	cii = ITOC(inode);
 	
-	le = cii->c_cnhead.next;
-	while ( le != &cii->c_cnhead ) {
+	lh = le = &cii->c_cnhead;
+	while ( (le = le->next ) != lh ) {
 		cc = list_entry(le, struct coda_cache, cc_cnlist);
-		le = le->next;
-		coda_cache_destroy(cc);
+		coda_cnremove(cc);
+		coda_ccremove(cc);
+		CODA_FREE(cc, sizeof(*cc));
 	}
 }
 
 /* remove all acl caches */
 void coda_cache_clear_all(struct super_block *sb)
 {
-	struct list_head *le;
+	struct list_head *lh, *le;
 	struct coda_cache *cc;
 	struct coda_sb_info *sbi = coda_sbp(sb);
 
@@ -137,18 +171,22 @@ void coda_cache_clear_all(struct super_block *sb)
 		return;
 	}
 	
-	le = sbi->sbi_cchead.next;
-	while ( le != &sbi->sbi_cchead ) {
+	if ( list_empty(&sbi->sbi_cchead) )
+		return;
+
+	lh = le = &sbi->sbi_cchead;
+	while ( (le = le->next ) != lh ) {
 		cc = list_entry(le, struct coda_cache, cc_cclist);
-		le = le->next;
-		coda_cache_destroy(cc);
+		coda_cnremove(cc);
+		coda_ccremove(cc);
+		CODA_FREE(cc, sizeof(*cc));
 	}
 }
 
 /* remove all acl caches for a principal */
 void coda_cache_clear_cred(struct super_block *sb, struct coda_cred *cred)
 {
-	struct list_head *le;
+	struct list_head *lh, *le;
 	struct coda_cache *cc;
 	struct coda_sb_info *sbi = coda_sbp(sb);
 
@@ -157,12 +195,17 @@ void coda_cache_clear_cred(struct super_block *sb, struct coda_cred *cred)
 		return;
 	}
 	
-	le = sbi->sbi_cchead.next;
-	while ( le != &sbi->sbi_cchead ) {
+	if (list_empty(&sbi->sbi_cchead))
+		return;
+
+	lh = le = &sbi->sbi_cchead;
+	while ( (le = le->next ) != lh ) {
 		cc = list_entry(le, struct coda_cache, cc_cclist);
-		le = le->next;
-		if (coda_cred_eq(&cc->cc_cred, cred))
-			coda_cache_destroy(cc);
+		if ( coda_cred_eq(&cc->cc_cred, cred)) {
+			coda_cnremove(cc);
+			coda_ccremove(cc);
+			CODA_FREE(cc, sizeof(*cc));
+		}
 	}
 }
 
@@ -172,11 +215,11 @@ void coda_cache_clear_cred(struct super_block *sb, struct coda_cred *cred)
 int coda_cache_check(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-	struct list_head *le;
+	struct list_head *lh, *le;
 	struct coda_cache *cc = NULL;
 	
-	for(le = cii->c_cnhead.next; le != &cii->c_cnhead; le = le->next)
-	{
+	le = lh = &cii->c_cnhead;
+	while( (le = le->next ) != lh )  {
 		/* compare name and creds */
 		cc = list_entry(le, struct coda_cache, cc_cnlist);
 		if ( (cc->cc_mask & mask) != mask ) 
@@ -186,8 +229,8 @@ int coda_cache_check(struct inode *inode, int mask)
 		CDEBUG(D_CACHE, "HIT for ino %ld\n", inode->i_ino );
 		return 1; /* cache hit */
 	}
-	CDEBUG(D_CACHE, "MISS for ino %ld\n", inode->i_ino );
-	return 0;
+		CDEBUG(D_CACHE, "MISS for ino %ld\n", inode->i_ino );
+		return 0;
 }
 
 
@@ -248,10 +291,10 @@ static void coda_flag_children(struct dentry *parent, int flag)
 	struct list_head *child;
 	struct dentry *de;
 
-	for(child = parent->d_subdirs.next; child != &parent->d_subdirs;
-	    child = child->next)
-	{
+	child = parent->d_subdirs.next;
+	while ( child != &parent->d_subdirs ) {
 		de = list_entry(child, struct dentry, d_child);
+		child = child->next;
 		/* don't know what to do with negative dentries */
 		if ( ! de->d_inode ) 
 			continue;
@@ -269,7 +312,7 @@ void coda_flag_inode_children(struct inode *inode, int flag)
 	struct dentry *alias_de;
 
 	ENTRY;
-	if ( !inode || !S_ISDIR(inode->i_mode)) 
+	if ( !inode ) 
 		return; 
 
 	if (list_empty(&inode->i_dentry))
@@ -283,8 +326,8 @@ void coda_flag_inode_children(struct inode *inode, int flag)
 	while ( alias != &inode->i_dentry ) {
 		alias_de = list_entry(alias, struct dentry, d_alias);
 		coda_flag_children(alias_de, flag);
-		alias = alias->next;
 		shrink_dcache_parent(alias_de);
+		alias = alias->next;
 	}
 
 }
@@ -292,7 +335,14 @@ void coda_flag_inode_children(struct inode *inode, int flag)
 /* this will not zap the inode away */
 void coda_flag_inode(struct inode *inode, int flag)
 {
-	struct coda_inode_info *cii = ITOC(inode);
+	struct coda_inode_info *cii;
+
+	if ( !inode ) {
+		CDEBUG(D_CACHE, " no inode!\n");
+		return;
+	}
+
+	cii = ITOC(inode);
 	cii->c_flags |= flag;
 }		
 

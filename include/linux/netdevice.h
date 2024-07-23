@@ -24,9 +24,7 @@
 #ifndef _LINUX_NETDEVICE_H
 #define _LINUX_NETDEVICE_H
 
-#ifdef __KERNEL__
 #include <linux/config.h>
-#endif
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -38,8 +36,6 @@
 #include <net/profile.h>
 #endif
 #endif
-
-struct divert_blk;
 
 /*
  *	For future expansion when we will have different priorities. 
@@ -270,9 +266,6 @@ struct device
 	struct Qdisc		*qdisc_list;
 	unsigned long		tx_queue_len;	/* Max frames per queue allowed */
 
-	/* Bridge stuff */
-	int			bridge_port_id;		
-	
 	/* Pointers to interface service routines.	*/
 	int			(*open)(struct device *dev);
 	int			(*stop)(struct device *dev);
@@ -319,11 +312,6 @@ struct device
 	/* Semi-private data. Keep it at the end of device struct. */
 	struct dst_entry	*fastpath[NETDEV_FASTROUTE_HMASK+1];
 #endif
-
-#ifdef CONFIG_NET_DIVERT
-	/* this will get initialized at each interface type init routine */
-	struct divert_blk	*divert;
-#endif /* CONFIG_NET_DIVERT */
 };
 
 
@@ -417,7 +405,7 @@ extern __inline__ void  dev_unlock_list(void)
 extern __inline__ void dev_lock_wait(void)
 {
 	while (atomic_read(&dev_lockct)) {
-		current->policy |= SCHED_YIELD;
+		current->counter = 0;
 		schedule();
 	}
 }
@@ -432,17 +420,13 @@ extern __inline__ void dev_init_buffers(struct device *dev)
 extern void		ether_setup(struct device *dev);
 extern void		fddi_setup(struct device *dev);
 extern void		tr_setup(struct device *dev);
-extern void		fc_setup(struct device *dev);
 extern void		tr_freedev(struct device *dev);
-extern void		fc_freedev(struct device *dev);
 extern int		ether_config(struct device *dev, struct ifmap *map);
 /* Support for loadable net-drivers */
 extern int		register_netdev(struct device *dev);
 extern void		unregister_netdev(struct device *dev);
 extern int		register_trdev(struct device *dev);
 extern void		unregister_trdev(struct device *dev);
-extern int		register_fcdev(struct device *dev);
-extern void		unregister_fcdev(struct device *dev);
 /* Functions used for multicast support */
 extern void		dev_mc_upload(struct device *dev);
 extern int 		dev_mc_delete(struct device *dev, void *addr, int alen, int all);

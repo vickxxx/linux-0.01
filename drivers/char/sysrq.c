@@ -24,17 +24,14 @@
 
 #include <asm/ptrace.h>
 
-#ifdef CONFIG_MAGIC_SYSRQ
-int sysrq_enabled = 1;
+#ifdef CONFIG_APM
+#include <linux/apm_bios.h>
 #endif
 
 extern void wakeup_bdflush(int);
 extern void reset_vc(unsigned int);
 extern int console_loglevel;
 extern struct vfsmount *vfsmntlist;
-
-/* Machine specific power off function */
-void (*sysrq_power_off)(void) = NULL;
 
 /* Send a signal to all user processes */
 
@@ -85,12 +82,12 @@ void handle_sysrq(int key, struct pt_regs *pt_regs,
 		printk("Resetting\n");
 		machine_restart(NULL);
 		break;
+#ifdef CONFIG_APM
 	case 'o':					    /* O -- power off */
-		if (sysrq_power_off) {
-			printk("Power off\n");
-			sysrq_power_off();
-		}
+		printk("Power off\n");
+		apm_power_off();
 		break;
+#endif
 	case 's':					    /* S -- emergency sync */
 		printk("Emergency Sync\n");
 		emergency_sync_scheduled = EMERG_SYNC;
@@ -140,10 +137,11 @@ void handle_sysrq(int key, struct pt_regs *pt_regs,
 		if (tty)
 			printk("saK ");
 #endif
-		printk("Boot ");
-		if (sysrq_power_off)
-			printk("Off ");
-		printk("Sync Unmount showPc showTasks showMem loglevel0-8 tErm kIll killalL\n");
+		printk("Boot "
+#ifdef CONFIG_APM
+		       "Off "
+#endif
+		       "Sync Unmount showPc showTasks showMem loglevel0-8 tErm kIll killalL\n");
 		/* Don't use 'A' as it's handled specially on the Sparc */
 	}
 

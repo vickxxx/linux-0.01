@@ -18,8 +18,6 @@
  *			 by Andrea Arcangeli
  * Version 1.03		fix for (hwif->chipset == ide_4drives)
  * Version 1.04		fixed buggy treatments of known flash memory cards
- * 17-OCT-2000 rjohnson@analogic.com Added spin-locks for reading CMOS
- * chip.
  */
 
 #undef REALLY_SLOW_IO		/* most systems can safely undef this */
@@ -37,7 +35,6 @@
 #include <linux/genhd.h>
 #include <linux/malloc.h>
 #include <linux/delay.h>
-#include <linux/mc146818rtc.h> /* CMOS defines */
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
@@ -112,16 +109,8 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 				}
 				type = ide_cdrom;	/* Early cdrom models used zero */
 			case ide_cdrom:
-				drive->removable = 1;
-#ifdef CONFIG_PPC
-				/* kludge for Apple PowerBook internal zip */
-				if (!strstr(id->model, "CD-ROM") && strstr(id->model, "ZIP")) {
-					printk ("FLOPPY");
-					type = ide_floppy;
-					break;
-				}
-#endif
 				printk ("CDROM");
+				drive->removable = 1;
 				break;
 			case ide_tape:
 				printk ("TAPE");
@@ -201,10 +190,6 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 		hd_status = IDE_STATUS_REG;	/* ancient Seagate drives, broken interfaces */
 	} else
 		hd_status = IDE_ALTSTATUS_REG;	/* use non-intrusive polling */
-
-	/* set features register for atapi identify command */
-	if((cmd == WIN_PIDENTIFY))
-	        OUT_BYTE(0,IDE_FEATURE_REG); /* disable dma & overlap mode */
 
 #if CONFIG_BLK_DEV_PDC4030
 	if (IS_PDC4030_DRIVE) {
@@ -294,7 +279,6 @@ static int do_probe (ide_drive_t *drive, byte cmd)
 		drive->name, drive->present, drive->media,
 		(cmd == WIN_IDENTIFY) ? "ATA" : "ATAPI");
 #endif
-	delay_50ms();	/* needed for some systems (e.g. crw9624 as drive0 with disk as slave) */
 	SELECT_DRIVE(hwif,drive);
 	delay_50ms();
 	if (IN_BYTE(IDE_SELECT_REG) != drive->select.all && !drive->present) {
@@ -389,7 +373,6 @@ static inline byte probe_for_drive (ide_drive_t *drive)
 static void probe_cmos_for_drives (ide_hwif_t *hwif)
 {
 #ifdef __i386__
-	unsigned long flags;
 	extern struct drive_info_struct drive_info;
 	byte cmos_disks, *BIOS = (byte *) &drive_info;
 	int unit;
@@ -398,27 +381,17 @@ static void probe_cmos_for_drives (ide_hwif_t *hwif)
 	if (hwif->chipset == ide_pdc4030 && hwif->channel != 0)
 		return;
 #endif /* CONFIG_BLK_DEV_PDC4030 */
-	spin_lock_irqsave(&rtc_lock, flags);
 	outb_p(0x12,0x70);		/* specify CMOS address 0x12 */
 	cmos_disks = inb_p(0x71);	/* read the data from 0x12 */
-	spin_unlock_irqrestore(&rtc_lock, flags);
 	/* Extract drive geometry from CMOS+BIOS if not already setup */
 	for (unit = 0; unit < MAX_DRIVES; ++unit) {
 		ide_drive_t *drive = &hwif->drives[unit];
-		if ((cmos_disks & (0xf0 >> (unit*4)))
-		    && !drive->present && !drive->nobios) {
-			unsigned short cyl = *(unsigned short *)BIOS;
-			unsigned char head = *(BIOS+2);
-			unsigned char sect = *(BIOS+14);
-			if (cyl > 0 && head > 0 && sect > 0 && sect < 64) {
-				drive->cyl   = drive->bios_cyl  = cyl;
-				drive->head  = drive->bios_head = head;
-				drive->sect  = drive->bios_sect = sect;
-				drive->ctl   = *(BIOS+8);
-				drive->present = 1;
-			} else
-				printk("hd%d: C/H/S=%d/%d/%d from BIOS ignored\n",
-				       unit, cyl, head, sect);
+		if ((cmos_disks & (0xf0 >> (unit*4))) && !drive->present && !drive->nobios) {
+			drive->cyl   = drive->bios_cyl  = *(unsigned short *)BIOS;
+			drive->head  = drive->bios_head = *(BIOS+2);
+			drive->sect  = drive->bios_sect = *(BIOS+14);
+			drive->ctl   = *(BIOS+8);
+			drive->present = 1;
 		}
 		BIOS += 16;
 	}
@@ -587,6 +560,10 @@ static int init_irq (ide_hwif_t *hwif)
 		hwgroup->handler  = NULL;
 		hwgroup->drive    = NULL;
 		hwgroup->busy     = 0;
+		hwgroup->spinlock = (spinlock_t)SPIN_LOCK_UNLOCKED;
+#if (DEBUG_SPINLOCK > 0)
+		printk("hwgroup(%s) spinlock is %p\n", hwif->name,  &hwgroup->spinlock);	/* FIXME */
+#endif
 		init_timer(&hwgroup->timer);
 		hwgroup->timer.function = &ide_timer_expiry;
 		hwgroup->timer.data = (unsigned long) hwgroup;
@@ -833,12 +810,7 @@ int init_module (void)
 	
 	for (index = 0; index < MAX_HWIFS; ++index)
 		ide_unregister(index);
-	ideprobe_init();
-#ifdef CONFIG_PROC_FS
-	proc_ide_destroy();	/* Avoid multiple entry in /proc */
-	proc_ide_create();
-#endif
-	return 0;
+	return ideprobe_init();
 }
 
 void cleanup_module (void)

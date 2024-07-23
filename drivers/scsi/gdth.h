@@ -10,7 +10,7 @@
  *
  * <achim@vortex.de>
  *
- * $Id: gdth.h,v 1.35 2000/10/11 08:42:38 achim Exp $
+ * $Id: gdth.h,v 1.21 1999/03/26 09:12:24 achim Exp $
  */
 
 #include <linux/version.h>
@@ -29,9 +29,9 @@
 /* defines, macros */
 
 /* driver version */
-#define GDTH_VERSION_STR        "1.25"
+#define GDTH_VERSION_STR        "1.14"
 #define GDTH_VERSION            1
-#define GDTH_SUBVERSION         25
+#define GDTH_SUBVERSION         14
 
 /* protocol version */
 #define PROTOCOL_VERSION        1
@@ -126,8 +126,7 @@
 #endif
 
 /* limits */
-#define GDTH_SCRATCH    PAGE_SIZE               /* 4KB scratch buffer */
-#define GDTH_SCRATCH_ORD 0                      /* order 0 means 1 page */
+#define GDTH_SCRATCH    4096                    /* 4KB scratch buffer */
 #define GDTH_MAXCMDS    124
 #define GDTH_MAXC_P_L   16                      /* max. cmds per lun */
 #define GDTH_MAX_RAW    2                       /* max. cmds per raw device */
@@ -136,8 +135,7 @@
 #define MAXID           127
 #define MAXLUN          8
 #define MAXBUS          6
-#define MAX_HDRIVES     100                     /* max. host drive count */
-#define MAX_LDRIVES     255                     /* max. log. drive count */
+#define MAX_HDRIVES     35                      /* max. host drive count */
 #define MAX_EVENTS      100                     /* event buffer count */
 #define MAX_RES_ARGS    40                      /* device reservation, 
                                                    must be a multiple of 4 */
@@ -175,13 +173,7 @@
 #define IC_QUEUE_BYTES  4
 #define DPMEM_COMMAND_OFFSET    IC_HEADER_BYTES+IC_QUEUE_BYTES*MAXOFFSETS
 
-/* cluster_type constants */
-#define CLUSTER_DRIVE         1
-#define CLUSTER_MOUNTED       2
-#define CLUSTER_RESERVED      4
-#define CLUSTER_RESERVE_STATE (CLUSTER_DRIVE|CLUSTER_MOUNTED|CLUSTER_RESERVED)
-
-/* commands for all services, cache service */
+/* cache/raw service commands */
 #define GDT_INIT        0                       /* service initialization */
 #define GDT_READ        1                       /* read command */
 #define GDT_WRITE       2                       /* write command */
@@ -197,13 +189,8 @@
 #define GDT_READ_THR    17                      /* read through */
 #define GDT_EXT_INFO    18                      /* extended info */
 #define GDT_RESET       19                      /* controller reset */
-#define GDT_RESERVE_DRV 20                      /* reserve host drive */
-#define GDT_RELEASE_DRV 21                      /* release host drive */
-#define GDT_CLUST_INFO  22                      /* cluster info */
-#define GDT_RW_ATTRIBS  23                      /* R/W attribs (write thru,..)*/
-#define GDT_CLUST_RESET 24                      /* releases the cluster drives*/
 
-/* raw service commands */
+/* additional raw service commands */
 #define GDT_RESERVE     14                      /* reserve dev. to raw serv. */
 #define GDT_RELEASE     15                      /* release device */
 #define GDT_RESERVE_ALL 16                      /* reserve all devices */
@@ -212,9 +199,6 @@
 #define GDT_SCAN_START  19                      /* start device scan */
 #define GDT_SCAN_END    20                      /* stop device scan */  
 
-/* screen service commands */
-#define GDT_REALTIME    3                       /* realtime clock to screens. */
-
 /* IOCTL command defines */
 #define SCSI_DR_INFO    0x00                    /* SCSI drive info */                   
 #define SCSI_CHAN_CNT   0x05                    /* SCSI channel count */   
@@ -222,11 +206,10 @@
 #define SCSI_DEF_CNT    0x15                    /* grown/primary defects */
 #define DSK_STATISTICS  0x4b                    /* SCSI disk statistics */
 #define IOCHAN_DESC     0x5d                    /* description of IO channel */
-#define IOCHAN_RAW_DESC 0x5e                    /* description of raw IO chn. */
+#define IOCHAN_RAW_DESC 0x5e                    /* description of raw IO channel */
 #define L_CTRL_PATTERN  0x20000000L             /* SCSI IOCTL mask */
 #define ARRAY_INFO      0x12                    /* array drive info */
 #define ARRAY_DRV_LIST  0x0f                    /* array drive list */
-#define ARRAY_DRV_LIST2 0x34                    /* array drive list (new) */
 #define LA_CTRL_PATTERN 0x10000000L             /* array IOCTL mask */
 #define CACHE_DRV_CNT   0x01                    /* cache drive count */
 #define CACHE_DRV_LIST  0x02                    /* cache drive list */
@@ -239,11 +222,19 @@
 #define IO_CHANNEL      0x00020000L             /* default IO channel */
 #define INVALID_CHANNEL 0x0000ffffL             /* invalid channel */
 
+/* IOCTLs */
+#define GDTIOCTL_MASK       ('J'<<8)
+#define GDTIOCTL_GENERAL    (GDTIOCTL_MASK | 0) /* general IOCTL */
+#define GDTIOCTL_DRVERS     (GDTIOCTL_MASK | 1) /* get driver version */
+#define GDTIOCTL_CTRTYPE    (GDTIOCTL_MASK | 2) /* get controller type */
+#define GDTIOCTL_CTRCNT     (GDTIOCTL_MASK | 5) /* get controller count */
+#define GDTIOCTL_LOCKDRV    (GDTIOCTL_MASK | 6) /* lock host drive */
+#define GDTIOCTL_LOCKCHN    (GDTIOCTL_MASK | 7) /* lock channel */
+#define GDTIOCTL_EVENT      (GDTIOCTL_MASK | 8) /* read controller events */
+
 /* service errors */
 #define S_OK            1                       /* no error */
-#define S_GENERR        6                       /* general error */
 #define S_BSY           7                       /* controller busy */
-#define S_CACHE_UNKNOWN 12                      /* cache serv.: drive unknown */
 #define S_RAW_SCSI      12                      /* raw serv.: target error */
 #define S_RAW_ILL       0xff                    /* raw serv.: illegal */
 
@@ -258,8 +249,8 @@
 #define HIGH_PRI        0x08
 
 /* data directions */
-#define GDTH_DATA_IN    0x01000000L             /* data from target */
-#define GDTH_DATA_OUT   0x00000000L             /* data to target */
+#define DATA_IN         0x01000000L             /* data from target */
+#define DATA_OUT        0x00000000L             /* data to target */
 
 /* BMIC registers (EISA controllers) */
 #define ID0REG          0x0c80                  /* board ID */
@@ -307,7 +298,7 @@ typedef struct {
     unchar      revision[4];                    /* revision */
     ulong32     sy_rate;                        /* current rate for sync. tr. */
     ulong32     sy_max_rate;                    /* max. rate for sync. tr. */
-    ulong32     no_ldrive;                      /* belongs to this log. drv.*/
+    ulong32     no_ldrive;                      /* belongs to this logical drv.*/
     ulong32     blkcnt;                         /* number of blocks */
     ushort      blksize;                        /* size of block in bytes */
     unchar      available;                      /* flag: access is available */
@@ -462,15 +453,7 @@ typedef struct {
     unchar      is_parity;                      /* Flag: is parity drive? */
     unchar      is_hotfix;                      /* Flag: is hotfix drive? */
     unchar      res[3];
-} PACKED gdth_alist_str;
-
-typedef struct {
-    ulong32     entries_avail;                  /* allocated entries */
-    ulong32     entries_init;                   /* returned entries */
-    ulong32     first_entry;                    /* first entry number */
-    ulong32     list_offset;                    /* offset of following list */
-    gdth_alist_str list[1];                     /* list */
-} PACKED gdth_arcdl_str;
+} PACKED gdth_arraylist_str;
 
 /* cache info/config IOCTL */
 typedef struct {
@@ -602,13 +585,8 @@ typedef struct {
         } PACKED ioctl;                         /* IOCTL command structure */
         struct {
             ushort      reserved;
-            union {
-                struct {
-                    ulong32  msg_handle;        /* message handle */
-                    ulong32  msg_addr;          /* message buffer address */
-                } PACKED msg;
-                unchar       data[12];          /* buffer for rtc data, ... */
-            } su;
+            ulong32     msg_handle;             /* message handle */
+            ulong32     msg_addr;               /* message buffer address */
         } PACKED screen;                        /* screen service cmd. str. */
         struct {
             ushort      reserved;
@@ -625,7 +603,7 @@ typedef struct {
             unchar      priority;               /* only 0 used */
             ulong32     sense_len;              /* sense data length */
             ulong32     sense_data;             /* sense data addr. */
-            ulong32     link_p;                 /* linked cmds (not supp.) */
+            struct raw  *link_p;                /* linked cmds (not supp.) */
             ulong32     sg_ranz;                /* s/g element count */
             gdth_sg_str sg_lst[GDTH_MAXSG];     /* s/g list */
         } PACKED raw;                           /* raw service cmd. struct. */
@@ -671,8 +649,6 @@ typedef struct {
             ulong32         l1, l2, l3, l4;
         } PACKED test;
     } eu;
-    ulong32                 severity;
-    unchar                  event_string[256];          
 } PACKED gdth_evt_data;
 
 typedef struct {
@@ -822,9 +798,7 @@ typedef struct {
     unchar              unused5[7];
     unchar              edoor_en_reg;           /* board interrupts enable */
     unchar              unused6[27];
-    ulong32             unused7[939];         
-    ulong32             severity;       
-    char                evt_str[256];           /* event string */
+    ulong32             unused7[1004];          /* size: 4 KB */
 } PACKED gdt6m_i960_regs;
 
 /* DPRAM PCI MPR controllers */
@@ -858,7 +832,6 @@ typedef struct {
     ushort              type;                   /* controller class */
     ushort              raw_feat;               /* feat. raw service (s/g,..) */
     ulong32             stype;                  /* controller subtype */
-    ushort              fw_vers;                /* firmware version */
     ushort              cache_feat;             /* feat. cache serv. (s/g,..) */
     ushort              bmic;                   /* BMIC address (EISA) */
     void                *brd;                   /* DPRAM address */
@@ -871,13 +844,12 @@ typedef struct {
     unchar              irq;                    /* IRQ */
     unchar              drq;                    /* DRQ (ISA controllers) */
     ushort              status;                 /* command status */
-    ushort              service;                /* service/firmware ver./.. */
     ulong32             info;
     ulong32             info2;                  /* additional info */
     Scsi_Cmnd           *req_first;             /* top of request queue */
     struct {
         unchar          present;                /* Flag: host drive present? */
-        unchar          is_logdrv;              /* Flag: log. drive (master)? */
+        unchar          is_logdrv;              /* Flag: logical drive (master)? */
         unchar          is_arraydrv;            /* Flag: array drive? */
         unchar          is_master;              /* Flag: array drive master? */
         unchar          is_parity;              /* Flag: parity drive? */
@@ -890,15 +862,13 @@ typedef struct {
         ulong32         size;                   /* capacity */
         unchar          ldr_no;                 /* log. drive no. */
         unchar          rw_attribs;             /* r/w attributes */
-        unchar          cluster_type;           /* cluster properties */
-        unchar          media_changed;          /* Flag:MOUNT/UNMOUNT occured */
         ulong32         start_sec;              /* start sector */
-    } hdr[MAX_LDRIVES];                         /* host drives */
+    } hdr[MAX_HDRIVES];                         /* host drives */
     struct {
         unchar          lock;                   /* channel locked? (hot plug) */
         unchar          pdev_cnt;               /* physical device count */
         unchar          local_no;               /* local channel number */
-        unchar          io_cnt[MAXID];          /* current IO count */
+	unchar          io_cnt[MAXID];          /* current IO count */
         ulong32         address;                /* channel address */
         ulong32         id_list[MAXID];         /* IDs of the phys. devices */
     } raw[MAXBUS];                              /* SCSI channels */
@@ -918,7 +888,6 @@ typedef struct {
     gdth_cpar_str       cpar;                   /* controller cache par. */
     gdth_bfeat_str      bfeat;                  /* controller features */
     gdth_binfo_str      binfo;                  /* controller info */
-    gdth_evt_data       dvr;                    /* event structure */
 #if LINUX_VERSION_CODE >= 0x02015F
     spinlock_t          smp_lock;
 #endif
@@ -1009,38 +978,7 @@ int gdth_reset(Scsi_Cmnd *);
 #endif
 const char *gdth_info(struct Scsi_Host *);
 
-#if LINUX_VERSION_CODE >= 0x020322
-int gdth_bios_param(Disk *,kdev_t,int *);
-int gdth_proc_info(char *,char **,off_t,int,int,int);
-int gdth_eh_abort(Scsi_Cmnd *scp);
-int gdth_eh_device_reset(Scsi_Cmnd *scp);
-int gdth_eh_bus_reset(Scsi_Cmnd *scp);
-int gdth_eh_host_reset(Scsi_Cmnd *scp);
-#define GDTH { proc_name:       "gdth",                          \
-               proc_info:       gdth_proc_info,                  \
-               name:            "GDT SCSI Disk Array Controller",\
-               detect:          gdth_detect,                     \
-               release:         gdth_release,                    \
-               info:            gdth_info,                       \
-               command:         gdth_command,                    \
-               queuecommand:    gdth_queuecommand,               \
-               eh_abort_handler: gdth_eh_abort,                  \
-               eh_device_reset_handler: gdth_eh_device_reset,    \
-               eh_bus_reset_handler: gdth_eh_bus_reset,          \
-               eh_host_reset_handler: gdth_eh_host_reset,        \
-               abort:           gdth_abort,                      \
-               reset:           gdth_reset,                      \
-               bios_param:      gdth_bios_param,                 \
-               can_queue:       GDTH_MAXCMDS,                    \
-               this_id:         -1,                              \
-               sg_tablesize:    GDTH_MAXSG,                      \
-               cmd_per_lun:     GDTH_MAXC_P_L,                   \
-               present:         0,                               \
-               unchecked_isa_dma: 1,                             \
-               use_clustering:  ENABLE_CLUSTERING,               \
-               use_new_eh_code: 1       /* use new error code */ }    
-
-#elif LINUX_VERSION_CODE >= 0x02015F
+#if LINUX_VERSION_CODE >= 0x02015F
 int gdth_bios_param(Disk *,kdev_t,int *);
 extern struct proc_dir_entry proc_scsi_gdth;
 int gdth_proc_info(char *,char **,off_t,int,int,int);
@@ -1071,7 +1009,6 @@ int gdth_eh_host_reset(Scsi_Cmnd *scp);
                unchecked_isa_dma: 1,                             \
                use_clustering:  ENABLE_CLUSTERING,               \
                use_new_eh_code: 1       /* use new error code */ }    
-
 #elif LINUX_VERSION_CODE >= 0x010300
 int gdth_bios_param(Disk *,kdev_t,int *);
 extern struct proc_dir_entry proc_scsi_gdth;
@@ -1096,7 +1033,6 @@ int gdth_proc_info(char *,char **,off_t,int,int,int);
                    0,                                   \
                    1,                                   \
                    ENABLE_CLUSTERING}
-
 #else
 int gdth_bios_param(Disk *,int,int *);
 #define GDTH { NULL, NULL,                              \

@@ -1,4 +1,4 @@
-/* $Id: irq.c,v 1.76.2.3 2000/03/02 02:03:27 davem Exp $
+/* $Id: irq.c,v 1.76 1999/04/02 14:54:30 davem Exp $
  * irq.c: UltraSparc IRQ handling/init/registry.
  *
  * Copyright (C) 1997  David S. Miller  (davem@caip.rutgers.edu)
@@ -825,10 +825,10 @@ static void show(char * str)
 	int cpu = smp_processor_id();
 
 	printk("\n%s, CPU %d:\n", str, cpu);
-	printk("irq:  %d [%u %u]\n",
+	printk("irq:  %d [%ld %ld]\n",
 	       atomic_read(&global_irq_count),
 	       cpu_data[0].irq_count, cpu_data[1].irq_count);
-	printk("bh:   %d [%u %u]\n",
+	printk("bh:   %d [%ld %ld]\n",
 	       (spin_is_locked(&global_bh_count) ? 1 : 0),
 	       cpu_data[0].bh_count, cpu_data[1].bh_count);
 }
@@ -1230,7 +1230,7 @@ int probe_irq_off(unsigned long mask)
 void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 		 unsigned long *clock)
 {
-	unsigned long pstate;
+	unsigned long flags;
 	extern unsigned long timer_tick_offset;
 	int node, err;
 #ifdef __SMP__
@@ -1253,57 +1253,31 @@ void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 		prom_halt();
 	}
 
-	/* Guarentee that the following sequences execute
-	 * uninterrupted.
-	 */
-	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-			     "wrpr	%0, %1, %%pstate"
-			     : "=r" (pstate)
-			     : "i" (PSTATE_IE));
+	save_and_cli(flags);
 
 	/* Set things up so user can access tick register for profiling
-	 * purposes.  Also workaround BB_ERRATA_1 by doing a dummy
-	 * read back of %tick after writing it.
+	 * purposes.
 	 */
 	__asm__ __volatile__("
 		sethi	%%hi(0x80000000), %%g1
-		ba,pt	%%xcc, 1f
-		 sllx	%%g1, 32, %%g1
-		.align	64
-	1:	rd	%%tick, %%g2
+		sllx	%%g1, 32, %%g1
+		rd	%%tick, %%g2
 		add	%%g2, 6, %%g2
 		andn	%%g2, %%g1, %%g2
 		wrpr	%%g2, 0, %%tick
-		rdpr	%%tick, %%g0"
-	: /* no outputs */
+"	: /* no outputs */
 	: /* no inputs */
 	: "g1", "g2");
 
-	/* Workaround for Spitfire Errata (#54 I think??), I discovered
-	 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
-	 * number 103640.
-	 *
-	 * On Blackbird writes to %tick_cmpr can fail, the
-	 * workaround seems to be to execute the wr instruction
-	 * at the start of an I-cache line, and perform a dummy
-	 * read back from %tick_cmpr right after writing to it. -DaveM
-	 */
 	__asm__ __volatile__("
 		rd	%%tick, %%g1
-		ba,pt	%%xcc, 1f
-		 add	%%g1, %0, %%g1
-		.align	64
-	1:	wr	%%g1, 0x0, %%tick_cmpr
-		rd	%%tick_cmpr, %%g0"
+		add	%%g1, %0, %%g1
+		wr	%%g1, 0x0, %%tick_cmpr"
 	: /* no outputs */
 	: "r" (timer_tick_offset)
 	: "g1");
 
-	/* Restore PSTATE_IE. */
-	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
-			     : /* no outputs */
-			     : "r" (pstate));
-
+	restore_flags(flags);
 	sti();
 }
 
@@ -1425,7 +1399,7 @@ void enable_prom_timer(void)
 	prom_timers->count0 = 0;
 }
 
-unsigned long __init init_IRQ(unsigned long memory)
+__initfunc(void init_IRQ(void))
 {
 	static int called = 0;
 
@@ -1456,5 +1430,4 @@ unsigned long __init init_IRQ(unsigned long memory)
 			     : /* No outputs */
 			     : "i" (PSTATE_IE)
 			     : "g1");
-	return memory;
 }

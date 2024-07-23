@@ -62,7 +62,7 @@
 #include "irq.h"
 
 
-unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
+unsigned long cpu_hz;	/* Detected as we calibrate the TSC */
 
 /* Number of usecs that the last interrupt was delayed */
 static int delay_at_last_interrupt;
@@ -74,12 +74,9 @@ static unsigned long last_tsc_low; /* lsb 32 bits of Time Stamp Counter */
  * Equal to 2^32 * (1 / (clocks per usec) ).
  * Initialized in time_init.
  */
-unsigned long fast_gettimeoffset_quotient=0;
+static unsigned long fast_gettimeoffset_quotient=0;
 
 extern rwlock_t xtime_lock;
-extern volatile unsigned long lost_ticks;
-
-spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 
 static inline unsigned long do_fast_gettimeoffset(void)
 {
@@ -114,8 +111,6 @@ static inline unsigned long do_fast_gettimeoffset(void)
 #define TICK_SIZE tick
 
 #ifndef CONFIG_X86_TSC
-
-spinlock_t i8253_lock = SPIN_LOCK_UNLOCKED;
 
 /* This function must be called with interrupts disabled 
  * It was inspired by Steve McCanne's microtime-i386 for BSD.  -- jrs
@@ -161,8 +156,6 @@ static unsigned long do_slow_gettimeoffset(void)
 	 */
 	unsigned long jiffies_t;
 
-	/* gets recalled with irq locally disabled */
-	spin_lock(&i8253_lock);
 	/* timer count may underflow right here */
 	outb_p(0x00, 0x43);	/* latch the count ASAP */
 
@@ -176,14 +169,6 @@ static unsigned long do_slow_gettimeoffset(void)
 
 	count |= inb_p(0x40) << 8;
 
-	/* VIA686a test code... reset the latch if count > max */
- 	if (count > LATCH-1) {
-		outb_p(0x34, 0x43);
-		outb_p(LATCH & 0xff, 0x40);
-		outb(LATCH >> 8, 0x40);
-		count = LATCH - 1;
-	}	
-	
 	/*
 	 * avoiding timer inconsistencies (they are rare, but they happen)...
 	 * there are two kinds of problems that must be avoided here:
@@ -229,7 +214,6 @@ static unsigned long do_slow_gettimeoffset(void)
 		}
 	} else
 		jiffies_p = jiffies_t;
-	spin_unlock(&i8253_lock);
 
 	count_p = count;
 
@@ -253,6 +237,7 @@ static unsigned long (*do_gettimeoffset)(void) = do_slow_gettimeoffset;
  */
 void do_gettimeofday(struct timeval *tv)
 {
+	extern volatile unsigned long lost_ticks;
 	unsigned long flags;
 	unsigned long usec, sec;
 
@@ -286,7 +271,6 @@ void do_settimeofday(struct timeval *tv)
 	 * would have done, and then undo it!
 	 */
 	tv->tv_usec -= do_gettimeoffset();
-	tv->tv_usec -= lost_ticks * (1000000 / HZ);
 
 	while (tv->tv_usec < 0) {
 		tv->tv_usec += 1000000;
@@ -317,8 +301,6 @@ static int set_rtc_mmss(unsigned long nowtime)
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
 
-	/* gets recalled with irq locally disabled */
-	spin_lock(&rtc_lock);
 	save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
 	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
 
@@ -364,7 +346,6 @@ static int set_rtc_mmss(unsigned long nowtime)
 	 */
 	CMOS_WRITE(save_control, RTC_CONTROL);
 	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
-	spin_unlock(&rtc_lock);
 
 	return retval;
 }
@@ -466,35 +447,10 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 		rdtscl(last_tsc_low);
 
-#if 0 /*
-       * SUBTLE: this is not necessary from here because it's implicit in the
-       * write xtime_lock.
-       */
-		spin_lock(&i8253_lock);
-#endif
 		outb_p(0x00, 0x43);     /* latch the count ASAP */
 
 		count = inb_p(0x40);    /* read the latched count */
 		count |= inb(0x40) << 8;
-
-		/* VIA686a test code... reset the latch if count > max */
-		if (count > LATCH-1) {
-			static int last_whine;
-			outb_p(0x34, 0x43);
-			outb_p(LATCH & 0xff, 0x40);
-			outb(LATCH >> 8, 0x40);
-			count = LATCH - 1;
-			if(time_after(jiffies, last_whine))
-			{
-				printk(KERN_WARNING "probable hardware bug: clock timer configuration lost - probably a VIA686a.\n");
-				printk(KERN_WARNING "probable hardware bug: restoring chip configuration.\n");
-				last_whine = jiffies + HZ;
-			}			
-		}	
-
-#if 0
-		spin_unlock(&i8253_lock);
-#endif
 
 		count = ((LATCH-1) - count) * TICK_SIZE;
 		delay_at_last_interrupt = (count + LATCH/2) / LATCH;
@@ -656,8 +612,6 @@ bad_ctc:
 	return 0;
 }
 
-extern int x86_udelay_tsc;
-
 __initfunc(void time_init(void))
 {
 	xtime.tv_sec = get_cmos_time();
@@ -695,11 +649,6 @@ __initfunc(void time_init(void))
 		if (tsc_quotient) {
 			fast_gettimeoffset_quotient = tsc_quotient;
 			use_tsc = 1;
-			/*
-			 *	We should be more selective here I suspect
-			 *	and just enable this for the new intel chips ?
-			 */
-			x86_udelay_tsc = 1;
 #ifndef do_gettimeoffset
 			do_gettimeoffset = do_fast_gettimeoffset;
 #endif
@@ -709,12 +658,12 @@ __initfunc(void time_init(void))
 			 * The formula is (10^6 * 2^32) / (2^32 * 1 / (clocks/us)) =
 			 * clock/second. Our precision is about 100 ppm.
 			 */
-			{	unsigned long eax=0, edx=1000;
+			{	unsigned long eax=0, edx=1000000;
 				__asm__("divl %2"
-		       		:"=a" (cpu_khz), "=d" (edx)
+		       		:"=a" (cpu_hz), "=d" (edx)
         	       		:"r" (tsc_quotient),
 	                	"0" (eax), "1" (edx));
-				printk("Detected %ld kHz processor.\n", cpu_khz);
+				printk("Detected %ld Hz processor.\n", cpu_hz);
 			}
 		}
 	}

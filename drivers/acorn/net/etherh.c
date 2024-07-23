@@ -37,7 +37,6 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
-#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -51,15 +50,12 @@
 #define DEBUG_INIT 2
 
 static unsigned int net_debug = NET_DEBUG;
-static const card_ids __init etherh_cids[] = {
+static const card_ids etherh_cids[] = {
 	{ MANU_I3, PROD_I3_ETHERLAN500 },
 	{ MANU_I3, PROD_I3_ETHERLAN600 },
 	{ MANU_I3, PROD_I3_ETHERLAN600A },
 	{ 0xffff, 0xffff }
 };
-
-MODULE_AUTHOR("Russell King");
-MODULE_DESCRIPTION("i3 EtherH driver");
 
 static char *version = "etherh [500/600/600A] ethernet driver (c) 1998 R.M.King v1.05\n";
 
@@ -84,8 +80,8 @@ static char *version = "etherh [500/600/600A] ethernet driver (c) 1998 R.M.King 
  * Read the ethernet address string from the on board rom.
  * This is an ascii string...
  */
-__initfunc(static int
-etherh_addr(char *addr, struct expansion_card *ec))
+static int
+etherh_addr(char *addr, struct expansion_card *ec)
 {
 	struct in_chunk_dir cd;
 	char *s;
@@ -220,8 +216,10 @@ etherh_block_output (struct device *dev, int count, const unsigned char *buf, in
 
 	if (ei_status.word16)
 		outsw (dma_addr, buf, count >> 1);
+#ifdef BIT8
 	else
 		outsb (dma_addr, buf, count);
+#endif
 
 	dma_start = jiffies;
 
@@ -270,8 +268,11 @@ etherh_block_input (struct device *dev, int count, struct sk_buff *skb, int ring
 		insw (dma_addr, buf, count >> 1);
 		if (count & 1)
 			buf[count - 1] = inb (dma_addr);
-	} else
+	}
+#ifdef BIT8
+	else
 		insb (dma_addr, buf, count);
+#endif
 
 	outb (ENISR_RDC, addr + EN0_ISR);
 	ei_status.dmaing &= ~1;
@@ -306,8 +307,10 @@ etherh_get_header (struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 
 	if (ei_status.word16)
 		insw (dma_addr, hdr, sizeof (*hdr) >> 1);
+#ifdef BIT8
 	else
 		insb (dma_addr, hdr, sizeof (*hdr));
+#endif
 
 	outb (ENISR_RDC, addr + EN0_ISR);
 	ei_status.dmaing &= ~1;
@@ -352,8 +355,8 @@ etherh_close(struct device *dev)
 /*
  * This is the real probe routine.
  */
-__initfunc(static int
-etherh_probe1(struct device *dev))
+static int
+etherh_probe1(struct device *dev)
 {
 	static int version_printed;
 	unsigned int addr, i, reg0, tmp;
@@ -458,13 +461,10 @@ static expansioncard_ops_t etherh_ops = {
 	etherh_irq_enable,
 	etherh_irq_disable,
 	NULL,
-	NULL,
-	NULL,
 	NULL
 };
 
-__initfunc(static void
-etherh_initdev(ecard_t *ec, struct device *dev))
+static void etherh_initdev (ecard_t *ec, struct device *dev)
 {
 	ecard_claim (ec);
 	
@@ -492,27 +492,27 @@ etherh_initdev(ecard_t *ec, struct device *dev))
 	}
 	ec->ops = &etherh_ops;
 
-	etherh_addr(dev->dev_addr, ec);
+	etherh_addr (dev->dev_addr, ec);
 }
 
 #ifndef MODULE
-__initfunc(int
-etherh_probe(struct device *dev))
+int
+etherh_probe(struct device *dev)
 {
 	if (!dev)
 		return ENODEV;
 
-	if (!dev->base_addr || dev->base_addr == 0xffe0) {
-		struct expansion_card *ec;
+	ecard_startfind ();
 
-		ecard_startfind();
+	if (!dev->base_addr) {
+		struct expansion_card *ec;
 
 		if ((ec = ecard_find (0, etherh_cids)) == NULL)
 			return ENODEV;
 
-		etherh_initdev(ec, dev);
+		etherh_initdev (ec, dev);
 	}
-	return etherh_probe1(dev);
+	return etherh_probe1 (dev);
 }
 #endif
 
@@ -529,10 +529,12 @@ static int
 init_all_cards(void)
 {
 	struct device *dev = NULL;
+	struct expansion_card *boguscards[MAX_ETHERH_CARDS];
 	int i, found = 0;
 
 	for (i = 0; i < MAX_ETHERH_CARDS; i++) {
 		my_ethers[i] = NULL;
+		boguscards[i] = NULL;
 		ec[i] = NULL;
 		strcpy (ethernames[i], "        ");
 	}
@@ -569,7 +571,7 @@ init_all_cards(void)
 		if (register_netdev(dev) != 0) {
 			printk (KERN_WARNING "No etherh card found at %08lX\n", dev->base_addr);
 			if (ec[i]) {
-				ecard_release(ec[i]);
+				boguscards[i] = ec[i];
 				ec[i] = NULL;
 			}
 			continue;
@@ -580,6 +582,12 @@ init_all_cards(void)
 
 	if (dev)
 		kfree (dev);
+
+	for (i = 0; i < MAX_ETHERH_CARDS; i++)
+		if (boguscards[i]) {
+			boguscards[i]->ops = NULL;
+			ecard_release (boguscards[i]);
+		}
 
 	return found ? 0 : -ENODEV;
 }

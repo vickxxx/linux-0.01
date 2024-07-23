@@ -78,7 +78,7 @@ long time_reftime = 0;		/* time at last adjustment (s) */
 long time_adjust = 0;
 long time_adjust_step = 0;
 
-unsigned long global_event = 0;
+unsigned long event = 0;
 
 extern int do_setitimer(int, struct itimerval *, struct itimerval *);
 unsigned int * prof_buffer = NULL;
@@ -322,7 +322,7 @@ out_no_target:
 	int this_cpu = smp_processor_id();
 	struct task_struct *tsk;
 
-	tsk = current;
+	tsk = cpu_curr(this_cpu);
 	if (preemption_goodness(tsk, p, this_cpu) > 0)
 		tsk->need_resched = 1;
 #endif
@@ -498,19 +498,17 @@ static struct timer_vec * const tvecs[] = {
 	(struct timer_vec *)&tv1, &tv2, &tv3, &tv4, &tv5
 };
 
-static struct timer_list ** run_timer_list_running;
-
 #define NOOF_TVECS (sizeof(tvecs) / sizeof(tvecs[0]))
 
 static unsigned long timer_jiffies = 0;
 
 static inline void insert_timer(struct timer_list *timer,
-				struct timer_list **vec)
+				struct timer_list **vec, int idx)
 {
-	if ((timer->next = *vec))
-		(*vec)->prev = timer;
-	*vec = timer;
-	timer->prev = (struct timer_list *)vec;
+	if ((timer->next = vec[idx]))
+		vec[idx]->prev = timer;
+	vec[idx] = timer;
+	timer->prev = (struct timer_list *)&vec[idx];
 }
 
 static inline void internal_add_timer(struct timer_list *timer)
@@ -520,36 +518,31 @@ static inline void internal_add_timer(struct timer_list *timer)
 	 */
 	unsigned long expires = timer->expires;
 	unsigned long idx = expires - timer_jiffies;
-	struct timer_list ** vec;
 
-	if (run_timer_list_running)
-		vec = run_timer_list_running;
-	else if (idx < TVR_SIZE) {
+	if (idx < TVR_SIZE) {
 		int i = expires & TVR_MASK;
-		vec = tv1.vec + i;
+		insert_timer(timer, tv1.vec, i);
 	} else if (idx < 1 << (TVR_BITS + TVN_BITS)) {
 		int i = (expires >> TVR_BITS) & TVN_MASK;
-		vec = tv2.vec + i;
+		insert_timer(timer, tv2.vec, i);
 	} else if (idx < 1 << (TVR_BITS + 2 * TVN_BITS)) {
 		int i = (expires >> (TVR_BITS + TVN_BITS)) & TVN_MASK;
-		vec = tv3.vec + i;
+		insert_timer(timer, tv3.vec, i);
 	} else if (idx < 1 << (TVR_BITS + 3 * TVN_BITS)) {
 		int i = (expires >> (TVR_BITS + 2 * TVN_BITS)) & TVN_MASK;
-		vec = tv4.vec + i;
+		insert_timer(timer, tv4.vec, i);
 	} else if ((signed long) idx < 0) {
 		/* can happen if you add a timer with expires == jiffies,
 		 * or you set a timer to go off in the past
 		 */
-		vec = tv1.vec + tv1.index;
+		insert_timer(timer, tv1.vec, tv1.index);
 	} else if (idx <= 0xffffffffUL) {
 		int i = (expires >> (TVR_BITS + 3 * TVN_BITS)) & TVN_MASK;
-		vec = tv5.vec + i;
+		insert_timer(timer, tv5.vec, i);
 	} else {
 		/* Can only get here on architectures with 64-bit jiffies */
 		timer->next = timer->prev = timer;
-		return;
 	}
-	insert_timer(timer, vec);
 }
 
 spinlock_t timerlist_lock = SPIN_LOCK_UNLOCKED;
@@ -696,7 +689,6 @@ asmlinkage void schedule(void)
 	struct task_struct *prev, *next, *p;
 	int this_cpu, c;
 
-	sti();
 	if (tq_scheduler)
 		goto handle_tq_scheduler;
 tq_scheduler_back:
@@ -870,11 +862,7 @@ move_rr_last:
 
 scheduling_in_interrupt:
 	printk("Scheduling in interrupt\n");
-#ifdef CONFIG_ARCH_S390
-	asm volatile ( ".word 0\n" );
-#else
 	*(int *)0 = 0;
-#endif /* CONFIG_ARCH_S390 */
 	return;
 }
 
@@ -890,9 +878,8 @@ rwlock_t waitqueue_lock = RW_LOCK_UNLOCKED;
  */
 void __wake_up(struct wait_queue **q, unsigned int mode)
 {
-	struct task_struct *p, *best_exclusive;
+	struct task_struct *p;
 	struct wait_queue *head, *next;
-	unsigned int do_exclusive;
 
         if (!q)
 		goto out;
@@ -907,23 +894,22 @@ void __wake_up(struct wait_queue **q, unsigned int mode)
 	if (!next)
 		goto out_unlock;
 
-	best_exclusive = 0;
-	do_exclusive = mode & TASK_EXCLUSIVE;
 	while (next != head) {
 		p = next->task;
 		next = next->next;
 		if (p->state & mode) {
-			if (do_exclusive && p->task_exclusive) {
-				if (best_exclusive == NULL)
-					best_exclusive = p;
-			}
-			else {
+			/*
+			 * We can drop the read-lock early if this
+			 * is the only/last process.
+			 */
+			if (next == head) {
+				read_unlock(&waitqueue_lock);
 				wake_up_process(p);
+				goto out;
 			}
+			wake_up_process(p);
 		}
 	}
-	if (best_exclusive)
-		wake_up_process(best_exclusive);
 out_unlock:
 	read_unlock(&waitqueue_lock);
 out:
@@ -1138,14 +1124,13 @@ static inline void run_timer_list(void)
 {
 	spin_lock_irq(&timerlist_lock);
 	while ((long)(jiffies - timer_jiffies) >= 0) {
-		struct timer_list *timer, * queued = NULL;
+		struct timer_list *timer;
 		if (!tv1.index) {
 			int n = 1;
 			do {
 				cascade_timers(tvecs[n]);
 			} while (tvecs[n]->index == 1 && ++n < NOOF_TVECS);
 		}
-		run_timer_list_running = &queued;
 		while ((timer = tv1.vec[tv1.index])) {
 			void (*fn)(unsigned long) = timer->function;
 			unsigned long data = timer->data;
@@ -1155,15 +1140,8 @@ static inline void run_timer_list(void)
 			fn(data);
 			spin_lock_irq(&timerlist_lock);
 		}
-		run_timer_list_running = NULL;
 		++timer_jiffies; 
 		tv1.index = (tv1.index + 1) & TVR_MASK;
-		while (queued)
-		{
-			timer = queued;
-			queued = queued->next;
-			internal_add_timer(timer);
-		}			
 	}
 	spin_unlock_irq(&timerlist_lock);
 }
@@ -1746,8 +1724,8 @@ static int setscheduler(pid_t pid, int policy,
 	/*
 	 * We play safe to avoid deadlocks.
 	 */
-	read_lock_irq(&tasklist_lock);
-	spin_lock(&runqueue_lock);
+	spin_lock_irq(&runqueue_lock);
+	read_lock(&tasklist_lock);
 
 	p = find_process_by_pid(pid);
 
@@ -1791,8 +1769,8 @@ static int setscheduler(pid_t pid, int policy,
 	current->need_resched = 1;
 
 out_unlock:
-	spin_unlock(&runqueue_lock);
-	read_unlock_irq(&tasklist_lock);
+	read_unlock(&tasklist_lock);
+	spin_unlock_irq(&runqueue_lock);
 
 out_nounlock:
 	return retval;
@@ -1933,21 +1911,13 @@ asmlinkage int sys_nanosleep(struct timespec *rqtp, struct timespec *rmtp)
 	if (t.tv_sec == 0 && t.tv_nsec <= 2000000L &&
 	    current->policy != SCHED_OTHER)
 	{
-		unsigned long delay;
-		
 		/*
 		 * Short delay requests up to 2 ms will be handled with
 		 * high precision by a busy wait for all real-time processes.
 		 *
 		 * Its important on SMP not to do this holding locks.
 		 */
-		 
-		delay=(t.tv_nsec + 999) / 1000;
-		
-		if(delay>10000)
-			mdelay((delay+999)/1000);
-		else
-			udelay(delay);
+		udelay((t.tv_nsec + 999) / 1000);
 		return 0;
 	}
 
@@ -2055,34 +2025,6 @@ void show_state(void)
 	for_each_task(p)
 		show_task((p->tarray_ptr - &task[0]),p);
 	read_unlock(&tasklist_lock);
-}
-
-/*
- *      Put all the gunge required to become a kernel thread without
- *      attached user resources in one place where it belongs.
- */
-
-void daemonize(void)
-{
-	struct fs_struct *fs;
-
-	/*
-	 * If we were started as result of loading a module, close all of the
-	 * user space pages.  We don't need them, and if we didn't close them
-	 * they would be locked into memory.
-	 */
-	exit_mm(current);
-
-	current->session = 1;
-	current->pgrp = 1;
-
-	/* Become as one with the init task */
-
-	exit_fs(current);	/* current->fs->count--; */
-	fs = init_task.fs;
-	current->fs = fs;
-	atomic_inc(&fs->count);
-
 }
 
 void __init init_idle(void)

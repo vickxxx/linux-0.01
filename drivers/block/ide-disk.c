@@ -88,63 +88,46 @@ static inline void idedisk_output_data (ide_drive_t *drive, void *buffer, unsign
  */
 static int lba_capacity_is_ok (struct hd_driveid *id)
 {
-	unsigned long lba_sects, chs_sects, head, tail;
+	unsigned long lba_sects   = id->lba_capacity;
+	unsigned long chs_sects   = id->cyls * id->heads * id->sectors;
+	unsigned long _10_percent = chs_sects / 10;
 
 	/*
-	 * The ATA spec tells large drives to return
-	 * C/H/S = 16383/16/63 independent of their size.
-	 * Some drives can be jumpered to use 15 heads instead of 16.
-	 * Some drives can be jumpered to use 4092 cyls instead of 16383.
+	 * very large drives (8GB+) may lie about the number of cylinders
+	 * This is a split test for drives 8 Gig and Bigger only.
 	 */
-	if ((id->cyls == 16383
-	     || (id->cyls == 4092 && id->cur_cyls == 16383)) &&
-	    id->sectors == 63 &&
-	    (id->heads == 15 || id->heads == 16) &&
-	    id->lba_capacity >= 16383*63*id->heads)
-		return 1;
-
-	lba_sects   = id->lba_capacity;
-	chs_sects   = id->cyls * id->heads * id->sectors;
-
+	if ((id->lba_capacity >= 16514064) && (id->cyls == 0x3fff) &&
+	    (id->heads == 16) && (id->sectors == 63)) {
+		id->cyls = lba_sects / (16 * 63); /* correct cyls */
+		return 1;	/* lba_capacity is our only option */
+	}
 	/* perform a rough sanity check on lba_sects:  within 10% is "okay" */
-	if ((lba_sects - chs_sects) < chs_sects/10)
-		return 1;
-
+	if ((lba_sects - chs_sects) < _10_percent) {
+		return 1;	/* lba_capacity is good */
+	}
 	/* some drives have the word order reversed */
-	head = ((lba_sects >> 16) & 0xffff);
-	tail = (lba_sects & 0xffff);
-	lba_sects = (head | (tail << 16));
-	if ((lba_sects - chs_sects) < chs_sects/10) {
-		id->lba_capacity = lba_sects;
+	lba_sects = (lba_sects << 16) | (lba_sects >> 16);
+	if ((lba_sects - chs_sects) < _10_percent) {
+		id->lba_capacity = lba_sects;	/* fix it */
 		return 1;	/* lba_capacity is (now) good */
 	}
-
-	return 0;	/* lba_capacity value may be bad */
+	return 0;	/* lba_capacity value is bad */
 }
 
 /*
  * read_intr() is the handler for disk read/multread interrupts
  */
-static ide_startstop_t read_intr (ide_drive_t *drive)
+static void read_intr (ide_drive_t *drive)
 {
 	byte stat;
 	int i;
 	unsigned int msect, nsect;
 	struct request *rq;
-#if 0
+
 	if (!OK_STAT(stat=GET_STAT(),DATA_READY,BAD_R_STAT)) {
-		return ide_error(drive, "read_intr", stat);
+		ide_error(drive, "read_intr", stat);
+		return;
 	}
-#else	/* new way for dealing with premature shared PCI interrupts */
-	if (!OK_STAT(stat=GET_STAT(),DATA_READY,BAD_R_STAT)) {
-		if (stat & (ERR_STAT|DRQ_STAT)) {
-			return ide_error(drive, "read_intr", stat);
-		}
-		/* no data yet, so wait for another interrupt */
-		ide_set_handler(drive, &read_intr, WAIT_CMD, NULL);
-		return ide_started;
-	}
-#endif
 	msect = drive->mult_count;
 	
 read_next:
@@ -155,6 +138,12 @@ read_next:
 		msect -= nsect;
 	} else
 		nsect = 1;
+	/*
+	 * PIO input can take longish times, so we drop the spinlock.
+	 * On SMP, bad things might happen if syscall level code adds
+	 * a new request while we do this PIO, so we just freeze all
+	 * request queue handling while doing the PIO. FIXME
+	 */
 	idedisk_input_data(drive, rq->buffer, nsect * SECTOR_WORDS);
 #ifdef DEBUG
 	printk("%s:  read: sectors(%ld-%ld), buffer=0x%08lx, remaining=%ld\n",
@@ -165,30 +154,27 @@ read_next:
 	rq->buffer += nsect<<9;
 	rq->errors = 0;
 	i = (rq->nr_sectors -= nsect);
-	if (((long)(rq->current_nr_sectors -= nsect)) <= 0)
+	if ((rq->current_nr_sectors -= nsect) <= 0)
 		ide_end_request(1, HWGROUP(drive));
 	if (i > 0) {
 		if (msect)
 			goto read_next;
-		ide_set_handler (drive, &read_intr, WAIT_CMD, NULL);
-		return ide_started;
+		ide_set_handler (drive, &read_intr, WAIT_CMD);
 	}
-	return ide_stopped;
 }
 
 /*
  * write_intr() is the handler for disk write interrupts
  */
-static ide_startstop_t write_intr (ide_drive_t *drive)
+static void write_intr (ide_drive_t *drive)
 {
 	byte stat;
 	int i;
 	ide_hwgroup_t *hwgroup = HWGROUP(drive);
 	struct request *rq = hwgroup->rq;
+	int error = 0;
 
-	if (!OK_STAT(stat=GET_STAT(),DRIVE_READY,drive->bad_wstat)) {
-		printk("%s: write_intr error1: nr_sectors=%ld, stat=0x%02x\n", drive->name, rq->nr_sectors, stat);
-	} else {
+	if (OK_STAT(stat=GET_STAT(),DRIVE_READY,drive->bad_wstat)) {
 #ifdef DEBUG
 		printk("%s: write: sector %ld, buffer=0x%08lx, remaining=%ld\n",
 			drive->name, rq->sector, (unsigned long) rq->buffer,
@@ -200,44 +186,30 @@ static ide_startstop_t write_intr (ide_drive_t *drive)
 			rq->errors = 0;
 			i = --rq->nr_sectors;
 			--rq->current_nr_sectors;
-			if (((long)rq->current_nr_sectors) <= 0)
+			if (rq->current_nr_sectors <= 0)
 				ide_end_request(1, hwgroup);
 			if (i > 0) {
 				idedisk_output_data (drive, rq->buffer, SECTOR_WORDS);
-				ide_set_handler (drive, &write_intr, WAIT_CMD, NULL);
-				return ide_started;
+				ide_set_handler (drive, &write_intr, WAIT_CMD);
 			}
-			return ide_stopped;
+			goto out;
 		}
-		return ide_stopped;     /* the original code did this here (?) */ 
-	}
-	return ide_error(drive, "write_intr", stat);
+	} else
+		error = 1;
+out:
+	if (error)
+		ide_error(drive, "write_intr", stat);
 }
 
 /*
  * ide_multwrite() transfers a block of up to mcount sectors of data
  * to a drive as part of a disk multiple-sector write operation.
- *
- * Returns 0 if successful;  returns 1 if request had to be aborted due to corrupted buffer list.
  */
-int ide_multwrite (ide_drive_t *drive, unsigned int mcount)
+void ide_multwrite (ide_drive_t *drive, unsigned int mcount)
 {
-	ide_hwgroup_t	*hwgroup= HWGROUP(drive);
-	
-	/*
-	 *	This may look a bit odd, but remember wrq is a copy of the 
-	 *	request not the original. The pointers are real however so the
-	 *	bh's are not copies. Remember that or bad stuff will happen
-	 *
-	 *	At the point we are called the drive has asked us for the
-	 *	data, and its our job to feed it, walking across bh boundaries
-	 *	if need be.
-	 */
-	 
-	struct request *rq = &hwgroup->wrq;
+	struct request *rq = &HWGROUP(drive)->wrq;
 
 	do {
-		unsigned long flags;
 		unsigned int nsect = rq->current_nr_sectors;
 		if (nsect > mcount)
 			nsect = mcount;
@@ -249,95 +221,61 @@ int ide_multwrite (ide_drive_t *drive, unsigned int mcount)
 			drive->name, rq->sector, (unsigned long) rq->buffer,
 			nsect, rq->nr_sectors - nsect);
 #endif
-		spin_lock_irqsave(&io_request_lock, flags);	/* Is this really necessary? */
-		
-		/*
-		 *	Completed ?
-		 */
-		 
-		if (((long)(rq->nr_sectors -= nsect)) <= 0)
-		{
-			spin_unlock_irqrestore(&io_request_lock, flags);
+		if ((rq->nr_sectors -= nsect) <= 0)
 			break;
-		}
-		
-		/*
-		 *	Take off the sectors transferred
-		 */
-		 
 		if ((rq->current_nr_sectors -= nsect) == 0) {
-			/*
-			 *	If there are no sectors left then move on to
-			 *	the next buffer.
-			 */
 			if ((rq->bh = rq->bh->b_reqnext) != NULL) {
 				rq->current_nr_sectors = rq->bh->b_size>>9;
 				rq->buffer             = rq->bh->b_data;
 			} else {
-				/*
-				 *	Excuse me boss.. nr_sectors doesnt tally
-				 *	deep crap
-				 */
-				spin_unlock_irqrestore(&io_request_lock, flags);
-				printk("%s: buffer list corrupted (%ld, %ld, %d)\n", drive->name,
-					rq->current_nr_sectors, rq->nr_sectors, nsect);
-				ide_end_request(0, hwgroup);
-				return 1;
+				panic("%s: buffer list corrupted\n", drive->name);
+				break;
 			}
 		} else {
-			/* Fix the pointer.. we ate data */
 			rq->buffer += nsect << 9;
 		}
-		spin_unlock_irqrestore(&io_request_lock, flags);
 	} while (mcount);
-	return 0;
 }
 
 /*
  * multwrite_intr() is the handler for disk multwrite interrupts
  */
-static ide_startstop_t multwrite_intr (ide_drive_t *drive)
+static void multwrite_intr (ide_drive_t *drive)
 {
 	byte stat;
 	int i;
 	ide_hwgroup_t *hwgroup = HWGROUP(drive);
 	struct request *rq = &hwgroup->wrq;
+	int error = 0;
 
 	if (OK_STAT(stat=GET_STAT(),DRIVE_READY,drive->bad_wstat)) {
 		if (stat & DRQ_STAT) {
-			/*
-			 *	The drive wants data. Remember rq is the copy
-			 *	of the request
-			 */
 			if (rq->nr_sectors) {
-				if (ide_multwrite(drive, drive->mult_count))
-					return ide_stopped;
-				ide_set_handler (drive, &multwrite_intr, WAIT_CMD, NULL);
-				return ide_started;
+				ide_multwrite(drive, drive->mult_count);
+				ide_set_handler (drive, &multwrite_intr, WAIT_CMD);
+				goto out;
 			}
 		} else {
-			/*
-			 *	If the copy has all the blocks completed then
-			 *	we can end the original request.
-			 */
 			if (!rq->nr_sectors) {	/* all done? */
 				rq = hwgroup->rq;
 				for (i = rq->nr_sectors; i > 0;){
 					i -= rq->current_nr_sectors;
 					ide_end_request(1, hwgroup);
 				}
-				return ide_stopped;
+				goto out;
 			}
 		}
-		return ide_stopped;     /* the original code did this here (?) */ 
-	}
-	return ide_error(drive, "multwrite_intr", stat);
+	} else
+		error = 1;
+out:
+	if (error)
+		ide_error(drive, "multwrite_intr", stat);
 }
 
 /*
  * set_multmode_intr() is invoked on completion of a WIN_SETMULT cmd.
  */
-static ide_startstop_t set_multmode_intr (ide_drive_t *drive)
+static void set_multmode_intr (ide_drive_t *drive)
 {
 	byte stat = GET_STAT();
 
@@ -348,31 +286,28 @@ static ide_startstop_t set_multmode_intr (ide_drive_t *drive)
 		drive->special.b.recalibrate = 1;
 		(void) ide_dump_status(drive, "set_multmode", stat);
 	}
-	return ide_stopped;
 }
 
 /*
  * set_geometry_intr() is invoked on completion of a WIN_SPECIFY cmd.
  */
-static ide_startstop_t set_geometry_intr (ide_drive_t *drive)
+static void set_geometry_intr (ide_drive_t *drive)
 {
 	byte stat = GET_STAT();
 
 	if (!OK_STAT(stat,READY_STAT,BAD_STAT))
-		return ide_error(drive, "set_geometry_intr", stat);
-	return ide_stopped;
+		ide_error(drive, "set_geometry_intr", stat);
 }
 
 /*
  * recal_intr() is invoked on completion of a WIN_RESTORE (recalibrate) cmd.
  */
-static ide_startstop_t recal_intr (ide_drive_t *drive)
+static void recal_intr (ide_drive_t *drive)
 {
 	byte stat = GET_STAT();
 
 	if (!OK_STAT(stat,READY_STAT,BAD_STAT))
-		return ide_error(drive, "recal_intr", stat);
-	return ide_stopped;
+		ide_error(drive, "recal_intr", stat);
 }
 
 /*
@@ -380,7 +315,7 @@ static ide_startstop_t recal_intr (ide_drive_t *drive)
  * using LBA if supported, or CHS otherwise, to address sectors.
  * It also takes care of issuing special DRIVE_CMDs.
  */
-static ide_startstop_t do_rw_disk (ide_drive_t *drive, struct request *rq, unsigned long block)
+static void do_rw_disk (ide_drive_t *drive, struct request *rq, unsigned long block)
 {
 #ifdef CONFIG_BLK_DEV_PDC4030
 	ide_hwif_t *hwif = HWIF(drive);
@@ -426,63 +361,45 @@ static ide_startstop_t do_rw_disk (ide_drive_t *drive, struct request *rq, unsig
 	}
 #ifdef CONFIG_BLK_DEV_PDC4030
 	if (use_pdc4030_io) {
-		extern ide_startstop_t do_pdc4030_io(ide_drive_t *, struct request *);
-		return do_pdc4030_io (drive, rq);
+		extern void do_pdc4030_io(ide_drive_t *, struct request *);
+		do_pdc4030_io (drive, rq);
+		return;
 	}
 #endif /* CONFIG_BLK_DEV_PDC4030 */
 	if (rq->cmd == READ) {
 #ifdef CONFIG_BLK_DEV_IDEDMA
 		if (drive->using_dma && !(HWIF(drive)->dmaproc(ide_dma_read, drive)))
-			return ide_started;
+			return;
 #endif /* CONFIG_BLK_DEV_IDEDMA */
-		ide_set_handler(drive, &read_intr, WAIT_CMD, NULL);
+		ide_set_handler(drive, &read_intr, WAIT_CMD);
 		OUT_BYTE(drive->mult_count ? WIN_MULTREAD : WIN_READ, IDE_COMMAND_REG);
-		return ide_started;
+		return;
 	}
 	if (rq->cmd == WRITE) {
-		ide_startstop_t startstop;
 #ifdef CONFIG_BLK_DEV_IDEDMA
 		if (drive->using_dma && !(HWIF(drive)->dmaproc(ide_dma_write, drive)))
-			return ide_started;
+			return;
 #endif /* CONFIG_BLK_DEV_IDEDMA */
 		OUT_BYTE(drive->mult_count ? WIN_MULTWRITE : WIN_WRITE, IDE_COMMAND_REG);
-		if (ide_wait_stat(&startstop, drive, DATA_READY, drive->bad_wstat, WAIT_DRQ)) {
+		if (ide_wait_stat(drive, DATA_READY, drive->bad_wstat, WAIT_DRQ)) {
 			printk(KERN_ERR "%s: no DRQ after issuing %s\n", drive->name,
 				drive->mult_count ? "MULTWRITE" : "WRITE");
-			return startstop;
+			return;
 		}
 		if (!drive->unmask)
 			__cli();	/* local CPU only */
 		if (drive->mult_count) {
-			ide_hwgroup_t *hwgroup = HWGROUP(drive);
-			/*
-			 * Ugh.. this part looks ugly because we MUST set up
-			 * the interrupt handler before outputting the first block
-			 * of data to be written.  If we hit an error (corrupted buffer list)
-			 * in ide_multwrite(), then we need to remove the handler/timer
-			 * before returning.  Fortunately, this NEVER happens (right?).
-			 *
-			 * Except when you get an error it seems...
-			 */
-			hwgroup->wrq = *rq; /* scratchpad */
-			ide_set_handler (drive, &multwrite_intr, WAIT_CMD, NULL);
-			if (ide_multwrite(drive, drive->mult_count)) {
-				unsigned long flags;
-				spin_lock_irqsave(&io_request_lock, flags);
-				hwgroup->handler = NULL;
-				del_timer(&hwgroup->timer);
-				spin_unlock_irqrestore(&io_request_lock, flags);
-				return ide_stopped;
-			}
+			HWGROUP(drive)->wrq = *rq; /* scratchpad */
+			ide_set_handler (drive, &multwrite_intr, WAIT_CMD);
+			ide_multwrite(drive, drive->mult_count);
 		} else {
-			ide_set_handler (drive, &write_intr, WAIT_CMD, NULL);
+			ide_set_handler (drive, &write_intr, WAIT_CMD);
 			idedisk_output_data(drive, rq->buffer, SECTOR_WORDS);
 		}
-		return ide_started;
+		return;
 	}
 	printk(KERN_ERR "%s: bad command: %d\n", drive->name, rq->cmd);
 	ide_end_request(0, HWGROUP(drive));
-	return ide_stopped;
 }
 
 static int idedisk_open (struct inode *inode, struct file *filp, ide_drive_t *drive)
@@ -529,6 +446,7 @@ static unsigned long idedisk_capacity (ide_drive_t  *drive)
 	/* Determine capacity, and use LBA if the drive properly supports it */
 	if (id != NULL && (id->capability & 2) && lba_capacity_is_ok(id)) {
 		if (id->lba_capacity >= capacity) {
+			drive->cyl = id->lba_capacity / (drive->head * drive->sect);
 			capacity = id->lba_capacity;
 			drive->select.b.lba = 1;
 		}
@@ -536,7 +454,7 @@ static unsigned long idedisk_capacity (ide_drive_t  *drive)
 	return (capacity - drive->sect0);
 }
 
-static ide_startstop_t idedisk_special (ide_drive_t *drive)
+static void idedisk_special (ide_drive_t *drive)
 {
 	special_t *s = &drive->special;
 
@@ -562,9 +480,7 @@ static ide_startstop_t idedisk_special (ide_drive_t *drive)
 		int special = s->all;
 		s->all = 0;
 		printk(KERN_ERR "%s: bad special flag: 0x%02x\n", drive->name, special);
-		return ide_stopped;
 	}
-	return IS_PDC4030_DRIVE ? ide_stopped : ide_started;
 }
 
 static void idedisk_pre_reset (ide_drive_t *drive)
@@ -574,7 +490,7 @@ static void idedisk_pre_reset (ide_drive_t *drive)
 	drive->special.b.recalibrate  = 1;
 	if (OK_TO_RESET_CONTROLLER)
 		drive->mult_count = 0;
-	if (!drive->keep_settings && !drive->using_dma)
+	if (!drive->keep_settings)
 		drive->mult_req = 0;
 	if (drive->mult_req != drive->mult_count)
 		drive->special.b.set_multmode = 1;
@@ -686,7 +602,7 @@ static int set_nowerr(ide_drive_t *drive, int arg)
 		return -EBUSY;
 	drive->nowerr = arg;
 	drive->bad_wstat = arg ? BAD_R_STAT : BAD_W_STAT;
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&HWGROUP(drive)->spinlock, flags);
 	return 0;
 }
 
@@ -802,9 +718,12 @@ static void idedisk_setup (ide_drive_t *drive)
 	/* Use physical geometry if what we have still makes no sense */
 	if ((!drive->head || drive->head > 16) &&
 	    id->heads && id->heads <= 16) {
-		drive->cyl  = id->cyls;
-		drive->head = id->heads;
-		drive->sect = id->sectors;
+		if ((id->lba_capacity > 16514064) || (id->cyls == 0x3fff)) {
+			id->cyls = ((int)(id->lba_capacity/(id->heads * id->sectors)));
+		}
+		drive->cyl  = id->cur_cyls    = id->cyls;
+		drive->head = id->cur_heads   = id->heads;
+		drive->sect = id->cur_sectors = id->sectors;
 	}
 
 	/* calculate drive capacity, and select LBA if possible */
@@ -814,19 +733,21 @@ static void idedisk_setup (ide_drive_t *drive)
 	 * if possible, give fdisk access to more of the drive,
 	 * by correcting bios_cyls:
 	 */
-	if (!drive->forced_geom &&
-	    capacity > drive->bios_cyl * drive->bios_sect * drive->bios_head) {
-		unsigned long cylsize;
-		cylsize = drive->bios_sect * drive->bios_head;
-		if (cylsize == 0 || capacity/cylsize > 65535) {
-			drive->bios_sect = 63;
-			drive->bios_head = 255;
-			cylsize = 63*255;
-		}
-		if (capacity/cylsize > 65535)
-			drive->bios_cyl = 65535;
-		else
-			drive->bios_cyl = capacity/cylsize;
+	if ((capacity >= (drive->bios_cyl * drive->bios_sect * drive->bios_head)) &&
+	    (!drive->forced_geom) && drive->bios_sect && drive->bios_head) {
+		drive->bios_cyl = (capacity / drive->bios_sect) / drive->bios_head;
+#ifdef DEBUG
+		printk("Fixing Geometry :: CHS=%d/%d/%d to CHS=%d/%d/%d\n",
+			drive->id->cur_cyls,
+			drive->id->cur_heads,
+			drive->id->cur_sectors,
+			drive->bios_cyl,
+			drive->bios_head,
+			drive->bios_sect);
+#endif
+		drive->id->cur_cyls    = drive->bios_cyl;
+		drive->id->cur_heads   = drive->bios_head;
+		drive->id->cur_sectors = drive->bios_sect;
 	}
 
 #if 0	/* done instead for entire identify block in arch/ide.h stuff */
@@ -841,7 +762,7 @@ static void idedisk_setup (ide_drive_t *drive)
 	if (drive->using_dma) {
 		if ((id->field_valid & 4) &&
 		    (id->dma_ultra & (id->dma_ultra >> 8) & 7)) {
-			printk(", UDMA");       /* UDMA BIOS-enabled! */
+			printk(", UDMA");	/* UDMA BIOS-enabled! */
 		} else if (id->field_valid & 4) {
 			printk(", (U)DMA");	/* Can be BIOS-enabled! */
 		} else {
@@ -849,6 +770,19 @@ static void idedisk_setup (ide_drive_t *drive)
 		}
 	}
 	printk("\n");
+
+	if (drive->select.b.lba) {
+		if (*(int *)&id->cur_capacity0 < id->lba_capacity) {
+#ifdef DEBUG
+			printk("     CurSects=%d, LBASects=%d, ",
+				*(int *)&id->cur_capacity0, id->lba_capacity);
+#endif
+			*(int *)&id->cur_capacity0 = id->lba_capacity;
+#ifdef DEBUG
+			printk( "Fixed CurSects=%d\n", *(int *)&id->cur_capacity0);
+#endif
+		}
+	}
 
 	drive->mult_count = 0;
 	if (id->max_multsect) {

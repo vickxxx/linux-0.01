@@ -11,7 +11,6 @@
 #include <linux/unistd.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 
 #include <asm/uaccess.h>
 
@@ -29,7 +28,7 @@
 
 static kmem_cache_t *signal_queue_cachep;
 
-atomic_t nr_queued_signals;
+int nr_queued_signals;
 int max_queued_signals = 1024;
 
 void __init signals_init(void)
@@ -44,8 +43,6 @@ void __init signals_init(void)
 
 /*
  * Flush all pending signals for a task.
- * Callers must hold the sigmask_lock so that we do not race
- * with dequeue_signal or send_sig_info.
  */
 
 void
@@ -62,7 +59,7 @@ flush_signals(struct task_struct *t)
 	while (q) {
 		n = q->next;
 		kmem_cache_free(signal_queue_cachep, q);
-		atomic_dec(&nr_queued_signals);
+		nr_queued_signals--;
 		q = n;
 	}
 }
@@ -159,7 +156,7 @@ printk("SIG dequeue (%s:%d): %d ", current->comm, current->pid,
 					current->sigqueue_tail = pp;
 				*info = q->info;
 				kmem_cache_free(signal_queue_cachep,q);
-				atomic_dec(&nr_queued_signals);
+				nr_queued_signals--;
 				
 				/* then see if this signal is still pending. */
 				q = *pp;
@@ -272,16 +269,12 @@ printk("SIG queue (%s:%d): %d ", t->comm, t->pid, sig);
 		goto out_nolock;
 
 	/* The null signal is a permissions and process existance probe.
-	   No signal is actually delivered.  Same goes for zombies.
-	   We have to grab the spinlock now so that we do not race
-	   with flush_signals. */
+	   No signal is actually delivered.  Same goes for zombies. */
 	ret = 0;
-	spin_lock_irqsave(&t->sigmask_lock, flags);
-	if (!sig || !t->sig) {
-		spin_unlock_irqrestore(&t->sigmask_lock, flags);
+	if (!sig || !t->sig)
 		goto out_nolock;
-	}
 
+	spin_lock_irqsave(&t->sigmask_lock, flags);
 	switch (sig) {
 	case SIGKILL: case SIGCONT:
 		/* Wake up the process if stopped.  */
@@ -329,13 +322,13 @@ printk("SIG queue (%s:%d): %d ", t->comm, t->pid, sig);
 
 		struct signal_queue *q = 0;
 
-		if (atomic_read(&nr_queued_signals) < max_queued_signals) {
+		if (nr_queued_signals < max_queued_signals) {
 			q = (struct signal_queue *)
-			    kmem_cache_alloc(signal_queue_cachep, GFP_ATOMIC);
+			    kmem_cache_alloc(signal_queue_cachep, GFP_KERNEL);
 		}
 		
 		if (q) {
-			atomic_inc(&nr_queued_signals);
+			nr_queued_signals++;
 			q->next = NULL;
 			*t->sigqueue_tail = q;
 			t->sigqueue_tail = &q->next;
@@ -424,7 +417,6 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	if (t->sig->action[sig-1].sa.sa_handler == SIG_IGN)
 		t->sig->action[sig-1].sa.sa_handler = SIG_DFL;
 	sigdelset(&t->blocked, sig);
-	recalc_sigpending(t);
 	spin_unlock_irqrestore(&t->sigmask_lock, flags);
 
 	return send_sig_info(sig, info, t);
@@ -680,8 +672,7 @@ sys_rt_sigprocmask(int how, sigset_t *set, sigset_t *oset, size_t sigsetsize)
 			break;
 		}
 
-		if (!error)
-		    current->blocked = new_set;
+		current->blocked = new_set;
 		recalc_sigpending(current);
 		spin_unlock_irq(&current->sigmask_lock);
 		if (error)
@@ -740,11 +731,11 @@ sys_rt_sigtimedwait(const sigset_t *uthese, siginfo_t *uinfo,
 
 	if (copy_from_user(&these, uthese, sizeof(these)))
 		return -EFAULT;
-	/* Invert the set of allowed signals to get those we
-	   want to block.  */
-
-	sigdelsetmask (&these, sigmask(SIGKILL)|sigmask(SIGSTOP));
-	signotset(&these);
+	else {
+		/* Invert the set of allowed signals to get those we
+		   want to block.  */
+		signotset(&these);
+	}
 
 	if (uts) {
 		if (copy_from_user(&ts, uts, sizeof(ts)))
@@ -799,8 +790,6 @@ sys_kill(int pid, int sig)
 {
 	struct siginfo info;
 
-	memset(&info, 0, sizeof(info));
-	
 	info.si_signo = sig;
 	info.si_errno = 0;
 	info.si_code = SI_USER;
@@ -820,7 +809,7 @@ sys_rt_sigqueueinfo(int pid, int sig, siginfo_t *uinfo)
 
 	/* Not even root can pretend to send signals from the kernel.
 	   Nor can they impersonate a kill(), which adds source info.  */
-	if (SI_FROMKERNEL(&info))
+	if (info.si_code >= 0)
 		return -EPERM;
 	info.si_signo = sig;
 
@@ -879,10 +868,9 @@ do_sigaction(int sig, const struct k_sigaction *act, struct k_sigaction *oact)
 					if (q->info.si_signo != sig)
 						pp = &q->next;
 					else {
-						if ((*pp = q->next) == NULL)
-							current->sigqueue_tail = pp;
+						*pp = q->next;
 						kmem_cache_free(signal_queue_cachep, q);
-						atomic_dec(&nr_queued_signals);
+						nr_queued_signals--;
 					}
 					q = *pp;
 				}
@@ -1077,9 +1065,7 @@ sys_ssetmask(int newmask)
 
 	return old;
 }
-#endif /* !defined(__alpha__) */
 
-#if !defined(__alpha__) && !defined(__mips__)
 /*
  * For backwards compatibility.  Functionality superseded by sigaction.
  */
@@ -1096,4 +1082,4 @@ sys_signal(int sig, __sighandler_t handler)
 
 	return ret ? ret : (unsigned long)old_sa.sa.sa_handler;
 }
-#endif /* !defined(__alpha__) && !defined(__mips__) */
+#endif /* !alpha */

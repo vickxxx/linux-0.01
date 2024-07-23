@@ -1,14 +1,11 @@
-#
-# Makefile for the isdnloop ISDN device driver
-#
+L_OBJS :=
+M_OBJS :=
 
-# The target object and module list name.
+ifeq ($(CONFIG_ISDN_DRV_LOOP),y)
+  L_OBJS += isdnloop.o
+else
+  M_OBJS += isdnloop.o
+endif
 
-O_TARGET	:= vmlinux-obj.o
-
-# Each configuration option enables a list of files.
-
-obj-$(CONFIG_ISDN_DRV_LOOP)	+= isdnloop.o
-
-include $(TOPDIR)/drivers/isdn/Rules.make
+include $(TOPDIR)/Rules.make
 

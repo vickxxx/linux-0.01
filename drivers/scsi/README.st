@@ -2,7 +2,7 @@ This file contains brief information about the SCSI tape driver.
 The driver is currently maintained by Kai M{kisara (email
 Kai.Makisara@metla.fi)
 
-Last modified: Tue Aug 15 15:54:46 2000 by makisara@kai.makisara.local
+Last modified: Sun Jan 17 10:57:41 1999 by makisara@home
 
 
 BASICS
@@ -67,7 +67,7 @@ non-rewind devices (minor is 128 + device number) are implemented.
 In variable block mode, the byte count in write() determines the size
 of the physical block on tape. When reading, the drive reads the next
 tape block and returns to the user the data if the read() byte count
-is at least the block size. Otherwise an error is returned.
+is at least the block size. Otherwise the data is truncated.
 
 In fixed block mode, the data transfer between the drive and the
 driver is in multiples of the block size. The write() byte count must
@@ -348,6 +348,15 @@ MTIOCGET Returns some status information.
 	The GMT_xxx status bits reflect the drive status. GMT_DR_OPEN
 	is set if there is no tape in the drive. GMT_EOD means either
 	end of recorded data or end of tape. GMT_EOT means end of tape.
+
+The following ioctls use the structure mtlocation that contains both
+the block number and the partition number. These ioctls are available
+only for SCSI-2 tape drives and the block number is the
+device-independent logical block number defined by the standard.
+
+MTGETLOC Returns the current block and partition number.
+MTSETLOC Sets the tape to the block and partition specified by the
+	arguments.
 
 
 MISCELLANEOUS COMPILE OPTIONS

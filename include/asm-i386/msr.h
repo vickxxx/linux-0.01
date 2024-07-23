@@ -28,7 +28,3 @@
 			  : "=a" (low), "=d" (high) \
 			  : "c" (counter))
 
-/* symbolic names for some interesting MSRs */
-#define MSR_IA32_PLATFORM_ID	0x17
-#define MSR_IA32_UCODE_WRITE	0x79
-#define MSR_IA32_UCODE_REV	0x8B

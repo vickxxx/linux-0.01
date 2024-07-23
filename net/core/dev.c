@@ -19,7 +19,6 @@
  *		Adam Sulmicki <adam@cfar.umd.edu>
  *
  *	Changes:
- *		Marcelo Tosatti <marcelo@conectiva.com.br> : dont accept mtu 0 or <
  *		Alan Cox	:	device private ioctl copies fields back.
  *		Alan Cox	:	Transmit queue code does relevant stunts to
  *					keep the queue safe.
@@ -57,9 +56,6 @@
  *					A network device unload needs to purge
  *					the backlog queue.
  *	Paul Rusty Russel	:	SIOCSIFNAME
- *	Andrea Arcangeli	:	dev_clear_backlog() needs the
- *					skb_queue_lock held.
- *	Benoit Locher	:	Added the Frame Diversion code
  */
 
 #include <asm/uaccess.h>
@@ -82,10 +78,10 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <linux/rtnetlink.h>
+#include <net/slhc.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <net/br.h>
-#include <linux/divert.h>
 #include <net/dst.h>
 #include <net/pkt_sched.h>
 #include <net/profile.h>
@@ -97,11 +93,6 @@
 #ifdef CONFIG_PLIP
 extern int plip_init(void);
 #endif
-extern void n2_init(void);
-extern void c101_init(void);
-extern int wanxl_init(void);
-extern int cpc_init(void);
-extern void sync_ppp_init(void);
 
 NET_PROFILE_DEFINE(dev_queue_xmit)
 NET_PROFILE_DEFINE(net_bh)
@@ -462,10 +453,6 @@ int dev_close(struct device *dev)
 	if (!(dev->flags&IFF_UP))
 		return 0;
 
-	/* If the device is a slave we should not touch it*/
-	if(dev->flags&IFF_SLAVE)
-		return -EBUSY;
-                                
 	dev_deactivate(dev);
 
 	dev_lock_wait();
@@ -649,7 +636,7 @@ int dev_queue_xmit(struct sk_buff *skb)
 
 
 /*=======================================================================
-			Receiver routines
+			Receiver rotutines
   =======================================================================*/
 
 int netdev_dropping = 0;
@@ -723,8 +710,7 @@ static void netdev_wakeup(void)
 
 static void dev_clear_backlog(struct device *dev)
 {
-	struct sk_buff *curr;
-	unsigned long flags;
+	struct sk_buff *prev, *curr;
 
 	/*
 	 *
@@ -732,24 +718,27 @@ static void dev_clear_backlog(struct device *dev)
 	 *
 	 *  We are competing here both with netif_rx() and net_bh().
 	 *  We don't want either of those to mess with skb ptrs
-	 *  while we work on them, thus we must grab the
-	 *  skb_queue_lock.
+	 *  while we work on them, thus cli()/sti().
+	 *
+	 *  It looks better to use net_bh trick, at least
+	 *  to be sure, that we keep interrupt latency really low. --ANK (980727)
 	 */ 
 
 	if (backlog.qlen) {
-	repeat:
-		spin_lock_irqsave(&skb_queue_lock, flags);
-		for (curr = backlog.next;
-		     curr != (struct sk_buff *)(&backlog);
-		     curr = curr->next)
-			if (curr->dev == dev)
-			{
-				__skb_unlink(curr, &backlog);
+		start_bh_atomic();
+		curr = backlog.next;
+		while ( curr != (struct sk_buff *)(&backlog) ) {
+			unsigned long flags;
+			curr=curr->next;
+			if ( curr->prev->dev == dev ) {
+				prev = curr->prev;
+				spin_lock_irqsave(&skb_queue_lock, flags);
+				__skb_unlink(prev, &backlog);
 				spin_unlock_irqrestore(&skb_queue_lock, flags);
-				kfree_skb(curr);
-				goto repeat;
+				kfree_skb(prev);
 			}
-		spin_unlock_irqrestore(&skb_queue_lock, flags);
+		}
+		end_bh_atomic();
 #ifdef CONFIG_NET_HW_FLOWCONTROL
 		if (netdev_dropping)
 			netdev_wakeup();
@@ -780,10 +769,6 @@ void netif_rx(struct sk_buff *skb)
 	if (backlog.qlen <= netdev_max_backlog) {
 		if (backlog.qlen) {
 			if (netdev_dropping == 0) {
-				if (skb->dev->flags & IFF_SLAVE  && 
-				    skb->dev->slave) {
-					skb->dev = skb->dev->slave;
-				}
 				skb_queue_tail(&backlog,skb);
 				mark_bh(NET_BH);
 				return;
@@ -798,9 +783,6 @@ void netif_rx(struct sk_buff *skb)
 #else
 		netdev_dropping = 0;
 #endif
-		if (skb->dev->flags & IFF_SLAVE  &&  skb->dev->slave) {
-			skb->dev = skb->dev->slave;
-		}
 		skb_queue_tail(&backlog,skb);
 		mark_bh(NET_BH);
 		return;
@@ -813,11 +795,7 @@ void netif_rx(struct sk_buff *skb)
 #ifdef CONFIG_BRIDGE
 static inline void handle_bridge(struct sk_buff *skb, unsigned short type)
 {
-	/* 
-	 * The br_stats.flags is checked here to save the expense of a 
-	 * function call.
-	 */
-	if ((br_stats.flags & BR_UP) && br_call_bridge(skb, type))
+	if (br_stats.flags & BR_UP && br_protocol_ok(ntohs(type)))
 	{
 		/*
 		 *	We pass the bridge a complete frame. This means
@@ -841,16 +819,6 @@ static inline void handle_bridge(struct sk_buff *skb, unsigned short type)
 }
 #endif
 
-
-#ifdef CONFIG_NET_DIVERT
-static inline void handle_diverter(struct sk_buff *skb)
-{
-	/* if diversion is supported on device, then divert */
-	if (skb->dev->divert && skb->dev->divert->divert)
-		divert_frame(skb);
-	return;
-}
-#endif	 /* CONFIG_NET_DIVERT */
 
 /*
  *	When we are called the queue is ready to grab, the interrupts are
@@ -913,12 +881,6 @@ void net_bh(void)
 		 */
 		skb = skb_dequeue(&backlog);
 
-		/* This can happen if dev_clear_backlog is running
-		 * at the same time and it empties the queue.
-		 */
-		if (skb == NULL)
-			break;
-
 #ifdef CONFIG_CPU_IS_SLOW
 		if (ave_busy > 128*16) {
 			kfree_skb(skb);
@@ -960,15 +922,6 @@ void net_bh(void)
 		 */
 
 		type = skb->protocol;
-
-#ifdef CONFIG_NET_DIVERT
-		/*
-		 * Have the frame diverted ?
-		 *
-		 */
-		handle_diverter(skb);
-#endif	/* CONFIG_NET_DIVERT */
-		
 
 #ifdef CONFIG_BRIDGE
 		/*
@@ -1321,9 +1274,8 @@ static int sprintf_wireless_stats(char *buffer, struct device *dev)
 	int size;
 
 	if(stats != (struct iw_statistics *) NULL)
-	{
 		size = sprintf(buffer,
-			       "%6s: %04x  %3d%c  %3d%c  %3d%c  %6d %6d %6d\n",
+			       "%6s: %02x  %3d%c %3d%c  %3d%c %5d %5d %5d\n",
 			       dev->name,
 			       stats->status,
 			       stats->qual.qual,
@@ -1331,12 +1283,10 @@ static int sprintf_wireless_stats(char *buffer, struct device *dev)
 			       stats->qual.level,
 			       stats->qual.updated & 2 ? '.' : ' ',
 			       stats->qual.noise,
-			       stats->qual.updated & 4 ? '.' : ' ',
+			       stats->qual.updated & 3 ? '.' : ' ',
 			       stats->discard.nwid,
 			       stats->discard.code,
 			       stats->discard.misc);
-		stats->qual.updated = 0;
-	}
 	else
 		size = 0;
 
@@ -1358,9 +1308,8 @@ int dev_get_wireless_info(char * buffer, char **start, off_t offset,
 	struct device *	dev;
 
 	size = sprintf(buffer,
-		       "Inter-| sta-|   Quality        |   Discarded packets\n"
-		       " face | tus | link level noise |  nwid  crypt   misc\n"
-			);
+		       "Inter-|sta|  Quality       |  Discarded packets\n"
+		       " face |tus|link level noise| nwid crypt  misc\n");
 	
 	pos+=size;
 	len+=size;
@@ -1521,7 +1470,7 @@ static int dev_ifsioc(struct ifreq *ifr, unsigned int cmd)
 			 *	MTU must be positive.
 			 */
 			 
-			if (ifr->ifr_mtu<=0)
+			if (ifr->ifr_mtu<0)
 				return -EINVAL;
 
 			if (dev->change_mtu)
@@ -1782,12 +1731,10 @@ int dev_new_index(void)
 
 static int dev_boot_phase = 1;
 
+
 int register_netdevice(struct device *dev)
 {
 	struct device *d, **dp;
-#ifdef CONFIG_NET_DIVERT
-	int	ret;
-#endif
 
 	if (dev_boot_phase) {
 		/* This is NOT bug, but I am not sure, that all the
@@ -1810,11 +1757,6 @@ int register_netdevice(struct device *dev)
 		}
 		dev->next = NULL;
 		*dp = dev;
-#ifdef CONFIG_NET_DIVERT
-		ret=alloc_divert_blk(dev);
-		if (ret)
-			return ret;
-#endif /* CONFIG_NET_DIVERT */
 		return 0;
 	}
 
@@ -1838,11 +1780,7 @@ int register_netdevice(struct device *dev)
 
 	/* Notify protocols, that a new device appeared. */
 	notifier_call_chain(&netdev_chain, NETDEV_REGISTER, dev);
-#ifdef CONFIG_NET_DIVERT
-	ret=alloc_divert_blk(dev);
-	if (ret)
-		return ret;
-#endif
+
 	return 0;
 }
 
@@ -1890,9 +1828,6 @@ int unregister_netdevice(struct device *dev)
 
 			if (dev->destructor)
 				dev->destructor(dev);
-#ifdef CONFIG_NET_DIVERT
-			free_divert_blk(dev);	
-#endif /* CONFIG_NET_DIVERT */
 			return 0;
 		}
 	}
@@ -1910,18 +1845,15 @@ extern int lance_init(void);
 extern int bpq_init(void);
 extern int scc_init(void);
 extern void sdla_setup(void);
-extern void sdla_c_setup(void);
 extern void dlci_setup(void);
 extern int dmascc_init(void);
 extern int sm_init(void);
-extern void xpdsl_init(void);
 
 extern int baycom_ser_fdx_init(void);
 extern int baycom_ser_hdx_init(void);
 extern int baycom_par_init(void);
 
 extern int lapbeth_init(void);
-extern int comx_init(void);
 extern void arcnet_init(void);
 extern void ip_auto_config(void);
 #ifdef CONFIG_8xx
@@ -1969,13 +1901,6 @@ __initfunc(int net_dev_init(void))
 #ifdef CONFIG_BRIDGE	 
 	br_init();
 #endif	
-
-	/*
-	 * Frame Diverter init
-	 */
-#ifdef CONFIG_NET_DIVERT
-	dv_init();
-#endif /* CONFIG_NET_DIVERT */
 	
 	/*
 	 * This is Very Ugly(tm).
@@ -1996,7 +1921,7 @@ __initfunc(int net_dev_init(void))
 	dlci_setup();
 #endif
 #if defined(CONFIG_SDLA)
-	sdla_c_setup();
+	sdla_setup();
 #endif
 #if defined(CONFIG_BAYCOM_PAR)
 	baycom_par_init();
@@ -2022,8 +1947,17 @@ __initfunc(int net_dev_init(void))
 #if defined(CONFIG_8xx)
         cpm_enet_init();
 #endif
-#if defined(CONFIG_COMX)
-	comx_init();
+	/*
+	 *	SLHC if present needs attaching so other people see it
+	 *	even if not opened.
+	 */
+	 
+#ifdef CONFIG_INET	 
+#if (defined(CONFIG_SLIP) && defined(CONFIG_SLIP_COMPRESSED)) \
+	 || defined(CONFIG_PPP) \
+    || (defined(CONFIG_ISDN) && defined(CONFIG_ISDN_PPP))
+	slhc_install();
+#endif	
 #endif
 
 #ifdef CONFIG_NET_PROFILE
@@ -2082,32 +2016,6 @@ __initfunc(int net_dev_init(void))
 	dev_boot_phase = 0;
 
 	dev_mcast_init();
-
-#ifdef CONFIG_BRIDGE
-	/*
-	 * Register any statically linked ethernet devices with the bridge
-	 */
-	br_spacedevice_register();
-#endif
-
-#ifdef CONFIG_N2
-	n2_init();
-#endif
-#ifdef CONFIG_C101
-	c101_init();
-#endif
-#ifdef CONFIG_WANXL
-	wanxl_init();
-#endif
-#ifdef CONFIG_XPEED
-	xpdsl_init();
-#endif
-#ifdef CONFIG_PC300
-	cpc_init();
-#endif
-#ifdef CONFIG_HDLC
-	sync_ppp_init();
-#endif
 
 #ifdef CONFIG_IP_PNP
 	ip_auto_config();

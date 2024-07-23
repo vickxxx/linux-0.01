@@ -4,7 +4,7 @@
  *
  * Author:	Juan Jose Ciarlante, <jjciarla@raiz.uncu.edu.ar>
  *
- * 	$Id: ip_masq_mod.c,v 1.5.2.3 2001/01/04 04:20:16 davem Exp $
+ * 	$Id: ip_masq_mod.c,v 1.5 1998/08/29 23:51:09 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -23,8 +23,6 @@
 #include <net/ip_masq.h>
 #include <net/ip_masq_mod.h>
 
-#include <asm/spinlock.h>
-
 #include <linux/ip_masq.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
@@ -35,7 +33,9 @@ EXPORT_SYMBOL(unregister_ip_masq_mod);
 EXPORT_SYMBOL(ip_masq_mod_lkp_link);
 EXPORT_SYMBOL(ip_masq_mod_lkp_unlink);
 
+#ifdef __SMP__
 static spinlock_t masq_mod_lock = SPIN_LOCK_UNLOCKED;
+#endif
 
 /*
  *	Base pointer for registered modules
@@ -89,28 +89,28 @@ int ip_masq_mod_lkp_unlink(struct ip_masq_mod *mmod)
 {
 	struct ip_masq_mod **mmod_p;
 
-	spin_lock_irq(&masq_mod_lock);
+	write_lock_bh(&masq_mod_lock);
 
 	for (mmod_p = &ip_masq_mod_lkp_base; *mmod_p ; mmod_p = &(*mmod_p)->next)
 		if (mmod == (*mmod_p))  {
 			*mmod_p = mmod->next;
 			mmod->next = NULL;
-			spin_unlock_irq(&masq_mod_lock);
+			write_unlock_bh(&masq_mod_lock);
 			return 0;
 		}
 
-	spin_unlock_irq(&masq_mod_lock);
+	write_unlock_bh(&masq_mod_lock);
 	return -EINVAL;
 }
 
 int ip_masq_mod_lkp_link(struct ip_masq_mod *mmod)
 {
-	spin_lock_irq(&masq_mod_lock);
+	write_lock_bh(&masq_mod_lock);
 
 	mmod->next = ip_masq_mod_lkp_base;
 	ip_masq_mod_lkp_base=mmod;
 
-	spin_unlock_irq(&masq_mod_lock);
+	write_unlock_bh(&masq_mod_lock);
 	return 0;
 }
 

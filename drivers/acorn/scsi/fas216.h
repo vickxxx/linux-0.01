@@ -40,7 +40,6 @@
 #define CMD_TRANSFERINFO	0x10
 #define CMD_INITCMDCOMPLETE	0x11
 #define CMD_MSGACCEPTED		0x12
-#define CMD_PADBYTES		0x18
 #define CMD_SETATN		0x1a
 #define CMD_RSETATN		0x1b
 
@@ -172,17 +171,15 @@
 typedef enum {
 	PHASE_IDLE,					/* we're not planning on doing anything	*/
 	PHASE_SELECTION,				/* selecting a device			*/
-	PHASE_SELSTEPS,					/* selection with command steps		*/
-	PHASE_COMMAND,					/* command sent				*/
 	PHASE_MESSAGESENT,				/* selected, and we're sending cmd	*/
 	PHASE_RECONNECTED,				/* reconnected				*/
 	PHASE_DATAOUT,					/* data out to device			*/
 	PHASE_DATAIN,					/* data in from device			*/
 	PHASE_MSGIN,					/* message in from device		*/
-	PHASE_MSGIN_DISCONNECT,				/* disconnecting from bus		*/
-	PHASE_MSGOUT,					/* after message out phase		*/
-	PHASE_MSGOUT_EXPECT,				/* expecting message out		*/
+	PHASE_MSGOUT,					/* message out to device		*/
+	PHASE_AFTERMSGOUT,				/* after message out phase		*/
 	PHASE_STATUS,					/* status from device			*/
+	PHASE_DISCONNECT,				/* disconnecting from bus		*/
 	PHASE_DONE					/* Command complete			*/
 } phase_t;
 
@@ -200,15 +197,13 @@ typedef enum {
 } fasdmatype_t;
 
 typedef enum {
-	neg_wait,					/* Negociate with device		*/
-	neg_inprogress,					/* Negociation sent			*/
-	neg_complete,					/* Negociation complete			*/
-	neg_targcomplete,				/* Target completed negociation		*/
-	neg_invalid					/* Negociation not supported		*/
-} neg_t;
+	syncneg_start,					/* Negociate with device for Sync xfers	*/
+	syncneg_sent,					/* Sync Xfer negociation sent		*/
+	syncneg_complete,				/* Sync Xfer complete			*/
+	syncneg_invalid					/* Sync Xfer not supported		*/
+} syncneg_t;
 
 #define MAGIC	0x441296bdUL
-#define NR_MSGS	8
 
 typedef struct {
 	unsigned long		magic_start;
@@ -236,9 +231,7 @@ typedef struct {
 		MsgQueue_t	msgs;			/* message queue for connected device	*/
 
 		unsigned int	async_stp;		/* Async transfer STP value		*/
-		unsigned char	msgin_fifo;		/* bytes in fifo at time of message in	*/
-		unsigned char	message[256];		/* last message received from device	*/
-		unsigned int	msglen;			/* length of last message received	*/
+		unsigned short	last_message;		/* last message to be sent		*/
 
 		unsigned char	disconnectable:1;	/* this command can be disconnected	*/
 		unsigned char	aborting:1;		/* aborting command			*/
@@ -262,7 +255,6 @@ typedef struct {
 		unsigned char	clockrate;		/* clock rate of FAS device (MHz)	*/
 		unsigned char	select_timeout;		/* timeout (R5)				*/
 		unsigned char	sync_max_depth;		/* Synchronous xfer max fifo depth	*/
-		unsigned char	wide_max_size;		/* Maximum wide transfer size		*/
 		unsigned char	cntl3;			/* Control Reg 3			*/
 		unsigned int	asyncperiod;		/* Async transfer period (ns)		*/
 		unsigned int	disconnect_ok:1;	/* Disconnects allowed?			*/
@@ -275,14 +267,12 @@ typedef struct {
 	} queues;
 
 	/* per-device info */
-	struct fas216_device {
+	struct {
 		unsigned char	disconnect_ok:1;	/* device can disconnect		*/
-		unsigned char	period;			/* sync xfer period in (*4ns)		*/
+		unsigned int	period;			/* sync xfer period (*4ns)		*/
 		unsigned char	stp;			/* synchronous transfer period		*/
 		unsigned char	sof;			/* synchronous offset register		*/
-		unsigned char	wide_xfer;		/* currently negociated wide transfer	*/
-		neg_t		sync_state;		/* synchronous transfer mode		*/
-		neg_t		wide_state;		/* wide transfer mode			*/
+		syncneg_t	negstate;		/* synchronous transfer mode		*/
 	} device[8];
 	unsigned char	busyluns[8];			/* array of bits indicating LUNs busy	*/
 
@@ -349,9 +339,6 @@ extern void fas216_intr (struct Scsi_Host *instance);
  * Returns : 0 on success
  */
 extern int fas216_release (struct Scsi_Host *instance);
-
-extern int fas216_print_stats(FAS216_Info *info, char *buffer);
-extern int fas216_print_device(FAS216_Info *info, Scsi_Device *scd, char *buffer);
 
 /* Function: int fas216_eh_abort(Scsi_Cmnd *SCpnt)
  * Purpose : abort this command

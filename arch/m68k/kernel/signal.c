@@ -14,10 +14,6 @@
  * 68060 fixes by Jesper Skov
  *
  * 1997-12-01  Modified for POSIX.1b signals by Andreas Schwab
- *
- * mathemu support by Roman Zippel
- *  (Note: fpstate in the signal context is completly ignored for the emulator
- *         and the internal floating point format is put on stack)
  */
 
 /*
@@ -160,9 +156,6 @@ sys_sigaltstack(const stack_t *uss, stack_t *uoss)
 
 /*
  * Do a signal return; undo the signal stack.
- *
- * Keep the return code on the stack quadword aligned!
- * That makes the cache flush below easier.
  */
 
 struct sigframe
@@ -182,9 +175,9 @@ struct rt_sigframe
 	int sig;
 	struct siginfo *pinfo;
 	void *puc;
-	char retcode[8];
 	struct siginfo info;
 	struct ucontext uc;
+	char retcode[8];
 };
 
 
@@ -193,13 +186,6 @@ static unsigned char fpu_version = 0;	/* version number of fpu, set by setup_fra
 static inline int restore_fpu_state(struct sigcontext *sc)
 {
 	int err = 1;
-
-	if (FPU_IS_EMU) {
-	    /* restore registers */
-	    memcpy(current->tss.fpcntl, sc->sc_fpcntl, 12);
-	    memcpy(current->tss.fp, sc->sc_fpregs, 24);
-	    return 0;
-	}
 
 	if (CPU_IS_060 ? sc->sc_fpstate[2] : sc->sc_fpstate[0]) {
 	    /* Verify the frame format.  */
@@ -252,18 +238,6 @@ static inline int rt_restore_fpu_state(struct ucontext *uc)
 	int context_size = CPU_IS_060 ? 8 : 0;
 	fpregset_t fpregs;
 	int err = 1;
-
-	if (FPU_IS_EMU) {
-		/* restore fpu control register */
-		if (__copy_from_user(current->tss.fpcntl,
-				&uc->uc_mcontext.fpregs.f_pcr, 12))
-			goto out;
-		/* restore all other fpu register */
-		if (__copy_from_user(current->tss.fp,
-				uc->uc_mcontext.fpregs.f_fpregs, 96))
-			goto out;
-		return 0;
-	}
 
 	if (__get_user(*(long *)fpstate, (long *)&uc->uc_fpstate))
 		goto out;
@@ -504,7 +478,7 @@ asmlinkage int do_sigreturn(unsigned long __unused)
 	struct switch_stack *sw = (struct switch_stack *) &__unused;
 	struct pt_regs *regs = (struct pt_regs *) (sw + 1);
 	unsigned long usp = rdusp();
-	struct sigframe *frame = (struct sigframe *)(usp - 4);
+	struct sigframe *frame = (struct sigframe *)(usp - 24);
 	sigset_t set;
 	int d0;
 
@@ -562,13 +536,6 @@ badframe:
 
 static inline void save_fpu_state(struct sigcontext *sc, struct pt_regs *regs)
 {
-	if (FPU_IS_EMU) {
-		/* save registers */
-		memcpy(sc->sc_fpcntl, current->tss.fpcntl, 12);
-		memcpy(sc->sc_fpregs, current->tss.fp, 24);
-		return;
-	}
-
 	__asm__ volatile (".chip 68k/68881\n\t"
 			  "fsave %0\n\t"
 			  ".chip 68k"
@@ -599,16 +566,6 @@ static inline int rt_save_fpu_state(struct ucontext *uc, struct pt_regs *regs)
 	unsigned char fpstate[FPCONTEXT_SIZE];
 	int context_size = CPU_IS_060 ? 8 : 0;
 	int err = 0;
-
-	if (FPU_IS_EMU) {
-		/* save fpu control register */
-		err |= copy_to_user(&uc->uc_mcontext.fpregs.f_pcr,
-				current->tss.fpcntl, 12);
-		/* save all other fpu register */
-		err |= copy_to_user(uc->uc_mcontext.fpregs.f_fpregs,
-				current->tss.fp, 96);
-		return err;
-	}
 
 	__asm__ volatile (".chip 68k/68881\n\t"
 			  "fsave %0\n\t"
@@ -720,6 +677,25 @@ static inline void push_cache (unsigned long vaddr)
 				      "cpushl %%bc,(%0)\n\t"
 				      ".chip 68k"
 				      : : "a" (temp));
+		if (((vaddr + 8) ^ vaddr) & ~15) {
+			if (((vaddr + 8) ^ vaddr) & PAGE_MASK)
+				__asm__ __volatile__ (".chip 68040\n\t"
+						      "nop\n\t"
+						      "ptestr (%1)\n\t"
+						      "movec %%mmusr,%0\n\t"
+						      ".chip 68k"
+						      : "=r" (temp)
+						      : "a" (vaddr + 8));
+
+			temp &= PAGE_MASK;
+			temp |= (vaddr + 8) & ~PAGE_MASK;
+
+			__asm__ __volatile__ (".chip 68040\n\t"
+					      "nop\n\t"
+					      "cpushl %%bc,(%0)\n\t"
+					      ".chip 68k"
+					      : : "a" (temp));
+		}
 	}
 	else if (CPU_IS_060) {
 		unsigned long temp;
@@ -732,6 +708,18 @@ static inline void push_cache (unsigned long vaddr)
 				      "cpushl %%bc,(%0)\n\t"
 				      ".chip 68k"
 				      : : "a" (temp));
+		if (((vaddr + 8) ^ vaddr) & ~15) {
+			if (((vaddr + 8) ^ vaddr) & PAGE_MASK)
+				__asm__ __volatile__ (".chip 68060\n\t"
+						      "plpar (%0)\n\t"
+						      ".chip 68k"
+						      : "=a" (temp)
+						      : "0" (vaddr + 8));
+			__asm__ __volatile__ (".chip 68060\n\t"
+					      "cpushl %%bc,(%0)\n\t"
+					      ".chip 68k"
+					      : : "a" (temp));
+		}
 	}
 	else {
 		/*
@@ -809,9 +797,11 @@ static void setup_frame (int sig, struct k_sigaction *ka,
 
 	/* Set up to return from userspace.  */
 	err |= __put_user(frame->retcode, &frame->pretcode);
+	/* addaw #20,sp */
+	err |= __put_user(0xdefc0014, (long *)(frame->retcode + 0));
 	/* moveq #,d0; trap #0 */
 	err |= __put_user(0x70004e40 + (__NR_sigreturn << 16),
-			  (long *)(frame->retcode));
+			  (long *)(frame->retcode + 4));
 
 	if (err)
 		goto give_sigsegv;
@@ -891,10 +881,10 @@ static void setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 
 	/* Set up to return from userspace.  */
 	err |= __put_user(frame->retcode, &frame->pretcode);
-	/* moveq #,d0; notb d0; trap #0 */
-	err |= __put_user(0x70004600 + ((__NR_rt_sigreturn ^ 0xff) << 16),
-			  (long *)(frame->retcode + 0));
-	err |= __put_user(0x4e40, (short *)(frame->retcode + 4));
+	/* movel #,d0; trap #0 */
+	err |= __put_user(0x203c, (short *)(frame->retcode + 0));
+	err |= __put_user(__NR_rt_sigreturn, (long *)(frame->retcode + 2));
+	err |= __put_user(0x4e40, (short *)(frame->retcode + 6));
 
 	if (err)
 		goto give_sigsegv;
@@ -974,10 +964,11 @@ handle_signal(int sig, struct k_sigaction *ka, siginfo_t *info,
 	if (ka->sa.sa_flags & SA_ONESHOT)
 		ka->sa.sa_handler = SIG_DFL;
 
-	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
+	if (!(ka->sa.sa_flags & SA_NODEFER)) {
+		sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
 		sigaddset(&current->blocked,sig);
-	recalc_sigpending(current);
+		recalc_sigpending(current);
+	}
 }
 
 /*
@@ -1101,7 +1092,6 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 
 			default:
 				sigaddset(&current->signal, signr);
-				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOTREACHED */

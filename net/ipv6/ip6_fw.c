@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: ip6_fw.c,v 1.10.2.1 1999/08/07 10:56:39 davem Exp $
+ *	$Id: ip6_fw.c,v 1.10 1998/08/26 12:04:57 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -91,11 +91,12 @@ static __inline__ struct ip6_fw_rule * ip6_fwrule_alloc(void)
 	struct ip6_fw_rule *rl;
 
 	rl = kmalloc(sizeof(struct ip6_fw_rule), GFP_ATOMIC);
+
+	memset(rl, 0, sizeof(struct ip6_fw_rule));
+
 	if (rl)
-	{
-		memset(rl, 0, sizeof(struct ip6_fw_rule));
 		rl->flowr.ops = &ip6_fw_ops;
-	}
+
 	return rl;
 }
 

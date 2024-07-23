@@ -300,7 +300,6 @@ struct tcp_opt {
 
 	__u32	last_seg_size;	/* Size of last incoming segment */
 	__u32	rcv_mss;	/* MSS used for delayed ACK decisions */ 
-	__u32 	partial_writers; /* # of clients wanting at the head packet */
 
 	struct open_request	*syn_wait_queue;
 	struct open_request	**syn_wait_last;
@@ -585,7 +584,9 @@ struct proto {
 	/* Keeping track of sk's, looking them up, and port selection methods. */
 	void			(*hash)(struct sock *sk);
 	void			(*unhash)(struct sock *sk);
-	int			(*get_port)(struct sock *sk, unsigned short snum);
+	void			(*rehash)(struct sock *sk);
+	unsigned short		(*good_socknum)(void);
+	int			(*verify_bind)(struct sock *sk, unsigned short snum);
 
 	unsigned short		max_header;
 	unsigned long		retransmits;
@@ -621,26 +622,22 @@ struct proto {
 /* Some things in the kernel just want to get at a protocols
  * entire socket list commensurate, thus...
  */
-static __inline__ void __add_to_prot_sklist(struct sock *sk)
-{
-	struct proto *p = sk->prot;
-
-	sk->sklist_prev = (struct sock *) p;
-	sk->sklist_next = p->sklist_next;
-	p->sklist_next->sklist_prev = sk;
-	p->sklist_next = sk;
-
-	/* Charge the protocol. */
-	sk->prot->inuse += 1;
-	if(sk->prot->highestinuse < sk->prot->inuse)
-		sk->prot->highestinuse = sk->prot->inuse;
-}
-
 static __inline__ void add_to_prot_sklist(struct sock *sk)
 {
 	SOCKHASH_LOCK();
-	if(!sk->sklist_next)
-		__add_to_prot_sklist(sk);
+	if(!sk->sklist_next) {
+		struct proto *p = sk->prot;
+
+		sk->sklist_prev = (struct sock *) p;
+		sk->sklist_next = p->sklist_next;
+		p->sklist_next->sklist_prev = sk;
+		p->sklist_next = sk;
+
+		/* Charge the protocol. */
+		sk->prot->inuse += 1;
+		if(sk->prot->highestinuse < sk->prot->inuse)
+			sk->prot->highestinuse = sk->prot->inuse;
+	}
 	SOCKHASH_UNLOCK();
 }
 
@@ -673,9 +670,9 @@ static inline void lock_sock(struct sock *sk)
 #if 0
 /* debugging code: the test isn't even 100% correct, but it can catch bugs */
 /* Note that a double lock is ok in theory - it's just _usually_ a bug */
-/* Actually it can easily happen with multiple writers */ 
 	if (atomic_read(&sk->sock_readers)) {
-		printk("double lock on socket at %p\n", gethere());
+		__label__ here;
+		printk("double lock on socket at %p\n", &&here);
 here:
 	}
 #endif
@@ -717,10 +714,6 @@ extern void			destroy_sock(struct sock *sk);
 extern struct sk_buff		*sock_wmalloc(struct sock *sk,
 					      unsigned long size, int force,
 					      int priority);
-
-extern struct sk_buff		*sock_wmalloc_err(struct sock *sk,
-					      unsigned long size, int force,
-					      int priority, int *err);
 extern struct sk_buff		*sock_rmalloc(struct sock *sk,
 					      unsigned long size, int force,
 					      int priority);

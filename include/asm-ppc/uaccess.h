@@ -57,7 +57,7 @@ struct exception_table_entry
 
 /* Returns 0 if exception not found and fixup otherwise.  */
 extern unsigned long search_exception_table(unsigned long);
-extern void sort_exception_table(void);
+
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -259,22 +259,7 @@ strncpy_from_user(char *dst, const char *src, long count)
  * Return 0 for error
  */
 
-extern int __strnlen_user(const char *str, long len, unsigned long top);
-
-/*
- * Returns the length of the string at str (including the null byte),
- * or 0 if we hit a page we can't access,
- * or something > len if we didn't find a null byte.
- *
- * The `top' parameter to __strnlen_user is to make sure that
- * we can never overflow from the user area into kernel space.
- * It is 1 + the highest address the task can access.
- */
-extern __inline__ int strnlen_user(const char *str, long len)
-{
-	unsigned long top = __kernel_ok? 0: TASK_SIZE;
-	return __strnlen_user(str, len, top);
-}
+extern long strlen_user(const char *);
 
 #endif  /* __ASSEMBLY__ */
 

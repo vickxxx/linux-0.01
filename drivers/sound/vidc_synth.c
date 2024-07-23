@@ -88,8 +88,4 @@ void vidc_synth_init(struct address_info *hw_config)
 	else
 		printk(KERN_ERR "VIDCsound: Too many synthesizers\n");
 }
-
-void vidc_synth_exit(struct address_info *hw_config)
-{
-}
 #endif

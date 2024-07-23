@@ -238,7 +238,7 @@ struct video_unit
 #define VIDIOCGPICT		_IOR('v',6,struct video_picture)	/* Get picture properties */
 #define VIDIOCSPICT		_IOW('v',7,struct video_picture)	/* Set picture properties */
 #define VIDIOCCAPTURE		_IOW('v',8,int)				/* Start, end capture */
-#define VIDIOCGWIN		_IOR('v',9, struct video_window)	/* Get the video overlay window */
+#define VIDIOCGWIN		_IOR('v',9, struct video_window)	/* Set the video overlay window */
 #define VIDIOCSWIN		_IOW('v',10, struct video_window)	/* Set the video overlay window - passes clip list for hardware smarts , chromakey etc */
 #define VIDIOCGFBUF		_IOR('v',11, struct video_buffer)	/* Get frame buffer */
 #define VIDIOCSFBUF		_IOW('v',12, struct video_buffer)	/* Set frame buffer - root only */
@@ -278,9 +278,6 @@ struct video_unit
 #define VID_HARDWARE_TYPHOON	19
 #define VID_HARDWARE_VINO	20	/* Reserved for SGI Indy Vino */
 #define VID_HARDWARE_CADET	21	/* Cadet radio */
-#define VID_HARDWARE_TRUST	22	/* Trust FM Radio */
-#define VID_HARDWARE_CPIA	24
-#define VID_HARDWARE_OV511	27
 
 /*
  *	Initialiser list

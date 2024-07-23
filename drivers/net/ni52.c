@@ -5,7 +5,7 @@
  * same Gnu Public License that covers that work.
  *
  * Alphacode 0.82 (96/09/29) for Linux 2.0.0 (or later)
- * Copyrights (c) 1994,1995,1996 by M.Hipp (hippm@informatik.uni-tuebingen.de)
+ * Copyrights (c) 1994,1995,1996 by M.Hipp (Michael.Hipp@student.uni-tuebingen.de)
  *    [feel free to mail ....]
  *
  * when using as module: (no autoprobing!)
@@ -160,9 +160,9 @@ sizeof(nop_cmd) = 8;
 /**************************************************************************/
 
 /* different DELAYs */
-#define DELAY(x) mdelay(32 * x);
-#define DELAY_16(); { udelay(16); }
-#define DELAY_18(); { udelay(4); }
+#define DELAY(x) __delay((loops_per_sec>>5)*(x));
+#define DELAY_16(); { __delay( (loops_per_sec>>16)+1 ); }
+#define DELAY_18(); { __delay( (loops_per_sec>>18)+1 ); }
 
 /* wait for command with timeout: */
 #define WAIT_4_SCB_CMD() \

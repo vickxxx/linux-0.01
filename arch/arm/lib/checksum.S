@@ -74,9 +74,8 @@ ENTRY(csum_partial)
 		stmfd	sp!, {r1 - r2, r4 - r8, fp, ip, lr, pc}
 		.endm
 
-		.macro	load_regs,flags
-		ldm\flags	fp, {r1, r2, r4-r8, fp, sp, pc}
-		.endm
+#define LOAD_REGS(cond)					\
+		LOADREGS(##cond##ea,fp,{r1 - r2, r4 - r8, fp, sp, pc})
 
 		.macro	load1b,	reg1
 9999:		ldrbt	\reg1, [r0], $1
@@ -131,13 +130,12 @@ ENTRY(csum_partial)
 		stmfd	sp!, {r1 - r2, r4 - r9, fp, ip, lr, pc}
 		mov	r9, sp, lsr #13
 		mov	r9, r9, lsl #13
-		ldr	r9, [r9, #ADDR_LIMIT]
+		ldr	r9, [r9, #TSK_ADDR_LIMIT]
 		mov	r9, r9, lsr #24
 		.endm
 
-		.macro	load_regs,flags
-		ldm\flags	fp, {r1, r2, r4-r9, fp, sp, pc}^
-		.endm
+#define LOAD_REGS(cond)					\
+		LOADREGS(##cond##ea,fp,{r1 - r2, r4 - r9, fp, sp, pc})
 
 		.macro	load1b,	reg1
 		tst	r9, #0x01
@@ -247,7 +245,7 @@ ENTRY(csum_partial_copy_from_user)
 		adcs	r3, r3, r4
 4:		ands	r2, r2, #3
 		adceq	r0, r3, #0
-		load_regs	eqea
+		LOAD_REGS(eq)
 		load1l	r4
 		tst	r2, #2
 		beq	.exit
@@ -261,11 +259,11 @@ ENTRY(csum_partial_copy_from_user)
 		andne	r4, r4, #255
 		adcnes	r3, r3, r4
 		adcs	r0, r3, #0
-		load_regs	ea
+		LOAD_REGS(al)
 
 .too_small_user:
 		teq	r2, #0
-		load_regs	eqea
+		LOAD_REGS(eq)
 		cmp	r2, #2
 		blt	.too_small_user1
 		load2b	ip, r8
@@ -280,7 +278,7 @@ ENTRY(csum_partial_copy_from_user)
 		strb	ip, [r1], #1
 		adcs	r3, r3, ip
 .csum_exit:	adc	r0, r3, #0
-		load_regs	ea
+		LOAD_REGS(al)
 
 .src_not_aligned_user:
 		cmp	r2, #4
@@ -333,7 +331,7 @@ ENTRY(csum_partial_copy_from_user)
 		mov	r4, r5, lsr #8
 4:		ands	r2, r2, #3
 		adceq	r0, r3, #0
-		load_regs	eqea
+		LOAD_REGS(eq)
 		tst	r2, #2
 		beq	.exit
 		adcs	r3, r3, r4, lsl #16
@@ -386,16 +384,13 @@ ENTRY(csum_partial_copy_from_user)
 		mov	r4, r5, lsr #16
 4:		ands	r2, r2, #3
 		adceq	r0, r3, #0
-		load_regs	eqea
+		LOAD_REGS(eq)
 		tst	r2, #2
 		beq	.exit
 		adcs	r3, r3, r4, lsl #16
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
 		strb	r4, [r1], #1
-		tst	r2, #1
-		adceq	r0, r3, #0
-		load_regs	eqea
 		load1b	r4
 		b	.exit
 
@@ -442,7 +437,7 @@ ENTRY(csum_partial_copy_from_user)
 		mov	r4, r5, lsr #24
 4:		ands	r2, r2, #3
 		adceq	r0, r3, #0
-		load_regs	eqea
+		LOAD_REGS(eq)
 		tst	r2, #2
 		beq	.exit
 		adcs	r3, r3, r4, lsl #16
@@ -466,7 +461,7 @@ ENTRY(csum_partial_copy_from_user)
 6002:		teq	r2, r1
 		strneb	r3, [r1], #1
 		bne	6002b
-		load_regs	ea
+		LOAD_REGS(al)
 #if defined(CONFIG_CPU_32)
 		.previous
 #endif
@@ -525,13 +520,13 @@ Ldst_aligned:	tst	r0, #3
 		LOADREGS(eqea,fp,{r4 - r8, fp, sp, pc})
 		ldr	r4, [r0], #4
 		tst	r2, #2
-		beq	Lexit_r4
+		beq	Lexit
 		adcs	r3, r3, r4, lsl #16
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
-		b	Lexit_r4
+		b	Lexit
 
 Ltoo_small:	teq	r2, #0
 		LOADREGS(eqea,fp,{r4 - r8, fp, sp, pc})
@@ -543,12 +538,10 @@ Ltoo_small:	teq	r2, #0
 		adds	r3, r3, ip
 		strb	ip, [r1], #1
 		strb	r8, [r1], #1
-		tst	r2, #1
-Ltoo_small1:	ldrneb	r4, [r0], #1
-Lexit_r4:	tst	r2, #1
-		strneb	r4, [r1], #1
-		andne	r4, r4, #255
-		adcnes	r3, r3, r4
+Lexit:		tst	r2, #1
+Ltoo_small1:	ldrneb	ip, [r0], #1
+		strneb	ip, [r1], #1
+		adcnes	r3, r3, ip
 		adcs	r0, r3, #0
 		LOADREGS(ea,fp,{r4 - r8, fp, sp, pc})
 
@@ -605,13 +598,13 @@ Lsrc_not_aligned:
 		adceq	r0, r3, #0
 		LOADREGS(eqea,fp,{r4 - r8, fp, sp, pc})
 		tst	r2, #2
-		beq	Lexit_r4
+		beq	Lexit
 		adcs	r3, r3, r4, lsl #16
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
-		b	Lexit_r4
+		b	Lexit
 
 Lsrc2_aligned:	mov	r4, r4, lsr #16
 		adds	r3, r3, #0
@@ -657,13 +650,13 @@ Lsrc2_aligned:	mov	r4, r4, lsr #16
 		adceq	r0, r3, #0
 		LOADREGS(eqea,fp,{r4 - r8, fp, sp, pc})
 		tst	r2, #2
-		beq	Lexit_r4
+		beq	Lexit
 		adcs	r3, r3, r4, lsl #16
 		strb	r4, [r1], #1
 		mov	r4, r4, lsr #8
 		strb	r4, [r1], #1
 		ldrb	r4, [r0], #1
-		b	Lexit_r4
+		b	Lexit
 
 Lsrc3_aligned:	mov	r4, r4, lsr #24
 		adds	r3, r3, #0
@@ -709,14 +702,14 @@ Lsrc3_aligned:	mov	r4, r4, lsr #24
 		adceq	r0, r3, #0
 		LOADREGS(eqea,fp,{r4 - r8, fp, sp, pc})
 		tst	r2, #2
-		beq	Lexit_r4
+		beq	Lexit
 		adcs	r3, r3, r4, lsl #16
 		strb	r4, [r1], #1
 		ldr	r4, [r0], #4
 		strb	r4, [r1], #1
 		adcs	r3, r3, r4, lsl #24
 		mov	r4, r4, lsr #8
-		b	Lexit_r4
+		b	Lexit
 
 ENTRY(__csum_ipv6_magic)
 		stmfd	sp!, {lr}

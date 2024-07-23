@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.43.2.5 2000/10/02 02:05:37 anton Exp $
+/*  $Id: setup.c,v 1.43 1999/04/12 08:08:24 davem Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -160,17 +160,9 @@ int prom_callback(long *args)
 		}
 
 		if ((va >= KERNBASE) && (va < (KERNBASE + (4 * 1024 * 1024)))) {
-			/* Spitfire Errata #32 workaround */
-			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
-					     "flush	%%g6"
-					     : /* No outputs */
-					     : "r" (0),
-					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
-
 			/*
 			 * Locked down tlb entry 63.
 			 */
-
 			tte = spitfire_get_dtlb_data(63);
 			res = PROM_TRUE;
 			goto done;
@@ -442,17 +434,6 @@ static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
 extern struct consw sun_serial_con;
 
-void register_prom_callbacks(void)
-{
-	prom_setcallback(prom_callback);
-	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
-		   "' linux-va>tte-data to va>tte-data");
-	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
-		   "' linux-.soft1 to .soft1");
-	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
-		   "' linux-.soft2 to .soft2");
-}
-
 __initfunc(void setup_arch(char **cmdline_p,
 	unsigned long * memory_start_p, unsigned long * memory_end_p))
 {
@@ -497,6 +478,13 @@ __initfunc(void setup_arch(char **cmdline_p,
 			}
 		}
 	}
+	prom_setcallback(prom_callback);
+	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
+		   "' linux-va>tte-data to va>tte-data");
+	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
+		   "' linux-.soft1 to .soft1");
+	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
+		   "' linux-.soft2 to .soft2");
 
 	/* In paging_init() we tip off this value to see if we need
 	 * to change init_mm.pgd to point to the real alias mapping.
@@ -550,7 +538,7 @@ __initfunc(void setup_arch(char **cmdline_p,
 	init_task.tss.kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
-	if (ic_myaddr == INADDR_NONE) {
+	if (!ic_set_manually) {
 		int chosen = prom_finddevice ("/chosen");
 		u32 cl, sv, gw;
 		
@@ -562,9 +550,7 @@ __initfunc(void setup_arch(char **cmdline_p,
 			ic_servaddr = sv;
 			if (gw)
 				ic_gateway = gw;
-#if defined(CONFIG_IP_PNP_BOOTP) || defined(CONFIG_IP_PNP_RARP)
 			ic_proto_enabled = 0;
-#endif
 		}
 	}
 #endif
@@ -642,7 +628,7 @@ int get_cpuinfo(char *buffer)
             prom_rev, prom_prev >> 16, (prom_prev >> 8) & 0xff, prom_prev & 0xff,
 	    linux_num_cpus, smp_num_cpus
 #ifndef __SMP__
-            , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
+            , loops_per_sec/500000, (loops_per_sec/5000) % 100
 #endif
 	    );
 #ifdef __SMP__

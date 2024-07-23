@@ -1,4 +1,4 @@
-/* $Id: indy_sc.c,v 1.9 1999/05/12 21:57:49 ulfc Exp $
+/* $Id: indy_sc.c,v 1.9 1998/08/17 12:14:55 ralf Exp $
  *
  * indy_sc.c: Indy cache managment functions.
  *
@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/autoconf.h>
 
 #include <asm/bcache.h>
 #include <asm/sgi.h>
@@ -37,7 +38,6 @@ static inline void indy_sc_wipe(unsigned long first, unsigned long last)
 		.set	noreorder
 		.set	mips3
 		.set	noat
-		mfc0	$2, $12
 		li	$1, 0x80	# Go 64 bit
 		mtc0	$1, $12
 
@@ -50,12 +50,12 @@ static inline void indy_sc_wipe(unsigned long first, unsigned long last)
 		bne	%0, %1, 1b
 		daddu	%0, 32
 
-		mtc0	$2, $12		# Back to 32 bit
+		mtc0	$0, $12		# Back to 32 bit
 		nop; nop; nop; nop;
 		.set mips0
 		.set reorder"
-		: /* no output */
-		: "r" (first), "r" (last)
+		: "=r" (first), "=r" (last)
+		: "0" (first), "1" (last)
 		: "$1");
 }
 
@@ -69,10 +69,7 @@ static void indy_sc_wback_invalidate(unsigned long addr, unsigned long size)
 #endif
 	/* Which lines to flush?  */
 	first_line = SC_INDEX(addr);
-	if (size <= SC_LINE)
-		last_line = SC_INDEX(addr);
-	else
-		last_line = SC_INDEX(addr + size - 1);
+	last_line = SC_INDEX(SC_ROUND(addr + size));
 
 	__save_and_cli(flags);
 	if (first_line <= last_line) {
@@ -83,8 +80,8 @@ static void indy_sc_wback_invalidate(unsigned long addr, unsigned long size)
 	/* Cache index wrap around.  Due to the way the buddy system works
 	   this case should not happen.  We're prepared to handle it,
 	   though. */
-	indy_sc_wipe(first_line, SC_SIZE - SC_LINE);
-	indy_sc_wipe(0, last_line);
+	indy_sc_wipe(last_line, SC_SIZE);
+	indy_sc_wipe(0, first_line);
 out:
 	__restore_flags(flags);
 }

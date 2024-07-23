@@ -25,44 +25,16 @@ struct request {
 	int errors;
 	unsigned long sector;
 	unsigned long nr_sectors;
-	unsigned long nr_segments;
 	unsigned long current_nr_sectors;
 	char * buffer;
 	struct semaphore * sem;
 	struct buffer_head * bh;
 	struct buffer_head * bhtail;
 	struct request * next;
-	int elevator_latency;
 };
 
 typedef void (request_fn_proc) (void);
 typedef struct request ** (queue_proc) (kdev_t dev);
-
-typedef struct elevator_s
-{
-	int read_latency;
-	int write_latency;
-	unsigned int queue_ID;
-} elevator_t;
-
-#define ELEVATOR_DEFAULTS				\
-((elevator_t) {						\
-	256,			/* read_latency */	\
-	512,			/* write_latency */	\
-        0                       /* queue_ID */          \
-	})
-
-extern int blkelv_ioctl(kdev_t, unsigned long, unsigned long);
-
-typedef struct blkelv_ioctl_arg_s {
-	int queue_ID;
-	int read_latency;
-	int write_latency;
-	int max_bomb_segments;
-} blkelv_ioctl_arg_t;
-
-#define BLKELVGET   _IOR(0x12,106,sizeof(blkelv_ioctl_arg_t))
-#define BLKELVSET   _IOW(0x12,107,sizeof(blkelv_ioctl_arg_t))
 
 struct blk_dev_struct {
 	request_fn_proc		*request_fn;
@@ -74,8 +46,6 @@ struct blk_dev_struct {
 	struct request		*current_request;
 	struct request   plug;
 	struct tq_struct plug_tq;
-
-	elevator_t elevator;
 };
 
 struct sec_size {
@@ -105,18 +75,14 @@ extern int * max_readahead[MAX_BLKDEV];
 
 extern int * max_sectors[MAX_BLKDEV];
 
-extern int * max_segments[MAX_BLKDEV];
-
-#define MAX_SECTORS 128
-
-#define MAX_SEGMENTS MAX_SECTORS
+#define MAX_SECTORS 244 /* 254 ? */
 
 #define PageAlignSize(size) (((size) + PAGE_SIZE -1) & PAGE_MASK)
 #if 0  /* small readahead */
 #define MAX_READAHEAD PageAlignSize(4096*7)
 #define MIN_READAHEAD PageAlignSize(4096*2)
 #else /* large readahead */
-#define MAX_READAHEAD PageAlignSize(4096*31)
+#define MAX_READAHEAD PageAlignSize(4096*18)
 #define MIN_READAHEAD PageAlignSize(4096*3)
 #endif
 

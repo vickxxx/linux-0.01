@@ -33,7 +33,7 @@ start(int a1, int a2, void *promptr)
     if (getprop(chosen_handle, "stdin", &stdin, sizeof(stdin)) != 4)
 	exit();
 
-    boot(a1, a2, promptr);
+    coffboot(a1, a2, promptr);
     for (;;)
 	exit();
 }
@@ -60,25 +60,6 @@ write(void *handle, void *ptr, int nb)
     args.actual = -1;
     (*prom)(&args);
     return args.actual;
-}
-
-int writestring(void *f, char *ptr, int nb)
-{
-	int w = 0, i;
-	char *ret = "\r";
-
-	for (i = 0; i < nb; ++i) {
-		if (ptr[i] == '\n') {
-			if (i > w) {
-				write(f, ptr + w, i - w);
-				w = i;
-			}
-			write(f, ret, 1);
-		}
-	}
-	if (w < nb)
-		write(f, ptr + w, nb - w);
-	return nb;
 }
 
 int
@@ -149,29 +130,6 @@ finddevice(const char *name)
     return args.phandle;
 }
 
-void *
-claim(unsigned int virt, unsigned int size, unsigned int align)
-{
-    struct prom_args {
-	char *service;
-	int nargs;
-	int nret;
-	unsigned int virt;
-	unsigned int size;
-	unsigned int align;
-	void *ret;
-    } args;
-
-    args.service = "claim";
-    args.nargs = 3;
-    args.nret = 1;
-    args.virt = virt;
-    args.size = size;
-    args.align = align;
-    (*prom)(&args);
-    return args.ret;
-}
-
 int
 getprop(void *phandle, const char *name, void *buf, int buflen)
 {
@@ -203,7 +161,9 @@ putc(int c, void *f)
 {
     char ch = c;
 
-    return writestring(f, &ch, 1) == 1? c: -1;
+    if (c == '\n')
+	putc('\r', f);
+    return write(f, &ch, 1) == 1? c: -1;
 }
 
 int
@@ -217,7 +177,7 @@ fputs(char *str, void *f)
 {
     int n = strlen(str);
 
-    return writestring(f, str, n) == n? 0: -1;
+    return write(f, str, n) == n? 0: -1;
 }
 
 int
@@ -230,7 +190,7 @@ readchar()
 	case 1:
 	    return ch;
 	case -1:
-	    printk("read(stdin) returned -1\n");
+	    printk("read(stdin) returned -1\r\n");
 	    return -1;
 	}
     }
@@ -304,7 +264,7 @@ printk(char *fmt, ...)
 	va_start(args, fmt);
 	n = vsprintf(sprint_buf, fmt, args);
 	va_end(args);
-	writestring(stdout, sprint_buf, n);
+	write(stdout, sprint_buf, n);
 }
 
 int
@@ -316,6 +276,6 @@ printf(char *fmt, ...)
 	va_start(args, fmt);
 	n = vsprintf(sprint_buf, fmt, args);
 	va_end(args);
-	writestring(stdout, sprint_buf, n);
+	write(stdout, sprint_buf, n);
 	return n;
 }

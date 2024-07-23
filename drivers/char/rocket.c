@@ -443,7 +443,6 @@ static _INLINE_ void rp_do_transmit(struct r_port *info)
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
-		wake_up_interruptible(&tty->poll_wait);
 	}
 #ifdef ROCKET_DEBUG_INTR
 	printk("(%d,%d,%d,%d)...", info->xmit_cnt, info->xmit_head,
@@ -1698,7 +1697,6 @@ static void rp_hangup(struct tty_struct *tty)
 		info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 		sti();
 		wake_up_interruptible(&tty->write_wait);
-		wake_up_interruptible(&tty->poll_wait);
 		return;
 	}
 	if (info->count) {

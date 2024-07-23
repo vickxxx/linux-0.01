@@ -128,7 +128,6 @@ do_register(const char *name, void *data, int issvc)
 {
 	struct proc_dir_entry	*ent;
 
-	rpc_proc_init();
 	dprintk("RPC: registering /proc/net/rpc/%s\n", name);
 	ent = create_proc_entry(name, 0, proc_net_rpc);
 	ent->read_proc = issvc? svc_proc_read : rpc_proc_read;
@@ -175,9 +174,6 @@ rpc_proc_init(void)
 			proc_net_rpc = ent;
 		}
 	}
-#ifdef RPC_DEBUG
-	rpc_register_sysctl();
-#endif
 }
 
 void
@@ -188,9 +184,6 @@ rpc_proc_exit(void)
 		proc_net_rpc = NULL;
 		remove_proc_entry("net/rpc", 0);
 	}
-#ifdef RPC_DEBUG
-	rpc_unregister_sysctl();
-#endif
 }
 
 #ifdef MODULE
@@ -213,6 +206,9 @@ void rpc_modcount(struct inode *inode, int fill)
 int
 init_module(void)
 {
+#ifdef RPC_DEBUG
+	rpc_register_sysctl();
+#endif
 	rpc_proc_init();
 	return 0;
 }
@@ -220,6 +216,9 @@ init_module(void)
 void
 cleanup_module(void)
 {
+#ifdef RPC_DEBUG
+	rpc_unregister_sysctl();
+#endif
 	rpc_proc_exit();
 }
 #endif

@@ -71,7 +71,6 @@
 #include "sd.h"
 
 extern int inia100_detect(Scsi_Host_Template *);
-extern int inia100_release(struct Scsi_Host *);
 extern int inia100_command(Scsi_Cmnd *);
 extern int inia100_queue(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 extern int inia100_abort(Scsi_Cmnd *);
@@ -143,7 +142,7 @@ ENABLE_CLUSTERING \
 	proc_info:	NULL,				\
 	name:		inia100_REVID, \
 	detect:		inia100_detect, \
-	release:	inia100_release, \
+	release:	NULL, \
 	info:		NULL,					\
 	command:	inia100_command, \
 	queuecommand:	inia100_queue, \
@@ -168,9 +167,7 @@ ENABLE_CLUSTERING \
 #endif
 #endif
 
-#ifndef VIRT_TO_BUS
 #define VIRT_TO_BUS(i)  (unsigned int) virt_to_bus((void *)(i))
-#endif
 #define ULONG   unsigned long
 #define PVOID   void *
 #define USHORT  unsigned short
@@ -351,7 +348,6 @@ typedef struct orc_scb {	/* Scsi_Ctrl_Blk                */
 #define ORC_EXECSCSI	0x00	/* SCSI initiator command with residual */
 #define ORC_BUSDEVRST	0x01	/* SCSI Bus Device Reset  */
 
-#ifndef HOSTS_C
 /* Status of ORCSCB_Status */
 #define SCB_COMPLETE	0x00	/* SCB request completed  */
 #define SCB_POST	0x01	/* SCB is posted by the HOST      */
@@ -402,7 +398,6 @@ typedef struct orc_scb {	/* Scsi_Ctrl_Blk                */
 #define	MSG_DEVRST	0x0C
 #define	MSG_STAG	0x20
 
-#endif
 /***********************************************************************
 		Target Device Control Structure
 **********************************************************************/

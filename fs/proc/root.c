@@ -29,6 +29,7 @@
 
 static int proc_root_readdir(struct file *, void *, filldir_t);
 static struct dentry *proc_root_lookup(struct inode *,struct dentry *);
+static int proc_unlink(struct inode *, struct dentry *);
 
 static unsigned char proc_alloc_map[PROC_NDYNAMIC / 8] = {0};
 
@@ -85,7 +86,7 @@ struct inode_operations proc_dyna_dir_inode_operations = {
 	NULL,			/* create */
 	proc_lookup,		/* lookup */
 	NULL,			/* link	*/
-	NULL, 			/* unlink(struct inode *, struct dentry *) */
+	proc_unlink,		/* unlink(struct inode *, struct dentry *) */
 	NULL,			/* symlink	*/
 	NULL,			/* mkdir */
 	NULL,			/* rmdir */
@@ -632,13 +633,6 @@ static struct proc_dir_entry proc_root_rtc = {
 	0, &proc_array_inode_operations
 };
 #endif
-#ifdef CONFIG_SGI_DS1286
-static struct proc_dir_entry proc_root_ds1286 = {
-	PROC_RTC, 3, "rtc",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_array_inode_operations
-};
-#endif
 static struct proc_dir_entry proc_root_locks = {
 	PROC_LOCKS, 5, "locks",
 	S_IFREG | S_IRUGO, 1, 0, 0,
@@ -715,9 +709,6 @@ __initfunc(void proc_root_init(void))
 	proc_register(&proc_root, &proc_root_cmdline);
 #ifdef CONFIG_RTC
 	proc_register(&proc_root, &proc_root_rtc);
-#endif
-#ifdef CONFIG_SGI_DS1286
-	proc_register(&proc_root, &proc_root_ds1286);
 #endif
 	proc_register(&proc_root, &proc_root_locks);
 
@@ -844,7 +835,6 @@ static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentr
 		}
 		pid *= 10;
 		pid += c;
-		if (!pid) break;
 		if (pid & 0xffff0000) {
 			pid = 0;
 			break;
@@ -987,5 +977,17 @@ static int proc_root_readdir(struct file * filp,
 			break;
 		filp->f_pos++;
 	}
+	return 0;
+}
+
+static int proc_unlink(struct inode *dir, struct dentry *dentry)
+{
+	struct proc_dir_entry * dp = dir->u.generic_ip;
+
+printk("proc_file_unlink: deleting %s/%s\n", dp->name, dentry->d_name.name);
+
+	remove_proc_entry(dentry->d_name.name, dp);
+	dentry->d_inode->i_nlink = 0;
+	d_delete(dentry);
 	return 0;
 }

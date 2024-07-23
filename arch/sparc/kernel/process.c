@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.137.2.2 1999/10/01 01:32:53 anton Exp $
+/*  $Id: process.c,v 1.137 1999/05/08 03:00:10 davem Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -37,6 +37,7 @@
 #include <asm/delay.h>
 #include <asm/processor.h>
 #include <asm/psr.h>
+#include <asm/system.h>
 #include <asm/elf.h>
 
 extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
@@ -55,6 +56,7 @@ asmlinkage int sys_idle(void)
 {
 	int ret = -EPERM;
 
+	lock_kernel();
 	if (current->pid != 0)
 		goto out;
 
@@ -99,6 +101,7 @@ asmlinkage int sys_idle(void)
 	}
 	ret = 0;
 out:
+	unlock_kernel();
 	return ret;
 }
 

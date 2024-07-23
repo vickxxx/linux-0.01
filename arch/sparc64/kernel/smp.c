@@ -78,8 +78,8 @@ int smp_bogo(char *buf)
 		if(cpu_present_map & (1UL << i))
 			len += sprintf(buf + len,
 				       "Cpu%dBogo\t: %lu.%02lu\n",
-				       i, cpu_data[i].udelay_val / (500000/HZ),
-				       (cpu_data[i].udelay_val / (5000/HZ)) % 100);
+				       i, cpu_data[i].udelay_val / 500000,
+				       (cpu_data[i].udelay_val / 5000) % 100);
 	return len;
 }
 
@@ -91,11 +91,10 @@ __initfunc(void smp_store_cpu_info(int id))
 	cpu_data[id].bh_count			= 0;
 	/* multiplier and counter set by
 	   smp_setup_percpu_timer()  */
-	cpu_data[id].udelay_val			= loops_per_jiffy;
+	cpu_data[id].udelay_val			= loops_per_sec;
 
 	cpu_data[id].pgcache_size		= 0;
-	cpu_data[id].pte_cache[0]		= NULL;
-	cpu_data[id].pte_cache[1]		= NULL;
+	cpu_data[id].pte_cache			= NULL;
 	cpu_data[id].pgdcache_size		= 0;
 	cpu_data[id].pgd_cache			= NULL;
 	cpu_data[id].idle_volume		= 1;
@@ -119,7 +118,6 @@ extern void cpu_probe(void);
 __initfunc(void smp_callin(void))
 {
 	int cpuid = hard_smp_processor_id();
-	unsigned long pstate;
 
 	inherit_locked_prom_mappings(0);
 
@@ -128,36 +126,17 @@ __initfunc(void smp_callin(void))
 
 	cpu_probe();
 
-	/* Guarentee that the following sequences execute
-	 * uninterrupted.
-	 */
-	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-			     "wrpr	%0, %1, %%pstate"
-			     : "=r" (pstate)
-			     : "i" (PSTATE_IE));
-
-	/* Set things up so user can access tick register for profiling
-	 * purposes.  Also workaround BB_ERRATA_1 by doing a dummy
-	 * read back of %tick after writing it.
-	 */
+	/* Master did this already, now is the time for us to do it. */
 	__asm__ __volatile__("
 	sethi	%%hi(0x80000000), %%g1
-	ba,pt	%%xcc, 1f
-	 sllx	%%g1, 32, %%g1
-	.align	64
-1:	rd	%%tick, %%g2
+	sllx	%%g1, 32, %%g1
+	rd	%%tick, %%g2
 	add	%%g2, 6, %%g2
 	andn	%%g2, %%g1, %%g2
 	wrpr	%%g2, 0, %%tick
-	rdpr	%%tick, %%g0"
-	: /* no outputs */
+"	: /* no outputs */
 	: /* no inputs */
 	: "g1", "g2");
-
-	/* Restore PSTATE_IE. */
-	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
-			     : /* no outputs */
-			     : "r" (pstate));
 
 	smp_setup_percpu_timer();
 
@@ -179,7 +158,7 @@ __initfunc(void smp_callin(void))
 }
 
 extern int cpu_idle(void *unused);
-extern unsigned long init_IRQ(unsigned long);
+extern void init_IRQ(void);
 
 void initialize_secondary(void)
 {
@@ -188,8 +167,7 @@ void initialize_secondary(void)
 int start_secondary(void *unused)
 {
 	trap_init();
-	/* No memory allocation allowed on slave IRQ init */
-	init_IRQ(0UL);
+	init_IRQ();
 	smp_callin();
 	return cpu_idle(NULL);
 }
@@ -202,7 +180,7 @@ void cpu_panic(void)
 
 extern struct prom_cpuinfo linux_cpus[64];
 
-extern unsigned long sparc64_cpu_startup;
+extern unsigned long smp_trampoline;
 
 /* The OBP cpu startup callback truncates the 3rd arg cookie to
  * 32-bits (I think) so to be safe we have it read the pointer
@@ -228,13 +206,15 @@ __initfunc(void smp_boot_cpus(void))
 			continue;
 
 		if(cpu_present_map & (1UL << i)) {
-			unsigned long entry = (unsigned long)(&sparc64_cpu_startup);
+			unsigned long entry = (unsigned long)(&smp_trampoline);
 			unsigned long cookie = (unsigned long)(&cpu_new_task);
 			struct task_struct *p;
 			int timeout;
 			int no;
+			extern unsigned long phys_base;
 
-			prom_printf("Starting CPU %d... ", i);
+			entry += phys_base - KERNBASE;
+			cookie += phys_base - KERNBASE;
 			kernel_thread(start_secondary, NULL, CLONE_PID);
 			p = task[++cpucount];
 			p->processor = i;
@@ -255,11 +235,9 @@ __initfunc(void smp_boot_cpus(void))
 				cpu_number_map[i] = cpucount;
 				__cpu_logical_map[cpucount] = i;
 				prom_cpu_nodes[i] = linux_cpus[no].prom_node;
-				prom_printf("OK\n");
 			} else {
 				cpucount--;
 				printk("Processor %d is stuck.\n", i);
-				prom_printf("FAILED\n");
 			}
 		}
 		if(!callin_flag) {
@@ -280,8 +258,8 @@ __initfunc(void smp_boot_cpus(void))
 		}
 		printk("Total of %d processors activated (%lu.%02lu BogoMIPS).\n",
 		       cpucount + 1,
-		       (bogosum + 2500)/(500000/HZ),
-		       ((bogosum + 2500)/(5000/HZ))%100);
+		       (bogosum + 2500)/500000,
+		       ((bogosum + 2500)/5000)%100);
 		smp_activated = 1;
 		smp_num_cpus = cpucount + 1;
 	}
@@ -301,13 +279,6 @@ static inline void xcall_deliver(u64 data0, u64 data1, u64 data2, u64 pstate, un
 	       smp_processor_id(), data0, data1, data2, target);
 #endif
 again:
-	/* Ok, this is the real Spitfire Errata #54.
-	 * One must read back from a UDB internal register
-	 * after writes to the UDB interrupt dispatch, but
-	 * before the membar Sync for that write.
-	 * So we use the high UDB control register (ASI 0x7f,
-	 * ADDR 0x20) for the dummy read. -DaveM
-	 */
 	__asm__ __volatile__("
 	wrpr	%0, %1, %%pstate
 	wr	%%g0, %2, %%asi
@@ -316,14 +287,10 @@ again:
 	stxa	%5, [0x60] %%asi
 	membar	#Sync
 	stxa	%%g0, [%6] %%asi
-	membar	#Sync
-	mov	0x20, %%g1
-	ldxa	[%%g1] 0x7f, %%g0
 	membar	#Sync"
 	: /* No outputs */
 	: "r" (pstate), "i" (PSTATE_IE), "i" (ASI_UDB_INTR_W),
-	  "r" (data0), "r" (data1), "r" (data2), "r" (target)
-	: "g1");
+	  "r" (data0), "r" (data1), "r" (data2), "r" (target));
 
 	/* NOTE: PSTATE_IE is still clear. */
 	stuck = 100000;
@@ -569,31 +536,14 @@ void smp_release(void)
 /* Imprisoned penguins run with %pil == 15, but PSTATE_IE set, so they
  * can service tlb flush xcalls...
  */
-extern void prom_world(int);
-extern void save_alternate_globals(unsigned long *);
-extern void restore_alternate_globals(unsigned long *);
 void smp_penguin_jailcell(void)
 {
-	unsigned long global_save[24];
-
-	__asm__ __volatile__("flushw");
-	save_alternate_globals(global_save);
-	prom_world(1);
+	flushw_user();
 	atomic_inc(&smp_capture_registry);
 	membar("#StoreLoad | #StoreStore");
 	while(penguins_are_doing_time)
 		membar("#LoadLoad");
-	restore_alternate_globals(global_save);
 	atomic_dec(&smp_capture_registry);
-	prom_world(0);
-}
-
-extern unsigned long xcall_promstop;
-
-void smp_promstop_others(void)
-{
-	if (smp_processors_ready)
-		smp_cross_call(&xcall_promstop, 0, 0, 0);
 }
 
 static inline void sparc64_do_profile(unsigned long pc)
@@ -621,7 +571,7 @@ extern void update_one_process(struct task_struct *p, unsigned long ticks,
 
 void smp_percpu_timer_interrupt(struct pt_regs *regs)
 {
-	unsigned long compare, tick, pstate;
+	unsigned long compare, tick;
 	int cpu = smp_processor_id();
 	int user = user_mode(regs);
 
@@ -687,87 +637,27 @@ do {	hardirq_enter(cpu);			\
 			prof_counter(cpu) = prof_multiplier(cpu);
 		}
 
-		/* Guarentee that the following sequences execute
-		 * uninterrupted.
-		 */
-		__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-				     "wrpr	%0, %1, %%pstate"
-				     : "=r" (pstate)
-				     : "i" (PSTATE_IE));
-
-		/* Workaround for Spitfire Errata (#54 I think??), I discovered
-		 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
-		 * number 103640.
-		 *
-		 * On Blackbird writes to %tick_cmpr can fail, the
-		 * workaround seems to be to execute the wr instruction
-		 * at the start of an I-cache line, and perform a dummy
-		 * read back from %tick_cmpr right after writing to it. -DaveM
-		 *
-		 * Just to be anal we add a workaround for Spitfire
-		 * Errata 50 by preventing pipeline bypasses on the
-		 * final read of the %tick register into a compare
-		 * instruction.  The Errata 50 description states
-		 * that %tick is not prone to this bug, but I am not
-		 * taking any chances.
-		 */
 		__asm__ __volatile__("rd	%%tick_cmpr, %0\n\t"
-				     "ba,pt	%%xcc, 1f\n\t"
-				     " add	%0, %2, %0\n\t"
-				     ".align	64\n"
-				  "1: wr	%0, 0x0, %%tick_cmpr\n\t"
-				     "rd	%%tick_cmpr, %%g0\n\t"
-				     "rd	%%tick, %1\n\t"
-				     "mov	%1, %1"
+				     "add	%0, %2, %0\n\t"
+				     "wr	%0, 0x0, %%tick_cmpr\n\t"
+				     "rd	%%tick, %1"
 				     : "=&r" (compare), "=r" (tick)
 				     : "r" (current_tick_offset));
-
-		/* Restore PSTATE_IE. */
-		__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
-				     : /* no outputs */
-				     : "r" (pstate));
 	} while (tick >= compare);
 }
 
 __initfunc(static void smp_setup_percpu_timer(void))
 {
 	int cpu = smp_processor_id();
-	unsigned long pstate;
 
 	prof_counter(cpu) = prof_multiplier(cpu) = 1;
 
-	/* Guarentee that the following sequences execute
-	 * uninterrupted.
-	 */
-	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-			     "wrpr	%0, %1, %%pstate"
-			     : "=r" (pstate)
-			     : "i" (PSTATE_IE));
-
-	/* Workaround for Spitfire Errata (#54 I think??), I discovered
-	 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
-	 * number 103640.
-	 *
-	 * On Blackbird writes to %tick_cmpr can fail, the
-	 * workaround seems to be to execute the wr instruction
-	 * at the start of an I-cache line, and perform a dummy
-	 * read back from %tick_cmpr right after writing to it. -DaveM
-	 */
-	__asm__ __volatile__("
-		rd	%%tick, %%g1
-		ba,pt	%%xcc, 1f
-		 add	%%g1, %0, %%g1
-		.align	64
-	1:	wr	%%g1, 0x0, %%tick_cmpr
-		rd	%%tick_cmpr, %%g0"
-	: /* no outputs */
-	: "r" (current_tick_offset)
-	: "g1");
-
-	/* Restore PSTATE_IE. */
-	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
+	__asm__ __volatile__("rd	%%tick, %%g1\n\t"
+			     "add	%%g1, %0, %%g1\n\t"
+			     "wr	%%g1, 0x0, %%tick_cmpr"
 			     : /* no outputs */
-			     : "r" (pstate));
+			     : "r" (current_tick_offset)
+			     : "g1");
 }
 
 __initfunc(void smp_tick_init(void))
@@ -884,8 +774,7 @@ __initfunc(static void smp_tune_scheduling (void))
 	       (int) cacheflush_time);
 }
 
-/* /proc/profile writes can call this, don't __init it please. */
-int setup_profiling_timer(unsigned int multiplier)
+int __init setup_profiling_timer(unsigned int multiplier)
 {
 	unsigned long flags;
 	int i;

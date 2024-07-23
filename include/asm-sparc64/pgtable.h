@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.103.2.4 2000/12/11 12:31:06 anton Exp $
+/* $Id: pgtable.h,v 1.103 1999/03/28 08:40:04 davem Exp $
  * pgtable.h: SpitFire page table operations.
  *
  * Copyright 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -157,7 +157,7 @@ extern pte_t __bad_page(void);
  * hit for all __pa()/__va() operations.
  */
 extern unsigned long phys_base;
-#define ZERO_PAGE(vaddr)	((unsigned long)__va(phys_base))
+#define ZERO_PAGE	((unsigned long)__va(phys_base))
 
 /* Allocate a block of RAM which is aligned to its size.
  * This procedure can be used until the call to mem_init().
@@ -171,16 +171,9 @@ extern void *sparc_init_alloc(unsigned long *kbrk, unsigned long size);
 #define flush_cache_range(mm, start, end)	flushw_user()
 #define flush_cache_page(vma, page)		flushw_user()
 
-/* This is unnecessary on the SpitFire since D-CACHE is write-through. */
+/* These operations are unnecessary on the SpitFire since D-CACHE is write-through. */
+#define flush_icache_range(start, end)		do { } while (0)
 #define flush_page_to_ram(page)			do { } while (0)
-
-/* 
- * icache doesnt snoop local stores and we don't use block commit stores
- * (which invalidate icache lines) during module load, so we need this.
- */
-extern void flush_icache_range(unsigned long start, unsigned long end);
-
-extern void flush_dcache_page(unsigned long page);
 
 extern void __flush_dcache_range(unsigned long start, unsigned long end);
 
@@ -339,7 +332,7 @@ static __inline__ pte_t pte_mkdirty(pte_t _pte)
 #else
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
-	unsigned long *pte_cache[2];
+	unsigned long *pte_cache;
 	unsigned int pgcache_size;
 	unsigned int pgdcache_size;
 } pgt_quicklists;
@@ -436,12 +429,9 @@ extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_premasked);
 extern __inline__ pmd_t *get_pmd_fast(void)
 {
 	unsigned long *ret;
-	int color = 0;
 
-	if (pte_quicklist[color] == NULL)
-		color = 1;
-	if((ret = (unsigned long *)pte_quicklist[color]) != NULL) {
-		pte_quicklist[color] = (unsigned long *)(*ret);
+	if((ret = (unsigned long *)pte_quicklist) != NULL) {
+		pte_quicklist = (unsigned long *)(*ret);
 		ret[0] = 0;
 		pgtable_cache_size--;
 	}
@@ -450,10 +440,8 @@ extern __inline__ pmd_t *get_pmd_fast(void)
 
 extern __inline__ void free_pmd_fast(pgd_t *pmd)
 {
-	int color = (int) (((long)pmd >> PAGE_SHIFT) & 0x1);
-
-	*(unsigned long *)pmd = (unsigned long) pte_quicklist[color];
-	pte_quicklist[color] = (unsigned long *) pmd;
+	*(unsigned long *)pmd = (unsigned long) pte_quicklist;
+	pte_quicklist = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
@@ -462,15 +450,14 @@ extern __inline__ void free_pmd_slow(pmd_t *pmd)
 	free_page((unsigned long)pmd);
 }
 
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted,
-			   unsigned long color);
+extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
 
-extern __inline__ pte_t *get_pte_fast(unsigned long color)
+extern __inline__ pte_t *get_pte_fast(void)
 {
 	unsigned long *ret;
 
-	if((ret = (unsigned long *)pte_quicklist[color]) != NULL) {
-		pte_quicklist[color] = (unsigned long *)(*ret);
+	if((ret = (unsigned long *)pte_quicklist) != NULL) {
+		pte_quicklist = (unsigned long *)(*ret);
 		ret[0] = 0;
 		pgtable_cache_size--;
 	}
@@ -479,9 +466,8 @@ extern __inline__ pte_t *get_pte_fast(unsigned long color)
 
 extern __inline__ void free_pte_fast(pte_t *pte)
 {
-	unsigned long color = (((unsigned long)pte >> PAGE_SHIFT) & 0x1);
-	*(unsigned long *)pte = (unsigned long) pte_quicklist[color];
-	pte_quicklist[color] = (unsigned long *) pte;
+	*(unsigned long *)pte = (unsigned long) pte_quicklist;
+	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
@@ -501,12 +487,10 @@ extern inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
 {
 	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
 	if (pmd_none(*pmd)) {
-		/* Be careful, address can be just about anything... */
-		unsigned long color = (((unsigned long)pmd)>>2UL) & 0x1UL;
-		pte_t *page = get_pte_fast(color);
+		pte_t *page = get_pte_fast();
 
 		if (!page)
-			return get_pte_slow(pmd, address, color);
+			return get_pte_slow(pmd, address);
 		pmd_set(pmd, page);
 		return page + address;
 	}

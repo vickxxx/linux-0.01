@@ -91,10 +91,6 @@ print_item (WINDOW * win, const char *item, int choice, int selected, int hotkey
     	wattrset (win, selected ? tag_key_selected_attr : tag_key_attr);
     	mvwaddch(win, choice, item_x+j, menu_item[j]);
     }
-    if (selected) {
-wmove (win, choice, item_x+1);
-wrefresh (win);
-    }
 }
 
 /*
@@ -271,11 +267,9 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
 		 box_y, box_x+item_x+1, menu_height);
 
     print_buttons (dialog, height, width, 0);
-    wmove (menu, choice, item_x+1);
-    wrefresh (menu);
 
     while (key != ESC) {
-	key = wgetch(menu);
+	key = wgetch(dialog);
 
 	if (key < 256 && isalpha(key)) key = tolower(key);
 
@@ -378,8 +372,8 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
             print_arrows(dialog, item_no, scroll,
                          box_y, box_x+item_x+1, menu_height);
 
-            wnoutrefresh (dialog);
-            wrefresh (menu);
+            wnoutrefresh (menu);
+            wrefresh (dialog);
 
 	    continue;		/* wait for another key press */
         }
@@ -392,7 +386,7 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
 			? 2 : (button > 2 ? 0 : button);
 
 	    print_buttons(dialog, height, width, button);
-	    wrefresh (menu);
+	    wrefresh (dialog);
 	    break;
 	case ' ':
 	case 's':

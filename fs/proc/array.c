@@ -76,11 +76,6 @@ int get_malloc(char * buffer);
 #endif
 
 
-static int open_kcore(struct inode * inode, struct file * filp)
-{
-	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
-}
-
 static ssize_t read_core(struct file * file, char * buf,
 			 size_t count, loff_t *ppos)
 {
@@ -98,9 +93,6 @@ static ssize_t read_core(struct file * file, char * buf,
 	memset(&dump, 0, sizeof(struct user));
 	dump.magic = CMAGIC;
 	dump.u_dsize = max_mapnr;
-#if defined (__i386__)
-	dump.start_code = PAGE_OFFSET;
-#endif
 #ifdef __alpha__
 	dump.start_data = PAGE_OFFSET;
 #endif
@@ -145,12 +137,6 @@ static ssize_t read_core(struct file * file, char * buf,
 static struct file_operations proc_kcore_operations = {
 	NULL,           /* lseek */
 	read_core,
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-	open_kcore
 };
 
 struct inode_operations proc_kcore_inode_operations = {
@@ -248,10 +234,9 @@ static int get_kstat(char * buffer)
 	unsigned long ticks;
 
 	ticks = jiffies * smp_num_cpus;
-#ifndef CONFIG_ARCH_S390
 	for (i = 0 ; i < NR_IRQS ; i++)
 		sum += kstat_irqs(i);
-#endif
+
 #ifdef __SMP__
 	len = sprintf(buffer,
 		"cpu  %u %u %u %lu\n",
@@ -275,13 +260,8 @@ static int get_kstat(char * buffer)
 		"disk_rblk %u %u %u %u\n"
 		"disk_wblk %u %u %u %u\n"
 		"page %u %u\n"
-#ifdef CONFIG_ARCH_S390
-                "swap %u %u\n"
-		"intr 1 0",
-#else
 		"swap %u %u\n"
 		"intr %u",
-#endif
 #else
 	len = sprintf(buffer,
 		"cpu  %u %u %u %lu\n"
@@ -291,13 +271,8 @@ static int get_kstat(char * buffer)
 		"disk_rblk %u %u %u %u\n"
 		"disk_wblk %u %u %u %u\n"
 		"page %u %u\n"
-#ifdef CONFIG_ARCH_S390           
-                "swap %u %u\n"
-		"intr 1 0",   
-#else                             
-                "swap %u %u\n"    
-                "intr %u",        
-#endif                            
+		"swap %u %u\n"
+		"intr %u",
 		kstat.cpu_user,
 		kstat.cpu_nice,
 		kstat.cpu_system,
@@ -316,14 +291,10 @@ static int get_kstat(char * buffer)
 		kstat.pgpgin,
 		kstat.pgpgout,
 		kstat.pswpin,
-#ifdef CONFIG_ARCH_S390
-		kstat.pswpout);
-#else
-                kstat.pswpout, 
+		kstat.pswpout,
 		sum);
 	for (i = 0 ; i < NR_IRQS ; i++)
 		len += sprintf(buffer + len, " %u", kstat_irqs(i));
-#endif
 	len += sprintf(buffer + len,
 		"\nctxt %u\n"
 		"btime %lu\n"
@@ -558,22 +529,7 @@ static unsigned long get_wchan(struct task_struct *p)
 		return ((unsigned long *)schedule_frame)[12];
 	    }
 	    return pc;
-	}
-#elif defined(__mips__)
-	/*
-	 * The same comment as on the Alpha applies here, too ...
-	 */
-	{
-		unsigned long schedule_frame;
-		unsigned long pc;
-
-		pc = thread_saved_pc(&p->tss);
-		if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
-			schedule_frame = ((unsigned long *)(long)p->tss.reg30)[16];
-			return (unsigned long)((unsigned long *)schedule_frame)[11];
-		}
-		return pc;
-	}
+	}	
 #elif defined(__mc68000__)
 	{
 	    unsigned long fp, pc;
@@ -611,7 +567,7 @@ static unsigned long get_wchan(struct task_struct *p)
 			}
 		} while (count++ < 16);
 	}
-#elif defined(__arm__)
+#elif defined (CONFIG_ARM)
 	{
 		unsigned long fp, lr;
 		unsigned long stack_page;
@@ -651,28 +607,7 @@ static unsigned long get_wchan(struct task_struct *p)
 			fp = rw->ins[6] + bias;
 		} while (++count < 16);
 	}
-#elif defined (__s390__)
-        {
-                unsigned long ksp, backchain, ip;
-                unsigned long stack_page;
-                int count = 0;
-
-                stack_page = (unsigned long)p;
-                ksp = p->tss.ksp;
-                if (!stack_page || ksp < stack_page || ksp >= 8188+stack_page)
-                        return 0;
-                backchain = (*(unsigned long *) ksp) & 0x7fffffff;
-                do {
-                        if (backchain < stack_page || backchain >= 8188+stack_page)
-                                return 0;
-                        ip = (*(unsigned long *) (backchain+56)) & 0x7fffffff;
-                        if (ip < first_sched || ip >= last_sched)
-                                return ip;
-                        backchain = (*(unsigned long *) backchain) & 0x7fffffff;
-                } while (count++ < 16);
-        }
 #endif
-
 	return 0;
 }
 
@@ -688,7 +623,7 @@ static unsigned long get_wchan(struct task_struct *p)
 # define KSTK_EIP(tsk) \
     (*(unsigned long *)(PT_REG(pc) + PAGE_SIZE + (unsigned long)(tsk)))
 # define KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->tss.usp)
-#elif defined(__arm__)
+#elif defined(CONFIG_ARM)
 # define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1022])
 # define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1020])
 #elif defined(__mc68000__)
@@ -709,15 +644,6 @@ static unsigned long get_wchan(struct task_struct *p)
 #elif defined(__sparc__)
 # define KSTK_EIP(tsk)  ((tsk)->tss.kregs->pc)
 # define KSTK_ESP(tsk)  ((tsk)->tss.kregs->u_regs[UREG_FP])
-#elif defined(__mips__)
-# define PT_REG(reg)		((long)&((struct pt_regs *)0)->reg \
-				 - sizeof(struct pt_regs))
-#define KSTK_TOS(tsk) ((unsigned long)(tsk) + KERNEL_STACK_SIZE - 32)
-# define KSTK_EIP(tsk)	(*(unsigned long *)(KSTK_TOS(tsk) + PT_REG(cp0_epc)))
-# define KSTK_ESP(tsk)	(*(unsigned long *)(KSTK_TOS(tsk) + PT_REG(regs[29])))
-#elif defined(__s390__)
-#define KSTK_EIP(tsk)   ((tsk)->tss.regs->psw.addr)
-#define KSTK_ESP(tsk)   ((tsk)->tss.ksp)
 #endif
 
 /* Gcc optimizes away "strlen(x)" for constant x */
@@ -885,6 +811,7 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 	buffer += sprintf(buffer, "SigBlk:\t");
 	buffer = render_sigset_t(&p->blocked, buffer);
 	*buffer++ = '\n';
+
 	collect_sigign_sigcatch(p, &ign, &catch);
 	buffer += sprintf(buffer, "SigIgn:\t");
 	buffer = render_sigset_t(&ign, buffer);
@@ -922,9 +849,6 @@ static int get_status(int pid, char * buffer)
 	buffer = task_mem(tsk, buffer);
 	buffer = task_sig(tsk, buffer);
 	buffer = task_cap(tsk, buffer);
-#if __s390__
-	buffer = task_show_regs(tsk, buffer);
-#endif
 	return buffer - orig;
 }
 
@@ -939,10 +863,9 @@ static int get_stat(int pid, char * buffer)
 
 	read_lock(&tasklist_lock);
 	tsk = find_task_by_pid(pid);
-	if (!tsk) {
-		read_unlock(&tasklist_lock);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	if (!tsk)
 		return 0;
-	}
 	state = *get_task_state(tsk);
 	vsize = eip = esp = 0;
 	if (tsk->mm && tsk->mm != &init_mm) {
@@ -951,14 +874,9 @@ static int get_stat(int pid, char * buffer)
 			vsize += vma->vm_end - vma->vm_start;
 			vma = vma->vm_next;
 		}
-		if ((current->fsuid == tsk->euid && tsk->dumpable &&
-		    cap_issubset(tsk->cap_permitted, current->cap_permitted)) ||
-		    capable(CAP_DAC_OVERRIDE)) {
-			eip = KSTK_EIP(tsk);
-			esp = KSTK_ESP(tsk);
-		}
+		eip = KSTK_EIP(tsk);
+		esp = KSTK_ESP(tsk);
 	}
-	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
 
 	wchan = get_wchan(tsk);
 
@@ -1329,12 +1247,10 @@ extern int get_module_list(char *);
 extern int get_ksyms_list(char *, char **, off_t, int);
 #endif
 extern int get_device_list(char *);
-extern int get_partition_list(char *, char **, off_t, int);
+extern int get_partition_list(char *);
 extern int get_filesystem_list(char *);
 extern int get_filesystem_info( char * );
-#ifndef CONFIG_ARCH_S390
 extern int get_irq_list(char *);
-#endif
 extern int get_dma_list(char *);
 extern int get_cpuinfo(char *);
 extern int get_pci_list(char *);
@@ -1397,17 +1313,17 @@ static long get_root_array(char * page, int type, char **start,
 			return get_device_list(page);
 
 		case PROC_PARTITIONS:
-			return get_partition_list(page, start, offset, length);
-#ifndef CONFIG_ARCH_S390
+			return get_partition_list(page);
+
 		case PROC_INTERRUPTS:
 			return get_irq_list(page);
-#endif
+
 		case PROC_FILESYSTEMS:
 			return get_filesystem_list(page);
-#ifndef CONFIG_ARCH_S390
+
 		case PROC_DMA:
 			return get_dma_list(page);
-#endif
+
 		case PROC_IOPORTS:
 			return get_ioport_list(page);
 #ifdef CONFIG_BLK_DEV_MD
@@ -1425,10 +1341,6 @@ static long get_root_array(char * page, int type, char **start,
 #ifdef CONFIG_RTC
 		case PROC_RTC:
 			return get_rtc_status(page);
-#endif
-#ifdef CONFIG_SGI_DS1286
-		case PROC_RTC:
-			return get_ds1286_status(page);
 #endif
 		case PROC_LOCKS:
 			return get_locks_status(page, start, offset, length);
@@ -1482,7 +1394,7 @@ static int process_unauthorized(int type, int pid)
 		case PROC_PID_CPU:
 			return 0;	
 	}
-	if((current->fsuid == euid && ok) || capable(CAP_DAC_OVERRIDE))
+	if(capable(CAP_DAC_OVERRIDE) || (current->fsuid == euid && ok))
 		return 0;
 	return 1;
 }

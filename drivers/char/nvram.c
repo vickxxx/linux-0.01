@@ -25,10 +25,9 @@
  * the kernel and is not a module. Since the functions are used by some Atari
  * drivers, this is the case on the Atari.
  *
- * 1.0a		Paul Gortmaker: use rtc_lock, fix get/put_user in cli bugs.
  */
 
-#define NVRAM_VERSION		"1.0a"
+#define NVRAM_VERSION		"1.0"
 
 #include <linux/module.h>
 #include <linux/config.h>
@@ -79,12 +78,10 @@
 #define	mach_set_checksum	atari_set_checksum
 #define	mach_proc_infos		atari_proc_infos
 
-static spinlock_t rtc_lock;	/* optimized away; no SMP m68K */
-
 #endif
 
 /* Note that *all* calls to CMOS_READ and CMOS_WRITE must be done with
- * rtc_lock held. Due to the index-port/data-port design of the RTC, we
+ * interrupts disabled. Due to the index-port/data-port design of the RTC, we
  * don't want two different things trying to get to it at once. (e.g. the
  * periodic 11 min sync from time.c vs. this driver.)
  */
@@ -236,28 +233,23 @@ static ssize_t nvram_read(struct file * file,
 	unsigned long flags;
 	unsigned i = *ppos;
 	char *tmp = buf;
-	int checksum;
 	
 	if (i != *ppos)
 		return -EINVAL;
 
-	spin_lock_irqsave(&rtc_lock, flags);
-	checksum = nvram_check_checksum_int();
-	spin_unlock_irqrestore(&rtc_lock, flags);
-
-	if (!checksum)
+	save_flags(flags);
+	cli();
+	
+	if (!nvram_check_checksum_int()) {
+		restore_flags(flags);
 		return( -EIO );
+	}
 
 	for( ; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp )
-	{
-		int val;
-		spin_lock_irqsave(&rtc_lock, flags);
-		val = nvram_read_int(i);
-		spin_unlock_irqrestore(&rtc_lock, flags);
-		put_user( val, tmp );
-	}
+		put_user( nvram_read_int(i), tmp );
 	*ppos = i;
 
+	restore_flags(flags);
 	return( tmp - buf );
 }
 
@@ -268,31 +260,26 @@ static ssize_t nvram_write(struct file * file,
 	unsigned i = *ppos;
 	const char *tmp = buf;
 	char c;
-	int checksum;
 	
 	if (i != *ppos)
 		return -EINVAL;
 
-	spin_lock_irqsave(&rtc_lock, flags);
-	checksum = nvram_check_checksum_int();
-	spin_unlock_irqrestore(&rtc_lock, flags);
-
-	if (!checksum)
+	save_flags(flags);
+	cli();
+	
+	if (!nvram_check_checksum_int()) {
+		restore_flags(flags);
 		return( -EIO );
+	}
 
 	for( ; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp ) {
 		get_user( c, tmp );
-		spin_lock_irqsave(&rtc_lock, flags);
 		nvram_write_int( c, i );
-		spin_unlock_irqrestore(&rtc_lock, flags);
 	}
-
-	spin_lock_irqsave(&rtc_lock, flags);
 	nvram_set_checksum_int();
-	spin_unlock_irqrestore(&rtc_lock, flags);
-
 	*ppos = i;
 
+	restore_flags(flags);
 	return( tmp - buf );
 }
 
@@ -308,13 +295,14 @@ static int nvram_ioctl( struct inode *inode, struct file *file,
 		if (!capable(CAP_SYS_ADMIN))
 			return( -EACCES );
 
-		spin_lock_irqsave(&rtc_lock, flags);
+		save_flags(flags);
+		cli();
 
 		for( i = 0; i < NVRAM_BYTES; ++i )
 			nvram_write_int( 0, i );
 		nvram_set_checksum_int();
 		
-		spin_unlock_irqrestore(&rtc_lock, flags);
+		restore_flags(flags);
 		return( 0 );
 	  
 	  case NVRAM_SETCKS:		/* just set checksum, contents unchanged
@@ -323,9 +311,10 @@ static int nvram_ioctl( struct inode *inode, struct file *file,
 		if (!capable(CAP_SYS_ADMIN))
 			return( -EACCES );
 
-		spin_lock_irqsave(&rtc_lock, flags);
+		save_flags(flags);
+		cli();
 		nvram_set_checksum_int();
-		spin_unlock_irqrestore(&rtc_lock, flags);
+		restore_flags(flags);
 		return( 0 );
 
 	  default:
@@ -374,16 +363,17 @@ static int nvram_read_proc( char *buffer, char **start, off_t offset,
     int i, len = 0;
     off_t begin = 0;
 	
-	spin_lock_irqsave(&rtc_lock, flags);
+	save_flags(flags);
+	cli();
 	for( i = 0; i < NVRAM_BYTES; ++i )
 		contents[i] = nvram_read_int( i );
-	spin_unlock_irqrestore(&rtc_lock, flags);
+	restore_flags(flags);
 	
 	*eof = mach_proc_infos( contents, buffer, &len, &begin, offset, size );
 
     if (offset >= begin + len)
 		return( 0 );
-    *start = buffer + (offset - begin);
+    *start = buffer + (begin - offset);
     return( size < begin + len - offset ? size : begin + len - offset );
 	
 }
@@ -489,7 +479,7 @@ static void pc_set_checksum( void )
 #ifdef CONFIG_PROC_FS
 
 static char *floppy_types[] = {
-	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M", "3.5'' 2.88M"
+	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M"
 };
 
 static char *gfx_types[] = {
@@ -531,14 +521,14 @@ static int pc_proc_infos( unsigned char *nvram, char *buffer, int *len,
 	PRINT_PROC( "HD 0 type      : " );
 	type = nvram[4] >> 4;
 	if (type)
-		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[11] : type );
+		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[11] : type );
 	else
 		PRINT_PROC( "none\n" );
 
 	PRINT_PROC( "HD 1 type      : " );
 	type = nvram[4] & 0x0f;
 	if (type)
-		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[12] : type );
+		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[12] : type );
 	else
 		PRINT_PROC( "none\n" );
 

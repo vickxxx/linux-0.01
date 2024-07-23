@@ -1,8 +1,8 @@
 /*
  *	SoftDog	0.05:	A Software Watchdog Device
  *
- *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
- *				http://www.redhat.com
+ *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
+ *				http://www.cymru.net
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License

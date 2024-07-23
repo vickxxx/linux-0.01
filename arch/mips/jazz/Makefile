@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.6 1999/02/25 21:57:01 tsbogend Exp $
 #
 # Makefile for the Jazz family specific parts of the kernel
 #
@@ -14,8 +13,7 @@
 
 all: jazz.o
 O_TARGET := jazz.o
-O_OBJS	 := int-handler.o jazzdma.o reset.o rtc-jazz.o setup.o floppy-jazz.o \
-	    kbd-jazz.o
+O_OBJS	 := hw-access.o int-handler.o jazzdma.o reset.o rtc-jazz.o setup.o
 
 int-handler.o: int-handler.S
 

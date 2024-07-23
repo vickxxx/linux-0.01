@@ -22,7 +22,6 @@
  *			Joerg(DL1BKE)	Fixed DAMA Slave. We are *required* to start with
  *					standard AX.25 mode.
  *	AX.25 037	Jonathan(G4KLX)	New timer architecture.
- *                      Tomi(OH2BNS)    Fixed heartbeat expiry (check ax25_dev).
  */
 
 #include <linux/config.h>
@@ -154,12 +153,8 @@ unsigned long ax25_display_timer(struct timer_list *timer)
 static void ax25_heartbeat_expiry(unsigned long param)
 {
 	ax25_cb *ax25 = (ax25_cb *)param;
-	int proto = AX25_PROTO_STD_SIMPLEX;
 
-	if (ax25->ax25_dev)
-		proto = ax25->ax25_dev->values[AX25_VALUES_PROTOCOL];
-
-	switch (proto) {
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
 		case AX25_PROTO_STD_SIMPLEX:
 		case AX25_PROTO_STD_DUPLEX:
 			ax25_std_heartbeat_expiry(ax25);

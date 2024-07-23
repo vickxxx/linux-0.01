@@ -112,7 +112,7 @@ static int rd_kbsize[NUM_RAMDISKS];		/* Size in blocks of 1024 bytes */
  * architecture-specific setup routine (from the stored boot sector
  * information). 
  */
-int rd_size = CONFIG_BLK_DEV_RAM_SIZE;	/* Size of the RAM disks */
+int rd_size = 4096;		/* Size of the RAM disks */
 
 #ifndef MODULE
 int rd_doload = 0;		/* 1 = load RAM disk, 0 = don't load */
@@ -173,7 +173,7 @@ repeat:
 	if (CURRENT->cmd == READ) 
 		memset(CURRENT->buffer, 0, len); 
 	else	
-		mark_buffer_protected(CURRENT->bh);
+		set_bit(BH_Protected, &CURRENT->bh->b_state);
 
 	end_request(1);
 	goto repeat;
@@ -191,10 +191,7 @@ static int rd_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	switch (cmd) {
 		case BLKFLSBUF:
 			if (!capable(CAP_SYS_ADMIN)) return -EACCES;
-			/* special: we want to release the ramdisk memory,
-			   it's not like with the other blockdevices where
-			   this ioctl only flushes away the buffer cache. */
-			destroy_buffers(inode->i_rdev);
+			invalidate_buffers(inode->i_rdev);
 			break;
 
          	case BLKGETSIZE:   /* Return device size */
@@ -350,7 +347,7 @@ void cleanup_module(void)
 	int i;
 
 	for (i = 0 ; i < NUM_RAMDISKS; i++)
-		destroy_buffers(MKDEV(MAJOR_NR, i));
+		invalidate_buffers(MKDEV(MAJOR_NR, i));
 
 	unregister_blkdev( MAJOR_NR, "ramdisk" );
 	blk_dev[MAJOR_NR].request_fn = 0;
@@ -520,7 +517,7 @@ __initfunc(static void rd_load_image(kdev_t device, int offset, int unit))
 	}
 
 	if (nblocks > (rd_length[unit] >> RDBLK_SIZE_BITS)) {
-		printk("RAMDISK: image too big! (%d/%ld blocks)\n",
+		printk("RAMDISK: image too big! (%d/%d blocks)\n",
 		       nblocks, rd_length[unit] >> RDBLK_SIZE_BITS);
 		goto done;
 	}
@@ -567,12 +564,10 @@ __initfunc(static void rd_load_image(kdev_t device, int offset, int unit))
 		}
 		infile.f_op->read(&infile, buf, BLOCK_SIZE, &infile.f_pos);
 		outfile.f_op->write(&outfile, buf, BLOCK_SIZE, &outfile.f_pos);
-#ifndef CONFIG_ARCH_S390
 		if (!(i % 16)) {
 			printk("%c\b", rotator[rotate & 0x3]);
 			rotate++;
 		}
-#endif
 	}
 	printk("done.\n");
 	kfree(buf);
@@ -587,9 +582,6 @@ done:
 	set_fs(fs);
 }
 
-#ifdef CONFIG_MAC_FLOPPY
-int swim3_fd_eject(int devnum);
-#endif
 
 __initfunc(static void rd_load_disk(int n))
 {
@@ -610,14 +602,6 @@ __initfunc(static void rd_load_disk(int n))
 	if (rd_prompt) {
 #ifdef CONFIG_BLK_DEV_FD
 		floppy_eject();
-#endif
-#ifdef CONFIG_MAC_FLOPPY
-		if(MAJOR(ROOT_DEV) == FLOPPY_MAJOR)
-			swim3_fd_eject(MINOR(ROOT_DEV));
-#ifdef CONFIG_BLK_DEV_INITRD
-		else if(MAJOR(real_root_dev) == FLOPPY_MAJOR)
-			swim3_fd_eject(MINOR(real_root_dev));
-#endif
 #endif
 		printk(KERN_NOTICE
 		       "VFS: Insert root floppy disk to be loaded into RAM disk and press ENTER\n");
@@ -655,9 +639,7 @@ __initfunc(void initrd_load(void))
 
 #define OF(args)  args
 
-#ifndef memzero
 #define memzero(s, n)     memset ((s), 0, (n))
-#endif
 
 
 typedef unsigned char  uch;

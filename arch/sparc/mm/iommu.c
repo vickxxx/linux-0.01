@@ -1,4 +1,4 @@
-/* $Id: iommu.c,v 1.10.2.2 1999/11/03 03:05:55 davem Exp $
+/* $Id: iommu.c,v 1.10 1999/05/07 17:03:34 jj Exp $
  * iommu.c:  IOMMU specific routines for memory management.
  *
  * Copyright (C) 1995 David S. Miller  (davem@caip.rutgers.edu)
@@ -16,7 +16,6 @@
 #include <asm/sbus.h>
 #include <asm/io.h>
 #include <asm/mxcc.h>
-#include <asm/mbus.h>
 
 /* srmmu.c */
 extern int viking_mxcc_present;
@@ -202,19 +201,16 @@ static void iommu_release_scsi_sgl(struct mmu_sglist *sg, int sz, struct linux_s
 #ifdef CONFIG_SBUS
 static void iommu_map_dma_area(unsigned long addr, int len)
 {
-	unsigned long page, end, ipte_cache;
+	unsigned long page, end;
 	pgprot_t dvma_prot;
 	struct iommu_struct *iommu = SBus_chain->iommu;
 	iopte_t *iopte = iommu->page_table;
 	iopte_t *first;
 
-	if(viking_mxcc_present || srmmu_modtype == HyperSparc) {
+	if(viking_mxcc_present)
 		dvma_prot = __pgprot(SRMMU_CACHE | SRMMU_ET_PTE | SRMMU_PRIV);
-		ipte_cache = 1;
-	} else {
+	else
 		dvma_prot = __pgprot(SRMMU_ET_PTE | SRMMU_PRIV);
-		ipte_cache = 0;
-	}
 
 	iopte += ((addr - iommu->start) >> PAGE_SHIFT);
 	first = iopte;
@@ -229,24 +225,12 @@ static void iommu_map_dma_area(unsigned long addr, int len)
 			pmd_t *pmdp;
 			pte_t *ptep;
 
-			if (viking_mxcc_present)
-				viking_mxcc_flush_page(page);
-			else if (viking_flush)
-				viking_flush_page(page);
-			else
-				flush_page_to_ram(page);
-
 			pgdp = pgd_offset(init_task.mm, addr);
 			pmdp = pmd_offset(pgdp, addr);
 			ptep = pte_offset(pmdp, addr);
 
 			set_pte(ptep, pte_val(mk_pte(page, dvma_prot)));
-			if (ipte_cache != 0) {
-				iopte_val(*iopte++) = MKIOPTE(mmu_v2p(page));
-			} else {
-				iopte_val(*iopte++) =
-					MKIOPTE(mmu_v2p(page)) & ~IOPTE_CACHE;
-			}
+			iopte_val(*iopte++) = MKIOPTE(mmu_v2p(page));
 		}
 		addr += PAGE_SIZE;
 	}

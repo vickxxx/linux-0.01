@@ -25,7 +25,6 @@
  *           which must be served                               /Roman Zippel
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
@@ -76,17 +75,17 @@ int (*mach_request_irq) (unsigned int, void (*)(int, void *, struct pt_regs *),
 void (*mach_free_irq) (unsigned int, void *) = dummy_free_irq;
 
 /*
- * unsigned long init_IRQ(unsigned long memory)
+ * void init_IRQ(void)
  *
- * Parameters:	Memory base
+ * Parameters:	None
  *
- * Returns:	New memory base
+ * Returns:	Nothing
  *
  * This function should be called during kernel startup to initialize
  * the IRQ handling routines.
  */
 
-unsigned long __init init_IRQ(unsigned long memory)
+__initfunc(void init_IRQ(void))
 {
 	int i;
 
@@ -102,7 +101,6 @@ unsigned long __init init_IRQ(unsigned long memory)
 		nodes[i].handler = NULL;
 
 	mach_init_IRQ ();
-	return memory;
 }
 
 irq_node_t *new_irq_node(void)

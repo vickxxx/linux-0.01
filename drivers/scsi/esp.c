@@ -39,8 +39,6 @@
 #include <asm/idprom.h>
 #include <asm/spinlock.h>
 
-#include <linux/module.h>
-
 #define DEBUG_ESP
 /* #define DEBUG_ESP_HME */
 /* #define DEBUG_ESP_DATA */
@@ -396,7 +394,7 @@ extern inline void esp_cmd(struct Sparc_ESP *esp, struct Sparc_ESP_regs *eregs,
  *
  * struct scsi_cmnd:
  *
- *   We keep track of the synchronous capabilities of a target
+ *   We keep track of the syncronous capabilities of a target
  *   in the device member, using sync_min_period and
  *   sync_max_offset.  These are the values we directly write
  *   into the ESP registers while running a command.  If offset
@@ -496,10 +494,10 @@ static void esp_reset_dma(struct Sparc_ESP *esp)
 		esp->prev_hme_dmacsr = (DMA_PARITY_OFF|DMA_2CLKS|DMA_SCSI_DISAB|DMA_INT_ENAB);
 		esp->prev_hme_dmacsr &= ~(DMA_ENABLE|DMA_ST_WRITE|DMA_BRST_SZ);
 
-		if(can_do_burst64)
-			esp->prev_hme_dmacsr |= DMA_BRST64;
-		else if(can_do_burst32)
+		if(can_do_burst32)
 			esp->prev_hme_dmacsr |= DMA_BRST32;
+		else if(can_do_burst64)
+			esp->prev_hme_dmacsr |= DMA_BRST64;
 
 		if(can_do_sbus64)
 			esp->prev_hme_dmacsr |= DMA_SCSI_SBUS64;
@@ -612,7 +610,7 @@ static void esp_reset_esp(struct Sparc_ESP *esp, struct Sparc_ESP_regs *eregs)
 	case fas236:
 		/* Fast 236 or HME */
 		eregs->esp_cfg2 = esp->config2;
-		for(i=0; i<16; i++) {
+		for(i=0; i<8; i++) {
 			if(esp->erev == fashme) {
 				unsigned char cfg3;
 
@@ -637,7 +635,7 @@ static void esp_reset_esp(struct Sparc_ESP *esp, struct Sparc_ESP_regs *eregs)
 	case fas100a:
 		/* Fast 100a */
 		eregs->esp_cfg2 = esp->config2;
-		for(i=0; i<16; i++)
+		for(i=0; i<8; i++)
 			esp->config3[i] |= ESP_CONFIG3_FCLOCK;
 		eregs->esp_cfg3 = esp->prev_cfg3 = esp->config3[0];
 		esp->radelay = 32;
@@ -970,7 +968,7 @@ esp_irq_acquired:
 		} else {
 			int target;
 
-			for(target=0; target<16; target++)
+			for(target=0; target<8; target++)
 				esp->config3[target] = 0;
 			eregs->esp_cfg3 = esp->prev_cfg3 = 0;
 			if(ccf > ESP_CCF_F5) {
@@ -1180,7 +1178,7 @@ static int esp_host_info(struct Sparc_ESP *esp, char *ptr, off_t offset, int len
 	info.pos	= 0;
 
 	copy_info(&info, "Sparc ESP Host Adapter:\n");
-	copy_info(&info, "\tPROM node\t\t%08x\n", (unsigned int) esp->prom_node);
+	copy_info(&info, "\tPROM node\t\t%08lx\n", (unsigned long) esp->prom_node);
 	copy_info(&info, "\tPROM name\t\t%s\n", esp->prom_name);
 	copy_info(&info, "\tESP Model\t\t");
 	switch(esp->erev) {
@@ -1521,11 +1519,8 @@ do_sync_known:
 		 */
 		if((idprom->id_machtype == (SM_SUN4C | SM_4C_SS1)) ||
 		   (idprom->id_machtype == (SM_SUN4C | SM_4C_SS1PLUS))) {
-			/* But we are nice and allow tapes and removable
-			 * disks (but not CDROMs) to disconnect.
-			 */
-			if(SDptr->type == TYPE_TAPE ||
-			   (SDptr->type != TYPE_ROM && SDptr->removable))
+			/* But we are nice and allow tapes to disconnect. */
+			if(SDptr->type == TYPE_TAPE)
 				SDptr->disconnect = 1;
 			else
 				SDptr->disconnect = 0;
@@ -1543,8 +1538,7 @@ do_sync_known:
 		 */
 		if(esp->erev == fashme && !SDptr->wide) {
 			if(!SDptr->borken &&
-			   SDptr->type != TYPE_ROM &&
-			   SDptr->removable == 0) {
+			   SDptr->type != TYPE_ROM) {
 				build_wide_nego_msg(esp, 16);
 				SDptr->wide = 1;
 				esp->wnip = 1;
@@ -1561,11 +1555,6 @@ do_sync_known:
 				ESPMISC(("esp%d: Disabling sync for buggy "
 					 "CDROM.\n", esp->esp_id));
 				cdrom_hwbug_wkaround = 1;
-				build_sync_nego_msg(esp, 0, 0);
-			} else if (SDptr->removable != 0) {
-				ESPMISC(("esp%d: Not negotiating sync/wide but "
-					 "allowing disconnect for removable media.\n",
-					 esp->esp_id));
 				build_sync_nego_msg(esp, 0, 0);
 			} else {
 				build_sync_nego_msg(esp, esp->sync_defp, 15);
@@ -1600,9 +1589,7 @@ after_nego_msg_built:
 		 *           Therefore _no_ disconnects for SCSI1 targets
 		 *           thank you very much. ;-)
 		 */
-		if(((SDptr->scsi_level < 3) &&
-		    (SDptr->type != TYPE_TAPE) &&
-		    SDptr->removable == 0) ||
+		if(((SDptr->scsi_level < 3) && (SDptr->type != TYPE_TAPE)) ||
 		   cdrom_hwbug_wkaround || SDptr->borken) {
 			ESPMISC((KERN_INFO "esp%d: Disabling DISCONNECT for target %d "
 				 "lun %d\n", esp->esp_id, SCptr->target, SCptr->lun));
@@ -2521,7 +2508,7 @@ static int esp_do_data_finale(struct Sparc_ESP *esp,
 	 * on HME broken adapters because we skip the HME fifo
 	 * workaround code in esp_handle() if we are doing data
 	 * phase things.  We don't want to fuck directly with
-	 * the fifo like that, especially if doing synchronous
+	 * the fifo like that, especially if doing syncronous
 	 * transfers!  Also, will need to double the count on
 	 * HME if we are doing wide transfers, as the HME fifo
 	 * will move and count 16-bit quantities during wide data.
@@ -3600,21 +3587,14 @@ static int check_multibyte_msg(struct Sparc_ESP *esp,
 					bit = ESP_CONFIG3_FAST;
 				else
 					bit = ESP_CONFIG3_FSCSI;
-				if(period < 50) {
-					/* On FAS366, if using fast-20 synchronous transfers
-					 * we need to make sure the REQ/ACK assert/deassert
-					 * control bits are clear.
-					 */
-					if (esp->erev == fashme)
-						SDptr->sync_max_offset &= ~esp->radelay;
+				if(period < 50)
 					esp->config3[SCptr->target] |= bit;
-				} else {
+				else
 					esp->config3[SCptr->target] &= ~bit;
-				}
 				eregs->esp_cfg3 = esp->prev_cfg3 = esp->config3[SCptr->target];
 			}
-			eregs->esp_soff = esp->prev_soff = SDptr->sync_max_offset;
-			eregs->esp_stp  = esp->prev_stp  = SDptr->sync_min_period;
+			eregs->esp_soff = esp->prev_soff = SDptr->sync_min_period;
+			eregs->esp_stp  = esp->prev_stp  = SDptr->sync_max_offset;
 
 			ESPSDTR(("soff=%2x stp=%2x cfg3=%2x\n",
 				SDptr->sync_max_offset,
@@ -4315,18 +4295,3 @@ static void esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
 	spin_unlock_irqrestore(&io_request_lock, flags);
 }
 #endif
-
-int esp_revoke(Scsi_Device* SDptr)
-{
-	struct Sparc_ESP *esp = (struct Sparc_ESP *) SDptr->host->hostdata;
-	esp->targets_present &= ~(1 << SDptr->id);
-	return 0;
-}
-
-#ifdef MODULE
-Scsi_Host_Template driver_template = SCSI_SPARC_ESP;
-
-#include "scsi_module.c"
-
-EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

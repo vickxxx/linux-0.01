@@ -1,18 +1,14 @@
-#include <linux/config.h>
+
 #include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
-#include <linux/pci.h>
-#include <linux/openpic.h>
-#include <asm/pci-bridge.h>
 #include <asm/io.h>
 #include <asm/smp.h>
 #include <asm/prom.h>
 #include "pmac_pic.h"
-#include "open_pic.h"
 
-struct pmac_irq_hw {
+/* pmac */struct pmac_irq_hw {
         unsigned int    flag;
         unsigned int    enable;
         unsigned int    ack;
@@ -30,18 +26,10 @@ static volatile struct pmac_irq_hw *pmac_irq_hw[4] = {
 static int max_irqs;
 static int max_real_irqs;
 
-extern u_int openpic_read(volatile u_int *addr);
-
 #define MAXCOUNT 10000000
 
 #define GATWICK_IRQ_POOL_SIZE        10
 static struct interrupt_info gatwick_int_pool[GATWICK_IRQ_POOL_SIZE];
-
-extern int pmac_pcibios_read_config_word(unsigned char bus, unsigned char dev_fn,
-                                      unsigned char offset, unsigned short *val);
-extern int pmac_pcibios_write_config_word(unsigned char bus, unsigned char dev_fn,
-                                      unsigned char offset, unsigned short val);
-
 
 static void __pmac pmac_mask_and_ack_irq(unsigned int irq_nr)
 {
@@ -120,7 +108,7 @@ struct hw_interrupt_type pmac_pic = {
 };
 
 struct hw_interrupt_type gatwick_pic = {
-        " PMAC-PI2 ",
+	" GATWICK  ",
 	NULL,
 	NULL,
 	NULL,
@@ -158,8 +146,6 @@ pmac_do_IRQ(struct pt_regs *regs,
 	    int            cpu,
             int            isfake)
 {
-	extern void psurge_smp_message_recv(void);
-
 	int irq;
 	unsigned long bits = 0;
 
@@ -174,7 +160,7 @@ pmac_do_IRQ(struct pt_regs *regs,
                         if (xmon_2nd)
                                 xmon(regs);
 #endif
-                        psurge_smp_message_recv();
+                        smp_message_recv();
                         goto out;
                 }
                 /* could be here due to a do_fake_interrupt call but we don't
@@ -304,119 +290,17 @@ static void __init pmac_fix_gatwick_interrupts(struct device_node *gw, int irq_b
 	}
 }
 
-/*
- * The PowerBook 3400/2400/3500 can have a combo ethernet/modem
- * card which includes an ohare chip that acts as a second interrupt
- * controller.  If we find this second ohare, set it up and fix the
- * interrupt value in the device tree for the ethernet chip.
- */
-static void __init enable_second_ohare(void)
-{
-	unsigned char bus, devfn;
-	unsigned short cmd;
-        unsigned long addr;
-	int second_irq;
-	struct device_node *irqctrler = find_devices("pci106b,7");
-	struct device_node *ether;
-
-	if (irqctrler == NULL || irqctrler->n_addrs <= 0)
-		return;
-	addr = (unsigned long) ioremap(irqctrler->addrs[0].address, 0x40);
-	pmac_irq_hw[1] = (volatile struct pmac_irq_hw *)(addr + 0x20);
-	max_irqs = 64;
-	if (pci_device_loc(irqctrler, &bus, &devfn) == 0) {
-		pmac_pcibios_read_config_word(bus, devfn, PCI_COMMAND, &cmd);
-		cmd |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
-		cmd &= ~PCI_COMMAND_IO;
-		pmac_pcibios_write_config_word(bus, devfn, PCI_COMMAND, cmd);
-	}
-
-	second_irq = irqctrler->intrs[0].line;
-	printk(KERN_INFO "irq: secondary controller on irq %d\n", second_irq);
-	request_irq(second_irq, gatwick_action, SA_INTERRUPT,
-		    "interrupt cascade", 0 );
-
-	/* Fix interrupt for the modem/ethernet combo controller. The number
-	   in the device tree (27) is bogus (correct for the ethernet-only
-	   board but not the combo ethernet/modem board).
-	   The real interrupt is 28 on the second controller -> 28+32 = 60.
-	*/
-	ether = find_devices("pci1011,14");
-	if (ether && ether->n_intrs > 0) {
-		ether->intrs[0].line = 60;
-		printk(KERN_INFO "irq: Fixed ethernet IRQ to %d\n",
-		       ether->intrs[0].line);
-	}
-}
-
 __initfunc(void
 pmac_pic_init(void))
 {
         int i;
         struct device_node *irqctrler;
-        volatile struct pmac_irq_hw *addr;
-	int second_irq;
-	u_int t;
-	int nr_irq;
+        unsigned long addr;
+	int second_irq = -999;
 
-	/* We first try to detect Apple's new Core99 chipset, since mac-io
-	 * is quite different on those machines and contains an IBM MPIC2.
-	 */
-	irqctrler = find_type_devices("open-pic");
-	if (irqctrler != NULL) {
-	    printk("PowerMac using OpenPIC irq controller\n");
-	    if (irqctrler->n_addrs > 0) {
-#ifdef CONFIG_XMON
-		struct device_node* pswitch;
-#endif /* CONFIG_XMON */	
-		OpenPIC = (volatile struct OpenPIC *)
-			ioremap(irqctrler->addrs[0].address,
-			irqctrler->addrs[0].size);
-		/* from openpic.c code... --Troy
-		 * dynamically figure out how many interrupts 
-		 * We should really do something like panic
-		 * if nr_irq >= OPENPIC_VEC_IPI
-		 */
-		t = openpic_read(&OpenPIC->Global.Feature_Reporting0);
-                nr_irq = ((t & OPENPIC_FEATURE_LAST_SOURCE_MASK) >>
-                                OPENPIC_FEATURE_LAST_SOURCE_SHIFT) + 1;
-		
-		for ( i = 0 ; i < nr_irq ; i++ ) {
-		    irq_desc[i].ctl = &open_pic;
-		    irq_desc[i].level = 0;
-		}
-		ppc_md.do_IRQ = open_pic_do_IRQ;
-		open_pic.irq_offset = 0;
-		openpic_init(1);
-#ifdef CONFIG_XMON
-		pswitch = find_devices("programmer-switch");
-		if (pswitch && pswitch->n_intrs)
-			request_irq(pswitch->intrs[0].line, xmon_irq, 0,	
-				"NMI - XMON", 0);
-#endif	/* CONFIG_XMON */
-#ifdef __SMP__
-		request_irq(OPENPIC_VEC_IPI, openpic_ipi_action,
-			    0, "IPI0", 0);
-		request_irq(OPENPIC_VEC_IPI+1, openpic_ipi_action,
-			    0, "IPI1 (invalidate TLB)", 0);
-		request_irq(OPENPIC_VEC_IPI+2, openpic_ipi_action,
-			    0, "IPI2 (stop CPU)", 0);
-		request_irq(OPENPIC_VEC_IPI+3, openpic_ipi_action,
-			    0, "IPI3 (reschedule)", 0);
-#endif	/* __SMP__ */
-		return;
-	    }
-	    irqctrler = NULL;
-	}
 
-	/*
-	 * G3 powermacs and 1999 G3 PowerBooks have 64 interrupts,
-	 * 1998 G3 Series PowerBooks have 128, 
-	 * other powermacs have 32.
-	 * The combo ethernet/modem card for the Powerstar powerbooks
-	 * (2400/3400/3500, ohare based) has a second ohare chip
-	 * effectively making a total of 64.
-	 */
+	/* G3 powermacs have 64 interrupts, G3 Series PowerBook have 128, 
+	   others have 32 */
 	max_irqs = max_real_irqs = 32;
 	irqctrler = find_devices("mac-io");
 	if (irqctrler)
@@ -433,27 +317,23 @@ pmac_pic_init(void))
 	/* get addresses of first controller */
 	if (irqctrler) {
 		if  (irqctrler->n_addrs > 0) {
-			addr = ioremap(irqctrler->addrs[0].address, 0x40);
-			addr += 2;
-			for (i = 0; i < 2; ++i, --addr)
-				pmac_irq_hw[i] = addr;
+			addr = (unsigned long) 
+				ioremap(irqctrler->addrs[0].address, 0x40);
+			for (i = 0; i < 2; ++i)
+				pmac_irq_hw[i] = (volatile struct pmac_irq_hw*)
+					(addr + (2 - i) * 0x10);
 		}
 		
 		/* get addresses of second controller */
-		irqctrler = irqctrler->next;
+		irqctrler = (irqctrler->next) ? irqctrler->next : NULL;
 		if (irqctrler && irqctrler->n_addrs > 0) {
-			addr = ioremap(irqctrler->addrs[0].address, 0x40);
-			addr += 2;
-			for (i = 2; i < 4; ++i, --addr)
-				pmac_irq_hw[i] = addr;
+			addr = (unsigned long) 
+				ioremap(irqctrler->addrs[0].address, 0x40);
+			for (i = 2; i < 4; ++i)
+				pmac_irq_hw[i] = (volatile struct pmac_irq_hw*)
+					(addr + (4 - i) * 0x10);
 		}
 	}
-
-	/* PowerBooks 3400 and 3500 can have a second controller in a second
-	   ohare chip, on the combo ethernet/modem card */
-	if (machine_is_compatible("AAPL,3400/2400")
-	     || machine_is_compatible("AAPL,3500"))
-		enable_second_ohare();
 
 	/* disable all interrupts in all controllers */
 	for (i = 0; i * 32 < max_irqs; ++i)
@@ -466,11 +346,11 @@ pmac_pic_init(void))
 			(int)second_irq);
 		if (device_is_compatible(irqctrler, "gatwick"))
 			pmac_fix_gatwick_interrupts(irqctrler, max_real_irqs);
+		for ( i = max_real_irqs ; i < max_irqs ; i++ )
+			irq_desc[i].ctl = &gatwick_pic;
 		request_irq( second_irq, gatwick_action, SA_INTERRUPT,
-			     "interrupt cascade", 0 );
+			     "gatwick cascade", 0 );
 	}
-	for (i = max_real_irqs; i < max_irqs; i++)
-		irq_desc[i].ctl = &gatwick_pic;
 	printk("System has %d possible interrupts\n", max_irqs);
 	if (max_irqs != max_real_irqs)
 		printk(KERN_DEBUG "%d interrupts on main controller\n",
@@ -480,47 +360,3 @@ pmac_pic_init(void))
 	request_irq(20, xmon_irq, 0, "NMI - XMON", 0);
 #endif	/* CONFIG_XMON */
 }
-
-#ifdef CONFIG_PMAC_PBOOK
-/*
- * These procedures are used in implementing sleep on the powerbooks.
- * sleep_save_intrs() saves the states of all interrupt enables
- * and disables all interupts except for the nominated one.
- * sleep_restore_intrs() restores the states of all interrupt enables.
- * 
- * TODO: Those should be sleep notifiers with high priority.
- */
-unsigned int sleep_save_mask[2];
-
-void
-pmac_sleep_save_intrs(int viaint)
-{
-	sleep_save_mask[0] = ppc_cached_irq_mask[0];
-	sleep_save_mask[1] = ppc_cached_irq_mask[1];
-	ppc_cached_irq_mask[0] = 0;
-	ppc_cached_irq_mask[1] = 0;
-	if (viaint > 0)
-		set_bit(viaint, ppc_cached_irq_mask);
-	out_le32(&pmac_irq_hw[0]->enable, ppc_cached_irq_mask[0]);
-	if (max_real_irqs > 32)
-		out_le32(&pmac_irq_hw[1]->enable, ppc_cached_irq_mask[1]);
-	(void)in_le32(&pmac_irq_hw[0]->flag);
-	mb();
-}
-
-void
-pmac_sleep_restore_intrs(void)
-{
-	int i;
-
-
-	out_le32(&pmac_irq_hw[0]->enable, 0);
-	if (max_real_irqs > 32)
-		out_le32(&pmac_irq_hw[1]->enable, 0);
-	(void)in_le32(&pmac_irq_hw[0]->flag);
-	mb();
-	for (i = 0; i < max_real_irqs; ++i)
-		if (test_bit(i, sleep_save_mask))
-			pmac_unmask_irq(i);
-}
-#endif /* CONFIG_PMAC_PBOOK */

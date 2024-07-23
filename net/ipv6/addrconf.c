@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: addrconf.c,v 1.48.2.2 1999/12/14 10:32:53 davem Exp $
+ *	$Id: addrconf.c,v 1.48 1999/03/25 10:04:43 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -570,21 +570,6 @@ static int ipv6_generate_eui64(u8 *eui, struct device *dev)
 	}
 	return -1;
 }
-
-static int ipv6_inherit_eui64(u8 *eui, struct inet6_dev *idev)
-{
-	int err = -1;
-	struct inet6_ifaddr *ifp;
-
-	for (ifp=idev->addr_list; ifp; ifp=ifp->if_next) {
-		if (ifp->scope == IFA_LINK && !(ifp->flags&(ADDR_STATUS|DAD_STATUS))) {
-			memcpy(eui, ifp->addr.s6_addr+8, 8);
-			err = 0;
-			break;
-		}
-	}
-	return err;
-}
 #endif
 
 /*
@@ -757,8 +742,7 @@ void addrconf_prefix_rcv(struct device *dev, u8 *opt, int len)
 #ifdef CONFIG_IPV6_EUI64
 		if (pinfo->prefix_len == 64) {
 			memcpy(&addr, &pinfo->prefix, 8);
-			if (ipv6_generate_eui64(addr.s6_addr + 8, dev) &&
-			    ipv6_inherit_eui64(addr.s6_addr + 8, in6_dev))
+			if (ipv6_generate_eui64(addr.s6_addr + 8, dev))
 				return;
 			goto ok;
 		}
@@ -905,6 +889,7 @@ static int inet6_addr_del(int ifindex, struct in6_addr *pfx, int plen)
 	struct inet6_ifaddr *ifp;
 	struct inet6_dev *idev;
 	struct device *dev;
+	int scope;
 	
 	if ((dev = dev_get_by_index(ifindex)) == NULL)
 		return -ENODEV;
@@ -912,9 +897,11 @@ static int inet6_addr_del(int ifindex, struct in6_addr *pfx, int plen)
 	if ((idev = ipv6_get_idev(dev)) == NULL)
 		return -ENXIO;
 
+	scope = ipv6_addr_scope(pfx);
+
 	start_bh_atomic();
 	for (ifp = idev->addr_list; ifp; ifp=ifp->if_next) {
-		if (ifp->prefix_len == plen &&
+		if (ifp->scope == scope && ifp->prefix_len == plen &&
 		    (!memcmp(pfx, &ifp->addr, sizeof(struct in6_addr)))) {
 			ipv6_del_addr(ifp);
 			end_bh_atomic();
@@ -1390,7 +1377,7 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp)
 	 */
 
 	if (ifp->idev->cnf.forwarding == 0 &&
-	    (dev->flags&IFF_LOOPBACK) == 0 &&
+	    (dev->flags&(IFF_NOARP|IFF_LOOPBACK)) == 0 &&
 	    (ipv6_addr_type(&ifp->addr) & IPV6_ADDR_LINKLOCAL)) {
 		struct in6_addr all_routers;
 
@@ -1542,8 +1529,6 @@ inet6_rtm_deladdr(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 			return -EINVAL;
 		pfx = RTA_DATA(rta[IFA_LOCAL-1]);
 	}
-	if (pfx == NULL)
-		return -EINVAL;
 
 	return inet6_addr_del(ifm->ifa_index, pfx, ifm->ifa_prefixlen);
 }
@@ -1566,8 +1551,6 @@ inet6_rtm_newaddr(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
 			return -EINVAL;
 		pfx = RTA_DATA(rta[IFA_LOCAL-1]);
 	}
-	if (pfx == NULL)
-		return -EINVAL;
 
 	return inet6_addr_add(ifm->ifa_index, pfx, ifm->ifa_prefixlen);
 }

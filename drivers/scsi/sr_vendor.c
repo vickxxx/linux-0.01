@@ -60,7 +60,8 @@
 
 #define VENDOR_ID (scsi_CDs[minor].vendor)
 
-void sr_vendor_init(int minor)
+void
+sr_vendor_init(int minor)
 {
 #ifndef CONFIG_BLK_DEV_SR_VENDOR
 	VENDOR_ID = VENDOR_SCSI3;
@@ -103,7 +104,8 @@ void sr_vendor_init(int minor)
 /* small handy function for switching block length using MODE SELECT,
  * used by sr_read_sector() */
 
-int sr_set_blocklength(int minor, int blocklength)
+int
+sr_set_blocklength(int minor, int blocklength)
 {
 	unsigned char           *buffer;    /* the buffer for the ioctl */
 	unsigned char		cmd[12];    /* the scsi-command */
@@ -115,8 +117,8 @@ int sr_set_blocklength(int minor, int blocklength)
 		density = (blocklength > 2048) ? 0x81 : 0x83;
 #endif
 
-	if ((buffer = (unsigned char *) scsi_malloc(512)) == NULL)
-		return -ENOMEM;
+	buffer = (unsigned char *) scsi_malloc(512);
+	if (!buffer) return -ENOMEM;
 
 #ifdef DEBUG
 	printk("sr%d: MODE SELECT 0x%x/%d\n",minor,density,blocklength);
@@ -158,8 +160,8 @@ int sr_cd_check(struct cdrom_device_info *cdi)
 	if (scsi_CDs[minor].cdi.mask & CDC_MULTI_SESSION)
 		return 0;
 	
-	if ((buffer = (unsigned char *) scsi_malloc(512)) == NULL)
-		return -ENOMEM;
+	buffer = (unsigned char *) scsi_malloc(512);
+	if(!buffer) return -ENOMEM;
 	
 	sector   = 0;         /* the multisession sector offset goes here  */
 	no_multi = 0;         /* flag: the drive can't handle multisession */

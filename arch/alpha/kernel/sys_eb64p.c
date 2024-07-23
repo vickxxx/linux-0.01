@@ -26,7 +26,6 @@
 #include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_lca.h>
-#include <asm/hwrpb.h>
 
 #include "proto.h"
 #include "irq.h"
@@ -75,7 +74,7 @@ eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
 static void __init
 eb64p_init_irq(void)
 {
-#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_CABRIOLET)
+#ifdef CONFIG_ALPHA_GENERIC
 	/*
 	 * CABRIO SRM may not set variation correctly, so here we test
 	 * the high word of the interrupt summary register for the RAZ
@@ -83,12 +82,9 @@ eb64p_init_irq(void)
 	 */
 	if (inw(0x806) != 0xffff) {
 		extern struct alpha_machine_vector cabriolet_mv;
-
-		printk("Detected Cabriolet: correcting HWRPB.\n");
-
-		hwrpb->sys_variation |= 2L << 10;
-		hwrpb_update_checksum(hwrpb);
-
+#if 1
+		printk("eb64p_init_irq: resetting for CABRIO\n");
+#endif
 		alpha_mv = cabriolet_mv;
 		alpha_mv.init_irq();
 		return;

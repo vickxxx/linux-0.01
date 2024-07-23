@@ -1,5 +1,5 @@
 /*
- * arch/alpha/kernel/traps.c
+ * kernel/traps.c
  *
  * (C) Copyright 1994 Linus Torvalds
  */
@@ -27,270 +27,66 @@ dik_show_regs(struct pt_regs *regs, unsigned long *r9_15)
 {
 	printk("pc = [<%016lx>]  ra = [<%016lx>]  ps = %04lx\n",
 	       regs->pc, regs->r26, regs->ps);
-	printk("v0 = %016lx  t0 = %016lx  t1 = %016lx\n",
+	printk("r0 = %016lx  r1 = %016lx  r2 = %016lx\n",
 	       regs->r0, regs->r1, regs->r2);
-	printk("t2 = %016lx  t3 = %016lx  t4 = %016lx\n",
+	printk("r3 = %016lx  r4 = %016lx  r5 = %016lx\n",
  	       regs->r3, regs->r4, regs->r5);
-	printk("t5 = %016lx  t6 = %016lx  t7 = %016lx\n",
+	printk("r6 = %016lx  r7 = %016lx  r8 = %016lx\n",
 	       regs->r6, regs->r7, regs->r8);
 
 	if (r9_15) {
-		printk("s0 = %016lx  s1 = %016lx  s2 = %016lx\n",
+		printk("r9 = %016lx  r10= %016lx  r11= %016lx\n",
 		       r9_15[9], r9_15[10], r9_15[11]);
-		printk("s3 = %016lx  s4 = %016lx  s5 = %016lx\n",
+		printk("r12= %016lx  r13= %016lx  r14= %016lx\n",
 		       r9_15[12], r9_15[13], r9_15[14]);
-		printk("s6 = %016lx", r9_15[15]);
+		printk("r15= %016lx\n", r9_15[15]);
 	}
 
-	printk("  a0 = %016lx  a1 = %016lx\na2 = %016lx",
+	printk("r16= %016lx  r17= %016lx  r18= %016lx\n",
 	       regs->r16, regs->r17, regs->r18);
-	printk("  a3 = %016lx  a4 = %016lx\na5 = %016lx",
+	printk("r19= %016lx  r20= %016lx  r21= %016lx\n",
  	       regs->r19, regs->r20, regs->r21);
- 	printk("  t8 = %016lx  t9 = %016lx\nt10= %016lx",
+ 	printk("r22= %016lx  r23= %016lx  r24= %016lx\n",
 	       regs->r22, regs->r23, regs->r24);
-	printk("  t11= %016lx  pv = %016lx\nat = %016lx",
+	printk("r25= %016lx  r27= %016lx  r28= %016lx\n",
 	       regs->r25, regs->r27, regs->r28);
-	printk("  gp = %016lx  sp = %p\n", regs->gp, regs+1);
-}
-
-static char * ireg_name[] = {"v0", "t0", "t1", "t2", "t3", "t4", "t5", "t6",
-			   "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6",
-			   "a0", "a1", "a2", "a3", "a4", "a5", "t8", "t9",
-			   "t10", "t11", "ra", "pv", "at", "gp", "sp", "zero"};
-
-static char * inst_name[] = {"call_pal", "", "", "", "", "", "", "",
-	"lda", "ldah", "ldbu", "ldq_u", "ldwu", "stw", "stb", "stq_u",
-	"ALU", "ALU", "ALU", "ALU", "SQRT", "FVAX", "FIEEE", "FLOAT",
-	"MISC", "PAL19", "JMP", "PAL1B", "GRAPH", "PAL1D", "PAL1E", "PAL1F",
-	"ldf", "ldg", "lds", "ldt", "stf", "stg", "sts", "stt",
-	"ldl", "ldq", "ldl_l", "ldq_l", "stl", "stq", "stl_c", "stq_c",
-	"br", "fbeq", "fblt", "fble", "bsr", "fbne", "fbge", "fbgt"
-	"blbc", "beq", "blt", "ble", "blbs", "bne", "bge", "bgt"
-};
-
-static char * jump_name[] = {"jmp", "jsr", "ret", "jsr_coroutine"};
-
-typedef struct {int func; char * text;} alist;
-
-static alist inta_name[] = {{0, "addl"}, {2, "s4addl"}, {9, "subl"},
-	{0xb, "s4subl"}, {0xf, "cmpbge"}, {0x12, "s8addl"}, {0x1b, "s8subl"},
-	{0x1d, "cmpult"}, {0x20, "addq"}, {0x22, "s4addq"}, {0x29, "subq"},
-	{0x2b, "s4subq"}, {0x2d, "cmpeq"}, {0x32, "s8addq"}, {0x3b, "s8subq"},
-	{0x3d, "cmpule"}, {0x40, "addl/v"}, {0x49, "subl/v"}, {0x4d, "cmplt"},
-	{0x60, "addq/v"}, {0x69, "subq/v"}, {0x6d, "cmple"}, {-1, 0}};
-
-static alist intl_name[] = {{0, "and"}, {8, "andnot"}, {0x14, "cmovlbs"},
-	{0x16, "cmovlbc"}, {0x20, "or"}, {0x24, "cmoveq"}, {0x26, "cmovne"},
-	{0x28, "ornot"}, {0x40, "xor"}, {0x44, "cmovlt"}, {0x46, "cmovge"},
-	{0x48, "eqv"}, {0x61, "amask"}, {0x64, "cmovle"}, {0x66, "cmovgt"},
-	{0x6c, "implver"}, {-1, 0}};
-
-static alist ints_name[] = {{2, "mskbl"}, {6, "extbl"}, {0xb, "insbl"},
-	{0x12, "mskwl"}, {0x16, "extwl"}, {0x1b, "inswl"}, {0x22, "mskll"},
-	{0x26, "extll"}, {0x2b, "insll"}, {0x30, "zap"}, {0x31, "zapnot"},
-	{0x32, "mskql"}, {0x34, "srl"}, {0x36, "extql"}, {0x39, "sll"},
-	{0x3b, "insql"}, {0x3c, "sra"}, {0x52, "mskwh"}, {0x57, "inswh"},
-	{0x5a, "extwh"}, {0x62, "msklh"}, {0x67, "inslh"}, {0x6a, "extlh"},
-	{0x72, "mskqh"}, {0x77, "insqh"}, {0x7a, "extqh"}, {-1, 0}};
-
-static alist intm_name[] = {{0, "mull"}, {0x20, "mulq"}, {0x30, "umulh"},
-	{0x40, "mull/v"}, {0x60, "mulq/v"}, {-1, 0}};
-
-static alist * int_name[] = {inta_name, intl_name, ints_name, intm_name};
-
-static char *
-assoc(int fcode, alist * a)
-{
-	while ((fcode != a->func) && (a->func != -1))
-		++a;
-	return a->text;
-}
-
-static char *
-iname(unsigned int instr)
-{
-	int opcode = instr >> 26;
-	char * name = inst_name[opcode];
-
-	switch (opcode) {
-		default:
-			break;
-
-		case 0x10:
-		case 0x11:
-		case 0x12:
-		case 0x13: {
-			char * specific_name
-			  = assoc((instr >> 5) & 0x3f, int_name[opcode - 0x10]);
-			if (specific_name)
-				name = specific_name;
-			break;
-		}
-
-		case 0x1a:
-			name = jump_name[(instr >> 14) & 3];
-			break;
-	}
-	
-	return name;
-}
-
-static enum {NOT_INST, PAL, BRANCH, MEMORY, JUMP, OPERATE, FOPERATE, MISC}
-iformat(int opcode)
-{
-	if (opcode >= 0x30)
-		return BRANCH;
-	if (opcode >= 0x20)
-		return MEMORY;
-	if (opcode == 0)
-		return PAL;
-	if (opcode < 8)
-		return NOT_INST;
-	if (opcode < 0x10)
-		return MEMORY;
-	if (opcode < 0x14)
-		return OPERATE;
-	if (opcode < 0x18)
-		return FOPERATE;
-	switch (opcode) {
-		case 0x18:
-			return MISC;
-		case 0x1A:
-			return JUMP;
-		case 0x1C:
-			return OPERATE;
-		default:
-			return NOT_INST;
-	}
-}
-
-/*
- * The purpose here is to provide useful clues about a kernel crash, so
- * less likely instructions, e.g. floating point, aren't fully decoded.
- */
-static void
-disassemble(unsigned int instr)
-{
-	int optype = instr >> 26;
-	char buf[40], *s = buf;
-
-	s += sprintf(buf, "%08x  %s ", instr, iname(instr));
-	switch (iformat(optype)) {
-		default:
-		case NOT_INST:
-		case MISC:
-			break;
-
-		case PAL:
-			s += sprintf(s, "%d", instr);
-			break;
-
-		case BRANCH: {
-			int reg = (instr >> 21) & 0x1f;
-			int offset = instr & 0x1fffff;
-
-			if (offset >= 0x100000)
-				offset -= 0x200000;
-			if (((optype & 3) == 0) || (optype >= 0x38)) {
-				if ((optype != 0x30) || (reg != 0x1f))
-					s += sprintf(s, "%s,", ireg_name[reg]);
-			} else
-				s += sprintf(s, "f%d,", reg);
-			s += sprintf(s, ".%+d", (offset + 1) << 2);
-			break;
-		}
-
-		case MEMORY: {
-			int addr_reg = (instr >> 16) & 0x1f;
-			int value_reg = (instr >> 21) & 0x1f;
-			int offset = instr & 0xffff;
-
-			if (offset >= 0x8000)
-				offset -= 0x10000;
-			if ((optype >= 0x20) && (optype < 0x28))
-				s += sprintf(s, "f%d", value_reg);
-			else
-				s += sprintf(s, "%s", ireg_name[value_reg]);
-
-			s += sprintf(s, ",%d(%s)", offset, ireg_name[addr_reg]);
-			break;
-		}
-
-		case JUMP: {
-			int target_reg = (instr >> 16) & 0x1f;
-			int return_reg = (instr >> 21) & 0x1f;
-
-			s += sprintf(s, "%s,", ireg_name[return_reg]);
-			s += sprintf(s, "(%s)", ireg_name[target_reg]);
-			break;
-		}
-
-		case OPERATE: {
-			int areg = (instr >> 21) & 0x1f;
-			int breg = (instr >> 16) & 0x1f;
-			int creg = instr & 0x1f;
-			int litflag = instr & (1<<12);
-			int lit = (instr >> 13) & 0xff;
-
-			s += sprintf(s, "%s,", ireg_name[areg]);
-			if (litflag)
-				s += sprintf(s, "%d", lit);
-			else
-				s += sprintf(s, "%s", ireg_name[breg]);
-			s += sprintf(s, ",%s", ireg_name[creg]);
-			break;
-		}
-
-		case FOPERATE: {
-			int areg = (instr >> 21) & 0x1f;
-			int breg = (instr >> 16) & 0x1f;
-			int creg = instr & 0x1f;
-
-			s += sprintf(s, "f%d,f%d,f%d", areg, breg, creg);
-			break;
-		}
-	}
-	buf[s-buf] = 0;
-	printk("%s\n", buf);
+	printk("gp = %016lx  sp = %p\n", regs->gp, regs+1);
 }
 
 static void
 dik_show_code(unsigned int *pc)
 {
-	int i;
+	long i;
 
-	printk("Code:\n");
-	for (i = -6; i < 2; i++) {
+	printk("Code:");
+	for (i = -3; i < 6; i++) {
 		unsigned int insn;
 		if (__get_user(insn, pc+i))
 			break;
-		printk("%c", i ? ' ' : '*');
-		disassemble(insn);
+		printk("%c%08x%c",i?' ':'<',insn,i?' ':'>');
 	}
+	printk("\n");
 }
 
-void
+static void
 dik_show_trace(unsigned long *sp)
 {
-	int i = 1;
-
-	printk("Trace: ");
-	do {
+	long i = 0;
+	printk("Trace:");
+	while (0x1ff8 & (unsigned long) sp) {
 		extern unsigned long _stext, _etext;
-		unsigned long kpc = *sp;
-
-		if (kpc < (unsigned long) &_stext)
+		unsigned long tmp = *sp;
+		sp++;
+		if (tmp < (unsigned long) &_stext)
 			continue;
-		if (kpc >= (unsigned long) &_etext)
+		if (tmp >= (unsigned long) &_etext)
 			continue;
-		/*
-		 * Assume that only the low 24-bits of a kernel text address
-		 * is interesting.
-		 */
-		printk("%6x%c", (int)kpc & 0xffffff, (++i % 11) ? ' ' : '\n');
-	} while (((unsigned long)++sp & 0x1ff8) && (i < 33));
-	if (i >= 33)
-		printk(" ...");
+		printk(" [<%lx>]", tmp);
+		if (++i > 40) {
+			printk(" ...");
+			break;
+		}
+	}
 	printk("\n");
 }
 
@@ -299,9 +95,6 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 {
 	if (regs->ps & 8)
 		return;
-#ifdef __SMP__
-	printk("CPU %d ", hard_smp_processor_id());
-#endif
 	printk("%s(%d): %s %ld\n", current->comm, current->pid, str, err);
 	dik_show_regs(regs, r9_15);
 	dik_show_code((unsigned int *)regs->pc);
@@ -335,8 +128,8 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 	if (summary & 1) {
 		/* Software-completion summary bit is set, so try to
 		   emulate the instruction.  */
-		if (!amask(AMASK_PRECISE_TRAP)) {
-			/* 21264 (except pass 1) has precise exceptions.  */
+		if (implver() == IMPLVER_EV6) {
+			/* Whee!  EV6 has precice exceptions.  */
 			if (alpha_fp_emul(regs.pc - 4))
 				return;
 		} else {
@@ -345,12 +138,14 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 		}
 	}
 
+	lock_kernel();
 #if 0
 	printk("%s: arithmetic trap at %016lx: %02lx %016lx\n",
 		current->comm, regs.pc, summary, write_mask);
 #endif
 	die_if_kernel("Arithmetic fault", &regs, 0, 0);
 	send_sig(SIGFPE, current, 1);
+	unlock_kernel();
 }
 
 asmlinkage void
@@ -440,8 +235,10 @@ do_entDbg(unsigned long type, unsigned long a1,
 	  unsigned long a2, unsigned long a3, unsigned long a4,
 	  unsigned long a5, struct pt_regs regs)
 {
+	lock_kernel();
 	die_if_kernel("Instruction fault", &regs, type, 0);
 	force_sig(SIGILL, current);
+	unlock_kernel();
 }
 
 
@@ -652,12 +449,14 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 got_exception:
 	/* Ok, we caught the exception, but we don't want it.  Is there
 	   someone to pass it along to?  */
-	if ((fixup = search_exception_table(pc, regs.gp)) != 0) {
+	if ((fixup = search_exception_table(pc)) != 0) {
 		unsigned long newpc;
 		newpc = fixup_exception(una_reg, fixup, pc);
 
+		lock_kernel();
 		printk("Forwarding unaligned exception at %lx (%lx)\n",
 		       pc, newpc);
+		unlock_kernel();
 
 		(&regs)->pc = newpc;
 		return;
@@ -811,9 +610,11 @@ do_entUnaUser(void * va, unsigned long opcode,
 			cnt = 0;
 		}
 		if (++cnt < 5) {
+			lock_kernel();
 			printk("%s(%d): unaligned trap at %016lx: %p %lx %ld\n",
 			       current->comm, current->pid,
 			       regs->pc - 4, va, opcode, reg);
+			unlock_kernel();
 		}
 		last_time = jiffies;
 	}
@@ -1067,12 +868,16 @@ do_entUnaUser(void * va, unsigned long opcode,
 
 give_sigsegv:
 	regs->pc -= 4;  /* make pc point to faulting insn */
+	lock_kernel();
 	send_sig(SIGSEGV, current, 1);
+	unlock_kernel();
 	return;
 
 give_sigbus:
 	regs->pc -= 4;
+	lock_kernel();
 	send_sig(SIGBUS, current, 1);
+	unlock_kernel();
 	return;
 }
 
@@ -1086,9 +891,7 @@ alpha_ni_syscall(unsigned long a0, unsigned long a1, unsigned long a2,
 {
 	/* We only get here for OSF system calls, minus #112;
 	   the rest go to sys_ni_syscall.  */
-#if 0
 	printk("<sc %ld(%lx,%lx,%lx)>", regs.r0, a0, a1, a2);
-#endif
 	return -ENOSYS;
 }
 

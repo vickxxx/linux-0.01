@@ -1,4 +1,4 @@
-/* $Id: creatorfb.c,v 1.27.2.2 1999/11/05 09:07:56 davem Exp $
+/* $Id: creatorfb.c,v 1.27 1999/03/28 12:37:12 jj Exp $
  * creatorfb.c: Creator/Creator3D frame buffer driver
  *
  * Copyright (C) 1997,1998,1999 Jakub Jelinek (jj@ultra.linux.cz)
@@ -333,11 +333,9 @@ static void ffb_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 	u64 yx, hw;
 	int fg;
 	
-	spin_lock_irqsave(&fb->lock, flags);
 	fg = ((u32 *)p->dispsw_data)[attr_bgcol_ec(p,conp)];
 	if (fg != fb->s.ffb.fg_cache) {
 		FFBFifo(fb, 5);
@@ -358,17 +356,14 @@ static void ffb_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 	}
 	*(volatile u64 *)&fbc->by = yx + fb->s.ffb.yx_margin;
 	*(volatile u64 *)&fbc->bh = hw;
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void ffb_fill(struct fb_info_sbusfb *fb, struct display *p, int s,
 		     int count, unsigned short *boxes)
 {
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 	int fg;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	fg = ((u32 *)p->dispsw_data)[attr_bgcol(p,s)];
 	if (fg != fb->s.ffb.fg_cache) {
 		FFBFifo(fb, 1);
@@ -383,19 +378,16 @@ static void ffb_fill(struct fb_info_sbusfb *fb, struct display *p, int s,
 		fbc->bw = boxes[2] - boxes[0];
 		boxes += 4;
 	}
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void ffb_putc(struct vc_data *conp, struct display *p, int c, int yy, int xx)
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 	int i, xy;
 	u8 *fd;
 	u64 fgbg;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	if (fontheightlog(p)) {
 		xy = (yy << (16 + fontheightlog(p)));
 		i = ((c & p->charmask) << fontheightlog(p));
@@ -430,7 +422,6 @@ static void ffb_putc(struct vc_data *conp, struct display *p, int c, int yy, int
 			fd += 2;
 		}
 	}
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void ffb_putcs(struct vc_data *conp, struct display *p, const unsigned short *s,
@@ -438,12 +429,10 @@ static void ffb_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 	int i, xy;
 	u8 *fd1, *fd2, *fd3, *fd4;
 	u64 fgbg;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	fgbg = (((u64)(((u32 *)p->dispsw_data)[attr_fgcol(p,scr_readw(s))])) << 32) |
 	       ((u32 *)p->dispsw_data)[attr_bgcol(p,scr_readw(s))];
 	if (fgbg != *(u64 *)&fb->s.ffb.fg_cache) {
@@ -531,7 +520,6 @@ static void ffb_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 		}
 		xy += fontwidth(p);
 	}
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void ffb_revc(struct display *p, int xx, int yy)
@@ -539,43 +527,11 @@ static void ffb_revc(struct display *p, int xx, int yy)
 	/* Not used if hw cursor */
 }
 
-#if 0
-static void ffb_blank(struct fb_info_sbusfb *fb)
-{
-	struct ffb_dac *dac = fb->s.ffb.dac;
-	unsigned long flags;
-	u32 tmp;
-
-	spin_lock_irqsave(&fb->lock, flags);
-	dac->type = 0x6000;
-	tmp = (dac->value & ~0x1);
-	dac->type = 0x6000;
-	dac->value = tmp;
-	spin_unlock_irqrestore(&fb->lock, flags);
-}
-#endif
-
-static void ffb_unblank(struct fb_info_sbusfb *fb)
-{
-	struct ffb_dac *dac = fb->s.ffb.dac;
-	unsigned long flags;
-	u32 tmp;
-
-	spin_lock_irqsave(&fb->lock, flags);
-	dac->type = 0x6000;
-	tmp = (dac->value | 0x1);
-	dac->type = 0x6000;
-	dac->value = tmp;
-	spin_unlock_irqrestore(&fb->lock, flags);
-}
-
 static void ffb_loadcmap (struct fb_info_sbusfb *fb, struct display *p, int index, int count)
 {
 	struct ffb_dac *dac = fb->s.ffb.dac;
-	unsigned long flags;
 	int i, j = count;
 	
-	spin_lock_irqsave(&fb->lock, flags);
 	dac->type = 0x2000 | index;
 	for (i = index; j--; i++)
 		/* Feed the colors in :)) */
@@ -583,13 +539,11 @@ static void ffb_loadcmap (struct fb_info_sbusfb *fb, struct display *p, int inde
 			     ((fb->color_map CM(i,1)) << 8) |
 			     ((fb->color_map CM(i,2)) << 16);
 	if (!p)
-		goto out;
+		return;
 	for (i = index, j = count; i < 16 && j--; i++)
 		((u32 *)p->dispsw_data)[i] = ((fb->color_map CM(i,0))) |
 			      		     ((fb->color_map CM(i,1)) << 8) |
 					     ((fb->color_map CM(i,2)) << 16);
-out:
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static struct display_switch ffb_dispsw __initdata = {
@@ -600,20 +554,17 @@ static struct display_switch ffb_dispsw __initdata = {
 static void ffb_margins (struct fb_info_sbusfb *fb, struct display *p, int x_margin, int y_margin)
 {
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.ffb.xy_margin = (y_margin << 16) + x_margin;
 	fb->s.ffb.yx_margin = (((u64)y_margin) << 32) + x_margin;
 	p->screen_base += 8192 * (y_margin - fb->y_margin) + 4 * (x_margin - fb->x_margin);
 	FFBWait(fbc);
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
-static __inline__ void __ffb_curs_enable (struct fb_info_sbusfb *fb, int enable)
+static inline void ffb_curs_enable (struct fb_info_sbusfb *fb, int enable)
 {
 	struct ffb_dac *dac = fb->s.ffb.dac;
-
+	
 	dac->type2 = 0x100;
 	if (fb->s.ffb.dac_rev <= 2)
 		dac->value2 = enable ? 3 : 0;
@@ -624,25 +575,20 @@ static __inline__ void __ffb_curs_enable (struct fb_info_sbusfb *fb, int enable)
 static void ffb_setcursormap (struct fb_info_sbusfb *fb, u8 *red, u8 *green, u8 *blue)
 {
 	struct ffb_dac *dac = fb->s.ffb.dac;
-	unsigned long flags;
 	
-	spin_lock_irqsave(&fb->lock, flags);
-	__ffb_curs_enable (fb, 0);
+	ffb_curs_enable (fb, 0);
 	dac->type2 = 0x102;
 	dac->value2 = (red[0] | (green[0]<<8) | (blue[0]<<16));
 	dac->value2 = (red[1] | (green[1]<<8) | (blue[1]<<16));
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 /* Set cursor shape */
 static void ffb_setcurshape (struct fb_info_sbusfb *fb)
 {
 	struct ffb_dac *dac = fb->s.ffb.dac;
-	unsigned long flags;
 	int i, j;
 
-	spin_lock_irqsave(&fb->lock, flags);
-	__ffb_curs_enable (fb, 0);
+	ffb_curs_enable (fb, 0);
 	for (j = 0; j < 2; j++) {
 		dac->type2 = j ? 0 : 0x80;
 		for (i = 0; i < 0x40; i++) {
@@ -655,7 +601,6 @@ static void ffb_setcurshape (struct fb_info_sbusfb *fb)
 			}
 		}
 	}	
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 /* Load cursor information */
@@ -663,24 +608,19 @@ static void ffb_setcursor (struct fb_info_sbusfb *fb)
 {
 	struct ffb_dac *dac = fb->s.ffb.dac;
 	struct cg_cursor *c = &fb->cursor;
-	unsigned long flags;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	dac->type2 = 0x104;
 	/* Should this be just 0x7ff?? 
 	   Should I do some margin handling and setcurshape in that case? */
 	dac->value2 = (((c->cpos.fby - c->chot.fby) & 0xffff) << 16)
 	              |((c->cpos.fbx - c->chot.fbx) & 0xffff);
-	__ffb_curs_enable (fb, fb->cursor.enable);
-	spin_unlock_irqrestore(&fb->lock, flags);
+	ffb_curs_enable (fb, fb->cursor.enable);
 }
 
 static void ffb_switch_from_graph (struct fb_info_sbusfb *fb)
 {
 	register struct ffb_fbc *fbc = fb->s.ffb.fbc;
-	unsigned long flags;
 
-	spin_lock_irqsave(&fb->lock, flags);
 	FFBWait(fbc);
 	fb->s.ffb.fifo_cache = 0;
 	FFBFifo(fb, 8);
@@ -693,7 +633,6 @@ static void ffb_switch_from_graph (struct fb_info_sbusfb *fb)
 	fbc->fg = fb->s.ffb.fg_cache;
 	fbc->bg = fb->s.ffb.bg_cache;
 	FFBWait(fbc);
-	spin_unlock_irqrestore(&fb->lock, flags);
 }                                
 
 static char idstring[60] __initdata = { 0 };
@@ -756,16 +695,6 @@ __initfunc(char *creatorfb_init(struct fb_info_sbusfb *fb))
 	fb->setcurshape = ffb_setcurshape;
 	fb->switch_from_graph = ffb_switch_from_graph;
 	fb->fill = ffb_fill;
-#if 0
-	/* XXX Can't enable this for now, I've seen cases
-	 * XXX where the VC was blanked, and Xsun24 was started
-	 * XXX via a remote login, the sunfb code did not
-	 * XXX unblank creator when it was mmap'd for some
-	 * XXX reason, investigate later... -DaveM
-	 */
-	fb->blank = ffb_blank;
-	fb->unblank = ffb_unblank;
-#endif
 	
 	/* If there are any read errors or fifo overflow conditions,
 	 * clear them now.
@@ -795,12 +724,5 @@ __initfunc(char *creatorfb_init(struct fb_info_sbusfb *fb))
 	if (afb)
 		fb->s.ffb.dac_rev = 10;
 	
-	/* Unblank it just to be sure.  When there are multiple
-	 * FFB/AFB cards in the system, or it is not the OBP
-	 * chosen console, it will have video outputs off in
-	 * the DAC.
-	 */
-	ffb_unblank(fb);
-
 	return idstring;
 }

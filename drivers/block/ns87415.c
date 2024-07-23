@@ -49,25 +49,8 @@ static void ns87415_prepare_drive (ide_drive_t *drive, unsigned int use_dma)
 	new = use_dma ? ((new & ~other) | bit) : (new & ~bit);
 
 	if (new != *old) {
-		unsigned char stat;
-
-		/*
-		 * Don't change DMA engine settings while Write Buffers
-		 * are busy.
-		 */
-		(void) pci_read_config_byte(dev, 0x43, &stat);
-		while (stat & 0x03) {
-			udelay(1);
-			(void) pci_read_config_byte(dev, 0x43, &stat);
-		}
-
 		*old = new;
 		(void) pci_write_config_dword(dev, 0x40, new);
-
-		/*
-		 * And let things settle...
-		 */
-		udelay(10);
 	}
 
 	__restore_flags(flags);	/* local CPU only */
@@ -97,10 +80,6 @@ static int ns87415_dmaproc(ide_dma_action_t func, ide_drive_t *drive)
 				return 0;
 			ns87415_prepare_drive(drive, 0);	/* DMA failed: select PIO xfer */
 			return 1;
-		case ide_dma_check:
-			if (drive->media != ide_disk)
-				return ide_dmaproc(ide_dma_off_quietly, drive);
-			/* Fallthrough... */
 		default:
 			return ide_dmaproc(func, drive);	/* use standard DMA stuff */
 	}

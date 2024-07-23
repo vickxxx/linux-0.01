@@ -105,7 +105,8 @@ void ncp_update_inode2(struct inode* inode, struct nw_file_info *nwinfo)
 				switch (nwi->attributes & (aHIDDEN|aSYSTEM)) {
 					case aHIDDEN:
 						if (server->m.flags & NCP_MOUNT_SYMLINKS) {
-							if (inode->i_size <= NCP_MAX_SYMLINK_SIZE) {
+							if ((inode->i_size >= NCP_MIN_SYMLINK_SIZE)
+							 && (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
 								inode->i_mode = (inode->i_mode & ~S_IFMT) | S_IFLNK;
 								break;
 							}
@@ -133,16 +134,10 @@ void ncp_update_inode2(struct inode* inode, struct nw_file_info *nwinfo)
 	if ((inode->i_size)&&(inode->i_blksize)) {
 		inode->i_blocks = (inode->i_size-1)/(inode->i_blksize)+1;
 	}
-
-	inode->i_mtime = ncp_date_dos2unix(le16_to_cpu(nwi->modifyTime),
-					   le16_to_cpu(nwi->modifyDate));
-	inode->i_ctime = ncp_date_dos2unix(le16_to_cpu(nwi->creationTime),
-					   le16_to_cpu(nwi->creationDate));
-	inode->i_atime = ncp_date_dos2unix(0, le16_to_cpu(nwi->lastAccessDate));
-
-	NCP_FINFO(inode)->DosDirNum = nwi->DosDirNum;
-	NCP_FINFO(inode)->dirEntNum = nwi->dirEntNum;
-	NCP_FINFO(inode)->volNumber = nwi->volNumber;
+	/* TODO: times? I'm not sure... */
+	NCP_FINFO(inode)->DosDirNum = nwinfo->i.DosDirNum;
+	NCP_FINFO(inode)->dirEntNum = nwinfo->i.dirEntNum;
+	NCP_FINFO(inode)->volNumber = nwinfo->i.volNumber;
 }
 
 /*
@@ -167,7 +162,8 @@ static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
 			switch (nwi->attributes & (aHIDDEN|aSYSTEM)) {
 				case aHIDDEN:
 					if (server->m.flags & NCP_MOUNT_SYMLINKS) {
-						if (inode->i_size <= NCP_MAX_SYMLINK_SIZE) {
+						if ((inode->i_size >= NCP_MIN_SYMLINK_SIZE)
+						 && (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
 							inode->i_mode = (inode->i_mode & ~S_IFMT) | S_IFLNK;
 							break;
 						}
@@ -350,12 +346,11 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 						   GFP_KERNEL);
 	if (server == NULL)
 		goto out_no_server;
-	memset(server, 0, sizeof(*server));
 	NCP_SBP(sb) = server;
 
 	server->ncp_filp = ncp_filp;
 	server->lock = 0;
-	sema_init(&server->sem, 1);
+	server->wait = NULL;
 	server->packet = NULL;
 	server->buffer_size = 0;
 	server->conn_status = 0;
@@ -689,10 +684,10 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 		DPRINTK(KERN_DEBUG "ncpfs: trying to change size to %ld\n",
 			attr->ia_size);
 
-		if ((result = ncp_make_open(inode, O_WRONLY)) < 0) {
+		if ((result = ncp_make_open(inode, O_RDWR)) < 0) {
 			return -EACCES;
 		}
-		ncp_write_kernel(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle,
+		ncp_write(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle,
 			  attr->ia_size, 0, "", &written);
 
 		/* According to ndir, the changes only take effect after

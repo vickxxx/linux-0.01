@@ -1,4 +1,4 @@
-/* $Id: ppc-stub.c,v 1.4.2.1 1999/07/20 05:04:42 paulus Exp $
+/* $Id: ppc-stub.c,v 1.4 1998/07/28 08:25:01 paulus Exp $
  * ppc-stub.c:  KGDB support for the Linux kernel.
  *
  * adapted from arch/sparc/kernel/sparc-stub.c for the PowerPC
@@ -107,6 +107,7 @@
 
 #include <asm/system.h>
 #include <asm/signal.h>
+#include <asm/system.h>
 #include <asm/kgdb.h>
 #include <asm/pgtable.h>
 #include <asm/ptrace.h>
@@ -351,7 +352,7 @@ static inline int get_msr()
 
 static inline void set_msr(int msr)
 {
-	asm volatile("mtmsr %0" : : "r" (msr));
+	asm volatile("mfmsr %0" : : "r" (msr));
 }
 
 /* Set up exception handlers for tracing and breakpoints

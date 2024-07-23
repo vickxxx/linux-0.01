@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.10.2.2 1999/10/24 17:29:38 davem Exp $
+/* $Id: oplib.h,v 1.10 1998/12/18 10:02:03 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -205,8 +205,7 @@ extern int prom_wakeupsystem(void);
 /* MMU and memory related OBP interfaces. */
 
 /* Get unique string identifying SIMM at given physical address. */
-extern int prom_getunumber(int syndrome_code,
-			   unsigned long phys_addr,
+extern int prom_getunumber(unsigned long phys_lo, unsigned long phys_hi,
 			   char *buf, int buflen);
 
 /* Retain physical memory to the caller across soft resets. */
@@ -222,24 +221,6 @@ extern long prom_itlb_load(unsigned long index,
 extern long prom_dtlb_load(unsigned long index,
 			   unsigned long tte_data,
 			   unsigned long vaddr);
-
-/* Map/Unmap client program address ranges.  First the format of
- * the mapping mode argument.
- */
-#define PROM_MAP_WRITE	0x0001 /* Writable */
-#define PROM_MAP_READ	0x0002 /* Readable - sw */
-#define PROM_MAP_EXEC	0x0004 /* Executable - sw */
-#define PROM_MAP_LOCKED	0x0010 /* Locked, use i/dtlb load calls for this instead */
-#define PROM_MAP_CACHED	0x0020 /* Cacheable in both L1 and L2 caches */
-#define PROM_MAP_SE	0x0040 /* Side-Effects */
-#define PROM_MAP_GLOB	0x0080 /* Global */
-#define PROM_MAP_IE	0x0100 /* Invert-Endianness */
-#define PROM_MAP_DEFAULT (PROM_MAP_WRITE | PROM_MAP_READ | PROM_MAP_EXEC | PROM_MAP_CACHED)
-
-extern int prom_map(int mode, unsigned long size,
-		    unsigned long vaddr, unsigned long paddr);
-extern void prom_unmap(unsigned long size, unsigned long vaddr);
-
 
 /* PROM device tree traversal functions... */
 
@@ -355,7 +336,6 @@ extern long p1275_cmd (char *, long, ...);
 #define P1275_ARG_OUT_32B		3
 #define P1275_ARG_IN_FUNCTION		4
 #define P1275_ARG_IN_BUF		5
-#define P1275_ARG_IN_64B		6
 
 #define P1275_IN(x) ((x) & 0xf)
 #define P1275_OUT(x) (((x) << 4) & 0xf0)

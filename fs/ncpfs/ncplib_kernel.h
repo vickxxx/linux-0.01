@@ -32,24 +32,20 @@
 #include <linux/ncp_fs.h>
 #include <linux/ncp_fs_sb.h>
 
-#define NCP_MIN_SYMLINK_SIZE	8
-#define NCP_MAX_SYMLINK_SIZE	512
-
 int ncp_negotiate_buffersize(struct ncp_server *, int, int *);
 int ncp_negotiate_size_and_options(struct ncp_server *server, int size,
   			  int options, int *ret_size, int *ret_options);
 int ncp_get_volume_info_with_number(struct ncp_server *, int,
 				struct ncp_volume_info *);
 int ncp_close_file(struct ncp_server *, const char *);
-static inline int ncp_read_bounce_size(__u32 size) {
-	return sizeof(struct ncp_reply_header) + 2 + 2 + size + 8;
-};
-int ncp_read_bounce(struct ncp_server *, const char *, __u32, __u16, 
-		char *, int *, void* bounce, __u32 bouncelen);
-int ncp_read_kernel(struct ncp_server *, const char *, __u32, __u16, 
-		char *, int *);
+int ncp_read(struct ncp_server *, const char *, __u32, __u16, char *, int *);
+int ncp_write(struct ncp_server *, const char *, __u32, __u16,
+		const char *, int *);
+#ifdef CONFIG_NCPFS_EXTRAS
+int ncp_read_kernel(struct ncp_server *, const char *, __u32, __u16, char *, int *);
 int ncp_write_kernel(struct ncp_server *, const char *, __u32, __u16,
 		const char *, int *);
+#endif
 
 int ncp_obtain_info(struct ncp_server *server, struct inode *, char *,
 		struct nw_info_struct *target);
@@ -114,9 +110,9 @@ ncp_mount_subdir(struct ncp_server* server, __u8 volNumber,
 static inline void
 io2vol(struct ncp_server *server, char *name, int case_trans)
 {
-	unsigned char nc[2];
+	unsigned char nc;
 	unsigned char *np;
-	int len;
+	unsigned char *up;
 	struct nls_unicode uc;
 	struct nls_table *nls_in;
 	struct nls_table *nls_out;
@@ -127,10 +123,11 @@ io2vol(struct ncp_server *server, char *name, int case_trans)
 
 	while (*np)
 	{
-		nc[0] = toupperif(*np, case_trans);
-		nc[1] = 0x00;
-		nls_in->char2uni(nc, &len, &uc.uni2, &uc.uni1);
-		nls_out->uni2char(uc.uni1, uc.uni2, np, 1, &len);
+		nc = 0;
+		uc = nls_in->charset2uni[toupperif(*np, case_trans)];
+		up = nls_out->page_uni2charset[uc.uni2];
+		if (up != NULL)	nc = up[uc.uni1];
+		if (nc != 0) *np = nc;
 		np++;
 	}
 }
@@ -138,9 +135,9 @@ io2vol(struct ncp_server *server, char *name, int case_trans)
 static inline void
 vol2io(struct ncp_server *server, char *name, int case_trans)
 {
-	unsigned char nc[2];
+	unsigned char nc;
 	unsigned char *np;
-	int len;
+	unsigned char *up;
 	struct nls_unicode uc;
 	struct nls_table *nls_in;
 	struct nls_table *nls_out;
@@ -151,11 +148,12 @@ vol2io(struct ncp_server *server, char *name, int case_trans)
 
 	while (*np)
 	{
-		nc[0] = *np;
-		nc[1] = 0;
-		nls_in->char2uni(nc, &len, &uc.uni2, &uc.uni1);
-		nls_out->uni2char(uc.uni1, uc.uni2, nc, 1, &len);
-		*np = tolowerif(nc[0], case_trans);
+		nc = 0;
+		uc = nls_in->charset2uni[*np];
+		up = nls_out->page_uni2charset[uc.uni2];
+		if (up != NULL)	nc = up[uc.uni1];
+		if (nc == 0) nc = *np;
+		*np = tolowerif(nc, case_trans);
 		np++;
 	}
 }

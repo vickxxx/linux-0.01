@@ -1,8 +1,20 @@
-/* $Id: amd7930.c,v 1.5 2000/11/24 17:05:37 kai Exp $
+/* $Id: amd7930.c,v 1.2 1998/02/12 23:07:10 keil Exp $
  *
  * HiSax ISDN driver - chip specific routines for AMD 7930
  *
  * Author       Brent Baccala (baccala@FreeSoft.org)
+ *
+ *
+ *
+ * $Log: amd7930.c,v $
+ * Revision 1.2  1998/02/12 23:07:10  keil
+ * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
+ *
+ * Revision 1.1  1998/02/03 23:20:51  keil
+ * New files for SPARC isdn support
+ *
+ * Revision 1.1  1998/01/08 04:17:12  baccala
+ * ISDN comes to the Sparc.  Key points:
  *
  *    - Existing ISDN HiSax driver provides all the smarts
  *    - it compiles, runs, talks to an isolated phone switch, connects
@@ -14,7 +26,6 @@
  *
  * The code is unreliable enough to be consider alpha
  *
- * This file is (c) under GNU PUBLIC LICENSE
  *
  * Advanced Micro Devices' Am79C30A is an ISDN/audio chip used in the
  * SparcStation 1+.  The chip provides microphone and speaker interfaces
@@ -94,7 +105,7 @@
 #include "rawhdlc.h"
 #include <linux/interrupt.h>
 
-static const char *amd7930_revision = "$Revision: 1.5 $";
+static const char *amd7930_revision = "$Revision: 1.2 $";
 
 #define RCV_BUFSIZE	1024	/* Size of raw receive buffer in bytes */
 #define RCV_BUFBLKS	4	/* Number of blocks to divide buffer into
@@ -723,6 +734,8 @@ amd7930_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_amd7930(cs);
 			return(0);
+		case CARD_SETIRQ:
+			return(0);
 		case CARD_INIT:
 			cs->l1cmd = amd7930_l1cmd;
 			amd7930_liu_init(0, &amd7930_liu_callback, (void *)cs);
@@ -734,8 +747,8 @@ amd7930_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-int __init
-setup_amd7930(struct IsdnCard *card)
+__initfunc(int
+setup_amd7930(struct IsdnCard *card))
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];

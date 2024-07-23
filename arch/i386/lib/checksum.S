@@ -369,7 +369,7 @@ DST(	movb %cl, (%edi)	)
 
 #define ROUND1(x) \
 	SRC(movl x(%esi), %ebx	)	;	\
-	addl %ebx, %eax			;	\
+	addl %ebx, %eax\n		;	\
 	DST(movl %ebx, x(%edi)	)	; 
 
 #define ROUND(x) \

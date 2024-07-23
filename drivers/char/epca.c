@@ -1225,7 +1225,6 @@ static void pc_flush_buffer(struct tty_struct *tty)
 	restore_flags(flags);
 
 	wake_up_interruptible(&tty->write_wait);
-	wake_up_interruptible(&tty->poll_wait);
 	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
 
@@ -1681,7 +1680,7 @@ int pc_init(void)
 		memory.
 	------------------------------------------------------------------*/
 
-	ulong flags;
+	ulong flags, save_loops_per_sec; 
 	int crd;
 	struct board_info *bd;
 	unsigned char board_id = 0;
@@ -1825,10 +1824,9 @@ int pc_init(void)
 	/* --------------------------------------------------------------------- 
 	   loops_per_sec hasn't been set at this point :-(, so fake it out... 
 	   I set it, so that I can use the __delay() function.
-	   
-	   We don't use __delay(), so we don't need to fake it.
-	   
 	------------------------------------------------------------------------ */
+	save_loops_per_sec = loops_per_sec;
+	loops_per_sec = 13L * 500000L;
 
 	save_flags(flags);
 	cli();
@@ -1961,6 +1959,7 @@ int pc_init(void)
 	if (tty_register_driver(&pc_info))
 		panic("Couldn't register Digi PC/ info ");
 
+	loops_per_sec = save_loops_per_sec;  /* reset it to what it should be */
 
 	/* -------------------------------------------------------------------
 	   Start up the poller to check for events on all enabled boards
@@ -2446,7 +2445,7 @@ static void doevent(int crd)
 						  tty->ldisc.write_wakeup)
 						(tty->ldisc.write_wakeup)(tty);
 					wake_up_interruptible(&tty->write_wait);
-					wake_up_interruptible(&tty->poll_wait);
+
 				} /* End if LOWWAIT */
 
 			} /* End LOWTX_IND */
@@ -2466,7 +2465,6 @@ static void doevent(int crd)
 						(tty->ldisc.write_wakeup)(tty);
 
 					wake_up_interruptible(&tty->write_wait);
-					wake_up_interruptible(&tty->poll_wait);
 
 				} /* End if EMPTYWAIT */
 
@@ -3833,7 +3831,7 @@ void epca_setup(char *str, int *ints)
 
 			case 5:
 				board.port = (unsigned char *)ints[index];
-				if ((signed long)board.port <= 0)
+				if (board.port <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid io port 0x%x\n", (unsigned int)board.port);
 					invalid_lilo_config = 1;
@@ -3845,7 +3843,7 @@ void epca_setup(char *str, int *ints)
 
 			case 6:
 				board.membase = (unsigned char *)ints[index];
-				if ((signed long)board.membase <= 0)
+				if (board.membase <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid memory base 0x%x\n",(unsigned int)board.membase);
 					invalid_lilo_config = 1;

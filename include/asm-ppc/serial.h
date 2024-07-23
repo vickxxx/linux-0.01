@@ -4,10 +4,7 @@
 
 #include <linux/config.h>
 
-#if defined(CONFIG_GEMINI)
-#include <asm/gemini_serial.h>
-#else
-#if defined(CONFIG_APUS)
+#ifdef CONFIG_APUS
 #include <asm-m68k/serial.h>
 #else
 
@@ -122,5 +119,5 @@
 	EXTRA_SERIAL_PORT_DEFNS		\
 	HUB6_SERIAL_PORT_DFNS		\
 	MCA_SERIAL_PORT_DFNS
-#endif
-#endif
+
+#endif /* CONFIG_APUS */

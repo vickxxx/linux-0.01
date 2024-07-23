@@ -266,11 +266,7 @@ static void mace_reset(struct device *dev)
     /* done changing address */
     out_8(&mb->iac, 0);
 
-#ifndef CONFIG_MACE_AAUI_PORT
     out_8(&mb->plscc, PORTSEL_GPSI + ENPLSIO);
-#else
-    out_8(&mb->plscc, PORTSEL_AUI + ENPLSIO);
-#endif /* CONFIG_MACE_AAUI_PORT */
 }
 
 static void __mace_set_address(struct device *dev, void *addr)
@@ -686,10 +682,8 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		++mp->stats.tx_carrier_errors;
 	    if (fs & (UFLO|LCOL|RTRY))
 		++mp->stats.tx_aborted_errors;
-	} else {
-	    mp->stats.tx_bytes += mp->tx_bufs[i]->len;
+	} else
 	    ++mp->stats.tx_packets;
-	}
 	dev_kfree_skb(mp->tx_bufs[i]);
 	--mp->tx_active;
 	if (++i >= N_TX_RING)
@@ -854,7 +848,6 @@ static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 		skb->protocol = eth_type_trans(skb, dev);
 		netif_rx(skb);
 		mp->rx_bufs[i] = 0;
-		mp->stats.rx_bytes += skb->len;
 		++mp->stats.rx_packets;
 	    }
 	} else {
@@ -926,9 +919,9 @@ void cleanup_module(void)
     struct mace_data *mp = (struct mace_data *) mace_devs->priv;
     unregister_netdev(mace_devs);
 
-    free_irq(mace_devs->irq, mace_devs);
-    free_irq(mp->tx_dma_intr, mace_devs);
-    free_irq(mp->rx_dma_intr, mace_devs);
+    free_irq(mace_devs->irq, mace_interrupt);
+    free_irq(mp->tx_dma_intr, mace_txdma_intr);
+    free_irq(mp->rx_dma_intr, mace_rxdma_intr);
 
     kfree(mace_devs);
     mace_devs = NULL;

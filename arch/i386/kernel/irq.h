@@ -40,7 +40,6 @@ typedef struct {
 	struct hw_interrupt_type *handler;	/* handle/enable/disable functions */
 	struct irqaction *action;		/* IRQ action list */
 	unsigned int depth;			/* Disable depth for nested irq disables */
-	unsigned int unused[4];
 } irq_desc_t;
 
 /*
@@ -112,11 +111,6 @@ extern unsigned long io_apic_irqs;
 
 extern char _stext, _etext;
 
-/*
- * IF YOU CHANGE THIS, PLEASE ALSO CHANGE
- * FIX_IO_APIC_BASE_* in fixmap.h
- */
-#define MAX_IO_APICS 4
 #define MAX_IRQ_SOURCES 128
 #define MAX_MP_BUSSES 32
 enum mp_bustype {
@@ -220,8 +214,8 @@ __asm__( \
 	"\n" __ALIGN_STR"\n" \
 	"common_interrupt:\n\t" \
 	SAVE_ALL \
-	"call "SYMBOL_NAME_STR(do_IRQ)"\n\t" \
-	"jmp ret_from_intr\n");
+	"pushl $ret_from_intr\n\t" \
+	"jmp "SYMBOL_NAME_STR(do_IRQ));
 
 /*
  * subtle. orig_eax is used by the signal code to distinct between

@@ -39,39 +39,6 @@
  * Linus noticed.  -- jrs
  */
 
-static poll_table* alloc_wait(int nfds)
-{
-	poll_table* out;
-	poll_table* walk;
-
-	out = (poll_table *) __get_free_page(GFP_KERNEL);
-	if(out==NULL)
-		return NULL;
-	out->nr = 0;
-	out->entry = (struct poll_table_entry *)(out + 1);
-	out->next = NULL;
-	nfds -=__MAX_POLL_TABLE_ENTRIES;
-	walk = out;
-	while(nfds > 0) {
-		poll_table *tmp = (poll_table *) __get_free_page(GFP_KERNEL);
-		if (!tmp) {
-			while(out != NULL) {
-				tmp = out->next;
-				free_page((unsigned long)out);
-				out = tmp;
-			}
-			return NULL;
-		}
-		tmp->nr = 0;
-		tmp->entry = (struct poll_table_entry *)(tmp + 1);
-		tmp->next = NULL;
-		walk->next = tmp;
-		walk = tmp;
-		nfds -=__MAX_POLL_TABLE_ENTRIES;
-	}
-	return out;
-}
-
 static void free_wait(poll_table * p)
 {
 	struct poll_table_entry * entry;
@@ -96,6 +63,7 @@ void __pollwait(struct file * filp, struct wait_queue ** wait_address, poll_tabl
 	for (;;) {
 		if (p->nr < __MAX_POLL_TABLE_ENTRIES) {
 			struct poll_table_entry * entry;
+ok_table:
 		 	entry = p->entry + p->nr;
 		 	entry->filp = filp;
 		 	filp->f_count++;
@@ -105,6 +73,17 @@ void __pollwait(struct file * filp, struct wait_queue ** wait_address, poll_tabl
 			add_wait_queue(wait_address,&entry->wait);
 			p->nr++;
 			return;
+		}
+		if (p->next == NULL) {
+			poll_table *tmp = (poll_table *) __get_free_page(GFP_KERNEL);
+			if (!tmp)
+				return;
+			tmp->nr = 0;
+			tmp->entry = (struct poll_table_entry *)(tmp + 1);
+			tmp->next = NULL;
+			p->next = tmp;
+			p = tmp;
+			goto ok_table;
 		}
 		p = p->next;
 	}
@@ -128,7 +107,7 @@ static int max_select_fd(unsigned long n, fd_set_bits *fds)
 	/* handle last in-complete long-word first */
 	set = ~(~0UL << (n & (__NFDBITS-1)));
 	n /= __NFDBITS;
-	open_fds = current->files->open_fds->fds_bits+n;
+	open_fds = current->files->open_fds.fds_bits+n;
 	max = 0;
 	if (set) {
 		set &= BITS(fds, n);
@@ -175,21 +154,23 @@ int do_select(int n, fd_set_bits *fds, long *timeout)
 	long __timeout = *timeout;
 
 	wait = wait_table = NULL;
+	if (__timeout) {
+		wait_table = (poll_table *) __get_free_page(GFP_KERNEL);
+		if (!wait_table)
+			return -ENOMEM;
+
+		wait_table->nr = 0;
+		wait_table->entry = (struct poll_table_entry *)(wait_table + 1);
+		wait_table->next = NULL;
+		wait = wait_table;
+	}
+
 	lock_kernel();
 
 	retval = max_select_fd(n, fds);
 	if (retval < 0)
 		goto out;
 	n = retval;
-	if (__timeout) {
-		retval = -ENOMEM;
-		wait_table = alloc_wait(n);
-		if (!wait_table)
-			goto out;
-
-		wait = wait_table;
-	}
-
 	retval = 0;
 	for (;;) {
 		current->state = TASK_INTERRUPTIBLE;
@@ -283,31 +264,17 @@ sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct timeval *tvp)
 		if ((unsigned long) sec < MAX_SELECT_SECONDS) {
 			timeout = ROUND_UP(usec, 1000000/HZ);
 			timeout += sec * (unsigned long) HZ;
-
-			if (timeout < 0) {
-				ret = -EINVAL;
-				goto out_nofds;
-			}
 		}
 	}
 
 	ret = -EINVAL;
-	
-	/*
-	 * We ought to optimise the n=0 case - it is used enough..
-	 */
-	 
-	if (n < 0)
+	if (n < 0 || n > KFDS_NR)
 		goto out_nofds;
-	if (n > current->files->max_fdset)
-		n = current->files->max_fdset;
-		
 	/*
 	 * We need 6 bitmaps (in/out/ex for both incoming and outgoing),
 	 * since we used fdset we need to allocate memory in units of
-	 * long-words.
+	 * long-words. 
 	 */
-
 	ret = -ENOMEM;
 	size = FDS_BYTES(n);
 	bits = kmalloc(6 * size, GFP_KERNEL);
@@ -412,23 +379,25 @@ asmlinkage int sys_poll(struct pollfd * ufds, unsigned int nfds, long timeout)
 	lock_kernel();
 	/* Do a sanity check on nfds ... */
 	err = -EINVAL;
-	if (nfds > current->files->max_fds)
+	if (nfds > NR_OPEN)
 		goto out;
 
 	if (timeout) {
-		/* Careful about overflow in the intermediate values */
+		/* Carefula about overflow in the intermediate values */
 		if ((unsigned long) timeout < MAX_SCHEDULE_TIMEOUT / HZ)
-			timeout = (timeout*HZ+999)/1000+1;
+			timeout = (unsigned long)(timeout*HZ+999)/1000+1;
 		else /* Negative or overflow */
 			timeout = MAX_SCHEDULE_TIMEOUT;
 	}
 
 	err = -ENOMEM;
 	if (timeout) {
-		wait_table = alloc_wait(nfds);
+		wait_table = (poll_table *) __get_free_page(GFP_KERNEL);
 		if (!wait_table)
 			goto out;
-
+		wait_table->nr = 0;
+		wait_table->entry = (struct poll_table_entry *)(wait_table + 1);
+		wait_table->next = NULL;
 		wait = wait_table;
 	}
 

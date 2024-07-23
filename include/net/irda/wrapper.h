@@ -1,16 +1,15 @@
 /*********************************************************************
  *                
  * Filename:      wrapper.h
- * Version:       1.2
- * Description:   IrDA SIR async wrapper layer
+ * Version:       1.0
+ * Description:   IrDA Wrapper layer
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Mon Aug  4 20:40:53 1997
- * Modified at:   Tue Jan 11 12:37:29 2000
+ * Modified at:   Fri Jan 29 10:15:46 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1998-2000 Dag Brattli <dagb@cs.uit.no>, 
- *     All Rights Reserved.
+ *     Copyright (c) 1998 Dag Brattli <dagb@cs.uit.no>, All Rights Reserved.
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -28,7 +27,6 @@
 
 #include <linux/types.h>
 #include <linux/skbuff.h>
-#include <linux/netdevice.h>
 
 #include <net/irda/irda_device.h>
 
@@ -40,21 +38,17 @@
 #define STA BOF  /* Start flag */
 #define STO EOF  /* End flag */
 
-#define IRDA_TRANS 0x20    /* Asynchronous transparency modifier */       
+#define IR_TRANS 0x20    /* Asynchronous transparency modifier */       
 
-/* States for receving a frame in async mode */
 enum {
-	OUTSIDE_FRAME, 
+	OUTSIDE_FRAME = 1, 
 	BEGIN_FRAME, 
 	LINK_ESCAPE, 
 	INSIDE_FRAME
 };
 
 /* Proto definitions */
-int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize);
-void async_bump(struct device *dev, struct net_device_stats *stats,
-		__u8 *buf, int len);
-void async_unwrap_char(struct device *dev, struct net_device_stats *stats,
-		       iobuff_t *buf, __u8 byte);
+int  async_wrap_skb( struct sk_buff *skb, __u8 *tx_buff, int buffsize);
+void async_unwrap_char( struct irda_device *, __u8 byte);
 
 #endif

@@ -2,7 +2,7 @@
  * sound/sgalaxy.c
  *
  * Low level driver for Aztech Sound Galaxy cards.
- * Copyright 1998 Artur Skawina <skawina@geocities.com>
+ * Copyright 1998 Artur Skawina
  *
  * Supported cards:
  *    Aztech Sound Galaxy Waverider Pro 32 - 3D

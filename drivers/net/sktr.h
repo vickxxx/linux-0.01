@@ -16,15 +16,6 @@
 #define TR_RCF_LONGEST_FRAME_MASK 0x0070
 #define TR_RCF_FRAME4K 0x0030
 
-/* DeviceType values */
-#define SK_ISA 0
-#define SK_PCI 1
-#define PROT_ISA 2
-
-/* BusType values */
-#define BUS_TYPE_PCI	0
-#define BUS_TYPE_ISA	1
-
 /*------------------------------------------------------------------*/
 /*  Bit order for adapter communication with DMA		    */
 /*  --------------------------------------------------------------  */
@@ -651,7 +642,7 @@ typedef struct {
  * but possibly multiple TPLs for one frame) the length of the TPLs has to be
  * initialized in the OPL. (OPEN parameter list)
  */
-#define TPL_NUM		9	/* Number of Transmit Parameter Lists.
+#define TPL_NUM		3	/* Number of Transmit Parameter Lists.
 				 * !! MUST BE >= 3 !!
 				 */
 
@@ -1072,9 +1063,6 @@ typedef struct net_local {
 	unsigned char ScbInUse;
 	unsigned short CMDqueue;
 
-	unsigned int DeviceType;
-	unsigned int BusType;
-
 	unsigned long AdapterOpenFlag:1;
 	unsigned long AdapterVirtOpenFlag:1;
 	unsigned long OpenCommandIssued:1;
@@ -1084,7 +1072,6 @@ typedef struct net_local {
 	unsigned long LobeWireFaultLogged:1;
 	unsigned long ReOpenInProgress:1;
 	unsigned long Sleeping:1;
-	unsigned long Sending:1;
 
 	unsigned long LastOpenStatus;
 	unsigned short CurrentRingStatus;
@@ -1094,7 +1081,7 @@ typedef struct net_local {
 	unsigned long LastSendTime;
 
 	struct sk_buff_head SendSkbQueue;
-	atomic_t QueueSkb;
+	unsigned short QueueSkb;
 
 	struct tr_statistics MacStat;	/* MAC statistics structure */
 

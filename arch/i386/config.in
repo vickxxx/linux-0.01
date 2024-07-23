@@ -1,6 +1,6 @@
 #
 # For a description of the syntax of this configuration file,
-# see Documentation/kbuild/config-language.txt.
+# see the Configure script.
 #
 mainmenu_name "Linux Kernel Configuration"
 
@@ -12,11 +12,11 @@ endmenu
 mainmenu_option next_comment
 comment 'Processor type and features'
 choice 'Processor family' \
-	"386				CONFIG_M386	\
-	 486/Cx486			CONFIG_M486	\
-	 586/K5/5x86/6x86		CONFIG_M586	\
-	 Pentium/K6/TSC/CyrixIII	CONFIG_M586TSC	\
-	 PPro/6x86MX			CONFIG_M686" PPro
+	"386			CONFIG_M386	\
+	 486/Cx486		CONFIG_M486	\
+	 586/K5/5x86/6x86	CONFIG_M586	\
+	 Pentium/K6/TSC		CONFIG_M586TSC	\
+	 PPro/6x86MX		CONFIG_M686" PPro
 #
 # Define implied options from the CPU selection here
 #
@@ -32,14 +32,6 @@ fi
 if [ "$CONFIG_M686" = "y" ]; then
   define_bool CONFIG_X86_GOOD_APIC y
 fi
-
-tristate '/dev/cpu/microcode - Intel IA32 CPU microcode support' CONFIG_MICROCODE
-tristate '/dev/cpu/*/msr - Model-specific register support' CONFIG_X86_MSR
-tristate '/dev/cpu/*/cpuid - CPU information support' CONFIG_X86_CPUID
-
-choice 'Maximum Physical Memory' \
-	"1GB		CONFIG_1GB \
-	 2GB		CONFIG_2GB" 1GB
 
 bool 'Math emulation' CONFIG_MATH_EMULATION
 bool 'MTRR (Memory Type Range Register) support' CONFIG_MTRR
@@ -108,16 +100,17 @@ if [ "$CONFIG_PARPORT" != "n" ]; then
 fi
 
 bool 'Advanced Power Management BIOS support' CONFIG_APM
-if [ "$CONFIG_APM" != "n" ]; then
+if [ "$CONFIG_APM" = "y" ]; then
   bool '   Ignore USER SUSPEND' CONFIG_APM_IGNORE_USER_SUSPEND
   bool '   Enable PM at boot time' CONFIG_APM_DO_ENABLE
   bool '   Make CPU Idle calls when idle' CONFIG_APM_CPU_IDLE
   bool '   Enable console blanking using APM' CONFIG_APM_DISPLAY_BLANK
+  bool '   Power off on shutdown' CONFIG_APM_POWER_OFF
+  bool '   Ignore multiple suspend' CONFIG_APM_IGNORE_MULTIPLE_SUSPEND
+  bool '   Ignore multiple suspend/resume cycles' CONFIG_APM_IGNORE_SUSPEND_BOUNCE
   bool '   RTC stores time in GMT' CONFIG_APM_RTC_IS_GMT
   bool '   Allow interrupts during APM BIOS calls' CONFIG_APM_ALLOW_INTS
-  bool '   Use real mode APM BIOS call to power off' CONFIG_APM_REAL_MODE_POWER_OFF
 fi
-tristate 'Toshiba Laptop support' CONFIG_TOSHIBA
 
 endmenu
 
@@ -129,8 +122,6 @@ if [ "$CONFIG_NET" = "y" ]; then
   source net/Config.in
 fi
 
-source drivers/telephony/Config.in
-
 mainmenu_option next_comment
 comment 'SCSI support'
 
@@ -140,8 +131,6 @@ if [ "$CONFIG_SCSI" != "n" ]; then
   source drivers/scsi/Config.in
 fi
 endmenu
-
-source drivers/i2o/Config.in
 
 if [ "$CONFIG_NET" = "y" ]; then
   mainmenu_option next_comment
@@ -179,7 +168,7 @@ endmenu
 
 source drivers/char/Config.in
 
-source drivers/usb/Config.in
+# source drivers/usb/Config.in
 
 source fs/Config.in
 

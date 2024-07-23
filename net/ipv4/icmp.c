@@ -1,9 +1,9 @@
 /*
  *	NET3:	Implementation of the ICMP protocol layer. 
  *	
- *		Alan Cox, <alan@redhat.com>
+ *		Alan Cox, <alan@cymru.net>
  *
- *	Version: $Id: icmp.c,v 1.52.2.7 2001/02/02 01:27:08 davem Exp $
+ *	Version: $Id: icmp.c,v 1.52 1999/03/21 12:04:11 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -320,8 +320,6 @@ int sysctl_icmp_echo_ignore_broadcasts = 0;
 /* Control parameter - ignore bogus broadcast responses? */
 int sysctl_icmp_ignore_bogus_error_responses =0;
 
-extern int sysctl_ip_always_defrag;
-
 /*
  *	ICMP control array. This specifies what to do with each ICMP.
  */
@@ -494,12 +492,9 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 		daddr = icmp_param->replyopts.faddr;
 	if (ip_route_output(&rt, daddr, rt->rt_spec_dst, RT_TOS(skb->nh.iph->tos), 0))
 		return;
-	if (icmpv4_xrlim_allow(rt, icmp_param->icmph.type, 
-			       icmp_param->icmph.code)) { 
-		ip_build_xmit(sk, icmp_glue_bits, icmp_param, 
-			      icmp_param->data_len+sizeof(struct icmphdr),
-			      &ipc, rt, MSG_DONTWAIT);
-	}
+	ip_build_xmit(sk, icmp_glue_bits, icmp_param, 
+		icmp_param->data_len+sizeof(struct icmphdr),
+		&ipc, rt, MSG_DONTWAIT);
 	ip_rt_put(rt);
 }
 
@@ -522,7 +517,6 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info)
 	struct icmp_bxm icmp_param;
 	struct rtable *rt = (struct rtable*)skb_in->dst;
 	struct ipcm_cookie ipc;
-	unsigned int offset;
 	u32 saddr;
 	u8  tos;
 	
@@ -543,9 +537,10 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info)
 	 *	Now check at the protocol level
 	 */
 	if (!rt) {
-                if (sysctl_ip_always_defrag == 0 &&
-                    net_ratelimit())
+#ifndef CONFIG_IP_ALWAYS_DEFRAG
+		if (net_ratelimit())
 			printk(KERN_DEBUG "icmp_send: destinationless packet\n");
+#endif
 		return;
 	}
 	if (rt->rt_flags&(RTCF_BROADCAST|RTCF_MULTICAST))
@@ -652,12 +647,7 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info)
 	room -= sizeof(struct iphdr) + icmp_param.replyopts.optlen;
 	room -= sizeof(struct icmphdr);
 
-	if (skb_in->data > skb_in->nh.raw) 
-		offset = (skb_in->data - skb_in->nh.raw);
-	else 
-		offset = 0;
-	icmp_param.data_len = (skb_in->len + offset);
-
+	icmp_param.data_len=(iph->ihl<<2)+skb_in->len;
 	if (icmp_param.data_len > room)
 		icmp_param.data_len = room;
 	
@@ -708,9 +698,9 @@ static void icmp_unreach(struct icmphdr *icmph, struct sk_buff *skb, int len)
 				break;
 			case ICMP_FRAG_NEEDED:
 				if (ipv4_config.no_pmtu_disc) {
-					if (sysctl_ip_always_defrag == 0 && net_ratelimit())
-						printk(KERN_INFO "ICMP: %d.%d.%d.%d: fragmentation needed and DF set.\n",
-					       NIPQUAD(iph->daddr));
+					if (net_ratelimit())
+						printk(KERN_INFO "ICMP: %s: fragmentation needed and DF set.\n",
+					       in_ntoa(iph->daddr));
 				} else {
 					unsigned short new_mtu;
 					new_mtu = ip_rt_frag_needed(iph, ntohs(icmph->un.frag.mtu));
@@ -720,8 +710,8 @@ static void icmp_unreach(struct icmphdr *icmph, struct sk_buff *skb, int len)
 				}
 				break;
 			case ICMP_SR_FAILED:
-				if (sysctl_ip_always_defrag == 0 && net_ratelimit())
-					printk(KERN_INFO "ICMP: %d.%d.%d.%d: Source Route Failed.\n", NIPQUAD(iph->daddr));
+				if (net_ratelimit())
+					printk(KERN_INFO "ICMP: %s: Source Route Failed.\n", in_ntoa(iph->daddr));
 				break;
 			default:
 				break;
@@ -751,8 +741,8 @@ static void icmp_unreach(struct icmphdr *icmph, struct sk_buff *skb, int len)
 		if (inet_addr_type(iph->daddr) == RTN_BROADCAST)
 		{
 			if (net_ratelimit())
-				printk(KERN_WARNING "%d.%d.%d.%d sent an invalid ICMP error to a broadcast.\n",
-			       	NIPQUAD(skb->nh.iph->saddr));
+				printk(KERN_WARNING "%s sent an invalid ICMP error to a broadcast.\n",
+			       	in_ntoa(skb->nh.iph->saddr));
 			return; 
 		}
 	}
@@ -933,7 +923,7 @@ static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, int len)
 static void icmp_address(struct icmphdr *icmph, struct sk_buff *skb, int len)
 {
 #if 0
-	if (sysctl_ip_always_defrag == 0 && net_ratelimit())
+	if (net_ratelimit())
 		printk(KERN_DEBUG "a guy asks for address mask. Who is it?\n");
 #endif		
 }
@@ -963,8 +953,8 @@ static void icmp_address_reply(struct icmphdr *icmph, struct sk_buff *skb, int l
 		if (mask == ifa->ifa_mask && inet_ifa_match(rt->rt_src, ifa))
 			return;
 	}
-	if (sysctl_ip_always_defrag == 0 && net_ratelimit())
-		printk(KERN_INFO "Wrong address mask %08X from %08X/%s\n",
+	if (net_ratelimit())
+		printk(KERN_INFO "Wrong address mask %08lX from %08lX/%s\n",
 		       ntohl(mask), ntohl(rt->rt_src), dev->name);
 }
 
@@ -989,21 +979,13 @@ extern struct sock *udp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport, in
 
 int icmp_chkaddr(struct sk_buff *skb)
 {
-	unsigned short size = skb->nh.iph->ihl*4;
-	unsigned short clen = ntohs(skb->nh.iph->tot_len) - size;
-	struct icmphdr *icmph=(struct icmphdr *)(skb->nh.raw + size);
+	struct icmphdr *icmph=(struct icmphdr *)(skb->nh.raw + skb->nh.iph->ihl*4);
 	struct iphdr *iph = (struct iphdr *) (icmph + 1);
-	void (*handler)(struct icmphdr *icmph, struct sk_buff *skb, int len);
+	void (*handler)(struct icmphdr *icmph, struct sk_buff *skb, int len) = icmp_pointers[icmph->type].handler;
 
-	if (clen < sizeof(struct icmphdr)) return 0;
-	handler = icmp_pointers[icmph->type].handler;
 	if (handler == icmp_unreach || handler == icmp_redirect) {
 		struct sock *sk;
-		
-		clen -= sizeof(struct icmphdr);
-		if (clen < sizeof(struct iphdr) ||
-			clen < iph->ihl * 4 + sizeof(struct udphdr))
-			return 0;
+
 		switch (iph->protocol) {
 		case IPPROTO_TCP:
 			{

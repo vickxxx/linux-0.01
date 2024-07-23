@@ -1,8 +1,13 @@
-/* $Id: l3_1tr6.h,v 2.2 2000/06/26 08:59:14 keil Exp $
+/* $Id: l3_1tr6.h,v 2.0 1997/07/27 21:15:47 keil Exp $
  *
  *  German 1TR6 D-channel protocol defines
  *
- * This file is (c) under GNU PUBLIC LICENSE
+ * $Log: l3_1tr6.h,v $
+ * Revision 2.0  1997/07/27 21:15:47  keil
+ * New Callref based layer3
+ *
+ * Revision 1.1  1996/10/13 20:03:48  keil
+ * Initial revision
  *
  */
 #ifndef l3_1tr6
@@ -59,7 +64,6 @@
 #define MT_N1_REG_ACK 0x6C
 #define MT_N1_REG_REJ 0x6F
 #define MT_N1_STAT 0x63
-#define MT_N1_INVALID 0
 
 /*
  * W Elemente

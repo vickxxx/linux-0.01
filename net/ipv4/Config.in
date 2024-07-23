@@ -15,9 +15,8 @@ if [ "$CONFIG_IP_ADVANCED_ROUTER" = "y" ]; then
     bool 'IP: fast network address translation' CONFIG_IP_ROUTE_NAT
   fi
 fi
-bool 'IP: kernel-level configuration support' CONFIG_IP_PNP
+bool 'IP: kernel level autoconfiguration' CONFIG_IP_PNP
 if [ "$CONFIG_IP_PNP" = "y" ]; then
-  bool '      DHCP support' CONFIG_IP_PNP_DHCP
   bool '      BOOTP support' CONFIG_IP_PNP_BOOTP
   bool '      RARP support' CONFIG_IP_PNP_RARP
 # not yet ready..
@@ -32,12 +31,14 @@ if [ "$CONFIG_FIREWALL" = "y" ]; then
 	    define_bool CONFIG_NETLINK_DEV y
 	fi
     fi
+    bool 'IP: always defragment (required for masquerading)' CONFIG_IP_ALWAYS_DEFRAG
     if [ "$CONFIG_IP_MULTIPLE_TABLES" = "y" ]; then
 	bool 'IP: use FWMARK value as routing key' CONFIG_IP_ROUTE_FWMARK
     fi
   fi
 fi
 if [ "$CONFIG_IP_FIREWALL" = "y" ]; then
+  if [ "$CONFIG_IP_ALWAYS_DEFRAG" != "n" ]; then
     bool 'IP: transparent proxy support' CONFIG_IP_TRANSPARENT_PROXY
     bool 'IP: masquerading' CONFIG_IP_MASQUERADE
     if [ "$CONFIG_IP_MASQUERADE" != "n" ]; then
@@ -53,6 +54,7 @@ if [ "$CONFIG_IP_FIREWALL" = "y" ]; then
 	fi
       fi
     fi
+  fi
 fi
 bool 'IP: optimize as router not host' CONFIG_IP_ROUTER
 tristate 'IP: tunneling' CONFIG_NET_IPIP

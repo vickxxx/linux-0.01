@@ -36,7 +36,6 @@ extern ide_ioreg_t chrp_ide_regbase[MAX_HWIFS];
 extern ide_ioreg_t chrp_idedma_regbase; /* one for both channels */
 extern unsigned int chrp_ide_irq;
 extern void chrp_ide_probe(void);
-extern void ide_pmac_init(void);
 
 struct ide_machdep_calls {
         void        (*insw)(ide_ioreg_t port, void *buf, int ns);
@@ -63,6 +62,16 @@ void ide_init_hwif_ports(ide_ioreg_t *p, ide_ioreg_t base, int *irq);
 void ide_insw(ide_ioreg_t port, void *buf, int ns);
 void ide_outsw(ide_ioreg_t port, void *buf, int ns);
 void ppc_generic_ide_fix_driveid(struct hd_driveid *id);
+
+#undef insw
+#define insw(port, buf, ns) 	do {				\
+	ppc_ide_md.insw((port), (buf), (ns));			\
+} while (0)
+     
+#undef outsw
+#define outsw(port, buf, ns) 	do {				\
+	ppc_ide_md.outsw((port), (buf), (ns));			\
+} while (0)
 
 #undef	SUPPORT_SLOW_DATA_PORTS
 #define	SUPPORT_SLOW_DATA_PORTS	0
@@ -100,7 +109,6 @@ static __inline__ void ide_fix_driveid (struct hd_driveid *id) {
         ppc_ide_md.fix_driveid(id);
 }
 
-#if 0	/* standard inb/outb is OK now -- paulus */
 #undef inb
 #define inb(port)	in_8((unsigned char *)((port) + ppc_ide_md.io_base))
 #undef inb_p
@@ -111,7 +119,6 @@ static __inline__ void ide_fix_driveid (struct hd_driveid *id) {
 	out_8((unsigned char *)((port) + ppc_ide_md.io_base), (val) )
 #undef outb_p
 #define outb_p(val, port)	outb(val, port)
-#endif
 
 typedef union {
 	unsigned all			: 8;	/* all of the bits together */

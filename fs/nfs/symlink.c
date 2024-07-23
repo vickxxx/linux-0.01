@@ -5,20 +5,13 @@
  *
  *  Optimization changes Copyright (C) 1994 Florian La Roche
  *
- *  Jun 7 1999, cache symlink lookups in the page cache.  -DaveM
- *
  *  nfs symlink handling code
  */
 
-#define NFS_NEED_XDR_TYPES
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/sunrpc/clnt.h>
 #include <linux/nfs_fs.h>
-#include <linux/nfs.h>
-#include <linux/pagemap.h>
 #include <linux/stat.h>
-#include <asm/pgtable.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/string.h>
@@ -44,82 +37,70 @@ struct inode_operations nfs_symlink_inode_operations = {
 	NULL,			/* rename */
 	nfs_readlink,		/* readlink */
 	nfs_follow_link,	/* follow_link */
-	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* flushpage */
+	NULL,			/* bmap */
 	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	NULL			/* permission */
 };
-
-/* Symlink caching in the page cache is even more simplistic
- * and straight-forward than readdir caching.
- */
-static int nfs_symlink_filler(struct inode *inode, struct page *page)
-{
-	void * buffer = (void *)page_address(page);
-	unsigned int error;
-
-	/* We place the length at the beginning of the page,
-	 * in client byte order, followed by the string.
-	 */
-	error = NFS_PROTO(inode)->readlink(inode, buffer,
-					   PAGE_CACHE_SIZE-sizeof(u32)-4);
-	if (error < 0)
-		goto error;
-	flush_dcache_page(page_address(page)); /* Is this correct? */
-	set_bit(PG_uptodate, &page->flags);
-	nfs_unlock_page(page);
-	return 0;
-error:
-	set_bit(PG_error, &page->flags);
-	nfs_unlock_page(page);
-	return -EIO;
-}
 
 static int nfs_readlink(struct dentry *dentry, char *buffer, int buflen)
 {
-	struct inode *inode = dentry->d_inode;
-	struct page *page;
-	u32 *p, len;
+	int error;
+	unsigned int len;
+	char *res;
+	void *mem;
 
-	/* Caller revalidated the directory inode already. */
-	page = read_cache_page(inode, 0,
-				(filler_t *)nfs_symlink_filler, inode);
-	if (IS_ERR(page))
-		goto read_failed;
+	dfprintk(VFS, "nfs: readlink(%s/%s)\n",
+		dentry->d_parent->d_name.name, dentry->d_name.name);
 
-	p = (u32 *) page_address(page);
-	len = *p++;
-	if (len > buflen)
-		len = buflen;
-	copy_to_user(buffer, p, len);
-	page_cache_release(page);
-	return len;
-read_failed:
-	return PTR_ERR(page);
+	error = nfs_proc_readlink(NFS_DSERVER(dentry), NFS_FH(dentry),
+					&mem, &res, &len, NFS_MAXPATHLEN);
+	if (! error) {
+		if (len > buflen)
+			len = buflen;
+		copy_to_user(buffer, res, len);
+		error = len;
+		kfree(mem);
+	}
+	return error;
 }
 
 static struct dentry *
-nfs_follow_link(struct dentry *dentry, struct dentry *base, unsigned int follow)
+nfs_follow_link(struct dentry * dentry, struct dentry *base, unsigned int follow)
 {
+	int error;
+	unsigned int len;
+	char *res;
+	void *mem;
+	char *path;
 	struct dentry *result;
-	struct inode *inode = dentry->d_inode;
-	struct page *page;
-	u32 *p;
 
-	/* Caller revalidated the directory inode already. */
-	page = read_cache_page(inode, 0,
-				(filler_t *)nfs_symlink_filler, inode);
-	if (IS_ERR(page))
-		goto read_failed;
+	dfprintk(VFS, "nfs: follow_link(%s/%s)\n",
+		dentry->d_parent->d_name.name, dentry->d_name.name);
 
-	p = (u32 *) page_address(page);
-	result = lookup_dentry((char *) (p + 1), base, follow);
-	page_cache_release(page);
+	error = nfs_proc_readlink(NFS_DSERVER(dentry), NFS_FH(dentry),
+				 &mem, &res, &len, NFS_MAXPATHLEN);
+	result = ERR_PTR(error);
+	if (error)
+		goto out_dput;
+
+	result = ERR_PTR(-ENOMEM);
+	path = kmalloc(len + 1, GFP_KERNEL);
+	if (!path)
+		goto out_mem;
+	memcpy(path, res, len);
+	path[len] = 0;
+	kfree(mem);
+
+	result = lookup_dentry(path, base, follow);
+	kfree(path);
+out:
 	return result;
-read_failed:
-	return (struct dentry *)page;
+
+out_mem:
+	kfree(mem);
+out_dput:
+	dput(base);
+	goto out;
 }

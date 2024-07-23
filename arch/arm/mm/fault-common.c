@@ -26,14 +26,25 @@ void __bad_pmd_kernel(pmd_t *pmd)
 	set_pmd(pmd, mk_kernel_pmd(BAD_PAGETABLE));
 }
 
-/*
- * This is useful to dump out the page tables associated with
- * 'addr' in mm 'mm'.
- */
-void show_pte(struct mm_struct *mm, unsigned long addr)
+static void
+kernel_page_fault(unsigned long addr, int mode, struct pt_regs *regs,
+		  struct task_struct *tsk, struct mm_struct *mm)
 {
+	char *reason;
+	/*
+	 * Oops. The kernel tried to access some bad page. We'll have to
+	 * terminate things with extreme prejudice.
+	 */
 	pgd_t *pgd;
 
+	if (addr < PAGE_SIZE)
+		reason = "NULL pointer dereference";
+	else
+		reason = "paging request";
+
+	printk(KERN_ALERT "Unable to handle kernel %s at virtual address %08lx\n",
+		reason, addr);
+	printk(KERN_ALERT "memmap = %08lX, pgd = %p\n", tsk->tss.memmap, mm->pgd);
 	pgd = pgd_offset(mm, addr);
 	printk(KERN_ALERT "*pgd = %08lx", pgd_val(*pgd));
 
@@ -62,34 +73,11 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 		pte = pte_offset(pmd, addr);
 		printk(", *pte = %08lx", pte_val(*pte));
-#ifdef CONFIG_CPU_32
 		printk(", *ppte = %08lx", pte_val(pte[-PTRS_PER_PTE]));
-#endif
 	} while(0);
 
 	printk("\n");
-}
-
-/*
- * Oops. The kernel tried to access some bad page. We'll have to
- * terminate things with extreme prejudice.
- */
-static void
-kernel_page_fault(unsigned long addr, int write_access, struct pt_regs *regs,
-		  struct task_struct *tsk, struct mm_struct *mm)
-{
-	char *reason;
-
-	if (addr < PAGE_SIZE)
-		reason = "NULL pointer dereference";
-	else
-		reason = "paging request";
-
-	printk(KERN_ALERT "Unable to handle kernel %s at virtual address %08lx\n",
-		reason, addr);
-	printk(KERN_ALERT "memmap = %08lX, pgd = %p\n", tsk->tss.memmap, mm->pgd);
-	show_pte(mm, addr);
-	die("Oops", regs, write_access);
+	die("Oops", regs, mode);
 
 	do_exit(SIGKILL);
 }
@@ -100,7 +88,6 @@ static void do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
 	struct mm_struct *mm;
 	struct vm_area_struct *vma;
 	unsigned long fixup;
-	int fault;
 
 	tsk = current;
 	mm  = tsk->mm;
@@ -139,12 +126,8 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-survive:
-	fault = handle_mm_fault(tsk, vma, addr & PAGE_MASK, DO_COW(mode));
-	if (!fault)
+	if (!handle_mm_fault(tsk, vma, addr & PAGE_MASK, DO_COW(mode)))
 		goto do_sigbus;
-	if (fault < 0)
-		goto out_of_memory;
 
 	up(&mm->mmap_sem);
 	return;
@@ -157,7 +140,7 @@ bad_area:
 	up(&mm->mmap_sem);
 
 	/* User mode accesses just cause a SIGSEGV */
-	if (user_mode(regs)) {
+	if (mode & FAULT_CODE_USER) {
 		tsk->tss.error_code = mode;
 		tsk->tss.trap_no = 14;
 #ifdef CONFIG_DEBUG_USER
@@ -182,23 +165,6 @@ no_context:
 	kernel_page_fault(addr, mode, regs, tsk, mm);
 	return;
 
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-out_of_memory:
-	if (tsk->pid == 1) {
-		tsk->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	up(&mm->mmap_sem);
-	if (user_mode(regs)) {
-		printk("VM: killing process %s\n", tsk->comm);
-		do_exit(SIGKILL);
-	}
-	goto no_context;
-
 do_sigbus:
 	/*
 	 * We ran out of memory, or some other thing happened to us that made
@@ -215,7 +181,7 @@ do_sigbus:
 	force_sig(SIGBUS, tsk);
 
 	/* Kernel mode? Handle exceptions or die */
-	if (!user_mode(regs))
+	if (!(mode & FAULT_CODE_USER))
 		goto no_context;
 }
 

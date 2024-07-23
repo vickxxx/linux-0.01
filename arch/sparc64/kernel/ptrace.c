@@ -40,7 +40,6 @@ static pte_t *get_page(struct task_struct * tsk,
 	pgd_t * pgdir;
 	pmd_t * pgmiddle;
 	pte_t * pgtable;
-	int fault;
 
 repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
@@ -51,12 +50,8 @@ repeat:
 	current->mm->segments = (void *) (addr & PAGE_SIZE);
 
 	if (pgd_none(*pgdir)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %016lx\n", pgd_val(*pgdir));
@@ -65,12 +60,8 @@ repeat:
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %016lx\n", pmd_val(*pgmiddle));
@@ -79,20 +70,12 @@ repeat:
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (write && !pte_write(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	return pgtable;
 }
@@ -120,14 +103,16 @@ static __inline__ unsigned int read_user_int(unsigned long kvaddr)
 
 static __inline__ void write_user_long(unsigned long kvaddr, unsigned long val)
 {
-	*(unsigned long *)kvaddr = val;
-	flush_dcache_page(kvaddr & PAGE_MASK);
+	__asm__ __volatile__("stxa %0, [%1] %2"
+			     : /* no outputs */
+			     : "r" (val), "r" (__pa(kvaddr)), "i" (ASI_PHYS_USE_EC));
 }
 
 static __inline__ void write_user_int(unsigned long kvaddr, unsigned int val)
 {
-	*(unsigned int *)kvaddr = val;
-	flush_dcache_page(kvaddr & PAGE_MASK);
+	__asm__ __volatile__("stwa %0, [%1] %2"
+			     : /* no outputs */
+			     : "r" (val), "r" (__pa(kvaddr)), "i" (ASI_PHYS_USE_EC));
 }
 
 static inline unsigned long get_long(struct task_struct * tsk,
@@ -162,6 +147,11 @@ static inline void put_long(struct task_struct * tsk, struct vm_area_struct * vm
 
 		pgaddr = page + (addr & ~PAGE_MASK);
 		write_user_long(pgaddr, data);
+
+		__asm__ __volatile__("
+		membar	#StoreStore
+		flush	%0
+"		: : "r" (pgaddr & ~7) : "memory");
 	}
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
@@ -202,6 +192,11 @@ static inline void put_int(struct task_struct * tsk, struct vm_area_struct * vma
 
 		pgaddr = page + (addr & ~PAGE_MASK);
 		write_user_int(pgaddr, data);
+
+		__asm__ __volatile__("
+		membar	#StoreStore
+		flush	%0
+"		: : "r" (pgaddr & ~7) : "memory");
 	}
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */

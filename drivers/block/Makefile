@@ -142,10 +142,6 @@ ifeq ($(CONFIG_BLK_DEV_PDC4030),y)
 IDE_OBJS += pdc4030.o
 endif
 
-ifeq ($(CONFIG_BLK_DEV_ALI15X3),y)
-IDE_OBJS += alim15x3.o
-endif
-
 ifeq ($(CONFIG_BLK_DEV_TRM290),y)
 IDE_OBJS += trm290.o
 endif
@@ -165,10 +161,6 @@ endif
 ifeq ($(CONFIG_BLK_DEV_CMD646),y)
 IDE_OBJS += cmd646.o
 endif
-
-ifeq ($(CONFIG_BLK_DEV_CS5530),y)
-IDE_OBJS += cs5530.o
-endif     
 
 ifeq ($(CONFIG_BLK_DEV_SL82C105),y)
 IDE_OBJS += sl82c105.o
@@ -239,30 +231,6 @@ L_OBJS += xd.o
 else
   ifeq ($(CONFIG_BLK_DEV_XD),m)
   M_OBJS += xd.o
-  endif
-endif
-
-ifeq ($(CONFIG_BLK_CPQ_DA),y)
-L_OBJS += cpqarray.o
-else
-  ifeq ($(CONFIG_BLK_CPQ_DA),m)
-  M_OBJS += cpqarray.o
-  endif
-endif
-
-ifeq ($(CONFIG_BLK_CPQ_CISS_DA),y)
-L_OBJS += cciss.o
-else
-  ifeq ($(CONFIG_BLK_CPQ_CISS_DA),m)
-  M_OBJS += cciss.o
-  endif
-endif
-
-ifeq ($(CONFIG_BLK_DEV_DAC960),y)
-LX_OBJS += DAC960.o
-else
-  ifeq ($(CONFIG_BLK_DEV_DAC960),m)
-  MX_OBJS += DAC960.o
   endif
 endif
 

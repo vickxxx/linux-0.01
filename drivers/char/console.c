@@ -33,7 +33,7 @@
  * APM screenblank bug fixed Takashi Manabe <manabe@roy.dsl.tutics.tut.jp>
  *
  * Merge with the abstract console driver by Geert Uytterhoeven
- * <geert@linux-m68k.org>, Jan 1997.
+ * <Geert.Uytterhoeven@cs.kuleuven.ac.be>, Jan 1997.
  *
  *   Original m68k console driver modifications by
  *
@@ -91,6 +91,9 @@
 #include <linux/config.h>
 #include <linux/version.h>
 #include <linux/tqueue.h>
+#ifdef CONFIG_APM
+#include <linux/apm_bios.h>
+#endif
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -183,12 +186,6 @@ DECLARE_TASK_QUEUE(con_task_queue);
  * For the same reason, we defer scrollback to the console_bh.
  */
 static int scrollback_delta = 0;
-
-/*
- * Hook so that the power management routines can (un)blank
- * the console on our behalf.
- */
-int (*console_blank_hook)(int) = NULL;
 
 /*
  *	Low-Level Functions
@@ -358,7 +355,7 @@ static u8 build_attr(int currcons, u8 _color, u8 _intensity, u8 _blink, u8 _unde
 static void update_attr(int currcons)
 {
 	attr = build_attr(currcons, color, intensity, blink, underline, reverse ^ decscnm);
-	video_erase_char = (build_attr(currcons, color, 1, blink, 0, decscnm) << 8) | ' ';
+	video_erase_char = (build_attr(currcons, color, 1, 0, 0, decscnm) << 8) | ' ';
 }
 
 /* Note: inverting the screen twice should revert to the original state */
@@ -575,12 +572,10 @@ void redraw_screen(int new_console, int is_switch)
 	}
 
 	if (redraw) {
-		int update;
-		
 		set_origin(currcons);
-		update = sw->con_switch(vc_cons[currcons].d);
 		set_palette(currcons);
-		if (update && vcmode != KD_GRAPHICS)
+		if (sw->con_switch(vc_cons[currcons].d) && vcmode != KD_GRAPHICS)
+			/* Update the screen contents */
 			do_update_region(currcons, origin, screenbuf_size/2);
 	}
 	set_cursor(currcons);
@@ -686,7 +681,7 @@ int vc_resize(unsigned int lines, unsigned int cols,
 		else {
 			unsigned short *p = (unsigned short *) kmalloc(ss, GFP_USER);
 			if (!p) {
-				for (i = first; i< currcons; i++)
+				for (i = 0; i< currcons; i++)
 					if (newscreens[i])
 						kfree_s(newscreens[i], ss);
 				return -ENOMEM;
@@ -1989,7 +1984,7 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 	static unsigned long printing = 0;
 	const ushort *start;
 	ushort cnt = 0;
-	ushort myx;
+	ushort myx = x;
 
 	/* console busy or not yet initialized */
 	if (!printable || test_and_set_bit(0, &printing))
@@ -1997,10 +1992,6 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 
 	if (kmsg_redirect && vc_cons_allocated(kmsg_redirect - 1))
 		currcons = kmsg_redirect - 1;
-
-	/* read `x' only after setting currecons properly (otherwise
-	   the `x' macro will read the x of the foreground console). */
-	myx = x;
 
 	if (!vc_cons_allocated(currcons)) {
 		/* impossible */
@@ -2544,8 +2535,10 @@ void do_blank_screen(int entering_gfx)
 	if (i)
 		set_origin(currcons);
 
-	if (console_blank_hook && console_blank_hook(1))
+#ifdef CONFIG_APM
+	if (apm_display_blank())
 		return;
+#endif
     	if (vesa_blank_mode)
 		sw->con_blank(vc_cons[currcons].d, vesa_blank_mode + 1);
 }
@@ -2569,9 +2562,9 @@ void unblank_screen(void)
 
 	currcons = fg_console;
 	console_blanked = 0;
-	if (console_blank_hook)
-		console_blank_hook(0);
-	set_palette(currcons);
+#ifdef CONFIG_APM
+	apm_display_unblank();
+#endif
 	if (sw->con_blank(vc_cons[currcons].d, 0))
 		/* Low-level driver cannot restore -> do it ourselves */
 		update_screen(fg_console);
@@ -2823,7 +2816,6 @@ EXPORT_SYMBOL(default_blu);
 EXPORT_SYMBOL(video_font_height);
 EXPORT_SYMBOL(video_scan_lines);
 EXPORT_SYMBOL(vc_resize);
-EXPORT_SYMBOL(fg_console);
 
 #ifndef VT_SINGLE_DRIVER
 EXPORT_SYMBOL(take_over_console);

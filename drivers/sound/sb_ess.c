@@ -10,29 +10,29 @@
  *
  * History:
  *
- * Rolf Fokkens	 (Dec 20 1998):	ES188x recording level support on a per
+ * Rolf Fokkens	(Dec 20 1998):	ES188x recording level support on a per
  * fokkensr@vertis.nl			input basis.
- *				 (Dec 24 1998):	Recognition of ES1788, ES1887, ES1888,
+ *				(Dec 24 1998):	Recognition of ES1788, ES1887, ES1888,
  *								ES1868, ES1869 and ES1878. Could be used for
  *								specific handling in the future. All except
  *								ES1887 and ES1888 and ES688 are handled like
  *								ES1688.
- *				 (Dec 27 1998):	RECLEV for all (?) ES1688+ chips. ES188x now
+ *				(Dec 27 1998):	RECLEV for all (?) ES1688+ chips. ES188x now
  *								have the "Dec 20" support + RECLEV
- *				 (Jan  2 1999):	Preparation for Full Duplex. This means
+ *				(Jan  2 1999):	Preparation for Full Duplex. This means
  *								Audio 2 is now used for playback when dma16
  *								is specified. The next step would be to use
  *								Audio 1 and Audio 2 at the same time.
- *				 (Jan  9 1999):	Put all ESS stuff into sb_ess.[ch], this
+ *				(Jan  9 1999):	Put all ESS stuff into sb_ess.[ch], this
  *								includes both the ESS stuff that has been in
  *								sb_*[ch] before I touched it and the ESS support
  *								I added later
- *				 (Jan 23 1999):	Full Duplex seems to work. I wrote a small
+ *				(Jan 23 1999):	Full Duplex seems to work. I wrote a small
  *								test proggy which works OK. Haven't found
  *								any applications to test it though. So why did
  *								I bother to create it anyway?? :) Just for
  *								fun.
- *				 (May  2 1999):	I tried to be too smart by "introducing"
+ *				(May  2 1999):	I tried to be too smart by "introducing"
  *								ess_calc_best_speed (). The idea was that two
  *								dividers could be used to setup a samplerate,
  *								ess_calc_best_speed () would choose the best.
@@ -40,12 +40,6 @@
  *								recording problems for high samplerates. I
  *								fixed this by removing ess_calc_best_speed ()
  *								and just doing what the documentation says. 
- * Andy Sloane   (Jun  4 1999): Stole some code from ALSA to fix the playback
- * andy@guildsoftware.com		speed on ES1869, ES1879, ES1887, and ES1888.
- * 								1879's were previously ignored by this driver;
- * 								added (untested) support for those.
- * Cvetan Ivanov (Oct 27 1999): Fixed ess_dsp_init to call ess_set_dma_hw for
- * zezo@inet.bg					_ALL_ ESS models, not only ES1887
  *
  * This files contains ESS chip specifics. It's based on the existing ESS
  * handling as it resided in sb_common.c, sb_mixer.c and sb_audio.c. This
@@ -54,7 +48,7 @@
  * - RECLEV support for ES1688 and later
  * - 6 bits playback level support chips later than ES1688
  * - Recording level support on a per-device basis for ES1887
- * - Full-Duplex for ES1887
+ * - Full-Duplex for ES1887 (under development)
  *
  * Full duplex is enabled by specifying dma16. While the normal dma must
  * be one of 0, 1 or 3, dma16 can be one of 0, 1, 3 or 5. DMA 5 is a 16 bit
@@ -102,7 +96,7 @@
  * of writing 0x00 to 0x7f (which should be done by reset): The ES1887 moves
  * into ES1888 mode. This means that it claims IRQ 11, which happens to be my
  * ISDN adapter. Needless to say it no longer worked. I now understand why
- * after rebooting 0x7f already was 0x05, the value of my choice: the BIOS
+ * after rebooting 0x7f already was 0x05, the value of my choise: the BIOS
  * did it.
  *
  * Oh, and this is another trap: in ES1887 docs mixer register 0x70 is decribed
@@ -196,22 +190,14 @@
 #define ESSTYPE_LIKE20	-1		/* Mimic 2.0 behaviour					*/
 #define ESSTYPE_DETECT	0		/* Mimic 2.0 behaviour					*/
 
-int esstype = ESSTYPE_DETECT; /* module parameter in sb_card.c */
+int esstype = ESSTYPE_LIKE20; /* module parameter in sb_card.c */
 
 #define SUBMDL_ES1788	0x10	/* Subtype ES1788 for specific handling */
 #define SUBMDL_ES1868	0x11	/* Subtype ES1868 for specific handling */
 #define SUBMDL_ES1869	0x12	/* Subtype ES1869 for specific handling */
 #define SUBMDL_ES1878	0x13	/* Subtype ES1878 for specific handling */
-#define SUBMDL_ES1879	0x16    /* ES1879 was initially forgotten */
 #define SUBMDL_ES1887	0x14	/* Subtype ES1887 for specific handling */
 #define SUBMDL_ES1888	0x15	/* Subtype ES1888 for specific handling */
-
-#define SB_CAP_ES18XX_RATE 0x100
-
-#define ES1688_CLOCK1 795444 /* 128 - div */
-#define ES1688_CLOCK2 397722 /* 256 - div */
-#define ES18XX_CLOCK1 793800 /* 128 - div */
-#define ES18XX_CLOCK2 768000 /* 256 - div */
 
 #ifdef FKS_LOGGING
 static void ess_show_mixerregs (sb_devc *devc);
@@ -337,6 +323,7 @@ static int ess_calc_div (int clock, int revert, int *speedp, int *diffp)
 	return retval;
 }
 
+#ifdef OBSOLETE
 static int ess_calc_best_speed
 	(int clock1, int rev1, int clock2, int rev2, int *divp, int *speedp)
 {
@@ -360,6 +347,7 @@ static int ess_calc_best_speed
 
 	return retval;
 }
+#endif
 
 /*
  * Depending on the audiochannel ESS devices can
@@ -378,14 +366,11 @@ static void ess_common_speed (sb_devc *devc, int *speedp, int *divp)
 		 * The 0x80 is important for the first audio channel
 		 */
 		div = 0x80 | ess_calc_div (795500, 128, speedp, &diff);
-	} else if(devc->caps & SB_CAP_ES18XX_RATE) {
-		ess_calc_best_speed(ES18XX_CLOCK1, 128, ES18XX_CLOCK2, 256, 
-						&div, speedp);
 	} else {
 		if (*speedp > 22000) {
-			div = 0x80 | ess_calc_div (ES1688_CLOCK1, 256, speedp, &diff);
+			div = 0x80 | ess_calc_div (795500, 256, speedp, &diff);
 		} else {
-			div = 0x00 | ess_calc_div (ES1688_CLOCK2, 128, speedp, &diff);
+			div = 0x00 | ess_calc_div (397700, 128, speedp, &diff);
 		}
 	}
 	*divp = div;
@@ -1085,12 +1070,6 @@ int ess_init(sb_devc * devc, struct address_info *hw_config)
 		case 1788:
 			submodel = SUBMDL_ES1788;
 			break;
-		case 1878:
-			submodel = SUBMDL_ES1878;
-			break;
-		case 1879:
-			submodel = SUBMDL_ES1879;
-			break;
 		case 1887:
 			submodel = SUBMDL_ES1887;
 			break;
@@ -1137,10 +1116,6 @@ FKS_test (devc);
 			case 0x1878:
 				chip = "ES1878";
 				devc->submodel = SUBMDL_ES1878;
-				break;
-			case 0x1879:
-				chip = "ES1879";
-				devc->submodel = SUBMDL_ES1879;
 				break;
 			default:
 				if ((type & 0x00ff) != ((type >> 8) & 0x00ff)) {
@@ -1200,27 +1175,10 @@ FKS_test (devc);
 		strcpy(name, "Jazz16");
 	}
 
-	/* AAS: info stolen from ALSA: these boards have different clocks */
-	switch(devc->submodel) {
-/* APPARENTLY NOT 1869 AND 1887
-		case SUBMDL_ES1869:
-		case SUBMDL_ES1887:
-*/		
-		case SUBMDL_ES1888:
-			devc->caps |= SB_CAP_ES18XX_RATE;
-			break;
-	}
-
 	hw_config->name = name;
 	/* FKS: sb_dsp_reset to enable extended mode???? */
 	sb_dsp_reset(devc); /* Turn on extended mode */
 
-	/* Disable audio 2 data if boot from another OS w/o HW reset */
-	if (devc->submodel == SUBMDL_ES1879)
-	{
-		ess_setmixer(devc, 0x71, 0x00);
-	}   
-                       
 	/*
 	 *  Enable joystick and OPL3
 	 */
@@ -1313,13 +1271,6 @@ printk(KERN_INFO "ess_set_dma_hw: dma8=%d,dma16=%d,dup=%d\n"
 int ess_dsp_init (sb_devc *devc, struct address_info *hw_config)
 {
 	/*
-	 * Caller also checks this, but anyway
-	 */
-	if (devc->model != MDL_ESS) {
-		printk (KERN_INFO "ess_dsp_init for non ESS chip\n");
-		return 1;
-	}
-	/*
 	 * This for ES1887 to run Full Duplex. Actually ES1888
 	 * is allowed to do so too. I have no idea yet if this
 	 * will work for ES1888 however.
@@ -1339,12 +1290,15 @@ int ess_dsp_init (sb_devc *devc, struct address_info *hw_config)
 		if (devc->dma8 != devc->dma16 && devc->dma16 != -1) {
 			devc->duplex = 1;
 		}
+
+		if (!ess_set_dma_hw (devc)) {
+			free_irq(devc->irq, devc);
+			return 0;
+		}
+		return 1;
+	} else {
+		return -1;
 	}
-	if (!ess_set_dma_hw (devc)) {
-		free_irq(devc->irq, devc);
-		return 0;
-	}
-	return 1;
 }
 
 /****************************************************************************

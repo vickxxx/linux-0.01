@@ -1,5 +1,3 @@
-#include <linux/module.h>
-#include <linux/init.h>
 #include "includes.h"
 #include "hardware.h"
 #include "card.h"
@@ -39,12 +37,23 @@ int irq_supported(int irq_x)
 	return 0;
 }
 
+#ifdef MODULE
 MODULE_PARM(io, "1-4i");
 MODULE_PARM(irq, "1-4i");
 MODULE_PARM(ram, "1-4i");
 MODULE_PARM(do_reset, "i");
+#define init_sc init_module
+#else
+/*
+Initialization code for non-module version to be included
 
-static int __init sc_init(void)
+void sc_setup(char *str, int *ints)
+{
+}
+*/
+#endif
+
+int init_sc(void)
 {
 	int b = -1;
 	int i, j;
@@ -155,7 +164,7 @@ static int __init sc_init(void)
 		if(do_reset) {
 			pr_debug("Doing a SAFE probe reset\n");
 			outb(0xFF, io[b] + RESET_OFFSET);
-			set_current_state(TASK_INTERRUPTIBLE);
+			current->state = TASK_INTERRUPTIBLE;
 			schedule_timeout(milliseconds(10000));
 		}
 		pr_debug("RAM Base for board %d is 0x%x, %s probe\n", b, ram[b],
@@ -293,7 +302,7 @@ static int __init sc_init(void)
 			/*
 			 * No interrupt could be used
 			 */
-			pr_debug("Failed to acquire an IRQ line\n");
+			pr_debug("Failed to aquire an IRQ line\n");
 			continue;
 		}
 
@@ -401,7 +410,8 @@ static int __init sc_init(void)
 	return status;
 }
 
-static void  sc_exit(void)
+#ifdef MODULE
+void cleanup_module(void)
 {
 	int i, j;
 
@@ -453,6 +463,7 @@ static void  sc_exit(void)
 	}
 	pr_info("SpellCaster ISA ISDN Adapter Driver Unloaded.\n");
 }
+#endif
 
 int identify_board(unsigned long rambase, unsigned int iobase) 
 {
@@ -501,10 +512,19 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 	 * Try to identify a PRI card
 	 */
 	outb(PRI_BASEPG_VAL, pgport);
-	set_current_state(TASK_INTERRUPTIBLE);
+	current->state = TASK_INTERRUPTIBLE;
 	schedule_timeout(HZ);
 	sig = readl(rambase + SIG_OFFSET);
 	pr_debug("Looking for a signature, got 0x%x\n", sig);
+#if 0
+/*
+ * For Gary: 
+ * If it's a timing problem, it should be gone with the above schedule()
+ * Another possible reason may be the missing volatile in the original
+ * code. readl() does this for us.
+ */
+	printk("");	/* Hack! Doesn't work without this !!!??? */
+#endif
 	if(sig == SIGNATURE)
 		return PRI_BOARD;
 
@@ -512,10 +532,13 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 	 * Try to identify a PRI card
 	 */
 	outb(BRI_BASEPG_VAL, pgport);
-	set_current_state(TASK_INTERRUPTIBLE);
+	current->state = TASK_INTERRUPTIBLE;
 	schedule_timeout(HZ);
 	sig = readl(rambase + SIG_OFFSET);
 	pr_debug("Looking for a signature, got 0x%x\n", sig);
+#if 0
+	printk("");	/* Hack! Doesn't work without this !!!??? */
+#endif
 	if(sig == SIGNATURE)
 		return BRI_BOARD;
 
@@ -544,7 +567,7 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 	 */
 	x = 0;
 	while((inb(iobase + FIFOSTAT_OFFSET) & RF_HAS_DATA) && x < 100) {
-		set_current_state(TASK_INTERRUPTIBLE);
+		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(1);
 		x++;
 	}
@@ -568,6 +591,3 @@ int identify_board(unsigned long rambase, unsigned int iobase)
 		
 	return -1;
 }
-
-module_init(sc_init);
-module_exit(sc_exit);

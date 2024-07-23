@@ -32,7 +32,6 @@ es1888_init(void)
 		continue;
 	inb(0x022a);			/* pause */
 	outb(0xc6, 0x022c);		/* enable extended mode */
-	inb(0x022a);			/* pause, also forces the write */
 	while (inb(0x022c) & 0x80)	/* wait for bit 7 to deassert */
 		continue;
 	outb(0xb1, 0x022c);		/* setup for write to Interrupt CR */
@@ -45,5 +44,4 @@ es1888_init(void)
 	while (inb(0x022c) & 0x80)	/* wait for bit 7 to deassert */
 		continue;
 	outb(0x18, 0x022c);		/* set DMA channel 1 */
-	inb(0x022c);			/* force the write */
 }

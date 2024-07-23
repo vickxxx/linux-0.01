@@ -26,10 +26,6 @@ O_OBJS += tr.o
 	SNAP=y
 endif
 
-ifdef CONFIG_NET_FC
-O_OBJS += fc.o
-endif
-
 ifdef CONFIG_FDDI
 O_OBJS += fddi.o
 endif

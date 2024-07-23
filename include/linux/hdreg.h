@@ -49,7 +49,6 @@
 #define WIN_SEEK		0x70
 #define WIN_DIAGNOSE		0x90
 #define WIN_SPECIFY		0x91	/* set drive geometry translation */
-#define WIN_IDLEIMMEDIATE	0xE1	/* force drive to become "ready" */
 #define WIN_SETIDLE1		0xE3
 #define WIN_SETIDLE2		0x97
 
@@ -246,7 +245,7 @@ struct hd_driveid {
 	unsigned short	word123;	/* reserved (word 123) */
 	unsigned short	word124;	/* reserved (word 124) */
 	unsigned short	word125;	/* reserved (word 125) */
-	unsigned short	last_lun;	/* last lun on device */
+	unsigned short	word126;	/* reserved (word 126) */
 	unsigned short	word127;	/* reserved (word 127) */
 	unsigned short	security;	/* bits 0:support 1:enabled 2:locked 3:frozen */
 	unsigned short	reserved[127];

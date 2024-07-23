@@ -12,7 +12,6 @@
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/vmalloc.h>
-#include <linux/tasks.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -69,9 +68,6 @@ static int findkey (key_t key)
 	return -1;
 }
 
-int shmall = SHMALL;
-int shmall_max = SHMALL;
-
 /*
  * allocate new shmid_kernel and pgtable. protected by shm_segs[id] = NOID.
  */
@@ -80,11 +76,10 @@ static int newseg (key_t key, int shmflg, int size)
 	struct shmid_kernel *shp;
 	int numpages = (size + PAGE_SIZE -1) >> PAGE_SHIFT;
 	int id, i;
-	pte_t tmp_pte;
 
 	if (size < SHMMIN)
 		return -EINVAL;
-	if (shm_tot + numpages >= shmall)
+	if (shm_tot + numpages >= SHMALL)
 		return -ENOSPC;
 	for (id = 0; id < SHMMNI; id++)
 		if (shm_segs[id] == IPC_UNUSED) {
@@ -109,11 +104,7 @@ found:
 		return -ENOMEM;
 	}
 
-	pte_clear(&tmp_pte);
-
-	for (i = 0; i < numpages; i++)
-		shp->shm_pages[i] = pte_val(tmp_pte);
-
+	for (i = 0; i < numpages; shp->shm_pages[i++] = 0);
 	shm_tot += numpages;
 	shp->u.shm_perm.key = key;
 	shp->u.shm_perm.mode = (shmflg & S_IRWXUGO);
@@ -242,7 +233,7 @@ asmlinkage int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		shminfo.shmmni = SHMMNI;
 		shminfo.shmmax = shmmax;
 		shminfo.shmmin = SHMMIN;
-		shminfo.shmall = shmall;
+		shminfo.shmall = SHMALL;
 		shminfo.shmseg = SHMSEG;
 		if(copy_to_user (buf, &shminfo, sizeof(struct shminfo)))
 			goto out;
@@ -337,8 +328,6 @@ asmlinkage int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		if (current->euid == shp->u.shm_perm.uid ||
 		    current->euid == shp->u.shm_perm.cuid || 
 		    capable(CAP_SYS_ADMIN)) {
-			/* Do not find it any more */
-			shp->u.shm_perm.key = IPC_PRIVATE;
 			shp->u.shm_perm.mode |= SHM_DEST;
 			if (shp->u.shm_nattch <= 0)
 				killseg (id);
@@ -412,9 +401,8 @@ static int shm_map (struct vm_area_struct *shmd)
 
 	/* add new mapping */
 	tmp = shmd->vm_end - shmd->vm_start;
-	if ((current->rlim[RLIMIT_AS].rlim_cur < RLIM_INFINITY) && 
-	   ((current->mm->total_vm << PAGE_SHIFT) + tmp
-	   > current->rlim[RLIMIT_AS].rlim_cur))
+	if((current->mm->total_vm << PAGE_SHIFT) + tmp
+	   > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
 		return -ENOMEM;
 	current->mm->total_vm += tmp >> PAGE_SHIFT;
 	insert_vm_struct(current->mm, shmd);
@@ -520,7 +508,7 @@ asmlinkage int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 	shmd->vm_ops = &shm_vm_ops;
 
 	shp->u.shm_nattch++;            /* prevent destruction */
-	if (shp->u.shm_nattch > 0xffff - NR_TASKS || (err = shm_map (shmd))) {
+	if ((err = shm_map (shmd))) {
 		if (--shp->u.shm_nattch <= 0 && shp->u.shm_perm.mode & SHM_DEST)
 			killseg(id);
 		kmem_cache_free(vm_area_cachep, shmd);
@@ -552,11 +540,8 @@ static void shm_open (struct vm_area_struct *shmd)
 		printk("shm_open: unused id=%d PANIC\n", id);
 		return;
 	}
-	if (!++shp->u.shm_nattch) {
-		shp->u.shm_nattch--;
-		return; /* XXX: should be able to report failure */
-	}
 	insert_attach(shp,shmd);  /* insert shmd into shp->attaches */
+	shp->u.shm_nattch++;
 	shp->u.shm_atime = CURRENT_TIME;
 	shp->u.shm_lpid = current->pid;
 }
@@ -641,18 +626,19 @@ static unsigned long shm_nopage(struct vm_area_struct * shmd, unsigned long addr
 		printk ("shm_nopage: id=%d invalid. Race.\n", id);
 		return 0;
 	}
-#endif
-	/* This can occur on a remap */
-	
 	if (idx >= shp->shm_npages) {
+		printk ("shm_nopage : too large page index. id=%d\n", id);
 		return 0;
 	}
+#endif
 
 	pte = __pte(shp->shm_pages[idx]);
 	if (!pte_present(pte)) {
 		unsigned long page = get_free_page(GFP_USER);
-		if (!page)
-			return -1;
+		if (!page) {
+			oom(current);
+			return 0;
+		}
 		pte = __pte(shp->shm_pages[idx]);
 		if (pte_present(pte)) {
 			free_page (page); /* doesn't sleep */
@@ -681,7 +667,7 @@ done:	/* pte_val(pte) == shp->shm_pages[idx] */
 }
 
 /*
- * Goes through counter = (shm_rss / prio) present shm pages.
+ * Goes through counter = (shm_rss >> prio) present shm pages.
  */
 static unsigned long swap_id = 0; /* currently being swapped */
 static unsigned long swap_idx = 0; /* next to swap */
@@ -695,7 +681,7 @@ int shm_swap (int prio, int gfp_mask)
 	int loop = 0;
 	int counter;
 	
-	counter = shm_rss / prio;
+	counter = shm_rss >> prio;
 	if (!counter || !(swap_nr = get_swap_page()))
 		return 0;
 

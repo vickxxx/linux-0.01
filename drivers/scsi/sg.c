@@ -7,7 +7,7 @@
  * Original driver (sg.c):
  *        Copyright (C) 1992 Lawrence Foard
  * 2.x extensions to driver:
- *        Copyright (C) 1998 - 2000 Douglas Gilbert
+ *        Copyright (C) 1998, 1999 Douglas Gilbert
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,30 +16,31 @@
  *
  *  Borrows code from st driver. Thanks to Alessandro Rubini's "dd" book.
  */
- static char * sg_version_str = "Version: 2.1.39 (20000626)";
- static int sg_version_num = 20139; /* 2 digits for each component */
+ static char * sg_version_str = "Version: 2.1.32 (990501)";
 /*
- *  D. P. Gilbert (dgilbert@interlog.com, dougg@triode.net.au), notes:
+ *  D. P. Gilbert (dgilbert@interlog.com, dougg@triode.net.au)
+ *      - scatter list logic replaces previous large atomic SG_BIG_BUFF
+ *        sized allocation. See notes in <scsi/sg.h> include file. 
+ * 
  *      - scsi logging is available via SCSI_LOG_TIMEOUT macros. First
  *        the kernel/module needs to be built with CONFIG_SCSI_LOGGING
- *        (otherwise the macros compile to empty statements). 
- *        Then before running the program to be debugged enter: 
- *          # echo "scsi log timeout 7" > /proc/scsi/scsi 
- *        This will send copious output to the console and the log which
- *        is usually /var/log/messages. To turn off debugging enter:
- *          # echo "scsi log timeout 0" > /proc/scsi/scsi 
- *        The 'timeout' token was chosen because it is relatively unused.
- *        The token 'hlcomplete' should be used but that triggers too
- *        much output from the sd device driver. To dump the current
- *        state of the SCSI mid level data structures enter:
- *          # echo "scsi dump 1" > /proc/scsi/scsi 
- *        To dump the state of sg's data structures get the 'sg_debug'
- *        program from the utilities and enter:
- *          # sg_debug /dev/sg0 
- *        or any valid sg device name. The state of _all_ sg devices
- *        will be sent to the console and the log.
+ *        (otherwise the macros compile to empty statements), then do
+ *        something like: 'echo "scsi log all" > /proc/scsi/scsi' to log
+ *        everything or 'echo "scsi log {token} #N" > /proc/scsi/scsi'
+ *        where {token} is one of [error,timeout,scan,mlqueue,mlcomplete,
+ *        llqueue,llcomplete,hlqueue,hlcomplete,ioctl] and #N is 0...7
+ *        (with 0 meaning off). For example: 'scsi log timeout 7 > 
+ *        /proc/scsi/scsi' to get all logging messages from this driver.
+ *        Should use hlcomplete but it is too "noisy" (sd uses it).
  *
- *      - The 'alt_address' field in the scatter_list structure and the
+ *      - This driver obtains memory (heap) for the low-level driver to
+ *        transfer/dma to and from. It is obtained from up to 4 sources:
+ *              - 1 SG_SCATTER_SZ sized buffer on open() (per fd)
+ *                [could be less if SG_SCATTER_SZ bytes not available]
+ *              - obtain heap as required on write()s (get_free_pages)
+ *              - obtain heap from the shared scsi dma pool
+ *              - obtain heap from kernel directly (kmalloc) [last choice]
+ *        the 'alt_address' field in the scatter_list structure and the
  *        related 'mem_src' indicate the source of the heap allocation.
  *
  */
@@ -66,11 +67,11 @@
 #include <scsi/sg.h>
 
 
-int sg_big_buff = SG_DEF_RESERVED_SIZE; /* sg_big_buff is ro through sysctl */
+int sg_big_buff = SG_SCATTER_SZ;  /* sg_big_buff is ro through sysctl */
 /* N.B. This global is here to keep existing software happy. It now holds
-   the size of the reserve buffer of the most recent successful sg_open(). 
+   the size of the "first buffer" of the most recent sucessful sg_open(). 
    Only available when 'sg' compiled into kernel (rather than a module). 
-   This is deprecated (use SG_GET_RESERVED_SIZE ioctl() instead). */
+   This should probably be deprecated (use SG_GET_RESERVED_SIZE instead). */
 
 #define SG_SECTOR_SZ 512
 #define SG_SECTOR_MSK (SG_SECTOR_SZ - 1)
@@ -88,6 +89,7 @@ static int sg_num_pool = 0;
 static int sg_num_page = 0;
 #endif
 
+#define SG_HEAP_FB 0    /* heap obtained at open() (one buffer per fd) */
 #define SG_HEAP_PAGE 1  /* heap from kernel via get_free_pages() */
 #define SG_HEAP_KMAL 2  /* heap from kernel via kmalloc() */
 #define SG_HEAP_POOL 3  /* heap from scsi dma pool (mid-level) */
@@ -100,7 +102,7 @@ static int sg_detect(Scsi_Device *);
 static void sg_detach(Scsi_Device *);
 
 
-struct Scsi_Device_Template sg_template = {NULL, "generic", "sg", NULL, 0xff,
+struct Scsi_Device_Template sg_template = {NULL, NULL, "sg", NULL, 0xff,
                                            SCSI_GENERIC_MAJOR, 0, 0, 0, 0,
                                            sg_detect, sg_init,
                                            sg_finish, sg_attach, sg_detach};
@@ -110,9 +112,9 @@ typedef struct sg_scatter_hold  /* holding area for scsi scatter gather info */
 {
     unsigned short use_sg;      /* Number of pieces of scatter-gather */
     unsigned short sglist_len;  /* size of malloc'd scatter-gather list */
-    unsigned bufflen;           /* Size of (aggregate) data buffer */
+    unsigned bufflen;           /* Size of data buffer */
     unsigned b_malloc_len;      /* actual len malloc'ed in buffer */
-    void * buffer;              /* Data buffer or scatter list,12 bytes each*/
+    void * buffer;              /* Data buffer or scatter list (12 bytes) */
     char mem_src;               /* heap whereabouts of 'buffer' */
 } Sg_scatter_hold;    /* 20 bytes long on i386 */
 
@@ -124,11 +126,10 @@ typedef struct sg_request  /* SG_MAX_QUEUE requests outstanding per file */
     Scsi_Cmnd * my_cmdp;        /* NULL -> ready to read, else id */
     struct sg_request * nextrp; /* NULL -> tail request (slist) */
     struct sg_fd * parentfp;    /* NULL -> not in use */
-    Sg_scatter_hold data;       /* hold buffer, perhaps scatter list */
-    struct sg_header header;    /* scsi command+info, see <scsi/sg.h> */
-    char res_used;              /* 1 -> using reserve buffer, 0 -> not ... */
-    char done;                  /* 0->before bh, 1->before read, 2->read */
-} Sg_request; /* 72 bytes long on i386 */
+    Sg_scatter_hold data;       /* hold buffers, perhaps scatter list */
+    struct sg_header header;    /* scsi command+info <include/sg.h> */
+    char fb_used;               /* 1 -> using fst_buf, normally 0 (used) */
+} Sg_request; /* around 72 bytes long on i386 */
 
 typedef struct sg_fd /* holds the state of a file descriptor */
 {
@@ -136,61 +137,50 @@ typedef struct sg_fd /* holds the state of a file descriptor */
     struct sg_device * parentdp;     /* owning device */
     struct wait_queue * read_wait;   /* queue read until command done */
     int timeout;                     /* defaults to SG_DEFAULT_TIMEOUT */
-    Sg_scatter_hold reserve;  /* buffer held for this file descriptor */
-    unsigned save_scat_len;   /* original length of trunc. scat. element */
-    Sg_request * headrp;      /* head of request slist, NULL->empty */
+    char * fst_buf;     /* try to grab SG_SCATTER_SZ sized buffer on open */
+    int fb_size;        /* actual size of allocated fst_buf */
+    Sg_request * headrp; /* head of request slist, NULL->empty */
     struct fasync_struct * async_qp; /* used by asynchronous notification */
     Sg_request req_arr[SG_MAX_QUEUE]; /* used as singly-linked list */
-    char low_dma;       /* as in parent but possibly overridden to 1 */
+    char low_dma;       /* as in parent but possible overridden to 1 */
     char force_packid;  /* 1 -> pack_id input to read(), 0 -> ignored */
     char closed;        /* 1 -> fd closed but request(s) outstanding */
-    char my_mem_src;    /* heap whereabouts of this Sg_fd object */
+    char my_mem_src;    /* heap whereabouts of this sg_fb object */
     char cmd_q;         /* 1 -> allow command queuing, 0 -> don't */
-    char underrun_flag; /* 1 -> flag underruns, 0 -> don't flag underruns */
-    char next_cmd_len;  /* 0 -> automatic (def), >0 -> use on next write() */
-} Sg_fd; /* 1208 bytes long on i386 */
+    char underrun_flag; /* 1 -> flag underruns, 0 -> don't, 2 -> test */
+} Sg_fd; /* around 1192 bytes long on i386 */
 
 typedef struct sg_device /* holds the state of each scsi generic device */
 {
     Scsi_Device * device;
-    struct wait_queue * o_excl_wait; /* queue open() when O_EXCL in use */
+    struct wait_queue * generic_wait;/* queue open if O_EXCL on prev. open */
     int sg_tablesize;   /* adapter's max scatter-gather table size */
     Sg_fd * headfp;     /* first open fd belonging to this device */
     kdev_t i_rdev;      /* holds device major+minor number */
     char exclude;       /* opened for exclusive access */
     char sgdebug;       /* 0->off, 1->sense, 9->dump dev, 10-> all devs */
-    unsigned char merge_fd; /* 0->sequencing per fd, else fd count */
-} Sg_device; /* 24 bytes long on i386 */
+    unsigned char merge_fd; /* 0->sequencing per fd (def) else fd count */
+} Sg_device; /* around 24 bytes long on i386 */
 
 
 static int sg_fasync(int fd, struct file * filp, int mode);
 static void sg_command_done(Scsi_Cmnd * SCpnt);
-static int sg_start_req(Sg_request * srp, int max_buff_size,
-                        const char * inp, int num_write_xfer);
-static void sg_finish_rem_req(Sg_request * srp, char * outp,
-                              int num_read_xfer);
-static int sg_build_scat(Sg_scatter_hold * schp, int buff_size, 
-                         const Sg_fd * sfp);
-static void sg_write_xfer(Sg_scatter_hold * schp, const char * inp, 
-                          int num_write_xfer);
-static void sg_remove_scat(Sg_scatter_hold * schp);
-static void sg_read_xfer(Sg_scatter_hold * schp, char * outp,
-                         int num_read_xfer);
-static void sg_build_reserve(Sg_fd * sfp, int req_size);
-static void sg_link_reserve(Sg_fd * sfp, Sg_request * srp, int size);
-static void sg_unlink_reserve(Sg_fd * sfp, Sg_request * srp);
-static char * sg_malloc(const Sg_fd * sfp, int size, int * retSzp, 
+static int sg_sc_build(Sg_request * srp, int max_buff_size,
+                       const char * inp, int num_write_xfer);
+static int sg_sc_undo_rem(Sg_request * srp, char * outp,
+                          int num_read_xfer);
+static char * sg_malloc(Sg_request * srp, int size, int * retSzp, 
                         int * mem_srcp);
-static void sg_free(char * buff, int size, int mem_src);
+static void sg_free(Sg_request * srp, char * buff, int size, int mem_src);
 static char * sg_low_malloc(int rqSz, int lowDma, int mem_src, 
                             int * retSzp);
 static void sg_low_free(char * buff, int size, int mem_src);
 static Sg_fd * sg_add_sfp(Sg_device * sdp, int dev, int get_reserved);
 static int sg_remove_sfp(Sg_device * sdp, Sg_fd * sfp);
-static Sg_request * sg_get_rq_mark(Sg_fd * sfp, int pack_id);
+static Sg_request * sg_get_request(const Sg_fd * sfp, int pack_id);
 static Sg_request * sg_add_request(Sg_fd * sfp);
 static int sg_remove_request(Sg_fd * sfp, const Sg_request * srp);
-static int sg_res_in_use(const Sg_fd * sfp);
+static int sg_fb_in_use(const Sg_fd * sfp);
 static void sg_clr_scpnt(Scsi_Cmnd * SCpnt);
 static void sg_shorten_timeout(Scsi_Cmnd * scpnt);
 static void sg_debug(const Sg_device * sdp, const Sg_fd * sfp, int part_of);
@@ -200,13 +190,13 @@ static Sg_device * sg_dev_arr = NULL;
 static const int size_sg_header = sizeof(struct sg_header);
 
 
+
 static int sg_open(struct inode * inode, struct file * filp)
 {
     int dev = MINOR(inode->i_rdev);
     int flags = filp->f_flags;
     Sg_device * sdp;
     Sg_fd * sfp;
-    int res;
 
     if ((NULL == sg_dev_arr) || (dev < 0) || (dev >= sg_template.dev_max))
         return -ENXIO;
@@ -217,35 +207,38 @@ static int sg_open(struct inode * inode, struct file * filp)
         printk("sg_open: inode maj=%d, min=%d   sdp maj=%d, min=%d\n",
                MAJOR(inode->i_rdev), MINOR(inode->i_rdev),
                MAJOR(sdp->i_rdev), MINOR(sdp->i_rdev));
-    /* If we are in the middle of error recovery, don't let anyone
-     * else try and use this device.  Also, if error recovery fails, it
-     * may try and take the device offline, in which case all further
-     * access to the device is prohibited.  */
     if(! scsi_block_when_processing_errors(sdp->device))
         return -ENXIO;
+/*  if (O_RDWR != (flags & O_ACCMODE)) */
+/*      return -EACCES;   May just want to get to a ioctl, so remove */
 
     SCSI_LOG_TIMEOUT(3, printk("sg_open: dev=%d, flags=0x%x\n", dev, flags));
-
+   /* If we want exclusive access, then wait until the device is not
+    * busy, and then set the flag to prevent anyone else from using it. */
     if (flags & O_EXCL) {
         if (O_RDONLY == (flags & O_ACCMODE))
             return -EACCES;   /* Can't lock it with read only access */
-        if (sdp->headfp && (filp->f_flags & O_NONBLOCK))
-            return -EBUSY;
-        res = 0;  /* following is a macro that beats race condition */
-        __wait_event_interruptible(sdp->o_excl_wait, 
-               ((sdp->headfp || sdp->exclude) ? 0 : (sdp->exclude = 1)), 
-                                   res);
-        if (res)
-            return res; /* -ERESTARTSYS because signal hit process */
+        while (sdp->headfp) {
+            if (flags & O_NONBLOCK)
+                return -EBUSY;
+            interruptible_sleep_on(&sdp->generic_wait);
+            if (signal_pending(current))
+                return -ERESTARTSYS;
+        }
+        sdp->exclude = 1;
     }
-    else if (sdp->exclude) { /* some other fd has an exclusive lock on dev */
-        if (filp->f_flags & O_NONBLOCK)
-            return -EBUSY;
-        res = 0;  /* following is a macro that beats race condition */
-        __wait_event_interruptible(sdp->o_excl_wait, (! sdp->exclude), res);
-        if (res)
-            return res; /* -ERESTARTSYS because signal hit process */
+    else { /* Wait until nobody has an exclusive open on this device. */
+        while (sdp->exclude) {
+            if (flags & O_NONBLOCK)
+                return -EBUSY;
+            interruptible_sleep_on(&sdp->generic_wait);
+            if (signal_pending(current))
+                return -ERESTARTSYS;
+        }
     }
+    /* OK, we should have grabbed the device.  Mark the thing so
+     * that other processes know that we have it, and initialize the
+     * state variables to known values. */
     if (! sdp->headfp) { /* no existing opens on this device */
         sdp->sgdebug = 0;
         sdp->sg_tablesize = sdp->device->host->sg_tablesize;
@@ -291,47 +284,51 @@ static int sg_release(struct inode * inode, struct file * filp)
     if(sg_template.module)
         __MOD_DEC_USE_COUNT(sg_template.module);
     sdp->exclude = 0;
-    wake_up_interruptible(&sdp->o_excl_wait);
+    wake_up_interruptible(&sdp->generic_wait);
     return 0;
 }
 
+/* Read back the results of a SCSI command which was sent in a prior
+   write(). */
 static ssize_t sg_read(struct file * filp, char * buf,
                        size_t count, loff_t *ppos)
 {
-    int k, res;
+    int k;
     Sg_device * sdp;
     Sg_fd * sfp;
     Sg_request * srp;
     int req_pack_id = -1;
+    struct sg_header * shp = (struct sg_header *)buf;
 
     if ((! (sfp = (Sg_fd *)filp->private_data)) || (! (sdp = sfp->parentdp)))
         return -ENXIO;
     SCSI_LOG_TIMEOUT(3, printk("sg_read: dev=%d, count=%d\n", 
                                MINOR(sdp->i_rdev), (int)count));
     
+    /* If we are in the middle of error recovery, don't let anyone
+     * else try and use this device.  Also, if error recovery fails, it
+     * may try and take the device offline, in which case all further
+     * access to the device is prohibited.  */
     if(! scsi_block_when_processing_errors(sdp->device))
         return -ENXIO;
+
     if (ppos != &filp->f_pos)
         ; /* FIXME: Hmm.  Seek to the right place, or fail?  */
     if ((k = verify_area(VERIFY_WRITE, buf, count)))
         return k;
-    if (sfp->force_packid && (count >= size_sg_header)) {
-        struct sg_header hdr;
-        copy_from_user(&hdr, buf, size_sg_header);
-        req_pack_id = hdr.pack_id;
-    }
-    srp = sg_get_rq_mark(sfp, req_pack_id);
-    if (! srp) { /* now wait on packet to arrive */
+    if (sfp->force_packid && (count >= size_sg_header))
+        req_pack_id = shp->pack_id;
+    srp = sg_get_request(sfp, req_pack_id);
+    while(! srp) {
         if (filp->f_flags & O_NONBLOCK)
             return -EAGAIN;
-        res = 0;  /* following is a macro that beats race condition */
-        __wait_event_interruptible(sfp->read_wait, 
-                                   (srp = sg_get_rq_mark(sfp, req_pack_id)),
-                                   res);
-        if (res)
-            return res; /* -ERESTARTSYS because signal hit process */
+        interruptible_sleep_on(&sfp->read_wait);
+        if (signal_pending(current))
+            return -ERESTARTSYS;
+        srp = sg_get_request(sfp, req_pack_id);
     }
-    srp->header.pack_len = srp->header.reply_len;   /* Why ????? */
+    if (2 != sfp->underrun_flag)
+        srp->header.pack_len = srp->header.reply_len;   /* Why ????? */
 
     /* Now copy the result back to the user buffer.  */
     if (count >= size_sg_header) {
@@ -340,13 +337,13 @@ static ssize_t sg_read(struct file * filp, char * buf,
         if (count > srp->header.reply_len)
             count = srp->header.reply_len;
         if (count > size_sg_header) /* release does copy_to_user */
-            sg_finish_rem_req(srp, buf, count - size_sg_header);
+            sg_sc_undo_rem(srp, buf, count - size_sg_header);
         else
-            sg_finish_rem_req(srp, NULL, 0);
+            sg_sc_undo_rem(srp, NULL, 0);
     }
     else {
         count = (srp->header.result == 0) ? 0 : -EIO;
-        sg_finish_rem_req(srp, NULL, 0);
+        sg_sc_undo_rem(srp, NULL, 0);
     }
     return count;
 }
@@ -369,75 +366,81 @@ static ssize_t sg_write(struct file * filp, const char * buf,
     SCSI_LOG_TIMEOUT(3, printk("sg_write: dev=%d, count=%d\n", 
                                MINOR(sdp->i_rdev), (int)count));
 
+/* If we are in the middle of error recovery, don't let anyone
+ * else try and use this device.  Also, if error recovery fails, it
+ * may try and take the device offline, in which case all further
+ * access to the device is prohibited.  */
     if(! scsi_block_when_processing_errors(sdp->device) )
         return -ENXIO;
+
     if (ppos != &filp->f_pos)
         ; /* FIXME: Hmm.  Seek to the right place, or fail?  */
 
     if ((k = verify_area(VERIFY_READ, buf, count)))
         return k;  /* protects following copy_from_user()s + get_user()s */
+/* The minimum scsi command length is 6 bytes.  If we get anything
+ * less than this, it is clearly bogus.  */
     if (count < (size_sg_header + 6))
-        return -EIO;   /* The minimum scsi command length is 6 bytes. */ 
+        return -EIO;
 
-    if (! (srp = sg_add_request(sfp))) {
-        SCSI_LOG_TIMEOUT(1, printk("sg_write: queue full\n"));
+    srp = sg_add_request(sfp);
+    if (! srp) {
+        SCSI_LOG_TIMEOUT(1, printk("sg_write: queue full, domain error\n"));
         return -EDOM;
     }
     __copy_from_user(&srp->header, buf, size_sg_header); 
     buf += size_sg_header;
     srp->header.pack_len = count;
     __get_user(opcode, buf);
-    if (sfp->next_cmd_len > 0) {
-        if (sfp->next_cmd_len > MAX_COMMAND_SIZE) {
-            SCSI_LOG_TIMEOUT(1, printk("sg_write: command length too long\n"));
-            sfp->next_cmd_len = 0;
-            sg_remove_request(sfp, srp);
-            return -EIO;
-        }
-        cmd_size = sfp->next_cmd_len;
-        sfp->next_cmd_len = 0; /* reset so only this write() effected */
-    }
-    else {
-        cmd_size = COMMAND_SIZE(opcode); /* based on SCSI command group */
-        if ((opcode >= 0xc0) && srp->header.twelve_byte) 
-            cmd_size = 12;
-    }
+    cmd_size = COMMAND_SIZE(opcode);
+    if ((opcode >= 0xc0) && srp->header.twelve_byte) 
+        cmd_size = 12;
     SCSI_LOG_TIMEOUT(4, printk("sg_write:   scsi opcode=0x%02x, cmd_size=%d\n", 
                                (int)opcode, cmd_size));
 /* Determine buffer size.  */
     input_size = count - cmd_size;
     mxsize = (input_size > srp->header.reply_len) ? input_size :
                                                     srp->header.reply_len;
+/* Don't include the command header itself in the size.  */
     mxsize -= size_sg_header;
     input_size -= size_sg_header;
-    if ((input_size < 0)  || (srp->header.reply_len < 0)) {
-        sg_remove_request(sfp, srp);
-        return -EIO; /* Count too small or reply_len negative. */
+/* Verify user has actually passed enough bytes for this command. */
+    if (input_size < 0) {
+        sg_sc_undo_rem(srp, NULL, 0);
+        return -EIO; 
     }
-    if ((k = sg_start_req(srp, mxsize, buf + cmd_size, input_size))) {
+
+/* If we cannot allocate the buffer, report an error. */
+    if ((k = sg_sc_build(srp, mxsize, buf + cmd_size, input_size))) {
         SCSI_LOG_TIMEOUT(1, printk("sg_write: build err=%d\n", k));
-        sg_finish_rem_req(srp, NULL, 0);
-        return k;    /* probably out of space --> ENOMEM */
+        sg_sc_undo_rem(srp, NULL, 0);
+        return k;
     }
+
 /*  SCSI_LOG_TIMEOUT(7, printk("sg_write: allocating device\n")); */
-    spin_lock_irqsave(&io_request_lock, flags);
-    SCpnt = scsi_allocate_device(NULL, sdp->device, ! (filp->f_flags & O_NONBLOCK));
-    spin_unlock_irqrestore(&io_request_lock, flags);
-    if (! SCpnt) {
-        sg_finish_rem_req(srp, NULL, 0);
-        return -EAGAIN;   /* No available command blocks at the moment */
+/* Grab a command pointer for the device we want to talk to. If we
+ * don't want to block, just return with the appropriate message.  */
+    if (! (SCpnt = scsi_allocate_device(NULL, sdp->device, 
+                                        !(filp->f_flags & O_NONBLOCK)))) {
+        sg_sc_undo_rem(srp, NULL, 0);
+        return -EAGAIN;
     }
 /*  SCSI_LOG_TIMEOUT(7, printk("sg_write: device allocated\n")); */
+
     srp->my_cmdp = SCpnt;
     SCpnt->request.rq_dev = sdp->i_rdev;
     SCpnt->request.rq_status = RQ_ACTIVE;
     SCpnt->sense_buffer[0] = 0;
     SCpnt->cmd_len = cmd_size;
+    /* Now copy the SCSI command from the user's address space.  */
     __copy_from_user(cmnd, buf, cmd_size);
-/* Set the LUN field in the command structure, overriding user input  */
-    cmnd[1]= (cmnd[1] & 0x1f) | (sdp->device->lun << 5);
 
+/* Set the LUN field in the command structure.  */
+    cmnd[1]= (cmnd[1] & 0x1f) | (sdp->device->lun << 5);
 /*  SCSI_LOG_TIMEOUT(7, printk("sg_write: do cmd\n")); */
+/* Now pass the actual command down to the low-level driver.  We
+ * do not do any more here - when the interrupt arrives, we will
+ * then do the post-processing.  */
     spin_lock_irqsave(&io_request_lock, flags);
     SCpnt->use_sg = srp->data.use_sg;
     SCpnt->sglist_len = srp->data.sglist_len;
@@ -451,8 +454,6 @@ static ssize_t sg_write(struct file * filp, const char * buf,
     srp->data.sglist_len = 0;
     srp->data.bufflen = 0;
     srp->data.buffer = NULL;
-/* Now send everything of to mid-level. The next time we hear about this
-   packet is when sg_command_done() is called (ie a callback). */
     scsi_do_cmd(SCpnt, (void *)cmnd,
                 (void *)SCpnt->buffer, mxsize,
                 sg_command_done, sfp->timeout, SG_DEFAULT_RETRIES);
@@ -474,30 +475,30 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         return -ENXIO;
     SCSI_LOG_TIMEOUT(3, printk("sg_ioctl: dev=%d, cmd=0x%x\n", 
                                MINOR(sdp->i_rdev), (int)cmd_in));
+     /* If we are in the middle of error recovery, then don't allow any
+     *  access to this device.  Also, error recovery *may* have taken the
+     *  device offline, in which case all further access is prohibited.  */
     if(! scsi_block_when_processing_errors(sdp->device) )
         return -ENXIO;
 
     switch(cmd_in)
     {
     case SG_SET_TIMEOUT:
-        result =  get_user(val, (int *)arg);
-        if (result) return result;
-        if (val < 0)
-            return -EIO;
-        sfp->timeout = val;
-        return 0;
-    case SG_GET_TIMEOUT:  /* N.B. User receives timeout as return value */
+        return get_user(sfp->timeout, (int *)arg);
+    case SG_GET_TIMEOUT:
         return sfp->timeout; /* strange ..., for backward compatibility */
     case SG_SET_FORCE_LOW_DMA:
         result = get_user(val, (int *)arg);
         if (result) return result;
         if (val) {
-            sfp->low_dma = 1;
-            if ((0 == sfp->low_dma) && (0 == sg_res_in_use(sfp))) {
-                val = (int)sfp->reserve.bufflen;
-                sg_remove_scat(&sfp->reserve);
-                sg_build_reserve(sfp, val);
+            if ((0 == sfp->low_dma) && (0 == sg_fb_in_use(sfp))) {
+                sg_low_free(sfp->fst_buf, sfp->fb_size, SG_HEAP_PAGE);
+                sfp->fst_buf = sg_low_malloc(SG_SCATTER_SZ, 1, 
+                                             SG_HEAP_PAGE, &sfp->fb_size);
             }
+            sfp->low_dma = 1;
+            if (! sfp->fst_buf)
+                return -ENOMEM;
         }
         else
             sfp->low_dma = sdp->device->host->unchecked_isa_dma;
@@ -509,19 +510,14 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         if (result) return result;
         else {
             Sg_scsi_id * sg_idp = (Sg_scsi_id *)arg;
-            struct Scsi_Host * hostp = sdp->device->host;
-
-            __put_user((int)hostp->host_no, &sg_idp->host_no);
+            __put_user((int)sdp->device->host->host_no, &sg_idp->host_no);
             __put_user((int)sdp->device->channel, &sg_idp->channel);
             __put_user((int)sdp->device->id, &sg_idp->scsi_id);
             __put_user((int)sdp->device->lun, &sg_idp->lun);
             __put_user((int)sdp->device->type, &sg_idp->scsi_type);
-            __put_user(hostp->cmd_per_lun ? hostp->cmd_per_lun :
-                       hostp->hostt->cmd_per_lun, &sg_idp->h_cmd_per_lun);
-            __put_user((short)sdp->device->queue_depth, 
-                       &sg_idp->d_queue_depth);
             __put_user(0, &sg_idp->unused1);
             __put_user(0, &sg_idp->unused2);
+            __put_user(0, &sg_idp->unused3);
             return 0;
         }
     case SG_SET_FORCE_PACK_ID:
@@ -534,7 +530,7 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         if (result) return result;
         srp = sfp->headrp;
         while (srp) {
-            if (1 == srp->done) {
+            if (! srp->my_cmdp) {
                 __put_user(srp->header.pack_id, (int *)arg);
                 return 0;
             }
@@ -546,7 +542,7 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         srp = sfp->headrp;
         val = 0;
         while (srp) {
-            if (1 == srp->done)
+            if (! srp->my_cmdp)
                 ++val;
             srp = srp->nextrp;
         }
@@ -554,20 +550,15 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
     case SG_GET_SG_TABLESIZE:
         return put_user(sdp->sg_tablesize, (int *)arg);
     case SG_SET_RESERVED_SIZE:
+        /* currently ignored, future extension */
         if (O_RDWR != (filp->f_flags & O_ACCMODE))
             return -EACCES;
         result = get_user(val, (int *)arg);
         if (result) return result;
-        if (val != sfp->reserve.bufflen) {
-            if (sg_res_in_use(sfp))
-                return -EBUSY;
-            sg_remove_scat(&sfp->reserve);
-            sg_build_reserve(sfp, val);
-        }
+        /* logic should go here */
         return 0;
     case SG_GET_RESERVED_SIZE:
-        val = (int)sfp->reserve.bufflen;
-        return put_user(val, (int *)arg);
+        return put_user(sfp->fb_size, (int *)arg);
     case SG_GET_MERGE_FD:
         return put_user((int)sdp->merge_fd, (int *)arg);
     case SG_SET_MERGE_FD:
@@ -596,49 +587,15 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         return 0;
     case SG_GET_UNDERRUN_FLAG:
         return put_user((int)sfp->underrun_flag, (int *)arg);
-    case SG_NEXT_CMD_LEN:
-        result = get_user(val, (int *)arg);
-        if (result) return result;
-        sfp->next_cmd_len = (val > 0) ? val : 0;
-        return 0;
-    case SG_GET_VERSION_NUM:
-        return put_user(sg_version_num, (int *)arg);
     case SG_EMULATED_HOST:
         return put_user(sdp->device->host->hostt->emulated, (int *)arg);
-    case SG_SCSI_RESET:
-        if (! scsi_block_when_processing_errors(sdp->device))
-            return -EBUSY;
-        result = get_user(val, (int *)arg);
-        if (result) return result;
-        if (SG_SCSI_RESET_NOTHING == val)
-            return 0;
-#ifdef SCSI_TRY_RESET_DEVICE
-        switch (val)
-        {
-        case SG_SCSI_RESET_DEVICE:
-            val = SCSI_TRY_RESET_DEVICE;
-            break;
-        case SG_SCSI_RESET_BUS:
-            val = SCSI_TRY_RESET_BUS;
-            break;
-        case SG_SCSI_RESET_HOST:
-            val = SCSI_TRY_RESET_HOST;
-            break;
-        default:
-            return -EINVAL;
-        }
-        if(! capable(CAP_SYS_ADMIN))  return -EACCES;
-        return (scsi_reset_provider(sdp->device, val) == SUCCESS) ? 0 : -EIO;
-#else
-        SCSI_LOG_TIMEOUT(1, printk("sg_ioctl: SG_RESET_SCSI not supported\n"));
-        result = -EINVAL;
-#endif
     case SCSI_IOCTL_SEND_COMMAND:
         /* Allow SCSI_IOCTL_SEND_COMMAND without checking suser() since the
            user already has read/write access to the generic device and so
            can execute arbitrary SCSI commands.  */
         if (O_RDWR != (filp->f_flags & O_ACCMODE))
-            return -EACCES; /* very dangerous things can be done here */
+            return -EACCES; /* require write access since these could be
+                               dangerous */
         return scsi_ioctl_send_command(sdp->device, (void *)arg);
     case SG_SET_DEBUG:
         result = get_user(val, (int *)arg);
@@ -656,7 +613,8 @@ static int sg_ioctl(struct inode * inode, struct file * filp,
         return scsi_ioctl(sdp->device, cmd_in, (void *)arg);
     default:
         if (O_RDWR != (filp->f_flags & O_ACCMODE))
-            return -EACCES; /* don't know so take safe approach */
+            return -EACCES; /* require write access since these could be
+                               dangerous */
         return scsi_ioctl(sdp->device, cmd_in, (void *)arg);
     }
 }
@@ -674,7 +632,7 @@ static unsigned int sg_poll(struct file * filp, poll_table * wait)
     poll_wait(filp, &sfp->read_wait, wait);
     srp = sfp->headrp;
     while (srp) {   /* if any read waiting, flag it */
-        if ((0 == res) && (1 == srp->done))
+        if (! (res || srp->my_cmdp))
             res = POLLIN | POLLRDNORM;
         ++count;
         srp = srp->nextrp;
@@ -706,20 +664,18 @@ static int sg_fasync(int fd, struct file * filp, int mode)
 }
 
 /* This function is called by the interrupt handler when we
- * actually have a command that is complete. */
+ * actually have a command that is complete.  Change the
+ * flags to indicate that we have a result.  */
 static void sg_command_done(Scsi_Cmnd * SCpnt)
 {
     int dev = MINOR(SCpnt->request.rq_dev);
     Sg_device * sdp;
     Sg_fd * sfp;
     Sg_request * srp = NULL;
-    static const int min_sb_len = 
-                SG_MAX_SENSE > sizeof(SCpnt->sense_buffer) ? 
-                        sizeof(SCpnt->sense_buffer) : SG_MAX_SENSE;
+    int closed = 0;
 
     if ((NULL == sg_dev_arr) || (dev < 0) || (dev >= sg_template.dev_max)) {
         SCSI_LOG_TIMEOUT(1, printk("sg__done: bad args dev=%d\n", dev));
-        wake_up(&SCpnt->device->device_wait);
         scsi_release_command(SCpnt);
         SCpnt = NULL;
         return;
@@ -742,7 +698,6 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
     }
     if (! srp) {
         SCSI_LOG_TIMEOUT(1, printk("sg__done: req missing, dev=%d\n", dev));
-        wake_up(&SCpnt->device->device_wait);
         scsi_release_command(SCpnt);
         SCpnt = NULL;
         return;
@@ -752,19 +707,22 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
     srp->data.sglist_len = SCpnt->sglist_len;
     srp->data.bufflen = SCpnt->bufflen;
     srp->data.buffer = SCpnt->buffer;
+    if (2 == sfp->underrun_flag)
+        srp->header.pack_len = SCpnt->underflow;
     sg_clr_scpnt(SCpnt);
     srp->my_cmdp = NULL;
-    srp->done = 1;
 
-    SCSI_LOG_TIMEOUT(4, printk("sg__done: dev=%d, scsi_stat=%d, res=0x%x\n", 
+    SCSI_LOG_TIMEOUT(4, 
+              printk("sg__done: dev=%d, scsi_stat=%d, res=0x%x\n", 
                 dev, (int)status_byte(SCpnt->result), (int)SCpnt->result));
-    memcpy(srp->header.sense_buffer, SCpnt->sense_buffer, min_sb_len);
+/* See if the command completed normally, or whether something went wrong. */
+    memcpy(srp->header.sense_buffer, SCpnt->sense_buffer,
+           sizeof(SCpnt->sense_buffer));
     switch (host_byte(SCpnt->result)) 
-    { /* This setup of 'result' is for backward compatibility and is best
-         ignored by the user who should use target, host + driver status */
+    {
     case DID_OK:
-    case DID_PASSTHROUGH: 
-    case DID_SOFT_ERROR:
+    case DID_PASSTHROUGH: /* just guessing */
+    case DID_SOFT_ERROR:  /* just guessing */
       srp->header.result = 0;
       break;
     case DID_NO_CONNECT:
@@ -780,6 +738,12 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
       srp->header.result = EIO;
       break;
     case DID_ERROR:
+      /* There really should be DID_UNDERRUN and DID_OVERRUN error values,
+       * and a means for callers of scsi_do_cmd to indicate whether an
+       * underrun or overrun should signal an error.  Until that can be
+       * implemented, this kludge allows for returning useful error values
+       * except in cases that return DID_ERROR that might be due to an
+       * underrun. */
       if (SCpnt->sense_buffer[0] == 0 &&
           status_byte(SCpnt->result) == GOOD)
           srp->header.result = 0;
@@ -803,6 +767,8 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
 /* filesystems using this device. */
         sdp->device->changed = 1;
     }
+
+/* Pick up error and status information */
     srp->header.target_status = status_byte(SCpnt->result);
     if ((sdp->sgdebug > 0) && 
         ((CHECK_CONDITION == srp->header.target_status) ||
@@ -811,28 +777,25 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
     srp->header.host_status = host_byte(SCpnt->result);
     srp->header.driver_status = driver_byte(SCpnt->result);
 
-    wake_up(&SCpnt->device->device_wait);
     scsi_release_command(SCpnt);
     SCpnt = NULL;
     if (sfp->closed) { /* whoops this fd already released, cleanup */
+        closed = 1;
         SCSI_LOG_TIMEOUT(1,
                printk("sg__done: already closed, freeing ...\n"));
 /* should check if module is unloaded <<<<<<< */
-        sg_finish_rem_req(srp, NULL, 0);
-        srp = NULL;
+        sg_sc_undo_rem(srp, NULL, 0);
         if (NULL == sfp->headrp) { 
             SCSI_LOG_TIMEOUT(1,
                 printk("sg__done: already closed, final cleanup\n"));
             sg_remove_sfp(sdp, sfp);
-            sfp = NULL;
         }
     }
-/* Now wake up any sg_read() that is waiting for this packet. */
-    if (sfp && srp) {
-        wake_up_interruptible(&sfp->read_wait);
-        if (sfp->async_qp)
-            kill_fasync(sfp->async_qp, SIGPOLL);
-    }
+/* Now wake up the process that is waiting for the result. */
+    /* A. Rubini says this is preferable+faster than wake_up() */
+    wake_up_interruptible(&sfp->read_wait);
+    if ((sfp->async_qp) && (! closed))
+        kill_fasync(sfp->async_qp, SIGPOLL);
 }
 
 static void sg_debug_all(const Sg_fd * sfp)
@@ -887,9 +850,9 @@ static void sg_debug(const Sg_device * sdp, const Sg_fd * sfp, int part_of)
     dev = MINOR(sdp->i_rdev);
 
     if (part_of)
-        printk(" >>> device=%d (sg%d), ", dev, dev);
+        printk(" >>> device=%d(sg%c), ", dev, 'a' + dev);
     else
-        printk("sg_debug: device=%d (sg%d), ", dev, dev);
+        printk("sg_debug: device=%d(sg%c), ", dev, 'a' + dev);
     printk("scsi%d chan=%d id=%d lun=%d  em=%d\n", sdp->device->host->host_no,
            sdp->device->channel, sdp->device->id, sdp->device->lun,
            sdp->device->host->hostt->emulated);
@@ -910,20 +873,17 @@ static void sg_debug(const Sg_device * sdp, const Sg_fd * sfp, int part_of)
             printk("  *** Following data belongs to invoking FD ***\n");
         else if (! fp->parentdp)
             printk(">> Following FD has NULL parent pointer ???\n");
-        printk("   FD(%d): timeout=%d, bufflen=%d, use_sg=%d\n",
-               k, fp->timeout, fp->reserve.bufflen, (int)fp->reserve.use_sg);
-        printk("   low_dma=%d, cmd_q=%d, s_sc_len=%d, f_packid=%d\n",
-               (int)fp->low_dma, (int)fp->cmd_q, (int)fp->save_scat_len,
-               (int)fp->force_packid);
-        printk("   urun_flag=%d, next_cmd_len=%d, closed=%d\n",
-               (int)fp->underrun_flag, (int)fp->next_cmd_len, 
-               (int)fp->closed);
+        printk("   FD(%d): timeout=%d, fb_size=%d, cmd_q=%d\n",
+               k, fp->timeout, fp->fb_size, (int)fp->cmd_q);
+        printk("   low_dma=%d, force_packid=%d, urun_flag=%d, closed=%d\n",
+               (int)fp->low_dma, (int)fp->force_packid, 
+               (int)fp->underrun_flag, (int)fp->closed);
         srp = fp->headrp;
         if (NULL == srp)
             printk("     No requests active\n");
         while (srp) {
-            if (srp->res_used)
-                printk("reserved buff >> ");
+            if (srp->fb_used)
+                printk("using 1st buff >> ");
             else
                 printk("     ");
             if (srp->my_cmdp)
@@ -931,8 +891,7 @@ static void sg_debug(const Sg_device * sdp, const Sg_fd * sfp, int part_of)
                        srp->header.pack_id, srp->my_cmdp->bufflen, 
                        srp->my_cmdp->use_sg);
             else
-                printk("%s: pack_id=%d, bufflen=%d, use_sg=%d\n",
-                   ((1 == srp->done) ? "to_read" : "prior"),
+                printk("to_read: pack_id=%d, bufflen=%d, use_sg=%d\n",
                    srp->header.pack_id, srp->data.bufflen, srp->data.use_sg);
             if (! srp->parentfp)
                 printk(">> request has NULL parent pointer ???\n");
@@ -969,9 +928,9 @@ static int sg_detect(Scsi_Device * scsidp)
         case TYPE_WORM:
         case TYPE_TAPE: break;
         default:
-        printk("Detected scsi generic sg%d at scsi%d,"
+        printk("Detected scsi generic sg%c at scsi%d,"
                 " channel %d, id %d, lun %d\n",
-               sg_template.dev_noticed,
+               'a'+sg_template.dev_noticed,
                scsidp->host->host_no, scsidp->channel, 
                scsidp->id, scsidp->lun);
     }
@@ -1029,7 +988,7 @@ static int sg_attach(Scsi_Device * scsidp)
 
     SCSI_LOG_TIMEOUT(3, printk("sg_attach: dev=%d \n", k));
     sdp->device = scsidp;
-    sdp->o_excl_wait = NULL;
+    sdp->generic_wait = NULL;
     sdp->headfp= NULL;
     sdp->exclude = 0;
     sdp->merge_fd = 0;  /* Cope with SG_DEF_MERGE_FD on open */
@@ -1082,8 +1041,10 @@ static void sg_detach(Scsi_Device * scsidp)
         }
         scsidp->attached--;
         sg_template.nr_dev--;
-/* avoid associated device /dev/sg? being incremented
- * each time module is inserted/removed , <dan@lectra.fr> */
+        /*
+         * avoid associated device /dev/sg? bying incremented
+         * each time module is inserted/removed , <dan@lectra.fr>
+         */
         sg_template.dev_noticed--;
         return;
     }
@@ -1138,82 +1099,42 @@ static void sg_shorten_timeout(Scsi_Cmnd * scpnt)
 #endif
 }
 
-static int sg_start_req(Sg_request * srp, int max_buff_size,
-                        const char * inp, int num_write_xfer)
-{
-    int res;
-    Sg_fd * sfp = srp->parentfp;
-    Sg_scatter_hold * req_schp = &srp->data;
-    Sg_scatter_hold * rsv_schp = &sfp->reserve;
-
-    SCSI_LOG_TIMEOUT(4, printk("sg_start_req: max_buff_size=%d\n", 
-                               max_buff_size)); 
-    if (max_buff_size <= 0)
-        return 0;
-    if ((! sg_res_in_use(sfp)) && (max_buff_size <= rsv_schp->bufflen)) {
-        sg_link_reserve(sfp, srp, max_buff_size);
-        sg_write_xfer(req_schp, inp, num_write_xfer);
-    }
-    else {
-        res = sg_build_scat(req_schp, max_buff_size, sfp);
-        if (res) {
-            sg_remove_scat(req_schp);
-            return res;
-        }
-        sg_write_xfer(req_schp, inp, num_write_xfer);
-    }
-    return 0;
-}
-
-static void sg_finish_rem_req(Sg_request * srp, char * outp, 
-                              int num_read_xfer)
-{
-    Sg_fd * sfp = srp->parentfp;
-    Sg_scatter_hold * req_schp = &srp->data;
-
-    SCSI_LOG_TIMEOUT(4, printk("sg_finish_rem_req: res_used=%d\n",
-                               (int)srp->res_used)); 
-    if (num_read_xfer > 0)
-        sg_read_xfer(req_schp, outp, num_read_xfer);
-    if (srp->res_used)
-        sg_unlink_reserve(sfp, srp);
-    else 
-        sg_remove_scat(req_schp);
-    sg_remove_request(sfp, srp);
-}
-
-static int sg_build_scat(Sg_scatter_hold * schp, int buff_size, 
-                         const Sg_fd * sfp)
+static int sg_sc_build(Sg_request * srp, int max_buff_size,
+                       const char * inp, int num_write_xfer)
 {
     int ret_sz, mem_src;
-    int blk_size = buff_size;
+    int blk_size = max_buff_size;
     char * p = NULL;
 
-    if ((blk_size < 0) || (! sfp))
+    if ((blk_size < 0) || (! srp))
         return -EFAULT;
+    
+    SCSI_LOG_TIMEOUT(4, printk("sg_sc_build: m_b_s=%d, num_write_xfer=%d\n", 
+                                  max_buff_size, num_write_xfer)); 
     if (0 == blk_size)
         ++blk_size;             /* don't know why */
 /* round request up to next highest SG_SECTOR_SZ byte boundary */
     blk_size = (blk_size + SG_SECTOR_MSK) & (~SG_SECTOR_MSK);
-    SCSI_LOG_TIMEOUT(4, printk("sg_build_scat: buff_size=%d, blk_size=%d\n",
-                               buff_size, blk_size));
+    SCSI_LOG_TIMEOUT(5, printk("sg_sc_build: blk_size=%d\n", blk_size));
+
     if (blk_size <= SG_SCATTER_SZ) {
-        mem_src = SG_HEAP_PAGE;
-        p = sg_malloc(sfp, blk_size, &ret_sz, &mem_src);
+        mem_src = SG_HEAP_FB;
+        p = sg_malloc(srp, blk_size, &ret_sz, &mem_src);
         if (! p)
             return -ENOMEM;
         if (blk_size == ret_sz) { /* got it on the first attempt */
-            schp->use_sg = 0;
-            schp->buffer = p;
-            schp->bufflen = blk_size;
-            schp->mem_src = mem_src;
-            schp->b_malloc_len = blk_size;
+            srp->data.buffer = p;
+            srp->data.bufflen = blk_size;
+            srp->data.mem_src = mem_src;
+            srp->data.b_malloc_len = blk_size;
+            if (inp && (num_write_xfer > 0))
+                __copy_from_user(srp->data.buffer, inp, num_write_xfer);
             return 0;
         }
     }
     else {
         mem_src = SG_HEAP_PAGE;
-        p = sg_malloc(sfp, SG_SCATTER_SZ, &ret_sz, &mem_src);
+        p = sg_malloc(srp, SG_SCATTER_SZ, &ret_sz, &mem_src);
         if (! p)
             return -ENOMEM;
     }
@@ -1223,23 +1144,23 @@ static int sg_build_scat(Sg_scatter_hold * schp, int buff_size,
         int k, rem_sz, num, nxt;
         int sc_bufflen = PAGE_SIZE;
         int mx_sc_elems = (sc_bufflen / sizeof(struct scatterlist)) - 1;
-        int sg_tablesize = sfp->parentdp->sg_tablesize;
+        int sg_tablesize = srp->parentfp->parentdp->sg_tablesize;
         int first = 1;
 
         k = SG_HEAP_KMAL;  /* want to protect mem_src, use k as scratch */
-        schp->buffer = (struct scatterlist *)sg_malloc(sfp, 
+        srp->data.buffer = (struct scatterlist *)sg_malloc(srp, 
                                 sc_bufflen, &num, &k);
-        schp->mem_src = (char)k;
+        srp->data.mem_src = (char)k;
         /* N.B. ret_sz and mem_src carried into this block ... */
-        if (! schp->buffer)
+        if (! srp->data.buffer)
             return -ENOMEM;
         else if (num != sc_bufflen) {
             sc_bufflen = num;
             mx_sc_elems = (sc_bufflen / sizeof(struct scatterlist)) - 1;
         }
-        schp->sglist_len = sc_bufflen;
-        memset(schp->buffer, 0, sc_bufflen);
-        for (k = 0, sclp = schp->buffer, rem_sz = blk_size, nxt =0; 
+        srp->data.sglist_len = sc_bufflen;
+        memset(srp->data.buffer, 0, sc_bufflen);
+        for (k = 0, sclp = srp->data.buffer, rem_sz = blk_size, nxt =0; 
              (k < sg_tablesize) && (rem_sz > 0) && (k < mx_sc_elems); 
              ++k, rem_sz -= ret_sz, ++sclp) {
             if (first) 
@@ -1247,7 +1168,7 @@ static int sg_build_scat(Sg_scatter_hold * schp, int buff_size,
             else {
                 num = (rem_sz > SG_SCATTER_SZ) ? SG_SCATTER_SZ : rem_sz;
                 mem_src = SG_HEAP_PAGE;
-                p = sg_malloc(sfp, num, &ret_sz, &mem_src);
+                p = sg_malloc(srp, num, &ret_sz, &mem_src);
                 if (! p)
                     break;
             }
@@ -1255,205 +1176,84 @@ static int sg_build_scat(Sg_scatter_hold * schp, int buff_size,
             sclp->length = ret_sz;
             sclp->alt_address = (char *)(long)mem_src;
             
+            if(inp && (num_write_xfer > 0)) {
+                num = (ret_sz > num_write_xfer) ? num_write_xfer : ret_sz;
+                __copy_from_user(sclp->address, inp, num);
+                num_write_xfer -= num;
+                inp += num;
+            }
             SCSI_LOG_TIMEOUT(5, 
-                printk("sg_build_build: k=%d, a=0x%p, len=%d, ms=%d\n", 
+                printk("sg_sc_build: k=%d, a=0x%p, len=%d, ms=%d\n", 
                 k, sclp->address, ret_sz, mem_src));
         } /* end of for loop */
-        schp->use_sg = k;
+        srp->data.use_sg = k;
         SCSI_LOG_TIMEOUT(5, 
-            printk("sg_build_scat: use_sg=%d, rem_sz=%d\n", k, rem_sz));
-        schp->bufflen = blk_size;
+            printk("sg_sc_build: use_sg=%d, rem_sz=%d\n", k, rem_sz));
+        srp->data.bufflen = blk_size;
         if (rem_sz > 0)   /* must have failed */
             return -ENOMEM;
     }
     return 0;
 }
 
-static void sg_write_xfer(Sg_scatter_hold * schp, const char * inp, 
-                          int num_write_xfer)
+static int sg_sc_undo_rem(Sg_request * srp, char * outp,
+                          int num_read_xfer)
 {
-    SCSI_LOG_TIMEOUT(4, printk("sg_write_xfer: num_write_xfer=%d, use_sg=%d\n", 
-                               num_write_xfer, schp->use_sg)); 
-    if ((! inp) || (num_write_xfer <= 0))
-        return;
-    if (schp->use_sg > 0) {
-        int k, num;
-        struct scatterlist * sclp = (struct scatterlist *)schp->buffer;
-
-        for (k = 0; (k < schp->use_sg) && sclp->address; ++k, ++sclp) { 
-            num = (int)sclp->length;
-            if (num > num_write_xfer) {
-                __copy_from_user(sclp->address, inp, num_write_xfer);
-                break;
-            }
-            else {
-                __copy_from_user(sclp->address, inp, num);
-                num_write_xfer -= num;
-                if (num_write_xfer <= 0)
-                    break;
-                inp += num;
-            }
-        }
-    }
-    else
-        __copy_from_user(schp->buffer, inp, num_write_xfer);
-}
-
-static void sg_remove_scat(Sg_scatter_hold * schp)
-{
-    SCSI_LOG_TIMEOUT(4, printk("sg_remove_scat: use_sg=%d\n", schp->use_sg)); 
-    if(schp->use_sg > 0) {
-        int k, mem_src;
-        struct scatterlist * sclp = (struct scatterlist *)schp->buffer;
-
-        for (k = 0; (k < schp->use_sg) && sclp->address; ++k, ++sclp) {
-            mem_src = (int)(long)sclp->alt_address;
-            SCSI_LOG_TIMEOUT(5, 
-                printk("sg_remove_scat: k=%d, a=0x%p, len=%d, ms=%d\n", 
-                       k, sclp->address, sclp->length, mem_src));
-            sg_free(sclp->address, sclp->length, mem_src);
-            sclp->address = NULL;
-            sclp->length = 0;
-        }
-        sg_free(schp->buffer, schp->sglist_len, schp->mem_src);
-    }
-    else if (schp->buffer)
-        sg_free(schp->buffer, schp->b_malloc_len, schp->mem_src);
-    schp->buffer = NULL;
-    schp->bufflen = 0;
-    schp->use_sg = 0;
-    schp->sglist_len = 0;
-}
-
-static void sg_read_xfer(Sg_scatter_hold * schp, char * outp,
-                         int num_read_xfer)
-{
-    SCSI_LOG_TIMEOUT(4, printk("sg_read_xfer: num_read_xfer=%d\n", 
+    if (! srp)
+        return -EFAULT;
+    SCSI_LOG_TIMEOUT(4, printk("sg_sc_undo_rem: num_read_xfer=%d\n", 
                                num_read_xfer)); 
-    if ((! outp) || (num_read_xfer <= 0))
-        return;
-    if(schp->use_sg > 0) {
-        int k, num;
-        struct scatterlist * sclp = (struct scatterlist *)schp->buffer;
+    if (! outp)
+        num_read_xfer = 0;
+    if(srp->data.use_sg) {
+        int k, num, mem_src;
+        struct scatterlist * sclp = (struct scatterlist *)srp->data.buffer;
 
-        for (k = 0; (k < schp->use_sg) && sclp->address; ++k, ++sclp) {
-            num = (int)sclp->length;
-            if (num > num_read_xfer) {
-                __copy_to_user(outp, sclp->address, num_read_xfer);
-                break;
-            }
-            else {
-                __copy_to_user(outp, sclp->address, num);
-                num_read_xfer -= num;
-                if (num_read_xfer <= 0)
-                    break;
-                outp += num;
-            }
-        }
-    }
-    else
-        __copy_to_user(outp, schp->buffer, num_read_xfer);
-}
-
-static void sg_build_reserve(Sg_fd * sfp, int req_size)
-{
-    Sg_scatter_hold * schp = &sfp->reserve;
-
-    SCSI_LOG_TIMEOUT(4, printk("sg_build_reserve: req_size=%d\n", req_size)); 
-    do {
-        if (req_size < PAGE_SIZE)
-            req_size = PAGE_SIZE;
-        if (0 == sg_build_scat(schp, req_size, sfp))
-            return;
-        else
-            sg_remove_scat(schp);
-        req_size >>= 1; /* divide by 2 */
-    } while (req_size >  (PAGE_SIZE / 2));
-}
-
-static void sg_link_reserve(Sg_fd * sfp, Sg_request * srp, int size)
-{
-    Sg_scatter_hold * req_schp = &srp->data;
-    Sg_scatter_hold * rsv_schp = &sfp->reserve;
-
-    srp->res_used = 1;
-    SCSI_LOG_TIMEOUT(4, printk("sg_link_reserve: size=%d\n", size)); 
-    size = (size + 1) & (~1);   /* round to even for aha1542 */
-    if (rsv_schp->use_sg > 0) {
-        int k, num;
-        int rem = size;
-        struct scatterlist * sclp = (struct scatterlist *)rsv_schp->buffer;
-
-        for (k = 0; k < rsv_schp->use_sg; ++k, ++sclp) {
-            num = (int)sclp->length;
-            if (rem <= num) {
-                if (0 == k) {
-                    req_schp->use_sg = 0;
-                    req_schp->buffer = sclp->address;
+        for (k = 0; (k < srp->data.use_sg) && sclp->address; ++k, ++sclp) {
+            if (num_read_xfer > 0) {
+                num = (int)sclp->length;
+                if (num > num_read_xfer) {
+                    __copy_to_user(outp, sclp->address, num_read_xfer);
+                    outp += num_read_xfer;
+                    num_read_xfer = 0;
                 }
                 else {
-                    sfp->save_scat_len = num;
-                    sclp->length = (unsigned)rem;
-                    req_schp->use_sg = k + 1;
-                    req_schp->sglist_len = rsv_schp->sglist_len;
-                    req_schp->buffer = rsv_schp->buffer;
+                    __copy_to_user(outp, sclp->address, num);
+                    outp += num;
+                    num_read_xfer -= num;
                 }
-                req_schp->bufflen = size;
-                req_schp->mem_src = rsv_schp->mem_src;
-                req_schp->b_malloc_len = rsv_schp->b_malloc_len;
-                break;
             }
-            else
-                rem -= num;
+            mem_src = (int)(long)sclp->alt_address;
+            SCSI_LOG_TIMEOUT(5, 
+                printk("sg_sc_undo_rem: k=%d, a=0x%p, len=%d, ms=%d\n", 
+                       k, sclp->address, sclp->length, mem_src));
+            sg_free(srp, sclp->address, sclp->length, mem_src);
         }
-        if (k >= rsv_schp->use_sg)
-            SCSI_LOG_TIMEOUT(1, printk("sg_link_reserve: BAD size\n")); 
+        sg_free(srp, srp->data.buffer, srp->data.sglist_len, 
+                srp->data.mem_src);
     }
     else {
-        req_schp->use_sg = 0;
-        req_schp->bufflen = size;
-        req_schp->buffer = rsv_schp->buffer;
-        req_schp->mem_src = rsv_schp->mem_src;
-        req_schp->b_malloc_len = rsv_schp->b_malloc_len;
+        if (num_read_xfer > 0) 
+            __copy_to_user(outp, srp->data.buffer, num_read_xfer);
+        sg_free(srp, srp->data.buffer, srp->data.b_malloc_len, 
+                srp->data.mem_src);
     }
+    if (0 == sg_remove_request(srp->parentfp, srp)) {
+        SCSI_LOG_TIMEOUT(1, printk("sg_sc_undo_rem: srp=0x%p not found\n", 
+                                   srp));
+    }
+    return 0;
 }
 
-static void sg_unlink_reserve(Sg_fd * sfp, Sg_request * srp)
-{
-    Sg_scatter_hold * req_schp = &srp->data;
-    Sg_scatter_hold * rsv_schp = &sfp->reserve;
-
-    SCSI_LOG_TIMEOUT(4, printk("sg_unlink_reserve: req->use_sg=%d\n",
-                               (int)req_schp->use_sg)); 
-    if ((rsv_schp->use_sg > 0) && (req_schp->use_sg > 0)) {
-        struct scatterlist * sclp = (struct scatterlist *)rsv_schp->buffer;
-
-        if (sfp->save_scat_len > 0) 
-            (sclp + (req_schp->use_sg - 1))->length = 
-                                        (unsigned)sfp->save_scat_len;
-        else
-            SCSI_LOG_TIMEOUT(1, printk(
-                        "sg_unlink_reserve: BAD save_scat_len\n")); 
-    }
-    req_schp->use_sg = 0;
-    req_schp->bufflen = 0;
-    req_schp->buffer = NULL;
-    req_schp->sglist_len = 0;
-    sfp->save_scat_len = 0;
-    srp->res_used = 0;
-}
-
-static Sg_request * sg_get_rq_mark(Sg_fd * sfp, int pack_id)
+static Sg_request * sg_get_request(const Sg_fd * sfp, int pack_id)
 {
     Sg_request * resp = NULL;
 
     resp = sfp->headrp;
     while (resp) {
-        if ((1 == resp->done) && 
-            ((-1 == pack_id) || (resp->header.pack_id == pack_id))) {
-            resp->done = 2;
+        if ((! resp->my_cmdp) && 
+            ((-1 == pack_id) || (resp->header.pack_id == pack_id)))
             return resp;
-        }
         resp = resp->nextrp;
     }
     return resp;
@@ -1463,12 +1263,12 @@ static Sg_request * sg_get_rq_mark(Sg_fd * sfp, int pack_id)
 static Sg_request * sg_add_request(Sg_fd * sfp)
 {
     int k;
-    Sg_request * resp = sfp->headrp;
-    Sg_request * rp = sfp->req_arr;
+    Sg_request * resp = NULL;
+    Sg_request * rp;
 
+    resp = sfp->headrp;
+    rp = sfp->req_arr;
     if (! resp) {
-        memset(rp, 0, sizeof(Sg_request));
-        rp->parentfp = sfp;
         resp = rp;
         sfp->headrp = resp;
     }
@@ -1476,15 +1276,12 @@ static Sg_request * sg_add_request(Sg_fd * sfp)
         if (0 == sfp->cmd_q)
             resp = NULL;   /* command queuing disallowed */
         else {
-            for (k = 0; k < SG_MAX_QUEUE; ++k, ++rp) {
+            for (k = 0, rp; k < SG_MAX_QUEUE; ++k, ++rp) {
                 if (! rp->parentfp)
                     break;
             }
             if (k < SG_MAX_QUEUE) {
-                memset(rp, 0, sizeof(Sg_request));
-                rp->parentfp = sfp;
-                while (resp->nextrp) 
-                    resp = resp->nextrp;
+                while (resp->nextrp) resp = resp->nextrp;
                 resp->nextrp = rp;
                 resp = rp;
             }
@@ -1493,7 +1290,11 @@ static Sg_request * sg_add_request(Sg_fd * sfp)
         }
     }
     if (resp) {
+        resp->parentfp = sfp;
         resp->nextrp = NULL;
+        resp->fb_used = 0;
+        memset(&resp->data, 0, sizeof(Sg_scatter_hold));
+        memset(&resp->header, 0, sizeof(struct sg_header));
         resp->my_cmdp = NULL;
     }
     return resp;
@@ -1509,14 +1310,14 @@ static int sg_remove_request(Sg_fd * sfp, const Sg_request * srp)
         return 0;
     prev_rp = sfp->headrp;
     if (srp == prev_rp) {
-        sfp->headrp = prev_rp->nextrp;
         prev_rp->parentfp = NULL;
+        sfp->headrp = prev_rp->nextrp;
         return 1;
     }
     while ((rp = prev_rp->nextrp)) {
         if (srp == rp) {
-            prev_rp->nextrp = rp->nextrp;
             rp->parentfp = NULL;
+            prev_rp->nextrp = rp->nextrp;
             return 1;
         }
         prev_rp = rp;
@@ -1546,6 +1347,13 @@ static Sg_fd * sg_add_sfp(Sg_device * sdp, int dev, int get_reserved)
                    sdp->device->host->unchecked_isa_dma : 1;
     sfp->cmd_q = SG_DEF_COMMAND_Q;
     sfp->underrun_flag = SG_DEF_UNDERRUN_FLAG;
+    if (get_reserved)
+        sfp->fst_buf = sg_low_malloc(SG_SCATTER_SZ, sfp->low_dma, 
+                                     SG_HEAP_PAGE, &sfp->fb_size);
+    else
+        sfp->fst_buf = NULL;
+    if (! sfp->fst_buf)
+        sfp->fb_size = 0;
     sfp->parentdp = sdp;
     if (! sdp->headfp)
         sdp->headfp = sfp;
@@ -1555,14 +1363,11 @@ static Sg_fd * sg_add_sfp(Sg_device * sdp, int dev, int get_reserved)
            pfp = pfp->nextfp;
         pfp->nextfp = sfp;
     }
+    sg_big_buff = sfp->fb_size; /* show sysctl most recent "fb" size */
     SCSI_LOG_TIMEOUT(3, printk("sg_add_sfp: sfp=0x%p, m_s=%d\n",
                                sfp, (int)sfp->my_mem_src));
-    if (get_reserved) {
-        sg_build_reserve(sfp, SG_DEF_RESERVED_SIZE);
-        sg_big_buff = sfp->reserve.bufflen; /* sysctl shows most recent size */
-        SCSI_LOG_TIMEOUT(3, printk("sg_add_sfp:   bufflen=%d, use_sg=%d\n",
-                               sfp->reserve.bufflen, sfp->reserve.use_sg));
-    }
+    SCSI_LOG_TIMEOUT(3, printk("sg_add_sfp:   fb_sz=%d, fst_buf=0x%p\n",
+                               sfp->fb_size, sfp->fst_buf));
     return sfp;
 }
 
@@ -1582,8 +1387,8 @@ static int sg_remove_sfp(Sg_device * sdp, Sg_fd * sfp)
 /* Need to stop sg_command_done() playing with this list during this loop */
         while (srp) {
             tsrp = srp->nextrp;
-            if (srp->done)
-                sg_finish_rem_req(srp, NULL, 0);
+            if (! srp->my_cmdp)
+                sg_sc_undo_rem(srp, NULL, 0);
             else
                 ++dirty;
             srp = tsrp;
@@ -1604,12 +1409,12 @@ static int sg_remove_sfp(Sg_device * sdp, Sg_fd * sfp)
                 prev_fp = fp;
             }
         }
-        if (sfp->reserve.bufflen > 0) {
-SCSI_LOG_TIMEOUT(6, printk("sg_remove_sfp:    bufflen=%d, use_sg=%d\n",
-                 (int)sfp->reserve.bufflen, (int)sfp->reserve.use_sg));
-            sg_remove_scat(&sfp->reserve);
-        }
+SCSI_LOG_TIMEOUT(6, printk("sg_remove_sfp:    fb_sz=%d, fst_buf=0x%p\n",
+                 sfp->fb_size, sfp->fst_buf));
+        sg_low_free(sfp->fst_buf, sfp->fb_size, SG_HEAP_PAGE);
         sfp->parentdp = NULL;
+        sfp->fst_buf = NULL;
+        sfp->fb_size = 0;
     SCSI_LOG_TIMEOUT(6, printk("sg_remove_sfp:    sfp=0x%p\n", sfp));
         sg_low_free((char *)sfp, sizeof(Sg_fd), sfp->my_mem_src);
         res = 1;
@@ -1622,12 +1427,12 @@ SCSI_LOG_TIMEOUT(6, printk("sg_remove_sfp:    bufflen=%d, use_sg=%d\n",
     return res;
 }
 
-static int sg_res_in_use(const Sg_fd * sfp)
+static int sg_fb_in_use(const Sg_fd * sfp)
 {
     const Sg_request * srp = sfp->headrp;
 
     while (srp) {
-        if (srp->res_used)
+        if (srp->fb_used)
             return 1;
         srp = srp->nextrp;
     }
@@ -1706,7 +1511,7 @@ static char * sg_low_malloc(int rqSz, int lowDma, int mem_src, int * retSzp)
     return resp;
 }
 
-static char * sg_malloc(const Sg_fd * sfp, int size, int * retSzp, 
+static char * sg_malloc(Sg_request * srp, int size, int * retSzp, 
                         int * mem_srcp)
 {
     char * resp = NULL;
@@ -1715,16 +1520,26 @@ static char * sg_malloc(const Sg_fd * sfp, int size, int * retSzp,
     if (size <= 0)
         ;
     else {
+        Sg_fd * sfp = srp->parentfp;
         int low_dma = sfp->low_dma;
         int l_ms = -1;  /* invalid value */
 
         switch (*mem_srcp) 
         {
         case SG_HEAP_PAGE:
+        case SG_HEAP_FB:
             l_ms = (size < PAGE_SIZE) ? SG_HEAP_POOL : SG_HEAP_PAGE;
             resp = sg_low_malloc(size, low_dma, l_ms, 0);
             if (resp)
                 break;
+            if ((size <= sfp->fb_size) && (0 == sg_fb_in_use(sfp))) {
+                SCSI_LOG_TIMEOUT(6,
+                    printk("sg_malloc: scsi_malloc failed, get fst_buf\n"));
+                resp = sfp->fst_buf;
+                srp->fb_used = 1;
+                l_ms = SG_HEAP_FB;
+                break;
+            }
             resp = sg_low_malloc(size, low_dma, l_ms, &size);
             if (! resp) {
                 l_ms = (SG_HEAP_POOL == l_ms) ? SG_HEAP_PAGE : SG_HEAP_POOL;
@@ -1780,12 +1595,18 @@ static void sg_low_free(char * buff, int size, int mem_src)
                mem_src, buff, size);
 }
 
-static void sg_free(char * buff, int size, int mem_src)
+static void sg_free(Sg_request * srp, char * buff, int size, int mem_src)
 {
+    Sg_fd * sfp = srp->parentfp;
+
     SCSI_LOG_TIMEOUT(6, 
         printk("sg_free: buff=0x%p, size=%d\n", buff, size));
-    if ((! buff) || (size <= 0))
+    if ((! sfp) || (! buff) || (size <= 0))
         ;
+    else if (sfp->fst_buf == buff) {
+        srp->fb_used = 0;
+        SCSI_LOG_TIMEOUT(6, printk("sg_free:   left cause fst_buf\n"));
+    }
     else
         sg_low_free(buff, size, mem_src);
 }

@@ -73,7 +73,7 @@ int do_truncate(struct dentry *dentry, unsigned long length)
 	if ((off_t) length < 0)
 		return -EINVAL;
 
-	fs_down(&inode->i_sem);
+	down(&inode->i_sem);
 	newattrs.ia_size = length;
 	newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
 	error = notify_change(dentry, &newattrs);
@@ -83,7 +83,7 @@ int do_truncate(struct dentry *dentry, unsigned long length)
 		if (inode->i_op && inode->i_op->truncate)
 			inode->i_op->truncate(inode);
 	}
-	fs_up(&inode->i_sem);
+	up(&inode->i_sem);
 	return error;
 }
 
@@ -535,13 +535,10 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 	 * non-root user, remove the setuid bit.
 	 * 19981026	David C Niemi <niemi@tux.org>
 	 *
-	 * Changed this to apply to all users, including root, to avoid
-	 * some races. This is the behavior we had in 2.0. The check for
-	 * non-root was definitely wrong for 2.2 anyway, as it should
-	 * have been using CAP_FSETID rather than fsuid -- 19990830 SD.
 	 */
 	if ((inode->i_mode & S_ISUID) == S_ISUID &&
-		!S_ISDIR(inode->i_mode))
+		!S_ISDIR(inode->i_mode)
+		&& current->fsuid) 
 	{
 		newattrs.ia_mode &= ~S_ISUID;
 		newattrs.ia_valid |= ATTR_MODE;
@@ -551,11 +548,9 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 	 * by a non-root user, remove the setgid bit UNLESS there is no group
 	 * execute bit (this would be a file marked for mandatory locking).
 	 * 19981026	David C Niemi <niemi@tux.org>
-	 *
-	 * Removed the fsuid check (see the comment above) -- 19990830 SD.
 	 */
 	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) 
-		&& !S_ISDIR(inode->i_mode))
+		&& !S_ISDIR(inode->i_mode) && current->fsuid) 
 	{
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
@@ -696,13 +691,9 @@ int get_unused_fd(void)
 {
 	struct files_struct * files = current->files;
 	int fd, error;
-	
-repeat:
-	error = -EMFILE;
 
-	fd = find_next_zero_bit(files->open_fds, 
-				current->files->max_fdset, 
-				files->next_fd);
+	error = -EMFILE;
+	fd = find_first_zero_bit(&files->open_fds, NR_OPEN);
 	/*
 	 * N.B. For clone tasks sharing a files structure, this test
 	 * will limit the total number of files that can be opened.
@@ -710,27 +701,10 @@ repeat:
 	if (fd >= current->rlim[RLIMIT_NOFILE].rlim_cur)
 		goto out;
 
-	/* Do we need to expand the fdset array? */
-	if (fd >= current->files->max_fdset) {
-		error = expand_fdset(files, fd + 1);
-		if (!error)
-			goto repeat;
-		goto out;
-	}
-	
-	/* 
-	 * Check whether we need to expand the fd array.
-	 */
-	if (fd >= files->max_fds) {
-		error = expand_fd_array(files, fd + 1);
-		if (!error)
-			goto repeat;
-		goto out;
-	}
+	/* Check here for fd > files->max_fds to do dynamic expansion */
 
-	FD_SET(fd, files->open_fds);
-	FD_CLR(fd, files->close_on_exec);
-	files->next_fd = fd + 1;
+	FD_SET(fd, &files->open_fds);
+	FD_CLR(fd, &files->close_on_exec);
 #if 1
 	/* Sanity check */
 	if (files->fd[fd] != NULL) {
@@ -741,11 +715,12 @@ repeat:
 	error = fd;
 
 out:
-#ifdef FDSET_DEBUG	
-	if (error < 0)
-		printk (KERN_ERR __FUNCTION__ ": return %d\n", error);
-#endif
 	return error;
+}
+
+inline void put_unused_fd(unsigned int fd)
+{
+	FD_CLR(fd, &current->files->open_fds);
 }
 
 asmlinkage int sys_open(const char * filename, int flags, int mode)
@@ -845,8 +820,8 @@ asmlinkage int sys_close(unsigned int fd)
 		struct files_struct * files = current->files;
 		files->fd[fd] = NULL;
 		put_unused_fd(fd);
-		FD_CLR(fd, files->close_on_exec);
- 		error = filp_close(filp, files);
+		FD_CLR(fd, &files->close_on_exec);
+		error = filp_close(filp, files);
 	}
 	unlock_kernel();
 	return error;

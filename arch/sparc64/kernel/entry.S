@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.103.2.6 2000/09/08 14:00:04 jj Exp $
+/* $Id: entry.S,v 1.103 1999/05/08 03:00:21 davem Exp $
  * arch/sparc64/kernel/entry.S:  Sparc64 trap low-level entry points.
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -214,8 +214,8 @@ do_fptrap:
 	.align		32
 	.globl		do_ivec
 do_ivec:
-	mov		0x40, %g3
-	ldxa		[%g3 + %g0] ASI_UDB_INTR_R, %g3
+	wr		%g0, ASI_UDB_INTR_R, %asi
+	ldxa		[%g0 + 0x40] %asi, %g3
 	sethi		%hi(KERNBASE), %g4
 	cmp		%g3, %g4
 	bgeu,pn		%xcc, do_ivec_xcall
@@ -234,25 +234,22 @@ do_ivec:
 
 	sllx		%g2, %g4, %g2
 	sllx		%g4, 2, %g4
-	lduw		[%g6 + %g4], %g5	/* g5 = irq_work(cpu, pil) */
+	lduw		[%g1 + %g4], %g5	/* g5 = irq_work(cpu, pil) */
 	stw		%g5, [%g3 + 0x00]	/* bucket->irq_chain = g5 */
-	stw		%g3, [%g6 + %g4]	/* irq_work(cpu, pil) = bucket */
+	stw		%g3, [%g1 + %g4]	/* irq_work(cpu, pil) = bucket */
 	wr		%g2, 0x0, %set_softint
 	retry
 do_ivec_xcall:
-	mov		0x50, %g1
+	ldxa		[%g0 + 0x50] %asi, %g6
 
-	ldxa		[%g1 + %g0] ASI_UDB_INTR_R, %g1
 	srl		%g3, 0, %g3
-	mov		0x60, %g7
-	ldxa		[%g7 + %g0] ASI_UDB_INTR_R, %g7
+	ldxa		[%g0 + 0x60] %asi, %g7
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
 	membar		#Sync
 	jmpl		%g3, %g0
 	 nop
-
 do_ivec_spurious:
-	stw		%g3, [%g6 + 0x00]	/* irq_work(cpu, 0) = bucket */
+	stw		%g3, [%g1 + 0x00]	/* irq_work(cpu, 0) = bucket */
 	rdpr		%pstate, %g5
 
 	wrpr		%g5, PSTATE_IG | PSTATE_AG, %pstate
@@ -263,76 +260,6 @@ do_ivec_spurious:
 	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
-
-	.globl		save_alternate_globals
-save_alternate_globals: /* %o0 = save_area */
-	rdpr		%pstate, %o5
-	andn		%o5, PSTATE_IE, %o1
-	wrpr		%o1, PSTATE_AG, %pstate
-	stx		%g0, [%o0 + 0x00]
-	stx		%g1, [%o0 + 0x08]
-	stx		%g2, [%o0 + 0x10]
-	stx		%g3, [%o0 + 0x18]
-	stx		%g4, [%o0 + 0x20]
-	stx		%g5, [%o0 + 0x28]
-	stx		%g6, [%o0 + 0x30]
-	stx		%g7, [%o0 + 0x38]
-	wrpr		%o1, PSTATE_IG, %pstate
-	stx		%g0, [%o0 + 0x40]
-	stx		%g1, [%o0 + 0x48]
-	stx		%g2, [%o0 + 0x50]
-	stx		%g3, [%o0 + 0x58]
-	stx		%g4, [%o0 + 0x60]
-	stx		%g5, [%o0 + 0x68]
-	stx		%g6, [%o0 + 0x70]
-	stx		%g7, [%o0 + 0x78]
-	wrpr		%o1, PSTATE_MG, %pstate
-	stx		%g0, [%o0 + 0x80]
-	stx		%g1, [%o0 + 0x88]
-	stx		%g2, [%o0 + 0x90]
-	stx		%g3, [%o0 + 0x98]
-	stx		%g4, [%o0 + 0xa0]
-	stx		%g5, [%o0 + 0xa8]
-	stx		%g6, [%o0 + 0xb0]
-	stx		%g7, [%o0 + 0xb8]
-	wrpr		%o5, 0x0, %pstate
-	retl
-	 nop
-
-	.globl		restore_alternate_globals
-restore_alternate_globals: /* %o0 = save_area */
-	rdpr		%pstate, %o5
-	andn		%o5, PSTATE_IE, %o1
-	wrpr		%o1, PSTATE_AG, %pstate
-	ldx		[%o0 + 0x00], %g0
-	ldx		[%o0 + 0x08], %g1
-	ldx		[%o0 + 0x10], %g2
-	ldx		[%o0 + 0x18], %g3
-	ldx		[%o0 + 0x20], %g4
-	ldx		[%o0 + 0x28], %g5
-	ldx		[%o0 + 0x30], %g6
-	ldx		[%o0 + 0x38], %g7
-	wrpr		%o1, PSTATE_IG, %pstate
-	ldx		[%o0 + 0x40], %g0
-	ldx		[%o0 + 0x48], %g1
-	ldx		[%o0 + 0x50], %g2
-	ldx		[%o0 + 0x58], %g3
-	ldx		[%o0 + 0x60], %g4
-	ldx		[%o0 + 0x68], %g5
-	ldx		[%o0 + 0x70], %g6
-	ldx		[%o0 + 0x78], %g7
-	wrpr		%o1, PSTATE_MG, %pstate
-	ldx		[%o0 + 0x80], %g0
-	ldx		[%o0 + 0x88], %g1
-	ldx		[%o0 + 0x90], %g2
-	ldx		[%o0 + 0x98], %g3
-	ldx		[%o0 + 0xa0], %g4
-	ldx		[%o0 + 0xa8], %g5
-	ldx		[%o0 + 0xb0], %g6
-	ldx		[%o0 + 0xb8], %g7
-	wrpr		%o5, 0x0, %pstate
-	retl
-	 nop
 
 	.globl		getcc, setcc
 getcc:
@@ -551,97 +478,6 @@ __do_instruction_access_exception:
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
-	/* This is the trap handler entry point for ECC correctable
-	 * errors.  They are corrected, but we listen for the trap
-	 * so that the event can be logged.
-	 *
-	 * Disrupting errors are either:
-	 * 1) single-bit ECC errors during UDB reads to system
-	 *    memory
-	 * 2) data parity errors during write-back events
-	 *
-	 * As far as I can make out from the manual, the CEE trap
-	 * is only for correctable errors during memory read
-	 * accesses by the front-end of the processor.
-	 *
-	 * The code below is only for trap level 1 CEE events,
-	 * as it is the only situation where we can safely record
-	 * and log.  For trap level >1 we just clear the CE bit
-	 * in the AFSR and return.
-	 */
-
-	/* Our trap handling infrastructure allows us to preserve
-	 * two 64-bit values during etrap for arguments to
-	 * subsequent C code.  Therefore we encode the information
-	 * as follows:
-	 *
-	 * value 1) Full 64-bits of AFAR
-	 * value 2) Low 33-bits of AFSR, then bits 33-->42
-	 *          are UDBL error status and bits 43-->52
-	 *          are UDBH error status
-	 */
-	.align	64
-	.globl	cee_trap
-cee_trap:
-	ldxa	[%g0] ASI_AFSR, %g1		! Read AFSR
-	ldxa	[%g0] ASI_AFAR, %g2		! Read AFAR
-	sllx	%g1, 31, %g1			! Clear reserved bits
-	srlx	%g1, 31, %g1			! in AFSR
-
-	/* NOTE: UltraSparc-I/II have high and low UDB error
-	 *       registers, corresponding to the two UDB units
-	 *       present on those chips.  UltraSparc-IIi only
-	 *       has a single UDB, called "SDB" in the manual.
-	 *       For IIi the upper UDB register always reads
-	 *       as zero so for our purposes things will just
-	 *       work with the checks below.
-	 */
-	ldxa	[%g0] ASI_UDBL_ERROR_R, %g3	! Read UDB-Low error status
-	andcc	%g3, (1 << 8), %g4		! Check CE bit
-	sllx	%g3, (64 - 10), %g3		! Clear reserved bits
-	srlx	%g3, (64 - 10), %g3		! in UDB-Low error status
-
-	sllx	%g3, (33 + 0), %g3		! Shift up to encoding area
-	or	%g1, %g3, %g1			! Or it in
-	be,pn	%xcc, 1f			! Branch if CE bit was clear
-	 nop
-	stxa	%g4, [%g0] ASI_UDB_ERROR_W	! Clear CE sticky bit in UDBL
-	membar	#Sync				! Synchronize ASI stores
-1:	mov	0x18, %g5			! Addr of UDB-High error status
-	ldxa	[%g5] ASI_UDBH_ERROR_R, %g3	! Read it
-
-	andcc	%g3, (1 << 8), %g4		! Check CE bit
-	sllx	%g3, (64 - 10), %g3		! Clear reserved bits
-	srlx	%g3, (64 - 10), %g3		! in UDB-High error status
-	sllx	%g3, (33 + 10), %g3		! Shift up to encoding area
-	or	%g1, %g3, %g1			! Or it in
-	be,pn	%xcc, 1f			! Branch if CE bit was clear
-	 nop
-	nop
-
-	stxa	%g4, [%g5] ASI_UDB_ERROR_W	! Clear CE sticky bit in UDBH
-	membar	#Sync				! Synchronize ASI stores
-1:	mov	1, %g5				! AFSR CE bit is
-	sllx	%g5, 20, %g5			! bit 20
-	stxa	%g5, [%g0] ASI_AFSR		! Clear CE sticky bit in AFSR
-	membar	#Sync				! Synchronize ASI stores
-	sllx	%g2, (64 - 41), %g2		! Clear reserved bits
-	srlx	%g2, (64 - 41), %g2		! in latched AFAR
-
-	andn	%g2, 0x0f, %g2			! Finish resv bit clearing
-	mov	%g1, %g4			! Move AFSR+UDB* into save reg
-	mov	%g2, %g5			! Move AFAR into save reg
-	rdpr	%pil, %g2
-	wrpr	%g0, 15, %pil
-	ba,pt	%xcc, etrap_irq
-	 rd	%pc, %g7
-	mov	%l4, %o0
-
-	mov	%l5, %o1
-	call	cee_log
-	 add	%sp, STACK_BIAS + REGWIN_SZ, %o2
-	ba,a,pt	%xcc, rtrap_clr_l6
-
 	.globl		__do_privact
 __do_privact:
 	mov		TLB_SFSR, %g3
@@ -725,8 +561,6 @@ breakpoint_trap:
 	ba,pt		%xcc, rtrap
 	 nop
 
-#if defined(CONFIG_SUNOS_EMUL) || defined(CONFIG_SOLARIS_EMUL) || \
-    defined(CONFIG_SOLARIS_EMUL_MODULE)
 	/* SunOS uses syscall zero as the 'indirect syscall' it looks
 	 * like indir_syscall(scall_num, arg0, arg1, arg2...);  etc.
 	 * This is complete brain damage.
@@ -780,7 +614,6 @@ sunos_getgid:
 	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I1]
 	b,pt	%xcc, ret_sys_call
 	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
-#endif
 
 	/* SunOS's execv() call only specifies the argv argument, the
 	 * environment settings are the same as the calling processes.
@@ -945,22 +778,12 @@ ret_from_syscall:
 		 nop
 		ldx		[%g6 + AOFF_task_tss + AOFF_thread_pcr_reg], %o7
 		wr		%g0, %o7, %pcr
-
-		/* Blackbird errata workaround.  See commentary in
-		 * smp.c:smp_percpu_timer_interrupt() for more
-		 * information.
-		 */
-		ba,pt		%xcc, 99f
-		 nop
-		.align		64
-99:		wr		%g0, %g0, %pic
-		rd		%pic, %g0
-
+		wr		%g0, %g0, %pic
 1:		b,pt		%xcc, ret_sys_call
 		 ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0], %o0
-sparc_exit:	rdpr		%pstate, %g2
+sparc_exit:	rdpr		%otherwin, %g1
+		rdpr		%pstate, %g2
 		wrpr		%g2, PSTATE_IE, %pstate
-		rdpr		%otherwin, %g1
 		rdpr		%cansave, %g3
 		add		%g3, %g1, %g3
 		wrpr		%g3, 0x0, %cansave

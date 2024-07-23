@@ -11,12 +11,11 @@
 struct cs4215 {
 	__u8	data[4];	/* Data mode: Time slots 5-8 */
 	__u8	ctrl[4];	/* Ctrl mode: Time slots 1-4 */
+	__volatile__ struct dbri_mem td;
+	__volatile__ struct dbri_mem rd;
 	__u8	onboard;
-	__volatile__ __u32	status;
-        __volatile__ __u32	version;
-        int offset;
-        int ctrlmode;
-        int datamode;
+	__u32	status;
+        __u32	version;
 };
 
 
@@ -105,7 +104,7 @@ static struct {
 
 /* Time Slot 6, Output Setting  */
 #define CS4215_RO(v)	v	/* Right Output Attenuation 0x3f: -94.5 dB */
-#define CS4215_SE	(1<<6)	/* Speaker Enable */
+#define CS4215_SE	(1<<6)	/* Line Out Enable */
 #define CS4215_ADI	(1<<7)	/* A/D Data Invalid: Busy in calibration */
 
 /* Time Slot 7, Input Setting */

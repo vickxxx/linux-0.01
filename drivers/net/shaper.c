@@ -1,8 +1,8 @@
 /*
  *			Simple traffic shaper for Linux NET3.
  *
- *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
- *				http://www.redhat.com
+ *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
+ *				http://www.cymru.net
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -51,19 +51,14 @@
  *		will render your machine defunct. Don't for now shape over
  *		PPP or SLIP therefore!
  *		This will be fixed in BETA4
- *
- * Update History :
- *
- *              bh_atomic() SMP races fixes and rewritten the locking code to
- *              be SMP safe and irq-mask friendly.
- *              NOTE: we can't use start_bh_atomic() in kick_shaper()
- *              because it's going to be recalled from an irq handler,
- *              and synchronize_bh() is a nono if called from irq context.
+ */
+ 
+/*
+ * bh_atomic() SMP races fixes and rewritten the locking code to be SMP safe
+ * and irq-mask friendly. NOTE: we can't use start_bh_atomic() in kick_shaper()
+ * because it's going to be recalled from an irq handler, and synchronize_bh()
+ * is a nono if called from irq context.
  *						1999  Andrea Arcangeli
- *
- *              Device statistics (tx_pakets, tx_bytes,
- *              tx_drops: queue_over_time and collisions: max_queue_exceded)
- *                               1999/06/18 Jordi Murgo <savage@apostols.org>
  */
  
 #include <linux/module.h>
@@ -233,20 +228,18 @@ static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
 		/*
 		 *	Queue over time. Spill packet.
 		 */
-		if(skb->shapeclock-jiffies > SHAPER_LATENCY) {
+		if(skb->shapeclock-jiffies > SHAPER_LATENCY)
 			dev_kfree_skb(skb);
-			shaper->stats.tx_dropped++;
-		} else
+		else
 			skb_queue_tail(&shaper->sendq, skb);
 	}
 #endif 	
-	if(sh_debug)
+ 	if(sh_debug)
  		printk("Frame queued.\n");
  	if(skb_queue_len(&shaper->sendq)>SHAPER_QLEN)
  	{
  		ptr=skb_dequeue(&shaper->sendq);
-                dev_kfree_skb(ptr);
-                shaper->stats.collisions++;
+ 		dev_kfree_skb(ptr);
  	}
  	shaper_unlock(shaper);
  	return 0;
@@ -269,11 +262,7 @@ static void shaper_queue_xmit(struct shaper *shaper, struct sk_buff *skb)
 			printk("Kick new frame to %s, %d\n",
 				shaper->dev->name,newskb->priority);
 		dev_queue_xmit(newskb);
-
-                shaper->stats.tx_bytes+=newskb->len;
-		shaper->stats.tx_packets++;
-
-                if(sh_debug)
+		if(sh_debug)
 			printk("Kicked new frame out.\n");
 		dev_kfree_skb(skb);
 	}
@@ -426,8 +415,7 @@ static int shaper_start_xmit(struct sk_buff *skb, struct device *dev)
 
 static struct net_device_stats *shaper_get_stats(struct device *dev)
 {
-     	struct shaper *sh=dev->priv;
-	return &sh->stats;
+	return NULL;
 }
 
 static int shaper_header(struct sk_buff *skb, struct device *dev, 
@@ -557,13 +545,6 @@ static int shaper_ioctl(struct device *dev,  struct ifreq *ifr, int cmd)
 {
 	struct shaperconf *ss= (struct shaperconf *)&ifr->ifr_data;
 	struct shaper *sh=dev->priv;
-	
-	if(ss->ss_cmd == SHAPER_SET_DEV || ss->ss_cmd == SHAPER_SET_SPEED)
-	{
-		if(!capable(CAP_NET_ADMIN))
-			return -EPERM;
-	}
-	
 	switch(ss->ss_cmd)
 	{
 		case SHAPER_SET_DEV:
@@ -600,7 +581,7 @@ static struct shaper *shaper_alloc(struct device *dev)
 	skb_queue_head_init(&sh->sendq);
 	init_timer(&sh->timer);
 	sh->timer.function=shaper_timer;
-        sh->timer.data=(unsigned long)sh;
+	sh->timer.data=(unsigned long)sh;
 	return sh;
 }
 
@@ -683,9 +664,7 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-        struct shaper *sh=dev_shape.priv;
-
-        /*
+	/*
 	 *	No need to check MOD_IN_USE, as sys_delete_module() checks.
 	 *	To be unloadable we must be closed and detached so we don't
 	 *	need to flush things.
@@ -694,9 +673,10 @@ void cleanup_module(void)
 	unregister_netdev(&dev_shape);
 
 	/*
-	 *	Free up the private structure, or leak memory :-)
+	 *	Free up the private structure, or leak memory :-) 
 	 */
-	kfree(sh);
+	 
+	kfree(dev_shape.priv);
 	dev_shape.priv = NULL;
 }
 

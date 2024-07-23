@@ -17,7 +17,6 @@
 
 #include <asm/system.h>
 #include <asm/ptrace.h>
-#include <asm/pci.h>
 
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
@@ -25,7 +24,6 @@
 #undef __EXTERN_INLINE
 
 #include "proto.h"
-#include "bios32.h"
 
 /*
  * NOTE: Herein lie back-to-back mb instructions.  They are magic. 
@@ -438,12 +436,6 @@ apecs_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 	 * what ARC or SRM might have left behind...
 	 */
 	*(vuip)APECS_IOC_HAXR2 = 0; mb();
-
-	/* Tell userland where I/O space is located.  */
-	default_hose.pci_sparse_io_space = APECS_IO - IDENT_ADDR;
-	default_hose.pci_sparse_mem_space = APECS_SPARSE_MEM - IDENT_ADDR;
-	default_hose.pci_dense_io_space = 0;
-	default_hose.pci_dense_mem_space = APECS_DENSE_MEM - IDENT_ADDR;
 }
 
 int

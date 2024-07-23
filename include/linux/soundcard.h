@@ -76,8 +76,8 @@
  */
 
 #ifndef _SIOWR
-#if defined(_IOWR) && (defined(_AIX) || (!defined(sun) && !defined(sparc) && !defined(__sparc__) && !defined(__INCioctlh) && !defined(__Lynx__)))
-/* Use already defined ioctl defines if they exist (except with Sun or Sparc) */
+#if defined(_IOWR) && (defined(_AIX) || (!defined(sun) && !defined(sparc) && !defined(__INCioctlh) && !defined(__Lynx__)))
+/* Use already defined ioctl defines if they exist (except with Sun) */
 #define	SIOCPARM_MASK	IOCPARM_MASK
 #define	SIOC_VOID	IOC_VOID
 #define	SIOC_OUT	IOC_OUT
@@ -179,7 +179,7 @@ typedef struct seq_event_rec {
  * Some big endian/little endian handling macros
  */
 
-#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(__sparc__) || defined(HPPA) || defined(PPC)
+#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(HPPA) || defined(PPC)
 /* Big endian machines */
 #  define _PATCHKEY(id) (0xfd00|id)
 #  define AFMT_S16_NE AFMT_S16_BE
@@ -889,12 +889,6 @@ typedef struct _old_mixer_info /* Obsolete */
 typedef unsigned char mixer_record[128];
 
 #define SOUND_MIXER_ACCESS		_SIOWR('M', 102, mixer_record)
-
-/*
- * Two ioctls for special souncard function
- */
-#define SOUND_MIXER_AGC  _SIOWR('M', 103, int)
-#define SOUND_MIXER_3DSE  _SIOWR('M', 104, int)
 
 /*
  * The SOUND_MIXER_PRIVATE# commands can be redefined by low level drivers.

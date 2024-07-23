@@ -1,4 +1,4 @@
-/* $Id: systbls.S,v 1.53.2.7 2001/01/11 19:12:10 davem Exp $
+/* $Id: systbls.S,v 1.53 1999/04/07 17:14:11 davem Exp $
  * systbls.S: System call entry point tables for OS compatibility.
  *            The native Linux system call table lives here also.
  *
@@ -10,8 +10,6 @@
  * Copyright (C) 1995 Adrian M. Rodriguez (adrian@remus.rutgers.edu)
  */
 
-#include <linux/config.h>
-
 	.text
 	.align	1024
 
@@ -21,21 +19,21 @@
 sys_call_table32:
 /*0*/	.word sys_nis_syscall, sparc_exit, sys_fork, sys_read, sys_write
 /*5*/	.word sys_open, sys_close, sys32_wait4, sys_creat, sys_link
-/*10*/  .word sys_unlink, sunos_execv, sys_chdir, sys32_chown16, sys32_mknod
-/*15*/	.word sys32_chmod, sys32_lchown16, sparc_brk, sys_perfctr, sys32_lseek
+/*10*/  .word sys_unlink, sunos_execv, sys_chdir, sys32_chown, sys32_mknod
+/*15*/	.word sys32_chmod, sys32_lchown, sparc_brk, sys_perfctr, sys32_lseek
 /*20*/	.word sys_getpid, sys_capget, sys_capset, sys_setuid, sys_getuid
 /*25*/	.word sys_time, sys_ptrace, sys_alarm, sys32_sigaltstack, sys32_pause
 /*30*/	.word sys32_utime, sys_nis_syscall, sys_nis_syscall, sys_access, sys_nice
 	.word sys_nis_syscall, sys_sync, sys_kill, sys32_newstat, sys32_sendfile
-/*40*/	.word sys32_newlstat, sys_dup, sys_pipe, sys32_times, sys_lfs_syscall
+/*40*/	.word sys32_newlstat, sys_dup, sys_pipe, sys32_times, sys_nis_syscall
 	.word sys_umount, sys_setgid, sys_getgid, sys_signal, sys_geteuid
 /*50*/	.word sys_getegid, sys_acct, sys_nis_syscall, sys_nis_syscall, sys32_ioctl
-	.word sys_reboot, sys_lfs_syscall, sys_symlink, sys_readlink, sys32_execve
-/*60*/	.word sys_umask, sys_chroot, sys32_newfstat, sys_lfs_syscall, sys_getpagesize
+	.word sys_reboot, sys_nis_syscall, sys_symlink, sys_readlink, sys32_execve
+/*60*/	.word sys_umask, sys_chroot, sys32_newfstat, sys_nis_syscall, sys_getpagesize
 	.word sys_msync, sys_vfork, sys32_pread, sys32_pwrite, sys_nis_syscall
 /*70*/	.word sys_nis_syscall, sys32_mmap, sys_nis_syscall, sys_munmap, sys_mprotect
-	.word sys_nis_syscall, sys_vhangup, sys_lfs_syscall, sys_nis_syscall, sys32_getgroups
-/*80*/	.word sys32_setgroups, sys_getpgrp, sys_nis_syscall, sys32_setitimer, sys_lfs_syscall
+	.word sys_nis_syscall, sys_vhangup, sys_nis_syscall, sys_nis_syscall, sys32_getgroups
+/*80*/	.word sys32_setgroups, sys_getpgrp, sys_nis_syscall, sys32_setitimer, sys_nis_syscall
 	.word sys_swapon, sys32_getitimer, sys_nis_syscall, sys_sethostname, sys_nis_syscall
 /*90*/	.word sys_dup2, sys_nis_syscall, sys32_fcntl, sys32_select, sys_nis_syscall
 	.word sys_fsync, sys_setpriority, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
@@ -43,14 +41,14 @@ sys_call_table32:
 	.word sys32_rt_sigtimedwait, sys32_rt_sigqueueinfo, sys32_rt_sigsuspend, sys_nis_syscall, sys_nis_syscall
 /*110*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
 	.word sys_nis_syscall, sys32_gettimeofday, sys32_getrusage, sys_nis_syscall, sys_getcwd
-/*120*/	.word sys32_readv, sys32_writev, sys32_settimeofday, sys32_fchown16, sys_fchmod
+/*120*/	.word sys32_readv, sys32_writev, sys32_settimeofday, sys_fchown, sys_fchmod
 	.word sys_nis_syscall, sys32_setreuid, sys32_setregid, sys_rename, sys_truncate
-/*130*/	.word sys_ftruncate, sys_flock, sys_lfs_syscall, sys_nis_syscall, sys_nis_syscall
-	.word sys_nis_syscall, sys_mkdir, sys_rmdir, sys32_utimes, sys_lfs_syscall
+/*130*/	.word sys_ftruncate, sys_flock, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall
+	.word sys_nis_syscall, sys_mkdir, sys_rmdir, sys32_utimes, sys_nis_syscall
 /*140*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys32_getrlimit
 	.word sys32_setrlimit, sys_nis_syscall, sys32_prctl, sys32_pciconfig_read, sys32_pciconfig_write
-/*150*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_lfs_syscall
-	.word sys_lfs_syscall, sys_nis_syscall, sys32_statfs, sys32_fstatfs, sys_oldumount
+/*150*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_nis_syscall
+	.word sys_nis_syscall, sys_nis_syscall, sys32_statfs, sys32_fstatfs, sys_oldumount
 /*160*/	.word sys_nis_syscall, sys_nis_syscall, sys_getdomainname, sys_setdomainname, sys_nis_syscall
 	.word sys32_quotactl, sys_nis_syscall, sys32_mount, sys_ustat, sys_nis_syscall
 /*170*/	.word sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys32_getdents
@@ -69,7 +67,7 @@ sys_call_table32:
 	.word sys_nis_syscall, sys_llseek, sys_mlock, sys_munlock, sys_mlockall
 /*240*/	.word sys_munlockall, sys_sched_setparam, sys_sched_getparam, sys_sched_setscheduler, sys_sched_getscheduler
 	.word sys_sched_yield, sys_sched_get_priority_max, sys_sched_get_priority_min, sys32_sched_rr_get_interval, sys32_nanosleep
-/*250*/	.word sys_mremap, sys32_sysctl, sys_getsid, sys_fdatasync, sys32_nfsservctl
+/*250*/	.word sys_mremap, sys_sysctl, sys_getsid, sys_fdatasync, sys32_nfsservctl
 	.word sys_aplib
 
 	/* Now the 64-bit native Linux syscall table. */
@@ -131,8 +129,6 @@ sys_call_table:
 /*250*/	.word sys_mremap, sys_sysctl, sys_getsid, sys_fdatasync, sys_nfsservctl
 	.word sys_aplib
 
-#if defined(CONFIG_SUNOS_EMUL) || defined(CONFIG_SOLARIS_EMUL) || \
-    defined(CONFIG_SOLARIS_EMUL_MODULE)
 	/* Now the 32-bit SunOS syscall table. */
 
 	.align 1024
@@ -143,7 +139,7 @@ sunos_sys_table:
 	.word sys_close, sunos_wait4, sys_creat
 	.word sys_link, sys_unlink, sunos_execv
 	.word sys_chdir, sunos_nosys, sys32_mknod
-	.word sys32_chmod, sys32_lchown16, sunos_brk
+	.word sys32_chmod, sys32_lchown, sunos_brk
 	.word sunos_nosys, sys32_lseek, sunos_getpid
 	.word sunos_nosys, sunos_nosys, sunos_nosys
 	.word sunos_getuid, sunos_nosys, sys_ptrace
@@ -179,7 +175,7 @@ sunos_sys_table:
 	.word sys32_sigstack, sys32_recvmsg, sys32_sendmsg
 	.word sunos_nosys, sys32_gettimeofday, sys32_getrusage
 	.word sunos_getsockopt, sunos_nosys, sunos_readv
-	.word sunos_writev, sys32_settimeofday, sys32_fchown16
+	.word sunos_writev, sys32_settimeofday, sys_fchown
 	.word sys_fchmod, sys32_recvfrom, sys32_setreuid
 	.word sys_setregid, sys_rename, sys_truncate
 	.word sys_ftruncate, sys_flock, sunos_nosys
@@ -225,5 +221,3 @@ sunos_sys_table:
 	.word sunos_nosys, sunos_nosys
 /*250*/	.word sunos_nosys, sunos_nosys, sunos_nosys
 	.word sunos_nosys, sunos_nosys, sys_aplib
-
-#endif

@@ -1,4 +1,4 @@
-/* $Id: psycho.c,v 1.85.2.11 2000/10/24 21:00:53 davem Exp $
+/* $Id: psycho.c,v 1.85 1999/04/02 14:54:28 davem Exp $
  * psycho.c: Ultra/AX U2P PCI controller support.
  *
  * Copyright (C) 1997 David S. Miller (davem@caipfs.rutgers.edu)
@@ -30,11 +30,12 @@
 #define dprintf printk
 #endif
 
-/* If this is non-NULL it points to Sabre's DMA write-sync register
- * which is used by drivers of devices behind bridges other than APB
- * to synchronize DMA write streams with interrupt delivery.
- */
-volatile u64 *pci_dma_wsync = NULL;
+unsigned long pci_dvma_offset = 0x00000000UL;
+unsigned long pci_dvma_mask = 0xffffffffUL;
+
+#define PCI_DVMA_HASH_NONE	0xffffffffffffffffUL
+unsigned long pci_dvma_v2p_hash[PCI_DVMA_HASHSZ];
+unsigned long pci_dvma_p2v_hash[PCI_DVMA_HASHSZ];
 
 #ifndef CONFIG_PCI
 
@@ -62,13 +63,6 @@ asmlinkage int sys_pciconfig_write(unsigned long bus,
 }
 
 #else
-
-unsigned long pci_dvma_offset = 0x00000000UL;
-unsigned long pci_dvma_mask = 0xffffffffUL;
-
-#define PCI_DVMA_HASH_NONE	0xffffffffffffffffUL
-unsigned long pci_dvma_v2p_hash[PCI_DVMA_HASHSZ];
-unsigned long pci_dvma_p2v_hash[PCI_DVMA_HASHSZ];
 
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -227,12 +221,15 @@ out:
 	control |= (IOMMU_CTRL_TBWSZ | IOMMU_CTRL_ENAB);
 	switch(tsbsize) {
 	case 8:
+		pci_dvma_mask = 0x1fffffffUL;
 		control |= IOMMU_TSBSZ_8K;
 		break;
 	case 16:
+		pci_dvma_mask = 0x3fffffffUL;
 		control |= IOMMU_TSBSZ_16K;
 		break;
 	case 32:
+		pci_dvma_mask = 0x7fffffffUL;
 		control |= IOMMU_TSBSZ_32K;
 		break;
 	default:
@@ -305,8 +302,6 @@ void __init sabre_init(int pnode)
 		prom_printf("SABRE: Error, cannot map SABRE main registers.\n");
 		prom_halt();
 	}
-
-	pci_dma_wsync = &sabre->psycho_regs->pci_dma_wsync;
 
 	printk("PCI: Found SABRE, main regs at %p CTRL[%016lx]\n",
 	       sabre->psycho_regs, sabre->psycho_regs->control);
@@ -466,19 +461,8 @@ void __init pcibios_init(void)
 
 		err = prom_getproperty(node, "model", namebuf, sizeof(namebuf));
 		if ((err > 0) && !strncmp(namebuf, "SUNW,sabre", err)) {
-			/* SABRE/APB is composed of a 4GB aligned 4GB
-			 * total PCI memory space.
-			 */
-			pci_dvma_mask = 0xffffffff;
-
 			sabre_init(node);
 			goto next_pci;
-		} else {
-			/* PSYCHO has two independant 4GB, 2GB aligned,
-			 * memory spaces, and the lower 2GB is the region
-			 * for all PCI memory space device mappings.
-			 */
-			pci_dvma_mask = 0x7fffffff;
 		}
 
 		portid = prom_getintdefault(node, "upa-portid", 0xff);
@@ -771,18 +755,15 @@ static void __init apb_init(struct linux_psycho *sabre)
 {
 	struct pci_dev *pdev;
 	unsigned short stmp;
-#if 0
-	unsigned char sabre_latency_timer = 32;
+	unsigned int itmp;
 
 	for(pdev = pci_devices; pdev; pdev = pdev->next) {
 		if(pdev->vendor == PCI_VENDOR_ID_SUN &&
 		   pdev->device == PCI_DEVICE_ID_SUN_SABRE) {
-			pci_read_config_byte(pdev, PCI_LATENCY_TIMER,
-					     &sabre_latency_timer);
+			pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 128);
 			break;
 		}
 	}
-#endif
 	for (pdev = sabre->pci_bus->devices; pdev; pdev = pdev->sibling) {
 		if (pdev->vendor == PCI_VENDOR_ID_SUN &&
 		    pdev->device == PCI_DEVICE_ID_SUN_SIMBA) {
@@ -795,11 +776,32 @@ static void __init apb_init(struct linux_psycho *sabre)
 			/* Status register bits are "write 1 to clear". */
 			pci_write_config_word(pdev, PCI_STATUS, 0xffff);
 			pci_write_config_word(pdev, PCI_SEC_STATUS, 0xffff);
-#if 0
-			/* Propagate Sabre latency timer value into APB. */
-			pci_write_config_byte(pdev, PCI_LATENCY_TIMER,
-					      sabre_latency_timer);
-#endif
+
+			pci_read_config_word(pdev, PCI_BRIDGE_CONTROL, &stmp);
+			stmp = PCI_BRIDGE_CTL_MASTER_ABORT |
+			       PCI_BRIDGE_CTL_SERR |
+			       PCI_BRIDGE_CTL_PARITY;
+			pci_write_config_word(pdev, PCI_BRIDGE_CONTROL, stmp);
+
+			pci_read_config_dword(pdev, APB_PCI_CONTROL_HIGH, &itmp);
+			itmp = APB_PCI_CTL_HIGH_SERR |
+			       APB_PCI_CTL_HIGH_ARBITER_EN;
+			pci_write_config_dword(pdev, APB_PCI_CONTROL_HIGH, itmp);
+
+			/* Systems with SIMBA are usually workstations, so
+			 * we configure to park to SIMBA not to the previous
+			 * bus owner.
+			 */
+			pci_read_config_dword(pdev, APB_PCI_CONTROL_LOW, &itmp);
+			itmp = APB_PCI_CTL_LOW_ERRINT_EN | 0x0f;
+			pci_write_config_dword(pdev, APB_PCI_CONTROL_LOW, itmp);
+
+			/* Don't mess with the retry limit and PIO/DMA latency
+			 * timer settings.  But do set primary and secondary
+			 * latency timers.
+			 */
+			pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 128);
+			pci_write_config_byte(pdev, PCI_SEC_LATENCY_TIMER, 128);
 		}
 	}
 }
@@ -944,28 +946,6 @@ static void __init sabre_cookie_fillin(struct linux_psycho *sabre)
 	}
 }
 
-/* Older versions of OBP on PCI systems encode 64-bit MEM
- * space assignments incorrectly, this fixes them up.
- */
-static void __init fixup_obp_assignments(struct linux_prom_pci_registers *aregs, int numa)
-{
-	int i;
-
-	for (i = 0; i < numa; i++) {
-		struct linux_prom_pci_registers *ap;
-		int space;
-
-		ap = &aregs[i];
-		space = ap->phys_hi >> 24;
-		if ((space & 0x3) == 2 &&
-		    (space & 0x4) != 0) {
-			ap->phys_hi &= ~(0x7 << 24);
-			ap->phys_hi |= 0x3 << 24;
-		}
-	}
-}
-
-
 /* Walk PROM device tree under PBM, looking for 'assigned-address'
  * properties, and recording them in pci_vma's linked in via
  * PBM->assignments.
@@ -1019,8 +999,6 @@ static void __init assignment_process(struct linux_pbm_info *pbm, int node)
 
 		numa = (err / sizeof(struct linux_prom_pci_registers));
 	}
-
-	fixup_obp_assignments(&aregs[0], numa);
 
 	for(iter = 0; iter < numa; iter++) {
 		struct linux_prom_pci_registers *ap = &aregs[iter];
@@ -1190,6 +1168,15 @@ static void __init fixup_regs(struct pci_dev *pdev,
 				       pdev->bus->number, pdev->devfn,
 				       pdev->vendor, pdev->device);
 			continue;
+		} else if(bustype == 3) {
+			/* XXX add support for this... */
+			printk("%s %02x.%02x [%04x,%04x]: "
+			       "Warning, ignoring 64-bit PCI memory space, "
+			       "tell Eddie C. Dost (ecd@skynet.be).\n",
+			       __FUNCTION__,
+			       pdev->bus->number, pdev->devfn,
+			       pdev->vendor, pdev->device);
+			continue;
 		}
 
 		bsreg = (pregs[preg].phys_hi & 0xff);
@@ -1265,14 +1252,6 @@ static void __init fixup_regs(struct pci_dev *pdev,
 			pdev->base_address[brindex] |= 1;
 			IO_seen = 1;
 		} else {
-			/* Preserve type bits. */
-			if (bustype == 0x3) {
-				/* 64-bit */
-				pdev->base_address[brindex] |= 4;
-			} else if (bustype == 0x2) {
-				/* below 1M */
-				pdev->base_address[brindex] |= 2;
-			}
 			MEM_seen = 1;
 		}
 	}
@@ -1291,13 +1270,8 @@ static void __init fixup_regs(struct pci_dev *pdev,
 			ridx = ((breg - PCI_BASE_ADDRESS_0) >> 2);
 			base = (unsigned int)pdev->base_address[ridx];
 
-			if(pdev->base_address[ridx] > PAGE_OFFSET) {
-				if (((base & PCI_BASE_ADDRESS_SPACE) == PCI_BASE_ADDRESS_SPACE_MEMORY) &&
-				    ((base & PCI_BASE_ADDRESS_MEM_TYPE_MASK)
-				     == PCI_BASE_ADDRESS_MEM_TYPE_64))
-					breg += 4;
+			if(pdev->base_address[ridx] > PAGE_OFFSET)
 				continue;
-			}
 
 			io = (base & PCI_BASE_ADDRESS_SPACE)==PCI_BASE_ADDRESS_SPACE_IO;
 			base &= ~((io ?
@@ -1689,11 +1663,9 @@ static int __init pbm_intmap_match(struct linux_pbm_info *pbm,
 		return 0;
 	}
 	/*
-	 * Underneath a bridge, use register of parent bridge
-	 * closest to the PBM.
+	 * Underneath a bridge, use register of parent bridge.
 	 */
 	if (pdev->bus->number != pbm->pci_first_busno) {
-		struct pci_dev *pwalk;
 		struct pcidev_cookie *pcp;
 		int node, offset;
 		char prom_name[64];
@@ -1701,13 +1673,7 @@ static int __init pbm_intmap_match(struct linux_pbm_info *pbm,
 #ifdef FIXUP_IRQ_DEBUG
 		dprintf("UnderBridge, ");
 #endif
-
-		pwalk = pdev->bus->self;
-		while (pwalk->bus &&
-		       pwalk->bus->number != pbm->pci_first_busno)
-			pwalk = pwalk->bus->self;
-
-		pcp = pwalk->sysdata;
+		pcp = pdev->bus->self->sysdata;
 		if (!pcp) {
 #ifdef FIXUP_IRQ_DEBUG
 			dprintf("No bus PCP\n");
@@ -1918,8 +1884,6 @@ static void __init fixup_doit(struct pci_dev *pdev,
 	else
 		numaa = (err / sizeof(struct linux_prom_pci_registers));
 
-	fixup_obp_assignments(&assigned[0], numaa);
-
 	/* First, scan and fixup base registers. */
 	fixup_regs(pdev, pbm, pregs, nregs, &assigned[0], numaa);
 
@@ -1972,12 +1936,6 @@ static void __init fixup_pci_dev(struct pci_dev *pdev,
 	}
 
 	node = pcp->prom_node;
-
-	/* No need to crash if the PCI device lacks PROM
-	 * information.
-	 */
-	if (node == -1)
-		return;
 
 	err = prom_getproperty(node, "reg", (char *)&pregs[0], sizeof(pregs));
 	if(err == 0 || err == -1) {

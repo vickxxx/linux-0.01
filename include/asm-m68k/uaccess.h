@@ -801,19 +801,18 @@ strncpy_from_user(char *dst, const char *src, long count)
  *
  * Return 0 for error
  */
-static inline long strnlen_user(const char * src, long n)
+static inline long strlen_user(const char * src)
 {
     long res = -(long) src;
     __asm__ __volatile__
-	("   subq #1,%2\n"
-	 "1: movesb (%1)+,%%d0\n"
+	("1: movesb (%1)+,%%d0\n"
 	 "12:tstb %%d0\n"
-	 "   dbeq %2,1b\n"
+	 "   jne 1b\n"
 	 "   addl %1,%0\n"
 	 "2:\n"
 	 ".section .fixup,\"ax\"\n"
 	 "   .even\n"
-	 "3: moveq #0,%0\n"
+	 "3: moveq %2,%0\n"
 	 "   jra 2b\n"
 	 ".previous\n"
 	 ".section __ex_table,\"a\"\n"
@@ -821,8 +820,8 @@ static inline long strnlen_user(const char * src, long n)
 	 "   .long 1b,3b\n"
 	 "   .long 12b,3b\n"
 	 ".previous"
-	 : "=d"(res), "=a"(src), "=d"(n)
-	 : "0"(res), "1"(src), "2"(n)
+	 : "=d"(res), "=a"(src)
+	 : "i"(0), "0"(res), "1"(src)
 	 : "d0");
     return res;
 }

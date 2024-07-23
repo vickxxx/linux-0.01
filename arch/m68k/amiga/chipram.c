@@ -1,7 +1,8 @@
 /*
 **  linux/amiga/chipram.c
 **
-**      Modified 03-May-94 by Geert Uytterhoeven <geert@linux-m68k.org>
+**      Modified 03-May-94 by Geert Uytterhoeven
+**                           (Geert.Uytterhoeven@cs.kuleuven.ac.be)
 **          - 64-bit aligned allocations for full AGA compatibility
 */
 

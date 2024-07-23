@@ -113,10 +113,6 @@ int sd_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 	return put_user(blksize_size[MAJOR(dev)][MINOR(dev)&0x0F],
 		(int *)arg);
 				
-    case BLKELVGET:
-    case BLKELVSET:
-            return blkelv_ioctl(inode->i_rdev, cmd, arg);
-
     RO_IOCTLS(dev, arg);
 
     default:

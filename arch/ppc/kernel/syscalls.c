@@ -182,14 +182,18 @@ asmlinkage int sys_pipe(int *fildes)
 	int fd[2];
 	int error;
 
+	error = verify_area(VERIFY_WRITE, fildes, 8);
+	if (error)
+		return error;
 	lock_kernel();
 	error = do_pipe(fd);
 	unlock_kernel();
-	if (!error) {
-		if (copy_to_user(fildes, fd, 2*sizeof(int)))
-			error = -EFAULT;
-	}
-	return error;
+	if (error)
+		return error;
+	if (__put_user(fd[0],0+fildes)
+	    || __put_user(fd[1],1+fildes))
+		return -EFAULT;	/* should we close the fds? */
+	return 0;
 }
 
 asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
@@ -199,18 +203,19 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
 	struct file * file = NULL;
 	int ret = -EBADF;
 
-	down(&current->mm->mmap_sem);
 	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
-		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
+		file = fget(fd);
+		if (!file)
 			goto out;
 	}
 	
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	ret = do_mmap(file, addr, len, prot, flags, offset);
+	if (file)
+		fput(file);
 out:
 	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return ret;
 }
 
@@ -248,14 +253,9 @@ asmlinkage int sys_pause(void)
 
 asmlinkage int sys_uname(struct old_utsname * name)
 {
-	int err;
-	
-	if (!name)
-		return -EFAULT;
-	down(&uts_sem);
-	err = copy_to_user(name, &system_utsname, sizeof (*name));
-	up(&uts_sem);
-	return err ? -EFAULT : 0;
+	if (name && !copy_to_user(name, &system_utsname, sizeof (*name)))
+		return 0;
+	return -EFAULT;
 }
 
 asmlinkage int sys_olduname(struct oldold_utsname * name)
@@ -267,7 +267,6 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
 		return -EFAULT;
   
-  	down(&uts_sem);
 	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
 	error -= __put_user(0,name->sysname+__OLD_UTS_LEN);
 	error -= __copy_to_user(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
@@ -279,18 +278,6 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	error -= __copy_to_user(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
 	error = __put_user(0,name->machine+__OLD_UTS_LEN);
 	error = error ? -EFAULT : 0;
-	up(&uts_sem);
 
 	return error;
 }
-
-#ifndef CONFIG_PCI
-/*
- * Those are normally defined in arch/ppc/kernel/pci.c. But when CONFIG_PCI is
- * not defined, this file is not linked at all, so here are the "empty" versions
- */
-asmlinkage int sys_pciconfig_read() { return -ENOSYS; }
-asmlinkage int sys_pciconfig_write() { return -ENOSYS; }
-asmlinkage long sys_pciconfig_iobase() { return -ENOSYS; }
-#endif
-

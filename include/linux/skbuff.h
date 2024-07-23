@@ -449,14 +449,6 @@ extern __inline__ struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
  *	Add data to an sk_buff
  */
  
-extern __inline__ unsigned char *__skb_put(struct sk_buff *skb, unsigned int len)
-{
-	unsigned char *tmp=skb->tail;
-	skb->tail+=len;
-	skb->len+=len;
-	return tmp;
-}
-
 extern __inline__ unsigned char *skb_put(struct sk_buff *skb, unsigned int len)
 {
 	unsigned char *tmp=skb->tail;
@@ -469,13 +461,6 @@ extern __inline__ unsigned char *skb_put(struct sk_buff *skb, unsigned int len)
 here:		;
 	}
 	return tmp;
-}
-
-extern __inline__ unsigned char *__skb_push(struct sk_buff *skb, unsigned int len)
-{
-	skb->data-=len;
-	skb->len+=len;
-	return skb->data;
 }
 
 extern __inline__ unsigned char *skb_push(struct sk_buff *skb, unsigned int len)

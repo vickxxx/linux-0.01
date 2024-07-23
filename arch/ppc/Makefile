@@ -29,10 +29,6 @@ ifdef CONFIG_8xx
 CFLAGS := $(CFLAGS) -mcpu=860
 endif
 
-ifdef CONFIG_PPC64
-CFLAGS := $(CFLAGS) -Wa,-mppc64bridge #-Wa,-mppc64
-#CFLAGS := $(CFLAGS) -Wa,-mppc64 -mpowerpc64
-endif
 
 HEAD := arch/ppc/kernel/head.o
 
@@ -65,7 +61,8 @@ endif
 checks:
 	@$(MAKE) -C arch/$(ARCH)/kernel checks
 
-BOOT_TARGETS = zImage znetboot.initrd zImage.initrd
+BOOT_TARGETS = netboot znetboot zImage floppy install \
+	vmlinux.coff znetboot.initrd zImage.initrd vmlinux.coff.initrd
 
 ifdef CONFIG_MBX
 $(BOOT_TARGETS): $(CHECKS) vmlinux
@@ -73,16 +70,6 @@ $(BOOT_TARGETS): $(CHECKS) vmlinux
 	@$(MAKEMBXBOOT) $@
 else
 $(BOOT_TARGETS): $(CHECKS) vmlinux
-	@$(MAKECOFFBOOT) $@
-	@$(MAKEBOOT) $@
-	@$(MAKECHRPBOOT) $@
-
-znetboot: $(CHECKS) vmlinux
-ifdef CONFIG_SMP
-	cp -f vmlinux /tftpboot/vmlinux.smp
-else
-	cp -f vmlinux /tftpboot/vmlinux
-endif
 	@$(MAKECOFFBOOT) $@
 	@$(MAKEBOOT) $@
 	@$(MAKECHRPBOOT) $@
@@ -111,10 +98,6 @@ mbx_config:
 apus_config:
 	rm -f .config arch/ppc/defconfig
 	ln -s apus_defconfig arch/ppc/defconfig
-
-gemini_config:
-	rm -f .config arch/ppc/defconfig
-	ln -s gemini_defconfig arch/ppc/defconfig
 
 tags:
 	etags */*.c include/{asm,linux}/*.h arch/ppc/kernel/*.{c,h}

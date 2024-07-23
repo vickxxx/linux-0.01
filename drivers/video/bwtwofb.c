@@ -1,4 +1,4 @@
-/* $Id: bwtwofb.c,v 1.7.2.3 1999/10/06 10:52:36 anton Exp $
+/* $Id: bwtwofb.c,v 1.7 1999/01/26 10:55:02 jj Exp $
  * bwtwofb.c: BWtwo frame buffer driver
  *
  * Copyright (C) 1998 Jakub Jelinek   (jj@ultra.linux.cz)
@@ -85,20 +85,12 @@ static struct sbus_mmap_map bw2_mmap_map[] = {
 
 static void bw2_blank (struct fb_info_sbusfb *fb)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.bw2.regs->control &= ~BWTWO_CTL_ENABLE_VIDEO;
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void bw2_unblank (struct fb_info_sbusfb *fb)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.bw2.regs->control |= BWTWO_CTL_ENABLE_VIDEO;
-	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void bw2_margins (struct fb_info_sbusfb *fb, struct display *p, int x_margin, int y_margin)
@@ -224,9 +216,7 @@ char __init *bwtwofb_init(struct fb_info_sbusfb *fb)
 #endif
 	fb->margins = bw2_margins;
 	
-#ifndef CONFIG_SUN4
-	fb->physbase = __get_phys(fb->sbdp->sbus_vaddrs[0]);
-#endif
+	fb->physbase = phys;
 	fb->mmap_map = bw2_mmap_map;
 
 #ifdef __sparc_v9__

@@ -32,16 +32,13 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 	struct svc_serv	*serv;
 
 	xdr_init();
-#ifdef RPC_DEBUG
-	rpc_register_sysctl();
-#endif
 
 	if (!(serv = (struct svc_serv *) kmalloc(sizeof(*serv), GFP_KERNEL)))
 		return NULL;
 
 	memset(serv, 0, sizeof(*serv));
 	serv->sv_program   = prog;
-	atomic_set(&serv->sv_nrthreads, 1);
+	serv->sv_nrthreads = 1;
 	serv->sv_stats     = prog->pg_stats;
 	serv->sv_bufsz	   = bufsize? bufsize : 4096;
 	serv->sv_xdrsize   = xdrsize;
@@ -64,10 +61,10 @@ svc_destroy(struct svc_serv *serv)
 
 	dprintk("RPC: svc_destroy(%s, %d)\n",
 				serv->sv_program->pg_name,
-				atomic_read (&serv->sv_nrthreads));
+				serv->sv_nrthreads);
 
-	if (atomic_read (&serv->sv_nrthreads)) {
-		if (!atomic_dec_and_test (&serv->sv_nrthreads))
+	if (serv->sv_nrthreads) {
+		if (--(serv->sv_nrthreads) != 0)
 			return;
 	} else
 		printk("svc_destroy: no threads for serv=%p!\n", serv);
@@ -131,7 +128,7 @@ svc_create_thread(svc_thread_fn func, struct svc_serv *serv)
 	 || !svc_init_buffer(&rqstp->rq_defbuf, serv->sv_bufsz))
 		goto out_thread;
 
-	atomic_inc(&serv->sv_nrthreads);
+	serv->sv_nrthreads++;
 	rqstp->rq_server = serv;
 	error = kernel_thread((int (*)(void *)) func, rqstp, 0);
 	if (error < 0)
@@ -270,8 +267,8 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	if (prog != progp->pg_prog)
 		goto err_bad_prog;
 
-	if (vers >= progp->pg_nvers ||
-	  !(versp = progp->pg_vers[vers]))
+	versp = progp->pg_vers[vers];
+	if (!versp || vers >= progp->pg_nvers)
 		goto err_bad_vers;
 
 	procp = versp->vs_proc + proc;
@@ -356,7 +353,7 @@ err_bad_rpc:
 	goto sendit;
 
 err_bad_auth:
-	dprintk("svc: authentication failed (%d)\n", ntohl(auth_stat));
+	dprintk("svc: authentication failed (%ld)\n", ntohl(auth_stat));
 	serv->sv_stats->rpcbadauth++;
 	resp->buf[-1] = xdr_one;	/* REJECT */
 	svc_putlong(resp, xdr_one);	/* AUTH_ERROR */

@@ -1,6 +1,6 @@
 /*	$Id: com20020.c,v 1.6 1997/11/09 11:04:58 mj Exp $
 
-        Written 1997 by David Woodhouse <dwmw2@infradead.org>
+        Written 1997 by David Woodhouse <dwmw2@cam.ac.uk>
 
 	Derived from the original arcnet.c,
 	Written 1994-1996 by Avery Pennarun,
@@ -995,11 +995,8 @@ int init_module(void)
 
   if (dev->irq==2) dev->irq=9;
 
-  if (register_netdev(dev) != 0) {
-    kfree(dev->name);
-    kfree(dev);
+  if (register_netdev(dev) != 0)
     return -EIO;
-  }
 
   /* Increase use count of arcnet.o */
   arcnet_use_count(1);

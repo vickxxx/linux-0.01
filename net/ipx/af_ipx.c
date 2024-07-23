@@ -601,7 +601,8 @@ static struct sk_buff *ipxitf_adjust_skbuff(ipx_interface *intrfc, struct sk_buf
 		memcpy(skb2->h.raw, skb->h.raw, skb->len);
 	}
 	kfree_skb(skb);
-	return(skb2);
+
+	return (NULL);
 }
 
 static int ipxitf_send(ipx_interface *intrfc, struct sk_buff *skb, char *node)
@@ -774,7 +775,6 @@ static int ipxitf_rcv(ipx_interface *intrfc, struct sk_buff *skb)
 		{ 
 			/* < 8 hops && input itfc not in list */
 			*l = intrfc->if_netnum; /* insert recvd netnum into list */
-			ipx->ipx_tctrl++;
 			/* xmit on all other interfaces... */
 			for(ifcs = ipx_interfaces; ifcs != NULL; ifcs = ifcs->if_next) 
 			{
@@ -794,8 +794,7 @@ static int ipxitf_rcv(ipx_interface *intrfc, struct sk_buff *skb)
 					if(call_fw_firewall(PF_IPX, skb->dev, ipx, NULL, &skb) == FW_ACCEPT)
 					{
 					        skb2=skb_clone(skb, GFP_ATOMIC);
-						if(skb2)
-							ipxrtr_route_skb(skb2);
+						ipxrtr_route_skb(skb2);
 					}
 				}
 			}
@@ -1605,7 +1604,7 @@ static int ipx_get_info(char *buffer, char **start, off_t offset,
 				       s->protinfo.af_ipx.node[5],
 				       htons(s->protinfo.af_ipx.port));
 #else
-			len += sprintf(buffer+len,"%08X:%04X  ",
+			len += sprintf(buffer+len,"%08lX:%04X  ",
 				       htonl(i->if_netnum),
 				       htons(s->protinfo.af_ipx.port));
 #endif	/* CONFIG_IPX_INTERN */
@@ -1769,10 +1768,6 @@ static int ipx_getsockopt(struct socket *sock, int level, int optname,
 		return (-EFAULT);
 
 	len = min(len, sizeof(int));
-	
-	if(len < 0)
-		return -EINVAL;
-		
 	if(put_user(len, optlen))
 		return (-EFAULT);
 

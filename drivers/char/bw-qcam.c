@@ -159,8 +159,6 @@ static struct qcam_device *qcam_init(struct parport *port)
 	struct qcam_device *q;
 	
 	q = kmalloc(sizeof(struct qcam_device), GFP_KERNEL);
-	if(q==NULL)
-		return NULL;
 
 	q->pport = port;
 	q->pdev = parport_register_device(port, "bw-qcam", NULL, NULL,
@@ -867,9 +865,12 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 		case VIDIOCGWIN:
 		{
 			struct video_window vw;
-			memset(&vw, 0, sizeof(vw));
+			vw.x=0;
+			vw.y=0;
 			vw.width=qcam->width/qcam->transfer_scale;
 			vw.height=qcam->height/qcam->transfer_scale;
+			vw.chromakey=0;
+			vw.flags=0;
 			if(copy_to_user(arg, &vw, sizeof(vw)))
 				return -EFAULT;
 			return 0;

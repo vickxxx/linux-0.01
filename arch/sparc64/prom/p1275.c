@@ -1,4 +1,4 @@
-/* $Id: p1275.c,v 1.15.2.3 1999/10/27 00:22:27 davem Exp $
+/* $Id: p1275.c,v 1.15 1998/10/13 14:03:47 davem Exp $
  * p1275.c: Sun IEEE 1275 PROM low level interface routines
  *
  * Copyright (C) 1996,1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -253,7 +253,9 @@ void prom_cif_callback(void)
  */
 static int prom_entry_depth = 0;
 #ifdef __SMP__
-spinlock_t prom_entry_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t prom_entry_lock = SPIN_LOCK_UNLOCKED;
+extern void smp_capture(void);
+extern void smp_release(void);
 #endif
 
 static __inline__ unsigned long prom_get_lock(void)
@@ -268,6 +270,9 @@ static __inline__ unsigned long prom_get_lock(void)
 		if (prom_entry_depth != 0)
 			panic("prom_get_lock");
 #endif
+#ifdef __SMP__
+		smp_capture();
+#endif
 	}
 	prom_entry_depth++;
 
@@ -276,9 +281,12 @@ static __inline__ unsigned long prom_get_lock(void)
 
 static __inline__ void prom_release_lock(unsigned long flags)
 {
-	if (--prom_entry_depth == 0)
+	if (--prom_entry_depth == 0) {
+#ifdef __SMP__
+		smp_release();
+#endif
 		spin_unlock(&prom_entry_lock);
-
+	}
 	__restore_flags(flags);
 }
 
@@ -312,10 +320,6 @@ long p1275_cmd (char *service, long fmt, ...)
 		case P1275_ARG_NUMBER:
 			p1275buf.prom_args[i + 3] =
 						(unsigned)va_arg(list, long);
-			break;
-		case P1275_ARG_IN_64B:
-			p1275buf.prom_args[i + 3] =
-				va_arg(list, unsigned long);
 			break;
 		case P1275_ARG_IN_STRING:
 			strcpy (p, va_arg(list, char *));

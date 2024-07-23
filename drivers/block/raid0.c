@@ -182,12 +182,6 @@ static int raid0_map (struct md_dev *mddev, kdev_t *rdev,
   block=*rsector >> 1;
   hash=data->hash_table+(block/data->smallest->size);
 
-  if (hash - data->hash_table > data->nr_zones) 
-  { 
-	  printk(KERN_DEBUG "raid0_map: invalid block %li\n", block);
-	  return -1;
-  }
-
   /* Sanity check */
   if ((chunk_size*2)<(*rsector % (chunk_size*2))+size)
   {

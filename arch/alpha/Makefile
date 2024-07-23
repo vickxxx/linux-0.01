@@ -60,10 +60,9 @@ endif
 
 # For TSUNAMI, we must have the assembler not emulate our instructions.
 # The same is true for POLARIS.
-# The same is true for IRONGATE.
 # BWX is most important, but we don't really want any emulation ever.
 ifeq ($(old_gas),y)
- ifneq ($(CONFIG_ALPHA_GENERIC)$(CONFIG_ALPHA_TSUNAMI)$(CONFIG_ALPHA_POLARIS)$(CONFIG_ALPHA_IRONGATE),)
+ ifneq ($(CONFIG_ALPHA_GENERIC)$(CONFIG_ALPHA_TSUNAMI)$(CONFIG_ALPHA_POLARIS),)
    # How do we do #error in make?
    CFLAGS := --error-please-upgrade-your-assembler
  endif
@@ -78,9 +77,6 @@ else
    CFLAGS := $(CFLAGS) -Wa,-m21164pc
  endif
  ifeq ($(CONFIG_ALPHA_TSUNAMI),y)
-   CFLAGS := $(CFLAGS) -Wa,-mev6
- endif
- ifeq ($(CONFIG_ALPHA_IRONGATE),y)
    CFLAGS := $(CFLAGS) -Wa,-mev6
  endif
 endif

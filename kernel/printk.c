@@ -10,8 +10,6 @@
  * elsewhere, in preparation for a serial line console (someday).
  * Ted Ts'o, 2/11/93.
  * Modified for sysctl support, 1/8/97, Chris Horn.
- * Fixed SMP synchronization, 08/08/99, Manfred Spraul 
- *     manfreds@colorfullife.com
  */
 
 #include <linux/mm.h>
@@ -23,7 +21,6 @@
 #include <asm/uaccess.h>
 
 #define LOG_BUF_LEN	(16384)
-#define LOG_BUF_MASK	(LOG_BUF_LEN-1)
 
 static char buf[1024];
 
@@ -42,8 +39,6 @@ int console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
 int default_message_loglevel = DEFAULT_MESSAGE_LOGLEVEL;
 int minimum_console_loglevel = MINIMUM_CONSOLE_LOGLEVEL;
 int default_console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
-
-spinlock_t console_lock = SPIN_LOCK_UNLOCKED;
 
 struct console *console_drivers = NULL;
 static char log_buf[LOG_BUF_LEN];
@@ -111,8 +106,8 @@ void __init console_setup(char *str, int *ints)
  * 	0 -- Close the log.  Currently a NOP.
  * 	1 -- Open the log. Currently a NOP.
  * 	2 -- Read from the log.
- * 	3 -- Read all messages remaining in the ring buffer.
- * 	4 -- Read and clear all messages remaining in the ring buffer
+ * 	3 -- Read up to the last 4k of messages in the ring buffer.
+ * 	4 -- Read and clear last 4k of messages in the ring buffer
  * 	5 -- Clear ring buffer.
  * 	6 -- Disable printk's to console
  * 	7 -- Enable printk's to console
@@ -120,11 +115,12 @@ void __init console_setup(char *str, int *ints)
  */
 int do_syslog(int type, char * buf, int len)
 {
-	unsigned long i, j, limit, count;
+	unsigned long i, j, count, flags;
 	int do_clear = 0;
 	char c;
 	int error = -EPERM;
 
+	lock_kernel();
 	error = 0;
 	switch (type) {
 	case 0:		/* Close log */
@@ -145,18 +141,18 @@ int do_syslog(int type, char * buf, int len)
 		if (error)
 			goto out;
 		i = 0;
-		spin_lock_irq(&console_lock);
 		while (log_size && i < len) {
-			c = log_buf[log_start & LOG_BUF_MASK];
+			c = *((char *) log_buf+log_start);
 			log_start++;
 			log_size--;
-			spin_unlock_irq(&console_lock);
+			log_start &= LOG_BUF_LEN-1;
+			sti();
 			__put_user(c,buf);
 			buf++;
 			i++;
-			spin_lock_irq(&console_lock);
+			cli();
 		}
-		spin_unlock_irq(&console_lock);
+		sti();
 		error = i;
 		break;
 	case 4:		/* Read/clear last kernel messages */
@@ -172,56 +168,35 @@ int do_syslog(int type, char * buf, int len)
 		error = verify_area(VERIFY_WRITE,buf,len);
 		if (error)
 			goto out;
-		spin_lock_irq(&console_lock);
+		/*
+		 * The logged_chars, log_start, and log_size values may
+		 * change from an interrupt, so we disable interrupts.
+		 */
+		__save_flags(flags);
+		__cli();
 		count = len;
 		if (count > LOG_BUF_LEN)
 			count = LOG_BUF_LEN;
 		if (count > logged_chars)
 			count = logged_chars;
+		j = log_start + log_size - count;
+		__restore_flags(flags);
+		for (i = 0; i < count; i++) {
+			c = *((char *) log_buf+(j++ & (LOG_BUF_LEN-1)));
+			__put_user(c, buf++);
+		}
 		if (do_clear)
 			logged_chars = 0;
-		limit = log_start + log_size;
-		/*
-		 * __put_user() could sleep, and while we sleep
-		 * printk() could overwrite the messages 
-		 * we try to copy to user space. Therefore
-		 * the messages are copied in reverse. <manfreds>
-		 */
-		for(i=0;i < count;i++) {
-			j = limit-1-i;
-			if (j+LOG_BUF_LEN < log_start+log_size)
-				break;
-			c = log_buf[ j  & LOG_BUF_MASK ];
-			spin_unlock_irq(&console_lock);
-			__put_user(c,&buf[count-1-i]);
-			spin_lock_irq(&console_lock);
-		}
-		spin_unlock_irq(&console_lock);
 		error = i;
-		if(i != count) {
-			int offset = count-error;
-			/* buffer overflow during copy, correct user buffer. */
-			for(i=0;i<error;i++) {
-				__get_user(c,&buf[i+offset]);
-				__put_user(c,&buf[i]);
-			}
-		}
-
 		break;
 	case 5:		/* Clear ring buffer */
-		spin_lock_irq(&console_lock);
 		logged_chars = 0;
-		spin_unlock_irq(&console_lock);
 		break;
 	case 6:		/* Disable logging to console */
-		spin_lock_irq(&console_lock);
 		console_loglevel = minimum_console_loglevel;
-		spin_unlock_irq(&console_lock);
 		break;
 	case 7:		/* Enable logging to console */
-		spin_lock_irq(&console_lock);
 		console_loglevel = default_console_loglevel;
-		spin_unlock_irq(&console_lock);
 		break;
 	case 8:
 		error = -EINVAL;
@@ -229,9 +204,7 @@ int do_syslog(int type, char * buf, int len)
 			goto out;
 		if (len < minimum_console_loglevel)
 			len = minimum_console_loglevel;
-		spin_lock_irq(&console_lock);
 		console_loglevel = len;
-		spin_unlock_irq(&console_lock);
 		error = 0;
 		break;
 	default:
@@ -239,6 +212,7 @@ int do_syslog(int type, char * buf, int len)
 		break;
 	}
 out:
+	unlock_kernel();
 	return error;
 }
 
@@ -248,6 +222,9 @@ asmlinkage int sys_syslog(int type, char * buf, int len)
 		return -EPERM;
 	return do_syslog(type, buf, len);
 }
+
+
+spinlock_t console_lock;
 
 asmlinkage int printk(const char *fmt, ...)
 {
@@ -282,12 +259,13 @@ asmlinkage int printk(const char *fmt, ...)
 		}
 		line_feed = 0;
 		for (; p < buf_end; p++) {
-			log_buf[(log_start+log_size) & LOG_BUF_MASK] = *p;
+			log_buf[(log_start+log_size) & (LOG_BUF_LEN-1)] = *p;
 			if (log_size < LOG_BUF_LEN)
 				log_size++;
-			else
+			else {
 				log_start++;
-
+				log_start &= LOG_BUF_LEN-1;
+			}
 			logged_chars++;
 			if (*p == '\n') {
 				line_feed = 1;
@@ -312,33 +290,24 @@ asmlinkage int printk(const char *fmt, ...)
 
 void console_print(const char *s)
 {
-	struct console *c;
-	unsigned long flags;
+	struct console *c = console_drivers;
 	int len = strlen(s);
 
-	spin_lock_irqsave(&console_lock,flags);
-	c = console_drivers;
 	while(c) {
 		if ((c->flags & CON_ENABLED) && c->write)
 			c->write(c, s, len);
 		c = c->next;
 	}
-	spin_unlock_irqrestore(&console_lock,flags);
 }
 
 void unblank_console(void)
 {
-	struct console *c;
-	unsigned long flags;
-	
-	spin_lock_irqsave(&console_lock,flags);
-	c = console_drivers;
+	struct console *c = console_drivers;
 	while(c) {
 		if ((c->flags & CON_ENABLED) && c->unblank)
 			c->unblank();
 		c = c->next;
 	}
-	spin_unlock_irqrestore(&console_lock,flags);
 }
 
 /*
@@ -349,12 +318,11 @@ void unblank_console(void)
  */
 void register_console(struct console * console)
 {
-	int     i, j,len;
-	int	p;
+	int	i,j,len;
+	int	p = log_start;
 	char	buf[16];
 	signed char msg_level = -1;
 	char	*q;
-	unsigned long flags;
 
 	/*
 	 *	See if we want to use this console driver. If we
@@ -400,7 +368,6 @@ void register_console(struct console * console)
 	 *	Put this console in the list - keep the
 	 *	preferred driver at the head of the list.
 	 */
-	spin_lock_irqsave(&console_lock,flags);
 	if ((console->flags & CON_CONSDEV) || console_drivers == NULL) {
 		console->next = console_drivers;
 		console_drivers = console;
@@ -408,33 +375,23 @@ void register_console(struct console * console)
 		console->next = console_drivers->next;
 		console_drivers->next = console;
 	}
-	if ((console->flags & CON_PRINTBUFFER) == 0)
-		goto done;
+	if ((console->flags & CON_PRINTBUFFER) == 0) return;
+
 	/*
 	 *	Print out buffered log messages.
 	 */
-	p = log_start & LOG_BUF_MASK;
-
 	for (i=0,j=0; i < log_size; i++) {
 		buf[j++] = log_buf[p];
-		p = (p+1) & LOG_BUF_MASK;
+		p++; p &= LOG_BUF_LEN-1;
 		if (buf[j-1] != '\n' && i < log_size - 1 && j < sizeof(buf)-1)
 			continue;
 		buf[j] = 0;
 		q = buf;
 		len = j;
 		if (msg_level < 0) {
-			if(buf[0] == '<' &&
-				buf[1] >= '0' &&
-				buf[1] <= '7' &&
-				buf[2] == '>') {
-				msg_level = buf[1] - '0';
-				q = buf + 3;
-				len -= 3;
-			} else
-			{
-				msg_level = default_message_loglevel; 
-			}
+			msg_level = buf[1] - '0';
+			q = buf + 3;
+			len -= 3;
 		}
 		if (msg_level < console_loglevel)
 			console->write(console, q, len);
@@ -442,35 +399,26 @@ void register_console(struct console * console)
 			msg_level = -1;
 		j = 0;
 	}
-done:
-	spin_unlock_irqrestore(&console_lock,flags);
 }
 
 
 int unregister_console(struct console * console)
 {
         struct console *a,*b;
-	unsigned long flags;
-	int res = 1;
-
-	spin_lock_irqsave(&console_lock,flags);
+	
 	if (console_drivers == console) {
 		console_drivers=console->next;
-		res = 0;
-	} else
-	{
-		for (a=console_drivers->next, b=console_drivers ;
-		     a; b=a, a=b->next) {
-			if (a == console) {
-				b->next = a->next;
-				res = 0;
-				break;
-			}  
-		}
+		return (0);
+	}
+	for (a=console_drivers->next, b=console_drivers ;
+	     a; b=a, a=b->next) {
+		if (a == console) {
+			b->next = a->next;
+			return 0;
+		}  
 	}
 	
-	spin_unlock_irqrestore(&console_lock,flags);
-	return res;
+	return (1);
 }
 	
 /*

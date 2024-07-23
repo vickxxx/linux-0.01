@@ -216,11 +216,9 @@ tracesys:
 	movl $-ENOSYS,EAX(%esp)
 	call SYMBOL_NAME(syscall_trace)
 	movl ORIG_EAX(%esp),%eax
-        cmpl $(NR_syscalls),%eax 
-        jae 1f 
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
-1:	call SYMBOL_NAME(syscall_trace)
+	call SYMBOL_NAME(syscall_trace)
 	jmp ret_from_sys_call
 badsys:
 	movl $-ENOSYS,EAX(%esp)
@@ -267,18 +265,16 @@ error_code:
 	pushl %ebx
 	cld
 	movl %es,%cx
-	movl ORIG_EAX(%esp), %esi	# get the error code
-	movl ES(%esp), %edi		# get the function address
-	movl %eax, ORIG_EAX(%esp)
-	movl %ecx, ES(%esp)
+	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
 	movl %esp,%edx
-	pushl %esi			# push the error code
-	pushl %edx			# push the pt_regs pointer
+	xchgl %ecx, ES(%esp)		# get the address and save es.
+	pushl %eax			# push the error code
+	pushl %edx
 	movl $(__KERNEL_DS),%edx
 	movl %dx,%ds
 	movl %dx,%es
 	GET_CURRENT(%ebx)
-	call *%edi
+	call *%ecx
 	addl $8,%esp
 	jmp ret_from_exception
 
@@ -335,6 +331,11 @@ ENTRY(coprocessor_segment_overrun)
 	pushl $ SYMBOL_NAME(do_coprocessor_segment_overrun)
 	jmp error_code
 
+ENTRY(reserved)
+	pushl $0
+	pushl $ SYMBOL_NAME(do_reserved)
+	jmp error_code
+
 ENTRY(double_fault)
 	pushl $ SYMBOL_NAME(do_double_fault)
 	jmp error_code
@@ -361,11 +362,6 @@ ENTRY(alignment_check)
 
 ENTRY(page_fault)
 	pushl $ SYMBOL_NAME(do_page_fault)
-	jmp error_code
-
-ENTRY(machine_check)
-	pushl $0
-	pushl $ SYMBOL_NAME(mcheck_fault)
 	jmp error_code
 
 ENTRY(spurious_interrupt_bug)

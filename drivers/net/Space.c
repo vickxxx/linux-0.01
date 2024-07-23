@@ -31,7 +31,6 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/netlink.h>
-#include <linux/divert.h>
 
 #define	NEXT_DEV	NULL
 
@@ -58,22 +57,18 @@ extern int eepro_probe(struct device *);
 extern int eepro100_probe(struct device *);
 extern int el3_probe(struct device *);
 extern int at1500_probe(struct device *);
-extern int bond_init(struct device *);
 extern int pcnet32_probe(struct device *);
 extern int at1700_probe(struct device *);
 extern int fmv18x_probe(struct device *);
 extern int eth16i_probe(struct device *);
 extern int depca_probe(struct device *);
-extern int lp486e_probe(struct device *);
 extern int i82596_probe(struct device *);
 extern int ewrk3_probe(struct device *);
 extern int de4x5_probe(struct device *);
 extern int el1_probe(struct device *);
 extern int wavelan_probe(struct device *);
-extern int arlan_probe(struct device *);
 extern int el16_probe(struct device *);
 extern int elmc_probe(struct device *);
-extern int skmca_probe(struct device *);
 extern int elplus_probe(struct device *);
 extern int ac3200_probe(struct device *);
 extern int es_probe(struct device *);
@@ -106,8 +101,6 @@ extern int pamsnet_probe(struct device *);
 extern int tlan_probe(struct device *);
 extern int mace_probe(struct device *);
 extern int bmac_probe(struct device *);
-extern int gmac_probe(struct device *);
-extern int ncr885e_probe(struct device *);
 extern int cs89x0_probe(struct device *dev);
 extern int ethertap_probe(struct device *dev);
 extern int ether1_probe (struct device *dev);
@@ -116,25 +109,15 @@ extern int etherh_probe (struct device *dev);
 extern int am79c961_probe(struct device *dev);
 extern int epic100_probe(struct device *dev);
 extern int rtl8139_probe(struct device *dev);
-extern int rtl8139too_probe(struct device *dev);
-extern int sis900_probe(struct device *dev);
 extern int hplance_probe(struct device *dev);
-extern int bagetlance_probe(struct device *);
-extern int dec_lance_probe(struct device *);
 extern int via_rhine_probe(struct device *dev);
 extern int tc515_probe(struct device *dev);
 extern int lance_probe(struct device *dev);
 extern int rcpci_probe(struct device *);
-extern int dmfe_probe(struct device *);
-extern int sktr_probe(struct device *dev);
-extern int starfire_probe(struct device *dev);
 
 /* Gigabit Ethernet adapters */
 extern int yellowfin_probe(struct device *dev);
-extern int hamachi_probe(struct device *dev);
 extern int acenic_probe(struct device *dev);
-extern int skge_probe(struct device *dev);
-
 
 /* Detachable devices ("pocket adaptors") */
 extern int atp_init(struct device *);
@@ -144,19 +127,9 @@ extern int de620_probe(struct device *);
 /* FDDI adapters */
 extern int dfx_probe(struct device *dev);
 extern int apfddi_init(struct device *dev);
-extern int skfp_probe(struct device *dev);
 
 /* HIPPI boards */
 extern int rr_hippi_probe(struct device *);
-
-/* Fibre Channel adapters */
-extern int iph5526_probe(struct device *dev);
-
-/* SBNI adapters */
-extern int sbni_probe(struct device *);
-
-/* WAN Adapters */
-extern int lmc_probe_fake(struct device *);
 
 struct devprobe
 {
@@ -176,35 +149,13 @@ __initfunc(static int probe_list(struct device *dev, struct devprobe *plist))
 	struct devprobe *p = plist;
 	unsigned long base_addr = dev->base_addr;
 
-#ifdef CONFIG_NET_DIVERT
-	int	ret;
-#endif
-
 	while (p->probe != NULL) {
 		if (base_addr && p->probe(dev) == 0)	/* probe given addr */
-#ifdef CONFIG_NET_DIVERT
-		{
-			ret=alloc_divert_blk(dev);
-			if (ret)
-				return ret;
 			return 0;
-		}
-#else
-			return 0;
-#endif
 		else if (p->status == 0) {		/* has autoprobe failed yet? */
 			p->status = p->probe(dev);	/* no, try autoprobe */
 			if (p->status == 0)
-#ifdef CONFIG_NET_DIVERT
-			{
-				ret=alloc_divert_blk(dev);
-				if (ret)
-					return ret;
 				return 0;
-			}
-#else
-				return 0;
-#endif
 		}
 		p++;
 	}
@@ -235,10 +186,7 @@ struct devprobe pci_probes[] __initdata = {
 #ifdef CONFIG_EEXPRESS_PRO100	/* Intel EtherExpress Pro/100 */
 	{eepro100_probe, 0},
 #endif
-#ifdef CONFIG_LANMEDIA          /* Lanmedia must be before Tulip */
-        {lmc_probe_fake, 0},
-#endif
-#if defined(CONFIG_DEC_ELCP) || defined(CONFIG_DEC_ELCP_OLD)
+#ifdef CONFIG_DEC_ELCP 
 	{tulip_probe, 0},
 #endif
 #ifdef CONFIG_DE4X5             /* DEC DE425, DE434, DE435 adapters */
@@ -253,37 +201,14 @@ struct devprobe pci_probes[] __initdata = {
 #ifdef CONFIG_RTL8139
 	{rtl8139_probe, 0},
 #endif
-#ifdef CONFIG_RTL8139TOO
-	{rtl8139too_probe, 0},
-#endif
-#ifdef CONFIG_SIS900
-	{sis900_probe, 0},
-#endif
-
-#ifdef CONFIG_DM9102
-	{dmfe_probe, 0}, 
-#endif
-
 #ifdef CONFIG_YELLOWFIN
 	{yellowfin_probe, 0},
-#endif
-#ifdef CONFIG_HAMACHI
-	{hamachi_probe, 0},
 #endif
 #ifdef CONFIG_ACENIC
 	{acenic_probe, 0},
 #endif
-#ifdef CONFIG_SK98LIN
-	{skge_probe, 0},
-#endif
 #ifdef CONFIG_VIA_RHINE
 	{via_rhine_probe, 0},
-#endif
-#ifdef CONFIG_NET_DM9102
-	{dmfe_probe, 0},
-#endif
-#ifdef CONFIG_ADAPTEC_STARFIRE
-	{starfire_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -341,9 +266,6 @@ struct devprobe mca_probes[] __initdata = {
 #endif
 #ifdef CONFIG_ELMC		/* 3c523 */
 	{elmc_probe, 0},
-#endif
-#ifdef CONFIG_SKMC              /* SKnet Microchannel */
-        {skmca_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -425,17 +347,11 @@ struct devprobe isa_probes[] __initdata = {
 #if defined(CONFIG_APRICOT) || defined(CONFIG_MVME16x_NET) || defined(CONFIG_BVME6000_NET)	/* Intel I82596 */
 	{i82596_probe, 0},
 #endif
-#if defined(CONFIG_LP486E)
-	{lp486e_probe, 0},
-#endif
 #ifdef CONFIG_EL1		/* 3c501 */
 	{el1_probe, 0},
 #endif
 #ifdef CONFIG_WAVELAN		/* WaveLAN */
 	{wavelan_probe, 0},
-#endif
-#ifdef CONFIG_ARLAN		/* Aironet */
-	{arlan_probe, 0},
 #endif
 #ifdef CONFIG_EL16		/* 3c507 */
 	{el16_probe, 0},
@@ -509,12 +425,6 @@ struct devprobe ppc_probes[] __initdata = {
 #ifdef CONFIG_BMAC
 	{bmac_probe, 0},
 #endif
-#ifdef CONFIG_GMAC
-	{gmac_probe, 0},
-#endif
-#ifdef CONFIG_NCR885E
-	{ncr885e_probe, 0},
-#endif
 	{NULL, 0},
 };
 
@@ -528,12 +438,6 @@ struct devprobe sgi_probes[] __initdata = {
 struct devprobe mips_probes[] __initdata = {
 #ifdef CONFIG_MIPS_JAZZ_SONIC
 	{sonic_probe, 0},
-#endif
-#ifdef CONFIG_DECLANCE		/* DECstation on-board controller */
-	{dec_lance_probe, 0},   /* and maybe TURBOchannel option boards */
-#endif
-#ifdef CONFIG_BAGETLANCE        /* Lance-based Baget ethernet boards */
-        {bagetlance_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -620,9 +524,6 @@ __initfunc(static int fddiif_probe(struct device *dev))
 #ifdef CONFIG_APFDDI
 	&& apfddi_init(dev)
 #endif
-#ifdef CONFIG_SKFP
-	&& skfp_probe(dev)
-#endif
 	&& 1 ) {
 	    return 1;	/* -ENODEV or -EAGAIN would be more accurate. */
     }
@@ -653,41 +554,10 @@ static int hippi_probe(struct device *dev)
 }
 #endif
 
-
-#ifdef CONFIG_NET_FC
-static int fcif_probe(struct device *dev)
-{
-	if (dev->base_addr == -1)
-		return 1;
-
-	if (1
-#ifdef CONFIG_IPHASE5526
-	    && iph5526_probe(dev)
-#endif
-	    && 1 ) {
-		return 1; /* -ENODEV or -EAGAIN would be more accurate. */
-	}
-	return 0;
-}
-#endif  /* CONFIG_NET_FC */
-
-
 #ifdef CONFIG_ETHERTAP
     static struct device tap0_dev = { "tap0", 0, 0, 0, 0, NETLINK_TAPBASE, 0, 0, 0, 0, NEXT_DEV, ethertap_probe, };
 #   undef NEXT_DEV
 #   define NEXT_DEV	(&tap0_dev)
-#endif
-
-#ifdef CONFIG_BONDING
-static struct device bonding_dev = { "bond0", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, bond_init, };
-#    undef NEXT_DEV
-#    define NEXT_DEV    (&bonding_dev)
-#endif
-
-#ifdef CONFIG_LANMEDIA
-static struct device lmc_dev = { "lmc_dev", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, lmc_probe_fake, };
-#    undef NEXT_DEV
-#    define NEXT_DEV    (&lmc_dev)
 #endif
 
 #ifdef CONFIG_SDLA
@@ -794,14 +664,6 @@ static struct device mkiss_bootstrap = {
 #define NEXT_DEV (&mkiss_bootstrap)
 #endif	/* MKISS */
   
-#if defined(CONFIG_YAM)
-extern int yam_init(struct device *);
-static struct device yam_bootstrap = {
-  "yam", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, yam_init, };
-#undef NEXT_DEV
-#define NEXT_DEV (&yam_bootstrap)
-#endif	/* CONFIG_YAM */
-  
 #if defined(CONFIG_STRIP)
 extern int strip_init_ctrl_dev(struct device *);
 static struct device strip_bootstrap = {
@@ -845,8 +707,6 @@ struct device eql_dev = {
 #ifdef CONFIG_TR
 /* Token-ring device probe */
 extern int ibmtr_probe(struct device *);
-extern int olympic_probe(struct device *);
-extern int streamer_probe(struct device *);
 
 static int
 trif_probe(struct device *dev)
@@ -855,12 +715,6 @@ trif_probe(struct device *dev)
 #ifdef CONFIG_IBMTR
 	&& ibmtr_probe(dev)
 #endif
-#ifdef CONFIG_IBMOL
-	&& olympic_probe(dev)
-#endif
-#ifdef CONFIG_IBMLS
-	&& streamer_probe(dev)
-#endif	
 #ifdef CONFIG_SKTR
 	&& sktr_probe(dev)
 #endif
@@ -935,90 +789,7 @@ static struct device tr0_dev = {
 #   undef       NEXT_DEV
 #   define      NEXT_DEV        (&bif_dev)
 #endif
-
-
-#ifdef CONFIG_NET_FC
-    static struct device fc1_dev = {
-        "fc1", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, fcif_probe};
-	static struct device fc0_dev = {
-		"fc0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fc1_dev, fcif_probe};
-#   undef       NEXT_DEV
-#   define      NEXT_DEV        (&fc0_dev)
-#endif
-
-
-#ifdef CONFIG_SBNI
-	static struct device sbni7_dev =
-		{"sbni7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, sbni_probe};
-	static struct device sbni6_dev =
-		{"sbni6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni7_dev, sbni_probe};
-	static struct device sbni5_dev =
-		{"sbni5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni6_dev, sbni_probe};
-	static struct device sbni4_dev =
-		{"sbni4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni5_dev, sbni_probe};
-	static struct device sbni3_dev =
-		{"sbni3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni4_dev, sbni_probe};
-	static struct device sbni2_dev =
-		{"sbni2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni3_dev, sbni_probe};
-	static struct device sbni1_dev =
-		{"sbni1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni2_dev, sbni_probe};
-	static struct device sbni0_dev =
-		{"sbni0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &sbni1_dev, sbni_probe};
-
-#undef	NEXT_DEV
-#define	NEXT_DEV	(&sbni0_dev)
-#endif 
 	
-	
-#ifdef CONFIG_NET_SB1000
-    extern int sb1000_probe(struct device *dev);
-    static struct device sb1000_dev = {
-        "cm0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, sb1000_probe };
-#   undef       NEXT_DEV
-#   define      NEXT_DEV        (&sb1000_dev)
-#endif
-	
-/* S/390 channels */
-#ifdef CONFIG_CTC
-    extern int ctc_probe(struct device *dev);
-    static struct device ctc7_dev =
-       {"ctc7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV,  ctc_probe};
-    static struct device ctc6_dev =
-       {"ctc6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc7_dev, ctc_probe};
-    static struct device ctc5_dev =
-       {"ctc5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc6_dev, ctc_probe};
-    static struct device ctc4_dev =
-       {"ctc4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc5_dev, ctc_probe};
-    static struct device ctc3_dev =
-       {"ctc3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc4_dev, ctc_probe};
-    static struct device ctc2_dev =
-       {"ctc2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc3_dev, ctc_probe};
-    static struct device ctc1_dev =
-       {"ctc1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc2_dev, ctc_probe};
-    static struct device ctc0_dev =
-       {"ctc0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc1_dev, ctc_probe}; 
-
-    static struct device escon7_dev =
-       {"escon7", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc0_dev,   ctc_probe};
-    static struct device escon6_dev =
-       {"escon6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon7_dev, ctc_probe};
-    static struct device escon5_dev =
-       {"escon5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon6_dev, ctc_probe};
-    static struct device escon4_dev =
-       {"escon4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon5_dev, ctc_probe};
-    static struct device escon3_dev =
-       {"escon3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon4_dev, ctc_probe};
-    static struct device escon2_dev =
-       {"escon2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon3_dev, ctc_probe};
-    static struct device escon1_dev =
-       {"escon1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon2_dev, ctc_probe};
-    static struct device escon0_dev =
-       {"escon0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon1_dev, ctc_probe}; 
-
-#undef  NEXT_DEV
-#define NEXT_DEV        (&escon0_dev)                                  
-#endif  
-        
 extern int loopback_init(struct device *dev);
 struct device loopback_dev = {
 	"lo",			/* Software Loopback interface		*/

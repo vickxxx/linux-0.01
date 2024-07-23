@@ -178,8 +178,6 @@ struct linux_mib
 	unsigned long	OfoPruned;
 	unsigned long	OutOfWindowIcmps; 
 	unsigned long	LockDroppedIcmps; 
-	unsigned long	SockMallocOOM; 
-	unsigned long	ArpFilter;
 };
  	
 #endif

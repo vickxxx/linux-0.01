@@ -1,5 +1,5 @@
 /*
- * $Id: irq.c,v 1.105.2.3 1999/07/22 01:49:41 cort Exp $
+ * $Id: irq.c,v 1.105 1999/03/25 19:51:51 cort Exp $
  *
  *  arch/ppc/kernel/irq.c
  *
@@ -61,12 +61,11 @@
 
 #include "local_irq.h"
 
-extern atomic_t ipi_recv;
-extern atomic_t ipi_sent;
-void enable_irq(unsigned int irq_nr);
+extern volatile unsigned long ipi_count;
 void enable_irq(unsigned int irq_nr);
 void disable_irq(unsigned int irq_nr);
 
+/* Fixme - Need to figure out a way to get rid of this - Corey */
 volatile unsigned char *chrp_int_ack_special;
 
 #ifdef CONFIG_APUS
@@ -96,8 +95,8 @@ atomic_t ppc_n_lost_interrupts;
  * this needs to be removed.
  * -- Cort
  */
-static unsigned long cache_bitmask[1];
-static struct irqaction malloc_cache[32];
+static char cache_bitmask = 0;
+static struct irqaction malloc_cache[8];
 extern int mem_init_done;
 
 void *irq_kmalloc(size_t size, int pri)
@@ -105,10 +104,10 @@ void *irq_kmalloc(size_t size, int pri)
 	unsigned int i;
 	if ( mem_init_done )
 		return kmalloc(size,pri);
-	for ( i = 0; i < 32 ; i++ )
-		if ( ! (test_bit(i, (void *)cache_bitmask)) )
+	for ( i = 0; i <= 3 ; i++ )
+		if ( ! ( cache_bitmask & (1<<i) ) )
 		{
-			set_bit(i,(void *)cache_bitmask);
+			cache_bitmask |= (1<<i);
 			return (void *)(&malloc_cache[i]);
 		}
 	return 0;
@@ -117,10 +116,10 @@ void *irq_kmalloc(size_t size, int pri)
 void irq_kfree(void *ptr)
 {
 	unsigned int i;
-	for ( i = 0 ; i < 32 ; i++ )
+	for ( i = 0 ; i <= 3 ; i++ )
 		if ( ptr == &malloc_cache[i] )
 		{
-			clear_bit( i, (void *)cache_bitmask );
+			cache_bitmask &= ~(1<<i);
 			return;
 		}
 	kfree(ptr);
@@ -139,21 +138,17 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 	if (!handler)
 	{
 		/* Free */
-		p = &irq_desc[irq].action;
-		while ((action = *p) != NULL && action->dev_id != dev_id)
-			p = &action->next;
-		if (action == NULL)
-			return -ENOENT;
-
-		/* Found it - now free it */
-		save_flags(flags);
-		cli();
-		*p = action->next;
-		if (irq_desc[irq].action == NULL)
-			disable_irq(irq);
-		restore_flags(flags);
-		irq_kfree(action);
-		return 0;
+		for (p = &irq_desc[irq].action; (action = *p) != NULL; p = &action->next)
+		{
+			/* Found it - now free it */
+			save_flags(flags);
+			cli();
+			*p = action->next;
+			restore_flags(flags);
+			irq_kfree(action);
+			return 0;
+		}
+		return -ENOENT;
 	}
 	
 	action = (struct irqaction *)
@@ -193,12 +188,6 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 void free_irq(unsigned int irq, void *dev_id)
 {
 	request_irq(irq, NULL, 0, NULL, dev_id);
-}
-
-/* XXX should implement irq disable depth like on intel */
-void disable_irq_nosync(unsigned int irq_nr)
-{
-	mask_irq(irq_nr);
 }
 
 void disable_irq(unsigned int irq_nr)
@@ -244,10 +233,8 @@ int get_irq_list(char *buf)
 	}
 #ifdef __SMP__
 	/* should this be per processor send/receive? */
-  	/* should this be per processor send/receive? */
- 	len += sprintf(buf+len, "IPI: (recv/sent) %10lu/%lu\n",
- 			atomic_read(&ipi_recv), atomic_read(&ipi_sent));
-#endif /* __SMP__ */		
+	len += sprintf(buf+len, "IPI: %10lu\n", ipi_count);
+#endif		
 	len += sprintf(buf+len, "BAD: %10u\n", ppc_spurious_interrupts);
 	return len;
 }
@@ -301,17 +288,16 @@ int probe_irq_off (unsigned long irqs)
 	return 0;
 }
 
-unsigned long __init init_IRQ(unsigned long memory)
+void __init init_IRQ(void)
 {
 	static int once = 0;
 
 	if ( once )
-		return memory;
+		return;
 	else
 		once++;
 	
 	ppc_md.init_IRQ();
-	return memory;
 }
 
 #ifdef __SMP__
@@ -322,14 +308,10 @@ atomic_t global_irq_count;
 atomic_t global_bh_count;
 atomic_t global_bh_lock;
 
-extern unsigned long *_get_SP(void);
-
 static void show(char * str)
 {
-#if 0
 	int i;
 	unsigned long *stack;
-#endif
 	int cpu = smp_processor_id();
 
 	printk("\n%s, CPU %d:\n", str, cpu);
@@ -341,10 +323,6 @@ static void show(char * str)
 	       atomic_read(&global_bh_count),
 	       ppc_local_bh_count[0],
 	       ppc_local_bh_count[1]);
-#if 1
-	printk(" CPU: %d last CPU: %d\n", current->processor,current->last_processor);
-	print_backtrace (_get_SP());
-#else
 	stack = (unsigned long *) &str;
 	for (i = 40; i ; i--) {
 		unsigned long x = *++stack;
@@ -352,7 +330,6 @@ static void show(char * str)
 			printk("<[%08lx]> ", x);
 		}
 	}
-#endif
 }
 
 static inline void wait_on_bh(void)

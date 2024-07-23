@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp.c,v 1.140.2.16 2001/01/04 05:28:46 davem Exp $
+ * Version:	$Id: tcp.c,v 1.140 1999/04/22 10:34:31 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -697,57 +697,33 @@ static inline int tcp_memory_free(struct sock *sk)
 }
 
 /*
- *	Wait for more memory for a socket.
- *	Special case is err == -ENOMEM, in this case just sleep a bit waiting
- *	for the system to free up some memory. 
+ *	Wait for more memory for a socket
  */
-static void wait_for_tcp_memory(struct sock * sk, int err)
+static void wait_for_tcp_memory(struct sock * sk)
 {
-	if (1) { 
+	release_sock(sk);
+	if (!tcp_memory_free(sk)) {
 		struct wait_queue wait = { current, NULL };
-	
+
 		sk->socket->flags &= ~SO_NOSPACE;
 		add_wait_queue(sk->sleep, &wait);
-		release_sock(sk);
 		for (;;) {
 			if (signal_pending(current))
 				break;
 			current->state = TASK_INTERRUPTIBLE;
-			if (tcp_memory_free(sk) && !err)
+			if (tcp_memory_free(sk))
 				break;
 			if (sk->shutdown & SEND_SHUTDOWN)
 				break;
 			if (sk->err)
 				break;
-			if (!err) 
-				schedule();
-			else {
-				schedule_timeout(net_random()%(HZ/5) + 1); 
-				break;
-			} 	
+			schedule();
 		}
-		lock_sock(sk);
 		current->state = TASK_RUNNING;
 		remove_wait_queue(sk->sleep, &wait);
 	}
+	lock_sock(sk);
 }
-
-/*
- * Wait for a buffer.
- */ 
-static int wait_for_buffer(struct sock *sk) 
-{ 
-	struct wait_queue wait = { current, NULL }; 
-
-	release_sock(sk); 
-	add_wait_queue(sk->sleep, &wait); 
-	current->state = TASK_INTERRUPTIBLE; 
-	schedule(); 
-	current->state = TASK_RUNNING; 
-	remove_wait_queue(sk->sleep, &wait);
-	lock_sock(sk); 
-	return 0; 
-} 
 
 /* When all user supplied data has been queued set the PSH bit */
 #define PSH_NEEDED (seglen == 0 && iovlen == 0)
@@ -826,21 +802,11 @@ int tcp_do_sendmsg(struct sock *sk, struct msghdr *msg)
 				    tp->snd_nxt < TCP_SKB_CB(skb)->end_seq) {
 					int last_byte_was_odd = (copy % 4);
 
-					/* 
-					 * Check for parallel writers sleeping in user access.
-					 */ 
-					if (tp->partial_writers++ > 0) { 
-						wait_for_buffer(sk);
-						tp->partial_writers--;
-						continue; 
-					}
-				
 					copy = mss_now - copy;
 					if(copy > skb_tailroom(skb))
 						copy = skb_tailroom(skb);
 					if(copy > seglen)
 						copy = seglen;
-		
 					if(last_byte_was_odd) {
 						if(copy_from_user(skb_put(skb, copy),
 								  from, copy))
@@ -853,7 +819,6 @@ int tcp_do_sendmsg(struct sock *sk, struct msghdr *msg)
 							from, skb_put(skb, copy),
 							copy, skb->csum, &err);
 					}
-		
 					/*
 					 * FIXME: the *_user functions should
 					 *	  return how much data was
@@ -873,10 +838,6 @@ int tcp_do_sendmsg(struct sock *sk, struct msghdr *msg)
 					seglen -= copy;
 					if (PSH_NEEDED)
 						TCP_SKB_CB(skb)->flags |= TCPCB_FLAG_PSH;
-
-					if (--tp->partial_writers > 0) 
-						wake_up_interruptible(sk->sleep); 
-
 					continue;
 				}
 			}
@@ -922,12 +883,12 @@ int tcp_do_sendmsg(struct sock *sk, struct msghdr *msg)
 				tmp += copy;
 				queue_it = 0;
 			}
-			skb = sock_wmalloc_err(sk, tmp, 0, sk->allocation, &err);
+			skb = sock_wmalloc(sk, tmp, 0, GFP_KERNEL);
 
 			/* If we didn't get any memory, we need to sleep. */
 			if (skb == NULL) {
 				sk->socket->flags |= SO_NOSPACE;
-				if ((flags&MSG_DONTWAIT) && !err) {
+				if (flags&MSG_DONTWAIT) {
 					err = -EAGAIN;
 					goto do_interrupted;
 				}
@@ -935,11 +896,7 @@ int tcp_do_sendmsg(struct sock *sk, struct msghdr *msg)
 					err = -ERESTARTSYS;
 					goto do_interrupted;
 				}
-
-				/* In OOM that would fail anyways so do not bother. */ 
-				if (!err) 
-					tcp_push_pending_frames(sk, tp);
-				wait_for_tcp_memory(sk, err);
+				wait_for_tcp_memory(sk);
 
 				/* If SACK's were formed or PMTU events happened,
 				 * we must find out about it.
@@ -1374,12 +1331,12 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 		break;
 	}
 
-	if(copied >= 0 && msg->msg_name) {
+	if(copied > 0 && msg->msg_name)
 		tp->af_specific->addr2sockaddr(sk, (struct sockaddr *)
 					       msg->msg_name);       
-		if(addr_len)
-			*addr_len = tp->af_specific->sockaddr_len;
-	}
+
+	if(addr_len)
+		*addr_len = tp->af_specific->sockaddr_len;
 
 	remove_wait_queue(sk->sleep, &wait);
 	current->state = TASK_RUNNING;
@@ -1494,18 +1451,15 @@ static void tcp_close_pending (struct sock *sk)
 	while(req) {
 		struct open_request *iter;
 		
+		if (req->sk)
+			tcp_close(req->sk, 0);
+
 		iter = req;
 		req = req->dl_next;
 		
-		if (iter->sk) {
-			tcp_close(iter->sk, 0);
-			sk->ack_backlog--;
-		} else {
-			tcp_dec_slow_timer(TCP_SLT_SYNACK);
-			sk->tp_pinfo.af_tcp.syn_backlog--;
-		}
 		(*iter->class->destructor)(iter);
-
+		tcp_dec_slow_timer(TCP_SLT_SYNACK);
+		sk->ack_backlog--;
 		tcp_openreq_free(iter);
 	}
 
@@ -1619,7 +1573,6 @@ static struct open_request * wait_for_connect(struct sock * sk,
 	struct wait_queue wait = { current, NULL };
 	struct open_request *req;
 
-	current->task_exclusive = 1;
 	add_wait_queue(sk->sleep, &wait);
 	for (;;) {
 		current->state = TASK_INTERRUPTIBLE;
@@ -1633,8 +1586,6 @@ static struct open_request * wait_for_connect(struct sock * sk,
 			break;
 	}
 	current->state = TASK_RUNNING;
-	wmb();
-	current->task_exclusive = 0;
 	remove_wait_queue(sk->sleep, &wait);
 	return req;
 }
@@ -1779,9 +1730,6 @@ int tcp_getsockopt(struct sock *sk, int level, int optname, char *optval,
 		return -EFAULT;
 
 	len = min(len, sizeof(int));
-	
-	if(len < 0)
-		return -EINVAL;
 
 	switch(optname) {
 	case TCP_MAXSEG:
@@ -1817,8 +1765,6 @@ extern void __skb_cb_too_small_for_tcp(int, int);
 void __init tcp_init(void)
 {
 	struct sk_buff *skb = NULL;
-	unsigned long goal;
-	int order;
 
 	if(sizeof(struct tcp_skb_cb) > sizeof(skb->cb))
 		__skb_cb_too_small_for_tcp(sizeof(struct tcp_skb_cb),
@@ -1844,43 +1790,4 @@ void __init tcp_init(void)
 						NULL, NULL);
 	if(!tcp_timewait_cachep)
 		panic("tcp_init: Cannot alloc tcp_tw_bucket cache.");
-
-	/* Size and allocate TCP hash tables. */
-	goal = num_physpages >> (20 - PAGE_SHIFT);
-	for (order = 0; (1UL << order) < goal; order++)
-		;
-	do {
-		tcp_ehash_size = (1UL << order) * PAGE_SIZE /
-			sizeof(struct sock *);
-		tcp_ehash = (struct sock **)
-			__get_free_pages(GFP_ATOMIC, order);
-	} while (tcp_ehash == NULL && --order >= 0);
-
-	if (!tcp_ehash)
-		panic("Failed to allocate TCP established hash table\n");
-	memset(tcp_ehash, 0, tcp_ehash_size * sizeof(struct sock *));
-
-	goal = (((1UL << order) * PAGE_SIZE) / sizeof(struct tcp_bind_bucket *));
-	if (goal > (64 * 1024)) {
-		/* Don't size the bind-hash larger than the port
-		 * space, that is just silly.
-		 */
-		goal = (((64 * 1024) * sizeof(struct tcp_bind_bucket *)) / PAGE_SIZE);
-		for (order = 0; (1UL << order) < goal; order++)
-			;
-	}
-
-	do {
-		tcp_bhash_size = (1UL << order) * PAGE_SIZE /
-			sizeof(struct tcp_bind_bucket *);
-		tcp_bhash = (struct tcp_bind_bucket **)
-			__get_free_pages(GFP_ATOMIC, order);
-	} while (tcp_bhash == NULL && --order >= 0);
-
-	if (!tcp_bhash)
-		panic("Failed to allocate TCP bind hash table\n");
-	memset(tcp_bhash, 0, tcp_bhash_size * sizeof(struct tcp_bind_bucket *));
-
-	printk("TCP: Hash tables configured (ehash %d bhash %d)\n",
-	       tcp_ehash_size, tcp_bhash_size);
 }

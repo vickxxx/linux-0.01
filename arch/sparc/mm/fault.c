@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.101.2.5 1999/11/16 06:29:39 davem Exp $
+/* $Id: fault.c,v 1.101 1999/01/04 06:24:52 jj Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -17,6 +17,7 @@
 #include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 
@@ -237,14 +238,8 @@ good_area:
 		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
 	}
-survive:
-	{
-		int fault = handle_mm_fault(current, vma, address, write);
-		if (!fault)
-			goto do_sigbus;
-		if (fault < 0)
-			goto out_of_memory;
-	}
+	if (!handle_mm_fault(current, vma, address, write))
+		goto do_sigbus;
 	up(&mm->mmap_sem);
 	return;
 	/*
@@ -294,17 +289,6 @@ do_kernel_fault:
 	unhandled_fault (address, tsk, regs);
 	return;
 
-out_of_memory:
-	if (tsk->pid == 1) {
-		tsk->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	up(&mm->mmap_sem);
-	printk("VM: killing process %s\n", tsk->comm);
-	do_exit(SIGKILL);
-	return;
-
 do_sigbus:
 	up(&mm->mmap_sem);
 	tsk->tss.sig_address = address;
@@ -326,18 +310,8 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 	pgd_t *pgdp;
 	pte_t *ptep;
 
-	if (text_fault) {
+	if (text_fault)
 		address = regs->pc;
-	} else if (!write &&
-		   !(regs->psr & PSR_PS)) {
-		unsigned int insn, *ip;
-
-		ip = (unsigned int *)regs->pc;
-		if (! get_user(insn, ip)) {
-			if ((insn & 0xc1680000) == 0xc0680000)
-				write = 1;
-		}
-	}
 
 	pgdp = sun4c_pgd_offset(mm, address);
 	ptep = sun4c_pte_offset((pmd_t *) pgdp, address);
@@ -346,36 +320,28 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 	    if (write) {
 		if ((pte_val(*ptep) & (_SUN4C_PAGE_WRITE|_SUN4C_PAGE_PRESENT))
 				   == (_SUN4C_PAGE_WRITE|_SUN4C_PAGE_PRESENT)) {
-			unsigned long flags;
 
 			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_ACCESSED |
 				      _SUN4C_PAGE_MODIFIED |
 				      _SUN4C_PAGE_VALID |
 				      _SUN4C_PAGE_DIRTY);
 
-			save_and_cli(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
-				restore_flags(flags);
 				return;
 			}
-			restore_flags(flags);
 		}
 	    } else {
 		if ((pte_val(*ptep) & (_SUN4C_PAGE_READ|_SUN4C_PAGE_PRESENT))
 				   == (_SUN4C_PAGE_READ|_SUN4C_PAGE_PRESENT)) {
-			unsigned long flags;
 
 			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_ACCESSED |
 				      _SUN4C_PAGE_VALID);
 
-			save_and_cli(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
-				restore_flags(flags);
 				return;
 			}
-			restore_flags(flags);
 		}
 	    }
 	}
@@ -417,21 +383,14 @@ inline void force_user_fault(unsigned long address, int write)
 	if(expand_stack(vma, address))
 		goto bad_area;
 good_area:
-	if(write) {
+	if(write)
 		if(!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-	} else {
+	else
 		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
-	}
-survive:
-	{
-		int fault = handle_mm_fault(current, vma, address, write);
-		if (!fault)
-			goto do_sigbus;
-		if (fault < 0)
-			goto out_of_memory;
-	}
+	if (!handle_mm_fault(current, vma, address, write))
+		goto do_sigbus;
 	up(&mm->mmap_sem);
 	return;
 bad_area:
@@ -445,17 +404,6 @@ bad_area:
 	send_sig(SIGSEGV, tsk, 1);
 	return;
 
-out_of_memory:
-	if (tsk->pid == 1) {
-		tsk->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	up(&mm->mmap_sem);
-	printk("VM: killing process %s\n", tsk->comm);
-	do_exit(SIGKILL);
-	return;
-
 do_sigbus:
 	up(&mm->mmap_sem);
 	tsk->tss.sig_address = address;
@@ -467,25 +415,31 @@ void window_overflow_fault(void)
 {
 	unsigned long sp;
 
+	lock_kernel();
 	sp = current->tss.rwbuf_stkptrs[0];
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 1);
 	force_user_fault(sp, 1);
+	unlock_kernel();
 }
 
 void window_underflow_fault(unsigned long sp)
 {
+	lock_kernel();
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 0);
 	force_user_fault(sp, 0);
+	unlock_kernel();
 }
 
 void window_ret_fault(struct pt_regs *regs)
 {
 	unsigned long sp;
 
+	lock_kernel();
 	sp = regs->u_regs[UREG_FP];
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 0);
 	force_user_fault(sp, 0);
+	unlock_kernel();
 }

@@ -1,8 +1,8 @@
-/* $Id: pcikbd.c,v 1.27.2.2 2000/01/21 01:05:45 davem Exp $
+/* $Id: pcikbd.c,v 1.27 1999/05/09 06:40:47 ecd Exp $
  * pcikbd.c: Ultra/AX PC keyboard support.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
- * JavaStation support by Pete A. Zaitcev.
+ * JavaStation(MrCoffee) support by Pete A. Zaitcev.
  *
  * This code is mainly put together from various places in
  * drivers/char, please refer to these sources for credits
@@ -30,16 +30,13 @@
 #include <asm/io.h>
 #include <asm/uaccess.h>
 
-/*
- * Different platforms provide different permutations of names.
- * AXi - kb_ps2, kdmouse.
- * MrCoffee - keyboard, mouse.
- * Espresso - keyboard, kdmouse.
- */
-#define	PCI_KB_NAME1	"kb_ps2"
-#define PCI_KB_NAME2	"keyboard"
-#define PCI_MS_NAME1	"kdmouse"
-#define PCI_MS_NAME2	"mouse"
+#ifdef __sparc_v9__
+#define	PCI_KB_NAME	"kb_ps2"
+#define PCI_MS_NAME	"kdmouse"
+#else
+#define PCI_KB_NAME	"keyboard"
+#define PCI_MS_NAME	"mouse"
+#endif
 
 #include "pcikbd.h"
 #include "sunserial.h"
@@ -505,8 +502,7 @@ __initfunc(void pcikbd_init_hw(void))
 			for_each_ebusdev(edev, ebus) {
 				if(!strcmp(edev->prom_name, "8042")) {
 					for_each_edevchild(edev, child) {
-                                                if (strcmp(child->prom_name, PCI_KB_NAME1) == 0 ||
-						    strcmp(child->prom_name, PCI_KB_NAME2) == 0)
+                                                if (!strcmp(child->prom_name, PCI_KB_NAME))
 							goto found;
 					}
 				}
@@ -517,14 +513,12 @@ __initfunc(void pcikbd_init_hw(void))
 
 found:
 		pcikbd_iobase = child->base_address[0];
-#ifdef __sparc_v9__
 		if (check_region(pcikbd_iobase, sizeof(unsigned long))) {
 			printk("8042: can't get region %lx, %d\n",
 			       pcikbd_iobase, (int)sizeof(unsigned long));
 			return;
 		}
 		request_region(pcikbd_iobase, sizeof(unsigned long), "8042 controller");
-#endif
 
 		pcikbd_irq = child->irqs[0];
 		if (request_irq(pcikbd_irq, &pcikbd_interrupt,
@@ -554,7 +548,7 @@ ebus_done:
 	 * XXX: my 3.1.3 PROM does not give me the beeper node for the audio
 	 *      auxio register, though I know it is there... (ecd)
 	 *
-	 * JavaStations appear not to have beeper. --zaitcev
+	 * Both JE1 & MrCoffe have no beeper. How about Krups? --zaitcev
 	 */
 	if (!edev)
 		pcibeep_iobase = (pcikbd_iobase & ~(0xffffff)) | 0x722000;
@@ -579,6 +573,7 @@ ebus_done:
 	if(msg)
 		printk("8042: keyboard init failure [%s]\n", msg);
 }
+
 
 
 /*
@@ -939,32 +934,8 @@ struct file_operations psaux_fops = {
 	aux_fasync,
 };
 
-static int aux_no_open(struct inode *inode, struct file *file)
-{
-	return -ENODEV;
-}
-
-struct file_operations psaux_no_fops = {
-	NULL,		/* seek */
-	NULL,
-	NULL,
-	NULL, 		/* readdir */
-	NULL,
-	NULL, 		/* ioctl */
-	NULL,		/* mmap */
-	aux_no_open,
-	NULL,		/* flush */
-	NULL,
-	NULL,
-	NULL,
-};
-
 static struct miscdevice psaux_mouse = {
 	PSMOUSE_MINOR, "ps2aux", &psaux_fops
-};
-
-static struct miscdevice psaux_no_mouse = {
-	PSMOUSE_MINOR, "ps2aux", &psaux_no_fops
 };
 
 __initfunc(int pcimouse_init(void))
@@ -976,7 +947,7 @@ __initfunc(int pcimouse_init(void))
 	if (pcikbd_mrcoffee) {
 		if ((pcimouse_iobase = pcikbd_iobase) == 0) {
 			printk("pcimouse_init: no 8042 given\n");
-			goto do_enodev;
+			return -ENODEV;
 		}
 		pcimouse_irq = pcikbd_irq;
 	} else {
@@ -984,15 +955,14 @@ __initfunc(int pcimouse_init(void))
 			for_each_ebusdev(edev, ebus) {
 				if(!strcmp(edev->prom_name, "8042")) {
 					for_each_edevchild(edev, child) {
-							if (strcmp(child->prom_name, PCI_MS_NAME1) == 0 ||
-							    strcmp(child->prom_name, PCI_MS_NAME2) == 0)
+							if (!strcmp(child->prom_name, PCI_MS_NAME))
 							goto found;
 					}
 				}
 			}
 		}
 		printk("pcimouse_init: no 8042 found\n");
-		goto do_enodev;
+		return -ENODEV;
 
 found:
 		pcimouse_iobase = child->base_address[0];
@@ -1017,7 +987,7 @@ found:
 		        SA_SHIRQ, "mouse", (void *)pcimouse_iobase)) {
 		printk("8042: Cannot register IRQ %s\n",
 		       __irq_itoa(pcimouse_irq));
-		goto do_enodev;
+		return -ENODEV;
 	}
 
 	printk("8042(mouse) at %lx (irq %s)\n", pcimouse_iobase,
@@ -1046,21 +1016,12 @@ found:
 	aux_end_atomic();
 
 	return 0;
-
-do_enodev:
-	misc_register(&psaux_no_mouse);
-	return -ENODEV;
 }
 
-__initfunc(int pcimouse_no_init(void))
-{
-	misc_register(&psaux_no_mouse);
-	return -ENODEV;
-}
 
 __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 {
-	int pnode, enode, node, dnode, xnode;
+	int pnode, enode, node, dnode;
 	int kbnode = 0, msnode = 0, bnode = 0;
 	int devices = 0;
 	char prop[128];
@@ -1073,7 +1034,7 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 	len = prom_getproperty(prom_root_node, "name", prop, sizeof(prop));
 	if (len < 0) {
 		printk("ps2kbd_probe: no name of root node\n");
-		goto do_enodev;
+		return -ENODEV;
 	}
 	if (strncmp(prop, "SUNW,JavaStation-1", len) == 0) {
 		pcikbd_mrcoffee = 1;	/* Brain damage detected */
@@ -1086,7 +1047,7 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
         node = prom_getchild(prom_root_node);
 	node = prom_searchsiblings(node, "aliases");
 	if (!node)
-		goto do_enodev;
+		return -ENODEV;
 
 	len = prom_getproperty(node, "keyboard", prop, sizeof(prop));
 	if (len > 0) {
@@ -1094,7 +1055,7 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 		kbnode = prom_finddevice(prop);
 	}
 	if (!kbnode)
-		goto do_enodev;
+		return -ENODEV;
 
 	len = prom_getproperty(node, "mouse", prop, sizeof(prop));
 	if (len > 0) {
@@ -1102,7 +1063,7 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 		msnode = prom_finddevice(prop);
 	}
 	if (!msnode)
-		goto do_enodev;
+		return -ENODEV;
 
 	/*
 	 * Find matching EBus nodes...
@@ -1140,20 +1101,18 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 			 * For each '8042' on this EBus...
 			 */
 			while (node) {
-				dnode = prom_getchild(node);
-
 				/*
 				 * Does it match?
 				 */
-				if ((xnode = prom_searchsiblings(dnode, PCI_KB_NAME1)) == kbnode) {
-					++devices;
-				} else if ((xnode = prom_searchsiblings(dnode, PCI_KB_NAME2)) == kbnode) {
+				dnode = prom_getchild(node);
+				dnode = prom_searchsiblings(dnode, PCI_KB_NAME);
+				if (dnode == kbnode) {
 					++devices;
 				}
 
-				if ((xnode = prom_searchsiblings(dnode, PCI_MS_NAME1)) == msnode) {
-					++devices;
-				} else if ((xnode = prom_searchsiblings(dnode, PCI_MS_NAME2)) == msnode) {
+				dnode = prom_getchild(node);
+				dnode = prom_searchsiblings(dnode, PCI_MS_NAME);
+				if (dnode == msnode) {
 					++devices;
 				}
 
@@ -1172,8 +1131,6 @@ __initfunc(int ps2kbd_probe(unsigned long *memory_start))
 		pnode = prom_getsibling(pnode);
 		pnode = prom_searchsiblings(pnode, "pci");
 	}
-do_enodev:
-	sunkbd_setinitfunc(memory_start, pcimouse_no_init);
 	return -ENODEV;
 
 found:

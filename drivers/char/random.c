@@ -138,7 +138,7 @@
  * add_interrupt_randomness() uses the inter-interrupt timing as random
  * inputs to the entropy pool.  Note that not all interrupts are good
  * sources of randomness!  For example, the timer interrupts is not a
- * good choice, because the periodicity of the interrupts is too
+ * good choice, because the periodicity of the interrupts is to
  * regular, and hence predictable to an attacker.  Disk interrupts are
  * a better measure, since the timing of the disk interrupts are more
  * unpredictable.
@@ -425,7 +425,6 @@ static struct timer_rand_state extract_timer_state;
 static struct timer_rand_state *irq_timer_state[NR_IRQS];
 static struct timer_rand_state *blkdev_timer_state[MAX_BLKDEV];
 static struct wait_queue *random_read_wait;
-static struct wait_queue *random_poll_wait;
 static struct wait_queue *random_write_wait;
 
 static ssize_t random_read(struct file * file, char * buf,
@@ -557,7 +556,6 @@ __initfunc(void rand_initialize(void))
 #endif
 	extract_timer_state.dont_count_entropy = 1;
 	random_read_wait = NULL;
-	random_poll_wait = NULL;
 	random_write_wait = NULL;
 }
 
@@ -765,10 +763,7 @@ static void add_timer_randomness(struct random_bucket *r,
 
 		/* Wake up waiting processes, if we have enough entropy. */
 		if (r->entropy_count >= WAIT_INPUT_BITS)
-		{
 			wake_up_interruptible(&random_read_wait);
-			wake_up_interruptible(&random_poll_wait);
-		}
 	}
 		
 #ifdef RANDOM_BENCHMARK
@@ -778,12 +773,7 @@ static void add_timer_randomness(struct random_bucket *r,
 
 void add_keyboard_randomness(unsigned char scancode)
 {
-	static unsigned char last_scancode = 0;
-	/* ignore autorepeat (multiple key down w/o key up) */
-	if (scancode != last_scancode) {
-		last_scancode = scancode;
-		add_timer_randomness(&random_state, &keyboard_timer_state, scancode);
-	}
+	add_timer_randomness(&random_state, &keyboard_timer_state, scancode);
 }
 
 void add_mouse_randomness(__u32 mouse_data)
@@ -1229,10 +1219,7 @@ static ssize_t extract_entropy(struct random_bucket *r, char * buf,
 		r->entropy_count = 0;
 
 	if (r->entropy_count < WAIT_OUTPUT_BITS)
-	{
 		wake_up_interruptible(&random_write_wait);
-		wake_up_interruptible(&random_poll_wait);
-	}
 	
 	while (nbytes) {
 		/* Hash the pool to get the output */
@@ -1341,7 +1328,6 @@ random_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 			schedule();
 			continue;
 		}
-		current->state = TASK_RUNNING;
 		n = extract_entropy(&random_state, buf, n, 1);
 		if (n < 0) {
 			retval = n;
@@ -1378,7 +1364,8 @@ random_poll(struct file *file, poll_table * wait)
 {
 	unsigned int mask;
 
-	poll_wait(file, &random_poll_wait, wait);
+	poll_wait(file, &random_read_wait, wait);
+	poll_wait(file, &random_write_wait, wait);
 	mask = 0;
 	if (random_state.entropy_count >= WAIT_INPUT_BITS)
 		mask |= POLLIN | POLLRDNORM;
@@ -1461,10 +1448,7 @@ random_ioctl(struct inode * inode, struct file * file,
 		 * entropy.
 		 */
 		if (random_state.entropy_count >= WAIT_INPUT_BITS)
-		{
 			wake_up_interruptible(&random_read_wait);
-			wake_up_interruptible(&random_poll_wait);
-		}
 		return 0;
 	case RNDGETPOOL:
 		if (!capable(CAP_SYS_ADMIN))
@@ -1517,10 +1501,7 @@ random_ioctl(struct inode * inode, struct file * file,
 		 * entropy.
 		 */
 		if (random_state.entropy_count >= WAIT_INPUT_BITS)
-		{
 			wake_up_interruptible(&random_read_wait);
-			wake_up_interruptible(&random_poll_wait);
-		}
 		return 0;
 	case RNDZAPENTCNT:
 		if (!capable(CAP_SYS_ADMIN))
@@ -1717,7 +1698,7 @@ __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
 	if (!rekey_time || (tv.tv_sec - rekey_time) > REKEY_INTERVAL) {
 		rekey_time = tv.tv_sec;
 		/* First three words are overwritten below. */
-		get_random_bytes(&secret[3], sizeof(secret)-12);
+		get_random_bytes(&secret+3, sizeof(secret)-12);
 		count = (tv.tv_sec/REKEY_INTERVAL) << HASH_BITS;
 	}
 

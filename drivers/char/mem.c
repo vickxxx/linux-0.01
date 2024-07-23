@@ -16,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/joystick.h>
 #include <linux/i2c.h>
-#include <linux/capability.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -34,8 +33,8 @@ void dmasound_init(void);
 #ifdef CONFIG_SPARCAUDIO
 extern int sparcaudio_init(void);
 #endif
-#ifdef CONFIG_PHONE
-extern int telephony_init(void);
+#ifdef CONFIG_ISDN
+int isdn_init(void);
 #endif
 #ifdef CONFIG_VIDEO_DEV
 extern int videodev_init(void);
@@ -48,6 +47,18 @@ extern void prom_con_init(void);
 #endif
 #ifdef CONFIG_MDA_CONSOLE
 extern void mda_console_init(void);
+#endif
+#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
+extern void adbdev_init(void);
+#endif
+#ifdef CONFIG_USB_UHCI
+int uhci_init(void);
+#endif
+#ifdef CONFIG_USB_OHCI
+int ohci_init(void);
+#endif
+#ifdef CONFIG_USB_OHCI_HCD
+int ohci_hcd_init(void);
 #endif
      
 static ssize_t do_write_mem(struct file * file, void *p, unsigned long realp,
@@ -453,19 +464,11 @@ static loff_t memory_lseek(struct file * file, loff_t offset, int orig)
 	}
 }
 
-static int open_port(struct inode * inode, struct file * filp)
-{
-	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
-}
-
-
 #define mmap_kmem	mmap_mem
 #define zero_lseek	null_lseek
 #define full_lseek      null_lseek
 #define write_zero	write_null
 #define read_full       read_zero
-#define open_mem	open_port	/* different capability? */
-#define open_kmem	open_mem
 
 static struct file_operations mem_fops = {
 	memory_lseek,
@@ -475,7 +478,7 @@ static struct file_operations mem_fops = {
 	NULL,		/* mem_poll */
 	NULL,		/* mem_ioctl */
 	mmap_mem,
-	open_mem,
+	NULL,		/* no special open code */
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -489,7 +492,7 @@ static struct file_operations kmem_fops = {
 	NULL,		/* kmem_poll */
 	NULL,		/* kmem_ioctl */
 	mmap_kmem,
-	open_kmem,
+	NULL,		/* no special open code */
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -517,7 +520,7 @@ static struct file_operations port_fops = {
 	NULL,		/* port_poll */
 	NULL,		/* port_ioctl */
 	NULL,		/* port_mmap */
-	open_port,
+	NULL,		/* no special open code */
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -605,6 +608,17 @@ __initfunc(int chr_dev_init(void))
 	if (register_chrdev(MEM_MAJOR,"mem",&memory_fops))
 		printk("unable to get major %d for memory devs\n", MEM_MAJOR);
 	rand_initialize();
+#ifdef CONFIG_USB
+#ifdef CONFIG_USB_UHCI
+	uhci_init();
+#endif
+#ifdef CONFIG_USB_OHCI
+	ohci_init();
+#endif
+#ifdef CONFIG_USB_OHCI_HCD
+        ohci_hcd_init(); 
+#endif
+#endif
 #if defined (CONFIG_FB)
 	fbmem_init();
 #endif
@@ -644,17 +658,20 @@ __initfunc(int chr_dev_init(void))
 #if CONFIG_QIC02_TAPE
 	qic02_tape_init();
 #endif
+#if CONFIG_ISDN
+	isdn_init();
+#endif
 #ifdef CONFIG_FTAPE
 	ftape_init();
 #endif
 #ifdef CONFIG_VIDEO_BT848
 	i2c_init();
 #endif
+#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
+	adbdev_init();
+#endif
 #ifdef CONFIG_VIDEO_DEV
 	videodev_init();
-#endif
-#ifdef CONFIG_PHONE
-	telephony_init();
 #endif
 	return 0;
 }

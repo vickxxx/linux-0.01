@@ -363,8 +363,7 @@ __initfunc(static int cops_irq (int ioaddr, int board))
         {
                 outb(0, ioaddr+DAYNA_RESET);
                 inb(ioaddr+DAYNA_RESET);
-                current->state = TASK_UNINTERRUPTIBLE;
-                schedule_timeout(HZ/3);
+                udelay(333333);
         }
         if(board==TANGENT)
         {
@@ -500,7 +499,7 @@ static void cops_reset(struct device *dev, int sleep)
                                 schedule();
                 }
                 else
-                        mdelay(334);
+                        udelay(333333);
         }
         dev->tbusy=0;
 

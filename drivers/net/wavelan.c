@@ -1616,8 +1616,11 @@ wv_set_frequency(u_long		ioaddr,	/* I/O port of the card */
   if((frequency->e == 0) &&
      (frequency->m >= 0) && (frequency->m < BAND_NUM))
     {
+      /* frequency in units of 250 kHz (as read in the offset register) */
+      short	bands[] = { 0x30, 0x58, 0x64, 0x7A, 0x80, 0xA8, 0xD0, 0xF0, 0xF8, 0x150 };
+
       /* Get frequency offset. */
-      freq = channel_bands[frequency->m] >> 1;
+      freq = bands[frequency->m] >> 1;
     }
 
   /* Verify that the frequency is allowed. */
@@ -1788,7 +1791,6 @@ wv_frequency_list(u_long	ioaddr,	/* I/O port of the card */
   u_short	table[10];	/* Authorized frequency table */
   long		freq = 0L;	/* offset to 2.4 GHz in .5 MHz + 12 MHz */
   int		i;		/* index in the table */
-  int		c = 0;		/* Channel number */
 
   /* Read the frequency table. */
   fee_read(ioaddr, 0x71 /* frequency table */, table, 10);
@@ -1799,12 +1801,6 @@ wv_frequency_list(u_long	ioaddr,	/* I/O port of the card */
     /* Look in the table if the frequency is allowed */
     if(table[9 - (freq / 16)] & (1 << (freq % 16)))
       {
-	/* Compute approximate channel number */
-	while((((channel_bands[c] >> 1) - 24) < freq) &&
-	      (c < NELS(channel_bands)))
-	  c++;
-	list[i].i = c;	/* Set the list index */
-
 	/* put in the list */
 	list[i].m = (((freq + 24) * 5) + 24000L) * 10000;
 	list[i++].e = 1;
@@ -1910,18 +1906,18 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIWNWID:
       /* Set NWID in WaveLAN. */
-      if(!wrq->u.nwid.disabled)
+      if(wrq->u.nwid.on)
 	{
-	  /* Set NWID in psa */
-	  psa.psa_nwid[0] = (wrq->u.nwid.value & 0xFF00) >> 8;
-	  psa.psa_nwid[1] = wrq->u.nwid.value & 0xFF;
+	  /* Set NWID in psa. */
+	  psa.psa_nwid[0] = (wrq->u.nwid.nwid & 0xFF00) >> 8;
+	  psa.psa_nwid[1] = wrq->u.nwid.nwid & 0xFF;
 	  psa.psa_nwid_select = 0x01;
 	  psa_write(ioaddr, lp->hacr, (char *)psa.psa_nwid - (char *)&psa,
 		    (unsigned char *)psa.psa_nwid, 3);
 
 	  /* Set NWID in mmc. */
-	  m.w.mmw_netw_id_l = psa.psa_nwid[1];
-	  m.w.mmw_netw_id_h = psa.psa_nwid[0];
+	  m.w.mmw_netw_id_l = wrq->u.nwid.nwid & 0xFF;
+	  m.w.mmw_netw_id_h = (wrq->u.nwid.nwid & 0xFF00) >> 8;
 	  mmc_write(ioaddr, (char *)&m.w.mmw_netw_id_l - (char *)&m,
 		    (unsigned char *)&m.w.mmw_netw_id_l, 2);
 	  mmc_out(ioaddr, mmwoff(0, mmw_loopt_sel), 0x00);
@@ -1945,9 +1941,8 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Read the NWID. */
       psa_read(ioaddr, lp->hacr, (char *)psa.psa_nwid - (char *)&psa,
 	       (unsigned char *)psa.psa_nwid, 3);
-      wrq->u.nwid.value = (psa.psa_nwid[0] << 8) + psa.psa_nwid[1];
-      wrq->u.nwid.disabled = !(psa.psa_nwid_select);
-      wrq->u.nwid.fixed = 1;	/* Superfluous */
+      wrq->u.nwid.nwid = (psa.psa_nwid[0] << 8) + psa.psa_nwid[1];
+      wrq->u.nwid.on = psa.psa_nwid_select;
       break;
 
     case SIOCSIWFREQ:
@@ -1974,12 +1969,14 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	}
       else
 	{
+	  int	bands[] = { 915e6, 2.425e8, 2.46e8, 2.484e8, 2.4305e8 };
+
 	  psa_read(ioaddr, lp->hacr, (char *)&psa.psa_subband - (char *)&psa,
 		   (unsigned char *)&psa.psa_subband, 1);
 
 	  if(psa.psa_subband <= 4)
 	    {
-	      wrq->u.freq.m = fixed_bands[psa.psa_subband];
+	      wrq->u.freq.m = bands[psa.psa_subband];
 	      wrq->u.freq.e = (psa.psa_subband != 0);
 	    }
 	  else
@@ -1989,9 +1986,9 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIWSENS:
       /* Set the level threshold. */
-      /* We should complain loudly if wrq->u.sens.fixed = 0, because we
-       * can't set auto mode... */
-      psa.psa_thr_pre_set = wrq->u.sens.value & 0x3F;
+      if(!suser())
+	return -EPERM;
+      psa.psa_thr_pre_set = wrq->u.sensitivity & 0x3F;
       psa_write(ioaddr, lp->hacr, (char *)&psa.psa_thr_pre_set - (char *)&psa,
 	       (unsigned char *) &psa.psa_thr_pre_set, 1);
       /* update the Wavelan checksum */
@@ -2003,100 +2000,86 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Read the level threshold. */
       psa_read(ioaddr, lp->hacr, (char *)&psa.psa_thr_pre_set - (char *)&psa,
 	       (unsigned char *) &psa.psa_thr_pre_set, 1);
-      wrq->u.sens.value = psa.psa_thr_pre_set & 0x3F;
-      wrq->u.sens.fixed = 1;
+      wrq->u.sensitivity = psa.psa_thr_pre_set & 0x3F;
       break;
 
-    case SIOCSIWENCODE:
-      /* Set encryption key */
-      if(!mmc_encr(ioaddr))
-	{
-	  ret = -EOPNOTSUPP;
-	  break;
-	}
+     case SIOCSIWENCODE:
+       /* Set encryption key. */
+       if(!mmc_encr(ioaddr))
+	 {
+	   ret = -EOPNOTSUPP;
+	   break;
+	 }
 
-      /* Basic checking... */
-      if(wrq->u.encoding.pointer != (caddr_t) 0)
-	{
-	  /* Check the size of the key */
-	  if(wrq->u.encoding.length != 8)
-	    {
-	      ret = -EINVAL;
-	      break;
-	    }
+       if(wrq->u.encoding.method)
+	 {	/* Enable encryption. */
+	   int		i;
+	   long long	key = wrq->u.encoding.code;
 
-	  /* Copy the key in the driver */
-	  if(copy_from_user(psa.psa_encryption_key, wrq->u.encoding.pointer,
-			    wrq->u.encoding.length))
-	    {
-	      ret = -EFAULT;
-	      break;
-	    }
+	   for(i = 7; i >= 0; i--)
+	     {
+	       psa.psa_encryption_key[i] = key & 0xFF;
+	       key >>= 8;
+	     }
+           psa.psa_encryption_select = 1;
+	   psa_write(ioaddr, lp->hacr,
+		     (char *) &psa.psa_encryption_select - (char *) &psa,
+		     (unsigned char *) &psa.psa_encryption_select, 8+1);
 
-	  psa.psa_encryption_select = 1;
-	  psa_write(ioaddr, lp->hacr,
+           mmc_out(ioaddr, mmwoff(0, mmw_encr_enable),
+		   MMW_ENCR_ENABLE_EN | MMW_ENCR_ENABLE_MODE);
+           mmc_write(ioaddr, mmwoff(0, mmw_encr_key),
+		     (unsigned char *) &psa.psa_encryption_key, 8);
+	 }
+       else
+	 {	/* Disable encryption. */
+	   psa.psa_encryption_select = 0;
+	   psa_write(ioaddr, lp->hacr,
+		     (char *) &psa.psa_encryption_select - (char *) &psa,
+		     (unsigned char *) &psa.psa_encryption_select, 1);
+
+	   mmc_out(ioaddr, mmwoff(0, mmw_encr_enable), 0);
+	 }
+       /* update the Wavelan checksum */
+       update_psa_checksum(dev, ioaddr, lp->hacr);
+       break;
+
+     case SIOCGIWENCODE:
+       /* Read the encryption key. */
+       if(!mmc_encr(ioaddr))
+	 {
+	   ret = -EOPNOTSUPP;
+	   break;
+	 }
+
+       /* Only super-user can see encryption key. */
+       if(!suser())
+	 {
+	   ret = -EPERM;
+	   break;
+	 }
+       else
+	 {
+	   int		i;
+	   long long	key = 0;
+
+	   psa_read(ioaddr, lp->hacr,
 		    (char *) &psa.psa_encryption_select - (char *) &psa,
-		    (unsigned char *) &psa.psa_encryption_select, 8+1);
+		    (unsigned char *) &psa.psa_encryption_select, 1+8);
+	   for(i = 0; i < 8; i++)
+	     {
+	       key <<= 8;
+	       key += psa.psa_encryption_key[i];
+	     }
+	   wrq->u.encoding.code = key;
 
-	  mmc_out(ioaddr, mmwoff(0, mmw_encr_enable),
-		  MMW_ENCR_ENABLE_EN | MMW_ENCR_ENABLE_MODE);
-	  mmc_write(ioaddr, mmwoff(0, mmw_encr_key),
-		    (unsigned char *) &psa.psa_encryption_key, 8);
-	}
-
-      if(wrq->u.encoding.flags & IW_ENCODE_DISABLED)
-	{	/* disable encryption */
-	  psa.psa_encryption_select = 0;
-	  psa_write(ioaddr, lp->hacr,
-		    (char *) &psa.psa_encryption_select - (char *) &psa,
-		    (unsigned char *) &psa.psa_encryption_select, 1);
-
-	  mmc_out(ioaddr, mmwoff(0, mmw_encr_enable), 0);
-	}
-      /* update the Wavelan checksum */
-      update_psa_checksum(dev, ioaddr, lp->hacr);
-      break;
-
-    case SIOCGIWENCODE:
-      /* Read the encryption key */
-      if(!mmc_encr(ioaddr))
-	{
-	  ret = -EOPNOTSUPP;
-	  break;
-	}
-
-      /* only super-user can see encryption key */
-      if(!suser())
-	{
-	  ret = -EPERM;
-	  break;
-	}
-
-      /* Basic checking... */
-      if(wrq->u.encoding.pointer != (caddr_t) 0)
-	{
-	  /* Verify the user buffer */
-	  ret = verify_area(VERIFY_WRITE, wrq->u.encoding.pointer, 8);
-	  if(ret)
-	    break;
-
-	  psa_read(ioaddr, lp->hacr,
-		   (char *) &psa.psa_encryption_select - (char *) &psa,
-		   (unsigned char *) &psa.psa_encryption_select, 1+8);
-
-	  /* encryption is enabled ? */
-	  if(psa.psa_encryption_select)
-	    wrq->u.encoding.flags = IW_ENCODE_ENABLED;
-	  else
-	    wrq->u.encoding.flags = IW_ENCODE_DISABLED;
-	  wrq->u.encoding.flags |= mmc_encr(ioaddr);
-
-	  /* Copy the key to the user buffer */
-	  wrq->u.encoding.length = 8;
-	  if(copy_to_user(wrq->u.encoding.pointer, psa.psa_encryption_key, 8))
-	    ret = -EFAULT;
-	}
-      break;
+	   /* encryption is enabled */
+	   if(psa.psa_encryption_select)
+	     wrq->u.encoding.method = mmc_encr(ioaddr);
+	   else
+	     wrq->u.encoding.method = 0;
+	 }
+       break;
 
     case SIOCGIWRANGE:
       /* basic checking */
@@ -2104,11 +2087,17 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	{
 	  struct iw_range	range;
 
+	  /* Verify the user buffer. */
+	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
+			    sizeof(struct iw_range));
+	  if(ret)
+	    break;
+
 	  /* Set the length (useless:  it's constant). */
 	  wrq->u.data.length = sizeof(struct iw_range);
 
 	  /* Set information in the range struct.  */
-	  range.throughput = 1.6 * 1000 * 1000;	/* don't argue on this ! */
+	  range.throughput = 1.6 * 1024 * 1024;	/* don't argue on this ! */
 	  range.min_nwid = 0x0000;
 	  range.max_nwid = 0xFFFF;
 
@@ -2128,25 +2117,9 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  range.max_qual.level = MMR_SIGNAL_LVL;
 	  range.max_qual.noise = MMR_SILENCE_LVL;
 
-	  range.num_bitrates = 1;
-	  range.bitrate[0] = 2000000;	/* 2 Mb/s */
-
-	  /* Encryption supported ? */
-	  if(mmc_encr(ioaddr))
-	    {
-	      range.encoding_size[0] = 8;	/* DES = 64 bits key */
-	      range.num_encoding_sizes = 1;
-	      range.max_encoding_tokens = 1;	/* Only one key possible */
-	    }
-	  else
-	    {
-	      range.num_encoding_sizes = 0;
-	      range.max_encoding_tokens = 0;
-	    }
-
 	  /* Copy structure to the user buffer. */
-	  if (copy_to_user(wrq->u.data.pointer, &range, sizeof(struct iw_range)))
-	  	ret = -EFAULT;
+	  copy_to_user(wrq->u.data.pointer, &range,
+		       sizeof(struct iw_range));
 	}
       break;
 
@@ -2163,12 +2136,18 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	    { SIOCGIPHISTO, 0,	    IW_PRIV_TYPE_INT | 16, "gethisto" },
 	  };
 
+	  /* Verify the user buffer. */
+	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
+			    sizeof(priv));
+	  if(ret)
+	    break;
+
 	  /* Set the number of available ioctls. */
 	  wrq->u.data.length = 4;
 
 	  /* Copy structure to the user buffer. */
-	  if (copy_to_user(wrq->u.data.pointer, (u_char *) priv, sizeof(priv)))
-	  	ret = -EFAULT;
+	  copy_to_user(wrq->u.data.pointer, (u_char *) priv,
+		       sizeof(priv));
 	}
       break;
 
@@ -2190,11 +2169,14 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  struct sockaddr	address[IW_MAX_SPY];
 	  int			i;
 
+	  /* Verify where the user has set his addresses. */
+	  ret = verify_area(VERIFY_READ, wrq->u.data.pointer,
+			    sizeof(struct sockaddr) * lp->spy_number);
+	  if(ret)
+	    break;
 	  /* Copy addresses to the driver. */
-	  if (copy_from_user(address, wrq->u.data.pointer, sizeof(struct sockaddr) * lp->spy_number)) {
-	  	ret = -EFAULT;
-	  	break;
-	  }
+	  copy_from_user(address, wrq->u.data.pointer,
+			 sizeof(struct sockaddr) * lp->spy_number);
 
 	  /* Copy addresses to the lp structure. */
 	  for(i = 0; i < lp->spy_number; i++)
@@ -2233,6 +2215,13 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  struct sockaddr	address[IW_MAX_SPY];
 	  int			i;
 
+	  /* Verify the user buffer. */
+	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
+			    (sizeof(iw_qual) + sizeof(struct sockaddr))
+			    * IW_MAX_SPY);
+	  if(ret)
+	    break;
+
 	  /* Copy addresses from the lp structure. */
 	  for(i = 0; i < lp->spy_number; i++)
 	    {
@@ -2242,18 +2231,13 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	    }
 
 	  /* Copy addresses to the user buffer. */
-	  if (copy_to_user(wrq->u.data.pointer, address, sizeof(struct sockaddr) * lp->spy_number)) {
-	  	ret = -EFAULT;
-	  	break;
-	  }
-	  	
+	  copy_to_user(wrq->u.data.pointer, address,
+		       sizeof(struct sockaddr) * lp->spy_number);
+
 	  /* Copy stats to the user buffer (just after). */
-	  if (copy_to_user(wrq->u.data.pointer +
+	  copy_to_user(wrq->u.data.pointer +
 		       (sizeof(struct sockaddr) * lp->spy_number),
-		       lp->spy_stat, sizeof(iw_qual) * lp->spy_number)) {
-		       		ret = -EFAULT;
-		       		break;
-	  }
+		       lp->spy_stat, sizeof(iw_qual) * lp->spy_number);
 
 	  /* Reset updated flags. */
 	  for(i = 0; i < lp->spy_number; i++)
@@ -2267,10 +2251,7 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIPQTHR:
       if(!suser())
-        {
-	  ret = -EPERM;
-	  break;
-	}
+	return -EPERM;
       psa.psa_quality_thr = *(wrq->u.name) & 0x0F;
       psa_write(ioaddr, lp->hacr, (char *)&psa.psa_quality_thr - (char *)&psa,
 	       (unsigned char *)&psa.psa_quality_thr, 1);
@@ -2289,10 +2270,7 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
     case SIOCSIPHISTO:
       /* Verify that the user is root. */
       if(!suser())
-        {
-	  ret = -EPERM;
-	  break;
-	}
+	return -EPERM;
 
       /* Check the number of intervals. */
       if(wrq->u.data.length > 16)
@@ -2305,11 +2283,14 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Are there addresses to copy? */
       if(lp->his_number > 0)
 	{
+	  /* Verify where the user has set his addresses. */
+	  ret = verify_area(VERIFY_READ, wrq->u.data.pointer,
+			    sizeof(char) * lp->his_number);
+	  if(ret)
+	    break;
 	  /* Copy interval ranges to the driver */
-	  if (copy_from_user(lp->his_range, wrq->u.data.pointer, sizeof(char) * lp->his_number)) {
-	  	ret = -EFAULT;
-	  	break;
-	  }
+	  copy_from_user(lp->his_range, wrq->u.data.pointer,
+			 sizeof(char) * lp->his_number);
 
 	  /* Reset structure. */
 	  memset(lp->his_sum, 0x00, sizeof(long) * 16);
@@ -2323,10 +2304,15 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Give back the distribution statistics */
       if((lp->his_number > 0) && (wrq->u.data.pointer != (caddr_t) 0))
 	{
+	  /* Verify the user buffer. */
+	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
+			    sizeof(long) * 16);
+	  if(ret)
+	    break;
+
 	  /* Copy data to the user buffer. */
-	  if (copy_to_user(wrq->u.data.pointer, lp->his_sum, sizeof(long) * lp->his_number)) 
-			ret = -EFAULT;
-			
+	  copy_to_user(wrq->u.data.pointer, lp->his_sum,
+		       sizeof(long) * lp->his_number);
 	}	/* if(pointer != NULL) */
       break;
 #endif	/* HISTOGRAM */
@@ -4279,11 +4265,6 @@ init_module(void)
 
 	  /* Create device and set basic arguments. */
 	  dev = kmalloc(sizeof(struct device), GFP_KERNEL);
-	  if(dev==NULL)
-	  {
-	  	ret = -ENOMEM;
-	  	break;
-	  }
 	  memset(dev, 0x00, sizeof(struct device));
 	  dev->name = name[i];
 	  dev->base_addr = io[i];

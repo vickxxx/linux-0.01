@@ -10,7 +10,7 @@
  * Multi-arch abstraction and asm macros for easier reading:
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  *
- * $Id: r6000_fpu.S,v 1.5 1999/05/01 22:40:37 ralf Exp $
+ * $Id: r6000_fpu.S,v 1.3 1997/12/01 16:56:56 ralf Exp $
  */
 #include <asm/asm.h>
 #include <asm/fpregdef.h>
@@ -19,7 +19,6 @@
 #include <asm/regdef.h>
 
 	.set	noreorder
-	.set	mips2
 	/* Save floating point context */
 	LEAF(r6000_save_fp_context)
 	mfc0	t0,CP0_STATUS
@@ -51,11 +50,11 @@
 	 nop
 	END(r6000_save_fp_context)
 
-/* Restore FPU state:
+/* Restore fpu state:
  *  - fp gp registers
  *  - cp1 status/control register
  *
- * We base the decision which registers to restore from the signal stack
+ * We base the decission which registers to restore from the signal stack
  * frame on the current content of c0_status, not on the content of the
  * stack frame which might have been changed by the user.
  */

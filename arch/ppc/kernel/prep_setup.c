@@ -33,7 +33,6 @@
 #include <linux/timex.h>
 #include <linux/pci.h>
 #include <linux/openpic.h>
-#include <linux/delay.h>
 
 #include <asm/mmu.h>
 #include <asm/processor.h>
@@ -47,10 +46,9 @@
 #include <asm/mk48t59.h>
 #include <asm/prep_nvram.h>
 #include <asm/raven.h>
-#include <asm/keyboard.h>
-#include <asm/time.h>
-#include <asm/vga.h>
 
+
+#include "time.h"
 #include "local_irq.h"
 #include "i8259.h"
 #include "open_pic.h"
@@ -86,6 +84,7 @@ extern void pckbd_init_hw(void);
 extern unsigned char pckbd_sysrq_xlate[128];
 
 extern void prep_setup_pci_ptrs(void);
+extern void chrp_do_IRQ(struct pt_regs *regs, int cpu, int isfake);
 extern char saved_command_line[256];
 
 int _prep_type;
@@ -102,11 +101,15 @@ unsigned long empty_zero_page[1024];
 extern PTE *Hash, *Hash_end;
 extern unsigned long Hash_size, Hash_mask;
 extern int probingmem;
+extern unsigned long loops_per_sec;
 
 #ifdef CONFIG_BLK_DEV_RAM
 extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
 extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
 extern int rd_image_start;	/* starting block # of image */
+#endif
+#ifdef CONFIG_VGA_CONSOLE
+unsigned long vgacon_remap_base;
 #endif
 
 __prep
@@ -216,7 +219,7 @@ prep_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
 	unsigned char ucEquipPres1;
 
 	/* init to some ~sane value until calibrate_delay() runs */
-	loops_per_jiffy = 50000000/HZ;
+	loops_per_sec = 50000000;
 	
 	/* Set up floppy in PS/2 mode */
 	outb(0x09, SIO_CONFIG_RA);
@@ -246,7 +249,7 @@ prep_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
 		ROOT_DEV = to_kdev_t(0x0801); /* sda1 */
 		break;
 	case _PREP_Radstone:
-		ROOT_DEV = to_kdev_t(0x0802); /* sda2 */
+		ROOT_DEV = to_kdev_t(0x0801); /* sda1 */
 
 		/*
 		 * Determine system type
@@ -605,7 +608,6 @@ prep_init_IRQ(void))
 	int i;
 
 	if (OpenPIC != NULL) {
-		open_pic.irq_offset = 16;
 		for ( i = 16 ; i < 36 ; i++ )
 			irq_desc[i].ctl = &open_pic;
 		openpic_init(1);
@@ -615,14 +617,8 @@ prep_init_IRQ(void))
                 irq_desc[i].ctl = &i8259_pic;
         i8259_init();
 #ifdef __SMP__
-	request_irq(OPENPIC_VEC_IPI, openpic_ipi_action,
+	request_irq(openpic_to_irq(OPENPIC_VEC_SPURIOUS), openpic_ipi_action,
 		    0, "IPI0", 0);
-	request_irq(OPENPIC_VEC_IPI+1, openpic_ipi_action,
-		    0, "IPI1 (invalidate TLB)", 0);
-	request_irq(OPENPIC_VEC_IPI+2, openpic_ipi_action,
-		    0, "IPI2 (stop CPU)", 0);
-	request_irq(OPENPIC_VEC_IPI+3, openpic_ipi_action,
-		    0, "IPI3 (reschedule)", 0);
 #endif /* __SMP__ */
 }
 
@@ -633,36 +629,25 @@ prep_init_IRQ(void))
 void
 prep_ide_insw(ide_ioreg_t port, void *buf, int ns)
 {
-	ide_insw(((port)+(_IO_BASE)), buf, ns);
+	_insw((unsigned short *)((port)+_IO_BASE), buf, ns);
 }
 
 void
 prep_ide_outsw(ide_ioreg_t port, void *buf, int ns)
 {
-	ide_outsw(((port)+_IO_BASE), buf, ns);
+	_outsw((unsigned short *)((port)+_IO_BASE), buf, ns);
 }
 
 int
 prep_ide_default_irq(ide_ioreg_t base)
 {
-	if ( _prep_type == _PREP_IBM ) {
-		switch (base) {
-			case 0x1f0: return 13;
-			case 0x170: return 13;
-			case 0x1e8: return 11;
-			case 0x168: return 10;
-			default:
-				return 0;
-		}
-	} else {
-		switch (base) {
-			case 0x1f0: return 14;
-			case 0x170: return 14;
-			case 0x1e8: return 15;
-			case 0x168: return 15;
-			default:
-				return 0;
-		}
+	switch (base) {
+		case 0x1f0: return 13;
+		case 0x170: return 13;
+		case 0x1e8: return 11;
+		case 0x168: return 10;
+		default:
+                        return 0;
 	}
 }
 
@@ -703,7 +688,6 @@ prep_ide_release_region(ide_ioreg_t from,
 void
 prep_ide_fix_driveid(struct hd_driveid *id)
 {
-	ppc_generic_ide_fix_driveid(id);
 }
 
 __initfunc(void
@@ -720,27 +704,15 @@ prep_ide_init_hwif_ports (ide_ioreg_t *p, ide_ioreg_t base, int *irq))
 }
 #endif
 
-unsigned long *MotSave_SmpIar;
-unsigned char *MotSave_CpusState[2];
-
 __initfunc(void
 prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	  unsigned long r6, unsigned long r7))
 {
-	RESIDUAL *old_res = (RESIDUAL *)(r3 + KERNELBASE);
-
 	/* make a copy of residual data */
 	if ( r3 )
 	{
 		memcpy((void *)res,(void *)(r3+KERNELBASE),
 		       sizeof(RESIDUAL));
-
-		/* These need to be saved for the Motorola Prep 
-		 * MVME4600 and Dual MTX boards.
-		 */
-		MotSave_SmpIar = &old_res->VitalProductData.SmpIar;
-		MotSave_CpusState[0] = &old_res->Cpus[0].CpuState;
-		MotSave_CpusState[1] = &old_res->Cpus[1].CpuState;
 	}
 
 	isa_io_base = PREP_ISA_IO_BASE;
@@ -795,8 +767,10 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.get_cpuinfo    = prep_get_cpuinfo;
 	ppc_md.irq_cannonicalize = prep_irq_cannonicalize;
 	ppc_md.init_IRQ       = prep_init_IRQ;
-	/* this gets changed later on if we have an OpenPIC -- Cort */
-	ppc_md.do_IRQ         = prep_do_IRQ;
+	if ( !OpenPIC )
+		ppc_md.do_IRQ         = prep_do_IRQ;
+	else
+		ppc_md.do_IRQ         = chrp_do_IRQ;
 	ppc_md.init           = NULL;
 
 	ppc_md.restart        = prep_restart;
@@ -861,8 +835,7 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.kbd_leds          = pckbd_leds;
 	ppc_md.kbd_init_hw       = pckbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.sysrq_xlate	 = pckbd_sysrq_xlate;
-	SYSRQ_KEY		 = 0x54;
+	ppc_md.kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
 #endif
 #endif
 }

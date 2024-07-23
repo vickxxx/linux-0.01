@@ -3,7 +3,7 @@
 
 #include <linux/config.h>
 
-#if !defined(CONFIG_KGDB) && !defined(CONFIG_FTRACE)
+#ifndef CONFIG_KGDB
 
 #define __init __attribute__ ((__section__ (".text.init")))
 #define __initdata __attribute__ ((__section__ (".data.init")))

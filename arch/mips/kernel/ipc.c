@@ -1,4 +1,5 @@
-/* $Id$
+/*
+ * linux/arch/mips/kernel/ipc.c
  *
  * This file contains various random system calls that
  * have a non-standard calling sequence on the Linux/MIPS
@@ -21,92 +22,106 @@
  *
  * This is really horribly ugly.  FIXME: Get rid of this wrapper.
  */
-asmlinkage int sys_ipc (uint call, int first, int second,
-			int third, void *ptr, long fifth)
+asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 {
 	int version, ret;
 
+	lock_kernel();
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
 	if (call <= SEMCTL)
 		switch (call) {
 		case SEMOP:
-			return sys_semop (first, (struct sembuf *)ptr, second);
+			ret = sys_semop (first, (struct sembuf *)ptr, second);
+			goto out;
 		case SEMGET:
-			return sys_semget (first, second, third);
+			ret = sys_semget (first, second, third);
+			goto out;
 		case SEMCTL: {
 			union semun fourth;
+			ret = -EINVAL;
 			if (!ptr)
-				return -EINVAL;
+				goto out;
+			ret = -EFAULT;
 			if (get_user(fourth.__pad, (void **) ptr))
-				return -EFAULT;
-			return sys_semctl (first, second, third, fourth);
+				goto out;	
+			ret = sys_semctl (first, second, third, fourth);
+			goto out;
 			}
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
-
 	if (call <= MSGCTL) 
 		switch (call) {
 		case MSGSND:
-			return sys_msgsnd (first, (struct msgbuf *) ptr, 
+			ret = sys_msgsnd (first, (struct msgbuf *) ptr, 
 					  second, third);
+			goto out;
 		case MSGRCV:
 			switch (version) {
 			case 0: {
 				struct ipc_kludge tmp;
+				ret = -EINVAL;
 				if (!ptr)
-					return -EINVAL;
-				
-				if (copy_from_user(&tmp,
-						   (struct ipc_kludge *) ptr, 
-						   sizeof (tmp)))
-					return -EFAULT;
-				return sys_msgrcv (first, tmp.msgp, second,
-						   tmp.msgtyp, third);
+					goto out;
+				ret = -EFAULT;
+				if (copy_from_user(&tmp,(struct ipc_kludge *) ptr, 
+								   sizeof (tmp)))
+					goto out; 	
+				ret = sys_msgrcv (first, tmp.msgp, second, tmp.msgtyp, third);
+				goto out;
 				}
-			default:
-				return sys_msgrcv (first,
-						   (struct msgbuf *) ptr,
-						   second, fifth, third);
+			case 1: default:
+				ret = sys_msgrcv (first, (struct msgbuf *) ptr, second, fifth, third);
+				goto out;
 			}
 		case MSGGET:
-			return sys_msgget ((key_t) first, second);
+			ret = sys_msgget ((key_t) first, second);
+			goto out;
 		case MSGCTL:
-			return sys_msgctl (first, second,
-					   (struct msqid_ds *) ptr);
+			ret = sys_msgctl (first, second, (struct msqid_ds *) ptr);
+			goto out;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 	if (call <= SHMCTL) 
 		switch (call) {
 		case SHMAT:
 			switch (version) {
-			default: {
+			case 0: default: {
 				ulong raddr;
-				ret = sys_shmat (first, (char *) ptr,
-						 second, &raddr);
+				ret = sys_shmat (first, (char *) ptr, second, &raddr);
 				if (ret)
-					return ret;
-				return put_user (raddr, (ulong *) third);
+					goto out;
+				ret = put_user (raddr, (ulong *) third);
+				goto out;
 			}
 			case 1:	/* iBCS2 emulator entry point */
+				ret = -EINVAL;
 				if (!segment_eq(get_fs(), get_ds()))
-					return -EINVAL;
-				return sys_shmat (first, (char *) ptr,
-						  second, (ulong *) third);
+					goto out;
+				ret = sys_shmat (first, (char *) ptr, second, (ulong *) third);
+				goto out;
 			}
 		case SHMDT: 
-			return sys_shmdt ((char *)ptr);
+			ret = sys_shmdt ((char *)ptr);
+			goto out;
 		case SHMGET:
-			return sys_shmget (first, second, third);
+			ret = sys_shmget (first, second, third);
+			goto out;
 		case SHMCTL:
-			return sys_shmctl (first, second,
-					   (struct shmid_ds *) ptr);
+			ret = sys_shmctl (first, second, (struct shmid_ds *) ptr);
+			goto out;
 		default:
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
-	
-	return -EINVAL;
+	else
+		ret = -EINVAL;
+out:
+	unlock_kernel();
+	return ret;
 }

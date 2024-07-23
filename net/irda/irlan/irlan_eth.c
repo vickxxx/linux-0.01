@@ -6,13 +6,13 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Thu Oct 15 08:37:58 1998
- * Modified at:   Fri Apr 21 14:54:42 2000
+ * Modified at:   Thu Apr 22 14:26:39 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * Sources:       skeleton.c by Donald Becker <becker@CESDIS.gsfc.nasa.gov>
  *                slip.c by Laurence Culhane,   <loz@holmes.demon.co.uk>
  *                          Fred N. van Kempen, <waltje@uwalt.nl.mugnet.org>
  * 
- *     Copyright (c) 1998-2000 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 1998 Dag Brattli, All Rights Reserved.
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -29,7 +29,6 @@
 #include <linux/etherdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/if_arp.h>
-#include <linux/random.h>
 #include <net/arp.h>
 
 #include <net/irda/irda.h>
@@ -47,9 +46,10 @@
  */
 int irlan_eth_init(struct device *dev)
 {
+	struct irmanager_event mgr_event;
 	struct irlan_cb *self;
 
-	IRDA_DEBUG(2, __FUNCTION__"()\n");
+	DEBUG(0, __FUNCTION__"()\n");
 
 	ASSERT(dev != NULL, return -1;);
        
@@ -65,25 +65,36 @@ int irlan_eth_init(struct device *dev)
 	
 	ether_setup(dev);
 	
-	/* 
-	 * Lets do all queueing in IrTTP instead of this device driver.
-	 * Queueing here as well can introduce some strange latency
-	 * problems, which we will avoid by setting the queue size to 0.
-	 */
-	dev->tx_queue_len = 0;
+	dev->tx_queue_len = TTP_MAX_QUEUE;
 
-	if (self->provider.access_type == ACCESS_DIRECT) {
-		/*  
-		 * Since we are emulating an IrLAN sever we will have to
-		 * give ourself an ethernet address!  
-		 */
-		dev->dev_addr[0] = 0x40;
-		dev->dev_addr[1] = 0x00;
-		dev->dev_addr[2] = 0x00;
-		dev->dev_addr[3] = 0x00;
-		get_random_bytes(dev->dev_addr+4, 1);
-		get_random_bytes(dev->dev_addr+5, 1);
-	}
+#if 0
+	/*  
+	 *  OK, since we are emulating an IrLAN sever we will have to give
+	 *  ourself an ethernet address!
+	 *  FIXME: this must be more dynamically
+	 */
+	dev->dev_addr[0] = 0x40;
+	dev->dev_addr[1] = 0x00;
+	dev->dev_addr[2] = 0x00;
+	dev->dev_addr[3] = 0x00;
+	dev->dev_addr[4] = 0x23;
+	dev->dev_addr[5] = 0x45;
+#endif
+	/* 
+	 * Network device has now been registered, so tell irmanager about
+	 * it, so it can be configured with network parameters
+	 */
+	mgr_event.event = EVENT_IRLAN_START;
+	sprintf(mgr_event.devname, "%s", self->ifname);
+	irmanager_notify(&mgr_event);
+
+	/* 
+	 * We set this so that we only notify once, since if 
+	 * configuration of the network device fails, the user
+	 * will have to sort it out first anyway. No need to 
+	 * try again.
+	 */
+	self->notify_irmanager = FALSE;
 
 	return 0;
 }
@@ -98,7 +109,7 @@ int irlan_eth_open(struct device *dev)
 {
 	struct irlan_cb *self;
 	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	DEBUG(0, __FUNCTION__ "()\n");
 
 	ASSERT(dev != NULL, return -1;);
 
@@ -107,12 +118,13 @@ int irlan_eth_open(struct device *dev)
 	ASSERT(self != NULL, return -1;);
 
 	/* Ready to play! */
- 	dev->tbusy = 1; /* Wait until data link is ready */
+/* 	dev->tbusy = 0; */ /* Wait until data link is ready */
 	dev->interrupt = 0;
-	dev->start = 0;
+	dev->start = 1;
+
+	self->notify_irmanager = TRUE;
 
 	/* We are now open, so time to do some work */
-	self->disconnect_reason = 0;
 	irlan_client_wakeup(self, self->saddr, self->daddr);
 
 	irlan_mod_inc_use_count();
@@ -131,9 +143,8 @@ int irlan_eth_open(struct device *dev)
 int irlan_eth_close(struct device *dev)
 {
 	struct irlan_cb *self = (struct irlan_cb *) dev->priv;
-	struct sk_buff *skb;
-	
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+
+	DEBUG(0, __FUNCTION__ "()\n");
 	
 	/* Stop device */
 	dev->tbusy = 1;
@@ -142,16 +153,19 @@ int irlan_eth_close(struct device *dev)
 	irlan_mod_dec_use_count();
 
 	irlan_close_data_channel(self);
+
 	irlan_close_tsaps(self);
 
 	irlan_do_client_event(self, IRLAN_LMP_DISCONNECT, NULL);
 	irlan_do_provider_event(self, IRLAN_LMP_DISCONNECT, NULL);	
 	
-	/* Remove frames queued on the control channel */
-	while ((skb = skb_dequeue(&self->client.txq))) {
-		dev_kfree_skb(skb);
-	}
-	self->client.tx_busy = 0;
+	irlan_start_watchdog_timer(self, IRLAN_TIMEOUT);
+
+	/* Device closed by user! */
+	if (self->notify_irmanager)
+		self->notify_irmanager = FALSE;
+	else
+		self->notify_irmanager = TRUE;
 
 	return 0;
 }
@@ -165,58 +179,76 @@ int irlan_eth_close(struct device *dev)
 int irlan_eth_xmit(struct sk_buff *skb, struct device *dev)
 {
 	struct irlan_cb *self;
-	int ret;
 
+	DEBUG(4, __FUNCTION__ "()\n");
+	
 	self = (struct irlan_cb *) dev->priv;
 
 	ASSERT(self != NULL, return 0;);
 	ASSERT(self->magic == IRLAN_MAGIC, return 0;);
 
-	/* Check if IrTTP can accept more frames */
-	if (dev->tbusy)
-		return -EBUSY;
+	/* Lock transmit buffer */
+	if (irda_lock((void *) &dev->tbusy) == FALSE) {
+		/*
+		 * If we get here, some higher level has decided we are broken.
+		 * There should really be a "kick me" function call instead.
+		 */
+		int tickssofar = jiffies - dev->trans_start; 
+		
+		if (tickssofar < 5) 
+ 			return -EBUSY;
+		
+ 		dev->tbusy = 0;
+ 		dev->trans_start = jiffies;
+	}
 	
-	/* skb headroom large enough to contain all IrDA-headers? */
-	if ((skb_headroom(skb) < self->max_header_size) || (skb_shared(skb))) {
+	DEBUG(4, "Room left at head: %d\n", skb_headroom(skb));
+	DEBUG(4, "Room left at tail: %d\n", skb_tailroom(skb));
+	DEBUG(4, "Required room: %d\n", IRLAN_MAX_HEADER);
+	
+	/* skb headroom large enough to contain IR-headers? */
+	if ((skb_headroom(skb) < IRLAN_MAX_HEADER) || (skb_shared(skb))) {
 		struct sk_buff *new_skb = 
-			skb_realloc_headroom(skb, self->max_header_size);
+			skb_realloc_headroom(skb, IRLAN_MAX_HEADER);
+		ASSERT(new_skb != NULL, return 0;);
+		ASSERT(skb_headroom(new_skb) >= IRLAN_MAX_HEADER, return 0;);
 
-		/*  We have to free the original skb anyway */
+		/*  Free original skb, and use the new one */
 		dev_kfree_skb(skb);
-
-		/* Did the realloc succeed? */
-		if (new_skb == NULL)
-			return 0;
-
-		/* Use the new skb instead */
 		skb = new_skb;
 	} 
 
 	dev->trans_start = jiffies;
+	self->stats.tx_packets++;
+	self->stats.tx_bytes += skb->len; 
 
-	/* Now queue the packet in the transport layer */
-	if (self->use_udata)
-		ret = irttp_udata_request(self->tsap_data, skb);
-	else
-		ret = irttp_data_request(self->tsap_data, skb);
+	/*
+	 *  Now queue the packet in the transport layer
+	 *  FIXME: clean up the code below! DB
+	 */
+	if (self->use_udata) {
+		irttp_udata_request(self->tsap_data, skb);
+		dev->tbusy = 0;
+	
+		return 0;
+	}
 
-	if (ret < 0) {
-		/*   
-		 * IrTTPs tx queue is full, so we just have to
-		 * drop the frame! You might think that we should
-		 * just return -1 and don't deallocate the frame,
-		 * but that is dangerous since it's possible that
-		 * we have replaced the original skb with a new
-		 * one with larger headroom, and that would really
-		 * confuse do_dev_queue_xmit() in dev.c! I have
-		 * tried :-) DB 
+	if (irttp_data_request(self->tsap_data, skb) == -1) {
+		/*  
+		 *  IrTTPs tx queue is full, so we just have to drop the
+		 *  frame! You might think that we should just return -1
+		 *  and don't deallocate the frame, but that is dangerous
+		 *  since it's possible that we have replaced the original
+		 *  skb with a new one with larger headroom, and that would
+		 *  really confuse do_dev_queue_xmit() in dev.c! I have
+		 *  tried :-) DB
 		 */
 		dev_kfree_skb(skb);
-		self->stats.tx_dropped++;
-	} else {
-		self->stats.tx_packets++;
-		self->stats.tx_bytes += skb->len; 
+		++self->stats.tx_dropped;
+		
+		return 0;
 	}
+	dev->tbusy = 0; /* Finished! */
 	
 	return 0;
 }
@@ -233,6 +265,9 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
 
 	self = (struct irlan_cb *) instance;
 
+	ASSERT(self != NULL, return 0;);
+	ASSERT(self->magic == IRLAN_MAGIC, return 0;);
+
 	if (skb == NULL) {
 		++self->stats.rx_dropped; 
 		return 0;
@@ -247,11 +282,11 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
 	skb->dev = &self->dev;
 	skb->protocol=eth_type_trans(skb, skb->dev); /* Remove eth header */
 	
+	netif_rx(skb);   /* Eat it! */
+	
 	self->stats.rx_packets++;
 	self->stats.rx_bytes += skb->len; 
 
-	netif_rx(skb);   /* Eat it! */
-	
 	return 0;
 }
 
@@ -259,14 +294,14 @@ int irlan_eth_receive(void *instance, void *sap, struct sk_buff *skb)
  * Function irlan_eth_flow (status)
  *
  *    Do flow control between IP/Ethernet and IrLAN/IrTTP. This is done by 
- *    controlling the dev->tbusy variable. Currently not used, since we
- *    just drop the frames instead of asking the client layer to buffer 
- *    them.
+ *    controlling the dev->tbusy variable.
  */
 void irlan_eth_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 {
 	struct irlan_cb *self;
 	struct device *dev;
+
+	DEBUG(4, __FUNCTION__ "()\n");
 
 	self = (struct irlan_cb *) instance;
 
@@ -279,16 +314,26 @@ void irlan_eth_flow_indication(void *instance, void *sap, LOCAL_FLOW flow)
 	
 	switch (flow) {
 	case FLOW_STOP:
+		DEBUG(4, "IrLAN, stopping Ethernet layer\n");
+
 		dev->tbusy = 1;
 		break;
 	case FLOW_START:
-	default:
-		/* Tell upper layers that its time to transmit frames again */
+		/* 
+		 *  Tell upper layers that its time to transmit frames again
+		 */
+		DEBUG(4, "IrLAN, starting Ethernet layer\n");
+
 		dev->tbusy = 0;
 
-		/* Schedule network layer */
+		/* 
+		 *  Ready to receive more frames, so schedule the network
+		 *  layer
+		 */
 		mark_bh(NET_BH);		
 		break;
+	default:
+		DEBUG(0, __FUNCTION__ "(), Unknown flow command!\n");
 	}
 }
 
@@ -315,7 +360,7 @@ void irlan_eth_rebuild_header(void *buff, struct device *dev,
  *    Send gratuitous ARP to announce that we have changed
  *    hardware address, so that all peers updates their ARP tables
  */
-void irlan_eth_send_gratuitous_arp(struct device *dev)
+void irlan_etc_send_gratuitous_arp(struct device *dev) 
 {
 	struct in_device *in_dev;
 
@@ -324,15 +369,13 @@ void irlan_eth_send_gratuitous_arp(struct device *dev)
 	 * is useful if we have changed access points on the same
 	 * subnet.  
 	 */
-#ifdef CONFIG_INET
-	IRDA_DEBUG(4, "IrLAN: Sending gratuitous ARP\n");
+	DEBUG(4, "IrLAN: Sending gratuitous ARP\n");
 	in_dev = dev->ip_ptr;
 	arp_send(ARPOP_REQUEST, ETH_P_ARP, 
 		 in_dev->ifa_list->ifa_address,
-		 dev, 
+		 &dev, 
 		 in_dev->ifa_list->ifa_address,
 		 NULL, dev->dev_addr, NULL);
-#endif /* CONFIG_INET */
 }
 
 /*
@@ -348,44 +391,42 @@ void irlan_eth_set_multicast_list(struct device *dev)
 
  	self = dev->priv; 
 
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
+	DEBUG(0, __FUNCTION__ "()\n");
+	return;
  	ASSERT(self != NULL, return;); 
  	ASSERT(self->magic == IRLAN_MAGIC, return;);
 
-	/* Check if data channel has been connected yet */
-	if (self->client.state != IRLAN_DATA) {
-		IRDA_DEBUG(1, __FUNCTION__ "(), delaying!\n");
-		return;
-	}
-
-	if (dev->flags & IFF_PROMISC) {
+	if (dev->flags&IFF_PROMISC) {
 		/* Enable promiscuous mode */
-		WARNING("Promiscous mode not implemented by IrLAN!\n");
-	} 
+		DEBUG(0, "Promiscous mode not implemented\n");
+		/* outw(MULTICAST|PROMISC, ioaddr); */
+	}
 	else if ((dev->flags & IFF_ALLMULTI) || dev->mc_count > HW_MAX_ADDRS) {
 		/* Disable promiscuous mode, use normal mode. */
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
 		/* hardware_set_filter(NULL); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else if (dev->mc_count) {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
+		DEBUG(4, __FUNCTION__ "(), Setting multicast filter\n");
 		/* Walk the address list, and load the filter */
 		/* hardware_set_filter(dev->mc_list); */
 
 		irlan_set_multicast_filter(self, TRUE);
 	}
 	else {
-		IRDA_DEBUG(4, __FUNCTION__ "(), Clearing multicast filter\n");
+		DEBUG(4, __FUNCTION__ "(), Clearing multicast filter\n");
 		irlan_set_multicast_filter(self, FALSE);
 	}
 
-	if (dev->flags & IFF_BROADCAST)
+	if (dev->flags & IFF_BROADCAST) {
+		DEBUG(4, __FUNCTION__ "(), Setting broadcast filter\n");
 		irlan_set_broadcast_filter(self, TRUE);
-	else
+	} else {
+		DEBUG(4, __FUNCTION__ "(), Clearing broadcast filter\n");
 		irlan_set_broadcast_filter(self, FALSE);
+	}
 }
 
 /*

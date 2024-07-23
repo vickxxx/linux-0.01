@@ -25,11 +25,9 @@ struct svc_cacherep {
 	unsigned char		c_state,	/* unused, inprog, done */
 				c_type,		/* status, buffer */
 				c_secure : 1;	/* req came from port < 1024 */
-	struct sockaddr_in	c_addr;
+	struct in_addr		c_client;
 	u32			c_xid;
-	u32			c_prot;
 	u32			c_proc;
-	u32			c_vers;
 	unsigned long		c_timestamp;
 	union {
 		struct svc_buf	u_buffer;

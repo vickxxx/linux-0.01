@@ -73,7 +73,5 @@ typedef unsigned long u64;
 
 #endif
 
-typedef u32 dma_addr_t;
-
 #endif /* __KERNEL__ */
 #endif /* _ALPHA_TYPES_H */

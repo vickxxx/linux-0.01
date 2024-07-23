@@ -151,8 +151,9 @@ struct dev_priv {
 	unsigned int config1;
 	unsigned int config2;
     } regs;
-    unsigned char tx_head;		/* buffer nr to insert next packet	 */
-    unsigned char tx_tail;		/* buffer nr of transmitting packet	 */
+    unsigned int tx_head;		/* address to insert next packet	 */
+    unsigned int tx_tail;		/* address of transmitting packet	 */
+    unsigned int tx_used;		/* number of 'slots' used		 */
     unsigned int rx_head;		/* address to fetch next packet from	 */
     struct enet_statistics stats;
     struct timer_list timer;

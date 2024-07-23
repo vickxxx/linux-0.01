@@ -167,9 +167,6 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		else
 			last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
-
-	if (!user_mode(regs))
-		do_profile(instruction_pointer(regs));
 }
 
 static struct irqaction timerirq = {

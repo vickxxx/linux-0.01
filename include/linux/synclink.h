@@ -1,9 +1,7 @@
 /*
  * SyncLink Multiprotocol Serial Adapter Driver
  *
- * $Id: synclink.h,v 2.2 2000/11/08 17:08:30 paul Exp $
- *
- * Copyright (C) 1998-2000 by Microgate Corporation
+ * Copyright (C) 1998 by Microgate Corporation
  * 
  * Redistribution of this file is permitted under 
  * the terms of the GNU Public License (GPL)
@@ -11,7 +9,6 @@
 
 #ifndef _SYNCLINK_H_
 #define _SYNCLINK_H_
-#define SYNCLINK_H_VERSION 2.2
 
 #define BOOLEAN int
 #define TRUE 1
@@ -51,9 +48,8 @@
 #define BIT31	0x80000000
 
 
-#define HDLC_MAX_FRAME_SIZE	65535
+#define HDLC_MAX_FRAME_SIZE	4096
 #define MAX_ASYNC_TRANSMIT	4096
-#define MAX_ASYNC_BUFFER_SIZE	4096
 
 #define ASYNC_PARITY_NONE		0
 #define ASYNC_PARITY_EVEN		1
@@ -70,20 +66,14 @@
 #define HDLC_FLAG_AUTO_RTS		0x0080
 #define HDLC_FLAG_RXC_DPLL		0x0100
 #define HDLC_FLAG_RXC_BRG		0x0200
-#define HDLC_FLAG_RXC_TXCPIN		0x8000
-#define HDLC_FLAG_RXC_RXCPIN		0x0000
 #define HDLC_FLAG_TXC_DPLL		0x0400
 #define HDLC_FLAG_TXC_BRG		0x0800
-#define HDLC_FLAG_TXC_TXCPIN		0x0000
-#define HDLC_FLAG_TXC_RXCPIN		0x0008
 #define HDLC_FLAG_DPLL_DIV8		0x1000
 #define HDLC_FLAG_DPLL_DIV16		0x2000
 #define HDLC_FLAG_DPLL_DIV32		0x0000
-#define HDLC_FLAG_HDLC_LOOPMODE		0x4000
 
 #define HDLC_CRC_NONE			0
 #define HDLC_CRC_16_CCITT		1
-#define HDLC_CRC_32_CCITT		2
 
 #define HDLC_TXIDLE_FLAGS		0
 #define HDLC_TXIDLE_ALT_ZEROS_ONES	1
@@ -97,7 +87,6 @@
 #define HDLC_ENCODING_NRZB			1
 #define HDLC_ENCODING_NRZI_MARK			2
 #define HDLC_ENCODING_NRZI_SPACE		3
-#define HDLC_ENCODING_NRZI			HDLC_ENCODING_NRZI_SPACE
 #define HDLC_ENCODING_BIPHASE_MARK		4
 #define HDLC_ENCODING_BIPHASE_SPACE		5
 #define HDLC_ENCODING_BIPHASE_LEVEL		6
@@ -135,7 +124,7 @@ typedef struct _MGSL_PARAMS
 	unsigned char	encoding;	/* NRZ, NRZI, etc. */
 	unsigned long	clock_speed;	/* external clock speed in bits per second */
 	unsigned char	addr_filter;	/* receive HDLC address filter, 0xFF = disable */
-	unsigned short	crc_type;	/* None, CRC16-CCITT, or CRC32-CCITT */
+	unsigned short	crc_type;	/* None, CRC16 or CRC16-CCITT */
 	unsigned char	preamble_length;
 	unsigned char	preamble;
 
@@ -238,19 +227,17 @@ struct mgsl_icount {
  * MGSL_IOCTXABORT	abort transmitting frame (HDLC)
  * MGSL_IOCGSTATS	return current statistics
  * MGSL_IOCWAITEVENT	wait for specified event to occur
- * MGSL_LOOPTXDONE	transmit in HDLC LoopMode done
  */
 #define MGSL_MAGIC_IOC	'm'
-#define MGSL_IOCSPARAMS		_IOW(MGSL_MAGIC_IOC,0,struct _MGSL_PARAMS)
-#define MGSL_IOCGPARAMS		_IOR(MGSL_MAGIC_IOC,1,struct _MGSL_PARAMS)
+#define MGSL_IOCSPARAMS		_IOW(MGSL_MAGIC_IOC,0,sizeof(MGSL_PARAMS))
+#define MGSL_IOCGPARAMS		_IOR(MGSL_MAGIC_IOC,1,sizeof(MGSL_PARAMS))
 #define MGSL_IOCSTXIDLE		_IO(MGSL_MAGIC_IOC,2)
 #define MGSL_IOCGTXIDLE		_IO(MGSL_MAGIC_IOC,3)
 #define MGSL_IOCTXENABLE	_IO(MGSL_MAGIC_IOC,4)
 #define MGSL_IOCRXENABLE	_IO(MGSL_MAGIC_IOC,5)
 #define MGSL_IOCTXABORT		_IO(MGSL_MAGIC_IOC,6)
 #define MGSL_IOCGSTATS		_IO(MGSL_MAGIC_IOC,7)
-#define MGSL_IOCWAITEVENT	_IOWR(MGSL_MAGIC_IOC,8,int)
+#define MGSL_IOCWAITEVENT	_IO(MGSL_MAGIC_IOC,8)
 #define MGSL_IOCCLRMODCOUNT	_IO(MGSL_MAGIC_IOC,15)
-#define MGSL_IOCLOOPTXDONE	_IO(MGSL_MAGIC_IOC,9)
 
 #endif /* _SYNCLINK_H_ */

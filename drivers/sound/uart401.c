@@ -317,8 +317,8 @@ void attach_uart401(struct address_info *hw_config)
 	{
 		printk(KERN_WARNING "uart401: Failed to allocate memory\n");
 		kfree(midi_devs[devc->my_dev]);
-		sound_unload_mididev(devc->my_dev);
 		kfree(devc);
+		sound_unload_mididev(devc->my_dev);
 		devc=NULL;
 		return;
 	}

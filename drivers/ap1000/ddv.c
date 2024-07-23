@@ -16,6 +16,7 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/fs.h>
+#include <linux/ext2_fs.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/mm.h>

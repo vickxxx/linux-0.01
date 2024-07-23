@@ -6,7 +6,6 @@
 #include <asm/machdep.h>		/* ppc_md */
 
 extern void disable_irq(unsigned int);
-extern void disable_irq_nosync(unsigned int);
 extern void enable_irq(unsigned int);
 
 #ifndef CONFIG_8xx
@@ -31,6 +30,8 @@ extern void enable_irq(unsigned int);
 #define NUM_8259_INTERRUPTS	16
 #define NUM_OPENPIC_INTERRUPTS	20
 #define is_8259_irq(n)		((n) < NUM_8259_INTERRUPTS)
+#define openpic_to_irq(n)	((n)+NUM_8259_INTERRUPTS)
+#define irq_to_openpic(n)	((n)-NUM_8259_INTERRUPTS)
 #define IRQ_8259_CASCADE	NUM_8259_INTERRUPTS
 
 #ifndef CONFIG_APUS

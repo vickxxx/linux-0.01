@@ -379,7 +379,8 @@
                           Fix bug in pci_probe() for 64 bit systems reported
 			   by <belliott@accessone.com>.
       0.533   9-Jan-98    Fix more 64 bit bugs reported by <jal@cs.brown.edu>.
-      0.534  24-Jan-98    Fix last (?) endian bug from <geert@linux-m68k.org>
+      0.534  24-Jan-98    Fix last (?) endian bug from 
+                           <Geert.Uytterhoeven@cs.kuleuven.ac.be>
       0.535  21-Feb-98    Fix Ethernet Address PROM reset bug for DC21040.
       0.536  21-Mar-98    Change pci_probe() to use the pci_dev structure.
 			  **Incompatible with 2.0.x from here.**
@@ -652,19 +653,11 @@ struct parameters {
 #define ALIGN64     ((u_long)64 - 1)    /* 16 longword align */
 #define ALIGN128    ((u_long)128 - 1)   /* 32 longword align */
 
-#ifndef __powerpc__
 #define ALIGN         ALIGN32           /* Keep the DC21040 happy... */
 #define CACHE_ALIGN   CAL_16LONG
 #define DESC_SKIP_LEN DSL_0             /* Must agree with DESC_ALIGN */
 /*#define DESC_ALIGN    u32 dummy[4];  / * Must agree with DESC_SKIP_LEN */
 #define DESC_ALIGN
-
-#else /* __powerpc__ */
-#define ALIGN         ALIGN32           /* Keep the DC21040 happy... */
-#define CACHE_ALIGN   CAL_8LONG
-#define DESC_SKIP_LEN DSL_4             /* Must agree with DESC_ALIGN */
-#define DESC_ALIGN    u32 dummy[4];  	/* Must agree with DESC_SKIP_LEN */
-#endif /* __powerpc__ */
 
 #ifndef DEC_ONLY                        /* See README.de4x5 for using this */
 static int dec_only = 0;
@@ -770,9 +763,6 @@ struct de4x5_desc {
 struct de4x5_private {
     char adapter_name[80];                  /* Adapter name                 */
     u_long interrupt;                       /* Aligned ISR flag             */
-#ifdef __powerpc__
-    u_long dummy[3];			    /* Keep rx_ring 32-byte aligned */
-#endif
     struct de4x5_desc rx_ring[NUM_RX_DESC]; /* RX descriptor ring           */
     struct de4x5_desc tx_ring[NUM_TX_DESC]; /* TX descriptor ring           */
     struct sk_buff *tx_skb[NUM_TX_DESC];    /* TX skb for freeing when sent */
@@ -3241,7 +3231,6 @@ srom_map_media(struct device *dev)
 
       case ANS:
 	lp->media = ANS;
-	lp->fdx = lp->params.fdx;
 	break;
 
       default: 
@@ -4165,7 +4154,7 @@ get_hw_addr(struct device *dev)
     /* If possible, try to fix a broken card - SMC only so far */
     srom_repair(dev, broken);
 
-#ifdef CONFIG_POWERMAC
+#ifdef CONFIG_PMAC
     /* 
     ** If the address starts with 00 a0, we have to bit-reverse
     ** each byte of the address.
@@ -4178,7 +4167,7 @@ get_hw_addr(struct device *dev)
 	    dev->dev_addr[i] = ((x & 0x55) << 1) + ((x & 0xaa) >> 1);
 	}
     }
-#endif /* CONFIG_POWERMAC */
+#endif /* CONFIG_PMAC */
 
     /* Test for a bad enet address */
     status = test_bad_enet(dev, status);
@@ -5570,15 +5559,17 @@ de4x5_ioctl(struct device *dev, struct ifreq *rq, int cmd)
     switch(ioc->cmd) {
     case DE4X5_GET_HWADDR:           /* Get the hardware address */
 	ioc->len = ETH_ALEN;
+	if (verify_area(VERIFY_WRITE, ioc->data, ioc->len)) return -EFAULT;
 	for (i=0; i<ETH_ALEN; i++) {
 	    tmp.addr[i] = dev->dev_addr[i];
 	}
-	if (copy_to_user(ioc->data, tmp.addr, ioc->len)) return -EFAULT;
+	copy_to_user(ioc->data, tmp.addr, ioc->len);
 	break;
 
     case DE4X5_SET_HWADDR:           /* Set the hardware address */
 	if (!capable(CAP_NET_ADMIN)) return -EPERM;
-	if (copy_from_user(tmp.addr, ioc->data, ETH_ALEN)) return -EFAULT;
+	if (verify_area(VERIFY_READ, ioc->data, ETH_ALEN)) return -EFAULT;
+	copy_from_user(tmp.addr, ioc->data, ETH_ALEN);
 	for (i=0; i<ETH_ALEN; i++) {
 	    dev->dev_addr[i] = tmp.addr[i];
 	}
@@ -5621,8 +5612,9 @@ de4x5_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 
     case DE4X5_GET_STATS:            /* Get the driver statistics */
 	ioc->len = sizeof(lp->pktStats);
+	if (verify_area(VERIFY_WRITE, ioc->data, ioc->len)) return -EFAULT;
 	spin_lock_irqsave(&lp->lock, flags);
-	if (copy_to_user(ioc->data, &lp->pktStats, ioc->len)) return -EFAULT; 
+	copy_to_user(ioc->data, &lp->pktStats, ioc->len); 
 	spin_unlock_irqrestore(&lp->lock, flags);
 	break;
 
@@ -5635,12 +5627,14 @@ de4x5_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 
     case DE4X5_GET_OMR:              /* Get the OMR Register contents */
 	tmp.addr[0] = inl(DE4X5_OMR);
-	if (copy_to_user(ioc->data, tmp.addr, 1)) return -EFAULT;
+	if (verify_area(VERIFY_WRITE, ioc->data, 1)) return -EFAULT;
+	copy_to_user(ioc->data, tmp.addr, 1);
 	break;
 
     case DE4X5_SET_OMR:              /* Set the OMR Register contents */
 	if (!capable(CAP_NET_ADMIN)) return -EPERM;
-	if (copy_from_user(tmp.addr, ioc->data, 1)) return -EFAULT;
+	if (verify_area(VERIFY_READ, ioc->data, 1)) return -EFAULT;
+	copy_from_user(tmp.addr, ioc->data, 1);
 	outl(tmp.addr[0], DE4X5_OMR);
 	break;
 
@@ -5655,7 +5649,8 @@ de4x5_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 	tmp.lval[6] = inl(DE4X5_STRR); j+=4;
 	tmp.lval[7] = inl(DE4X5_SIGR); j+=4;
 	ioc->len = j;
-	if (copy_to_user(ioc->data, tmp.addr, ioc->len)) return -EFAULT;
+	if (verify_area(VERIFY_WRITE, ioc->data, ioc->len)) return -EFAULT;
+	copy_to_user(ioc->data, tmp.addr, ioc->len);
 	break;
 	
 #define DE4X5_DUMP              0x0f /* Dump the DE4X5 Status */
@@ -5744,7 +5739,8 @@ de4x5_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 	tmp.addr[j++] = dev->tbusy;
 	
 	ioc->len = j;
-	if (copy_to_user(ioc->data, tmp.addr, ioc->len)) return -EFAULT;
+	if (verify_area(VERIFY_WRITE, ioc->data, ioc->len)) return -EFAULT;
+	copy_to_user(ioc->data, tmp.addr, ioc->len);
 	break;
 
 */

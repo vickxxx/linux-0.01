@@ -93,7 +93,7 @@ static int tty_drivers_read_proc(char *page, char **start, off_t off,
 		*eof = 1;
 	if (off >= len+begin)
 		return 0;
-	*start = page + (off-begin);
+	*start = page + (begin-off);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -123,7 +123,7 @@ static int tty_ldiscs_read_proc(char *page, char **start, off_t off,
 		*eof = 1;
 	if (off >= len+begin)
 		return 0;
-	*start = page + (off-begin);
+	*start = page + (begin-off);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 

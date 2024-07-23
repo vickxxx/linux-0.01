@@ -1,13 +1,5 @@
-/*
- * linux/include/asm-arm/iomd.h
- *
- * Copyright (C) 1999 Russell King
- *
- * This file contains information out the IOMD ASIC used in the
- * Acorn RiscPC and subsequently integrated into the CLPS7500 chips.
- */
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 #define __IOMD(offset)	(IO_IOMD_BASE + (offset >> 2))
 #else
 #define __IOMD(offset)	offset
@@ -177,7 +169,7 @@
 #define VDMA_START	IOMD_VIDSTART
 #define VDMA_END	IOMD_VIDEND
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 extern unsigned int vram_half_sam;
 #define video_set_dma(start,end,offset)				\
 do {								\

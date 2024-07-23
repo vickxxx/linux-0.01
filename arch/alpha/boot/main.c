@@ -107,15 +107,15 @@ static inline long openboot(void)
 	char bootdev[256];
 	long result;
 
-	result = callback_getenv(ENV_BOOTED_DEV, bootdev, 255);
+	result = srm_dispatch(CCB_GET_ENV, ENV_BOOTED_DEV, bootdev, 255);
 	if (result < 0)
 		return result;
-	return callback_open(bootdev, result & 255);
+	return srm_dispatch(CCB_OPEN, bootdev, result & 255);
 }
 
 static inline long close(long dev)
 {
-	return callback_close(dev);
+	return srm_dispatch(CCB_CLOSE, dev);
 }
 
 static inline long load(long dev, unsigned long addr, unsigned long count)
@@ -124,7 +124,7 @@ static inline long load(long dev, unsigned long addr, unsigned long count)
 	extern char _end;
 	long result, boot_size = &_end - (char *) BOOT_ADDR;
 
-	result = callback_getenv(ENV_BOOTED_FILE, bootfile, 255);
+	result = srm_dispatch(CCB_GET_ENV, ENV_BOOTED_FILE, bootfile, 255);
 	if (result < 0)
 		return result;
 	result &= 255;
@@ -132,7 +132,7 @@ static inline long load(long dev, unsigned long addr, unsigned long count)
 	if (result)
 		srm_printk("Boot file specification (%s) not implemented\n",
 		       bootfile);
-	return callback_read(dev, count, addr, boot_size/512 + 1);
+	return srm_dispatch(CCB_READ, dev, count, addr, boot_size/512 + 1);
 }
 
 /*
@@ -176,12 +176,13 @@ void start_kernel(void)
 		return;
 	}
 
-	nbytes = callback_getenv(ENV_BOOTED_OSFLAGS, envval, sizeof(envval));
+	nbytes = srm_dispatch(CCB_GET_ENV, ENV_BOOTED_OSFLAGS,
+			  envval, sizeof(envval));
 	if (nbytes < 0) {
 		nbytes = 0;
 	}
 	envval[nbytes] = '\0';
-	strcpy((char*)ZERO_PAGE(0), envval);
+	strcpy((char*)ZERO_PAGE, envval);
 
 	srm_printk(" Ok\nNow booting the kernel\n");
 	runkernel();

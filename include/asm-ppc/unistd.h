@@ -195,11 +195,6 @@
 #define __NR_putpmsg		188	/* some people actually want streams */
 #define __NR_vfork		189
 
-#define __NR_pciconfig_read     198
-#define __NR_pciconfig_write    199
-#define __NR_pciconfig_iobase   200
-#define __NR_multiplexer        201
-
 #define __NR(n)	#n
 
 
@@ -381,6 +376,16 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
  * procedure where the fork was done cannot return to its caller in
  * the child.
  */
+
+/*
+ * Create a new kernel thread.
+ */
+extern long __kernel_thread(unsigned long, int (*)(void *), void *);
+
+static inline long kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+{
+	return __kernel_thread(flags | CLONE_VM, fn, arg);
+}
 
 /*
  * System call prototypes.

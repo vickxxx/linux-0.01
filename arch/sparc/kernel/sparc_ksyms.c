@@ -1,4 +1,4 @@
-/* $Id: sparc_ksyms.c,v 1.77.2.6 2000/09/16 14:15:15 davem Exp $
+/* $Id: sparc_ksyms.c,v 1.77 1999/03/21 06:37:43 davem Exp $
  * arch/sparc/kernel/ksyms.c: Sparc specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -40,6 +40,7 @@
 #include <asm/dma.h>
 #endif
 #include <asm/a.out.h>
+#include <asm/spinlock.h>
 #include <asm/io-unit.h>
 
 struct poll {
@@ -50,6 +51,8 @@ struct poll {
 
 extern int svr4_getcontext (svr4_ucontext_t *, struct pt_regs *);
 extern int svr4_setcontext (svr4_ucontext_t *, struct pt_regs *);
+extern unsigned long sunos_mmap(unsigned long, unsigned long, unsigned long,
+				unsigned long, unsigned long, unsigned long);
 void _sigpause_common (unsigned int set, struct pt_regs *);
 extern void (*__copy_1page)(void *, const void *);
 extern void __memmove(void *, const void *, __kernel_size_t);
@@ -63,9 +66,7 @@ extern char saved_command_line[];
 
 extern void bcopy (const char *, char *, int);
 extern int __ashrdi3(int, int);
-extern int __ashldi3(int, int);
 extern int __lshrdi3(int, int);
-extern int __muldi3(int, int);
 
 extern void dump_thread(struct pt_regs *, struct user *);
 
@@ -83,10 +84,10 @@ extern int __sparc_dot_ ## sym (int) __asm__("." #sym);		\
 __EXPORT_SYMBOL(__sparc_dot_ ## sym, "." #sym)
 
 #define EXPORT_SYMBOL_PRIVATE(sym)				\
-extern int __sparc_priv_ ## sym (int) __asm__("__" #sym);	\
+extern int __sparc_priv_ ## sym (int) __asm__("__" ## #sym);	\
 const struct module_symbol __export_priv_##sym			\
 __attribute__((section("__ksymtab"))) =				\
-{ (unsigned long) &__sparc_priv_ ## sym, "__" #sym }
+{ (unsigned long) &__sparc_priv_ ## sym, "__" ## #sym }
 
 /* used by various drivers */
 EXPORT_SYMBOL(sparc_cpu_model);
@@ -192,6 +193,7 @@ EXPORT_SYMBOL(dma_chain);
 EXPORT_SYMBOL(svr4_setcontext);
 EXPORT_SYMBOL(svr4_getcontext);
 EXPORT_SYMBOL(_sigpause_common);
+EXPORT_SYMBOL(sunos_mmap);
 
 /* Should really be in linux/kernel/ksyms.c */
 EXPORT_SYMBOL(dump_thread);
@@ -210,7 +212,6 @@ EXPORT_SYMBOL(prom_node_has_property);
 EXPORT_SYMBOL(prom_setprop);
 EXPORT_SYMBOL(saved_command_line);
 EXPORT_SYMBOL(prom_apply_obio_ranges);
-EXPORT_SYMBOL(prom_finddevice);
 EXPORT_SYMBOL(prom_getname);
 EXPORT_SYMBOL(prom_feval);
 EXPORT_SYMBOL(prom_getbool);
@@ -271,9 +272,7 @@ EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memmove);
 EXPORT_SYMBOL_NOVERS(__ashrdi3);
-EXPORT_SYMBOL_NOVERS(__ashldi3);
 EXPORT_SYMBOL_NOVERS(__lshrdi3);
-EXPORT_SYMBOL_NOVERS(__muldi3);
 
 EXPORT_SYMBOL_DOT(rem);
 EXPORT_SYMBOL_DOT(urem);

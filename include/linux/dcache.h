@@ -100,16 +100,6 @@ struct dentry_operations {
 					 * renamed" and has to be
 					 * deleted on the last dput()
 					 */
-#define	DCACHE_NFSD_DISCONNECTED 0x0004	/* This dentry is not currently connected to the
-					 * dcache tree. Its parent will either be itself,
-					 * or will have this flag as well.
-					 * If this dentry points to a directory, then
-					 * s_nfsd_free_path semaphore will be down
-					 */
-#define	DCACHE_REFERENCED 0x0008	/* This dentry is been recently
-					 * referenced so try to keep it in
-					 * cache.
-					 */
 
 /*
  * d_drop() unhashes the entry from the parent
@@ -143,26 +133,24 @@ extern void d_delete(struct dentry *);
 
 /* allocate/de-allocate */
 extern struct dentry * d_alloc(struct dentry * parent, const struct qstr *name);
-extern int prune_dcache(int, int);
+extern void prune_dcache(int);
 extern void shrink_dcache_sb(struct super_block *);
 extern void shrink_dcache_parent(struct dentry *);
 extern int d_invalidate(struct dentry *);
 
-#define shrink_dcache() prune_dcache(0, -1)
+#define shrink_dcache() prune_dcache(0)
 
 /* dcache memory management */
+extern int  select_dcache(int, int);
 extern void shrink_dcache_memory(int, unsigned int);
 extern void check_dcache_memory(void);
-extern void free_inode_memory(void);	/* defined in fs/inode.c */
+extern void free_inode_memory(int);	/* defined in fs/inode.c */
 
 /* only used at mount-time */
 extern struct dentry * d_alloc_root(struct inode * root_inode, struct dentry * old_root);
 
 /* test whether root is busy without destroying dcache */
 extern int is_root_busy(struct dentry *);
-
-/* test whether we have any submounts */
-extern int have_submounts(struct dentry *);
 
 /*
  * This adds the entry to the hash queues.

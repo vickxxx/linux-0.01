@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.105.2.2 2000/10/05 04:17:17 anton Exp $
+/*  $Id: setup.c,v 1.105 1999/04/13 14:17:08 jj Exp $
  *  linux/arch/sparc/kernel/setup.c
  *
  *  Copyright (C) 1995  David S. Miller (davem@caip.rutgers.edu)
@@ -424,9 +424,7 @@ __initfunc(void setup_arch(char **cmdline_p,
 				initrd_start -= KERNBASE;
 				initrd_end -= KERNBASE;
 				break;
-			default:
-				break;
-			};
+			}
 		}
 	}
 #endif	
@@ -531,7 +529,7 @@ int get_cpuinfo(char *buffer)
             &cputypval,
 	    linux_num_cpus, smp_num_cpus
 #ifndef __SMP__
-	    , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
+	    , loops_per_sec/500000, (loops_per_sec/5000) % 100
 #endif
 	    );
 #ifdef __SMP__

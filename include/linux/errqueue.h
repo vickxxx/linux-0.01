@@ -1,9 +1,7 @@
 #ifndef _LINUX_ERRQUEUE_H
 #define _LINUX_ERRQUEUE_H 1
 
-#ifdef __KERNEL__
 #include <linux/config.h>
-#endif
 
 struct sock_extended_err
 {

@@ -42,7 +42,7 @@ extern int __verify_write(const void *, unsigned long);
 	unsigned long flag,sum; \
 	asm("addl %3,%1 ; sbbl %0,%0; cmpl %1,%4; sbbl $0,%0" \
 		:"=&r" (flag), "=r" (sum) \
-		:"1" (addr),"g" ((int)size),"g" (current->addr_limit.seg)); \
+		:"1" (addr),"g" (size),"g" (current->addr_limit.seg)); \
 	flag; })
 
 #ifdef CONFIG_X86_WP_WORKS_OK
@@ -510,20 +510,20 @@ do {								\
 			"	popl %0\n"			\
 			"	shl $2,%0\n"			\
 			"	addl $3,%0\n"			\
-			"	jmp 3b\n"			\
+			"	jmp 2b\n"			\
 			"5:	pushl %%eax\n"			\
 			"	xorl %%eax,%%eax\n"		\
 			"	stosw\n"			\
 			"	stosb\n"			\
 			"	popl %%eax\n"			\
 			"	addl $3,%0\n"			\
-			"	jmp 3b\n"			\
+			"	jmp 2b\n"			\
 			"6:	pushl %%eax\n"			\
 			"	xorl %%eax,%%eax\n"		\
 			"	stosb\n"			\
 			"	popl %%eax\n"			\
 			"	incl %0\n"			\
-			"	jmp 3b\n"			\
+			"	jmp 2b\n"			\
 			".previous\n"				\
 			".section __ex_table,\"a\"\n"		\
 			"	.align 4\n"			\
@@ -597,7 +597,7 @@ __constant_copy_from_user_nocheck(void *to, const void *from, unsigned long n)
 
 long strncpy_from_user(char *dst, const char *src, long count);
 long __strncpy_from_user(char *dst, const char *src, long count);
-long strnlen_user(const char *str, long n);
+long strlen_user(const char *str);
 unsigned long clear_user(void *mem, unsigned long len);
 unsigned long __clear_user(void *mem, unsigned long len);
 

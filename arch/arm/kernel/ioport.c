@@ -1,36 +1,29 @@
 /*
  * linux/arch/arm/kernel/ioport.c
  *
- * IO permission support for ARM.
+ * Io-port support is not used for ARM
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/mm.h>
 
-#include <asm/pgtable.h>
-#include <asm/uaccess.h>
-
-#ifdef CONFIG_CPU_32
-asmlinkage int sys_iopl(unsigned long turn_on)
+/* Set EXTENT bits starting at BASE in BITMAP to value TURN_ON. */
+/*asmlinkage void set_bitmap(unsigned long *bitmap, short base, short extent, int new_value)
 {
-	if (turn_on && !capable(CAP_SYS_RAWIO))
-		return -EPERM;
+}*/
 
-	/*
-	 * We only support an on_off approach
-	 */
-	modify_domain(DOMAIN_IO, turn_on ? DOMAIN_MANAGER : DOMAIN_CLIENT);
-
-	return 0;
-}
-#else
-asmlinkage int sys_iopl(unsigned long turn_on)
+asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 {
 	return -ENOSYS;
 }
-#endif
+
+asmlinkage int sys_iopl(long ebx,long ecx,long edx,
+	     long esi, long edi, long ebp, long eax, long ds,
+	     long es, long fs, long gs, long orig_eax,
+	     long eip,long cs,long eflags,long esp,long ss)
+{
+	return -ENOSYS;
+}

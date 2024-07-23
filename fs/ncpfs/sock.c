@@ -83,8 +83,7 @@ static int _send(struct socket *sock, const void *buff, int len)
 
 #define NCP_SLACK_SPACE 1024
 
-static int do_ncp_rpc_call(struct ncp_server *server, int size,
-		struct ncp_reply_header* reply_buf, int max_reply_size)
+static int do_ncp_rpc_call(struct ncp_server *server, int size)
 {
 	struct file *file;
 	struct inode *inode;
@@ -277,7 +276,7 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size,
 	 * we have the correct reply, so read into the correct place and
 	 * return it
 	 */
-	result = _recv(sock, (void *)reply_buf, max_reply_size, MSG_DONTWAIT);
+	result = _recv(sock, (void *) start, server->packet_size, MSG_DONTWAIT);
 	if (result < 0) {
 		printk(KERN_WARNING "NCP: notice message: result=%d\n", result);
 	} else if (result < sizeof(struct ncp_reply_header)) {
@@ -300,8 +299,7 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size,
  * We need the server to be locked here, so check!
  */
 
-static int ncp_do_request(struct ncp_server *server, int size,
-		void* reply, int max_reply_size)
+static int ncp_do_request(struct ncp_server *server, int size)
 {
 	int result;
 
@@ -318,7 +316,7 @@ static int ncp_do_request(struct ncp_server *server, int size,
 		sign_packet(server, &size);
 	}
 #endif /* CONFIG_NCPFS_PACKET_SIGNING */
-	result = do_ncp_rpc_call(server, size, reply, max_reply_size);
+	result = do_ncp_rpc_call(server, size);
 
 	DDPRINTK(KERN_DEBUG "do_ncp_rpc_call returned %d\n", result);
 
@@ -334,11 +332,10 @@ static int ncp_do_request(struct ncp_server *server, int size,
  * received. It assumes that server->current_size contains the ncp
  * request size
  */
-int ncp_request2(struct ncp_server *server, int function, 
-		void* rpl, int size)
+int ncp_request(struct ncp_server *server, int function)
 {
 	struct ncp_request_header *h;
-	struct ncp_reply_header* reply = rpl;
+	struct ncp_reply_header *reply;
 	int request_size = server->current_size
 			 - sizeof(struct ncp_request_header);
 	int result;
@@ -360,11 +357,12 @@ int ncp_request2(struct ncp_server *server, int function,
 	h->task = 2; /* (current->pid) & 0xff; */
 	h->function = function;
 
-	result = ncp_do_request(server, request_size + sizeof(*h), reply, size);
+	result = ncp_do_request(server, request_size + sizeof(*h));
 	if (result < 0) {
 		DPRINTK(KERN_WARNING "ncp_request_error: %d\n", result);
 		goto out;
 	}
+	reply = (struct ncp_reply_header *) (server->packet);
 	server->completion = reply->completion_code;
 	server->conn_status = reply->connection_state;
 	server->reply_size = result;
@@ -395,7 +393,7 @@ int ncp_connect(struct ncp_server *server)
 	h->task		= 2; /* see above */
 	h->function	= 0;
 
-	result = ncp_do_request(server, sizeof(*h), server->packet, server->packet_size);
+	result = ncp_do_request(server, sizeof(*h));
 	if (result < 0)
 		goto out;
 	server->sequence = 0;
@@ -419,7 +417,7 @@ int ncp_disconnect(struct ncp_server *server)
 	h->task		= 2; /* see above */
 	h->function	= 0;
 
-	return ncp_do_request(server, sizeof(*h), server->packet, server->packet_size);
+	return ncp_do_request(server, sizeof(*h));
 }
 
 void ncp_lock_server(struct ncp_server *server)
@@ -430,18 +428,16 @@ void ncp_lock_server(struct ncp_server *server)
 		DPRINTK(KERN_WARNING "ncpfs: server locked!!!\n");
 	}
 #endif
-	down(&server->sem);
-	if (server->lock)
-		printk(KERN_WARNING "ncp_lock_server: was locked!\n");
+	while (server->lock)
+		sleep_on(&server->wait);
 	server->lock = 1;
 }
 
 void ncp_unlock_server(struct ncp_server *server)
 {
-	if (!server->lock) {
+	if (server->lock != 1) {
 		printk(KERN_WARNING "ncp_unlock_server: was not locked!\n");
-		return;
 	}
 	server->lock = 0;
-	up(&server->sem);
+	wake_up(&server->wait);
 }

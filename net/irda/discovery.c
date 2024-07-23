@@ -6,10 +6,8 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Tue Apr  6 15:33:50 1999
- * Modified at:   Sat Oct  9 17:11:31 1999
+ * Modified at:   Sun Apr 11 00:41:58 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
- * Modified at:   Fri May 28  3:11 CST 1999
- * Modified by:   Horst von Brand <vonbrand@sleipnir.valparaiso.cl>
  * 
  *     Copyright (c) 1999 Dag Brattli, All Rights Reserved.
  *     
@@ -30,8 +28,8 @@
  *     
  ********************************************************************/
 
-#include <linux/string.h>
 #include <linux/socket.h>
+#include <linux/irda.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irlmp.h>
@@ -41,58 +39,35 @@
 /*
  * Function irlmp_add_discovery (cachelog, discovery)
  *
- *    Add a new discovery to the cachelog, and remove any old discoveries
- *    from the same device
+ *    
+ *
  */
-void irlmp_add_discovery(hashbin_t *cachelog, discovery_t *new)
+void irlmp_add_discovery(hashbin_t *cachelog, discovery_t *discovery)
 {
-	discovery_t *discovery, *node;
-	unsigned long flags;
+	discovery_t *old;
 
-	spin_lock_irqsave(&irlmp->lock, flags);
+	DEBUG(4, __FUNCTION__ "()\n");
 
-	/* 
-	 * Remove all discoveries of devices that has previously been 
-	 * discovered on the same link with the same name (info), or the 
-	 * same daddr. We do this since some devices (mostly PDAs) change
-	 * their device address between every discovery.
-	 */
-	discovery = (discovery_t *) hashbin_get_first(cachelog);
-	while (discovery != NULL ) {
-			node = discovery;
-
-			/* Be sure to stay one item ahead */
-			discovery = (discovery_t *) hashbin_get_next(cachelog);
-			
-			if ((node->daddr == new->daddr) || 
-			    (strcmp(node->nickname, new->nickname) == 0))
-			{
-				/* This discovery is a previous discovery 
-				 * from the same device, so just remove it
-				 */
-				hashbin_remove(cachelog, node->daddr, NULL);
-				kfree(node);
-			}
-		}
-
+	/* Check if we have discovered this device before */
+	old = hashbin_remove(cachelog, discovery->daddr, NULL);
+	if (old)
+		kfree(old);
 
 	/* Insert the new and updated version */
-	hashbin_insert(cachelog, (queue_t *) new, new->daddr, NULL);
-
-	spin_unlock_irqrestore(&irlmp->lock, flags);
+	hashbin_insert(cachelog, (QUEUE *) discovery, discovery->daddr, NULL);
 }
 
 /*
  * Function irlmp_add_discovery_log (cachelog, log)
  *
- *    Merge a disovery log into the cachlog.
+ *    
  *
  */
 void irlmp_add_discovery_log(hashbin_t *cachelog, hashbin_t *log)
 {
 	discovery_t *discovery;
 
-	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+	DEBUG(4, __FUNCTION__ "()\n");
 
 	/*
 	 *  If log is missing this means that IrLAP was unable to perform the
@@ -121,11 +96,11 @@ void irlmp_add_discovery_log(hashbin_t *cachelog, hashbin_t *log)
  *    Go through all discoveries and expire all that has stayed to long
  *
  */
-void irlmp_expire_discoveries(hashbin_t *log, __u32 saddr, int force)
+void irlmp_expire_discoveries(hashbin_t *log, int saddr, int force)
 {
 	discovery_t *discovery, *curr;
 
-	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+	DEBUG(4, __FUNCTION__ "()\n");
 
 	discovery = (discovery_t *) hashbin_get_first(log);
 	while (discovery != NULL) {
@@ -159,10 +134,10 @@ void irlmp_dump_discoveries(hashbin_t *log)
 
 	discovery = (discovery_t *) hashbin_get_first(log);
 	while (discovery != NULL) {
-		IRDA_DEBUG(0, "Discovery:\n");
-		IRDA_DEBUG(0, "  daddr=%08x\n", discovery->daddr);
-		IRDA_DEBUG(0, "  saddr=%08x\n", discovery->saddr); 
-		IRDA_DEBUG(0, "  nickname=%s\n", discovery->nickname);
+		DEBUG(0, "Discovery:\n");
+		DEBUG(0, "  daddr=%08x\n", discovery->daddr);
+		DEBUG(0, "  saddr=%08x\n", discovery->saddr); 
+		DEBUG(0, "  name=%s\n", discovery->info);
 
 		discovery = (discovery_t *) hashbin_get_next(log);
 	}
@@ -177,19 +152,19 @@ void irlmp_dump_discoveries(hashbin_t *log)
  */
 __u32 irlmp_find_device(hashbin_t *cachelog, char *name, __u32 *saddr)
 {
-	unsigned long flags;
 	discovery_t *d;
+	unsigned long flags;
 
 	spin_lock_irqsave(&irlmp->lock, flags);
 
 	/* Look at all discoveries for that link */
 	d = (discovery_t *) hashbin_get_first(cachelog);
 	while (d != NULL) {
-		IRDA_DEBUG(1, "Discovery:\n");
-		IRDA_DEBUG(1, "  daddr=%08x\n", d->daddr);
-		IRDA_DEBUG(1, "  nickname=%s\n", d->nickname);
+		DEBUG(1, "Discovery:\n");
+		DEBUG(1, "  daddr=%08x\n", d->daddr);
+		DEBUG(1, "  name=%s\n", d->info);
 		
-		if (strcmp(name, d->nickname) == 0) {
+		if (strcmp(name, d->info) == 0) {
 			*saddr = d->saddr;
 			
 			spin_unlock_irqrestore(&irlmp->lock, flags);
@@ -226,12 +201,10 @@ int discovery_proc_read(char *buf, char **start, off_t offset, int len,
 	
 	discovery = (discovery_t *) hashbin_get_first(cachelog);
 	while ( discovery != NULL) {
-		len += sprintf(buf+len, "nickname: %s,", discovery->nickname);
+		len += sprintf( buf+len, "  name: %s,", 
+				discovery->info);
 		
-		len += sprintf(buf+len, " hint: 0x%02x%02x", 
-			       discovery->hints.byte[0], 
-			       discovery->hints.byte[1]);
-#if 0
+		len += sprintf( buf+len, " hint: ");
 		if ( discovery->hints.byte[0] & HINT_PNP)
 			len += sprintf( buf+len, "PnP Compatible ");
 		if ( discovery->hints.byte[0] & HINT_PDA)
@@ -255,14 +228,14 @@ int discovery_proc_read(char *buf, char **start, off_t offset, int len,
 			len += sprintf( buf+len, "IrCOMM ");
 		if ( discovery->hints.byte[1] & HINT_OBEX)
 			len += sprintf( buf+len, "IrOBEX ");
-#endif		
+		
 		len += sprintf(buf+len, ", saddr: 0x%08x", 
 			       discovery->saddr);
 
 		len += sprintf(buf+len, ", daddr: 0x%08x\n", 
 			       discovery->daddr);
 		
-		len += sprintf(buf+len, "\n");
+		len += sprintf( buf+len, "\n");
 		
 		discovery = (discovery_t *) hashbin_get_next(cachelog);
 	}

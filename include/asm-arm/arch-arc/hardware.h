@@ -49,7 +49,7 @@
 #define SCREEN1_BASE		0x01f88000
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * for use with inb/outb

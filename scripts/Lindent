@@ -1,2 +1,0 @@
-#!/bin/bash
-indent -kr -i8 -ts8 -br -ce -bap -sob -l80 -pcs -cs -ss -bs -di0 -nbc -lp -psl $@

@@ -1,7 +1,7 @@
 /*
  * sysctl_net_ipv4.c: sysctl interface to net IPV4 subsystem.
  *
- * $Id: sysctl_net_ipv4.c,v 1.38.2.4 2000/09/16 09:40:00 davem Exp $
+ * $Id: sysctl_net_ipv4.c,v 1.38 1999/01/02 16:51:48 davem Exp $
  *
  * Begun April 1, 1996, Mike Shaver.
  * Added /proc/sys/net/ipv4 directory entry (empty =) ). [MS]
@@ -14,6 +14,19 @@
 #include <net/ip.h>
 #include <net/route.h>
 #include <net/tcp.h>
+
+/*
+ *	TCP configuration parameters
+ */
+
+#define TCP_PMTU_DISC	0x00000001	/* perform PMTU discovery	  */
+#define TCP_CONG_AVOID	0x00000002	/* congestion avoidance algorithm */
+#define TCP_DELAY_ACKS	0x00000003	/* delayed ack stategy		  */
+
+#if 0
+static int boolean_min = 0;
+static int boolean_max = 1;
+#endif
 
 /* From icmp.c */
 extern int sysctl_icmp_echo_ignore_all;
@@ -28,12 +41,8 @@ extern int sysctl_ipfrag_time;
 /* From ip_output.c */
 extern int sysctl_ip_dynaddr;
 
-/* From ip_input.c */
-extern int sysctl_ip_always_defrag;
-
 /* From ip_masq.c */
 extern int sysctl_ip_masq_debug;
-extern int sysctl_ip_masq_udp_dloose;
 
 extern int sysctl_tcp_timestamps;
 extern int sysctl_tcp_window_scaling;
@@ -61,10 +70,7 @@ extern int sysctl_icmp_echoreply_time;
 /* From igmp.c */
 extern int sysctl_igmp_max_memberships;
 
-static int tcp_retr1_max = 255; 
-
-static int ip_local_port_range_min[] = { 1, 1 };
-static int ip_local_port_range_max[] = { 65535, 65535 };
+int tcp_retr1_max = 255; 
 
 struct ipv4_config ipv4_config;
 
@@ -84,23 +90,9 @@ int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 	if (write && ipv4_devconf.forwarding != val)
 		inet_forward_change();
 
-	return ret;
+        return ret;
 }
 
-static int ipv4_sysctl_forward_strategy(ctl_table *table, int *name, unsigned nlen,
-			 void *oldval, size_t *oldlenp,
-			 void *newval, size_t newlen, 
-			 void **context)
-{
-	int new;
-	if (newlen != sizeof(int))
-		return -EINVAL;
-	if (get_user(new,(int *)newval))
-		return -EFAULT; 
-	if (new != ipv4_devconf.forwarding) 
-		inet_forward_change(); 
-	return 0; /* caller does change again and handles handles oldval */ 
-}
 
 ctl_table ipv4_table[] = {
         {NET_IPV4_TCP_TIMESTAMPS, "tcp_timestamps",
@@ -117,7 +109,7 @@ ctl_table ipv4_table[] = {
          &proc_dointvec},
         {NET_IPV4_FORWARD, "ip_forward",
          &ipv4_devconf.forwarding, sizeof(int), 0644, NULL,
-         &ipv4_sysctl_forward,&ipv4_sysctl_forward_strategy},
+         &ipv4_sysctl_forward},
         {NET_IPV4_DEFAULT_TTL, "ip_default_ttl",
          &ip_statistics.IpDefaultTTL, sizeof(int), 0644, NULL,
          &proc_dointvec},
@@ -135,22 +127,17 @@ ctl_table ipv4_table[] = {
 	 &sysctl_ipfrag_low_thresh, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_DYNADDR, "ip_dynaddr",
 	 &sysctl_ip_dynaddr, sizeof(int), 0644, NULL, &proc_dointvec},
-        {NET_IPV4_ALWAYS_DEFRAG, "ip_always_defrag",
-         &sysctl_ip_always_defrag, sizeof(int), 0644, NULL, &proc_dointvec},
 #ifdef CONFIG_IP_MASQUERADE
 	{NET_IPV4_IP_MASQ_DEBUG, "ip_masq_debug",
 	 &sysctl_ip_masq_debug, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_IP_MASQ_UDP_DLOOSE, "ip_masq_udp_dloose",
-	 &sysctl_ip_masq_udp_dloose, sizeof(int), 0644, NULL, &proc_dointvec},
 #endif
 	{NET_IPV4_IPFRAG_TIME, "ipfrag_time",
-	 &sysctl_ipfrag_time, sizeof(int), 0644, NULL, &proc_dointvec_jiffies, 
-	 &sysctl_jiffies},
+	 &sysctl_ipfrag_time, sizeof(int), 0644, NULL, &proc_dointvec_jiffies},
 	{NET_IPV4_TCP_MAX_KA_PROBES, "tcp_max_ka_probes",
 	 &sysctl_tcp_max_ka_probes, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_TCP_KEEPALIVE_TIME, "tcp_keepalive_time",
 	 &sysctl_tcp_keepalive_time, sizeof(int), 0644, NULL, 
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
+	 &proc_dointvec_jiffies},
 	{NET_IPV4_TCP_KEEPALIVE_PROBES, "tcp_keepalive_probes",
 	 &sysctl_tcp_keepalive_probes, sizeof(int), 0644, NULL, 
 	 &proc_dointvec},
@@ -161,7 +148,7 @@ ctl_table ipv4_table[] = {
 	 &sysctl_tcp_retries2, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_TCP_FIN_TIMEOUT, "tcp_fin_timeout",
 	 &sysctl_tcp_fin_timeout, sizeof(int), 0644, NULL, 
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
+	 &proc_dointvec_jiffies},
 #ifdef CONFIG_SYN_COOKIES
 	{NET_TCP_SYNCOOKIES, "tcp_syncookies",
 	 &sysctl_tcp_syncookies, sizeof(int), 0644, NULL, &proc_dointvec},
@@ -174,8 +161,7 @@ ctl_table ipv4_table[] = {
 	 sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_LOCAL_PORT_RANGE, "ip_local_port_range",
 	 &sysctl_local_port_range, sizeof(sysctl_local_port_range), 0644, 
-	 NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 ip_local_port_range_min, ip_local_port_range_max },
+	 NULL, &proc_dointvec},
 	{NET_IPV4_ICMP_ECHO_IGNORE_ALL, "icmp_echo_ignore_all",
 	 &sysctl_icmp_echo_ignore_all, sizeof(int), 0644, NULL,
 	 &proc_dointvec},

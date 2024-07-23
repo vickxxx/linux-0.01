@@ -53,6 +53,7 @@ int coda_fid_is_weird(struct ViceFid *fid);
 int coda_iscontrol(const char *name, size_t length);
 
 void coda_load_creds(struct coda_cred *cred);
+int coda_mycred(struct coda_cred *);
 void coda_vattr_to_iattr(struct inode *, struct coda_vattr *);
 void coda_iattr_to_vattr(struct iattr *, struct coda_vattr *);
 unsigned short coda_flags_to_cflags(unsigned short);
@@ -67,6 +68,8 @@ void coda_prepare_openfile(struct inode *coda_inode, struct file *coda_file,
 void coda_restore_codafile(struct inode *coda_inode, struct file *coda_file, 
 			   struct inode *open_inode, struct file *open_file);
 int coda_inode_grab(dev_t dev, ino_t ino, struct inode **ind);
+
+#define NB_SFS_SIZ 0x895440
 
 /* cache.c */
 void coda_purge_children(struct inode *, int);
@@ -96,7 +99,7 @@ void coda_sysctl_clean(void);
   if (coda_debug & mask) {                                        \
     printk("(%s,l. %d): ",  __FUNCTION__, __LINE__);              \
     printk(format, ## a); }                                       \
-} while (0)
+} while (0) ;                            
 
 #define ENTRY    \
     if(coda_print_entry) printk("Process %d entered %s\n",current->pid,__FUNCTION__)
@@ -104,14 +107,16 @@ void coda_sysctl_clean(void);
 #define EXIT    \
     if(coda_print_entry) printk("Process %d leaving %s\n",current->pid,__FUNCTION__)
 
+#define CHECK_CNODE(c) do {  } while (0);
+
 #define CODA_ALLOC(ptr, cast, size)                                       \
 do {                                                                      \
     if (size < 3000) {                                                    \
         ptr = (cast)kmalloc((unsigned long) size, GFP_KERNEL);            \
-                CDEBUG(D_MALLOC, "kmalloced: %lx at %p.\n", (long)size, ptr);\
+                CDEBUG(D_MALLOC, "kmalloced: %x at %x.\n", (int) size, (int) ptr);\
      }  else {                                                             \
         ptr = (cast)vmalloc((unsigned long) size);                        \
-	CDEBUG(D_MALLOC, "vmalloced: %lx at %p .\n", (long)size, ptr);}\
+	CDEBUG(D_MALLOC, "vmalloced: %x at %x.\n", (int) size, (int) ptr);}\
     if (ptr == 0) {                                                       \
         printk("kernel malloc returns 0 at %s:%d\n", __FILE__, __LINE__);  \
     }                                                                     \
@@ -119,7 +124,7 @@ do {                                                                      \
 } while (0)
 
 
-#define CODA_FREE(ptr,size) do {if (size < 3000) { kfree_s((ptr), (size)); CDEBUG(D_MALLOC, "kfreed: %lx at %p.\n", (long) size, ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %lx at %p.\n", (long) size, ptr);} } while (0)
+#define CODA_FREE(ptr,size) do {if (size < 3000) { kfree_s((ptr), (size)); CDEBUG(D_MALLOC, "kfreed: %x at %x.\n", (int) size, (int) ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %x at %x.\n", (int) size, (int) ptr);} } while (0)
 
 /* inode to cnode */
 

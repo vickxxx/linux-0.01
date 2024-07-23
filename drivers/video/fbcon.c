@@ -91,9 +91,6 @@
 #include <asm/machdep.h>
 #include <asm/setup.h>
 #endif
-#ifdef CONFIG_FBCON_VGA_PLANES
-#include <asm/io.h>
-#endif
 #define INCLUDE_LINUX_LOGO_DATA
 #include <asm/linux_logo.h>
 
@@ -215,7 +212,7 @@ static int fbcon_show_logo(void);
 
 #ifdef CONFIG_MAC
 /*
- * On the Macintoy, there may or may not be a working VBL int. We need to probe
+ * On the Macintoy, there may or may not be a working VBL int. We need to prob
  */
 static int vbl_detected = 0;
 
@@ -526,7 +523,7 @@ static void fbcon_setup(int con, int init, int logo)
     	q = (unsigned short *)(conp->vc_origin + conp->vc_size_row * old_rows);
     	step = logo_lines * old_cols;
     	for (r = q - logo_lines * old_cols; r < q; r++)
-    	    if (scr_readw(r) != conp->vc_video_erase_char)
+    	    if (*r != conp->vc_video_erase_char)
     	    	break;
 	if (r != q && nr_rows >= old_rows + logo_lines) {
     	    save = kmalloc(logo_lines * nr_cols * 2, GFP_KERNEL);
@@ -1386,6 +1383,14 @@ static int fbcon_blank(struct vc_data *conp, int blank)
 
     if (!p->can_soft_blank) {
 	if (blank) {
+#ifdef CONFIG_MAC
+	    if (MACH_IS_MAC) {
+		if (p->screen_base)
+		    mymemset(p->screen_base,
+			     p->var.xres_virtual*p->var.yres_virtual*
+			     p->var.bits_per_pixel>>3);
+	    } else
+#endif
 	    if (p->visual == FB_VISUAL_MONO01) {
 		if (p->screen_base)
 		    mymemset(p->screen_base,
@@ -1806,13 +1811,12 @@ static unsigned long fbcon_getxy(struct vc_data *conp, unsigned long pos, int *p
     	    y += softback_lines;
     	ret = pos + (conp->vc_cols - x) * 2;
     } else if (conp->vc_num == fg_console && softback_lines) {
-    	unsigned long offset = pos - softback_curr;
+    	unsigned long offset = (pos - softback_curr) / 2;
     	
-    	if (pos < softback_curr)
-    	    offset += softback_end - softback_buf;
-    	offset /= 2;
     	x = offset % conp->vc_cols;
     	y = offset / conp->vc_cols;
+    	if (pos < softback_curr)
+	    y += (softback_end - softback_buf) / conp->vc_size_row;
 	ret = pos + (conp->vc_cols - x) * 2;
 	if (ret == softback_end)
 	    ret = softback_buf;
@@ -2221,48 +2225,18 @@ __initfunc(static int fbcon_show_logo( void ))
 			   p->type == FB_TYPE_INTERLEAVED_PLANES)) {
 
 	    /* monochrome */
-	    unsigned char inverse = p->inverse || p->visual == FB_VISUAL_MONO01
-		? 0x00 : 0xff;
+	    unsigned char inverse = p->inverse ? 0x00 : 0xff;
 
 	    /* can't use simply memcpy because need to apply inverse */
 	    for( y1 = 0; y1 < LOGO_H; y1++ ) {
-		src = logo + y1*LOGO_LINE;
-		dst = fb + y1*line + x/8;
+		src = logo + y1*LOGO_LINE + x/8;
+		dst = fb + y1*line;
 		for( x1 = 0; x1 < LOGO_LINE; ++x1 )
 		    *dst++ = *src++ ^ inverse;
 	    }
 	    done = 1;
 	}
 #endif
-#if defined(CONFIG_FBCON_VGA_PLANES)
-	if (depth == 4 && p->type == FB_TYPE_VGA_PLANES) {
-		outb_p(1,0x3ce); outb_p(0xf,0x3cf);
-		outb_p(3,0x3ce); outb_p(0,0x3cf);
-		outb_p(5,0x3ce); outb_p(0,0x3cf);
-
-		src = logo;
-		for (y1 = 0; y1 < LOGO_H; y1++) {
-			for (x1 = 0; x1 < LOGO_W / 2; x1++) {
-				dst = fb + y1*line + x1/4 + x/8;
-
-				outb_p(0,0x3ce);
-				outb_p(*src >> 4,0x3cf);
-				outb_p(8,0x3ce);
-				outb_p(1 << (7 - x1 % 4 * 2),0x3cf);
-				*(volatile char *) dst |= 1;
-
-				outb_p(0,0x3ce);
-				outb_p(*src & 0xf,0x3cf);
-				outb_p(8,0x3ce);
-				outb_p(1 << (7 - (1 + x1 % 4 * 2)),0x3cf);
-				*(volatile char *) dst |= 1;
-
-				src++;
-			}
-		}
-		done = 1;
-	}
-#endif			
     }
     
     if (p->fb_info->fbops->fb_rasterimg)
@@ -2326,4 +2300,3 @@ struct display_switch fbcon_dummy = {
 EXPORT_SYMBOL(fb_display);
 EXPORT_SYMBOL(fbcon_redraw_bmove);
 EXPORT_SYMBOL(fbcon_dummy);
-EXPORT_SYMBOL(fb_con);

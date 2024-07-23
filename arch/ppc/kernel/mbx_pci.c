@@ -17,9 +17,7 @@
 
 #include <asm/io.h>
 #include <asm/mbx.h>
-#include <asm/machdep.h>
 
-#include "pci.h"
 
 /*
  * This blows......The MBX uses the Tundra QSpan PCI bridge.  When

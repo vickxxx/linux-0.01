@@ -121,12 +121,12 @@ static __inline__ long __strncpy_from_user (char *dst, const char *src, long cou
 	return res;
 }
 
-extern __inline__ long strnlen_user (const char *s, long n)
+extern __inline__ long strlen_user (const char *s)
 {
 	unsigned long res = 0;
 
 	if (__addr_ok(s))
-		__do_strnlen_user (s, n, res);
+		__do_strlen_user (s, res);
 
 	return res;
 }

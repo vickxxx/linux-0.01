@@ -1,7 +1,6 @@
 #ifndef __ALPHA_DELAY_H
 #define __ALPHA_DELAY_H
 
-#include <asm/param.h>
 #include <asm/smp.h>
 
 /*
@@ -10,18 +9,12 @@
  * Delay routines, using a pre-computed "loops_per_second" value.
  */
 
-/* We can make the delay loop inline, but we have to be very careful
- * WRT scheduling for EV6 machines, to keep it consistent for all locations
- * of invocations. This is a reasonable compromise.
- */
-
 extern __inline__ void
 __delay(unsigned long loops)
 {
-	__asm__ __volatile__(".align 4\n"
-		     "1:\tsubq %0,1,%0\n\t"
-		     "bge %0,1b\n\t"
-		     "nop": "=r" (loops) : "0" (loops));
+	__asm__ __volatile__(".align 3\n"
+		"1:\tsubq %0,1,%0\n\t"
+		"bge %0,1b": "=r" (loops) : "0" (loops));
 }
 
 /*
@@ -41,7 +34,7 @@ __delay(unsigned long loops)
 extern __inline__ void
 __udelay(unsigned long usecs, unsigned long lps)
 {
-	/* compute (usecs * 2**64 / 10**6) * loops_per_jiffy * HZ / 2**64 */
+	/* compute (usecs * 2**64 / 10**6) * loops_per_sec / 2**64 */
 
 	usecs *= 0x000010c6f7a0b5edUL;		/* 2**64 / 1000000 */
 	__asm__("umulh %1,%2,%0" :"=r" (usecs) :"r" (usecs),"r" (lps));
@@ -51,7 +44,7 @@ __udelay(unsigned long usecs, unsigned long lps)
 extern __inline__ void
 __small_const_udelay(unsigned long usecs, unsigned long lps)
 {
-	/* compute (usecs * 2**32 / 10**6) * loops_per_jiffy * HZ / 2**32 */
+	/* compute (usecs * 2**32 / 10**6) * loops_per_sec / 2**32 */
 
         usecs *= 0x10c6;                /* 2^32 / 10^6 */
 	usecs *= lps;
@@ -63,16 +56,15 @@ __small_const_udelay(unsigned long usecs, unsigned long lps)
 #define udelay(usecs)						\
 	(__builtin_constant_p(usecs) && usecs < 0x100000000UL	\
 	 ? __small_const_udelay(usecs,				\
-		cpu_data[smp_processor_id()].loops_per_jiffy*HZ)	\
+		cpu_data[smp_processor_id()].loops_per_sec)	\
 	 : __udelay(usecs,					\
-		cpu_data[smp_processor_id()].loops_per_jiffy*HZ))
+		cpu_data[smp_processor_id()].loops_per_sec))
 #else
 #define udelay(usecs)						\
 	(__builtin_constant_p(usecs) && usecs < 0x100000000UL	\
-	 ? __small_const_udelay(usecs, loops_per_jiffy*HZ)		\
-	 : __udelay(usecs, loops_per_jiffy*HZ))
+	 ? __small_const_udelay(usecs, loops_per_sec)		\
+	 : __udelay(usecs, loops_per_sec))
 #endif
 
 
 #endif /* defined(__ALPHA_DELAY_H) */
-

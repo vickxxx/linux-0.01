@@ -1,4 +1,4 @@
-/* $Id: isdn_v110.c,v 1.5.6.2 2001/02/10 14:41:19 kai Exp $
+/* $Id: isdn_v110.c,v 1.2 1998/02/22 19:44:25 fritz Exp $
 
  * Linux ISDN subsystem, V.110 related functions (linklevel).
  *
@@ -18,11 +18,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
+ * $Log: isdn_v110.c,v $
+ * Revision 1.2  1998/02/22 19:44:25  fritz
+ * Bugfixes and improvements regarding V.110, V.110 now running.
+ *
+ * Revision 1.1  1998/02/20 17:32:09  fritz
+ * First checkin (not yet completely functionable).
+ *
  */
-
 #include <linux/string.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 
 #include <linux/isdn.h>
@@ -30,15 +36,14 @@
 
 #undef ISDN_V110_DEBUG
 
-char *isdn_v110_revision = "$Revision: 1.5.6.2 $";
+char *isdn_v110_revision = "$Revision: 1.2 $";
 
 #define V110_38400 255
 #define V110_19200  15
 #define V110_9600    3
 
-/* 
- * The following data are precoded matrices, online and offline matrix 
- * for 9600, 19200 und 38400, respectively
+/* Die folgenden Daten sind fertig kodierte Matrizen, jeweils
+   als online und offline matrix für 9600, 19200 und 38400
  */
 static unsigned char V110_OnMatrix_9600[] =
 {0xfc, 0xfc, 0xfc, 0xfc, 0xff, 0xff, 0xff, 0xfd, 0xff, 0xff,
@@ -66,12 +71,13 @@ static unsigned char V110_OnMatrix_38400[] =
 static unsigned char V110_OffMatrix_38400[] =
 {0x00, 0xff, 0xff, 0xff, 0xff, 0xfd, 0xff, 0xff, 0xff, 0xff};
 
-/* 
- * FlipBits reorders sequences of keylen bits in one byte.
- * E.g. source order 7654321 will be converted to 45670123 when keylen = 4,
- * and to 67452301 when keylen = 2. This is necessary because ordering on
- * the isdn line is the the other way.
+
+/* FlipBits dreht die Reihenfolge von jeweils keylen bits in einem byte um.
+   Aus der Bitreihenfolge 76543210 werden bei keylen=4 die bits 45670123,
+   bei keylen=2 die bits 67452301. Dies ist notwendig, weil die reihenfolge
+   auf der isdn-leitung falsch herum ist.
  */
+
 static __inline unsigned char
 FlipBits(unsigned char c, int keylen)
 {
@@ -102,7 +108,7 @@ isdn_v110_open(unsigned char key, int hdrlen, int maxsize)
 	int i;
 	isdn_v110_stream *v;
 
-	if ((v = kmalloc(sizeof(isdn_v110_stream), GFP_ATOMIC)) == NULL)
+	if ((v = kmalloc(sizeof(isdn_v110_stream), GFP_KERNEL)) == NULL)
 		return NULL;
 	memset(v, 0, sizeof(isdn_v110_stream));
 	v->key = key;
@@ -134,7 +140,7 @@ isdn_v110_open(unsigned char key, int hdrlen, int maxsize)
 	v->b = 0;
 	v->skbres = hdrlen;
 	v->maxsize = maxsize - hdrlen;
-	if ((v->encodebuf = kmalloc(maxsize, GFP_ATOMIC)) == NULL) {
+	if ((v->encodebuf = kmalloc(maxsize, GFP_KERNEL)) == NULL) {
 		kfree(v);
 		return NULL;
 	}
@@ -142,22 +148,29 @@ isdn_v110_open(unsigned char key, int hdrlen, int maxsize)
 }
 
 /* isdn_v110_close frees private V.110 data structures */
-void
+static void
 isdn_v110_close(isdn_v110_stream * v)
 {
 	if (v == NULL)
 		return;
 #ifdef ISDN_V110_DEBUG
 	printk(KERN_DEBUG "v110 close\n");
+#if 0
+	printk(KERN_DEBUG "isdn_v110_close: nbytes=%d\n", v->nbytes);
+	printk(KERN_DEBUG "isdn_v110_close: nbits=%d\n", v->nbits);
+	printk(KERN_DEBUG "isdn_v110_close: key=%d\n", v->key);
+	printk(KERN_DEBUG "isdn_v110_close: SyncInit=%d\n", v->SyncInit);
+	printk(KERN_DEBUG "isdn_v110:close: decodelen=%d\n", v->decodelen);
+	printk(KERN_DEBUG "isdn_v110_close: framelen=%d\n", v->framelen);
+#endif
 #endif
 	kfree(v->encodebuf);
 	kfree(v);
 }
 
 
-/* 
- * ValidHeaderBytes return the number of valid bytes in v->decodebuf 
- */
+/* ValidHeaderBytes prüft, wieviele bytes in v->decodebuf gültig sind */
+
 static int
 ValidHeaderBytes(isdn_v110_stream * v)
 {
@@ -168,9 +181,8 @@ ValidHeaderBytes(isdn_v110_stream * v)
 	return i;
 }
 
-/* 
- * SyncHeader moves the decodebuf ptr to the next valid header 
- */
+/* SyncHeader schiebt den decodebuf pointer auf den nächsten gültigen header */
+
 static void
 SyncHeader(isdn_v110_stream * v)
 {
@@ -207,60 +219,68 @@ DecodeMatrix(isdn_v110_stream * v, unsigned char *m, int len, unsigned char *buf
 	int dbit = v->dbit;
 	unsigned char b = v->b;
 
-	while (line < len) {    /* Are we done with all lines of the matrix? */
-		if ((line % 10) == 0) {	/* the 0. line of the matrix is always 0 ! */
-			if (m[line] != 0x00) {	/* not 0 ? -> error! */
+	while (line < len) {    /* sind schon alle matrizenzeilen abgearbeitet? */
+		if ((line % 10) == 0) {	/* die 0. zeile der matrix ist immer null ! */
+			if (m[line] != 0x00) {	/* nicht 0 ? dann fehler! */
 #ifdef ISDN_V110_DEBUG
 				printk(KERN_DEBUG "isdn_v110: DecodeMatrix, V110 Bad Header\n");
-				/* returning now is not the right thing, though :-( */
 #endif
-			} 
-			line++; /* next line of matrix */
+
+/*
+  dann einen return zu machen, ist auch irgendwie nicht das richtige! :-(
+  v->introducer = 0; v->dbit = 1; v->b = 0;
+  return buflen;                                                                                                     anzahl schon erzeugter daten zurückgeben!
+  */
+			}
+			line++; /* sonst die nächste matrixzeile nehmen */
 			continue;
-		} else if ((line % 10) == 5) {	/* in line 5 there's only e-bits ! */
-			if ((m[line] & 0x70) != 0x30) {	/* 011 has to be at the beginning! */
+		} else if ((line % 10) == 5) {	/* in zeile 5 stehen nur e-bits ! */
+			if ((m[line] & 0x70) != 0x30) {	/* 011 muß am anfang stehen! */
 #ifdef ISDN_V110_DEBUG
 				printk(KERN_DEBUG "isdn_v110: DecodeMatrix, V110 Bad 5th line\n");
-				/* returning now is not the right thing, though :-( */
 #endif
+/* dann einen return zu machen, ist auch irgendwie nicht das richtige! :-(
+   v->introducer = 0; v->dbit = 1; v->b = 0;
+   return buflen;
+ */
 			}
-			line++; /* next line */
+			line++; /* alles klar, nächste zeile */
 			continue;
 		} else if (!introducer) {	/* every byte starts with 10 (stopbit, startbit) */
-			introducer = (m[line] & mbit) ? 0 : 1;	/* current bit of the matrix */
+			introducer = (m[line] & mbit) ? 0 : 1;	/* aktuelles bit der matrix */
 		      next_byte:
-			if (mbit > 2) {	/* was it the last bit in this line ? */
-				mbit >>= 1;	/* no -> take next */
+			if (mbit > 2) {	/* war es das letzte bit dieser matrixzeile ? */
+				mbit >>= 1;	/* nein, nimm das nächste in dieser zeile */
 				continue;
-			}       /* otherwise start with leftmost bit in the next line */
+			}       /* sonst links in der nächsten zeile anfangen */
 			mbit = 64;
 			line++;
 			continue;
-		} else {        /* otherwise we need to set a data bit */
-			if (m[line] & mbit)	/* was that bit set in the matrix ? */
-				b |= dbit;	/* yes -> set it in the data byte */
+		} else {        /* sonst müssen wir ein datenbit setzen */
+			if (m[line] & mbit)	/* war das bit in der matrix gesetzt ? */
+				b |= dbit;	/* ja, dann setz es auch im datenbyte  */
 			else
-				b &= dbit - 1;	/* no -> clear it in the data byte */
-			if (dbit < 128)	/* is that data byte done ? */
-				dbit <<= 1;	/* no, got the next bit */
-			else {  /* data byte is done */
-				buf[buflen++] = b;	/* copy byte into the output buffer */
-				introducer = b = 0;	/* init of the intro sequence and of the data byte */
-				dbit = 1;	/* next we look for the 0th bit */
+				b &= dbit - 1;	/* nein, lösch bit im datenbyte */
+			if (dbit < 128)	/* haben wir schon ein ganzes byte voll ? */
+				dbit <<= 1;	/* nein, auf zum nächsten datenbit */
+			else {  /* ein ganzes datenbyte ist voll */
+				buf[buflen++] = b;	/* byte in den output buffer kopieren */
+				introducer = b = 0;	/* Init der Introsequenz und des datenbytes */
+				dbit = 1;	/* als nächstes suchen wir das nullte bit */
 			}
-			goto next_byte;	/* look for next bit in the matrix */
+			goto next_byte;	/* suche das nächste bit in der matrix */
 		}
 	}
 	v->introducer = introducer;
 	v->dbit = dbit;
 	v->b = b;
-	return buflen;          /* return number of bytes in the output buffer */
+	return buflen;          /* return anzahl der bytes im output buffer */
 }
 
-/* 
- * DecodeStream receives V.110 coded data from the input stream. It recovers the 
- * original frames.
- * The input stream doesn't need to be framed
+/* DecodeStream erhält vom input stream V110 kodierte Daten, die zu den
+   V110 frames zusammengepackt werden müssen. Die Daten können an diese
+   Schnittstelle so übergeben werden, wie sie von der Leitung kommen, ohne
+   darauf achten zu müssen, das frames usw. eingehalten werden.
  */
 struct sk_buff *
 isdn_v110_decode(isdn_v110_stream * v, struct sk_buff *skb)
@@ -299,8 +319,8 @@ isdn_v110_decode(isdn_v110_stream * v, struct sk_buff *skb)
 		dev_kfree_skb(skb);
 		return NULL;    /* no, try later      */
 	}
-	if (ValidHeaderBytes(v) != v->nbytes) {	/* is that a valid header? */
-		SyncHeader(v);  /* no -> look for header */
+	if (ValidHeaderBytes(v) != v->nbytes) {	/* ist es ein ungültiger header ? */
+		SyncHeader(v);  /* nein, such einen header */
 		goto ReSync;
 	}
 	len = (v->decodelen - (v->decodelen % (10 * v->nbytes))) / v->nbytes;
@@ -342,15 +362,15 @@ EncodeMatrix(unsigned char *buf, int len, unsigned char *m, int mlen)
 	int introducer = 3;
 	int ibit[] = {0, 1, 1};
 
-	while ((i < len) && (line < mlen)) {	/* while we still have input data */
-		switch (line % 10) {	/* in which line of the matrix are we? */
+	while ((i < len) && (line < mlen)) {	/* solange noch input da ist */
+		switch (line % 10) {	/* in welcher matrixzeile sind wir ? */
 			case 0:
-				m[line++] = 0x00;	/* line 0 is always 0 */
-				mbit = 128;	/* go on with the 7th bit */
+				m[line++] = 0x00;	/* zeile 0 ist immer 0 */
+				mbit = 128;	/* und es geht mit dem 7. bit weiter */
 				break;
 			case 5:
-				m[line++] = 0xbf;	/* line 5 is always 10111111 */
-				mbit = 128;	/* go on with the 7th bit */
+				m[line++] = 0xbf;	/* zeile 5 ist immer 10111111 */
+				mbit = 128;	/* und es geht mit dem 7. bit weiter */
 				break;
 		}
 		if (line >= mlen) {
@@ -358,41 +378,41 @@ EncodeMatrix(unsigned char *buf, int len, unsigned char *m, int mlen)
 			return line;
 		}
 	next_bit:
-		switch (mbit) { /* leftmost or rightmost bit ? */
+		switch (mbit) { /* ganz linkes oder rechtes bit ? */
 			case 1:
-				line++;	/* rightmost -> go to next line */
+				line++;	/* ganz rechts ! dann in die nächste */
 				if (line >= mlen) {
 					printk(KERN_WARNING "isdn_v110 (EncodeMatrix): buffer full!\n");
 					return line;
 				}
 			case 128:
-				m[line] = 128;	/* leftmost -> set byte to 1000000 */
-				mbit = 64;	/* current bit in the matrix line */
+				m[line] = 128;	/* ganz links byte auf 1000000 setzen */
+				mbit = 64;	/* aktuelles bit in der matrixzeile */
 				continue;
 		}
-		if (introducer) {	/* set 110 sequence ? */
-			introducer--;	/* set on digit less */
-			m[line] |= ibit[introducer] ? mbit : 0;	/* set corresponding bit */
-			mbit >>= 1;	/* bit of matrix line  >> 1 */
-			goto next_bit;	/* and go on there */
-		}               /* else push data bits into the matrix! */
-		m[line] |= (buf[i] & dbit) ? mbit : 0;	/* set data bit in matrix */
-		if (dbit == 128) {	/* was it the last one? */
-			dbit = 1;	/* then go on with first bit of  */
-			i++;            /* next byte in input buffer */
-			if (i < len)	/* input buffer done ? */
-				introducer = 3;	/* no, write introducer 110 */
-			else {  /* input buffer done ! */
-				m[line] |= (mbit - 1) & 0xfe;	/* set remaining bits in line to 1 */
+		if (introducer) {	/* 110 sequenz setzen ? */
+			introducer--;	/* ein digit weniger setzen */
+			m[line] |= ibit[introducer] ? mbit : 0;	/* entsprechendes bit setzen */
+			mbit >>= 1;	/* bit der matrixzeile >> 1 */
+			goto next_bit;	/* und dort weiter machen */
+		}               /* else datenbits in die matrix packen! */
+		m[line] |= (buf[i] & dbit) ? mbit : 0;	/* datenbit in matrix setzen */
+		if (dbit == 128) {	/* war es das letzte datenbit ? */
+			dbit = 1;	/* dann mach beim nächsten weiter */
+			i++;    /* nächste datenbyte des input buffers */
+			if (i < len)	/* war es schon das letzte ? */
+				introducer = 3;	/* nein, schreib den introducer 110 */
+			else {  /* war das letzte datenbyte ! */
+				m[line] |= (mbit - 1) & 0xfe;	/* setz restliche bits der zeile auf 1 */
 				break;
 			}
-		} else          /* not the last data bit */
-			dbit <<= 1;	/* then go to next data bit */
-		mbit >>= 1;     /* go to next bit of matrix */
+		} else          /* nicht das letzte datenbit */
+			dbit <<= 1;	/* dann gehe zum nächsten datenbit */
+		mbit >>= 1;     /* und setz bit der matrix weiter */
 		goto next_bit;
 
 	}
-	/* if necessary, generate remaining lines of the matrix... */
+	/* evtl. noch restliche zeilen in der matrix generieren... */
 	if ((line) && ((line + 10) < mlen))
 		switch (++line % 10) {
 			case 1:
@@ -414,7 +434,7 @@ EncodeMatrix(unsigned char *buf, int len, unsigned char *m, int mlen)
 			case 9:
 				m[line++] = 0xfe;
 		}
-	return line;            /* that's how many lines we have */
+	return line;            /* soviele matrixzeilen sind es */
 }
 
 /*
@@ -502,7 +522,7 @@ isdn_v110_encode(isdn_v110_stream * v, struct sk_buff *skb)
 		return nskb;
 	}
 	mlen = EncodeMatrix(skb->data, rlen, v110buf, size);
-	/* now distribute 2 or 4 bits each to the output stream! */
+	/* jetzt noch jeweils 2 oder 4 bits auf den output stream verteilen! */
 	rbuf = skb_put(nskb, size);
 	olen = 0;
 	sval1 = 8 - v->nbits;

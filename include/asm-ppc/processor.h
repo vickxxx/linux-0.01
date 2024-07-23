@@ -4,9 +4,9 @@
 #include <linux/config.h>
 
 #include <asm/ptrace.h>
+#include <asm/residual.h>
 
 /* Bit encodings for Machine State Register (MSR) */
-#define MSR_VEC		(1<<25)		/* Enable Altivec */
 #define MSR_POW		(1<<18)		/* Enable Power Management */
 #define MSR_TGPR	(1<<17)		/* TLB Update registers in use */
 #define MSR_ILE		(1<<16)		/* Interrupt Little-Endian enable */
@@ -51,23 +51,10 @@
 #define HID0_DLOCK	(1<<12)		/* Data Cache Lock */
 #define HID0_ICFI	(1<<11)		/* Instruction Cache Flash Invalidate */
 #define HID0_DCI	(1<<10)		/* Data Cache Invalidate */
-#define HID0_SPD	(1<<9)		/* Speculative disable */
 #define HID0_SIED	(1<<7)		/* Serial Instruction Execution [Disable] */
-#define HID0_SGE	(1<<7)		/* Store Gathering Enable */
-#define HID0_BTIC	(1<<5)		/* Branch Target Instruction Cache Enable */
-#define HID0_ABE	(1<<3)		/* Address Broadcast Enable */
 #define HID0_BHTE	(1<<2)		/* Branch History Table Enable */
 #define HID0_BTCD	(1<<1)		/* Branch target cache disable */
 
-/* L2CR bits */
-#define L2CR_PIPE_LATEWR   (0x01800000)   /* late-write SRAM */
-#define L2CR_L2CTL         (0x00100000)   /* RAM control */
-#define L2CR_INST_DISABLE  (0x00400000)   /* disable for insn's */
-#define L2CR_L2I           (0x00200000)   /* global invalidate */
-#define L2CR_L2E           (0x80000000)   /* enable */
-#define L2CR_L2WT          (0x00080000)   /* write-through */
-
- 
 /* fpscr settings */
 #define FPSCR_FX        (1<<31)
 #define FPSCR_FEX       (1<<30)
@@ -81,7 +68,6 @@
 #define _MACH_rpxlite 64  /* RPCG RPX-Lite 8xx board */
 #define _MACH_bseip   128 /* Bright Star Engineering ip-Engine */
 #define _MACH_yk      256 /* Motorola Yellowknife */
-#define _MACH_gemini  512 /* Synergy Microsystems gemini board */
 
 /* see residual.h for these */
 #define _PREP_Motorola 0x01  /* motorola prep */
@@ -159,7 +145,6 @@ n:
 #define EAR	282	/* External Address Register */
 #define L2CR	1017    /* PPC 750 L2 control register */
 
-#define ICTC	1019
 #define THRM1	1020
 #define THRM2	1021
 #define THRM3	1022
@@ -190,10 +175,6 @@ n:
 #define SR15	15
 
 #ifndef __ASSEMBLY__
-#include <asm/types.h>
-
-#ifdef __KERNEL__
-
 extern int _machine;
 
 /* Temporary hacks until we can clean things up better - Corey */
@@ -215,11 +196,6 @@ extern unsigned char ucBoardRevMaj, ucBoardRevMin;
 struct task_struct;
 void start_thread(struct pt_regs *regs, unsigned long nip, unsigned long sp);
 void release_thread(struct task_struct *);
-
-/*
- * Create a new kernel thread.
- */
-extern long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
 
 /*
  * Bus types
@@ -259,20 +235,9 @@ struct thread_struct {
 	double		fpr[32];	/* Complete floating point set */
 	unsigned long	fpscr_pad;	/* fpr ... fpscr must be contiguous */
 	unsigned long	fpscr;		/* Floating point status */
-#ifdef CONFIG_ALTIVEC
-	vector128	vr[32];		/* Complete AltiVec set */
-	vector128	vscr;		/* AltiVec status */
-	unsigned long	vrsave;
-#endif /* CONFIG_ALTIVEC */
 };
 
 #define INIT_SP		(sizeof(init_stack) + (unsigned long) &init_stack)
-
-#ifdef CONFIG_ALTIVEC
-#define INIT_TSS_AVEC	{{{0}}}, {{0}}, 0,
-#else
-#define INIT_TSS_AVEC
-#endif /* CONFIG_ALTIVEC */
 
 #define INIT_TSS  { \
 	INIT_SP, /* ksp */ \
@@ -281,8 +246,7 @@ struct thread_struct {
 	(struct pt_regs *)INIT_SP - 1, /* regs */ \
 	KERNEL_DS, /*fs*/ \
 	0, /* last_syscall */ \
-	{0}, 0, 0, \
-	INIT_TSS_AVEC \
+	{0}, 0, 0 \
 }
 
 /*
@@ -324,6 +288,5 @@ void _nmask_and_or_msr(unsigned long nmask, unsigned long or_val);
 
 #endif /* ndef ASSEMBLY*/
 
-#endif /* __KERNEL__ */
-
+  
 #endif /* __ASM_PPC_PROCESSOR_H */

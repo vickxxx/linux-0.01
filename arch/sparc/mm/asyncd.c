@@ -1,4 +1,4 @@
-/*  $Id: asyncd.c,v 1.12.2.1 1999/11/16 06:29:36 davem Exp $
+/*  $Id: asyncd.c,v 1.12 1998/09/13 04:30:30 davem Exp $
  *  The asyncd kernel daemon. This handles paging on behalf of 
  *  processes that receive page faults due to remote (async) memory
  *  accesses. 
@@ -152,9 +152,7 @@ static int fault_in_page(int taskid,
 	if(!pte)
 		goto no_memory;
 	if(!pte_present(*pte)) {
-		int fault = handle_mm_fault(tsk, vma, address, write);
-		if (fault < 0)
-			goto no_memory;
+		handle_mm_fault(tsk, vma, address, write);
 		goto finish_up;
 	}
 	set_pte(pte, pte_mkyoung(*pte));
@@ -166,11 +164,7 @@ static int fault_in_page(int taskid,
 		flush_tlb_page(vma, address);
 		goto finish_up;
 	}
-	{
-		int fault = handle_mm_fault(tsk, vma, address, write);
-		if (fault < 0)
-			goto no_memory;
-	}
+	handle_mm_fault(tsk, vma, address, write);
 
 	/* Fall through for do_wp_page */
 finish_up:
@@ -179,7 +173,7 @@ finish_up:
 
 no_memory:
 	stats.failure++;
-	force_sig(SIGKILL, tsk);
+	oom(tsk);
 	return 1;
 	
 bad_area:	  

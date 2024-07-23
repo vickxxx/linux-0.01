@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.36.2.6 2001/01/26 22:26:07 davem Exp $
+/* $Id: ebus.c,v 1.36 1999/05/04 03:21:42 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -44,12 +44,6 @@ extern int flash_init(void);
 #ifdef CONFIG_ENVCTRL
 extern int envctrl_init(void);
 #endif
-#ifdef CONFIG_DISPLAY7SEG
-extern int d7s_init(void);
-#endif
-#ifdef CONFIG_WATCHDOG_CP1XXX
-extern int wd_init(void);
-#endif
 
 static inline unsigned long ebus_alloc(size_t size)
 {
@@ -62,15 +56,15 @@ static inline unsigned long ebus_alloc(size_t size)
 	return mem;
 }
 
-__initfunc(int ebus_intmap_match(struct linux_ebus *ebus,
-				 struct linux_prom_registers *reg,
-				 int *interrupt))
+__initfunc(void ebus_intmap_match(struct linux_ebus *ebus,
+				  struct linux_prom_registers *reg,
+				  int *interrupt))
 {
 	unsigned int hi, lo, irq;
 	int i;
 
 	if (!ebus->num_ebus_intmap)
-		return 0;
+		return;
 
 	hi = reg->which_io & ebus->ebus_intmask.phys_hi;
 	lo = reg->phys_addr & ebus->ebus_intmask.phys_lo;
@@ -80,10 +74,13 @@ __initfunc(int ebus_intmap_match(struct linux_ebus *ebus,
 		    (ebus->ebus_intmap[i].phys_lo == lo) &&
 		    (ebus->ebus_intmap[i].interrupt == irq)) {
 			*interrupt = ebus->ebus_intmap[i].cinterrupt;
-			return 0;
+			return;
 		}
 	}
-	return -1;
+
+	prom_printf("ebus: IRQ [%08x.%08x.%08x] not found in interrupt-map\n",
+		    reg->which_io, reg->phys_addr, *interrupt);
+	prom_halt();
 }
 
 __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
@@ -103,13 +100,9 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 
 	for (i = 0; i < dev->num_addrs; i++) {
 		if (regs[i] >= dev->parent->num_addrs) {
-#if 1
-			continue;
-#else
 			prom_printf("UGH: property for %s was %d, need < %d\n",
 				    dev->prom_name, len, dev->parent->num_addrs);
 			panic(__FUNCTION__);
-#endif
 		}
 		dev->base_address[i] = dev->parent->base_address[regs[i]];
 	}
@@ -135,16 +128,9 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
 		for (i = 0; i < dev->num_irqs; i++) {
-			if (ebus_intmap_match(dev->bus, preg, &irqs[i]) != -1) {
-				dev->irqs[i] = psycho_irq_build(dev->bus->parent,
-								dev->bus->self,
-								irqs[i]);
-			} else {
-				/* If we get a bogus interrupt property, just
-				 * record the raw value instead of punting.
-				 */
-				dev->irqs[i] = irqs[i];
-			}
+			ebus_intmap_match(dev->bus, preg, &irqs[i]);
+			dev->irqs[i] = psycho_irq_build(dev->bus->parent,
+							dev->bus->self, irqs[i]);
 		}
 	}
 
@@ -196,16 +182,9 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
 		for (i = 0; i < dev->num_irqs; i++) {
-			if (ebus_intmap_match(dev->bus, &regs[0], &irqs[i]) != -1) {
-				dev->irqs[i] = psycho_irq_build(dev->bus->parent,
-								dev->bus->self,
-								irqs[i]);
-			} else {
-				/* If we get a bogus interrupt property, just
-				 * record the raw value instead of punting.
-				 */
-				dev->irqs[i] = irqs[i];
-			}
+			ebus_intmap_match(dev->bus, &regs[0], &irqs[i]);
+			dev->irqs[i] = psycho_irq_build(dev->bus->parent,
+							dev->bus->self, irqs[i]);
 		}
 	}
 
@@ -245,7 +224,6 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 }
 
 extern void clock_probe(void);
-extern void power_init(void);
 
 __initfunc(void ebus_init(void))
 {
@@ -430,9 +408,5 @@ __initfunc(void ebus_init(void))
 #ifdef CONFIG_OBP_FLASH
 	flash_init();
 #endif
-#ifdef CONFIG_DISPLAY7SEG
-	d7s_init();
-#endif
 	clock_probe();
-	power_init();
 }

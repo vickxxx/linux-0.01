@@ -32,6 +32,13 @@ extern void xmon(struct pt_regs *excp);
 	__asm__ __volatile__ ("mfmsr %0" : "=r" ((flags)) : : "memory"); })
 #define __save_and_cli(flags)	({__save_flags(flags);__cli();})
 
+/* Data cache block flush - write out the cache line containing the
+   specified address and then invalidate it in the cache. */
+extern __inline__ void dcbf(void *line)
+{
+	asm("dcbf %0,%1; sync" : : "r" (line), "r" (0));
+}
+
 extern __inline__ void __restore_flags(unsigned long flags)
 {
         extern atomic_t ppc_n_lost_interrupts;
@@ -45,13 +52,13 @@ extern __inline__ void __restore_flags(unsigned long flags)
         }
 }
 
-struct task_struct;
 
 extern void __sti(void);
 extern void __cli(void);
 extern int _disable_interrupts(void);
 extern void _enable_interrupts(int);
 
+extern void instruction_dump(unsigned long *);
 extern void print_backtrace(unsigned long *);
 extern void show_regs(struct pt_regs * regs);
 extern void flush_instruction_cache(void);
@@ -60,26 +67,19 @@ extern void poweroff_now(void);
 extern int _get_PVR(void);
 extern long _get_L2CR(void);
 extern void _set_L2CR(unsigned long);
-extern long _get_HID0(void);
-extern void _set_HID0(unsigned long);
-extern long _get_ICTC(void);
-extern void _set_ICTC(unsigned long);
 extern void via_cuda_init(void);
 extern void pmac_nvram_init(void);
 extern void read_rtc_time(void);
 extern void pmac_find_display(void);
 extern void giveup_fpu(struct task_struct *);
 extern void enable_kernel_fp(void);
-extern void giveup_altivec(struct task_struct *);
 extern void cvt_fd(float *from, double *to, unsigned long *fpscr);
 extern void cvt_df(double *from, float *to, unsigned long *fpscr);
-extern int call_rtas(const char *, int, int, unsigned long *, ...);
-extern void chrp_progress(char *);
-void chrp_event_scan(void);
 
 struct device_node;
 extern void note_scsi_host(struct device_node *, void *);
 
+struct task_struct;
 #define switch_to(prev,next,last) _switch_to((prev),(next),&(last))
 extern void _switch_to(struct task_struct *, struct task_struct *,
 		       struct task_struct **);
@@ -88,8 +88,6 @@ struct thread_struct;
 extern struct task_struct *_switch(struct thread_struct *prev,
 				     struct thread_struct *next,
 				     unsigned long context);
-
-extern unsigned int rtas_data;
 
 struct pt_regs;
 extern void dump_regs(struct pt_regs *);

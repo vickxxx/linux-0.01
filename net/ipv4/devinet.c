@@ -1,7 +1,7 @@
 /*
  *	NET3	IP device support routines.
  *
- *	Version: $Id: devinet.c,v 1.28.2.4 2000/10/29 11:41:15 davem Exp $
+ *	Version: $Id: devinet.c,v 1.28 1999/05/08 20:00:16 davem Exp $
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -99,9 +99,6 @@ static __inline__ void inet_free_ifa(struct in_ifaddr *ifa)
 struct in_device *inetdev_init(struct device *dev)
 {
 	struct in_device *in_dev;
-
-	if (dev->mtu < 68)
-		return NULL;
 
 	in_dev = kmalloc(sizeof(*in_dev), GFP_KERNEL);
 	if (!in_dev)
@@ -652,13 +649,12 @@ u32 inet_select_addr(struct device *dev, u32 dst, int scope)
 	for_primary_ifa(in_dev) {
 		if (ifa->ifa_scope > scope)
 			continue;
+		addr = ifa->ifa_local;
 		if (!dst || inet_ifa_match(dst, ifa))
-			return ifa->ifa_local;
-		if (!addr)
-			addr = ifa->ifa_local;
+			return addr;
 	} endfor_ifa(in_dev);
 	
-	if (addr)
+	if (addr || scope >= RT_SCOPE_LINK)
 		return addr;
 
 	/* Not loopback addresses on loopback should be preferred
@@ -670,9 +666,7 @@ u32 inet_select_addr(struct device *dev, u32 dst, int scope)
 			continue;
 
 		for_primary_ifa(in_dev) {
-			if (!IN_DEV_HIDDEN(in_dev) &&
-			    ifa->ifa_scope <= scope &&
-			    ifa->ifa_scope != RT_SCOPE_LINK)
+			if (ifa->ifa_scope <= scope)
 				return ifa->ifa_local;
 		} endfor_ifa(in_dev);
 	}
@@ -727,10 +721,6 @@ static int inetdev_event(struct notifier_block *this, unsigned long event, void 
 	case NETDEV_DOWN:
 		ip_mc_down(in_dev);
 		break;
-	case NETDEV_CHANGEMTU:	
-		if (dev->mtu >= 68)
-			break;
-		/* MTU falled under minimal IP mtu. Disable IP. */
 	case NETDEV_UNREGISTER:
 		inetdev_destroy(in_dev);
 		break;
@@ -925,7 +915,7 @@ int devinet_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 static struct devinet_sysctl_table
 {
 	struct ctl_table_header *sysctl_header;
-	ctl_table devinet_vars[14];
+	ctl_table devinet_vars[12];
 	ctl_table devinet_dev[2];
 	ctl_table devinet_conf_dir[2];
 	ctl_table devinet_proto_dir[2];
@@ -964,12 +954,6 @@ static struct devinet_sysctl_table
          &proc_dointvec},
         {NET_IPV4_CONF_LOG_MARTIANS, "log_martians",
          &ipv4_devconf.log_martians, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-	{NET_IPV4_CONF_HIDDEN, "hidden",
-         &ipv4_devconf.hidden, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-	{NET_IPV4_CONF_ARPFILTER, "arp_filter",
-         &ipv4_devconf.arp_filter, sizeof(int), 0644, NULL,
          &proc_dointvec},
 	 {0}},
 

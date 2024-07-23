@@ -1,11 +1,10 @@
 OUTPUT_FORMAT("elf64-alpha")
 ENTRY(__start)
-PHDRS { kernel PT_LOAD ; }
 SECTIONS
 {
    . = 0xfffffc0000310000;
    _text = .;
-   .text : { *(.text) } :kernel
+   .text : { *(.text) }
    .text2 : { *(.text2) }
    _etext = .;
 
@@ -27,22 +26,11 @@ SECTIONS
   __init_begin = .;
   .text.init : { *(.text.init) }
   .data.init : { *(.data.init) }
-  . = ALIGN(16);		/* __setup() commandline parameters */
-  __setup_start = .;
-  .setup.init : { *(.setup.init) }
-  __setup_end = .;
-
-  . = ALIGN(8);
-  __initcall_start = .;		/* the init functions to be called */
-  .initcall.init : { *(.initcall.init) }
-  __initcall_end = .;
-
   . = ALIGN(2*8192);	/* Align double page for init_task_union */
   __init_end = .;
 
   /* The initial task and kernel stack */
   init_task : { *(init_task) }
-
 
   /* Global data */
   _data = .;

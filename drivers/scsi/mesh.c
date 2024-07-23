@@ -8,7 +8,6 @@
  * Copyright (C) 1996 Paul Mackerras.
  */
 #include <linux/config.h>
-#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -30,10 +29,6 @@
 #include <asm/processor.h>
 #include <asm/spinlock.h>
 #include <asm/feature.h>
-#ifdef CONFIG_PMAC_PBOOK
-#include <asm/adb.h>
-#include <asm/pmu.h>
-#endif
 
 #include "scsi.h"
 #include "hosts.h"
@@ -44,8 +39,6 @@
  * - handle aborts correctly
  * - retry arbitration if lost (unless higher levels do this for us)
  */
-
-#define MESH_NEW_STYLE_EH
 
 #if 1
 #undef KERN_DEBUG
@@ -158,28 +151,16 @@ struct mesh_state {
 	u8	msgout[16];
 	struct dbdma_cmd *dma_cmds;	/* space for dbdma commands, aligned */
 	int	clk_freq;
-	struct mesh_target tgts[8];
-	struct device_node *dnode;
-	unsigned char *mio_base;
-#ifndef MESH_NEW_STYLE_EH
 	Scsi_Cmnd *completed_q;
 	Scsi_Cmnd *completed_qtail;
+	struct mesh_target tgts[8];
 	struct tq_struct tqueue;
-#endif
 #ifdef MESH_DBG
 	int	log_ix;
 	int	n_log;
 	struct dbglog log[N_DBG_SLOG];
 #endif
 };
-
-#ifdef CONFIG_PMAC_PBOOK
-static int mesh_notify_sleep(struct pmu_sleep_notifier *self, int when);
-static struct pmu_sleep_notifier mesh_sleep_notifier = {
-	mesh_notify_sleep,
-	SLEEP_LEVEL_BLOCK,
-};
-#endif
 
 #ifdef MESH_DBG
 
@@ -205,9 +186,7 @@ static int mesh_notify_reboot(struct notifier_block *, unsigned long, void *);
 static void mesh_dump_regs(struct mesh_state *);
 static void mesh_start(struct mesh_state *);
 static void mesh_start_cmd(struct mesh_state *, Scsi_Cmnd *);
-#ifndef MESH_NEW_STYLE_EH
 static void finish_cmds(void *);
-#endif
 static void add_sdtr_msg(struct mesh_state *);
 static void set_sdtr(struct mesh_state *, int, int);
 static void start_phase(struct mesh_state *);
@@ -228,7 +207,6 @@ static void set_dma_cmds(struct mesh_state *, Scsi_Cmnd *);
 static void halt_dma(struct mesh_state *);
 static int data_goes_out(Scsi_Cmnd *);
 static void do_abort(struct mesh_state *ms);
-static void set_mesh_power(struct mesh_state *ms, int state);
 
 static struct notifier_block mesh_notifier = {
 	mesh_notify_reboot,
@@ -263,7 +241,6 @@ mesh_detect(Scsi_Host_Template *tp)
 	if (mesh == 0)
 		mesh = find_compatible_devices("scsi", "chrp,mesh0");
 	for (; mesh != 0; mesh = mesh->next) {
-		struct device_node *mio;
 		if (mesh->n_addrs != 2 || mesh->n_intrs != 2) {
 			printk(KERN_ERR "mesh: expected 2 addrs and 2 intrs"
 			       " (got %d,%d)", mesh->n_addrs, mesh->n_intrs);
@@ -275,16 +252,13 @@ mesh_detect(Scsi_Host_Template *tp)
 			continue;
 		}
 		mesh_host->unique_id = nmeshes;
-#ifndef MODULE
 		note_scsi_host(mesh, mesh_host);
-#endif
-
+		
 		ms = (struct mesh_state *) mesh_host->hostdata;
 		if (ms == 0)
 			panic("no mesh state");
 		memset(ms, 0, sizeof(*ms));
 		ms->host = mesh_host;
-		ms->dnode = mesh;
 		ms->mesh = (volatile struct mesh_regs *)
 			ioremap(mesh->addrs[0].address, 0x1000);
 		ms->dma = (volatile struct dbdma_regs *)
@@ -308,10 +282,10 @@ mesh_detect(Scsi_Host_Template *tp)
 			ms->tgts[tgt].sync_params = ASYNC_PARAMS;
 			ms->tgts[tgt].current_req = 0;
 		}
-#ifndef MESH_NEW_STYLE_EH
+
 		ms->tqueue.routine = finish_cmds;
 		ms->tqueue.data = ms;
-#endif
+
 		*prev_statep = ms;
 		prev_statep = &ms->next;
 
@@ -328,16 +302,9 @@ mesh_detect(Scsi_Host_Template *tp)
 		if (mesh_sync_period < minper)
 			mesh_sync_period = minper;
 
-		ms->mio_base = 0;
-		for (mio = ms->dnode->parent; mio; mio = mio->parent)
-			if (strcmp(mio->name, "mac-io") == 0
-			    && mio->n_addrs > 0)
-				break;
-		if (mio)
-			ms->mio_base = (unsigned char *)
-				ioremap(mio->addrs[0].address, 0x40);
+		feature_set(mesh, FEATURE_MESH_enable);
+		mdelay(200);
 
-		set_mesh_power(ms, 1);
 		mesh_init(ms);
 
 		if (request_irq(ms->meshintr, do_mesh_interrupt, 0, "MESH", ms)) {
@@ -347,73 +314,11 @@ mesh_detect(Scsi_Host_Template *tp)
 		++nmeshes;
 	}
 
-	if ((_machine == _MACH_Pmac) && (nmeshes > 0)) {
-#ifdef CONFIG_PMAC_PBOOK
-		pmu_register_sleep_notifier(&mesh_sleep_notifier);
-#endif /* CONFIG_PMAC_PBOOK */
- 		register_reboot_notifier(&mesh_notifier);
-	}		
+	if ((_machine == _MACH_Pmac) && (nmeshes > 0))
+		register_reboot_notifier(&mesh_notifier);
 
 	return nmeshes;
 }
-
-static void
-set_mesh_power(struct mesh_state *ms, int state)
-{
-	if (_machine != _MACH_Pmac || ms->mio_base == 0)
-		return;
-		
-	if (state) {
-		feature_set(ms->dnode, FEATURE_MESH_enable);
-		/* This seems to enable the termination power. strangely
-		   this doesn't fully agree with OF, but with MacOS */
-		if (ms->mio_base)
-			out_8(ms->mio_base + 0x36, 0x70);
-		mdelay(200);
-	} else {
-		feature_clear(ms->dnode, FEATURE_MESH_enable);
-		if (ms->mio_base)
-			out_8(ms->mio_base + 0x36, 0x34);
-		mdelay(10);
-	}
-}			
-
-#ifdef CONFIG_PMAC_PBOOK
-/*
- * notify clients before sleep and reset bus afterwards
- */
-int
-mesh_notify_sleep(struct pmu_sleep_notifier *self, int when)
-{
-	struct mesh_state *ms;
-	
-	switch (when) {
-	case PBOOK_SLEEP_REQUEST:
-		/* XXX We should wait for current transactions and queue
-		 * new ones that would be posted beyond this point 
-		 */ 
-		break;
-	case PBOOK_SLEEP_REJECT:
-		break;
-		
-	case PBOOK_SLEEP_NOW:
-		for (ms = all_meshes; ms != 0; ms = ms->next) {
-			disable_irq(ms->meshintr);
-			set_mesh_power(ms, 0);
-		}
-		break;
-	case PBOOK_WAKE:
-		for (ms = all_meshes; ms != 0; ms = ms->next) {
-			set_mesh_power(ms, 1);
-			mesh_init(ms);
-			enable_irq(ms->meshintr);
-		}
-		break;
-	}
-	return PBOOK_SLEEP_OK;
-}
-#endif /* CONFIG_PMAC_PBOOK */
- 
 
 int
 mesh_queue(Scsi_Cmnd *cmd, void (*done)(Scsi_Cmnd *))
@@ -523,9 +428,7 @@ mesh_reset(Scsi_Cmnd *cmd, unsigned how)
 	{
 		handle_reset(ms);
 		restore_flags(flags);
-#ifndef MESH_NEW_STYLE_EH
 		finish_cmds(ms);
-#endif
 		ret |= SCSI_RESET_SUCCESS;
 	}
 	return ret;
@@ -774,7 +677,6 @@ mesh_start_cmd(struct mesh_state *ms, Scsi_Cmnd *cmd)
 	}
 }
 
-#ifndef MESH_NEW_STYLE_EH
 static void
 finish_cmds(void *data)
 {
@@ -783,18 +685,18 @@ finish_cmds(void *data)
 	unsigned long flags;
 
 	for (;;) {
-		spin_lock_irqsave(&io_request_lock, flags);
+		save_flags(flags);
+		cli();
 		cmd = ms->completed_q;
 		if (cmd == NULL) {
-			spin_unlock_irqrestore(&io_request_lock, flags);
+			restore_flags(flags);
 			break;
 		}
 		ms->completed_q = (Scsi_Cmnd *) cmd->host_scribble;
+		restore_flags(flags);
 		(*cmd->scsi_done)(cmd);
-		spin_unlock_irqrestore(&io_request_lock, flags);
 	}
 }
-#endif /* MESH_NEW_STYLE_EH */
 
 static inline void
 add_sdtr_msg(struct mesh_state *ms)
@@ -860,8 +762,8 @@ start_phase(struct mesh_state *ms)
 	Scsi_Cmnd *cmd = ms->current_req;
 	struct mesh_target *tp = &ms->tgts[ms->conn_tgt];
 
-	dlog(ms, "start_phase nmo/exc/fc/seq = %.8x",
-	     MKWORD(ms->n_msgout, mr->exception, mr->fifo_count, mr->sequence));
+	dlog(ms, "start_phase err/exc/fc/seq = %.8x",
+	     MKWORD(mr->error, mr->exception, mr->fifo_count, mr->sequence));
 	out_8(&mr->interrupt, INT_ERROR | INT_EXCEPTION | INT_CMDDONE);
 	seq = use_active_neg + (ms->n_msgout? SEQ_ATN: 0);
 	switch (ms->msgphase) {
@@ -1155,7 +1057,6 @@ cmd_complete(struct mesh_state *ms)
 			t = 230;		/* wait up to 230us */
 			while ((mr->bus_status0 & BS0_REQ) == 0) {
 				if (--t < 0) {
-					dlog(ms, "impatient for req", ms->n_msgout);
 					ms->msgphase = msg_none;
 					break;
 				}
@@ -1742,9 +1643,7 @@ mesh_done(struct mesh_state *ms, int start_next)
 static void
 mesh_completed(struct mesh_state *ms, Scsi_Cmnd *cmd)
 {
-#ifdef MESH_NEW_STYLE_EH
-	(*cmd->scsi_done)(cmd);
-#else
+#if 0
 	if (ms->completed_q == NULL)
 		ms->completed_q = cmd;
 	else
@@ -1753,7 +1652,9 @@ mesh_completed(struct mesh_state *ms, Scsi_Cmnd *cmd)
 	cmd->host_scribble = NULL;
 	queue_task(&ms->tqueue, &tq_immediate);
 	mark_bh(IMMEDIATE_BH);
-#endif /* MESH_NEW_STYLE_EH */
+#else
+	(*cmd->scsi_done)(cmd);
+#endif
 }
 
 /*
@@ -1911,12 +1812,6 @@ data_goes_out(Scsi_Cmnd *cmd)
 		return 0;
 	}
 }
-
-#ifdef MODULE
-Scsi_Host_Template driver_template = SCSI_MESH;
-
-#include "scsi_module.c"
-#endif /* MODULE */
 
 #ifdef MESH_DBG
 static inline u32 readtb(void)

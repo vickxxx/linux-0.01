@@ -1,4 +1,4 @@
-/* $Id: siginfo.h,v 1.4 1999/06/13 16:35:54 ralf Exp $
+/* $Id: siginfo.h,v 1.4 1998/08/28 16:23:06 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -97,8 +97,8 @@ typedef struct siginfo {
 #define SI_MESGQ	-4	/* sent by real time mesq state change */
 #define SI_SIGIO	-5	/* sent by queued SIGIO */
 
-#define SI_FROMUSER(siptr)	((siptr)->si_code <= 0 && (siptr)->si_code != SI_SIGIO)
-#define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0 || (siptr)->si_code == SI_SIGIO)
+#define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
+#define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
 
 /*
  * SIGILL si_codes

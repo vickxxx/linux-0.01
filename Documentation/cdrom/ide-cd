@@ -1,7 +1,7 @@
 IDE-CD driver documentation
 Originally by scott snyder  <snyder@fnald0.fnal.gov> (19 May 1996)
 Carrying on the torch is: Erik Andersen <andersee@debian.org>
-New maintainer (19 Oct 1998): Jens Axboe <axboe@suse.de>
+New maintainers (19 Oct 1998): Jens Axboe <axboe@image.dk>
 
 1. Introduction
 ---------------
@@ -286,7 +286,7 @@ b. Timeout/IRQ errors.
     Unfortunately, these drives seem to become very confused when we perform
     the standard Linux ATA disk drive probe. If you own one of these drives,
     you can bypass the ATA probing which confuses these CDROM drives, by 
-    adding `append="hdX=noprobe hdX=cdrom"' to your lilo.conf file and running 
+    adding `append="hdX=noprobe hdX=cdrom"' to your lilo.conf file and runing 
     lilo (again where X is the drive letter corresponding to where your drive 
     is installed.)
     

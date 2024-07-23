@@ -117,14 +117,6 @@ int register_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
          * TODO: Make number of input/output buffers tunable parameters
          */
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x202ff
-        init_waitqueue_head(&drv->open_wait);
-        init_waitqueue_head(&drv->output_write_wait);
-        init_waitqueue_head(&drv->output_drain_wait);
-        init_waitqueue_head(&drv->input_read_wait);
-        init_waitqueue_head(&drv->poll_wait);
-#endif
-
         drv->num_output_buffers = 8;
 	drv->output_buffer_size = (4096 * 2);
 	drv->playing_count = 0;
@@ -272,7 +264,6 @@ void sparcaudio_output_done(struct sparcaudio_driver * drv, int status)
    * If status & 2, a buffer was claimed for DMA and is still in use.
    *
    * The playing_count for non-DMA hardware should never be non-zero.
-   * Value of status for non-DMA hardware should always be 1.
    */
   if (status & 1) {
     if (drv->playing_count) 
@@ -309,10 +300,8 @@ void sparcaudio_output_done(struct sparcaudio_driver * drv, int status)
 
   /* If we got back a buffer, see if anyone wants to write to it */
   if ((status & 1) || ((drv->output_count + drv->playing_count) 
-                       < drv->num_output_buffers)) {
+		  < drv->num_output_buffers)) 
     wake_up_interruptible(&drv->output_write_wait);
-    wake_up_interruptible(&drv->poll_wait);
-  }
 
   /* If the output queue is empty, shut down the driver. */
   if ((drv->output_count < 1) && (drv->playing_count < 1)) {
@@ -325,7 +314,6 @@ void sparcaudio_output_done(struct sparcaudio_driver * drv, int status)
     /* Wake up any waiting writers or syncers and return. */
     wake_up_interruptible(&drv->output_write_wait);
     wake_up_interruptible(&drv->output_drain_wait);
-    wake_up_interruptible(&drv->poll_wait);
     return;
   }
 
@@ -347,7 +335,6 @@ void sparcaudio_input_done(struct sparcaudio_driver * drv, int status)
     drv->ops->start_input(drv, drv->input_buffers[drv->input_front],
 			  drv->input_buffer_size);
     wake_up_interruptible(&drv->input_read_wait);
-    wake_up_interruptible(&drv->poll_wait);
     return;
   } 
 
@@ -383,7 +370,6 @@ void sparcaudio_input_done(struct sparcaudio_driver * drv, int status)
 
   /* Wake up any tasks that are waiting. */
   wake_up_interruptible(&drv->input_read_wait);
-  wake_up_interruptible(&drv->poll_wait);
 }
 
 
@@ -406,14 +392,14 @@ static int sparcaudio_select(struct inode * inode, struct file * file,
       dprintk(("read ready: c%d o%d\n", drv->input_count, drv->input_offset));
       return 1;
     }
-    select_wait(&drv->poll_wait, wait);
+    select_wait(&drv->input_read_wait, wait);
     break;
   case SEL_OUT:
     dprintk(("sel out: c%d o%d p%d\n", drv->output_count, drv->output_offset, drv->playing_count));
     if ((drv->output_count + drv->playing_count) < (drv->num_output_buffers)) {
       return 1;
     }
-    select_wait(&drv->poll_wait, wait);
+    select_wait(&drv->output_write_wait, wait);
     break;
   case SEL_EX:
     break;
@@ -429,7 +415,8 @@ static unsigned int sparcaudio_poll(struct file *file, poll_table * wait)
   struct sparcaudio_driver *drv = drivers[(MINOR(inode->i_rdev) >>
                                            SPARCAUDIO_DEVICE_SHIFT)];
 
-  poll_wait(file, &drv->poll_wait, wait);
+  poll_wait(file, &drv->input_read_wait, wait);
+  poll_wait(file, &drv->output_write_wait, wait);
   if (((!file->f_flags & O_NONBLOCK) && drv->input_count) ||
       (drv->input_size > drv->buffer_size)) {
     mask |= POLLIN | POLLRDNORM;
@@ -513,7 +500,6 @@ static ssize_t sparcaudio_read(struct file * file, char *buf,
      */
     if (drv->duplex == 2) {
       wake_up_interruptible(&drv->output_write_wait);
-      wake_up_interruptible(&drv->poll_wait);
     }
   }
 
@@ -678,7 +664,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
   case SOUND_MIXER_WRITE_CD:
   case SOUND_MIXER_WRITE_LINE:
   case SOUND_MIXER_WRITE_IMIX:
-    if(COPY_IN(arg, k))
+    if(get_user(k, arg))
       return -EFAULT;
     tprintk(("setting input volume (0x%x)", k));
     if (drv->ops->get_input_channels)
@@ -709,7 +695,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
   case SOUND_MIXER_WRITE_PCM:
   case SOUND_MIXER_WRITE_VOLUME:
   case SOUND_MIXER_WRITE_SPEAKER:
-    if(COPY_IN(arg, k))
+    if(get_user(k, arg))
 	return -EFAULT;
     tprintk(("setting output volume (0x%x)", k));
     if (drv->ops->get_output_channels)
@@ -750,7 +736,7 @@ static int sparcaudio_mixer_ioctl(struct inode * inode, struct file * file,
   case SOUND_MIXER_WRITE_RECSRC: 
     if (!drv->ops->set_input_port)
       return -EINVAL;
-    if(COPY_IN(arg, k))
+    if(get_user(k, arg))
       return -EFAULT;
     /* only one should ever be selected */
     if (k & SOUND_MASK_IMIX) j = AUDIO_ANALOG_LOOPBACK;
@@ -1193,7 +1179,6 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 		sparcaudio_sync_output(drv);
 		if (drv->output_active) {
 		  wake_up_interruptible(&drv->output_write_wait);
-		  wake_up_interruptible(&drv->poll_wait);
 		  drv->ops->stop_output(drv);
 		}
 		drv->output_offset = 0;
@@ -1210,7 +1195,6 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 		((unsigned int)arg == FLUSHRW)) {
 	      if (drv->input_active && (file->f_mode & FMODE_READ)) {
 		wake_up_interruptible(&drv->input_read_wait);
-		wake_up_interruptible(&drv->poll_wait);
 		drv->ops->stop_input(drv);
 		drv->input_active = 0;
 		drv->input_front = 0;
@@ -1243,7 +1227,6 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 	  case AUDIO_FLUSH:
 	    if (drv->output_active && (file->f_mode & FMODE_WRITE)) {
 	      wake_up_interruptible(&drv->output_write_wait);
-	      wake_up_interruptible(&drv->poll_wait);
 	      drv->ops->stop_output(drv);
 	      drv->output_active = 0;
 	      drv->output_front = 0;
@@ -1256,7 +1239,6 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 	    }
 	    if (drv->input_active && (file->f_mode & FMODE_READ)) {
 	      wake_up_interruptible(&drv->input_read_wait);
-	      wake_up_interruptible(&drv->poll_wait);
 	      drv->ops->stop_input(drv);
 	      drv->input_active = 0;
 	      drv->input_front = 0;

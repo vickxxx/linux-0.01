@@ -202,7 +202,7 @@ struct lp_struct lp_table[LP_NO] =
 /* Test if the printer is not acking the strobe */
 #define	LP_NO_ACKING(status)	((status) & LP_PACK)
 /* Test if the printer has error conditions */
-#define LP_NO_ERROR(minor, status)	((!(LP_F(minor) & LP_CAREFUL)) ? ((status) & LP_PERRORP) : (((status) & (LP_PERRORP|LP_POUTPA|LP_PSELECD)) == (LP_PERRORP|LP_PSELECD)))
+#define LP_NO_ERROR(status)	((status) & LP_PERRORP)
 
 #undef LP_DEBUG
 #undef LP_READ_DEBUG
@@ -249,8 +249,7 @@ static __inline__ void lp_schedule(int minor, long timeout)
 		lp_table[minor].irq_missed = 1;
 		schedule_timeout(timeout);
 		lp_parport_claim(minor);
-	} 
-	else
+	} else
 		schedule_timeout(timeout);
 }
 
@@ -289,7 +288,7 @@ static inline int lp_char(char lpchar, int minor)
 		lp_yield(minor);
 
 		status = r_str(minor);
-		if (LP_NO_ERROR(minor, status))
+		if (LP_NO_ERROR(status))
 		{
 			if (LP_READY(status))
 				break;
@@ -307,11 +306,32 @@ static inline int lp_char(char lpchar, int minor)
 		/*
 		 * NOTE: if you run with irqs you _must_ use
 		 * `tunelp /dev/lp? -c 1' to be rasonable efficient!
-		 *
-		 * ..but beware that data corruption can happen that way. -Tim
 		 */
 		if (++count == LP_CHAR(minor))
+		{
+			if (irq_ok)
+			{
+				static int first_time = 1;
+				/*
+				 * The printer is using a buggy handshake, so
+				 * revert to polling to not overload the
+				 * machine and warn the user that its printer
+				 * could get optimized trusting the irq. -arca
+				 */
+				lp_table[minor].irq_missed = 1;
+				if (first_time)
+				{
+					first_time = 0;
+					printk(KERN_WARNING "lp%d: the "
+					       "printing could be optimized "
+					       "using the TRUST_IRQ flag, "
+					       "see the top of "
+					       "linux/drivers/char/lp.c\n",
+					       minor);
+				}
+			}
 			return 0;
+		}
 	}
 
 	w_dtr(minor, lpchar);
@@ -392,7 +412,6 @@ static void lp_error(int minor)
 	if (LP_POLLED(minor) || LP_PREEMPTED(minor)) {
 		current->state = TASK_INTERRUPTIBLE;
 		lp_parport_release(minor);
-		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(LP_TIMEOUT_POLLED);
 		lp_parport_claim(minor);
 		lp_table[minor].irq_missed = 1;
@@ -403,7 +422,7 @@ static int lp_check_status(int minor)
 {
 	unsigned int last = lp_table[minor].last_error;
 	unsigned char status = r_str(minor);
-	if ((status & LP_PERRORP) && !(LP_F(minor) & LP_CAREFUL))
+	if (status & LP_PERRORP)
 		/* No error. */
 		last = 0;
 	else if ((status & LP_POUTPA)) {
@@ -416,14 +435,11 @@ static int lp_check_status(int minor)
 			last = LP_PSELECD;
 			printk(KERN_INFO "lp%d off-line\n", minor);
 		}
-	} else if (!(status & LP_PERRORP)) {
+	} else {
 		if (last != LP_PERRORP) {
 			last = LP_PERRORP;
 			printk(KERN_INFO "lp%d on fire\n", minor);
 		}
-	} else {
-		last = 0; /* Come here if LP_CAREFUL is set and no
-                             errors are reported. */
 	}
 
 	lp_table[minor].last_error = last;
@@ -625,7 +641,6 @@ static ssize_t lp_read(struct file * file, char * buf,
 		/* Data available. */
 
 		/* Hack: Wait 10ms (between events 6 and 7) */
-		current->state = TASK_INTERRUPTIBLE;
                 schedule_timeout((HZ+99)/100);
                 break;
 	}
@@ -769,12 +784,14 @@ static int lp_ioctl(struct inode *inode, struct file *file,
 			else
 				LP_F(minor) &= ~LP_ABORTOPEN;
 			break;
+#ifdef OBSOLETED
 		case LPCAREFUL:
 			if (arg)
 				LP_F(minor) |= LP_CAREFUL;
 			else
 				LP_F(minor) &= ~LP_CAREFUL;
 			break;
+#endif
 		case LPTRUSTIRQ:
 			if (arg)
 				LP_F(minor) |= LP_TRUST_IRQ;
@@ -951,8 +968,7 @@ int lp_init(void)
 			return -EIO;
 		}
 	} else {
-		printk(KERN_INFO "lp: no devices found\n");
-		return -ENODEV;
+		printk(KERN_INFO "lp: driver loaded but no devices found\n");
 	}
 
 	return 0;

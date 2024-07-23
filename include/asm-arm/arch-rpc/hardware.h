@@ -41,7 +41,7 @@
 #define FLUSH_BASE		0xdf000000
 
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 /*
  * for use with inb/outb

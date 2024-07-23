@@ -1,5 +1,5 @@
 /*
- * $Id: time.c,v 1.47.2.4 1999/08/27 04:20:32 cort Exp $
+ * $Id: time.c,v 1.47 1999/03/18 05:11:11 cort Exp $
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -41,17 +41,18 @@
 #include <asm/processor.h>
 #include <asm/nvram.h>
 #include <asm/cache.h>
+/* Fixme - Why is this here? - Corey */
 #ifdef CONFIG_8xx
 #include <asm/8xx_immap.h>
 #endif
 #include <asm/machdep.h>
 
-#include <asm/time.h>
+#include "time.h"
 
 void smp_local_timer_interrupt(struct pt_regs *);
 
 /* keep track of when we need to update the rtc */
-time_t last_rtc_update = 0;
+unsigned long last_rtc_update = 0;
 
 /* The decrementer counts down by 128 every 128ns on a 601. */
 #define DECREMENTER_COUNT_601	(1000000000 / HZ)
@@ -71,7 +72,7 @@ void timer_interrupt(struct pt_regs * regs)
 {
 	int dval, d;
 	unsigned long cpu = smp_processor_id();
-
+	
 	hardirq_enter(cpu);
 #ifdef __SMP__
 	{
@@ -106,44 +107,32 @@ void timer_interrupt(struct pt_regs * regs)
 		if ( !smp_processor_id() )
 		{
 			do_timer(regs);
-#if 0
-	/* -- BenH -- I'm removing this for now since it can cause various
-	 *            troubles with local-time RTCs. Now that we have a
-	 *            /dev/rtc that uses ppc_md.set_rtc_time() on mac, it
-	 *            should be possible to program the RTC from userland
-	 *            in all cases.
-	 */
 			/*
 			 * update the rtc when needed
 			 */
-			if ( (time_status & STA_UNSYNC) &&
-			     ((xtime.tv_sec > last_rtc_update + 60) ||
-			      (xtime.tv_sec < last_rtc_update)) )
+			if ( xtime.tv_sec > last_rtc_update + 660 )
 			{
-				if (ppc_md.set_rtc_time(xtime.tv_sec) == 0)
+				if (ppc_md.set_rtc_time(xtime.tv_sec) == 0) {
 					last_rtc_update = xtime.tv_sec;
-				else
+				}
+				else {
 					/* do it again in 60 s */
-					last_rtc_update = xtime.tv_sec;
+					last_rtc_update = xtime.tv_sec - 60;
+				}
 			}
-#endif			
 		}
 	}
 #ifdef __SMP__
 	smp_local_timer_interrupt(regs);
 #endif		
 
+	/* Fixme - make this more generic - Corey */
 #ifdef CONFIG_APUS
 	{
 		extern void apus_heartbeat (void);
 		apus_heartbeat ();
 	}
 #endif
-#if defined(CONFIG_ALL_PPC) || defined(CONFIG_CHRP)
-	if ( _machine == _MACH_chrp )
-		chrp_event_scan();
-#endif	
-
 	hardirq_exit(cpu);
 }
 
@@ -175,6 +164,7 @@ void do_settimeofday(struct timeval *tv)
 	int frac_tick;
 	
 	last_rtc_update = 0; /* so the rtc gets updated soon */
+	
 	frac_tick = tv->tv_usec % (1000000 / HZ);
 	save_flags(flags);
 	cli();
@@ -192,10 +182,10 @@ void do_settimeofday(struct timeval *tv)
 
 __initfunc(void time_init(void))
 {
-	long time_offset = 0;
-
         if (ppc_md.time_init != NULL)
-                time_offset = ppc_md.time_init();
+        {
+                ppc_md.time_init();
+        }
 
 	if ((_get_PVR() >> 16) == 1) {
 		/* 601 processor: dec counts down by 128 every 128ns */
@@ -208,16 +198,12 @@ __initfunc(void time_init(void))
 
         xtime.tv_sec = ppc_md.get_rtc_time();
         xtime.tv_usec = 0;
-        if (time_offset) {
-        	struct timezone tz;
-        	tz.tz_minuteswest = time_offset/60;
-        	tz.tz_dsttime = 0; /* Not handled correctly by the kernel anyway */
-        	do_sys_settimeofday(NULL, &tz);
-        }
 
 	set_dec(decrementer_count);
-	/* allow updates right away */
-	last_rtc_update = 0;
+	/* mark the rtc/on-chip timer as in sync
+	 * so we don't update right away
+	 */
+	last_rtc_update = xtime.tv_sec;
 }
 
 /* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
@@ -342,3 +328,6 @@ void to_tm(int tim, struct rtc_time * tm)
 	 */
 	GregorianDay(tm);
 }
+
+
+

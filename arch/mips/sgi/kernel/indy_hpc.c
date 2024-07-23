@@ -1,4 +1,4 @@
-/* $Id: indy_hpc.c,v 1.6 1999/05/07 22:34:31 ulfc Exp $
+/* $Id: indy_hpc.c,v 1.4 1998/07/14 09:12:27 ralf Exp $
  *
  * indy_hpc.c: Routines for generic manipulation of the HPC controllers.
  *
@@ -43,8 +43,7 @@ __initfunc(void sgihpc_init(void))
 	prom_printf("sgihpc_init: ");
 #endif
 
-	/* This test works now thanks to William J. Earl */
-	if ((sid & 1) == 0 ) {
+	if(sid & 1) {
 #ifdef DEBUG_SGIHPC
 		prom_printf("GUINESS ");
 #endif

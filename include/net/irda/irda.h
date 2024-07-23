@@ -1,15 +1,15 @@
 /*********************************************************************
  *                
  * Filename:      irda.h
- * Version:       1.0
- * Description:   IrDA common include file for kernel internal use
- * Status:        Stable
+ * Version:       
+ * Description:   
+ * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Tue Dec  9 21:13:12 1997
- * Modified at:   Sat Dec 25 18:58:49 1999
+ * Modified at:   Wed Apr 21 17:49:00 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1998-1999 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 1998 Dag Brattli, All Rights Reserved.
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -28,10 +28,6 @@
 #include <linux/config.h>
 #include <linux/skbuff.h>
 #include <linux/kernel.h>
-#include <linux/if.h>
-#include <linux/irda.h>
-
-typedef __u32 magic_t;
 
 #include <net/irda/qos.h>
 #include <net/irda/irqueue.h>
@@ -44,16 +40,8 @@ typedef __u32 magic_t;
 #define FALSE 0
 #endif
 
-#ifndef IRDA_MIN /* Lets not mix this MIN with other header files */
-#define IRDA_MIN(a, b) (((a) < (b)) ? (a) : (b))
-#endif
-
-#ifndef ALIGN
-#  define ALIGN __attribute__((aligned))
-#endif
-#ifndef PACK
-#  define PACK __attribute__((packed))
-#endif
+#define ALIGN __attribute__((aligned))
+#define PACK __attribute__((packed))
 
 
 #ifdef CONFIG_IRDA_DEBUG
@@ -63,14 +51,14 @@ extern __u32 irda_debug;
 /* use 0 for production, 1 for verification, >2 for debug */
 #define IRDA_DEBUG_LEVEL 0
 
-#define IRDA_DEBUG(n, args...) (irda_debug >= (n)) ? (printk(KERN_DEBUG args)) : 0
+#define DEBUG(n, args...) if (irda_debug >= (n)) printk(KERN_DEBUG args)
 #define ASSERT(expr, func) \
 if(!(expr)) { \
         printk( "Assertion failed! %s,%s,%s,line=%d\n",\
         #expr,__FILE__,__FUNCTION__,__LINE__); \
         ##func}
 #else
-#define IRDA_DEBUG(n, args...)
+#define DEBUG(n, args...)
 #define ASSERT(expr, func)
 #endif /* CONFIG_IRDA_DEBUG */
 
@@ -78,13 +66,12 @@ if(!(expr)) { \
 #define MESSAGE(args...) printk(KERN_INFO args)
 #define ERROR(args...)   printk(KERN_ERR args)
 
-#define MSECS_TO_JIFFIES(ms) (((ms)*HZ+999)/1000)
+#define MSECS_TO_JIFFIES(ms) (ms*HZ/1000)
 
 /*
- *  Magic numbers used by Linux-IrDA. Random numbers which must be unique to 
+ *  Magic numbers used by Linux/IR. Random numbers which must be unique to 
  *  give the best protection
  */
-
 #define IRTTY_MAGIC        0x2357
 #define LAP_MAGIC          0x1357
 #define LMP_MAGIC          0x4321
@@ -99,9 +86,8 @@ if(!(expr)) { \
 #define IRLAN_MAGIC        0x754
 #define IAS_OBJECT_MAGIC   0x34234
 #define IAS_ATTRIB_MAGIC   0x45232
-#define IRDA_TASK_MAGIC    0x38423
 
-#define IAS_DEVICE_ID 0x0000 /* Defined by IrDA, IrLMP section 4.1 (page 68) */
+#define IAS_DEVICE_ID 0x5342 
 #define IAS_PNP_ID    0xd342
 #define IAS_OBEX_ID   0x34323
 #define IAS_IRLAN_ID  0x34234
@@ -116,17 +102,13 @@ struct irda_sock {
 	__u32 saddr;          /* my local address */
 	__u32 daddr;          /* peer address */
 
-	struct lsap_cb *lsap; /* LSAP used by Ultra */
-	__u8  pid;            /* Protocol IP (PID) used by Ultra */
-
+	struct ias_object *ias_obj;
 	struct tsap_cb *tsap; /* TSAP used by this connection */
 	__u8 dtsap_sel;       /* remote TSAP address */
 	__u8 stsap_sel;       /* local TSAP address */
 	
 	__u32 max_sdu_size_rx;
 	__u32 max_sdu_size_tx;
-	__u32 max_data_size;
-	__u8  max_header_size;
 	struct qos_info qos_tx;
 
 	__u16 mask;           /* Hint bits mask */
@@ -135,13 +117,9 @@ struct irda_sock {
 	__u32 ckey;           /* IrLMP client handle */
 	__u32 skey;           /* IrLMP service handle */
 
-	struct ias_object *ias_obj;   /* Our service name + lsap in IAS */
-	struct iriap_cb *iriap;	      /* Used to query remote IAS */
-	struct ias_value *ias_result; /* Used by getsockopt(IRLMP_IAS_QUERY) */
-
 	int nslots;           /* Number of slots to use for discovery */
 
-	int errno;            /* status of the IAS query */
+	int errno;
 
 	struct sock *sk;
 	struct wait_queue *ias_wait;       /* Wait for LM-IAS answer */
@@ -161,17 +139,39 @@ typedef union {
 	__u8  byte[2];
 } __u16_host_order;
 
-/* 
- * Per-packet information we need to hide inside sk_buff 
- * (must not exceed 48 bytes, check with struct sk_buff) 
+/*
+ *  Information monitored by some layers
  */
-struct irda_skb_cb {
-	magic_t magic;     /* Be sure that we can trust the information */
-	__u32   speed;     /* The Speed this frame should be sent with */
-	__u16     mtt;     /* Minimum turn around time */
-	int     xbofs;     /* Number of xbofs required, used by SIR mode */
-	__u8     line;     /* Used by IrCOMM in IrLPT mode */
-	void (*destructor)(struct sk_buff *skb); /* Used for flow control */
+struct irda_statistics
+{
+        int     rx_packets;             /* total packets received       */
+        int     tx_packets;             /* total packets transmitted    */
+        int     rx_errors;              /* bad packets received         */
+        int     tx_errors;              /* packet transmit problems     */
+        int     rx_dropped;             /* no space in linux buffers    */
+        int     tx_dropped;             /* no space available in linux  */
+	int     rx_compressed;
+	int     tx_compressed;
+	int     rx_bytes;               /* total bytes received         */
+	int     tx_bytes;               /* total bytes transmitted      */
+
+        int     multicast;              /* multicast packets received   */
+        int     collisions;
+	
+        /* detailed rx_errors: */
+        int     rx_length_errors;
+        int     rx_over_errors;         /* receiver ring buff overflow  */
+        int     rx_crc_errors;          /* recved pkt with crc error    */
+        int     rx_frame_errors;        /* recv'd frame alignment error */
+        int     rx_fifo_errors;         /* recv'r fifo overrun          */
+        int     rx_missed_errors;       /* receiver missed packet       */
+
+        /* detailed tx_errors */
+        int     tx_aborted_errors;
+        int     tx_carrier_errors;
+        int     tx_fifo_errors;
+        int     tx_heartbeat_errors;
+        int     tx_window_errors;
 };
 
 /* Misc status information */
@@ -220,21 +220,21 @@ typedef enum {
 /*
  *  Notify structure used between transport and link management layers
  */
-typedef struct {
+struct notify_t {
 	int (*data_indication)(void *priv, void *sap, struct sk_buff *skb);
 	int (*udata_indication)(void *priv, void *sap, struct sk_buff *skb);
 	void (*connect_confirm)(void *instance, void *sap, 
 				struct qos_info *qos, __u32 max_sdu_size,
-				__u8 max_header_size, struct sk_buff *skb);
+				struct sk_buff *skb);
 	void (*connect_indication)(void *instance, void *sap, 
-				   struct qos_info *qos, __u32 max_sdu_size, 
-				   __u8 max_header_size, struct sk_buff *skb);
+				   struct qos_info *qos, __u32 max_sdu_size,
+				   struct sk_buff *skb);
 	void (*disconnect_indication)(void *instance, void *sap, 
 				      LM_REASON reason, struct sk_buff *);
 	void (*flow_indication)(void *instance, void *sap, LOCAL_FLOW flow);
 	void *instance; /* Layer instance pointer */
 	char name[16];  /* Name of layer */
-} notify_t;
+};
 
 #define NOTIFY_MAX_NAME 16
 

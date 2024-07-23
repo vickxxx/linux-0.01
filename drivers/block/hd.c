@@ -21,8 +21,6 @@
  *  Removed 99% of above. Use Mark's ide driver for those options.
  *  This is now a lightweight ST-506 driver. (Paul Gortmaker)
  *
- *  17-OCT-2000 rjohnson@analogic.com Added spin-lock for reading
- *  CMOS chip.
  */
   
 /* Uncomment the following if you want verbose error reports. */
@@ -50,7 +48,7 @@
 
 #define MAJOR_NR HD_MAJOR
 #include <linux/blk.h>
-extern spinlock_t rtc_lock;
+
 static int revalidate_hddisk(kdev_t, int);
 
 #define	HD_DELAY	0
@@ -708,7 +706,6 @@ static void hd_geninit(struct gendisk *ignored)
 	if (!NR_HD) {
 		extern struct drive_info drive_info;
 		unsigned char *BIOS = (unsigned char *) &drive_info;
-		unsigned long flags;
 		int cmos_disks;
 
 		for (drive=0 ; drive<2 ; drive++) {
@@ -746,11 +743,8 @@ static void hd_geninit(struct gendisk *ignored)
 
 		
 	*/
-                spin_lock_irqsave(&rtc_lock, flags);
-		cmos_disks = CMOS_READ(0x12);
-		spin_unlock_irqrestore(&rtc_lock, flags);
 
-		if (cmos_disks & 0xf0) {
+		if ((cmos_disks = CMOS_READ(0x12)) & 0xf0) {
 			if (cmos_disks & 0x0f)
 				NR_HD = 2;
 			else

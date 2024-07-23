@@ -5,7 +5,7 @@
  *
  *		ROUTE - implementation of the IP router.
  *
- * Version:	$Id: route.c,v 1.67.2.5 2000/09/01 23:19:46 davem Exp $
+ * Version:	$Id: route.c,v 1.67 1999/05/08 20:00:20 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -222,8 +222,8 @@ static int rt_cache_get_info(char *buffer, char **start, off_t offset, int lengt
 				(unsigned long)r->rt_dst,
 				(unsigned long)r->rt_gateway,
 				r->rt_flags,
-				atomic_read(&r->u.dst.refcnt),
 				atomic_read(&r->u.dst.use),
+				atomic_read(&r->u.dst.refcnt),
 				0,
 				(unsigned long)r->rt_src, (int)r->u.dst.pmtu,
 				r->u.dst.window,
@@ -599,22 +599,6 @@ restart:
 	return 0;
 }
 
-static void rt_del(unsigned hash, struct rtable *rt)
-{
-	struct rtable **rthp;
-
-	start_bh_atomic();
-	ip_rt_put(rt);
-	for (rthp = &rt_hash_table[hash]; *rthp; rthp = &(*rthp)->u.rt_next) {
-		if (*rthp == rt) {
-			*rthp = rt->u.rt_next;
-			rt_free(rt);
-			break;
-		}
-	}
-	end_bh_atomic();
-}
-
 void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 		    u32 saddr, u8 tos, struct device *dev)
 {
@@ -685,7 +669,6 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 				rt->u.dst.lastuse = jiffies;
 				rt->u.dst.neighbour = NULL;
 				rt->u.dst.hh = NULL;
-				rt->u.dst.obsolete = 0;
 
 				rt->rt_flags |= RTCF_REDIRECTED;
 
@@ -704,10 +687,10 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 					break;
 				}
 
-				rt_del(hash, rth);
-
+				*rthp = rth->u.rt_next;
 				if (!rt_intern_hash(hash, rt, &rt))
 					ip_rt_put(rt);
+				rt_drop(rth);
 				break;
 			}
 		}
@@ -717,8 +700,8 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 reject_redirect:
 #ifdef CONFIG_IP_ROUTE_VERBOSE
 	if (IN_DEV_LOG_MARTIANS(in_dev) && net_ratelimit())
-		printk(KERN_INFO "Redirect from %X/%s to %X ignored."
-		       "Path = %X -> %X, tos %02x\n",
+		printk(KERN_INFO "Redirect from %lX/%s to %lX ignored."
+		       "Path = %lX -> %lX, tos %02x\n",
 		       ntohl(old_gw), dev->name, ntohl(new_gw),
 		       ntohl(saddr), ntohl(daddr), tos);
 #endif
@@ -735,10 +718,20 @@ static struct dst_entry *ipv4_negative_advice(struct dst_entry *dst)
 		}
 		if ((rt->rt_flags&RTCF_REDIRECTED) || rt->u.dst.expires) {
 			unsigned hash = rt_hash_code(rt->key.dst, rt->key.src^(rt->key.oif<<5), rt->key.tos);
+			struct rtable **rthp;
 #if RT_CACHE_DEBUG >= 1
 			printk(KERN_DEBUG "ip_rt_advice: redirect to %d.%d.%d.%d/%02x dropped\n", NIPQUAD(rt->rt_dst), rt->key.tos);
 #endif
-			rt_del(hash, rt);
+			start_bh_atomic();
+			ip_rt_put(rt);
+			for (rthp = &rt_hash_table[hash]; *rthp; rthp = &(*rthp)->u.rt_next) {
+				if (*rthp == rt) {
+					*rthp = rt->u.rt_next;
+					rt_free(rt);
+					break;
+				}
+			}
+			end_bh_atomic();
 			return NULL;
 		}
 	}
@@ -957,7 +950,7 @@ void ip_rt_get_source(u8 *addr, struct rtable *rt)
 
 	if (rt->key.iif == 0)
 		src = rt->rt_src;
-	else if (fib_lookup(&rt->key, &res) == 0 && res.type != RTN_NAT)
+	else if (fib_lookup(&rt->key, &res) == 0)
 		src = FIB_RES_PREFSRC(res);
 	else
 		src = inet_select_addr(rt->u.dst.dev, rt->rt_gateway, RT_SCOPE_UNIVERSE);
@@ -987,8 +980,6 @@ static void rt_set_nexthop(struct rtable *rt, struct fib_result *res, u32 itag)
 			rt->u.dst.pmtu = rt->u.dst.dev->mtu;
 			if (rt->u.dst.pmtu > IP_MAX_MTU)
 				rt->u.dst.pmtu = IP_MAX_MTU;
-			if (rt->u.dst.pmtu < 68)
-				rt->u.dst.pmtu = 68;
 			if (rt->u.dst.mxlock&(1<<RTAX_MTU) &&
 			    rt->rt_gateway != rt->rt_dst &&
 			    rt->u.dst.pmtu > 576)
@@ -1003,8 +994,6 @@ static void rt_set_nexthop(struct rtable *rt, struct fib_result *res, u32 itag)
 		rt->u.dst.pmtu	= rt->u.dst.dev->mtu;
 		if (rt->u.dst.pmtu > IP_MAX_MTU)
 			rt->u.dst.pmtu = IP_MAX_MTU;
-		if (rt->u.dst.pmtu < 68)
-			rt->u.dst.pmtu = 68;
 		rt->u.dst.window= 0;
 		rt->u.dst.rtt	= TCP_TIMEOUT_INIT;
 	}
@@ -1927,30 +1916,16 @@ int ipv4_sysctl_rtcache_flush(ctl_table *ctl, int write, struct file * filp,
 		return -EINVAL;
 }
 
-static int ipv4_sysctl_rtcache_flush_strategy(ctl_table *table, int *name, unsigned nlen,
-			 void *oldval, size_t *oldlenp,
-			 void *newval, size_t newlen, 
-			 void **context)
-{
-	int delay;
-	if (newlen != sizeof(int))
-		return -EINVAL;
-	if (get_user(delay,(int *)newval))
-		return -EFAULT; 
-	rt_cache_flush(delay); 
-	return 0;
-}
-
 ctl_table ipv4_route_table[] = {
         {NET_IPV4_ROUTE_FLUSH, "flush",
-         &flush_delay, sizeof(int), 0644, NULL,
-         &ipv4_sysctl_rtcache_flush, &ipv4_sysctl_rtcache_flush_strategy },
+         &flush_delay, sizeof(int), 0200, NULL,
+         &ipv4_sysctl_rtcache_flush},
 	{NET_IPV4_ROUTE_MIN_DELAY, "min_delay",
          &ip_rt_min_delay, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	{NET_IPV4_ROUTE_MAX_DELAY, "max_delay",
          &ip_rt_max_delay, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	{NET_IPV4_ROUTE_GC_THRESH, "gc_thresh",
          &ipv4_dst_ops.gc_thresh, sizeof(int), 0644, NULL,
          &proc_dointvec},
@@ -1959,13 +1934,13 @@ ctl_table ipv4_route_table[] = {
          &proc_dointvec},
 	{NET_IPV4_ROUTE_GC_MIN_INTERVAL, "gc_min_interval",
          &ip_rt_gc_min_interval, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	{NET_IPV4_ROUTE_GC_TIMEOUT, "gc_timeout",
          &ip_rt_gc_timeout, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	{NET_IPV4_ROUTE_GC_INTERVAL, "gc_interval",
          &ip_rt_gc_interval, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	{NET_IPV4_ROUTE_REDIRECT_LOAD, "redirect_load",
          &ip_rt_redirect_load, sizeof(int), 0644, NULL,
          &proc_dointvec},
@@ -1986,7 +1961,7 @@ ctl_table ipv4_route_table[] = {
          &proc_dointvec},
 	{NET_IPV4_ROUTE_MTU_EXPIRES, "mtu_expires",
          &ip_rt_mtu_expires, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies, &sysctl_jiffies},
+         &proc_dointvec_jiffies},
 	 {0}
 };
 #endif

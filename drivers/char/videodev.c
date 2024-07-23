@@ -9,7 +9,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Author:	Alan Cox, <alan@redhat.com>
+ * Author:	Alan Cox, <alan@cymru.net>
  *
  * Fixes:
  */
@@ -54,9 +54,6 @@ extern int init_colour_qcams(struct video_init *);
 #ifdef CONFIG_VIDEO_BWQCAM
 extern int init_bw_qcams(struct video_init *);
 #endif
-#ifdef CONFIG_VIDEO_CPIA
-extern int cpia_init(struct video_init *);
-#endif
 #ifdef CONFIG_VIDEO_PLANB
 extern int init_planbs(struct video_init *);
 #endif
@@ -65,9 +62,6 @@ extern int aztech_init(struct video_init *);
 #endif
 #ifdef CONFIG_RADIO_RTRACK
 extern int rtrack_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_RTRACK2
-extern int rtrack2_init(struct video_init *);
 #endif
 #ifdef CONFIG_RADIO_SF16FMI
 extern int fmi_init(struct video_init *);
@@ -84,14 +78,8 @@ extern int typhoon_init(struct video_init *);
 #ifdef CONFIG_RADIO_CADET
 extern int cadet_init(struct video_init *);
 #endif
-#ifdef CONFIG_RADIO_TRUST
-extern int trust_init(struct video_init *);
-#endif
 #ifdef CONFIG_VIDEO_PMS
 extern int init_pms_cards(struct video_init *);
-#endif
-#ifdef CONFIG_VIDEO_ZORAN
-extern int init_zoran_cards(struct video_init *);
 #endif
 
 static struct video_init video_init_list[]={
@@ -107,9 +95,6 @@ static struct video_init video_init_list[]={
 #endif	
 #ifdef CONFIG_VIDEO_BWQCAM
 	{"bw-qcam", init_bw_qcams},
-#endif        
-#ifdef CONFIG_VIDEO_CPIA
-        {"cpia", cpia_init},
 #endif	
 #ifdef CONFIG_VIDEO_PMS
 	{"PMS", init_pms_cards}, 
@@ -123,9 +108,6 @@ static struct video_init video_init_list[]={
 #ifdef CONFIG_RADIO_RTRACK
 	{"RTrack", rtrack_init}, 
 #endif 
-#ifdef CONFIG_RADIO_RTRACK2
-	{"RTrack2", rtrack2_init}, 
-#endif
 #ifdef CONFIG_RADIO_SF16FMI
 	{"SF16FMI", fmi_init}, 
 #endif	
@@ -141,12 +123,6 @@ static struct video_init video_init_list[]={
 #ifdef CONFIG_RADIO_TYPHOON
 	{"radio-typhoon", typhoon_init},
 #endif
-#ifdef CONFIG_VIDEO_ZORAN
-	{"zoran", init_zoran_cards},
-#endif	
-#ifdef CONFIG_RADIO_TRUST
-	{"Trust", trust_init}, 
-#endif	
 	{"end", NULL}
 };
 

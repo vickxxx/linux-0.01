@@ -1,10 +1,8 @@
-/* $Id: ioctl32.c,v 1.62.2.18 2001/01/26 22:26:07 davem Exp $
+/* $Id: ioctl32.c,v 1.62 1999/05/01 09:17:44 davem Exp $
  * ioctl32.c: Conversion between 32bit and 64bit native ioctls.
  *
  * Copyright (C) 1997  Jakub Jelinek  (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
- * Copyright (C) 2000  Vinh Truong (vinh.truong@eng.sun.com)
- *              --- VT: add commands for envctrl driver in sys32_ioctl()
  *
  * These routines maintain argument size conversion between 32bit and 64bit
  * ioctls.
@@ -19,6 +17,7 @@
 #include <linux/if.h>
 #include <linux/malloc.h>
 #include <linux/hdreg.h>
+#include <linux/md.h>
 #include <linux/kd.h>
 #include <linux/route.h>
 #include <linux/skbuff.h>
@@ -38,12 +37,6 @@
 #include <linux/fb.h>
 #include <linux/ext2_fs.h>
 #include <linux/videodev.h>
-#include <linux/netdevice.h>
-#include <linux/smb_fs.h>
-#include <linux/blkdev.h>
-#include <linux/in6.h>
-#include <linux/ipv6_route.h>
-#include <net/sock.h>
 
 #include <scsi/scsi.h>
 /* Ugly hack. */
@@ -62,8 +55,6 @@
 #include <asm/envctrl.h>
 #include <asm/audioio.h>
 #include <asm/ethtool.h>
-#include <asm/display7seg.h>
-#include <asm/watchdog.h>
 
 #include <linux/soundcard.h>
 
@@ -417,7 +408,6 @@ struct ifreq32 {
                 int     ifru_mtu;
                 struct  ifmap32 ifru_map;
                 char    ifru_slave[IFNAMSIZ];   /* Just fits the size */
-		char	ifru_newname[IFNAMSIZ];
                 __kernel_caddr_t32 ifru_data;
         } ifr_ifru;
 };
@@ -426,25 +416,6 @@ struct ifconf32 {
         int     ifc_len;                        /* size of buffer       */
         __kernel_caddr_t32  ifcbuf;
 };
-
-static int dev_ifname32(unsigned int fd, unsigned long arg)
-{
-	struct device *dev;
-	struct ifreq32 ifr32;
-	int err;
-
-	if (copy_from_user(&ifr32, (struct ifreq32 *)arg, sizeof(struct ifreq32)))
-		return -EFAULT;
-
-	dev = dev_get_by_index(ifr32.ifr_ifindex);
-	if (!dev)
-		return -ENODEV;
-
-	strcpy(ifr32.ifr_name, dev->name);
-
-	err = copy_to_user((struct ifreq32 *)arg, &ifr32, sizeof(struct ifreq32));
-	return (err ? -EFAULT : 0);
-}
 
 static inline int dev_ifconf(unsigned int fd, unsigned long arg)
 {
@@ -626,64 +597,30 @@ struct rtentry32 {
 
 };
 
-struct in6_rtmsg32 {
-	struct in6_addr		rtmsg_dst;
-	struct in6_addr		rtmsg_src;
-	struct in6_addr		rtmsg_gateway;
-	u32			rtmsg_type;
-	u16			rtmsg_dst_len;
-	u16			rtmsg_src_len;
-	u32			rtmsg_metric;
-	u32			rtmsg_info;
-	u32			rtmsg_flags;
-	s32			rtmsg_ifindex;
-};
-
-extern struct socket *sockfd_lookup(int fd, int *err);
-
 static inline int routing_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
-	int ret;
-	void *r = NULL;
-	struct in6_rtmsg r6;
-	struct rtentry r4;
+	struct rtentry r;
 	char devname[16];
 	u32 rtdev;
+	int ret;
 	mm_segment_t old_fs = get_fs();
-	struct socket *mysock = sockfd_lookup(fd, &ret);
-
-	if (mysock && mysock->sk && mysock->sk->family == AF_INET6) { /* ipv6 */
-		ret = copy_from_user (&r6.rtmsg_dst, &(((struct in6_rtmsg32 *)arg)->rtmsg_dst),
-			3 * sizeof(struct in6_addr));
-		ret |= __get_user (r6.rtmsg_type, &(((struct in6_rtmsg32 *)arg)->rtmsg_type));
-		ret |= __get_user (r6.rtmsg_dst_len, &(((struct in6_rtmsg32 *)arg)->rtmsg_dst_len));
-		ret |= __get_user (r6.rtmsg_src_len, &(((struct in6_rtmsg32 *)arg)->rtmsg_src_len));
-		ret |= __get_user (r6.rtmsg_metric, &(((struct in6_rtmsg32 *)arg)->rtmsg_metric));
-		ret |= __get_user (r6.rtmsg_info, &(((struct in6_rtmsg32 *)arg)->rtmsg_info));
-		ret |= __get_user (r6.rtmsg_flags, &(((struct in6_rtmsg32 *)arg)->rtmsg_flags));
-		ret |= __get_user (r6.rtmsg_ifindex, &(((struct in6_rtmsg32 *)arg)->rtmsg_ifindex));
-		
-		r = (void *)&r6;
-	} else { /* ipv4 */
-		ret = copy_from_user (&r4.rt_dst, &(((struct rtentry32 *)arg)->rt_dst), 3 * sizeof(struct sockaddr));
-		ret |= __get_user (r4.rt_flags, &(((struct rtentry32 *)arg)->rt_flags));
-		ret |= __get_user (r4.rt_metric, &(((struct rtentry32 *)arg)->rt_metric));
-		ret |= __get_user (r4.rt_mtu, &(((struct rtentry32 *)arg)->rt_mtu));
-		ret |= __get_user (r4.rt_window, &(((struct rtentry32 *)arg)->rt_window));
-		ret |= __get_user (r4.rt_irtt, &(((struct rtentry32 *)arg)->rt_irtt));
-		ret |= __get_user (rtdev, &(((struct rtentry32 *)arg)->rt_dev));
-		if (rtdev) {
-			ret |= copy_from_user (devname, (char *)A(rtdev), 15);
-			r4.rt_dev = devname; devname[15] = 0;
-		} else
-			r4.rt_dev = 0;
-
-		r = (void *)&r4;
-	}
+	
+	ret = copy_from_user (&r.rt_dst, &(((struct rtentry32 *)arg)->rt_dst), 3 * sizeof(struct sockaddr));
+	ret |= __get_user (r.rt_flags, &(((struct rtentry32 *)arg)->rt_flags));
+	ret |= __get_user (r.rt_metric, &(((struct rtentry32 *)arg)->rt_metric));
+	ret |= __get_user (r.rt_mtu, &(((struct rtentry32 *)arg)->rt_mtu));
+	ret |= __get_user (r.rt_window, &(((struct rtentry32 *)arg)->rt_window));
+	ret |= __get_user (r.rt_irtt, &(((struct rtentry32 *)arg)->rt_irtt));
+	ret |= __get_user (rtdev, &(((struct rtentry32 *)arg)->rt_dev));
+	if (rtdev) {
+		ret |= copy_from_user (devname, (char *)A(rtdev), 15);
+		r.rt_dev = devname; devname[15] = 0;
+	} else
+		r.rt_dev = 0;
 	if (ret)
 		return -EFAULT;
 	set_fs (KERNEL_DS);
-	ret = sys_ioctl (fd, cmd, (unsigned long) r);
+	ret = sys_ioctl (fd, cmd, (long)&r);
 	set_fs (old_fs);
 	return ret;
 }
@@ -1479,21 +1416,11 @@ struct cdrom_read_audio32 {
 	__kernel_caddr_t32	buf;
 };
 
-struct cdrom_generic_command32 {
-	unsigned char		cmd[CDROM_PACKET_SIZE];
-	__kernel_caddr_t32	buffer;
-	unsigned int		buflen;
-	int			stat;
-	__kernel_caddr_t32	sense;
-	__kernel_caddr_t32	reserved[3];
-};
-
 static int cdrom_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	mm_segment_t old_fs = get_fs();
 	struct cdrom_read cdread;
 	struct cdrom_read_audio cdreadaudio;
-	struct cdrom_generic_command cgc;
 	__kernel_caddr_t32 addr;
 	char *data = 0;
 	void *karg;
@@ -1528,17 +1455,6 @@ static int cdrom_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long ar
 			return -ENOMEM;
 		cdreadaudio.buf = data;
 		break;
-	case CDROM_SEND_PACKET:
-		karg = &cgc;
-		err = copy_from_user(cgc.cmd, &((struct cdrom_generic_command32 *)arg)->cmd, sizeof(cgc.cmd));
-		err |= __get_user(addr, &((struct cdrom_generic_command32 *)arg)->buffer);
-		err |= __get_user(cgc.buflen, &((struct cdrom_generic_command32 *)arg)->buflen);
-		if (err)
-		return -EFAULT;
-		if ((data = kmalloc(cgc.buflen, GFP_KERNEL)) == NULL)
-			return -ENOMEM;
-		cgc.buffer = data;
-		break;
 	default:
 		do {
 			static int count = 0;
@@ -1564,14 +1480,11 @@ static int cdrom_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long ar
 	case CDROMREADAUDIO:
 		err = copy_to_user((char *)A(addr), data, cdreadaudio.nframes * 2352);
 		break;
-	case CDROM_SEND_PACKET:
-		err = copy_to_user((char *)A(addr), data, cgc.buflen);
 	default:
 		break;
 	}
-out:	if (data)
-		kfree(data);
-	return err ? -EFAULT : 0;
+out:	if (data) kfree(data);
+	return err;
 }
 
 struct loop_info32 {
@@ -1759,581 +1672,21 @@ static int do_unimap_ioctl(struct file *file, int cmd, struct unimapdesc32 *user
 	return 0;
 }
 
-static int do_smb_getmountuid(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	mm_segment_t old_fs = get_fs();
-	__kernel_uid_t kuid;
-	int err;
-
-	cmd = SMB_IOC_GETMOUNTUID;
-
-	set_fs(KERNEL_DS);
-	err = sys_ioctl(fd, cmd, (unsigned long)&kuid);
-	set_fs(old_fs);
-
-	if (err >= 0)
-		err = put_user(kuid, (__kernel_uid_t32 *)arg);
-
-	return err;
-}
-
-#if defined(CONFIG_DRM) || defined(CONFIG_DRM_MODULE)
-/* This really belongs in include/linux/drm.h -DaveM */
-#include "../../../drivers/char/drm/drm.h"
-
-typedef struct drm32_version {
-	int    version_major;	  /* Major version			    */
-	int    version_minor;	  /* Minor version			    */
-	int    version_patchlevel;/* Patch level			    */
-	int    name_len;	  /* Length of name buffer		    */
-	u32    name;		  /* Name of driver			    */
-	int    date_len;	  /* Length of date buffer		    */
-	u32    date;		  /* User-space buffer to hold date	    */
-	int    desc_len;	  /* Length of desc buffer		    */
-	u32    desc;		  /* User-space buffer to hold desc	    */
-} drm32_version_t;
-#define DRM32_IOCTL_VERSION    DRM_IOWR(0x00, drm32_version_t)
-
-static int drm32_version(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_version_t *uversion = (drm32_version_t *)arg;
-	char *name_ptr, *date_ptr, *desc_ptr;
-	u32 tmp1, tmp2, tmp3;
-	drm_version_t kversion;
-	mm_segment_t old_fs;
-	int ret;
-
-	memset(&kversion, 0, sizeof(kversion));
-	if (get_user(kversion.name_len, &uversion->name_len) ||
-	    get_user(kversion.date_len, &uversion->date_len) ||
-	    get_user(kversion.desc_len, &uversion->desc_len) ||
-	    get_user(tmp1, &uversion->name) ||
-	    get_user(tmp2, &uversion->date) ||
-	    get_user(tmp3, &uversion->desc))
-		return -EFAULT;
-
-	name_ptr = (char *) A(tmp1);
-	date_ptr = (char *) A(tmp2);
-	desc_ptr = (char *) A(tmp3);
-
-	ret = -ENOMEM;
-	if (kversion.name_len && name_ptr) {
-		kversion.name = kmalloc(kversion.name_len, GFP_KERNEL);
-		if (!kversion.name)
-			goto out;
-	}
-	if (kversion.date_len && date_ptr) {
-		kversion.date = kmalloc(kversion.date_len, GFP_KERNEL);
-		if (!kversion.date)
-			goto out;
-	}
-	if (kversion.desc_len && desc_ptr) {
-		kversion.desc = kmalloc(kversion.desc_len, GFP_KERNEL);
-		if (!kversion.desc)
-			goto out;
-	}
-
-        old_fs = get_fs();
-	set_fs(KERNEL_DS);
-        ret = sys_ioctl (fd, DRM_IOCTL_VERSION, (unsigned long)&kversion);
-        set_fs(old_fs);
-
-	if (!ret) {
-		if ((kversion.name &&
-		     copy_to_user(name_ptr, kversion.name, kversion.name_len)) ||
-		    (kversion.date &&
-		     copy_to_user(date_ptr, kversion.date, kversion.date_len)) ||
-		    (kversion.desc &&
-		     copy_to_user(desc_ptr, kversion.desc, kversion.desc_len)))
-			ret = -EFAULT;
-		if (put_user(kversion.version_major, &uversion->version_major) ||
-		    put_user(kversion.version_minor, &uversion->version_minor) ||
-		    put_user(kversion.version_patchlevel, &uversion->version_patchlevel) ||
-		    put_user(kversion.name_len, &uversion->name_len) ||
-		    put_user(kversion.date_len, &uversion->date_len) ||
-		    put_user(kversion.desc_len, &uversion->desc_len))
-			ret = -EFAULT;
-	}
-
-out:
-	if (kversion.name)
-		kfree(kversion.name);
-	if (kversion.date)
-		kfree(kversion.date);
-	if (kversion.desc)
-		kfree(kversion.desc);
-	return ret;
-}
-
-typedef struct drm32_unique {
-	int	unique_len;	  /* Length of unique			    */
-	u32	unique;		  /* Unique name for driver instantiation   */
-} drm32_unique_t;
-#define DRM32_IOCTL_GET_UNIQUE DRM_IOWR(0x01, drm32_unique_t)
-#define DRM32_IOCTL_SET_UNIQUE DRM_IOW( 0x10, drm32_unique_t)
-
-static int drm32_getsetunique(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_unique_t *uarg = (drm32_unique_t *)arg;
-	drm_unique_t karg;
-	mm_segment_t old_fs;
-	char *uptr;
-	u32 tmp;
-	int ret;
-
-	if (get_user(karg.unique_len, &uarg->unique_len))
-		return -EFAULT;
-	karg.unique = NULL;
-
-	if (get_user(tmp, &uarg->unique))
-		return -EFAULT;
-
-	uptr = (char *) A(tmp);
-
-	if (uptr) {
-		karg.unique = kmalloc(karg.unique_len, GFP_KERNEL);
-		if (!karg.unique)
-			return -ENOMEM;
-		if (cmd == DRM32_IOCTL_SET_UNIQUE &&
-		    copy_from_user(karg.unique, uptr, karg.unique_len)) {
-			kfree(karg.unique);
-			return -EFAULT;
-		}
-	}
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	if (cmd == DRM32_IOCTL_GET_UNIQUE)
-		ret = sys_ioctl (fd, DRM_IOCTL_GET_UNIQUE, (unsigned long)&karg);
-	else
-		ret = sys_ioctl (fd, DRM_IOCTL_SET_UNIQUE, (unsigned long)&karg);
-        set_fs(old_fs);
-
-	if (!ret) {
-		if (cmd == DRM32_IOCTL_GET_UNIQUE &&
-		    uptr != NULL &&
-		    copy_to_user(uptr, karg.unique, karg.unique_len))
-			ret = -EFAULT;
-		if (put_user(karg.unique_len, &uarg->unique_len))
-			ret = -EFAULT;
-	}
-
-	if (karg.unique != NULL)
-		kfree(karg.unique);
-
-	return ret;
-}
-
-typedef struct drm32_map {
-	u32		offset;	 /* Requested physical address (0 for SAREA)*/
-	u32		size;	 /* Requested physical size (bytes)	    */
-	drm_map_type_t	type;	 /* Type of memory to map		    */
-	drm_map_flags_t flags;	 /* Flags				    */
-	u32		handle;  /* User-space: "Handle" to pass to mmap    */
-				 /* Kernel-space: kernel-virtual address    */
-	int		mtrr;	 /* MTRR slot used			    */
-				 /* Private data			    */
-} drm32_map_t;
-#define DRM32_IOCTL_ADD_MAP    DRM_IOWR(0x15, drm32_map_t)
-
-static int drm32_addmap(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_map_t *uarg = (drm32_map_t *) arg;
-	drm_map_t karg;
-	mm_segment_t old_fs;
-	u32 tmp;
-	int ret;
-
-	ret  = get_user(karg.offset, &uarg->offset);
-	ret |= get_user(karg.size, &uarg->size);
-	ret |= get_user(karg.type, &uarg->type);
-	ret |= get_user(karg.flags, &uarg->flags);
-	ret |= get_user(tmp, &uarg->handle);
-	ret |= get_user(karg.mtrr, &uarg->mtrr);
-	if (ret)
-		return -EFAULT;
-
-	karg.handle = (void *) A(tmp);
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_ADD_MAP, (unsigned long) &karg);
-	set_fs(old_fs);
-
-	if (!ret) {
-		ret  = put_user(karg.offset, &uarg->offset);
-		ret |= put_user(karg.size, &uarg->size);
-		ret |= put_user(karg.type, &uarg->type);
-		ret |= put_user(karg.flags, &uarg->flags);
-		tmp = (u32) (long)karg.handle;
-		ret |= put_user(tmp, &uarg->handle);
-		ret |= put_user(karg.mtrr, &uarg->mtrr);
-		if (ret)
-			ret = -EFAULT;
-	}
-
-	return ret;
-}
-
-typedef struct drm32_buf_info {
-	int	       count;	/* Entries in list			     */
-	u32	       list;    /* (drm_buf_desc_t *) */ 
-} drm32_buf_info_t;
-#define DRM32_IOCTL_INFO_BUFS  DRM_IOWR(0x18, drm32_buf_info_t)
-
-static int drm32_info_bufs(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_buf_info_t *uarg = (drm32_buf_info_t *)arg;
-	drm_buf_desc_t *ulist;
-	drm_buf_info_t karg;
-	mm_segment_t old_fs;
-	int orig_count, ret;
-	u32 tmp;
-
-	if (get_user(karg.count, &uarg->count) ||
-	    get_user(tmp, &uarg->list))
-		return -EFAULT;
-
-	ulist = (drm_buf_desc_t *) A(tmp);
-
-	orig_count = karg.count;
-
-	karg.list = kmalloc(karg.count * sizeof(drm_buf_desc_t), GFP_KERNEL);
-	if (!karg.list)
-		return -EFAULT;
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_INFO_BUFS, (unsigned long) &karg);
-	set_fs(old_fs);
-
-	if (!ret) {
-		if (karg.count <= orig_count &&
-		    (copy_to_user(ulist, karg.list,
-				  karg.count * sizeof(drm_buf_desc_t))))
-			ret = -EFAULT;
-		if (put_user(karg.count, &uarg->count))
-			ret = -EFAULT;
-	}
-
-	kfree(karg.list);
-
-	return ret;
-}
-
-typedef struct drm32_buf_free {
-	int	       count;
-	u32	       list;	/* (int *) */
-} drm32_buf_free_t;
-#define DRM32_IOCTL_FREE_BUFS  DRM_IOW( 0x1a, drm32_buf_free_t)
-
-static int drm32_free_bufs(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_buf_free_t *uarg = (drm32_buf_free_t *)arg;
-	drm_buf_free_t karg;
-	mm_segment_t old_fs;
-	int *ulist;
-	int ret;
-	u32 tmp;
-
-	if (get_user(karg.count, &uarg->count) ||
-	    get_user(tmp, &uarg->list))
-		return -EFAULT;
-
-	ulist = (int *) A(tmp);
-
-	karg.list = kmalloc(karg.count * sizeof(int), GFP_KERNEL);
-	if (!karg.list)
-		return -ENOMEM;
-
-	ret = -EFAULT;
-	if (copy_from_user(karg.list, ulist, (karg.count * sizeof(int))))
-		goto out;
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_FREE_BUFS, (unsigned long) &karg);
-	set_fs(old_fs);
-
-out:
-	kfree(karg.list);
-
-	return ret;
-}
-
-typedef struct drm32_buf_pub {
-	int		  idx;	       /* Index into master buflist	     */
-	int		  total;       /* Buffer size			     */
-	int		  used;	       /* Amount of buffer in use (for DMA)  */
-	u32		  address;     /* Address of buffer (void *)	     */
-} drm32_buf_pub_t;
-
-typedef struct drm32_buf_map {
-	int	      count;	/* Length of buflist			    */
-	u32	      virtual;	/* Mmaped area in user-virtual (void *)	    */
-	u32 	      list;	/* Buffer information (drm_buf_pub_t *)	    */
-} drm32_buf_map_t;
-#define DRM32_IOCTL_MAP_BUFS   DRM_IOWR(0x19, drm32_buf_map_t)
-
-static int drm32_map_bufs(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_buf_map_t *uarg = (drm32_buf_map_t *)arg;
-	drm32_buf_pub_t *ulist;
-	drm_buf_map_t karg;
-	mm_segment_t old_fs;
-	int orig_count, ret, i;
-	u32 tmp1, tmp2;
-
-	if (get_user(karg.count, &uarg->count) ||
-	    get_user(tmp1, &uarg->virtual) ||
-	    get_user(tmp2, &uarg->list))
-		return -EFAULT;
-
-	karg.virtual = (void *) A(tmp1);
-	ulist = (drm32_buf_pub_t *) A(tmp2);
-
-	orig_count = karg.count;
-
-	karg.list = kmalloc(karg.count * sizeof(drm_buf_pub_t), GFP_KERNEL);
-	if (!karg.list)
-		return -ENOMEM;
-
-	ret = -EFAULT;
-	for (i = 0; i < karg.count; i++) {
-		if (get_user(karg.list[i].idx, &ulist[i].idx) ||
-		    get_user(karg.list[i].total, &ulist[i].total) ||
-		    get_user(karg.list[i].used, &ulist[i].used) ||
-		    get_user(tmp1, &ulist[i].address))
-			goto out;
-
-		karg.list[i].address = (void *) A(tmp1);
-	}
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_MAP_BUFS, (unsigned long) &karg);
-	set_fs(old_fs);
-
-	if (!ret) {
-		for (i = 0; i < orig_count; i++) {
-			tmp1 = (u32) (long) karg.list[i].address;
-			if (put_user(karg.list[i].idx, &ulist[i].idx) ||
-			    put_user(karg.list[i].total, &ulist[i].total) ||
-			    put_user(karg.list[i].used, &ulist[i].used) ||
-			    put_user(tmp1, &ulist[i].address)) {
-				ret = -EFAULT;
-				goto out;
-			}
-		}
-		if (put_user(karg.count, &uarg->count))
-			ret = -EFAULT;
-	}
-
-out:
-	kfree(karg.list);
-	return ret;
-}
-
-typedef struct drm32_dma {
-				/* Indices here refer to the offset into
-				   buflist in drm_buf_get_t.  */
-	int		context;	  /* Context handle		    */
-	int		send_count;	  /* Number of buffers to send	    */
-	u32		send_indices;	  /* List of handles to buffers (int *) */
-	u32		send_sizes;	  /* Lengths of data to send (int *) */
-	drm_dma_flags_t flags;		  /* Flags			    */
-	int		request_count;	  /* Number of buffers requested    */
-	int		request_size;	  /* Desired size for buffers	    */
-	u32		request_indices;  /* Buffer information (int *)	    */
-	u32		request_sizes;    /* (int *) */
-	int		granted_count;	  /* Number of buffers granted	    */
-} drm32_dma_t;
-#define DRM32_IOCTL_DMA	     DRM_IOWR(0x29, drm32_dma_t)
-
-/* RED PEN	The DRM layer blindly dereferences the send/request
- * 		indice/size arrays even though they are userland
- * 		pointers.  -DaveM
- */
-static int drm32_dma(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_dma_t *uarg = (drm32_dma_t *) arg;
-	int *u_si, *u_ss, *u_ri, *u_rs;
-	drm_dma_t karg;
-	mm_segment_t old_fs;
-	int ret;
-	u32 tmp1, tmp2, tmp3, tmp4;
-
-	karg.send_indices = karg.send_sizes = NULL;
-	karg.request_indices = karg.request_sizes = NULL;
-
-	if (get_user(karg.context, &uarg->context) ||
-	    get_user(karg.send_count, &uarg->send_count) ||
-	    get_user(tmp1, &uarg->send_indices) ||
-	    get_user(tmp2, &uarg->send_sizes) ||
-	    get_user(karg.flags, &uarg->flags) ||
-	    get_user(karg.request_count, &uarg->request_count) ||
-	    get_user(karg.request_size, &uarg->request_size) ||
-	    get_user(tmp3, &uarg->request_indices) ||
-	    get_user(tmp4, &uarg->request_sizes) ||
-	    get_user(karg.granted_count, &uarg->granted_count))
-		return -EFAULT;
-
-	u_si = (int *) A(tmp1);
-	u_ss = (int *) A(tmp2);
-	u_ri = (int *) A(tmp3);
-	u_rs = (int *) A(tmp4);
-
-	if (karg.send_count) {
-		karg.send_indices = kmalloc(karg.send_count * sizeof(int), GFP_KERNEL);
-		karg.send_sizes = kmalloc(karg.send_count * sizeof(int), GFP_KERNEL);
-
-		ret = -ENOMEM;
-		if (!karg.send_indices || !karg.send_sizes)
-			goto out;
-
-		ret = -EFAULT;
-		if (copy_from_user(karg.send_indices, u_si,
-				   (karg.send_count * sizeof(int))) ||
-		    copy_from_user(karg.send_sizes, u_ss,
-				   (karg.send_count * sizeof(int))))
-			goto out;
-	}
-
-	if (karg.request_count) {
-		karg.request_indices = kmalloc(karg.request_count * sizeof(int), GFP_KERNEL);
-		karg.request_sizes = kmalloc(karg.request_count * sizeof(int), GFP_KERNEL);
-
-		ret = -ENOMEM;
-		if (!karg.request_indices || !karg.request_sizes)
-			goto out;
-
-		ret = -EFAULT;
-		if (copy_from_user(karg.request_indices, u_ri,
-				   (karg.request_count * sizeof(int))) ||
-		    copy_from_user(karg.request_sizes, u_rs,
-				   (karg.request_count * sizeof(int))))
-			goto out;
-	}
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_DMA, (unsigned long) &karg);
-	set_fs(old_fs);
-
-	if (!ret) {
-		if (put_user(karg.context, &uarg->context) ||
-		    put_user(karg.send_count, &uarg->send_count) ||
-		    put_user(karg.flags, &uarg->flags) ||
-		    put_user(karg.request_count, &uarg->request_count) ||
-		    put_user(karg.request_size, &uarg->request_size) ||
-		    put_user(karg.granted_count, &uarg->granted_count))
-			ret = -EFAULT;
-
-		if (karg.send_count) {
-			if (copy_to_user(u_si, karg.send_indices,
-					 (karg.send_count * sizeof(int))) ||
-			    copy_to_user(u_ss, karg.send_sizes,
-					 (karg.send_count * sizeof(int))))
-				ret = -EFAULT;
-		}
-		if (karg.request_count) {
-			if (copy_to_user(u_ri, karg.request_indices,
-					 (karg.request_count * sizeof(int))) ||
-			    copy_to_user(u_rs, karg.request_sizes,
-					 (karg.request_count * sizeof(int))))
-				ret = -EFAULT;
-		}
-	}
-
-out:
-	if (karg.send_indices)
-		kfree(karg.send_indices);
-	if (karg.send_sizes)
-		kfree(karg.send_sizes);
-	if (karg.request_indices)
-		kfree(karg.request_indices);
-	if (karg.request_sizes)
-		kfree(karg.request_sizes);
-
-	return ret;
-}
-
-typedef struct drm32_ctx_res {
-	int		count;
-	u32		contexts; /* (drm_ctx_t *) */
-} drm32_ctx_res_t;
-#define DRM32_IOCTL_RES_CTX    DRM_IOWR(0x26, drm32_ctx_res_t)
-
-static int drm32_res_ctx(unsigned int fd, unsigned int cmd, unsigned long arg)
-{
-	drm32_ctx_res_t *uarg = (drm32_ctx_res_t *) arg;
-	drm_ctx_t *ulist;
-	drm_ctx_res_t karg;
-	mm_segment_t old_fs;
-	int orig_count, ret;
-	u32 tmp;
-
-	karg.contexts = NULL;
-	if (get_user(karg.count, &uarg->count) ||
-	    get_user(tmp, &uarg->contexts))
-		return -EFAULT;
-
-	ulist = (drm_ctx_t *) A(tmp);
-
-	orig_count = karg.count;
-	if (karg.count && ulist) {
-		karg.contexts = kmalloc((karg.count * sizeof(drm_ctx_t)), GFP_KERNEL);
-		if (!karg.contexts)
-			return -ENOMEM;
-		if (copy_from_user(karg.contexts, ulist,
-				   (karg.count * sizeof(drm_ctx_t)))) {
-			kfree(karg.contexts);
-			return -EFAULT;
-		}
-	}
-
-	old_fs = get_fs();
-	set_fs(KERNEL_DS);
-	ret = sys_ioctl(fd, DRM_IOCTL_RES_CTX, (unsigned long) &karg);
-	set_fs(old_fs);
-
-	if (!ret) {
-		if (orig_count) {
-			if (copy_to_user(ulist, karg.contexts,
-					 (orig_count * sizeof(drm_ctx_t))))
-				ret = -EFAULT;
-		}
-		if (put_user(karg.count, &uarg->count))
-			ret = -EFAULT;
-	}
-
-	if (karg.contexts)
-		kfree(karg.contexts);
-
-	return ret;
-}
-
-#endif /* defined(CONFIG_DRM) || defined(CONFIG_DRM_MODULE) */
-
 asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {
 	struct file * filp;
 	int error = -EBADF;
 
 	lock_kernel();
-	filp = fget(fd);
+	filp = fcheck(fd);
 	if(!filp)
-		goto out2;
+		goto out;
 
 	if (!filp->f_op || !filp->f_op->ioctl) {
 		error = sys_ioctl (fd, cmd, arg);
 		goto out;
 	}
 	switch (cmd) {
-	case SIOCGIFNAME:
-		error = dev_ifname32(fd, arg);
-		goto out;
-
 	case SIOCGIFCONF:
 		error = dev_ifconf(fd, arg);
 		goto out;
@@ -2501,49 +1854,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 		error = do_video_ioctl(fd, cmd, arg);
 		goto out;
 
-	/* One SMB ioctl needs translations. */
-	case _IOR('u', 1, __kernel_uid_t32): /* SMB_IOC_GETMOUNTUID */
-		error = do_smb_getmountuid(fd, cmd, arg);
-		goto out;
-
-#if defined(CONFIG_DRM) || defined(CONFIG_DRM_MODULE)
-	case DRM32_IOCTL_VERSION:
-		error = drm32_version(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_GET_UNIQUE:
-		error = drm32_getsetunique(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_SET_UNIQUE:
-		error = drm32_getsetunique(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_ADD_MAP:
-		error = drm32_addmap(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_INFO_BUFS:
-		error = drm32_info_bufs(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_FREE_BUFS:
-		error = drm32_free_bufs(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_MAP_BUFS:
-		error = drm32_map_bufs(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_DMA:
-		error = drm32_dma(fd, cmd, arg);
-		goto out;
-
-	case DRM32_IOCTL_RES_CTX:
-		error = drm32_res_ctx(fd, cmd, arg);
-		goto out;
-#endif /* DRM */
-
 	/* List here exlicitly which ioctl's are known to have
 	 * compatable types passed or none at all...
 	 */
@@ -2585,9 +1895,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case TIOCSCTTY:
 	case TIOCGPTN:
 	case TIOCSPTLCK:
-	case TIOCGSERIAL:
-	case TIOCSSERIAL:
-	case TIOCSERGETLSR:
 	
 	/* Big F */
 	case FBIOGTYPE:
@@ -2638,8 +1945,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case HDIO_SET_NICE:
 	case BLKROSET:
 	case BLKROGET:
-	case BLKELVGET:
-	case BLKELVSET:
 
 	/* 0x02 -- Floppy ioctls */
 	case FDMSGON:
@@ -2665,24 +1970,11 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case BLKRASET:
 	
 	/* 0x09 */
-	case /* RAID_VERSION */		_IOR (MD_MAJOR, 0x10, char[12]):
-	case /* GET_ARRAY_INFO */	_IOR (MD_MAJOR, 0x11, char[72]):
-	case /* GET_DISK_INFO */	_IOR (MD_MAJOR, 0x12, char[20]):
-	case /* CLEAR_ARRAY */		_IO (MD_MAJOR, 0x20):
-	case /* ADD_NEW_DISK */		_IOW (MD_MAJOR, 0x21, char[20]):
-	case /* HOT_REMOVE_DISK */	_IO (MD_MAJOR, 0x22):
-	case /* SET_ARRAY_INFO */	_IOW (MD_MAJOR, 0x23, char[72]):
-	case /* SET_DISK_INFO */	_IO (MD_MAJOR, 0x24):
-	case /* WRITE_RAID_INFO */	_IO (MD_MAJOR, 0x25):
-	case /* UNPROTECT_ARRAY */	_IO (MD_MAJOR, 0x26):
-	case /* PROTECT_ARRAY */	_IO (MD_MAJOR, 0x27):
-	case /* HOT_ADD_DISK */		_IO (MD_MAJOR, 0x28):
-	case /* RUN_ARRAY */		_IOW (MD_MAJOR, 0x30, char[12]):
-	case /* START_ARRAY */		_IO (MD_MAJOR, 0x31):
-	case /* STOP_ARRAY */		_IO (MD_MAJOR, 0x32):
-	case /* STOP_ARRAY_RO */	_IO (MD_MAJOR, 0x33):
-	case /* RESTART_ARRAY_RW */	_IO (MD_MAJOR, 0x34):
-
+	case REGISTER_DEV:
+	case REGISTER_DEV_NEW:
+	case START_MD:
+	case STOP_MD:
+	
 	/* Big K */
 	case PIO_FONT:
 	case GIO_FONT:
@@ -2782,23 +2074,11 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case _IOR('v' , BASE_VIDIOCPRIVATE+6, int):
 	case _IOR('v' , BASE_VIDIOCPRIVATE+7, int):
 
-	/* Little p (/dev/rtc, /dev/envctrl, /dev/d7s, etc.) */
+	/* Little p (/dev/rtc, /dev/envctrl, etc.) */
 	case RTCGET:
 	case RTCSET:
-	case ENVCTRL_RD_WARNING_TEMPERATURE:
-	case ENVCTRL_RD_SHUTDOWN_TEMPERATURE:
-	case ENVCTRL_RD_CPU_TEMPERATURE:
-	case ENVCTRL_RD_FAN_STATUS:
-	case ENVCTRL_RD_VOLTAGE_STATUS:
-	case ENVCTRL_RD_SCSI_TEMPERATURE:
-	case ENVCTRL_RD_ETHERNET_TEMPERATURE:
-	case ENVCTRL_RD_MTHRBD_TEMPERATURE:
-	case ENVCTRL_RD_CPU_VOLTAGE:
-	case ENVCTRL_RD_GLOBALADDRESS:
-	case D7SIOCWR:
-	/* case D7SIOCRD: Same value as ENVCTRL_RD_VOLTAGE_STATUS */
-	case D7SIOCTM:
-
+	case I2CIOCSADR:
+	case I2CIOCGADR:
 
 	/* Little m */
 	case MTIOCTOP:
@@ -2818,9 +2098,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case OPROMGETCONS:
 	case OPROMGETFBNAME:
 	case OPROMGETBOOTARGS:
-	case OPROMSETCUR:
-	case OPROMPCI2NODE:
-	case OPROMPATH2NODE:
 
 	/* Socket level stuff */
 	case FIOSETOWN:
@@ -2853,25 +2130,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case SG_EMULATED_HOST:
 	case SG_SET_TRANSFORM:
 	case SG_GET_TRANSFORM:
-	case SG_SET_RESERVED_SIZE:
-	case SG_GET_RESERVED_SIZE:
-	case SG_GET_SCSI_ID:
-	case SG_SET_FORCE_LOW_DMA:
-	case SG_GET_LOW_DMA:
-	case SG_SET_FORCE_PACK_ID:
-	case SG_GET_PACK_ID:
-	case SG_GET_NUM_WAITING:
-	case SG_SET_DEBUG:
-	case SG_GET_SG_TABLESIZE:
-	case SG_GET_MERGE_FD:
-	case SG_SET_MERGE_FD:
-	case SG_GET_COMMAND_Q:
-	case SG_SET_COMMAND_Q:
-	case SG_GET_UNDERRUN_FLAG:
-	case SG_SET_UNDERRUN_FLAG:
-	case SG_GET_VERSION_NUM:
-	case SG_NEXT_CMD_LEN:
-	case SG_SCSI_RESET:
 
 	/* PPP stuff */
 	case PPPIOCGFLAGS:
@@ -2920,15 +2178,6 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case CDROM_DRIVE_STATUS:
 	case CDROM_DISC_STATUS:
 	case CDROM_CHANGER_NSLOTS:
-	case CDROM_LOCKDOOR:
-	case CDROM_DEBUG:
-	case CDROM_GET_CAPABILITY:
-	case DVD_READ_STRUCT:
-	case DVD_WRITE_STRUCT:
-	case DVD_AUTH:
-	case CDROM_SEND_PACKET:
-	case CDROM_NEXT_WRITABLE:
-	case CDROM_LAST_WRITTEN:
 	
 	/* Big L */
 	case LOOP_SET_FD:
@@ -3094,49 +2343,7 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	case AUTOFS_IOC_CATATONIC:
 	case AUTOFS_IOC_PROTOVER:
 	case AUTOFS_IOC_EXPIRE:
-
-	/* Big W for hardware watchdog timers */
-	/* WIOC_GETSUPPORT not yet implemented -E */
-	case WDIOC_GETSTATUS:
-	case WDIOC_GETBOOTSTATUS:
-	case WDIOC_GETTEMP:
-	case WDIOC_SETOPTIONS:
-	case WDIOC_KEEPALIVE:
-	case WIOCSTART:
-	case WIOCSTOP:
-	case WIOCGSTAT:
 	
-	/* Raw devices */
-	case _IO(0xac, 0): /* RAW_SETBIND */
-	case _IO(0xac, 1): /* RAW_GETBIND */
-
-	/* SMB ioctls which do not need any translations */
-	case SMB_IOC_NEWCONN:
-
-#if defined(CONFIG_DRM) || defined(CONFIG_DRM_MODULE)
-	/* DRM ioctls which do not need any translations */
-	case DRM_IOCTL_GET_MAGIC:
-	case DRM_IOCTL_IRQ_BUSID:
-	case DRM_IOCTL_AUTH_MAGIC:
-	case DRM_IOCTL_BLOCK:
-	case DRM_IOCTL_UNBLOCK:
-	case DRM_IOCTL_CONTROL:
-	case DRM_IOCTL_ADD_BUFS:
-	case DRM_IOCTL_MARK_BUFS:
-	case DRM_IOCTL_ADD_CTX:
-	case DRM_IOCTL_RM_CTX:
-	case DRM_IOCTL_MOD_CTX:
-	case DRM_IOCTL_GET_CTX:
-	case DRM_IOCTL_SWITCH_CTX:
-	case DRM_IOCTL_NEW_CTX:
-	case DRM_IOCTL_ADD_DRAW:
-	case DRM_IOCTL_RM_DRAW:
-	case DRM_IOCTL_LOCK:
-	case DRM_IOCTL_UNLOCK:
-	case DRM_IOCTL_FINISH:
-#endif /* DRM */
-
-
 		error = sys_ioctl (fd, cmd, arg);
 		goto out;
 
@@ -3149,11 +2356,9 @@ asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 				       (int)fd, (unsigned int)cmd, (unsigned int)arg);
 		} while(0);
 		error = -EINVAL;
-		goto out;
+		break;
 	}
 out:
-	fput(filp);
-out2:
 	unlock_kernel();
 	return error;
 }

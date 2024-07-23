@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: reassembly.c,v 1.11.2.1 2000/09/13 00:49:39 davem Exp $
+ *	$Id: reassembly.c,v 1.11 1998/08/26 12:05:16 davem Exp $
  *
  *	Based on: net/ipv4/ip_fragment.c
  *
@@ -160,15 +160,6 @@ u8* ipv6_reassembly(struct sk_buff **skbp, __u8 *nhptr)
 		icmpv6_param_prob(skb, ICMPV6_HDR_FIELD, skb->h.raw);
 		return NULL;
 	}
- 
-	if (!(fhdr->frag_off & __constant_htons(0xFFF9))) {
-		/* It is not a fragmented frame */
-		skb->h.raw += sizeof(struct frag_hdr);
-		ipv6_statistics.Ip6ReasmOKs++;
-
-		return &fhdr->nexthdr;
-	}
-
 	if (atomic_read(&ip6_frag_mem) > sysctl_ip6frag_high_thresh)
 		frag_prune();
 

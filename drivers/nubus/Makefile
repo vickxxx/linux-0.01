@@ -9,19 +9,7 @@
 # parent makefile.
 #
 
-L_TARGET := nubus.a
-
-ifeq ($(CONFIG_MODULES),y)
-O_TARGET := nubus_n_syms.o
-OX_OBJS  := nubus_syms.o
-O_OBJS   := nubus.o
-L_OBJS   := nubus_n_syms.o
-else
 L_OBJS   := nubus.o
-endif
-
-ifdef CONFIG_PROC_FS
-L_OBJS   += proc.o
-endif
+L_TARGET := nubus.a
 
 include $(TOPDIR)/Rules.make

@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_ipv4.c,v 1.175.2.18 2001/02/02 01:27:08 davem Exp $
+ * Version:	$Id: tcp_ipv4.c,v 1.175 1999/05/08 21:09:54 davem Exp $
  *
  *		IPv4 specific functions
  *
@@ -90,14 +90,12 @@ void tcp_v4_send_check(struct sock *sk, struct tcphdr *th, int len,
  * First half of the table is for sockets not in TIME_WAIT, second half
  * is for TIME_WAIT sockets only.
  */
-unsigned int tcp_ehash_size;
-struct sock **tcp_ehash;
+struct sock *tcp_established_hash[TCP_HTABLE_SIZE];
 
 /* Ok, let's try this, I give up, we do need a local binding
  * TCP hash as well as the others for fast bind/connect.
  */
-unsigned int tcp_bhash_size;
-struct tcp_bind_bucket **tcp_bhash;
+struct tcp_bind_bucket *tcp_bound_hash[TCP_BHTABLE_SIZE];
 
 /* All sockets in TCP_LISTEN state will be in here.  This is the only table
  * where wildcard'd TCP sockets can exist.  Hash function here is just local
@@ -119,7 +117,7 @@ int tcp_port_rover = (1024 - 1);
 static __inline__ int tcp_hashfn(__u32 laddr, __u16 lport,
 				 __u32 faddr, __u16 fport)
 {
-	return ((laddr ^ lport) ^ (faddr ^ fport)) & ((tcp_ehash_size/2) - 1);
+	return ((laddr ^ lport) ^ (faddr ^ fport)) & ((TCP_HTABLE_SIZE/2) - 1);
 }
 
 static __inline__ int tcp_sk_hashfn(struct sock *sk)
@@ -132,9 +130,27 @@ static __inline__ int tcp_sk_hashfn(struct sock *sk)
 	return tcp_hashfn(laddr, lport, faddr, fport);
 }
 
-/* Allocate and initialize a new TCP local port bind bucket.
- * Always runs inside the socket hashing lock.
- */
+/* Invariant, sk->num is non-zero. */
+void tcp_bucket_unlock(struct sock *sk)
+{
+	struct tcp_bind_bucket *tb;
+	unsigned short snum = sk->num;
+
+	SOCKHASH_LOCK();
+	for(tb = tcp_bound_hash[tcp_bhashfn(snum)]; tb; tb = tb->next) {
+		if(tb->port == snum) {
+			if(tb->owners == NULL &&
+			   (tb->flags & TCPB_FLAG_LOCKED)) {
+				tb->flags &= ~(TCPB_FLAG_LOCKED |
+					       TCPB_FLAG_FASTREUSE);
+				tcp_inc_slow_timer(TCP_SLT_BUCKETGC);
+			}
+			break;
+		}
+	}
+	SOCKHASH_UNLOCK();
+}
+
 struct tcp_bind_bucket *tcp_bucket_create(unsigned short snum)
 {
 	struct tcp_bind_bucket *tb;
@@ -142,9 +158,9 @@ struct tcp_bind_bucket *tcp_bucket_create(unsigned short snum)
 	tb = kmem_cache_alloc(tcp_bucket_cachep, SLAB_ATOMIC);
 	if(tb != NULL) {
 		struct tcp_bind_bucket **head =
-			&tcp_bhash[tcp_bhashfn(snum)];
+			&tcp_bound_hash[tcp_bhashfn(snum)];
 		tb->port = snum;
-		tb->fastreuse = 0;
+		tb->flags = TCPB_FLAG_LOCKED;
 		tb->owners = NULL;
 		if((tb->next = *head) != NULL)
 			tb->next->pprev = &tb->next;
@@ -156,198 +172,139 @@ struct tcp_bind_bucket *tcp_bucket_create(unsigned short snum)
 
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 /* Ensure that the bound bucket for the port exists.
- * Return 0 and bump bucket reference count on success.
- *
- * Must run in a BH atomic section.
+ * Return 0 on success.
  */
-static __inline__ int __tcp_bucket_check(unsigned short snum)
+static __inline__ int tcp_bucket_check(unsigned short snum)
 {
-	struct tcp_bind_bucket *tb;
-
-	tb = tcp_bhash[tcp_bhashfn(snum)];
+	struct tcp_bind_bucket *tb = tcp_bound_hash[tcp_bhashfn(snum)];
 	for( ; (tb && (tb->port != snum)); tb = tb->next)
 		;
-	if (tb == NULL) {
-		if ((tb = tcp_bucket_create(snum)) == NULL)
-			return 1;
-	}
-
-	return 0;
+	if(tb == NULL && tcp_bucket_create(snum) == NULL)
+		return 1;
+	else
+		return 0;
 }
 #endif
 
-static __inline__ void __tcp_inherit_port(struct sock *sk, struct sock *child)
-{
-	struct tcp_bind_bucket *tb = (struct tcp_bind_bucket *)sk->prev;
-
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-	if (child->num != sk->num) {
-		unsigned short snum = child->num;
-		for(tb = tcp_bhash[tcp_bhashfn(snum)];
-		    tb && tb->port != snum;
-		    tb = tb->next)
-			;
-		if (tb == NULL)
-			tb = (struct tcp_bind_bucket *)sk->prev;
-	}
-#endif
-	if ((child->bind_next = tb->owners) != NULL)
-		tb->owners->bind_pprev = &child->bind_next;
-	tb->owners = child;
-	child->bind_pprev = &tb->owners;
-	child->prev = (struct sock *) tb;
-}
-
-__inline__ void tcp_inherit_port(struct sock *sk, struct sock *child)
-{
-	SOCKHASH_LOCK();
-	__tcp_inherit_port(sk, child);
-	SOCKHASH_UNLOCK();
-}
-
-/* Obtain a reference to a local port for the given sock,
- * if snum is zero it means select any available local port.
- */
-static int tcp_v4_get_port(struct sock *sk, unsigned short snum)
+static int tcp_v4_verify_bind(struct sock *sk, unsigned short snum)
 {
 	struct tcp_bind_bucket *tb;
+	int result = 0;
 
 	SOCKHASH_LOCK();
-	if (snum == 0) {
-		int rover = tcp_port_rover;
-		int low = sysctl_local_port_range[0];
-		int high = sysctl_local_port_range[1];
-		int remaining = (high - low) + 1;
-
-		do {	rover++;
-			if ((rover < low) || (rover > high))
-				rover = low;
-			tb = tcp_bhash[tcp_bhashfn(rover)];
-			for ( ; tb; tb = tb->next)
-				if (tb->port == rover)
-					goto next;
-			break;
-		next:
-		} while (--remaining > 0);
-		tcp_port_rover = rover;
-
-		/* Exhausted local port range during search? */
-		if (remaining <= 0)
-			goto fail;
-
-		/* OK, here is the one we will use. */
-		snum = rover;
-		tb = NULL;
-	} else {
-		for (tb = tcp_bhash[tcp_bhashfn(snum)];
-		     tb != NULL;
-		     tb = tb->next)
-			if (tb->port == snum)
-				break;
-	}
-	if (tb != NULL && tb->owners != NULL) {
-		if (tb->fastreuse != 0 && sk->reuse != 0) {
-			goto success;
+	for(tb = tcp_bound_hash[tcp_bhashfn(snum)];
+	    (tb && (tb->port != snum));
+	    tb = tb->next)
+		;
+	if(tb && tb->owners) {
+		/* Fast path for reuse ports, see include/net/tcp.h for a very
+		 * detailed description of why this works, and why it is worth
+		 * the effort at all. -DaveM
+		 */
+		if((tb->flags & TCPB_FLAG_FASTREUSE)	&&
+		   (sk->reuse != 0)) {
+			goto go_like_smoke;
 		} else {
-			struct sock *sk2 = tb->owners;
+			struct sock *sk2;
 			int sk_reuse = sk->reuse;
 
-			for( ; sk2 != NULL; sk2 = sk2->bind_next) {
+			/* We must walk the whole port owner list in this case. -DaveM */
+			for(sk2 = tb->owners; sk2; sk2 = sk2->bind_next) {
 				if (sk->bound_dev_if == sk2->bound_dev_if) {
-					if (!sk_reuse	||
-					    !sk2->reuse	||
-					    sk2->state == TCP_LISTEN) {
-						if (!sk2->rcv_saddr	||
-						    !sk->rcv_saddr	||
-						    (sk2->rcv_saddr == sk->rcv_saddr))
+					if(!sk_reuse || !sk2->reuse || sk2->state == TCP_LISTEN) {
+						if(!sk2->rcv_saddr		||
+						   !sk->rcv_saddr		||
+						   (sk2->rcv_saddr == sk->rcv_saddr))
 							break;
 					}
 				}
 			}
-			/* If we found a conflict, fail. */
-			if (sk2 != NULL)
-				goto fail;
+			if(sk2 != NULL)
+				result = 1;
 		}
 	}
-	if (tb == NULL &&
-	    (tb = tcp_bucket_create(snum)) == NULL)
-			goto fail;
-	if (tb->owners == NULL) {
-		if (sk->reuse && sk->state != TCP_LISTEN)
-			tb->fastreuse = 1;
-		else
-			tb->fastreuse = 0;
-	} else if (tb->fastreuse &&
-		   ((sk->reuse == 0) || (sk->state == TCP_LISTEN)))
-		tb->fastreuse = 0;
-success:
-	sk->num = snum;
-	if ((sk->bind_next = tb->owners) != NULL)
-		tb->owners->bind_pprev = &sk->bind_next;
-	tb->owners = sk;
-	sk->bind_pprev = &tb->owners;
-	sk->prev = (struct sock *) tb;
-
+	if(result == 0) {
+		if(tb == NULL) {
+			if((tb = tcp_bucket_create(snum)) == NULL)
+				result = 1;
+			else if (sk->reuse && sk->state != TCP_LISTEN)
+				tb->flags |= TCPB_FLAG_FASTREUSE;
+		} else {
+			/* It could be pending garbage collection, this
+			 * kills the race and prevents it from disappearing
+			 * out from under us by the time we use it.  -DaveM
+			 */
+			if(tb->owners == NULL) {
+				if (!(tb->flags & TCPB_FLAG_LOCKED)) {
+					tb->flags = (TCPB_FLAG_LOCKED |
+						     ((sk->reuse &&
+						       sk->state != TCP_LISTEN) ?
+						      TCPB_FLAG_FASTREUSE : 0));
+					tcp_dec_slow_timer(TCP_SLT_BUCKETGC);
+				} else if (!(tb->flags & TCPB_FLAG_GOODSOCKNUM)) {
+					/* Someone is in between the bind
+					 * and the actual connect or listen.
+					 * See if it was a legitimate reuse
+					 * and we are as well, else punt.
+					 */
+					if (sk->reuse == 0 ||
+					    !(tb->flags & TCPB_FLAG_FASTREUSE))
+						result = 1;
+				} else
+					tb->flags &= ~TCPB_FLAG_GOODSOCKNUM;
+			}
+		}
+	}
+go_like_smoke:
 	SOCKHASH_UNLOCK();
-	return 0;
-
-fail:
-	SOCKHASH_UNLOCK();
-	return 1;
+	return result;
 }
 
-/* Get rid of any references to a local port held by the
- * given sock.
- */
-__inline__ void __tcp_put_port(struct sock *sk)
+unsigned short tcp_good_socknum(void)
 {
 	struct tcp_bind_bucket *tb;
+	int low = sysctl_local_port_range[0];
+	int high = sysctl_local_port_range[1];
+	int remaining = (high - low) + 1;
+	int rover;
 
-	tb = (struct tcp_bind_bucket *) sk->prev;
-	if (sk->bind_next)
-		sk->bind_next->bind_pprev = sk->bind_pprev;
-	*(sk->bind_pprev) = sk->bind_next;
-	sk->prev = NULL;
-	if (tb->owners == NULL) {
-		if (tb->next)
-			tb->next->pprev = tb->pprev;
-		*(tb->pprev) = tb->next;
-		kmem_cache_free(tcp_bucket_cachep, tb);
-	}
-}
-
-void tcp_put_port(struct sock *sk)
-{
 	SOCKHASH_LOCK();
-	__tcp_put_port(sk);
+	rover = tcp_port_rover;
+	do {
+		rover += 1;
+		if((rover < low) || (rover > high))
+			rover = low;
+		tb = tcp_bound_hash[tcp_bhashfn(rover)];
+		for( ; tb; tb = tb->next) {
+			if(tb->port == rover)
+				goto next;
+		}
+		break;
+	next:
+	} while(--remaining > 0);
+	tcp_port_rover = rover;
+	tb = NULL;
+	if((remaining <= 0) || ((tb = tcp_bucket_create(rover)) == NULL))
+		rover = 0;
+	if (tb != NULL)
+		tb->flags |= TCPB_FLAG_GOODSOCKNUM;
 	SOCKHASH_UNLOCK();
-}
 
-static __inline__ void __tcp_v4_hash(struct sock *sk)
-{
-	struct sock **skp;
-
-	if (sk->pprev) {
-		printk("tcp_v4_hash: bug, socket state is %d\n", sk->state);
-		*(int *)0 = 0;
-	}
-
-	if(sk->state == TCP_LISTEN)
-		skp = &tcp_listening_hash[tcp_sk_listen_hashfn(sk)];
-	else
-		skp = &tcp_ehash[(sk->hashent = tcp_sk_hashfn(sk))];
-
-	if((sk->next = *skp) != NULL)
-		(*skp)->pprev = &sk->next;
-	*skp = sk;
-	sk->pprev = skp;
+	return rover;
 }
 
 static void tcp_v4_hash(struct sock *sk)
 {
 	if (sk->state != TCP_CLOSE) {
+		struct sock **skp;
+
 		SOCKHASH_LOCK();
-		__tcp_v4_hash(sk);
+		skp = &tcp_established_hash[(sk->hashent = tcp_sk_hashfn(sk))];
+		if((sk->next = *skp) != NULL)
+			(*skp)->pprev = &sk->next;
+		*skp = sk;
+		sk->pprev = skp;
+		tcp_sk_bindify(sk);
 		SOCKHASH_UNLOCK();
 	}
 }
@@ -361,8 +318,38 @@ static void tcp_v4_unhash(struct sock *sk)
 		*sk->pprev = sk->next;
 		sk->pprev = NULL;
 		tcp_reg_zap(sk);
-		if (sk->prev != NULL)
-			__tcp_put_port(sk);
+		tcp_sk_unbindify(sk);
+	}
+	SOCKHASH_UNLOCK();
+}
+
+static void tcp_v4_rehash(struct sock *sk)
+{
+	unsigned char state;
+
+	SOCKHASH_LOCK();
+	state = sk->state;
+	if(sk->pprev != NULL) {
+		if(sk->next)
+			sk->next->pprev = sk->pprev;
+		*sk->pprev = sk->next;
+		sk->pprev = NULL;
+		tcp_reg_zap(sk);
+	}
+	if(state != TCP_CLOSE) {
+		struct sock **skp;
+
+		if(state == TCP_LISTEN)
+			skp = &tcp_listening_hash[tcp_sk_listen_hashfn(sk)];
+		else
+			skp = &tcp_established_hash[(sk->hashent = tcp_sk_hashfn(sk))];
+
+		if((sk->next = *skp) != NULL)
+			(*skp)->pprev = &sk->next;
+		*skp = sk;
+		sk->pprev = skp;
+		if(state == TCP_LISTEN)
+			tcp_sk_bindify(sk);
 	}
 	SOCKHASH_UNLOCK();
 }
@@ -429,7 +416,7 @@ static inline struct sock *__tcp_v4_lookup(struct tcphdr *th,
 	 * have wildcards anyways.
 	 */
 	hash = tcp_hashfn(daddr, hnum, saddr, sport);
-	for(sk = tcp_ehash[hash]; sk; sk = sk->next) {
+	for(sk = tcp_established_hash[hash]; sk; sk = sk->next) {
 		if(TCP_IPV4_MATCH(sk, acookie, saddr, daddr, ports, dif)) {
 			if (sk->state == TCP_ESTABLISHED)
 				TCP_RHASH(sport) = sk;
@@ -437,7 +424,7 @@ static inline struct sock *__tcp_v4_lookup(struct tcphdr *th,
 		}
 	}
 	/* Must check for a TIME_WAIT'er before going to listener hash. */
-	for(sk = tcp_ehash[hash+(tcp_ehash_size/2)]; sk; sk = sk->next)
+	for(sk = tcp_established_hash[hash+(TCP_HTABLE_SIZE/2)]; sk; sk = sk->next)
 		if(TCP_IPV4_MATCH(sk, acookie, saddr, daddr, ports, dif))
 			goto hit;
 	sk = tcp_v4_lookup_listener(daddr, hnum, dif);
@@ -477,7 +464,7 @@ static struct sock *tcp_v4_proxy_lookup(unsigned short num, unsigned long raddr,
 
 	/* This code must run only from NET_BH. */
 	{
-		struct tcp_bind_bucket *tb = tcp_bhash[tcp_bhashfn(hnum)];
+		struct tcp_bind_bucket *tb = tcp_bound_hash[tcp_bhashfn(hnum)];
 		for( ; (tb && tb->port != hnum); tb = tb->next)
 			;
 		if(tb == NULL)
@@ -518,7 +505,7 @@ pass2:
 	}
 next:
 	if(firstpass--) {
-		struct tcp_bind_bucket *tb = tcp_bhash[tcp_bhashfn(hpnum)];
+		struct tcp_bind_bucket *tb = tcp_bound_hash[tcp_bhashfn(hpnum)];
 		for( ; (tb && tb->port != hpnum); tb = tb->next)
 			;
 		if(tb) {
@@ -533,8 +520,7 @@ gotit:
 
 static inline __u32 tcp_v4_init_sequence(struct sock *sk, struct sk_buff *skb)
 {
-	return secure_tcp_sequence_number(skb->nh.iph->daddr,
-					  skb->nh.iph->saddr,
+	return secure_tcp_sequence_number(sk->saddr, sk->daddr,
 					  skb->h.th->dest,
 					  skb->h.th->source);
 }
@@ -555,15 +541,14 @@ static int tcp_v4_unique_address(struct sock *sk)
 
 	/* Freeze the hash while we snoop around. */
 	SOCKHASH_LOCK();
-	tb = tcp_bhash[tcp_bhashfn(snum)];
+	tb = tcp_bound_hash[tcp_bhashfn(snum)];
 	for(; tb; tb = tb->next) {
 		if(tb->port == snum && tb->owners != NULL) {
 			/* Almost certainly the re-use port case, search the real hashes
 			 * so it actually scales.
 			 */
 			sk = __tcp_v4_lookup(NULL, sk->daddr, sk->dport,
-					     sk->rcv_saddr, htons(snum),
-					     sk->bound_dev_if);
+					     sk->rcv_saddr, snum, sk->bound_dev_if);
 			if((sk != NULL) && (sk->state != TCP_LISTEN))
 				retval = 0;
 			break;
@@ -1028,48 +1013,6 @@ static void tcp_v4_send_reset(struct sk_buff *skb)
 	tcp_statistics.TcpOutRsts++;
 }
 
-/* 
- *	Send an ACK for a socket less packet (needed for time wait) 
- *
- *  FIXME: Does not echo timestamps yet.
- *
- *  Assumes that the caller did basic address and flag checks.
- */
-static void tcp_v4_send_ack(struct sk_buff *skb, __u32 seq, __u32 ack, __u16 window)
-{
-	struct tcphdr *th = skb->h.th;
-	struct tcphdr rth;
-	struct ip_reply_arg arg;
-
-	/* Swap the send and the receive. */
-	memset(&rth, 0, sizeof(struct tcphdr)); 
-	rth.dest = th->source;
-	rth.source = th->dest; 
-	rth.doff = sizeof(struct tcphdr)/4;
-
-	rth.seq = htonl(seq);
-	rth.ack_seq = htonl(ack); 
-	rth.ack = 1;
-
-	rth.window = htons(window);
-
-	memset(&arg, 0, sizeof arg); 
-	arg.iov[0].iov_base = (unsigned char *)&rth; 
-	arg.iov[0].iov_len  = sizeof rth;
-	arg.csum = csum_tcpudp_nofold(skb->nh.iph->daddr, 
-				      skb->nh.iph->saddr, /*XXX*/
-				      sizeof(struct tcphdr),
-				      IPPROTO_TCP,
-				      0); 
-	arg.n_iov = 1;
-	arg.csumoffset = offsetof(struct tcphdr, check) / 2; 
-
-	ip_send_reply(tcp_socket->sk, skb, &arg, sizeof rth);
-
-	tcp_statistics.TcpOutSegs++;
-}
-
-
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 
 /*
@@ -1109,8 +1052,6 @@ int tcp_chkaddr(struct sk_buff *skb)
 	struct tcphdr *th = (struct tcphdr *)(skb->nh.raw + iph->ihl*4);
 	struct sock *sk;
 
-	if (ntohs(iph->tot_len) - iph->ihl*4 < sizeof(struct tcphdr))
-		return 0;
 	sk = tcp_v4_lookup(iph->saddr, th->source, iph->daddr,
 			   th->dest, skb->dev->ifindex);
 
@@ -1373,8 +1314,6 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 
 		memcpy(newsk, sk, sizeof(*newsk));
 		newsk->sklist_next = NULL;
-		newsk->next = NULL;
-		newsk->pprev = NULL;
 		newsk->state = TCP_SYN_RECV;
 
 		/* Clone the TCP header template */
@@ -1389,6 +1328,7 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 
 		newsk->done = 0;
 		newsk->proc = 0;
+		newsk->pair = NULL;
 		skb_queue_head_init(&newsk->back_log);
 		skb_queue_head_init(&newsk->error_queue);
 #ifdef CONFIG_FILTER
@@ -1529,7 +1469,7 @@ struct sock * tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	 * later will require to destroy just created newsk in the case of fail.
 	 * 1998/04/22 Andrey V. Savochkin <saw@msu.ru>
 	 */
-	if (__tcp_bucket_check(ntohs(skb->h.th->dest)))
+	if (tcp_bucket_check(ntohs(skb->h.th->dest)))
 		goto exit;
 #endif
 
@@ -1564,13 +1504,8 @@ struct sock * tcp_v4_syn_recv_sock(struct sock *sk, struct sk_buff *skb,
 	if (newsk->sndbuf < (3 * newtp->pmtu_cookie))
 		newsk->sndbuf = min ((3 * newtp->pmtu_cookie), sysctl_wmem_max);
  
-	/* We run in BH processing itself or within a BH atomic
-	 * sequence (backlog) so no locking is needed.
-	 */
-	__tcp_v4_hash(newsk);
-	__tcp_inherit_port(sk, newsk);
-	__add_to_prot_sklist(newsk);
-
+	tcp_v4_hash(newsk);
+	add_to_prot_sklist(newsk);
 	sk->data_ready(sk, 0); /* Deliver SIGIO */ 
 
 	return newsk;
@@ -1580,28 +1515,24 @@ exit:
 	return NULL;
 }
 
-static struct sock *tcp_v4_rst_req(struct sock *sk, struct sk_buff *skb)
+static void tcp_v4_rst_req(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 	struct open_request *req, *prev;
 
 	req = tcp_v4_search_req(tp,skb->nh.iph, skb->h.th, &prev);
 	if (!req)
-		return NULL;
+		return;
 	/* Sequence number check required by RFC793 */
 	if (before(TCP_SKB_CB(skb)->seq, req->rcv_isn) ||
 	    after(TCP_SKB_CB(skb)->seq, req->rcv_isn+1))
-		return NULL;
-	if (req->sk)
-		return req->sk;
-
+		return;
 	tcp_synq_unlink(tp, req, prev);
-	tp->syn_backlog--;
+	(req->sk ? sk->ack_backlog : tp->syn_backlog)--;
 	req->class->destructor(req);
 	tcp_openreq_free(req); 
 
 	net_statistics.EmbryonicRsts++;
-	return NULL;
 }
 
 /* Check for embryonic sockets (open_requests) We check packets with
@@ -1615,8 +1546,10 @@ static inline struct sock *tcp_v4_hnd_req(struct sock *sk,struct sk_buff *skb)
 	u32 flg = ((u32 *)th)[3]; 
 
 	/* Check for RST */
-	if (flg & __constant_htonl(0x00040000))
-		return tcp_v4_rst_req(sk, skb);
+	if (flg & __constant_htonl(0x00040000)) {
+		tcp_v4_rst_req(sk, skb);
+		return NULL;
+	}
 
 	/* Check for SYN|ACK */
 	if (flg & __constant_htonl(0x00120000)) {
@@ -1629,8 +1562,7 @@ static inline struct sock *tcp_v4_hnd_req(struct sock *sk,struct sk_buff *skb)
 			sk = tcp_check_req(sk, skb, req);
 		}
 #ifdef CONFIG_SYN_COOKIES
-		else if ((flg & __constant_htonl(0x00120000))==__constant_htonl(0x00100000))
-		{
+		else {
 			sk = cookie_v4_check(sk, skb, &(IPCB(skb)->opt));
 		}
 #endif
@@ -1716,7 +1648,6 @@ int tcp_v4_rcv(struct sk_buff *skb, unsigned short len)
 	/* Count it even if it's bad */
 	tcp_statistics.TcpInSegs++;
 
-	len = skb->len;
 	if (len < sizeof(struct tcphdr))
 		goto bad_packet;
 
@@ -1742,10 +1673,6 @@ int tcp_v4_rcv(struct sk_buff *skb, unsigned short len)
 	default:
 		/* CHECKSUM_UNNECESSARY */
 	}
-
-	if((th->doff * 4) < sizeof(struct tcphdr) ||
-	   len < (th->doff * 4))
-		goto bad_packet;
 
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 	if (IPCB(skb)->redirport)
@@ -1790,39 +1717,10 @@ discard_it:
   	return 0;
 
 do_time_wait:
-	/* Sorry for the ugly switch. 2.3 will have a better solution. */ 
-	switch (tcp_timewait_state_process((struct tcp_tw_bucket *)sk,
-					   skb, th, skb->len)) {
-	case TCP_TW_ACK:
-		tcp_v4_send_ack(skb,
-				((struct tcp_tw_bucket *)sk)->snd_nxt,
-				((struct tcp_tw_bucket *)sk)->rcv_nxt,
-				((struct tcp_tw_bucket *)sk)->window);
-		goto discard_it; 
-	case TCP_TW_RST:
-		goto no_tcp_socket; 
-	default:
-		goto discard_it; 
-	}
-}
-
-static void __tcp_v4_rehash(struct sock *sk)
-{
-	struct sock **skp = &tcp_ehash[(sk->hashent = tcp_sk_hashfn(sk))];
-
-	SOCKHASH_LOCK();
-	if(sk->pprev) {
-		if(sk->next)
-			sk->next->pprev = sk->pprev;
-		*sk->pprev = sk->next;
-		sk->pprev = NULL;
-		tcp_reg_zap(sk);
-	}
-	if((sk->next = *skp) != NULL)
-		(*skp)->pprev = &sk->next;
-	*skp = sk;
-	sk->pprev = skp;
-	SOCKHASH_UNLOCK();
+	if(tcp_timewait_state_process((struct tcp_tw_bucket *)sk,
+				      skb, th, skb->len))
+		goto no_tcp_socket;
+	goto discard_it;
 }
 
 int tcp_v4_rebuild_header(struct sock *sk)
@@ -1882,7 +1780,7 @@ do_rewrite:
 	/* Ouch!, this should not happen. */
 	if (!sk->saddr || !sk->rcv_saddr) {
 		printk(KERN_WARNING "tcp_v4_rebuild_header(): not valid sock addrs: "
-		       "saddr=%08X rcv_saddr=%08X\n",
+		       "saddr=%08lX rcv_saddr=%08lX\n",
 		       ntohl(sk->saddr), 
 		       ntohl(sk->rcv_saddr));
 		return 0;
@@ -1898,12 +1796,7 @@ do_rewrite:
 
 		sk->saddr = new_saddr;
 		sk->rcv_saddr = new_saddr;
-
-		/* XXX The only one ugly spot where we need to
-		 * XXX really change the sockets identity after
-		 * XXX it has entered the hashes. -DaveM
-		 */
-		__tcp_v4_rehash(sk);
+		tcp_v4_rehash(sk);
 	} 
         
 	return 0;
@@ -1911,17 +1804,8 @@ do_rewrite:
 
 static struct sock * tcp_v4_get_sock(struct sk_buff *skb, struct tcphdr *th)
 {
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-	if (IPCB(skb)->redirport)
-		return tcp_v4_proxy_lookup(th->dest, skb->nh.iph->saddr,
-					   th->source,  skb->nh.iph->daddr,
-					   skb->dev, IPCB(skb)->redirport,
-					   skb->dev->ifindex);
-	else
-#endif
-		return tcp_v4_lookup(skb->nh.iph->saddr, th->source,
-				     skb->nh.iph->daddr, th->dest,
-				     skb->dev->ifindex);
+	return tcp_v4_lookup(skb->nh.iph->saddr, th->source,
+			     skb->nh.iph->daddr, th->dest, skb->dev->ifindex);
 }
 
 static void v4_addr2sockaddr(struct sock *sk, struct sockaddr * uaddr)
@@ -2007,11 +1891,13 @@ static int tcp_v4_destroy_sock(struct sock *sk)
   	while((skb = __skb_dequeue(&tp->out_of_order_queue)) != NULL)
 		kfree_skb(skb);
 
-	/* Clean up a referenced TCP bind bucket, this only happens if a
+	/* Clean up a locked TCP bind bucket, this only happens if a
 	 * port is allocated for a socket, but it never fully connects.
+	 * In which case we will find num to be non-zero and daddr to
+	 * be zero.
 	 */
-	if(sk->prev != NULL)
-		tcp_put_port(sk);
+	if(sk->daddr == 0 && sk->num != 0)
+		tcp_bucket_unlock(sk);
 
 	return 0;
 }
@@ -2038,7 +1924,9 @@ struct proto tcp_prot = {
 	tcp_v4_do_rcv,			/* backlog_rcv */
 	tcp_v4_hash,			/* hash */
 	tcp_v4_unhash,			/* unhash */
-	tcp_v4_get_port,		/* get_port */
+	tcp_v4_rehash,			/* rehash */
+	tcp_good_socknum,		/* good_socknum */
+	tcp_v4_verify_bind,		/* verify_bind */
 	128,				/* max_header */
 	0,				/* retransmits */
 	"TCP",				/* name */

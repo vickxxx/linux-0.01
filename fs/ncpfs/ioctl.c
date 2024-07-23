@@ -33,7 +33,6 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	int result;
 	struct ncp_ioctl_request request;
 	struct ncp_fs_info info;
-	char* bouncebuffer;
 
 #ifdef NCP_IOC_GETMOUNTUID_INT
 	/* remove after ncpfs-2.0.13/2.2.0 gets released */
@@ -58,9 +57,12 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}
-		if (copy_from_user(&request, (struct ncp_ioctl_request *) arg,
-			       sizeof(request)))
-			return -EFAULT;
+		if ((result = verify_area(VERIFY_READ, (char *) arg,
+					  sizeof(request))) != 0) {
+			return result;
+		}
+		copy_from_user(&request, (struct ncp_ioctl_request *) arg,
+			       sizeof(request));
 
 		if ((request.function > 255)
 		    || (request.size >
@@ -71,13 +73,6 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 					  NCP_PACKET_SIZE)) != 0) {
 			return result;
 		}
-		bouncebuffer = kmalloc(NCP_PACKET_SIZE, GFP_NFS);
-		if (!bouncebuffer)
-			return -ENOMEM;
-		if (copy_from_user(bouncebuffer, request.data, request.size)) {
-			kfree(bouncebuffer);
-			return -EFAULT;
-		}
 		ncp_lock_server(server);
 
 		/* FIXME: We hack around in the server's structures
@@ -85,22 +80,17 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 		server->has_subfunction = 0;
 		server->current_size = request.size;
-		memcpy(server->packet, bouncebuffer, request.size);
+		copy_from_user(server->packet, request.data, request.size);
 
-		result = ncp_request2(server, request.function, 
-			bouncebuffer, NCP_PACKET_SIZE);
-		if (result < 0)
-			result = -EIO;
-		else
-			result = server->reply_size;
-		ncp_unlock_server(server);
+		ncp_request(server, request.function);
+
 		DPRINTK(KERN_DEBUG "ncp_ioctl: copy %d bytes\n",
-			result);
-		if (result >= 0)
-			if (copy_to_user(request.data, bouncebuffer, result))
-				result = -EFAULT;
-		kfree(bouncebuffer);
-		return result;
+			server->reply_size);
+		copy_to_user(request.data, server->packet, server->reply_size);
+
+		ncp_unlock_server(server);
+
+		return server->reply_size;
 
 	case NCP_IOC_CONN_LOGGED_IN:
 
@@ -307,7 +297,6 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 				default:
 						return -EINVAL;
 			}
-			/* locking needs both read and write access */
 			if ((result = ncp_make_open(inode, O_RDWR)) != 0)
 			{
 				return result;

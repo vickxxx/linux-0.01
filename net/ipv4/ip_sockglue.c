@@ -636,9 +636,6 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 	if(get_user(len,optlen))
 		return -EFAULT;
 
-	if(len < 0)
-		return -EINVAL;
-		
 	switch(optname)
 	{
 		case IP_OPTIONS:

@@ -16,24 +16,8 @@
  *
  */
 
-/*
- * We must actually use 2 windows to direct-map the 2GB space, because
- * of an "idiot-syncracy" of the CYPRESS chip used on DS20 and others.
- * It may respond to a PCI bus address in the last 1MB of the 4GB
- * address range, and that is where real memory may appear.
- *
- * Sigh...
- */
 #define TSUNAMI_DMA_WIN_BASE_DEFAULT    (1024*1024*1024U)
-#define TSUNAMI_DMA_WIN_SIZE_DEFAULT    (2*1024*1024*1024U)
-
-#define TSUNAMI_DMA_WIN0_BASE_DEFAULT    (1024*1024*1024UL)
-#define TSUNAMI_DMA_WIN0_SIZE_DEFAULT    (1024*1024*1024UL)
-#define TSUNAMI_DMA_WIN0_TRAN_DEFAULT    (0UL)
-
-#define TSUNAMI_DMA_WIN1_BASE_DEFAULT    (2*1024*1024*1024UL)
-#define TSUNAMI_DMA_WIN1_SIZE_DEFAULT    (1024*1024*1024UL)
-#define TSUNAMI_DMA_WIN1_TRAN_DEFAULT    (1024*1024*1024UL)
+#define TSUNAMI_DMA_WIN_SIZE_DEFAULT    (1024*1024*1024U)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
 #define TSUNAMI_DMA_WIN_BASE		alpha_mv.dma_win_base
@@ -80,7 +64,6 @@ typedef struct {
 	tsunami_64	mpr2;
 	tsunami_64	mpr3;
 	tsunami_64	mctl;
-	tsunami_64	__pad1;
 	tsunami_64	ttr;
 	tsunami_64	tdr;
 	tsunami_64	dim2;
@@ -321,7 +304,7 @@ __EXTERN_INLINE void * tsunami_bus_to_virt(unsigned long address)
 /*
  * I/O functions:
  *
- * TSUNAMI, the 21272 PCI/memory support chipset for the EV6 (21264)
+ * TSUNAMI, the 21??? PCI/memory support chipset for the EV6 (21264)
  * can only use linear accesses to get at PCI memory and I/O spaces.
  */
 

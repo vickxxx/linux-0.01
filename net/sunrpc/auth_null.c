@@ -38,7 +38,6 @@ static void
 nul_destroy(struct rpc_auth *auth)
 {
 	dprintk("RPC: destroying NULL authenticator %p\n", auth);
-	rpcauth_free_credcache(auth);
 	rpc_free(auth);
 }
 
@@ -46,15 +45,17 @@ nul_destroy(struct rpc_auth *auth)
  * Create NULL creds for current process
  */
 static struct rpc_cred *
-nul_create_cred(int flags)
+nul_create_cred(struct rpc_task *task)
 {
 	struct rpc_cred	*cred;
 
-	if (!(cred = (struct rpc_cred *) rpc_allocate(flags, sizeof(*cred))))
+	if (!(cred = (struct rpc_cred *) rpc_malloc(task, sizeof(*cred)))) {
+		task->tk_status = -ENOMEM;
 		return NULL;
+	}
+
 	cred->cr_count = 0;
 	cred->cr_flags = RPCAUTH_CRED_UPTODATE;
-	cred->cr_uid = current->uid;
 
 	return cred;
 }
@@ -72,7 +73,7 @@ nul_destroy_cred(struct rpc_cred *cred)
  * Match cred handle against current process
  */
 static int
-nul_match(struct rpc_cred *cred, int taskflags)
+nul_match(struct rpc_task *task, struct rpc_cred *cred)
 {
 	return 1;
 }
@@ -109,12 +110,10 @@ nul_validate(struct rpc_task *task, u32 *p)
 		printk("RPC: bad verf flavor: %ld\n", (unsigned long) n);
 		return NULL;
 	}
-	if ((n = ntohl(*p++)) > 400) {
+	if ((n = ntohl(*p++)) != 0) {
 		printk("RPC: bad verf size: %ld\n", (unsigned long) n);
 		return NULL;
 	}
-	if (n)
-		p += XDR_QUADLEN(n);
 
 	return p;
 }

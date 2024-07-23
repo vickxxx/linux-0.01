@@ -106,9 +106,9 @@ asmlinkage void stack_segment(void);
 asmlinkage void general_protection(void);
 asmlinkage void page_fault(void);
 asmlinkage void coprocessor_error(void);
+asmlinkage void reserved(void);
 asmlinkage void alignment_check(void);
 asmlinkage void spurious_interrupt_bug(void);
-asmlinkage void machine_check(void);
 
 int kstack_depth_to_print = 24;
 
@@ -155,48 +155,40 @@ static void show_registers(struct pt_regs *regs)
 		printk("\nStack: ");
 		stack = (unsigned long *) esp;
 		for(i=0; i < kstack_depth_to_print; i++) {
-			if (((long) stack & 8191) == 0)
+			if (((long) stack & 4095) == 0)
 				break;
 			if (i && ((i % 8) == 0))
 				printk("\n       ");
 			printk("%08lx ", *stack++);
 		}
 		printk("\nCall Trace: ");
-		if (!esp || (esp & 3))
-			printk("Bad ESP value.");
-		else {
-			stack = (unsigned long *) esp;
-			i = 1;
-			module_start = PAGE_OFFSET + (max_mapnr << PAGE_SHIFT);
-			module_start = ((module_start + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
-			module_end = module_start + MODULE_RANGE;
-			while (((long) stack & 8191) != 0) {
-				addr = *stack++;
-				/*
-				 * If the address is either in the text segment of the
-				 * kernel, or in the region which contains vmalloc'ed
-				 * memory, it *may* be the address of a calling
-				 * routine; if so, print it so that someone tracing
-				 * down the cause of the crash will be able to figure
-				 * out the call path that was taken.
-				 */
-				if (((addr >= (unsigned long) &_stext) &&
-				     (addr <= (unsigned long) &_etext)) ||
-				    ((addr >= module_start) && (addr <= module_end))) {
-					if (i && ((i % 8) == 0))
-						printk("\n       ");
-					printk("[<%08lx>] ", addr);
-					i++;
-				}
+		stack = (unsigned long *) esp;
+		i = 1;
+		module_start = PAGE_OFFSET + (max_mapnr << PAGE_SHIFT);
+		module_start = ((module_start + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
+		module_end = module_start + MODULE_RANGE;
+		while (((long) stack & 4095) != 0) {
+			addr = *stack++;
+			/*
+			 * If the address is either in the text segment of the
+			 * kernel, or in the region which contains vmalloc'ed
+			 * memory, it *may* be the address of a calling
+			 * routine; if so, print it so that someone tracing
+			 * down the cause of the crash will be able to figure
+			 * out the call path that was taken.
+			 */
+			if (((addr >= (unsigned long) &_stext) &&
+			     (addr <= (unsigned long) &_etext)) ||
+			    ((addr >= module_start) && (addr <= module_end))) {
+				if (i && ((i % 8) == 0))
+					printk("\n       ");
+				printk("[<%08lx>] ", addr);
+				i++;
 			}
 		}
 		printk("\nCode: ");
-		if (!regs->eip || regs->eip==-1)
-			printk("Bad EIP value.");
-		else {
-			for(i=0;i<20;i++)
+		for(i=0;i<20;i++)
 			printk("%02x ", ((unsigned char *)regs->eip)[i]);
-		}
 	}
 	printk("\n");
 }	
@@ -245,6 +237,7 @@ DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
 DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present, current)
 DO_ERROR(12, SIGBUS,  "stack segment", stack_segment, current)
 DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
+DO_ERROR(18, SIGSEGV, "reserved", reserved, current)
 /* I don't have documents for this but it does seem to cover the cache
    flush from user space exception some people get. */
 DO_ERROR(19, SIGSEGV, "cache flush denied", cache_flush_denied, current)
@@ -366,9 +359,6 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 
 	__asm__ __volatile__("movl %%db6,%0" : "=r" (condition));
 
-	/* Ensure the debug status register is visible to ptrace (or the process itself) */
-	tsk->tss.debugreg[6] = condition;
-
 	/* Mask out spurious TF errors due to lazy TF clearing */
 	if (condition & DR_STEP) {
 		/*
@@ -397,7 +387,6 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 	/* Ok, finally something we can handle */
 	tsk->tss.trap_no = 1;
 	tsk->tss.error_code = error_code;
-	tsk->tss.debugreg[DR_STATUS] = condition;
 	force_sig(SIGTRAP, tsk);
 	return;
 
@@ -702,7 +691,6 @@ void __init trap_init(void)
 	set_trap_gate(15,&spurious_interrupt_bug);
 	set_trap_gate(16,&coprocessor_error);
 	set_trap_gate(17,&alignment_check);
-	set_trap_gate(18,&machine_check);
 	set_system_gate(SYSCALL_VECTOR,&system_call);
 
 	/* set up GDT task & ldt entries */

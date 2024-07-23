@@ -1,26 +1,15 @@
-/* $Id: isdn_concap.c,v 1.8 2000/05/11 22:29:20 kai Exp $
+/* $Id: isdn_concap.c,v 1.2 1998/01/31 22:49:21 keil Exp $
  
- * Linux ISDN subsystem, protocol encapsulation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- */
-
-/* Stuff to support the concap_proto by isdn4linux. isdn4linux - specific
+ * Stuff to support the concap_proto by isdn4linux. isdn4linux - specific
  * stuff goes here. Stuff that depends only on the concap protocol goes to
  * another -- protocol specific -- source file.
+ *
+ * $Log: isdn_concap.c,v $
+ * Revision 1.2  1998/01/31 22:49:21  keil
+ * correct comments
+ *
+ * Revision 1.1  1998/01/31 22:27:57  keil
+ * New files from Henner Eisen for X.25 support
  *
  */
 
@@ -31,9 +20,14 @@
 #include <linux/concap.h>
 #include "isdn_concap.h"
 
+/* The declaration of this (or a plublic variant thereof) should really go
+   in linux/isdn.h. But we really need it here (and isdn_ppp, like us, also
+   refers to that private function currently owned by isdn_net.c) */
+extern int isdn_net_force_dial_lp(isdn_net_local *);
+
 
 /* The following set of device service operations are for encapsulation
-   protocols that require for reliable datalink semantics. That means:
+   protocols that require for reliable datalink sematics. That means:
 
    - before any data is to be submitted the connection must explicitly
      be set up.
@@ -52,19 +46,15 @@
 
 int isdn_concap_dl_data_req(struct concap_proto *concap, struct sk_buff *skb)
 {
+	int tmp;
 	struct device *ndev = concap -> net_dev;
-	isdn_net_dev *nd = ((isdn_net_local *) ndev->priv)->netdev;
-	isdn_net_local *lp = isdn_net_get_locked_lp(nd);
+	isdn_net_local *lp = (isdn_net_local *) ndev->priv;
 
 	IX25DEBUG( "isdn_concap_dl_data_req: %s \n", concap->net_dev->name);
-	if (!lp) {
-		IX25DEBUG( "isdn_concap_dl_data_req: %s : isdn_net_send_skb returned %d\n", concap -> net_dev -> name, 1);
-		return 1;
-	}
 	lp->huptimer = 0;
-	isdn_net_writebuf_skb(lp, skb);
-	IX25DEBUG( "isdn_concap_dl_data_req: %s : isdn_net_send_skb returned %d\n", concap -> net_dev -> name, 0);
-	return 0;
+	tmp=isdn_net_send_skb(ndev, lp, skb);
+	IX25DEBUG( "isdn_concap_dl_data_req: %s : isdn_net_send_skb returned %d\n", concap -> net_dev -> name, tmp);
+	return tmp;
 }
 
 
@@ -76,9 +66,9 @@ int isdn_concap_dl_connect_req(struct concap_proto *concap)
 	IX25DEBUG( "isdn_concap_dl_connect_req: %s \n", ndev -> name);
 
 	/* dial ... */
-	ret = isdn_net_dial_req( lp );
+	ret = isdn_net_force_dial_lp( lp );
 	if ( ret ) IX25DEBUG("dialing failed\n");
-	return ret;
+	return 0;
 }
 
 int isdn_concap_dl_disconn_req(struct concap_proto *concap)

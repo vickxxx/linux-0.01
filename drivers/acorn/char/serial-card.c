@@ -33,20 +33,14 @@
 #ifdef MODULE
 static int __serial_ports[NUM_SERIALS];
 static int __serial_pcount;
-static int __serial_addr[NUM_SERIALS];
 static struct expansion_card *expcard[MAX_ECARDS];
 #define ADD_ECARD(ec,card) expcard[(card)] = (ec)
-#define ADD_PORT(port,addr)					\
-	do {							\
-		__serial_ports[__serial_pcount] = (port);	\
-		__serial_addr[__serial_pcount] = (addr);	\
-		__serial_pcount += 1;				\
-	} while (0)
+#define ADD_PORT(port) __serial_ports[__serial_pcount++] = (port)
 #undef MY_INIT
 #define MY_INIT init_module
 #else
 #define ADD_ECARD(ec,card)
-#define ADD_PORT(port,addr)
+#define ADD_PORT(port)
 #endif
 
 static const card_ids serial_cids[] = { MY_CARD_LIST, { 0xffff, 0xffff } };
@@ -81,15 +75,12 @@ int MY_INIT (void)
 	cardaddr = MY_BASE_ADDRESS(ec);
 
 	for (port = 0; port < MY_NUMPORTS; port ++) {
-	    unsigned long address;
 	    int line;
 
-	    address = MY_PORT_ADDRESS(port, cardaddr);
-
-	    line = serial_register_onedev (address, ec->irq);
+	    line = serial_register_onedev (MY_PORT_ADDRESS(port, cardaddr), ec->irq);
 	    if (line < 0)
 		break;
-	    ADD_PORT(line, address);
+	    ADD_PORT(line);
 	}
 
 	if (port) {
@@ -106,10 +97,8 @@ void cleanup_module (void)
 {
     int i;
 
-    for (i = 0; i < __serial_pcount; i++) {
-	unregister_serial(__serial_ports[i]);
-	release_region(__serial_addr[i], 8);
-    }
+    for (i = 0; i < __serial_pcount; i++)
+	unregister_serial (__serial_ports[i]);
 
     for (i = 0; i < MAX_ECARDS; i++)
 	if (expcard[i])

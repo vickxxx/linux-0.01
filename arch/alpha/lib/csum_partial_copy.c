@@ -173,11 +173,11 @@ csum_partial_cfu_src_aligned(const unsigned long *src, unsigned long *dst,
 {
 	unsigned long carry = 0;
 	unsigned long word;
-	unsigned long second_dest;
 	int err = 0;
 
 	mskql(partial_dest, doff, partial_dest);
 	while (len >= 0) {
+		unsigned long second_dest;
 		err |= __get_user(word, src);
 		len -= 8;
 		insql(word, doff, second_dest);
@@ -189,30 +189,35 @@ csum_partial_cfu_src_aligned(const unsigned long *src, unsigned long *dst,
 		carry = checksum < word;
 		dst++;
 	}
-	len += 8;
-	if (len) {
-		checksum += carry;
+	len += doff;
+	checksum += carry;
+	if (len >= 0) {
+		unsigned long second_dest;
 		err |= __get_user(word, src);
-		mskql(word, len, word);
-		len -= 8;
+		mskql(word, len-doff, word);
 		checksum += word;
 		insql(word, doff, second_dest);
-		len += doff;
+		stq_u(partial_dest | second_dest, dst);
 		carry = checksum < word;
-		partial_dest |= second_dest;
-		if (len >= 0) {
-			stq_u(partial_dest, dst);
-			if (!len) goto out;
-			dst++;
+		if (len) {
+			ldq_u(second_dest, dst+1);
 			insqh(word, doff, partial_dest);
+			mskqh(second_dest, len, second_dest);
+			stq_u(partial_dest | second_dest, dst+1);
 		}
-		doff = len;
+		checksum += carry;
+	} else if (len & 7) {
+		unsigned long second_dest;
+		err |= __get_user(word, src);
+		ldq_u(second_dest, dst);
+		mskql(word, len-doff, word);
+		checksum += word;
+		mskqh(second_dest, len, second_dest);
+		carry = checksum < word;
+		insql(word, doff, word);
+		stq_u(partial_dest | word | second_dest, dst);
+		checksum += carry;
 	}
-	ldq_u(second_dest, dst);
-	mskqh(second_dest, doff, second_dest);
-	stq_u(partial_dest | second_dest, dst);
-out:
-	checksum += carry;
 	if (err) *errp = err;
 	return checksum;
 }
@@ -278,7 +283,7 @@ csum_partial_cfu_unaligned(const unsigned long * src, unsigned long * dst,
 			stq_u(partial_dest | second_dest, dst+1);
 		}
 		checksum += carry;
-	} else {
+	} else if (len & 7) {
 		unsigned long second, word;
 		unsigned long second_dest;
 

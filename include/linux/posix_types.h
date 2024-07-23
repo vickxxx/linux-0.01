@@ -1,7 +1,15 @@
 #ifndef _LINUX_POSIX_TYPES_H
 #define _LINUX_POSIX_TYPES_H
 
-#include <linux/stddef.h>
+/*
+ * This file is generally used by user-level software, so you need to
+ * be a little careful about namespace pollution etc.  Also, we cannot
+ * assume GCC is being used.
+ */
+
+#ifndef NULL
+# define NULL		((void *) 0)
+#endif
 
 /*
  * This allows for 1024 file descriptors: if NR_OPEN is ever grown

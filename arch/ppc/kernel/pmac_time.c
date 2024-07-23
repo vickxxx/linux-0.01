@@ -22,9 +22,8 @@
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/nvram.h>
 
-#include <asm/time.h>
+#include "time.h"
 
 /* Apparently the RTC stores seconds since 1 Jan 1904 */
 #define RTC_OFFSET	2082844800
@@ -50,36 +49,14 @@
 /* Bits in IFR and IER */
 #define T1_INT		0x40		/* Timer 1 interrupt */
 
-extern struct timezone sys_tz;
-
-__init
-long pmac_time_init(void)
-{
-	s32 delta = 0;
-	int dst;
-	
-	delta = ((s32)pmac_xpram_read(PMAC_XPRAM_MACHINE_LOC + 0x9)) << 16;
-	delta |= ((s32)pmac_xpram_read(PMAC_XPRAM_MACHINE_LOC + 0xa)) << 8;
-	delta |= pmac_xpram_read(PMAC_XPRAM_MACHINE_LOC + 0xb);
-	if (delta & 0x00800000UL)
-		delta |= 0xFF000000UL;
-	dst = ((pmac_xpram_read(PMAC_XPRAM_MACHINE_LOC + 0x8) & 0x80) != 0);
-	printk("GMT Delta read from XPRAM: %d minutes, DST: %s\n", delta/60,
-		dst ? "on" : "off");
-	return -delta;
-}
-
 __pmac
+
 unsigned long pmac_get_rtc_time(void)
 {
 	struct adb_request req;
 
 	/* Get the time from the RTC */
-	if (adb_controller == 0)
-		return 0;
-	/* adb_controller->kind, not adb_hardware, since that doesn't
-	   get set until we call adb_init - paulus. */
-	switch (adb_controller->kind) {
+	switch (adb_hardware) {
 	case ADB_VIACUDA:
 		if (cuda_request(&req, NULL, 2, CUDA_PACKET, CUDA_GET_TIME) < 0)
 			return 0;
@@ -91,10 +68,8 @@ unsigned long pmac_get_rtc_time(void)
 		return (req.reply[3] << 24) + (req.reply[4] << 16)
 			+ (req.reply[5] << 8) + req.reply[6] - RTC_OFFSET;
 	case ADB_VIAPMU:
-		if (pmu_request(&req, NULL, 1, PMU_READ_RTC) < 0) {
-			printk("pmac_read_rtc_time: pmu_request failed\n");
+		if (pmu_request(&req, NULL, 1, PMU_READ_RTC) < 0)
 			return 0;
-		}
 		while (!req.complete)
 			pmu_poll();
 		if (req.reply_len != 5)
@@ -109,42 +84,7 @@ unsigned long pmac_get_rtc_time(void)
 
 int pmac_set_rtc_time(unsigned long nowtime)
 {
-	struct adb_request req;
-	int dst, delta;
-
-	nowtime += RTC_OFFSET;
-
-	/* Set the time in the RTC */
-	if (adb_controller == 0)
-		return 0;
-	/* adb_controller->kind, not adb_hardware, since that doesn't
-	   get set until we call adb_init - paulus. */
-	switch (adb_controller->kind) {
-	case ADB_VIACUDA:
-		if (cuda_request(&req, NULL, 6, CUDA_PACKET, CUDA_SET_TIME,
-				 nowtime >> 24, nowtime >> 16, nowtime >> 8, nowtime) < 0)
-			return 0;
-		while (!req.complete)
-			cuda_poll();
-//		if (req.reply_len != 7)
-			printk(KERN_ERR "pmac_set_rtc_time: got %d byte reply\n",
-			       req.reply_len);
-		break;
-	case ADB_VIAPMU:
-		if (pmu_request(&req, NULL, 5, PMU_SET_RTC,
-				nowtime >> 24, nowtime >> 16, nowtime >> 8, nowtime) < 0)
-			return 0;
-		while (!req.complete)
-			pmu_poll();
-		if (req.reply_len != 5)
-			printk(KERN_ERR "pmac_set_rtc_time: got %d byte reply\n",
-			       req.reply_len);
-		break;
-	default:
-		return 0;
-	}
-
-	return 1;
+	return 0;
 }
 
 /*
@@ -199,12 +139,13 @@ __initfunc(int via_calibrate_decr(void))
 /*
  * Reset the time after a sleep.
  */
-static int time_sleep_notify(struct pmu_sleep_notifier *self, int when)
+static int time_sleep_notify(struct notifier_block *this, unsigned long event,
+			     void *x)
 {
 	static unsigned long time_diff;
 
-	switch (when) {
-	case PBOOK_SLEEP_NOW:
+	switch (event) {
+	case PBOOK_SLEEP:
 		time_diff = xtime.tv_sec - pmac_get_rtc_time();
 		break;
 	case PBOOK_WAKE:
@@ -214,11 +155,11 @@ static int time_sleep_notify(struct pmu_sleep_notifier *self, int when)
 		last_rtc_update = xtime.tv_sec;
 		break;
 	}
-	return PBOOK_SLEEP_OK;
+	return NOTIFY_DONE;
 }
 
-static struct pmu_sleep_notifier time_sleep_notifier = {
-	time_sleep_notify, SLEEP_LEVEL_MISC,
+static struct notifier_block time_sleep_notifier = {
+	time_sleep_notify, NULL, 100
 };
 #endif /* CONFIG_PMAC_PBOOK */
 
@@ -233,7 +174,7 @@ __initfunc(void pmac_calibrate_decr(void))
 	int freq, *fp, divisor;
 
 #ifdef CONFIG_PMAC_PBOOK
-	pmu_register_sleep_notifier(&time_sleep_notifier);
+	notifier_chain_register(&sleep_notifier_list, &time_sleep_notifier);
 #endif /* CONFIG_PMAC_PBOOK */
 
 	if (via_calibrate_decr())

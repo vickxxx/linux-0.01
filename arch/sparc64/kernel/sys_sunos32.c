@@ -1,4 +1,4 @@
-/* $Id: sys_sunos32.c,v 1.22.2.6 2001/02/02 01:30:09 davem Exp $
+/* $Id: sys_sunos32.c,v 1.22 1998/10/26 20:01:13 davem Exp $
  * sys_sunos32.c: SunOS binary compatability layer on sparc64.
  *
  * Copyright (C) 1995, 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -25,6 +25,7 @@
 #include <linux/signal.h>
 #include <linux/uio.h>
 #include <linux/utsname.h>
+#include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/stat.h>
 #include <linux/malloc.h>
@@ -327,7 +328,6 @@ asmlinkage u32 sunos_sigblock(u32 blk_mask)
 	spin_lock_irq(&current->sigmask_lock);
 	old = (u32) current->blocked.sig[0];
 	current->blocked.sig[0] |= (blk_mask & _BLOCKABLE);
-	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	return old;
 }
@@ -339,7 +339,6 @@ asmlinkage u32 sunos_sigsetmask(u32 newmask)
 	spin_lock_irq(&current->sigmask_lock);
 	retval = (u32) current->blocked.sig[0];
 	current->blocked.sig[0] = (newmask & _BLOCKABLE);
-	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	return retval;
 }
@@ -672,12 +671,12 @@ asmlinkage void sunos_nop(void)
 #define SMNT_SYS5         128
 
 struct sunos_fh_t {
-	char fh_data [NFS2_FHSIZE];
+	char fh_data [NFS_FHSIZE];
 };
 
 struct sunos_nfs_mount_args {
 	struct sockaddr_in  *addr; /* file server address */
-	struct nfs3_fh *fh;     /* File handle to be mounted */
+	struct nfs_fh *fh;     /* File handle to be mounted */
 	int        flags;      /* flags */
 	int        wsize;      /* write size in bytes */
 	int        rsize;      /* read size in bytes */
@@ -746,7 +745,7 @@ sunos_nfs_get_server_fd (int fd, struct sockaddr_in *addr)
 
 	server.sin_family = AF_INET;
 	server.sin_addr = addr->sin_addr;
-	server.sin_port = NFS2_PORT;
+	server.sin_port = NFS_PORT;
 
 	/* Call sys_connect */
 	ret = socket->ops->connect (socket, (struct sockaddr *) &server,
@@ -1168,7 +1167,6 @@ asmlinkage int sunos_msgsys(int op, u32 arg1, u32 arg2, u32 arg3, u32 arg4)
 			(current->tss.kregs->u_regs[UREG_FP] & 0xffffffffUL);
 		if(get_user(arg5, &sp->xxargs[0])) {
 			rval = -EFAULT;
-			kfree(kmbuf);
 			break;
 		}
 		set_fs(KERNEL_DS);
@@ -1349,7 +1347,7 @@ asmlinkage int sunos_readv(u32 fd, u32 vector, s32 count)
 
 	lock_kernel();
 	ret = check_nonblock(sys32_readv(fd, vector, count), fd);
-	unlock_kernel();
+	lock_kernel();
 	return ret;
 }
 

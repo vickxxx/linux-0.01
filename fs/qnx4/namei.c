@@ -1,7 +1,7 @@
 /* 
  * QNX4 file system, Linux implementation.
  * 
- * Version : 0.2.1
+ * Version : 0.1
  * 
  * Using parts of the xiafs filesystem.
  * 
@@ -33,7 +33,7 @@ static int qnx4_match(int len, const char *name,
 		      struct buffer_head *bh, unsigned long *offset)
 {
 	struct qnx4_inode_entry *de;
-	int namelen, thislen;
+	int namelen;
 
 	if (bh == NULL) {
 		printk("qnx4: matching unassigned buffer !\n");
@@ -41,24 +41,23 @@ static int qnx4_match(int len, const char *name,
 	}
 	de = (struct qnx4_inode_entry *) (bh->b_data + *offset);
 	*offset += QNX4_DIR_ENTRY_SIZE;
-	if ((de->di_status & QNX4_FILE_LINK) != 0) {
+	if ((de->di_status & 0x08) == 0x08) {
 		namelen = QNX4_NAME_MAX;
 	} else {
-		namelen = QNX4_SHORT_NAME_MAX;
+		namelen = _SHORT_NAME_MAX;
 	}
 	/* "" means "." ---> so paths like "/usr/lib//libc.a" work */
 	if (!len && (de->di_fname[0] == '.') && (de->di_fname[1] == '\0')) {
 		return 1;
 	}
-	thislen = strlen( de->di_fname );
-	if ( thislen > namelen )
-		thislen = namelen;
-	if (len != thislen) {
+	if (len != strlen(de->di_fname)) {
 		return 0;
 	}
 	if (strncmp(name, de->di_fname, len) == 0) {
-		if ((de->di_status & (QNX4_FILE_USED|QNX4_FILE_LINK)) != 0) {
-			return 1;
+		if ((de->di_mode) || (de->di_status == QNX4_FILE_LINK)) {
+			if (de->di_status) {
+				return 1;
+			}
 		}
 	}
 	return 0;
@@ -76,19 +75,19 @@ static struct buffer_head *qnx4_find_entry(int len, struct inode *dir,
 		return NULL;
 	}
 	bh = NULL;
-	block = blkofs = offset = 0;
-	while (blkofs * QNX4_BLOCK_SIZE + offset < dir->i_size) {
+	blkofs = dir->u.qnx4_i.i_first_xtnt.xtnt_blk - 1;
+	offset = block = 0;
+	while (block * QNX4_BLOCK_SIZE + offset < dir->i_size) {
 		if (!bh) {
-			bh = qnx4_bread(dir, blkofs, 0);
+			bh = qnx4_bread(dir, block + blkofs, 0);
 			if (!bh) {
-				blkofs++;
+				block++;
 				continue;
 			}
 		}
 		*res_dir = (struct qnx4_inode_entry *) (bh->b_data + offset);
 		if (qnx4_match(len, name, bh, &offset)) {
-			block = qnx4_block_map( dir, blkofs );
-			*ino = block * QNX4_INODES_PER_BLOCK +
+			*ino = (block + blkofs) * QNX4_INODES_PER_BLOCK +
 			    (offset / QNX4_DIR_ENTRY_SIZE) - 1;
 			return bh;
 		}
@@ -98,7 +97,7 @@ static struct buffer_head *qnx4_find_entry(int len, struct inode *dir,
 		brelse(bh);
 		bh = NULL;
 		offset = 0;
-		blkofs++;
+		block++;
 	}
 	brelse(bh);
 	*res_dir = NULL;
@@ -120,8 +119,7 @@ struct dentry * qnx4_lookup(struct inode *dir, struct dentry *dentry)
 	/* The entry is linked, let's get the real info */
 	if ((de->di_status & QNX4_FILE_LINK) == QNX4_FILE_LINK) {
 		lnk = (struct qnx4_link_info *) de;
-		ino = (le32_to_cpu(lnk->dl_inode_blk) - 1) *
-		    QNX4_INODES_PER_BLOCK +
+		ino = (lnk->dl_inode_blk - 1) * QNX4_INODES_PER_BLOCK +
 		    lnk->dl_inode_ndx;
 	}
 	brelse(bh);

@@ -1,7 +1,7 @@
 /*
  *  arch/ppc/kernel/head.S
  *
- *  $Id: head.S,v 1.130.2.6 1999/10/12 01:03:34 cort Exp $
+ *  $Id: head.S,v 1.130 1999/05/09 19:16:43 cort Exp $
  *
  *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -13,7 +13,6 @@
  *    Copyright (C) 1996 Paul Mackerras.
  *  MPC8xx modifications Copyright (C) 1997 Dan Malek (dmalek@jlc.net).
  *  Amiga/APUS changes by Jesper Skov (jskov@cygnus.co.uk).
- *  AltiVec additions by Kumar Gala (kumar.gala@motorola.com).
  *
  *  This file contains the low-level support and setup for the
  *  PowerPC platform, including trap and interrupt dispatch.
@@ -23,10 +22,6 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *
- *  2000-04-10.
- *  Add sys_rt_sigreturn in DoSyscall Handler.
- *  Giovanna Ambrosini (ambrosini@lightning.ch).
  *	
  */
 
@@ -87,28 +82,6 @@ LG_CACHE_LINE_SIZE = 4
 #define REST_16FPRS(n, base)	REST_8FPRS(n, base); REST_8FPRS(n+8, base)
 #define REST_32FPRS(n, base)	REST_16FPRS(n, base); REST_16FPRS(n+16, base)
 
-/*
- * Once a version of gas that understands the AltiVec instructions
- * is freely available, we can do this the normal way...  - paulus
- */
-#define LVX(r,a,b)	.long	(31<<26)+((r)<<21)+((a)<<16)+((b)<<11)+(103<<1)
-#define STVX(r,a,b)	.long	(31<<26)+((r)<<21)+((a)<<16)+((b)<<11)+(231<<1)
-#define MFVSCR(r)	.long	(4<<26)+((r)<<11)+(770<<1)
-#define MTVSCR(r)	.long	(4<<26)+((r)<<11)+(802<<1)
-
-#define SAVE_VR(n,b,base)	li b,TSS_VR0+(16*(n)); STVX(n,b,base)
-#define SAVE_2VR(n,b,base)	SAVE_VR(n,b,base); SAVE_VR(n+1,b,base) 
-#define SAVE_4VR(n,b,base)	SAVE_2VR(n,b,base); SAVE_2VR(n+2,b,base) 
-#define SAVE_8VR(n,b,base)	SAVE_4VR(n,b,base); SAVE_4VR(n+4,b,base) 
-#define SAVE_16VR(n,b,base)	SAVE_8VR(n,b,base); SAVE_8VR(n+8,b,base)
-#define SAVE_32VR(n,b,base)	SAVE_16VR(n,b,base); SAVE_16VR(n+16,b,base)
-#define REST_VR(n,b,base)	li b,TSS_VR0+(16*(n)); LVX(n,b,base)
-#define REST_2VR(n,b,base)	REST_VR(n,b,base); REST_VR(n+1,b,base) 
-#define REST_4VR(n,b,base)	REST_2VR(n,b,base); REST_2VR(n+2,b,base) 
-#define REST_8VR(n,b,base)	REST_4VR(n,b,base); REST_4VR(n+4,b,base) 
-#define REST_16VR(n,b,base)	REST_8VR(n,b,base); REST_8VR(n+8,b,base) 
-#define REST_32VR(n,b,base)	REST_16VR(n,b,base); REST_16VR(n+16,b,base)
-
 #define SYNC \
 	sync; \
 	isync
@@ -126,20 +99,16 @@ LG_CACHE_LINE_SIZE = 4
 
 /* 601 only have IBAT cr0.eq is set on 601 when using this macro */ 
 #define LOAD_BAT(n, offset, reg, RA, RB) \
-	/* see the comment for clear_bats() -- Cort */ \
-	li	RA,0;			\
-	mtspr	IBAT##n##U,RA;		\
-	mtspr	DBAT##n##U,RA;		\
-	lwz	RA,offset+0(reg);	\
+	lwz	RA,offset+0(reg); \
 	lwz	RB,offset+4(reg);	\
-	mtspr	IBAT##n##U,RA;		\
-	mtspr	IBAT##n##L,RB;		\
-	beq	1f;			\
+	mtspr	IBAT##n##U,RA;	\
+	mtspr	IBAT##n##L,RB;	\
+	beq	1f;		\
 	lwz	RA,offset+8(reg);	\
 	lwz	RB,offset+12(reg);	\
-	mtspr	DBAT##n##U,RA;		\
-	mtspr	DBAT##n##L,RB;		\
-1:	
+	mtspr	DBAT##n##U,RA;	\
+	mtspr	DBAT##n##L,RB;	\
+1:	 
 
 #ifndef CONFIG_APUS
 #define tophys(rd,rs,rt)	addis	rd,rs,-KERNELBASE@h
@@ -166,15 +135,7 @@ _stext:
 	.text
 	.globl	_start
 _start:
-	/* 
-	 * These are here for legacy reasons, the kernel used to
-	 * need to look like a coff function entry for the pmac
-	 * but we're always started by some kind of bootloader now.
-	 *  -- Cort
-	 */
-	nop
-	nop
-	nop
+	.long	TOPHYS(__start),0,0
 
 /* PMAC
  * Enter here with the kernel text, data and bss loaded starting at
@@ -260,17 +221,60 @@ __start:
 	bl	prom_init
 	.globl	__secondary_start
 __secondary_start:
-/* Switch MMU off, clear BATs and flush TLB */
- 	bl	mmu_off
-mmu_off_return:
-	bl	clear_bats
-	bl	flush_tlbs
-	bl	setup_init_bats
-#ifndef CONFIG_APUS
-#ifdef CONFIG_BOOTX_TEXT
-	bl	setup_disp_bat
+/*
+ * Use the first pair of BAT registers to map the 1st 16MB
+ * of RAM to KERNELBASE.  From this point on we can't safely
+ * call OF any more.
+ */
+	mfspr	r9,PVR
+	rlwinm	r9,r9,16,16,31		/* r9 = 1 for 601, 4 for 604 */
+	cmpi	0,r9,1
+	lis	r11,KERNELBASE@h
+	bne	4f
+	ori	r11,r11,4		/* set up BAT registers for 601 */
+	li	r8,0x7f			/* valid, block length = 8MB */
+	oris	r9,r11,0x800000@h	/* set up BAT reg for 2nd 8M */
+	oris	r10,r8,0x800000@h	/* set up BAT reg for 2nd 8M */
+	mtspr	IBAT0U,r11		/* N.B. 601 has valid bit in */
+	mtspr	IBAT0L,r8		/* lower BAT register */
+	mtspr	IBAT1U,r9
+	mtspr	IBAT1L,r10
+	b	5f
+4:
+#ifdef CONFIG_APUS
+	ori	r11,r11,BL_8M<<2|0x2	/* set up an 8MB mapping */
+	ori	r11,r11,0xfe		/* set up an 8MB mapping */
+	lis	r8,CYBERBASEp@h
+	lwz	r8,0(r8)
+	addis	r8,r8,KERNELBASE@h
+	addi	r8,r8,2
+#else
+	ori	r11,r11,BL_256M<<2|0x2	/* set up BAT registers for 604 */
+	li	r8,2			/* R/W access */
+	/* 
+	 * allow secondary cpus to get at all of ram in early bootup
+	 * since their init_task may be up there -- Cort
+	 */
+	oris	r18,r8,0x10000000@h
+	oris	r21,r11,(KERNELBASE+0x10000000)@h
+	mtspr	DBAT1L,r18		/* N.B. 6xx (not 601) have valid */
+	mtspr	DBAT1U,r21		/* bit in upper BAT register */
+	mtspr	IBAT1L,r18
+	mtspr	IBAT1U,r21
+	
+	oris	r18,r8,0x20000000@h
+	oris	r21,r11,(KERNELBASE+0x20000000)@h
+	mtspr	DBAT2L,r18		/* N.B. 6xx (not 601) have valid */
+	mtspr	DBAT2U,r21		/* bit in upper BAT register */
+	mtspr	IBAT2L,r28
+	mtspr	IBAT2U,r21
 #endif
-#endif
+	mtspr	DBAT0L,r8		/* N.B. 6xx (not 601) have valid */
+	mtspr	DBAT0U,r11		/* bit in upper BAT register */
+	mtspr	IBAT0L,r8
+	mtspr	IBAT0U,r11
+5:	isync
+
 #ifdef CONFIG_APUS
 	/* Unfortunately the APUS specific instructions bloat the
 	 * code so it cannot fit in the 0x100 bytes available. We have
@@ -394,16 +398,16 @@ mmu_off_return:
  * ready to work.
  */
 #endif /* CONFIG_8xx */
-	b	turn_on_mmu
 
-/* Hack for sleep on Core99 machines
- */
-#ifdef CONFIG_POWERMAC
-	. = 0x80
-SleepVector:
-	.long	0
-	.long	0	
-#endif /* CONFIG_POWERMAC */
+turn_on_mmu:
+	mfmsr	r0
+	ori	r0,r0,MSR_DR|MSR_IR
+	mtspr	SRR1,r0
+	lis	r0,start_here@h
+	ori	r0,r0,start_here@l
+	mtspr	SRR0,r0
+	SYNC
+	rfi				/* enables MMU */
 
 /*
  * GCC sometimes accesses words at negative offsets from the stack
@@ -469,15 +473,10 @@ label:						\
 
 /* System reset */
 #ifdef CONFIG_SMP /* MVME/MTX start the secondary here */
-#ifdef CONFIG_GEMINI
-	. = 0x100
-	b	__secondary_start_gemini
-#else /* CONFIG_GEMINI */
 	STD_EXCEPTION(0x100, Reset, __secondary_start_psurge)
-#endif /* CONFIG_GEMINI */
 #else
 	STD_EXCEPTION(0x100, Reset, UnknownException)
-#endif
+#endif	
 
 /* Machine check */
 	STD_EXCEPTION(0x200, MachineCheck, MachineCheckException)
@@ -636,26 +635,7 @@ SystemCall:
 	STD_EXCEPTION(0xd00, SingleStep, SingleStepException)
 
 	STD_EXCEPTION(0xe00, Trap_0e, UnknownException)
-
-#ifndef CONFIG_ALTIVEC
 	STD_EXCEPTION(0xf00, Trap_0f, UnknownException)
-#else
-/*
- * The Altivec unavailable trap is at 0x0f20.  Foo.
- * We effectively remap it to 0x3000.
- */
-	. = 0xf00
-	b	Trap_0f
-trap_0f_cont:
-	addi	r3,r1,STACK_FRAME_OVERHEAD
-	li	r20,MSR_KERNEL
-	bl	transfer_to_handler
-	.long	UnknownException
-	.long	int_return
-
-	. = 0xf20
-	b	AltiVecUnavailable
-#endif /* CONFIG_ALTIVEC */
 
 #ifndef CONFIG_8xx
 /*
@@ -1173,24 +1153,9 @@ DataTLBError:
 	STD_EXCEPTION(0x2f00, Trap_2f, UnknownException)
 
 	. = 0x3000
-#ifdef CONFIG_ALTIVEC
-AltiVecUnavailable:
-	EXCEPTION_PROLOG
-	bne	load_up_altivec		/* if from user, just load it up */
-	li	r20,MSR_KERNEL
-	bl	transfer_to_handler	/* if from kernel, take a trap */
-	.long	KernelAltiVec
-	.long	int_return
-
-/* here are the bits of trap 0xf00 which got displaced */
-Trap_0f:
-	EXCEPTION_PROLOG
-	b	trap_0f_cont
-#endif /* CONFIG_ALTIVEC */
-
-#else /* CONFIG_8xx */
+#else
 	. = 0x2000
-#endif /* CONFIG_8xx */
+#endif
 
 /*
  * This code finishes saving the registers to the exception frame
@@ -1278,11 +1243,10 @@ Hash_msk = (((1 << Hash_bits) - 1) * 64)
 	.globl	hash_page
 hash_page:
 #ifdef __SMP__
-	SAVE_2GPRS(7,r21)
 	eieio
 	lis	r2,hash_table_lock@h
 	ori	r2,r2,hash_table_lock@l
- 	tophys(r2,r2,r6)
+	tophys(r2,r2,r6)
 	lis	r6,100000000@h
 	mtctr	r6
 	lwz	r0,PROCESSOR-TSS(r5)
@@ -1292,18 +1256,10 @@ hash_page:
 	bne-	12f
 	stwcx.	r0,0,r2
 	beq+	11f
-	/* spin here a bit */
-12:	mfctr	r7
-	li	r8,1000
-	mtctr	r8
-13:
-	bdnz	13b
-	mtctr	r7
-	cmpw	r6,r0
+12:	cmpw	r6,r0
 	bdnzf	2,10b
 	tw	31,31,31
 11:	eieio
-	REST_2GPRS(7, r21)
 #endif
 	/* Get PTE (linux-style) and check access */
 	lwz	r5,PG_TABLES(r5)		
@@ -1330,6 +1286,7 @@ hash_page:
 #else
 	bnelr-
 #endif
+
 	ori	r6,r6,0x100		/* set _PAGE_ACCESSED in pte */
 	rlwinm	r5,r4,5,24,24		/* _PAGE_RW access -> _PAGE_DIRTY */
 	rlwimi	r5,r4,7,22,22		/* _PAGE_RW -> _PAGE_HWWRITE */
@@ -1345,8 +1302,11 @@ hash_page:
 	/* Construct the high word of the PPC-style PTE */
 	mfsrin	r5,r3			/* get segment reg for segment */
 	rlwinm	r5,r5,7,1,24		/* put VSID in 0x7fffff80 bits */
+#ifndef __SMP__				/* do this later for SMP */
 	oris	r5,r5,0x8000		/* set V (valid) bit */
+#endif
 	rlwimi	r5,r3,10,26,31		/* put in API (abbrev page index) */
+
 	/* Get the address of the primary PTE group in the hash table */
 	.globl	hash_page_patch_A
 hash_page_patch_A:
@@ -1457,7 +1417,6 @@ found_slot:
  */
 found_empty:
 found_slot:
-	clrlwi	r5,r5,1		/* clear valid bit (0x80000000) */
 	stw	r5,0(r3)	/* clear V (valid) bit in PTE */
 	sync
 	tlbsync
@@ -1509,7 +1468,6 @@ found_slot:
 	REST_GPR(20, r21)
 	REST_2GPRS(22, r21)
 	lwz	r21,GPR21(r21)
-	sync
 	rfi
 	
 #ifdef __SMP__
@@ -1649,145 +1607,11 @@ giveup_fpu:
 #endif /* __SMP__ */
 	blr
 
-#ifdef CONFIG_ALTIVEC
-/* Note that the AltiVec support is closely modeled after the FP
- * support.  Changes to one are likely to be applicable to the
- * other!  */
-load_up_altivec:
-/*
- * Disable AltiVec for the task which had AltiVec previously,
- * and save its AltiVec registers in its thread_struct.
- * Enables AltiVec for use in the kernel on return.
- * On SMP we know the AltiVec units are free, since we give it up every
- * switch.  -- Kumar
- */
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	SYNC
-	mtmsr	r5			/* enable use of AltiVec now */
-	SYNC
-/*
- * For SMP, we don't do lazy AltiVec switching because it just gets too
- * horrendously complex, especially when a task switches from one CPU
- * to another.  Instead we call giveup_altivec in switch_to.
- */
-#ifndef __SMP__
-#ifndef CONFIG_APUS
-	lis	r6,-KERNELBASE@h
-#else
-	lis	r6,CYBERBASEp@h
-	lwz	r6,0(r6)
-#endif
-	addis	r3,r6,last_task_used_altivec@ha
-	lwz	r4,last_task_used_altivec@l(r3)
-	cmpi	0,r4,0
-	beq	1f
-	add	r4,r4,r6
-	addi	r4,r4,TSS	/* want TSS of last_task_used_altivec */
-	SAVE_32VR(0,r20,r4)
-	MFVSCR(vr0)
-	li	r20,TSS_VSCR
-	STVX(vr0,r20,r4)
-	lwz	r5,PT_REGS(r4)
-	add	r5,r5,r6
-	lwz	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r20,MSR_VEC@h
-	andc	r4,r4,r20	/* disable altivec for previous task */
-	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#endif /* __SMP__ */
-	/* enable use of AltiVec after return */
-	oris	r23,r23,MSR_VEC@h
-	mfspr	r5,SPRG3		/* current task's TSS (phys) */
-	li	r20,TSS_VSCR
-	LVX(vr0,r20,r5)
-	MTVSCR(vr0)
-	REST_32VR(0,r20,r5)
-#ifndef __SMP__
-	subi	r4,r5,TSS
-	sub	r4,r4,r6
-	stw	r4,last_task_used_altivec@l(r3)
-#endif /* __SMP__ */
-	/* restore registers and return */
-	lwz	r3,_CCR(r21)
-	lwz	r4,_LINK(r21)
-	mtcrf	0xff,r3
-	mtlr	r4
-	REST_GPR(1, r21)
-	REST_4GPRS(3, r21)
-	/* we haven't used ctr or xer */
-	mtspr	SRR1,r23
-	mtspr	SRR0,r22
-	REST_GPR(20, r21)
-	REST_2GPRS(22, r21)
-	lwz	r21,GPR21(r21)
-	SYNC
-	rfi
-
-/*
- * AltiVec unavailable trap from kernel - print a message, but let
- * the task use AltiVec in the kernel until it returns to user mode.
- */
-KernelAltiVec:
-	lwz	r3,_MSR(r1)
-	oris	r3,r3,MSR_VEC@h
-	stw	r3,_MSR(r1)	/* enable use of AltiVec after return */
-	lis	r3,87f@h
-	ori	r3,r3,87f@l
-	mr	r4,r2		/* current */
-	lwz	r5,_NIP(r1)
-	bl	printk
-	b	int_return
-87:	.string	"AltiVec used in kernel  (task=%p, pc=%x)  \n"
-	.align	4
-
-/*
- * giveup_altivec(tsk)
- * Disable AltiVec for the task given as the argument,
- * and save the AltiVec registers in its thread_struct.
- * Enables AltiVec for use in the kernel on return.
- */
-
-	.globl	giveup_altivec
-giveup_altivec:
-	mfmsr	r5
-	oris	r5,r5,MSR_VEC@h
-	SYNC
-	mtmsr	r5			/* enable use of AltiVec now */
-	SYNC
-	cmpi	0,r3,0
-	beqlr-				/* if no previous owner, done */
-	addi	r3,r3,TSS		/* want TSS of task */
-	lwz	r5,PT_REGS(r3)
-	cmpi	0,r5,0
-	SAVE_32VR(0, r4, r3)
-	MFVSCR(vr0)
-	li	r4,TSS_VSCR
-	STVX(vr0, r4, r3)
-	beq	1f
-	lwz	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-	lis	r3,MSR_VEC@h
-	andc	r4,r4,r3		/* disable AltiVec for previous task */
-	stw	r4,_MSR-STACK_FRAME_OVERHEAD(r5)
-1:
-#ifndef __SMP__
-	li	r5,0
-	lis	r4,last_task_used_altivec@ha
-	stw	r5,last_task_used_altivec@l(r4)
-#endif /* __SMP__ */
+#else  /* CONFIG_8xx */
+	.globl	giveup_fpu
+giveup_fpu:
 	blr
-#endif /* CONFIG_ALTIVEC */
-
-mmu_off:
- 	addi	r4, r3, mmu_off_return - _start
-	mfmsr	r3
-	andi.	r0,r3,MSR_DR|MSR_IR		/* MMU enabled? */
-	beqlr
-	andc	r3,r3,r0
-	mtspr	SRR0,r4
-	mtspr	SRR1,r3
-	SYNC
-	rfi
+#endif /* CONFIG_8xx */
 
 /*
  * This code is jumped to from the startup code to copy
@@ -1798,6 +1622,8 @@ relocate_kernel:
 	addi	r9,r9,0x6f58		/* translate source addr */
 	cmpw	r31,r9			/* (we have to on chrp) */
 	beq	7f
+	rlwinm	r4,r4,0,8,31		/* translate source address */
+	add	r4,r4,r3		/* to region mapped with BATs */
 7:	addis	r9,r26,klimit@ha	/* fetch klimit */
 	lwz	r25,klimit@l(r9)
 	addis	r25,r25,-KERNELBASE@h
@@ -1845,41 +1671,10 @@ copy_and_flush:
 	. = 0x4000
 #endif
 
-#else  /* CONFIG_8xx */
-	.globl	giveup_fpu
-giveup_fpu:
-	blr
-#endif /* CONFIG_8xx */
-
-turn_on_mmu:
-	mfmsr	r0
-	ori	r1,r0,MSR_DR|MSR_IR
-	mtspr	SRR1,r1
-	lis	r0,start_here@h
-	ori	r0,r0,start_here@l
-	mtspr	SRR0,r0
-	SYNC
-	rfi				/* enables MMU */
-
-#ifdef CONFIG_GEMINI
-	.globl	__secondary_start_gemini
-__secondary_start_gemini:
-        mfspr   r4,HID0
-        ori     r4,r4,HID0_ICFI
-        li      r3,0
-        ori     r3,r3,HID0_ICE
-        andc    r4,r4,r3
-        mtspr   HID0,r4
-        sync
-        bl      prom_init
-        b       __secondary_start
-#endif /* CONFIG_GEMINI */
-
 #ifdef CONFIG_SMP
 	.globl	__secondary_start_psurge
 __secondary_start_psurge:
 	li	r24,1			/* cpu # */
-	li	r3,0			/* starting physical address */
 	b	__secondary_start
 
 	.globl	__secondary_hold
@@ -1905,15 +1700,18 @@ __secondary_hold:
 	blr
 #endif /* CONFIG_SMP */
 	
-#ifndef CONFIG_8xx
+/*
+ * This is where the main kernel code starts.
+ */
 start_here:
+#ifndef CONFIG_8xx
 	/*
 	 * Enable caches and 604-specific features if necessary.
 	 */
 	mfspr	r9,PVR
 	rlwinm	r9,r9,16,16,31
 	cmpi	0,r9,1
-	beq	6f			/* not needed for 601 */
+	beq	4f			/* not needed for 601 */
 	mfspr	r11,HID0
 	andi.	r0,r11,HID0_DCE
 	ori	r11,r11,HID0_ICE|HID0_DCE
@@ -1930,24 +1728,14 @@ start_here:
 	cmpi	0,r9,4			/* check for 604 */
 	cmpi	1,r9,9			/* or 604e */
 	cmpi	2,r9,10			/* or mach5 */
-	cmpi	3,r9,8			/* check for 750 (G3) */
-	cmpi	4,r9,12			/* or 7400 (G4) */
 	cror	2,2,6
 	cror	2,2,10
 	bne	4f
 	ori	r11,r11,HID0_SIED|HID0_BHTE /* for 604[e], enable */
 	bne	2,5f
 	ori	r11,r11,HID0_BTCD
-	b	5f
-4:
-	cror	14,14,18
-	bne	3,6f
-	ori	r11,r11,HID0_SGE|HID0_BHTE|HID0_BTIC|HID0_ABE /* for g3/g4, enable */
-	rlwinm	r11,r11,0,23,21		/* clear HID0_SPD */
- 	li	r3,0
- 	mtspr	ICTC,r3
 5:	mtspr	HID0,r11		/* superscalar exec & br history tbl */
-6:
+4:
 #endif /* CONFIG_8xx */
 #ifdef __SMP__
 	/* if we're the second cpu stack and r2 are different
@@ -2028,10 +1816,10 @@ start_here:
 	li	r3,MSR_KERNEL & ~(MSR_IR|MSR_DR)
 	mtspr	SRR0,r4
 	mtspr	SRR1,r3
-	SYNC
 	rfi
 /* Load up the kernel context */
 2:
+	SYNC			/* Force all PTE updates to finish */
 	tlbia			/* Clear all TLB entries */
 	sync			/* wait for tlbia/tlbie to finish */
 #ifdef __SMP__
@@ -2088,7 +1876,6 @@ start_here:
 #endif /* __SMP__ */
 	mtspr	SRR0,r3
 	mtspr	SRR1,r4
-	SYNC
 	rfi			/* enable MMU and jump to start_kernel */
 
 /*
@@ -2126,9 +1913,7 @@ DoSyscall:
 1:
 #endif /* SHOW_SYSCALLS */
 	cmpi	0,r0,0x7777	/* Special case for 'sys_sigreturn' */
-        cmpi    1,r0,0x6666     /* Special case for 'sys_rt_sigreturn' */
 	beq-	10f
-        beq-    cr1,16f
 	lwz	r10,TASK_FLAGS(r2)
 	andi.	r10,r10,PF_TRACESYS
 	bne-	50f
@@ -2175,12 +1960,6 @@ syscall_ret_1:
 /* sys_sigreturn */
 10:	addi	r3,r1,STACK_FRAME_OVERHEAD
 	bl	sys_sigreturn
-        cmpi    0,r3,0          /* Check for restarted system call */
-        bge     int_return
-        b       20b
-/* sys_rt_sigreturn */
-16:     addi    r3,r1,STACK_FRAME_OVERHEAD
-        bl      sys_rt_sigreturn
 	cmpi	0,r3,0		/* Check for restarted system call */
 	bge	int_return
 	b	20b
@@ -2273,9 +2052,6 @@ _GLOBAL(_switch)
 	mflr	r20		/* Return to switch caller */
 	mfmsr	r22
 	li	r0,MSR_FP	/* Disable floating-point */
-#ifdef CONFIG_ALTIVEC
-	oris	r0,r0,MSR_VEC@h
-#endif /* CONFIG_ALTIVEC */
 	andc	r22,r22,r0
 	stw	r20,_NIP(r1)
 	stw	r22,_MSR(r1)
@@ -2589,38 +2365,6 @@ _GLOBAL(clear_page)
 	blr
 
 /*
- * Copy a whole page.  We use the dcbz instruction on the destination
- * to reduce memory traffic (it eliminates the unnecessary reads of
- * the destination into cache).  This requires that the destination
- * is cacheable.
- */
-_GLOBAL(copy_page)
-	li	r0,4096/CACHE_LINE_SIZE
-	mtctr	r0
-	addi	r3,r3,-4
-	addi	r4,r4,-4
-	li	r5,4
-1:	dcbz	r5,r3
-	lwz	r6,4(r4)
-	lwz	r7,8(r4)
-	lwz	r8,12(r4)
-	lwzu	r9,16(r4)
-	stw	r6,4(r3)
-	stw	r7,8(r3)
-	stw	r8,12(r3)
-	stwu	r9,16(r3)
-	lwz	r6,4(r4)
-	lwz	r7,8(r4)
-	lwz	r8,12(r4)
-	lwzu	r9,16(r4)
-	stw	r6,4(r3)
-	stw	r7,8(r3)
-	stw	r8,12(r3)
-	stwu	r9,16(r3)
-	bdnz	1b
-	blr
-
-/*
  * Flush entries from the hash table with VSIDs in the range
  * given.
  */
@@ -2794,10 +2538,12 @@ _GLOBAL(__main)
  */
 	.globl	enter_rtas
 enter_rtas:
+	stwu	r1,-16(r1)
 	mflr	r0
 	stw	r0,20(r1)
 	lis	r4,rtas_data@ha
 	lwz	r4,rtas_data@l(r4)
+	addis	r4,r4,-KERNELBASE@h
 	lis	r6,1f@ha	/* physical return address for rtas */
 	addi	r6,r6,1f@l
 	addis	r6,r6,-KERNELBASE@h
@@ -2813,11 +2559,11 @@ enter_rtas:
 	andi.	r9,r9,MSR_ME|MSR_RI
 	sync			/* disable interrupts so SRR0/1 */
 	mtmsr	r0		/* don't get trashed */
+	li	r6,0	
 	mtlr	r6
 	mtspr	SPRG2,r7
 	mtspr	SRR0,r8
 	mtspr	SRR1,r9
-	SYNC
 	rfi
 1:	addis	r9,r1,-KERNELBASE@h
 	lwz	r8,20(r9)	/* get return address */
@@ -2826,7 +2572,6 @@ enter_rtas:
 	mtspr	SPRG2,r0
 	mtspr	SRR0,r8
 	mtspr	SRR1,r9
-	SYNC
 	rfi			/* return to caller */
 #endif /* CONFIG_8xx */
 
@@ -2851,138 +2596,6 @@ m8xx_gorom:
        mtlr    r4
        blr
 #endif /* CONFIG_8xx */
-
-/* 
- * An undocumented "feature" of 604e requires that the v bit
- * be cleared before changing BAT values.
- *
- * Also, newer IBM firmware does not clear bat3 and 4 so
- * this makes sure it's done.
- *  -- Cort 
- */
-clear_bats:
-#if !defined(CONFIG_GEMINI)
-	li	r20,0
-	mfspr	r9,PVR
-	rlwinm	r9,r9,16,16,31		/* r9 = 1 for 601, 4 for 604 */
-	cmpwi	r9, 1
-	beq	1f
-	
-	mtspr	DBAT0U,r20
-	mtspr	DBAT0L,r20	
-	mtspr	DBAT1U,r20
-	mtspr	DBAT1L,r20
-	mtspr	DBAT2U,r20
-	mtspr	DBAT2L,r20	
-	mtspr	DBAT3U,r20
-	mtspr	DBAT3L,r20
-1:	
-	mtspr	IBAT0U,r20
-	mtspr	IBAT0L,r20
-	mtspr	IBAT1U,r20
-	mtspr	IBAT1L,r20
-	mtspr	IBAT2U,r20
-	mtspr	IBAT2L,r20
-	mtspr	IBAT3U,r20
-	mtspr	IBAT3L,r20
-#endif /* !defined(CONFIG_GEMINI) */
-	blr
-
-flush_tlbs:
-	lis	r20, 0x1000
-1:	addic.	r20, r20, -0x1000
-	tlbie	r20
-	blt	1b
-	sync
-	blr
-
-/* Use the first pair of BAT registers to map the 1st 16MB
- * of RAM to KERNELBASE.  From this point on we can't safely
- * call OF any more.
- */
-setup_init_bats:
-	lis	r11,KERNELBASE@h
-	mfspr	r9,PVR
-	rlwinm	r9,r9,16,16,31		/* r9 = 1 for 601, 4 for 604 */
-	cmpi	0,r9,1
-	bne	4f
-	ori	r11,r11,4		/* set up BAT registers for 601 */
-	li	r8,0x7f			/* valid, block length = 8MB */
-	oris	r9,r11,0x800000@h	/* set up BAT reg for 2nd 8M */
-	oris	r10,r8,0x800000@h	/* set up BAT reg for 2nd 8M */
-	mtspr	IBAT0U,r11		/* N.B. 601 has valid bit in */
-	mtspr	IBAT0L,r8		/* lower BAT register */
-	mtspr	IBAT1U,r9
-	mtspr	IBAT1L,r10
-	b	5f
-4:
-#ifdef CONFIG_APUS
-	ori	r11,r11,BL_8M<<2|0x2	/* set up an 8MB mapping */
-	ori	r11,r11,0xfe		/* set up an 8MB mapping */
-	lis	r8,CYBERBASEp@h
-	lwz	r8,0(r8)
-	addis	r8,r8,KERNELBASE@h
-	addi	r8,r8,2
-#else	
-	ori	r11,r11,BL_256M<<2|0x2	/* set up BAT registers for 604 */
-	li	r8,2			/* R/W access */
-	/*
-	 * If the MMU is off clear the bats.  See clear_bat() -- Cort
-	 */
-#ifndef CONFIG_GEMINI	
-	/* 
-	 * allow secondary cpus to get at all of ram in early bootup
-	 * since their init_task may be up there -- Cort
-	 */
-	oris	r18,r8,0x10000000@h
-	oris	r21,r11,(KERNELBASE+0x10000000)@h
-	mtspr	DBAT1L,r18		/* N.B. 6xx (not 601) have valid */
-	mtspr	DBAT1U,r21		/* bit in upper BAT register */
-	mtspr	IBAT1L,r18
-	mtspr	IBAT1U,r21
-	
-	oris	r18,r8,0x20000000@h
-	oris	r21,r11,(KERNELBASE+0x20000000)@h
-	mtspr	DBAT2L,r18		/* N.B. 6xx (not 601) have valid */
-	mtspr	DBAT2U,r21		/* bit in upper BAT register */
-	mtspr	IBAT2L,r18
-	mtspr	IBAT2U,r21
-#endif /* ndef CONFIG_GEMINI */	
-#endif
-	mtspr	DBAT0L,r8		/* N.B. 6xx (not 601) have valid */
-	mtspr	DBAT0U,r11		/* bit in upper BAT register */
-	mtspr	IBAT0L,r8
-	mtspr	IBAT0U,r11
-5:	isync
-	blr
-	
-#ifdef CONFIG_BOOTX_TEXT
-setup_disp_bat:
-	/*
-	 * setup the display bat prepared for us in prom.c
-	 */
-	mflr	r8
-	bl	reloc_offset
-	mtlr	r8
-	lis	r8, disp_BATL@h
-	ori	r8, r8, disp_BATL@l
-	add	r8, r3, r8
-	lwz	r8, 0(r8)
-	lis	r11, disp_BATU@h
-	ori	r11, r11, disp_BATU@l
-	add	r11, r3, r11
-	lwz	r11, 0(r11)
-	mtspr	IBAT3L,r8
-	mtspr	IBAT3U,r11
-	mfspr	r9,PVR
-	rlwinm	r9,r9,16,16,31		/* r9 = 1 for 601, 4 for 604 */
-	cmpi	0,r9,1
-	beq	1f
-	mtspr	DBAT3L,r8
-	mtspr	DBAT3U,r11
-1:		
-	blr
-#endif
 	
 /*
  * We put a few things here that have to be page-aligned.
@@ -3007,5 +2620,3 @@ swapper_pg_dir:
 	.globl	cmd_line
 cmd_line:
 	.space	512
-
-

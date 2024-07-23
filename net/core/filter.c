@@ -49,7 +49,7 @@ static u8 *load_pointer(struct sk_buff *skb, int k)
 	else if (k>=SKF_LL_OFF)
 		ptr = skb->mac.raw + k - SKF_LL_OFF;
 
-	if (ptr >= skb->head && ptr < skb->tail)
+	if (ptr<skb->head && ptr < skb->tail)
 		return ptr;
 	return NULL;
 }
@@ -106,7 +106,7 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 				continue;
 
 			case BPF_ALU|BPF_MUL|BPF_K:
-				A *= fentry->k;
+				A *= X;
 				continue;
 
 			case BPF_ALU|BPF_DIV|BPF_X:
@@ -196,7 +196,7 @@ int sk_run_filter(struct sk_buff *skb, struct sock_filter *filter, int flen)
 			case BPF_LD|BPF_W|BPF_ABS:
 				k = fentry->k;
 load_w:
-				if((unsigned int)(k+sizeof(u32)) <= len) {
+				if(k+sizeof(u32) <= len) {
 					A = ntohl(*(u32*)&data[k]);
 					continue;
 				}
@@ -215,7 +215,7 @@ load_w:
 			case BPF_LD|BPF_H|BPF_ABS:
 				k = fentry->k;
 load_h:
-				if((unsigned int) (k + sizeof(u16)) <= len) {
+				if(k + sizeof(u16) <= len) {
 					A = ntohs(*(u16*)&data[k]);
 					continue;
 				}
@@ -234,7 +234,7 @@ load_h:
 			case BPF_LD|BPF_B|BPF_ABS:
 				k = fentry->k;
 load_b:
-				if((unsigned int)k < len) {
+				if(k < len) {
 					A = data[k];
 					continue;
 				}
@@ -271,7 +271,7 @@ load_b:
 
 			case BPF_LDX|BPF_B|BPF_MSH:
 				k = fentry->k;
-				if((unsigned int)k >= len)
+				if(k >= len)
 					return (0);
 				X = (data[k] & 0xf) << 2;
 				continue;

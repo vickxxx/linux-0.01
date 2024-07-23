@@ -5,8 +5,6 @@
  *
  *      including portions (c) 1995-1998 Patrick Caulfield.
  *
- *      slight improvements (c) 2000 Edward Betts <edward@debian.org>
- *
  *  This file is based on the VGA console driver (vgacon.c):
  *	
  *	Created 28 Sep 1997 by Geert Uytterhoeven
@@ -75,10 +73,14 @@ static int	mda_last_vc  = 16;
 
 static struct vc_data	*mda_display_fg = NULL;
 
+#ifdef MODULE_PARM
 MODULE_PARM(mda_first_vc, "1-255i");
 MODULE_PARM(mda_last_vc,  "1-255i");
+#endif
 
-/* MDA register values */
+
+/* MDA register values
+ */
 
 #define MDA_CURSOR_BLINKING	0x00
 #define MDA_CURSOR_OFF		0x20
@@ -196,7 +198,11 @@ __initfunc(void mdacon_setup(char *str, int *ints))
 }
 #endif
 
+#ifdef MODULE
+static int mda_detect(void)
+#else
 __initfunc(static int mda_detect(void))
+#endif
 {
 	int count=0;
 	u16 *p, p_save;
@@ -234,18 +240,13 @@ __initfunc(static int mda_detect(void))
 	/* Ok, there is definitely a card registering at the correct
 	 * memory location, so now we do an I/O port test.
 	 */
-
-	/* Edward: These two mess `tests' mess up my cursor on bootup */
-
-	/* cursor low register */
-	/* if (! test_mda_b(0x66, 0x0f)) {
+	
+	if (! test_mda_b(0x66, 0x0f)) {	    /* cursor low register */
 		return 0;
-	} */
-
-	/* cursor low register */
-	/* if (! test_mda_b(0x99, 0x0f)) {
+	}
+	if (! test_mda_b(0x99, 0x0f)) {     /* cursor low register */
 		return 0;
-	} */
+	}
 
 	/* See if the card is a Hercules, by checking whether the vsync
 	 * bit of the status register is changing.  This test lasts for
@@ -279,7 +280,11 @@ __initfunc(static int mda_detect(void))
 	return 1;
 }
 
+#ifdef MODULE
+static void mda_initialize(void)
+#else
 __initfunc(static void mda_initialize(void))
+#endif
 {
 	write_mda_b(97, 0x00);		/* horizontal total */
 	write_mda_b(80, 0x01);		/* horizontal displayed */
@@ -304,7 +309,11 @@ __initfunc(static void mda_initialize(void))
 	outb_p(0x00, mda_gfx_port);
 }
 
+#ifdef MODULE
+static const char *mdacon_startup(void)
+#else
 __initfunc(static const char *mdacon_startup(void))
+#endif
 {
 	mda_num_columns = 80;
 	mda_num_lines   = 25;
@@ -329,9 +338,6 @@ __initfunc(static const char *mdacon_startup(void))
 	if (mda_type != TYPE_MDA) {
 		mda_initialize();
 	}
-
-	/* cursor looks ugly during boot-up, so turn it off */
-	mda_set_cursor(mda_vram_len - 1);
 
 	printk("mdacon: %s with %ldK of memory detected.\n",
 		mda_type_name, mda_vram_len/1024);
@@ -488,21 +494,13 @@ static int mdacon_set_palette(struct vc_data *c, unsigned char *table)
 
 static int mdacon_blank(struct vc_data *c, int blank)
 {
-	if (mda_type == TYPE_MDA) {
-		if (blank) 
-			scr_memsetw((void *)mda_vram_base, 
-				mda_convert_attr(c->vc_video_erase_char),
-				c->vc_screenbuf_size);
-		/* Tell console.c that it has to restore the screen itself */
-		return 1;
+	if (blank) {
+		outb_p(0x00, mda_mode_port);	/* disable video */
 	} else {
-		if (blank)
-			outb_p(0x00, mda_mode_port);	/* disable video */
-		else
-			outb_p(MDA_MODE_VIDEO_EN | MDA_MODE_BLINK_EN, 
-				mda_mode_port);
-		return 0;
+		outb_p(MDA_MODE_VIDEO_EN | MDA_MODE_BLINK_EN, mda_mode_port);
 	}
+	
+	return 0;
 }
 
 static int mdacon_font_op(struct vc_data *c, struct console_font_op *op)
@@ -590,12 +588,16 @@ struct consw mda_con = {
 	mdacon_invert_region,	/* con_invert_region */
 };
 
+#ifdef MODULE
+void mda_console_init(void)
+#else
 __initfunc(void mda_console_init(void))
+#endif
 {
 	if (mda_first_vc > mda_last_vc)
 		return;
 
-	take_over_console(&mda_con, mda_first_vc-1, mda_last_vc-1, 0);
+	take_over_console(&mda_con, mda_first_vc, mda_last_vc, 0);
 }
 
 #ifdef MODULE

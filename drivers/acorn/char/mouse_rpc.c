@@ -1,5 +1,5 @@
 /*
- * linux/drivers/char/mouse_rpc.c
+ * linux/drivers/char/rpcmouse.c
  *
  * Copyright (C) 1996-1998 Russell King
  *
@@ -16,7 +16,6 @@
 #include <asm/hardware.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/iomd.h>
 
 #include "../../char/mouse.h"
 

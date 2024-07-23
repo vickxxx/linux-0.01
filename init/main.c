@@ -22,14 +22,9 @@
 #include <linux/smp_lock.h>
 #include <linux/blk.h>
 #include <linux/hdreg.h>
-#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
-
-#ifdef CONFIG_ARCH_S390
-#include <asm/s390mach.h>
-#endif
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -47,19 +42,13 @@
 #  include <asm/mtrr.h>
 #endif
 
-#ifdef CONFIG_DASD
-#include <asm/dasd.h>
-#endif
-
-#ifdef CONFIG_BLK_DEV_XPRAM
-#include "../drivers/s390/block/xpram.h"
+#ifdef CONFIG_APM
+#include <linux/apm_bios.h>
 #endif
 
 #ifdef CONFIG_MAC
 extern void nubus_init(void);
 #endif
-
-extern int irda_device_init(void);
 
 /*
  * Versions of gcc older than that listed below may actually compile
@@ -78,10 +67,11 @@ extern int console_loglevel;
 
 static int init(void *);
 extern int bdflush(void *);
-extern int kupdate(void *);
 extern int kswapd(void *);
+extern int kpiod(void *);
 extern void kswapd_setup(void);
-extern unsigned long init_IRQ( unsigned long);
+
+extern void init_IRQ(void);
 extern void init_modules(void);
 extern long console_init(long, long);
 extern void sock_init(void);
@@ -107,12 +97,8 @@ extern void smp_setup(char *str, int *ints);
 extern void ioapic_pirq_setup(char *str, int *ints);
 extern void ioapic_setup(char *str, int *ints);
 #endif
-#ifdef CONFIG_MICROCODE
-extern int microcode_init(void);
-#endif
 extern void no_scroll(char *str, int *ints);
 extern void kbd_reset_setup(char *str, int *ints);
-extern void aux_reconnect_setup(char *str, int *ints);
 extern void panic_setup(char *str, int *ints);
 extern void bmouse_setup(char *str, int *ints);
 extern void msmouse_setup(char *str, int *ints);
@@ -120,38 +106,26 @@ extern void console_setup(char *str, int *ints);
 #ifdef CONFIG_PRINTER
 extern void lp_setup(char *str, int *ints);
 #endif
-#ifdef CONFIG_VIDEO_CPIA_PP
-extern void cpia_pp_setup(char *str, int *ints);
-#endif
 #ifdef CONFIG_JOY_AMIGA
 extern void js_am_setup(char *str, int *ints);
 #endif
 #ifdef CONFIG_JOY_ANALOG
 extern void js_an_setup(char *str, int *ints);
 #endif
-#ifdef CONFIG_JOY_ASSASSIN
+#ifdef CONFIG_JOY_ASSASIN
 extern void js_as_setup(char *str, int *ints);
 #endif
 #ifdef CONFIG_JOY_CONSOLE
 extern void js_console_setup(char *str, int *ints);
-extern void js_console_setup_2(char *str, int *ints);
-extern void js_console_setup_3(char *str, int *ints);
 #endif
 #ifdef CONFIG_JOY_DB9
 extern void js_db9_setup(char *str, int *ints);
-extern void js_db9_setup_2(char *str, int *ints);
-extern void js_db9_setup_3(char *str, int *ints);
 #endif
 #ifdef CONFIG_JOY_TURBOGRAFX
 extern void js_tg_setup(char *str, int *ints);
-extern void js_tg_setup_2(char *str, int *ints);
-extern void js_tg_setup_3(char *str, int *ints);
 #endif
 #ifdef CONFIG_JOY_LIGHTNING
 extern void js_l4_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_PCI
-extern void js_pci_setup(char *str, int *ints);
 #endif
 extern void eth_setup(char *str, int *ints);
 #ifdef CONFIG_ARCNET_COM20020
@@ -159,12 +133,6 @@ extern void com20020_setup(char *str, int *ints);
 #endif
 #ifdef CONFIG_ARCNET_RIM_I
 extern void arcrimi_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_CTC  
-extern void ctc_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_IUCV
-extern void iucv_setup(char *str, int *ints);
 #endif
 #ifdef CONFIG_ARCNET_COM90xxIO
 extern void com90io_setup(char *str, int *ints);
@@ -197,22 +165,8 @@ extern void pg_setup(char *str, int *ints);
 #ifdef CONFIG_PARIDE_PCD
 extern void pcd_setup(char *str, int *ints);
 #endif
-#ifdef CONFIG_3215
-extern void con3215_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_MDISK
-extern void mdisk_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BLK_DEV_XPRAM
-extern void xpram_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ARCH_S390
-extern void vmhalt_setup(char *str, int *ints);
-extern void vmpoff_setup(char *str, int *ints);
-#endif
 extern void floppy_setup(char *str, int *ints);
 extern void st_setup(char *str, int *ints);
-extern void osst_setup(char *str, int *ints);
 extern void st0x_setup(char *str, int *ints);
 extern void advansys_setup(char *str, int *ints);
 extern void tmc8xx_setup(char *str, int *ints);
@@ -226,7 +180,6 @@ extern void aha152x_setup(char *str, int *ints);
 extern void aha1542_setup(char *str, int *ints);
 extern void gdth_setup(char *str, int *ints);
 extern void aic7xxx_setup(char *str, int *ints);
-extern void ips_setup(char *str, int *ints);
 extern void AM53C974_setup(char *str, int *ints);
 extern void BusLogic_Setup(char *str, int *ints);
 extern void ncr53c8xx_setup(char *str, int *ints);
@@ -318,7 +271,6 @@ extern void stram_swap_setup (char *str, int *ints);
 extern void wd33c93_setup (char *str, int *ints);
 extern void gvp11_setup (char *str, int *ints);
 extern void ncr53c7xx_setup (char *str, int *ints);
-extern void sim710_setup (char *str, int *ints);
 #ifdef CONFIG_MAC_SCSI
 extern void mac_scsi_setup (char *str, int *ints);
 #endif
@@ -332,10 +284,6 @@ extern void pcxx_setup(char *str, int *ints);
 #ifdef CONFIG_RISCOM8
 extern void riscom8_setup(char *str, int *ints);
 #endif
-
-extern void n2_setup(char *str, int *ints);
-extern void c101_setup(char *str, int *ints);
-
 #ifdef CONFIG_SPECIALIX
 extern void specialix_setup(char *str, int *ints);
 #endif
@@ -378,17 +326,11 @@ extern void nfs_root_setup(char *str, int *ints);
 #ifdef CONFIG_FTAPE
 extern void ftape_setup(char *str, int *ints);
 #endif
-#ifdef CONFIG_3215_CONSOLE
-extern int con3215_activate(void);
-#endif
 #ifdef CONFIG_MDA_CONSOLE
 extern void mdacon_setup(char *str, int *ints);
 #endif
 #ifdef CONFIG_LTPC
 extern void ltpc_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BLK_CPQ_DA
-extern void cpqarray_setup(char *str, int *ints);
 #endif
 
 #if defined(CONFIG_SYSVIPC)
@@ -400,10 +342,6 @@ extern void dquot_init_hash(void);
 
 #ifdef CONFIG_MD_BOOT
 extern void md_setup(char *str,int *ints) __init;
-#endif
-
-#ifdef CONFIG_AGP
-extern int agp_init (void);
 #endif
 
 /*
@@ -465,9 +403,6 @@ static struct dev_name_struct {
 #ifdef CONFIG_ROOT_NFS
 	{ "nfs",     0x00ff },
 #endif
-#ifdef CONFIG_BLK_DEV_LOOP
-	{ "loop",    0x0700 },
-#endif
 #ifdef CONFIG_BLK_DEV_IDE
 	{ "hda",     0x0300 },
 	{ "hdb",     0x0340 },
@@ -499,42 +434,6 @@ static struct dev_name_struct {
 	{ "sdn",     0x08d0 },
 	{ "sdo",     0x08e0 },
 	{ "sdp",     0x08f0 },
-#endif
-#ifdef CONFIG_BLK_DEV_DAC960
-	{ "rd/c0d0p",0x3000 },
-	{ "rd/c0d1p",0x3008 },
-	{ "rd/c0d2p",0x3010 },
-	{ "rd/c0d3p",0x3018 },
-	{ "rd/c0d4p",0x3020 },
-	{ "rd/c0d5p",0x3028 },
-	{ "rd/c0d6p",0x3030 },
-	{ "rd/c0d7p",0x3038 },
-	{ "rd/c0d8p",0x3040 },
-	{ "rd/c0d9p",0x3048 },
-	{ "rd/c0d10p",0x3050 },
-	{ "rd/c0d11p",0x3058 },
-	{ "rd/c0d12p",0x3060 },
-	{ "rd/c0d13p",0x3068 },
-	{ "rd/c0d14p",0x3070 },
-	{ "rd/c0d15p",0x3078 },
-#endif
-#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
-	{ "ida/c0d0p",0x4800 },
-	{ "ida/c0d1p",0x4810 },
-	{ "ida/c0d2p",0x4820 },
-	{ "ida/c0d3p",0x4830 },
-	{ "ida/c0d4p",0x4840 },
-	{ "ida/c0d5p",0x4850 },
-	{ "ida/c0d6p",0x4860 },
-	{ "ida/c0d7p",0x4870 },
-	{ "ida/c0d8p",0x4880 },
-	{ "ida/c0d9p",0x4890 },
-	{ "ida/c0d10p",0x48A0 },
-	{ "ida/c0d11p",0x48B0 },
-	{ "ida/c0d12p",0x48C0 },
-	{ "ida/c0d13p",0x48D0 },
-	{ "ida/c0d14p",0x48E0 },
-	{ "ida/c0d15p",0x48F0 },
 #endif
 #ifdef CONFIG_ATARI_ACSI
 	{ "ada",     0x1c00 },
@@ -600,78 +499,6 @@ static struct dev_name_struct {
 #if CONFIG_DDV
 	{ "ddv", DDV_MAJOR << 8},
 #endif
-#ifdef CONFIG_MDISK
-        { "mnda", (MDISK_MAJOR << MINORBITS)},
-        { "mndb", (MDISK_MAJOR << MINORBITS) + 1},
-        { "mndc", (MDISK_MAJOR << MINORBITS) + 2},
-        { "mndd", (MDISK_MAJOR << MINORBITS) + 3},
-        { "mnde", (MDISK_MAJOR << MINORBITS) + 4},
-        { "mndf", (MDISK_MAJOR << MINORBITS) + 5},
-        { "mndg", (MDISK_MAJOR << MINORBITS) + 6},
-        { "mndh", (MDISK_MAJOR << MINORBITS) + 7},
-#endif
-#ifdef CONFIG_DASD
-       { "dasda", (DASD_MAJOR << MINORBITS) },
-       { "dasdb", (DASD_MAJOR << MINORBITS) + (1 << 2) },
-       { "dasdc", (DASD_MAJOR << MINORBITS) + (2 << 2) },
-       { "dasdd", (DASD_MAJOR << MINORBITS) + (3 << 2) },
-       { "dasde", (DASD_MAJOR << MINORBITS) + (4 << 2) },
-       { "dasdf", (DASD_MAJOR << MINORBITS) + (5 << 2) },
-       { "dasdg", (DASD_MAJOR << MINORBITS) + (6 << 2) },
-       { "dasdh", (DASD_MAJOR << MINORBITS) + (7 << 2) },
-       { "dasdi", (DASD_MAJOR << MINORBITS) + (8 << 2) },
-       { "dasdj", (DASD_MAJOR << MINORBITS) + (9 << 2) },
-       { "dasdk", (DASD_MAJOR << MINORBITS) + (10 << 2) },
-       { "dasdl", (DASD_MAJOR << MINORBITS) + (11 << 2) },
-       { "dasdm", (DASD_MAJOR << MINORBITS) + (12 << 2) },
-       { "dasdn", (DASD_MAJOR << MINORBITS) + (13 << 2) },
-       { "dasdo", (DASD_MAJOR << MINORBITS) + (14 << 2) },
-       { "dasdp", (DASD_MAJOR << MINORBITS) + (15 << 2) },
-       { "dasdq", (DASD_MAJOR << MINORBITS) + (16 << 2) },
-       { "dasdr", (DASD_MAJOR << MINORBITS) + (17 << 2) },
-       { "dasds", (DASD_MAJOR << MINORBITS) + (18 << 2) },
-       { "dasdt", (DASD_MAJOR << MINORBITS) + (19 << 2) },
-       { "dasdu", (DASD_MAJOR << MINORBITS) + (20 << 2) },
-       { "dasdv", (DASD_MAJOR << MINORBITS) + (21 << 2) },
-       { "dasdw", (DASD_MAJOR << MINORBITS) + (22 << 2) },
-       { "dasdx", (DASD_MAJOR << MINORBITS) + (23 << 2) },
-       { "dasdy", (DASD_MAJOR << MINORBITS) + (24 << 2) },
-       { "dasdz", (DASD_MAJOR << MINORBITS) + (25 << 2) },
-#endif
-#ifdef CONFIG_BLK_DEV_XPRAM
-       { "xpram0", (XPRAM_MAJOR << MINORBITS) },
-       { "xpram1", (XPRAM_MAJOR << MINORBITS) + 1 },
-       { "xpram2", (XPRAM_MAJOR << MINORBITS) + 2 },
-       { "xpram3", (XPRAM_MAJOR << MINORBITS) + 3 },
-       { "xpram4", (XPRAM_MAJOR << MINORBITS) + 4 },
-       { "xpram5", (XPRAM_MAJOR << MINORBITS) + 5 },
-       { "xpram6", (XPRAM_MAJOR << MINORBITS) + 6 },
-       { "xpram7", (XPRAM_MAJOR << MINORBITS) + 7 },
-       { "xpram8", (XPRAM_MAJOR << MINORBITS) + 8 },
-       { "xpram9", (XPRAM_MAJOR << MINORBITS) + 9 },
-       { "xpram10", (XPRAM_MAJOR << MINORBITS) + 10 },
-       { "xpram11", (XPRAM_MAJOR << MINORBITS) + 11 },
-       { "xpram12", (XPRAM_MAJOR << MINORBITS) + 12 },
-       { "xpram13", (XPRAM_MAJOR << MINORBITS) + 13 },
-       { "xpram14", (XPRAM_MAJOR << MINORBITS) + 14 },
-       { "xpram15", (XPRAM_MAJOR << MINORBITS) + 15 },
-       { "xpram16", (XPRAM_MAJOR << MINORBITS) + 16 },
-       { "xpram17", (XPRAM_MAJOR << MINORBITS) + 17 },
-       { "xpram18", (XPRAM_MAJOR << MINORBITS) + 18 },
-       { "xpram19", (XPRAM_MAJOR << MINORBITS) + 19 },
-       { "xpram20", (XPRAM_MAJOR << MINORBITS) + 20 },
-       { "xpram21", (XPRAM_MAJOR << MINORBITS) + 21 },
-       { "xpram22", (XPRAM_MAJOR << MINORBITS) + 22 },
-       { "xpram23", (XPRAM_MAJOR << MINORBITS) + 23 },
-       { "xpram24", (XPRAM_MAJOR << MINORBITS) + 24 },
-       { "xpram25", (XPRAM_MAJOR << MINORBITS) + 25 },
-       { "xpram26", (XPRAM_MAJOR << MINORBITS) + 26 },
-       { "xpram27", (XPRAM_MAJOR << MINORBITS) + 27 },
-       { "xpram28", (XPRAM_MAJOR << MINORBITS) + 28 },
-       { "xpram29", (XPRAM_MAJOR << MINORBITS) + 29 },
-       { "xpram30", (XPRAM_MAJOR << MINORBITS) + 30 },
-       { "xpram31", (XPRAM_MAJOR << MINORBITS) + 31 },
-#endif
 	{ NULL, 0 }
 };
 
@@ -726,7 +553,6 @@ static struct kernel_param cooked_params[] __initdata = {
 	{ "noapic", ioapic_setup },
 	{ "pirq=", ioapic_pirq_setup },
 #endif
-
 #endif
 #ifdef CONFIG_BLK_DEV_RAM
 	{ "ramdisk_start=", ramdisk_start_setup },
@@ -738,14 +564,6 @@ static struct kernel_param cooked_params[] __initdata = {
 	{ "noinitrd", no_initrd },
 #endif
 #endif
-
-#ifdef CONFIG_CTC
-        { "ctc=", ctc_setup } ,
-#endif
-#ifdef CONFIG_IUCV
-        { "iucv=", iucv_setup } ,
-#endif
-
 #ifdef CONFIG_FB
 	{ "video=", video_setup },
 #endif
@@ -760,15 +578,10 @@ static struct kernel_param cooked_params[] __initdata = {
 #ifdef CONFIG_VT
 	{ "kbd-reset", kbd_reset_setup },
 #endif
-#if defined(CONFIG_PSMOUSE) && defined (CONFIG_VT)
-	{ "psaux-reconnect", aux_reconnect_setup },
-#endif
 #ifdef CONFIG_BUGi386
 	{ "no-hlt", no_halt },
 	{ "no387", no_387 },
 	{ "reboot=", reboot_setup },
-#endif
-#ifdef CONFIG_MCA
 	{ "mca-pentium", mca_pentium },
 #endif
 #ifdef CONFIG_INET
@@ -792,42 +605,36 @@ static struct kernel_param cooked_params[] __initdata = {
 #ifdef CONFIG_PRINTER
         { "lp=", lp_setup },
 #endif
-#ifdef CONFIG_VIDEO_CPIA_PP
-        { "cpia_pp=", cpia_pp_setup },
-#endif
 #ifdef CONFIG_JOY_AMIGA
 	{ "js_am=", js_am_setup },
 #endif
 #ifdef CONFIG_JOY_ANALOG
 	{ "js_an=", js_an_setup },
 #endif
-#ifdef CONFIG_JOY_ASSASSIN
+#ifdef CONFIG_JOY_ASSASIN
 	{ "js_as=", js_as_setup },
 #endif
 #ifdef CONFIG_JOY_CONSOLE
 	{ "js_console=", js_console_setup },
-	{ "js_console2=", js_console_setup_2 },
-	{ "js_console3=", js_console_setup_3 },
+	{ "js_console2=", js_console_setup },
+	{ "js_console3=", js_console_setup },
 #endif
 #ifdef CONFIG_JOY_DB9
 	{ "js_db9=", js_db9_setup },
-	{ "js_db9_2=", js_db9_setup_2 },
-	{ "js_db9_3=", js_db9_setup_3 },
+	{ "js_db9_2=", js_db9_setup },
+	{ "js_db9_3=", js_db9_setup },
 #endif
 #ifdef CONFIG_JOY_TURBOGRAFX
 	{ "js_tg=", js_tg_setup },
-	{ "js_tg_2=", js_tg_setup_2 },
-	{ "js_tg_3=", js_tg_setup_3 },
-#endif
-#ifdef CONFIG_JOY_LIGHTNING
-	{ "js_l4=", js_l4_setup },
-#endif
-#ifdef CONFIG_JOY_PCI
-	{ "js_pci=", js_pci_setup },
+	{ "js_tg_2=", js_tg_setup },
+	{ "js_tg_3=", js_tg_setup },
 #endif
 #ifdef CONFIG_SCSI
 	{ "max_scsi_luns=", scsi_luns_setup },
 	{ "scsi_logging=", scsi_logging_setup },
+#endif
+#ifdef CONFIG_JOY_LIGHTNING
+	{ "js_l4=", js_l4_setup },
 #endif
 #ifdef CONFIG_SCSI_ADVANSYS
 	{ "advansys=", advansys_setup },
@@ -837,9 +644,6 @@ static struct kernel_param cooked_params[] __initdata = {
 #endif
 #ifdef CONFIG_CHR_DEV_ST
 	{ "st=", st_setup },
-#endif
-#ifdef CONFIG_CHR_DEV_OSST
-	{ "osst=", osst_setup },
 #endif
 #ifdef CONFIG_BUSMOUSE
 	{ "bmouse=", bmouse_setup },
@@ -874,9 +678,6 @@ static struct kernel_param cooked_params[] __initdata = {
 #endif
 #ifdef CONFIG_SCSI_AIC7XXX
 	{ "aic7xxx=", aic7xxx_setup},
-#endif
-#ifdef CONFIG_SCSI_IPS
-	{ "ips=", ips_setup},
 #endif
 #ifdef CONFIG_SCSI_BUSLOGIC
 	{ "BusLogic=", BusLogic_Setup},
@@ -996,9 +797,6 @@ static struct kernel_param cooked_params[] __initdata = {
 	    || defined(CONFIG_BLZ603EPLUS_SCSI)
         { "53c7xx=", ncr53c7xx_setup },
 #endif
-#if defined(CONFIG_SCSI_SIM710)
-	{ "sim710=", sim710_setup },
-#endif
 #if defined(CONFIG_A3000_SCSI) || defined(CONFIG_A2091_SCSI) \
 	    || defined(CONFIG_GVP11_SCSI)
 	{ "wd33c93=", wd33c93_setup },
@@ -1063,9 +861,6 @@ static struct kernel_param cooked_params[] __initdata = {
 #ifdef CONFIG_LTPC
 	{ "ltpc=", ltpc_setup },
 #endif
-#ifdef CONFIG_BLK_CPQ_DA
-	{ "smart2=", cpqarray_setup },
-#endif
 	{ 0, 0 }
 };
 
@@ -1096,28 +891,11 @@ static struct kernel_param raw_params[] __initdata = {
 #ifdef CONFIG_PARIDE_PG
         { "pg.", pg_setup },
 #endif
-#ifdef CONFIG_N2
-	{ "n2=", n2_setup },
-#endif
-#ifdef CONFIG_C101
-	{ "c101=", c101_setup },
-#endif
-#ifdef CONFIG_3215
-	{ "condev=", con3215_setup },
-#endif
-#ifdef CONFIG_MDISK
-        { "mdisk=", mdisk_setup },
-#endif
-#ifdef CONFIG_BLK_DEV_XPRAM
-        { "xpram_parts=", xpram_setup },
-#endif
-#ifdef CONFIG_ARCH_S390
-        { "vmhalt=", vmhalt_setup },
-        { "vmpoff=", vmpoff_setup },
+#ifdef CONFIG_APM
+	{ "apm=", apm_setup },
 #endif
 	{ 0, 0 }
 };
-
 
 #ifdef CONFIG_BLK_DEV_RAM
 static void __init ramdisk_start_setup(char *str, int *ints)
@@ -1147,7 +925,6 @@ static void __init ramdisk_size(char *str, int *ints)
 
 static int __init checksetup(char *line)
 {
-	struct new_kernel_param *p;
 	int i, ints[11];
 
 #ifdef CONFIG_BLK_DEV_IDE
@@ -1171,25 +948,14 @@ static int __init checksetup(char *line)
 			return 1;
 		}
 	}
-
-	/* Now handle new-style __setup parameters */
-	p = &__setup_start;
-	while (p < &__setup_end) {
-		int n = strlen(p->str);
-		if (!strncmp(line,p->str,n)) {
-			if (p->setup_func(line+n))
-				return 1;
-		}
-		p++;
-	}
 	return 0;
 }
 
 /* this should be approx 2 Bo*oMips to start (note initial shift), and will
    still work even if initially too large, it will just take slightly longer */
-unsigned long loops_per_jiffy = (1<<12);
+unsigned long loops_per_sec = (1<<12);
 
-/* This is the number of bits of precision for the loops_per_jiffy.  Each
+/* This is the number of bits of precision for the loops_per_second.  Each
    bit takes on average 1.5/HZ seconds.  This (like the original) is a little
    better than 1% */
 #define LPS_PREC 8
@@ -1199,40 +965,42 @@ void __init calibrate_delay(void)
 	unsigned long ticks, loopbit;
 	int lps_precision = LPS_PREC;
 
-	loops_per_jiffy = (1<<12);
+	loops_per_sec = (1<<12);
 
 	printk("Calibrating delay loop... ");
-	while (loops_per_jiffy <<= 1) {
+	while (loops_per_sec <<= 1) {
 		/* wait for "start of" clock tick */
 		ticks = jiffies;
 		while (ticks == jiffies)
 			/* nothing */;
 		/* Go .. */
 		ticks = jiffies;
-		__delay(loops_per_jiffy);
+		__delay(loops_per_sec);
 		ticks = jiffies - ticks;
 		if (ticks)
 			break;
 	}
 
-/* Do a binary approximation to get loops_per_jiffy set to equal one clock
+/* Do a binary approximation to get loops_per_second set to equal one clock
    (up to lps_precision bits) */
-	loops_per_jiffy >>= 1;
-	loopbit = loops_per_jiffy;
+	loops_per_sec >>= 1;
+	loopbit = loops_per_sec;
 	while ( lps_precision-- && (loopbit >>= 1) ) {
-		loops_per_jiffy |= loopbit;
+		loops_per_sec |= loopbit;
 		ticks = jiffies;
 		while (ticks == jiffies);
 		ticks = jiffies;
-		__delay(loops_per_jiffy);
+		__delay(loops_per_sec);
 		if (jiffies != ticks)	/* longer than 1 tick */
-			loops_per_jiffy &= ~loopbit;
+			loops_per_sec &= ~loopbit;
 	}
 
+/* finally, adjust loops per second in terms of seconds instead of clocks */	
+	loops_per_sec *= HZ;
 /* Round the value and print it */	
 	printk("%lu.%02lu BogoMIPS\n",
-		loops_per_jiffy/(500000/HZ),
-		(loops_per_jiffy/(5000/HZ)) % 100);
+		(loops_per_sec+2500)/500000,
+		((loops_per_sec+2500)/5000) % 100);
 }
 
 /*
@@ -1247,7 +1015,6 @@ void __init calibrate_delay(void)
 static void __init parse_options(char *line)
 {
 	char *next;
-        char *quote;
 	int args, envs;
 
 	if (!*line)
@@ -1256,25 +1023,8 @@ static void __init parse_options(char *line)
 	envs = 1;	/* TERM is set to 'linux' by default */
 	next = line;
 	while ((line = next) != NULL) {
-		/* On S/390 we want to be able to pass an options that
-                 * contains blanks. For example vmhalt="IPL CMS". 
-                 * To allow that I added code that prevents blanks in
-                 * quotes to be recognized as delimiter. -- Martin
-                 */
-                quote = strchr(line,'"');
-                next = strchr(line, ' ');
-                while (next != NULL && quote != NULL && quote < next) {
-                        /* we found a left quote before the next blank
-                         * now we have to find the matching right quote
-                         */
-                        next = strchr(quote+1, '"');
-                        if (next != NULL) {
-                                quote = strchr(next+1, '"');
-                                next = strchr(next+1, ' ');
-                        }
-                }
-                if (next != NULL)
-                        *next++ = 0;
+		if ((next = strchr(line,' ')) != NULL)
+			*next++ = 0;
 		/*
 		 * check for kernel options first..
 		 */
@@ -1288,10 +1038,6 @@ static void __init parse_options(char *line)
 		}
 		if (!strcmp(line,"debug")) {
 			console_loglevel = 10;
-			continue;
-		}
-		if (!strcmp(line,"quiet")) {
-			console_loglevel = 4;
 			continue;
 		}
 		if (!strncmp(line,"init=",5)) {
@@ -1388,7 +1134,7 @@ asmlinkage void __init start_kernel(void)
 	setup_arch(&command_line, &memory_start, &memory_end);
 	memory_start = paging_init(memory_start,memory_end);
 	trap_init();
-        memory_start = init_IRQ( memory_start );
+	init_IRQ();
 	sched_init();
 	time_init();
 	parse_options(command_line);
@@ -1423,9 +1169,6 @@ asmlinkage void __init start_kernel(void)
 #endif
 	mem_init(memory_start,memory_end);
 	kmem_cache_sizes_init();
-#ifdef CONFIG_3215_CONSOLE
-        con3215_activate();
-#endif
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
 #endif
@@ -1434,10 +1177,6 @@ asmlinkage void __init start_kernel(void)
 	dcache_init();
 	vma_init();
 	buffer_init(memory_end-memory_start);
- 	page_cache_init(memory_end-memory_start);
-#ifdef CONFIG_ARCH_S390
-	ccwcache_init();
-#endif
 	signals_init();
 	inode_init();
 	file_table_init();
@@ -1482,21 +1221,6 @@ static void __init no_initrd(char *s,int *ints)
 
 struct task_struct *child_reaper = &init_task;
 
-
-static void __init do_initcalls(void)
-{
-	initcall_t *call;
-
-	call = &__initcall_start;
-	
-	while (call < &__initcall_end)
-	{
-		(*call)();
-		call++;
-	} 
-}
-
-
 /*
  * Ok, the machine is now initialized. None of the devices
  * have been touched yet, but the CPU subsystem is up and
@@ -1537,10 +1261,6 @@ static void __init do_basic_setup(void)
 	 * Ok, at this point all CPU's should be initialized, so
 	 * we can start looking into devices..
 	 */
-#ifdef CONFIG_ARCH_S390
-	s390_init_machine_check();
-#endif
-
 #ifdef CONFIG_PCI
 	pci_init();
 #endif
@@ -1565,18 +1285,15 @@ static void __init do_basic_setup(void)
 #ifdef CONFIG_MAC
 	nubus_init();
 #endif
-#ifdef CONFIG_AGP
-	agp_init();
-#endif
 
 	/* Networking initialization needs a process context */ 
 	sock_init();
 
 	/* Launch bdflush from here, instead of the old syscall way. */
 	kernel_thread(bdflush, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-	kernel_thread(kupdate, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 	/* Start the background pageout daemon. */
 	kswapd_setup();
+	kernel_thread(kpiod, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 	kernel_thread(kswapd, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 
 #if CONFIG_AP1000
@@ -1595,32 +1312,32 @@ static void __init do_basic_setup(void)
 	else mount_initrd =0;
 #endif
 
-	/* Start the event daemon thread */
-	start_context_thread();
-
 	/* Set up devices .. */
 	device_setup();
 
 	/* .. executable formats .. */
 	binfmt_setup();
 
-	/* the functions marked initcall  */
-	
-	do_initcalls();
-
 	/* .. filesystems .. */
 	filesystem_setup();
 
-#ifdef CONFIG_IRDA
-	irda_device_init(); /* Must be done after protocol initialization */
-#endif
-
-#ifdef CONFIG_MICROCODE
-	microcode_init();
-#endif
-
 	/* Mount the root filesystem.. */
 	mount_root();
+
+#ifdef CONFIG_UMSDOS_FS
+	{
+		/*
+			When mounting a umsdos fs as root, we detect
+			the pseudo_root (/linux) and initialise it here.
+			pseudo_root is defined in fs/umsdos/inode.c
+		*/
+		extern struct inode *pseudo_root;
+		if (pseudo_root != NULL){
+			current->fs->root = pseudo_root->i_sb->s_root;
+			current->fs->pwd  = pseudo_root->i_sb->s_root;
+		}
+	}
+#endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	root_mountflags = real_root_mountflags;

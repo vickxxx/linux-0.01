@@ -88,8 +88,7 @@ unsigned int video_scan_lines;
  * comments - KDMKTONE doesn't put the process to sleep.
  */
 
-#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) \
-    || (defined(__mips__) && !defined(CONFIG_SGI))
+#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) || defined(__mips__)
 
 static void
 kd_nosound(unsigned long ignored)
@@ -590,8 +589,6 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 
 	case KDGETKEYCODE:
 	case KDSETKEYCODE:
-		if(!suser())
-			perm=0;
 		return do_kbkeycode_ioctl(cmd, (struct kbkeycode *)arg, perm);
 
 	case KDGKBENT:

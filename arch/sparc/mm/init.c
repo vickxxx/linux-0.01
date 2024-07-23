@@ -1,4 +1,4 @@
-/*  $Id: init.c,v 1.65.2.1 1999/08/07 10:42:54 davem Exp $
+/*  $Id: init.c,v 1.65 1999/04/09 16:28:03 davem Exp $
  *  linux/arch/sparc/mm/init.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -245,7 +245,7 @@ __initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 	struct page *page, *end;
 
 	/* Saves us work later. */
-	memset((void *) ZERO_PAGE(0), 0, PAGE_SIZE);
+	memset((void *) ZERO_PAGE, 0, PAGE_SIZE);
 
 	end_mem &= PAGE_MASK;
 	max_mapnr = MAP_NR(end_mem);

@@ -28,8 +28,6 @@ struct linux_binprm{
 	int argc, envc;
 	char * filename;	/* Name of binary */
 	unsigned long loader, exec;
-	int dumpable;
-	int priv_change;
 };
 
 /*
@@ -54,7 +52,6 @@ extern int open_dentry(struct dentry *, int mode);
 
 extern int init_elf_binfmt(void);
 extern int init_elf32_binfmt(void);
-extern int init_irix_binfmt(void);
 extern int init_aout_binfmt(void);
 extern int init_aout32_binfmt(void);
 extern int init_script_binfmt(void);

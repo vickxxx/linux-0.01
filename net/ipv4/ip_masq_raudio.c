@@ -2,7 +2,7 @@
  *		IP_MASQ_RAUDIO  - Real Audio masquerading module
  *
  *
- * Version:	@(#)$Id: ip_masq_raudio.c,v 1.11.2.1 2001/01/10 01:52:33 davem Exp $
+ * Version:	@(#)$Id: ip_masq_raudio.c,v 1.11 1998/10/06 04:49:04 davem Exp $
  *
  * Author:	Nigel Metheringham
  *		Real Time Streaming code by Progressive Networks
@@ -169,10 +169,7 @@ masq_raudio_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **
         skb = *skb_p;
 	iph = skb->nh.iph;
         th = (struct tcphdr *)&(((char *)iph)[iph->ihl*4]);
-
-	/* Make sure we take into account the size of the TCP packet.  This is
-	 * because there may be TCP options in the TCP packet */
-	data = ((char *)&th[0]) + (th->doff * 4);
+        data = (char *)&th[1];
 
         data_limit = skb->h.raw + skb->len;
 
@@ -318,10 +315,7 @@ masq_rtsp_out (struct ip_masq_app *mapp,
         skb = *skb_p;
 	iph = skb->nh.iph;
         th = (struct tcphdr *)&(((char *)iph)[iph->ihl*4]);
-
-	/* Make sure we take into account the size of the TCP packet.  This is
-	 * because there may be TCP options in the TCP packet */
-	data = ((char *)&th[0]) + (th->doff * 4);
+        data = (char *)&th[1];
 
         data_limit = skb->h.raw + skb->len;
 

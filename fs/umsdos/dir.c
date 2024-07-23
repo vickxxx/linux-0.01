@@ -597,13 +597,6 @@ struct dentry *UMSDOS_lookup (struct inode *dir, struct dentry *dentry)
 	return ret;
 }
 
-/*
- * looks up REAL DOS filename and returns result dentry
- *
- * NOTE: since it is looked via UMSDOS_rlookup, it will not have i_patched,
- * umsdos_i.pos and other EMD-related stuff ! Moreover, it will destroy them
- * if such dentry was pre-existant.
- */
 struct dentry *umsdos_covered(struct dentry *parent, char *name, int len)
 {
 	struct dentry *result, *dentry;
@@ -677,20 +670,10 @@ char * umsdos_d_path(struct dentry *dentry, char * buffer, int len)
 	/* N.B. not safe -- fix this soon! */
 	current->fs->root = dentry->d_sb->s_root;
 	path = d_path(dentry, buffer, len);
-
-	if (*path == '/')
-		path++; /* skip leading '/' */
-
-	if (current->fs->root->d_inode == pseudo_root)
-	{
-		*(path-1) = '/';
-		path -= (UMSDOS_PSDROOT_LEN+1);
-		memcpy(path, UMSDOS_PSDROOT_NAME, UMSDOS_PSDROOT_LEN);
-	}
-
 	current->fs->root = old_root;
 	return path;
 }
+	
 
 /*
  * Return the dentry which points to a pseudo-hardlink.
@@ -725,7 +708,6 @@ hlink->d_parent->d_name.name, hlink->d_name.name);
 	filp.f_flags = O_RDONLY;
 
 	len = umsdos_file_read_kmem (&filp, path, hlink->d_inode->i_size);
-	if ((len > 0) && (len < PATH_MAX)) path[len] = '\0';
 	if (len != hlink->d_inode->i_size)
 		goto out_noread;
 #ifdef UMSDOS_DEBUG_VERBOSE
@@ -736,14 +718,7 @@ hlink->d_parent->d_name.name, hlink->d_name.name, path);
 	/* start at root dentry */
 	dentry_dst = dget(base);
 	path[len] = '\0';
-	
-	pt = path;
-	if (*path == '/')
-		pt++; /* skip leading '/' */
-	
-	if (base->d_inode == pseudo_root)
-		pt += (UMSDOS_PSDROOT_LEN + 1);
-	
+	pt = path + 1; /* skip leading '/' */
 	while (1) {
 		struct dentry *dir = dentry_dst, *demd;
 		char *start = pt;
@@ -766,7 +741,6 @@ printk ("umsdos_solve_hlink: dir %s/%s, name=%s, real=%d\n",
 dir->d_parent->d_name.name, dir->d_name.name, start, real);
 #endif
 		dentry_dst = umsdos_lookup_dentry(dir, start, len, real);
-/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
 		if (real)
 			d_drop(dir);
 		dput (dir);

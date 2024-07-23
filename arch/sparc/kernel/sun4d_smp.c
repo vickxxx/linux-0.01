@@ -99,14 +99,6 @@ __initfunc(void smp4d_callin(void))
 	local_flush_cache_all();
 	local_flush_tlb_all();
 
-	/*
-	 * Unblock the master CPU _only_ when the scheduler state
-	 * of all secondary CPUs will be up-to-date, so after
-	 * the SMP initialization the master will be just allowed
-	 * to call the scheduler code.
-	 */
-	init_idle();
-
 	/* Get our local ticker going. */
 	smp_setup_percpu_timer();
 
@@ -278,11 +270,11 @@ __initfunc(void smp4d_boot_cpus(void))
 				smp_highest_cpu = i;
 			}
 		}
-		SMP_PRINTK(("Total of %d Processors activated (%lu.%02lu BogoMIPS).\n", cpucount + 1, bogosum/(500000/HZ), (bogosum/(5000/HZ))%100));
+		SMP_PRINTK(("Total of %d Processors activated (%lu.%02lu BogoMIPS).\n", cpucount + 1, (bogosum + 2500)/500000, ((bogosum + 2500)/5000)%100));
 		printk("Total of %d Processors activated (%lu.%02lu BogoMIPS).\n",
 		       cpucount + 1,
-		       bogosum/(500000/HZ),
-		       (bogosum/(5000/HZ))%100);
+		       (bogosum + 2500)/500000,
+		       ((bogosum + 2500)/5000)%100);
 		smp_activated = 1;
 		smp_num_cpus = cpucount + 1;
 	}

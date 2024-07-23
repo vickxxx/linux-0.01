@@ -26,7 +26,6 @@ struct hw_interrupt_type {
 struct irqdesc {
 	struct irqaction *action;
 	struct hw_interrupt_type *ctl;
-	int level;
 };
 
 extern struct irqdesc irq_desc[NR_IRQS];

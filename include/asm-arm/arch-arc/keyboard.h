@@ -7,8 +7,6 @@
  * Copyright (C) 1998 Russell King
  */
 
-#include <linux/ioport.h>
-#include <asm/io.h>
 #include <asm/irq.h>
 
 #define NR_SCANCODES 128

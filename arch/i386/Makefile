@@ -62,13 +62,6 @@ arch/i386/mm: dummy
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
-vmlinux: arch/i386/vmlinux.lds
-
-arch/i386/vmlinux.lds: arch/i386/vmlinux.lds.S FORCE
-	$(CPP) -C -P -I$(HPATH) -imacros $(HPATH)/asm-i386/page_offset.h -Ui386 arch/i386/vmlinux.lds.S >arch/i386/vmlinux.lds
-
-FORCE: ;
-
 zImage: vmlinux
 	@$(MAKEBOOT) zImage
 
@@ -96,7 +89,6 @@ archclean:
 	@$(MAKEBOOT) clean
 
 archmrproper:
-	rm -f arch/i386/vmlinux.lds
 
 archdep:
 	@$(MAKEBOOT) dep

@@ -56,7 +56,6 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <net/slhc_vj.h>
 
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
@@ -79,8 +78,12 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <net/checksum.h>
+#include <net/slhc_vj.h>
 #include <asm/unaligned.h>
+
+int last_retran;
 
 static unsigned char *encode(unsigned char *cp, unsigned short n);
 static long decode(unsigned char **cpp);
@@ -255,7 +258,8 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	ip = (struct iphdr *) icp;
 
 	/* Bail if this packet isn't TCP, or is an IP fragment */
-	if (ip->protocol != IPPROTO_TCP || (ntohs(ip->frag_off) & 0x3fff)) {
+	if(ip->protocol != IPPROTO_TCP || (ntohs(ip->frag_off) & 0x1fff) ||
+				       (ip->frag_off & 32)){
 		/* Send as regular IP */
 		if(ip->protocol != IPPROTO_TCP)
 			comp->sls_o_nontcp++;
@@ -349,9 +353,10 @@ found:
 	 */
 	oth = &cs->cs_tcp;
 
-	if(ip->version != cs->cs_ip.version || ip->ihl != cs->cs_ip.ihl
+	if(last_retran
+	 || ip->version != cs->cs_ip.version || ip->ihl != cs->cs_ip.ihl
 	 || ip->tos != cs->cs_ip.tos
-	 || (ip->frag_off & htons(0x4000)) != (cs->cs_ip.frag_off & htons(0x4000))
+	 || (ip->frag_off & 64) != (cs->cs_ip.frag_off & 64)
 	 || ip->ttl != cs->cs_ip.ttl
 	 || th->doff != cs->cs_tcp.doff
 	 || (ip->ihl > 5 && memcmp(ip+1,cs->cs_ipopt,((ip->ihl)-5)*4) != 0)
@@ -747,8 +752,20 @@ void cleanup_module(void)
 	return;
 }
 
+#else /* MODULE */
+
+__initfunc(void slhc_install(void))
+{
+}
+
 #endif /* MODULE */
 #else /* CONFIG_INET */
+EXPORT_SYMBOL(slhc_init);
+EXPORT_SYMBOL(slhc_free);
+EXPORT_SYMBOL(slhc_remember);
+EXPORT_SYMBOL(slhc_compress);
+EXPORT_SYMBOL(slhc_uncompress);
+EXPORT_SYMBOL(slhc_toss);
 
 int
 slhc_toss(struct slcompress *comp)
@@ -789,11 +806,5 @@ slhc_init(int rslots, int tslots)
   printk(KERN_DEBUG "Called IP function on non IP-system: slhc_init");
   return NULL;
 }
-EXPORT_SYMBOL(slhc_init);
-EXPORT_SYMBOL(slhc_free);
-EXPORT_SYMBOL(slhc_remember);
-EXPORT_SYMBOL(slhc_compress);
-EXPORT_SYMBOL(slhc_uncompress);
-EXPORT_SYMBOL(slhc_toss);
 
 #endif /* CONFIG_INET */

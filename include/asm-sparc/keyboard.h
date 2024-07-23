@@ -1,4 +1,4 @@
-/* $Id: keyboard.h,v 1.2.2.1 1999/08/07 10:52:45 davem Exp $
+/* $Id: keyboard.h,v 1.2 1999/04/28 11:59:07 davem Exp $
  * linux/include/asm-sparc/keyboard.h
  *
  * sparc64 Created Aug 29 1997 by Eddie C. Dost (ecd@skynet.be)
@@ -12,9 +12,6 @@
 #define _SPARC_KEYBOARD_H 1
 
 #ifdef __KERNEL__
-
-#include <linux/ioport.h>
-#include <asm/io.h>
 
 #define KEYBOARD_IRQ			13
 #define DISABLE_KBD_DURING_INTERRUPTS	0
@@ -47,31 +44,6 @@ extern unsigned char pcikbd_sysrq_xlate[128];
 
 /* #define SYSRQ_KEY 0x54 */	/* sparc64 */
 #define SYSRQ_KEY 0x63		/* sparc */
-
-/* resource allocation */
-#define kbd_request_region() request_region(0x60, 16, "keyboard")
-#define kbd_request_irq(handler) request_irq(KEYBOARD_IRQ, handler, 0, \
-                                             "keyboard", NULL)
-
-/* How to access the keyboard macros on this platform.  */
-#define kbd_read_input() inb(KBD_DATA_REG)
-#define kbd_read_status() inb(KBD_STATUS_REG)
-#define kbd_write_output(val) outb(val, KBD_DATA_REG)
-#define kbd_write_command(val) outb(val, KBD_CNTL_REG)
-
-/* Some stoneage hardware needs delays after some operations.  */
-#define kbd_pause() do { } while(0)
-
-/*
- * Machine specific bits for the PS/2 driver
- */
-
-#define AUX_IRQ 12
-
-#define aux_request_irq(hand, dev_id)					\
-	request_irq(AUX_IRQ, hand, SA_SHIRQ, "PS/2 Mouse", dev_id)
-
-#define aux_free_irq(dev_id) free_irq(AUX_IRQ, dev_id)
 
 #endif /* __KERNEL__ */
 

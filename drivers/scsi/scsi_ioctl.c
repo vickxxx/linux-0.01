@@ -227,8 +227,10 @@ int scsi_ioctl_send_command(Scsi_Device *dev, Scsi_Ioctl_Command *sic)
     if(buf_needed){
 	buf_needed = (buf_needed + 511) & ~511;
 	if (buf_needed > MAX_BUF) buf_needed = MAX_BUF;
-	if ((buf = (char *) scsi_malloc(buf_needed)) == NULL)
-		return -ENOMEM;
+        spin_lock_irqsave(&io_request_lock, flags);
+	buf = (char *) scsi_malloc(buf_needed);
+        spin_unlock_irqrestore(&io_request_lock, flags);
+	if (!buf) return -ENOMEM;
 	memset(buf, 0, buf_needed);
     } else
 	buf = NULL;
@@ -403,7 +405,6 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 	return ioctl_probe(dev->host, arg);
     case SCSI_IOCTL_SEND_COMMAND:
 	if(!capable(CAP_SYS_ADMIN))  return -EACCES;
-	if(!capable(CAP_SYS_RAWIO))  return -EACCES;
 	return scsi_ioctl_send_command((Scsi_Device *) dev,
 				       (Scsi_Ioctl_Command *) arg);
     case SCSI_IOCTL_DOORLOCK:

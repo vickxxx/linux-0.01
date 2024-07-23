@@ -7,7 +7,6 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <asm/io.h>
 
 #define __EXTERN_INLINE inline
 #include <asm/mmu_context.h>
@@ -29,20 +28,64 @@
 extern void die_if_kernel(char *,struct pt_regs *,long, unsigned long *);
 
 
-/*
- * Force a new ASN for a task.
- */
+#ifdef __SMP__
+unsigned long last_asn[NR_CPUS] = { /* gag */
+  ASN_FIRST_VERSION +  (0 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (1 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (2 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (3 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (4 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (5 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (6 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (7 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (8 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION +  (9 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (10 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (11 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (12 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (13 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (14 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (15 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (16 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (17 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (18 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (19 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (20 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (21 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (22 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (23 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (24 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (25 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (26 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (27 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (28 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (29 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (30 << WIDTH_HARDWARE_ASN),
+  ASN_FIRST_VERSION + (31 << WIDTH_HARDWARE_ASN)
+};
+#else
+unsigned long asn_cache = ASN_FIRST_VERSION;
+#endif /* __SMP__ */
 
-#ifndef __SMP__
-unsigned long last_asn = ASN_FIRST_VERSION;
-#endif
+/*
+ * Select a new ASN for a task.
+ */
 
 void
 get_new_mmu_context(struct task_struct *p, struct mm_struct *mm)
 {
-	unsigned long new = __get_new_mmu_context();
-	mm->context[smp_processor_id()] = new;
-	p->tss.asn = new & HARDWARE_ASN_MASK;
+	unsigned long asn = asn_cache;
+
+	if ((asn & HARDWARE_ASN_MASK) < MAX_ASN)
+		++asn;
+	else {
+		tbiap();
+		imb();
+		asn = (asn & ~HARDWARE_ASN_MASK) + ASN_FIRST_VERSION;
+	}
+	asn_cache = asn;
+	mm->context = asn;			/* full version + asn */
+	p->tss.asn = asn & HARDWARE_ASN_MASK;	/* just asn */
 }
 
 /*
@@ -120,18 +163,9 @@ good_area:
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
 	}
-survive:
-	{
-		int fault = handle_mm_fault(current, vma, address, cause > 0);
-		if (!fault)
-			goto do_sigbus;
-		if (fault < 0)
-			goto out_of_memory;
-	}
+	handle_mm_fault(current, vma, address, cause > 0);
 	up(&mm->mmap_sem);
- out_unlock:
-	unlock_kernel();
-	return;
+	goto out;
 
 /*
  * Something tried to access memory that isn't in our memory map..
@@ -142,20 +176,17 @@ bad_area:
 
 	if (user_mode(regs)) {
 		force_sig(SIGSEGV, current);
-		goto out_unlock;
+		goto out;
 	}
 
-no_context:
 	/* Are we prepared to handle this fault as an exception?  */
-	if ((fixup = search_exception_table(regs->pc, regs->gp)) != 0) {
+	if ((fixup = search_exception_table(regs->pc)) != 0) {
 		unsigned long newpc;
 		newpc = fixup_exception(dpf_reg, fixup, regs->pc);
-#if 0
 		printk("%s: Exception at [<%lx>] (%lx)\n",
 		       current->comm, regs->pc, newpc);
-#endif
 		regs->pc = newpc;
-		goto out_unlock;
+		goto out;
 	}
 
 /*
@@ -166,37 +197,7 @@ no_context:
 	       "virtual address %016lx\n", address);
 	die_if_kernel("Oops", regs, cause, (unsigned long*)regs - 16);
 	do_exit(SIGKILL);
-
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-out_of_memory:
-	if (current->pid == 1)
-	{
-		current->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	up(&mm->mmap_sem);
-	if (user_mode(regs))
-	{
-		printk("VM: killing process %s\n", current->comm);
-		do_exit(SIGKILL);
-	}
-	goto no_context;
-
-do_sigbus:
-	up(&mm->mmap_sem);
-
-	/*
-	 * Send a sigbus, regardless of whether we were in kernel
-	 * or user mode.
-	 */
-	force_sig(SIGBUS, current);
-
-	/* Kernel mode? Handle exceptions or die */
-	if (!user_mode(regs))
-		goto no_context;
-	goto out_unlock;
+ out:
+	unlock_kernel();
 }
+

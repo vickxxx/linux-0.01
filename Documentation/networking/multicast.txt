@@ -1,13 +1,11 @@
-Behaviour of Cards Under Multicast
-==================================
+Behaviour of cards under Multicast. This is how they currently 
+behave not what the hardware can do - i.e. the lance driver doesn't
+use its filter, even though the code for loading it is in the DEC
+lance based driver.
 
-This is how they currently behave, not what the hardware can do--for example,
-the Lance driver doesn't use its filter, even though the code for loading
-it is in the DEC Lance-based driver.
-
-The following are requirements for multicasting 
+The following multicast requirements are needed
 -----------------------------------------------
-AppleTalk	Multicast	hardware filtering not important but
+Appletalk	Multicast	hardware filtering not important but
 				 avoid cards only doing promisc
 IP-Multicast	Multicast	hardware filters really help
 IP-MRoute	AllMulti	hardware filters are of no help

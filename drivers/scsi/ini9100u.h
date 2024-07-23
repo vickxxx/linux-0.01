@@ -63,9 +63,7 @@
  *		- Removed unused code
  * 12/13/98 bv	- v1.03b
  *		- Add spinlocks to HCS structure.
- * 21/01/99 bv	- v1.03e
- *		- Added PCI_ID structure
- **************************************************************************/
+*******************************************************************************/
 
 #ifndef	CVT_LINUX_VERSION
 #define	CVT_LINUX_VERSION(V,P,S)	(((V) * 65536) + ((P) * 256) + (S))
@@ -78,7 +76,6 @@
 #include "sd.h"
 
 extern int i91u_detect(Scsi_Host_Template *);
-extern int i91u_release(struct Scsi_Host *);
 extern int i91u_command(Scsi_Cmnd *);
 extern int i91u_queue(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 extern int i91u_abort(Scsi_Cmnd *);
@@ -91,7 +88,7 @@ extern struct proc_dir_entry proc_scsi_ini9100u;
 extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 #endif
 
-#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03g"
+#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03d"
 
 #if LINUX_VERSION_CODE < CVT_LINUX_VERSION(1, 3, 0)
 #define INI9100U	{ \
@@ -149,7 +146,7 @@ extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 	proc_info:	NULL,				\
 	name:		i91u_REVID, \
 	detect:		i91u_detect, \
-	release:	i91u_release, \
+	release:	NULL, \
 	info:		NULL,					\
 	command:	i91u_command, \
 	queuecommand:	i91u_queue, \
@@ -175,9 +172,7 @@ extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 #endif
 
 
-#ifndef VIRT_TO_BUS
 #define VIRT_TO_BUS(i)  (unsigned int) virt_to_bus((void *)(i))
-#endif
 #define ULONG   unsigned long
 #define USHORT  unsigned short
 #define UCHAR   unsigned char
@@ -212,19 +207,11 @@ extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 #define SENSE_SIZE		14
 
 #define INI_VENDOR_ID   0x1101	/* Initio's PCI vendor ID       */
-#define DMX_VENDOR_ID	0x134a	/* Domex's PCI vendor ID	*/
+#define DMX_VENDOR_ID   0x134a	/* Domex's PCI vendor ID       */
 #define I950_DEVICE_ID	0x9500	/* Initio's inic-950 product ID   */
 #define I940_DEVICE_ID	0x9400	/* Initio's inic-940 product ID   */
 #define I935_DEVICE_ID	0x9401	/* Initio's inic-935 product ID   */
 #define I920_DEVICE_ID	0x0002	/* Initio's other product ID      */
-
-/************************************************************************/
-/*              Vendor ID/Device ID Pair Structure			*/
-/************************************************************************/
-typedef struct PCI_ID_Struc {
-	unsigned short vendor_id;
-	unsigned short device_id;
-} PCI_ID;
 
 /************************************************************************/
 /*              Scatter-Gather Element Structure                        */

@@ -7,11 +7,13 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET	:= mm.o
-O_OBJS		:= init.o extable.o fault-$(PROCESSOR).o small_page.o
+all:	lib first_rule
+
+O_TARGET := mm.o
+O_OBJS   := init.o extable.o fault-$(PROCESSOR).o small_page.o
 
 ifeq ($(PROCESSOR),armo)
- O_OBJS		+= proc-arm2,3.o
+ O_OBJS += proc-arm2,3.o
 endif
 
 ifeq ($(PROCESSOR),armv)
@@ -20,8 +22,11 @@ endif
 
 include $(TOPDIR)/Rules.make
 
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) $(AFLAGS_$@) -traditional -c -o $*.o $<
+%.o: %.S
+	$(CC) $(CFLAGS) -D__ASSEMBLY__ -c -o $@ $<
+
+.PHONY:	lib
+lib:;	@$(MAKE) -C ../lib constants.h
 
 # Special dependencies
 fault-armv.o: fault-common.c

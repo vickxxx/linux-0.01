@@ -1,7 +1,8 @@
 /*
  * Amiga Linux/68k A2065 Ethernet Driver
  *
- * (C) Copyright 1995 by Geert Uytterhoeven <geert@linux-m68k.org>
+ * (C) Copyright 1995 by Geert Uytterhoeven
+ *			(Geert.Uytterhoeven@cs.kuleuven.ac.be)
  *
  * ---------------------------------------------------------------------------
  *

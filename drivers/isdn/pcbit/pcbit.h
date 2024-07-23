@@ -46,7 +46,6 @@ struct pcbit_dev {
 	/* board */
 
 	volatile unsigned char* sh_mem;		/* RDP address	*/
-	unsigned long ph_mem;
 	unsigned int irq;
 	unsigned int id;
 	unsigned int interrupt;			/* set during interrupt 
@@ -69,7 +68,7 @@ struct pcbit_dev {
 	struct frame_buf *write_queue;
 
 	/* Protocol start */
-	wait_queue_head_t set_running_wq;
+	struct wait_queue *set_running_wq;
 	struct timer_list set_running_timer;
 
 	struct timer_list error_recover_timer;
@@ -167,3 +166,10 @@ struct pcbit_ioctl {
 #define L2_ERROR    6
 
 #endif
+
+
+
+
+
+
+

@@ -1,4 +1,4 @@
-/* $Id: PeeCeeI.c,v 1.3.6.1 1999/09/04 17:49:23 davem Exp $
+/* $Id: PeeCeeI.c,v 1.3 1997/08/28 23:59:52 davem Exp $
  * PeeCeeI.c: The emerging standard...
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -9,7 +9,6 @@
 #ifdef CONFIG_PCI
 
 #include <asm/io.h>
-#include <asm/byteorder.h>
 
 void outsb(unsigned long addr, const void *src, unsigned long count)
 {
@@ -22,29 +21,25 @@ void outsb(unsigned long addr, const void *src, unsigned long count)
 void outsw(unsigned long addr, const void *src, unsigned long count)
 {
 	if(count) {
-		u16 *ps = (u16 *)src;
-		u32 *pi;
+		const u16 *ps = src;
+		const u32 *pi;
 
 		if(((u64)src) & 0x2) {
-			u16 val = le16_to_cpup(ps);
-			outw(val, addr);
-			ps++;
+			outw(*ps++, addr);
 			count--;
 		}
-		pi = (u32 *)ps;
+		pi = (const u32 *)ps;
 		while(count >= 2) {
-			u32 w = le32_to_cpup(pi);
+			u32 w;
 
-			pi++;
-			outw(w >> 0, addr);
+			w = *pi++;
 			outw(w >> 16, addr);
+			outw(w, addr);
 			count -= 2;
 		}
-		ps = (u16 *)pi;
-		if(count) {
-			u16 val = le16_to_cpup(ps);
-			outw(val, addr);
-		}
+		ps = (const u16 *)pi;
+		if(count)
+			outw(*ps, addr);
 	}
 }
 
@@ -52,71 +47,60 @@ void outsl(unsigned long addr, const void *src, unsigned long count)
 {
 	if(count) {
 		if((((u64)src) & 0x3) == 0) {
-			u32 *p = (u32 *)src;
-			while(count--) {
-				u32 val = cpu_to_le32p(p);
-				outl(val, addr);
-				p++;
-			}
+			const u32 *p = src;
+			while(count--)
+				outl(*p++, addr);
 		} else {
-			u8 *pb;
-			u16 *ps = (u16 *)src;
+			const u8 *pb;
+			const u16 *ps = src;
 			u32 l = 0, l2;
-			u32 *pi;
+			const u32 *pi;
 
 			switch(((u64)src) & 0x3) {
 			case 0x2:
 				count -= 1;
-				l = cpu_to_le16p(ps) << 16;
-				ps++;
-				pi = (u32 *)ps;
+				l = *ps++;
+				pi = (const u32 *)ps;
 				while(count--) {
-					l2 = cpu_to_le32p(pi);
-					pi++;
-					outl(((l >> 16) | (l2 << 16)), addr);
+					l2 = *pi++;
+					outl(((l <<16) | (l2 >> 16)), addr);
 					l = l2;
 				}
-				ps = (u16 *)pi;
-				l2 = cpu_to_le16p(ps);
-				outl(((l >> 16) | (l2 << 16)), addr);
+				ps = (const u16 *)pi;
+				outl(((l << 16) | (*ps >> 16)), addr);
 				break;
 
 			case 0x1:
 				count -= 1;
-				pb = (u8 *)src;
-				l = (*pb++ << 8);
-				ps = (u16 *)pb;
-				l2 = cpu_to_le16p(ps);
-				ps++;
-				l |= (l2 << 16);
-				pi = (u32 *)ps;
+				pb = src;
+				l = (*pb++ << 16);
+				ps = (const u16 *)pb;
+				l |= *ps++;
+				pi = (const u32 *)ps;
 				while(count--) {
-					l2 = cpu_to_le32p(pi);
-					pi++;
-					outl(((l >> 8) | (l2 << 24)), addr);
+					l2 = *pi++;
+					outl(((l << 8) | (l2 >> 24)), addr);
 					l = l2;
 				}
-				pb = (u8 *)pi;
-				outl(((l >> 8) | (*pb << 24)), addr);
+				pb = (const u8 *)pi;
+				outl(((l << 8) | (*pb >> 24)), addr);
 				break;
 
 			case 0x3:
 				count -= 1;
-				pb = (u8 *)src;
-				l = (*pb++ << 24);
-				pi = (u32 *)pb;
+				pb = src;
+				l = (*pb++ >> 24);
+				pi = (const u32 *)pb;
 				while(count--) {
-					l2 = cpu_to_le32p(pi);
-					pi++;
-					outl(((l >> 24) | (l2 << 8)), addr);
+					l2 = *pi++;
+					outl(((l << 24) | (l2 >> 8)), addr);
 					l = l2;
 				}
-				ps = (u16 *)pi;
-				l2 = cpu_to_le16p(ps);
-				ps++;
-				pb = (u8 *)ps;
-				l2 |= (*pb << 16);
-				outl(((l >> 24) | (l2 << 8)), addr);
+				ps = (const u16 *)pi;
+				l2 = (*ps++ << 16);
+				pb = (const u8 *)ps;
+				l2 |= (*pb << 8);
+				outl(((l << 24) | (l2 >> 8)), addr);
 				break;
 			}
 		}
@@ -138,7 +122,7 @@ void insb(unsigned long addr, void *dst, unsigned long count)
 			w  = (inb(addr) << 24);
 			w |= (inb(addr) << 16);
 			w |= (inb(addr) << 8);
-			w |= (inb(addr) << 0);
+			w |= inb(addr);
 			*pi++ = w;
 			count -= 4;
 		}
@@ -155,21 +139,21 @@ void insw(unsigned long addr, void *dst, unsigned long count)
 		u32 *pi;
 
 		if(((unsigned long)ps) & 0x2) {
-			*ps++ = le16_to_cpu(inw(addr));
+			*ps++ = inw(addr);
 			count--;
 		}
 		pi = (u32 *)ps;
 		while(count >= 2) {
 			u32 w;
 
-			w  = (le16_to_cpu(inw(addr)) << 16);
-			w |= (le16_to_cpu(inw(addr)) << 0);
+			w  = (inw(addr) << 16);
+			w |= inw(addr);
 			*pi++ = w;
 			count -= 2;
 		}
 		ps = (u16 *)pi;
 		if(count)
-			*ps = le16_to_cpu(inw(addr));
+			*ps = inw(addr);
 	}
 }
 
@@ -179,7 +163,7 @@ void insl(unsigned long addr, void *dst, unsigned long count)
 		if((((unsigned long)dst) & 0x3) == 0) {
 			u32 *pi = dst;
 			while(count--)
-				*pi++ = le32_to_cpu(inl(addr));
+				*pi++ = inl(addr);
 		} else {
 			u32 l = 0, l2, *pi;
 			u16 *ps;
@@ -189,48 +173,47 @@ void insl(unsigned long addr, void *dst, unsigned long count)
 			case 0x2:
 				ps = dst;
 				count -= 1;
-				l = le32_to_cpu(inl(addr));
-				*ps++ = l;
+				l = inl(addr);
+				*ps++ = (l >> 16);
 				pi = (u32 *)ps;
 				while(count--) {
-					l2 = le32_to_cpu(inl(addr));
+					l2 = inl(addr);
 					*pi++ = (l << 16) | (l2 >> 16);
 					l = l2;
 				}
 				ps = (u16 *)pi;
-				*ps = l;
+				*ps = (l << 16);
 				break;
 
 			case 0x1:
 				pb = dst;
 				count -= 1;
-				l = le32_to_cpu(inl(addr));
-				*pb++ = l >> 24;
+				*pb++ = (l >> 24);
 				ps = (u16 *)pb;
-				*ps++ = ((l >> 8) & 0xffff);
+				*ps++ = (l >> 8);
 				pi = (u32 *)ps;
 				while(count--) {
-					l2 = le32_to_cpu(inl(addr));
-					*pi++ = (l << 24) | (l2 >> 8);
+					l2 = inl(addr);
+					*pi++ = ((l << 24) | (l2 >> 8));
 					l = l2;
 				}
 				pb = (u8 *)pi;
-				*pb = l;
+				*pb = (l >> 8);
 				break;
 
 			case 0x3:
 				pb = (u8 *)dst;
 				count -= 1;
-				l = le32_to_cpu(inl(addr));
+				l = inl(addr);
 				*pb++ = l >> 24;
 				pi = (u32 *)pb;
 				while(count--) {
-					l2 = le32_to_cpu(inl(addr));
-					*pi++ = (l << 8) | (l2 >> 24);
+					l2 = inl(addr);
+					*pi++ = ((l >> 24) | (l2 << 8));
 					l = l2;
 				}
 				ps = (u16 *)pi;
-				*ps++ = ((l >> 8) & 0xffff);
+				*ps++ = l >> 8;
 				pb = (u8 *)ps;
 				*pb = l;
 				break;

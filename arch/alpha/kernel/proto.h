@@ -1,5 +1,4 @@
 /* Prototypes of functions used across modules here in this directory.  */
-#include <linux/pci.h>
 
 #define vucp	volatile unsigned char  *
 #define vusp	volatile unsigned short *
@@ -45,23 +44,6 @@ extern int cia_hose_write_config_dword (u8, u8, u8, u32 value,
 extern void cia_init_arch(unsigned long *, unsigned long *);
 extern void cia_machine_check(u64, u64, struct pt_regs *);
 
-/* core_irongate.c */
-extern int irongate_hose_read_config_byte (u8, u8, u8, u8 *value,
-					  struct linux_hose_info *hose);
-extern int irongate_hose_read_config_word (u8, u8, u8, u16 *value,
-					  struct linux_hose_info *hose);
-extern int irongate_hose_read_config_dword (u8, u8, u8, u32 *value,
-					   struct linux_hose_info *hose);
-extern int irongate_hose_write_config_byte (u8, u8, u8, u8 value,
-					   struct linux_hose_info *hose);
-extern int irongate_hose_write_config_word (u8, u8, u8, u16 value,
-					   struct linux_hose_info *hose);
-extern int irongate_hose_write_config_dword (u8, u8, u8, u32 value,
-					    struct linux_hose_info *hose);
-extern void irongate_init_arch(unsigned long *, unsigned long *);
-extern void irongate_machine_check(u64, u64, struct pt_regs *);
-extern int irongate_pci_clr_err(void);
-
 /* core_lca.c */
 extern int lca_hose_read_config_byte (u8, u8, u8, u8 *value,
 				      struct linux_hose_info *hose);
@@ -92,7 +74,6 @@ extern int mcpcia_hose_write_config_word (u8, u8, u8, u16 value,
 extern int mcpcia_hose_write_config_dword (u8, u8, u8, u32 value,
 					   struct linux_hose_info *hose);
 extern void mcpcia_init_arch(unsigned long *, unsigned long *);
-extern void mcpcia_init_hoses(void);
 extern void mcpcia_machine_check(u64, u64, struct pt_regs *);
 
 /* core_polaris.c */
@@ -165,17 +146,11 @@ extern void tsunami_machine_check(u64, u64, struct pt_regs *);
 
 /* setup.c */
 extern unsigned long srm_hae;
-extern int srmcons_output;
-extern void register_srm_console(void);
-extern void unregister_srm_console(void);
 
 /* smp.c */
 extern void setup_smp(void);
 extern int smp_info(char *buffer);
 extern void handle_ipi(struct pt_regs *);
-extern void smp_percpu_timer_interrupt(struct pt_regs *);
-extern int smp_boot_cpuid;
-extern unsigned long cpu_present_mask;
 
 /* bios32.c */
 extern void reset_for_srm(void);
@@ -203,7 +178,7 @@ extern unsigned long alpha_read_fp_reg (unsigned long reg);
 extern void wrmces(unsigned long mces);
 extern void cserve_ena(unsigned long);
 extern void cserve_dis(unsigned long);
-extern void __smp_callin(unsigned long);
+extern void __start_cpu(unsigned long);
 
 /* entry.S */
 extern void entArith(void);
@@ -216,18 +191,11 @@ extern void entDbg(void);
 
 /* process.c */
 extern void generic_kill_arch (int mode, char *reboot_cmd);
-extern int cpu_idle(void *) __attribute__((noreturn));
+extern void cpu_idle(void *) __attribute__((noreturn));
 
 /* ptrace.c */
 extern int ptrace_set_bpt (struct task_struct *child);
 extern int ptrace_cancel_bpt (struct task_struct *child);
 
 /* ../mm/init.c */
-extern void switch_to_system_map(void);
 void srm_paging_stop(void);
-
-/* irq.c */
-extern void process_mcheck_info(unsigned long vector, unsigned long la_ptr,
-				struct pt_regs *regs, char *machine,
-				unsigned int debug, unsigned int expected);
-

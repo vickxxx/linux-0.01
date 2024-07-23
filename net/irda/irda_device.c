@@ -1,35 +1,28 @@
 /*********************************************************************
  *                
  * Filename:      irda_device.c
- * Version:       0.9
- * Description:   Utility functions used by the device drivers
+ * Version:       0.5
+ * Description:   Abstract device driver layer and helper functions
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
- * Created at:    Sat Oct  9 09:22:27 1999
- * Modified at:   Wed Mar  1 11:00:34 2000
+ * Created at:    Wed Sep  2 20:22:08 1998
+ * Modified at:   Wed Apr 21 09:48:19 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1999-2000 Dag Brattli, All Rights Reserved.
- *     
+ *     Copyright (c) 1998 Dag Brattli, All Rights Reserved.
+ *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
- * 
- *     This program is distributed in the hope that it will be useful,
- *     but WITHOUT ANY WARRANTY; without even the implied warranty of
- *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- *     GNU General Public License for more details.
- * 
- *     You should have received a copy of the GNU General Public License 
- *     along with this program; if not, write to the Free Software 
- *     Foundation, Inc., 59 Temple Place, Suite 330, Boston, 
- *     MA 02111-1307 USA
+ *  
+ *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     provide warranty for any of this software. This material is 
+ *     provided "AS-IS" and at no charge.
  *     
  ********************************************************************/
 
 #include <linux/config.h>
-#include <linux/string.h>
 #include <linux/proc_fs.h>
 #include <linux/skbuff.h>
 #include <linux/if.h>
@@ -38,79 +31,51 @@
 #include <linux/netdevice.h>
 #include <linux/init.h>
 #include <linux/tty.h>
-#include <linux/kmod.h>
-#include <linux/wireless.h>
-#include <asm/spinlock.h>
 
 #include <asm/ioctls.h>
 #include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <asm/dma.h>
-#include <asm/io.h>
+#include <asm/spinlock.h>
 
 #include <net/pkt_sched.h>
 
 #include <net/irda/irda_device.h>
-#include <net/irda/irlap.h>
+#include <net/irda/irlap_frame.h>
 #include <net/irda/timer.h>
 #include <net/irda/wrapper.h>
 
 extern int irtty_init(void);
-extern int nsc_ircc_init(void);
-extern int ircc_init(void);
+extern int pc87108_init(void);
 extern int w83977af_init(void);
 extern int esi_init(void);
 extern int tekram_init(void);
 extern int actisys_init(void);
 extern int girbil_init(void);
-extern int toshoboe_init(void);
-extern int litelink_init(void);
 
-static void __irda_task_delete(struct irda_task *task);
+hashbin_t *irda_device = NULL;
 
-static hashbin_t *dongles = NULL;
-static hashbin_t *tasks = NULL;
-
-const char *infrared_mode[] = {
-	"IRDA_IRLAP",
-	"IRDA_RAW",
-	"SHARP_ASK",
-	"TV_REMOTE",
-};
-
-static const char *task_state[] = {
-	"IRDA_TASK_INIT",
-	"IRDA_TASK_DONE", 
-	"IRDA_TASK_WAIT",
-	"IRDA_TASK_WAIT1",
-	"IRDA_TASK_WAIT2",
-	"IRDA_TASK_WAIT3",
-	"IRDA_TASK_CHILD_INIT",
-	"IRDA_TASK_CHILD_WAIT",
-	"IRDA_TASK_CHILD_DONE",
-};
-
-static void irda_task_timer_expired(void *data);
+/* Netdevice functions */
+static int irda_device_net_rebuild_header(struct sk_buff *skb);
+static int irda_device_net_hard_header(struct sk_buff *skb, 
+				       struct device *dev,
+				       unsigned short type, void *daddr, 
+				       void *saddr, unsigned len);
+static int irda_device_net_set_config( struct device *dev, struct ifmap *map);
+static int irda_device_net_change_mtu( struct device *dev, int new_mtu);
 
 #ifdef CONFIG_PROC_FS
-int irda_device_proc_read(char *buf, char **start, off_t offset, int len, 
-			  int unused);
+int irda_device_proc_read( char *buf, char **start, off_t offset, int len, 
+			   int unused);
 
 #endif /* CONFIG_PROC_FS */
 
-int __init irda_device_init( void)
+__initfunc(int irda_device_init( void))
 {
-	dongles = hashbin_new(HB_GLOBAL);
-	if (dongles == NULL) {
-		printk(KERN_WARNING 
-		       "IrDA: Can't allocate dongles hashbin!\n");
-		return -ENOMEM;
-	}
-
-	tasks = hashbin_new(HB_GLOBAL);
-	if (tasks == NULL) {
-		printk(KERN_WARNING 
-		       "IrDA: Can't allocate tasks hashbin!\n");
+	/* Allocate master array */
+	irda_device = hashbin_new( HB_LOCAL);
+	if ( irda_device == NULL) {
+		printk( KERN_WARNING "IrDA: Can't allocate irda_device hashbin!\n");
 		return -ENOMEM;
 	}
 
@@ -125,13 +90,7 @@ int __init irda_device_init( void)
 	w83977af_init();
 #endif
 #ifdef CONFIG_NSC_FIR
-	nsc_ircc_init();
-#endif
-#ifdef CONFIG_TOSHIBA_FIR
-	toshoboe_init();
-#endif
-#ifdef CONFIG_SMC_IRCC_FIR
-	ircc_init();
+	pc87108_init();
 #endif
 #ifdef CONFIG_ESI_DONGLE
 	esi_init();
@@ -145,21 +104,158 @@ int __init irda_device_init( void)
 #ifdef CONFIG_GIRBIL_DONGLE
 	girbil_init();
 #endif
-#ifdef CONFIG_LITELINK_DONGLE
-	litelink_init();
-#endif
-#ifdef CONFIG_OLD_BELKIN
- 	old_belkin_init();
-#endif
 	return 0;
 }
 
 void irda_device_cleanup(void)
 {
-	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+	DEBUG(4, __FUNCTION__ "()\n");
 
-	hashbin_delete(tasks, (FREE_FUNC) __irda_task_delete);
-	hashbin_delete(dongles, NULL);
+	ASSERT(irda_device != NULL, return;);
+
+	hashbin_delete(irda_device, (FREE_FUNC) irda_device_close);
+}
+
+/*
+ * Function irda_device_open (self)
+ *
+ *    Open a new IrDA port device
+ *
+ */
+int irda_device_open(struct irda_device *self, char *name, void *priv)
+{        
+	int result;
+	int i=0;
+
+	/* Allocate memory if needed */
+	if (self->rx_buff.truesize > 0) {
+		self->rx_buff.head = ( __u8 *) kmalloc(self->rx_buff.truesize,
+						       self->rx_buff.flags);
+		if (self->rx_buff.head == NULL)
+			return -ENOMEM;
+
+		memset(self->rx_buff.head, 0, self->rx_buff.truesize);
+	}
+	if (self->tx_buff.truesize > 0) {
+		self->tx_buff.head = ( __u8 *) kmalloc(self->tx_buff.truesize, 
+						       self->tx_buff.flags);
+		if (self->tx_buff.head == NULL)
+			return -ENOMEM;
+
+		memset(self->tx_buff.head, 0, self->tx_buff.truesize);
+	}
+	
+      	self->magic = IRDA_DEVICE_MAGIC;
+
+	self->rx_buff.in_frame = FALSE;
+	self->rx_buff.state = OUTSIDE_FRAME;
+	self->tx_buff.data = self->tx_buff.head;
+	self->rx_buff.data = self->rx_buff.head;
+
+	/* Initialize timers */
+	init_timer(&self->media_busy_timer);	
+
+	/* A pointer to the low level implementation */
+	self->priv = priv;
+
+	/* Initialize IrDA net device */
+	do {
+		sprintf(self->name, "%s%d", "irda", i++);
+	} while (dev_get(self->name) != NULL);
+	
+	self->netdev.name = self->name;
+	self->netdev.priv = (void *) self;
+	self->netdev.next = NULL;
+
+	if ((result = register_netdev(&self->netdev)) != 0) {
+		DEBUG(0, __FUNCTION__ "(), register_netdev() failed!\n");
+		return -1;
+	}
+	
+	/* 
+	 * Make the description for the device. self->netdev.name will get
+	 * a name like "irda0" and the self->descriptin will get a name
+	 * like "irda0 <-> irtty0" 
+	 */
+	strncpy(self->description, self->name, 5);
+	strcat(self->description, " <-> ");
+	strncat(self->description, name, 23);
+	
+	hashbin_insert(irda_device, (QUEUE *) self, (int) self, NULL);
+	
+	/* Open network device */
+	dev_open(&self->netdev);
+
+	MESSAGE("IrDA: Registred device %s\n", self->name);
+
+	irda_device_set_media_busy(self, FALSE);
+
+	/* 
+	 * Open new IrLAP layer instance, now that everything should be
+	 * initialized properly 
+	 */
+	self->irlap = irlap_open(self);
+        
+	/* It's now safe to initilize the saddr */
+	memcpy(self->netdev.dev_addr, &self->irlap->saddr, 4);
+
+	return 0;
+}
+
+/*
+ * Function irda_device_close (self)
+ *
+ *    Close this instance of the irda_device, just deallocate buffers
+ *
+ */
+void __irda_device_close(struct irda_device *self)
+{
+	DEBUG(4, __FUNCTION__ "()\n");
+
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return;);
+
+	/* We do this test to know if the device has been registered at all */
+	if (self->netdev.type == ARPHRD_IRDA) {
+		dev_close(&self->netdev);
+		
+		/* Remove netdevice */
+		unregister_netdev(&self->netdev);
+	}
+
+	/* Stop timers */
+	del_timer(&self->media_busy_timer);
+
+	if (self->tx_buff.head)
+		kfree(self->tx_buff.head);
+
+	if (self->rx_buff.head)
+		kfree(self->rx_buff.head);
+
+	self->magic = 0;
+}
+
+/*
+ * Function irda_device_close (self)
+ *
+ *    
+ *
+ */
+void irda_device_close(struct irda_device *self)
+{
+	DEBUG(4, __FUNCTION__ "()\n");
+
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return;);
+
+	/* Stop and remove instance of IrLAP */
+	if (self->irlap)
+		irlap_close(self->irlap);
+	self->irlap = NULL;
+
+	hashbin_remove(irda_device, (int) self, NULL);
+
+	__irda_device_close(self);
 }
 
 /*
@@ -168,243 +264,102 @@ void irda_device_cleanup(void)
  *    Called when we have detected that another station is transmiting
  *    in contention mode.
  */
-void irda_device_set_media_busy(struct device *dev, int status) 
+void irda_device_set_media_busy(struct irda_device *self, int status) 
 {
-	struct irlap_cb *self;
-
-	IRDA_DEBUG(4, __FUNCTION__ "(%s)\n", status ? "TRUE" : "FALSE");
-
-	self = (struct irlap_cb *) dev->atalk_ptr;
+	DEBUG(4, __FUNCTION__ "(%s)\n", status ? "TRUE" : "FALSE");
 
 	ASSERT(self != NULL, return;);
-	ASSERT(self->magic == LAP_MAGIC, return;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return;);
 
 	if (status) {
 		self->media_busy = TRUE;
-		irlap_start_mbusy_timer(self);
-		IRDA_DEBUG( 4, "Media busy!\n");
+		irda_device_start_mbusy_timer(self);
+		DEBUG( 4, "Media busy!\n");
 	} else {
 		self->media_busy = FALSE;
 		del_timer(&self->media_busy_timer);
 	}
 }
 
-int irda_device_set_dtr_rts(struct device *dev, int dtr, int rts)
-{	
-	struct if_irda_req req;
-	int ret;
-
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
-	if (!dev->do_ioctl) {
-		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
-		      "device driver\n");
-		return -1;
-	}
-
-	req.ifr_dtr = dtr;
-	req.ifr_rts = rts;
-
-	ret = dev->do_ioctl(dev, (struct ifreq *) &req, SIOCSDTRRTS);
-
-	return ret;
-}
-
-int irda_device_change_speed(struct device *dev, __u32 speed)
-{	
-	struct if_irda_req req;
-	int ret;
-
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
-	if (!dev->do_ioctl) {
-		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
-		      "device driver\n");
-		return -1;
-	}
-
-	req.ifr_baudrate = speed;
-
-	ret = dev->do_ioctl(dev, (struct ifreq *) &req, SIOCSBANDWIDTH);
-
-	return ret;
-}
-
 /*
- * Function irda_device_is_receiving (dev)
+ * Function __irda_device_change_speed (self, speed)
  *
- *    Check if the device driver is currently receiving data
- *
+ *    When this function is called, we will have a process context so its
+ *    possible for us to sleep, wait or whatever :-)
  */
-int irda_device_is_receiving(struct device *dev)
+static void __irda_device_change_speed(struct irda_device *self, int speed)
 {
-	struct if_irda_req req;
-	int ret;
-
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
-	if (!dev->do_ioctl) {
-		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
-		      "device driver\n");
-		return -1;
-	}
-
-	ret = dev->do_ioctl(dev, (struct ifreq *) &req, SIOCGRECEIVING);
-	if (ret < 0)
-		return ret;
-
-	return req.ifr_receiving;
-}
-
-void irda_task_next_state(struct irda_task *task, TASK_STATE state)
-{
-	IRDA_DEBUG(2, __FUNCTION__ "(), state = %s\n", task_state[state]);
-
-	task->state = state;
-}
-
-static void __irda_task_delete(struct irda_task *task)
-{
-	del_timer(&task->timer);
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return;);
 	
-	kfree(task);
-}
+	/*
+	 *  Is is possible to change speed yet? Wait until the last byte 
+	 *  has been transmitted.
+	 */
+	if (self->wait_until_sent) {
+		self->wait_until_sent(self);
+		if (self->change_speed) {
+			self->change_speed(self, speed);
 
-void irda_task_delete(struct irda_task *task)
-{
-	/* Unregister task */
-	hashbin_remove(tasks, (int) task, NULL);
-
-	__irda_task_delete(task);
-}
-
-/*
- * Function irda_task_kick (task)
- *
- *    Tries to execute a task possible multiple times until the task is either
- *    finished, or askes for a timeout. When a task is finished, we do post
- *    processing, and notify the parent task, that is waiting for this task
- *    to complete.
- */
-int irda_task_kick(struct irda_task *task)
-{
-	int finished = TRUE;
-	int count = 0;
-	int timeout;
-
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
-
-	ASSERT(task != NULL, return -1;);
-	ASSERT(task->magic == IRDA_TASK_MAGIC, return -1;);
-
-	/* Execute task until it's finished, or askes for a timeout */
-	do {
-		timeout = task->function(task);
-		if (count++ > 100) {
-			ERROR(__FUNCTION__ "(), error in task handler!\n");
-			irda_task_delete(task);
-			return TRUE;
-		}			
-	} while ((timeout == 0) && (task->state != IRDA_TASK_DONE));
-
-	if (timeout < 0) {
-		ERROR(__FUNCTION__ "(), Error executing task!\n");
-		irda_task_delete(task);
-		return TRUE;
-	}
-
-	/* Check if we are finished */
-	if (task->state == IRDA_TASK_DONE) {
-		del_timer(&task->timer);
-
-		/* Do post processing */
-		if (task->finished)
-			task->finished(task);
-
-		/* Notify parent */
-		if (task->parent) {
-			/* Check if parent is waiting for us to complete */
-			if (task->parent->state == IRDA_TASK_CHILD_WAIT) {
-				task->parent->state = IRDA_TASK_CHILD_DONE;
-
-				/* Stop timer now that we are here */
-				del_timer(&task->parent->timer);
-
-				/* Kick parent task */
-				irda_task_kick(task->parent);
-			}
-		}		
-		irda_task_delete(task);
-	} else if (timeout > 0) {
-		irda_start_timer(&task->timer, timeout, (void *) task, 
-				 irda_task_timer_expired);
-		finished = FALSE;
+			/* Update the QoS value only */
+			self->qos.baud_rate.value = speed;
+		}
 	} else {
-		IRDA_DEBUG(0, __FUNCTION__ 
-			   "(), not finished, and no timeout!\n");
-		finished = FALSE;
+		printk(KERN_WARNING "wait_until_sent() "
+		       "has not implemented by the IrDA device driver!\n");
 	}
-
-	return finished;
 }
 
 /*
- * Function irda_task_execute (instance, function, finished)
+ * Function irda_device_change_speed (self, speed)
  *
- *    This function registers and tries to execute tasks that may take some
- *    time to complete. We do it this hairy way since we may have been
- *    called from interrupt context, so it's not possible to use
- *    schedule_timeout() 
+ *    Change the speed of the currently used irda_device
+ *
  */
-struct irda_task *irda_task_execute(void *instance, TASK_CALLBACK function, 
-				    TASK_CALLBACK finished, 
-				    struct irda_task *parent, void *param)
+inline void irda_device_change_speed(struct irda_device *self, int speed)
 {
-	struct irda_task *task;
-	int ret;
+	DEBUG(4, __FUNCTION__ "()\n");
 
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return;);
 
-	task = kmalloc(sizeof(struct irda_task), GFP_ATOMIC);
-	if (!task)
-		return NULL;
+	irda_execute_as_process(self, 
+				(TODO_CALLBACK) __irda_device_change_speed, 
+				speed);
+}
 
-	task->state    = IRDA_TASK_INIT;
-	task->instance = instance;
-	task->function = function;
-	task->finished = finished;
-	task->parent   = parent;
-	task->param    = param;	
-	task->magic    = IRDA_TASK_MAGIC;
+inline int irda_device_is_media_busy( struct irda_device *self)
+{
+	ASSERT( self != NULL, return FALSE;);
+	ASSERT( self->magic == IRDA_DEVICE_MAGIC, return FALSE;);
+	
+	return self->media_busy;
+}
 
-	init_timer(&task->timer);
+inline int irda_device_is_receiving( struct irda_device *self)
+{
+	ASSERT( self != NULL, return FALSE;);
+	ASSERT( self->magic == IRDA_DEVICE_MAGIC, return FALSE;);
 
-	/* Register task */
-	hashbin_insert(tasks, (queue_t *) task, (int) task, NULL);
-
-	/* No time to waste, so lets get going! */
-	ret = irda_task_kick(task);
-	if (ret)
-		return NULL;
+	if ( self->is_receiving)
+		return self->is_receiving( self);
 	else
-		return task;
+		return FALSE;
 }
 
-/*
- * Function irda_task_timer_expired (data)
- *
- *    Task time has expired. We now try to execute task (again), and restart
- *    the timer if the task has not finished yet
- */
-static void irda_task_timer_expired(void *data)
+inline struct qos_info *irda_device_get_qos( struct irda_device *self)
 {
-	struct irda_task *task;
+	ASSERT( self != NULL, return NULL;);
+	ASSERT( self->magic == IRDA_DEVICE_MAGIC, return NULL;);
 
-	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+	return &self->qos;
+}
 
-	task = (struct irda_task *) data;
+static struct enet_statistics *irda_device_get_stats( struct device *dev)
+{
+	struct irda_device *priv = (struct irda_device *) dev->priv;
 
-	irda_task_kick(task);
+	return &priv->stats;
 }
 
 /*
@@ -415,13 +370,24 @@ static void irda_task_timer_expired(void *data)
  */
 int irda_device_setup(struct device *dev) 
 {
+	struct irda_device *self;
+
+	DEBUG(4, __FUNCTION__ "()\n");
+
 	ASSERT(dev != NULL, return -1;);
 
+	self = (struct irda_device *) dev->priv;
+
+	ASSERT(self != NULL, return -1;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return -1;);	
+
+	dev->get_stats	     = irda_device_get_stats;
+	dev->rebuild_header  = irda_device_net_rebuild_header;
+	dev->set_config      = irda_device_net_set_config;
+	dev->change_mtu      = irda_device_net_change_mtu;
+/*  	dev->hard_header     = irda_device_net_hard_header; */
         dev->hard_header_len = 0;
         dev->addr_len        = 0;
-
-	/* dev->new_style       = 1; */
-	/* dev->destructor      = irda_device_destructor; */
 
         dev->type            = ARPHRD_IRDA;
         dev->tx_queue_len    = 8; /* Window size + 1 s-frame */
@@ -439,143 +405,67 @@ int irda_device_setup(struct device *dev)
 }
 
 /*
- * Function irda_device_txqueue_empty (dev)
+ * Function irda_device_net_rebuild_header (buff, dev, dst, skb)
+ *
+ *    
+ *
+ */
+static int irda_device_net_rebuild_header( struct sk_buff *skb)
+{
+	DEBUG( 4, __FUNCTION__ "()\n");
+
+	return 0;
+}
+
+static int irda_device_net_hard_header(struct sk_buff *skb, struct device *dev,
+				       unsigned short type, void *daddr, 
+				       void *saddr, unsigned len)
+{
+	DEBUG( 0, __FUNCTION__ "()\n");
+
+	skb->mac.raw = skb->data;
+        /* skb_push(skb,PPP_HARD_HDR_LEN); */
+        /* return PPP_HARD_HDR_LEN; */
+	
+	return 0;
+}
+
+static int irda_device_net_set_config( struct device *dev, struct ifmap *map)
+{
+	DEBUG( 0, __FUNCTION__ "()\n");
+
+	return 0;
+}
+
+static int irda_device_net_change_mtu( struct device *dev, int new_mtu)
+{
+     DEBUG( 0, __FUNCTION__ "()\n");
+     
+     return 0;  
+}
+
+/*
+ * Function irda_device_transmit_finished (void)
  *
  *    Check if there is still some frames in the transmit queue for this
  *    device. Maybe we should use: q->q.qlen == 0.
  *
  */
-int irda_device_txqueue_empty(struct device *dev)
+int irda_device_txqueue_empty( struct irda_device *self)
 {
-	if (skb_queue_len(&dev->qdisc->q))
+	ASSERT(self != NULL, return -1;);
+	ASSERT(self->magic == IRDA_DEVICE_MAGIC, return -1;);	
+
+	if (skb_queue_len(&self->netdev.qdisc->q))
 		return FALSE;
 
 	return TRUE;
 }
 
 /*
- * Function irda_device_init_dongle (self, type, qos)
- *
- *    Initialize attached dongle.
- */
-dongle_t *irda_device_dongle_init(struct device *dev, int type)
-{
-	struct dongle_reg *reg;
-	char modname[32];
-	dongle_t *dongle;
-
-	ASSERT(dev != NULL, return NULL;);
-
-#ifdef CONFIG_KMOD
-	/* Try to load the module needed */
-	sprintf(modname, "irda-dongle-%d", type);
-	request_module(modname);
-#endif /* CONFIG_KMOD */
-
-	if (!(reg = hashbin_find(dongles, type, NULL))) {
-		ERROR("IrDA: Unable to find requested dongle\n");
-		return NULL;
-	}
-
-	/* Allocate dongle info for this instance */
-	dongle = kmalloc(sizeof(dongle_t), GFP_KERNEL);
-	if (!dongle)
-		return NULL;
-
-	memset(dongle, 0, sizeof(dongle_t));
-
-	/* Bind the registration info to this particular instance */
-	dongle->issue = reg;
-	dongle->dev = dev;
-
-	return dongle;
-}
-
-/*
- * Function irda_device_dongle_cleanup (dongle)
- *
- *    
- *
- */
-int irda_device_dongle_cleanup(dongle_t *dongle)
-{
-	ASSERT(dongle != NULL, return -1;);
-
-	dongle->issue->close(dongle);
-
-	kfree(dongle);
-
-	return 0;
-}
-
-/*
- * Function irda_device_register_dongle (dongle)
- *
- *    
- *
- */
-int irda_device_register_dongle(struct dongle_reg *new)
-{
-	/* Check if this dongle has been registred before */
-	if (hashbin_find(dongles, new->type, NULL)) {
-		MESSAGE(__FUNCTION__ "(), Dongle already registered\n");
-                return 0;
-        }
-	
-	/* Insert IrDA dongle into hashbin */
-	hashbin_insert(dongles, (queue_t *) new, new->type, NULL);
-	
-        return 0;
-}
-
-/*
- * Function irda_device_unregister_dongle (dongle)
- *
- *    Unregister dongle, and remove dongle from list of registred dongles
- *
- */
-void irda_device_unregister_dongle(struct dongle_reg *dongle)
-{
-	struct dongle *node;
-
-	node = hashbin_remove(dongles, dongle->type, NULL);
-	if (!node) {
-		ERROR(__FUNCTION__ "(), dongle not found!\n");
-		return;
-	}
-}
-
-/*
- * Function irda_device_set_mode (self, mode)
- *
- *    Set the Infrared device driver into mode where it sends and receives
- *    data without using IrLAP framing. Check out the particular device
- *    driver to find out which modes it support.
- */
-int irda_device_set_mode(struct device* dev, int mode)
-{	
-	struct if_irda_req req;
-	int ret;
-
-	IRDA_DEBUG(0, __FUNCTION__ "()\n");
-
-	if (!dev->do_ioctl) {
-		ERROR(__FUNCTION__ "(), set_raw_mode not impl. by "
-		      "device driver\n");
-		return -1;
-	}
-	
-	req.ifr_mode = mode;
-
-	ret = dev->do_ioctl(dev, (struct ifreq *) &req, SIOCSMODE);
-	
-	return ret;
-}
-
-/*
  * Function setup_dma (idev, buffer, count, mode)
  *
- *    Setup the DMA channel. Commonly used by ISA FIR drivers
+ *    Setup the DMA channel
  *
  */
 void setup_dma(int channel, char *buffer, int count, int mode)
@@ -593,3 +483,88 @@ void setup_dma(int channel, char *buffer, int count, int mode)
 
 	release_dma_lock(flags);
 }
+
+#ifdef CONFIG_PROC_FS
+
+int irda_device_print_flags(struct irda_device *idev, char *buf)
+{
+	int len=0;
+
+	len += sprintf( buf+len, "\t");
+
+	if (idev->netdev.flags & IFF_UP)
+		len += sprintf( buf+len, "UP ");
+	if (!idev->netdev.tbusy)
+		len += sprintf( buf+len, "RUNNING ");
+
+	if (idev->flags & IFF_SIR)
+		len += sprintf( buf+len, "SIR ");
+	if (idev->flags & IFF_MIR)
+		len += sprintf( buf+len, "MIR ");
+	if (idev->flags & IFF_FIR)
+		len += sprintf( buf+len, "FIR ");
+	if (idev->flags & IFF_PIO)
+		len += sprintf( buf+len, "PIO ");
+	if (idev->flags & IFF_DMA)
+		len += sprintf( buf+len, "DMA ");
+	if (idev->flags & IFF_SHM)
+		len += sprintf( buf+len, "SHM ");
+	if (idev->flags & IFF_DONGLE)
+		len += sprintf( buf+len, "DONGLE ");
+
+	len += sprintf( buf+len, "\n");
+
+	return len;
+}
+
+/*
+ * Function irda_device_proc_read (buf, start, offset, len, unused)
+ *
+ *    Give some info to the /proc file system
+ *
+ */
+int irda_device_proc_read(char *buf, char **start, off_t offset, int len, 
+			  int unused)
+{
+	struct irda_device *self;
+	unsigned long flags;
+     
+	save_flags(flags);
+	cli();
+
+	len = 0;
+
+	self = (struct irda_device *) hashbin_get_first(irda_device);
+	while ( self != NULL) {
+		len += sprintf(buf+len, "%s,", self->name);
+		len += sprintf(buf+len, "\tbinding: %s\n", 
+			       self->description);
+		
+		len += irda_device_print_flags(self, buf+len);
+		len += sprintf(buf+len, "\tbps\tmaxtt\tdsize\twinsize\taddbofs\tmintt\tldisc\n");
+		
+		len += sprintf(buf+len, "\t%d\t", 
+			       self->qos.baud_rate.value);
+		len += sprintf(buf+len, "%d\t", 
+			       self->qos.max_turn_time.value);
+		len += sprintf(buf+len, "%d\t",
+			       self->qos.data_size.value);
+		len += sprintf(buf+len, "%d\t",
+			       self->qos.window_size.value);
+		len += sprintf(buf+len, "%d\t",
+			       self->qos.additional_bofs.value);
+		len += sprintf(buf+len, "%d\t", 
+			       self->qos.min_turn_time.value);
+		len += sprintf(buf+len, "%d", 
+			       self->qos.link_disc_time.value);
+		len += sprintf(buf+len, "\n");
+		
+		self = (struct irda_device *) hashbin_get_next(irda_device);
+	}
+	restore_flags(flags);
+
+	return len;
+}
+
+#endif /* CONFIG_PROC_FS */
+

@@ -1,9 +1,7 @@
 /*
  *  joy-thrustmaster.c  Version 1.2
  *
- *  Copyright (c) 1998-1999 Vojtech Pavlik
- *
- *  Sponsored by SuSE
+ *  Copyright (c) 1998 Vojtech Pavlik
  */
 
 /*
@@ -27,7 +25,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  * 
  * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
+ * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
@@ -40,15 +38,28 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/init.h>
 
 #define JS_TM_MAX_START		400
-#define JS_TM_MAX_STROBE	45
+#define JS_TM_MAX_STROBE	25
 #define JS_TM_MAX_LENGTH	13
 
 #define JS_TM_MODE_M3DI		1
 #define JS_TM_MODE_3DRP		3
-#define JS_TM_MODE_FGP		163
+#define JS_TM_MODE_WCS3		4
+
+#define JS_TM_MODE_MAX		5	/* Last mode + 1 */
+
+#define JS_TM_BYTE_A0		0
+#define JS_TM_BYTE_A1		1
+#define JS_TM_BYTE_A2		3
+#define JS_TM_BYTE_A3		4
+#define JS_TM_BYTE_A4		6
+#define JS_TM_BYTE_A5		7
+
+#define JS_TM_BYTE_D0		2
+#define JS_TM_BYTE_D1		5
+#define JS_TM_BYTE_D2		8
+#define JS_TM_BYTE_D3		9
 
 #define JS_TM_BYTE_ID		10
 #define JS_TM_BYTE_REV		11
@@ -57,13 +68,12 @@
 static int js_tm_port_list[] __initdata = {0x201, 0};
 static struct js_port* js_tm_port __initdata = NULL;
 
-static unsigned char js_tm_byte_a[16] = { 0, 1, 3, 4, 6, 7 };
-static unsigned char js_tm_byte_d[16] = { 2, 5, 8, 9 };
-
 struct js_tm_info {
 	int io;
 	unsigned char mode;
 };
+
+static int js_tm_id_to_def[JS_TM_MODE_MAX] = {0x00, 0x42, 0x00, 0x22, 0x00};
 
 /*
  * js_tm_read_packet() reads a ThrustMaster packet.
@@ -71,25 +81,35 @@ struct js_tm_info {
 
 static int js_tm_read_packet(int io, unsigned char *data)
 {
-	unsigned int t, p;
+	unsigned int t, t1;
 	unsigned char u, v, error;
 	int i, j;
 	unsigned long flags;
 
+	int start = (js_time_speed * JS_TM_MAX_START) >> 10;
+	int strobe = (js_time_speed * JS_TM_MAX_STROBE) >> 10;
+
 	error = 0;
 	i = j = 0;
-	p = t = JS_TM_MAX_START;
 
 	__save_flags(flags);
 	__cli();
 	outb(0xff,io);
-	
-	v = inb(io) >> 4;
+
+	t = js_get_time();
 
 	do {
-		t--;
-		u = v; v = inb(io) >> 4;
-		if (~v & u & 2) {
+		u = inb(io);
+		t1 = js_get_time();
+	} while ((u & 1) && js_delta(t1, t) < start);
+
+	t = t1;
+	u >>= 4;
+
+	do {
+		v = inb(io) >> 4;
+		t1 = js_get_time();
+		if ((u ^ v) & u & 2) {
 			if (j) {
 				if (j < 9) {				/* Data bit */
 					data[i] |= (~v & 1) << (j - 1);
@@ -104,9 +124,10 @@ static int js_tm_read_packet(int io, unsigned char *data)
 				error |= ~v & 1;
 				j++;
 			}
-			p = t = (p - t) << 1;
+			t = t1;
 		}
-	} while (!error && i < JS_TM_MAX_LENGTH && t > 0);
+		u = v;
+	} while (!error && i < JS_TM_MAX_LENGTH && js_delta(t1,t) < strobe);
 
 	__restore_flags(flags);
 
@@ -121,39 +142,46 @@ static int js_tm_read(void *xinfo, int **axes, int **buttons)
 {
 	struct js_tm_info *info = xinfo;
 	unsigned char data[JS_TM_MAX_LENGTH];
-	int i;
 
-	if (js_tm_read_packet(info->io, data)) return -1;
-	if (data[JS_TM_BYTE_ID] != info->mode) return -1;
-
-	for (i = 0; i < data[JS_TM_BYTE_DEF] >> 4; i++) axes[0][i] = data[js_tm_byte_a[i]];
+	if (js_tm_read_packet(info->io, data)) {
+		printk(KERN_WARNING "joy-thrustmaster: failed to read data packet\n");
+		return -1;
+	}
+	if (data[JS_TM_BYTE_ID] != info->mode) {
+		printk(KERN_WARNING "joy-thrustmaster: ID (%d) != mode (%d)\n",
+			data[JS_TM_BYTE_ID], info->mode);
+		return -1;
+	}
+	if (data[JS_TM_BYTE_DEF] != js_tm_id_to_def[info->mode]) {
+		printk(KERN_WARNING "joy-thrustmaster: DEF (%d) != def(mode) (%d)\n",
+			data[JS_TM_BYTE_DEF], js_tm_id_to_def[info->mode]);
+		return -1;
+	}
 
 	switch (info->mode) {
 
 		case JS_TM_MODE_M3DI:
 
-			axes[0][4] = ((data[js_tm_byte_d[0]] >> 3) & 1) - ((data[js_tm_byte_d[0]] >> 1) & 1);
-			axes[0][5] = ((data[js_tm_byte_d[0]] >> 2) & 1) - ( data[js_tm_byte_d[0]]       & 1);
+			axes[0][0] = data[JS_TM_BYTE_A0];
+			axes[0][1] = data[JS_TM_BYTE_A1];
+			axes[0][2] = data[JS_TM_BYTE_A2];
+			axes[0][3] = data[JS_TM_BYTE_A3];
 
-			buttons[0][0] = ((data[js_tm_byte_d[0]] >> 6) & 0x01) | ((data[js_tm_byte_d[0]] >> 3) & 0x06)
-				      | ((data[js_tm_byte_d[0]] >> 4) & 0x08) | ((data[js_tm_byte_d[1]] >> 2) & 0x30);
+			axes[0][4] = ((data[JS_TM_BYTE_D0] >> 3) & 1) - ((data[JS_TM_BYTE_D0] >> 1) & 1);
+			axes[0][5] = ((data[JS_TM_BYTE_D0] >> 2) & 1) - ( data[JS_TM_BYTE_D0]       & 1);
+
+			buttons[0][0] = ((data[JS_TM_BYTE_D0] >> 6) & 0x01) | ((data[JS_TM_BYTE_D0] >> 3) & 0x06)
+				      | ((data[JS_TM_BYTE_D0] >> 4) & 0x08) | ((data[JS_TM_BYTE_D1] >> 2) & 0x30);
 
 			return 0;
 
 		case JS_TM_MODE_3DRP:
-		case JS_TM_MODE_FGP:
 
-			buttons[0][0] = (data[js_tm_byte_d[0]] & 0x3f) | ((data[js_tm_byte_d[1]] << 6) & 0xc0)
-				      | (( ((int) data[js_tm_byte_d[0]]) << 2) & 0x300);
+			axes[0][0] = data[JS_TM_BYTE_A0];
+			axes[0][1] = data[JS_TM_BYTE_A1];
 
-			return 0;
-
-		default:
-
-			buttons[0][0] = 0;
-
-			for (i = 0; i < (data[JS_TM_BYTE_DEF] & 0xf); i++)
-				buttons[0][0] |= ((int) data[js_tm_byte_d[i]]) << (i << 3);
+			buttons[0][0] = ( data[JS_TM_BYTE_D0]       & 0x3f) | ((data[JS_TM_BYTE_D1] << 6) & 0xc0)
+				      | (( ((int) data[JS_TM_BYTE_D0]) << 2) & 0x300);
 
 			return 0;
 
@@ -189,9 +217,9 @@ static int js_tm_close(struct js_dev *jd)
 
 static void __init js_tm_init_corr(int num_axes, int mode, int **axes, struct js_corr **corr)
 {
-	int j = 0;
+	int j;
 
-	for (; j < num_axes; j++) {
+	for (j = 0; j < num_axes; j++) {
 		corr[0][j].type = JS_CORR_BROKEN;
 		corr[0][j].prec = 0;
 		corr[0][j].coef[0] = 127 - 2;
@@ -202,7 +230,8 @@ static void __init js_tm_init_corr(int num_axes, int mode, int **axes, struct js
 
 	switch (mode) {
 		case JS_TM_MODE_M3DI: j = 4; break;
-		default: break;
+		case JS_TM_MODE_3DRP: j = 2; break;
+		default:	      j = 0; break;
 	}
 
 	for (; j < num_axes; j++) {
@@ -223,46 +252,48 @@ static void __init js_tm_init_corr(int num_axes, int mode, int **axes, struct js
 static struct js_port __init *js_tm_probe(int io, struct js_port *port)
 {
 	struct js_tm_info info;
-	struct js_rm_models {
-		unsigned char id;
-		char *name;
-		char axes;
-		char buttons;
-	} models[] = {	{   1, "ThrustMaster Millenium 3D Inceptor", 6, 6 },
-			{   3, "ThrustMaster Rage 3D Gamepad", 2, 10 },
-			{ 163, "Thrustmaster Fusion GamePad", 2, 10 },
-			{   0, NULL, 0, 0 }};
-	char name[64];
+	char *names[JS_TM_MODE_MAX] = { NULL, "ThrustMaster Millenium 3D Inceptor", NULL,
+						"ThrustMaster Rage 3D Gamepad", "ThrustMaster WCS III" };
+	char axes[JS_TM_MODE_MAX] = { 0, 6, 0, 2, 0 };
+	char buttons[JS_TM_MODE_MAX] = { 0, 5, 0, 10, 0 };
+
 	unsigned char data[JS_TM_MAX_LENGTH];
-	unsigned char a, b;
-	int i;
+	unsigned char u;
 
 	if (check_region(io, 1)) return port;
 
-	if (js_tm_read_packet(io, data)) return port;
+	if (((u = inb(io)) & 3) == 3) return port;
+	outb(0xff,io);
+	if (!((inb(io) ^ u) & ~u & 0xf)) return port;
+
+	if(js_tm_read_packet(io, data)) {
+		printk(KERN_WARNING "joy-thrustmaster: probe - can't read packet\n");
+		return port;
+	}
 
 	info.io = io;
 	info.mode = data[JS_TM_BYTE_ID];
 
 	if (!info.mode) return port;
 
-	for (i = 0; models[i].id && models[i].id != info.mode; i++);
+	if (info.mode >= JS_TM_MODE_MAX || !names[info.mode]) {
+		printk(KERN_WARNING "joy-thrustmaster: unknown device detected "
+				    "(io=%#x, id=%d), contact <vojtech@ucw.cz>\n",
+					io, info.mode);
+		return port;
+	}
 
-	if (models[i].id != info.mode) {
-		a = data[JS_TM_BYTE_DEF] >> 4;
-		b = (data[JS_TM_BYTE_DEF] & 0xf) << 3;
-		sprintf(name, "Unknown %d-axis, %d-button TM device %d", a, b, info.mode);
-	} else {
-		sprintf(name, models[i].name);
-		a = models[i].axes;
-		b = models[i].buttons;
+	if (data[JS_TM_BYTE_DEF] != js_tm_id_to_def[info.mode]) {
+		printk(KERN_WARNING "joy-thrustmaster: wrong DEF (%d) for ID %d - should be %d\n",
+				data[JS_TM_BYTE_DEF], info.mode, js_tm_id_to_def[info.mode]);
 	}
 
 	request_region(io, 1, "joystick (thrustmaster)");
 	port = js_register_port(port, &info, 1, sizeof(struct js_tm_info), js_tm_read);
 	printk(KERN_INFO "js%d: %s revision %d at %#x\n",
-		js_register_device(port, 0, a, b, name, js_tm_open, js_tm_close), name, data[JS_TM_BYTE_REV], io);
-	js_tm_init_corr(a, info.mode, port->axes, port->corr);
+		js_register_device(port, 0, axes[info.mode], buttons[info.mode],
+				names[info.mode], js_tm_open, js_tm_close), names[info.mode], data[JS_TM_BYTE_REV], io);
+	js_tm_init_corr(axes[info.mode], info.mode, port->axes, port->corr);
 
 	return port;
 }
@@ -290,7 +321,7 @@ void cleanup_module(void)
 {
 	struct js_tm_info *info;
 
-	while (js_tm_port) {
+	while (js_tm_port != NULL) {
 		js_unregister_device(js_tm_port->devs[0]);
 		info = js_tm_port->info;
 		release_region(info->io, 1);

@@ -399,7 +399,7 @@ __initfunc(int arc90xx_probe(struct device *dev))
 			 */
 			airqmask = probe_irq_on();
 			AINTMASK(NORXflag);
-			mdelay(1);
+			udelay(1);
 			AINTMASK(0);
 			airq = probe_irq_off(airqmask);
 

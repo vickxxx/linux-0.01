@@ -36,7 +36,7 @@ struct cpuinfo_x86 {
 	int	fdiv_bug;
 	int	f00f_bug;
 	int	coma_bug;
-	unsigned long loops_per_jiffy;
+	unsigned long loops_per_sec;
 	unsigned long *pgd_quick;
 	unsigned long *pte_quick;
 	unsigned long pgtable_cache_sz;
@@ -48,8 +48,6 @@ struct cpuinfo_x86 {
 #define X86_VENDOR_UMC 3
 #define X86_VENDOR_NEXGEN 4
 #define X86_VENDOR_CENTAUR 5
-#define X86_VENDOR_RISE 6
-#define X86_VENDOR_TRANSMETA 7
 #define X86_VENDOR_UNKNOWN 0xff
 
 /*
@@ -326,28 +324,5 @@ extern void free_task_struct(struct task_struct *);
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)
-
-/* '6' because it used to be for P6 only, now supports P15 too */
-#define MICROCODE_IOCFREE _IO('6',0)
-
-/* physical layour of IA32 microcode chunks */
-struct microcode {
-	unsigned int hdrver;
-	unsigned int rev;
-	unsigned int date;
-	unsigned int sig;
-	unsigned int cksum;
-	unsigned int ldrver;
-	unsigned int pf;
-	unsigned int reserved[5];
-	unsigned int bits[500];
-};
-
-
-/* REP NOP (PAUSE) is a good thing to insert into busy-wait loops. */
-extern inline void rep_nop(void)
-{
-	__asm__ __volatile__("rep;nop");
-}
 
 #endif /* __ASM_I386_PROCESSOR_H */

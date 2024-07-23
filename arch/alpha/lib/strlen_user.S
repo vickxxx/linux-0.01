@@ -3,13 +3,6 @@
  *
  * Return the length of the string including the NUL terminator
  * (strlen+1) or zero if an error occurred.
- *
- * In places where it is critical to limit the processing time,
- * and the data is not trusted, strnlen_user() should be used.
- * It will return a value greater than its second argument if
- * that limit would be exceeded. This implementation is allowed
- * to access memory beyond the limit, but will not cross a page
- * boundary when doing so.
  */
 
 #include <alpha/regdef.h>
@@ -28,12 +21,12 @@
 	.set noat
 	.text
 
-	.globl __strnlen_user
-	.ent __strnlen_user
+	.globl __strlen_user
+	.ent __strlen_user
 	.frame sp, 0, ra
 
 	.align 3
-__strnlen_user:
+__strlen_user:
 	ldgp	$29,0($27)	# we do exceptions -- we need the gp.
 	.prologue 1
 
@@ -44,17 +37,9 @@ __strnlen_user:
 	or      t1, t0, t0
 	subq	a0, 1, a0	# get our +1 for the return 
 	cmpbge  zero, t0, t1	# t1 <- bitmask: bit i == 1 <==> i-th byte == 0
-	subq	a1, 7, t2
-	subq	a0, v0, t0
 	bne     t1, $found
 
-	addq	t2, t0, t2
-	addq	a1, 1, a1
-
-	.align 3
-$loop:	ble	t2, $limit
-	EX( ldq t0, 8(v0) )
-	subq	t2, 8, t2
+$loop:	EX( ldq t0, 8(v0) )
 	addq    v0, 8, v0	# addr += 8
 	cmpbge  zero, t0, t1
 	beq     t1, $loop
@@ -76,9 +61,4 @@ $found:	negq    t1, t2		# clear all but least set bit
 $exception:
 	ret
 
-	.align 3		# currently redundant
-$limit:
-	subq	a1, t2, v0
-	ret
-
-	.end __strnlen_user
+	.end __strlen_user

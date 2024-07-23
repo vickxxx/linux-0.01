@@ -331,8 +331,7 @@ static void plot_pixel_mac(struct display *p, int bw, int pixel_x, int pixel_y)
   u16 *dest16, pix16;
   u32 *dest32, pix32;
 
-  /* There *are* 68k Macs that support more than 832x624, you know :-) */
-  if (pixel_x < 0 || pixel_y < 0 || pixel_x >= p->var.xres || pixel_y >= p->var.yres) {
+  if (pixel_x < 0 || pixel_y < 0 || pixel_x >= 832 || pixel_y >= 624) {
     int cnt;
     printk ("ERROR: pixel_x == %d, pixel_y == %d", pixel_x, pixel_y);
     for(cnt = 0; cnt < 100000; cnt++)
@@ -456,7 +455,7 @@ static int get_pixel_mac(struct display *p, int pixel_x, int pixel_y)
   u8 *dest, bit;
   u16 *dest16;
   u32 *dest32;
-  u8 pixel = 0x5a;
+  u8 pixel;
 
   switch (p->var.bits_per_pixel) {
   case 1:

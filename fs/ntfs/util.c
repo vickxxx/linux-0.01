@@ -266,8 +266,6 @@ int ntfs_uni_strncmp(short int* a,short int *b,int n)
 			return -1;
 		if(b[i]<a[i])
 			return 1;
-		if (a[i] == 0)
-			return 0;
 	}
 	return 0;
 }
@@ -283,8 +281,6 @@ int ntfs_ua_strncmp(short int* a,char* b,int n)
 			return -1;
 		if(b[i]<NTFS_GETU16(a+i))
 			return 1;
-		if (b[i] == 0)
-			return 0;
 	}
 	return 0;
 }

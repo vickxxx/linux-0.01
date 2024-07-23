@@ -882,8 +882,9 @@ int ultrastor_abort(Scsi_Cmnd *SCpnt)
 	(inb(SYS_DOORBELL_INTR(config.doorbell_address)) & 1))
       {
 	int flags;
-	printk("Ux4F: abort while completed command pending\n");
 	save_flags(flags);
+	printk("Ux4F: abort while completed command pending\n");
+	restore_flags(flags);
 	cli();
 	ultrastor_interrupt(0, NULL, NULL);
 	restore_flags(flags);

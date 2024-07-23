@@ -106,12 +106,6 @@
  * 1998/09/20 -- David Weinehall -- Added slow-down code for buggy PS/2-drives.
  */
 
-/*
- * 1999/08/13 -- Paul Slootman -- floppy stopped working on Alpha after 24
- * days, 6 hours, 32 minutes and 32 seconds (i.e. MAXINT jiffies; ints were
- * being used to store jiffies, which are unsigned longs).
- */
-
 #define FLOPPY_SANITY_CHECK
 #undef  FLOPPY_SILENT_DCL_CLEAR
 
@@ -610,10 +604,10 @@ static void is_alive(const char *message)
 #define OLOGSIZE 20
 
 static void (*lasthandler)(void) = NULL;
-static unsigned long interruptjiffies=0;
-static unsigned long resultjiffies=0;
+static int interruptjiffies=0;
+static int resultjiffies=0;
 static int resultsize=0;
-static unsigned long lastredo=0;
+static int lastredo=0;
 
 static struct output_log {
 	unsigned char data;
@@ -633,7 +627,7 @@ static void reschedule_timeout(int drive, const char *message, int marg)
 		drive = current_drive;
 	del_timer(&fd_timeout);
 	if (drive < 0 || drive > N_DRIVE) {
-		fd_timeout.expires = jiffies + 20UL*HZ;
+		fd_timeout.expires = jiffies + 20*HZ;
 		drive=0;
 	} else
 		fd_timeout.expires = jiffies + UDP->timeout;
@@ -716,7 +710,7 @@ static int disk_change(int drive)
 #ifdef DCL_DEBUG
 	if (UDP->flags & FD_DEBUG){
 		DPRINT("checking disk change line for drive %d\n",drive);
-		DPRINT("jiffies=%lu\n", jiffies);
+		DPRINT("jiffies=%ld\n", jiffies);
 		DPRINT("disk change line=%x\n",fd_inb(FD_DIR)&0x80);
 		DPRINT("flags=%lx\n",UDRS->flags);
 	}
@@ -1010,7 +1004,7 @@ static void main_command_interrupt(void)
 }
 
 /* waits for a delay (spinup or select) to pass */
-static int wait_for_completion(unsigned long delay, timeout_fn function)
+static int wait_for_completion(int delay, timeout_fn function)
 {
 	if (FDCS->reset){
 		reset_fdc(); /* do the reset during sleep to win time
@@ -1281,7 +1275,7 @@ static int fdc_configure(void)
 static void fdc_specify(void)
 {
 	unsigned char spec1, spec2;
-	unsigned long srt, hlt, hut;
+	int srt, hlt, hut;
 	unsigned long dtr = NOMINAL_DTR;
 	unsigned long scale_dtr = NOMINAL_DTR;
 	int hlt_max_code = 0x7f;
@@ -1371,7 +1365,7 @@ static int fdc_dtr(void)
 	 * Pause 5 msec to avoid trouble. (Needs to be 2 jiffies)
 	 */
 	FDCS->dtr = raw_cmd->rate & 3;
-	return(wait_for_completion(jiffies+2UL*HZ/100,
+	return(wait_for_completion(jiffies+2*HZ/100,
 				   (timeout_fn) floppy_ready));
 } /* fdc_dtr */
 
@@ -1467,8 +1461,7 @@ static int interpret_errors(void)
  */
 static void setup_rw_floppy(void)
 {
-	int i,r, flags,dflags;
-	unsigned long ready_date;
+	int i,ready_date,r, flags,dflags;
 	timeout_fn function;
 
 	flags = raw_cmd->flags;
@@ -1541,7 +1534,7 @@ static void seek_interrupt(void)
 #ifdef DCL_DEBUG
 		if (DP->flags & FD_DEBUG){
 			DPRINT("clearing NEWCHANGE flag because of effective seek\n");
-			DPRINT("jiffies=%lu\n", jiffies);
+			DPRINT("jiffies=%ld\n", jiffies);
 		}
 #endif
 		CLEARF(FD_DISK_NEWCHANGE); /* effective seek */
@@ -1831,20 +1824,20 @@ static void show_floppy(void)
 	printk("\n");
 	printk("floppy driver state\n");
 	printk("-------------------\n");
-	printk("now=%lu last interrupt=%lu diff=%lu last called handler=%p\n",
-	       jiffies, interruptjiffies, jiffies-interruptjiffies, lasthandler);
+	printk("now=%ld last interrupt=%d last called handler=%p\n",
+	       jiffies, interruptjiffies, lasthandler);
 
 
 #ifdef FLOPPY_SANITY_CHECK
 	printk("timeout_message=%s\n", timeout_message);
 	printk("last output bytes:\n");
 	for (i=0; i < OLOGSIZE; i++)
-		printk("%2x %2x %lu\n",
+		printk("%2x %2x %ld\n",
 		       output_log[(i+output_log_pos) % OLOGSIZE].data,
 		       output_log[(i+output_log_pos) % OLOGSIZE].status,
 		       output_log[(i+output_log_pos) % OLOGSIZE].jiffies);
-	printk("last result at %lu\n", resultjiffies);
-	printk("last redo_fd_request at %lu\n", lastredo);
+	printk("last result at %d\n", resultjiffies);
+	printk("last redo_fd_request at %d\n", lastredo);
 	for (i=0; i<resultsize; i++){
 		printk("%2x ", reply_buffer[i]);
 	}
@@ -1861,8 +1854,8 @@ static void show_floppy(void)
 		printk("fd_timer.function=%p\n", fd_timer.function);
 	if (fd_timeout.prev){
 		printk("timer_table=%p\n",fd_timeout.function);
-		printk("expires=%lu\n",fd_timeout.expires-jiffies);
-		printk("now=%lu\n",jiffies);
+		printk("expires=%ld\n",fd_timeout.expires-jiffies);
+		printk("now=%ld\n",jiffies);
 	}
 	printk("cont=%p\n", cont);
 	printk("CURRENT=%p\n", CURRENT);
@@ -1931,6 +1924,8 @@ static int start_motor(void (*function)(void) )
 
 static void floppy_ready(void)
 {
+	unsigned long flags;
+	
 	CHECK_RESET;
 	if (start_motor(floppy_ready)) return;
 	if (fdc_dtr()) return;
@@ -1950,7 +1945,7 @@ static void floppy_ready(void)
 	if ((raw_cmd->flags & FD_RAW_READ) || 
 	    (raw_cmd->flags & FD_RAW_WRITE))
 	{
-		unsigned long flags = claim_dma_lock();
+		flags=claim_dma_lock();
 		fd_chose_dma_mode(raw_cmd->kernel_data,
 				  raw_cmd->length);
 		release_dma_lock(flags);
@@ -2257,7 +2252,6 @@ static int do_format(kdev_t device, struct format_descr *tmp_format_req)
 static void request_done(int uptodate)
 {
 	int block;
-	unsigned long flags;
 
 	probing = 0;
 	reschedule_timeout(MAXTIMEOUT, "request done %d", uptodate);
@@ -2276,7 +2270,6 @@ static void request_done(int uptodate)
 			DRS->maxtrack = 1;
 
 		/* unlock chained buffers */
-		spin_lock_irqsave(&io_request_lock, flags);
 		while (current_count_sectors && CURRENT &&
 		       current_count_sectors >= CURRENT->current_nr_sectors){
 			current_count_sectors -= CURRENT->current_nr_sectors;
@@ -2284,7 +2277,6 @@ static void request_done(int uptodate)
 			CURRENT->sector += CURRENT->current_nr_sectors;
 			end_request(1);
 		}
-		spin_unlock_irqrestore(&io_request_lock, flags);
 		if (current_count_sectors && CURRENT){
 			/* "unlock" last subsector */
 			CURRENT->buffer += current_count_sectors <<9;
@@ -2308,9 +2300,7 @@ static void request_done(int uptodate)
 			DRWE->last_error_sector = CURRENT->sector;
 			DRWE->last_error_generation = DRS->generation;
 		}
-		spin_lock_irqsave(&io_request_lock, flags);
 		end_request(0);
-		spin_unlock_irqrestore(&io_request_lock, flags);
 	}
 }
 
@@ -2318,13 +2308,6 @@ static void request_done(int uptodate)
 static void rw_interrupt(void)
 {
 	int nr_sectors, ssize, eoc, heads;
-
-	if (R_HEAD >= 2) {
-	    /* some Toshiba floppy controllers occasionnally seem to
-	     * return bogus interrupts after read/write operations, which
-	     * can be recognized by a bad head number (>= 2) */
-	     return;
-	}  
 
 	if (!DRS->first_read_date)
 		DRS->first_read_date = jiffies;
@@ -3019,12 +3002,12 @@ static int user_reset_fdc(int drive, int arg, int interruptible)
  * Misc Ioctl's and support
  * ========================
  */
-static inline int fd_copyout(void *param, const void *address, unsigned long size)
+static inline int fd_copyout(void *param, const void *address, int size)
 {
 	return copy_to_user(param,address, size) ? -EFAULT : 0;
 }
 
-static inline int fd_copyin(void *param, void *address, unsigned long size)
+static inline int fd_copyin(void *param, void *address, int size)
 {
 	return copy_from_user(address, param, size) ? -EFAULT : 0;
 }
@@ -3830,7 +3813,7 @@ static int check_floppy_change(kdev_t dev)
 	if (UTESTF(FD_DISK_CHANGED) || UTESTF(FD_VERIFY))
 		return 1;
 
-	if (UDP->checkfreq < (int)(jiffies - UDRS->last_checked)) {
+	if (UDP->checkfreq < jiffies - UDRS->last_checked){
 		lock_fdc(drive,0);
 		poll_drive(0,0);
 		process_fd_request();
@@ -4008,7 +3991,7 @@ __initfunc(static void floppy_set_flags(int *ints,int param, int param2))
 		else
 			default_drive_params[i].params.flags &= ~param2;
 	}
-	DPRINT("%s flag 0x%x\n", param ? "Setting" : "Clearing", param2);
+	DPRINT("%s flag 0x%x\n", param2 ? "Setting" : "Clearing", param);
 }
 
 __initfunc(static void daring(int *ints,int param, int param2))

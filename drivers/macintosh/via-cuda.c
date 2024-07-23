@@ -21,7 +21,6 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/init.h>
-#include <asm/machdep.h>
 
 static volatile unsigned char *via;
 

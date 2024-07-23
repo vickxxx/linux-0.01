@@ -1,19 +1,12 @@
-/* $Revision: 3.0 $$Date: 1998/11/02 14:20:59 $
+/* $Revision: 2.6 $$Date: 1998/08/10 16:57:01 $
  * linux/include/linux/cyclades.h
  *
- * This file was initially written by
- * Randolph Bentson <bentson@grieg.seaslug.org> and is maintained by
- * Ivan Passos <ivan@cyclades.com>.
+ * This file is maintained by Ivan Passos <ivan@cyclades.com>, 
+ * Marcio Saito <marcio@cyclades.com> and
+ * Randolph Bentson <bentson@grieg.seaslug.org>.
  *
  * This file contains the general definitions for the cyclades.c driver
  *$Log: cyclades.h,v $
- *Revision 3.1  2000/04/19 18:52:52  ivan
- *converted address fields to unsigned long and added fields for physical
- *addresses on cyclades_card structure;
- *
- *Revision 3.0  1998/11/02 14:20:59  ivan
- *added nports field on cyclades_card structure;
- *
  *Revision 2.5  1998/08/03 16:57:01  ivan
  *added cyclades_idle_stats structure;
  * 
@@ -324,7 +317,6 @@ struct	FIRM_ID {
 #define C_IN_RXOFL	0x00010000      /* RX buffer overflow */
 #define C_IN_IOCTLW	0x00020000      /* I/O control w/ wait */
 #define C_IN_MRTS	0x00040000	/* modem RTS drop */
-#define C_IN_ICHAR	0x00080000
  
 /* flow control */
 
@@ -381,8 +373,6 @@ struct	FIRM_ID {
 #define	C_CM_TXLOWWM	0x61		/* Tx buffer low water mark */
 #define	C_CM_RXHIWM	0x62		/* Rx buffer high water mark */
 #define	C_CM_RXNNDT	0x63		/* rx no new data timeout */
-#define	C_CM_TXFEMPTY	0x64
-#define	C_CM_ICHAR	0x65
 #define	C_CM_MDCD	0x70		/* modem DCD change */
 #define	C_CM_MDSR	0x71		/* modem DSR change */
 #define	C_CM_MRI	0x72		/* modem RI change */
@@ -420,8 +410,6 @@ struct CH_CTRL {
 	uclong	hw_overflow;	/* hw overflow counter */
 	uclong	sw_overflow;	/* sw overflow counter */
 	uclong	comm_error;	/* frame/parity error counter */
-	uclong ichar;
-	uclong filler[7];
 };
 
 
@@ -502,28 +490,7 @@ struct ZFW_CTRL {
 /****************** ****************** *******************/
 #endif
 
-/* Per card data structure */
-struct cyclades_card {
-    unsigned long base_phys;
-    unsigned long ctl_phys;
-    unsigned long base_addr;
-    unsigned long ctl_addr;
-    int irq;
-    int num_chips;	/* 0 if card absent, -1 if Z/PCI, else Y */
-    int first_line;	/* minor number of first channel on card */
-    int nports;		/* Number of ports in the card */
-    int bus_index;	/* address shift - 0 for ISA, 1 for PCI */
-    int	intr_enabled;	/* FW Interrupt flag - 0 disabled, 1 enabled */
-#ifdef __KERNEL__
-    spinlock_t card_lock;
-#else
-    uclong filler;
-#endif
-};
 
-struct cyclades_chip {
-  int filler;
-};
 
 
 #ifdef __KERNEL__
@@ -541,13 +508,20 @@ struct cyclades_chip {
 #define cy_readw(port)  readw(port)
 #define cy_readl(port)  readl(port)
 
-/*
- * Statistics counters
- */
-struct cyclades_icount {
-	__u32	cts, dsr, rng, dcd, tx, rx;
-	__u32	frame, parity, overrun, brk;
-	__u32	buf_overrun;
+/* Per card data structure */
+
+struct cyclades_card {
+    long base_addr;
+    long ctl_addr;
+    int irq;
+    int num_chips;	/* 0 if card absent, -1 if Z/PCI, else Y */
+    int first_line;	/* minor number of first channel on card */
+    int bus_index;	/* address shift - 0 for ISA, 1 for PCI */
+    int	inact_ctrl;	/* FW Inactivity control - 0 disabled, 1 enabled */
+};
+
+struct cyclades_chip {
+  int filler;
 };
 
 /*
@@ -583,8 +557,7 @@ struct cyclades_port {
 	unsigned long		event;
 	unsigned long		last_active;
 	int			count;	/* # of fd on device */
-	int                     breakon;
-	int                     breakoff;
+	int                     x_break;
 	int			blocked_open; /* # of blocked opens */
 	long			session; /* Session of opening process */
 	long			pgrp; /* pgrp of opening process */
@@ -594,18 +567,16 @@ struct cyclades_port {
 	int			xmit_cnt;
         int                     default_threshold;
         int                     default_timeout;
-	unsigned long		jiffies[3];
-	unsigned long		rflush_count;
+	struct tq_struct	tqueue;
 	struct termios		normal_termios;
 	struct termios		callout_termios;
-	struct cyclades_monitor	mon;
-	struct cyclades_idle_stats	idle_stats;
-	struct cyclades_icount	icount;
-	struct tq_struct	tqueue;
 	struct wait_queue	*open_wait;
 	struct wait_queue	*close_wait;
 	struct wait_queue	*shutdown_wait;
-	struct wait_queue	*delta_msr_wait;
+        struct cyclades_monitor mon;
+	unsigned long		jiffies[3];
+	unsigned long		rflush_count;
+	struct cyclades_idle_stats   idle_stats;
 };
 
 /*
@@ -618,8 +589,6 @@ struct cyclades_port {
 #define Cy_EVENT_BREAK			3
 #define Cy_EVENT_OPEN_WAKEUP		4
 #define Cy_EVENT_SHUTDOWN_WAKEUP	5
-#define	Cy_EVENT_DELTA_WAKEUP		6
-#define	Cy_EVENT_Z_RX_FULL		7
 
 #define	CLOSING_WAIT_DELAY	30*HZ
 #define CY_CLOSING_WAIT_NONE	65535
@@ -798,7 +767,6 @@ struct cyclades_port {
 #define CyRTPR		(0x21*2)
 #define CyMSVR1		(0x6C*2)
 #define CyMSVR2		(0x6D*2)
-#define      CyANY_DELTA	(0xF0)
 #define      CyDSR		(0x80)
 #define      CyCTS		(0x40)
 #define      CyRI		(0x20)

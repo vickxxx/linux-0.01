@@ -5,7 +5,7 @@
  *
  *		PACKET - implements raw packet sockets.
  *
- * Version:	$Id: af_packet.c,v 1.19.2.3 2000/10/24 21:28:47 davem Exp $
+ * Version:	$Id: af_packet.c,v 1.19 1999/03/21 05:23:03 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -71,10 +71,6 @@
 #ifdef CONFIG_BRIDGE
 #include <net/br.h>
 #endif
-
-#ifdef CONFIG_NET_DIVERT
-#include <linux/divert.h>
-#endif /* CONFIG_NET_DIVERT */
 
 #ifdef CONFIG_DLCI
 extern int dlci_ioctl(unsigned int, void*);
@@ -528,7 +524,7 @@ static void packet_destroy_timer(unsigned long data)
 
 	sk->timer.expires=jiffies+10*HZ;
 	add_timer(&sk->timer);
-/*	printk(KERN_DEBUG "packet sk destroy delayed\n"); */
+	printk(KERN_DEBUG "packet sk destroy delayed\n");
 }
 
 /*
@@ -1136,14 +1132,6 @@ static int packet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 #else
 			return -ENOPKG;
 #endif						
-			
-		case SIOCGIFDIVERT:
-		case SIOCSIFDIVERT:
-#ifdef CONFIG_NET_DIVERT
-			return(divert_ioctl(cmd, (struct divert_cf *) arg));
-#else
-			return -ENOPKG;
-#endif /* CONFIG_NET_DIVERT */
 			
 #ifdef CONFIG_INET
 		case SIOCADDRT:

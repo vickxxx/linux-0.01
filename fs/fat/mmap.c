@@ -23,7 +23,6 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/pgtable.h>
 
 /*
  * Fill in the supplied page for mmap
@@ -124,12 +123,8 @@ int fat_readpage(struct file *file, struct page * page)
 	struct dentry * dentry = file->f_dentry;
 	struct inode * inode = dentry->d_inode;
 	if (MSDOS_SB(inode->i_sb)->cvf_format &&
-	    MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage) {
-		int ret = MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage(inode,page);
-
-		flush_dcache_page(page_address(page));
-		return ret;
-	}
+	    MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage)
+		return MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage(inode,page);
 	    
 	printk("fat_readpage called with no handler (shouldn't happen)\n");
 	return -1;

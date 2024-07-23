@@ -1,9 +1,9 @@
-/* $Id: capi.c,v 1.9 2000/11/12 16:32:06 kai Exp $
+/* $Id: capi.c,v 1.7 1998/02/23 23:35:41 fritz Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *        CAPI encoder/decoder
  *
- * Copyright 1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
  * Thanks to Friedemann Baitinger and IBM Germany
  *
  * This program is free software; you can redistribute it and/or modify
@@ -19,6 +19,31 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ *
+ * $Log: capi.c,v $
+ * Revision 1.7  1998/02/23 23:35:41  fritz
+ * Eliminated some compiler warnings.
+ *
+ * Revision 1.6  1998/02/12 23:06:50  keil
+ * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
+ *
+ * Revision 1.5  1997/10/09 22:23:02  fritz
+ * New HL<->LL interface:
+ *   New BSENT callback with nr. of bytes included.
+ *   Sending without ACK.
+ *
+ * Revision 1.4  1997/09/25 17:25:39  fritz
+ * Support for adding cards at runtime.
+ * Support for new Firmware.
+ *
+ * Revision 1.3  1997/09/24 19:44:14  fritz
+ * Added MSN mapping support, some cleanup.
+ *
+ * Revision 1.2  1997/09/23 19:41:24  fritz
+ * Disabled Logging of DATA_B3_IND/RESP/REQ/CONF Messages.
+ *
+ * Revision 1.1  1997/09/23 18:00:08  fritz
+ * New driver for IBM Active 2000.
  *
  */
 
@@ -85,6 +110,10 @@ static actcapi_msgdsc valid_msg[] = {
 	{{ 0x84, 0x03}, "DISCONNECT_B3_RESP"},
 	{{ 0x86, 0x03}, "DATA_B3_RESP"},
 	{{ 0xff, 0x03}, "MANUFACTURER_RESP"},
+#if 0
+/* CAPI 2.0 */
+	{{ 0x05, 0x80}, "LISTEN_REQ (CAPI 2.0)"},
+#endif
 #endif
 	{{ 0x00, 0x00}, NULL},
 };

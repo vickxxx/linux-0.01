@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.92.2.3 1999/12/05 07:24:38 davem Exp $
+/*  $Id: process.c,v 1.92 1999/05/08 23:04:48 davem Exp $
  *  arch/sparc64/kernel/process.c
  *
  *  Copyright (C) 1995, 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -152,6 +152,11 @@ void machine_restart(char * cmd)
 	panic("Reboot failed!");
 }
 
+void machine_power_off(void)
+{
+	machine_halt();
+}
+
 static void show_regwindow32(struct pt_regs *regs)
 {
 	struct reg_window32 *rw;
@@ -277,7 +282,7 @@ void __show_regs(struct pt_regs * regs)
 	unsigned long flags;
 
 	spin_lock_irqsave(&regdump_lock, flags);
-	printk("CPU[%d]: local_irq_count[%u] global_irq_count[%d]\n",
+	printk("CPU[%d]: local_irq_count[%ld] global_irq_count[%d]\n",
 	       smp_processor_id(), local_irq_count,
 	       atomic_read(&global_irq_count));
 #endif
@@ -647,14 +652,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
  * a system call from a "real" process, but the process memory space will
  * not be free'd until both the parent and the child have exited.
  */
-pid_t kernel_thread(int (*__fn)(void *), void * __arg, unsigned long flags)
+pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
-	register int (*fn)(void *) asm("g2");
-	register void *arg asm("g3");
 	long retval;
 
-	fn = __fn;
-	arg = __arg;
 	__asm__ __volatile("mov %1, %%g1\n\t"
 			   "mov %2, %%o0\n\t"	   /* Clone flags. */
 			   "mov 0, %%o1\n\t"	   /* usp arg == 0 */

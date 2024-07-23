@@ -71,10 +71,9 @@ static void mouse_input(unsigned char *, int, struct pt_regs *);
 #ifdef CONFIG_ADBMOUSE
 /* XXX: Hook for mouse driver */
 void (*adb_mouse_interrupt_hook)(unsigned char *, int);
-/* Turn this on by default */
-int adb_emulate_buttons = 1;
-int adb_button2_keycode = 0x7c; /* right option key */
-int adb_button3_keycode = 0x7d;	/* right control key */
+int adb_emulate_buttons = 0;
+int adb_button2_keycode = 0x7d;	/* right control key */
+int adb_button3_keycode = 0x7c; /* right option key */
 #endif
 
 /* The mouse driver - for debugging */
@@ -112,7 +111,7 @@ u_short mac_plain_map[NR_KEYS] __initdata = {
 	0xf104,	0xf105,	0xf106,	0xf102,	0xf107,	0xf108,	0xf200,	0xf10a,
 	0xf200,	0xf10c,	0xf200,	0xf209,	0xf200,	0xf109,	0xf200,	0xf10b,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf103,	0xf117,
-	0xf101,	0xf119,	0xf100,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf101,	0xf119,	0xf100,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 u_short mac_shift_map[NR_KEYS] __initdata = {
@@ -131,7 +130,7 @@ u_short mac_shift_map[NR_KEYS] __initdata = {
 	0xf10e,	0xf10f,	0xf110,	0xf10c,	0xf111,	0xf112,	0xf200,	0xf10a,
 	0xf200,	0xf10c,	0xf200,	0xf203,	0xf200,	0xf113,	0xf200,	0xf10b,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf20b,	0xf116,	0xf10d,	0xf117,
-	0xf10b,	0xf20a,	0xf10a,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf10b,	0xf20a,	0xf10a,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 u_short mac_altgr_map[NR_KEYS] __initdata = {
@@ -150,7 +149,7 @@ u_short mac_altgr_map[NR_KEYS] __initdata = {
 	0xf510,	0xf511,	0xf512,	0xf50e,	0xf513,	0xf514,	0xf200,	0xf516,
 	0xf200,	0xf10c,	0xf200,	0xf202,	0xf200,	0xf515,	0xf200,	0xf517,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf50f,	0xf117,
-	0xf50d,	0xf119,	0xf50c,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf50d,	0xf119,	0xf50c,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 u_short mac_ctrl_map[NR_KEYS] __initdata = {
@@ -169,7 +168,7 @@ u_short mac_ctrl_map[NR_KEYS] __initdata = {
 	0xf104,	0xf105,	0xf106,	0xf102,	0xf107,	0xf108,	0xf200,	0xf10a,
 	0xf200,	0xf10c,	0xf200,	0xf204,	0xf200,	0xf109,	0xf200,	0xf10b,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf103,	0xf117,
-	0xf101,	0xf119,	0xf100,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf101,	0xf119,	0xf100,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 u_short mac_shift_ctrl_map[NR_KEYS] __initdata = {
@@ -188,7 +187,7 @@ u_short mac_shift_ctrl_map[NR_KEYS] __initdata = {
 	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 	0xf200,	0xf10c,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf200,	0xf117,
-	0xf200,	0xf119,	0xf200,	0xf700,	0xf701,	0xf702,	0xf200,	0xf20c,
+	0xf200,	0xf119,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,	0xf20c,
 };
 
 u_short mac_alt_map[NR_KEYS] __initdata = {
@@ -207,7 +206,7 @@ u_short mac_alt_map[NR_KEYS] __initdata = {
 	0xf504,	0xf505,	0xf506,	0xf502,	0xf507,	0xf508,	0xf200,	0xf50a,
 	0xf200,	0xf10c,	0xf200,	0xf209,	0xf200,	0xf509,	0xf200,	0xf50b,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf503,	0xf117,
-	0xf501,	0xf119,	0xf500,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf501,	0xf119,	0xf500,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 u_short mac_ctrl_alt_map[NR_KEYS] __initdata = {
@@ -226,7 +225,7 @@ u_short mac_ctrl_alt_map[NR_KEYS] __initdata = {
 	0xf504,	0xf505,	0xf506,	0xf502,	0xf507,	0xf508,	0xf200,	0xf50a,
 	0xf200,	0xf10c,	0xf200,	0xf200,	0xf200,	0xf509,	0xf200,	0xf50b,
 	0xf200,	0xf11d,	0xf115,	0xf114,	0xf118,	0xf116,	0xf503,	0xf117,
-	0xf501,	0xf119,	0xf500,	0xf700,	0xf701,	0xf702,	0xf200,	0xf200,
+	0xf501,	0xf119,	0xf500,	0xf200,	0xf200,	0xf200,	0xf200,	0xf200,
 };
 
 extern unsigned int keymap_count;
@@ -240,19 +239,19 @@ extern int console_loglevel;
 static struct adb_request led_request;
 extern int in_keybinit;
 
-
 /*
  * machdep keyboard routines, interface and key repeat method modeled after
  * drivers/macintosh/keyb_mac.c
  */
 
-int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
-		      char raw_mode)
+int mac_kbd_translate(unsigned char keycode, unsigned char *keycodep,
+		     char raw_mode)
 {
 	if (!raw_mode) {
 		/*
 		 * Convert R-shift/control/option to L version.
 		 * Remap keycode 0 (A) to the unused keycode 0x5a.
+		 * Other parts of the system assume 0 is not a valid keycode.
 		 */
 		switch (keycode) {
 		case 0x7b: keycode = 0x38; break; /* R-shift */
@@ -261,12 +260,11 @@ int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
 		case 0:	   keycode = 0x5a; break; /* A */
 		}
 	}
-
 	*keycodep = keycode;
 	return 1;
 }
 
-int mackbd_unexpected_up(unsigned char keycode)
+int mac_kbd_unexpected_up(unsigned char keycode)
 {
 	return 0x80;
 }
@@ -299,41 +297,70 @@ input_keycode(int keycode, int repeat)
 #ifdef CONFIG_ADBMOUSE
 	/*
 	 * XXX: Add mouse button 2+3 fake codes here if mouse open.
-	 *	Keep track of 'button' states here as we only send 
-	 *	single up/down events!
+	 *	As we only report up/down events, keep track of faked buttons.
 	 *	Really messy; might need to check if keyboard is in
-	 *	VC_RAW mode.
+	 *	VC_RAW mode for X?.
 	 *	Might also want to know how many buttons need to be emulated.
 	 *	-> hide this as function in arch/m68k/mac ?
+	 *	Current emulation buttons: right alt/option and control
+	 *	(wanted: command and alt/option, or KP= and KP( ...)
+	 *	Debug version; might be rewritten to be faster on normal keys.
 	 */
-	if (adb_emulate_buttons
-	    && (keycode == adb_button2_keycode
-		|| keycode == adb_button3_keycode)
-	    && (adb_mouse_interrupt_hook || console_loglevel == 10)) {
-		int button;
+	if (adb_emulate_buttons 
+	    && (adb_mouse_interrupt_hook || console_loglevel >= 8)) {
+		unsigned char button, button2, button3, fake_event;
+		static unsigned char button2state=0, button3state=0; /* up */
 		/* faked ADB packet */
 		static unsigned char data[4] = { 0, 0x80, 0x80, 0x80 };
 
-		button = keycode == adb_button2_keycode? 2: 3;
-		if (data[button] != up_flag) {
-			/* send a fake mouse packet */
-			data[button] = up_flag;
-			if (console_loglevel >= 8)
-				printk("fake mouse event: %x %x %x\n",
-				       data[1], data[2], data[3]);
+		button = 0;
+		fake_event = 0;
+		if (keycode == adb_button2_keycode) {	/* which 'button' ? */
+			/* R-option */
+			button2 = (!up_flag);		/* new state */
+			if (button2 != button2state)	/* change ? */
+				button = 2; 
+			button2state = button2;		/* save state */
+			fake_event = 2;
+		} else if (keycode == adb_button3_keycode) {
+			/* R-control */
+			button3 = (!up_flag);		/* new state */
+			if (button3 != button3state)	/* change ? */ 
+				button = 3; 
+			button3state = button3; 	/* save state */
+			fake_event = 3;
+		}
+#ifdef DEBUG_ADBMOUSE
+		if (fake_event && console_loglevel >= 8)
+			printk("fake event: button2 %d button3 %d button %d\n",
+				 button2state, button3state, button);
+#endif
+		if (button) {		/* there's been a button state change */
+			/* fake a mouse packet : send all bytes, change one! */
+			data[button] = (up_flag ? 0x80 : 0);
 			if (adb_mouse_interrupt_hook)
 				adb_mouse_interrupt_hook(data, 4);
+#ifdef DEBUG_ADBMOUSE
+			else
+				printk("mouse_fake: data %2x %2x %2x buttons %2x \n", 
+					data[1], data[2], data[3],
+					~( (data[1] & 0x80 ? 0 : 4) 
+					 | (data[2] & 0x80 ? 0 : 1) 
+					 | (data[3] & 0x80 ? 0 : 2) )&7 );
+#endif
 		}
-		return;
+		/*
+		 * for mouse 3-button emulation: don't process 'fake' keys!
+		 * Keys might autorepeat, and console state gets generally messed
+		 * up enough so that selection stops working.
+		 */
+		if (fake_event)
+			return;
 	}
 #endif /* CONFIG_ADBMOUSE */
 
 	/*
-	 * This should not be done in raw mode, but basically X is
-	 * all screwed up, so we try to make it less so by adjusting
-	 * things.  Note that this is also redundant with
-	 * mackbd_translate() above.  Either we are wrong somewhere
-	 * or X is wrong, and I'm betting on the latter.
+	 * Convert R-shift/control/option to L version.
 	 */
 	switch (keycode) {
 		case 0x7b: keycode = 0x38; break; /* R-shift */
@@ -466,18 +493,16 @@ kbd_repeat(unsigned long xxx)
 static void
 mouse_input(unsigned char *data, int nb, struct pt_regs *regs)
 {
-#ifdef DEBUG_ADB
-	if (console_loglevel == 10 &&
-	    (nb < 5 || nb > 6 || (data[2] & 3) != MOUSE_DATAREG)) {
-		int i;
+	struct kbd_struct *kbd;
+	int i;
 
-		printk(KERN_DEBUG "data from mouse:");
+	if (nb < 5 || nb > 6 || (data[2] & 3) != MOUSE_DATAREG) {
+		printk("data from mouse:");
 		for (i = 0; i < nb; ++i)
 			printk(" %x", data[i]);
 		printk("\n");
 		return;
 	}
-#endif
 
 	if (adb_mouse_interrupt_hook) {
 		adb_mouse_interrupt_hook(data+2, nb-2);
@@ -487,6 +512,60 @@ mouse_input(unsigned char *data, int nb, struct pt_regs *regs)
 		 */
 		return;
 	} 
+#ifdef DEBUG_ADBMOUSE
+	else
+		if (console_loglevel >= 8)
+		    printk("mouse_input: data %x %x %x buttons %x dx %d dy %d \n", 
+			data[3], data[4], data[5],
+			~((data[3] & 0x80 ? 0 : 4) 
+			| (data[4] & 0x80 ? 0 : 1)
+			| (data[5] & 0x80 ? 0 : 2))&7,
+			((data[4]&0x7f) < 64 ? (data[4]&0x7f) : (data[4]&0x7f)-128 ),
+			((data[3]&0x7f) < 64 ? -(data[3]&0x7f) : 128-(data[3]&0x7f) ) );
+#endif
+
+
+	kbd = kbd_table + fg_console;
+
+#if 0	/* The entirely insane way of MkLinux handling mouse input */
+	/* Requires put_queue which is static in keyboard.c :-( */
+	/* Only send mouse codes when keyboard is in raw mode. */
+	if (kbd->kbdmode == VC_RAW) {
+		static unsigned char uch_ButtonStateSecond = 0;
+		unsigned char uchButtonSecond;
+
+		/* Send first button, second button and movement. */
+		put_queue( 0x7e );
+		put_queue( data[3] );
+		put_queue( data[4] );
+
+		/* [ACA: Are there any two-button ADB mice that use handler 1 or 2?] */
+
+		/* Store the button state. */
+		uchButtonSecond = (data[4] & 0x80);
+
+		/* Send second button. */
+		if (uchButtonSecond != uch_ButtonStateSecond) {
+			put_queue( 0x3f | uchButtonSecond );
+			uch_ButtonStateSecond = uchButtonSecond;
+		}
+
+		/* Macintosh 3-button mouse (handler 4). */
+		if ((nb == 6) && (data[1] & 0x40)) {
+			static unsigned char uch_ButtonStateThird = 0;
+			unsigned char uchButtonThird;
+
+			/* Store the button state for speed. */
+			uchButtonThird = (data[5] & 0x80);
+
+			/* Send third button. */
+			if (uchButtonThird != uch_ButtonStateThird) {
+				put_queue( 0x40 | uchButtonThird );
+				uch_ButtonStateThird = uchButtonThird;
+			}
+		}
+	}
+#endif	/* insane MkLinux mouse hack */
 }
 
 /* Map led flags as defined in kbd_kern.h to bits for Apple keyboard. */
@@ -503,11 +582,13 @@ static unsigned char mac_ledmap[8] = {
 
 static int leds_pending;
 
-void mackbd_leds(unsigned int leds)
+void mac_kbd_leds(unsigned int leds)
 {
-	if (led_request.complete) {
+	if (led_request.got_reply) {
+#ifdef DEBUG_ADB
 		if (console_loglevel == 10)
-			printk(KERN_DEBUG "mackbd_leds: got reply, sending request!\n");
+			printk("mac_kbd_leds: got reply, sending request!\n");
+#endif
 		adb_request(&led_request, mac_leds_done, 4, ADB_PACKET,
 			     ADB_WRITEREG(ADB_KEYBOARD, KEYB_LEDREG),
 			     0xff, ~mac_ledmap[leds]);
@@ -522,15 +603,20 @@ static void mac_leds_done(struct adb_request *req)
 	if (leds_pending) {
 		leds = leds_pending & 0xff;
 		leds_pending = 0;
-		mackbd_leds(leds);
+		mac_kbd_leds(leds);
 	}
 	mark_bh(KEYBOARD_BH);
 }
 
-__initfunc(int mackbd_init_hw(void))
+int mac_kbdrate(struct kbd_repeat *k)
 {
-	static struct adb_request autopoll_req, confcod_req;
-	int ct;
+	return 0;
+}
+
+__initfunc(int mac_keyb_init(void))
+{
+	static struct adb_request autopoll_req, confcod_req, mouse_req, readkey_req;
+	volatile int ct;
 
 	/* setup key map */
 	memcpy(key_maps[0], mac_plain_map, sizeof(plain_map));
@@ -543,7 +629,12 @@ __initfunc(int mackbd_init_hw(void))
 
 	/* initialize mouse interrupt hook */
 	adb_mouse_interrupt_hook = NULL;
-	
+
+	/*
+	 * Might put that someplace else, possibly ....
+	 */
+	adb_bus_init();
+
 	/* the input functions ... */	
 	adb_register(ADB_KEYBOARD, keyboard_input);
 	adb_register(ADB_MOUSE, mouse_input);
@@ -562,13 +653,17 @@ __initfunc(int mackbd_init_hw(void))
 	 */
 
 	if (macintosh_config->adb_type == MAC_ADB_CUDA) {
-		printk(KERN_DEBUG "CUDA autopoll on ...\n");
+		printk("CUDA autopoll on ...\n");
 		adb_request(&autopoll_req, NULL, 3, CUDA_PACKET, CUDA_AUTOPOLL, 1);
-		ct = 0;
-		while (!autopoll_req.complete && ct++ < 1000)
-			adb_poll();
-		if (ct == 1000) printk(KERN_ERR "ADB timeout\n");
-		autopoll_req.complete = 1;
+		ct=0; 
+		while (!autopoll_req.got_reply && ++ct<1000)
+		{
+				udelay(10);
+		}
+		if(ct==1000) {
+			printk("Keyboard timed out.\n");
+			autopoll_req.got_reply = 1;
+		}
 	}
 
 	/*
@@ -576,15 +671,15 @@ __initfunc(int mackbd_init_hw(void))
 	 *	care of that for other Macs.
 	 */
 
-	printk(KERN_DEBUG "Configuring keyboard:\n");
-	/* Aarrrgggh!  Die in hell! */
-	udelay(8000);
+	printk("Configuring keyboard:\n");
+
+	udelay(3000);
 
 	/* 
 	 * turn on all leds - the keyboard driver will turn them back off 
-	 * via mackbd_leds if everything works ok!
+	 * via mac_kbd_leds if everything works ok!
 	 */
-	printk(KERN_DEBUG "leds on ...\n");
+	printk("leds on ...\n");
 	adb_request(&led_request, NULL, 4, ADB_PACKET,
 		     ADB_WRITEREG(ADB_KEYBOARD, KEYB_LEDREG), 0xff, ~7);
 
@@ -592,13 +687,19 @@ __initfunc(int mackbd_init_hw(void))
 	 * The polling stuff should go away as soon as the ADB driver is stable
 	 */
 	ct = 0;
-	while (!led_request.complete && ct++ < 1000)
-		adb_poll();
-	if (ct == 1000) printk(KERN_ERR "ADB timeout\n");
-	led_request.complete = 1;
+	while (!led_request.got_reply && ++ct<1000)
+	{
+		udelay(10);
+	}
+	if(ct==1000) {
+		printk("keyboard timed out.\n");
+		led_request.got_reply  = 1;
+	}
 
-	printk(KERN_DEBUG "configuring coding mode ...\n");
-	udelay(8000);
+#if 1
+	printk("configuring coding mode ...\n");
+
+	udelay(3000);
 
 	/* 
 	 * get the keyboard to send separate codes for
@@ -606,15 +707,56 @@ __initfunc(int mackbd_init_hw(void))
 	 */
 	adb_request(&confcod_req, NULL, 4, ADB_PACKET, 
 		     ADB_WRITEREG(ADB_KEYBOARD, 3), 0, 3);
-	ct = 0;
-	while (!confcod_req.complete && ct++ < 1000)
-		adb_poll();
-	if (ct == 1000) printk(KERN_ERR "ADB timeout\n");
-	confcod_req.complete = 1;
+
+	ct=0; 
+	while (!confcod_req.got_reply && ++ct<1000)
+	{
+		udelay(10);
+	}
+	if(ct==1000) {
+		printk("keyboard timed out.\n");
+		confcod_req.got_reply  = 1;
+	}
+#endif
+
+#if 0	/* seems to hurt, at least Geert's Mac */
+	printk("Configuring mouse (3-button mode) ...\n");
+
+	udelay(3000);
+
+	/* 
+	 * XXX: taken from the PPC driver again ... 
+	 * Try to switch the mouse (id 3) to handler 4, for three-button
+	 * mode. (0x20 is Service Request Enable, 0x03 is Device ID). 
+	 */
+	adb_request(&mouse_req, NULL, 4, ADB_PACKET,
+		    ADB_WRITEREG(ADB_MOUSE, 3), 0x23, 4 );
+
+	ct=0; 
+	while (!mouse_req.got_reply && ++ct<1000)
+	{
+		udelay(10);
+	}
+	if(ct==1000)
+		printk("Mouse timed out.\n");
+#endif
+
+#if 0
+	printk("Start polling keyboard ...\n");
+
+	/* 
+	 *	get the keyboard to send data back, via the adb_input hook
+	 *	XXX: was never used properly, and the driver takes care
+	 *	of polling and timeout retransmits now.
+	 *	Might be of use if we want to start talking to a specific
+	 *	device here...
+	 */
+	adb_request(&readkey_req, NULL, 2, ADB_PACKET, 
+		     ADB_READREG(ADB_KEYBOARD, KEYB_KEYREG));
+#endif
 
 	in_keybinit = 0;
-	printk(KERN_DEBUG "keyboard init done\n");
-	udelay(8000);
+	printk("keyboard init done\n");
 
 	return 0;
 }

@@ -136,10 +136,6 @@
  * Pick up the architecture specific timex specifications
  */
 #include <asm/timex.h>
-/*
- * Pick up the definition of timeval
- */
-#include <linux/time.h>
 
 /* LATCH is used in the interval timer and ftape setup. */
 #define LATCH  ((CLOCK_TICK_RATE + HZ/2) / HZ)	/* For divider */

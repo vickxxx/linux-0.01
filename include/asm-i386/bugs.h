@@ -28,12 +28,10 @@ __initfunc(static void no_halt(char *s, int *ints))
 	boot_cpu_data.hlt_works_ok = 0;
 }
 
-#ifdef CONFIG_MCA
 __initfunc(static void mca_pentium(char *s, int *ints))
 {
 	mca_pentium_flag = 1;
 }
-#endif
 
 __initfunc(static void no_387(char *s, int *ints))
 {
@@ -46,7 +44,7 @@ static char __initdata fpu_error = 0;
 __initfunc(static void copro_timeout(void))
 {
 	fpu_error = 1;
-	timer_table[COPRO_TIMER].expires = jiffies+HZ;
+	timer_table[COPRO_TIMER].expires = jiffies+100;
 	timer_active |= 1<<COPRO_TIMER;
 	printk(KERN_ERR "387 failed: trying to reset\n");
 	send_sig(SIGFPE, current, 1);
@@ -104,7 +102,7 @@ __initfunc(static void check_fpu(void))
 	 * should get there first..
 	 */
 	printk(KERN_INFO "Checking 386/387 coupling... ");
-	timer_table[COPRO_TIMER].expires = jiffies+HZ/2;
+	timer_table[COPRO_TIMER].expires = jiffies+50;
 	timer_table[COPRO_TIMER].fn = copro_timeout;
 	timer_active |= 1<<COPRO_TIMER;
 	__asm__("clts ; fninit ; fnstcw %0 ; fwait":"=m" (*&control_word));
@@ -188,7 +186,6 @@ __asm__(".align 4\nvide: ret");
 __initfunc(static void check_amd_k6(void))
 {
 	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
-	    boot_cpu_data.x86 == 5 &&
 	    boot_cpu_data.x86_model == 6 &&
 	    boot_cpu_data.x86_mask == 1)
 	{
@@ -331,7 +328,7 @@ __initfunc(static void check_cx686_slop(void))
 		if (ccr5 & 2) { /* possible wrong calibration done */
 			printk(KERN_INFO "Recalibrating delay loop with SLOP bit reset\n");
 			calibrate_delay();
-			boot_cpu_data.loops_per_jiffy = loops_per_jiffy;
+			boot_cpu_data.loops_per_sec = loops_per_sec;
 		}
 	}
 }
@@ -359,6 +356,14 @@ __initfunc(static void check_cyrix_cpu(void))
 
 __initfunc(static void check_cyrix_coma(void))
 {
+	if (boot_cpu_data.coma_bug) {
+		unsigned char ccr1;
+		cli();
+		ccr1 = getCx86 (CX86_CCR1);
+		setCx86 (CX86_CCR1, ccr1 | 0x10);
+		sti();
+		printk("Cyrix processor with \"coma bug\" found, workaround enabled\n");
+	}
 }
  
 /*
@@ -420,13 +425,5 @@ __initfunc(static void check_bugs(void))
 	check_amd_k6();
 	check_pentium_f00f();
 	check_cyrix_coma();
-	/*
-	 *	Catch people using stupid model number data
-	 *	(Pentium IV) and report 686 still. The /proc data
-	 *	however does not lie and reports 15 as will cpuid.
-	 */
-	if(boot_cpu_data.x86 > 9)
-		system_utsname.machine[1] = '6';
-	else
-		system_utsname.machine[1] = '0' + boot_cpu_data.x86;
+	system_utsname.machine[1] = '0' + boot_cpu_data.x86;
 }

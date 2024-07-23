@@ -3,18 +3,15 @@
  *
  * This file holds all declarations for the knfsd syscall interface.
  *
- * Copyright (C) 1995-1997 Olaf Kirch <okir@monad.swb.de>
+ * Copyright (C) 1995 Olaf Kirch <okir@monad.swb.de>
  */
 
 #ifndef NFSD_SYSCALL_H
 #define NFSD_SYSCALL_H
 
-#include <asm/types.h>
-#ifdef __KERNEL__
-# include <linux/config.h>
-# include <linux/types.h>
-# include <linux/in.h>
-#endif 
+#include <linux/config.h>
+#include <linux/types.h>
+#include <linux/socket.h>
 #include <linux/posix_types.h>
 #include <linux/nfsd/const.h>
 #include <linux/nfsd/export.h>
@@ -37,9 +34,6 @@
 #define NFSCTL_UGIDUPDATE	5	/* update a client's uid/gid map. */
 #define NFSCTL_GETFH		6	/* get an fh by ino (used by mountd) */
 #define NFSCTL_GETFD		7	/* get an fh by path (used by mountd) */
-
-/* Above this is for lockd. */
-#define NFSCTL_LOCKD		0x10000
 
 /* SVC */
 struct nfsctl_svc {
@@ -127,7 +121,11 @@ union nfsctl_res {
 /*
  * Kernel syscall implementation.
  */
+#if defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
 extern asmlinkage int	sys_nfsservctl(int, void *, void *);
+#else
+#define sys_nfsservctl		sys_ni_syscall
+#endif
 extern int		exp_addclient(struct nfsctl_client *ncp);
 extern int		exp_delclient(struct nfsctl_client *ncp);
 extern int		exp_export(struct nfsctl_export *nxp);

@@ -10,7 +10,7 @@
  *	14478 Potsdam, Germany
  *
  *	Most of this code is directly derived from his userspace driver.
- *	His driver works so send any reports to alan@redhat.com unless the
+ *	His driver works so send any reports to alan@cymru.net unless the
  *	userspace driver also doesnt work for you...
  */
 
@@ -1024,6 +1024,12 @@ static int init_mediavision(void)
 	return 0;
 }
 
+static void shutdown_mediavision(void)
+{
+	release_region(io_port,3);
+	release_region(0x9A01, 1);
+}
+
 /*
  *	Module stuff
  */
@@ -1055,12 +1061,6 @@ int init_pms_cards(struct video_init *v)
 
 MODULE_PARM(io_port,"i");
 MODULE_PARM(mem_base,"i");
-
-static void shutdown_mediavision(void)
-{
-	release_region(io_port,3);
-	release_region(0x9A01, 1);
-}
 
 void cleanup_module(void)
 {

@@ -1,4 +1,4 @@
-/* $Id: reset.c,v 1.6 1999/04/10 12:21:30 ulfc Exp $
+/* $Id: reset.c,v 1.6 1998/07/09 19:57:47 ralf Exp $
  *
  * Reset a SGI.
  *
@@ -33,9 +33,7 @@
 #define POWERDOWN_FREQ		(HZ / 4)
 #define PANIC_FREQ		(HZ / 8)
 
-static unsigned char sgi_volume;
-
-static struct timer_list power_timer, blink_timer, debounce_timer, volume_timer;
+static struct timer_list power_timer, blink_timer, debounce_timer;
 static int shuting_down, has_paniced;
 
 static void sgi_machine_restart(char *command) __attribute__((noreturn));
@@ -131,50 +129,14 @@ static inline void power_button(void)
 	add_timer(&power_timer);
 }
 
-void inline sgi_volume_set(unsigned char volume)
+static inline void volume_up_button(void)
 {
-	sgi_volume = volume;
-
-	hpc3c0->pbus_extregs[2][0] = sgi_volume;
-	hpc3c0->pbus_extregs[2][1] = sgi_volume;
+	/* Later when we have sound support ... */
 }
 
-void inline sgi_volume_get(unsigned char *volume)
+static inline void volume_down_button(void)
 {
-	*volume = sgi_volume;
-}
-
-static inline void volume_up_button(unsigned long data)
-{
-	del_timer(&volume_timer);
-
-	if (sgi_volume < 0xff)
-		sgi_volume++;
-
-	hpc3c0->pbus_extregs[2][0] = sgi_volume;
-	hpc3c0->pbus_extregs[2][1] = sgi_volume;
-
-	if (ioc_icontrol->istat1 & 2) {
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
-
-}
-
-static inline void volume_down_button(unsigned long data)
-{
-	del_timer(&volume_timer);
-
-	if (sgi_volume > 0)
-		sgi_volume--;
-
-	hpc3c0->pbus_extregs[2][0] = sgi_volume;
-	hpc3c0->pbus_extregs[2][1] = sgi_volume;
-
-	if (ioc_icontrol->istat1 & 2) {
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
+	/* Later when we have sound support ... */
 }
 
 static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
@@ -194,18 +156,10 @@ static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (!(buttons & 2))		/* Power button was pressed */
 		power_button();
-	if (!(buttons & 0x40)) {	/* Volume up button was pressed */
-		init_timer(&volume_timer);
-		volume_timer.function = volume_up_button;
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
-	if (!(buttons & 0x10)) {	/* Volume down button was pressed */
-		init_timer(&volume_timer);
-		volume_timer.function = volume_down_button;
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
+	if (!(buttons & 0x40))		/* Volume up button was pressed */
+		volume_up_button();
+	if (!(buttons & 0x10))		/* Volume down button was pressed */
+		volume_down_button();
 }
 
 static int panic_event(struct notifier_block *this, unsigned long event,

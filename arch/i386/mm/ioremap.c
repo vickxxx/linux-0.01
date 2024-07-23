@@ -93,42 +93,32 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 {
 	void * addr;
 	struct vm_struct * area;
-	unsigned long offset, last_addr;
-
-	/* Don't allow wraparound or zero size */
-	last_addr = phys_addr + size - 1;
-	if (!size || last_addr < phys_addr)
-		return NULL;
+	unsigned long offset;
 
 	/*
 	 * Don't remap the low PCI/ISA area, it's always mapped..
 	 */
-	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
+	if (phys_addr >= 0xA0000 && (phys_addr+size) <= 0x100000)
 		return phys_to_virt(phys_addr);
 
 	/*
 	 * Don't allow anybody to remap normal RAM that we're using..
 	 */
 	if (phys_addr < virt_to_phys(high_memory))
-           {
-		char *temp_addr, *temp_end;
-		int i;
-
-		temp_addr = __va(phys_addr);
-		temp_end = temp_addr + (size - 1);
-	      
-		for(i = MAP_NR(temp_addr); i <= MAP_NR(temp_end); i++) {
-			if(!PageReserved(mem_map + i))
-				return NULL;
-		}
-	   }
+		return NULL;
 
 	/*
 	 * Mappings have to be page-aligned
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr) - phys_addr;
+	size = PAGE_ALIGN(size + offset);
+
+	/*
+	 * Don't allow mappings that wrap..
+	 */
+	if (!size || size > phys_addr + size)
+		return NULL;
 
 	/*
 	 * Ok, go for it..

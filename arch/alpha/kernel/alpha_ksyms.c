@@ -16,7 +16,6 @@
 #include <linux/pci.h>
 #include <linux/tty.h>
 #include <linux/mm.h>
-#include <linux/smp_lock.h>
 
 #include <asm/io.h>
 #include <asm/hwrpb.h>
@@ -37,7 +36,6 @@
 extern struct hwrpb_struct *hwrpb;
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu(struct pt_regs *, elf_fpregset_t *);
-extern spinlock_t rtc_lock;
 
 /* these are C runtime functions with special calling conventions: */
 extern void __divl (void);
@@ -49,12 +47,11 @@ extern void __remlu (void);
 extern void __divqu (void);
 extern void __remqu (void);
 
-EXPORT_SYMBOL(init_mm);
-
 EXPORT_SYMBOL(alpha_mv);
+EXPORT_SYMBOL(local_bh_count);
+EXPORT_SYMBOL(local_irq_count);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
-EXPORT_SYMBOL(disable_irq_nosync);
 EXPORT_SYMBOL(screen_info);
 EXPORT_SYMBOL(perf_irq);
 
@@ -106,9 +103,7 @@ EXPORT_SYMBOL(hwrpb);
 EXPORT_SYMBOL(wrusp);
 EXPORT_SYMBOL(start_thread);
 EXPORT_SYMBOL(alpha_read_fp_reg);
-EXPORT_SYMBOL(alpha_read_fp_reg_s);
 EXPORT_SYMBOL(alpha_write_fp_reg);
-EXPORT_SYMBOL(alpha_write_fp_reg_s);
 
 /* In-kernel system calls.  */
 EXPORT_SYMBOL(__kernel_thread);
@@ -144,7 +139,7 @@ EXPORT_SYMBOL(alpha_fp_emul);
 EXPORT_SYMBOL_NOVERS(__copy_user);
 EXPORT_SYMBOL_NOVERS(__do_clear_user);
 EXPORT_SYMBOL(__strncpy_from_user);
-EXPORT_SYMBOL(__strnlen_user);
+EXPORT_SYMBOL(__strlen_user);
 
 /*
  * The following are specially called from the semaphore assembly stubs.
@@ -163,13 +158,11 @@ EXPORT_SYMBOL(flush_tlb_all);
 EXPORT_SYMBOL(flush_tlb_mm);
 EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL(flush_tlb_range);
-EXPORT_SYMBOL(smp_imb);
 EXPORT_SYMBOL(cpu_data);
 EXPORT_SYMBOL(cpu_number_map);
 EXPORT_SYMBOL(global_bh_lock);
 EXPORT_SYMBOL(global_bh_count);
 EXPORT_SYMBOL(synchronize_bh);
-EXPORT_SYMBOL(alpha_bh_lock);
 EXPORT_SYMBOL(global_irq_holder);
 EXPORT_SYMBOL(__global_cli);
 EXPORT_SYMBOL(__global_sti);
@@ -177,20 +170,14 @@ EXPORT_SYMBOL(__global_save_flags);
 EXPORT_SYMBOL(__global_restore_flags);
 #if DEBUG_SPINLOCK
 EXPORT_SYMBOL(spin_unlock);
-EXPORT_SYMBOL(debug_spin_lock);
-EXPORT_SYMBOL(debug_spin_trylock);
+EXPORT_SYMBOL(spin_lock);
+EXPORT_SYMBOL(spin_trylock);
 #endif
 #if DEBUG_RWLOCK
 EXPORT_SYMBOL(write_lock);
 EXPORT_SYMBOL(read_lock);
 #endif
-EXPORT_SYMBOL_NOVERS(kernel_flag);
-#else /* __SMP__ */
-EXPORT_SYMBOL(local_bh_count);
-EXPORT_SYMBOL(local_irq_count);
 #endif /* __SMP__ */
-
-EXPORT_SYMBOL(rtc_lock);
 
 /*
  * The following are special because they're not called
@@ -211,6 +198,3 @@ EXPORT_SYMBOL_NOVERS(__remq);
 EXPORT_SYMBOL_NOVERS(__remqu);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
-EXPORT_SYMBOL_NOVERS(memscan);
-
-

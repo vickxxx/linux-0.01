@@ -8,18 +8,15 @@
  * or SHA. I've removed this code, because it doesn't give you more
  * security than blocking external access to port 2049 on your firewall.
  *
- * Copyright (C) 1995-1999 Olaf Kirch <okir@monad.swb.de>
+ * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#ifndef _LINUX_NFSD_FH_H
-#define _LINUX_NFSD_FH_H
+#ifndef NFSD_FH_H
+#define NFSD_FH_H
 
-#include <asm/types.h>
-#ifdef __KERNEL__
-# include <linux/types.h>
-# include <linux/string.h>
-# include <linux/fs.h>
-#endif
+#include <linux/types.h>
+#include <linux/string.h>
+#include <linux/fs.h>
 #include <linux/nfsd/const.h>
 #include <linux/nfsd/debug.h>
 
@@ -30,13 +27,12 @@
  * ino/dev of the exported inode.
  */
 struct nfs_fhbase {
-	__u32		fb_dcookie;	/* dentry cookie */
+	struct dentry *	fb_dentry;	/* dentry cookie */
 	__u32		fb_ino;		/* our inode number */
 	__u32		fb_dirino;	/* dir inode number */
 	__u32		fb_dev;		/* our device */
 	__u32		fb_xdev;
 	__u32		fb_xino;
-	__u32		fb_generation;
 };
 
 #define NFS_FH_PADDING		(NFS_FHSIZE - sizeof(struct nfs_fhbase))
@@ -45,13 +41,12 @@ struct knfs_fh {
 	__u8			fh_cookie[NFS_FH_PADDING];
 };
 
-#define fh_dcookie		fh_base.fb_dcookie
+#define fh_dcookie		fh_base.fb_dentry
 #define fh_ino			fh_base.fb_ino
 #define fh_dirino		fh_base.fb_dirino
 #define fh_dev			fh_base.fb_dev
 #define fh_xdev			fh_base.fb_xdev
 #define fh_xino			fh_base.fb_xino
-#define fh_generation		fh_base.fb_generation
 
 #ifdef __KERNEL__
 
@@ -86,32 +81,12 @@ typedef struct svc_fh {
 	struct knfs_fh		fh_handle;	/* FH data */
 	struct dentry *		fh_dentry;	/* validated dentry */
 	struct svc_export *	fh_export;	/* export pointer */
-#ifdef CONFIG_NFSD_V3
-	unsigned char		fh_post_saved;	/* post-op attrs saved */
-	unsigned char		fh_pre_saved;	/* pre-op attrs saved */
-#endif /* CONFIG_NFSD_V3 */
-	unsigned char		fh_locked;	/* inode locked by us */
-
-#ifdef CONFIG_NFSD_V3
-	/* Pre-op attributes saved during fh_lock */
-	__u64			fh_pre_size;	/* size before operation */
+	size_t			fh_pre_size;	/* size before operation */
 	time_t			fh_pre_mtime;	/* mtime before oper */
 	time_t			fh_pre_ctime;	/* ctime before oper */
-
-	/* Post-op attributes saved in fh_unlock */
-	umode_t			fh_post_mode;	/* i_mode */
-	nlink_t			fh_post_nlink;	/* i_nlink */
-	uid_t			fh_post_uid;	/* i_uid */
-	gid_t			fh_post_gid;	/* i_gid */
-	__u64			fh_post_size;	/* i_size */
-	unsigned long		fh_post_blocks; /* i_blocks */
-	unsigned long		fh_post_blksize;/* i_blksize */
-	kdev_t			fh_post_rdev;	/* i_rdev */
-	time_t			fh_post_atime;	/* i_atime */
-	time_t			fh_post_mtime;	/* i_mtime */
-	time_t			fh_post_ctime;	/* i_ctime */
-#endif /* CONFIG_NFSD_V3 */
-
+	unsigned long		fh_post_version;/* inode version after oper */
+	unsigned char		fh_locked;	/* inode locked by us */
+	unsigned char		fh_dverified;	/* dentry has been checked */
 } svc_fh;
 
 /*
@@ -128,11 +103,17 @@ u32	fh_verify(struct svc_rqst *, struct svc_fh *, int, int);
 void	fh_compose(struct svc_fh *, struct svc_export *, struct dentry *);
 void	fh_update(struct svc_fh *);
 void	fh_put(struct svc_fh *);
+void	nfsd_fh_flush(kdev_t);
+void	nfsd_fh_init(void);
+void	nfsd_fh_free(void);
+
+void	expire_all(void);
+void	expire_by_dentry(struct dentry *);
 
 static __inline__ struct svc_fh *
 fh_copy(struct svc_fh *dst, struct svc_fh *src)
 {
-	if (src->fh_dentry || src->fh_locked) {
+	if (src->fh_dverified || src->fh_locked) {
 		struct dentry *dentry = src->fh_dentry;
 		printk(KERN_ERR "fh_copy: copying %s/%s, already verified!\n",
 			dentry->d_parent->d_name.name, dentry->d_name.name);
@@ -149,53 +130,6 @@ fh_init(struct svc_fh *fhp)
 	return fhp;
 }
 
-#ifdef CONFIG_NFSD_V3
-/*
- * Fill in the pre_op attr for the wcc data
- */
-static inline void
-fill_pre_wcc(struct svc_fh *fhp)
-{
-        struct inode    *inode;
-
-        inode = fhp->fh_dentry->d_inode;
-        if (!fhp->fh_pre_saved) {
-                fhp->fh_pre_mtime = inode->i_mtime;
-                        fhp->fh_pre_ctime = inode->i_ctime;
-                        fhp->fh_pre_size  = inode->i_size;
-                        fhp->fh_pre_saved = 1;
-        }
-        fhp->fh_locked = 1;
-}
-
-/*
- * Fill in the post_op attr for the wcc data
- */
-static inline void
-fill_post_wcc(struct svc_fh *fhp)
-{
-        struct inode    *inode = fhp->fh_dentry->d_inode;
-
-        if (fhp->fh_post_saved)
-                printk("nfsd: inode locked twice during operation.\n");
-
-        fhp->fh_post_mode       = inode->i_mode;
-        fhp->fh_post_nlink      = inode->i_nlink;
-        fhp->fh_post_uid        = inode->i_uid;
-        fhp->fh_post_gid        = inode->i_gid;
-        fhp->fh_post_size       = inode->i_size;
-        fhp->fh_post_blksize    = inode->i_blksize;
-        fhp->fh_post_blocks     = inode->i_blocks;
-        fhp->fh_post_rdev       = inode->i_rdev;
-        fhp->fh_post_atime      = inode->i_atime;
-        fhp->fh_post_mtime      = inode->i_mtime;
-        fhp->fh_post_ctime      = inode->i_ctime;
-        fhp->fh_post_saved      = 1;
-        fhp->fh_locked          = 0;
-}
-#endif /* CONFIG_NFSD_V3 */
-
-
 /*
  * Lock a file handle/inode
  */
@@ -205,10 +139,11 @@ fh_lock(struct svc_fh *fhp)
 	struct dentry	*dentry = fhp->fh_dentry;
 	struct inode	*inode;
 
+	/*
 	dfprintk(FILEOP, "nfsd: fh_lock(%x/%ld) locked = %d\n",
-			SVCFH_DEV(fhp), (long)SVCFH_INO(fhp), fhp->fh_locked);
-
-	if (!fhp->fh_dentry) {
+			SVCFH_DEV(fhp), SVCFH_INO(fhp), fhp->fh_locked);
+	 */
+	if (!fhp->fh_dverified) {
 		printk(KERN_ERR "fh_lock: fh not verified!\n");
 		return;
 	}
@@ -220,11 +155,9 @@ fh_lock(struct svc_fh *fhp)
 
 	inode = dentry->d_inode;
 	down(&inode->i_sem);
-#ifdef CONFIG_NFSD_V3
-	fill_pre_wcc(fhp);
-#else
+	if (!fhp->fh_pre_mtime)
+		fhp->fh_pre_mtime = inode->i_mtime;
 	fhp->fh_locked = 1;
-#endif /* CONFIG_NFSD_V3 */
 }
 
 /*
@@ -233,23 +166,48 @@ fh_lock(struct svc_fh *fhp)
 static inline void
 fh_unlock(struct svc_fh *fhp)
 {
-	if (!fhp->fh_dentry)
+	if (!fhp->fh_dverified)
 		printk(KERN_ERR "fh_unlock: fh not verified!\n");
 
 	if (fhp->fh_locked) {
-#ifdef CONFIG_NFSD_V3
-		fill_post_wcc(fhp);
-		up(&fhp->fh_dentry->d_inode->i_sem);
-#else
 		struct dentry *dentry = fhp->fh_dentry;
 		struct inode *inode = dentry->d_inode;
 
+		if (!fhp->fh_post_version)
+			fhp->fh_post_version = inode->i_version;
 		fhp->fh_locked = 0;
 		up(&inode->i_sem);
-#endif /* CONFIG_NFSD_V3 */
 	}
 }
+
+/*
+ * Release an inode
+ */
+#if 0
+#define fh_put(fhp)	__fh_put(fhp, __FILE__, __LINE__)
+
+static inline void
+__fh_put(struct svc_fh *fhp, char *file, int line)
+{
+	struct dentry	*dentry;
+
+	if (!fhp->fh_dverified)
+		return;
+
+	dentry = fhp->fh_dentry;
+	if (!dentry->d_count) {
+		printk("nfsd: trying to free free dentry in %s:%d\n"
+		       "      file %s/%s\n",
+		       file, line,
+		       dentry->d_parent->d_name.name, dentry->d_name.name);
+	} else {
+		fh_unlock(fhp);
+		fhp->fh_dverified = 0;
+		dput(dentry);
+	}
+}
+#endif
+
 #endif /* __KERNEL__ */
 
-
-#endif /* _LINUX_NFSD_FH_H */
+#endif /* NFSD_FH_H */

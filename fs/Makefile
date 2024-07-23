@@ -13,12 +13,12 @@ O_TARGET := fs.o
 O_OBJS    = open.o read_write.o devices.o file_table.o buffer.o \
 		super.o  block_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
 		ioctl.o readdir.o select.o fifo.o locks.o filesystems.o \
-		dcache.o inode.o attr.o bad_inode.o file.o $(BINFMTS) 
+		dcache.o inode.o attr.o bad_inode.o $(BINFMTS) 
 
 MOD_LIST_NAME := FS_MODULES
 ALL_SUB_DIRS = coda minix ext2 fat msdos vfat proc isofs nfs umsdos ntfs \
-		hpfs sysv smbfs ncpfs ufs affs romfs autofs hfs lockd \
-		nfsd nls devpts adfs qnx4 efs
+		hpfs sysv smbfs ncpfs ufs affs romfs autofs hfs lockd nfsd \
+		nls devpts adfs qnx4
 
 ifeq ($(CONFIG_QUOTA),y)
 O_OBJS += dquot.o
@@ -212,14 +212,6 @@ SUB_DIRS += qnx4
 else
   ifeq ($(CONFIG_QNX4FS_FS),m)
   MOD_SUB_DIRS += qnx4
-  endif
-endif
-
-ifeq ($(CONFIG_EFS_FS),y)
-SUB_DIRS += efs
-else
-  ifeq ($(CONFIG_EFS_FS),m)
-  MOD_SUB_DIRS += efs
   endif
 endif
 

@@ -64,7 +64,6 @@ static int max_interrupt_work = 10;
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>	/* for udelay() */
-#include <linux/init.h>
 
 #include <asm/spinlock.h>
 #include <asm/bitops.h>
@@ -157,7 +156,7 @@ struct el3_mca_adapters_struct {
 	int id;
 };
 
-static struct el3_mca_adapters_struct el3_mca_adapters[] __initdata = {
+struct el3_mca_adapters_struct el3_mca_adapters[] = {
 	{ "3Com 3c529 EtherLink III (10base2)", 0x627c },
 	{ "3Com 3c529 EtherLink III (10baseT)", 0x627d },
 	{ "3Com 3c529 EtherLink III (test mode)", 0x62db },
@@ -167,7 +166,7 @@ static struct el3_mca_adapters_struct el3_mca_adapters[] __initdata = {
 };
 #endif
 
-int __init el3_probe(struct device *dev)
+int el3_probe(struct device *dev)
 {
 	short lrs_state = 0xff, i;
 	int ioaddr, irq, if_port;
@@ -227,6 +226,9 @@ int __init el3_probe(struct device *dev)
 				 * detected and is enabled
 				 */
 
+				printk("3c509: found %s at slot %d\n",
+					el3_mca_adapters[j].name, slot + 1 );
+
 				pos4 = mca_read_stored_pos( slot, 4 );
 				pos5 = mca_read_stored_pos( slot, 5 );
 
@@ -240,9 +242,6 @@ int __init el3_probe(struct device *dev)
 					continue;
 				}
 
-				printk("3c509: found %s at slot %d\n",
-					el3_mca_adapters[j].name, slot + 1 );
-
 				/* claim the slot */
 				mca_set_adapter_name(slot, el3_mca_adapters[j].name);
 				mca_set_adapter_procfn(slot, NULL, NULL);
@@ -252,7 +251,6 @@ int __init el3_probe(struct device *dev)
 				if (el3_debug > 2) {
 					printk("3c529: irq %d  ioaddr 0x%x  ifport %d\n", irq, ioaddr, if_port);
 				}
-				EL3WINDOW(0);
 				for (i = 0; i < 3; i++) {
 					phys_addr[i] = htons(read_eeprom(ioaddr, i));
 				}
@@ -376,7 +374,6 @@ int __init el3_probe(struct device *dev)
 	
 	((struct el3_private *)dev->priv)->mca_slot = mca_slot;
 	((struct el3_private *)dev->priv)->next_dev = el3_root_dev;
-	((struct el3_private *)dev->priv)->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
 	el3_root_dev = dev;
 
 	if (el3_debug > 0)
@@ -397,7 +394,7 @@ int __init el3_probe(struct device *dev)
 /* Read a word from the EEPROM using the regular EEPROM access register.
    Assume that we are in register window zero.
  */
-static ushort __init read_eeprom(int ioaddr, int index)
+static ushort read_eeprom(int ioaddr, int index)
 {
 	outw(EEPROM_READ + index, ioaddr + 10);
 	/* Pause for at least 162 us. for the read to take place. */
@@ -406,7 +403,7 @@ static ushort __init read_eeprom(int ioaddr, int index)
 }
 
 /* Read a word from the EEPROM when in the ISA ID probe state. */
-static ushort __init id_read_eeprom(int index)
+static ushort id_read_eeprom(int index)
 {
 	int bit, word = 0;
 
@@ -436,6 +433,9 @@ el3_open(struct device *dev)
 	outw(TxReset, ioaddr + EL3_CMD);
 	outw(RxReset, ioaddr + EL3_CMD);
 	outw(SetStatusEnb | 0x00, ioaddr + EL3_CMD);
+
+	/* Set the spinlock before grabbing IRQ! */
+	((struct el3_private *)dev->priv)->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
 
 	if (request_irq(dev->irq, &el3_interrupt, 0, dev->name, dev)) {
 		return -EAGAIN;
@@ -577,7 +577,7 @@ el3_start_xmit(struct sk_buff *skb, struct device *dev)
 		outw(0x00, ioaddr + TX_FIFO);
 		/* ... and the packet rounded to a doubleword. */
 #ifdef  __powerpc__
-		outsl_ns(ioaddr + TX_FIFO, skb->data, (skb->len + 3) >> 2);
+		outsl_unswapped(ioaddr + TX_FIFO, skb->data, (skb->len + 3) >> 2);
 #else
 		outsl(ioaddr + TX_FIFO, skb->data, (skb->len + 3) >> 2);
 #endif
@@ -797,7 +797,7 @@ el3_rx(struct device *dev)
 
 				/* 'skb->data' points to the start of sk_buff data area. */
 #ifdef  __powerpc__
-				insl_ns(ioaddr+RX_FIFO, skb_put(skb,pkt_len),
+				insl_unswapped(ioaddr+RX_FIFO, skb_put(skb,pkt_len),
 							   (pkt_len + 3) >> 2);
 #else
 				insl(ioaddr + RX_FIFO, skb_put(skb,pkt_len),

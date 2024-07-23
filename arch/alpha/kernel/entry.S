@@ -8,7 +8,7 @@
 
 #define SIGCHLD 20
 
-#define NR_SYSCALLS 377
+#define NR_SYSCALLS 371
 
 /*
  * These offsets must match with alpha_mv in <asm/machvec.h>.
@@ -82,8 +82,8 @@
 	ldq	$1,8($30);		\
 	ldq	$2,16($30);		\
 	ldq	$3,24($30);		\
-	ldq	$20,HAE_CACHE($19);	\
-	ldq	$21,152($30);		\
+	ldq	$20,152($30);		\
+	ldq	$21,HAE_CACHE($19);	\
 	ldq	$4,32($30);		\
 	ldq	$5,40($30);		\
 	ldq	$6,48($30);		\
@@ -272,11 +272,7 @@ __kernel_execve:
 	stq	$26,0($30)
 	stq	$19,8($30)
 	.prologue 1
-#ifdef __SMP__	
-	jsr	$26,___kernel_execve
-#else
 	jsr	$26,do_execve
-#endif	/* __SMP__ */
 	bne	$0,1f		/* error! */
 	ldq	$30,8($30)
 	br	$31,ret_from_sys_call
@@ -1147,9 +1143,3 @@ sys_call_table:
 	.quad sys_capget
 	.quad sys_capset
 	.quad sys_sendfile			/* 370 */
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall			/* 375 */
-	.quad sys_pciconfig_iobase

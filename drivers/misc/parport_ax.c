@@ -1,4 +1,4 @@
-/* $Id: parport_ax.c,v 1.17.2.1 2000/01/09 18:29:28 ecd Exp $
+/* $Id: parport_ax.c,v 1.17 1999/01/20 06:18:54 davem Exp $
  * Parallel-port routines for Sun Ultra/AX architecture
  * 
  * Author: Eddie C. Dost <ecd@skynet.be>
@@ -28,6 +28,13 @@
 #include <asm/ebus.h>
 #include <asm/ns87303.h>
 #include <asm/irq.h>
+
+
+/*
+ * Define this if you have Devices which don't support short
+ * host read/write cycles.
+ */
+#undef HAVE_SLOW_DEVICES
 
 
 #define DATA		0x00
@@ -506,6 +513,7 @@ init_one_port(struct linux_ebus_device *dev)
 	struct parport tmpport, *p;
 	unsigned long base;
 	unsigned long config;
+	unsigned char tmp;
 	int irq, dma;
 
 	/* Pointer to NS87303 Configuration Registers */
@@ -515,15 +523,29 @@ init_one_port(struct linux_ebus_device *dev)
 	tmpport.base = dev->base_address[0];
 	tmpport.ops = &parport_ax_ops;
 
-	/* Configure IRQ to Push Pull, Level Low */
 	/* Enable ECP mode, set bit 2 of the CTR first */
 	tmpport.ops->write_control(&tmpport, 0x04);
-	ns87303_modify(config, PCR,
-		       PCR_EPP_ENABLE | PCR_IRQ_ODRAIN,
-		       PCR_ECP_ENABLE | PCR_ECP_CLK_ENA | PCR_IRQ_POLAR);
+	tmp = ns87303_readb(config, PCR);
+	tmp |= (PCR_EPP_IEEE | PCR_ECP_ENABLE | PCR_ECP_CLK_ENA);
+	ns87303_writeb(config, PCR, tmp);
 
 	/* LPT CTR bit 5 controls direction of parallel port */
-	ns87303_modify(config, PTR, 0, PTR_LPT_REG_DIR);
+	tmp = ns87303_readb(config, PTR);
+	tmp |= PTR_LPT_REG_DIR;
+	ns87303_writeb(config, PTR, tmp);
+
+	/* Configure IRQ to Push Pull, Level Low */
+	tmp = ns87303_readb(config, PCR);
+	tmp &= ~(PCR_IRQ_ODRAIN);
+	tmp |= PCR_IRQ_POLAR;
+	ns87303_writeb(config, PCR, tmp);
+
+#ifndef HAVE_SLOW_DEVICES
+	/* Enable Zero Wait State for ECP */
+	tmp = ns87303_readb(config, FCR);
+	tmp |= FCR_ZWS_ENA;
+	ns87303_writeb(config, FCR, tmp);
+#endif
 
 	/*
 	 * Now continue initializing the port

@@ -8,7 +8,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Version:	$Id: af_unix.c,v 1.76.2.6 2001/01/04 05:28:48 davem Exp $
+ * Version:	$Id: af_unix.c,v 1.76 1999/05/08 05:54:55 davem Exp $
  *
  * Fixes:
  *		Linus Torvalds	:	Assorted bug cures.
@@ -43,7 +43,6 @@
  *					number of socks to 2*max_files and
  *					the number of skb queueable in the
  *					dgram receiver.
- *	      Malcolm Beattie   :	Set peercred for socketpair
  *
  * Known differences from reference BSD that was tested:
  *
@@ -104,13 +103,10 @@
 #include <net/scm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/smp_lock.h>
 
 #include <asm/checksum.h>
 
 #define min(a,b)	(((a)<(b))?(a):(b))
-
-extern int unix_tot_inflight;
 
 int sysctl_unix_delete_delay = HZ;
 int sysctl_unix_destroy_delay = 10*HZ;
@@ -132,6 +128,7 @@ extern __inline__ unsigned unix_hash_fold(unsigned hash)
 {
 	hash ^= hash>>16;
 	hash ^= hash>>8;
+	hash ^= hash>>4;
 	return hash;
 }
 
@@ -241,7 +238,7 @@ static unix_socket *unix_find_socket_byname(struct sockaddr_un *sunname,
 {
 	unix_socket *s;
 
-	for (s=unix_socket_table[(hash^type)&(UNIX_HASH_SIZE-1)]; s; s=s->next)
+	for (s=unix_socket_table[(hash^type)&0xF]; s; s=s->next)
 	{
 		if(s->protinfo.af_unix.addr->len==len &&
 		   memcmp(s->protinfo.af_unix.addr->name, sunname, len) == 0 &&
@@ -258,7 +255,7 @@ static unix_socket *unix_find_socket_byinode(struct inode *i)
 {
 	unix_socket *s;
 
-	for (s=unix_socket_table[i->i_ino & (UNIX_HASH_SIZE - 1)]; s; s=s->next)
+	for (s=unix_socket_table[i->i_ino & 0xF]; s; s=s->next)
 	{
 		struct dentry *dentry = s->protinfo.af_unix.dentry;
 
@@ -345,8 +342,7 @@ static int unix_release_sock (unix_socket *sk)
 	 *	  What the above comment does talk about? --ANK(980817)
 	 */
 
-	if (unix_tot_inflight)
-		unix_gc();		/* Garbage collect fds */	
+	unix_gc();		/* Garbage collect fds */	
 	return 0;
 }
 	
@@ -417,7 +413,7 @@ static struct sock * unix_create1(struct socket *sock, int stream)
 {
 	struct sock *sk;
 
-	if (atomic_read(&unix_nr_socks) >= 2*files_stat.max_files)
+	if (atomic_read(&unix_nr_socks) >= 2*max_files)
 		return NULL;
 
 	MOD_INC_USE_COUNT;
@@ -521,7 +517,7 @@ retry:
 
 	sk->protinfo.af_unix.addr = addr;
 	unix_remove_socket(sk);
-	sk->protinfo.af_unix.list = &unix_socket_table[(addr->hash ^ sk->type)&(UNIX_HASH_SIZE - 1)];
+	sk->protinfo.af_unix.list = &unix_socket_table[(addr->hash ^ sk->type)&0xF];
 	unix_insert_socket(sk);
 	return 0;
 }
@@ -609,7 +605,7 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		}
 		unix_remove_socket(sk);
 		sk->protinfo.af_unix.addr = addr;
-		sk->protinfo.af_unix.list = &unix_socket_table[(hash^sk->type)&(UNIX_HASH_SIZE - 1)];
+		sk->protinfo.af_unix.list = &unix_socket_table[(hash^sk->type)&0xF];
 		unix_insert_socket(sk);
 		return 0;
 	}
@@ -630,7 +626,7 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 			return err;
 	}
 	unix_remove_socket(sk);
-	sk->protinfo.af_unix.list = &unix_socket_table[dentry->d_inode->i_ino & (UNIX_HASH_SIZE - 1)];
+	sk->protinfo.af_unix.list = &unix_socket_table[dentry->d_inode->i_ino & 0xF];
 	sk->protinfo.af_unix.dentry = dentry;
 	unix_insert_socket(sk);
 
@@ -817,9 +813,6 @@ static int unix_socketpair(struct socket *socka, struct socket *sockb)
 	unix_lock(skb);
 	unix_peer(ska)=skb;
 	unix_peer(skb)=ska;
-	ska->peercred.pid = skb->peercred.pid = current->pid;
-	ska->peercred.uid = skb->peercred.uid = current->euid;
-	ska->peercred.gid = skb->peercred.gid = current->egid;
 
 	if (ska->type != SOCK_DGRAM)
 	{
@@ -975,10 +968,6 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 			return -ENOTCONN;
 	}
 
-	err = -EMSGSIZE;
-	if (len > sk->sndbuf)
-		goto out;
-
 	if (sock->passcred && !sk->protinfo.af_unix.addr)
 		unix_autobind(sock);
 
@@ -992,11 +981,7 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		unix_attach_fds(scm, skb);
 
 	skb->h.raw = skb->data;
-
-	unlock_kernel();
 	err = memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len);
-	lock_kernel();
-
 	if (err)
 		goto out_free;
 
@@ -1028,7 +1013,7 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	while (skb_queue_len(&other->receive_queue) >=
 	       sysctl_unix_max_dgram_qlen)
 	{
-		if (msg->msg_flags&MSG_DONTWAIT)
+		if (sock->file->f_flags & O_NONBLOCK)
 		{
 			err = -EAGAIN;
 			goto out_unlock;
@@ -1152,19 +1137,11 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		if (scm->fp)
 			unix_attach_fds(scm, skb);
 
-		{
-			int err;
-
-			unlock_kernel();
-			err = memcpy_fromiovec(skb_put(skb,size), msg->msg_iov, size);
-			lock_kernel();
-
-			if(err) {
-				kfree_skb(skb);
-				if (sent)
-					goto out;
-				return -EFAULT;
-			}
+		if (memcpy_fromiovec(skb_put(skb,size), msg->msg_iov, size)) {
+			kfree_skb(skb);
+			if (sent)
+				goto out;
+			return -EFAULT;
 		}
 
 		other=unix_peer(sk);
@@ -1242,10 +1219,7 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 	else if (size < skb->len)
 		msg->msg_flags |= MSG_TRUNC;
 
-	unlock_kernel();
 	err = skb_copy_datagram_iovec(skb, 0, msg->msg_iov, size);
-	lock_kernel();
-
 	if (err)
 		goto out_free;
 
@@ -1365,19 +1339,11 @@ static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size
 		}
 
 		chunk = min(skb->len, size);
-		{
-			int err;
-
-			unlock_kernel();
-			err = memcpy_toiovec(msg->msg_iov, skb->data, chunk);
-			lock_kernel();
-
-			if(err) {
-				skb_queue_head(&sk->receive_queue, skb);
-				if (copied == 0)
-					copied = -EFAULT;
-				break;
-			}
+		if (memcpy_toiovec(msg->msg_iov, skb->data, chunk)) {
+			skb_queue_head(&sk->receive_queue, skb);
+			if (copied == 0)
+				copied = -EFAULT;
+			break;
 		}
 		copied += chunk;
 		size -= chunk;

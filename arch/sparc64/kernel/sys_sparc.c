@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.26.2.2 2000/03/24 00:03:27 davem Exp $
+/* $Id: sys_sparc.c,v 1.26 1999/01/07 19:07:01 jj Exp $
  * linux/arch/sparc64/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -214,13 +214,6 @@ c_sys_nis_syscall (struct pt_regs *regs)
 	return -ENOSYS;
 }
 
-/* We don't want to warn about LFS syscalls which are defined in our headers */
-asmlinkage unsigned long
-sys_lfs_syscall (void)
-{
-	return -ENOSYS;
-}
-
 /* #define DEBUG_SPARC_BREAKPOINT */
 
 asmlinkage void
@@ -279,21 +272,6 @@ asmlinkage int solaris_syscall(struct pt_regs *regs)
 	unlock_kernel();
 	return -ENOSYS;
 }
-
-#ifndef CONFIG_SUNOS_EMUL
-asmlinkage int sunos_syscall(struct pt_regs *regs)
-{
-	static int count = 0;
-	lock_kernel();
-	regs->tpc = regs->tnpc;
-	regs->tnpc += 4;
-	if(++count <= 20)
-		printk ("SunOS binary emulation not compiled in\n");
-	force_sig(SIGSEGV, current);
-	unlock_kernel();
-	return -ENOSYS;
-}
-#endif
 
 asmlinkage int sys_utrap_install(utrap_entry_t type, utrap_handler_t new_p,
 				 utrap_handler_t new_d,

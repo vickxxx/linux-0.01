@@ -1,4 +1,4 @@
-/* $Id: blockops.S,v 1.16.2.4 2000/07/14 01:11:29 davem Exp $
+/* $Id: blockops.S,v 1.16 1998/10/20 03:09:04 jj Exp $
  * blockops.S: UltraSparc block zero optimized routines.
  *
  * Copyright (C) 1996,1998 David S. Miller (davem@caip.rutgers.edu)
@@ -43,44 +43,16 @@ copy_page: /* %o0=dest, %o1=src */
 	sethi		%hi(DCACHE_SIZE), %o1
 	add		%o0, %o3, %o0
 	add		%o0, %o1, %o1
-	mov		TLBTEMP_ENT1, %o3
+	sethi		%hi(TLBTEMP_ENT1), %o3
 	rdpr		%pstate, %g3
 	wrpr		%g3, PSTATE_IE, %pstate
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %o4
-	stxa		%g0, [%o4] ASI_DMMU
-	sethi		%hi(empty_zero_page), %o4
-	flush		%o4
-
 	ldxa		[%o3] ASI_DTLB_TAG_READ, %o4
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %o5
-	stxa		%g0, [%o5] ASI_DMMU
-	sethi		%hi(empty_zero_page), %o5
-	flush		%o5
-
 	ldxa		[%o3] ASI_DTLB_DATA_ACCESS, %o5
 	stxa		%o0, [%o2] ASI_DMMU
 	stxa		%g1, [%o3] ASI_DTLB_DATA_ACCESS
 	membar		#Sync
 	add		%o3, (TLBTEMP_ENTSZ), %o3
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %g5
-	stxa		%g0, [%g5] ASI_DMMU
-	sethi		%hi(empty_zero_page), %g5
-	flush		%g5
-
 	ldxa		[%o3] ASI_DTLB_TAG_READ, %g5
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %g7
-	stxa		%g0, [%g7] ASI_DMMU
-	sethi		%hi(empty_zero_page), %g7
-	flush		%g7
-
 	ldxa		[%o3] ASI_DTLB_DATA_ACCESS, %g7
 	stxa		%o1, [%o2] ASI_DMMU
 	stxa		%g2, [%o3] ASI_DTLB_DATA_ACCESS
@@ -145,24 +117,10 @@ clear_page:		/* %o0=dest */
 	mov		TLB_TAG_ACCESS, %o2
 	sethi		%hi(TLBTEMP_BASE), %o3
 	add		%o0, %o3, %o0
-	mov		TLBTEMP_ENT2, %o3
+	sethi		%hi(TLBTEMP_ENT2), %o3
 	rdpr		%pstate, %g3
 	wrpr		%g3, PSTATE_IE, %pstate
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %g5
-	stxa		%g0, [%g5] ASI_DMMU
-	sethi		%hi(empty_zero_page), %g5
-	flush		%g5
-
 	ldxa		[%o3] ASI_DTLB_TAG_READ, %g5
-
-	/* Spitfire Errata #32 workaround */
-	mov		0x8, %g7
-	stxa		%g0, [%g7] ASI_DMMU
-	sethi		%hi(empty_zero_page), %g7
-	flush		%g7
-
 	ldxa		[%o3] ASI_DTLB_DATA_ACCESS, %g7
 	stxa		%o0, [%o2] ASI_DMMU
 	stxa		%g1, [%o3] ASI_DTLB_DATA_ACCESS
@@ -178,18 +136,16 @@ clear_page:		/* %o0=dest */
 
 	faddd		%f0, %f2, %f12			! FPA	Group
 	fmuld		%f0, %f2, %f14			! FPM
+	wr		%g0, ASI_BLK_P, %asi		! LSU	Group
 	membar		#StoreLoad | #StoreStore | #LoadStore	! LSU	Group
-1:	stda		%f0, [%o0 + %g0] ASI_BLK_P	! Store	Group
-	add		%o0, 0x40, %o0			! IEU0
-	stda		%f0, [%o0 + %g0] ASI_BLK_P	! Store	Group
-	add		%o0, 0x40, %o0			! IEU0
-	stda		%f0, [%o0 + %g0] ASI_BLK_P	! Store	Group
+1:	stda		%f0, [%o0 + 0x00] %asi		! Store	Group
+	stda		%f0, [%o0 + 0x40] %asi		! Store	Group
+	stda		%f0, [%o0 + 0x80] %asi		! Store	Group
+	stda		%f0, [%o0 + 0xc0] %asi		! Store	Group
 
-	add		%o0, 0x40, %o0			! IEU0	Group
-	stda		%f0, [%o0 + %g0] ASI_BLK_P	! Store	Group
 	subcc		%o1, 1, %o1			! IEU1
 	bne,pt		%icc, 1b			! CTI
-	 add		%o0, 0x40, %o0			! IEU0	Group
+	 add		%o0, 0x100, %o0			! IEU0	Group
 	membar		#Sync				! LSU	Group
 	VISExitHalf
 

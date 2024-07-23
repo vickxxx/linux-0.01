@@ -42,9 +42,9 @@ if [ "$CONFIG_UNIX98_PTYS" = "y" ]; then
   bool '/dev/pts filesystem for Unix98 PTYs' CONFIG_DEVPTS_FS
 fi
 if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  tristate 'QNX4 filesystem support (read only) (EXPERIMENTAL)' CONFIG_QNX4FS_FS
+  tristate 'QNX filesystem support (EXPERIMENTAL)' CONFIG_QNX4FS_FS
   if [ "$CONFIG_QNX4FS_FS" != "n" ]; then
-    bool '   QNX4FS write support (DANGEROUS)' CONFIG_QNX4FS_RW
+    bool '   QNXFS read-write support (FOR TESTING ONLY)' CONFIG_QNX4FS_RW
   fi    
 fi
 tristate 'ROM filesystem support' CONFIG_ROMFS_FS
@@ -54,12 +54,7 @@ tristate 'UFS filesystem support' CONFIG_UFS_FS
 if [ "$CONFIG_UFS_FS" != "n" ]; then
   bool '   UFS filesystem write support (experimental)' CONFIG_UFS_FS_WRITE
 fi
-if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  tristate 'SGI EFS filesystem support (read only) (experimental)' CONFIG_EFS_FS
-  if [ "$CONFIG_EFS_FS" != "n" ]; then
-    define_bool CONFIG_SGI_PARTITION y
-  fi
-fi
+
 
 if [ "$CONFIG_NET" = "y" ]; then
 
@@ -69,18 +64,14 @@ comment 'Network File Systems'
 if [ "$CONFIG_INET" = "y" ]; then
   tristate 'Coda filesystem support (advanced network fs)' CONFIG_CODA_FS
   tristate 'NFS filesystem support' CONFIG_NFS_FS
-  if [ "$CONFIG_NFS_FS" != "n" ]; then
-    bool '   NFS Version 3 filesystem support' CONFIG_NFS_V3
-  fi
   if [ "$CONFIG_NFS_FS" = "y" -a "$CONFIG_IP_PNP" = "y" ]; then
     bool '   Root file system on NFS' CONFIG_ROOT_NFS
   fi
-  tristate 'NFS server support' CONFIG_NFSD
+  if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+    tristate 'NFS server support' CONFIG_NFSD
+  fi
   if [ "$CONFIG_NFSD" != "n" ]; then
-    bool '   NFS Version 3 server support' CONFIG_NFSD_V3
-    if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-      bool '   NFS server TCP support (VERY EXPERIMENTAL)' CONFIG_NFSD_TCP
-    fi
+    bool '   Emulate SUN NFS server' CONFIG_NFSD_SUN
   fi
   if [ "$CONFIG_NFS_FS" = "y" -o "$CONFIG_NFSD" = "y" ]; then
     define_bool CONFIG_SUNRPC y
@@ -96,11 +87,8 @@ if [ "$CONFIG_INET" = "y" ]; then
   fi
   tristate 'SMB filesystem support (to mount WfW shares etc.)' CONFIG_SMB_FS
   if [ "$CONFIG_SMB_FS" != "n" ]; then
-     bool '   Use a default NLS' CONFIG_SMB_NLS_DEFAULT
-     if [ "$CONFIG_SMB_NLS_DEFAULT" = "y" ]; then
-        string '  Default Remote NLS Option' CONFIG_SMB_NLS_REMOTE "cp437"
-     fi
-  fi   
+    bool 'SMB Win95 bug work-around' CONFIG_SMB_WIN95
+  fi
 fi
 if [ "$CONFIG_IPX" != "n" -o "$CONFIG_INET" != "n" ]; then
   tristate 'NCP filesystem support (to mount NetWare volumes)' CONFIG_NCP_FS
@@ -117,7 +105,6 @@ comment 'Partition Types'
 
 bool 'BSD disklabel (BSD partition tables) support' CONFIG_BSD_DISKLABEL
 bool 'Macintosh partition map support' CONFIG_MAC_PARTITION
-bool 'Minix subpartition support' CONFIG_MINIX_SUBPARTITION
 bool 'SMD disklabel (Sun partition tables) support' CONFIG_SMD_DISKLABEL
 bool 'Solaris (x86) partition table support' CONFIG_SOLARIS_X86_PARTITION
 if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then

@@ -1,7 +1,7 @@
 /*
  * linux/include/asm-arm/proc-armo/pgtable.h
  *
- * Copyright (C) 1995-1999 Russell King
+ * Copyright (C) 1995, 1996 Russell King
  * Modified 18/19-Oct-1997 for two-level page table
  */
 #ifndef __ASM_PROC_PGTABLE_H
@@ -21,8 +21,6 @@
 #define flush_cache_range(mm,start,end)		do { } while (0)
 #define flush_cache_page(vma,vmaddr)		do { } while (0)
 #define flush_page_to_ram(page)			do { } while (0)
-#define clean_cache_range(_start,_end)		do { } while (0)
-#define clean_cache_area(_start,_size)		do { } while (0)
 #define flush_icache_range(start,end)		do { } while (0)
 
 /*
@@ -175,7 +173,7 @@ extern pte_t *__bad_pagetable(void);
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE(vaddr) ((unsigned long) empty_zero_page)
+#define ZERO_PAGE ((unsigned long) empty_zero_page)
 
 /* number of bits that fit into a memory pointer */
 #define BYTES_PER_PTR			(sizeof(unsigned long))

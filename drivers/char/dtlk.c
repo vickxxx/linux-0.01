@@ -61,7 +61,7 @@
 #include <linux/mm.h>		/* for verify_area */
 #include <linux/errno.h>	/* for -EBUSY */
 #include <linux/ioport.h>	/* for check_region, request_region */
-#include <linux/delay.h>	/* for loops_per_jiffy */
+#include <linux/delay.h>	/* for loops_per_sec */
 #include <asm/segment.h>	/* for put_user_byte */
 #include <asm/io.h>		/* for inb_p, outb_p, inb, outb, etc. */
 #include <asm/uaccess.h>	/* for get_user, etc. */
@@ -154,7 +154,7 @@ static ssize_t dtlk_read(struct file *file, char *buf,
 	if (minor != DTLK_MINOR || !dtlk_has_indexing)
 		return -EINVAL;
 
-	for (retries = 0; retries < 10000000; retries++) {
+	for (retries = 0; retries < loops_per_sec / 10; retries++) {
 		while (i < count && dtlk_readable()) {
 			ch = dtlk_read_lpc();
 			/*        printk("dtlk_read() reads 0x%02x\n", ch); */
@@ -168,7 +168,7 @@ static ssize_t dtlk_read(struct file *file, char *buf,
 			break;
 		dtlk_delay(10);
 	}
-	if (retries == 10000000)
+	if (retries == loops_per_sec)
 		printk(KERN_ERR "dtlk_read times out\n");
 	TRACE_RET;
 	return -EAGAIN;
@@ -222,7 +222,7 @@ static ssize_t dtlk_write(struct file *file, const char *buf,
 				   up to 250 usec for the RDY bit to
 				   go nonzero. */
 				for (retries = 0;
-				     retries < 25000;
+				     retries < loops_per_sec / 4000;
 				     retries++)
 					if (inb_p(dtlk_port_tts) &
 					    TTS_WRITABLE)
@@ -272,14 +272,14 @@ static unsigned int dtlk_poll(struct file *file, poll_table * wait)
 	}
 	/* there are no exception conditions */
 
-	{
+	if (mask == 0 && !dtlk_timer_active) {
 		/* not ready just yet.  There won't be any interrupts,
 		   so we set a timer instead. */
 		dtlk_timer_active = 1;
 		dtlk_timer.expires = jiffies + HZ / 100;
 		add_timer(&dtlk_timer);
 	}
-	return mask;
+	return 0;
 }
 
 static void dtlk_stop_timer()
@@ -295,6 +295,11 @@ static void dtlk_timer_tick(unsigned long data)
 
 	wake_up_interruptible(&dtlk_process_list);
 
+	if (dtlk_timer_active) {
+		del_timer(&dtlk_timer);
+		dtlk_timer.expires = jiffies + HZ / 100;
+		add_timer(&dtlk_timer);
+	}
 }
 
 static int dtlk_ioctl(struct inode *inode,
@@ -479,7 +484,7 @@ static int __init dtlk_dev_probe(void)
 for (i = 0; i < 10; i++)			\
   {						\
     buffer[b++] = inb_p(dtlk_port_lpc);		\
-    udelay(1);					\
+    __delay(loops_per_sec/1000000);             \
   }
 				char buffer[1000];
 				int b = 0, i, j;
@@ -490,7 +495,7 @@ for (i = 0; i < 10; i++)			\
 				LOOK
 				    dtlk_write_bytes("\0012I\r", 4);
 				buffer[b++] = 0;
-				mdelay(50);
+				__delay(50 * loops_per_sec / 1000);
 				outb_p(0xff, dtlk_port_lpc);
 				buffer[b++] = 0;
 				LOOK
@@ -509,12 +514,12 @@ for (i = 0; i < 10; i++)			\
 for (i = 0; i < 10; i++)			\
   {						\
     buffer[b++] = inb_p(dtlk_port_tts);		\
-    udelay(1);					\
+    __delay(loops_per_sec/1000000);  /* 1 us */ \
   }
 				char buffer[1000];
 				int b = 0, i, j;
 
-				mdelay(10);
+				__delay(loops_per_sec / 100);	/* 10 ms */
 				LOOK
 				    outb_p(0x03, dtlk_port_tts);
 				buffer[b++] = 0;
@@ -646,7 +651,7 @@ static char dtlk_read_lpc(void)
 	/* acknowledging a read takes 3-4
 	   usec.  Here, we wait up to 20 usec
 	   for the acknowledgement */
-	retries = 2000;
+	retries = (loops_per_sec * 20) / 1000000;
 	while (inb_p(dtlk_port_lpc) != 0x7f && --retries > 0);
 	if (retries == 0)
 		printk(KERN_ERR "dtlk_read_lpc() timeout\n");
@@ -704,7 +709,7 @@ static char dtlk_write_tts(char ch)
 	/* the RDY bit goes zero 2-3 usec after writing, and goes
 	   1 again 180-190 usec later.  Here, we wait up to 10
 	   usec for the RDY bit to go zero. */
-	for (retries = 0; retries < 1000; retries++)
+	for (retries = 0; retries < loops_per_sec / 100000; retries++)
 		if ((inb_p(dtlk_port_tts) & TTS_WRITABLE) == 0)
 			break;
 

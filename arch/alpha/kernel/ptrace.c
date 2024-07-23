@@ -17,7 +17,6 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
-#include <asm/fpu.h>
 
 #include "proto.h"
 
@@ -120,30 +119,18 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 /*
  * Get contents of register REGNO in task TASK.
  */
-static long
+static inline long
 get_reg(struct task_struct * task, unsigned long regno)
 {
-	/* Special hack for fpcr -- combine hardware and software bits.  */
-	if (regno == 63) {
-		unsigned long fpcr = *get_reg_addr(task, regno);
-		unsigned long swcr = task->tss.flags & IEEE_SW_MASK;
-		swcr = swcr_update_status(swcr, fpcr);
-		return fpcr | swcr;
-	}
 	return *get_reg_addr(task, regno);
 }
 
 /*
  * Write contents of register REGNO in task TASK.
  */
-static int
+static inline int
 put_reg(struct task_struct *task, unsigned long regno, long data)
 {
-	if (regno == 63) {
-		task->tss.flags = ((task->tss.flags & ~IEEE_SW_MASK)
-				   | (data & IEEE_SW_MASK));
-		data = (data & FPCR_DYN_MASK) | ieee_swcr_to_fpcr(data);
-	}
 	*get_reg_addr(task, regno) = data;
 	return 0;
 }
@@ -162,18 +149,13 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	pmd_t * pgmiddle;
 	pte_t * pgtable;
 	unsigned long page;
-	int fault;
 
 	DBG(DBG_MEM_ALL, ("getting long at 0x%lx\n", addr));
  repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
 	if (pgd_none(*pgdir)) {
-		fault = handle_mm_fault(tsk, vma, addr, 0);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, 0);
+		goto repeat;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
@@ -182,12 +164,8 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		fault = handle_mm_fault(tsk, vma, addr, 0);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, 0);
+		goto repeat;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
@@ -196,12 +174,8 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, 0);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, 0);
+		goto repeat;
 	}
 	page = pte_page(*pgtable);
 	/* this is a hack for non-kernel-mapped video buffers and similar */
@@ -228,17 +202,12 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	pmd_t *pgmiddle;
 	pte_t *pgtable;
 	unsigned long page;
-	int fault;
 
  repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
 	if (!pgd_present(*pgdir)) {
-		fault = handle_mm_fault(tsk, vma, addr, 1);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return;
+		handle_mm_fault(tsk, vma, addr, 1);
+		goto repeat;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
@@ -247,12 +216,8 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		fault = handle_mm_fault(tsk, vma, addr, 1);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return;
+		handle_mm_fault(tsk, vma, addr, 1);
+		goto repeat;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
@@ -261,21 +226,13 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, 1);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return;
+		handle_mm_fault(tsk, vma, addr, 1);
+		goto repeat;
 	}
 	page = pte_page(*pgtable);
 	if (!pte_write(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, 1);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return;
+		handle_mm_fault(tsk, vma, addr, 1);
+		goto repeat;
 	}
 
 	/* This is a hack for non-kernel-mapped video buffers and similar.  */

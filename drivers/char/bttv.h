@@ -40,7 +40,7 @@
 #define VBIBUF_SIZE     65536
 
 /* maximum needed buffer size for extended VBI frame mode capturing */
-#define BTTV_MAX_FBUF   0x208000
+#define BTTV_MAX_FBUF	0x190000
 
 #ifdef __KERNEL__
 
@@ -102,9 +102,9 @@ struct bttv
 #else
 	struct pci_dev *dev;
 #endif
-	unsigned int irq;           /* IRQ used by Bt848 card */
+	unsigned char irq;          /* IRQ used by Bt848 card */
 	unsigned char revision;
-	unsigned long bt848_adr;    /* bus address of IO mem returned by PCI BIOS */
+	unsigned int bt848_adr;      /* bus address of IO mem returned by PCI BIOS */
 	unsigned char *bt848_mem;   /* pointer to mapped IO memory */
 	unsigned long busriscmem; 
 	u32 *riscmem;
@@ -210,8 +210,6 @@ struct bttv
 #define BTTV_VHX           0x0e
 #define BTTV_ZOLTRIX       0x0f
 #define BTTV_PIXVIEWPLAYTV 0x10
-#define BTTV_WINVIEW_601   0x11
-#define BTTV_AVEC_INTERCAP 0x12
 
 #define AUDIO_TUNER        0x00
 #define AUDIO_RADIO        0x01
@@ -226,7 +224,6 @@ struct bttv
 #define TDA8425            0x02
 #define TDA9840            0x03
 #define TEA6300            0x04
-#define TEA6320            0x05
 
 #define I2C_TSA5522        0xc2
 #define I2C_TDA9840	   0x84
@@ -235,7 +232,7 @@ struct bttv
 #define I2C_HAUPEE         0xa0
 #define I2C_STBEE          0xae
 #define I2C_VHX 	   0xc0
-#define I2C_TEA6300        0x80 /* same as TEA6320 */
+#define I2C_TEA6300        0x80
 
 #define TDA9840_SW	   0x00
 #define TDA9840_LVADJ	   0x02
@@ -262,29 +259,5 @@ struct bttv
 #define TEA6300_TR         0x03		/* treble control */
 #define TEA6300_FA         0x04		/* fader control */
 #define TEA6300_SW         0x05		/* mute and source switch */
-
-
-#define TEA6320_V          0x00
-#define TEA6320_FFR        0x01  /* volume front right */
-#define TEA6320_FFL        0x02  /* volume front left */
-#define TEA6320_FRR        0x03  /* volume rear right */
-#define TEA6320_FRL        0x04  /* volume rear left */
-#define TEA6320_BA         0x05  /* bass */
-#define TEA6320_TR         0x06  /* treble */
-#define TEA6320_S          0x07  /* switch register */
-                                 /* values for those registers: */
-#define TEA6320_S_SA       0x01  /* stereo A input */
-#define TEA6320_S_SB       0x02  /* stereo B */
-#define TEA6320_S_SC       0x04  /* stereo C */
-#define TEA6320_S_GMU      0x80  /* general mute */
-
-
-#define PT2254_L_CHANEL 0x10
-#define PT2254_R_CHANEL 0x08
-#define PT2254_DBS_IN_2 0x400
-#define PT2254_DBS_IN_10 0x20000
-#define WINVIEW_PT2254_CLK  0x40
-#define WINVIEW_PT2254_DATA 0x20
-#define WINVIEW_PT2254_STROBE 0x80
 
 #endif

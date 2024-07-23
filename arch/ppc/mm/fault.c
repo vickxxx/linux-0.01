@@ -48,7 +48,7 @@ unsigned long pte_errors = 0; /* updated by do_page_fault() */
 unsigned int probingmem = 0;
 
 extern void die_if_kernel(char *, struct pt_regs *, long);
-void bad_page_fault(struct pt_regs *, unsigned long, unsigned long);
+void bad_page_fault(struct pt_regs *, unsigned long);
 void do_page_fault(struct pt_regs *, unsigned long, unsigned long);
 
 /*
@@ -60,7 +60,6 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 {
 	struct vm_area_struct * vma;
 	struct mm_struct *mm = current->mm;
-	int fault;
 
 	/*printk("address: %08lx nip:%08lx code: %08lx %s%s%s%s%s%s\n",
 	       address,regs->nip,error_code,
@@ -71,10 +70,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 	       (error_code&0x80000000)?"I/O ":"",
 	       (regs->trap == 0x400)?"instr":"data"
 	       );*/
-
-	if (regs->trap == 0x400)
-		error_code &= 0x48200000;
-
+	       
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	if (debugger_fault_handler && regs->trap == 0x300) {
 		debugger_fault_handler(regs);
@@ -86,11 +82,24 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 			return;
 	}
 #endif
-	if (in_interrupt() || mm == &init_mm) {
-		bad_page_fault(regs, address, error_code);
+	if (in_interrupt()) {
+		static int complained;
+		if (complained < 20) {
+			++complained;
+			printk("page fault in interrupt handler, addr=%lx\n",
+			       address);
+			show_regs(regs);
+			instruction_dump((unsigned long *)regs->nip);
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+			if (debugger_kernel_faults)
+				debugger(regs);
+#endif
+		}
+	}
+	if (current == NULL) {
+		bad_page_fault(regs, address);
 		return;
 	}
-
 	down(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -107,7 +116,6 @@ good_area:
 	if (error_code & 0x95700000)
 		/* an error such as lwarx to I/O controller space,
 		   address matching DABR, eciwx, etc. */
-		goto bad_area;
 #endif /* CONFIG_6xx */
 #ifdef CONFIG_8xx
         /* The MPC8xx seems to always set 0x80000000, which is
@@ -116,9 +124,10 @@ good_area:
          */
 	if (error_code & 0x10000000)
                 /* Guarded storage error. */
-		goto bad_area;
 #endif /* CONFIG_8xx */
-
+		goto bad_area;
+	
+	
 	/* a write */
 	if (error_code & 0x02000000) {
 		if (!(vma->vm_flags & VM_WRITE))
@@ -131,13 +140,8 @@ good_area:
 		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
 	}
-
- survive:
-	fault = handle_mm_fault(current, vma, address, error_code & 0x2000000);
-	if (!fault)
-		goto do_sigbus;
-	if (fault < 0)
-		goto out_of_memory;
+	if (!handle_mm_fault(current, vma, address, error_code & 0x02000000))
+		goto bad_area;
 	up(&mm->mmap_sem);
 	/*
 	 * keep track of tlb+htab misses that are good addrs but
@@ -148,72 +152,37 @@ good_area:
 	return;
 
 bad_area:
+
 	up(&mm->mmap_sem);
 	pte_errors++;	
-	bad_page_fault(regs, address, error_code);
-	return;
-
-/*
- * We ran out of memory, or some other thing happened to us that made
- * us unable to handle the page fault gracefully.
- */
-out_of_memory:
-	if (current->pid == 1) {
-		current->policy |= SCHED_YIELD;
-		schedule();
-		goto survive;
-	}
-	up(&mm->mmap_sem);
-	if (user_mode(regs)) {
-		printk("VM: killing process %s\n", current->comm);
-		do_exit(SIGKILL);
-	}
-	bad_page_fault(regs, address, error_code);
-	return;
-
-do_sigbus:
-	up(&mm->mmap_sem);
-
-	/*
-	 * Send a sigbus, regardless of whether we were in kernel
-	 * or user mode.
-	 */
-	force_sig(SIGBUS, current);
-
-	/* Kernel mode? Handle exceptions or die */
-	if (!user_mode(regs))
-		bad_page_fault(regs, address, error_code);
+	bad_page_fault(regs, address);
 }
 
 void
-bad_page_fault(struct pt_regs *regs, unsigned long address, unsigned long err)
+bad_page_fault(struct pt_regs *regs, unsigned long address)
 {
 	unsigned long fixup;
 	if (user_mode(regs)) {
 		force_sig(SIGSEGV, current);
 		return;
 	}
-
+	
 	/* Are we prepared to handle this fault?  */
 	if ((fixup = search_exception_table(regs->nip)) != 0) {
 		regs->nip = fixup;
 		return;
 	}
 
-	/* kernel has accessed a bad address */
-	if (address < PAGE_SIZE)
-		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
-	else
-		printk(KERN_ALERT "Unable to handle kernel paging request");
-	printk(" at virtual address %08lx (error %lx)\n", address, err);
+	/* kernel has accessed a bad area */
 	show_regs(regs);
+	print_backtrace( (unsigned long *)regs->gpr[1] );
+	instruction_dump((unsigned long *)regs->nip);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 	if (debugger_kernel_faults)
 		debugger(regs);
 #endif
-	print_backtrace((unsigned long *)regs->gpr[1]);
 	panic("kernel access of bad area pc %lx lr %lx address %lX tsk %s/%d",
-	      regs->nip, regs->link, address, current->comm, current->pid);
+	      regs->nip,regs->link,address,current->comm,current->pid);
 }
 
 #ifdef CONFIG_8xx

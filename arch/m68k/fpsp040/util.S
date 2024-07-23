@@ -138,20 +138,20 @@ ovf_e1_exc:
 |
 ovf_fsgl:
 	clrl	%d0
-	jra	ovf_res
+	bras	ovf_res
 
 ovff_sgl:
 	movel	#0x00000001,%d0		|set single
-	jra	ovf_res
+	bras	ovf_res
 ovff_dbl:
 	movel	#0x00000002,%d0		|set double
-	jra	ovf_res
+	bras	ovf_res
 |
 | The precision is in the fpcr.
 |
 ovf_fpcr:
 	bfextu	FPCR_MODE(%a6){#0:#2},%d0 |set round precision
-	jra	ovf_res
+	bras	ovf_res
 	
 |
 |

@@ -4,7 +4,7 @@
  *  Al Longyear <longyear@netcom.com>
  *  Extensively rewritten by Paul Mackerras <paulus@cs.anu.edu.au>
  *
- *  ==FILEVERSION 20000223==
+ *  ==FILEVERSION 990510==
  *
  *  NOTE TO MAINTAINERS:
  *     If you modify this file at all, please set the number above to the
@@ -49,7 +49,6 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -95,8 +94,8 @@
  * Local functions
  */
 
-int ppp_register_compressor (struct compressor *cp);
 #ifdef CONFIG_MODULES
+static int ppp_register_compressor (struct compressor *cp);
 static void ppp_unregister_compressor (struct compressor *cp);
 #endif
 
@@ -175,27 +174,6 @@ static char szVersion[]		= PPP_VERSION;
 
 EXPORT_SYMBOL(ppp_register_compressor);
 EXPORT_SYMBOL(ppp_unregister_compressor);
-
-/* Bits in ppp->state */
-#define PUSHING		0	/* currently executing in ppp_tty_push */
-#define WAKEUP		1	/* someone else wants to also */
-#define XMITFULL	2	/* someone owns ppp->tpkt */
-#define FLUSHING	3	/* discard output */
-
-/* Non-blocking locking. */
-static inline int xmit_trylock(struct ppp *ppp)
-{
-	wmb();
-	if (test_and_set_bit(PUSHING, &ppp->state))
-		return 0;
-	return 1;
-}
-
-static inline void xmit_unlock(struct ppp *ppp)
-{
-	wmb();
-	clear_bit(PUSHING, &ppp->state);
-}
 
 /*************************************************************
  * LINE DISCIPLINE SUPPORT
@@ -318,10 +296,6 @@ ppp_first_time(void)
 
 
 #ifndef MODULE
-
-extern int bsd_comp_install(void);
-extern int ppp_deflate_install(void);
-
 /*
  * Called at boot time if the PPP driver is compiled into the kernel.
  */
@@ -333,11 +307,7 @@ ppp_init(struct device *dev)
 
 	if (first_time) {
 		first_time = 0;
-		answer = ppp_first_time();
-		if (answer == 0) {
-			bsd_comp_install();
-			ppp_deflate_install();
-		}
+		answer	   = ppp_first_time();
 	}
 	if (answer == 0)
 		answer = -ENODEV;
@@ -353,7 +323,7 @@ ppp_async_init(struct ppp *ppp)
 {
 	ppp->escape = 0;
 	ppp->toss   = 0xE0;
-	ppp->state = 0;
+	ppp->tty_pushing = 0;
 
 	memset (ppp->xmit_async_map, 0, sizeof (ppp->xmit_async_map));
 	ppp->xmit_async_map[0] = 0xffffffff;
@@ -401,9 +371,6 @@ static int
 ppp_tty_open (struct tty_struct *tty)
 {
 	struct ppp *ppp;
-	
-	if(!capable(CAP_NET_ADMIN))
-		return -EPERM;
 
 	/*
 	 * Allocate a ppp structure to use.
@@ -868,10 +835,11 @@ ppp_sync_send(struct ppp *ppp, struct sk_buff *skb)
 	
 	CHECK_PPP(0);
 
-	if (test_and_set_bit(XMITFULL, &ppp->state))
+	if (ppp->tpkt != NULL)
 		return -1;
+	ppp->tpkt = skb;
 
-	data = skb->data;
+	data = ppp->tpkt->data;
 	
 	/*
 	 * LCP packets with code values between 1 (configure-reqest)
@@ -885,14 +853,14 @@ ppp_sync_send(struct ppp *ppp, struct sk_buff *skb)
 	if (PPP_PROTOCOL(data) < 0x8000)
 		ppp->last_xmit = jiffies;
 	++ppp->stats.ppp_opackets;
-	ppp->stats.ppp_ooctects += skb->len;
+	ppp->stats.ppp_ooctects += ppp->tpkt->len;
 
 	if ( !(data[2]) && (ppp->flags & SC_COMP_PROT) ) {
 		/* compress protocol field */
 		data[2] = data[1];
 		data[1] = data[0];
-		skb_pull(skb,1);
-		data = skb->data;
+		skb_pull(ppp->tpkt,1);
+		data = ppp->tpkt->data;
 	}
 	
 	/*
@@ -902,10 +870,9 @@ ppp_sync_send(struct ppp *ppp, struct sk_buff *skb)
 	    && PPP_ADDRESS(data) == PPP_ALLSTATIONS
 	    && PPP_CONTROL(data) == PPP_UI) {
 		/* strip addr and control field */
-		skb_pull(skb,2);
+		skb_pull(ppp->tpkt,2);
 	}
 
-	ppp->tpkt = skb;
 	return ppp_tty_sync_push(ppp);
 }
 
@@ -916,52 +883,67 @@ ppp_sync_send(struct ppp *ppp, struct sk_buff *skb)
 static int
 ppp_tty_sync_push(struct ppp *ppp)
 {
-	int sent, done = 0;
-	struct tty_struct *tty;
+	int sent;
+	struct tty_struct *tty = ppp2tty(ppp);
+	unsigned long flags;
 		
 	CHECK_PPP(0);
 
-	set_bit(WAKEUP, &ppp->state);
-	if (!xmit_trylock(ppp))
+	if (ppp->tpkt == NULL)
 		return 0;
-
- again:
-	clear_bit(WAKEUP, &ppp->state);
-
-	if (ppp->tpkt != 0) {
+		
+	/* prevent reentrancy with tty_pushing flag */		
+	save_flags(flags);
+	cli();
+	if (ppp->tty_pushing) {
+		/* record wakeup attempt so we don't lose */
+		/* a wakeup call while doing push processing */
+		ppp->woke_up=1;
+		restore_flags(flags);
+		return 0;
+	}
+	ppp->tty_pushing = 1;
+	restore_flags(flags);
+	
+	if (tty == NULL || tty->disc_data != (void *) ppp)
+		goto flush;
+		
+	for(;;){
+		ppp->woke_up=0;
+		
 		/* Note: Sync driver accepts complete frame or nothing */
-		tty = ppp2tty(ppp);
-		sent = -1;
-		if (test_bit(FLUSHING, &ppp->state))
-			sent = ppp->tpkt->len;
-		else if (tty != NULL && tty->disc_data == (void *) ppp) {
-			tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
-			sent = tty->driver.write(tty, 0, ppp->tpkt->data, ppp->tpkt->len);
-		}
-		if (sent < 0)
+		tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
+		sent = tty->driver.write(tty, 0, ppp->tpkt->data, ppp->tpkt->len);
+		if (sent < 0) {
 			/* write error (possible loss of CD) */
 			/* record error and discard current packet */
 			ppp->stats.ppp_oerrors++;
-		else
-			ppp->stats.ppp_obytes += sent;
-		if (sent < 0 || sent >= ppp->tpkt->len) {
-			/* driver accepted the frame or we got an error */
-			kfree_skb(ppp->tpkt);
-			ppp->tpkt = 0;
-			wmb();
-			clear_bit(XMITFULL, &ppp->state);
-			done = 1;
+			break;
 		}
+		ppp->stats.ppp_obytes += sent;
+		if (sent < ppp->tpkt->len) {
+			/* driver unable to accept frame just yet */
+			save_flags(flags);
+			cli();
+			if (ppp->woke_up) {
+				/* wake up called while processing */
+				/* try to send the frame again */
+				restore_flags(flags);
+				continue;
+			}
+			/* wait for wakeup callback to try send again */
+			ppp->tty_pushing = 0;
+			restore_flags(flags);
+			return 0;
+		}
+		break;
 	}
-	if (ppp->tpkt == 0)
-		clear_bit(FLUSHING, &ppp->state);
-
-	xmit_unlock(ppp);
-	if (test_and_clear_bit(WAKEUP, &ppp->state))
-		if (xmit_trylock(ppp))
-			goto again;
-
-	return done;
+flush:	
+	/* done with current packet (sent or discarded) */
+	kfree_skb(ppp->tpkt);
+	ppp->tpkt = 0;
+	ppp->tty_pushing = 0;
+	return 1;
 }
 
 /*
@@ -979,11 +961,10 @@ ppp_async_send(struct ppp *ppp, struct sk_buff *skb)
 
 	ppp_tty_push(ppp);
 
-	if (test_and_set_bit(XMITFULL, &ppp->state))
+	if (ppp->tpkt != NULL)
 		return -1;
-	ppp->tpkt_pos = 0;
-	wmb();
 	ppp->tpkt = skb;
+	ppp->tpkt_pos = 0;
 
 	return ppp_tty_push(ppp);
 }
@@ -996,62 +977,58 @@ static int
 ppp_tty_push(struct ppp *ppp)
 {
 	int avail, sent, done = 0;
-	struct tty_struct *tty;
-
+	struct tty_struct *tty = ppp2tty(ppp);
+	
 	if (ppp->flags & SC_SYNC) 
 		return ppp_tty_sync_push(ppp);
 
 	CHECK_PPP(0);
-
-	set_bit(WAKEUP, &ppp->state);
-	if (!xmit_trylock(ppp))
+	if (ppp->tty_pushing) {
+		ppp->woke_up = 1;
 		return 0;
-
- again:
-	clear_bit(WAKEUP, &ppp->state);
-
-	avail = ppp->olim - ppp->optr;
-	if (avail > 0) {
-		tty = ppp2tty(ppp);
-		sent = -1;
-		if (test_bit(FLUSHING, &ppp->state)) {
-			sent = avail;
-		} else if (tty != NULL && tty->disc_data == (void *) ppp) {
+	}
+	if (tty == NULL || tty->disc_data != (void *) ppp)
+		goto flush;
+	while (ppp->optr < ppp->olim || ppp->tpkt != 0) {
+		ppp->tty_pushing = 1;
+		mb();
+		ppp->woke_up = 0;
+		avail = ppp->olim - ppp->optr;
+		if (avail > 0) {
 			tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
 			sent = tty->driver.write(tty, 0, ppp->optr, avail);
-		}
-		if (sent < 0) {
-			/* error, e.g. loss of CD */
-			ppp->stats.ppp_oerrors++;
-			ppp->optr = ppp->olim;
-			if (ppp->tpkt != 0) {
-				kfree_skb(ppp->tpkt);
-				ppp->tpkt = 0;
-				wmb();
-				clear_bit(XMITFULL, &ppp->state);
-				done = 1;
-			}
-		} else {
+			if (sent < 0)
+				goto flush;	/* error, e.g. loss of CD */
 			ppp->stats.ppp_obytes += sent;
 			ppp->optr += sent;
+			if (sent < avail) {
+				wmb();
+				ppp->tty_pushing = 0;
+				mb();
+				if (ppp->woke_up)
+					continue;
+				return done;
+			}
 		}
+		if (ppp->tpkt != 0)
+			done = ppp_async_encode(ppp);
+		wmb();
+		ppp->tty_pushing = 0;
 	}
+	return done;
 
-	if (ppp->optr == ppp->olim) {
-		if (ppp->tpkt != 0) {
-			done |= ppp_async_encode(ppp);
-			goto again;
-		} else {
-			/* buffers are empty */
-			clear_bit(FLUSHING, &ppp->state);
-		}
+flush:
+	ppp->tty_pushing = 1;
+	mb();
+	ppp->stats.ppp_oerrors++;
+	if (ppp->tpkt != 0) {
+		kfree_skb(ppp->tpkt);
+		ppp->tpkt = 0;
+		done = 1;
 	}
-
-	xmit_unlock(ppp);
-	if (test_and_clear_bit(WAKEUP, &ppp->state))
-		if (xmit_trylock(ppp))
-			goto again;
-
+	ppp->optr = ppp->olim;
+	wmb();
+	ppp->tty_pushing = 0;
 	return done;
 }
 
@@ -1152,8 +1129,6 @@ ppp_async_encode(struct ppp *ppp)
 
 		kfree_skb(ppp->tpkt);
 		ppp->tpkt = 0;
-		wmb();
-		clear_bit(XMITFULL, &ppp->state);
 		return 1;
 	}
 
@@ -1174,10 +1149,22 @@ static void
 ppp_tty_flush_output(struct ppp *ppp)
 {
 	struct sk_buff *skb;
+	int done = 0;
 
-	set_bit(FLUSHING, &ppp->state);
 	while ((skb = skb_dequeue(&ppp->xmt_q)) != NULL)
 		kfree_skb(skb);
+	ppp->tty_pushing = 1;
+	mb();
+	ppp->optr = ppp->olim;
+	if (ppp->tpkt != NULL) {
+		kfree_skb(ppp->tpkt);
+		ppp->tpkt = 0;
+		done = 1;
+	}
+	wmb();
+	ppp->tty_pushing = 0;
+	if (done)
+		ppp_output_wakeup(ppp);
 }
 
 /*
@@ -2721,7 +2708,7 @@ ppp_dev_xmit(struct sk_buff *skb, struct device *dev)
 	}
 
 	/*
-	 * The ppp->xmit_busy field acts as a lock to allow only
+	 * The dev->tbusy field acts as a lock to allow only
 	 * one packet to be processed at a time.  If we can't
 	 * get the lock, try again later.
 	 * We deliberately queue as little as possible inside
@@ -3050,10 +3037,8 @@ static struct compressor *find_compressor (int type)
 	return (struct compressor *) 0;
 }
 
-/* 
- * If PPP is built-in then so are compressors, so __initfunc is okay here.
- */
-__initfunc(int ppp_register_compressor (struct compressor *cp))
+#ifdef CONFIG_MODULES
+static int ppp_register_compressor (struct compressor *cp)
 {
 	struct compressor_link *new;
 	unsigned long flags;
@@ -3081,7 +3066,6 @@ __initfunc(int ppp_register_compressor (struct compressor *cp))
 	return 0;
 }
 
-#ifdef CONFIG_MODULES
 static void ppp_unregister_compressor (struct compressor *cp)
 {
 	struct compressor_link *prev = (struct compressor_link *) 0;

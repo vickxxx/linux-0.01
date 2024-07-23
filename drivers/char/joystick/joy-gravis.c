@@ -1,9 +1,7 @@
 /*
  *  joy-gravis.c  Version 1.2
  *
- *  Copyright (c) 1998-1999 Vojtech Pavlik
- *
- *  Sponsored by SuSE
+ *  Copyright (c) 1998 Vojtech Pavlik
  */
 
 /*
@@ -27,7 +25,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  * 
  * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
+ * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
@@ -39,16 +37,15 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/string.h>
-#include <linux/init.h>
 
 #define JS_GR_MODE_GPP		1
 #define JS_GR_LENGTH_GPP	24
-#define JS_GR_STROBE_GPP	400
+#define JS_GR_STROBE_GPP	75
 
 #define JS_GR_MODE_XT		2
 #define JS_GR_MODE_BD		3
 #define JS_GR_LENGTH_XT		4
-#define JS_GR_STROBE_XT		200
+#define JS_GR_STROBE_XT		30
 #define JS_GR_MAX_CHUNKS_XT	10	
 #define JS_GR_MAX_BITS_XT	30	
 
@@ -66,36 +63,37 @@ struct js_gr_info {
 
 static int js_gr_gpp_read_packet(int io, int shift, unsigned int *data)
 {
-	unsigned long flags;
+	unsigned int t, t1;
 	unsigned char u, v;
-	unsigned int t, p;
 	int i;
+	unsigned long flags;
+
+	int strobe = (js_time_speed * JS_GR_STROBE_GPP) >> 10;
 
 	i = 0;
 	data[0] = 0;
-	p = t = JS_GR_STROBE_GPP;
-	p += JS_GR_STROBE_GPP;
 
 	__save_flags(flags);
 	__cli();
-
-	v = inb(io) >> shift;
+	u = inb(io) >> shift;
+	t = js_get_time();
 
 	do {
-		t--;
-		u = v; v = (inb(io) >> shift) & 3;
-		if (~v & u & 1) {
+		v = (inb(io) >> shift) & 3;
+		t1 = js_get_time();
+		if ((u ^ v) & u & 1) {
 			data[0] |= (v >> 1) << i++;
-			p = t = (p - t) << 1;
+			t = t1;
 		}
-	} while (i < JS_GR_LENGTH_GPP && t > 0);
+		u = v;
+	} while (i < JS_GR_LENGTH_GPP && js_delta(t1,t) < strobe);
 
 	__restore_flags(flags);
 
 	if (i < JS_GR_LENGTH_GPP) return -1;
 
 	for (i = 0; i < JS_GR_LENGTH_GPP && (data[0] & 0xfe4210) ^ 0x7c0000; i++)
-		data[0] = data[0] >> 1 | (data[0] & 1) << (JS_GR_LENGTH_GPP - 1);
+		data[0] = data[0] >> 1 | (data[0] & 1) << 23;
 
 	return -(i == JS_GR_LENGTH_GPP);
 }
@@ -106,36 +104,35 @@ static int js_gr_gpp_read_packet(int io, int shift, unsigned int *data)
 
 static int js_gr_xt_read_packet(int io, int shift, unsigned int *data)
 {
-	unsigned int i, j, buf, crc;
+	unsigned int t, t1;
 	unsigned char u, v, w;
+	unsigned int i, j, buf, crc;
 	unsigned long flags;
-	unsigned int t, p;
 	char status;
+
+	int strobe = (js_time_speed * JS_GR_STROBE_XT) >> 10;
 
 	data[0] = data[1] = data[2] = data[3] = 0;
 	status = buf = i = j = 0;
-	p = t = JS_GR_STROBE_XT;
-	p += JS_GR_STROBE_XT;
 
 	__save_flags(flags);
 	__cli();
 
 	v = w = (inb(io) >> shift) & 3;
+	t = js_get_time();
 
 	do {
-		t--;
 		u = (inb(io) >> shift) & 3;
+		t1 = js_get_time();
 
 		if (u ^ v) {
 
 			if ((u ^ v) & 1) {
-				p = t = (p - t) << 2;
 				buf = (buf << 1) | (u >> 1);
 				i++;
 			} else 
 
 			if ((((u ^ v) & (v ^ w)) >> 1) & ~(u | v | w) & 1) {
-				p = t = (p - t) << 2;
 				if (i == 20) {
 					crc = buf ^ (buf >> 7) ^ (buf >> 14);
 					if (!((crc ^ (0x25cb9e70 >> ((crc >> 2) & 0x1c))) & 0xf)) {
@@ -148,11 +145,12 @@ static int js_gr_xt_read_packet(int io, int shift, unsigned int *data)
 				i = 0;
 			}
 
+			t = t1;
 			w = v;
 			v = u;
 		}
 
-	} while (status != 0xf && i < JS_GR_MAX_BITS_XT && j < JS_GR_MAX_CHUNKS_XT && t > 0);
+	} while (status != 0xf && i < JS_GR_MAX_BITS_XT && j < JS_GR_MAX_CHUNKS_XT && js_delta(t1,t) < strobe);
 
 	__restore_flags(flags);
 
@@ -322,7 +320,7 @@ static void __init js_gr_init_corr(int mode, struct js_corr *corr)
 }
 
 /*
- * js_gr_probe() probes for GrIP joysticks.
+ * js_gr_probe() probes fro GrIP joysticks.
  */
 
 static struct js_port __init *js_gr_probe(int io, struct js_port *port)
@@ -391,9 +389,9 @@ void cleanup_module(void)
 	int i;
 	struct js_gr_info *info;
 
-	while (js_gr_port) {
+	while (js_gr_port != NULL) {
 		for (i = 0; i < js_gr_port->ndevs; i++)
-			if (js_gr_port->devs[i])
+			if (js_gr_port->devs[i] != NULL)
 				js_unregister_device(js_gr_port->devs[i]);
 		info = js_gr_port->info;
 		release_region(info->io, 1);

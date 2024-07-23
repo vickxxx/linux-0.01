@@ -155,7 +155,6 @@ static long pm_address(u_char FPU_modrm, u_char segment,
 { 
   struct desc_struct descriptor;
   unsigned long base_address, limit, address, seg_top;
-  unsigned short selector;
 
   segment--;
 
@@ -173,16 +172,14 @@ static long pm_address(u_char FPU_modrm, u_char segment,
       /* fs and gs aren't used by the kernel, so they still have their
 	 user-space values. */
     case PREFIX_FS_-1:
-      /* The extra variable is needed here to get gcc to use a 16 bit register
+      /* The cast is needed here to get gcc 2.8.0 to use a 16 bit register
 	 in the assembler statement. */
-      __asm__("mov %%fs,%0":"=r" (selector));
-      addr->selector = selector;
+      __asm__("mov %%fs,%0":"=r" ((unsigned short)addr->selector));
       break;
     case PREFIX_GS_-1:
-      /* The extra variable is needed here to get gcc to use a 16 bit register
+      /* The cast is needed here to get gcc 2.8.0 to use a 16 bit register
 	 in the assembler statement. */
-      __asm__("mov %%gs,%0":"=r" (selector));
-      addr->selector = selector;
+      __asm__("mov %%gs,%0":"=r" ((unsigned short)addr->selector));
       break;
     default:
       addr->selector = PM_REG_(segment);

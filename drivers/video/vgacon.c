@@ -153,7 +153,7 @@ static inline void write_vga(unsigned char reg, unsigned int val)
 __initfunc(static const char *vgacon_startup(void))
 {
 	const char *display_desc = NULL;
-	u16 saved1, saved2;
+	u16 saved;
 	u16 *p;
 
 	if (ORIG_VIDEO_ISVGA == VIDEO_TYPE_VLFB) {
@@ -267,24 +267,18 @@ __initfunc(static const char *vgacon_startup(void))
 	 *	Are there smarter methods around?
 	 */
 	p = (u16 *)vga_vram_base;
-	saved1 = scr_readw(p);
-	saved2 = scr_readw(p + 1);
+	saved = scr_readw(p);
 	scr_writew(0xAA55, p);
-	scr_writew(0x55AA, p + 1);
-	if (scr_readw(p) != 0xAA55 || scr_readw(p + 1) != 0x55AA) {
-		scr_writew(saved1, p);
-		scr_writew(saved2, p + 1);
+	if (scr_readw(p) != 0xAA55) {
+		scr_writew(saved, p);
 		goto no_vga;
 	}
 	scr_writew(0x55AA, p);
-	scr_writew(0xAA55, p + 1);
-	if (scr_readw(p) != 0x55AA || scr_readw(p + 1) != 0xAA55) {
-		scr_writew(saved1, p);
-		scr_writew(saved2, p + 1);
+	if (scr_readw(p) != 0x55AA) {
+		scr_writew(saved, p);
 		goto no_vga;
 	}
-	scr_writew(saved1, p);
-	scr_writew(saved2, p + 1);
+	scr_writew(saved, p);
 
 	if (vga_video_type == VIDEO_TYPE_EGAC
 	    || vga_video_type == VIDEO_TYPE_VGAC

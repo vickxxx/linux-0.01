@@ -3,8 +3,8 @@
  *
  *      Based on wdt.c. Original copyright messages:
  *
- *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
- *				http://www.redhat.com
+ *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
+ *				http://www.cymru.net
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -15,7 +15,7 @@
  *	warranty for any of this software. This material is provided 
  *	"AS-IS" and at no charge.	
  *
- *	(c) Copyright 1995    Alan Cox <alan@redhat.com>
+ *	(c) Copyright 1995    Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  */
 
@@ -219,7 +219,7 @@ __initfunc(int acq_init(void))
 	misc_register(&acq_miscdev);
 	request_region(WDT_STOP, 1, "Acquire WDT");
 	request_region(WDT_START, 1, "Acquire WDT");
-	register_reboot_notifier(&acq_notifier);
+	unregister_reboot_notifier(&acq_notifier);
 	return 0;
 }
 

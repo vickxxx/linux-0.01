@@ -9,7 +9,7 @@ UFS OPTIONS
 
 ufstype=type_of_ufs
 	UFS is a file system widely used in different operating systems.
-	The problem are differences among implementations. Features of
+	The problem are differencies among implementations. Features of
 	some implementations are undocumented, so its hard to recognize
 	type of ufs automatically. That's why user must specify type of 
 	ufs manually by mount option ufstype. Possible values are:
@@ -28,10 +28,6 @@ ufstype=type_of_ufs
 
 	nextstep
 		used in NextStep
-		supported as read-only
-
-	nextstep-cd
-		used for NextStep CDROMs (block_size == 2048)
 		supported as read-only
 
 	openstep
