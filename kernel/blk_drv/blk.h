@@ -1,7 +1,7 @@
 #ifndef _BLK_H
 #define _BLK_H
 
-#define NR_BLK_DEV	7
+#define NR_BLK_DEV	10
 /*
  * NR_REQUEST is the number of entries in the request-queue.
  * NOTE that writes may use only the low 2/3 of these: reads
@@ -26,9 +26,11 @@ struct request {
 	int errors;
 	unsigned long sector;
 	unsigned long nr_sectors;
+	unsigned long current_nr_sectors;
 	char * buffer;
-	struct task_struct * waiting;
+	struct wait_queue * waiting;
 	struct buffer_head * bh;
+	struct buffer_head * bhtail;
 	struct request * next;
 };
 
@@ -38,7 +40,7 @@ struct request {
  * are much more time-critical than writes.
  */
 #define IN_ORDER(s1,s2) \
-((s1)->cmd<(s2)->cmd || ((s1)->cmd==(s2)->cmd && \
+((s1)->cmd < (s2)->cmd || ((s1)->cmd == (s2)->cmd && \
 ((s1)->dev < (s2)->dev || (((s1)->dev == (s2)->dev && \
 (s1)->sector < (s2)->sector)))))
 
@@ -47,12 +49,35 @@ struct blk_dev_struct {
 	struct request * current_request;
 };
 
+
+struct sec_size {
+	unsigned block_size;
+	unsigned block_size_bits;
+};
+
+/*
+ * These will have to be changed to be aware of different buffer
+ * sizes etc..
+ */
+#define SECTOR_MASK ((1 << (BLOCK_SIZE_BITS - 9)) -1)
+#define SUBSECTOR(block) ((block) & SECTOR_MASK)
+
+extern struct sec_size * blk_sec[NR_BLK_DEV];
 extern struct blk_dev_struct blk_dev[NR_BLK_DEV];
 extern struct request request[NR_REQUEST];
-extern struct task_struct * wait_for_request;
+extern struct wait_queue * wait_for_request;
 
 extern int * blk_size[NR_BLK_DEV];
 
+extern int is_read_only(int dev);
+extern void set_device_ro(int dev,int flag);
+
+#define RO_IOCTLS(dev,where) \
+  case BLKROSET: if (!suser()) return -EPERM; \
+		 set_device_ro((dev),get_fs_long((long *) (where))); return 0; \
+  case BLKROGET: verify_area((void *) (where), sizeof(long)); \
+		 put_fs_long(is_read_only(dev),(long *) (where)); return 0;
+		 
 #ifdef MAJOR_NR
 
 /*
@@ -78,12 +103,32 @@ extern int * blk_size[NR_BLK_DEV];
 #define DEVICE_OFF(device) floppy_off(DEVICE_NR(device))
 
 #elif (MAJOR_NR == 3)
-/* harddisk */
+/* harddisk: timeout is 6 seconds.. */
 #define DEVICE_NAME "harddisk"
 #define DEVICE_INTR do_hd
 #define DEVICE_TIMEOUT HD_TIMER
+#define TIMEOUT_VALUE 600
 #define DEVICE_REQUEST do_hd_request
 #define DEVICE_NR(device) (MINOR(device)>>6)
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == 8)
+/* scsi disk */
+#define DEVICE_NAME "scsidisk"
+#define DEVICE_INTR do_sd  
+#define TIMEOUT_VALUE 200
+#define DEVICE_REQUEST do_sd_request
+#define DEVICE_NR(device) (MINOR(device) >> 4)
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == 9)
+/* scsi tape */
+#define DEVICE_NAME "scsitape"
+#define DEVICE_INTR do_st  
+#define DEVICE_REQUEST do_st_request
+#define DEVICE_NR(device) (MINOR(device))
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
@@ -93,18 +138,34 @@ extern int * blk_size[NR_BLK_DEV];
 
 #endif
 
+#ifndef CURRENT
 #define CURRENT (blk_dev[MAJOR_NR].current_request)
+#endif
+
 #define CURRENT_DEV DEVICE_NR(CURRENT->dev)
 
 #ifdef DEVICE_INTR
 void (*DEVICE_INTR)(void) = NULL;
 #endif
 #ifdef DEVICE_TIMEOUT
-#define SET_INTR(x) (DEVICE_INTR = (x), \
-	timer_table[DEVICE_TIMEOUT].expires = jiffies + 200, \
-	timer_active |= 1<<DEVICE_TIMEOUT)
+
+#define SET_TIMER \
+((timer_table[DEVICE_TIMEOUT].expires = jiffies + TIMEOUT_VALUE), \
+(timer_active |= 1<<DEVICE_TIMEOUT))
+
+#define CLEAR_TIMER \
+timer_active &= ~(1<<DEVICE_TIMEOUT)
+
+#define SET_INTR(x) \
+if (DEVICE_INTR = (x)) \
+	SET_TIMER; \
+else \
+	CLEAR_TIMER;
+
 #else
+
 #define SET_INTR(x) (DEVICE_INTR = (x))
+
 #endif
 static void (DEVICE_REQUEST)(void);
 
@@ -116,41 +177,53 @@ extern inline void unlock_buffer(struct buffer_head * bh)
 	wake_up(&bh->b_wait);
 }
 
-extern inline void end_request(int uptodate)
+static void end_request(int uptodate)
 {
-	DEVICE_OFF(CURRENT->dev);
-	if (CURRENT->bh) {
-		CURRENT->bh->b_uptodate = uptodate;
-		unlock_buffer(CURRENT->bh);
-	}
+	struct request * req;
+	struct buffer_head * bh;
+
+	req = CURRENT;
+	req->errors = 0;
 	if (!uptodate) {
 		printk(DEVICE_NAME " I/O error\n\r");
-		printk("dev %04x, block %d\n\r",CURRENT->dev,
-			CURRENT->bh->b_blocknr);
+		printk("dev %04x, sector %d\n\r",req->dev,req->sector);
+		req->nr_sectors--;
+		req->nr_sectors &= ~SECTOR_MASK;
+		req->sector += (BLOCK_SIZE / 512);
+		req->sector &= ~SECTOR_MASK;		
 	}
-	wake_up(&CURRENT->waiting);
+
+	if (bh = req->bh) {
+		req->bh = bh->b_reqnext;
+		bh->b_reqnext = NULL;
+		bh->b_uptodate = uptodate;
+		unlock_buffer(bh);
+		if (bh = req->bh) {
+			req->current_nr_sectors = bh->b_size >> 9;
+			if (req->nr_sectors < req->current_nr_sectors) {
+				req->nr_sectors = req->current_nr_sectors;
+				printk("end_request: buffer-list destroyed\n");
+			}
+			req->buffer = bh->b_data;
+			return;
+		}
+	}
+	DEVICE_OFF(req->dev);
+	CURRENT = req->next;
+	wake_up(&req->waiting);
+	req->dev = -1;
 	wake_up(&wait_for_request);
-	CURRENT->dev = -1;
-	CURRENT = CURRENT->next;
 }
 
-#ifdef DEVICE_TIMEOUT
-#define CLEAR_DEVICE_TIMEOUT timer_active &= ~(1<<DEVICE_TIMEOUT);
-#else
-#define CLEAR_DEVICE_TIMEOUT
-#endif
-
 #ifdef DEVICE_INTR
-#define CLEAR_DEVICE_INTR DEVICE_INTR = 0;
+#define CLEAR_INTR SET_INTR(NULL)
 #else
-#define CLEAR_DEVICE_INTR
+#define CLEAR_INTR
 #endif
 
 #define INIT_REQUEST \
-repeat: \
 	if (!CURRENT) {\
-		CLEAR_DEVICE_INTR \
-		CLEAR_DEVICE_TIMEOUT \
+		CLEAR_INTR; \
 		return; \
 	} \
 	if (MAJOR(CURRENT->dev) != MAJOR_NR) \

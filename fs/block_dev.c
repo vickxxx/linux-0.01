@@ -1,11 +1,10 @@
 /*
  *  linux/fs/block_dev.c
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <errno.h>
-
+#include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <asm/segment.h>
@@ -36,7 +35,7 @@ int block_write(struct inode * inode, struct file * filp, char * buf, int count)
 		if (chars > count)
 			chars=count;
 		if (chars == BLOCK_SIZE)
-			bh = getblk(dev,block);
+			bh = getblk(dev, block, BLOCK_SIZE);
 		else
 			bh = breada(dev,block,block+1,block+2,-1);
 		block++;
@@ -47,8 +46,10 @@ int block_write(struct inode * inode, struct file * filp, char * buf, int count)
 		filp->f_pos += chars;
 		written += chars;
 		count -= chars;
-		while (chars-->0)
-			*(p++) = get_fs_byte(buf++);
+		memcpy_fromfs(p,buf,chars);
+		p += chars;
+		buf += chars;
+		bh->b_uptodate = 1;
 		bh->b_dirt = 1;
 		brelse(bh);
 	}
@@ -85,8 +86,9 @@ int block_read(struct inode * inode, struct file * filp, char * buf, int count)
 		filp->f_pos += chars;
 		read += chars;
 		count -= chars;
-		while (chars-->0)
-			put_fs_byte(*(p++),buf++);
+		memcpy_tofs(buf,p,chars);
+		p += chars;
+		buf += chars;
 		brelse(bh);
 	}
 	return read;

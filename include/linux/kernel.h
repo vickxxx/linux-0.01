@@ -1,13 +1,14 @@
+#ifndef _LINUX_KERNEL_H
+#define _LINUX_KERNEL_H
+
 /*
  * 'kernel.h' contains some often-used function prototypes etc
  */
+
 void verify_area(void * addr,int count);
 volatile void panic(const char * str);
 volatile void do_exit(long error_code);
-int printf(const char * fmt, ...);
 int printk(const char * fmt, ...);
-void console_print(const char * str);
-int tty_write(unsigned ch,char * buf,int count);
 void * malloc(unsigned int size);
 void free_s(void * obj, int size);
 
@@ -22,3 +23,4 @@ void free_s(void * obj, int size);
  */
 #define suser() (current->euid == 0)
 
+#endif

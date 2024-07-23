@@ -1,5 +1,5 @@
 !
-!	setup.s		(C) 1991 Linus Torvalds
+!	setup.s		Copyright (C) 1991, 1992 Linus Torvalds
 !
 ! setup.s is responsible for getting the system data from the BIOS,
 ! and putting them into the appropriate places in system memory.
@@ -14,6 +14,7 @@
 
 ! NOTE! These had better be the same as in bootsect.s!
 #include <linux/config.h>
+#define NORMAL_VGA 0xffff
 
 INITSEG  = DEF_INITSEG	! we move boot here - out of the way
 SYSSEG   = DEF_SYSSEG	! system loaded at 0x10000 (65536).
@@ -42,6 +43,12 @@ start:
 	mov	ah,#0x88
 	int	0x15
 	mov	[2],ax
+
+! set the keyboard repeat rate to the max
+
+	mov	ax,#0x0305
+	mov	bx,#0x0000
+	int	0x16
 
 ! check for EGA/VGA and some config parameters
 
@@ -183,9 +190,10 @@ end_move:
 	out	#0xA1,al
 	.word	0x00eb,0x00eb
 	mov	al,#0xFF		! mask off all interrupts for now
-	out	#0x21,al
-	.word	0x00eb,0x00eb
 	out	#0xA1,al
+	.word	0x00eb,0x00eb
+	mov	al,#0xFB		! mask all irq's but irq2 which
+	out	#0x21,al		! is cascaded
 
 ! well, that certainly wasn't fun :-(. Hopefully it works, and we don't
 ! need no steenking BIOS anyway (except for the initial loading :-).
@@ -211,6 +219,22 @@ empty_8042:
 	jnz	empty_8042	! yes - loop
 	ret
 
+getkey:
+	in	al,#0x60	! Quick and dirty...
+	.word	0x00eb,0x00eb		! jmp $+2, jmp $+2
+	mov	bl,al
+	in	al,#0x61
+	.word	0x00eb,0x00eb
+	mov	ah,al
+	or	al,#0x80
+	out	#0x61,al
+	.word	0x00eb,0x00eb
+	mov	al,ah
+	out	#0x61,al
+	.word	0x00eb,0x00eb
+	mov	al,bl
+	ret
+
 ! Routine trying to recognize type of SVGA-board present (if any)
 ! and if it recognize one gives the choices of resolution it offers.
 ! If one is found the resolution chosen is given by al,ah (rows,cols).
@@ -223,20 +247,24 @@ chsvga:	cld
 	mov	es,ax
 	lea	si,msg1
 	call	prtstr
+#ifndef SVGA_MODE
 flush:	in	al,#0x60		! Flush the keyboard buffer
 	cmp	al,#0x82
 	jb	nokey
 	jmp	flush
-nokey:	in	al,#0x60
+nokey:	call getkey
 	cmp	al,#0x82
 	jb	nokey
 	cmp	al,#0xe0
 	ja	nokey
 	cmp	al,#0x9c
 	je	svga
+#endif
+#if !defined(SVGA_MODE) || SVGA_MODE == NORMAL_VGA
 	mov	ax,#0x5019
 	pop	ds
 	ret
+#endif
 svga:	cld
 	lea 	si,idati		! Check ATI 'clues'
 	mov	di,#0x31
@@ -475,7 +503,10 @@ tbl:	pop	bx
 	call	prtstr
 	pop	si
 	add	cl,#0x80
-nonum:	in	al,#0x60	! Quick and dirty...
+#if defined(SVGA_MODE) && SVGA_MODE != NORMAL_VGA
+	mov	al,#SVGA_MODE		! Preset SVGA mode 
+#else
+nonum:	call	getkey
 	cmp	al,#0x82
 	jb	nonum
 	cmp	al,#0x8b
@@ -486,6 +517,7 @@ nonum:	in	al,#0x60	! Quick and dirty...
 zero:	sub	al,#0x0a
 nozero:	sub	al,#0x80
 	dec	al
+#endif
 	xor	ah,ah
 	add	di,ax
 	inc	di
@@ -498,8 +530,25 @@ nozero:	sub	al,#0x80
 	lodsw
 	pop	ds
 	ret
-novid7:	pop	ds	! Here could be code to support standard 80x50,80x30
-	mov	ax,#0x5019	
+novid7:
+	mov	ax,#0x1112
+	mov	bl,#0
+	int	0x10		! use 8x8 font set (50 lines on VGA)
+
+	mov	ax,#0x1200
+	mov	bl,#0x20
+	int	0x10		! use alternate print screen
+
+	mov	ax,#0x1201
+	mov	bl,#0x34
+	int	0x10		! turn off cursor emulation
+
+	mov	ah,#0x01
+	mov	cx,#0x0607
+	int	0x10		! turn on cursor (scan lines 6 to 7)
+
+	pop	ds
+	mov	ax,#0x5032	! return 80x50
 	ret
 
 ! Routine that 'tabs' to next col.
