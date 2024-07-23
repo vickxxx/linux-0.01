@@ -23,27 +23,16 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
- * RED HAT AND/OR ITS SUPPLIERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
- * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- *
- * THIS SOFTWARE IS NOT INTENDED FOR USE IN SAFETY CRITICAL SYSTEMS
- *
  * Authors:
  *    Gareth Hughes <gareth@valinux.com>
- *
- * Memory allocation size checks added 14/01/2003, Alan Cox <alan@redhat.com>
  */
 
+#define __NO_VERSION__
 #include "r128.h"
 #include "drmP.h"
-#include "drm.h"
-#include "r128_drm.h"
 #include "r128_drv.h"
+#include "drm.h"
+#include <linux/delay.h>
 
 
 /* ================================================================
@@ -540,7 +529,7 @@ static void r128_cce_dispatch_flip( drm_device_t *dev )
 {
 	drm_r128_private_t *dev_priv = dev->dev_private;
 	RING_LOCALS;
-	DRM_DEBUG( "page=%d\n", dev_priv->current_page );
+	DRM_DEBUG( "%s: page=%d\n", __FUNCTION__, dev_priv->current_page );
 
 #if R128_PERFORMANCE_BOXES
 	/* Do some trivial performance monitoring...
@@ -589,7 +578,8 @@ static void r128_cce_dispatch_vertex( drm_device_t *dev,
 	int prim = buf_priv->prim;
 	int i = 0;
 	RING_LOCALS;
-	DRM_DEBUG( "buf=%d nbox=%d\n", buf->idx, sarea_priv->nbox );
+	DRM_DEBUG( "%s: buf=%d nbox=%d\n",
+		   __FUNCTION__, buf->idx, sarea_priv->nbox );
 
 	if ( 0 )
 		r128_print_dirty( "dispatch_vertex", sarea_priv->dirty );
@@ -800,7 +790,7 @@ static int r128_cce_dispatch_blit( drm_device_t *dev,
 	u32 *data;
 	int dword_shift, dwords;
 	RING_LOCALS;
-	DRM_DEBUG( "\n" );
+	DRM_DEBUG( "%s\n", __FUNCTION__ );
 
 	/* The compiler won't optimize away a division by a variable,
 	 * even if the only legal values are powers of two.  Thus, we'll
@@ -913,9 +903,6 @@ static int r128_cce_dispatch_write_span( drm_device_t *dev,
 	DRM_DEBUG( "%s\n", __FUNCTION__ );
 
 	count = depth->n;
-	
-	if( count > 4096 || count <= 0)
-		return -EMSGSIZE;
 	if ( copy_from_user( &x, depth->x, sizeof(x) ) ) {
 		return -EFAULT;
 	}
@@ -1009,9 +996,6 @@ static int r128_cce_dispatch_write_pixels( drm_device_t *dev,
 	DRM_DEBUG( "%s\n", __FUNCTION__ );
 
 	count = depth->n;
-	
-	if( count > 4096 || count <= 0)
-		return -EMSGSIZE;
 
 	x = kmalloc( count * sizeof(*x), GFP_KERNEL );
 	if ( x == NULL ) {
@@ -1127,9 +1111,6 @@ static int r128_cce_dispatch_read_span( drm_device_t *dev,
 	DRM_DEBUG( "%s\n", __FUNCTION__ );
 
 	count = depth->n;
-	
-	if ( count > 4096 || count <= 0)
-		return -EMSGSIZE;
 	if ( copy_from_user( &x, depth->x, sizeof(x) ) ) {
 		return -EFAULT;
 	}
@@ -1172,9 +1153,6 @@ static int r128_cce_dispatch_read_pixels( drm_device_t *dev,
 	DRM_DEBUG( "%s\n", __FUNCTION__ );
 
 	count = depth->n;
-	if ( count > 4096 || count <= 0)
-		return -EMSGSIZE;
-
 	if ( count > dev_priv->depth_pitch ) {
 		count = dev_priv->depth_pitch;
 	}
@@ -1541,75 +1519,10 @@ int r128_cce_indirect( struct inode *inode, struct file *filp,
 {
 	drm_file_t *priv = filp->private_data;
 	drm_device_t *dev = priv->dev;
-	drm_r128_private_t *dev_priv = dev->dev_private;
-	drm_device_dma_t *dma = dev->dma;
-	drm_buf_t *buf;
-	drm_r128_buf_priv_t *buf_priv;
-	drm_r128_indirect_t indirect;
-#if 0
-	RING_LOCALS;
-#endif
 
 	LOCK_TEST_WITH_RETURN( dev );
 
-	if ( !dev_priv ) {
-		DRM_ERROR( "%s called with no initialization\n", __FUNCTION__ );
-		return -EINVAL;
-	}
-
-	if ( copy_from_user( &indirect, (drm_r128_indirect_t *)arg,
-			     sizeof(indirect) ) )
-		return -EFAULT;
-
-	DRM_DEBUG( "indirect: idx=%d s=%d e=%d d=%d\n",
-		   indirect.idx, indirect.start,
-		   indirect.end, indirect.discard );
-
-	if ( indirect.idx < 0 || indirect.idx >= dma->buf_count ) {
-		DRM_ERROR( "buffer index %d (of %d max)\n",
-			   indirect.idx, dma->buf_count - 1 );
-		return -EINVAL;
-	}
-
-	buf = dma->buflist[indirect.idx];
-	buf_priv = buf->dev_private;
-
-	if ( buf->pid != current->pid ) {
-		DRM_ERROR( "process %d using buffer owned by %d\n",
-			   current->pid, buf->pid );
-		return -EINVAL;
-	}
-	if ( buf->pending ) {
-		DRM_ERROR( "sending pending buffer %d\n", indirect.idx );
-		return -EINVAL;
-	}
-
-	if ( indirect.start < buf->used ) {
-		DRM_ERROR( "reusing indirect: start=0x%x actual=0x%x\n",
-			   indirect.start, buf->used );
-		return -EINVAL;
-	}
-
-	RING_SPACE_TEST_WITH_RETURN( dev_priv );
-	VB_AGE_TEST_WITH_RETURN( dev_priv );
-
-	buf->used = indirect.end;
-	buf_priv->discard = indirect.discard;
-
-#if 0
-	/* Wait for the 3D stream to idle before the indirect buffer
-	 * containing 2D acceleration commands is processed.
+	/* Indirect buffer firing is not supported at this time.
 	 */
-	BEGIN_RING( 2 );
-	RADEON_WAIT_UNTIL_3D_IDLE();
-	ADVANCE_RING();
-#endif
-
-	/* Dispatch the indirect buffer full of commands from the
-	 * X server.  This is insecure and is thus only available to
-	 * privileged clients.
-	 */
-	r128_cce_dispatch_indirect( dev, buf, indirect.start, indirect.end );
-
-	return 0;
+	return -EINVAL;
 }

@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/media.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -18,7 +18,6 @@
 #include <linux/mii.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/pci.h>
 #include "tulip.h"
 
 
@@ -390,9 +389,9 @@ void tulip_select_media(struct net_device *dev, int startup)
 		if (tulip_media_cap[dev->if_port] & MediaIsMII) {
 			new_csr6 = 0x020E0000;
 		} else if (tulip_media_cap[dev->if_port] & MediaIsFx) {
-			new_csr6 = 0x02860000;
+			new_csr6 = 0x028600000;
 		} else
-			new_csr6 = 0x03860000;
+			new_csr6 = 0x038600000;
 		if (tulip_debug > 1)
 			printk(KERN_DEBUG "%s: No media description table, assuming "
 				   "%s transceiver, CSR12 %2.2x.\n",

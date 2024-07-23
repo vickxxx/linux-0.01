@@ -31,7 +31,7 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: build.c,v 1.16.2.3 2003/04/30 09:43:32 dwmw2 Exp $
+ * $Id: build.c,v 1.16 2001/03/15 15:38:23 dwmw2 Exp $
  *
  */
 
@@ -43,30 +43,8 @@
 int jffs2_build_inode_pass1(struct jffs2_sb_info *, struct jffs2_inode_cache *);
 int jffs2_build_remove_unlinked_inode(struct jffs2_sb_info *, struct jffs2_inode_cache *);
 
-static inline struct jffs2_inode_cache *
-first_inode_chain(int *i, struct jffs2_sb_info *c)
-{
-	for (; *i < INOCACHE_HASHSIZE; (*i)++) {
-		if (c->inocache_list[*i])
-			return c->inocache_list[*i];
-	}
-	return NULL;
-}
 
-static inline struct jffs2_inode_cache *
-next_inode(int *i, struct jffs2_inode_cache *ic, struct jffs2_sb_info *c)
-{
-	/* More in this chain? */
-	if (ic->next)
-		return ic->next;
-	(*i)++;
-	return first_inode_chain(i, c);
-}
-
-#define for_each_inode(i, c, ic)			\
-	for (i = 0, ic = first_inode_chain(&i, (c));	\
-	     ic;					\
-	     ic = next_inode(&i, ic, (c)))
+#define for_each_inode(i, c, ic) for (i=0; i<INOCACHE_HASHSIZE; i++) for (ic=c->inocache_list[i]; ic; ic=ic->next) 
 
 /* Scan plan:
  - Scan physical nodes. Build map of inodes/dirents. Allocate inocaches as we go
@@ -81,11 +59,7 @@ int jffs2_build_filesystem(struct jffs2_sb_info *c)
 
 	/* First, scan the medium and build all the inode caches with
 	   lists of physical nodes */
-
-	c->flags |= JFFS2_SB_FLAG_MOUNTING;
 	ret = jffs2_scan_medium(c);
-	c->flags &= ~JFFS2_SB_FLAG_MOUNTING;
-
 	if (ret)
 		return ret;
 
@@ -227,10 +201,6 @@ int jffs2_build_inode_pass1(struct jffs2_sb_info *c, struct jffs2_inode_cache *i
 
 		if (child_ic->nlink++ && fd->type == DT_DIR) {
 			printk(KERN_NOTICE "Child dir \"%s\" (ino #%u) of dir ino #%u appears to be a hard link\n", fd->name, fd->ino, ic->ino);
-			if (fd->ino == 1 && ic->ino == 1) {
-				printk(KERN_NOTICE "This is mostly harmless, and probably caused by creating a JFFS2 image\n");
-				printk(KERN_NOTICE "using a buggy version of mkfs.jffs2. Use at least v1.17.\n");
-			}
 			/* What do we do about it? */
 		}
 		D1(printk(KERN_DEBUG "Increased nlink for child \"%s\" (ino #%u)\n", fd->name, fd->ino));

@@ -1,6 +1,3 @@
-#ifndef __ASM_SMPLOCK_H
-#define __ASM_SMPLOCK_H
-
 /*
  * <asm/smplock.h>
  *
@@ -11,8 +8,7 @@
 #include <linux/sched.h>
 #include <asm/current.h>
 
-extern spinlock_cacheline_t kernel_flag_cacheline;  
-#define kernel_flag kernel_flag_cacheline.lock      
+extern spinlock_t kernel_flag;
 
 #define kernel_locked()		spin_is_locked(&kernel_flag)
 
@@ -63,7 +59,7 @@ static __inline__ void lock_kernel(void)
 static __inline__ void unlock_kernel(void)
 {
 	if (current->lock_depth < 0)
-		out_of_line_bug();
+		BUG();
 #if 1
 	if (--current->lock_depth < 0)
 		spin_unlock(&kernel_flag);
@@ -77,5 +73,3 @@ static __inline__ void unlock_kernel(void)
 		 "=m" (current->lock_depth));
 #endif
 }
-
-#endif /* __ASM_SMPLOCK_H */

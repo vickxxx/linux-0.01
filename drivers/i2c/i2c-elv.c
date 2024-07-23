@@ -27,12 +27,16 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <linux/init.h>
+
+#include <asm/uaccess.h>
+
 #include <linux/ioport.h>
+#include <asm/io.h>
 #include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-#include <asm/io.h>
 
 #define DEFAULT_BASE 0x378
 static int base=0;
@@ -91,14 +95,14 @@ static int bit_elv_init(void)
 	} else {
 						/* test for ELV adap. 	*/
 		if (inb(base+1) & 0x80) {	/* BUSY should be high	*/
-			DEBINIT(printk(KERN_DEBUG "i2c-elv.o: Busy was low.\n"));
+			DEBINIT(printk("i2c-elv.o: Busy was low.\n"));
 			return -ENODEV;
 		} else {
 			outb(0x0c,base+2);	/* SLCT auf low		*/
 			udelay(400);
-			if ( !(inb(base+1) & 0x10) ) {
+			if ( !(inb(base+1) && 0x10) ) {
 				outb(0x04,base+2);
-				DEBINIT(printk(KERN_DEBUG "i2c-elv.o: Select was high.\n"));
+				DEBINIT(printk("i2c-elv.o: Select was high.\n"));
 				return -ENODEV;
 			}
 		}
@@ -145,28 +149,28 @@ static void bit_elv_dec_use(struct i2c_adapter *adap)
  * This is only done when more than one hardware adapter is supported.
  */
 static struct i2c_algo_bit_data bit_elv_data = {
-	.setsda		= bit_elv_setsda,
-	.setscl		= bit_elv_setscl,
-	.getsda		= bit_elv_getsda,
-	.getscl		= bit_elv_getscl,
-	.udelay		= 80,
-	.mdelay		= 80,
-	.timeout	= HZ
+	NULL,
+	bit_elv_setsda,
+	bit_elv_setscl,
+	bit_elv_getsda,
+	bit_elv_getscl,
+	80, 80, 100,		/*	waits, timeout */
 };
 
 static struct i2c_adapter bit_elv_ops = {
-	.name		= "ELV Parallel port adaptor",
-	.id		= I2C_HW_B_ELV,
-	.algo_data	= &bit_elv_data,
-	.inc_use	= bit_elv_inc_use,
-	.dec_use	= bit_elv_dec_use,
-	.client_register = bit_elv_reg,
-	.client_unregister = bit_elv_unreg,
+	"ELV Parallel port adaptor",
+	I2C_HW_B_ELV,
+	NULL,
+	&bit_elv_data,
+	bit_elv_inc_use,
+	bit_elv_dec_use,
+	bit_elv_reg,
+	bit_elv_unreg,	
 };
 
 int __init i2c_bitelv_init(void)
 {
-	printk(KERN_INFO "i2c-elv.o: i2c ELV parallel port adapter module version %s (%s)\n", I2C_VERSION, I2C_DATE);
+	printk("i2c-elv.o: i2c ELV parallel port adapter module\n");
 	if (base==0) {
 		/* probe some values */
 		base=DEFAULT_BASE;
@@ -186,7 +190,7 @@ int __init i2c_bitelv_init(void)
 			return -ENODEV;
 		}
 	}
-	printk(KERN_DEBUG "i2c-elv.o: found device at %#x.\n",base);
+	printk("i2c-elv.o: found device at %#x.\n",base);
 	return 0;
 }
 
@@ -197,6 +201,7 @@ EXPORT_NO_SYMBOLS;
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for ELV parallel port adapter");
 MODULE_LICENSE("GPL");
+
 
 MODULE_PARM(base, "i");
 

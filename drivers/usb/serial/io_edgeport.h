@@ -2,7 +2,7 @@
  *
  *	io_edgeport.h	Edgeport Linux Interface definitions
  *
- *	Copyright (C) 2000 Inside Out Networks, Inc.
+ *	Copyright (c) 2000 Inside Out Networks, Inc.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -136,6 +136,7 @@ struct string_block {
 	__u16	Strings[1];			/* Start of string block */
 };
 
+typedef struct string_block STRING_BLOCK, *PSTRING_BLOCK;
 
 
 #endif

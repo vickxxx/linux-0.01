@@ -158,8 +158,7 @@ static struct tty_ldisc tty_ldisc_N_R3964 = {
         r3964_write,           /* write */
         r3964_ioctl,           /* ioctl */
         r3964_set_termios,     /* set_termios */
-        r3964_poll,            /* poll */
-        NULL,                  /* hangup */
+        r3964_poll,            /* poll */            
         r3964_receive_buf,     /* receive_buf */
         r3964_receive_room,    /* receive_room */
         0                      /* write_wakeup */
@@ -1365,7 +1364,7 @@ static ssize_t r3964_write(struct tty_struct * tty, struct file * file,
       pHeader->owner = pClient;
    }
 
-   __copy_from_user(pHeader->data, data, count); /* We already verified this */
+   copy_from_user (pHeader->data, data, count); /* We already verified this */
 
    if(pInfo->flags & R3964_DEBUG)
    {

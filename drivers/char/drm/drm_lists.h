@@ -29,6 +29,7 @@
  *    Gareth Hughes <gareth@valinux.com>
  */
 
+#define __NO_VERSION__
 #include "drmP.h"
 
 #if __HAVE_DMA_WAITLIST
@@ -41,7 +42,7 @@ int DRM(waitlist_create)(drm_waitlist_t *bl, int count)
 				    DRM_MEM_BUFLISTS);
 
 	if(!bl->bufs) return -ENOMEM;
-	memset(bl->bufs, 0, sizeof(*bl->bufs));
+
 	bl->count      = count;
 	bl->rp	       = bl->bufs;
 	bl->wp	       = bl->bufs;

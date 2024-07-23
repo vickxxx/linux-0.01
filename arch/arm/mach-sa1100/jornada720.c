@@ -8,8 +8,6 @@
 #include <linux/delay.h>
 
 #include <asm/hardware.h>
-#include <asm/hardware/sa1111.h>
-#include <asm/irq.h>
 #include <asm/setup.h>
 
 #include <asm/mach/arch.h>
@@ -36,20 +34,23 @@ static int __init jornada720_init(void)
 	udelay(1);
 	GPSR = GPIO_GPIO20;
 	udelay(20);
-	SBI_SKCR = JORSKCR_INIT;/* Turn on the PLL, enable Ready and enable nOE assertion from DC */
+	SKCR = JORSKCR_INIT;	/* Turn on the PLL, enable Ready and enable nOE assertion from DC */
 	mdelay(100);
 
-	SBI_SKCR = JORSKCR_RCLK;/* turn on the RCLOCK */
-	SBI_SMCR = 0x35;	/* initialize the SMC (debug SA-1111 reset */
-	PCCR = 0;		/* initialize the S2MC (debug SA-1111 reset) */
+	SKCR = JORSKCR_RCLK;	/* turn on the RCLOCK */
+	SMCR = 0x35;	/* initialize the SMC (debug SA-1111 reset */
+	PCCR = 0;	/* initialize the S2MC (debug SA-1111 reset) */
 
 	/* LDD4 is speaker, LDD3 is microphone */
 	PPSR &= ~(PPC_LDD3 | PPC_LDD4);
 	PPDR |= PPC_LDD3 | PPC_LDD4;
 
 	/* initialize extra IRQs */
-	set_GPIO_IRQ_edge(GPIO_GPIO1, GPIO_RISING_EDGE);
-	sa1111_init_irq(IRQ_GPIO1);	/* chained on GPIO 1 */
+	set_GPIO_IRQ_edge(GPIO_GPIO(1), GPIO_RISING_EDGE);
+	sa1111_init_irq(SA1100_GPIO_TO_IRQ(1));	/* chained on GPIO 1 */
+
+	sa1100_register_uart(0, 3);
+	sa1100_register_uart(1, 1);
 
 	return 0;
 }
@@ -67,10 +68,10 @@ fixup_jornada720(struct machine_desc *desc, struct param_struct *params,
 
 static struct map_desc jornada720_io_desc[] __initdata = {
  /* virtual     physical    length      domain     r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 0, 1, 0, 0 }, /* Flash bank 0 */
-  { 0xf0000000, 0x48000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* Epson registers */
-  { 0xf1000000, 0x48200000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* Epson frame buffer */
-  { 0xf4000000, 0x40000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* SA-1111 */
+  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 1, 1, 0, 0 }, /* Flash bank 0 */
+  { 0xf0000000, 0x48000000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* Epson registers */
+  { 0xf1000000, 0x48200000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* Epson frame buffer */
+  { 0xf4000000, 0x40000000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* SA-1111 */
   LAST_DESC
 };
 
@@ -78,9 +79,6 @@ static void __init jornada720_map_io(void)
 {
 	sa1100_map_io();
 	iotable_init(jornada720_io_desc);
-	
-	sa1100_register_uart(0, 3);
-	sa1100_register_uart(1, 1);
 }
 
 MACHINE_START(JORNADA720, "HP Jornada 720")

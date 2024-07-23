@@ -1011,11 +1011,7 @@ int parport_claim_or_block(struct pardevice *dev)
 		/* If dev->waiting is clear now, an interrupt
 		   gave us the port and we would deadlock if we slept.  */
 		if (dev->waiting) {
-			interruptible_sleep_on (&dev->wait_q);
-			if (signal_pending (current)) {
-				restore_flags (flags);
-				return -EINTR;
-			}
+			sleep_on(&dev->wait_q);
 			r = 1;
 		} else {
 			r = 0;
@@ -1088,7 +1084,7 @@ void parport_release(struct pardevice *dev)
 		if (pd->waiting & 2) { /* sleeping in claim_or_block */
 			parport_claim(pd);
 			if (waitqueue_active(&pd->wait_q))
-				wake_up_interruptible(&pd->wait_q);
+				wake_up(&pd->wait_q);
 			return;
 		} else if (pd->wakeup) {
 			pd->wakeup(pd->private);

@@ -36,7 +36,6 @@ void __init prom_init(void *cif_handler, void *cif_stack)
 	int ints[3];
 	int node;
 	int i = 0;
-	int bufadjust;
 
 	prom_vers = PROM_P1275;
 
@@ -64,19 +63,9 @@ void __init prom_init(void *cif_handler, void *cif_stack)
 	if (strncmp (buffer, "OBP ", 4))
 		goto strange_version;
 
-	/*
-	 * Version field is expected to be 'OBP xx.yy.zz date...'
-	 * However, Sun can't stick to this format very well, so
-	 * we need to check for 'OBP  xx.yy.zz date...' and adjust
-	 * accordingly. -spot
-	 */
+	/* Version field is expected to be 'OBP xx.yy.zz date...' */
 
-	if (strncmp (buffer, "OBP  ", 5))
-		bufadjust = 4;
-	else
-		bufadjust = 5;
-
-	p = buffer + bufadjust;
+	p = buffer + 4;
 	while (p && isdigit(*p) && i < 3) {
 		ints[i++] = simple_strtoul(p, NULL, 0);
 		if ((p = strchr(p, '.')) != NULL)
@@ -88,7 +77,7 @@ void __init prom_init(void *cif_handler, void *cif_stack)
 	prom_rev = ints[1];
 	prom_prev = (ints[0] << 16) | (ints[1] << 8) | ints[2];
 
-	printk ("PROMLIB: Sun IEEE Boot Prom %s\n", buffer + bufadjust);
+	printk ("PROMLIB: Sun IEEE Boot Prom %s\n", buffer + 4);
 
 	prom_meminit();
 

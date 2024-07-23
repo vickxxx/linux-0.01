@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.amigaints.h 1.5 05/17/01 18:14:24 cort
+ */
+/*
 ** amigaints.h -- Amiga Linux interrupt handling structs and prototypes
 **
 ** Copyright 1992 by Greg Harp
@@ -107,8 +110,12 @@
 #define IF_DSKBLK   0x0002	/* diskblock DMA finished */
 #define IF_TBE	    0x0001	/* serial transmit buffer empty interrupt */
 
+struct irq_server {
+	unsigned short count, reentrance;
+};
+
 extern void amiga_do_irq(int irq, struct pt_regs *fp);
-extern void amiga_do_irq_list(int irq, struct pt_regs *fp);
+extern void amiga_do_irq_list(int irq, struct pt_regs *fp, struct irq_server *server);
 
 /* CIA interrupt control register bits */
 

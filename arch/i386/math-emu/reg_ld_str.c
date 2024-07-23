@@ -632,7 +632,7 @@ int FPU_store_double(FPU_REG *st0_ptr, u_char st0_tag, double *dfloat)
 /* Put a float into user memory */
 int FPU_store_single(FPU_REG *st0_ptr, u_char st0_tag, float *single)
 {
-  long templ = 0;
+  long templ;
   unsigned long increment = 0;     	/* avoid gcc warnings */
   int precision_loss;
   int exp;

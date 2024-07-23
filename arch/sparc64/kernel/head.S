@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.86 2001/12/05 01:02:16 davem Exp $
+/* $Id: head.S,v 1.82 2001/10/04 23:37:04 davem Exp $
  * head.S: Initial boot code for the Sparc64 port of Linux.
  *
  * Copyright (C) 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -50,19 +50,11 @@ bootup_user_stack:
  */
         .global root_flags, ram_flags, root_dev
         .global sparc_ramdisk_image, sparc_ramdisk_size
-	.global sparc_ramdisk_image64
+	.globl	silo_args
 
         .ascii  "HdrS"
         .word   LINUX_VERSION_CODE
-
-	/* History:
-	 *
-	 * 0x0300 : Supports being located at other than 0x4000
-	 * 0x0202 : Supports kernel params string
-	 * 0x0201 : Supports reboot_command
-	 */
-	.half   0x0301          /* HdrS version */
-
+        .half   0x0203          /* HdrS version */
 root_flags:
         .half   1
 root_dev:
@@ -74,9 +66,7 @@ sparc_ramdisk_image:
 sparc_ramdisk_size:
         .word   0
         .xword  reboot_command
-	.xword	bootstr_info
-sparc_ramdisk_image64:
-	.xword	0
+	.xword	bootstr_len
 	.word	_end
 
 	/* We must be careful, 32-bit OpenBOOT will get confused if it
@@ -88,28 +78,25 @@ sparc_ramdisk_image64:
 	 * PROM entry point is on %o4
 	 */
 sparc64_boot:
-	BRANCH_IF_CHEETAH_BASE(g1,g5,cheetah_boot)
-	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1,g5,cheetah_plus_boot)
-	ba,pt	%xcc, spitfire_boot
-	 nop
-
-cheetah_plus_boot:
-	/* Preserve OBP choosen DCU and DCR register settings.  */
-	ba,pt	%xcc, cheetah_generic_boot
+	rdpr	%ver, %g1
+	sethi	%hi(0x003e0014), %g5
+	srlx	%g1, 32, %g1
+	or	%g5, %lo(0x003e0014), %g5
+	cmp	%g1, %g5
+	bne,pt	%icc, spitfire_boot
 	 nop
 
 cheetah_boot:
 	mov	DCR_BPE | DCR_RPE | DCR_SI | DCR_IFPOE | DCR_MS, %g1
 	wr	%g1, %asr18
 
-	sethi	%uhi(DCU_ME|DCU_RE|DCU_HPE|DCU_SPE|DCU_SL|DCU_WE), %g5
-	or	%g5, %ulo(DCU_ME|DCU_RE|DCU_HPE|DCU_SPE|DCU_SL|DCU_WE), %g5
+	sethi	%uhi(DCU_ME | DCU_RE | /*DCU_PE |*/ DCU_HPE | DCU_SPE | DCU_SL | DCU_WE), %g5
+	or	%g5, %ulo(DCU_ME | DCU_RE | /*DCU_PE |*/ DCU_HPE | DCU_SPE | DCU_SL | DCU_WE), %g5
 	sllx	%g5, 32, %g5
 	or	%g5, DCU_DM | DCU_IM | DCU_DC | DCU_IC, %g5
 	stxa	%g5, [%g0] ASI_DCU_CONTROL_REG
 	membar	#Sync
 
-cheetah_generic_boot:
 	mov	TSB_EXTENSION_P, %g3
 	stxa	%g0, [%g3] ASI_DMMU
 	stxa	%g0, [%g3] ASI_IMMU
@@ -161,31 +148,11 @@ cheetah_generic_boot:
 	blu,pt	%xcc, 1b
 	 add	%l0, (1 << 3), %l0
 
-	/* Search the small TLB.  OBP never maps us like that but
-	 * newer SILO can.
-	 */
-	clr	%l0
-
-1:	ldxa	[%l0] ASI_ITLB_TAG_READ, %g1
-	membar	#Sync
-	andn	%g1, %l2, %g1
-	cmp	%g1, %g2
-	be,pn	%xcc, cheetah_got_tlbentry
-	 nop
-	cmp	%l0, (15 << 3)
-	blu,pt	%xcc, 1b
-	 add	%l0, (1 << 3), %l0
-
-	/* BUG() if we get here... */
-	ta	0x5
-
 cheetah_got_tlbentry:
-	ldxa	[%l0] ASI_ITLB_DATA_ACCESS, %g0
 	ldxa	[%l0] ASI_ITLB_DATA_ACCESS, %g1
 	membar	#Sync
 	and	%g1, %g3, %g1
-	set	0x5fff, %l0
-	andn	%g1, %l0, %g1
+	sub	%g1, %g2, %g1
 	or	%g5, %g1, %g5
 
 	/* Clear out any KERNBASE area entries. */
@@ -233,34 +200,8 @@ cheetah_got_tlbentry:
 	blu,pt	%xcc, 1b
 	 add	%l0, (1 << 3), %l0
 
-	/* On Cheetah+, have to check second DTLB.  */
-	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1,l0,2f)
-	ba,pt	%xcc, 9f
-	 nop
-
-2:	set	3 << 16, %l0
-1:	ldxa	[%l0] ASI_DTLB_TAG_READ, %g1
-	membar	#Sync
-	andn	%g1, %l2, %g1
-	cmp	%g1, %g3
-	blu,pn	%xcc, 2f
-	 cmp	%g1, %g7
-	bgeu,pn	%xcc, 2f
-	 nop
-	stxa	%g0, [%l7] ASI_DMMU
-	membar	#Sync
-	stxa	%g0, [%l0] ASI_DTLB_DATA_ACCESS
-	membar	#Sync
-	
-2:	and	%l0, (511 << 3), %g1
-	cmp	%g1, (511 << 3)
-	blu,pt	%xcc, 1b
-	 add	%l0, (1 << 3), %l0
-
-9:
-
 	/* Now lock the TTE we created into ITLB-0 and DTLB-0,
-	 * entry 15 (and maybe 14 too).
+	 * entry 15.
 	 */
 	sethi	%hi(KERNBASE), %g3
 	set	(0 << 16) | (15 << 3), %g7
@@ -274,29 +215,6 @@ cheetah_got_tlbentry:
 	membar	#Sync
 	flush	%g3
 	membar	#Sync
-	sethi	%hi(_end), %g3			/* Check for bigkernel case */
-	or	%g3, %lo(_end), %g3
-	srl	%g3, 23, %g3			/* Check if _end > 8M */
-	brz,pt	%g3, 1f
-	 sethi	%hi(KERNBASE), %g3		/* Restore for fixup code below */
-	sethi	%hi(0x400000), %g3
-	or	%g3, %lo(0x400000), %g3
-	add	%g5, %g3, %g5			/* New tte data */
-	andn	%g5, (_PAGE_G), %g5
-	sethi	%hi(KERNBASE+0x400000), %g3
-	or	%g3, %lo(KERNBASE+0x400000), %g3
-	set	(0 << 16) | (14 << 3), %g7
-	stxa	%g3, [%l7] ASI_DMMU
-	membar	#Sync
-	stxa	%g5, [%g7] ASI_DTLB_DATA_ACCESS
-	membar	#Sync
-	stxa	%g3, [%l7] ASI_IMMU
-	membar	#Sync
-	stxa	%g5, [%g7] ASI_ITLB_DATA_ACCESS
-	membar	#Sync
-	flush	%g3
-	membar	#Sync
-	sethi	%hi(KERNBASE), %g3		/* Restore for fixup code below */
 	ba,pt	%xcc, 1f
 	 nop
 
@@ -362,17 +280,13 @@ spitfire_create_mappings:
 	blu,pt	%xcc, 1b
 	 add	%l0, (1 << 3), %l0
 
-	/* BUG() if we get here... */
-	ta	0x5
-
 spitfire_got_tlbentry:
 	/* Nops here again, perhaps Cheetah/Blackbird are better behaved... */
 	nop
 	nop
 	nop
 	and	%g1, %g3, %g1		/* Mask to just get paddr bits.       */
-	set	0x5fff, %l3		/* Mask offset to get phys base.      */
-	andn	%g1, %l3, %g1
+	sub	%g1, %g2, %g1		/* Get rid of %pc offset to get base. */
 
 	/* NOTE: We hold on to %g1 paddr base as we need it below to lock
 	 * NOTE: the PROM cif code into the TLB.
@@ -431,7 +345,7 @@ spitfire_got_tlbentry:
 
 
 	/* PROM never puts any TLB entries into the MMU with the lock bit
-	 * set.  So we gladly use tlb entry 63 for KERNBASE. And maybe 62 too.
+	 * set.  So we gladly use tlb entry 63 for KERNBASE.
 	 */
 
 	sethi	%hi(KERNBASE), %g3
@@ -444,28 +358,7 @@ spitfire_got_tlbentry:
 	membar	#Sync
 	flush	%g3
 	membar	#Sync
-	sethi	%hi(_end), %g3			/* Check for bigkernel case */
-	or	%g3, %lo(_end), %g3
-	srl	%g3, 23, %g3			/* Check if _end > 8M */
-	brz,pt	%g3, 2f
-	 sethi	%hi(KERNBASE), %g3		/* Restore for fixup code below */
-	sethi	%hi(0x400000), %g3
-	or	%g3, %lo(0x400000), %g3
-	add	%g5, %g3, %g5			/* New tte data */
-	andn	%g5, (_PAGE_G), %g5
-	sethi	%hi(KERNBASE+0x400000), %g3
-	or	%g3, %lo(KERNBASE+0x400000), %g3
-	mov	(62 << 3), %g7
-	stxa	%g3, [%l7] ASI_DMMU
-	stxa	%g5, [%g7] ASI_DTLB_DATA_ACCESS
-	membar	#Sync
-	stxa	%g3, [%l7] ASI_IMMU
-	stxa	%g5, [%g7] ASI_ITLB_DATA_ACCESS
-	membar	#Sync
-	flush	%g3
-	membar	#Sync
-	sethi	%hi(KERNBASE), %g3		/* Restore for fixup code below */
-2:	ba,pt	%xcc, 1f
+	ba,pt	%xcc, 1f
 	 nop
 1:
 	set	sun4u_init, %g2
@@ -494,20 +387,21 @@ sun4u_init:
 	stxa	%g3, [%g2] ASI_DMMU
 	membar	#Sync
 
-	BRANCH_IF_ANY_CHEETAH(g1,g5,cheetah_tlb_fixup)
-
-	ba,pt	%xcc, spitfire_tlb_fixup
+	rdpr	%ver, %g1
+	sethi	%hi(0x003e0014), %g5
+	srlx	%g1, 32, %g1
+	or	%g5, %lo(0x003e0014), %g5
+	cmp	%g1, %g5
+	bne,pt	%icc, spitfire_tlb_fixup
 	 nop
 
 cheetah_tlb_fixup:
 	set	(0 << 16) | (15 << 3), %g7
-	ldxa	[%g7] ASI_ITLB_DATA_ACCESS, %g0
 	ldxa	[%g7] ASI_ITLB_DATA_ACCESS, %g1
 	andn	%g1, (_PAGE_G), %g1
 	stxa	%g1, [%g7] ASI_ITLB_DATA_ACCESS
 	membar	#Sync
 
-	ldxa	[%g7] ASI_DTLB_DATA_ACCESS, %g0
 	ldxa	[%g7] ASI_DTLB_DATA_ACCESS, %g1
 	andn	%g1, (_PAGE_G), %g1
 	stxa	%g1, [%g7] ASI_DTLB_DATA_ACCESS
@@ -517,20 +411,15 @@ cheetah_tlb_fixup:
 	flush	%g3
 	membar	#Sync
 
-	mov	2, %g2		/* Set TLB type to cheetah+. */
-	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g5,g7,1f)
-
-	mov	1, %g2		/* Set TLB type to cheetah. */
-
-1:	sethi	%hi(tlb_type), %g5
+	/* Set TLB type to cheetah. */
+	mov	1, %g2
+	sethi	%hi(tlb_type), %g5
 	stw	%g2, [%g5 + %lo(tlb_type)]
 
 	/* Patch copy/page operations to cheetah optimized versions. */
 	call	cheetah_patch_copyops
 	 nop
 	call	cheetah_patch_pgcopyops
-	 nop
-	call	cheetah_patch_cachetlbops
 	 nop
 
 	ba,pt	%xcc, tlb_fixup_done
@@ -584,7 +473,7 @@ tlb_fixup_done:
 	wr	%g0, ASI_P, %asi
 	mov	1, %g5
 	sllx	%g5, THREAD_SHIFT, %g5
-	sub	%g5, (STACKFRAME_SZ + STACK_BIAS), %g5
+	sub	%g5, (REGWIN_SZ + STACK_BIAS), %g5
 	add	%g6, %g5, %sp
 	mov	0, %fp
 
@@ -634,6 +523,13 @@ setup_tba:	/* i0 = is_starfire */
 #define KERN_HIGHBITS		((_PAGE_VALID|_PAGE_SZ4MB)^0xfffff80000000000)
 #define KERN_LOWBITS		(_PAGE_CP | _PAGE_CV | _PAGE_P | _PAGE_W)
 
+#define VPTE_BASE_SPITFIRE	0xfffffffe00000000
+#if 1
+#define VPTE_BASE_CHEETAH	VPTE_BASE_SPITFIRE
+#else
+#define VPTE_BASE_CHEETAH	0xffe0000000000000
+#endif
+
 	mov	TSB_REG, %g1
 	stxa	%g0, [%g1] ASI_DMMU
 	membar	#Sync
@@ -643,17 +539,19 @@ setup_tba:	/* i0 = is_starfire */
 	sllx	%g2, 32, %g2
 	or	%g2, KERN_LOWBITS, %g2
 
-	BRANCH_IF_ANY_CHEETAH(g3,g7,cheetah_vpte_base)
-	ba,pt	%xcc, spitfire_vpte_base
+	rdpr		%ver, %g3
+	sethi		%hi(0x003e0014), %g7
+	srlx		%g3, 32, %g3
+	or		%g7, %lo(0x003e0014), %g7
+	cmp		%g3, %g7
+	bne,pt		%icc, 1f
 	 nop
 
-cheetah_vpte_base:
 	sethi		%uhi(VPTE_BASE_CHEETAH), %g3
 	or		%g3, %ulo(VPTE_BASE_CHEETAH), %g3
 	ba,pt		%xcc, 2f
 	 sllx		%g3, 32, %g3
-
-spitfire_vpte_base:
+1:
 	sethi		%uhi(VPTE_BASE_SPITFIRE), %g3
 	or		%g3, %ulo(VPTE_BASE_SPITFIRE), %g3
 	sllx		%g3, 32, %g3
@@ -662,6 +560,8 @@ spitfire_vpte_base:
 	clr	%g7
 #undef KERN_HIGHBITS
 #undef KERN_LOWBITS
+#undef VPTE_BASE_SPITFIRE
+#undef VPTE_BASE_CHEETAH
 
 	/* Setup Interrupt globals */
 	wrpr	%o1, (PSTATE_IG|PSTATE_IE), %pstate
@@ -680,19 +580,14 @@ spitfire_vpte_base:
 	 nop
 
 not_starfire:
-	BRANCH_IF_JALAPENO(g1,g5,is_jalapeno)
-	BRANCH_IF_ANY_CHEETAH(g1,g5,is_cheetah)
-
-	ba,pt	%xcc, not_cheetah
+	rdpr		%ver, %g1
+	sethi		%hi(0x003e0014), %g5
+	srlx		%g1, 32, %g1
+	or		%g7, %lo(0x003e0014), %g5
+	cmp		%g1, %g5
+	bne,pt		%icc, not_cheetah
 	 nop
 
-is_jalapeno:
-	ldxa		[%g0] ASI_JBUS_CONFIG, %g1
-	srlx		%g1, 17, %g1
-	ba,pt		%xcc, set_worklist
-	 and		%g1, 0x1f, %g1		! 5bit JBUS ID
-
-is_cheetah:
 	ldxa		[%g0] ASI_SAFARI_CONFIG, %g1
 	srlx		%g1, 17, %g1
 	ba,pt		%xcc, set_worklist
@@ -713,25 +608,25 @@ set_worklist:
 #endif
 
 	/* Kill PROM timer */
-	sethi	%hi(0x80000000), %g1
-	sllx	%g1, 32, %g1
-	wr	%g1, 0, %tick_cmpr
+	wr	%g0, 0, %tick_cmpr
 
-	BRANCH_IF_ANY_CHEETAH(g1,g5,1f)
-
-	ba,pt	%xcc, 2f
+	rdpr		%ver, %g1
+	sethi		%hi(0x003e0014), %g5
+	srlx		%g1, 32, %g1
+	or		%g7, %lo(0x003e0014), %g5
+	cmp		%g1, %g5
+	bne,pt		%icc, 1f
 	 nop
 
 	/* Disable STICK_INT interrupts. */
-1:
-	sethi	%hi(0x80000000), %g1
-	sllx	%g1, 32, %g1
-	wr	%g1, %asr25
+	sethi		%hi(0x80000000), %g1
+	sllx		%g1, 32, %g1
+	wr		%g1, %asr25
 
 	/* Ok, we're done setting up all the state our trap mechanims needs,
 	 * now get back into normal globals and let the PROM know what is up.
 	 */
-2:
+1:
 	wrpr	%g0, %g0, %wstate
 	wrpr	%o1, PSTATE_IE, %pstate
 
@@ -782,9 +677,8 @@ swapper_pg_dir:
 
 	.data
 	.align	8
-	.globl	prom_tba, tlb_type
+	.globl	prom_tba
 prom_tba:	.xword	0
-tlb_type:	.word	0	/* Must NOT end up in BSS */
 	.section	".fixup",#alloc,#execinstr
 	.globl	__ret_efault
 __ret_efault:

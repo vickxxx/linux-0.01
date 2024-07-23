@@ -5,42 +5,34 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995-2002 Russell King
+# Copyright (C) 1995-2000 Russell King
 #
 
 SYSTEM	=$(TOPDIR)/vmlinux
 
-# Note: the following conditions must always be true:
-#  ZRELADDR == virt_to_phys(TEXTADDR)
-#   PARAMS_PHYS must be with 4MB of ZRELADDR
-#   INITRD_PHYS must be in RAM
-
 ifeq ($(CONFIG_CPU_26),y)
-ZRELADDR	 = 0x02080000
+ZTEXTADDR	 = 0x02080000
 PARAMS_PHYS	 = 0x0207c000
 INITRD_PHYS	 = 0x02180000
+INITRD_VIRT	 = 0x02180000
 endif
 
 ifeq ($(CONFIG_ARCH_RPC),y)
-ZRELADDR	 = 0x10008000
+ZTEXTADDR	 = 0x10008000
 PARAMS_PHYS	 = 0x10000100
 INITRD_PHYS	 = 0x18000000
-endif
-
-ifeq ($(CONFIG_ARCH_RISCSTATION),y)
-ZRELADDR	 = 0x10008000
-PARAMS_PHYS	 = 0x10000100
-INITRD_PHYS	 = 0x18000000
+INITRD_VIRT	 = 0xc8000000
 endif
 
 ifeq ($(CONFIG_ARCH_CLPS7500),y)
-ZRELADDR	 = 0x10008000
+ZTEXTADDR	 = 0x10008000
 endif
 
 ifeq ($(CONFIG_ARCH_EBSA110),y)
-ZRELADDR	 = 0x00008000
+ZTEXTADDR	 = 0x00008000
 PARAMS_PHYS	 = 0x00000400
 INITRD_PHYS	 = 0x00800000
+INITRD_VIRT	 = 0xc0800000
 endif
 
 ifeq ($(CONFIG_ARCH_SHARK),y)
@@ -49,114 +41,118 @@ ZRELADDR	 = 0x08008000
 endif
 
 ifeq ($(CONFIG_FOOTBRIDGE),y)
-ZRELADDR	 = 0x00008000
+ZTEXTADDR	 = 0x00008000
 PARAMS_PHYS	 = 0x00000100
 INITRD_PHYS	 = 0x00800000
+INITRD_VIRT	 = 0xc0800000
 endif
 
 ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
-ZRELADDR	 = 0x00008000
+ZTEXTADDR	 = 0x00008000
 PARAMS_PHYS	 = 0x00000100
 INITRD_PHYS	 = 0x00800000
-endif
-
-ifeq ($(CONFIG_ARCH_AT91RM9200),y)
-ZRELADDR	 = 0x20008000
-endif
-
-ifeq ($(CONFIG_ARCH_MX1ADS),y)
-ZRELADDR	 = 0x08008000
-endif
-
-ifeq ($(CONFIG_ARCH_CAMELOT),y)
-ZRELADDR	 = 0x00008000
+INITRD_VIRT	 = 0xc0800000
 endif
 
 ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
-ZRELADDR	 = 0x40008000
+ZTEXTADDR	 = 0x40008000
 endif
 
 ifeq ($(CONFIG_ARCH_L7200),y)
+# RAM based kernel
+#ZTEXTADDR	 = 0xf0400000
+#ZRELADDR	 = 0xf0008000
+
+# FLASH based kernel
+ZTEXTADDR	 = 0x00010000
 ZRELADDR	 = 0xf0008000
+ZBSSADDR	 = 0xf03e0000
 endif
 
 # The standard locations for stuff on CLPS711x type processors
 ifeq ($(CONFIG_ARCH_CLPS711X),y)
-ZRELADDR	 = 0xc0028000
+ZTEXTADDR	 = 0xc0028000
 PARAMS_PHYS	 = 0xc0000100
 endif
 
 # Should probably have some agreement on these...
 ifeq ($(CONFIG_ARCH_P720T),y)
 INITRD_PHYS	 = 0xc0400000
+INITRD_VIRT	 = 0xc0400000
 endif
 ifeq ($(CONFIG_ARCH_CDB89712),y)
 INITRD_PHYS	 = 0x00700000
-endif
-
-ifeq ($(CONFIG_ARCH_OMAHA),y)
-ZTEXTADDR	 = 0x0c008000
-PARAMS_PHYS	 = 0x0C000100
-INITRD_PHYS	 = 0x0C800000
-INITRD_VIRT	 = 0x0C800000
+INITRD_VIRT	 = 0xc0300000
 endif
 
 ifeq ($(CONFIG_ARCH_SA1100),y)
+ZTEXTADDR	 = 0xc0008000
 ZRELADDR	 = 0xc0008000
-# No defconfig file to move this into...
-#ifeq ($(CONFIG_SA1100_YOPY),y)
-#  ZTEXTADDR      = 0x00080000
-#  ZBSSADDR       = 0xc0200000
-#endif
+ifeq ($(CONFIG_SA1100_VICTOR),y)
+  ZTEXTADDR	 = 0x00002000
+  ZBSSADDR	 = 0xc0200000
+endif
+ifeq ($(CONFIG_SA1100_SHERMAN),y)
+  ZTEXTADDR      = 0x00050000   
+  ZBSSADDR       = 0xc0200000
+endif
+ifeq ($(CONFIG_SA1100_GRAPHICSCLIENT),y)
+  ZTEXTADDR	 = 0xC0200000
+endif
+ifeq ($(CONFIG_SA1100_GRAPHICSMASTER),y)
+  ZTEXTADDR	 = 0xC0400000
+endif
+ifeq ($(CONFIG_SA1100_ADSBITSY),y)
+  ZTEXTADDR	 = 0xC0400000
+endif
+ifeq ($(CONFIG_SA1100_YOPY),y)
+  ZTEXTADDR      = 0x00080000
+  ZBSSADDR       = 0xc0200000
+endif
 ifeq ($(CONFIG_SA1111),y)
   ZRELADDR	 = 0xc0208000
 endif
 endif
 
 ifeq ($(CONFIG_ARCH_ANAKIN),y)
-ZRELADDR	 = 0x20008000
+ZTEXTADDR	 = 0x20008000
 endif
 
 #
-# We now have a PIC decompressor implementation.  Decompressors running
-# from RAM should not define ZTEXTADDR.  Decompressors running directly
-# from ROM or Flash must define ZTEXTADDR (preferably via the config)
+# If you don't define ZRELADDR above,
+# then it defaults to ZTEXTADDR
 #
-ifeq ($(CONFIG_ZBOOT_ROM),y)
-ZTEXTADDR	=0x$(CONFIG_ZBOOT_ROM_TEXT)
-ZBSSADDR	=0x$(CONFIG_ZBOOT_ROM_BSS)
-else
-ZTEXTADDR	=0
-ZBSSADDR	=ALIGN(4)
+ifeq ($(ZRELADDR),)
+ZRELADDR	= $(ZTEXTADDR)
 endif
 
-export	SYSTEM ZTEXTADDR ZBSSADDR ZRELADDR INITRD_PHYS PARAMS_PHYS
+export	SYSTEM ZTEXTADDR ZBSSADDR ZRELADDR INITRD_PHYS INITRD_VIRT PARAMS_PHYS
 
-Image:	$(SYSTEM)
-	$(OBJCOPY) $(OBJCOPYFLAGS) $< $@
+Image:	$(CONFIGURE) $(SYSTEM)
+	$(OBJCOPY) -O binary -R .note -R .comment -S $(SYSTEM) $@
 
 bzImage: zImage
 
-zImage:	compressed/vmlinux
-	$(OBJCOPY) $(OBJCOPYFLAGS) $< $@
+zImage:	$(CONFIGURE) compressed/vmlinux
+	$(OBJCOPY) -O binary -R .note -R .comment -S compressed/vmlinux $@
 
 bootpImage: bootp/bootp
-	$(OBJCOPY) $(OBJCOPYFLAGS) $< $@
+	$(OBJCOPY) -O binary -R .note -R .comment -S bootp/bootp $@
 
-compressed/vmlinux: $(TOPDIR)/vmlinux FORCE
+compressed/vmlinux: $(TOPDIR)/vmlinux dep
 	@$(MAKE) -C compressed vmlinux
 
-bootp/bootp: zImage initrd FORCE
+bootp/bootp: zImage initrd
 	@$(MAKE) -C bootp bootp
 
 initrd:
-	@test "$(INITRD_PHYS)" != "" || (echo This machine does not support INITRD; exit -1)
+	@test "$(INITRD_VIRT)" != "" || (echo This architecture does not support INITRD; exit -1)
 	@test "$(INITRD)" != "" || (echo You must specify INITRD; exit -1)
 
-install: Image
+install: $(CONFIGURE) Image
 	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) Image $(TOPDIR)/System.map "$(INSTALL_PATH)"
 
-zinstall: zImage
+zinstall: $(CONFIGURE) zImage
 	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) zImage $(TOPDIR)/System.map "$(INSTALL_PATH)"
 
 clean:
@@ -165,5 +161,3 @@ clean:
 	@$(MAKE) -C bootp clean
 
 dep:
-
-FORCE:

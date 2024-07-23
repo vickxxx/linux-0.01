@@ -16,8 +16,6 @@
  *  - PHY updates
  * BenH <benh@kernel.crashing.org> - 08/08/2001
  * - Add more PHYs, fixes to sleep code
- * Matt Domsch <Matt_Domsch@dell.com> - 11/12/2001
- * - use library crc32 functions
  */
 
 #include <linux/module.h>
@@ -35,12 +33,10 @@
 #include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/crc32.h>
 #include <asm/prom.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/machdep.h>
-#include <asm/pmac_feature.h>
+#include <asm/feature.h>
 #include <asm/keylargo.h>
 #include <asm/pci-bridge.h>
 #ifdef CONFIG_PMAC_PBOOK
@@ -246,7 +242,6 @@ mii_interrupt(struct gmac *gm)
 #endif
 		    	full_duplex = ((aux_stat & MII_BCM5201_AUXCTLSTATUS_DUPLEX) != 0);
 		    	link_100 = ((aux_stat & MII_BCM5201_AUXCTLSTATUS_SPEED) != 0);
-			netif_carrier_on(gm->dev);
 		        break;
 		      case PHY_B5400:
 		      case PHY_B5401:
@@ -261,7 +256,6 @@ mii_interrupt(struct gmac *gm)
 		    	full_duplex = phy_BCM5400_link_table[link][0];
 		    	link_100 = phy_BCM5400_link_table[link][1];
 		    	gigabit = phy_BCM5400_link_table[link][2];
-			netif_carrier_on(gm->dev);
 		    	break;
 		      case PHY_LXT971:
 		    	aux_stat = mii_read(gm, gm->phy_addr, MII_LXT971_STATUS2);
@@ -271,7 +265,6 @@ mii_interrupt(struct gmac *gm)
 #endif
 		    	full_duplex = ((aux_stat & MII_LXT971_STATUS2_FULLDUPLEX) != 0);
 		    	link_100 = ((aux_stat & MII_LXT971_STATUS2_SPEED) != 0);
-			netif_carrier_on(gm->dev);
 		    	break;
 		      default:
 		    	full_duplex = (lpar_ability & MII_ANLPA_FDAM) != 0;
@@ -299,12 +292,10 @@ mii_interrupt(struct gmac *gm)
 #ifdef DEBUG_PHY
 		    printk(KERN_INFO "%s:    Link down !\n", gm->dev->name);
 #endif
-			netif_carrier_off(gm->dev);
 		}
 	}
 }
 
-#ifdef CONFIG_PMAC_PBOOK
 /* Power management: stop PHY chip for suspend mode
  * 
  * TODO: This will have to be modified is WOL is to be supported.
@@ -450,7 +441,6 @@ gmac_resume(struct gmac *gm)
 		GM_OUT(GM_RX_CONF, 0);
 	}
 }
-#endif
 
 static int
 mii_do_reset_phy(struct gmac *gm, int phy_addr)
@@ -595,8 +585,8 @@ mii_lookup_and_reset(struct gmac *gm)
 	gm->phy_type = PHY_UNKNOWN;
 
 	/* Hard reset the PHY */
-	pmac_call_feature(PMAC_FTR_GMAC_PHY_RESET, gm->of_node, 0, 0);
-		
+	feature_gmac_phy_reset(gm->of_node);
+	
 	/* Find the PHY */
 	for(i=0; i<=31; i++) {
 		mii_control = mii_read(gm, i, MII_CR);
@@ -693,7 +683,7 @@ static void
 gmac_set_power(struct gmac *gm, int power_up)
 {
 	if (power_up) {
-		pmac_call_feature(PMAC_FTR_GMAC_ENABLE, gm->of_node, 0, 1);
+		feature_set_gmac_power(gm->of_node, 1);
 		if (gm->pci_devfn != 0xff) {
 			u16 cmd;
 			
@@ -718,7 +708,7 @@ gmac_set_power(struct gmac *gm, int power_up)
 	    			PCI_CACHE_LINE_SIZE, 8);
 		}
 	} else {
-		pmac_call_feature(PMAC_FTR_GMAC_ENABLE, gm->of_node, 0, 0);
+		feature_set_gmac_power(gm->of_node, 0);
 	}
 }
 
@@ -1007,13 +997,14 @@ gmac_stop_dma(struct gmac *gm)
  * Configure promisc mode and setup multicast hash table
  * filter
  */
+#define CRC_POLY	0xedb88320
 static void
 gmac_set_multicast(struct net_device *dev)
 {
 	struct gmac *gm = (struct gmac *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
 	int i,j,k,b;
-	u32 crc;
+	unsigned long crc;
 	int multicast_hash = 0;
 	int multicast_all = 0;
 	int promisc = 0;
@@ -1036,7 +1027,17 @@ gmac_set_multicast(struct net_device *dev)
 			hash_table[i] = 0;
 
 	    	for (i = 0; i < dev->mc_count; i++) {
-			crc = ether_crc_le(6, dmi->dmi_addr);
+			crc = ~0;
+			for (j = 0; j < 6; ++j) {
+			    b = dmi->dmi_addr[j];
+			    for (k = 0; k < 8; ++k) {
+				if ((crc ^ b) & 1)
+				    crc = (crc >> 1) ^ CRC_POLY;
+				else
+				    crc >>= 1;
+				b >>= 1;
+			    }
+			}
 			j = crc >> 24;	/* bit number in multicast_filter */
 			hash_table[j >> 4] |= 1 << (15 - (j & 0xf));
 			dmi = dmi->next;
@@ -1105,10 +1106,7 @@ gmac_open(struct net_device *dev)
 	
 	/* Initialize the multicast tables & promisc mode if any */
 	gmac_set_multicast(dev);
-
-	/* Initialize the carrier status */
-	netif_carrier_off(dev);
-
+	
 	/*
 	 * Check out PHY status and start auto-poll
 	 * 
@@ -1619,12 +1617,6 @@ gmac_probe1(struct device_node *gmac)
 	SET_MODULE_OWNER(dev);
 
 	gm = dev->priv;
-	gm->of_node = gmac;
-	if (!request_OF_resource(gmac, 0, " (gmac)")) {
-		printk(KERN_ERR "GMAC: can't request IO resource !\n");
-		gm->of_node = NULL;
-		goto out_unreg;
-	}
 	dev->base_addr = gmac->addrs[0].address;
 	gm->regs = (volatile unsigned int *)
 		ioremap(gmac->addrs[0].address, 0x10000);
@@ -1634,6 +1626,7 @@ gmac_probe1(struct device_node *gmac)
 	}
 	dev->irq = gmac->intrs[0].line;
 	gm->dev = dev;
+	gm->of_node = gmac;
 
 	spin_lock_init(&gm->lock);
 	
@@ -1674,8 +1667,6 @@ gmac_probe1(struct device_node *gmac)
 
 out_unreg:
 	unregister_netdev(dev);
-	if (gm->of_node)
-		release_OF_resource(gm->of_node, 0);
 	kfree(dev);
 out_rxdesc:
 	free_page(rx_descpage);
@@ -1686,7 +1677,6 @@ out_txdesc:
 MODULE_AUTHOR("Paul Mackerras/Ben Herrenschmidt");
 MODULE_DESCRIPTION("PowerMac GMAC driver.");
 MODULE_LICENSE("GPL");
-EXPORT_NO_SYMBOLS;
 
 static void __exit gmac_cleanup_module(void)
 {
@@ -1704,7 +1694,6 @@ static void __exit gmac_cleanup_module(void)
 		iounmap((void *) gm->regs);
 		free_page(gm->tx_desc_page);
 		free_page(gm->rx_desc_page);
-		release_OF_resource(gm->of_node, 0);
 		gmacs = gm->next_gmac;
 		kfree(dev);
 	}

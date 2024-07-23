@@ -80,13 +80,29 @@ pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
 
 #ifdef DEBUG_PTRACE
 char *pt_rq [] = {
-	/* 0  */ "TRACEME", "PEEKTEXT", "PEEKDATA", "PEEKUSR",
-	/* 4  */ "POKETEXT", "POKEDATA", "POKEUSR", "CONT",
-	/* 8  */ "KILL", "SINGLESTEP", "SUNATTACH", "SUNDETACH",
-	/* 12 */ "GETREGS", "SETREGS", "GETFPREGS", "SETFPREGS",
-	/* 16 */ "READDATA", "WRITEDATA", "READTEXT", "WRITETEXT",
-	/* 20 */ "GETFPAREGS", "SETFPAREGS", "unknown", "unknown",
-	/* 24 */ "SYSCALL", ""
+"TRACEME",
+"PEEKTEXT",
+"PEEKDATA",
+"PEEKUSR",
+"POKETEXT",
+"POKEDATA",
+"POKEUSR",
+"CONT",
+"KILL",
+"SINGLESTEP",
+"SUNATTACH",
+"SUNDETACH",
+"GETREGS",
+"SETREGS",
+"GETFPREGS",
+"SETFPREGS",
+"READDATA",
+"WRITEDATA",
+"READTEXT",
+"WRITETEXT",
+"GETFPAREGS",
+"SETFPAREGS",
+""
 };
 #endif
 
@@ -119,7 +135,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	{
 		char *s;
 
-		if ((request >= 0) && (request <= 24))
+		if ((request > 0) && (request < 21))
 			s = pt_rq [request];
 		else
 			s = "unknown";
@@ -576,7 +592,7 @@ flush_and_out:
 	{
 		unsigned long va;
 
-		if (tlb_type == cheetah || tlb_type == cheetah_plus) {
+		if (tlb_type == cheetah) {
 			for (va = 0; va < (1 << 16); va += (1 << 5))
 				spitfire_put_dcache_tag(va, 0x0);
 			/* No need to mess with I-cache on Cheetah. */

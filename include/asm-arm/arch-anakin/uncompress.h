@@ -14,7 +14,6 @@
 #ifndef __ASM_ARCH_UNCOMPRESS_H
 #define __ASM_ARCH_UNCOMPRESS_H
 
-#include <linux/config.h>
 #include <asm/io.h>
 #include <asm/arch/serial_reg.h>
 
@@ -25,9 +24,7 @@
 static inline void
 putc(int c)
 {
-	while (!(__raw_readl(IO_START + UART0 + 0x10) & TXEMPTY))
-		barrier();
-
+	while (!(__raw_readl(IO_START + UART0 + 0x10) & TXEMPTY));
 	__raw_writel(c, IO_START + UART0 + 0x14);
 	__raw_writel(__raw_readl(IO_START + UART0 + 0x18)
 			| SENDREQUEST, IO_START + UART0 + 0x18);

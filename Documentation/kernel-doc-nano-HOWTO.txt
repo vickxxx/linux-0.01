@@ -73,10 +73,10 @@ if ($#ARGV < 0) {
 mkdir $ARGV[0],0777;
 $state = 0;
 while (<STDIN>) {
-    if (/^\.TH \"[^\"]*\" (\d) \"([^\"]*)\"/) {
+    if (/^\.TH \"[^\"]*\" 4 \"([^\"]*)\"/) {
 	if ($state == 1) { close OUT }
 	$state = 1;
-	$fn = "$ARGV[0]/$2.$1";
+	$fn = "$ARGV[0]/$1.4";
 	print STDERR "Creating $fn\n";
 	open OUT, ">$fn" or die "can't open $fn: $!\n";
 	print OUT $_;

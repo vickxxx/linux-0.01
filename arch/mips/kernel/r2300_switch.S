@@ -10,15 +10,15 @@
  * Further modifications to make this work:
  * Copyright (c) 1998-2000 Harald Koerfgen
  */
-#include <linux/config.h>
 #include <asm/asm.h>
+#include <asm/bootinfo.h>
 #include <asm/cachectl.h>
 #include <asm/current.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
 #include <asm/offset.h>
 #include <asm/page.h>
-#include <asm/pgtable-bits.h>
+#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
@@ -27,19 +27,6 @@
 
 	.set	mips1
 	.align	5
-
-#define PF_USEDFPU      0x00100000      /* task used FPU this quantum (SMP) */
-#define ST_OFF (KERNEL_STACK_SIZE - 32 - PT_SIZE + PT_STATUS)
-
-/*
- * [jsun] FPU context is saved if and only if the process has used FPU in 
- * the current run (PF_USEDFPU).  In any case, the CU1 bit for user space 
- * STATUS register should be 0, so that a process *always* starts its 
- * userland with FPU disabled after each context switch.
- *
- * FPU will be enabled as soon as the process accesses FPU again, through
- * do_cpu() trap.
- */
 
 /*
  * task_struct *resume(task_struct *prev,
@@ -54,32 +41,6 @@ LEAF(resume)
 	CPU_SAVE_NONSCRATCH(a0)
 	sw	ra, THREAD_REG31(a0)
 
-	/* 
-	 * check if we need to save FPU registers
-	 */
-	lw	t0, TASK_FLAGS(a0)
-	li	t1, PF_USEDFPU
-	and	t2, t0, t1
-	beqz	t2, 1f
-	nor	t1, zero, t1
-
-	/*
-	 * clear PF_USEDFPU bit in task flags
-	 */
-	and	t0, t0, t1
-	sw	t0, TASK_FLAGS(a0)
-
-	/*
-	 * clear user-saved stack CU1 bit
-	 */
-	lw	t0, ST_OFF(a0)
-	li	t1, ~ST0_CU1
-	and	t0, t0, t1
-	sw	t0, ST_OFF(a0)
-
-	FPU_SAVE_SINGLE(a0, t0)			# clobbers t0
-
-1:
 	/*
 	 * The order of restoring the registers takes care of the race
 	 * updating $28, $29 and kernelsp without disabling ints.
@@ -103,34 +64,61 @@ LEAF(resume)
 	END(resume)
 
 /*
+ * Do lazy fpu context switch.  Saves FPU context to the process in a0
+ * and loads the new context of the current process.
+ */
+
+#define ST_OFF (KERNEL_STACK_SIZE - 32 - PT_SIZE + PT_STATUS)
+
+LEAF(lazy_fpu_switch)
+	mfc0	t0, CP0_STATUS			# enable cp1
+	li	t3, 0x20000000
+	or	t0, t3
+	mtc0	t0, CP0_STATUS
+
+	.set	noreorder
+	beqz	a0, 2f				# Save floating point state
+	 nor	t3, zero, t3
+	.set	reorder
+	lw	t1, ST_OFF(a0)			# last thread looses fpu
+	and	t1, t3
+	sw	t1, ST_OFF(a0)
+	FPU_SAVE_SINGLE(a0, t1)			# clobbers t1
+
+2:
+	FPU_RESTORE_SINGLE($28, t0)		# clobbers t0
+	jr	ra
+	END(lazy_fpu_switch)
+
+/*
  * Save a thread's fp context.
  */
-LEAF(_save_fp)
+LEAF(save_fp)
 	FPU_SAVE_SINGLE(a0, t1)			# clobbers t1
 	jr	ra
-	END(_save_fp)
+	END(save_fp)
 
 /*
  * Restore a thread's fp context.
  */
-LEAF(_restore_fp)
+LEAF(restore_fp)
 	FPU_RESTORE_SINGLE(a0, t1)		# clobbers t1
 	jr	ra
-	END(_restore_fp)
+	END(restore_fp)
 
 /*
  * Load the FPU with signalling NANS.  This bit pattern we're using has
  * the property that no matter wether considered as single or as double
- * precision represents signaling NANS.
+ * precission represents signaling NANS.
  *
  * We initialize fcr31 to rounding to nearest, no exceptions.
  */
 
 #define FPU_DEFAULT  0x00000000
 
-LEAF(_init_fpu)
+LEAF(init_fpu)
 	mfc0	t0, CP0_STATUS
-	li	t1, ST0_CU1
+	li	t1, 0x20000000
 	or	t0, t1
 	mtc0	t0, CP0_STATUS
 
@@ -174,4 +162,4 @@ LEAF(_init_fpu)
 	jr	ra
 	 mtc1	t0, $f31
 	.set	reorder
-	END(_init_fpu)
+	END(init_fpu)

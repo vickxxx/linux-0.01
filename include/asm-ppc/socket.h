@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.socket.h 1.6 05/17/01 18:14:25 cort
+ */
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
@@ -9,7 +12,7 @@
 #define SIOCATMARK	0x8905
 #define SIOCGSTAMP	0x8906		/* Get stamp */
 
-/* For setsockopt(2) */
+/* For setsockoptions(2) */
 #define SOL_SOCKET	1
 
 #define SO_DEBUG	1
@@ -65,6 +68,6 @@
 					/* other similar things on the	*/
 					/* user level.			*/
 #define	SOCK_MAX	(SOCK_PACKET+1)
-#endif /* __KERNEL__ */
+#endif
 
 #endif /* _ASM_SOCKET_H */

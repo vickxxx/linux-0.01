@@ -56,27 +56,22 @@
  * cpu_arm1020_data_abort()
  *
  * obtain information about current aborted instruction
- * Note: we read user space.  This means we might cause a data
- * abort here if the I-TLB and D-TLB aren't seeing the same
- * picture.  Unfortunately, this does happen.  We live with it.
  *
- *  r2 = address of aborted instruction
- *  r3 = cpsr
+ * r0 = address of aborted instruction
  *
  * Returns:
  *  r0 = address of abort
  *  r1 != 0 if writing
  *  r3 = FSR
- *  r4 = corrupted
  */
 	.align	5
 ENTRY(cpu_arm1020_data_abort)
-	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
+	ldr	r1, [r0]			@ read aborted instruction
 	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	ldr	r1, [r2]			@ read aborted instruction
-	and	r3, r3, #255
 	tst	r1, r1, lsr #21 		@ C = bit 20
+	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
 	sbc	r1, r1, r1			@ r1 = C - 1
+	and	r3, r3, #255
 	mov	pc, lr
 
 /*
@@ -135,7 +130,7 @@ ENTRY(cpu_arm1020_reset)
 	.align	5
 ENTRY(cpu_arm1020_do_idle)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -156,7 +151,7 @@ ENTRY(cpu_arm1020_do_idle)
 ENTRY(cpu_arm1020_cache_clean_invalidate_all)
 	mov	r2, #1
 cpu_arm1020_cache_clean_invalidate_all_r2:
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, ip, c7, c10, 4
 
 	mov	r1, #0xf			@ 16 segments
@@ -165,7 +160,7 @@ cpu_arm1020_cache_clean_invalidate_all_r2:
 	orr	ip, ip, r1, LSL #5		@ shift in/up index
 	mcr	p15, 0, ip, c7, c14, 2		@ Clean & Inval DCache entry
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB 
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	ip, ip
 #endif
 	subs	r3, r3, #1
@@ -176,12 +171,12 @@ cpu_arm1020_cache_clean_invalidate_all_r2:
 	bge	1b				@ segments 7 to 0
 #endif
         
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
 	teq	r2, #0
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 #endif
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	ip, ip
 	mov	ip, ip
 #endif
@@ -203,13 +198,13 @@ ENTRY(cpu_arm1020_cache_clean_invalidate_range)
 	cmp	r3, #MAX_AREA_SIZE
 	bgt	cpu_arm1020_cache_clean_invalidate_all_r2
 	mcr	p15, 0, r3, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
@@ -217,11 +212,11 @@ ENTRY(cpu_arm1020_cache_clean_invalidate_range)
 	blt	1b
 #endif
 
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
 	teq	r2, #0
 	movne	r0, #0
 	mcrne	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -238,14 +233,14 @@ ENTRY(cpu_arm1020_cache_clean_invalidate_range)
 	.align	5
 ENTRY(cpu_arm1020_flush_ram_page)
 	mcr	p15, 0, r1, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mov	r1, #PAGESIZE
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -254,7 +249,7 @@ ENTRY(cpu_arm1020_flush_ram_page)
 	mov	r0, #0
 
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -275,14 +270,14 @@ ENTRY(cpu_arm1020_flush_ram_page)
  */
 	.align	5
 ENTRY(cpu_arm1020_dcache_invalidate_range)
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	/* D cache are on */
 	tst	r0, #DCACHELINESIZE - 1
 	bic	r0, r0, #DCACHELINESIZE - 1
 	mcrne	p15, 0, r0, c7, c10, 4
 	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry at start
 	mcrne	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -290,14 +285,14 @@ ENTRY(cpu_arm1020_dcache_invalidate_range)
 	mcrne	p15, 0, r1, c7, c10, 4
 	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry at end
 	mcrne	p15, 0, r1, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r1, r1
 	mov	r1, r1
 	mov	r1, r1
 #endif
         
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
@@ -306,7 +301,7 @@ ENTRY(cpu_arm1020_dcache_invalidate_range)
 #else
 	/* D cache off, but still drain the write buffer */
 	mcr	p15, 0, r0, c7, c10, 4		@ Drain write buffer
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -330,13 +325,13 @@ ENTRY(cpu_arm1020_dcache_clean_range)
 	cmp	r3, #MAX_AREA_SIZE
 	bgt	cpu_arm1020_cache_clean_invalidate_all_r2
 	mcr	p15, 0, r3, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
@@ -344,7 +339,7 @@ ENTRY(cpu_arm1020_dcache_clean_range)
 	blt	1b
 #endif
 
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -367,23 +362,23 @@ ENTRY(cpu_arm1020_dcache_clean_range)
 ENTRY(cpu_arm1020_dcache_clean_page)
 	mov	r1, #PAGESIZE
 	mcr	p15, 0, r0, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry  (drain is done by TLB fns)
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
 	subs	r1, r1, #2 * DCACHELINESIZE
 	bhi	1b
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -401,14 +396,14 @@ ENTRY(cpu_arm1020_dcache_clean_page)
 ENTRY(cpu_arm1020_dcache_clean_entry)
 	mov	r1, #0
 	mcr	p15, 0, r1, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, r0, c7, c10, 1		@ clean single D entry
 	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
 #endif
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
 	mcr	p15, 0, r1, c7, c5, 1		@ invalidate I entry
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r1, r1
 	mov	r1, r1
 #endif
@@ -427,14 +422,14 @@ ENTRY(cpu_arm1020_dcache_clean_entry)
 	.align	5
 ENTRY(cpu_arm1020_icache_invalidate_range)
 1:	mcr	p15, 0, r0, c7, c10, 4
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	add	r0, r0, #DCACHELINESIZE
@@ -442,7 +437,7 @@ ENTRY(cpu_arm1020_icache_invalidate_range)
 	blo	1b
 ENTRY(cpu_arm1020_icache_invalidate_page)
 	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -460,7 +455,7 @@ ENTRY(cpu_arm1020_tlb_invalidate_all)
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c8, c7, 0		@ invalidate I & D tlbs
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -476,15 +471,12 @@ ENTRY(cpu_arm1020_tlb_invalidate_all)
  */
 	.align	5
 ENTRY(cpu_arm1020_tlb_invalidate_range)
-	sub	r3, r1, r0
-	cmp	r3, #256 * PAGESIZE
-	bhi	cpu_arm1020_tlb_invalidate_all
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
 1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
 	mcr	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
 	add	r0, r0, #PAGESIZE
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 #endif
 	cmp	r0, r1
@@ -503,14 +495,14 @@ ENTRY(cpu_arm1020_tlb_invalidate_range)
 ENTRY(cpu_arm1020_tlb_invalidate_page)
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
 	teq	r1, #0
 	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
 	mcrne	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -527,7 +519,7 @@ ENTRY(cpu_arm1020_tlb_invalidate_page)
  */
 	.align	5
 ENTRY(cpu_arm1020_set_pgd)
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, r3, c7, c10, 4
 	mov	r1, #0xF			@ 16 segments
 1:	mov	r3, #0x3F			@ 64 entries
@@ -536,7 +528,7 @@ ENTRY(cpu_arm1020_set_pgd)
 	mcr	p15, 0, ip, c7, c14, 2		@ Clean & Inval DCache entry
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c10, 4
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	ip, ip
 #endif
 	subs	r3, r3, #1
@@ -548,13 +540,13 @@ ENTRY(cpu_arm1020_set_pgd)
 
 #endif
 	mov	r1, #0
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
 	mcr	p15, 0, r1, c7, c5, 0		@ invalidate I cache
 #endif
 	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	ip, ip
 	mov	ip, ip
 #endif
@@ -571,18 +563,18 @@ ENTRY(cpu_arm1020_set_pgd)
  */
 	.align	5
 ENTRY(cpu_arm1020_set_pmd)
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH
 	eor	r2, r1, #0x0a			@ C & Section
 	tst	r2, #0x0b
 	biceq	r1, r1, #4			@ clear bufferable bit
 #endif
 	str	r1, [r0]
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, r0, c7, c10, 4
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry  (drain is done by TLB fns)
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
@@ -612,42 +604,47 @@ ENTRY(cpu_arm1020_set_pte)
 	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
 	movne	r2, #0
 
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH
 	eor	r3, r1, #0x0a			@ C & small page?
 	tst	r3, #0x0b
 	biceq	r2, r2, #4
 #endif
 	str	r2, [r0]			@ hardware version
 	mov	r0, r0
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	mcr	p15, 0, r0, c7, c10, 4
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	mov	r0, r0
 	mov	r0, r0
 #endif
 	mov	pc, lr
 
 
+cpu_manu_name:
+	.asciz	"ARM/VLSI"
 ENTRY(cpu_arm1020_name)
 	.ascii	"Arm1020"
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#if defined(CONFIG_CPU_ARM1020_CPU_IDLE)
+	.ascii	"s"
+#endif
+#if defined(CONFIG_CPU_ARM1020_I_CACHE_ON)
 	.ascii	"i"
 #endif
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#if defined(CONFIG_CPU_ARM1020_D_CACHE_ON)
 	.ascii	"d"
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#if defined(CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH)
 	.ascii	"(wt)"
 #else
 	.ascii	"(wb)"
 #endif
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	.ascii	"B"
 #endif
-#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
+#ifdef CONFIG_CPU_ARM1020_ROUND_ROBIN
 	.ascii	"RR"
 #endif
 	.ascii	"\0"
@@ -677,16 +674,16 @@ __arm1020_setup:
 	orr	r0, r0, #0x0031 		@ ..........DP...M
 	orr	r0, r0, #0x0100 		@ .......S........
 
-#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
+#ifdef CONFIG_CPU_ARM1020_ROUND_ROBIN
 	orr	r0, r0, #0x4000 		@ .R..............
 #endif
-#ifndef CONFIG_CPU_BPREDICT_DISABLE
+#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
 	orr	r0, r0, #0x0800 		@ ....Z...........
 #endif
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
 	orr	r0, r0, #0x0004 		@ Enable D cache
 #endif
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
 	orr	r0, r0, #0x1000 		@ I Cache on
 #endif
 	mov	pc, lr
@@ -734,7 +731,7 @@ arm1020_processor_functions:
 
 	.type	cpu_arm1020_info, #object
 cpu_arm1020_info:
-	.long	0
+	.long	cpu_manu_name
 	.long	cpu_arm1020_name
 	.size	cpu_arm1020_info, . - cpu_arm1020_info
 
@@ -759,7 +756,7 @@ __arm1020_proc_info:
 	b	__arm1020_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
 	.long	cpu_arm1020_info
 	.long	arm1020_processor_functions
 	.size	__arm1020_proc_info, . - __arm1020_proc_info

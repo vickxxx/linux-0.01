@@ -4,10 +4,8 @@
  * Needs:
  *	void check_bugs(void);
  *
- * Based on <asm-alpha/bugs.h>.
- *
- * Modified 1998, 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>,  Hewlett-Packard Co.
+ * Copyright (C) 1998, 1999 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <asm/processor.h>

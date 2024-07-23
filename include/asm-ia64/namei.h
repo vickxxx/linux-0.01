@@ -2,8 +2,8 @@
 #define _ASM_IA64_NAMEI_H
 
 /*
- * Modified 1998, 1999, 2001
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998, 1999, 2001 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <asm/ptrace.h>

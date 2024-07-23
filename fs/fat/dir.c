@@ -198,11 +198,11 @@ int fat_search_long(struct inode *inode, const char *name, int name_len,
 	int uni_xlate = MSDOS_SB(sb)->options.unicode_xlate;
 	int utf8 = MSDOS_SB(sb)->options.utf8;
 	unsigned short opt_shortname = MSDOS_SB(sb)->options.shortname;
-	int chl, i, j, last_u, res = 0;
-	loff_t i_pos, cpos = 0;
+	int ino, chl, i, j, last_u, res = 0;
+	loff_t cpos = 0;
 
 	while(1) {
-		if (fat_get_entry(inode,&cpos,&bh,&de,&i_pos) == -1)
+		if (fat_get_entry(inode,&cpos,&bh,&de,&ino) == -1)
 			goto EODir;
 parse_record:
 		long_slots = 0;
@@ -253,7 +253,7 @@ parse_long:
 				if (ds->id & 0x40) {
 					unicode[offset + 13] = 0;
 				}
-				if (fat_get_entry(inode,&cpos,&bh,&de,&i_pos)<0)
+				if (fat_get_entry(inode,&cpos,&bh,&de,&ino)<0)
 					goto EODir;
 				if (slot == 0)
 					break;
@@ -368,9 +368,8 @@ static int fat_readdirx(struct inode *inode, struct file *filp, void *dirent,
 	int utf8 = MSDOS_SB(sb)->options.utf8;
 	int nocase = MSDOS_SB(sb)->options.nocase;
 	unsigned short opt_shortname = MSDOS_SB(sb)->options.shortname;
-	unsigned long inum;
-	int chi, chl, i, i2, j, last, last_u, dotoffset = 0;
-	loff_t i_pos, cpos;
+	int ino, inum, chi, chl, i, i2, j, last, last_u, dotoffset = 0;
+	loff_t cpos;
 
 	cpos = filp->f_pos;
 /* Fake . and .. for the root directory. */
@@ -393,7 +392,7 @@ static int fat_readdirx(struct inode *inode, struct file *filp, void *dirent,
  	bh = NULL;
 GetNew:
 	long_slots = 0;
-	if (fat_get_entry(inode,&cpos,&bh,&de,&i_pos) == -1)
+	if (fat_get_entry(inode,&cpos,&bh,&de,&ino) == -1)
 		goto EODir;
 	/* Check for long filename entry */
 	if (isvfat) {
@@ -450,7 +449,7 @@ ParseLong:
 			if (ds->id & 0x40) {
 				unicode[offset + 13] = 0;
 			}
-			if (fat_get_entry(inode,&cpos,&bh,&de,&i_pos) == -1)
+			if (fat_get_entry(inode,&cpos,&bh,&de,&ino) == -1)
 				goto EODir;
 			if (slot == 0)
 				break;
@@ -542,7 +541,7 @@ ParseLong:
 /*		inum = fat_parent_ino(inode,0); */
 		inum = filp->f_dentry->d_parent->d_inode->i_ino;
 	} else {
-		struct inode *tmp = fat_iget(sb, i_pos);
+		struct inode *tmp = fat_iget(sb, ino);
 		if (tmp) {
 			inum = tmp->i_ino;
 			iput(tmp);
@@ -691,14 +690,14 @@ int fat_dir_ioctl(struct inode * inode, struct file * filp,
 /***** See if directory is empty */
 int fat_dir_empty(struct inode *dir)
 {
-	loff_t pos, i_pos;
+	loff_t pos;
 	struct buffer_head *bh;
 	struct msdos_dir_entry *de;
-	int result = 0;
+	int ino,result = 0;
 
 	pos = 0;
 	bh = NULL;
-	while (fat_get_entry(dir,&pos,&bh,&de,&i_pos) > -1) {
+	while (fat_get_entry(dir,&pos,&bh,&de,&ino) > -1) {
 		/* Ignore vfat longname entries */
 		if (de->attr == ATTR_EXT)
 			continue;
@@ -718,7 +717,7 @@ int fat_dir_empty(struct inode *dir)
 /* This assumes that size of cluster is above the 32*slots */
 
 int fat_add_entries(struct inode *dir,int slots, struct buffer_head **bh,
-		  struct msdos_dir_entry **de, loff_t *i_pos)
+		  struct msdos_dir_entry **de, int *ino)
 {
 	struct super_block *sb = dir->i_sb;
 	loff_t offset, curr;
@@ -728,7 +727,7 @@ int fat_add_entries(struct inode *dir,int slots, struct buffer_head **bh,
 	offset = curr = 0;
 	*bh = NULL;
 	row = 0;
-	while (fat_get_entry(dir,&curr,bh,de,i_pos) > -1) {
+	while (fat_get_entry(dir,&curr,bh,de,ino) > -1) {
 		if (IS_FREE((*de)->name)) {
 			if (++row == slots)
 				return offset;
@@ -743,7 +742,7 @@ int fat_add_entries(struct inode *dir,int slots, struct buffer_head **bh,
 	if (!new_bh)
 		return -ENOSPC;
 	fat_brelse(sb, new_bh);
-	do fat_get_entry(dir,&curr,bh,de,i_pos); while (++row<slots);
+	do fat_get_entry(dir,&curr,bh,de,ino); while (++row<slots);
 	return offset;
 }
 

@@ -135,10 +135,6 @@ struct sk_buff {
 	struct sock	*sk;			/* Socket we are owned by 			*/
 	struct timeval	stamp;			/* Time we arrived				*/
 	struct net_device	*dev;		/* Device we arrived on/are leaving by		*/
-	struct net_device	*real_dev;	/* For support of point to point protocols 
-						   (e.g. 802.3ad) over bonding, we must save the
-						   physical device that got the packet before
-						   replacing skb->dev with the virtual device.  */
 
 	/* Transport layer header */
 	union
@@ -221,6 +217,9 @@ struct sk_buff {
 #endif
 };
 
+#define SK_WMEM_MAX	65535
+#define SK_RMEM_MAX	65535
+
 #ifdef __KERNEL__
 /*
  *	Handling routines are only of interest to the kernel
@@ -241,7 +240,6 @@ extern struct sk_buff *		skb_copy_expand(const struct sk_buff *skb,
 						int newheadroom,
 						int newtailroom,
 						int priority);
-extern struct sk_buff *		skb_pad(struct sk_buff *skb, int pad);
 #define dev_kfree_skb(a)	kfree_skb(a)
 extern void	skb_over_panic(struct sk_buff *skb, int len, void *here);
 extern void	skb_under_panic(struct sk_buff *skb, int len, void *here);
@@ -290,11 +288,15 @@ static inline struct sk_buff *skb_get(struct sk_buff *skb)
  
 static inline void kfree_skb(struct sk_buff *skb)
 {
-	if (likely(atomic_read(&skb->users) == 1))
-		smp_rmb();
-	else if (likely(!atomic_dec_and_test(&skb->users)))
-		return;
-	__kfree_skb(skb);
+	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
+		__kfree_skb(skb);
+}
+
+/* Use this if you didn't touch the skb state [for fast switching] */
+static inline void kfree_skb_fast(struct sk_buff *skb)
+{
+	if (atomic_read(&skb->users) == 1 || atomic_dec_and_test(&skb->users))
+		kfree_skbmem(skb);	
 }
 
 /**
@@ -586,7 +588,7 @@ static inline struct sk_buff *__skb_dequeue(struct sk_buff_head *list)
 
 static inline struct sk_buff *skb_dequeue(struct sk_buff_head *list)
 {
-	unsigned long flags;
+	long flags;
 	struct sk_buff *result;
 
 	spin_lock_irqsave(&list->lock, flags);
@@ -735,7 +737,7 @@ static inline struct sk_buff *__skb_dequeue_tail(struct sk_buff_head *list)
 
 static inline struct sk_buff *skb_dequeue_tail(struct sk_buff_head *list)
 {
-	unsigned long flags;
+	long flags;
 	struct sk_buff *result;
 
 	spin_lock_irqsave(&list->lock, flags);
@@ -749,14 +751,14 @@ static inline int skb_is_nonlinear(const struct sk_buff *skb)
 	return skb->data_len;
 }
 
-static inline unsigned int skb_headlen(const struct sk_buff *skb)
+static inline int skb_headlen(const struct sk_buff *skb)
 {
 	return skb->len - skb->data_len;
 }
 
-#define SKB_PAGE_ASSERT(skb) do { if (skb_shinfo(skb)->nr_frags) out_of_line_bug(); } while (0)
-#define SKB_FRAG_ASSERT(skb) do { if (skb_shinfo(skb)->frag_list) out_of_line_bug(); } while (0)
-#define SKB_LINEAR_ASSERT(skb) do { if (skb_is_nonlinear(skb)) out_of_line_bug(); } while (0)
+#define SKB_PAGE_ASSERT(skb) do { if (skb_shinfo(skb)->nr_frags) BUG(); } while (0)
+#define SKB_FRAG_ASSERT(skb) do { if (skb_shinfo(skb)->frag_list) BUG(); } while (0)
+#define SKB_LINEAR_ASSERT(skb) do { if (skb_is_nonlinear(skb)) BUG(); } while (0)
 
 /*
  *	Add data to an sk_buff
@@ -824,7 +826,7 @@ static inline char *__skb_pull(struct sk_buff *skb, unsigned int len)
 {
 	skb->len-=len;
 	if (skb->len < skb->data_len)
-		out_of_line_bug();
+		BUG();
 	return 	skb->data+=len;
 }
 
@@ -1080,26 +1082,6 @@ skb_cow(struct sk_buff *skb, unsigned int headroom)
 }
 
 /**
- *	skb_padto	- pad an skbuff up to a minimal size
- *	@skb: buffer to pad
- *	@len: minimal length
- *
- *	Pads up a buffer to ensure the trailing bytes exist and are
- *	blanked. If the buffer already contains sufficient data it
- *	is untouched. Returns the buffer, which may be a replacement
- *	for the original, or NULL for out of memory - in which case
- *	the original buffer is still freed.
- */
- 
-static inline struct sk_buff *skb_padto(struct sk_buff *skb, unsigned int len)
-{
-	unsigned int size = skb->len;
-	if(likely(size >= len))
-		return skb;
-	return skb_pad(skb, len-size);
-}
-
-/**
  *	skb_linearize - convert paged skb to linear one
  *	@skb: buffer to linarize
  *	@gfp: allocation mode
@@ -1112,7 +1094,7 @@ static inline void *kmap_skb_frag(const skb_frag_t *frag)
 {
 #ifdef CONFIG_HIGHMEM
 	if (in_irq())
-		out_of_line_bug();
+		BUG();
 
 	local_bh_disable();
 #endif
@@ -1162,18 +1144,7 @@ nf_conntrack_get(struct nf_ct_info *nfct)
 	if (nfct)
 		atomic_inc(&nfct->master->use);
 }
-static inline void
-nf_reset(struct sk_buff *skb)
-{
-	nf_conntrack_put(skb->nfct);
-	skb->nfct = NULL;
-#ifdef CONFIG_NETFILTER_DEBUG
-	skb->nf_debug = 0;
 #endif
-}
-#else /* CONFIG_NETFILTER */
-static inline void nf_reset(struct sk_buff *skb) {}
-#endif /* CONFIG_NETFILTER */
 
 #endif	/* __KERNEL__ */
 #endif	/* _LINUX_SKBUFF_H */

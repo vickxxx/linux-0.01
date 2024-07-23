@@ -53,8 +53,6 @@
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/module.h>
-#include <linux/ethtool.h>
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
@@ -166,16 +164,6 @@ static void cs_error(client_handle_t handle, int func, int ret)
     CardServices(ReportError, handle, &err);
 }
 
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, "ibmtr_cs");
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-};
-
 /*======================================================================
 
     ibmtr_attach() creates an "instance" of the driver, allocating
@@ -228,7 +216,6 @@ static dev_link_t *ibmtr_attach(void)
     link->irq.Instance = info->dev = dev;
     
     dev->init = &ibmtr_probe;
-    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     /* Register with Card Services */
     link->next = dev_list;

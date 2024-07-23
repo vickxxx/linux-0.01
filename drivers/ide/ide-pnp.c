@@ -16,11 +16,16 @@
  * Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.  
  */
 
-#include <linux/module.h>
 #include <linux/ide.h>
 #include <linux/init.h>
 
 #include <linux/isapnp.h>
+
+#ifndef PREPARE_FUNC
+#define PREPARE_FUNC(dev)  (dev->prepare)
+#define ACTIVATE_FUNC(dev)  (dev->activate)
+#define DEACTIVATE_FUNC(dev)  (dev->deactivate)
+#endif
 
 #define DEV_IO(dev, index) (dev->resource[index].start)
 #define DEV_IRQ(dev, index) (dev->irq_resource[index].start)
@@ -49,7 +54,6 @@ struct pnp_dev_t {
 };
 
 /* Generic initialisation function for ISA PnP IDE interface */
-
 static int __init pnpide_generic_init(struct pci_dev *dev, int enable)
 {
 	hw_regs_t hw;
@@ -62,16 +66,13 @@ static int __init pnpide_generic_init(struct pci_dev *dev, int enable)
 		return 1;
 
 	ide_setup_ports(&hw, (ide_ioreg_t) DEV_IO(dev, 0),
-			generic_ide_offsets,
-			(ide_ioreg_t) DEV_IO(dev, 1),
-			0, NULL,
-//			generic_pnp_ide_iops,
-			DEV_IRQ(dev, 0));
+			generic_ide_offsets, (ide_ioreg_t) DEV_IO(dev, 1),
+			0, NULL, DEV_IRQ(dev, 0));
 
 	index = ide_register_hw(&hw, NULL);
 
 	if (index != -1) {
-	    	printk(KERN_INFO "ide%d: %s IDE interface\n", index, DEV_NAME(dev));
+	    	printk("ide%d: %s IDE interface\n", index, DEV_NAME(dev));
 		return 0;
 	}
 
@@ -87,6 +88,7 @@ struct pnp_dev_t idepnp_devices[] __initdata = {
 	{	0 }
 };
 
+#ifdef MODULE
 #define NR_PNP_DEVICES 8
 struct pnp_dev_inst {
 	struct pci_dev *dev;
@@ -94,12 +96,12 @@ struct pnp_dev_inst {
 };
 static struct pnp_dev_inst devices[NR_PNP_DEVICES];
 static int pnp_ide_dev_idx = 0;
+#endif
 
 /*
  * Probe for ISA PnP IDE interfaces.
  */
-
-static void pnpide_init(int enable)
+void __init pnpide_init(int enable)
 {
 	struct pci_dev *dev = NULL;
 	struct pnp_dev_t *dev_type;
@@ -107,18 +109,19 @@ static void pnpide_init(int enable)
 	if (!isapnp_present())
 		return;
 
+#ifdef MODULE
 	/* Module unload, deactivate all registered devices. */
 	if (!enable) {
 		int i;
 		for (i = 0; i < pnp_ide_dev_idx; i++) {
-			dev = devices[i].dev;
 			devices[i].dev_type->init_fn(dev, 0);
-			if (dev->deactivate)
-				dev->deactivate(dev);
+
+			if (DEACTIVATE_FUNC(devices[i].dev))
+				DEACTIVATE_FUNC(devices[i].dev)(devices[i].dev);
 		}
 		return;
 	}
-
+#endif
 	for (dev_type = idepnp_devices; dev_type->vendor; dev_type++) {
 		while ((dev = isapnp_find_dev(NULL, dev_type->vendor,
 			dev_type->device, dev))) {
@@ -126,20 +129,20 @@ static void pnpide_init(int enable)
 			if (dev->active)
 				continue;
 
-       			if (dev->prepare && dev->prepare(dev) < 0) {
-				printk(KERN_ERR"ide-pnp: %s prepare failed\n", DEV_NAME(dev));
+       			if (PREPARE_FUNC(dev) && (PREPARE_FUNC(dev))(dev) < 0) {
+				printk("ide: %s prepare failed\n", DEV_NAME(dev));
 				continue;
 			}
 
-			if (dev->activate && dev->activate(dev) < 0) {
-				printk(KERN_ERR"ide: %s activate failed\n", DEV_NAME(dev));
+			if (ACTIVATE_FUNC(dev) && (ACTIVATE_FUNC(dev))(dev) < 0) {
+				printk("ide: %s activate failed\n", DEV_NAME(dev));
 				continue;
 			}
 
 			/* Call device initialization function */
 			if (dev_type->init_fn(dev, 1)) {
-				if (dev->deactivate(dev))
-					dev->deactivate(dev);
+				if (DEACTIVATE_FUNC(dev))
+					DEACTIVATE_FUNC(dev)(dev);
 			} else {
 #ifdef MODULE
 				/*
@@ -156,26 +159,3 @@ static void pnpide_init(int enable)
 		}
 	}
 }
-
-static void __init pnpide_begin(void)
-{
-	pnpide_init(1);
-}
-
-static int pnpide_init_module(void)
-{
-	ide_register_driver(pnpide_begin);
-	return 0;
-}
-
-static void pnpide_unload(void)
-{
-	pnpide_init(0);
-}
-
-module_init(pnpide_init_module);
-module_exit(pnpide_unload);
-
-MODULE_AUTHOR("Andrey Panin");
-MODULE_DESCRIPTION("Enabler for ISAPNP IDE devices");
-MODULE_LICENSE("GPL");

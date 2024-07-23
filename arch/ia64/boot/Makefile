@@ -27,6 +27,6 @@ bootloader: $(OBJECTS)
 	-o bootloader
 
 clean:
-	rm -f $(targets-y) $(OBJECTS)
+	rm -f $(TARGETS)
 
 dep:

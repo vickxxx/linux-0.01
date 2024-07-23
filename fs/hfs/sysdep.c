@@ -41,9 +41,9 @@ hfs_buffer hfs_buffer_get(hfs_sysmdb sys_mdb, int block, int read) {
 	hfs_buffer tmp = HFS_BAD_BUFFER;
 
 	if (read) {
-		tmp = sb_bread(sys_mdb, block);
+		tmp = bread(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
 	} else {
-		tmp = sb_getblk(sys_mdb, block);
+		tmp = getblk(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
 		if (tmp) {
 			mark_buffer_uptodate(tmp, 1);
 		}

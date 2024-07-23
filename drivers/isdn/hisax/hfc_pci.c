@@ -1,4 +1,4 @@
-/* $Id: hfc_pci.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: hfc_pci.c,v 1.34.6.8 2001/09/23 22:24:47 kai Exp $
  *
  * low level driver for CCD´s hfc-pci based cards
  *
@@ -26,7 +26,7 @@
 
 extern const char *CardType[];
 
-static const char *hfcpci_revision = "$Revision: 1.1.4.1 $";
+static const char *hfcpci_revision = "$Revision: 1.34.6.8 $";
 
 /* table entry in the PCI devices list */
 typedef struct {
@@ -76,8 +76,6 @@ release_io_hfcpci(struct IsdnCardState *cs)
 {
 	unsigned long flags;
 
-	printk(KERN_INFO "HiSax: release hfcpci at %p\n",
-		cs->hw.hfcpci.pci_io);
 	save_flags(flags);
 	cli();
 	cs->hw.hfcpci.int_m2 = 0;	/* interrupt output off ! */
@@ -88,11 +86,13 @@ release_io_hfcpci(struct IsdnCardState *cs)
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout((30 * HZ) / 1000);	/* Timeout 30ms */
 	Write_hfc(cs, HFCPCI_CIRM, 0);	/* Reset Off */
+#if CONFIG_PCI
 	pcibios_write_config_word(cs->hw.hfcpci.pci_bus, cs->hw.hfcpci.pci_device_fn, PCI_COMMAND, 0);	/* disable memory mapped ports + busmaster */
+#endif				/* CONFIG_PCI */
 	del_timer(&cs->hw.hfcpci.timer);
 	kfree(cs->hw.hfcpci.share_start);
 	cs->hw.hfcpci.share_start = NULL;
-	iounmap((void *)cs->hw.hfcpci.pci_io);
+	vfree(cs->hw.hfcpci.pci_io);
 }
 
 /********************************************************************************/
@@ -686,10 +686,6 @@ hfcpci_fill_fifo(struct BCState *bcs)
 			} else if (cs->debug & L1_DEB_HSCX)
 				debugl1(cs, "hfcpci_fill_fifo_trans %d frame length %d discarded",
 					bcs->channel, bcs->tx_skb->len);
-
-			if (bcs->st->lli.l1writewakeup &&
-                           (PACKET_NOACK != bcs->tx_skb->pkt_type))
-				bcs->st->lli.l1writewakeup(bcs->st, bcs->tx_skb->len);
 
 			dev_kfree_skb_any(bcs->tx_skb);
 			cli();
@@ -1742,11 +1738,11 @@ setup_hfcpci(struct IsdnCard *card)
 		/* Allocate memory for FIFOS */
 		/* Because the HFC-PCI needs a 32K physical alignment, we */
 		/* need to allocate the double mem and align the address */
-		if (!(cs->hw.hfcpci.share_start = kmalloc(65536, GFP_KERNEL))) {
+		if (!((void *) cs->hw.hfcpci.share_start = kmalloc(65536, GFP_KERNEL))) {
 			printk(KERN_WARNING "HFC-PCI: Error allocating memory for FIFO!\n");
 			return 0;
 		}
-		cs->hw.hfcpci.fifos = (void *)
+		(ulong) cs->hw.hfcpci.fifos =
 		    (((ulong) cs->hw.hfcpci.share_start) & ~0x7FFF) + 0x8000;
 		pcibios_write_config_dword(cs->hw.hfcpci.pci_bus,
 				       cs->hw.hfcpci.pci_device_fn, 0x80,

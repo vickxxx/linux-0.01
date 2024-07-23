@@ -1,4 +1,5 @@
-/*
+/* $Id: strncpy_user.S,v 1.3 1999/08/21 22:19:11 ralf Exp $
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -28,31 +29,31 @@
  */
 
 LEAF(__strncpy_from_user_asm)
-	LONG_L		v0, THREAD_CURDS($28)	# pointer ok?
-	and		v0, a1
-	bltz		v0, fault
+	lw	v0, THREAD_CURDS($28)	# pointer ok?
+	and	v0, a1
+	bltz	v0, fault
 
-FEXPORT(__strncpy_from_user_nocheck_asm)
-	move		v0, zero
-	move		v1, a1
-	.set		noreorder
-1:	EX(lbu, t0, (v1), fault)
-	PTR_ADDIU	v1, 1
-	beqz		t0, 2f
-	 sb		t0, (a0)
-	PTR_ADDIU	v0, 1
-	bne		v0, a2, 1b
-	 PTR_ADDIU	a0, 1
-	.set		reorder
-2:	PTR_ADDU	t0, a1, v0
-	xor		t0, a1
-	bltz		t0, fault
-	jr		ra			# return n
+EXPORT(__strncpy_from_user_nocheck_asm)
+	move	v0, zero
+	move	v1, a1
+	.set	noreorder
+1:	EX(lbu,	 t0, (v1), fault)
+	addiu	v1, v1, 1
+	beqz	t0, 2f
+	 sb	t0, (a0)
+	addiu	v0, 1
+	bne	v0, a2, 1b
+	 addiu	a0, 1
+	.set	reorder
+2:	addu	t0, a1, v0
+	xor	t0, a1
+	bltz	t0, fault
+	jr	ra				# return n
 	END(__strncpy_from_user_asm)
 
-fault:	li		v0, -EFAULT
-	jr		ra
+fault:	li	v0, -EFAULT
+	jr	ra
 
-	.section	__ex_table,"a"
-	PTR		1b, fault
+	.section __ex_table,"a"
+	PTR	1b, fault
 	.previous

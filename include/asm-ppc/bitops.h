@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.bitops.h 1.9 05/26/01 14:48:14 paulus
+ */
+/*
  * bitops.h: Bit string operations on the ppc
  */
 
@@ -8,7 +11,6 @@
 
 #include <linux/config.h>
 #include <asm/byteorder.h>
-#include <asm/atomic.h>
 
 /*
  * The test_and_*_bit operations are taken to imply a memory barrier
@@ -31,12 +33,11 @@ static __inline__ void set_bit(int nr, volatile void * addr)
 	unsigned long old;
 	unsigned long mask = 1 << (nr & 0x1f);
 	unsigned long *p = ((unsigned long *)addr) + (nr >> 5);
-
+	
 	__asm__ __volatile__("\n\
 1:	lwarx	%0,0,%3 \n\
-	or	%0,%0,%2 \n"
-	PPC405_ERR77(0,%3)
-"	stwcx.	%0,0,%3 \n\
+	or	%0,%0,%2 \n\
+	stwcx.	%0,0,%3 \n\
 	bne-	1b"
 	: "=&r" (old), "=m" (*p)
 	: "r" (mask), "r" (p), "m" (*p)
@@ -68,9 +69,8 @@ static __inline__ void clear_bit(int nr, volatile void *addr)
 
 	__asm__ __volatile__("\n\
 1:	lwarx	%0,0,%3 \n\
-	andc	%0,%0,%2 \n"
-	PPC405_ERR77(0,%3)
-"	stwcx.	%0,0,%3 \n\
+	andc	%0,%0,%2 \n\
+	stwcx.	%0,0,%3 \n\
 	bne-	1b"
 	: "=&r" (old), "=m" (*p)
 	: "r" (mask), "r" (p), "m" (*p)
@@ -96,9 +96,8 @@ static __inline__ void change_bit(int nr, volatile void *addr)
 
 	__asm__ __volatile__("\n\
 1:	lwarx	%0,0,%3 \n\
-	xor	%0,%0,%2 \n"
-	PPC405_ERR77(0,%3)
-"	stwcx.	%0,0,%3 \n\
+	xor	%0,%0,%2 \n\
+	stwcx.	%0,0,%3 \n\
 	bne-	1b"
 	: "=&r" (old), "=m" (*p)
 	: "r" (mask), "r" (p), "m" (*p)
@@ -127,9 +126,8 @@ static __inline__ int test_and_set_bit(int nr, volatile void *addr)
 
 	__asm__ __volatile__(SMP_WMB "\n\
 1:	lwarx	%0,0,%4 \n\
-	or	%1,%0,%3 \n"
-	PPC405_ERR77(0,%4)
-"	stwcx.	%1,0,%4 \n\
+	or	%1,%0,%3 \n\
+	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)
@@ -160,9 +158,8 @@ static __inline__ int test_and_clear_bit(int nr, volatile void *addr)
 
 	__asm__ __volatile__(SMP_WMB "\n\
 1:	lwarx	%0,0,%4 \n\
-	andc	%1,%0,%3 \n"
-	PPC405_ERR77(0,%4)
-"	stwcx.	%1,0,%4 \n\
+	andc	%1,%0,%3 \n\
+	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)
@@ -193,9 +190,8 @@ static __inline__ int test_and_change_bit(int nr, volatile void *addr)
 
 	__asm__ __volatile__(SMP_WMB "\n\
 1:	lwarx	%0,0,%4 \n\
-	xor	%1,%0,%3 \n"
-	PPC405_ERR77(0,%4)
-"	stwcx.	%1,0,%4 \n\
+	xor	%1,%0,%3 \n\
+	stwcx.	%1,0,%4 \n\
 	bne	1b"
 	SMP_MB
 	: "=&r" (old), "=&r" (t), "=m" (*p)
@@ -241,6 +237,8 @@ static __inline__ int ffz(unsigned int x)
 	return __ilog2(x & -x);
 }
 
+#ifdef __KERNEL__
+
 /*
  * ffs: find first bit set. This is defined the same way as
  * the libc and compiler builtin ffs routines, therefore
@@ -259,6 +257,8 @@ static __inline__ int ffs(int x)
 #define hweight32(x) generic_hweight32(x)
 #define hweight16(x) generic_hweight16(x)
 #define hweight8(x) generic_hweight8(x)
+
+#endif /* __KERNEL__ */
 
 /*
  * This implementation of find_{first,next}_zero_bit was stolen from
@@ -305,6 +305,8 @@ found_middle:
 	return result + ffz(tmp);
 }
 
+
+#ifdef __KERNEL__
 
 #define ext2_set_bit(nr, addr)		__test_and_set_bit((nr) ^ 0x18, addr)
 #define ext2_clear_bit(nr, addr)	__test_and_clear_bit((nr) ^ 0x18, addr)
@@ -368,6 +370,8 @@ found_middle:
 #define minix_test_and_clear_bit(nr,addr) ext2_clear_bit(nr,addr)
 #define minix_test_bit(nr,addr) ext2_test_bit(nr,addr)
 #define minix_find_first_zero_bit(addr,size) ext2_find_first_zero_bit(addr,size)
+
+#endif	/* __KERNEL__ */
 
 #endif /* _PPC_BITOPS_H */
 #endif /* __KERNEL__ */

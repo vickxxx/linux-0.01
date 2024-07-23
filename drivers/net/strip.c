@@ -2706,7 +2706,8 @@ static int strip_open(struct tty_struct *tty)
     tty->disc_data = strip_info;
     if (tty->driver.flush_buffer)
         tty->driver.flush_buffer(tty);
-    tty_ldisc_flush(tty);
+    if (tty->ldisc.flush_buffer)
+        tty->ldisc.flush_buffer(tty);
 
     /*
      * Restore default settings

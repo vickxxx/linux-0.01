@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.hardirq.h 1.12 07/10/01 11:26:58 trini
+ */
 #ifdef __KERNEL__
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
@@ -6,9 +9,9 @@
 #include <asm/smp.h>
 
 /* entry.S is sensitive to the offsets of these fields */
-/* The __last_jiffy_stamp field is needed to ensure that no decrementer
- * interrupt is lost on SMP machines. Since on most CPUs it is in the same
- * cache line as local_irq_count, it is cheap to access and is also used on UP
+/* The __last_jiffy_stamp field is needed to ensure that no decrementer 
+ * interrupt is lost on SMP machines. Since on most CPUs it is in the same 
+ * cache line as local_irq_count, it is cheap to access and is also used on UP 
  * for uniformity.
  */
 typedef struct {
@@ -18,15 +21,11 @@ typedef struct {
 	unsigned int __syscall_count;
 	struct task_struct * __ksoftirqd_task;
 	unsigned int __last_jiffy_stamp;
-	unsigned int __heartbeat_count;
-	unsigned int __heartbeat_reset;
 } ____cacheline_aligned irq_cpustat_t;
 
 #include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
 #define last_jiffy_stamp(cpu) __IRQ_STAT((cpu), __last_jiffy_stamp)
-#define heartbeat_count(cpu) __IRQ_STAT((cpu), __heartbeat_count)
-#define heartbeat_reset(cpu) __IRQ_STAT((cpu), __heartbeat_reset)
 /*
  * Are we in an interrupt context? Either doing bottom half
  * or hardware interrupt processing?
@@ -66,7 +65,7 @@ static inline void release_irqlock(int cpu)
 static inline void hardirq_enter(int cpu)
 {
 	unsigned int loops = 10000000;
-
+	
 	++local_irq_count(cpu);
 	atomic_inc(&global_irq_count);
 	while (test_bit(0,&global_irq_lock)) {

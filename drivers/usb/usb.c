@@ -38,8 +38,6 @@
 #endif
 #include <linux/usb.h>
 
-#include "hcd.h"
-
 static const int usb_bandwidth_option =
 #ifdef CONFIG_USB_BANDWIDTH
 				1;
@@ -195,17 +193,6 @@ void usb_deregister(struct usb_driver *driver)
 	up (&usb_bus_list_lock);
 }
 
-int usb_ifnum_to_ifpos(struct usb_device *dev, unsigned ifnum)
-{
-	int i;
-
-	for (i = 0; i < dev->actconfig->bNumInterfaces; i++)
-		if (dev->actconfig->interface[i].altsetting[0].bInterfaceNumber == ifnum)
-			return i;
-
-	return -EINVAL;
-}
-
 struct usb_interface *usb_ifnum_to_if(struct usb_device *dev, unsigned ifnum)
 {
 	int i;
@@ -231,50 +218,41 @@ struct usb_endpoint_descriptor *usb_epnum_to_ep_desc(struct usb_device *dev, uns
 }
 
 /*
- * usb_calc_bus_time - approximate periodic transaction time in nanoseconds
- * @speed: from dev->speed; USB_SPEED_{LOW,FULL,HIGH}
- * @is_input: true iff the transaction sends data to the host
- * @isoc: true for isochronous transactions, false for interrupt ones
- * @bytecount: how many bytes in the transaction.
+ * usb_calc_bus_time:
  *
- * Returns approximate bus time in nanoseconds for a periodic transaction.
- * See USB 2.0 spec section 5.11.3; only periodic transfers need to be
- * scheduled in software, this function is only used for such scheduling.
+ * returns (approximate) USB bus time in nanoseconds for a USB transaction.
  */
-long usb_calc_bus_time (int speed, int is_input, int isoc, int bytecount)
+static long usb_calc_bus_time (int low_speed, int input_dir, int isoc, int bytecount)
 {
 	unsigned long	tmp;
 
-	switch (speed) {
-	case USB_SPEED_LOW: 	/* INTR only */
-		if (is_input) {
+	if (low_speed)		/* no isoc. here */
+	{
+		if (input_dir)
+		{
 			tmp = (67667L * (31L + 10L * BitTime (bytecount))) / 1000L;
 			return (64060L + (2 * BW_HUB_LS_SETUP) + BW_HOST_DELAY + tmp);
-		} else {
+		}
+		else
+		{
 			tmp = (66700L * (31L + 10L * BitTime (bytecount))) / 1000L;
 			return (64107L + (2 * BW_HUB_LS_SETUP) + BW_HOST_DELAY + tmp);
 		}
-	case USB_SPEED_FULL:	/* ISOC or INTR */
-		if (isoc) {
-			tmp = (8354L * (31L + 10L * BitTime (bytecount))) / 1000L;
-			return (((is_input) ? 7268L : 6265L) + BW_HOST_DELAY + tmp);
-		} else {
-			tmp = (8354L * (31L + 10L * BitTime (bytecount))) / 1000L;
-			return (9107L + BW_HOST_DELAY + tmp);
-		}
-	case USB_SPEED_HIGH:	/* ISOC or INTR */
-		// FIXME adjust for input vs output
-		if (isoc)
-			tmp = HS_USECS (bytecount);
-		else
-			tmp = HS_USECS_ISO (bytecount);
-		return tmp;
-	default:
-		dbg ("bogus device speed!");
-		return -1;
 	}
-}
 
+	/* for full-speed: */
+
+	if (!isoc)		/* Input or Output */
+	{
+		tmp = (8354L * (31L + 10L * BitTime (bytecount))) / 1000L;
+		return (9107L + BW_HOST_DELAY + tmp);
+	} /* end not Isoc */
+
+	/* for isoc: */
+
+	tmp = (8354L * (31L + 10L * BitTime (bytecount))) / 1000L;
+	return (((input_dir) ? 7268L : 6265L) + BW_HOST_DELAY + tmp);
+}
 
 /*
  * usb_check_bandwidth():
@@ -307,7 +285,7 @@ int usb_check_bandwidth (struct usb_device *dev, struct urb *urb)
 	unsigned int	pipe = urb->pipe;
 	long		bustime;
 
-	bustime = usb_calc_bus_time (dev->speed, usb_pipein(pipe),
+	bustime = usb_calc_bus_time (usb_pipeslow(pipe), usb_pipein(pipe),
 			usb_pipeisoc(pipe), usb_maxpacket(dev, pipe, usb_pipeout(pipe)));
 	if (usb_pipeisoc(pipe))
 		bustime = NS_TO_US(bustime) / urb->number_of_packets;
@@ -479,10 +457,11 @@ void usb_deregister_bus(struct usb_bus *bus)
 	 */
 	down (&usb_bus_list_lock);
 	list_del(&bus->bus_list);
-	clear_bit(bus->busnum, busmap.busmap);
 	up (&usb_bus_list_lock);
 
 	usbdevfs_remove_bus(bus);
+
+	clear_bit(bus->busnum, busmap.busmap);
 
 	usb_bus_put(bus);
 }
@@ -770,23 +749,6 @@ out_err:
 	return -1;
 }
 
-/*
- * This simply converts the interface _number_ (as in interface.bInterfaceNumber) and
- * converts it to the interface _position_ (as in dev->actconfig->interface + position)
- * and calls usb_find_interface_driver().
- *
- * Note that the number is the same as the position for all interfaces _except_
- * devices with interfaces not sequentially numbered (e.g., 0, 2, 3, etc).
- */
-int usb_find_interface_driver_for_ifnum(struct usb_device *dev, unsigned ifnum)
-{
-	int ifpos = usb_ifnum_to_ifpos(dev, ifnum);
-
-	if (0 > ifpos)
-		return -EINVAL;
-
-	return usb_find_interface_driver(dev, ifpos);
-}
 
 #ifdef	CONFIG_HOTPLUG
 
@@ -810,7 +772,7 @@ int usb_find_interface_driver_for_ifnum(struct usb_device *dev, unsigned ifnum)
  * cases, we know no other thread can recycle our address, since we must
  * already have been serialized enough to prevent that.
  */
-static void call_policy_interface (char *verb, struct usb_device *dev, int interface)
+static void call_policy (char *verb, struct usb_device *dev)
 {
 	char *argv [3], **envp, *buf, *scratch;
 	int i = 0, value;
@@ -889,14 +851,20 @@ static void call_policy_interface (char *verb, struct usb_device *dev, int inter
 			    dev->descriptor.bDeviceSubClass,
 			    dev->descriptor.bDeviceProtocol) + 1;
 	if (dev->descriptor.bDeviceClass == 0) {
-		int alt = dev->actconfig->interface [interface].act_altsetting;
+		int alt = dev->actconfig->interface [0].act_altsetting;
 
+		/* a simple/common case: one config, one interface, one driver
+		 * with current altsetting being a reasonable setting.
+		 * everything needs a smart agent and usbdevfs; or can rely on
+		 * device-specific binding policies.
+		 */
 		envp [i++] = scratch;
 		scratch += sprintf (scratch, "INTERFACE=%d/%d/%d",
-			dev->actconfig->interface [interface].altsetting [alt].bInterfaceClass,
-			dev->actconfig->interface [interface].altsetting [alt].bInterfaceSubClass,
-			dev->actconfig->interface [interface].altsetting [alt].bInterfaceProtocol)
+			dev->actconfig->interface [0].altsetting [alt].bInterfaceClass,
+			dev->actconfig->interface [0].altsetting [alt].bInterfaceSubClass,
+			dev->actconfig->interface [0].altsetting [alt].bInterfaceProtocol)
 			+ 1;
+		/* INTERFACE-0, INTERFACE-1, ... ? */
 	}
 	envp [i++] = 0;
 	/* assert: (scratch - buf) < sizeof buf */
@@ -909,14 +877,6 @@ static void call_policy_interface (char *verb, struct usb_device *dev, int inter
 	kfree (envp);
 	if (value != 0)
 		dbg ("kusbd policy returned 0x%x", value);
-}
-
-static void call_policy (char *verb, struct usb_device *dev)
-{
-	int i;
-	for (i = 0; i < dev->actconfig->bNumInterfaces; i++) {
-		call_policy_interface (verb, dev, i);
-	}
 }
 
 #else
@@ -979,9 +939,6 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus)
 
 	usb_bus_get(bus);
 
-	if (!parent)
-		dev->devpath [0] = '0';
-
 	dev->bus = bus;
 	dev->parent = parent;
 	atomic_set(&dev->refcnt, 1);
@@ -989,8 +946,6 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent, struct usb_bus *bus)
 	INIT_LIST_HEAD(&dev->filelist);
 
 	init_MUTEX(&dev->serialize);
-	spin_lock_init(&dev->excl_lock);
-	init_waitqueue_head(&dev->excl_wait);
 
 	dev->bus->op->allocate(dev);
 
@@ -1030,12 +985,12 @@ void usb_inc_dev_use(struct usb_device *dev)
  *
  *	The driver should call usb_free_urb() when it is finished with the urb.
  */
-struct urb *usb_alloc_urb(int iso_packets)
+urb_t *usb_alloc_urb(int iso_packets)
 {
-	struct urb *urb;
+	urb_t *urb;
 
-	urb = (struct urb *)kmalloc(sizeof(struct urb) + iso_packets * sizeof(struct iso_packet_descriptor),
-			/* pessimize to prevent deadlocks */ GFP_ATOMIC);
+	urb = (urb_t *)kmalloc(sizeof(urb_t) + iso_packets * sizeof(iso_packet_descriptor_t),
+	      in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
 	if (!urb) {
 		err("alloc_urb: kmalloc failed");
 		return NULL;
@@ -1056,13 +1011,13 @@ struct urb *usb_alloc_urb(int iso_packets)
  *	cleaned up with a call to usb_free_urb() when the driver is finished
  *	with it.
  */
-void usb_free_urb(struct urb* urb)
+void usb_free_urb(urb_t* urb)
 {
 	if (urb)
 		kfree(urb);
 }
 /*-------------------------------------------------------------------*/
-int usb_submit_urb(struct urb *urb)
+int usb_submit_urb(urb_t *urb)
 {
 	if (urb && urb->dev && urb->dev->bus && urb->dev->bus->op)
 		return urb->dev->bus->op->submit_urb(urb);
@@ -1071,7 +1026,7 @@ int usb_submit_urb(struct urb *urb)
 }
 
 /*-------------------------------------------------------------------*/
-int usb_unlink_urb(struct urb *urb)
+int usb_unlink_urb(urb_t *urb)
 {
 	if (urb && urb->dev && urb->dev->bus && urb->dev->bus->op)
 		return urb->dev->bus->op->unlink_urb(urb);
@@ -1085,7 +1040,7 @@ int usb_unlink_urb(struct urb *urb)
 /*-------------------------------------------------------------------*
  * completion handler for compatibility wrappers (sync control/bulk) *
  *-------------------------------------------------------------------*/
-static void usb_api_blocking_completion(struct urb *urb)
+static void usb_api_blocking_completion(urb_t *urb)
 {
 	struct usb_api_data *awd = (struct usb_api_data *)urb->context;
 
@@ -1099,7 +1054,7 @@ static void usb_api_blocking_completion(struct urb *urb)
  *-------------------------------------------------------------------*/
 
 // Starts urb and waits for completion or timeout
-static int usb_start_wait_urb(struct urb *urb, int timeout, int* actual_length)
+static int usb_start_wait_urb(urb_t *urb, int timeout, int* actual_length)
 { 
 	DECLARE_WAITQUEUE(wait, current);
 	struct usb_api_data awd;
@@ -1155,9 +1110,9 @@ static int usb_start_wait_urb(struct urb *urb, int timeout, int* actual_length)
 /*-------------------------------------------------------------------*/
 // returns status (negative) or length (positive)
 int usb_internal_control_msg(struct usb_device *usb_dev, unsigned int pipe, 
-			    struct usb_ctrlrequest *cmd,  void *data, int len, int timeout)
+			    devrequest *cmd,  void *data, int len, int timeout)
 {
-	struct urb *urb;
+	urb_t *urb;
 	int retv;
 	int length;
 
@@ -1190,8 +1145,7 @@ int usb_internal_control_msg(struct usb_device *usb_dev, unsigned int pipe,
  *	This function sends a simple control message to a specified endpoint
  *	and waits for the message to complete, or timeout.
  *	
- *	If successful, it returns the number of bytes transferred; 
- *	otherwise, it returns a negative error number.
+ *	If successful, it returns 0, othwise a negative error number.
  *
  *	Don't use this function from within an interrupt context, like a
  *	bottom half handler.  If you need a asyncronous message, or need to send
@@ -1200,17 +1154,17 @@ int usb_internal_control_msg(struct usb_device *usb_dev, unsigned int pipe,
 int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u8 requesttype,
 			 __u16 value, __u16 index, void *data, __u16 size, int timeout)
 {
-	struct usb_ctrlrequest *dr = kmalloc(sizeof(struct usb_ctrlrequest), GFP_NOIO);
+	devrequest *dr = kmalloc(sizeof(devrequest), GFP_KERNEL);
 	int ret;
 	
 	if (!dr)
 		return -ENOMEM;
 
-	dr->bRequestType = requesttype;
-	dr->bRequest = request;
-	dr->wValue = cpu_to_le16p(&value);
-	dr->wIndex = cpu_to_le16p(&index);
-	dr->wLength = cpu_to_le16p(&size);
+	dr->requesttype = requesttype;
+	dr->request = request;
+	dr->value = cpu_to_le16p(&value);
+	dr->index = cpu_to_le16p(&index);
+	dr->length = cpu_to_le16p(&size);
 
 	//dbg("usb_control_msg");	
 
@@ -1234,9 +1188,9 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u
  *	This function sends a simple bulk message to a specified endpoint
  *	and waits for the message to complete, or timeout.
  *	
- *	If successful, it returns 0, otherwise a negative error number.
- *	The number of actual bytes transferred will be stored in the 
- *	actual_length paramater.
+ *	If successful, it returns 0, othwise a negative error number.
+ *	The number of actual bytes transferred will be plaed in the 
+ *	actual_timeout paramater.
  *
  *	Don't use this function from within an interrupt context, like a
  *	bottom half handler.  If you need a asyncronous message, or need to
@@ -1245,7 +1199,7 @@ int usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u
 int usb_bulk_msg(struct usb_device *usb_dev, unsigned int pipe, 
 			void *data, int len, int *actual_length, int timeout)
 {
-	struct urb *urb;
+	urb_t *urb;
 
 	if (len < 0)
 		return -EINVAL;
@@ -1744,8 +1698,7 @@ void usb_disconnect(struct usb_device **pdev)
 
 	*pdev = NULL;
 
-	info("USB disconnect on device %s-%s address %d",
-			dev->bus->bus_name, dev->devpath, dev->devnum);
+	info("USB disconnect on device %d", dev->devnum);
 
 	if (dev->actconfig) {
 		for (i = 0; i < dev->actconfig->bNumInterfaces; i++) {
@@ -1817,17 +1770,17 @@ void usb_connect(struct usb_device *dev)
  * These are the actual routines to send
  * and receive control messages.
  */
-
-/* USB spec identifies 5 second timeouts.
- * Some devices (MGE Ellipse UPSes, etc) need it, too.
- */
-#define GET_TIMEOUT 5
-#define SET_TIMEOUT 5
+#ifdef CONFIG_USB_LONG_TIMEOUT
+#define GET_TIMEOUT 4
+#else
+#define GET_TIMEOUT 3
+#endif
+#define SET_TIMEOUT 3
 
 int usb_set_address(struct usb_device *dev)
 {
 	return usb_control_msg(dev, usb_snddefctrl(dev), USB_REQ_SET_ADDRESS,
-		0, dev->devnum, 0, NULL, 0, HZ * SET_TIMEOUT);
+		0, dev->devnum, 0, NULL, 0, HZ * GET_TIMEOUT);
 }
 
 int usb_get_descriptor(struct usb_device *dev, unsigned char type, unsigned char index, void *buf, int size)
@@ -1997,14 +1950,6 @@ int usb_set_interface(struct usb_device *dev, int interface, int alternate)
 	if (!iface) {
 		warn("selecting invalid interface %d", interface);
 		return -EINVAL;
-	}
-
-	/* 9.4.10 says devices don't need this, if the interface
-	   only has one alternate setting */
-	if (iface->num_altsetting == 1) {
-		dbg("ignoring set_interface for dev %d, iface %d, alt %d",
-			dev->devnum, interface, alternate);
-		return 0;
 	}
 
 	if ((ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
@@ -2184,7 +2129,7 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 		if (err < 0) {
 			err("error getting string descriptor 0 (error=%d)", err);
 			goto errout;
-		} else if (err < 4 || tbuf[0] < 4) {
+		} else if (tbuf[0] < 4) {
 			err("string descriptor 0 too short");
 			err = -EINVAL;
 			goto errout;
@@ -2381,61 +2326,6 @@ struct list_head *usb_bus_get_list(void)
 }
 #endif
 
-int usb_excl_lock(struct usb_device *dev, unsigned int type, int interruptible)
-{
-	DECLARE_WAITQUEUE(waita, current);
-
-	add_wait_queue(&dev->excl_wait, &waita);
-	if (interruptible)
-		set_current_state(TASK_INTERRUPTIBLE);
-	else
-		set_current_state(TASK_UNINTERRUPTIBLE);
-
-	for (;;) {
-		spin_lock_irq(&dev->excl_lock);
-		switch (type) {
-		case 1:		/* 1 - read */
-		case 2:		/* 2 - write */
-		case 3:		/* 3 - control: excludes both read and write */
-			if ((dev->excl_type & type) == 0) {
-				dev->excl_type |= type;
-				spin_unlock_irq(&dev->excl_lock);
-				set_current_state(TASK_RUNNING);
-				remove_wait_queue(&dev->excl_wait, &waita);
-				return 0;
-			}
-			break;
-		default:
-			spin_unlock_irq(&dev->excl_lock);
-			set_current_state(TASK_RUNNING);
-			remove_wait_queue(&dev->excl_wait, &waita);
-			return -EINVAL;
-		}
-		spin_unlock_irq(&dev->excl_lock);
-
-		if (interruptible) {
-			schedule();
-			if (signal_pending(current)) {
-				remove_wait_queue(&dev->excl_wait, &waita);
-				return 1;
-			}
-			set_current_state(TASK_INTERRUPTIBLE);
-		} else {
-			schedule();
-			set_current_state(TASK_UNINTERRUPTIBLE);
-		}
-	}
-}
-
-void usb_excl_unlock(struct usb_device *dev, unsigned int type)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&dev->excl_lock, flags);
-	dev->excl_type &= ~type;
-	wake_up(&dev->excl_wait);
-	spin_unlock_irqrestore(&dev->excl_lock, flags);
-}
 
 /*
  * Init
@@ -2469,7 +2359,6 @@ module_exit(usb_exit);
  * into the kernel, and other device drivers are built as modules,
  * then these symbols need to be exported for the modules to use.
  */
-EXPORT_SYMBOL(usb_ifnum_to_ifpos);
 EXPORT_SYMBOL(usb_ifnum_to_if);
 EXPORT_SYMBOL(usb_epnum_to_ep_desc);
 
@@ -2484,7 +2373,6 @@ EXPORT_SYMBOL(usb_alloc_dev);
 EXPORT_SYMBOL(usb_free_dev);
 EXPORT_SYMBOL(usb_inc_dev_use);
 
-EXPORT_SYMBOL(usb_find_interface_driver_for_ifnum);
 EXPORT_SYMBOL(usb_driver_claim_interface);
 EXPORT_SYMBOL(usb_interface_claimed);
 EXPORT_SYMBOL(usb_driver_release_interface);
@@ -2496,7 +2384,6 @@ EXPORT_SYMBOL(usb_reset_device);
 EXPORT_SYMBOL(usb_connect);
 EXPORT_SYMBOL(usb_disconnect);
 
-EXPORT_SYMBOL(usb_calc_bus_time);
 EXPORT_SYMBOL(usb_check_bandwidth);
 EXPORT_SYMBOL(usb_claim_bandwidth);
 EXPORT_SYMBOL(usb_release_bandwidth);
@@ -2528,9 +2415,6 @@ EXPORT_SYMBOL(usb_unlink_urb);
 
 EXPORT_SYMBOL(usb_control_msg);
 EXPORT_SYMBOL(usb_bulk_msg);
-
-EXPORT_SYMBOL(usb_excl_lock);
-EXPORT_SYMBOL(usb_excl_unlock);
 
 EXPORT_SYMBOL(usb_devfs_handle);
 MODULE_LICENSE("GPL");

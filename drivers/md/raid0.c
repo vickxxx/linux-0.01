@@ -289,40 +289,41 @@ bad_zone1:
 	return 0;
 }
 			   
-static void raid0_status (struct seq_file *seq, mddev_t *mddev)
+static int raid0_status (char *page, mddev_t *mddev)
 {
+	int sz = 0;
 #undef MD_DEBUG
 #ifdef MD_DEBUG
 	int j, k;
 	raid0_conf_t *conf = mddev_to_conf(mddev);
   
-	seq_printf(seq, "      ");
+	sz += sprintf(page + sz, "      ");
 	for (j = 0; j < conf->nr_zones; j++) {
-		seq_printf(seq, "[z%d",
+		sz += sprintf(page + sz, "[z%d",
 				conf->hash_table[j].zone0 - conf->strip_zone);
 		if (conf->hash_table[j].zone1)
-			seq_printf(seq, "/z%d] ",
+			sz += sprintf(page+sz, "/z%d] ",
 				conf->hash_table[j].zone1 - conf->strip_zone);
 		else
-			seq_printf(seq, "] ");
+			sz += sprintf(page+sz, "] ");
 	}
   
-	seq_printf(seq, "\n");
+	sz += sprintf(page + sz, "\n");
   
 	for (j = 0; j < conf->nr_strip_zones; j++) {
-		seq_printf(seq, "      z%d=[", j);
+		sz += sprintf(page + sz, "      z%d=[", j);
 		for (k = 0; k < conf->strip_zone[j].nb_dev; k++)
-			seq_printf (seq, "%s/", partition_name(
+			sz += sprintf (page+sz, "%s/", partition_name(
 				conf->strip_zone[j].dev[k]->dev));
-
-		seq_printf (seq, "] zo=%d do=%d s=%d\n",
+		sz--;
+		sz += sprintf (page+sz, "] zo=%d do=%d s=%d\n",
 				conf->strip_zone[j].zone_offset,
 				conf->strip_zone[j].dev_offset,
 				conf->strip_zone[j].size);
 	}
 #endif
-	seq_printf(seq, " %dk chunks", mddev->param.chunk_size/1024);
-	return;
+	sz += sprintf(page + sz, " %dk chunks", mddev->param.chunk_size/1024);
+	return sz;
 }
 
 static mdk_personality_t raid0_personality=

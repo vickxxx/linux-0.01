@@ -53,7 +53,7 @@ static int qptis_running = 0;
 
 #define PACKB(a, b)			(((a)<<4)|(b))
 
-static const u_char mbox_param[] = {
+const u_char mbox_param[] = {
 	PACKB(1, 1),	/* MBOX_NO_OP */
 	PACKB(5, 5),	/* MBOX_LOAD_RAM */
 	PACKB(2, 0),	/* MBOX_EXEC_FIRMWARE */
@@ -1533,4 +1533,4 @@ static Scsi_Host_Template driver_template = QLOGICPTI;
 
 #include "scsi_module.c"
 
-MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

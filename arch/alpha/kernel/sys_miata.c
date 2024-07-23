@@ -230,24 +230,13 @@ static void __init
 miata_init_pci(void)
 {
 	cia_init_pci();
-	/* The PYXIS has data corruption problem with scatter/gather
-	   burst DMA reads crossing 8K boundary. It had been fixed
-	   with off-chip logic on all PYXIS systems except first
-	   MIATAs, so disable SG DMA on such machines. */
-	if (!SMC669_Init(0)) {	/* MIATA GL has SMC37c669 Super I/O */
-		alpha_mv.mv_pci_tbi = NULL; 
-		printk(KERN_INFO "pci: pyxis 8K boundary dma bug - "
-				 "sg dma disabled\n");
-	}
+	SMC669_Init(0); /* it might be a GL (fails harmlessly if not) */
 	es1888_init();
 }
 
 static void
 miata_kill_arch(int mode)
 {
-	cia_kill_arch(mode);
-
-#ifndef ALPHA_RESTORE_SRM_SETUP
 	switch(mode) {
 	case LINUX_REBOOT_CMD_RESTART:
 		/* Who said DEC engineers have no sense of humor? ;-)  */ 
@@ -263,7 +252,6 @@ miata_kill_arch(int mode)
 	}
 
 	halt();
-#endif
 }
 
 

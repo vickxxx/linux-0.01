@@ -16,17 +16,7 @@
    many places throughout the kernel to size static arrays.  That's ok,
    we'll use alpha_mv.nr_irqs when we want the real thing.  */
 
-/* When LEGACY_START_ADDRESS is selected, we leave out:
-     TITAN
-     WILDFIRE
-     MARVEL
-*/
-
-# if defined(CONFIG_ALPHA_LEGACY_START_ADDRESS)
-#  define NR_IRQS	(128)		/* max is RAWHIDE/TAKARA */
-# else
-#  define NR_IRQS	(32768 + 16)	/* marvel - 32 pids */
-# endif
+# define NR_IRQS	2048 /* enuff for WILDFIRE with 8 QBBs */
 
 #elif defined(CONFIG_ALPHA_CABRIOLET) || \
       defined(CONFIG_ALPHA_EB66P)     || \
@@ -53,7 +43,6 @@
 # define NR_IRQS	40
 
 #elif defined(CONFIG_ALPHA_DP264) || \
-      defined(CONFIG_ALPHA_LYNX)  || \
       defined(CONFIG_ALPHA_SHARK) || \
       defined(CONFIG_ALPHA_EIGER)
 # define NR_IRQS	64
@@ -67,9 +56,6 @@
 
 #elif defined(CONFIG_ALPHA_WILDFIRE)
 # define NR_IRQS	2048 /* enuff for 8 QBBs */
-
-#elif defined(CONFIG_ALPHA_MARVEL)
-# define NR_IRQS	(32768 + 16)	/* marvel - 32 pids */
 
 #else /* everyone else */
 # define NR_IRQS	16

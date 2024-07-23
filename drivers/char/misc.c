@@ -66,13 +66,16 @@ static DECLARE_MUTEX(misc_sem);
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
 extern int psaux_init(void);
+#ifdef CONFIG_SGI_NEWPORT_GFX
+extern void gfx_register(void);
+#endif
+extern void streamable_init(void);
 extern int rtc_DP8570A_init(void);
 extern int rtc_MK48T08_init(void);
 extern int ds1286_init(void);
 extern int pmu_device_init(void);
 extern int tosh_init(void);
 extern int i8k_init(void);
-extern int lcd_init(void);
 
 static int misc_read_proc(char *buf, char **start, off_t offset,
 			  int len, int *eof, void *private)
@@ -167,7 +170,7 @@ static struct file_operations misc_fops = {
  
 int misc_register(struct miscdevice * misc)
 {
-	static devfs_handle_t devfs_handle, dir;
+	static devfs_handle_t devfs_handle;
 	struct miscdevice *c;
 	
 	if (misc->next || misc->prev)
@@ -198,12 +201,11 @@ int misc_register(struct miscdevice * misc)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
 	if (!devfs_handle)
 		devfs_handle = devfs_mk_dir (NULL, "misc", NULL);
-	dir = strchr (misc->name, '/') ? NULL : devfs_handle;
 	misc->devfs_handle =
-		devfs_register (dir, misc->name, DEVFS_FL_NONE,
-				MISC_MAJOR, misc->minor,
-				S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
-				misc->fops, NULL);
+	    devfs_register (devfs_handle, misc->name, DEVFS_FL_NONE,
+			    MISC_MAJOR, misc->minor,
+			    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
+			    misc->fops, NULL);
 
 	/*
 	 * Add it to the front, so that later devices can "override"
@@ -263,11 +265,17 @@ int __init misc_init(void)
 #ifdef CONFIG_PMAC_PBOOK
 	pmu_device_init();
 #endif
+#ifdef CONFIG_SGI_NEWPORT_GFX
+	gfx_register ();
+#endif
+#ifdef CONFIG_SGI_IP22
+	streamable_init ();
+#endif
+#ifdef CONFIG_SGI_NEWPORT_GFX
+	gfx_register ();
+#endif
 #ifdef CONFIG_TOSHIBA
 	tosh_init();
-#endif
-#ifdef CONFIG_COBALT_LCD
-	lcd_init();
 #endif
 #ifdef CONFIG_I8K
 	i8k_init();

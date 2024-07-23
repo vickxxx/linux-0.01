@@ -66,18 +66,18 @@ void lmcEventLog (u_int32_t EventNum, u_int32_t arg2, u_int32_t arg3)
 #endif
 }
 
-void lmc_trace(struct net_device *dev, char *msg){
+inline void lmc_trace(struct net_device *dev, char *msg){
 #ifdef LMC_TRACE
     unsigned long j = jiffies + 3; /* Wait for 50 ms */
 
     if(in_interrupt()){
         printk("%s: * %s\n", dev->name, msg);
-//        while(time_before(jiffies, j+10))
+//        while(jiffies < j+10)
 //            ;
     }
     else {
         printk("%s: %s\n", dev->name, msg);
-        while(time_before(jiffies, j))
+        while(jiffies < j)
             schedule();
     }
 #endif

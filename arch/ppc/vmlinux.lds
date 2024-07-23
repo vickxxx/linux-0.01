@@ -33,9 +33,6 @@ SECTIONS
     *(.text)
     *(.fixup)
     *(.got1)
-    __got2_start = .;
-    *(.got2)
-    __got2_end = .;
   }
   _etext = .;
   PROVIDE (etext = .);
@@ -64,7 +61,6 @@ SECTIONS
   _edata  =  .;
   PROVIDE (edata = .);
 
-  . = ALIGN(8);
   .fixup   : { *(.fixup) }
   __start___ex_table = .;
   __ex_table : { *(__ex_table) }
@@ -74,7 +70,6 @@ SECTIONS
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
 
-  . = ALIGN(8);
   __start___ftr_fixup = .;
   __ftr_fixup : { *(__ftr_fixup) }
   __stop___ftr_fixup = .;
@@ -85,7 +80,7 @@ SECTIONS
   . = ALIGN(4096);
   __init_begin = .;
   .text.init : { *(.text.init) }
-  .data.init : {
+  .data.init : { 
     *(.data.init);
     __vtop_table_begin = .;
     *(.vtop_fixup);
@@ -140,7 +135,6 @@ SECTIONS
    *(.bss)
    *(COMMON)
   }
-  . = ALIGN(4);
   _end = . ;
   PROVIDE (end = .);
 }

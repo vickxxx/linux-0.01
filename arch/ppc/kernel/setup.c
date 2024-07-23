@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.setup.c 1.65 11/18/01 20:57:25 trini
+ */
+/*
  * Common prep/pmac/chrp boot and setup code.
  */
 
@@ -26,36 +29,47 @@
 #include <asm/smp.h>
 #include <asm/elf.h>
 #include <asm/cputable.h>
+#ifdef CONFIG_8xx
+#include <asm/mpc8xx.h>
+#include <asm/8xx_immap.h>
+#endif
+#ifdef CONFIG_8260
+#include <asm/mpc8260.h>
+#include <asm/immap_8260.h>
+#endif
+#ifdef CONFIG_4xx
+#include <asm/ppc4xx.h>
+#endif
 #include <asm/bootx.h>
 #include <asm/btext.h>
 #include <asm/machdep.h>
+#include <asm/feature.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <asm/pmac_feature.h>
-#include <asm/kgdb.h>
 
 extern void platform_init(unsigned long r3, unsigned long r4,
 		unsigned long r5, unsigned long r6, unsigned long r7);
 extern void bootx_init(unsigned long r4, unsigned long phys);
+extern unsigned long reloc_offset(void);
 extern void identify_cpu(unsigned long offset, unsigned long cpu);
 extern void do_cpu_ftr_fixups(unsigned long offset);
-extern void reloc_got2(unsigned long offset);
 
 #ifdef CONFIG_XMON
 extern void xmon_map_scc(void);
 #endif
 
 extern boot_infos_t *boot_infos;
-char saved_command_line[512];
-extern char cmd_line[512];
+char saved_command_line[256];
 unsigned char aux_device_present;
 struct ide_machdep_calls ppc_ide_md;
 char *sysmap;
 unsigned long sysmap_size;
 
 /* Used with the BI_MEMSIZE bootinfo parameter to store the memory
-   size value reported by the boot loader. */
-unsigned long boot_mem_size;
+   size value reported by the boot loader. */ 
+unsigned int boot_mem_size;
+
+int parse_bootinfo(void);
 
 unsigned long ISA_DMA_THRESHOLD;
 unsigned long DMA_MODE_READ, DMA_MODE_WRITE;
@@ -89,7 +103,7 @@ int dcache_bsize;
 int icache_bsize;
 int ucache_bsize;
 
-#if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_FB)
+#ifdef CONFIG_VGA_CONSOLE
 struct screen_info screen_info = {
 	0, 25,			/* orig-x, orig-y */
 	0,			/* unused */
@@ -101,18 +115,18 @@ struct screen_info screen_info = {
 	1,			/* orig-video-isVGA */
 	16			/* orig-video-points */
 };
-#endif /* CONFIG_VGA_CONSOLE || CONFIG_FB */
+#endif /* CONFIG_VGA_CONSOLE */
 
 void machine_restart(char *cmd)
 {
 	ppc_md.restart(cmd);
 }
-
+  
 void machine_power_off(void)
 {
 	ppc_md.power_off();
 }
-
+  
 void machine_halt(void)
 {
 	ppc_md.halt();
@@ -152,12 +166,12 @@ int show_cpuinfo(struct seq_file *m, void *v)
 		return 0;
 	pvr = cpu_data[i].pvr;
 	lpj = cpu_data[i].loops_per_jiffy;
+	seq_printf(m, "processor\t: %lu\n", i);
 #else
 	pvr = mfspr(PVR);
 	lpj = loops_per_jiffy;
 #endif
 
-	seq_printf(m, "processor\t: %u\n", i);
 	seq_printf(m, "cpu\t\t: ");
 
 	if (cur_cpu_spec[i]->pvr_mask)
@@ -207,7 +221,7 @@ int show_cpuinfo(struct seq_file *m, void *v)
 		break;
 	}
 
-	seq_printf(m, "revision\t: %hd.%hd (pvr %04x %04x)\n",
+	seq_printf(m, "revision\t: %hd.%hd (pvr %04x %04x)\n", 
 		   maj, min, PVR_VER(pvr), PVR_REV(pvr));
 
 	seq_printf(m, "bogomips\t: %lu.%02lu\n",
@@ -258,7 +272,7 @@ __init
 unsigned long
 early_init(int r3, int r4, int r5)
 {
-	extern char __bss_start[], _end[];
+	extern char __bss_start, _end;
  	unsigned long phys;
 	unsigned long offset = reloc_offset();
 
@@ -267,7 +281,7 @@ early_init(int r3, int r4, int r5)
 
 	/* First zero the BSS -- use memset, some arches don't have
 	 * caches on yet */
-	memset_io(PTRRELOC(&__bss_start), 0, _end - __bss_start);
+	memset_io(PTRRELOC(&__bss_start), 0, &_end - &__bss_start);
 
 	/*
 	 * Identify the CPU type and fix up code sections
@@ -277,22 +291,22 @@ early_init(int r3, int r4, int r5)
 	do_cpu_ftr_fixups(offset);
 
 #if defined(CONFIG_ALL_PPC)
-	reloc_got2(offset);
-
 	/* If we came here from BootX, clear the screen,
 	 * set up some pointers and return. */
-	if ((r3 == 0x426f6f58) && (r5 == 0))
+	if ((r3 == 0x426f6f58) && (r5 == 0)) {
 		bootx_init(r4, phys);
+		return phys;
+	}
 
-	/*
-	 * don't do anything on prep
+	/* check if we're prep, return if we are */
+	if ( *(unsigned long *)(0) == 0xdeadc0de )
+		return phys;
+
+	/* 
 	 * for now, don't use bootinfo because it breaks yaboot 0.5
 	 * and assume that if we didn't find a magic number, we have OF
 	 */
-	else if (*(unsigned long *)(0) != 0xdeadc0de)
-		phys = prom_init(r3, r4, (prom_entry)r5);
-
-	reloc_got2(-offset);
+	phys = prom_init(r3, r4, (prom_entry)r5);
 #endif
 
 	return phys;
@@ -304,7 +318,7 @@ intuit_machine_type(void)
 {
 	char *model;
 	struct device_node *root;
-
+			
 	/* ask the OF info if we're a chrp or pmac */
 	root = find_path_device("/");
 	if (root != 0) {
@@ -329,13 +343,13 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	      unsigned long r6, unsigned long r7)
 {
 #ifdef CONFIG_BOOTX_TEXT
-	if (boot_text_mapped) {
-		btext_clearscreen();
-		btext_welcome();
-	}
-#endif
+	extern boot_infos_t *disp_bi;
 
-	parse_bootinfo(find_bootinfo());
+	if (disp_bi) {
+		btext_clearscreen();
+		btext_welcome(disp_bi);
+	}
+#endif	
 
 	/* if we didn't get any bootinfo telling us what we are... */
 	if (_machine == 0) {
@@ -370,7 +384,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	 * bootargs property of the /chosen node.
 	 * If an initial ramdisk is present, r3 and r4
 	 * are used for initrd_start and initrd_size,
-	 * otherwise they contain 0xdeadbeef.
+	 * otherwise they contain 0xdeadbeef.  
 	 */
 	if (r3 >= 0x4000 && r3 < 0x800000 && r4 == 0) {
 		cmd_line[0] = 0;
@@ -393,16 +407,17 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	} else {
 		struct device_node *chosen;
 		char *p;
-
+			
 #ifdef CONFIG_BLK_DEV_INITRD
-		if (r3 && r4 && r4 != 0xdeadbeef) {
-			if (r3 < KERNELBASE)
-				r3 += KERNELBASE;
-			initrd_start = r3;
-			initrd_end = r3 + r4;
-			ROOT_DEV = MKDEV(RAMDISK_MAJOR, 0);
-			initrd_below_start_ok = 1;
-		}
+		if (r3 && r4 && r4 != 0xdeadbeef)
+			{
+				if (r3 < KERNELBASE)
+					r3 += KERNELBASE;
+				initrd_start = r3;
+				initrd_end = r3 + r4;
+				ROOT_DEV = MKDEV(RAMDISK_MAJOR, 0);
+				initrd_below_start_ok = 1;
+			}
 #endif
 		chosen = find_devices("chosen");
 		if (chosen != NULL) {
@@ -426,8 +441,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 }
 #endif /* CONFIG_ALL_PPC */
 
-#ifndef CONFIG_APUS
-struct bi_record *find_bootinfo(void)
+int parse_bootinfo(void)
 {
 	struct bi_record *rec;
 	extern char __bss_start[];
@@ -441,21 +455,15 @@ struct bi_record *find_bootinfo(void)
 		 */
 		rec = (struct bi_record *)_ALIGN((ulong)__bss_start+0x10000+(1<<20)-1,(1<<20));
 		if ( rec->tag != BI_FIRST )
-			return NULL;
+			return -1;
 	}
-	return rec;
-}
-
-void parse_bootinfo(struct bi_record *rec)
-{
-	if (rec == NULL || rec->tag != BI_FIRST)
-		return;
-	while (rec->tag != BI_LAST) {
+	for ( ; rec->tag != BI_LAST ;
+	      rec = (struct bi_record *)((ulong)rec + rec->size) )
+	{
 		ulong *data = rec->data;
 		switch (rec->tag) {
 		case BI_CMD_LINE:
-			memcpy(cmd_line, (void *)data, rec->size -
-					sizeof(struct bi_record));
+			memcpy(cmd_line, (void *)data, rec->size);
 			break;
 		case BI_SYSMAP:
 			sysmap = (char *)((data[0] >= (KERNELBASE)) ? data[0] :
@@ -476,17 +484,11 @@ void parse_bootinfo(struct bi_record *rec)
 		case BI_MEMSIZE:
 			boot_mem_size = data[0];
 			break;
-		case BI_BOARD_INFO:
-			/* data is typically a bd_t */
-			if (ppc_md.board_info)
-				ppc_md.board_info((void *)data,
-					rec->size - sizeof(struct bi_record));
-			break;
 		}
-		rec = (struct bi_record *)((ulong)rec + rec->size);
 	}
+
+	return 0;
 }
-#endif /* CONFIG_APUS */
 
 /*
  * Find out what kind of machine we're on and save any data we need
@@ -501,6 +503,8 @@ machine_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #ifdef CONFIG_CMDLINE
 	strcpy(cmd_line, CONFIG_CMDLINE);
 #endif /* CONFIG_CMDLINE */
+
+	parse_bootinfo();
 
 	platform_init(r3, r4, r5, r6, r7);
 
@@ -521,17 +525,11 @@ int __init ppc_setup_l2cr(char *str)
 }
 __setup("l2cr=", ppc_setup_l2cr);
 
-void __init arch_discover_root(void)
-{
-	if (ppc_md.discover_root != NULL)
-		ppc_md.discover_root();
-}
-
 void __init ppc_init(void)
 {
 	/* clear the progress line */
 	if ( ppc_md.progress ) ppc_md.progress("             ", 0xffff);
-
+	
 	if (ppc_md.init != NULL) {
 		ppc_md.init();
 	}
@@ -549,13 +547,8 @@ void __init setup_arch(char **cmdline_p)
 	loops_per_jiffy = 500000000 / HZ;
 
 #ifdef CONFIG_ALL_PPC
-	/* This could be called "early setup arch", it must be done
-	 * now because xmon need it
-	 */
-	if (_machine == _MACH_Pmac)
-		pmac_feature_init();	/* New cool way */
-#endif /* CONFIG_ALL_PPC */
-
+	feature_init();
+#endif
 #ifdef CONFIG_XMON
 	xmon_map_scc();
 	if (strstr(cmd_line, "xmon"))
@@ -566,12 +559,7 @@ void __init setup_arch(char **cmdline_p)
 #if defined(CONFIG_KGDB)
 	kgdb_map_scc();
 	set_debug_traps();
-	if (strstr(cmd_line, "gdb")) {
-		if (ppc_md.progress)
-			ppc_md.progress("setup_arch: kgdb breakpoint", 0x4000);
-		printk("kgdb breakpoint activated\n");
-		breakpoint();
-	}
+	breakpoint();
 #endif
 
 	/*
@@ -594,7 +582,7 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code = (unsigned long) _etext;
 	init_mm.end_data = (unsigned long) _edata;
 	init_mm.brk = (unsigned long) klimit;
-
+	
 	/* Save unparsed command line copy for /proc/cmdline */
 	strcpy(saved_command_line, cmd_line);
 	*cmdline_p = cmd_line;
@@ -603,18 +591,115 @@ void __init setup_arch(char **cmdline_p)
 	do_init_bootmem();
 	if ( ppc_md.progress ) ppc_md.progress("setup_arch: bootmem", 0x3eab);
 
-#ifdef CONFIG_PPC_OCP
-	/* Initialize OCP device list */
-	ocp_early_init();
-	if ( ppc_md.progress ) ppc_md.progress("setup_arch: ocp_early_init", 0x3eab);
-#endif
-
 	ppc_md.setup_arch();
 	if ( ppc_md.progress ) ppc_md.progress("arch: exit", 0x3eab);
+
+#if defined(CONFIG_PCI) && defined(CONFIG_ALL_PPC)
+	/* We create the "pci-OF-bus-map" property now so it appear in the
+	 * /proc device tree
+	 */
+	if (have_of) {
+		struct property* of_prop;
+		
+		of_prop = (struct property*)alloc_bootmem(sizeof(struct property) + 256);
+		if (of_prop && find_path_device("/")) {
+			memset(of_prop, -1, sizeof(struct property) + 256);
+			of_prop->name = "pci-OF-bus-map";
+			of_prop->length = 256;
+			of_prop->value = (unsigned char *)&of_prop[1];
+			prom_add_property(find_path_device("/"), of_prop);
+		}
+	}
+#endif /* CONFIG_PCI && CONFIG_ALL_PPC */
 
 	paging_init();
 	sort_exception_table();
 
 	/* this is for modules since _machine can be a define -- Cort */
 	ppc_md.ppc_machine = _machine;
+}
+
+/* Convert the shorts/longs in hd_driveid from little to big endian;
+ * chars are endian independant, of course, but strings need to be flipped.
+ * (Despite what it says in drivers/block/ide.h, they come up as little
+ * endian...)
+ *
+ * Changes to linux/hdreg.h may require changes here. */
+void ppc_generic_ide_fix_driveid(struct hd_driveid *id)
+{
+        int i;
+	unsigned short *stringcast;
+
+	id->config         = __le16_to_cpu(id->config);
+	id->cyls           = __le16_to_cpu(id->cyls);
+	id->reserved2      = __le16_to_cpu(id->reserved2);
+	id->heads          = __le16_to_cpu(id->heads);
+	id->track_bytes    = __le16_to_cpu(id->track_bytes);
+	id->sector_bytes   = __le16_to_cpu(id->sector_bytes);
+	id->sectors        = __le16_to_cpu(id->sectors);
+	id->vendor0        = __le16_to_cpu(id->vendor0);
+	id->vendor1        = __le16_to_cpu(id->vendor1);
+	id->vendor2        = __le16_to_cpu(id->vendor2);
+	stringcast = (unsigned short *)&id->serial_no[0];
+	for (i = 0; i < (20/2); i++)
+	        stringcast[i] = __le16_to_cpu(stringcast[i]);
+	id->buf_type       = __le16_to_cpu(id->buf_type);
+	id->buf_size       = __le16_to_cpu(id->buf_size);
+	id->ecc_bytes      = __le16_to_cpu(id->ecc_bytes);
+	stringcast = (unsigned short *)&id->fw_rev[0];
+	for (i = 0; i < (8/2); i++)
+	        stringcast[i] = __le16_to_cpu(stringcast[i]);
+	stringcast = (unsigned short *)&id->model[0];
+	for (i = 0; i < (40/2); i++)
+	        stringcast[i] = __le16_to_cpu(stringcast[i]);
+	id->dword_io       = __le16_to_cpu(id->dword_io);
+	id->reserved50     = __le16_to_cpu(id->reserved50);
+	id->field_valid    = __le16_to_cpu(id->field_valid);
+	id->cur_cyls       = __le16_to_cpu(id->cur_cyls);
+	id->cur_heads      = __le16_to_cpu(id->cur_heads);
+	id->cur_sectors    = __le16_to_cpu(id->cur_sectors);
+	id->cur_capacity0  = __le16_to_cpu(id->cur_capacity0);
+	id->cur_capacity1  = __le16_to_cpu(id->cur_capacity1);
+	id->lba_capacity   = __le32_to_cpu(id->lba_capacity);
+	id->dma_1word      = __le16_to_cpu(id->dma_1word);
+	id->dma_mword      = __le16_to_cpu(id->dma_mword);
+	id->eide_pio_modes = __le16_to_cpu(id->eide_pio_modes);
+	id->eide_dma_min   = __le16_to_cpu(id->eide_dma_min);
+	id->eide_dma_time  = __le16_to_cpu(id->eide_dma_time);
+	id->eide_pio       = __le16_to_cpu(id->eide_pio);
+	id->eide_pio_iordy = __le16_to_cpu(id->eide_pio_iordy);
+	for (i = 0; i < 2; i++)
+		id->words69_70[i] = __le16_to_cpu(id->words69_70[i]);
+        for (i = 0; i < 4; i++)
+                id->words71_74[i] = __le16_to_cpu(id->words71_74[i]);
+	id->queue_depth	   = __le16_to_cpu(id->queue_depth);
+	for (i = 0; i < 4; i++)
+		id->words76_79[i] = __le16_to_cpu(id->words76_79[i]);
+	id->major_rev_num  = __le16_to_cpu(id->major_rev_num);
+	id->minor_rev_num  = __le16_to_cpu(id->minor_rev_num);
+	id->command_set_1  = __le16_to_cpu(id->command_set_1);
+	id->command_set_2  = __le16_to_cpu(id->command_set_2);
+	id->cfsse          = __le16_to_cpu(id->cfsse);
+	id->cfs_enable_1   = __le16_to_cpu(id->cfs_enable_1);
+	id->cfs_enable_2   = __le16_to_cpu(id->cfs_enable_2);
+	id->csf_default    = __le16_to_cpu(id->csf_default);
+	id->dma_ultra      = __le16_to_cpu(id->dma_ultra);
+	id->word89         = __le16_to_cpu(id->word89);
+	id->word90         = __le16_to_cpu(id->word90);
+	id->CurAPMvalues   = __le16_to_cpu(id->CurAPMvalues);
+	id->word92         = __le16_to_cpu(id->word92);
+	id->hw_config      = __le16_to_cpu(id->hw_config);
+	for (i = 0; i < 32; i++)
+		id->words94_125[i]  = __le16_to_cpu(id->words94_125[i]);
+	id->last_lun       = __le16_to_cpu(id->last_lun);
+	id->word127        = __le16_to_cpu(id->word127);
+	id->dlf            = __le16_to_cpu(id->dlf);
+	id->csfo           = __le16_to_cpu(id->csfo);
+	for (i = 0; i < 26; i++)
+		id->words130_155[i] = __le16_to_cpu(id->words130_155[i]);
+	id->word156        = __le16_to_cpu(id->word156);
+	for (i = 0; i < 3; i++)
+		id->words157_159[i] = __le16_to_cpu(id->words157_159[i]);
+	for (i = 0; i < 96; i++)
+		id->words160_255[i] = __le16_to_cpu(id->words160_255[i]);
 }

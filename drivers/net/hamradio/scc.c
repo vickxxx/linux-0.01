@@ -2128,7 +2128,7 @@ static int __init scc_init_driver (void)
 
 static void __exit scc_cleanup_driver(void)
 {
-	unsigned long flags;
+	long flags;
 	io_port ctrl;
 	int k;
 	struct scc_channel *scc;
@@ -2179,6 +2179,5 @@ static void __exit scc_cleanup_driver(void)
 MODULE_AUTHOR("Joerg Reuter <jreuter@yaina.de>");
 MODULE_DESCRIPTION("AX.25 Device Driver for Z8530 based HDLC cards");
 MODULE_SUPPORTED_DEVICE("Z8530 based SCC cards for Amateur Radio");
-MODULE_LICENSE("GPL");
 module_init(scc_init_driver);
 module_exit(scc_cleanup_driver);

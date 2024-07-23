@@ -50,64 +50,199 @@ asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
  * The idle loop on a S390...
  */
 
+static psw_t wait_psw;
+
 int cpu_idle(void *unused)
 {
-	psw_t wait_psw;
-	unsigned long reg;
-
 	/* endless idle loop with no priority at all */
         init_idle();
 	current->nice = 20;
 	current->counter = -100;
-	while (1) {
-		__cli();
-		if (current->need_resched) {
-			__sti();
-			schedule();
-			check_pgt_cache();
-			continue;
-		}
+	wait_psw.mask = _WAIT_PSW_MASK;
+	wait_psw.addr = (unsigned long) &&idle_wakeup | 0x80000000L;
+	while(1) {
+                if (current->need_resched) {
+                        schedule();
+                        check_pgt_cache();
+                        continue;
+                }
 
-		/* 
-		 * Wait for external, I/O or machine check interrupt and
-		 * switch of machine check bit after the wait has ended.
-		 */
-		wait_psw.mask = _WAIT_PSW_MASK;
+		/* load wait psw */
 		asm volatile (
-			"    basr %0,0\n"
-			"0:  la   %0,1f-0b(%0)\n"
-			"    st   %0,4(%1)\n"
-			"    oi   4(%1),0x80\n"
-			"    lpsw 0(%1)\n"
-			"1:  la   %0,2f-1b(%0)\n"
-			"    st   %0,4(%1)\n"
-			"    oi   4(%1),0x80\n"
-			"    ni   1(%1),0xf9\n"
-			"    lpsw 0(%1)\n"
-			"2:"
-			: "=&a" (reg) : "a" (&wait_psw) : "memory", "cc" );
+                        "lpsw %0"
+                        : : "m" (wait_psw) );
+idle_wakeup:
 	}
 }
 
-extern void show_registers(struct pt_regs *regs);
-extern void show_trace(unsigned long *sp);
+/*
+  As all the register will only be made displayable to the root
+  user ( via printk ) or checking if the uid of the user is 0 from
+  the /proc filesystem please god this will be secure enough DJB.
+  The lines are given one at a time so as not to chew stack space in
+  printk on a crash & also for the proc filesystem when you get
+  0 returned you know you've got all the lines
+ */
+
+static int sprintf_regs(int line, char *buff, struct task_struct *task, struct pt_regs *regs)
+{
+	int linelen=0;
+	int regno,chaincnt;
+	u32 backchain,prev_backchain,endchain;
+	u32 ksp = 0;
+	char *mode = "???";
+
+	enum
+	{
+		sp_linefeed,
+		sp_psw,
+		sp_ksp,
+		sp_gprs,
+		sp_gprs1,
+		sp_gprs2,
+		sp_gprs3,
+		sp_gprs4,
+		sp_acrs,
+		sp_acrs1,
+		sp_acrs2,
+		sp_acrs3,
+		sp_acrs4,
+		sp_kern_backchain,
+		sp_kern_backchain1
+	};
+
+	if (task)
+		ksp = task->thread.ksp;
+	if (regs && !(regs->psw.mask & PSW_PROBLEM_STATE))
+		ksp = regs->gprs[15];
+
+	if (regs)
+		mode = (regs->psw.mask & PSW_PROBLEM_STATE)?
+		       "User" : "Kernel";
+
+	switch(line)
+	{
+	case sp_linefeed: 
+		linelen=sprintf(buff,"\n");
+		break;
+	case sp_psw:
+		if(regs)
+			linelen=sprintf(buff, "%s PSW:    %08lx %08lx    %s\n", mode,
+				(unsigned long) regs->psw.mask,
+				(unsigned long) regs->psw.addr,
+				print_tainted());
+		else
+			linelen=sprintf(buff,"pt_regs=NULL some info unavailable\n");
+		break;
+	case sp_ksp:
+		linelen=sprintf(&buff[linelen],
+				"task: %08x ksp: %08x pt_regs: %08x\n",
+				(addr_t)task, (addr_t)ksp, (addr_t)regs);
+		break;
+	case sp_gprs:
+		if(regs)
+			linelen=sprintf(buff, "%s GPRS:\n", mode);
+		break;
+	case sp_gprs1 ... sp_gprs4:
+		if(regs)
+		{
+			regno=(line-sp_gprs1)*4;
+			linelen=sprintf(buff,"%08x  %08x  %08x  %08x\n",
+					regs->gprs[regno], 
+					regs->gprs[regno+1],
+					regs->gprs[regno+2],
+					regs->gprs[regno+3]);
+		}
+		break;
+	case sp_acrs:
+		if(regs)
+			linelen=sprintf(buff, "%s ACRS:\n", mode);
+		break;	
+        case sp_acrs1 ... sp_acrs4:
+		if(regs)
+		{
+			regno=(line-sp_acrs1)*4;
+			linelen=sprintf(buff,"%08x  %08x  %08x  %08x\n",
+					regs->acrs[regno],
+					regs->acrs[regno+1],
+					regs->acrs[regno+2],
+					regs->acrs[regno+3]);
+		}
+		break;
+	case sp_kern_backchain:
+		if (regs && (regs->psw.mask & PSW_PROBLEM_STATE))
+			break;	
+		if (ksp)
+			linelen=sprintf(buff, "Kernel BackChain  CallChain\n");
+		break;
+	default:
+		if (ksp)
+		{
+			
+			backchain=ksp&PSW_ADDR_MASK;
+			endchain=((backchain&(-8192))+8192);
+			prev_backchain=backchain-1;
+			line-=sp_kern_backchain1;
+			for(chaincnt=0;;chaincnt++)
+			{
+				if((backchain==0)||(backchain>=endchain)
+				   ||(chaincnt>=8)||(prev_backchain>=backchain))
+					break;
+				if(chaincnt==line)
+				{
+					linelen+=sprintf(&buff[linelen],"       %08x   [<%08lx>]\n",
+							 backchain,
+							 *(u32 *)(backchain+56)&PSW_ADDR_MASK);
+					break;
+				}
+				prev_backchain=backchain;
+				backchain=(*((u32 *)backchain))&PSW_ADDR_MASK;
+			}
+		}
+	}
+	return(linelen);
+}
+
 
 void show_regs(struct pt_regs *regs)
 {
-	struct task_struct *tsk = current;
+	char buff[80];
+	int i, line;
 
-        printk("CPU:    %d    %s\n", tsk->processor, print_tainted());
-        printk("Process %s (pid: %d, task: %08lx, ksp: %08x)\n",
-	       current->comm, current->pid, (unsigned long) tsk,
-	       tsk->thread.ksp);
+        printk("CPU:    %d\n",smp_processor_id());
+        printk("Process %s (pid: %d, stackpage=%08X)\n",
+                current->comm, current->pid, 4096+(addr_t)current);
+	
+	for (line = 0; sprintf_regs(line, buff, current, regs); line++)
+		printk(buff);
 
-	show_registers(regs);
-	/* Show stack backtrace if pt_regs is from kernel mode */
-	if (!(regs->psw.mask & PSW_PROBLEM_STATE))
-		show_trace((unsigned long *) regs->gprs[15]);
+	if (regs->psw.mask & PSW_PROBLEM_STATE)
+	{
+		printk("User Code:\n");
+		memset(buff, 0, 20);
+		copy_from_user(buff,
+			       (char *) (regs->psw.addr & PSW_ADDR_MASK), 20);
+		for (i = 0; i < 20; i++)
+			printk("%02x ", buff[i]);
+		printk("\n");
+	}
 }
 
-int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+char *task_show_regs(struct task_struct *task, char *buffer)
+{
+	int line, len;
+
+	for (line = 0; ; line++)
+	{
+		len = sprintf_regs(line, buffer, task, task->thread.regs);
+		if (!len) break;
+		buffer += len;
+	}
+	return buffer;
+}
+
+
+int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
         int clone_arg = flags | CLONE_VM;
         int retval;
@@ -166,10 +301,16 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
             unsigned long gprs[10];    /* gprs 6 -15                       */
             unsigned long fprs[4];     /* fpr 4 and 6                      */
             unsigned long empty[4];
+#if CONFIG_REMOTE_DEBUG
+	    struct gdb_pt_regs childregs;
+#else
             struct pt_regs childregs;
+#endif
           } *frame;
 
         frame = (struct stack_frame *) (2*PAGE_SIZE + (unsigned long) p) -1;
+        frame = (struct stack_frame *) (((unsigned long) frame)&-8L);
+        p->thread.regs = (struct pt_regs *)&frame->childregs;
         p->thread.ksp = (unsigned long) frame;
         memcpy(&frame->childregs,regs,sizeof(struct pt_regs));
         frame->childregs.gprs[15] = new_stackp;
@@ -180,11 +321,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long new_stackp,
 
         /* fake return stack for resume(), don't go back to schedule */
         frame->gprs[9]  = (unsigned long) frame;
+	frame->childregs.old_ilc = -1; /* We are not single stepping an svc */
         /* save fprs, if used in last task */
 	save_fp_regs(&p->thread.fp_regs);
         p->thread.user_seg = __pa((unsigned long) p->mm->pgd) | _SEGMENT_TABLE;
-	/* start process with ar4 pointing to the correct address space */
-	p->thread.ar4 = get_fs().ar4;
+        p->thread.fs = USER_DS;
         /* Don't copy debug registers */
         memset(&p->thread.per_info,0,sizeof(p->thread.per_info));
         return 0;

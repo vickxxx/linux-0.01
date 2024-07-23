@@ -3,7 +3,7 @@
 /*
  *      es1370.c  --  Ensoniq ES1370/Asahi Kasei AK4531 audio driver.
  *
- *      Copyright (C) 1998-2001, 2003  Thomas Sailer (t.sailer@alumni.ethz.ch)
+ *      Copyright (C) 1998-2001  Thomas Sailer (t.sailer@alumni.ethz.ch)
  *
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
@@ -122,7 +122,6 @@
  *    07.01.2001   0.36  Timeout change in wrcodec as requested by Frank Klemm <pfk@fuchs.offl.uni-jena.de>
  *    31.01.2001   0.37  Register/Unregister gameport
  *                       Fix SETTRIGGER non OSS API conformity
- *    03.01.2003   0.38  open_mode fixes from Georg Acher <acher@in.tum.de>
  *
  * some important things missing in Ensoniq documentation:
  *
@@ -398,7 +397,7 @@ static LIST_HEAD(devs);
  * so that it cannot wreak havoc. The attribute makes sure it doesn't
  * cross a page boundary and ensures dword alignment for the DMA engine
  */
-static unsigned char *bugbuf;  // [16] __attribute__ ((aligned (16)));
+static unsigned char bugbuf[16] __attribute__ ((aligned (16)));
 
 /* --------------------------------------------------------------------- */
 
@@ -1639,7 +1638,7 @@ static int es1370_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
@@ -1657,7 +1656,7 @@ static int es1370_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		if (s->dma_dac2.mapped)
 			s->dma_dac2.count &= s->dma_dac2.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
@@ -1810,7 +1809,7 @@ static int es1370_release(struct inode *inode, struct file *file)
 		stop_adc(s);
 		dealloc_dmabuf(s, &s->dma_adc);
 	}
-	s->open_mode &= ~(file->f_mode & (FMODE_READ|FMODE_WRITE));
+	s->open_mode &= (~file->f_mode) & (FMODE_READ|FMODE_WRITE);
 	wake_up(&s->open_wait);
 	up(&s->open_sem);
 	unlock_kernel();
@@ -2116,7 +2115,7 @@ static int es1370_ioctl_dac(struct inode *inode, struct file *file, unsigned int
 		if (s->dma_dac1.mapped)
 			s->dma_dac1.count &= s->dma_dac1.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if ((val = prog_dmabuf_dac1(s)))
@@ -2485,8 +2484,12 @@ static int es1370_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK) 
-				break;
+			if (file->f_flags & O_NONBLOCK) {
+				remove_wait_queue(&s->midi.owait, &wait);
+				set_current_state(TASK_RUNNING);
+				unlock_kernel();
+				return -EBUSY;
+			}
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				DBG(printk(KERN_DEBUG "es1370: midi timed out??\n");)
@@ -2495,7 +2498,7 @@ static int es1370_midi_release(struct inode *inode, struct file *file)
 		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
-	s->open_mode &= ~((file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE));
+	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
 	spin_lock_irqsave(&s->lock, flags);
 	if (!(s->open_mode & (FMODE_MIDI_READ | FMODE_MIDI_WRITE))) {
 		s->ctrl &= ~CTRL_UART_EN;
@@ -2565,11 +2568,6 @@ static int __devinit es1370_probe(struct pci_dev *pcidev, const struct pci_devic
 	mm_segment_t fs;
 	int i, val, ret;
 
-	if (bugbuf == NULL)
-		bugbuf = kmalloc(16, GFP_KERNEL);
-	if (bugbuf == NULL)
-		return -ENOMEM;
-	
 	if ((ret=pci_enable_device(pcidev)))
 		return ret;
 
@@ -2674,8 +2672,7 @@ static int __devinit es1370_probe(struct pci_dev *pcidev, const struct pci_devic
 	}
 	set_fs(fs);
 	/* register gameport */
-	if(s->gameport.io)
-		gameport_register_port(&s->gameport);
+	gameport_register_port(&s->gameport);
 
 	/* store it in the driver field */
 	pci_set_drvdata(pcidev, s);
@@ -2746,7 +2743,7 @@ static int __init init_es1370(void)
 {
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "es1370: version v0.38 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "es1370: version v0.37 time " __TIME__ " " __DATE__ "\n");
 	return pci_module_init(&es1370_driver);
 }
 
@@ -2754,8 +2751,6 @@ static void __exit cleanup_es1370(void)
 {
 	printk(KERN_INFO "es1370: unloading\n");
 	pci_unregister_driver(&es1370_driver);
-	if(bugbuf)
-		kfree(bugbuf);
 }
 
 module_init(init_es1370);

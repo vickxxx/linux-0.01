@@ -335,10 +335,6 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 			goto give_sigsegv;
 	}
 
-	/* Set up backchain. */
-	if (__put_user(regs->gprs[15], (addr_t *) frame))
-		goto give_sigsegv;
-
 	/* Set up registers for signal handler */
 	regs->gprs[15] = (addr_t)frame;
 	regs->psw.addr = FIX_PSW(ka->sa.sa_handler);
@@ -391,10 +387,6 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 		err |= __put_user(S390_SYSCALL_OPCODE | __NR_rt_sigreturn, 
 	                          (u16 *)(frame->retcode));
 	}
-
-	/* Set up backchain. */
-	if (__put_user(regs->gprs[15], (addr_t *) frame))
-		goto give_sigsegv;
 
 	/* Set up registers for signal handler */
 	regs->gprs[15] = (addr_t)frame;
@@ -544,7 +536,7 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
 				continue;
 
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
+			case SIGCONT: case SIGCHLD: case SIGWINCH:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -571,7 +563,10 @@ int do_signal(struct pt_regs *regs, sigset_t *oldset)
                                 /* FALLTHRU */
 
 			default:
-				sig_exit(signr, exit_code, &info);
+				sigaddset(&current->pending.signal, signr);
+				recalc_sigpending(current);
+				current->flags |= PF_SIGNALED;
+				do_exit(exit_code);
 				/* NOTREACHED */
 			}
 		}

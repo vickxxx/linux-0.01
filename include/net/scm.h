@@ -8,9 +8,8 @@
 
 struct scm_fp_list
 {
-	struct list_head	list;
-	int			count;
-	struct file		*fp[SCM_MAX_FD];
+	int		count;
+	struct file	*fp[SCM_MAX_FD];
 };
 
 struct scm_cookie

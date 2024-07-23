@@ -15,12 +15,9 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/mman.h>
-#include <linux/personality.h>
 #include <linux/sys.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
-#include <linux/init.h>
-#include <linux/completion.h>
 
 #include <asm/bootinfo.h>
 #include <asm/pgtable.h>
@@ -31,11 +28,8 @@
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/elf.h>
-#include <asm/cpu.h>
-#include <asm/fpu.h>
-#include <asm/inst.h>
 
-ATTRIB_NORET void cpu_idle(void)
+asmlinkage int cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
 	init_idle();
@@ -43,59 +37,63 @@ ATTRIB_NORET void cpu_idle(void)
 	current->counter = -100;
 	while (1) {
 		while (!current->need_resched)
-			if (cpu_wait)
-				(*cpu_wait)();
+			if (wait_available)
+				__asm__("wait");
 		schedule();
 		check_pgt_cache();
 	}
 }
 
+struct task_struct *last_task_used_math = NULL;
+
 asmlinkage void ret_from_fork(void);
-
-void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
-{
-	unsigned long status;
-
-	/* New thread loses kernel privileges. */
-	status = regs->cp0_status & ~(ST0_CU0|ST0_FR|ST0_KSU);
-	status |= KSU_USER;
-	status |= (current->thread.mflags & MF_32BIT_REGS) ? 0 : ST0_FR;
-	regs->cp0_status = status;
-	current->used_math = 0;
-	lose_fpu();
-	regs->cp0_epc = pc;
-	regs->regs[29] = sp;
-	current->thread.current_ds = USER_DS;
-}
 
 void exit_thread(void)
 {
+	/* Forget lazy fpu state */
+	if (IS_FPU_OWNER()) {
+		set_cp0_status(ST0_CU1, ST0_CU1);
+		__asm__ __volatile__("cfc1\t$0,$31");
+		CLEAR_FPU_OWNER();
+	}
 }
 
 void flush_thread(void)
 {
+	/* Forget lazy fpu state */
+	if (IS_FPU_OWNER()) {
+		set_cp0_status(ST0_CU1, ST0_CU1);
+		__asm__ __volatile__("cfc1\t$0,$31");
+		CLEAR_FPU_OWNER();
+	}
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-		unsigned long unused, struct task_struct *p,
-		struct pt_regs *regs)
+		 unsigned long unused,
+                 struct task_struct * p, struct pt_regs * regs)
 {
-	struct pt_regs *childregs;
+	struct pt_regs * childregs;
 	long childksp;
 
 	childksp = (unsigned long)p + KERNEL_STACK_SIZE - 32;
 
-	if (is_fpu_owner()) {
+	if (IS_FPU_OWNER()) {
 		save_fp(p);
 	}
-
 	/* set up new TSS. */
 	childregs = (struct pt_regs *) childksp - 1;
 	*childregs = *regs;
 	childregs->regs[7] = 0;	/* Clear error flag */
-	childregs->regs[2] = 0;	/* Child gets zero as return value */
-	regs->regs[2] = p->pid;
-
+	if (current->personality == PER_LINUX) {
+		childregs->regs[2] = 0;	/* Child gets zero as return value */
+		regs->regs[2] = p->pid;
+	} else {
+		/* Under IRIX things are a little different. */
+		childregs->regs[2] = 0;
+		childregs->regs[3] = 1;
+		regs->regs[2] = p->pid;
+		regs->regs[3] = 0;
+	}
 	if (childregs->cp0_status & ST0_CU0) {
 		childregs->regs[28] = (unsigned long) p;
 		childregs->regs[29] = childksp;
@@ -108,12 +106,12 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	p->thread.reg31 = (unsigned long) ret_from_fork;
 
 	/*
-	 * New tasks lose permission to use the fpu. This accelerates context
-	 * switching for most programs since they don't use the fpu.  Most
-	 * MIPS IV CPUs use ST0_CU3 as ST0_XX flag so we leave it unchanged.
+	 * New tasks loose permission to use the fpu. This accelerates context
+	 * switching for most programs since they don't use the fpu.
 	 */
-	p->thread.cp0_status = read_c0_status() & ~(ST0_CU2|ST0_CU1|ST0_KSU);
-	childregs->cp0_status &= ~(ST0_CU2|ST0_CU1);
+	p->thread.cp0_status = read_32bit_cp0_register(CP0_STATUS) &
+                            ~(ST0_CU3|ST0_CU2|ST0_CU1|ST0_KSU);
+	childregs->cp0_status &= ~(ST0_CU3|ST0_CU2|ST0_CU1);
 
 	return 0;
 }
@@ -121,38 +119,61 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 /* Fill in the fpu structure for a core dump.. */
 int dump_fpu(struct pt_regs *regs, elf_fpregset_t *r)
 {
-	memcpy(r, &current->thread.fpu, sizeof(current->thread.fpu));
-	return 1;
+	/* We actually store the FPU info in the task->thread
+	 * area.
+	 */
+	if(regs->cp0_status & ST0_CU1) {
+		memcpy(r, &current->thread.fpu, sizeof(current->thread.fpu));
+		return 1;
+	}
+	return 0; /* Task didn't use the fpu at all. */
+}
+
+/* Fill in the user structure for a core dump.. */
+void dump_thread(struct pt_regs *regs, struct user *dump)
+{
+	dump->magic = CMAGIC;
+	dump->start_code  = current->mm->start_code;
+	dump->start_data  = current->mm->start_data;
+	dump->start_stack = regs->regs[29] & ~(PAGE_SIZE - 1);
+	dump->u_tsize = (current->mm->end_code - dump->start_code)
+	                >> PAGE_SHIFT;
+	dump->u_dsize = (current->mm->brk + (PAGE_SIZE - 1) - dump->start_data)
+	                >> PAGE_SHIFT;
+	dump->u_ssize = (current->mm->start_stack - dump->start_stack +
+	                 PAGE_SIZE - 1) >> PAGE_SHIFT;
+	memcpy(&dump->regs[0], regs, sizeof(struct pt_regs));
+	memcpy(&dump->regs[EF_SIZE/4], &current->thread.fpu,
+	       sizeof(current->thread.fpu));
 }
 
 /*
  * Create a kernel thread
  */
-int arch_kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
+int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
 	int retval;
 
 	__asm__ __volatile__(
-		"	move	$6, $sp		\n"
-		"	move	$4, %5		\n"
-		"	li	$2, %1		\n"
-		"	syscall			\n"
-		"	beq	$6, $sp, 1f	\n"
-		"	move	$4, %3		\n"
-		"	jalr	%4		\n"
-		"	move	$4, $2		\n"
-		"	li	$2, %2		\n"
-		"	syscall			\n"
-		"1:	move	%0, $2		\n"
-		: "=r" (retval)
-		: "i" (__NR_clone), "i" (__NR_exit), "r" (arg), "r" (fn),
-		  "r" (flags | CLONE_VM)
-		 /*
-		  * The called subroutine might have destroyed any of the
-		  * at, result, argument or temporary registers ...
-		 */
-		: "$2", "$3", "$4", "$5", "$6", "$7", "$8",
-		  "$9","$10","$11","$12","$13","$14","$15","$24","$25","$31");
+		"move\t$6, $sp\n\t"
+		"move\t$4, %5\n\t"
+		"li\t$2, %1\n\t"
+		"syscall\n\t"
+		"beq\t$6, $sp, 1f\n\t"
+		"move\t$4, %3\n\t"
+		"jalr\t%4\n\t"
+		"move\t$4, $2\n\t"
+		"li\t$2, %2\n\t"
+		"syscall\n"
+		"1:\tmove\t%0, $2"
+		:"=r" (retval)
+		:"i" (__NR_clone), "i" (__NR_exit), "r" (arg), "r" (fn),
+		 "r" (flags | CLONE_VM)
+
+		 /* The called subroutine might have destroyed any of the
+		  * at, result, argument or temporary registers ...  */
+		:"$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8",
+		 "$9","$10","$11","$12","$13","$14","$15","$24","$25");
 
 	return retval;
 }
@@ -165,62 +186,6 @@ extern void scheduling_functions_end_here(void);
 #define first_sched	((unsigned long) scheduling_functions_start_here)
 #define last_sched	((unsigned long) scheduling_functions_end_here)
 
-struct mips_frame_info schedule_frame;
-static struct mips_frame_info schedule_timeout_frame;
-static struct mips_frame_info sleep_on_frame;
-static struct mips_frame_info sleep_on_timeout_frame;
-static struct mips_frame_info wait_for_completion_frame;
-static int mips_frame_info_initialized;
-static int __init get_frame_info(struct mips_frame_info *info, void *func)
-{
-	int i;
-	union mips_instruction *ip = (union mips_instruction *)func;
-	info->pc_offset = -1;
-	info->frame_offset = -1;
-	for (i = 0; i < 128; i++, ip++) {
-		/* if jal, jalr, jr, stop. */
-		if (ip->j_format.opcode == jal_op ||
-		    (ip->r_format.opcode == spec_op &&
-		     (ip->r_format.func == jalr_op ||
-		      ip->r_format.func == jr_op)))
-			break;
-		if (ip->i_format.opcode == sd_op &&
-		    ip->i_format.rs == 29) {
-			/* sd $ra, offset($sp) */
-			if (ip->i_format.rt == 31) {
-				if (info->pc_offset != -1)
-					break;
-				info->pc_offset =
-					ip->i_format.simmediate / sizeof(long);
-			}
-			/* sd $s8, offset($sp) */
-			if (ip->i_format.rt == 30) {
-				if (info->frame_offset != -1)
-					break;
-				info->frame_offset =
-					ip->i_format.simmediate / sizeof(long);
-			}
-		}
-	}
-	if (info->pc_offset == -1 || info->frame_offset == -1) {
-		printk("Can't analyze prologue code at %p\n", func);
-		info->pc_offset = -1;
-		info->frame_offset = -1;
-		return -1;
-	}
-
-	return 0;
-}
-void __init frame_info_init(void)
-{
-	mips_frame_info_initialized =
-		!get_frame_info(&schedule_frame, schedule) &&
-		!get_frame_info(&schedule_timeout_frame, schedule_timeout) &&
-		!get_frame_info(&sleep_on_frame, sleep_on) &&
-		!get_frame_info(&sleep_on_timeout_frame, sleep_on_timeout) &&
-		!get_frame_info(&wait_for_completion_frame, wait_for_completion);
-}
-
 /* get_wchan - a maintenance nightmare ...  */
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -229,8 +194,6 @@ unsigned long get_wchan(struct task_struct *p)
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	if (!mips_frame_info_initialized)
-		return 0;
 	pc = thread_saved_pc(&p->thread);
 	if (pc < first_sched || pc >= last_sched)
 		goto out;
@@ -243,33 +206,30 @@ unsigned long get_wchan(struct task_struct *p)
 		goto schedule_timeout_caller;
 	if (pc >= (unsigned long)interruptible_sleep_on)
 		goto schedule_caller;
-	if (pc >= (unsigned long)wait_for_completion)
-		goto schedule_caller;
 	goto schedule_timeout_caller;
 
 schedule_caller:
-	frame = ((unsigned long *)p->thread.reg30)[schedule_frame.frame_offset];
-	if (pc >= (unsigned long) sleep_on)
-		pc = ((unsigned long *)frame)[sleep_on_frame.pc_offset];
-	else
-		pc = ((unsigned long *)frame)[wait_for_completion_frame.pc_offset];
+	frame = ((unsigned long *)p->thread.reg30)[10];
+	pc    = ((unsigned long *)frame)[7];
 	goto out;
 
 schedule_timeout_caller:
 	/* Must be schedule_timeout ...  */
-	frame = ((unsigned long *)p->thread.reg30)[schedule_frame.frame_offset];
+	pc    = ((unsigned long *)p->thread.reg30)[11];
+	frame = ((unsigned long *)p->thread.reg30)[10];
 
 	/* The schedule_timeout frame ...  */
-	pc    = ((unsigned long *)frame)[schedule_timeout_frame.pc_offset];
+	pc    = ((unsigned long *)frame)[9];
+	frame = ((unsigned long *)frame)[8];
 
 	if (pc >= first_sched && pc < last_sched) {
-		/* schedule_timeout called by [interruptible_]sleep_on_timeout */
-		frame = ((unsigned long *)frame)[schedule_timeout_frame.frame_offset];
-		pc    = ((unsigned long *)frame)[sleep_on_timeout_frame.pc_offset];
+		/* schedule_timeout called by interruptible_sleep_on_timeout */
+		pc    = ((unsigned long *)frame)[7];
+		frame = ((unsigned long *)frame)[6];
 	}
 
 out:
-	if (current->thread.mflags & MF_32BIT_ADDR) /* Kludge for 32-bit ps  */
+	if (current->thread.mflags & MF_32BIT)	/* Kludge for 32-bit ps  */
 		pc &= 0xffffffff;
 
 	return pc;

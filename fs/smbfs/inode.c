@@ -22,7 +22,6 @@
 #include <linux/dcache.h>
 #include <linux/smp_lock.h>
 #include <linux/nls.h>
-#include <linux/seq_file.h>
 
 #include <linux/smb_fs.h>
 #include <linux/smbno.h>
@@ -42,13 +41,9 @@
 #define SMB_NLS_REMOTE ""
 #endif
 
-#define SMB_TTL_DEFAULT 1000
-#define SMB_TIMEO_DEFAULT 30
-
 static void smb_delete_inode(struct inode *);
 static void smb_put_super(struct super_block *);
 static int  smb_statfs(struct super_block *, struct statfs *);
-static int  smb_show_options(struct seq_file *, struct vfsmount *);
 
 static struct super_operations smb_sops =
 {
@@ -56,7 +51,6 @@ static struct super_operations smb_sops =
 	delete_inode:	smb_delete_inode,
 	put_super:	smb_put_super,
 	statfs:		smb_statfs,
-	show_options:	smb_show_options,
 };
 
 
@@ -79,16 +73,8 @@ smb_iget(struct super_block *sb, struct smb_fattr *fattr)
 		result->i_fop = &smb_file_operations;
 		result->i_data.a_ops = &smb_file_aops;
 	} else if (S_ISDIR(result->i_mode)) {
-		struct smb_sb_info *server = &(sb->u.smbfs_sb);
-		if (server->opt.capabilities & SMB_CAP_UNIX)
-			result->i_op = &smb_dir_inode_operations_unix;
-		else
-			result->i_op = &smb_dir_inode_operations;
+		result->i_op = &smb_dir_inode_operations;
 		result->i_fop = &smb_dir_operations;
-	} else if(S_ISLNK(result->i_mode)) {
-		result->i_op = &smb_link_inode_operations;
-	} else {
-		init_special_inode(result, result->i_mode, fattr->f_rdev);
 	}
 	insert_inode_hash(result);
 	return result;
@@ -195,14 +181,7 @@ smb_refresh_inode(struct dentry *dentry)
 		/*
 		 * Check whether the type part of the mode changed,
 		 * and don't update the attributes if it did.
-		 *
-		 * And don't dick with the root inode
 		 */
-		if (inode->i_ino == 2)
-			return error;
-		if (S_ISLNK(inode->i_mode))
-			return error;	/* VFS will deal with it */
-
 		if ((inode->i_mode & S_IFMT) == (fattr.f_mode & S_IFMT)) {
 			smb_set_inode_attr(inode, &fattr);
 		} else {
@@ -280,21 +259,21 @@ smb_delete_inode(struct inode *ino)
 	clear_inode(ino);
 }
 
+/* FIXME: flags and has_arg could probably be merged. */
 static struct option opts[] = {
-	{ "version",	0, 'v' },
-	{ "win95",	SMB_MOUNT_WIN95, 1 },
-	{ "oldattr",	SMB_MOUNT_OLDATTR, 1 },
-	{ "dirattr",	SMB_MOUNT_DIRATTR, 1 },
-	{ "case",	SMB_MOUNT_CASE, 1 },
-	{ "uid",	0, 'u' },
-	{ "gid",	0, 'g' },
-	{ "file_mode",	0, 'f' },
-	{ "dir_mode",	0, 'd' },
-	{ "iocharset",	0, 'i' },
-	{ "codepage",	0, 'c' },
-	{ "ttl",	0, 't' },
-	{ "timeo",	0, 'o' },
-	{ NULL,		0, 0}
+	{ "version",	1, 0, 'v' },
+	{ "win95",	0, SMB_MOUNT_WIN95, 1 },
+	{ "oldattr",	0, SMB_MOUNT_OLDATTR, 1 },
+	{ "dirattr",	0, SMB_MOUNT_DIRATTR, 1 },
+	{ "case",	0, SMB_MOUNT_CASE, 1 },
+	{ "uid",	1, 0, 'u' },
+	{ "gid",	1, 0, 'g' },
+	{ "file_mode",	1, 0, 'f' },
+	{ "dir_mode",	1, 0, 'd' },
+	{ "iocharset",	1, 0, 'i' },
+	{ "codepage",	1, 0, 'c' },
+	{ "ttl",	1, 0, 't' },
+	{ NULL,		0, 0, 0}
 };
 
 static int
@@ -311,6 +290,7 @@ parse_options(struct smb_mount_data_kernel *mnt, char *options)
 				&optopt, &optarg, &flags, &value)) > 0) {
 
 		VERBOSE("'%s' -> '%s'\n", optopt, optarg ? optarg : "<none>");
+
 		switch (c) {
 		case 1:
 			/* got a "flag" option */
@@ -325,19 +305,17 @@ parse_options(struct smb_mount_data_kernel *mnt, char *options)
 			break;
 		case 'u':
 			mnt->uid = value;
-			flags |= SMB_MOUNT_UID;
 			break;
 		case 'g':
 			mnt->gid = value;
-			flags |= SMB_MOUNT_GID;
 			break;
 		case 'f':
-			mnt->file_mode = (value & S_IRWXUGO) | S_IFREG;
-			flags |= SMB_MOUNT_FMODE;
+			mnt->file_mode = value & (S_IRWXU | S_IRWXG | S_IRWXO);
+			mnt->file_mode |= S_IFREG;
 			break;
 		case 'd':
-			mnt->dir_mode = (value & S_IRWXUGO) | S_IFDIR;
-			flags |= SMB_MOUNT_DMODE;
+			mnt->dir_mode = value & (S_IRWXU | S_IRWXG | S_IRWXO);
+			mnt->dir_mode |= S_IFDIR;
 			break;
 		case 'i':
 			strncpy(mnt->codepage.local_name, optarg, 
@@ -350,9 +328,6 @@ parse_options(struct smb_mount_data_kernel *mnt, char *options)
 		case 't':
 			mnt->ttl = value;
 			break;
-		case 'o':
-			mnt->timeo = value;
-			break;
 		default:
 			printk ("smbfs: Unrecognized mount option %s\n",
 				optopt);
@@ -363,49 +338,6 @@ parse_options(struct smb_mount_data_kernel *mnt, char *options)
 	return c;
 }
 
-/*
- * smb_show_options() is for displaying mount options in /proc/mounts.
- * It tries to avoid showing settings that were not changed from their
- * defaults.
- */
-static int
-smb_show_options(struct seq_file *s, struct vfsmount *m)
-{
-	struct smb_mount_data_kernel *mnt = m->mnt_sb->u.smbfs_sb.mnt;
-	int i;
-
-	for (i = 0; opts[i].name != NULL; i++)
-		if (mnt->flags & opts[i].flag)
-			seq_printf(s, ",%s", opts[i].name);
-
-	if (mnt->flags & SMB_MOUNT_UID)
-		seq_printf(s, ",uid=%d", mnt->uid);
-	if (mnt->flags & SMB_MOUNT_GID)
-		seq_printf(s, ",gid=%d", mnt->gid);
-	if (mnt->mounted_uid != 0)
-		seq_printf(s, ",mounted_uid=%d", mnt->mounted_uid);
-
-	/* 
-	 * Defaults for file_mode and dir_mode are unknown to us; they
-	 * depend on the current umask of the user doing the mount.
-	 */
-	if (mnt->flags & SMB_MOUNT_FMODE)
-		seq_printf(s, ",file_mode=%04o", mnt->file_mode & S_IRWXUGO);
-	if (mnt->flags & SMB_MOUNT_DMODE)
-		seq_printf(s, ",dir_mode=%04o", mnt->dir_mode & S_IRWXUGO);
-
-	if (strcmp(mnt->codepage.local_name, CONFIG_NLS_DEFAULT))
-		seq_printf(s, ",iocharset=%s", mnt->codepage.local_name);
-	if (strcmp(mnt->codepage.remote_name, SMB_NLS_REMOTE))
-		seq_printf(s, ",codepage=%s", mnt->codepage.remote_name);
-
-	if (mnt->ttl != SMB_TTL_DEFAULT)
-		seq_printf(s, ",ttl=%d", mnt->ttl);
-	if (mnt->timeo != SMB_TIMEO_DEFAULT)
-		seq_printf(s, ",timeo=%d", mnt->timeo);
-
-	return 0;
-}
 
 static void
 smb_put_super(struct super_block *sb)
@@ -444,7 +376,6 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	struct inode *root_inode;
 	struct smb_fattr root;
 	int ver;
-	void *mem;
 
 	if (!raw_data)
 		goto out_no_data;
@@ -456,7 +387,6 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 
 	sb->s_blocksize = 1024;	/* Eh...  Is this correct? */
 	sb->s_blocksize_bits = 10;
-	sb->s_maxbytes = MAX_NON_LFS;
 	sb->s_magic = SMB_SUPER_MAGIC;
 	sb->s_op = &smb_sops;
 
@@ -484,13 +414,10 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 
 	/* Allocate the mount data structure */
 	/* FIXME: merge this with the other malloc and get a whole page? */
-	mem = smb_kmalloc(sizeof(struct smb_ops) +
-			  sizeof(struct smb_mount_data_kernel), GFP_KERNEL);
-	if (!mem)
+	mnt = smb_kmalloc(sizeof(struct smb_mount_data_kernel), GFP_KERNEL);
+	if (!mnt)
 		goto out_no_mount;
-	server->mnt = mnt = mem;
-	server->ops = mem + sizeof(struct smb_mount_data_kernel);
-	smb_install_null_ops(server->ops);
+	server->mnt = mnt;
 
 	memset(mnt, 0, sizeof(struct smb_mount_data_kernel));
 	strncpy(mnt->codepage.local_name, CONFIG_NLS_DEFAULT,
@@ -498,30 +425,30 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	strncpy(mnt->codepage.remote_name, SMB_NLS_REMOTE,
 		SMB_NLS_MAXNAMELEN);
 
-	mnt->ttl = SMB_TTL_DEFAULT;
-	mnt->timeo = SMB_TIMEO_DEFAULT;
+	mnt->ttl = 1000;
 	if (ver == SMB_MOUNT_OLDVERSION) {
 		mnt->version = oldmnt->version;
 
 		/* FIXME: is this enough to convert uid/gid's ? */
+		mnt->mounted_uid = oldmnt->mounted_uid;
 		mnt->uid = oldmnt->uid;
 		mnt->gid = oldmnt->gid;
 
-		mnt->file_mode = (oldmnt->file_mode & S_IRWXUGO) | S_IFREG;
-		mnt->dir_mode = (oldmnt->dir_mode & S_IRWXUGO) | S_IFDIR;
+		mnt->file_mode =
+			oldmnt->file_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
+		mnt->dir_mode =
+			oldmnt->dir_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
+		mnt->file_mode |= S_IFREG;
+		mnt->dir_mode  |= S_IFDIR;
 
-		mnt->flags = (oldmnt->file_mode >> 9) | SMB_MOUNT_UID |
-			SMB_MOUNT_GID | SMB_MOUNT_FMODE | SMB_MOUNT_DMODE;
+		mnt->flags = (oldmnt->file_mode >> 9);
 	} else {
-		mnt->file_mode = S_IRWXU | S_IRGRP | S_IXGRP |
-				S_IROTH | S_IXOTH | S_IFREG;
-	        mnt->dir_mode = S_IRWXU | S_IRGRP | S_IXGRP |
-				S_IROTH | S_IXOTH | S_IFDIR;
 		if (parse_options(mnt, raw_data))
 			goto out_bad_option;
+
+		mnt->mounted_uid = current->uid;
 	}
 	smb_setcodepage(server, &mnt->codepage);
-	mnt->mounted_uid = current->uid;
 
 	/*
 	 * Display the enabled options
@@ -543,7 +470,6 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root)
 		goto out_no_root;
-
 	smb_new_dentry(sb->s_root);
 
 	return sb;
@@ -584,7 +510,7 @@ smb_notify_change(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;
 	struct smb_sb_info *server = server_from_dentry(dentry);
-	unsigned int mask = (S_IFREG | S_IFDIR | S_IRWXUGO);
+	unsigned int mask = (S_IFREG | S_IFDIR | S_IRWXU | S_IRWXG | S_IRWXO);
 	int error, changed, refresh = 0;
 	struct smb_fattr fattr;
 
@@ -609,30 +535,17 @@ smb_notify_change(struct dentry *dentry, struct iattr *attr)
 		VERBOSE("changing %s/%s, old size=%ld, new size=%ld\n",
 			DENTRY_PATH(dentry),
 			(long) inode->i_size, (long) attr->ia_size);
-
-		filemap_fdatasync(inode->i_mapping);
-		filemap_fdatawait(inode->i_mapping);
-
 		error = smb_open(dentry, O_WRONLY);
 		if (error)
 			goto out;
-		error = server->ops->truncate(inode, attr->ia_size);
+		error = smb_proc_trunc(server, inode->u.smbfs_i.fileid,
+					 attr->ia_size);
 		if (error)
 			goto out;
 		error = vmtruncate(inode, attr->ia_size);
 		if (error)
 			goto out;
 		refresh = 1;
-	}
-
-	if (server->opt.capabilities & SMB_CAP_UNIX) {
-		/* For now we don't want to set the size with setattr_unix */
-		attr->ia_valid &= ~ATTR_SIZE;
-		/* FIXME: only call if we actually want to set something? */
-		error = smb_proc_setattr_unix(dentry, attr, 0, 0);
-		if (!error)
-			refresh = 1;
-		goto out;
 	}
 
 	/*

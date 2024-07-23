@@ -50,7 +50,6 @@
 
 static int ibwdt_is_open;
 static spinlock_t ibwdt_lock;
-static int expect_close = 0;
 
 /*
  *
@@ -88,42 +87,10 @@ static int expect_close = 0;
  *
  */
 
-static int wd_times[] = {
-	30,	/* 0x0 */
-	28,	/* 0x1 */
-	26,	/* 0x2 */
-	24,	/* 0x3 */
-	22,	/* 0x4 */
-	20,	/* 0x5 */
-	18,	/* 0x6 */
-	16,	/* 0x7 */
-	14,	/* 0x8 */
-	12,	/* 0x9 */
-	10,	/* 0xA */
-	8,	/* 0xB */
-	6,	/* 0xC */
-	4,	/* 0xD */
-	2,	/* 0xE */
-	0,	/* 0xF */
-};
-
 #define WDT_STOP 0x441
 #define WDT_START 0x443
 
-/* Default timeout */
 #define WD_TIMO 0		/* 30 seconds +/- 20%, from table */
-
-static int wd_margin = WD_TIMO;
-
-#ifdef CONFIG_WATCHDOG_NOWAYOUT
-static int nowayout = 1;
-#else
-static int nowayout = 0;
-#endif
-
-MODULE_PARM(nowayout,"i");
-MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
-
 
 /*
  *	Kernel methods.
@@ -133,7 +100,7 @@ static void
 ibwdt_ping(void)
 {
 	/* Write a watchdog value */
-	outb_p(wd_margin, WDT_START);
+	outb_p(WD_TIMO, WDT_START);
 }
 
 static ssize_t
@@ -144,20 +111,6 @@ ibwdt_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 		return -ESPIPE;
 
 	if (count) {
-		if (!nowayout) {
-			size_t i;
-
-			/* In case it was set long ago */
-			expect_close = 0;
-
-			for (i = 0; i != count; i++) {
-				char c;
-				if (get_user(c, buf + i))
-					return -EFAULT;
-				if (c == 'V')
-					expect_close = 1;
-			}
-		}
 		ibwdt_ping();
 		return 1;
 	}
@@ -174,13 +127,8 @@ static int
 ibwdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	  unsigned long arg)
 {
-	int i, new_margin;
-
 	static struct watchdog_info ident = {
-		WDIOF_KEEPALIVEPING |
-		WDIOF_SETTIMEOUT |
-		WDIOF_MAGICCLOSE,
-		1, "IB700 WDT"
+		WDIOF_KEEPALIVEPING, 1, "IB700 WDT"
 	};
 
 	switch (cmd) {
@@ -196,22 +144,6 @@ ibwdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 	case WDIOC_KEEPALIVE:
 	  ibwdt_ping();
-	  break;
-
-	case WDIOC_SETTIMEOUT:
-	  if (get_user(new_margin, (int *)arg))
-		  return -EFAULT;
-	  if ((new_margin < 0) || (new_margin > 30))
-		  return -EINVAL;
-	  for (i = 0x0F; i > -1; i--)
-		  if (wd_times[i] > new_margin)
-			  break;
-	  wd_margin = i;
-	  ibwdt_ping();
-	  /* Fall */
-
-	case WDIOC_GETTIMEOUT:
-	  return put_user(wd_times[wd_margin], (int *)arg);
 	  break;
 
 	default:
@@ -249,11 +181,9 @@ ibwdt_close(struct inode *inode, struct file *file)
 	lock_kernel();
 	if (MINOR(inode->i_rdev) == WATCHDOG_MINOR) {
 		spin_lock(&ibwdt_lock);
-		if (expect_close) {
-			outb_p(wd_times[wd_margin], WDT_STOP);
-		} else {
-			printk(KERN_CRIT "WDT device closed unexpectedly.  WDT will not stop!\n");
-		}
+#ifndef CONFIG_WATCHDOG_NOWAYOUT
+		outb_p(WD_TIMO, WDT_STOP);
+#endif
 		ibwdt_is_open = 0;
 		spin_unlock(&ibwdt_lock);
 	}
@@ -271,7 +201,7 @@ ibwdt_notify_sys(struct notifier_block *this, unsigned long code,
 {
 	if (code == SYS_DOWN || code == SYS_HALT) {
 		/* Turn the WDT off */
-		outb_p(wd_times[wd_margin], WDT_STOP);
+		outb_p(WD_TIMO, WDT_STOP);
 	}
 	return NOTIFY_DONE;
 }

@@ -5,8 +5,6 @@
  * Bugreports.to..: <Linux390@de.ibm.com>
  * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 2000, 2001
  *
- * $Revision: 1.52.2.3 $
- *
  * History of changes:
  * 05/14/01 fixed PL030160GTO (BUG() in erp_action_5)
  */
@@ -43,9 +41,7 @@ log_erp_chain (ccw_req_t *cqr,
         char    *nl, 
                 *end_cqr,
                 *begin, 
-                *end,
-                buffer[80];
-        
+                *end;
         
         /* dump sense data */
         if (device->discipline            && 
@@ -58,130 +54,83 @@ log_erp_chain (ccw_req_t *cqr,
         /* log the channel program */
         while (loop_cqr != NULL) {
                 
-                DEV_MESSAGE (KERN_ERR, device, 
-                             "(%s) ERP chain report for req: %p",
-                             caller == 0 ? "EXAMINE" : "ACTION",
-                             loop_cqr);
+                DASD_MESSAGE (KERN_ERR, device, 
+                              "(%s) ERP chain report for req: %p",
+                              caller == 0 ? "EXAMINE" : "ACTION",
+                              loop_cqr);
                 
                 nl      = (char *) loop_cqr;
                 end_cqr = nl + sizeof (ccw_req_t); 
                 
                 while (nl < end_cqr) {
-
-                        sprintf (buffer,
-                                 "%p: %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x",
-                                 nl,
-                                 nl[0], nl[1], nl[2], nl[3],
-                                 nl[4], nl[5], nl[6], nl[7],
-                                 nl[8], nl[9], nl[10], nl[11],
-                                 nl[12], nl[13], nl[14], nl[15]);
-        
-                        DEV_MESSAGE (KERN_ERR, device, "%s", 
-                                     buffer);
                         
+                        DASD_MESSAGE (KERN_ERR, device, 
+                                      "%p: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                      "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                      nl,
+                                      nl[0], nl[1], nl[2], nl[3],
+                                      nl[4], nl[5], nl[6], nl[7],
+                                      nl[8], nl[9], nl[10], nl[11],
+                                      nl[12], nl[13], nl[14], nl[15]);
                         nl +=16;
                 }        
-               	
-		DEV_MESSAGE (KERN_ERR, device,
-				"DATA area is at: %p",
-				loop_cqr->data);
-
-		nl      = (char *) loop_cqr->data;
-		end_cqr = nl + loop_cqr->datasize;
-
-                while (nl < end_cqr) {
-					 
-                        sprintf (buffer,
-                                 "%p: %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x"
-                                 " %02x%02x%02x%02x",
-                                  nl,
-                                  nl[0], nl[1], nl[2], nl[3],
-                                  nl[4], nl[5], nl[6], nl[7],
-                                  nl[8], nl[9], nl[10], nl[11],
-                                 nl[12], nl[13], nl[14], nl[15]);
-
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     buffer);
-
-                        nl +=16;
-              }
-	       	
+                
                 nl  = (char *) loop_cqr->cpaddr;
                 
                 if (loop_cqr->cplength > 40) { /* log only parts of the CP */
 
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
                                       "Start of channel program:");
                         
                         for (i = 0; i < 20; i += 2) { 
                                 
-                                sprintf (buffer,
-                                         "%p: %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x",
-                                         nl,
-                                         nl[0], nl[1], nl[2], nl[3],
-                                         nl[4], nl[5], nl[6], nl[7],
-                                         nl[8], nl[9], nl[10], nl[11],
-                                         nl[12], nl[13], nl[14], nl[15]);
+                                DASD_MESSAGE (KERN_ERR, device, 
+                                              "%p: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                              "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                              nl,
+                                              nl[0], nl[1], nl[2], nl[3],
+                                              nl[4], nl[5], nl[6], nl[7],
+                                              nl[8], nl[9], nl[10], nl[11],
+                                              nl[12], nl[13], nl[14], nl[15]);
                                 
-                                DEV_MESSAGE (KERN_ERR, device, "%s",
-                                             buffer);
-
                                 nl += 16;
                         }
                         
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     "End of channel program:");
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
+                                      "End of channel program:");
                         
                         nl  = (char *) loop_cqr->cpaddr;
                         nl  += ((loop_cqr->cplength - 10) * 8);
                         
                         for (i = 0; i < 20; i += 2) { 
                                 
-                                sprintf (buffer,
-                                         "%p: %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x",
-                                         nl,
-                                         nl[0], nl[1], nl[2], nl[3],
-                                         nl[4], nl[5], nl[6], nl[7],
-                                         nl[8], nl[9], nl[10], nl[11],
-                                         nl[12], nl[13], nl[14], nl[15]);
-                                
-                                DEV_MESSAGE (KERN_ERR, device, "%s",
-                                             buffer);
+                                DASD_MESSAGE (KERN_ERR, device, 
+                                              "%p: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                              "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                              nl,
+                                              nl[0], nl[1], nl[2], nl[3],
+                                              nl[4], nl[5], nl[6], nl[7],
+                                              nl[8], nl[9], nl[10], nl[11],
+                                              nl[12], nl[13], nl[14], nl[15]);
                                 
                                 nl += 16;
                         }
                         
                 } else { /* log the whole CP */
                         
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
                                       "Channel program (complete):");
                         
                         for (i = 0; i < (loop_cqr->cplength + 4); i += 2) { 
                                 
-                                sprintf (buffer,
-                                         "%p: %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x"
-                                         " %02x%02x%02x%02x",
-                                         nl,
-                                         nl[0], nl[1], nl[2], nl[3],
-                                         nl[4], nl[5], nl[6], nl[7],
-                                         nl[8], nl[9], nl[10], nl[11],
-                                         nl[12], nl[13], nl[14], nl[15]);
-                                
-                                DEV_MESSAGE (KERN_ERR, device, "%s",
-                                             buffer);
+                                DASD_MESSAGE (KERN_ERR, device, 
+                                              "%p: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                              "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                              nl,
+                                              nl[0], nl[1], nl[2], nl[3],
+                                              nl[4], nl[5], nl[6], nl[7],
+                                              nl[8], nl[9], nl[10], nl[11],
+                                              nl[12], nl[13], nl[14], nl[15]);
                                 
                                 nl += 16;
                         }
@@ -201,34 +150,29 @@ log_erp_chain (ccw_req_t *cqr,
                         
                                 nl -= 10*8;     /* start some bytes before */
                                 
-                                DEV_MESSAGE (KERN_ERR, device, 
-                                             "Failed CCW (%p) (area):",
-                                             (void *)(long)cpa);
+                                DASD_MESSAGE (KERN_ERR, device, 
+                                                "Failed CCW (%p) (area):",
+                                                (void *)(long)cpa);
                                 
                                 for (i = 0; i < 20; i += 2) { 
                                         
-                                        sprintf (buffer,
-                                                 "%p: %02x%02x%02x%02x"
-                                                 " %02x%02x%02x%02x"
-                                                 " %02x%02x%02x%02x"
-                                                 " %02x%02x%02x%02x",
-                                                 nl,
-                                                 nl[0], nl[1], nl[2], nl[3],
-                                                 nl[4], nl[5], nl[6], nl[7],
-                                                 nl[8], nl[9], nl[10], nl[11],
-                                                 nl[12], nl[13], nl[14], nl[15]);
-
-                                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                                     buffer);
+                                        DASD_MESSAGE (KERN_ERR, device, 
+                                                      "%p: %02x%02x%02x%02x %02x%02x%02x%02x "
+                                                      "%02x%02x%02x%02x %02x%02x%02x%02x",
+                                                      nl,
+                                                      nl[0], nl[1], nl[2], nl[3],
+                                                      nl[4], nl[5], nl[6], nl[7],
+                                                      nl[8], nl[9], nl[10], nl[11],
+                                                      nl[12], nl[13], nl[14], nl[15]);
                                         
                                         nl += 16;
                                 }
                                 
                         } else {
                                 
-                                DEV_MESSAGE (KERN_ERR, device, 
-                                             "Failed CCW (%p) already logged",
-                                             (void *)(long)cpa);
+                                DASD_MESSAGE (KERN_ERR, device, 
+                                              "Failed CCW (%p) already logged",
+                                              (void *)(long)cpa);
                         }
                 }
                 
@@ -272,9 +216,9 @@ dasd_3990_erp_examine_24 (ccw_req_t *cqr,
 	if ((  sense[0] & SNS0_CMD_REJECT       ) &&
 	    (!(sense[2] & SNS2_ENV_DATA_PRESENT))   ) {
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "EXAMINE 24: Command Reject detected - "
-                             "fatal error");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "EXAMINE 24: Command Reject detected - "
+                              "fatal error");
 
                 return dasd_era_fatal;
 	}
@@ -283,9 +227,9 @@ dasd_3990_erp_examine_24 (ccw_req_t *cqr,
 	if ((  sense[1] & SNS1_INV_TRACK_FORMAT ) &&
             (!(sense[2] & SNS2_ENV_DATA_PRESENT))   ) {
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "EXAMINE 24: Invalid Track Format detected "
-                             "- fatal error");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "EXAMINE 24: Invalid Track Format detected "
+                              "- fatal error");
 
                 return dasd_era_fatal;
 	}
@@ -293,10 +237,9 @@ dasd_3990_erp_examine_24 (ccw_req_t *cqr,
 	/* check for 'No Record Found' */
 	if (sense[1] & SNS1_NO_REC_FOUND) {
                 
-                DEV_MESSAGE (KERN_ERR, device,
-                             "EXAMINE 24: No Record Found detected %s",
-                             cqr == device->init_cqr ? " " :
-                             "- fatal error");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "EXAMINE 24: No Record Found detected "
+                              "- fatal error");
 
                 return dasd_era_fatal;
 	}
@@ -330,9 +273,8 @@ dasd_3990_erp_examine_32 (ccw_req_t *cqr,
 		return dasd_era_none;
 
 	case 0x01:
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "EXAMINE 32: fatal error");
-
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "EXAMINE 32: fatal error");
 		return dasd_era_fatal;
 
 	default:
@@ -363,9 +305,8 @@ dasd_3990_erp_examine (ccw_req_t *cqr,
                        devstat_t *stat)
 {
 
-	char          *sense  = stat->ii.sense.data;
-        dasd_era_t     era    = dasd_era_recover;
-        dasd_device_t *device = cqr->device;
+	char       *sense = stat->ii.sense.data;
+        dasd_era_t era    = dasd_era_recover;
 
 	/* check for successful execution first */
 	if (stat->cstat == 0x00                                 &&
@@ -386,8 +327,7 @@ dasd_3990_erp_examine (ccw_req_t *cqr,
 	} 
 
         /* log the erp chain if fatal error occurred */
-        if ((era == dasd_era_fatal  ) &&
-            (cqr != device->init_cqr)   ){
+        if (era == dasd_era_fatal) {
 
                 log_erp_chain (cqr, 
                                0, 
@@ -447,6 +387,13 @@ dasd_3990_erp_cleanup (ccw_req_t *erp,
  *   Block the given device request queue to prevent from further
  *   processing until the started timer has expired or an related
  *   interrupt was received.
+ *
+ *  PARAMETER
+ *   erp                request to be blocked
+ *   expires            time to wait until restart (in seconds) 
+ *
+ * RETURN VALUES
+ *   void               
  */
 void
 dasd_3990_erp_block_queue (ccw_req_t     *erp,
@@ -455,26 +402,20 @@ dasd_3990_erp_block_queue (ccw_req_t     *erp,
 
 	dasd_device_t *device = erp->device;
 
-        DEV_MESSAGE (KERN_INFO, device,
-                     "blocking request queue for %is",
-                     (int) expires);
-
-        device->stopped |= DASD_STOPPED_PENDING;
+        DASD_MESSAGE (KERN_INFO, device,
+                      "blocking request queue for %is",
+                      (int) expires);
 
         check_then_set (&erp->status,
                         CQR_STATUS_ERROR,
-                        CQR_STATUS_QUEUED);
+                        CQR_STATUS_PENDING);
 
         /* restart queue after some time */
-        if (!timer_pending(&device->blocking_timer)) {
-                init_timer(&device->blocking_timer);
-                device->blocking_timer.function = dasd_3990_erp_restart_queue; 
-                device->blocking_timer.data     = (unsigned long) device;
-                device->blocking_timer.expires  = jiffies + (expires * HZ);
-                add_timer(&device->blocking_timer); 
-        } else {
-                mod_timer(&device->blocking_timer, jiffies + (expires * HZ));
-        }
+        device->timer.function = dasd_3990_erp_restart_queue; 
+        device->timer.data     = (unsigned long) erp;
+        device->timer.expires  = jiffies + (expires * HZ);
+
+        add_timer(&device->timer); 
 
 } /* end dasd_3990_erp_block_queue */ 
 
@@ -482,15 +423,24 @@ dasd_3990_erp_block_queue (ccw_req_t     *erp,
  * DASD_3990_ERP_RESTART_QUEUE 
  *
  * DESCRIPTION
- *   Restarts request queue of current device.
- *   This has to be done if either an related interrupt was received, or 
- *   the timer has expired.
+ *   Restarts request currently in status PENDING.
+ *   This has to be done if either an related interrupt has received, or 
+ *   a timer has expired.
+ *   
+ *
+ *  PARAMETER
+ *   erp                pointer to the PENDING ERP
+ *
+ * RETURN VALUES
+ *   void               
+ *
  */
 void
-dasd_3990_erp_restart_queue (unsigned long device_ptr)
+dasd_3990_erp_restart_queue (unsigned long erp)
 {
 
-	dasd_device_t *device = (dasd_device_t *) device_ptr;
+        ccw_req_t     *cqr    = (void *) erp;
+	dasd_device_t *device = cqr->device;
 	unsigned long flags;
         
         /* get the needed locks to modify the request queue */
@@ -498,13 +448,20 @@ dasd_3990_erp_restart_queue (unsigned long device_ptr)
                                    flags);
 
         /* 'restart' the device queue */
-        DEV_MESSAGE (KERN_INFO, device, "%s",
-                     "request queue restarted by MIH");
+        if (cqr->status == CQR_STATUS_PENDING) {
+                
+                DASD_MESSAGE (KERN_INFO, device, "%s",
+                              "request queue restarted by MIH");
 
-        device->stopped &= ~DASD_STOPPED_PENDING;
+                check_then_set (&cqr->status,
+                                CQR_STATUS_PENDING,
+                                CQR_STATUS_QUEUED);
+        }
 
+        /* release the lock */
         s390irq_spin_unlock_irqrestore (device->devinfo.irq, 
                                         flags);
+
         dasd_schedule_bh (device);
 
 } /* end dasd_3990_erp_restart_queue */
@@ -538,9 +495,9 @@ dasd_3990_erp_int_req (ccw_req_t *erp)
         } else {
 
                 /* issue a message and wait for 'device ready' interrupt */
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "is offline or not installed - "
-                             "INTERVENTION REQUIRED!!");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "is offline or not installed - "
+                              "INTERVENTION REQUIRED!!");
                 
                 dasd_3990_erp_block_queue (erp,
                                            60);
@@ -578,29 +535,32 @@ dasd_3990_erp_alternate_path (ccw_req_t *erp)
 
 	if ((erp->lpm & ioinfo[irq]->opm) != 0x00) {
 
-		DEV_MESSAGE (KERN_DEBUG, device,
-                             "try alternate lpm=%x (lpum=%x / opm=%x)",
-                             erp->lpm,
-                             erp->dstat->lpum,
-                             ioinfo[irq]->opm);
+		DASD_MESSAGE (KERN_DEBUG, device,
+                              "try alternate lpm=%x (lpum=%x / opm=%x)",
+                              erp->lpm,
+                              erp->dstat->lpum,
+                              ioinfo[irq]->opm);
 
 		/* reset status to queued to handle the request again... */
-		if (erp->status > CQR_STATUS_QUEUED)
-                        erp->status = CQR_STATUS_QUEUED;
+		check_then_set (&erp->status,
+                                CQR_STATUS_ERROR,
+                                CQR_STATUS_QUEUED);
 
                 erp->retries = 1;
                 
 	} else {
          
-                DEV_MESSAGE (KERN_ERR, device,
-                             "No alternate channel path left (lpum=%x / "
-                             "opm=%x) -> permanent error",
-                             erp->dstat->lpum,
-                             ioinfo[irq]->opm);
-
+                DASD_MESSAGE (KERN_ERR, device,
+                              "No alternate channel path left (lpum=%x / "
+                              "opm=%x) -> permanent error",
+                              erp->dstat->lpum,
+                              ioinfo[irq]->opm);
+                
                 /* post request with permanent error */
-		if (erp->status > CQR_STATUS_QUEUED)
-                        erp->status = CQR_STATUS_FAILED;
+                check_then_set (&erp->status,
+                                CQR_STATUS_ERROR,
+                                CQR_STATUS_FAILED);
+
         }
         
 } /* end dasd_3990_erp_alternate_path */
@@ -635,8 +595,8 @@ dasd_3990_erp_DCTL (ccw_req_t *erp,
         
 	if (!dctl_cqr) {
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Unable to allocate DCTL-CQR");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate DCTL-CQR");
                 
                 check_then_set (&erp->status,
                                 CQR_STATUS_ERROR,
@@ -657,9 +617,8 @@ dasd_3990_erp_DCTL (ccw_req_t *erp,
         if (dasd_set_normalized_cda(ccw, 
                                     __pa (DCTL_data), dctl_cqr, erp->device)) {
                 dasd_free_request (dctl_cqr, erp->device);
-
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Unable to allocate DCTL-CQR");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate DCTL-CQR");
 
                 check_then_set (&erp->status,
                                 CQR_STATUS_ERROR,
@@ -673,8 +632,7 @@ dasd_3990_erp_DCTL (ccw_req_t *erp,
         dctl_cqr->lpm      = LPM_ANYPATH;
         dctl_cqr->expires  = 5 * TOD_MIN;
         dctl_cqr->retries  = 2;
-
-	dctl_cqr->buildclk = get_clock ();
+	asm volatile ("STCK %0":"=m" (dctl_cqr->buildclk));
 
         dctl_cqr->status = CQR_STATUS_FILLED;
 
@@ -745,26 +703,24 @@ dasd_3990_erp_action_4 (ccw_req_t *erp,
 
         } else {
 
-                if (sense[25] == 0x1D) {	/* state change pending */
+                if (sense[25] & 0x1D) {	/* state change pending */
                         
-                        DEV_MESSAGE (KERN_INFO, device,
-                                     "waiting for state change pending "
-                                     "interrupt, %d retries left",
-                                     erp->retries);
-
+                        DASD_MESSAGE (KERN_INFO, device, "%s",
+                                      "waiting for state change pending "
+                                      "int");
+                        
                         dasd_3990_erp_block_queue (erp,
                                                    30);
+                        
                 } else {
-			DEV_MESSAGE (KERN_INFO, device, 
-                                     "redriving request immediately, "
-                                     "%d retries left", 
-                                     erp->retries);
+
                         /* no state change pending - retry */
                         check_then_set (&erp->status,
                                         CQR_STATUS_ERROR,
                                         CQR_STATUS_QUEUED);
                 }
         }
+
 	return erp;
 
 } /* end dasd_3990_erp_action_4 */
@@ -834,98 +790,98 @@ dasd_3990_handle_env_data (ccw_req_t *erp,
 			case 0x00:	/* No Message */
 				break;
 			case 0x01:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Invalid Command");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Invalid Command");
 				break;
 			case 0x02:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Invalid Command "
-                                             "Sequence");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Invalid Command "
+                                              "Sequence");
 				break;
 			case 0x03:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - CCW Count less than "
-                                             "required");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - CCW Count less than "
+                                              "required");
 				break;
 			case 0x04:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Invalid Parameter");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Invalid Parameter");
 				break;
 			case 0x05:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Diagnostic of Sepecial"
-                                             " Command Violates File Mask");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Diagnostic of Sepecial"
+                                              " Command Violates File Mask");
 				break;
 			case 0x07:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Channel Returned with "
-                                             "Incorrect retry CCW");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Channel Returned with "
+                                              "Incorrect retry CCW");
 				break;
 			case 0x08:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Reset Notification");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Reset Notification");
 				break;
 			case 0x09:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Storage Path Restart");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Storage Path Restart");
 				break;
 			case 0x0A:
-                                DEV_MESSAGE (KERN_WARNING, device,
-                                             "FORMAT 0 - Channel requested "
-                                             "... %02x",
-                                             sense[8]);
+                                DASD_MESSAGE (KERN_WARNING, device,
+                                              "FORMAT 0 - Channel requested "
+                                              "... %02x",
+                                              sense[8]);
 				break;
 			case 0x0B:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Invalid Defective/"
-                                             "Alternate Track Pointer");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Invalid Defective/"
+                                              "Alternate Track Pointer");
 				break;
 			case 0x0C:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - DPS Installation "
-                                             "Check");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - DPS Installation "
+                                              "Check");
 				break;
 			case 0x0E:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Command Invalid on "
-                                             "Secondary Address");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Command Invalid on "
+                                              "Secondary Address");
 				break;
 			case 0x0F:
-                                DEV_MESSAGE (KERN_WARNING, device,
-                                             "FORMAT 0 - Status Not As "
-                                             "Required: reason %02x",
-                                             sense[8]);
+                                DASD_MESSAGE (KERN_WARNING, device,
+                                              "FORMAT 0 - Status Not As "
+                                              "Required: reason %02x",
+                                              sense[8]);
 				break;
 			default:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Reseved");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Reseved");
 			}
 		} else {
 			switch (msg_no) {
 			case 0x00:	/* No Message */
 				break;
 			case 0x01:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Device Error Source");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Device Error Source");
 				break;
 			case 0x02:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Reserved");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Reserved");
 				break;
 			case 0x03:
-                                DEV_MESSAGE (KERN_WARNING, device,
-                                             "FORMAT 0 - Device Fenced - "
-                                             "device = %02x",
-                                             sense[4]);
+                                DASD_MESSAGE (KERN_WARNING, device,
+                                              "FORMAT 0 - Device Fenced - "
+                                              "device = %02x",
+                                              sense[4]);
 				break;
 			case 0x04:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Data Pinned for "
-                                             "Device");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Data Pinned for "
+                                              "Device");
 				break;
 			default:
-                                DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                             "FORMAT 0 - Reserved");
+                                DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                              "FORMAT 0 - Reserved");
 			}
                 }
                 break;
@@ -935,348 +891,348 @@ dasd_3990_handle_env_data (ccw_req_t *erp,
 		case 0x00:	/* No Message */
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Device Status 1 not as "
-                                     "expected");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Device Status 1 not as "
+                                      "expected");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Index missing");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Index missing");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Interruption cannot be reset");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Interruption cannot be reset");
 			break;
 		case 0x05:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Device did not respond to "
-                                     "selection");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Device did not respond to "
+                                      "selection");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Device check-2 error or Set "
-                                     "Sector is not complete");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Device check-2 error or Set "
+                                      "Sector is not complete");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Head address does not "
-                                     "compare");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Head address does not "
+                                      "compare");
 			break;
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Device status 1 not valid");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Device status 1 not valid");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Device not ready");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Device not ready");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Track physical address did "
-                                     "not compare");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Track physical address did "
+                                      "not compare");
 			break;
 		case 0x0B:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Missing device address bit");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Missing device address bit");
 			break;
 		case 0x0C:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Drive motor switch is off");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Drive motor switch is off");
 			break;
 		case 0x0D:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Seek incomplete");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Seek incomplete");
 			break;
 		case 0x0E:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Cylinder address did not "
-                                     "compare");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Cylinder address did not "
+                                      "compare");
 			break;
 		case 0x0F:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Offset active cannot be "
-                                     "reset");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Offset active cannot be "
+                                      "reset");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 1 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 1 - Reserved");
 		}
                 break;		
                         
 	case 0x20:	/* Format 2 - 3990 Equipment Checks */
 		switch (msg_no) {
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 2 - 3990 check-2 error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 2 - 3990 check-2 error");
 			break;
 		case 0x0E:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 2 - Support facility errors");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 2 - Support facility errors");
 			break;
 		case 0x0F:
-                        DEV_MESSAGE (KERN_WARNING, device,
-                                     "FORMAT 2 - Microcode detected error %02x",
-                                     sense[8]);
+                        DASD_MESSAGE (KERN_WARNING, device,
+                                      "FORMAT 2 - Microcode detected error %02x",
+                                      sense[8]);
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 2 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 2 - Reserved");
 		}
                 break;		
 
 	case 0x30:	/* Format 3 - 3990 Control Checks */
 		switch (msg_no) {
 		case 0x0F:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 3 - Allegiance terminated");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 3 - Allegiance terminated");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 3 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 3 - Reserved");
 		}
                 break;		
 
 	case 0x40:	/* Format 4 - Data Checks */
 		switch (msg_no) {
 		case 0x00:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Home address area error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Home address area error");
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Count area error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Count area error");
 			break;
 		case 0x02:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Key area error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Key area error");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Data area error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Data area error");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in home address "
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in home address "
                                       "area");
 			break;
 		case 0x05:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in count address "
-                                     "area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in count address "
+                                      "area");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in key area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in key area");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in data area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in data area");
 			break;
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Home address area error; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Home address area error; "
+                                      "offset active");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Count area error; offset "
-                                     "active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Count area error; offset "
+                                      "active");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Key area error; offset "
-                                     "active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Key area error; offset "
+                                      "active");
 			break;
 		case 0x0B:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Data area error; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Data area error; "
+                                      "offset active");
 			break;
 		case 0x0C:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in home "
-                                     "address area; offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in home "
+                                      "address area; offset active");
 			break;
 		case 0x0D:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No syn byte in count "
-                                     "address area; offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No syn byte in count "
+                                      "address area; offset active");
 			break;
 		case 0x0E:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No sync byte in key area; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No sync byte in key area; "
+                                      "offset active");
 			break;
 		case 0x0F:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - No syn byte in data area; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - No syn byte in data area; "
+                                      "offset active");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 4 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 4 - Reserved");
 		}
                 break;		
 
 	case 0x50:	/* Format 5 - Data Check with displacement information */
 		switch (msg_no) {
 		case 0x00:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the "
-                                     "home address area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the "
+                                      "home address area");
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the count area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the count area");
 			break;
 		case 0x02:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the key area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the key area");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the data area");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the data area");
 			break;
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the "
-                                     "home address area; offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the "
+                                      "home address area; offset active");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the count area; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the count area; "
+                                      "offset active");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the key area; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the key area; "
+                                      "offset active");
 			break;
 		case 0x0B:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Data Check in the data area; "
-                                     "offset active");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Data Check in the data area; "
+                                      "offset active");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 5 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 5 - Reserved");
 		}
                 break;		
 
 	case 0x60:	/* Format 6 - Usage Statistics/Overrun Errors */
 		switch (msg_no) {
 		case 0x00:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel A");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel A");
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel B");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel B");
 			break;
 		case 0x02:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel C");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel C");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel D");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel D");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel E");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel E");
 			break;
 		case 0x05:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel F");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel F");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel G");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel G");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Overrun on channel H");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Overrun on channel H");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 6 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 6 - Reserved");
 		}
                 break;		
 
 	case 0x70:	/* Format 7 - Device Connection Control Checks */
 		switch (msg_no) {
 		case 0x00:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - RCC initiated by a connection "
-                                     "check alert");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - RCC initiated by a connection "
+                                      "check alert");
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - RCC 1 sequence not "
-                                     "successful");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - RCC 1 sequence not "
+                                      "successful");
 			break;
 		case 0x02:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - RCC 1 and RCC 2 sequences not "
-                                     "successful");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - RCC 1 and RCC 2 sequences not "
+                                      "successful");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Invalid tag-in during "
-                                     "selection sequence");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Invalid tag-in during "
+                                      "selection sequence");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - extra RCC required");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - extra RCC required");
 			break;
 		case 0x05:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Invalid DCC selection "
-                                     "response or timeout");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Invalid DCC selection "
+                                      "response or timeout");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Missing end operation; device "
-                                     "transfer complete");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Missing end operation; device "
+                                      "transfer complete");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Missing end operation; device "
-                                     "transfer incomplete");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Missing end operation; device "
+                                      "transfer incomplete");
 			break;
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Invalid tag-in for an "
-                                     "immediate command sequence");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Invalid tag-in for an "
+                                      "immediate command sequence");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Invalid tag-in for an "
-                                     "extended command sequence");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Invalid tag-in for an "
+                                      "extended command sequence");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - 3990 microcode time out when "
-                                     "stopping selection");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - 3990 microcode time out when "
+                                      "stopping selection");
 			break;
 		case 0x0B:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - No response to selection "
-                                     "after a poll interruption");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - No response to selection "
+                                      "after a poll interruption");
 			break;
 		case 0x0C:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Permanent path error (DASD "
-                                     "controller not available)");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Permanent path error (DASD "
+                                      "controller not available)");
 			break;
 		case 0x0D:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - DASD controller not available"
-                                     " on disconnected command chain");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - DASD controller not available"
+                                      " on disconnected command chain");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 7 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 7 - Reserved");
 		}
                 break;		
 
@@ -1284,52 +1240,52 @@ dasd_3990_handle_env_data (ccw_req_t *erp,
 		switch (msg_no) {
 		case 0x00:	/* No Message */
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - Error correction code "
-                                     "hardware fault");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - Error correction code "
+                                      "hardware fault");
 			break;
 		case 0x03:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - Unexpected end operation "
-                                     "response code");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - Unexpected end operation "
+                                      "response code");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - End operation with transfer "
-                                     "count not zero");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - End operation with transfer "
+                                      "count not zero");
 			break;
 		case 0x05:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - End operation with transfer "
-                                     "count zero");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - End operation with transfer "
+                                      "count zero");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - DPS checks after a system "
-                                     "reset or selective reset");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - DPS checks after a system "
+                                      "reset or selective reset");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - DPS cannot be filled");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - DPS cannot be filled");
 			break;
 		case 0x08:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - Short busy time-out during "
-                                     "device selection");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - Short busy time-out during "
+                                      "device selection");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - DASD controller failed to "
-                                     "set or reset the long busy latch");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - DASD controller failed to "
+                                      "set or reset the long busy latch");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - No interruption from device "
-                                     "during a command chain");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - No interruption from device "
+                                      "during a command chain");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 8 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 8 - Reserved");
 		}
                 break;		
 
@@ -1338,97 +1294,94 @@ dasd_3990_handle_env_data (ccw_req_t *erp,
 		case 0x00:
 			break;	/* No Message */
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 9 - Device check-2 error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 9 - Device check-2 error");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 9 - Head address did not compare");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 9 - Head address did not compare");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 9 - Track physical address did "
-                                     "not compare while oriented");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 9 - Track physical address did "
+                                      "not compare while oriented");
 			break;
 		case 0x0E:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 9 - Cylinder address did not "
-                                     "compare");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 9 - Cylinder address did not "
+                                      "compare");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT 9 - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT 9 - Reserved");
 		}
                 break;		
 
 	case 0xF0:		/* Format F - Cache Storage Checks */
 		switch (msg_no) {
 		case 0x00:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Operation Terminated");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Operation Terminated");
 			break;
 		case 0x01:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Subsystem Processing Error");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Subsystem Processing Error");
 			break;
 		case 0x02:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Cache or nonvolatile storage "
-                                     "equipment failure");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Cache or nonvolatile storage "
+                                      "equipment failure");
 			break;
 		case 0x04:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Caching terminated");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Caching terminated");
 			break;
 		case 0x06:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Cache fast write access not "
-                                     "authorized");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Cache fast write access not "
+                                      "authorized");
 			break;
 		case 0x07:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Track format incorrect");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Track format incorrect");
 			break;
 		case 0x09:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Caching reinitiated");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Caching reinitiated");
 			break;
 		case 0x0A:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Nonvolatile storage "
-                                     "terminated");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Nonvolatile storage "
+                                      "terminated");
 			break;
 		case 0x0B:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Volume is suspended duplex");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Volume is suspended duplex");
 			break;
 		case 0x0C:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Subsystem status connot be "
-                                     "determined");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Subsystem status connot be "
+                                      "determined");
 			break;
 		case 0x0D:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - Caching status reset to "
-                                     "default");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - Caching status reset to "
+                                      "default");
 			break;
 		case 0x0E:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT F - DASD Fast Write inhibited");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT F - DASD Fast Write inhibited");
 			break;
 		default:
-                        DEV_MESSAGE (KERN_WARNING, device, "%s",
-                                     "FORMAT D - Reserved");
+                        DASD_MESSAGE (KERN_WARNING, device, "%s",
+                                      "FORMAT D - Reserved");
 		}
                 break;		
 
 	default:	/* unknown message format - should not happen */
-                DEV_MESSAGE (KERN_WARNING, device,
-                             "unknown message format %02x",
-                             msg_format);
-                
+
 	} /* end switch message format */
-        
+
 } /* end dasd_3990_handle_env_data */
 
 /*
@@ -1456,8 +1409,8 @@ dasd_3990_erp_com_rej (ccw_req_t *erp,
 	/* env data present (ACTION 10 - retry should work) */
 	if (sense[2] & SNS2_ENV_DATA_PRESENT) {
 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Command Reject - environmental data present");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Command Reject - environmental data present");
 
 		dasd_3990_handle_env_data (erp,
                                            sense);
@@ -1466,8 +1419,8 @@ dasd_3990_erp_com_rej (ccw_req_t *erp,
 
 	} else {
 		/* fatal error -  set status to FAILED */
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Command Reject - Fatal error");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Command Reject - Fatal error");
 
                 erp = dasd_3990_erp_cleanup (erp,
                                              CQR_STATUS_FAILED);
@@ -1504,9 +1457,9 @@ dasd_3990_erp_bus_out (ccw_req_t *erp)
         } else {
 
                 /* issue a message and wait for 'device ready' interrupt */
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "bus out parity error or BOPC requested by "
-                             "channel");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "bus out parity error or BOPC requested by "
+                              "channel");
                 
                 dasd_3990_erp_block_queue (erp,
                                            60);
@@ -1539,22 +1492,22 @@ dasd_3990_erp_equip_check (ccw_req_t *erp,
 
 	if (sense[1] & SNS1_WRITE_INHIBITED) {
 
-		DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Write inhibited path encountered");
+		DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Write inhibited path encountered");
 
 		/* vary path offline */
-		DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Path should be varied off-line. "
-                             "This is not implemented yet \n - please report "
-                             "to linux390@de.ibm.com");
+		DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Path should be varied off-line. "
+                              "This is not implemented yet \n - please report "
+                              "to linux390@de.ibm.com");
 
 		erp = dasd_3990_erp_action_1 (erp);
 
 	} else if (sense[2] & SNS2_ENV_DATA_PRESENT) {
                 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Equipment Check - "
-                             "environmental data present");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Equipment Check - "
+                              "environmental data present");
                 
                 dasd_3990_handle_env_data (erp,
                                            sense);
@@ -1563,18 +1516,17 @@ dasd_3990_erp_equip_check (ccw_req_t *erp,
                                               sense);
                 
         } else if (sense[1] & SNS1_PERM_ERR) {
-
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Equipment Check - retry exhausted or "
-                             "undesirable");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Equipment Check - retry exhausted or "
+                              "undesirable");
                 
                 erp = dasd_3990_erp_action_1 (erp);
                 
         } else {
                 /* all other equipment checks - Action 5 */
                 /* rest is done when retries == 0 */
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Equipment check or processing error");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Equipment check or processing error");
                 
                 erp = dasd_3990_erp_action_5 (erp);
         }
@@ -1606,9 +1558,9 @@ dasd_3990_erp_data_check (ccw_req_t *erp,
 	if (sense[2] & SNS2_CORRECTABLE) {	/* correctable data check */
 
 		/* issue message that the data has been corrected */
-		DEV_MESSAGE (KERN_EMERG, device, "%s",
-                             "Data recovered during retry with PCI "
-                             "fetch mode active");
+		DASD_MESSAGE (KERN_EMERG, device, "%s",
+                              "Data recovered during retry with PCI "
+                              "fetch mode active");
 
                 /* not possible to handle this situation in Linux */    
                 panic("No way to inform appliction about the possibly "
@@ -1616,26 +1568,26 @@ dasd_3990_erp_data_check (ccw_req_t *erp,
 
 	} else if (sense[2] & SNS2_ENV_DATA_PRESENT) {
 
-		DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Uncorrectable data check recovered secondary "
-                             "addr of duplex pair");
+		DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Uncorrectable data check recovered secondary "
+                              "addr of duplex pair");
 
 		erp = dasd_3990_erp_action_4 (erp,
 					      sense);
 
 	} else if (sense[1] & SNS1_PERM_ERR) {
 
-		DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Uncorrectable data check with internal "
-                             "retry exhausted");
+		DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Uncorrectable data check with internal "
+                              "retry exhausted");
 
 		erp = dasd_3990_erp_action_1 (erp);
 
 	} else {
 		/* all other data checks */
-		DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Uncorrectable data check with retry count "
-                             "exhausted...");
+		DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Uncorrectable data check with retry count "
+                              "exhausted...");
 
 		erp = dasd_3990_erp_action_5 (erp);
 	}
@@ -1664,9 +1616,9 @@ dasd_3990_erp_overrun (ccw_req_t *erp,
 
 	erp->function = dasd_3990_erp_overrun;
 
-        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "Overrun - service overrun or overrun"
-                     " error requested by channel");
+        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "Overrun - service overrun or overrun"
+                      " error requested by channel");
 
         erp = dasd_3990_erp_action_5 (erp);
 
@@ -1696,9 +1648,9 @@ dasd_3990_erp_inv_format (ccw_req_t *erp,
 
 	if (sense[2] & SNS2_ENV_DATA_PRESENT) {
 
-		DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Track format error when destaging or "
-                             "staging data");
+		DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Track format error when destaging or "
+                              "staging data");
 
 		dasd_3990_handle_env_data (erp,
                                            sense);
@@ -1707,9 +1659,9 @@ dasd_3990_erp_inv_format (ccw_req_t *erp,
 					      sense);
 
 	} else {
-		DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Invalid Track Format - Fatal error should have "
-                             "been handled within the interrupt handler");
+		DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Invalid Track Format - Fatal error should have "
+                              "been handled within the interrupt handler");
 
                 erp= dasd_3990_erp_cleanup (erp,
                                             CQR_STATUS_FAILED);
@@ -1737,8 +1689,8 @@ dasd_3990_erp_EOC (ccw_req_t *default_erp,
 
 	dasd_device_t *device = default_erp->device;
 
-        DEV_MESSAGE (KERN_ERR, device, "%s",
-                     "End-of-Cylinder - must never happen");
+        DASD_MESSAGE (KERN_ERR, device, "%s",
+                      "End-of-Cylinder - must never happen");
 
         /* implement action 7 - BUG */
         return dasd_3990_erp_cleanup (default_erp,
@@ -1766,8 +1718,8 @@ dasd_3990_erp_env_data (ccw_req_t *erp,
 
 	erp->function = dasd_3990_erp_env_data;
 
-        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "Environmental data present");
+        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "Environmental data present");
 
         dasd_3990_handle_env_data (erp,
                                    sense);
@@ -1806,9 +1758,9 @@ dasd_3990_erp_no_rec (ccw_req_t *default_erp,
 
 	dasd_device_t *device = default_erp->device;
 
-        DEV_MESSAGE (KERN_ERR, device, "%s",
-                     "No Record Found - Fatal error should "
-                     "have been handled within the interrupt handler");
+        DASD_MESSAGE (KERN_ERR, device, "%s",
+                      "No Record Found - Fatal error should "
+                      "have been handled within the interrupt handler");
 
         return dasd_3990_erp_cleanup (default_erp,
                                       CQR_STATUS_FAILED);
@@ -1834,8 +1786,8 @@ dasd_3990_erp_file_prot (ccw_req_t *erp)
 
 	dasd_device_t *device = erp->device;
 
-        DEV_MESSAGE (KERN_ERR, device, "%s",
-                     "File Protected");
+        DASD_MESSAGE (KERN_ERR, device, "%s",
+                      "File Protected");
 
         return dasd_3990_erp_cleanup (erp,
                                       CQR_STATUS_FAILED);
@@ -1966,8 +1918,8 @@ dasd_3990_erp_action_10_32 (ccw_req_t *erp,
         erp->retries  = 256;
         erp->function = dasd_3990_erp_action_10_32;
 
-	DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "Perform logging requested");
+	DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "Perform logging requested");
 
 	return erp;
 
@@ -2005,8 +1957,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
 	char           *LO_data;   /* LO_eckd_data_t */
         ccw1_t         *ccw;
 
-	DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "Write not finished because of unexpected condition");
+	DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "Write not finished because of unexpected condition");
         
         default_erp->function = dasd_3990_erp_action_1B_32;
 
@@ -2020,8 +1972,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
         /* for imprecise ending just do default erp */
         if (sense[1] & 0x01) {
 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Imprecise ending is set - just retry");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Imprecise ending is set - just retry");
 
                 return default_erp;
         } 
@@ -2032,9 +1984,9 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
         
         if (cpa == 0) {
                 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Unable to determine address of the CCW "
-                             "to be restarted");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Unable to determine address of the CCW "
+                              "to be restarted");
                 
                 return dasd_3990_erp_cleanup (default_erp,
                                               CQR_STATUS_FAILED);
@@ -2049,8 +2001,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
 
 	if (!erp) {
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Unable to allocate ERP");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate ERP");
                 
                 return dasd_3990_erp_cleanup (default_erp,
                                               CQR_STATUS_FAILED);
@@ -2068,8 +2020,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
         if ((sense[3]  == 0x01) &&
             (LO_data[1] & 0x01)   ){
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "BUG - this should not happen");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "BUG - this should not happen");
 
                 return dasd_3990_erp_cleanup (default_erp,
                                               CQR_STATUS_FAILED);
@@ -2105,8 +2057,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
 	if (dasd_set_normalized_cda (ccw,
                                      __pa (DE_data), erp, device)) {
                 dasd_free_request (erp, device);
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Unable to allocate ERP");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate ERP");
 
                 return dasd_3990_erp_cleanup (default_erp,
                                               CQR_STATUS_FAILED);
@@ -2121,8 +2073,8 @@ dasd_3990_erp_action_1B_32 (ccw_req_t *default_erp,
 	if (dasd_set_normalized_cda (ccw, 
                                      __pa (LO_data), erp, device)){
                 dasd_free_request (erp, device);
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "Unable to allocate ERP");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate ERP");
                 
                 return dasd_3990_erp_cleanup (default_erp,
                                               CQR_STATUS_FAILED);
@@ -2177,9 +2129,9 @@ dasd_3990_update_1B (ccw_req_t *previous_erp,
 	char           *LO_data;   /* LO_eckd_data_t */
         ccw1_t         *ccw;
 
-	DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "Write not finished because of unexpected condition"
-                     " - follow on");
+	DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "Write not finished because of unexpected condition"
+                      " - follow on");
         
         /* determine the original cqr */
         cqr = previous_erp;
@@ -2191,8 +2143,8 @@ dasd_3990_update_1B (ccw_req_t *previous_erp,
         /* for imprecise ending just do default erp */
         if (sense[1] & 0x01) {
 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Imprecise ending is set - just retry");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Imprecise ending is set - just retry");
 
                 check_then_set (&previous_erp->status,
                                 CQR_STATUS_ERROR,
@@ -2207,9 +2159,9 @@ dasd_3990_update_1B (ccw_req_t *previous_erp,
         
         if (cpa == 0) {
                 
-                DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                             "Unable to determine address of the CCW "
-                             "to be restarted");
+                DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                              "Unable to determine address of the CCW "
+                              "to be restarted");
                 
                 check_then_set (&previous_erp->status,
                                 CQR_STATUS_ERROR,
@@ -2226,8 +2178,8 @@ dasd_3990_update_1B (ccw_req_t *previous_erp,
         if ((sense[3]  == 0x01) &&
             (LO_data[1] & 0x01)   ){
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",
-                             "BUG - this should not happen");
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "BUG - this should not happen");
 
                 check_then_set (&previous_erp->status,
                                 CQR_STATUS_ERROR,
@@ -2396,7 +2348,7 @@ dasd_3990_erp_compound_code (ccw_req_t *erp,
                         break;
                         
                 default:
-                        ; /* should not happen - continue */
+                        /* should not happen - continue */
 
                 }
         }
@@ -2434,11 +2386,11 @@ dasd_3990_erp_compound_config (ccw_req_t *erp,
                 /* set to suspended duplex state then restart */
                 dasd_device_t *device  = erp->device;
 
-                DEV_MESSAGE (KERN_ERR, device, "%s",      
-                             "Set device to suspended duplex state should be "
-                             "done!\n"
-                             "This is not implemented yet (for compound ERP)"
-                             " - please report to linux390@de.ibm.com");
+                DASD_MESSAGE (KERN_ERR, device, "%s",      
+                              "Set device to suspended duplex state should be "
+                              "done!\n"
+                              "This is not implemented yet (for compound ERP)"
+                              " - please report to linux390@de.ibm.com");
                 
         }
 
@@ -2535,10 +2487,10 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
 		switch (sense[25]) {
 
 		case 0x00:	/* success */
-                        DEV_MESSAGE (KERN_DEBUG, device,
-                                     "ERP called for successful request %p"
-                                     " - NO ERP necessary",
-                                     erp);
+                        DASD_MESSAGE (KERN_DEBUG, device,
+                                      "ERP called for successful request %p"
+                                      " - NO ERP necessary",
+                                      erp);
                         
                         erp = dasd_3990_erp_cleanup (erp,
                                                      CQR_STATUS_DONE);
@@ -2546,9 +2498,9 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
                         break;
                         
 		case 0x01:	/* fatal error */
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     "Fatal error should have been "
-                                     "handled within the interrupt handler");
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
+                                      "Fatal error should have been "
+                                      "handled within the interrupt handler");
 
                         erp = dasd_3990_erp_cleanup (erp,
                                                      CQR_STATUS_FAILED);
@@ -2560,12 +2512,12 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
                         break;
 
 		case 0x0F:	/* length mismatch during update write command */
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     "update write command error - should not "
-                                     "happen;\n"
-                                     "Please send this message together with "
-                                     "the above sense data to linux390@de."
-                                     "ibm.com");
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
+                                      "update write command error - should not "
+                                      "happen;\n"
+                                      "Please send this message together with "
+                                      "the above sense data to linux390@de."
+                                      "ibm.com");
 
                         erp = dasd_3990_erp_cleanup (erp,
                                                      CQR_STATUS_FAILED);
@@ -2577,12 +2529,12 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
                         break;
 
 		case 0x15:	/* next track outside defined extend */
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     "next track outside defined extend - "
-                                     "should not happen;\n"
-                                     "Please send this message together with "
-                                     "the above sense data to linux390@de."
-                                     "ibm.com");
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
+                                      "next track outside defined extend - "
+                                      "should not happen;\n"
+                                      "Please send this message together with "
+                                      "the above sense data to linux390@de."
+                                      "ibm.com");
 
                         erp= dasd_3990_erp_cleanup (erp,
                                                     CQR_STATUS_FAILED);
@@ -2595,9 +2547,9 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
                         break;
 
 		case 0x1C:	/* invalid data */
-                        DEV_MESSAGE (KERN_EMERG, device, "%s",
-                                     "Data recovered during retry with PCI "
-                                     "fetch mode active");
+                        DASD_MESSAGE (KERN_EMERG, device, "%s",
+                                      "Data recovered during retry with PCI "
+                                      "fetch mode active");
                         
                         /* not possible to handle this situation in Linux */    
                         panic("Invalid data - No way to inform appliction about "
@@ -2605,16 +2557,16 @@ dasd_3990_erp_inspect_32 ( ccw_req_t *erp,
 			break;
 
 		case 0x1D:	/* state-change pending */
-                        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                                     "A State change pending condition exists "
-                                     "for the subsystem or device");
+                        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                                      "A State change pending condition exists "
+                                      "for the subsystem or device");
 
                         erp = dasd_3990_erp_action_4 (erp,
                                                       sense);
 			break;
 
-		default:	
-                        ;       /* all others errors - default erp  */
+		default:	/* all others errors - default erp  */
+                        
 		}
 	}
 
@@ -2687,49 +2639,25 @@ dasd_3990_erp_add_erp (ccw_req_t *cqr)
 {
 
 	dasd_device_t *device = cqr->device;
-	ccw1_t *ccw;
 
 	/* allocate additional request block */
-	ccw_req_t *erp = dasd_alloc_request ((char *) &cqr->magic, 2, 0, cqr->device);
+	ccw_req_t *erp = dasd_alloc_request ((char *) &cqr->magic, 1, 0, cqr->device);
 
 	if (!erp) {
-                if (cqr->retries <= 0) {
-                        DEV_MESSAGE (KERN_ERR, device, "%s",
-                                     "Unable to allocate ERP request "
-                                     "(NO retries left)");
-                
-                        check_then_set (&cqr->status,
-                                        CQR_STATUS_ERROR,
-                                        CQR_STATUS_FAILED);
 
-                        cqr->stopclk = get_clock ();
-
-                } else {
-                        DEV_MESSAGE (KERN_ERR, device,
-                                     "Unable to allocate ERP request "
-                                     "(%i retries left)",
-                                     cqr->retries);
+                DASD_MESSAGE (KERN_ERR, device, "%s",
+                              "Unable to allocate ERP request");
                 
-                        if (!timer_pending(&device->timer)) {
-                                init_timer (&device->timer);
-                                device->timer.function = dasd_schedule_bh_timed;
-                                device->timer.data     = (unsigned long) device;
-                                device->timer.expires  = jiffies + (HZ << 3);
-                                add_timer (&device->timer);
-                        } else {
-                                mod_timer(&device->timer, jiffies + (HZ << 3));
-                        }
-                }
+                check_then_set (&cqr->status,
+                                CQR_STATUS_ERROR,
+                                CQR_STATUS_FAILED);
+
                 return cqr;
 	}
 
 	/* initialize request with default TIC to current ERP/CQR */
-	ccw = erp->cpaddr;
-	ccw->cmd_code = CCW_CMD_NOOP;
-	ccw->flags = CCW_FLAG_CC;
-	ccw++;
-	ccw->cmd_code = CCW_CMD_TIC;
-	ccw->cda      = (long)(cqr->cpaddr);
+	erp->cpaddr->cmd_code = CCW_CMD_TIC;
+	erp->cpaddr->cda      = (long)(cqr->cpaddr);
 	erp->function = dasd_3990_erp_add_erp;
 	erp->refers   = cqr;
 	erp->device   = cqr->device;
@@ -2781,10 +2709,10 @@ dasd_3990_erp_additional_erp (ccw_req_t *cqr)
  * DASD_3990_ERP_ERROR_MATCH
  *
  * DESCRIPTION
- *   Check if the device status of the given cqr is the same.
+ *   check if the the device status of the given cqr is the same.
  *   This means that the failed CCW and the relevant sense data
  *   must match.
- *   I don't distinguish between 24 and 32 byte sense because in case of
+ *   I don't distinguish between 24 and 32 byte sense becaus in case of
  *   24 byte sense byte 25 and 27 is set as well.
  *
  * PARAMETER
@@ -2807,7 +2735,7 @@ dasd_3990_erp_error_match (ccw_req_t *cqr1,
 	}
 
 	/* check sense data; byte 0-2,25,27 */
-	if (!((memcmp (cqr1->dstat->ii.sense.data,
+	if (!((strncmp (cqr1->dstat->ii.sense.data,
 			cqr2->dstat->ii.sense.data,
 			3) == 0) &&
 	      (cqr1->dstat->ii.sense.data[27] ==
@@ -2928,10 +2856,10 @@ dasd_3990_erp_further_erp (ccw_req_t *erp)
                                 break;
                         }
                         default:
-                                DEV_MESSAGE (KERN_DEBUG, device,
-                                             "invalid subcommand modifier 0x%x "
-                                             "for Diagnostic Control Command",
-                                             sense[25]);
+                                DASD_MESSAGE (KERN_DEBUG, device,
+                                              "invalid subcommand modifier 0x%x "
+                                              "for Diagnostic Control Command",
+                                              sense[25]);
                         }
                 } 
 
@@ -2946,10 +2874,10 @@ dasd_3990_erp_further_erp (ccw_req_t *erp)
 
 	} else {
                 /* no retry left and no additional special handling necessary */
-                DEV_MESSAGE (KERN_ERR, device,
-                             "no retries left for erp %p - "
-                             "set status to FAILED",
-                             erp);
+                DASD_MESSAGE (KERN_ERR, device,
+                              "no retries left for erp %p - "
+                              "set status to FAILED",
+                              erp);
 
 		check_then_set (&erp->status,
                                 CQR_STATUS_ERROR,
@@ -3009,7 +2937,7 @@ dasd_3990_erp_handle_match_erp (ccw_req_t *erp_head,
 
         if (erp->retries > 0) {
                 
-                char *sense = erp->refers->dstat->ii.sense.data;
+                char *sense = erp->dstat->ii.sense.data;
                 
                 /* check for special retries */
                 if (erp->function == dasd_3990_erp_action_4) {
@@ -3028,10 +2956,10 @@ dasd_3990_erp_handle_match_erp (ccw_req_t *erp_head,
                         
                 } else {
                         /* simple retry   */
-                        DEV_MESSAGE (KERN_DEBUG, device,
-                                     "%i retries left for erp %p",
-                                     erp->retries,
-                                     erp);
+                        DASD_MESSAGE (KERN_DEBUG, device,
+                                      "%i retries left for erp %p",
+                                      erp->retries,
+                                      erp);
                         
                         /* handle the request again... */
                         check_then_set (&erp->status,
@@ -3075,20 +3003,26 @@ dasd_3990_erp_action (ccw_req_t *cqr)
         __u32         cpa     = cqr->dstat->cpa;    
 
 #ifdef ERP_DEBUG 
+        DASD_MESSAGE (KERN_DEBUG, device,
+                      "entering 3990 ERP for "
+                      "0x%04X on sch %d = /dev/%s ",
+                      device->devinfo.devno,
+                      device->devinfo.irq,
+                      device->name);
+
 	/* print current erp_chain */
-        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "ERP chain at BEGINNING of ERP-ACTION");
+        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "ERP chain at BEGINNING of ERP-ACTION");
         {
                 ccw_req_t *temp_erp = NULL;
-
                 for (temp_erp = cqr; 
                      temp_erp != NULL; 
                      temp_erp = temp_erp->refers){
 
-                        DEV_MESSAGE (KERN_DEBUG, device,
-                                     "      erp %p refers to %p",
-                                     temp_erp,
-                                     temp_erp->refers);
+                        DASD_MESSAGE (KERN_DEBUG, device,
+                                      "      erp %p refers to %p",
+                                      temp_erp,
+                                      temp_erp->refers);
                 }
         } 
 #endif /* ERP_DEBUG */
@@ -3097,10 +3031,10 @@ dasd_3990_erp_action (ccw_req_t *cqr)
 	if ((cqr->dstat->cstat == 0x00                                 ) &&
 	    (cqr->dstat->dstat == (DEV_STAT_CHN_END | DEV_STAT_DEV_END))   ) {
 
-                DEV_MESSAGE (KERN_DEBUG, device,
-                             "ERP called for successful request %p"
-                             " - NO ERP necessary",
-                             cqr);
+                DASD_MESSAGE (KERN_DEBUG, device,
+                              "ERP called for successful request %p"
+                              " - NO ERP necessary",
+                              cqr);
                 
                 check_then_set (&cqr->status,
                                 CQR_STATUS_ERROR,
@@ -3110,10 +3044,10 @@ dasd_3990_erp_action (ccw_req_t *cqr)
 	}
 	/* check if sense data are available */
 	if (!cqr->dstat->ii.sense.data) {
-		DEV_MESSAGE (KERN_DEBUG, device,
-                             "ERP called witout sense data avail ..."
-                             "request %p - NO ERP possible",
-                             cqr);
+		DASD_MESSAGE (KERN_DEBUG, device,
+			"ERP called witout sense data avail ..."
+			"request %p - NO ERP possible",
+			cqr);
 
                 check_then_set (&cqr->status,
                                 CQR_STATUS_ERROR,
@@ -3137,18 +3071,18 @@ dasd_3990_erp_action (ccw_req_t *cqr)
 
 #ifdef ERP_DEBUG
 	/* print current erp_chain */
-        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                     "ERP chain at END of ERP-ACTION");
+        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                      "ERP chain at END of ERP-ACTION");
         {
                 ccw_req_t *temp_erp = NULL;
                 for (temp_erp = erp; 
                      temp_erp != NULL; 
                      temp_erp = temp_erp->refers) {
 
-                        DEV_MESSAGE (KERN_DEBUG, device,
-                                     "      erp %p refers to %p",
-                                     temp_erp,
-                                     temp_erp->refers);
+                        DASD_MESSAGE (KERN_DEBUG, device,
+                                      "      erp %p refers to %p",
+                                      temp_erp,
+                                      temp_erp->refers);
                 }
         }
 #endif /* ERP_DEBUG */
@@ -3161,34 +3095,35 @@ dasd_3990_erp_action (ccw_req_t *cqr)
         }
 
         /* enqueue added ERP request */
-        if ((erp != device->queue.head ) &&
+        if ((erp != cqr                      ) &&
             (erp->status == CQR_STATUS_FILLED)   ){
 
                 dasd_chanq_enq_head (&device->queue,
                                      erp);
         } else {
-                if ((erp->status == CQR_STATUS_FILLED ) ||
-                    (erp != device->queue.head)) {
-                        /* something strange happened - log error and panic */
+                if ((erp->status == CQR_STATUS_FILLED )||
+                    (erp != cqr                       )  ){
+                        /* something strange happened - log the error and throw a BUG() */
+                        DASD_MESSAGE (KERN_ERR, device, "%s",
+                                      "Problems with ERP chain!!! BUG");
+
                         /* print current erp_chain */
-                        DEV_MESSAGE (KERN_DEBUG, device, "%s",
-                                     "ERP chain at END of ERP-ACTION");
+                        DASD_MESSAGE (KERN_DEBUG, device, "%s",
+                                      "ERP chain at END of ERP-ACTION");
                         {
                                 ccw_req_t *temp_erp = NULL;
                                 for (temp_erp = erp; 
                                      temp_erp != NULL; 
                                      temp_erp = temp_erp->refers) {
 
-                                        DEV_MESSAGE (KERN_DEBUG, device,
-                                                     "      erp %p (function %p)"
-                                                     " refers to %p",
-                                                     temp_erp,
-                                                     temp_erp->function,
-                                                     temp_erp->refers);
+                                        DASD_MESSAGE (KERN_DEBUG, device,
+                                                      "      erp %p (function %p) refers to %p",
+                                                      temp_erp,
+                                                      temp_erp->function,
+                                                      temp_erp->refers);
                                 }
                         }
-                        panic ("Problems with ERP chain!!! "
-                               "Please report to linux390@de.ibm.com");
+                        BUG();
                 }
 
         }
@@ -3196,6 +3131,112 @@ dasd_3990_erp_action (ccw_req_t *cqr)
 	return erp;
 
 } /* end dasd_3990_erp_action */
+
+/*
+ * DASD_3990_ERP_POSTACTION
+ *
+ * DESCRIPTION
+ *   Frees all ERPs of the current ERP Chain and set the status
+ *   of the original CQR either to CQR_STATUS_DONE if ERP was successful
+ *   or to CQR_STATUS_FAILED if ERP was NOT successful.
+ *
+ * PARAMETER
+ *   erp                current erp_head
+ *
+ * RETURN VALUES
+ *   cqr                pointer to the original CQR
+ */
+ccw_req_t *
+dasd_3990_erp_postaction (ccw_req_t *erp)
+{
+
+	ccw_req_t     *cqr      = NULL, 
+                      *free_erp = NULL;
+	dasd_device_t *device   = erp->device;
+	int           success;
+
+	if (erp->refers   == NULL || 
+            erp->function == NULL   ) {
+
+		BUG ();
+	}
+
+	if (erp->status == CQR_STATUS_DONE)
+		success = 1;
+	else
+		success = 0;
+
+#ifdef ERP_DEBUG
+
+	/* print current erp_chain */
+	printk (KERN_DEBUG PRINTK_HEADER
+		"3990 ERP postaction called for erp chain:\n");
+	{
+		ccw_req_t *temp_erp = NULL;
+
+		for (temp_erp = erp; 
+                     temp_erp != NULL;
+		     temp_erp = temp_erp->refers) {
+
+			printk (KERN_DEBUG PRINTK_HEADER
+				"       erp %p refers to %p with erp function %p\n",
+				temp_erp, temp_erp->refers, temp_erp->function);
+		}
+	}
+
+#endif /* ERP_DEBUG */
+
+	/* free all ERPs - but NOT the original cqr */
+	while (erp->refers != NULL) {
+
+		free_erp = erp;
+		erp      = erp->refers;
+
+		/* remove the request from the device queue */
+		dasd_chanq_deq (&device->queue,
+                                free_erp);
+
+		/* free the finished erp request */
+		dasd_free_request (free_erp, free_erp->device);
+	}
+
+	/* save ptr to original cqr */
+	cqr = erp;
+
+	/* set corresponding status to original cqr */
+	if (success) {
+
+		check_then_set (&cqr->status, 
+                                CQR_STATUS_ERROR,
+				CQR_STATUS_DONE);
+	} else {
+
+		check_then_set (&cqr->status,
+				CQR_STATUS_ERROR, 
+                                CQR_STATUS_FAILED);
+	}
+
+#ifdef ERP_DEBUG
+	/* print current erp_chain */
+	printk (KERN_DEBUG PRINTK_HEADER
+		"3990 ERP postaction finished with remaining chain:\n");
+	{
+		ccw_req_t *temp_erp = NULL;
+
+		for (temp_erp = cqr; 
+                     temp_erp != NULL;
+		     temp_erp = temp_erp->refers) {
+
+			printk (KERN_DEBUG PRINTK_HEADER
+				" erp %p refers to %p \n", temp_erp,
+				temp_erp->refers);
+		}
+	}
+#endif /* ERP_DEBUG */
+
+	return cqr;
+
+} /* end dasd_3990_erp_postaction */
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

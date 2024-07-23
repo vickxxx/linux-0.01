@@ -84,7 +84,7 @@ static inline unsigned long _get_base(char * addr)
 #define loadsegment(seg,value)			\
 	asm volatile("\n"			\
 		"1:\t"				\
-		"mov %0,%%" #seg "\n"		\
+		"movl %0,%%" #seg "\n"		\
 		"2:\n"				\
 		".section .fixup,\"ax\"\n"	\
 		"3:\t"				\
@@ -96,7 +96,7 @@ static inline unsigned long _get_base(char * addr)
 		".align 4\n\t"			\
 		".long 1b,3b\n"			\
 		".previous"			\
-		: :"m" (value))
+		: :"m" (*(unsigned int *)&(value)))
 
 /*
  * Clear and set 'TS' bit respectively
@@ -154,11 +154,6 @@ struct __xchg_dummy { unsigned long a[100]; };
  * to do an SIMD/3DNOW!/MMX/FPU 64-bit store here, but that
  * might have an implicit FPU-save as a cost, so it's not
  * clear which path to go.)
- *
- * chmxchg8b must be used with the lock prefix here to allow
- * the instruction to be executed atomically, see page 3-102
- * of the instruction set reference 24319102.pdf. We need
- * the reader side to see the coherent 64bit value.
  */
 static inline void __set_64bit (unsigned long long * ptr,
 		unsigned int low, unsigned int high)
@@ -167,7 +162,7 @@ static inline void __set_64bit (unsigned long long * ptr,
 		"\n1:\t"
 		"movl (%0), %%eax\n\t"
 		"movl 4(%0), %%edx\n\t"
-		"lock cmpxchg8b (%0)\n\t"
+		"cmpxchg8b (%0)\n\t"
 		"jnz 1b"
 		: /* no outputs */
 		:	"D"(ptr),
@@ -238,7 +233,6 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 
 #ifdef CONFIG_X86_CMPXCHG
 #define __HAVE_ARCH_CMPXCHG 1
-#endif
 
 static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 				      unsigned long new, int size)
@@ -271,6 +265,10 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
 					(unsigned long)(n),sizeof(*(ptr))))
     
+#else
+/* Compiling for a 386 proper.	Is it worth implementing via cli/sti?  */
+#endif
+
 /*
  * Force strict CPU ordering.
  * And yes, this is required on UP too when we're talking
@@ -302,14 +300,13 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
-#define set_mb(var, value) do { (void) xchg(&var, value); } while (0)
 #else
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
-#define set_mb(var, value) do { var = value; barrier(); } while (0)
 #endif
 
+#define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 /* interrupt control.. */
@@ -320,18 +317,8 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 /* used in the idle loop; sti takes one instruction cycle to complete */
 #define safe_halt()		__asm__ __volatile__("sti; hlt": : :"memory")
 
-#define __save_and_cli(x)	do { __save_flags(x); __cli(); } while(0);
-#define __save_and_sti(x)	do { __save_flags(x); __sti(); } while(0);
-
 /* For spinlocks etc */
-#if 0
 #define local_irq_save(x)	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=g" (x): /* no input */ :"memory")
-#define local_irq_set(x)	__asm__ __volatile__("pushfl ; popl %0 ; sti":"=g" (x): /* no input */ :"memory")
-#else
-#define local_irq_save(x)	__save_and_cli(x)
-#define local_irq_set(x)	__save_and_sti(x)
-#endif
-
 #define local_irq_restore(x)	__restore_flags(x)
 #define local_irq_disable()	__cli()
 #define local_irq_enable()	__sti()
@@ -346,8 +333,6 @@ extern void __global_restore_flags(unsigned long);
 #define sti() __global_sti()
 #define save_flags(x) ((x)=__global_save_flags())
 #define restore_flags(x) __global_restore_flags(x)
-#define save_and_cli(x) do { save_flags(x); cli(); } while(0);
-#define save_and_sti(x) do { save_flags(x); sti(); } while(0);
 
 #else
 
@@ -355,8 +340,6 @@ extern void __global_restore_flags(unsigned long);
 #define sti() __sti()
 #define save_flags(x) __save_flags(x)
 #define restore_flags(x) __restore_flags(x)
-#define save_and_cli(x) __save_and_cli(x)
-#define save_and_sti(x) __save_and_sti(x)
 
 #endif
 
@@ -372,6 +355,5 @@ extern int is_sony_vaio_laptop;
 
 #define BROKEN_ACPI_Sx		0x0001
 #define BROKEN_INIT_AFTER_S1	0x0002
-#define BROKEN_PNP_BIOS		0x0004
 
 #endif

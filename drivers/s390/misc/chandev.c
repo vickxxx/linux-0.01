@@ -902,6 +902,25 @@ void chandev_add_parms(chandev_type chan_type,u16 lo_devno,u16 hi_devno,char *pa
 		       (int)lo_devno,(int)hi_devno);
 		return;
 	}
+	chandev_lock();
+	for_each(parms,chandev_parms_head)
+	{
+		if(chan_type&(parms->chan_type))
+		{
+			u16 lomax=MAX(parms->lo_devno,lo_devno),
+				himin=MIN(parms->hi_devno,lo_devno);
+			if(lomax<=himin)
+			{
+				chandev_unlock();
+				printk("chandev_add_parms detected overlapping "
+				       "parameter definitions for chan_type=0x%02x"
+				       " lo_devno=0x%04x  hi_devno=0x%04x\n,"
+				       " do a del_parms.",chan_type,(int)lo_devno,(int)hi_devno);
+				return;
+			}
+		}
+	}
+	chandev_unlock();
 	if((parms=chandev_allocstr(parmstr,offsetof(chandev_parms,parmstr))))
 	{
 		parms->chan_type=chan_type;
@@ -1038,9 +1057,6 @@ static void chandev_init_default_models(void)
 	chandev_add_model(chandev_type_osad,0x3088,0x62,-1,-1,0,default_msck_bits,FALSE,FALSE);
 	/* claw */
 	chandev_add_model(chandev_type_claw,0x3088,0x61,-1,-1,0,default_msck_bits,FALSE,FALSE);
-
-	/* ficon attached ctc */
-	chandev_add_model(chandev_type_escon,0x3088,0x1E,-1,-1,0,default_msck_bits,FALSE,FALSE);
 }
 
 
@@ -1708,16 +1724,8 @@ chandev *write,chandev *data)
 				   read->sch.devno>=curr_parms->lo_devno&&
 					read->sch.devno<=curr_parms->hi_devno)
 				{
-					if (!probeinfo.parmstr) {
-						probeinfo.parmstr = vmalloc(sizeof(curr_parms->parmstr)+1);
-						strcpy(probeinfo.parmstr, curr_parms->parmstr);
-					} else {
-						char *buf;
-
-						buf = vmalloc(strlen(probeinfo.parmstr)+strlen(curr_parms->parmstr)+2);
-						sprintf(buf, "%s,%s",probeinfo.parmstr, curr_parms->parmstr);
-						probeinfo.parmstr=buf;
-					}
+					probeinfo.parmstr=curr_parms->parmstr;
+					break;
 				}
 			}
 			if(force)
@@ -2470,7 +2478,6 @@ static int chandev_setup(int in_read_conf,char *instr,char *errstr,int lineno)
 					goto BadArgs;
 					
 				}
-				break;
 			case del_auto_msck_stridx*stridx_mult:
 			case (del_auto_msck_stridx*stridx_mult)|iscomma:
 				switch(ints[0])
@@ -2483,7 +2490,6 @@ static int chandev_setup(int in_read_conf,char *instr,char *errstr,int lineno)
 				default:
 					goto BadArgs;
 				}
-				break;
 			case del_noauto_stridx*stridx_mult:
 				chandev_free_all_list((list **)&chandev_noauto_head);
 				break;
@@ -2802,7 +2808,6 @@ static void chandev_read_conf(void)
 	struct stat statbuf;
 	char        *buff;
 	int         curr,left,len,fd;
-	mm_segment_t oldfs;
 
 	/* if called from chandev_register_and_probe & 
 	   the driver is compiled into the kernel the
@@ -2813,7 +2818,6 @@ static void chandev_read_conf(void)
 	if(in_interrupt()||current->fs->root==NULL)
 		return;
 	atomic_set(&chandev_conf_read,TRUE);
-	oldfs = get_fs();
 	set_fs(KERNEL_DS);
 	if(stat(CHANDEV_FILE,&statbuf)==0)
 	{
@@ -2838,7 +2842,7 @@ static void chandev_read_conf(void)
 			vfree(buff);
 		}
 	}
-	set_fs(oldfs);
+	set_fs(USER_DS);
 }
 
 static void chandev_read_conf_if_necessary(void)
@@ -3088,7 +3092,7 @@ static int chandev_read_proc(char *page, char **start, off_t offset,
 				chandevs_detected=TRUE;
 				if(pass)
 				{
-					chandev_printf(chan_exit,"0x%04x 0x%04x 0x%02x  0x%04x 0x%02x  0x%04x 0x%02x 0x%02x 0x%016Lx  %-5s%-5s\n",
+					chandev_printf(chan_exit,"0x%04x 0x%04x 0x%02x  0x%04x 0x%02x  0x%04x 0x%02x 0x%02x 0x%016Lx  %-5s %-5s\n",
 						       curr_irq,curr_devinfo.devno,
 						       ( curr_force ? curr_force->chan_type : 
 						       ( curr_model ? curr_model->chan_type : 
@@ -3144,9 +3148,6 @@ static int chandev_write_proc(struct file *file, const char *buffer,
 	int         rc;
 	char        *buff;
 	
-	if(count > 65536)
-		count = 65536;
-		
 	buff=vmalloc(count+1);
 	if(buff)
 	{

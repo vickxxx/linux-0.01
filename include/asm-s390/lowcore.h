@@ -45,10 +45,6 @@
 #define __LC_CPUID                      0xC60
 #define __LC_CPUADDR                    0xC68
 #define __LC_IPLDEV                     0xC7C
-
-#define __LC_JIFFY_TIMER		0xC80
-#define __LC_INT_CLOCK			0xC88
-
 #define __LC_PANIC_MAGIC                0xE00
 
 #define __LC_PFAULT_INTPARM             0x080
@@ -165,10 +161,9 @@ struct _lowcore
 	/* entry.S sensitive area end */
 
         /* SMP info area: defined by DJB */
-        __u64        jiffy_timer;              /* 0xc80 */
-        __u64        int_clock;                /* 0xc88 */
-	atomic_t     ext_call_fast;            /* 0xc90 */
-        __u8         pad11[0xe00-0xc94];       /* 0xc94 */
+        __u64        jiffy_timer_cc;           /* 0xc80 */
+	atomic_t     ext_call_fast;            /* 0xc88 */
+        __u8         pad11[0xe00-0xc8c];       /* 0xc8c */
 
         /* 0xe00 is used as indicator for dump tools */
         /* whether the kernel died with panic() or not */
@@ -187,12 +182,12 @@ extern __inline__ void set_prefix(__u32 address)
 extern struct _lowcore *lowcore_ptr[];
 
 #ifndef CONFIG_SMP
-#define get_cpu_lowcore(cpu)      (&S390_lowcore)
-#define safe_get_cpu_lowcore(cpu) (&S390_lowcore)
+#define get_cpu_lowcore(cpu)    S390_lowcore
+#define safe_get_cpu_lowcore(cpu) S390_lowcore
 #else
-#define get_cpu_lowcore(cpu)      (lowcore_ptr[(cpu)])
+#define get_cpu_lowcore(cpu)    (*lowcore_ptr[cpu])
 #define safe_get_cpu_lowcore(cpu) \
-        ((cpu) == smp_processor_id() ? &S390_lowcore : lowcore_ptr[(cpu)])
+        ((cpu)==smp_processor_id() ? S390_lowcore:(*lowcore_ptr[(cpu)]))
 #endif
 #endif /* __ASSEMBLY__ */
 

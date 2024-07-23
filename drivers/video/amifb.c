@@ -61,6 +61,7 @@
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 #include <asm/setup.h>
+#include <asm/io.h>
 
 #include <video/fbcon.h>
 #include <video/fbcon-afb.h>
@@ -807,7 +808,7 @@ static struct fb_videomode ami_modedb[] __initdata = {
 	FB_SYNC_BROADCAST, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
     }, {
 	/* 640x400, 15 kHz, 60 Hz interlaced (NTSC) */
-	"ntsc-lace", 60, 640, 400, TAG_HIRES, 106, 86, 88, 33, 76, 4,
+	"ntsc-lace", 60, 640, TAG_HIRES, 106, 86, 88, 33, 76, 4,
 	FB_SYNC_BROADCAST, FB_VMODE_INTERLACED | FB_VMODE_YWRAP
     }, {
 	/* 640x256, 15 kHz, 50 Hz (PAL) */
@@ -902,7 +903,7 @@ static struct fb_videomode ami_modedb[] __initdata = {
 	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
     }, {
 	/* 1024x800, 15 Hz */
-	"a2024-15", 15, 1024, 800, TAG_HIRES, 0, 0, 0, 0, 0, 0,
+	"a2024-15", 10, 1024, 800, TAG_HIRES, 0, 0, 0, 0, 0, 0,
 	0, FB_VMODE_NONINTERLACED | FB_VMODE_YWRAP
     }
 #endif
@@ -1605,6 +1606,19 @@ int __init amifb_init(void)
 		return -ENXIO;
 
 	/*
+	 * TODO: where should we put this? The DMI Resolver doesn't have a
+	 *	 frame buffer accessible by the CPU
+	 */
+
+#ifdef CONFIG_GSP_RESOLVER
+	if (amifb_resolver){
+		custom.dmacon = DMAF_MASTER | DMAF_RASTER | DMAF_COPPER |
+				DMAF_BLITTER | DMAF_SPRITE;
+		return 0;
+	}
+#endif
+
+	/*
 	 * We request all registers starting from bplpt[0]
 	 */
 	if (!request_mem_region(CUSTOM_PHYSADDR+0xe0, 0x120,
@@ -1772,7 +1786,7 @@ default_chipset:
 
 	ami_init_copper();
 
-	if (request_irq(IRQ_AMIGA_COPPER, amifb_interrupt, 0,
+	if (request_irq(IRQ_AMIGA_VERTB, amifb_interrupt, 0,
 	                "fb vertb handler", &currentpar)) {
 		err = -EBUSY;
 		goto amifb_error;

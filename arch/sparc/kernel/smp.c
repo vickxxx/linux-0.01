@@ -18,7 +18,6 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
-#include <linux/cache.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -67,7 +66,7 @@ cycles_t cacheflush_time = 0; /* XXX */
  */
 
 /* Kernel spinlock */
-spinlock_t kernel_flag __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
+spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 
 /* Used to make bitops atomic */
 unsigned char bitops_spinlock = 0;
@@ -102,6 +101,13 @@ void __init smp_commence(void)
 	smp_commenced = 1;
 	local_flush_cache_all();
 	local_flush_tlb_all();
+}
+
+/* Only broken Intel needs this, thus it should not even be referenced
+ * globally...
+ */
+void __init initialize_secondary(void)
+{
 }
 
 extern int cpu_idle(void);

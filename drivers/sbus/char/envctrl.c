@@ -1,4 +1,4 @@
-/* $Id: envctrl.c,v 1.24.2.1 2002/01/15 09:01:39 davem Exp $
+/* $Id: envctrl.c,v 1.24 2001/10/08 22:19:51 davem Exp $
  * envctrl.c: Temperature and Fan monitoring on Machines providing it.
  *
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
@@ -776,19 +776,24 @@ static void envctrl_set_mon(struct i2c_child_t *pchild,
 static void envctrl_init_adc(struct i2c_child_t *pchild, int node)
 {
 	char chnls_desc[CHANNEL_DESC_SZ];
-	int i = 0, len;
-	char *pos = chnls_desc;
+	int i, len, j = 0;
+	char *ptr;
 
-	/* Firmware describe channels into a stream separated by a '\0'. */
-	len = prom_getproperty(node, "channels-description", chnls_desc,
+	/* Firmware describe channels into a stream separated by a '\0'.
+	 * Replace all '\0' with a space.
+	 */
+        len = prom_getproperty(node, "channels-description", chnls_desc,
 			       CHANNEL_DESC_SZ);
-	chnls_desc[CHANNEL_DESC_SZ - 1] = '\0';
+        for (i = 0; i < len; i++) {
+                if (chnls_desc[i] == '\0')
+                        chnls_desc[i] = ' ';
+        }
 
-	while (len > 0) {
-		int l = strlen(pos) + 1;
-		envctrl_set_mon(pchild, pos, i++);
-		len -= l;
-		pos += l;
+	ptr = strtok(chnls_desc, " ");
+	while (ptr != NULL) {
+		envctrl_set_mon(pchild, ptr, j);
+		ptr = strtok(NULL, " ");
+		j++;
 	}
 
 	/* Get optional properties. */
@@ -1050,7 +1055,7 @@ static int __init envctrl_init(void)
 	struct linux_ebus *ebus = NULL;
 	struct linux_ebus_device *edev = NULL;
 	struct linux_ebus_child *edev_child = NULL;
-	int err, i = 0;
+	int i = 0;
 
 	for_each_ebus(ebus) {
 		for_each_ebusdev(edev, ebus) {
@@ -1105,11 +1110,9 @@ done:
 	udelay(200);
 
 	/* Register the device as a minor miscellaneous device. */
-	err = misc_register(&envctrl_dev);
-	if (err) {
+	if (misc_register(&envctrl_dev)) {
 		printk("envctrl: Unable to get misc minor %d\n",
 		       envctrl_dev.minor);
-		goto out_iounmap;
 	}
 
 	/* Note above traversal routine post-incremented 'i' to accomodate 
@@ -1124,21 +1127,9 @@ done:
 			i2c_childlist[i].addr, (0 == i) ? ("\n") : (" "));
 	}
 
-	err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
-	if (err < 0)
-		goto out_deregister;
+	kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
 
 	return 0;
-
-out_deregister:
-	misc_deregister(&envctrl_dev);
-out_iounmap:
-	iounmap(i2c);
-	for (i = 0; i < ENVCTRL_MAX_CPU * 2; i++) {
-		if (i2c_childlist[i].tables)
-			kfree(i2c_childlist[i].tables);
-	}
-	return err;
 #else
 	return -ENODEV;
 #endif

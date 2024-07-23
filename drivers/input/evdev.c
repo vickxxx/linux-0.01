@@ -67,7 +67,7 @@ static void evdev_event(struct input_handle *handle, unsigned int type, unsigned
 
 	while (list) {
 
-		do_gettimeofday(&list->buffer[list->head].time);
+		get_fast_time(&list->buffer[list->head].time);
 		list->buffer[list->head].type = type;
 		list->buffer[list->head].code = code;
 		list->buffer[list->head].value = value;
@@ -222,9 +222,6 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	struct evdev *evdev = list->evdev;
 	struct input_dev *dev = evdev->handle.dev;
 	int retval;
-
-	if (!evdev->exist)
-		return -ENODEV;
 
 	switch (cmd) {
 

@@ -102,7 +102,7 @@ static inline void hscx_cmd(struct net_device *dev, int cmd)
 	unsigned char cec;
 	unsigned delay = 0;
 
-	while ((cec = (rd_hscx(dev, HSCX_STAR) & HSCX_CEC)) != 0 && 
+	while ((cec = (rd_hscx(dev, HSCX_STAR) & HSCX_CEC) != 0) && 
 	    (jiffs + HZ > jiffies)) {
 		udelay(1);
 		if (++delay > (100000 / HZ)) break;
@@ -566,6 +566,8 @@ static int MIXCOM_open(struct net_device *dev)
 
 	return 0;
 	
+err_restore_flags:
+	restore_flags(flags);
 err_release_region:
 	release_region(dev->base_addr, MIXCOM_IO_EXTENT);
 err_ret:

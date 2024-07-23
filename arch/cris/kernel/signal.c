@@ -7,7 +7,7 @@
  *
  *  Ideas also taken from arch/arm.
  *
- *  Copyright (C) 2000, 2001, 2002 Axis Communications AB
+ *  Copyright (C) 2000, 2001 Axis Communications AB
  *
  *  Authors:  Bjorn Wesen (bjornw@axis.com)
  *
@@ -517,7 +517,7 @@ give_sigsegv:
  * OK, we're invoking a handler
  */	
 
-extern inline void
+static inline void
 handle_signal(int canrestart, unsigned long sig, struct k_sigaction *ka,
 	      siginfo_t *info, sigset_t *oldset, struct pt_regs * regs)
 {
@@ -528,7 +528,7 @@ handle_signal(int canrestart, unsigned long sig, struct k_sigaction *ka,
 			case -ERESTARTNOHAND:
 				/* ERESTARTNOHAND means that the syscall should only be
 				   restarted if there was no handler for the signal, and since
-				   we only get here if there is a handler, we don't restart */
+				   we only get here if there is a handler, we dont restart */
 				regs->r10 = -EINTR;
 				break;
 
@@ -679,7 +679,10 @@ int do_signal(int canrestart, sigset_t *oldset, struct pt_regs *regs)
 
 			default:
 				lock_kernel();
-				sig_exit(signr, exit_code, &info);
+				sigaddset(&current->pending.signal, signr);
+				recalc_sigpending(current);
+				current->flags |= PF_SIGNALED;
+				do_exit(exit_code);
 				/* NOTREACHED */
 			}
 		}

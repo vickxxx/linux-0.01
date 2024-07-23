@@ -142,8 +142,6 @@ struct usbdevfs_hub_portinfo {
 #define USBDEVFS_HUB_PORTINFO      _IOR('U', 19, struct usbdevfs_hub_portinfo)
 #define USBDEVFS_RESET             _IO('U', 20)
 #define USBDEVFS_CLEAR_HALT        _IOR('U', 21, unsigned int)
-#define USBDEVFS_DISCONNECT        _IO('U', 22)
-#define USBDEVFS_CONNECT           _IO('U', 23)
 
 /* --------------------------------------------------------------------- */
 
@@ -185,6 +183,8 @@ extern struct file_operations usbdevfs_drivers_fops;
 extern struct file_operations usbdevfs_devices_fops;
 extern struct file_operations usbdevfs_device_file_operations;
 extern struct inode_operations usbdevfs_device_inode_operations;
+extern struct inode_operations usbdevfs_bus_inode_operations;
+extern struct file_operations usbdevfs_bus_file_operations;
 extern void usbdevfs_conn_disc_event(void);
 
 #endif /* __KERNEL__ */

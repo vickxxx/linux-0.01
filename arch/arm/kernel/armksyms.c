@@ -62,11 +62,9 @@ extern void __modsi3(void);
 extern void __muldi3(void);
 extern void __ucmpdi2(void);
 extern void __udivdi3(void);
-extern void __umoddi3(void);
 extern void __udivmoddi4(void);
 extern void __udivsi3(void);
 extern void __umodsi3(void);
-extern void abort(void);
 
 extern void ret_from_exception(void);
 extern void fpundefinstr(void);
@@ -79,12 +77,12 @@ extern void fp_enter(void);
 extern void __do_softirq(void);
 
 #define EXPORT_SYMBOL_ALIAS(sym,orig)		\
- const char __kstrtab_##sym[]			\
+ const char __kstrtab_##sym##[]			\
   __attribute__((section(".kstrtab"))) =	\
     __MODULE_STRING(sym);			\
  const struct module_symbol __ksymtab_##sym	\
   __attribute__((section("__ksymtab"))) =	\
-    { (unsigned long)&orig, __kstrtab_##sym };
+    { (unsigned long)&##orig, __kstrtab_##sym };
 
 /*
  * floating point math emulator support.
@@ -108,9 +106,7 @@ EXPORT_SYMBOL_NOVERS(__do_softirq);
 	/* platform dependent support */
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
-EXPORT_SYMBOL(__udelay);
-EXPORT_SYMBOL(__ndelay);
-EXPORT_SYMBOL(__const_delay);
+EXPORT_SYMBOL(udelay);
 #ifdef CONFIG_CPU_32
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(__iounmap);
@@ -119,9 +115,7 @@ EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(system_rev);
 EXPORT_SYMBOL(system_serial_low);
 EXPORT_SYMBOL(system_serial_high);
-#ifdef CONFIG_DEBUG_BUGVERBOSE
 EXPORT_SYMBOL(__bug);
-#endif
 EXPORT_SYMBOL(__bad_xchg);
 EXPORT_SYMBOL(__readwrite_bug);
 EXPORT_SYMBOL(enable_irq);
@@ -193,7 +187,6 @@ EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memmove);
 EXPORT_SYMBOL_NOVERS(memcmp);
 EXPORT_SYMBOL_NOVERS(memscan);
-EXPORT_SYMBOL_NOVERS(memchr);
 EXPORT_SYMBOL_NOVERS(__memzero);
 
 	/* user mem (segment) */
@@ -233,11 +226,9 @@ EXPORT_SYMBOL_NOVERS(__modsi3);
 EXPORT_SYMBOL_NOVERS(__muldi3);
 EXPORT_SYMBOL_NOVERS(__ucmpdi2);
 EXPORT_SYMBOL_NOVERS(__udivdi3);
-EXPORT_SYMBOL_NOVERS(__umoddi3);
 EXPORT_SYMBOL_NOVERS(__udivmoddi4);
 EXPORT_SYMBOL_NOVERS(__udivsi3);
 EXPORT_SYMBOL_NOVERS(__umodsi3);
-EXPORT_SYMBOL_NOVERS(abort);
 
 	/* bitops */
 EXPORT_SYMBOL(set_bit);

@@ -16,17 +16,9 @@
 	2/2/00- Added support for kernel-level ISAPnP 
 		by Stephen Frost <sfrost@snowman.net> and Alessandro Zummo
 	Cleaned up for 2.3.x/softnet by Jeff Garzik and Alan Cox.
-	
-	11/17/2001 - Added ethtool support (jgarzik)
-
 */
 
-#define DRV_NAME		"3c515"
-#define DRV_VERSION		"0.99t"
-#define DRV_RELDATE		"17-Nov-2001"
-
-static char *version =
-DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " becker@scyld.com and others\n";
+static char *version = "3c515.c:v0.99-sn 2000/02/12 becker@cesdis.gsfc.nasa.gov and others\n";
 
 #define CORKSCREW 1
 
@@ -71,9 +63,6 @@ static int max_interrupt_work = 20;
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/timer.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -91,14 +80,12 @@ static int max_interrupt_work = 20;
 #define REQUEST_IRQ(i,h,f,n, instance) request_irq(i,h,f,n, instance)
 #define IRQ(irq, dev_id, pt_regs) (irq, dev_id, pt_regs)
 
-#define MAX_UNITS 8
-
 MODULE_AUTHOR("Donald Becker <becker@scyld.com>");
 MODULE_DESCRIPTION("3Com 3c515 Corkscrew driver");
 MODULE_LICENSE("GPL");
 
 MODULE_PARM(debug, "i");
-MODULE_PARM(options, "1-" __MODULE_STRING(MAX_UNITS) "i");
+MODULE_PARM(options, "1-" __MODULE_STRING(8) "i");
 MODULE_PARM(rx_copybreak, "i");
 MODULE_PARM(max_interrupt_work, "i");
 MODULE_PARM_DESC(debug, "3c515 debug level (0-6)");
@@ -406,7 +393,6 @@ static int corkscrew_close(struct net_device *dev);
 static void update_stats(int addr, struct net_device *dev);
 static struct net_device_stats *corkscrew_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
-static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* 
@@ -423,7 +409,7 @@ static struct ethtool_ops netdev_ethtool_ops;
 */
 /* This driver uses 'options' to pass the media type, full-duplex flag, etc. */
 /* Note: this is the only limit on the number of cards supported!! */
-static int options[MAX_UNITS] = { -1, -1, -1, -1, -1, -1, -1, -1, };
+static int options[8] = { -1, -1, -1, -1, -1, -1, -1, -1, };
 
 #ifdef MODULE
 static int debug = -1;
@@ -560,10 +546,9 @@ no_pnp:
 		printk(KERN_INFO "3c515 Resource configuration register %#4.4x, DCR %4.4x.\n",
 		     inl(ioaddr + 0x2002), inw(ioaddr + 0x2000));
 		irq = inw(ioaddr + 0x2002) & 15;
-		corkscrew_found_device(dev, ioaddr, irq, CORKSCREW_ID,
-				       dev && dev->mem_start ?  dev->mem_start :
-				         (cards_found >= MAX_UNITS ? -1 :
-						options[cards_found]));
+		corkscrew_found_device(dev, ioaddr, irq, CORKSCREW_ID, dev
+				       && dev->mem_start ? dev->
+				       mem_start : options[cards_found]);
 		dev = 0;
 		cards_found++;
 	}
@@ -736,7 +721,6 @@ static int corkscrew_probe1(struct net_device *dev)
 	dev->stop = &corkscrew_close;
 	dev->get_stats = &corkscrew_get_stats;
 	dev->set_multicast_list = &set_rx_mode;
-	dev->ethtool_ops = &netdev_ethtool_ops;
 
 	return 0;
 }
@@ -1607,31 +1591,6 @@ static void set_rx_mode(struct net_device *dev)
 
 	outw(new_mode, ioaddr + EL3_CMD);
 }
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
-}
-
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return corkscrew_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	corkscrew_debug = level;
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-};
-
 
 #ifdef MODULE
 void cleanup_module(void)

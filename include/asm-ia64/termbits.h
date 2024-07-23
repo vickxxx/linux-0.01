@@ -2,10 +2,8 @@
 #define _ASM_IA64_TERMBITS_H
 
 /*
- * Based on <asm-i386/termbits.h>.
- *
- * Modified 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1999 Hewlett-Packard Co
+ * Copyright (C) 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * 99/01/28	Added new baudrates
  */

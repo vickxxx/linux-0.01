@@ -33,4 +33,3 @@ static void __exit exit_vfat_fs(void)
 
 module_init(init_vfat_fs)
 module_exit(exit_vfat_fs)
-MODULE_LICENSE("GPL");

@@ -6,10 +6,8 @@
  * Copyright (C) 1999 by Ralf Baechle
  * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
-#ifndef _ASM_SERIAL_H
-#define _ASM_SERIAL_H
-
 #include <linux/config.h>
+#include <asm/bootinfo.h>
 #include <asm/jazz.h>
 
 /*
@@ -67,9 +65,9 @@
 
 #ifdef CONFIG_MIPS_JAZZ
 #define _JAZZ_SERIAL_INIT(int, base)					\
-	{ .baud_base = JAZZ_BASE_BAUD, .irq = int, .flags = STD_COM_FLAGS,	\
-	  .iomem_base = (u8 *) base, .iomem_reg_shift = 0,			\
-	  .io_type = SERIAL_IO_MEM }
+	{ baud_base: JAZZ_BASE_BAUD, irq: int, flags: STD_COM_FLAGS,	\
+	  iomem_base: (u8 *) base, iomem_reg_shift: 0,			\
+	  io_type: SERIAL_IO_MEM }
 #define JAZZ_SERIAL_PORT_DEFNS						\
 	_JAZZ_SERIAL_INIT(JAZZ_SERIAL1_IRQ, JAZZ_SERIAL1_BASE),		\
 	_JAZZ_SERIAL_INIT(JAZZ_SERIAL2_IRQ, JAZZ_SERIAL2_BASE),
@@ -87,41 +85,19 @@
 #define ATLAS_SERIAL_PORT_DEFNS
 #endif
 
-#ifdef CONFIG_MIPS_SEAD
-#include <asm/mips-boards/sead.h>
-#include <asm/mips-boards/seadint.h>
-#define SEAD_SERIAL_PORT_DEFNS			\
-	/* UART CLK   PORT IRQ     FLAGS        */			\
-	{ 0, SEAD_BASE_BAUD, SEAD_UART0_REGS_BASE, SEADINT_UART0, STD_COM_FLAGS },     /* ttyS0 */
-#else
-#define SEAD_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_MIPS_COBALT
-#include <asm/cobalt/cobalt.h>
-#define COBALT_BASE_BAUD  (18432000 / 16)
-#define COBALT_SERIAL_PORT_DEFNS		\
-	/* UART CLK   PORT  IRQ  FLAGS    */ 		\
-	{ 0, COBALT_BASE_BAUD, 0xc800000, COBALT_SERIAL_IRQ, STD_COM_FLAGS },   /* ttyS0 */
-#else
-#define COBALT_SERIAL_PORT_DEFNS
-#endif
-
 /*
  * Both Galileo boards have the same UART mappings.
  */
 #if defined (CONFIG_MIPS_EV96100) || defined (CONFIG_MIPS_EV64120)
-#include <asm/gt64120/gt64120.h>
+#include <asm/galileo-boards/ev96100.h>
 #include <asm/galileo-boards/ev96100int.h>
 #define EV96100_SERIAL_PORT_DEFNS                                  \
-    { .baud_base = EV96100_BASE_BAUD, .irq = EV96100INT_UART_0, \
-      .flags = STD_COM_FLAGS,  \
-      .iomem_base = EV96100_UART0_REGS_BASE, .iomem_reg_shift = 2, \
-      .io_type = SERIAL_IO_MEM }, \
-    { .baud_base = EV96100_BASE_BAUD, .irq = EV96100INT_UART_0, \
-      .flags = STD_COM_FLAGS, \
-      .iomem_base = EV96100_UART1_REGS_BASE, .iomem_reg_shift = 2, \
-      .io_type = SERIAL_IO_MEM },
+    { baud_base: EV96100_BASE_BAUD, port: EV96100_UART0_REGS_BASE, \
+      irq: EV96100INT_UART_0, flags: STD_COM_FLAGS, type: 0x3,   \
+      iomem_base: EV96100_UART0_REGS_BASE },                       \
+    { baud_base: EV96100_BASE_BAUD, port: EV96100_UART1_REGS_BASE, \
+      irq: EV96100INT_UART_0, flags: STD_COM_FLAGS, type: 0x3,   \
+      iomem_base: EV96100_UART1_REGS_BASE },
 #else
 #define EV96100_SERIAL_PORT_DEFNS
 #endif
@@ -131,16 +107,16 @@
 #include <asm/it8172/it8172_int.h>
 #include <asm/it8712.h>
 #define ITE_SERIAL_PORT_DEFNS                                  \
-    { .baud_base = BASE_BAUD, .port = (IT8172_PCI_IO_BASE + IT_UART_BASE), \
-      .irq = IT8172_UART_IRQ, .flags = STD_COM_FLAGS, .type = 0x3 }, \
-    { .baud_base = (24000000/(16*13)), .port = (IT8172_PCI_IO_BASE + IT8712_UART1_PORT), \
-      .irq = IT8172_SERIRQ_4, .flags = STD_COM_FLAGS, .type = 0x3 }, \
+    { baud_base: BASE_BAUD, port: (IT8172_PCI_IO_BASE + IT_UART_BASE), \
+      irq: IT8172_UART_IRQ, flags: STD_COM_FLAGS, type: 0x3 }, \
+    { baud_base: (24000000/(16*13)), port: (IT8172_PCI_IO_BASE + IT8712_UART1_PORT), \
+      irq: IT8172_SERIRQ_4, flags: STD_COM_FLAGS, type: 0x3 }, \
     /* Smart Card Reader 0 */ \
-    { .baud_base = BASE_BAUD, .port = (IT8172_PCI_IO_BASE + IT_SCR0_BASE), \
-      .irq = IT8172_SCR0_IRQ, .flags = STD_COM_FLAGS, .type = 0x3 }, \
+    { baud_base: BASE_BAUD, port: (IT8172_PCI_IO_BASE + IT_SCR0_BASE), \
+      irq: IT8172_SCR0_IRQ, flags: STD_COM_FLAGS, type: 0x3 }, \
     /* Smart Card Reader 1 */ \
-    { .baud_base = BASE_BAUD, .port = (IT8172_PCI_IO_BASE + IT_SCR1_BASE), \
-      .irq = IT8172_SCR1_IRQ, .flags = STD_COM_FLAGS, .type = 0x3 },
+    { baud_base: BASE_BAUD, port: (IT8172_PCI_IO_BASE + IT_SCR1_BASE), \
+      irq: IT8172_SCR1_IRQ, flags: STD_COM_FLAGS, type: 0x3 },
 #else
 #define ITE_SERIAL_PORT_DEFNS
 #endif
@@ -149,78 +125,28 @@
 #include <asm/it8172/it8172.h>
 #include <asm/it8172/it8172_int.h>
 #define IVR_SERIAL_PORT_DEFNS                                  \
-    { .baud_base = BASE_BAUD, .port = (IT8172_PCI_IO_BASE + IT_UART_BASE), \
-      .irq = IT8172_UART_IRQ, .flags = STD_COM_FLAGS, .type = 0x3 },         \
+    { baud_base: BASE_BAUD, port: (IT8172_PCI_IO_BASE + IT_UART_BASE), \
+      irq: IT8172_UART_IRQ, flags: STD_COM_FLAGS, type: 0x3 },         \
     /* Smart Card Reader 1 */ \
-    { .baud_base = BASE_BAUD, .port = (IT8172_PCI_IO_BASE + IT_SCR1_BASE), \
-      .irq = IT8172_SCR1_IRQ, .flags = STD_COM_FLAGS, .type = 0x3 },
+    { baud_base: BASE_BAUD, port: (IT8172_PCI_IO_BASE + IT_SCR1_BASE), \
+      irq: IT8172_SCR1_IRQ, flags: STD_COM_FLAGS, type: 0x3 },
 #else
 #define IVR_SERIAL_PORT_DEFNS
 #endif
 
-#ifdef CONFIG_AU1X00_UART
+#ifdef CONFIG_AU1000_UART
 #include <asm/au1000.h>
-#ifdef CONFIG_SOC_AU1000
 #define AU1000_SERIAL_PORT_DEFNS                              \
-    { .baud_base = 0, .port = UART0_ADDR, .irq = AU1000_UART0_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },                        \
-    { .baud_base = 0, .port = UART1_ADDR, .irq = AU1000_UART1_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },     \
-    { .baud_base = 0, .port = UART2_ADDR, .irq = AU1000_UART2_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },    \
-    { .baud_base = 0, .port = UART3_ADDR, .irq = AU1000_UART3_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },
-#endif
-
-#ifdef CONFIG_SOC_AU1500
-#define AU1000_SERIAL_PORT_DEFNS                              \
-    { .baud_base = 0, .port = UART0_ADDR, .irq = AU1500_UART0_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },                        \
-    { .baud_base = 0, .port = UART3_ADDR, .irq = AU1500_UART3_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },
-#endif
-
-#ifdef CONFIG_SOC_AU1100
-#define AU1000_SERIAL_PORT_DEFNS                              \
-    { .baud_base = 0, .port = UART0_ADDR, .irq = AU1100_UART0_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },                        \
-    { .baud_base = 0, .port = UART1_ADDR, .irq = AU1100_UART1_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },     \
-    { .baud_base = 0, .port = UART3_ADDR, .irq = AU1100_UART3_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },
-#endif
-
-#ifdef CONFIG_SOC_AU1550
-#define AU1000_SERIAL_PORT_DEFNS                              \
-    { .baud_base = 0, .port = UART0_ADDR, .irq = AU1550_UART0_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },                        \
-    { .baud_base = 0, .port = UART1_ADDR, .irq = AU1550_UART1_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },     \
-    { .baud_base = 0, .port = UART3_ADDR, .irq = AU1550_UART3_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },
-#endif
-
-#ifdef CONFIG_SOC_AU1200
-#define AU1000_SERIAL_PORT_DEFNS                              \
-    { .baud_base = 0, .port = UART0_ADDR, .irq = AU1200_UART0_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },                        \
-    { .baud_base = 0, .port = UART1_ADDR, .irq = AU1200_UART1_INT,  \
-      .flags = STD_COM_FLAGS, .type = 1 },
-#endif
-
+    { baud_base: 0, port: UART0_ADDR, irq: AU1000_UART0_INT,  \
+      flags: STD_COM_FLAGS, type: 1 },                        \
+    { baud_base: 0, port: UART1_ADDR, irq: AU1000_UART1_INT,  \
+      flags: STD_COM_FLAGS, type: 1 },     \
+    { baud_base: 0, port: UART2_ADDR, irq: AU1000_UART2_INT,  \
+      flags: STD_COM_FLAGS, type: 1 },    \
+    { baud_base: 0, port: UART3_ADDR, irq: AU1000_UART3_INT,  \
+      flags: STD_COM_FLAGS, type: 1 },
 #else
 #define AU1000_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_TOSHIBA_JMR3927
-#include <asm/jmr3927/jmr3927.h>
-#define TXX927_SERIAL_PORT_DEFNS                              \
-    { .baud_base = JMR3927_BASE_BAUD, .port = UART0_ADDR, .irq = UART0_INT,  \
-      .flags = UART0_FLAGS, .type = 1 },                        \
-    { .baud_base = JMR3927_BASE_BAUD, .port = UART1_ADDR, .irq = UART1_INT,  \
-      .flags = UART1_FLAGS, .type = 1 },
-#else
-#define TXX927_SERIAL_PORT_DEFNS
 #endif
 
 #ifdef CONFIG_HAVE_STD_PC_SERIAL_PORT
@@ -311,181 +237,36 @@
 #define OCELOT_SERIAL1_BASE	0xe0001020
 
 #define _OCELOT_SERIAL_INIT(int, base)					\
-	{ .baud_base = OCELOT_BASE_BAUD, .irq = int, .flags = STD_COM_FLAGS, \
-	  .iomem_base = (u8 *) base, .iomem_reg_shift = 2,		\
-	  .io_type = SERIAL_IO_MEM }
+	{ baud_base: OCELOT_BASE_BAUD, irq: int, flags: STD_COM_FLAGS,	\
+	  iomem_base: (u8 *) base, iomem_reg_shift: 2,			\
+	  io_type: SERIAL_IO_MEM }
 #define MOMENCO_OCELOT_SERIAL_PORT_DEFNS				\
 	_OCELOT_SERIAL_INIT(OCELOT_SERIAL1_IRQ, OCELOT_SERIAL1_BASE)
 #else
 #define MOMENCO_OCELOT_SERIAL_PORT_DEFNS
 #endif
 
-#ifdef CONFIG_MOMENCO_OCELOT_G
-/* Ordinary NS16552 duart with a 20MHz crystal.  */
-#define OCELOT_G_BASE_BAUD ( 20000000 / 16 )
-
-#define OCELOT_G_SERIAL1_IRQ	4
-#if 0
-#define OCELOT_G_SERIAL1_BASE	0xe0001020
-#else
-#define OCELOT_G_SERIAL1_BASE	0xfd000020
-#endif
-
-#define _OCELOT_G_SERIAL_INIT(int, base)				\
-	{ .baud_base = OCELOT_G_BASE_BAUD, .irq = int, .flags = STD_COM_FLAGS,\
-	  .iomem_base = (u8 *) base, .iomem_reg_shift = 2,		\
-	  .io_type = SERIAL_IO_MEM }
-#define MOMENCO_OCELOT_G_SERIAL_PORT_DEFNS				\
-	_OCELOT_G_SERIAL_INIT(OCELOT_G_SERIAL1_IRQ, OCELOT_G_SERIAL1_BASE)
-#else
-#define MOMENCO_OCELOT_G_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_MOMENCO_OCELOT_C
-/* Ordinary NS16552 duart with a 20MHz crystal.  */
-#define OCELOT_C_BASE_BAUD ( 20000000 / 16 )
-
-#define OCELOT_C_SERIAL1_IRQ	80
-#define OCELOT_C_SERIAL1_BASE	0xfd000020
-
-#define OCELOT_C_SERIAL2_IRQ	81
-#define OCELOT_C_SERIAL2_BASE	0xfd000000
-
-#define _OCELOT_C_SERIAL_INIT(int, base)				 \
-	{ baud_base: OCELOT_C_BASE_BAUD, irq: int, flags: STD_COM_FLAGS,\
-	  iomem_base: (u8 *) base, iomem_reg_shift: 2,			 \
-	  io_type: SERIAL_IO_MEM }
-#define MOMENCO_OCELOT_C_SERIAL_PORT_DEFNS				\
-	_OCELOT_C_SERIAL_INIT(OCELOT_C_SERIAL1_IRQ, OCELOT_C_SERIAL1_BASE), \
-	_OCELOT_C_SERIAL_INIT(OCELOT_C_SERIAL2_IRQ, OCELOT_C_SERIAL2_BASE)
-#else
-#define MOMENCO_OCELOT_C_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_PMC_STRETCH
-/* 16550 Compatible. FIXME: Need to get the defines below */
-
-#define PMC_STRETCH_BASE_BAUD 		( 1843200 / 16 )
-#define	PMC_STRETCH_IRQ			0
-#define	PMC_STRETCH_BASE_ADDRESS	0xbd110000
-
-#define	_PMC_STRETCH_SERIAL_INIT(int, base)				\
-	{ baud_base: PMC_STRETCH_BASE_BAUD, irq: int,			\
-	  flags: STD_COM_FLAGS,	iomem_base: (u8 *) base,		\
-	  iomem_reg_shift: 2, io_type: SERIAL_IO_MEM }
-
-#define	PMC_STRETCH_SERIAL_PORT_DEFNS						\
-	_PMC_STRETCH_SERIAL_INIT(PMC_STRETCH_IRQ, PMC_STRETCH_BASE_ADDRESS)
-#else
-#define	PMC_STRETCH_SERIAL_PORT_DEFNS
-#endif		
-
-#ifdef CONFIG_MOMENCO_JAGUAR_ATX
-/* Ordinary NS16552 duart with a 20MHz crystal.  */
-#define JAGUAR_ATX_BASE_BAUD ( 20000000 / 16 )
-
-#define JAGUAR_ATX_SERIAL1_IRQ	7
-#define JAGUAR_ATX_SERIAL1_BASE	0xfffffffffd000020
-
-#define _JAGUAR_ATX_SERIAL_INIT(int, base)				\
-	{ baud_base: JAGUAR_ATX_BASE_BAUD, irq: int,			\
-	  flags: (ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST),		\
-	  iomem_base: (u8 *) base, iomem_reg_shift: 2,			\
-	  io_type: SERIAL_IO_MEM }
-#define MOMENCO_JAGUAR_ATX_SERIAL_PORT_DEFNS				\
-	_JAGUAR_ATX_SERIAL_INIT(JAGUAR_ATX_SERIAL1_IRQ, JAGUAR_ATX_SERIAL1_BASE)
-#else
-#define MOMENCO_JAGUAR_ATX_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_TITAN_SERIAL
-/* 16552 20 MHz crystal */
-#define TITAN_SERIAL_BASE_BAUD	( 20000000 / 16 )
-#define	TITAN_SERIAL_IRQ	XXX
-#define	TITAN_SERIAL_BASE	0xffffffff
-
-#define	_TITAN_SERIAL_INIT(int, base)					\
-	{ baud_base: TITAN_SERIAL_BASE_BAUD, irq: int,			\
-	  flags: STD_COM_FLAGS,	iomem_base: (u8 *) base,		\
-	  iomem_reg_shift: 2, io_type: SERIAL_IO_MEM			\
-	}
-
-#define TITAN_SERIAL_PORT_DEFNS						\
-	_TITAN_SERIAL_INIT(TITAN_SERIAL_IRQ, TITAN_SERIAL_BASE)
-#else
-#define TITAN_SERIAL_PORT_DEFNS
-#endif
-
-#ifdef CONFIG_SGI_IP27
-
-/*
- * Note about serial ports and consoles:
- * For console output, everyone uses the IOC3 UARTA (offset 0x178)
- * connected to the master node (look in ip27_setup_console() and
- * ip27prom_console_write()).
- *
- * For serial (/dev/ttyS0 etc), we can not have hardcoded serial port
- * addresses on a partitioned machine. Since we currently use the ioc3
- * serial ports, we use dynamic serial port discovery that the serial.c
- * driver uses for pci/pnp ports (there is an entry for the SGI ioc3
- * boards in pci_boards[]). Unfortunately, UARTA's pio address is greater
- * than UARTB's, although UARTA on o200s has traditionally been known as
- * port 0. So, we just use one serial port from each ioc3 (since the
- * serial driver adds addresses to get to higher ports).
- *
- * The first one to do a register_console becomes the preferred console
- * (if there is no kernel command line console= directive). /dev/console
- * (ie 5, 1) is then "aliased" into the device number returned by the
- * "device" routine referred to in this console structure
- * (ip27prom_console_dev).
- *
- * Also look in ip27-pci.c:pci_fixuop_ioc3() for some comments on working
- * around ioc3 oddities in this respect.
- *
- * The IOC3 serials use a 22MHz clock rate with an additional divider by 3.
- * (IOC3_BAUD = (22000000 / (3*16)))
- *
- * At the moment this is only a skeleton definition as we register all serials
- * at runtime.
- */
-
-#define IP27_SERIAL_PORT_DEFNS
-#else
-#define IP27_SERIAL_PORT_DEFNS
-#endif /* CONFIG_SGI_IP27 */
-
 #ifdef CONFIG_DDB5477
-#include <asm/ddb5xxx/ddb5477.h>
-#define DDB5477_SERIAL_PORT_DEFNS					 \
-	{  .baud_base = BASE_BAUD, .irq = VRC5477_IRQ_UART0,		\
-	  .flags = STD_COM_FLAGS, .iomem_base = (u8*)0xbfa04200,	\
-	  .iomem_reg_shift = 3, .io_type = SERIAL_IO_MEM},		\
-	{  .baud_base = BASE_BAUD, .irq = VRC5477_IRQ_UART1,		\
-	  .flags = STD_COM_FLAGS, .iomem_base = (u8*)0xbfa04240,	\
-	  .iomem_reg_shift = 3, .io_type = SERIAL_IO_MEM},
+#define DDB5477_SERIAL_PORT_DEFNS                                       \
+        { baud_base: BASE_BAUD, irq: 12, flags: STD_COM_FLAGS,          \
+          iomem_base: (u8*)0xbfa04200, iomem_reg_shift: 3,              \
+          io_type: SERIAL_IO_MEM},\
+        { baud_base: BASE_BAUD, irq: 28, flags: STD_COM_FLAGS,          \
+          iomem_base: (u8*)0xbfa04240, iomem_reg_shift: 3,              \
+          io_type: SERIAL_IO_MEM},
 #else
 #define DDB5477_SERIAL_PORT_DEFNS
 #endif
 
-#define SERIAL_PORT_DFNS			\
-	ATLAS_SERIAL_PORT_DEFNS			\
-	AU1000_SERIAL_PORT_DEFNS		\
-	COBALT_SERIAL_PORT_DEFNS		\
-	DDB5477_SERIAL_PORT_DEFNS		\
-	EV96100_SERIAL_PORT_DEFNS		\
-	EXTRA_SERIAL_PORT_DEFNS			\
-	HUB6_SERIAL_PORT_DFNS			\
-	ITE_SERIAL_PORT_DEFNS           	\
-	IVR_SERIAL_PORT_DEFNS           	\
-	JAZZ_SERIAL_PORT_DEFNS			\
-	MOMENCO_OCELOT_SERIAL_PORT_DEFNS	\
-	MOMENCO_OCELOT_G_SERIAL_PORT_DEFNS	\
-	MOMENCO_OCELOT_C_SERIAL_PORT_DEFNS	\
-	MOMENCO_JAGUAR_ATX_SERIAL_PORT_DEFNS	\
-	PMC_STRETCH_SERIAL_PORT_DEFNS		\
-	SEAD_SERIAL_PORT_DEFNS			\
-	STD_SERIAL_PORT_DEFNS			\
-	TITAN_SERIAL_PORT_DEFNS			\
-	TXX927_SERIAL_PORT_DEFNS
-
-#endif /* _ASM_SERIAL_H */
+#define SERIAL_PORT_DFNS		\
+	IVR_SERIAL_PORT_DEFNS           \
+	ITE_SERIAL_PORT_DEFNS           \
+	ATLAS_SERIAL_PORT_DEFNS		\
+	EV96100_SERIAL_PORT_DEFNS	\
+	JAZZ_SERIAL_PORT_DEFNS		\
+	STD_SERIAL_PORT_DEFNS		\
+	EXTRA_SERIAL_PORT_DEFNS		\
+	HUB6_SERIAL_PORT_DFNS		\
+	MOMENCO_OCELOT_SERIAL_PORT_DEFNS\
+	AU1000_SERIAL_PORT_DEFNS	\
+	DDB5477_SERIAL_PORT_DEFNS

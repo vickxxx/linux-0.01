@@ -28,7 +28,7 @@
  * indirection blocks, the group and superblock summaries, and the data
  * block to complete the transaction.  */
 
-#define EXT3_SINGLEDATA_TRANS_BLOCKS	8U
+#define EXT3_SINGLEDATA_TRANS_BLOCKS	8
 
 /* Define the minimum size for a transaction which modifies data.  This
  * needs to take into account the fact that we may end up modifying two
@@ -52,7 +52,7 @@ extern int ext3_writepage_trans_blocks(struct inode *inode);
  * start off at the maximum transaction size and grow the transaction
  * optimistically as we go. */
 
-#define EXT3_MAX_TRANS_DATA		64U
+#define EXT3_MAX_TRANS_DATA		64
 
 /* We break up a large truncate or write transaction once the handle's
  * buffer credits gets this low, we need either to extend the
@@ -61,7 +61,7 @@ extern int ext3_writepage_trans_blocks(struct inode *inode);
  * one block, plus two quota updates.  Quota allocations are not
  * needed. */
 
-#define EXT3_RESERVE_TRANS_BLOCKS	12U
+#define EXT3_RESERVE_TRANS_BLOCKS	12
 
 int
 ext3_mark_iloc_dirty(handle_t *handle, 
@@ -196,22 +196,9 @@ __ext3_journal_dirty_metadata(const char *where,
  */
 static inline handle_t *ext3_journal_start(struct inode *inode, int nblocks)
 {
-	journal_t *journal;
-	
 	if (inode->i_sb->s_flags & MS_RDONLY)
 		return ERR_PTR(-EROFS);
-
-	/* Special case here: if the journal has aborted behind our
-	 * backs (eg. EIO in the commit thread), then we still need to
-	 * take the FS itself readonly cleanly. */
-	journal = EXT3_JOURNAL(inode);
-	if (is_journal_aborted(journal)) {
-		ext3_abort(inode->i_sb, __FUNCTION__,
-			   "Detected aborted journal");
-		return ERR_PTR(-EROFS);
-	}
-	
-	return journal_start(journal, nblocks);
+	return journal_start(EXT3_JOURNAL(inode), nblocks);
 }
 
 static inline handle_t *

@@ -18,20 +18,33 @@
 
 #include "udfdecl.h"
 
+#if defined(__linux__) && defined(__KERNEL__)
+
 #include <linux/fs.h>
 #include <linux/string.h>
+#include <linux/udf_fs.h>
 
-uint8_t * udf_filead_read(struct inode *dir, uint8_t *tmpad, uint8_t ad_size,
+#else
+
+#include <sys/types.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#endif
+
+#ifdef __KERNEL__
+
+Uint8 * udf_filead_read(struct inode *dir, Uint8 *tmpad, Uint8 ad_size,
 	lb_addr fe_loc, int *pos, int *offset, struct buffer_head **bh, int *error)
 {
 	int loffset = *offset;
 	int block;
-	uint8_t *ad;
+	Uint8 *ad;
 	int remainder;
 
 	*error = 0;
 
-	ad = (uint8_t *)(*bh)->b_data + *offset;
+	ad = (Uint8 *)(*bh)->b_data + *offset;
 	*offset += ad_size;
 
 	if (!ad)
@@ -47,7 +60,7 @@ uint8_t * udf_filead_read(struct inode *dir, uint8_t *tmpad, uint8_t ad_size,
 		block = udf_get_lb_pblock(dir->i_sb, fe_loc, ++*pos);
 		if (!block)
 			return NULL;
-		if (!(*bh = udf_tread(dir->i_sb, block)))
+		if (!(*bh = udf_tread(dir->i_sb, block, dir->i_sb->s_blocksize)))
 			return NULL;
 	}
 	else if (*offset > dir->i_sb->s_blocksize)
@@ -55,30 +68,30 @@ uint8_t * udf_filead_read(struct inode *dir, uint8_t *tmpad, uint8_t ad_size,
 		ad = tmpad;
 
 		remainder = dir->i_sb->s_blocksize - loffset;
-		memcpy((uint8_t *)ad, (*bh)->b_data + loffset, remainder);
+		memcpy((Uint8 *)ad, (*bh)->b_data + loffset, remainder);
 
 		udf_release_data(*bh);
 		block = udf_get_lb_pblock(dir->i_sb, fe_loc, ++*pos);
 		if (!block)
 			return NULL;
-		if (!((*bh) = udf_tread(dir->i_sb, block)))
+		if (!((*bh) = udf_tread(dir->i_sb, block, dir->i_sb->s_blocksize)))
 			return NULL;
 
-		memcpy((uint8_t *)ad + remainder, (*bh)->b_data, ad_size - remainder);
+		memcpy((Uint8 *)ad + remainder, (*bh)->b_data, ad_size - remainder);
 		*offset = ad_size - remainder;
 	}
 	return ad;
 }
 
-struct fileIdentDesc *
+struct FileIdentDesc *
 udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 	struct udf_fileident_bh *fibh,
-	struct fileIdentDesc *cfi,
-	lb_addr *bloc, uint32_t *extoffset, 
-	lb_addr *eloc, uint32_t *elen,
-	uint32_t *offset, struct buffer_head **bh)
+	struct FileIdentDesc *cfi,
+	lb_addr *bloc, Uint32 *extoffset, 
+	lb_addr *eloc, Uint32 *elen,
+	Uint32 *offset, struct buffer_head **bh)
 {
-	struct fileIdentDesc *fi;
+	struct FileIdentDesc *fi;
 	int i, num, block;
 	struct buffer_head * tmp, * bha[16];
 
@@ -89,7 +102,7 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 		int lextoffset = *extoffset;
 
 		if (udf_next_aext(dir, bloc, extoffset, eloc, elen, bh, 1) !=
-			(EXT_RECORDED_ALLOCATED >> 30))
+			EXTENT_RECORDED_ALLOCATED)
 		{
 			return NULL;
 		}
@@ -104,7 +117,7 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 			*extoffset = lextoffset;
 
 		udf_release_data(fibh->sbh);
-		if (!(fibh->sbh = fibh->ebh = udf_tread(dir->i_sb, block)))
+		if (!(fibh->sbh = fibh->ebh = udf_tread(dir->i_sb, block, dir->i_sb->s_blocksize)))
 			return NULL;
 		fibh->soffset = fibh->eoffset = 0;
 
@@ -116,7 +129,7 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 			for (num=0; i>0; i--)
 			{
 				block = udf_get_lb_pblock(dir->i_sb, *eloc, *offset+i);
-				tmp = udf_tgetblk(dir->i_sb, block);
+				tmp = udf_tgetblk(dir->i_sb, block, dir->i_sb->s_blocksize);
 				if (tmp && !buffer_uptodate(tmp) && !buffer_locked(tmp))
 					bha[num++] = tmp;
 				else
@@ -146,14 +159,14 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 
 	if (fibh->eoffset <= dir->i_sb->s_blocksize)
 	{
-		memcpy((uint8_t *)cfi, (uint8_t *)fi, sizeof(struct fileIdentDesc));
+		memcpy((Uint8 *)cfi, (Uint8 *)fi, sizeof(struct FileIdentDesc));
 	}
 	else if (fibh->eoffset > dir->i_sb->s_blocksize)
 	{
 		int lextoffset = *extoffset;
 
 		if (udf_next_aext(dir, bloc, extoffset, eloc, elen, bh, 1) !=
-			(EXT_RECORDED_ALLOCATED >> 30))
+			EXTENT_RECORDED_ALLOCATED)
 		{
 			return NULL;
 		}
@@ -170,18 +183,18 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 		fibh->soffset -= dir->i_sb->s_blocksize;
 		fibh->eoffset -= dir->i_sb->s_blocksize;
 
-		if (!(fibh->ebh = udf_tread(dir->i_sb, block)))
+		if (!(fibh->ebh = udf_tread(dir->i_sb, block, dir->i_sb->s_blocksize)))
 			return NULL;
 
-		if (sizeof(struct fileIdentDesc) > - fibh->soffset)
+		if (sizeof(struct FileIdentDesc) > - fibh->soffset)
 		{
 			int fi_len;
 
-			memcpy((uint8_t *)cfi, (uint8_t *)fi, - fibh->soffset);
-			memcpy((uint8_t *)cfi - fibh->soffset, fibh->ebh->b_data,
-				sizeof(struct fileIdentDesc) + fibh->soffset);
+			memcpy((Uint8 *)cfi, (Uint8 *)fi, - fibh->soffset);
+			memcpy((Uint8 *)cfi - fibh->soffset, fibh->ebh->b_data,
+				sizeof(struct FileIdentDesc) + fibh->soffset);
 
-			fi_len = (sizeof(struct fileIdentDesc) + cfi->lengthFileIdent +
+			fi_len = (sizeof(struct FileIdentDesc) + cfi->lengthFileIdent +
 				le16_to_cpu(cfi->lengthOfImpUse) + 3) & ~3;
 
 			*nf_pos += ((fi_len - (fibh->eoffset - fibh->soffset)) >> 2);
@@ -189,22 +202,25 @@ udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 		}
 		else
 		{
-			memcpy((uint8_t *)cfi, (uint8_t *)fi, sizeof(struct fileIdentDesc));
+			memcpy((Uint8 *)cfi, (Uint8 *)fi, sizeof(struct FileIdentDesc));
 		}
 	}
 	return fi;
 }
+#endif
 
-struct fileIdentDesc * 
+struct FileIdentDesc * 
 udf_get_fileident(void * buffer, int bufsize, int * offset)
 {
-	struct fileIdentDesc *fi;
+	struct FileIdentDesc *fi;
 	int lengthThisIdent;
-	uint8_t * ptr;
+	Uint8 * ptr;
 	int padlen;
 
 	if ( (!buffer) || (!offset) ) {
+#ifdef __KERNEL__
 		udf_debug("invalidparms\n, buffer=%p, offset=%p\n", buffer, offset);
+#endif
 		return NULL;
 	}
 
@@ -213,21 +229,23 @@ udf_get_fileident(void * buffer, int bufsize, int * offset)
 	if ( (*offset > 0) && (*offset < bufsize) ) {
 		ptr += *offset;
 	}
-	fi=(struct fileIdentDesc *)ptr;
-	if (le16_to_cpu(fi->descTag.tagIdent) != TAG_IDENT_FID)
+	fi=(struct FileIdentDesc *)ptr;
+	if (le16_to_cpu(fi->descTag.tagIdent) != TID_FILE_IDENT_DESC)
 	{
-		udf_debug("0x%x != TAG_IDENT_FID\n",
+#ifdef __KERNEL__
+		udf_debug("0x%x != TID_FILE_IDENT_DESC\n",
 			le16_to_cpu(fi->descTag.tagIdent));
 		udf_debug("offset: %u sizeof: %lu bufsize: %u\n",
-			*offset, (unsigned long)sizeof(struct fileIdentDesc), bufsize);
+			*offset, (unsigned long)sizeof(struct FileIdentDesc), bufsize);
+#endif
 		return NULL;
 	}
-	if ( (*offset + sizeof(struct fileIdentDesc)) > bufsize )
+	if ( (*offset + sizeof(struct FileIdentDesc)) > bufsize )
 	{
-		lengthThisIdent = sizeof(struct fileIdentDesc);
+		lengthThisIdent = sizeof(struct FileIdentDesc);
 	}
 	else
-		lengthThisIdent = sizeof(struct fileIdentDesc) +
+		lengthThisIdent = sizeof(struct FileIdentDesc) +
 			fi->lengthFileIdent + le16_to_cpu(fi->lengthOfImpUse);
 
 	/* we need to figure padding, too! */
@@ -243,25 +261,29 @@ extent_ad *
 udf_get_fileextent(void * buffer, int bufsize, int * offset)
 {
 	extent_ad * ext;
-	struct fileEntry *fe;
-	uint8_t * ptr;
+	struct FileEntry *fe;
+	Uint8 * ptr;
 
 	if ( (!buffer) || (!offset) )
 	{
+#ifdef __KERNEL__
 		printk(KERN_ERR "udf: udf_get_fileextent() invalidparms\n");
+#endif
 		return NULL;
 	}
 
-	fe = (struct fileEntry *)buffer;
+	fe = (struct FileEntry *)buffer;
 
-	if ( le16_to_cpu(fe->descTag.tagIdent) != TAG_IDENT_FE )
+	if ( le16_to_cpu(fe->descTag.tagIdent) != TID_FILE_ENTRY )
 	{
-		udf_debug("0x%x != TAG_IDENT_FE\n",
+#ifdef __KERNEL__
+		udf_debug("0x%x != TID_FILE_ENTRY\n",
 			le16_to_cpu(fe->descTag.tagIdent));
+#endif
 		return NULL;
 	}
 
-	ptr=(uint8_t *)(fe->extendedAttr) + le32_to_cpu(fe->lengthExtendedAttr);
+	ptr=(Uint8 *)(fe->extendedAttr) + le32_to_cpu(fe->lengthExtendedAttr);
 
 	if ( (*offset > 0) && (*offset < le32_to_cpu(fe->lengthAllocDescs)) )
 	{
@@ -278,15 +300,17 @@ short_ad *
 udf_get_fileshortad(void * buffer, int maxoffset, int *offset, int inc)
 {
 	short_ad * sa;
-	uint8_t * ptr;
+	Uint8 * ptr;
 
 	if ( (!buffer) || (!offset) )
 	{
+#ifdef __KERNEL__
 		printk(KERN_ERR "udf: udf_get_fileshortad() invalidparms\n");
+#endif
 		return NULL;
 	}
 
-	ptr = (uint8_t *)buffer;
+	ptr = (Uint8 *)buffer;
 
 	if ( (*offset > 0) && (*offset < maxoffset) )
 		ptr += *offset;
@@ -304,15 +328,17 @@ long_ad *
 udf_get_filelongad(void * buffer, int maxoffset, int * offset, int inc)
 {
 	long_ad * la;
-	uint8_t * ptr;
+	Uint8 * ptr;
 
 	if ( (!buffer) || !(offset) ) 
 	{
+#ifdef __KERNEL__
 		printk(KERN_ERR "udf: udf_get_filelongad() invalidparms\n");
+#endif
 		return NULL;
 	}
 
-	ptr = (uint8_t *)buffer;
+	ptr = (Uint8 *)buffer;
 
 	if ( (*offset > 0) && (*offset < maxoffset) )
 		ptr += *offset;

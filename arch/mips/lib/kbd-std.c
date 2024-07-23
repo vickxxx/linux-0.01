@@ -1,4 +1,5 @@
-/*
+/* $Id: kbd-std.c,v 1.2 1999/06/11 14:29:45 ralf Exp $
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,7 +8,6 @@
  *
  * Copyright (C) 1998, 1999 by Ralf Baechle
  */
-#include <linux/config.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
 #include <linux/pc_keyb.h>

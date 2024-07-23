@@ -1,5 +1,5 @@
 /*
- * Copyright 2000-2002 by Hans Reiser, licensing governed by reiserfs/README
+ * Copyright 2000 by Hans Reiser, licensing governed by reiserfs/README
  */
 
 #include <linux/sched.h>
@@ -106,7 +106,7 @@ static int sd_unit_num (struct virtual_item * vi)
 
 static void sd_print_vi (struct virtual_item * vi)
 {
-    reiserfs_warning (NULL, "STATDATA, index %d, type 0x%x, %h\n", 
+    reiserfs_warning ("STATDATA, index %d, type 0x%x, %h\n", 
 		      vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -209,7 +209,7 @@ static int direct_unit_num (struct virtual_item * vi)
 
 static void direct_print_vi (struct virtual_item * vi)
 {
-    reiserfs_warning (NULL, "DIRECT, index %d, type 0x%x, %h\n", 
+    reiserfs_warning ("DIRECT, index %d, type 0x%x, %h\n", 
 		      vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -363,7 +363,7 @@ static int indirect_unit_num (struct virtual_item * vi)
 
 static void indirect_print_vi (struct virtual_item * vi)
 {
-    reiserfs_warning (NULL, "INDIRECT, index %d, type 0x%x, %h\n", 
+    reiserfs_warning ("INDIRECT, index %d, type 0x%x, %h\n", 
 		      vi->vi_index, vi->vi_type, vi->vi_ih);
 }
 
@@ -390,7 +390,7 @@ struct item_operations indirect_ops = {
 
 static int direntry_bytes_number (struct item_head * ih, int block_size)
 {
-    reiserfs_warning (NULL, "vs-16090: direntry_bytes_number: "
+    reiserfs_warning ("vs-16090: direntry_bytes_number: "
 		      "bytes number is asked for direntry");
     return 0;
 }
@@ -465,6 +465,13 @@ static void direntry_check_item (struct item_head * ih, char * item)
 
 
 #define DIRENTRY_VI_FIRST_DIRENTRY_ITEM 1
+
+struct direntry_uarea {
+    int flags;
+    __u16 entry_count;
+    __u16 entry_sizes[1];
+} __attribute__ ((__packed__)) ;
+
 
 /*
  * function returns old entry number in directory item in real node
@@ -653,7 +660,7 @@ static void direntry_print_vi (struct virtual_item * vi)
     int i;
     struct direntry_uarea * dir_u = vi->vi_uarea;
 
-    reiserfs_warning (NULL, "DIRENTRY, index %d, type 0x%x, %h, flags 0x%x\n", 
+    reiserfs_warning ("DIRENTRY, index %d, type 0x%x, %h, flags 0x%x\n", 
 		      vi->vi_index, vi->vi_type, vi->vi_ih, dir_u->flags);
     printk ("%d entries: ", dir_u->entry_count);
     for (i = 0; i < dir_u->entry_count; i ++)
@@ -678,110 +685,17 @@ struct item_operations direntry_ops = {
 
 
 //////////////////////////////////////////////////////////////////////////////
-// Error catching functions to catch errors caused by incorrect item types.
-//
-static int errcatch_bytes_number (struct item_head * ih, int block_size)
-{
-    reiserfs_warning (NULL, "green-16001: Invalid item type observed, run fsck ASAP\n");
-    return 0;
-}
-
-static void errcatch_decrement_key (struct cpu_key * key)
-{
-    reiserfs_warning (NULL, "green-16002: Invalid item type observed, run fsck ASAP\n");
-}
-
-
-static int errcatch_is_left_mergeable (struct key * key, unsigned long bsize)
-{
-    reiserfs_warning (NULL, "green-16003: Invalid item type observed, run fsck ASAP\n");
-    return 0;
-}
-
-
-static void errcatch_print_item (struct item_head * ih, char * item)
-{
-    reiserfs_warning (NULL, "green-16004: Invalid item type observed, run fsck ASAP\n");
-}
-
-
-static void errcatch_check_item (struct item_head * ih, char * item)
-{
-    reiserfs_warning (NULL, "green-16005: Invalid item type observed, run fsck ASAP\n");
-}
-
-static int errcatch_create_vi (struct virtual_node * vn,
-			       struct virtual_item * vi, 
-			       int is_affected, 
-			       int insert_size)
-{
-    reiserfs_warning (NULL, "green-16006: Invalid item type observed, run fsck ASAP\n");
-    return 0;	// We might return -1 here as well, but it won't help as create_virtual_node() from where
-		// this operation is called from is of return type void.
-}
-
-static int errcatch_check_left (struct virtual_item * vi, int free,
-				int start_skip, int end_skip)
-{
-    reiserfs_warning (NULL, "green-16007: Invalid item type observed, run fsck ASAP\n");
-    return -1;
-}
-
-
-static int errcatch_check_right (struct virtual_item * vi, int free)
-{
-    reiserfs_warning (NULL, "green-16008: Invalid item type observed, run fsck ASAP\n");
-    return -1;
-}
-
-static int errcatch_part_size (struct virtual_item * vi, int first, int count)
-{
-    reiserfs_warning (NULL, "green-16009: Invalid item type observed, run fsck ASAP\n");
-    return 0;
-}
-
-static int errcatch_unit_num (struct virtual_item * vi)
-{
-    reiserfs_warning (NULL, "green-16010: Invalid item type observed, run fsck ASAP\n");
-    return 0;
-}
-
-static void errcatch_print_vi (struct virtual_item * vi)
-{
-    reiserfs_warning (NULL, "green-16011: Invalid item type observed, run fsck ASAP\n");
-}
-
-struct item_operations errcatch_ops = {
-    errcatch_bytes_number,
-    errcatch_decrement_key,
-    errcatch_is_left_mergeable,
-    errcatch_print_item,
-    errcatch_check_item,
-
-    errcatch_create_vi,
-    errcatch_check_left,
-    errcatch_check_right,
-    errcatch_part_size,
-    errcatch_unit_num,
-    errcatch_print_vi
-};
-
-
-
-//////////////////////////////////////////////////////////////////////////////
 //
 //
 #if ! (TYPE_STAT_DATA == 0 && TYPE_INDIRECT == 1 && TYPE_DIRECT == 2 && TYPE_DIRENTRY == 3)
   do not compile
 #endif
 
-struct item_operations * item_ops [TYPE_ANY + 1] = {
+struct item_operations * item_ops [4] = {
   &stat_data_ops,
   &indirect_ops,
   &direct_ops,
-  &direntry_ops,
-  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-  &errcatch_ops		/* This is to catch errors with invalid type (15th entry for TYPE_ANY) */
+  &direntry_ops
 };
 
 

@@ -125,7 +125,7 @@ static int osf_filldir(void *__buf, const char *name, int namlen, loff_t offset,
 	put_user(reclen, &dirent->d_reclen);
 	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
-	dirent = (char *)dirent + reclen;
+	((char *) dirent) += reclen;
 	buf->dirent = dirent;
 	buf->count -= reclen;
 	return 0;
@@ -219,8 +219,8 @@ asmlinkage unsigned long sys_getxpid(int a0, int a1, int a2, int a3, int a4,
 	 * isn't actually going to matter, as if the parent happens
 	 * to change we can happily return either of the pids.
 	 */
-	(&regs)->r20 = tsk->p_opptr->tgid;
-	return tsk->tgid;
+	(&regs)->r20 = tsk->p_opptr->pid;
+	return tsk->pid;
 }
 
 asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
@@ -462,8 +462,13 @@ out:
 
 asmlinkage int osf_swapon(const char *path, int flags, int lowat, int hiwat)
 {
+	int ret;
+
 	/* for now, simply ignore lowat and hiwat... */
-	return sys_swapon(path, flags);
+	lock_kernel();
+	ret = sys_swapon(path, flags);
+	unlock_kernel();
+	return ret;
 }
 
 asmlinkage unsigned long sys_getpagesize(void)
@@ -524,13 +529,18 @@ asmlinkage long osf_shmat(int shmid, void *shmaddr, int shmflg)
 	unsigned long raddr;
 	long err;
 
+	lock_kernel();
 	err = sys_shmat(shmid, shmaddr, shmflg, &raddr);
-
+	if (err)
+		goto out;
 	/*
 	 * This works because all user-level addresses are
 	 * non-negative longs!
 	 */
-	return err ? err : (long)raddr;
+	err = raddr;
+out:
+	unlock_kernel();
+	return err;
 }
 
 
@@ -1374,44 +1384,3 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 
 	return addr;
 }
-
-#ifdef CONFIG_OSF4_COMPAT
-extern ssize_t sys_readv(unsigned long, const struct iovec *, unsigned long);
-extern ssize_t sys_writev(unsigned long, const struct iovec *, unsigned long);
-
-/* Clear top 32 bits of iov_len in the user's buffer for
-   compatibility with old versions of OSF/1 where iov_len
-   was defined as int. */
-static int
-osf_fix_iov_len(const struct iovec *iov, unsigned long count)
-{
-	unsigned long i;
-
-	for (i = 0 ; i < count ; i++) {
-		int *iov_len_high = (int *)&iov[i].iov_len + 1;
-
-		if (put_user(0, iov_len_high))
-			return -EFAULT;
-	}
-	return 0;
-}
-
-asmlinkage ssize_t
-osf_readv(unsigned long fd, const struct iovec * vector, unsigned long count)
-{
-	if (unlikely(personality(current->personality) == PER_OSF4))
-		if (osf_fix_iov_len(vector, count))
-			return -EFAULT;
-	return sys_readv(fd, vector, count);
-}
-
-asmlinkage ssize_t
-osf_writev(unsigned long fd, const struct iovec * vector, unsigned long count)
-{
-	if (unlikely(personality(current->personality) == PER_OSF4))
-		if (osf_fix_iov_len(vector, count))
-			return -EFAULT;
-	return sys_writev(fd, vector, count);
-}
-
-#endif

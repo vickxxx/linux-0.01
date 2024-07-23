@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) 2000-2003 LSI Logic Corporation.
+ *  Copyright (c) 2000-2001 LSI Logic Corporation.
  *
  *
- *           Name:  mpi_type.h
+ *           Name:  MPI_TYPE.H
  *          Title:  MPI Basic type definitions
  *  Creation Date:  June 6, 2000
  *
- *    mpi_type.h Version:  01.05.xx
+ *    MPI Version:  01.01.02
  *
  *  Version History
  *  ---------------
@@ -17,7 +17,6 @@
  *  06-06-00  01.00.01  Update version number for 1.0 release.
  *  11-02-00  01.01.01  Original release for post 1.0 work
  *  02-20-01  01.01.02  Added define and ifdef for MPI_POINTER.
- *  08-08-01  01.02.01  Original release for v1.2 work.
  *  --------------------------------------------------------------------------
  */
 

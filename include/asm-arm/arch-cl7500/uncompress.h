@@ -9,8 +9,7 @@
 
 static __inline__ void putc(char c)
 {
-	while (!(*((volatile unsigned int *)(SERBASE + 0x14)) & 0x20))
-		barrier();
+	while (!(*((volatile unsigned int *)(SERBASE + 0x14)) & 0x20));
 	*((volatile unsigned int *)(SERBASE)) = c;
 }
 

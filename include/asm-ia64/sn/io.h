@@ -1,19 +1,21 @@
-/*
+
+/* $Id: io.h,v 1.2 2000/02/02 16:35:57 ralf Exp $
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
  * Copyright (C) 2000 Ralf Baechle
+ * Copyright (C) 2000 Silicon Graphics, Inc.
  */
-#ifndef _ASM_IA64_SN_IO_H
-#define _ASM_IA64_SN_IO_H
+#ifndef _ASM_SN_IO_H
+#define _ASM_SN_IO_H
 
 #include <linux/config.h>
 
-#include <asm/sn/addrs.h>
-
-extern int numionodes;
+#if defined(CONFIG_SGI_IP35) || defined(CONFIG_IA64_SGI_SN1) || defined(CONFIG_IA64_GENERIC)
+#include <asm/sn/sn1/addrs.h>
+#endif
 
 /* Because we only have PCI I/O ports.  */
 #define IIO_ITTE_BASE	0x400160	/* base of translation table entries */
@@ -49,21 +51,17 @@ extern int numionodes;
 #define IIO_ITTE_GET(nasid, bigwin) REMOTE_HUB_ADDR((nasid), IIO_ITTE(bigwin))
 
 /*
- * Macro which takes the widget number, and returns the
+ * Macro which takes the widget number, and returns the 
  * IO PRB address of that widget.
- * value _x is expected to be a widget number in the range
+ * value _x is expected to be a widget number in the range 
  * 0, 8 - 0xF
  */
 #define	IIO_IOPRB(_x)	(IIO_IOPRB_0 + ( ( (_x) < HUB_WIDGET_ID_MIN ? \
 			(_x) : \
 			(_x) - (HUB_WIDGET_ID_MIN-1)) << 3) )
 
-#include <asm/sn/sn2/shub.h>
-#include <asm/sn/sn2/shubio.h>
+#if defined(CONFIG_SGI_IP35) || defined(CONFIG_IA64_SGI_SN1) || defined(CONFIG_IA64_GENERIC)
+#include <asm/sn/sn1/hubio.h>
+#endif
 
-/*
- * Used to ensure write ordering (like mb(), but for I/O space)
- */
-extern void sn_mmiob(void);
-
-#endif /* _ASM_IA64_SN_IO_H */
+#endif /* _ASM_SN_IO_H */

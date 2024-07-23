@@ -6,11 +6,13 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $*.s
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $*.o
 
-O_TARGET := gt64120.o
+O_TARGET:= gt64120.o
 
-obj-y	 		+= time.o
-obj-$(CONFIG_PCI)	+= pci.o
+obj-y	 := gt_irq.o pci.o
 
 include $(TOPDIR)/Rules.make

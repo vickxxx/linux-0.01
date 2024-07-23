@@ -52,6 +52,14 @@ static void ncp_add_mem(struct ncp_server *server, const void *source, int size)
 	return;
 }
 
+static void ncp_add_mem_fromfs(struct ncp_server *server, const char *source, int size)
+{
+	assert_server_locked(server);
+	copy_from_user(&(server->packet[server->current_size]), source, size);
+	server->current_size += size;
+	return;
+}
+
 static void ncp_add_pstring(struct ncp_server *server, const char *s)
 {
 	int len = strlen(s);
@@ -258,7 +266,6 @@ static void ncp_extract_file_info(void *structure, struct nw_info_struct *target
 	target->nameLen = *name_len;
 	memcpy(target->entryName, name_len + 1, *name_len);
 	target->entryName[*name_len] = '\0';
-	target->volNumber = le32_to_cpu(target->volNumber);
 	return;
 }
 
@@ -339,7 +346,7 @@ ncp_get_known_namespace(struct ncp_server *server, __u8 volume)
 	}
 
 	result = NW_NS_DOS;
-	no_namespaces = le16_to_cpu(ncp_reply_word(server, 0));
+	no_namespaces = ncp_reply_word(server, 0);
 	namespace = ncp_reply_data(server, 2);
 
 	while (no_namespaces > 0) {

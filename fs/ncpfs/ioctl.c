@@ -418,7 +418,7 @@ outrel:
 			if (user.object_name_len) {
 				newname = ncp_kmalloc(user.object_name_len, GFP_USER);
 				if (!newname) return -ENOMEM;
-				if (copy_from_user(newname, user.object_name, user.object_name_len)) {
+				if (copy_from_user(newname, user.object_name, sizeof(user))) {
 					ncp_kfree_s(newname, user.object_name_len);
 					return -EFAULT;
 				}
@@ -434,7 +434,7 @@ outrel:
 			oldprivatelen = server->priv.len;
 			server->auth.auth_type = user.auth_type;
 			server->auth.object_name_len = user.object_name_len;
-			server->auth.object_name = newname;
+			server->auth.object_name = user.object_name;
 			server->priv.len = 0;
 			server->priv.data = NULL;
 			/* leave critical section */

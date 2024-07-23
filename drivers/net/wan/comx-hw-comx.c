@@ -92,9 +92,9 @@ struct comx_privdata {
 };
 
 static struct net_device *memory_used[(COMX_MEM_MAX - COMX_MEM_MIN) / 0x10000];
-static struct comx_hardware hicomx_hw;
-static struct comx_hardware comx_hw;
-static struct comx_hardware cmx_hw;
+extern struct comx_hardware hicomx_hw;
+extern struct comx_hardware comx_hw;
+extern struct comx_hardware cmx_hw;
 
 static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
@@ -466,16 +466,16 @@ static int COMX_open(struct net_device *dev)
 	}
 
 	if (!twin_open) {
-		if (!request_region(dev->base_addr, hw->io_extent, dev->name)) {
+		if (check_region(dev->base_addr, hw->io_extent)) {
 			return -EAGAIN;
 		}
 		if (request_irq(dev->irq, COMX_interrupt, 0, dev->name, 
 		   (void *)dev)) {
 			printk(KERN_ERR "comx-hw-comx: unable to obtain irq %d\n", dev->irq);
-			release_region(dev->base_addr, hw->io_extent);
 			return -EAGAIN;
 		}
 		ch->init_status |= IRQ_ALLOCATED;
+		request_region(dev->base_addr, hw->io_extent, dev->name);
 		if (!ch->HW_load_board || ch->HW_load_board(dev)) {
 			ch->init_status &= ~IRQ_ALLOCATED;
 			retval=-ENODEV;

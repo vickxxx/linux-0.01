@@ -1,7 +1,7 @@
 /*
- * USB Skeleton driver - 0.7
+ * USB Skeleton driver - 0.6
  *
- * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License as
@@ -22,9 +22,6 @@
  *
  * History:
  *
- * 2002_02_12 - 0.7 - zero out dev in probe function for devices that do
- *			not have both a bulk in and bulk out endpoint.
- *			Thanks to Holger Waechtler for the fix.
  * 2001_11_05 - 0.6 - fix minor locking problem in skel_disconnect.
  *			Thanks to Pete Zaitcev for the fix.
  * 2001_09_04 - 0.5 - fix devfs bug in skel_disconnect. Thanks to wim delvaux
@@ -87,7 +84,7 @@ MODULE_DEVICE_TABLE (usb, skel_table);
 
 
 /* Get a minor range for your devices from the usb maintainer */
-#define USB_SKEL_MINOR_BASE	192	
+#define USB_SKEL_MINOR_BASE	200	
 
 /* we can have up to this number of device plugged in at once */
 #define MAX_DEVICES		16
@@ -141,37 +138,9 @@ static struct usb_skel		*minor_table[MAX_DEVICES];
 /* lock to protect the minor_table structure */
 static DECLARE_MUTEX (minor_table_mutex);
 
-/*
- * File operations needed when we register this driver.
- * This assumes that this driver NEEDS file operations,
- * of course, which means that the driver is expected
- * to have a node in the /dev directory. If the USB
- * device were for a network interface then the driver
- * would use "struct net_driver" instead, and a serial
- * device would use "struct tty_driver". 
- */
+/* file operations needed when we register this driver */
 static struct file_operations skel_fops = {
-	/*
-	 * The owner field is part of the module-locking
-	 * mechanism. The idea is that the kernel knows
-	 * which module to increment the use-counter of
-	 * BEFORE it calls the device's open() function.
-	 * This also means that the kernel can decrement
-	 * the use-counter again before calling release()
-	 * or should the open() function fail.
-	 *
-	 * Not all device structures have an "owner" field
-	 * yet. "struct file_operations" and "struct net_device"
-	 * do, while "struct tty_driver" does not. If the struct
-	 * has an "owner" field, then initialize it to the value
-	 * THIS_MODULE and the kernel will handle all module
-	 * locking for you automatically. Otherwise, you must
-	 * increment the use-counter in the open() function
-	 * and decrement it again in the release() function
-	 * yourself.
-	 */
 	owner:		THIS_MODULE,
-
 	read:		skel_read,
 	write:		skel_write,
 	ioctl:		skel_ioctl,
@@ -246,11 +215,7 @@ static int skel_open (struct inode *inode, struct file *file)
 		return -ENODEV;
 	}
 
-	/* Increment our usage count for the module.
-	 * This is redundant here, because "struct file_operations"
-	 * has an "owner" field. This line is included here soley as
-	 * a reference for drivers using lesser structures... ;-)
-	 */
+	/* increment our usage count for the module */
 	MOD_INC_USE_COUNT;
 
 	/* lock our minor table and get our local data for this minor */
@@ -313,8 +278,8 @@ static int skel_release (struct inode *inode, struct file *file)
 		/* the device was unplugged before the file was released */
 		up (&dev->sem);
 		skel_delete (dev);
-		up (&minor_table_mutex);
 		MOD_DEC_USE_COUNT;
+		up (&minor_table_mutex);
 		return 0;
 	}
 
@@ -543,7 +508,6 @@ static void * skel_probe(struct usb_device *udev, unsigned int ifnum, const stru
 		err ("Out of memory");
 		goto exit;
 	}
-	memset (dev, 0x00, sizeof (*dev));
 	minor_table[minor] = dev;
 
 	interface = &udev->actconfig->interface[ifnum];

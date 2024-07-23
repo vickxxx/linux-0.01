@@ -6,7 +6,7 @@
  * Copyright (C) 1999		Arun Sharma <arun.sharma@intel.com>
  * Copyright (C) 1997,1998	Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997		David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 2000-2002 Hewlett-Packard Co
+ * Copyright (C) 2000-2001 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * These routines maintain argument size conversion between 32bit and 64bit
@@ -38,7 +38,6 @@
 #include <linux/smb_mount.h>
 #include <linux/ncp_fs.h>
 #include <linux/quota.h>
-#include <linux/quotacompat.h>
 #include <linux/module.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/nfsd/nfsd.h>
@@ -74,7 +73,6 @@
 #define OFFSET4K(a)		((a) & 0xfff)
 #define PAGE_START(addr)	((addr) & PAGE_MASK)
 #define PAGE_OFF(addr)		((addr) & ~PAGE_MASK)
-#define MINSIGSTKSZ_IA32	2048
 
 extern asmlinkage long sys_execve (char *, char **, char **, struct pt_regs *);
 extern asmlinkage long sys_mprotect (unsigned long, size_t, unsigned long);
@@ -84,7 +82,6 @@ extern unsigned long arch_get_unmapped_area (struct file *, unsigned long, unsig
 
 /* forward declaration: */
 asmlinkage long sys32_mprotect (unsigned int, unsigned int, int);
-asmlinkage unsigned long sys_brk(unsigned long);
 
 /*
  * Anything that modifies or inspects ia32 user virtual memory must hold this semaphore
@@ -94,7 +91,7 @@ asmlinkage unsigned long sys_brk(unsigned long);
 static DECLARE_MUTEX(ia32_mmap_sem);
 
 static int
-nargs (unsigned int arg, char **ap, int max)
+nargs (unsigned int arg, char **ap)
 {
 	unsigned int addr;
 	int n, err;
@@ -107,14 +104,10 @@ nargs (unsigned int arg, char **ap, int max)
 		err = get_user(addr, (unsigned int *)A(arg));
 		if (err)
 			return err;
-		if (n > max)
-			return -E2BIG;
 		if (ap)
 			*ap++ = (char *) A(addr);
 		arg += sizeof(unsigned int);
 		n++;
-		if (n >= (MAX_ARG_PAGES * PAGE_SIZE) / sizeof(char *))
-			return -E2BIG;
 	} while (addr);
 	return n - 1;
 }
@@ -130,11 +123,10 @@ sys32_execve (char *filename, unsigned int argv, unsigned int envp,
 	int na, ne, len;
 	long r;
 
-	/* Allocates upto 2x MAX_ARG_PAGES */
-	na = nargs(argv, NULL, (MAX_ARG_PAGES*PAGE_SIZE) / sizeof(char *) - 1);
+	na = nargs(argv, NULL);
 	if (na < 0)
 		return na;
-	ne = nargs(envp, NULL, (MAX_ARG_PAGES*PAGE_SIZE) / sizeof(char *) - 1 );
+	ne = nargs(envp, NULL);
 	if (ne < 0)
 		return ne;
 	len = (na + ne + 2) * sizeof(*av);
@@ -146,10 +138,10 @@ sys32_execve (char *filename, unsigned int argv, unsigned int envp,
 	av[na] = NULL;
 	ae[ne] = NULL;
 
-	r = nargs(argv, av, na);
+	r = nargs(argv, av);
 	if (r < 0)
 		goto out;
-	r = nargs(envp, ae, ne);
+	r = nargs(envp, ae);
 	if (r < 0)
 		goto out;
 
@@ -172,9 +164,9 @@ sys32_execve (char *filename, unsigned int argv, unsigned int envp,
 		current->thread.map_base  = old_map_base;
 		current->thread.task_size = old_task_size;
 		set_fs(USER_DS);	/* establish new task-size as the address-limit */
+	  out:
+		kfree(av);
 	}
-  out:
-	kfree(av);
 	return r;
 }
 
@@ -207,18 +199,13 @@ extern asmlinkage long sys_newstat (char * filename, struct stat * statbuf);
 asmlinkage long
 sys32_newstat (char *filename, struct stat32 *statbuf)
 {
-	char *name;
 	int ret;
 	struct stat s;
 	mm_segment_t old_fs = get_fs();
 
-	name = getname(filename);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
 	set_fs(KERNEL_DS);
-	ret = sys_newstat(name, &s);
+	ret = sys_newstat(filename, &s);
 	set_fs(old_fs);
-	putname(name);
 	if (putstat(statbuf, &s))
 		return -EFAULT;
 	return ret;
@@ -229,18 +216,13 @@ extern asmlinkage long sys_newlstat(char * filename, struct stat * statbuf);
 asmlinkage long
 sys32_newlstat (char *filename, struct stat32 *statbuf)
 {
-	char *name;
 	mm_segment_t old_fs = get_fs();
 	struct stat s;
 	int ret;
 
-	name = getname(filename);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
 	set_fs(KERNEL_DS);
-	ret = sys_newlstat(name, &s);
+	ret = sys_newlstat(filename, &s);
 	set_fs(old_fs);
-	putname(name);
 	if (putstat(statbuf, &s))
 		return -EFAULT;
 	return ret;
@@ -267,8 +249,9 @@ sys32_newfstat (unsigned int fd, struct stat32 *statbuf)
 
 
 static int
-get_page_prot (struct vm_area_struct *vma, unsigned long addr)
+get_page_prot (unsigned long addr)
 {
+	struct vm_area_struct *vma = find_vma(current->mm, addr);
 	int prot = 0;
 
 	if (!vma || vma->vm_start > addr)
@@ -291,26 +274,14 @@ static unsigned long
 mmap_subpage (struct file *file, unsigned long start, unsigned long end, int prot, int flags,
 	      loff_t off)
 {
-	void *page = NULL;
+	void *page = (void *) get_zeroed_page(GFP_KERNEL);
 	struct inode *inode;
-	unsigned long ret = 0;
-	struct vm_area_struct *vma = find_vma(current->mm, start);
-	int old_prot = get_page_prot(vma, start);
+	unsigned long ret;
+	int old_prot = get_page_prot(start);
 
 	DBG("mmap_subpage(file=%p,start=0x%lx,end=0x%lx,prot=%x,flags=%x,off=0x%llx)\n",
 	    file, start, end, prot, flags, off);
 
-
-	/* Optimize the case where the old mmap and the new mmap are both anonymous */
-	if ((old_prot & PROT_WRITE) && (flags & MAP_ANONYMOUS) && !vma->vm_file) {
-		if (clear_user((void *) start, end - start)) {
-			ret = -EFAULT;
-			goto out;
-		}
-		goto skip_mmap;
-	}
-
-	page = (void *) get_zeroed_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
 
@@ -335,7 +306,6 @@ mmap_subpage (struct file *file, unsigned long start, unsigned long end, int pro
 			copy_to_user((void *) end, page + PAGE_OFF(end),
 				     PAGE_SIZE - PAGE_OFF(end));
 	}
-
 	if (!(flags & MAP_ANONYMOUS)) {
 		/* read the file contents */
 		inode = file->f_dentry->d_inode;
@@ -346,13 +316,10 @@ mmap_subpage (struct file *file, unsigned long start, unsigned long end, int pro
 			goto out;
 		}
 	}
-
- skip_mmap:
 	if (!(prot & PROT_WRITE))
 		ret = sys_mprotect(PAGE_START(start), PAGE_SIZE, prot | old_prot);
   out:
-	if (page)
-		free_page((unsigned long) page);
+	free_page((unsigned long) page);
 	return ret;
 }
 
@@ -445,7 +412,7 @@ emulate_mmap (struct file *file, unsigned long start, unsigned long len, int pro
 			return -EINVAL;
 		}
 		if (!(prot & PROT_WRITE) && sys_mprotect(pstart, pend - pstart, prot) < 0)
-			return -EINVAL;
+			return EINVAL;
 	}
 	return start;
 }
@@ -480,12 +447,7 @@ ia32_do_mmap (struct file *file, unsigned long addr, unsigned long len, int prot
 		return addr;
 
 	if (len > IA32_PAGE_OFFSET || addr > IA32_PAGE_OFFSET - len)
-	{
-		if (flags & MAP_FIXED)
-			return -ENOMEM;
-		else
 		return -EINVAL;
-	}
 
 	if (OFFSET4K(offset))
 		return -EINVAL;
@@ -584,7 +546,7 @@ sys32_munmap (unsigned int start, unsigned int len)
 #if PAGE_SHIFT <= IA32_PAGE_SHIFT
 	ret = sys_munmap(start, end - start);
 #else
-	if (start >= end)
+	if (start > end)
 		return -EINVAL;
 
 	start = PAGE_ALIGN(start);
@@ -613,12 +575,11 @@ static long
 mprotect_subpage (unsigned long address, int new_prot)
 {
 	int old_prot;
-	struct vm_area_struct *vma;
 
 	if (new_prot == PROT_NONE)
 		return 0;		/* optimize case where nothing changes... */
-	vma = find_vma(current->mm, address);
-	old_prot = get_page_prot(vma, address);
+
+	old_prot = get_page_prot(address);
 	return sys_mprotect(address, PAGE_SIZE, new_prot | old_prot);
 }
 
@@ -661,8 +622,7 @@ sys32_mprotect (unsigned int start, unsigned int len, int prot)
 			/* end address is 4KB aligned but not page aligned. */
 			retval = mprotect_subpage(PAGE_START(end), prot);
 			if (retval < 0)
-				goto out;
-
+				return retval;
 			end = PAGE_START(end);
 		}
 		retval = sys_mprotect(start, end - start, prot);
@@ -714,18 +674,13 @@ extern asmlinkage long sys_statfs(const char * path, struct statfs * buf);
 asmlinkage long
 sys32_statfs (const char *path, struct statfs32 *buf)
 {
-	const char *name;
 	int ret;
 	struct statfs s;
 	mm_segment_t old_fs = get_fs();
 
-	name = getname(path);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
 	set_fs(KERNEL_DS);
-	ret = sys_statfs(name, &s);
+	ret = sys_statfs(path, &s);
 	set_fs(old_fs);
-	putname(name);
 	if (put_statfs(buf, &s))
 		return -EFAULT;
 	return ret;
@@ -1273,8 +1228,8 @@ sys32_writev (int fd, struct iovec32 *vector, u32 count)
 #define RESOURCE32(x) ((x > RLIM_INFINITY32) ? RLIM_INFINITY32 : x)
 
 struct rlimit32 {
-	unsigned int	rlim_cur;
-	unsigned int	rlim_max;
+	int	rlim_cur;
+	int	rlim_max;
 };
 
 extern asmlinkage long sys_getrlimit (unsigned int resource, struct rlimit *rlim);
@@ -1372,11 +1327,6 @@ struct cmsghdr32 {
 #define __CMSG32_FIRSTHDR(ctl,len) \
 	((len) >= sizeof(struct cmsghdr32) ? (struct cmsghdr32 *)(ctl) : (struct cmsghdr32 *)NULL)
 #define CMSG32_FIRSTHDR(msg)	__CMSG32_FIRSTHDR((msg)->msg_control, (msg)->msg_controllen)
-#define CMSG32_OK(ucmlen, ucmsg, mhdr) \
-	((ucmlen) >= sizeof(struct cmsghdr32) && \
-	 (ucmlen) <= (unsigned long) \
-	 ((mhdr)->msg_controllen - \
-	  ((char *)(ucmsg) - (char *)(mhdr)->msg_control)))
 
 static inline struct cmsghdr32 *
 __cmsg32_nxthdr (void *ctl, __kernel_size_t size, struct cmsghdr32 *cmsg, int cmsg_len)
@@ -1437,12 +1387,14 @@ get_cmsghdr32 (struct msghdr *kmsg, unsigned char *stackbuf, struct sock *sk, si
 			return -EFAULT;
 
 		/* Catch bogons. */
-		if (!CMSG32_OK(ucmlen, ucmsg, kmsg))
+		if (CMSG32_ALIGN(ucmlen) < CMSG32_ALIGN(sizeof(struct cmsghdr32)))
+			return -EINVAL;
+		if ((unsigned long)(((char *)ucmsg - (char *)kmsg->msg_control) + ucmlen)
+		    > kmsg->msg_controllen)
 			return -EINVAL;
 
 		tmp = ((ucmlen - CMSG32_ALIGN(sizeof(*ucmsg))) +
 		       CMSG_ALIGN(sizeof(struct cmsghdr)));
-		tmp = CMSG_ALIGN(tmp);
 		kcmlen += tmp;
 		ucmsg = CMSG32_NXTHDR(kmsg, ucmsg, ucmlen);
 	}
@@ -1479,7 +1431,7 @@ get_cmsghdr32 (struct msghdr *kmsg, unsigned char *stackbuf, struct sock *sk, si
 			goto out_free_efault;
 
 		/* Advance. */
-		kcmsg = (struct cmsghdr *)((char *)kcmsg + tmp);
+		kcmsg = (struct cmsghdr *)((char *)kcmsg + CMSG_ALIGN(tmp));
 		ucmsg = CMSG32_NXTHDR(kmsg, ucmsg, ucmlen);
 	}
 
@@ -1653,8 +1605,7 @@ scm_detach_fds32 (struct msghdr *kmsg, struct scm_cookie *scm)
  *		IPV6_AUTHHDR	ipv6 auth exthdr	32-bit clean
  */
 static void
-cmsg32_recvmsg_fixup (struct msghdr *kmsg, unsigned long orig_cmsg_uptr,
-		__kernel_size_t orig_cmsg_len)
+cmsg32_recvmsg_fixup (struct msghdr *kmsg, unsigned long orig_cmsg_uptr)
 {
 	unsigned char *workbuf, *wp;
 	unsigned long bufsz, space_avail;
@@ -1688,9 +1639,6 @@ cmsg32_recvmsg_fixup (struct msghdr *kmsg, unsigned long orig_cmsg_uptr,
 			goto fail2;
 
 		clen64 = kcmsg32->cmsg_len;
-		if ((clen64 < CMSG_ALIGN(sizeof(*ucmsg))) ||
-				(clen64 > (orig_cmsg_len + wp - workbuf)))
-			break;
 		copy_from_user(CMSG32_DATA(kcmsg32), CMSG_DATA(ucmsg),
 			       clen64 - CMSG_ALIGN(sizeof(*ucmsg)));
 		clen32 = ((clen64 - CMSG_ALIGN(sizeof(*ucmsg))) +
@@ -1820,7 +1768,6 @@ sys32_recvmsg (int fd, struct msghdr32 *msg, unsigned int flags)
 	struct iovec *iov=iovstack;
 	struct msghdr msg_sys;
 	unsigned long cmsg_ptr;
-	__kernel_size_t cmsg_len;
 	int err, iov_size, total_len, len;
 	struct scm_cookie scm;
 
@@ -1865,7 +1812,6 @@ sys32_recvmsg (int fd, struct msghdr32 *msg, unsigned int flags)
 	total_len=err;
 
 	cmsg_ptr = (unsigned long)msg_sys.msg_control;
-	cmsg_len = msg_sys.msg_controllen;
 	msg_sys.msg_flags = 0;
 
 	if (sock->file->f_flags & O_NONBLOCK)
@@ -1892,8 +1838,7 @@ sys32_recvmsg (int fd, struct msghdr32 *msg, unsigned int flags)
 			 * fix it up before we tack on more stuff.
 			 */
 			if ((unsigned long) msg_sys.msg_control != cmsg_ptr)
-				cmsg32_recvmsg_fixup(&msg_sys, cmsg_ptr,
-						cmsg_len);
+				cmsg32_recvmsg_fixup(&msg_sys, cmsg_ptr);
 
 			/* Wheee... */
 			if (sock->passcred)
@@ -2138,7 +2083,7 @@ struct shmid_ds32 {
 };
 
 struct shmid64_ds32 {
-	struct ipc64_perm32 shm_perm;
+	struct ipc64_perm shm_perm;
 	__kernel_size_t32 shm_segsz;
 	__kernel_time_t32 shm_atime;
 	unsigned int __unused1;
@@ -2172,8 +2117,8 @@ struct shm_info32 {
 };
 
 struct ipc_kludge {
-	u32 msgp;
-	s32 msgtyp;
+	struct msgbuf *msgp;
+	long msgtyp;
 };
 
 #define SEMOP		 1
@@ -2220,10 +2165,6 @@ semctl32 (int first, int second, int third, void *uptr)
 	else
 		fourth.__pad = (void *)A(pad);
 	switch (third) {
-	      default:
-		err = -EINVAL;
-		break;
-
 	      case IPC_INFO:
 	      case IPC_RMID:
 	      case IPC_SET:
@@ -2291,7 +2232,7 @@ semctl32 (int first, int second, int third, void *uptr)
 static int
 do_sys32_msgsnd (int first, int second, int third, void *uptr)
 {
-	struct msgbuf *p = kmalloc(second + sizeof(struct msgbuf), GFP_USER);
+	struct msgbuf *p = kmalloc(second + sizeof(struct msgbuf) + 4, GFP_USER);
 	struct msgbuf32 *up = (struct msgbuf32 *)uptr;
 	mm_segment_t old_fs;
 	int err;
@@ -2333,12 +2274,12 @@ do_sys32_msgrcv (int first, int second, int msgtyp, int third, int version, void
 		msgtyp = ipck.msgtyp;
 	}
 	err = -ENOMEM;
-	p = kmalloc(second + sizeof(struct msgbuf), GFP_USER);
+	p = kmalloc(second + sizeof(struct msgbuf) + 4, GFP_USER);
 	if (!p)
 		goto out;
 	old_fs = get_fs();
 	set_fs(KERNEL_DS);
-	err = sys_msgrcv(first, p, second, msgtyp, third);
+	err = sys_msgrcv(first, p, second + 4, msgtyp, third);
 	set_fs(old_fs);
 	if (err < 0)
 		goto free_then_out;
@@ -2371,21 +2312,21 @@ msgctl32 (int first, int second, void *uptr)
 
 	      case IPC_SET:
 		if (version == IPC_64) {
-			err = get_user(m64.msg_perm.uid, &up64->msg_perm.uid);
-			err |= get_user(m64.msg_perm.gid, &up64->msg_perm.gid);
-			err |= get_user(m64.msg_perm.mode, &up64->msg_perm.mode);
-			err |= get_user(m64.msg_qbytes, &up64->msg_qbytes);
+			err = get_user(m.msg_perm.uid, &up64->msg_perm.uid);
+			err |= get_user(m.msg_perm.gid, &up64->msg_perm.gid);
+			err |= get_user(m.msg_perm.mode, &up64->msg_perm.mode);
+			err |= get_user(m.msg_qbytes, &up64->msg_qbytes);
 		} else {
-			err = get_user(m64.msg_perm.uid, &up32->msg_perm.uid);
-			err |= get_user(m64.msg_perm.gid, &up32->msg_perm.gid);
-			err |= get_user(m64.msg_perm.mode, &up32->msg_perm.mode);
-			err |= get_user(m64.msg_qbytes, &up32->msg_qbytes);
+			err = get_user(m.msg_perm.uid, &up32->msg_perm.uid);
+			err |= get_user(m.msg_perm.gid, &up32->msg_perm.gid);
+			err |= get_user(m.msg_perm.mode, &up32->msg_perm.mode);
+			err |= get_user(m.msg_qbytes, &up32->msg_qbytes);
 		}
 		if (err)
 			break;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_msgctl(first, second, &m64);
+		err = sys_msgctl(first, second, &m);
 		set_fs(old_fs);
 		break;
 
@@ -2465,7 +2406,7 @@ static int
 shmctl32 (int first, int second, void *uptr)
 {
 	int err = -EFAULT, err2;
-
+	struct shmid_ds s;
 	struct shmid64_ds s64;
 	struct shmid_ds32 *up32 = (struct shmid_ds32 *)uptr;
 	struct shmid64_ds32 *up64 = (struct shmid64_ds32 *)uptr;
@@ -2517,19 +2458,19 @@ shmctl32 (int first, int second, void *uptr)
 
 	      case IPC_SET:
 		if (version == IPC_64) {
-			err = get_user(s64.shm_perm.uid, &up64->shm_perm.uid);
-			err |= get_user(s64.shm_perm.gid, &up64->shm_perm.gid);
-			err |= get_user(s64.shm_perm.mode, &up64->shm_perm.mode);
+			err = get_user(s.shm_perm.uid, &up64->shm_perm.uid);
+			err |= get_user(s.shm_perm.gid, &up64->shm_perm.gid);
+			err |= get_user(s.shm_perm.mode, &up64->shm_perm.mode);
 		} else {
-			err = get_user(s64.shm_perm.uid, &up32->shm_perm.uid);
-			err |= get_user(s64.shm_perm.gid, &up32->shm_perm.gid);
-			err |= get_user(s64.shm_perm.mode, &up32->shm_perm.mode);
+			err = get_user(s.shm_perm.uid, &up32->shm_perm.uid);
+			err |= get_user(s.shm_perm.gid, &up32->shm_perm.gid);
+			err |= get_user(s.shm_perm.mode, &up32->shm_perm.mode);
 		}
 		if (err)
 			break;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_shmctl(first, second, &s64);
+		err = sys_shmctl(first, second, &s);
 		set_fs(old_fs);
 		break;
 
@@ -2647,9 +2588,8 @@ sys32_ipc (u32 call, int first, int second, int third, u32 ptr, u32 fifth)
 		return shmctl32(first, second, (void *)AA(ptr));
 
 	      default:
-		return -ENOSYS;
+		return -EINVAL;
 	}
-	return -EINVAL;
 }
 
 /*
@@ -2901,6 +2841,20 @@ putreg (struct task_struct *child, int regno, unsigned int value)
 	}
 }
 
+static inline void
+ia32f2ia64f (void *dst, void *src)
+{
+	asm volatile ("ldfe f6=[%1];; stf.spill [%0]=f6" :: "r"(dst), "r"(src) : "memory");
+	return;
+}
+
+static inline void
+ia64f2ia32f (void *dst, void *src)
+{
+	asm volatile ("ldf.fill f6=[%1];; stfe [%0]=f6" :: "r"(dst),  "r"(src) : "memory");
+	return;
+}
+
 static void
 put_fpreg (int regno, struct _fpreg_ia32 *reg, struct pt_regs *ptp, struct switch_stack *swp,
 	   int tos)
@@ -2919,16 +2873,12 @@ put_fpreg (int regno, struct _fpreg_ia32 *reg, struct pt_regs *ptp, struct switc
 		ia64f2ia32f(f, &ptp->f9);
 		break;
 	      case 2:
-		ia64f2ia32f(f, &ptp->f10);
-		break;
 	      case 3:
-		ia64f2ia32f(f, &ptp->f11);
-		break;
 	      case 4:
 	      case 5:
 	      case 6:
 	      case 7:
-		ia64f2ia32f(f, &swp->f12 + (regno - 4));
+		ia64f2ia32f(f, &swp->f10 + (regno - 2));
 		break;
 	}
 	copy_to_user(reg, f, sizeof(*reg));
@@ -2949,168 +2899,69 @@ get_fpreg (int regno, struct _fpreg_ia32 *reg, struct pt_regs *ptp, struct switc
 		copy_from_user(&ptp->f9, reg, sizeof(*reg));
 		break;
 	      case 2:
-		copy_from_user(&ptp->f10, reg, sizeof(*reg));
-		break;
 	      case 3:
-		copy_from_user(&ptp->f11, reg, sizeof(*reg));
-		break;
 	      case 4:
 	      case 5:
 	      case 6:
 	      case 7:
-		copy_from_user(&swp->f12 + (regno - 4), reg, sizeof(*reg));
+		copy_from_user(&swp->f10 + (regno - 2), reg, sizeof(*reg));
 		break;
 	}
 	return;
 }
 
-int
-save_ia32_fpstate (struct task_struct *tsk, struct ia32_user_i387_struct *save)
+static int
+save_ia32_fpstate (struct task_struct *tsk, struct _fpstate_ia32 *save)
 {
 	struct switch_stack *swp;
 	struct pt_regs *ptp;
 	int i, tos;
 
 	if (!access_ok(VERIFY_WRITE, save, sizeof(*save)))
-		return -EFAULT;
-
-	__put_user(tsk->thread.fcr & 0xffff, &save->cwd);
-	__put_user(tsk->thread.fsr & 0xffff, &save->swd);
-	__put_user((tsk->thread.fsr>>16) & 0xffff, &save->twd);
-	__put_user(tsk->thread.fir, &save->fip);
-	__put_user((tsk->thread.fir>>32) & 0xffff, &save->fcs);
-	__put_user(tsk->thread.fdr, &save->foo);
-	__put_user((tsk->thread.fdr>>32) & 0xffff, &save->fos);
-
+		return -EIO;
+	__put_user(tsk->thread.fcr, &save->cw);
+	__put_user(tsk->thread.fsr, &save->sw);
+	__put_user(tsk->thread.fsr >> 32, &save->tag);
+	__put_user(tsk->thread.fir, &save->ipoff);
+	__put_user(__USER_CS, &save->cssel);
+	__put_user(tsk->thread.fdr, &save->dataoff);
+	__put_user(__USER_DS, &save->datasel);
 	/*
 	 *  Stack frames start with 16-bytes of temp space
 	 */
 	swp = (struct switch_stack *)(tsk->thread.ksp + 16);
 	ptp = ia64_task_regs(tsk);
-	tos = (tsk->thread.fsr >> 11) & 7;
+	tos = (tsk->thread.fsr >> 11) & 3;
 	for (i = 0; i < 8; i++)
-		put_fpreg(i, &save->st_space[i], ptp, swp, tos);
+		put_fpreg(i, &save->_st[i], ptp, swp, tos);
 	return 0;
 }
 
 static int
-restore_ia32_fpstate (struct task_struct *tsk, struct ia32_user_i387_struct *save)
+restore_ia32_fpstate (struct task_struct *tsk, struct _fpstate_ia32 *save)
 {
 	struct switch_stack *swp;
 	struct pt_regs *ptp;
-	int i, tos;
-	unsigned int fsrlo, fsrhi, num32;
+	int i, tos, ret;
+	int fsrlo, fsrhi;
 
 	if (!access_ok(VERIFY_READ, save, sizeof(*save)))
-		return(-EFAULT);
-
-	__get_user(num32, (unsigned int *)&save->cwd);
-	tsk->thread.fcr = (tsk->thread.fcr & (~0x1f3f)) | (num32 & 0x1f3f);
-	__get_user(fsrlo, (unsigned int *)&save->swd);
-	__get_user(fsrhi, (unsigned int *)&save->twd);
-	num32 = (fsrhi << 16) | fsrlo;
-	tsk->thread.fsr = (tsk->thread.fsr & (~0xffffffff)) | num32;
-	__get_user(num32, (unsigned int *)&save->fip);
-	tsk->thread.fir = (tsk->thread.fir & (~0xffffffff)) | num32;
-	__get_user(num32, (unsigned int *)&save->foo);
-	tsk->thread.fdr = (tsk->thread.fdr & (~0xffffffff)) | num32;
-
+		return(-EIO);
+	ret = __get_user(tsk->thread.fcr, (unsigned int *)&save->cw);
+	ret |= __get_user(fsrlo, (unsigned int *)&save->sw);
+	ret |= __get_user(fsrhi, (unsigned int *)&save->tag);
+	tsk->thread.fsr = ((long)fsrhi << 32) | (long)fsrlo;
+	ret |= __get_user(tsk->thread.fir, (unsigned int *)&save->ipoff);
+	ret |= __get_user(tsk->thread.fdr, (unsigned int *)&save->dataoff);
 	/*
 	 *  Stack frames start with 16-bytes of temp space
 	 */
 	swp = (struct switch_stack *)(tsk->thread.ksp + 16);
 	ptp = ia64_task_regs(tsk);
-	tos = (tsk->thread.fsr >> 11) & 7;
+	tos = (tsk->thread.fsr >> 11) & 3;
 	for (i = 0; i < 8; i++)
-		get_fpreg(i, &save->st_space[i], ptp, swp, tos);
-	return 0;
-}
-
-int
-save_ia32_fpxstate (struct task_struct *tsk, struct ia32_user_fxsr_struct *save)
-{
-	struct switch_stack *swp;
-	struct pt_regs *ptp;
-	int i, tos;
-	unsigned long mxcsr=0;
-	unsigned long num128[2];
-
-	if (!access_ok(VERIFY_WRITE, save, sizeof(*save)))
-		return -EFAULT;
-
-	__put_user(tsk->thread.fcr & 0xffff, &save->cwd);
-	__put_user(tsk->thread.fsr & 0xffff, &save->swd);
-	__put_user((tsk->thread.fsr>>16) & 0xffff, &save->twd);
-	__put_user(tsk->thread.fir, &save->fip);
-	__put_user((tsk->thread.fir>>32) & 0xffff, &save->fcs);
-	__put_user(tsk->thread.fdr, &save->foo);
-	__put_user((tsk->thread.fdr>>32) & 0xffff, &save->fos);
-
-        /*
-         *  Stack frames start with 16-bytes of temp space
-         */
-        swp = (struct switch_stack *)(tsk->thread.ksp + 16);
-        ptp = ia64_task_regs(tsk);
-	tos = (tsk->thread.fsr >> 11) & 7;
-        for (i = 0; i < 8; i++)
-		put_fpreg(i, (struct _fpxreg_ia32 *)&save->st_space[4*i], ptp, swp, tos);
-
-	mxcsr = ((tsk->thread.fcr>>32) & 0xff80) | ((tsk->thread.fsr>>32) & 0x3f);
-	__put_user(mxcsr & 0xffff, &save->mxcsr);
-	for (i = 0; i < 8; i++) {
-		memcpy(&(num128[0]), &(swp->f16) + i*2, sizeof(unsigned long));
-		memcpy(&(num128[1]), &(swp->f17) + i*2, sizeof(unsigned long));
-		copy_to_user(&save->xmm_space[0] + 4*i, num128, sizeof(struct _xmmreg_ia32));
-	}
-	return 0;
-}
-
-static int
-restore_ia32_fpxstate (struct task_struct *tsk, struct ia32_user_fxsr_struct *save)
-{
-	struct switch_stack *swp;
-	struct pt_regs *ptp;
-	int i, tos;
-	unsigned int fsrlo, fsrhi, num32;
-	int mxcsr;
-	unsigned long num64;
-	unsigned long num128[2];
-
-	if (!access_ok(VERIFY_READ, save, sizeof(*save)))
-		return(-EFAULT);
-
-	__get_user(num32, (unsigned int *)&save->cwd);
-	tsk->thread.fcr = (tsk->thread.fcr & (~0x1f3f)) | (num32 & 0x1f3f);
-	__get_user(fsrlo, (unsigned int *)&save->swd);
-	__get_user(fsrhi, (unsigned int *)&save->twd);
-	num32 = (fsrhi << 16) | fsrlo;
-	tsk->thread.fsr = (tsk->thread.fsr & (~0xffffffff)) | num32;
-	__get_user(num32, (unsigned int *)&save->fip);
-	tsk->thread.fir = (tsk->thread.fir & (~0xffffffff)) | num32;
-	__get_user(num32, (unsigned int *)&save->foo);
-	tsk->thread.fdr = (tsk->thread.fdr & (~0xffffffff)) | num32;
-
-	/*
-	 *  Stack frames start with 16-bytes of temp space
-	 */
-	swp = (struct switch_stack *)(tsk->thread.ksp + 16);
-	ptp = ia64_task_regs(tsk);
-	tos = (tsk->thread.fsr >> 11) & 7;
-	for (i = 0; i < 8; i++)
-	get_fpreg(i, (struct _fpxreg_ia32 *)&save->st_space[4*i], ptp, swp, tos);
-
-	__get_user(mxcsr, (unsigned int *)&save->mxcsr);
-	num64 = mxcsr & 0xff10;
-	tsk->thread.fcr = (tsk->thread.fcr & (~0xff1000000000)) | (num64<<32);
-	num64 = mxcsr & 0x3f;
-	tsk->thread.fsr = (tsk->thread.fsr & (~0x3f00000000)) | (num64<<32);
-
-	for (i = 0; i < 8; i++) {
-		copy_from_user(num128, &save->xmm_space[0] + 4*i, sizeof(struct _xmmreg_ia32));
-		memcpy(&(swp->f16) + i*2, &(num128[0]), sizeof(unsigned long));
-		memcpy(&(swp->f17) + i*2, &(num128[1]), sizeof(unsigned long));
-	}
-	return 0;
+		get_fpreg(i, &save->_st[i], ptp, swp, tos);
+	return ret ? -EFAULT : 0;
 }
 
 extern asmlinkage long sys_ptrace (long, pid_t, unsigned long, unsigned long, long, long, long,
@@ -3141,23 +2992,26 @@ sys32_ptrace (int request, pid_t pid, unsigned int addr, unsigned int data,
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
 	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out;
 	ret = -EPERM;
 	if (pid == 1)		/* no messing around with init! */
-		goto out_tsk;
+		goto out;
 
 	if (request == PTRACE_ATTACH) {
 		ret = sys_ptrace(request, pid, addr, data, arg4, arg5, arg6, arg7, stack);
-		goto out_tsk;
+		goto out;
 	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
-		goto out_tsk;
+	ret = -ESRCH;
+	if (!(child->ptrace & PT_PTRACED))
+		goto out;
+	if (child->state != TASK_STOPPED) {
+		if (request != PTRACE_KILL)
+			goto out;
+	}
+	if (child->p_pptr != current)
+		goto out;
 
 	switch (request) {
 	      case PTRACE_PEEKTEXT:
@@ -3167,12 +3021,12 @@ sys32_ptrace (int request, pid_t pid, unsigned int addr, unsigned int data,
 			ret = put_user(value, (unsigned int *) A(data));
 		else
 			ret = -EIO;
-		goto out_tsk;
+		goto out;
 
 	      case PTRACE_POKETEXT:
 	      case PTRACE_POKEDATA:	/* write the word at location addr */
 		ret = ia32_poke(regs, child, addr, data);
-		goto out_tsk;
+		goto out;
 
 	      case PTRACE_PEEKUSR:	/* read word at addr in USER area */
 		ret = -EIO;
@@ -3219,19 +3073,11 @@ sys32_ptrace (int request, pid_t pid, unsigned int addr, unsigned int data,
 		break;
 
 	      case IA32_PTRACE_GETFPREGS:
-		ret = save_ia32_fpstate(child, (struct ia32_user_i387_struct *) A(data));
-		break;
-
-	      case IA32_PTRACE_GETFPXREGS:
-		ret = save_ia32_fpxstate(child, (struct ia32_user_fxsr_struct *) A(data));
+		ret = save_ia32_fpstate(child, (struct _fpstate_ia32 *) A(data));
 		break;
 
 	      case IA32_PTRACE_SETFPREGS:
-		ret = restore_ia32_fpstate(child, (struct ia32_user_i387_struct *) A(data));
-		break;
-
-	      case IA32_PTRACE_SETFPXREGS:
-		ret = restore_ia32_fpxstate(child, (struct ia32_user_fxsr_struct *) A(data));
+		ret = restore_ia32_fpstate(child, (struct _fpstate_ia32 *) A(data));
 		break;
 
 	      case PTRACE_SYSCALL:	/* continue, stop after next syscall */
@@ -3247,8 +3093,6 @@ sys32_ptrace (int request, pid_t pid, unsigned int addr, unsigned int data,
 		break;
 
 	}
-  out_tsk:
-	free_task_struct(child);
   out:
 	unlock_kernel();
 	return ret;
@@ -3419,18 +3263,10 @@ sys32_sigaltstack (ia32_stack_t *uss32, ia32_stack_t *uoss32,
 			return -EFAULT;
 	uss.ss_sp = (void *) (long) buf32.ss_sp;
 	uss.ss_flags = buf32.ss_flags;
-	/* MINSIGSTKSZ is different for ia32 vs ia64. We lie here to pass the 
-           check and set it to the user requested value later */
-	if ((buf32.ss_flags != SS_DISABLE) && (buf32.ss_size < MINSIGSTKSZ_IA32)) {
-		ret = -ENOMEM;
-		goto out;
-	}
-	uss.ss_size = MINSIGSTKSZ;
+	uss.ss_size = buf32.ss_size;
 	set_fs(KERNEL_DS);
 	ret = do_sigaltstack(uss32 ? &uss : NULL, &uoss, pt->r12);
- 	current->sas_ss_size = buf32.ss_size;	
 	set_fs(old_fs);
-out:
 	if (ret < 0)
 		return(ret);
 	if (uoss32) {
@@ -3479,7 +3315,6 @@ extern asmlinkage long sys_sysctl(struct __sysctl_args *args);
 asmlinkage long
 sys32_sysctl (struct sysctl32 *args)
 {
-#ifdef CONFIG_SYSCTL
 	struct sysctl32 a32;
 	mm_segment_t old_fs = get_fs ();
 	void *oldvalp, *newvalp;
@@ -3517,9 +3352,6 @@ sys32_sysctl (struct sysctl32 *args)
 		return -EFAULT;
 
 	return ret;
-#else
-	return -ENOSYS;
-#endif
 }
 
 asmlinkage long
@@ -3667,11 +3499,9 @@ sys32_fcntl64 (unsigned int fd, unsigned int cmd, unsigned int arg)
 			return -EFAULT;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		ret = sys_fcntl(fd, (cmd == F_GETLK64) ? F_GETLK :
-			((cmd == F_SETLK64) ? F_SETLK : F_SETLKW),
-			(unsigned long) &f);
+		ret = sys_fcntl(fd, cmd, (unsigned long) &f);
 		set_fs(old_fs);
-		if (cmd == F_GETLK64 && ia32_put_flock(&f, arg))
+		if (cmd == F_GETLK && ia32_put_flock(&f, arg))
 			return -EFAULT;
 		break;
 
@@ -3728,18 +3558,13 @@ putstat64 (struct stat64 *ubuf, struct stat *kbuf)
 asmlinkage long
 sys32_stat64 (char *filename, struct stat64 *statbuf)
 {
-	char *name;
 	mm_segment_t old_fs = get_fs();
 	struct stat s;
 	long ret;
 
-	name = getname(filename);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
 	set_fs(KERNEL_DS);
-	ret = sys_newstat(name, &s);
+	ret = sys_newstat(filename, &s);
 	set_fs(old_fs);
-	putname(name);
 	if (putstat64(statbuf, &s))
 		return -EFAULT;
 	return ret;
@@ -3748,18 +3573,13 @@ sys32_stat64 (char *filename, struct stat64 *statbuf)
 asmlinkage long
 sys32_lstat64 (char *filename, struct stat64 *statbuf)
 {
-	char *name;
 	mm_segment_t old_fs = get_fs();
 	struct stat s;
 	long ret;
 
-	name = getname(filename);
-	if (IS_ERR(name))
-		return PTR_ERR(name);
 	set_fs(KERNEL_DS);
-	ret = sys_newlstat(name, &s);
+	ret = sys_newlstat(filename, &s);
 	set_fs(old_fs);
-	putname(name);
 	if (putstat64(statbuf, &s))
 		return -EFAULT;
 	return ret;
@@ -3795,43 +3615,21 @@ struct sysinfo32 {
 	u32 bufferram;
 	u32 totalswap;
 	u32 freeswap;
-	u16 procs;
-	u16 pad;
-	u32 totalhigh;
-	u32 freehigh;
-	u32 mem_unit;
-	char _f[8];
+	unsigned short procs;
+	char _f[22];
 };
 
 asmlinkage long
 sys32_sysinfo (struct sysinfo32 *info)
 {
 	extern asmlinkage long sys_sysinfo (struct sysinfo *);
+	mm_segment_t old_fs = get_fs();
 	struct sysinfo s;
 	long ret, err;
-	int bitcount = 0;
-	mm_segment_t old_fs = get_fs();
 
 	set_fs(KERNEL_DS);
 	ret = sys_sysinfo(&s);
 	set_fs(old_fs);
-	/* Check to see if any memory value is too large for 32-bit and
-	 * scale down if needed.
-	 */
-	if ((s.totalram >> 32) || (s.totalswap >> 32)) {
-		while (s.mem_unit < PAGE_SIZE) {
-			s.mem_unit <<= 1;
-			bitcount++;
-		}
-		s.totalram >>= bitcount;
-		s.freeram >>= bitcount;
-		s.sharedram >>= bitcount;
-		s.bufferram >>= bitcount;
-		s.totalswap >>= bitcount;
-		s.freeswap >>= bitcount;
-		s.totalhigh >>= bitcount;
-		s.freehigh >>= bitcount;
-	}
 
 	if (!access_ok(VERIFY_WRITE, info, sizeof(*info)))
 		return -EFAULT;
@@ -3847,9 +3645,6 @@ sys32_sysinfo (struct sysinfo32 *info)
 	err |= __put_user(s.totalswap, &info->totalswap);
 	err |= __put_user(s.freeswap, &info->freeswap);
 	err |= __put_user(s.procs, &info->procs);
-	err |= __put_user(s.totalhigh, &info->totalhigh);
-	err |= __put_user(s.freehigh, &info->freehigh);
-	err |= __put_user(s.mem_unit, &info->mem_unit);
 	if (err)
 		return -EFAULT;
 	return ret;
@@ -3896,7 +3691,7 @@ getname32 (const char *filename)
 	return result;
 }
 
-struct user_dqblk32 {
+struct dqblk32 {
 	__u32 dqb_bhardlimit;
 	__u32 dqb_bsoftlimit;
 	__u32 dqb_curblocks;
@@ -3908,43 +3703,43 @@ struct user_dqblk32 {
 };
 
 asmlinkage long
-sys32_quotactl(int cmd, unsigned int special, int id, caddr_t addr)
+sys32_quotactl (int cmd, unsigned int special, int id, struct dqblk32 *addr)
 {
 	extern asmlinkage long sys_quotactl (int, const char *, int, caddr_t);
 	int cmds = cmd >> SUBCMDSHIFT;
 	mm_segment_t old_fs;
-	struct v1c_mem_dqblk d;
+	struct dqblk d;
 	char *spec;
 	long err;
 
 	switch (cmds) {
-	case Q_V1_GETQUOTA:
+	      case Q_GETQUOTA:
 		break;
-	case Q_V1_SETQUOTA:
-	case Q_V1_SETUSE:
-	case Q_V1_SETQLIM:
-		if (copy_from_user(&d, addr, sizeof(struct user_dqblk32)))
+	      case Q_SETQUOTA:
+	      case Q_SETUSE:
+	      case Q_SETQLIM:
+		if (copy_from_user (&d, addr, sizeof(struct dqblk32)))
 			return -EFAULT;
-		d.dqb_itime = ((struct user_dqblk32 *)&d)->dqb_itime;
-		d.dqb_btime = ((struct user_dqblk32 *)&d)->dqb_btime;
+		d.dqb_itime = ((struct dqblk32 *)&d)->dqb_itime;
+		d.dqb_btime = ((struct dqblk32 *)&d)->dqb_btime;
 		break;
-	default:
-		return sys_quotactl(cmd, (void *)A(special), id, addr);
+	      default:
+		return sys_quotactl(cmd, (void *) A(special), id, (caddr_t) addr);
 	}
 	spec = getname32((void *) A(special));
 	err = PTR_ERR(spec);
 	if (IS_ERR(spec))
 		return err;
-	old_fs = get_fs();
+	old_fs = get_fs ();
 	set_fs(KERNEL_DS);
 	err = sys_quotactl(cmd, (const char *)spec, id, (caddr_t)&d);
 	set_fs(old_fs);
 	putname(spec);
-	if (cmds == Q_V1_GETQUOTA) {
+	if (cmds == Q_GETQUOTA) {
 		__kernel_time_t b = d.dqb_btime, i = d.dqb_itime;
-		((struct user_dqblk32 *)&d)->dqb_itime = i;
-		((struct user_dqblk32 *)&d)->dqb_btime = b;
-		if (copy_to_user(addr, &d, sizeof(struct user_dqblk32)))
+		((struct dqblk32 *)&d)->dqb_itime = i;
+		((struct dqblk32 *)&d)->dqb_btime = b;
+		if (copy_to_user(addr, &d, sizeof(struct dqblk32)))
 			return -EFAULT;
 	}
 	return err;
@@ -4013,50 +3808,6 @@ sys32_personality (unsigned int personality)
 	if (ret == PER_LINUX32)
 		ret = PER_LINUX;
 	return ret;
-}
-
-asmlinkage unsigned long
-sys32_brk (unsigned int brk)
-{
-	unsigned long ret, obrk;
-	struct mm_struct *mm = current->mm;
-
-	obrk = mm->brk;
-	ret = sys_brk(brk);
-	if (ret < obrk)
-		clear_user((void *) ret, PAGE_ALIGN(ret) - ret);
-	return ret;
-}
-
-/*
- * Exactly like fs/open.c:sys_open(), except that it doesn't set the O_LARGEFILE flag.
- */
-asmlinkage long
-sys32_open (const char * filename, int flags, int mode)
-{
-	char * tmp;
-	int fd, error;
-
-	tmp = getname(filename);
-	fd = PTR_ERR(tmp);
-	if (!IS_ERR(tmp)) {
-		fd = get_unused_fd();
-		if (fd >= 0) {
-			struct file *f = filp_open(tmp, flags, mode);
-			error = PTR_ERR(f);
-			if (IS_ERR(f))
-				goto out_error;
-			fd_install(fd, f);
-		}
-out:
-		putname(tmp);
-	}
-	return fd;
-
-out_error:
-	put_unused_fd(fd);
-	fd = error;
-	goto out;
 }
 
 #ifdef	NOTYET  /* UNTESTED FOR IA64 FROM HERE DOWN */

@@ -23,6 +23,18 @@
 
 long cs3_shadow;
 
+static int __init simpad_init(void)
+{
+	PSPR = 0xc0008000;
+	GPDR &= ~GPIO_GPIO0;
+	cs3_shadow = (EN1 | EN0 | LED2_ON | DISPLAY_ON | RS232_ON | 
+		      ENABLE_5V | RESET_SIMCARD);
+	*(CS3BUSTYPE *)(CS3_BASE) = cs3_shadow;
+	return 0;
+}
+
+__initcall(simpad_init);
+
 long get_cs3_shadow()
 {
 	return cs3_shadow;
@@ -58,8 +70,8 @@ fixup_simpad(struct machine_desc *desc, struct param_struct *params,
 
 static struct map_desc simpad_io_desc[] __initdata = {
   /* virtual	physical    length	domain	   r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 0, 1, 0, 0 }, 
-  { 0xf2800000, 0x4b800000, 0x00800000, DOMAIN_IO, 0, 1, 0, 0 }, /* MQ200 */  
+  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 1, 1, 0, 0 }, 
+  { 0xf2800000, 0x4b800000, 0x00800000, DOMAIN_IO, 1, 1, 0, 0 }, /* MQ200 */  
   { 0xf1000000, 0x18000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* Paules CS3, write only */
   LAST_DESC
 };
@@ -76,7 +88,7 @@ static void simpad_uart_pm(struct uart_port *port, u_int state, u_int oldstate)
 }
 
 static struct sa1100_port_fns simpad_port_fns __initdata = {
-	.pm	= simpad_uart_pm,
+	pm:	simpad_uart_pm,
 };
 
 static void __init simpad_map_io(void)
@@ -84,17 +96,11 @@ static void __init simpad_map_io(void)
 	sa1100_map_io();
 	iotable_init(simpad_io_desc);
 
-	PSPR = 0xc0008000;
-	GPDR &= ~GPIO_GPIO0;
-	cs3_shadow = (EN1 | EN0 | LED2_ON | DISPLAY_ON | RS232_ON | 
-		      ENABLE_5V | RESET_SIMCARD);
-	*(CS3BUSTYPE *)(CS3_BASE) = cs3_shadow;
-
+#ifndef CONFIG_SERIAL_SA1100_OLD
 	//It is only possible to register 3 UART in serial_sa1100.c
 	sa1100_register_uart(0, 3);
 	sa1100_register_uart(1, 1);
-
-	set_GPIO_IRQ_edge(GPIO_UCB1300_IRQ, GPIO_RISING_EDGE);
+#endif
 }
 
 #ifdef CONFIG_PROC_FS

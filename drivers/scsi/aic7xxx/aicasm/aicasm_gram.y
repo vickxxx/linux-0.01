@@ -3,7 +3,7 @@
  * Parser for the Aic7xxx SCSI Host adapter sequencer assembler.
  *
  * Copyright (c) 1997, 1998, 2000 Justin T. Gibbs.
- * Copyright (c) 2001, 2002 Adaptec Inc.
+ * Copyright (c) 2001 Adaptec Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -38,20 +38,18 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_gram.y#29 $
+ * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_gram.y#9 $
  *
- * $FreeBSD$
+ * $FreeBSD: src/sys/dev/aic7xxx/aicasm/aicasm_gram.y,v 1.12 2000/10/31 18:44:32 gibbs Exp $
  */
 
-#include <sys/types.h>
-
 #include <inttypes.h>
-#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
 
+#include <sys/types.h>
 #ifdef __linux__
 #include "../queue.h"
 #else
@@ -64,34 +62,21 @@
 
 int yylineno;
 char *yyfilename;
-char stock_prefix[] = "aic_";
-char *prefix = stock_prefix;
-char *patch_arg_list;
 char *versions;
-static char errbuf[255];
-static char regex_pattern[255];
 static symbol_t *cur_symbol;
-static symbol_t *field_symbol;
-static symbol_t *scb_or_sram_symbol;
 static symtype cur_symtype;
-static symbol_ref_t accumulator;
-static symbol_ref_t mode_ptr;
+static symbol_t *accumulator;
 static symbol_ref_t allones;
 static symbol_ref_t allzeros;
 static symbol_ref_t none;
 static symbol_ref_t sindex;
 static int instruction_ptr;
-static int num_srams;
 static int sram_or_scb_offset;
 static int download_constant_count;
 static int in_critical_section;
-static u_int enum_increment;
-static u_int enum_next_value;
 
-static void process_field(int field_type, symbol_t *sym, int mask);
+static void process_bitmask(int mask_type, symbol_t *sym, int mask);
 static void initialize_symbol(symbol_t *symbol);
-static void add_macro_arg(const char *argtext, int position);
-static void add_macro_body(const char *bodytext);
 static void process_register(symbol_t **p_symbol);
 static void format_1_instr(int opcode, symbol_ref_t *dest,
 			   expression_t *immed, symbol_ref_t *src, int ret);
@@ -107,12 +92,13 @@ static void add_conditional(symbol_t *symbol);
 static void add_version(const char *verstring);
 static int  is_download_const(expression_t *immed);
 
+#define YYDEBUG 1
 #define SRAM_SYMNAME "SRAM_BASE"
 #define SCB_SYMNAME "SCB_BASE"
 %}
 
 %union {
-	u_int		value;
+	int		value;
 	char		*str;
 	symbol_t	*sym;
 	symbol_ref_t	sym_ref;
@@ -122,8 +108,6 @@ static int  is_download_const(expression_t *immed);
 %token T_REGISTER
 
 %token <value> T_CONST
-
-%token T_EXPORT
 
 %token T_DOWNLOAD
 
@@ -135,21 +119,9 @@ static int  is_download_const(expression_t *immed);
 
 %token T_SIZE
 
-%token T_EXPR_LSHIFT
-
-%token T_EXPR_RSHIFT
-
 %token <value> T_ADDRESS
 
 %token T_ACCESS_MODE
-
-%token T_MODES
-
-%token T_DEFINE
-
-%token T_SET_SRC_MODE
-
-%token T_SET_DST_MODE
 
 %token <value> T_MODE
 
@@ -157,19 +129,17 @@ static int  is_download_const(expression_t *immed);
 
 %token T_END_CS
 
-%token T_FIELD
-
-%token T_ENUM
+%token T_BIT
 
 %token T_MASK
 
 %token <value> T_NUMBER
 
-%token <str> T_PATH T_STRING T_ARG T_MACROBODY
+%token <str> T_PATH T_STRING
 
 %token <sym> T_CEXPR
 
-%token T_EOF T_INCLUDE T_VERSION T_PREFIX T_PATCH_ARG_LIST
+%token T_EOF T_INCLUDE T_VERSION
 
 %token <value> T_SHR T_SHL T_ROR T_ROL
 
@@ -193,7 +163,7 @@ static int  is_download_const(expression_t *immed);
 
 %token T_NOP
 
-%token T_ACCUM T_ALLONES T_ALLZEROS T_NONE T_SINDEX T_MODE_PTR
+%token T_ACCUM T_ALLONES T_ALLZEROS T_NONE T_SINDEX
 
 %token T_A
 
@@ -207,15 +177,13 @@ static int  is_download_const(expression_t *immed);
 
 %type <expression> expression immediate immediate_or_a
 
-%type <value> export ret f1_opcode f2_opcode jmp_jc_jnc_call jz_jnz je_jne
+%type <value> ret f1_opcode f2_opcode jmp_jc_jnc_call jz_jnz je_jne
 
-%type <value> mode_value mode_list macro_arglist
+%type <value> numerical_value
 
 %left '|'
 %left '&'
-%left T_EXPR_LSHIFT T_EXPR_RSHIFT
 %left '+' '-'
-%left '*' '/'
 %right '~'
 %nonassoc UMINUS
 %%
@@ -223,28 +191,18 @@ static int  is_download_const(expression_t *immed);
 program:
 	include
 |	program include
-|	prefix
-|	program prefix
-|	patch_arg_list
-|	program patch_arg_list
 |	version
 |	program version
 |	register
 |	program register
 |	constant
 |	program constant
-|	macrodefn
-|	program macrodefn
 |	scratch_ram
 |	program scratch_ram
 |	scb
 |	program scb
 |	label
 |	program label
-|	set_src_mode
-|	program set_src_mode
-|	set_dst_mode
-|	program set_dst_mode
 |	critical_section_start
 |	program critical_section_start
 |	critical_section_end
@@ -263,30 +221,6 @@ include:
 |	T_INCLUDE '"' T_PATH '"'
 	{
 		include_file($3, QUOTED_INCLUDE);
-	}
-;
-
-prefix:
-	T_PREFIX '=' T_STRING
-	{
-		if (prefix != stock_prefix)
-			stop("Prefix multiply defined",
-			     EX_DATAERR);
-		prefix = strdup($3);
-		if (prefix == NULL)
-			stop("Unable to record prefix", EX_SOFTWARE);
-	}
-;
-
-patch_arg_list:
-	T_PATCH_ARG_LIST '=' T_STRING
-	{
-		if (patch_arg_list != NULL)
-			stop("Patch argument list multiply defined",
-			     EX_DATAERR);
-		patch_arg_list = strdup($3);
-		if (patch_arg_list == NULL)
-			stop("Unable to record patch arg list", EX_SOFTWARE);
 	}
 ;
 
@@ -346,13 +280,10 @@ reg_attribute:
 	reg_address
 |	size
 |	access_mode
-|	modes
-|	field_defn
-|	enum_defn
+|	bit_defn
 |	mask_defn
 |	alias
 |	accumulator
-|	mode_pointer
 |	allones
 |	allzeros
 |	none
@@ -370,18 +301,6 @@ size:
 	T_SIZE T_NUMBER
 	{
 		cur_symbol->info.rinfo->size = $2;
-		if (scb_or_sram_symbol != NULL) {
-			u_int max_addr;
-			u_int sym_max_addr;
-
-			max_addr = scb_or_sram_symbol->info.rinfo->address
-				 + scb_or_sram_symbol->info.rinfo->size;
-			sym_max_addr = cur_symbol->info.rinfo->address
-				     + cur_symbol->info.rinfo->size;
-
-			if (sym_max_addr > max_addr)
-				stop("SCB or SRAM space exhausted", EX_DATAERR);
-		}
 	}
 ;
 
@@ -392,116 +311,17 @@ access_mode:
 	}
 ;
 
-modes:
-	T_MODES mode_list
+bit_defn:
+	T_BIT T_SYMBOL T_NUMBER
 	{
-		cur_symbol->info.rinfo->modes = $2;
-	}
-;
-
-mode_list:
-	mode_value
-	{
-		$$ = $1;
-	}
-|	mode_list ',' mode_value
-	{
-		$$ = $1 | $3;
-	}
-;
-
-mode_value:
-	T_NUMBER
-	{
-		if ($1 > 4) {
-			stop("Valid register modes range between 0 and 4.",
-			     EX_DATAERR);
-			/* NOTREACHED */
-		}
-
-		$$ = (0x1 << $1);
-	}
-|	T_SYMBOL
-	{
-		symbol_t *symbol;
-
-		symbol = $1;
-		if (symbol->type != CONST) {
-			stop("Only \"const\" symbols allowed in "
-			     "mode definitions.", EX_DATAERR);
-			/* NOTREACHED */
-		}
-		if (symbol->info.cinfo->value > 4) {
-			stop("Valid register modes range between 0 and 4.",
-			     EX_DATAERR);
-			/* NOTREACHED */
-		}
-		$$ = (0x1 << symbol->info.cinfo->value);
-	}
-;
-
-field_defn:
-	T_FIELD
-		{
-			field_symbol = NULL;
-			enum_next_value = 0;
-			enum_increment = 1;
-		}
-	'{' enum_entry_list '}'
-|	T_FIELD T_SYMBOL expression
-		{
-			process_field(FIELD, $2, $3.value);
-			field_symbol = $2;
-			enum_next_value = 0;
-			enum_increment = 0x01 << (ffs($3.value) - 1);
-		}
-	'{' enum_entry_list '}'
-|	T_FIELD T_SYMBOL expression
-	{
-		process_field(FIELD, $2, $3.value);
-	}
-;
-
-enum_defn:
-	T_ENUM
-		{
-			field_symbol = NULL;
-			enum_next_value = 0;
-			enum_increment = 1;
-		}
-	'{' enum_entry_list '}'
-|	T_ENUM T_SYMBOL expression
-		{
-			process_field(ENUM, $2, $3.value);
-			field_symbol = $2;
-			enum_next_value = 0;
-			enum_increment = 0x01 << (ffs($3.value) - 1);
-		}
-	'{' enum_entry_list '}'
-;
-
-enum_entry_list:
-	enum_entry
-|	enum_entry_list ',' enum_entry
-;
-
-enum_entry:
-	T_SYMBOL
-	{
-		process_field(ENUM_ENTRY, $1, enum_next_value);
-		enum_next_value += enum_increment;
-	}
-|	T_SYMBOL expression
-	{
-		process_field(ENUM_ENTRY, $1, $2.value);
-		enum_next_value = $2.value + enum_increment;
+		process_bitmask(BIT, $2, $3);
 	}
 ;
 
 mask_defn:
 	T_MASK T_SYMBOL expression
 	{
-		process_field(MASK, $2, $3.value);
+		process_bitmask(MASK, $2, $3.value);
 	}
 ;
 
@@ -522,24 +342,12 @@ alias:
 accumulator:
 	T_ACCUM
 	{
-		if (accumulator.symbol != NULL) {
+		if (accumulator != NULL) {
 			stop("Only one accumulator definition allowed",
 			     EX_DATAERR);
 			/* NOTREACHED */
 		}
-		accumulator.symbol = cur_symbol;
-	}
-;
-
-mode_pointer:
-	T_MODE_PTR
-	{
-		if (mode_ptr.symbol != NULL) {
-			stop("Only one mode pointer definition allowed",
-			     EX_DATAERR);
-			/* NOTREACHED */
-		}
-		mode_ptr.symbol = cur_symbol;
+		accumulator = cur_symbol;
 	}
 ;
 
@@ -620,34 +428,6 @@ expression:
 			       &($1.referenced_syms),
 			       &($3.referenced_syms));
 	}
-|	expression '*' expression
-	{
-		$$.value = $1.value * $3.value;
-		symlist_merge(&($$.referenced_syms),
-			       &($1.referenced_syms),
-			       &($3.referenced_syms));
-	}
-|	expression '/' expression
-	{
-		$$.value = $1.value / $3.value;
-		symlist_merge(&($$.referenced_syms),
-			       &($1.referenced_syms),
-			       &($3.referenced_syms));
-	}
-| 	expression T_EXPR_LSHIFT expression
-	{
-		$$.value = $1.value << $3.value;
-		symlist_merge(&$$.referenced_syms,
-			       &$1.referenced_syms,
-			       &$3.referenced_syms);
-	}
-| 	expression T_EXPR_RSHIFT expression
-	{
-		$$.value = $1.value >> $3.value;
-		symlist_merge(&$$.referenced_syms,
-			       &$1.referenced_syms,
-			       &$3.referenced_syms);
-	}
 |	'(' expression ')'
 	{
 		$$ = $2;
@@ -681,10 +461,8 @@ expression:
 			$$.value = symbol->info.rinfo->address;
 			break;
 		case MASK:
-		case FIELD:
-		case ENUM:
-		case ENUM_ENTRY:
-			$$.value = symbol->info.finfo->value;
+		case BIT:
+			$$.value = symbol->info.minfo->mask;
 			break;
 		case DOWNLOAD_CONST:
 		case CONST:
@@ -693,10 +471,12 @@ expression:
 		case UNINITIALIZED:
 		default:
 		{
-			snprintf(errbuf, sizeof(errbuf),
+			char buf[255];
+
+			snprintf(buf, sizeof(buf),
 				 "Undefined symbol %s referenced",
 				 symbol->name);
-			stop(errbuf, EX_DATAERR);
+			stop(buf, EX_DATAERR);
 			/* NOTREACHED */
 			break;
 		}
@@ -707,7 +487,7 @@ expression:
 ;
 
 constant:
-	T_CONST T_SYMBOL expression 
+	T_CONST T_SYMBOL numerical_value
 	{
 		if ($2->type != UNINITIALIZED) {
 			stop("Re-definition of symbol as a constant",
@@ -716,7 +496,8 @@ constant:
 		}
 		$2->type = CONST;
 		initialize_symbol($2);
-		$2->info.cinfo->value = $3.value;
+		$2->info.cinfo->value = $3;
+		$2->info.cinfo->define = $1;
 	}
 |	T_CONST T_SYMBOL T_DOWNLOAD
 	{
@@ -733,64 +514,31 @@ constant:
 		$2->type = DOWNLOAD_CONST;
 		initialize_symbol($2);
 		$2->info.cinfo->value = download_constant_count++;
+		$2->info.cinfo->define = FALSE;
 	}
 ;
 
-macrodefn_prologue:
-	T_DEFINE T_SYMBOL
+numerical_value:
+	T_NUMBER
 	{
-		if ($2->type != UNINITIALIZED) {
-			stop("Re-definition of symbol as a macro",
-			     EX_DATAERR);
-			/* NOTREACHED */
-		}
-		cur_symbol = $2;
-		cur_symbol->type = MACRO;
-		initialize_symbol(cur_symbol);
+		$$ = $1;
 	}
-;
-
-macrodefn:
-	macrodefn_prologue T_MACROBODY
+|	'-' T_NUMBER
 	{
-		add_macro_body($2);
-	}
-|	macrodefn_prologue '(' macro_arglist ')' T_MACROBODY
-	{
-		add_macro_body($5);
-		cur_symbol->info.macroinfo->narg = $3;
-	}
-;
-
-macro_arglist:
-	{
-		/* Macros can take no arguments */
-		$$ = 0;
-	}
-|	T_ARG
-	{
-		$$ = 1;
-		add_macro_arg($1, 0);
-	}
-|	macro_arglist ',' T_ARG
-	{
-		if ($1 == 0) {
-			stop("Comma without preceeding argument in arg list",
-			     EX_DATAERR);
-			/* NOTREACHED */
-		}
-		$$ = $1 + 1;
-		add_macro_arg($3, $1);
+		$$ = -$2;
 	}
 ;
 
 scratch_ram:
 	T_SRAM '{'
 		{
-			snprintf(errbuf, sizeof(errbuf), "%s%d", SRAM_SYMNAME,
-				 num_srams);
 			cur_symbol = symtable_get(SRAM_SYMNAME);
 			cur_symtype = SRAMLOC;
+			if (cur_symbol->type != UNINITIALIZED) {
+				stop("Only one SRAM definition allowed",
+				     EX_DATAERR);
+				/* NOTREACHED */
+			}
 			cur_symbol->type = SRAMLOC;
 			initialize_symbol(cur_symbol);
 		}
@@ -798,15 +546,10 @@ scratch_ram:
 		{
 			sram_or_scb_offset = cur_symbol->info.rinfo->address;
 		}
-		size
-		{
-			scb_or_sram_symbol = cur_symbol;
-		}
-		scb_or_sram_attributes
+		scb_or_sram_reg_list
 	'}'
 		{
 			cur_symbol = NULL;
-			scb_or_sram_symbol = NULL;
 		}
 ;
 
@@ -829,23 +572,11 @@ scb:
 		{
 			sram_or_scb_offset = cur_symbol->info.rinfo->address;
 		}
-		size
-		{
-			scb_or_sram_symbol = cur_symbol;
-		}
-		scb_or_sram_attributes
+		scb_or_sram_reg_list
 	'}'
 		{
 			cur_symbol = NULL;
-			scb_or_sram_symbol = NULL;
 		}
-;
-
-scb_or_sram_attributes:
-	/* NULL definition is okay */
-|	modes
-|	scb_or_sram_reg_list
-|	modes scb_or_sram_reg_list
 ;
 
 scb_or_sram_reg_list:
@@ -888,11 +619,11 @@ reg_symbol:
 	}
 |	T_A
 	{
-		if (accumulator.symbol == NULL) {
+		if (accumulator == NULL) {
 			stop("No accumulator has been defined", EX_DATAERR);
 			/* NOTREACHED */
 		}
-		$$.symbol = accumulator.symbol;
+		$$.symbol = accumulator;
 		$$.offset = 0;
 	}
 ;
@@ -913,21 +644,11 @@ immediate:
 immediate_or_a:
 	expression
 	{
-		if ($1.value == 0 && is_download_const(&$1) == 0) {
-			snprintf(errbuf, sizeof(errbuf),
-				 "\nExpression evaluates to 0 and thus "
-				 "references the accumulator.\n "
-				 "If this is the desired effect, use 'A' "
-				 "instead.\n");
-			stop(errbuf, EX_DATAERR);
-		}
 		$$ = $1;
 	}
 |	T_A
 	{
 		SLIST_INIT(&$$.referenced_syms);
-		symlist_add(&$$.referenced_syms, accumulator.symbol,
-			    SYMLIST_INSERT_HEAD);
 		$$.value = 0;
 	}
 ;
@@ -955,22 +676,8 @@ ret:
 	{ $$ = 1; }
 ;
 
-set_src_mode:
-	T_SET_SRC_MODE T_NUMBER ';'
-	{
-		src_mode = $2;
-	}
-;
-
-set_dst_mode:
-	T_SET_DST_MODE T_NUMBER ';'
-	{
-		dst_mode = $2;
-	}
-;
-
 critical_section_start:
-	T_BEGIN_CS ';'
+	T_BEGIN_CS
 	{
 		critical_section_t *cs;
 
@@ -983,10 +690,9 @@ critical_section_start:
 		cs->begin_addr = instruction_ptr;
 		in_critical_section = TRUE;
 	}
-;
 
 critical_section_end:
-	T_END_CS ';'
+	T_END_CS
 	{
 		critical_section_t *cs;
 
@@ -998,25 +704,17 @@ critical_section_end:
 		cs->end_addr = instruction_ptr;
 		in_critical_section = FALSE;
 	}
-;
-
-export:
-	{ $$ = 0; }
-|	T_EXPORT
-	{ $$ = 1; }
-;
 
 label:
-	export T_SYMBOL ':'
+	T_SYMBOL ':'
 	{
-		if ($2->type != UNINITIALIZED) {
+		if ($1->type != UNINITIALIZED) {
 			stop("Program label multiply defined", EX_DATAERR);
 			/* NOTREACHED */
 		}
-		$2->type = LABEL;
-		initialize_symbol($2);
-		$2->info.linfo->address = instruction_ptr;
-		$2->info.linfo->exported = $1;
+		$1->type = LABEL;
+		initialize_symbol($1);
+		$1->info.linfo->address = instruction_ptr;
 	}
 ;
 
@@ -1229,22 +927,9 @@ code:
 ;
 
 code:
-	T_MVI destination ',' immediate ret ';'
+	T_MVI destination ',' immediate_or_a ret ';'
 	{
-		if ($4.value == 0
-		 && is_download_const(&$4) == 0) {
-			expression_t immed;
-
-			/*
-			 * Allow move immediates of 0 so that macros,
-			 * that can't know the immediate's value and
-			 * otherwise compensate, still work.
-			 */
-			make_expression(&immed, 1);
-			format_1_instr(AIC_OP_BMOV, &$2, &immed, &allzeros, $5);
-		} else {
-			format_1_instr(AIC_OP_OR, &$2, &$4, &allzeros, $5);
-		}
+		format_1_instr(AIC_OP_OR, &$2, &$4, &allzeros, $5);
 	}
 ;
 
@@ -1379,7 +1064,7 @@ code:
 %%
 
 static void
-process_field(int field_type, symbol_t *sym, int value)
+process_bitmask(int mask_type, symbol_t *sym, int mask)
 {
 	/*
 	 * Add the current register to its
@@ -1389,54 +1074,52 @@ process_field(int field_type, symbol_t *sym, int value)
 	 * the "allowed bits" of this register.
 	 */
 	if (sym->type == UNINITIALIZED) {
-		sym->type = field_type;
+		sym->type = mask_type;
 		initialize_symbol(sym);
-		sym->info.finfo->value = value;
-		if (field_type != ENUM_ENTRY) {
-			if (field_type != MASK && value == 0) {
-				stop("Empty Field, or Enum", EX_DATAERR);
+		if (mask_type == BIT) {
+			if (mask == 0) {
+				stop("Bitmask with no bits set", EX_DATAERR);
 				/* NOTREACHED */
 			}
-			sym->info.finfo->value = value;
-			sym->info.finfo->mask = value;
-		} else if (field_symbol != NULL) {
-			sym->info.finfo->mask = field_symbol->info.finfo->value;
-		} else {
-			sym->info.finfo->mask = 0xFF;
+			if ((mask & ~(0x01 << (ffs(mask) - 1))) != 0) {
+				stop("Bitmask with more than one bit set",
+				     EX_DATAERR);
+				/* NOTREACHED */
+			}
 		}
-	} else if (sym->type != field_type) {
-		stop("Field definition mirrors a definition of the same "
+		sym->info.minfo->mask = mask;
+	} else if (sym->type != mask_type) {
+		stop("Bit definition mirrors a definition of the same "
 		     " name, but a different type", EX_DATAERR);
 		/* NOTREACHED */
-	} else if (value != sym->info.finfo->value) {
-		stop("Field redefined with a conflicting value", EX_DATAERR);
+	} else if (mask != sym->info.minfo->mask) {
+		stop("Bitmask redefined with a conflicting value", EX_DATAERR);
 		/* NOTREACHED */
 	}
 	/* Fail if this symbol is already listed */
-	if (symlist_search(&(sym->info.finfo->symrefs),
+	if (symlist_search(&(sym->info.minfo->symrefs),
 			   cur_symbol->name) != NULL) {
-		stop("Field defined multiple times for register", EX_DATAERR);
+		stop("Bitmask defined multiple times for register", EX_DATAERR);
 		/* NOTREACHED */
 	}
-	symlist_add(&(sym->info.finfo->symrefs), cur_symbol,
+	symlist_add(&(sym->info.minfo->symrefs), cur_symbol,
 		    SYMLIST_INSERT_HEAD);
-	cur_symbol->info.rinfo->valid_bitmask |= sym->info.finfo->mask;
+	cur_symbol->info.rinfo->valid_bitmask |= mask;
 	cur_symbol->info.rinfo->typecheck_masks = TRUE;
-	symlist_add(&(cur_symbol->info.rinfo->fields), sym, SYMLIST_SORT);
 }
 
 static void
 initialize_symbol(symbol_t *symbol)
 {
 	switch (symbol->type) {
-	case UNINITIALIZED:
+        case UNINITIALIZED:
 		stop("Call to initialize_symbol with type field unset",
 		     EX_SOFTWARE);
 		/* NOTREACHED */
 		break;
-	case REGISTER:
-	case SRAMLOC:
-	case SCBLOC:
+        case REGISTER:
+        case SRAMLOC:
+        case SCBLOC:
 		symbol->info.rinfo =
 		    (struct reg_info *)malloc(sizeof(struct reg_info));
 		if (symbol->info.rinfo == NULL) {
@@ -1445,19 +1128,8 @@ initialize_symbol(symbol_t *symbol)
 		}
 		memset(symbol->info.rinfo, 0,
 		       sizeof(struct reg_info));
-		SLIST_INIT(&(symbol->info.rinfo->fields));
-		/*
-		 * Default to allowing access in all register modes
-		 * or to the mode specified by the SCB or SRAM space
-		 * we are in.
-		 */
-		if (scb_or_sram_symbol != NULL)
-			symbol->info.rinfo->modes =
-			    scb_or_sram_symbol->info.rinfo->modes;
-		else
-			symbol->info.rinfo->modes = ~0;
 		break;
-	case ALIAS:
+        case ALIAS:
 		symbol->info.ainfo =
 		    (struct alias_info *)malloc(sizeof(struct alias_info));
 		if (symbol->info.ainfo == NULL) {
@@ -1467,21 +1139,19 @@ initialize_symbol(symbol_t *symbol)
 		memset(symbol->info.ainfo, 0,
 		       sizeof(struct alias_info));
 		break;
-	case MASK:
-	case FIELD:
-	case ENUM:
-	case ENUM_ENTRY:
-		symbol->info.finfo =
-		    (struct field_info *)malloc(sizeof(struct field_info));
-		if (symbol->info.finfo == NULL) {
-			stop("Can't create field info", EX_SOFTWARE);
+        case MASK:
+        case BIT:
+		symbol->info.minfo =
+		    (struct mask_info *)malloc(sizeof(struct mask_info));
+		if (symbol->info.minfo == NULL) {
+			stop("Can't create bitmask info", EX_SOFTWARE);
 			/* NOTREACHED */
 		}
-		memset(symbol->info.finfo, 0, sizeof(struct field_info));
-		SLIST_INIT(&(symbol->info.finfo->symrefs));
+		memset(symbol->info.minfo, 0, sizeof(struct mask_info));
+		SLIST_INIT(&(symbol->info.minfo->symrefs));
 		break;
-	case CONST:
-	case DOWNLOAD_CONST:
+        case CONST:
+        case DOWNLOAD_CONST:
 		symbol->info.cinfo =
 		    (struct const_info *)malloc(sizeof(struct const_info));
 		if (symbol->info.cinfo == NULL) {
@@ -1511,17 +1181,6 @@ initialize_symbol(symbol_t *symbol)
 		memset(symbol->info.condinfo, 0,
 		       sizeof(struct cond_info));
 		break;
-	case MACRO:
-		symbol->info.macroinfo = 
-		    (struct macro_info *)malloc(sizeof(struct macro_info));
-		if (symbol->info.macroinfo == NULL) {
-			stop("Can't create macro info", EX_SOFTWARE);
-			/* NOTREACHED */
-		}
-		memset(symbol->info.macroinfo, 0,
-		       sizeof(struct macro_info));
-		STAILQ_INIT(&symbol->info.macroinfo->args);
-		break;
 	default:
 		stop("Call to initialize_symbol with invalid symbol type",
 		     EX_SOFTWARE);
@@ -1531,75 +1190,25 @@ initialize_symbol(symbol_t *symbol)
 }
 
 static void
-add_macro_arg(const char *argtext, int argnum)
-{
-	struct macro_arg *marg;
-	int i;
-	int retval;
-		
-
-	if (cur_symbol == NULL || cur_symbol->type != MACRO) {
-		stop("Invalid current symbol for adding macro arg",
-		     EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-
-	marg = (struct macro_arg *)malloc(sizeof(*marg));
-	if (marg == NULL) {
-		stop("Can't create macro_arg structure", EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-	marg->replacement_text = NULL;
-	retval = snprintf(regex_pattern, sizeof(regex_pattern),
-			  "[^-/A-Za-z0-9_](%s)([^-/A-Za-z0-9_]|$)",
-			  argtext);
-	if (retval >= sizeof(regex_pattern)) {
-		stop("Regex text buffer too small for arg",
-		     EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-	retval = regcomp(&marg->arg_regex, regex_pattern, REG_EXTENDED);
-	if (retval != 0) {
-		stop("Regex compilation failed", EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-	STAILQ_INSERT_TAIL(&cur_symbol->info.macroinfo->args, marg, links);
-}
-
-static void
-add_macro_body(const char *bodytext)
-{
-	if (cur_symbol == NULL || cur_symbol->type != MACRO) {
-		stop("Invalid current symbol for adding macro arg",
-		     EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-	cur_symbol->info.macroinfo->body = strdup(bodytext);
-	if (cur_symbol->info.macroinfo->body == NULL) {
-		stop("Can't duplicate macro body text", EX_SOFTWARE);
-		/* NOTREACHED */
-	}
-}
-
-static void
 process_register(symbol_t **p_symbol)
 {
+	char buf[255];
 	symbol_t *symbol = *p_symbol;
 
 	if (symbol->type == UNINITIALIZED) {
-		snprintf(errbuf, sizeof(errbuf), "Undefined register %s",
+		snprintf(buf, sizeof(buf), "Undefined register %s",
 			 symbol->name);
-		stop(errbuf, EX_DATAERR);
+		stop(buf, EX_DATAERR);
 		/* NOTREACHED */
 	} else if (symbol->type == ALIAS) {
 		*p_symbol = symbol->info.ainfo->parent;
 	} else if ((symbol->type != REGISTER)
 		&& (symbol->type != SCBLOC)
 		&& (symbol->type != SRAMLOC)) {
-		snprintf(errbuf, sizeof(errbuf),
+		snprintf(buf, sizeof(buf),
 			 "Specified symbol %s is not a register",
 			 symbol->name);
-		stop(errbuf, EX_DATAERR);
+		stop(buf, EX_DATAERR);
 	}
 }
 
@@ -1633,47 +1242,7 @@ format_1_instr(int opcode, symbol_ref_t *dest, expression_t *immed,
 
 	if (is_download_const(immed))
 		f1_instr->parity = 1;
-	else if (dest->symbol == mode_ptr.symbol) {
-		u_int src_value;
-		u_int dst_value;
 
-		/*
-		 * Attempt to update mode information if
-		 * we are operating on the mode register.
-		 */
-		if (src->symbol == allones.symbol)
-			src_value = 0xFF;
-		else if (src->symbol == allzeros.symbol)
-			src_value = 0;
-		else if (src->symbol == mode_ptr.symbol)
-			src_value = (dst_mode << 4) | src_mode;
-		else
-			goto cant_update;
-
-		switch (opcode) {
-		case AIC_OP_AND:
-			dst_value = src_value & immed->value;
-			break;
-		case AIC_OP_XOR:
-			dst_value = src_value ^ immed->value;
-			break;
-		case AIC_OP_ADD:
-			dst_value = (src_value + immed->value) & 0xFF;
-			break;
-		case AIC_OP_OR:
-			dst_value = src_value | immed->value;
-			break;
-		case AIC_OP_BMOV:
-			dst_value = src_value;
-			break;
-		default:
-			goto cant_update;
-		}
-		src_mode = dst_value & 0xF;
-		dst_mode = (dst_value >> 4) & 0xF;
-	}
-
-cant_update:
 	symlist_free(&immed->referenced_syms);
 	instruction_ptr++;
 }
@@ -1781,14 +1350,6 @@ format_3_instr(int opcode, symbol_ref_t *src,
 static void
 test_readable_symbol(symbol_t *symbol)
 {
-	
-	if ((symbol->info.rinfo->modes & (0x1 << src_mode)) == 0) {
-		snprintf(errbuf, sizeof(errbuf),
-			"Register %s unavailable in source reg mode %d",
-			symbol->name, src_mode);
-		stop(errbuf, EX_DATAERR);
-	}
-
 	if (symbol->info.rinfo->mode == WO) {
 		stop("Write Only register specified as source",
 		     EX_DATAERR);
@@ -1799,14 +1360,6 @@ test_readable_symbol(symbol_t *symbol)
 static void
 test_writable_symbol(symbol_t *symbol)
 {
-	
-	if ((symbol->info.rinfo->modes & (0x1 << dst_mode)) == 0) {
-		snprintf(errbuf, sizeof(errbuf),
-			"Register %s unavailable in destination reg mode %d",
-			symbol->name, dst_mode);
-		stop(errbuf, EX_DATAERR);
-	}
-
 	if (symbol->info.rinfo->mode == RO) {
 		stop("Read Only register specified as destination",
 		     EX_DATAERR);
@@ -1819,6 +1372,7 @@ type_check(symbol_t *symbol, expression_t *expression, int opcode)
 {
 	symbol_node_t *node;
 	int and_op;
+	char buf[255];
 
 	and_op = FALSE;
 	if (opcode == AIC_OP_AND || opcode == AIC_OP_JNZ || AIC_OP_JZ)
@@ -1831,11 +1385,11 @@ type_check(symbol_t *symbol, expression_t *expression, int opcode)
 	 */
 	if (and_op == FALSE
 	 && (expression->value & ~symbol->info.rinfo->valid_bitmask) != 0) {
-		snprintf(errbuf, sizeof(errbuf),
+		snprintf(buf, sizeof(buf),
 			 "Invalid bit(s) 0x%x in immediate written to %s",
 			 expression->value & ~symbol->info.rinfo->valid_bitmask,
 			 symbol->name);
-		stop(errbuf, EX_DATAERR);
+		stop(buf, EX_DATAERR);
 		/* NOTREACHED */
 	}
 
@@ -1843,21 +1397,19 @@ type_check(symbol_t *symbol, expression_t *expression, int opcode)
 	 * Now make sure that all of the symbols referenced by the
 	 * expression are defined for this register.
 	 */
-	if (symbol->info.rinfo->typecheck_masks != FALSE) {
+	if(symbol->info.rinfo->typecheck_masks != FALSE) {
 		for(node = expression->referenced_syms.slh_first;
 		    node != NULL;
 		    node = node->links.sle_next) {
 			if ((node->symbol->type == MASK
-			  || node->symbol->type == FIELD
-			  || node->symbol->type == ENUM
-			  || node->symbol->type == ENUM_ENTRY)
-			 && symlist_search(&node->symbol->info.finfo->symrefs,
+			  || node->symbol->type == BIT)
+			 && symlist_search(&node->symbol->info.minfo->symrefs,
 					   symbol->name) == NULL) {
-				snprintf(errbuf, sizeof(errbuf),
-					 "Invalid field or mask %s "
+				snprintf(buf, sizeof(buf),
+					 "Invalid bit or mask %s "
 					 "for register %s",
 					 node->symbol->name, symbol->name);
-				stop(errbuf, EX_DATAERR);
+				stop(buf, EX_DATAERR);
 				/* NOTREACHED */
 			}
 		}

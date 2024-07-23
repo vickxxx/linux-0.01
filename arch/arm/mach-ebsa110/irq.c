@@ -11,9 +11,6 @@
  *   22-08-1998	RMK	Restructured IRQ routines
  */
 #include <linux/init.h>
-#include <linux/stddef.h>
-#include <linux/list.h>
-#include <linux/timer.h>
 
 #include <asm/mach/irq.h>
 #include <asm/hardware.h>
@@ -38,14 +35,14 @@ void __init ebsa110_init_irq(void)
 	unsigned long flags;
 	int irq;
 
-	local_irq_save(flags);
+	save_flags_cli (flags);
 	__raw_writeb(0xff, IRQ_MCLR);
 	__raw_writeb(0x55, IRQ_MSET);
 	__raw_writeb(0x00, IRQ_MSET);
 	if (__raw_readb(IRQ_MASK) != 0x55)
 		while (1);
 	__raw_writeb(0xff, IRQ_MCLR);	/* clear all interrupt enables */
-	local_irq_restore(flags);
+	restore_flags (flags);
 
 	for (irq = 0; irq < NR_IRQS; irq++) {
 		irq_desc[irq].valid	= 1;

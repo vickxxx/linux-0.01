@@ -77,7 +77,7 @@ enum sis900_interrupt_enable_reigster_bits {
 	IE = 0x00000001
 };
 
-/* maximum dma burst for transmission and receive */
+/* maximum dma burst fro transmission and receive*/
 #define MAX_DMA_RANGE	7	/* actually 0 means MAXIMUM !! */
 #define TxMXDMA_shift   	20
 #define RxMXDMA_shift    20
@@ -86,7 +86,7 @@ enum sis900_tx_rx_dma{
 	DMA_BURST_512 = 0,	DMA_BURST_64 = 5
 };
 
-/* transmit FIFO thresholds */
+/* transmit FIFO threshholds */
 #define TX_FILL_THRESH   16	/* 1/4 FIFO size */
 #define TxFILLT_shift   	8
 #define TxDRNT_shift    	0
@@ -135,12 +135,7 @@ enum sis900_eeprom_command {
 	EEaddrMask = 0x013F, EEcmdShift = 16
 };
 
-/* For SiS962 or SiS963, request the eeprom software access */
-enum sis96x_eeprom_command {
-	EEREQ = 0x00000400, EEDONE = 0x00000200, EEGNT = 0x00000100
-};
-
-/* Management Data I/O (mdio) frame */
+/* Manamgement Data I/O (mdio) frame */
 #define MIIread         0x6000
 #define MIIwrite        0x5002
 #define MIIpmdShift     7
@@ -245,7 +240,7 @@ enum sis900_revision_id {
 	SIS630A_900_REV = 0x80,		SIS630E_900_REV = 0x81,
 	SIS630S_900_REV = 0x82,		SIS630EA1_900_REV = 0x83,
 	SIS630ET_900_REV = 0x84,	SIS635A_900_REV = 0x90,
-	SIS96x_900_REV = 0X91,		SIS900B_900_REV = 0x03
+	SIS900B_900_REV = 0x03
 };
 
 enum sis630_revision_id {

@@ -11,8 +11,6 @@
 #error "include <asm/hardware.h> instead"
 #endif
 
-#include <linux/config.h>
-
 #ifndef CONFIG_SA1100_PANGOLIN_PCMCIA_IDE
 
 /* GPIOs for which the generic definition doesn't say much */

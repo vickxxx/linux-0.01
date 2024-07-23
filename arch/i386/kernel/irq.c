@@ -32,7 +32,6 @@
 #include <linux/kernel_stat.h>
 #include <linux/irq.h>
 #include <linux/proc_fs.h>
-#include <linux/seq_file.h>
 
 #include <asm/atomic.h>
 #include <asm/io.h>
@@ -132,55 +131,55 @@ atomic_t irq_mis_count;
  * Generic, controller-independent functions:
  */
 
-int show_interrupts(struct seq_file *p, void *v)
+int get_irq_list(char *buf)
 {
 	int i, j;
 	struct irqaction * action;
+	char *p = buf;
 
-	seq_printf(p, "           ");
+	p += sprintf(p, "           ");
 	for (j=0; j<smp_num_cpus; j++)
-		seq_printf(p, "CPU%d       ",j);
-	seq_putc(p,'\n');
+		p += sprintf(p, "CPU%d       ",j);
+	*p++ = '\n';
 
 	for (i = 0 ; i < NR_IRQS ; i++) {
 		action = irq_desc[i].action;
 		if (!action) 
 			continue;
-		seq_printf(p, "%3d: ",i);
+		p += sprintf(p, "%3d: ",i);
 #ifndef CONFIG_SMP
-		seq_printf(p, "%10u ", kstat_irqs(i));
+		p += sprintf(p, "%10u ", kstat_irqs(i));
 #else
 		for (j = 0; j < smp_num_cpus; j++)
-			seq_printf(p, "%10u ",
+			p += sprintf(p, "%10u ",
 				kstat.irqs[cpu_logical_map(j)][i]);
 #endif
-		seq_printf(p, " %14s", irq_desc[i].handler->typename);
-		seq_printf(p, "  %s", action->name);
+		p += sprintf(p, " %14s", irq_desc[i].handler->typename);
+		p += sprintf(p, "  %s", action->name);
 
 		for (action=action->next; action; action = action->next)
-			seq_printf(p, ", %s", action->name);
-		seq_putc(p,'\n');
+			p += sprintf(p, ", %s", action->name);
+		*p++ = '\n';
 	}
-	seq_printf(p, "NMI: ");
+	p += sprintf(p, "NMI: ");
 	for (j = 0; j < smp_num_cpus; j++)
-		seq_printf(p, "%10u ",
+		p += sprintf(p, "%10u ",
 			nmi_count(cpu_logical_map(j)));
-	seq_printf(p, "\n");
+	p += sprintf(p, "\n");
 #if CONFIG_X86_LOCAL_APIC
-	seq_printf(p, "LOC: ");
+	p += sprintf(p, "LOC: ");
 	for (j = 0; j < smp_num_cpus; j++)
-		seq_printf(p, "%10u ",
+		p += sprintf(p, "%10u ",
 			apic_timer_irqs[cpu_logical_map(j)]);
-	seq_printf(p, "\n");
+	p += sprintf(p, "\n");
 #endif
-	seq_printf(p, "ERR: %10u\n", atomic_read(&irq_err_count));
+	p += sprintf(p, "ERR: %10u\n", atomic_read(&irq_err_count));
 #ifdef CONFIG_X86_IO_APIC
 #ifdef APIC_MISMATCH_DEBUG
-	seq_printf(p, "MIS: %10u\n", atomic_read(&irq_mis_count));
+	p += sprintf(p, "MIS: %10u\n", atomic_read(&irq_mis_count));
 #endif
 #endif
-
-	return 0;
+	return p - buf;
 }
 
 
@@ -578,20 +577,6 @@ asmlinkage unsigned int do_IRQ(struct pt_regs regs)
 	irq_desc_t *desc = irq_desc + irq;
 	struct irqaction * action;
 	unsigned int status;
-#ifdef CONFIG_DEBUG_STACKOVERFLOW
-	long esp;
-
-	/* Debugging check for stack overflow: is there less than 1KB free? */
-	__asm__ __volatile__("andl %%esp,%0" : "=r" (esp) : "0" (8191));
-	if (unlikely(esp < (sizeof(struct task_struct) + 1024))) {
-		extern void show_stack(unsigned long *);
-
-		printk("do_IRQ: stack overflow: %ld\n",
-			esp - sizeof(struct task_struct));
-		__asm__ __volatile__("movl %%esp,%0" : "=r" (esp));
-		show_stack((void *)esp);
-	}
-#endif
 
 	kstat.irqs[cpu][irq]++;
 	spin_lock(&desc->lock);
@@ -1036,7 +1021,7 @@ int setup_irq(unsigned int irq, struct irqaction * new)
 
 	if (!shared) {
 		desc->depth = 0;
-		desc->status &= ~(IRQ_DISABLED | IRQ_AUTODETECT | IRQ_WAITING | IRQ_INPROGRESS);
+		desc->status &= ~(IRQ_DISABLED | IRQ_AUTODETECT | IRQ_WAITING);
 		desc->handler->startup(irq);
 	}
 	spin_unlock_irqrestore(&desc->lock,flags);

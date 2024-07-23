@@ -22,7 +22,6 @@
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
 #endif
-#include <linux/pm.h>
 
 #include <asm/oplib.h>
 #include <asm/delay.h>
@@ -45,9 +44,6 @@
 #ifdef CONFIG_SBUS
 #include <asm/sbus.h>
 #include <asm/dma.h>
-#endif
-#ifdef CONFIG_HIGHMEM
-#include <linux/highmem.h>
 #endif
 #include <asm/a.out.h>
 #include <asm/io-unit.h>
@@ -122,7 +118,6 @@ EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL(__down_interruptible);
 
 EXPORT_SYMBOL(sparc_valid_addr_bitmap);
-EXPORT_SYMBOL(phys_base);
 
 /* Atomic operations. */
 EXPORT_SYMBOL_PRIVATE(_atomic_add);
@@ -152,12 +147,10 @@ EXPORT_SYMBOL(__cpu_logical_map);
 #endif
 
 EXPORT_SYMBOL(udelay);
-EXPORT_SYMBOL(ndelay);
 EXPORT_SYMBOL(mostek_lock);
 EXPORT_SYMBOL(mstk48t02_regs);
 #if CONFIG_SUN_AUXIO
-EXPORT_SYMBOL(set_auxio);
-EXPORT_SYMBOL(get_auxio);
+EXPORT_SYMBOL(auxio_register);
 #endif
 EXPORT_SYMBOL(request_fast_irq);
 EXPORT_SYMBOL(io_remap_page_range);
@@ -208,12 +201,6 @@ EXPORT_SYMBOL(pci_free_consistent);
 EXPORT_SYMBOL(pci_map_single);
 EXPORT_SYMBOL(pci_unmap_single);
 EXPORT_SYMBOL(pci_dma_sync_single);
-#endif
-
-/* in arch/sparc/mm/highmem.c */
-#ifdef CONFIG_HIGHMEM
-EXPORT_SYMBOL(kmap_atomic);
-EXPORT_SYMBOL(kunmap_atomic);
 #endif
 
 /* Solaris/SunOS binary compatibility */
@@ -297,7 +284,6 @@ EXPORT_SYMBOL_NOVERS(memcmp);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memmove);
-EXPORT_SYMBOL_NOVERS(memchr);
 EXPORT_SYMBOL_NOVERS(__ashrdi3);
 EXPORT_SYMBOL_NOVERS(__ashldi3);
 EXPORT_SYMBOL_NOVERS(__lshrdi3);
@@ -310,6 +296,3 @@ EXPORT_SYMBOL_DOT(mul);
 EXPORT_SYMBOL_DOT(umul);
 EXPORT_SYMBOL_DOT(div);
 EXPORT_SYMBOL_DOT(udiv);
-
-/* Sun Power Management Idle Handler */
-EXPORT_SYMBOL(pm_idle);

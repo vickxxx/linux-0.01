@@ -1,4 +1,4 @@
-/* $Id: hysdn_procconf.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+/* $Id: hysdn_procconf.c,v 1.8.6.4 2001/09/23 22:24:54 kai Exp $
  *
  * Linux driver for HYSDN cards, /proc/net filesystem dir and conf functions.
  *
@@ -21,7 +21,7 @@
 
 #include "hysdn_defs.h"
 
-static char *hysdn_procconf_revision = "$Revision: 1.1.4.1 $";
+static char *hysdn_procconf_revision = "$Revision: 1.8.6.4 $";
 
 #define INFO_OUT_LEN 80		/* length of info line including lf */
 
@@ -212,32 +212,29 @@ hysdn_conf_write(struct file *file, const char *buf, size_t count, loff_t * off)
 static ssize_t
 hysdn_conf_read(struct file *file, char *buf, size_t count, loff_t * off)
 {
-	loff_t pos = *off;
 	char *cp;
 	int i;
 
 	if (off != &file->f_pos)	/* fs error check */
 		return -ESPIPE;
 
-	if (!(file->f_mode & FMODE_READ))
-		return -EPERM;
-
-	if (!(cp = file->private_data))
-		return (-EFAULT);	/* should never happen */
-
-	i = strlen(cp);	/* get total string length */
-
-	if (pos != (unsigned)pos || pos >= i)
-		return 0;
-
-	/* still bytes to transfer */
-	cp += pos;	/* point to desired data offset */
-	i -= pos;	/* remaining length */
-	if (i > count)
-		i = count;	/* limit length to transfer */
-	if (copy_to_user(buf, cp, i))
-		return (-EFAULT);	/* copy error */
-	*off = pos + i;	/* adjust offset */
+	if (file->f_mode & FMODE_READ) {
+		if (!(cp = file->private_data))
+			return (-EFAULT);	/* should never happen */
+		i = strlen(cp);	/* get total string length */
+		if (*off < i) {
+			/* still bytes to transfer */
+			cp += *off;	/* point to desired data offset */
+			i -= *off;	/* remaining length */
+			if (i > count)
+				i = count;	/* limit length to transfer */
+			if (copy_to_user(buf, cp, i))
+				return (-EFAULT);	/* copy error */
+			*off += i;	/* adjust offset */
+		} else
+			return (0);
+	} else
+		return (-EPERM);	/* no permission to read */
 
 	return (i);
 }				/* hysdn_conf_read */

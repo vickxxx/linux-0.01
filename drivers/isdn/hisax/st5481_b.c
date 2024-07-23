@@ -67,28 +67,24 @@ static void usb_b_out(struct st5481_bcs *bcs,int buf_nr)
 				bytes_sent = buf_size - len;
 				if (skb->len < bytes_sent)
 					bytes_sent = skb->len;
-				{	/* swap tx bytes to get hearable audio data */
-					register unsigned char *src  = skb->data;
-					register unsigned char *dest = urb->transfer_buffer+len;
-					register unsigned int count;
-					for (count = 0; count < bytes_sent; count++)
-						*dest++ = isdnhdlc_bit_rev_tab[*src++];
-				}
+
+				memcpy(urb->transfer_buffer+len, skb->data, bytes_sent);
+				
 				len += bytes_sent;
 			} else {
-				len += isdnhdlc_encode(&b_out->hdlc_state,
-						       skb->data, skb->len, &bytes_sent,
-						       urb->transfer_buffer+len, buf_size-len);
+				len += hdlc_encode(&b_out->hdlc_state, 
+						   skb->data, skb->len, &bytes_sent,
+						   urb->transfer_buffer+len, buf_size-len);
 			}
 
 			skb_pull(skb, bytes_sent);
-
+			
 			if (!skb->len) {
 				// Frame sent
 				b_out->tx_skb = NULL;
 				B_L1L2(bcs, PH_DATA | CONFIRM, (void *) skb->truesize);
 				dev_kfree_skb_any(skb);
-
+				
 /* 				if (!(bcs->tx_skb = skb_dequeue(&bcs->sq))) { */
 /* 					st5481B_sched_event(bcs, B_XMTBUFREADY); */
 /* 				} */
@@ -99,9 +95,9 @@ static void usb_b_out(struct st5481_bcs *bcs,int buf_nr)
 				len = buf_size;
 			} else {
 				// Send flags
-				len += isdnhdlc_encode(&b_out->hdlc_state,
-						       NULL, 0, &bytes_sent,
-						       urb->transfer_buffer+len, buf_size-len);
+				len += hdlc_encode(&b_out->hdlc_state, 
+						   NULL, 0, &bytes_sent,
+						   urb->transfer_buffer+len, buf_size-len);
 			}
 		}	
 	}
@@ -213,7 +209,7 @@ static void st5481B_mode(struct st5481_bcs *bcs, int mode)
 	if (bcs->mode != L1_MODE_NULL) {
 		// Open the B channel
 		if (bcs->mode != L1_MODE_TRANS) {
-			isdnhdlc_out_init(&b_out->hdlc_state, 0, bcs->mode == L1_MODE_HDLC_56K);
+			hdlc_out_init(&b_out->hdlc_state, 0, bcs->mode == L1_MODE_HDLC_56K);
 		}
 		st5481_usb_pipe_reset(adapter, (bcs->channel+1)*2, NULL, NULL);
 	
@@ -279,7 +275,7 @@ static int __devinit st5481_setup_b_out(struct st5481_bcs *bcs)
 				      usb_b_out_complete, bcs);
 }
 
-static void st5481_release_b_out(struct st5481_bcs *bcs)
+static void __devexit st5481_release_b_out(struct st5481_bcs *bcs)
 {
 	struct st5481_b_out *b_out = &bcs->b_out;
 
@@ -320,7 +316,7 @@ int __devinit st5481_setup_b(struct st5481_bcs *bcs)
 /*
  * Release buffers and URBs for the B channels
  */
-void st5481_release_b(struct st5481_bcs *bcs)
+void __devexit st5481_release_b(struct st5481_bcs *bcs)
 {
 	DBG(4,"");
 

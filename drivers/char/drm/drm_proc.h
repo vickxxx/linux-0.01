@@ -33,6 +33,7 @@
  *    the problem with the proc files not outputting all their information.
  */
 
+#define __NO_VERSION__
 #include "drmP.h"
 
 static int	   DRM(name_info)(char *buf, char **start, off_t offset,
@@ -147,10 +148,10 @@ static int DRM(name_info)(char *buf, char **start, off_t offset, int request,
 	*eof   = 0;
 
 	if (dev->unique) {
-		DRM_PROC_PRINT("%s 0x%lx %s\n",
-			       dev->name, (long)dev->device, dev->unique);
+		DRM_PROC_PRINT("%s 0x%x %s\n",
+			       dev->name, dev->device, dev->unique);
 	} else {
-		DRM_PROC_PRINT("%s 0x%lx\n", dev->name, (long)dev->device);
+		DRM_PROC_PRINT("%s 0x%x\n", dev->name, dev->device);
 	}
 
 	if (len > request + offset) return request;

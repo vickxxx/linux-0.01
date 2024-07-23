@@ -14,10 +14,6 @@
 *  Peter Berger (pberger@brimson.com)
 *  Al Borchers (borchers@steinerpoint.com)
 * 
-* (12/03/2001) gkh
-*	switched to using port->open_count instead of private version.
-*	Removed port->active
-*
 * (04/08/2001) gb
 *	Identify version on module load.
 *
@@ -235,16 +231,19 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/fcntl.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/tqueue.h>
-#include <asm/uaccess.h>
 #include <linux/usb.h>
 
 #ifdef CONFIG_USB_SERIAL_DEBUG
@@ -412,14 +411,14 @@
 
 /* Structures */
 
-struct digi_serial {
+typedef struct digi_serial {
 	spinlock_t ds_serial_lock;
 	struct usb_serial_port *ds_oob_port;	/* out-of-band port */
 	int ds_oob_port_num;			/* index of out-of-band port */
 	int ds_device_started;
-};
+} digi_serial_t;
 
-struct digi_port {
+typedef struct digi_port {
 	spinlock_t dp_port_lock;
 	int dp_port_num;
 	int dp_out_buf_len;
@@ -430,6 +429,7 @@ struct digi_port {
 	int dp_write_urb_in_use;
 	unsigned int dp_modem_signals;
 	wait_queue_head_t dp_modem_change_wait;
+	int dp_open_count;			/* inc on open, dec on close */
 	int dp_transmit_idle;
 	wait_queue_head_t dp_transmit_idle_wait;
 	int dp_throttled;
@@ -438,7 +438,7 @@ struct digi_port {
 	int dp_in_close;			/* close in progress */
 	wait_queue_head_t dp_close_wait;	/* wait queue for close */
 	struct tq_struct dp_wakeup_task;
-};
+} digi_port_t;
 
 
 /* Local Function Declarations */
@@ -483,12 +483,12 @@ static __devinitdata struct usb_device_id id_table_combined [] = {
 	{ }						/* Terminating entry */
 };
 
-static struct usb_device_id id_table_2 [] = {
+static __devinitdata struct usb_device_id id_table_2 [] = {
 	{ USB_DEVICE(DIGI_VENDOR_ID, DIGI_2_ID) },
 	{ }						/* Terminating entry */
 };
 
-static struct usb_device_id id_table_4 [] = {
+static __devinitdata struct usb_device_id id_table_4 [] = {
 	{ USB_DEVICE(DIGI_VENDOR_ID, DIGI_4_ID) },
 	{ }						/* Terminating entry */
 };
@@ -498,51 +498,55 @@ MODULE_DEVICE_TABLE (usb, id_table_combined);
 /* device info needed for the Digi serial converter */
 
 static struct usb_serial_device_type digi_acceleport_2_device = {
-	.owner =			THIS_MODULE,
-	.name =				"Digi USB",
-	.id_table =			id_table_2,
-	.num_interrupt_in =		0,
-	.num_bulk_in =			4,
-	.num_bulk_out =			4,
-	.num_ports =			3,
-	.open =				digi_open,
-	.close =			digi_close,
-	.write =			digi_write,
-	.write_room =			digi_write_room,
-	.write_bulk_callback = 		digi_write_bulk_callback,
-	.read_bulk_callback =		digi_read_bulk_callback,
-	.chars_in_buffer =		digi_chars_in_buffer,
-	.throttle =			digi_rx_throttle,
-	.unthrottle =			digi_rx_unthrottle,
-	.ioctl =			digi_ioctl,
-	.set_termios =			digi_set_termios,
-	.break_ctl =			digi_break_ctl,
-	.startup =			digi_startup,
-	.shutdown =			digi_shutdown,
+	name:				"Digi USB",
+	id_table:			id_table_2,
+	needs_interrupt_in:		DONT_CARE,
+	needs_bulk_in:			MUST_HAVE,
+	needs_bulk_out:			MUST_HAVE,
+	num_interrupt_in:		0,
+	num_bulk_in:			4,
+	num_bulk_out:			4,
+	num_ports:			3,
+	open:				digi_open,
+	close:				digi_close,
+	write:				digi_write,
+	write_room:			digi_write_room,
+	write_bulk_callback: 		digi_write_bulk_callback,
+	read_bulk_callback:		digi_read_bulk_callback,
+	chars_in_buffer:		digi_chars_in_buffer,
+	throttle:			digi_rx_throttle,
+	unthrottle:			digi_rx_unthrottle,
+	ioctl:				digi_ioctl,
+	set_termios:			digi_set_termios,
+	break_ctl:			digi_break_ctl,
+	startup:			digi_startup,
+	shutdown:			digi_shutdown,
 };
 
 static struct usb_serial_device_type digi_acceleport_4_device = {
-	.owner =			THIS_MODULE,
-	.name =				"Digi USB",
-	.id_table =			id_table_4,
-	.num_interrupt_in =		0,
-	.num_bulk_in =			5,
-	.num_bulk_out =			5,
-	.num_ports =			4,
-	.open =				digi_open,
-	.close =			digi_close,
-	.write =			digi_write,
-	.write_room =			digi_write_room,
-	.write_bulk_callback = 		digi_write_bulk_callback,
-	.read_bulk_callback =		digi_read_bulk_callback,
-	.chars_in_buffer =		digi_chars_in_buffer,
-	.throttle =			digi_rx_throttle,
-	.unthrottle =			digi_rx_unthrottle,
-	.ioctl =			digi_ioctl,
-	.set_termios =			digi_set_termios,
-	.break_ctl =			digi_break_ctl,
-	.startup =			digi_startup,
-	.shutdown =			digi_shutdown,
+	name:				"Digi USB",
+	id_table:			id_table_4,
+	needs_interrupt_in:		DONT_CARE,
+	needs_bulk_in:			MUST_HAVE,
+	needs_bulk_out:			MUST_HAVE,
+	num_interrupt_in:		0,
+	num_bulk_in:			5,
+	num_bulk_out:			5,
+	num_ports:			4,
+	open:				digi_open,
+	close:				digi_close,
+	write:				digi_write,
+	write_room:			digi_write_room,
+	write_bulk_callback: 		digi_write_bulk_callback,
+	read_bulk_callback:		digi_read_bulk_callback,
+	chars_in_buffer:		digi_chars_in_buffer,
+	throttle:			digi_rx_throttle,
+	unthrottle:			digi_rx_unthrottle,
+	ioctl:				digi_ioctl,
+	set_termios:			digi_set_termios,
+	break_ctl:			digi_break_ctl,
+	startup:			digi_startup,
+	shutdown:			digi_shutdown,
 };
 
 
@@ -596,12 +600,13 @@ static void digi_wakeup_write_lock( struct usb_serial_port *port )
 {
 
 	unsigned long flags;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 
 
 	spin_lock_irqsave( &priv->dp_port_lock, flags );
 	digi_wakeup_write( port );
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
+	MOD_DEC_USE_COUNT;
 }
 
 static void digi_wakeup_write( struct usb_serial_port *port )
@@ -614,7 +619,14 @@ static void digi_wakeup_write( struct usb_serial_port *port )
 	wake_up_interruptible( &port->write_wait );
 
 	/* wake up line discipline */
-	tty_wakeup(tty);
+	if( (tty->flags & (1 << TTY_DO_WRITE_WAKEUP))
+	&& tty->ldisc.write_wakeup )
+		(tty->ldisc.write_wakeup)(tty);
+
+	/* wake up other tty processes */
+	wake_up_interruptible( &tty->write_wait );
+	/* For 2.2.16 backport -- wake_up_interruptible( &tty->poll_wait ); */
+
 }
 
 
@@ -635,8 +647,8 @@ static int digi_write_oob_command( struct usb_serial_port *port,
 
 	int ret = 0;
 	int len;
-	struct usb_serial_port *oob_port = (struct usb_serial_port *)((struct digi_serial *)port->serial->private)->ds_oob_port;
-	struct digi_port *oob_priv = (struct digi_port *)oob_port->private;
+	struct usb_serial_port *oob_port = (struct usb_serial_port *)((digi_serial_t *)port->serial->private)->ds_oob_port;
+	digi_port_t *oob_priv = (digi_port_t *)oob_port->private;
 	unsigned long flags = 0;
 
 
@@ -677,7 +689,7 @@ dbg( "digi_write_oob_command: TOP: port=%d, count=%d", oob_priv->dp_port_num, co
 	spin_unlock_irqrestore( &oob_priv->dp_port_lock, flags );
 
 	if( ret ) {
-		err("%s: usb_submit_urb failed, ret=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d",
 			ret );
 	}
 
@@ -704,7 +716,7 @@ static int digi_write_inb_command( struct usb_serial_port *port,
 
 	int ret = 0;
 	int len;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned char *data = port->write_urb->transfer_buffer;
 	unsigned long flags = 0;
 
@@ -722,7 +734,7 @@ count );
 	while( count > 0 && ret == 0 ) {
 
 		while( (port->write_urb->status == -EINPROGRESS
-		|| priv->dp_write_urb_in_use) && time_before(jiffies, timeout)) {
+		|| priv->dp_write_urb_in_use) && jiffies < timeout ) {
 			cond_wait_interruptible_timeout_irqrestore(
 				&port->write_wait, DIGI_RETRY_TIMEOUT,
 				&priv->dp_port_lock, flags );
@@ -766,7 +778,7 @@ count );
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 
 	if( ret ) {
-		err("%s: usb_submit_urb failed, ret=%d, port=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d, port=%d",
 		ret, priv->dp_port_num );
 	}
 
@@ -790,9 +802,9 @@ static int digi_set_modem_signals( struct usb_serial_port *port,
 {
 
 	int ret;
-	struct digi_port *port_priv = (struct digi_port *)port->private;
-	struct usb_serial_port *oob_port = (struct usb_serial_port *)((struct digi_serial *)port->serial->private)->ds_oob_port;
-	struct digi_port *oob_priv = (struct digi_port *)oob_port->private;
+	digi_port_t *port_priv = (digi_port_t *)port->private;
+	struct usb_serial_port *oob_port = (struct usb_serial_port *)((digi_serial_t *)port->serial->private)->ds_oob_port;
+	digi_port_t *oob_priv = (digi_port_t *)oob_port->private;
 	unsigned char *data = oob_port->write_urb->transfer_buffer;
 	unsigned long flags = 0;
 
@@ -842,7 +854,7 @@ port_priv->dp_port_num, modem_signals );
 	spin_unlock_irqrestore( &oob_priv->dp_port_lock, flags );
 
 	if( ret ) {
-		err("%s: usb_submit_urb failed, ret=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d",
 		ret );
 	}
 
@@ -869,7 +881,7 @@ static int digi_transmit_idle( struct usb_serial_port *port,
 
 	int ret;
 	unsigned char buf[2];
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned long flags = 0;
 
 
@@ -887,7 +899,7 @@ static int digi_transmit_idle( struct usb_serial_port *port,
 
 	spin_lock_irqsave( &priv->dp_port_lock, flags );
 
-	while( time_before(jiffies, timeout) && !priv->dp_transmit_idle ) {
+	while( jiffies < timeout && !priv->dp_transmit_idle ) {
 		cond_wait_interruptible_timeout_irqrestore(
 			&priv->dp_transmit_idle_wait, DIGI_RETRY_TIMEOUT,
 			&priv->dp_port_lock, flags );
@@ -909,7 +921,7 @@ static void digi_rx_throttle( struct usb_serial_port *port )
 {
 
 	unsigned long flags;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 
 
 dbg( "digi_rx_throttle: TOP: port=%d", priv->dp_port_num );
@@ -930,7 +942,7 @@ static void digi_rx_unthrottle( struct usb_serial_port *port )
 	int ret = 0;
 	int len;
 	unsigned long flags;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	struct tty_struct *tty = port->tty;
 
 
@@ -963,7 +975,7 @@ dbg( "digi_rx_unthrottle: TOP: port=%d", priv->dp_port_num );
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 
 	if( ret ) {
-		err("%s: usb_submit_urb failed, ret=%d, port=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d, port=%d",
 			ret, priv->dp_port_num );
 	}
 
@@ -974,7 +986,7 @@ static void digi_set_termios( struct usb_serial_port *port,
 	struct termios *old_termios )
 {
 
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned int iflag = port->tty->termios->c_iflag;
 	unsigned int cflag = port->tty->termios->c_cflag;
 	unsigned int old_iflag = old_termios->c_iflag;
@@ -1198,7 +1210,7 @@ static int digi_ioctl( struct usb_serial_port *port, struct file *file,
 	unsigned int cmd, unsigned long arg )
 {
 
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned int val;
 	unsigned long flags = 0;
 
@@ -1250,7 +1262,7 @@ static int digi_write( struct usb_serial_port *port, int from_user,
 {
 
 	int ret,data_len,new_len;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned char *data = port->write_urb->transfer_buffer;
 	unsigned char user_buf[64];	/* 64 bytes is max USB bulk packet */
 	unsigned long flags = 0;
@@ -1322,7 +1334,7 @@ priv->dp_port_num, count, from_user, in_interrupt() );
 	/* return length of new data written, or error */
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 	if( ret < 0 ) {
-		err("%s: usb_submit_urb failed, ret=%d, port=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d, port=%d",
 			ret, priv->dp_port_num );
 	}
 
@@ -1337,27 +1349,27 @@ static void digi_write_bulk_callback( struct urb *urb )
 
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct usb_serial *serial;
-	struct digi_port *priv;
+	digi_port_t *priv;
 	int ret = 0;
 
 
 dbg( "digi_write_bulk_callback: TOP, urb->status=%d", urb->status );
 
 	/* port and serial sanity check */
-	if( port == NULL || (priv=(struct digi_port *)(port->private)) == NULL ) {
-		err("%s: port or port->private is NULL, status=%d", __FUNCTION__,
+	if( port == NULL || (priv=(digi_port_t *)(port->private)) == NULL ) {
+		err( __FUNCTION__ ": port or port->private is NULL, status=%d",
 			urb->status );
 		return;
 	}
 	serial = port->serial;
 	if( serial == NULL || serial->private == NULL ) {
-		err("%s: serial or serial->private is NULL, status=%d", __FUNCTION__, urb->status );
+		err( __FUNCTION__ ": serial or serial->private is NULL, status=%d", urb->status );
 		return;
 	}
 
 	/* handle oob callback */
 	if( priv->dp_port_num
-	== ((struct digi_serial *)(serial->private))->ds_oob_port_num ) {
+	== ((digi_serial_t *)(serial->private))->ds_oob_port_num ) {
 		dbg( "digi_write_bulk_callback: oob callback" );
 		spin_lock( &priv->dp_port_lock );
 		priv->dp_write_urb_in_use = 0;
@@ -1374,7 +1386,7 @@ dbg( "digi_write_bulk_callback: TOP, urb->status=%d", urb->status );
 	/* try to send any buffered data on this port, if it is open */
 	spin_lock( &priv->dp_port_lock );
 	priv->dp_write_urb_in_use = 0;
-	if( port->open_count && port->write_urb->status != -EINPROGRESS
+	if( priv->dp_open_count && port->write_urb->status != -EINPROGRESS
 	&& priv->dp_out_buf_len > 0 ) {
 
 		*((unsigned char *)(port->write_urb->transfer_buffer))
@@ -1401,12 +1413,14 @@ dbg( "digi_write_bulk_callback: TOP, urb->status=%d", urb->status );
 
 	/* also queue up a wakeup at scheduler time, in case we */
 	/* lost the race in write_chan(). */
-	schedule_task(&priv->dp_wakeup_task);
+	MOD_INC_USE_COUNT;
+	if (schedule_task(&priv->dp_wakeup_task) == 0)
+		MOD_DEC_USE_COUNT;
 
 	spin_unlock( &priv->dp_port_lock );
 
 	if( ret ) {
-		err("%s: usb_submit_urb failed, ret=%d, port=%d", __FUNCTION__,
+		err( __FUNCTION__ ": usb_submit_urb failed, ret=%d, port=%d",
 			ret, priv->dp_port_num );
 	}
 
@@ -1417,7 +1431,7 @@ static int digi_write_room( struct usb_serial_port *port )
 {
 
 	int room;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	unsigned long flags = 0;
 
 
@@ -1440,7 +1454,7 @@ dbg( "digi_write_room: port=%d, room=%d", priv->dp_port_num, room );
 static int digi_chars_in_buffer( struct usb_serial_port *port )
 {
 
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 
 
 	if( port->write_urb->status == -EINPROGRESS
@@ -1461,12 +1475,12 @@ static int digi_open( struct usb_serial_port *port, struct file *filp )
 
 	int ret;
 	unsigned char buf[32];
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	struct termios not_termios;
 	unsigned long flags = 0;
 
 
-dbg( "digi_open: TOP: port=%d, open_count=%d", priv->dp_port_num, port->open_count );
+dbg( "digi_open: TOP: port=%d, active=%d, open_count=%d", priv->dp_port_num, port->active, priv->dp_open_count );
 
 	/* be sure the device is started up */
 	if( digi_startup_device( port->serial ) != 0 )
@@ -1480,17 +1494,32 @@ dbg( "digi_open: TOP: port=%d, open_count=%d", priv->dp_port_num, port->open_cou
 		return( -EAGAIN );
 	}
 
+	/* inc module use count before sleeping to wait for closes */
+	++priv->dp_open_count;
+	MOD_INC_USE_COUNT;
+
 	/* wait for a close in progress to finish */
 	while( priv->dp_in_close ) {
 		cond_wait_interruptible_timeout_irqrestore(
 			&priv->dp_close_wait, DIGI_RETRY_TIMEOUT,
 			&priv->dp_port_lock, flags );
 		if( signal_pending(current) ) {
+			--priv->dp_open_count;
+			MOD_DEC_USE_COUNT;
 			return( -EINTR );
 		}
 		spin_lock_irqsave( &priv->dp_port_lock, flags );
 	}
 
+	/* if port is already open, just return */
+	/* be sure exactly one open proceeds */
+	if( port->active ) {
+		spin_unlock_irqrestore( &priv->dp_port_lock, flags );
+		return( 0 );
+	}
+
+	/* first open, mark port as active */
+	port->active = 1;
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
  
 	/* read modem signals automatically whenever they change */
@@ -1527,15 +1556,24 @@ static void digi_close( struct usb_serial_port *port, struct file *filp )
 	int ret;
 	unsigned char buf[32];
 	struct tty_struct *tty = port->tty;
-	struct digi_port *priv = (struct digi_port *)port->private;
+	digi_port_t *priv = (digi_port_t *)port->private;
 	unsigned long flags = 0;
 
 
-dbg( "digi_close: TOP: port=%d, open_count=%d", priv->dp_port_num, port->open_count );
+dbg( "digi_close: TOP: port=%d, active=%d, open_count=%d", priv->dp_port_num, port->active, priv->dp_open_count );
 
 
 	/* do cleanup only after final close on this port */
 	spin_lock_irqsave( &priv->dp_port_lock, flags );
+	if( priv->dp_open_count > 1 ) {
+		--priv->dp_open_count;
+		MOD_DEC_USE_COUNT;
+		spin_unlock_irqrestore( &priv->dp_port_lock, flags );
+		return;
+	} else if( priv->dp_open_count <= 0 ) {
+		spin_unlock_irqrestore( &priv->dp_port_lock, flags );
+		return;
+	}
 	priv->dp_in_close = 1;
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 
@@ -1550,7 +1588,8 @@ dbg( "digi_close: TOP: port=%d, open_count=%d", priv->dp_port_num, port->open_co
 	/* flush driver and line discipline buffers */
 	if( tty->driver.flush_buffer )
 		tty->driver.flush_buffer( tty );
-	tty_ldisc_flush(tty);
+	if( tty->ldisc.flush_buffer )
+		tty->ldisc.flush_buffer( tty );
 
 	if (port->serial->dev) {
 		/* wait for transmit idle */
@@ -1605,8 +1644,11 @@ dbg( "digi_close: TOP: port=%d, open_count=%d", priv->dp_port_num, port->open_co
 	tty->closing = 0;
 
 	spin_lock_irqsave( &priv->dp_port_lock, flags );
+	port->active = 0;
 	priv->dp_write_urb_in_use = 0;
 	priv->dp_in_close = 0;
+	--priv->dp_open_count;
+	MOD_DEC_USE_COUNT;
 	wake_up_interruptible( &priv->dp_close_wait );
 	spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 
@@ -1625,7 +1667,7 @@ static int digi_startup_device( struct usb_serial *serial )
 {
 
 	int i,ret = 0;
-	struct digi_serial *serial_priv = (struct digi_serial *)serial->private;
+	digi_serial_t *serial_priv = (digi_serial_t *)serial->private;
 	struct usb_serial_port *port;
 
 
@@ -1647,7 +1689,8 @@ static int digi_startup_device( struct usb_serial *serial )
 		port->write_urb->dev = port->serial->dev;
 
 		if( (ret=usb_submit_urb(port->read_urb)) != 0 ) {
-			err("%s: usb_submit_urb failed, ret=%d, port=%d", __FUNCTION__,
+			err(
+			__FUNCTION__ ": usb_submit_urb failed, ret=%d, port=%d",
 			ret, i );
 			break;
 		}
@@ -1663,8 +1706,8 @@ static int digi_startup( struct usb_serial *serial )
 {
 
 	int i;
-	struct digi_port *priv;
-	struct digi_serial *serial_priv;
+	digi_port_t *priv;
+	digi_serial_t *serial_priv;
 
 
 dbg( "digi_startup: TOP" );
@@ -1673,11 +1716,13 @@ dbg( "digi_startup: TOP" );
 	/* number of regular ports + 1 for the out-of-band port */
 	for( i=0; i<serial->type->num_ports+1; i++ ) {
 
+		serial->port[i].active = 0;
+
 		/* allocate port private structure */
 		priv = serial->port[i].private =
-			(struct digi_port *)kmalloc( sizeof(struct digi_port),
+			(digi_port_t *)kmalloc( sizeof(digi_port_t),
 			GFP_KERNEL );
-		if( priv == (struct digi_port *)0 ) {
+		if( priv == (digi_port_t *)0 ) {
 			while( --i >= 0 )
 				kfree( serial->port[i].private );
 			return( 1 );			/* error */
@@ -1691,6 +1736,7 @@ dbg( "digi_startup: TOP" );
 		priv->dp_write_urb_in_use = 0;
 		priv->dp_modem_signals = 0;
 		init_waitqueue_head( &priv->dp_modem_change_wait );
+		priv->dp_open_count = 0;
 		priv->dp_transmit_idle = 0;
 		init_waitqueue_head( &priv->dp_transmit_idle_wait );
 		priv->dp_throttled = 0;
@@ -1710,9 +1756,9 @@ dbg( "digi_startup: TOP" );
 
 	/* allocate serial private structure */
 	serial_priv = serial->private =
-		(struct digi_serial *)kmalloc( sizeof(struct digi_serial),
+		(digi_serial_t *)kmalloc( sizeof(digi_serial_t),
 		GFP_KERNEL );
-	if( serial_priv == (struct digi_serial *)0 ) {
+	if( serial_priv == (digi_serial_t *)0 ) {
 		for( i=0; i<serial->type->num_ports+1; i++ )
 			kfree( serial->port[i].private );
 		return( 1 );			/* error */
@@ -1733,6 +1779,8 @@ static void digi_shutdown( struct usb_serial *serial )
 {
 
 	int i;
+	digi_port_t *priv;
+	unsigned long flags;
 
 
 dbg( "digi_shutdown: TOP, in_interrupt()=%d", in_interrupt() );
@@ -1741,6 +1789,17 @@ dbg( "digi_shutdown: TOP, in_interrupt()=%d", in_interrupt() );
 	for( i=0; i<serial->type->num_ports+1; i++ ) {
 		usb_unlink_urb( serial->port[i].read_urb );
 		usb_unlink_urb( serial->port[i].write_urb );
+	}
+
+	/* dec module use count */
+	for( i=0; i<serial->type->num_ports; i++ ) {
+		priv = serial->port[i].private;
+		spin_lock_irqsave( &priv->dp_port_lock, flags );
+		while( priv->dp_open_count > 0 ) {
+			MOD_DEC_USE_COUNT;
+			--priv->dp_open_count;
+		}
+		spin_unlock_irqrestore( &priv->dp_port_lock, flags );
 	}
 
 	/* free the private data structures for all ports */
@@ -1756,34 +1815,34 @@ static void digi_read_bulk_callback( struct urb *urb )
 {
 
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
-	struct digi_port *priv;
+	digi_port_t *priv;
 	int ret;
 
 
 dbg( "digi_read_bulk_callback: TOP" );
 
 	/* port sanity check, do not resubmit if port is not valid */
-	if( port == NULL || (priv=(struct digi_port *)(port->private)) == NULL ) {
-		err("%s: port or port->private is NULL, status=%d", __FUNCTION__,
+	if( port == NULL || (priv=(digi_port_t *)(port->private)) == NULL ) {
+		err( __FUNCTION__ ": port or port->private is NULL, status=%d",
 			urb->status );
 		return;
 	}
 	if( port->serial == NULL
 	|| serial_paranoia_check( port->serial, __FUNCTION__ )
 	|| port->serial->private == NULL ) {
-		err("%s: serial is bad or serial->private is NULL, status=%d", __FUNCTION__, urb->status );
+		err( __FUNCTION__ ": serial is bad or serial->private is NULL, status=%d", urb->status );
 		return;
 	}
 
 	/* do not resubmit urb if it has any status error */
 	if( urb->status ) {
-		err("%s: nonzero read bulk status: status=%d, port=%d", __FUNCTION__, urb->status, priv->dp_port_num );
+		err( __FUNCTION__ ": nonzero read bulk status: status=%d, port=%d", urb->status, priv->dp_port_num );
 		return;
 	}
 
 	/* handle oob or inb callback, do not resubmit if error */
 	if( priv->dp_port_num
-	== ((struct digi_serial *)(port->serial->private))->ds_oob_port_num ) {
+	== ((digi_serial_t *)(port->serial->private))->ds_oob_port_num ) {
 		if( digi_read_oob_callback( urb ) != 0 )
 			return;
 	} else {
@@ -1794,7 +1853,7 @@ dbg( "digi_read_bulk_callback: TOP" );
 	/* continue read */
 	urb->dev = port->serial->dev;
 	if( (ret=usb_submit_urb(urb)) != 0 ) {
-		err("%s: failed resubmitting urb, ret=%d, port=%d", __FUNCTION__,
+		err( __FUNCTION__ ": failed resubmitting urb, ret=%d, port=%d",
 			ret, priv->dp_port_num );
 	}
 
@@ -1816,7 +1875,7 @@ static int digi_read_inb_callback( struct urb *urb )
 
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct tty_struct *tty = port->tty;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	int opcode = ((unsigned char *)urb->transfer_buffer)[0];
 	int len = ((unsigned char *)urb->transfer_buffer)[1];
 	int status = ((unsigned char *)urb->transfer_buffer)[2];
@@ -1830,12 +1889,12 @@ static int digi_read_inb_callback( struct urb *urb )
 
 	/* do not process callbacks on closed ports */
 	/* but do continue the read chain */
-	if( port->open_count == 0 )
+	if( priv->dp_open_count == 0 )
 		return( 0 );
 
 	/* short/multiple packet check */
 	if( urb->actual_length != len + 2 ) {
-     		err("%s: INCOMPLETE OR MULTIPLE PACKET, urb->status=%d, port=%d, opcode=%d, len=%d, actual_length=%d, status=%d", __FUNCTION__, urb->status, priv->dp_port_num, opcode, len, urb->actual_length, status );
+     		err( __FUNCTION__ ": INCOMPLETE OR MULTIPLE PACKET, urb->status=%d, port=%d, opcode=%d, len=%d, actual_length=%d, status=%d", urb->status, priv->dp_port_num, opcode, len, urb->actual_length, status );
 		return( -1 );
 	}
 
@@ -1904,9 +1963,9 @@ static int digi_read_inb_callback( struct urb *urb )
 	spin_unlock( &priv->dp_port_lock );
 
 	if( opcode == DIGI_CMD_RECEIVE_DISABLE ) {
-		dbg("%s: got RECEIVE_DISABLE", __FUNCTION__ );
+		dbg( __FUNCTION__ ": got RECEIVE_DISABLE" );
 	} else if( opcode != DIGI_CMD_RECEIVE_DATA ) {
-		dbg("%s: unknown opcode: %d", __FUNCTION__, opcode );
+		dbg( __FUNCTION__ ": unknown opcode: %d", opcode );
 	}
 
 	return( throttled ? 1 : 0 );
@@ -1928,7 +1987,7 @@ static int digi_read_oob_callback( struct urb *urb )
 
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 	struct usb_serial *serial = port->serial;
-	struct digi_port *priv = (struct digi_port *)(port->private);
+	digi_port_t *priv = (digi_port_t *)(port->private);
 	int opcode, line, status, val;
 	int i;
 
@@ -1964,7 +2023,7 @@ opcode, line, status, val );
 			if( val & DIGI_READ_INPUT_SIGNALS_CTS ) {
 				priv->dp_modem_signals |= TIOCM_CTS;
 				/* port must be open to use tty struct */
-				if( port->open_count
+				if( priv->dp_open_count
 				&& port->tty->termios->c_cflag & CRTSCTS ) {
 					port->tty->hw_stopped = 0;
 					digi_wakeup_write( port );
@@ -1972,7 +2031,7 @@ opcode, line, status, val );
 			} else {
 				priv->dp_modem_signals &= ~TIOCM_CTS;
 				/* port must be open to use tty struct */
-				if( port->open_count
+				if( priv->dp_open_count
 				&& port->tty->termios->c_cflag & CRTSCTS ) {
 					port->tty->hw_stopped = 1;
 				}

@@ -14,10 +14,10 @@
 #include <linux/init.h>
 #include <linux/bootmem.h>
 
-#include <asm/hardware.h>
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/page.h>
+#include <asm/io.h>
 #include <asm/setup.h>
 
 #include <asm/mach/map.h>
@@ -123,7 +123,6 @@ pgd_t *get_pgd_slow(struct mm_struct *mm)
 no_pte:
 	spin_unlock(&mm->page_table_lock);
 	pmd_free(new_pmd);
-	check_pgt_cache();
 	free_pages((unsigned long)new_pgd, 2);
 	return NULL;
 
@@ -158,7 +157,6 @@ void free_pgd_slow(pgd_t *pgd)
 	pmd_clear(pmd);
 	pte_free(pte);
 	pmd_free(pmd);
-	check_pgt_cache();
 free:
 	free_pages((unsigned long) pgd, 2);
 }
@@ -202,7 +200,7 @@ alloc_init_page(unsigned long virt, unsigned long phys, int domain, int prot)
 	}
 	ptep = pte_offset(pmdp, virt);
 
-	set_pte(ptep, pfn_pte(phys >> PAGE_SHIFT, __pgprot(prot)));
+	set_pte(ptep, mk_pte_phys(phys, __pgprot(prot)));
 }
 
 /*
@@ -226,19 +224,6 @@ static void __init create_mapping(struct map_desc *md)
 	unsigned long virt, length;
 	int prot_sect, prot_pte;
 	long off;
-
-	if (md->prot_read && md->prot_write &&
-	    !md->cacheable && !md->bufferable) {
-		printk(KERN_WARNING "Security risk: creating user "
-		       "accessible mapping for 0x%08lx at 0x%08lx\n",
-		       md->physical, md->virtual);
-	}
-
-	if (md->virtual != vectors_base() && md->virtual < PAGE_OFFSET) {
-		printk(KERN_WARNING "MM: not creating mapping for "
-		       "0x%08lx at 0x%08lx in user region\n",
-		       md->physical, md->virtual);
-	}
 
 	prot_pte = L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY |
 		   (md->prot_read  ? L_PTE_USER       : 0) |
@@ -390,6 +375,8 @@ void __init memtable_init(struct meminfo *mi)
 	init_maps->bufferable = 0;
 
 	create_mapping(init_maps);
+
+	flush_cache_all();
 }
 
 /*

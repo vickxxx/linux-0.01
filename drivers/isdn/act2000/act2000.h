@@ -1,4 +1,4 @@
-/* $Id: act2000.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+/* $Id: act2000.h,v 1.8.6.3 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
@@ -178,19 +178,19 @@ typedef struct act2000_card {
         char regname[35];                /* Name used for request_region     */
 } act2000_card;
 
-static inline void act2000_schedule_tx(act2000_card *card)
+extern __inline__ void act2000_schedule_tx(act2000_card *card)
 {
         queue_task(&card->snd_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);
 }
 
-static inline void act2000_schedule_rx(act2000_card *card)
+extern __inline__ void act2000_schedule_rx(act2000_card *card)
 {
         queue_task(&card->rcv_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);
 }
 
-static inline void act2000_schedule_poll(act2000_card *card)
+extern __inline__ void act2000_schedule_poll(act2000_card *card)
 {
         queue_task(&card->poll_tq, &tq_immediate);
         mark_bh(IMMEDIATE_BH);

@@ -8,21 +8,22 @@
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/videodev.h>
+#include <asm/semaphore.h>
 #include <linux/init.h>
-#include <linux/kdev_t.h>
+
 #include <linux/sound.h>
 #include <linux/soundcard.h>
-
-#include <asm/semaphore.h>
 #include <asm/uaccess.h>
 
-# include "i2c-compat.h"
-# define strlcpy(dest,src,len) strncpy(dest,src,(len)-1)
-# define iminor(inode) minor(inode->i_rdev)
+#include "audiochip.h"
+#include "id.h"
 
 #define DEV_MAX  4
 
+static int debug = 0;
 static int devnr = -1;
+
+MODULE_PARM(debug,"i");
 MODULE_PARM(devnr,"i");
 
 MODULE_AUTHOR("Gerd Knorr");
@@ -86,8 +87,8 @@ static int tvmixer_ioctl(struct inode *inode, struct file *file, unsigned int cm
 	
         if (cmd == SOUND_MIXER_INFO) {
                 mixer_info info;
-                strlcpy(info.id, "tv card", sizeof(info.id));
-                strlcpy(info.name, i2c_clientname(client), sizeof(info.name));
+                strncpy(info.id, "tv card", sizeof(info.id));
+                strncpy(info.name, client->name, sizeof(info.name));
                 info.modify_counter = 42 /* FIXME */;
                 if (copy_to_user((void *)arg, &info, sizeof(info)))
                         return -EFAULT;
@@ -95,8 +96,8 @@ static int tvmixer_ioctl(struct inode *inode, struct file *file, unsigned int cm
         }
         if (cmd == SOUND_OLD_MIXER_INFO) {
                 _old_mixer_info info;
-                strlcpy(info.id, "tv card", sizeof(info.id));
-                strlcpy(info.name, i2c_clientname(client), sizeof(info.name));
+                strncpy(info.id, "tv card", sizeof(info.id));
+                strncpy(info.name, client->name, sizeof(info.name));
                 if (copy_to_user((void *)arg, &info, sizeof(info)))
                         return -EFAULT;
                 return 0;
@@ -134,16 +135,16 @@ static int tvmixer_ioctl(struct inode *inode, struct file *file, unsigned int cm
 	case MIXER_WRITE(SOUND_MIXER_VOLUME):
 		left  = mix_to_v4l(val);
 		right = mix_to_v4l(val >> 8);
-		va.volume  = max(left,right);
-		va.balance = (32768*min(left,right)) / (va.volume ? va.volume : 1);
+		va.volume  = MAX(left,right);
+		va.balance = (32768*MIN(left,right)) / (va.volume ? va.volume : 1);
 		va.balance = (left<right) ? (65535-va.balance) : va.balance;
 		client->driver->command(client,VIDIOCSAUDIO,&va);
 		client->driver->command(client,VIDIOCGAUDIO,&va);
 		/* fall throuth */
 	case MIXER_READ(SOUND_MIXER_VOLUME):
-		left  = (min(65536 - va.balance,32768) *
+		left  = (MIN(65536 - va.balance,32768) *
 			 va.volume) / 32768;
-		right = (min(va.balance,(u16)32768) *
+		right = (MIN(va.balance,32768) *
 			 va.volume) / 32768;
 		ret = v4l_to_mix2(left,right);
 		break;
@@ -176,7 +177,7 @@ static int tvmixer_ioctl(struct inode *inode, struct file *file, unsigned int cm
 
 static int tvmixer_open(struct inode *inode, struct file *file)
 {
-        int i, minor = iminor(inode);
+        int i, minor = MINOR(inode->i_rdev);
         struct TVMIXER *mix = NULL;
 	struct i2c_client *client = NULL;
 
@@ -213,25 +214,21 @@ static int tvmixer_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+
 static struct i2c_driver driver = {
-	.name            = "tv card mixer driver",
-        .id              = I2C_DRIVERID_TVMIXER,
-#ifdef I2C_DF_DUMMY
-	.flags           = I2C_DF_DUMMY,
-#else
-	.flags           = I2C_DF_NOTIFY,
-        .detach_adapter  = tvmixer_adapters,
-#endif
-        .attach_adapter  = tvmixer_adapters,
-        .detach_client   = tvmixer_clients,
+	name:            "tv card mixer driver",
+        id:              I2C_DRIVERID_TVMIXER,
+	flags:           I2C_DF_DUMMY,
+        attach_adapter:  tvmixer_adapters,
+        detach_client:   tvmixer_clients,
 };
 
 static struct file_operations tvmixer_fops = {
-	.owner		= THIS_MODULE,
-	.llseek         = no_llseek,
-	.ioctl          = tvmixer_ioctl,
-	.open           = tvmixer_open,
-	.release        = tvmixer_release,
+	owner:		THIS_MODULE,
+	llseek:         no_llseek,
+	ioctl:          tvmixer_ioctl,
+	open:           tvmixer_open,
+	release:        tvmixer_release,
 };
 
 /* ----------------------------------------------------------------------- */
@@ -240,6 +237,8 @@ static int tvmixer_adapters(struct i2c_adapter *adap)
 {
 	int i;
 
+	if (debug)
+		printk("tvmixer: adapter %s\n",adap->name);
 	for (i=0; i<I2C_CLIENT_MAX; i++) {
 		if (!adap->clients[i])
 			continue;
@@ -253,21 +252,14 @@ static int tvmixer_clients(struct i2c_client *client)
 	struct video_audio va;
 	int i,minor;
 
-#ifdef I2C_ADAP_CLASS_TV_ANALOG
-	if (!(client->adapter->class & I2C_ADAP_CLASS_TV_ANALOG))
-		return -1;
-#else
 	/* TV card ??? */
-	switch (client->adapter->id) {
-	case I2C_ALGO_BIT | I2C_HW_B_BT848:
-	case I2C_ALGO_BIT | I2C_HW_B_RIVA:
-		/* ok, have a look ... */
-		break;
-	default:
-		/* ignore that one */
+	if (client->adapter->id != (I2C_ALGO_BIT | I2C_HW_B_BT848)) {
+		if (debug)
+			printk("tvmixer: %s is not a tv card\n",
+			       client->adapter->name);
 		return -1;
 	}
-#endif
+	printk("tvmixer: debug: %s\n",client->name);
 
 	/* unregister ?? */
 	for (i = 0; i < DEV_MAX; i++) {
@@ -276,8 +268,7 @@ static int tvmixer_clients(struct i2c_client *client)
 			unregister_sound_mixer(devices[i].minor);
 			devices[i].dev = NULL;
 			devices[i].minor = -1;
-			printk("tvmixer: %s unregistered (#1)\n",
-			       i2c_clientname(client));
+			printk("tvmixer: %s unregistered (#1)\n",client->name);
 			return 0;
 		}
 	}
@@ -292,13 +283,25 @@ static int tvmixer_clients(struct i2c_client *client)
 	}
 
 	/* audio chip with mixer ??? */
-	if (NULL == client->driver->command)
+	if (NULL == client->driver->command) {
+		if (debug)
+			printk("tvmixer: %s: driver->command is NULL\n",
+			       client->driver->name);
 		return -1;
+	}
 	memset(&va,0,sizeof(va));
-	if (0 != client->driver->command(client,VIDIOCGAUDIO,&va))
+	if (0 != client->driver->command(client,VIDIOCGAUDIO,&va)) {
+		if (debug)
+			printk("tvmixer: %s: VIDIOCGAUDIO failed\n",
+			       client->name);
 		return -1;
-	if (0 == (va.flags & VIDEO_AUDIO_VOLUME))
+	}
+	if (0 == (va.flags & VIDEO_AUDIO_VOLUME)) {
+		if (debug)
+			printk("tvmixer: %s: has no volume control\n",
+			       client->name);
 		return -1;
+	}
 
 	/* everything is fine, register */
 	if ((minor = register_sound_mixer(&tvmixer_fops,devnr)) < 0) {
@@ -317,7 +320,7 @@ static int tvmixer_clients(struct i2c_client *client)
 
 /* ----------------------------------------------------------------------- */
 
-static int tvmixer_init_module(void)
+int tvmixer_init_module(void)
 {
 	int i;
 	
@@ -327,7 +330,7 @@ static int tvmixer_init_module(void)
 	return 0;
 }
 
-static void tvmixer_cleanup_module(void)
+void tvmixer_cleanup_module(void)
 {
 	int i;
 	
@@ -336,7 +339,7 @@ static void tvmixer_cleanup_module(void)
 		if (devices[i].minor != -1) {
 			unregister_sound_mixer(devices[i].minor);
 			printk("tvmixer: %s unregistered (#2)\n",
-			       i2c_clientname(devices[i].dev));
+			       devices[i].dev->name);
 		}
 	}
 }

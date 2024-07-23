@@ -16,12 +16,8 @@
  *
  */
 
-#define DRV_NAME		"3c527"
-#define DRV_VERSION		"0.6a"
-#define DRV_RELDATE		"2001/11/17"
-
 static const char *version =
-DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Richard Proctor (rnp@netlink.co.nz)\n";
+	"3c527.c:v0.6 2001/03/03 Richard Proctor (rnp@netlink.co.nz)\n";
 
 /**
  * DOC: Traps for the unwary
@@ -94,9 +90,6 @@ DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Richard Proctor (rnp@netlink.co.nz
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -111,13 +104,11 @@ DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Richard Proctor (rnp@netlink.co.nz
 
 #include "3c527.h"
 
-MODULE_LICENSE("GPL");
-
 /*
  * The name of the card. Is used for messages and in the requests for
  * io regions, irqs and dma channels
  */
-static const char* cardname = DRV_NAME;
+static const char* cardname = "3c527";
 
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifndef NET_DEBUG
@@ -222,7 +213,6 @@ static int	mc32_close(struct net_device *dev);
 static struct	net_device_stats *mc32_get_stats(struct net_device *dev);
 static void	mc32_set_multicast_list(struct net_device *dev);
 static void	mc32_reset_multicast_list(struct net_device *dev);
-static struct ethtool_ops netdev_ethtool_ops;
 
 /**
  * mc32_probe 	-	Search for supported boards
@@ -512,7 +502,7 @@ static int __init mc32_probe1(struct net_device *dev, int slot)
 	dev->set_multicast_list = mc32_set_multicast_list;
 	dev->tx_timeout		= mc32_timeout;
 	dev->watchdog_timeo	= HZ*5;	/* Board does all the work */
-	dev->ethtool_ops	= &netdev_ethtool_ops;
+
 	
 	lp->xceiver_state = HALTED; 
 	
@@ -1085,16 +1075,9 @@ static int mc32_send_packet(struct sk_buff *skb, struct net_device *dev)
 	/* NP is the buffer we will be loading */
 	np=lp->tx_ring[lp->tx_ring_head].p; 
 
-   	if(skb->len < ETH_ZLEN)
-   	{
-   		skb = skb_padto(skb, ETH_ZLEN);
-   		if(skb == NULL)
-   			goto out;
-   	}
-
 	/* We will need this to flush the buffer out */
 	lp->tx_ring[lp->tx_ring_head].skb=skb;
-
+   	   
 	np->length = (skb->len < ETH_ZLEN) ? ETH_ZLEN : skb->len; 
 			
 	np->data	= virt_to_bus(skb->data);
@@ -1103,7 +1086,7 @@ static int mc32_send_packet(struct sk_buff *skb, struct net_device *dev)
 	wmb();
 		
 	p->control     &= ~CONTROL_EOL;     /* Clear EOL on p */ 
-out:	
+	
 	restore_flags(flags);
 
 	netif_wake_queue(dev);
@@ -1660,30 +1643,6 @@ static void mc32_reset_multicast_list(struct net_device *dev)
 {
 	do_mc32_set_multicast_list(dev,1);
 }
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "MCA 0x%lx", dev->base_addr);
-}
-
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return mc32_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	mc32_debug = level;
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-};
 
 #ifdef MODULE
 

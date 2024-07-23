@@ -43,23 +43,23 @@ inet_peer_minttl - INTEGER
 	Minimum time-to-live of entries.  Should be enough to cover fragment
 	time-to-live on the reassembling side.  This minimum time-to-live  is
 	guaranteed if the pool size is less than inet_peer_threshold.
-	Measured in jiffies(1).
+	Measured in jiffies.
 
 inet_peer_maxttl - INTEGER
 	Maximum time-to-live of entries.  Unused entries will expire after
 	this period of time if there is no memory pressure on the pool (i.e.
 	when the number of entries in the pool is very small).
-	Measured in jiffies(1).
+	Measured in jiffies.
 
 inet_peer_gc_mintime - INTEGER
 	Minimum interval between garbage collection passes.  This interval is
 	in effect under high memory pressure on the pool.
-	Measured in jiffies(1).
+	Measured in jiffies.
 
 inet_peer_gc_maxtime - INTEGER
 	Minimum interval between garbage collection passes.  This interval is
 	in effect under low (or absent) memory pressure on the pool.
-	Measured in jiffies(1).
+	Measured in jiffies.
 
 TCP variables: 
 
@@ -81,7 +81,7 @@ tcp_keepalive_probes - INTEGER
 	How many keepalive probes TCP sends out, until it decides that the
 	connection is broken. Default value: 9.
 
-tcp_keepalive_intvl - INTEGER
+tcp_keepalive_interval - INTEGER
 	How frequently the probes are send out. Multiplied by
 	tcp_keepalive_probes it is time to kill not responding connection,
 	after probes started. Default value: 75sec i.e. connection
@@ -126,13 +126,7 @@ tcp_max_tw_buckets - INTEGER
 	if network conditions require more than default value.
 
 tcp_tw_recycle - BOOLEAN
-	Enable fast recycling TIME-WAIT sockets. Default value is 0.
-	It should not be changed without advice/request of technical
-	experts.
-
-tcp_tw_reuse - BOOLEAN
-	Allow to reuse TIME-WAIT sockets for new connections when it is
-	safe from protocol viewpoint. Default value is 0.
+	Enable fast recycling TIME-WAIT sockets. Default value is 1.
 	It should not be changed without advice/request of technical
 	experts.
 
@@ -188,7 +182,10 @@ tcp_max_syn_backlog - INTEGER
 	still did not receive an acknowledgement from connecting client.
 	Default value is 1024 for systems with more than 128Mb of memory,
 	and 128 for low memory machines. If server suffers of overload,
-	try to increase this number.
+	try to increase this number. Warning! If you make it greater
+	than 1024, it would be better to change TCP_SYNQ_HSIZE in
+	include/net/tcp.h to keep TCP_SYNQ_HSIZE*16<=tcp_max_syn_backlog
+	and to recompile kernel.
 
 tcp_window_scaling - BOOLEAN
 	Enable window scaling as defined in RFC1323.
@@ -281,52 +278,6 @@ tcp_rfc1337 - BOOLEAN
 	asassination.	
 	Default: 0
 
-tcp_low_latency - BOOLEAN
-	If set, the TCP stack makes decisions that prefer lower
-	latency as opposed to higher throughput.  By default, this
-	option is not set meaning that higher throughput is preferred.
-	An example of an application where this default should be
-	changed would be a Beowulf compute cluster.
-	Default: 0
-
-tcp_vegas_cong_avoid - BOOLEAN
-	Enable TCP Vegas congestion avoidance algorithm.
-	TCP Vegas is a sender-side only change to TCP that anticipates
-	the onset of congestion by estimating the bandwidth. TCP Vegas
-	adjusts the sending rate by modifying the congestion
-	window. TCP Vegas should provide less packet loss, but it is
-	not as aggressive as TCP Reno.
-	Default:0
-
-tcp_bic - BOOLEAN
-	Enable BIC TCP congestion control algorithm.
-	BIC-TCP is a sender-side only change that ensures a linear RTT
-	fairness under large windows while offering both scalability and
-	bounded TCP-friendliness. The protocol combines two schemes
-	called additive increase and binary search increase. When the
-	congestion window is large, additive increase with a large
-	increment ensures linear RTT fairness as well as good
-	scalability. Under small congestion windows, binary search
-	increase provides TCP friendliness.
-	Default: 0
-
-tcp_bic_low_window - INTEGER
-	Sets the threshold window (in packets) where BIC TCP starts to
-	adjust the congestion window. Below this threshold BIC TCP behaves
-	the same as the default TCP Reno. 
-	Default: 14
-
-tcp_bic_fast_convergence - BOOLEAN
-	Forces BIC TCP to more quickly respond to changes in congestion
-	window. Allows two flows sharing the same connection to converge
-	more rapidly.
-	Default: 1
-
-tcp_default_win_scale - INTEGER
-	Sets the minimum window scale TCP will negotiate for on all
-	conections.
-	Default: 7
-
 ip_local_port_range - 2 INTEGERS
 	Defines the local port range that is used by TCP and UDP to
 	choose the local port. The first number is the first, the 
@@ -358,65 +309,38 @@ icmp_echo_ignore_broadcasts - BOOLEAN
 	ICMP ECHO requests sent to it or just those to broadcast/multicast
 	addresses, respectively.
 
-icmp_ratelimit - INTEGER
-	Limit the maximal rates for sending ICMP packets whose type matches
-	icmp_ratemask (see below) to specific targets.
+icmp_destunreach_rate - INTEGER
+icmp_paramprob_rate - INTEGER
+icmp_timeexceed_rate - INTEGER
+icmp_echoreply_rate - INTEGER (not enabled per default)
+	Limit the maximal rates for sending ICMP packets to specific targets.
 	0 to disable any limiting, otherwise the maximal rate in jiffies(1)
-	Default: 100
-
-icmp_ratemask - INTEGER
-	Mask made of ICMP types for which rates are being limited.
-	Significant bits: IHGFEDCBA9876543210
-	Default mask:     0000001100000011000 (6168)
-
-	Bit definitions (see include/linux/icmp.h):
-		0 Echo Reply
-		3 Destination Unreachable *
-		4 Source Quench *
-		5 Redirect
-		8 Echo Request
-		B Time Exceeded *
-		C Parameter Problem *
-		D Timestamp Request
-		E Timestamp Reply
-		F Info Request
-		G Info Reply
-		H Address Mask Request
-		I Address Mask Reply
-
-	* These are rate limited by default (see default mask above)
+	See the source for more information.
 
 icmp_ignore_bogus_error_responses - BOOLEAN
-	Some routers violate RFC1122 by sending bogus responses to broadcast
+	Some routers violate RFC 1122 by sending bogus responses to broadcast
 	frames.  Such violations are normally logged via a kernel warning.
 	If this is set to TRUE, the kernel will not give such warnings, which
 	will avoid log file clutter.
 	Default: FALSE
 
+(1) Jiffie: internal timeunit for the kernel. On the i386 1/100s, on the
+Alpha 1/1024s. See the HZ define in /usr/include/asm/param.h for the exact
+value on your system. 
+
 igmp_max_memberships - INTEGER
 	Change the maximum number of multicast groups we can subscribe to.
 	Default: 20
 
-conf/interface/*  changes special settings per interface (where "interface" is 
-		  the name of your network interface)
-conf/all/*	  is special, changes the settings for all interfaces
-
+conf/interface/*: 
+conf/all/* is special and changes the settings for all interfaces.
+	Change special settings per interface.
 
 log_martians - BOOLEAN
 	Log packets with impossible addresses to kernel log.
-	log_martians for the interface will be enabled if at least one of
-	conf/{all,interface}/log_martians is set to TRUE,
-	it will be disabled otherwise
 
 accept_redirects - BOOLEAN
 	Accept ICMP redirect messages.
-	accept_redirects for the interface will be enabled if:
-	- both conf/{all,interface}/accept_redirects are TRUE in the case forwarding
-	  for the interface is enabled
-	or
-	- at least one of conf/{all,interface}/accept_redirects is TRUE in the case
-	  forwarding for the interface is disabled
-	accept_redirects for the interface will be disabled otherwise
 	default TRUE (host)
 		FALSE (router)
 
@@ -426,62 +350,33 @@ forwarding - BOOLEAN
 mc_forwarding - BOOLEAN
 	Do multicast routing. The kernel needs to be compiled with CONFIG_MROUTE
 	and a multicast routing daemon is required.
-	conf/all/mc_forwarding must also be set to TRUE to enable multicast routing
-	for the interface
-
-medium_id - INTEGER
-	Integer value used to differentiate the devices by the medium they
-	are attached to. Two devices can have different id values when
-	the broadcast packets are received only on one of them.
-	The default value 0 means that the device is the only interface
-	to its medium, value of -1 means that medium is not known.
-	
-	Currently, it is used to change the proxy_arp behavior:
-	the proxy_arp feature is enabled for packets forwarded between
-	two devices attached to different media.
 
 proxy_arp - BOOLEAN
 	Do proxy arp.
-	proxy_arp for the interface will be enabled if at least one of
-	conf/{all,interface}/proxy_arp is set to TRUE,
-	it will be disabled otherwise
 
 shared_media - BOOLEAN
 	Send(router) or accept(host) RFC1620 shared media redirects.
 	Overrides ip_secure_redirects.
-	shared_media for the interface will be enabled if at least one of
-	conf/{all,interface}/shared_media is set to TRUE,
-	it will be disabled otherwise
 	default TRUE
 
 secure_redirects - BOOLEAN
 	Accept ICMP redirect messages only for gateways,
 	listed in default gateway list.
-	secure_redirects for the interface will be enabled if at least one of
-	conf/{all,interface}/secure_redirects is set to TRUE,
-	it will be disabled otherwise
 	default TRUE
 
 send_redirects - BOOLEAN
-	Send redirects, if router.
-	send_redirects for the interface will be enabled if at least one of
-	conf/{all,interface}/send_redirects is set to TRUE,
-	it will be disabled otherwise
-	Default: TRUE
+	Send redirects, if router. Default: TRUE
 
 bootp_relay - BOOLEAN
 	Accept packets with source address 0.b.c.d destined
 	not to this host as local ones. It is supposed, that
 	BOOTP relay daemon will catch and forward such packets.
-	conf/all/bootp_relay must also be set to TRUE to enable BOOTP relay
-	for the interface
+
 	default FALSE
 	Not Implemented Yet.
 
 accept_source_route - BOOLEAN
 	Accept packets with SRR option.
-	conf/all/accept_source_route must also be set to TRUE to accept packets
-	with SRR option on the interface
 	default TRUE (router)
 		FALSE (host)
 
@@ -492,89 +387,10 @@ rp_filter - BOOLEAN
 	    networks running a slow unreliable protocol (sort of RIP),
 	    or using static routes.
 
-	0 - No source validation.
-
-	conf/all/rp_filter must also be set to TRUE to do source validation
-	on the interface
+	0 - No source validation. 
 
 	Default value is 0. Note that some distributions enable it
-	in startup scripts.
-
-arp_filter - BOOLEAN
-	1 - Allows you to have multiple network interfaces on the same
-	subnet, and have the ARPs for each interface be answered
-	based on whether or not the kernel would route a packet from
-	the ARP'd IP out that interface (therefore you must use source
-	based routing for this to work). In other words it allows control
-	of which cards (usually 1) will respond to an arp request.
-
-	0 - (default) The kernel can respond to arp requests with addresses
-	from other interfaces. This may seem wrong but it usually makes
-	sense, because it increases the chance of successful communication.
-	IP addresses are owned by the complete host on Linux, not by
-	particular interfaces. Only for more complex setups like load-
-	balancing, does this behaviour cause problems.
-
-	arp_filter for the interface will be enabled if at least one of
-	conf/{all,interface}/arp_filter is set to TRUE,
-	it will be disabled otherwise
-
-arp_announce - INTEGER
-	Define different restriction levels for announcing the local
-	source IP address from IP packets in ARP requests sent on
-	interface:
-	0 - (default) Use any local address, configured on any interface
-	1 - Try to avoid local addresses that are not in the target's
-	subnet for this interface. This mode is useful when target
-	hosts reachable via this interface require the source IP
-	address in ARP requests to be part of their logical network
-	configured on the receiving interface. When we generate the
-	request we will check all our subnets that include the
-	target IP and will preserve the source address if it is from
-	such subnet. If there is no such subnet we select source
-	address according to the rules for level 2.
-	2 - Always use the best local address for this target.
-	In this mode we ignore the source address in the IP packet
-	and try to select local address that we prefer for talks with
-	the target host. Such local address is selected by looking
-	for primary IP addresses on all our subnets on the outgoing
-	interface that include the target IP address. If no suitable
-	local address is found we select the first local address
-	we have on the outgoing interface or on all other interfaces,
-	with the hope we will receive reply for our request and
-	even sometimes no matter the source IP address we announce.
-
-	The max value from conf/{all,interface}/arp_announce is used.
-
-	Increasing the restriction level gives more chance for
-	receiving answer from the resolved target while decreasing
-	the level announces more valid sender's information.
-
-arp_ignore - INTEGER
-	Define different modes for sending replies in response to
-	received ARP requests that resolve local target IP addresses:
-	0 - (default): reply for any local target IP address, configured
-	on any interface
-	1 - reply only if the target IP address is local address
-	configured on the incoming interface
-	2 - reply only if the target IP address is local address
-	configured on the incoming interface and both with the
-	sender's IP address are part from same subnet on this interface
-	3 - do not reply for local addresses configured with scope host,
-	only resolutions for global and link addresses are replied
-	4-7 - reserved
-	8 - do not reply for all local addresses
-
-	The max value from conf/{all,interface}/arp_ignore is used
-	when ARP request is received on the {interface}
-
-tag - INTEGER
-	Allows you to write a number, which can be used as required.
-	Default value is 0.
-
-(1) Jiffie: internal timeunit for the kernel. On the i386 1/100s, on the
-Alpha 1/1024s. See the HZ define in /usr/include/asm/param.h for the exact
-value on your system. 
+	in startip scripts.
 
 Alexey Kuznetsov.
 kuznet@ms2.inr.ac.ru
@@ -582,8 +398,8 @@ kuznet@ms2.inr.ac.ru
 Updated by:
 Andi Kleen
 ak@muc.de
-Nicolas Delon
-delon.nicolas@wanadoo.fr
+
+
 
 
 
@@ -592,15 +408,6 @@ delon.nicolas@wanadoo.fr
 
 IPv6 has no global variables such as tcp_*.  tcp_* settings under ipv4/ also
 apply to IPv6 [XXX?].
-
-bindv6only - BOOLEAN
-	Default value for IPV6_V6ONLY socket option,
-	which restricts use of the IPv6 socket to IPv6 communication 
-	only.
-		TRUE: disable IPv4-mapped address feature
-		FALSE: enable IPv4-mapped address feature
-
-	Default: FALSE (as specified in RFC2553bis)
 
 conf/default/*:
 	Change the interface-specific default settings.
@@ -641,11 +448,9 @@ accept_redirects - BOOLEAN
 			    disabled if local forwarding is enabled.
 
 autoconf - BOOLEAN
-	Autoconfigure addresses using Prefix Information in Router 
-	Advertisements.
+	Configure link-local addresses using L2 hardware addresses.
 
-	Functional default: enabled if accept_ra is enabled.
-			    disabled if accept_ra is disabled.
+	Default: TRUE
 
 dad_transmits - INTEGER
 	The amount of Duplicate Address Detection probes to send.
@@ -702,14 +507,8 @@ router_solicitations - INTEGER
 	routers are present.
 	Default: 3
 
-icmp/*:
-ratelimit - INTEGER
-	Limit the maximal rates for sending ICMPv6 packets.
-	0 to disable any limiting, otherwise the maximal rate in jiffies(1)
-	Default: 100
-
 IPv6 Update by:
-Pekka Savola <pekkas@netcore.fi>
-YOSHIFUJI Hideaki / USAGI Project <yoshfuji@linux-ipv6.org>
+Pekka Savola
+pekkas@netcore.fi
 
-$Id: ip-sysctl.txt,v 1.19.2.1 2001/12/13 08:59:27 davem Exp $
+$Id: ip-sysctl.txt,v 1.19 2001/05/16 17:11:04 davem Exp $

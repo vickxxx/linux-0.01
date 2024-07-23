@@ -6,7 +6,6 @@
 #include <linux/spinlock.h>
 #include <asm/scatterlist.h>
 #include <asm/machvec.h>
-#include <asm/io.h>
 
 /*
  * The following structure is used to manage multiple PCI busses.
@@ -43,15 +42,12 @@ struct pci_controller {
 
 	struct pci_iommu_arena *sg_pci;
 	struct pci_iommu_arena *sg_isa;
-
-	void *sysdata;
 };
 
 /* Override the logic in pci_scan_bus for skipping already-configured
    bus numbers.  */
 
 #define pcibios_assign_all_busses()	1
-#define pcibios_scan_all_fns()		0
 
 #define PCIBIOS_MIN_IO		alpha_mv.min_io_address
 #define PCIBIOS_MIN_MEM		alpha_mv.min_mem_address
@@ -104,20 +100,6 @@ extern dma_addr_t pci_map_page(struct pci_dev *, struct page *,
 
 extern void pci_unmap_single(struct pci_dev *, dma_addr_t, size_t, int);
 extern void pci_unmap_page(struct pci_dev *, dma_addr_t, size_t, int);
-
-/* pci_unmap_{single,page} is not a nop, thus... */
-#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
-	dma_addr_t ADDR_NAME;
-#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
-	__u32 LEN_NAME;
-#define pci_unmap_addr(PTR, ADDR_NAME)			\
-	((PTR)->ADDR_NAME)
-#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
-	(((PTR)->ADDR_NAME) = (VAL))
-#define pci_unmap_len(PTR, LEN_NAME)			\
-	((PTR)->LEN_NAME)
-#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
-	(((PTR)->LEN_NAME) = (VAL))
 
 /* Map a set of buffers described by scatterlist in streaming mode for
    PCI DMA.  This is the scather-gather version of the above

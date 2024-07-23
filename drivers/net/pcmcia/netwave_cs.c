@@ -37,9 +37,6 @@
 /* To have statistics (just packets sent) define this */
 #undef NETWAVE_STATS
 
-#define DRV_NAME	"netwave_cs"
-#define DRV_VERSION	"0.3.0"
-
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -54,9 +51,6 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -169,7 +163,7 @@ static int pc_debug = PCMCIA_DEBUG;
 MODULE_PARM(pc_debug, "i");
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-DRV_NAME ".c " DRV_VERSION " Thu Jul 17 14:36:02 1997 (John Markus Bjørndalen)\n";
+"netwave_cs.c 0.3.0 Thu Jul 17 14:36:02 1997 (John Markus Bjørndalen)\n";
 #else
 #define DEBUG(n, args...)
 #endif
@@ -205,8 +199,6 @@ MODULE_PARM(scramble_key, "i");
 MODULE_PARM(mem_speed, "i");
 MODULE_PARM(irq_mask, "i");
 MODULE_PARM(irq_list, "1-4i");
-
-MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
@@ -246,8 +238,6 @@ static struct net_device_stats *netwave_get_stats(struct net_device *dev);
 static struct iw_statistics* netwave_get_wireless_stats(struct net_device *dev);
 #endif
 static int netwave_ioctl(struct net_device *, struct ifreq *, int);
-
-static struct ethtool_ops netdev_ethtool_ops;
 
 static void set_multicast_list(struct net_device *dev);
 
@@ -495,7 +485,6 @@ static dev_link_t *netwave_attach(void)
     dev->get_wireless_stats = &netwave_get_wireless_stats;
 #endif
     dev->do_ioctl = &netwave_ioctl;
-    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     dev->tx_timeout = &netwave_watchdog;
     dev->watchdog_timeo = TX_TIMEOUT;
@@ -605,34 +594,6 @@ static void netwave_flush_stale_links(void)
 	    netwave_detach(link);
     }
 } /* netwave_flush_stale_links */
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
-}
-
-#ifdef PCMCIA_DEBUG
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return pc_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	pc_debug = level;
-}
-#endif /* PCMCIA_DEBUG */
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-#ifdef PCMCIA_DEBUG
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-#endif /* PCMCIA_DEBUG */
-};
 
 /*
  * Function netwave_ioctl (dev, rq, cmd)
@@ -1636,3 +1597,4 @@ static void set_multicast_list(struct net_device *dev)
     writeb(rcvMode, ramBase + NETWAVE_EREG_CB + 1);
     writeb(NETWAVE_CMD_EOC, ramBase + NETWAVE_EREG_CB + 2);
 }
+MODULE_LICENSE("GPL");

@@ -37,7 +37,7 @@ ENTRY(ia32_clone)
 	mov loc1=r16				// save ar.pfs across do_fork
 	.body
 	zxt4 out1=in1				// newsp
-	mov out3=16				// stacksize (compensates for 16-byte scratch area)
+	mov out3=0				// stacksize
 	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// out2 = &regs
 	zxt4 out0=in0				// out0 = clone_flags
 	br.call.sptk.many rp=do_fork
@@ -87,19 +87,12 @@ END(sys32_sigsuspend)
 
 GLOBAL_ENTRY(ia32_ret_from_clone)
 	PT_REGS_UNWIND_INFO(0)
-{	/*
-	 * Some versions of gas generate bad unwind info if the first instruction of a
-	 * procedure doesn't go into the first slot of a bundle.  This is a workaround.
-	 */
-	nop.m 0
-	nop.i 0
 	/*
 	 * We need to call schedule_tail() to complete the scheduling process.
 	 * Called by ia64_switch_to after do_fork()->copy_thread().  r8 contains the
 	 * address of the previously executing task.
 	 */
 	br.call.sptk.many rp=ia64_invoke_schedule_tail
-}
 .ret1:	adds r2=IA64_TASK_PTRACE_OFFSET,r13
 	;;
 	ld8 r2=[r2]
@@ -138,19 +131,6 @@ GLOBAL_ENTRY(ia32_trace_syscall)
 	;;
 	st8 [r2]=r3				// initialize return code to -ENOSYS
 	br.call.sptk.few rp=invoke_syscall_trace // give parent a chance to catch syscall args
-	// Need to reload arguments (they may be changed by the tracing process)
-	adds r2=IA64_PT_REGS_R9_OFFSET+16,sp	// r2 = &pt_regs.r9
-	adds r3=IA64_PT_REGS_R13_OFFSET+16,sp	// r3 = &pt_regs.r13
-	;;
-	ld4 r33=[r2],8				// r9 == ecx
-	ld4 r37=[r3],16				// r13 == ebp
-	;;
-	ld4 r34=[r2],8				// r10 == edx
-	ld4 r36=[r3],8				// r15 == edi
-	;;
-	ld4 r32=[r2],8				// r11 == ebx
-	ld4 r35=[r3],8				// r14 == esi
-	;;
 .ret2:	br.call.sptk.few rp=b6			// do the syscall
 .ia32_strace_check_retval:
 	cmp.lt p6,p0=r8,r0			// syscall failed?
@@ -200,7 +180,7 @@ ia32_syscall_table:
 	data8 sys32_fork
 	data8 sys_read
 	data8 sys_write
-	data8 sys32_open	  /* 5 */
+	data8 sys_open		  /* 5 */
 	data8 sys_close
 	data8 sys32_waitpid
 	data8 sys_creat
@@ -240,7 +220,7 @@ ia32_syscall_table:
 	data8 sys32_pipe
 	data8 sys32_times
 	data8 sys32_ni_syscall	  /* old prof syscall holder */
-	data8 sys32_brk		  /* 45 */
+	data8 sys_brk		  /* 45 */
 	data8 sys_setgid	/* 16-bit version */
 	data8 sys_getgid	/* 16-bit version */
 	data8 sys32_signal

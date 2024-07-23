@@ -54,7 +54,7 @@
 
 
 /* TEA5757 pin mappings */
-static const int clk = 1, data = 2, wren = 4, mo_st = 8, power = 16 ;
+const int clk = 1, data = 2, wren = 4, mo_st = 8, power = 16 ;
 
 static int radio_nr = -1;
 MODULE_PARM(radio_nr, "i");
@@ -376,7 +376,7 @@ static struct pci_driver maxiradio_driver = {
 	name:		"radio-maxiradio",
 	id_table:	maxiradio_pci_tbl,
 	probe:		maxiradio_init_one,
-	remove:		__devexit_p(maxiradio_remove_one),
+	remove:		maxiradio_remove_one,
 };
 
 int __init maxiradio_radio_init(void)

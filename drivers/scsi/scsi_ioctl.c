@@ -279,7 +279,6 @@ int scsi_ioctl_send_command(Scsi_Device * dev, Scsi_Ioctl_Command * sic)
 		cmd[1] = (cmd[1] & 0x1f) | (dev->lun << 5);
 
 	switch (opcode) {
-	case SEND_DIAGNOSTIC:
 	case FORMAT_UNIT:
 		timeout = FORMAT_UNIT_TIMEOUT;
 		retries = 1;
@@ -378,12 +377,9 @@ static int
 scsi_ioctl_get_pci(Scsi_Device * dev, void *arg)
 {
 
-        if (!dev->host->pci_dev)
-        	return -ENXIO;
-        if(copy_to_user(arg, dev->host->pci_dev->slot_name,
-                            sizeof(dev->host->pci_dev->slot_name)))
-		return -EFAULT;
-	return 0;
+        if (!dev->host->pci_dev) return -ENXIO;
+        return copy_to_user(arg, dev->host->pci_dev->slot_name,
+                            sizeof(dev->host->pci_dev->slot_name));
 }
 
 

@@ -3,7 +3,7 @@
                              -------------------
     begin                : Thu Sep 7 2000
     copyright            : (C) 2000 by Adaptec
-    email                : aacraid@adaptec.com
+    email                : deanna_bonds@adaptec.com
 
     			   July 30, 2001 First version being submitted
 			   for inclusion in the kernel.  V2.4
@@ -85,7 +85,7 @@ static dpt_sig_S DPTI_sig = {
 #elif defined(__alpha__)
 	PROC_ALPHA ,
 #else
-	(-1),(-1)
+	(-1),
 #endif
 	 FT_HBADRVR, 0, OEM_DPT, OS_LINUX, CAP_OVERLAP, DEV_ALL,
 	ADF_ALL_SC5, 0, 0, DPT_VERSION, DPT_REVISION, DPT_SUBREVISION,
@@ -109,6 +109,10 @@ static int sys_tbl_len = 0;
 static adpt_hba* hbas[DPTI_MAX_HBA];
 static adpt_hba* hba_chain = NULL;
 static int hba_count = 0;
+
+// Debug flags to be put into the HBA flags field when initialized
+// Make sure to enable DEBUG_PRINT for these flags to work
+static unsigned long DebugFlags = HBA_FLAGS_DBG_SCAN_B | HBA_FLAGS_DBG_FLAGS_MASK;
 
 static struct file_operations adpt_fops = {
 	ioctl: adpt_ioctl,
@@ -434,7 +438,7 @@ static int adpt_queue(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 			cmd->scsi_done(cmd);
 			return 0;
 		}
-		cmd->device->hostdata = pDev;
+		(struct adpt_device*)(cmd->device->hostdata) = pDev;
 	}
 	pDev->pScsi_dev = cmd->device;
 
@@ -807,7 +811,7 @@ static int adpt_hba_reset(adpt_hba* pHba)
 static void adpt_i2o_sys_shutdown(void)
 {
 	adpt_hba *pHba, *pNext;
-	struct adpt_i2o_post_wait_data *p1, *old;
+	struct adpt_i2o_post_wait_data *p1, *p2;
 
 	 printk(KERN_INFO"Shutting down Adaptec I2O controllers.\n");
 	 printk(KERN_INFO"   This could take a few minutes if there are many devices attached\n");
@@ -821,14 +825,13 @@ static void adpt_i2o_sys_shutdown(void)
 	}
 
 	/* Remove any timedout entries from the wait queue.  */
+	p2 = NULL;
 //	spin_lock_irqsave(&adpt_post_wait_lock, flags);
 	/* Nothing should be outstanding at this point so just
 	 * free them 
 	 */
-	for(p1 = adpt_post_wait_queue; p1;) {
-		old = p1;
-		p1 = p1->next;
-		kfree(old);
+	for(p1 = adpt_post_wait_queue; p1; p2 = p1, p1 = p2->next) {
+		kfree(p1);
 	}
 //	spin_unlock_irqrestore(&adpt_post_wait_lock, flags);
 	adpt_post_wait_queue = 0;
@@ -1138,8 +1141,7 @@ static int adpt_i2o_post_wait(adpt_hba* pHba, u32* msg, int len, int timeout)
        // to support async LCT get
 	wait_data->next = adpt_post_wait_queue;
 	adpt_post_wait_queue = wait_data;
-	adpt_post_wait_id++;
-	adpt_post_wait_id = (adpt_post_wait_id & 0x7fff);
+	adpt_post_wait_id = (++adpt_post_wait_id & 0x7fff);
 	wait_data->id =  adpt_post_wait_id;
 	spin_unlock_irqrestore(&adpt_post_wait_lock, flags);
 
@@ -1319,9 +1321,7 @@ static s32 adpt_i2o_reset_hba(adpt_hba* pHba)
 	while(*status == 0){
 		if(time_after(jiffies,timeout)){
 			printk(KERN_WARNING"%s: IOP Reset Timeout\n",pHba->name);
-			/* We loose 4 bytes of "status" here, but we cannot
-			   free these because controller may awake and corrupt
-			   those bytes at any time */
+			kfree(status);
 			return -ETIMEDOUT;
 		}
 		rmb();
@@ -1339,9 +1339,6 @@ static s32 adpt_i2o_reset_hba(adpt_hba* pHba)
 			}
 			if(time_after(jiffies,timeout)){
 				printk(KERN_ERR "%s:Timeout waiting for IOP Reset.\n",pHba->name);
-			/* We loose 4 bytes of "status" here, but we cannot
-			   free these because controller may awake and corrupt
-			   those bytes at any time */
 				return -ETIMEDOUT;
 			}
 		} while (m == EMPTY_QUEUE);
@@ -1504,7 +1501,7 @@ static int adpt_i2o_parse_lct(adpt_hba* pHba)
 							pDev->next_lun; pDev = pDev->next_lun){
 					}
 					pDev->next_lun = kmalloc(sizeof(struct adpt_device),GFP_KERNEL);
-					if(pDev->next_lun == NULL) {
+					if(pDev == NULL) {
 						return -ENOMEM;
 					}
 					memset(pDev->next_lun,0,sizeof(struct adpt_device));
@@ -2195,7 +2192,7 @@ static s32 adpt_scsi_register(adpt_hba* pHba,Scsi_Host_Template * sht)
 		printk ("%s: scsi_register returned NULL\n",pHba->name);
 		return -1;
 	}
-	host->hostdata[0] = (unsigned long)pHba;
+	(adpt_hba*)(host->hostdata[0]) = pHba;
 	pHba->host = host;
 
 	host->irq = pHba->pDev->irq;;
@@ -2566,7 +2563,7 @@ static int adpt_i2o_activate_hba(adpt_hba* pHba)
 
 	if(pHba->initialized ) {
 		if (adpt_i2o_status_get(pHba) < 0) {
-			if((rcode = adpt_i2o_reset_hba(pHba)) != 0){
+			if((rcode = adpt_i2o_reset_hba(pHba) != 0)){
 				printk(KERN_WARNING"%s: Could NOT reset.\n", pHba->name);
 				return rcode;
 			}
@@ -2592,7 +2589,7 @@ static int adpt_i2o_activate_hba(adpt_hba* pHba)
 			}
 		}
 	} else {
-		if((rcode = adpt_i2o_reset_hba(pHba)) != 0){
+		if((rcode = adpt_i2o_reset_hba(pHba) != 0)){
 			printk(KERN_WARNING"%s: Could NOT reset.\n", pHba->name);
 			return rcode;
 		}

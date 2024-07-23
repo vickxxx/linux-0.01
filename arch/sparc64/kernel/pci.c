@@ -1,4 +1,4 @@
-/* $Id: pci.c,v 1.36.2.4 2002/02/10 15:06:48 ecd Exp $
+/* $Id: pci.c,v 1.36 2001/10/06 00:38:25 davem Exp $
  * pci.c: UltraSparc PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
@@ -81,8 +81,6 @@ volatile int pci_poke_faulted;
 extern void sabre_init(int, char *);
 extern void psycho_init(int, char *);
 extern void schizo_init(int, char *);
-extern void schizo_plus_init(int, char *);
-extern void tomatillo_init(int, char *);
 
 static struct {
 	char *model_name;
@@ -94,16 +92,12 @@ static struct {
 	{ "SUNW,psycho", psycho_init },
 	{ "pci108e,8000", psycho_init },
 	{ "SUNW,schizo", schizo_init },
-	{ "pci108e,8001", schizo_init },
-	{ "SUNW,schizo+", schizo_plus_init },
-	{ "pci108e,8002", schizo_plus_init },
-	{ "SUNW,tomatillo", tomatillo_init },
-	{ "pci108e,a801", tomatillo_init },
+	{ "pci108e,8001", schizo_init }
 };
 #define PCI_NUM_CONTROLLER_TYPES (sizeof(pci_controller_table) / \
 				  sizeof(pci_controller_table[0]))
 
-static int pci_controller_init(char *model_name, int namelen, int node)
+static void pci_controller_init(char *model_name, int namelen, int node)
 {
 	int i;
 
@@ -112,71 +106,12 @@ static int pci_controller_init(char *model_name, int namelen, int node)
 			     pci_controller_table[i].model_name,
 			     namelen)) {
 			pci_controller_table[i].init(node, model_name);
-			return 1;
+			return;
 		}
 	}
 	printk("PCI: Warning unknown controller, model name [%s]\n",
 	       model_name);
 	printk("PCI: Ignoring controller...\n");
-
-	return 0;
-}
-
-static int pci_is_controller(char *model_name, int namelen, int node)
-{
-	int i;
-
-	for (i = 0; i < PCI_NUM_CONTROLLER_TYPES; i++) {
-		if (!strncmp(model_name,
-			     pci_controller_table[i].model_name,
-			     namelen)) {
-			return 1;
-		}
-	}
-	return 0;
-}
-
-
-static int pci_controller_scan(int (*handler)(char *, int, int))
-{
-	char namebuf[64];
-	int node;
-	int count = 0;
-
-	node = prom_getchild(prom_root_node);
-	while ((node = prom_searchsiblings(node, "pci")) != 0) {
-		int len;
-
-		if ((len = prom_getproperty(node, "model", namebuf, sizeof(namebuf))) > 0 ||
-		    (len = prom_getproperty(node, "compatible", namebuf, sizeof(namebuf))) > 0) {
-			int item_len = 0;
-
-			/* Our value may be a multi-valued string in the
-			 * case of some compatible properties. For sanity,
-			 * only try the first one. */
-
-			while (namebuf[item_len] && len) {
-				len--;
-				item_len++;
-			}
-
-			if (handler(namebuf, item_len, node))
-				count++;
-		}
-
-		node = prom_getsibling(node);
-		if (!node)
-			break;
-	}
-
-	return count;
-}
-
-
-/* Is there some PCI controller in the system?  */
-int pcic_present(void)
-{
-	return pci_controller_scan(pci_is_controller);
 }
 
 /* Find each controller in the system, attach and initialize
@@ -186,9 +121,28 @@ int pcic_present(void)
  */
 static void pci_controller_probe(void)
 {
-	printk("PCI: Probing for controllers.\n");
+	char namebuf[16];
+	int node;
 
-	pci_controller_scan(pci_controller_init);
+	printk("PCI: Probing for controllers.\n");
+	node = prom_getchild(prom_root_node);
+	while ((node = prom_searchsiblings(node, "pci")) != 0) {
+		int len;
+
+		len = prom_getproperty(node, "model",
+				       namebuf, sizeof(namebuf));
+		if (len > 0)
+			pci_controller_init(namebuf, len, node);
+		else {
+			len = prom_getproperty(node, "compatible",
+					       namebuf, sizeof(namebuf));
+			if (len > 0)
+				pci_controller_init(namebuf, len, node);
+		}
+		node = prom_getsibling(node);
+		if (!node)
+			break;
+	}
 }
 
 static void pci_scan_each_controller_bus(void)
@@ -280,63 +234,33 @@ int pci_claim_resource(struct pci_dev *pdev, int resource)
 	return request_resource(root, res);
 }
 
-/*
- * Given the PCI bus a device resides on, try to
- * find an acceptable resource allocation for a
- * specific device resource..
- */
-static int pci_assign_bus_resource(const struct pci_bus *bus,
-	struct pci_dev *dev,
-	struct resource *res,
-	unsigned long size,
-	unsigned long min,
-	int resno)
-{
-	unsigned int type_mask;
-	int i;
-
-	type_mask = IORESOURCE_IO | IORESOURCE_MEM;
-	for (i = 0 ; i < 4; i++) {
-		struct resource *r = bus->resource[i];
-		if (!r)
-			continue;
-
-		/* type_mask must match */
-		if ((res->flags ^ r->flags) & type_mask)
-			continue;
-
-		/* Ok, try it out.. */
-		if (allocate_resource(r, res, size, min, -1, size, NULL, NULL) < 0)
-			continue;
-
-		/* PCI config space updated by caller.  */
-		return 0;
-	}
-	return -EBUSY;
-}
-
 int pci_assign_resource(struct pci_dev *pdev, int resource)
 {
 	struct pcidev_cookie *pcp = pdev->sysdata;
 	struct pci_pbm_info *pbm = pcp->pbm;
 	struct resource *res = &pdev->resource[resource];
-	unsigned long min, size;
+	struct resource *root;
+	unsigned long min, max, size, align;
 	int err;
 
-	if (res->flags & IORESOURCE_IO)
-		min = pbm->io_space.start + 0x400UL;
-	else
-		min = pbm->mem_space.start;
+	if (res->flags & IORESOURCE_IO) {
+		root = &pbm->io_space;
+		min = root->start + 0x400UL;
+		max = root->end;
+	} else {
+		root = &pbm->mem_space;
+		min = root->start;
+		max = min + 0x80000000UL;
+	}
 
-	size = res->end - res->start + 1;
+	size = res->end - res->start;
+	align = size + 1;
 
-	err = pci_assign_bus_resource(pdev->bus, pdev, res, size, min, resource);
-
+	err = allocate_resource(root, res, size + 1, min, max, align, NULL, NULL);
 	if (err < 0) {
 		printk("PCI: Failed to allocate resource %d for %s\n",
 		       resource, pdev->name);
 	} else {
-		/* Update PCI config space. */
 		pbm->parent->base_address_update(pdev, resource);
 	}
 
@@ -357,12 +281,11 @@ void pcibios_fixup_pbus_ranges(struct pci_bus *pbus,
 {
 }
 
-void pcibios_align_resource(void *data, struct resource *res,
-			    unsigned long size, unsigned long align)
+void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 }
 
-int pcibios_enable_device(struct pci_dev *pdev, int mask)
+int pcibios_enable_device(struct pci_dev *pdev)
 {
 	return 0;
 }
@@ -495,7 +418,7 @@ static int __pci_mmap_make_offset(struct pci_dev *dev, struct vm_area_struct *vm
 				  enum pci_mmap_state mmap_state)
 {
 	unsigned long user_offset = vma->vm_pgoff << PAGE_SHIFT;
-	unsigned long user32 = user_offset & pci_memspace_mask;
+	unsigned long user32 = user_offset & 0xffffffffUL;
 	unsigned long largest_base, this_base, addr32;
 	int i;
 
@@ -525,7 +448,7 @@ static int __pci_mmap_make_offset(struct pci_dev *dev, struct vm_area_struct *vm
 
 		this_base = rp->start;
 
-		addr32 = (this_base & PAGE_MASK) & pci_memspace_mask;
+		addr32 = (this_base & PAGE_MASK) & 0xffffffffUL;
 
 		if (mmap_state == pci_mmap_io)
 			addr32 &= 0xffffff;
@@ -541,7 +464,7 @@ static int __pci_mmap_make_offset(struct pci_dev *dev, struct vm_area_struct *vm
 	if (mmap_state == pci_mmap_io)
 		vma->vm_pgoff = (((largest_base & ~0xffffffUL) | user32) >> PAGE_SHIFT);
 	else
-		vma->vm_pgoff = (((largest_base & ~(pci_memspace_mask)) | user32) >> PAGE_SHIFT);
+		vma->vm_pgoff = (((largest_base & ~0xffffffffUL) | user32) >> PAGE_SHIFT);
 
 	return 0;
 }

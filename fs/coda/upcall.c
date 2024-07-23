@@ -15,6 +15,7 @@
  */
 
 #include <asm/system.h>
+#include <asm/segment.h>
 #include <asm/signal.h>
 #include <linux/signal.h>
 
@@ -79,6 +80,7 @@ int venus_rootfid(struct super_block *sb, ViceFid *fidp)
         union inputArgs *inp;
         union outputArgs *outp;
         int insize, outsize, error;
+	ENTRY;
 
         insize = SIZE(root);
         UPARG(CODA_ROOT);
@@ -94,6 +96,7 @@ int venus_rootfid(struct super_block *sb, ViceFid *fidp)
 	}
 
 	CODA_FREE(inp, insize);
+        EXIT;
 	return error;
 }
 
@@ -103,6 +106,7 @@ int venus_getattr(struct super_block *sb, struct ViceFid *fid,
         union inputArgs *inp;
         union outputArgs *outp;
         int insize, outsize, error;
+	ENTRY;
 
         insize = SIZE(getattr); 
 	UPARG(CODA_GETATTR);
@@ -113,6 +117,7 @@ int venus_getattr(struct super_block *sb, struct ViceFid *fid,
 	*attr = outp->coda_getattr.attr;
 
 	CODA_FREE(inp, insize);
+        EXIT;
         return error;
 }
 
@@ -175,7 +180,10 @@ int venus_store(struct super_block *sb, struct ViceFid *fid, int flags,
 	insize = SIZE(store);
 	UPARG(CODA_STORE);
 	
-	memcpy(&(inp->ih.cred), cred, sizeof(*cred));
+	if ( cred ) {
+		memcpy(&(inp->ih.cred), cred, sizeof(*cred));
+	} else 
+		printk("CODA: store without valid file creds.\n");
 	
         inp->coda_store.VFid = *fid;
         inp->coda_store.flags = flags;
@@ -214,7 +222,10 @@ int venus_close(struct super_block *sb, struct ViceFid *fid, int flags,
 	insize = SIZE(release);
 	UPARG(CODA_CLOSE);
 	
-	memcpy(&(inp->ih.cred), cred, sizeof(*cred));
+	if ( cred ) {
+		memcpy(&(inp->ih.cred), cred, sizeof(*cred));
+	} else 
+		printk("CODA: close without valid file creds.\n");
 	
         inp->coda_close.VFid = *fid;
         inp->coda_close.flags = flags;
@@ -421,6 +432,7 @@ int venus_readlink(struct super_block *sb, struct ViceFid *fid,
 	}
         
         CDEBUG(D_INODE, " result %d\n",error);
+        EXIT;
         CODA_FREE(inp, insize);
         return error;
 }
@@ -450,6 +462,7 @@ int venus_link(struct super_block *sb, struct ViceFid *fid,
         error = coda_upcall(coda_sbp(sb), insize, &outsize, inp);
 
         CDEBUG(D_INODE, " result %d\n",error);
+        EXIT;
 	CODA_FREE(inp, insize);
         return error;
 }
@@ -486,6 +499,7 @@ int venus_symlink(struct super_block *sb, struct ViceFid *fid,
 	error = coda_upcall(coda_sbp(sb), insize, &outsize, inp);
 
         CDEBUG(D_INODE, " result %d\n",error);
+        EXIT;
 	CODA_FREE(inp, insize);
         return error;
 }
@@ -522,6 +536,7 @@ int venus_access(struct super_block *sb, struct ViceFid *fid, int mask)
 	error = coda_upcall(coda_sbp(sb), insize, &outsize, inp);
 
 	CODA_FREE(inp, insize);
+        EXIT;
 	return error;
 }
 
@@ -542,11 +557,6 @@ int venus_pioctl(struct super_block *sb, struct ViceFid *fid,
 		error = -EINVAL;
 		goto exit;
         }
-
-        if (data->vi.out_size > VC_MAXDATASIZE) {
-		error = -EINVAL;
-		goto exit;
-	}
 
         inp->coda_ioctl.VFid = *fid;
     
@@ -576,30 +586,26 @@ int venus_pioctl(struct super_block *sb, struct ViceFid *fid,
 		       error, coda_f2s(fid));
 		goto exit; 
 	}
-
-	if (outsize < (long)outp->coda_ioctl.data + outp->coda_ioctl.len) {
-                CDEBUG(D_FILE, "reply size %d < reply len %ld\n", outsize,
-		       (long)outp->coda_ioctl.data + outp->coda_ioctl.len);
-		error = -EINVAL;
-		goto exit;
-	}
-
+        
+	/* Copy out the OUT buffer. */
         if (outp->coda_ioctl.len > data->vi.out_size) {
-                CDEBUG(D_FILE, "return len %d > request len %d\n",
-		       outp->coda_ioctl.len, data->vi.out_size);
+                CDEBUG(D_FILE, "return len %d <= request len %d\n",
+                      outp->coda_ioctl.len, 
+                      data->vi.out_size);
 		error = -EINVAL;
-		goto exit;
+        } else {
+		error = verify_area(VERIFY_WRITE, data->vi.out, 
+                                    data->vi.out_size);
+		if ( error ) goto exit;
+
+		if (copy_to_user(data->vi.out, 
+				 (char *)outp + (long)outp->coda_ioctl.data, 
+				 data->vi.out_size)) {
+			error = -EINVAL;
+			goto exit;
+		}
         }
 
-	/* Copy out the OUT buffer. */
-	error = verify_area(VERIFY_WRITE, data->vi.out, outp->coda_ioctl.len);
-	if ( error ) goto exit;
-
-	if (copy_to_user(data->vi.out, 
-			 (char *)outp + (long)outp->coda_ioctl.data, 
-			 outp->coda_ioctl.len)) {
-	    error = -EINVAL;
-	}
  exit:
 	CODA_FREE(inp, insize);
 	return error;
@@ -627,6 +633,7 @@ int venus_statfs(struct super_block *sb, struct statfs *sfs)
 	}
 
         CDEBUG(D_INODE, " result %d\n",error);
+        EXIT;
         CODA_FREE(inp, insize);
         return error;
 }
@@ -714,6 +721,8 @@ static int coda_upcall(struct coda_sb_info *sbi,
 	union outputArgs *out;
 	struct upc_req *req;
 	int error = 0;
+
+	ENTRY;
 
 	vcommp = sbi->sbi_vcomm;
 	if ( !vcommp->vc_inuse ) {

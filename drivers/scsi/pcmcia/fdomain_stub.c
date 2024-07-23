@@ -2,7 +2,7 @@
 
     A driver for Future Domain-compatible PCMCIA SCSI cards
 
-    fdomain_cs.c 1.47 2001/10/13 00:08:52
+    fdomain_cs.c 1.43 2000/06/12 21:27:25
 
     The contents of this file are subject to the Mozilla Public
     License Version 1.1 (the "License"); you may not use this file
@@ -19,8 +19,8 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU General Public License version 2 (the "GPL"), in
-    which case the provisions of the GPL are applicable instead of the
+    terms of the GNU General Public License version 2 (the "GPL"), in which
+    case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
     your version of this file under the MPL, indicate your decision
@@ -37,6 +37,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/timer.h>
 #include <linux/ioport.h>
 #include <scsi/scsi.h>
 #include <linux/major.h>
@@ -53,29 +54,26 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
-/*====================================================================*/
-
-/* Module parameters */
-
-MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
-MODULE_DESCRIPTION("Future Domain PCMCIA SCSI driver");
-MODULE_LICENSE("Dual MPL/GPL");
-
-#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
-
-/* Bit map of interrupts to choose from */
-INT_MODULE_PARM(irq_mask, 0xdeb8);
-static int irq_list[4] = { -1 };
-MODULE_PARM(irq_list, "1-4i");
-
 #ifdef PCMCIA_DEBUG
-INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
+static int pc_debug = PCMCIA_DEBUG;
+MODULE_PARM(pc_debug, "i");
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"fdomain_cs.c 1.47 2001/10/13 00:08:52 (David Hinds)";
+"fdomain_cs.c 1.43 2000/06/12 21:27:25 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
+
+/*====================================================================*/
+
+/* Parameters that can be set with 'insmod' */
+
+/* Bit map of interrupts to choose from */
+static u_int irq_mask = 0xdeb8;
+static int irq_list[4] = { -1 };
+
+MODULE_PARM(irq_mask, "i");
+MODULE_PARM(irq_list, "1-4i");
 
 /*====================================================================*/
 
@@ -85,7 +83,7 @@ typedef struct scsi_info_t {
     dev_node_t		node[8];
 } scsi_info_t;
 
-extern int fdomain_setup(char *str);
+extern void fdomain_setup(char *str, int *ints);
 
 static void fdomain_release(u_long arg);
 static int fdomain_event(event_t event, int priority,
@@ -124,6 +122,8 @@ static dev_link_t *fdomain_attach(void)
     if (!info) return NULL;
     memset(info, 0, sizeof(*info));
     link = &info->link; link->priv = info;
+    link->release.function = &fdomain_release;
+    link->release.data = (u_long)link;
 
     link->io.NumPorts1 = 0x10;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
@@ -176,6 +176,7 @@ static void fdomain_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
+    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
 	fdomain_release((u_long)link);
 	if (link->state & DEV_STALE_CONFIG) {
@@ -211,7 +212,6 @@ static void fdomain_config(dev_link_t *link)
     u_char tuple_data[64];
     Scsi_Device *dev;
     dev_node_t *node, **tail;
-    char str[16];
     struct Scsi_Host *host;
 
     DEBUG(0, "fdomain_config(0x%p)\n", link);
@@ -252,8 +252,7 @@ static void fdomain_config(dev_link_t *link)
     ints[0] = 2;
     ints[1] = link->io.BasePort1;
     ints[2] = link->irq.AssignedIRQ;
-    sprintf(str, "%d,%d", link->io.BasePort1, link->irq.AssignedIRQ);
-    fdomain_setup(str);
+    fdomain_setup("PCMCIA setup", ints);
     
     scsi_register_module(MODULE_SCSI_HA, &driver_template);
 
@@ -346,7 +345,7 @@ static int fdomain_event(event_t event, int priority,
     case CS_EVENT_CARD_REMOVAL:
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG)
-	    fdomain_release((u_long)link);
+	    mod_timer(&link->release, jiffies + HZ/20);
 	break;
     case CS_EVENT_CARD_INSERTION:
 	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;

@@ -17,7 +17,6 @@
 #include <linux/smp_lock.h>
 #include <linux/kernel_stat.h>
 #include <linux/mc146818rtc.h>
-#include <linux/cache.h>
 
 #include <asm/mtrr.h>
 #include <asm/pgalloc.h>
@@ -66,7 +65,7 @@
  *	an L1cache=Writethrough or L1cache=off option.
  *
  *		B stepping CPUs may hang. There are hardware work arounds
- *	for this. We warn about it in case your board doesn't have the work
+ *	for this. We warn about it in case your board doesnt have the work
  *	arounds. Basically thats so I can tell anyone with a B stepping
  *	CPU and SMP problems "tough".
  *
@@ -103,9 +102,9 @@
  */
 
 /* The 'big kernel lock' */
-spinlock_cacheline_t kernel_flag_cacheline = {SPIN_LOCK_UNLOCKED};
+spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 
-struct tlb_state cpu_tlbstate[NR_CPUS] __cacheline_aligned = {[0 ... NR_CPUS-1] = { &init_mm, 0, }};
+struct tlb_state cpu_tlbstate[NR_CPUS] = {[0 ... NR_CPUS-1] = { &init_mm, 0 }};
 
 /*
  * the following functions deal with sending IPIs between CPUs.
@@ -115,7 +114,7 @@ struct tlb_state cpu_tlbstate[NR_CPUS] __cacheline_aligned = {[0 ... NR_CPUS-1] 
 
 static inline int __prepare_ICR (unsigned int shortcut, int vector)
 {
-	return APIC_DM_FIXED | shortcut | vector | INT_DEST_ADDR_MODE;
+	return APIC_DM_FIXED | shortcut | vector | APIC_DEST_LOGICAL;
 }
 
 static inline int __prepare_ICR2 (unsigned int mask)
@@ -150,7 +149,7 @@ static inline void __send_IPI_shortcut(unsigned int shortcut, int vector)
 	apic_write_around(APIC_ICR, cfg);
 }
 
-void fastcall send_IPI_self(int vector)
+void send_IPI_self(int vector)
 {
 	__send_IPI_shortcut(APIC_DEST_SELF, vector);
 }
@@ -214,10 +213,7 @@ static inline void send_IPI_mask_sequence(int mask, int vector)
 			/*
 			 * prepare target chip field
 			 */
-			if(clustered_apic_mode == CLUSTERED_APIC_XAPIC)
-				cfg = __prepare_ICR2(cpu_to_physical_apicid(query_cpu));
-			else
-				cfg = __prepare_ICR2(cpu_to_logical_apicid(query_cpu));
+			cfg = __prepare_ICR2(cpu_to_logical_apicid(query_cpu));
 			apic_write_around(APIC_ICR2, cfg);
 		
 			/*
@@ -301,15 +297,12 @@ static spinlock_t tlbstate_lock = SPIN_LOCK_UNLOCKED;
 /*
  * We cannot call mmdrop() because we are in interrupt context, 
  * instead update mm->cpu_vm_mask.
- *
- * We need to reload %cr3 since the page tables may be going
- * away frm under us...
  */
 static void inline leave_mm (unsigned long cpu)
 {
-	BUG_ON(cpu_tlbstate[cpu].state == TLBSTATE_OK);
+	if (cpu_tlbstate[cpu].state == TLBSTATE_OK)
+		BUG();
 	clear_bit(cpu, &cpu_tlbstate[cpu].active_mm->cpu_vm_mask);
-	load_cr3(swapper_pg_dir);
 }
 
 /*
@@ -497,7 +490,7 @@ void flush_tlb_all(void)
  * anything. Worst case is that we lose a reschedule ...
  */
 
-void fastcall smp_send_reschedule(int cpu)
+void smp_send_reschedule(int cpu)
 {
 	send_IPI_mask(1 << cpu, RESCHEDULE_VECTOR);
 }
@@ -535,7 +528,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
  * remote CPUs are nearly ready to execute <<func>> or are or have executed.
  *
  * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler or from a bottom half handler.
+ * hardware interrupt handler, you may call it from a bottom half handler.
  */
 {
 	struct call_data_struct data;
@@ -551,7 +544,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		atomic_set(&data.finished, 0);
 
-	spin_lock(&call_lock);
+	spin_lock_bh(&call_lock);
 	call_data = &data;
 	wmb();
 	/* Send a message to all other CPUs and wait for them to respond */
@@ -564,7 +557,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		while (atomic_read(&data.finished) != cpus)
 			barrier();
-	spin_unlock(&call_lock);
+	spin_unlock_bh(&call_lock);
 
 	return 0;
 }

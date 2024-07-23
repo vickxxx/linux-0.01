@@ -3101,12 +3101,28 @@ static int smctr_load_node_addr(struct net_device *dev)
         unsigned int i;
         __u8 r;
 
-        for(i = 0; i < 6; i++)
+        /* Check if node address has been specified by user. (non-0) */
+        for(i = 0; ((i < 6) && (dev->dev_addr[i] == 0)); i++);
         {
-                r = inb(ioaddr + LAR0 + i);
-                dev->dev_addr[i] = (char)r;
+                if(i != 6)
+                {
+                        for(i = 0; i < 6; i++)
+                        {
+                                r = inb(ioaddr + LAR0 + i);
+                                dev->dev_addr[i] = (char)r;
+                        }
+                        dev->addr_len = 6;
+                }
+                else    /* Node addr. not given by user, read it from board. */
+                {
+                        for(i = 0; i < 6; i++)
+                        {
+                                r = inb(ioaddr + LAR0 + i);
+                                dev->dev_addr[i] = (char)r;
+                        }
+                        dev->addr_len = 6;
+                }
         }
-        dev->addr_len = 6;
 
         return (0);
 }

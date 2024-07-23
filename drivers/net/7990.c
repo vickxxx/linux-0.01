@@ -25,7 +25,6 @@
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/crc32.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -532,8 +531,6 @@ int lance_start_xmit (struct sk_buff *skb, struct net_device *dev)
         ib->btx_ring [entry].length = (-len) | 0xf000;
         ib->btx_ring [entry].misc = 0;
     
-    	if(skb->len < ETH_ZLEN)
-    		memset((char *)&ib->tx_buf[entry][0], 0, ETH_ZLEN);
         memcpy ((char *)&ib->tx_buf [entry][0], skb->data, skblen);
     
         /* Now, give the packet to the lance */
@@ -571,8 +568,8 @@ static void lance_load_multicast (struct net_device *dev)
         volatile u16 *mcast_table = (u16 *)&ib->filter;
         struct dev_mc_list *dmi=dev->mc_list;
         char *addrs;
-        int i;
-        u32 crc;
+        int i, j, bit, byte;
+        u32 crc, poly = CRC_POLYNOMIAL_LE;
         
         /* set all multicast bits */
         if (dev->flags & IFF_ALLMULTI){ 
@@ -593,7 +590,21 @@ static void lance_load_multicast (struct net_device *dev)
                 if (!(*addrs & 1))
                         continue;
                 
-		crc = ether_crc_le(6, addrs);
+                crc = 0xffffffff;
+                for (byte = 0; byte < 6; byte++)
+                        for (bit = *addrs++, j = 0; j < 8; j++, bit>>=1)
+                        {
+                                int test;
+
+                                test = ((bit ^ crc) & 0x01);
+                                crc >>= 1;
+
+                                if (test)
+                                {
+                                        crc = crc ^ poly;
+                                }
+                        }
+                
                 crc = crc >> 26;
                 mcast_table [crc >> 4] |= 1 << (crc & 0xf);
         }
@@ -632,4 +643,3 @@ void lance_set_multicast (struct net_device *dev)
 		netif_start_queue (dev);
 }
 
-MODULE_LICENSE("GPL");

@@ -22,7 +22,7 @@
 
 extern void free_proc_entry(struct proc_dir_entry *);
 
-static inline struct proc_dir_entry * de_get(struct proc_dir_entry *de)
+struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 {
 	if (de)
 		atomic_inc(&de->count);
@@ -32,7 +32,7 @@ static inline struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 /*
  * Decrements the use count and checks for deferred deletion.
  */
-static void de_put(struct proc_dir_entry *de)
+void de_put(struct proc_dir_entry *de)
 {
 	if (de) {	
 		lock_kernel();		
@@ -186,7 +186,6 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 	s->s_blocksize_bits = 10;
 	s->s_magic = PROC_SUPER_MAGIC;
 	s->s_op = &proc_sops;
-	s->s_maxbytes = ~0UL;
 	
 	root_inode = proc_get_inode(s, PROC_ROOT_INO, &proc_root);
 	if (!root_inode)

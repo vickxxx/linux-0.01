@@ -6,19 +6,19 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(AFLAGS) $< -o $@
+.S.o:
+	$(CC) $(AFLAGS) -c $< -o $@
 
 O_TARGET := dec.o
 
 all: dec.o
 
-export-objs	:= rtc-dec.o setup.o wbflush.o
-
-obj-y		:= ecc-berr.o int-handler.o ioasic-irq.o kn02-irq.o reset.o \
-		   rtc-dec.o setup.o time.o
+export-objs := wbflush.o
+obj-y	 := int-handler.o setup.o irq.o time.o reset.o rtc-dec.o wbflush.o
 
 obj-$(CONFIG_PROM_CONSOLE)	+= promcon.o
-obj-$(CONFIG_CPU_HAS_WB)	+= wbflush.o
 
 int-handler.o:	int-handler.S
 

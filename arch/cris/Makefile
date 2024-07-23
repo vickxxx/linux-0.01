@@ -1,4 +1,4 @@
-#
+# $Id: Makefile,v 1.22 2001/10/01 14:42:38 bjornw Exp $
 # cris/Makefile
 #
 # This file is included by the global makefile so that you can add your own
@@ -29,17 +29,18 @@ LD = if [ ! -e $(LD_SCRIPT).tmp -o $(LD_SCRIPT) -nt $(LD_SCRIPT).tmp ]; then \
               -e s/@CONFIG_ETRAX_DRAM_SIZE_M@/$(CONFIG_ETRAX_DRAM_SIZE)/ \
               < $(LD_SCRIPT) > $(LD_SCRIPT).tmp; \
      else true; \
-     fi && $(CROSS_COMPILE)ld -mcrislinux
+     fi && $(CROSS_COMPILE)gcc -mlinux -nostdlib
 
-LINKFLAGS = -T $(LD_SCRIPT).tmp
+LINKFLAGS = -mlinux -T $(LD_SCRIPT).tmp
 
 # objcopy is used to make binary images from the resulting linked file
 
 OBJCOPY := $(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
 
-# -mlinux enables -march=v10, -fno-underscores, -D__linux__ among others
+# normally, gcc on a linux box adds __linux__ but we do it "manually"
+# -mlinux enables -march=v10, -fno-underscores among others
 
-CFLAGS := $(CFLAGS) -mlinux -pipe
+CFLAGS := $(CFLAGS) -mlinux -fno-strict-aliasing -pipe -D__linux__
 
 ifdef CONFIG_ETRAX_KGDB
 CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS)) -g
@@ -56,10 +57,6 @@ ifdef CONFIG_ETRAX_AXISFLASHMAP
 # each others config options
 SUBDIRS += arch/cris/boot/rescue
 endif
-
-# Note that the order of .o files below is important is some cases
-# (because initcalls are executed in the order they are linked)
-# Never add any driver before mm.o!
 CORE_FILES += arch/cris/kernel/kernel.o arch/cris/mm/mm.o
 DRIVERS += arch/cris/drivers/drivers.o
 LIBGCC = $(shell $(CC) $(CFLAGS) -print-file-name=libgcc.a)

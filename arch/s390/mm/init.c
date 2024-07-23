@@ -40,7 +40,6 @@
 mmu_gather_t mmu_gathers[NR_CPUS];
 
 static unsigned long totalram_pages;
-extern unsigned long memory_size;
 
 pgd_t swapper_pg_dir[PTRS_PER_PGD] __attribute__((__aligned__(PAGE_SIZE)));
 char  empty_zero_page[PAGE_SIZE] __attribute__((__aligned__(PAGE_SIZE)));
@@ -65,11 +64,6 @@ int do_check_pgt_cache(int low, int high)
                 } while(pgtable_cache_size > low);
         }
         return freed;
-}
-
-void diag10(unsigned long addr)
-{
-        asm volatile ("diag %0,%0,0x10" : : "a" (addr));
 }
 
 void show_mem(void)
@@ -220,7 +214,7 @@ void free_initmem(void)
 		free_page(addr);
 		totalram_pages++;
         }
-        printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n",
+        printk ("Freeing unused kernel memory: %dk freed\n",
 		(&__init_end - &__init_begin) >> 10);
 }
 
@@ -228,7 +222,7 @@ void free_initmem(void)
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
         if (start < end)
-                printk (KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+                printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
         for (; start < end; start += PAGE_SIZE) {
                 ClearPageReserved(virt_to_page(start));
                 set_page_count(virt_to_page(start), 1);

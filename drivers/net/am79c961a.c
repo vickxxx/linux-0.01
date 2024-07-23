@@ -29,7 +29,6 @@
 #include <linux/skbuff.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/crc32.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -309,13 +308,33 @@ static struct net_device_stats *am79c961_getstats (struct net_device *dev)
 	return &priv->stats;
 }
 
+static inline u32 update_crc(u32 crc, u8 byte)
+{
+	int i;
+
+	for (i = 8; i != 0; i--) {
+		byte ^= crc & 1;
+		crc >>= 1;
+
+		if (byte & 1)
+			crc ^= 0xedb88320;
+
+		byte >>= 1;
+	}
+
+	return crc;
+}
+
 static void am79c961_mc_hash(struct dev_mc_list *dmi, unsigned short *hash)
 {
 	if (dmi->dmi_addrlen == ETH_ALEN && dmi->dmi_addr[0] & 0x01) {
-		int idx, bit;
+		int i, idx, bit;
 		u32 crc;
 
-		crc = ether_crc_le(ETH_ALEN, dmi->dmi_addr);
+		crc = 0xffffffff;
+
+		for (i = 0; i < ETH_ALEN; i++)
+			crc = update_crc(crc, dmi->dmi_addr[i]);
 
 		idx = crc >> 30;
 		bit = (crc >> 26) & 15;
@@ -409,19 +428,10 @@ static int
 am79c961_sendpacket(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
-	unsigned int length = skb->len;
+	unsigned int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 	unsigned int hdraddr, bufaddr;
 	unsigned int head;
 	unsigned long flags;
-	
-	/* FIXME: I thought the 79c961 could do padding - RMK ??? */
-	if(length < ETH_ZLEN)
-	{
-		skb = skb_padto(skb, ETH_ZLEN);
-		if(skb == NULL)
-			return 0;
-		length = ETH_ZLEN;
-	}
 
 	head = priv->txhead;
 	hdraddr = priv->txhdr + (head << 3);

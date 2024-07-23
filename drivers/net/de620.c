@@ -316,7 +316,7 @@ de620_read_byte(struct net_device *dev)
 }
 
 static inline void
-de620_write_block(struct net_device *dev, byte *buffer, int count, int pad)
+de620_write_block(struct net_device *dev, byte *buffer, int count)
 {
 #ifndef LOWSPEED
 	byte uflip = NIC_Cmd ^ (DS0 | DS1);
@@ -334,9 +334,6 @@ de620_write_block(struct net_device *dev, byte *buffer, int count, int pad)
 	/* No further optimization useful, the limit is in the adapter. */
 	for ( ; count > 0; --count, ++buffer) {
 		de620_put_byte(dev,*buffer);
-	}
-	for ( count = pad ; count > 0; --count, ++buffer) {
-		de620_put_byte(dev, 0);
 	}
 	de620_send_command(dev,W_DUMMY);
 #ifdef COUNT_LOOPS
@@ -452,17 +449,11 @@ static int de620_open(struct net_device *dev)
 		return ret;
 	}
 
-	if (adapter_init(dev)) {
-		ret = -EIO;
-		goto out_free_irq;
-	}
+	if (adapter_init(dev))
+		return -EIO;
 
 	netif_start_queue(dev);
 	return 0;
-
-out_free_irq:
-	free_irq(dev->irq, dev);
-	return ret;
 }
 
 /************************************************
@@ -579,7 +570,7 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		restore_flags(flags);
 		return 1;
 	}
-	de620_write_block(dev, buffer, skb->len, len-skb->len);
+	de620_write_block(dev, buffer, len);
 
 	dev->trans_start = jiffies;
 	if(!(using_txbuf == (TXBF0 | TXBF1)))
@@ -853,10 +844,13 @@ int __init de620_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 
-	if (!request_region(dev->base_addr, 3, "de620")) {
-		printk(KERN_ERR "io 0x%3lX, which is busy.\n", dev->base_addr);
+#if 0 /* Not yet */
+	if (check_region(dev->base_addr, 3)) {
+		printk(", port 0x%x busy\n", dev->base_addr);
 		return -EBUSY;
 	}
+#endif
+	request_region(dev->base_addr, 3, "de620");
 
 	/* else, got it! */
 	printk(", Ethernet Address: %2.2X",

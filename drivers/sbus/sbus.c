@@ -1,4 +1,4 @@
-/* $Id: sbus.c,v 1.95.2.3 2002/01/05 01:12:31 davem Exp $
+/* $Id: sbus.c,v 1.95 2001/03/15 02:11:10 davem Exp $
  * sbus.c:  SBus support routines.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -20,13 +20,6 @@
 struct sbus_bus *sbus_root = NULL;
 
 static struct linux_prom_irqs irqs[PROMINTR_MAX] __initdata = { { 0 } };
-#ifdef CONFIG_SPARC32
-static int interrupts[PROMINTR_MAX] __initdata = { 0 };
-#endif
-
-#ifdef CONFIG_PCI
-extern int pcic_present(void);
-#endif
 
 /* Perhaps when I figure out more about the iommu we'll put a
  * device registration routine here that probe_sbus() calls to
@@ -129,37 +122,20 @@ no_ranges:
 #else
 	len = prom_getproperty(prom_node, "intr",
 			       (char *)irqs, sizeof(irqs));
-	if (len != -1) {
-		sdev->num_irqs = len / 8;
-		if (sdev->num_irqs == 0) {
-			sdev->irqs[0] = 0;
-		} else if (sparc_cpu_model == sun4d) {
-			extern unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq);
+	if (len == -1)
+		len = 0;
+	sdev->num_irqs = len / 8;
+	if (sdev->num_irqs == 0) {
+		sdev->irqs[0] = 0;
+	} else if (sparc_cpu_model == sun4d) {
+		extern unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq);
 
-			for (len = 0; len < sdev->num_irqs; len++)
-				sdev->irqs[len] = sun4d_build_irq(sdev, irqs[len].pri);
-		} else {
-			for (len = 0; len < sdev->num_irqs; len++)
-				sdev->irqs[len] = irqs[len].pri;
-		}
+		for (len = 0; len < sdev->num_irqs; len++)
+			sdev->irqs[len] = sun4d_build_irq(sdev, irqs[len].pri);
 	} else {
-		/* No "intr" node found-- check for "interrupts" node.
-		 * This node contains SBus interrupt levels, not IPLs
-		 * as in "intr", and no vector values.  We convert 
-		 * SBus interrupt levels to PILs (platform specific).
-		 */
-		len = prom_getproperty(prom_node, "interrupts", 
-					(char *)interrupts, sizeof(interrupts));
-		if (len == -1) {
-			sdev->irqs[0] = 0;
-			sdev->num_irqs = 0;
-		} else {
-			sdev->num_irqs = len / sizeof(int);
-			for (len = 0; len < sdev->num_irqs; len++) {
-				sdev->irqs[len] = sbint_to_irq(sdev, interrupts[len]);
-			}
-		}
-	} 
+		for (len = 0; len < sdev->num_irqs; len++)
+			sdev->irqs[len] = irqs[len].pri;
+	}
 #endif /* !__sparc_v9__ */
 }
 
@@ -215,8 +191,6 @@ static void __init sbus_do_child_siblings(int start_node,
  * prom_sbus_ranges_init(), with all sun4d stuff cut away.
  * Ask DaveM what is going on here, how is sun4d supposed to work... XXX
  */
-/* added back sun4d patch from Thomas Bogendoerfer - should be OK (crn) */
-
 static void __init sbus_bus_ranges_init(int parent_node, struct sbus_bus *sbus)
 {
 	int len;
@@ -229,20 +203,6 @@ static void __init sbus_bus_ranges_init(int parent_node, struct sbus_bus *sbus)
 		return;
 	}
 	sbus->num_sbus_ranges = len / sizeof(struct linux_prom_ranges);
-#ifdef CONFIG_SPARC32
-	if (sparc_cpu_model == sun4d) {
-		struct linux_prom_ranges iounit_ranges[PROMREG_MAX];
-		int num_iounit_ranges;
-
-		len = prom_getproperty(parent_node, "ranges",
-				       (char *) iounit_ranges,
-				       sizeof (iounit_ranges));
-		if (len != -1) {
-			num_iounit_ranges = (len/sizeof(struct linux_prom_ranges));
-			prom_adjust_ranges (sbus->sbus_ranges, sbus->num_sbus_ranges, iounit_ranges, num_iounit_ranges);
-		}
-	}
-#endif
 }
 
 static void __init __apply_ranges_to_regs(struct linux_prom_ranges *ranges,
@@ -271,7 +231,6 @@ static void __init __apply_ranges_to_regs(struct linux_prom_ranges *ranges,
 				return;
 			}
 			regs[regnum].which_io = ranges[rngnum].ot_parent_space;
-			regs[regnum].phys_addr -= ranges[rngnum].ot_child_base;
 			regs[regnum].phys_addr += ranges[rngnum].ot_parent_base;
 		}
 	}
@@ -348,7 +307,7 @@ void __init sbus_init(void)
 		nd = prom_searchsiblings(topnd, "sbus");
 		if(nd == 0) {
 #ifdef CONFIG_PCI
-			if (!pcic_present()) {	
+			if (!pcibios_present()) {	
 				prom_printf("Neither SBUS nor PCI found.\n");
 				prom_halt();
 			} else {
@@ -373,7 +332,7 @@ void __init sbus_init(void)
 		   (nd = prom_getchild(iommund)) == 0 ||
 		   (nd = prom_searchsiblings(nd, "sbus")) == 0) {
 #ifdef CONFIG_PCI
-                        if (!pcic_present()) {       
+                        if (!pcibios_present()) {       
                                 prom_printf("Neither SBUS nor PCI found.\n");
                                 prom_halt();
                         }
@@ -431,10 +390,6 @@ void __init sbus_init(void)
 		sbus_bus_ranges_init(iommund, sbus);
 
 		sbus_devs = prom_getchild(this_sbus);
-		if (!sbus_devs) {
-			sbus->devices = NULL;
-			goto next_bus;
-		}
 
 		sbus->devices = kmalloc(sizeof(struct sbus_dev), GFP_ATOMIC);
 
@@ -498,7 +453,7 @@ void __init sbus_init(void)
 		sbus_fixup_all_regs(sbus->devices);
 
 		dvma_init(sbus);
-	next_bus:
+
 		num_sbus++;
 		if(sparc_cpu_model == sun4u) {
 			this_sbus = prom_getsibling(this_sbus);

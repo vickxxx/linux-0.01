@@ -1,9 +1,29 @@
 #ifndef __ASM_SPINLOCK_H
 #define __ASM_SPINLOCK_H
 
-#include <asm/spinlock_t.h>		/* get spinlock primitives */
-#include <asm/psw.h>			/* local_* primitives need PSW_I */
-#include <asm/system_irqsave.h>		/* get local_* primitives */
+#include <asm/system.h>
+
+/* if you're going to use out-of-line slowpaths, use .section .lock.text,
+ * not .text.lock or the -ffunction-sections monster will eat you alive
+ */
+
+/* we seem to be the only architecture that uses 0 to mean locked - but we
+ * have to.  prumpf */
+
+#undef SPIN_LOCK_UNLOCKED
+#define SPIN_LOCK_UNLOCKED (spinlock_t) { 1 }
+
+#define spin_lock_init(x)	do { (x)->lock = 1; } while(0)
+
+#define spin_unlock_wait(x)	do { barrier(); } while(((volatile spinlock_t *)(x))->lock == 1)
+
+#define spin_lock(x) \
+	do { while(__ldcw(&(x)->lock) == 0); } while(0)
+	
+#define spin_unlock(x) \
+	do { (x)->lock = 1; } while(0)
+
+#define spin_trylock(x) (__ldcw(&(x)->lock) == 1)
 
 /*
  * Read-write spinlocks, allowing multiple readers
@@ -15,8 +35,6 @@ typedef struct {
 } rwlock_t;
 
 #define RW_LOCK_UNLOCKED (rwlock_t) { SPIN_LOCK_UNLOCKED, 0 }
-
-#define rwlock_init(lp)	do { *(lp) = RW_LOCK_UNLOCKED; } while (0)
 
 /* read_lock, read_unlock are pretty straightforward.  Of course it somehow
  * sucks we end up saving/restoring flags twice for read_lock_irqsave aso. */

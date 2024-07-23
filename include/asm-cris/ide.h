@@ -1,7 +1,7 @@
 /*
  *  linux/include/asm-cris/ide.h
  *
- *  Copyright (C) 2000, 2001, 2002  Axis Communications AB
+ *  Copyright (C) 2000  Axis Communications AB
  *
  *  Authors:    Bjorn Wesen
  *
@@ -17,15 +17,14 @@
 #ifdef __KERNEL__
 
 #include <asm/svinto.h>
-#include <asm/io.h>
-#include <asm-generic/ide_iops.h>
-
 
 /* ETRAX 100 can support 4 IDE busses on the same pins (serialized) */
 
 #define MAX_HWIFS	4
 
-extern __inline__ int ide_default_irq(ide_ioreg_t base)
+#define ide__sti()	__sti()
+
+static __inline__ int ide_default_irq(ide_ioreg_t base)
 {
 	/* all IDE busses share the same IRQ, number 4.
 	 * this has the side-effect that ide-probe.c will cluster our 4 interfaces
@@ -35,7 +34,7 @@ extern __inline__ int ide_default_irq(ide_ioreg_t base)
 	return 4; 
 }
 
-extern __inline__ ide_ioreg_t ide_default_io_base(int index)
+static __inline__ ide_ioreg_t ide_default_io_base(int index)
 {
 	/* we have no real I/O base address per interface, since all go through the
 	 * same register. but in a bitfield in that register, we have the i/f number.
@@ -54,7 +53,7 @@ extern __inline__ ide_ioreg_t ide_default_io_base(int index)
  * of the ide_default_io_base call above. ctrl_port will be 0, but that is don't care for us.
  */
 
-extern __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
+static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
 {
 	int i;
 
@@ -77,7 +76,7 @@ extern __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port,
 	hw->io_ports[IDE_IRQ_OFFSET] = 0;
 }
 
-extern __inline__ void ide_init_default_hwifs(void)
+static __inline__ void ide_init_default_hwifs(void)
 {
 	hw_regs_t hw;
 	int index;
@@ -89,10 +88,54 @@ extern __inline__ void ide_init_default_hwifs(void)
 	}
 }
 
+typedef union {
+	unsigned all			: 8;	/* all of the bits together */
+	struct {
+		unsigned head		: 4;	/* always zeros here */
+		unsigned unit		: 1;	/* drive select number, 0 or 1 */
+		unsigned bit5		: 1;	/* always 1 */
+		unsigned lba		: 1;	/* using LBA instead of CHS */
+		unsigned bit7		: 1;	/* always 1 */
+	} b;
+	} select_t;
+
 /* some configuration options we don't need */
 
 #undef SUPPORT_VLB_SYNC
 #define SUPPORT_VLB_SYNC 0
+
+#undef SUPPORT_SLOW_DATA_PORTS
+#define SUPPORT_SLOW_DATA_PORTS	0
+
+/* request and free a normal interrupt */
+
+#define ide_request_irq(irq,hand,flg,dev,id)	request_irq((irq),(hand),(flg),(dev),(id))
+#define ide_free_irq(irq,dev_id)		free_irq((irq), (dev_id))
+
+/* ide-probe.c calls ide_request_region and stuff on the io_ports defined,
+ * but since they are not actually memory-mapped in the ETRAX driver, we don't
+ * do anything.
+ */
+
+#define ide_check_region(from,extent)		(0)
+#define ide_request_region(from,extent,name)	do {} while(0)
+#define ide_release_region(from,extent)		do {} while(0)
+
+/*
+ * The following are not needed for the non-m68k ports
+ */
+#define ide_ack_intr(hwif)		(1)
+#define ide_fix_driveid(id)		do {} while (0)
+#define ide_release_lock(lock)		do {} while (0)
+#define ide_get_lock(lock, hdlr, data)	do {} while (0)
+
+/* the drive addressing is done through a controller register on the Etrax CPU */
+void OUT_BYTE(unsigned char data, ide_ioreg_t reg);
+unsigned char IN_BYTE(ide_ioreg_t reg);
+
+/* this tells ide.h not to define the standard macros */
+#define HAVE_ARCH_OUT_BYTE
+#define HAVE_ARCH_IN_BYTE
 
 #endif /* __KERNEL__ */
 

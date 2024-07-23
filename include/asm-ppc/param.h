@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.param.h 1.8 08/20/01 22:50:29 paulus
+ */
 #ifndef _ASM_PPC_PARAM_H
 #define _ASM_PPC_PARAM_H
 
@@ -19,6 +22,6 @@
 
 #ifdef __KERNEL__
 # define CLOCKS_PER_SEC	HZ	/* frequency at which times() counts */
-#endif /* __KERNEL__ */
+#endif
 
 #endif

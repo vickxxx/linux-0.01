@@ -6,8 +6,6 @@ adfs.txt
 	- info and mount options for the Acorn Advanced Disc Filing System.
 affs.txt
 	- info and mount options for the Amiga Fast File System.
-befs.txt
-	- info for the BeOS file system (BFS)
 bfs.txt
 	- info for the SCO UnixWare Boot Filesystem (BFS).
 coda.txt
@@ -24,8 +22,6 @@ hpfs.txt
 	- info and mount options for the OS/2 HPFS.
 isofs.txt
 	- info and mount options for the ISO 9660 (CDROM) filesystem.
-jfs.txt
-	- info and mount options for the JFS filesystem.
 ncpfs.txt
 	- info on Novell Netware(tm) filesystem using NCP protocol.
 ntfs.txt
@@ -48,5 +44,3 @@ vfat.txt
 	- info on using the VFAT filesystem used in Windows NT and Windows 95
 vfs.txt
 	- Overview of the Virtual File System
-xfs.txt
-	- info and mount options for the XFS filesystem.

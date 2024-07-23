@@ -14,16 +14,10 @@ extern unsigned int pcibios_assign_all_busses(void);
 #else
 #define pcibios_assign_all_busses()	0
 #endif
-#define pcibios_scan_all_fns()		0
 
 extern unsigned long pci_mem_start;
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		(pci_mem_start)
-
-void pcibios_config_init(void);
-struct pci_bus * pcibios_scan_root(int bus);
-extern int (*pci_config_read)(int seg, int bus, int dev, int fn, int reg, int len, u32 *value);
-extern int (*pci_config_write)(int seg, int bus, int dev, int fn, int reg, int len, u32 value);
 
 void pcibios_set_master(struct pci_dev *dev);
 void pcibios_penalize_isa_irq(int irq);
@@ -79,7 +73,7 @@ static inline dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr,
 					size_t size, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	flush_write_buffers();
 	return virt_to_bus(ptr);
 }
@@ -95,7 +89,7 @@ static inline void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr,
 				    size_t size, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	/* Nothing to do */
 }
 
@@ -107,28 +101,18 @@ static inline dma_addr_t pci_map_page(struct pci_dev *hwdev, struct page *page,
 				      unsigned long offset, size_t size, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 
-	return ((dma_addr_t)(page - mem_map) *
-		(dma_addr_t) PAGE_SIZE +
-		(dma_addr_t) offset);
+	return (page - mem_map) * PAGE_SIZE + offset;
 }
 
 static inline void pci_unmap_page(struct pci_dev *hwdev, dma_addr_t dma_address,
 				  size_t size, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	/* Nothing to do */
 }
-
-/* pci_unmap_{page,single} is a nop so... */
-#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)
-#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)
-#define pci_unmap_addr(PTR, ADDR_NAME)		(0)
-#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)	do { } while (0)
-#define pci_unmap_len(PTR, LEN_NAME)		(0)
-#define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do { } while (0)
 
 /* Map a set of buffers described by scatterlist in streaming
  * mode for DMA.  This is the scather-gather version of the
@@ -151,16 +135,16 @@ static inline int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg,
 	int i;
 
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
  
  	/*
  	 * temporary 2.4 hack
  	 */
  	for (i = 0; i < nents; i++ ) {
  		if (sg[i].address && sg[i].page)
- 			out_of_line_bug();
+ 			BUG();
  		else if (!sg[i].address && !sg[i].page)
- 			out_of_line_bug();
+ 			BUG();
  
  		if (sg[i].address)
  			sg[i].dma_address = virt_to_bus(sg[i].address);
@@ -180,7 +164,7 @@ static inline void pci_unmap_sg(struct pci_dev *hwdev, struct scatterlist *sg,
 				int nents, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	/* Nothing to do */
 }
 
@@ -198,7 +182,7 @@ static inline void pci_dma_sync_single(struct pci_dev *hwdev,
 				       size_t size, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	flush_write_buffers();
 }
 
@@ -213,7 +197,7 @@ static inline void pci_dma_sync_sg(struct pci_dev *hwdev,
 				   int nelems, int direction)
 {
 	if (direction == PCI_DMA_NONE)
-		out_of_line_bug();
+		BUG();
 	flush_write_buffers();
 }
 

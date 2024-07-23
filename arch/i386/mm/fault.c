@@ -27,6 +27,8 @@
 
 extern void die(const char *,struct pt_regs *,long);
 
+extern int console_loglevel;
+
 /*
  * Ugly, ugly, but the goto's result in better assembly..
  */
@@ -71,7 +73,7 @@ good_area:
 		if (!vma || vma->vm_start != start)
 			goto bad_area;
 		if (!(vma->vm_flags & VM_WRITE))
-			goto bad_area;
+			goto bad_area;;
 	}
 	return 1;
 
@@ -86,7 +88,8 @@ bad_area:
 
 out_of_memory:
 	if (current->pid == 1) {
-		yield();
+		current->policy |= SCHED_YIELD;
+		schedule();
 		goto survive;
 	}
 	goto bad_area;
@@ -122,6 +125,12 @@ void bust_spinlocks(int yes)
 		printk(" ");
 		console_loglevel = loglevel_save;
 	}
+}
+
+void do_BUG(const char *file, int line)
+{
+	bust_spinlocks(1);
+	printk("kernel BUG at %s:%d!\n", file, line);
 }
 
 asmlinkage void do_invalid_op(struct pt_regs *, unsigned long);
@@ -270,8 +279,7 @@ bad_area:
 	/* User mode accesses just cause a SIGSEGV */
 	if (error_code & 4) {
 		tsk->thread.cr2 = address;
-		/* Kernel addresses are always protection faults */
-		tsk->thread.error_code = error_code | (address >= TASK_SIZE);
+		tsk->thread.error_code = error_code;
 		tsk->thread.trap_no = 14;
 		info.si_signo = SIGSEGV;
 		info.si_errno = 0;
@@ -334,11 +342,13 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
+	up_read(&mm->mmap_sem);
 	if (tsk->pid == 1) {
-		yield();
+		tsk->policy |= SCHED_YIELD;
+		schedule();
+		down_read(&mm->mmap_sem);
 		goto survive;
 	}
-	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (error_code & 4)
 		do_exit(SIGKILL);

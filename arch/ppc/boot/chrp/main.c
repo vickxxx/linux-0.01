@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.main.c 1.13 07/27/01 20:24:17 trini
+ */
+/*
  * Copyright (C) Paul Mackerras 1997.
  *
  * This program is free software; you can redistribute it and/or
@@ -7,20 +10,24 @@
  * 2 of the License, or (at your option) any later version.
  */
 #include "nonstdio.h"
-#include "of1275.h"
 #include <asm/processor.h>
-#include <asm/page.h>
 
-/* Passed from the linker */
-extern char __image_begin, __image_end;
-extern char __ramdisk_begin[], __ramdisk_end;
-extern char _start, _end;
-
+extern char _end[];
+extern char initrd_data[];
+extern char image_data[];
+extern char sysmap_data[];
+extern int getprop(void *, const char *, void *, int);
+extern int initrd_len;
+extern int image_len;
+extern int sysmap_len;
 extern unsigned int heap_max;
+extern void claim(unsigned int virt, unsigned int size, unsigned int align);
+extern void *finddevice(const char *);
 extern void flush_cache(void *, unsigned long);
 extern void gunzip(void *, int, unsigned char *, int *);
 extern void make_bi_recs(unsigned long addr, char *name, unsigned int mach,
 		unsigned int progend);
+extern void pause(void);
 
 char *avail_ram;
 char *begin_avail, *end_avail;
@@ -40,35 +47,28 @@ char *avail_high;
 
 static char scratch[SCRATCH_SIZE];	/* 1MB of scratch space for gunzip */
 
-typedef void (*kernel_start_t)(int, int, void *, unsigned int, unsigned int);
-
 void
 chrpboot(int a1, int a2, void *prom)
 {
     unsigned sa, len;
     void *dst;
     unsigned char *im;
-    unsigned int initrd_size, initrd_start;
-
+    unsigned initrd_start=0, initrd_size=0;
+    extern char _start;
+    
     printf("chrpboot starting: loaded at 0x%p\n\r", &_start);
 
-    initrd_size = (char *)(&__ramdisk_end) - (char *)(&__ramdisk_begin);
-    if (initrd_size) {
+    if (initrd_len) {
+	initrd_size = initrd_len;
 	initrd_start = (RAM_END - initrd_size) & ~0xFFF;
-	a1 = initrd_start;
-	a2 = initrd_size;
 	claim(initrd_start, RAM_END - initrd_start, 0);
 	printf("initial ramdisk moving 0x%x <- 0x%p (%x bytes)\n\r",
-	       initrd_start, (char *)(&__ramdisk_begin), initrd_size);
-	memcpy((char *)initrd_start, (char *)(&__ramdisk_begin), initrd_size);
-    } else {
-	initrd_start = 0;
-	initrd_size = 0;
-	a2 = 0xdeadbeef;
+	       initrd_start, initrd_data, initrd_size);
+	memcpy((char *)initrd_start, initrd_data, initrd_size);
     }
 
-    im = (char *)(&__image_begin);
-    len = (char *)(&__image_end) - (char *)(&__image_begin);
+    im = image_data;
+    len = image_len;
     /* claim 4MB starting at PROG_START */
     claim(PROG_START, PROG_SIZE - PROG_START, 0);
     dst = (void *) PROG_START;
@@ -88,11 +88,11 @@ chrpboot(int a1, int a2, void *prom)
     flush_cache(dst, len);
     make_bi_recs(((unsigned long) dst + len), "chrpboot", _MACH_chrp,
 		    (PROG_START + PROG_SIZE));
-
+    
     sa = (unsigned long)PROG_START;
     printf("start address = 0x%x\n\r", sa);
 
-    (*(kernel_start_t)sa)(a1, a2, prom, initrd_start, initrd_size);
+    (*(void (*)())sa)(a1, a2, prom, initrd_start, initrd_size);
 
     printf("returned?\n\r");
 

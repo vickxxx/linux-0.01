@@ -764,13 +764,9 @@ static int myri_rebuild_header(struct sk_buff *skb)
 int myri_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 {
 	unsigned short type = hh->hh_type;
-	unsigned char *pad;
-	struct ethhdr *eth;
+	unsigned char *pad = (unsigned char *) hh->hh_data;
+	struct ethhdr *eth = (struct ethhdr *) (pad + MYRI_PAD_LEN);
 	struct net_device *dev = neigh->dev;
-
-	pad = ((unsigned char *) hh->hh_data) +
-		HH_DATA_OFF(sizeof(*eth) + MYRI_PAD_LEN);
-	eth = (struct ethhdr *) (pad + MYRI_PAD_LEN);
 
 	if (type == __constant_htons(ETH_P_802_3))
 		return -1;
@@ -790,8 +786,7 @@ int myri_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 /* Called by Address Resolution module to notify changes in address. */
 void myri_header_cache_update(struct hh_cache *hh, struct net_device *dev, unsigned char * haddr)
 {
-	memcpy(((u8*)hh->hh_data) + HH_DATA_OFF(sizeof(struct ethhdr)),
-	       haddr, dev->addr_len);
+	memcpy(((u8*)hh->hh_data) + 2, haddr, dev->addr_len);
 }
 
 static int myri_change_mtu(struct net_device *dev, int new_mtu)
@@ -804,6 +799,9 @@ static int myri_change_mtu(struct net_device *dev, int new_mtu)
 
 static struct net_device_stats *myri_get_stats(struct net_device *dev)
 { return &(((struct myri_eth *)dev->priv)->enet_stats); }
+
+#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
+#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
 
 static void myri_set_multicast(struct net_device *dev)
 {

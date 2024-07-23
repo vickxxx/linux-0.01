@@ -60,8 +60,7 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
  * addresses to be allocated in the 0x000-0x0ff region
  * modulo 0x400.
  */
-void pcibios_align_resource(void *data, struct resource *res,
-			    unsigned long size, unsigned long align)
+void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 	if (res->flags & IORESOURCE_IO) {
 		unsigned long start = res->start;
@@ -73,7 +72,7 @@ void pcibios_align_resource(void *data, struct resource *res,
 	}
 }
 
-int pcibios_enable_device(struct pci_dev *dev, int mask)
+int pcibios_enable_device(struct pci_dev *dev)
 {
 	u16 cmd, old_cmd;
 	int idx;
@@ -82,8 +81,6 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	old_cmd = cmd;
 	for(idx=0; idx<6; idx++) {
-		if (!(mask & (1 << idx)))
-			continue;
 		r = &dev->resource[idx];
 		if (!r->start && r->end) {
 			printk(KERN_ERR "PCI: Device %s not available because of resource collisions\n", dev->slot_name);

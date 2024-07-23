@@ -19,8 +19,7 @@
 static __inline__ void putc(char c)
 {
 	while(__raw_readb(IO_UART + 0x18) & 0x20 ||
-	      __raw_readb(IO_UART + 0x18) & 0x08)
-		barrier();
+		__raw_readb(IO_UART + 0x18) & 0x08);
 	__raw_writeb(c, IO_UART + 0x00);
 }
 

@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.config.c 1.12 09/18/01 11:19:06 paulus
+ */
 #define m68k_debug_device debug_device
 
 /*
@@ -100,6 +103,7 @@ extern void amiga_mksound( unsigned int count, unsigned int ticks );
 extern void amiga_floppy_setup(char *, int *);
 #endif
 static void amiga_reset (void);
+static int amiga_wait_key (struct console *co);
 extern void amiga_init_sound(void);
 static void amiga_savekmsg_init(void);
 static void amiga_mem_console_write(struct console *co, const char *b,
@@ -113,6 +117,7 @@ static void amiga_heartbeat(int on);
 
 static struct console amiga_console_driver = {
 	name:		"debug",
+	wait_key:	amiga_wait_key,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,
 };
@@ -343,7 +348,7 @@ static void __init amiga_identify(void)
 
   case AMI_DRACO:
     panic("No support for Draco yet");
-
+ 
   default:
     panic("Unknown Amiga Model");
   }
@@ -408,16 +413,16 @@ void __init config_amiga(void)
   mach_keyb_init       = amiga_keyb_init;
   mach_kbdrate         = amiga_kbdrate;
   mach_init_IRQ        = amiga_init_IRQ;
-#ifndef CONFIG_APUS
   mach_default_handler = &amiga_default_handler;
+#ifndef CONFIG_APUS
   mach_request_irq     = amiga_request_irq;
   mach_free_irq        = amiga_free_irq;
   enable_irq           = amiga_enable_irq;
   disable_irq          = amiga_disable_irq;
-  mach_get_irq_list    = amiga_get_irq_list;
 #endif
   mach_get_model       = amiga_get_model;
   mach_get_hardware_list = amiga_get_hardware_list;
+  mach_get_irq_list    = amiga_get_irq_list;
   mach_gettimeoffset   = amiga_gettimeoffset;
   if (AMIGAHW_PRESENT(A3000_CLK)){
     mach_gettod  = a3000_gettod;
@@ -644,7 +649,7 @@ static int amiga_hwclk(int op, struct hwclk_time *t)
 		volatile struct tod2000 *tod = TOD_2000;
 
 		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
-
+	    
 		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
 			;
 
@@ -709,13 +714,13 @@ static int amiga_set_clock_mmss (unsigned long nowtime)
 		tod->second2 = real_seconds % 10;
 		tod->minute1 = real_minutes / 10;
 		tod->minute2 = real_minutes % 10;
-
+		
 		tod->cntrl1 = TOD3000_CNTRL1_FREE;
 	} else /* if (AMIGAHW_PRESENT(A2000_CLK)) */ {
 		volatile struct tod2000 *tod = TOD_2000;
 
 		tod->cntrl1 = TOD2000_CNTRL1_HOLD;
-
+	    
 		while (tod->cntrl1 & TOD2000_CNTRL1_BUSY)
 			;
 
@@ -728,6 +733,33 @@ static int amiga_set_clock_mmss (unsigned long nowtime)
 	}
 
 	return 0;
+}
+
+static int amiga_wait_key (struct console *co)
+{
+    int i;
+
+    while (1) {
+	while (ciaa.pra & 0x40);
+
+	/* debounce */
+	for (i = 0; i < 1000; i++);
+
+	if (!(ciaa.pra & 0x40))
+	    break;
+    }
+
+    /* wait for button up */
+    while (1) {
+	while (!(ciaa.pra & 0x40));
+
+	/* debounce */
+	for (i = 0; i < 1000; i++);
+
+	if (ciaa.pra & 0x40)
+	    break;
+    }
+    return 0;
 }
 
 static NORET_TYPE void amiga_reset( void )
@@ -951,9 +983,8 @@ static int amiga_get_hardware_list(char *buffer)
     AMIGAHW_ANNOUNCE(MAGIC_REKICK, "Magic Hard Rekick");
     AMIGAHW_ANNOUNCE(PCMCIA, "PCMCIA Slot");
     if (AMIGAHW_PRESENT(ZORRO))
-	len += sprintf(buffer+len, "\tZorro II%s AutoConfig: %d Expansion "
-				   "Device%s\n",
-		       AMIGAHW_PRESENT(ZORRO3) ? "I" : "",
+	len += sprintf(buffer+len, "\tZorro%s AutoConfig: %d Expansion Device%s\n",
+		       AMIGAHW_PRESENT(ZORRO3) ? " III" : "",
 		       zorro_num_autocon, zorro_num_autocon == 1 ? "" : "s");
 
 #undef AMIGAHW_ANNOUNCE
@@ -974,7 +1005,7 @@ int get_hardware_list(char *buffer)
 		mach_get_model(model);
 	else
 		strcpy(model, "Unknown PowerPC");
-
+	
 	len += sprintf(buffer+len, "Model:\t\t%s\n", model);
 	len += get_cpuinfo(buffer+len);
 	for (mem = 0, i = 0; i < m68k_realnum_memory; i++)

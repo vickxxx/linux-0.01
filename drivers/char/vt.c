@@ -90,7 +90,7 @@ unsigned int video_scan_lines;
  * comments - KDMKTONE doesn't put the process to sleep.
  */
 
-#if defined(__i386__) || defined(__alpha__) || defined(CONFIG_PPC_ISATIMER) \
+#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) \
     || (defined(__mips__) && defined(CONFIG_ISA)) \
     || (defined(__arm__) && defined(CONFIG_HOST_FOOTBRIDGE)) \
     || defined(__x86_64__)
@@ -165,9 +165,6 @@ do_kdsk_ioctl(int cmd, struct kbentry *user_kbe, int perm, struct kbd_struct *kb
 		return -EFAULT;
 	if (i >= NR_KEYS || s >= MAX_NR_KEYMAPS)
 		return -EINVAL;	
-
-	if (!capable(CAP_SYS_TTY_CONFIG))
-		perm = 0;
 
 	switch (cmd) {
 	case KDGKBENT:
@@ -278,9 +275,6 @@ do_kdgkb_ioctl(int cmd, struct kbsentry *user_kdgkb, int perm)
 	int delta;
 	char *first_free, *fj, *fnw;
 	int i, j, k;
-
-	if (!capable(CAP_SYS_TTY_CONFIG))
-		perm = 0;
 
 	/* we mostly copy too much here (512bytes), but who cares ;) */
 	if (copy_from_user(&tmp, user_kdgkb, sizeof(struct kbsentry)))
@@ -487,7 +481,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ucval = keyboard_type;
 		goto setchar;
 
-#if defined(CONFIG_X86)
+#if !defined(__alpha__) && !defined(__ia64__) && !defined(__mips__) && !defined(__arm__) && !defined(__sh__)
 		/*
 		 * These cannot be implemented on any machine that implements
 		 * ioperm() in user level (such as Alpha PCs).
@@ -594,7 +588,8 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		  default:
 			return -EINVAL;
 		}
-		tty_ldisc_flush(tty);
+		if (tty->ldisc.flush_buffer)
+			tty->ldisc.flush_buffer(tty);
 		return 0;
 
 	case KDGKBMODE:

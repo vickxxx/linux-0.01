@@ -327,14 +327,13 @@ static size_t parport_uss720_epp_read_data(struct parport *pp, void *buf, size_t
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t got = 0;
-	char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; got < length; got++) {
-		if (get_1284_register(pp, 4, buff))
+		if (get_1284_register(pp, 4, (char *)buf))
 			break;
-		buff++;
+		((char*)buf)++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -349,14 +348,13 @@ static size_t parport_uss720_epp_write_data(struct parport *pp, const void *buf,
 #if 0
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t written = 0;
-	const char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; written < length; written++) {
-		if (set_1284_register(pp, 4, *buff))
+		if (set_1284_register(pp, 4, (char *)buf))
 			break;
-		buff++;
+		((char*)buf)++;
 		if (get_1284_register(pp, 1, NULL))
 			break;
 		if (priv->reg[0] & 0x01) {
@@ -388,14 +386,13 @@ static size_t parport_uss720_epp_read_addr(struct parport *pp, void *buf, size_t
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t got = 0;
-	char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; got < length; got++) {
-		if (get_1284_register(pp, 3, buff))
+		if (get_1284_register(pp, 3, (char *)buf))
 			break;
-		buff++;
+		((char*)buf)++;
 		if (priv->reg[0] & 0x01) {
 			clear_epp_timeout(pp);
 			break;
@@ -409,14 +406,13 @@ static size_t parport_uss720_epp_write_addr(struct parport *pp, const void *buf,
 {
 	struct parport_uss720_private *priv = pp->private_data;	
 	size_t written = 0;
-	const char *buff = buf;
 
 	if (change_mode(pp, ECR_EPP))
 		return 0;
 	for (; written < length; written++) {
-		if (set_1284_register(pp, 3, *buff))
+		if (set_1284_register(pp, 3, *(char *)buf))
 			break;
-		buff++;
+		((char*)buf)++;
 		if (get_1284_register(pp, 1, NULL))
 			break;
 		if (priv->reg[0] & 0x01) {
@@ -467,14 +463,13 @@ static size_t parport_uss720_ecp_read_data(struct parport *pp, void *buffer, siz
 static size_t parport_uss720_ecp_write_addr(struct parport *pp, const void *buffer, size_t len, int flags)
 {
 	size_t written = 0;
-	const char *buff = buffer;
 
 	if (change_mode(pp, ECR_ECP))
 		return 0;
 	for (; written < len; written++) {
-		if (set_1284_register(pp, 5, *buff))
+		if (set_1284_register(pp, 5, *(char *)buffer))
 			break;
-		buff++;
+		((char*)buffer)++;
 	}
 	change_mode(pp, ECR_PS2);
 	return written;

@@ -109,7 +109,7 @@ asmlinkage int irix_prctl(struct pt_regs *regs)
 		if (error)
 			error = (task->run_list.next != NULL);
 		read_unlock(&tasklist_lock);
-		/* Can _your_ OS find this out that fast? */
+		/* Can _your_ OS find this out that fast? */ 
 		break;
 	}
 
@@ -332,7 +332,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		       current->comm, current->pid, name, value, retval);
 /*		if (retval == PROM_ENOENT)
 		  	retval = -ENOENT; */
-		break;
+		break;				   
 	}
 #endif
 
@@ -505,7 +505,7 @@ asmlinkage int irix_syssgi(struct pt_regs *regs)
 		}
 		break;
 	}
-
+	
 	default:
 		printk("irix_syssgi: Unsupported command %d\n", (int)cmd);
 		retval = -EINVAL;
@@ -624,10 +624,8 @@ asmlinkage int irix_stime(int value)
 	write_lock_irq(&xtime_lock);
 	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
-	time_adjust = 0;			/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
+	time_maxerror = MAXPHASE;
+	time_esterror = MAXPHASE;
 	write_unlock_irq(&xtime_lock);
 
 	return 0;
@@ -928,8 +926,8 @@ asmlinkage int irix_getdomainname(char *name, int len)
 		return error;
 
 	down_read(&uts_sem);
-	if (len > __NEW_UTS_LEN)
-		len = __NEW_UTS_LEN;
+	if(len > (__NEW_UTS_LEN - 1))
+		len = __NEW_UTS_LEN - 1;
 	error = 0;
 	if (copy_to_user(name, system_utsname.domainname, len))
 		error = -EFAULT;
@@ -1073,7 +1071,7 @@ asmlinkage unsigned long irix_mmap32(unsigned long addr, size_t len, int prot,
 		if (flags & IRIX_MAP_AUTOGROW) {
 			unsigned long old_pos;
 			long max_size = offset + len;
-
+			
 			if (max_size > file->f_dentry->d_inode->i_size) {
 				old_pos = sys_lseek (fd, max_size - 1, 0);
 				sys_write (fd, "", 1);
@@ -1712,7 +1710,7 @@ asmlinkage int irix_statvfs64(char *fname, struct irix_statvfs64 *buf)
 
 	printk("[%s:%d] Wheee.. irix_statvfs(%s,%p)\n",
 	       current->comm, current->pid, fname, buf);
-	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs64));
+	error = verify_area(VERIFY_WRITE, buf, sizeof(struct irix_statvfs));
 	if(error)
 		goto out;
 	error = user_path_walk(fname, &nd);
@@ -1878,8 +1876,7 @@ static int irix_filldir32(void *__buf, const char *name, int namlen,
 	return 0;
 }
 
-asmlinkage int irix_ngetdents(unsigned int fd, void * dirent,
-	unsigned int count, int *eob)
+asmlinkage int irix_ngetdents(unsigned int fd, void * dirent, unsigned int count, int *eob)
 {
 	struct file *file;
 	struct irix_dirent32 *lastdirent;
@@ -1903,7 +1900,6 @@ asmlinkage int irix_ngetdents(unsigned int fd, void * dirent,
 	error = vfs_readdir(file, irix_filldir32, &buf);
 	if (error < 0)
 		goto out_putf;
-
 	error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
@@ -1912,9 +1908,10 @@ asmlinkage int irix_ngetdents(unsigned int fd, void * dirent,
 	}
 
 	if (put_user(0, eob) < 0) {
-		error = -EFAULT;
+		error = EFAULT;
 		goto out_putf;
 	}
+
 
 #ifdef DEBUG_GETDENTS
 	printk("eob=%d returning %d\n", *eob, count - buf.count);

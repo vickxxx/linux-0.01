@@ -242,7 +242,7 @@ SendMessageWithATN:
 
 SendIdentifyMsg:
 	CALL	SendMessage
-	CLEAR	ATN
+	JUMP	SendCommand
 
 IgnoreMsgBeforeCommand:
 	CLEAR	ACK

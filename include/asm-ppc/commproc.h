@@ -1,4 +1,8 @@
 /*
+ * BK Id: SCCS/s.commproc.h 1.16 09/27/01 12:41:09 trini
+ */
+
+/*
  * MPC8xx Communication Processor Module.
  * Copyright (c) 1997 Dan Malek (dmalek@jlc.net)
  *
@@ -466,23 +470,6 @@ typedef struct scc_enet {
 #define SICR_ENET_CLKRT	((uint)0x0000003d)
 #endif	/* CONFIG_RPXCLASSIC */
 
-/***  D-BOX2  ***********************************************/
-
-#ifdef CONFIG_DBOX2
-
-#define PA_ENET_RXD	((ushort)0x0004)
-#define PA_ENET_TXD	((ushort)0x0008)
-#define PA_ENET_RCLK	((ushort)0x0200)
-#define PA_ENET_TCLK	((ushort)0x0800)
-
-#define PC_ENET_TENA	((ushort)0x0002)
-#define PC_ENET_CLSN	((ushort)0x0040)
-#define PC_ENET_RENA	((ushort)0x0080)
-
-#define SICR_ENET_MASK	((uint)0x0000ff00)
-#define SICR_ENET_CLKRT	((uint)0x00003d00)
-#endif	/* CONFIG_DBOX2 */
-
 /***  TQM823L, TQM850L  ***********************************************/
 
 #if defined(CONFIG_TQM823L) || defined(CONFIG_TQM850L)
@@ -749,10 +736,6 @@ typedef struct iic {
 	ushort	iic_tbptr;	/* Internal */
 	ushort	iic_tbc;	/* Internal */
 	uint	iic_txtmp;	/* Internal */
-	uint	iic_res;
-	ushort	iic_rpbase;	/* Relocation pointer */
-	ushort	iic_res2;
-
 } iic_t;
 
 #define BD_IIC_START		((ushort)0x0400)
@@ -806,9 +789,8 @@ typedef struct iic {
 #define CICR_IEN		((uint)0x00000080)	/* Int. enable */
 #define CICR_SPS		((uint)0x00000001)	/* SCC Spread */
 
-extern void cpm_install_handler(int vec,
+extern void cpm_install_handler(int vec, 
 		void (*handler)(void *, struct pt_regs *regs), void *dev_id);
 extern void cpm_free_handler(int vec);
-extern const char *cpm_int_name[];
 
 #endif /* __CPM_8XX__ */

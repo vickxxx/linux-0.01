@@ -6,16 +6,16 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $*.s
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $*.o
 
 all:	sni.o int-handler.o
 
 O_TARGET := sni.o
 
-obj-y	 		+= int-handler.o io.o irq.o pcimt_scache.o reset.o \
-			   setup.o
-
-obj-$(CONFIG_PCI)	+= pci.o
+obj-y	 := int-handler.o io.o irq.o pci.o pcimt_scache.o reset.o setup.o
 
 int-handler.o: int-handler.S
 

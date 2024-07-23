@@ -10,11 +10,8 @@
  *
  */
 
-#define DRV_NAME	"aironet4500_cs"
-#define DRV_VERSION	"0.1"
-
 static const char *awc_version =
-DRV_NAME ".c v" DRV_VERSION " 1/1/99 Elmer Joandi, elmer@ylenurme.ee.\n";
+"aironet4500_cs.c v0.1 1/1/99 Elmer Joandi, elmer@ylenurme.ee.\n";
 
 
 #include <linux/module.h>
@@ -27,9 +24,6 @@ DRV_NAME ".c v" DRV_VERSION " 1/1/99 Elmer Joandi, elmer@ylenurme.ee.\n";
 #include <linux/timer.h>
 #include <linux/interrupt.h>
 #include <linux/in.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -165,34 +159,6 @@ static int awc_pcmcia_close(struct net_device *dev)
 	return ret;
 }
 
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
-}
-
-#ifdef PCMCIA_DEBUG
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return pc_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	pc_debug = level;
-}
-#endif /* PCMCIA_DEBUG */
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-#ifdef PCMCIA_DEBUG
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-#endif /* PCMCIA_DEBUG */
-};
-
 /*
 	awc_attach() creates an "instance" of the driver, allocating
 	local data structures for one device.  The device is registered
@@ -250,7 +216,7 @@ static dev_link_t *awc_attach(void)
 	};
 	memset(dev,0,sizeof(struct net_device));
 	dev->priv = kmalloc(sizeof(struct awc_private), GFP_KERNEL);
-	if (!dev->priv ) {printk(KERN_CRIT "out of mem on dev priv alloc \n"); kfree(dev); return NULL;};
+	if (!dev->priv ) {printk(KERN_CRIT "out of mem on dev priv alloc \n"); return NULL;};
 	memset(dev->priv,0,sizeof(struct awc_private));
 	
 //	link->dev->minor = dev->minor;
@@ -264,8 +230,7 @@ static dev_link_t *awc_attach(void)
 //	dev->set_config = 		&awc_config_misiganes,aga mitte awc_config;
 	dev->get_stats = 		&awc_get_stats;
 //	dev->set_multicast_list = 	&awc_set_multicast_list;
-	SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
-	
+
 	strcpy(dev->name, ((struct awc_private *)dev->priv)->node.dev_name);
 
 	ether_setup(dev);
@@ -315,7 +280,7 @@ static dev_link_t *awc_attach(void)
 static void awc_detach(dev_link_t *link)
 {
 	dev_link_t **linkp;
-	unsigned long flags;
+	long flags;
 	int i=0;
 
 	DEBUG(0, "awc_detach(0x%p)\n", link);

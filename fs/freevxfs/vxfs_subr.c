@@ -27,7 +27,7 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_subr.c,v 1.8 2001/12/28 20:50:47 hch Exp hch $"
+#ident "$Id: vxfs_subr.c,v 1.5 2001/04/26 22:49:51 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - shared subroutines.
@@ -37,7 +37,6 @@
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 
-#include "vxfs_kcompat.h"
 #include "vxfs_extern.h"
 
 
@@ -50,12 +49,6 @@ struct address_space_operations vxfs_aops = {
 	.sync_page =		block_sync_page,
 };
 
-__inline__ void
-vxfs_put_page(struct page *pp)
-{
-	kunmap(pp);
-	page_cache_release(pp);
-}
 
 /**
  * vxfs_get_page - read a page into memory.
@@ -69,8 +62,9 @@ vxfs_put_page(struct page *pp)
  *   The wanted page on success, else a NULL pointer.
  */
 struct page *
-vxfs_get_page(struct address_space *mapping, u_long n)
+vxfs_get_page(struct inode *ip, u_long n)
 {
+	struct address_space *		mapping = ip->i_mapping;
 	struct page *			pp;
 
 	pp = read_cache_page(mapping, n,
@@ -94,6 +88,13 @@ fail:
 	return ERR_PTR(-EIO);
 }
 
+__inline__ void
+vxfs_put_page(struct page *pp)
+{
+	kunmap(pp);
+	page_cache_release(pp);
+}
+
 /**
  * vxfs_bread - read buffer for a give inode,block tuple
  * @ip:		inode
@@ -113,7 +114,7 @@ vxfs_bread(struct inode *ip, int block)
 	daddr_t			pblock;
 
 	pblock = vxfs_bmap1(ip, block);
-	bp = sb_bread(ip->i_sb, pblock);
+	bp = bread(ip->i_dev, pblock, ip->i_sb->s_blocksize);
 
 	return (bp);
 }
@@ -134,14 +135,17 @@ vxfs_bread(struct inode *ip, int block)
  *   Zero on success, else a negativ error code (-EIO).
  */
 static int
-vxfs_getblk(struct inode *ip, sector_t iblock,
+vxfs_getblk(struct inode *ip, long iblock,
 	    struct buffer_head *bp, int create)
 {
 	daddr_t			pblock;
 
 	pblock = vxfs_bmap1(ip, iblock);
 	if (pblock != 0) {
-		map_bh(bp, ip->i_sb, pblock);
+		bp->b_dev = ip->i_dev;
+		bp->b_blocknr = pblock;
+		bp->b_state |= (1UL << BH_Mapped);
+
 		return 0;
 	}
 

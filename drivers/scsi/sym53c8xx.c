@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
+**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@free.fr>
+**          Gerard Roudier              <groudier@club-internet.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -2651,7 +2651,7 @@ static	struct script script0 __initdata = {
 	**	The below GETJOB_BEGIN to GETJOB_END section of SCRIPTS 
 	**	is a critical path. If it is partially executed, it then 
 	**	may happen that the job address is not yet in the DSA 
-	**	and the next queue position points to the next JOB.
+	**	and the the next queue position points to the next JOB.
 	*/
 	SCR_LOAD_ABS (dsa, 4),
 		PADDRH (startpos),
@@ -6992,7 +6992,7 @@ static void ncr_chip_reset (ncb_p np)
 
 static void ncr_soft_reset(ncb_p np)
 {
-	u_char istat = 0;
+	u_char istat;
 	int i;
 
 	if (!(np->features & FE_ISTAT1) || !(INB (nc_istat1) & SRUN))
@@ -7005,7 +7005,7 @@ static void ncr_soft_reset(ncb_p np)
 			INW (nc_sist);
 		}
 		else if (istat & DIP) {
-			if (INB (nc_dstat) & ABRT)
+			if (INB (nc_dstat) & ABRT);
 				break;
 		}
 		UDELAY(5);
@@ -11981,19 +11981,6 @@ static lcb_p ncr_setup_lcb (ncb_p np, u_char tn, u_char ln, u_char *inq_data)
 		inq_byte7 |= INQ7_SYNC;
 
 	/*
-	**	Don't do PPR negotiations on SCSI-2 devices unless
-	**	they set the DT bit (0x04) in byte 57 of the INQUIRY
-	**	return data.
-	*/
-	if (((inq_data[2] & 0x07) < 3) && (inq_data[4] < 53 ||
-					   !(inq_data[56] & 0x04))) {
-		if (tp->minsync < 10)
-			tp->minsync = 10;
-		if (tp->usrsync < 10)
-			tp->usrsync = 10;
-	}
-
-	/*
 	**	Prepare negotiation if SIP capabilities have changed.
 	*/
 	tp->inq_done = 1;
@@ -12893,7 +12880,7 @@ static void __init ncr_detect_pqs_pds(void)
 **    differ and attach them using the order in the NVRAM.
 **
 **    If no NVRAM is found or data appears invalid attach boards in 
-**    the order they are detected.
+**    the the order they are detected.
 **===================================================================
 */
 int __init sym53c8xx_detect(Scsi_Host_Template *tpnt)
@@ -13182,7 +13169,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 	** descriptors.
 	*/
 	if (chip && (chip->features & FE_DAC)) {
-		if (pci_set_dma_mask(pdev, (u64) 0xffffffffffULL))
+		if (pci_set_dma_mask(pdev, (u64) 0xffffffffff))
 			chip->features &= ~FE_DAC_IN_USE;
 		else
 			chip->features |= FE_DAC_IN_USE;
@@ -14124,7 +14111,7 @@ printk("ncr_user_command: data=%ld\n", uc->data);
 	if (len)
 		return -EINVAL;
 	else {
-		unsigned long flags;
+		long flags;
 
 		NCR_LOCK_NCB(np, flags);
 		ncr_usercmd (np);

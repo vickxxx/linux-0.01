@@ -2,13 +2,15 @@
  *
  * Name:	skcsum.c
  * Project:	GEnesis, PCI Gigabit Ethernet Adapter
+ * Version:	$Revision: 1.8 $
+ * Date:	$Date: 2001/02/06 11:15:36 $
  * Purpose:	Store/verify Internet checksum in send/receive packets.
  *
  ******************************************************************************/
 
 /******************************************************************************
  *
- *	(C)Copyright 1998-2003 SysKonnect GmbH.
+ *	(C)Copyright 1998-2001 SysKonnect GmbH.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -19,11 +21,52 @@
  *
  ******************************************************************************/
 
+/******************************************************************************
+ *
+ * History:
+ *
+ *	$Log: skcsum.c,v $
+ *	Revision 1.8  2001/02/06 11:15:36  rassmann
+ *	Supporting two nets on dual-port adapters.
+ *	
+ *	Revision 1.7  2000/06/29 13:17:05  rassmann
+ *	Corrected reception of a packet with UDP checksum == 0 (which means there
+ *	is no UDP checksum).
+ *	
+ *	Revision 1.6  2000/02/21 12:35:10  cgoos
+ *	Fixed license header comment.
+ *	
+ *	Revision 1.5  2000/02/21 11:05:19  cgoos
+ *	Merged changes back to common source.
+ *	Fixed rx path for BIG ENDIAN architecture.
+ *	
+ *	Revision 1.1  1999/07/26 15:28:12  mkarl
+ *	added return SKCS_STATUS_IP_CSUM_ERROR_UDP and
+ *	SKCS_STATUS_IP_CSUM_ERROR_TCP to pass the NidsTester
+ *	changed from common source to windows specific source
+ *	therefore restarting with v1.0
+ *	
+ *	Revision 1.3  1999/05/10 08:39:33  mkarl
+ *	prevent overflows in SKCS_HTON16
+ *	fixed a bug in pseudo header checksum calculation
+ *	added some comments
+ *	
+ *	Revision 1.2  1998/10/22 11:53:28  swolf
+ *	Now using SK_DBG_MSG.
+ *	
+ *	Revision 1.1  1998/09/01 15:35:41  swolf
+ *	initial revision
+ *
+ *	13-May-1998 sw	Created.
+ *
+ ******************************************************************************/
+
 #ifdef SK_USE_CSUM	/* Check if CSUM is to be used. */
 
 #ifndef lint
-static const char SysKonnectFileId[] =
-	"@(#) $Id: skcsum.c,v 1.12 2003/08/20 13:55:53 mschmid Exp $ (C) SysKonnect.";
+static const char SysKonnectFileId[] = "@(#)"
+	"$Id: skcsum.c,v 1.8 2001/02/06 11:15:36 rassmann Exp $"
+	" (C) SysKonnect.";
 #endif	/* !lint */
 
 /******************************************************************************
@@ -55,8 +98,8 @@ static const char SysKonnectFileId[] =
  *
  *	"h/skdrv1st.h"
  *	"h/skcsum.h"
- *	"h/sktypes.h"
- *	"h/skqueue.h"
+ *	 "h/sktypes.h"
+ *	 "h/skqueue.h"
  *	"h/skdrv2nd.h"
  *
  ******************************************************************************/
@@ -121,7 +164,7 @@ static const char SysKonnectFileId[] =
  * little/big endian conversion on little endian machines only.
  */
 #ifdef SK_LITTLE_ENDIAN
-#define SKCS_HTON16(Val16)	(((unsigned) (Val16) >> 8) | (((Val16) & 0xff) << 8))
+#define SKCS_HTON16(Val16)	(((unsigned) (Val16) >> 8) | (((Val16) & 0xFF) << 8))
 #endif	/* SK_LITTLE_ENDIAN */
 #ifdef SK_BIG_ENDIAN
 #define SKCS_HTON16(Val16)	(Val16)
@@ -152,7 +195,7 @@ static const char SysKonnectFileId[] =
  *	zero.)
  *
  * Note:
- *	There is a bug in the GENESIS ASIC which may lead to wrong checksums.
+ *	There is a bug in the ASIC whic may lead to wrong checksums.
  *
  * Arguments:
  *	pAc - A pointer to the adapter context struct.
@@ -368,9 +411,9 @@ int					NetNumber)		/* Net number */
 			SKCS_OFS_IP_DESTINATION_ADDRESS + 0) +
 		(unsigned long) *(SK_U16 *) SKCS_IDX(pIpHeader,
 			SKCS_OFS_IP_DESTINATION_ADDRESS + 2) +
-		(unsigned long) SKCS_HTON16(NextLevelProtocol) +
+		(unsigned long) (NextLevelProtocol << 8) +
 		(unsigned long) SKCS_HTON16(IpDataLength);
-	
+
 	/* Add-in any carries. */
 
 	SKCS_OC_ADD(PseudoHeaderChecksum, PseudoHeaderChecksum, 0);
@@ -379,7 +422,6 @@ int					NetNumber)		/* Net number */
 
 	SKCS_OC_ADD(pPacketInfo->PseudoHeaderChecksum, PseudoHeaderChecksum, 0);
 
-	pPacketInfo->ProtocolFlags = ProtocolFlags;
 	NextLevelProtoStats->TxOkCts++;	/* Success. */
 }	/* SkCsGetSendInfo */
 
@@ -551,7 +593,7 @@ int			NetNumber)	/* Net number */
 	NextLevelProtocol = *(SK_U8 *)
 		SKCS_IDX(pIpHeader, SKCS_OFS_IP_NEXT_LEVEL_PROTOCOL);
 
-	if (IpHeaderChecksum != 0xffff) {
+	if (IpHeaderChecksum != 0xFFFF) {
 		pAc->Csum.ProtoStats[NetNumber][SKCS_PROTO_STATS_IP].RxErrCts++;
 		/* the NDIS tester wants to know the upper level protocol too */
 		if (NextLevelProtocol == SKCS_PROTO_ID_TCP) {
@@ -669,7 +711,7 @@ int			NetNumber)	/* Net number */
 
 	/* Check if the TCP/UDP checksum is ok. */
 
-	if ((unsigned) NextLevelProtocolChecksum == 0xffff) {
+	if ((unsigned) NextLevelProtocolChecksum == 0xFFFF) {
 
 		/* TCP/UDP checksum ok. */
 
@@ -736,7 +778,7 @@ int			NetNumber)
 	*pChecksum2Offset = SKCS_MAC_HEADER_SIZE + SKCS_IP_HEADER_SIZE;
 }	/* SkCsSetReceiveFlags */
 
-#ifndef SK_CS_CALCULATE_CHECKSUM
+#ifndef SkCsCalculateChecksum
 
 /******************************************************************************
  *
@@ -801,7 +843,7 @@ unsigned	Length)		/* Length of data. */
 	return ((unsigned) Checksum);
 }	/* SkCsCalculateChecksum */
 
-#endif /* SK_CS_CALCULATE_CHECKSUM */
+#endif /* SkCsCalculateChecksum */
 
 /******************************************************************************
  *
@@ -847,16 +889,14 @@ SK_EVPARA	Param)	/* Event dependent parameter. */
 	 */
 	case SK_CSUM_EVENT_CLEAR_PROTO_STATS:
 
-		ProtoIndex = (int)Param.Para32[1];
-		NetNumber = (int)Param.Para32[0];
+		ProtoIndex = (int)Param.Para32[0];
+		NetNumber = (int)Param.Para32[1];
 		if (ProtoIndex < 0) {	/* Clear for all protocols. */
-			if (NetNumber >= 0) {
-				SK_MEMSET(&pAc->Csum.ProtoStats[NetNumber][0], 0,
-					sizeof(pAc->Csum.ProtoStats[NetNumber]));
-			}
+			memset(&pAc->Csum.ProtoStats[NetNumber][0], 0,
+				sizeof(pAc->Csum.ProtoStats[NetNumber]));
 		}
 		else {					/* Clear for individual protocol. */
-			SK_MEMSET(&pAc->Csum.ProtoStats[NetNumber][ProtoIndex], 0,
+			memset(&pAc->Csum.ProtoStats[NetNumber][ProtoIndex], 0,
 				sizeof(pAc->Csum.ProtoStats[NetNumber][ProtoIndex]));
 		}
 		break;

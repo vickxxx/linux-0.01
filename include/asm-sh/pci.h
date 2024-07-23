@@ -10,10 +10,9 @@
    or architectures with incomplete PCI setup by the loader */
 
 #define pcibios_assign_all_busses()	1
-#define pcibios_scan_all_fns()		0
 
-#if defined(CONFIG_CPU_SUBTYPE_ST40)
-/* These are currently the correct values for the ST40 based chips.
+#if defined(CONFIG_CPU_SUBTYPE_ST40STB1)
+/* These are currently the correct values for the STM overdrive board. 
  * We need some way of setting this on a board specific way, it will 
  * not be the same on other boards I think
  */
@@ -26,12 +25,10 @@
 #elif defined(CONFIG_SH_BIGSUR) && defined(CONFIG_CPU_SUBTYPE_SH7751)
 #define PCIBIOS_MIN_IO		0x2000
 #define PCIBIOS_MIN_MEM		0xFD000000
-#elif defined(CONFIG_SH_7751_SOLUTION_ENGINE) || defined(CONFIG_SH_SECUREEDGE5410)
+
+#elif defined(CONFIG_SH_7751_SOLUTION_ENGINE)
 #define PCIBIOS_MIN_IO          0x4000
 #define PCIBIOS_MIN_MEM         0xFD000000
-#elif defined(CONFIG_PCI_SD0001)
-#define PCIBIOS_MIN_IO		0x2000
-#define PCIBIOS_MIN_MEM		0x01000000L
 #endif
 
 struct pci_dev;
@@ -52,14 +49,6 @@ static inline void pcibios_penalize_isa_irq(int irq)
 #include <asm/scatterlist.h>
 #include <linux/string.h>
 #include <asm/io.h>
-
-struct pci_dev;
-
-/* The PCI address space does equal the physical memory
- * address space.  The networking and block device layers use
- * this boolean for bounce buffer decisions.
- */
-#define PCI_DMA_BUS_IS_PHYS	(1)
 
 /* Allocate and map kernel buffer using consistent mode DMA for a device.
  * hwdev should be valid struct pci_dev pointer for PCI devices,
@@ -99,31 +88,6 @@ static inline dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr,
 #endif
 	return virt_to_bus(ptr);
 }
-
-/* pci_unmap_{single,page} being a nop depends upon the
- * configuration.
- */
-#ifdef CONFIG_SH_PCIDMA_NONCOHERENT
-#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
-	dma_addr_t ADDR_NAME;
-#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
-	__u32 LEN_NAME;
-#define pci_unmap_addr(PTR, ADDR_NAME)			\
-	((PTR)->ADDR_NAME)
-#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
-	(((PTR)->ADDR_NAME) = (VAL))
-#define pci_unmap_len(PTR, LEN_NAME)			\
-	((PTR)->LEN_NAME)
-#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
-	(((PTR)->LEN_NAME) = (VAL))
-#else
-#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)
-#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)
-#define pci_unmap_addr(PTR, ADDR_NAME)		(0)
-#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)	do { } while (0)
-#define pci_unmap_len(PTR, LEN_NAME)		(0)
-#define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do { } while (0)
-#endif
 
 /* Unmap a single streaming mode DMA translation.  The dma_addr and size
  * must match what was provided for in a previous pci_map_single call.  All
@@ -231,11 +195,6 @@ static inline int pci_dma_supported(struct pci_dev *hwdev, u64 mask)
 {
 	return 1;
 }
-
-/* Not supporting more than 32-bit PCI bus addresses now, but
- * must satisfy references to this function.  Change if needed.
- */
-#define pci_dac_dma_supported(pci_dev, mask) (0)
 
 /* Return the index of the PCI controller for device PDEV. */
 #define pci_controller_num(PDEV)	(0)

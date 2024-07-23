@@ -333,7 +333,7 @@ static void fd_deselect (int drive)
 
 	get_fdc(drive);
 	save_flags (flags);
-	cli();
+	sti();
 
 	selected = -1;
 
@@ -366,8 +366,10 @@ static int fd_motor_on(int nr)
 		unit[nr].motor = 1;
 		fd_select(nr);
 
+		del_timer(&motor_on_timer);
 		motor_on_timer.data = nr;
-		mod_timer(&motor_on_timer, jiffies + HZ/2);
+		motor_on_timer.expires = jiffies + HZ/2;
+		add_timer(&motor_on_timer);
 
 		on_attempts = 10;
 		sleep_on (&motor_wait);
@@ -425,9 +427,11 @@ static void floppy_off (unsigned int nr)
 	int drive;
 
 	drive = nr & 3;
+	del_timer(motor_off_timer + drive);
+	motor_off_timer[drive].expires = jiffies + 3*HZ;
 	/* called this way it is always from interrupt */
 	motor_off_timer[drive].data = nr | 0x80000000;
-	mod_timer(motor_off_timer + drive, jiffies + 3*HZ);
+	add_timer(motor_off_timer + nr);
 }
 
 static int fd_calibrate(int drive)
@@ -1462,7 +1466,10 @@ static void redo_fd_request(void)
 
 			unit[drive].dirty = 1;
 		        /* reset the timer */
-			mod_timer(flush_track_timer + drive, jiffies + 1);
+		        del_timer (flush_track_timer + drive);
+			    
+			flush_track_timer[drive].expires = jiffies + 1;
+			add_timer (flush_track_timer + drive);
 			restore_flags (flags);
 			break;
 		}
@@ -1484,6 +1491,7 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 {
 	int drive = inode->i_rdev & 3;
 	static struct floppy_struct getprm;
+	struct super_block * sb;
 
 	switch(cmd){
 	case HDIO_GETGEO:
@@ -1670,6 +1678,9 @@ static int floppy_open(struct inode *inode, struct file *filp)
 
 static int floppy_release(struct inode * inode, struct file * filp)
 {
+#ifdef DEBUG
+	struct super_block * sb;
+#endif
 	int drive = MINOR(inode->i_rdev) & 3;
 
 	if (unit[drive].dirty == 1) {

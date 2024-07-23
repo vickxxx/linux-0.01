@@ -1,8 +1,8 @@
 /* tulip_core.c: A DEC 21x4x-family ethernet driver for Linux. */
 
 /*
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
-	Copyright 2000-2002  The Linux Kernel Team
+	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
+	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
 	This software may be used and distributed according to the terms
@@ -15,19 +15,18 @@
 */
 
 #define DRV_NAME	"tulip"
-#define DRV_VERSION	"0.9.15-pre12"
-#define DRV_RELDATE	"Aug 9, 2002"
+#define DRV_VERSION	"0.9.15-pre9"
+#define DRV_RELDATE	"Nov 6, 2001"
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/pci.h>
 #include "tulip.h"
+#include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/etherdevice.h>
 #include <linux/delay.h>
 #include <linux/mii.h>
 #include <linux/ethtool.h>
-#include <linux/crc32.h>
 #include <asm/unaligned.h>
 #include <asm/uaccess.h>
 
@@ -63,7 +62,7 @@ const char * const medianame[32] = {
 /* Set the copy breakpoint for the copy-only-tiny-buffer Rx structure. */
 #if defined(__alpha__) || defined(__arm__) || defined(__hppa__) \
 	|| defined(__sparc_) || defined(__ia64__) \
-	|| defined(__sh__) || defined(__mips__) || defined(__SH5__)
+	|| defined(__sh__) || defined(__mips__)
 static int rx_copybreak = 1518;
 #else
 static int rx_copybreak = 100;
@@ -94,8 +93,6 @@ static int csr0 = 0x01A00000 | 0x8000;
 static int csr0 = 0x01A00000 | 0x9000;
 #elif defined(__arm__) || defined(__sh__)
 static int csr0 = 0x01A00000 | 0x4800;
-#elif defined(__mips__)
-static int csr0 = 0x00200000 | 0x4000;
 #else
 #warning Processor architecture undefined!
 static int csr0 = 0x00A00000 | 0x4800;
@@ -176,7 +173,7 @@ struct tulip_chip_table tulip_tbl[] = {
 
   /* COMET */
   { "ADMtek Comet", 256, 0x0001abef,
-	HAS_MII | MC_HASH_ONLY | COMET_MAC_ADDR, comet_timer },
+	MC_HASH_ONLY | COMET_MAC_ADDR, comet_timer },
 
   /* COMPEX9881 */
   { "Compex 9881 PMAC", 128, 0x0001ebef,
@@ -191,10 +188,6 @@ struct tulip_chip_table tulip_tbl[] = {
   { "Davicom DM9102/DM9102A", 128, 0x0001ebef,
 	HAS_MII | HAS_MEDIA_TABLE | CSR12_IN_SROM | HAS_ACPI,
 	tulip_timer },
-
-  /* CONEXANT */
-  {	"Conexant LANfinity", 256, 0x0001ebef,
-	HAS_MII, tulip_timer },
 };
 
 
@@ -212,13 +205,10 @@ static struct pci_device_id tulip_pci_tbl[] __devinitdata = {
 	{ 0x1317, 0x0981, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x1317, 0x0985, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x1317, 0x1985, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1317, 0x9511, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x13D1, 0xAB02, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x13D1, 0xAB03, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x13D1, 0xAB08, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x104A, 0x0981, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x104A, 0x2774, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1259, 0xa120, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x11F6, 0x9881, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMPEX9881 },
 	{ 0x8086, 0x0039, PCI_ANY_ID, PCI_ANY_ID, 0, 0, I21145 },
 	{ 0x1282, 0x9100, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DM910X },
@@ -226,15 +216,6 @@ static struct pci_device_id tulip_pci_tbl[] __devinitdata = {
 	{ 0x1113, 0x1216, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x1113, 0x1217, PCI_ANY_ID, PCI_ANY_ID, 0, 0, MX98715 },
 	{ 0x1113, 0x9511, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1186, 0x1541, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1186, 0x1561, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1626, 0x8410, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1737, 0xAB09, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x1737, 0xAB08, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x17B3, 0xAB08, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
-	{ 0x14f1, 0x1803, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CONEXANT },
-	{ 0x10b9, 0x5261, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DM910X },	/* ALi 1563 integrated ethernet */
-	{ 0x10b7, 0x9300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },	/* 3Com 3CSOHO100B-TX */
 	{ } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, tulip_pci_tbl);
@@ -321,8 +302,8 @@ static void tulip_up(struct net_device *dev)
 	tp->dirty_rx = tp->dirty_tx = 0;
 
 	if (tp->flags & MC_HASH_ONLY) {
-		u32 addr_low = le32_to_cpu(get_unaligned((u32 *)dev->dev_addr));
-		u32 addr_high = le16_to_cpu(get_unaligned((u16 *)(dev->dev_addr+4)));
+		u32 addr_low = cpu_to_le32(get_unaligned((u32 *)dev->dev_addr));
+		u32 addr_high = cpu_to_le32(get_unaligned((u16 *)(dev->dev_addr+4)));
 		if (tp->chip_id == AX88140) {
 			outl(0, ioaddr + CSR13);
 			outl(addr_low,  ioaddr + CSR14);
@@ -467,7 +448,7 @@ media_picked:
 		tp->csr6 = 0x01a80200;
 		outl(0x0f370000 | inw(ioaddr + 0x80), ioaddr + 0x80);
 		outl(0x11000 | inw(ioaddr + 0xa0), ioaddr + 0xa0);
-	} else if (tp->chip_id == COMET || tp->chip_id == CONEXANT) {
+	} else if (tp->chip_id == COMET) {
 		/* Enable automatic Tx underrun recovery. */
 		outl(inl(ioaddr + 0x88) | 1, ioaddr + 0x88);
 		dev->if_port = tp->mii_cnt ? 11 : 0;
@@ -580,7 +561,7 @@ static void tulip_tx_timeout(struct net_device *dev)
 					dev->if_port = 2 - dev->if_port;
 				} else
 					dev->if_port = 0;
-			else if (dev->if_port != 0 || (csr12 & 0x0004) != 0)
+			else
 				dev->if_port = 1;
 			tulip_select_media(dev, 0);
 		}
@@ -720,9 +701,8 @@ tulip_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	int entry;
 	u32 flag;
 	dma_addr_t mapping;
-	unsigned long eflags;
 
-	spin_lock_irqsave(&tp->lock, eflags);
+	spin_lock_irq(&tp->lock);
 
 	/* Calculate the next Tx descriptor entry. */
 	entry = tp->cur_tx % TX_RING_SIZE;
@@ -757,7 +737,7 @@ tulip_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Trigger an immediate transmit demand. */
 	outl(0, dev->base_addr + CSR1);
 
-	spin_unlock_irqrestore(&tp->lock, eflags);
+	spin_unlock_irq(&tp->lock);
 
 	dev->trans_start = jiffies;
 
@@ -1054,6 +1034,41 @@ static int private_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
    new frame, not around filling tp->setup_frame.  This is non-deterministic
    when re-entered but still correct. */
 
+/* The little-endian AUTODIN32 ethernet CRC calculation.
+   N.B. Do not use for bulk data, use a table-based routine instead.
+   This is common code and should be moved to net/core/crc.c */
+static unsigned const ethernet_polynomial_le = 0xedb88320U;
+static inline u32 ether_crc_le(int length, unsigned char *data)
+{
+	u32 crc = 0xffffffff;	/* Initial value. */
+	while(--length >= 0) {
+		unsigned char current_octet = *data++;
+		int bit;
+		for (bit = 8; --bit >= 0; current_octet >>= 1) {
+			if ((crc ^ current_octet) & 1) {
+				crc >>= 1;
+				crc ^= ethernet_polynomial_le;
+			} else
+				crc >>= 1;
+		}
+	}
+	return crc;
+}
+static unsigned const ethernet_polynomial = 0x04c11db7U;
+static inline u32 ether_crc(int length, unsigned char *data)
+{
+    int crc = -1;
+
+    while(--length >= 0) {
+		unsigned char current_octet = *data++;
+		int bit;
+		for (bit = 0; bit < 8; bit++, current_octet >>= 1)
+			crc = (crc << 1) ^
+				((crc < 0) ^ (current_octet & 1) ? ethernet_polynomial : 0);
+    }
+    return crc;
+}
+
 #undef set_bit_le
 #define set_bit_le(i,p) do { ((char *)(p))[(i)/8] |= (1<<((i)%8)); } while(0)
 
@@ -1074,12 +1089,12 @@ static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 
 		set_bit_le(index, hash_table);
 
+		for (i = 0; i < 32; i++) {
+			*setup_frm++ = hash_table[i];
+			*setup_frm++ = hash_table[i];
+		}
+		setup_frm = &tp->setup_frame[13*6];
 	}
-	for (i = 0; i < 32; i++) {
-		*setup_frm++ = hash_table[i];
-		*setup_frm++ = hash_table[i];
-	}
-	setup_frm = &tp->setup_frame[13*6];
 
 	/* Fill the final entry with our physical address. */
 	eaddrs = (u16 *)dev->dev_addr;
@@ -1179,13 +1194,11 @@ static void set_rx_mode(struct net_device *dev)
 		}
 	} else {
 		unsigned long flags;
-		u32 tx_flags = 0x08000000 | 192;
 
 		/* Note that only the low-address shortword of setup_frame is valid!
 		   The values are doubled for big-endian architectures. */
 		if (dev->mc_count > 14) { /* Must use a multicast hash table. */
 			build_setup_frame_hash(tp->setup_frame, dev);
-			tx_flags = 0x08400000 | 192;
 		} else {
 			build_setup_frame_perfect(tp->setup_frame, dev);
 		}
@@ -1195,6 +1208,7 @@ static void set_rx_mode(struct net_device *dev)
 		if (tp->cur_tx - tp->dirty_tx > TX_RING_SIZE - 2) {
 			/* Same setup recently queued, we need not add it. */
 		} else {
+			u32 tx_flags = 0x08000000 | 192;
 			unsigned int entry;
 			int dummy = -1;
 
@@ -1247,13 +1261,31 @@ static void __devinit tulip_mwi_config (struct pci_dev *pdev,
 {
 	struct tulip_private *tp = dev->priv;
 	u8 cache;
-	u16 pci_command;
+	u16 pci_command, new_command;
 	u32 csr0;
 
 	if (tulip_debug > 3)
 		printk(KERN_DEBUG "%s: tulip_mwi_config()\n", pdev->slot_name);
 
 	tp->csr0 = csr0 = 0;
+
+	/* check for sane cache line size. from acenic.c. */
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cache);
+	if ((cache << 2) != SMP_CACHE_BYTES) {
+		printk(KERN_WARNING "%s: PCI cache line size set incorrectly "
+		       "(%i bytes) by BIOS/FW, correcting to %i\n",
+		       pdev->slot_name, (cache << 2), SMP_CACHE_BYTES);
+		pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE,
+				      SMP_CACHE_BYTES >> 2);
+		udelay(5);
+	}
+
+	/* read cache line size again, hardware may not have accepted
+	 * our cache line size change
+	 */
+	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cache);
+	if (!cache)
+		goto out;
 
 	/* if we have any cache line size at all, we can do MRM */
 	csr0 |= MRM;
@@ -1265,19 +1297,15 @@ static void __devinit tulip_mwi_config (struct pci_dev *pdev,
 	/* set or disable MWI in the standard PCI command bit.
 	 * Check for the case where  mwi is desired but not available
 	 */
-	if (csr0 & MWI)	pci_set_mwi(pdev);
-	else		pci_clear_mwi(pdev);
-
-	/* read result from hardware (in case bit refused to enable) */
 	pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
-	if ((csr0 & MWI) && (!(pci_command & PCI_COMMAND_INVALIDATE)))
-		csr0 &= ~MWI;
-
-	/* if cache line size hardwired to zero, no MWI */
-	pci_read_config_byte(pdev, PCI_CACHE_LINE_SIZE, &cache);
-	if ((csr0 & MWI) && (cache == 0)) {
-		csr0 &= ~MWI;
-		pci_clear_mwi(pdev);
+	if (csr0 & MWI)	new_command = pci_command | PCI_COMMAND_INVALIDATE;
+	else		new_command = pci_command & ~PCI_COMMAND_INVALIDATE;
+	if (new_command != pci_command) {
+		pci_write_config_word(pdev, PCI_COMMAND, new_command);
+		udelay(5);
+		pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
+		if ((csr0 & MWI) && (!(pci_command & PCI_COMMAND_INVALIDATE)))
+			csr0 &= ~MWI;
 	}
 
 	/* assign per-cacheline-size cache alignment and
@@ -1294,29 +1322,20 @@ static void __devinit tulip_mwi_config (struct pci_dev *pdev,
 		csr0 |= MRL | (3 << CALShift) | (32 << BurstLenShift);
 		break;
 	default:
-		cache = 0;
-		break;
+		goto out;
 	}
 
-	/* if we have a good cache line size, we by now have a good
-	 * csr0, so save it and exit
-	 */
-	if (cache)
-		goto out;
+	tp->csr0 = csr0;
+	goto out;
 
-	/* we don't have a good csr0 or cache line size, disable MWI */
 	if (csr0 & MWI) {
-		pci_clear_mwi(pdev);
+		pci_command &= ~PCI_COMMAND_INVALIDATE;
+		pci_write_config_word(pdev, PCI_COMMAND, pci_command);
 		csr0 &= ~MWI;
 	}
-
-	/* sane defaults for burst length and cache alignment
-	 * originally from de4x5 driver
-	 */
-	csr0 |= (8 << BurstLenShift) | (1 << CALShift);
+	tp->csr0 = csr0 | (8 << BurstLenShift) | (1 << CALShift);
 
 out:
-	tp->csr0 = csr0;
 	if (tulip_debug > 2)
 		printk(KERN_DEBUG "%s: MWI config cacheline=%d, csr0=%08x\n",
 		       pdev->slot_name, cache, csr0);
@@ -1408,14 +1427,12 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 		csr0 &= ~0xfff10000; /* zero reserved bits 31:20, 16 */
 
 	/* DM9102A has troubles with MRM & clear reserved bits 24:22, 20, 16, 7:1 */
-	if ((pdev->vendor == 0x1282 && pdev->device == 0x9102)
-		|| (pdev->vendor == 0x10b9 && pdev->device == 0x5261))
+	if (pdev->vendor == 0x1282 && pdev->device == 0x9102)
 		csr0 &= ~0x01f100ff;
 
 #if defined(__sparc__)
         /* DM9102A needs 32-dword alignment/burst length on sparc - chip bug? */
-	if ((pdev->vendor == 0x1282 && pdev->device == 0x9102)
-		|| (pdev->vendor == 0x10b9 && pdev->device == 0x5261))
+        if (pdev->vendor == 0x1282 && pdev->device == 0x9102)
                 csr0 = (csr0 & ~0xff00) | 0xe000;
 #endif
 
@@ -1491,6 +1508,7 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 	tp->timer.function = tulip_tbl[tp->chip_id].media_timer;
 
 	dev->base_addr = ioaddr;
+	dev->irq = irq;
 
 #ifdef CONFIG_TULIP_MWI
 	if (!force_csr0 && (tp->flags & HAS_PCI_MWI))
@@ -1545,8 +1563,8 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 		}
 	} else if (chip_idx == COMET) {
 		/* No need to read the EEPROM. */
-		put_unaligned(cpu_to_le32(inl(ioaddr + 0xA4)), (u32 *)dev->dev_addr);
-		put_unaligned(cpu_to_le16(inl(ioaddr + 0xA8)), (u16 *)(dev->dev_addr + 4));
+		put_unaligned(inl(ioaddr + 0xA4), (u32 *)dev->dev_addr);
+		put_unaligned(inl(ioaddr + 0xA8), (u16 *)(dev->dev_addr + 4));
 		for (i = 0; i < 6; i ++)
 			sum += dev->dev_addr[i];
 	} else {
@@ -1564,13 +1582,7 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 		for (i = 0; i < 8; i ++)
 			if (ee_data[i] != ee_data[16+i])
 				sa_offset = 20;
-		if (chip_idx == CONEXANT) {
-		    /* Check that the tuple type and length is correct. */
-			if (ee_data[0x198] == 0x04  &&  ee_data[0x199] == 6)
-			    sa_offset = 0x19A;
-		}
-		if (ee_data[0] == 0xff && ee_data[1] == 0xff &&
-		    ee_data[2] == 0) {
+		if (ee_data[0] == 0xff  &&  ee_data[1] == 0xff &&  ee_data[2] == 0) {
 			sa_offset = 2;		/* Grrr, damn Matrox boards. */
 			multiport_cnt = 4;
 		}
@@ -1589,35 +1601,6 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
                        /* No media table either */
                        tp->flags &= ~HAS_MEDIA_TABLE;
                }
-#endif
-#ifdef CONFIG_MIPS_COBALT
-               if ((pdev->bus->number == 0) && 
-                   ((PCI_SLOT(pdev->devfn) == 7) ||
-                    (PCI_SLOT(pdev->devfn) == 12))) {
-                       /* Cobalt MAC address in first EEPROM locations. */
-                       sa_offset = 0;
-                       /* No media table either */
-                       tp->flags &= ~HAS_MEDIA_TABLE;
-               }
-#endif
-#ifdef __hppa__
-		/* 3x5 HSC (J3514A) has a broken srom */
-		if(ee_data[0] == 0x61 && ee_data[1] == 0x10) {
-			/* pci_vendor_id and subsystem_id are swapped */
-			ee_data[0] = ee_data[2];
-			ee_data[1] = ee_data[3];
-			ee_data[2] = 0x61;
-			ee_data[3] = 0x10;
-
-			/* srom need to be byte-swaped and shifted up 1 word.  
-			 * This shift needs to happen at the end of the MAC
-			 * first because of the 2 byte overlap.
-			 */
-			for(i = 4; i >= 0; i -= 2) {
-				ee_data[17 + i + 3] = ee_data[17 + i];
-				ee_data[16 + i + 5] = ee_data[16 + i];
-			}
-		}
 #endif
 		for (i = 0; i < 6; i ++) {
 			dev->dev_addr[i] = ee_data[i + sa_offset];
@@ -1663,7 +1646,6 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 	for (i = 0; i < 6; i++)
 		last_phys_addr[i] = dev->dev_addr[i];
 	last_irq = irq;
-	dev->irq = irq;
 
 	/* The lower four bits are the media type. */
 	if (board_idx >= 0  &&  board_idx < MAX_UNITS) {
@@ -1885,11 +1867,11 @@ static void __devexit tulip_remove_one (struct pci_dev *pdev)
 		return;
 
 	tp = dev->priv;
-	unregister_netdev (dev);
 	pci_free_consistent (pdev,
 			     sizeof (struct tulip_rx_desc) * RX_RING_SIZE +
 			     sizeof (struct tulip_tx_desc) * TX_RING_SIZE,
 			     tp->rx_ring, tp->rx_ring_dma);
+	unregister_netdev (dev);
 	if (tp->mtable)
 		kfree (tp->mtable);
 #ifndef USE_IO_OPS
@@ -1907,7 +1889,7 @@ static struct pci_driver tulip_driver = {
 	name:		DRV_NAME,
 	id_table:	tulip_pci_tbl,
 	probe:		tulip_init_one,
-	remove:		__devexit_p(tulip_remove_one),
+	remove:		tulip_remove_one,
 #ifdef CONFIG_PM
 	suspend:	tulip_suspend,
 	resume:		tulip_resume,

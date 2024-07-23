@@ -1,5 +1,5 @@
 /*
- *  linux/arch/i386/kernel/head.S -- the 32-bit startup code.
+ *  linux/arch/i386/head.S -- the 32-bit startup code.
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
@@ -34,7 +34,7 @@
 #define X86_HARD_MATH	CPU_PARAMS+6
 #define X86_CPUID	CPU_PARAMS+8
 #define X86_CAPABILITY	CPU_PARAMS+12
-#define X86_VENDOR_ID	CPU_PARAMS+36	/* tied to NCAPINTS in cpufeature.h */
+#define X86_VENDOR_ID	CPU_PARAMS+28
 
 /*
  * swapper_pg_dir is the main page directory, address 0x00101000
@@ -113,7 +113,7 @@ startup_32:
 	popfl
 	jmp checkCPUtype
 1:
-#endif /* CONFIG_SMP */
+#endif CONFIG_SMP
 
 /*
  * Clear BSS first so that there are no surprises...
@@ -178,7 +178,7 @@ checkCPUtype:
  * we don't need to preserve eflags.
  */
 
-	movb $3,X86		# at least 386
+	movl $3,X86		# at least 386
 	pushfl			# push EFLAGS
 	popl %eax		# get EFLAGS
 	movl %eax,%ecx		# save original EFLAGS
@@ -191,7 +191,7 @@ checkCPUtype:
 	andl $0x40000,%eax	# check if AC bit changed
 	je is386
 
-	movb $4,X86		# at least 486
+	movl $4,X86		# at least 486
 	movl %ecx,%eax
 	xorl $0x200000,%eax	# check ID flag
 	pushl %eax
@@ -325,21 +325,27 @@ ENTRY(stack_start)
 
 /* This is the default interrupt "handler" :-) */
 int_msg:
-	.asciz "Unknown interrupt, stack: %p %p %p %p\n"
+	.asciz "Unknown interrupt\n"
 	ALIGN
 ignore_int:
 	cld
+	pushl %eax
+	pushl %ecx
+	pushl %edx
+	pushl %es
+	pushl %ds
 	movl $(__KERNEL_DS),%eax
 	movl %eax,%ds
 	movl %eax,%es
-	pushl 12(%esp)
-	pushl 12(%esp)
-	pushl 12(%esp)
-	pushl 12(%esp)
 	pushl $int_msg
 	call SYMBOL_NAME(printk)
-1:	hlt
-	jmp 1b
+	popl %eax
+	popl %ds
+	popl %es
+	popl %edx
+	popl %ecx
+	popl %eax
+	iret
 
 /*
  * The interrupt descriptor table has room for 256 idt's,
@@ -440,3 +446,12 @@ ENTRY(gdt_table)
 	.quad 0x00009a0000000000	/* 0x50 APM CS 16 code (16 bit) */
 	.quad 0x0040920000000000	/* 0x58 APM DS    data */
 	.fill NR_CPUS*4,8,0		/* space for TSS's and LDT's */
+		
+/*
+ * This is to aid debugging, the various locking macros will be putting
+ * code fragments here.  When an oops occurs we'd rather know that it's
+ * inside the .text.lock section rather than as some offset from whatever
+ * function happens to be last in the .text segment.
+ */
+.section .text.lock
+ENTRY(stext_lock)

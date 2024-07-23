@@ -309,8 +309,13 @@ static Scsi_Host_Template *the_template = NULL;
 #undef TAG_NONE
 #define TAG_NONE 0xff
 
+/* For the m68k, the number of bits in 'allocated' must be a multiple of 32! */
+#if (MAX_TAGS % 32) != 0
+#error "MAX_TAGS must be a multiple of 32!"
+#endif
+
 typedef struct {
-    DECLARE_BITMAP(allocated, MAX_TAGS);
+    char	allocated[MAX_TAGS/8];
     int		nr_allocated;
     int		queue_size;
 } TAG_ALLOC;
@@ -329,7 +334,7 @@ static void __init init_tags( void )
     for( target = 0; target < 8; ++target ) {
 	for( lun = 0; lun < 8; ++lun ) {
 	    ta = &TagAlloc[target][lun];
-	    CLEAR_BITMAP( ta->allocated, MAX_TAGS );
+	    memset( &ta->allocated, 0, MAX_TAGS/8 );
 	    ta->nr_allocated = 0;
 	    /* At the beginning, assume the maximum queue size we could
 	     * support (MAX_TAGS). This value will be decreased if the target
@@ -389,8 +394,8 @@ static void cmd_get_tag( Scsi_Cmnd *cmd, int should_be_tagged )
     else {
 	TAG_ALLOC *ta = &TagAlloc[cmd->target][cmd->lun];
 
-	cmd->tag = find_first_zero_bit( ta->allocated, MAX_TAGS );
-	set_bit( cmd->tag, ta->allocated );
+	cmd->tag = find_first_zero_bit( &ta->allocated, MAX_TAGS );
+	set_bit( cmd->tag, &ta->allocated );
 	ta->nr_allocated++;
 	TAG_PRINTK( "scsi%d: using tag %d for target %d lun %d "
 		    "(now %d tags in use)\n",
@@ -419,7 +424,7 @@ static void cmd_free_tag( Scsi_Cmnd *cmd )
     }
     else {
 	TAG_ALLOC *ta = &TagAlloc[cmd->target][cmd->lun];
-	clear_bit( cmd->tag, ta->allocated );
+	clear_bit( cmd->tag, &ta->allocated );
 	ta->nr_allocated--;
 	TAG_PRINTK( "scsi%d: freed tag %d for target %d lun %d\n",
 		    H_NO(cmd), cmd->tag, cmd->target, cmd->lun );
@@ -438,7 +443,7 @@ static void free_all_tags( void )
     for( target = 0; target < 8; ++target ) {
 	for( lun = 0; lun < 8; ++lun ) {
 	    ta = &TagAlloc[target][lun];
-	    CLEAR_BITMAP( ta->allocated, MAX_TAGS );
+	    memset( &ta->allocated, 0, MAX_TAGS/8 );
 	    ta->nr_allocated = 0;
 	}
     }
@@ -639,7 +644,10 @@ __inline__ void NCR5380_print_phase(struct Scsi_Host *instance) { };
 
 static volatile int main_running = 0;
 static struct tq_struct NCR5380_tqueue = {
-    routine:	(void (*)(void*))NCR5380_main	/* must have (void *) arg... */
+    NULL,		/* next */
+    0,			/* sync */
+    (void (*)(void*))NCR5380_main,  /* routine, must have (void *) arg... */
+    NULL		/* data */
 };
 
 static __inline__ void queue_main(void)

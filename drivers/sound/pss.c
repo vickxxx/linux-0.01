@@ -48,7 +48,7 @@
  *          Added module parameter pss_firmware to allow the user to tell 
  *          the driver where the fireware file is located.  The default 
  *          setting is the previous hardcoded setting "/etc/sound/pss_synth".
- * 00-03-03: Christoph Hellwig <chhellwig@infradead.org>
+ * 00-03-03: Christoph Hellwig <chhellwig@gmx.net>
  *	    Adapted to module_init/module_exit
  * 11-10-2000: Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
  *	    Added __init to probe_pss(), attach_pss() and probe_pss_mpu()
@@ -450,36 +450,20 @@ static void pss_mixer_reset(pss_confdata *devc)
 	}
 }
 
-static int set_volume_mono(caddr_t p, int *aleft)
+static void arg_to_volume_mono(unsigned int volume, int *aleft)
 {
 	int left;
-	unsigned volume;
-	if (get_user(volume, (unsigned *)p))
-		return -EFAULT;
 	
-	left = volume & 0xff;
+	left = volume & 0x00ff;
 	if (left > 100)
 		left = 100;
 	*aleft = left;
-	return 0;
 }
 
-static int set_volume_stereo(caddr_t p, int *aleft, int *aright)
+static void arg_to_volume_stereo(unsigned int volume, int *aleft, int *aright)
 {
-	int left, right;
-	unsigned volume;
-	if (get_user(volume, (unsigned *)p))
-		return -EFAULT;
-
-	left = volume & 0xff;
-	if (left > 100)
-		left = 100;
-	right = (volume >> 8) & 0xff;
-	if (right > 100)
-		right = 100;
-	*aleft = left;
-	*aright = right;
-	return 0;
+	arg_to_volume_mono(volume, aleft);
+	arg_to_volume_mono(volume >> 8, aright);
 }
 
 static int ret_vol_mono(int left)
@@ -526,38 +510,33 @@ static int pss_mixer_ioctl (int dev, unsigned int cmd, caddr_t arg)
 					return call_ad_mixer(devc, cmd, arg);
 				else
 				{
-					int v;
-					if (get_user(v, (int *)arg))
-						return -EFAULT;
-					if (v != 0)
+					if (*(int *)arg != 0)
 						return -EINVAL;
 					return 0;
 				}
 			case SOUND_MIXER_VOLUME:
-				if (set_volume_stereo(arg,
-					&devc->mixer.volume_l,
-					&devc->mixer.volume_r))
-					return -EFAULT;
+				arg_to_volume_stereo(*(unsigned int *)arg, &devc->mixer.volume_l,
+					&devc->mixer.volume_r); 
 				set_master_volume(devc, devc->mixer.volume_l,
 					devc->mixer.volume_r);
 				return ret_vol_stereo(devc->mixer.volume_l,
 					devc->mixer.volume_r);
 		  
 			case SOUND_MIXER_BASS:
-				if (set_volume_mono(arg, &devc->mixer.bass))
-					return -EFAULT;
+				arg_to_volume_mono(*(unsigned int *)arg,
+					&devc->mixer.bass);
 				set_bass(devc, devc->mixer.bass);
 				return ret_vol_mono(devc->mixer.bass);
 		  
 			case SOUND_MIXER_TREBLE:
-				if (set_volume_mono(arg, &devc->mixer.treble))
-					return -EFAULT;
+				arg_to_volume_mono(*(unsigned int *)arg,
+					&devc->mixer.treble);
 				set_treble(devc, devc->mixer.treble);
 				return ret_vol_mono(devc->mixer.treble);
 		  
 			case SOUND_MIXER_SYNTH:
-				if (set_volume_mono(arg, &devc->mixer.synth))
-					return -EFAULT;
+				arg_to_volume_mono(*(unsigned int *)arg,
+					&devc->mixer.synth);
 				set_synth_volume(devc, devc->mixer.synth);
 				return ret_vol_mono(devc->mixer.synth);
 		  
@@ -567,67 +546,54 @@ static int pss_mixer_ioctl (int dev, unsigned int cmd, caddr_t arg)
 	}
 	else			
 	{
-		int val, and_mask = 0, or_mask = 0;
 		/*
 		 * Return parameters
 		 */
 		switch (cmdf)
 		{
+
 			case SOUND_MIXER_DEVMASK:
 				if (call_ad_mixer(devc, cmd, arg) == -EINVAL)
-					break;
-				and_mask = ~0;
-				or_mask = SOUND_MASK_VOLUME | SOUND_MASK_BASS | SOUND_MASK_TREBLE | SOUND_MASK_SYNTH;
-				break;
+					*(int *)arg = 0; /* no mixer devices */
+				return (*(int *)arg |= SOUND_MASK_VOLUME | SOUND_MASK_BASS | SOUND_MASK_TREBLE | SOUND_MASK_SYNTH);
 		  
 			case SOUND_MIXER_STEREODEVS:
 				if (call_ad_mixer(devc, cmd, arg) == -EINVAL)
-					break;
-				and_mask = ~0;
-				or_mask = SOUND_MASK_VOLUME;
-				break;
+					*(int *)arg = 0; /* no stereo devices */
+				return (*(int *)arg |= SOUND_MASK_VOLUME);
 		  
 			case SOUND_MIXER_RECMASK:
 				if (devc->ad_mixer_dev != NO_WSS_MIXER)
 					return call_ad_mixer(devc, cmd, arg);
-				break;
+				else
+					return (*(int *)arg = 0); /* no record devices */
 
 			case SOUND_MIXER_CAPS:
 				if (devc->ad_mixer_dev != NO_WSS_MIXER)
 					return call_ad_mixer(devc, cmd, arg);
-				or_mask = SOUND_CAP_EXCL_INPUT;
-				break;
+				else
+					return (*(int *)arg = SOUND_CAP_EXCL_INPUT);
 
 			case SOUND_MIXER_RECSRC:
 				if (devc->ad_mixer_dev != NO_WSS_MIXER)
 					return call_ad_mixer(devc, cmd, arg);
-				break;
+				else
+					return (*(int *)arg = 0); /* no record source */
 
 			case SOUND_MIXER_VOLUME:
-				or_mask =  ret_vol_stereo(devc->mixer.volume_l, devc->mixer.volume_r);
-				break;
+				return (*(int *)arg = ret_vol_stereo(devc->mixer.volume_l, devc->mixer.volume_r));
 			  
 			case SOUND_MIXER_BASS:
-				or_mask =  ret_vol_mono(devc->mixer.bass);
-				break;
+				return (*(int *)arg = ret_vol_mono(devc->mixer.bass));
 			  
 			case SOUND_MIXER_TREBLE:
-				or_mask = ret_vol_mono(devc->mixer.treble);
-				break;
+				return (*(int *)arg = ret_vol_mono(devc->mixer.treble));
 			  
 			case SOUND_MIXER_SYNTH:
-				or_mask = ret_vol_mono(devc->mixer.synth);
-				break;
+				return (*(int *)arg = ret_vol_mono(devc->mixer.synth));
 			default:
 				return -EINVAL;
 		}
-		if (get_user(val, (int *)arg))
-			return -EFAULT;
-		val &= and_mask;
-		val |= or_mask;
-		if (put_user(val, (int *)arg))
-			return -EFAULT;
-		return val;
 	}
 }
 
@@ -1165,7 +1131,7 @@ MODULE_PARM_DESC(pss_firmware, "Location of the firmware file (default - /etc/so
 MODULE_PARM(pss_mixer, "b");
 MODULE_PARM_DESC(pss_mixer, "Enable (1) or disable (0) PSS mixer (controlling of output volume, bass, treble, synth volume). The mixer is not available on all PSS cards.");
 MODULE_AUTHOR("Hannu Savolainen, Vladimir Michl");
-MODULE_DESCRIPTION("Module for PSS sound cards (based on AD1848, ADSP-2115 and ESC614). This module includes control of output amplifier and synth volume of the Beethoven ADSP-16 card (this may work with other PSS cards).");
+MODULE_DESCRIPTION("Module for PSS sound cards (based on AD1848, ADSP-2115 and ESC614). This module includes control of output amplifier and synth volume of the Beethoven ADSP-16 card (this may work with other PSS cards).\n");
 MODULE_LICENSE("GPL");
 
 

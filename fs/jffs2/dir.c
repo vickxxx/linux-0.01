@@ -31,19 +31,18 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: dir.c,v 1.45.2.8 2003/11/02 13:51:17 dwmw2 Exp $
+ * $Id: dir.c,v 1.42 2001/05/24 22:24:39 dwmw2 Exp $
  *
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
-#include <linux/mtd/compatmac.h> /* For completion */
 #include <linux/jffs2.h>
 #include <linux/jffs2_fs_i.h>
 #include <linux/jffs2_fs_sb.h>
 #include "nodelist.h"
-#include <linux/crc32.h>
+#include "crc32.h"
 
 static int jffs2_readdir (struct file *, void *, filldir_t);
 
@@ -177,11 +176,11 @@ static int jffs2_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		}
 		D2(printk(KERN_DEBUG "Dirent %ld: \"%s\", ino #%u, type %d\n", offset, fd->name, fd->ino, fd->type));
 		if (filldir(dirent, fd->name, strlen(fd->name), offset, fd->ino, fd->type) < 0)
-			break;
+			goto out;
 		offset++;
 	}
-	up(&f->sem);
  out:
+	up(&f->sem);
 	filp->f_pos = offset;
 	return 0;
 }
@@ -293,7 +292,7 @@ static int jffs2_create(struct inode *dir_i, struct dentry *dentry, int mode)
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = inode->i_ino;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = namelen;
@@ -304,19 +303,15 @@ static int jffs2_create(struct inode *dir_i, struct dentry *dentry, int mode)
 	fd = jffs2_write_dirent(dir_i, rd, dentry->d_name.name, namelen, phys_ofs, &writtenlen);
 
 	jffs2_complete_reservation(c);
+	jffs2_free_raw_dirent(rd);
 	
 	if (IS_ERR(fd)) {
 		/* dirent failed to write. Delete the inode normally 
 		   as if it were the final unlink() */
-		jffs2_free_raw_dirent(rd);
 		up(&dir_f->sem);
 		jffs2_clear_inode(inode);
 		return PTR_ERR(fd);
 	}
-
-	dir_i->i_mtime = dir_i->i_ctime = rd->mctime;
-
-	jffs2_free_raw_dirent(rd);
 
 	/* Link the fd into the inode's list, obsoleting an old
 	   one if necessary. */
@@ -363,7 +358,7 @@ static int jffs2_do_unlink(struct inode *dir_i, struct dentry *dentry, int renam
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = 0;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = dentry->d_name.len;
@@ -404,9 +399,8 @@ static int jffs2_do_unlink(struct inode *dir_i, struct dentry *dentry, int renam
 			jffs2_mark_node_obsolete(c, fd->raw);
 			jffs2_free_full_dirent(fd);
 		}
-		/* Don't oops on unlinking a bad inode */
-		if (f->inocache)
-			f->inocache->nlink--;
+
+		f->inocache->nlink--;
 		dentry->d_inode->i_nlink--;
 		up(&f->sem);
 	}
@@ -451,7 +445,7 @@ static int jffs2_do_link (struct dentry *old_dentry, struct inode *dir_i, struct
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = old_dentry->d_inode->i_ino;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = dentry->d_name.len;
@@ -488,16 +482,7 @@ static int jffs2_do_link (struct dentry *old_dentry, struct inode *dir_i, struct
 
 static int jffs2_link (struct dentry *old_dentry, struct inode *dir_i, struct dentry *dentry)
 {
-	int ret;
-
-	/* Can't link a bad inode. */
-	if (!JFFS2_INODE_INFO(old_dentry->d_inode)->inocache)
-		return -EIO;
-
-	if (S_ISDIR(old_dentry->d_inode->i_mode))
-		return -EPERM;
-
-	ret = jffs2_do_link(old_dentry, dir_i, dentry, 0);
+	int ret = jffs2_do_link(old_dentry, dir_i, dentry, 0);
 	if (!ret) {
 		d_instantiate(dentry, old_dentry->d_inode);
 		atomic_inc(&old_dentry->d_inode->i_count);
@@ -556,7 +541,7 @@ static int jffs2_symlink (struct inode *dir_i, struct dentry *dentry, const char
 
 	f = JFFS2_INODE_INFO(inode);
 
-	inode->i_size = ri->isize = ri->dsize = ri->csize = strlen(target);
+	ri->dsize = ri->csize = strlen(target);
 	ri->totlen = sizeof(*ri) + ri->dsize;
 	ri->hdr_crc = crc32(0, ri, sizeof(struct jffs2_unknown_node)-4);
 
@@ -614,7 +599,7 @@ static int jffs2_symlink (struct inode *dir_i, struct dentry *dentry, const char
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = inode->i_ino;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = namelen;
@@ -625,19 +610,15 @@ static int jffs2_symlink (struct inode *dir_i, struct dentry *dentry, const char
 	fd = jffs2_write_dirent(dir_i, rd, dentry->d_name.name, namelen, phys_ofs, &writtenlen);
 	
 	jffs2_complete_reservation(c);
+	jffs2_free_raw_dirent(rd);
 	
 	if (IS_ERR(fd)) {
 		/* dirent failed to write. Delete the inode normally 
 		   as if it were the final unlink() */
-		jffs2_free_raw_dirent(rd);
 		up(&dir_f->sem);
 		jffs2_clear_inode(inode);
 		return PTR_ERR(fd);
 	}
-
-	dir_i->i_mtime = dir_i->i_ctime = rd->mctime;
-
-	jffs2_free_raw_dirent(rd);
 
 	/* Link the fd into the inode's list, obsoleting an old
 	   one if necessary. */
@@ -748,7 +729,7 @@ static int jffs2_mkdir (struct inode *dir_i, struct dentry *dentry, int mode)
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = inode->i_ino;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = namelen;
@@ -759,19 +740,15 @@ static int jffs2_mkdir (struct inode *dir_i, struct dentry *dentry, int mode)
 	fd = jffs2_write_dirent(dir_i, rd, dentry->d_name.name, namelen, phys_ofs, &writtenlen);
 	
 	jffs2_complete_reservation(c);
+	jffs2_free_raw_dirent(rd);
 	
 	if (IS_ERR(fd)) {
 		/* dirent failed to write. Delete the inode normally 
 		   as if it were the final unlink() */
-		jffs2_free_raw_dirent(rd);
 		up(&dir_f->sem);
 		jffs2_clear_inode(inode);
 		return PTR_ERR(fd);
 	}
-
-	dir_i->i_mtime = dir_i->i_ctime = rd->mctime;
-
-	jffs2_free_raw_dirent(rd);
 
 	/* Link the fd into the inode's list, obsoleting an old
 	   one if necessary. */
@@ -816,7 +793,8 @@ static int jffs2_mknod (struct inode *dir_i, struct dentry *dentry, int mode, in
 	
 	c = JFFS2_SB_INFO(dir_i->i_sb);
 	
-	if (S_ISBLK(mode) || S_ISCHR(mode)) {
+	if ((mode & S_IFMT) == S_IFBLK ||
+	    (mode & S_IFMT) == S_IFCHR) {
 		dev = (MAJOR(to_kdev_t(rdev)) << 8) | MINOR(to_kdev_t(rdev));
 		devlen = sizeof(dev);
 	}
@@ -902,7 +880,7 @@ static int jffs2_mknod (struct inode *dir_i, struct dentry *dentry, int mode, in
 	rd->hdr_crc = crc32(0, rd, sizeof(struct jffs2_unknown_node)-4);
 
 	rd->pino = dir_i->i_ino;
-	rd->version = ++dir_f->highest_version;
+	rd->version = dir_f->highest_version++;
 	rd->ino = inode->i_ino;
 	rd->mctime = CURRENT_TIME;
 	rd->nsize = namelen;
@@ -916,19 +894,15 @@ static int jffs2_mknod (struct inode *dir_i, struct dentry *dentry, int mode, in
 	fd = jffs2_write_dirent(dir_i, rd, dentry->d_name.name, namelen, phys_ofs, &writtenlen);
 	
 	jffs2_complete_reservation(c);
+	jffs2_free_raw_dirent(rd);
 	
 	if (IS_ERR(fd)) {
 		/* dirent failed to write. Delete the inode normally 
 		   as if it were the final unlink() */
-		jffs2_free_raw_dirent(rd);
 		up(&dir_f->sem);
 		jffs2_clear_inode(inode);
 		return PTR_ERR(fd);
 	}
-
-	dir_i->i_mtime = dir_i->i_ctime = rd->mctime;
-
-	jffs2_free_raw_dirent(rd);
 
 	/* Link the fd into the inode's list, obsoleting an old
 	   one if necessary. */
@@ -936,7 +910,6 @@ static int jffs2_mknod (struct inode *dir_i, struct dentry *dentry, int mode, in
 	up(&dir_f->sem);
 
 	d_instantiate(dentry, inode);
-
 	return 0;
 }
 
@@ -944,29 +917,6 @@ static int jffs2_rename (struct inode *old_dir_i, struct dentry *old_dentry,
                         struct inode *new_dir_i, struct dentry *new_dentry)
 {
 	int ret;
-	struct jffs2_inode_info *victim_f = NULL;
-
-	/* The VFS will check for us and prevent trying to rename a 
-	 * file over a directory and vice versa, but if it's a directory,
-	 * the VFS can't check whether the victim is empty. The filesystem
-	 * needs to do that for itself.
-	 */
-	if (new_dentry->d_inode) {
-		victim_f = JFFS2_INODE_INFO(new_dentry->d_inode);
-		if (S_ISDIR(new_dentry->d_inode->i_mode)) {
-			struct jffs2_full_dirent *fd;
-
-			down(&victim_f->sem);
-			for (fd = victim_f->dents; fd; fd = fd->next) {
-				if (fd->ino) {
-					up(&victim_f->sem);
-					return -ENOTEMPTY;
-				}
-			}
-			up(&victim_f->sem);
-		}
-	}
-
 	/* XXX: We probably ought to alloc enough space for
 	   both nodes at the same time. Writing the new link, 
 	   then getting -ENOSPC, is quite bad :)
@@ -977,33 +927,24 @@ static int jffs2_rename (struct inode *old_dir_i, struct dentry *old_dentry,
 	if (ret)
 		return ret;
 
-	if (victim_f) {
-		/* There was a victim. Kill it off nicely */
-		new_dentry->d_inode->i_nlink--;
-		/* Don't oops if the victim was a dirent pointing to an
-		   inode which didn't exist. */
-		if (victim_f->inocache) {
-			down(&victim_f->sem);
-			victim_f->inocache->nlink--;
-			up(&victim_f->sem);
-		}
-	}
-
 	/* Unlink the original */
 	ret = jffs2_do_unlink(old_dir_i, old_dentry, 1);
 	
 	if (ret) {
-		/* Oh shit. We really ought to make a single node which can do both atomically */
-		struct jffs2_inode_info *f = JFFS2_INODE_INFO(old_dentry->d_inode);
-		down(&f->sem);
-		if (f->inocache)
+		/* Try to delete the _new_ link to return a clean failure */
+		int ret2 = jffs2_do_unlink(new_dir_i, new_dentry, 1);
+		if (ret2) {
+			struct jffs2_inode_info *f = JFFS2_INODE_INFO(old_dentry->d_inode);
+			down(&f->sem);
 			old_dentry->d_inode->i_nlink = f->inocache->nlink++;
-		up(&f->sem);
+			up(&f->sem);
 		       
-		printk(KERN_NOTICE "jffs2_rename(): Link succeeded, unlink failed (err %d). You now have a hard link\n", ret);
-		/* Might as well let the VFS know */
-		d_instantiate(new_dentry, old_dentry->d_inode);
-		atomic_inc(&old_dentry->d_inode->i_count);
+			printk(KERN_NOTICE "jffs2_rename(): Link succeeded, unlink failed (old err %d, new err %d). You now have a hard link\n", ret, ret2);
+			/* Might as well let the VFS know */
+			d_instantiate(new_dentry, old_dentry->d_inode);
+			atomic_inc(&old_dentry->d_inode->i_count);
+		}
+		
 	}
 	return ret;
 }

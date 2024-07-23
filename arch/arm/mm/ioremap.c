@@ -8,19 +8,24 @@
  * Hacked for ARM by Phil Blundell <philb@gnu.org>
  * Hacked to allow all architectures to build, and various cleanups
  * by Russell King
- *
+ */
+
+/*
  * This allows a driver to remap an arbitrary region of bus memory into
  * virtual space.  One should *only* use readl, writel, memcpy_toio and
  * so on with such remapped areas.
  *
- * ioremap support tweaked to allow support for large page mappings.  We
- * have several issues that needs to be resolved first however:
+ * Because the ARM only has a 32-bit address space we can't address the
+ * whole of the (physical) PCI space at once.  PCI huge-mode addressing
+ * allows us to circumvent this restriction by splitting PCI space into
+ * two 2GB chunks and mapping only one at a time into processor memory.
+ * We use MMU protection domains to trap any attempt to access the bank
+ * that is not currently mapped.  (This isn't fully implemented yet.)
  *
- *  1. We need set_pte, or something like set_pte to understand large
- *     page mappings.
- *
- *  2. we need the unmap_* functions to likewise understand large page
- *     mappings.
+ * DC21285 currently has a bug in that the PCI address extension
+ * register affects the address of any writes waiting in the outbound
+ * FIFO.  Unfortunately, it is not possible to tell the DC21285 to
+ * flush this - flushing the area causes the bus to lock.
  */
 #include <linux/errno.h>
 #include <linux/mm.h>
@@ -30,9 +35,8 @@
 #include <asm/pgalloc.h>
 #include <asm/io.h>
 
-static inline void
-remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
-	       unsigned long pfn, pgprot_t pgprot)
+static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
+	unsigned long phys_addr, pgprot_t pgprot)
 {
 	unsigned long end;
 
@@ -40,26 +44,22 @@ remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
 	end = address + size;
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
-	BUG_ON(address >= end);
+	if (address >= end)
+		BUG();
 	do {
-		if (!pte_none(*pte))
-			goto bad;
-
-		set_pte(pte, pfn_pte(pfn, pgprot));
+		if (!pte_none(*pte)) {
+			printk("remap_area_pte: page already exists\n");
+			BUG();
+		}
+		set_pte(pte, mk_pte_phys(phys_addr, pgprot));
 		address += PAGE_SIZE;
-		pfn++;
+		phys_addr += PAGE_SIZE;
 		pte++;
 	} while (address && (address < end));
-	return;
-
- bad:
-	printk("remap_area_pte: page already exists\n");
-	BUG();
 }
 
-static inline int
-remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
-	       unsigned long pfn, unsigned long flags)
+static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
+	unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
 	pgprot_t pgprot;
@@ -70,33 +70,34 @@ remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
 
-	pfn -= address >> PAGE_SHIFT;
-	BUG_ON(address >= end);
+	phys_addr -= address;
+	if (address >= end)
+		BUG();
 
 	pgprot = __pgprot(L_PTE_PRESENT | L_PTE_YOUNG | L_PTE_DIRTY | L_PTE_WRITE | flags);
 	do {
 		pte_t * pte = pte_alloc(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
-		remap_area_pte(pte, address, end - address, pfn + (address >> PAGE_SHIFT), pgprot);
+		remap_area_pte(pte, address, end - address, address + phys_addr, pgprot);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
 	} while (address && (address < end));
 	return 0;
 }
 
-static int
-remap_area_pages(unsigned long address, unsigned long pfn,
-		 unsigned long size, unsigned long flags)
+static int remap_area_pages(unsigned long address, unsigned long phys_addr,
+				 unsigned long size, unsigned long flags)
 {
 	int error;
 	pgd_t * dir;
 	unsigned long end = address + size;
 
-	pfn -= address >> PAGE_SHIFT;
+	phys_addr -= address;
 	dir = pgd_offset(&init_mm, address);
 	flush_cache_all();
-	BUG_ON(address >= end);
+	if (address >= end)
+		BUG();
 	spin_lock(&init_mm.page_table_lock);
 	do {
 		pmd_t *pmd;
@@ -105,7 +106,7 @@ remap_area_pages(unsigned long address, unsigned long pfn,
 		if (!pmd)
 			break;
 		if (remap_area_pmd(pmd, address, end - address,
-					 pfn + (address >> PAGE_SHIFT), flags))
+					 phys_addr + address, flags))
 			break;
 		error = 0;
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
@@ -153,7 +154,7 @@ void * __ioremap(unsigned long phys_addr, size_t size, unsigned long flags)
 	if (!area)
 		return NULL;
 	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr >> PAGE_SHIFT, size, flags)) {
+	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
 		vfree(addr);
 		return NULL;
 	}

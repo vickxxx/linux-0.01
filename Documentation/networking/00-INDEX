@@ -44,10 +44,6 @@ dgrs.txt
 	- the Digi International RightSwitch SE-X Ethernet driver
 dmfe.txt
 	- info on the Davicom DM9102(A)/DM9132/DM9801 fast ethernet driver.
-e100.txt
-	- info on Intel's EtherExpress PRO/100 line of 10/100 boards
-e1000.txt
-	- info on Intel's E1000 line of gigabit ethernet boards
 eql.txt
 	- serial IP load balancing
 ethertap.txt
@@ -97,8 +93,7 @@ shaper.txt
 sis900.txt
 	- SiS 900/7016 Fast Ethernet device driver info.
 sk98lin.txt
-	- Marvell Yukon Chipset / SysKonnect SK-98xx compliant Gigabit
-	  Ethernet Adapter family driver info
+	- SysKonnect SK-NET (SK-98xx) Gigabit Ethernet driver info.
 skfp.txt
 	- SysKonnect FDDI (SK-5xxx, Compaq Netelligent) driver info.
 smc9.txt

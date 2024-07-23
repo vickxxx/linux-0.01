@@ -289,7 +289,7 @@ static inline void esp_advance_phase(Scsi_Cmnd *s, int newphase)
 #endif
 
 #ifdef DEBUG_ESP_CMDS
-inline void esp_cmd(struct NCR_ESP *esp, struct ESP_regs *eregs,
+extern inline void esp_cmd(struct NCR_ESP *esp, struct ESP_regs *eregs,
 			   unchar cmd)
 {
 	esp->espcmdlog[esp->espcmdent] = cmd;
@@ -917,7 +917,7 @@ static void esp_get_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 		if (esp->dma_mmu_get_scsi_one)
 			esp->dma_mmu_get_scsi_one(esp, sp);
 		else
-			sp->SCp.ptr =
+			sp->SCp.have_data_in = (int) sp->SCp.ptr =
 				(char *) virt_to_phys(sp->request_buffer);
 	} else {
 		sp->SCp.buffer = (struct scatterlist *) sp->buffer;
@@ -3613,5 +3613,3 @@ void esp_release(void)
 	esps_running = esps_in_use;
 }
 #endif
-
-MODULE_LICENSE("GPL");

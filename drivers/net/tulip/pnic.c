@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/pnic.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -15,7 +15,6 @@
 */
 
 #include <linux/kernel.h>
-#include <linux/pci.h>
 #include "tulip.h"
 
 

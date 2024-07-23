@@ -1,4 +1,4 @@
-/* $Id: eicon_mod.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: eicon_mod.c,v 1.37.6.6 2001/09/23 22:24:37 kai Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
  * 
@@ -44,7 +44,7 @@
 static eicon_card *cards = (eicon_card *) NULL;   /* glob. var , contains
                                                      start of card-list   */
 
-static char *eicon_revision = "$Revision: 1.1.4.1 $";
+static char *eicon_revision = "$Revision: 1.37.6.6 $";
 
 extern char *eicon_pci_revision;
 extern char *eicon_isa_revision;
@@ -665,11 +665,8 @@ if_readstatus(u_char * buf, int len, int user, int id, int channel)
 			else
 				cnt = skb->len;
 
-			if (user) {
-				spin_unlock_irqrestore(&eicon_lock, flags);
+			if (user)
 				copy_to_user(p, skb->data, cnt);
-				spin_lock_irqsave(&eicon_lock, flags);
-			}
 			else
 				memcpy(p, skb->data, cnt);
 
@@ -1553,7 +1550,7 @@ int eicon_mca_find_card(int type,          /* type-idx of eicon-card          */
             	};
 	};
 	/* all adapter flavors checked without match, finito with:            */
-        return -ENODEV;
+        return ENODEV;
 };
 
 
@@ -1600,14 +1597,14 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				membase = cards_membase;
 			} else {
 				if (membase != cards_membase)
-					return -ENODEV;
+					return ENODEV;
 			};
 			cards_irq=irq_array[((adf_pos0 & 0xC)>>2)];
 			if (irq == -1) { 
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return -ENODEV;
+					return ENODEV;
 			};
 			cards_io= 0xC00 + ((adf_pos0>>4)*0x10);
 			type = EICON_CTYPE_ISAPRI; 
@@ -1619,14 +1616,14 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				membase = cards_membase;
 			} else {
 				if (membase != cards_membase)
-					return -ENODEV;
+					return ENODEV;
 			};
 			cards_irq=irq_array[((adf_pos0 & 0xC)>>2)];
 			if (irq == -1) { 
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return -ENODEV;
+					return ENODEV;
 			};
 
 			cards_io= 0xC00 + ((adf_pos0>>4)*0x10);
@@ -1640,12 +1637,12 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 				irq = cards_irq;
 			} else {
 				if (irq != cards_irq)
-					return -ENODEV;
+					return ENODEV;
 			};
 			type = 0; 
 			break;
 		default:
-			return -ENODEV;
+			return  ENODEV;
 	};
 	/* matching membase & irq */
 	if ( 1 == eicon_addcard(type, membase, irq, id, 0)) { 
@@ -1664,7 +1661,7 @@ int eicon_mca_probe(int slot,  /* slot-nr where the card was detected         */
 			cards->mca_slot+1);
 		return  0 ; /* eicon_addcard added a card */
 	} else {
-		return -ENODEV;
+		return ENODEV;
 	};
 };
 #endif /* CONFIG_MCA */

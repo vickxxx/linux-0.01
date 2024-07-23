@@ -591,7 +591,8 @@ int wpc_init (sdla_t* card, wandev_conf_t* conf)
 	
 
 		if (chdlc_set_intr_mode(card, APP_INT_ON_TIMER)){
-			printk (KERN_INFO "%s: Failed to set interrupt triggers!\n",
+			printk (KERN_INFO "%s: 
+				Failed to set interrupt triggers!\n",
 				card->devname);
 			return -EIO;	
         	}
@@ -1088,11 +1089,13 @@ static int if_open (netdevice_t* dev)
 	
 	set_bit(0,&chdlc_priv_area->config_chdlc);
 	chdlc_priv_area->config_chdlc_timeout=jiffies;
+	del_timer(&chdlc_priv_area->poll_delay_timer);
 
 	/* Start the CHDLC configuration after 1sec delay.
 	 * This will give the interface initilization time
 	 * to finish its configuration */
-	mod_timer(&chdlc_priv_area->poll_delay_timer, jiffies + HZ);
+	chdlc_priv_area->poll_delay_timer.expires=jiffies+HZ;
+	add_timer(&chdlc_priv_area->poll_delay_timer);
 	return err;
 }
 
@@ -2677,20 +2680,18 @@ static void process_route (sdla_t *card)
 		printk(KERN_INFO "%s: Dynamic route failure.\n",card->devname);
 
                 if(card->u.c.slarp_timer) {
-			u32 addr_net = htonl(chdlc_priv_area->IP_address);
 
-			printk(KERN_INFO "%s: Bad IP address %u.%u.%u.%u received\n",
+			printk(KERN_INFO "%s: Bad IP address %s received\n",
 				card->devname,
-			       NIPQUAD(addr_net));
+				in_ntoa(ntohl(chdlc_priv_area->IP_address)));
                         printk(KERN_INFO "%s: from remote station.\n",
 				card->devname);
 
                 }else{ 
-			u32 addr_net = htonl(chdlc_priv_area->IP_address);
 
-                        printk(KERN_INFO "%s: Bad IP address %u.%u.%u.%u issued\n",
-			       card->devname,
-			       NIPQUAD(addr_net));
+                        printk(KERN_INFO "%s: Bad IP address %s issued\n",
+				card->devname,
+				in_ntoa(ntohl(chdlc_priv_area->IP_address)));
                         printk(KERN_INFO "%s: to remote station. Local\n",
 				card->devname);
 			printk(KERN_INFO "%s: IP address must be A.B.C.1\n",
@@ -2809,16 +2810,16 @@ static void process_route (sdla_t *card)
 		}
 
                if(err) {
-			printk(KERN_INFO "%s: Add route %u.%u.%u.%u failed (%d)\n", 
-				card->devname, NIPQUAD(remote_IP_addr), err);
+			printk(KERN_INFO "%s: Add route %s failed (%d)\n", 
+				card->devname, in_ntoa(remote_IP_addr), err);
 		} else {
 			((chdlc_private_area_t *)dev->priv)->route_status = ROUTE_ADDED;
 			printk(KERN_INFO "%s: Dynamic route added.\n",
 				card->devname);
-			printk(KERN_INFO "%s:    Local IP addr : %u.%u.%u.%u\n",
-				card->devname, NIPQUAD(local_IP_addr));
-			printk(KERN_INFO "%s:    Remote IP addr: %u.%u.%u.%u\n",
-				card->devname, NIPQUAD(remote_IP_addr));
+			printk(KERN_INFO "%s:    Local IP addr : %s\n",
+				card->devname, in_ntoa(local_IP_addr));
+			printk(KERN_INFO "%s:    Remote IP addr: %s\n",
+				card->devname, in_ntoa(remote_IP_addr));
 			chdlc_priv_area->route_removed = 0;
 		}
 		break;
@@ -2849,14 +2850,14 @@ static void process_route (sdla_t *card)
 #endif
 		if(err) {
 			printk(KERN_INFO
-				"%s: Remove route %u.%u.%u.%u failed, (err %d)\n",
-					card->devname, NIPQUAD(remote_IP_addr),
+				"%s: Remove route %s failed, (err %d)\n",
+					card->devname, in_ntoa(remote_IP_addr),
 					err);
 		} else {
 			((chdlc_private_area_t *)dev->priv)->route_status =
 				NO_ROUTE;
-                        printk(KERN_INFO "%s: Dynamic route removed: %u.%u.%u.%u\n",
-                                        card->devname, NIPQUAD(local_IP_addr)); 
+                        printk(KERN_INFO "%s: Dynamic route removed: %s\n",
+                                        card->devname, in_ntoa(local_IP_addr)); 
 			chdlc_priv_area->route_removed = 1;
 		}
 		break;
@@ -3819,7 +3820,7 @@ static void chdlc_poll_delay (unsigned long dev_ptr)
 
 void s508_lock (sdla_t *card, unsigned long *smp_flags)
 {
-#if defined(CONFIG_SMP) || defined(LINUX_2_4)
+#if defined(__SMP__) || defined(LINUX_2_4)
 	spin_lock_irqsave(&card->wandev.lock, *smp_flags);
         if (card->next){
         	spin_lock(&card->next->wandev.lock);
@@ -3831,7 +3832,7 @@ void s508_lock (sdla_t *card, unsigned long *smp_flags)
 
 void s508_unlock (sdla_t *card, unsigned long *smp_flags)
 {
-#if defined(CONFIG_SMP) || defined(LINUX_2_4)
+#if defined(__SMP__) || defined(LINUX_2_4)
         if (card->next){
         	spin_unlock(&card->next->wandev.lock);
         }
@@ -3868,7 +3869,11 @@ static void tty_poll_task (void* data)
 	if ((tty=card->tty)==NULL)
 		return;
 	
-	tty_wakeup(tty);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup){
+		(tty->ldisc.write_wakeup)(tty);
+	}
+	wake_up_interruptible(&tty->write_wait);
 #if defined(SERIAL_HAVE_POLL_WAIT) || \
          (defined LINUX_2_1 && LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,15))
 	wake_up_interruptible(&tty->poll_wait);
@@ -4094,7 +4099,6 @@ static void wanpipe_tty_receive(sdla_t *card, unsigned addr, unsigned int len)
 	char fp=0;
 	struct tty_struct *tty;
 	int i;
-	struct tty_ldisc *ld;
 	
 	if (!card->tty_open){
 		dbg_printk(KERN_INFO "%s: TTY not open during receive\n",
@@ -4182,11 +4186,8 @@ static void wanpipe_tty_receive(sdla_t *card, unsigned addr, unsigned int len)
 			len -= offset;
 		}
 		sdla_peek(&card->hw, addr, card->tty_rx+offset, len);
-		ld = tty_ldisc_ref(tty);
-		if (ld) {
-			if (ld->receive_buf)
-				ld->receive_buf(tty,card->tty_rx,&fp,olen);
-			tty_ldisc_deref(ld);
+		if (tty->ldisc.receive_buf){
+			tty->ldisc.receive_buf(tty,card->tty_rx,&fp,olen);
 		}else{
 			if (net_ratelimit()){
 				printk(KERN_INFO 
@@ -4493,11 +4494,14 @@ static void wanpipe_tty_flush_buffer(struct tty_struct *tty)
 	if (!tty)
 		return;
 	
+	wake_up_interruptible(&tty->write_wait);
 #if defined(SERIAL_HAVE_POLL_WAIT) || \
          (defined LINUX_2_1 && LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,15))
 	wake_up_interruptible(&tty->poll_wait);
 #endif
-	tty_wakeup(tty);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 
 	return;
 }

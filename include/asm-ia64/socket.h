@@ -2,17 +2,15 @@
 #define _ASM_IA64_SOCKET_H
 
 /*
- * Socket related defines.
+ * Socket related defines.  This mostly mirrors the Linux/x86 version.
  *
- * Based on <asm-i386/socket.h>.
- *
- * Modified 1998-2000
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <asm/sockios.h>
 
-/* For setsockopt(2) */
+/* For setsockoptions(2) */
 #define SOL_SOCKET	1
 
 #define SO_DEBUG	1

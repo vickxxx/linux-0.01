@@ -1,9 +1,7 @@
 /* 
  * Motion Eye video4linux driver for Sony Vaio PictureBook
  *
- * Copyright (C) 2001-2003 Stelian Pop <stelian@popies.net>
- *
- * Copyright (C) 2001-2002 Alcôve <www.alcove.com>
+ * Copyright (C) 2001 Stelian Pop <stelian.pop@fr.alcove.com>, Alcôve
  *
  * Copyright (C) 2000 Andrew Tridgell <tridge@valinux.com>
  *
@@ -31,11 +29,7 @@
 #define _MEYE_PRIV_H_
 
 #define MEYE_DRIVER_MAJORVERSION	1
-#define MEYE_DRIVER_MINORVERSION	9
-
-#include <linux/config.h>
-#include <linux/types.h>
-#include <linux/pci.h>
+#define MEYE_DRIVER_MINORVERSION	1
 
 /****************************************************************************/
 /* Motion JPEG chip registers                                               */
@@ -298,26 +292,22 @@ struct meye {
 	u8 mchip_fnum;			/* current mchip frame number */
 
 	unsigned char *mchip_mmregs;	/* mchip: memory mapped registers */
-	u8 *mchip_ptable[MCHIP_NB_PAGES];/* mchip: ptable */
-	dma_addr_t *mchip_ptable_toc;	/* mchip: ptable toc */
-	dma_addr_t mchip_dmahandle;	/* mchip: dma handle to ptable toc */
+	unsigned char *mchip_fbuffer;	/* mchip: framebuffer */
+	u32 mchip_ptaddr;		/* mchip: pointer to framebuffer */
 
 	unsigned char *grab_fbuffer;	/* capture framebuffer */
 					/* list of buffers */
 	struct meye_grab_buffer grab_buffer[MEYE_MAX_BUFNBRS];
 
 	/* other */
+	unsigned int open_count;	/* open() count */
 	struct semaphore lock;		/* semaphore for open/mmap... */
 
 	struct meye_queue grabq;	/* queue for buffers to be grabbed */
 
-	struct video_device *video_dev;	/* video device parameters */
+	struct video_device video_dev;	/* video device parameters */
 	struct video_picture picture;	/* video picture parameters */
 	struct meye_params params;	/* additional parameters */
-#ifdef CONFIG_PM
-	u32 pm_state[16];		/* PCI configuration space */
-	u8 pm_mchip_mode;		/* old mchip mode */
-#endif
 };
 
 #endif

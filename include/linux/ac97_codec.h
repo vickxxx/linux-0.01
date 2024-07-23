@@ -32,7 +32,7 @@
 #define AC97_PCM_FRONT_DAC_RATE   0x002C       /* PCM Front DAC Rate */
 #define AC97_PCM_SURR_DAC_RATE    0x002E       /* PCM Surround DAC Rate */
 #define AC97_PCM_LFE_DAC_RATE     0x0030       /* PCM LFE DAC Rate */
-#define AC97_PCM_LR_ADC_RATE      0x0032       /* PCM LR ADC Rate */
+#define AC97_PCM_LR_ADC_RATE      0x0032       /* PCM LR DAC Rate */
 #define AC97_PCM_MIC_ADC_RATE     0x0034       /* PCM MIC ADC Rate */
 #define AC97_CENTER_LFE_MASTER    0x0036       /* Center + LFE Master Volume */
 #define AC97_SURROUND_MASTER      0x0038       /* Surround (Rear) Master Volume */
@@ -143,39 +143,6 @@
 #define AC97_PWR_PR6              0x4000       /* HP amp powerdown */
 #define AC97_PWR_PR7              0x8000       /* Modem off - if supported */
 
-/* extended audio ID register bit defines */
-#define AC97_EXTID_VRA            0x0001
-#define AC97_EXTID_DRA            0x0002
-#define AC97_EXTID_SPDIF          0x0004
-#define AC97_EXTID_VRM            0x0008
-#define AC97_EXTID_DSA0           0x0010
-#define AC97_EXTID_DSA1           0x0020
-#define AC97_EXTID_CDAC           0x0040
-#define AC97_EXTID_SDAC           0x0080
-#define AC97_EXTID_LDAC           0x0100
-#define AC97_EXTID_AMAP           0x0200
-#define AC97_EXTID_REV0           0x0400
-#define AC97_EXTID_REV1           0x0800
-#define AC97_EXTID_ID0            0x4000
-#define AC97_EXTID_ID1            0x8000
-
-/* extended status register bit defines */
-#define AC97_EXTSTAT_VRA          0x0001
-#define AC97_EXTSTAT_DRA          0x0002
-#define AC97_EXTSTAT_SPDIF        0x0004
-#define AC97_EXTSTAT_VRM          0x0008
-#define AC97_EXTSTAT_SPSA0        0x0010
-#define AC97_EXTSTAT_SPSA1        0x0020
-#define AC97_EXTSTAT_CDAC         0x0040
-#define AC97_EXTSTAT_SDAC         0x0080
-#define AC97_EXTSTAT_LDAC         0x0100
-#define AC97_EXTSTAT_MADC         0x0200
-#define AC97_EXTSTAT_SPCV         0x0400
-#define AC97_EXTSTAT_PRI          0x0800
-#define AC97_EXTSTAT_PRJ          0x1000
-#define AC97_EXTSTAT_PRK          0x2000
-#define AC97_EXTSTAT_PRL          0x4000
-
 /* useful power states */
 #define AC97_PWR_D0               0x0000      /* everything on */
 #define AC97_PWR_D1              AC97_PWR_PR0|AC97_PWR_PR1|AC97_PWR_PR4
@@ -214,9 +181,6 @@
                                     (CODEC)->supported_mixers & (1<<FOO) )
 
 struct ac97_codec {
-	/* Linked list of codecs */
-	struct list_head list;
-
 	/* AC97 controller connected with */
 	void *private_data;
 
@@ -224,36 +188,21 @@ struct ac97_codec {
 	int id;
 	int dev_mixer; 
 	int type;
-	u32 model;
-
-	int modem:1;
 
 	struct ac97_ops *codec_ops;
 
-	/* controller specific lower leverl ac97 accessing routines.
-	   must be re-entrant safe */
+	/* controller specific lower leverl ac97 accessing routines */
 	u16  (*codec_read)  (struct ac97_codec *codec, u8 reg);
 	void (*codec_write) (struct ac97_codec *codec, u8 reg, u16 val);
 
 	/* Wait for codec-ready.  Ok to sleep here.  */
 	void  (*codec_wait)  (struct ac97_codec *codec);
 
-	/* callback used by helper drivers for interesting ac97 setups */
-	void  (*codec_unregister) (struct ac97_codec *codec);
-	
-	struct ac97_driver *driver;
-	void *driver_private;	/* Private data for the driver */
-	
-	spinlock_t lock;
-	
 	/* OSS mixer masks */
 	int modcnt;
 	int supported_mixers;
 	int stereo_mixers;
 	int record_sources;
-
-	/* Property flags */
-	int flags;
 
 	int bit_resolution;
 
@@ -282,15 +231,7 @@ struct ac97_ops
 	/* Amplifier control */
 	int (*amplifier)(struct ac97_codec *codec, int on);
 	/* Digital mode control */
-	int (*digital)(struct ac97_codec *codec, int slots, int rate, int mode);
-#define AUDIO_DIGITAL		0x8000
-#define AUDIO_PRO		0x4000
-#define AUDIO_DRS		0x2000
-#define AUDIO_CCMASK		0x003F
-	
-#define AC97_DELUDED_MODEM	1	/* Audio codec reports its a modem */
-#define AC97_NO_PCM_VOLUME	2	/* Volume control is missing 	   */
-#define AC97_DEFAULT_POWER_OFF 4 /* Needs warm reset to power up */
+	int (*digital)(struct ac97_codec *codec, int format);
 };
 
 extern int ac97_read_proc (char *page_out, char **start, off_t off,
@@ -300,20 +241,5 @@ extern unsigned int ac97_set_adc_rate(struct ac97_codec *codec, unsigned int rat
 extern unsigned int ac97_set_dac_rate(struct ac97_codec *codec, unsigned int rate);
 extern int ac97_save_state(struct ac97_codec *codec);
 extern int ac97_restore_state(struct ac97_codec *codec);
-
-extern struct ac97_codec *ac97_alloc_codec(void);
-extern void ac97_release_codec(struct ac97_codec *codec);
-
-struct ac97_driver {
-	struct list_head list;
-	char *name;
-	u32 codec_id;
-	u32 codec_mask;
-	int (*probe) (struct ac97_codec *codec, struct ac97_driver *driver);
-	void (*remove) (struct ac97_codec *codec, struct ac97_driver *driver);
-};
-
-extern int ac97_register_driver(struct ac97_driver *driver);
-extern void ac97_unregister_driver(struct ac97_driver *driver);
 
 #endif /* _AC97_CODEC_H_ */

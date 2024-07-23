@@ -7,18 +7,24 @@
  * on information published in the Processor Abstraction Layer
  * and the System Abstraction Layer manual.
  *
- * Copyright (C) 1998-2002 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Asit Mallick <asit.k.mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <don.dugger@intel.com>
  */
 #include <linux/config.h>
 
-#include <asm/kregs.h>
 #include <asm/page.h>
-#include <asm/pal.h>
 
 #define KERNEL_START		(PAGE_OFFSET + 68*1024*1024)
+
+/*
+ * The following #defines must match with vmlinux.lds.S:
+ */
+#define IVT_ADDR		(KERNEL_START)
+#define IVT_END_ADDR		(KERNEL_START + 0x8000)
+#define ZERO_PAGE_ADDR		PAGE_ALIGN(IVT_END_ADDR)
+#define SWAPPER_PGD_ADDR	(ZERO_PAGE_ADDR + 1*PAGE_SIZE)
 
 #define GATE_ADDR		(0xa000000000000000 + PAGE_SIZE)
 #define PERCPU_ADDR		(0xa000000000000000 + 2*PAGE_SIZE)
@@ -29,11 +35,10 @@
 #include <linux/types.h>
 
 struct pci_vector_struct {
-	__u16 segment;	/* PCI Segment number */
 	__u16 bus;	/* PCI Bus number */
 	__u32 pci_id;	/* ACPI split 16 bits device, 16 bits function (see section 6.1.1) */
 	__u8 pin;	/* PCI PIN (0 = A, 1 = B, 2 = C, 3 = D) */
-	__u32 irq;	/* IRQ assigned */
+	__u8 irq;	/* IRQ assigned */
 };
 
 extern struct ia64_boot_param {
@@ -104,8 +109,6 @@ ia64_insn_group_barrier (void)
 #define set_mb(var, value)	do { (var) = (value); mb(); } while (0)
 #define set_wmb(var, value)	do { (var) = (value); mb(); } while (0)
 
-#define safe_halt()         ia64_pal_halt_light()    /* PAL_HALT_LIGHT */
-
 /*
  * The group barrier in front of the rsm & ssm are necessary to ensure
  * that none of the previous instructions in the same group are
@@ -122,7 +125,7 @@ do {											\
 	unsigned long ip, psr;								\
 											\
 	__asm__ __volatile__ ("mov %0=psr;; rsm psr.i;;" : "=r" (psr) :: "memory");	\
-	if (psr & IA64_PSR_I) {								\
+	if (psr & (1UL << 14)) {							\
 		__asm__ ("mov %0=ip" : "=r"(ip));					\
 		last_cli_ip = ip;							\
 	}										\
@@ -134,38 +137,22 @@ do {											\
 	unsigned long ip, psr;								\
 											\
 	__asm__ __volatile__ ("mov %0=psr;; rsm psr.i;;" : "=r" (psr) :: "memory");	\
-	if (psr & IA64_PSR_I) {								\
+	if (psr & (1UL << 14)) {							\
 		__asm__ ("mov %0=ip" : "=r"(ip));					\
 		last_cli_ip = ip;							\
 	}										\
 } while (0)
 
-# define local_irq_set(x)								\
-do {											\
-	unsigned long psr;								\
-											\
-	__asm__ __volatile__ ("mov %0=psr;;"						\
-			      "ssm psr.i;;"						\
-			      "srlz.d"							\
-			      : "=r" (psr) :: "memory");				\
-	(x) = psr;									\
-} while (0)
-
-# define local_irq_restore(x)							\
-do {										\
-	unsigned long ip, old_psr, psr = (x);					\
-										\
-	__asm__ __volatile__ ("mov %0=psr;"					\
-			      "cmp.ne p6,p7=%1,r0;;"				\
-			      "(p6) ssm psr.i;"					\
-			      "(p7) rsm psr.i;;"				\
-			      "(p6) srlz.d"					\
-			      : "=&r" (old_psr) : "r"((psr) & IA64_PSR_I)	\
-			      : "p6", "p7", "memory");				\
-	if ((old_psr & IA64_PSR_I) && !(psr & IA64_PSR_I)) {			\
-		__asm__ ("mov %0=ip" : "=r"(ip));				\
-		last_cli_ip = ip;						\
-	}									\
+# define local_irq_restore(x)						 \
+do {									 \
+	unsigned long ip, old_psr, psr = (x);				 \
+									 \
+	__asm__ __volatile__ (";;mov %0=psr; mov psr.l=%1;; srlz.d"	 \
+			      : "=&r" (old_psr) : "r" (psr) : "memory"); \
+	if ((old_psr & (1UL << 14)) && !(psr & (1UL << 14))) {		 \
+		__asm__ ("mov %0=ip" : "=r"(ip));			 \
+		last_cli_ip = ip;					 \
+	}								 \
 } while (0)
 
 #else /* !CONFIG_IA64_DEBUG_IRQ */
@@ -174,16 +161,8 @@ do {										\
 						      : "=r" (x) :: "memory")
 # define local_irq_disable()	__asm__ __volatile__ (";; rsm psr.i;;" ::: "memory")
 /* (potentially) setting psr.i requires data serialization: */
-# define local_irq_set(x)	__asm__ __volatile__ ("mov %0=psr;;"			\
-						      "ssm psr.i;;"			\
-						      "srlz.d"				\
-						      : "=r" (x) :: "memory")
-# define local_irq_restore(x)	__asm__ __volatile__ ("cmp.ne p6,p7=%0,r0;;"		\
-						      "(p6) ssm psr.i;"			\
-						      "(p7) rsm psr.i;;"		\
-						      "srlz.d"				\
-						      :: "r"((x) & IA64_PSR_I)		\
-						      : "p6", "p7", "memory")
+# define local_irq_restore(x)	__asm__ __volatile__ (";; mov psr.l=%0;; srlz.d"	\
+						      :: "r" (x) : "memory")
 #endif /* !CONFIG_IA64_DEBUG_IRQ */
 
 #define local_irq_enable()	__asm__ __volatile__ (";; ssm psr.i;; srlz.d" ::: "memory")
@@ -191,9 +170,7 @@ do {										\
 #define __cli()			local_irq_disable ()
 #define __save_flags(flags)	__asm__ __volatile__ ("mov %0=psr" : "=r" (flags) :: "memory")
 #define __save_and_cli(flags)	local_irq_save(flags)
-#define __save_and_sti(flags)	local_irq_set(flags)
 #define save_and_cli(flags)	__save_and_cli(flags)
-#define save_and_sti(flags)	__save_and_sti(flags)
 #define __sti()			local_irq_enable ()
 #define __restore_flags(flags)	local_irq_restore(flags)
 
@@ -213,9 +190,172 @@ do {										\
 # define restore_flags(flags)	__restore_flags(flags)
 #endif /* !CONFIG_SMP */
 
+/*
+ * Force an unresolved reference if someone tries to use
+ * ia64_fetch_and_add() with a bad value.
+ */
+extern unsigned long __bad_size_for_ia64_fetch_and_add (void);
+extern unsigned long __bad_increment_for_ia64_fetch_and_add (void);
+
+#define IA64_FETCHADD(tmp,v,n,sz)						\
+({										\
+	switch (sz) {								\
+	      case 4:								\
+		__asm__ __volatile__ ("fetchadd4.rel %0=[%1],%2"		\
+				      : "=r"(tmp) : "r"(v), "i"(n) : "memory");	\
+		break;								\
+										\
+	      case 8:								\
+		__asm__ __volatile__ ("fetchadd8.rel %0=[%1],%2"		\
+				      : "=r"(tmp) : "r"(v), "i"(n) : "memory");	\
+		break;								\
+										\
+	      default:								\
+		__bad_size_for_ia64_fetch_and_add();				\
+	}									\
+})
+
+#define ia64_fetch_and_add(i,v)							\
+({										\
+	__u64 _tmp;								\
+	volatile __typeof__(*(v)) *_v = (v);					\
+	switch (i) {								\
+	      case -16:	IA64_FETCHADD(_tmp, _v, -16, sizeof(*(v))); break;	\
+	      case  -8:	IA64_FETCHADD(_tmp, _v,  -8, sizeof(*(v))); break;	\
+	      case  -4:	IA64_FETCHADD(_tmp, _v,  -4, sizeof(*(v))); break;	\
+	      case  -1:	IA64_FETCHADD(_tmp, _v,  -1, sizeof(*(v))); break;	\
+	      case   1:	IA64_FETCHADD(_tmp, _v,   1, sizeof(*(v))); break;	\
+	      case   4:	IA64_FETCHADD(_tmp, _v,   4, sizeof(*(v))); break;	\
+	      case   8:	IA64_FETCHADD(_tmp, _v,   8, sizeof(*(v))); break;	\
+	      case  16:	IA64_FETCHADD(_tmp, _v,  16, sizeof(*(v))); break;	\
+	      default:								\
+		_tmp = __bad_increment_for_ia64_fetch_and_add();		\
+		break;								\
+	}									\
+	(__typeof__(*v)) (_tmp + (i));	/* return new value */			\
+})
+
+/*
+ * This function doesn't exist, so you'll get a linker error if
+ * something tries to do an invalid xchg().
+ */
+extern void __xchg_called_with_bad_pointer (void);
+
+static __inline__ unsigned long
+__xchg (unsigned long x, volatile void *ptr, int size)
+{
+	unsigned long result;
+
+	switch (size) {
+	      case 1:
+		__asm__ __volatile ("xchg1 %0=[%1],%2" : "=r" (result)
+				    : "r" (ptr), "r" (x) : "memory");
+		return result;
+
+	      case 2:
+		__asm__ __volatile ("xchg2 %0=[%1],%2" : "=r" (result)
+				    : "r" (ptr), "r" (x) : "memory");
+		return result;
+
+	      case 4:
+		__asm__ __volatile ("xchg4 %0=[%1],%2" : "=r" (result)
+				    : "r" (ptr), "r" (x) : "memory");
+		return result;
+
+	      case 8:
+		__asm__ __volatile ("xchg8 %0=[%1],%2" : "=r" (result)
+				    : "r" (ptr), "r" (x) : "memory");
+		return result;
+	}
+	__xchg_called_with_bad_pointer();
+	return x;
+}
+
+#define xchg(ptr,x)							     \
+  ((__typeof__(*(ptr))) __xchg ((unsigned long) (x), (ptr), sizeof(*(ptr))))
+
+/*
+ * Atomic compare and exchange.  Compare OLD with MEM, if identical,
+ * store NEW in MEM.  Return the initial value in MEM.  Success is
+ * indicated by comparing RETURN with OLD.
+ */
+
+#define __HAVE_ARCH_CMPXCHG 1
+
+/*
+ * This function doesn't exist, so you'll get a linker error
+ * if something tries to do an invalid cmpxchg().
+ */
+extern long __cmpxchg_called_with_bad_pointer(void);
+
+#define ia64_cmpxchg(sem,ptr,old,new,size)						\
+({											\
+	__typeof__(ptr) _p_ = (ptr);							\
+	__typeof__(new) _n_ = (new);							\
+	__u64 _o_, _r_;									\
+											\
+	switch (size) {									\
+	      case 1: _o_ = (__u8 ) (long) (old); break;				\
+	      case 2: _o_ = (__u16) (long) (old); break;				\
+	      case 4: _o_ = (__u32) (long) (old); break;				\
+	      case 8: _o_ = (__u64) (long) (old); break;				\
+	      default: break;								\
+	}										\
+	 __asm__ __volatile__ ("mov ar.ccv=%0;;" :: "rO"(_o_));				\
+	switch (size) {									\
+	      case 1:									\
+		__asm__ __volatile__ ("cmpxchg1."sem" %0=[%1],%2,ar.ccv"		\
+				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
+		break;									\
+											\
+	      case 2:									\
+		__asm__ __volatile__ ("cmpxchg2."sem" %0=[%1],%2,ar.ccv"		\
+				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
+		break;									\
+											\
+	      case 4:									\
+		__asm__ __volatile__ ("cmpxchg4."sem" %0=[%1],%2,ar.ccv"		\
+				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
+		break;									\
+											\
+	      case 8:									\
+		__asm__ __volatile__ ("cmpxchg8."sem" %0=[%1],%2,ar.ccv"		\
+				      : "=r"(_r_) : "r"(_p_), "r"(_n_) : "memory");	\
+		break;									\
+											\
+	      default:									\
+		_r_ = __cmpxchg_called_with_bad_pointer();				\
+		break;									\
+	}										\
+	(__typeof__(old)) _r_;								\
+})
+
+#define cmpxchg_acq(ptr,o,n)	ia64_cmpxchg("acq", (ptr), (o), (n), sizeof(*(ptr)))
+#define cmpxchg_rel(ptr,o,n)	ia64_cmpxchg("rel", (ptr), (o), (n), sizeof(*(ptr)))
+
+/* for compatibility with other platforms: */
+#define cmpxchg(ptr,o,n)	cmpxchg_acq(ptr,o,n)
+
+#ifdef CONFIG_IA64_DEBUG_CMPXCHG
+# define CMPXCHG_BUGCHECK_DECL	int _cmpxchg_bugcheck_count = 128;
+# define CMPXCHG_BUGCHECK(v)							\
+  do {										\
+	if (_cmpxchg_bugcheck_count-- <= 0) {					\
+		void *ip;							\
+		extern int printk(const char *fmt, ...);			\
+		asm ("mov %0=ip" : "=r"(ip));					\
+		printk("CMPXCHG_BUGCHECK: stuck at %p on word %p\n", ip, (v));	\
+		break;								\
+	}									\
+  } while (0)
+#else /* !CONFIG_IA64_DEBUG_CMPXCHG */
+# define CMPXCHG_BUGCHECK_DECL
+# define CMPXCHG_BUGCHECK(v)
+#endif /* !CONFIG_IA64_DEBUG_CMPXCHG */
+
 #ifdef __KERNEL__
 
-#define prepare_to_switch()    local_irq_disable()
+#define prepare_to_switch()    do { } while(0)
 
 #ifdef CONFIG_IA32_SUPPORT
 # define IS_IA32_PROCESS(regs)	(ia64_psr(regs)->is != 0)
@@ -238,49 +378,39 @@ extern struct task_struct *ia64_switch_to (void *next_task);
 extern void ia64_save_extra (struct task_struct *task);
 extern void ia64_load_extra (struct task_struct *task);
 
-#ifdef CONFIG_PERFMON
-# define PERFMON_IS_SYSWIDE() (local_cpu_data->pfm_syst_info & 0x1)
-#else
-# define PERFMON_IS_SYSWIDE() (0)
-#endif
-
-#define IA64_HAS_EXTRA_STATE(t)							\
-	((t)->thread.flags & (IA64_THREAD_DBG_VALID|IA64_THREAD_PM_VALID)	\
-	 || IS_IA32_PROCESS(ia64_task_regs(t)) || PERFMON_IS_SYSWIDE())
-
-#define __switch_to(prev,next,last) do {							 \
-	if (IA64_HAS_EXTRA_STATE(prev))								 \
-		ia64_save_extra(prev);								 \
-	if (IA64_HAS_EXTRA_STATE(next))								 \
-		ia64_load_extra(next);								 \
-	ia64_psr(ia64_task_regs(next))->dfh = !ia64_is_local_fpu_owner(next);			 \
-	(last) = ia64_switch_to((next));							 \
+#define __switch_to(prev,next,last) do {						\
+	if (((prev)->thread.flags & (IA64_THREAD_DBG_VALID|IA64_THREAD_PM_VALID))	\
+	    || IS_IA32_PROCESS(ia64_task_regs(prev)))					\
+		ia64_save_extra(prev);							\
+	if (((next)->thread.flags & (IA64_THREAD_DBG_VALID|IA64_THREAD_PM_VALID))	\
+	    || IS_IA32_PROCESS(ia64_task_regs(next)))					\
+		ia64_load_extra(next);							\
+	(last) = ia64_switch_to((next));						\
 } while (0)
 
 #ifdef CONFIG_SMP
-
-/* Return true if this CPU can call the console drivers in printk() */
-#define arch_consoles_callable() (cpu_online_map & (1UL << smp_processor_id()))
-
-/*
- * In the SMP case, we save the fph state when context-switching away from a thread that
- * modified fph.  This way, when the thread gets scheduled on another CPU, the CPU can
- * pick up the state from task->thread.fph, avoiding the complication of having to fetch
- * the latest fph state from another CPU.  In other words: eager save, lazy restore.
- */
+  /*
+   * In the SMP case, we save the fph state when context-switching
+   * away from a thread that modified fph.  This way, when the thread
+   * gets scheduled on another CPU, the CPU can pick up the state from
+   * task->thread.fph, avoiding the complication of having to fetch
+   * the latest fph state from another CPU.
+   */
 # define switch_to(prev,next,last) do {						\
-	if (ia64_psr(ia64_task_regs(prev))->mfh && ia64_is_local_fpu_owner(prev)) {				\
+	if (ia64_psr(ia64_task_regs(prev))->mfh) {				\
 		ia64_psr(ia64_task_regs(prev))->mfh = 0;			\
 		(prev)->thread.flags |= IA64_THREAD_FPH_VALID;			\
 		__ia64_save_fpu((prev)->thread.fph);				\
 	}									\
-	__switch_to(prev, next, last);						\
-} while (0)
+	ia64_psr(ia64_task_regs(prev))->dfh = 1;				\
+	__switch_to(prev,next,last);						\
+  } while (0)
 #else
-# define switch_to(prev,next,last)	__switch_to(prev, next, last)
+# define switch_to(prev,next,last) do {						\
+	ia64_psr(ia64_task_regs(next))->dfh = (ia64_get_fpu_owner() != (next));	\
+	__switch_to(prev,next,last);						\
+} while (0)
 #endif
-
-#define ia64_platform_is(x) (strcmp(x, platform_name) == 0)
 
 #endif /* __KERNEL__ */
 

@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.system.h 1.14 08/20/01 14:34:41 paulus
+ */
+/*
  * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
  */
 #ifndef __PPC_SYSTEM_H
@@ -55,13 +58,9 @@ extern void poweroff_now(void);
 #ifdef CONFIG_6xx
 extern long _get_L2CR(void);
 extern void _set_L2CR(unsigned long);
-extern long _get_L3CR(void);
-extern void _set_L3CR(unsigned long);
 #else
-#define _get_L2CR()	0L
+#define _get_L2CR()	0
 #define _set_L2CR(val)	do { } while(0)
-#define _get_L3CR()	0L
-#define _set_L3CR(val)	do { } while(0)
 #endif
 extern void via_cuda_init(void);
 extern void pmac_nvram_init(void);
@@ -102,7 +101,6 @@ extern void dump_regs(struct pt_regs *);
 #define save_flags(flags)	__save_flags(flags)
 #define restore_flags(flags)	__restore_flags(flags)
 #define save_and_cli(flags)	__save_and_cli(flags)
-#define save_and_sti(flags)	__save_and_sti(flags)
 
 #else /* CONFIG_SMP */
 
@@ -115,16 +113,16 @@ extern void __global_restore_flags(unsigned long);
 #define save_flags(x) ((x)=__global_save_flags())
 #define restore_flags(x) __global_restore_flags(x)
 
-#define save_and_cli(x) do { save_flags(x); cli(); } while(0);
-#define save_and_sti(x) do { save_flags(x); sti(); } while(0);
-
 #endif /* !CONFIG_SMP */
 
 #define local_irq_disable()		__cli()
 #define local_irq_enable()		__sti()
 #define local_irq_save(flags)		__save_and_cli(flags)
-#define local_irq_set(flags)		__save_and_sti(flags)
 #define local_irq_restore(flags)	__restore_flags(flags)
+
+#endif /* __KERNEL__ */
+
+#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 
 static __inline__ unsigned long
 xchg_u32(volatile void *p, unsigned long val)
@@ -132,9 +130,8 @@ xchg_u32(volatile void *p, unsigned long val)
 	unsigned long prev;
 
 	__asm__ __volatile__ ("\n\
-1:	lwarx	%0,0,%2 \n"
-	PPC405_ERR77(0,%2)
-"	stwcx.	%3,0,%2 \n\
+1:	lwarx	%0,0,%2 \n\
+	stwcx.	%3,0,%2 \n\
 	bne-	1b"
 	: "=&r" (prev), "=m" (*(volatile unsigned long *)p)
 	: "r" (p), "r" (val), "m" (*(volatile unsigned long *)p)
@@ -184,9 +181,8 @@ __cmpxchg_u32(volatile int *p, int old, int new)
 	__asm__ __volatile__ ("\n\
 1:	lwarx	%0,0,%2 \n\
 	cmpw	0,%0,%3 \n\
-	bne	2f \n"
-	PPC405_ERR77(0,%2)
-"	stwcx.	%4,0,%2 \n\
+	bne	2f \n\
+	stwcx.	%4,0,%2 \n\
 	bne-	1b\n"
 #ifdef CONFIG_SMP
 "	sync\n"
@@ -226,5 +222,4 @@ __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 				    (unsigned long)_n_, sizeof(*(ptr))); \
   })
 
-#endif /* __KERNEL__ */
 #endif /* __PPC_SYSTEM_H */

@@ -9,8 +9,6 @@
  * High loaded stuff by Hans Lermen & Werner Almesberger, Feb. 1996
  */
 
-#define STANDALONE
-
 #include <linux/linkage.h>
 #include <linux/vmalloc.h>
 #include <linux/tty.h>
@@ -101,11 +99,15 @@ static long bytes_out = 0;
 static uch *output_data;
 static unsigned long output_ptr = 0;
 
+ 
 static void *malloc(int size);
 static void free(void *where);
-
-static void putstr(const char *);
-
+static void error(char *m);
+static void gzip_mark(void **);
+static void gzip_release(void **);
+ 
+static void puts(const char *);
+  
 extern int end;
 static long free_mem_ptr = (long)&end;
 static long free_mem_end_ptr;
@@ -121,6 +123,10 @@ static uch *high_buffer_start /* = (uch *)(((ulg)&end) + HEAP_SIZE)*/;
 static char *vidmem = (char *)0xb8000;
 static int vidport;
 static int lines, cols;
+
+#ifdef CONFIG_MULTIQUAD
+static void *xquad_portio = NULL;
+#endif
 
 #include "../../../../lib/inflate.c"
 
@@ -165,7 +171,7 @@ static void scroll(void)
 		vidmem[i] = ' ';
 }
 
-static void putstr(const char *s)
+static void puts(const char *s)
 {
 	int x,y,pos;
 	char c;
@@ -283,9 +289,9 @@ static void flush_window(void)
 
 static void error(char *x)
 {
-	putstr("\n\n");
-	putstr(x);
-	putstr("\n\n -- System halted");
+	puts("\n\n");
+	puts(x);
+	puts("\n\n -- System halted");
 
 	while(1);	/* Halt */
 }
@@ -369,9 +375,9 @@ asmlinkage int decompress_kernel(struct moveparams *mv, void *rmode)
 	else setup_output_buffer_if_we_run_high(mv);
 
 	makecrc();
-	putstr("Uncompressing Linux... ");
+	puts("Uncompressing Linux... ");
 	gunzip();
-	putstr("Ok, booting the kernel.\n");
+	puts("Ok, booting the kernel.\n");
 	if (high_loaded) close_output_buffer_if_we_run_high(mv);
 	return high_loaded;
 }

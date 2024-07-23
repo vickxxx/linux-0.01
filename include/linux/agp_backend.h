@@ -48,62 +48,33 @@ enum chipset_type {
 	INTEL_I815,
 	INTEL_I820,
 	INTEL_I830_M,
-	INTEL_I845_G,
 	INTEL_I840,
 	INTEL_I845,
 	INTEL_I850,
-	INTEL_I855_PM,
 	INTEL_I860,
-	INTEL_I865_G,
-	INTEL_I915_G,
-	INTEL_I915_GM,
-	INTEL_I7205,
-	INTEL_I7505,
-	INTEL_460GX,
 	VIA_GENERIC,
 	VIA_VP3,
 	VIA_MVP3,
 	VIA_MVP4,
-	VIA_APOLLO_PLE133,
 	VIA_APOLLO_PRO,
 	VIA_APOLLO_KX133,
 	VIA_APOLLO_KT133,
-	VIA_APOLLO_KM266,
-	VIA_APOLLO_KT400,
-	VIA_CLE266,
-	VIA_APOLLO_P4M266,
-	VIA_APOLLO_P4X400,
 	SIS_GENERIC,
 	AMD_GENERIC,
 	AMD_IRONGATE,
 	AMD_761,
 	AMD_762,
-	AMD_8151,
 	ALI_M1541,
 	ALI_M1621,
 	ALI_M1631,
 	ALI_M1632,
 	ALI_M1641,
-	ALI_M1644,
 	ALI_M1647,
 	ALI_M1651,
-	ALI_M1671,
 	ALI_GENERIC,
 	SVWRKS_HE,
 	SVWRKS_LE,
-	SVWRKS_GENERIC,
-	NVIDIA_NFORCE,
-	NVIDIA_NFORCE2,
-	NVIDIA_NFORCE3,
-	NVIDIA_GENERIC,
-	HP_ZX1,
-	ATI_RS100,
-	ATI_RS200,
-	ATI_RS250,
-	ATI_RS300_100,
-	ATI_RS300_133,
-	ATI_RS300_166,
-	ATI_RS300_200
+	SVWRKS_GENERIC
 };
 
 typedef struct _agp_version {
@@ -186,7 +157,7 @@ extern agp_memory *agp_allocate_memory(size_t, u32);
  * 
  */
 
-extern int agp_copy_info(agp_kern_info *);
+extern void agp_copy_info(agp_kern_info *);
 
 /*
  * agp_copy_info :
@@ -282,7 +253,7 @@ typedef struct {
 	void       (*enable)(u32);
 	int        (*acquire)(void);
 	void       (*release)(void);
-	int        (*copy_info)(agp_kern_info *);
+	void       (*copy_info)(agp_kern_info *);
 } drm_agp_t;
 
 extern const drm_agp_t *drm_agp_p;

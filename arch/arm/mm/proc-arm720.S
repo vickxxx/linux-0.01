@@ -37,11 +37,6 @@
 #include <asm/hardware.h>
 
 /*
- * and the page size
- */
-#define PAGESIZE	4096
-
-/*
  * Function: arm720_cache_clean_invalidate_all (void)
  *	   : arm720_cache_clean_invalidate_page (unsigned long address, int size,
  *                                    int flags)
@@ -91,11 +86,8 @@ ENTRY(cpu_arm720_tlb_invalidate_all)
  * Purpose : flush a TLB entry
  */
 ENTRY(cpu_arm720_tlb_invalidate_range)
-		sub	r3, r1, r0
-		cmp	r3, #256 * PAGESIZE		@ arbitary, should be tuned
-		bhi	cpu_arm720_tlb_invalidate_all
 1:		mcr	p15, 0, r0, c8, c7, 1		@ flush TLB (v4)
-		add	r0, r0, #PAGESIZE
+		add	r0, r0, #4096
 		cmp	r0, r1
 		blt	1b
 		mov	pc, lr
@@ -119,9 +111,6 @@ ENTRY(cpu_arm720_tlb_invalidate_page)
  *         : r3 = saved SPSR
  *
  * Purpose : obtain information about current aborted instruction
- * Note: we read user space.  This means we might cause a data
- * abort here if the I-TLB and D-TLB aren't seeing the same
- * picture.  Unfortunately, this does happen.  We live with it.
  *
  * Returns : r0 = address of abort
  *	   : r1 != 0 if writing
@@ -446,6 +435,8 @@ ENTRY(cpu_arm720_reset)
 		mov	pc, r0
 
 	
+cpu_armvlsi_name:
+		.asciz	"ARM"
 cpu_arm720_name:
 		.asciz	"ARM720T"
 		.align
@@ -506,7 +497,7 @@ ENTRY(arm720_processor_functions)
 
 		.type	cpu_arm720_info, #object
 cpu_arm720_info:
-		.long	0
+		.long	cpu_armvlsi_name
 		.long	cpu_arm720_name
 		.size	cpu_arm720_info, . - cpu_arm720_info
 	
@@ -533,7 +524,7 @@ __arm720_proc_info:
 		b	__arm720_setup				@ cpu_flush
 		.long	cpu_arch_name				@ arch_name
 		.long	cpu_elf_name				@ elf_name
-		.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB	@ elf_hwcap
+		.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB | HWCAP_26BIT	@ elf_hwcap
 		.long	cpu_arm720_info				@ info
 		.long	arm720_processor_functions
 		.size	__arm720_proc_info, . - __arm720_proc_info

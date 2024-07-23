@@ -1,102 +1,45 @@
 /******************************************************************************
  *
  * Module Name: nsdump - table dumping routines for debug
+ *              $Revision: 105 $
  *
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2004, R. Byron Moore
- * All rights reserved.
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
-#include <acpi/acpi.h>
-#include <acpi/acnamesp.h>
-#include <acpi/acparser.h>
+#include "acpi.h"
+#include "acinterp.h"
+#include "acnamesp.h"
+#include "actables.h"
+#include "acparser.h"
 
 
 #define _COMPONENT          ACPI_NAMESPACE
-	 ACPI_MODULE_NAME    ("nsdump")
+	 MODULE_NAME         ("nsdump")
 
 
-#if defined(ACPI_DEBUG_OUTPUT) || defined(ACPI_DEBUGGER)
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ns_print_pathname
- *
- * PARAMETERS:  num_segment         - Number of ACPI name segments
- *              Pathname            - The compressed (internal) path
- *
- * DESCRIPTION: Print an object's full namespace pathname
- *
- ******************************************************************************/
-
-void
-acpi_ns_print_pathname (
-	u32                             num_segments,
-	char                            *pathname)
-{
-	ACPI_FUNCTION_NAME ("ns_print_pathname");
-
-
-	if (!(acpi_dbg_level & ACPI_LV_NAMES) || !(acpi_dbg_layer & ACPI_NAMESPACE)) {
-		return;
-	}
-
-	/* Print the entire name */
-
-	ACPI_DEBUG_PRINT ((ACPI_DB_NAMES, "["));
-
-	while (num_segments) {
-		acpi_os_printf ("%4.4s", pathname);
-		pathname += ACPI_NAME_SIZE;
-
-		num_segments--;
-		if (num_segments) {
-			acpi_os_printf (".");
-		}
-	}
-
-	acpi_os_printf ("]\n");
-}
-
+#if defined(ACPI_DEBUG) || defined(ENABLE_DEBUGGER)
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_dump_pathname
+ * FUNCTION:    Acpi_ns_dump_pathname
  *
  * PARAMETERS:  Handle              - Object
  *              Msg                 - Prefix message
@@ -108,65 +51,85 @@ acpi_ns_print_pathname (
  *
  ******************************************************************************/
 
-void
+acpi_status
 acpi_ns_dump_pathname (
-	acpi_handle                     handle,
-	char                            *msg,
-	u32                             level,
-	u32                             component)
+	acpi_handle             handle,
+	NATIVE_CHAR             *msg,
+	u32                     level,
+	u32                     component)
 {
+	NATIVE_CHAR             *buffer;
+	u32                     length;
 
-	ACPI_FUNCTION_TRACE ("ns_dump_pathname");
+
+	FUNCTION_TRACE ("Ns_dump_pathname");
 
 
 	/* Do this only if the requested debug level and component are enabled */
 
 	if (!(acpi_dbg_level & level) || !(acpi_dbg_layer & component)) {
-		return_VOID;
+		return_ACPI_STATUS (AE_OK);
+	}
+
+	buffer = ACPI_MEM_ALLOCATE (PATHNAME_MAX);
+	if (!buffer) {
+		return_ACPI_STATUS (AE_NO_MEMORY);
 	}
 
 	/* Convert handle to a full pathname and print it (with supplied message) */
 
-	acpi_ns_print_node_pathname (handle, msg);
-	acpi_os_printf ("\n");
-	return_VOID;
+	length = PATHNAME_MAX;
+	if (ACPI_SUCCESS (acpi_ns_handle_to_pathname (handle, &length, buffer))) {
+		acpi_os_printf ("%s %s (%p)\n", msg, buffer, handle);
+	}
+
+	ACPI_MEM_FREE (buffer);
+
+	return_ACPI_STATUS (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_dump_one_object
+ * FUNCTION:    Acpi_ns_dump_one_object
  *
  * PARAMETERS:  Handle              - Node to be dumped
  *              Level               - Nesting level of the handle
- *              Context             - Passed into walk_namespace
+ *              Context             - Passed into Walk_namespace
  *
  * DESCRIPTION: Dump a single Node
- *              This procedure is a user_function called by acpi_ns_walk_namespace.
+ *              This procedure is a User_function called by Acpi_ns_walk_namespace.
  *
  ******************************************************************************/
 
 acpi_status
 acpi_ns_dump_one_object (
-	acpi_handle                     obj_handle,
-	u32                             level,
-	void                            *context,
-	void                            **return_value)
+	acpi_handle             obj_handle,
+	u32                     level,
+	void                    *context,
+	void                    **return_value)
 {
-	struct acpi_walk_info           *info = (struct acpi_walk_info *) context;
-	struct acpi_namespace_node      *this_node;
-	union acpi_operand_object       *obj_desc = NULL;
-	acpi_object_type                obj_type;
-	acpi_object_type                type;
-	u32                             bytes_to_dump;
-	u32                             dbg_level;
-	u32                             i;
+	acpi_walk_info          *info = (acpi_walk_info *) context;
+	acpi_namespace_node     *this_node;
+	acpi_operand_object     *obj_desc = NULL;
+	acpi_object_type8       obj_type;
+	acpi_object_type8       type;
+	u32                     bytes_to_dump;
+	u32                     downstream_sibling_mask = 0;
+	u32                     level_tmp;
+	u32                     which_bit;
+	u32                     i;
 
 
-	ACPI_FUNCTION_NAME ("ns_dump_one_object");
+	PROC_NAME ("Ns_dump_one_object");
 
 
-	/* Is output enabled? */
+	this_node = acpi_ns_map_handle_to_node (obj_handle);
+
+	level_tmp   = level;
+	type        = this_node->type;
+	which_bit   = 1;
+
 
 	if (!(acpi_dbg_level & info->debug_level)) {
 		return (AE_OK);
@@ -177,9 +140,6 @@ acpi_ns_dump_one_object (
 		return (AE_OK);
 	}
 
-	this_node = acpi_ns_map_handle_to_node (obj_handle);
-	type = this_node->type;
-
 	/* Check if the owner matches */
 
 	if ((info->owner_id != ACPI_UINT32_MAX) &&
@@ -187,30 +147,68 @@ acpi_ns_dump_one_object (
 		return (AE_OK);
 	}
 
+
 	/* Indent the object according to the level */
 
-	acpi_os_printf ("%2d%*s", (u32) level - 1, (int) level * 2, " ");
+	while (level_tmp--) {
 
-	/* Check the node type and name */
+		/* Print appropriate characters to form tree structure */
 
-	if (type > ACPI_TYPE_LOCAL_MAX) {
-		ACPI_REPORT_WARNING (("Invalid ACPI Type %08X\n", type));
+		if (level_tmp) {
+			if (downstream_sibling_mask & which_bit) {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "|"));
+			}
+
+			else {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " "));
+			}
+
+			which_bit <<= 1;
+		}
+
+		else {
+			if (acpi_ns_exist_downstream_sibling (this_node + 1)) {
+				downstream_sibling_mask |= (1 << (level - 1));
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "+"));
+			}
+
+			else {
+				downstream_sibling_mask &= ACPI_UINT32_MAX ^ (1 << (level - 1));
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "+"));
+			}
+
+			if (this_node->child == NULL) {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "-"));
+			}
+
+			else if (acpi_ns_exist_downstream_sibling (this_node->child)) {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "+"));
+			}
+
+			else {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "-"));
+			}
+		}
 	}
 
-	if (!acpi_ut_valid_acpi_name (this_node->name.integer)) {
-		ACPI_REPORT_WARNING (("Invalid ACPI Name %08X\n", this_node->name.integer));
+
+	/* Check the integrity of our data */
+
+	if (type > INTERNAL_TYPE_MAX) {
+		type = INTERNAL_TYPE_DEF_ANY;                                /* prints as *ERROR* */
+	}
+
+	if (!acpi_ut_valid_acpi_name (this_node->name)) {
+		REPORT_WARNING (("Invalid ACPI Name %08X\n", this_node->name));
 	}
 
 	/*
 	 * Now we can print out the pertinent information
 	 */
-	acpi_os_printf ("%4.4s %-12s %p ",
-			acpi_ut_get_node_name (this_node), acpi_ut_get_type_name (type), this_node);
+	ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " %4.4s %-12s %p",
+			(char*)&this_node->name, acpi_ut_get_type_name (type), this_node));
 
-	dbg_level = acpi_dbg_level;
-	acpi_dbg_level = 0;
-	obj_desc = acpi_ns_get_attached_object (this_node);
-	acpi_dbg_level = dbg_level;
+	obj_desc = this_node->object;
 
 	switch (info->display_type) {
 	case ACPI_DISPLAY_SUMMARY:
@@ -218,147 +216,110 @@ acpi_ns_dump_one_object (
 		if (!obj_desc) {
 			/* No attached object, we are done */
 
-			acpi_os_printf ("\n");
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 			return (AE_OK);
 		}
 
+
 		switch (type) {
 		case ACPI_TYPE_PROCESSOR:
-
-			acpi_os_printf ("ID %X Len %.4X Addr %p\n",
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " ID %d Addr %.4X Len %.4X\n",
 					 obj_desc->processor.proc_id,
-					 obj_desc->processor.length,
-					 (char *) obj_desc->processor.address);
+					 obj_desc->processor.address,
+					 obj_desc->processor.length));
 			break;
-
 
 		case ACPI_TYPE_DEVICE:
-
-			acpi_os_printf ("Notify Object: %p\n", obj_desc);
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Notification object: %p", obj_desc));
 			break;
-
 
 		case ACPI_TYPE_METHOD:
-
-			acpi_os_printf ("Args %X Len %.4X Aml %p\n",
-					 (u32) obj_desc->method.param_count,
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Args %d Len %.4X Aml %p \n",
+					 obj_desc->method.param_count,
 					 obj_desc->method.aml_length,
-					 obj_desc->method.aml_start);
+					 obj_desc->method.aml_start));
 			break;
-
 
 		case ACPI_TYPE_INTEGER:
-
-			acpi_os_printf ("= %8.8X%8.8X\n",
-					 ACPI_FORMAT_UINT64 (obj_desc->integer.value));
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " = %8.8X%8.8X\n",
+					 HIDWORD (obj_desc->integer.value),
+					 LODWORD (obj_desc->integer.value)));
 			break;
-
 
 		case ACPI_TYPE_PACKAGE:
-
-			if (obj_desc->common.flags & AOPOBJ_DATA_VALID) {
-				acpi_os_printf ("Elements %.2X\n",
-						 obj_desc->package.count);
-			}
-			else {
-				acpi_os_printf ("[Length not yet evaluated]\n");
-			}
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Elements %.2X\n",
+					 obj_desc->package.count));
 			break;
-
 
 		case ACPI_TYPE_BUFFER:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Len %.2X",
+					 obj_desc->buffer.length));
 
-			if (obj_desc->common.flags & AOPOBJ_DATA_VALID) {
-				acpi_os_printf ("Len %.2X",
-						 obj_desc->buffer.length);
+			/* Dump some of the buffer */
 
-				/* Dump some of the buffer */
-
-				if (obj_desc->buffer.length > 0) {
-					acpi_os_printf (" =");
-					for (i = 0; (i < obj_desc->buffer.length && i < 12); i++) {
-						acpi_os_printf (" %.2hX", obj_desc->buffer.pointer[i]);
-					}
+			if (obj_desc->buffer.length > 0) {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " ="));
+				for (i = 0; (i < obj_desc->buffer.length && i < 12); i++) {
+					ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " %.2X",
+							obj_desc->buffer.pointer[i]));
 				}
-				acpi_os_printf ("\n");
 			}
-			else {
-				acpi_os_printf ("[Length not yet evaluated]\n");
-			}
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 			break;
-
 
 		case ACPI_TYPE_STRING:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Len %.2X",
+					 obj_desc->string.length));
 
-			acpi_os_printf ("Len %.2X ", obj_desc->string.length);
-			acpi_ut_print_string (obj_desc->string.pointer, 32);
-			acpi_os_printf ("\n");
+			if (obj_desc->string.length > 0) {
+				 ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " = \"%.32s\"...",
+						 obj_desc->string.pointer));
+			}
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 			break;
-
 
 		case ACPI_TYPE_REGION:
-
-			acpi_os_printf ("[%s]", acpi_ut_get_region_name (obj_desc->region.space_id));
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " [%s]",
+					 acpi_ut_get_region_name (obj_desc->region.space_id)));
 			if (obj_desc->region.flags & AOPOBJ_DATA_VALID) {
-				acpi_os_printf (" Addr %8.8X%8.8X Len %.4X\n",
-						 ACPI_FORMAT_UINT64 (obj_desc->region.address),
-						 obj_desc->region.length);
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Addr %8.8X%8.8X Len %.4X\n",
+						 HIDWORD(obj_desc->region.address),
+						 LODWORD(obj_desc->region.address),
+						 obj_desc->region.length));
 			}
 			else {
-				acpi_os_printf (" [Address/Length not yet evaluated]\n");
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " [Address/Length not evaluated]\n"));
 			}
 			break;
 
-
-		case ACPI_TYPE_LOCAL_REFERENCE:
-
-			acpi_os_printf ("[%s]\n",
-					acpi_ps_get_opcode_name (obj_desc->reference.opcode));
+		case INTERNAL_TYPE_REFERENCE:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " [%s]\n",
+					 acpi_ps_get_opcode_name (obj_desc->reference.opcode)));
 			break;
-
 
 		case ACPI_TYPE_BUFFER_FIELD:
 
-			if (obj_desc->buffer_field.buffer_obj &&
-				obj_desc->buffer_field.buffer_obj->buffer.node) {
-				acpi_os_printf ("Buf [%4.4s]",
-						acpi_ut_get_node_name (obj_desc->buffer_field.buffer_obj->buffer.node));
-			}
+			/* TBD: print Buffer name when we can easily get it */
 			break;
 
-
-		case ACPI_TYPE_LOCAL_REGION_FIELD:
-
-			acpi_os_printf ("Rgn [%4.4s]",
-					acpi_ut_get_node_name (obj_desc->common_field.region_obj->region.node));
+		case INTERNAL_TYPE_REGION_FIELD:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Rgn [%4.4s]",
+					 (char *) &obj_desc->common_field.region_obj->region.node->name));
 			break;
 
-
-		case ACPI_TYPE_LOCAL_BANK_FIELD:
-
-			acpi_os_printf ("Rgn [%4.4s] Bnk [%4.4s]",
-					acpi_ut_get_node_name (obj_desc->common_field.region_obj->region.node),
-					acpi_ut_get_node_name (obj_desc->bank_field.bank_obj->common_field.node));
+		case INTERNAL_TYPE_BANK_FIELD:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Rgn [%4.4s]",
+					 (char *) &obj_desc->common_field.region_obj->region.node->name));
 			break;
 
-
-		case ACPI_TYPE_LOCAL_INDEX_FIELD:
-
-			acpi_os_printf ("Idx [%4.4s] Dat [%4.4s]",
-					acpi_ut_get_node_name (obj_desc->index_field.index_obj->common_field.node),
-					acpi_ut_get_node_name (obj_desc->index_field.data_obj->common_field.node));
-			break;
-
-
-		case ACPI_TYPE_LOCAL_ALIAS:
-		case ACPI_TYPE_LOCAL_METHOD_ALIAS:
-
-			acpi_os_printf ("Target %4.4s (%p)\n", acpi_ut_get_node_name (obj_desc), obj_desc);
+		case INTERNAL_TYPE_INDEX_FIELD:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Rgn [%4.4s]",
+					 (char *) &obj_desc->index_field.index_obj->common_field.region_obj->region.node->name));
 			break;
 
 		default:
 
-			acpi_os_printf ("Object %p\n", obj_desc);
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Object %p\n", obj_desc));
 			break;
 		}
 
@@ -366,73 +327,76 @@ acpi_ns_dump_one_object (
 
 		switch (type) {
 		case ACPI_TYPE_BUFFER_FIELD:
-		case ACPI_TYPE_LOCAL_REGION_FIELD:
-		case ACPI_TYPE_LOCAL_BANK_FIELD:
-		case ACPI_TYPE_LOCAL_INDEX_FIELD:
-
-			acpi_os_printf (" Off %.3X Len %.2X Acc %.2hd\n",
-					(obj_desc->common_field.base_byte_offset * 8)
-						+ obj_desc->common_field.start_field_bit_offset,
-					obj_desc->common_field.bit_length,
-					obj_desc->common_field.access_byte_width);
-			break;
-
-		default:
+		case INTERNAL_TYPE_REGION_FIELD:
+		case INTERNAL_TYPE_BANK_FIELD:
+		case INTERNAL_TYPE_INDEX_FIELD:
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " Off %.2X Len %.2X Acc %.2d\n",
+					 (obj_desc->common_field.base_byte_offset * 8) + obj_desc->common_field.start_field_bit_offset,
+					 obj_desc->common_field.bit_length,
+					 obj_desc->common_field.access_bit_width));
 			break;
 		}
+
 		break;
 
 
 	case ACPI_DISPLAY_OBJECTS:
 
-		acpi_os_printf ("O:%p", obj_desc);
+		ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "%p O:%p",
+				this_node, obj_desc));
+
 		if (!obj_desc) {
 			/* No attached object, we are done */
 
-			acpi_os_printf ("\n");
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 			return (AE_OK);
 		}
 
-		acpi_os_printf ("(R%d)",
-				obj_desc->common.reference_count);
+		ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "(R%d)",
+				obj_desc->common.reference_count));
 
 		switch (type) {
+
 		case ACPI_TYPE_METHOD:
 
 			/* Name is a Method and its AML offset/length are set */
 
-			acpi_os_printf (" M:%p-%X\n", obj_desc->method.aml_start,
-					  obj_desc->method.aml_length);
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " M:%p-%X\n",
+					 obj_desc->method.aml_start,
+					 obj_desc->method.aml_length));
+
 			break;
+
 
 		case ACPI_TYPE_INTEGER:
 
-			acpi_os_printf (" I:%8.8X8.8%X\n",
-					ACPI_FORMAT_UINT64 (obj_desc->integer.value));
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " N:%X%X\n",
+					 HIDWORD(obj_desc->integer.value),
+					 LODWORD(obj_desc->integer.value)));
 			break;
+
 
 		case ACPI_TYPE_STRING:
 
-			acpi_os_printf (" S:%p-%X\n", obj_desc->string.pointer,
-					  obj_desc->string.length);
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " S:%p-%X\n",
+					 obj_desc->string.pointer,
+					 obj_desc->string.length));
 			break;
+
 
 		case ACPI_TYPE_BUFFER:
 
-			acpi_os_printf (" B:%p-%X\n", obj_desc->buffer.pointer,
-					  obj_desc->buffer.length);
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " B:%p-%X\n",
+					 obj_desc->buffer.pointer,
+					 obj_desc->buffer.length));
 			break;
+
 
 		default:
 
-			acpi_os_printf ("\n");
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 			break;
 		}
-		break;
-
-
-	default:
-		acpi_os_printf ("\n");
 		break;
 	}
 
@@ -445,56 +409,48 @@ acpi_ns_dump_one_object (
 
 	/* If there is an attached object, display it */
 
-	dbg_level    = acpi_dbg_level;
-	acpi_dbg_level = 0;
-	obj_desc     = acpi_ns_get_attached_object (this_node);
-	acpi_dbg_level = dbg_level;
+	obj_desc = this_node->object;
 
 	/* Dump attached objects */
 
 	while (obj_desc) {
-		obj_type = ACPI_TYPE_INVALID;
-		acpi_os_printf ("      Attached Object %p: ", obj_desc);
+		obj_type = INTERNAL_TYPE_INVALID;
 
 		/* Decode the type of attached object and dump the contents */
 
-		switch (ACPI_GET_DESCRIPTOR_TYPE (obj_desc)) {
-		case ACPI_DESC_TYPE_NAMED:
+		ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "        Attached Object %p: ", obj_desc));
 
-			acpi_os_printf ("(Ptr to Node)\n");
-			bytes_to_dump = sizeof (struct acpi_namespace_node);
-			break;
-
-
-		case ACPI_DESC_TYPE_OPERAND:
-
-			obj_type = ACPI_GET_OBJECT_TYPE (obj_desc);
-
-			if (obj_type > ACPI_TYPE_LOCAL_MAX) {
-				acpi_os_printf ("(Ptr to ACPI Object type %X [UNKNOWN])\n", obj_type);
-				bytes_to_dump = 32;
-			}
-			else {
-				acpi_os_printf ("(Ptr to ACPI Object type %s, %X)\n",
-						   acpi_ut_get_type_name (obj_type), obj_type);
-				bytes_to_dump = sizeof (union acpi_operand_object);
-			}
-			break;
-
-
-		default:
-
-			acpi_os_printf ("(String or Buffer ptr - not an object descriptor) [%s]\n",
-					acpi_ut_get_descriptor_name (obj_desc));
-			bytes_to_dump = 16;
-			break;
+		if (VALID_DESCRIPTOR_TYPE (obj_desc, ACPI_DESC_TYPE_NAMED)) {
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "(Ptr to Node)\n"));
+			bytes_to_dump = sizeof (acpi_namespace_node);
 		}
 
-		ACPI_DUMP_BUFFER (obj_desc, bytes_to_dump);
+
+		else if (VALID_DESCRIPTOR_TYPE (obj_desc, ACPI_DESC_TYPE_INTERNAL)) {
+			obj_type = obj_desc->common.type;
+
+			if (obj_type > INTERNAL_TYPE_MAX) {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "(Ptr to ACPI Object type %X [UNKNOWN])\n", obj_type));
+				bytes_to_dump = 32;
+			}
+
+			else {
+				ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "(Ptr to ACPI Object type %2.2X [%s])\n",
+						   obj_type, acpi_ut_get_type_name (obj_type)));
+				bytes_to_dump = sizeof (acpi_operand_object);
+			}
+		}
+
+		else {
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "(String or Buffer - not descriptor)\n"));
+			bytes_to_dump = 16;
+		}
+
+		DUMP_BUFFER (obj_desc, bytes_to_dump);
 
 		/* If value is NOT an internal object, we are done */
 
-		if (ACPI_GET_DESCRIPTOR_TYPE (obj_desc) != ACPI_DESC_TYPE_OPERAND) {
+		if (VALID_DESCRIPTOR_TYPE (obj_desc, ACPI_DESC_TYPE_NAMED)) {
 			goto cleanup;
 		}
 
@@ -503,97 +459,176 @@ acpi_ns_dump_one_object (
 		 */
 		switch (obj_type) {
 		case ACPI_TYPE_STRING:
-			obj_desc = (void *) obj_desc->string.pointer;
+			obj_desc = (acpi_operand_object *) obj_desc->string.pointer;
 			break;
 
 		case ACPI_TYPE_BUFFER:
-			obj_desc = (void *) obj_desc->buffer.pointer;
+			obj_desc = (acpi_operand_object *) obj_desc->buffer.pointer;
 			break;
 
 		case ACPI_TYPE_BUFFER_FIELD:
-			obj_desc = (union acpi_operand_object *) obj_desc->buffer_field.buffer_obj;
+			obj_desc = (acpi_operand_object *) obj_desc->buffer_field.buffer_obj;
 			break;
 
 		case ACPI_TYPE_PACKAGE:
-			obj_desc = (void *) obj_desc->package.elements;
+			obj_desc = (acpi_operand_object *) obj_desc->package.elements;
 			break;
 
 		case ACPI_TYPE_METHOD:
-			obj_desc = (void *) obj_desc->method.aml_start;
+			obj_desc = (acpi_operand_object *) obj_desc->method.aml_start;
 			break;
 
-		case ACPI_TYPE_LOCAL_REGION_FIELD:
-			obj_desc = (void *) obj_desc->field.region_obj;
+		case INTERNAL_TYPE_REGION_FIELD:
+			obj_desc = (acpi_operand_object *) obj_desc->field.region_obj;
 			break;
 
-		case ACPI_TYPE_LOCAL_BANK_FIELD:
-			obj_desc = (void *) obj_desc->bank_field.region_obj;
+		case INTERNAL_TYPE_BANK_FIELD:
+			obj_desc = (acpi_operand_object *) obj_desc->bank_field.region_obj;
 			break;
 
-		case ACPI_TYPE_LOCAL_INDEX_FIELD:
-			obj_desc = (void *) obj_desc->index_field.index_obj;
+		case INTERNAL_TYPE_INDEX_FIELD:
+			obj_desc = (acpi_operand_object *) obj_desc->index_field.index_obj;
 			break;
 
-		default:
+	   default:
 			goto cleanup;
 		}
 
-		obj_type = ACPI_TYPE_INVALID;  /* Terminate loop after next pass */
+		obj_type = INTERNAL_TYPE_INVALID;    /* Terminate loop after next pass */
 	}
 
 cleanup:
-	acpi_os_printf ("\n");
+	ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "\n"));
 	return (AE_OK);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_dump_objects
+ * FUNCTION:    Acpi_ns_dump_objects
  *
  * PARAMETERS:  Type                - Object type to be dumped
- *              max_depth           - Maximum depth of dump.  Use ACPI_UINT32_MAX
+ *              Max_depth           - Maximum depth of dump.  Use ACPI_UINT32_MAX
  *                                    for an effectively unlimited depth.
- *              owner_id            - Dump only objects owned by this ID.  Use
+ *              Owner_id            - Dump only objects owned by this ID.  Use
  *                                    ACPI_UINT32_MAX to match all owners.
- *              start_handle        - Where in namespace to start/end search
+ *              Start_handle        - Where in namespace to start/end search
  *
  * DESCRIPTION: Dump typed objects within the loaded namespace.
- *              Uses acpi_ns_walk_namespace in conjunction with acpi_ns_dump_one_object.
+ *              Uses Acpi_ns_walk_namespace in conjunction with Acpi_ns_dump_one_object.
  *
  ******************************************************************************/
 
 void
 acpi_ns_dump_objects (
-	acpi_object_type                type,
-	u8                              display_type,
-	u32                             max_depth,
-	u32                             owner_id,
-	acpi_handle                     start_handle)
+	acpi_object_type8       type,
+	u8                      display_type,
+	u32                     max_depth,
+	u32                     owner_id,
+	acpi_handle             start_handle)
 {
-	struct acpi_walk_info           info;
+	acpi_walk_info          info;
 
 
-	ACPI_FUNCTION_ENTRY ();
+	FUNCTION_ENTRY ();
 
 
 	info.debug_level = ACPI_LV_TABLES;
 	info.owner_id = owner_id;
 	info.display_type = display_type;
 
-	(void) acpi_ns_walk_namespace (type, start_handle, max_depth,
-			 ACPI_NS_WALK_NO_UNLOCK, acpi_ns_dump_one_object,
-			 (void *) &info, NULL);
+
+	acpi_ns_walk_namespace (type, start_handle, max_depth, NS_WALK_NO_UNLOCK, acpi_ns_dump_one_object,
+			   (void *) &info, NULL);
+}
+
+
+#ifndef _ACPI_ASL_COMPILER
+/*******************************************************************************
+ *
+ * FUNCTION:    Acpi_ns_dump_one_device
+ *
+ * PARAMETERS:  Handle              - Node to be dumped
+ *              Level               - Nesting level of the handle
+ *              Context             - Passed into Walk_namespace
+ *
+ * DESCRIPTION: Dump a single Node that represents a device
+ *              This procedure is a User_function called by Acpi_ns_walk_namespace.
+ *
+ ******************************************************************************/
+
+acpi_status
+acpi_ns_dump_one_device (
+	acpi_handle             obj_handle,
+	u32                     level,
+	void                    *context,
+	void                    **return_value)
+{
+	acpi_device_info        info;
+	acpi_status             status;
+	u32                     i;
+
+
+	PROC_NAME ("Ns_dump_one_device");
+
+
+	status = acpi_ns_dump_one_object (obj_handle, level, context, return_value);
+
+	status = acpi_get_object_info (obj_handle, &info);
+	if (ACPI_SUCCESS (status)) {
+		for (i = 0; i < level; i++) {
+			ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, " "));
+		}
+
+		ACPI_DEBUG_PRINT_RAW ((ACPI_DB_TABLES, "    HID: %s, ADR: %8.8X%8.8X, Status: %x\n",
+				  info.hardware_id, HIDWORD(info.address), LODWORD(info.address), info.current_status));
+	}
+
+	return (status);
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_dump_tables
+ * FUNCTION:    Acpi_ns_dump_root_devices
  *
- * PARAMETERS:  search_base         - Root of subtree to be dumped, or
+ * PARAMETERS:  None
+ *
+ * DESCRIPTION: Dump all objects of type "device"
+ *
+ ******************************************************************************/
+
+void
+acpi_ns_dump_root_devices (void)
+{
+	acpi_handle             sys_bus_handle;
+
+
+	PROC_NAME ("Ns_dump_root_devices");
+
+
+	/* Only dump the table if tracing is enabled */
+
+	if (!(ACPI_LV_TABLES & acpi_dbg_level)) {
+		return;
+	}
+
+	acpi_get_handle (0, NS_SYSTEM_BUS, &sys_bus_handle);
+
+	ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "Display of all devices in the namespace:\n"));
+	acpi_ns_walk_namespace (ACPI_TYPE_DEVICE, sys_bus_handle, ACPI_UINT32_MAX, NS_WALK_NO_UNLOCK,
+			   acpi_ns_dump_one_device, NULL, NULL);
+}
+
+#endif
+
+/*******************************************************************************
+ *
+ * FUNCTION:    Acpi_ns_dump_tables
+ *
+ * PARAMETERS:  Search_base         - Root of subtree to be dumped, or
  *                                    NS_ALL to dump the entire namespace
- *              max_depth           - Maximum depth of dump.  Use INT_MAX
+ *              Max_depth           - Maximum depth of dump.  Use INT_MAX
  *                                    for an effectively unlimited depth.
  *
  * DESCRIPTION: Dump the name space, or a portion of it.
@@ -602,13 +637,13 @@ acpi_ns_dump_objects (
 
 void
 acpi_ns_dump_tables (
-	acpi_handle                     search_base,
-	u32                             max_depth)
+	acpi_handle             search_base,
+	u32                     max_depth)
 {
-	acpi_handle                     search_handle = search_base;
+	acpi_handle             search_handle = search_base;
 
 
-	ACPI_FUNCTION_TRACE ("ns_dump_tables");
+	FUNCTION_TRACE ("Ns_dump_tables");
 
 
 	if (!acpi_gbl_root_node) {
@@ -616,16 +651,17 @@ acpi_ns_dump_tables (
 		 * If the name space has not been initialized,
 		 * there is nothing to dump.
 		 */
-		ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "namespace not initialized!\n"));
+		ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "name space not initialized!\n"));
 		return_VOID;
 	}
 
-	if (ACPI_NS_ALL == search_base) {
+	if (NS_ALL == search_base) {
 		/*  entire namespace    */
 
 		search_handle = acpi_gbl_root_node;
 		ACPI_DEBUG_PRINT ((ACPI_DB_TABLES, "\\\n"));
 	}
+
 
 	acpi_ns_dump_objects (ACPI_TYPE_ANY, ACPI_DISPLAY_OBJECTS, max_depth,
 			ACPI_UINT32_MAX, search_handle);
@@ -635,10 +671,10 @@ acpi_ns_dump_tables (
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ns_dump_entry
+ * FUNCTION:    Acpi_ns_dump_entry
  *
  * PARAMETERS:  Handle              - Node to be dumped
- *              debug_level         - Output level
+ *              Debug_level         - Output level
  *
  * DESCRIPTION: Dump a single Node
  *
@@ -646,20 +682,19 @@ acpi_ns_dump_tables (
 
 void
 acpi_ns_dump_entry (
-	acpi_handle                     handle,
-	u32                             debug_level)
+	acpi_handle             handle,
+	u32                     debug_level)
 {
-	struct acpi_walk_info           info;
+	acpi_walk_info          info;
 
 
-	ACPI_FUNCTION_ENTRY ();
+	FUNCTION_ENTRY ();
 
 
 	info.debug_level = debug_level;
 	info.owner_id = ACPI_UINT32_MAX;
-	info.display_type = ACPI_DISPLAY_SUMMARY;
 
-	(void) acpi_ns_dump_one_object (handle, 1, &info, NULL);
+	acpi_ns_dump_one_object (handle, 1, &info, NULL);
 }
 
 #endif

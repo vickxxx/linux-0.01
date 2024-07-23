@@ -12,8 +12,7 @@ fi
 # msdos and Joliet want NLS
 if [ "$CONFIG_JOLIET" = "y" -o "$CONFIG_FAT_FS" != "n" \
 	-o "$CONFIG_NTFS_FS" != "n" -o "$CONFIG_NCPFS_NLS" = "y" \
-	-o "$CONFIG_SMB_NLS" = "y" -o "$CONFIG_JFS_FS" != "n" \
-	-o "$CONFIG_BEFS_FS" != "n" -o "$CONFIG_HFSPLUS_FS" != "n" ]; then
+	-o "$CONFIG_SMB_NLS" = "y" ]; then
   define_bool CONFIG_NLS y
 else
   define_bool CONFIG_NLS n
@@ -44,7 +43,6 @@ if [ "$CONFIG_NLS" = "y" ]; then
   tristate 'Korean charset (CP949, EUC-KR)'        CONFIG_NLS_CODEPAGE_949
   tristate 'Thai charset (CP874, TIS-620)'         CONFIG_NLS_CODEPAGE_874
   tristate 'Hebrew charsets (ISO-8859-8, CP1255)'  CONFIG_NLS_ISO8859_8
-  tristate 'Windows CP1250 (Slavic/Central European Languages)' CONFIG_NLS_CODEPAGE_1250
   tristate 'Windows CP1251 (Bulgarian, Belarusian)' CONFIG_NLS_CODEPAGE_1251
   tristate 'NLS ISO 8859-1  (Latin 1; Western European Languages)' CONFIG_NLS_ISO8859_1
   tristate 'NLS ISO 8859-2  (Latin 2; Slavic/Central European Languages)' CONFIG_NLS_ISO8859_2

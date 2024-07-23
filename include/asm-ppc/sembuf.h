@@ -1,7 +1,10 @@
+/*
+ * BK Id: SCCS/s.sembuf.h 1.5 05/17/01 18:14:25 cort
+ */
 #ifndef _PPC_SEMBUF_H
 #define _PPC_SEMBUF_H
 
-/*
+/* 
  * The semid64_ds structure for PPC architecture.
  */
 

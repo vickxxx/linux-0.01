@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.47 2003/07/08 09:53:35 starvik Exp $
+/* $Id: head.S,v 1.41 2001/10/29 14:55:58 pkj Exp $
  * 
  * Head of the kernel - alter with care
  *
@@ -7,24 +7,6 @@
  * Authors:	Bjorn Wesen (bjornw@axis.com)
  * 
  * $Log: head.S,v $
- * Revision 1.47  2003/07/08 09:53:35  starvik
- * Corrected last CVS log entry
- *
- * Revision 1.46  2003/05/15 08:07:51  gunnard
- * Removed serial port DMA when using AGDB.
- *
- * Revision 1.45  2003/04/28 05:31:05  starvik
- * Added section attributes
- *
- * Revision 1.44  2002/02/05 15:39:57  bjornw
- * Oops.. non-CRAMFS_MAGIC should jump over the copying, not into it...
- *
- * Revision 1.43  2001/11/08 15:09:43  starvik
- * Only start MII clock if Ethernet is configured
- *
- * Revision 1.42  2001/11/08 14:37:34  starvik
- * Start MII clock early to make sure that it is running at tranceiver reset
- *
  * Revision 1.41  2001/10/29 14:55:58  pkj
  * Corrected pa$r0 to par0.
  *
@@ -174,10 +156,7 @@
 
 #define CRAMFS_MAGIC 0x28cd3d45
 #define RAM_INIT_MAGIC 0x56902387
-
-#define START_ETHERNET_CLOCK IO_STATE(R_NETWORK_GEN_CONFIG, enable, on) |\
-                             IO_STATE(R_NETWORK_GEN_CONFIG, phy, mii_clk)
-				
+		
 	;; exported symbols
 		
 	.globl	etrax_irv
@@ -320,14 +299,8 @@ _inflash0:
 
 	;; Put this in a suitable section where we can reclaim storage
 	;; after init.
-	.section ".text.init", "ax"
+	.section ".text.init"
 _inflash:
-#ifdef CONFIG_ETRAX_ETHERNET	
-	;; Start MII clock to make sure it is running when tranceiver is reset
-	move.d START_ETHERNET_CLOCK, $r0
-	move.d $r0, [R_NETWORK_GEN_CONFIG]
-#endif
-		
 	;; We need to initialze DRAM registers before we start using the DRAM
 
 	cmp.d	RAM_INIT_MAGIC, $r8	; Already initialized?
@@ -432,7 +405,7 @@ _no_romfs_in_flash:
 	move.d	__vmlinux_end, $r0; the image will be after the vmlinux end address
 	move.d	[$r0], $r1	; cramfs assumes same endian on host/target
 	cmp.d	CRAMFS_MAGIC, $r1; magic value in cramfs superblock
-	bne	2f
+	bne	1f
 	nop
 
 	;; Ok. What is its size ? 
@@ -462,8 +435,7 @@ _no_romfs_in_flash:
 	subq	1, $r2
 	bne	1b
 	nop
-
-2:	
+	
 	;; Dont worry that the BSS is tainted. It will be cleared later.
 
 	moveq	0, $r0
@@ -552,23 +524,13 @@ _start_it:
 #if (!defined(CONFIG_ETRAX_KGDB) || !defined(CONFIG_ETRAX_DEBUG_PORT0)) \
 	&& !defined(CONFIG_DMA_MEMCPY)
 	; DMA channels 6 and 7 to ser0, kgdb doesnt want DMA
-#if (defined(CONFIG_ETRAX_AGDB))
-	; agdb only wants DMA out, no dma in
-	or.d	  IO_STATE (R_GEN_CONFIG, dma6, serial0),$r0
-#else
 	or.d	  IO_STATE (R_GEN_CONFIG, dma7, serial0)	\
 		| IO_STATE (R_GEN_CONFIG, dma6, serial0),$r0
 #endif
-#endif
 #if !defined(CONFIG_ETRAX_KGDB) || !defined(CONFIG_ETRAX_DEBUG_PORT1)
 	; DMA channels 8 and 9 to ser1, kgdb doesnt want DMA
-#if (defined(CONFIG_ETRAX_AGDB))
-	  ; agdb only wants DMA out, no dma in
-	or.d	  IO_STATE (R_GEN_CONFIG, dma8, serial1),$r0
-#else
 	or.d	  IO_STATE (R_GEN_CONFIG, dma9, serial1)	\
 		| IO_STATE (R_GEN_CONFIG, dma8, serial1),$r0
-#endif	
 #endif	
 #ifdef CONFIG_DMA_MEMCPY
 	; 6/7 memory-memory DMA
@@ -580,13 +542,8 @@ _start_it:
 	or.w	IO_STATE (R_GEN_CONFIG, ser2, select),$r0
 #if !defined(CONFIG_ETRAX_KGDB) || !defined(CONFIG_ETRAX_DEBUG_PORT2)
 	; DMA channels 2 and 3 to ser2, kgdb doesnt want DMA
-#if (defined(CONFIG_ETRAX_AGDB))
-	; agdb only wants DMA out, no dma in
-	or.d	  IO_STATE (R_GEN_CONFIG, dma2, serial2),$r0
-#else
 	or.d	  IO_STATE (R_GEN_CONFIG, dma3, serial2)	\
 		| IO_STATE (R_GEN_CONFIG, dma2, serial2),$r0
-#endif
 #endif
 #endif
 #if defined(CONFIG_ETRAX_SERIAL_PORT3) || defined(CONFIG_ETRAX_SYNCHRONOUS_SERIAL_PORT1)
@@ -594,13 +551,8 @@ _start_it:
 	or.w	IO_STATE (R_GEN_CONFIG, ser3, select),$r0
 #if !defined(CONFIG_ETRAX_KGDB) || !defined(CONFIG_ETRAX_DEBUG_PORT3)
 	; DMA channels 4 and 5 to ser3, kgdb doesnt want DMA
-#if (defined(CONFIG_ETRAX_AGDB))
-	; agdb only wants DMA out, no dma in
-	or.d	  IO_STATE (R_GEN_CONFIG, dma4, serial3),$r0
-#else
 	or.d	  IO_STATE (R_GEN_CONFIG, dma5, serial3)	\
 		| IO_STATE (R_GEN_CONFIG, dma4, serial3),$r0
-#endif
 #endif
 #endif
 #if defined(CONFIG_ETRAX_PARALLEL_PORT0) || defined(CONFIG_ETRAX_ETHERNET_LPSLAVE)
@@ -869,5 +821,5 @@ swapper_pg_dir = 0x60002000
 swapper_pg_dir = 0xc0002000
 #endif
 
-	.section ".data.init", "aw"
+	.section ".data.init"
 #include "../lib/hw_settings.S"

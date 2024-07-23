@@ -131,7 +131,7 @@ int ncp__vol2io(unsigned char *, unsigned int *,
 
 #endif /* CONFIG_NCPFS_NLS */
 
-int
+inline int
 ncp_strnicmp(struct nls_table *,
 		const unsigned char *, const unsigned char *, int);
 

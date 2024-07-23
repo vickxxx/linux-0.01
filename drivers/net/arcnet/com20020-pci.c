@@ -1,6 +1,5 @@
 /*
- * Linux ARCnet driver - COM20020 PCI support
- * for Contemporary Controls PCI20 and SOHARD SH-ARC PCI with com20020 chipset
+ * Linux ARCnet driver - COM20020 PCI support (Contemporary Controls PCI20)
  * 
  * Written 1994-1999 by Avery Pennarun,
  *    based on an ISA version by David Woodhouse.
@@ -58,7 +57,6 @@ MODULE_PARM(timeout, "i");
 MODULE_PARM(backplane, "i");
 MODULE_PARM(clockp, "i");
 MODULE_PARM(clockm, "i");
-MODULE_LICENSE("GPL");
 
 static void com20020pci_open_close(struct net_device *dev, bool open)
 {
@@ -87,21 +85,7 @@ static int __devinit com20020pci_probe(struct pci_dev *pdev, const struct pci_de
 	memset(lp, 0, sizeof(struct arcnet_local));
 	pci_set_drvdata(pdev, dev);
 
-	// SOHARD needs PCI base addr 4
-	if (pdev->vendor==0x10B5) {
-		BUGMSG(D_NORMAL, "SOHARD\n");
-		ioaddr = pci_resource_start(pdev, 4);
-	}
-	else {
-		BUGMSG(D_NORMAL, "Contemporary Controls\n");
-		ioaddr = pci_resource_start(pdev, 2);
-	}
-
-	// Dummy access after Reset
-	// ARCNET controller needs this access to detect bustype
-	outb(0x00,ioaddr+1);
-	inb(ioaddr+1);
-
+	ioaddr = pci_resource_start(pdev, 2);
 	dev->base_addr = ioaddr;
 	dev->irq = pdev->irq;
 	dev->dev_addr[0] = node;
@@ -167,7 +151,6 @@ static struct pci_device_id com20020pci_id_table[] __devinitdata = {
 	{ 0x1571, 0xa204, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{ 0x1571, 0xa205, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{ 0x1571, 0xa206, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
-        { 0x10B5, 0x9050, PCI_ANY_ID, PCI_ANY_ID, 0, 0, ARC_CAN_10MBIT },
 	{0,}
 };
 
@@ -177,7 +160,7 @@ static struct pci_driver com20020pci_driver = {
 	name:		"com20020",
 	id_table:	com20020pci_id_table,
 	probe:		com20020pci_probe,
-	remove:		__devexit_p(com20020pci_remove),
+	remove:		com20020pci_remove
 };
 
 static int __init com20020pci_init(void)

@@ -137,15 +137,15 @@ void __init via_init(void)
 			panic("UNKNOWN VIA TYPE");
 	}
 
-	printk(KERN_INFO "VIA1 at %p is a 6522 or clone\n", via1);
+	printk("VIA1 at %p is a 6522 or clone\n", via1);
 
-	printk(KERN_INFO "VIA2 at %p is ", via2);
+	printk("VIA2 at %p is ", via2);
 	if (rbv_present) {
-		printk(KERN_INFO "an RBV\n");
+		printk("an RBV\n");
 	} else if (oss_present) {
-		printk(KERN_INFO "an OSS\n");
+		printk("an OSS\n");
 	} else {
-		printk(KERN_INFO "a 6522 or clone\n");
+		printk("a 6522 or clone\n");
 	}
 
 #ifdef DEBUG_VIA
@@ -291,22 +291,22 @@ void __init via_register_interrupts(void)
 
 void via_debug_dump(void)
 {
-	printk(KERN_DEBUG "VIA1: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
+	printk("VIA1: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
 		(uint) via1[vDirA], (uint) via1[vDirB], (uint) via1[vACR]);
-	printk(KERN_DEBUG "         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
+	printk("         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
 		(uint) via1[vPCR], (uint) via1[vIFR], (uint) via1[vIER]);
 	if (oss_present) {
-		printk(KERN_DEBUG "VIA2: <OSS>\n");
+		printk("VIA2: <OSS>\n");
 	} else if (rbv_present) {
-		printk(KERN_DEBUG "VIA2:  IFR = 0x%02X  IER = 0x%02X\n",
+		printk("VIA2:  IFR = 0x%02X  IER = 0x%02X\n",
 			(uint) via2[rIFR], (uint) via2[rIER]);
-		printk(KERN_DEBUG "      SIFR = 0x%02X SIER = 0x%02X\n",
+		printk("      SIFR = 0x%02X SIER = 0x%02X\n",
 			(uint) via2[rSIFR], (uint) via2[rSIER]);
 	} else {
-		printk(KERN_DEBUG "VIA2: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
+		printk("VIA2: DDRA = 0x%02X DDRB = 0x%02X ACR = 0x%02X\n",
 			(uint) via2[vDirA], (uint) via2[vDirB],
 			(uint) via2[vACR]);
-		printk(KERN_DEBUG "         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
+		printk("         PCR = 0x%02X  IFR = 0x%02X IER = 0x%02X\n",
 			(uint) via2[vPCR],
 			(uint) via2[vIFR], (uint) via2[vIER]);
 	}
@@ -374,10 +374,7 @@ void __init via_nubus_init(void)
 
 	if (!rbv_present) {
 		/* set the line to be an output on non-RBV machines */
-		if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-		   (macintosh_config->adb_type != MAC_ADB_PB2)) {
-			via2[vDirB] |= 0x02;
-		}
+		via2[vDirB] |= 0x02;
 	}
 
 	/* this seems to be an ADB bit on PMU machines */
@@ -393,23 +390,8 @@ void __init via_nubus_init(void)
 		via2[rSIER] = 0x7F;
 		via2[rSIER] = nubus_active | 0x80;
 	} else {
-		/* These are ADB bits on PMU */
-		if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-		   (macintosh_config->adb_type != MAC_ADB_PB2)) {
-			switch(macintosh_config->ident)
-			{
-				case MAC_MODEL_II:
-				case MAC_MODEL_IIX:
-				case MAC_MODEL_IICX:
-				case MAC_MODEL_SE30:
-					via2[vBufA] |= 0x3F;
-					via2[vDirA] = ~nubus_active | 0xc0;
-					break;
-				default:
-					via2[vBufA] = 0xFF;
-					via2[vDirA] = ~nubus_active;
-			}
-		}
+		via2[vBufA] = 0xFF;
+		via2[vDirA] = ~nubus_active;
 	}
 }
 
@@ -499,7 +481,7 @@ void via_irq_enable(int irq) {
 	int irq_bit	= 1 << irq_idx;
 
 #ifdef DEBUG_IRQUSE
-	printk(KERN_DEBUG "via_irq_enable(%d)\n", irq);
+	printk("via_irq_enable(%d)\n", irq);
 #endif
 
 	if (irq_src == 1) {
@@ -526,21 +508,7 @@ void via_irq_enable(int irq) {
 			via2[rSIER] = IER_SET_BIT(irq_idx);
 		} else {
 			/* Make sure the bit is an input, to enable the irq */
-			/* But not on PowerBooks, that's ADB... */
-			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-			   (macintosh_config->adb_type != MAC_ADB_PB2)) {
-			   	switch(macintosh_config->ident)
-				{
-					case MAC_MODEL_II:
-					case MAC_MODEL_IIX:
-					case MAC_MODEL_IICX:
-					case MAC_MODEL_SE30:
-						via2[vDirA] &= (~irq_bit | 0xc0);
-						break;
-					default:
-						via2[vDirA] &= ~irq_bit;
-				}
-			}
+			via2[vDirA] &= ~irq_bit;
 		}
 		nubus_active |= irq_bit;
 	}
@@ -552,7 +520,7 @@ void via_irq_disable(int irq) {
 	int irq_bit	= 1 << irq_idx;
 
 #ifdef DEBUG_IRQUSE
-	printk(KERN_DEBUG "via_irq_disable(%d)\n", irq);
+	printk("via_irq_disable(%d)\n", irq);
 #endif
 
 	if (irq_src == 1) {
@@ -565,11 +533,7 @@ void via_irq_disable(int irq) {
 			via2[rSIER] = IER_CLR_BIT(irq_idx);
 		} else {
 			/* disable the nubus irq by changing dir to output */
-			/* except on PMU */
-			if ((macintosh_config->adb_type != MAC_ADB_PB1) &&
-			   (macintosh_config->adb_type != MAC_ADB_PB2)) {
-				via2[vDirA] |= irq_bit;
-			}
+			via2[vDirA] |= irq_bit;
 		}
 		nubus_active &= ~irq_bit;
 	}

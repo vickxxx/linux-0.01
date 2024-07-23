@@ -339,4 +339,4 @@ static Scsi_Host_Template driver_template = PLUTO;
 
 #include "scsi_module.c"
 
-MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

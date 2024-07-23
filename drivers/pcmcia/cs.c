@@ -809,7 +809,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	    return 1;
     for (i = 0; i < MAX_IO_WIN; i++) {
 	if (s->io[i].NumPorts == 0) {
-	    if (find_io_region(base, num, align, name, s) == 0) {
+	    if (find_io_region(base, num, align, name) == 0) {
 		s->io[i].Attributes = attr;
 		s->io[i].BasePort = *base;
 		s->io[i].NumPorts = s->io[i].InUse = num;
@@ -821,7 +821,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	/* Try to extend top of window */
 	try = s->io[i].BasePort + s->io[i].NumPorts;
 	if ((*base == 0) || (*base == try))
-	    if (find_io_region(&try, num, 0, name, s) == 0) {
+	    if (find_io_region(&try, num, 0, name) == 0) {
 		*base = try;
 		s->io[i].NumPorts += num;
 		s->io[i].InUse += num;
@@ -830,7 +830,7 @@ static int alloc_io_space(socket_info_t *s, u_int attr, ioaddr_t *base,
 	/* Try to extend bottom of window */
 	try = s->io[i].BasePort - num;
 	if ((*base == 0) || (*base == try))
-	    if (find_io_region(&try, num, 0, name, s) == 0) {
+	    if (find_io_region(&try, num, 0, name) == 0) {
 		s->io[i].BasePort = *base = try;
 		s->io[i].NumPorts += num;
 		s->io[i].InUse += num;
@@ -882,10 +882,6 @@ int pcmcia_access_configuration_register(client_handle_t handle,
 	c = &s->config[reg->Function];
     } else
 	c = CONFIG(handle);
-
-    if (c == NULL)
-	return CS_NO_CARD;
-
     if (!(c->state & CONFIG_LOCKED))
 	return CS_CONFIGURATION_LOCKED;
 
@@ -1272,7 +1268,7 @@ int pcmcia_get_status(client_handle_t handle, cs_status_t *status)
     } else
 	c = CONFIG(handle);
     if ((c != NULL) && (c->state & CONFIG_LOCKED) &&
-	(c->IntType & (INT_MEMORY_AND_IO|INT_ZOOMED_VIDEO))) {
+	(c->IntType & INT_MEMORY_AND_IO)) {
 	u_char reg;
 	if (c->Present & PRESENT_PIN_REPLACE) {
 	    read_cis_mem(s, 1, (c->ConfigBase+CISREG_PRR)>>1, 1, &reg);
@@ -1700,8 +1696,6 @@ int pcmcia_request_configuration(client_handle_t handle,
     c->Attributes = req->Attributes;
     if (req->IntType & INT_MEMORY_AND_IO)
 	s->socket.flags |= SS_IOCARD;
-    if (req->IntType & INT_ZOOMED_VIDEO)
-	s->socket.flags |= SS_ZVCARD|SS_IOCARD;
     if (req->Attributes & CONF_ENABLE_DMA)
 	s->socket.flags |= SS_DMA_MODE;
     if (req->Attributes & CONF_ENABLE_SPKR)
@@ -1862,7 +1856,7 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 {
     socket_info_t *s;
     config_t *c;
-    int ret = CS_IN_USE, irq = 0;
+    int ret = 0, irq = 0;
     
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
@@ -1874,9 +1868,13 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	return CS_CONFIGURATION_LOCKED;
     if (c->state & CONFIG_IRQ_REQ)
 	return CS_IN_USE;
-
+    
+    /* Short cut: if there are no ISA interrupts, then it is PCI */
+    if (!s->cap.irq_mask) {
+	irq = s->cap.pci_irq;
+	ret = (irq) ? 0 : CS_IN_USE;
 #ifdef CONFIG_ISA
-    if (s->irq.AssignedIRQ != 0) {
+    } else if (s->irq.AssignedIRQ != 0) {
 	/* If the interrupt is already assigned, it must match */
 	irq = s->irq.AssignedIRQ;
 	if (req->IRQInfo1 & IRQ_INFO2_VALID) {
@@ -1885,6 +1883,7 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	} else
 	    ret = ((req->IRQInfo1&IRQ_MASK) == irq) ? 0 : CS_BAD_ARGS;
     } else {
+	ret = CS_IN_USE;
 	if (req->IRQInfo1 & IRQ_INFO2_VALID) {
 	    u_int try, mask = req->IRQInfo2 & s->cap.irq_mask;
 	    for (try = 0; try < 2; try++) {
@@ -1899,13 +1898,9 @@ int pcmcia_request_irq(client_handle_t handle, irq_req_t *req)
 	    irq = req->IRQInfo1 & IRQ_MASK;
 	    ret = try_irq(req->Attributes, irq, 1);
 	}
-    }
 #endif
-    if (ret != 0) {
-	if (!s->cap.pci_irq)
-	    return ret;
-	irq = s->cap.pci_irq;
     }
+    if (ret != 0) return ret;
 
     if (req->Attributes & IRQ_HANDLE_PRESENT) {
 	if (bus_request_irq(s->cap.bus, irq, req->Handler,
@@ -1979,7 +1974,7 @@ int pcmcia_request_window(client_handle_t *handle, win_req_t *req, window_handle
 	find_mem_region(&win->base, win->size, align,
 			(req->Attributes & WIN_MAP_BELOW_1MB) ||
 			!(s->cap.features & SS_CAP_PAGE_REGS),
-			(*handle)->dev_info, s))
+			(*handle)->dev_info))
 	return CS_IN_USE;
     (*handle)->state |= CLIENT_WIN_REQ(w);
 

@@ -64,7 +64,7 @@ static inline void copy_page(void *to, void *from)
 
 #define BUG() do { \
         printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-        __asm__ __volatile__(".long 0"); \
+        __asm__ __volatile__(".word 0x0000"); \
 } while (0)                                       
 
 #define PAGE_BUG(page) do { \
@@ -119,13 +119,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define __va(x)                 (void *)(x)
 #define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
 #define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
-
-unsigned int get_storage_key(void);
-unsigned long pfix_get_page_addr(void *);
-unsigned long pfix_get_addr(void *);
 
 #endif /* __KERNEL__ */
 

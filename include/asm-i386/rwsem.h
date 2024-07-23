@@ -4,8 +4,6 @@
  *
  * Derived from asm-i386/semaphore.h
  *
- * Trylock by Brian Watson (Brian.J.Watson@compaq.com).
- *
  *
  * The MSW of the count is the negated number of active writers and waiting
  * lockers, and the LSW is the total number of active locks
@@ -103,7 +101,7 @@ static inline void __down_read(struct rw_semaphore *sem)
 LOCK_PREFIX	"  incl      (%%eax)\n\t" /* adds 0x00000001, returns the old value */
 		"  js        2f\n\t" /* jump if we weren't granted the lock */
 		"1:\n\t"
-		LOCK_SECTION_START("")
+		".section .text.lock,\"ax\"\n"
 		"2:\n\t"
 		"  pushl     %%ecx\n\t"
 		"  pushl     %%edx\n\t"
@@ -111,34 +109,11 @@ LOCK_PREFIX	"  incl      (%%eax)\n\t" /* adds 0x00000001, returns the old value 
 		"  popl      %%edx\n\t"
 		"  popl      %%ecx\n\t"
 		"  jmp       1b\n"
-		LOCK_SECTION_END
+		".previous"
 		"# ending down_read\n\t"
-		: "=m"(sem->count)
-		: "a"(sem), "m"(sem->count)
+		: "+m"(sem->count)
+		: "a"(sem)
 		: "memory", "cc");
-}
-
-/*
- * trylock for reading -- returns 1 if successful, 0 if contention
- */
-static inline int __down_read_trylock(struct rw_semaphore *sem)
-{
-	__s32 result, tmp;
-	__asm__ __volatile__(
-		"# beginning __down_read_trylock\n\t"
-		"  movl      %0,%1\n\t"
-		"1:\n\t"
-		"  movl	     %1,%2\n\t"
-		"  addl      %3,%2\n\t"
-		"  jle	     2f\n\t"
-LOCK_PREFIX	"  cmpxchgl  %2,%0\n\t"
-		"  jnz	     1b\n\t"
-		"2:\n\t"
-		"# ending __down_read_trylock\n\t"
-		: "+m"(sem->count), "=&a"(result), "=&r"(tmp)
-		: "i"(RWSEM_ACTIVE_READ_BIAS)
-		: "memory", "cc");
-	return result>=0 ? 1 : 0;
 }
 
 /*
@@ -151,34 +126,21 @@ static inline void __down_write(struct rw_semaphore *sem)
 	tmp = RWSEM_ACTIVE_WRITE_BIAS;
 	__asm__ __volatile__(
 		"# beginning down_write\n\t"
-LOCK_PREFIX	"  xadd      %%edx,(%%eax)\n\t" /* subtract 0x0000ffff, returns the old value */
-		"  testl     %%edx,%%edx\n\t" /* was the count 0 before? */
+LOCK_PREFIX	"  xadd      %0,(%%eax)\n\t" /* subtract 0x0000ffff, returns the old value */
+		"  testl     %0,%0\n\t" /* was the count 0 before? */
 		"  jnz       2f\n\t" /* jump if we weren't granted the lock */
 		"1:\n\t"
-		LOCK_SECTION_START("")
+		".section .text.lock,\"ax\"\n"
 		"2:\n\t"
 		"  pushl     %%ecx\n\t"
 		"  call      rwsem_down_write_failed\n\t"
 		"  popl      %%ecx\n\t"
 		"  jmp       1b\n"
-		LOCK_SECTION_END
+		".previous\n"
 		"# ending down_write"
-		: "=m"(sem->count), "=d"(tmp)
-		: "a"(sem), "1"(tmp), "m"(sem->count)
+		: "+d"(tmp), "+m"(sem->count)
+		: "a"(sem)
 		: "memory", "cc");
-}
-
-/*
- * trylock for writing -- returns 1 if successful, 0 if contention
- */
-static inline int __down_write_trylock(struct rw_semaphore *sem)
-{
-	signed long ret = cmpxchg(&sem->count,
-				  RWSEM_UNLOCKED_VALUE, 
-				  RWSEM_ACTIVE_WRITE_BIAS);
-	if (ret == RWSEM_UNLOCKED_VALUE)
-		return 1;
-	return 0;
 }
 
 /*
@@ -192,7 +154,7 @@ static inline void __up_read(struct rw_semaphore *sem)
 LOCK_PREFIX	"  xadd      %%edx,(%%eax)\n\t" /* subtracts 1, returns the old value */
 		"  js        2f\n\t" /* jump if the lock is being waited upon */
 		"1:\n\t"
-		LOCK_SECTION_START("")
+		".section .text.lock,\"ax\"\n"
 		"2:\n\t"
 		"  decw      %%dx\n\t" /* do nothing if still outstanding active readers */
 		"  jnz       1b\n\t"
@@ -200,10 +162,10 @@ LOCK_PREFIX	"  xadd      %%edx,(%%eax)\n\t" /* subtracts 1, returns the old valu
 		"  call      rwsem_wake\n\t"
 		"  popl      %%ecx\n\t"
 		"  jmp       1b\n"
-		LOCK_SECTION_END
+		".previous\n"
 		"# ending __up_read\n"
-		: "=m"(sem->count), "=d"(tmp)
-		: "a"(sem), "1"(tmp), "m"(sem->count)
+		: "+m"(sem->count), "+d"(tmp)
+		: "a"(sem)
 		: "memory", "cc");
 }
 
@@ -218,7 +180,7 @@ static inline void __up_write(struct rw_semaphore *sem)
 LOCK_PREFIX	"  xaddl     %%edx,(%%eax)\n\t" /* tries to transition 0xffff0001 -> 0x00000000 */
 		"  jnz       2f\n\t" /* jump if the lock is being waited upon */
 		"1:\n\t"
-		LOCK_SECTION_START("")
+		".section .text.lock,\"ax\"\n"
 		"2:\n\t"
 		"  decw      %%dx\n\t" /* did the active count reduce to 0? */
 		"  jnz       1b\n\t" /* jump back if not */
@@ -226,10 +188,10 @@ LOCK_PREFIX	"  xaddl     %%edx,(%%eax)\n\t" /* tries to transition 0xffff0001 ->
 		"  call      rwsem_wake\n\t"
 		"  popl      %%ecx\n\t"
 		"  jmp       1b\n"
-		LOCK_SECTION_END
+		".previous\n"
 		"# ending __up_write\n"
-		: "=m"(sem->count)
-		: "a"(sem), "i"(-RWSEM_ACTIVE_WRITE_BIAS), "m"(sem->count)
+		: "+m"(sem->count)
+		: "a"(sem), "i"(-RWSEM_ACTIVE_WRITE_BIAS)
 		: "memory", "cc", "edx");
 }
 

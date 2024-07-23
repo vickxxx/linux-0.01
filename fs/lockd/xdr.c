@@ -55,7 +55,7 @@ static inline u32 *nlm_decode_cookie(u32 *p, struct nlm_cookie *c)
 		c->len=4;
 		memset(c->data, 0, 4);	/* hockeypux brain damage */
 	}
-	else if(len<=NLM_MAXCOOKIELEN)
+	else if(len<=8)
 	{
 		c->len=len;
 		memcpy(c->data, p, len);
@@ -64,7 +64,7 @@ static inline u32 *nlm_decode_cookie(u32 *p, struct nlm_cookie *c)
 	else 
 	{
 		printk(KERN_NOTICE
-			"lockd: bad cookie size %d (only cookies under %d bytes are supported.)\n", len, NLM_MAXCOOKIELEN);
+			"lockd: bad cookie size %d (only cookies under 8 bytes are supported.)\n", len);
 		return NULL;
 	}
 	return p;
@@ -86,7 +86,7 @@ nlm_decode_fh(u32 *p, struct nfs_fh *f)
 
 	if ((len = ntohl(*p++)) != NFS2_FHSIZE) {
 		printk(KERN_NOTICE
-			"lockd: bad fhandle size %d (should be %d)\n",
+			"lockd: bad fhandle size %x (should be %d)\n",
 			len, NFS2_FHSIZE);
 		return NULL;
 	}
@@ -534,7 +534,7 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
  * Buffer requirements for NLM
  */
 #define NLM_void_sz		0
-#define NLM_cookie_sz		1+QUADLEN(NLM_MAXCOOKIELEN)
+#define NLM_cookie_sz		3	/* 1 len , 2 data */
 #define NLM_caller_sz		1+QUADLEN(sizeof(system_utsname.nodename))
 #define NLM_netobj_sz		1+QUADLEN(XDR_MAX_NETOBJ)
 /* #define NLM_owner_sz		1+QUADLEN(NLM_MAXOWNER) */
@@ -561,10 +561,11 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
 #define nlmclt_decode_norep	NULL
 
 #define PROC(proc, argtype, restype)	\
-    { .p_procname  = "nlm_" #proc,					\
-      .p_encode    = (kxdrproc_t) nlmclt_encode_##argtype,		\
-      .p_decode    = (kxdrproc_t) nlmclt_decode_##restype,		\
-      .p_bufsiz    = MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2	\
+    { "nlm_" #proc,						\
+      (kxdrproc_t) nlmclt_encode_##argtype,			\
+      (kxdrproc_t) nlmclt_decode_##restype,			\
+      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2,		\
+      0								\
     }
 
 static struct rpc_procinfo	nlm_procedures[] = {
@@ -643,32 +644,3 @@ nlm_procname(u32 proc)
 }
 #endif
 
-#ifdef RPC_DEBUG
-const char *nlmdbg_cookie2a(const struct nlm_cookie *cookie)
-{
-	/*
-	 * We can get away with a static buffer because we're only
-	 * called with BKL held.
-	 */
-	static char buf[2*NLM_MAXCOOKIELEN+1];
-	int i;
-	int len = sizeof(buf);
-	char *p = buf;
-
-	len--;	/* allow for trailing \0 */
-	if (len < 3)
-		return "???";
-	for (i = 0 ; i < cookie->len ; i++) {
-		if (len < 2) {
-			strcpy(p-3, "...");
-			break;
-		}
-		sprintf(p, "%02x", cookie->data[i]);
-		p += 2;
-		len -= 2;
-	}
-	*p = '\0';
-
-	return buf;
-}
-#endif

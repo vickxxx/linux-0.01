@@ -41,9 +41,7 @@ extern void paging_init(void);
 #define flush_dcache_page(page)			do { } while (0)
 #define flush_icache_range(start, end)		do { } while (0)
 #define flush_icache_page(vma,pg)		do { } while (0)
-#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
 #define flush_cache_sigtramp(vaddr)		do { } while (0)
-#define __flush_icache_all()			do { } while (0)
 
 #define p3_cache_init()				do { } while (0)
 
@@ -66,7 +64,6 @@ extern void flush_cache_sigtramp(unsigned long addr);
 
 #define flush_page_to_ram(page)			do { } while (0)
 #define flush_icache_page(vma,pg)		do { } while (0)
-#define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
 
 /* Initialization of P3 area for copy_user_page */
 extern void p3_cache_init(void);
@@ -209,6 +206,11 @@ extern unsigned long empty_zero_page[1024];
 #define pmd_clear(xp)	do { set_pmd(xp, __pmd(0)); } while (0)
 #define	pmd_bad(x)	((pmd_val(x) & (~PAGE_MASK & ~_PAGE_USER)) != _KERNPG_TABLE)
 
+/*
+ * Permanent address of a page. Obviously must never be
+ * called on a highmem page.
+ */
+#define page_address(page)  ((page)->virtual) /* P1 address of the page */
 #define pages_to_mb(x)	((x) >> (20-PAGE_SHIFT))
 #define pte_page(x) 	phys_to_page(pte_val(x)&PTE_PHYS_MASK)
 
@@ -310,11 +312,5 @@ extern void update_mmu_cache(struct vm_area_struct * vma,
  * No page table caches to initialise
  */
 #define pgtable_cache_init()	do { } while (0)
-
-/*
- * Set pg flags to non-cached
- */
-#define pgprot_noncached(_prot) __pgprot(pgprot_val(_prot) &= ~_PAGE_CACHABLE)
-
 
 #endif /* __ASM_SH_PAGE_H */

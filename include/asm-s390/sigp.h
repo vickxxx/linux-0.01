@@ -59,6 +59,9 @@ typedef enum
 typedef enum
 {
 	ec_schedule=0,
+        ec_restart,
+        ec_halt,
+        ec_power_off,
 	ec_call_function,
 	ec_bit_last
 } ec_bit_sig;
@@ -106,7 +109,7 @@ signal_processor_p(__u32 parameter,__u16 cpu_addr,sigp_order_code order_code)
  * Signal processor with parameter and return status
  */
 extern __inline__ sigp_ccode
-signal_processor_ps(unsigned long *statusptr, __u32 parameter,
+signal_processor_ps(__u32 *statusptr, __u32 parameter,
 		    __u16 cpu_addr, sigp_order_code order_code)
 {
 	sigp_ccode ccode;
@@ -126,6 +129,6 @@ signal_processor_ps(unsigned long *statusptr, __u32 parameter,
    return ccode;
 }
 
-#endif /* __SIGP__ */
+#endif __SIGP__
 
 

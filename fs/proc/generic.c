@@ -56,7 +56,6 @@ proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 	ssize_t	n, count;
 	char	*start;
 	struct proc_dir_entry * dp;
-	loff_t pos = *ppos;
 
 	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 	if (!(page = (char*) __get_free_page(GFP_KERNEL)))
@@ -65,8 +64,6 @@ proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 	while ((nbytes > 0) && !eof)
 	{
 		count = MIN(PROC_BLOCK_SIZE, nbytes);
-		if ((unsigned)pos > INT_MAX)
-			break;
 
 		start = NULL;
 		if (dp->get_info) {
@@ -74,11 +71,11 @@ proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 			 * Handle backwards compatibility with the old net
 			 * routines.
 			 */
-			n = dp->get_info(page, &start, pos, count);
+			n = dp->get_info(page, &start, *ppos, count);
 			if (n < count)
 				eof = 1;
 		} else if (dp->read_proc) {
-			n = dp->read_proc(page, &start, pos,
+			n = dp->read_proc(page, &start, *ppos,
 					  count, &eof, dp->data);
 		} else
 			break;
@@ -87,8 +84,8 @@ proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 			/*
 			 * For proc files that are less than 4k
 			 */
-			start = page + pos;
-			n -= pos;
+			start = page + *ppos;
+			n -= *ppos;
 			if (n <= 0)
 				break;
 			if (n > count)
@@ -114,13 +111,12 @@ proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 			break;
 		}
 
-		pos += start < page ? (long)start : n; /* Move down the file */
+		*ppos += start < page ? (long)start : n; /* Move down the file */
 		nbytes -= n;
 		buf += n;
 		retval += n;
 	}
 	free_page((unsigned long) page);
-	*ppos = pos;
 	return retval;
 }
 
@@ -142,27 +138,24 @@ proc_file_write(struct file * file, const char * buffer,
 
 
 static loff_t
-proc_file_lseek(struct file * file, loff_t offset, int origin)
+proc_file_lseek(struct file * file, loff_t offset, int orig)
 {
-	long long retval;
-
-	switch (origin) {
-		case 2:
-			offset += file->f_dentry->d_inode->i_size;
-			break;
-		case 1:
-			offset += file->f_pos;
-	}
-	retval = -EINVAL;
-	if (offset>=0 && (unsigned long long)offset<=file->f_dentry->d_inode->i_sb->s_maxbytes) {
-		if (offset != file->f_pos) {
-			file->f_pos = offset;
-			file->f_reada = 0;
-		}
-		retval = offset;
-	}
-	/* RED-PEN user can fake an error here by setting offset to >=-4095 && <0  */
-	return retval;
+    switch (orig) {
+    case 0:
+	if (offset < 0)
+	    return -EINVAL;    
+	file->f_pos = offset;
+	return(file->f_pos);
+    case 1:
+	if (offset + file->f_pos < 0)
+	    return -EINVAL;    
+	file->f_pos += offset;
+	return(file->f_pos);
+    case 2:
+	return(-EINVAL);
+    default:
+	return(-EINVAL);
+    }
 }
 
 /*
@@ -461,11 +454,7 @@ struct proc_dir_entry *proc_symlink(const char *name,
 		ent->data = kmalloc((ent->size=strlen(dest))+1, GFP_KERNEL);
 		if (ent->data) {
 			strcpy((char*)ent->data,dest);
-			if (proc_register(parent, ent) < 0) {
-				kfree(ent->data);
-				kfree(ent);
-				ent = NULL;
-			}
+			proc_register(parent, ent);
 		} else {
 			kfree(ent);
 			ent = NULL;
@@ -482,36 +471,24 @@ struct proc_dir_entry *proc_mknod(const char *name, mode_t mode,
 	ent = proc_create(&parent,name,mode,1);
 	if (ent) {
 		ent->rdev = rdev;
-		if (proc_register(parent, ent) < 0) {
-			kfree(ent);
-			ent = NULL;
-		}
+		proc_register(parent, ent);
 	}
 	return ent;
 }
 
-struct proc_dir_entry *proc_mkdir_mode(const char *name, mode_t mode,
-		struct proc_dir_entry *parent)
+struct proc_dir_entry *proc_mkdir(const char *name, struct proc_dir_entry *parent)
 {
 	struct proc_dir_entry *ent;
 
-	ent = proc_create(&parent, name, S_IFDIR | mode, 2);
+	ent = proc_create(&parent,name,
+			  (S_IFDIR | S_IRUGO | S_IXUGO),2);
 	if (ent) {
 		ent->proc_fops = &proc_dir_operations;
 		ent->proc_iops = &proc_dir_inode_operations;
 
-		if (proc_register(parent, ent) < 0) {
-			kfree(ent);
-			ent = NULL;
-		}
+		proc_register(parent, ent);
 	}
 	return ent;
-}
-
-struct proc_dir_entry *proc_mkdir(const char *name,
-		struct proc_dir_entry *parent)
-{
-	return proc_mkdir_mode(name, S_IRUGO | S_IXUGO, parent);
 }
 
 struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
@@ -538,10 +515,7 @@ struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 			ent->proc_fops = &proc_dir_operations;
 			ent->proc_iops = &proc_dir_inode_operations;
 		}
-		if (proc_register(parent, ent) < 0) {
-			kfree(ent);
-			ent = NULL;
-		}
+		proc_register(parent, ent);
 	}
 	return ent;
 }

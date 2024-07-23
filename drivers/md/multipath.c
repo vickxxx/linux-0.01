@@ -281,17 +281,18 @@ static int multipath_make_request (mddev_t *mddev, int rw,
 	return 0;
 }
 
-static void multipath_status (struct seq_file *seq, mddev_t *mddev)
+static int multipath_status (char *page, mddev_t *mddev)
 {
 	multipath_conf_t *conf = mddev_to_conf(mddev);
-	int i;
+	int sz = 0, i;
 	
-	seq_printf (seq, " [%d/%d] [", conf->raid_disks,
+	sz += sprintf (page+sz, " [%d/%d] [", conf->raid_disks,
 						 conf->working_disks);
 	for (i = 0; i < conf->raid_disks; i++)
-		seq_printf (seq, "%s",
+		sz += sprintf (page+sz, "%s",
 			conf->multipaths[i].operational ? "U" : "_");
-	seq_printf (seq, "]");
+	sz += sprintf (page+sz, "]");
+	return sz;
 }
 
 #define LAST_DISK KERN_ALERT \
@@ -700,8 +701,11 @@ static void multipathd (void *data)
 		md_spin_unlock_irqrestore(&retry_list_lock, flags);
 
 		mddev = mp_bh->mddev;
-		if (mddev->sb_dirty)
+		if (mddev->sb_dirty) {
+			printk(KERN_INFO "dirty sb detected, updating.\n");
+			mddev->sb_dirty = 0;
 			md_update_sb(mddev);
+		}
 		bh = &mp_bh->bh_req;
 		dev = bh->b_dev;
 		

@@ -86,8 +86,6 @@ earlier 3Com products.
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
-#include <linux/ethtool.h>
-#include <asm/uaccess.h>
 
 #include <pcmcia/version.h>
 #include <pcmcia/cs_types.h>
@@ -253,7 +251,6 @@ static int el3_rx(struct net_device *dev, int worklimit);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static struct ethtool_ops netdev_ethtool_ops;
 static void set_rx_mode(struct net_device *dev);
 
 static dev_info_t dev_info = "3c574_cs";
@@ -329,7 +326,6 @@ static dev_link_t *tc574_attach(void)
 	dev->hard_start_xmit = &el3_start_xmit;
 	dev->get_stats = &el3_get_stats;
 	dev->do_ioctl = &el3_ioctl;
-	SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 	dev->set_multicast_list = &set_rx_mode;
 	ether_setup(dev);
 	dev->open = &el3_open;
@@ -1193,16 +1189,6 @@ static int el3_rx(struct net_device *dev, int worklimit)
 	return worklimit;
 }
 
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, "3c574_cs");
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-};
-
 /* Provide ioctl() calls to examine the MII xcvr state. */
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
@@ -1216,14 +1202,12 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		  data[0], data[1], data[2], data[3]);
 
     switch(cmd) {
-	case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
-	case SIOCDEVPRIVATE:
+	case SIOCDEVPRIVATE:		/* Get the address of the PHY in use. */
 		data[0] = phy;
-	case SIOCGMIIREG:		/* Read the specified MII register. */
-	case SIOCDEVPRIVATE+1:
+	case SIOCDEVPRIVATE+1:		/* Read the specified MII register. */
 		{
 			int saved_window;
-			unsigned long flags;
+			long flags;
 
 			save_flags(flags);
 			cli();
@@ -1234,11 +1218,10 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			restore_flags(flags);
 			return 0;
 		}
-	case SIOCSMIIREG:		/* Write the specified MII register */
-	case SIOCDEVPRIVATE+2:
+	case SIOCDEVPRIVATE+2:		/* Write the specified MII register */
 		{
 			int saved_window;
-			unsigned long flags;
+			long flags;
 
 			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;

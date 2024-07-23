@@ -378,17 +378,8 @@ static void seeq8005_timeout(struct net_device *dev)
 static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short length = skb->len;
-	unsigned char *buf;
-
-	if(length < ETH_ZLEN)
-	{
-		skb = skb_padto(skb, ETH_ZLEN);
-		if(skb == NULL)
-			return 0;
-		length = ETH_ZLEN;
-	}
-	buf = skb->data;
+	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	unsigned char *buf = skb->data;
 
 	/* Block a timer-based transmit from overlapping */
 	netif_stop_queue(dev);

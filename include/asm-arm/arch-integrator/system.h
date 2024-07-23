@@ -21,17 +21,15 @@
 #ifndef __ASM_ARCH_SYSTEM_H
 #define __ASM_ARCH_SYSTEM_H
 
-#include <asm/hardware.h>
-#include <asm/io.h>
 #include <asm/arch/platform.h>
 
-static inline void arch_idle(void)
+static void arch_idle(void)
 {
 	/*
 	 * This should do all the clock switching
 	 * and wait for interrupt tricks
 	 */
-	cpu_do_idle();
+	cpu_do_idle(0);
 }
 
 static inline void arch_reset(char mode)

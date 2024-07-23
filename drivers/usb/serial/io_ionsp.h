@@ -2,7 +2,7 @@
  *
  *	IONSP.H		Definitions for I/O Networks Serial Protocol
  *
- *	Copyright (C) 1997-1998 Inside Out Networks, Inc.
+ *	Copyright (c) 1997-1998 Inside Out Networks, Inc.
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -88,12 +88,12 @@ All 16-bit fields are sent in little-endian (Intel) format.
 // Interrupt pipe
 //
 
-struct int_status_pkt {
+typedef struct _INT_STATUS_PKT {
 	__u16      RxBytesAvail;		    // Additional bytes available to
 						    // be read from Bulk IN pipe
 	__u16      TxCredits[ MAX_RS232_PORTS ];   // Additional space available in
 						    // given port's TxBuffer
-};
+} INT_STATUS_PKT, *PINT_STATUS_PKT;
 
 
 #define GET_INT_STATUS_SIZE(NumPorts) (sizeof(__u16) + (sizeof(__u16) * (NumPorts)))

@@ -62,21 +62,6 @@ struct ip_conntrack_tuple
 	} dst;
 };
 
-/* This is optimized opposed to a memset of the whole structure.  Everything we
- * really care about is the  source/destination unions */
-#define IP_CT_TUPLE_U_BLANK(tuple) 				\
-	do {							\
-		(tuple)->src.u.all = 0;				\
-		(tuple)->dst.u.all = 0;				\
-	} while (0)
-
-enum ip_conntrack_dir
-{
-	IP_CT_DIR_ORIGINAL,
-	IP_CT_DIR_REPLY,
-	IP_CT_DIR_MAX
-};
-
 #ifdef __KERNEL__
 
 #define DUMP_TUPLE(tp)						\
@@ -90,18 +75,12 @@ DEBUGP("tuple %p: %u %u.%u.%u.%u:%hu -> %u.%u.%u.%u:%hu\n",	\
 /* If we're the first tuple, it's the original dir. */
 #define DIRECTION(h) ((enum ip_conntrack_dir)(&(h)->ctrack->tuplehash[1] == (h)))
 
-/* Connections have two entries in the hash table: one for each way */
-struct ip_conntrack_tuple_hash
+enum ip_conntrack_dir
 {
-	struct list_head list;
-
-	struct ip_conntrack_tuple tuple;
-
-	/* this == &ctrack->tuplehash[DIRECTION(this)]. */
-	struct ip_conntrack *ctrack;
+	IP_CT_DIR_ORIGINAL,
+	IP_CT_DIR_REPLY,
+	IP_CT_DIR_MAX
 };
-
-#endif /* __KERNEL__ */
 
 static inline int ip_ct_tuple_src_equal(const struct ip_conntrack_tuple *t1,
 				        const struct ip_conntrack_tuple *t2)
@@ -136,4 +115,16 @@ static inline int ip_ct_tuple_mask_cmp(const struct ip_conntrack_tuple *t,
 		     & mask->dst.protonum));
 }
 
+/* Connections have two entries in the hash table: one for each way */
+struct ip_conntrack_tuple_hash
+{
+	struct list_head list;
+
+	struct ip_conntrack_tuple tuple;
+
+	/* this == &ctrack->tuplehash[DIRECTION(this)]. */
+	struct ip_conntrack *ctrack;
+};
+
+#endif /* __KERNEL__ */
 #endif /* _IP_CONNTRACK_TUPLE_H */

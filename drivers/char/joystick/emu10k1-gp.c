@@ -52,7 +52,6 @@ struct emu {
 	
 static struct pci_device_id emu_tbl[] __devinitdata = {
 	{ 0x1102, 0x7002, PCI_ANY_ID, PCI_ANY_ID }, /* SB Live! gameport */
-        { 0x1102, 0x7003, PCI_ANY_ID, PCI_ANY_ID }, /* Audigy! gameport */
 	{ 0, }
 };
 
@@ -109,7 +108,7 @@ static struct pci_driver emu_driver = {
         name:           "Emu10k1 Gameport",
         id_table:       emu_tbl,
         probe:          emu_probe,
-        remove:         __devexit_p(emu_remove),
+        remove:         emu_remove,
 };
 
 int __init emu_init(void)

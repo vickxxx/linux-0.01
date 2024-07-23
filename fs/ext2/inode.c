@@ -35,17 +35,6 @@ MODULE_AUTHOR("Remy Card and others");
 MODULE_DESCRIPTION("Second Extended Filesystem");
 MODULE_LICENSE("GPL");
 
-/*
- * Test whether an inode is a fast symlink.
- */
-static inline int ext2_inode_is_fast_symlink(struct inode *inode)
-{
-	int ea_blocks = inode->u.ext2_i.i_file_acl ?
-		(inode->i_sb->s_blocksize >> 9) : 0;
-
-	return (S_ISLNK(inode->i_mode) &&
-		inode->i_blocks - ea_blocks == 0);
-}
 
 static int ext2_update_inode(struct inode * inode, int do_sync);
 
@@ -250,7 +239,8 @@ static Indirect *ext2_get_branch(struct inode *inode,
 				 Indirect chain[4],
 				 int *err)
 {
-	struct super_block *sb = inode->i_sb;
+	kdev_t dev = inode->i_dev;
+	int size = inode->i_sb->s_blocksize;
 	Indirect *p = chain;
 	struct buffer_head *bh;
 
@@ -260,7 +250,7 @@ static Indirect *ext2_get_branch(struct inode *inode,
 	if (!p->key)
 		goto no_block;
 	while (--depth) {
-		bh = sb_bread(sb, le32_to_cpu(p->key));
+		bh = bread(dev, le32_to_cpu(p->key), size);
 		if (!bh)
 			goto failure;
 		/* Reader: pointers */
@@ -409,7 +399,7 @@ static int ext2_alloc_branch(struct inode *inode,
 		 * Get buffer_head for parent block, zero it out and set 
 		 * the pointer to new one, then send parent to disk.
 		 */
-		bh = sb_getblk(inode->i_sb, parent);
+		bh = getblk(inode->i_dev, parent, blocksize);
 		lock_buffer(bh);
 		memset(bh->b_data, 0, blocksize);
 		branch[n].bh = bh;
@@ -418,11 +408,7 @@ static int ext2_alloc_branch(struct inode *inode,
 		mark_buffer_uptodate(bh, 1);
 		unlock_buffer(bh);
 		mark_buffer_dirty_inode(bh, inode);
-		/* We used to sync bh here if IS_SYNC(inode).
-		 * But for S_ISREG files we now rely upon generic_osync_inode()
-		 * and b_inode_buffers
-		 */
-		if (S_ISDIR(inode->i_mode) && IS_SYNC(inode)) {
+		if (IS_SYNC(inode) || inode->u.ext2_i.i_osync) {
 			ll_rw_block (WRITE, 1, &bh);
 			wait_on_buffer (bh);
 		}
@@ -486,13 +472,16 @@ static inline int ext2_splice_branch(struct inode *inode,
 	/* had we spliced it onto indirect block? */
 	if (where->bh) {
 		mark_buffer_dirty_inode(where->bh, inode);
-		if (S_ISDIR(inode->i_mode) && IS_SYNC(inode)) {
-			ll_rw_block(WRITE, 1, &where->bh);
+		if (IS_SYNC(inode) || inode->u.ext2_i.i_osync) {
+			ll_rw_block (WRITE, 1, &where->bh);
 			wait_on_buffer(where->bh);
 		}
 	}
 
-	mark_inode_dirty(inode);
+	if (IS_SYNC(inode) || inode->u.ext2_i.i_osync)
+		ext2_sync_inode (inode);
+	else
+		mark_inode_dirty(inode);
 	return 0;
 
 changed:
@@ -564,7 +553,6 @@ out:
 	if (err == -EAGAIN)
 		goto changed;
 
-	goal = 0;
 	if (ext2_find_goal(inode, iblock, chain, partial, &goal) < 0)
 		goto changed;
 
@@ -775,7 +763,7 @@ static void ext2_free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 			if (!nr)
 				continue;
 			*p = 0;
-			bh = sb_bread(inode->i_sb, nr);
+			bh = bread (inode->i_dev, nr, inode->i_sb->s_blocksize);
 			/*
 			 * A read failure? Report error and clear slot
 			 * (should be rare).
@@ -812,8 +800,6 @@ void ext2_truncate (struct inode * inode)
 
 	if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 	    S_ISLNK(inode->i_mode)))
-		return;
-	if (ext2_inode_is_fast_symlink(inode))
 		return;
 	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
 		return;
@@ -852,6 +838,10 @@ void ext2_truncate (struct inode * inode)
 				   (u32*)partial->bh->b_data + addr_per_block,
 				   (chain+n-1) - partial);
 		mark_buffer_dirty_inode(partial->bh, inode);
+		if (IS_SYNC(inode)) {
+			ll_rw_block (WRITE, 1, &partial->bh);
+			wait_on_buffer (partial->bh);
+		}
 		brelse (partial->bh);
 		partial--;
 	}
@@ -883,27 +873,10 @@ do_indirects:
 			;
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	if (IS_SYNC(inode)) {
-		fsync_inode_buffers(inode);
+	if (IS_SYNC(inode))
 		ext2_sync_inode (inode);
-	} else {
+	else
 		mark_inode_dirty(inode);
-	}
-}
-
-void ext2_set_inode_flags(struct inode *inode)
-{
-	unsigned int flags = inode->u.ext2_i.i_flags;
-
-	inode->i_flags &= ~(S_SYNC|S_APPEND|S_IMMUTABLE|S_NOATIME);
-	if (flags & EXT2_SYNC_FL)
-		inode->i_flags |= S_SYNC;
-	if (flags & EXT2_APPEND_FL)
-		inode->i_flags |= S_APPEND;
-	if (flags & EXT2_IMMUTABLE_FL)
-		inode->i_flags |= S_IMMUTABLE;
-	if (flags & EXT2_NOATIME_FL)
-		inode->i_flags |= S_NOATIME;
 }
 
 void ext2_read_inode (struct inode * inode)
@@ -948,7 +921,7 @@ void ext2_read_inode (struct inode * inode)
 		EXT2_INODE_SIZE(inode->i_sb);
 	block = le32_to_cpu(gdp[desc].bg_inode_table) +
 		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
-	if (!(bh = sb_bread(inode->i_sb, block))) {
+	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize))) {
 		ext2_error (inode->i_sb, "ext2_read_inode",
 			    "unable to read inode block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
@@ -993,7 +966,6 @@ void ext2_read_inode (struct inode * inode)
 	else
 		inode->u.ext2_i.i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
 	inode->i_generation = le32_to_cpu(raw_inode->i_generation);
- 	inode->u.ext2_i.i_state = 0;
 	inode->u.ext2_i.i_prealloc_count = 0;
 	inode->u.ext2_i.i_block_group = block_group;
 
@@ -1016,7 +988,7 @@ void ext2_read_inode (struct inode * inode)
 		inode->i_fop = &ext2_dir_operations;
 		inode->i_mapping->a_ops = &ext2_aops;
 	} else if (S_ISLNK(inode->i_mode)) {
-		if (ext2_inode_is_fast_symlink(inode))
+		if (!inode->i_blocks)
 			inode->i_op = &ext2_fast_symlink_inode_operations;
 		else {
 			inode->i_op = &page_symlink_inode_operations;
@@ -1027,7 +999,22 @@ void ext2_read_inode (struct inode * inode)
 				   le32_to_cpu(raw_inode->i_block[0]));
 	brelse (bh);
 	inode->i_attr_flags = 0;
-	ext2_set_inode_flags(inode);
+	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL) {
+		inode->i_attr_flags |= ATTR_FLAG_SYNCRONOUS;
+		inode->i_flags |= S_SYNC;
+	}
+	if (inode->u.ext2_i.i_flags & EXT2_APPEND_FL) {
+		inode->i_attr_flags |= ATTR_FLAG_APPEND;
+		inode->i_flags |= S_APPEND;
+	}
+	if (inode->u.ext2_i.i_flags & EXT2_IMMUTABLE_FL) {
+		inode->i_attr_flags |= ATTR_FLAG_IMMUTABLE;
+		inode->i_flags |= S_IMMUTABLE;
+	}
+	if (inode->u.ext2_i.i_flags & EXT2_NOATIME_FL) {
+		inode->i_attr_flags |= ATTR_FLAG_NOATIME;
+		inode->i_flags |= S_NOATIME;
+	}
 	return;
 	
 bad_inode:
@@ -1076,7 +1063,7 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 		EXT2_INODE_SIZE(inode->i_sb);
 	block = le32_to_cpu(gdp[desc].bg_inode_table) +
 		(offset >> EXT2_BLOCK_SIZE_BITS(inode->i_sb));
-	if (!(bh = sb_bread(inode->i_sb, block))) {
+	if (!(bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize))) {
 		ext2_error (inode->i_sb, "ext2_write_inode",
 			    "unable to read inode block - "
 			    "inode=%lu, block=%lu", inode->i_ino, block);
@@ -1084,11 +1071,6 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 	}
 	offset &= EXT2_BLOCK_SIZE(inode->i_sb) - 1;
 	raw_inode = (struct ext2_inode *) (bh->b_data + offset);
-
-	/* For fields not tracked in the in-memory inode,
-	 * initialise them to zero for new inodes. */
-	if (inode->u.ext2_i.i_state & EXT2_STATE_NEW)
-		memset(raw_inode, 0, EXT2_SB(inode->i_sb)->s_inode_size);
 
 	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
 	if(!(test_opt(inode->i_sb, NO_UID32))) {
@@ -1123,7 +1105,7 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 	raw_inode->i_frag = inode->u.ext2_i.i_frag_no;
 	raw_inode->i_fsize = inode->u.ext2_i.i_frag_size;
 	raw_inode->i_file_acl = cpu_to_le32(inode->u.ext2_i.i_file_acl);
-	if (!S_ISREG(inode->i_mode))
+	if (S_ISDIR(inode->i_mode))
 		raw_inode->i_dir_acl = cpu_to_le32(inode->u.ext2_i.i_dir_acl);
 	else {
 		raw_inode->i_size_high = cpu_to_le32(inode->i_size >> 32);
@@ -1162,7 +1144,6 @@ static int ext2_update_inode(struct inode * inode, int do_sync)
 			err = -EIO;
 		}
 	}
-	inode->u.ext2_i.i_state &= ~EXT2_STATE_NEW;
 	brelse (bh);
 	return err;
 }

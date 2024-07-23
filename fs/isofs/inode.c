@@ -34,6 +34,11 @@
 
 #include "zisofs.h"
 
+/*
+ * We have no support for "multi volume" CDs, but more and more disks carry
+ * wrong information within the volume descriptors.
+ */
+#define IGNORE_WRONG_MULTI_VOLUME_SPECS
 #define BEQUIET
 
 #ifdef LEAK_CHECK
@@ -335,16 +340,16 @@ static int parse_options(char *options, struct iso9660_options * popt)
 			else if (!strcmp(value,"acorn")) popt->map = 'a';
 			else return 0;
 		}
-		else if (!strcmp(this_char,"session") && value) {
+		if (!strcmp(this_char,"session") && value) {
 			char * vpnt = value;
 			unsigned int ivalue = simple_strtoul(vpnt, &vpnt, 0);
-			if (ivalue > 99) return 0;
+			if(ivalue < 0 || ivalue >99) return 0;
 			popt->session=ivalue+1;
 		}
-		else if (!strcmp(this_char,"sbsector") && value) {
+		if (!strcmp(this_char,"sbsector") && value) {
 			char * vpnt = value;
 			unsigned int ivalue = simple_strtoul(vpnt, &vpnt, 0);
-			if (ivalue > 660*512) return 0;
+			if(ivalue < 0 || ivalue >660*512) return 0;
 			popt->sbsector=ivalue;
 		}
 		else if (!strcmp(this_char,"check") && value) {
@@ -484,6 +489,19 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 	if (!parse_options((char *) data, &opt))
 		goto out_unlock;
 
+#if 0
+	printk("map = %c\n", opt.map);
+	printk("rock = %c\n", opt.rock);
+	printk("joliet = %c\n", opt.joliet);
+	printk("check = %c\n", opt.check);
+	printk("cruft = %c\n", opt.cruft);
+	printk("unhide = %c\n", opt.unhide);
+	printk("blocksize = %d\n", opt.blocksize);
+	printk("gid = %d\n", opt.gid);
+	printk("uid = %d\n", opt.uid);
+	printk("iocharset = %s\n", opt.iocharset);
+#endif
+
 	/*
 	 * First of all, get the hardware blocksize for this device.
 	 * If we don't know what it is, or the hardware blocksize is
@@ -509,7 +527,6 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 	}
 
 	set_blocksize(dev, opt.blocksize);
-	s->s_blocksize = opt.blocksize;
 
 	s->u.isofs_sb.s_high_sierra = high_sierra = 0; /* default is iso9660 */
 
@@ -523,8 +540,8 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 	    struct iso_volume_descriptor  * vdp;
 
 	    block = iso_blknum << (ISOFS_BLOCK_BITS-blocksize_bits);
-	    if (!(bh = sb_bread(s, block)))
-		goto out_no_read;
+	    if (!(bh = bread(dev, block, opt.blocksize)))
+		goto out_no_read;		
 
 	    vdp = (struct iso_volume_descriptor *)bh->b_data;
 	    hdp = (struct hs_volume_descriptor *)bh->b_data;
@@ -605,13 +622,19 @@ root_found:
 
 	if(high_sierra){
 	  rootp = (struct iso_directory_record *) h_pri->root_directory_record;
+#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
+	  if (isonum_723 (h_pri->volume_set_size) != 1)
+		goto out_no_support;
+#endif /* IGNORE_WRONG_MULTI_VOLUME_SPECS */
 	  s->u.isofs_sb.s_nzones = isonum_733 (h_pri->volume_space_size);
 	  s->u.isofs_sb.s_log_zone_size = isonum_723 (h_pri->logical_block_size);
 	  s->u.isofs_sb.s_max_size = isonum_733(h_pri->volume_space_size);
 	} else {
-	  if (!pri)
-	    goto out_freebh;
 	  rootp = (struct iso_directory_record *) pri->root_directory_record;
+#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
+	  if (isonum_723 (pri->volume_set_size) != 1)
+		goto out_no_support;
+#endif /* IGNORE_WRONG_MULTI_VOLUME_SPECS */
 	  s->u.isofs_sb.s_nzones = isonum_733 (pri->volume_space_size);
 	  s->u.isofs_sb.s_log_zone_size = isonum_723 (pri->logical_block_size);
 	  s->u.isofs_sb.s_max_size = isonum_733(pri->volume_space_size);
@@ -831,6 +854,11 @@ out_bad_size:
 	printk(KERN_WARNING "Logical zone size(%d) < hardware blocksize(%u)\n",
 		orig_zonesize, blocksize);
 	goto out_freebh;
+#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
+out_no_support:
+	printk(KERN_WARNING "Multi-volume disks not supported.\n");
+	goto out_freebh;
+#endif
 out_unknown_format:
 	if (!silent)
 		printk(KERN_WARNING "Unable to identify CD-ROM format.\n");
@@ -868,6 +896,7 @@ int isofs_get_blocks(struct inode *inode, long iblock,
 	unsigned int firstext;
 	unsigned long nextino;
 	int section, rv;
+	unsigned int blocksize = inode->i_sb->s_blocksize;
 
 	lock_kernel();
 
@@ -928,7 +957,7 @@ int isofs_get_blocks(struct inode *inode, long iblock,
 			(*bh_result)->b_blocknr  = firstext + b_off - offset;
 			(*bh_result)->b_state   |= (1UL << BH_Mapped);
 		} else {
-			*bh_result = sb_getblk(inode->i_sb, firstext+b_off-offset);
+			*bh_result = getblk(inode->i_dev, firstext+b_off-offset, blocksize);
 			if ( !*bh_result )
 				goto abort;
 		}
@@ -971,12 +1000,12 @@ static int isofs_bmap(struct inode *inode, int block)
 	return 0;
 }
 
-struct buffer_head *isofs_bread(struct inode *inode, unsigned int block)
+struct buffer_head *isofs_bread(struct inode *inode, unsigned int bufsize, unsigned int block)
 {
 	unsigned int blknr = isofs_bmap(inode, block);
 	if (!blknr)
 		return NULL;
-	return sb_bread(inode->i_sb, blknr);
+	return bread(inode->i_dev, blknr, bufsize);
 }
 
 static int isofs_readpage(struct file *file, struct page *page)
@@ -1031,7 +1060,7 @@ static int isofs_read_level3_size(struct inode * inode)
 		unsigned int de_len;
 
 		if (!bh) {
-			bh = sb_bread(inode->i_sb, block);
+			bh = bread(inode->i_dev, block, bufsize);
 			if (!bh)
 				goto out_noread;
 		}
@@ -1063,7 +1092,7 @@ static int isofs_read_level3_size(struct inode * inode)
 			brelse(bh);
 			bh = NULL;
 			if (offset) {
-				bh = sb_bread(inode->i_sb, block);
+				bh = bread(inode->i_dev, block, bufsize);
 				if (!bh)
 					goto out_noread;
 				memcpy((void *) tmpde + slop, bh->b_data, offset);
@@ -1121,7 +1150,7 @@ static void isofs_read_inode(struct inode * inode)
 	unsigned long offset;
 	int volume_seq_no, i;
 
-	bh = sb_bread(inode->i_sb, block);
+	bh = bread(inode->i_dev, block, bufsize);
 	if (!bh)
 		goto out_badread;
 
@@ -1139,7 +1168,7 @@ static void isofs_read_inode(struct inode * inode)
 		}
 		memcpy(tmpde, bh->b_data + offset, frag1);
 		brelse(bh);
-		bh = sb_bread(inode->i_sb, ++block);
+		bh = bread(inode->i_dev, ++block, bufsize);
 		if (!bh)
 			goto out_badread;
 		memcpy((char *)tmpde+frag1, bh->b_data, de_len - frag1);
@@ -1183,13 +1212,30 @@ static void isofs_read_inode(struct inode * inode)
 	}
 
 	/*
+	 * The ISO-9660 filesystem only stores 32 bits for file size.
+	 * mkisofs handles files up to 2GB-2 = 2147483646 = 0x7FFFFFFE bytes
+	 * in size. This is according to the large file summit paper from 1996.
+	 * WARNING: ISO-9660 filesystems > 1 GB and even > 2 GB are fully
+	 *	    legal. Do not prevent to use DVD's schilling@fokus.gmd.de
+	 */
+	if ((inode->i_size < 0 || inode->i_size > 0x7FFFFFFE) &&
+	    inode->i_sb->u.isofs_sb.s_cruft == 'n') {
+		printk(KERN_WARNING "Warning: defective CD-ROM.  "
+		       "Enabling \"cruft\" mount option.\n");
+		inode->i_sb->u.isofs_sb.s_cruft = 'y';
+	}
+
+	/*
 	 * Some dipshit decided to store some other bit of information
-	 * in the high byte of the file length.  Truncate in case
-	 * this CDROM was mounted with the cruft option.
+	 * in the high byte of the file length.  Catch this and holler.
+	 * WARNING: this will make it impossible for a file to be > 16MB
+	 * on the CDROM.
 	 */
 
-	if (inode->i_sb->u.isofs_sb.s_cruft == 'y')
+	if (inode->i_sb->u.isofs_sb.s_cruft == 'y' &&
+	    inode->i_size & 0xff000000) {
 		inode->i_size &= 0x00ffffff;
+	}
 
 	if (de->interleave[0]) {
 		printk("Interleaved files not (yet) supported.\n");
@@ -1237,29 +1283,51 @@ static void isofs_read_inode(struct inode * inode)
 	/* get the volume sequence number */
 	volume_seq_no = isonum_723 (de->volume_sequence_number) ;
 
+	/*
+	 * Disable checking if we see any volume number other than 0 or 1.
+	 * We could use the cruft option, but that has multiple purposes, one
+	 * of which is limiting the file size to 16Mb.  Thus we silently allow
+	 * volume numbers of 0 to go through without complaining.
+	 */
+	if (inode->i_sb->u.isofs_sb.s_cruft == 'n' &&
+	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
+		printk(KERN_WARNING "Warning: defective CD-ROM "
+		       "(volume sequence number %d). "
+		       "Enabling \"cruft\" mount option.\n", volume_seq_no);
+		inode->i_sb->u.isofs_sb.s_cruft = 'y';
+	}
+
 	/* Install the inode operations vector */
-	if (S_ISREG(inode->i_mode)) {
-		inode->i_fop = &generic_ro_fops;
-		switch ( inode->u.isofs_i.i_file_format ) {
-#ifdef CONFIG_ZISOFS
-		case isofs_file_compressed:
-			inode->i_data.a_ops = &zisofs_aops;
-			break;
-#endif
-		default:
-			inode->i_data.a_ops = &isofs_aops;
-			break;
-		}
-	} else if (S_ISDIR(inode->i_mode)) {
-		inode->i_op = &isofs_dir_inode_operations;
-		inode->i_fop = &isofs_dir_operations;
-	} else if (S_ISLNK(inode->i_mode)) {
-		inode->i_op = &page_symlink_inode_operations;
-		inode->i_data.a_ops = &isofs_symlink_aops;
+#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
+	if (inode->i_sb->u.isofs_sb.s_cruft != 'y' &&
+	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
+		printk(KERN_WARNING "Multi-volume CD somehow got mounted.\n");
 	} else
-		/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
-		init_special_inode(inode, inode->i_mode,
-				   kdev_t_to_nr(inode->i_rdev));
+#endif /*IGNORE_WRONG_MULTI_VOLUME_SPECS */
+	{
+		if (S_ISREG(inode->i_mode)) {
+			inode->i_fop = &generic_ro_fops;
+			switch ( inode->u.isofs_i.i_file_format ) {
+#ifdef CONFIG_ZISOFS
+			case isofs_file_compressed:
+				inode->i_data.a_ops = &zisofs_aops;
+				break;
+#endif
+			default:
+				inode->i_data.a_ops = &isofs_aops;
+				break;
+			}
+		} else if (S_ISDIR(inode->i_mode)) {
+			inode->i_op = &isofs_dir_inode_operations;
+			inode->i_fop = &isofs_dir_operations;
+		} else if (S_ISLNK(inode->i_mode)) {
+			inode->i_op = &page_symlink_inode_operations;
+			inode->i_data.a_ops = &isofs_symlink_aops;
+		} else
+			/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
+			init_special_inode(inode, inode->i_mode,
+					   kdev_t_to_nr(inode->i_rdev));
+	}
  out:
 	if (tmpde)
 		kfree(tmpde);
@@ -1277,7 +1345,7 @@ static void isofs_read_inode(struct inode * inode)
 #ifdef LEAK_CHECK
 #undef malloc
 #undef free_s
-#undef sb_bread
+#undef bread
 #undef brelse
 
 void * leak_check_malloc(unsigned int size){
@@ -1292,9 +1360,9 @@ void leak_check_free_s(void * obj, int size){
   return kfree(obj);
 }
 
-struct buffer_head * leak_check_bread(struct super_block *sb, int block){
+struct buffer_head * leak_check_bread(int dev, int block, int size){
   check_bread++;
-  return sb_bread(sb, block);
+  return bread(dev, block, size);
 }
 
 void leak_check_brelse(struct buffer_head * bh){

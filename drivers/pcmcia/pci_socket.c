@@ -249,7 +249,7 @@ static struct pci_driver pci_cardbus_driver = {
 	name:		"cardbus",
 	id_table:	cardbus_table,
 	probe:		cardbus_probe,
-	remove:		__devexit_p(cardbus_remove),
+	remove:		cardbus_remove,
 	suspend:	cardbus_suspend,
 	resume:		cardbus_resume,
 };

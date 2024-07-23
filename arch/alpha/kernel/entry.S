@@ -10,7 +10,7 @@
 
 #define SIGCHLD 20
 
-#define NR_SYSCALLS 382
+#define NR_SYSCALLS 378
 
 /*
  * These offsets must match with alpha_mv in <asm/machvec.h>.
@@ -231,12 +231,12 @@ kernel_clone:
 .end	kernel_clone
 
 /*
- * arch_kernel_thread(fn, arg, clone_flags)
+ * kernel_thread(fn, arg, clone_flags)
  */
 .align 3
-.globl	arch_kernel_thread
-.ent	arch_kernel_thread
-arch_kernel_thread:
+.globl	kernel_thread
+.ent	kernel_thread
+kernel_thread:
 	ldgp	$29,0($27)	/* we can be called from a module */
 	.frame $30, 4*8, $26
 	subq	$30,4*8,$30
@@ -265,7 +265,7 @@ arch_kernel_thread:
 	mov	$0,$16
 	mov	$31,$26
 	jsr	$31,sys_exit
-.end	arch_kernel_thread
+.end	kernel_thread
 
 /*
  * __kernel_execve(path, argv, envp, regs)
@@ -886,13 +886,8 @@ sys_call_table:
 	.quad osf_getrusage
 	.quad sys_getsockopt
 	.quad alpha_ni_syscall
-#ifdef CONFIG_OSF4_COMPAT
-	.quad osf_readv				/* 120 */
-	.quad osf_writev
-#else
 	.quad sys_readv				/* 120 */
 	.quad sys_writev
-#endif
 	.quad osf_settimeofday
 	.quad sys_fchown
 	.quad sys_fchmod
@@ -1153,9 +1148,3 @@ sys_call_table:
 	.quad sys_gettid
 	.quad sys_readahead
 	.quad sys_ni_syscall			/* 380, sys_security */
-	.quad sys_tkill
-
-/* Remember to update everything, kids.  */
-.ifne (. - sys_call_table) - (NR_SYSCALLS * 8)
-.err
-.endif

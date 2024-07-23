@@ -41,7 +41,7 @@ static int bfs_readdir(struct file * f, void * dirent, filldir_t filldir)
 	while (f->f_pos < dir->i_size) {
 		offset = f->f_pos & (BFS_BSIZE-1);
 		block = dir->iu_sblock + (f->f_pos >> BFS_BSIZE_BITS);
-		bh = sb_bread(dir->i_sb, block);
+		bh = bread(dev, block, BFS_BSIZE);
 		if (!bh) {
 			f->f_pos += BFS_BSIZE - offset;
 			continue;
@@ -256,6 +256,7 @@ static int bfs_add_entry(struct inode * dir, const char * name, int namelen, int
 	struct buffer_head * bh;
 	struct bfs_dirent * de;
 	int block, sblock, eblock, off;
+	kdev_t dev;
 	int i;
 
 	dprintf("name=%s, namelen=%d\n", name, namelen);
@@ -265,10 +266,11 @@ static int bfs_add_entry(struct inode * dir, const char * name, int namelen, int
 	if (namelen > BFS_NAMELEN)
 		return -ENAMETOOLONG;
 
+	dev = dir->i_dev;
 	sblock = dir->iu_sblock;
 	eblock = dir->iu_eblock;
 	for (block=sblock; block<=eblock; block++) {
-		bh = sb_bread(dir->i_sb, block);
+		bh = bread(dev, block, BFS_BSIZE);
 		if(!bh) 
 			return -ENOSPC;
 		for (off=0; off<BFS_BSIZE; off+=BFS_DIRENT_SIZE) {
@@ -306,16 +308,18 @@ static struct buffer_head * bfs_find_entry(struct inode * dir,
 {
 	unsigned long block, offset;
 	struct buffer_head * bh;
+	struct bfs_sb_info * info;
 	struct bfs_dirent * de;
 
 	*res_dir = NULL;
+	info = &dir->i_sb->u.bfs_sb;
 	if (namelen > BFS_NAMELEN)
 		return NULL;
 	bh = NULL;
 	block = offset = 0;
 	while (block * BFS_BSIZE + offset < dir->i_size) {
 		if (!bh) {
-			bh = sb_bread(dir->i_sb, dir->iu_sblock + block);
+			bh = bread(dir->i_dev, dir->iu_sblock + block, BFS_BSIZE);
 			if (!bh) {
 				block++;
 				continue;

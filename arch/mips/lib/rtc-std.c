@@ -7,7 +7,6 @@
  *
  * Copyright (C) 1998, 2001 by Ralf Baechle
  */
-#include <linux/module.h>
 #include <linux/mc146818rtc.h>
 #include <asm/io.h>
 
@@ -33,5 +32,3 @@ struct rtc_ops std_rtc_ops = {
 	&std_rtc_write_data,
 	&std_rtc_bcd_mode
 };
-
-EXPORT_SYMBOL(rtc_ops);

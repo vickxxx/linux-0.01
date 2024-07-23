@@ -42,7 +42,6 @@ struct exec_domain;
 #define CLONE_VFORK	0x00004000	/* set if the parent wants the child to wake it up on mm_release */
 #define CLONE_PARENT	0x00008000	/* set if we want to have the same parent as the cloner */
 #define CLONE_THREAD	0x00010000	/* Same thread group? */
-#define CLONE_NEWNS	0x00020000	/* New namespace group? */
 
 #define CLONE_SIGNAL	(CLONE_SIGHAND | CLONE_THREAD)
 
@@ -80,9 +79,7 @@ extern int last_pid;
 #include <linux/time.h>
 #include <linux/param.h>
 #include <linux/resource.h>
-#ifdef __KERNEL__
 #include <linux/timer.h>
-#endif
 
 #include <asm/processor.h>
 
@@ -94,13 +91,23 @@ extern int last_pid;
 
 #define __set_task_state(tsk, state_value)		\
 	do { (tsk)->state = (state_value); } while (0)
+#ifdef CONFIG_SMP
 #define set_task_state(tsk, state_value)		\
 	set_mb((tsk)->state, (state_value))
+#else
+#define set_task_state(tsk, state_value)		\
+	__set_task_state((tsk), (state_value))
+#endif
 
 #define __set_current_state(state_value)			\
 	do { current->state = (state_value); } while (0)
+#ifdef CONFIG_SMP
 #define set_current_state(state_value)		\
 	set_mb(current->state, (state_value))
+#else
+#define set_current_state(state_value)		\
+	__set_current_state(state_value)
+#endif
 
 /*
  * Scheduling policies
@@ -153,19 +160,12 @@ extern void flush_scheduled_tasks(void);
 extern int start_context_thread(void);
 extern int current_is_keventd(void);
 
-#if CONFIG_SMP
-extern void set_cpus_allowed(struct task_struct *p, unsigned long new_mask);
-#else
-# define set_cpus_allowed(p, new_mask) do { } while (0)
-#endif
-
 /*
  * The default fd array needs to be at least BITS_PER_LONG,
  * as this is the granularity returned by copy_fdset().
  */
 #define NR_OPEN_DEFAULT BITS_PER_LONG
 
-struct namespace;
 /*
  * Open file table structure
  */
@@ -199,9 +199,7 @@ struct files_struct {
 }
 
 /* Maximum number of active map areas.. This is a random (large) number */
-#define DEFAULT_MAX_MAP_COUNT	(65536)
-
-extern int max_map_count;
+#define MAX_MAP_COUNT	(65536)
 
 struct mm_struct {
 	struct vm_area_struct * mmap;		/* list of VMAs */
@@ -273,9 +271,9 @@ struct user_struct {
 };
 
 #define get_current_user() ({ 				\
-	struct user_struct *__tmp_user = current->user;	\
-	atomic_inc(&__tmp_user->__count);		\
-	__tmp_user; })
+	struct user_struct *__user = current->user;	\
+	atomic_inc(&__user->__count);			\
+	__user; })
 
 extern struct user_struct root_user;
 #define INIT_USER (&root_user)
@@ -335,7 +333,6 @@ struct task_struct {
 	/* ??? */
 	unsigned long personality;
 	int did_exec:1;
-	unsigned task_dumpable:1;
 	pid_t pid;
 	pid_t pgrp;
 	pid_t tty_old_pgrp;
@@ -392,8 +389,6 @@ struct task_struct {
 	struct fs_struct *fs;
 /* open file information */
 	struct files_struct *files;
-/* namespace */
-	struct namespace *namespace;
 /* signal handlers */
 	spinlock_t sigmask_lock;	/* Protects signal and blocked */
 	struct signal_struct *sig;
@@ -415,8 +410,6 @@ struct task_struct {
 
 /* journalling filesystem info */
 	void *journal_info;
-
-	struct list_head *scm_work_list;
 };
 
 /*
@@ -431,10 +424,8 @@ struct task_struct {
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */
 #define PF_MEMALLOC	0x00000800	/* Allocating memory */
-#define PF_MEMDIE      0x00001000       /* Killed for out-of-memory */
+#define PF_MEMDIE	0x00001000	/* Killed for out-of-memory */
 #define PF_FREE_PAGES	0x00002000	/* per process page freeing */
-#define PF_NOIO		0x00004000	/* avoid generating further I/O */
-#define PF_FSTRANS	0x00008000	/* inside a filesystem transaction */
 
 #define PF_USEDFPU	0x00100000	/* task used FPU this quantum (SMP) */
 
@@ -448,8 +439,6 @@ struct task_struct {
 #define PT_TRACESYSGOOD	0x00000008
 #define PT_PTRACE_CAP	0x00000010	/* ptracer can follow suid-exec */
 
-#define is_dumpable(tsk)    ((tsk)->task_dumpable && (tsk)->mm && (tsk)->mm->dumpable)
-
 /*
  * Limit the stack by to some sane default: root can always
  * increase this limit if needed..  8MB seems reasonable.
@@ -460,7 +449,6 @@ struct task_struct {
 #define MAX_COUNTER	(20*HZ/100)
 #define DEF_NICE	(0)
 
-extern void yield(void);
 
 /*
  * The default (Linux) execution domain.
@@ -484,8 +472,8 @@ extern struct exec_domain	default_exec_domain;
     policy:		SCHED_OTHER,					\
     mm:			NULL,						\
     active_mm:		&init_mm,					\
-    cpus_runnable:	~0UL,						\
-    cpus_allowed:	~0UL,						\
+    cpus_runnable:	-1,						\
+    cpus_allowed:	-1,						\
     run_list:		LIST_HEAD_INIT(tsk.run_list),			\
     next_task:		&tsk,						\
     prev_task:		&tsk,						\
@@ -578,7 +566,6 @@ static inline void task_release_cpu(struct task_struct *tsk)
 /* per-UID process charging. */
 extern struct user_struct * alloc_uid(uid_t);
 extern void free_uid(struct user_struct *);
-extern void switch_uid(struct user_struct *);
 
 #include <asm/current.h>
 
@@ -613,7 +600,7 @@ extern int FASTCALL(wake_up_process(struct task_struct * tsk));
 #define wake_up_interruptible_nr(x, nr)	__wake_up((x),TASK_INTERRUPTIBLE, nr)
 #define wake_up_interruptible_all(x)	__wake_up((x),TASK_INTERRUPTIBLE, 0)
 #define wake_up_interruptible_sync(x)	__wake_up_sync((x),TASK_INTERRUPTIBLE, 1)
-#define wake_up_interruptible_sync_nr(x, nr) __wake_up_sync((x),TASK_INTERRUPTIBLE,  nr)
+#define wake_up_interruptible_sync_nr(x) __wake_up_sync((x),TASK_INTERRUPTIBLE,  nr)
 asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru);
 
 extern int in_group_p(gid_t);
@@ -622,7 +609,6 @@ extern int in_egroup_p(gid_t);
 extern void proc_caches_init(void);
 extern void flush_signals(struct task_struct *);
 extern void flush_signal_handlers(struct task_struct *);
-extern void sig_exit(int, int, struct siginfo *);
 extern int dequeue_signal(sigset_t *, siginfo_t *);
 extern void block_all_signals(int (*notifier)(void *priv), void *priv,
 			      sigset_t *mask);
@@ -765,7 +751,7 @@ extern struct mm_struct * start_lazy_tlb(void);
 extern void end_lazy_tlb(struct mm_struct *mm);
 
 /* mmdrop drops the mm and the page tables */
-extern void FASTCALL(__mmdrop(struct mm_struct *));
+extern inline void FASTCALL(__mmdrop(struct mm_struct *));
 static inline void mmdrop(struct mm_struct * mm)
 {
 	if (atomic_dec_and_test(&mm->mm_count))
@@ -802,14 +788,9 @@ extern void daemonize(void);
 extern int do_execve(char *, char **, char **, struct pt_regs *);
 extern int do_fork(unsigned long, unsigned long, struct pt_regs *, unsigned long);
 
-extern void set_task_comm(struct task_struct *tsk, char *from);
-extern void get_task_comm(char *to, struct task_struct *tsk);
-
 extern void FASTCALL(add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
 extern void FASTCALL(add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait));
 extern void FASTCALL(remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
-
-extern long kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 #define __wait_event(wq, condition) 					\
 do {									\
@@ -888,13 +869,8 @@ do {									\
 #define for_each_task(p) \
 	for (p = &init_task ; (p = p->next_task) != &init_task ; )
 
-#define for_each_thread(task) \
-	for (task = next_thread(current) ; task != current ; task = next_thread(task))
-
 #define next_thread(p) \
 	list_entry((p)->thread_group.next, struct task_struct, thread_group)
-
-#define thread_group_leader(p)	(p->pid == p->tgid)
 
 static inline void del_from_runqueue(struct task_struct * p)
 {
@@ -911,8 +887,7 @@ static inline int task_on_runqueue(struct task_struct *p)
 
 static inline void unhash_process(struct task_struct *p)
 {
-	if (task_on_runqueue(p))
-		out_of_line_bug();
+	if (task_on_runqueue(p)) BUG();
 	write_lock_irq(&tasklist_lock);
 	nr_threads--;
 	unhash_pid(p);
@@ -951,17 +926,6 @@ static inline char * d_path(struct dentry *dentry, struct vfsmount *vfsmnt,
 	return res;
 }
 
-static inline int need_resched(void)
-{
-	return (unlikely(current->need_resched));
-}
-
-extern void __cond_resched(void);
-static inline void cond_resched(void)
-{
-	if (need_resched())
-		__cond_resched();
-}
-
 #endif /* __KERNEL__ */
+
 #endif

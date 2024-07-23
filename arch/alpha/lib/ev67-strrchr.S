@@ -19,7 +19,7 @@
  */
 
 
-#include <asm/regdef.h>
+#include <alpha/regdef.h>
 
 	.set noreorder
 	.set noat

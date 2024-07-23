@@ -10,8 +10,6 @@
  *	overhauled to use key registration
  *	based upon discusions in irc://irc.openprojects.net/#kernelnewbies
  */
-#ifndef __LINUX_SYSRQ_H__
-#define __LINUX_SYSRQ_H__
 
 #include <linux/config.h>
 
@@ -105,7 +103,7 @@ static inline int __reterr(void)
 
 /* Deferred actions */
 
-extern volatile int emergency_sync_scheduled;
+extern int emergency_sync_scheduled;
 
 #define EMERG_SYNC 1
 #define EMERG_REMOUNT 2
@@ -119,5 +117,3 @@ void do_emergency_sync(void);
 #else
 #define CHECK_EMERGENCY_SYNC
 #endif
-
-#endif /* __LINUX_SYSRQ_H__ */

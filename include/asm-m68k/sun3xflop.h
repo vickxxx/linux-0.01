@@ -3,7 +3,7 @@
  * Derived partially from asm-sparc/floppy.h, which is:
  *     Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *
- * Sun3x version 2/4/2000 Sam Creasey (sammy@sammy.net)
+ * Sun3x version 2/4/2000 Sam Creasey (sammy@oh.verio.com)
  */
 
 #ifndef __ASM_SUN3X_FLOPPY_H

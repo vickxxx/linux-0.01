@@ -241,10 +241,7 @@ static int __init com90io_found(struct net_device *dev)
 		return -ENODEV;
 	}
 	/* Reserve the I/O region - guaranteed to work by check_region */
-	if (!request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)")) {
-		free_irq(dev->irq, dev);
-		return -EBUSY;
-	}
+	request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)");
 
 	/* Initialize the rest of the device structure. */
 	dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
@@ -383,7 +380,6 @@ static char *device;		/* use eg. device=arc1 to change name */
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 MODULE_PARM(device, "s");
-MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

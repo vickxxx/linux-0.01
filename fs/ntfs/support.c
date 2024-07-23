@@ -150,7 +150,7 @@ int ntfs_read_mft_record(ntfs_volume *vol, int mftno, char *buf)
 		 * now as we just can't handle some on disk structures
 		 * this way. (AIA) */
 		printk(KERN_WARNING "NTFS: Invalid MFT record for 0x%x\n", mftno);
-		return -EIO;
+		return -EINVAL;
 	}
 	ntfs_debug(DEBUG_OTHER, "read_mft_record: Done 0x%x\n", mftno);
 	return 0;
@@ -169,7 +169,7 @@ int ntfs_getput_clusters(ntfs_volume *vol, int cluster, ntfs_size_t start_offs,
 		   buf->do_read ? "get" : "put", cluster, start_offs, length);
 	to_copy = vol->cluster_size - start_offs;
 	while (length) {
-		if (!(bh = sb_bread(sb, cluster))) {
+		if (!(bh = bread(sb->s_dev, cluster, vol->cluster_size))) {
 			ntfs_debug(DEBUG_OTHER, "%s failed\n",
 				   buf->do_read ? "Reading" : "Writing");
 			error = -EIO;
@@ -240,7 +240,7 @@ int ntfs_dupuni2map(ntfs_volume *vol, ntfs_u16 *in, int in_len, char **out,
 				NLS_MAX_CHARSET_SIZE)) > 0) {
 			/* Adjust result buffer. */
 			if (chl > 1) {
-				buf = ntfs_malloc(*out_len + chl);
+				buf = ntfs_malloc(*out_len + chl - 1);
 				if (!buf) {
 					i = -ENOMEM;
 					goto err_ret;

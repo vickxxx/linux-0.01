@@ -8,7 +8,7 @@
  * addresses.  Thus, we need to be careful not to let the user to
  * trick us into accessing kernel memory that would normally be
  * inaccessible.  This code is also fairly performance sensitive,
- * so we want to spend as little time doing safety checks as
+ * so we want to spend as little time doing saftey checks as
  * possible.
  *
  * To make matters a bit more interesting, these macros sometimes also
@@ -26,10 +26,8 @@
  * associated and, if so, sets r8 to -EFAULT and clears r9 to 0 and
  * then resumes execution at the continuation point.
  *
- * Based on <asm-alpha/uaccess.h>.
- *
- * Copyright (C) 1998, 1999, 2001, 2003 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2001 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <linux/errno.h>
@@ -58,10 +56,8 @@
  * address TASK_SIZE is never valid.  We also need to make sure that the address doesn't
  * point inside the virtually mapped linear page table.
  */
-#define __access_ok(addr,size,segment)						\
-	likely(((unsigned long) (addr)) <= (segment).seg			\
-	       && ((segment).seg == KERNEL_DS.seg				\
-		   || REGION_OFFSET((unsigned long) (addr)) < RGN_MAP_LIMIT))
+#define __access_ok(addr,size,segment)	(((unsigned long) (addr)) <= (segment).seg		\
+	 && ((segment).seg == KERNEL_DS.seg || rgn_offset((unsigned long) (addr)) < RGN_MAP_LIMIT))
 #define access_ok(type,addr,size)	__access_ok((addr),(size),get_fs())
 
 static inline int
@@ -323,23 +319,5 @@ struct exception_fixup {
 
 extern struct exception_fixup search_exception_table (unsigned long addr);
 extern void handle_exception (struct pt_regs *regs, struct exception_fixup fixup);
-
-#ifdef GAS_HAS_LOCAL_TAGS
-#define SEARCH_EXCEPTION_TABLE(regs) search_exception_table(regs->cr_iip + ia64_psr(regs)->ri);
-#else
-#define SEARCH_EXCEPTION_TABLE(regs) search_exception_table(regs->cr_iip);
-#endif
-
-static inline int
-done_with_exception (struct pt_regs *regs)
-{
-	struct exception_fixup fix;
-	fix = SEARCH_EXCEPTION_TABLE(regs);
-	if (fix.cont) {
-		handle_exception(regs, fix);
-		return 1;
-	}
-	return 0;
-}
 
 #endif /* _ASM_IA64_UACCESS_H */

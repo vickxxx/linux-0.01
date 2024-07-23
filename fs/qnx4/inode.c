@@ -95,7 +95,7 @@ static void qnx4_write_inode(struct inode *inode, int unused)
 	QNX4DEBUG(("qnx4: write inode 2.\n"));
 	block = ino / QNX4_INODES_PER_BLOCK;
 	lock_kernel();
-	if (!(bh = sb_bread(inode->i_sb, block))) {
+	if (!(bh = bread(inode->i_dev, block, QNX4_BLOCK_SIZE))) {
 		printk("qnx4: major problem: unable to read inode from dev "
 		       "%s\n", kdevname(inode->i_dev));
 		unlock_kernel();
@@ -162,7 +162,7 @@ struct buffer_head *qnx4_getblk(struct inode *inode, int nr,
 	if ( nr >= 0 )
 		nr = qnx4_block_map( inode, nr );
 	if (nr) {
-		result = sb_getblk(inode->i_sb, nr);
+		result = getblk(inode->i_dev, nr, QNX4_BLOCK_SIZE);
 		return result;
 	}
 	if (!create) {
@@ -173,7 +173,7 @@ struct buffer_head *qnx4_getblk(struct inode *inode, int nr,
 	if (!tmp) {
 		return NULL;
 	}
-	result = sb_getblk(inode->i_sb, tmp);
+	result = getblk(inode->i_dev, tmp, QNX4_BLOCK_SIZE);
 	if (tst) {
 		qnx4_free_block(inode->i_sb, tmp);
 		brelse(result);
@@ -243,7 +243,7 @@ unsigned long qnx4_block_map( struct inode *inode, long iblock )
 		while ( --nxtnt > 0 ) {
 			if ( ix == 0 ) {
 				// read next xtnt block.
-				bh = sb_bread(inode->i_sb, i_xblk - 1);
+				bh = bread( inode->i_dev, i_xblk - 1, QNX4_BLOCK_SIZE );
 				if ( !bh ) {
 					QNX4DEBUG(("qnx4: I/O error reading xtnt block [%ld])\n", i_xblk - 1));
 					return -EIO;
@@ -307,7 +307,7 @@ static const char *qnx4_checkroot(struct super_block *sb)
 		rd = le32_to_cpu(sb->u.qnx4_sb.sb->RootDir.di_first_xtnt.xtnt_blk) - 1;
 		rl = le32_to_cpu(sb->u.qnx4_sb.sb->RootDir.di_first_xtnt.xtnt_size);
 		for (j = 0; j < rl; j++) {
-			bh = sb_bread(sb, rd + j);	/* root dir, first block */
+			bh = bread(sb->s_dev, rd + j, QNX4_BLOCK_SIZE);	/* root dir, first block */
 			if (bh == NULL) {
 				return "unable to read root entry.";
 			}
@@ -318,10 +318,6 @@ static const char *qnx4_checkroot(struct super_block *sb)
 					if (!strncmp(rootdir->di_fname, QNX4_BMNAME, sizeof QNX4_BMNAME)) {
 						found = 1;
 						sb->u.qnx4_sb.BitMap = kmalloc( sizeof( struct qnx4_inode_entry ), GFP_KERNEL );
-						if (!sb->u.qnx4_sb.BitMap) {
-							brelse (bh);
-							return "not enough memory for bitmap inode";
-						}
 						memcpy( sb->u.qnx4_sb.BitMap, rootdir, sizeof( struct qnx4_inode_entry ) );	/* keep bitmap inode known */
 						break;
 					}
@@ -351,18 +347,25 @@ static struct super_block *qnx4_read_super(struct super_block *s,
 	s->s_blocksize = QNX4_BLOCK_SIZE;
 	s->s_blocksize_bits = QNX4_BLOCK_SIZE_BITS;
 
-	/* Check the superblock signature. Since the qnx4 code is
+	/* Check the boot signature. Since the qnx4 code is
 	   dangerous, we should leave as quickly as possible
 	   if we don't belong here... */
-	bh = sb_bread(s, 1);
+	bh = bread(dev, 0, QNX4_BLOCK_SIZE);
+	if (!bh) {
+		printk("qnx4: unable to read the boot sector\n");
+		goto outnobh;
+	}
+	if ( memcmp( (char*)bh->b_data + 4, "QNX4FS", 6 ) ) {
+		if (!silent)
+			printk("qnx4: wrong fsid in boot sector.\n");
+		goto out;
+	}
+	brelse(bh);
+
+	bh = bread(dev, 1, QNX4_BLOCK_SIZE);
 	if (!bh) {
 		printk("qnx4: unable to read the superblock\n");
 		goto outnobh;
-	}
-	if ( le32_to_cpu( *(__u32*)bh->b_data ) != QNX4_SUPER_MAGIC ) {
-		if (!silent)
-			printk("qnx4: wrong fsid in superblock sector.\n");
-		goto out;
 	}
 	s->s_op = &qnx4_sops;
 	s->s_magic = QNX4_SUPER_MAGIC;
@@ -454,7 +457,7 @@ static void qnx4_read_inode(struct inode *inode)
 	}
 	block = ino / QNX4_INODES_PER_BLOCK;
 
-	if (!(bh = sb_bread(inode->i_sb, block))) {
+	if (!(bh = bread(inode->i_dev, block, QNX4_BLOCK_SIZE))) {
 		printk("qnx4: major problem: unable to read inode from dev "
 		       "%s\n", kdevname(inode->i_dev));
 		return;

@@ -1043,13 +1043,13 @@ static struct net_device_stats *i2o_lan_get_stats(struct net_device *dev)
 		printk(KERN_INFO "%s: Unable to query LAN_HISTORICAL_STATS.\n", dev->name);
 	else {
 		dprintk(KERN_DEBUG "%s: LAN_HISTORICAL_STATS queried.\n", dev->name);
-		priv->stats.gen.tx_packets = val64[0];
-		priv->stats.gen.tx_bytes   = val64[1];
-		priv->stats.gen.rx_packets = val64[2];
-		priv->stats.gen.rx_bytes   = val64[3];
-		priv->stats.gen.tx_errors  = val64[4];
-		priv->stats.gen.rx_errors  = val64[5];
-		priv->stats.gen.rx_dropped = val64[6];
+		priv->stats.tx_packets = val64[0];
+		priv->stats.tx_bytes   = val64[1];
+		priv->stats.rx_packets = val64[2];
+		priv->stats.rx_bytes   = val64[3];
+		priv->stats.tx_errors  = val64[4];
+		priv->stats.rx_errors  = val64[5];
+		priv->stats.rx_dropped = val64[6];
 	}
 
 	if (i2o_query_scalar(iop, i2o_dev->lct_data.tid, 0x0180, -1,
@@ -1062,9 +1062,9 @@ static struct net_device_stats *i2o_lan_get_stats(struct net_device *dev)
 			printk(KERN_INFO "%s: Unable to query LAN_OPTIONAL_RX_HISTORICAL_STATS.\n", dev->name);
 		else {
 			dprintk(KERN_DEBUG "%s: LAN_OPTIONAL_RX_HISTORICAL_STATS queried.\n", dev->name);
-			priv->stats.gen.multicast        = val64[4];
-			priv->stats.gen.rx_length_errors = val64[10];
-			priv->stats.gen.rx_crc_errors    = val64[0];
+			priv->stats.multicast	     = val64[4];
+			priv->stats.rx_length_errors = val64[10];
+			priv->stats.rx_crc_errors    = val64[0];
 		}
 	}
 
@@ -1075,9 +1075,9 @@ static struct net_device_stats *i2o_lan_get_stats(struct net_device *dev)
 			printk(KERN_INFO "%s: Unable to query LAN_802_3_HISTORICAL_STATS.\n", dev->name);
 		else {
 			dprintk(KERN_DEBUG "%s: LAN_802_3_HISTORICAL_STATS queried.\n", dev->name);
-	 		priv->stats.gen.collisions        = val64[1] + val64[2];
-			priv->stats.gen.rx_frame_errors   = val64[0];
-			priv->stats.gen.tx_carrier_errors = val64[6];
+	 		priv->stats.transmit_collision = val64[1] + val64[2];
+			priv->stats.rx_frame_errors    = val64[0];
+			priv->stats.tx_carrier_errors  = val64[6];
 		}
 
 		if (i2o_query_scalar(iop, i2o_dev->lct_data.tid, 0x0280, -1,
@@ -1091,11 +1091,9 @@ static struct net_device_stats *i2o_lan_get_stats(struct net_device *dev)
 			else {
 				dprintk(KERN_DEBUG "%s: LAN_OPTIONAL_802_3_HISTORICAL_STATS queried.\n", dev->name);
 				if (supported_stats & 0x1)
-					priv->stats.gen.rx_over_errors =
-								val64[0];
+					priv->stats.rx_over_errors = val64[0];
 				if (supported_stats & 0x4)
-					priv->stats.gen.tx_heartbeat_errors =
-								val64[2];
+					priv->stats.tx_heartbeat_errors = val64[2];
 			}
 		}
 	}
@@ -1432,7 +1430,11 @@ struct net_device *i2o_lan_register_device(struct i2o_device *i2o_dev)
 	return dev;
 }
 
-static int __init i2o_lan_init(void)
+#ifdef MODULE
+#define i2o_lan_init	init_module
+#endif
+
+int __init i2o_lan_init(void)
 {
 	struct net_device *dev;
 	int i;
@@ -1513,7 +1515,9 @@ static int __init i2o_lan_init(void)
 	return 0;
 }
 
-static void i2o_lan_exit(void)
+#ifdef MODULE
+
+void cleanup_module(void)
 {
 	int i;
 
@@ -1572,5 +1576,4 @@ MODULE_PARM_DESC(rx_copybreak, "Copy breakpoint for copy only small frames (1-)"
 MODULE_PARM(tx_batch_mode, "0-2" "i");
 MODULE_PARM_DESC(tx_batch_mode, "0=Send immediatelly, 1=Send in batches, 2=Switch automatically");
 
-module_init(i2o_lan_init);
-module_exit(i2o_lan_exit);
+#endif

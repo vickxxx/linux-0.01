@@ -2,8 +2,8 @@
  * This file contains various system calls that have different calling
  * conventions on different platforms.
  *
- * Copyright (C) 1999-2000, 2002 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2000 Hewlett-Packard Co
+ * Copyright (C) 1999-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/config.h>
 #include <linux/errno.h>
@@ -15,7 +15,6 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/highuid.h>
-#include <linux/hugetlb.h>
 
 #include <asm/shmparam.h>
 #include <asm/uaccess.h>
@@ -30,10 +29,6 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 
 	if (len > RGN_MAP_LIMIT)
 		return -ENOMEM;
-#ifdef CONFIG_HUGETLB_PAGE
-	if (rgn_index(addr)==REGION_HPAGE)
-		addr = 0;
-#endif
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
@@ -61,14 +56,16 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 }
 
 asmlinkage long
-ia64_getpriority (int which, int who)
+ia64_getpriority (int which, int who, long arg2, long arg3, long arg4, long arg5, long arg6,
+		  long arg7, long stack)
 {
+	struct pt_regs *regs = (struct pt_regs *) &stack;
 	extern long sys_getpriority (int, int);
 	long prio;
 
 	prio = sys_getpriority(which, who);
 	if (prio >= 0) {
-		force_successful_syscall_return();
+		regs->r8 = 0;	/* ensure negative priority is not mistaken as error code */
 		prio = 20 - prio;
 	}
 	return prio;
@@ -82,9 +79,11 @@ sys_getpagesize (void)
 }
 
 asmlinkage unsigned long
-ia64_shmat (int shmid, void *shmaddr, int shmflg)
+ia64_shmat (int shmid, void *shmaddr, int shmflg, long arg3, long arg4, long arg5, long arg6,
+	    long arg7, long stack)
 {
 	extern int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr);
+	struct pt_regs *regs = (struct pt_regs *) &stack;
 	unsigned long raddr;
 	int retval;
 
@@ -92,14 +91,16 @@ ia64_shmat (int shmid, void *shmaddr, int shmflg)
 	if (retval < 0)
 		return retval;
 
-	force_successful_syscall_return();
+	regs->r8 = 0;	/* ensure negative addresses are not mistaken as an error code */
 	return raddr;
 }
 
 asmlinkage unsigned long
-ia64_brk (unsigned long brk)
+ia64_brk (unsigned long brk, long arg1, long arg2, long arg3,
+	  long arg4, long arg5, long arg6, long arg7, long stack)
 {
 	extern int vm_enough_memory (long pages);
+	struct pt_regs *regs = (struct pt_regs *) &stack;
 	unsigned long rlim, retval, newbrk, oldbrk;
 	struct mm_struct *mm = current->mm;
 
@@ -149,7 +150,7 @@ set_brk:
 out:
 	retval = mm->brk;
 	up_write(&mm->mmap_sem);
-	force_successful_syscall_return();
+	regs->r8 = 0;		/* ensure large retval isn't mistaken as error code */
 	return retval;
 }
 
@@ -200,13 +201,15 @@ do_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, un
 	if (len == 0)
 		goto out;
 
-	/*
-	 * Don't permit mappings into unmapped space, the virtual page table of a region,
-	 * or across a region boundary.  Note: RGN_MAP_LIMIT is equal to 2^n-PAGE_SIZE
-	 * (for some integer n <= 61) and len > 0.
-	 */
+	/* don't permit mappings into unmapped space or the virtual page table of a region: */
 	roff = rgn_offset(addr);
-	if ((len > RGN_MAP_LIMIT) || (roff > (RGN_MAP_LIMIT - len))) {
+	if ((len | roff | (roff + len)) >= RGN_MAP_LIMIT) {
+		addr = -EINVAL;
+		goto out;
+	}
+
+	/* don't permit mappings that would cross a region boundary: */
+	if (rgn_index(addr) != rgn_index(addr + len)) {
 		addr = -EINVAL;
 		goto out;
 	}
@@ -226,46 +229,29 @@ out:	if (file)
  * of) files that are larger than the address space of the CPU.
  */
 asmlinkage unsigned long
-sys_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, long pgoff)
+sys_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, long pgoff,
+	   long arg6, long arg7, long stack)
 {
+	struct pt_regs *regs = (struct pt_regs *) &stack;
+
 	addr = do_mmap2(addr, len, prot, flags, fd, pgoff);
 	if (!IS_ERR((void *) addr))
-		force_successful_syscall_return();
+		regs->r8 = 0;	/* ensure large addresses are not mistaken as failures... */
 	return addr;
 }
 
 asmlinkage unsigned long
-sys_mmap (unsigned long addr, unsigned long len, int prot, int flags, int fd, long off)
+sys_mmap (unsigned long addr, unsigned long len, int prot, int flags,
+	  int fd, long off, long arg6, long arg7, long stack)
 {
+	struct pt_regs *regs = (struct pt_regs *) &stack;
+
 	if ((off & ~PAGE_MASK) != 0)
 		return -EINVAL;
 
 	addr = do_mmap2(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 	if (!IS_ERR((void *) addr))
-		force_successful_syscall_return();
-	return addr;
-}
-
-asmlinkage unsigned long
-ia64_mremap (unsigned long addr, unsigned long old_len, unsigned long new_len, unsigned long flags,
-	     unsigned long new_addr)
-{
-	extern unsigned long do_mremap (unsigned long addr,
-					unsigned long old_len,
-					unsigned long new_len,
-					unsigned long flags,
-					unsigned long new_addr);
-
-	down_write(&current->mm->mmap_sem);
-	{
-		addr = do_mremap(addr, old_len, new_len, flags, new_addr);
-	}
-	up_write(&current->mm->mmap_sem);
-
-	if (IS_ERR((void *) addr))
-		return addr;
-
-	force_successful_syscall_return();
+		regs->r8 = 0;	/* ensure large addresses are not mistaken as failures... */
 	return addr;
 }
 

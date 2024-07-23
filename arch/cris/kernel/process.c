@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.24 2003/03/06 14:19:32 pkj Exp $
+/* $Id: process.c,v 1.20 2001/10/03 08:21:39 jonashg Exp $
  * 
  *  linux/arch/cris/kernel/process.c
  *
@@ -8,19 +8,6 @@
  *  Authors:   Bjorn Wesen (bjornw@axis.com)
  *
  *  $Log: process.c,v $
- *  Revision 1.24  2003/03/06 14:19:32  pkj
- *  Use a cpu_idle() function identical to the one used by i386.
- *
- *  Revision 1.23  2002/10/14 18:29:27  johana
- *  Call etrax_gpio_wake_up_check() from cpu_idle() to reduce gpio latency
- *  from ~15 ms to ~6 ms.
- *
- *  Revision 1.22  2001/11/13 09:40:43  orjanf
- *  Added dump_fpu (needed for core dumps).
- *
- *  Revision 1.21  2001/11/12 18:26:21  pkj
- *  Fixed compiler warnings.
- *
  *  Revision 1.20  2001/10/03 08:21:39  jonashg
  *  cause_of_death does not exist if CONFIG_SVINTO_SIM is defined.
  *
@@ -70,7 +57,6 @@
 #include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
-#include <linux/elfcore.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 
@@ -91,6 +77,7 @@
  * setup.
  */
 
+static struct vm_area_struct init_mmap = INIT_MMAP;
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
 static struct signal_struct init_signals = INIT_SIGNALS;
@@ -117,17 +104,7 @@ union task_union init_task_union
  * region by enable_hlt/disable_hlt.
  */
 
-static int hlt_counter;
-
-/*
- * Powermanagement idle function, if any..
- */
-void (*pm_idle)(void);
-
-/*
- * Power off function, if any
- */
-void (*pm_power_off)(void);
+static int hlt_counter=0;
 
 void disable_hlt(void)
 {
@@ -138,42 +115,12 @@ void enable_hlt(void)
 {
 	hlt_counter--;
 }
-
-/*
- * We use this if we don't have any better
- * idle routine..
- */
-static void default_idle(void)
+ 
+int cpu_idle(void *unused)
 {
-#ifdef CONFIG_ETRAX_GPIO
-	extern void etrax_gpio_wake_up_check(void); /* drivers/gpio.c */
-
-	/* This can reduce latency from 15 ms to 6 ms */
-	etrax_gpio_wake_up_check(); /* drivers/gpio.c */
-#endif
-}
-
-/*
- * The idle thread. There's no useful work to be
- * done, so just try to conserve power and have a
- * low exit latency (ie sit in a loop waiting for
- * somebody to say that they'd like to reschedule)
- */
-void cpu_idle(void)
-{
-	/* endless idle loop with no priority at all */
-	init_idle();
-	current->nice = 20;
-	current->counter = -100;
-
 	while(1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-		while (!current->need_resched)
-			idle();
+		current->counter = -100;
 		schedule();
-		check_pgt_cache();
 	}
 }
 
@@ -189,15 +136,14 @@ void hard_reset_now (void)
 	 * code to know about it than the watchdog handler in entry.S and
 	 * this code, implementing hard reset through the watchdog.
 	 */
-#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	extern int cause_of_death;
-#endif
 
 	printk("*** HARD RESET ***\n");
 	cli();
 
 #if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	cause_of_death = 0xbedead;
+
 #else
 	/* Since we dont plan to keep on reseting the watchdog,
 	   the key can be arbitrary hence three */
@@ -227,8 +173,6 @@ void machine_halt(void)
 
 void machine_power_off(void)
 {
-	if (pm_power_off)
-		pm_power_off();
 }
 
 /*
@@ -300,10 +244,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
  */
 void dump_thread(struct pt_regs * regs, struct user * dump)
 {
-#if 0
 	int i;
-
-	/* changed the size calculations - should hopefully work better. lbt */
+#if 0
+/* changed the size calculations - should hopefully work better. lbt */
 	dump->magic = CMAGIC;
 	dump->start_code = 0;
 	dump->start_stack = regs->esp & ~(PAGE_SIZE - 1);
@@ -321,12 +264,6 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 
 	dump->u_fpvalid = dump_fpu (regs, &dump->i387);
 #endif 
-}
-
-/* Fill in the fpu structure for a core dump. */
-int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
-{
-        return 0;
 }
 
 /* 

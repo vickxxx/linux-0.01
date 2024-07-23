@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.hw_irq.h 1.10 05/17/01 18:14:24 cort
+ */
+/*
  * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
  */
 #ifdef __KERNEL__
@@ -7,8 +10,7 @@
 
 extern unsigned long timer_interrupt_intercept;
 extern unsigned long do_IRQ_intercept;
-extern int timer_interrupt(struct pt_regs *);
-extern void ppc_irq_dispatch_handler(struct pt_regs *regs, int irq);
+int timer_interrupt(struct pt_regs *);
 
 extern void __sti(void);
 extern void __cli(void);
@@ -18,7 +20,6 @@ extern unsigned long __sti_end, __cli_end, __restore_flags_end, __save_flags_ptr
 
 #define __save_flags(flags) __save_flags_ptr((unsigned long *)&flags)
 #define __save_and_cli(flags) ({__save_flags(flags);__cli();})
-#define __save_and_sti(flags) ({__save_flags(flags);__sti();})
 
 extern void do_lost_interrupts(unsigned long);
 

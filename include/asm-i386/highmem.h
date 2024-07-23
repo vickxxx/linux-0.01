@@ -46,7 +46,7 @@ extern void kmap_init(void) __init;
  * easily, subsequent pte tables have to be allocated in one physical
  * chunk of RAM.
  */
-#define PKMAP_BASE (0xff800000UL)
+#define PKMAP_BASE (0xfe000000UL)
 #ifdef CONFIG_X86_PAE
 #define LAST_PKMAP 512
 #else
@@ -56,25 +56,22 @@ extern void kmap_init(void) __init;
 #define PKMAP_NR(virt)  ((virt-PKMAP_BASE) >> PAGE_SHIFT)
 #define PKMAP_ADDR(nr)  (PKMAP_BASE + ((nr) << PAGE_SHIFT))
 
-extern void * FASTCALL(kmap_high(struct page *page, int nonblocking));
+extern void * FASTCALL(kmap_high(struct page *page));
 extern void FASTCALL(kunmap_high(struct page *page));
 
-#define kmap(page) __kmap(page, 0)
-#define kmap_nonblock(page) __kmap(page, 1)
-
-static inline void *__kmap(struct page *page, int nonblocking)
+static inline void *kmap(struct page *page)
 {
 	if (in_interrupt())
-		out_of_line_bug();
+		BUG();
 	if (page < highmem_start_page)
 		return page_address(page);
-	return kmap_high(page, nonblocking);
+	return kmap_high(page);
 }
 
 static inline void kunmap(struct page *page)
 {
 	if (in_interrupt())
-		out_of_line_bug();
+		BUG();
 	if (page < highmem_start_page)
 		return;
 	kunmap_high(page);
@@ -98,7 +95,7 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
 #if HIGHMEM_DEBUG
 	if (!pte_none(*(kmap_pte-idx)))
-		out_of_line_bug();
+		BUG();
 #endif
 	set_pte(kmap_pte-idx, mk_pte(page, kmap_prot));
 	__flush_tlb_one(vaddr);
@@ -109,14 +106,14 @@ static inline void *kmap_atomic(struct page *page, enum km_type type)
 static inline void kunmap_atomic(void *kvaddr, enum km_type type)
 {
 #if HIGHMEM_DEBUG
-	unsigned long vaddr = (unsigned long) kvaddr & PAGE_MASK;
+	unsigned long vaddr = (unsigned long) kvaddr;
 	enum fixed_addresses idx = type + KM_TYPE_NR*smp_processor_id();
 
 	if (vaddr < FIXADDR_START) // FIXME
 		return;
 
 	if (vaddr != __fix_to_virt(FIX_KMAP_BEGIN+idx))
-		out_of_line_bug();
+		BUG();
 
 	/*
 	 * force other mappings to Oops if they'll try to access

@@ -14,6 +14,7 @@
 #include <linux/stat.h>
 #include <linux/errno.h>
 #include <linux/locks.h>
+#include <asm/segment.h>
 #include <linux/string.h>
 #define __NO_VERSION__
 #include <linux/module.h>
@@ -44,6 +45,8 @@ struct file_operations coda_ioctl_operations = {
 /* the coda pioctl inode ops */
 static int coda_ioctl_permission(struct inode *inode, int mask)
 {
+        ENTRY;
+
         return 0;
 }
 
@@ -56,6 +59,7 @@ static int coda_pioctl(struct inode * inode, struct file * filp,
         struct inode *target_inode = NULL;
         struct coda_inode_info *cnp;
 
+        ENTRY;
         /* get the Pioctl data arguments from user space */
         if (copy_from_user(&data, (int *)user_data, sizeof(data))) {
 	    return -EINVAL;

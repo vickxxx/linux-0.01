@@ -91,22 +91,13 @@ typedef struct {
         unsigned long pmd0;
         unsigned long pmd1; 
         } pmd_t;
-typedef unsigned int pgd_t;
+typedef struct { unsigned long pgd; } pgd_t;
 typedef struct { unsigned long pgprot; } pgprot_t;
 
 #define pte_val(x)      ((x).pte)
 #define pmd_val(x)      ((x).pmd0)
 #define pmd_val1(x)     ((x).pmd1)
-
-static inline unsigned long __pgd_val(pgd_t *pgdp)
-{
-	unsigned long addr = (unsigned long) pgdp;
-	unsigned long *pgd_slot = (unsigned long *) (addr & -8);
-
-	return *pgd_slot + ((addr & 4) << 11);
-}
-#define pgd_val(pgd) __pgd_val(&(pgd))
-
+#define pgd_val(x)      ((x).pgd)
 #define pgprot_val(x)   ((x).pgprot)
 
 #define __pte(x)        ((pte_t) { (x) } )
@@ -125,13 +116,6 @@ static inline unsigned long __pgd_val(pgd_t *pgdp)
 #define __va(x)                 (void *)(x)
 #define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
 #define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
-
-#define get_storage_key() 0
-#define pfix_get_page_addr(addr) (unsigned long)addr
-#define pfix_get_addr(addr) (unsigned long)addr
 
 #endif                                 /* __KERNEL__                       */
 

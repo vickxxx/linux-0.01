@@ -1,15 +1,17 @@
-# arch/ia64/hp/Makefile
-# Copyright (c) 2002 Matthew Wilcox for Hewlett Packard
+#
+# ia64/platform/hp/Makefile
+#
+# Copyright (C) 1999 Silicon Graphics, Inc.
+# Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
+#
 
-ALL_SUB_DIRS := sim zx1 common
+all: hp.a
 
-O_TARGET := hp.o
+O_TARGET := hp.a
 
-subdir-$(CONFIG_IA64_GENERIC) += $(ALL_SUB_DIRS)
-subdir-$(CONFIG_IA64_HP_SIM) += sim
-subdir-$(CONFIG_IA64_HP_ZX1) += zx1 common
+obj-y := hpsim_console.o hpsim_irq.o hpsim_setup.o
+obj-$(CONFIG_IA64_GENERIC) += hpsim_machvec.o
 
-SUB_DIRS := $(subdir-y)
-obj-y += $(join $(subdir-y),$(subdir-y:%=/%.o))
+clean::
 
 include $(TOPDIR)/Rules.make

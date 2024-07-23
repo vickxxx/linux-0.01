@@ -1,4 +1,4 @@
-/* $Id: pcic.c,v 1.22.2.1 2002/01/23 14:35:45 davem Exp $
+/* $Id: pcic.c,v 1.22 2001/02/13 01:16:43 davem Exp $
  * pcic.c: Sparc/PCI controller support
  *
  * Copyright (C) 1998 V. Roganov and G. Raiko
@@ -185,7 +185,7 @@ static struct pcic_sn2list pcic_known_sysnames[] = {
  * Only one PCIC per IIep,
  * and since we have no SMP IIep, only one per system.
  */
-static int pcic0_up;
+static int pcic0_up = 0;
 static struct linux_pcic pcic0;
 
 unsigned int pcic_regs;
@@ -759,6 +759,7 @@ void __init pci_time_init(void)
 	unsigned long v;
 	int timer_irq, irq;
 
+	do_get_fast_time = pci_do_gettimeofday;
 	/* A hack until do_gettimeofday prototype is moved to arch specific headers
 	   and btfixupped. Patch do_gettimeofday with ba pci_do_gettimeofday; nop */
 	((unsigned int *)do_gettimeofday)[0] = 
@@ -865,12 +866,11 @@ void pcibios_update_resource(struct pci_dev *pdev, struct resource *res1,
 {
 }
 
-void pcibios_align_resource(void *data, struct resource *res,
-			    unsigned long size, unsigned long align)
+void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 }
 
-int pcibios_enable_device(struct pci_dev *pdev, int mask)
+int pcibios_enable_device(struct pci_dev *pdev)
 {
 	return 0;
 }

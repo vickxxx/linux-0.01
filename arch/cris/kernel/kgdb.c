@@ -18,12 +18,6 @@
 *! Jul 21 1999  Bjorn Wesen     eLinux port
 *!
 *! $Log: kgdb.c,v $
-*! Revision 1.8  2003/04/09 08:31:15  pkj
-*! Typo correction (taken from Linux 2.5).
-*!
-*! Revision 1.7  2002/07/12 09:14:56  bjornw
-*! Corrected typo
-*!
 *! Revision 1.6  2001/10/09 13:10:03  matsfg
 *! Added $ on registers and removed some underscores
 *!
@@ -61,7 +55,7 @@
 *!
 *!---------------------------------------------------------------------------
 *!
-*! $Id: kgdb.c,v 1.8 2003/04/09 08:31:15 pkj Exp $
+*! $Id: kgdb.c,v 1.6 2001/10/09 13:10:03 matsfg Exp $
 *!
 *! (C) Copyright 1999, Axis Communications AB, LUND, SWEDEN
 *!
@@ -155,7 +149,7 @@
  *    (IPL too high, disabled, ...)
  *
  *  - The gdb stub is currently not reentrant, i.e. errors that happen therein
- *    (e.g. accessing invalid memory) may not be caught correctly. This could
+ *    (e.g. accesing invalid memory) may not be caught correctly. This could
  *    be removed in future by introducing a stack of struct registers.
  *
  */
@@ -1070,7 +1064,7 @@ handle_exception (int sigval)
 					int regno = gdb_cris_strtol (&remcomInBuffer[1], &suffix, 16);
 					int status;
 #ifdef PROCESS_SUPPORT
-					if (current_thread_g != executing_task)
+					if (current_thread_g =! executing_task)
 						status = write_stack_register (current_thread_g, regno, suffix+1);
 					else
 #endif
@@ -1489,7 +1483,7 @@ kgdb_handle_serial:
   move.d   $r0,[reg+0x62]   ; Save the return address in BRP
   move     $usp,[reg+0x66]  ; USP
 
-;; get the serial character (from debugport.c) and check if it is a ctrl-c
+;; get the serial character (from debugport.c) and check if its a ctrl-c
 
   jsr getDebugChar
   cmp.b 3, $r10

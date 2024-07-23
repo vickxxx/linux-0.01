@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------------- */
-/* i2c-velleman.c i2c-hw access for Velleman K8000 adapters		     */
+/* i2c-velleman.c i2c-hw access for Velleman K9000 adapters		     */
 /* ------------------------------------------------------------------------- */
 /*   Copyright (C) 1995-96, 2000 Simon G. Vogl
 
@@ -24,12 +24,12 @@
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/errno.h>
-#include <linux/delay.h>
+#include <linux/string.h>  /* for 2.0 kernels to get NULL   */
+#include <asm/errno.h>     /* for 2.0 kernels to get ENODEV */
+#include <asm/io.h>
+
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
-#include <asm/io.h>
-#include <asm/param.h> /* for HZ */
 
 /* ----- global defines -----------------------------------------------	*/
 #define DEB(x)		/* should be reasonable open, close &c. 	*/
@@ -139,28 +139,28 @@ static void bit_velle_dec_use(struct i2c_adapter *adap)
  */
 
 static struct i2c_algo_bit_data bit_velle_data = {
-	.setsda		= bit_velle_setsda,
-	.setscl		= bit_velle_setscl,
-	.getsda		= bit_velle_getsda,
-	.getscl		= bit_velle_getscl,
-	.udelay		= 10,
-	.mdelay		= 10,
-	.timeout	= HZ
+	NULL,
+	bit_velle_setsda,
+	bit_velle_setscl,
+	bit_velle_getsda,
+	bit_velle_getscl,
+	10, 10, 100,		/*	waits, timeout */
 };
 
 static struct i2c_adapter bit_velle_ops = {
-	.name		= "Velleman K8000",
-	.id		= I2C_HW_B_VELLE,
-	.algo_data	= &bit_velle_data,
-	.inc_use	= bit_velle_inc_use,
-	.dec_use	= bit_velle_dec_use,
-	.client_register = bit_velle_reg,
-	.client_unregister = bit_velle_unreg,
+	"Velleman K8000",
+	I2C_HW_B_VELLE,
+	NULL,
+	&bit_velle_data,
+	bit_velle_inc_use,
+	bit_velle_dec_use,
+	bit_velle_reg,
+	bit_velle_unreg,
 };
 
 int __init  i2c_bitvelle_init(void)
 {
-	printk(KERN_INFO "i2c-velleman.o: i2c Velleman K8000 adapter module version %s (%s)\n", I2C_VERSION, I2C_DATE);
+	printk("i2c-velleman.o: i2c Velleman K8000 adapter module\n");
 	if (base==0) {
 		/* probe some values */
 		base=DEFAULT_BASE;
@@ -180,7 +180,7 @@ int __init  i2c_bitvelle_init(void)
 			return -ENODEV;
 		}
 	}
-	printk(KERN_DEBUG "i2c-velleman.o: found device at %#x.\n",base);
+	printk("i2c-velleman.o: found device at %#x.\n",base);
 	return 0;
 }
 

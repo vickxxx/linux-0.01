@@ -15,6 +15,7 @@
 #include <linux/stat.h>
 #include <linux/errno.h>
 #include <linux/locks.h>
+#include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
 
@@ -25,6 +26,7 @@
 
 /* initialize the debugging variables */
 int coda_debug;
+int coda_print_entry; 
 int coda_access_cache = 1;
 int coda_fake_statfs;
 
@@ -32,7 +34,21 @@ int coda_fake_statfs;
 char * coda_f2s(ViceFid *f)
 {
 	static char s[60];
-	sprintf(s, "(%-#lx.%-#lx.%-#lx)", f->Volume, f->Vnode, f->Unique);
+	if ( f ) {
+		sprintf(s, "(%-#lx,%-#lx,%-#lx)", 
+			 f->Volume, f->Vnode, f->Unique);
+	}
+	return s;
+}
+
+/* print another fid */
+char * coda_f2s2(ViceFid *f)
+{
+	static char s[60];
+	if ( f ) {
+		sprintf(s, "(%-#lx,%-#lx,%-#lx)", 
+			 f->Volume, f->Vnode, f->Unique);
+	}
 	return s;
 }
 

@@ -304,26 +304,26 @@ typedef struct x25_channel
 #ifdef NEX_OLD_CALL_INFO
 typedef struct x25_call_info
 {
-	char dest[17];			/* ASCIIZ destination address */
-	char src[17];			/* ASCIIZ source address */
-	char nuser;			/* number of user data bytes */
-	unsigned char user[127];	/* user data */
-	char nfacil;			/* number of facilities */
+	char dest[17];			PACKED;/* ASCIIZ destination address */
+	char src[17];			PACKED;/* ASCIIZ source address */
+	char nuser;			PACKED;/* number of user data bytes */
+	unsigned char user[127];	PACKED;/* user data */
+	char nfacil;			PACKED;/* number of facilities */
 	struct
 	{
-		unsigned char code;
-		unsigned char parm;
+		unsigned char code;     PACKED;
+		unsigned char parm;     PACKED;
 	} facil[64];			        /* facilities */
 } x25_call_info_t;
 #else
 typedef struct x25_call_info
 {
-	char dest[MAX_X25_ADDR_SIZE];	/* ASCIIZ destination address */
-	char src[MAX_X25_ADDR_SIZE];	/* ASCIIZ source address */
-	unsigned char nuser;
-	unsigned char user[MAX_X25_DATA_SIZE];/* user data */
-	unsigned char nfacil;
-	unsigned char facil[MAX_X25_FACL_SIZE];
+	char dest[MAX_X25_ADDR_SIZE]		PACKED;/* ASCIIZ destination address */
+	char src[MAX_X25_ADDR_SIZE]		PACKED;/* ASCIIZ source address */
+	unsigned char nuser			PACKED;
+	unsigned char user[MAX_X25_DATA_SIZE]	PACKED;/* user data */
+	unsigned char nfacil			PACKED;
+	unsigned char facil[MAX_X25_FACL_SIZE]	PACKED;
 	unsigned short lcn             		PACKED;
 } x25_call_info_t;
 #endif
@@ -1267,10 +1267,12 @@ static int if_open (netdevice_t* dev)
 			connect(card);
 			S508_S514_unlock(card, &smp_flags);
 
-			mod_timer(&card->u.x.x25_timer, jiffies + HZ);
+			del_timer(&card->u.x.x25_timer);
+			card->u.x.x25_timer.expires=jiffies+HZ;
+			add_timer(&card->u.x.x25_timer);
 		}
 	}
-	/* Device is not up until the we are in connected state */
+	/* Device is not up untill the we are in connected state */
 	do_gettimeofday( &tv );
 	chan->router_start_time = tv.tv_sec;
 
@@ -4719,7 +4721,7 @@ static int execute_delayed_cmd (sdla_t* card, netdevice_t *dev, mbox_cmd_t *usr_
 /*===============================================================
  * api_incoming_call 
  *
- *	Pass an incoming call request up the listening
+ *	Pass an incoming call request up the the listening
  *      sock.  If the API sock is not listening reject the
  *      call.
  *
@@ -4754,7 +4756,7 @@ static int api_incoming_call (sdla_t* card, TX25Mbox *mbox, int lcn)
  * send_delayed_cmd_result
  *
  *	Wait commands like PLEACE CALL or CLEAR CALL must wait
- *      until the result arrives. This function passes
+ *      untill the result arrivers. This function passes
  *      the result to a waiting sock. 
  *
  *===============================================================*/

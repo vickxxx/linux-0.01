@@ -1,4 +1,4 @@
-/* $Id: rwsem.h,v 1.5 2001/11/18 00:12:56 davem Exp $
+/* $Id: rwsem.h,v 1.4 2001/04/26 02:36:36 davem Exp $
  * rwsem.h: R/W semaphores implemented using CAS
  *
  * Written by David S. Miller (davem@redhat.com), 2001.
@@ -59,7 +59,7 @@ static inline void __down_read(struct rw_semaphore *sem)
 		" add		%%g7, 1, %%g7\n\t"
 		"cmp		%%g7, 0\n\t"
 		"bl,pn		%%icc, 3f\n\t"
-		" membar	#StoreLoad | #StoreStore\n"
+		" membar	#StoreStore\n"
 		"2:\n\t"
 		".subsection	2\n"
 		"3:\tmov	%0, %%g5\n\t"
@@ -79,31 +79,6 @@ static inline void __down_read(struct rw_semaphore *sem)
 		: "g5", "g7", "memory", "cc");
 }
 
-static __inline__ int __down_read_trylock(struct rw_semaphore *sem)
-{
-	int result;
-
-	__asm__ __volatile__(
-		"! beginning __down_read_trylock\n"
-		"1:\tlduw	[%1], %%g5\n\t"
-		"add		%%g5, 1, %%g7\n\t"
-		"cmp		%%g7, 0\n\t"
-		"bl,pn		%%icc, 2f\n\t"
-		" mov		0, %0\n\t"
-		"cas		[%1], %%g5, %%g7\n\t"
-		"cmp		%%g5, %%g7\n\t"
-		"bne,pn		%%icc, 1b\n\t"
-		" mov		1, %0\n\t"
-		"membar		#StoreLoad | #StoreStore\n"
-		"2:\n\t"
-		"! ending __down_read_trylock"
-		: "=&r" (result)
-                : "r" (sem)
-		: "g5", "g7", "memory", "cc");
-
-	return result;
-}
-
 static inline void __down_write(struct rw_semaphore *sem)
 {
 	__asm__ __volatile__(
@@ -117,7 +92,7 @@ static inline void __down_write(struct rw_semaphore *sem)
 		"bne,pn		%%icc, 1b\n\t"
 		" cmp		%%g7, 0\n\t"
 		"bne,pn		%%icc, 3f\n\t"
-		" membar	#StoreLoad | #StoreStore\n"
+		" membar	#StoreStore\n"
 		"2:\n\t"
 		".subsection	2\n"
 		"3:\tmov	%0, %%g5\n\t"
@@ -136,33 +111,6 @@ static inline void __down_write(struct rw_semaphore *sem)
 		: "g1", "g5", "g7", "memory", "cc");
 }
 
-static __inline__ int __down_write_trylock(struct rw_semaphore *sem)
-{
-	int result;
-
-	__asm__ __volatile__(
-		"! beginning __down_write_trylock\n\t"
-		"sethi		%%hi(%2), %%g1\n\t"
-		"or		%%g1, %%lo(%2), %%g1\n"
-		"1:\tlduw	[%1], %%g5\n\t"
-		"cmp		%%g5, 0\n\t"
-		"bne,pn		%%icc, 2f\n\t"
-		" mov		0, %0\n\t"
-		"add		%%g5, %%g1, %%g7\n\t"
-		"cas		[%1], %%g5, %%g7\n\t"
-		"cmp		%%g5, %%g7\n\t"
-		"bne,pn		%%icc, 1b\n\t"
-		" mov		1, %0\n\t"
-		"membar		#StoreLoad | #StoreStore\n"
-		"2:\n\t"
-		"! ending __down_write_trylock"
-		: "=&r" (result)
-		: "r" (sem), "i" (RWSEM_ACTIVE_WRITE_BIAS)
-		: "g1", "g5", "g7", "memory", "cc");
-
-	return result;
-}
-
 static inline void __up_read(struct rw_semaphore *sem)
 {
 	__asm__ __volatile__(
@@ -174,7 +122,7 @@ static inline void __up_read(struct rw_semaphore *sem)
 		"bne,pn		%%icc, 1b\n\t"
 		" cmp		%%g7, 0\n\t"
 		"bl,pn		%%icc, 3f\n\t"
-		" membar	#StoreLoad | #StoreStore\n"
+		" membar	#StoreStore\n"
 		"2:\n\t"
 		".subsection	2\n"
 		"3:\tsethi	%%hi(%2), %%g1\n\t"
@@ -212,7 +160,7 @@ static inline void __up_write(struct rw_semaphore *sem)
 		" sub		%%g7, %%g1, %%g7\n\t"
 		"cmp		%%g7, 0\n\t"
 		"bl,pn		%%icc, 3f\n\t"
-		" membar	#StoreLoad | #StoreStore\n"
+		" membar	#StoreStore\n"
 		"2:\n\t"
 		".subsection 2\n"
 		"3:\tmov	%0, %%g5\n\t"
@@ -241,7 +189,7 @@ static inline int rwsem_atomic_update(int delta, struct rw_semaphore *sem)
 		"cas		[%2], %%g5, %%g7\n\t"
 		"cmp		%%g5, %%g7\n\t"
 		"bne,pn		%%icc, 1b\n\t"
-		" membar	#StoreLoad | #StoreStore\n\t"
+		" nop\n\t"
 		"mov		%%g7, %0\n\t"
 		: "=&r" (tmp)
 		: "0" (tmp), "r" (sem)
@@ -260,7 +208,7 @@ static inline __u16 rwsem_cmpxchgw(struct rw_semaphore *sem, __u16 __old, __u16 
 
 again:
 	__asm__ __volatile__("cas	[%2], %3, %0\n\t"
-			     "membar	#StoreLoad | #StoreStore"
+			     "membar	#StoreStore | #StoreLoad"
 			     : "=&r" (prev)
 			     : "0" (new), "r" (sem), "r" (old)
 			     : "memory");

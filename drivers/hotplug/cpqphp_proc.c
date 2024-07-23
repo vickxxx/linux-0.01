@@ -1,9 +1,9 @@
 /*
  * Compaq Hot Plug Controller Driver
  *
- * Copyright (C) 1995,2001 Compaq Computer Corporation
- * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
- * Copyright (C) 2001 IBM Corp.
+ * Copyright (c) 1995,2001 Compaq Computer Corporation
+ * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (c) 2001 IBM Corp.
  *
  * All rights reserved.
  *
@@ -177,7 +177,7 @@ int cpqhp_proc_remove_ctrl (struct controller *ctrl)
 	
 int cpqhp_proc_init_ctrl (void)
 {
-	ctrl_proc_root = proc_mkdir("hpc", proc_root_driver);
+	ctrl_proc_root = proc_mkdir("driver/hpc", NULL);
 	if (!ctrl_proc_root)
 		return -ENOMEM;
 	ctrl_proc_root->owner = THIS_MODULE;

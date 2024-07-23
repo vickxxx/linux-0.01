@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (pedro_m@yahoo.com)
+ * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
  * the GNU General Public License, incorporated herein by reference.
@@ -63,7 +63,8 @@ extern int capi_disc_resp(struct pcbit_chan *chan, struct sk_buff **skb);
 extern int capi_decode_debug_188(u_char *hdr, ushort hdrlen);
 #endif
 
-static inline struct pcbit_chan * 
+extern __inline__ 
+struct pcbit_chan * 
 capi_channel(struct pcbit_dev *dev, struct sk_buff *skb)
 {
 	ushort callref;

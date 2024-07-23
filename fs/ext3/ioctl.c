@@ -37,7 +37,7 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 			return -EROFS;
 
 		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
-			return -EACCES;
+			return -EPERM;
 
 		if (get_user(flags, (int *) arg))
 			return -EFAULT;
@@ -81,7 +81,22 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		flags |= oldflags & ~EXT3_FL_USER_MODIFIABLE;
 		inode->u.ext3_i.i_flags = flags;
 
-		ext3_set_inode_flags(inode);
+		if (flags & EXT3_SYNC_FL)
+			inode->i_flags |= S_SYNC;
+		else
+			inode->i_flags &= ~S_SYNC;
+		if (flags & EXT3_APPEND_FL)
+			inode->i_flags |= S_APPEND;
+		else
+			inode->i_flags &= ~S_APPEND;
+		if (flags & EXT3_IMMUTABLE_FL)
+			inode->i_flags |= S_IMMUTABLE;
+		else
+			inode->i_flags &= ~S_IMMUTABLE;
+		if (flags & EXT3_NOATIME_FL)
+			inode->i_flags |= S_NOATIME;
+		else
+			inode->i_flags &= ~S_NOATIME;
 		inode->i_ctime = CURRENT_TIME;
 
 		err = ext3_mark_iloc_dirty(handle, inode, &iloc);

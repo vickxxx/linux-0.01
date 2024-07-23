@@ -13,20 +13,19 @@ O_TARGET	:= mm.o
 
 # Object file lists.
 
-obj-y		:= init.o extable.o fault-common.o
+obj-y		:= init.o
 obj-m		:=
 obj-n		:=
 obj-		:=
 export-objs	:= proc-syms.o discontig.o
 
-ifeq ($(CONFIG_CPU_32),y)
-obj-y		+= consistent.o fault-armv.o ioremap.o mm-armv.o
-obj-$(CONFIG_MODULES) += proc-syms.o
-endif
+cpu32-y		:= consistent.o fault-armv.o ioremap.o mm-armv.o
+cpu32-$(CONFIG_MODULES) += proc-syms.o
 
+obj-y		+= extable.o fault-common.o
 obj-$(CONFIG_CPU_26) += fault-armo.o mm-armo.o small_page.o
+obj-$(CONFIG_CPU_32) += $(cpu32-y)
 
-obj-$(CONFIG_ALIGNMENT_TRAP) += alignment.o
 obj-$(CONFIG_DISCONTIGMEM) += discontig.o
 
 # Select the processor-specific files
@@ -35,11 +34,8 @@ p-$(CONFIG_CPU_ARM610)	+= proc-arm6,7.o
 p-$(CONFIG_CPU_ARM710)	+= proc-arm6,7.o
 p-$(CONFIG_CPU_ARM720T)	+= proc-arm720.o
 p-$(CONFIG_CPU_ARM920T)	+= proc-arm920.o
-p-$(CONFIG_CPU_ARM922T)	+= proc-arm922.o
-p-$(CONFIG_CPU_ARM925T)	+= proc-arm925.o
 p-$(CONFIG_CPU_ARM926T)	+= proc-arm926.o
 p-$(CONFIG_CPU_ARM1020)	+= proc-arm1020.o
-p-$(CONFIG_CPU_ARM1026)	+= proc-arm1026.o
 p-$(CONFIG_CPU_SA110)	+= proc-sa110.o
 p-$(CONFIG_CPU_SA1100)	+= proc-sa110.o
 

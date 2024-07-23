@@ -129,8 +129,6 @@ out:
 out_nolock:
 	if (read)
 		ret = read;
-
-	UPDATE_ATIME(inode);
 	return ret;
 }
 
@@ -212,7 +210,7 @@ pipe_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 		do {
 			/*
 			 * Synchronous wake-up: it knows that this process
-			 * is going to give up this CPU, so it doesn't have
+			 * is going to give up this CPU, so it doesnt have
 			 * to do idle reschedules.
 			 */
 			wake_up_interruptible_sync(PIPE_WAIT(*inode));
@@ -230,7 +228,8 @@ pipe_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 	/* Signal readers asynchronously that there is more data.  */
 	wake_up_interruptible(PIPE_WAIT(*inode));
 
-	update_mctime(inode);
+	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
+	mark_inode_dirty(inode);
 
 out:
 	up(PIPE_SEM(*inode));
@@ -245,6 +244,12 @@ sigpipe:
 	up(PIPE_SEM(*inode));
 	send_sig(SIGPIPE, current, 0);
 	return -EPIPE;
+}
+
+static loff_t
+pipe_lseek(struct file *file, loff_t offset, int orig)
+{
+	return -ESPIPE;
 }
 
 static ssize_t
@@ -376,7 +381,7 @@ pipe_rdwr_open(struct inode *inode, struct file *filp)
  * are also used in linux/fs/fifo.c to do operations on FIFOs.
  */
 struct file_operations read_fifo_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		pipe_read,
 	write:		bad_pipe_w,
 	poll:		fifo_poll,
@@ -386,7 +391,7 @@ struct file_operations read_fifo_fops = {
 };
 
 struct file_operations write_fifo_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		bad_pipe_r,
 	write:		pipe_write,
 	poll:		fifo_poll,
@@ -396,7 +401,7 @@ struct file_operations write_fifo_fops = {
 };
 
 struct file_operations rdwr_fifo_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		pipe_read,
 	write:		pipe_write,
 	poll:		fifo_poll,
@@ -406,7 +411,7 @@ struct file_operations rdwr_fifo_fops = {
 };
 
 struct file_operations read_pipe_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		pipe_read,
 	write:		bad_pipe_w,
 	poll:		pipe_poll,
@@ -416,7 +421,7 @@ struct file_operations read_pipe_fops = {
 };
 
 struct file_operations write_pipe_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		bad_pipe_r,
 	write:		pipe_write,
 	poll:		pipe_poll,
@@ -426,7 +431,7 @@ struct file_operations write_pipe_fops = {
 };
 
 struct file_operations rdwr_pipe_fops = {
-	llseek:		no_llseek,
+	llseek:		pipe_lseek,
 	read:		pipe_read,
 	write:		pipe_write,
 	poll:		pipe_poll,

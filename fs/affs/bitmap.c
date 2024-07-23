@@ -268,7 +268,8 @@ err_full:
 	return 0;
 }
 
-int affs_init_bitmap(struct super_block *sb, int *flags)
+int
+affs_init_bitmap(struct super_block *sb)
 {
 	struct affs_bm_info *bm;
 	struct buffer_head *bmap_bh = NULL, *bh = NULL;
@@ -276,13 +277,13 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 	u32 size, blk, end, offset, mask;
 	int i, res = 0;
 
-	if (*flags & MS_RDONLY)
+	if (sb->s_flags & MS_RDONLY)
 		return 0;
 
 	if (!AFFS_ROOT_TAIL(sb, AFFS_SB->s_root_bh)->bm_flag) {
 		printk(KERN_NOTICE "AFFS: Bitmap invalid - mounting %s read only\n",
 			kdevname(sb->s_dev));
-		*flags |= MS_RDONLY;
+		sb->s_flags |= MS_RDONLY;
 		return 0;
 	}
 
@@ -291,11 +292,11 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 	AFFS_SB->s_bmap_bits = sb->s_blocksize * 8 - 32;
 	AFFS_SB->s_bmap_count = (AFFS_SB->s_partition_size - AFFS_SB->s_reserved +
 				 AFFS_SB->s_bmap_bits - 1) / AFFS_SB->s_bmap_bits;
-	size = AFFS_SB->s_bmap_count * sizeof(*bm);
+	size = AFFS_SB->s_bmap_count * sizeof(struct affs_bm_info);
 	bm = AFFS_SB->s_bitmap = kmalloc(size, GFP_KERNEL);
 	if (!AFFS_SB->s_bitmap) {
 		printk(KERN_ERR "AFFS: Bitmap allocation failed\n");
-		return -ENOMEM;
+		return 1;
 	}
 	memset(AFFS_SB->s_bitmap, 0, size);
 
@@ -310,13 +311,13 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 		bh = affs_bread(sb, bm->bm_key);
 		if (!bh) {
 			printk(KERN_ERR "AFFS: Cannot read bitmap\n");
-			res = -EIO;
+			res = 1;
 			goto out;
 		}
 		if (affs_checksum_block(sb, bh)) {
 			printk(KERN_WARNING "AFFS: Bitmap %u invalid - mounting %s read only.\n",
 			       bm->bm_key, kdevname(sb->s_dev));
-			*flags |= MS_RDONLY;
+			sb->s_flags |= MS_RDONLY;
 			goto out;
 		}
 		pr_debug("AFFS: read bitmap block %d: %d\n", blk, bm->bm_key);
@@ -332,7 +333,7 @@ int affs_init_bitmap(struct super_block *sb, int *flags)
 		bmap_bh = affs_bread(sb, be32_to_cpu(bmap_blk[blk]));
 		if (!bmap_bh) {
 			printk(KERN_ERR "AFFS: Cannot read bitmap extension\n");
-			res = -EIO;
+			res = 1;
 			goto out;
 		}
 		bmap_blk = (u32 *)bmap_bh->b_data;
@@ -376,16 +377,4 @@ out:
 	affs_brelse(bh);
 	affs_brelse(bmap_bh);
 	return res;
-}
-
-void affs_free_bitmap(struct super_block *sb)
-{
-	if (!AFFS_SB->s_bitmap)
-		return;
-
-	affs_brelse(AFFS_SB->s_bmap_bh);
-	AFFS_SB->s_bmap_bh = NULL;
-	AFFS_SB->s_last_bmap = ~0;
-	kfree(AFFS_SB->s_bitmap);
-	AFFS_SB->s_bitmap = NULL;
 }

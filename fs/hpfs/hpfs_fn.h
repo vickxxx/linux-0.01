@@ -27,6 +27,9 @@
 
 #include "hpfs.h"
 
+#define memcpy_tofs memcpy
+#define memcpy_fromfs memcpy
+
 #define EIOERROR  EIO
 #define EFSERROR  EPERM
 #define EMEMERROR ENOMEM
@@ -58,13 +61,13 @@ typedef void nonconst; /* What this is for ? */
  * local time (HPFS) to GMT (Unix)
  */
 
-extern inline time_t local_to_gmt(struct super_block *s, time32_t t)
+extern inline time_t local_to_gmt(struct super_block *s, time_t t)
 {
 	extern struct timezone sys_tz;
 	return t + sys_tz.tz_minuteswest * 60 + s->s_hpfs_timeshift;
 }
 
-extern inline time32_t gmt_to_local(struct super_block *s, time_t t)
+extern inline time_t gmt_to_local(struct super_block *s, time_t t)
 {
 	extern struct timezone sys_tz;
 	return t - sys_tz.tz_minuteswest * 60 - s->s_hpfs_timeshift;
@@ -118,12 +121,12 @@ extern inline struct hpfs_dirent *de_next_de (struct hpfs_dirent *de)
 
 extern inline struct extended_attribute *fnode_ea(struct fnode *fnode)
 {
-	return (struct extended_attribute *)((char *)fnode + fnode->ea_offs + fnode->acl_size_s);
+	return (struct extended_attribute *)((char *)fnode + fnode->ea_offs);
 }
 
 extern inline struct extended_attribute *fnode_end_ea(struct fnode *fnode)
 {
-	return (struct extended_attribute *)((char *)fnode + fnode->ea_offs + fnode->acl_size_s + fnode->ea_size_s);
+	return (struct extended_attribute *)((char *)fnode + fnode->ea_offs + fnode->ea_size_s);
 }
 
 extern inline struct extended_attribute *next_ea(struct extended_attribute *ea)
@@ -153,11 +156,9 @@ extern inline unsigned de_size(int namelen, secno down_ptr)
 
 extern inline void copy_de(struct hpfs_dirent *dst, struct hpfs_dirent *src)
 {
-	int a;
-	int n;
+	int a = dst->down;
+	int n = dst->not_8x3;
 	if (!dst || !src) return;
-	a = dst->down;
-	n = dst->not_8x3;
 	memcpy((char *)dst + 2, (char *)src + 2, 28);
 	dst->down = a;
 	dst->not_8x3 = n;

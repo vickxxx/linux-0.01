@@ -8,13 +8,6 @@
  * Authors:   Bjorn Wesen
  *
  * $Log: ptrace.c,v $
- * Revision 1.9  2003/10/01 11:34:23  aurer
- * * Allow PTRACE_PEEKUSR and PTRACE_POKEUSR to access USP.
- * * Removed nonsensical comment about ptrace behavior.
- *
- * Revision 1.8  2001/11/12 18:26:21  pkj
- * Fixed compiler warnings.
- *
  * Revision 1.7  2001/09/26 11:53:49  bjornw
  * PTRACE_DETACH works more simple in 2.4.10
  *
@@ -81,6 +74,8 @@ static inline long get_reg(struct task_struct *task, unsigned int regno)
 static inline int put_reg(struct task_struct *task, unsigned int regno,
 			  unsigned long data)
 {
+	unsigned long *addr;
+
 	if (regno == PT_USP)
 		task->thread.usp = data;
 	else if (regno < PT_MAX)
@@ -99,6 +94,14 @@ void ptrace_disable(struct task_struct *child)
 {
        /* Todo - pending singlesteps? */
 }
+
+/* Note that this implementation of ptrace behaves differently from vanilla
+ * ptrace.  Contrary to what the man page says, in the PTRACE_PEEKTEXT,
+ * PTRACE_PEEKDATA, and PTRACE_PEEKUSER requests the data variable is not
+ * ignored.  Instead, the data variable is expected to point at a location
+ * (in user space) where the result of the ptrace call is written (instead of
+ * being returned).
+ */
 
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
@@ -159,13 +162,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		/* read the word at location addr in the USER area. */
 		case PTRACE_PEEKUSR: {
 			unsigned long tmp;
-
+			
 			ret = -EIO;
-			if ((addr & 3) || addr < 0 || addr > PT_MAX << 2)
+			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
 				break;
-
-			tmp = get_reg(child, addr >> 2);
-			ret = put_user(tmp, (unsigned long *)data);
+			
+			tmp = 0;  /* Default return condition */
+			ret = -EIO;
+			if (addr < sizeof(struct pt_regs)) {
+				tmp = get_reg(child, addr >> 2);
+				ret = put_user(tmp, (unsigned long *)data);
+			}
 			break;
 		}
 
@@ -180,25 +187,29 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
 			ret = -EIO;
-			if ((addr & 3) || addr < 0 || addr > PT_MAX << 2)
+			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
 				break;
 
-			addr >>= 2;
+			if (addr < sizeof(struct pt_regs)) {
+				addr >>= 2;
 
-			if (addr == PT_DCCR) {
+				if (addr == PT_DCCR) {
 				/* don't allow the tracing process to change stuff like
 				 * interrupt enable, kernel/user bit, dma enables etc.
 				 */
-				data &= DCCR_MASK;
-				data |= get_reg(child, PT_DCCR) & ~DCCR_MASK;
+					data &= DCCR_MASK;
+					data |= get_reg(child, PT_DCCR) & ~DCCR_MASK;
+				}
+				if (put_reg(child, addr, data))
+					break;
+				ret = 0;
 			}
-			if (put_reg(child, addr, data))
-				break;
-			ret = 0;
 			break;
 
 		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
-		case PTRACE_CONT: /* restart after signal. */
+		case PTRACE_CONT: { /* restart after signal. */
+			long tmp;
+
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
 				break;
@@ -211,13 +222,16 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			wake_up_process(child);
 			ret = 0;
 			break;
+		}
 
 /*
  * make the child exit.  Best I can do is send it a sigkill. 
  * perhaps it should be put in the status that it wants to 
  * exit.
  */
-		case PTRACE_KILL:
+		case PTRACE_KILL: {
+			long tmp;
+
 			ret = 0;
 			if (child->state == TASK_ZOMBIE) /* already dead */
 				break;
@@ -225,8 +239,11 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			/* TODO: make sure any pending breakpoint is killed */
 			wake_up_process(child);
 			break;
+		}
 
-		case PTRACE_SINGLESTEP: /* set the trap flag. */
+		case PTRACE_SINGLESTEP: {  /* set the trap flag. */
+			long tmp;
+
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
 				break;
@@ -239,6 +256,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			wake_up_process(child);
 			ret = 0;
 			break;
+		}
 
 		case PTRACE_DETACH:
 			ret = ptrace_detach(child, data);

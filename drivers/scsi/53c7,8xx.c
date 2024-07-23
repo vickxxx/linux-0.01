@@ -1867,7 +1867,7 @@ NCR53c8xx_run_tests (struct Scsi_Host *host) {
 	 */
 
 	timeout = jiffies + 5 * HZ / 10;
-	while ((hostdata->test_completed == -1) && time_before(jiffies, timeout)) {
+	while ((hostdata->test_completed == -1) && jiffies < timeout) {
 		barrier();
 		cpu_relax();
 	}
@@ -1953,7 +1953,7 @@ NCR53c8xx_run_tests (struct Scsi_Host *host) {
 	    restore_flags(flags);
 
 	    timeout = jiffies + 5 * HZ;	/* arbitrary */
-	    while ((hostdata->test_completed == -1) && time_before(jiffies, timeout)) {
+	    while ((hostdata->test_completed == -1) && jiffies < timeout) {
 	    	barrier();
 		cpu_relax();
 	    }
@@ -3197,7 +3197,7 @@ debugger_fn_bs (struct Scsi_Host *host, struct debugger_token *token,
 
     bp->address = (u32 *) args[0];
     memcpy ((void *) bp->old_instruction, (void *) bp->address, 8);
-    bp->old_size = ((bp->old_instruction[0] >> 24) & DCMD_TYPE_MASK) ==
+    bp->old_size = (((bp->old_instruction[0] >> 24) & DCMD_TYPE_MASK) ==
 	DCMD_TYPE_MMI ? 3 : 2;
     bp->next = hostdata->breakpoints;
     hostdata->breakpoints = bp->next;
@@ -3926,7 +3926,7 @@ NCR53c7xx_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *)) {
 	restore_flags (flags);
 	cmd->result = le32_to_cpu(0xffff);	/* The NCR will overwrite message
 				       and status with valid data */
-	cmd->host_scribble = (unsigned char *) create_cmd (cmd);
+	cmd->host_scribble = (unsigned char *) tmp = create_cmd (cmd);
     }
     cli();
     /*
@@ -6397,7 +6397,7 @@ NCR53c7x0_release(struct Scsi_Host *host) {
 	(struct NCR53c7x0_hostdata *) host->hostdata;
     struct NCR53c7x0_cmd *cmd, *tmp;
     shutdown (host);
-    if (host->irq != SCSI_IRQ_NONE)
+    if (host->irq != IRQ_NONE)
 	{
 	    int irq_count;
 	    struct Scsi_Host *tmp;

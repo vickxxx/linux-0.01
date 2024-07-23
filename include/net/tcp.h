@@ -27,10 +27,8 @@
 #include <linux/config.h>
 #include <linux/tcp.h>
 #include <linux/slab.h>
-#include <linux/cache.h>
 #include <net/checksum.h>
 #include <net/sock.h>
-#include <net/snmp.h>
 
 /* This is for all connections with a full identity, no wildcards.
  * New scheme, half the table is for TIME_WAIT, the other half is
@@ -77,7 +75,7 @@ struct tcp_ehash_bucket {
  */
 struct tcp_bind_bucket {
 	unsigned short		port;
-	signed short		fastreuse;
+	unsigned short		fastreuse;
 	struct tcp_bind_bucket	*next;
 	struct sock		*owners;
 	struct tcp_bind_bucket	**pprev;
@@ -119,7 +117,8 @@ extern struct tcp_hashinfo {
 	 * Now align to a new cache line as all the following members
 	 * are often dirty.
 	 */
-	rwlock_t __tcp_lhash_lock ____cacheline_aligned;
+	rwlock_t __tcp_lhash_lock
+		__attribute__((__aligned__(SMP_CACHE_BYTES)));
 	atomic_t __tcp_lhash_users;
 	wait_queue_head_t __tcp_lhash_wait;
 	spinlock_t __tcp_portalloc_lock;
@@ -395,24 +394,6 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 # define TCP_TW_RECYCLE_TICK (12+2-TCP_TW_RECYCLE_SLOTS_LOG)
 #endif
 
-#define BICTCP_BETA_SCALE    1024	/* Scale factor beta calculation
-					 * max_cwnd = snd_cwnd * beta
-					 */
-#define BICTCP_MAX_INCREMENT 32		/*
-					 * Limit on the amount of
-					 * increment allowed during
-					 * binary search.
-					 */
-#define BICTCP_FUNC_OF_MIN_INCR 11	/*
-					 * log(B/Smin)/log(B/(B-1))+1,
-					 * Smin:min increment
-					 * B:log factor
-					 */
-#define BICTCP_B		4	 /*
-					  * In binary search,
-					  * go to point (max+min)/N
-					  */
-
 /*
  *	TCP option
  */
@@ -466,6 +447,7 @@ extern int sysctl_tcp_syncookies;
 extern int sysctl_tcp_retrans_collapse;
 extern int sysctl_tcp_stdurg;
 extern int sysctl_tcp_rfc1337;
+extern int sysctl_tcp_tw_recycle;
 extern int sysctl_tcp_abort_on_overflow;
 extern int sysctl_tcp_max_orphans;
 extern int sysctl_tcp_max_tw_buckets;
@@ -478,21 +460,6 @@ extern int sysctl_tcp_wmem[3];
 extern int sysctl_tcp_rmem[3];
 extern int sysctl_tcp_app_win;
 extern int sysctl_tcp_adv_win_scale;
-extern int sysctl_tcp_tw_reuse;
-extern int sysctl_tcp_frto;
-extern int sysctl_tcp_low_latency;
-extern int sysctl_tcp_westwood;
-extern int sysctl_tcp_vegas_cong_avoid;
-extern int sysctl_tcp_vegas_alpha;
-extern int sysctl_tcp_vegas_beta;
-extern int sysctl_tcp_vegas_gamma;
-extern int sysctl_tcp_nometrics_save;
-extern int sysctl_tcp_bic;
-extern int sysctl_tcp_bic_fast_convergence;
-extern int sysctl_tcp_bic_low_window;
-extern int sysctl_tcp_bic_beta;
-extern int sysctl_tcp_default_win_scale;
-extern int sysctl_tcp_moderate_rcvbuf;
 
 extern atomic_t tcp_memory_allocated;
 extern atomic_t tcp_sockets_allocated;
@@ -531,7 +498,7 @@ struct open_request {
 	__u16			rmt_port;
 	__u16			mss;
 	__u8			retrans;
-	__u8			__pad;
+	__u8			index;
 	__u16	snd_wscale : 4, 
 		rcv_wscale : 4, 
 		tstamp_ok : 1,
@@ -585,8 +552,7 @@ static inline void tcp_openreq_free(struct open_request *req)
  */
 
 struct tcp_func {
-	int			(*queue_xmit)		(struct sk_buff *skb,
-							 int ipfragok);
+	int			(*queue_xmit)		(struct sk_buff *skb);
 
 	void			(*send_check)		(struct sock *sk,
 							 struct tcphdr *th,
@@ -602,7 +568,9 @@ struct tcp_func {
 							 struct sk_buff *skb,
 							 struct open_request *req,
 							 struct dst_entry *dst);
-    
+	
+	int			(*hash_connecting)	(struct sock *sk);
+
 	int			(*remember_stamp)	(struct sock *sk);
 
 	__u16			net_header_len;
@@ -631,19 +599,19 @@ struct tcp_func {
  * and worry about wraparound (automatic with unsigned arithmetic).
  */
 
-static inline int before(__u32 seq1, __u32 seq2)
+extern __inline int before(__u32 seq1, __u32 seq2)
 {
         return (__s32)(seq1-seq2) < 0;
 }
 
-static inline int after(__u32 seq1, __u32 seq2)
+extern __inline int after(__u32 seq1, __u32 seq2)
 {
 	return (__s32)(seq2-seq1) < 0;
 }
 
 
 /* is s2<=s1<=s3 ? */
-static inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
+extern __inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
 {
 	return seq3 - seq2 >= seq1 - seq2;
 }
@@ -655,8 +623,6 @@ extern struct tcp_mib tcp_statistics[NR_CPUS*2];
 #define TCP_INC_STATS(field)		SNMP_INC_STATS(tcp_statistics, field)
 #define TCP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(tcp_statistics, field)
 #define TCP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(tcp_statistics, field)
-#define TCP_ADD_STATS_BH(field, val)	SNMP_ADD_STATS_BH(tcp_statistics, field, val)
-#define TCP_ADD_STATS_USER(field, val)	SNMP_ADD_STATS_USER(tcp_statistics, field, val)
 
 extern void			tcp_put_port(struct sock *sk);
 extern void			__tcp_put_port(struct sock *sk);
@@ -688,8 +654,6 @@ extern int			tcp_rcv_established(struct sock *sk,
 						    struct sk_buff *skb,
 						    struct tcphdr *th, 
 						    unsigned len);
-
-extern void			tcp_rcv_space_adjust(struct sock *sk);
 
 enum tcp_ack_state_t
 {
@@ -748,7 +712,6 @@ extern struct sock *		tcp_check_req(struct sock *sk,struct sk_buff *skb,
 extern int			tcp_child_process(struct sock *parent,
 						  struct sock *child,
 						  struct sk_buff *skb);
-extern void			tcp_enter_frto(struct sock *sk);
 extern void			tcp_enter_loss(struct sock *sk, int how);
 extern void			tcp_clear_retrans(struct tcp_opt *tp);
 extern void			tcp_update_metrics(struct sock *sk);
@@ -809,7 +772,8 @@ extern int			tcp_v4_connect(struct sock *sk,
 					       struct sockaddr *uaddr,
 					       int addr_len);
 
-extern int			tcp_connect(struct sock *sk);
+extern int			tcp_connect(struct sock *sk,
+					    struct sk_buff *skb);
 
 extern struct sk_buff *		tcp_make_synack(struct sock *sk,
 						struct dst_entry *dst,
@@ -857,11 +821,6 @@ extern int tcp_sync_mss(struct sock *sk, u32 pmtu);
 
 extern const char timer_bug_msg[];
 
-/* Read 'sendfile()'-style from a TCP socket */
-typedef int (*sk_read_actor_t)(read_descriptor_t *, struct sk_buff *,
-				unsigned int, size_t);
-extern int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
-			 sk_read_actor_t recv_actor);
 
 static inline void tcp_clear_xmit_timer(struct sock *sk, int what)
 {
@@ -1110,89 +1069,14 @@ static __inline__ unsigned int tcp_packets_in_flight(struct tcp_opt *tp)
 	return tp->packets_out - tp->left_out + tp->retrans_out;
 }
 
-/*
- * Which congestion algorithim is in use on the connection.
- */
-#define tcp_is_vegas(__tp)	((__tp)->adv_cong == TCP_VEGAS)
-#define tcp_is_westwood(__tp)	((__tp)->adv_cong == TCP_WESTWOOD)
-#define tcp_is_bic(__tp)	((__tp)->adv_cong == TCP_BIC)
-
 /* Recalculate snd_ssthresh, we want to set it to:
  *
- * Reno:
  * 	one half the current congestion window, but no
  *	less than two segments
- *
- * BIC:
- *	behave like Reno until low_window is reached,
- *	then increase congestion window slowly
  */
 static inline __u32 tcp_recalc_ssthresh(struct tcp_opt *tp)
 {
-	if (tcp_is_bic(tp)) {
-		if (sysctl_tcp_bic_fast_convergence &&
-		    tp->snd_cwnd < tp->bictcp.last_max_cwnd)
-			tp->bictcp.last_max_cwnd = (tp->snd_cwnd * 
-						    (BICTCP_BETA_SCALE
-						     + sysctl_tcp_bic_beta))
-				/ (2 * BICTCP_BETA_SCALE);
-		else
-			tp->bictcp.last_max_cwnd = tp->snd_cwnd;
-
-		if (tp->snd_cwnd > sysctl_tcp_bic_low_window)
-			return max((tp->snd_cwnd * sysctl_tcp_bic_beta)
-				   / BICTCP_BETA_SCALE, 2U);
-	}
-
 	return max(tp->snd_cwnd >> 1U, 2U);
-}
-
-/* Stop taking Vegas samples for now. */
-#define tcp_vegas_disable(__tp)	((__tp)->vegas.doing_vegas_now = 0)
-    
-static inline void tcp_vegas_enable(struct tcp_opt *tp)
-{
-	/* There are several situations when we must "re-start" Vegas:
-	 *
-	 *  o when a connection is established
-	 *  o after an RTO
-	 *  o after fast recovery
-	 *  o when we send a packet and there is no outstanding
-	 *    unacknowledged data (restarting an idle connection)
-	 *
-	 * In these circumstances we cannot do a Vegas calculation at the
-	 * end of the first RTT, because any calculation we do is using
-	 * stale info -- both the saved cwnd and congestion feedback are
-	 * stale.
-	 *
-	 * Instead we must wait until the completion of an RTT during
-	 * which we actually receive ACKs.
-	 */
-    
-	/* Begin taking Vegas samples next time we send something. */
-	tp->vegas.doing_vegas_now = 1;
-     
-	/* Set the beginning of the next send window. */
-	tp->vegas.beg_snd_nxt = tp->snd_nxt;
-
-	tp->vegas.cntRTT = 0;
-	tp->vegas.minRTT = 0x7fffffff;
-}
-
-/* Should we be taking Vegas samples right now? */
-#define tcp_vegas_enabled(__tp)	((__tp)->vegas.doing_vegas_now)
-
-extern void tcp_ca_init(struct tcp_opt *tp);
-
-static inline void tcp_set_ca_state(struct tcp_opt *tp, u8 ca_state)
-{
-	if (tcp_is_vegas(tp)) {
-		if (ca_state == TCP_CA_Open) 
-			tcp_vegas_enable(tp);
-		else
-			tcp_vegas_disable(tp);
-	}
-	tp->ca_state = ca_state;
 }
 
 /* If cwnd > ssthresh, we may raise ssthresh to be half-way to cwnd.
@@ -1254,7 +1138,7 @@ static inline void tcp_enter_cwr(struct tcp_opt *tp)
 	tp->prior_ssthresh = 0;
 	if (tp->ca_state < TCP_CA_CWR) {
 		__tcp_enter_cwr(tp);
-		tcp_set_ca_state(tp, TCP_CA_CWR);
+		tp->ca_state = TCP_CA_CWR;
 	}
 }
 
@@ -1439,14 +1323,13 @@ static __inline__ int tcp_prequeue(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
-	if (!sysctl_tcp_low_latency && tp->ucopy.task) {
+	if (tp->ucopy.task) {
 		__skb_queue_tail(&tp->ucopy.prequeue, skb);
 		tp->ucopy.memory += skb->truesize;
 		if (tp->ucopy.memory > sk->rcvbuf) {
 			struct sk_buff *skb1;
 
-			if (sk->lock.users)
-				out_of_line_bug();
+			if (sk->lock.users) BUG();
 
 			while ((skb1 = __skb_dequeue(&tp->ucopy.prequeue)) != NULL) {
 				sk->backlog_rcv(sk, skb1);
@@ -1486,9 +1369,6 @@ static __inline__ void tcp_set_state(struct sock *sk, int state)
 		break;
 
 	case TCP_CLOSE:
-		if (oldstate == TCP_CLOSE_WAIT || oldstate == TCP_ESTABLISHED)
-			TCP_INC_STATS(TcpEstabResets);
-
 		sk->prot->unhash(sk);
 		if (sk->prev && !(sk->userlocks&SOCK_BINDPORT_LOCK))
 			tcp_put_port(sk);
@@ -1637,9 +1517,6 @@ static inline void tcp_select_initial_window(int __space, __u32 mss,
 		if (*rcv_wscale && sysctl_tcp_app_win && space>=mss &&
 		    space - max((space>>sysctl_tcp_app_win), mss>>*rcv_wscale) < 65536/2)
 			(*rcv_wscale)--;
-
-		*rcv_wscale = max((__u8)sysctl_tcp_default_win_scale,
-				  *rcv_wscale);
 	}
 
 	/* Set initial window to value enough for senders,
@@ -1715,7 +1592,6 @@ struct tcp_listen_opt
 	int			qlen;
 	int			qlen_young;
 	int			clock_hand;
-	u32			hash_rnd;
 	struct open_request	*syn_table[TCP_SYNQ_HSIZE];
 };
 
@@ -1949,145 +1825,6 @@ static inline int tcp_paws_check(struct tcp_opt *tp, int rst)
 	return 1;
 }
 
-#define TCP_CHECK_TIMER(sk) do { } while (0)
-
-static inline int tcp_use_frto(const struct sock *sk)
-{
-	const struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-	
-	/* F-RTO must be activated in sysctl and there must be some
-	 * unsent new data, and the advertised window should allow
-	 * sending it.
-	 */
-	return (sysctl_tcp_frto && tp->send_head &&
-		!after(TCP_SKB_CB(tp->send_head)->end_seq,
-		       tp->snd_una + tp->snd_wnd));
-}
-
-static inline void tcp_mib_init(void)
-{
-	/* See RFC 2012 */
-	TCP_ADD_STATS_USER(TcpRtoAlgorithm, 1);
-	TCP_ADD_STATS_USER(TcpRtoMin, TCP_RTO_MIN*1000/HZ);
-	TCP_ADD_STATS_USER(TcpRtoMax, TCP_RTO_MAX*1000/HZ);
-	TCP_ADD_STATS_USER(TcpMaxConn, -1);
-}
-
-
-/* TCP Westwood functions and constants */
-
-#define TCP_WESTWOOD_INIT_RTT               20*HZ           /* maybe too conservative?! */
-#define TCP_WESTWOOD_RTT_MIN                HZ/20           /* 50ms */
-
-static inline void tcp_westwood_update_rtt(struct tcp_opt *tp, __u32 rtt_seq)
-{
-	if (tcp_is_westwood(tp))
-		tp->westwood.rtt = rtt_seq;
-}
-
-void __tcp_westwood_fast_bw(struct sock *, struct sk_buff *);
-void __tcp_westwood_slow_bw(struct sock *, struct sk_buff *);
-
-/*
- * This function initializes fields used in TCP Westwood+. We can't
- * get no information about RTTmin at this time so we simply set it to
- * TCP_WESTWOOD_INIT_RTT. This value was chosen to be too conservative
- * since in this way we're sure it will be updated in a consistent
- * way as soon as possible. It will reasonably happen within the first
- * RTT period of the connection lifetime.
- */
-
-static inline void __tcp_init_westwood(struct sock *sk)
-{
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
-
-	tp->westwood.bw_ns_est = 0;
-	tp->westwood.bw_est = 0;
-	tp->westwood.accounted = 0;
-	tp->westwood.cumul_ack = 0;
-	tp->westwood.rtt_win_sx = tcp_time_stamp;
-	tp->westwood.rtt = TCP_WESTWOOD_INIT_RTT;
-	tp->westwood.rtt_min = TCP_WESTWOOD_INIT_RTT;
-	tp->westwood.snd_una = tp->snd_una;
-}
-
-static inline void tcp_init_westwood(struct sock *sk)
-{
-	__tcp_init_westwood(sk);
-}
-
-static inline void tcp_westwood_fast_bw(struct sock *sk, struct sk_buff *skb)
-{
-	if (tcp_is_westwood(&(sk->tp_pinfo.af_tcp)))
-		__tcp_westwood_fast_bw(sk, skb);
-}
-
-static inline void tcp_westwood_slow_bw(struct sock *sk, struct sk_buff *skb)
-{
-	if (tcp_is_westwood(&(sk->tp_pinfo.af_tcp)))
-		__tcp_westwood_slow_bw(sk, skb);
-}
-
-static inline __u32 __tcp_westwood_bw_rttmin(struct tcp_opt *tp)
-{
-	return (__u32) ((tp->westwood.bw_est) * (tp->westwood.rtt_min) /
-			(__u32) (tp->mss_cache));
-}
-
-static inline __u32 tcp_westwood_bw_rttmin(struct tcp_opt *tp)
-{
-	__u32 ret = 0;
-
-	if (tcp_is_westwood(tp))
-		ret = (__u32) (max(__tcp_westwood_bw_rttmin(tp), 2U));
-
-	return ret;
-}
-
-static inline int tcp_westwood_ssthresh(struct tcp_opt *tp)
-{
-	int ret = 0;
-	__u32 ssthresh;
-
-	if (tcp_is_westwood(tp)) {
-		if (!(ssthresh = tcp_westwood_bw_rttmin(tp)))
-			return ret;
-
-		tp->snd_ssthresh = ssthresh;
-		ret = 1;
-	}
-
-	return ret;
-}
-
-static inline int tcp_westwood_cwnd(struct tcp_opt *tp)
-{
-	int ret = 0;
-	__u32 cwnd;
-
-	if (tcp_is_westwood(tp)) {
-		if (!(cwnd = tcp_westwood_bw_rttmin(tp)))
-			return ret;
-
-		tp->snd_cwnd = cwnd;
-		ret = 1;
-	}
-
-	return ret;
-}
-
-static inline int tcp_westwood_complete_cwr(struct tcp_opt *tp) 
-{
-	int ret = 0;
-
-	if (tcp_is_westwood(tp)) {
-		if (tcp_westwood_cwnd(tp)) {
-			tp->snd_ssthresh = tp->snd_cwnd;
-			ret = 1;
-		}
-	}
-
-	return ret;
-}
+#define TCP_CHECK_TIMER(sk) do { } while (0);
 
 #endif	/* _TCP_H */

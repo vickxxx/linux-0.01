@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Intel Corp.
  * Copyright (C) 1999, 2001 Hewlett-Packard Co
- * Copyright (C) 1999, 2001, 2003 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
@@ -33,7 +33,8 @@
  * is sufficient (the IDE driver will autodetect the drive geometry).
  */
 char drive_info[4*16];
-extern int pcat_compat;
+
+unsigned char aux_device_present = 0xaa;	/* XXX remove this when legacy I/O is gone */
 
 void __init
 dig_setup (char **cmdline_p)
@@ -56,7 +57,7 @@ dig_setup (char **cmdline_p)
 	if (!ia64_boot_param->console_info.num_rows
 	    || !ia64_boot_param->console_info.num_cols)
 	{
-		printk(KERN_WARNING "dig_setup: warning: invalid screen-info, guessing 80x25\n");
+		printk("dig_setup: warning: invalid screen-info, guessing 80x25\n");
 		orig_x = 0;
 		orig_y = 0;
 		num_cols = 80;
@@ -80,7 +81,13 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
 }
 
-void __init
+void
 dig_irq_init (void)
 {
+	/*
+	 * Disable the compatibility mode interrupts (8259 style), needs IN/OUT support
+	 * enabled.
+	 */
+	outb(0xff, 0xA1);
+	outb(0xff, 0x21);
 }

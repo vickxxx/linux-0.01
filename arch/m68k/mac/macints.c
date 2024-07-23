@@ -30,7 +30,7 @@
  *		  - slot 0: SCSI interrupt
  *		  - slot 1: Sound interrupt
  *
- * Levels 3-6 vary by machine type. For VIA or RBV Macintoshes:
+ * Levels 3-6 vary by machine type. For VIA or RBV Macintohes:
  *
  *	3	- unused (?)
  *
@@ -249,7 +249,7 @@ void mac_init_IRQ(void)
 #endif /* SHUTUP_SONIC */
 
 	/* 
-	 * Now register the handlers for the master IRQ handlers
+	 * Now register the handlers for the the master IRQ handlers
 	 * at levels 1-7. Most of the work is done elsewhere.
 	 */
 
@@ -494,7 +494,7 @@ int mac_irq_pending( unsigned int irq )
  * Add an interrupt service routine to an interrupt source.
  * Returns 0 on success.
  *
- * FIXME: You can register interrupts on nonexistent source (ie PSC4 on a
+ * FIXME: You can register interrupts on nonexistant source (ie PSC4 on a
  *        non-PSC machine). We should return -EINVAL in those cases.
  */
  

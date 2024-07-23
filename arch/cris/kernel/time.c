@@ -1,8 +1,9 @@
-/*
+/* $Id: time.c,v 1.9 2001/10/25 10:26:37 johana Exp $
+ *
  *  linux/arch/cris/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
- *  Copyright (C) 1999, 2000, 2001, 2002, 2003 Axis Communications AB
+ *  Copyright (C) 1999, 2000, 2001 Axis Communications AB
  *
  * 1994-07-02    Alan Modra
  *	fixed set_rtc_mmss, fixed time.year for >= 2000, new mktime
@@ -17,17 +18,6 @@
  * Linux/CRIS specific code:
  *
  * Authors:    Bjorn Wesen
- *             Johan Adolfsson
- *
- * 2002-03-04    Johan Adolfsson
- *      Use prescale timer at 25000 Hz instead of the baudrate timer at
- *      19200 to get rid of the 64ppm to fast timer (and we get better
- *      resolution within a jiffie as well.
- * 2002-03-05    Johan Adolfsson
- *      Use prescaler in do_slow_gettimeoffset() to get 1 us resolution (40ns)
- * 2002-09-06    Johan Adolfsson
- *      Handle lost ticks by checking wall_jiffies, more efficient code
- *      by using local vars and not the pointer argument.
  *
  */
 
@@ -53,8 +43,6 @@
 
 #include <asm/svinto.h>
 
-#define CRIS_TEST_TIMERS 0
-
 static int have_rtc;  /* used to remember if we have an RTC or not */
 
 /* define this if you need to use print_timestamp */
@@ -63,141 +51,18 @@ static int have_rtc;  /* used to remember if we have an RTC or not */
 
 extern int setup_etrax_irq(int, struct irqaction *);
 
-#define TICK_SIZE tick
-
-extern unsigned long wall_jiffies;
-
-/* The timers count from their initial value down to 1 
- * The R_TIMER0_DATA counts down when R_TIM_PRESC_STATUS reaches halv
- * of the divider value.
- */ 
-unsigned long get_ns_in_jiffie(void)
-{
-	unsigned char timer_count, t1;
-	unsigned short presc_count;
-	unsigned long ns;
-	unsigned long flags;
-
-	save_flags(flags);
-	cli();	
-	timer_count = *R_TIMER0_DATA;
-	presc_count = *R_TIM_PRESC_STATUS;  
-	/* presc_count might be wrapped */
-	t1 = *R_TIMER0_DATA;
-
-	if (timer_count != t1){
-		/* it wrapped, read prescaler again...  */
-		presc_count = *R_TIM_PRESC_STATUS;
-		timer_count = t1;
-	}
-	restore_flags(flags);
-	if (presc_count >= PRESCALE_VALUE/2 ){
-		presc_count =  PRESCALE_VALUE - presc_count + PRESCALE_VALUE/2;
-	} else {
-		presc_count =  PRESCALE_VALUE - presc_count - PRESCALE_VALUE/2;
-	}
-
-	ns = ( (TIMER0_DIV - timer_count) * ((1000000000/HZ)/TIMER0_DIV )) + 
-	     ( (presc_count) * (1000000000/PRESCALE_FREQ));
-	return ns;
-}
-
-
-/* Convert the clkdiv_low and clkdivb_high fiels in timer_data
- * (from *R_TIMER_DATA) to nanoseconds (67 ns resolution)
+/* Lookup table to convert *R_TIMER0 to microseconds (us) 
+ * Timer goes from TIMER0_DIV down to 1 meaning 0-10000us in step of approx 52us
  */
-unsigned long timer_data_to_ns(unsigned long timer_data) 
-{
-/* low (clkdiv_low lsb toggles with 7.3728MHz so it counts
- * with 14.7456 MHz = 67.816 ns (0-17361ns)
- * high (clkdiv_high lsb toggles with 38.4kHz so it counts
- * with 76.8kHz = 13020.833 ns (0-3333333 ns)
- * By checking bit 9,8,7 we can now how to compensate the low value
- * to get a 67 ns resolution all the way.
-Example of R_TIMER_DATA values:
-     bit 98 7   low      9 87     offset
-0289DC00 00 000 0        0 00       0
-0289DC41 00 010 64       0 01       0
-0289DC81 00 100 128      0 10       0
-0289DDC0 01 110 192      1 11       0        13020 = 192        
-0289DD01 01 000 0    256 1 00     +256    
-0289DD41 01 010 64   320 1 01     +256        
+unsigned short cris_timer0_value_us[TIMER0_DIV+1];
 
-0288DE80 10 100 128  384 0 10  0: -128             26040= 384  
-0288DEC1 10 110 192  448 0 11  64 -128            
-0288DE01 10 000 0    512      128 +128    
-0288DF40 11 010 64   576      192 +128             39060 
-0288DF81 11 100 128  640      256 +128   
-0288DFC1 11 110 192  704      320 +128
-                              ..393		 
-*/
-	
-	static const short timer_data_add[8] = {
-		0,   /* 00 0 */
-		0,   /* 00 1 */
-		256, /* 01 0 */
-		0,   /* 01 1 */
-		128, /* 10 0 */
-		-128,/* 10 1 */
-		128, /* 11 0 */
-		128  /* 11 1 */
-	};  
-	unsigned long ns;
-	unsigned long low;
-	unsigned long high;
-  
-	high = (((timer_data & 0x0000FE00)>>8) * 13020833)/1000;
-	ns = high;
-  
-	low = timer_data & 0xFF;
-	low += timer_data_add[(timer_data >>7) & 0x7];
-	ns += (low * 67816)/1000;
-	return ns;
-} /* timer_data_to_ns */
-
-
-
-
-#if CRIS_TEST_TIMERS 
-#define NS_TEST_SIZE 4000
-static unsigned long ns_test[NS_TEST_SIZE];
-void cris_test_timers(void)
-{
-	int i;
-#if 0
-	for (i = 0; i < NS_TEST_SIZE; i++)
-	{
-		ns_test[i] = *R_TIMER0_DATA | (*R_TIM_PRESC_STATUS<<16);
-	}
-	for (i = 1; i < NS_TEST_SIZE; i++)
-	{
-		printk("%4i. %lu %lu %09lu ns \n",
-		       i, ns_test[i]&0x0FFFF, (ns_test[i]>>16), 
-	get_ns_in_jiffie_from_data(ns_test[i]&0x0FFFF, ns_test[i]>>16));
-	}
-#else
-	for (i = 0; i < NS_TEST_SIZE; i++)
-	{
-		ns_test[i] = get_ns_in_jiffie();
-	}
-
-	for (i = 1; i < NS_TEST_SIZE; i++)
-	{
-		printk("%4i. %09lu ns diff %li ns\n",
-		       i, ns_test[i], ns_test[i]- ns_test[i-1]);
-	}
-#endif
-}
-
-#endif
+#define TICK_SIZE tick
 
 static unsigned long do_slow_gettimeoffset(void)
 {
-	unsigned long count, t1;
-	unsigned long usec_count = 0;
-	unsigned short presc_count;
+	unsigned long count;
 
-	static unsigned long count_p = TIMER0_DIV;/* for the first call after boot */
+	static unsigned long count_p = LATCH;    /* for the first call after boot */
 	static unsigned long jiffies_p = 0;
 
 	/*
@@ -213,50 +78,34 @@ static unsigned long do_slow_gettimeoffset(void)
 #ifndef CONFIG_SVINTO_SIM
 	/* Not available in the xsim simulator. */
 	count = *R_TIMER0_DATA;
-	presc_count = *R_TIM_PRESC_STATUS;  
-	/* presc_count might be wrapped */
-	t1 = *R_TIMER0_DATA;
-	if (count != t1){
-		/* it wrapped, read prescaler again...  */
-		presc_count = *R_TIM_PRESC_STATUS;
-		count = t1;
-	}
 #else
 	count = 0;
-	presc_count = 0;
 #endif
 
  	jiffies_t = jiffies;
 
 	/*
 	 * avoiding timer inconsistencies (they are rare, but they happen)...
-	 * there are one problem that must be avoided here:
+	 * there are three kinds of problems that must be avoided here:
 	 *  1. the timer counter underflows
-	 */
+	 *  2. we are after the timer interrupt, but the bottom half handler
+	 *     hasn't executed yet.
+ */
 	if( jiffies_t == jiffies_p ) {
 		if( count > count_p ) {
-			/* Timer wrapped, use new count and prescale 
-			 * increase the time corresponding to one jiffie
-			 */
-			usec_count = 1000000/HZ;
 		}
 	} else
 		jiffies_p = jiffies_t;
-        count_p = count;
-	if (presc_count >= PRESCALE_VALUE/2 ){
-		presc_count =  PRESCALE_VALUE - presc_count + PRESCALE_VALUE/2;
-	} else {
-		presc_count =  PRESCALE_VALUE - presc_count - PRESCALE_VALUE/2;
-	}
-	/* Convert timer value to usec */
-	usec_count += ( (TIMER0_DIV - count) * (1000000/HZ)/TIMER0_DIV ) +
-	              (( (presc_count) * (1000000000/PRESCALE_FREQ))/1000);
 
-	return usec_count;
+        count_p = count;
+
+	count = ((LATCH-1) - count) * TICK_SIZE;
+	count = (count + LATCH/2) / LATCH;
+
+	return count;
 }
 
-
-#define do_gettimeoffset() do_slow_gettimeoffset()
+static unsigned long (*do_gettimeoffset)(void) = do_slow_gettimeoffset;
 
 /*
  * This version of gettimeofday has near microsecond resolution.
@@ -264,33 +113,20 @@ static unsigned long do_slow_gettimeoffset(void)
 void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
-	unsigned long usec, sec;
+
 	save_flags(flags);
 	cli();
-	usec = do_gettimeoffset();
-	{
-		unsigned long lost = jiffies - wall_jiffies;
-		if (lost)
-			usec += lost * (1000000 / HZ);
+	*tv = xtime;
+	tv->tv_usec += do_gettimeoffset();
+	if (tv->tv_usec >= 1000000) {
+		tv->tv_usec -= 1000000;
+		tv->tv_sec++;
 	}
-	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
 	restore_flags(flags);
-
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		sec++;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
 }
 
 void do_settimeofday(struct timeval *tv)
 {
-	unsigned long flags;
-	signed long new_usec, new_sec;
-	save_flags(flags);  
 	cli();
 	/* This is revolting. We need to set the xtime.tv_usec
 	 * correctly. However, the value in this location is
@@ -298,23 +134,20 @@ void do_settimeofday(struct timeval *tv)
 	 * Discover what correction gettimeofday
 	 * would have done, and then undo it!
 	 */
-	new_usec = tv->tv_usec;
-	new_usec -= do_gettimeoffset();
-	new_usec -= (jiffies - wall_jiffies) * (1000000 / HZ);
-	new_sec = tv->tv_sec;
-	while (new_usec < 0) {
-		new_usec += 1000000;
-		new_sec--;
-	}
-	xtime.tv_sec = new_sec;
-	xtime.tv_usec = new_usec;
+	tv->tv_usec -= do_gettimeoffset();
 
+	if (tv->tv_usec < 0) {
+		tv->tv_usec += 1000000;
+		tv->tv_sec--;
+	}
+
+	xtime = *tv;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	restore_flags(flags);
+	sti();
 }
 
 
@@ -327,8 +160,9 @@ static int set_rtc_mmss(unsigned long nowtime)
 {
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
+	unsigned char save_control, save_freq_select;
 
-	printk(KERN_DEBUG "set_rtc_mmss(%lu)\n", nowtime);
+	printk("set_rtc_mmss(%d)\n", nowtime);
 
 	if(!have_rtc)
 		return 0;
@@ -391,9 +225,7 @@ static int set_rtc_mmss(unsigned long nowtime)
 /* right now, starting the watchdog is the same as resetting it */
 #define start_watchdog reset_watchdog
 
-#if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 static int watchdog_key = 0;  /* arbitrary number */
-#endif
 
 /* number of pages to consider "out of memory". it is normal that the memory
  * is used though, so put this really low.
@@ -474,12 +306,12 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	if ((time_status & STA_UNSYNC) == 0 &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
 	    xtime.tv_usec > 500000 - (tick >> 1) &&
-	    xtime.tv_usec < 500000 + (tick >> 1)) {
+	    xtime.tv_usec < 500000 + (tick >> 1))
 		if (set_rtc_mmss(xtime.tv_sec) == 0)
 			last_rtc_update = xtime.tv_sec;
 		else
 			last_rtc_update = xtime.tv_sec - 600;
-	}
+	
 }
 
 #if 0
@@ -490,7 +322,6 @@ void print_timestamp(const char *s)
 {
 	unsigned long flags;
 	unsigned int newjiff;
-
 	save_flags(flags);
 	cli();
 	newjiff = (myjiff << 16) | (unsigned short)(-*R_TIMER01_DATA); 
@@ -506,6 +337,7 @@ unsigned long
 get_cmos_time(void)
 {
 	unsigned int year, mon, day, hour, min, sec;
+	int i;
 
 	sec = CMOS_READ(RTC_SECONDS);
 	min = CMOS_READ(RTC_MINUTES);
@@ -514,8 +346,7 @@ get_cmos_time(void)
 	mon = CMOS_READ(RTC_MONTH);
 	year = CMOS_READ(RTC_YEAR);
 
-	printk(KERN_DEBUG
-	       "rtc: sec 0x%x min 0x%x hour 0x%x day 0x%x mon 0x%x year 0x%x\n", 
+	printk("rtc: sec 0x%x min 0x%x hour 0x%x day 0x%x mon 0x%x year 0x%x\n", 
 	       sec, min, hour, day, mon, year);
 
 	BCD_TO_BIN(sec);
@@ -554,16 +385,11 @@ static struct irqaction irq2  = { timer_interrupt, SA_SHIRQ | SA_INTERRUPT,
 void __init
 time_init(void)
 {	
-	/* Probe for the RTC and read it if it exists 
-	 * Before the RTC can be probed the loops_per_usec variable needs 
-	 * to be initialized to make usleep work. A better value for 
-	 * loops_per_usec is calculated by the kernel later once the 
-	 * clock has started.  
-	 */
-	loops_per_usec = 50;
+	int i;
+	/* probe for the RTC and read it if it exists */
 
 	if(RTC_INIT() < 0) {
-		/* no RTC, start at the Epoch (00:00:00 UTC, January 1, 1970) */
+		/* no RTC, start at 1980 */
 		xtime.tv_sec = 0;
 		xtime.tv_usec = 0;
 		have_rtc = 0;
@@ -602,33 +428,33 @@ time_init(void)
 		IO_STATE( R_TIMER_CTRL, tm0, run) |
 		IO_STATE( R_TIMER_CTRL, clksel0, c6250kHz);
 #else
-  
 	*R_TIMER_CTRL = 
 		IO_FIELD(R_TIMER_CTRL, timerdiv1, 192)      | 
-		IO_FIELD(R_TIMER_CTRL, timerdiv0, TIMER0_DIV)      |
+		IO_FIELD(R_TIMER_CTRL, timerdiv0, 192)      |
 		IO_STATE(R_TIMER_CTRL, i1,        nop)      | 
 		IO_STATE(R_TIMER_CTRL, tm1,       stop_ld)  |
 		IO_STATE(R_TIMER_CTRL, clksel1,   c19k2Hz)  |
 		IO_STATE(R_TIMER_CTRL, i0,        nop)      |
 		IO_STATE(R_TIMER_CTRL, tm0,       stop_ld)  |
-		IO_STATE(R_TIMER_CTRL, clksel0,   flexible);
+		IO_STATE(R_TIMER_CTRL, clksel0,   c19k2Hz);
 	
 	*R_TIMER_CTRL = r_timer_ctrl_shadow =
 		IO_FIELD(R_TIMER_CTRL, timerdiv1, 192)      | 
-		IO_FIELD(R_TIMER_CTRL, timerdiv0, TIMER0_DIV)      |
+		IO_FIELD(R_TIMER_CTRL, timerdiv0, 192)      |
 		IO_STATE(R_TIMER_CTRL, i1,        nop)      |
 		IO_STATE(R_TIMER_CTRL, tm1,       run)      |
 		IO_STATE(R_TIMER_CTRL, clksel1,   c19k2Hz)  |
 		IO_STATE(R_TIMER_CTRL, i0,        nop)      |
 		IO_STATE(R_TIMER_CTRL, tm0,       run)      |
-		IO_STATE(R_TIMER_CTRL, clksel0,   flexible);
-
-	*R_TIMER_PRESCALE = PRESCALE_VALUE;
+		IO_STATE(R_TIMER_CTRL, clksel0,   c19k2Hz);
 #endif
 
-#if CRIS_TEST_TIMERS
-	cris_test_timers();
-#endif
+	for (i=0; i <= TIMER0_DIV; i++) {
+		/* We must be careful not to get overflow... */
+		cris_timer0_value_us[TIMER0_DIV-i] = 
+		  (unsigned short)((unsigned long)
+		  ((i*(1000000/HZ))/TIMER0_DIV)&0x0000FFFFL);
+	}
 	
 	*R_IRQ_MASK0_SET =
 		IO_STATE(R_IRQ_MASK0_SET, timer0, set); /* unmask the timer irq */
@@ -640,7 +466,7 @@ time_init(void)
 	/* enable watchdog if we should use one */
 
 #if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
-	printk(KERN_INFO "Enabling watchdog...\n");
+	printk("Enabling watchdog...\n");
 	start_watchdog();
 
 	/* If we use the hardware watchdog, we want to trap it as an NMI

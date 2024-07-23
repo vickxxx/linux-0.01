@@ -31,7 +31,7 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: readinode.c,v 1.58.2.8 2003/11/02 13:54:20 dwmw2 Exp $
+ * $Id: readinode.c,v 1.56 2001/07/26 20:32:39 dwmw2 Exp $
  *
  */
 
@@ -44,7 +44,7 @@
 #include <linux/mtd/mtd.h>
 #include <linux/jffs2.h>
 #include "nodelist.h"
-#include <linux/crc32.h>
+#include "crc32.h"
 
 
 D1(void jffs2_print_frag_list(struct jffs2_inode_info *f)
@@ -173,12 +173,12 @@ int jffs2_add_full_dnode_to_fraglist(struct jffs2_sb_info *c, struct jffs2_node_
 				jffs2_free_node_frag(newfrag);
 				return -ENOMEM;
 			}
-			D1(printk(KERN_DEBUG "split old frag 0x%04x-0x%04x -->", this->ofs, this->ofs+this->size);
+			printk(KERN_DEBUG "split old frag 0x%04x-0x%04x -->", this->ofs, this->ofs+this->size);
 			if (this->node)
 				printk("phys 0x%08x\n", this->node->raw->flash_offset &~3);
 			else 
 				printk("hole\n");
-			   )
+
 			newfrag2->ofs = fn->ofs + fn->size;
 			newfrag2->size = (this->ofs+this->size) - newfrag2->ofs;
 			newfrag2->next = this->next;
@@ -251,8 +251,6 @@ void jffs2_read_inode (struct inode *inode)
 	struct jffs2_full_dnode *fn = NULL;
 	struct jffs2_sb_info *c;
 	struct jffs2_raw_inode latest_node;
-	__u32 latest_mctime, mctime_ver;
-	__u32 mdata_ver = 0;
 	int ret;
 	ssize_t retlen;
 
@@ -290,7 +288,7 @@ void jffs2_read_inode (struct inode *inode)
 	inode->i_nlink = f->inocache->nlink;
 
 	/* Grab all nodes relevant to this ino */
-	ret = jffs2_get_inode_nodes(c, inode->i_ino, f, &tn_list, &fd_list, &f->highest_version, &latest_mctime, &mctime_ver);
+	ret = jffs2_get_inode_nodes(c, inode->i_ino, f, &tn_list, &fd_list, &f->highest_version);
 
 	if (ret) {
 		printk(KERN_CRIT "jffs2_get_inode_nodes() for ino %lu returned %d\n", inode->i_ino, ret);
@@ -300,6 +298,8 @@ void jffs2_read_inode (struct inode *inode)
 	f->dents = fd_list;
 
 	while (tn_list) {
+		static __u32 mdata_ver = 0;
+
 		tn = tn_list;
 
 		fn = tn->fn;
@@ -335,7 +335,6 @@ void jffs2_read_inode (struct inode *inode)
 			printk(KERN_WARNING "jffs2_read_inode(): But it has children so we fake some modes for it\n");
 		}
 		inode->i_mode = S_IFDIR | S_IRUGO | S_IWUSR | S_IXUGO;
-		latest_node.version = 0;
 		inode->i_atime = inode->i_ctime = inode->i_mtime = CURRENT_TIME;
 		inode->i_nlink = f->inocache->nlink;
 		inode->i_size = 0;
@@ -363,7 +362,7 @@ void jffs2_read_inode (struct inode *inode)
 		inode->i_uid = latest_node.uid;
 		inode->i_gid = latest_node.gid;
 		inode->i_size = latest_node.isize;
-		if (S_ISREG(inode->i_mode))
+		if ((inode->i_mode & S_IFMT) == S_IFREG)
 			jffs2_truncate_fraglist(c, &f->fraglist, latest_node.isize);
 		inode->i_atime = latest_node.atime;
 		inode->i_mtime = latest_node.mtime;
@@ -373,8 +372,9 @@ void jffs2_read_inode (struct inode *inode)
 	/* OK, now the special cases. Certain inode types should
 	   have only one data node, and it's kept as the metadata
 	   node */
-	if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode) ||
-	    S_ISLNK(inode->i_mode)) {
+	if ((inode->i_mode & S_IFMT) == S_IFBLK ||
+	    (inode->i_mode & S_IFMT) == S_IFCHR ||
+	    (inode->i_mode & S_IFMT) == S_IFLNK) {
 		if (f->metadata) {
 			printk(KERN_WARNING "Argh. Special inode #%lu with mode 0%o had metadata node\n", inode->i_ino, inode->i_mode);
 			jffs2_clear_inode(inode);
@@ -389,8 +389,7 @@ void jffs2_read_inode (struct inode *inode)
 		}
 		/* ASSERT: f->fraglist != NULL */
 		if (f->fraglist->next) {
-			printk(KERN_WARNING "Argh. Special inode #%lu with mode 0%o had more than one node\n", inode->i_ino, inode->i_mode);
-			/* FIXME: Deal with it - check crc32, check for duplicate node, check times and discard the older one */
+			printk(KERN_WARNING "Argh. Special inode #%lu had more than one node\n", inode->i_ino);
 			jffs2_clear_inode(inode);
 			make_bad_inode(inode);
 			return;
@@ -409,21 +408,9 @@ void jffs2_read_inode (struct inode *inode)
 
 	case S_IFLNK:
 		inode->i_op = &jffs2_symlink_inode_operations;
-		/* Hack to work around broken isize in old symlink code.
-		   Remove this when dwmw2 comes to his senses and stops
-		   symlinks from being an entirely gratuitous special
-		   case. */
-		if (!inode->i_size)
-			inode->i_size = latest_node.dsize;
 		break;
 		
 	case S_IFDIR:
-		if (mctime_ver > latest_node.version) {
-			/* The times in the latest_node are actually older than
-			   mctime in the latest dirent. Cheat. */
-			inode->i_mtime = inode->i_ctime = inode->i_atime = 
-				latest_mctime;
-		}
 		inode->i_op = &jffs2_dir_inode_operations;
 		inode->i_fop = &jffs2_dir_operations;
 		break;
@@ -468,17 +455,13 @@ void jffs2_clear_inode (struct inode *inode)
 	struct jffs2_node_frag *frag, *frags;
 	struct jffs2_full_dirent *fd, *fds;
 	struct jffs2_inode_info *f = JFFS2_INODE_INFO(inode);
-        int deleted;
 
 	D1(printk(KERN_DEBUG "jffs2_clear_inode(): ino #%lu mode %o\n", inode->i_ino, inode->i_mode));
-
-	down(&f->sem);
-	deleted = f->inocache && !f->inocache->nlink;
 
 	frags = f->fraglist;
 	fds = f->dents;
 	if (f->metadata) {
-		if (deleted)
+		if (!f->inocache->nlink)
 			jffs2_mark_node_obsolete(c, f->metadata->raw);
 		jffs2_free_full_dnode(f->metadata);
 	}
@@ -490,7 +473,7 @@ void jffs2_clear_inode (struct inode *inode)
 
 		if (frag->node && !(--frag->node->frags)) {
 			/* Not a hole, and it's the final remaining frag of this node. Free the node */
-			if (deleted)
+			if (!f->inocache->nlink)
 				jffs2_mark_node_obsolete(c, frag->node->raw);
 
 			jffs2_free_full_dnode(frag->node);
@@ -502,7 +485,10 @@ void jffs2_clear_inode (struct inode *inode)
 		fds = fd->next;
 		jffs2_free_full_dirent(fd);
 	}
-
-	up(&f->sem);
+	//	if (!f->inocache->nlink) {
+		//		D1(printk(KERN_DEBUG "jffs2_clear_inode() deleting inode #%lu\n", inode->i_ino));
+		//		jffs2_del_ino_cache(JFFS2_SB_INFO(inode->i_sb), f->inocache);
+		//		jffs2_free_inode_cache(f->inocache);
+	//	}
 };
 

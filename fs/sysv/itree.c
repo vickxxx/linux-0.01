@@ -86,7 +86,8 @@ static Indirect *get_branch(struct inode *inode,
 			    Indirect chain[],
 			    int *err)
 {
-	struct super_block *sb = inode->i_sb;
+	kdev_t dev = inode->i_dev;
+	int size = inode->i_sb->s_blocksize;
 	Indirect *p = chain;
 	struct buffer_head *bh;
 
@@ -95,8 +96,8 @@ static Indirect *get_branch(struct inode *inode,
 	if (!p->key)
 		goto no_block;
 	while (--depth) {
-		int block = block_to_cpu(sb, p->key);
-		bh = sb_bread(sb, block);
+		int block = block_to_cpu(inode->i_sb, p->key);
+		bh = bread(dev, block, size);
 		if (!bh)
 			goto failure;
 		if (!verify_chain(chain, p))
@@ -138,7 +139,7 @@ static int alloc_branch(struct inode *inode,
 		 * the pointer to new one, then send parent to disk.
 		 */
 		parent = block_to_cpu(inode->i_sb, branch[n-1].key);
-		bh = sb_getblk(inode->i_sb, parent);
+		bh = getblk(inode->i_dev, parent, blocksize);
 		lock_buffer(bh);
 		memset(bh->b_data, 0, blocksize);
 		branch[n].bh = bh;
@@ -335,7 +336,7 @@ static void free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 				continue;
 			*p = 0;
 			block = block_to_cpu(sb, nr);
-			bh = sb_bread(sb, block);
+			bh = bread(inode->i_dev, block, sb->s_blocksize);
 			if (!bh)
 				continue;
 			free_branches(inode, (u32*)bh->b_data,

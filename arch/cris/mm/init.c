@@ -7,33 +7,6 @@
  *  Authors:  Bjorn Wesen (bjornw@axis.com)
  *
  *  $Log: init.c,v $
- *  Revision 1.38  2003/04/01 14:12:08  starvik
- *  Added loglevel for lots of printks
- *
- *  Revision 1.37  2003/01/22 06:54:47  starvik
- *  Fixed warnings issued by GCC 3.2.1
- *
- *  Revision 1.36  2003/01/09 17:59:55  starvik
- *  Added init_ioremap to initcalls
- *
- *  Revision 1.35  2002/05/17 05:33:59  starvik
- *  Limit cache flush range to the size of the cache
- *
- *  Revision 1.34  2002/04/22 11:48:51  johana
- *  Added KERN_INFO (2.4.19-pre7)
- *
- *  Revision 1.33  2002/03/19 15:22:17  bjornw
- *  Added flush_etrax_cache
- *
- *  Revision 1.32  2002/03/15 17:09:31  bjornw
- *  Added prepare_rx_descriptor as a workaround for a bug
- *
- *  Revision 1.31  2001/11/13 16:22:00  bjornw
- *  Skip calculating totalram and sharedram in si_meminfo
- *
- *  Revision 1.30  2001/11/12 19:02:10  pkj
- *  Fixed compiler warnings.
- *
  *  Revision 1.29  2001/07/25 16:09:50  bjornw
  *  val->sharedram will stay 0
  *
@@ -122,7 +95,6 @@
 #include <linux/swap.h>
 #include <linux/smp.h>
 #include <linux/bootmem.h>
-#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
@@ -218,7 +190,7 @@ paging_init(void)
 	int i;
 	unsigned long zones_size[MAX_NR_ZONES];
 
-	printk(KERN_INFO "Setting up paging and the MMU.\n");
+	printk("Setting up paging and the MMU.\n");
 	
 	/* clear out the init_mm.pgd that will contain the kernel's mappings */
 
@@ -241,15 +213,13 @@ paging_init(void)
 #ifndef CONFIG_CRIS_LOW_MAP
 	/* This code is for the corrected Etrax-100 LX version 2... */
 
-#define CACHED_BOOTROM (KSEG_A | 0x08000000UL)
-
 	*R_MMU_KSEG = ( IO_STATE(R_MMU_KSEG, seg_f, seg  ) | /* cached flash */
 			IO_STATE(R_MMU_KSEG, seg_e, seg  ) | /* uncached flash */
 			IO_STATE(R_MMU_KSEG, seg_d, page ) | /* vmalloc area */
 			IO_STATE(R_MMU_KSEG, seg_c, seg  ) | /* kernel area */
 			IO_STATE(R_MMU_KSEG, seg_b, seg  ) | /* kernel reg area */
-			IO_STATE(R_MMU_KSEG, seg_a, seg  ) | /* bootrom/regs cached */ 
-			IO_STATE(R_MMU_KSEG, seg_9, page ) | /* user area */
+			IO_STATE(R_MMU_KSEG, seg_a, page ) | /* user area */
+			IO_STATE(R_MMU_KSEG, seg_9, page ) |
 			IO_STATE(R_MMU_KSEG, seg_8, page ) |
 			IO_STATE(R_MMU_KSEG, seg_7, page ) |
 			IO_STATE(R_MMU_KSEG, seg_6, page ) |
@@ -265,7 +235,7 @@ paging_init(void)
 			    IO_FIELD(R_MMU_KBASE_HI, base_d, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_c, 0x4 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_b, 0xb ) |
-			    IO_FIELD(R_MMU_KBASE_HI, base_a, 0x3 ) |
+			    IO_FIELD(R_MMU_KBASE_HI, base_a, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_9, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_8, 0x0 ) );
 	
@@ -292,9 +262,7 @@ paging_init(void)
 	 * We map them straight over in LOW_MAP, but use vremap in LX version 2.
 	 */
 
-#define CACHED_BOOTROM (KSEG_F | 0x08000000UL)
-
-	*R_MMU_KSEG = ( IO_STATE(R_MMU_KSEG, seg_f, seg  ) |  /* cached bootrom/regs */ 
+	*R_MMU_KSEG = ( IO_STATE(R_MMU_KSEG, seg_f, page ) | 
 			IO_STATE(R_MMU_KSEG, seg_e, page ) |
 			IO_STATE(R_MMU_KSEG, seg_d, page ) | 
 			IO_STATE(R_MMU_KSEG, seg_c, page ) |   
@@ -315,7 +283,7 @@ paging_init(void)
 			IO_STATE(R_MMU_KSEG, seg_1, page ) |  /* user area */
 			IO_STATE(R_MMU_KSEG, seg_0, page ) ); /* user area */
 
-	*R_MMU_KBASE_HI = ( IO_FIELD(R_MMU_KBASE_HI, base_f, 0x3 ) |
+	*R_MMU_KBASE_HI = ( IO_FIELD(R_MMU_KBASE_HI, base_f, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_e, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_d, 0x0 ) |
 			    IO_FIELD(R_MMU_KBASE_HI, base_c, 0x0 ) |
@@ -414,8 +382,7 @@ mem_init(void)
         datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
         initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 	
-        printk(KERN_INFO
-	       "Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, "
+        printk("Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, "
 	       "%dk init)\n" ,
 	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
 	       max_mapnr << (PAGE_SHIFT-10),
@@ -436,82 +403,47 @@ mem_init(void)
 	return;
 }
 
-/* Initialize remaps of some I/O-ports. It is important that this
- * is called before any driver is initialized.
+/* Initialize remaps of some I/O-ports. This is designed to be callable
+ * multiple times from the drivers init-sections, because we don't know
+ * beforehand which driver will get initialized first.
  */
 
-static int 
-__init init_ioremap(void)
+void 
+init_ioremap(void)
 {
   
 	/* Give the external I/O-port addresses their values */
 
+        static int initialized = 0;
+  
+        if( !initialized ) {
+                initialized++;
+            
 #ifdef CONFIG_CRIS_LOW_MAP
-	/* Simply a linear map (see the KSEG map above in paging_init) */
-	port_cse1_addr = (volatile unsigned long *)(MEM_CSE1_START |
-	                                            MEM_NON_CACHEABLE);
-	port_csp0_addr = (volatile unsigned long *)(MEM_CSP0_START |
-	                                            MEM_NON_CACHEABLE);
-	port_csp4_addr = (volatile unsigned long *)(MEM_CSP4_START |
-	                                            MEM_NON_CACHEABLE);
-#else						    
-	/* Note that nothing blows up just because we do this remapping 
-	 * it's ok even if the ports are not used or connected 
-	 * to anything (or connected to a non-I/O thing) */        
-	port_cse1_addr = (volatile unsigned long *)
-	ioremap((unsigned long)(MEM_CSE1_START | MEM_NON_CACHEABLE), 16);
-	port_csp0_addr = (volatile unsigned long *)
-	ioremap((unsigned long)(MEM_CSP0_START | MEM_NON_CACHEABLE), 16);
-	port_csp4_addr = (volatile unsigned long *)
-	ioremap((unsigned long)(MEM_CSP4_START | MEM_NON_CACHEABLE), 16);
-#endif
-	return 0;
+               /* Simply a linear map (see the KSEG map above in paging_init) */
+               port_cse1_addr = (volatile unsigned long *)(MEM_CSE1_START | 
+                                                           MEM_NON_CACHEABLE);
+               port_csp0_addr = (volatile unsigned long *)(MEM_CSP0_START |
+                                                           MEM_NON_CACHEABLE);
+               port_csp4_addr = (volatile unsigned long *)(MEM_CSP4_START |
+                                                           MEM_NON_CACHEABLE);
+#else
+               /* Note that nothing blows up just because we do this remapping 
+                * it's ok even if the ports are not used or connected 
+                * to anything (or connected to a non-I/O thing) */        
+               port_cse1_addr = (volatile unsigned long *)
+                 ioremap((unsigned long)(MEM_CSE1_START | 
+                                         MEM_NON_CACHEABLE), 16);
+               port_csp0_addr = (volatile unsigned long *)
+                 ioremap((unsigned long)(MEM_CSP0_START |
+                                         MEM_NON_CACHEABLE), 16);
+               port_csp4_addr = (volatile unsigned long *)
+                 ioremap((unsigned long)(MEM_CSP4_START |
+                                         MEM_NON_CACHEABLE), 16);
+#endif	
+        }
 }
 
-__initcall(init_ioremap);
-
-/* Helper function for the two below */
-
-static inline void
-flush_etrax_cacherange(void *startadr, int length)
-{
-	/* CACHED_BOOTROM is mapped to the boot-rom area (cached) which
-	 * we can use to get fast dummy-reads of cachelines
-	 */
-
-	volatile short *flushadr = (volatile short *)(((unsigned long)startadr & ~PAGE_MASK) |
-						      CACHED_BOOTROM);
-
-	length = length > 8192 ? 8192 : length;  /* No need to flush more than cache size */
-
-	while(length > 0) {
-		*flushadr; /* dummy read to flush */
-		flushadr += (32/sizeof(short));  /* a cacheline is 32 bytes */
-		length -= 32;
-	}
-}
-
-/* Due to a bug in Etrax100(LX) all versions, receiving DMA buffers
- * will occationally corrupt certain CPU writes if the DMA buffers
- * happen to be hot in the cache.
- * 
- * As a workaround, we have to flush the relevant parts of the cache
- * before (re) inserting any receiving descriptor into the DMA HW.
- */
-
-void
-prepare_rx_descriptor(struct etrax_dma_descr *desc)
-{
-	flush_etrax_cacherange((void *)desc->buf, desc->sw_len ? desc->sw_len : 65536);
-}
-
-/* Do the same thing but flush the entire cache */
-
-void
-flush_etrax_cache(void)
-{
-	flush_etrax_cacherange(0, 8192);
-}
 
 /* free the pages occupied by initialization code */
 
@@ -527,18 +459,29 @@ free_initmem(void)
                 free_page(addr);
                 totalram_pages++;
         }
-        printk (KERN_INFO "Freeing unused kernel memory: %luk freed\n", 
-		(unsigned long)((&__init_end - &__init_begin) >> 10));
+        printk ("Freeing unused kernel memory: %dk freed\n", 
+		(&__init_end - &__init_begin) >> 10);
 }
 
 void 
 si_meminfo(struct sysinfo *val)
 {
-        val->totalram = totalram_pages;
-        val->sharedram = 0;
-        val->freeram = nr_free_pages();
-        val->bufferram = atomic_read(&buffermem_pages);
-        val->totalhigh = 0;
-        val->freehigh = 0;
-        val->mem_unit = PAGE_SIZE;
+	int i;
+
+	i = max_mapnr;
+	val->totalram = 0;
+	val->sharedram = 0;
+	val->freeram = nr_free_pages();
+	val->bufferram = atomic_read(&buffermem_pages);
+	while (i-- > 0)  {
+		if (PageReserved(mem_map+i))
+			continue;
+		val->totalram++;
+		if (!atomic_read(&mem_map[i].count))
+			continue;
+		val->sharedram += atomic_read(&mem_map[i].count) - 1;
+	}
+	val->mem_unit = PAGE_SIZE;
+	val->totalhigh = 0;
+	val->freehigh = 0;
 }

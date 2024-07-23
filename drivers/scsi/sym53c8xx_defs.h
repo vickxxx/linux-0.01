@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
+**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@free.fr>
+**          Gerard Roudier              <groudier@club-internet.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -50,10 +50,6 @@
 **
 **  NVRAM detection and reading.
 **    Copyright (C) 1997 Richard Waltham <dormouse@farsrobt.demon.co.uk>
-**
-**  Added support for MIPS big endian systems.
-**  Carsten Langgaard, carstenl@mips.com
-**  Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
 **
 *******************************************************************************
 */
@@ -388,16 +384,7 @@
 #define	readl_l2b(a)	le32_to_cpu(readl(a))
 #define	writew_b2l(v,a)	writew(cpu_to_le16(v),a)
 #define	writel_b2l(v,a)	writel(cpu_to_le32(v),a)
-#elif defined(__mips__)
-#define readw_l2b	readw
-#define readl_l2b	readl
-#define writew_b2l	writew
-#define writel_b2l	writel
-#define inw_l2b 	inw
-#define inl_l2b 	inl
-#define outw_b2l	outw
-#define outl_b2l	outl
-#else	/* Other big-endian */
+#else	/* Other bid-endian */
 #define	readw_l2b	readw
 #define	readl_l2b	readl
 #define	writew_b2l	writew

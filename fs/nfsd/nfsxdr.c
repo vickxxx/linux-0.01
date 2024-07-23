@@ -127,25 +127,13 @@ decode_sattr(u32 *p, struct iattr *iap)
 	if (tmp != (u32)-1 && tmp1 != (u32)-1) {
 		iap->ia_valid |= ATTR_MTIME | ATTR_MTIME_SET;
 		iap->ia_mtime = tmp;
-		/*
-		 * Passing the invalid value useconds=1000000 for mtime
-		 * is a Sun convention for "set both mtime and atime to
-		 * current server time".  It's needed to make permissions
-		 * checks for the "touch" program across v2 mounts to
-		 * Solaris and Irix boxes work correctly. See description of
-		 * sattr in section 6.1 of "NFS Illustrated" by
-		 * Brent Callaghan, Addison-Wesley, ISBN 0-201-32750-5
-		 */
-		if (tmp1 == 1000000)
-			iap->ia_valid &= ~(ATTR_ATIME_SET|ATTR_MTIME_SET);
 	}
 	return p;
 }
 
 static inline u32 *
-encode_fattr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
+encode_fattr(struct svc_rqst *rqstp, u32 *p, struct inode *inode)
 {
-	struct inode *inode = fhp->fh_dentry->d_inode;
 	int type = (inode->i_mode & S_IFMT);
 
 	*p++ = htonl(nfs_ftypes[type >> 12]);
@@ -165,12 +153,7 @@ encode_fattr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 	else
 		*p++ = htonl(0xffffffff);
 	*p++ = htonl((u32) inode->i_blocks);
-	if (rqstp->rq_reffh->fh_version == 1 
-	    && rqstp->rq_reffh->fh_fsid_type == 1
-	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
-		*p++ = htonl((u32) fhp->fh_export->ex_fsid);
-	else
-		*p++ = htonl((u32) inode->i_dev);
+	*p++ = htonl((u32) inode->i_dev);
 	*p++ = htonl((u32) inode->i_ino);
 	*p++ = htonl((u32) inode->i_atime);
 	*p++ = 0;
@@ -349,7 +332,7 @@ int
 nfssvc_encode_attrstat(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_attrstat *resp)
 {
-	p = encode_fattr(rqstp, p, &resp->fh);
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -358,7 +341,7 @@ nfssvc_encode_diropres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_diropres *resp)
 {
 	p = encode_fh(p, &resp->fh);
-	p = encode_fattr(rqstp, p, &resp->fh);
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	return xdr_ressize_check(rqstp, p);
 }
 
@@ -375,7 +358,7 @@ int
 nfssvc_encode_readres(struct svc_rqst *rqstp, u32 *p,
 					struct nfsd_readres *resp)
 {
-	p = encode_fattr(rqstp, p, &resp->fh);
+	p = encode_fattr(rqstp, p, resp->fh.fh_dentry->d_inode);
 	*p++ = htonl(resp->count);
 	p += XDR_QUADLEN(resp->count);
 
@@ -396,7 +379,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 {
 	struct statfs	*stat = &resp->stats;
 
-	*p++ = htonl(NFSSVC_MAXBLKSIZE);	/* max transfer size */
+	*p++ = htonl(8 * 1024);		/* max transfer size */
 	*p++ = htonl(stat->f_bsize);
 	*p++ = htonl(stat->f_blocks);
 	*p++ = htonl(stat->f_bfree);

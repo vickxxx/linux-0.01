@@ -21,10 +21,8 @@ do_reipl:	basr	%r13,0
 	        oi      .Lschib+5-.Lpg0(%r13),0x84 
 .Lecs:  	xi      .Lschib+27-.Lpg0(%r13),0x01 
         	msch    .Lschib-.Lpg0(%r13) 
-	        lghi    %r0,5
-.Lssch:		ssch	.Liplorb-.Lpg0(%r13)           
-		jz	.L001
-		brct    %r0,.Lssch   
+		ssch	.Liplorb-.Lpg0(%r13)           
+		jz	.L001   
 		bas	%r14,.Ldisab-.Lpg0(%r13)
 .L001:		mvc	__LC_IO_NEW_PSW(16),.Lionew-.Lpg0(%r13)	
 .Ltpi:		lpswe	.Lwaitpsw-.Lpg0(%r13)          

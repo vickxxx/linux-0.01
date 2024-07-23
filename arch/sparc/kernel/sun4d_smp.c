@@ -47,7 +47,7 @@ extern struct task_struct *current_set[NR_CPUS];
 extern volatile int smp_processors_ready;
 extern unsigned long cpu_present_map;
 extern int smp_num_cpus;
-static int smp_highest_cpu;
+static int smp_highest_cpu = 0;
 extern int smp_threads_ready;
 extern unsigned char mid_xlate[NR_CPUS];
 extern volatile unsigned long cpu_callin_map[NR_CPUS];
@@ -132,7 +132,8 @@ void __init smp4d_callin(void)
 		
 	/* Fix idle thread fields. */
 	__asm__ __volatile__("ld [%0], %%g6\n\t"
-			     : : "r" (&current_set[cpuid])
+			     "sta %%g6, [%%g0] %1\n\t"
+			     : : "r" (&current_set[cpuid]), "i" (ASI_M_VIKING_TMP2)
 			     : "memory" /* paranoid */);
 
 	cpu_leds[cpuid] = 0x9;
@@ -350,11 +351,11 @@ void smp4d_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			unsigned long a3 asm("i3") = arg3;
 			unsigned long a4 asm("i4") = arg4;
 			unsigned long a5 asm("i5") = arg5;
-
-			__asm__ __volatile__(
-				"std %0, [%6]\n\t"
-				"std %2, [%6 + 8]\n\t"
-				"std %4, [%6 + 16]\n\t" : :
+					
+			__asm__ __volatile__("
+				std %0, [%6]
+				std %2, [%6 + 8]
+				std %4, [%6 + 16]" : : 
 				"r"(f), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5),
 				"r" (&ccall_info.func));
 		}
@@ -493,18 +494,25 @@ void __init smp4d_blackbox_id(unsigned *addr)
 
 void __init smp4d_blackbox_current(unsigned *addr)
 {
-	int rd = *addr & 0x3e000000;
+	/* We have a nice Linux current register :) */
+	int rd = addr[1] & 0x3e000000;
 	
-	addr[0] = 0xc0800800 | rd;		/* lda [%g0] ASI_M_VIKING_TMP1, reg */
-	addr[2] = 0x81282002 | rd | (rd >> 11);	/* sll reg, 2, reg */
-	addr[4] = 0x01000000;			/* nop */
+	addr[0] = 0x10800006;			/* b .+24 */
+	addr[1] = 0xc0800820 | rd;		/* lda [%g0] ASI_M_VIKING_TMP2, reg */
 }
 
 void __init sun4d_init_smp(void)
 {
 	int i;
+	extern unsigned int patchme_store_new_current[];
 	extern unsigned int t_nmi[], linux_trap_ipi15_sun4d[], linux_trap_ipi15_sun4m[];
 
+	/* Store current into Linux current register :) */
+	__asm__ __volatile__("sta %%g6, [%%g0] %0" : : "i"(ASI_M_VIKING_TMP2));
+	
+	/* Patch switch_to */
+	patchme_store_new_current[0] = (patchme_store_new_current[0] & 0x3e000000) | 0xc0a00820;
+	
 	/* Patch ipi15 trap table */
 	t_nmi[1] = t_nmi[1] + (linux_trap_ipi15_sun4d - linux_trap_ipi15_sun4m);
 	

@@ -81,8 +81,8 @@ Scsi_Host_Name * scsi_host_no_list;
 struct Scsi_Host * scsi_hostlist;
 struct Scsi_Device_Template * scsi_devicelist;
 
-int max_scsi_hosts;	/* host_no for next new host */
-int next_scsi_host;	/* count of registered scsi hosts */
+int max_scsi_hosts;
+int next_scsi_host;
 
 void
 scsi_unregister(struct Scsi_Host * sh){
@@ -107,8 +107,21 @@ scsi_unregister(struct Scsi_Host * sh){
     if (shn) shn->host_registered = 0;
     /* else {} : This should not happen, we should panic here... */
     
+    /* If we are removing the last host registered, it is safe to reuse
+     * its host number (this avoids "holes" at boot time) (DB) 
+     * It is also safe to reuse those of numbers directly below which have
+     * been released earlier (to avoid some holes in numbering).
+     */
+    if(sh->host_no == max_scsi_hosts - 1) {
+	while(--max_scsi_hosts >= next_scsi_host) {
+	    shpnt = scsi_hostlist;
+	    while(shpnt && shpnt->host_no != max_scsi_hosts - 1)
+		shpnt = shpnt->next;
+	    if(shpnt)
+		break;
+	}
+    }
     next_scsi_host--;
-
     kfree((char *) sh);
 }
 
@@ -116,7 +129,7 @@ scsi_unregister(struct Scsi_Host * sh){
  * once we are 100% sure that we want to use this host adapter -  it is a
  * pain to reverse this, so we try to avoid it 
  */
-extern int blk_nohighio;
+
 struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     struct Scsi_Host * retval, *shpnt, *o_shp;
     Scsi_Host_Name *shn, *shn2;
@@ -222,8 +235,6 @@ struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     retval->cmd_per_lun = tpnt->cmd_per_lun;
     retval->unchecked_isa_dma = tpnt->unchecked_isa_dma;
     retval->use_clustering = tpnt->use_clustering;   
-    if (!blk_nohighio)
-	retval->highmem_io = tpnt->highmem_io;
 
     retval->select_queue_depths = tpnt->select_queue_depths;
     retval->max_sectors = tpnt->max_sectors;
@@ -262,24 +273,6 @@ scsi_register_device(struct Scsi_Device_Template * sdpnt)
     sdpnt->next = scsi_devicelist;
     scsi_devicelist = sdpnt;
     return 0;
-}
-
-void
-scsi_deregister_device(struct Scsi_Device_Template * tpnt)
-{
-    struct Scsi_Device_Template *spnt;
-    struct Scsi_Device_Template *prev_spnt;
-
-    spnt = scsi_devicelist;
-    prev_spnt = NULL;
-    while (spnt != tpnt) {
-	prev_spnt = spnt;
-	spnt = spnt->next;
-    }
-    if (prev_spnt == NULL)
-        scsi_devicelist = tpnt->next;
-    else
-        prev_spnt->next = spnt->next;
 }
 
 /*

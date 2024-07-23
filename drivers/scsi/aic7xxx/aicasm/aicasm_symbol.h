@@ -2,7 +2,6 @@
  * Aic7xxx SCSI host adapter firmware asssembler symbol table definitions
  *
  * Copyright (c) 1997 Justin T. Gibbs.
- * Copyright (c) 2002 Adaptec Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -37,9 +36,9 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_symbol.h#17 $
+ * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_symbol.h#6 $
  *
- * $FreeBSD$
+ * $FreeBSD: src/sys/dev/aic7xxx/aicasm/aicasm_symbol.h,v 1.11 2000/09/22 22:19:55 gibbs Exp $
  */
 
 #ifdef __linux__
@@ -54,16 +53,13 @@ typedef enum {
 	ALIAS,
 	SCBLOC,
 	SRAMLOC,
-	ENUM_ENTRY,
-	FIELD,
 	MASK,
-	ENUM,
+	BIT,
 	CONST,
 	DOWNLOAD_CONST,
 	LABEL,
-	CONDITIONAL,
-	MACRO
-} symtype;
+	CONDITIONAL
+}symtype;
 
 typedef enum {
 	RO = 0x01,
@@ -71,27 +67,24 @@ typedef enum {
 	RW = 0x03
 }amode_t;
 
-typedef SLIST_HEAD(symlist, symbol_node) symlist_t;
-
 struct reg_info {
-	u_int	  address;
-	int	  size;
-	amode_t	  mode;
-	symlist_t fields;
-	uint8_t	  valid_bitmask;
-	uint8_t	  modes;
-	int	  typecheck_masks;
+	u_int8_t address;
+	int	 size;
+	amode_t	 mode;
+	u_int8_t valid_bitmask;
+	int	 typecheck_masks;
 };
 
-struct field_info {
+typedef SLIST_HEAD(symlist, symbol_node) symlist_t;
+
+struct mask_info {
 	symlist_t symrefs;
-	uint8_t	  value;
-	uint8_t	  mask;
+	u_int8_t mask;
 };
 
 struct const_info {
-	u_int	value;
-	int	define;
+	u_int8_t value;
+	int	 define;
 };
 
 struct alias_info {
@@ -100,24 +93,10 @@ struct alias_info {
 
 struct label_info {
 	int	address;
-	int	exported;
 };
 
 struct cond_info {
 	int	func_num;
-};
-
-struct macro_arg {
-	STAILQ_ENTRY(macro_arg)	links;
-	regex_t	arg_regex;
-	char   *replacement_text;
-};
-STAILQ_HEAD(macro_arg_list, macro_arg) args;
-
-struct macro_info {
-	struct macro_arg_list args;
-	int   narg;
-	const char* body;
 };
 
 typedef struct expression_info {
@@ -129,13 +108,12 @@ typedef struct symbol {
 	char	*name;
 	symtype	type;
 	union	{
-		struct reg_info	  *rinfo;
-		struct field_info *finfo;
+		struct reg_info *rinfo;
+		struct mask_info *minfo;
 		struct const_info *cinfo;
 		struct alias_info *ainfo;
 		struct label_info *linfo;
-		struct cond_info  *condinfo;
-		struct macro_info *macroinfo;
+		struct cond_info *condinfo;
 	}info;
 } symbol_t;
 
@@ -183,25 +161,25 @@ TAILQ_HEAD(cs_tailq, critical_section);
 SLIST_HEAD(scope_list, scope);
 TAILQ_HEAD(scope_tailq, scope);
 
-void	symbol_delete(symbol_t *symbol);
+void	symbol_delete __P((symbol_t *symbol));
 
-void	symtable_open(void);
+void	symtable_open __P((void));
 
-void	symtable_close(void);
+void	symtable_close __P((void));
 
 symbol_t *
-	symtable_get(char *name);
+	symtable_get __P((char *name));
 
 symbol_node_t *
-	symlist_search(symlist_t *symlist, char *symname);
+	symlist_search __P((symlist_t *symlist, char *symname));
 
 void
-	symlist_add(symlist_t *symlist, symbol_t *symbol, int how);
+	symlist_add __P((symlist_t *symlist, symbol_t *symbol, int how));
 #define SYMLIST_INSERT_HEAD	0x00
 #define SYMLIST_SORT		0x01
 
-void	symlist_free(symlist_t *symlist);
+void	symlist_free __P((symlist_t *symlist));
 
-void	symlist_merge(symlist_t *symlist_dest, symlist_t *symlist_src1,
-		      symlist_t *symlist_src2);
-void	symtable_dump(FILE *ofile, FILE *dfile);
+void	symlist_merge __P((symlist_t *symlist_dest, symlist_t *symlist_src1,
+			   symlist_t *symlist_src2));
+void	symtable_dump __P((FILE *ofile));

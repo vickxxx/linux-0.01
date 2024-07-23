@@ -36,6 +36,7 @@ static char *version =
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
+#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 
@@ -879,6 +880,7 @@ static void __exit socal_cleanup(void)
 	
 	for_each_socal(s) {
 		irq = s->port[0].fc.irq;
+		disable_irq (irq);
 		free_irq (irq, s);
 
 		fcp_release(&(s->port[0].fc), 2);

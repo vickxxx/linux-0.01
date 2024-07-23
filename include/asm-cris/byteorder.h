@@ -1,3 +1,5 @@
+/* $Id: byteorder.h,v 1.1 2000/07/10 16:32:31 bjornw Exp $ */
+
 #ifndef _CRIS_BYTEORDER_H
 #define _CRIS_BYTEORDER_H
 
@@ -10,17 +12,17 @@
  * them together into ntohl etc.
  */
 
-extern __inline__ __const__ __u32 ___arch__swab32(__u32 x)
+static __inline__ __const__ __u32 ___arch__swab32(__u32 x)
 {
 	__asm__ ("swapwb %0" : "=r" (x) : "0" (x));
-
+  
 	return(x);
 }
 
-extern __inline__ __const__ __u16 ___arch__swab16(__u16 x)
+static __inline__ __const__ __u16 ___arch__swab16(__u16 x)
 {
 	__asm__ ("swapb %0" : "=r" (x) : "0" (x));
-
+	
 	return(x);
 }
 
@@ -41,3 +43,5 @@ extern __inline__ __const__ __u16 ___arch__swab16(__u16 x)
 #include <linux/byteorder/little_endian.h>
 
 #endif
+
+

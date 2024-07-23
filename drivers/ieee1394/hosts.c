@@ -11,188 +11,215 @@
  */
 
 #include <linux/config.h>
+
 #include <linux/types.h>
-#include <linux/list.h>
 #include <linux/init.h>
-#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/wait.h>
 
 #include "ieee1394_types.h"
 #include "hosts.h"
 #include "ieee1394_core.h"
 #include "highlevel.h"
 
-LIST_HEAD(hpsb_hosts);
-DECLARE_MUTEX(hpsb_hosts_lock);
 
-static int dummy_transmit_packet(struct hpsb_host *h, struct hpsb_packet *p)
-{
-        return 0;
-}
+static LIST_HEAD(templates);
+static spinlock_t templates_lock = SPIN_LOCK_UNLOCKED;
 
-static int dummy_devctl(struct hpsb_host *h, enum devctl_cmd c, int arg)
-{
-        return -1;
-}
-
-static int dummy_isoctl(struct hpsb_iso *iso, enum isoctl_cmd command, unsigned long arg)
-{
-	return -1;
-}
-
-static struct hpsb_host_driver dummy_driver = {
-        .transmit_packet = dummy_transmit_packet,
-        .devctl =          dummy_devctl,
-	.isoctl =          dummy_isoctl
-};
-
-/**
- * hpsb_ref_host - increase reference count for host controller.
- * @host: the host controller
- *
- * Increase the reference count for the specified host controller.
- * When holding a reference to a host, the memory allocated for the
- * host struct will not be freed and the host is guaranteed to be in a
- * consistent state.  The driver may be unloaded or the controller may
- * be removed (PCMCIA), but the host struct will remain valid.
+/*
+ * This function calls the add_host/remove_host hooks for every host currently
+ * registered.  Init == TRUE means add_host.
  */
-
-int hpsb_ref_host(struct hpsb_host *host)
+void hl_all_hosts(struct hpsb_highlevel *hl, int init)
 {
-        struct list_head *lh;
-        int retval = 0;
+	struct list_head *tlh, *hlh;
+        struct hpsb_host_template *tmpl;
+        struct hpsb_host *host;
 
-	down(&hpsb_hosts_lock);
-        list_for_each(lh, &hpsb_hosts) {
-                if (host == list_entry(lh, struct hpsb_host, host_list)) {
-                        host->driver->devctl(host, MODIFY_USAGE, 1);
-			host->refcount++;
-                        retval = 1;
-			break;
-        	}
+        spin_lock(&templates_lock);
+
+	list_for_each(tlh, &templates) {
+                tmpl = list_entry(tlh, struct hpsb_host_template, list);
+		list_for_each(hlh, &tmpl->hosts) {
+			host = list_entry(hlh, struct hpsb_host, list);
+                        if (host->initialized) {
+                                if (init) {
+                                        if (hl->op->add_host) {
+                                                hl->op->add_host(host);
+                                        }
+                                } else {
+                                        if (hl->op->remove_host) {
+                                                hl->op->remove_host(host);
+                                        }
+                                }
+                        }
+                }
         }
-	up(&hpsb_hosts_lock);
+
+        spin_unlock(&templates_lock);
+}
+
+int hpsb_inc_host_usage(struct hpsb_host *host)
+{
+	struct list_head *tlh, *hlh;
+        struct hpsb_host_template *tmpl;
+        int retval = 0;
+	unsigned long flags;
+
+        spin_lock_irqsave(&templates_lock, flags);
+
+	list_for_each(tlh, &templates) {
+                tmpl = list_entry(tlh, struct hpsb_host_template, list);
+		list_for_each(hlh, &tmpl->hosts) {
+			if (host == list_entry(hlh, struct hpsb_host, list)) {
+                                tmpl->devctl(host, MODIFY_USAGE, 1);
+                                retval = 1;
+                                break;
+                        }
+                }
+		if (retval)
+			break;
+        }
+
+        spin_unlock_irqrestore(&templates_lock, flags);
 
         return retval;
 }
 
-/**
- * hpsb_unref_host - decrease reference count for host controller.
- * @host: the host controller
- *
- * Decrease the reference count for the specified host controller.
- * When the reference count reaches zero, the memory allocated for the
- * &hpsb_host will be freed.
- */
-
-void hpsb_unref_host(struct hpsb_host *host)
+void hpsb_dec_host_usage(struct hpsb_host *host)
 {
-        host->driver->devctl(host, MODIFY_USAGE, 0);
-
-	down(&hpsb_hosts_lock);
-        host->refcount--;
-
-        if (!host->refcount && host->is_shutdown)
-                kfree(host);
-	up(&hpsb_hosts_lock);
+        host->template->devctl(host, MODIFY_USAGE, 0);
 }
 
-/**
- * hpsb_alloc_host - allocate a new host controller.
- * @drv: the driver that will manage the host controller
- * @extra: number of extra bytes to allocate for the driver
- *
- * Allocate a &hpsb_host and initialize the general subsystem specific
- * fields.  If the driver needs to store per host data, as drivers
- * usually do, the amount of memory required can be specified by the
- * @extra parameter.  Once allocated, the driver should initialize the
- * driver specific parts, enable the controller and make it available
- * to the general subsystem using hpsb_add_host().
- *
- * The &hpsb_host is allocated with an single initial reference
- * belonging to the driver.  Once the driver is done with the struct,
- * for example, when the driver is unloaded, it should release this
- * reference using hpsb_unref_host().
- *
- * Return Value: a pointer to the &hpsb_host if succesful, %NULL if
- * no memory was available.
+/*
+ * The following function is exported for module usage.  It will be called from
+ * the detect function of a adapter driver.
  */
-
-struct hpsb_host *hpsb_alloc_host(struct hpsb_host_driver *drv, size_t extra)
+struct hpsb_host *hpsb_get_host(struct hpsb_host_template *tmpl, 
+                                size_t hd_size)
 {
         struct hpsb_host *h;
-	int i;
 
-        h = kmalloc(sizeof(struct hpsb_host) + extra, SLAB_KERNEL);
+        h = vmalloc(sizeof(struct hpsb_host) + hd_size);
         if (!h) return NULL;
-        memset(h, 0, sizeof(struct hpsb_host) + extra);
 
-	h->hostdata = h + 1;
-        h->driver = drv;
-	h->refcount = 1;
+        memset(h, 0, sizeof(struct hpsb_host) + hd_size);
+
+        atomic_set(&h->generation, 0);
 
         INIT_LIST_HEAD(&h->pending_packets);
         spin_lock_init(&h->pending_pkt_lock);
 
-	for (i = 0; i < ARRAY_SIZE(h->tpool); i++)
-		HPSB_TPOOL_INIT(&h->tpool[i]);
+        sema_init(&h->tlabel_count, 64);
+        spin_lock_init(&h->tlabel_lock);
 
-	atomic_set(&h->generation, 0);
-
-	init_timer(&h->timeout);
-	h->timeout.data = (unsigned long) h;
-	h->timeout.function = abort_timedouts;
-	h->timeout_interval = HZ / 20; // 50ms by default
+	INIT_TQUEUE(&h->timeout_tq, (void (*)(void*))abort_timedouts, h);
 
         h->topology_map = h->csr.topology_map + 3;
         h->speed_map = (u8 *)(h->csr.speed_map + 2);
 
-	return h;
+        h->template = tmpl;
+        if (hd_size)
+                h->hostdata = &h->embedded_hostdata[0];
+
+	list_add_tail(&h->list, &tmpl->hosts);
+
+        return h;
 }
 
-static int alloc_hostnum(void)
+static void free_all_hosts(struct hpsb_host_template *tmpl)
 {
-	int hostnum = 0;
+	struct list_head *hlh, *next;
+        struct hpsb_host *host;
 
-	while (1) {
-		struct list_head *lh;
-		int found = 0;
+	list_for_each_safe(hlh, next, &tmpl->hosts) {
+		host = list_entry(hlh, struct hpsb_host, list);
+                vfree(host);
+        }
+}
 
-		list_for_each(lh, &hpsb_hosts) {
-			struct hpsb_host *host = list_entry(lh, struct hpsb_host, host_list);
 
-			if (host->id == hostnum) {
-				found = 1;
-				break;
-			}
-		}
+static void init_hosts(struct hpsb_host_template *tmpl)
+{
+        int count;
+	struct list_head *hlh;
+        struct hpsb_host *host;
 
-		if (!found)
-			return hostnum;
+        count = tmpl->detect_hosts(tmpl);
 
-		hostnum++;
+	list_for_each(hlh, &tmpl->hosts) {
+		host = list_entry(hlh, struct hpsb_host, list);
+                if (tmpl->initialize_host(host)) {
+                        host->initialized = 1;
+
+                        highlevel_add_host(host);
+                        hpsb_reset_bus(host, LONG_RESET);
+                }
+        }
+
+        tmpl->number_of_hosts = count;
+        HPSB_INFO("detected %d %s adapter%s", count, tmpl->name,
+                  (count != 1 ? "s" : ""));
+}
+
+static void shutdown_hosts(struct hpsb_host_template *tmpl)
+{
+	struct list_head *hlh;
+        struct hpsb_host *host;
+
+	list_for_each(hlh, &tmpl->hosts) {
+		host = list_entry(hlh, struct hpsb_host, list);
+                if (host->initialized) {
+                        host->initialized = 0;
+                        abort_requests(host);
+
+                        highlevel_remove_host(host);
+
+                        tmpl->release_host(host);
+                        while (test_bit(0, &host->timeout_tq.sync)) {
+                                schedule();
+                        }
+                }
+        }
+        free_all_hosts(tmpl);
+        tmpl->release_host(NULL);
+
+        tmpl->number_of_hosts = 0;
+}
+
+
+/*
+ * The following two functions are exported symbols for module usage.
+ */
+int hpsb_register_lowlevel(struct hpsb_host_template *tmpl)
+{
+	INIT_LIST_HEAD(&tmpl->hosts);
+	tmpl->number_of_hosts = 0;
+
+        spin_lock(&templates_lock);
+	list_add_tail(&tmpl->list, &templates);
+        spin_unlock(&templates_lock);
+
+	/* PCI cards should be smart and use the PCI detection layer, and
+	 * not this one shot deal. detect_hosts() will be obsoleted soon. */
+	if (tmpl->detect_hosts != NULL) {
+		HPSB_DEBUG("Registered %s driver, initializing now", tmpl->name);
+		init_hosts(tmpl);
 	}
 
-	return 0;
+        return 0;
 }
 
-void hpsb_add_host(struct hpsb_host *host)
+void hpsb_unregister_lowlevel(struct hpsb_host_template *tmpl)
 {
-	down(&hpsb_hosts_lock);
-	host->id = alloc_hostnum();
-        list_add_tail(&host->host_list, &hpsb_hosts);
-	up(&hpsb_hosts_lock);
+        shutdown_hosts(tmpl);
 
-        highlevel_add_host(host);
-        host->driver->devctl(host, RESET_BUS, LONG_RESET);
-}
-
-void hpsb_remove_host(struct hpsb_host *host)
-{
-	down(&hpsb_hosts_lock);
-        host->is_shutdown = 1;
-        host->driver = &dummy_driver;
-	list_del(&host->host_list);
-	up(&hpsb_hosts_lock);
-
-        highlevel_remove_host(host);
+        if (tmpl->number_of_hosts)
+                HPSB_PANIC("attempted to remove busy host template "
+			   "of %s at address 0x%p", tmpl->name, tmpl);
+	else {
+		spin_lock(&templates_lock);
+		list_del(&tmpl->list);
+		spin_unlock(&templates_lock);
+	}
 }

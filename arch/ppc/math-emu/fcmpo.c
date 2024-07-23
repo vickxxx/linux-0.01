@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.fcmpo.c 1.6 05/17/01 18:14:22 cort
+ */
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <asm/uaccess.h>
@@ -37,7 +40,7 @@ fcmpo(u32 *ccr, int crfD, void *frA, void *frB)
 
 	*ccr &= ~(15 << ((7 - crfD) << 2));
 	*ccr |= (cmp << ((7 - crfD) << 2));
-
+ 
 #ifdef DEBUG
 	printk("CR: %08x\n", *ccr);
 #endif

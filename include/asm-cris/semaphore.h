@@ -1,3 +1,5 @@
+/* $Id: semaphore.h,v 1.3 2001/05/08 13:54:09 bjornw Exp $ */
+
 /* On the i386 these are coded in asm, perhaps we should as well. Later.. */
 
 #ifndef _CRIS_SEMAPHORE_H
@@ -13,7 +15,7 @@
 #include <asm/atomic.h>
 
 /*
- * CRIS semaphores, implemented in C-only so far.
+ * CRIS semaphores, implemented in C-only so far. 
  */
 
 int printk(const char *fmt, ...);
@@ -52,12 +54,12 @@ extern inline void sema_init(struct semaphore *sem, int val)
 	*sem = (struct semaphore)__SEMAPHORE_INITIALIZER((*sem),val);
 }
 
-extern inline void init_MUTEX (struct semaphore *sem)
+static inline void init_MUTEX (struct semaphore *sem)
 {
         sema_init(sem, 1);
 }
 
-extern inline void init_MUTEX_LOCKED (struct semaphore *sem)
+static inline void init_MUTEX_LOCKED (struct semaphore *sem)
 {
         sema_init(sem, 0);
 }
@@ -138,7 +140,7 @@ extern inline int down_trylock(struct semaphore * sem)
  * jumps for both down() and up().
  */
 extern inline void up(struct semaphore * sem)
-{
+{  
 	unsigned long flags;
 	int wakeup;
 
@@ -154,11 +156,6 @@ extern inline void up(struct semaphore * sem)
 	if(wakeup) {
 		__up(sem);
 	}
-}
-
-static inline int sem_getcount(struct semaphore *sem)
-{
-	return sem->count;
 }
 
 #endif

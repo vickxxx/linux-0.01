@@ -90,8 +90,7 @@
 
 #include <asm/hardware.h>
 
-extern unsigned int sa11x0_freq_to_ppcr(unsigned int khz);
-extern unsigned int sa11x0_validatespeed(unsigned int khz);
+
 
 
 typedef struct {
@@ -216,26 +215,18 @@ static int sa1100_dram_notifier(struct notifier_block *nb,
 
 
 static struct notifier_block sa1100_dram_block = {
-	.notifier_call = sa1100_dram_notifier,
+	notifier_call: sa1100_dram_notifier,
 };
 
 
-static void sa1100_setspeed(unsigned int khz)
-{
-	PPCR = sa11x0_freq_to_ppcr(khz);
-}
+
 
 static int __init sa1100_dram_init(void)
 {
-	int ret = -ENODEV;
-
-	if ((processor_id & CPU_SA1100_MASK) == CPU_SA1100_ID) {
-		ret = cpufreq_register_notifier(&sa1100_dram_block);
-
-		cpufreq_setfunctions(sa11x0_validatespeed, sa1100_setspeed);
-	}
-
-	return ret;
+	return cpufreq_register_notifier(&sa1100_dram_block);
 }
+
+
+
 
 __initcall(sa1100_dram_init);

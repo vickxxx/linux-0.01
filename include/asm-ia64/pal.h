@@ -1,8 +1,6 @@
 #ifndef _ASM_IA64_PAL_H
 #define _ASM_IA64_PAL_H
 
-#ifdef __KERNEL__
-
 /*
  * Processor Abstraction Layer definitions.
  *
@@ -80,7 +78,6 @@
 #ifndef __ASSEMBLY__
 
 #include <linux/types.h>
-#include <asm/fpu.h>
 
 /*
  * Data types needed to pass information into PAL procedures and
@@ -91,10 +88,10 @@
 typedef s64				pal_status_t;
 
 #define PAL_STATUS_SUCCESS		0	/* No error */
-#define PAL_STATUS_UNIMPLEMENTED	(-1)	/* Unimplemented procedure */
-#define PAL_STATUS_EINVAL		(-2)	/* Invalid argument */
-#define PAL_STATUS_ERROR		(-3)	/* Error */
-#define PAL_STATUS_CACHE_INIT_FAIL	(-4)	/* Could not initialize the
+#define PAL_STATUS_UNIMPLEMENTED	-1	/* Unimplemented procedure */
+#define PAL_STATUS_EINVAL		-2	/* Invalid argument */
+#define PAL_STATUS_ERROR		-3	/* Error */
+#define PAL_STATUS_CACHE_INIT_FAIL	-4	/* Could not initialize the
 						 * specified level and type of
 						 * cache without sideeffects
 						 * and "restrict" was 1
@@ -407,11 +404,10 @@ typedef struct pal_process_state_info_s {
 						 * generated.
 						 * (Trap Lost )
 						 */
-			mi		: 1,	/* More information available
-						 * call PAL_MC_ERROR_INFO
+			op		: 3,	/* Operation that
+						 * caused the machine
+						 * check
 						 */
-			pi		: 1,	/* Precise instruction pointer */
-			pm		: 1,	/* Precise min-state save area */
 
 			dy		: 1,	/* Processor dynamic
 						 * state valid
@@ -453,23 +449,32 @@ typedef struct pal_process_state_info_s {
 						 * by the processor
 						 */
 
-			reserved2	: 11,
+			reserved2	: 12,
 			cc		: 1,	/* Cache check */
 			tc		: 1,	/* TLB check */
 			bc		: 1,	/* Bus check */
-			rc		: 1,	/* Register file check */
-			uc		: 1;	/* Uarch check */
+			uc		: 1;	/* Unknown check */
 
 } pal_processor_state_info_t;
 
 typedef struct pal_cache_check_info_s {
-	u64		op		: 4,	/* Type of cache
+	u64		reserved1	: 16,
+			way		: 5,	/* Way in which the
+						 * error occurred
+						 */
+			reserved2	: 1,
+			mc		: 1,	/* Machine check corrected */
+			tv		: 1,	/* Target address
+						 * structure is valid
+						 */
+
+			wv		: 1,	/* Way field valid */
+			op		: 3,	/* Type of cache
 						 * operation that
 						 * caused the machine
 						 * check.
 						 */
-			level		: 2,	/* Cache level */
-			reserved1	: 2,
+
 			dl		: 1,	/* Failure in data part
 						 * of cache line
 						 */
@@ -478,34 +483,11 @@ typedef struct pal_cache_check_info_s {
 						 */
 			dc		: 1,	/* Failure in dcache */
 			ic		: 1,	/* Failure in icache */
-			mesi		: 3,	/* Cache line state */
+			index		: 24,	/* Cache line index */
 			mv		: 1,	/* mesi valid */
-			way		: 5,	/* Way in which the
-						 * error occurred
-						 */
-			wiv		: 1,	/* Way field valid */
-			reserved2	: 10,
+			mesi		: 3,	/* Cache line state */
+			level		: 4;	/* Cache level */
 
-			index		: 20,	/* Cache line index */
-			reserved3	: 2,
-
-			is		: 1,	/* instruction set (1 == ia32) */
-			iv		: 1,	/* instruction set field valid */
-			pl		: 2,	/* privilege level */
-			pv		: 1,	/* privilege level field valid */
-			mcc		: 1,	/* Machine check corrected */
-			tv		: 1,	/* Target address
-						 * structure is valid
-						 */
-			rq		: 1,	/* Requester identifier
-						 * structure is valid
-						 */
-			rp		: 1,	/* Responder identifier
-						 * structure is valid
-						 */
-			pi		: 1;	/* Precise instruction pointer
-						 * structure is valid
-						 */
 } pal_cache_check_info_t;
 
 typedef struct pal_tlb_check_info_s {
@@ -513,38 +495,18 @@ typedef struct pal_tlb_check_info_s {
 	u64		tr_slot		: 8,	/* Slot# of TR where
 						 * error occurred
 						 */
-			trv		: 1,	/* tr_slot field is valid */
-			reserved1	: 1,
-			level		: 2,	/* TLB level where failure occurred */
-			reserved2	: 4,
+			reserved2	: 8,
 			dtr		: 1,	/* Fail in data TR */
 			itr		: 1,	/* Fail in inst TR */
 			dtc		: 1,	/* Fail in data TC */
 			itc		: 1,	/* Fail in inst. TC */
-			op		: 4,	/* Cache operation */
-			reserved3	: 30,
+			mc		: 1,	/* Machine check corrected */
+			reserved1	: 43;
 
-			is		: 1,	/* instruction set (1 == ia32) */
-			iv		: 1,	/* instruction set field valid */
-			pl		: 2,	/* privilege level */
-			pv		: 1,	/* privilege level field valid */
-			mcc		: 1,	/* Machine check corrected */
-			tv		: 1,	/* Target address
-						 * structure is valid
-						 */
-			rq		: 1,	/* Requester identifier
-						 * structure is valid
-						 */
-			rp		: 1,	/* Responder identifier
-						 * structure is valid
-						 */
-			pi		: 1;	/* Precise instruction pointer
-						 * structure is valid
-						 */
 } pal_tlb_check_info_t;
 
 typedef struct pal_bus_check_info_s {
-	u64		size		: 5,	/* Xaction size */
+	u64		size		: 5,	/* Xaction size*/
 			ib		: 1,	/* Internal bus error */
 			eb		: 1,	/* External bus error */
 			cc		: 1,	/* Error occurred
@@ -553,90 +515,15 @@ typedef struct pal_bus_check_info_s {
 						 */
 			type		: 8,	/* Bus xaction type*/
 			sev		: 5,	/* Bus error severity*/
-			hier		: 2,	/* Bus hierarchy level */
-			reserved1	: 1,
+			tv		: 1,	/* Targ addr valid */
+			rp		: 1,	/* Resp addr valid */
+			rq		: 1,	/* Req addr valid */
 			bsi		: 8,	/* Bus error status
 						 * info
 						 */
-			reserved2	: 22,
-
-			is		: 1,	/* instruction set (1 == ia32) */
-			iv		: 1,	/* instruction set field valid */
-			pl		: 2,	/* privilege level */
-			pv		: 1,	/* privilege level field valid */
-			mcc		: 1,	/* Machine check corrected */
-			tv		: 1,	/* Target address
-						 * structure is valid
-						 */
-			rq		: 1,	/* Requester identifier
-						 * structure is valid
-						 */
-			rp		: 1,	/* Responder identifier
-						 * structure is valid
-						 */
-			pi		: 1;	/* Precise instruction pointer
-						 * structure is valid
-						 */
+			mc		: 1,	/* Machine check corrected */
+			reserved1	: 31;
 } pal_bus_check_info_t;
-
-typedef struct pal_reg_file_check_info_s {
-	u64		id		: 4,	/* Register file identifier */
-			op		: 4,	/* Type of register
-						 * operation that
-						 * caused the machine
-						 * check.
-						 */
-			reg_num		: 7,	/* Register number */
-			rnv		: 1,	/* reg_num valid */
-			reserved2	: 38,
-
-			is		: 1,	/* instruction set (1 == ia32) */
-			iv		: 1,	/* instruction set field valid */
-			pl		: 2,	/* privilege level */
-			pv		: 1,	/* privilege level field valid */
-			mcc		: 1,	/* Machine check corrected */
-			reserved3	: 3,
-			pi		: 1;	/* Precise instruction pointer
-						 * structure is valid
-						 */
-} pal_reg_file_check_info_t;
-
-typedef struct pal_uarch_check_info_s {
-	u64		sid		: 5,	/* Structure identification */
-			level		: 3,	/* Level of failure */
-			array_id	: 4,	/* Array identification */
-			op		: 4,	/* Type of
-						 * operation that
-						 * caused the machine
-						 * check.
-						 */
-			way		: 6,	/* Way of structure */
-			wv		: 1,	/* way valid */
-			xv		: 1,	/* index valid */
-			reserved1	: 8,
-			index		: 8,	/* Index or set of the uarch
-						 * structure that failed.
-						 */
-			reserved2	: 24,
-
-			is		: 1,	/* instruction set (1 == ia32) */
-			iv		: 1,	/* instruction set field valid */
-			pl		: 2,	/* privilege level */
-			pv		: 1,	/* privilege level field valid */
-			mcc		: 1,	/* Machine check corrected */
-			tv		: 1,	/* Target address
-						 * structure is valid
-						 */
-			rq		: 1,	/* Requester identifier
-						 * structure is valid
-						 */
-			rp		: 1,	/* Responder identifier
-						 * structure is valid
-						 */
-			pi		: 1;	/* Precise instruction pointer
-						 * structure is valid
-						 */
-} pal_uarch_check_info_t;
 
 typedef union pal_mc_error_info_u {
 	u64				pmei_data;
@@ -644,8 +531,6 @@ typedef union pal_mc_error_info_u {
 	pal_cache_check_info_t		pme_cache;
 	pal_tlb_check_info_t		pme_tlb;
 	pal_bus_check_info_t		pme_bus;
-	pal_reg_file_check_info_t	pme_reg_file;
-	pal_uarch_check_info_t		pme_uarch;
 } pal_mc_error_info_t;
 
 #define pmci_proc_unknown_check			pme_processor.uc
@@ -736,8 +621,7 @@ typedef struct pal_min_state_area_s {
 	u64	pmsa_xip;		/* previous iip		   */
 	u64	pmsa_xpsr;		/* previous psr		   */
 	u64	pmsa_xfs;		/* previous ifs		   */
-	u64	pmsa_br1;		/* branch register 1	   */
-	u64	pmsa_reserved[70];	/* pal_min_state_area should total to 1KB */
+	u64	pmsa_reserved[71];	/* pal_min_state_area should total to 1KB */
 } pal_min_state_area_t;
 
 
@@ -766,43 +650,11 @@ extern struct ia64_pal_retval ia64_pal_call_stacked (u64, u64, u64, u64);
 extern struct ia64_pal_retval ia64_pal_call_phys_static (u64, u64, u64, u64);
 extern struct ia64_pal_retval ia64_pal_call_phys_stacked (u64, u64, u64, u64);
 
-extern void ia64_save_scratch_fpregs(struct ia64_fpreg *);
-extern void ia64_load_scratch_fpregs(struct ia64_fpreg *);
-
-#define PAL_CALL(iprv,a0,a1,a2,a3) do {                 \
-	struct ia64_fpreg fr[6];                        \
-	ia64_save_scratch_fpregs(fr);                     \
-	iprv = ia64_pal_call_static(a0, a1, a2, a3, 0); \
-	ia64_load_scratch_fpregs(fr);                  \
-} while (0)
-
-#define PAL_CALL_IC_OFF(iprv,a0,a1,a2,a3) do {          \
-	struct ia64_fpreg fr[6];                        \
-	ia64_save_scratch_fpregs(fr);                     \
-	iprv = ia64_pal_call_static(a0, a1, a2, a3, 1); \
-	ia64_load_scratch_fpregs(fr);                  \
-} while (0)
-
-#define PAL_CALL_STK(iprv,a0,a1,a2,a3) do {             \
-	struct ia64_fpreg fr[6];                        \
-	ia64_save_scratch_fpregs(fr);                     \
-	iprv = ia64_pal_call_stacked(a0, a1, a2, a3);   \
-	ia64_load_scratch_fpregs(fr);                  \
-} while (0)
-
-#define PAL_CALL_PHYS(iprv,a0,a1,a2,a3) do {            \
-	struct ia64_fpreg fr[6];                        \
-	ia64_save_scratch_fpregs(fr);                     \
-	iprv = ia64_pal_call_phys_static(a0, a1, a2, a3);\
-	ia64_load_scratch_fpregs(fr);                  \
-} while (0)
-
-#define PAL_CALL_PHYS_STK(iprv,a0,a1,a2,a3) do {        \
-	struct ia64_fpreg fr[6];                        \
-	ia64_save_scratch_fpregs(fr);                     \
-	iprv = ia64_pal_call_phys_stacked(a0, a1, a2, a3); \
-	ia64_load_scratch_fpregs(fr);                  \
-} while (0)
+#define PAL_CALL(iprv,a0,a1,a2,a3)		iprv = ia64_pal_call_static(a0, a1, a2, a3, 0)
+#define PAL_CALL_IC_OFF(iprv,a0,a1,a2,a3)	iprv = ia64_pal_call_static(a0, a1, a2, a3, 1)
+#define PAL_CALL_STK(iprv,a0,a1,a2,a3)		iprv = ia64_pal_call_stacked(a0, a1, a2, a3)
+#define PAL_CALL_PHYS(iprv,a0,a1,a2,a3)		iprv = ia64_pal_call_phys_static(a0, a1, a2, a3)
+#define PAL_CALL_PHYS_STK(iprv,a0,a1,a2,a3)	iprv = ia64_pal_call_phys_stacked(a0, a1, a2, a3)
 
 typedef int (*ia64_pal_handler) (u64, ...);
 extern ia64_pal_handler ia64_pal;
@@ -1549,7 +1401,5 @@ ia64_pal_prefetch_visibility (void)
 }
 
 #endif /* __ASSEMBLY__ */
-
-#endif /* __KERNEL__ */
 
 #endif /* _ASM_IA64_PAL_H */

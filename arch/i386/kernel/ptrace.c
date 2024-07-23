@@ -369,8 +369,12 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 		}
 		ret = 0;
-		if ( !child->used_math )
-			load_empty_fpu(child);
+		if ( !child->used_math ) {
+			/* Simulate an empty FPU. */
+			set_fpu_cwd(child, 0x037f);
+			set_fpu_swd(child, 0x0000);
+			set_fpu_twd(child, 0xffff);
+		}
 		get_fpregs((struct user_i387_struct *)data, child);
 		break;
 	}
@@ -393,8 +397,13 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			ret = -EIO;
 			break;
 		}
-		if ( !child->used_math )
-			load_empty_fpu(child);
+		if ( !child->used_math ) {
+			/* Simulate an empty FPU. */
+			set_fpu_cwd(child, 0x037f);
+			set_fpu_swd(child, 0x0000);
+			set_fpu_twd(child, 0xffff);
+			set_fpu_mxcsr(child, 0x1f80);
+		}
 		ret = get_fpxregs((struct user_fxsr_struct *)data, child);
 		break;
 	}

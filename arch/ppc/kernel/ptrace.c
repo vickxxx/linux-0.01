@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.ptrace.c 1.8 07/07/01 17:00:08 paulus
+ */
+/*
  *  linux/arch/ppc/kernel/ptrace.c
  *
  *  PowerPC version
@@ -13,7 +16,8 @@
  * and Paul Mackerras (paulus@linuxcare.com.au).
  *
  * This file is subject to the terms and conditions of the GNU General
- * Public License.  Please read the COPYING file for all license details.
+ * Public License.  See the file README.legal in the main directory of
+ * this archive for more details.
  */
 
 #include <linux/kernel.h>
@@ -33,11 +37,7 @@
 /*
  * Set of msr bits that gdb can change on behalf of a process.
  */
-#if defined(CONFIG_4xx)
-#define MSR_DEBUGCHANGE	(0)
-#else
 #define MSR_DEBUGCHANGE	(MSR_FE0 | MSR_SE | MSR_BE | MSR_FE1)
-#endif
 
 /*
  * does not yet catch signals sent when the child dies.
@@ -71,89 +71,22 @@ static inline int put_reg(struct task_struct *task, int regno,
 	return -EIO;
 }
 
-#ifdef CONFIG_ALTIVEC
-/*
- * Get contents of AltiVec register state in task TASK
- */
-static inline int get_vrregs(unsigned long *data, struct task_struct *task)
-{
-	int i, j;
-
-	if (!access_ok(VERIFY_WRITE, data, 133 * sizeof(unsigned long)))
-		return -EFAULT;
-
-	/* copy AltiVec registers VR[0] .. VR[31] */
-	for (i = 0; i < 32; i++)
-		for (j = 0; j < 4; j++, data++)
-			if (__put_user(task->thread.vr[i].u[j], data))
-				return -EFAULT;
-
-	/* copy VSCR */
-	for (i = 0; i < 4; i++, data++)
-		if (__put_user(task->thread.vscr.u[i], data))
-			return -EFAULT;
-
-        /* copy VRSAVE */
-	if (__put_user(task->thread.vrsave, data))
-		return -EFAULT;
-
-	return 0;
-}
-
-/*
- * Write contents of AltiVec register state into task TASK.
- */
-static inline int set_vrregs(struct task_struct *task, unsigned long *data)
-{
-	int i, j;
-
-	if (!access_ok(VERIFY_READ, data, 133 * sizeof(unsigned long)))
-		return -EFAULT;
-
-	/* copy AltiVec registers VR[0] .. VR[31] */
-	for (i = 0; i < 32; i++)
-		for (j = 0; j < 4; j++, data++)
-			if (__get_user(task->thread.vr[i].u[j], data))
-				return -EFAULT;
-
-	/* copy VSCR */
-	for (i = 0; i < 4; i++, data++)
-		if (__get_user(task->thread.vscr.u[i], data))
-			return -EFAULT;
-
-	/* copy VRSAVE */
-	if (__get_user(task->thread.vrsave, data))
-		return -EFAULT;
-
-	return 0;
-}
-#endif
-
 static inline void
 set_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-#if defined(CONFIG_4xx)
-	regs->msr |= MSR_DE;
-	task->thread.dbcr0 |=  (DBCR0_IDM | DBCR0_IC);
-#else
+
 	if (regs != NULL)
 		regs->msr |= MSR_SE;
-#endif
-
 }
 
 static inline void
 clear_single_step(struct task_struct *task)
 {
 	struct pt_regs *regs = task->thread.regs;
-#if defined(CONFIG_4xx)
-	regs->msr &= ~MSR_DE;
-	task->thread.dbcr0 &=  ~DBCR0_IC;
-#else
+
 	if (regs != NULL)
 		regs->msr &= ~MSR_SE;
-#endif
 }
 
 /*
@@ -199,14 +132,19 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		ret = ptrace_attach(child);
 		goto out_tsk;
 	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
+	ret = -ESRCH;
+	if (!(child->ptrace & PT_PTRACED))
+		goto out_tsk;
+	if (child->state != TASK_STOPPED) {
+		if (request != PTRACE_KILL)
+			goto out_tsk;
+	}
+	if (child->p_pptr != current)
 		goto out_tsk;
 
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
-	case PTRACE_PEEKTEXT: /* read word at location addr. */
+	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
 		int copied;
@@ -288,20 +226,14 @@ int sys_ptrace(long request, long pid, long addr, long data)
 		child->exit_code = data;
 		/* make sure the single step bit is not set. */
 		clear_single_step(child);
-#ifdef CONFIG_4xx
-		/* ...but traps may be set, so catch those....
-		*/
-		child->thread.regs->msr   |= MSR_DE;
-		child->thread.dbcr0 |= (DBCR0_IDM | DBCR0_TDE);
-#endif
 		wake_up_process(child);
 		ret = 0;
 		break;
 	}
 
 /*
- * make the child exit.  Best I can do is send it a sigkill.
- * perhaps it should be put in the status that it wants to
+ * make the child exit.  Best I can do is send it a sigkill. 
+ * perhaps it should be put in the status that it wants to 
  * exit.
  */
 	case PTRACE_KILL: {
@@ -331,24 +263,6 @@ int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_DETACH:
 		ret = ptrace_detach(child, data);
 		break;
-
-#ifdef CONFIG_ALTIVEC
-	case PTRACE_GETVRREGS:
-		/* Get the child altivec register state. */
-		if (child->thread.regs->msr & MSR_VEC)
-			giveup_altivec(child);
-		ret = get_vrregs((unsigned long *)data, child);
-		break;
-
-	case PTRACE_SETVRREGS:
-		/* Set the child altivec register state. */
-		/* this is to clear the MSR_VEC bit to force a reload
-		 * of register state from memory */
-		if (child->thread.regs->msr & MSR_VEC)
-			giveup_altivec(child);
-		ret = set_vrregs(child, (unsigned long *)data);
-		break;
-#endif
 
 	default:
 		ret = -EIO;

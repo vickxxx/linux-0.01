@@ -13,7 +13,8 @@ extern struct page *highmem_start_page;
 /* declarations for linux/mm/highmem.c */
 unsigned int nr_free_highpages(void);
 
-extern struct buffer_head *create_bounce(int rw, struct buffer_head * bh_orig);
+extern struct buffer_head * create_bounce(int rw, struct buffer_head * bh_orig);
+
 
 static inline char *bh_kmap(struct buffer_head *bh)
 {
@@ -23,42 +24,6 @@ static inline char *bh_kmap(struct buffer_head *bh)
 static inline void bh_kunmap(struct buffer_head *bh)
 {
 	kunmap(bh->b_page);
-}
-
-/*
- * remember to add offset! and never ever reenable interrupts between a
- * bh_kmap_irq and bh_kunmap_irq!!
- */
-static inline char *bh_kmap_irq(struct buffer_head *bh, unsigned long *flags)
-{
-	unsigned long addr;
-
-	__save_flags(*flags);
-
-	/*
-	 * could be low
-	 */
-	if (!PageHighMem(bh->b_page))
-		return bh->b_data;
-
-	/*
-	 * it's a highmem page
-	 */
-	__cli();
-	addr = (unsigned long) kmap_atomic(bh->b_page, KM_BH_IRQ);
-
-	if (addr & ~PAGE_MASK)
-		BUG();
-
-	return (char *) addr + bh_offset(bh);
-}
-
-static inline void bh_kunmap_irq(char *buffer, unsigned long *flags)
-{
-	unsigned long ptr = (unsigned long) buffer & PAGE_MASK;
-
-	kunmap_atomic((void *) ptr, KM_BH_IRQ);
-	__restore_flags(*flags);
 }
 
 #else /* CONFIG_HIGHMEM */
@@ -72,11 +37,8 @@ static inline void *kmap(struct page *page) { return page_address(page); }
 #define kmap_atomic(page,idx)		kmap(page)
 #define kunmap_atomic(page,idx)		kunmap(page)
 
-#define bh_kmap(bh)			((bh)->b_data)
-#define bh_kunmap(bh)			do { } while (0)
-#define kmap_nonblock(page)            kmap(page)
-#define bh_kmap_irq(bh, flags)		((bh)->b_data)
-#define bh_kunmap_irq(bh, flags)	do { *(flags) = 0; } while (0)
+#define bh_kmap(bh)	((bh)->b_data)
+#define bh_kunmap(bh)	do { } while (0)
 
 #endif /* CONFIG_HIGHMEM */
 
@@ -94,6 +56,17 @@ static inline void clear_highpage(struct page *page)
 	kunmap(page);
 }
 
+static inline void memclear_highpage(struct page *page, unsigned int offset, unsigned int size)
+{
+	char *kaddr;
+
+	if (offset + size > PAGE_SIZE)
+		BUG();
+	kaddr = kmap(page);
+	memset(kaddr + offset, 0, size);
+	kunmap(page);
+}
+
 /*
  * Same but also flushes aliased cache contents to RAM.
  */
@@ -102,10 +75,9 @@ static inline void memclear_highpage_flush(struct page *page, unsigned int offse
 	char *kaddr;
 
 	if (offset + size > PAGE_SIZE)
-		out_of_line_bug();
+		BUG();
 	kaddr = kmap(page);
 	memset(kaddr + offset, 0, size);
-	flush_dcache_page(page);
 	flush_page_to_ram(page);
 	kunmap(page);
 }
@@ -125,11 +97,11 @@ static inline void copy_highpage(struct page *to, struct page *from)
 {
 	char *vfrom, *vto;
 
-	vfrom = kmap_atomic(from, KM_USER0);
-	vto = kmap_atomic(to, KM_USER1);
+	vfrom = kmap(from);
+	vto = kmap(to);
 	copy_page(vto, vfrom);
-	kunmap_atomic(vfrom, KM_USER0);
-	kunmap_atomic(vto, KM_USER1);
+	kunmap(from);
+	kunmap(to);
 }
 
 #endif /* _LINUX_HIGHMEM_H */

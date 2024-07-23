@@ -10,8 +10,6 @@
  * Modified by:   Dag Brattli <dag@brattli.net>
  * Modified at:   Tue Jun 26 2001
  * Modified by:   Stefani Seibold <stefani@seibold.net>
- * Modified at:   Thur Apr 18 2002
- * Modified by:   Jeff Snyder <je4d@pobox.com>
  * 
  *     Copyright (c) 2001      Stefani Seibold
  *     Copyright (c) 1999-2001 Dag Brattli
@@ -172,7 +170,7 @@ static inline void register_bank(int iobase, int bank)
 
 static int __init smc_access(unsigned short cfg_base,unsigned char reg)
 {
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	outb(reg, cfg_base);
 
@@ -186,7 +184,7 @@ static const smc_chip_t * __init smc_probe(unsigned short cfg_base,u8 reg,const 
 {
 	u8 devid,xdevid,rev; 
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	/* Leave configuration */
 
@@ -265,7 +263,7 @@ static int __init smc_superio_flat(const smc_chip_t *chips, unsigned short cfg_b
 	u8 mode;
 	int ret = -ENODEV;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	if (smc_probe(cfg_base,0xD,chips,type)==NULL)
 		return ret;
@@ -309,7 +307,7 @@ static int __init smc_superio_paged(const smc_chip_t *chips, unsigned short cfg_
 	unsigned short sir_io;
 	int ret = -ENODEV;
 	
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	if (smc_probe(cfg_base,0x20,chips,type)==NULL)
 		return ret;
@@ -345,8 +343,8 @@ static int __init smc_superio_paged(const smc_chip_t *chips, unsigned short cfg_
 static int __init smc_superio_fdc(unsigned short cfg_base)
 {
 	if (check_region(cfg_base, 2) < 0) {
-		IRDA_DEBUG(0, "%s: can't get cfg_base of 0x%03x\n",
-			__FUNCTION__, cfg_base);
+		IRDA_DEBUG(0, __FUNCTION__ ": can't get cfg_base of 0x%03x\n",
+			   cfg_base);
 		return -1;
 	}
 
@@ -360,8 +358,8 @@ static int __init smc_superio_lpc(unsigned short cfg_base)
 {
 #if 0
 	if (check_region(cfg_base, 2) < 0) {
-		IRDA_DEBUG(0, "%s: can't get cfg_base of 0x%03x\n",
-			__FUNCTION__, cfg_base);
+		IRDA_DEBUG(0, __FUNCTION__ ": can't get cfg_base of 0x%03x\n",
+			   cfg_base);
 		return -1;
 	}
 #endif
@@ -382,7 +380,7 @@ int __init ircc_init(void)
 {
 	int ret=-ENODEV;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	dev_count=0;
 
@@ -405,7 +403,8 @@ int __init ircc_init(void)
 
 	/* Trys to open for all the SMC chipsets we know about */
 
-	IRDA_DEBUG(0, "%s Try to open all known SMC chipsets\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ 
+	" Try to open all known SMC chipsets\n");
 
 	if (!smc_superio_fdc(0x3f0))
 		ret=0;
@@ -434,17 +433,17 @@ static int __init ircc_open(unsigned int fir_base, unsigned int sir_base)
 	unsigned char low, high, chip, config, dma, irq, version;
 
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	if (check_region(fir_base, CHIP_IO_EXTENT) < 0) {
-		IRDA_DEBUG(0, "%s: can't get fir_base of 0x%03x\n",
-			__FUNCTION__, fir_base);
+		IRDA_DEBUG(0, __FUNCTION__ ": can't get fir_base of 0x%03x\n",
+			   fir_base);
 		return -ENODEV;
 	}
 #if POSSIBLE_USED_BY_SERIAL_DRIVER
 	if (check_region(sir_base, CHIP_IO_EXTENT) < 0) {
-		IRDA_DEBUG(0, "%s: can't get sir_base of 0x%03x\n",
-			__FUNCTION__, sir_base);
+		IRDA_DEBUG(0, __FUNCTION__ ": can't get sir_base of 0x%03x\n",
+			   sir_base);
 		return -ENODEV;
 	}
 #endif
@@ -461,8 +460,8 @@ static int __init ircc_open(unsigned int fir_base, unsigned int sir_base)
 	dma     = config & 0x0f;
 
         if (high != 0x10 || low != 0xb8 || (chip != 0xf1 && chip != 0xf2)) { 
-	        IRDA_DEBUG(0, "%s(), addr 0x%04x - no device found!\n", 
-	        	__FUNCTION__, fir_base);
+	        IRDA_DEBUG(0, __FUNCTION__ 
+			   "(), addr 0x%04x - no device found!\n", fir_base);
 		return -ENODEV;
 	}
 	MESSAGE("SMC IrDA Controller found\n IrCC version %d.%d, "
@@ -470,7 +469,8 @@ static int __init ircc_open(unsigned int fir_base, unsigned int sir_base)
 		chip & 0x0f, version, fir_base, sir_base, dma, irq);
 
 	if (dev_count>DIM(dev_self)) {
-	        IRDA_DEBUG(0, "%s(), to many devices!\n", __FUNCTION__);
+	        IRDA_DEBUG(0, __FUNCTION__ 
+			   "(), to many devices!\n");
 		return -ENOMEM;
 	}
 
@@ -539,7 +539,7 @@ static int __init ircc_open(unsigned int fir_base, unsigned int sir_base)
 	if (ircc_irq < 255) {
 		if (ircc_irq!=irq)
 			MESSAGE("%s, Overriding IRQ - chip says %d, using %d\n",
-				driver_name, irq, ircc_irq);
+				driver_name, self->io->irq, ircc_irq);
 		self->io->irq = ircc_irq;
 	}
 	else
@@ -547,13 +547,13 @@ static int __init ircc_open(unsigned int fir_base, unsigned int sir_base)
 	if (ircc_dma < 255) {
 		if (ircc_dma!=dma)
 			MESSAGE("%s, Overriding DMA - chip says %d, using %d\n",
-				driver_name, dma, ircc_dma);
+				driver_name, self->io->dma, ircc_dma);
 		self->io->dma = ircc_dma;
 	}
 	else
 		self->io->dma = dma;
 
-	request_region(self->io->fir_base, CHIP_IO_EXTENT, driver_name);
+	request_region(fir_base, CHIP_IO_EXTENT, driver_name);
 
 	/* Initialize QoS for this device */
 	irda_init_max_qos_capabilies(&irport->qos);
@@ -605,7 +605,7 @@ static void ircc_change_speed(void *priv, u32 speed)
 	struct ircc_cb *self = (struct ircc_cb *) priv;
 	struct net_device *dev;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	ASSERT(self != NULL, return;);
 
@@ -620,8 +620,8 @@ static void ircc_change_speed(void *priv, u32 speed)
 
 	switch (speed) {
 	default:
-		IRDA_DEBUG(0, "%s(), unknown baud rate of %d\n", 
-			__FUNCTION__, speed);
+		IRDA_DEBUG(0, __FUNCTION__ "(), unknown baud rate of %d\n", 
+			   speed);
 		/* FALLTHROUGH */
 	case 9600:
 	case 19200:
@@ -636,19 +636,19 @@ static void ircc_change_speed(void *priv, u32 speed)
 		ir_mode = IRCC_CFGA_IRDA_HDLC;
 		ctrl = IRCC_CRC;
 		fast = 0;
-		IRDA_DEBUG(0, "%s(), handling baud of 576000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 576000\n");
 		break;
 	case 1152000:
 		ir_mode = IRCC_CFGA_IRDA_HDLC;
 		ctrl = IRCC_1152 | IRCC_CRC;
 		fast = 0;
-		IRDA_DEBUG(0, "%s(), handling baud of 1152000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 1152000\n");
 		break;
 	case 4000000:
 		ir_mode = IRCC_CFGA_IRDA_4PPM;
 		ctrl = IRCC_CRC;
 		fast = IRCC_LCR_A_FAST;
-		IRDA_DEBUG(0, "%s(), handling baud of 4000000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 4000000\n");
 		break;
 	}
 	
@@ -676,7 +676,8 @@ static void ircc_change_speed(void *priv, u32 speed)
 		dev->hard_start_xmit = &irport_hard_xmit;
 		irport_start(self->irport);
 		
-	        IRDA_DEBUG(0, "%s(), using irport to change speed to %d\n", __FUNCTION__, speed);
+	        IRDA_DEBUG(0, __FUNCTION__ 
+			   "(), using irport to change speed to %d\n", speed);
 		irport_change_speed(self->irport, speed);
 	}	
 
@@ -778,7 +779,7 @@ static void ircc_dma_xmit(struct ircc_cb *self, int iobase, int bofs)
 {
 	u8 ctrl;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "\n");
 #if 0	
 	/* Disable Rx */
 	register_bank(iobase, 0);
@@ -828,7 +829,7 @@ static void ircc_dma_xmit(struct ircc_cb *self, int iobase, int bofs)
  */
 static void ircc_dma_xmit_complete(struct ircc_cb *self, int iobase)
 {
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "\n");
 #if 0
 	/* Disable Tx */
 	register_bank(iobase, 0);
@@ -914,7 +915,7 @@ static void ircc_dma_receive_complete(struct ircc_cb *self, int iobase)
 	struct sk_buff *skb;
 	int len, msgcnt;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "\n");
 #if 0
 	/* Disable Rx */
 	register_bank(iobase, 0);
@@ -923,8 +924,8 @@ static void ircc_dma_receive_complete(struct ircc_cb *self, int iobase)
 	register_bank(iobase, 0);
 	msgcnt = inb(iobase+IRCC_LCR_B) & 0x08;
 
-	IRDA_DEBUG(2, "%s: dma count = %d\n",
-		__FUNCTION__, get_dma_residue(self->io->dma));
+	IRDA_DEBUG(2, __FUNCTION__ ": dma count = %d\n",
+		   get_dma_residue(self->io->dma));
 
 	len = self->rx_buff.truesize - get_dma_residue(self->io->dma);
 	
@@ -935,14 +936,14 @@ static void ircc_dma_receive_complete(struct ircc_cb *self, int iobase)
 		len -= 4;
 
 	if ((len < 2) || (len > 2050)) {
-		WARNING("%s(), bogus len=%d\n", __FUNCTION__, len);
+		WARNING(__FUNCTION__ "(), bogus len=%d\n", len);
 		return;
 	}
-	IRDA_DEBUG(2, "%s: msgcnt = %d, len=%d\n", __FUNCTION__, msgcnt, len);
+	IRDA_DEBUG(2, __FUNCTION__ ": msgcnt = %d, len=%d\n", msgcnt, len);
 
 	skb = dev_alloc_skb(len+1);
 	if (!skb)  {
-		WARNING("%s(), memory squeeze, dropping frame.\n", __FUNCTION__);
+		WARNING(__FUNCTION__ "(), memory squeeze, dropping frame.\n");
 		return;
 	}			
 	/* Make sure IP header gets aligned */
@@ -996,7 +997,7 @@ static void ircc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* Disable interrupts */
 	outb(0, iobase+IRCC_IER);
 
-	IRDA_DEBUG(2, "%s(), iir = 0x%02x\n", __FUNCTION__, iir);
+	IRDA_DEBUG(2, __FUNCTION__ "(), iir = 0x%02x\n", iir);
 
 	if (iir & IRCC_IIR_EOM) {
 		if (self->io->direction == IO_RECV)
@@ -1026,12 +1027,12 @@ static int ircc_is_receiving(struct ircc_cb *self)
 	int status = FALSE;
 	/* int iobase; */
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	ASSERT(self != NULL, return FALSE;);
 
-	IRDA_DEBUG(0, "%s: dma count = %d\n",
-		__FUNCTION__, get_dma_residue(self->io->dma));
+	IRDA_DEBUG(0, __FUNCTION__ ": dma count = %d\n",
+		   get_dma_residue(self->io->dma));
 
 	status = (self->rx_buff.state != OUTSIDE_FRAME);
 	
@@ -1051,7 +1052,7 @@ static int ircc_net_open(struct net_device *dev)
 	struct ircc_cb *self;
 	int iobase;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 	
 	ASSERT(dev != NULL, return -1;);
 	irport = (struct irport_cb *) dev->priv;
@@ -1070,7 +1071,7 @@ static int ircc_net_open(struct net_device *dev)
 	if (request_dma(self->io->dma, dev->name)) {
 		irport_net_close(dev);
 
-		WARNING("%s(), unable to allocate DMA=%d\n", __FUNCTION__, self->io->dma);
+		WARNING(__FUNCTION__ "(), unable to allocate DMA=%d\n", self->io->dma);
 		return -EAGAIN;
 	}
 	
@@ -1091,7 +1092,7 @@ static int ircc_net_close(struct net_device *dev)
 	struct ircc_cb *self;
 	int iobase;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 	
 	ASSERT(dev != NULL, return -1;);
 	irport = (struct irport_cb *) dev->priv;
@@ -1169,7 +1170,7 @@ static int __exit ircc_close(struct ircc_cb *self)
 {
 	int iobase;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	ASSERT(self != NULL, return -1;);
 
@@ -1189,9 +1190,10 @@ static int __exit ircc_close(struct ircc_cb *self)
         outb(IRCC_CFGB_IR, iobase+IRCC_SCE_CFGB);
 #endif
 	/* Release the PORT that this driver is using */
-	IRDA_DEBUG(0, "%s(), releasing 0x%03x\n", __FUNCTION__, iobase);
+	IRDA_DEBUG(0, __FUNCTION__ "(), releasing 0x%03x\n", 
+		   self->io->fir_base);
 
-	release_region(iobase, CHIP_IO_EXTENT);
+	release_region(self->io->fir_base, self->io->fir_ext);
 
 	if (self->tx_buff.head)
 		kfree(self->tx_buff.head);
@@ -1205,16 +1207,16 @@ static int __exit ircc_close(struct ircc_cb *self)
 }
 #endif /* MODULE */
 
-static int __init smc_init(void)
+int __init smc_init(void)
 {
 	return ircc_init();
 }
 
-static void __exit smc_cleanup(void)
+void __exit smc_cleanup(void)
 {
 	int i;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "\n");
 
 	for (i=0; i < 2; i++) {
 		if (dev_self[i])

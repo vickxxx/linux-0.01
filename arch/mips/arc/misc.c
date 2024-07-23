@@ -1,21 +1,13 @@
 /*
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
- * Miscellaneous ARCS PROM routines.
+ * misc.c: Miscellaneous ARCS PROM routines.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
- * Copyright (C) 1999 Ralf Baechle (ralf@gnu.org)
- * Copyright (C) 1999 Silicon Graphics, Inc.
  */
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 
 #include <asm/bcache.h>
-
-#include <asm/arc/types.h>
 #include <asm/sgialib.h>
 #include <asm/bootinfo.h>
 #include <asm/system.h>
@@ -23,81 +15,68 @@
 extern void *sgiwd93_host;
 extern void reset_wd33c93(void *instance);
 
-VOID
-ArcHalt(VOID)
+void prom_halt(void)
 {
 	bc_disable();
 	cli();
 #if CONFIG_SCSI_SGIWD93
 	reset_wd33c93(sgiwd93_host);
 #endif
-	ARC_CALL0(halt);
-never:	goto never;
+	romvec->halt();
 }
 
-VOID
-ArcPowerDown(VOID)
+void prom_powerdown(void)
 {
 	bc_disable();
 	cli();
 #if CONFIG_SCSI_SGIWD93
 	reset_wd33c93(sgiwd93_host);
 #endif
-	ARC_CALL0(pdown);
-never:	goto never;
+	romvec->pdown();
 }
 
 /* XXX is this a soft reset basically? XXX */
-VOID
-ArcRestart(VOID)
+void prom_restart(void)
 {
 	bc_disable();
 	cli();
 #if CONFIG_SCSI_SGIWD93
 	reset_wd33c93(sgiwd93_host);
 #endif
-	ARC_CALL0(restart);
-never:	goto never;
+	romvec->restart();
 }
 
-VOID
-ArcReboot(VOID)
+void prom_reboot(void)
 {
 	bc_disable();
 	cli();
 #if CONFIG_SCSI_SGIWD93
 	reset_wd33c93(sgiwd93_host);
 #endif
-	ARC_CALL0(reboot);
-never:	goto never;
+	romvec->reboot();
 }
 
-VOID
-ArcEnterInteractiveMode(VOID)
+void ArcEnterInteractiveMode(void)
 {
 	bc_disable();
 	cli();
 #if CONFIG_SCSI_SGIWD93
 	reset_wd33c93(sgiwd93_host);
 #endif
-	ARC_CALL0(imode);
-never:	goto never;
+	romvec->imode();
 }
 
-LONG
-ArcSaveConfiguration(VOID)
+long prom_cfgsave(void)
 {
-	return ARC_CALL0(cfg_save);
+	return romvec->cfg_save();
 }
 
-struct linux_sysid *
-ArcGetSystemId(VOID)
+struct linux_sysid *prom_getsysid(void)
 {
-	return (struct linux_sysid *) ARC_CALL0(get_sysid);
+	return romvec->get_sysid();
 }
 
-VOID __init
-ArcFlushAllCaches(VOID)
+void __init prom_cacheflush(void)
 {
-	ARC_CALL0(cache_flush);
+	romvec->cache_flush();
 }

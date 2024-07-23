@@ -21,15 +21,13 @@
  *  2000-01-01	Added quirks handling for buggy hardware
  *		Peter Denison <peterd@pnd-pc.demon.co.uk>
  *  2000-06-14	Added isapnp_probe_devs() and isapnp_activate_dev()
- *		Christoph Hellwig <hch@infradead.org>
+ *		Christoph Hellwig <hch@caldera.de>
  *  2001-06-03  Added release_region calls to correspond with
  *		request_region calls when a failure occurs.  Also
  *		added KERN_* constants to printk() calls.
  *  2001-11-07  Added isapnp_{,un}register_driver calls along the lines
  *              of the pci driver interface
  *              Kai Germaschewski <kai.germaschewski@gmx.de>
- *  2002-06-06  Made the use of dma channel 0 configurable 
- *              Gerald Teschl <gerald.teschl@univie.ac.at>
  */
 
 #include <linux/config.h>
@@ -58,10 +56,13 @@ LIST_HEAD(isapnp_devices);
 #define ISAPNP_DEBUG
 #endif
 
+struct resource *pidxr_res;
+struct resource *pnpwrp_res;
+struct resource *isapnp_rdp_res;
+
 int isapnp_disable;			/* Disable ISA PnP */
 int isapnp_rdp;				/* Read Data Port */
 int isapnp_reset = 1;			/* reset all PnP cards (deactivate) */
-int isapnp_allow_dma0 = -1;		/* allow dma 0 during auto activation: -1=off (:default), 0=off (set by user), 1=on */
 int isapnp_skip_pci_scan;		/* skip PCI resource scanning */
 int isapnp_verbose = 1;			/* verbose mode */
 int isapnp_reserve_irq[16] = { [0 ... 15] = -1 };	/* reserve (don't use) some IRQ */
@@ -77,8 +78,6 @@ MODULE_PARM(isapnp_rdp, "i");
 MODULE_PARM_DESC(isapnp_rdp, "ISA Plug & Play read data port");
 MODULE_PARM(isapnp_reset, "i");
 MODULE_PARM_DESC(isapnp_reset, "ISA Plug & Play reset all cards");
-MODULE_PARM(isapnp_allow_dma0, "i");
-MODULE_PARM_DESC(isapnp_allow_dma0, "Allow dma value 0 during auto activation");
 MODULE_PARM(isapnp_skip_pci_scan, "i");
 MODULE_PARM_DESC(isapnp_skip_pci_scan, "ISA Plug & Play skip PCI resource scanning");
 MODULE_PARM(isapnp_verbose, "i");
@@ -510,6 +509,7 @@ static void __init isapnp_add_irq_resource(struct pci_dev *dev,
                                                int dependent, int size)
 {
 	unsigned char tmp[3];
+	int i;
 	struct isapnp_irq *irq, *ptr;
 
 	isapnp_peek(tmp, size);
@@ -537,13 +537,9 @@ static void __init isapnp_add_irq_resource(struct pci_dev *dev,
 	else
 		(*res)->irq = irq;
 #ifdef CONFIG_PCI
-	{
-		int i;
-
-		for (i=0; i<16; i++)
-			if (irq->map & (1<<i))
-				pcibios_penalize_isa_irq(i);
-	}
+	for (i=0; i<16; i++)
+		if (irq->map & (1<<i))
+			pcibios_penalize_isa_irq(i);
 #endif
 }
 
@@ -896,7 +892,6 @@ static int __init isapnp_create_device(struct pci_bus *card,
 		case _STAG_END:
 			if (size > 0)
 				isapnp_skip_bytes(size);
-			isapnp_config_prepare(dev);
 			return 1;
 		default:
 			printk(KERN_ERR "isapnp: unexpected or unknown tag type 0x%x for logical device %i (device %i), ignored\n", type, dev->devfn, card->number);
@@ -1758,14 +1753,13 @@ static int isapnp_valid_irq(struct isapnp_cfgtmp *cfg, int idx)
 
 static int isapnp_check_dma(struct isapnp_cfgtmp *cfg, int dma, int idx)
 {
-	int i, mindma =1;
+	int i;
 	struct pci_dev *dev;
 
 	/* Some machines allow DMA 0, but others don't. In fact on some 
 	   boxes DMA 0 is the memory refresh. Play safe */
-	if (isapnp_allow_dma0 == 1)
-		mindma = 0;
-	if (dma < mindma || dma == 4 || dma > 7)
+	   
+	if (dma < 1 || dma == 4 || dma > 7)
 		return 1;
 	for (i = 0; i < 8; i++) {
 		if (isapnp_reserve_dma[i] == dma)
@@ -2147,13 +2141,19 @@ static void isapnp_free_card(struct pci_bus *card)
 	kfree(card);
 }
 
+#endif /* MODULE */
+
 static void isapnp_free_all_resources(void)
 {
 #ifdef ISAPNP_REGION_OK
-	release_region(_PIDXR, 1);
+	if (pidxr_res)
+		release_resource(pidxr_res);
 #endif
-	release_region(_PNPWRP, 1);
-	release_region(isapnp_rdp, 1);
+	if (pnpwrp_res)
+		release_resource(pnpwrp_res);
+	if (isapnp_rdp >= 0x203 && isapnp_rdp <= 0x3ff && isapnp_rdp_res)
+		release_resource(isapnp_rdp_res);
+#ifdef MODULE
 #ifdef CONFIG_PROC_FS
 	isapnp_proc_done();
 #endif
@@ -2162,9 +2162,8 @@ static void isapnp_free_all_resources(void)
 		list_del(list);
 		isapnp_free_card(pci_bus_b(list));
 	}
+#endif
 }
-
-#endif /* MODULE */
 
 static int isapnp_announce_device(struct isapnp_driver *drv, 
 				  struct pci_dev *dev)
@@ -2284,12 +2283,14 @@ int __init isapnp_init(void)
 		return 0;
 	}
 #ifdef ISAPNP_REGION_OK
-	if (!request_region(_PIDXR, 1, "isapnp index")) {
+	pidxr_res=request_region(_PIDXR, 1, "isapnp index");
+	if(!pidxr_res) {
 		printk(KERN_ERR "isapnp: Index Register 0x%x already used\n", _PIDXR);
 		return -EBUSY;
 	}
 #endif
-	if (!request_region(_PNPWRP, 1, "isapnp write")) {
+	pnpwrp_res=request_region(_PNPWRP, 1, "isapnp write");
+	if(!pnpwrp_res) {
 		printk(KERN_ERR "isapnp: Write Data Register 0x%x already used\n", _PNPWRP);
 #ifdef ISAPNP_REGION_OK
 		release_region(_PIDXR, 1);
@@ -2305,12 +2306,13 @@ int __init isapnp_init(void)
 	printk(KERN_INFO "isapnp: Scanning for PnP cards...\n");
 	if (isapnp_rdp >= 0x203 && isapnp_rdp <= 0x3ff) {
 		isapnp_rdp |= 3;
-		if (!request_region(isapnp_rdp, 1, "isapnp read")) {
+		isapnp_rdp_res=request_region(isapnp_rdp, 1, "isapnp read");
+		if(!isapnp_rdp_res) {
 			printk(KERN_ERR "isapnp: Read Data Register 0x%x already used\n", isapnp_rdp);
 #ifdef ISAPNP_REGION_OK
 			release_region(_PIDXR, 1);
 #endif
-			release_region(_PNPWRP, 1);
+			release_region(isapnp_rdp, 1);
 			return -EBUSY;
 		}
 		isapnp_set_rdp();
@@ -2320,15 +2322,12 @@ int __init isapnp_init(void)
 		cards = isapnp_isolate();
 		if (cards < 0 || 
 		    (isapnp_rdp < 0x203 || isapnp_rdp > 0x3ff)) {
-#ifdef ISAPNP_REGION_OK
-			release_region(_PIDXR, 1);
-#endif
-			release_region(_PNPWRP, 1);
+			isapnp_free_all_resources();
 			isapnp_detected = 0;
 			printk(KERN_INFO "isapnp: No Plug & Play device found\n");
 			return 0;
 		}
-		request_region(isapnp_rdp, 1, "isapnp read");
+		isapnp_rdp_res=request_region(isapnp_rdp, 1, "isapnp read");
 	}
 	isapnp_build_device_list();
 	cards = 0;

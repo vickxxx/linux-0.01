@@ -102,9 +102,7 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 
 	if (regno == 30) {
 		addr = &task->thread.usp;
-	} else if (regno == 65) {
-		addr = &task->thread.unique;
-	} else if (regno == 31 || regno > 65) {
+	} else if (regno == 31 || regno > 64) {
 		zero = 0;
 		addr = &zero;
 	} else {

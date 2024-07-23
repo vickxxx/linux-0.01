@@ -8,7 +8,6 @@
 
 #include <linux/config.h>
 #include <linux/threads.h>
-#include <linux/cache.h>
 #include <asm/asi.h>
 #include <asm/starfire.h>
 #include <asm/spitfire.h>
@@ -35,7 +34,7 @@ extern struct prom_cpuinfo linux_cpus[64];
 /* Per processor Sparc parameters we need. */
 
 /* Keep this a multiple of 64-bytes for cache reasons. */
-typedef struct {
+struct cpuinfo_sparc {
 	/* Dcache line 1 */
 	unsigned int	__pad0;		/* bh_count moved to irq_stat for consistency. KAO */
 	unsigned int	multiplier;
@@ -52,14 +51,15 @@ typedef struct {
 
 	/* Dcache lines 3 and 4 */
 	unsigned int	irq_worklists[16];
-} ____cacheline_aligned cpuinfo_sparc;
+};
 
-extern cpuinfo_sparc cpu_data[NR_CPUS];
+extern struct cpuinfo_sparc cpu_data[NR_CPUS];
 
 /*
  *	Private routines/data
  */
  
+extern unsigned char boot_cpu_id;
 extern unsigned long cpu_present_map;
 #define cpu_online_map cpu_present_map
 
@@ -85,20 +85,12 @@ extern __inline__ int cpu_number_map(int cpu)
 
 extern __inline__ int hard_smp_processor_id(void)
 {
-	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
-		unsigned long cfg, ver;
-		__asm__ __volatile__("rdpr %%ver, %0" : "=r" (ver));
-		if ((ver >> 32) == 0x003e0016) {
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (cfg)
-					     : "i" (ASI_JBUS_CONFIG));
-			return ((cfg >> 17) & 0x1f);
-		} else {
-			__asm__ __volatile__("ldxa [%%g0] %1, %0"
-					     : "=r" (cfg)
-					     : "i" (ASI_SAFARI_CONFIG));
-			return ((cfg >> 17) & 0x3ff);
-		}
+	if (tlb_type == cheetah) {
+		unsigned long safari_config;
+		__asm__ __volatile__("ldxa [%%g0] %1, %0"
+				     : "=r" (safari_config)
+				     : "i" (ASI_SAFARI_CONFIG));
+		return ((safari_config >> 17) & 0x3ff);
 	} else if (this_is_starfire != 0) {
 		return starfire_hard_smp_processor_id();
 	} else {

@@ -1,4 +1,4 @@
-/* $Id: hisax.h,v 1.1.4.2 2001/12/09 19:15:28 kai Exp $
+/* $Id: hisax.h,v 2.52.6.9 2001/09/23 22:24:48 kai Exp $
  *
  * Basic declarations, defines and prototypes
  *
@@ -68,9 +68,6 @@
 #define DL_DATA		0x0220
 #define DL_FLUSH	0x0224
 #define DL_UNIT_DATA	0x0230
-
-#define MDL_BC_RELEASE  0x0278  // Formula-n enter:now
-#define MDL_BC_ASSIGN   0x027C  // Formula-n enter:now
 #define MDL_ASSIGN	0x0280
 #define MDL_REMOVE	0x0284
 #define MDL_ERROR	0x0288
@@ -395,15 +392,15 @@ struct isar_hw {
 
 struct hdlc_stat_reg {
 #ifdef __BIG_ENDIAN
-	u_char fill;
-	u_char mode;
-	u_char xml;
-	u_char cmd;
+	u_char fill __attribute__((packed));
+	u_char mode __attribute__((packed));
+	u_char xml  __attribute__((packed));
+	u_char cmd  __attribute__((packed));
 #else
-	u_char cmd;
-	u_char xml;
-	u_char mode;
-	u_char fill;
+	u_char cmd  __attribute__((packed));
+	u_char xml  __attribute__((packed));
+	u_char mode __attribute__((packed));
+	u_char fill __attribute__((packed));
 #endif
 };
 
@@ -472,8 +469,6 @@ struct amd7930_hw {
 #define BC_FLG_FTI_RUN	13
 #define BC_FLG_LL_OK	14
 #define BC_FLG_LL_CONN	15
-#define BC_FLG_FTI_FTS	16
-#define BC_FLG_FRH_WAIT	17
 
 #define L1_MODE_NULL	0
 #define L1_MODE_TRANS	1
@@ -838,17 +833,6 @@ struct w6692_chip {
 	int ph_state;
 };
 
-struct amd7930_chip {
-	u_char lmr1;
-	u_char ph_state;
-	u_char old_state;
-	u_char flg_t3;
-	unsigned int tx_xmtlen;
-	struct timer_list timer3;
-	void (*ph_command) (struct IsdnCardState *, u_char, char *);
-	void (*setIrqMask) (struct IsdnCardState *, u_char);
-};
-
 struct icc_chip {
 	int ph_state;
 	u_char *mon_tx;
@@ -945,7 +929,6 @@ struct IsdnCardState {
 		struct hfcpci_chip hfcpci;
 		struct hfcsx_chip hfcsx;
 		struct w6692_chip w6692;
-		struct amd7930_chip amd7930;
 		struct icc_chip icc;
 	} dc;
 	u_char *rcvbuf;
@@ -966,6 +949,8 @@ struct IsdnCardState {
 #define  MON1_RX	2
 #define  MON0_TX	4
 #define  MON1_TX	8
+
+#define	 HISAX_MAX_CARDS	8
 
 #define  ISDN_CTYPE_16_0	1
 #define  ISDN_CTYPE_8_0		2
@@ -1007,8 +992,7 @@ struct IsdnCardState {
 #define  ISDN_CTYPE_NETJET_U	38
 #define  ISDN_CTYPE_HFC_SP_PCMCIA      39
 #define  ISDN_CTYPE_DYNAMIC     40
-#define  ISDN_CTYPE_ENTERNOW	41
-#define  ISDN_CTYPE_COUNT	41
+#define  ISDN_CTYPE_COUNT	40
 
 
 #ifdef ISDN_CHIP_ISAC
@@ -1265,10 +1249,6 @@ struct IsdnCardState {
 #endif
 #else
 #define CARD_NETJET_U 0
-#endif
-
-#ifdef CONFIG_HISAX_ENTERNOW_PCI
-#define CARD_FN_ENTERNOW_PCI 1
 #endif
 
 #define TEI_PER_CARD 1

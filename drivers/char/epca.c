@@ -585,7 +585,9 @@ static void pc_close(struct tty_struct * tty, struct file * filp)
 		if (tty->driver.flush_buffer)
 			tty->driver.flush_buffer(tty);
 
-		tty_ldisc_flush(tty);
+		if (tty->ldisc.flush_buffer)
+			tty->ldisc.flush_buffer(tty);
+
 		shutdown(ch);
 		tty->closing = 0;
 		ch->event = 0;
@@ -690,13 +692,15 @@ static void pc_hangup(struct tty_struct *tty)
 		cli();
 		if (tty->driver.flush_buffer)
 			tty->driver.flush_buffer(tty);
-		
-		tty_ldisc_flush(tty);
-		
+
+		if (tty->ldisc.flush_buffer)
+			tty->ldisc.flush_buffer(tty);
+
 		shutdown(ch);
 
 		if (ch->count)
 			MOD_DEC_USE_COUNT;
+		
 
 		ch->tty   = NULL;
 		ch->event = 0;
@@ -904,9 +908,7 @@ static int pc_write(struct tty_struct * tty, int from_user,
 				
 				----------------------------------------------------------------- */
 
-				if (copy_from_user(ch->tmp_buf, buf,
-						   bytesAvailable))
-					return -EFAULT;
+				copy_from_user(ch->tmp_buf, buf, bytesAvailable);
 
 			} /* End if area verified */
 
@@ -1171,7 +1173,9 @@ static void pc_flush_buffer(struct tty_struct *tty)
 	memoff(ch);
 	restore_flags(flags);
 
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 
 } /* End pc_flush_buffer */
 
@@ -2017,8 +2021,7 @@ static void post_fep_init(unsigned int crd)
 	    (*(ushort *)((ulong)memaddr + XEPORTS) < 3))
 		shrinkmem = 1;
 	if (bd->type < PCIXEM)
-		if (!request_region((int)bd->port, 4, board_desc[bd->type]))
-			return;		
+		request_region((int)bd->port, 4, board_desc[bd->type]);
 
 	memwinon(bd, 0);
 
@@ -2182,13 +2185,9 @@ static void post_fep_init(unsigned int crd)
 		if (!(ch->tmp_buf))
 		{
 			printk(KERN_ERR "POST FEP INIT : kmalloc failed for port 0x%x\n",i);
-			release_region((int)bd->port, 4);
-			while(i-- > 0)
-				kfree((ch--)->tmp_buf);
-			return;
+
 		}
-		else 
-			memset((void *)ch->tmp_buf,0,ch->txbufsize);
+		memset((void *)ch->tmp_buf,0,ch->txbufsize);
 	} /* End for each port */
 
 	printk(KERN_INFO 
@@ -2377,7 +2376,10 @@ static void doevent(int crd)
 				{ /* Begin if LOWWAIT */
 
 					ch->statusflags &= ~LOWWAIT;
-					tty_wakeup(tty);
+					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+						  tty->ldisc.write_wakeup)
+						(tty->ldisc.write_wakeup)(tty);
+					wake_up_interruptible(&tty->write_wait);
 
 				} /* End if LOWWAIT */
 
@@ -2393,7 +2395,11 @@ static void doevent(int crd)
 				{ /* Begin if EMPTYWAIT */
 
 					ch->statusflags &= ~EMPTYWAIT;
-					tty_wakeup(tty);
+					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+						  tty->ldisc.write_wakeup)
+						(tty->ldisc.write_wakeup)(tty);
+
+					wake_up_interruptible(&tty->write_wait);
 
 				} /* End if EMPTYWAIT */
 
@@ -2994,8 +3000,7 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 				di.port = boards[brd].port ;
 				di.membase = boards[brd].membase ;
 
-				if (copy_to_user((char *)arg, &di, sizeof (di)))
-					return -EFAULT;
+				copy_to_user((char *)arg, &di, sizeof (di));
 				break;
 
 			} /* End case DIGI_GETINFO */
@@ -3064,9 +3069,14 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 	{ /* Begin switch cmd */
 
 		case TCGETS:
-			if (copy_to_user((struct termios *)arg, 
-					 tty->termios, sizeof(struct termios)))
-				return -EFAULT;
+			retval = verify_area(VERIFY_WRITE, (void *)arg,
+                              sizeof(struct termios));
+			
+			if (retval)
+				return(retval);
+
+			copy_to_user((struct termios *)arg, 
+			             tty->termios, sizeof(struct termios));
 			return(0);
 
 		case TCGETA:
@@ -3226,9 +3236,14 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			break;
 
 		case DIGI_GETA:
-			if (copy_to_user((char*)arg, &ch->digiext,
-					 sizeof(digi_t)))
-				return -EFAULT;
+			if ((error=
+				verify_area(VERIFY_WRITE, (char*)arg, sizeof(digi_t))))
+			{
+				printk(KERN_ERR "<Error> - Digi GETA failed\n");
+				return(error);
+			}
+
+			copy_to_user((char*)arg, &ch->digiext, sizeof(digi_t));
 			break;
 
 		case DIGI_SETAW:
@@ -3242,16 +3257,18 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			}
 			else 
 			{
-				/* ldisc lock already held in ioctl */
-				tty_ldisc_flush(tty);
+				if (tty->ldisc.flush_buffer)
+					tty->ldisc.flush_buffer(tty);
 			}
 
 			/* Fall Thru */
 
 		case DIGI_SETA:
-			if (copy_from_user(&ch->digiext, (char*)arg,
-					   sizeof(digi_t)))
-				return -EFAULT;
+			if ((error =
+				verify_area(VERIFY_READ, (char*)arg,sizeof(digi_t))))
+				return(error);
+
+			copy_from_user(&ch->digiext, (char*)arg, sizeof(digi_t));
 			
 			if (ch->digiext.digi_flags & DIGI_ALTPIN) 
 			{
@@ -3294,8 +3311,10 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 			memoff(ch);
 			restore_flags(flags);
 
-			if (copy_to_user((char*)arg, &dflow, sizeof(dflow)))
-				return -EFAULT;
+			if ((error = verify_area(VERIFY_WRITE, (char*)arg,sizeof(dflow))))
+				return(error);
+
+			copy_to_user((char*)arg, &dflow, sizeof(dflow));
 			break;
 
 		case DIGI_SETAFLOW:
@@ -3311,8 +3330,10 @@ static int pc_ioctl(struct tty_struct *tty, struct file * file,
 				stopc = ch->stopca;
 			}
 
-			if (copy_from_user(&dflow, (char*)arg, sizeof(dflow)))
-				return -EFAULT;
+			if ((error = verify_area(VERIFY_READ, (char*)arg,sizeof(dflow))))
+				return(error);
+
+			copy_from_user(&dflow, (char*)arg, sizeof(dflow));
 
 			if (dflow.startc != startc || dflow.stopc != stopc) 
 			{ /* Begin  if setflow toggled */
@@ -3742,7 +3763,7 @@ void epca_setup(char *str, int *ints)
 
 			case 5:
 				board.port = (unsigned char *)ints[index];
-				if (ints[index] <= 0)
+				if (board.port <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid io port 0x%x\n", (unsigned int)board.port);
 					invalid_lilo_config = 1;
@@ -3754,7 +3775,7 @@ void epca_setup(char *str, int *ints)
 
 			case 6:
 				board.membase = (unsigned char *)ints[index];
-				if (ints[index] <= 0)
+				if (board.membase <= 0)
 				{
 					printk(KERN_ERR "<Error> - epca_setup: Invalid memory base 0x%x\n",(unsigned int)board.membase);
 					invalid_lilo_config = 1;

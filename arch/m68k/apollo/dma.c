@@ -10,7 +10,6 @@
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/apollodma.h>
-#include <asm/io.h>
 
 /* note only works for 16 Bit 1 page DMA's */
 
@@ -28,7 +27,7 @@ unsigned short dma_map_page(unsigned long phys_addr,int count,int type) {
 #if 0
 		printk("phys_addr: %x, page_aligned_addr: %x, start_map_addr: %x\n",phys_addr,page_aligned_addr,start_map_addr+i);
 #endif
-		out_be16(xlat_map_entry, start_map_addr+i);
+		outw(start_map_addr+i, xlat_map_entry);
 	}
 
 	next_free_xlat_entry+=2;

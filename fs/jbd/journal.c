@@ -33,6 +33,7 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
 #include <linux/proc_fs.h>
 
@@ -57,7 +58,6 @@ EXPORT_SYMBOL(journal_sync_buffer);
 #endif
 EXPORT_SYMBOL(journal_flush);
 EXPORT_SYMBOL(journal_revoke);
-EXPORT_SYMBOL(journal_callback_set);
 
 EXPORT_SYMBOL(journal_init_dev);
 EXPORT_SYMBOL(journal_init_inode);
@@ -70,6 +70,7 @@ EXPORT_SYMBOL(journal_load);
 EXPORT_SYMBOL(journal_destroy);
 EXPORT_SYMBOL(journal_recover);
 EXPORT_SYMBOL(journal_update_superblock);
+EXPORT_SYMBOL(__journal_abort);
 EXPORT_SYMBOL(journal_abort);
 EXPORT_SYMBOL(journal_errno);
 EXPORT_SYMBOL(journal_ack_err);
@@ -204,7 +205,6 @@ int kjournald(void *arg)
 
 	lock_kernel();
 	daemonize();
-	reparent_to_init();
 	spin_lock_irq(&current->sigmask_lock);
 	sigfillset(&current->blocked);
 	recalc_sigpending(current);
@@ -253,7 +253,6 @@ int kjournald(void *arg)
 
 		/* Were we woken up by a commit wakeup event? */
 		if ((transaction = journal->j_running_transaction) != NULL &&
-		    journal->j_commit_interval &&
 		    time_after_eq(jiffies, transaction->t_expires)) {
 			journal->j_commit_request = transaction->t_tid;
 			jbd_debug(1, "woke because of timeout\n");
@@ -269,7 +268,6 @@ int kjournald(void *arg)
 
 	journal->j_task = NULL;
 	wake_up(&journal->j_wait_done_commit);
-	unlock_kernel();
 	jbd_debug(1, "Journal thread exiting.\n");
 	return 0;
 }
@@ -460,10 +458,11 @@ int journal_write_metadata_buffer(transaction_t *transaction,
 	do {
 		new_bh = get_unused_buffer_head(0);
 		if (!new_bh) {
-			printk (KERN_NOTICE "%s: ENOMEM at "
-				"get_unused_buffer_head, trying again.\n",
-				__FUNCTION__);
-			yield();
+			printk (KERN_NOTICE __FUNCTION__
+				": ENOMEM at get_unused_buffer_head, "
+				"trying again.\n");
+			current->policy |= SCHED_YIELD;
+			schedule();
 		}
 	} while (!new_bh);
 	/* keep subsequent assertions sane */
@@ -588,8 +587,9 @@ void log_wait_commit (journal_t *journal, tid_t tid)
 #ifdef CONFIG_JBD_DEBUG
 	lock_journal(journal);
 	if (!tid_geq(journal->j_commit_request, tid)) {
-		printk(KERN_EMERG "%s: error: j_commit_request=%d, tid=%d\n",
-			__FUNCTION__, journal->j_commit_request, tid);
+		printk(KERN_EMERG __FUNCTION__
+			": error: j_commit_request=%d, tid=%d\n",
+			journal->j_commit_request, tid);
 	}
 	unlock_journal(journal);
 #endif
@@ -606,7 +606,7 @@ void log_wait_commit (journal_t *journal, tid_t tid)
  * Log buffer allocation routines:
  */
 
-int journal_next_log_block(journal_t *journal, unsigned long *retp)
+unsigned long journal_next_log_block(journal_t *journal)
 {
 	unsigned long blocknr;
 
@@ -617,7 +617,7 @@ int journal_next_log_block(journal_t *journal, unsigned long *retp)
 	journal->j_free--;
 	if (journal->j_head == journal->j_last)
 		journal->j_head = journal->j_first;
-	return journal_bmap(journal, blocknr, retp);
+	return journal_bmap(journal, blocknr);
 }
 
 /*
@@ -627,51 +627,32 @@ int journal_next_log_block(journal_t *journal, unsigned long *retp)
  * this is a no-op.  If needed, we can use j_blk_offset - everything is
  * ready.
  */
-int journal_bmap(journal_t *journal, unsigned long blocknr, 
-		 unsigned long *retp)
+unsigned long journal_bmap(journal_t *journal, unsigned long blocknr)
 {
-	int err = 0;
 	unsigned long ret;
 
 	if (journal->j_inode) {
 		ret = bmap(journal->j_inode, blocknr);
-		if (ret)
-			*retp = ret;
-		else {
-			printk (KERN_ALERT "%s: journal block not found "
-				"at offset %lu on %s\n", __FUNCTION__,
-				blocknr, bdevname(journal->j_dev));
-			err = -EIO;
-			__journal_abort_soft(journal, err);
-		}
+		J_ASSERT(ret != 0);
 	} else {
-		*retp = blocknr; /* +journal->j_blk_offset */
+		ret = blocknr;	 /* +journal->j_blk_offset */
 	}
-	return err;
+	return ret;
 }
 
 /*
  * We play buffer_head aliasing tricks to write data/metadata blocks to
  * the journal without copying their contents, but for journal
  * descriptor blocks we do need to generate bona fide buffers.
- *
- * We return a jh whose bh is locked and ready to be populated.
  */
 
 struct journal_head * journal_get_descriptor_buffer(journal_t *journal)
 {
 	struct buffer_head *bh;
-	unsigned long blocknr;
-	int err;
-
-	err = journal_next_log_block(journal, &blocknr);
-
-	if (err)
-		return NULL;
+	unsigned long blocknr = journal_next_log_block(journal);
 
 	bh = getblk(journal->j_dev, blocknr, journal->j_blocksize);
-	lock_buffer(bh);
-	memset(bh->b_data, 0, journal->j_blocksize);
+	bh->b_state |= (1 << BH_Dirty);
 	BUFFER_TRACE(bh, "return this buffer");
 	return journal_add_journal_head(bh);
 }
@@ -707,7 +688,7 @@ static journal_t * journal_init_common (void)
 	init_MUTEX(&journal->j_checkpoint_sem);
 	init_MUTEX(&journal->j_sem);
 
-	journal->j_commit_interval = get_buffer_flushtime();
+	journal->j_commit_interval = (HZ * 5);
 
 	/* The journal is marked for error until we succeed with recovery! */
 	journal->j_flags = JFS_ABORT;
@@ -731,21 +712,14 @@ fail:
  * need to set up all of the mapping information to tell the journaling
  * system where the journal blocks are.
  *
+ * journal_init_dev creates a journal which maps a fixed contiguous
+ * range of blocks on an arbitrary block device.
+ *
+ * journal_init_inode creates a journal which maps an on-disk inode as
+ * the journal.  The inode must exist already, must support bmap() and
+ * must have all data blocks preallocated.
  */
 
- /**
-  *  journal_t * journal_init_dev() - creates an initialises a journal structure
-  *  @kdev: Block device on which to create the journal
-  *  @fs_dev: Device which hold journalled filesystem for this journal.
-  *  @start: Block nr Start of journal.
-  *  @len:  Lenght of the journal in blocks.
-  *  @blocksize: blocksize of journalling device
-  *  @returns: a newly created journal_t *
-  *  
-  *  journal_init_dev creates a journal which maps a fixed contiguous
-  *  range of blocks on an arbitrary block device.
-  * 
-  */
 journal_t * journal_init_dev(kdev_t dev, kdev_t fs_dev,
 			int start, int len, int blocksize)
 {
@@ -768,21 +742,12 @@ journal_t * journal_init_dev(kdev_t dev, kdev_t fs_dev,
 
 	return journal;
 }
- 
-/** 
- *  journal_t * journal_init_inode () - creates a journal which maps to a inode.
- *  @inode: An inode to create the journal in
- *  
- * journal_init_inode creates a journal which maps an on-disk inode as
- * the journal.  The inode must exist already, must support bmap() and
- * must have all data blocks preallocated.
- */
+
 journal_t * journal_init_inode (struct inode *inode)
 {
 	struct buffer_head *bh;
 	journal_t *journal = journal_init_common();
-	int err;
-	unsigned long blocknr;
+	int blocknr;
 
 	if (!journal)
 		return NULL;
@@ -792,40 +757,19 @@ journal_t * journal_init_inode (struct inode *inode)
 	journal->j_inode = inode;
 	jbd_debug(1,
 		  "journal %p: inode %s/%ld, size %Ld, bits %d, blksize %ld\n",
-		  journal, bdevname(inode->i_dev), inode->i_ino, 
-		  (long long) inode->i_size,
+		  journal, bdevname(inode->i_dev), inode->i_ino, inode->i_size,
 		  inode->i_sb->s_blocksize_bits, inode->i_sb->s_blocksize);
 
 	journal->j_maxlen = inode->i_size >> inode->i_sb->s_blocksize_bits;
 	journal->j_blocksize = inode->i_sb->s_blocksize;
 
-	err = journal_bmap(journal, 0, &blocknr);
-	/* If that failed, give up */
-	if (err) {
-		printk(KERN_ERR "%s: Cannnot locate journal superblock\n",
-			__FUNCTION__);
-		kfree(journal);
-		return NULL;
-	}
-	
+	blocknr = journal_bmap(journal, 0);
 	bh = getblk(journal->j_dev, blocknr, journal->j_blocksize);
 	J_ASSERT(bh != NULL);
 	journal->j_sb_buffer = bh;
 	journal->j_superblock = (journal_superblock_t *)bh->b_data;
 
 	return journal;
-}
-
-/* 
- * If the journal init or create aborts, we need to mark the journal
- * superblock as being NULL to prevent the journal destroy from writing
- * back a bogus superblock. 
- */
-static void journal_fail_superblock (journal_t *journal)
-{
-	struct buffer_head *bh = journal->j_sb_buffer;
-	brelse(bh);
-	journal->j_sb_buffer = NULL;
 }
 
 /*
@@ -866,25 +810,21 @@ static int journal_reset (journal_t *journal)
 	return 0;
 }
 
-/** 
- * int journal_create() - Initialise the new journal file
- * @journal: Journal to create. This structure must have been initialised
- * 
+/*
  * Given a journal_t structure which tells us which disk blocks we can
  * use, create a new journal superblock and initialise all of the
- * journal fields from scratch.  
- **/
-int journal_create(journal_t *journal)
+ * journal fields from scratch.  */
+
+int journal_create (journal_t *journal)
 {
-	unsigned long blocknr;
+	int blocknr;
 	struct buffer_head *bh;
 	journal_superblock_t *sb;
-	int i, err;
+	int i;
 
 	if (journal->j_maxlen < JFS_MIN_JOURNAL_BLOCKS) {
 		printk (KERN_ERR "Journal length (%d blocks) too short.\n",
 			journal->j_maxlen);
-		journal_fail_superblock(journal);
 		return -EINVAL;
 	}
 
@@ -892,8 +832,8 @@ int journal_create(journal_t *journal)
 		/*
 		 * We don't know what block to start at!
 		 */
-		printk(KERN_EMERG "%s: creation of journal on external "
-			"device!\n", __FUNCTION__);
+		printk(KERN_EMERG __FUNCTION__
+			": creation of journal on external device!\n");
 		BUG();
 	}
 
@@ -901,9 +841,7 @@ int journal_create(journal_t *journal)
 	   have any blocks on disk beginning with JFS_MAGIC_NUMBER. */
 	jbd_debug(1, "JBD: Zeroing out journal blocks...\n");
 	for (i = 0; i < journal->j_maxlen; i++) {
-		err = journal_bmap(journal, i, &blocknr);
-		if (err)
-			return err;
+		blocknr = journal_bmap(journal, i);
 		bh = getblk(journal->j_dev, blocknr, journal->j_blocksize);
 		wait_on_buffer(bh);
 		memset (bh->b_data, 0, journal->j_blocksize);
@@ -913,8 +851,7 @@ int journal_create(journal_t *journal)
 		mark_buffer_uptodate(bh, 1);
 		__brelse(bh);
 	}
-
-	fsync_no_super(journal->j_dev);
+	sync_dev(journal->j_dev);
 	jbd_debug(1, "JBD: journal cleared.\n");
 
 	/* OK, fill in the initial static fields in the new superblock */
@@ -935,14 +872,11 @@ int journal_create(journal_t *journal)
 	return journal_reset(journal);
 }
 
-/** 
- * void journal_update_superblock() - Update journal sb on disk.
- * @journal: The journal to update.
- * @wait: Set to '0' if you don't want to wait for IO completion.
- *
+/*
  * Update a journal's dynamic superblock fields and write it to disk,
  * optionally waiting for the IO to complete.
- */
+*/
+
 void journal_update_superblock(journal_t *journal, int wait)
 {
 	journal_superblock_t *sb = journal->j_superblock;
@@ -981,8 +915,7 @@ static int journal_get_superblock(journal_t *journal)
 {
 	struct buffer_head *bh;
 	journal_superblock_t *sb;
-	int err = -EIO;
-	
+
 	bh = journal->j_sb_buffer;
 
 	J_ASSERT(bh != NULL);
@@ -992,18 +925,16 @@ static int journal_get_superblock(journal_t *journal)
 		if (!buffer_uptodate(bh)) {
 			printk (KERN_ERR
 				"JBD: IO error reading journal superblock\n");
-			goto out;
+			return -EIO;
 		}
 	}
 
 	sb = journal->j_superblock;
 
-	err = -EINVAL;
-	
 	if (sb->s_header.h_magic != htonl(JFS_MAGIC_NUMBER) ||
 	    sb->s_blocksize != htonl(journal->j_blocksize)) {
 		printk(KERN_WARNING "JBD: no valid journal superblock found\n");
-		goto out;
+		return -EINVAL;
 	}
 
 	switch(ntohl(sb->s_header.h_blocktype)) {
@@ -1015,21 +946,17 @@ static int journal_get_superblock(journal_t *journal)
 		break;
 	default:
 		printk(KERN_WARNING "JBD: unrecognised superblock format ID\n");
-		goto out;
+		return -EINVAL;
 	}
 
 	if (ntohl(sb->s_maxlen) < journal->j_maxlen)
 		journal->j_maxlen = ntohl(sb->s_maxlen);
 	else if (ntohl(sb->s_maxlen) > journal->j_maxlen) {
 		printk (KERN_WARNING "JBD: journal file too short\n");
-		goto out;
+		return -EINVAL;
 	}
 
 	return 0;
-
-out:
-	journal_fail_superblock(journal);
-	return err;
 }
 
 /*
@@ -1058,14 +985,12 @@ static int load_superblock(journal_t *journal)
 }
 
 
-/**
- * int journal_load() - Read journal from disk.
- * @journal: Journal to act on.
- * 
+/*
  * Given a journal_t structure which tells us which disk blocks contain
  * a journal, read the journal from disk to initialise the in-memory
  * structures.
  */
+
 int journal_load(journal_t *journal)
 {
 	int err;
@@ -1110,13 +1035,11 @@ recovery_error:
 	return -EIO;
 }
 
-/**
- * void journal_destroy() - Release a journal_t structure.
- * @journal: Journal to act on.
-* 
+/*
  * Release a journal_t structure once it is no longer in use by the
  * journaled object.
  */
+
 void journal_destroy (journal_t *journal)
 {
 	/* Wait for the commit thread to wake up and die. */
@@ -1138,10 +1061,7 @@ void journal_destroy (journal_t *journal)
 	/* We can now mark the journal as empty. */
 	journal->j_tail = 0;
 	journal->j_tail_sequence = ++journal->j_transaction_sequence;
-	if (journal->j_sb_buffer) {
-		journal_update_superblock(journal, 1);
-		brelse(journal->j_sb_buffer);
-	}
+	journal_update_superblock(journal, 1);
 
 	if (journal->j_inode)
 		iput(journal->j_inode);
@@ -1149,17 +1069,14 @@ void journal_destroy (journal_t *journal)
 		journal_destroy_revoke(journal);
 
 	unlock_journal(journal);
+	brelse(journal->j_sb_buffer);
 	kfree(journal);
 	MOD_DEC_USE_COUNT;
 }
 
 
-/**
- *int journal_check_used_features () - Check if features specified are used.
- * 
- * Check whether the journal uses all of a given set of
- * features.  Return true (non-zero) if it does. 
- **/
+/* Published API: Check whether the journal uses all of a given set of
+ * features.  Return true (non-zero) if it does. */
 
 int journal_check_used_features (journal_t *journal, unsigned long compat,
 				 unsigned long ro, unsigned long incompat)
@@ -1181,10 +1098,7 @@ int journal_check_used_features (journal_t *journal, unsigned long compat,
 	return 0;
 }
 
-/**
- * int journal_check_available_features() - Check feature set in journalling layer
- * 
- * Check whether the journaling code supports the use of
+/* Published API: Check whether the journaling code supports the use of
  * all of a given set of features on this journal.  Return true
  * (non-zero) if it can. */
 
@@ -1213,13 +1127,8 @@ int journal_check_available_features (journal_t *journal, unsigned long compat,
 	return 0;
 }
 
-/**
- * int journal_set_features () - Mark a given journal feature in the superblock
- *
- * Mark a given journal feature as present on the
- * superblock.  Returns true if the requested features could be set. 
- *
- */
+/* Published API: Mark a given journal feature as present on the
+ * superblock.  Returns true if the requested features could be set. */
 
 int journal_set_features (journal_t *journal, unsigned long compat,
 			  unsigned long ro, unsigned long incompat)
@@ -1245,12 +1154,12 @@ int journal_set_features (journal_t *journal, unsigned long compat,
 }
 
 
-/**
- * int journal_update_format () - Update on-disk journal structure.
- *
+/*
+ * Published API:
  * Given an initialised but unloaded journal struct, poke about in the
  * on-disk structure to update it to the most recent supported version.
  */
+
 int journal_update_format (journal_t *journal)
 {
 	journal_superblock_t *sb;
@@ -1300,10 +1209,7 @@ static int journal_convert_superblock_v1(journal_t *journal,
 }
 
 
-/**
- * int journal_flush () - Flush journal
- * @journal: Journal to act on.
- * 
+/*
  * Flush all data for a given journal to disk and empty the journal.
  * Filesystems can use this when remounting readonly to ensure that
  * recovery does not need to happen on remount.
@@ -1357,16 +1263,12 @@ int journal_flush (journal_t *journal)
 	return err;
 }
 
-/**
- * int journal_wipe() - Wipe journal contents
- * @journal: Journal to act on.
- * @write: flag (see below)
- * 
+/*
  * Wipe out all of the contents of a journal, safely.  This will produce
  * a warning if the journal contains any valid recovery information.
  * Must be called between journal_init_*() and journal_load().
  *
- * If 'write' is non-zero, then we wipe out the journal on disk; otherwise
+ * If (write) is non-zero, then we wipe out the journal on disk; otherwise
  * we merely suppress recovery.
  */
 
@@ -1415,58 +1317,10 @@ const char * journal_dev_name(journal_t *journal)
 }
 
 /*
- * Journal abort has very specific semantics, which we describe
- * for journal abort. 
- *
- * Two internal function, which provide abort to te jbd layer
- * itself are here.
- */
-
-/* Quick version for internal journal use (doesn't lock the journal).
- * Aborts hard --- we mark the abort as occurred, but do _nothing_ else,
- * and don't attempt to make any other journal updates. */
-void __journal_abort_hard (journal_t *journal)
-{
-	transaction_t *transaction;
-
-	if (journal->j_flags & JFS_ABORT)
-		return;
-
-	printk (KERN_ERR "Aborting journal on device %s.\n",
-		journal_dev_name(journal));
-
-	journal->j_flags |= JFS_ABORT;
-	transaction = journal->j_running_transaction;
-	if (transaction)
-		log_start_commit(journal, transaction);
-}
-
-/* Soft abort: record the abort error status in the journal superblock,
- * but don't do any other IO. */
-void __journal_abort_soft (journal_t *journal, int errno)
-{
-	if (journal->j_flags & JFS_ABORT)
-		return;
-
-	if (!journal->j_errno)
-		journal->j_errno = errno;
-
-	__journal_abort_hard(journal);
-
-	if (errno)
-		journal_update_superblock(journal, 1);
-}
-
-/**
- * void journal_abort () - Shutdown the journal immediately.
- * @journal: the journal to shutdown.
- * @errno:   an error number to record in the journal indicating
- *           the reason for the shutdown.
- *
- * Perform a complete, immediate shutdown of the ENTIRE
+ * journal_abort: perform a complete, immediate shutdown of the ENTIRE
  * journal (not of a single transaction).  This operation cannot be
  * undone without closing and reopening the journal.
- *           
+ *
  * The journal_abort function is intended to support higher level error
  * recovery mechanisms such as the ext2/ext3 remount-readonly error
  * mode.
@@ -1490,7 +1344,7 @@ void __journal_abort_soft (journal_t *journal, int errno)
  * final journal_stop, which will receive the -EIO error.
  *
  * Finally, the journal_abort call allows the caller to supply an errno
- * which will be recorded (if possible) in the journal superblock.  This
+ * which will be recored (if possible) in the journal superblock.  This
  * allows a client to record failure conditions in the middle of a
  * transaction without having to complete the transaction to record the
  * failure to disk.  ext3_error, for example, now uses this
@@ -1500,27 +1354,42 @@ void __journal_abort_soft (journal_t *journal, int errno)
  * supply an errno; a null errno implies that absolutely no further
  * writes are done to the journal (unless there are any already in
  * progress).
- * 
  */
 
+/* Quick version for internal journal use (doesn't lock the journal) */
+void __journal_abort (journal_t *journal)
+{
+	transaction_t *transaction;
+
+	printk (KERN_ERR "Aborting journal on device %s.\n",
+		journal_dev_name(journal));
+
+	journal->j_flags |= JFS_ABORT;
+	transaction = journal->j_running_transaction;
+	if (transaction)
+		log_start_commit(journal, transaction);
+}
+
+/* Full version for external use */
 void journal_abort (journal_t *journal, int errno)
 {
 	lock_journal(journal);
-	__journal_abort_soft(journal, errno);
+
+	if (journal->j_flags & JFS_ABORT)
+		goto out;
+
+	if (!journal->j_errno)
+		journal->j_errno = errno;
+
+	__journal_abort(journal);
+
+	if (errno)
+		journal_update_superblock(journal, 1);
+
+ out:
 	unlock_journal(journal);
 }
 
-/** 
- * int journal_errno () - returns the journal's error state.
- * @journal: journal to examine.
- *
- * This is the errno numbet set with journal_abort(), the last
- * time the journal was mounted - if the journal was stopped
- * without calling abort this will be 0.
- *
- * If the journal has been aborted on this mount time -EROFS will
- * be returned.
- */
 int journal_errno (journal_t *journal)
 {
 	int err;
@@ -1534,14 +1403,6 @@ int journal_errno (journal_t *journal)
 	return err;
 }
 
-
-
-/** 
- * int journal_clear_err () - clears the journal's error state
- *
- * An error must be cleared or Acked to take a FS out of readonly
- * mode.
- */
 int journal_clear_err (journal_t *journal)
 {
 	int err = 0;
@@ -1555,13 +1416,6 @@ int journal_clear_err (journal_t *journal)
 	return err;
 }
 
-
-/** 
- * void journal_ack_err() - Ack journal err.
- *
- * An error must be cleared or Acked to take a FS out of readonly
- * mode.
- */
 void journal_ack_err (journal_t *journal)
 {
 	lock_journal(journal);
@@ -1569,49 +1423,6 @@ void journal_ack_err (journal_t *journal)
 		journal->j_flags |= JFS_ACK_ERR;
 	unlock_journal(journal);
 }
-
-
-/*
- * Report any unexpected dirty buffers which turn up.  Normally those
- * indicate an error, but they can occur if the user is running (say)
- * tune2fs to modify the live filesystem, so we need the option of
- * continuing as gracefully as possible.  #
- *
- * The caller should already hold the journal lock and
- * journal_datalist_lock spinlock: most callers will need those anyway
- * in order to probe the buffer's journaling state safely.
- */
-void __jbd_unexpected_dirty_buffer(const char *function, int line, 
-				 struct journal_head *jh)
-{
-	struct buffer_head *bh = jh2bh(jh);
-	int jlist;
-	
-	if (buffer_dirty(bh)) {
-		printk ("%sUnexpected dirty buffer encountered at "
-			"%s:%d (%s blocknr %lu)\n",
-			KERN_WARNING, function, line,
-			kdevname(bh->b_dev), bh->b_blocknr);
-#ifdef JBD_PARANOID_WRITES
-		J_ASSERT_BH (bh, !buffer_dirty(bh));
-#endif	
-		
-		/* If this buffer is one which might reasonably be dirty
-		 * --- ie. data, or not part of this journal --- then
-		 * we're OK to leave it alone, but otherwise we need to
-		 * move the dirty bit to the journal's own internal
-		 * JBDDirty bit. */
-		jlist = jh->b_jlist;
-		
-		if (jlist == BJ_Metadata || jlist == BJ_Reserved || 
-		    jlist == BJ_Shadow || jlist == BJ_Forget) {
-			if (atomic_set_buffer_clean(jh2bh(jh))) {
-				set_bit(BH_JBDDirty, &jh2bh(jh)->b_state);
-			}
-		}
-	}
-}
-
 
 int journal_blocks_per_page(struct inode *inode)
 {
@@ -1646,7 +1457,7 @@ void shrink_journal_memory(void)
  * Simple support for retying memory allocations.  Introduced to help to
  * debug different VM deadlock avoidance strategies. 
  */
-void * __jbd_kmalloc (const char *where, size_t size, int flags, int retry)
+void * __jbd_kmalloc (char *where, size_t size, int flags, int retry)
 {
 	void *p;
 	static unsigned long last_warning;
@@ -1662,13 +1473,14 @@ void * __jbd_kmalloc (const char *where, size_t size, int flags, int retry)
 		 * messages. */
 		jbd_debug(1, "ENOMEM in %s, retrying.\n", where);
 
-		if (time_after(jiffies, last_warning + 120*HZ)) {
+		if (time_after(jiffies, last_warning + 5*HZ)) {
 			printk(KERN_NOTICE
 			       "ENOMEM in %s, retrying.\n", where);
 			last_warning = jiffies;
 		}
 		
-		yield();
+		current->policy |= SCHED_YIELD;
+		schedule();
 	}
 }
 
@@ -1721,12 +1533,13 @@ static struct journal_head *journal_alloc_journal_head(void)
 	if (ret == 0) {
 		jbd_debug(1, "out of memory for journal_head\n");
 		if (time_after(jiffies, last_warning + 5*HZ)) {
-			printk(KERN_NOTICE "ENOMEM in %s, retrying.\n",
-				__FUNCTION__);
+			printk(KERN_NOTICE "ENOMEM in " __FUNCTION__
+			       ", retrying.\n");
 			last_warning = jiffies;
 		}
 		while (ret == 0) {
-			yield();
+			current->policy |= SCHED_YIELD;
+			schedule();
 			ret = kmem_cache_alloc(journal_head_cache, GFP_NOFS);
 		}
 	}
@@ -1748,8 +1561,8 @@ static void journal_free_journal_head(struct journal_head *jh)
  *
  * Whenever a buffer has an attached journal_head, its ->b_state:BH_JBD bit
  * is set.  This bit is tested in core kernel code where we need to take
- * JBD-specific actions.  Testing the zeroness of ->b_journal_head is not
- * reliable there.
+ * JBD-specific actions.  Testing the zeroness of ->b_private is not reliable
+ * there.
  *
  * When a buffer has its BH_JBD bit set, its ->b_count is elevated by one.
  *

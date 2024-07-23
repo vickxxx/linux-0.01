@@ -5,7 +5,6 @@
 
 #include <asm/atomic.h>
 #include <linux/mount.h>
-#include <linux/kernel.h>
 
 /*
  * linux/include/linux/dcache.h
@@ -245,7 +244,7 @@ static __inline__ struct dentry * dget(struct dentry *dentry)
 {
 	if (dentry) {
 		if (!atomic_read(&dentry->d_count))
-			out_of_line_bug();
+			BUG();
 		atomic_inc(&dentry->d_count);
 	}
 	return dentry;

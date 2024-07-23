@@ -56,7 +56,6 @@ typedef unsigned  long u64;
 #define BITS_PER_LONG 64
 
 typedef u32 dma_addr_t;
-typedef u64 dma64_addr_t;
 
 #endif                                 /* __KERNEL__                       */
 #endif

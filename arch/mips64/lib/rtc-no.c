@@ -9,25 +9,25 @@
  * Copyright (C) 1998, 2001 by Ralf Baechle
  */
 #include <linux/kernel.h>
-#include <linux/module.h>
 #include <linux/mc146818rtc.h>
 
-static unsigned int shouldnt_happen(void)
+static unsigned char no_rtc_read_data(unsigned long addr)
 {
-	static int called;
+	panic("no_rtc_read_data called - shouldn't happen.");
+}
 
-	if (!called) {
-		called = 1;
-		printk(KERN_DEBUG "RTC functions called - shouldn't happen\n");
-	}
+static void no_rtc_write_data(unsigned char data, unsigned long addr)
+{
+	panic("no_rtc_write_data called - shouldn't happen.");
+}
 
-	return 0;
+static int no_rtc_bcd_mode(void)
+{
+	panic("no_rtc_bcd_mode called - shouldn't happen.");
 }
 
 struct rtc_ops no_rtc_ops = {
-    .rtc_read_data  = (void *) &shouldnt_happen,
-    .rtc_write_data = (void *) &shouldnt_happen,
-    .rtc_bcd_mode   = (void *) &shouldnt_happen
+	&no_rtc_read_data,
+	&no_rtc_write_data,
+	&no_rtc_bcd_mode
 };
-
-EXPORT_SYMBOL(rtc_ops);

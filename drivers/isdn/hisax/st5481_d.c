@@ -162,8 +162,8 @@ static struct FsmNode L1FnList[] __initdata =
 	{ST_L1_F8, EV_TIMER3,            l1_timer3},
 	{ST_L1_F8, EV_IND_DP,            l1_go_f3},
 	{ST_L1_F8, EV_IND_AP,            l1_go_f6},
-	{ST_L1_F8, EV_IND_AI8,           l1_go_f7},
-	{ST_L1_F8, EV_IND_AI10,          l1_go_f7},
+	{ST_L1_F8, EV_IND_AI8,           l1_go_f8},
+	{ST_L1_F8, EV_IND_AI10,          l1_go_f8},
 	{ST_L1_F8, EV_IND_RSY,           l1_ignore},
 };
 
@@ -297,7 +297,7 @@ static void usb_d_out(struct st5481_adapter *adapter, int buf_nr)
 	unsigned int num_packets, packet_offset;
 	int len, buf_size, bytes_sent;
 	struct sk_buff *skb;
-	struct iso_packet_descriptor *desc;
+	iso_packet_descriptor_t *desc;
 
 	if (d_out->fsm.state != ST_DOUT_NORMAL)
 		return;
@@ -313,15 +313,15 @@ static void usb_d_out(struct st5481_adapter *adapter, int buf_nr)
 	buf_size = NUM_ISO_PACKETS_D * SIZE_ISO_PACKETS_D_OUT;
 	
 	if (skb) {
-		len = isdnhdlc_encode(&d_out->hdlc_state,
-				      skb->data, skb->len, &bytes_sent,
-				      urb->transfer_buffer, buf_size);
+		len = hdlc_encode(&d_out->hdlc_state, 
+				  skb->data, skb->len, &bytes_sent,
+				  urb->transfer_buffer, buf_size);
 		skb_pull(skb,bytes_sent);
 	} else {
 		// Send flags or idle
-		len = isdnhdlc_encode(&d_out->hdlc_state,
-				      NULL, 0, &bytes_sent,
-				      urb->transfer_buffer, buf_size);
+		len = hdlc_encode(&d_out->hdlc_state, 
+				  NULL, 0, &bytes_sent,
+				  urb->transfer_buffer, buf_size);
 	}
 	
 	if (len < buf_size) {
@@ -413,7 +413,7 @@ static void dout_start_xmit(struct FsmInst *fsm, int event, void *arg)
 
 	DBG(2,"len=%d",skb->len);
 
-	isdnhdlc_out_init(&d_out->hdlc_state, 1, 0);
+	hdlc_out_init(&d_out->hdlc_state, 1, 0);
 
 	if (test_and_set_bit(buf_nr, &d_out->busy)) {
 		WARN("ep %d urb %d busy %#lx", EP_D_OUT, buf_nr, d_out->busy);
@@ -422,9 +422,9 @@ static void dout_start_xmit(struct FsmInst *fsm, int event, void *arg)
 	urb = d_out->urb[buf_nr];
 
 	DBG_SKB(0x10, skb);
-	len = isdnhdlc_encode(&d_out->hdlc_state,
-			      skb->data, skb->len, &bytes_sent,
-			      urb->transfer_buffer, 16);
+	len = hdlc_encode(&d_out->hdlc_state, 
+			  skb->data, skb->len, &bytes_sent,
+			  urb->transfer_buffer, 16);
 	skb_pull(skb, bytes_sent);
 
 	if(len < 16)
@@ -673,7 +673,7 @@ static int __devinit st5481_setup_d_out(struct st5481_adapter *adapter)
 				      usb_d_out_complete, adapter);
 }
 
-static void st5481_release_d_out(struct st5481_adapter *adapter)
+static void __devexit st5481_release_d_out(struct st5481_adapter *adapter)
 {
 	struct st5481_d_out *d_out = &adapter->d_out;
 
@@ -723,7 +723,7 @@ int __devinit st5481_setup_d(struct st5481_adapter *adapter)
 	return retval;
 }
 
-void st5481_release_d(struct st5481_adapter *adapter)
+void __devexit st5481_release_d(struct st5481_adapter *adapter)
 {
 	DBG(2,"");
 

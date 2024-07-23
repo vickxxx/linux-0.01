@@ -67,27 +67,6 @@
 irq_desc_t _irq_desc[NR_IRQS] __cacheline_aligned =
 	{ [0 ... NR_IRQS-1] = { IRQ_DISABLED, &no_irq_type, NULL, 0, SPIN_LOCK_UNLOCKED}};
 
-#ifdef CONFIG_IA64_GENERIC
-struct irq_desc *
-__ia64_irq_desc (unsigned int irq)
-{
-	return _irq_desc + irq;
-}
-
-ia64_vector
-__ia64_irq_to_vector (unsigned int irq)
-{
-	return (ia64_vector) irq;
-}
-
-unsigned int
-__ia64_local_vector_to_irq (ia64_vector vec)
-{
-	return (unsigned int) vec;
-}
-
-#endif
-
 static void register_irq_proc (unsigned int irq);
 
 /*
@@ -111,7 +90,7 @@ static void ack_none(unsigned int irq)
  * a generic callback i think.
  */
 #if CONFIG_X86
-	printk(KERN_ERR "unexpected IRQ trap at vector %02x\n", irq);
+	printk("unexpected IRQ trap at vector %02x\n", irq);
 #ifdef CONFIG_X86_LOCAL_APIC
 	/*
 	 * Currently unexpected vectors happen only on SMP and APIC.
@@ -125,7 +104,7 @@ static void ack_none(unsigned int irq)
 #endif
 #endif
 #if CONFIG_IA64
-	printk(KERN_ERR "Unexpected irq vector 0x%x on CPU %u!\n", irq, smp_processor_id());
+	printk("Unexpected irq vector 0x%x on CPU %u!\n", irq, smp_processor_id());
 #endif
 }
 
@@ -308,11 +287,10 @@ static inline void wait_on_irq(void)
 		 * already executing in one..
 		 */
 		if (!irqs_running())
-			if (really_local_bh_count() || !spin_is_locked(&global_bh_lock))
+			if (local_bh_count() || !spin_is_locked(&global_bh_lock))
 				break;
 
 		/* Duh, we have to loop. Release the lock to avoid deadlocks */
-		smp_mb__before_clear_bit();	/* need barrier before releasing lock... */
 		clear_bit(0,&global_irq_lock);
 
 		for (;;) {
@@ -327,7 +305,7 @@ static inline void wait_on_irq(void)
 				continue;
 			if (global_irq_lock)
 				continue;
-			if (!really_local_bh_count() && spin_is_locked(&global_bh_lock))
+			if (!local_bh_count() && spin_is_locked(&global_bh_lock))
 				continue;
 			if (!test_and_set_bit(0,&global_irq_lock))
 				break;
@@ -400,14 +378,14 @@ void __global_cli(void)
 	__save_flags(flags);
 	if (flags & IA64_PSR_I) {
 		__cli();
-		if (!really_local_irq_count())
+		if (!local_irq_count())
 			get_irqlock();
 	}
 #else
 	__save_flags(flags);
 	if (flags & (1 << EFLAGS_IF_SHIFT)) {
 		__cli();
-		if (!really_local_irq_count())
+		if (!local_irq_count())
 			get_irqlock();
 	}
 #endif
@@ -415,7 +393,7 @@ void __global_cli(void)
 
 void __global_sti(void)
 {
-	if (!really_local_irq_count())
+	if (!local_irq_count())
 		release_irqlock(smp_processor_id());
 	__sti();
 }
@@ -444,7 +422,7 @@ unsigned long __global_save_flags(void)
 	retval = 2 + local_enabled;
 
 	/* check for global flags if we're not in an interrupt */
-	if (!really_local_irq_count()) {
+	if (!local_irq_count()) {
 		if (local_enabled)
 			retval = 1;
 		if (global_irq_holder == cpu)
@@ -551,7 +529,7 @@ void disable_irq(unsigned int irq)
 	disable_irq_nosync(irq);
 
 #ifdef CONFIG_SMP
-	if (!really_local_irq_count()) {
+	if (!local_irq_count()) {
 		do {
 			barrier();
 		} while (irq_desc(irq)->status & IRQ_INPROGRESS);
@@ -591,7 +569,7 @@ void enable_irq(unsigned int irq)
 		desc->depth--;
 		break;
 	case 0:
-		printk(KERN_ERR "enable_irq(%u) unbalanced from %p\n",
+		printk("enable_irq(%u) unbalanced from %p\n",
 		       irq, (void *) __builtin_return_address(0));
 	}
 	spin_unlock_irqrestore(&desc->lock, flags);
@@ -738,7 +716,7 @@ int request_irq(unsigned int irq,
 	 */
 	if (irqflags & SA_SHIRQ) {
 		if (!dev_id)
-			printk(KERN_ERR "Bad boy: %s called us without a dev_id!\n", devname);
+			printk("Bad boy: %s called us without a dev_id!\n", devname);
 	}
 #endif
 
@@ -819,7 +797,7 @@ void free_irq(unsigned int irq, void *dev_id)
 			kfree(action);
 			return;
 		}
-		printk(KERN_ERR "Trying to free free IRQ%d\n",irq);
+		printk("Trying to free free IRQ%d\n",irq);
 		spin_unlock_irqrestore(&desc->lock,flags);
 		return;
 	}
@@ -1031,11 +1009,6 @@ int setup_irq(unsigned int irq, struct irqaction * new)
 		rand_initialize_irq(irq);
 	}
 
-	if (new->flags & SA_PERCPU_IRQ) {
-		desc->status |= IRQ_PER_CPU;
-		desc->handler = &irq_type_ia64_lsapic;
-	}
-
 	/*
 	 * The following block of code has to be executed atomically
 	 */
@@ -1060,7 +1033,7 @@ int setup_irq(unsigned int irq, struct irqaction * new)
 
 	if (!shared) {
 		desc->depth = 0;
-		desc->status &= ~(IRQ_DISABLED | IRQ_AUTODETECT | IRQ_WAITING | IRQ_INPROGRESS);
+		desc->status &= ~(IRQ_DISABLED | IRQ_AUTODETECT | IRQ_WAITING);
 		desc->handler->startup(irq);
 	}
 	spin_unlock_irqrestore(&desc->lock,flags);
@@ -1116,25 +1089,13 @@ out:
 static struct proc_dir_entry * smp_affinity_entry [NR_IRQS];
 
 static unsigned long irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
-static char irq_redir [NR_IRQS]; // = { [0 ... NR_IRQS-1] = 1 };
-
-void set_irq_affinity_info(int irq, int hwid, int redir)
-{
-	unsigned long mask = 1UL<<cpu_logical_id(hwid);
-
-	if (irq >= 0 && irq < NR_IRQS) {
-		irq_affinity[irq] = mask;
-		irq_redir[irq] = (char) (redir & 0xff);
-	}
-}
 
 static int irq_affinity_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
-	if (count < HEX_DIGITS+3)
+	if (count < HEX_DIGITS+1)
 		return -EINVAL;
-	return sprintf (page, "%s%08lx\n", irq_redir[(long)data] ? "r " : "",
-			irq_affinity[(long)data]);
+	return sprintf (page, "%08lx\n", irq_affinity[(long)data]);
 }
 
 static int irq_affinity_write_proc (struct file *file, const char *buffer,
@@ -1142,20 +1103,11 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 {
 	int irq = (long) data, full_count = count, err;
 	unsigned long new_value;
-	const char *buf = buffer;
-	int redir;
 
 	if (!irq_desc(irq)->handler->set_affinity)
 		return -EIO;
 
-	if (buf[0] == 'r' || buf[0] == 'R') {
-		++buf;
-		while (*buf == ' ') ++buf;
-		redir = 1;
-	} else
-		redir = 0;
-
-	err = parse_hex_value(buf, count, &new_value);
+	err = parse_hex_value(buffer, count, &new_value);
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
@@ -1165,7 +1117,8 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 	if (!(new_value & cpu_online_map))
 		return -EINVAL;
 
-	irq_desc(irq)->handler->set_affinity(irq | (redir? IA64_IRQ_REDIRECTED :0), new_value);
+	irq_affinity[irq] = new_value;
+	irq_desc(irq)->handler->set_affinity(irq, new_value);
 
 	return full_count;
 }
@@ -1201,7 +1154,7 @@ static void register_irq_proc (unsigned int irq)
 {
 	char name [MAX_NAMELEN];
 
-	if (!root_irq_dir || (irq_desc(irq)->handler == &no_irq_type) || irq_dir[irq])
+	if (!root_irq_dir || (irq_desc(irq)->handler == &no_irq_type))
 		return;
 
 	memset(name, 0, MAX_NAMELEN);

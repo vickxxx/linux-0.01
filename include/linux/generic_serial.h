@@ -12,6 +12,9 @@
 #ifndef GENERIC_SERIAL_H
 #define GENERIC_SERIAL_H
 
+
+
+
 struct real_driver {
   void                    (*disable_tx_interrupts) (void *);
   void                    (*enable_tx_interrupts) (void *);
@@ -95,7 +98,9 @@ void gs_set_termios (struct tty_struct * tty,
                      struct termios * old_termios);
 int  gs_init_port(struct gs_port *port);
 int  gs_setserial(struct gs_port *port, struct serial_struct *sp);
-int  gs_getserial(struct gs_port *port, struct serial_struct *sp);
+void gs_getserial(struct gs_port *port, struct serial_struct *sp);
 void gs_got_break(struct gs_port *port);
+
+extern int gs_debug;
 
 #endif

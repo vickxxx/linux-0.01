@@ -75,7 +75,6 @@
 #include <linux/selection.h>
 #include <linux/smp.h>
 #include <linux/init.h>
-#include <linux/pm.h>
 
 #include <asm/irq.h>
 #include <asm/system.h>
@@ -137,12 +136,6 @@ static int softback_lines;
 
 static void fbcon_free_font(struct display *);
 static int fbcon_set_origin(struct vc_data *);
-
-#ifdef CONFIG_PM
-static int pm_fbcon_request(struct pm_dev *dev, pm_request_t rqst, void *data);
-static struct pm_dev *pm_fbcon;
-static int fbcon_sleeping;
-#endif
 
 /*
  * Emmanuel: fbcon will now use a hardware cursor if the
@@ -240,7 +233,6 @@ static void cursor_timer_handler(unsigned long dev_addr);
 static struct timer_list cursor_timer = {
     function: cursor_timer_handler
 };
-static int use_timer_cursor;
 
 static void cursor_timer_handler(unsigned long dev_addr)
 {
@@ -266,22 +258,23 @@ static void cursor_timer_handler(unsigned long dev_addr)
 int PROC_CONSOLE(const struct fb_info *info)
 {
         int fgc;
+        
+        if (info->display_fg != NULL)
+                fgc = info->display_fg->vc_num;
+        else
+                return -1;
+                
+        if (!current->tty)
+                return fgc;
 
-	if (info->display_fg == NULL)
-		return -1;
+        if (current->tty->driver.type != TTY_DRIVER_TYPE_CONSOLE)
+                /* XXX Should report error here? */
+                return fgc;
 
-        if (!current->tty ||
-	    current->tty->driver.type != TTY_DRIVER_TYPE_CONSOLE ||
-	    MINOR(current->tty->device) < 1)
-		fgc = info->display_fg->vc_num;
-	else
-		fgc = MINOR(current->tty->device)-1;
+        if (MINOR(current->tty->device) < 1)
+                return fgc;
 
-	/* Does this virtual console belong to the specified fbdev? */
-	if (fb_display[fgc].fb_info != info)
-		return -1;
-
-	return fgc;
+        return MINOR(current->tty->device) - 1;
 }
 
 
@@ -464,15 +457,10 @@ static const char *fbcon_startup(void)
 #endif
 
     if (irqres) {
-	use_timer_cursor = 1;
 	cursor_blink_rate = DEFAULT_CURSOR_BLINK_RATE;
 	cursor_timer.expires = jiffies+HZ/50;
 	add_timer(&cursor_timer);
     }
-
-#ifdef CONFIG_PM
-    pm_fbcon = pm_register(PM_SYS_DEV, PM_SYS_VGA, pm_fbcon_request);
-#endif
 
     return display_desc;
 }
@@ -636,7 +624,7 @@ static void fbcon_setup(int con, int init, int logo)
     }
     
     if (!fontwidthvalid(p,fontwidth(p))) {
-#if defined(CONFIG_FBCON_MAC) && defined(CONFIG_MAC)
+#ifdef CONFIG_MAC
 	if (MACH_IS_MAC)
 	    /* ++Geert: hack to make 6x11 fonts work on mac */
 	    p->dispsw = &fbcon_mac;
@@ -660,8 +648,9 @@ static void fbcon_setup(int con, int init, int logo)
     
     if (logo) {
     	/* Need to make room for the logo */
-	int cnt, step, erase_char;
-
+	int cnt;
+	int step;
+    
     	logo_lines = (LOGO_H + fontheight(p) - 1) / fontheight(p);
     	q = (unsigned short *)(conp->vc_origin + conp->vc_size_row * old_rows);
     	step = logo_lines * old_cols;
@@ -691,10 +680,8 @@ static void fbcon_setup(int con, int init, int logo)
     		conp->vc_pos += logo_lines * conp->vc_size_row;
     	    }
     	}
-	erase_char = conp->vc_video_erase_char;
-	if (! conp->vc_can_do_color)
-	    erase_char &= ~0x400; /* disable underline */
-	scr_memsetw((unsigned short *)conp->vc_origin, erase_char,
+    	scr_memsetw((unsigned short *)conp->vc_origin,
+		    conp->vc_video_erase_char, 
 		    conp->vc_size_row * logo_lines);
     }
     
@@ -919,9 +906,8 @@ static void fbcon_cursor(struct vc_data *conp, int mode)
 	return;
 
     cursor_on = 0;
-    if (cursor_drawn && p->cursor_x < conp->vc_cols &&
-	p->cursor_y < conp->vc_rows)
-	p->dispsw->revc(p, p->cursor_x, real_y(p, p->cursor_y));
+    if (cursor_drawn)
+        p->dispsw->revc(p, p->cursor_x, real_y(p, p->cursor_y));
 
     p->cursor_x = conp->vc_x;
     p->cursor_y = y;
@@ -1878,10 +1864,7 @@ static inline int fbcon_set_font(int unit, struct console_font_op *op)
        font length must be multiple of 256, at least. And 256 is multiple
        of 4 */
     k = 0;
-    while (p > new_data) {
-	    p = (u8 *)((u32 *)p - 1);
-	    k += *(u32 *) p;
-    }
+    while (p > new_data) k += *--(u32 *)p;
     FNTSUM(new_data) = k;
     /* Check if the same font is on some other console already */
     for (i = 0; i < MAX_NR_CONSOLES; i++) {
@@ -2102,7 +2085,7 @@ static int fbcon_scrolldelta(struct vc_data *conp, int lines)
 
     offset = p->yscroll-scrollback_current;
     limit = p->vrows;
-    switch (p->scrollmode & __SCROLL_YMASK) {
+    switch (p->scrollmode && __SCROLL_YMASK) {
 	case __SCROLL_YWRAP:
 	    p->var.vmode |= FB_VMODE_YWRAP;
 	    break;
@@ -2417,7 +2400,7 @@ static int __init fbcon_show_logo( void )
 		else
 		    dst = fb + y1*line + x/8;
 		for( x1 = 0; x1 < LOGO_LINE; ++x1 )
-		    fb_writeb(*src++ ^ inverse, dst++);
+		    fb_writeb(fb_readb(src++) ^ inverse, dst++);
 	    }
 	    done = 1;
 	}
@@ -2463,39 +2446,6 @@ static int __init fbcon_show_logo( void )
 
     return done ? (LOGO_H + fontheight(p) - 1) / fontheight(p) : 0 ;
 }
-
-#ifdef CONFIG_PM
-/* console.c doesn't do enough here */
-static int
-pm_fbcon_request(struct pm_dev *dev, pm_request_t rqst, void *data)
-{
-	unsigned long flags;
-	
-	switch (rqst)
-	{
-	case PM_RESUME:
-		acquire_console_sem();
-		fbcon_sleeping = 0;
-		if (use_timer_cursor) {
-			cursor_timer.expires = jiffies+HZ/50;
-			add_timer(&cursor_timer);
-		}
-		release_console_sem();
-		break;
-	case PM_SUSPEND:
-		acquire_console_sem();
-		save_flags(flags);
-		cli();
-		if (use_timer_cursor)
-			del_timer(&cursor_timer);
-		fbcon_sleeping = 1;
-		restore_flags(flags);
-		release_console_sem();
-		break;
-	}
-	return 0;
-}
-#endif /* CONFIG_PM */
 
 /*
  *  The console `switch' structure for the frame buffer based console

@@ -12,12 +12,14 @@
     (C) 1999 Benjamin Reed.  All Rights Reserved.  Permission to use
     code in the Developer's manual was granted for this driver by
     Aironet.  Major code contributions were received from Javier Achirica
-    <achirica@users.sourceforge.net> and Jean Tourrilhes <jt@hpl.hp.com>.
-    Code was also integrated from the Cisco Aironet driver for Linux.
+    and Jean Tourrilhes <jt@hpl.hp.com>.  Code was also integrated from
+    the Cisco Aironet driver for Linux.
 
 ======================================================================*/
 
 #include <linux/config.h>
+#include <linux/version.h>
+#include <asm/segment.h>
 #include <linux/init.h>
 
 #include <linux/kernel.h>
@@ -40,13 +42,12 @@
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/ioport.h>
+#include <linux/config.h>
 #include <linux/pci.h>
 #include <asm/uaccess.h>
 
-#include "airo.h"
-
 #ifdef CONFIG_PCI
-static struct pci_device_id card_ids[] = {
+static struct pci_device_id card_ids[] = __devinitdata {
 	{ 0x14b9, 1, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0x14b9, 0x4500, PCI_ANY_ID, PCI_ANY_ID },
 	{ 0x14b9, 0x4800, PCI_ANY_ID, PCI_ANY_ID, },
@@ -60,35 +61,26 @@ static int airo_pci_probe(struct pci_dev *, const struct pci_device_id *);
 static void airo_pci_remove(struct pci_dev *);
 
 static struct pci_driver airo_driver = {
-	.name     = "airo",
-	.id_table = card_ids,
-	.probe    = airo_pci_probe,
-	.remove   = __devexit_p(airo_pci_remove),
+	name:     "airo",
+	id_table: card_ids,
+	probe:    airo_pci_probe,
+	remove:   airo_pci_remove,
 };
 #endif /* CONFIG_PCI */
 
 /* Include Wireless Extension definition and check version - Jean II */
 #include <linux/wireless.h>
 #define WIRELESS_SPY		// enable iwspy support
-#if WIRELESS_EXT > 12
-#include <net/iw_handler.h>	// New driver API
-#endif	/* WIRELESS_EXT > 12 */
-
+#if WIRELESS_EXT < 9
+#warning "Wireless extension v9 or newer required - please upgrade your kernel"
+#undef WIRELESS_EXT
+#undef WIRELESS_SPY
+#endif
 #define CISCO_EXT		// enable Cisco extensions
+
 #ifdef CISCO_EXT
 #include <linux/delay.h>
 #endif
-
-/* Support Cisco MIC feature */
-#define MICSUPPORT
-
-#if defined(MICSUPPORT) && !defined(CONFIG_CRYPTO)
-#warning MIC support requires Crypto API
-#undef MICSUPPORT
-#endif
-
-/* Hack to do some power saving */
-#define POWER_ON_DOWN
 
 /* As you can see this list is HUGH!
    I really don't know what a lot of these counts are about, but they
@@ -96,12 +88,12 @@ static struct pci_driver airo_driver = {
    infront of the label, that statistic will not be included in the list
    of statistics in the /proc filesystem */
 
-#define IGNLABEL(comment) 0
+#define IGNLABEL 0&(int)
 static char *statsLabels[] = {
 	"RxOverrun",
-	IGNLABEL("RxPlcpCrcErr"),
-	IGNLABEL("RxPlcpFormatErr"),
-	IGNLABEL("RxPlcpLengthErr"),
+	IGNLABEL "RxPlcpCrcErr",
+	IGNLABEL "RxPlcpFormatErr",
+	IGNLABEL "RxPlcpLengthErr",
 	"RxMacCrcErr",
 	"RxMacCrcOk",
 	"RxWepErr",
@@ -145,15 +137,15 @@ static char *statsLabels[] = {
 	"HostRxBc",
 	"HostRxUc",
 	"HostRxDiscard",
-	IGNLABEL("HmacTxMc"),
-	IGNLABEL("HmacTxBc"),
-	IGNLABEL("HmacTxUc"),
-	IGNLABEL("HmacTxFail"),
-	IGNLABEL("HmacRxMc"),
-	IGNLABEL("HmacRxBc"),
-	IGNLABEL("HmacRxUc"),
-	IGNLABEL("HmacRxDiscard"),
-	IGNLABEL("HmacRxAccepted"),
+	IGNLABEL "HmacTxMc",
+	IGNLABEL "HmacTxBc",
+	IGNLABEL "HmacTxUc",
+	IGNLABEL "HmacTxFail",
+	IGNLABEL "HmacRxMc",
+	IGNLABEL "HmacRxBc",
+	IGNLABEL "HmacRxUc",
+	IGNLABEL "HmacRxDiscard",
+	IGNLABEL "HmacRxAccepted",
 	"SsidMismatch",
 	"ApMismatch",
 	"RatesMismatch",
@@ -161,26 +153,26 @@ static char *statsLabels[] = {
 	"AuthTimeout",
 	"AssocReject",
 	"AssocTimeout",
-	IGNLABEL("ReasonOutsideTable"),
-	IGNLABEL("ReasonStatus1"),
-	IGNLABEL("ReasonStatus2"),
-	IGNLABEL("ReasonStatus3"),
-	IGNLABEL("ReasonStatus4"),
-	IGNLABEL("ReasonStatus5"),
-	IGNLABEL("ReasonStatus6"),
-	IGNLABEL("ReasonStatus7"),
-	IGNLABEL("ReasonStatus8"),
-	IGNLABEL("ReasonStatus9"),
-	IGNLABEL("ReasonStatus10"),
-	IGNLABEL("ReasonStatus11"),
-	IGNLABEL("ReasonStatus12"),
-	IGNLABEL("ReasonStatus13"),
-	IGNLABEL("ReasonStatus14"),
-	IGNLABEL("ReasonStatus15"),
-	IGNLABEL("ReasonStatus16"),
-	IGNLABEL("ReasonStatus17"),
-	IGNLABEL("ReasonStatus18"),
-	IGNLABEL("ReasonStatus19"),
+	IGNLABEL "ReasonOutsideTable",
+	IGNLABEL "ReasonStatus1",
+	IGNLABEL "ReasonStatus2",
+	IGNLABEL "ReasonStatus3",
+	IGNLABEL "ReasonStatus4",
+	IGNLABEL "ReasonStatus5",
+	IGNLABEL "ReasonStatus6",
+	IGNLABEL "ReasonStatus7",
+	IGNLABEL "ReasonStatus8",
+	IGNLABEL "ReasonStatus9",
+	IGNLABEL "ReasonStatus10",
+	IGNLABEL "ReasonStatus11",
+	IGNLABEL "ReasonStatus12",
+	IGNLABEL "ReasonStatus13",
+	IGNLABEL "ReasonStatus14",
+	IGNLABEL "ReasonStatus15",
+	IGNLABEL "ReasonStatus16",
+	IGNLABEL "ReasonStatus17",
+	IGNLABEL "ReasonStatus18",
+	IGNLABEL "ReasonStatus19",
 	"RxMan",
 	"TxMan",
 	"RxRefresh",
@@ -224,8 +216,6 @@ static int aux_bap /* = 0 */; /* Checks to see if the aux ports are needed to re
 		    the bap, needed on some older cards and buses. */
 static int adhoc;
 
-static int probe = 1;
-
 static int proc_uid /* = 0 */;
 
 static int proc_gid /* = 0 */;
@@ -260,8 +250,6 @@ encryption.  Units are in 512kbs.  Zero (default) means there is no limit. \
 Older cards used to be limited to 2mbs (4).");
 MODULE_PARM(adhoc, "i");
 MODULE_PARM_DESC(adhoc, "If non-zero, the card will start in adhoc mode.");
-MODULE_PARM(probe, "i");
-MODULE_PARM_DESC(probe, "If zero, the driver won't start the card.");
 
 MODULE_PARM(proc_uid, "i");
 MODULE_PARM_DESC(proc_uid, "The uid that the /proc files will belong to.");
@@ -272,9 +260,11 @@ MODULE_PARM_DESC(airo_perm, "The permission bits of /proc/[driver/]aironet.");
 MODULE_PARM(proc_perm, "i");
 MODULE_PARM_DESC(proc_perm, "The permission bits of the files in /proc");
 
+#include <asm/uaccess.h>
+
 /* This is a kind of sloppy hack to get this information to OUT4500 and
    IN4500.  I would be extremely interested in the situation where this
-   doesn't work though!!! */
+   doesnt work though!!! */
 static int do8bitIO = 0;
 
 /* Return codes */
@@ -283,76 +273,18 @@ static int do8bitIO = 0;
 #define NO_PACKET -2
 
 /* Commands */
-#define NOP2		0x0000
-#define MAC_ENABLE	0x0001
-#define MAC_DISABLE	0x0002
-#define CMD_LOSE_SYNC	0x0003 /* Not sure what this does... */
-#define CMD_SOFTRESET	0x0004
-#define HOSTSLEEP	0x0005
-#define CMD_MAGIC_PKT	0x0006
-#define CMD_SETWAKEMASK	0x0007
-#define CMD_READCFG	0x0008
-#define CMD_SETMODE	0x0009
-#define CMD_ALLOCATETX	0x000a
-#define CMD_TRANSMIT	0x000b
-#define CMD_DEALLOCATETX 0x000c
-#define NOP		0x0010
-#define CMD_WORKAROUND	0x0011
-#define CMD_ALLOCATEAUX 0x0020
-#define CMD_ACCESS	0x0021
-#define CMD_PCIBAP	0x0022
-#define CMD_PCIAUX	0x0023
-#define CMD_ALLOCBUF	0x0028
-#define CMD_GETTLV	0x0029
-#define CMD_PUTTLV	0x002a
-#define CMD_DELTLV	0x002b
-#define CMD_FINDNEXTTLV	0x002c
-#define CMD_PSPNODES	0x0030
-#define CMD_SETCW	0x0031    
-#define CMD_SETPCF	0x0032    
-#define CMD_SETPHYREG	0x003e
-#define CMD_TXTEST	0x003f
-#define MAC_ENABLETX	0x0101
-#define CMD_LISTBSS	0x0103
-#define CMD_SAVECFG	0x0108
-#define CMD_ENABLEAUX	0x0111
-#define CMD_WRITERID	0x0121
-#define CMD_USEPSPNODES	0x0130
-#define MAC_ENABLERX	0x0201
-
-/* Command errors */
-#define ERROR_QUALIF 0x00
-#define ERROR_ILLCMD 0x01
-#define ERROR_ILLFMT 0x02
-#define ERROR_INVFID 0x03
-#define ERROR_INVRID 0x04
-#define ERROR_LARGE 0x05
-#define ERROR_NDISABL 0x06
-#define ERROR_ALLOCBSY 0x07
-#define ERROR_NORD 0x0B
-#define ERROR_NOWR 0x0C
-#define ERROR_INVFIDTX 0x0D
-#define ERROR_TESTACT 0x0E
-#define ERROR_TAGNFND 0x12
-#define ERROR_DECODE 0x20
-#define ERROR_DESCUNAV 0x21
-#define ERROR_BADLEN 0x22
-#define ERROR_MODE 0x80
-#define ERROR_HOP 0x81
-#define ERROR_BINTER 0x82
-#define ERROR_RXMODE 0x83
-#define ERROR_MACADDR 0x84
-#define ERROR_RATES 0x85
-#define ERROR_ORDER 0x86
-#define ERROR_SCAN 0x87
-#define ERROR_AUTH 0x88
-#define ERROR_PSMODE 0x89
-#define ERROR_RTYPE 0x8A
-#define ERROR_DIVER 0x8B
-#define ERROR_SSID 0x8C
-#define ERROR_APLIST 0x8D
-#define ERROR_AUTOWAKE 0x8E
-#define ERROR_LEAP 0x8F
+#define NOP 0x0010
+#define MAC_ENABLE 0x0001
+#define MAC_DISABLE 0x0002
+#define CMD_LOSE_SYNC 0x0003 /* Not sure what this does... */
+#define CMD_ACCESS 0x0021
+#define CMD_ALLOCATETX 0x000a
+#define CMD_TRANSMIT 0x000b
+#define HOSTSLEEP 0x85
+#define CMD_SETMODE 0x0009
+#define CMD_ENABLEAUX 0x0111
+#define CMD_SOFTRESET 0x0004
+#define CMD_LISTBSS 0x0103
 
 /* Registers */
 #define COMMAND 0x00
@@ -403,16 +335,9 @@ static int do8bitIO = 0;
 #define EV_ALLOC 0x08
 #define EV_LINK 0x80
 #define EV_AWAKE 0x100
-#define EV_TXCPY 0x400
 #define EV_UNKNOWN 0x800
-#define EV_MIC 0x1000 /* Message Integrity Check Interrupt */
-#define STATUS_INTS ( EV_AWAKE | EV_LINK | EV_TXEXC | EV_TX | EV_RX | EV_MIC )
-
-#ifdef CHECK_UNKNOWN_INTS
+#define STATUS_INTS ( EV_AWAKE | EV_LINK | EV_TXEXC | EV_TX | EV_RX)
 #define IGNORE_INTS ( EV_CMD | EV_UNKNOWN)
-#else
-#define IGNORE_INTS (~STATUS_INTS)
-#endif
 
 /* The RIDs */
 #define RID_CAPABILITIES 0xFF00
@@ -435,21 +360,18 @@ static int do8bitIO = 0;
 #define RID_LEAPUSERNAME 0xFF23
 #define RID_LEAPPASSWORD 0xFF24
 #define RID_STATUS     0xFF50
-#define RID_BEACON_HST 0xFF51
-#define RID_BUSY_HST   0xFF52
-#define RID_RETRIES_HST 0xFF53
+#define RID_UNKNOWN52  0xFF52
 #define RID_UNKNOWN54  0xFF54
 #define RID_UNKNOWN55  0xFF55
 #define RID_UNKNOWN56  0xFF56
-#define RID_MIC        0xFF57
 #define RID_STATS16    0xFF60
 #define RID_STATS16DELTA 0xFF61
 #define RID_STATS16DELTACLEAR 0xFF62
 #define RID_STATS      0xFF68
 #define RID_STATSDELTA 0xFF69
 #define RID_STATSDELTACLEAR 0xFF6A
-#define RID_ECHOTEST_RID 0xFF70
-#define RID_ECHOTEST_RESULTS 0xFF71
+#define RID_UNKNOWN70  0xFF70
+#define RID_UNKNOWN71  0xFF71
 #define RID_BSSLISTFIRST 0xFF72
 #define RID_BSSLISTNEXT  0xFF73
 
@@ -481,7 +403,7 @@ typedef struct {
 typedef struct {
 	u16 len;
 	u16 kindex;
-	u8 mac[ETH_ALEN];
+	u8 mac[6];
 	u16 klen;
 	u8 key[16];
 } WepKeyRid;
@@ -520,7 +442,6 @@ typedef struct {
 #define MODE_ETHER_LLC (1<<12) /* enable ethernet LLC */
 #define MODE_LEAF_NODE (1<<13) /* enable leaf node bridge */
 #define MODE_CF_POLLABLE (1<<14) /* enable CF pollable */
-#define MODE_MIC (1<<15) /* enable MIC */
 	u16 rmode; /* receive mode */
 #define RXMODE_BC_MC_ADDR 0
 #define RXMODE_BC_ADDR 1 /* ignore multicasts */
@@ -532,7 +453,7 @@ typedef struct {
 #define RXMODE_NORMALIZED_RSSI (1<<9) /* return normalized RSSI */
 	u16 fragThresh;
 	u16 rtsThres;
-	u8 macAddr[ETH_ALEN];
+	u8 macAddr[6];
 	u8 rates[8];
 	u16 shortRetryLimit;
 	u16 longRetryLimit;
@@ -614,27 +535,27 @@ typedef struct {
 	u16 arlDelay;
 	u16 _reserved4[1];
 	/*---------- Aironet Extensions ----------*/
-	u8 magicAction;
+	u16 magicAction;
 #define MAGIC_ACTION_STSCHG 1
 #define MACIC_ACTION_RESUME 2
 #define MAGIC_IGNORE_MCAST (1<<8)
 #define MAGIC_IGNORE_BCAST (1<<9)
 #define MAGIC_SWITCH_TO_PSP (0<<10)
 #define MAGIC_STAY_IN_CAM (1<<10)
-	u8 magicControl;
+	u16 magicControl;
 	u16 autoWake;
 } ConfigRid;
 
 typedef struct {
 	u16 len;
-	u8 mac[ETH_ALEN];
+	u8 mac[6];
 	u16 mode;
 	u16 errorCode;
 	u16 sigQuality;
 	u16 SSIDlen;
 	char SSID[32];
 	char apName[16];
-	u8 bssid[4][ETH_ALEN];
+	char bssid[4][6];
 	u16 beaconPeriod;
 	u16 dimPeriod;
 	u16 atimDuration;
@@ -649,38 +570,7 @@ typedef struct {
 	u16 currentXmitRate;
 	u16 apDevExtensions;
 	u16 normalizedSignalStrength;
-	u16 shortPreamble;
-	u8 apIP[4];
-	u8 noisePercent; /* Noise percent in last second */
-	u8 noisedBm; /* Noise dBm in last second */
-	u8 noiseAvePercent; /* Noise percent in last minute */
-	u8 noiseAvedBm; /* Noise dBm in last minute */
-	u8 noiseMaxPercent; /* Highest noise percent in last minute */
-	u8 noiseMaxdBm; /* Highest noise dbm in last minute */
-	u16 load;
-	u8 carrier[4];
-	u16 assocStatus;
-#define STAT_NOPACKETS 0
-#define STAT_NOCARRIERSET 10
-#define STAT_GOTCARRIERSET 11
-#define STAT_WRONGSSID 20
-#define STAT_BADCHANNEL 25
-#define STAT_BADBITRATES 30
-#define STAT_BADPRIVACY 35
-#define STAT_APFOUND 40
-#define STAT_APREJECTED 50
-#define STAT_AUTHENTICATING 60
-#define STAT_DEAUTHENTICATED 61
-#define STAT_AUTHTIMEOUT 62
-#define STAT_ASSOCIATING 70
-#define STAT_DEASSOCIATED 71
-#define STAT_ASSOCTIMEOUT 72
-#define STAT_NOTAIROAP 73
-#define STAT_ASSOCIATED 80
-#define STAT_LEAPING 90
-#define STAT_LEAPFAILED 91
-#define STAT_LEAPTIMEDOUT 92
-#define STAT_LEAPCOMPLETE 93
+	u16 _reserved[10];
 } StatusRid;
 
 typedef struct {
@@ -692,7 +582,7 @@ typedef struct {
 
 typedef struct {
 	u16 len;
-	u8 ap[4][ETH_ALEN];
+	u8 ap[4][6];
 } APListRid;
 
 typedef struct {
@@ -703,11 +593,11 @@ typedef struct {
 	char manName[32];
 	char prodName[16];
 	char prodVer[8];
-	char factoryAddr[ETH_ALEN];
-	char aironetAddr[ETH_ALEN];
+	char factoryAddr[6];
+	char aironetAddr[6];
 	u16 radioType;
 	u16 country;
-	char callid[ETH_ALEN];
+	char callid[6];
 	char supportedRates[8];
 	char rxDiversity;
 	char txDiversity;
@@ -721,7 +611,6 @@ typedef struct {
 	u16 softCap;
 	u16 bootBlockVer;
 	u16 requiredHard;
-	u16 extSoftCap;
 } CapabilityRid;
 
 typedef struct {
@@ -731,7 +620,7 @@ typedef struct {
 #define RADIO_DS 2 /* Direct sequence radio type */
 #define RADIO_TMA 4 /* Proprietary radio used in old cards (2500) */
   u16 radioType;
-  u8 bssid[ETH_ALEN]; /* Mac address of the BSS */
+  u8 bssid[6]; /* Mac address of the BSS */
   u8 zero;
   u8 ssidLen;
   u8 ssid[32];
@@ -764,37 +653,6 @@ typedef struct {
   tdsRssiEntry x[256];
 } tdsRssiRid;
 
-typedef struct {
-	u16 len;
-	u16 state;
-	u16 multicastValid;
-	u8  multicast[16];
-	u16 unicastValid;
-	u8  unicast[16];
-} MICRid;
-
-typedef struct {
-	u16 typelen;
-
-	union {
-	    u8 snap[8];
-	    struct {
-		u8 dsap;
-		u8 ssap;
-		u8 control;
-		u8 orgcode[3];
-		u8 fieldtype[2];
-	    } llc;
-	} u;
-	u32 mic;
-	u32 seq;
-} MICBuffer;
-
-typedef struct {
-	u8 da[ETH_ALEN];
-	u8 sa[ETH_ALEN];
-} etherHead;
-
 #pragma pack()
 
 #define TXCTL_TXOK (1<<1) /* report if tx is ok */
@@ -819,10 +677,6 @@ typedef struct {
 #else /* SIOCIWFIRSTPRIV */
 #define SIOCIWFIRSTPRIV SIOCDEVPRIVATE
 #endif /* SIOCIWFIRSTPRIV */
-/* This may be wrong. When using the new SIOCIWFIRSTPRIV range, we probably
- * should use only "GET" ioctls (last bit set to 1). "SET" ioctls are root
- * only and don't return the modified struct ifreq to the application which
- * is usually a problem. - Jean II */
 #define AIROIOCTL	SIOCIWFIRSTPRIV
 #define AIROIDIFC 	AIROIOCTL + 1
 
@@ -839,10 +693,6 @@ typedef struct {
 #define AIROGSTAT		8
 #define AIROGSTATSC32		9
 #define AIROGSTATSD32		10
-#define AIROGMICRID		11
-#define AIROGMICSTATS		12
-#define AIROGFLAGS		13
-#define AIRORRID		15
 
 /* Leave gap of 40 commands after AIROGSTATSD32 for future */
 
@@ -878,48 +728,9 @@ typedef struct aironet_ioctl {
 } aironet_ioctl;
 #endif /* CISCO_EXT */
 
-#define NUM_MODULES       2
-#define MIC_MSGLEN_MAX    2400
-#define EMMH32_MSGLEN_MAX MIC_MSGLEN_MAX
-
-typedef struct {
-	u32   size;            // size
-	u8    enabled;         // MIC enabled or not
-	u32   rxSuccess;       // successful packets received
-	u32   rxIncorrectMIC;  // pkts dropped due to incorrect MIC comparison
-	u32   rxNotMICed;      // pkts dropped due to not being MIC'd
-	u32   rxMICPlummed;    // pkts dropped due to not having a MIC plummed
-	u32   rxWrongSequence; // pkts dropped due to sequence number violation
-	u32   reserve[32];
-} mic_statistics;
-
-typedef struct {
-	u32 coeff[((EMMH32_MSGLEN_MAX)+3)>>2];
-	u64 accum;	// accumulated mic, reduced to u32 in final()
-	int position;	// current position (byte offset) in message
-	union {
-		u8  d8[4];
-		u32 d32;
-	} part;	// saves partial message word across update() calls
-} emmh32_context;
-
-typedef struct {
-	emmh32_context seed;	    // Context - the seed
-	u32		 rx;	    // Received sequence number
-	u32		 tx;	    // Tx sequence number
-	u32		 window;    // Start of window
-	u8		 valid;	    // Flag to say if context is valid or not
-	u8		 key[16];
-} miccntx;
-
-typedef struct {
-	miccntx mCtx;		// Multicast context
-	miccntx uCtx;		// Unicast context
-} mic_module;
-
 #ifdef WIRELESS_EXT
 // Frequency list (map channels to frequencies)
-static const long frequency_list[] = { 2412, 2417, 2422, 2427, 2432, 2437, 2442,
+const long frequency_list[] = { 2412, 2417, 2422, 2427, 2432, 2437, 2442,
 				2447, 2452, 2457, 2462, 2467, 2472, 2484 };
 
 // A few details needed for WEP (Wireless Equivalent Privacy)
@@ -929,35 +740,19 @@ typedef struct wep_key_t {
 	u16	len;
 	u8	key[16];	/* 40-bit and 104-bit keys */
 } wep_key_t;
-
-/* Backward compatibility */
-#ifndef IW_ENCODE_NOKEY
-#define IW_ENCODE_NOKEY         0x0800  /* Key is write only, so not present */
-#define IW_ENCODE_MODE  (IW_ENCODE_DISABLED | IW_ENCODE_RESTRICTED | IW_ENCODE_OPEN)
-#endif /* IW_ENCODE_NOKEY */
-
-#if WIRELESS_EXT > 12
-/* List of Wireless Handlers (new API) */
-static const struct iw_handler_def	airo_handler_def;
-#else	/* WIRELESS_EXT > 12 */
-/* More Wireless Extensions backward compatibility */
-/* Part of iw_handler prototype we need (apart that we don't need it) */
-struct iw_request_info {};
-#endif	/* WIRELESS_EXT > 12 */
 #endif /* WIRELESS_EXT */
 
-static const char version[] = "airo.c 0.6 (Ben Reed & Javier Achirica)";
+static const char version[] = "airo.c 0.3 (Ben Reed & Javier Achirica)";
 
 struct airo_info;
 
 static int get_dec_u16( char *buffer, int *start, int limit );
 static void OUT4500( struct airo_info *, u16 register, u16 value );
 static unsigned short IN4500( struct airo_info *, u16 register );
-static u16 setup_card(struct airo_info*, u8 *mac);
-static int enable_MAC( struct airo_info *ai, Resp *rsp, int lock );
-static void disable_MAC(struct airo_info *ai, int lock);
+static u16 setup_card(struct airo_info*, u8 *mac, ConfigRid *);
 static void enable_interrupts(struct airo_info*);
 static void disable_interrupts(struct airo_info*);
+static u16 lock_issuecommand(struct airo_info*, Cmd *pCmd, Resp *pRsp);
 static u16 issuecommand(struct airo_info*, Cmd *pCmd, Resp *pRsp);
 static int bap_setup(struct airo_info*, u16 rid, u16 offset, int whichbap);
 static int aux_bap_read(struct airo_info*, u16 *pu16Dst, int bytelen,
@@ -967,112 +762,62 @@ static int fast_bap_read(struct airo_info*, u16 *pu16Dst, int bytelen,
 static int bap_write(struct airo_info*, const u16 *pu16Src, int bytelen,
 		     int whichbap);
 static int PC4500_accessrid(struct airo_info*, u16 rid, u16 accmd);
-static int PC4500_readrid(struct airo_info*, u16 rid, void *pBuf, int len, int lock);
+static int PC4500_readrid(struct airo_info*, u16 rid, void *pBuf, int len);
 static int PC4500_writerid(struct airo_info*, u16 rid, const void
-			   *pBuf, int len, int lock);
+			   *pBuf, int len);
 static int do_writerid( struct airo_info*, u16 rid, const void *rid_data,
-			int len, int dummy );
-static u16 transmit_allocate(struct airo_info*, int lenPayload, int raw);
-static int transmit_802_3_packet(struct airo_info*, int len, char *pPacket);
-static int transmit_802_11_packet(struct airo_info*, int len, char *pPacket);
+			int len );
+static u16 transmit_allocate(struct airo_info*, int lenPayload);
+static int transmit_802_3_packet(struct airo_info*, u16 TxFid, char
+				 *pPacket, int len);
 
-static irqreturn_t airo_interrupt( int irq, void* dev_id, struct pt_regs
+static void airo_interrupt( int irq, void* dev_id, struct pt_regs
 			    *regs);
-static int airo_thread(void *data);
-static void timer_func( struct net_device *dev );
 static int airo_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 #ifdef WIRELESS_EXT
 struct iw_statistics *airo_get_wireless_stats (struct net_device *dev);
-static void airo_read_wireless_stats (struct airo_info *local);
 #endif /* WIRELESS_EXT */
 #ifdef CISCO_EXT
 static int readrids(struct net_device *dev, aironet_ioctl *comp);
 static int writerids(struct net_device *dev, aironet_ioctl *comp);
 int flashcard(struct net_device *dev, aironet_ioctl *comp);
 #endif /* CISCO_EXT */
-#ifdef MICSUPPORT
-static void micinit(struct airo_info *ai);
-static int micsetup(struct airo_info *ai);
-static int encapsulate(struct airo_info *ai, etherHead *pPacket, MICBuffer *buffer, int len);
-static int decapsulate(struct airo_info *ai, MICBuffer *mic, etherHead *pPacket, u16 payLen);
-
-#include <linux/crypto.h>
-#endif
 
 struct airo_info {
 	struct net_device_stats	stats;
 	int open;
 	struct net_device             *dev;
 	/* Note, we can have MAX_FIDS outstanding.  FIDs are 16-bits, so we
-	   use the high bit to mark whether it is in use. */
+	   use the high bit to mark wether it is in use. */
 #define MAX_FIDS 6
 	int                           fids[MAX_FIDS];
 	int registered;
 	ConfigRid config;
-	int need_commit;	// Need to set config
+	u16 authtype; // Used with auto_wep
 	char keyindex; // Used with auto wep
 	char defindex; // Used with auto wep
+	struct timer_list timer;
 	struct proc_dir_entry *proc_entry;
 	struct airo_info *next;
         spinlock_t aux_lock;
-        unsigned long flags;
-#define FLAG_PROMISC	8	/* IFF_PROMISC 0x100 - include/linux/if.h */
-#define FLAG_RADIO_OFF	0	/* User disabling of MAC */
-#define FLAG_RADIO_DOWN	1	/* ifup/ifdown disabling of MAC */
-#define FLAG_RADIO_MASK 0x03
-#define FLAG_FLASHING	2
-#define FLAG_ADHOC	3	/* Needed by MIC */
-#define FLAG_MIC_CAPABLE 4
-#define FLAG_UPDATE_MULTI 5
-#define FLAG_UPDATE_UNI 6
-#define FLAG_802_11	7
-#define FLAG_PENDING_XMIT 9
-#define FLAG_PENDING_XMIT11 10
-#define FLAG_PCI	11
-#define JOB_MASK	0x1ff0000
-#define JOB_DIE		16
-#define JOB_XMIT	17
-#define JOB_XMIT11	18
-#define JOB_STATS	19
-#define JOB_PROMISC	20
-#define JOB_MIC		21
-#define JOB_EVENT	22
-#define JOB_AUTOWEP	23
-#define JOB_WSTATS	24
+        spinlock_t main_lock;
+        int flags;
+#define FLAG_PROMISC   IFF_PROMISC
+#define FLAG_RADIO_OFF 0x02
 	int (*bap_read)(struct airo_info*, u16 *pu16Dst, int bytelen,
 			int whichbap);
+	int (*header_parse)(struct sk_buff*, unsigned char *);
 	unsigned short *flash;
 	tdsRssiEntry *rssi;
-	struct task_struct *task;
-	struct semaphore sem;
-	pid_t thr_pid;
-	wait_queue_head_t thr_wait;
-	struct completion thr_exited;
-	unsigned long expires;
-	struct {
-		struct sk_buff *skb;
-		int fid;
-	} xmit, xmit11;
-	struct net_device *wifidev;
 #ifdef WIRELESS_EXT
+	int			need_commit;	// Need to set config
 	struct iw_statistics	wstats;		// wireless stats
-	unsigned long		scan_timestamp;	/* Time started to scan */
-#if WIRELESS_EXT > 15
-	struct iw_spy_data	spy_data;
-#else /* WIRELESS_EXT > 15 */
 #ifdef WIRELESS_SPY
 	int			spy_number;
-	u_char			spy_address[IW_MAX_SPY][ETH_ALEN];
+	u_char			spy_address[IW_MAX_SPY][6];
 	struct iw_quality	spy_stat[IW_MAX_SPY];
 #endif /* WIRELESS_SPY */
-#endif /* WIRELESS_EXT > 15 */
 #endif /* WIRELESS_EXT */
-#ifdef MICSUPPORT
-	/* MIC stuff */
-	struct crypto_tfm	*tfm;
-	mic_module		mod[2];
-	mic_statistics		micstats;
-#endif
 };
 
 static inline int bap_read(struct airo_info *ai, u16 *pu16Dst, int bytelen,
@@ -1085,466 +830,6 @@ static int setup_proc_entry( struct net_device *dev,
 static int takedown_proc_entry( struct net_device *dev,
 				struct airo_info *apriv );
 
-#ifdef MICSUPPORT
-/***********************************************************************
- *                              MIC ROUTINES                           *
- ***********************************************************************
- */
-
-static int RxSeqValid (struct airo_info *ai,miccntx *context,int mcast,u32 micSeq);
-static void MoveWindow(miccntx *context, u32 micSeq);
-void emmh32_setseed(emmh32_context *context, u8 *pkey, int keylen, struct crypto_tfm *);
-void emmh32_init(emmh32_context *context);
-void emmh32_update(emmh32_context *context, u8 *pOctets, int len);
-void emmh32_final(emmh32_context *context, u8 digest[4]);
-
-/* micinit - Initialize mic seed */
-
-static void micinit(struct airo_info *ai)
-{
-	MICRid mic_rid;
-
-	clear_bit(JOB_MIC, &ai->flags);
-	PC4500_readrid(ai, RID_MIC, &mic_rid, sizeof(mic_rid), 0);
-	up(&ai->sem);
-
-	ai->micstats.enabled = (mic_rid.state & 0x00FF) ? 1 : 0;
-
-	if (ai->micstats.enabled) {
-		/* Key must be valid and different */
-		if (mic_rid.multicastValid && (!ai->mod[0].mCtx.valid ||
-		    (memcmp (ai->mod[0].mCtx.key, mic_rid.multicast,
-			     sizeof(ai->mod[0].mCtx.key)) != 0))) {
-			/* Age current mic Context */
-			memcpy(&ai->mod[1].mCtx,&ai->mod[0].mCtx,sizeof(miccntx));
-			/* Initialize new context */
-			memcpy(&ai->mod[0].mCtx.key,mic_rid.multicast,sizeof(mic_rid.multicast));
-			ai->mod[0].mCtx.window  = 33; //Window always points to the middle
-			ai->mod[0].mCtx.rx      = 0;  //Rx Sequence numbers
-			ai->mod[0].mCtx.tx      = 0;  //Tx sequence numbers
-			ai->mod[0].mCtx.valid   = 1;  //Key is now valid
-  
-			/* Give key to mic seed */
-			emmh32_setseed(&ai->mod[0].mCtx.seed,mic_rid.multicast,sizeof(mic_rid.multicast), ai->tfm);
-		}
-
-		/* Key must be valid and different */
-		if (mic_rid.unicastValid && (!ai->mod[0].uCtx.valid || 
-		    (memcmp(ai->mod[0].uCtx.key, mic_rid.unicast,
-			    sizeof(ai->mod[0].uCtx.key)) != 0))) {
-			/* Age current mic Context */
-			memcpy(&ai->mod[1].uCtx,&ai->mod[0].uCtx,sizeof(miccntx));
-			/* Initialize new context */
-			memcpy(&ai->mod[0].uCtx.key,mic_rid.unicast,sizeof(mic_rid.unicast));
-	
-			ai->mod[0].uCtx.window  = 33; //Window always points to the middle
-			ai->mod[0].uCtx.rx      = 0;  //Rx Sequence numbers
-			ai->mod[0].uCtx.tx      = 0;  //Tx sequence numbers
-			ai->mod[0].uCtx.valid   = 1;  //Key is now valid
-	
-			//Give key to mic seed
-			emmh32_setseed(&ai->mod[0].uCtx.seed, mic_rid.unicast, sizeof(mic_rid.unicast), ai->tfm);
-		}
-	} else {
-      /* So next time we have a valid key and mic is enabled, we will update
-       * the sequence number if the key is the same as before.
-       */
-		ai->mod[0].uCtx.valid = 0;
-		ai->mod[0].mCtx.valid = 0;
-	}
-}
-
-/* micsetup - Get ready for business */
-
-static int micsetup(struct airo_info *ai) {
-	int i;
-
-	if (ai->tfm == NULL)
-	        ai->tfm = crypto_alloc_tfm("aes", 0);
-
-        if (ai->tfm == NULL) {
-                printk(KERN_ERR "airo: failed to load transform for AES\n");
-                return ERROR;
-        }
-
-	for (i=0; i < NUM_MODULES; i++) {
-		memset(&ai->mod[i].mCtx,0,sizeof(miccntx));
-		memset(&ai->mod[i].uCtx,0,sizeof(miccntx));
-	}
-	return SUCCESS;
-}
-
-char micsnap[]= {0xAA,0xAA,0x03,0x00,0x40,0x96,0x00,0x02};
-
-/*===========================================================================
- * Description: Mic a packet
- *    
- *      Inputs: etherHead * pointer to an 802.3 frame
- *    
- *     Returns: BOOLEAN if successful, otherwise false.
- *             PacketTxLen will be updated with the mic'd packets size.
- *
- *    Caveats: It is assumed that the frame buffer will already
- *             be big enough to hold the largets mic message possible.
- *            (No memory allocation is done here).
- *  
- *    Author: sbraneky (10/15/01)
- *    Merciless hacks by rwilcher (1/14/02)
- */
-
-static int encapsulate(struct airo_info *ai ,etherHead *frame, MICBuffer *mic, int payLen)
-{
-	miccntx   *context;
-
-	// Determine correct context
-	// If not adhoc, always use unicast key
-
-	if (test_bit(FLAG_ADHOC, &ai->flags) && (frame->da[0] & 0x1))
-		context = &ai->mod[0].mCtx;
-	else
-		context = &ai->mod[0].uCtx;
-  
-	if (!context->valid)
-		return ERROR;
-
-	mic->typelen = htons(payLen + 16); //Length of Mic'd packet
-
-	memcpy(&mic->u.snap, micsnap, sizeof(micsnap)); // Add Snap
-
-	// Add Tx sequence
-	mic->seq = htonl(context->tx);
-	context->tx += 2;
-
-	emmh32_init(&context->seed); // Mic the packet
-	emmh32_update(&context->seed,frame->da,ETH_ALEN * 2); // DA,SA
-	emmh32_update(&context->seed,(u8*)&mic->typelen,10); // Type/Length and Snap
-	emmh32_update(&context->seed,(u8*)&mic->seq,sizeof(mic->seq)); //SEQ
-	emmh32_update(&context->seed,frame->da + ETH_ALEN * 2,payLen); //payload
-	emmh32_final(&context->seed, (u8*)&mic->mic);
-
-	/*    New Type/length ?????????? */
-	mic->typelen = 0; //Let NIC know it could be an oversized packet
-	return SUCCESS;
-}
-
-typedef enum {
-    NONE,
-    NOMIC,
-    NOMICPLUMMED,
-    SEQUENCE,
-    INCORRECTMIC,
-} mic_error;
-
-/*===========================================================================
- *  Description: Decapsulates a MIC'd packet and returns the 802.3 packet
- *               (removes the MIC stuff) if packet is a valid packet.
- *      
- *       Inputs: etherHead  pointer to the 802.3 packet             
- *     
- *      Returns: BOOLEAN - TRUE if packet should be dropped otherwise FALSE
- *     
- *      Author: sbraneky (10/15/01)
- *    Merciless hacks by rwilcher (1/14/02)
- *---------------------------------------------------------------------------
- */
-
-static int decapsulate(struct airo_info *ai, MICBuffer *mic, etherHead *eth, u16 payLen)
-{
-	int      i;
-	u32      micSEQ;
-	miccntx  *context;
-	u8       digest[4];
-	mic_error micError = NONE;
-
-	// Check if the packet is a Mic'd packet
-
-	if (!ai->micstats.enabled) {
-		//No Mic set or Mic OFF but we received a MIC'd packet.
-		if (memcmp ((u8*)eth + 14, micsnap, sizeof(micsnap)) == 0) {
-			ai->micstats.rxMICPlummed++;
-			return ERROR;
-		}
-		return SUCCESS;
-	}
-
-	if (ntohs(mic->typelen) == 0x888E)
-		return SUCCESS;
-
-	if (memcmp (mic->u.snap, micsnap, sizeof(micsnap)) != 0) {
-	    // Mic enabled but packet isn't Mic'd
-		ai->micstats.rxMICPlummed++;
-	    	return ERROR;
-	}
-
-	micSEQ = ntohl(mic->seq);            //store SEQ as CPU order
-
-	//At this point we a have a mic'd packet and mic is enabled
-	//Now do the mic error checking.
-
-	//Receive seq must be odd
-	if ( (micSEQ & 1) == 0 ) {
-		ai->micstats.rxWrongSequence++;
-		return ERROR;
-	}
-
-	for (i = 0; i < NUM_MODULES; i++) {
-		int mcast = eth->da[0] & 1;
-		//Determine proper context 
-		context = mcast ? &ai->mod[i].mCtx : &ai->mod[i].uCtx;
-	
-		//Make sure context is valid
-		if (!context->valid) {
-			if (i == 0)
-				micError = NOMICPLUMMED;
-			continue;                
-		}
-	       	//DeMic it 
-
-		if (!mic->typelen)
-			mic->typelen = htons(payLen + sizeof(MICBuffer) - 2);
-	
-		emmh32_init(&context->seed);
-		emmh32_update(&context->seed, eth->da, ETH_ALEN*2); 
-		emmh32_update(&context->seed, (u8 *)&mic->typelen, sizeof(mic->typelen)+sizeof(mic->u.snap)); 
-		emmh32_update(&context->seed, (u8 *)&mic->seq,sizeof(mic->seq));	
-		emmh32_update(&context->seed, eth->da + ETH_ALEN*2,payLen);	
-		//Calculate MIC
-		emmh32_final(&context->seed, digest);
-	
-		if (memcmp(digest, &mic->mic, 4)) { //Make sure the mics match
-		  //Invalid Mic
-			if (i == 0)
-				micError = INCORRECTMIC;
-			continue;
-		}
-
-		//Check Sequence number if mics pass
-		if (RxSeqValid(ai, context, mcast, micSEQ) == SUCCESS) {
-			ai->micstats.rxSuccess++;
-			return SUCCESS;
-		}
-		if (i == 0)
-			micError = SEQUENCE;
-	}
-
-	// Update statistics
-	switch (micError) {
-		case NOMICPLUMMED: ai->micstats.rxMICPlummed++;   break;
-		case SEQUENCE:    ai->micstats.rxWrongSequence++; break;
-		case INCORRECTMIC: ai->micstats.rxIncorrectMIC++; break;
-		case NONE:  break;
-		case NOMIC: break;
-	}
-	return ERROR;
-}
-
-/*===========================================================================
- * Description:  Checks the Rx Seq number to make sure it is valid
- *               and hasn't already been received
- *   
- *     Inputs: miccntx - mic context to check seq against
- *             micSeq  - the Mic seq number
- *   
- *    Returns: TRUE if valid otherwise FALSE. 
- *
- *    Author: sbraneky (10/15/01)
- *    Merciless hacks by rwilcher (1/14/02)
- *---------------------------------------------------------------------------
- */
-
-static int RxSeqValid (struct airo_info *ai,miccntx *context,int mcast,u32 micSeq)
-{
-	u32 seq,index;
-
-	//Allow for the ap being rebooted - if it is then use the next 
-	//sequence number of the current sequence number - might go backwards
-
-	if (mcast) {
-		if (test_bit(FLAG_UPDATE_MULTI, &ai->flags)) {
-			clear_bit (FLAG_UPDATE_MULTI, &ai->flags);
-			context->window = (micSeq > 33) ? micSeq : 33;
-			context->rx     = 0;        // Reset rx
-		}
-	} else if (test_bit(FLAG_UPDATE_UNI, &ai->flags)) {
-		clear_bit (FLAG_UPDATE_UNI, &ai->flags);
-		context->window = (micSeq > 33) ? micSeq : 33; // Move window
-		context->rx     = 0;        // Reset rx
-	}
-
-	//Make sequence number relative to START of window
-	seq = micSeq - (context->window - 33);
-
-	//Too old of a SEQ number to check.
-	if ((u32)seq < 0)
-		return ERROR;
-    
-	if ( seq > 64 ) {
-		//Window is infinite forward
-		MoveWindow(context,micSeq);
-		return SUCCESS;
-	}
-
-	// We are in the window. Now check the context rx bit to see if it was already sent
-	seq >>= 1;         //divide by 2 because we only have odd numbers
-	index = 1 << seq;  //Get an index number
-
-	if (!(context->rx & index)) {
-		//micSEQ falls inside the window.
-		//Add seqence number to the list of received numbers.
-		context->rx |= index;
-
-		MoveWindow(context,micSeq);
-
-		return SUCCESS;
-	}
-	return ERROR;
-}
-
-static void MoveWindow(miccntx *context, u32 micSeq)
-{
-	u32 shift;
-
-	//Move window if seq greater than the middle of the window
-	if (micSeq > context->window) {
-		shift = (micSeq - context->window) >> 1;
-    
-		    //Shift out old
-		if (shift < 32)
-			context->rx >>= shift;
-		else
-			context->rx = 0;
-
-		context->window = micSeq;      //Move window
-	}
-}
-
-/*==============================================*/
-/*========== EMMH ROUTINES  ====================*/
-/*==============================================*/
-
-/* mic accumulate */
-#define MIC_ACCUM(val)	\
-	context->accum += (u64)(val) * context->coeff[coeff_position++];
-
-static unsigned char aes_counter[16];
-
-/* expand the key to fill the MMH coefficient array */
-void emmh32_setseed(emmh32_context *context, u8 *pkey, int keylen, struct crypto_tfm *tfm)
-{
-  /* take the keying material, expand if necessary, truncate at 16-bytes */
-  /* run through AES counter mode to generate context->coeff[] */
-  
-	int i,j;
-	u32 counter;
-	u8 *cipher, plain[16];
-	struct scatterlist sg[1];
-
-	crypto_cipher_setkey(tfm, pkey, 16);
-	counter = 0;
-	for (i = 0; i < (sizeof(context->coeff)/sizeof(context->coeff[0])); ) {
-		aes_counter[15] = (u8)(counter >> 0);
-		aes_counter[14] = (u8)(counter >> 8);
-		aes_counter[13] = (u8)(counter >> 16);
-		aes_counter[12] = (u8)(counter >> 24);
-		counter++;
-		memcpy (plain, aes_counter, 16);
-		sg[0].page = virt_to_page(plain);
-		sg[0].offset = ((long) plain & ~PAGE_MASK);
-		sg[0].length = 16;
-		crypto_cipher_encrypt(tfm, sg, sg, 16);
-		cipher = kmap(sg[0].page) + sg[0].offset;
-		for (j=0; (j<16) && (i< (sizeof(context->coeff)/sizeof(context->coeff[0]))); ) {
-			context->coeff[i++] = ntohl(*(u32 *)&cipher[j]);
-			j += 4;
-		}
-	}
-}
-
-/* prepare for calculation of a new mic */
-void emmh32_init(emmh32_context *context)
-{
-	/* prepare for new mic calculation */
-	context->accum = 0;
-	context->position = 0;
-}
-
-/* add some bytes to the mic calculation */
-void emmh32_update(emmh32_context *context, u8 *pOctets, int len)
-{
-	int	coeff_position, byte_position;
-  
-	if (len == 0) return;
-  
-	coeff_position = context->position >> 2;
-  
-	/* deal with partial 32-bit word left over from last update */
-	byte_position = context->position & 3;
-	if (byte_position) {
-		/* have a partial word in part to deal with */
-		do {
-			if (len == 0) return;
-			context->part.d8[byte_position++] = *pOctets++;
-			context->position++;
-			len--;
-		} while (byte_position < 4);
-		MIC_ACCUM(htonl(context->part.d32));
-	}
-
-	/* deal with full 32-bit words */
-	while (len >= 4) {
-		MIC_ACCUM(htonl(*(u32 *)pOctets));
-		context->position += 4;
-		pOctets += 4;
-		len -= 4;
-	}
-
-	/* deal with partial 32-bit word that will be left over from this update */
-	byte_position = 0;
-	while (len > 0) {
-		context->part.d8[byte_position++] = *pOctets++;
-		context->position++;
-		len--;
-	}
-}
-
-/* mask used to zero empty bytes for final partial word */
-static u32 mask32[4] = { 0x00000000L, 0xFF000000L, 0xFFFF0000L, 0xFFFFFF00L };
-
-/* calculate the mic */
-void emmh32_final(emmh32_context *context, u8 digest[4])
-{
-	int	coeff_position, byte_position;
-	u32	val;
-  
-	u64 sum, utmp;
-	s64 stmp;
-
-	coeff_position = context->position >> 2;
-  
-	/* deal with partial 32-bit word left over from last update */
-	byte_position = context->position & 3;
-	if (byte_position) {
-		/* have a partial word in part to deal with */
-		val = htonl(context->part.d32);
-		MIC_ACCUM(val & mask32[byte_position]);	/* zero empty bytes */
-	}
-
-	/* reduce the accumulated u64 to a 32-bit MIC */
-	sum = context->accum;
-	stmp = (sum  & 0xffffffffLL) - ((sum >> 32)  * 15);
-	utmp = (stmp & 0xffffffffLL) - ((stmp >> 32) * 15);
-	sum = utmp & 0xffffffffLL;
-	if (utmp > 0x10000000fLL)
-		sum -= 15;
-
-	val = (u32)sum;
-	digest[0] = (val>>24) & 0xFF;
-	digest[1] = (val>>16) & 0xFF;
-	digest[2] = (val>>8) & 0xFF;
-	digest[3] = val & 0xFF;
-}
-#endif
-
 static int readBSSListRid(struct airo_info *ai, int first,
 		      BSSListRid *list) {
 	int rc;
@@ -1554,18 +839,14 @@ static int readBSSListRid(struct airo_info *ai, int first,
 	if (first == 1) {
 			memset(&cmd, 0, sizeof(cmd));
 			cmd.cmd=CMD_LISTBSS;
-			if (down_interruptible(&ai->sem))
-				return -ERESTARTSYS;
-			issuecommand(ai, &cmd, &rsp);
-			up(&ai->sem);
+			lock_issuecommand(ai, &cmd, &rsp);
 			/* Let the command take effect */
 			set_current_state (TASK_INTERRUPTIBLE);
-			ai->task = current;
 			schedule_timeout (3*HZ);
-			ai->task = NULL;
 		}
-	rc = PC4500_readrid(ai, first ? RID_BSSLISTFIRST : RID_BSSLISTNEXT,
-			    list, sizeof(*list), 1);
+	rc = PC4500_readrid(ai,
+		            first ? RID_BSSLISTFIRST : RID_BSSLISTNEXT,
+			    list, sizeof(*list));
 
 	list->len = le16_to_cpu(list->len);
 	list->index = le16_to_cpu(list->index);
@@ -1580,7 +861,7 @@ static int readBSSListRid(struct airo_info *ai, int first,
 
 static int readWepKeyRid(struct airo_info*ai, WepKeyRid *wkr, int temp) {
 	int rc = PC4500_readrid(ai, temp ? RID_WEP_TEMP : RID_WEP_PERM,
-				wkr, sizeof(*wkr), 1);
+				wkr, sizeof(*wkr));
 
 	wkr->len = le16_to_cpu(wkr->len);
 	wkr->kindex = le16_to_cpu(wkr->kindex);
@@ -1589,17 +870,17 @@ static int readWepKeyRid(struct airo_info*ai, WepKeyRid *wkr, int temp) {
 }
 /* In the writeXXXRid routines we copy the rids so that we don't screwup
  * the originals when we endian them... */
-static int writeWepKeyRid(struct airo_info*ai, WepKeyRid *pwkr, int perm, int lock) {
+static int writeWepKeyRid(struct airo_info*ai, WepKeyRid *pwkr, int perm) {
 	int rc;
 	WepKeyRid wkr = *pwkr;
 
 	wkr.len = cpu_to_le16(wkr.len);
 	wkr.kindex = cpu_to_le16(wkr.kindex);
 	wkr.klen = cpu_to_le16(wkr.klen);
-	rc = PC4500_writerid(ai, RID_WEP_TEMP, &wkr, sizeof(wkr), lock);
+	rc = do_writerid(ai, RID_WEP_TEMP, &wkr, sizeof(wkr));
 	if (rc!=SUCCESS) printk(KERN_ERR "airo:  WEP_TEMP set %x\n", rc);
 	if (perm) {
-		rc = PC4500_writerid(ai, RID_WEP_PERM, &wkr, sizeof(wkr), lock);
+		rc = do_writerid(ai, RID_WEP_PERM, &wkr, sizeof(wkr));
 		if (rc!=SUCCESS) {
 			printk(KERN_ERR "airo:  WEP_PERM set %x\n", rc);
 		}
@@ -1609,7 +890,7 @@ static int writeWepKeyRid(struct airo_info*ai, WepKeyRid *pwkr, int perm, int lo
 
 static int readSsidRid(struct airo_info*ai, SsidRid *ssidr) {
 	int i;
-	int rc = PC4500_readrid(ai, RID_SSID, ssidr, sizeof(*ssidr), 1);
+	int rc = PC4500_readrid(ai, RID_SSID, ssidr, sizeof(*ssidr));
 
 	ssidr->len = le16_to_cpu(ssidr->len);
 	for(i = 0; i < 3; i++) {
@@ -1626,61 +907,29 @@ static int writeSsidRid(struct airo_info*ai, SsidRid *pssidr) {
 	for(i = 0; i < 3; i++) {
 		ssidr.ssids[i].len = cpu_to_le16(ssidr.ssids[i].len);
 	}
-	rc = PC4500_writerid(ai, RID_SSID, &ssidr, sizeof(ssidr), 1);
+	rc = do_writerid(ai, RID_SSID, &ssidr, sizeof(ssidr));
 	return rc;
 }
-static int readConfigRid(struct airo_info*ai, int lock) {
-	int rc;
+static int readConfigRid(struct airo_info*ai, ConfigRid *cfgr) {
+	int rc = PC4500_readrid(ai, RID_ACTUALCONFIG, cfgr, sizeof(*cfgr));
 	u16 *s;
-	ConfigRid cfg;
 
-	if (ai->config.len)
-		return SUCCESS;
+	for(s = &cfgr->len; s <= &cfgr->rtsThres; s++) *s = le16_to_cpu(*s);
 
-	rc = PC4500_readrid(ai, RID_ACTUALCONFIG, &cfg, sizeof(cfg), lock);
-	if (rc != SUCCESS)
-		return rc;
-
-	for(s = &cfg.len; s <= &cfg.rtsThres; s++) *s = le16_to_cpu(*s);
-
-	for(s = &cfg.shortRetryLimit; s <= &cfg.radioType; s++)
+	for(s = &cfgr->shortRetryLimit; s <= &cfgr->radioType; s++)
 		*s = le16_to_cpu(*s);
 
-	for(s = &cfg.txPower; s <= &cfg.radioSpecific; s++)
+	for(s = &cfgr->txPower; s <= &cfgr->radioSpecific; s++)
 		*s = le16_to_cpu(*s);
 
-	for(s = &cfg.arlThreshold; s <= &cfg.autoWake; s++)
+	for(s = &cfgr->arlThreshold; s <= &cfgr->autoWake; s++)
 		*s = le16_to_cpu(*s);
 
-	ai->config = cfg;
-	return SUCCESS;
+	return rc;
 }
-static inline void checkThrottle(struct airo_info *ai) {
-	int i;
-/* Old hardware had a limit on encryption speed */
-	if (ai->config.authType != AUTH_OPEN && maxencrypt) {
-		for(i=0; i<8; i++) {
-			if (ai->config.rates[i] > maxencrypt) {
-				ai->config.rates[i] = 0;
-			}
-		}
-	}
-}
-static int writeConfigRid(struct airo_info*ai, int lock) {
+static int writeConfigRid(struct airo_info*ai, ConfigRid *pcfgr) {
 	u16 *s;
-	ConfigRid cfgr;
-
-	if (!ai->need_commit)
-		return SUCCESS;
-
-	ai->need_commit = 0;
-	checkThrottle(ai);
-	cfgr = ai->config;
-
-	if ((cfgr.opmode & 0xFF) == MODE_STA_IBSS)
-		set_bit(FLAG_ADHOC, &ai->flags);
-	else
-		clear_bit(FLAG_ADHOC, &ai->flags);
+	ConfigRid cfgr = *pcfgr;
 
 	for(s = &cfgr.len; s <= &cfgr.rtsThres; s++) *s = cpu_to_le16(*s);
 
@@ -1693,34 +942,33 @@ static int writeConfigRid(struct airo_info*ai, int lock) {
 	for(s = &cfgr.arlThreshold; s <= &cfgr.autoWake; s++)
 		*s = cpu_to_le16(*s);
 
-	return PC4500_writerid( ai, RID_CONFIG, &cfgr, sizeof(cfgr), lock);
+	return do_writerid( ai, RID_CONFIG, &cfgr, sizeof(cfgr));
 }
-static int readStatusRid(struct airo_info*ai, StatusRid *statr, int lock) {
-	int rc = PC4500_readrid(ai, RID_STATUS, statr, sizeof(*statr), lock);
+static int readStatusRid(struct airo_info*ai, StatusRid *statr) {
+	int rc = PC4500_readrid(ai, RID_STATUS, statr, sizeof(*statr));
 	u16 *s;
 
 	statr->len = le16_to_cpu(statr->len);
 	for(s = &statr->mode; s <= &statr->SSIDlen; s++) *s = le16_to_cpu(*s);
 
-	for(s = &statr->beaconPeriod; s <= &statr->shortPreamble; s++)
+	for(s = &statr->beaconPeriod; s <= &statr->_reserved[9]; s++)
 		*s = le16_to_cpu(*s);
-	statr->load = le16_to_cpu(statr->load);
-	statr->assocStatus = le16_to_cpu(statr->assocStatus);
+
 	return rc;
 }
 static int readAPListRid(struct airo_info*ai, APListRid *aplr) {
-	int rc =  PC4500_readrid(ai, RID_APLIST, aplr, sizeof(*aplr), 1);
+	int rc =  PC4500_readrid(ai, RID_APLIST, aplr, sizeof(*aplr));
 	aplr->len = le16_to_cpu(aplr->len);
 	return rc;
 }
 static int writeAPListRid(struct airo_info*ai, APListRid *aplr) {
 	int rc;
 	aplr->len = cpu_to_le16(aplr->len);
-	rc = PC4500_writerid(ai, RID_APLIST, aplr, sizeof(*aplr), 1);
+	rc = do_writerid(ai, RID_APLIST, aplr, sizeof(*aplr));
 	return rc;
 }
 static int readCapabilityRid(struct airo_info*ai, CapabilityRid *capr) {
-	int rc = PC4500_readrid(ai, RID_CAPABILITIES, capr, sizeof(*capr), 1);
+	int rc = PC4500_readrid(ai, RID_CAPABILITIES, capr, sizeof(*capr));
 	u16 *s;
 
 	capr->len = le16_to_cpu(capr->len);
@@ -1731,8 +979,8 @@ static int readCapabilityRid(struct airo_info*ai, CapabilityRid *capr) {
 		*s = le16_to_cpu(*s);
 	return rc;
 }
-static int readStatsRid(struct airo_info*ai, StatsRid *sr, int rid, int lock) {
-	int rc = PC4500_readrid(ai, rid, sr, sizeof(*sr), lock);
+static int readStatsRid(struct airo_info*ai, StatsRid *sr, int rid) {
+	int rc = PC4500_readrid(ai, rid, sr, sizeof(*sr));
 	u32 *i;
 
 	sr->len = le16_to_cpu(sr->len);
@@ -1742,110 +990,19 @@ static int readStatsRid(struct airo_info*ai, StatsRid *sr, int rid, int lock) {
 
 static int airo_open(struct net_device *dev) {
 	struct airo_info *info = dev->priv;
-	Resp rsp;
 
-	if (test_bit(FLAG_FLASHING, &info->flags))
-		return -EIO;
-
-	/* Make sure the card is configured.
-	 * Wireless Extensions may postpone config changes until the card
-	 * is open (to pipeline changes and speed-up card setup). If
-	 * those changes are not yet commited, do it now - Jean II */
-	if(info->need_commit) {
-		disable_MAC(info, 1);
-		writeConfigRid(info, 1);
-	}
-
-	if (info->wifidev != dev) {
-		/* Power on the MAC controller (which may have been disabled) */
-		clear_bit(FLAG_RADIO_DOWN, &info->flags);
-		enable_interrupts(info);
-	}
-	enable_MAC(info, &rsp, 1);
+	enable_interrupts(info);
 
 	netif_start_queue(dev);
 	return 0;
 }
 
-static void get_tx_error(struct airo_info *ai, u32 fid)
-{
-	u16 status;
-
-	if (bap_setup(ai, ai->fids[fid] & 0xffff, 4, BAP0) == SUCCESS) {
-		bap_read(ai, &status, 2, BAP0);
-		if (le16_to_cpu(status) & 2) /* Too many retries */
-			ai->stats.tx_aborted_errors++;
-		if (le16_to_cpu(status) & 4) /* Transmit lifetime exceeded */
-			ai->stats.tx_heartbeat_errors++;
-		if (le16_to_cpu(status) & 8) /* Aid fail */
-			{ }
-		if (le16_to_cpu(status) & 0x10) /* MAC disabled */
-			ai->stats.tx_carrier_errors++;
-		if (le16_to_cpu(status) & 0x20) /* Association lost */
-			{ }
-#if WIRELESS_EXT > 13
-		/* We produce a TXDROP event only for retry or lifetime
-		 * exceeded, because that's the only status that really mean
-		 * that this particular node went away.
-		 * Other errors means that *we* screwed up. - Jean II */
-		if ((le16_to_cpu(status) & 2) ||
-		     (le16_to_cpu(status) & 4)) {
-			union iwreq_data	wrqu;
-			char junk[0x18];
-
-			/* Faster to skip over useless data than to do
-			 * another bap_setup(). We are at offset 0x6 and
-			 * need to go to 0x18 and read 6 bytes - Jean II */
-			bap_read(ai, (u16 *) junk, 0x18, BAP0);
-
-			/* Copy 802.11 dest address.
-			 * We use the 802.11 header because the frame may
-			 * not be 802.3 or may be mangled...
-			 * In Ad-Hoc mode, it will be the node address.
-			 * In managed mode, it will be most likely the AP addr
-			 * User space will figure out how to convert it to
-			 * whatever it needs (IP address or else).
-			 * - Jean II */
-			memcpy(wrqu.addr.sa_data, junk + 0x12, ETH_ALEN);
-			wrqu.addr.sa_family = ARPHRD_ETHER;
-
-			/* Send event to user space */
-			wireless_send_event(ai->dev, IWEVTXDROP, &wrqu, NULL);
-		}
-#endif /* WIRELESS_EXT > 13 */
-	}
-}
-
-static void airo_end_xmit(struct net_device *dev) {
-	u16 status;
-	int i;
-	struct airo_info *priv = dev->priv;
-	struct sk_buff *skb = priv->xmit.skb;
-	int fid = priv->xmit.fid;
-	u32 *fids = priv->fids;
-
-	clear_bit(JOB_XMIT, &priv->flags);
-	clear_bit(FLAG_PENDING_XMIT, &priv->flags);
-	status = transmit_802_3_packet (priv, fids[fid], skb->data);
-	up(&priv->sem);
-
-	i = 0;
-	if ( status == SUCCESS ) {
-		dev->trans_start = jiffies;
-		for (; i < MAX_FIDS / 2 && (priv->fids[i] & 0xffff0000); i++);
-	} else {
-		priv->fids[fid] &= 0xffff;
-		priv->stats.tx_window_errors++;
-	}
-	if (i < MAX_FIDS / 2)
-		netif_wake_queue(dev);
-	dev_kfree_skb(skb);
-}
-
 static int airo_start_xmit(struct sk_buff *skb, struct net_device *dev) {
 	s16 len;
-	int i, j;
-	struct airo_info *priv = dev->priv;
+	u16 status;
+	u32 flags;
+	int i,j;
+	struct airo_info *priv = (struct airo_info*)dev->priv;
 	u32 *fids = priv->fids;
 
 	if ( skb == NULL ) {
@@ -1854,158 +1011,80 @@ static int airo_start_xmit(struct sk_buff *skb, struct net_device *dev) {
 	}
 
 	/* Find a vacant FID */
-	for( i = 0; i < MAX_FIDS / 2 && (fids[i] & 0xffff0000); i++ );
-	for( j = i + 1; j < MAX_FIDS / 2 && (fids[j] & 0xffff0000); j++ );
-
-	if ( j >= MAX_FIDS / 2 ) {
-		netif_stop_queue(dev);
-
-		if (i == MAX_FIDS / 2) {
-			priv->stats.tx_fifo_errors++;
-			return 1;
+	spin_lock_irqsave(&priv->main_lock, flags);
+	for( j = 0, i = -1; j < MAX_FIDS; j++ ) {
+		if ( !( fids[j] & 0xffff0000 ) ) {
+			if ( i == -1 ) i = j;
+			else break;
 		}
 	}
-	/* check min length*/
-	len = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-        /* Mark fid as used & save length for later */
-	fids[i] |= (len << 16);
-	priv->xmit.skb = skb;
-	priv->xmit.fid = i;
-	if (down_trylock(&priv->sem) != 0) {
-		set_bit(FLAG_PENDING_XMIT, &priv->flags);
-		netif_stop_queue(dev);
-		set_bit(JOB_XMIT, &priv->flags);
-		wake_up_interruptible(&priv->thr_wait);
-	} else
-		airo_end_xmit(dev);
-	return 0;
-}
+	if ( j == MAX_FIDS ) netif_stop_queue(dev);
+	if ( i == -1 ) {
+		priv->stats.tx_fifo_errors++;
+		goto tx_done;
+	}
 
-static void airo_end_xmit11(struct net_device *dev) {
-	u16 status;
-	int i;
-	struct airo_info *priv = dev->priv;
-	struct sk_buff *skb = priv->xmit11.skb;
-	int fid = priv->xmit11.fid;
-	u32 *fids = priv->fids;
+	len = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN; /* check min length*/
+	status = transmit_802_3_packet( priv, fids[i], skb->data, len );
 
-	clear_bit(JOB_XMIT11, &priv->flags);
-	clear_bit(FLAG_PENDING_XMIT11, &priv->flags);
-	status = transmit_802_11_packet (priv, fids[fid], skb->data);
-	up(&priv->sem);
-
-	i = MAX_FIDS / 2;
 	if ( status == SUCCESS ) {
+                /* Mark fid as used & save length for later */
+		fids[i] |= (len << 16);
 		dev->trans_start = jiffies;
-		for (; i < MAX_FIDS && (priv->fids[i] & 0xffff0000); i++);
 	} else {
-		priv->fids[fid] &= 0xffff;
 		priv->stats.tx_window_errors++;
 	}
-	if (i < MAX_FIDS)
-		netif_wake_queue(dev);
+ tx_done:
+	spin_unlock_irqrestore(&priv->main_lock, flags);
 	dev_kfree_skb(skb);
-}
-
-static int airo_start_xmit11(struct sk_buff *skb, struct net_device *dev) {
-	s16 len;
-	int i, j;
-	struct airo_info *priv = dev->priv;
-	u32 *fids = priv->fids;
-
-	if ( skb == NULL ) {
-		printk( KERN_ERR "airo:  skb == NULL!!!\n" );
-		return 0;
-	}
-
-	/* Find a vacant FID */
-	for( i = MAX_FIDS / 2; i < MAX_FIDS && (fids[i] & 0xffff0000); i++ );
-	for( j = i + 1; j < MAX_FIDS && (fids[j] & 0xffff0000); j++ );
-
-	if ( j >= MAX_FIDS ) {
-		netif_stop_queue(dev);
-
-		if (i == MAX_FIDS) {
-			priv->stats.tx_fifo_errors++;
-			return 1;
-		}
-	}
-	/* check min length*/
-	len = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-        /* Mark fid as used & save length for later */
-	fids[i] |= (len << 16);
-	priv->xmit11.skb = skb;
-	priv->xmit11.fid = i;
-	if (down_trylock(&priv->sem) != 0) {
-		set_bit(FLAG_PENDING_XMIT11, &priv->flags);
-		netif_stop_queue(dev);
-		set_bit(JOB_XMIT11, &priv->flags);
-		wake_up_interruptible(&priv->thr_wait);
-	} else
-		airo_end_xmit11(dev);
 	return 0;
-}
-
-static void airo_read_stats(struct airo_info *ai) {
-	StatsRid stats_rid;
-	u32 *vals = stats_rid.vals;
-
-	clear_bit(JOB_STATS, &ai->flags);
-	readStatsRid(ai, &stats_rid, RID_STATS, 0);
-	up(&ai->sem);
-
-	ai->stats.rx_packets = vals[43] + vals[44] + vals[45];
-	ai->stats.tx_packets = vals[39] + vals[40] + vals[41];
-	ai->stats.rx_bytes = vals[92];
-	ai->stats.tx_bytes = vals[91];
-	ai->stats.rx_errors = vals[0] + vals[2] + vals[3] + vals[4];
-	ai->stats.tx_errors = vals[42] + ai->stats.tx_fifo_errors;
-	ai->stats.multicast = vals[43];
-	ai->stats.collisions = vals[89];
-
-	/* detailed rx_errors: */
-	ai->stats.rx_length_errors = vals[3];
-	ai->stats.rx_crc_errors = vals[4];
-	ai->stats.rx_frame_errors = vals[2];
-	ai->stats.rx_fifo_errors = vals[0];
 }
 
 struct net_device_stats *airo_get_stats(struct net_device *dev)
 {
-	struct airo_info *local =  dev->priv;
+	struct airo_info *local = (struct airo_info*) dev->priv;
+	StatsRid stats_rid;
+	u32 *vals = stats_rid.vals;
 
-	/* Get stats out of the card if available */
-	if (down_trylock(&local->sem) != 0) {
-		set_bit(JOB_STATS, &local->flags);
-		wake_up_interruptible(&local->thr_wait);
-	} else
-		airo_read_stats(local);
+	/* Get stats out of the card */
+	readStatsRid(local, &stats_rid, RID_STATS);
 
-	return &local->stats;
+	local->stats.rx_packets = vals[43] + vals[44] + vals[45];
+	local->stats.tx_packets = vals[39] + vals[40] + vals[41];
+	local->stats.rx_bytes = vals[92];
+	local->stats.tx_bytes = vals[91];
+	local->stats.rx_errors = vals[0] + vals[2] + vals[3] + vals[4];
+	local->stats.tx_errors = vals[42] + local->stats.tx_fifo_errors;
+	local->stats.multicast = vals[43];
+	local->stats.collisions = vals[89];
+
+	/* detailed rx_errors: */
+	local->stats.rx_length_errors = vals[3];
+	local->stats.rx_crc_errors = vals[4];
+	local->stats.rx_frame_errors = vals[2];
+	local->stats.rx_fifo_errors = vals[0];
+
+	return (&local->stats);
 }
 
-static void airo_set_promisc(struct airo_info *ai) {
+static int enable_MAC( struct airo_info *ai, Resp *rsp );
+static void disable_MAC(struct airo_info *ai);
+
+static void airo_set_multicast_list(struct net_device *dev) {
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	Cmd cmd;
 	Resp rsp;
 
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.cmd=CMD_SETMODE;
-	clear_bit(JOB_PROMISC, &ai->flags);
-	cmd.parm0=(ai->flags&IFF_PROMISC) ? PROMISC : NOPROMISC;
-	issuecommand(ai, &cmd, &rsp);
-	up(&ai->sem);
-}
-
-static void airo_set_multicast_list(struct net_device *dev) {
-	struct airo_info *ai = dev->priv;
-
+	/* For some reason this command takes a lot of time (~20 ms) and it's
+	 * run in an interrupt handler, so we'd better be sure we needed it
+	 * before executing it.
+	 */
 	if ((dev->flags ^ ai->flags) & IFF_PROMISC) {
-		change_bit(FLAG_PROMISC, &ai->flags);
-		if (down_trylock(&ai->sem) != 0) {
-			set_bit(JOB_PROMISC, &ai->flags);
-			wake_up_interruptible(&ai->thr_wait);
-		} else
-			airo_set_promisc(ai);
+		memset(&cmd, 0, sizeof(cmd));
+		cmd.cmd=CMD_SETMODE;
+		cmd.parm0=(dev->flags&IFF_PROMISC) ? PROMISC : NOPROMISC;
+		lock_issuecommand(ai, &cmd, &rsp);
+		ai->flags^=IFF_PROMISC;
 	}
 
 	if ((dev->flags&IFF_ALLMULTI)||dev->mc_count>0) {
@@ -2015,19 +1094,14 @@ static void airo_set_multicast_list(struct net_device *dev) {
 
 static int airo_set_mac_address(struct net_device *dev, void *p)
 {
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	struct sockaddr *addr = p;
-	Resp rsp;
+	ConfigRid cfg;
 
-	readConfigRid(ai, 1);
-	memcpy (ai->config.macAddr, addr->sa_data, dev->addr_len);
-	ai->need_commit = 1;
-	disable_MAC(ai, 1);
-	writeConfigRid (ai, 1);
-	enable_MAC(ai, &rsp, 1);
-	memcpy (ai->dev->dev_addr, addr->sa_data, dev->addr_len);
-	if (ai->wifidev)
-		memcpy (ai->wifidev->dev_addr, addr->sa_data, dev->addr_len);
+	readConfigRid (ai, &cfg);
+	memcpy (cfg.macAddr, addr->sa_data, dev->addr_len);
+	writeConfigRid (ai, &cfg);
+	memcpy (dev->dev_addr, addr->sa_data, dev->addr_len);
 	return 0;
 }
 
@@ -2041,22 +1115,10 @@ static int airo_change_mtu(struct net_device *dev, int new_mtu)
 
 
 static int airo_close(struct net_device *dev) {
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 
 	netif_stop_queue(dev);
-
-	if (ai->wifidev != dev) {
-#ifdef POWER_ON_DOWN
-		/* Shut power to the card. The idea is that the user can save
-		 * power when he doesn't need the card with "ifconfig down".
-		 * That's the method that is most friendly towards the network
-		 * stack (i.e. the network stack won't try to broadcast
-		 * anything on the interface and routes are gone. Jean II */
-		set_bit(FLAG_RADIO_DOWN, &ai->flags);
-		disable_MAC(ai, 1);
-#endif
-		disable_interrupts( ai );
-	}
+	disable_interrupts( ai );
 	return 0;
 }
 
@@ -2064,104 +1126,28 @@ static void del_airo_dev( struct net_device *dev );
 
 void stop_airo_card( struct net_device *dev, int freeres )
 {
-	struct airo_info *ai = dev->priv;
-	disable_interrupts(ai);
-	free_irq( dev->irq, dev );
-	takedown_proc_entry( dev, ai );
-	if (ai->registered) {
-		unregister_netdev( dev );
-		if (ai->wifidev) {
-			unregister_netdev(ai->wifidev);
-			free_netdev(ai->wifidev);
-			ai->wifidev = 0;
-		}
-		ai->registered = 0;
-	}
-	set_bit(JOB_DIE, &ai->flags);
-	kill_proc(ai->thr_pid, SIGTERM, 1);
-	wait_for_completion(&ai->thr_exited);
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	if (ai->flash)
 		kfree(ai->flash);
 	if (ai->rssi)
 		kfree(ai->rssi);
+	takedown_proc_entry( dev, ai );
+	if (ai->registered) {
+		unregister_netdev( dev );
+		ai->registered = 0;
+	}
+	disable_interrupts(ai);
+	free_irq( dev->irq, dev );
+	if (auto_wep) del_timer_sync(&ai->timer);
 	if (freeres) {
 		/* PCMCIA frees this stuff, so only for PCI and ISA */
 	        release_region( dev->base_addr, 64 );
         }
-#ifdef MICSUPPORT
-	if (ai->tfm)
-		crypto_free_tfm(ai->tfm);
-#endif
 	del_airo_dev( dev );
-	free_netdev( dev );
+	kfree( dev );
 }
-
-EXPORT_SYMBOL(stop_airo_card);
 
 static int add_airo_dev( struct net_device *dev );
-
-int wll_header_parse(struct sk_buff *skb, unsigned char *haddr)
-{
-	memcpy(haddr, skb->mac.raw + 10, ETH_ALEN);
-	return ETH_ALEN;
-}
-
-static void wifi_setup(struct net_device *dev, struct net_device *ethdev)
-{
-	struct airo_info *ai = ethdev->priv;
-	dev->priv = ai;
-	dev->hard_header        = 0;
-	dev->rebuild_header     = 0;
-	dev->hard_header_cache  = 0;
-	dev->header_cache_update= 0;
-
-	dev->hard_header_parse  = wll_header_parse;
-	dev->hard_start_xmit = &airo_start_xmit11;
-	dev->get_stats = &airo_get_stats;
-	dev->set_mac_address = &airo_set_mac_address;
-	dev->do_ioctl = &airo_ioctl;
-#ifdef WIRELESS_EXT
-	dev->get_wireless_stats = airo_get_wireless_stats;
-#if WIRELESS_EXT > 12
-	dev->wireless_handlers = (struct iw_handler_def *)&airo_handler_def;
-#endif /* WIRELESS_EXT > 12 */
-#endif /* WIRELESS_EXT */
-	dev->change_mtu = &airo_change_mtu;
-	dev->open = &airo_open;
-	dev->stop = &airo_close;
-	dev->irq = ethdev->irq;
-	dev->base_addr = ethdev->base_addr;
-
-	dev->type               = ARPHRD_IEEE80211;
-	dev->hard_header_len    = ETH_HLEN;
-	dev->mtu                = 2312;
-	dev->addr_len           = ETH_ALEN;
-	memcpy(dev->dev_addr, ethdev->dev_addr, dev->addr_len);
-	dev->tx_queue_len       = 100; 
-
-	memset(dev->broadcast,0xFF, ETH_ALEN);
-
-	dev->flags              = IFF_BROADCAST|IFF_MULTICAST;
-}
-
-static struct net_device *init_wifidev(struct airo_info *ai,
-					struct net_device *ethdev)
-{
-	int err;
-	struct net_device *dev = (struct net_device*)kmalloc(sizeof *dev,GFP_KERNEL);
-	if (!dev) return 0;
-	memset(dev, 0, sizeof(*dev));
-
-	strcpy(dev->name, "wifi%d");
-	dev->priv = ai;
-	wifi_setup(dev, ethdev);
-	err = register_netdev(dev);
-	if (err<0) {
-		kfree(dev);
-		return 0;
-	}
-	return dev;
-}
 
 struct net_device *init_airo_card( unsigned short irq, int port, int is_pcmcia )
 {
@@ -2181,24 +1167,14 @@ struct net_device *init_airo_card( unsigned short irq, int port, int is_pcmcia )
 	}
 
 	ai = dev->priv;
-	ai->wifidev = 0;
 	ai->registered = 0;
         ai->dev = dev;
 	ai->aux_lock = SPIN_LOCK_UNLOCKED;
-	sema_init(&ai->sem, 1);
-	ai->need_commit = 0;
-	ai->config.len = 0;
-	init_waitqueue_head (&ai->thr_wait);
-	init_completion (&ai->thr_exited);
-	ai->thr_pid = kernel_thread(airo_thread, dev, CLONE_FS | CLONE_FILES);
-	if (ai->thr_pid < 0)
-		goto err_out_free;
-#ifdef MICSUPPORT
-	ai->tfm = NULL;
-#endif
+	ai->main_lock = SPIN_LOCK_UNLOCKED;
+	ai->header_parse = dev->hard_header_parse;
 	rc = add_airo_dev( dev );
 	if (rc)
-		goto err_out_thr;
+		goto err_out_free;
 
 	/* The Airo-specific entries in the device structure. */
 	dev->hard_start_xmit = &airo_start_xmit;
@@ -2208,9 +1184,6 @@ struct net_device *init_airo_card( unsigned short irq, int port, int is_pcmcia )
 	dev->do_ioctl = &airo_ioctl;
 #ifdef WIRELESS_EXT
 	dev->get_wireless_stats = airo_get_wireless_stats;
-#if WIRELESS_EXT > 12
-	dev->wireless_handlers = (struct iw_handler_def *)&airo_handler_def;
-#endif /* WIRELESS_EXT > 12 */
 #endif /* WIRELESS_EXT */
 	dev->change_mtu = &airo_change_mtu;
 	dev->open = &airo_open;
@@ -2230,21 +1203,15 @@ struct net_device *init_airo_card( unsigned short irq, int port, int is_pcmcia )
 		}
 	}
 
-	if (probe) {
-		if ( setup_card( ai, dev->dev_addr ) != SUCCESS ) {
-			printk( KERN_ERR "airo: MAC could not be enabled\n" );
-			rc = -EIO;
-			goto err_out_res;
-		}
-	} else {
-		ai->bap_read = fast_bap_read;
-		set_bit(FLAG_FLASHING, &ai->flags);
+	if ( setup_card( ai, dev->dev_addr, &ai->config) != SUCCESS ) {
+		printk( KERN_ERR "airo: MAC could not be enabled\n" );
+		rc = -EIO;
+		goto err_out_res;
 	}
 
 	rc = register_netdev(dev);
 	if (rc)
 		goto err_out_res;
-	ai->wifidev = init_wifidev(ai, dev);
 
 	ai->registered = 1;
 	printk( KERN_INFO "airo: MAC enabled %s %x:%x:%x:%x:%x:%x\n",
@@ -2253,9 +1220,8 @@ struct net_device *init_airo_card( unsigned short irq, int port, int is_pcmcia )
 		dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5] );
 
 	/* Allocate the transmit buffers */
-	if (probe)
-		for( i = 0; i < MAX_FIDS; i++ )
-			ai->fids[i] = transmit_allocate(ai,2312,i>=MAX_FIDS/2);
+	for( i = 0; i < MAX_FIDS; i++ )
+		ai->fids[i] = transmit_allocate( ai, 2312 );
 
 	setup_proc_entry( dev, dev->priv ); /* XXX check for failure */
 	netif_start_queue(dev);
@@ -2269,20 +1235,14 @@ err_out_irq:
 	free_irq(dev->irq, dev);
 err_out_unlink:
 	del_airo_dev(dev);
-err_out_thr:
-	set_bit(JOB_DIE, &ai->flags);
-	kill_proc(ai->thr_pid, SIGTERM, 1);
-	wait_for_completion(&ai->thr_exited);
 err_out_free:
 	kfree(dev);
 	return NULL;
 }
 
-EXPORT_SYMBOL(init_airo_card);
-
-static int waitbusy (struct airo_info *ai) {
+int waitbusy (struct airo_info *ai) {
 	int delay = 0;
-	while ((IN4500 (ai, COMMAND) & COMMAND_BUSY) && (delay < 10000)) {
+	while ((IN4500 (ai, COMMAND) & COMMAND_BUSY) & (delay < 10000)) {
 		udelay (10);
 		if (++delay % 20)
 			OUT4500(ai, EVACK, EV_CLEARCOMMANDBUSY);
@@ -2292,11 +1252,9 @@ static int waitbusy (struct airo_info *ai) {
 
 int reset_airo_card( struct net_device *dev ) {
 	int i;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 
-
-	if (down_interruptible(&ai->sem))
-		return -1;
+	disable_MAC(ai);
 	waitbusy (ai);
 	OUT4500(ai,COMMAND,CMD_SOFTRESET);
 	set_current_state (TASK_UNINTERRUPTIBLE);
@@ -2304,9 +1262,8 @@ int reset_airo_card( struct net_device *dev ) {
 	waitbusy (ai);
 	set_current_state (TASK_UNINTERRUPTIBLE);
 	schedule_timeout (HZ/5);
-	if ( setup_card(ai, dev->dev_addr ) != SUCCESS ) {
+	if ( setup_card(ai, dev->dev_addr, &(ai)->config) != SUCCESS ) {
 		printk( KERN_ERR "airo: MAC could not be enabled\n" );
-		up(&ai->sem);
 		return -1;
 	} else {
 		printk( KERN_INFO "airo: MAC enabled %s %x:%x:%x:%x:%x:%x\n",
@@ -2320,144 +1277,32 @@ int reset_airo_card( struct net_device *dev ) {
 			);
 		/* Allocate the transmit buffers */
 		for( i = 0; i < MAX_FIDS; i++ )
-			ai->fids[i] = transmit_allocate(ai,2312,i>=MAX_FIDS/2);
+			ai->fids[i] = transmit_allocate( ai, 2312 );
 	}
 	enable_interrupts( ai );
 	netif_wake_queue(dev);
-	up(&ai->sem);
 	return 0;
 }
 
-EXPORT_SYMBOL(reset_airo_card);
-
-#if WIRELESS_EXT > 13
-static void airo_send_event(struct net_device *dev) {
-	struct airo_info *ai = dev->priv;
-	union iwreq_data wrqu;
-	StatusRid status_rid;
-
-	clear_bit(JOB_EVENT, &ai->flags);
-	PC4500_readrid(ai, RID_STATUS, &status_rid, sizeof(status_rid), 0);
-	up(&ai->sem);
-	wrqu.data.length = 0;
-	wrqu.data.flags = 0;
-	memcpy(wrqu.ap_addr.sa_data, status_rid.bssid[0], ETH_ALEN);
-	wrqu.ap_addr.sa_family = ARPHRD_ETHER;
-
-	/* Send event to user space */
-	wireless_send_event(dev, SIOCGIWAP, &wrqu, NULL);
-}
-#endif
-
-static int airo_thread(void *data) {
-	struct net_device *dev = data;
-	struct airo_info *ai = dev->priv;
-	int locked;
-	
-	daemonize();
-	reparent_to_init();
-	spin_lock_irq(&current->sigmask_lock);
-	sigemptyset(&current->blocked);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
-
-	strncpy (current->comm, dev->name, sizeof(current->comm) - 1);
-	current->comm[sizeof(current->comm) - 1] = '\0';
-
-	while(1) {
-		if (signal_pending(current)) {
-			spin_lock_irq(&current->sigmask_lock);
-			flush_signals(current);
-			spin_unlock_irq(&current->sigmask_lock);
-		}
-
-		if (test_bit(JOB_DIE, &ai->flags))
-			break;
-
-		if (ai->flags & JOB_MASK) {
-			locked = down_interruptible(&ai->sem);
-		} else {
-			wait_queue_t wait;
-
-			init_waitqueue_entry(&wait, current);
-			add_wait_queue(&ai->thr_wait, &wait);
-			for (;;) {
-				set_current_state(TASK_INTERRUPTIBLE);
-				if (ai->flags & JOB_MASK)
-					break;
-				if (ai->expires) {
-					if (time_after_eq(jiffies,ai->expires)){
-						set_bit(JOB_AUTOWEP,&ai->flags);
-						break;
-					}
-					if (!signal_pending(current)) {
-						schedule_timeout(ai->expires - jiffies);
-						continue;
-					}
-				} else if (!signal_pending(current)) {
-					schedule();
-					continue;
-				}
-				break;
-			}
-			current->state = TASK_RUNNING;
-			remove_wait_queue(&ai->thr_wait, &wait);
-			locked = 1;
-		}
-
-		if (locked)
-			continue;
-
-		if (test_bit(JOB_DIE, &ai->flags)) {
-			up(&ai->sem);
-			break;
-		}
-
-		if (test_bit(FLAG_FLASHING, &ai->flags)) {
-			up(&ai->sem);
-			continue;
-		}
-
-		if (test_bit(JOB_XMIT, &ai->flags))
-			airo_end_xmit(dev);
-		else if (test_bit(JOB_XMIT11, &ai->flags))
-			airo_end_xmit11(dev);
-		else if (test_bit(JOB_STATS, &ai->flags))
-			airo_read_stats(ai);
-		else if (test_bit(JOB_WSTATS, &ai->flags))
-			airo_read_wireless_stats(ai);
-		else if (test_bit(JOB_PROMISC, &ai->flags))
-			airo_set_promisc(ai);
-#ifdef MICSUPPORT
-		else if (test_bit(JOB_MIC, &ai->flags))
-			micinit(ai);
-#endif
-#if WIRELESS_EXT > 13
-		else if (test_bit(JOB_EVENT, &ai->flags))
-			airo_send_event(dev);
-#endif
-		else if (test_bit(JOB_AUTOWEP, &ai->flags))
-			timer_func(dev);
-	}
-	complete_and_exit (&ai->thr_exited, 0);
+int wll_header_parse(struct sk_buff *skb, unsigned char *haddr)
+{
+	memcpy(haddr, skb->mac.raw + 10, ETH_ALEN);
+	return ETH_ALEN;
 }
 
-static irqreturn_t airo_interrupt ( int irq, void* dev_id, struct pt_regs *regs) {
+static void airo_interrupt ( int irq, void* dev_id, struct pt_regs *regs) {
 	struct net_device *dev = (struct net_device *)dev_id;
 	u16 status;
 	u16 fid;
-	struct airo_info *apriv = dev->priv;
+	struct airo_info *apriv = (struct airo_info *)dev->priv;
 	u16 savedInterrupts = 0;
-	int handled = 0;
 
 	if (!netif_device_present(dev))
-		return IRQ_NONE;
+		return;
 
 	for (;;) {
 		status = IN4500( apriv, EVSTAT );
-		if ( !(status & STATUS_INTS) || status == 0xffff ) break;
-
-		handled = 1;
+		if ( !status || status == 0xffff ) break;
 
 		if ( status & EV_AWAKE ) {
 			OUT4500( apriv, EVACK, EV_AWAKE );
@@ -2469,19 +1314,7 @@ static irqreturn_t airo_interrupt ( int irq, void* dev_id, struct pt_regs *regs)
 			OUT4500( apriv, EVINTEN, 0 );
 		}
 
-		if ( status & EV_MIC ) {
-			OUT4500( apriv, EVACK, EV_MIC );
-#ifdef MICSUPPORT
-			if (test_bit(FLAG_MIC_CAPABLE, &apriv->flags)) {
-				set_bit(JOB_MIC, &apriv->flags);
-				wake_up_interruptible(&apriv->thr_wait);
-			}
-#endif
-		}
 		if ( status & EV_LINK ) {
-#if WIRELESS_EXT > 13
-			union iwreq_data	wrqu;
-#endif /* WIRELESS_EXT > 13 */
 			/* The link status has changed, if you want to put a
 			   monitor hook in, do it here.  (Remember that
 			   interrupts are still disabled!)
@@ -2518,234 +1351,115 @@ static irqreturn_t airo_interrupt ( int irq, void* dev_id, struct pt_regs *regs)
 #define RC_NOAUTH 9 /* Station requesting (Re)Association is not
 		       Authenticated with the responding station */
 			if (newStatus != ASSOCIATED) {
-				if (auto_wep && !apriv->expires) {
-					apriv->expires = RUN_AT(3*HZ);
-					wake_up_interruptible(&apriv->thr_wait);
+				if (auto_wep && !timer_pending(&apriv->timer)) {
+					apriv->timer.expires = RUN_AT(HZ*3);
+		      			add_timer(&apriv->timer);
 				}
-			} else {
-				struct task_struct *task = apriv->task;
-				if (auto_wep)
-					apriv->expires = 0;
-				if (task)
-					wake_up_process (task);
-				set_bit(FLAG_UPDATE_UNI, &apriv->flags);
-				set_bit(FLAG_UPDATE_MULTI, &apriv->flags);
 			}
-#if WIRELESS_EXT > 13
-			/* Question : is ASSOCIATED the only status
-			 * that is valid ? We want to catch handover
-			 * and reassociations as valid status
-			 * Jean II */
-			if(newStatus == ASSOCIATED) {
-				if (apriv->scan_timestamp) {
-					/* Send an empty event to user space.
-					 * We don't send the received data on
-					 * the event because it would require
-					 * us to do complex transcoding, and
-					 * we want to minimise the work done in
-					 * the irq handler. Use a request to
-					 * extract the data - Jean II */
-					wrqu.data.length = 0;
-					wrqu.data.flags = 0;
-					wireless_send_event(dev, SIOCGIWSCAN, &wrqu, NULL);
-					apriv->scan_timestamp = 0;
-				}
-				if (down_trylock(&apriv->sem) != 0) {
-					set_bit(JOB_EVENT, &apriv->flags);
-					wake_up_interruptible(&apriv->thr_wait);
-				} else
-					airo_send_event(dev);
-			} else {
-				memset(wrqu.ap_addr.sa_data, '\0', ETH_ALEN);
-				wrqu.ap_addr.sa_family = ARPHRD_ETHER;
-
-				/* Send event to user space */
-				wireless_send_event(dev, SIOCGIWAP, &wrqu,NULL);
-			}
-#endif /* WIRELESS_EXT > 13 */
 		}
 
 		/* Check to see if there is something to receive */
 		if ( status & EV_RX  ) {
 			struct sk_buff *skb = NULL;
 			u16 fc, len, hdrlen = 0;
-#pragma pack(1)
 			struct {
 				u16 status, len;
 				u8 rssi[2];
-				u8 rate;
-				u8 freq;
-				u16 tmp[4];
 			} hdr;
-#pragma pack()
-			u16 gap;
-			u16 tmpbuf[4];
-			u16 *buffer;
 
 			fid = IN4500( apriv, RXFID );
 
 			/* Get the packet length */
-			if (test_bit(FLAG_802_11, &apriv->flags)) {
+			if (dev->type == ARPHRD_IEEE80211) {
 				bap_setup (apriv, fid, 4, BAP0);
 				bap_read (apriv, (u16*)&hdr, sizeof(hdr), BAP0);
 				/* Bad CRC. Ignore packet */
 				if (le16_to_cpu(hdr.status) & 2)
 					hdr.len = 0;
-				if (apriv->wifidev == NULL)
-					hdr.len = 0;
 			} else {
-				bap_setup (apriv, fid, 0x36, BAP0);
-				bap_read (apriv, (u16*)&hdr.len, 2, BAP0);
+				bap_setup (apriv, fid, 6, BAP0);
+				bap_read (apriv, (u16*)&hdr.len, 4, BAP0);
 			}
 			len = le16_to_cpu(hdr.len);
 
 			if (len > 2312) {
 				printk( KERN_ERR "airo: Bad size %d\n", len );
-				goto badrx;
+				len = 0;
 			}
-			if (len == 0)
-				goto badrx;
+			if (len) {
+				if (dev->type == ARPHRD_IEEE80211) {
+					bap_setup (apriv, fid, 0x14, BAP0);
+					bap_read (apriv, (u16*)&fc, sizeof(fc), BAP0);
+					if ((le16_to_cpu(fc) & 0x300) == 0x300)
+						hdrlen = 30;
+					else
+						hdrlen = 24;
+				} else
+					hdrlen = 12;
 
-			if (test_bit(FLAG_802_11, &apriv->flags)) {
-				bap_read (apriv, (u16*)&fc, sizeof(fc), BAP0);
-				fc = le16_to_cpu(fc);
-				switch (fc & 0xc) {
-					case 4:
-						if ((fc & 0xe0) == 0xc0)
-							hdrlen = 10;
-						else
-							hdrlen = 16;
-						break;
-					case 8:
-						if ((fc&0x300)==0x300){
-							hdrlen = 30;
+				skb = dev_alloc_skb( len + hdrlen + 2 );
+				if ( !skb ) {
+					apriv->stats.rx_dropped++;
+					len = 0;
+				}
+			}
+			if (len) {
+				u16 *buffer;
+				buffer = (u16*)skb_put (skb, len + hdrlen);
+				if (dev->type == ARPHRD_IEEE80211) {
+					u16 gap, tmpbuf[4];
+					buffer[0] = fc;
+					bap_read (apriv, buffer + 1, hdrlen - 2, BAP0);
+					if (hdrlen == 24)
+						bap_read (apriv, tmpbuf, 6, BAP0);
+
+					bap_read (apriv, &gap, sizeof(gap), BAP0);
+					gap = le16_to_cpu(gap);
+					if (gap && gap <= 8)
+						bap_read (apriv, tmpbuf, gap, BAP0);
+
+					bap_read (apriv, buffer + hdrlen/2, len, BAP0);
+				} else {
+			                bap_setup (apriv, fid, 0x38, BAP0);
+					bap_read (apriv, buffer,len + hdrlen,BAP0);
+				}
+				OUT4500( apriv, EVACK, EV_RX);
+#ifdef WIRELESS_SPY
+				if (apriv->spy_number > 0) {
+					int i;
+					char *sa;
+
+					sa = (char*)buffer + ((dev->type == ARPHRD_IEEE80211) ? 10 : 6);
+
+					for (i=0; i<apriv->spy_number; i++)
+						if (!memcmp(sa,apriv->spy_address[i],6))
+						{
+							apriv->spy_stat[i].qual = hdr.rssi[0];
+							if (apriv->rssi)
+								apriv->spy_stat[i].level = 0x100 - apriv->rssi[hdr.rssi[1]].rssidBm;
+							else
+								apriv->spy_stat[i].level = (hdr.rssi[1] + 321) / 2;
+							apriv->spy_stat[i].noise = 0;
+							apriv->spy_stat[i].updated = 3;
 							break;
 						}
-					default:
-						hdrlen = 24;
 				}
-			} else
-				hdrlen = ETH_ALEN * 2;
-
-			skb = dev_alloc_skb( len + hdrlen + 2 );
-			if ( !skb ) {
-				apriv->stats.rx_dropped++;
-				goto badrx;
-			}
-			buffer = (u16*)skb_put (skb, len + hdrlen);
-			if (test_bit(FLAG_802_11, &apriv->flags)) {
-				buffer[0] = fc;
-				bap_read (apriv, buffer + 1, hdrlen - 2, BAP0);
-				if (hdrlen == 24)
-					bap_read (apriv, tmpbuf, 6, BAP0);
-
-				bap_read (apriv, &gap, sizeof(gap), BAP0);
-				gap = le16_to_cpu(gap);
-				if (gap) {
-					if (gap <= 8)
-						bap_read (apriv, tmpbuf, gap, BAP0);
-					else
-						printk(KERN_ERR "airo: gaplen too big. Problems will follow...\n");
-				}
-				bap_read (apriv, buffer + hdrlen/2, len, BAP0);
-			} else {
-#ifdef MICSUPPORT
-				MICBuffer micbuf;
-#endif
-				bap_read (apriv, buffer, ETH_ALEN*2, BAP0);
-#ifdef MICSUPPORT
-				if (apriv->micstats.enabled) {
-					bap_read (apriv,(u16*)&micbuf,sizeof(micbuf),BAP0);
-					if (ntohs(micbuf.typelen) > 0x05DC)
-						bap_setup (apriv, fid, 0x44, BAP0);
-					else {
-						if (len <= sizeof(micbuf))
-							goto badmic;
-
-						len -= sizeof(micbuf);
-						skb_trim (skb, len + hdrlen);
-					}
-				}
-#endif
-				bap_read(apriv,buffer+ETH_ALEN,len,BAP0);
-#ifdef MICSUPPORT
-				if (decapsulate(apriv,&micbuf,(etherHead*)buffer,len)) {
-badmic:
-					dev_kfree_skb_irq (skb);
-#else
-				if (0) {
-#endif
-badrx:
-					OUT4500( apriv, EVACK, EV_RX);
-					goto exitrx;
-				}
-			}
-#if WIRELESS_EXT > 15
-#ifdef IW_WIRELESS_SPY		/* defined in iw_handler.h */
-			if (apriv->spy_data.spy_number > 0) {
-				char *sa;
-				struct iw_quality wstats;
-				/* Prepare spy data : addr + qual */
-				if (!test_bit(FLAG_802_11, &apriv->flags)) {
-					sa = (char*)buffer + 6;
-					bap_setup (apriv, fid, 8, BAP0);
-					bap_read (apriv, (u16*)hdr.rssi, 2, BAP0);
-				} else
-					sa = (char*)buffer + 10;
-				wstats.qual = hdr.rssi[0];
-				if (apriv->rssi)
-					wstats.level = 0x100 - apriv->rssi[hdr.rssi[1]].rssidBm;
-				else
-					wstats.level = (hdr.rssi[1] + 321) / 2;
-				wstats.updated = 3;	
-				/* Update spy records */
-				wireless_spy_update(dev, sa, &wstats);
-			}
-#endif /* IW_WIRELESS_SPY */
-#else /* WIRELESS_EXT > 15 */
-#ifdef WIRELESS_SPY
-			if (apriv->spy_number > 0) {
-				int i;
-				char *sa;
-
-				sa = (char*)buffer + (test_bit(FLAG_802_11, &apriv->flags) ? 10 : 6);
-
-				for (i=0; i<apriv->spy_number; i++)
-					if (!memcmp(sa,apriv->spy_address[i],ETH_ALEN))
-					{
-						if (!test_bit(FLAG_802_11, &apriv->flags)) {
-							bap_setup (apriv, fid, 8, BAP0);
-							bap_read (apriv, (u16*)hdr.rssi, 2, BAP0);
-						}
-						apriv->spy_stat[i].qual = hdr.rssi[0];
-						if (apriv->rssi)
-							apriv->spy_stat[i].level = 0x100 - apriv->rssi[hdr.rssi[1]].rssidBm;
-						else
-							apriv->spy_stat[i].level = (hdr.rssi[1] + 321) / 2;
-						apriv->spy_stat[i].noise = 0;
-						apriv->spy_stat[i].updated = 3;
-						break;
-					}
-			}
 #endif /* WIRELESS_SPY  */
-#endif /* WIRELESS_EXT > 15 */
-			OUT4500( apriv, EVACK, EV_RX);
-
-			if (test_bit(FLAG_802_11, &apriv->flags)) {
-				skb->mac.raw = skb->data;
-				skb->pkt_type = PACKET_OTHERHOST;
-				skb->dev = apriv->wifidev;
-				skb->protocol = htons(ETH_P_802_2);
-			} else {
+				dev->last_rx = jiffies;
 				skb->dev = dev;
-				skb->protocol = eth_type_trans(skb,dev);
-			}
-			skb->dev->last_rx = jiffies;
-			skb->ip_summed = CHECKSUM_NONE;
+				skb->ip_summed = CHECKSUM_NONE;
+				if (dev->type == ARPHRD_IEEE80211) {
+					skb->mac.raw = skb->data;
+					skb_pull (skb, hdrlen);
+					skb->pkt_type = PACKET_OTHERHOST;
+					skb->protocol = htons(ETH_P_802_2);
+				} else
+					skb->protocol = eth_type_trans(skb,dev);
 
-			netif_rx( skb );
+				netif_rx( skb );
+			} else
+				OUT4500( apriv, EVACK, EV_RX);
 		}
-exitrx:
 
 		/* Check to see if a packet has been transmitted */
 		if (  status & ( EV_TX|EV_TXEXC ) ) {
@@ -2759,26 +1473,31 @@ exitrx:
 				if ( ( apriv->fids[i] & 0xffff ) == fid ) {
 					len = apriv->fids[i] >> 16;
 					index = i;
+					/* Set up to be used again */
+					apriv->fids[i] &= 0xffff;
 				}
 			}
-			if (index != -1) {
-				if (status & EV_TXEXC)
-					get_tx_error(apriv, index);
-				OUT4500( apriv, EVACK, status & (EV_TX | EV_TXEXC));
-				/* Set up to be used again */
-				apriv->fids[index] &= 0xffff;
-				if (index < MAX_FIDS / 2) {
-					if (!test_bit(FLAG_PENDING_XMIT, &apriv->flags))
-						netif_wake_queue(dev);
-				} else {
-					if (!test_bit(FLAG_PENDING_XMIT11, &apriv->flags))
-						netif_wake_queue(apriv->wifidev);
-				}
-			} else {
-				OUT4500( apriv, EVACK, status & (EV_TX | EV_TXEXC));
+			if (index != -1) netif_wake_queue(dev);
+			if ((status & EV_TXEXC) &&
+				(bap_setup(apriv, fid, 4, BAP1) == SUCCESS)) {
+
+				u16 status;
+				bap_read(apriv, &status, 2, BAP1);
+				if (le16_to_cpu(status) & 2)
+					apriv->stats.tx_aborted_errors++;
+				if (le16_to_cpu(status) & 4)
+					apriv->stats.tx_heartbeat_errors++;
+				if (le16_to_cpu(status) & 0x10)
+					apriv->stats.tx_carrier_errors++;
+			}
+			OUT4500( apriv, EVACK, status & (EV_TX | EV_TXEXC));
+			if (index==-1) {
 				printk( KERN_ERR "airo: Unallocated FID was used to xmit\n" );
 			}
 		}
+		if ( status & ~STATUS_INTS )
+			OUT4500( apriv, EVACK, status & ~STATUS_INTS);
+
 		if ( status & ~STATUS_INTS & ~IGNORE_INTS )
 			printk( KERN_WARNING "airo: Got weird status %x\n",
 				status & ~STATUS_INTS & ~IGNORE_INTS );
@@ -2788,7 +1507,7 @@ exitrx:
 		OUT4500( apriv, EVINTEN, savedInterrupts );
 
 	/* done.. */
-	return IRQ_RETVAL(handled);
+	return;
 }
 
 /*
@@ -2821,44 +1540,22 @@ static u16 IN4500( struct airo_info *ai, u16 reg ) {
 	return rc;
 }
 
-static int enable_MAC( struct airo_info *ai, Resp *rsp, int lock ) {
-	int rc;
+static int enable_MAC( struct airo_info *ai, Resp *rsp ) {
         Cmd cmd;
 
-	/* FLAG_RADIO_OFF : Radio disabled via /proc or Wireless Extensions
-	 * FLAG_RADIO_DOWN : Radio disabled via "ifconfig ethX down"
-	 * Note : we could try to use !netif_running(dev) in enable_MAC()
-	 * instead of this flag, but I don't trust it *within* the
-	 * open/close functions, and testing both flags together is
-	 * "cheaper" - Jean II */
-	if (ai->flags & FLAG_RADIO_MASK) return SUCCESS;
+        if (ai->flags&FLAG_RADIO_OFF) return SUCCESS;
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.cmd = MAC_ENABLE;
-	if (!lock)
-		return issuecommand(ai, &cmd, rsp);
-
-	if (down_interruptible(&ai->sem))
-		return -ERESTARTSYS;
-	rc = issuecommand(ai, &cmd, rsp);
-	up(&ai->sem);
-	return rc;
+	return lock_issuecommand(ai, &cmd, rsp);
 }
 
-static void disable_MAC( struct airo_info *ai, int lock ) {
+static void disable_MAC( struct airo_info *ai ) {
         Cmd cmd;
 	Resp rsp;
 
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.cmd = MAC_DISABLE; // disable in case already enabled
-	if (!lock) {
-		issuecommand(ai, &cmd, &rsp);
-		return;
-	}
-
-	if (down_interruptible(&ai->sem))
-		return;
-	issuecommand(ai, &cmd, &rsp);
-	up(&ai->sem);
+	lock_issuecommand(ai, &cmd, &rsp);
 }
 
 static void enable_interrupts( struct airo_info *ai ) {
@@ -2868,17 +1565,19 @@ static void enable_interrupts( struct airo_info *ai ) {
 	/* Enable the interrupts */
 	OUT4500( ai, EVINTEN, STATUS_INTS );
 	/* Note there is a race condition between the last two lines that
-	   I don't know how to get rid of right now... */
+	   I dont know how to get rid of right now... */
 }
 
 static void disable_interrupts( struct airo_info *ai ) {
 	OUT4500( ai, EVINTEN, 0 );
 }
 
-static u16 setup_card(struct airo_info *ai, u8 *mac)
+static u16 setup_card(struct airo_info *ai, u8 *mac,
+		      ConfigRid *config)
 {
 	Cmd cmd;
 	Resp rsp;
+	ConfigRid cfg;
 	int status;
 	int i;
 	SsidRid mySsid;
@@ -2895,23 +1594,18 @@ static u16 setup_card(struct airo_info *ai, u8 *mac)
 	/* The NOP is the first step in getting the card going */
 	cmd.cmd = NOP;
 	cmd.parm0 = cmd.parm1 = cmd.parm2 = 0;
-	if (down_interruptible(&ai->sem))
-		return ERROR;
-	if ( issuecommand( ai, &cmd, &rsp ) != SUCCESS ) {
-		up(&ai->sem);
+	if ( lock_issuecommand( ai, &cmd, &rsp ) != SUCCESS ) {
 		return ERROR;
 	}
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.cmd = MAC_DISABLE; // disable in case already enabled
-	if ( issuecommand( ai, &cmd, &rsp ) != SUCCESS ) {
-		up(&ai->sem);
+	if ( lock_issuecommand( ai, &cmd, &rsp ) != SUCCESS ) {
 		return ERROR;
 	}
 
 	// Let's figure out if we need to use the AUX port
 	cmd.cmd = CMD_ENABLEAUX;
-	if (issuecommand(ai, &cmd, &rsp) != SUCCESS) {
-		up(&ai->sem);
+	if (lock_issuecommand(ai, &cmd, &rsp) != SUCCESS) {
 		printk(KERN_ERR "airo: Error checking for AUX port\n");
 		return ERROR;
 	}
@@ -2922,97 +1616,81 @@ static u16 setup_card(struct airo_info *ai, u8 *mac)
 		ai->bap_read = aux_bap_read;
 		printk(KERN_DEBUG "airo: Doing AUX bap_reads\n");
 	}
-	up(&ai->sem);
-	if (ai->config.len == 0) {
+	if ( config->len ) {
+		cfg = *config;
+	} else {
 		tdsRssiRid rssi_rid;
-		CapabilityRid cap_rid;
 
 		// general configuration (read/modify/write)
-		status = readConfigRid(ai, 1);
+		status = readConfigRid(ai, &cfg);
 		if ( status != SUCCESS ) return ERROR;
 
-		status = readCapabilityRid(ai, &cap_rid);
-		if ( status != SUCCESS ) return ERROR;
-
-		status = PC4500_readrid(ai,RID_RSSI,&rssi_rid,sizeof(rssi_rid),1);
+		status = PC4500_readrid(ai,RID_RSSI,&rssi_rid,sizeof(rssi_rid));
 		if ( status == SUCCESS ) {
 			if (ai->rssi || (ai->rssi = kmalloc(512, GFP_KERNEL)) != NULL)
 				memcpy(ai->rssi, (u8*)&rssi_rid + 2, 512);
 		}
 		else {
+			CapabilityRid cap_rid;
 			if (ai->rssi) {
 				kfree(ai->rssi);
 				ai->rssi = NULL;
 			}
-			if (cap_rid.softCap & 8)
-				ai->config.rmode |= RXMODE_NORMALIZED_RSSI;
+			status = readCapabilityRid(ai, &cap_rid);
+			if ((status == SUCCESS) && (cap_rid.softCap & 8))
+				cfg.rmode |= RXMODE_NORMALIZED_RSSI;
 			else
 				printk(KERN_WARNING "airo: unknown received signal level scale\n");
 		}
-		ai->config.opmode = adhoc ? MODE_STA_IBSS : MODE_STA_ESS;
-		ai->config.authType = AUTH_OPEN;
-		ai->config.modulation = MOD_CCK;
-
-#ifdef MICSUPPORT
-		if ((cap_rid.len>=sizeof(cap_rid)) && (cap_rid.extSoftCap&1) &&
-		    (micsetup(ai) == SUCCESS)) {
-			ai->config.opmode |= MODE_MIC;
-			set_bit(FLAG_MIC_CAPABLE, &ai->flags);
-		}
-#endif
+		cfg.opmode = adhoc ? MODE_STA_IBSS : MODE_STA_ESS;
 
 		/* Save off the MAC */
-		for( i = 0; i < ETH_ALEN; i++ ) {
-			mac[i] = ai->config.macAddr[i];
+		for( i = 0; i < 6; i++ ) {
+			mac[i] = cfg.macAddr[i];
 		}
 
 		/* Check to see if there are any insmod configured
 		   rates to add */
 		if ( rates ) {
 			int i = 0;
-			if ( rates[0] ) memset(ai->config.rates,0,sizeof(ai->config.rates));
+			if ( rates[0] ) memset(cfg.rates,0,sizeof(cfg.rates));
 			for( i = 0; i < 8 && rates[i]; i++ ) {
-				ai->config.rates[i] = rates[i];
+				cfg.rates[i] = rates[i];
 			}
 		}
 		if ( basic_rate > 0 ) {
 			int i;
 			for( i = 0; i < 8; i++ ) {
-				if ( ai->config.rates[i] == basic_rate ||
-				     !ai->config.rates ) {
-					ai->config.rates[i] = basic_rate | 0x80;
+				if ( cfg.rates[i] == basic_rate ||
+				     !cfg.rates ) {
+					cfg.rates[i] = basic_rate | 0x80;
 					break;
 				}
 			}
 		}
-		ai->need_commit = 1;
+		cfg.authType = ai->authtype;
+		*config = cfg;
 	}
 
 	/* Setup the SSIDs if present */
 	if ( ssids[0] ) {
-		int i;
+		int i = 0;
 		for( i = 0; i < 3 && ssids[i]; i++ ) {
 			mySsid.ssids[i].len = strlen(ssids[i]);
 			if ( mySsid.ssids[i].len > 32 )
 				mySsid.ssids[i].len = 32;
 			memcpy(mySsid.ssids[i].ssid, ssids[i],
 			       mySsid.ssids[i].len);
+			mySsid.ssids[i].len = mySsid.ssids[i].len;
 		}
-		mySsid.len = sizeof(mySsid);
 	}
 
-	status = writeConfigRid(ai, 1);
+	status = writeConfigRid(ai, &cfg);
 	if ( status != SUCCESS ) return ERROR;
 
 	/* Set up the SSID list */
 	status = writeSsidRid(ai, &mySsid);
 	if ( status != SUCCESS ) return ERROR;
-
-	status = enable_MAC(ai, &rsp, 1);
-	if ( status != SUCCESS || (rsp.status & 0xFF00) != 0) {
-		printk( KERN_ERR "airo: Bad MAC enable reason = %x, rid = %x, offset = %d\n", rsp.rsp0, rsp.rsp1, rsp.rsp2 );
-		return ERROR;
-	}
 
 	/* Grab the initial wep key, we gotta save it for auto_wep */
 	rc = readWepKeyRid(ai, &wkr, 1);
@@ -3024,41 +1702,41 @@ static u16 setup_card(struct airo_info *ai, u8 *mac)
 		rc = readWepKeyRid(ai, &wkr, 0);
 	} while(lastindex != wkr.kindex);
 
-	if (auto_wep) {
-		ai->expires = RUN_AT(3*HZ);
-		wake_up_interruptible(&ai->thr_wait);
+	if (auto_wep && !timer_pending(&ai->timer)) {
+		ai->timer.expires = RUN_AT(HZ*3);
+		add_timer(&ai->timer);
 	}
-
 	return SUCCESS;
+}
+
+static u16 lock_issuecommand(struct airo_info *ai, Cmd *pCmd, Resp *pRsp) {
+	int rc;
+	long flags;
+
+	spin_lock_irqsave(&ai->main_lock, flags);
+	rc = issuecommand(ai, pCmd, pRsp);
+	spin_unlock_irqrestore(&ai->main_lock, flags);
+	return rc;
 }
 
 static u16 issuecommand(struct airo_info *ai, Cmd *pCmd, Resp *pRsp) {
         // Im really paranoid about letting it run forever!
 	int max_tries = 600000;
-	u16 cmd;
 
 	OUT4500(ai, PARAM0, pCmd->parm0);
 	OUT4500(ai, PARAM1, pCmd->parm1);
 	OUT4500(ai, PARAM2, pCmd->parm2);
 	OUT4500(ai, COMMAND, pCmd->cmd);
-	while ( max_tries-- && (IN4500(ai, EVSTAT) & EV_CMD) == 0 &&
-		(cmd = IN4500(ai, COMMAND)) != 0 )
-			if (cmd == pCmd->cmd)
-				// PC4500 didn't notice command, try again
-				OUT4500(ai, COMMAND, pCmd->cmd);
+	while ( max_tries-- &&
+		(IN4500(ai, EVSTAT) & EV_CMD) == 0) {
+		if ( IN4500(ai, COMMAND) == pCmd->cmd) {
+			// PC4500 didn't notice command, try again
+			OUT4500(ai, COMMAND, pCmd->cmd);
+		}
+	}
 	if ( max_tries == -1 ) {
 		printk( KERN_ERR
 			"airo: Max tries exceeded when issueing command\n" );
-                return ERROR;
-	}
-
-	while (max_tries-- && (IN4500(ai, EVSTAT) & EV_CMD) == 0) {
-		if (!in_interrupt() && (max_tries & 255) == 0)
-			schedule();
-	}
-	if ( max_tries == -1 ) {
-		printk( KERN_ERR
-			"airo: Max tries exceeded waiting for command\n" );
                 return ERROR;
 	}
 	// command completed
@@ -3073,7 +1751,6 @@ static u16 issuecommand(struct airo_info *ai, Cmd *pCmd, Resp *pRsp) {
 	}
 	// acknowledge processing the status/response
 	OUT4500(ai, EVACK, EV_CMD);
-
 	return SUCCESS;
 }
 
@@ -3141,7 +1818,7 @@ static int aux_bap_read(struct airo_info *ai, u16 *pu16Dst,
 	u16 next;
 	int words;
 	int i;
-	unsigned long flags;
+	long flags;
 
 	spin_lock_irqsave(&ai->aux_lock, flags);
 	page = IN4500(ai, SWS0+whichbap);
@@ -3212,15 +1889,13 @@ static int PC4500_accessrid(struct airo_info *ai, u16 rid, u16 accmd)
 
 /*  Note, that we are using BAP1 which is also used by transmit, so
  *  we must get a lock. */
-static int PC4500_readrid(struct airo_info *ai, u16 rid, void *pBuf, int len, int lock)
+static int PC4500_readrid(struct airo_info *ai, u16 rid, void *pBuf, int len)
 {
 	u16 status;
+        long flags;
         int rc = SUCCESS;
 
-	if (lock) {
-		if (down_interruptible(&ai->sem))
-			return ERROR;
-	}
+	spin_lock_irqsave(&ai->main_lock, flags);
 	if ( (status = PC4500_accessrid(ai, rid, CMD_ACCESS)) != SUCCESS) {
                 rc = status;
                 goto done;
@@ -3244,26 +1919,21 @@ static int PC4500_readrid(struct airo_info *ai, u16 rid, void *pBuf, int len, in
 	}
 	// read remainder of the rid
 	rc = bap_read(ai, ((u16*)pBuf)+1, len, BAP1);
-done:
-	if (lock)
-		up(&ai->sem);
+ done:
+	spin_unlock_irqrestore(&ai->main_lock, flags);
 	return rc;
 }
 
 /*  Note, that we are using BAP1 which is also used by transmit, so
  *  make sure this isnt called when a transmit is happening */
 static int PC4500_writerid(struct airo_info *ai, u16 rid,
-			   const void *pBuf, int len, int lock)
+			   const void *pBuf, int len)
 {
 	u16 status;
+        long flags;
 	int rc = SUCCESS;
 
-	*(u16*)pBuf = cpu_to_le16((u16)len);
-
-	if (lock) {
-		if (down_interruptible(&ai->sem))
-			return ERROR;
-	}
+	spin_lock_irqsave(&ai->main_lock, flags);
 	// --- first access so that we can write the rid data
 	if ( (status = PC4500_accessrid(ai, rid, CMD_ACCESS)) != 0) {
                 rc = status;
@@ -3278,42 +1948,28 @@ static int PC4500_writerid(struct airo_info *ai, u16 rid,
 	// ---now commit the rid data
 	rc = PC4500_accessrid(ai, rid, 0x100|CMD_ACCESS);
  done:
-	if (lock)
-		up(&ai->sem);
+	spin_unlock_irqrestore(&ai->main_lock, flags);
         return rc;
 }
 
 /* Allocates a FID to be used for transmitting packets.  We only use
    one for now. */
-static u16 transmit_allocate(struct airo_info *ai, int lenPayload, int raw)
+static u16 transmit_allocate(struct airo_info *ai, int lenPayload)
 {
-	unsigned int loop = 3000;
 	Cmd cmd;
 	Resp rsp;
 	u16 txFid;
 	u16 txControl;
+        long flags;
 
 	cmd.cmd = CMD_ALLOCATETX;
 	cmd.parm0 = lenPayload;
-	if (down_interruptible(&ai->sem))
-		return ERROR;
-	if (issuecommand(ai, &cmd, &rsp) != SUCCESS) {
-		txFid = ERROR;
-		goto done;
-	}
-	if ( (rsp.status & 0xFF00) != 0) {
-		txFid = ERROR;
-		goto done;
-	}
+	if (lock_issuecommand(ai, &cmd, &rsp) != SUCCESS) return 0;
+	if ( (rsp.status & 0xFF00) != 0) return 0;
 	/* wait for the allocate event/indication
 	 * It makes me kind of nervous that this can just sit here and spin,
 	 * but in practice it only loops like four times. */
-	while (((IN4500(ai, EVSTAT) & EV_ALLOC) == 0) && --loop);
-	if (!loop) {
-		txFid = ERROR;
-		goto done;
-	}
-
+	while ( (IN4500(ai, EVSTAT) & EV_ALLOC) == 0) ;
 	// get the allocated fid and acknowledge
 	txFid = IN4500(ai, TXALLOCFID);
 	OUT4500(ai, EVACK, EV_ALLOC);
@@ -3323,19 +1979,15 @@ static u16 transmit_allocate(struct airo_info *ai, int lenPayload, int raw)
 	 *  will be using the same one over and over again. */
 	/*  We only have to setup the control once since we are not
 	 *  releasing the fid. */
-	if (raw)
-		txControl = cpu_to_le16(TXCTL_TXOK | TXCTL_TXEX | TXCTL_802_11
-			| TXCTL_ETHERNET | TXCTL_NORELEASE);
-	else
-		txControl = cpu_to_le16(TXCTL_TXOK | TXCTL_TXEX | TXCTL_802_3
-			| TXCTL_ETHERNET | TXCTL_NORELEASE);
-	if (bap_setup(ai, txFid, 0x0008, BAP1) != SUCCESS)
-		txFid = ERROR;
-	else
-		bap_write(ai, &txControl, sizeof(txControl), BAP1);
-
-done:
-	up(&ai->sem);
+	txControl = cpu_to_le16(TXCTL_TXOK | TXCTL_TXEX | TXCTL_802_3
+		| TXCTL_ETHERNET | TXCTL_NORELEASE);
+	spin_lock_irqsave(&ai->main_lock, flags);
+	if (bap_setup(ai, txFid, 0x0008, BAP1) != SUCCESS) {
+		spin_unlock_irqrestore(&ai->main_lock, flags);
+		return ERROR;
+	}
+	bap_write(ai, &txControl, sizeof(txControl), BAP1);
+	spin_unlock_irqrestore(&ai->main_lock, flags);
 
 	return txFid;
 }
@@ -3343,102 +1995,26 @@ done:
 /* In general BAP1 is dedicated to transmiting packets.  However,
    since we need a BAP when accessing RIDs, we also use BAP1 for that.
    Make sure the BAP1 spinlock is held when this is called. */
-static int transmit_802_3_packet(struct airo_info *ai, int len, char *pPacket)
+static int transmit_802_3_packet(struct airo_info *ai, u16 txFid,
+				 char *pPacket, int len)
 {
 	u16 payloadLen;
 	Cmd cmd;
 	Resp rsp;
-	int miclen = 0;
-	u16 txFid = len;
-	MICBuffer pMic;
 
-	len >>= 16;
-
-	if (len <= ETH_ALEN * 2) {
+	if (len < 12) {
 		printk( KERN_WARNING "Short packet %d\n", len );
 		return ERROR;
 	}
-	len -= ETH_ALEN * 2;
-
-#ifdef MICSUPPORT
-	if (test_bit(FLAG_MIC_CAPABLE, &ai->flags) && ai->micstats.enabled && 
-	    (ntohs(((u16 *)pPacket)[6]) != 0x888E)) {
-		if (encapsulate(ai,(etherHead *)pPacket,&pMic,len) != SUCCESS)
-			return ERROR;
-		miclen = sizeof(pMic);
-	}
-#endif
 
 	// packet is destination[6], source[6], payload[len-12]
 	// write the payload length and dst/src/payload
 	if (bap_setup(ai, txFid, 0x0036, BAP1) != SUCCESS) return ERROR;
 	/* The hardware addresses aren't counted as part of the payload, so
 	 * we have to subtract the 12 bytes for the addresses off */
-	payloadLen = cpu_to_le16(len + miclen);
+	payloadLen = cpu_to_le16(len-12);
 	bap_write(ai, &payloadLen, sizeof(payloadLen),BAP1);
-	bap_write(ai, (const u16*)pPacket, sizeof(etherHead), BAP1);
-	if (miclen)
-		bap_write(ai, (const u16*)&pMic, miclen, BAP1);
-	bap_write(ai, (const u16*)(pPacket + sizeof(etherHead)), len, BAP1);
-	// issue the transmit command
-	memset( &cmd, 0, sizeof( cmd ) );
-	cmd.cmd = CMD_TRANSMIT;
-	cmd.parm0 = txFid;
-	if (issuecommand(ai, &cmd, &rsp) != SUCCESS) return ERROR;
-	if ( (rsp.status & 0xFF00) != 0) return ERROR;
-	return SUCCESS;
-}
-
-static int transmit_802_11_packet(struct airo_info *ai, int len, char *pPacket)
-{
-	u16 fc, payloadLen;
-	Cmd cmd;
-	Resp rsp;
-	int hdrlen;
-	struct {
-		u8 addr4[ETH_ALEN];
-		u16 gaplen;
-		u8 gap[6];
-	} gap;
-	u16 txFid = len;
-	len >>= 16;
-	gap.gaplen = 6;
-
-	fc = le16_to_cpu(*(const u16*)pPacket);
-	switch (fc & 0xc) {
-		case 4:
-			if ((fc & 0xe0) == 0xc0)
-				hdrlen = 10;
-			else
-				hdrlen = 16;
-			break;
-		case 8:
-			if ((fc&0x300)==0x300){
-				hdrlen = 30;
-				break;
-			}
-		default:
-			hdrlen = 24;
-	}
-
-	if (len < hdrlen) {
-		printk( KERN_WARNING "Short packet %d\n", len );
-		return ERROR;
-	}
-
-	/* packet is 802.11 header +  payload
-	 * write the payload length and dst/src/payload */
-	if (bap_setup(ai, txFid, 6, BAP1) != SUCCESS) return ERROR;
-	/* The 802.11 header aren't counted as part of the payload, so
-	 * we have to subtract the header bytes off */
-	payloadLen = cpu_to_le16(len-hdrlen);
-	bap_write(ai, &payloadLen, sizeof(payloadLen),BAP1);
-	if (bap_setup(ai, txFid, 0x0014, BAP1) != SUCCESS) return ERROR;
-	bap_write(ai, (const u16*)pPacket, hdrlen, BAP1);
-	bap_write(ai, hdrlen == 30 ?
-		(const u16*)&gap.gaplen : (const u16*)&gap, 38 - hdrlen, BAP1);
-
-	bap_write(ai, (const u16*)(pPacket + hdrlen), len - hdrlen, BAP1);
+	bap_write(ai, (const u16*)pPacket, len, BAP1);
 	// issue the transmit command
 	memset( &cmd, 0, sizeof( cmd ) );
 	cmd.cmd = CMD_TRANSMIT;
@@ -3474,56 +2050,56 @@ static int proc_config_open( struct inode *inode, struct file *file );
 static int proc_wepkey_open( struct inode *inode, struct file *file );
 
 static struct file_operations proc_statsdelta_ops = {
-	.read		= proc_read,
-	.open		= proc_statsdelta_open,
-	.release	= proc_close
+	read:           proc_read,
+	open:           proc_statsdelta_open,
+	release:        proc_close
 };
 
 static struct file_operations proc_stats_ops = {
-	.read		= proc_read,
-	.open		= proc_stats_open,
-	.release	= proc_close
+	read:           proc_read,
+	open:           proc_stats_open,
+	release:        proc_close
 };
 
 static struct file_operations proc_status_ops = {
-	.read		= proc_read,
-	.open		= proc_status_open,
-	.release	= proc_close
+	read:            proc_read,
+	open:            proc_status_open,
+	release:         proc_close
 };
 
 static struct file_operations proc_SSID_ops = {
-	.read		= proc_read,
-	.write		= proc_write,
-	.open		= proc_SSID_open,
-	.release	= proc_close
+	read:          proc_read,
+	write:         proc_write,
+	open:          proc_SSID_open,
+	release:       proc_close
 };
 
 static struct file_operations proc_BSSList_ops = {
-	.read		= proc_read,
-	.write		= proc_write,
-	.open		= proc_BSSList_open,
-	.release	= proc_close
+	read:          proc_read,
+	write:         proc_write,
+	open:          proc_BSSList_open,
+	release:       proc_close
 };
 
 static struct file_operations proc_APList_ops = {
-	.read		= proc_read,
-	.write		= proc_write,
-	.open		= proc_APList_open,
-	.release	= proc_close
+	read:          proc_read,
+	write:         proc_write,
+	open:          proc_APList_open,
+	release:       proc_close
 };
 
 static struct file_operations proc_config_ops = {
-	.read		= proc_read,
-	.write		= proc_write,
-	.open		= proc_config_open,
-	.release	= proc_close
+	read:          proc_read,
+	write:         proc_write,
+	open:          proc_config_open,
+	release:       proc_close
 };
 
 static struct file_operations proc_wepkey_ops = {
-	.read		= proc_read,
-	.write		= proc_write,
-	.open		= proc_wepkey_open,
-	.release	= proc_close
+	read:          proc_read,
+	write:         proc_write,
+	open:          proc_wepkey_open,
+	release:       proc_close
 };
 
 static struct proc_dir_entry *airo_entry = 0;
@@ -3551,7 +2127,6 @@ static int setup_proc_entry( struct net_device *dev,
 					      airo_entry);
         apriv->proc_entry->uid = proc_uid;
         apriv->proc_entry->gid = proc_gid;
-	apriv->proc_entry->owner = THIS_MODULE;
 
 	/* Setup the StatsDelta */
 	entry = create_proc_entry("StatsDelta",
@@ -3560,7 +2135,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_statsdelta_ops);
 
 	/* Setup the Stats */
@@ -3570,7 +2144,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_stats_ops);
 
 	/* Setup the Status */
@@ -3580,7 +2153,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_status_ops);
 
 	/* Setup the Config */
@@ -3590,7 +2162,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_config_ops);
 
 	/* Setup the SSID */
@@ -3600,7 +2171,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_SSID_ops);
 
 	/* Setup the APList */
@@ -3610,7 +2180,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_APList_ops);
 
 	/* Setup the BSSList */
@@ -3620,7 +2189,6 @@ static int setup_proc_entry( struct net_device *dev,
 	entry->uid = proc_uid;
 	entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_BSSList_ops);
 
 	/* Setup the WepKey */
@@ -3630,7 +2198,6 @@ static int setup_proc_entry( struct net_device *dev,
         entry->uid = proc_uid;
         entry->gid = proc_gid;
 	entry->data = dev;
-	entry->owner = THIS_MODULE;
 	SETPROC_OPS(entry, proc_wepkey_ops);
 
 	return 0;
@@ -3668,22 +2235,19 @@ static ssize_t proc_read( struct file *file,
 			  size_t len,
 			  loff_t *offset )
 {
-	loff_t pos = *offset;
+	int i;
+	int pos;
 	struct proc_data *priv = (struct proc_data*)file->private_data;
 
-	if (!priv->rbuffer)
-		return -EINVAL;
+	if( !priv->rbuffer ) return -EINVAL;
 
-	if (pos < 0)
-		return -EINVAL;
-	if (pos >= priv->readlen)
-		return 0;
-	if (len > priv->readlen - pos)
-		len = priv->readlen - pos;
-	if (copy_to_user(buffer, priv->rbuffer + pos, len))
-		return -EFAULT;
-	*offset = pos + len;
-	return len;
+	pos = *offset;
+	for( i = 0; i+pos < priv->readlen && i < len; i++ ) {
+		if (put_user( priv->rbuffer[i+pos], buffer+i ))
+			return -EFAULT;
+	}
+	*offset += i;
+	return i;
 }
 
 /*
@@ -3695,34 +2259,38 @@ static ssize_t proc_write( struct file *file,
 			   size_t len,
 			   loff_t *offset )
 {
-	loff_t pos = *offset;
+	int i;
+	int pos;
 	struct proc_data *priv = (struct proc_data*)file->private_data;
 
-	if (!priv->wbuffer)
+	if ( !priv->wbuffer ) {
 		return -EINVAL;
+	}
 
-	if (pos < 0)
-		return -EINVAL;
-	if (pos >= priv->maxwritelen)
-		return 0;
-	if (len > priv->maxwritelen - pos)
-		len = priv->maxwritelen - pos;
-	if (copy_from_user(priv->wbuffer + pos, buffer, len))
-		return -EFAULT;
-	if (pos + len > priv->writelen)
-		priv->writelen = pos + len;
-	*offset = pos + len;
-	return len;
+	pos = *offset;
+
+	for( i = 0; i + pos <  priv->maxwritelen &&
+		     i < len; i++ ) {
+		if (get_user( priv->wbuffer[i+pos], buffer + i ))
+			return -EFAULT;
+	}
+	if ( i+pos > priv->writelen ) priv->writelen = i+file->f_pos;
+	*offset += i;
+	return i;
 }
 
 static int proc_status_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *apriv = dev->priv;
+	struct airo_info *apriv = (struct airo_info *)dev->priv;
 	CapabilityRid cap_rid;
 	StatusRid status_rid;
 	int i;
+
+	MOD_INC_USE_COUNT;
+
+	dp = inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -3733,7 +2301,7 @@ static int proc_status_open( struct inode *inode, struct file *file ) {
 		return -ENOMEM;
 	}
 
-	readStatusRid(apriv, &status_rid, 1);
+	readStatusRid(apriv, &status_rid);
 	readCapabilityRid(apriv, &cap_rid);
 
         i = sprintf(data->rbuffer, "Status: %s%s%s%s%s%s%s%s%s\n",
@@ -3797,12 +2365,16 @@ static int proc_stats_rid_open( struct inode *inode,
 				struct file *file,
 				u16 rid ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *apriv = dev->priv;
+	struct airo_info *apriv = (struct airo_info *)dev->priv;
 	StatsRid stats;
 	int i, j;
 	int *vals = stats.vals;
+	MOD_INC_USE_COUNT;
+
+
+	dp = inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -3813,10 +2385,10 @@ static int proc_stats_rid_open( struct inode *inode,
 		return -ENOMEM;
 	}
 
-	readStatsRid(apriv, &stats, rid, 1);
+	readStatsRid(apriv, &stats, rid);
 
         j = 0;
-	for(i=0; statsLabels[i]!=(char *)-1 &&
+	for(i=0; (int)statsLabels[i]!=-1 &&
 		    i*4<stats.len; i++){
 		if (!statsLabels[i]) continue;
 		if (j+strlen(statsLabels[i])+16>4096) {
@@ -3848,58 +2420,66 @@ static int get_dec_u16( char *buffer, int *start, int limit ) {
 	return value;
 }
 
-static int airo_config_commit(struct net_device *dev,
-			      struct iw_request_info *info, void *zwrq,
-			      char *extra);
+static void checkThrottle(ConfigRid *config) {
+	int i;
+/* Old hardware had a limit on encryption speed */
+	if (config->authType != AUTH_OPEN && maxencrypt) {
+		for(i=0; i<8; i++) {
+			if (config->rates[i] > maxencrypt) {
+				config->rates[i] = 0;
+			}
+		}
+	}
+}
 
 static void proc_config_on_close( struct inode *inode, struct file *file ) {
 	struct proc_data *data = file->private_data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
+	ConfigRid config;
+	Resp rsp;
 	char *line;
+	int need_reset = 0;
 
 	if ( !data->writelen ) return;
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
-	readConfigRid(ai, 1);
-	ai->need_commit = 1;
+	disable_MAC(ai);
+	readConfigRid(ai, &config);
 
 	line = data->wbuffer;
 	while( line[0] ) {
 /*** Mode processing */
 		if ( !strncmp( line, "Mode: ", 6 ) ) {
 			line += 6;
-			if ((ai->config.rmode & 0xff) >= RXMODE_RFMON)
-					ai->need_commit = 2;
-			ai->config.rmode &= 0xfe00;
-			clear_bit (FLAG_802_11, &ai->flags);
-			ai->config.opmode &= 0xFF00;
-			ai->config.scanMode = SCANMODE_ACTIVE;
+			config.rmode &= 0xfe00;
 			if ( line[0] == 'a' ) {
-				ai->config.opmode |= 0;
+				config.opmode = 0;
 			} else {
-				ai->config.opmode |= 1;
-				if ( line[0] == 'r' ) {
-					ai->config.rmode |= RXMODE_RFMON | RXMODE_DISABLE_802_3_HEADER;
-					ai->config.scanMode = SCANMODE_PASSIVE;
-					set_bit (FLAG_802_11, &ai->flags);
-				} else if ( line[0] == 'y' ) {
-					ai->config.rmode |= RXMODE_RFMON_ANYBSS | RXMODE_DISABLE_802_3_HEADER;
-					ai->config.scanMode = SCANMODE_PASSIVE;
-					set_bit (FLAG_802_11, &ai->flags);
-				} else if ( line[0] == 'l' )
-					ai->config.rmode |= RXMODE_LANMON;
+				config.opmode = 1;
+				if ( line[0] == 'r' )
+					config.rmode |= RXMODE_RFMON | RXMODE_DISABLE_802_3_HEADER;
+				else if ( line[0] == 'y' )
+					config.rmode |= RXMODE_RFMON_ANYBSS | RXMODE_DISABLE_802_3_HEADER;
 			}
-			ai->need_commit = 1;
+			if (config.rmode & RXMODE_DISABLE_802_3_HEADER) {
+				dev->type = ARPHRD_IEEE80211;
+				dev->hard_header_parse = wll_header_parse;
+			} else if (dev->type == ARPHRD_IEEE80211) {
+				dev->type = ARPHRD_ETHER;
+				dev->hard_header_parse = ai->header_parse;
+				need_reset = 1;
+			}
 		}
 
 /*** Radio status */
 		else if (!strncmp(line,"Radio: ", 7)) {
 			line += 7;
 			if (!strncmp(line,"off",3)) {
-				set_bit (FLAG_RADIO_OFF, &ai->flags);
+				ai->flags |= FLAG_RADIO_OFF;
 			} else {
-				clear_bit (FLAG_RADIO_OFF, &ai->flags);
+				ai->flags &= ~FLAG_RADIO_OFF;
 			}
 		}
 /*** NodeName processing */
@@ -3907,26 +2487,22 @@ static void proc_config_on_close( struct inode *inode, struct file *file ) {
 			int j;
 
 			line += 10;
-			memset( ai->config.nodeName, 0, 16 );
+			memset( config.nodeName, 0, 16 );
 /* Do the name, assume a space between the mode and node name */
 			for( j = 0; j < 16 && line[j] != '\n'; j++ ) {
-				ai->config.nodeName[j] = line[j];
+				config.nodeName[j] = line[j];
 			}
-			ai->need_commit = 1;
 		}
 
 /*** PowerMode processing */
 		else if ( !strncmp( line, "PowerMode: ", 11 ) ) {
 			line += 11;
 			if ( !strncmp( line, "PSPCAM", 6 ) ) {
-				ai->config.powerSaveMode = POWERSAVE_PSPCAM;
-				ai->need_commit = 1;
+				config.powerSaveMode = POWERSAVE_PSPCAM;
 			} else if ( !strncmp( line, "PSP", 3 ) ) {
-				ai->config.powerSaveMode = POWERSAVE_PSP;
-				ai->need_commit = 1;
+				config.powerSaveMode = POWERSAVE_PSP;
 			} else {
-				ai->config.powerSaveMode = POWERSAVE_CAM;
-				ai->need_commit = 1;
+				config.powerSaveMode = POWERSAVE_CAM;
 			}
 		} else if ( !strncmp( line, "DataRates: ", 11 ) ) {
 			int v, i = 0, k = 0; /* i is index into line,
@@ -3934,91 +2510,77 @@ static void proc_config_on_close( struct inode *inode, struct file *file ) {
 
 			line += 11;
 			while((v = get_dec_u16(line, &i, 3))!=-1) {
-				ai->config.rates[k++] = (u8)v;
+				config.rates[k++] = (u8)v;
 				line += i + 1;
 				i = 0;
 			}
-			ai->need_commit = 1;
 		} else if ( !strncmp( line, "Channel: ", 9 ) ) {
 			int v, i = 0;
 			line += 9;
 			v = get_dec_u16(line, &i, i+3);
-			if ( v != -1 ) {
-				ai->config.channelSet = (u16)v;
-				ai->need_commit = 1;
-			}
+			if ( v != -1 )
+				config.channelSet = (u16)v;
 		} else if ( !strncmp( line, "XmitPower: ", 11 ) ) {
 			int v, i = 0;
 			line += 11;
 			v = get_dec_u16(line, &i, i+3);
-			if ( v != -1 ) {
-				ai->config.txPower = (u16)v;
-				ai->need_commit = 1;
-			}
+			if ( v != -1 ) config.txPower = (u16)v;
 		} else if ( !strncmp( line, "WEP: ", 5 ) ) {
 			line += 5;
 			switch( line[0] ) {
 			case 's':
-				ai->config.authType = (u16)AUTH_SHAREDKEY;
+				config.authType = (u16)AUTH_SHAREDKEY;
 				break;
 			case 'e':
-				ai->config.authType = (u16)AUTH_ENCRYPT;
+				config.authType = (u16)AUTH_ENCRYPT;
 				break;
 			default:
-				ai->config.authType = (u16)AUTH_OPEN;
+				config.authType = (u16)AUTH_OPEN;
 				break;
 			}
-			ai->need_commit = 1;
 		} else if ( !strncmp( line, "LongRetryLimit: ", 16 ) ) {
 			int v, i = 0;
 
 			line += 16;
 			v = get_dec_u16(line, &i, 3);
 			v = (v<0) ? 0 : ((v>255) ? 255 : v);
-			ai->config.longRetryLimit = (u16)v;
-			ai->need_commit = 1;
+			config.longRetryLimit = (u16)v;
 		} else if ( !strncmp( line, "ShortRetryLimit: ", 17 ) ) {
 			int v, i = 0;
 
 			line += 17;
 			v = get_dec_u16(line, &i, 3);
 			v = (v<0) ? 0 : ((v>255) ? 255 : v);
-			ai->config.shortRetryLimit = (u16)v;
-			ai->need_commit = 1;
+			config.shortRetryLimit = (u16)v;
 		} else if ( !strncmp( line, "RTSThreshold: ", 14 ) ) {
 			int v, i = 0;
 
 			line += 14;
 			v = get_dec_u16(line, &i, 4);
 			v = (v<0) ? 0 : ((v>2312) ? 2312 : v);
-			ai->config.rtsThres = (u16)v;
-			ai->need_commit = 1;
+			config.rtsThres = (u16)v;
 		} else if ( !strncmp( line, "TXMSDULifetime: ", 16 ) ) {
 			int v, i = 0;
 
 			line += 16;
 			v = get_dec_u16(line, &i, 5);
 			v = (v<0) ? 0 : v;
-			ai->config.txLifetime = (u16)v;
-			ai->need_commit = 1;
+			config.txLifetime = (u16)v;
 		} else if ( !strncmp( line, "RXMSDULifetime: ", 16 ) ) {
 			int v, i = 0;
 
 			line += 16;
 			v = get_dec_u16(line, &i, 5);
 			v = (v<0) ? 0 : v;
-			ai->config.rxLifetime = (u16)v;
-			ai->need_commit = 1;
+			config.rxLifetime = (u16)v;
 		} else if ( !strncmp( line, "TXDiversity: ", 13 ) ) {
-			ai->config.txDiversity =
+			config.txDiversity =
 				(line[13]=='l') ? 1 :
 				((line[13]=='r')? 2: 3);
-			ai->need_commit = 1;
 		} else if ( !strncmp( line, "RXDiversity: ", 13 ) ) {
-			ai->config.rxDiversity =
+			config.rxDiversity =
 				(line[13]=='l') ? 1 :
 				((line[13]=='r')? 2: 3);
-			ai->need_commit = 1;
 		} else if ( !strncmp( line, "FragThreshold: ", 15 ) ) {
 			int v, i = 0;
 
@@ -4026,23 +2588,22 @@ static void proc_config_on_close( struct inode *inode, struct file *file ) {
 			v = get_dec_u16(line, &i, 4);
 			v = (v<256) ? 256 : ((v>2312) ? 2312 : v);
 			v = v & 0xfffe; /* Make sure its even */
-			ai->config.fragThresh = (u16)v;
-			ai->need_commit = 1;
+			config.fragThresh = (u16)v;
 		} else if (!strncmp(line, "Modulation: ", 12)) {
 			line += 12;
 			switch(*line) {
-			case 'd':  ai->config.modulation=MOD_DEFAULT; ai->need_commit=1; break;
-			case 'c':  ai->config.modulation=MOD_CCK; ai->need_commit=1; break;
-			case 'm':  ai->config.modulation=MOD_MOK; ai->need_commit=1; break;
+			case 'd':  config.modulation=MOD_DEFAULT; break;
+			case 'c':  config.modulation=MOD_CCK; break;
+			case 'm':  config.modulation=MOD_MOK; break;
 			default:
 				printk( KERN_WARNING "airo: Unknown modulation\n" );
 			}
 		} else if (!strncmp(line, "Preamble: ", 10)) {
 			line += 10;
 			switch(*line) {
-			case 'a': ai->config.preamble=PREAMBLE_AUTO; ai->need_commit=1; break;
-			case 'l': ai->config.preamble=PREAMBLE_LONG; ai->need_commit=1; break;
-			case 's': ai->config.preamble=PREAMBLE_SHORT; ai->need_commit=1; break;
+			case 'a': config.preamble=PREAMBLE_AUTO; break;
+			case 'l': config.preamble=PREAMBLE_LONG; break;
+			case 's': config.preamble=PREAMBLE_SHORT; break;
 		        default: printk(KERN_WARNING "airo: Unknown preamble\n");
 			}
 		} else {
@@ -4051,24 +2612,33 @@ static void proc_config_on_close( struct inode *inode, struct file *file ) {
 		while( line[0] && line[0] != '\n' ) line++;
 		if ( line[0] ) line++;
 	}
-	airo_config_commit(dev, NULL, NULL, NULL);
-}
+	checkThrottle(&config);
+	ai->config = config;
+	if (need_reset) {
+		APListRid APList_rid;
+		SsidRid SSID_rid;
 
-static char *get_rmode(u16 mode) {
-        switch(mode&0xff) {
-        case RXMODE_RFMON:  return "rfmon";
-        case RXMODE_RFMON_ANYBSS:  return "yna (any) bss rfmon";
-        case RXMODE_LANMON:  return "lanmon";
-        }
-        return "ESS";
+		readAPListRid(ai, &APList_rid);
+		readSsidRid(ai, &SSID_rid);
+		reset_airo_card(dev);
+		writeSsidRid(ai, &SSID_rid);
+		writeAPListRid(ai, &APList_rid);
+	}
+	writeConfigRid(ai, &config);
+	enable_MAC(ai, &rsp);
 }
 
 static int proc_config_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
+	ConfigRid config;
 	int i;
+
+	MOD_INC_USE_COUNT;
+
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -4087,7 +2657,7 @@ static int proc_config_open( struct inode *inode, struct file *file ) {
 	data->maxwritelen = 2048;
 	data->on_close = proc_config_on_close;
 
-	readConfigRid(ai, 1);
+	readConfigRid(ai, &config);
 
 	i = sprintf( data->rbuffer,
 		     "Mode: %s\n"
@@ -4097,25 +2667,25 @@ static int proc_config_open( struct inode *inode, struct file *file ) {
 		     "DataRates: %d %d %d %d %d %d %d %d\n"
 		     "Channel: %d\n"
 		     "XmitPower: %d\n",
-		     (ai->config.opmode & 0xFF) == 0 ? "adhoc" :
-		     (ai->config.opmode & 0xFF) == 1 ? get_rmode(ai->config.rmode):
-		     (ai->config.opmode & 0xFF) == 2 ? "AP" :
-		     (ai->config.opmode & 0xFF) == 3 ? "AP RPTR" : "Error",
-		     test_bit(FLAG_RADIO_OFF, &ai->flags) ? "off" : "on",
-		     ai->config.nodeName,
-		     ai->config.powerSaveMode == 0 ? "CAM" :
-		     ai->config.powerSaveMode == 1 ? "PSP" :
-		     ai->config.powerSaveMode == 2 ? "PSPCAM" : "Error",
-		     (int)ai->config.rates[0],
-		     (int)ai->config.rates[1],
-		     (int)ai->config.rates[2],
-		     (int)ai->config.rates[3],
-		     (int)ai->config.rates[4],
-		     (int)ai->config.rates[5],
-		     (int)ai->config.rates[6],
-		     (int)ai->config.rates[7],
-		     (int)ai->config.channelSet,
-		     (int)ai->config.txPower
+		     config.opmode == 0 ? "adhoc" :
+		     config.opmode == 1 ? "ESS" :
+		     config.opmode == 2 ? "AP" :
+		     config.opmode == 3 ? "AP RPTR" : "Error",
+		     ai->flags&FLAG_RADIO_OFF ? "off" : "on",
+		     config.nodeName,
+		     config.powerSaveMode == 0 ? "CAM" :
+		     config.powerSaveMode == 1 ? "PSP" :
+		     config.powerSaveMode == 2 ? "PSPCAM" : "Error",
+		     (int)config.rates[0],
+		     (int)config.rates[1],
+		     (int)config.rates[2],
+		     (int)config.rates[3],
+		     (int)config.rates[4],
+		     (int)config.rates[5],
+		     (int)config.rates[6],
+		     (int)config.rates[7],
+		     (int)config.channelSet,
+		     (int)config.txPower
 		);
 	sprintf( data->rbuffer + i,
 		 "LongRetryLimit: %d\n"
@@ -4129,24 +2699,24 @@ static int proc_config_open( struct inode *inode, struct file *file ) {
 		 "WEP: %s\n"
 		 "Modulation: %s\n"
 		 "Preamble: %s\n",
-		 (int)ai->config.longRetryLimit,
-		 (int)ai->config.shortRetryLimit,
-		 (int)ai->config.rtsThres,
-		 (int)ai->config.txLifetime,
-		 (int)ai->config.rxLifetime,
-		 ai->config.txDiversity == 1 ? "left" :
-		 ai->config.txDiversity == 2 ? "right" : "both",
-		 ai->config.rxDiversity == 1 ? "left" :
-		 ai->config.rxDiversity == 2 ? "right" : "both",
-		 (int)ai->config.fragThresh,
-		 ai->config.authType == AUTH_ENCRYPT ? "encrypt" :
-		 ai->config.authType == AUTH_SHAREDKEY ? "shared" : "open",
-		 ai->config.modulation == 0 ? "default" :
-		 ai->config.modulation == MOD_CCK ? "cck" :
-		 ai->config.modulation == MOD_MOK ? "mok" : "error",
-		 ai->config.preamble == PREAMBLE_AUTO ? "auto" :
-		 ai->config.preamble == PREAMBLE_LONG ? "long" :
-		 ai->config.preamble == PREAMBLE_SHORT ? "short" : "error"
+		 (int)config.longRetryLimit,
+		 (int)config.shortRetryLimit,
+		 (int)config.rtsThres,
+		 (int)config.txLifetime,
+		 (int)config.rxLifetime,
+		 config.txDiversity == 1 ? "left" :
+		 config.txDiversity == 2 ? "right" : "both",
+		 config.rxDiversity == 1 ? "left" :
+		 config.rxDiversity == 2 ? "right" : "both",
+		 (int)config.fragThresh,
+		 config.authType == AUTH_ENCRYPT ? "encrypt" :
+		 config.authType == AUTH_SHAREDKEY ? "shared" : "open",
+		 config.modulation == 0 ? "default" :
+		 config.modulation == MOD_CCK ? "cck" :
+		 config.modulation == MOD_MOK ? "mok" : "error",
+		 config.preamble == PREAMBLE_AUTO ? "auto" :
+		 config.preamble == PREAMBLE_LONG ? "long" :
+		 config.preamble == PREAMBLE_SHORT ? "short" : "error"
 		);
 	data->readlen = strlen( data->rbuffer );
 	return 0;
@@ -4154,11 +2724,10 @@ static int proc_config_open( struct inode *inode, struct file *file ) {
 
 static void proc_SSID_on_close( struct inode *inode, struct file *file ) {
 	struct proc_data *data = (struct proc_data *)file->private_data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	SsidRid SSID_rid;
-	Resp rsp;
 	int i;
 	int offset = 0;
 
@@ -4179,11 +2748,7 @@ static void proc_SSID_on_close( struct inode *inode, struct file *file ) {
 		       offset < data->writelen ) offset++;
 		offset++;
 	}
-	if (i)
-		SSID_rid.len = sizeof(SSID_rid);
-	disable_MAC(ai, 1);
 	writeSsidRid(ai, &SSID_rid);
-	enable_MAC(ai, &rsp, 1);
 }
 
 inline static u8 hexVal(char c) {
@@ -4195,11 +2760,10 @@ inline static u8 hexVal(char c) {
 
 static void proc_APList_on_close( struct inode *inode, struct file *file ) {
 	struct proc_data *data = (struct proc_data *)file->private_data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	APListRid APList_rid;
-	Resp rsp;
 	int i;
 
 	if ( !data->writelen ) return;
@@ -4222,20 +2786,18 @@ static void proc_APList_on_close( struct inode *inode, struct file *file ) {
 			}
 		}
 	}
-	disable_MAC(ai, 1);
 	writeAPListRid(ai, &APList_rid);
-	enable_MAC(ai, &rsp, 1);
 }
 
 /* This function wraps PC4500_writerid with a MAC disable */
 static int do_writerid( struct airo_info *ai, u16 rid, const void *rid_data,
-			int len, int dummy ) {
+			int len ) {
 	int rc;
 	Resp rsp;
 
-	disable_MAC(ai, 1);
-	rc = PC4500_writerid(ai, rid, rid_data, len, 1);
-	enable_MAC(ai, &rsp, 1);
+	disable_MAC(ai);
+	rc = PC4500_writerid(ai, rid, rid_data, len);
+	enable_MAC(ai, &rsp);
 	return rc;
 }
 
@@ -4263,8 +2825,8 @@ static int get_wep_key(struct airo_info *ai, u16 index) {
 }
 
 static int set_wep_key(struct airo_info *ai, u16 index,
-		       const char *key, u16 keylen, int perm, int lock ) {
-	static const unsigned char macaddr[ETH_ALEN] = { 0x01, 0, 0, 0, 0, 0 };
+		       const char *key, u16 keylen, int perm ) {
+	static const unsigned char macaddr[6] = { 0x01, 0, 0, 0, 0, 0 };
 	WepKeyRid wkr;
 
 	memset(&wkr, 0, sizeof(wkr));
@@ -4281,19 +2843,19 @@ static int set_wep_key(struct airo_info *ai, u16 index,
 		wkr.kindex = index;
 		wkr.klen = keylen;
 		memcpy( wkr.key, key, keylen );
-		memcpy( wkr.mac, macaddr, ETH_ALEN );
+		memcpy( wkr.mac, macaddr, 6 );
 		printk(KERN_INFO "Setting key %d\n", index);
 	}
 
-	writeWepKeyRid(ai, &wkr, perm, lock);
+	writeWepKeyRid(ai, &wkr, perm);
 	return 0;
 }
 
 static void proc_wepkey_on_close( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	int i;
 	char key[16];
 	u16 index = 0;
@@ -4301,6 +2863,7 @@ static void proc_wepkey_on_close( struct inode *inode, struct file *file ) {
 
 	memset(key, 0, sizeof(key));
 
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 	data = (struct proc_data *)file->private_data;
 	if ( !data->writelen ) return;
 
@@ -4308,7 +2871,7 @@ static void proc_wepkey_on_close( struct inode *inode, struct file *file ) {
 	    (data->wbuffer[1] == ' ' || data->wbuffer[1] == '\n')) {
 		index = data->wbuffer[0] - '0';
 		if (data->wbuffer[1] == '\n') {
-			set_wep_key(ai, index, 0, 0, 1, 1);
+			set_wep_key(ai, index, 0, 0, 1);
 			return;
 		}
 		j = 2;
@@ -4327,19 +2890,23 @@ static void proc_wepkey_on_close( struct inode *inode, struct file *file ) {
 			break;
 		}
 	}
-	set_wep_key(ai, index, key, i/3, 1, 1);
+	set_wep_key(ai, index, key, i/3, 1);
 }
 
 static int proc_wepkey_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	char *ptr;
 	WepKeyRid wkr;
 	u16 lastindex;
 	int j=0;
 	int rc;
+
+	MOD_INC_USE_COUNT;
+
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -4382,12 +2949,16 @@ static int proc_wepkey_open( struct inode *inode, struct file *file ) {
 
 static int proc_SSID_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	int i;
 	char *ptr;
 	SsidRid SSID_rid;
+
+	MOD_INC_USE_COUNT;
+
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -4426,12 +2997,16 @@ static int proc_SSID_open( struct inode *inode, struct file *file ) {
 
 static int proc_APList_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	int i;
 	char *ptr;
 	APListRid APList_rid;
+
+	MOD_INC_USE_COUNT;
+
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -4474,14 +3049,18 @@ static int proc_APList_open( struct inode *inode, struct file *file ) {
 
 static int proc_BSSList_open( struct inode *inode, struct file *file ) {
 	struct proc_data *data;
-	struct proc_dir_entry *dp = PDE(inode);
+	struct proc_dir_entry *dp = inode->u.generic_ip;
 	struct net_device *dev = dp->data;
-	struct airo_info *ai = dev->priv;
+	struct airo_info *ai = (struct airo_info*)dev->priv;
 	char *ptr;
 	BSSListRid BSSList_rid;
 	int rc;
 	/* If doLoseSync is not 1, we won't do a Lose Sync */
 	int doLoseSync = -1;
+
+	MOD_INC_USE_COUNT;
+
+	dp = (struct proc_dir_entry *) inode->u.generic_ip;
 
 	if ((file->private_data = kmalloc(sizeof(struct proc_data ), GFP_KERNEL)) == NULL)
 		return -ENOMEM;
@@ -4503,10 +3082,7 @@ static int proc_BSSList_open( struct inode *inode, struct file *file ) {
 
 			memset(&cmd, 0, sizeof(cmd));
 			cmd.cmd=CMD_LISTBSS;
-			if (down_interruptible(&ai->sem))
-				return -ERESTARTSYS;
-			issuecommand(ai, &cmd, &rsp);
-			up(&ai->sem);
+			lock_issuecommand(ai, &cmd, &rsp);
 			data->readlen = 0;
 			return 0;
 		}
@@ -4545,6 +3121,7 @@ static int proc_close( struct inode *inode, struct file *file )
 {
 	struct proc_data *data = (struct proc_data *)file->private_data;
 	if ( data->on_close != NULL ) data->on_close( inode, file );
+	MOD_DEC_USE_COUNT;
 	if ( data->rbuffer ) kfree( data->rbuffer );
 	if ( data->wbuffer ) kfree( data->wbuffer );
 	kfree( data );
@@ -4556,52 +3133,67 @@ static struct net_device_list {
 	struct net_device_list *next;
 } *airo_devices = 0;
 
-/* Since the card doesn't automatically switch to the right WEP mode,
+/* Since the card doesnt automatically switch to the right WEP mode,
    we will make it do it.  If the card isn't associated, every secs we
    will switch WEP modes to see if that will help.  If the card is
    associated we will check every minute to see if anything has
    changed. */
-static void timer_func( struct net_device *dev ) {
-	struct airo_info *apriv = dev->priv;
-	Resp rsp;
+static void timer_func( u_long data ) {
+	struct net_device *dev = (struct net_device*)data;
+	struct airo_info *apriv = (struct airo_info *)dev->priv;
+	u16 linkstat = IN4500(apriv, LINKSTAT);
 
+	if (linkstat != 0x400 ) {
 /* We don't have a link so try changing the authtype */
-	readConfigRid(apriv, 0);
-	disable_MAC(apriv, 0);
-	switch(apriv->config.authType) {
+		ConfigRid config = apriv->config;
+
+		switch(apriv->authtype) {
 		case AUTH_ENCRYPT:
 /* So drop to OPEN */
-			apriv->config.authType = AUTH_OPEN;
+			config.authType = AUTH_OPEN;
+			apriv->authtype = AUTH_OPEN;
 			break;
 		case AUTH_SHAREDKEY:
 			if (apriv->keyindex < auto_wep) {
-				set_wep_key(apriv, apriv->keyindex, 0, 0, 0, 0);
-				apriv->config.authType = AUTH_SHAREDKEY;
+				set_wep_key(apriv, apriv->keyindex, 0, 0, 0);
+				config.authType = AUTH_SHAREDKEY;
+				apriv->authtype = AUTH_SHAREDKEY;
 				apriv->keyindex++;
 			} else {
 			        /* Drop to ENCRYPT */
 				apriv->keyindex = 0;
-				set_wep_key(apriv, apriv->defindex, 0, 0, 0, 0);
-				apriv->config.authType = AUTH_ENCRYPT;
+				set_wep_key(apriv, apriv->defindex, 0, 0, 0);
+				config.authType = AUTH_ENCRYPT;
+				apriv->authtype = AUTH_ENCRYPT;
 			}
 			break;
 		default:  /* We'll escalate to SHAREDKEY */
-			apriv->config.authType = AUTH_SHAREDKEY;
-	}
-	apriv->need_commit = 1;
-	writeConfigRid(apriv, 0);
-	enable_MAC(apriv, &rsp, 0);
-	up(&apriv->sem);
+			config.authType = AUTH_SHAREDKEY;
+			apriv->authtype = AUTH_SHAREDKEY;
+		}
+		checkThrottle(&config);
+		writeConfigRid(apriv, &config);
 
 /* Schedule check to see if the change worked */
-	clear_bit(JOB_AUTOWEP, &apriv->flags);
-	apriv->expires = RUN_AT(HZ*3);
+		apriv->timer.expires = RUN_AT(HZ*3);
+		add_timer(&apriv->timer);
+	}
 }
 
 static int add_airo_dev( struct net_device *dev ) {
 	struct net_device_list *node = kmalloc( sizeof( *node ), GFP_KERNEL );
 	if ( !node )
 		return -ENOMEM;
+
+	if ( auto_wep ) {
+		struct airo_info *apriv=dev->priv;
+		struct timer_list *timer = &apriv->timer;
+
+		timer->function = timer_func;
+		timer->data = (u_long)dev;
+		init_timer(timer);
+		apriv->authtype = AUTH_SHAREDKEY;
+	}
 
 	node->dev = dev;
 	node->next = airo_devices;
@@ -4624,16 +3216,11 @@ static int __devinit airo_pci_probe(struct pci_dev *pdev,
 {
 	struct net_device *dev;
 
-	if (pci_enable_device(pdev))
-		return -ENODEV;
-	pci_set_master(pdev);
-
 	dev = init_airo_card(pdev->irq,	pdev->resource[2].start, 0);
 	if (!dev)
 		return -ENODEV;
 
 	pci_set_drvdata(pdev, dev);
-	set_bit (FLAG_PCI, &((struct airo_info *)dev->priv)->flags);
 	return 0;
 }
 
@@ -4645,7 +3232,7 @@ static void __devexit airo_pci_remove(struct pci_dev *pdev)
 
 static int __init airo_init_module( void )
 {
-	int i, have_isa_dev = 0;
+	int i, rc = 0, have_isa_dev = 0;
 
 	airo_entry = create_proc_entry("aironet",
 				       S_IFDIR | airo_perm,
@@ -4663,7 +3250,7 @@ static int __init airo_init_module( void )
 
 #ifdef CONFIG_PCI
 	printk( KERN_INFO "airo:  Probing for PCI adapters\n" );
-	pci_module_init(&airo_driver);		/* FIXME: check return val */
+	rc = pci_module_init(&airo_driver);
 	printk( KERN_INFO "airo:  Finished probing for PCI adapters\n" );
 #endif
 
@@ -4675,1531 +3262,22 @@ static int __init airo_init_module( void )
 
 static void __exit airo_cleanup_module( void )
 {
-	int is_pci = 0;
 	while( airo_devices ) {
 		printk( KERN_INFO "airo: Unregistering %s\n", airo_devices->dev->name );
-#ifdef CONFIG_PCI
-		if (test_bit(FLAG_PCI, &((struct airo_info *)airo_devices->dev->priv)->flags))
-			is_pci = 1;
-#endif
 		stop_airo_card( airo_devices->dev, 1 );
 	}
 	remove_proc_entry("aironet", proc_root_driver);
-
-	if (is_pci) {
-#ifdef CONFIG_PCI
-		pci_unregister_driver(&airo_driver);
-#endif
-	}
 }
 
 #ifdef WIRELESS_EXT
 /*
  * Initial Wireless Extension code for Aironet driver by :
  *	Jean Tourrilhes <jt@hpl.hp.com> - HPL - 17 November 00
- * Conversion to new driver API by :
- *	Jean Tourrilhes <jt@hpl.hp.com> - HPL - 26 March 02
- * Javier also did a good amount of work here, adding some new extensions
- * and fixing my code. Let's just say that without him this code just
- * would not work at all... - Jean II
  */
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get protocol name
- */
-static int airo_get_name(struct net_device *dev,
-			 struct iw_request_info *info,
-			 char *cwrq,
-			 char *extra)
-{
-	strcpy(cwrq, "IEEE 802.11-DS");
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set frequency
- */
-static int airo_set_freq(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_freq *fwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int rc = -EINPROGRESS;		/* Call commit handler */
-
-	/* If setting by frequency, convert to a channel */
-	if((fwrq->e == 1) &&
-	   (fwrq->m >= (int) 2.412e8) &&
-	   (fwrq->m <= (int) 2.487e8)) {
-		int f = fwrq->m / 100000;
-		int c = 0;
-		while((c < 14) && (f != frequency_list[c]))
-			c++;
-		/* Hack to fall through... */
-		fwrq->e = 0;
-		fwrq->m = c + 1;
-	}
-	/* Setting by channel number */
-	if((fwrq->m > 1000) || (fwrq->e > 0))
-		rc = -EOPNOTSUPP;
-	else {
-		int channel = fwrq->m;
-		/* We should do a better check than that,
-		 * based on the card capability !!! */
-		if((channel < 1) || (channel > 16)) {
-			printk(KERN_DEBUG "%s: New channel value of %d is invalid!\n", dev->name, fwrq->m);
-			rc = -EINVAL;
-		} else {
-			readConfigRid(local, 1);
-			/* Yes ! We can set it !!! */
-			local->config.channelSet = (u16)(channel - 1);
-			local->need_commit = 1;
-		}
-	}
-	return rc;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get frequency
- */
-static int airo_get_freq(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_freq *fwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	StatusRid status_rid;		/* Card status info */
-
-	readConfigRid(local, 1);
-	if ((local->config.opmode & 0xFF) == MODE_STA_ESS)
-		status_rid.channel = local->config.channelSet;
-	else
-		readStatusRid(local, &status_rid, 1);
-
-#ifdef WEXT_USECHANNELS
-	fwrq->m = ((int)status_rid.channel) + 1;
-	fwrq->e = 0;
-#else
-	{
-		int f = (int)status_rid.channel;
-		fwrq->m = frequency_list[f] * 100000;
-		fwrq->e = 1;
-	}
-#endif
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set ESSID
- */
-static int airo_set_essid(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_point *dwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	Resp rsp;
-	SsidRid SSID_rid;		/* SSIDs */
-
-	/* Reload the list of current SSID */
-	readSsidRid(local, &SSID_rid);
-
-	/* Check if we asked for `any' */
-	if(dwrq->flags == 0) {
-		/* Just send an empty SSID list */
-		memset(&SSID_rid, 0, sizeof(SSID_rid));
-	} else {
-		int	index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
-
-		/* Check the size of the string */
-		if(dwrq->length > IW_ESSID_MAX_SIZE+1) {
-			return -E2BIG ;
-		}
-		/* Check if index is valid */
-		if((index < 0) || (index >= 4)) {
-			return -EINVAL;
-		}
-
-		/* Set the SSID */
-		memset(SSID_rid.ssids[index].ssid, 0,
-		       sizeof(SSID_rid.ssids[index].ssid));
-		memcpy(SSID_rid.ssids[index].ssid, extra, dwrq->length);
-		SSID_rid.ssids[index].len = dwrq->length - 1;
-		SSID_rid.len = sizeof(SSID_rid);
-	}
-	/* Write it to the card */
-	disable_MAC(local, 1);
-	writeSsidRid(local, &SSID_rid);
-	enable_MAC(local, &rsp, 1);
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get ESSID
- */
-static int airo_get_essid(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_point *dwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	StatusRid status_rid;		/* Card status info */
-
-	readStatusRid(local, &status_rid, 1);
-
-	/* Note : if dwrq->flags != 0, we should
-	 * get the relevant SSID from the SSID list... */
-
-	/* Get the current SSID */
-	memcpy(extra, status_rid.SSID, status_rid.SSIDlen);
-	extra[status_rid.SSIDlen] = '\0';
-	/* If none, we may want to get the one that was set */
-
-	/* Push it out ! */
-	dwrq->length = status_rid.SSIDlen + 1;
-	dwrq->flags = 1; /* active */
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set AP address
- */
-static int airo_set_wap(struct net_device *dev,
-			struct iw_request_info *info,
-			struct sockaddr *awrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-	Cmd cmd;
-	Resp rsp;
-	APListRid APList_rid;
-	static const unsigned char bcast[ETH_ALEN] = { 255, 255, 255, 255, 255, 255 };
-
-	if (awrq->sa_family != ARPHRD_ETHER)
-		return -EINVAL;
-	else if (!memcmp(bcast, awrq->sa_data, ETH_ALEN)) {
-		memset(&cmd, 0, sizeof(cmd));
-		cmd.cmd=CMD_LOSE_SYNC;
-		if (down_interruptible(&local->sem))
-			return -ERESTARTSYS;
-		issuecommand(local, &cmd, &rsp);
-		up(&local->sem);
-	} else {
-		memset(&APList_rid, 0, sizeof(APList_rid));
-		APList_rid.len = sizeof(APList_rid);
-		memcpy(APList_rid.ap[0], awrq->sa_data, ETH_ALEN);
-		disable_MAC(local, 1);
-		writeAPListRid(local, &APList_rid);
-		enable_MAC(local, &rsp, 1);
-	}
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get AP address
- */
-static int airo_get_wap(struct net_device *dev,
-			struct iw_request_info *info,
-			struct sockaddr *awrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-	StatusRid status_rid;		/* Card status info */
-
-	readStatusRid(local, &status_rid, 1);
-
-	/* Tentative. This seems to work, wow, I'm lucky !!! */
-	memcpy(awrq->sa_data, status_rid.bssid[0], ETH_ALEN);
-	awrq->sa_family = ARPHRD_ETHER;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Nickname
- */
-static int airo_set_nick(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_point *dwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	/* Check the size of the string */
-	if(dwrq->length > 16 + 1) {
-		return -E2BIG;
-	}
-	readConfigRid(local, 1);
-	memset(local->config.nodeName, 0, sizeof(local->config.nodeName));
-	memcpy(local->config.nodeName, extra, dwrq->length);
-	local->need_commit = 1;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Nickname
- */
-static int airo_get_nick(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_point *dwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	strncpy(extra, local->config.nodeName, 16);
-	extra[16] = '\0';
-	dwrq->length = strlen(extra) + 1;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Bit-Rate
- */
-static int airo_set_rate(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	CapabilityRid cap_rid;		/* Card capability info */
-	u8	brate = 0;
-	int	i;
-
-	/* First : get a valid bit rate value */
-	readCapabilityRid(local, &cap_rid);
-
-	/* Which type of value ? */
-	if((vwrq->value < 8) && (vwrq->value >= 0)) {
-		/* Setting by rate index */
-		/* Find value in the magic rate table */
-		brate = cap_rid.supportedRates[vwrq->value];
-	} else {
-		/* Setting by frequency value */
-		u8	normvalue = (u8) (vwrq->value/500000);
-
-		/* Check if rate is valid */
-		for(i = 0 ; i < 8 ; i++) {
-			if(normvalue == cap_rid.supportedRates[i]) {
-				brate = normvalue;
-				break;
-			}
-		}
-	}
-	/* -1 designed the max rate (mostly auto mode) */
-	if(vwrq->value == -1) {
-		/* Get the highest available rate */
-		for(i = 0 ; i < 8 ; i++) {
-			if(cap_rid.supportedRates[i] == 0)
-				break;
-		}
-		if(i != 0)
-			brate = cap_rid.supportedRates[i - 1];
-	}
-	/* Check that it is valid */
-	if(brate == 0) {
-		return -EINVAL;
-	}
-
-	readConfigRid(local, 1);
-	/* Now, check if we want a fixed or auto value */
-	if(vwrq->fixed == 0) {
-		/* Fill all the rates up to this max rate */
-		memset(local->config.rates, 0, 8);
-		for(i = 0 ; i < 8 ; i++) {
-			local->config.rates[i] = cap_rid.supportedRates[i];
-			if(local->config.rates[i] == brate)
-				break;
-		}
-	} else {
-		/* Fixed mode */
-		/* One rate, fixed */
-		memset(local->config.rates, 0, 8);
-		local->config.rates[0] = brate;
-	}
-	local->need_commit = 1;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Bit-Rate
- */
-static int airo_get_rate(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	StatusRid status_rid;		/* Card status info */
-
-	readStatusRid(local, &status_rid, 1);
-
-	vwrq->value = status_rid.currentXmitRate * 500000;
-	/* If more than one rate, set auto */
-	readConfigRid(local, 1);
-	vwrq->fixed = (local->config.rates[1] == 0);
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set RTS threshold
- */
-static int airo_set_rts(struct net_device *dev,
-			struct iw_request_info *info,
-			struct iw_param *vwrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int rthr = vwrq->value;
-
-	if(vwrq->disabled)
-		rthr = 2312;
-	if((rthr < 0) || (rthr > 2312)) {
-		return -EINVAL;
-	}
-	readConfigRid(local, 1);
-	local->config.rtsThres = rthr;
-	local->need_commit = 1;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get RTS threshold
- */
-static int airo_get_rts(struct net_device *dev,
-			struct iw_request_info *info,
-			struct iw_param *vwrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	vwrq->value = local->config.rtsThres;
-	vwrq->disabled = (vwrq->value >= 2312);
-	vwrq->fixed = 1;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Fragmentation threshold
- */
-static int airo_set_frag(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int fthr = vwrq->value;
-
-	if(vwrq->disabled)
-		fthr = 2312;
-	if((fthr < 256) || (fthr > 2312)) {
-		return -EINVAL;
-	}
-	fthr &= ~0x1;	/* Get an even value - is it really needed ??? */
-	readConfigRid(local, 1);
-	local->config.fragThresh = (u16)fthr;
-	local->need_commit = 1;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Fragmentation threshold
- */
-static int airo_get_frag(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	vwrq->value = local->config.fragThresh;
-	vwrq->disabled = (vwrq->value >= 2312);
-	vwrq->fixed = 1;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Mode of Operation
- */
-static int airo_set_mode(struct net_device *dev,
-			 struct iw_request_info *info,
-			 __u32 *uwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int commit = 1;
-
-	readConfigRid(local, 1);
-	if ((local->config.rmode & 0xff) >= RXMODE_RFMON)
-		commit = 2;
-
-	switch(*uwrq) {
-		case IW_MODE_ADHOC:
-			local->config.opmode &= 0xFF00;
-			local->config.opmode |= MODE_STA_IBSS;
-			local->config.rmode &= 0xfe00;
-			local->config.scanMode = SCANMODE_ACTIVE;
-			clear_bit (FLAG_802_11, &local->flags);
-			break;
-		case IW_MODE_INFRA:
-			local->config.opmode &= 0xFF00;
-			local->config.opmode |= MODE_STA_ESS;
-			local->config.rmode &= 0xfe00;
-			local->config.scanMode = SCANMODE_ACTIVE;
-			clear_bit (FLAG_802_11, &local->flags);
-			break;
-		case IW_MODE_MASTER:
-			local->config.opmode &= 0xFF00;
-			local->config.opmode |= MODE_AP;
-			local->config.rmode &= 0xfe00;
-			local->config.scanMode = SCANMODE_ACTIVE;
-			clear_bit (FLAG_802_11, &local->flags);
-			break;
-		case IW_MODE_REPEAT:
-			local->config.opmode &= 0xFF00;
-			local->config.opmode |= MODE_AP_RPTR;
-			local->config.rmode &= 0xfe00;
-			local->config.scanMode = SCANMODE_ACTIVE;
-			clear_bit (FLAG_802_11, &local->flags);
-			break;
-		case IW_MODE_MONITOR:
-			local->config.opmode &= 0xFF00;
-			local->config.opmode |= MODE_STA_ESS;
-			local->config.rmode &= 0xfe00;
-			local->config.rmode |= RXMODE_RFMON | RXMODE_DISABLE_802_3_HEADER;
-			local->config.scanMode = SCANMODE_PASSIVE;
-			set_bit (FLAG_802_11, &local->flags);
-			break;
-		default:
-			return -EINVAL;
-	}
-	local->need_commit = commit;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Mode of Operation
- */
-static int airo_get_mode(struct net_device *dev,
-			 struct iw_request_info *info,
-			 __u32 *uwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	/* If not managed, assume it's ad-hoc */
-	switch (local->config.opmode & 0xFF) {
-		case MODE_STA_ESS:
-			*uwrq = IW_MODE_INFRA;
-			break;
-		case MODE_AP:
-			*uwrq = IW_MODE_MASTER;
-			break;
-		case MODE_AP_RPTR:
-			*uwrq = IW_MODE_REPEAT;
-			break;
-		default:
-			*uwrq = IW_MODE_ADHOC;
-	}
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Encryption Key
- */
-static int airo_set_encode(struct net_device *dev,
-			   struct iw_request_info *info,
-			   struct iw_point *dwrq,
-			   char *extra)
-{
-	struct airo_info *local = dev->priv;
-	CapabilityRid cap_rid;		/* Card capability info */
-
-	/* Is WEP supported ? */
-	readCapabilityRid(local, &cap_rid);
-	/* Older firmware doesn't support this...
-	if(!(cap_rid.softCap & 2)) {
-		return -EOPNOTSUPP;
-	} */
-	readConfigRid(local, 1);
-
-	/* Basic checking: do we have a key to set ?
-	 * Note : with the new API, it's impossible to get a NULL pointer.
-	 * Therefore, we need to check a key size == 0 instead.
-	 * New version of iwconfig properly set the IW_ENCODE_NOKEY flag
-	 * when no key is present (only change flags), but older versions
-	 * don't do it. - Jean II */
-	if (dwrq->length > 0) {
-		wep_key_t key;
-		int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
-		int current_index = get_wep_key(local, 0xffff);
-		/* Check the size of the key */
-		if (dwrq->length > MAX_KEY_SIZE) {
-			return -EINVAL;
-		}
-		/* Check the index (none -> use current) */
-		if ((index < 0) || (index>=(cap_rid.softCap&0x80)?4:1))
-			index = current_index;
-		/* Set the length */
-		if (dwrq->length > MIN_KEY_SIZE)
-			key.len = MAX_KEY_SIZE;
-		else
-			if (dwrq->length > 0)
-				key.len = MIN_KEY_SIZE;
-			else
-				/* Disable the key */
-				key.len = 0;
-		/* Check if the key is not marked as invalid */
-		if(!(dwrq->flags & IW_ENCODE_NOKEY)) {
-			/* Cleanup */
-			memset(key.key, 0, MAX_KEY_SIZE);
-			/* Copy the key in the driver */
-			memcpy(key.key, extra, dwrq->length);
-			/* Send the key to the card */
-			set_wep_key(local, index, key.key, key.len, 1, 1);
-		}
-		/* WE specify that if a valid key is set, encryption
-		 * should be enabled (user may turn it off later)
-		 * This is also how "iwconfig ethX key on" works */
-		if((index == current_index) && (key.len > 0) &&
-		   (local->config.authType == AUTH_OPEN)) {
-			local->config.authType = AUTH_ENCRYPT;
-			local->need_commit = 1;
-		}
-	} else {
-		/* Do we want to just set the transmit key index ? */
-		int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
-		if ((index>=0) && (index<(cap_rid.softCap&0x80)?4:1)) {
-			set_wep_key(local, index, 0, 0, 1, 1);
-		} else
-			/* Don't complain if only change the mode */
-			if(!dwrq->flags & IW_ENCODE_MODE) {
-				return -EINVAL;
-			}
-	}
-	/* Read the flags */
-	if(dwrq->flags & IW_ENCODE_DISABLED)
-		local->config.authType = AUTH_OPEN;	// disable encryption
-	if(dwrq->flags & IW_ENCODE_RESTRICTED)
-		local->config.authType = AUTH_SHAREDKEY;	// Only Both
-	if(dwrq->flags & IW_ENCODE_OPEN)
-		local->config.authType = AUTH_ENCRYPT;	// Only Wep
-	/* Commit the changes to flags if needed */
-	if(dwrq->flags & IW_ENCODE_MODE)
-		local->need_commit = 1;
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Encryption Key
- */
-static int airo_get_encode(struct net_device *dev,
-			   struct iw_request_info *info,
-			   struct iw_point *dwrq,
-			   char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int index = (dwrq->flags & IW_ENCODE_INDEX) - 1;
-	CapabilityRid cap_rid;		/* Card capability info */
-
-	/* Is it supported ? */
-	readCapabilityRid(local, &cap_rid);
-	if(!(cap_rid.softCap & 2)) {
-		return -EOPNOTSUPP;
-	}
-	readConfigRid(local, 1);
-	/* Check encryption mode */
-	switch(local->config.authType)	{
-		case AUTH_ENCRYPT:
-			dwrq->flags = IW_ENCODE_OPEN;
-			break;
-		case AUTH_SHAREDKEY:
-			dwrq->flags = IW_ENCODE_RESTRICTED;
-			break;
-		default:
-		case AUTH_OPEN:
-			dwrq->flags = IW_ENCODE_DISABLED;
-			break;
-	}
-	/* We can't return the key, so set the proper flag and return zero */
-	dwrq->flags |= IW_ENCODE_NOKEY;
-	memset(extra, 0, 16);
-
-	/* Which key do we want ? -1 -> tx index */
-	if((index < 0) || (index >= (cap_rid.softCap & 0x80) ? 4 : 1))
-		index = get_wep_key(local, 0xffff);
-	dwrq->flags |= index + 1;
-	/* Copy the key to the user buffer */
-	dwrq->length = get_wep_key(local, index);
-	if (dwrq->length > 16) {
-		dwrq->length=0;
-	}
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Tx-Power
- */
-static int airo_set_txpow(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	CapabilityRid cap_rid;		/* Card capability info */
-	int i;
-	int rc = -EINVAL;
-
-	readCapabilityRid(local, &cap_rid);
-
-	if (vwrq->disabled) {
-		set_bit (FLAG_RADIO_OFF, &local->flags);
-		local->need_commit = 1;
-		return -EINPROGRESS;		/* Call commit handler */
-	}
-	if (vwrq->flags != IW_TXPOW_MWATT) {
-		return -EINVAL;
-	}
-	clear_bit (FLAG_RADIO_OFF, &local->flags);
-	for (i = 0; cap_rid.txPowerLevels[i] && (i < 8); i++)
-		if ((vwrq->value==cap_rid.txPowerLevels[i])) {
-			readConfigRid(local, 1);
-			local->config.txPower = vwrq->value;
-			local->need_commit = 1;
-			rc = -EINPROGRESS;	/* Call commit handler */
-			break;
-		}
-	return rc;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Tx-Power
- */
-static int airo_get_txpow(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	vwrq->value = local->config.txPower;
-	vwrq->fixed = 1;	/* No power control */
-	vwrq->disabled = test_bit(FLAG_RADIO_OFF, &local->flags);
-	vwrq->flags = IW_TXPOW_MWATT;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Retry limits
- */
-static int airo_set_retry(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int rc = -EINVAL;
-
-	if(vwrq->disabled) {
-		return -EINVAL;
-	}
-	readConfigRid(local, 1);
-	if(vwrq->flags & IW_RETRY_LIMIT) {
-		if(vwrq->flags & IW_RETRY_MAX)
-			local->config.longRetryLimit = vwrq->value;
-		else if (vwrq->flags & IW_RETRY_MIN)
-			local->config.shortRetryLimit = vwrq->value;
-		else {
-			/* No modifier : set both */
-			local->config.longRetryLimit = vwrq->value;
-			local->config.shortRetryLimit = vwrq->value;
-		}
-		local->need_commit = 1;
-		rc = -EINPROGRESS;		/* Call commit handler */
-	}
-	if(vwrq->flags & IW_RETRY_LIFETIME) {
-		local->config.txLifetime = vwrq->value / 1024;
-		local->need_commit = 1;
-		rc = -EINPROGRESS;		/* Call commit handler */
-	}
-	return rc;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Retry limits
- */
-static int airo_get_retry(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	vwrq->disabled = 0;      /* Can't be disabled */
-
-	readConfigRid(local, 1);
-	/* Note : by default, display the min retry number */
-	if((vwrq->flags & IW_RETRY_TYPE) == IW_RETRY_LIFETIME) {
-		vwrq->flags = IW_RETRY_LIFETIME;
-		vwrq->value = (int)local->config.txLifetime * 1024;
-	} else if((vwrq->flags & IW_RETRY_MAX)) {
-		vwrq->flags = IW_RETRY_LIMIT | IW_RETRY_MAX;
-		vwrq->value = (int)local->config.longRetryLimit;
-	} else {
-		vwrq->flags = IW_RETRY_LIMIT;
-		vwrq->value = (int)local->config.shortRetryLimit;
-		if((int)local->config.shortRetryLimit != (int)local->config.longRetryLimit)
-			vwrq->flags |= IW_RETRY_MIN;
-	}
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get range info
- */
-static int airo_get_range(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_point *dwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	struct iw_range *range = (struct iw_range *) extra;
-	CapabilityRid cap_rid;		/* Card capability info */
-	int		i;
-	int		k;
-
-	readCapabilityRid(local, &cap_rid);
-
-	dwrq->length = sizeof(struct iw_range);
-	memset(range, 0, sizeof(*range));
-	range->min_nwid = 0x0000;
-	range->max_nwid = 0x0000;
-	range->num_channels = 14;
-	/* Should be based on cap_rid.country to give only
-	 * what the current card support */
-	k = 0;
-	for(i = 0; i < 14; i++) {
-		range->freq[k].i = i + 1; /* List index */
-		range->freq[k].m = frequency_list[i] * 100000;
-		range->freq[k++].e = 1;	/* Values in table in MHz -> * 10^5 * 10 */
-	}
-	range->num_frequency = k;
-
-	/* Hum... Should put the right values there */
-	range->max_qual.qual = 10;
-	range->max_qual.level = 0x100 - 120;	/* -120 dBm */
-	range->max_qual.noise = 0;
-	range->sensitivity = 65535;
-
-	for(i = 0 ; i < 8 ; i++) {
-		range->bitrate[i] = cap_rid.supportedRates[i] * 500000;
-		if(range->bitrate[i] == 0)
-			break;
-	}
-	range->num_bitrates = i;
-
-	/* Set an indication of the max TCP throughput
-	 * in bit/s that we can expect using this interface.
-	 * May be use for QoS stuff... Jean II */
-	if(i > 2)
-		range->throughput = 5000 * 1000;
-	else
-		range->throughput = 1500 * 1000;
-
-	range->min_rts = 0;
-	range->max_rts = 2312;
-	range->min_frag = 256;
-	range->max_frag = 2312;
-
-	if(cap_rid.softCap & 2) {
-		// WEP: RC4 40 bits
-		range->encoding_size[0] = 5;
-		// RC4 ~128 bits
-		if (cap_rid.softCap & 0x100) {
-			range->encoding_size[1] = 13;
-			range->num_encoding_sizes = 2;
-		} else
-			range->num_encoding_sizes = 1;
-		range->max_encoding_tokens = (cap_rid.softCap & 0x80) ? 4 : 1;
-	} else {
-		range->num_encoding_sizes = 0;
-		range->max_encoding_tokens = 0;
-	}
-	range->min_pmp = 0;
-	range->max_pmp = 5000000;	/* 5 secs */
-	range->min_pmt = 0;
-	range->max_pmt = 65535 * 1024;	/* ??? */
-	range->pmp_flags = IW_POWER_PERIOD;
-	range->pmt_flags = IW_POWER_TIMEOUT;
-	range->pm_capa = IW_POWER_PERIOD | IW_POWER_TIMEOUT | IW_POWER_ALL_R;
-
-	/* Transmit Power - values are in mW */
-	for(i = 0 ; i < 8 ; i++) {
-		range->txpower[i] = cap_rid.txPowerLevels[i];
-		if(range->txpower[i] == 0)
-			break;
-	}
-	range->num_txpower = i;
-	range->txpower_capa = IW_TXPOW_MWATT;
-	range->we_version_source = 12;
-	range->we_version_compiled = WIRELESS_EXT;
-	range->retry_capa = IW_RETRY_LIMIT | IW_RETRY_LIFETIME;
-	range->retry_flags = IW_RETRY_LIMIT;
-	range->r_time_flags = IW_RETRY_LIFETIME;
-	range->min_retry = 1;
-	range->max_retry = 65535;
-	range->min_r_time = 1024;
-	range->max_r_time = 65535 * 1024;
-	/* Experimental measurements - boundary 11/5.5 Mb/s */
-	/* Note : with or without the (local->rssi), results
-	 * are somewhat different. - Jean II */
-	range->avg_qual.qual = 6;
-	if (local->rssi)
-		range->avg_qual.level = 186;	/* -70 dBm */
-	else
-		range->avg_qual.level = 176;	/* -80 dBm */
-	range->avg_qual.noise = 0;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Power Management
- */
-static int airo_set_power(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	if (vwrq->disabled) {
-		if ((local->config.rmode & 0xFF) >= RXMODE_RFMON) {
-			return -EINVAL;
-		}
-		local->config.powerSaveMode = POWERSAVE_CAM;
-		local->config.rmode &= 0xFF00;
-		local->config.rmode |= RXMODE_BC_MC_ADDR;
-		local->need_commit = 1;
-		return -EINPROGRESS;		/* Call commit handler */
-	}
-	if ((vwrq->flags & IW_POWER_TYPE) == IW_POWER_TIMEOUT) {
-		local->config.fastListenDelay = (vwrq->value + 500) / 1024;
-		local->config.powerSaveMode = POWERSAVE_PSPCAM;
-		local->need_commit = 1;
-	} else if ((vwrq->flags & IW_POWER_TYPE) == IW_POWER_PERIOD) {
-		local->config.fastListenInterval = local->config.listenInterval = (vwrq->value + 500) / 1024;
-		local->config.powerSaveMode = POWERSAVE_PSPCAM;
-		local->need_commit = 1;
-	}
-	switch (vwrq->flags & IW_POWER_MODE) {
-		case IW_POWER_UNICAST_R:
-			if ((local->config.rmode & 0xFF) >= RXMODE_RFMON) {
-				return -EINVAL;
-			}
-			local->config.rmode &= 0xFF00;
-			local->config.rmode |= RXMODE_ADDR;
-			local->need_commit = 1;
-			break;
-		case IW_POWER_ALL_R:
-			if ((local->config.rmode & 0xFF) >= RXMODE_RFMON) {
-				return -EINVAL;
-			}
-			local->config.rmode &= 0xFF00;
-			local->config.rmode |= RXMODE_BC_MC_ADDR;
-			local->need_commit = 1;
-		case IW_POWER_ON:
-			break;
-		default:
-			return -EINVAL;
-	}
-	// Note : we may want to factor local->need_commit here
-	// Note2 : may also want to factor RXMODE_RFMON test
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Power Management
- */
-static int airo_get_power(struct net_device *dev,
-			  struct iw_request_info *info,
-			  struct iw_param *vwrq,
-			  char *extra)
-{
-	struct airo_info *local = dev->priv;
-	int mode;
-
-	readConfigRid(local, 1);
-	mode = local->config.powerSaveMode;
-	if ((vwrq->disabled = (mode == POWERSAVE_CAM)))
-		return 0;
-	if ((vwrq->flags & IW_POWER_TYPE) == IW_POWER_TIMEOUT) {
-		vwrq->value = (int)local->config.fastListenDelay * 1024;
-		vwrq->flags = IW_POWER_TIMEOUT;
-	} else {
-		vwrq->value = (int)local->config.fastListenInterval * 1024;
-		vwrq->flags = IW_POWER_PERIOD;
-	}
-	if ((local->config.rmode & 0xFF) == RXMODE_ADDR)
-		vwrq->flags |= IW_POWER_UNICAST_R;
-	else
-		vwrq->flags |= IW_POWER_ALL_R;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Sensitivity
- */
-static int airo_set_sens(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	local->config.rssiThreshold = vwrq->disabled ? RSSI_DEFAULT : vwrq->value;
-	local->need_commit = 1;
-
-	return -EINPROGRESS;		/* Call commit handler */
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Sensitivity
- */
-static int airo_get_sens(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *local = dev->priv;
-
-	readConfigRid(local, 1);
-	vwrq->value = local->config.rssiThreshold;
-	vwrq->disabled = (vwrq->value == 0);
-	vwrq->fixed = 1;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get AP List
- * Note : this is deprecated in favor of IWSCAN
- */
-static int airo_get_aplist(struct net_device *dev,
-			   struct iw_request_info *info,
-			   struct iw_point *dwrq,
-			   char *extra)
-{
-	struct airo_info *local = dev->priv;
-	struct sockaddr *address = (struct sockaddr *) extra;
-	struct iw_quality qual[IW_MAX_AP];
-	BSSListRid BSSList;
-	int i;
-	int loseSync = capable(CAP_NET_ADMIN) ? 1: -1;
-
-	for (i = 0; i < IW_MAX_AP; i++) {
-		if (readBSSListRid(local, loseSync, &BSSList))
-			break;
-		loseSync = 0;
-		memcpy(address[i].sa_data, BSSList.bssid, ETH_ALEN);
-		address[i].sa_family = ARPHRD_ETHER;
-		if (local->rssi)
-			qual[i].level = 0x100 - local->rssi[BSSList.rssi].rssidBm;
-		else
-			qual[i].level = (BSSList.rssi + 321) / 2;
-		qual[i].qual = qual[i].noise = 0;
-		qual[i].updated = 2;
-		if (BSSList.index == 0xffff)
-			break;
-	}
-	if (!i) {
-		StatusRid status_rid;		/* Card status info */
-		readStatusRid(local, &status_rid, 1);
-		for (i = 0;
-		     i < min(IW_MAX_AP, 4) &&
-			     (status_rid.bssid[i][0]
-			      & status_rid.bssid[i][1]
-			      & status_rid.bssid[i][2]
-			      & status_rid.bssid[i][3]
-			      & status_rid.bssid[i][4]
-			      & status_rid.bssid[i][5])!=0xff &&
-			     (status_rid.bssid[i][0]
-			      | status_rid.bssid[i][1]
-			      | status_rid.bssid[i][2]
-			      | status_rid.bssid[i][3]
-			      | status_rid.bssid[i][4]
-			      | status_rid.bssid[i][5]);
-		     i++) {
-			memcpy(address[i].sa_data,
-			       status_rid.bssid[i], ETH_ALEN);
-			address[i].sa_family = ARPHRD_ETHER;
-		}
-	} else {
-		dwrq->flags = 1; /* Should be define'd */
-		memcpy(extra + sizeof(struct sockaddr)*i,
-		       &qual,  sizeof(struct iw_quality)*i);
-	}
-	dwrq->length = i;
-
-	return 0;
-}
-
-#if WIRELESS_EXT > 13
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : Initiate Scan
- */
-static int airo_set_scan(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_param *vwrq,
-			 char *extra)
-{
-	struct airo_info *ai = dev->priv;
-	Cmd cmd;
-	Resp rsp;
-
-	/* Note : you may have realised that, as this is a SET operation,
-	 * this is privileged and therefore a normal user can't
-	 * perform scanning.
-	 * This is not an error, while the device perform scanning,
-	 * traffic doesn't flow, so it's a perfect DoS...
-	 * Jean II */
-
-	/* Initiate a scan command */
-	memset(&cmd, 0, sizeof(cmd));
-	cmd.cmd=CMD_LISTBSS;
-	if (down_interruptible(&ai->sem))
-		return -ERESTARTSYS;
-	issuecommand(ai, &cmd, &rsp);
-	ai->scan_timestamp = jiffies;
-	up(&ai->sem);
-
-	/* At this point, just return to the user. */
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Translate scan data returned from the card to a card independent
- * format that the Wireless Tools will understand - Jean II
- */
-static inline char *airo_translate_scan(struct net_device *dev,
-					char *current_ev,
-					char *end_buf,
-					BSSListRid *list)
-{
-	struct airo_info *ai = dev->priv;
-	struct iw_event		iwe;		/* Temporary buffer */
-	u16			capabilities;
-	char *			current_val;	/* For rates */
-	int			i;
-
-	/* First entry *MUST* be the AP MAC address */
-	iwe.cmd = SIOCGIWAP;
-	iwe.u.ap_addr.sa_family = ARPHRD_ETHER;
-	memcpy(iwe.u.ap_addr.sa_data, list->bssid, ETH_ALEN);
-	current_ev = iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_ADDR_LEN);
-
-	/* Other entries will be displayed in the order we give them */
-
-	/* Add the ESSID */
-	iwe.u.data.length = list->ssidLen;
-	if(iwe.u.data.length > 32)
-		iwe.u.data.length = 32;
-	iwe.cmd = SIOCGIWESSID;
-	iwe.u.data.flags = 1;
-	current_ev = iwe_stream_add_point(current_ev, end_buf, &iwe, list->ssid);
-
-	/* Add mode */
-	iwe.cmd = SIOCGIWMODE;
-	capabilities = le16_to_cpu(list->cap);
-	if(capabilities & (CAP_ESS | CAP_IBSS)) {
-		if(capabilities & CAP_ESS)
-			iwe.u.mode = IW_MODE_MASTER;
-		else
-			iwe.u.mode = IW_MODE_ADHOC;
-		current_ev = iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_UINT_LEN);
-	}
-
-	/* Add frequency */
-	iwe.cmd = SIOCGIWFREQ;
-	iwe.u.freq.m = le16_to_cpu(list->dsChannel);
-	iwe.u.freq.m = frequency_list[iwe.u.freq.m] * 100000;
-	iwe.u.freq.e = 1;
-	current_ev = iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_FREQ_LEN);
-
-	/* Add quality statistics */
-	iwe.cmd = IWEVQUAL;
-	if (ai->rssi)
-		iwe.u.qual.level = 0x100 - ai->rssi[list->rssi].rssidBm;
-	else
-		iwe.u.qual.level = (list->rssi + 321) / 2;
-	iwe.u.qual.noise = 0;
-	iwe.u.qual.qual = 0;
-	current_ev = iwe_stream_add_event(current_ev, end_buf, &iwe, IW_EV_QUAL_LEN);
-
-	/* Add encryption capability */
-	iwe.cmd = SIOCGIWENCODE;
-	if(capabilities & CAP_PRIVACY)
-		iwe.u.data.flags = IW_ENCODE_ENABLED | IW_ENCODE_NOKEY;
-	else
-		iwe.u.data.flags = IW_ENCODE_DISABLED;
-	iwe.u.data.length = 0;
-	current_ev = iwe_stream_add_point(current_ev, end_buf, &iwe, list->ssid);
-
-	/* Rate : stuffing multiple values in a single event require a bit
-	 * more of magic - Jean II */
-	current_val = current_ev + IW_EV_LCP_LEN;
-
-	iwe.cmd = SIOCGIWRATE;
-	/* Those two flags are ignored... */
-	iwe.u.bitrate.fixed = iwe.u.bitrate.disabled = 0;
-	/* Max 8 values */
-	for(i = 0 ; i < 8 ; i++) {
-		/* NULL terminated */
-		if(list->rates[i] == 0)
-			break;
-		/* Bit rate given in 500 kb/s units (+ 0x80) */
-		iwe.u.bitrate.value = ((list->rates[i] & 0x7f) * 500000);
-		/* Add new value to event */
-		current_val = iwe_stream_add_value(current_ev, current_val, end_buf, &iwe, IW_EV_PARAM_LEN);
-	}
-	/* Check if we added any event */
-	if((current_val - current_ev) > IW_EV_LCP_LEN)
-		current_ev = current_val;
-
-	/* The other data in the scan result are not really
-	 * interesting, so for now drop it - Jean II */
-	return current_ev;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : Read Scan Results
- */
-static int airo_get_scan(struct net_device *dev,
-			 struct iw_request_info *info,
-			 struct iw_point *dwrq,
-			 char *extra)
-{
-	struct airo_info *ai = dev->priv;
-	BSSListRid BSSList;
-	int rc;
-	char *current_ev = extra;
-
-	/* When we are associated again, the scan has surely finished.
-	 * Just in case, let's make sure enough time has elapsed since
-	 * we started the scan. - Javier */
-	if(ai->scan_timestamp && time_before(jiffies,ai->scan_timestamp+3*HZ)) {
-		/* Important note : we don't want to block the caller
-		 * until results are ready for various reasons.
-		 * First, managing wait queues is complex and racy
-		 * (there may be multiple simultaneous callers).
-		 * Second, we grab some rtnetlink lock before comming
-		 * here (in dev_ioctl()).
-		 * Third, the caller can wait on the Wireless Event
-		 * - Jean II */
-		return -EAGAIN;
-	}
-	ai->scan_timestamp = 0;
-
-	/* There's only a race with proc_BSSList_open(), but its
-	 * consequences are begnign. So I don't bother fixing it - Javier */
-
-	/* Try to read the first entry of the scan result */
-	rc = PC4500_readrid(ai, RID_BSSLISTFIRST, &BSSList, sizeof(BSSList), 1);
-	if((rc) || (BSSList.index == 0xffff)) {
-		/* Client error, no scan results...
-		 * The caller need to restart the scan. */
-		return -ENODATA;
-	}
-
-	/* Read and parse all entries */
-	while((!rc) && (BSSList.index != 0xffff)) {
-		/* Translate to WE format this entry */
-		current_ev = airo_translate_scan(dev, current_ev,
-						 extra + IW_SCAN_MAX_DATA,
-						 &BSSList);
-
-		/* Read next entry */
-		rc = PC4500_readrid(ai, RID_BSSLISTNEXT,
-				    &BSSList, sizeof(BSSList), 1);
-	}
-	/* Length of data */
-	dwrq->length = (current_ev - extra);
-	dwrq->flags = 0;	/* todo */
-
-	return 0;
-}
-#endif	/* WIRELESS_EXT > 13 */
-
-#if WIRELESS_EXT <= 15
-#ifdef WIRELESS_SPY
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : set Spy List
- */
-static int airo_set_spy(struct net_device *dev,
-			struct iw_request_info *info,
-			struct iw_point *dwrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-	struct sockaddr *address = (struct sockaddr *) extra;
-
-	/* Disable spy while we copy the addresses.
-	 * As we don't disable interrupts, we need to do this to avoid races */
-	local->spy_number = 0;
-
-	if (dwrq->length > 0) {
-		int i;
-
-		/* Copy addresses */
-		for (i = 0; i < dwrq->length; i++)
-			memcpy(local->spy_address[i], address[i].sa_data, ETH_ALEN);
-		/* Reset stats */
-		memset(local->spy_stat, 0, sizeof(struct iw_quality) * IW_MAX_SPY);
-	}
-	/* Enable addresses */
-	local->spy_number = dwrq->length;
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Wireless Handler : get Spy List
- */
-static int airo_get_spy(struct net_device *dev,
-			struct iw_request_info *info,
-			struct iw_point *dwrq,
-			char *extra)
-{
-	struct airo_info *local = dev->priv;
-	struct sockaddr *address = (struct sockaddr *) extra;
-	int i;
-
-	dwrq->length = local->spy_number;
-
-	/* Copy addresses. */
-	for(i = 0; i < local->spy_number; i++) 	{
-		memcpy(address[i].sa_data, local->spy_address[i], ETH_ALEN);
-		address[i].sa_family = AF_UNIX;
-	}
-	/* Copy stats to the user buffer (just after). */
-	if(local->spy_number > 0)
-		memcpy(extra  + (sizeof(struct sockaddr) * local->spy_number),
-		       local->spy_stat, sizeof(struct iw_quality) * local->spy_number);
-	/* Reset updated flags. */
-	for (i=0; i<local->spy_number; i++)
-		local->spy_stat[i].updated = 0;
-	return 0;
-}
-#endif			/* WIRELESS_SPY */
-#endif /* WIRELESS_EXT <= 15 */
-
-/*------------------------------------------------------------------*/
-/*
- * Commit handler : called after a bunch of SET operations
- */
-static int airo_config_commit(struct net_device *dev,
-			      struct iw_request_info *info,	/* NULL */
-			      void *zwrq,			/* NULL */
-			      char *extra)			/* NULL */
-{
-	struct airo_info *local = dev->priv;
-	Resp rsp;
-
-	if (!local->need_commit)
-		return 0;
-
-	/* Some of the "SET" function may have modified some of the
-	 * parameters. It's now time to commit them in the card */
-	disable_MAC(local, 1);
-	if (local->need_commit > 1) {
-		APListRid APList_rid;
-		SsidRid SSID_rid;
-
-		readAPListRid(local, &APList_rid);
-		readSsidRid(local, &SSID_rid);
-		reset_airo_card(dev);
-		disable_MAC(local, 1);
-		writeSsidRid(local, &SSID_rid);
-		writeAPListRid(local, &APList_rid);
-	}
-	if (down_interruptible(&local->sem))
-		return -ERESTARTSYS;
-	writeConfigRid(local, 0);
-	enable_MAC(local, &rsp, 0);
-	if (local->need_commit > 1)
-		airo_set_promisc(local);
-	else
-		up(&local->sem);
-
-	return 0;
-}
-
-/*------------------------------------------------------------------*/
-/*
- * Structures to export the Wireless Handlers
- */
-
-static const struct iw_priv_args airo_private_args[] = {
-/*{ cmd,         set_args,                            get_args, name } */
-  { AIROIOCTL, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED | sizeof (aironet_ioctl),
-    IW_PRIV_TYPE_BYTE | 2047, "airoioctl" },
-  { AIROIDIFC, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED | sizeof (aironet_ioctl),
-    IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "airoidifc" },
-};
-
-#if WIRELESS_EXT > 12
-static const iw_handler		airo_handler[] =
-{
-	(iw_handler) airo_config_commit,	/* SIOCSIWCOMMIT */
-	(iw_handler) airo_get_name,		/* SIOCGIWNAME */
-	(iw_handler) NULL,			/* SIOCSIWNWID */
-	(iw_handler) NULL,			/* SIOCGIWNWID */
-	(iw_handler) airo_set_freq,		/* SIOCSIWFREQ */
-	(iw_handler) airo_get_freq,		/* SIOCGIWFREQ */
-	(iw_handler) airo_set_mode,		/* SIOCSIWMODE */
-	(iw_handler) airo_get_mode,		/* SIOCGIWMODE */
-	(iw_handler) airo_set_sens,		/* SIOCSIWSENS */
-	(iw_handler) airo_get_sens,		/* SIOCGIWSENS */
-	(iw_handler) NULL,			/* SIOCSIWRANGE */
-	(iw_handler) airo_get_range,		/* SIOCGIWRANGE */
-	(iw_handler) NULL,			/* SIOCSIWPRIV */
-	(iw_handler) NULL,			/* SIOCGIWPRIV */
-	(iw_handler) NULL,			/* SIOCSIWSTATS */
-	(iw_handler) NULL,			/* SIOCGIWSTATS */
-#if WIRELESS_EXT > 15
-	iw_handler_set_spy,			/* SIOCSIWSPY */
-	iw_handler_get_spy,			/* SIOCGIWSPY */
-	iw_handler_set_thrspy,			/* SIOCSIWTHRSPY */
-	iw_handler_get_thrspy,			/* SIOCGIWTHRSPY */
-#else /* WIRELESS_EXT > 15 */
-#ifdef WIRELESS_SPY
-	(iw_handler) airo_set_spy,		/* SIOCSIWSPY */
-	(iw_handler) airo_get_spy,		/* SIOCGIWSPY */
-#else	/* WIRELESS_SPY */
-	(iw_handler) NULL,			/* SIOCSIWSPY */
-	(iw_handler) NULL,			/* SIOCGIWSPY */
-#endif	/* WIRELESS_SPY */
-	(iw_handler) NULL,			/* -- hole -- */
-	(iw_handler) NULL,			/* -- hole -- */
-#endif /* WIRELESS_EXT > 15 */
-	(iw_handler) airo_set_wap,		/* SIOCSIWAP */
-	(iw_handler) airo_get_wap,		/* SIOCGIWAP */
-	(iw_handler) NULL,			/* -- hole -- */
-	(iw_handler) airo_get_aplist,		/* SIOCGIWAPLIST */
-#if WIRELESS_EXT > 13
-	(iw_handler) airo_set_scan,		/* SIOCSIWSCAN */
-	(iw_handler) airo_get_scan,		/* SIOCGIWSCAN */
-#else	/* WIRELESS_EXT > 13 */
-	(iw_handler) NULL,			/* SIOCSIWSCAN */
-	(iw_handler) NULL,			/* SIOCGIWSCAN */
-#endif	/* WIRELESS_EXT > 13 */
-	(iw_handler) airo_set_essid,		/* SIOCSIWESSID */
-	(iw_handler) airo_get_essid,		/* SIOCGIWESSID */
-	(iw_handler) airo_set_nick,		/* SIOCSIWNICKN */
-	(iw_handler) airo_get_nick,		/* SIOCGIWNICKN */
-	(iw_handler) NULL,			/* -- hole -- */
-	(iw_handler) NULL,			/* -- hole -- */
-	(iw_handler) airo_set_rate,		/* SIOCSIWRATE */
-	(iw_handler) airo_get_rate,		/* SIOCGIWRATE */
-	(iw_handler) airo_set_rts,		/* SIOCSIWRTS */
-	(iw_handler) airo_get_rts,		/* SIOCGIWRTS */
-	(iw_handler) airo_set_frag,		/* SIOCSIWFRAG */
-	(iw_handler) airo_get_frag,		/* SIOCGIWFRAG */
-	(iw_handler) airo_set_txpow,		/* SIOCSIWTXPOW */
-	(iw_handler) airo_get_txpow,		/* SIOCGIWTXPOW */
-	(iw_handler) airo_set_retry,		/* SIOCSIWRETRY */
-	(iw_handler) airo_get_retry,		/* SIOCGIWRETRY */
-	(iw_handler) airo_set_encode,		/* SIOCSIWENCODE */
-	(iw_handler) airo_get_encode,		/* SIOCGIWENCODE */
-	(iw_handler) airo_set_power,		/* SIOCSIWPOWER */
-	(iw_handler) airo_get_power,		/* SIOCGIWPOWER */
-};
-
-/* Note : don't describe AIROIDIFC and AIROOLDIDIFC in here.
- * We want to force the use of the ioctl code, because those can't be
- * won't work the iw_handler code (because they simultaneously read
- * and write data and iw_handler can't do that).
- * Note that it's perfectly legal to read/write on a single ioctl command,
- * you just can't use iwpriv and need to force it via the ioctl handler.
- * Jean II */
-static const iw_handler		airo_private_handler[] =
-{
-	NULL,				/* SIOCIWFIRSTPRIV */
-};
-
-static const struct iw_handler_def	airo_handler_def =
-{
-	.num_standard	= sizeof(airo_handler)/sizeof(iw_handler),
-	.num_private	= sizeof(airo_private_handler)/sizeof(iw_handler),
-	.num_private_args = sizeof(airo_private_args)/sizeof(struct iw_priv_args),
-	.standard	= (iw_handler *) airo_handler,
-	.private	= (iw_handler *) airo_private_handler,
-	.private_args	= (struct iw_priv_args *) airo_private_args,
-#if WIRELESS_EXT > 15
-	.spy_offset	= ((void *) (&((struct airo_info *) NULL)->spy_data) -
-			   (void *) NULL),
-#endif /* WIRELESS_EXT > 15 */
-
-};
-
-#endif /* WIRELESS_EXT > 12 */
+#ifndef IW_ENCODE_NOKEY
+#define IW_ENCODE_NOKEY         0x0800  /* Key is write only, so not present */
+#define IW_ENCODE_MODE  (IW_ENCODE_DISABLED | IW_ENCODE_RESTRICTED | IW_ENCODE_OPEN)
+#endif /* IW_ENCODE_NOKEY */
 #endif /* WIRELESS_EXT */
 
 /*
@@ -6208,6 +3286,8 @@ static const struct iw_handler_def	airo_handler_def =
  *
  * TODO :
  *	o Check input value more carefully and fill correct values in range
+ *	o Implement : POWER, SPY, APLIST
+ *	o Optimise when adapter is closed (aggregate changes, commit later)
  *	o Test and shakeout the bugs (if any)
  *
  * Jean II
@@ -6217,290 +3297,887 @@ static const struct iw_handler_def	airo_handler_def =
  */
 static int airo_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-	int rc = 0;
-#if defined(WIRELESS_EXT) && WIRELESS_EXT < 13
+	int i, rc = 0;
+#ifdef WIRELESS_EXT
+	struct airo_info *local = (struct airo_info*) dev->priv;
 	struct iwreq *wrq = (struct iwreq *) rq;
-#endif /* WIRELESS_EXT < 13 */
+	ConfigRid config;		/* Configuration info */
+	CapabilityRid cap_rid;		/* Card capability info */
+	StatusRid status_rid;		/* Card status info */
+
+#ifdef CISCO_EXT
+	if (cmd != SIOCGIWPRIV && cmd != AIROIOCTL && cmd != AIROIDIFC
+#ifdef AIROOLDIOCTL
+		&& cmd != AIROOLDIOCTL && cmd != AIROOLDIDIFC
+#endif
+		)
+#endif /* CISCO_EXT */
+	{
+		/* If the command read some stuff, we better get it out of
+		 * the card first... */
+		if(IW_IS_GET(cmd))
+			readStatusRid(local, &status_rid);
+		if(IW_IS_GET(cmd) || (cmd == SIOCSIWRATE) || (cmd == SIOCSIWENCODE))
+			readCapabilityRid(local, &cap_rid);
+		/* Get config in all cases, because SET will just modify it */
+		readConfigRid(local, &config);
+	}
+#endif /* WIRELESS_EXT */
 
 	switch (cmd) {
-/* WE 13 and higher will use airo_handler_def */
-#if defined(WIRELESS_EXT) && WIRELESS_EXT < 13
-	case SIOCGIWNAME:	// Get name
-		airo_get_name(dev, NULL, (char *) &(wrq->u.name), NULL);
+#ifdef WIRELESS_EXT
+		// Get name
+	case SIOCGIWNAME:
+		strcpy(wrq->u.name, "IEEE 802.11-DS");
 		break;
 
-	case SIOCSIWFREQ:	// Set frequency/channel
-		rc = airo_set_freq(dev, NULL, &(wrq->u.freq), NULL);
-		break;
-
-	case SIOCGIWFREQ:	// Get frequency/channel
-		rc = airo_get_freq(dev, NULL, &(wrq->u.freq), NULL);
-		break;
-
-	case SIOCSIWESSID:	// Set desired network name (ESSID)
-		{
-			char essidbuf[IW_ESSID_MAX_SIZE+1];
-			if (wrq->u.essid.length > IW_ESSID_MAX_SIZE) {
-				rc = -E2BIG;
-				break;
+		// Set frequency/channel
+	case SIOCSIWFREQ:
+		/* If setting by frequency, convert to a channel */
+		if((wrq->u.freq.e == 1) &&
+		   (wrq->u.freq.m >= (int) 2.412e8) &&
+		   (wrq->u.freq.m <= (int) 2.487e8)) {
+			int f = wrq->u.freq.m / 100000;
+			int c = 0;
+			while((c < 14) && (f != frequency_list[c]))
+				c++;
+			/* Hack to fall through... */
+			wrq->u.freq.e = 0;
+			wrq->u.freq.m = c + 1;
+		}
+		/* Setting by channel number */
+		if((wrq->u.freq.m > 1000) || (wrq->u.freq.e > 0))
+			rc = -EOPNOTSUPP;
+		else {
+			int channel = wrq->u.freq.m;
+			/* We should do a better check than that,
+			 * based on the card capability !!! */
+			if((channel < 1) || (channel > 16)) {
+				printk(KERN_DEBUG "%s: New channel value of %d is invalid!\n", dev->name, wrq->u.freq.m);
+				rc = -EINVAL;
+			} else {
+				/* Yes ! We can set it !!! */
+				config.channelSet = (u16)(channel - 1);
+				local->need_commit = 1;
 			}
-			if (copy_from_user(essidbuf, wrq->u.essid.pointer,
-					   wrq->u.essid.length)) {
-				rc = -EFAULT;
-				break;
-			}
-			rc = airo_set_essid(dev, NULL,
-					    &(wrq->u.essid), essidbuf);
 		}
 		break;
 
-	case SIOCGIWESSID:	// Get current network name (ESSID)
+		// Get frequency/channel
+	case SIOCGIWFREQ:
+#ifdef WEXT_USECHANNELS
+		wrq->u.freq.m = ((int)status_rid.channel) + 1;
+		wrq->u.freq.e = 0;
+#else
 		{
-			char essidbuf[IW_ESSID_MAX_SIZE+1];
-			if (wrq->u.essid.pointer)
-				rc = airo_get_essid(dev, NULL,
-						    &(wrq->u.essid), essidbuf);
-				if ( copy_to_user(wrq->u.essid.pointer,
-						  essidbuf,
-						  wrq->u.essid.length) )
+			int f = (int)status_rid.channel;
+			wrq->u.freq.m = frequency_list[f] * 100000;
+			wrq->u.freq.e = 1;
+		}
+#endif
+		break;
+
+		// Set desired network name (ESSID)
+	case SIOCSIWESSID:
+		if (wrq->u.data.pointer) {
+			char	essid[IW_ESSID_MAX_SIZE + 1];
+			SsidRid SSID_rid;		/* SSIDs */
+
+			/* Reload the list of current SSID */
+			readSsidRid(local, &SSID_rid);
+
+			/* Check if we asked for `any' */
+			if(wrq->u.data.flags == 0) {
+				/* Just send an empty SSID list */
+				memset(&SSID_rid, 0, sizeof(SSID_rid));
+			} else {
+				int	index = (wrq->u.data.flags &
+						 IW_ENCODE_INDEX) - 1;
+
+				/* Check the size of the string */
+				if(wrq->u.data.length > IW_ESSID_MAX_SIZE+1) {
+					rc = -E2BIG;
+					break;
+				}
+				/* Check if index is valid */
+				if((index < 0) || (index >= 4)) {
+					rc = -EINVAL;
+					break;
+				}
+
+				/* Set the SSID */
+				memset(essid, 0, sizeof(essid));
+				if (copy_from_user(essid,
+					       wrq->u.data.pointer,
+					       wrq->u.data.length)) {
 					rc = -EFAULT;
+					break;
+				}
+				memcpy(SSID_rid.ssids[index].ssid, essid,
+				       sizeof(essid) - 1);
+				SSID_rid.ssids[index].len = wrq->u.data.length - 1;
+			}
+			/* Write it to the card */
+			writeSsidRid(local, &SSID_rid);
+		}
+		break;
+
+		// Get current network name (ESSID)
+	case SIOCGIWESSID:
+		if (wrq->u.data.pointer) {
+			char essid[IW_ESSID_MAX_SIZE + 1];
+
+			/* Note : if wrq->u.data.flags != 0, we should
+			 * get the relevant SSID from the SSID list... */
+
+			/* Get the current SSID */
+			memcpy(essid, status_rid.SSID, status_rid.SSIDlen);
+			essid[status_rid.SSIDlen] = '\0';
+			/* If none, we may want to get the one that was set */
+
+			/* Push it out ! */
+			wrq->u.data.length = strlen(essid) + 1;
+			wrq->u.data.flags = 1; /* active */
+			if (copy_to_user(wrq->u.data.pointer, essid, sizeof(essid)))
+				rc = -EFAULT;
 		}
 		break;
 
 	case SIOCSIWAP:
-		rc = airo_set_wap(dev, NULL, &(wrq->u.ap_addr), NULL);
+		if (wrq->u.ap_addr.sa_family != ARPHRD_ETHER)
+			rc = -EINVAL;
+		else {
+			APListRid APList_rid;
+
+			memset(&APList_rid, 0, sizeof(APList_rid));
+			APList_rid.len = sizeof(APList_rid);
+			memcpy(APList_rid.ap[0], wrq->u.ap_addr.sa_data, 6);
+			writeAPListRid(local, &APList_rid);
+			local->need_commit = 1;
+		}
 		break;
 
-	case SIOCGIWAP:		// Get current Access Point (BSSID)
-		rc = airo_get_wap(dev, NULL, &(wrq->u.ap_addr), NULL);
+		// Get current Access Point (BSSID)
+	case SIOCGIWAP:
+		/* Tentative. This seems to work, wow, I'm lucky !!! */
+		memcpy(wrq->u.ap_addr.sa_data, status_rid.bssid[0], 6);
+		wrq->u.ap_addr.sa_family = ARPHRD_ETHER;
 		break;
 
-	case SIOCSIWNICKN:	// Set desired station name
-		{
-			char nickbuf[IW_ESSID_MAX_SIZE+1];
-			if (wrq->u.data.length > IW_ESSID_MAX_SIZE) {
+		// Set desired station name
+	case SIOCSIWNICKN:
+		if (wrq->u.data.pointer) {
+			char	name[16 + 1];
+
+			/* Check the size of the string */
+			if(wrq->u.data.length > 16 + 1) {
 				rc = -E2BIG;
 				break;
 			}
-			if (copy_from_user(nickbuf, wrq->u.data.pointer,
+			memset(name, 0, sizeof(name));
+			if (copy_from_user(name, wrq->u.data.pointer,
 					   wrq->u.data.length)) {
 				rc = -EFAULT;
 				break;
 			}
-			rc = airo_set_nick(dev, NULL,
-					   &(wrq->u.data), nickbuf);
+			memcpy(config.nodeName, name, 16);
+			local->need_commit = 1;
 		}
 		break;
 
-	case SIOCGIWNICKN:	// Get current station name
-		{
-			char nickbuf[IW_ESSID_MAX_SIZE+1];
-			if (wrq->u.data.pointer)
-				rc = airo_get_nick(dev, NULL,
-						   &(wrq->u.data), nickbuf);
-				if ( copy_to_user(wrq->u.data.pointer,
-						  nickbuf,
-						  wrq->u.data.length) )
-					rc = -EFAULT;
+		// Get current station name
+	case SIOCGIWNICKN:
+		if (wrq->u.data.pointer) {
+			char name[IW_ESSID_MAX_SIZE + 1];
+
+			strncpy(name, config.nodeName, 16);
+			name[16] = '\0';
+			wrq->u.data.length = strlen(name) + 1;
+			if (copy_to_user(wrq->u.data.pointer, name, sizeof(name)))
+				rc = -EFAULT;
 		}
 		break;
 
-	case SIOCSIWRATE:	// Set the desired bit-rate
-		rc = airo_set_rate(dev, NULL, &(wrq->u.bitrate), NULL);
-		break;
+		// Set the desired bit-rate
+	case SIOCSIWRATE:
+	{
+		/* First : get a valid bit rate value */
+		u8	brate = 0;
+		int	i;
 
-	case SIOCGIWRATE:	// Get the current bit-rate
-		rc = airo_get_rate(dev, NULL, &(wrq->u.bitrate), NULL);
-		break;
+		/* Which type of value ? */
+		if((wrq->u.bitrate.value < 8) &&
+		   (wrq->u.bitrate.value >= 0)) {
+			/* Setting by rate index */
+			/* Find value in the magic rate table */
+			brate = cap_rid.supportedRates[wrq->u.bitrate.value];
+		} else {
+			/* Setting by frequency value */
+			u8	normvalue = (u8) (wrq->u.bitrate.value/500000);
 
-	case SIOCSIWRTS:	// Set the desired RTS threshold
-		rc = airo_set_rts(dev, NULL, &(wrq->u.rts), NULL);
-		break;
-
-	case SIOCGIWRTS:	// Get the current RTS threshold
-		rc = airo_get_rts(dev, NULL, &(wrq->u.rts), NULL);
-		break;
-
-	case SIOCSIWFRAG:	// Set the desired fragmentation threshold
-		rc = airo_set_frag(dev, NULL, &(wrq->u.frag), NULL);
-		break;
-
-	case SIOCGIWFRAG:	// Get the current fragmentation threshold
-		rc = airo_get_frag(dev, NULL, &(wrq->u.frag), NULL);
-		break;
-
-	case SIOCSIWMODE:	// Set mode of operation
-		rc = airo_set_mode(dev, NULL, &(wrq->u.mode), NULL);
-		break;
-
-	case SIOCGIWMODE:	// Get mode of operation
-		rc = airo_get_mode(dev, NULL, &(wrq->u.mode), NULL);
-		break;
-
-	case SIOCSIWENCODE:	// Set WEP keys and mode
-		{
-			char keybuf[MAX_KEY_SIZE];
-			if (wrq->u.encoding.pointer) {
-				/* We actually have a key to set */
-				if (wrq->u.encoding.length > MAX_KEY_SIZE) {
-					rc = -E2BIG;
+			/* Check if rate is valid */
+			for(i = 0 ; i < 8 ; i++) {
+				if(normvalue == cap_rid.supportedRates[i]) {
+					brate = normvalue;
 					break;
 				}
-				if (copy_from_user(keybuf,
-						   wrq->u.encoding.pointer,
-						   wrq->u.encoding.length)) {
-					rc = -EFAULT;
+			}
+		}
+		/* -1 designed the max rate (mostly auto mode) */
+		if(wrq->u.bitrate.value == -1) {
+			/* Get the highest available rate */
+			for(i = 0 ; i < 8 ; i++) {
+				if(cap_rid.supportedRates[i] == 0)
 					break;
-				}
-			} else if (wrq->u.encoding.length != 0) {
+			}
+			if(i != 0)
+				brate = cap_rid.supportedRates[i - 1];
+		}
+		/* Check that it is valid */
+		if(brate == 0) {
+			rc = -EINVAL;
+			break;
+		}
+
+		/* Now, check if we want a fixed or auto value */
+		if(wrq->u.bitrate.fixed == 0) {
+			/* Fill all the rates up to this max rate */
+			memset(config.rates, 0, 8);
+			for(i = 0 ; i < 8 ; i++) {
+				config.rates[i] = cap_rid.supportedRates[i];
+				if(config.rates[i] == brate)
+					break;
+			}
+			local->need_commit = 1;
+		} else {
+			/* Fixed mode */
+			/* One rate, fixed */
+			memset(config.rates, 0, 8);
+			config.rates[0] = brate;
+			local->need_commit = 1;
+		}
+		break;
+	}
+
+	// Get the current bit-rate
+	case SIOCGIWRATE:
+	{
+		int brate = status_rid.currentXmitRate;
+		wrq->u.bitrate.value = brate * 500000;
+		/* If more than one rate, set auto */
+		wrq->u.rts.fixed = (config.rates[1] == 0);
+	}
+	break;
+
+	// Set the desired RTS threshold
+	case SIOCSIWRTS:
+	{
+		int rthr = wrq->u.rts.value;
+		if(wrq->u.rts.disabled)
+			rthr = 2312;
+		if((rthr < 0) || (rthr > 2312)) {
+			rc = -EINVAL;
+		} else {
+			config.rtsThres = rthr;
+			local->need_commit = 1;
+		}
+	}
+	break;
+
+	// Get the current RTS threshold
+	case SIOCGIWRTS:
+		wrq->u.rts.value = config.rtsThres;
+		wrq->u.rts.disabled = (wrq->u.rts.value >= 2312);
+		wrq->u.rts.fixed = 1;
+		break;
+
+		// Set the desired fragmentation threshold
+	case SIOCSIWFRAG:
+	{
+		int fthr = wrq->u.frag.value;
+		if(wrq->u.frag.disabled)
+			fthr = 2312;
+		if((fthr < 256) || (fthr > 2312)) {
+			rc = -EINVAL;
+		} else {
+			fthr &= ~0x1;	/* Get an even value */
+			config.fragThresh = (u16)fthr;
+			local->need_commit = 1;
+		}
+	}
+	break;
+
+	// Get the current fragmentation threshold
+	case SIOCGIWFRAG:
+		wrq->u.frag.value = config.fragThresh;
+		wrq->u.frag.disabled = (wrq->u.frag.value >= 2312);
+		wrq->u.frag.fixed = 1;
+		break;
+
+		// Set mode of operation
+	case SIOCSIWMODE:
+		switch(wrq->u.mode) {
+		case IW_MODE_ADHOC:
+			config.opmode = MODE_STA_IBSS;
+			local->need_commit = 1;
+			break;
+		case IW_MODE_INFRA:
+			config.opmode = MODE_STA_ESS;
+			local->need_commit = 1;
+			break;
+		case IW_MODE_MASTER:
+			config.opmode = MODE_AP;
+			local->need_commit = 1;
+			break;
+		case IW_MODE_REPEAT:
+			config.opmode = MODE_AP_RPTR;
+			local->need_commit = 1;
+			break;
+		default:
+			rc = -EINVAL;
+		}
+		break;
+
+		// Get mode of operation
+	case SIOCGIWMODE:
+		/* If not managed, assume it's ad-hoc */
+		switch (config.opmode & 0xFF) {
+		case MODE_STA_ESS:
+			wrq->u.mode = IW_MODE_INFRA;
+			break;
+		case MODE_AP:
+			wrq->u.mode = IW_MODE_MASTER;
+			break;
+		case MODE_AP_RPTR:
+			wrq->u.mode = IW_MODE_REPEAT;
+			break;
+		default:
+			wrq->u.mode = IW_MODE_ADHOC;
+		}
+		break;
+
+		// Set WEP keys and mode
+	case SIOCSIWENCODE:
+		/* Is WEP supported ? */
+		/* Older firmware doesn't support this...
+		if(!(cap_rid.softCap & 2)) {
+			rc = -EOPNOTSUPP;
+			break;
+		} */
+		/* Basic checking: do we have a key to set ? */
+		if (wrq->u.encoding.pointer != (caddr_t) 0) {
+			wep_key_t key;
+			int index = (wrq->u.encoding.flags & IW_ENCODE_INDEX) - 1;
+			int current_index = get_wep_key(local, 0xffff);
+			/* Check the size of the key */
+			if (wrq->u.encoding.length > MAX_KEY_SIZE) {
 				rc = -EINVAL;
 				break;
 			}
-			rc = airo_set_encode(dev, NULL,
-					     &(wrq->u.encoding), keybuf);
+			/* Check the index (none -> use current) */
+			if ((index < 0) || (index>=(cap_rid.softCap&0x80)?4:1))
+				index = current_index;
+			/* Set the length */
+			if (wrq->u.encoding.length > MIN_KEY_SIZE)
+				key.len = MAX_KEY_SIZE;
+			else
+				if (wrq->u.encoding.length > 0)
+					key.len = MIN_KEY_SIZE;
+				else
+					/* Disable the key */
+					key.len = 0;
+			/* Check if the key is not marked as invalid */
+			if(!(wrq->u.encoding.flags & IW_ENCODE_NOKEY)) {
+				/* Cleanup */
+				memset(key.key, 0, MAX_KEY_SIZE);
+				/* Copy the key in the driver */
+				if(copy_from_user(key.key,
+						  wrq->u.encoding.pointer,
+						  wrq->u.encoding.length)) {
+					key.len = 0;
+					rc = -EFAULT;
+					break;
+				}
+				/* Send the key to the card */
+				set_wep_key(local, index, key.key,
+					    key.len, 1);
+			}
+			/* WE specify that if a valid key is set, encryption
+			 * should be enabled (user may turn it off later)
+			 * This is also how "iwconfig ethX key on" works */
+			if((index == current_index) && (key.len > 0) &&
+			   (config.authType == AUTH_OPEN)) {
+				config.authType = AUTH_ENCRYPT;
+				local->need_commit = 1;
+			}
+		} else {
+			/* Do we want to just set the transmit key index ? */
+			int index = (wrq->u.encoding.flags & IW_ENCODE_INDEX) - 1;
+			if ((index>=0) && (index<(cap_rid.softCap&0x80)?4:1)) {
+				set_wep_key(local, index, 0, 0, 1);
+			} else
+				/* Don't complain if only change the mode */
+				if(!wrq->u.encoding.flags & IW_ENCODE_MODE) {
+					rc = -EINVAL;
+					break;
+				}
 		}
+		/* Read the flags */
+		if(wrq->u.encoding.flags & IW_ENCODE_DISABLED)
+			config.authType = AUTH_OPEN;	// disable encryption
+		if(wrq->u.encoding.flags & IW_ENCODE_RESTRICTED)
+			config.authType = AUTH_SHAREDKEY;	// Only Both
+		if(wrq->u.encoding.flags & IW_ENCODE_OPEN)
+			config.authType = AUTH_ENCRYPT;	// Only Wep
+		/* Commit the changes if needed */
+		if(wrq->u.encoding.flags & IW_ENCODE_MODE)
+			local->need_commit = 1;
 		break;
 
-	case SIOCGIWENCODE:	// Get the WEP keys and mode
+		// Get the WEP keys and mode
+	case SIOCGIWENCODE:
+		/* Is it supported ? */
+		if(!(cap_rid.softCap & 2)) {
+			rc = -EOPNOTSUPP;
+			break;
+		}
 		// Only super-user can see WEP key
-		// Note : this is needed only for very old versions of WE
 		if (!capable(CAP_NET_ADMIN)) {
 			rc = -EPERM;
 			break;
 		}
-		{
-			char keybuf[MAX_KEY_SIZE];
-			rc = airo_get_encode(dev, NULL,
-					     &(wrq->u.encoding), keybuf);
-			if (wrq->u.encoding.pointer) {
-				if (copy_to_user(wrq->u.encoding.pointer,
-						 keybuf,
-						 wrq->u.encoding.length))
-					rc = -EFAULT;
+
+		// Basic checking...
+		if (wrq->u.encoding.pointer != (caddr_t) 0) {
+			char zeros[16];
+			int index = (wrq->u.encoding.flags & IW_ENCODE_INDEX) - 1;
+
+			memset(zeros,0, sizeof(zeros));
+			/* Check encryption mode */
+			wrq->u.encoding.flags = IW_ENCODE_NOKEY;
+			/* Is WEP enabled ??? */
+			switch(config.authType)	{
+			case AUTH_ENCRYPT:
+				wrq->u.encoding.flags |= IW_ENCODE_OPEN;
+				break;
+			case AUTH_SHAREDKEY:
+				wrq->u.encoding.flags |= IW_ENCODE_RESTRICTED;
+				break;
+			default:
+			case AUTH_OPEN:
+				wrq->u.encoding.flags |= IW_ENCODE_DISABLED;
+				break;
 			}
+
+			/* Which key do we want ? -1 -> tx index */
+			if((index < 0) || (index >= (cap_rid.softCap&0x80)?4:1))
+				index = get_wep_key(local, 0xffff);
+			wrq->u.encoding.flags |= index + 1;
+			/* Copy the key to the user buffer */
+			wrq->u.encoding.length = get_wep_key(local, index);
+			if (wrq->u.encoding.length > 16) {
+				wrq->u.encoding.length=0;
+			}
+
+			if(copy_to_user(wrq->u.encoding.pointer, zeros,
+					wrq->u.encoding.length))
+				rc = -EFAULT;
 		}
 		break;
 
-	case SIOCGIWTXPOW:	// Get the current Tx-Power
-		rc=airo_get_txpow(dev, NULL, &(wrq->u.txpower), NULL);
+#if WIRELESS_EXT > 9
+		// Get the current Tx-Power
+	case SIOCGIWTXPOW:
+		wrq->u.txpower.value = config.txPower;
+		wrq->u.txpower.fixed = 1;	/* No power control */
+		wrq->u.txpower.disabled = (local->flags & FLAG_RADIO_OFF);
+		wrq->u.txpower.flags = IW_TXPOW_MWATT;
 		break;
 	case SIOCSIWTXPOW:
-		rc=airo_set_txpow(dev, NULL, &(wrq->u.txpower), NULL);
+		if (wrq->u.txpower.disabled) {
+			local->flags |= FLAG_RADIO_OFF;
+			local->need_commit = 1;
+			break;
+		}
+		if (wrq->u.txpower.flags != IW_TXPOW_MWATT) {
+			rc = -EINVAL;
+			break;
+		}
+		local->flags &= ~FLAG_RADIO_OFF;
+		rc = -EINVAL;
+		for (i = 0; cap_rid.txPowerLevels[i] && (i < 8); i++)
+			if ((wrq->u.txpower.value==cap_rid.txPowerLevels[i])) {
+				config.txPower = wrq->u.txpower.value;
+				local->need_commit = 1;
+				rc = 0;
+				break;
+			}
 		break;
+#endif /* WIRELESS_EXT > 9 */
 
+#if WIRELESS_EXT > 10
 	case SIOCSIWRETRY:
-		rc=airo_set_retry(dev, NULL, &(wrq->u.retry), NULL);
-		break;
-	case SIOCGIWRETRY:
-		rc=airo_get_retry(dev, NULL, &(wrq->u.retry), NULL);
+		if(wrq->u.retry.disabled) {
+			rc = -EINVAL;
+			break;
+		}
+		local->need_commit = 0;
+		if(wrq->u.retry.flags & IW_RETRY_LIMIT) {
+			if(wrq->u.retry.flags & IW_RETRY_MAX)
+				config.longRetryLimit = wrq->u.retry.value;
+			else if (wrq->u.retry.flags & IW_RETRY_MIN)
+				config.shortRetryLimit = wrq->u.retry.value;
+			else {
+				/* No modifier : set both */
+				config.longRetryLimit = wrq->u.retry.value;
+				config.shortRetryLimit = wrq->u.retry.value;
+			}
+			local->need_commit = 1;
+		}
+		if(wrq->u.retry.flags & IW_RETRY_LIFETIME) {
+			config.txLifetime = wrq->u.retry.value / 1024;
+			local->need_commit = 1;
+		}
+		if(local->need_commit == 0) {
+			rc = -EINVAL;
+		}
 		break;
 
-	case SIOCGIWRANGE:	// Get range of parameters
-		{
+	case SIOCGIWRETRY:
+		wrq->u.retry.disabled = 0;      /* Can't be disabled */
+
+		/* Note : by default, display the min retry number */
+		if((wrq->u.retry.flags & IW_RETRY_TYPE) == IW_RETRY_LIFETIME) {
+			wrq->u.retry.flags = IW_RETRY_LIFETIME;
+			wrq->u.retry.value = (int)config.txLifetime * 1024;
+		} else if((wrq->u.retry.flags & IW_RETRY_MAX)) {
+			wrq->u.retry.flags = IW_RETRY_LIMIT | IW_RETRY_MAX;
+			wrq->u.retry.value = (int)config.longRetryLimit;
+		} else {
+			wrq->u.retry.flags = IW_RETRY_LIMIT;
+			wrq->u.retry.value = (int)config.shortRetryLimit;
+			if((int)config.shortRetryLimit != (int)config.longRetryLimit)
+				wrq->u.retry.flags |= IW_RETRY_MIN;
+		}
+
+		break;
+#endif /* WIRELESS_EXT > 10 */
+
+		// Get range of parameters
+	case SIOCGIWRANGE:
+		if (wrq->u.data.pointer) {
 			struct iw_range range;
-			rc = airo_get_range(dev, NULL,
-					    &(wrq->u.data), (char *) &range);
-			if (copy_to_user(wrq->u.data.pointer, &range,
-					 sizeof(struct iw_range)))
+			int		i;
+			int		k;
+
+			wrq->u.data.length = sizeof(range);
+			memset(&range, 0, sizeof(range));
+			range.min_nwid = 0x0000;
+			range.max_nwid = 0x0000;
+			range.num_channels = 14;
+			/* Should be based on cap_rid.country to give only
+			 * what the current card support */
+			k = 0;
+			for(i = 0; i < 14; i++) {
+				range.freq[k].i = i + 1; /* List index */
+				range.freq[k].m = frequency_list[i] * 100000;
+				range.freq[k++].e = 1;	/* Values in table in MHz -> * 10^5 * 10 */
+			}
+			range.num_frequency = k;
+
+			/* Hum... Should put the right values there */
+			range.max_qual.qual = 10;
+			range.max_qual.level = 0x100 - 120;	/* -120 dBm */
+			range.max_qual.noise = 0;
+			range.sensitivity = 65535;
+
+			for(i = 0 ; i < 8 ; i++) {
+				range.bitrate[i] = cap_rid.supportedRates[i] * 500000;
+				if(range.bitrate[i] == 0)
+					break;
+			}
+			range.num_bitrates = i;
+
+			/* Set an indication of the max TCP throughput
+			 * in bit/s that we can expect using this interface.
+			 * May be use for QoS stuff... Jean II */
+			if(i > 2)
+				range.throughput = 5 * 1000 * 1000;
+			else
+				range.throughput = 1.5 * 1000 * 1000;
+
+			range.min_rts = 0;
+			range.max_rts = 2312;
+			range.min_frag = 256;
+			range.max_frag = 2312;
+
+			if(cap_rid.softCap & 2) {
+				// WEP: RC4 40 bits
+				range.encoding_size[0] = 5;
+				// RC4 ~128 bits
+				if (cap_rid.softCap & 0x100) {
+					range.encoding_size[1] = 13;
+					range.num_encoding_sizes = 2;
+				} else
+					range.num_encoding_sizes = 1;
+				range.max_encoding_tokens = (cap_rid.softCap & 0x80) ? 4 : 1;
+			} else {
+				range.num_encoding_sizes = 0;
+				range.max_encoding_tokens = 0;
+			}
+#if WIRELESS_EXT > 9
+			range.min_pmp = 0;
+			range.max_pmp = 5000000;	/* 5 secs */
+			range.min_pmt = 0;
+			range.max_pmt = 65535 * 1024;	/* ??? */
+			range.pmp_flags = IW_POWER_PERIOD;
+			range.pmt_flags = IW_POWER_TIMEOUT;
+			range.pm_capa = IW_POWER_PERIOD | IW_POWER_TIMEOUT | IW_POWER_ALL_R;
+
+			/* Transmit Power - values are in mW */
+			for(i = 0 ; i < 8 ; i++) {
+				range.txpower[i] = cap_rid.txPowerLevels[i];
+				if(range.txpower[i] == 0)
+					break;
+			}
+			range.num_txpower = i;
+			range.txpower_capa = IW_TXPOW_MWATT;
+#endif /* WIRELESS_EXT > 9 */
+#if WIRELESS_EXT > 10
+			range.we_version_source = 12;
+			range.we_version_compiled = WIRELESS_EXT;
+			range.retry_capa = IW_RETRY_LIMIT | IW_RETRY_LIFETIME;
+			range.retry_flags = IW_RETRY_LIMIT;
+			range.r_time_flags = IW_RETRY_LIFETIME;
+			range.min_retry = 1;
+			range.max_retry = 65535;
+			range.min_r_time = 1024;
+			range.max_r_time = 65535 * 1024;
+#endif /* WIRELESS_EXT > 10 */
+#if WIRELESS_EXT > 11
+			/* Experimental measurements - boundary 11/5.5 Mb/s */
+			/* Note : with or without the (local->rssi), results
+			 * are somewhat different. - Jean II */
+			range.avg_qual.qual = 6;
+			if (local->rssi)
+				range.avg_qual.level = 186;	/* -70 dBm */
+			else
+				range.avg_qual.level = 176;	/* -80 dBm */
+			range.avg_qual.noise = 0;
+#endif /* WIRELESS_EXT > 11 */
+
+			if (copy_to_user(wrq->u.data.pointer, &range, sizeof(struct iw_range)))
 				rc = -EFAULT;
 		}
 		break;
 
 	case SIOCGIWPOWER:
-		rc=airo_get_power(dev, NULL, &(wrq->u.power), NULL);
-		break;
+	{
+		int mode = config.powerSaveMode;
+		if ((wrq->u.power.disabled = (mode == POWERSAVE_CAM)))
+			break;
+		if ((wrq->u.power.flags & IW_POWER_TYPE) == IW_POWER_TIMEOUT) {
+			wrq->u.power.value = (int)config.fastListenDelay * 1024;
+			wrq->u.power.flags = IW_POWER_TIMEOUT;
+		} else {
+			wrq->u.power.value = (int)config.fastListenInterval * 1024;
+			wrq->u.power.flags = IW_POWER_PERIOD;
+		}
+		if ((config.rmode & 0xFF) == RXMODE_ADDR)
+			wrq->u.power.flags |= IW_POWER_UNICAST_R;
+		else
+			wrq->u.power.flags |= IW_POWER_ALL_R;
+	}
+	break;
 
 	case SIOCSIWPOWER:
-		rc=airo_set_power(dev, NULL, &(wrq->u.power), NULL);
+		if (wrq->u.power.disabled) {
+			if ((config.rmode & 0xFF) >= RXMODE_RFMON) {
+				rc = -EINVAL;
+				break;
+			}
+			config.powerSaveMode = POWERSAVE_CAM;
+			config.rmode &= 0xFF00;
+			config.rmode |= RXMODE_BC_MC_ADDR;
+			local->need_commit = 1;
+			break;
+		}
+		if ((wrq->u.power.flags & IW_POWER_TYPE) == IW_POWER_TIMEOUT) {
+			config.fastListenDelay = (wrq->u.power.value + 500) / 1024;
+			config.powerSaveMode = POWERSAVE_PSPCAM;
+			local->need_commit = 1;
+		} else if ((wrq->u.power.flags & IW_POWER_TYPE) == IW_POWER_PERIOD) {
+			config.fastListenInterval = config.listenInterval = (wrq->u.power.value + 500) / 1024;
+			config.powerSaveMode = POWERSAVE_PSPCAM;
+			local->need_commit = 1;
+		}
+		switch (wrq->u.power.flags & IW_POWER_MODE) {
+		case IW_POWER_UNICAST_R:
+			if ((config.rmode & 0xFF) >= RXMODE_RFMON) {
+				rc = -EINVAL;
+				break;
+			}
+			config.rmode &= 0xFF00;
+			config.rmode |= RXMODE_ADDR;
+			local->need_commit = 1;
+			break;
+		case IW_POWER_ALL_R:
+			if ((config.rmode & 0xFF) >= RXMODE_RFMON) {
+				rc = -EINVAL;
+				break;
+			}
+			config.rmode &= 0xFF00;
+			config.rmode |= RXMODE_BC_MC_ADDR;
+			local->need_commit = 1;
+		case IW_POWER_ON:
+			break;
+		default:
+			rc = -EINVAL;
+		}
 		break;
 
 	case SIOCGIWSENS:
-		rc = airo_get_sens(dev, NULL, &(wrq->u.sens), NULL);
+		wrq->u.sens.value = config.rssiThreshold;
+		wrq->u.sens.disabled = (wrq->u.sens.value == 0);
+		wrq->u.sens.fixed = 1;
 		break;
 
 	case SIOCSIWSENS:
-		rc = airo_set_sens(dev, NULL, &(wrq->u.sens), NULL);
+		config.rssiThreshold = wrq->u.sens.disabled ? RSSI_DEFAULT : wrq->u.sens.value;
+		local->need_commit = 1;
 		break;
 
 	case SIOCGIWAPLIST:
-		{
-			char buffer[IW_MAX_AP * (sizeof(struct sockaddr) +
-						  sizeof(struct iw_quality))];
-			if (wrq->u.data.pointer) {
-				rc = airo_get_aplist(dev, NULL,
-						     &(wrq->u.data), buffer);
-				if (copy_to_user(wrq->u.data.pointer,
-						 buffer,
-						 (wrq->u.data.length *
-						  (sizeof(struct sockaddr) +
-						   sizeof(struct iw_quality)))
-						 ))
+		if (wrq->u.data.pointer) {
+			int i, rc;
+			struct sockaddr s[IW_MAX_AP];
+			struct iw_quality qual[IW_MAX_AP];
+			BSSListRid BSSList;
+			int loseSync = capable(CAP_NET_ADMIN) ? 1: -1;
+			for (i = 0; i < IW_MAX_AP; i++) {
+				if (readBSSListRid(local, loseSync, &BSSList))
+					break;
+				loseSync = 0;
+				memcpy(s[i].sa_data, BSSList.bssid, 6);
+				s[i].sa_family = ARPHRD_ETHER;
+				if (local->rssi)
+					qual[i].level = 0x100 - local->rssi[BSSList.rssi].rssidBm;
+				else
+					qual[i].level = (BSSList.rssi + 321) / 2;
+				qual[i].qual = qual[i].noise = 0;
+				qual[i].updated = 2;
+				if (BSSList.index == 0xffff) break;
+			}
+			if (!i) {
+				for (i = 0;
+				     i < min(IW_MAX_AP, 4) &&
+					     (status_rid.bssid[i][0]
+					      & status_rid.bssid[i][1]
+					      & status_rid.bssid[i][2]
+					      & status_rid.bssid[i][3]
+					      & status_rid.bssid[i][4]
+					      & status_rid.bssid[i][5])!=-1 &&
+					     (status_rid.bssid[i][0]
+					      | status_rid.bssid[i][1]
+					      | status_rid.bssid[i][2]
+					      | status_rid.bssid[i][3]
+					      | status_rid.bssid[i][4]
+					      | status_rid.bssid[i][5]);
+				     i++) {
+					memcpy(s[i].sa_data,
+					       status_rid.bssid[i], 6);
+					s[i].sa_family = ARPHRD_ETHER;
+				}
+			} else {
+				wrq->u.data.flags = 1; /* Should be define'd */
+				if (copy_to_user(wrq->u.data.pointer
+						 + sizeof(struct sockaddr)*i,
+						 &qual,
+						 sizeof(struct iw_quality)*i))
 					rc = -EFAULT;
 			}
+			wrq->u.data.length = i;
+			if (copy_to_user(wrq->u.data.pointer, &s,
+					 sizeof(struct sockaddr)*i))
+				rc = -EFAULT;
 		}
 		break;
 
 #ifdef WIRELESS_SPY
-	case SIOCSIWSPY:	// Set the spy list
+		// Set the spy list
+	case SIOCSIWSPY:
+		if (wrq->u.data.length > IW_MAX_SPY)
+		{
+			rc = -E2BIG;
+			break;
+		}
+		local->spy_number = wrq->u.data.length;
+		if (local->spy_number > 0)
 		{
 			struct sockaddr address[IW_MAX_SPY];
-			/* Check the number of addresses */
-			if (wrq->u.data.length > IW_MAX_SPY) {
-				rc = -E2BIG;
-				break;
-			}
-			/* Get the data in the driver */
-			if (wrq->u.data.pointer) {
-				if (copy_from_user((char *) address,
-						   wrq->u.data.pointer,
-						   sizeof(struct sockaddr) *
-						   wrq->u.data.length)) {
+			int i;
+
+			if (copy_from_user(address, wrq->u.data.pointer,
+					   sizeof(struct sockaddr) * local->spy_number)) {
 				rc = -EFAULT;
 				break;
-				}
-			} else if (wrq->u.data.length != 0) {
-				rc = -EINVAL;
-				break;
 			}
-			rc=airo_set_spy(dev, NULL, &(wrq->u.data),
-					(char *) address);
+			for (i=0; i<local->spy_number; i++)
+				memcpy(local->spy_address[i], address[i].sa_data, 6);
+			memset(local->spy_stat, 0, sizeof(struct iw_quality) * IW_MAX_SPY);
 		}
 		break;
 
-	case SIOCGIWSPY:	// Get the spy list
+		// Get the spy list
+	case SIOCGIWSPY:
+		wrq->u.data.length = local->spy_number;
+		if ((local->spy_number > 0) && (wrq->u.data.pointer))
 		{
-			char buffer[IW_MAX_SPY * (sizeof(struct sockaddr) +
-						  sizeof(struct iw_quality))];
-			if (wrq->u.data.pointer) {
-				rc = airo_get_spy(dev, NULL,
-						  &(wrq->u.data), buffer);
-				if (copy_to_user(wrq->u.data.pointer,
-						 buffer,
-						 (wrq->u.data.length *
-						  (sizeof(struct sockaddr) +
-						   sizeof(struct iw_quality)))
-						 ))
-					rc = -EFAULT;
+			struct sockaddr address[IW_MAX_SPY];
+			int i;
+			rc = verify_area(VERIFY_WRITE, wrq->u.data.pointer, (sizeof(struct iw_quality)+sizeof(struct sockaddr)) * IW_MAX_SPY);
+			if (rc)
+				break;
+			for (i=0; i<local->spy_number; i++)
+			{
+				memcpy(address[i].sa_data, local->spy_address[i], 6);
+				address[i].sa_family = AF_UNIX;
 			}
+			if (copy_to_user(wrq->u.data.pointer, address, sizeof(struct sockaddr) * local->spy_number)) {
+				rc = -EFAULT;
+				break;
+			}
+			if (copy_to_user(wrq->u.data.pointer + (sizeof(struct sockaddr)*local->spy_number), local->spy_stat, sizeof(struct iw_quality) * local->spy_number)) {
+				rc = -EFAULT;
+				break;
+			}
+			for (i=0; i<local->spy_number; i++)
+				local->spy_stat[i].updated = 0;
 		}
 		break;
 #endif /* WIRELESS_SPY */
 
 #ifdef CISCO_EXT
 	case SIOCGIWPRIV:
-		if(wrq->u.data.pointer) {
+		if(wrq->u.data.pointer)
+		{
+			struct iw_priv_args   priv[] =
+			{ /* cmd, set_args, get_args, name */
+				{ AIROIOCTL, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED | sizeof (aironet_ioctl), IW_PRIV_TYPE_BYTE | 2047, "airoioctl" },
+				{ AIROIDIFC, IW_PRIV_TYPE_BYTE | IW_PRIV_SIZE_FIXED | sizeof (aironet_ioctl), IW_PRIV_TYPE_INT | IW_PRIV_SIZE_FIXED | 1, "airoidifc" },
+			};
+
 			/* Set the number of ioctl available */
-			wrq->u.data.length = sizeof(airo_private_args) / sizeof( airo_private_args[0]);
+			wrq->u.data.length = 2;
 
 			/* Copy structure to the user buffer */
-			if(copy_to_user(wrq->u.data.pointer,
-					(u_char *) airo_private_args,
-					sizeof(airo_private_args)))
+			if(copy_to_user(wrq->u.data.pointer, (u_char *) priv,
+					sizeof(priv)))
 				rc = -EFAULT;
 		}
 		break;
 #endif /* CISCO_EXT */
-#endif /* WIRELESS_EXT < 13 */
+#endif /* WIRELESS_EXT */
 
 #ifdef CISCO_EXT
 	case AIROIDIFC:
@@ -6531,9 +4208,9 @@ static int airo_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			break;
 		}
 
-		/* Separate R/W functions bracket legality here
+		/* Seperate R/W functions bracket legality here
 		 */
-		if ( com.command <= AIRORRID )
+		if ( com.command <= AIROGSTATSD32 )
 			rc = readrids(dev,&com);
 		else if ( com.command >= AIROPCAP && com.command <= AIROPLEAPUSR )
 			rc = writerids(dev,&com);
@@ -6550,16 +4227,31 @@ static int airo_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		rc = -EOPNOTSUPP;
 	}
 
-#if defined(WIRELESS_EXT) && WIRELESS_EXT < 13
-	/* WE 13 and higher will use airo_config_commit */
+#ifdef WIRELESS_EXT
 	/* Some of the "SET" function may have modified some of the
 	 * parameters. It's now time to commit them in the card */
-	airo_config_commit(dev, NULL, NULL, NULL);
-	if (rc == -EINPROGRESS)
-		return 0;
-#endif /* WIRELESS_EXT < 13 */
+	if(local->need_commit) {
+		/* A classical optimisation here is to not commit any change
+		 * if the card is not "opened". This is what we do in
+		 * wvlan_cs (see for details).
+		 * For that, we would need to have the config RID saved in
+		 * the airo_info struct and make sure to not re-read it if
+		 * local->need_commit != 0. Then, you need to patch "open"
+		 * to do the final commit of all parameters...
+		 * Jean II */
+		Resp rsp;
 
-	return rc;
+		disable_MAC(local);
+		local->config = config;	/* ???? config is local !!! */
+		checkThrottle(&config);
+		writeConfigRid(local, &config);
+		enable_MAC(local, &rsp);
+
+		local->need_commit = 0;
+	}
+#endif /* WIRELESS_EXT */
+
+	return(rc);
 }
 
 #ifdef WIRELESS_EXT
@@ -6569,20 +4261,20 @@ static int airo_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
  *
  * TODO :
  *	o Check if work in Ad-Hoc mode (otherwise, use SPY, as in wvlan_cs)
+ *	o Find the noise level
  *
  * Jean
  */
-static void airo_read_wireless_stats(struct airo_info *local)
+struct iw_statistics *airo_get_wireless_stats(struct net_device *dev)
 {
+	struct airo_info *local = (struct airo_info*) dev->priv;
 	StatusRid status_rid;
 	StatsRid stats_rid;
 	u32 *vals = stats_rid.vals;
 
 	/* Get stats out of the card */
-	clear_bit(JOB_WSTATS, &local->flags);
-	readStatusRid(local, &status_rid, 0);
-	readStatsRid(local, &stats_rid, RID_STATS, 0);
-	up(&local->sem);
+	readStatusRid(local, &status_rid);
+	readStatsRid(local, &stats_rid, RID_STATS);
 
 	/* The status */
 	local->wstats.status = status_rid.mode;
@@ -6593,41 +4285,26 @@ static void airo_read_wireless_stats(struct airo_info *local)
 		local->wstats.qual.level = 0x100 - local->rssi[status_rid.sigQuality].rssidBm;
 	else
 		local->wstats.qual.level = (status_rid.normalizedSignalStrength + 321) / 2;
-	if (status_rid.len >= 124) {
-		local->wstats.qual.noise = 256 - status_rid.noisedBm;
-		local->wstats.qual.updated = 7;
-	} else {
-		local->wstats.qual.noise = 0;
-		local->wstats.qual.updated = 3;
-	}
+	local->wstats.qual.noise = 0;
+	local->wstats.qual.updated = 3;
 
 	/* Packets discarded in the wireless adapter due to wireless
 	 * specific problems */
 	local->wstats.discard.nwid = vals[56] + vals[57] + vals[58];/* SSID Mismatch */
 	local->wstats.discard.code = vals[6];/* RxWepErr */
+#if WIRELESS_EXT > 11
 	local->wstats.discard.fragment = vals[30];
 	local->wstats.discard.retries = vals[10];
 	local->wstats.discard.misc = vals[1] + vals[32];
 	local->wstats.miss.beacon = vals[34];
-}
-
-struct iw_statistics *airo_get_wireless_stats(struct net_device *dev)
-{
-	struct airo_info *local =  dev->priv;
-
-	/* Get stats out of the card if available */
-	if (down_trylock(&local->sem) != 0) {
-		set_bit(JOB_WSTATS, &local->flags);
-		wake_up_interruptible(&local->thr_wait);
-	} else
-		airo_read_wireless_stats(local);
-
-	return &local->wstats;
+#else /* WIRELESS_EXT > 11 */
+	local->wstats.discard.misc = vals[1] + vals[30] + vals[32];
+#endif /* WIRELESS_EXT > 11 */
+	return (&local->wstats);
 }
 #endif /* WIRELESS_EXT */
 
 #ifdef CISCO_EXT
-#define RIDS_SIZE	2048
 /*
  * This just translates from driver IOCTL codes to the command codes to
  * feed to the radio's host interface. Things can be added/deleted
@@ -6636,18 +4313,12 @@ struct iw_statistics *airo_get_wireless_stats(struct net_device *dev)
  */
 static int readrids(struct net_device *dev, aironet_ioctl *comp) {
 	unsigned short ridcode;
-	unsigned char *iobuf;
-	int len;
-	struct airo_info *ai = dev->priv;
-
-	if (test_bit(FLAG_FLASHING, &ai->flags))
-		return -EIO;
+	unsigned char iobuf[2048];
 
 	switch(comp->command)
 	{
 	case AIROGCAP:      ridcode = RID_CAPABILITIES; break;
-	case AIROGCFG: writeConfigRid (ai, 1);
-			    ridcode = RID_CONFIG;       break;
+	case AIROGCFG:      ridcode = RID_CONFIG;       break;
 	case AIROGSLIST:    ridcode = RID_SSID;         break;
 	case AIROGVLIST:    ridcode = RID_APLIST;       break;
 	case AIROGDRVNAM:   ridcode = RID_DRVNAME;      break;
@@ -6665,37 +4336,20 @@ static int readrids(struct net_device *dev, aironet_ioctl *comp) {
 	case AIROGSTAT:     ridcode = RID_STATUS;       break;
 	case AIROGSTATSD32: ridcode = RID_STATSDELTA;   break;
 	case AIROGSTATSC32: ridcode = RID_STATS;        break;
-#ifdef MICSUPPORT
-	case AIROGMICSTATS:
-		if (copy_to_user(comp->data, &ai->micstats,
-				 min((int)comp->len,(int)sizeof(ai->micstats))))
-			return -EFAULT;
-		return 0;
-#endif
-	case AIRORRID:      ridcode = comp->len;        break;
 	default:
 		return -EINVAL;
 		break;
 	}
 
-	if ((iobuf = kmalloc(RIDS_SIZE, GFP_KERNEL)) == NULL)
-		return -ENOMEM;
-
-	PC4500_readrid(ai,ridcode,iobuf,RIDS_SIZE, 1);
+	PC4500_readrid((struct airo_info *)dev->priv,ridcode,iobuf,sizeof(iobuf));
 	/* get the count of bytes in the rid  docs say 1st 2 bytes is it.
 	 * then return it to the user
 	 * 9/22/2000 Honor user given length
 	 */
-	if (comp->command == AIRORRID)
-		len = le16_to_cpu(*(unsigned short *)iobuf); /* Yuck! */
-	else
-		len = comp->len;
 
-	if (copy_to_user(comp->data, iobuf, min(len, (int)RIDS_SIZE))) {
-		kfree (iobuf);
+	if (copy_to_user(comp->data, iobuf,
+			 min((int)comp->len, (int)sizeof(iobuf))))
 		return -EFAULT;
-	}
-	kfree (iobuf);
 	return 0;
 }
 
@@ -6704,18 +4358,14 @@ static int readrids(struct net_device *dev, aironet_ioctl *comp) {
  */
 
 static int writerids(struct net_device *dev, aironet_ioctl *comp) {
-	struct airo_info *ai = dev->priv;
-	int  ridcode, enabled;
+	int  ridcode;
 	Resp      rsp;
-	static int (* writer)(struct airo_info *, u16 rid, const void *, int, int);
-	unsigned char *iobuf;
+	static int (* writer)(struct airo_info *, u16 rid, const void *, int);
+	unsigned char iobuf[2048];
 
 	/* Only super-user can write RIDs */
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
-
-	if (test_bit(FLAG_FLASHING, &ai->flags))
-		return -EIO;
 
 	ridcode = 0;
 	writer = do_writerid;
@@ -6725,8 +4375,7 @@ static int writerids(struct net_device *dev, aironet_ioctl *comp) {
 	case AIROPSIDS:     ridcode = RID_SSID;         break;
 	case AIROPCAP:      ridcode = RID_CAPABILITIES; break;
 	case AIROPAPLIST:   ridcode = RID_APLIST;       break;
-	case AIROPCFG: ai->config.len = 0;
-			    ridcode = RID_CONFIG;       break;
+	case AIROPCFG:      ridcode = RID_CONFIG;       break;
 	case AIROPWEPKEYNV: ridcode = RID_WEP_PERM;     break;
 	case AIROPLEAPUSR:  ridcode = RID_LEAPUSERNAME; break;
 	case AIROPLEAPPWD:  ridcode = RID_LEAPPASSWORD; break;
@@ -6737,7 +4386,7 @@ static int writerids(struct net_device *dev, aironet_ioctl *comp) {
 		 * same with MAC off
 		 */
 	case AIROPMACON:
-		if (enable_MAC(ai, &rsp, 1) != 0)
+		if (enable_MAC(dev->priv, &rsp) != 0)
 			return -EIO;
 		return 0;
 
@@ -6746,7 +4395,7 @@ static int writerids(struct net_device *dev, aironet_ioctl *comp) {
 		 * as disable_MAC. it's probably so short the compiler does not gen one.
 		 */
 	case AIROPMACOFF:
-		disable_MAC(ai, 1);
+		disable_MAC(dev->priv);
 		return 0;
 
 		/* This command merely clears the counts does not actually store any data
@@ -6754,56 +4403,25 @@ static int writerids(struct net_device *dev, aironet_ioctl *comp) {
 		 * writerid routines.
 		 */
 	case AIROPSTCLR:
-		if ((iobuf = kmalloc(RIDS_SIZE, GFP_KERNEL)) == NULL)
-			return -ENOMEM;
+		ridcode = RID_STATSDELTACLEAR;
 
-		PC4500_readrid(ai,RID_STATSDELTACLEAR,iobuf,RIDS_SIZE, 1);
-
-#ifdef MICSUPPORT
-		enabled = ai->micstats.enabled;
-		memset(&ai->micstats,0,sizeof(ai->micstats));
-		ai->micstats.enabled = enabled;
-#endif
+		PC4500_readrid(dev->priv,ridcode,iobuf,sizeof(iobuf));
 
 		if (copy_to_user(comp->data, iobuf,
-				 min((int)comp->len, (int)RIDS_SIZE))) {
-			kfree (iobuf);
+				 min((int)comp->len, (int)sizeof(iobuf))))
 			return -EFAULT;
-		}
-		kfree (iobuf);
 		return 0;
 
 	default:
 		return -EOPNOTSUPP;	/* Blarg! */
 	}
-	if(comp->len > RIDS_SIZE)
+	if(comp->len > sizeof(iobuf))
 		return -EINVAL;
 
-	if ((iobuf = kmalloc(RIDS_SIZE, GFP_KERNEL)) == NULL)
-		return -ENOMEM;
-
-	if (copy_from_user(iobuf,comp->data,comp->len)) {
-		kfree (iobuf);
+	if (copy_from_user(iobuf,comp->data,comp->len))
 		return -EFAULT;
-	}
-
-	if (comp->command == AIROPCFG) {
-		ConfigRid *cfg = (ConfigRid *)iobuf;
-
-		if (test_bit(FLAG_MIC_CAPABLE, &ai->flags))
-			cfg->opmode |= MODE_MIC;
-
-		if ((cfg->opmode & 0xFF) == MODE_STA_IBSS)
-			set_bit (FLAG_ADHOC, &ai->flags);
-		else
-			clear_bit (FLAG_ADHOC, &ai->flags);
-	}
-
-	if((*writer)(ai, ridcode, iobuf,comp->len,1)) {
-		kfree (iobuf);
+	if((*writer)((struct airo_info *)dev->priv, ridcode, iobuf,comp->len))
 		return -EIO;
-	}
-	kfree (iobuf);
 	return 0;
 }
 
@@ -6882,7 +4500,7 @@ int flashcard(struct net_device *dev, aironet_ioctl *comp) {
  */
 
 int cmdreset(struct airo_info *ai) {
-	disable_MAC(ai, 1);
+	disable_MAC(ai);
 
 	if(!waitbusy (ai)){
 		printk(KERN_INFO "Waitbusy hang before RESET\n");
@@ -6907,23 +4525,14 @@ int cmdreset(struct airo_info *ai) {
  */
 
 int setflashmode (struct airo_info *ai) {
-	set_bit (FLAG_FLASHING, &ai->flags);
-
 	OUT4500(ai, SWS0, FLASH_COMMAND);
 	OUT4500(ai, SWS1, FLASH_COMMAND);
-	if (probe) {
-		OUT4500(ai, SWS0, FLASH_COMMAND);
-		OUT4500(ai, COMMAND,0x10);
-	} else {
-		OUT4500(ai, SWS2, FLASH_COMMAND);
-		OUT4500(ai, SWS3, FLASH_COMMAND);
-		OUT4500(ai, COMMAND,0);
-	}
+	OUT4500(ai, SWS0, FLASH_COMMAND);
+	OUT4500(ai, COMMAND,0x10);
 	set_current_state (TASK_UNINTERRUPTIBLE);
 	schedule_timeout (HZ/2); /* 500ms delay */
 
 	if(!waitbusy(ai)) {
-		clear_bit (FLAG_FLASHING, &ai->flags);
 		printk(KERN_INFO "Waitbusy hang after setflash mode\n");
 		return -EIO;
 	}
@@ -7029,11 +4638,10 @@ int flashrestart(struct airo_info *ai,struct net_device *dev){
 
 	set_current_state (TASK_UNINTERRUPTIBLE);
 	schedule_timeout (HZ);          /* Added 12/7/00 */
-	clear_bit (FLAG_FLASHING, &ai->flags);
-	status = setup_card(ai, dev->dev_addr);
+	status = setup_card(ai, dev->dev_addr,&((struct airo_info*)dev->priv)->config);
 
 	for( i = 0; i < MAX_FIDS; i++ ) {
-		ai->fids[i] = transmit_allocate( ai, 2312, i >= MAX_FIDS / 2 );
+		ai->fids[i] = transmit_allocate( ai, 2312 );
 	}
 
 	set_current_state (TASK_UNINTERRUPTIBLE);

@@ -1101,9 +1101,9 @@ static enum enq_res do_tx(struct sk_buff *skb)
 	dma_rd = eni_in(MID_DMA_RD_TX);
 	dma_size = 3; /* JK for descriptor and final fill, plus final size
 			 mis-alignment fix */
-DPRINTK("iovcnt = %d\n",skb_shinfo(skb)->nr_frags);
-	if (!skb_shinfo(skb)->nr_frags) dma_size += 5;
-	else dma_size += 5*(skb_shinfo(skb)->nr_frags+1);
+DPRINTK("iovcnt = %d\n",ATM_SKB(skb)->iovcnt);
+	if (!ATM_SKB(skb)->iovcnt) dma_size += 5;
+	else dma_size += 5*ATM_SKB(skb)->iovcnt;
 	if (dma_size > TX_DMA_BUF) {
 		printk(KERN_CRIT DEV_LABEL "(itf %d): needs %d DMA entries "
 		    "(got only %d)\n",vcc->dev->number,dma_size,TX_DMA_BUF);
@@ -1124,20 +1124,15 @@ DPRINTK("iovcnt = %d\n",skb_shinfo(skb)->nr_frags);
 	     MID_DMA_COUNT_SHIFT) | (tx->index << MID_DMA_CHAN_SHIFT) |
 	     MID_DT_JK;
 	j++;
-	if (!skb_shinfo(skb)->nr_frags)
+	if (!ATM_SKB(skb)->iovcnt)
 		if (aal5) put_dma(tx->index,eni_dev->dma,&j,paddr,skb->len);
 		else put_dma(tx->index,eni_dev->dma,&j,paddr+4,skb->len-4);
 	else {
 DPRINTK("doing direct send\n"); /* @@@ well, this doesn't work anyway */
-		for (i = -1; i < skb_shinfo(skb)->nr_frags; i++)
-			if (i == -1)
-				put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
-				    skb->data,
-				    skb->len - skb->data_len);
-			else
-				put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
-				    skb_shinfo(skb)->frags[i].page + skb_shinfo(skb)->frags[i].page_offset,
-				    skb_shinfo(skb)->frags[i].size);
+		for (i = 0; i < ATM_SKB(skb)->iovcnt; i++)
+			put_dma(tx->index,eni_dev->dma,&j,(unsigned long)
+			    ((struct iovec *) skb->data)[i].iov_base,
+			    ((struct iovec *) skb->data)[i].iov_len);
 	}
 	if (skb->len & 3)
 		put_dma(tx->index,eni_dev->dma,&j,zeroes,4-(skb->len & 3));
@@ -1879,7 +1874,7 @@ static void eni_close(struct atm_vcc *vcc)
 	DPRINTK("eni_close: done waiting\n");
 	/* deallocate memory */
 	kfree(ENI_VCC(vcc));
-	vcc->dev_data = NULL;
+	ENI_VCC(vcc) = NULL;
 	clear_bit(ATM_VF_ADDR,&vcc->flags);
 	/*foo();*/
 }
@@ -1887,10 +1882,8 @@ static void eni_close(struct atm_vcc *vcc)
 
 static int get_ci(struct atm_vcc *vcc,short *vpi,int *vci)
 {
-	struct sock *s;
 	struct atm_vcc *walk;
 
-	read_lock(&vcc_sklist_lock);
 	if (*vpi == ATM_VPI_ANY) *vpi = 0;
 	if (*vci == ATM_VCI_ANY) {
 		for (*vci = ATM_NOT_RSV_VCI; *vci < NR_VCI; (*vci)++) {
@@ -1898,47 +1891,28 @@ static int get_ci(struct atm_vcc *vcc,short *vpi,int *vci)
 			    ENI_DEV(vcc->dev)->rx_map[*vci])
 				continue;
 			if (vcc->qos.txtp.traffic_class != ATM_NONE) {
-				for (s = vcc_sklist; s; s = s->next) {
-					walk = s->protinfo.af_atm;
-					if (walk->dev != vcc->dev)
-						continue;
+				for (walk = vcc->dev->vccs; walk;
+				    walk = walk->next)
 					if (test_bit(ATM_VF_ADDR,&walk->flags)
 					    && walk->vci == *vci &&
 					    walk->qos.txtp.traffic_class !=
 					    ATM_NONE)
 						break;
-				}
-				if (s) continue;
+				if (walk) continue;
 			}
 			break;
 		}
-		read_unlock(&vcc_sklist_lock);
 		return *vci == NR_VCI ? -EADDRINUSE : 0;
 	}
-	if (*vci == ATM_VCI_UNSPEC) {
-		read_unlock(&vcc_sklist_lock);
-		return 0;
-	}
+	if (*vci == ATM_VCI_UNSPEC) return 0;
 	if (vcc->qos.rxtp.traffic_class != ATM_NONE &&
-	    ENI_DEV(vcc->dev)->rx_map[*vci]) {
-		read_unlock(&vcc_sklist_lock);
+	    ENI_DEV(vcc->dev)->rx_map[*vci])
 		return -EADDRINUSE;
-	}
-	if (vcc->qos.txtp.traffic_class == ATM_NONE) {
-		read_unlock(&vcc_sklist_lock);
-		return 0;
-	}
-	for (s = vcc_sklist; s; s = s->next) {
-		walk = s->protinfo.af_atm;
-		if (walk->dev != vcc->dev)
-			continue;
+	if (vcc->qos.txtp.traffic_class == ATM_NONE) return 0;
+	for (walk = vcc->dev->vccs; walk; walk = walk->next)
 		if (test_bit(ATM_VF_ADDR,&walk->flags) && walk->vci == *vci &&
-		    walk->qos.txtp.traffic_class != ATM_NONE) {
-			read_unlock(&vcc_sklist_lock);
+		    walk->qos.txtp.traffic_class != ATM_NONE)
 			return -EADDRINUSE;
-		}
-	}
-	read_unlock(&vcc_sklist_lock);
 	return 0;
 }
 
@@ -1951,7 +1925,7 @@ static int eni_open(struct atm_vcc *vcc,short vpi,int vci)
 
 	DPRINTK(">eni_open\n");
 	EVENT("eni_open\n",0,0);
-	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags)) vcc->dev_data = NULL;
+	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags)) ENI_VCC(vcc) = NULL;
 	eni_dev = ENI_DEV(vcc->dev);
 	error = get_ci(vcc,&vpi,&vci);
 	if (error) return error;
@@ -1966,7 +1940,7 @@ static int eni_open(struct atm_vcc *vcc,short vpi,int vci)
 	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags)) {
 		eni_vcc = kmalloc(sizeof(struct eni_vcc),GFP_KERNEL);
 		if (!eni_vcc) return -ENOMEM;
-		vcc->dev_data = eni_vcc;
+		ENI_VCC(vcc) = eni_vcc;
 		eni_vcc->tx = NULL; /* for eni_close after open_rx */
 		if ((error = open_rx_first(vcc))) {
 			eni_close(vcc);
@@ -2146,7 +2120,6 @@ static unsigned char eni_phy_get(struct atm_dev *dev,unsigned long addr)
 
 static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 {
-	struct sock *s;
 	static const char *signal[] = { "LOST","unknown","okay" };
 	struct eni_dev *eni_dev = ENI_DEV(dev);
 	struct atm_vcc *vcc;
@@ -2219,15 +2192,10 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 		return sprintf(page,"%10sbacklog %u packets\n","",
 		    skb_queue_len(&tx->backlog));
 	}
-	read_lock(&vcc_sklist_lock);
-	for (s = vcc_sklist; s; s = s->next) {
-		struct eni_vcc *eni_vcc;
+	for (vcc = dev->vccs; vcc; vcc = vcc->next) {
+		struct eni_vcc *eni_vcc = ENI_VCC(vcc);
 		int length;
 
-		vcc = s->protinfo.af_atm;
-		if (vcc->dev != dev)
-			continue;
-		eni_vcc = ENI_VCC(vcc);
 		if (--left) continue;
 		length = sprintf(page,"vcc %4d: ",vcc->vci);
 		if (eni_vcc->rx) {
@@ -2242,10 +2210,8 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 			length += sprintf(page+length,"tx[%d], txing %d bytes",
 			    eni_vcc->tx->index,eni_vcc->txing);
 		page[length] = '\n';
-		read_unlock(&vcc_sklist_lock);
 		return length+1;
 	}
-	read_unlock(&vcc_sklist_lock);
 	for (i = 0; i < eni_dev->free_len; i++) {
 		struct eni_free *fe = eni_dev->free_list+i;
 		unsigned long offset;
@@ -2302,7 +2268,7 @@ static int __devinit eni_init_one(struct pci_dev *pci_dev,
 	if (!dev) goto out2;
 	pci_set_drvdata(pci_dev, dev);
 	eni_dev->pci_dev = pci_dev;
-	dev->dev_data = eni_dev;
+	ENI_DEV(dev) = eni_dev;
 	eni_dev->asic = ent->driver_data;
 	error = eni_do_init(dev);
 	if (error) goto out3;
@@ -2344,7 +2310,7 @@ static struct pci_driver eni_driver = {
 	name:		DEV_LABEL,
 	id_table:	eni_pci_tbl,
 	probe:		eni_init_one,
-	remove:		__devexit_p(eni_remove_one),
+	remove:		eni_remove_one,
 };
 
 

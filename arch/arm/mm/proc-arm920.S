@@ -56,27 +56,22 @@
  * cpu_arm920_data_abort()
  *
  * obtain information about current aborted instruction
- * Note: we read user space.  This means we might cause a data
- * abort here if the I-TLB and D-TLB aren't seeing the same
- * picture.  Unfortunately, this does happen.  We live with it.
  *
- *  r2 = address of aborted instruction
- *  r3 = cpsr
+ * r0 = address of aborted instruction
  *
  * Returns:
  *  r0 = address of abort
  *  r1 != 0 if writing
  *  r3 = FSR
- *  r4 = corrupted
  */
 	.align	5
 ENTRY(cpu_arm920_data_abort)
-	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
+	ldr	r1, [r0]			@ read aborted instruction
 	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	ldr	r1, [r2]			@ read aborted instruction
-	and	r3, r3, #255
 	tst	r1, r1, lsr #21			@ C = bit 20
+	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
 	sbc	r1, r1, r1			@ r1 = C - 1
+	and	r3, r3, #255
 	mov	pc, lr
 	
 /*
@@ -134,7 +129,9 @@ ENTRY(cpu_arm920_reset)
  */
 	.align	5
 ENTRY(cpu_arm920_do_idle)
+#if defined(CONFIG_CPU_ARM920_CPU_IDLE)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
+#endif
 	mov	pc, lr
 
 /* ================================= CACHE ================================ */
@@ -153,7 +150,7 @@ ENTRY(cpu_arm920_cache_clean_invalidate_all)
 	mov	r2, #1
 cpu_arm920_cache_clean_invalidate_all_r2:
 	mov	ip, #0
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
 /*
@@ -191,7 +188,7 @@ ENTRY(cpu_arm920_cache_clean_invalidate_range)
 	cmp	r3, #MAX_AREA_SIZE
 	bgt	cpu_arm920_cache_clean_invalidate_all_r2
 1:	teq	r2, #0
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
 	add	r0, r0, #DCACHELINESIZE
@@ -222,7 +219,7 @@ ENTRY(cpu_arm920_cache_clean_invalidate_range)
 	.align	5
 ENTRY(cpu_arm920_flush_ram_page)
 	mov	r1, #PAGESIZE
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	add	r0, r0, #DCACHELINESIZE
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
@@ -408,10 +405,6 @@ ENTRY(cpu_arm920_tlb_invalidate_all)
  */
 	.align	5
 ENTRY(cpu_arm920_tlb_invalidate_range)
-	sub	r3, r1, r0
-	cmp	r3, #256 * PAGESIZE		@ arbitary, should be tuned
-	bhi	cpu_arm920_tlb_invalidate_all
-
 	mov	r3, #0
 	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
 
@@ -456,7 +449,7 @@ ENTRY(cpu_arm920_tlb_invalidate_page)
 	.align	5
 ENTRY(cpu_arm920_set_pgd)
 	mov	ip, #0
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 	/* Any reason why we don't use mcr p15, 0, r0, c7, c7, 0 here? --rmk */
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
@@ -489,7 +482,7 @@ ENTRY(cpu_arm920_set_pgd)
  */
 	.align	5
 ENTRY(cpu_arm920_set_pmd)
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 	eor	r2, r1, #0x0a			@ C & Section
 	tst	r2, #0x0b
 	biceq	r1, r1, #4			@ clear bufferable bit
@@ -523,7 +516,7 @@ ENTRY(cpu_arm920_set_pte)
 	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
 	movne	r2, #0
 
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#ifdef CONFIG_CPU_ARM920_WRITETHROUGH
 	eor	r3, r2, #0x0a			@ C & small page?
 	tst	r3, #0x0b
 	biceq	r2, r2, #4
@@ -535,14 +528,19 @@ ENTRY(cpu_arm920_set_pte)
 	mov	pc, lr
 
 
+cpu_manu_name:
+	.asciz	"ARM/CIRRUS"
 ENTRY(cpu_arm920_name)
 	.ascii	"Arm920T"
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#if defined(CONFIG_CPU_ARM920_CPU_IDLE)
+	.ascii	"s"
+#endif
+#if defined(CONFIG_CPU_ARM920_I_CACHE_ON)
 	.ascii	"i"
 #endif
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#if defined(CONFIG_CPU_ARM920_D_CACHE_ON)
 	.ascii	"d"
-#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+#if defined(CONFIG_CPU_ARM920_WRITETHROUGH)
 	.ascii	"(wt)"
 #else
 	.ascii	"(wb)"
@@ -576,10 +574,10 @@ __arm920_setup:
 	orr	r0, r0, #0x0031
 	orr	r0, r0, #0x2100			@ ..1. ...1 ..11 ...1
 
-#ifndef CONFIG_CPU_DCACHE_DISABLE
+#ifdef CONFIG_CPU_ARM920_D_CACHE_ON
 	orr	r0, r0, #0x0004			@ .... .... .... .1..
 #endif
-#ifndef CONFIG_CPU_ICACHE_DISABLE
+#ifdef CONFIG_CPU_ARM920_I_CACHE_ON
 	orr	r0, r0, #0x1000			@ ...1 .... .... ....
 #endif
 	mov	pc, lr
@@ -627,7 +625,7 @@ arm920_processor_functions:
 
 	.type	cpu_arm920_info, #object
 cpu_arm920_info:
-	.long	0
+	.long	cpu_manu_name
 	.long	cpu_arm920_name
 	.size	cpu_arm920_info, . - cpu_arm920_info
 
@@ -652,7 +650,7 @@ __arm920_proc_info:
 	b	__arm920_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
 	.long	cpu_arm920_info
 	.long	arm920_processor_functions
 	.size	__arm920_proc_info, . - __arm920_proc_info

@@ -31,7 +31,7 @@ affs_bread(struct super_block *sb, int block)
 {
 	pr_debug(KERN_DEBUG "affs_bread: %d\n", block);
 	if (block >= AFFS_SB->s_reserved && block < AFFS_SB->s_partition_size)
-		return sb_bread(sb, block);
+		return bread(sb->s_dev, block, sb->s_blocksize);
 	return NULL;
 }
 static inline struct buffer_head *
@@ -39,7 +39,7 @@ affs_getblk(struct super_block *sb, int block)
 {
 	pr_debug(KERN_DEBUG "affs_getblk: %d\n", block);
 	if (block >= AFFS_SB->s_reserved && block < AFFS_SB->s_partition_size)
-		return sb_getblk(sb, block);
+		return getblk(sb->s_dev, block, sb->s_blocksize);
 	return NULL;
 }
 static inline struct buffer_head *
@@ -48,11 +48,10 @@ affs_getzeroblk(struct super_block *sb, int block)
 	struct buffer_head *bh;
 	pr_debug(KERN_DEBUG "affs_getzeroblk: %d\n", block);
 	if (block >= AFFS_SB->s_reserved && block < AFFS_SB->s_partition_size) {
-		bh = sb_getblk(sb, block);
-		lock_buffer(bh);
+		bh = getblk(sb->s_dev, block, sb->s_blocksize);
+		wait_on_buffer(bh);
 		memset(bh->b_data, 0 , sb->s_blocksize);
 		mark_buffer_uptodate(bh, 1);
-		unlock_buffer(bh);
 		return bh;
 	}
 	return NULL;
@@ -63,7 +62,7 @@ affs_getemptyblk(struct super_block *sb, int block)
 	struct buffer_head *bh;
 	pr_debug(KERN_DEBUG "affs_getemptyblk: %d\n", block);
 	if (block >= AFFS_SB->s_reserved && block < AFFS_SB->s_partition_size) {
-		bh = sb_getblk(sb, block);
+		bh = getblk(sb->s_dev, block, sb->s_blocksize);
 		wait_on_buffer(bh);
 		mark_buffer_uptodate(bh, 1);
 		return bh;

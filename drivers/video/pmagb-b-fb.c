@@ -94,7 +94,7 @@ struct pmagbbfb_par {
 };
 
 static int currcon = 0;
-static struct pmagbbfb_par current_par;
+struct pmagbbfb_par current_par;
 
 static void pmagbbfb_encode_var(struct fb_var_screeninfo *var,
 				struct pmagbbfb_par *par)
@@ -108,15 +108,6 @@ static void pmagbbfb_encode_var(struct fb_var_screeninfo *var,
 	var->yoffset = 0;
 	var->bits_per_pixel = 8;
 	var->grayscale = 0;
-	var->red.offset = 0;
-	var->red.length = 8;
-	var->red.msb_right = 0;
-	var->green.offset = 0;
-	var->green.length = 8;
-	var->green.msb_right = 0;
-	var->blue.offset = 0;
-	var->blue.length = 8;
-	var->blue.msb_right = 0;
 	var->transp.offset = 0;
 	var->transp.length = 0;
 	var->transp.msb_right = 0;
@@ -336,7 +327,7 @@ static void pmagbbfb_set_disp(int con, struct pmagb_b_my_fb_info *info)
 	display->next_line = fix.line_length;
 	display->can_soft_blank = 0;
 	display->inverse = 0;
-	display->scrollmode = SCROLL_YREDRAW;
+
 	display->dispsw = &fbcon_cfb8;
 }
 
@@ -435,6 +426,11 @@ int __init pmagbbfb_init(void)
 	} else {
 		return -ENODEV;
 	}
+}
+
+int __init pmagbbfb_setup(char *options)
+{
+	return 0;
 }
 
 MODULE_LICENSE("GPL");

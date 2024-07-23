@@ -52,10 +52,9 @@ static ssize_t usb_driver_read(struct file *file, char *buf, size_t nbytes, loff
 	struct list_head *tmp = usb_driver_list.next;
 	char *page, *start, *end;
 	ssize_t ret = 0;
-	loff_t n = *ppos;
-	unsigned int pos = n, len;
+	unsigned int pos, len;
 
-	if (pos != n)
+	if (*ppos < 0)
 		return -EINVAL;
 	if (nbytes <= 0)
 		return 0;
@@ -65,6 +64,7 @@ static ssize_t usb_driver_read(struct file *file, char *buf, size_t nbytes, loff
                 return -ENOMEM;
 	start = page;
 	end = page + (PAGE_SIZE - 100);
+	pos = *ppos;
 	for (; tmp != &usb_driver_list; tmp = tmp->next) {
 		struct usb_driver *driver = list_entry(tmp, struct usb_driver, driver_list);
 		int minor = driver->fops ? driver->minor : -1;
@@ -88,7 +88,7 @@ static ssize_t usb_driver_read(struct file *file, char *buf, size_t nbytes, loff
 		if (copy_to_user(buf, page + pos, len))
 			ret = -EFAULT;
 		else
-			*ppos = pos + len;
+			*ppos += len;
 	}
 	free_page((unsigned long)page);
 	return ret;

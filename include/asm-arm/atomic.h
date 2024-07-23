@@ -32,75 +32,75 @@ typedef struct { volatile int counter; } atomic_t;
 #define atomic_read(v)	((v)->counter)
 #define atomic_set(v,i)	(((v)->counter) = (i))
 
-static inline void atomic_add(int i, volatile atomic_t *v)
+static __inline__ void atomic_add(int i, volatile atomic_t *v)
 {
 	unsigned long flags;
 
-	local_irq_save(flags);
+	__save_flags_cli(flags);
 	v->counter += i;
-	local_irq_restore(flags);
+	__restore_flags(flags);
 }
 
-static inline void atomic_sub(int i, volatile atomic_t *v)
+static __inline__ void atomic_sub(int i, volatile atomic_t *v)
 {
 	unsigned long flags;
 
-	local_irq_save(flags);
+	__save_flags_cli(flags);
 	v->counter -= i;
-	local_irq_restore(flags);
+	__restore_flags(flags);
 }
 
-static inline void atomic_inc(volatile atomic_t *v)
+static __inline__ void atomic_inc(volatile atomic_t *v)
 {
 	unsigned long flags;
 
-	local_irq_save(flags);
+	__save_flags_cli(flags);
 	v->counter += 1;
-	local_irq_restore(flags);
+	__restore_flags(flags);
 }
 
-static inline void atomic_dec(volatile atomic_t *v)
+static __inline__ void atomic_dec(volatile atomic_t *v)
 {
 	unsigned long flags;
 
-	local_irq_save(flags);
+	__save_flags_cli(flags);
 	v->counter -= 1;
-	local_irq_restore(flags);
+	__restore_flags(flags);
 }
 
-static inline int atomic_dec_and_test(volatile atomic_t *v)
+static __inline__ int atomic_dec_and_test(volatile atomic_t *v)
 {
 	unsigned long flags;
-	int val;
+	int result;
 
-	local_irq_save(flags);
-	val = v->counter;
-	v->counter = val -= 1;
-	local_irq_restore(flags);
+	__save_flags_cli(flags);
+	v->counter -= 1;
+	result = (v->counter == 0);
+	__restore_flags(flags);
 
-	return val == 0;
+	return result;
 }
 
 static inline int atomic_add_negative(int i, volatile atomic_t *v)
 {
 	unsigned long flags;
-	int val;
+	int result;
 
-	local_irq_save(flags);
-	val = v->counter;
-	v->counter = val += i;
-	local_irq_restore(flags);
+	__save_flags_cli(flags);
+	v->counter += i;
+	result = (v->counter < 0);
+	__restore_flags(flags);
 
-	return val < 0;
+	return result;
 }
 
-static inline void atomic_clear_mask(unsigned long mask, unsigned long *addr)
+static __inline__ void atomic_clear_mask(unsigned long mask, unsigned long *addr)
 {
 	unsigned long flags;
 
-	local_irq_save(flags);
+	__save_flags_cli(flags);
 	*addr &= ~mask;
-	local_irq_restore(flags);
+	__restore_flags(flags);
 }
 
 /* Atomic operations are already serializing on ARM */

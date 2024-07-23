@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.open_pic.c 1.31 10/11/01 12:09:11 trini
+ */
+/*
  *  arch/ppc/kernel/open_pic.c -- OpenPIC Interrupt Handling
  *
  *  Copyright (C) 1997 Geert Uytterhoeven
@@ -14,34 +17,35 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/irq.h>
+#include <linux/init.h>
 #include <asm/ptrace.h>
 #include <asm/signal.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/prom.h>
 #include <asm/sections.h>
-#include <asm/open_pic.h>
-#include <asm/i8259.h>
 
+#include "local_irq.h"
+#include "open_pic.h"
 #include "open_pic_defs.h"
 
 void* OpenPIC_Addr;
 static volatile struct OpenPIC *OpenPIC = NULL;
-/*
- * We define OpenPIC_InitSenses table thusly:
- * bit 0x1: sense, 0 for edge and 1 for level.
- * bit 0x2: polarity, 0 for negative, 1 for positive.
- */
 u_int OpenPIC_NumInitSenses __initdata = 0;
 u_char *OpenPIC_InitSenses __initdata = NULL;
 extern int use_of_interrupt_tree;
 
+void find_ISUs(void);
+
 static u_int NumProcessors;
 static u_int NumSources;
+#ifdef CONFIG_POWER3
+static int NumISUs;
+#endif
 static int open_pic_irq_offset;
-static volatile OpenPIC_Source *ISR[NR_IRQS];
-static int openpic_cascade_irq = -1;
-static int (*openpic_cascade_fn)(struct pt_regs *);
+static volatile unsigned char* chrp_int_ack_special;
+
+OpenPIC_SourcePtr ISU[OPENPIC_MAX_ISU];
 
 /* Global Operations */
 static void openpic_disable_8259_pass_through(void);
@@ -63,12 +67,13 @@ static void openpic_enable_irq(u_int irq);
 static void openpic_disable_irq(u_int irq);
 static void openpic_initirq(u_int irq, u_int pri, u_int vector, int polarity,
 			    int is_level);
-static void openpic_mapirq(u_int irq, u_int cpumask, u_int keepmask);
+static void openpic_mapirq(u_int irq, u_int cpumask);
 
 /*
  * These functions are not used but the code is kept here
  * for completeness and future reference.
  */
+static void openpic_reset(void);
 #ifdef notused
 static void openpic_enable_8259_pass_through(void);
 static u_int openpic_get_priority(void);
@@ -145,8 +150,7 @@ struct hw_interrupt_type open_pic_ipi = {
  */
 extern unsigned long* _get_SP(void);
 #define check_arg_irq(irq) \
-    if (irq < open_pic_irq_offset || irq >= NumSources+open_pic_irq_offset \
-	|| ISR[irq - open_pic_irq_offset] == 0) { \
+    if (irq < open_pic_irq_offset || irq >= (NumSources+open_pic_irq_offset)){ \
       printk("open_pic.c:%d: illegal irq %d\n", __LINE__, irq); \
       print_backtrace(_get_SP()); }
 #define check_arg_cpu(cpu) \
@@ -162,25 +166,23 @@ extern unsigned long* _get_SP(void);
 #define check_arg_cpu(cpu)	do {} while (0)
 #endif
 
+#ifdef CONFIG_POWER3
+	#define GET_ISU(source)	ISU[(source) >> 4][(source) & 0xf]
+#else
+	#define GET_ISU(source)	ISU[0][(source)]
+#endif
+
 u_int openpic_read(volatile u_int *addr)
 {
 	u_int val;
 
-#ifdef CONFIG_PPC_OPENPIC_BE
-	val = in_be32(addr);
-#else
 	val = in_le32(addr);
-#endif
 	return val;
 }
 
 static inline void openpic_write(volatile u_int *addr, u_int val)
 {
-#ifdef CONFIG_PPC_OPENPIC_BE
-	out_be32(addr, val);
-#else
 	out_le32(addr, val);
-#endif
 }
 
 static inline u_int openpic_readfield(volatile u_int *addr, u_int mask)
@@ -219,7 +221,7 @@ static void openpic_safe_writefield(volatile u_int *addr, u_int mask,
 u_int openpic_read_IPI(volatile u_int* addr)
 {
          u_int val = 0;
-#if defined(CONFIG_PPC_OPENPIC_BE) || defined(CONFIG_POWER3)
+#ifdef CONFIG_POWER3
         val = in_be32(addr);
 #else
         val = in_le32(addr);
@@ -258,53 +260,8 @@ static void openpic_safe_writefield_IPI(volatile u_int *addr, u_int mask, u_int 
 }
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_EPIC_SERIAL_MODE
-static void __init openpic_eicr_set_clk(u_int clkval)
-{
-	openpic_writefield(&OpenPIC->Global.Global_Configuration1,
-			OPENPIC_EICR_S_CLK_MASK, (clkval << 28));
-}
-
-static void __init openpic_enable_sie(void)
-{
-	openpic_setfield(&OpenPIC->Global.Global_Configuration1,
-			OPENPIC_EICR_SIE);
-}
-#endif
-
-#if defined(CONFIG_EPIC_SERIAL_MODE) || defined(CONFIG_PMAC_PBOOK)
-static void openpic_reset(void)
-{
-	openpic_setfield(&OpenPIC->Global.Global_Configuration0,
-			 OPENPIC_CONFIG_RESET);
-	while (openpic_readfield(&OpenPIC->Global.Global_Configuration0,
-				 OPENPIC_CONFIG_RESET))
-		mb();
-}
-#endif
-
-void __init openpic_set_sources(int first_irq, int num_irqs, void *first_ISR)
-{
-	volatile OpenPIC_Source *src = first_ISR;
-	int i, last_irq;
-
-	last_irq = first_irq + num_irqs;
-	if (last_irq > NumSources)
-		NumSources = last_irq;
-	if (src == 0)
-		src = &((struct OpenPIC *)OpenPIC_Addr)->Source[first_irq];
-	for (i = first_irq; i < last_irq; ++i, ++src)
-		ISR[i] = src;
-}
-
-/*
- * The `offset' parameter defines where the interrupts handled by the
- * OpenPIC start in the space of interrupt numbers that the kernel knows
- * about.  In other words, the OpenPIC's IRQ0 is numbered `offset' in the
- * kernel's interrupt numbering scheme.
- * We assume there is only one OpenPIC.
- */
-void __init openpic_init(int offset)
+void __init openpic_init(int main_pic, int offset, unsigned char* chrp_ack,
+			 int programmer_switch_irq)
 {
 	u_int t, i;
 	u_int timerfreq;
@@ -316,13 +273,7 @@ void __init openpic_init(int offset)
 	}
 	OpenPIC = (volatile struct OpenPIC *)OpenPIC_Addr;
 
-#ifdef CONFIG_EPIC_SERIAL_MODE
-	/* Have to start from ground zero.
-	*/
-	openpic_reset();
-#endif
-
-	if (ppc_md.progress) ppc_md.progress("openpic: enter", 0x122);
+	if ( ppc_md.progress ) ppc_md.progress("openpic enter",0x122);
 
 	t = openpic_read(&OpenPIC->Global.Feature_Reporting0);
 	switch (t & OPENPIC_FEATURE_VERSION_MASK) {
@@ -341,11 +292,8 @@ void __init openpic_init(int offset)
 	}
 	NumProcessors = ((t & OPENPIC_FEATURE_LAST_PROCESSOR_MASK) >>
 			 OPENPIC_FEATURE_LAST_PROCESSOR_SHIFT) + 1;
-	if (NumSources == 0)
-		openpic_set_sources(0,
-				    ((t & OPENPIC_FEATURE_LAST_SOURCE_MASK) >>
-				     OPENPIC_FEATURE_LAST_SOURCE_SHIFT) + 1,
-				    NULL);
+	NumSources = ((t & OPENPIC_FEATURE_LAST_SOURCE_MASK) >>
+		      OPENPIC_FEATURE_LAST_SOURCE_SHIFT) + 1;
 	printk("OpenPIC Version %s (%d CPUs and %d IRQ sources) at %p\n",
 	       version, NumProcessors, NumSources, OpenPIC);
 	timerfreq = openpic_read(&OpenPIC->Global.Timer_Frequency);
@@ -353,10 +301,14 @@ void __init openpic_init(int offset)
 		printk("OpenPIC timer frequency is %d.%06d MHz\n",
 		       timerfreq / 1000000, timerfreq % 1000000);
 
+	if (!main_pic)
+		return;
+
 	open_pic_irq_offset = offset;
+	chrp_int_ack_special = (volatile unsigned char*)chrp_ack;
 
 	/* Initialize timer interrupts */
-	if ( ppc_md.progress ) ppc_md.progress("openpic: timer",0x3ba);
+	if ( ppc_md.progress ) ppc_md.progress("openpic timer",0x3ba);
 	for (i = 0; i < OPENPIC_NUM_TIMERS; i++) {
 		/* Disabled, Priority 0 */
 		openpic_inittimer(i, 0, OPENPIC_VEC_TIMER+i+offset);
@@ -366,7 +318,7 @@ void __init openpic_init(int offset)
 
 #ifdef CONFIG_SMP
 	/* Initialize IPI interrupts */
-	if ( ppc_md.progress ) ppc_md.progress("openpic: ipi",0x3bb);
+	if ( ppc_md.progress ) ppc_md.progress("openpic ipi",0x3bb);
 	for (i = 0; i < OPENPIC_NUM_IPI; i++) {
 		/* Disabled, Priority 10..13 */
 		openpic_initipi(i, 10+i, OPENPIC_VEC_IPI+i+offset);
@@ -376,32 +328,35 @@ void __init openpic_init(int offset)
 	}
 #endif
 
+	find_ISUs();
+
 	/* Initialize external interrupts */
-	if (ppc_md.progress) ppc_md.progress("openpic: external",0x3bc);
+	if (ppc_md.progress) ppc_md.progress("openpic ext",0x3bc);
 
 	openpic_set_priority(0xf);
 
-	/* Init all external sources, including possibly the cascade. */
-	for (i = 0; i < NumSources; i++) {
-		int sense;
+	/* SIOint (8259 cascade) is special */
+	if (offset) {
+		openpic_initirq(0, 8, offset, 1, 1);
+		openpic_mapirq(0, 1<<0);
+	}
 
-		if (ISR[i] == 0)
-			continue;
+	/* Init all external sources */
+	for (i = 1; i < NumSources; i++) {
+		int pri, sense;
 
 		/* the bootloader may have left it enabled (bad !) */
 		openpic_disable_irq(i+offset);
 
-		sense = (i < OpenPIC_NumInitSenses)? OpenPIC_InitSenses[i]: \
-				(IRQ_SENSE_LEVEL | IRQ_POLARITY_NEGATIVE);
-
-		if (sense & IRQ_SENSE_MASK)
+		pri = (i == programmer_switch_irq)? 9: 8;
+		sense = (i < OpenPIC_NumInitSenses)? OpenPIC_InitSenses[i]: 1;
+		if (sense)
 			irq_desc[i+offset].status = IRQ_LEVEL;
 
-		/* Enabled, Priority 8 */
-		openpic_initirq(i, 8, i+offset, (sense & IRQ_POLARITY_MASK),
-				(sense & IRQ_SENSE_MASK));
+		/* Enabled, Priority 8 or 9 */
+		openpic_initirq(i, pri, i+offset, !sense, sense);
 		/* Processor 0 */
-		openpic_mapirq(i, 1<<0, 0);
+		openpic_mapirq(i, 1<<0);
 	}
 
 	/* Init descriptors */
@@ -409,17 +364,61 @@ void __init openpic_init(int offset)
 		irq_desc[i].handler = &open_pic;
 
 	/* Initialize the spurious interrupt */
-	if (ppc_md.progress) ppc_md.progress("openpic: spurious",0x3bd);
+	if (ppc_md.progress) ppc_md.progress("openpic spurious",0x3bd);
 	openpic_set_spurious(OPENPIC_VEC_SPURIOUS+offset);
 
-	openpic_disable_8259_pass_through();
-#ifdef CONFIG_EPIC_SERIAL_MODE
-	openpic_eicr_set_clk(7);	/* Slowest value until we know better */
-	openpic_enable_sie();
-#endif
+	/* Initialize the cascade */
+	if (offset) {
+		if (request_irq(offset, no_action, SA_INTERRUPT,
+				"82c59 cascade", NULL))
+			printk("Unable to get OpenPIC IRQ 0 for cascade\n");
+	}
 	openpic_set_priority(0);
+	openpic_disable_8259_pass_through();
 
-	if (ppc_md.progress) ppc_md.progress("openpic: exit",0x222);
+	if (ppc_md.progress) ppc_md.progress("openpic exit",0x222);
+}
+
+#ifdef CONFIG_POWER3
+void openpic_setup_ISU(int isu_num, unsigned long addr)
+{
+	if (isu_num >= OPENPIC_MAX_ISU)
+		return;
+	ISU[isu_num] = (OpenPIC_SourcePtr) ioremap(addr, 0x400);
+	if (isu_num >= NumISUs)
+		NumISUs = isu_num + 1;
+}
+#endif
+
+void find_ISUs(void)
+{
+#ifdef CONFIG_POWER3
+        /* Use /interrupt-controller/reg and
+         * /interrupt-controller/interrupt-ranges from OF device tree
+	 * the ISU array is setup in chrp_pci.c in ibm_add_bridges
+	 * as a result
+	 * -- tgall
+         */
+
+	/* basically each ISU is a bus, and this assumes that
+	 * open_pic_isu_count interrupts per bus are possible 
+	 * ISU == Interrupt Source
+	 */
+	NumSources = NumISUs * 0x10;
+
+#else
+	/* for non-distributed OpenPIC implementations it's in the IDU -- Cort */
+	ISU[0] = (OpenPIC_Source *)OpenPIC->Source;
+#endif
+}
+
+static void openpic_reset(void)
+{
+	openpic_setfield(&OpenPIC->Global.Global_Configuration0,
+			 OPENPIC_CONFIG_RESET);
+	while (openpic_readfield(&OpenPIC->Global.Global_Configuration0,
+				 OPENPIC_CONFIG_RESET))
+		mb();
 }
 
 #ifdef notused
@@ -430,7 +429,6 @@ static void openpic_enable_8259_pass_through(void)
 }
 #endif /* notused */
 
-/* This can't be __init, it is used in openpic_sleep_restore_intrs */
 static void openpic_disable_8259_pass_through(void)
 {
 	openpic_setfield(&OpenPIC->Global.Global_Configuration0,
@@ -472,7 +470,7 @@ static u_int openpic_get_priority(void)
 }
 #endif /* notused */
 
-static void __init openpic_set_priority(u_int pri)
+static void openpic_set_priority(u_int pri)
 {
 	DECL_THIS_CPU;
 
@@ -493,7 +491,6 @@ static u_int openpic_get_spurious(void)
 }
 #endif /* notused */
 
-/* This can't be __init, it is used in openpic_sleep_restore_intrs */
 static void openpic_set_spurious(u_int vec)
 {
 	check_arg_vec(vec);
@@ -523,9 +520,7 @@ void openpic_reset_processor_phys(u_int mask)
 	openpic_write(&OpenPIC->Global.Processor_Initialization, mask);
 }
 
-#if defined(CONFIG_SMP) || defined(CONFIG_PMAC_PBOOK)
 static spinlock_t openpic_setup_lock = SPIN_LOCK_UNLOCKED;
-#endif
 
 #ifdef CONFIG_SMP
 /*
@@ -547,7 +542,7 @@ static void __init openpic_initipi(u_int ipi, u_int pri, u_int vec)
 
 /*
  *  Send an IPI to one or more CPUs
- *
+ *  
  *  Externally called, however, it takes an IPI number (0...OPENPIC_NUM_IPI)
  *  and not a system-wide interrupt number
  */
@@ -564,28 +559,23 @@ void openpic_cause_IPI(u_int ipi, u_int cpumask)
 void openpic_request_IPIs(void)
 {
 	int i;
-
+	
 	/*
-	 * Make sure this matches what is defined in smp.c for
-	 * smp_message_{pass|recv}() or what shows up in
+	 * Make sure this matches what is defined in smp.c for 
+	 * smp_message_{pass|recv}() or what shows up in 
 	 * /proc/interrupts will be wrong!!! --Troy */
-
+	
 	if (OpenPIC == NULL)
 		return;
 
-	/* IPIs are marked SA_INTERRUPT as they must run with irqs disabled */
 	request_irq(OPENPIC_VEC_IPI+open_pic_irq_offset,
-		    openpic_ipi_action, SA_INTERRUPT,
-		    "IPI0 (call function)", 0);
+		    openpic_ipi_action, 0, "IPI0 (call function)", 0);
 	request_irq(OPENPIC_VEC_IPI+open_pic_irq_offset+1,
-		    openpic_ipi_action, SA_INTERRUPT,
-		    "IPI1 (reschedule)", 0);
+		    openpic_ipi_action, 0, "IPI1 (reschedule)", 0);
 	request_irq(OPENPIC_VEC_IPI+open_pic_irq_offset+2,
-		    openpic_ipi_action, SA_INTERRUPT,
-		    "IPI2 (invalidate tlb)", 0);
+		    openpic_ipi_action, 0, "IPI2 (invalidate tlb)", 0);
 	request_irq(OPENPIC_VEC_IPI+open_pic_irq_offset+3,
-		    openpic_ipi_action, SA_INTERRUPT,
-		    "IPI3 (xmon break)", 0);
+		    openpic_ipi_action, 0, "IPI3 (xmon break)", 0);
 
 	for ( i = 0; i < OPENPIC_NUM_IPI ; i++ )
 		openpic_enable_ipi(OPENPIC_VEC_IPI+open_pic_irq_offset+i);
@@ -612,8 +602,8 @@ void __init do_openpic_setup_cpu(void)
  	 * we should make sure we also change the default values of irq_affinity
  	 * in irq.c.
  	 */
- 	for (i = 0; i < NumSources; i++)
-		openpic_mapirq(i, msk, ~0U);
+ 	for (i = 0; i < NumSources ; i++)
+		openpic_mapirq(i, openpic_read(&GET_ISU(i).Destination) | msk);
 #endif /* CONFIG_IRQ_ALL_CPUS */
  	openpic_set_priority(0);
 
@@ -648,20 +638,6 @@ static void __init openpic_maptimer(u_int timer, u_int cpumask)
 		      physmask(cpumask));
 }
 
-/*
- * Initalize the interrupt source which will generate an NMI.
- * This raises the interrupt's priority from 8 to 9.
- *
- * irq: The logical IRQ which generates an NMI.
- */
-void __init
-openpic_init_nmi_irq(u_int irq)
-{
-	check_arg_irq(irq);
-	openpic_safe_writefield(&ISR[irq - open_pic_irq_offset]->Vector_Priority,
-				OPENPIC_PRIORITY_MASK,
-				9 << OPENPIC_PRIORITY_SHIFT);
-}
 
 /*
  *
@@ -669,19 +645,6 @@ openpic_init_nmi_irq(u_int irq)
  *
  */
 
-/*
- * Hookup a cascade to the OpenPIC.
- */
-void __init
-openpic_hookup_cascade(u_int irq, char *name,
-	int (*cascade_fn)(struct pt_regs *))
-{
-	openpic_cascade_irq = irq;
-	openpic_cascade_fn = cascade_fn;
-	if (request_irq(irq, no_action, SA_INTERRUPT, name, NULL))
-		printk("Unable to get OpenPIC IRQ %d for cascade\n",
-				irq - open_pic_irq_offset);
-}
 
 /*
  *  Enable/disable an external interrupt source
@@ -690,36 +653,33 @@ openpic_hookup_cascade(u_int irq, char *name,
  */
 static void openpic_enable_irq(u_int irq)
 {
-	volatile u_int *vpp;
-
 	check_arg_irq(irq);
-	vpp = &ISR[irq - open_pic_irq_offset]->Vector_Priority;
-	openpic_clearfield(vpp, OPENPIC_MASK);
+	openpic_clearfield(&GET_ISU(irq - open_pic_irq_offset).Vector_Priority, OPENPIC_MASK);
 	/* make sure mask gets to controller before we return to user */
 	do {
 		mb(); /* sync is probably useless here */
-	} while (openpic_readfield(vpp, OPENPIC_MASK));
+	} while(openpic_readfield(&GET_ISU(irq - open_pic_irq_offset).Vector_Priority,
+			OPENPIC_MASK));
 }
 
 static void openpic_disable_irq(u_int irq)
 {
-	volatile u_int *vpp;
 	u32 vp;
-
+	
 	check_arg_irq(irq);
-	vpp = &ISR[irq - open_pic_irq_offset]->Vector_Priority;
-	openpic_setfield(vpp, OPENPIC_MASK);
+	openpic_setfield(&GET_ISU(irq - open_pic_irq_offset).Vector_Priority, OPENPIC_MASK);
 	/* make sure mask gets to controller before we return to user */
 	do {
 		mb();  /* sync is probably useless here */
-		vp = openpic_readfield(vpp, OPENPIC_MASK | OPENPIC_ACTIVITY);
+		vp = openpic_readfield(&GET_ISU(irq - open_pic_irq_offset).Vector_Priority,
+    			OPENPIC_MASK | OPENPIC_ACTIVITY);
 	} while((vp & OPENPIC_ACTIVITY) && !(vp & OPENPIC_MASK));
 }
 
 #ifdef CONFIG_SMP
 /*
  *  Enable/disable an IPI interrupt source
- *
+ *  
  *  Externally called, irq is an offseted system-wide interrupt number
  */
 void openpic_enable_ipi(u_int irq)
@@ -747,10 +707,9 @@ void openpic_disable_ipi(u_int irq)
  *  pol: polarity (1 for positive, 0 for negative)
  *  sense: 1 for level, 0 for edge
  */
-static void __init
-openpic_initirq(u_int irq, u_int pri, u_int vec, int pol, int sense)
+static void openpic_initirq(u_int irq, u_int pri, u_int vec, int pol, int sense)
 {
-	openpic_safe_writefield(&ISR[irq]->Vector_Priority,
+	openpic_safe_writefield(&GET_ISU(irq).Vector_Priority,
 				OPENPIC_PRIORITY_MASK | OPENPIC_VECTOR_MASK |
 				OPENPIC_SENSE_MASK | OPENPIC_POLARITY_MASK,
 				(pri << OPENPIC_PRIORITY_SHIFT) | vec |
@@ -762,13 +721,9 @@ openpic_initirq(u_int irq, u_int pri, u_int vec, int pol, int sense)
 /*
  *  Map an interrupt source to one or more CPUs
  */
-static void openpic_mapirq(u_int irq, u_int physmask, u_int keepmask)
+static void openpic_mapirq(u_int irq, u_int physmask)
 {
-	if (ISR[irq] == 0)
-		return;
-	if (keepmask != 0)
-		physmask |= openpic_read(&ISR[irq]->Destination) & keepmask;
-	openpic_write(&ISR[irq]->Destination, physmask);
+	openpic_write(&GET_ISU(irq).Destination, physmask);
 }
 
 #ifdef notused
@@ -779,10 +734,9 @@ static void openpic_mapirq(u_int irq, u_int physmask, u_int keepmask)
  */
 static void openpic_set_sense(u_int irq, int sense)
 {
-	if (ISR[irq] != 0)
-		openpic_safe_writefield(&ISR[irq]->Vector_Priority,
-					OPENPIC_SENSE_LEVEL,
-					(sense ? OPENPIC_SENSE_LEVEL : 0));
+	openpic_safe_writefield(&GET_ISU(irq).Vector_Priority,
+				OPENPIC_SENSE_LEVEL,
+				(sense ? OPENPIC_SENSE_LEVEL : 0));
 }
 #endif /* notused */
 
@@ -803,7 +757,7 @@ static void openpic_end_irq(unsigned int irq_nr)
 
 static void openpic_set_affinity(unsigned int irq_nr, unsigned long cpumask)
 {
-	openpic_mapirq(irq_nr - open_pic_irq_offset, physmask(cpumask), 0);
+	openpic_mapirq(irq_nr - open_pic_irq_offset, physmask(cpumask));
 }
 
 #ifdef CONFIG_SMP
@@ -823,25 +777,35 @@ static void openpic_ipi_action(int cpl, void *dev_id, struct pt_regs *regs)
 
 #endif /* CONFIG_SMP */
 
+/* This one may be merged with PReP and CHRP */
 int
 openpic_get_irq(struct pt_regs *regs)
 {
+/*
+ * Clean up needed. -VAL
+ */
+#ifndef CONFIG_GEMINI
+	extern int i8259_irq(int cpu);
+#endif
 	int irq = openpic_irq();
 
-	/*
-	 * Check for the cascade interrupt and call the cascaded
-	 * interrupt controller function (usually i8259_irq) if so.
-	 * This should move to irq.c eventually.  -- paulus
-	 */
-	if (irq == openpic_cascade_irq && openpic_cascade_fn != NULL) {
-		int cirq = openpic_cascade_fn(regs);
+	/* Management of the cascade should be moved out of here */
 
-		/* Allow for the cascade being shared with other devices */
-		if (cirq != -1) {
-			irq = cirq;
-			openpic_eoi();
-		}
-        } else if (irq == OPENPIC_VEC_SPURIOUS + open_pic_irq_offset)
+	/* Yep - because openpic !=> i8259, for one thing. -VAL */
+        if (open_pic_irq_offset && irq == open_pic_irq_offset)
+        {
+                /*
+                 * This magic address generates a PCI IACK cycle.
+                 */
+		if ( chrp_int_ack_special )
+			irq = *chrp_int_ack_special;
+#ifndef CONFIG_GEMINI
+		else
+			irq = i8259_irq( smp_processor_id() );
+#endif
+		openpic_eoi();
+        }
+	if (irq == OPENPIC_VEC_SPURIOUS + open_pic_irq_offset)
 		irq = -1;
 	return irq;
 }
@@ -882,7 +846,7 @@ openpic_sleep_save_intrs(void)
 {
 	int	i;
 	unsigned long flags;
-
+	
 	spin_lock_irqsave(&openpic_setup_lock, flags);
 
 	for (i=0; i<NumProcessors; i++) {
@@ -894,11 +858,9 @@ openpic_sleep_save_intrs(void)
 	for (i=0; i<OPENPIC_NUM_IPI; i++)
 		save_ipi_vp[i] = openpic_read(&OpenPIC->Global.IPI_Vector_Priority(i));
 	for (i=0; i<NumSources; i++) {
-		if (ISR[i] == 0)
-			continue;
-		save_irq_src_vp[i] = openpic_read(&ISR[i]->Vector_Priority)
+		save_irq_src_vp[i] = openpic_read(&OpenPIC->Source[i].Vector_Priority)
 			& ~OPENPIC_ACTIVITY;
-		save_irq_src_dest[i] = openpic_read(&ISR[i]->Destination);
+		save_irq_src_dest[i] = openpic_read(&OpenPIC->Source[i].Destination);
 	}
 	spin_unlock_irqrestore(&openpic_setup_lock, flags);
 }
@@ -910,23 +872,19 @@ openpic_sleep_restore_intrs(void)
 	unsigned long	flags;
 
 	spin_lock_irqsave(&openpic_setup_lock, flags);
-
+	
 	openpic_reset();
 
 	for (i=0; i<OPENPIC_NUM_IPI; i++)
-		openpic_write(&OpenPIC->Global.IPI_Vector_Priority(i),
-			      save_ipi_vp[i]);
+		openpic_write(&OpenPIC->Global.IPI_Vector_Priority(i), save_ipi_vp[i]);
 	for (i=0; i<NumSources; i++) {
-		if (ISR[i] == 0)
-			continue;
-		openpic_write(&ISR[i]->Vector_Priority, save_irq_src_vp[i]);
-		openpic_write(&ISR[i]->Destination, save_irq_src_dest[i]);
+		openpic_write(&OpenPIC->Source[i].Vector_Priority, save_irq_src_vp[i]);
+		openpic_write(&OpenPIC->Source[i].Destination, save_irq_src_dest[i]);
 	}
 	openpic_set_spurious(OPENPIC_VEC_SPURIOUS+open_pic_irq_offset);
 	openpic_disable_8259_pass_through();
 	for (i=0; i<NumProcessors; i++)
-		openpic_write(&OpenPIC->Processor[i].Current_Task_Priority,
-			      save_cpu_task_pri[i]);
+		openpic_write(&OpenPIC->Processor[i].Current_Task_Priority, save_cpu_task_pri[i]);
 
 	spin_unlock_irqrestore(&openpic_setup_lock, flags);
 }

@@ -10,23 +10,20 @@
 #include <asm/cprefix.h>
 #include <asm/ptrace.h>
 
-/* Work around cpp -rob */
-#define ALLOC #alloc
-#define EXECINSTR #execinstr
-#define EX(x,y,a,b) 				\
+#define EX(x,y,a,b,z) 				\
 98: 	x,y;					\
-	.section .fixup,ALLOC,EXECINSTR;	\
+	.section .fixup,z##alloc,z##execinstr;	\
 	.align	4;				\
 99:	ba 30f;					\
 	 a, b, %o0;				\
-	.section __ex_table,ALLOC;		\
+	.section __ex_table,z##alloc;		\
 	.align	4;				\
 	.word	98b, 99b;			\
 	.text;					\
 	.align	4
 
-#define EXT(start,end,handler) 			\
-	.section __ex_table,ALLOC;		\
+#define EXT(start,end,handler,z) 		\
+	.section __ex_table,z##alloc;		\
 	.align	4;				\
 	.word	start, 0, end, handler;		\
 	.text;					\
@@ -77,13 +74,13 @@ C_LABEL(memset):
 3:
 	cmp	%o2, 3
 	be	2f
-	 EX(stb	%g3, [%o0], sub %o1, 0)
+	 EX(stb	%g3, [%o0], sub %o1, 0,#)
 
 	cmp	%o2, 2
 	be	2f
-	 EX(stb	%g3, [%o0 + 0x01], sub %o1, 1)
+	 EX(stb	%g3, [%o0 + 0x01], sub %o1, 1,#)
 
-	EX(stb	%g3, [%o0 + 0x02], sub %o1, 2)
+	EX(stb	%g3, [%o0 + 0x02], sub %o1, 2,#)
 2:
 	sub	%o2, 4, %o2
 	add	%o1, %o2, %o1
@@ -104,7 +101,7 @@ C_LABEL(__bzero):
 	be	2f
 	 mov	%g3, %g2
 
-	EX(st	%g3, [%o0], sub %o1, 0)
+	EX(st	%g3, [%o0], sub %o1, 0,#)
 	sub	%o1, 4, %o1
 	add	%o0, 4, %o0
 2:
@@ -116,7 +113,7 @@ C_LABEL(__bzero):
 	subcc	%o3, 128, %o3
 	ZERO_BIG_BLOCK(%o0, 0x40, %g2)
 11:
-	EXT(10b, 11b, 20f)
+	EXT(10b, 11b, 20f,#)
 	bne	10b
 	 add	%o0, 128, %o0
 
@@ -141,17 +138,17 @@ C_LABEL(__bzero):
 	be	1f
 	 andcc	%o1, 2, %g0
 
-	EX(st	%g3, [%o0], and %o1, 7)
+	EX(st	%g3, [%o0], and %o1, 7,#)
 	add	%o0, 4, %o0
 1:
 	be	1f
 	 andcc	%o1, 1, %g0
 
-	EX(sth	%g3, [%o0], and %o1, 3)
+	EX(sth	%g3, [%o0], and %o1, 3,#)
 	add	%o0, 2, %o0
 1:
 	bne,a	8f
-	 EX(stb	%g3, [%o0], and %o1, 1)
+	 EX(stb	%g3, [%o0], and %o1, 1,#)
 8:
 	retl
 	 clr	%o0
@@ -164,7 +161,7 @@ C_LABEL(__bzero):
 	 add	%o0, 1, %o0
 	subcc	%o1, 1, %o1
 	bne,a	8b
-	 EX(stb	%g3, [%o0 - 1], add %o1, 1)
+	 EX(stb	%g3, [%o0 - 1], add %o1, 1,#)
 0:
 	retl
 	 clr	%o0

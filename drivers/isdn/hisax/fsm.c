@@ -1,4 +1,4 @@
-/* $Id: fsm.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: fsm.c,v 1.14.6.4 2001/09/23 22:24:47 kai Exp $
  *
  * Finite state machine
  *
@@ -20,6 +20,14 @@
 #include "hisax.h"
 
 #define FSM_TIMER_DEBUG 0
+
+EXPORT_SYMBOL(FsmNew);
+EXPORT_SYMBOL(FsmFree);
+EXPORT_SYMBOL(FsmEvent);
+EXPORT_SYMBOL(FsmChangeState);
+EXPORT_SYMBOL(FsmInitTimer);
+EXPORT_SYMBOL(FsmDelTimer);
+EXPORT_SYMBOL(FsmRestartTimer);
 
 int __init
 FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount)

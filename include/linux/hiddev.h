@@ -39,33 +39,26 @@ struct hiddev_event {
 };
 
 struct hiddev_devinfo {
-	__u32 bustype;
-	__u32 busnum;
-	__u32 devnum;
-	__u32 ifnum;
-	__s16 vendor;
-	__s16 product;
-	__s16 version;
-	__u32 num_applications;
-};
-
-struct hiddev_collection_info {
-	__u32 index;
-	__u32 type;
-	__u32 usage;
-	__u32 level;
+	unsigned int bustype;
+	unsigned int busnum;
+	unsigned int devnum;
+	unsigned int ifnum;
+	short vendor;
+	short product;
+	short version;
+	unsigned num_applications;
 };
 
 #define HID_STRING_SIZE 256
 struct hiddev_string_descriptor {
-	__s32 index;
+	int index;
 	char value[HID_STRING_SIZE];
 };
 
 struct hiddev_report_info {
-	__u32 report_type;
-	__u32 report_id;
-	__u32 num_fields;
+	unsigned report_type;
+	unsigned report_id;
+	unsigned num_fields;
 };
 
 /* To do a GUSAGE/SUSAGE, fill in at least usage_code,  report_type and 
@@ -88,20 +81,20 @@ struct hiddev_report_info {
 #define HID_REPORT_TYPE_MAX     3
 
 struct hiddev_field_info {
-	__u32 report_type;
-	__u32 report_id;
-	__u32 field_index;
-	__u32 maxusage;
-	__u32 flags;
-	__u32 physical;		/* physical usage for this field */
-	__u32 logical;		/* logical usage for this field */
-	__u32 application;		/* application usage for this field */
+	unsigned report_type;
+	unsigned report_id;
+	unsigned field_index;
+	unsigned maxusage;
+	unsigned flags;
+	unsigned physical;		/* physical usage for this field */
+	unsigned logical;		/* logical usage for this field */
+	unsigned application;		/* application usage for this field */
 	__s32 logical_minimum;
 	__s32 logical_maximum;
 	__s32 physical_minimum;
 	__s32 physical_maximum;
-	__u32 unit_exponent;
-	__u32 unit;
+	unsigned unit_exponent;
+	unsigned unit;
 };
 
 /* Fill in report_type, report_id and field_index to get the information on a
@@ -118,33 +111,20 @@ struct hiddev_field_info {
 #define HID_FIELD_BUFFERED_BYTE		0x100
 
 struct hiddev_usage_ref {
-	__u32 report_type;
-	__u32 report_id;
-	__u32 field_index;
-	__u32 usage_index;
-	__u32 usage_code;
+	unsigned report_type;
+	unsigned report_id;
+	unsigned field_index;
+	unsigned usage_index;
+	unsigned usage_code;
 	__s32 value;
 };
 
-/* hiddev_usage_ref_multi is used for sending multiple bytes to a control.
- * It really manifests itself as setting the value of consecutive usages */
-struct hiddev_usage_ref_multi {
-	struct hiddev_usage_ref uref;
-	__u32 num_values;
-	__s32 values[HID_MAX_USAGES];
-};
-
-/* FIELD_INDEX_NONE is returned in read() data from the kernel when flags
- * is set to (HIDDEV_FLAG_UREF | HIDDEV_FLAG_REPORT) and a new report has
- * been sent by the device 
- */
-#define HID_FIELD_INDEX_NONE 0xffffffff
 
 /*
  * Protocol version.
  */
 
-#define HID_VERSION		0x010004
+#define HID_VERSION		0x010002
 
 /*
  * IOCTLs (0x00 - 0x7f)
@@ -158,27 +138,11 @@ struct hiddev_usage_ref_multi {
 #define HIDIOCGNAME(len)	_IOC(_IOC_READ, 'H', 0x06, len)
 #define HIDIOCGREPORT		_IOW('H', 0x07, struct hiddev_report_info)
 #define HIDIOCSREPORT		_IOW('H', 0x08, struct hiddev_report_info)
-#define HIDIOCGREPORTINFO	_IOWR('H', 0x09, struct hiddev_report_info)
-#define HIDIOCGFIELDINFO	_IOWR('H', 0x0A, struct hiddev_field_info)
-#define HIDIOCGUSAGE		_IOWR('H', 0x0B, struct hiddev_usage_ref)
-#define HIDIOCSUSAGE		_IOW('H', 0x0C, struct hiddev_usage_ref)
-#define HIDIOCGUCODE		_IOWR('H', 0x0D, struct hiddev_usage_ref)
-#define HIDIOCGFLAG		_IOR('H', 0x0E, int)
-#define HIDIOCSFLAG		_IOW('H', 0x0F, int)
-#define HIDIOCGCOLLECTIONINDEX	_IOW('H', 0x10, struct hiddev_usage_ref)
-#define HIDIOCGCOLLECTIONINFO	_IOWR('H', 0x11, struct hiddev_collection_info)
-
-/* For writing/reading to multiple/consecutive usages */
-#define HIDIOCGUSAGES		_IOWR('H', 0x12, struct hiddev_usage_ref_multi)
-#define HIDIOCSUSAGES		_IOW('H', 0x13, struct hiddev_usage_ref_multi)
-
-
-/* 
- * Flags to be used in HIDIOCSFLAG
- */
-#define HIDDEV_FLAG_UREF	0x1
-#define HIDDEV_FLAG_REPORT	0x2
-#define HIDDEV_FLAGS		0x3
+#define HIDIOCGREPORTINFO       _IOWR('H', 0x09, struct hiddev_report_info)
+#define HIDIOCGFIELDINFO        _IOWR('H', 0x0A, struct hiddev_field_info)
+#define HIDIOCGUSAGE            _IOWR('H', 0x0B, struct hiddev_usage_ref)
+#define HIDIOCSUSAGE            _IOW('H', 0x0C, struct hiddev_usage_ref)
+#define HIDIOCGUCODE            _IOWR('H', 0x0D, struct hiddev_usage_ref)
 
 /* To traverse the input report descriptor info for a HID device, perform the 
  * following:
@@ -215,20 +179,13 @@ struct hiddev_usage_ref_multi {
 #ifdef CONFIG_USB_HIDDEV
 int hiddev_connect(struct hid_device *);
 void hiddev_disconnect(struct hid_device *);
-void hiddev_hid_event(struct hid_device *hid, struct hid_field *field,
-		      struct hid_usage *usage, __s32 value);
-void hiddev_report_event(struct hid_device *hid, struct hid_report *report);
+void hiddev_hid_event(struct hid_device *, unsigned int usage, int value);
 int __init hiddev_init(void);
 void __exit hiddev_exit(void);
 #else
-static inline int hiddev_connect(struct hid_device *hid) { return -1; }
+static inline void *hiddev_connect(struct hid_device *hid) { return NULL; }
 static inline void hiddev_disconnect(struct hid_device *hid) { }
-static inline void hiddev_hid_event(struct hid_device *hid, 
-                                         struct hid_field *field,
-                                         struct hid_usage *usage,
-                                         __s32 value) { }
-static inline void hiddev_report_event(struct hid_device *hid,
-                                       struct hid_report *report) { }
+static inline void hiddev_event(struct hid_device *hid, unsigned int usage, int value) { }
 static inline int hiddev_init(void) { return 0; }
 static inline void hiddev_exit(void) { }
 #endif

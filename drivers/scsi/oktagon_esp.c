@@ -77,9 +77,7 @@ static void dma_commit(void *opaque);
 long oktag_to_io(long *paddr, long *addr, long len);
 long oktag_from_io(long *addr, long *paddr, long len);
 
-static struct tq_struct tq_fake_dma = {
-    routine:	dma_commit,
-};
+static struct tq_struct tq_fake_dma = { NULL, 0, dma_commit, NULL };
 
 #define DMA_MAXTRANSFER 0x8000
 
@@ -548,7 +546,7 @@ static void dma_invalidate(struct NCR_ESP *esp)
 
 void dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-        sp->SCp.ptr =
+        sp->SCp.have_data_in = (int) sp->SCp.ptr =
                 sp->request_buffer;
 }
 
@@ -591,5 +589,3 @@ int oktagon_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
-
-MODULE_LICENSE("GPL");

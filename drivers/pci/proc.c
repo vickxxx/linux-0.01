@@ -47,8 +47,7 @@ proc_bus_pci_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 	const struct inode *ino = file->f_dentry->d_inode;
 	const struct proc_dir_entry *dp = ino->u.generic_ip;
 	struct pci_dev *dev = dp->data;
-	loff_t n = *ppos;
-	unsigned pos = n;
+	unsigned int pos = *ppos;
 	unsigned int cnt, size;
 
 	/*
@@ -64,7 +63,7 @@ proc_bus_pci_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 	else
 		size = 64;
 
-	if (pos != n || pos >= size)
+	if (pos >= size)
 		return 0;
 	if (nbytes >= size)
 		nbytes = size;
@@ -130,11 +129,10 @@ proc_bus_pci_write(struct file *file, const char *buf, size_t nbytes, loff_t *pp
 	const struct inode *ino = file->f_dentry->d_inode;
 	const struct proc_dir_entry *dp = ino->u.generic_ip;
 	struct pci_dev *dev = dp->data;
-	loff_t n = *ppos;
-	unsigned pos = n;
+	int pos = *ppos;
 	int cnt;
 
-	if (pos != n || pos >= PCI_CFG_SPACE_SIZE)
+	if (pos >= PCI_CFG_SPACE_SIZE)
 		return 0;
 	if (nbytes >= PCI_CFG_SPACE_SIZE)
 		nbytes = PCI_CFG_SPACE_SIZE;
@@ -371,7 +369,7 @@ static struct seq_operations proc_bus_pci_devices_op = {
 	show:	show_device
 };
 
-struct proc_dir_entry *proc_bus_pci_dir;
+static struct proc_dir_entry *proc_bus_pci_dir;
 
 int pci_proc_attach_device(struct pci_dev *dev)
 {

@@ -1,89 +1,47 @@
 /******************************************************************************
  *
  * Module Name: psutils - Parser miscellaneous utilities (Parser only)
+ *              $Revision: 44 $
  *
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2004, R. Byron Moore
- * All rights reserved.
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
-#include <acpi/acpi.h>
-#include <acpi/acparser.h>
-#include <acpi/amlcode.h>
-#include <acpi/acnamesp.h>
+#include "acpi.h"
+#include "acparser.h"
+#include "amlcode.h"
 
 #define _COMPONENT          ACPI_PARSER
-	 ACPI_MODULE_NAME    ("psutils")
+	 MODULE_NAME         ("psutils")
+
+
+#define PARSEOP_GENERIC     0x01
+#define PARSEOP_NAMED       0x02
+#define PARSEOP_DEFERRED    0x04
+#define PARSEOP_BYTELIST    0x08
+#define PARSEOP_IN_CACHE    0x80
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_create_scope_op
- *
- * PARAMETERS:  None
- *
- * RETURN:      scope_op
- *
- * DESCRIPTION: Create a Scope and associated namepath op with the root name
- *
- ******************************************************************************/
-
-union acpi_parse_object *
-acpi_ps_create_scope_op (
-	void)
-{
-	union acpi_parse_object         *scope_op;
-
-
-	scope_op = acpi_ps_alloc_op (AML_SCOPE_OP);
-	if (!scope_op) {
-		return (NULL);
-	}
-
-
-	scope_op->named.name = ACPI_ROOT_NAME;
-	return (scope_op);
-}
-
-
-/*******************************************************************************
- *
- * FUNCTION:    acpi_ps_init_op
+ * FUNCTION:    Acpi_ps_init_op
  *
  * PARAMETERS:  Op              - A newly allocated Op object
  *              Opcode          - Opcode to store in the Op
@@ -97,23 +55,28 @@ acpi_ps_create_scope_op (
 
 void
 acpi_ps_init_op (
-	union acpi_parse_object         *op,
-	u16                             opcode)
+	acpi_parse_object       *op,
+	u16                     opcode)
 {
-	ACPI_FUNCTION_ENTRY ();
+	const acpi_opcode_info  *aml_op;
 
 
-	op->common.data_type = ACPI_DESC_TYPE_PARSER;
-	op->common.aml_opcode = opcode;
+	FUNCTION_ENTRY ();
 
-	ACPI_DISASM_ONLY_MEMBERS (ACPI_STRNCPY (op->common.aml_op_name,
-			(acpi_ps_get_opcode_info (opcode))->name, sizeof (op->common.aml_op_name)));
+
+	op->data_type = ACPI_DESC_TYPE_PARSER;
+	op->opcode = opcode;
+
+	aml_op = acpi_ps_get_opcode_info (opcode);
+
+	DEBUG_ONLY_MEMBERS (STRNCPY (op->op_name, aml_op->name,
+			   sizeof (op->op_name)));
 }
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_alloc_op
+ * FUNCTION:    Acpi_ps_alloc_op
  *
  * PARAMETERS:  Opcode          - Opcode that will be stored in the new Op
  *
@@ -125,17 +88,17 @@ acpi_ps_init_op (
  *
  ******************************************************************************/
 
-union acpi_parse_object*
+acpi_parse_object*
 acpi_ps_alloc_op (
-	u16                             opcode)
+	u16                     opcode)
 {
-	union acpi_parse_object         *op = NULL;
-	u32                             size;
-	u8                              flags;
-	const struct acpi_opcode_info   *op_info;
+	acpi_parse_object       *op = NULL;
+	u32                     size;
+	u8                      flags;
+	const acpi_opcode_info  *op_info;
 
 
-	ACPI_FUNCTION_ENTRY ();
+	FUNCTION_ENTRY ();
 
 
 	op_info = acpi_ps_get_opcode_info (opcode);
@@ -143,28 +106,33 @@ acpi_ps_alloc_op (
 	/* Allocate the minimum required size object */
 
 	if (op_info->flags & AML_DEFER) {
-		size = sizeof (struct acpi_parse_obj_named);
-		flags = ACPI_PARSEOP_DEFERRED;
-	}
-	else if (op_info->flags & AML_NAMED) {
-		size = sizeof (struct acpi_parse_obj_named);
-		flags = ACPI_PARSEOP_NAMED;
-	}
-	else if (opcode == AML_INT_BYTELIST_OP) {
-		size = sizeof (struct acpi_parse_obj_named);
-		flags = ACPI_PARSEOP_BYTELIST;
-	}
-	else {
-		size = sizeof (struct acpi_parse_obj_common);
-		flags = ACPI_PARSEOP_GENERIC;
+		size = sizeof (acpi_parse2_object);
+		flags = PARSEOP_DEFERRED;
 	}
 
-	if (size == sizeof (struct acpi_parse_obj_common)) {
+	else if (op_info->flags & AML_NAMED) {
+		size = sizeof (acpi_parse2_object);
+		flags = PARSEOP_NAMED;
+	}
+
+	else if (opcode == AML_INT_BYTELIST_OP) {
+		size = sizeof (acpi_parse2_object);
+		flags = PARSEOP_BYTELIST;
+	}
+
+	else {
+		size = sizeof (acpi_parse_object);
+		flags = PARSEOP_GENERIC;
+	}
+
+
+	if (size == sizeof (acpi_parse_object)) {
 		/*
 		 * The generic op is by far the most common (16 to 1)
 		 */
 		op = acpi_ut_acquire_from_cache (ACPI_MEM_LIST_PSNODE);
 	}
+
 	else {
 		op = acpi_ut_acquire_from_cache (ACPI_MEM_LIST_PSNODE_EXT);
 	}
@@ -173,7 +141,7 @@ acpi_ps_alloc_op (
 
 	if (op) {
 		acpi_ps_init_op (op, opcode);
-		op->common.flags = flags;
+		op->flags = flags;
 	}
 
 	return (op);
@@ -182,7 +150,7 @@ acpi_ps_alloc_op (
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_free_op
+ * FUNCTION:    Acpi_ps_free_op
  *
  * PARAMETERS:  Op              - Op to be freed
  *
@@ -195,18 +163,19 @@ acpi_ps_alloc_op (
 
 void
 acpi_ps_free_op (
-	union acpi_parse_object         *op)
+	acpi_parse_object       *op)
 {
-	ACPI_FUNCTION_NAME ("ps_free_op");
+	PROC_NAME ("Ps_free_op");
 
 
-	if (op->common.aml_opcode == AML_INT_RETURN_VALUE_OP) {
-		ACPI_DEBUG_PRINT ((ACPI_DB_ALLOCATIONS, "Free retval op: %p\n", op));
+	if (op->opcode == AML_INT_RETURN_VALUE_OP) {
+		ACPI_DEBUG_PRINT ((ACPI_DB_INFO, "Free retval op: %p\n", op));
 	}
 
-	if (op->common.flags & ACPI_PARSEOP_GENERIC) {
+	if (op->flags == PARSEOP_GENERIC) {
 		acpi_ut_release_to_cache (ACPI_MEM_LIST_PSNODE, op);
 	}
+
 	else {
 		acpi_ut_release_to_cache (ACPI_MEM_LIST_PSNODE_EXT, op);
 	}
@@ -215,7 +184,7 @@ acpi_ps_free_op (
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_delete_parse_cache
+ * FUNCTION:    Acpi_ps_delete_parse_cache
  *
  * PARAMETERS:  None
  *
@@ -229,7 +198,7 @@ void
 acpi_ps_delete_parse_cache (
 	void)
 {
-	ACPI_FUNCTION_TRACE ("ps_delete_parse_cache");
+	FUNCTION_TRACE ("Ps_delete_parse_cache");
 
 
 	acpi_ut_delete_generic_cache (ACPI_MEM_LIST_PSNODE);
@@ -252,7 +221,7 @@ acpi_ps_delete_parse_cache (
  */
 u8
 acpi_ps_is_leading_char (
-	u32                             c)
+	u32                     c)
 {
 	return ((u8) (c == '_' || (c >= 'A' && c <= 'Z')));
 }
@@ -263,7 +232,7 @@ acpi_ps_is_leading_char (
  */
 u8
 acpi_ps_is_prefix_char (
-	u32                             c)
+	u32                     c)
 {
 	return ((u8) (c == '\\' || c == '^'));
 }
@@ -274,19 +243,19 @@ acpi_ps_is_prefix_char (
  */
 u32
 acpi_ps_get_name (
-	union acpi_parse_object         *op)
+	acpi_parse_object       *op)
 {
 
 
 	/* The "generic" object has no name associated with it */
 
-	if (op->common.flags & ACPI_PARSEOP_GENERIC) {
+	if (op->flags & PARSEOP_GENERIC) {
 		return (0);
 	}
 
 	/* Only the "Extended" parse objects have a name */
 
-	return (op->named.name);
+	return (((acpi_parse2_object *) op)->name);
 }
 
 
@@ -295,16 +264,16 @@ acpi_ps_get_name (
  */
 void
 acpi_ps_set_name (
-	union acpi_parse_object         *op,
-	u32                             name)
+	acpi_parse_object       *op,
+	u32                     name)
 {
 
 	/* The "generic" object has no name associated with it */
 
-	if (op->common.flags & ACPI_PARSEOP_GENERIC) {
+	if (op->flags & PARSEOP_GENERIC) {
 		return;
 	}
 
-	op->named.name = name;
+	((acpi_parse2_object *) op)->name = name;
 }
 

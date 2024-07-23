@@ -41,10 +41,9 @@ struct nfs_page {
 
 #define NFS_WBACK_BUSY(req)	(test_bit(PG_BUSY,&(req)->wb_flags))
 
-extern	struct nfs_page *nfs_create_request(struct rpc_cred *, struct inode *,
+extern	struct nfs_page *nfs_create_request(struct file *, struct inode *,
 					    struct page *,
 					    unsigned int, unsigned int);
-extern	void nfs_clear_request(struct nfs_page *req);
 extern	void nfs_release_request(struct nfs_page *req);
 
 
@@ -53,7 +52,7 @@ extern	void nfs_list_add_request(struct nfs_page *, struct list_head *);
 extern	int nfs_scan_lru(struct list_head *, struct list_head *, int);
 extern	int nfs_scan_lru_timeout(struct list_head *, struct list_head *, int);
 extern	int nfs_scan_list(struct list_head *, struct list_head *,
-				unsigned long, unsigned int);
+			  struct file *, unsigned long, unsigned int);
 extern	int nfs_coalesce_requests(struct list_head *, struct list_head *,
 				  unsigned int);
 extern  int nfs_wait_on_request(struct nfs_page *);

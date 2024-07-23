@@ -18,8 +18,8 @@
   </authorgroup>
 
   <copyright>
-   <year>2001</year>
-   <holder>Rusty Russell</holder>
+   <year>2000</year>
+   <holder>Paul Russell</holder>
   </copyright>
 
   <legalnotice>
@@ -651,29 +651,6 @@ printk(KERN_INFO "my ip: %d.%d.%d.%d\n", NIPQUAD(ipaddress));
    </para> 
   </sect1>
  
-  <sect1 id="routines-endian">
-   <title><function>cpu_to_be32()</function>/<function>be32_to_cpu()</function>/<function>cpu_to_le32()</function>/<function>le32_to_cpu()</function>
-     <filename class=headerfile>include/asm/byteorder.h</filename> 
-   </title>
-
-   <para>
-    The <function>cpu_to_be32()</function> family (where the "32" can
-    be replaced by 64 or 16, and the "be" can be replaced by "le") are
-    the general way to do endian conversions in the kernel: they
-    return the converted value.  All variations supply the reverse as
-    well: <function>be32_to_cpu()</function>, etc.
-   </para>
-
-   <para>
-    There are two major variations of these functions: the pointer
-    variation, such as <function>cpu_to_be32p()</function>, which take
-    a pointer to the given type, and return the converted value.  The
-    other variation is the "in-situ" family, such as
-    <function>cpu_to_be32s()</function>, which convert value referred
-    to by the pointer, and return void.
-   </para> 
-  </sect1>
-
   <sect1 id="routines-local-irqs">
    <title><function>local_irq_save()</function>/<function>local_irq_restore()</function>
     <filename class=headerfile>include/asm/system.h</filename>
@@ -1026,7 +1003,7 @@ EXPORT_NO_SYMBOLS;
     Similar to <function>EXPORT_SYMBOL()</function> except that the
     symbols exported by <function>EXPORT_SYMBOL_GPL()</function> can
     only be seen by modules with a
-    <function>MODULE_LICENSE()</function> that specifies a GPL
+    <function>MODULE_LICENCE()</function> that specifies a GPL
     compatible license.
    </para>
   </sect1>
@@ -1091,17 +1068,18 @@ EXPORT_NO_SYMBOLS;
    <title>Initializing structure members</title>
 
    <para>
-    The preferred method of initializing structures is to use
-    designated initialisers, as defined by ISO C99, eg:
+    The preferred method of initializing structures is to use the
+    gcc Labeled Elements extension, eg:
    </para>
    <programlisting>
 static struct block_device_operations opt_fops = {
-        .open               = opt_open,
-        .release            = opt_release,
-        .ioctl              = opt_ioctl,
-        .check_media_change = opt_media_change,
+        open:                   opt_open,
+        release:                opt_release,
+        ioctl:                  opt_ioctl,
+        check_media_change:     opt_media_change,
 };
    </programlisting>
+
    <para>
     This makes it easy to grep for, and makes it clear which
     structure fields are set.  You should do this because it looks
@@ -1135,6 +1113,11 @@ static struct block_device_operations opt_fops = {
      <para>
       Declaring attributes of a function / variable / type
       (__attribute__)
+     </para>
+    </listitem>
+    <listitem>
+     <para>
+      Labeled elements
      </para>
     </listitem>
     <listitem>

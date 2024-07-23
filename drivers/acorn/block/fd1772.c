@@ -1567,30 +1567,29 @@ static struct block_device_operations floppy_fops =
 
 int fd1772_init(void)
 {
-	int i, err;
+	int i;
 
 	if (!machine_is_archimedes())
 		return 0;
 
-	err = register_blkdev(MAJOR_NR, "fd", &floppy_fops);
-	if (err) {
+	if (register_blkdev(MAJOR_NR, "fd", &floppy_fops)) {
 		printk("Unable to get major %d for floppy\n", MAJOR_NR);
-		goto err_out;
+		return 1;
 	}
 
-	err = -EBUSY;
 	if (request_dma(FLOPPY_DMA, "fd1772")) {
 		printk("Unable to grab DMA%d for the floppy (1772) driver\n", FLOPPY_DMA);
-		goto err_blkdev;
+		return 1;
 	};
 
 	if (request_dma(FIQ_FD1772, "fd1772 end")) {
 		printk("Unable to grab DMA%d for the floppy (1772) driver\n", FIQ_FD1772);
-		goto err_dma1;
+		free_dma(FLOPPY_DMA);
+		return 1;
 	};
+	enable_dma(FIQ_FD1772);	/* This inserts a call to our command end routine */
 
 	/* initialize variables */
-	err = -ENOMEM;
 	SelectedDrive = -1;
 #ifdef TRACKBUFFER
 	BufferDrive = BufferSide = BufferTrack = -1;
@@ -1602,10 +1601,7 @@ int fd1772_init(void)
 	   out of some special memory... */
 	DMABuffer = (char *) kmalloc(2048);	/* Copes with pretty large sectors */
 #endif
-	if (DMABuffer == NULL)
-		goto err_dma2;
 
-	enable_dma(FIQ_FD1772);	/* This inserts a call to our command end routine */
 	for (i = 0; i < FD_MAX_UNITS; i++) {
 		unit[i].track = -1;
 	}
@@ -1623,13 +1619,8 @@ int fd1772_init(void)
 	config_types();
 
 	return 0;
+}
 
- err_dma2:
-	free_dma(FIQ_FD1772);
- err_dma1:
-	free_dma(FLOPPY_DMA);
- err_blkdev:
-	unregister_blkdev(MAJOR_NR, &floppy_fops);
- err_out:
-	return err;
+void floppy_eject(void)
+{
 }

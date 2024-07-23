@@ -896,7 +896,7 @@ nm256_resetAC97 (struct ac97_hwint *dev)
 
     /* Reset the mixer.  'Tis magic!  */
     nm256_writePort8 (card, 2, 0x6c0, 1);
-//  nm256_writePort8 (card, 2, 0x6cc, 0x87);	/* This crashes Dell latitudes */
+    nm256_writePort8 (card, 2, 0x6cc, 0x87);
     nm256_writePort8 (card, 2, 0x6cc, 0x80);
     nm256_writePort8 (card, 2, 0x6cc, 0x0);
 
@@ -1090,7 +1090,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 		printk (KERN_ERR "NM256: This doesn't look to me like the AC97-compatible version.\n");
 		printk (KERN_ERR "       You can force the driver to load by passing in the module\n");
 		printk (KERN_ERR "       parameter:\n");
-		printk (KERN_ERR "              force_load = 1\n");
+		printk (KERN_ERR "              force_ac97 = 1\n");
 		printk (KERN_ERR "\n");
 		printk (KERN_ERR "       More likely, you should be using the appropriate SB-16 or\n");
 		printk (KERN_ERR "       CS4232 driver instead.  (If your BIOS has settings for\n");

@@ -96,7 +96,6 @@ void query_format(int recsrc, struct wave_format *wave_fmt)
 	wave_fmt->bytesperchannel = wave_fmt->bitsperchannel >> 3;
 	wave_fmt->bytespersample = wave_fmt->channels * wave_fmt->bytesperchannel;
 	wave_fmt->bytespersec = wave_fmt->bytespersample * wave_fmt->samplingrate;
-	wave_fmt->bytespervoicesample = wave_fmt->bytespersample;
 }
 
 static int alloc_buffer(struct emu10k1_card *card, struct wavein_buffer *buffer)
@@ -121,7 +120,7 @@ int emu10k1_wavein_open(struct emu10k1_wavedevice *wave_dev)
 	struct emu10k1_card *card = wave_dev->card;
 	struct wiinst *wiinst = wave_dev->wiinst;
 	struct wiinst **wiinst_tmp = NULL;
-	u16 delay;
+	u32 delay;
 	unsigned long flags;
 
 	DPF(2, "emu10k1_wavein_open()\n");
@@ -169,12 +168,6 @@ int emu10k1_wavein_open(struct emu10k1_wavedevice *wave_dev)
 	}
 
 	emu10k1_set_record_src(card, wiinst);
-
-	emu10k1_reset_record(card, &wiinst->buffer);
-
-	wiinst->buffer.hw_pos = 0;
-	wiinst->buffer.pos = 0;
-	wiinst->buffer.bytestocopy = 0;
 
 	delay = (48000 * wiinst->buffer.fragment_size) / wiinst->format.bytespersec;
 
@@ -229,6 +222,10 @@ void emu10k1_wavein_start(struct emu10k1_wavedevice *wave_dev)
 	emu10k1_start_record(card, &wiinst->buffer);
 	emu10k1_timer_enable(wave_dev->card, &wiinst->timer);
 
+	wiinst->buffer.hw_pos = 0;
+	wiinst->buffer.pos = 0;
+	wiinst->buffer.bytestocopy = 0;
+
 	wiinst->state |= WAVE_STATE_STARTED;
 }
 
@@ -252,7 +249,7 @@ int emu10k1_wavein_setformat(struct emu10k1_wavedevice *wave_dev, struct wave_fo
 {
 	struct emu10k1_card *card = wave_dev->card;
 	struct wiinst *wiinst = wave_dev->wiinst;
-	u16 delay;
+	u32 delay;
 
 	DPF(2, "emu10k1_wavein_setformat()\n");
 

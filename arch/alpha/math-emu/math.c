@@ -220,12 +220,12 @@ alpha_fp_emul (unsigned long pc)
 				FP_CONV(S,D,1,1,SR,DB);
 				goto pack_s;
 			} else {
-				vb = alpha_read_fp_reg_s(fb);
-				FP_UNPACK_SP(SB, &vb);
+				/* CVTST need do nothing else but copy the
+				   bits and repack.  */
 				DR_c = DB_c;
 				DR_s = DB_s;
 				DR_e = DB_e;
-				DR_f = SB_f << (52 - 23);
+				DR_f = DB_f;
 				goto pack_d;
 			}
 
@@ -255,11 +255,11 @@ alpha_fp_emul (unsigned long pc)
 			goto done_d;
 
 		case FOP_FNC_CVTxS:
-			FP_FROM_INT_S(SR, (*(long*)&vb), 64, long);
+			FP_FROM_INT_S(SR, ((long)vb), 64, long);
 			goto pack_s;
 
 		case FOP_FNC_CVTxT:
-			FP_FROM_INT_D(DR, (*(long*)&vb), 64, long);
+			FP_FROM_INT_D(DR, ((long)vb), 64, long);
 			goto pack_d;
 		}
 		goto bad_insn;

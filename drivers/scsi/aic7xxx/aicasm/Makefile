@@ -1,19 +1,15 @@
 PROG=	aicasm
 
-.SUFFIXES= .l .y .c .h
+.SUFFIXES= .l .y .c
 
 CSRCS=	aicasm.c aicasm_symbol.c
-YSRCS=	aicasm_gram.y aicasm_macro_gram.y
-LSRCS=	aicasm_scan.l aicasm_macro_scan.l
+GENSRCS= aicasm_gram.c aicasm_scan.c
+GENHDRS= y.tab.h aicdb.h
 
-GENHDRS=	aicdb.h $(YSRCS:.y=.h)
-GENSRCS=	$(YSRCS:.y=.c) $(LSRCS:.l=.c)
-
-SRCS=	${CSRCS} ${GENSRCS}
-LIBS=	-ldb
-clean-files:= ${GENSRCS} ${GENHDRS} $(YSRCS:.y=.output) $(PROG)
+SRCS=	${GENSRCS} ${CSRCS}
+CLEANFILES= ${GENSRCS} ${GENHDRS} y.output
 # Override default kernel CFLAGS.  This is a userland app.
-AICASM_CFLAGS:= -I/usr/include -I.
+AICASM_CFLAGS:= -I/usr/include -I. -ldb
 YFLAGS= -d
 
 NOMAN=	noman
@@ -30,13 +26,11 @@ YFLAGS+= -t -v
 LFLAGS= -d
 endif
 
-$(PROG):  ${GENHDRS} $(SRCS)
-	$(AICASM_CC) $(AICASM_CFLAGS) $(SRCS) -o $(PROG) $(LIBS)
+$(PROG):  $(SRCS) $(GENHDRS)
+	$(AICASM_CC) $(AICASM_CFLAGS) $(SRCS) -o $(PROG)
 
 aicdb.h:
-	@if [ -e "/usr/include/db4/db_185.h" ]; then		\
-		echo "#include <db4/db_185.h>" > aicdb.h;	\
-	 elif [ -e "/usr/include/db3/db_185.h" ]; then		\
+	@if [ -e "/usr/include/db3/db_185.h" ]; then		\
 		echo "#include <db3/db_185.h>" > aicdb.h;	\
 	 elif [ -e "/usr/include/db2/db_185.h" ]; then		\
 		echo "#include <db2/db_185.h>" > aicdb.h;	\
@@ -49,20 +43,10 @@ aicdb.h:
 	 fi
 
 clean:
-	rm -f $(clean-files)
+	rm -f $(CLEANFILES) $(PROG)
 
-aicasm_gram.c aicasm_gram.h: aicasm_gram.y
-	$(YACC) $(YFLAGS) -b $(<:.y=) $<
-	mv $(<:.y=).tab.c $(<:.y=.c)
-	mv $(<:.y=).tab.h $(<:.y=.h)
+y.tab.h aicasm_gram.c: aicasm_gram.y
+	$(YACC) $(YFLAGS) aicasm_gram.y
+	mv y.tab.c aicasm_gram.c
 
-aicasm_macro_gram.c aicasm_macro_gram.h: aicasm_macro_gram.y
-	$(YACC) $(YFLAGS) -b $(<:.y=) -p mm $<
-	mv $(<:.y=).tab.c $(<:.y=.c)
-	mv $(<:.y=).tab.h $(<:.y=.h)
-
-aicasm_scan.c: aicasm_scan.l
-	$(LEX) $(LFLAGS) -o$@ $<
-
-aicasm_macro_scan.c: aicasm_macro_scan.l
-	$(LEX) $(LFLAGS) -Pmm -o$@ $<
+aicasm_scan.c: y.tab.h

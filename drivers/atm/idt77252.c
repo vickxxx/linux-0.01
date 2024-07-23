@@ -1,8 +1,8 @@
 /******************************************************************* 
- * ident "$Id: idt77252.c,v 1.3 2001/11/17 00:30:19 ecd Exp $"
+ * ident "$Id: idt77252.c,v 1.2 2001/11/11 08:13:54 ecd Exp $"
  *
  * $Author: ecd $
- * $Date: 2001/11/17 00:30:19 $
+ * $Date: 2001/11/11 08:13:54 $
  *
  * Copyright (c) 2000 ATecoM GmbH 
  *
@@ -30,7 +30,7 @@
  *
  *******************************************************************/
 static char const rcsid[] =
-"$Id: idt77252.c,v 1.3 2001/11/17 00:30:19 ecd Exp $";
+"$Id: idt77252.c,v 1.2 2001/11/11 08:13:54 ecd Exp $";
 
 
 #include <linux/module.h>
@@ -665,8 +665,8 @@ alloc_scq(struct idt77252_dev *card, int class)
 	skb_queue_head_init(&scq->transmit);
 	skb_queue_head_init(&scq->pending);
 
-	TXPRINTK("idt77252: SCQ: base 0x%p, next 0x%p, last 0x%p, paddr %08llx\n",
-		 scq->base, scq->next, scq->last, (unsigned long long)scq->paddr);
+	TXPRINTK("idt77252: SCQ: base 0x%p, next 0x%p, last 0x%p, paddr %08x\n",
+		 scq->base, scq->next, scq->last, scq->paddr);
 
 	return scq;
 }
@@ -730,7 +730,7 @@ push_on_scq(struct idt77252_dev *card, struct vc_map *vc, struct sk_buff *skb)
 		struct atm_vcc *vcc = vc->tx_vcc;
 
 		vc->estimator->cells += (skb->len + 47) / 48;
-		if (atomic_read(&vcc->sk->wmem_alloc) > (vcc->sk->sndbuf >> 1)) {
+		if (atomic_read(&vcc->tx_inuse) > (vcc->sk->sndbuf >> 1)) {
 			u32 cps = vc->estimator->maxcps;
 
 			vc->estimator->cps = cps;
@@ -1988,7 +1988,7 @@ idt77252_send_skb(struct atm_vcc *vcc, struct sk_buff *skb, int oam)
 		return -EINVAL;
 	}
 
-	if (skb_shinfo(skb)->nr_frags != 0) {
+	if (ATM_SKB(skb)->iovcnt != 0) {
 		printk("%s: No scatter-gather yet.\n", card->name);
 		atomic_inc(&vcc->stats->tx_err);
 		dev_kfree_skb(skb);
@@ -2025,7 +2025,8 @@ idt77252_send_oam(struct atm_vcc *vcc, void *cell, int flags)
 		atomic_inc(&vcc->stats->tx_err);
 		return -ENOMEM;
 	}
-	atomic_add(skb->truesize, &vcc->sk->wmem_alloc);
+	atomic_add(skb->truesize + ATM_PDU_OVHD, &vcc->tx_inuse);
+	ATM_SKB(skb)->iovcnt = 0;
 
 	memcpy(skb_put(skb, 52), cell, 52);
 
@@ -2404,43 +2405,34 @@ idt77252_init_rx(struct idt77252_dev *card, struct vc_map *vc,
 static int
 idt77252_find_vcc(struct atm_vcc *vcc, short *vpi, int *vci)
 {
-	struct sock *s;
 	struct atm_vcc *walk;
 
-	read_lock(&vcc_sklist_lock);
 	if (*vpi == ATM_VPI_ANY) {
 		*vpi = 0;
-		s = vcc_sklist;
-		while (s) {
-			walk = s->protinfo.af_atm;
-			if (walk->dev != vcc->dev)
-				continue;
+		walk = vcc->dev->vccs;
+		while (walk) {
 			if ((walk->vci == *vci) && (walk->vpi == *vpi)) {
 				(*vpi)++;
-				s = vcc_sklist;
+				walk = vcc->dev->vccs;
 				continue;
 			}
-			s = s->next;
+			walk = walk->next;
 		}
 	}
 
 	if (*vci == ATM_VCI_ANY) {
 		*vci = ATM_NOT_RSV_VCI;
-		s = vcc_sklist;
-		while (s) {
-			walk = s->protinfo.af_atm;
-			if (walk->dev != vcc->dev)
-				continue;
+		walk = vcc->dev->vccs;
+		while (walk) {
 			if ((walk->vci == *vci) && (walk->vpi == *vpi)) {
 				(*vci)++;
-				s = vcc_sklist;
+				walk = vcc->dev->vccs;
 				continue;
 			}
-			s = s->next;
+			walk = walk->next;
 		}
 	}
 
-	read_unlock(&vcc_sklist_lock);
 	return 0;
 }
 

@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/boot/bootp/init.S
  *
- *  Copyright (C) 2000-2002 Russell King
+ *  Copyright (C) 2000 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -11,9 +11,8 @@
  *  r0 through to r3 straight through.
  */
 		.section .start,#alloc,#execinstr
-		.type	_start, #function
-		.globl	_start
-_start:		adr	r10, initdata
+		.type	_entry, #function
+_entry:		adr	r10, initdata
 		ldr	r11, initdata
 		sub	r11, r10, r11		@ work out exec offset
 		b	splitify
@@ -23,8 +22,14 @@ _start:		adr	r10, initdata
 initdata:	.word	initdata		@ compiled address of this
 		.size	initdata,. - initdata
 
+		.text
 splitify:	adr	r13, data
 		ldmia	r13!, {r4-r6}		@ move the initrd
+		add	r4, r4, r11		@ correction
+		bl	move
+
+		ldmia	r13!, {r4-r6}		@ then the kernel
+		mov	r12, r5
 		add	r4, r4, r11		@ correction
 		bl	move
 
@@ -47,16 +52,17 @@ splitify:	adr	r13, data
 
 		ldr	r9, [r8, #4]		@ get first tag
 		teq	r9, r4
-		beq	taglist			@ ok, we have a tag list
+		bne	taglist			@ ok, we have a tag list
 
 /*
  * We didn't find a valid tag list - create one.
  */
 		str	r4, [r8, #4]
-		mov	r4, #(8 >> 2)
+		mov	r4, #8
 		str	r4, [r8, #0]
 		mov	r4, #0
 		str	r4, [r8, #8]
+
 /*
  * find the end of the tag list, and then add an INITRD tag on the end.
  * If there is already an INITRD tag, then we ignore it; the last INITRD
@@ -64,12 +70,12 @@ splitify:	adr	r13, data
  */
 taglist:	ldr	r9, [r8, #0]		@ tag length
 		teq	r9, #0			@ last tag?
-		addne	r8, r8, r9, lsl #2
+		addne	r8, r8, r9
 		bne	taglist
-		mov	r4, #(16 >> 2)		@ length of initrd tag
+
+		mov	r4, #16			@ length of initrd tag
 		mov	r9, #0			@ end of tag list terminator
 		stmia	r8, {r4, r5, r6, r7, r9}
-		adr	r12, kernel_start
 		mov	pc, r12			@ call kernel
 
 /*
@@ -77,7 +83,6 @@ taglist:	ldr	r9, [r8, #0]		@ tag length
  */
 param_struct:	add	r8, r8, #16*4
 		stmia	r8, {r6,r7}		@ save in param_struct
-		adr	r12, kernel_start
 		mov	pc, r12			@ call kernel
 
 move:		ldmia	r4!, {r7 - r10}		@ move 32-bytes at a time
@@ -92,12 +97,15 @@ data:		.word	initrd_start
 		.word	initrd_addr
 		.word	initrd_len
 
+		.word	kernel_start
+		.word	kernel_addr
+		.word	kernel_len
+
 		.word	0x54410001		@ r4 = ATAG_CORE
-		.word	0x54420005		@ r5 = ATAG_INITRD
-		.word	initrd_addr		@ r6
+		.word	0x54410005		@ r5 = ATAG_INITRD
+		.word	initrd_virt		@ r6
 		.word	initrd_len		@ r7
 		.word	params			@ r8
 
+		.type	kernel_start,#object
 		.type	initrd_start,#object
-
-kernel_start:

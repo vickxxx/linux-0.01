@@ -1,4 +1,4 @@
-/* $Id: timod.c,v 1.16.2.1 2001/12/18 22:15:25 davem Exp $
+/* $Id: timod.c,v 1.16 2001/09/18 22:29:06 davem Exp $
  * timod.c: timod emulation.
  *
  * Copyright (C) 1998 Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)
@@ -33,7 +33,7 @@ extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
 	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
-static spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
+spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
 static char * page = NULL ;
 
 #ifndef DEBUG_SOLARIS_KMALLOC
@@ -46,7 +46,7 @@ static char * page = NULL ;
 void * mykmalloc(size_t s, int gfp)
 {
 	static char * page;
-	static size_t free;
+	static size_t free = 0;
 	void * r;
 	s = ((s + 63) & ~63);
 	if( s > PAGE_SIZE ) {

@@ -2,10 +2,10 @@
 #define _ASM_IA64_POLL_H
 
 /*
- * poll(2) bit definitions.  Based on <asm-i386/poll.h>.
+ * poll(2) bit definitions.  Chosen to be compatible with Linux/x86.
  *
- * Modified 1998, 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #define POLLIN		0x0001

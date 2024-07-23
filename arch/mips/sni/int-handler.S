@@ -1,7 +1,7 @@
 /*
  * SNI RM200 PCI specific interrupt handler code.
  *
- * Copyright (C) 1994, 95, 96, 97, 98, 1999, 2000, 01 by Ralf Baechle
+ * Copyright (C) 1994, 95, 96, 97, 98, 1999, 2000 by Ralf Baechle
  */
 #include <asm/asm.h>
 #include <asm/mipsregs.h>
@@ -9,13 +9,12 @@
 #include <asm/sni.h>
 #include <asm/stackframe.h>
 
-/*
- * The PCI ASIC has the nasty property that it may delay writes if it is busy.
- * As a consequence from writes that have not graduated when we exit from the
- * interrupt handler we might catch a spurious interrupt.  To avoid this we
- * force the PCI ASIC to graduate all writes by executing a read from the
- * PCI bus.
- */
+/* The PCI ASIC has the nasty property that it may delay writes if it is busy.
+   As a consequence from writes that have not graduated when we exit from the
+   interrupt handler we might catch a spurious interrupt.  To avoid this we
+   force the PCI ASIC to graduate all writes by executing a read from the
+   PCI bus.  */
+
 		.set	noreorder
 		.set	noat
 		.align	5
@@ -47,7 +46,7 @@ led_cache:	.byte	0
 		bnez	t1, _hwint0
 		 nop
 
-		j	ret_from_irq			# spurious interrupt
+		j	return				# spurious interrupt
 		 nop
 
  ##############################################################################

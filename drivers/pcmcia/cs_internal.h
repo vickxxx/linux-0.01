@@ -1,5 +1,5 @@
 /*
- * cs_internal.h 1.57 2002/10/24 06:11:43
+ * cs_internal.h 1.54 2000/10/26 20:10:55
  *
  * The contents of this file are subject to the Mozilla Public License
  * Version 1.1 (the "License"); you may not use this file except in
@@ -202,13 +202,13 @@ int cb_config(socket_info_t *s);
 void cb_release(socket_info_t *s);
 void cb_enable(socket_info_t *s);
 void cb_disable(socket_info_t *s);
-int read_cb_mem(socket_info_t *s, u_char fn, int space,
-		u_int addr, u_int len, void *ptr);
+void read_cb_mem(socket_info_t *s, u_char fn, int space,
+		 u_int addr, u_int len, void *ptr);
 void cb_release_cis_mem(socket_info_t *s);
 
 /* In cistpl.c */
-int read_cis_mem(socket_info_t *s, int attr,
-		 u_int addr, u_int len, void *ptr);
+void read_cis_mem(socket_info_t *s, int attr,
+		  u_int addr, u_int len, void *ptr);
 void write_cis_mem(socket_info_t *s, int attr,
 		   u_int addr, u_int len, void *ptr);
 void release_cis_mem(socket_info_t *s);
@@ -238,11 +238,11 @@ int copy_memory(memory_handle_t handle, copy_op_t *req);
 
 /* In rsrc_mgr */
 void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
-		  int force_low, socket_info_t *s);
+		  int force_low);
 int find_io_region(ioaddr_t *base, ioaddr_t num, ioaddr_t align,
-		   char *name, socket_info_t *s);
+		   char *name);
 int find_mem_region(u_long *base, u_long num, u_long align,
-		    int force_low, char *name, socket_info_t *s);
+		    int force_low, char *name);
 int try_irq(u_int Attributes, int irq, int specific);
 void undo_irq(u_int Attributes, int irq);
 int adjust_resource_info(client_handle_t handle, adjust_t *adj);

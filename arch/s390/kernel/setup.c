@@ -48,125 +48,13 @@ unsigned int console_mode = 0;
 unsigned int console_device = -1;
 unsigned long memory_size = 0;
 unsigned long machine_flags = 0;
-struct { unsigned long addr, size, type; } memory_chunk[16] = { { 0 } };
+struct { unsigned long addr, size, type; } memory_chunk[16];
 #define CHUNK_READ_WRITE 0
 #define CHUNK_READ_ONLY 1
 __u16 boot_cpu_addr;
 int cpus_initialized = 0;
 unsigned long cpu_initialized = 0;
 volatile int __cpu_logical_map[NR_CPUS]; /* logical cpu to cpu address */
-
-unsigned long *pfix_table;
-unsigned int __global_storage_key;
-
-unsigned int get_storage_key(void) { return __global_storage_key; }
-
-unsigned long pfix_get_page_addr(void *addr)
-{
-	if (!MACHINE_HAS_PFIX)
-		return (unsigned long) addr;
-
-	return pfix_table[(unsigned long)virt_to_phys(addr)>>PAGE_SHIFT];
-}
-
-unsigned long pfix_get_addr(void *addr)
-{
-	if (!MACHINE_HAS_PFIX)
-		return (unsigned long) addr;
-
-	return pfix_get_page_addr(addr) + ((unsigned long)addr&(PAGE_SIZE-1));
-}
-
-/*
- * These functions allow to lock and unlock pages in VM. They need
- * the absolute address of the page to be locked or unlocked. This will
- * only work if the diag98 option in the user directory is enabled for
- * the guest.
- */
-
-/* if result is 0, addr will become the host absolute address */
-static inline int pfix_lock_page(void *addr)
-{
-        int ret;
-
-        __asm__ __volatile__(
-		"   sske  %1,%2\n"    /* set storage key */
-                "   l     0,0(%1)\n"  /* addr into gpr 0 */
-                "   lhi   2,0\n"      /* function code is 0 */
-                "   diag  2,0,0x98\n" /* result in gpr 1 */
-                "   jnz   0f\n"
-		"   lhi   %0,0\n"     /* if cc=0: return 0 */
-	    	"   st    1,0(%1)\n"  /* gpr1 contains host absol. addr */
-		"   j     1f\n"
-		"0: lr    %0,1\n"     /* gpr1 contains error code */
-		"   sske  %1,2\n"     /* reset storage key */
-		"1:\n"
-                : "=d" (ret), "+d" ((unsigned long)addr) : "d" (__global_storage_key) 
-                : "0", "1", "2", "cc" );
-        return ret;
-}
-
-static inline void pfix_unlock_page(unsigned long addr)
-{
-        __asm__ __volatile__(
-                "   lr    0,%0\n"  /* parameter in gpr 0 */
-                "   lhi   2,4\n"   /* function code is 4 */
-                "   diag  2,0,0x98\n" /* result in gpr 1 */
-		"   sske  %0,%1\n"
-                : : "a" (addr), "d" (0)
-                : "0", "1", "2", "cc" );
-}
-
-static void unpfix_all_pages(void)
-{
-        unsigned long i;
-
-	if (!pfix_table)
-		return;
-
-	for (i=0; i<sizeof(pfix_table); i++) {
-		if (pfix_table[i]) {
-			pfix_unlock_page(i << PAGE_SHIFT);
-		}
-	}
-}
-
-static void pfix_all_pages(unsigned long start_pfn, unsigned long max_pfn)
-{
-        unsigned long i,r;
-	unsigned long size;
-
-	size = ((max_pfn - start_pfn) >> PAGE_SHIFT) * sizeof(long);
-	pfix_table = alloc_bootmem(size);
-	if (!pfix_table)
-		return;
-
-	__global_storage_key = 6 << 4;
-	for (i = 0; i < 16 && memory_chunk[i].size > 0; i++) {
-		unsigned long start;
-
-		for(start = memory_chunk[i].addr; 
-		    (start < memory_chunk[i].addr + memory_chunk[i].size &&
-		     start < max_pfn); start += PAGE_SIZE) {
-			unsigned long index;
-
-			index = start >> PAGE_SHIFT;
-			pfix_table[index] = start;
-			r = pfix_lock_page(&pfix_table[index]);
-			if (r) {
-				pfix_table[index] = 0;
-				unpfix_all_pages();
-				free_bootmem((unsigned long)pfix_table, size);
-				machine_flags &= ~128; /* MACHINE_HAS_PFIX=0 */
-				__global_storage_key = 0;
-				printk(KERN_WARNING "Error enabling PFIX at "
-				       "address 0x%08lx.\n", start);
-				return;
-			}
-		}
-        }
-	printk (KERN_INFO "PFIX enabled.\n");
-}
 
 /*
  * Setup options
@@ -277,15 +165,15 @@ __setup("condev=", condev_setup);
 static int __init conmode_setup(char *str)
 {
 #if defined(CONFIG_HWC_CONSOLE)
-	if (strncmp(str, "hwc", 4) == 0)
+	if (strncmp(str, "hwc", 4) == 0 && !MACHINE_IS_P390)
                 SET_CONSOLE_HWC;
 #endif
 #if defined(CONFIG_TN3215_CONSOLE)
-	if (strncmp(str, "3215", 5) == 0)
+	if (strncmp(str, "3215", 5) == 0 && (MACHINE_IS_VM || MACHINE_IS_P390))
 		SET_CONSOLE_3215;
 #endif
 #if defined(CONFIG_TN3270_CONSOLE)
-	if (strncmp(str, "3270", 5) == 0)
+	if (strncmp(str, "3270", 5) == 0 && (MACHINE_IS_VM || MACHINE_IS_P390))
 		SET_CONSOLE_3270;
 #endif
         return 1;
@@ -345,61 +233,30 @@ static void __init conmode_default(void)
 	}
 }
 
-#ifdef CONFIG_SMP
-extern void machine_restart_smp(char *);
-extern void machine_halt_smp(void);
-extern void machine_power_off_smp(void);
-
-void (*_machine_restart)(char *command) = machine_restart_smp;
-void (*_machine_halt)(void) = machine_halt_smp;
-void (*_machine_power_off)(void) = machine_power_off_smp;
-#else
 /*
  * Reboot, halt and power_off routines for non SMP.
  */
-static void do_machine_restart_nonsmp(char * __unused)
+
+#ifndef CONFIG_SMP
+void machine_restart(char * __unused)
 {
 	reipl(S390_lowcore.ipl_device);
 }
 
-static void do_machine_halt_nonsmp(void)
+void machine_halt(void)
 {
         if (MACHINE_IS_VM && strlen(vmhalt_cmd) > 0)
                 cpcmd(vmhalt_cmd, NULL, 0);
         signal_processor(smp_processor_id(), sigp_stop_and_store_status);
 }
 
-static void do_machine_power_off_nonsmp(void)
+void machine_power_off(void)
 {
         if (MACHINE_IS_VM && strlen(vmpoff_cmd) > 0)
                 cpcmd(vmpoff_cmd, NULL, 0);
         signal_processor(smp_processor_id(), sigp_stop_and_store_status);
 }
-
-void (*_machine_restart)(char *command) = do_machine_restart_nonsmp;
-void (*_machine_halt)(void) = do_machine_halt_nonsmp;
-void (*_machine_power_off)(void) = do_machine_power_off_nonsmp;
 #endif
-
-/*
- * Reboot, halt and power_off stubs. They just call _machine_restart,
- * _machine_halt or _machine_power_off. 
- */
-
-void machine_restart(char *command)
-{
-	_machine_restart(command);
-}
-
-void machine_halt(void)
-{
-	_machine_halt();
-}
-
-void machine_power_off(void)
-{
-	_machine_power_off();
-}
 
 /*
  * Setup function called from init/main.c just after the banner
@@ -413,12 +270,11 @@ void __init setup_arch(char **cmdline_p)
         unsigned long memory_start, memory_end;
         char c = ' ', cn, *to = command_line, *from = COMMAND_LINE;
 	struct resource *res;
-	unsigned long start_pfn, end_pfn, max_pfn=0;
+	unsigned long start_pfn, end_pfn;
         static unsigned int smptrap=0;
         unsigned long delay = 0;
 	struct _lowcore *lowcore;
 	int i;
-	static int use_pfix;
 
         if (smptrap)
                 return;
@@ -428,12 +284,8 @@ void __init setup_arch(char **cmdline_p)
          * print what head.S has found out about the machine 
          */
 	printk((MACHINE_IS_VM) ?
-	       "We are running under VM (31 bit mode)\n" :
-	       "We are running native (31 bit mode)\n");
-	if (MACHINE_IS_VM)
-		printk((MACHINE_HAS_PFIX) ?
-		       "This machine has PFIX support\n" :
-		       "This machine has no PFIX support\n");
+	       "We are running under VM\n" :
+	       "We are running native\n");
 	printk((MACHINE_HAS_IEEE) ?
 	       "This machine has an IEEE fpu\n" :
 	       "This machine has no IEEE fpu\n");
@@ -491,14 +343,6 @@ void __init setup_arch(char **cmdline_p)
 			/* now wait for the requested amount of time */
 			udelay(delay);
                 }
-		/*
-		 * "use_pfix" specifies whether we want to fix all pages,
-		 * if possible.
-		 */
-		if (c == ' ' && strncmp(from, "use_pfix", 8) == 0) {
-			use_pfix = 1;
-			from += 8;
-		}
                 cn = *(from++);
                 if (!cn)
                         break;
@@ -513,10 +357,6 @@ void __init setup_arch(char **cmdline_p)
                         break;
                 *(to++) = c;
         }
-
-	if (!use_pfix)
-		machine_flags &= ~128; /* MACHINE_HAS_PFIX = 0 */
-
         if (c == ' ' && to > command_line) to--;
         *to = '\0';
         *cmdline_p = command_line;
@@ -552,8 +392,6 @@ void __init setup_arch(char **cmdline_p)
 		if (start_chunk < end_chunk)
 			free_bootmem(start_chunk << PAGE_SHIFT,
 				     (end_chunk - start_chunk) << PAGE_SHIFT);
-		if (start_chunk + memory_chunk[i].size > max_pfn)
-			max_pfn = start_chunk + memory_chunk[i].size;
 	}
 
         /*
@@ -601,7 +439,6 @@ void __init setup_arch(char **cmdline_p)
 	lowcore->kernel_stack = ((__u32) &init_task_union) + 8192;
 	lowcore->async_stack = (__u32)
 		__alloc_bootmem(2*PAGE_SIZE, 2*PAGE_SIZE, 0) + 8192;
-	lowcore->jiffy_timer = -1LL;
 	set_prefix((__u32) lowcore);
         cpu_init();
         boot_cpu_addr = S390_lowcore.cpu_data.cpu_addr;
@@ -611,10 +448,6 @@ void __init setup_arch(char **cmdline_p)
 	 * Create kernel page tables and switch to virtual addressing.
 	 */
         paging_init();
-
-	if (MACHINE_HAS_PFIX)
-		/* max_pfn may be smaller than memory_end. */
-		pfix_all_pages(start_pfn, max_pfn);
 
 	res = alloc_bootmem_low(sizeof(struct resource));
 	res->start = 0;
@@ -652,18 +485,17 @@ void print_cpu_info(struct cpuinfo_S390 *cpuinfo)
 static int show_cpuinfo(struct seq_file *m, void *v)
 {
         struct cpuinfo_S390 *cpuinfo;
-	unsigned long n = (unsigned long) v - 1;
+	unsigned n = v;
 
-	if (!n) {
+	if (!n--) {
 		seq_printf(m, "vendor_id       : IBM/S390\n"
 			       "# processors    : %i\n"
 			       "bogomips per cpu: %lu.%02lu\n",
 			       smp_num_cpus, loops_per_jiffy/(500000/HZ),
 			       (loops_per_jiffy/(5000/HZ))%100);
-	}
-	if (cpu_online_map & (1 << n)) {
-		cpuinfo = &safe_get_cpu_lowcore(n)->cpu_data;
-		seq_printf(m, "processor %li: "
+	} else if (cpu_online_map & (1 << n)) {
+		cpuinfo = &safe_get_cpu_lowcore(n).cpu_data;
+		seq_printf(m, "processor %i: "
 			       "version = %02X,  "
 			       "identification = %06X,  "
 			       "machine = %04X\n",
@@ -676,7 +508,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
-	return *pos <= NR_CPUS ? (void *)((unsigned long) *pos + 1) : NULL;
+	return *pos <= NR_CPUS ? (void)(*pos+1) : NULL;
 }
 static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 {

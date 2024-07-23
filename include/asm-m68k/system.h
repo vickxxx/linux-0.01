@@ -4,13 +4,10 @@
 #include <linux/config.h> /* get configuration macros */
 #include <linux/linkage.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <asm/segment.h>
 #include <asm/entry.h>
 
 #define prepare_to_switch()	do { } while(0)
-
-#ifdef __KERNEL__
 
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
@@ -44,11 +41,11 @@ asmlinkage void resume(void);
   register void *_next __asm__ ("a1") = (next); \
   register void *_last __asm__ ("d1"); \
   __asm__ __volatile__("jbsr " SYMBOL_NAME_STR(resume) \
-		       : "=a" (_prev), "=a" (_next), "=d" (_last) \
-		       : "0" (_prev), "1" (_next)		  \
-		       : "d0", "d2", "d3", "d4", "d5"); \
+		       : "=d" (_last) : "a" (_prev), "a" (_next) \
+		       : "d0", /* "d1", */ "d2", "d3", "d4", "d5", "a0", "a1"); \
   (last) = _last; \
 }
+
 
 /* interrupt control.. */
 #if 0
@@ -66,7 +63,6 @@ asmlinkage void resume(void);
 
 /* For spinlocks etc */
 #define local_irq_save(x)	({ __save_flags(x); __cli(); })
-#define local_irq_set(x)	({ __save_flags(x); __sti(); })
 #define local_irq_restore(x)	__restore_flags(x)
 #define local_irq_disable()	__cli()
 #define local_irq_enable()	__sti()
@@ -75,8 +71,7 @@ asmlinkage void resume(void);
 #define sti()			__sti()
 #define save_flags(x)		__save_flags(x)
 #define restore_flags(x)	__restore_flags(x)
-#define save_and_cli(x)		do { save_flags(x); cli(); } while(0)
-#define save_and_set(x)		do { save_flags(x); sti(); } while(0)
+#define save_and_cli(flags)   do { save_flags(flags); cli(); } while(0)
 
 /*
  * Force strict CPU ordering.
@@ -86,7 +81,7 @@ asmlinkage void resume(void);
 #define mb()		barrier()
 #define rmb()		barrier()
 #define wmb()		barrier()
-#define set_mb(var, value)     do { var = value; mb(); } while (0)
+#define set_mb(var, value)    do { xchg(&var, value); } while (0)
 #define set_wmb(var, value)    do { var = value; wmb(); } while (0)
 
 #define smp_mb()	barrier()
@@ -163,7 +158,5 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 	return x;
 }
 #endif
-
-#endif /* __KERNEL__ */
 
 #endif /* _M68K_SYSTEM_H */

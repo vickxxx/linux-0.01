@@ -34,7 +34,6 @@ ssize_t	raw_write(struct file *, const char *, size_t, loff_t *);
 int	raw_open(struct inode *, struct file *);
 int	raw_release(struct inode *, struct file *);
 int	raw_ctl_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
-int	raw_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 
 
 static struct file_operations raw_fops = {
@@ -42,7 +41,6 @@ static struct file_operations raw_fops = {
 	write:		raw_write,
 	open:		raw_open,
 	release:	raw_release,
-	ioctl:		raw_ioctl,
 };
 
 static struct file_operations raw_ctl_fops = {
@@ -161,25 +159,6 @@ int raw_release(struct inode *inode, struct file *filp)
 }
 
 
-
-/* Forward ioctls to the underlying block device. */ 
-int raw_ioctl(struct inode *inode, 
-		  struct file *flip,
-		  unsigned int command, 
-		  unsigned long arg)
-{
-	int minor = minor(inode->i_rdev), err; 
-	struct block_device *b; 
-	if (minor < 1 || minor > 255)
-		return -ENODEV;
-
-	b = raw_devices[minor].binding;
-	err = -EINVAL; 
-	if (b && b->bd_inode && b->bd_op && b->bd_op->ioctl) { 
-		err = b->bd_op->ioctl(b->bd_inode, NULL, command, arg); 
-	} 
-	return err;
-} 
 
 /*
  * Deal with ioctls against the raw-device control interface, to bind
@@ -301,7 +280,6 @@ ssize_t	rw_raw_dev(int rw, struct file *filp, char *buf,
 	int		minor;
 	kdev_t		dev;
 	unsigned long	limit;
-	loff_t		off = *offp;
 
 	int		sector_size, sector_bits, sector_mask;
 	int		max_sectors;
@@ -339,12 +317,12 @@ ssize_t	rw_raw_dev(int rw, struct file *filp, char *buf,
 		 MAJOR(dev), MINOR(dev), limit);
 	
 	err = -EINVAL;
-	if ((off & sector_mask) || (size & sector_mask))
+	if ((*offp & sector_mask) || (size & sector_mask))
 		goto out_free;
 	err = 0;
 	if (size)
 		err = -ENXIO;
-	if ((off >> sector_bits) >= limit)
+	if ((*offp >> sector_bits) >= limit)
 		goto out_free;
 
 	/*
@@ -354,7 +332,7 @@ ssize_t	rw_raw_dev(int rw, struct file *filp, char *buf,
 	 */
 
 	transferred = 0;
-	blocknr = off >> sector_bits;
+	blocknr = *offp >> sector_bits;
 	while (size > 0) {
 		blocks = size >> sector_bits;
 		if (blocks > max_sectors)
@@ -391,7 +369,7 @@ ssize_t	rw_raw_dev(int rw, struct file *filp, char *buf,
 	}
 	
 	if (transferred) {
-		*offp = off + transferred;
+		*offp += transferred;
 		err = transferred;
 	}
 

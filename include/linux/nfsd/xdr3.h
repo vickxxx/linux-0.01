@@ -41,7 +41,7 @@ struct nfsd3_writeargs {
 	__u32			count;
 	int			stable;
 	__u8 *			data;
-	__u32			len;
+	int			len;
 };
 
 struct nfsd3_createargs {

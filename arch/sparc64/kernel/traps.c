@@ -1,4 +1,4 @@
-/* $Id: traps.c,v 1.82 2001/11/18 00:12:56 davem Exp $
+/* $Id: traps.c,v 1.79 2001/09/21 02:14:39 kanoj Exp $
  * arch/sparc64/kernel/traps.c
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -30,59 +30,24 @@
 #include <asm/dcu.h>
 #include <asm/estate.h>
 #include <asm/chafsr.h>
-#include <asm/sfafsr.h>
 #include <asm/psrcompat.h>
 #include <asm/processor.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
 
-/* When an irrecoverable trap occurs at tl > 0, the trap entry
- * code logs the trap state registers at every level in the trap
- * stack.  It is found at (pt_regs + sizeof(pt_regs)) and the layout
- * is as follows:
- */
-struct tl1_traplog {
-	struct {
-		unsigned long tstate;
-		unsigned long tpc;
-		unsigned long tnpc;
-		unsigned long tt;
-	} trapstack[4];
-	unsigned long tl;
-};
-
-static void dump_tl1_traplog(struct tl1_traplog *p)
-{
-	int i;
-
-	printk("TRAPLOG: Error at trap level 0x%lx, dumping track stack.\n",
-	       p->tl);
-	for (i = 0; i < 4; i++) {
-		printk(KERN_CRIT
-		       "TRAPLOG: Trap level %d TSTATE[%016lx] TPC[%016lx] "
-		       "TNPC[%016lx] TT[%lx]\n",
-		       i + 1,
-		       p->trapstack[i].tstate, p->trapstack[i].tpc,
-		       p->trapstack[i].tnpc, p->trapstack[i].tt);
-	}
-}
-
 void bad_trap (struct pt_regs *regs, long lvl)
 {
-	char buffer[32];
 	siginfo_t info;
 
 	if (lvl < 0x100) {
-		sprintf(buffer, "Bad hw trap %lx at tl0\n", lvl);
-		die_if_kernel(buffer, regs);
-	}
-
-	lvl -= 0x100;
-	if (regs->tstate & TSTATE_PRIV) {
-		sprintf(buffer, "Kernel bad sw trap %lx", lvl);
+		char buffer[24];
+		
+		sprintf (buffer, "Bad hw trap %lx at tl0\n", lvl);
 		die_if_kernel (buffer, regs);
 	}
+	if (regs->tstate & TSTATE_PRIV)
+		die_if_kernel ("Kernel bad trap", regs);
 	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
@@ -91,35 +56,26 @@ void bad_trap (struct pt_regs *regs, long lvl)
 	info.si_errno = 0;
 	info.si_code = ILL_ILLTRP;
 	info.si_addr = (void *)regs->tpc;
-	info.si_trapno = lvl;
+	info.si_trapno = lvl - 0x100;
 	force_sig_info(SIGILL, &info, current);
 }
 
 void bad_trap_tl1 (struct pt_regs *regs, long lvl)
 {
-	char buffer[32];
+	char buffer[24];
 	
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
-
 	sprintf (buffer, "Bad trap %lx at tl>0", lvl);
 	die_if_kernel (buffer, regs);
 }
 
-#ifdef CONFIG_DEBUG_BUGVERBOSE
-void do_BUG(const char *file, int line)
-{
-	bust_spinlocks(1);
-	printk("kernel BUG at %s:%d!\n", file, line);
-}
-#endif
-
-void spitfire_insn_access_exception(struct pt_regs *regs, unsigned long sfsr, unsigned long sfar)
+void instruction_access_exception (struct pt_regs *regs,
+				   unsigned long sfsr, unsigned long sfar)
 {
 	siginfo_t info;
 
 	if (regs->tstate & TSTATE_PRIV) {
-		printk("spitfire_insn_access_exception: SFSR[%016lx] "
-		       "SFAR[%016lx], going.\n", sfsr, sfar);
+		printk("instruction_access_exception: SFSR[%016lx] SFAR[%016lx], going.\n",
+		       sfsr, sfar);
 		die_if_kernel("Iax", regs);
 	}
 	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
@@ -134,13 +90,8 @@ void spitfire_insn_access_exception(struct pt_regs *regs, unsigned long sfsr, un
 	force_sig_info(SIGSEGV, &info, current);
 }
 
-void spitfire_insn_access_exception_tl1(struct pt_regs *regs, unsigned long sfsr, unsigned long sfar)
-{
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
-	spitfire_insn_access_exception(regs, sfsr, sfar);
-}
-
-void spitfire_data_access_exception(struct pt_regs *regs, unsigned long sfsr, unsigned long sfar)
+void data_access_exception (struct pt_regs *regs,
+			    unsigned long sfsr, unsigned long sfar)
 {
 	siginfo_t info;
 
@@ -162,8 +113,8 @@ void spitfire_data_access_exception(struct pt_regs *regs, unsigned long sfsr, un
 			return;
 		}
 		/* Shit... */
-		printk("spitfire_data_access_exception: SFSR[%016lx] "
-		       "SFAR[%016lx], going.\n", sfsr, sfar);
+		printk("data_access_exception: SFSR[%016lx] SFAR[%016lx], going.\n",
+		       sfsr, sfar);
 		die_if_kernel("Dax", regs);
 	}
 
@@ -175,12 +126,6 @@ void spitfire_data_access_exception(struct pt_regs *regs, unsigned long sfsr, un
 	force_sig_info(SIGSEGV, &info, current);
 }
 
-void spitfire_data_access_exception_tl1(struct pt_regs *regs, unsigned long sfsr, unsigned long sfar)
-{
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
-	spitfire_data_access_exception(regs, sfsr, sfar);
-}
-
 #ifdef CONFIG_PCI
 /* This is really pathetic... */
 extern volatile int pci_poke_in_progress;
@@ -189,38 +134,69 @@ extern volatile int pci_poke_faulted;
 #endif
 
 /* When access exceptions happen, we must do this. */
-static void spitfire_clean_and_reenable_l1_caches(void)
+static void clean_and_reenable_l1_caches(void)
 {
 	unsigned long va;
 
-	if (tlb_type != spitfire)
-		BUG();
+	if (tlb_type == spitfire) {
+		/* Clean 'em. */
+		for (va =  0; va < (PAGE_SIZE << 1); va += 32) {
+			spitfire_put_icache_tag(va, 0x0);
+			spitfire_put_dcache_tag(va, 0x0);
+		}
 
-	/* Clean 'em. */
-	for (va =  0; va < (PAGE_SIZE << 1); va += 32) {
-		spitfire_put_icache_tag(va, 0x0);
-		spitfire_put_dcache_tag(va, 0x0);
+		/* Re-enable in LSU. */
+		__asm__ __volatile__("flush %%g6\n\t"
+				     "membar #Sync\n\t"
+				     "stxa %0, [%%g0] %1\n\t"
+				     "membar #Sync"
+				     : /* no outputs */
+				     : "r" (LSU_CONTROL_IC | LSU_CONTROL_DC |
+					    LSU_CONTROL_IM | LSU_CONTROL_DM),
+				     "i" (ASI_LSU_CONTROL)
+				     : "memory");
+	} else if (tlb_type == cheetah) {
+		/* Flush D-cache */
+		for (va = 0; va < (1 << 16); va += (1 << 5)) {
+			__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+					     "membar #Sync"
+					     : /* no outputs */
+					     : "r" (va), "i" (ASI_DCACHE_TAG));
+		}
 	}
-
-	/* Re-enable in LSU. */
-	__asm__ __volatile__("flush %%g6\n\t"
-			     "membar #Sync\n\t"
-			     "stxa %0, [%%g0] %1\n\t"
-			     "membar #Sync"
-			     : /* no outputs */
-			     : "r" (LSU_CONTROL_IC | LSU_CONTROL_DC |
-				    LSU_CONTROL_IM | LSU_CONTROL_DM),
-			     "i" (ASI_LSU_CONTROL)
-			     : "memory");
 }
 
-static void spitfire_enable_estate_errors(void)
+void do_iae(struct pt_regs *regs)
 {
-	__asm__ __volatile__("stxa	%0, [%%g0] %1\n\t"
-			     "membar	#Sync"
-			     : /* no outputs */
-			     : "r" (ESTATE_ERR_ALL),
-			       "i" (ASI_ESTATE_ERROR_EN));
+	siginfo_t info;
+
+	clean_and_reenable_l1_caches();
+
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_OBJERR;
+	info.si_addr = (void *)0;
+	info.si_trapno = 0;
+	force_sig_info(SIGBUS, &info, current);
+}
+
+void do_dae(struct pt_regs *regs)
+{
+#ifdef CONFIG_PCI
+	if (pci_poke_in_progress && pci_poke_cpu == smp_processor_id()) {
+		clean_and_reenable_l1_caches();
+
+		pci_poke_faulted = 1;
+
+		/* Why the fuck did they have to change this? */
+		if (tlb_type == cheetah)
+			regs->tpc += 4;
+
+		regs->tnpc = regs->tpc + 4;
+		return;
+	}
+#endif
+	do_iae(regs);
 }
 
 static char ecc_syndrome_table[] = {
@@ -258,15 +234,65 @@ static char ecc_syndrome_table[] = {
 	0x0b, 0x48, 0x48, 0x4b, 0x48, 0x4b, 0x4b, 0x4a
 };
 
+/* cee_trap in entry.S encodes AFSR/UDBH/UDBL error status
+ * in the following format.  The AFAR is left as is, with
+ * reserved bits cleared, and is a raw 40-bit physical
+ * address.
+ */
+#define CE_STATUS_UDBH_UE		(1UL << (43 + 9))
+#define CE_STATUS_UDBH_CE		(1UL << (43 + 8))
+#define CE_STATUS_UDBH_ESYNDR		(0xffUL << 43)
+#define CE_STATUS_UDBH_SHIFT		43
+#define CE_STATUS_UDBL_UE		(1UL << (33 + 9))
+#define CE_STATUS_UDBL_CE		(1UL << (33 + 8))
+#define CE_STATUS_UDBL_ESYNDR		(0xffUL << 33)
+#define CE_STATUS_UDBL_SHIFT		33
+#define CE_STATUS_AFSR_MASK		(0x1ffffffffUL)
+#define CE_STATUS_AFSR_ME		(1UL << 32)
+#define CE_STATUS_AFSR_PRIV		(1UL << 31)
+#define CE_STATUS_AFSR_ISAP		(1UL << 30)
+#define CE_STATUS_AFSR_ETP		(1UL << 29)
+#define CE_STATUS_AFSR_IVUE		(1UL << 28)
+#define CE_STATUS_AFSR_TO		(1UL << 27)
+#define CE_STATUS_AFSR_BERR		(1UL << 26)
+#define CE_STATUS_AFSR_LDP		(1UL << 25)
+#define CE_STATUS_AFSR_CP		(1UL << 24)
+#define CE_STATUS_AFSR_WP		(1UL << 23)
+#define CE_STATUS_AFSR_EDP		(1UL << 22)
+#define CE_STATUS_AFSR_UE		(1UL << 21)
+#define CE_STATUS_AFSR_CE		(1UL << 20)
+#define CE_STATUS_AFSR_ETS		(0xfUL << 16)
+#define CE_STATUS_AFSR_ETS_SHIFT	16
+#define CE_STATUS_AFSR_PSYND		(0xffffUL << 0)
+#define CE_STATUS_AFSR_PSYND_SHIFT	0
+
+/* Layout of Ecache TAG Parity Syndrome of AFSR */
+#define AFSR_ETSYNDROME_7_0		0x1UL /* E$-tag bus bits  <7:0> */
+#define AFSR_ETSYNDROME_15_8		0x2UL /* E$-tag bus bits <15:8> */
+#define AFSR_ETSYNDROME_21_16		0x4UL /* E$-tag bus bits <21:16> */
+#define AFSR_ETSYNDROME_24_22		0x8UL /* E$-tag bus bits <24:22> */
+
 static char *syndrome_unknown = "<Unknown>";
 
-static void spitfire_log_udb_syndrome(unsigned long afar, unsigned long udbh, unsigned long udbl, unsigned long bit)
+asmlinkage void cee_log(unsigned long ce_status,
+			unsigned long afar,
+			struct pt_regs *regs)
 {
-	unsigned short scode;
-	char memmod_str[64], *p;
+	char memmod_str[64];
+	char *p;
+	unsigned short scode, udb_reg;
 
-	if (udbl & bit) {
-		scode = ecc_syndrome_table[udbl & 0xff];
+	printk(KERN_WARNING "CPU[%d]: Correctable ECC Error "
+	       "AFSR[%lx] AFAR[%016lx] UDBL[%lx] UDBH[%lx]\n",
+	       smp_processor_id(),
+	       (ce_status & CE_STATUS_AFSR_MASK),
+	       afar,
+	       ((ce_status >> CE_STATUS_UDBL_SHIFT) & 0x3ffUL),
+	       ((ce_status >> CE_STATUS_UDBH_SHIFT) & 0x3ffUL));
+
+	udb_reg = ((ce_status >> CE_STATUS_UDBL_SHIFT) & 0x3ffUL);
+	if (udb_reg & (1 << 8)) {
+		scode = ecc_syndrome_table[udb_reg & 0xff];
 		if (prom_getunumber(scode, afar,
 				    memmod_str, sizeof(memmod_str)) == -1)
 			p = syndrome_unknown;
@@ -277,8 +303,9 @@ static void spitfire_log_udb_syndrome(unsigned long afar, unsigned long udbh, un
 		       smp_processor_id(), scode, p);
 	}
 
-	if (udbh & bit) {
-		scode = ecc_syndrome_table[udbh & 0xff];
+	udb_reg = ((ce_status >> CE_STATUS_UDBH_SHIFT) & 0x3ffUL);
+	if (udb_reg & (1 << 8)) {
+		scode = ecc_syndrome_table[udb_reg & 0xff];
 		if (prom_getunumber(scode, afar,
 				    memmod_str, sizeof(memmod_str)) == -1)
 			p = syndrome_unknown;
@@ -287,115 +314,6 @@ static void spitfire_log_udb_syndrome(unsigned long afar, unsigned long udbh, un
 		printk(KERN_WARNING "CPU[%d]: UDBH Syndrome[%x] "
 		       "Memory Module \"%s\"\n",
 		       smp_processor_id(), scode, p);
-	}
-
-}
-
-static void spitfire_cee_log(unsigned long afsr, unsigned long afar, unsigned long udbh, unsigned long udbl, int tl1, struct pt_regs *regs)
-{
-
-	printk(KERN_WARNING "CPU[%d]: Correctable ECC Error "
-	       "AFSR[%lx] AFAR[%016lx] UDBL[%lx] UDBH[%lx] TL>1[%d]\n",
-	       smp_processor_id(), afsr, afar, udbl, udbh, tl1);
-
-	spitfire_log_udb_syndrome(afar, udbh, udbl, UDBE_CE);
-
-	/* The Correctable ECC Error trap does not disable I/D caches.  So
-	 * we only have to restore the ESTATE Error Enable register.
-	 */
-	spitfire_enable_estate_errors();
-}
-
-static void spitfire_ue_log(unsigned long afsr, unsigned long afar, unsigned long udbh, unsigned long udbl, unsigned long tt, int tl1, struct pt_regs *regs)
-{
-	siginfo_t info;
-
-	printk(KERN_WARNING "CPU[%d]: Uncorrectable Error AFSR[%lx] "
-	       "AFAR[%lx] UDBL[%lx] UDBH[%ld] TT[%lx] TL>1[%d]\n",
-	       smp_processor_id(), afsr, afar, udbl, udbh, tt, tl1);
-
-	/* XXX add more human friendly logging of the error status
-	 * XXX as is implemented for cheetah
-	 */
-
-	spitfire_log_udb_syndrome(afar, udbh, udbl, UDBE_UE);
-
-	if (regs->tstate & TSTATE_PRIV) {
-		if (tl1)
-			dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
-		die_if_kernel("UE", regs);
-	}
-
-	/* XXX need more intelligent processing here, such as is implemented
-	 * XXX for cheetah errors, in fact if the E-cache still holds the
-	 * XXX line with bad parity this will loop
-	 */
-
-	spitfire_clean_and_reenable_l1_caches();
-	spitfire_enable_estate_errors();
-
-	if (current->thread.flags & SPARC_FLAG_32BIT) {
-		regs->tpc &= 0xffffffff;
-		regs->tnpc &= 0xffffffff;
-	}
-	info.si_signo = SIGBUS;
-	info.si_errno = 0;
-	info.si_code = BUS_OBJERR;
-	info.si_addr = (void *)0;
-	info.si_trapno = 0;
-	force_sig_info(SIGBUS, &info, current);
-}
-
-void spitfire_access_error(struct pt_regs *regs, unsigned long status_encoded, unsigned long afar)
-{
-	unsigned long afsr, tt, udbh, udbl;
-	int tl1;
-
-	afsr = (status_encoded & SFSTAT_AFSR_MASK) >> SFSTAT_AFSR_SHIFT;
-	tt = (status_encoded & SFSTAT_TRAP_TYPE) >> SFSTAT_TRAP_TYPE_SHIFT;
-	tl1 = (status_encoded & SFSTAT_TL_GT_ONE) ? 1 : 0;
-	udbl = (status_encoded & SFSTAT_UDBL_MASK) >> SFSTAT_UDBL_SHIFT;
-	udbh = (status_encoded & SFSTAT_UDBH_MASK) >> SFSTAT_UDBH_SHIFT;
-
-#ifdef CONFIG_PCI
-	if (tt == TRAP_TYPE_DAE &&
-	    pci_poke_in_progress && pci_poke_cpu == smp_processor_id()) {
-		spitfire_clean_and_reenable_l1_caches();
-		spitfire_enable_estate_errors();
-
-		pci_poke_faulted = 1;
-		regs->tnpc = regs->tpc + 4;
-		return;
-	}
-#endif
-
-	if (afsr & SFAFSR_UE)
-		spitfire_ue_log(afsr, afar, udbh, udbl, tt, tl1, regs);
-
-	if (tt == TRAP_TYPE_CEE) {
-		/* Handle the case where we took a CEE trap, but ACK'd
-		 * only the UE state in the UDB error registers.
-		 */
-		if (afsr & SFAFSR_UE) {
-			if (udbh & UDBE_CE) {
-				__asm__ __volatile__(
-					"stxa	%0, [%1] %2\n\t"
-					"membar	#Sync"
-					: /* no outputs */
-					: "r" (udbh & UDBE_CE),
-					  "r" (0x0), "i" (ASI_UDB_ERROR_W));
-			}
-			if (udbl & UDBE_CE) {
-				__asm__ __volatile__(
-					"stxa	%0, [%1] %2\n\t"
-					"membar	#Sync"
-					: /* no outputs */
-					: "r" (udbl & UDBE_CE),
-					  "r" (0x18), "i" (ASI_UDB_ERROR_W));
-			}
-		}
-
-		spitfire_cee_log(afsr, afar, udbh, udbl, tl1, regs);
 	}
 }
 
@@ -439,179 +357,6 @@ struct cheetah_err_info {
 };
 #define CHAFSR_INVALID		((u64)-1L)
 
-/* This table is ordered in priority of errors and matches the
- * AFAR overwrite policy as well.
- */
-
-struct afsr_error_table {
-	unsigned long mask;
-	const char *name;
-};
-
-static const char CHAFSR_PERR_msg[] =
-	"System interface protocol error";
-static const char CHAFSR_IERR_msg[] =
-	"Internal processor error";
-static const char CHAFSR_ISAP_msg[] =
-	"System request parity error on incoming addresss";
-static const char CHAFSR_UCU_msg[] =
-	"Uncorrectable E-cache ECC error for ifetch/data";
-static const char CHAFSR_UCC_msg[] =
-	"SW Correctable E-cache ECC error for ifetch/data";
-static const char CHAFSR_UE_msg[] =
-	"Uncorrectable system bus data ECC error for read";
-static const char CHAFSR_EDU_msg[] =
-	"Uncorrectable E-cache ECC error for stmerge/blkld";
-static const char CHAFSR_EMU_msg[] =
-	"Uncorrectable system bus MTAG error";
-static const char CHAFSR_WDU_msg[] =
-	"Uncorrectable E-cache ECC error for writeback";
-static const char CHAFSR_CPU_msg[] =
-	"Uncorrectable ECC error for copyout";
-static const char CHAFSR_CE_msg[] =
-	"HW corrected system bus data ECC error for read";
-static const char CHAFSR_EDC_msg[] =
-	"HW corrected E-cache ECC error for stmerge/blkld";
-static const char CHAFSR_EMC_msg[] =
-	"HW corrected system bus MTAG ECC error";
-static const char CHAFSR_WDC_msg[] =
-	"HW corrected E-cache ECC error for writeback";
-static const char CHAFSR_CPC_msg[] =
-	"HW corrected ECC error for copyout";
-static const char CHAFSR_TO_msg[] =
-	"Unmapped error from system bus";
-static const char CHAFSR_BERR_msg[] =
-	"Bus error response from system bus";
-static const char CHAFSR_IVC_msg[] =
-	"HW corrected system bus data ECC error for ivec read";
-static const char CHAFSR_IVU_msg[] =
-	"Uncorrectable system bus data ECC error for ivec read";
-static struct afsr_error_table __cheetah_error_table[] = {
-	{	CHAFSR_PERR,	CHAFSR_PERR_msg		},
-	{	CHAFSR_IERR,	CHAFSR_IERR_msg		},
-	{	CHAFSR_ISAP,	CHAFSR_ISAP_msg		},
-	{	CHAFSR_UCU,	CHAFSR_UCU_msg		},
-	{	CHAFSR_UCC,	CHAFSR_UCC_msg		},
-	{	CHAFSR_UE,	CHAFSR_UE_msg		},
-	{	CHAFSR_EDU,	CHAFSR_EDU_msg		},
-	{	CHAFSR_EMU,	CHAFSR_EMU_msg		},
-	{	CHAFSR_WDU,	CHAFSR_WDU_msg		},
-	{	CHAFSR_CPU,	CHAFSR_CPU_msg		},
-	{	CHAFSR_CE,	CHAFSR_CE_msg		},
-	{	CHAFSR_EDC,	CHAFSR_EDC_msg		},
-	{	CHAFSR_EMC,	CHAFSR_EMC_msg		},
-	{	CHAFSR_WDC,	CHAFSR_WDC_msg		},
-	{	CHAFSR_CPC,	CHAFSR_CPC_msg		},
-	{	CHAFSR_TO,	CHAFSR_TO_msg		},
-	{	CHAFSR_BERR,	CHAFSR_BERR_msg		},
-	/* These two do not update the AFAR. */
-	{	CHAFSR_IVC,	CHAFSR_IVC_msg		},
-	{	CHAFSR_IVU,	CHAFSR_IVU_msg		},
-	{	0,		NULL			},
-};
-static const char CHPAFSR_DTO_msg[] =
-	"System bus unmapped error for prefetch/storequeue-read";
-static const char CHPAFSR_DBERR_msg[] =
-	"System bus error for prefetch/storequeue-read";
-static const char CHPAFSR_THCE_msg[] =
-	"Hardware corrected E-cache Tag ECC error";
-static const char CHPAFSR_TSCE_msg[] =
-	"SW handled correctable E-cache Tag ECC error";
-static const char CHPAFSR_TUE_msg[] =
-	"Uncorrectable E-cache Tag ECC error";
-static const char CHPAFSR_DUE_msg[] =
-	"System bus uncorrectable data ECC error due to prefetch/store-fill";
-static struct afsr_error_table __cheetah_plus_error_table[] = {
-	{	CHAFSR_PERR,	CHAFSR_PERR_msg		},
-	{	CHAFSR_IERR,	CHAFSR_IERR_msg		},
-	{	CHAFSR_ISAP,	CHAFSR_ISAP_msg		},
-	{	CHAFSR_UCU,	CHAFSR_UCU_msg		},
-	{	CHAFSR_UCC,	CHAFSR_UCC_msg		},
-	{	CHAFSR_UE,	CHAFSR_UE_msg		},
-	{	CHAFSR_EDU,	CHAFSR_EDU_msg		},
-	{	CHAFSR_EMU,	CHAFSR_EMU_msg		},
-	{	CHAFSR_WDU,	CHAFSR_WDU_msg		},
-	{	CHAFSR_CPU,	CHAFSR_CPU_msg		},
-	{	CHAFSR_CE,	CHAFSR_CE_msg		},
-	{	CHAFSR_EDC,	CHAFSR_EDC_msg		},
-	{	CHAFSR_EMC,	CHAFSR_EMC_msg		},
-	{	CHAFSR_WDC,	CHAFSR_WDC_msg		},
-	{	CHAFSR_CPC,	CHAFSR_CPC_msg		},
-	{	CHAFSR_TO,	CHAFSR_TO_msg		},
-	{	CHAFSR_BERR,	CHAFSR_BERR_msg		},
-	{	CHPAFSR_DTO,	CHPAFSR_DTO_msg		},
-	{	CHPAFSR_DBERR,	CHPAFSR_DBERR_msg	},
-	{	CHPAFSR_THCE,	CHPAFSR_THCE_msg	},
-	{	CHPAFSR_TSCE,	CHPAFSR_TSCE_msg	},
-	{	CHPAFSR_TUE,	CHPAFSR_TUE_msg		},
-	{	CHPAFSR_DUE,	CHPAFSR_DUE_msg		},
-	/* These two do not update the AFAR. */
-	{	CHAFSR_IVC,	CHAFSR_IVC_msg		},
-	{	CHAFSR_IVU,	CHAFSR_IVU_msg		},
-	{	0,		NULL			},
-};
-static const char JPAFSR_JETO_msg[] =
-	"System interface protocol error, hw timeout caused";
-static const char JPAFSR_SCE_msg[] =
-	"Parity error on system snoop results";
-static const char JPAFSR_JEIC_msg[] =
-	"System interface protocol error, illegal command detected";
-static const char JPAFSR_JEIT_msg[] =
-	"System interface protocol error, illegal ADTYPE detected";
-static const char JPAFSR_OM_msg[] =
-	"Out of range memory error has occurred";
-static const char JPAFSR_ETP_msg[] =
-	"Parity error on L2 cache tag SRAM";
-static const char JPAFSR_UMS_msg[] =
-	"Error due to unsupported store";
-static const char JPAFSR_RUE_msg[] =
-	"Uncorrectable ECC error from remote cache/memory";
-static const char JPAFSR_RCE_msg[] =
-	"Correctable ECC error from remote cache/memory";
-static const char JPAFSR_BP_msg[] =
-	"JBUS parity error on returned read data";
-static const char JPAFSR_WBP_msg[] =
-	"JBUS parity error on data for writeback or block store";
-static const char JPAFSR_FRC_msg[] =
-	"Foreign read to DRAM incurring correctable ECC error";
-static const char JPAFSR_FRU_msg[] =
-	"Foreign read to DRAM incurring uncorrectable ECC error";
-static struct afsr_error_table __jalapeno_error_table[] = {
-	{	JPAFSR_JETO,	JPAFSR_JETO_msg		},
-	{	JPAFSR_SCE,	JPAFSR_SCE_msg		},
-	{	JPAFSR_JEIC,	JPAFSR_JEIC_msg		},
-	{	JPAFSR_JEIT,	JPAFSR_JEIT_msg		},
-	{	CHAFSR_PERR,	CHAFSR_PERR_msg		},
-	{	CHAFSR_IERR,	CHAFSR_IERR_msg		},
-	{	CHAFSR_ISAP,	CHAFSR_ISAP_msg		},
-	{	CHAFSR_UCU,	CHAFSR_UCU_msg		},
-	{	CHAFSR_UCC,	CHAFSR_UCC_msg		},
-	{	CHAFSR_UE,	CHAFSR_UE_msg		},
-	{	CHAFSR_EDU,	CHAFSR_EDU_msg		},
-	{	JPAFSR_OM,	JPAFSR_OM_msg		},
-	{	CHAFSR_WDU,	CHAFSR_WDU_msg		},
-	{	CHAFSR_CPU,	CHAFSR_CPU_msg		},
-	{	CHAFSR_CE,	CHAFSR_CE_msg		},
-	{	CHAFSR_EDC,	CHAFSR_EDC_msg		},
-	{	JPAFSR_ETP,	JPAFSR_ETP_msg		},
-	{	CHAFSR_WDC,	CHAFSR_WDC_msg		},
-	{	CHAFSR_CPC,	CHAFSR_CPC_msg		},
-	{	CHAFSR_TO,	CHAFSR_TO_msg		},
-	{	CHAFSR_BERR,	CHAFSR_BERR_msg		},
-	{	JPAFSR_UMS,	JPAFSR_UMS_msg		},
-	{	JPAFSR_RUE,	JPAFSR_RUE_msg		},
-	{	JPAFSR_RCE,	JPAFSR_RCE_msg		},
-	{	JPAFSR_BP,	JPAFSR_BP_msg		},
-	{	JPAFSR_WBP,	JPAFSR_WBP_msg		},
-	{	JPAFSR_FRC,	JPAFSR_FRC_msg		},
-	{	JPAFSR_FRU,	JPAFSR_FRU_msg		},
-	/* These two do not update the AFAR. */
-	{	CHAFSR_IVU,	CHAFSR_IVU_msg		},
-	{	0,		NULL			},
-};
-static struct afsr_error_table *cheetah_error_table;
-static unsigned long cheetah_afsr_errors;
-
 /* This is allocated at boot time based upon the largest hardware
  * cpu ID in the system.  We allocate two entries per cpu, one for
  * TL==0 logging and one for TL >= 1 logging.
@@ -633,21 +378,17 @@ static __inline__ struct cheetah_err_info *cheetah_get_error_log(unsigned long a
 	return p;
 }
 
-extern unsigned int tl0_icpe[], tl1_icpe[];
-extern unsigned int tl0_dcpe[], tl1_dcpe[];
 extern unsigned int tl0_fecc[], tl1_fecc[];
 extern unsigned int tl0_cee[], tl1_cee[];
 extern unsigned int tl0_iae[], tl1_iae[];
 extern unsigned int tl0_dae[], tl1_dae[];
-extern unsigned int cheetah_plus_icpe_trap_vector[], cheetah_plus_icpe_trap_vector_tl1[];
-extern unsigned int cheetah_plus_dcpe_trap_vector[], cheetah_plus_dcpe_trap_vector_tl1[];
 extern unsigned int cheetah_fecc_trap_vector[], cheetah_fecc_trap_vector_tl1[];
 extern unsigned int cheetah_cee_trap_vector[], cheetah_cee_trap_vector_tl1[];
 extern unsigned int cheetah_deferred_trap_vector[], cheetah_deferred_trap_vector_tl1[];
 
 void cheetah_ecache_flush_init(void)
 {
-	unsigned long largest_size, smallest_linesize, order, ver;
+	unsigned long largest_size, smallest_linesize, order;
 	char type[16];
 	int node, highest_cpu, i;
 
@@ -733,18 +474,6 @@ void cheetah_ecache_flush_init(void)
 	for (i = 0; i < 2 * highest_cpu; i++)
 		cheetah_error_log[i].afsr = CHAFSR_INVALID;
 
-	__asm__ ("rdpr %%ver, %0" : "=r" (ver));
-	if ((ver >> 32) == 0x003e0016) {
-		cheetah_error_table = &__jalapeno_error_table[0];
-		cheetah_afsr_errors = JPAFSR_ERRORS;
-	} else if ((ver >> 32) == 0x003e0015) {
-		cheetah_error_table = &__cheetah_plus_error_table[0];
-		cheetah_afsr_errors = CHPAFSR_ERRORS;
-	} else {
-		cheetah_error_table = &__cheetah_error_table[0];
-		cheetah_afsr_errors = CHAFSR_ERRORS;
-	}
-
 	/* Now patch trap tables. */
 	memcpy(tl0_fecc, cheetah_fecc_trap_vector, (8 * 4));
 	memcpy(tl1_fecc, cheetah_fecc_trap_vector_tl1, (8 * 4));
@@ -754,12 +483,6 @@ void cheetah_ecache_flush_init(void)
 	memcpy(tl1_iae, cheetah_deferred_trap_vector_tl1, (8 * 4));
 	memcpy(tl0_dae, cheetah_deferred_trap_vector, (8 * 4));
 	memcpy(tl1_dae, cheetah_deferred_trap_vector_tl1, (8 * 4));
-	if (tlb_type == cheetah_plus) {
-		memcpy(tl0_dcpe, cheetah_plus_dcpe_trap_vector, (8 * 4));
-		memcpy(tl1_dcpe, cheetah_plus_dcpe_trap_vector_tl1, (8 * 4));
-		memcpy(tl0_icpe, cheetah_plus_icpe_trap_vector, (8 * 4));
-		memcpy(tl1_icpe, cheetah_plus_icpe_trap_vector_tl1, (8 * 4));
-	}
 	flushi(PAGE_OFFSET);
 }
 
@@ -798,22 +521,9 @@ static void cheetah_flush_ecache_line(unsigned long physaddr)
  *
  * So we must only flush the I-cache when it is disabled.
  */
-static void __cheetah_flush_icache(void)
-{
-	unsigned long i;
-
-	/* Clear the valid bits in all the tags. */
-	for (i = 0; i < (1 << 15); i += (1 << 5)) {
-		__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
-				     "membar #Sync"
-				     : /* no outputs */
-				     : "r" (i | (2 << 3)), "i" (ASI_IC_TAG));
-	}
-}
-
 static void cheetah_flush_icache(void)
 {
-	unsigned long dcu_save;
+	unsigned long dcu_save, i;
 
 	/* Save current DCU, disable I-cache. */
 	__asm__ __volatile__("ldxa [%%g0] %1, %0\n\t"
@@ -824,7 +534,13 @@ static void cheetah_flush_icache(void)
 			     : "i" (ASI_DCU_CONTROL_REG), "i" (DCU_IC)
 			     : "g1");
 
-	__cheetah_flush_icache();
+	/* Clear the valid bits in all the tags. */
+	for (i = 0; i < (1 << 16); i += (1 << 5)) {
+		__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+				     "membar #Sync"
+				     : /* no outputs */
+				     : "r" (i | (2 << 3)), "i" (ASI_IC_TAG));
+	}
 
 	/* Restore DCU register */
 	__asm__ __volatile__("stxa %0, [%%g0] %1\n\t"
@@ -842,34 +558,6 @@ static void cheetah_flush_dcache(void)
 				     "membar #Sync"
 				     : /* no outputs */
 				     : "r" (i), "i" (ASI_DCACHE_TAG));
-	}
-}
-
-/* In order to make the even parity correct we must do two things.
- * First, we clear DC_data_parity and set DC_utag to an appropriate value.
- * Next, we clear out all 32-bytes of data for that line.  Data of
- * all-zero + tag parity value of zero == correct parity.
- */
-static void cheetah_plus_zap_dcache_parity(void)
-{
-	unsigned long i;
-
-	for (i = 0; i < (1 << 16); i += (1 << 5)) {
-		unsigned long tag = (i >> 14);
-		unsigned long j;
-
-		__asm__ __volatile__("membar	#Sync\n\t"
-				     "stxa	%0, [%1] %2\n\t"
-				     "membar	#Sync"
-				     : /* no outputs */
-				     : "r" (tag), "r" (i),
-				       "i" (ASI_DCACHE_UTAG));
-		for (j = i; j < i + (1 << 5); j += (1 << 3))
-			__asm__ __volatile__("membar	#Sync\n\t"
-					     "stxa	%%g0, [%0] %1\n\t"
-					     "membar	#Sync"
-					     : /* no outputs */
-					     : "r" (j), "i" (ASI_DCACHE_DATA));
 	}
 }
 
@@ -943,6 +631,36 @@ static unsigned char cheetah_mtag_syntab[] = {
        NONE, NONE
 };
 
+/* This table is ordered in priority of errors and matches the
+ * AFAR overwrite policy as well.
+ */
+static struct {
+	unsigned long mask;
+	char *name;
+} cheetah_error_table[] = {
+	{	CHAFSR_PERR,	"System interface protocol error"			},
+	{	CHAFSR_IERR,	"Internal processor error"				},
+	{	CHAFSR_ISAP,	"System request parity error on incoming addresss"	},
+	{	CHAFSR_UCU,	"Uncorrectable E-cache ECC error for ifetch/data"	},
+	{	CHAFSR_UCC,	"SW Correctable E-cache ECC error for ifetch/data"	},
+	{	CHAFSR_UE,	"Uncorrectable system bus data ECC error for read"	},
+	{	CHAFSR_EDU,	"Uncorrectable E-cache ECC error for stmerge/blkld"	},
+	{	CHAFSR_EMU,	"Uncorrectable system bus MTAG error"			},
+	{	CHAFSR_WDU,	"Uncorrectable E-cache ECC error for writeback"		},
+	{	CHAFSR_CPU,	"Uncorrectable ECC error for copyout"			},
+	{	CHAFSR_CE,	"HW corrected system bus data ECC error for read"	},
+	{	CHAFSR_EDC,	"HW corrected E-cache ECC error for stmerge/blkld"	},
+	{	CHAFSR_EMC,	"HW corrected system bus MTAG ECC error"		},
+	{	CHAFSR_WDC,	"HW corrected E-cache ECC error for writeback"		},
+	{	CHAFSR_CPC,	"HW corrected ECC error for copyout"			},
+	{	CHAFSR_TO,	"Unmapped error from system bus"			},
+	{	CHAFSR_BERR,	"Bus error response from system bus"			},
+	/* These two do not update the AFAR. */
+	{	CHAFSR_IVC,	"HW corrected system bus data ECC error for ivec read"	},
+	{	CHAFSR_IVU,	"Uncorrectable system bus data ECC error for ivec read"	},
+	{	0,		NULL							}
+};
+
 /* Return the highest priority error conditon mentioned. */
 static __inline__ unsigned long cheetah_get_hipri(unsigned long afsr)
 {
@@ -956,7 +674,7 @@ static __inline__ unsigned long cheetah_get_hipri(unsigned long afsr)
 	return tmp;
 }
 
-static const char *cheetah_get_string(unsigned long bit)
+static char *cheetah_get_string(unsigned long bit)
 {
 	int i;
 
@@ -1069,7 +787,7 @@ static void cheetah_log_errors(struct pt_regs *regs, struct cheetah_err_info *in
 	       info->ecache_data[2],
 	       info->ecache_data[3]);
 
-	afsr = (afsr & ~hipri) & cheetah_afsr_errors;
+	afsr = (afsr & ~hipri) & CHAFSR_ERRORS;
 	while (afsr != 0UL) {
 		unsigned long bit = cheetah_get_hipri(afsr);
 
@@ -1092,7 +810,7 @@ static int cheetah_recheck_errors(struct cheetah_err_info *logp)
 	__asm__ __volatile__("ldxa [%%g0] %1, %0\n\t"
 			     : "=r" (afsr)
 			     : "i" (ASI_AFSR));
-	if ((afsr & cheetah_afsr_errors) != 0) {
+	if ((afsr & CHAFSR_ERRORS) != 0) {
 		if (logp != NULL) {
 			__asm__ __volatile__("ldxa [%%g0] %1, %0\n\t"
 					     : "=r" (afar)
@@ -1229,7 +947,6 @@ static int cheetah_fix_ce(unsigned long physaddr)
 	__asm__ __volatile__("ldxa	[%0] %3, %%g0\n\t"
 			     "ldxa	[%1] %3, %%g0\n\t"
 			     "casxa	[%2] %3, %%g0, %%g0\n\t"
-			     "membar	#StoreLoad | #StoreStore\n\t"
 			     "ldxa	[%0] %3, %%g0\n\t"
 			     "ldxa	[%1] %3, %%g0\n\t"
 			     "membar	#Sync"
@@ -1318,12 +1035,12 @@ void cheetah_cee_handler(struct pt_regs *regs, unsigned long afsr, unsigned long
 
 		flush_all = flush_line = 0;
 		if ((afsr & CHAFSR_EDC) != 0UL) {
-			if ((afsr & cheetah_afsr_errors) == CHAFSR_EDC)
+			if ((afsr & CHAFSR_ERRORS) == CHAFSR_EDC)
 				flush_line = 1;
 			else
 				flush_all = 1;
 		} else if ((afsr & CHAFSR_CPC) != 0UL) {
-			if ((afsr & cheetah_afsr_errors) == CHAFSR_CPC)
+			if ((afsr & CHAFSR_ERRORS) == CHAFSR_CPC)
 				flush_line = 1;
 			else
 				flush_all = 1;
@@ -1446,12 +1163,12 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 
 		flush_all = flush_line = 0;
 		if ((afsr & CHAFSR_EDU) != 0UL) {
-			if ((afsr & cheetah_afsr_errors) == CHAFSR_EDU)
+			if ((afsr & CHAFSR_ERRORS) == CHAFSR_EDU)
 				flush_line = 1;
 			else
 				flush_all = 1;
 		} else if ((afsr & CHAFSR_BERR) != 0UL) {
-			if ((afsr & cheetah_afsr_errors) == CHAFSR_BERR)
+			if ((afsr & CHAFSR_ERRORS) == CHAFSR_BERR)
 				flush_line = 1;
 			else
 				flush_all = 1;
@@ -1565,46 +1282,6 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 		panic("Irrecoverable deferred error trap.\n");
 }
 
-/* Handle a D/I cache parity error trap.  TYPE is encoded as:
- *
- * Bit0:	0=dcache,1=icache
- * Bit1:	0=recoverable,1=unrecoverable
- *
- * The hardware has disabled both the I-cache and D-cache in
- * the %dcr register.  
- */
-void cheetah_plus_parity_error(int type, struct pt_regs *regs)
-{
-	if (type & 0x1)
-		__cheetah_flush_icache();
-	else
-		cheetah_plus_zap_dcache_parity();
-	cheetah_flush_dcache();
-
-	/* Re-enable I-cache/D-cache */
-	__asm__ __volatile__("ldxa [%%g0] %0, %%g1\n\t"
-			     "or %%g1, %1, %%g1\n\t"
-			     "stxa %%g1, [%%g0] %0\n\t"
-			     "membar #Sync"
-			     : /* no outputs */
-			     : "i" (ASI_DCU_CONTROL_REG),
-			       "i" (DCU_DC | DCU_IC)
-			     : "g1");
-
-	if (type & 0x2) {
-		printk(KERN_EMERG "CPU[%d]: Cheetah+ %c-cache parity error at TPC[%016lx]\n",
-		       smp_processor_id(),
-		       (type & 0x1) ? 'I' : 'D',
-		       regs->tpc);
-		panic("Irrecoverable Cheetah+ parity error.");
-	}
-
-	printk(KERN_WARNING "CPU[%d]: Cheetah+ %c-cache parity error at TPC[%016lx]\n",
-	       smp_processor_id(),
-	       (type & 0x1) ? 'I' : 'D',
-	       regs->tpc);
-}
-
 void do_fpe_common(struct pt_regs *regs)
 {
 	if(regs->tstate & TSTATE_PRIV) {
@@ -1684,8 +1361,6 @@ void do_div0(struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if (regs->tstate & TSTATE_PRIV)
-		die_if_kernel("TL0: Kernel divide by zero.", regs);
 	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
@@ -1728,17 +1403,17 @@ void user_instruction_dump (unsigned int *pc)
 	printk("\n");
 }
 
-void show_trace_raw(struct task_struct *tsk, unsigned long ksp)
+void show_trace_task(struct task_struct *tsk)
 {
 	unsigned long pc, fp;
 	unsigned long task_base = (unsigned long)tsk;
 	struct reg_window *rw;
 	int count = 0;
 
-	if (tsk == current)
-		flushw_all();
+	if (!tsk)
+		return;
 
-	fp = ksp + STACK_BIAS;
+	fp = tsk->thread.ksp + STACK_BIAS;
 	do {
 		/* Bogus frame pointer? */
 		if (fp < (task_base + sizeof(struct task_struct)) ||
@@ -1750,21 +1425,6 @@ void show_trace_raw(struct task_struct *tsk, unsigned long ksp)
 		fp = rw->ins[6] + STACK_BIAS;
 	} while (++count < 16);
 	printk("\n");
-}
-
-void show_trace_task(struct task_struct *tsk)
-{
-	if (tsk)
-		show_trace_raw(tsk, tsk->thread.ksp);
-}
-
-void dump_stack(void)
-{
-	unsigned long ksp;
-
-	__asm__ __volatile__("mov	%%fp, %0"
-			     : "=r" (ksp));
-	show_trace_raw(current, ksp);
 }
 
 void die_if_kernel(char *str, struct pt_regs *regs)
@@ -1899,67 +1559,56 @@ void do_cee(struct pt_regs *regs)
 
 void do_cee_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Cache Error Exception", regs);
 }
 
 void do_dae_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Data Access Exception", regs);
 }
 
 void do_iae_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Instruction Access Exception", regs);
 }
 
 void do_div0_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: DIV0 Exception", regs);
 }
 
 void do_fpdis_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU Disabled", regs);
 }
 
 void do_fpieee_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU IEEE Exception", regs);
 }
 
 void do_fpother_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU Other Exception", regs);
 }
 
 void do_ill_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Illegal Instruction Exception", regs);
 }
 
 void do_irq_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: IRQ Exception", regs);
 }
 
 void do_lddfmna_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: LDDF Exception", regs);
 }
 
 void do_stdfmna_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: STDF Exception", regs);
 }
 
@@ -1970,7 +1619,6 @@ void do_paw(struct pt_regs *regs)
 
 void do_paw_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Phys Watchpoint Exception", regs);
 }
 
@@ -1981,13 +1629,11 @@ void do_vaw(struct pt_regs *regs)
 
 void do_vaw_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Virt Watchpoint Exception", regs);
 }
 
 void do_tof_tl1(struct pt_regs *regs)
 {
-	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Tag Overflow Exception", regs);
 }
 

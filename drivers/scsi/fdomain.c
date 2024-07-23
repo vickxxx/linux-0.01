@@ -561,8 +561,7 @@ static void print_banner( struct Scsi_Host *shpnt )
    printk( "\n" );
 }
 
-/* no __init, may be called from fdomain_stubs.c */
-int fdomain_setup( char *str )
+static int __init fdomain_setup( char *str )
 {
 	int ints[4];
 
@@ -730,13 +729,13 @@ static int fdomain_isa_detect( int *irq, int *iobase )
       switch (Quantum) {
       case 2:			/* ISA_200S */
       case 3:			/* ISA_250MG */
-	 base = isa_readb(bios_base + 0x1fa2) + (isa_readb(bios_base + 0x1fa3) << 8);
+	 base = readb(bios_base + 0x1fa2) + (readb(bios_base + 0x1fa3) << 8);
 	 break;
       case 4:			/* ISA_200S (another one) */
-	 base = isa_readb(bios_base + 0x1fa3) + (isa_readb(bios_base + 0x1fa4) << 8);
+	 base = readb(bios_base + 0x1fa3) + (readb(bios_base + 0x1fa4) << 8);
 	 break;
       default:
-	 base = isa_readb(bios_base + 0x1fcc) + (isa_readb(bios_base + 0x1fcd) << 8);
+	 base = readb(bios_base + 0x1fcc) + (readb(bios_base + 0x1fcd) << 8);
 	 break;
       }
    
@@ -984,7 +983,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       /* Register the IRQ with the kernel */
 
       retcode = request_irq( interrupt_level,
-			     do_fdomain_16x0_intr, pdev?SA_SHIRQ:0, "fdomain", shpnt);
+			     do_fdomain_16x0_intr, pdev?SA_SHIRQ:0, "fdomain", NULL);
 
       if (retcode < 0) {
 	 if (retcode == -EINVAL) {
@@ -1956,7 +1955,7 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
 	 offset = bios_base + 0x1f31 + drive * 25;
 	 break;
       }
-      isa_memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
+      memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
       info_array[0] = i.heads;
       info_array[1] = i.sectors;
       info_array[2] = i.cylinders;
@@ -2036,20 +2035,9 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
    return 0;
 }
 
-int fdomain_16x0_release(struct Scsi_Host *shpnt)
-{
-	if (shpnt->irq)
-		free_irq(shpnt->irq, shpnt);
-	if (shpnt->io_port && shpnt->n_io_port)
-		release_region(shpnt->io_port, shpnt->n_io_port);
-	return 0;
-}
-
 MODULE_LICENSE("GPL");
 
-#ifndef PCMCIA
 /* Eventually this will go into an include file, but this will be later */
 static Scsi_Host_Template driver_template = FDOMAIN_16X0;
 
 #include "scsi_module.c"
-#endif

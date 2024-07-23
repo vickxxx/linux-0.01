@@ -11,7 +11,6 @@
 
 #include <linux/config.h>
 #include <linux/mm.h>
-#include <asm/fixmap.h>
 
 /* TLB flushing:
  *
@@ -19,34 +18,14 @@
  *  - flush_tlb_mm(mm) flushes the specified mm context TLB entries
  *  - flush_tlb_page(mm, vmaddr) flushes a single page
  *  - flush_tlb_range(mm, start, end) flushes a range of pages
- *  - flush_tlb_pgtables(mm, start, end) flushes a range of page tables
- *  - flush_tlb_one(page) flushes a single kernel page
  */
-extern void local_flush_tlb_all(void);
-extern void local_flush_tlb_mm(struct mm_struct *mm);
-extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
-			       unsigned long end);
-extern void local_flush_tlb_page(struct vm_area_struct *vma,
-                                 unsigned long page);
-extern void local_flush_tlb_one(unsigned long page);
-
-#ifdef CONFIG_SMP
-
 extern void flush_tlb_all(void);
-extern void flush_tlb_mm(struct mm_struct *);
-extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
-extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
+extern void flush_tlb_mm(struct mm_struct *mm);
+extern void flush_tlb_range(struct mm_struct *mm, unsigned long start,
+			       unsigned long end);
+extern void flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 
-#else /* CONFIG_SMP */
-
-#define flush_tlb_all()			local_flush_tlb_all()
-#define flush_tlb_mm(mm)		local_flush_tlb_mm(mm)
-#define flush_tlb_range(mm,vmaddr,end)	local_flush_tlb_range(mm, vmaddr, end)
-#define flush_tlb_page(vma,page)	local_flush_tlb_page(vma, page)
-
-#endif /* CONFIG_SMP */
-
-static inline void flush_tlb_pgtables(struct mm_struct *mm,
+extern inline void flush_tlb_pgtables(struct mm_struct *mm,
                                       unsigned long start, unsigned long end)
 {
 	/* Nothing to do on MIPS.  */
@@ -69,9 +48,9 @@ static inline void flush_tlb_pgtables(struct mm_struct *mm,
  */
 extern void pgd_init(unsigned long page);
 
-static __inline__ pgd_t *get_pgd_slow(void)
+extern __inline__ pgd_t *get_pgd_slow(void)
 {
-	pgd_t *ret = (pgd_t *)__get_free_pages(GFP_KERNEL, PGD_ORDER), *init;
+	pgd_t *ret = (pgd_t *)__get_free_page(GFP_KERNEL), *init;
 
 	if (ret) {
 		init = pgd_offset(&init_mm, 0);
@@ -82,7 +61,7 @@ static __inline__ pgd_t *get_pgd_slow(void)
 	return ret;
 }
 
-static __inline__ pgd_t *get_pgd_fast(void)
+extern __inline__ pgd_t *get_pgd_fast(void)
 {
 	unsigned long *ret;
 
@@ -95,19 +74,21 @@ static __inline__ pgd_t *get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-static __inline__ void free_pgd_fast(pgd_t *pgd)
+extern __inline__ void free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
 	pgd_quicklist = (unsigned long *) pgd;
 	pgtable_cache_size++;
 }
 
-static __inline__ void free_pgd_slow(pgd_t *pgd)
+extern __inline__ void free_pgd_slow(pgd_t *pgd)
 {
-	free_pages((unsigned long)pgd, PGD_ORDER);
+	free_page((unsigned long)pgd);
 }
 
-static __inline__ pte_t *get_pte_fast(void)
+extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
+
+extern __inline__ pte_t *get_pte_fast(void)
 {
 	unsigned long *ret;
 
@@ -119,29 +100,29 @@ static __inline__ pte_t *get_pte_fast(void)
 	return (pte_t *)ret;
 }
 
-static __inline__ void free_pte_fast(pte_t *pte)
+extern __inline__ void free_pte_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-static __inline__ void free_pte_slow(pte_t *pte)
+extern __inline__ void free_pte_slow(pte_t *pte)
 {
 	free_page((unsigned long)pte);
 }
 
 /* We don't use pmd cache, so these are dummy routines */
-static __inline__ pmd_t *get_pmd_fast(void)
+extern __inline__ pmd_t *get_pmd_fast(void)
 {
 	return (pmd_t *)0;
 }
 
-static __inline__ void free_pmd_fast(pmd_t *pmd)
+extern __inline__ void free_pmd_fast(pmd_t *pmd)
 {
 }
 
-static __inline__ void free_pmd_slow(pmd_t *pmd)
+extern __inline__ void free_pmd_slow(pmd_t *pmd)
 {
 }
 
@@ -169,19 +150,19 @@ static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm, unsigned long addr
 	return (pte_t *)ret;
 }
 
-static __inline__ void pte_free_fast(pte_t *pte)
+extern __inline__ void pte_free_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-static __inline__ void pte_free_slow(pte_t *pte)
+extern __inline__ void pte_free_slow(pte_t *pte)
 {
 	free_page((unsigned long)pte);
 }
 
-#define pte_free(pte)           pte_free_fast(pte)
+#define pte_free(pte)           pte_free_slow(pte)
 #define pgd_free(pgd)           free_pgd_fast(pgd)
 #define pgd_alloc(mm)           get_pgd_fast()
 

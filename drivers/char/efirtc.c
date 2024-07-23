@@ -35,12 +35,12 @@
 #include <linux/init.h>
 #include <linux/rtc.h>
 #include <linux/proc_fs.h>
-#include <linux/efi.h>
 
+#include <asm/efi.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-#define EFI_RTC_VERSION		"0.4"
+#define EFI_RTC_VERSION		"0.2"
 
 #define EFI_ISDST (EFI_TIME_ADJUST_DAYLIGHT|EFI_TIME_IN_DAYLIGHT)
 /*
@@ -118,7 +118,6 @@ convert_to_efi_time(struct rtc_time *wtime, efi_time_t *eft)
 static void
 convert_from_efi_time(efi_time_t *eft, struct rtc_time *wtime)
 {
-	memset(wtime, 0, sizeof(struct rtc_time));
 	wtime->tm_sec  = eft->second;
 	wtime->tm_min  = eft->minute;
 	wtime->tm_hour = eft->hour;
@@ -316,45 +315,56 @@ efi_rtc_get_status(char *buf)
 	spin_unlock_irqrestore(&efi_rtc_lock,flags);
 
 	p += sprintf(p,
-		     "Time           : %u:%u:%u.%09u\n"
-		     "Date           : %u-%u-%u\n"
-		     "Daylight       : %u\n",
-		     eft.hour, eft.minute, eft.second, eft.nanosecond, 
-		     eft.year, eft.month, eft.day,
-		     eft.daylight);
+		     "Time      :\n"
+		     "Year      : %u\n"
+		     "Month     : %u\n"
+		     "Day       : %u\n"
+		     "Hour      : %u\n"
+		     "Minute    : %u\n"
+		     "Second    : %u\n"
+		     "Nanosecond: %u\n"
+		     "Daylight  : %u\n",
+		     eft.year, eft.month, eft.day, eft.hour, eft.minute,
+		     eft.second, eft.nanosecond, eft.daylight);
 
-	if (eft.timezone == EFI_UNSPECIFIED_TIMEZONE)
-		p += sprintf(p, "Timezone       : unspecified\n");
+	if ( eft.timezone == EFI_UNSPECIFIED_TIMEZONE)
+		p += sprintf(p, "Timezone  : unspecified\n");
 	else
 		/* XXX fixme: convert to string? */
-		p += sprintf(p, "Timezone       : %u\n", eft.timezone);
+		p += sprintf(p, "Timezone  : %u\n", eft.timezone);
 		
 
 	p += sprintf(p,
-		     "Alarm Time     : %u:%u:%u.%09u\n"
-		     "Alarm Date     : %u-%u-%u\n"
-		     "Alarm Daylight : %u\n"
-		     "Enabled        : %s\n"
-		     "Pending        : %s\n",
-		     alm.hour, alm.minute, alm.second, alm.nanosecond, 
-		     alm.year, alm.month, alm.day, 
-		     alm.daylight,
-		     enabled == 1 ? "yes" : "no",
-		     pending == 1 ? "yes" : "no");
+		     "\nWakeup Alm:\n"
+		     "Enabled   : %s\n"
+		     "Pending   : %s\n"
+		     "Year      : %u\n"
+		     "Month     : %u\n"
+		     "Day       : %u\n"
+		     "Hour      : %u\n"
+		     "Minute    : %u\n"
+		     "Second    : %u\n"
+		     "Nanosecond: %u\n"
+		     "Daylight  : %u\n",
+		     enabled == 1 ? "Yes" : "No",
+		     pending == 1 ? "Yes" : "No",
+		     alm.year, alm.month, alm.day, alm.hour, alm.minute,
+		     alm.second, alm.nanosecond, alm.daylight);
 
-	if (eft.timezone == EFI_UNSPECIFIED_TIMEZONE)
-		p += sprintf(p, "Timezone       : unspecified\n");
+	if ( eft.timezone == EFI_UNSPECIFIED_TIMEZONE)
+		p += sprintf(p, "Timezone  : unspecified\n");
 	else
 		/* XXX fixme: convert to string? */
-		p += sprintf(p, "Timezone       : %u\n", alm.timezone);
+		p += sprintf(p, "Timezone  : %u\n", eft.timezone);
 
 	/*
 	 * now prints the capabilities
 	 */
 	p += sprintf(p,
-		     "Resolution     : %u\n"
-		     "Accuracy       : %u\n"
-		     "SetstoZero     : %u\n",
+		     "\nClock Cap :\n"
+		     "Resolution: %u\n"
+		     "Accuracy  : %u\n"
+		     "SetstoZero: %u\n",
 		      cap.resolution, cap.accuracy, cap.sets_to_zero);
 
 	return  p - buf;
@@ -376,25 +386,12 @@ efi_rtc_read_proc(char *page, char **start, off_t off,
 static int __init 
 efi_rtc_init(void)
 {
-	int ret;
-	struct proc_dir_entry *dir;
-
 	printk(KERN_INFO "EFI Time Services Driver v%s\n", EFI_RTC_VERSION);
 
-	ret = misc_register(&efi_rtc_dev);
-	if (ret) {
-		printk(KERN_ERR "efirtc: can't misc_register on minor=%d\n",
-				EFI_RTC_MINOR);
-		return ret;
-	}
+	misc_register(&efi_rtc_dev);
 
-	dir = create_proc_read_entry ("driver/efirtc", 0, NULL,
-			              efi_rtc_read_proc, NULL);
-	if (dir == NULL) {
-		printk(KERN_ERR "efirtc: can't create /proc/driver/efirtc.\n");
-		misc_deregister(&efi_rtc_dev);
-		return -1;
-	}
+	create_proc_read_entry ("efirtc", 0, NULL, efi_rtc_read_proc, NULL);
+
 	return 0;
 }
 

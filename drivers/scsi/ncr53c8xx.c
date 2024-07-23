@@ -22,7 +22,7 @@
 **  This driver has been ported to Linux from the FreeBSD NCR53C8XX driver
 **  and is currently maintained by
 **
-**          Gerard Roudier              <groudier@free.fr>
+**          Gerard Roudier              <groudier@club-internet.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -63,7 +63,7 @@
 **  August 18 1997 by Cort <cort@cs.nmt.edu>:
 **     Support for Power/PC (Big Endian).
 **
-**  June 20 1998 by Gerard Roudier
+**  June 20 1998 by Gerard Roudier <groudier@club-internet.fr>:
 **     Support for up to 64 tags per lun.
 **     O(1) everywhere (C and SCRIPTS) for normal cases.
 **     Low PCI traffic for command handling when on-chip RAM is present.
@@ -7185,7 +7185,7 @@ void ncr_int_sir (ncb_p np)
 **
 **	Possible cases:		   hs  sir   msg_in value  send   goto
 **	We try to negotiate:
-**	-> target doesn't msgin    NEG FAIL  noop   defa.  -      dispatch
+**	-> target doesnt't msgin   NEG FAIL  noop   defa.  -      dispatch
 **	-> target rejected our msg NEG FAIL  reject defa.  -      dispatch
 **	-> target answered  (ok)   NEG SYNC  sdtr   set    -      clrack
 **	-> target answered (!ok)   NEG SYNC  sdtr   defa.  REJ--->msg_bad

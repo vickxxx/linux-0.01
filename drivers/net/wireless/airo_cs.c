@@ -15,7 +15,7 @@
 
     In addition this module was derived from dummy_cs.
     The initial developer of dummy_cs is David A. Hinds
-    <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
+    <dhinds@hyper.stanford.edu>.  Portions created by David A. Hinds
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.    
     
 ======================================================================*/
@@ -44,8 +44,6 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ds.h>
-
-#include "airo.h"
 
 /*
    All the PCMCIA modules use PCMCIA_DEBUG to control debugging.  If
@@ -92,6 +90,10 @@ MODULE_PARM(irq_list, "1-4i");
    insertion and ejection events.  They are invoked from the airo_cs
    event handler. 
 */
+
+struct net_device *init_airo_card( int, int, int );
+void stop_airo_card( struct net_device *, int );
+int reset_airo_card( struct net_device * );
 
 static void airo_config(dev_link_t *link);
 static void airo_release(u_long arg);
@@ -242,11 +244,6 @@ static dev_link_t *airo_attach(void)
 	
 	/* Allocate space for private device-specific data */
 	local = kmalloc(sizeof(local_info_t), GFP_KERNEL);
-	if (!local) {
-		printk(KERN_ERR "airo_cs: no memory for new device\n");
-		kfree (link);
-		return NULL;
-	}
 	memset(local, 0, sizeof(local_info_t));
 	link->priv = local;
 	

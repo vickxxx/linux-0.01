@@ -32,10 +32,8 @@ bvmlinux: piggy.o $(OBJECTS)
 head.o: head.S
 	$(CC) $(AFLAGS) -traditional -c head.S
 
-comma	:= ,
-
 misc.o: misc.c
-	$(CC) $(CFLAGS) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) -c misc.c
+	$(CC) $(CFLAGS) -c misc.c
 
 piggy.o:	$(SYSTEM)
 	tmppiggy=_tmp_$$$$piggy; \

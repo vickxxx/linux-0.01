@@ -882,7 +882,7 @@ static void handle_stripe(struct stripe_head *sh)
 	/* check if the array has lost two devices and, if so, some requests might
 	 * need to be failed
 	 */
-	if (failed > 1 && to_read+to_write+written) {
+	if (failed > 1 && to_read+to_write) {
 		for (i=disks; i--; ) {
 			/* fail all writes first */
 			if (sh->bh_write[i]) to_write--;
@@ -891,14 +891,6 @@ static void handle_stripe(struct stripe_head *sh)
 				bh->b_reqnext = return_fail;
 				return_fail = bh;
 			}
-			/* and fail all 'written' */
-			if (sh->bh_written[i]) written--;
-			while ((bh = sh->bh_written[i])) {
-				sh->bh_written[i] = bh->b_reqnext;
-				bh->b_reqnext = return_fail;
-				return_fail = bh;
-			}
-
 			/* fail any reads if this device is non-operational */
 			if (!conf->disks[i].operational) {
 				spin_lock_irq(&conf->device_lock);
@@ -950,7 +942,7 @@ static void handle_stripe(struct stripe_head *sh)
 	/* Now we might consider reading some blocks, either to check/generate
 	 * parity, or to satisfy requests
 	 */
-	if (to_read || (syncing && (uptodate < disks))) {
+	if (to_read || (syncing && (uptodate+failed < disks))) {
 		for (i=disks; i--;) {
 			bh = sh->bh_cache[i];
 			if (!buffer_locked(bh) && !buffer_uptodate(bh) &&
@@ -1301,8 +1293,10 @@ static void raid5d (void *data)
 
 	handled = 0;
 
-	if (mddev->sb_dirty)
+	if (mddev->sb_dirty) {
+		mddev->sb_dirty = 0;
 		md_update_sb(mddev);
+	}
 	md_spin_lock_irq(&conf->device_lock);
 	while (1) {
 		struct list_head *first;
@@ -1689,23 +1683,23 @@ static void printall (raid5_conf_t *conf)
 }
 #endif
 
-static void raid5_status (struct seq_file *seq, mddev_t *mddev)
+static int raid5_status (char *page, mddev_t *mddev)
 {
 	raid5_conf_t *conf = (raid5_conf_t *) mddev->private;
 	mdp_super_t *sb = mddev->sb;
-	int i;
+	int sz = 0, i;
 
-	seq_printf (seq, " level %d, %dk chunk, algorithm %d", sb->level, sb->chunk_size >> 10, sb->layout);
-	seq_printf (seq, " [%d/%d] [", conf->raid_disks, conf->working_disks);
+	sz += sprintf (page+sz, " level %d, %dk chunk, algorithm %d", sb->level, sb->chunk_size >> 10, sb->layout);
+	sz += sprintf (page+sz, " [%d/%d] [", conf->raid_disks, conf->working_disks);
 	for (i = 0; i < conf->raid_disks; i++)
-		seq_printf (seq, "%s", conf->disks[i].operational ? "U" : "_");
-	seq_printf (seq, "]");
+		sz += sprintf (page+sz, "%s", conf->disks[i].operational ? "U" : "_");
+	sz += sprintf (page+sz, "]");
 #if RAID5_DEBUG
 #define D(x) \
-	seq_printf (seq, "<"#x":%d>", atomic_read(&conf->x))
+	sz += sprintf (page+sz, "<"#x":%d>", atomic_read(&conf->x))
 	printall(conf);
 #endif
-
+	return sz;
 }
 
 static void print_raid5_conf (raid5_conf_t *conf)

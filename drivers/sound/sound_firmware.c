@@ -4,11 +4,10 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-static int my_errno;
-#define errno my_errno
-#include <asm/unistd.h>
+#include <linux/unistd.h>
 #include <asm/uaccess.h>
 
+static int errno;
 static int do_mod_firmware_load(const char *fn, char **fp)
 {
 	int fd;

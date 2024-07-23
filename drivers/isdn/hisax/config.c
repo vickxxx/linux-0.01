@@ -1,4 +1,4 @@
-/* $Id: config.c,v 1.1.4.5 2001/12/09 19:19:26 kai Exp $
+/* $Id: config.c,v 2.57.6.20 2001/09/23 22:24:47 kai Exp $
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
@@ -75,8 +75,6 @@
  *   37 HFC 2BDS0 S+/SP         p0=irq p1=iobase
  *   38 Travers Technologies NETspider-U PCI card
  *   39 HFC 2BDS0-SP PCMCIA     p0=irq p1=iobase
- *   40 hotplug interface
- *   41 Formula-n enter:now ISDN PCI a/b   none
  *
  * protocol can be either ISDN_PTYPE_EURO or ISDN_PTYPE_1TR6 or ISDN_PTYPE_NI1
  *
@@ -95,7 +93,6 @@ const char *CardType[] = {
 	"Siemens I-Surf", "Acer P10", "HST Saphir", "Telekom A4T",
 	"Scitel Quadro", "Gazel", "HFC 2BDS0 PCI", "Winbond 6692",
 	"HFC 2BDS0 SX", "NETspider-U", "HFC-2BDS0-SP PCMCIA",
-	"Hotplug", "Formula-n enter:now PCI a/b", 
 };
 
 void HiSax_closecard(int cardnr);
@@ -339,19 +336,27 @@ EXPORT_SYMBOL(HiSax_closecard);
 	NULL, \
 }
 
-struct IsdnCard cards[HISAX_MAX_CARDS] = {
+#define EMPTY_CARD	{0, DEFAULT_PROTO, {0, 0, 0, 0}, NULL}
+
+struct IsdnCard cards[] = {
 	FIRST_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
+	EMPTY_CARD,
 };
 
-#define HISAX_IDSIZE (HISAX_MAX_CARDS*8)
-static char HiSaxID[HISAX_IDSIZE] __devinitdata = { 0, };
+static char HiSaxID[64] __devinitdata = { 0, };
 
 char *HiSax_id __devinitdata = HiSaxID;
 #ifdef MODULE
 /* Variables for insmod */
-static int type[HISAX_MAX_CARDS] __devinitdata = { 0, };
-static int protocol[HISAX_MAX_CARDS] __devinitdata = { 0, };
-static int io[HISAX_MAX_CARDS] __devinitdata = { 0, };
+static int type[8] __devinitdata = { 0, };
+static int protocol[8] __devinitdata = { 0, };
+static int io[8] __devinitdata = { 0, };
 #undef IO0_IO1
 #ifdef CONFIG_HISAX_16_3
 #define IO0_IO1
@@ -361,27 +366,25 @@ static int io[HISAX_MAX_CARDS] __devinitdata = { 0, };
 #define IO0_IO1
 #endif
 #ifdef IO0_IO1
-static int io0[HISAX_MAX_CARDS] __devinitdata = { 0, };
-static int io1[HISAX_MAX_CARDS] __devinitdata = { 0, };
+static int io0[8] __devinitdata = { 0, };
+static int io1[8] __devinitdata = { 0, };
 #endif
-static int irq[HISAX_MAX_CARDS] __devinitdata = { 0, };
-static int mem[HISAX_MAX_CARDS] __devinitdata = { 0, };
+static int irq[8] __devinitdata = { 0, };
+static int mem[8] __devinitdata = { 0, };
 static char *id __devinitdata = HiSaxID;
-
-#define PARM_PARA "1-" __MODULE_STRING(HISAX_MAX_CARDS) "i"
 
 MODULE_DESCRIPTION("ISDN4Linux: Driver for passive ISDN cards");
 MODULE_AUTHOR("Karsten Keil");
 MODULE_LICENSE("GPL");
-MODULE_PARM(type, PARM_PARA);
-MODULE_PARM(protocol, PARM_PARA);
-MODULE_PARM(io, PARM_PARA);
-MODULE_PARM(irq, PARM_PARA);
-MODULE_PARM(mem, PARM_PARA);
+MODULE_PARM(type, "1-8i");
+MODULE_PARM(protocol, "1-8i");
+MODULE_PARM(io, "1-8i");
+MODULE_PARM(irq, "1-8i");
+MODULE_PARM(mem, "1-8i");
 MODULE_PARM(id, "s");
 #ifdef IO0_IO1
-MODULE_PARM(io0, PARM_PARA);
-MODULE_PARM(io1, PARM_PARA);
+MODULE_PARM(io0, "1-8i");
+MODULE_PARM(io1, "1-8i");
 #endif
 #endif /* MODULE */
 
@@ -445,7 +448,6 @@ static int __init HiSax_setup(char *line)
 	i = 0;
 	j = 1;
 	while (argc && (i < HISAX_MAX_CARDS)) {
-		cards[i].protocol = DEFAULT_PROTO;
 		if (argc) {
 			cards[i].typ = ints[j];
 			j++;
@@ -473,15 +475,13 @@ static int __init HiSax_setup(char *line)
 		}
 		i++;
 	}
-  	if (str && *str) {
-		if (strlen(str) < HISAX_IDSIZE)
-			strcpy(HiSaxID, str);
-		else
-			printk(KERN_WARNING "HiSax: ID too long!");
-	} else
+	if (str && *str) {
+		strcpy(HiSaxID, str);
+		HiSax_id = HiSaxID;
+	} else {
 		strcpy(HiSaxID, "HiSax");
-
-	HiSax_id = HiSaxID;
+		HiSax_id = HiSaxID;
+	}
 	return 1;
 }
 
@@ -602,10 +602,6 @@ extern int setup_w6692(struct IsdnCard *card);
 
 #if CARD_NETJET_U
 extern int setup_netjet_u(struct IsdnCard *card);
-#endif
-
-#if CARD_FN_ENTERNOW_PCI
-extern int setup_enternow_pci(struct IsdnCard *card);
 #endif
 
 /*
@@ -1143,11 +1139,6 @@ static int __devinit checkcard(int cardnr, char *id, int *busy_flag)
 		ret = setup_netjet_u(card);
 		break;
 #endif
-#if CARD_FN_ENTERNOW_PCI
-	case ISDN_CTYPE_ENTERNOW:
-		ret = setup_enternow_pci(card);
-		break;
-#endif
 	case ISDN_CTYPE_DYNAMIC:
 		ret = 2;
 		break;
@@ -1261,12 +1252,9 @@ int __devinit HiSax_inithardware(int *busy_flag)
 			foundcards++;
 			i++;
 		} else {
-			/* make sure we don't oops the module */
-			if (cards[i].typ > 0 && cards[i].typ <= ISDN_CTYPE_COUNT) {
-				printk(KERN_WARNING
-			       		"HiSax: Card %s not installed !\n",
-			       		CardType[cards[i].typ]);
-			}
+			printk(KERN_WARNING
+			       "HiSax: Card %s not installed !\n",
+			       CardType[cards[i].typ]);
 			HiSax_shiftcards(i);
 			nrcards--;
 		}
@@ -1408,8 +1396,6 @@ static int __init HiSax_init(void)
 		if (protocol[i]) {
 			cards[j].protocol = protocol[i];
 			nzproto++;
-		} else {
-			cards[j].protocol = DEFAULT_PROTO;
 		}
 		switch (type[i]) {
 		case ISDN_CTYPE_16_0:
@@ -1487,22 +1473,15 @@ static int __init HiSax_init(void)
 			} else {
 				/* QUADRO is a 4 BRI card */
 				cards[j++].para[0] = 1;
-				/* we need to check if further cards can be added */
-				if (j < HISAX_MAX_CARDS) {
-					cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
-					cards[j].protocol = protocol[i];
-					cards[j++].para[0] = 2;
-				}
-				if (j < HISAX_MAX_CARDS) {
-					cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
-					cards[j].protocol = protocol[i];
-					cards[j++].para[0] = 3;
-				}
-				if (j < HISAX_MAX_CARDS) {
-					cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
-					cards[j].protocol = protocol[i];
-					cards[j].para[0] = 4;
-				}
+				cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
+				cards[j].protocol = protocol[i];
+				cards[j++].para[0] = 2;
+				cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
+				cards[j].protocol = protocol[i];
+				cards[j++].para[0] = 3;
+				cards[j].typ = ISDN_CTYPE_SCT_QUADRO;
+				cards[j].protocol = protocol[i];
+				cards[j].para[0] = 4;
 			}
 			break;
 		}
@@ -1526,10 +1505,15 @@ static int __init HiSax_init(void)
 	       nrcards, (nrcards > 1) ? "s" : "");
 
 	/* Install only, if at least one card found */
-	if (!HiSax_inithardware(NULL))
-		return -ENODEV;
+	if (!HiSax_inithardware(NULL)) {
+		retval = -EIO;
+		goto out_isdnl1;
+	}
+
 	return 0;
 
+ out_isdnl1:
+	Isdnl1Free();
  out_tei:
 	TeiFree();
  out_isdnl2:
@@ -1576,8 +1560,6 @@ int elsa_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 		cards[i].typ = type[i];
 		if (protocol[i]) {
 			cards[i].protocol = protocol[i];
-		} else {
-			cards[i].protocol = DEFAULT_PROTO;
 		}
 	}
 	cards[0].para[0] = pcm_irq;
@@ -1595,8 +1577,7 @@ int elsa_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 	printk(KERN_DEBUG "HiSax: Total %d card%s defined\n",
 	       nrcards, (nrcards > 1) ? "s" : "");
 
-	if (!HiSax_inithardware(busy_flag))
-		return -ENODEV;
+	HiSax_inithardware(busy_flag);
 	printk(KERN_NOTICE "HiSax: module installed\n");
 #endif
 	return 0;
@@ -1619,8 +1600,6 @@ int hfc_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 		cards[i].typ = type[i];
 		if (protocol[i]) {
 			cards[i].protocol = protocol[i];
-		} else {
-			cards[i].protocol = DEFAULT_PROTO;
 		}
 	}
 	cards[0].para[0] = pcm_irq;
@@ -1638,8 +1617,7 @@ int hfc_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 	printk(KERN_DEBUG "HiSax: Total %d card%s defined\n",
 	       nrcards, (nrcards > 1) ? "s" : "");
 
-	if (!HiSax_inithardware(busy_flag))
-		return -ENODEV;
+	HiSax_inithardware(busy_flag);
 	printk(KERN_NOTICE "HiSax: module installed\n");
 #endif
 	return 0;
@@ -1662,8 +1640,6 @@ int sedl_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 		cards[i].typ = type[i];
 		if (protocol[i]) {
 			cards[i].protocol = protocol[i];
-		} else {
-			cards[i].protocol = DEFAULT_PROTO;
 		}
 	}
 	cards[0].para[0] = pcm_irq;
@@ -1681,8 +1657,7 @@ int sedl_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 	printk(KERN_DEBUG "HiSax: Total %d card%s defined\n",
 	       nrcards, (nrcards > 1) ? "s" : "");
 
-	if (!HiSax_inithardware(busy_flag))
-		return -ENODEV;
+	HiSax_inithardware(busy_flag);
 	printk(KERN_NOTICE "HiSax: module installed\n");
 #endif
 	return 0;
@@ -1705,8 +1680,6 @@ int avm_a1_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 		cards[i].typ = type[i];
 		if (protocol[i]) {
 			cards[i].protocol = protocol[i];
-		} else {
-			cards[i].protocol = DEFAULT_PROTO;
 		}
 	}
 	cards[0].para[0] = pcm_irq;
@@ -1724,8 +1697,7 @@ int avm_a1_init_pcmcia(void *pcm_iob, int pcm_irq, int *busy_flag, int prot)
 	printk(KERN_DEBUG "HiSax: Total %d card%s defined\n",
 	       nrcards, (nrcards > 1) ? "s" : "");
 
-	if (!HiSax_inithardware(busy_flag))
-		return -ENODEV;
+	HiSax_inithardware(busy_flag);
 	printk(KERN_NOTICE "HiSax: module installed\n");
 #endif
 	return 0;
@@ -1925,8 +1897,6 @@ static void hisax_b_l1l2(struct hisax_if *ifc, int pr, void *arg)
 		break;
 	case PH_DEACTIVATE | INDICATION:
 		st->l1.l1l2(st, pr, NULL);
-		clear_bit(BC_FLG_BUSY, &bcs->Flag);
-		skb_queue_purge(&bcs->squeue);
 		bcs->hw.b_if = NULL;
 		break;
 	case PH_DATA | INDICATION:
@@ -2014,9 +1984,6 @@ static void hisax_b_l2l1(struct PStack *st, int pr, void *arg)
 		else
 			set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
 		break;
-	case PH_DEACTIVATE | REQUEST:
-		test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
-		skb_queue_purge(&bcs->squeue);
 	default:
 		B_L2L1(b_if, pr, arg);
 		break;
@@ -2117,9 +2084,6 @@ static struct pci_device_id hisax_pci_tbl[] __initdata = {
 	{PCI_VENDOR_ID_EICON,    PCI_DEVICE_ID_EICON_DIVA20,     PCI_ANY_ID, PCI_ANY_ID},
 	{PCI_VENDOR_ID_EICON,    PCI_DEVICE_ID_EICON_DIVA20_U,   PCI_ANY_ID, PCI_ANY_ID},
 	{PCI_VENDOR_ID_EICON,    PCI_DEVICE_ID_EICON_DIVA201,    PCI_ANY_ID, PCI_ANY_ID},
-//#########################################################################################	
-	{PCI_VENDOR_ID_EICON,    PCI_DEVICE_ID_EICON_DIVA202,    PCI_ANY_ID, PCI_ANY_ID},
-//#########################################################################################	
 #endif
 #ifdef CONFIG_HISAX_ELSA
 	{PCI_VENDOR_ID_ELSA,     PCI_DEVICE_ID_ELSA_MICROLINK,   PCI_ANY_ID, PCI_ANY_ID},
@@ -2178,11 +2142,3 @@ MODULE_DEVICE_TABLE(pci, hisax_pci_tbl);
 
 module_init(HiSax_init);
 module_exit(HiSax_exit);
-
-EXPORT_SYMBOL(FsmNew);
-EXPORT_SYMBOL(FsmFree);
-EXPORT_SYMBOL(FsmEvent);
-EXPORT_SYMBOL(FsmChangeState);
-EXPORT_SYMBOL(FsmInitTimer);
-EXPORT_SYMBOL(FsmDelTimer);
-EXPORT_SYMBOL(FsmRestartTimer);

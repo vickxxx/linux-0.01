@@ -21,6 +21,5 @@ extern __inline__ void __delay(unsigned long loops)
 
 /* This is too messy with inline asm on the Sparc. */
 extern void udelay(unsigned long usecs);
-extern void ndelay(unsigned long usecs);
 
 #endif /* defined(__SPARC_DELAY_H) */

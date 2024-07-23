@@ -12,7 +12,7 @@
  * boundary when doing so.
  */
 
-#include <asm/regdef.h>
+#include <alpha/regdef.h>
 
 
 /* Allow an exception for an insn; exit if we get one.  */

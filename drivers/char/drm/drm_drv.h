@@ -113,36 +113,34 @@
 #define DRIVER_IOCTLS
 #endif
 #ifndef DRIVER_FOPS
+#if LINUX_VERSION_CODE >= 0x020400
 #define DRIVER_FOPS				\
 static struct file_operations	DRM(fops) = {	\
-	.owner   = THIS_MODULE,			\
-	.open	 = DRM(open),			\
-	.flush	 = DRM(flush),			\
-	.release = DRM(release),		\
-	.ioctl	 = DRM(ioctl),			\
-	.mmap	 = DRM(mmap),			\
-	.read	 = DRM(read),			\
-	.fasync  = DRM(fasync),			\
-	.poll	 = DRM(poll),			\
+	owner:   THIS_MODULE,			\
+	open:	 DRM(open),			\
+	flush:	 DRM(flush),			\
+	release: DRM(release),			\
+	ioctl:	 DRM(ioctl),			\
+	mmap:	 DRM(mmap),			\
+	read:	 DRM(read),			\
+	fasync:	 DRM(fasync),			\
+	poll:	 DRM(poll),			\
+}
+#else
+#define DRIVER_FOPS				\
+static struct file_operations	DRM(fops) = {	\
+	open:	 DRM(open),			\
+	flush:	 DRM(flush),			\
+	release: DRM(release),			\
+	ioctl:	 DRM(ioctl),			\
+	mmap:	 DRM(mmap),			\
+	read:	 DRM(read),			\
+	fasync:	 DRM(fasync),			\
+	poll:	 DRM(poll),			\
 }
 #endif
-
-#ifndef MODULE
-/* DRM(options) is called by the kernel to parse command-line options
- * passed via the boot-loader (e.g., LILO).  It calls the insmod option
- * routine, drm_parse_drm.
- */
-/* Use an additional macro to avoid preprocessor troubles */
-#define DRM_OPTIONS_FUNC DRM(options)
-static int __init DRM(options)( char *str )
-{
-	DRM(parse_options)( str );
-	return 1;
-}
-
-__setup( DRIVER_NAME "=", DRM_OPTIONS_FUNC );
-#undef DRM_OPTIONS_FUNC
 #endif
+
 
 /*
  * The default number of instances (minor numbers) to initialize.
@@ -203,7 +201,9 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 
 	/* The DRM_IOCTL_DMA ioctl should be defined by the driver.
 	 */
+#if __HAVE_DMA_IRQ
 	[DRM_IOCTL_NR(DRM_IOCTL_CONTROL)]       = { DRM(control),     1, 1 },
+#endif
 #endif
 
 #if __REALLY_HAVE_AGP
@@ -220,10 +220,6 @@ static drm_ioctl_desc_t		  DRM(ioctls)[] = {
 #if __HAVE_SG
 	[DRM_IOCTL_NR(DRM_IOCTL_SG_ALLOC)]      = { DRM(sg_alloc),    1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_SG_FREE)]       = { DRM(sg_free),     1, 1 },
-#endif
-
-#if __HAVE_VBL_IRQ
-	[DRM_IOCTL_NR(DRM_IOCTL_WAIT_VBLANK)]   = { DRM(wait_vblank), 0, 0 },
 #endif
 
 	DRIVER_IOCTLS
@@ -310,7 +306,7 @@ static int DRM(setup)( drm_device_t *dev )
 	dev->map_count = 0;
 
 	dev->vmalist = NULL;
-	dev->sigdata.lock = dev->lock.hw_lock = NULL;
+	dev->lock.hw_lock = NULL;
 	init_waitqueue_head( &dev->lock.lock_queue );
 	dev->queue_count = 0;
 	dev->queue_reserved = 0;
@@ -443,7 +439,7 @@ static int DRM(takedown)( drm_device_t *dev )
 					DRM_DEBUG( "mtrr_del=%d\n", retcode );
 				}
 #endif
-				DRM(ioremapfree)( map->handle, map->size, dev );
+				DRM(ioremapfree)( map->handle, map->size );
 				break;
 			case _DRM_SHM:
 				vfree(map->handle);
@@ -495,7 +491,7 @@ static int DRM(takedown)( drm_device_t *dev )
 	DRM(dma_takedown)( dev );
 #endif
 	if ( dev->lock.hw_lock ) {
-		dev->sigdata.lock = dev->lock.hw_lock = NULL; /* SHM removed */
+		dev->lock.hw_lock = NULL; /* SHM removed */
 		dev->lock.pid = 0;
 		wake_up_interruptible( &dev->lock.lock_queue );
 	}
@@ -723,7 +719,7 @@ int DRM(open)( struct inode *inode, struct file *filp )
 	int i;
 
 	for (i = 0; i < DRM(numdevs); i++) {
-		if (minor(inode->i_rdev) == DRM(minor)[i]) {
+		if (MINOR(inode->i_rdev) == DRM(minor)[i]) {
 			dev = &(DRM(device)[i]);
 			break;
 		}
@@ -736,6 +732,9 @@ int DRM(open)( struct inode *inode, struct file *filp )
 
 	retcode = DRM(open_helper)( inode, filp, dev );
 	if ( !retcode ) {
+#if LINUX_VERSION_CODE < 0x020333
+		MOD_INC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
 		atomic_inc( &dev->counts[_DRM_STAT_OPENS] );
 		spin_lock( &dev->count_lock );
 		if ( !dev->open_count++ ) {
@@ -765,8 +764,8 @@ int DRM(release)( struct inode *inode, struct file *filp )
 	 * Begin inline drm_release
 	 */
 
-	DRM_DEBUG( "pid = %d, device = 0x%lx, open_count = %d\n",
-		   current->pid, (long)dev->device, dev->open_count );
+	DRM_DEBUG( "pid = %d, device = 0x%x, open_count = %d\n",
+		   current->pid, dev->device, dev->open_count );
 
 	if ( dev->lock.hw_lock &&
 	     _DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock) &&
@@ -854,6 +853,9 @@ int DRM(release)( struct inode *inode, struct file *filp )
 	 * End inline drm_release
 	 */
 
+#if LINUX_VERSION_CODE < 0x020333
+	MOD_DEC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
 	atomic_inc( &dev->counts[_DRM_STAT_CLOSES] );
 	spin_lock( &dev->count_lock );
 	if ( !--dev->open_count ) {
@@ -891,9 +893,8 @@ int DRM(ioctl)( struct inode *inode, struct file *filp,
 	atomic_inc( &dev->counts[_DRM_STAT_IOCTLS] );
 	++priv->ioctl_count;
 
-	DRM_DEBUG( "pid=%d, cmd=0x%02x, nr=0x%02x, dev 0x%lx, auth=%d\n",
-		   current->pid, cmd, nr, (long)dev->device, 
-		   priv->authenticated );
+	DRM_DEBUG( "pid=%d, cmd=0x%02x, nr=0x%02x, dev 0x%x, auth=%d\n",
+		   current->pid, cmd, nr, dev->device, priv->authenticated );
 
 	if ( nr >= DRIVER_IOCTL_COUNT ) {
 		retcode = -EINVAL;

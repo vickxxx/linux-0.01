@@ -367,7 +367,6 @@ static ssize_t slm_read( struct file *file, char *buf, size_t count,
 
 {
 	struct inode *node = file->f_dentry->d_inode;
-	loff_t pos = *ppos;
 	unsigned long page;
 	int length;
 	int end;
@@ -382,18 +381,18 @@ static ssize_t slm_read( struct file *file, char *buf, size_t count,
 		count = length;
 		goto out;
 	}
-	if (pos != (unsigned) pos || pos >= length) {
+	if (file->f_pos >= length) {
 		count = 0;
 		goto out;
 	}
-	if (count > length - pos)
-		count = length - pos;
-	end = count + pos;
-	if (copy_to_user(buf, (char *)page + pos, count)) {
+	if (count + file->f_pos > length)
+		count = length - file->f_pos;
+	end = count + file->f_pos;
+	if (copy_to_user(buf, (char *)page + file->f_pos, count)) {
 		count = -EFAULT;
 		goto out;
 	}
-	*ppos = end;
+	file->f_pos = end;
 out:	free_page( page );
 	return( count );
 }
@@ -1004,7 +1003,7 @@ int slm_init( void )
 		return -EBUSY;
 	}
 	
-	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, "SLM" ))) {
+	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, NULL, "SLM" ))) {
 		printk( KERN_ERR "Unable to get SLM ST-Ram buffer.\n" );
 		devfs_unregister_chrdev( MAJOR_NR, "slm" );
 		return -ENOMEM;

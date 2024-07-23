@@ -300,4 +300,4 @@ static Scsi_Host_Template driver_template = FCAL;
 
 #include "scsi_module.c"
 
-MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

@@ -72,17 +72,17 @@ static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 #define E21_SAPROM		0x10	/* Offset to station address data. */
 #define E21_IO_EXTENT	 0x20
 
-static inline void mem_on(short port, unsigned long mem_base,
+extern inline void mem_on(short port, volatile char *mem_base,
 						  unsigned char start_page )
 {
 	/* This is a little weird: set the shared memory window by doing a
 	   read.  The low address bits specify the starting page. */
-	isa_readb(mem_base+start_page);
+	readb(mem_base+start_page);
 	inb(port + E21_MEM_ENABLE);
 	outb(E21_MEM_ON, port + E21_MEM_ENABLE + E21_MEM_ON);
 }
 
-static inline void mem_off(short port)
+extern inline void mem_off(short port)
 {
 	inb(port + E21_MEM_ENABLE);
 	outb(0x00, port + E21_MEM_ENABLE);
@@ -300,15 +300,15 @@ e21_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 {
 
 	short ioaddr = dev->base_addr;
-	unsigned long shared_mem = dev->mem_start;
+	char *shared_mem = (char *)dev->mem_start;
 
 	mem_on(ioaddr, shared_mem, ring_page);
 
 #ifdef notdef
 	/* Officially this is what we are doing, but the readl() is faster */
-	isa_memcpy_fromio(hdr, shared_mem, sizeof(struct e8390_pkt_hdr));
+	memcpy_fromio(hdr, shared_mem, sizeof(struct e8390_pkt_hdr));
 #else
-	((unsigned int*)hdr)[0] = isa_readl(shared_mem);
+	((unsigned int*)hdr)[0] = readl(shared_mem);
 #endif
 
 	/* Turn off memory access: we would need to reprogram the window anyway. */
@@ -323,11 +323,12 @@ static void
 e21_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	short ioaddr = dev->base_addr;
+	char *shared_mem = (char *)dev->mem_start;
 
-	mem_on(ioaddr, dev->mem_start, (ring_offset>>8));
+	mem_on(ioaddr, shared_mem, (ring_offset>>8));
 
 	/* Packet is always in one chunk -- we can copy + cksum. */
-	isa_eth_io_copy_and_sum(skb, dev->mem_start + (ring_offset & 0xff), count, 0);
+	eth_io_copy_and_sum(skb, dev->mem_start + (ring_offset & 0xff), count, 0);
 
 	mem_off(ioaddr);
 }
@@ -337,14 +338,14 @@ e21_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				 int start_page)
 {
 	short ioaddr = dev->base_addr;
-	unsigned long shared_mem = dev->mem_start;
+	volatile char *shared_mem = (char *)dev->mem_start;
 
 	/* Set the shared memory window start by doing a read, with the low address
 	   bits specifying the starting page. */
-	isa_readb(shared_mem + start_page);
+	readb(shared_mem + start_page);
 	mem_on(ioaddr, shared_mem, start_page);
 
-	isa_memcpy_toio(shared_mem, buf, count);
+	memcpy_toio(shared_mem, buf, count);
 	mem_off(ioaddr);
 }
 
@@ -387,12 +388,10 @@ MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
-MODULE_PARM_DESC(io, "I/O base address(es)");
-MODULE_PARM_DESC(irq, "IRQ number(s)");
-MODULE_PARM_DESC(mem, " memory base address(es)");
-MODULE_PARM_DESC(xcvr, "tranceiver(s) (0=internal, 1=external)");
-MODULE_DESCRIPTION("Cabletron E2100 ISA ethernet driver");
-MODULE_LICENSE("GPL");
+MODULE_PARM_DESC(io, "E2100 I/O base address(es)");
+MODULE_PARM_DESC(irq, "E2100 IRQ number(s)");
+MODULE_PARM_DESC(mem, " E2100 memory base address(es)");
+MODULE_PARM_DESC(xcvr, "E2100 tranceiver(s) (0=internal, 1=external)");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -441,6 +440,7 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
 
 
 /*

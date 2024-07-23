@@ -9,12 +9,12 @@ Introduction
 	combinations and it seems that it works.
 	  The main page is located at <http://sstfb.sourceforge.net>, and if
 	you want the latest version, check out the CVS, as the driver is a work
-	in progress, I feel incomfortable with releasing tarballs of something
+	in progress, i feel incomfortable with releasing tarballs of something
 	not completely working...Don't worry, it's still more than useable
 	(I eat my own dog food)
 
 	  Please read the Bug section, and report any success or failure to me
-	(Ghozlane Toumi <gtoumi@laposte.net>).
+	(Ghozlane Toumi <gtoumi@messel.emse.fr>).
 	  BTW, If you have only one monitor , and you don't feel like playing
 	with the vga passthrou cable, I can only suggest borrowing a screen
 	somewhere... 
@@ -22,9 +22,8 @@ Introduction
 
 Installation 
 
-	  This driver (should) work on ix86, with "late" 2.2.x kernel (tested
+	  This driver (should) work on ix86, with any 2.2.x kernel (tested
 	with x = 19) and "recent" 2.4.x kernel, as a module or compiled in.
-	  It has been included in mainstream kernel since the infamous 2.4.10.
 	  You can apply the patches found in sstfb/kernel/*-2.{2|4}.x.patch,
 	and copy sstfb.c to linux/drivers/video/, or apply a single patch, 
 	sstfb/patch-2.{2|4}.x-sstfb-yymmdd to your linux source tree.
@@ -42,7 +41,7 @@ Module Usage
 	  module, the 3dfx takes control of the output, so you'll have to
 	  plug the monitor to the "normal" video board in order to issue
 	  the commands, or you can blindly use sst_dbg_vgapass
-          in the tools directory (See Tools). The latest solution is pass the
+          in the tools directory (See Tools). The latest option is pass the
 	  parameter vgapass=1 when insmodding the driver. (See Kernel/Modules
 	  Options)
 
@@ -78,39 +77,36 @@ Kernel/Modules Options
 	in kernel :  video=sstfb:option1,option2:value2,option3 ...
 	
 	sstfb supports the folowing options :
+	module		kernel		description
 
-Module		Kernel		Description
+	vgapass=1	vgapass		enable or disable VGA passthrou cable
+	vgapass=0	vganopass	when enabled, the monitor will
+					get the signal from the VGA board
+					and not from the voodoo. default nopass
 
-vgapass=0	vganopass	Enable or disable VGA passthrou cable.
-vgapass=1	vgapass		When enabled, the monitor will get the signal
-				from the VGA board and not from the voodoo.
-				Default: nopass
+	mem=x		mem:x		force frame buffer memory in MiB
+					allowed values: 1, 2, 4. default detect
 
-mem=x		mem:x		Force frame buffer memory in MiB
-				allowed values: 0, 1, 2, 4.
-				Default: 0 (= autodetect)
+	inverse=1	inverse		suposed to enable inverse console.
+					doesn't work ...
 
-inverse=1	inverse		Supposed to enable inverse console.
-				doesn't work yet...
+	clipping=1	clipping	enable or disable clipping . with
+	clipping=0	noclipping	clipping enabled, all offscreen reads
+					and writes are disgarded. default:
+					enable clipping.
 
-clipping=1	clipping	Enable or disable clipping.
-clipping=0	noclipping	With clipping enabled, all offscreen
-				reads and writes are disgarded.
-				Default: enable clipping.
+	gfxclk=x	gfxclk:x	force graphic clock frequency (in MHz)
+					becarefull with this option .
+					default is 50Mhz for voodoo1, 75MHz
+					for voodoo2. Be carefull, this one is
+					dangerous. default=auto
 
-gfxclk=x	gfxclk:x	Force graphic clock frequency (in MHz).
-				Be carefull with this option, it may be
-				DANGEROUS.
-				Default: auto 
-					50Mhz for Voodoo 1,
-					75MHz for Voodoo 2. 
+	slowpci=0	slowpci		enable or disable fast PCI read/writes
+	slowpci=1	fastpci		default : fastpci
 
-slowpci=1	fastpci		Enable or disable fast PCI read/writes.
-slowpci=1	slowpci		Default : fastpci
-
-dev=x		dev:x		Attach the driver to device number x.
-				0 is the first compatible board (in 
-				lspci order)
+	dev=x		dev:x		attach the driver to device number x
+					0 is the first compatible board (in 
+					lspci order)
 
 Tools
 
@@ -130,8 +126,8 @@ Bugs
 
 	- DO NOT use glide while the sstfb module is in, you'll most likely
 	hang your computer.
-	- If you see some artefacts (pixels not cleaning and stuff like that), 
-	try turning off clipping (clipping=0), and/or using slowpci
+	- if you see some artefacts (pixels not cleaning and stuff like that), 
+	try turning off clipping (clipping=0)
 	- the driver don't detect the 4Mb frame buffer voodoos, it seems that
 	the 2 last Mbs wrap around. looking into that .
 	- The driver is 16 bpp only, 24/32 won't work.
@@ -141,8 +137,8 @@ Bugs
 	patterns at the border of your windows (the pixels loose the lowest
 	byte -> basicaly the blue component nd some of the green) . I'm unable
 	to reproduce this with XFree86-3.3, but one of the testers has this
-	problem with XFree86-4. apparently recent Xfree86-4.x solve this
-	problem.
+	problem with XFree86-4. I don't know yet if this is the drivers fault
+	or X's (most likely the driver, of course).
 	- I didn't really test changing the palette, so you may find some weird
 	things when playing with that.
 	- Sometimes the driver will not recognise the DAC , and the
@@ -151,9 +147,6 @@ Bugs
 	contact me .
 	- the 24/32 is not likely to work anytime soon , knowing that the
 	hardware does ... unusual thigs in 24/32 bpp
-	- When used with anther video board, current limitations of linux
-	console subsystem can cause some troubles, specificaly, you should
-	disable software scrollback , as it can oops badly ...
 
 Todo
 
@@ -161,14 +154,14 @@ Todo
 	- Buy more coffee.
 	- test/port to other arch.
 	- try to add panning using tweeks with front and back buffer .
-	- try to implement accel on voodoo2 , this board can actualy do a 
+	- try to implement accel en voodoo2 , this board can actualy do a 
 	  lot in 2D even if it was sold as a 3D only board ...
 
 ghoz.
 
 -- 
-Ghozlane Toumi <gtoumi@laposte.net>
+Ghozlane Toumi <gtoumi@messel.emse.fr>
 
 
-$Date: 2002/05/09 20:11:45 $
+$Date: 2001/08/29 00:21:11 $
 http://sstfb.sourceforge.net/README

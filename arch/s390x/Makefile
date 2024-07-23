@@ -55,12 +55,8 @@ MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 image: vmlinux 
 	@$(MAKEBOOT) image
 
-install: vmlinux
-	@$(MAKEBOOT) BOOTIMAGE=image install
-
 archclean:
 	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
 
 archmrproper:
 

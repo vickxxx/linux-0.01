@@ -49,7 +49,7 @@
 #define	RTM_MAX		(RTM_BASE+31)
 
 /* 
-   Generic structure for encapsulation of optional route information.
+   Generic structure for encapsulation optional route information.
    It is reminiscent of sockaddr, but with sa_family replaced
    with attribute type.
  */
@@ -64,8 +64,7 @@ struct rtattr
 
 #define RTA_ALIGNTO	4
 #define RTA_ALIGN(len) ( ((len)+RTA_ALIGNTO-1) & ~(RTA_ALIGNTO-1) )
-#define RTA_OK(rta,len) ((len) >= (int)sizeof(struct rtattr) && \
-			 (rta)->rta_len >= sizeof(struct rtattr) && \
+#define RTA_OK(rta,len) ((len) > 0 && (rta)->rta_len >= sizeof(struct rtattr) && \
 			 (rta)->rta_len <= (len))
 #define RTA_NEXT(rta,attrlen)	((attrlen) -= RTA_ALIGN((rta)->rta_len), \
 				 (struct rtattr*)(((char*)(rta)) + RTA_ALIGN((rta)->rta_len)))
@@ -78,7 +77,7 @@ struct rtattr
 
 
 /******************************************************************************
- *		Definitions used in routing table administration.
+ *		Definitions used in routing table administation.
  ****/
 
 struct rtmsg
@@ -114,10 +113,9 @@ enum
 	RTN_THROW,		/* Not in this table		*/
 	RTN_NAT,		/* Translate this address	*/
 	RTN_XRESOLVE,		/* Use external resolver	*/
-	__RTN_MAX
 };
 
-#define RTN_MAX (__RTN_MAX - 1)
+#define RTN_MAX RTN_XRESOLVE
 
 
 /* rtm_protocol */
@@ -130,19 +128,18 @@ enum
 #define RTPROT_STATIC	4	/* Route installed by administrator	*/
 
 /* Values of protocol >= RTPROT_STATIC are not interpreted by kernel;
-   they are just passed from user and back as is.
+   they just passed from user and back as is.
    It will be used by hypothetical multiple routing daemons.
    Note that protocol values should be standardized in order to
    avoid conflicts.
  */
 
 #define RTPROT_GATED	8	/* Apparently, GateD */
-#define RTPROT_RA	9	/* RDISC/ND router advertisements */
+#define RTPROT_RA	9	/* RDISC/ND router advertisments */
 #define RTPROT_MRT	10	/* Merit MRT */
 #define RTPROT_ZEBRA	11	/* Zebra */
 #define RTPROT_BIRD	12	/* BIRD */
 #define RTPROT_DNROUTED	13	/* DECnet routing daemon */
-#define RTPROT_XORP	14	/* XORP */
 
 /* rtm_scope
 
@@ -170,7 +167,6 @@ enum rt_scope_t
 #define RTM_F_NOTIFY		0x100	/* Notify user of route change	*/
 #define RTM_F_CLONED		0x200	/* This route is cloned		*/
 #define RTM_F_EQUALIZE		0x400	/* Multipath equalizer: NI	*/
-#define RTM_F_PREFIX		0x800	/* Prefix addresses		*/
 
 /* Reserved table identifiers */
 
@@ -180,10 +176,9 @@ enum rt_class_t
 /* User defined values */
 	RT_TABLE_DEFAULT=253,
 	RT_TABLE_MAIN=254,
-	RT_TABLE_LOCAL=255,
-	__RT_TABLE_MAX
+	RT_TABLE_LOCAL=255
 };
-#define RT_TABLE_MAX (__RT_TABLE_MAX - 1)
+#define RT_TABLE_MAX RT_TABLE_LOCAL
 
 
 
@@ -203,19 +198,18 @@ enum rtattr_type_t
 	RTA_MULTIPATH,
 	RTA_PROTOINFO,
 	RTA_FLOW,
-	RTA_CACHEINFO,
-	__RTA_MAX
+	RTA_CACHEINFO
 };
 
-#define RTA_MAX (__RTA_MAX - 1)
+#define RTA_MAX RTA_CACHEINFO
 
 #define RTM_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct rtmsg))))
 #define RTM_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct rtmsg))
 
 /* RTM_MULTIPATH --- array of struct rtnexthop.
  *
- * "struct rtnexthop" describes all necessary nexthop information,
- * i.e. parameters of path to a destination via this nexthop.
+ * "struct rtnexthop" describres all necessary nexthop information,
+ * i.e. parameters of path to a destination via this nextop.
  *
  * At the moment it is impossible to set different prefsrc, mtu, window
  * and rtt for different paths from multipath.
@@ -286,10 +280,9 @@ enum
 #define RTAX_ADVMSS RTAX_ADVMSS
 	RTAX_REORDERING,
 #define RTAX_REORDERING RTAX_REORDERING
-	__RTAX_MAX
 };
 
-#define RTAX_MAX (__RTAX_MAX - 1)
+#define RTAX_MAX RTAX_REORDERING
 
 
 
@@ -314,11 +307,10 @@ enum
 	IFA_LABEL,
 	IFA_BROADCAST,
 	IFA_ANYCAST,
-	IFA_CACHEINFO,
-	__IFA_MAX
+	IFA_CACHEINFO
 };
 
-#define IFA_MAX (__IFA_MAX - 1)
+#define IFA_MAX IFA_CACHEINFO
 
 /* ifa_flags */
 
@@ -366,11 +358,10 @@ enum
 	NDA_UNSPEC,
 	NDA_DST,
 	NDA_LLADDR,
-	NDA_CACHEINFO,
-	__NDA_MAX
+	NDA_CACHEINFO
 };
 
-#define NDA_MAX (__NDA_MAX - 1)
+#define NDA_MAX NDA_CACHEINFO
 
 #define NDA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ndmsg))))
 #define NDA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ndmsg))
@@ -449,17 +440,12 @@ enum
 #define IFLA_COST IFLA_COST
 	IFLA_PRIORITY,
 #define IFLA_PRIORITY IFLA_PRIORITY
-	IFLA_MASTER,
+	IFLA_MASTER
 #define IFLA_MASTER IFLA_MASTER
-	IFLA_WIRELESS,		/* Wireless Extension event - see wireless.h */
-#define IFLA_WIRELESS IFLA_WIRELESS
-	IFLA_PROTINFO,		/* Protocol specific information for a link */
-#define IFLA_PROTINFO IFLA_PROTINFO
-	__IFLA_MAX
 };
 
 
-#define IFLA_MAX (__IFLA_MAX - 1)
+#define IFLA_MAX IFLA_MASTER
 
 #define IFLA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifinfomsg))))
 #define IFLA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifinfomsg))
@@ -475,7 +461,7 @@ enum
 
    Comments:
    - Combination IFF_BROADCAST|IFF_POINTOPOINT is invalid
-   - If neither of these three flags are set;
+   - If neiher of these three flags are set;
      the interface is NBMA.
 
    - IFF_MULTICAST does not mean anything special:
@@ -492,19 +478,6 @@ enum
    or maybe 0, what means, that real media is unknown (usual
    for IPIP tunnels, when route to endpoint is allowed to change)
  */
-
-/* Subtype attributes for IFLA_PROTINFO */
-enum
-{
-	IFLA_INET6_UNSPEC,
-	IFLA_INET6_FLAGS,	/* link flags			*/
-	IFLA_INET6_CONF,	/* sysctl parameters		*/
-	IFLA_INET6_STATS,	/* statistics			*/
-	IFLA_INET6_MCAST,	/* MC things. What of them?	*/
-	__IFLA_INET6_MAX
-};
-
-#define IFLA_INET6_MAX	(__IFLA_INET6_MAX - 1)
 
 /*****************************************************************
  *		Traffic control messages.
@@ -529,10 +502,9 @@ enum
 	TCA_STATS,
 	TCA_XSTATS,
 	TCA_RATE,
-	__TCA_MAX
 };
 
-#define TCA_MAX (__TCA_MAX - 1)
+#define TCA_MAX TCA_RATE
 
 #define TCA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct tcmsg))))
 #define TCA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct tcmsg))
@@ -574,6 +546,7 @@ static __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
 
 extern int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len);
 
+#ifdef CONFIG_RTNETLINK
 extern struct sock *rtnl;
 
 struct rtnetlink_link
@@ -595,6 +568,12 @@ extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const voi
 
 extern void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change);
 
+#else
+
+#define rtmsg_ifinfo(a,b,c) do { } while (0)
+
+#endif
+
 extern struct semaphore rtnl_sem;
 
 #define rtnl_exlock()		do { } while(0)
@@ -604,19 +583,23 @@ extern struct semaphore rtnl_sem;
 #define rtnl_shlock()		down(&rtnl_sem)
 #define rtnl_shlock_nowait()	down_trylock(&rtnl_sem)
 
+#ifndef CONFIG_RTNETLINK
+#define rtnl_shunlock()	up(&rtnl_sem)
+#else
 #define rtnl_shunlock()	do { up(&rtnl_sem); \
 		             if (rtnl && rtnl->receive_queue.qlen) \
 				     rtnl->data_ready(rtnl, 0); \
 		        } while(0)
+#endif
 
 extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern void rtnetlink_init(void);
 
 #define ASSERT_RTNL() do { if (down_trylock(&rtnl_sem) == 0)  { up(&rtnl_sem); \
-printk("RTNL: assertion failed at " __FILE__ "(%d)\n", __LINE__); } \
-		   } while(0)
-#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d)\n", __LINE__); }
+printk("RTNL: assertion failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); } \
+		   } while(0);
+#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
 
 
 #endif /* __KERNEL__ */

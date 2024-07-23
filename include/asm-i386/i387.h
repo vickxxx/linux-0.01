@@ -34,7 +34,7 @@ extern void kernel_fpu_begin(void);
 
 #define clear_fpu( tsk ) do { \
 	if ( tsk->flags & PF_USEDFPU ) { \
-		asm volatile("fnclex ; fwait"); \
+		asm volatile("fwait"); \
 		tsk->flags &= ~PF_USEDFPU; \
 		stts(); \
 	} \
@@ -76,7 +76,6 @@ extern int get_fpxregs( struct user_fxsr_struct *buf,
 			struct task_struct *tsk );
 extern int set_fpxregs( struct task_struct *tsk,
 			struct user_fxsr_struct *buf );
-extern void load_empty_fpu(struct task_struct *);
 
 /*
  * FPU state for core dumps...

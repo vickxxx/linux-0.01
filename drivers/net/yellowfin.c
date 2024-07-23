@@ -125,7 +125,6 @@ static int gx_fix;
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/ethtool.h>
-#include <linux/crc32.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>		/* Processor type for cache alignment. */
 #include <asm/unaligned.h>
@@ -857,7 +856,6 @@ static int yellowfin_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct yellowfin_private *yp = dev->priv;
 	unsigned entry;
-	int len = skb->len;
 
 	netif_stop_queue (dev);
 
@@ -867,43 +865,33 @@ static int yellowfin_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Calculate the next Tx descriptor entry. */
 	entry = yp->cur_tx % TX_RING_SIZE;
 
+	yp->tx_skbuff[entry] = skb;
+
 	if (gx_fix) {	/* Note: only works for paddable protocols e.g.  IP. */
 		int cacheline_end = ((unsigned long)skb->data + skb->len) % 32;
 		/* Fix GX chipset errata. */
 		if (cacheline_end > 24  || cacheline_end == 0)
-		{
-			len = skb->len + 32 - cacheline_end + 1;
-			if(len != skb->len)
-				skb = skb_padto(skb, len);
-		}
-		if(skb == NULL)
-		{
-			yp->tx_skbuff[entry] = NULL;
-			netif_wake_queue(dev);
-			return 0;
-		}
+			skb->len += 32 - cacheline_end + 1;
 	}
-	yp->tx_skbuff[entry] = skb;
-
 #ifdef NO_TXSTATS
 	yp->tx_ring[entry].addr = cpu_to_le32(pci_map_single(yp->pci_dev, 
-		skb->data, len, PCI_DMA_TODEVICE));
+		skb->data, skb->len, PCI_DMA_TODEVICE));
 	yp->tx_ring[entry].result_status = 0;
 	if (entry >= TX_RING_SIZE-1) {
 		/* New stop command. */
 		yp->tx_ring[0].dbdma_cmd = cpu_to_le32(CMD_STOP);
 		yp->tx_ring[TX_RING_SIZE-1].dbdma_cmd =
-			cpu_to_le32(CMD_TX_PKT|BRANCH_ALWAYS | len);
+			cpu_to_le32(CMD_TX_PKT|BRANCH_ALWAYS | skb->len);
 	} else {
 		yp->tx_ring[entry+1].dbdma_cmd = cpu_to_le32(CMD_STOP);
 		yp->tx_ring[entry].dbdma_cmd =
-			cpu_to_le32(CMD_TX_PKT | BRANCH_IFTRUE | len);
+			cpu_to_le32(CMD_TX_PKT | BRANCH_IFTRUE | skb->len);
 	}
 	yp->cur_tx++;
 #else
-	yp->tx_ring[entry<<1].request_cnt = len;
+	yp->tx_ring[entry<<1].request_cnt = skb->len;
 	yp->tx_ring[entry<<1].addr = cpu_to_le32(pci_map_single(yp->pci_dev, 
-		skb->data, len, PCI_DMA_TODEVICE));
+		skb->data, skb->len, PCI_DMA_TODEVICE));
 	/* The input_last (status-write) command is constant, but we must 
 	   rewrite the subsequent 'stop' command. */
 
@@ -916,7 +904,7 @@ static int yellowfin_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	yp->tx_ring[entry<<1].dbdma_cmd =
 		cpu_to_le32( ((entry % 6) == 0 ? CMD_TX_PKT|INTR_ALWAYS|BRANCH_IFTRUE :
-					  CMD_TX_PKT | BRANCH_IFTRUE) | len);
+					  CMD_TX_PKT | BRANCH_IFTRUE) | skb->len);
 #endif
 
 	/* Non-x86 Todo: explicitly flush cache lines here. */
@@ -1031,11 +1019,17 @@ static void yellowfin_interrupt(int irq, void *dev_instance, struct pt_regs *reg
 					if (tx_errs & 0x0800) yp->stats.tx_carrier_errors++;
 					if (tx_errs & 0x2000) yp->stats.tx_window_errors++;
 					if (tx_errs & 0x8000) yp->stats.tx_fifo_errors++;
+#ifdef ETHER_STATS
+					if (tx_errs & 0x1000) yp->stats.collisions16++;
+#endif
 				} else {
 #ifndef final_version
 					if (yellowfin_debug > 4)
 						printk(KERN_DEBUG "%s: Normal transmit, Tx status %4.4x.\n",
 							   dev->name, tx_errs);
+#endif
+#ifdef ETHER_STATS
+					if (tx_errs & 0x0400) yp->stats.tx_deferred++;
 #endif
 					yp->stats.tx_bytes += skb->len;
 					yp->stats.collisions += tx_errs & 15;
@@ -1345,6 +1339,29 @@ static struct net_device_stats *yellowfin_get_stats(struct net_device *dev)
 
 /* Set or clear the multicast filter for this adaptor. */
 
+/* The little-endian AUTODIN32 ethernet CRC calculation.
+   N.B. Do not use for bulk data, use a table-based routine instead.
+   This is common code and should be moved to net/core/crc.c */
+static unsigned const ethernet_polynomial_le = 0xedb88320U;
+
+static inline unsigned ether_crc_le(int length, unsigned char *data)
+{
+	unsigned int crc = 0xffffffff;	/* Initial value. */
+	while(--length >= 0) {
+		unsigned char current_octet = *data++;
+		int bit;
+		for (bit = 8; --bit >= 0; current_octet >>= 1) {
+			if ((crc ^ current_octet) & 1) {
+				crc >>= 1;
+				crc ^= ethernet_polynomial_le;
+			} else
+				crc >>= 1;
+		}
+	}
+	return crc;
+}
+
+
 static void set_rx_mode(struct net_device *dev)
 {
 	struct yellowfin_private *yp = dev->priv;
@@ -1489,7 +1506,7 @@ static struct pci_driver yellowfin_driver = {
 	name:		DRV_NAME,
 	id_table:	yellowfin_pci_tbl,
 	probe:		yellowfin_init_one,
-	remove:		__devexit_p(yellowfin_remove_one),
+	remove:		yellowfin_remove_one,
 };
 
 

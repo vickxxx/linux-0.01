@@ -40,7 +40,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	/* look at all blocks */
 	while (block < inode->i_blocks) {
 		/* read the dir block */
-		bh = sb_bread(inode->i_sb, efs_bmap(inode, block));
+		bh = bread(inode->i_dev, efs_bmap(inode, block), EFS_DIRBSIZE);
 
 		if (!bh) {
 			printk(KERN_ERR "EFS: readdir(): failed to read dir block %d\n", block);

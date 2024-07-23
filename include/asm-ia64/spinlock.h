@@ -3,7 +3,7 @@
 
 /*
  * Copyright (C) 1998-2001 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  *
  * This file is used for SMP configurations only.
@@ -74,12 +74,6 @@ typedef struct {
 #define SPIN_LOCK_UNLOCKED			(spinlock_t) { 0 }
 #define spin_lock_init(x)			((x)->lock = 0)
 
-#ifdef GAS_HAS_HINT_INSN
-#define HINT_PAUSE	";; (p7) hint @pause\n"
-#else
-#define HINT_PAUSE
-#endif										
-
 /*
  * Streamlined test_and_set_bit(0, (x)).  We use test-and-test-and-set
  * rather than a simple xchg to avoid writing the cache-line when
@@ -90,17 +84,16 @@ typedef struct {
 	"mov r29 = 1\n"						\
 	";;\n"							\
 	"1:\n"							\
-	"ld4 r2 = [%0]\n"					\
+	"ld4.bias r2 = [%0]\n"					\
 	";;\n"							\
 	"cmp4.eq p0,p7 = r0,r2\n"				\
-	HINT_PAUSE 						\
 	"(p7) br.cond.spnt.few 1b \n"				\
 	"cmpxchg4.acq r2 = [%0], r29, ar.ccv\n"			\
 	";;\n"							\
 	"cmp4.eq p0,p7 = r0, r2\n"				\
 	"(p7) br.cond.spnt.few 1b\n"				\
 	";;\n"							\
-	:: "r"(&(x)->lock) : "ar.ccv", "p7", "r2", "r29", "memory")
+	:: "r"(&(x)->lock) : "r2", "r29", "memory")
 
 #define spin_is_locked(x)	((x)->lock != 0)
 #define spin_unlock(x)		do { barrier(); ((spinlock_t *) x)->lock = 0; } while (0)
@@ -122,21 +115,20 @@ do {										\
 	int tmp = 0;								\
 	__asm__ __volatile__ ("1:\tfetchadd4.acq %0 = [%1], 1\n"		\
 			      ";;\n"						\
-			      "tbit.nz p7,p0 = %0, 31\n"			\
-			      "(p7) br.cond.sptk.few 2f\n"			\
+			      "tbit.nz p6,p0 = %0, 31\n"			\
+			      "(p6) br.cond.sptk.few 2f\n"			\
 			      ".section .text.lock,\"ax\"\n"			\
 			      "2:\tfetchadd4.rel %0 = [%1], -1\n"		\
 			      ";;\n"						\
 			      "3:\tld4.acq %0 = [%1]\n"				\
 			      ";;\n"						\
-			      "tbit.nz p7,p0 = %0, 31\n"			\
-			      HINT_PAUSE					\
-			      "(p7) br.cond.sptk.few 3b\n"			\
+			      "tbit.nz p6,p0 = %0, 31\n"			\
+			      "(p6) br.cond.sptk.few 3b\n"			\
 			      "br.cond.sptk.few 1b\n"				\
 			      ";;\n"						\
 			      ".previous\n"					\
 			      : "=&r" (tmp)					\
-			      : "r" (rw) : "p7", "memory");			\
+			      : "r" (rw): "memory");				\
 } while(0)
 
 #define read_unlock(rw)								\
@@ -158,20 +150,19 @@ do {										\
 		"ld4 r2 = [%0]\n"						\
 		";;\n"								\
 		"cmp4.eq p0,p7 = r0,r2\n"					\
-		HINT_PAUSE							\
 		"(p7) br.cond.spnt.few 1b \n"					\
 		"cmpxchg4.acq r2 = [%0], r29, ar.ccv\n"				\
 		";;\n"								\
 		"cmp4.eq p0,p7 = r0, r2\n"					\
 		"(p7) br.cond.spnt.few 1b\n"					\
 		";;\n"								\
-		:: "r"(rw) : "ar.ccv", "p7", "r2", "r29", "memory");		\
+		:: "r"(rw) : "r2", "r29", "memory");				\
 } while(0)
 
-#define write_unlock(x)									\
-({											\
-	smp_mb__before_clear_bit();	/* need barrier before releasing lock... */	\
-	clear_bit(31, (x));								\
-})
+/*
+ * clear_bit() has "acq" semantics; we're really need "rel" semantics,
+ * but for simplicity, we simply do a fence for now...
+ */
+#define write_unlock(x)				({clear_bit(31, (x)); mb();})
 
 #endif /*  _ASM_IA64_SPINLOCK_H */

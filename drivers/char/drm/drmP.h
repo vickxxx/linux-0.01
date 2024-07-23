@@ -52,9 +52,7 @@
 #include <linux/version.h>
 #include <linux/sched.h>
 #include <linux/smp_lock.h>	/* For (un)lock_kernel */
-#include <asm/system.h>	/* for cmpxchg() */
 #include <linux/mm.h>
-#include <linux/pagemap.h>
 #if defined(__alpha__) || defined(__powerpc__)
 #include <asm/pgtable.h> /* For pte_wrprotect */
 #endif
@@ -68,12 +66,26 @@
 #include <linux/types.h>
 #include <linux/agp_backend.h>
 #endif
+#if LINUX_VERSION_CODE >= 0x020100 /* KERNEL_VERSION(2,1,0) */
 #include <linux/tqueue.h>
 #include <linux/poll.h>
+#endif
+#if LINUX_VERSION_CODE < 0x020400
+#include "compat-pre24.h"
+#endif
 #include <asm/pgalloc.h>
 #include "drm.h"
 
-#include "drm_os_linux.h"
+/* page_to_bus for earlier kernels, not optimal in all cases */
+#ifndef page_to_bus
+#define page_to_bus(page)	((unsigned int)(virt_to_bus(page_address(page))))
+#endif
+
+/* We just use virt_to_bus for pci_map_single on older kernels */
+#if LINUX_VERSION_CODE < 0x020400
+#define pci_map_single(hwdev, ptr, size, direction)	virt_to_bus(ptr)
+#define pci_unmap_single(hwdev, dma_addr, size, direction)
+#endif
 
 /* DRM template customization defaults
  */
@@ -106,78 +118,6 @@
 						defined(CONFIG_AGP_MODULE)))
 #define __REALLY_HAVE_MTRR	(__HAVE_MTRR && defined(CONFIG_MTRR))
 
-
-				/* Generic cmpxchg added in 2.3.x */
-#ifndef __HAVE_ARCH_CMPXCHG
-				/* Include this here so that driver can be
-                                   used with older kernels. */
-#if defined(__alpha__)
-static __inline__ unsigned long
-__cmpxchg_u32(volatile int *m, int old, int new)
-{
-	unsigned long prev, cmp;
-
-	__asm__ __volatile__(
-	"1:	ldl_l %0,%2\n"
-	"	cmpeq %0,%3,%1\n"
-	"	beq %1,2f\n"
-	"	mov %4,%1\n"
-	"	stl_c %1,%2\n"
-	"	beq %1,3f\n"
-	"2:	mb\n"
-	".subsection 2\n"
-	"3:	br 1b\n"
-	".previous"
-	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m));
-
-	return prev;
-}
-
-static __inline__ unsigned long
-__cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
-{
-	unsigned long prev, cmp;
-
-	__asm__ __volatile__(
-	"1:	ldq_l %0,%2\n"
-	"	cmpeq %0,%3,%1\n"
-	"	beq %1,2f\n"
-	"	mov %4,%1\n"
-	"	stq_c %1,%2\n"
-	"	beq %1,3f\n"
-	"2:	mb\n"
-	".subsection 2\n"
-	"3:	br 1b\n"
-	".previous"
-	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m));
-
-	return prev;
-}
-
-static __inline__ unsigned long
-__cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
-{
-	switch (size) {
-		case 4:
-			return __cmpxchg_u32(ptr, old, new);
-		case 8:
-			return __cmpxchg_u64(ptr, old, new);
-	}
-	return old;
-}
-#define cmpxchg(ptr,o,n)						 \
-  ({									 \
-     __typeof__(*(ptr)) _o_ = (o);					 \
-     __typeof__(*(ptr)) _n_ = (n);					 \
-     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
-				    (unsigned long)_n_, sizeof(*(ptr))); \
-  })
-
-#endif /* alpha */
-#endif
-#define __REALLY_HAVE_SG	(__HAVE_SG)
 
 /* Begin the DRM...
  */
@@ -221,57 +161,185 @@ __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 #define DRM_MAX_CTXBITMAP (PAGE_SIZE * 8)
 
 				/* Backward compatibility section */
-#ifndef minor
-#define minor(x) MINOR((x))
+				/* _PAGE_WT changed to _PAGE_PWT in 2.2.6 */
+#ifndef _PAGE_PWT
+#define _PAGE_PWT _PAGE_WT
+#endif
+				/* Wait queue declarations changed in 2.3.1 */
+#ifndef DECLARE_WAITQUEUE
+#define DECLARE_WAITQUEUE(w,c) struct wait_queue w = { c, NULL }
+typedef struct wait_queue *wait_queue_head_t;
+#define init_waitqueue_head(q) *q = NULL;
 #endif
 
-#ifndef MODULE_LICENSE
-#define MODULE_LICENSE(x) 
+				/* _PAGE_4M changed to _PAGE_PSE in 2.3.23 */
+#ifndef _PAGE_PSE
+#define _PAGE_PSE _PAGE_4M
 #endif
 
-
-#ifndef pte_offset_map 
-#define pte_offset_map pte_offset
-#define pte_unmap(pte)
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,19)
-static inline struct page * vmalloc_to_page(void * vmalloc_addr)
-{
-	unsigned long addr = (unsigned long) vmalloc_addr;
-	struct page *page = NULL;
-	pgd_t *pgd = pgd_offset_k(addr);
-	pmd_t *pmd;
-	pte_t *ptep, pte;
-  
-	if (!pgd_none(*pgd)) {
-		pmd = pmd_offset(pgd, addr);
-		if (!pmd_none(*pmd)) {
-			ptep = pte_offset_map(pmd, addr);
-			pte = *ptep;
-			if (pte_present(pte))
-				page = pte_page(pte);
-			pte_unmap(ptep);
-		}
-	}
-	return page;
-}
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0)
-#define DRM_RPR_ARG(vma)
+				/* vm_offset changed to vm_pgoff in 2.3.25 */
+#if LINUX_VERSION_CODE < 0x020319
+#define VM_OFFSET(vma) ((vma)->vm_offset)
 #else
-#define DRM_RPR_ARG(vma) vma,
+#define VM_OFFSET(vma) ((vma)->vm_pgoff << PAGE_SHIFT)
 #endif
 
+				/* *_nopage return values defined in 2.3.26 */
+#ifndef NOPAGE_SIGBUS
+#define NOPAGE_SIGBUS 0
+#endif
+#ifndef NOPAGE_OOM
+#define NOPAGE_OOM 0
+#endif
 
-#define VM_OFFSET(vma) ((vma)->vm_pgoff << PAGE_SHIFT)
+				/* module_init/module_exit added in 2.3.13 */
+#ifndef module_init
+#define module_init(x)  int init_module(void) { return x(); }
+#endif
+#ifndef module_exit
+#define module_exit(x)  void cleanup_module(void) { x(); }
+#endif
+
+				/* Generic cmpxchg added in 2.3.x */
+#ifndef __HAVE_ARCH_CMPXCHG
+				/* Include this here so that driver can be
+                                   used with older kernels. */
+#if defined(__alpha__)
+static __inline__ unsigned long
+__cmpxchg_u32(volatile int *m, int old, int new)
+{
+	unsigned long prev, cmp;
+
+	__asm__ __volatile__(
+	"1:	ldl_l %0,%5\n"
+	"	cmpeq %0,%3,%1\n"
+	"	beq %1,2f\n"
+	"	mov %4,%1\n"
+	"	stl_c %1,%2\n"
+	"	beq %1,3f\n"
+	"2:	mb\n"
+	".subsection 2\n"
+	"3:	br 1b\n"
+	".previous"
+	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
+	: "r"((long) old), "r"(new), "m"(*m)
+	: "memory" );
+
+	return prev;
+}
+
+static __inline__ unsigned long
+__cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
+{
+	unsigned long prev, cmp;
+
+	__asm__ __volatile__(
+	"1:	ldq_l %0,%5\n"
+	"	cmpeq %0,%3,%1\n"
+	"	beq %1,2f\n"
+	"	mov %4,%1\n"
+	"	stq_c %1,%2\n"
+	"	beq %1,3f\n"
+	"2:	mb\n"
+	".subsection 2\n"
+	"3:	br 1b\n"
+	".previous"
+	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
+	: "r"((long) old), "r"(new), "m"(*m)
+	: "memory" );
+
+	return prev;
+}
+
+static __inline__ unsigned long
+__cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
+{
+	switch (size) {
+		case 4:
+			return __cmpxchg_u32(ptr, old, new);
+		case 8:
+			return __cmpxchg_u64(ptr, old, new);
+	}
+	return old;
+}
+#define cmpxchg(ptr,o,n)						 \
+  ({									 \
+     __typeof__(*(ptr)) _o_ = (o);					 \
+     __typeof__(*(ptr)) _n_ = (n);					 \
+     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
+				    (unsigned long)_n_, sizeof(*(ptr))); \
+  })
+
+#elif __i386__
+static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
+				      unsigned long new, int size)
+{
+	unsigned long prev;
+	switch (size) {
+	case 1:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgb %b1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	case 2:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgw %w1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	case 4:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgl %1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	}
+	return old;
+}
+
+#elif defined(__powerpc__)
+extern void __cmpxchg_called_with_bad_pointer(void);
+static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
+                                      unsigned long new, int size)
+{
+	unsigned long prev;
+
+	switch (size) {
+	case 4:
+		__asm__ __volatile__(
+			"sync;"
+			"0:    lwarx %0,0,%1 ;"
+			"      cmpl 0,%0,%3;"
+			"      bne 1f;"
+			"      stwcx. %2,0,%1;"
+			"      bne- 0b;"
+			"1:    "
+			"sync;"
+			: "=&r"(prev)
+			: "r"(ptr), "r"(new), "r"(old)
+			: "cr0", "memory");
+		return prev;
+	}
+	__cmpxchg_called_with_bad_pointer();
+	return old;
+}
+
+#endif /* i386, powerpc & alpha */
+
+#ifndef __alpha__
+#define cmpxchg(ptr,o,n)						\
+  ((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),		\
+				 (unsigned long)(n),sizeof(*(ptr))))
+#endif
+
+#endif /* !__HAVE_ARCH_CMPXCHG */
 
 				/* Macros to make printk easier */
 #define DRM_ERROR(fmt, arg...) \
-	printk(KERN_ERR "[" DRM_NAME ":%s] *ERROR* " fmt , __FUNCTION__ , ##arg)
+	printk(KERN_ERR "[" DRM_NAME ":" __FUNCTION__ "] *ERROR* " fmt , ##arg)
 #define DRM_MEM_ERROR(area, fmt, arg...) \
-	printk(KERN_ERR "[" DRM_NAME ":%s:%s] *ERROR* " fmt , __FUNCTION__, \
+	printk(KERN_ERR "[" DRM_NAME ":" __FUNCTION__ ":%s] *ERROR* " fmt , \
 	       DRM(mem_stats)[area].name , ##arg)
 #define DRM_INFO(fmt, arg...)  printk(KERN_INFO "[" DRM_NAME "] " fmt , ##arg)
 
@@ -280,8 +348,8 @@ static inline struct page * vmalloc_to_page(void * vmalloc_addr)
 	do {								\
 		if ( DRM(flags) & DRM_FLAG_DEBUG )			\
 			printk(KERN_DEBUG				\
-			       "[" DRM_NAME ":%s] " fmt ,	\
-			       __FUNCTION__ , ##arg);			\
+			       "[" DRM_NAME ":" __FUNCTION__ "] " fmt ,	\
+			       ##arg);					\
 	} while (0)
 #else
 #define DRM_DEBUG(fmt, arg...)		 do { } while (0)
@@ -298,16 +366,13 @@ static inline struct page * vmalloc_to_page(void * vmalloc_addr)
    if (len > DRM_PROC_LIMIT) { ret; *eof = 1; return len - offset; }
 
 				/* Mapping helper macros */
-#define DRM_IOREMAP(map, dev)					\
-	(map)->handle = DRM(ioremap)((map)->offset, (map)->size, (dev) )
+#define DRM_IOREMAP(map)						\
+	(map)->handle = DRM(ioremap)( (map)->offset, (map)->size )
 
-#define DRM_IOREMAP_NOCACHE(map, dev)					\
-	(map)->handle = DRM(ioremap_nocache)((map)->offset, (map)->size, (dev) )
-
-#define DRM_IOREMAPFREE(map, dev)						\
+#define DRM_IOREMAPFREE(map)						\
 	do {								\
 		if ( (map)->handle && (map)->size )			\
-			DRM(ioremapfree)( (map)->handle, (map)->size, (dev) );	\
+			DRM(ioremapfree)( (map)->handle, (map)->size );	\
 	} while (0)
 
 #define DRM_FIND_MAP(_map, _o)						\
@@ -585,17 +650,6 @@ typedef struct drm_map_list {
 	drm_map_t		*map;
 } drm_map_list_t;
 
-#if __HAVE_VBL_IRQ
-
-typedef struct drm_vbl_sig {
-	struct list_head	head;
-	unsigned int		sequence;
-	struct siginfo		info;
-	struct task_struct	*task;
-} drm_vbl_sig_t;
-
-#endif
-
 typedef struct drm_device {
 	const char	  *name;	/* Simple driver name		   */
 	char		  *unique;	/* Unique identifier: e.g., busid  */
@@ -655,13 +709,6 @@ typedef struct drm_device {
 	int		  last_context;	/* Last current context		   */
 	unsigned long	  last_switch;	/* jiffies at last context switch  */
 	struct tq_struct  tq;
-#if __HAVE_VBL_IRQ
-   	wait_queue_head_t vbl_queue;
-   	atomic_t          vbl_received;
-	spinlock_t        vbl_lock;
-	drm_vbl_sig_t     vbl_sigs;
-	unsigned int      vbl_pending;
-#endif
 	cycles_t	  ctx_start;
 	cycles_t	  lck_start;
 #if __HAVE_DMA_HISTOGRAM
@@ -683,7 +730,11 @@ typedef struct drm_device {
 #endif
 	struct pci_dev *pdev;
 #ifdef __alpha__
+#if LINUX_VERSION_CODE < 0x020403
+	struct pci_controler *hose;
+#else
 	struct pci_controller *hose;
+#endif
 #endif
 	drm_sg_mem_t      *sg;  /* Scatter gather memory */
 	unsigned long     *ctx_bitmap;
@@ -727,18 +778,34 @@ extern unsigned int  DRM(poll)(struct file *filp,
 			       struct poll_table_struct *wait);
 
 				/* Mapping support (drm_vm.h) */
+#if LINUX_VERSION_CODE < 0x020317
+extern unsigned long DRM(vm_nopage)(struct vm_area_struct *vma,
+				    unsigned long address,
+				    int unused);
+extern unsigned long DRM(vm_shm_nopage)(struct vm_area_struct *vma,
+					unsigned long address,
+					int unused);
+extern unsigned long DRM(vm_dma_nopage)(struct vm_area_struct *vma,
+					unsigned long address,
+					int unused);
+extern unsigned long DRM(vm_sg_nopage)(struct vm_area_struct *vma,
+				       unsigned long address,
+				       int unused);
+#else
+				/* Return type changed in 2.3.23 */
 extern struct page *DRM(vm_nopage)(struct vm_area_struct *vma,
 				   unsigned long address,
-				   int write_access);
+				   int unused);
 extern struct page *DRM(vm_shm_nopage)(struct vm_area_struct *vma,
 				       unsigned long address,
-				       int write_access);
+				       int unused);
 extern struct page *DRM(vm_dma_nopage)(struct vm_area_struct *vma,
 				       unsigned long address,
-				       int write_access);
+				       int unused);
 extern struct page *DRM(vm_sg_nopage)(struct vm_area_struct *vma,
 				      unsigned long address,
-				      int write_access);
+				      int unused);
+#endif
 extern void	     DRM(vm_open)(struct vm_area_struct *vma);
 extern void	     DRM(vm_close)(struct vm_area_struct *vma);
 extern void	     DRM(vm_shm_close)(struct vm_area_struct *vma);
@@ -759,9 +826,8 @@ extern void	     DRM(free)(void *pt, size_t size, int area);
 extern unsigned long DRM(alloc_pages)(int order, int area);
 extern void	     DRM(free_pages)(unsigned long address, int order,
 				     int area);
-extern void	     *DRM(ioremap)(unsigned long offset, unsigned long size, drm_device_t *dev);
-extern void	     *DRM(ioremap_nocache)(unsigned long offset, unsigned long size, drm_device_t *dev);
-extern void	     DRM(ioremapfree)(void *pt, unsigned long size, drm_device_t *dev);
+extern void	     *DRM(ioremap)(unsigned long offset, unsigned long size);
+extern void	     DRM(ioremapfree)(void *pt, unsigned long size);
 
 #if __REALLY_HAVE_AGP
 extern agp_memory    *DRM(alloc_agp)(int pages, u32 type);
@@ -890,15 +956,6 @@ extern int           DRM(irq_install)( drm_device_t *dev, int irq );
 extern int           DRM(irq_uninstall)( drm_device_t *dev );
 extern void          DRM(dma_service)( int irq, void *device,
 				       struct pt_regs *regs );
-extern void          DRM(driver_irq_preinstall)( drm_device_t *dev );
-extern void          DRM(driver_irq_postinstall)( drm_device_t *dev );
-extern void          DRM(driver_irq_uninstall)( drm_device_t *dev );
-#if __HAVE_VBL_IRQ
-extern int           DRM(wait_vblank)(struct inode *inode, struct file *filp,
-				      unsigned int cmd, unsigned long arg);
-extern int           DRM(vblank_wait)(drm_device_t *dev, unsigned int *vbl_seq);
-extern void          DRM(vbl_send_signals)( drm_device_t *dev );
-#endif
 #if __HAVE_DMA_IRQ_BH
 extern void          DRM(dma_immediate_bh)( void *dev );
 #endif

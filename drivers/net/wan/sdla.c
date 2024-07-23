@@ -319,7 +319,7 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 struct _dlci_stat 
 {
 	short dlci		__attribute__((packed));
-	char  flags;
+	char  flags		__attribute__((packed));
 };
 
 struct _frad_stat 
@@ -695,7 +695,7 @@ static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
 					save_flags(flags); 
 					cli();
 					SDLA_WINDOW(dev, addr);
-					pbuf = (void *)(((unsigned long) dev->mem_start) + (addr & SDLA_ADDR_MASK));
+					pbuf = (void *)(((int) dev->mem_start) + (addr & SDLA_ADDR_MASK));
 						sdla_write(dev, pbuf->buf_addr, skb->data, skb->len);
 						SDLA_WINDOW(dev, addr);
 					pbuf->opp_flag = 1;
@@ -1201,7 +1201,6 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
 		temp = kmalloc(mem.len, GFP_KERNEL);
 		if (!temp)
 			return(-ENOMEM);
-		memset(temp, 0, mem.len);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
 		{
@@ -1301,8 +1300,6 @@ NOTE:  This is rather a useless action right now, as the
 
 		case SDLA_WRITEMEM:
 		case SDLA_READMEM:
-			if(!capable(CAP_SYS_RAWIO))
-				return -EPERM;
 			return(sdla_xfer(dev, (struct sdla_mem *)ifr->ifr_data, cmd == SDLA_READMEM));
 
 		case SDLA_START:
@@ -1351,10 +1348,8 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 		return(-EINVAL);
 
 	dev->base_addr = map->base_addr;
-	if (!request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name)){
-		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use \n", dev->base_addr);
-		return(-EINVAL);
-	}
+	request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name);
+
 	/* test for card types, S502A, S502E, S507, S508                 */
 	/* these tests shut down the card completely, so clear the state */
 	flp->type = SDLA_UNKNOWN;

@@ -330,12 +330,6 @@ static void ax_bump(struct ax_disp *ax)
 				return;
 			}
 			ax->rcount -= 2;
-                        /* dl9sau bugfix: the trailling two bytes flexnet crc
-                         * will not be passed to the kernel. thus we have
-                         * to correct the kissparm signature, because it
-                         * indicates a crc but there's none
-			 */
-                        *ax->rbuff &= ~0x20;
 		}
  	}
 
@@ -353,7 +347,6 @@ static void ax_bump(struct ax_disp *ax)
 	skb->protocol = htons(ETH_P_AX25);
 	netif_rx(skb);
 	tmp_ax->rx_packets++;
-	tmp_ax->rx_bytes+=count;
 }
 
 /* Encapsulate one AX.25 packet and stuff into a TTY queue. */
@@ -393,7 +386,6 @@ static void ax_encaps(struct ax_disp *ax, unsigned char *icp, int len)
 		ax->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
 		actual = ax->tty->driver.write(ax->tty, 0, ax->xbuff, count);
 		ax->tx_packets++;
-		ax->tx_bytes+=actual;
 		ax->dev->trans_start = jiffies;
 		ax->xleft = count - actual;
 		ax->xhead = ax->xbuff + actual;
@@ -402,7 +394,6 @@ static void ax_encaps(struct ax_disp *ax, unsigned char *icp, int len)
 		ax->mkiss->tty->flags |= (1 << TTY_DO_WRITE_WAKEUP);
 		actual = ax->mkiss->tty->driver.write(ax->mkiss->tty, 0, ax->mkiss->xbuff, count);
 		ax->tx_packets++;
-		ax->tx_bytes+=actual;
 		ax->mkiss->dev->trans_start = jiffies;
 		ax->mkiss->xleft = count - actual;
 		ax->mkiss->xhead = ax->mkiss->xbuff + actual;
@@ -654,7 +645,8 @@ static int ax25_open(struct tty_struct *tty)
 
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 
 	/* Restore default settings */
 	ax->dev->type = ARPHRD_AX25;
@@ -717,8 +709,6 @@ static struct net_device_stats *ax_get_stats(struct net_device *dev)
 
 	stats.rx_packets     = ax->rx_packets;
 	stats.tx_packets     = ax->tx_packets;
-	stats.rx_bytes	     = ax->rx_bytes;
-	stats.tx_bytes       = ax->tx_bytes;
 	stats.rx_dropped     = ax->rx_dropped;
 	stats.tx_dropped     = ax->tx_dropped;
 	stats.tx_errors      = ax->tx_errors;
@@ -946,7 +936,7 @@ static int ax25_init(struct net_device *dev)
 	memcpy(dev->dev_addr,  ax25_test,  AX25_ADDR_LEN);
 
 	/* New-style flags. */
-	dev->flags      = IFF_BROADCAST | IFF_MULTICAST;
+	dev->flags      = 0;
 
 	return 0;
 }
@@ -1018,7 +1008,6 @@ MODULE_AUTHOR("Hans Albas PE1AYX <hans@esrac.ele.tue.nl>");
 MODULE_DESCRIPTION("KISS driver for AX.25 over TTYs");
 MODULE_PARM(ax25_maxdev, "i");
 MODULE_PARM_DESC(ax25_maxdev, "number of MKISS devices");
-MODULE_LICENSE("GPL");
 
 module_init(mkiss_init_driver);
 module_exit(mkiss_exit_driver);

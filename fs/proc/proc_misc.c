@@ -36,11 +36,11 @@
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 #include <linux/seq_file.h>
-#include <linux/sysrq.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
+
 
 #define LOAD_INT(x) ((x) >> FSHIFT)
 #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
@@ -50,44 +50,20 @@
  * have a way to deal with that gracefully. Right now I used straightforward
  * wrappers, but this needs further analysis wrt potential overflows.
  */
-extern int get_hardware_list(char *);
-extern int get_stram_list(char *);
 #ifdef CONFIG_MODULES
 extern int get_module_list(char *);
 #endif
 extern int get_device_list(char *);
+extern int get_partition_list(char *, char **, off_t, int);
 extern int get_filesystem_list(char *);
 extern int get_exec_domain_list(char *);
-#ifndef CONFIG_X86
 extern int get_irq_list(char *);
-#endif
 extern int get_dma_list(char *);
 extern int get_locks_status (char *, char **, off_t, int);
 extern int get_swaparea_info (char *);
 #ifdef CONFIG_SGI_DS1286
 extern int get_ds1286_status(char *);
 #endif
-
-void proc_sprintf(char *page, off_t *off, int *lenp, const char *format, ...)
-{
-	int len = *lenp;
-	va_list args;
-
-	/* try to only print whole lines */
-	if (len > PAGE_SIZE-512)
-		return;
-
-	va_start(args, format);
-	len += vsnprintf(page + len, PAGE_SIZE-len, format, args);
-	va_end(args);
-
-	if (len <= *off) {
-		*off -= len;
-		len = 0;
-	}
-
-	*lenp = len;
-}
 
 static int proc_calc_metrics(char *page, char **start, off_t off,
 				 int count, int *eof, int len)
@@ -166,7 +142,7 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 #define B(x) ((unsigned long long)(x) << PAGE_SHIFT)
 	si_meminfo(&i);
 	si_swapinfo(&i);
-	pg_size = page_cache_size - i.bufferram;
+	pg_size = atomic_read(&page_cache_size) - i.bufferram ;
 
 	len = sprintf(page, "        total:    used:    free:  shared: buffers:  cached:\n"
 		"Mem:  %8Lu %8Lu %8Lu %8Lu %8Lu %8Lu\n"
@@ -238,36 +214,6 @@ static struct file_operations proc_cpuinfo_operations = {
 	release:	seq_release,
 };
 
-#ifdef CONFIG_PROC_HARDWARE
-static int hardware_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_hardware_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
-
-#ifdef CONFIG_STRAM_PROC
-static int stram_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_stram_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-#endif
-
-extern struct seq_operations partitions_op;
-static int partitions_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &partitions_op);
-}
-static struct file_operations proc_partitions_operations = {
-	open:		partitions_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
-};
-
 #ifdef CONFIG_MODULES
 static int modules_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -289,24 +235,10 @@ static struct file_operations proc_ksyms_operations = {
 };
 #endif
 
-extern struct seq_operations slabinfo_op;
-extern ssize_t slabinfo_write(struct file *, const char *, size_t, loff_t *);
-static int slabinfo_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &slabinfo_op);
-}
-static struct file_operations proc_slabinfo_operations = {
-	open:		slabinfo_open,
-	read:		seq_read,
-	write:		slabinfo_write,
-	llseek:		seq_lseek,
-	release:	seq_release,
-};
-
 static int kstat_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	int i, len = 0;
+	int i, len;
 	extern unsigned long total_forks;
 	unsigned long jif = jiffies;
 	unsigned int sum = 0, user = 0, nice = 0, system = 0;
@@ -324,12 +256,10 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 #endif
 	}
 
-	proc_sprintf(page, &off, &len,
-		      "cpu  %u %u %u %lu\n", user, nice, system,
+	len = sprintf(page, "cpu  %u %u %u %lu\n", user, nice, system,
 		      jif * smp_num_cpus - (user + nice + system));
 	for (i = 0 ; i < smp_num_cpus; i++)
-		proc_sprintf(page, &off, &len,
-			"cpu%d %u %u %u %lu\n",
+		len += sprintf(page + len, "cpu%d %u %u %u %lu\n",
 			i,
 			kstat.per_cpu_user[cpu_logical_map(i)],
 			kstat.per_cpu_nice[cpu_logical_map(i)],
@@ -337,7 +267,7 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 			jif - (  kstat.per_cpu_user[cpu_logical_map(i)] \
 				   + kstat.per_cpu_nice[cpu_logical_map(i)] \
 				   + kstat.per_cpu_system[cpu_logical_map(i)]));
-	proc_sprintf(page, &off, &len,
+	len += sprintf(page + len,
 		"page %u %u\n"
 		"swap %u %u\n"
 		"intr %u",
@@ -347,13 +277,12 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 			kstat.pswpout,
 			sum
 	);
-#if !defined(CONFIG_ARCH_S390) && !defined(CONFIG_ALPHA)
+#if !defined(CONFIG_ARCH_S390)
 	for (i = 0 ; i < NR_IRQS ; i++)
-		proc_sprintf(page, &off, &len,
-			     " %u", kstat_irqs(i));
+		len += sprintf(page + len, " %u", kstat_irqs(i));
 #endif
 
-	proc_sprintf(page, &off, &len, "\ndisk_io: ");
+	len += sprintf(page + len, "\ndisk_io: ");
 
 	for (major = 0; major < DK_MAX_MAJOR; major++) {
 		for (disk = 0; disk < DK_MAX_DISK; disk++) {
@@ -361,7 +290,7 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 				kstat.dk_drive_rblk[major][disk] +
 				kstat.dk_drive_wblk[major][disk];
 			if (active)
-				proc_sprintf(page, &off, &len,
+				len += sprintf(page + len,
 					"(%u,%u):(%u,%u,%u,%u,%u) ",
 					major, disk,
 					kstat.dk_drive[major][disk],
@@ -373,7 +302,7 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 		}
 	}
 
-	proc_sprintf(page, &off, &len,
+	len += sprintf(page + len,
 		"\nctxt %u\n"
 		"btime %lu\n"
 		"processes %lu\n",
@@ -391,7 +320,14 @@ static int devices_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
-#ifndef CONFIG_X86
+static int partitions_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	int len = get_partition_list(page, start, off, count);
+	if (len < count) *eof = 1;
+	return len;
+}
+
 #if !defined(CONFIG_ARCH_S390)
 static int interrupts_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -400,38 +336,6 @@ static int interrupts_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 #endif
-
-#else /* !CONFIG_X86 */
-
-extern int show_interrupts(struct seq_file *p, void *v);
-static int interrupts_open(struct inode *inode, struct file *file)
-{
-	unsigned size = PAGE_SIZE * (1 + smp_num_cpus / 8);
-	char *buf = kmalloc(size, GFP_KERNEL);
-	struct seq_file *m;
-	int res;
-
-	if (!buf)
-		return -ENOMEM;
-	res = single_open(file, show_interrupts, NULL);
-	if (!res) {
-		m = file->private_data;
-		m->buf = buf;
-		m->size = size;
-	} else
-		kfree(buf);
-	return res;
-}
-static struct file_operations proc_interrupts_operations = {
-	.open		= interrupts_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-#endif /* !CONFIG_X86 */
-
-extern struct file_operations proc_ioports_operations;
-extern struct file_operations proc_iomem_operations;
 
 static int filesystems_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -447,13 +351,21 @@ static int dma_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
+static int ioports_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	int len = get_ioport_list(page);
+	return proc_calc_metrics(page, start, off, count, eof, len);
+}
+
 static int cmdline_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	extern char saved_command_line[];
-	int len = 0;
+	int len;
 
-	proc_sprintf(page, &off, &len, "%s\n", saved_command_line);
+	len = sprintf(page, "%s\n", saved_command_line);
+	len = strlen(page);
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
@@ -491,6 +403,13 @@ static int swaps_read_proc(char *page, char **start, off_t off,
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
+static int memory_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	int len = get_mem_list(page);
+	return proc_calc_metrics(page, start, off, count, eof, len);
+}
+
 /*
  * This function accesses profiling information. The returned data is
  * binary: the sampling step and the actual contents of the profile
@@ -500,13 +419,12 @@ static int swaps_read_proc(char *page, char **start, off_t off,
 static ssize_t read_profile(struct file *file, char *buf,
 			    size_t count, loff_t *ppos)
 {
-	loff_t n = *ppos;
-	unsigned p = n;
+	unsigned long p = *ppos;
 	ssize_t read;
 	char * pnt;
 	unsigned int sample_step = 1 << prof_shift;
 
-	if (p != n || p >= (prof_len+1)*sizeof(unsigned int))
+	if (p >= (prof_len+1)*sizeof(unsigned int))
 		return 0;
 	if (count > (prof_len+1)*sizeof(unsigned int) - p)
 		count = (prof_len+1)*sizeof(unsigned int) - p;
@@ -517,10 +435,9 @@ static ssize_t read_profile(struct file *file, char *buf,
 		buf++; p++; count--; read++;
 	}
 	pnt = (char *)prof_buffer + p - sizeof(unsigned int);
-	if (copy_to_user(buf,(void *)pnt,count))
-		return -EFAULT;
+	copy_to_user(buf,(void *)pnt,count);
 	read += count;
-	*ppos = n + read;
+	*ppos += read;
 	return read;
 }
 
@@ -556,27 +473,17 @@ static struct file_operations proc_profile_operations = {
 	write:		write_profile,
 };
 
-#ifdef CONFIG_MAGIC_SYSRQ
-/*
- * writing 'C' to /proc/sysrq-trigger is like sysrq-C
- */
-static ssize_t write_sysrq_trigger(struct file *file, const char *buf,
-				     size_t count, loff_t *ppos)
+extern struct seq_operations mounts_op;
+static int mounts_open(struct inode *inode, struct file *file)
 {
-	if (count) {
-		char c;
-
-		if (get_user(c, buf))
-			return -EFAULT;
-		handle_sysrq(c, NULL, NULL, NULL);
-	}
-	return count;
+	return seq_open(file, &mounts_op);
 }
-
-static struct file_operations proc_sysrq_trigger_operations = {
-	.write		= write_sysrq_trigger,
+static struct file_operations proc_mounts_operations = {
+	open:		mounts_open,
+	read:		seq_read,
+	llseek:		seq_lseek,
+	release:	seq_release,
 };
-#endif
 
 struct proc_dir_entry *proc_root_kcore;
 
@@ -599,48 +506,37 @@ void __init proc_misc_init(void)
 		{"uptime",	uptime_read_proc},
 		{"meminfo",	meminfo_read_proc},
 		{"version",	version_read_proc},
-#ifdef CONFIG_PROC_HARDWARE
-		{"hardware",	hardware_read_proc},
-#endif
-#ifdef CONFIG_STRAM_PROC
-		{"stram",	stram_read_proc},
-#endif
 #ifdef CONFIG_MODULES
 		{"modules",	modules_read_proc},
 #endif
 		{"stat",	kstat_read_proc},
 		{"devices",	devices_read_proc},
-#if !defined(CONFIG_ARCH_S390) && !defined(CONFIG_X86)
+		{"partitions",	partitions_read_proc},
+#if !defined(CONFIG_ARCH_S390)
 		{"interrupts",	interrupts_read_proc},
 #endif
 		{"filesystems",	filesystems_read_proc},
 		{"dma",		dma_read_proc},
+		{"ioports",	ioports_read_proc},
 		{"cmdline",	cmdline_read_proc},
 #ifdef CONFIG_SGI_DS1286
 		{"rtc",		ds1286_read_proc},
 #endif
 		{"locks",	locks_read_proc},
 		{"swaps",	swaps_read_proc},
+		{"iomem",	memory_read_proc},
 		{"execdomains",	execdomains_read_proc},
 		{NULL,}
 	};
 	for (p = simple_ones; p->name; p++)
 		create_proc_read_entry(p->name, 0, NULL, p->read_proc, NULL);
 
-	proc_symlink("mounts", NULL, "self/mounts");
-
 	/* And now for trickier ones */
 	entry = create_proc_entry("kmsg", S_IRUSR, &proc_root);
 	if (entry)
 		entry->proc_fops = &proc_kmsg_operations;
+	create_seq_entry("mounts", 0, &proc_mounts_operations);
 	create_seq_entry("cpuinfo", 0, &proc_cpuinfo_operations);
-#if defined(CONFIG_X86)
-	create_seq_entry("interrupts", 0, &proc_interrupts_operations);
-#endif
-	create_seq_entry("ioports", 0, &proc_ioports_operations);
-	create_seq_entry("iomem", 0, &proc_iomem_operations);
-	create_seq_entry("partitions", 0, &proc_partitions_operations);
-	create_seq_entry("slabinfo",S_IWUSR|S_IRUGO,&proc_slabinfo_operations);
 #ifdef CONFIG_MODULES
 	create_seq_entry("ksyms", 0, &proc_ksyms_operations);
 #endif
@@ -657,11 +553,6 @@ void __init proc_misc_init(void)
 			entry->size = (1+prof_len) * sizeof(unsigned int);
 		}
 	}
-#ifdef CONFIG_MAGIC_SYSRQ
-	entry = create_proc_entry("sysrq-trigger", S_IWUSR, NULL);
-	if (entry)
-		entry->proc_fops = &proc_sysrq_trigger_operations;
-#endif
 #ifdef CONFIG_PPC32
 	{
 		extern struct file_operations ppc_htab_operations;
@@ -670,4 +561,8 @@ void __init proc_misc_init(void)
 			entry->proc_fops = &ppc_htab_operations;
 	}
 #endif
+	entry = create_proc_read_entry("slabinfo", S_IWUSR | S_IRUGO, NULL,
+				       slabinfo_read_proc, NULL);
+	if (entry)
+		entry->write_proc = slabinfo_write_proc;
 }

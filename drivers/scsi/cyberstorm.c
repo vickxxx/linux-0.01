@@ -131,8 +131,8 @@ int __init cyber_esp_detect(Scsi_Host_Template *tpnt)
 		esp->eregs = (struct ESP_regs *)(address + CYBER_ESP_ADDR);
 		
 		/* Set the command buffer */
-		esp->esp_command = cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus((void *)cmd_buffer);
+		esp->esp_command = (volatile unsigned char*) cmd_buffer;
+		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
@@ -320,5 +320,3 @@ int cyber_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
-
-MODULE_LICENSE("GPL");

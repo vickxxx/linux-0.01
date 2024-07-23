@@ -60,12 +60,8 @@ image: vmlinux
 
 archclean:
 	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
 
 archmrproper:
 
 archdep:
 	@$(MAKEBOOT) dep
-
-install: vmlinux
-	@$(MAKEBOOT) BOOTIMAGE=image install

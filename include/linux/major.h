@@ -33,7 +33,6 @@
 #define MD_MAJOR        9
 #define MISC_MAJOR	10
 #define SCSI_CDROM_MAJOR 11
-#define	MUX_MAJOR	11	/* PA-RISC only */
 #define QIC02_TAPE_MAJOR 12
 #define XT_DISK_MAJOR	13
 #define SOUND_MAJOR	14
@@ -140,8 +139,6 @@
 #define PHONE_MAJOR	100
 
 #define LVM_CHAR_MAJOR	109	/* Logical Volume Manager */
-
-#define	UMEM_MAJOR	116	/* http://www.umem.com/ Battery Backed RAM */
 
 #define RTF_MAJOR	150
 #define RAW_MAJOR	162

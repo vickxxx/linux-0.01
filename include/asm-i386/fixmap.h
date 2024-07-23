@@ -15,7 +15,6 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <asm/acpi.h>
 #include <asm/apicdef.h>
 #include <asm/page.h>
 #ifdef CONFIG_HIGHMEM
@@ -58,29 +57,14 @@ enum fixed_addresses {
 #endif
 #ifdef CONFIG_X86_VISWS_APIC
 	FIX_CO_CPU,	/* Cobalt timer */
-	FIX_CO_APIC,	/* Cobalt APIC Redirection Table */
+	FIX_CO_APIC,	/* Cobalt APIC Redirection Table */ 
 	FIX_LI_PCIA,	/* Lithium PCI Bridge A */
 	FIX_LI_PCIB,	/* Lithium PCI Bridge B */
 #endif
-#ifndef CONFIG_X86_F00F_WORKS_OK
-	FIX_F00F,
-#endif
-#ifdef CONFIG_X86_SUMMIT
-	FIX_CYCLONE_TIMER, /*cyclone timer register*/
-#endif 
 #ifdef CONFIG_HIGHMEM
 	FIX_KMAP_BEGIN,	/* reserved pte's for temporary kernel mappings */
 	FIX_KMAP_END = FIX_KMAP_BEGIN+(KM_TYPE_NR*NR_CPUS)-1,
 #endif
-#ifdef CONFIG_ACPI_BOOT
-	FIX_ACPI_BEGIN,
-	FIX_ACPI_END = FIX_ACPI_BEGIN + FIX_ACPI_PAGES - 1,
-#endif
-	__end_of_permanent_fixed_addresses,
-	/* temporary boot-time mappings, used before ioremap() is functional */
-#define NR_FIX_BTMAPS	16
-	FIX_BTMAP_END = __end_of_permanent_fixed_addresses,
-	FIX_BTMAP_BEGIN = FIX_BTMAP_END + NR_FIX_BTMAPS - 1,
 	__end_of_fixed_addresses
 };
 
@@ -102,8 +86,8 @@ extern void __set_fixmap (enum fixed_addresses idx,
  * at the top of mem..
  */
 #define FIXADDR_TOP	(0xffffe000UL)
-#define __FIXADDR_SIZE	(__end_of_permanent_fixed_addresses << PAGE_SHIFT)
-#define FIXADDR_START	(FIXADDR_TOP - __FIXADDR_SIZE)
+#define FIXADDR_SIZE	(__end_of_fixed_addresses << PAGE_SHIFT)
+#define FIXADDR_START	(FIXADDR_TOP - FIXADDR_SIZE)
 
 #define __fix_to_virt(x)	(FIXADDR_TOP - ((x) << PAGE_SHIFT))
 

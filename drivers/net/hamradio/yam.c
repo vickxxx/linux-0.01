@@ -308,8 +308,7 @@ static const unsigned char chktabh[256] =
 static void delay(int ms)
 {
 	unsigned long timeout = jiffies + ((ms * HZ) / 1000);
-	while (time_before(jiffies, timeout))
-		cpu_relax();
+	while (jiffies < timeout);
 }
 
 /*
@@ -840,7 +839,6 @@ static int yam_open(struct net_device *dev)
 	struct yam_port *yp = (struct yam_port *) dev->priv;
 	enum uart u;
 	int i;
-	int ret=0;
 
 	printk(KERN_INFO "Trying %s at iobase 0x%lx irq %u\n", dev->name, dev->base_addr, dev->irq);
 
@@ -850,27 +848,24 @@ static int yam_open(struct net_device *dev)
 		dev->irq < 2 || dev->irq > 15) {
 		return -ENXIO;
 	}
-	if (!request_region(dev->base_addr, YAM_EXTENT, dev->name))
-	{
+	if (check_region(dev->base_addr, YAM_EXTENT)) {
 		printk(KERN_ERR "%s: cannot 0x%lx busy\n", dev->name, dev->base_addr);
 		return -EACCES;
 	}
 	if ((u = yam_check_uart(dev->base_addr)) == c_uart_unknown) {
 		printk(KERN_ERR "%s: cannot find uart type\n", dev->name);
-		ret = -EIO;
-		goto out_release_base;
+		return -EIO;
 	}
 	if (fpga_download(dev->base_addr, yp->bitrate)) {
 		printk(KERN_ERR "%s: cannot init FPGA\n", dev->name);
-		ret = -EIO;
-		goto out_release_base;
+		return -EIO;
 	}
 	outb(0, IER(dev->base_addr));
 	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, dev)) {
 		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
-		ret = -EBUSY;
-		goto out_release_base;
+		return -EBUSY;
 	}
+	request_region(dev->base_addr, YAM_EXTENT, dev->name);
 
 	yam_set_uart(dev);
 
@@ -887,10 +882,6 @@ static int yam_open(struct net_device *dev)
 	printk(KERN_INFO "%s at iobase 0x%lx irq %u uart %s\n", dev->name, dev->base_addr, dev->irq,
 		   uart_str[u]);
 	return 0;
-
-out_release_base:
-	release_region(dev->base_addr, YAM_EXTENT);
-	return ret;
 }
 
 /* --------------------------------------------------------------------- */
@@ -1186,7 +1177,6 @@ static void __exit yam_cleanup_driver(void)
 
 MODULE_AUTHOR("Frederic Rible F1OAT frible@teaser.fr");
 MODULE_DESCRIPTION("Yam amateur radio modem driver");
-MODULE_LICENSE("GPL");
 
 module_init(yam_init_driver);
 module_exit(yam_cleanup_driver);

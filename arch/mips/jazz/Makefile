@@ -6,15 +6,17 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $@
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $@
 
 all: jazz.o
 
 O_TARGET := jazz.o
 
-export-objs	:= jazz-ksyms.o
-obj-y	 	:= int-handler.o irq.o jazzdma.o jazz-ksyms.o reset.o \
-		   rtc-jazz.o setup.o floppy-jazz.o kbd-jazz.o
+obj-y	 := int-handler.o irq.o jazzdma.o reset.o rtc-jazz.o setup.o \
+	    floppy-jazz.o kbd-jazz.o
 
 int-handler.o: int-handler.S
 

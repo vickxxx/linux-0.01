@@ -23,7 +23,7 @@
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/module.h>
+#include <linux/types.h>
 #include <linux/a.out.h>
 #include <linux/user.h>
 #include <linux/string.h>
@@ -224,7 +224,7 @@ static inline void access_error060 (struct frame *fp)
 		unsigned long addr = fp->un.fmt4.effaddr;
 
 		if (fslw & MMU060_MA)
-			addr = (addr + PAGE_SIZE - 1) & PAGE_MASK;
+			addr = (addr + 7) & -8;
 
 		errorcode = 1;
 		if (fslw & MMU060_DESC_ERR) {
@@ -258,12 +258,16 @@ static inline unsigned long probe040(int iswrite, unsigned long addr, int wbs)
 
 	set_fs(MAKE_MM_SEG(wbs));
 
-	if (iswrite)
-                asm volatile (".chip 68040; ptestw (%0); .chip 68k" : : "a" (addr));
-	else
-                asm volatile (".chip 68040; ptestr (%0); .chip 68k" : : "a" (addr));
+	asm volatile (".chip 68040");
 
-        asm volatile (".chip 68040; movec %%mmusr,%0; .chip 68k" : "=r" (mmusr));
+	if (iswrite)
+		asm volatile ("ptestw (%0)" : : "a" (addr));
+	else
+		asm volatile ("ptestr (%0)" : : "a" (addr));
+
+	asm volatile ("movec %%mmusr,%0" : "=r" (mmusr));
+
+	asm volatile (".chip 68k");
 
 	set_fs(old_fs); 
 
@@ -302,7 +306,7 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 	return res;
 }
 
-/* after an exception in a writeback the stack frame corresponding
+/* after an exception in a writeback the stack frame coresponding
  * to that exception is discarded, set a few bits in the old frame 
  * to simulate what it should look like
  */
@@ -332,7 +336,7 @@ static inline void do_040writebacks(struct frame *fp)
 			fp->un.fmt7.wb2s = 0;
 	}
 
-	/* do the 2nd wb only if the first one was successful (except for a kernel wb) */
+	/* do the 2nd wb only if the first one was succesful (except for a kernel wb) */
 	if (fp->un.fmt7.wb3s & WBV_040 && (!res || fp->un.fmt7.wb3s & 4)) {
 		res = do_040writeback1(fp->un.fmt7.wb3s, fp->un.fmt7.wb3a,
 				       fp->un.fmt7.wb3d);
@@ -446,7 +450,7 @@ extern int mmu_emu_handle_fault (unsigned long, int, int);
 
 /* sun3 version of bus_error030 */
 
-static inline void bus_error030(struct frame *fp)
+extern inline void bus_error030 (struct frame *fp)
 {
 	unsigned char buserr_type = sun3_get_buserr ();
 	unsigned long addr, errorcode;
@@ -574,9 +578,12 @@ static inline void bus_error030 (struct frame *fp)
 	unsigned short mmusr;
 	unsigned long addr, errorcode;
 	unsigned short ssw = fp->un.fmtb.ssw;
+	int user_space_fault = 1;
 #if DEBUG
 	unsigned long desc;
+#endif
 
+#if DEBUG
 	printk ("pid = %x  ", current->pid);
 	printk ("SSW=%#06x  ", ssw);
 
@@ -593,115 +600,127 @@ static inline void bus_error030 (struct frame *fp)
 			space_names[ssw & DFC], fp->ptregs.pc);
 #endif
 
+	if (fp->ptregs.sr & PS_S) {
+		/* kernel fault must be a data fault to user space */
+		if (! ((ssw & DF) && ((ssw & DFC) == USER_DATA))) {
+			/* instruction fault or kernel data fault! */
+			if (ssw & (FC | FB))
+				printk ("Instruction fault at %#010lx\n",
+					fp->ptregs.pc);
+			if (ssw & DF) {
+				printk ("Data %s fault at %#010lx in %s (pc=%#lx)\n",
+					ssw & RW ? "read" : "write",
+					fp->un.fmtb.daddr,
+					space_names[ssw & DFC], fp->ptregs.pc);
+			}
+			printk ("BAD KERNEL BUSERR\n");
+			die_if_kernel("Oops",&fp->ptregs,0);
+			force_sig(SIGKILL, current);
+			return;
+		}
+	} else {
+		/* user fault */
+		if (!(ssw & (FC | FB)) && !(ssw & DF))
+			/* not an instruction fault or data fault! BAD */
+			panic ("USER BUSERR w/o instruction or data fault");
+		user_space_fault = 1;
+#if DEBUG
+		printk("User space bus-error\n");
+#endif
+	}
+
 	/* ++andreas: If a data fault and an instruction fault happen
 	   at the same time map in both pages.  */
 
 	/* First handle the data fault, if any.  */
-	if (ssw & DF) {
-		addr = fp->un.fmtb.daddr;
+	if (ssw & DF)
+	  {
+	    addr = fp->un.fmtb.daddr;
 
+	    mmusr = MMU_I;
+	    if (user_space_fault) {
 #if DEBUG
-		asm volatile ("ptestr %3,%2@,#7,%0\n\t"
-			      "pmove %%psr,%1@"
-			      : "=a&" (desc)
-			      : "a" (&temp), "a" (addr), "d" (ssw));
+		    asm volatile ("ptestr #1,%2@,#7,%0\n\t"
+				  "pmove %/psr,%1@"
+				  : "=a&" (desc)
+				  : "a" (&temp), "a" (addr));
 #else
-		asm volatile ("ptestr %2,%1@,#7\n\t"
-			      "pmove %%psr,%0@"
-			      : : "a" (&temp), "a" (addr), "d" (ssw));
+		    asm volatile ("ptestr #1,%1@,#7\n\t"
+				  "pmove %/psr,%0@"
+				  : : "a" (&temp), "a" (addr));
 #endif
-		mmusr = temp;
-
+		    mmusr = temp;
+	    }
+      
 #if DEBUG
-		printk("mmusr is %#x for addr %#lx in task %p\n",
-		       mmusr, addr, current);
-		printk("descriptor address is %#lx, contents %#lx\n",
-		       __va(desc), *(unsigned long *)__va(desc));
+	    printk ("mmusr is %#x for addr %#lx in task %p\n",
+		    mmusr, addr, current);
+	    printk ("descriptor address is %#lx, contents %#lx\n",
+		    __va(desc), *(unsigned long *)__va(desc));
 #endif
 
-		errorcode = (mmusr & MMU_I) ? 0 : 1;
-		if (!(ssw & RW) || (ssw & RM))
-			errorcode |= 2;
+	    errorcode = (mmusr & MMU_I) ? 0 : 1;
+	    if (!(ssw & RW) || (ssw & RM))
+		    errorcode |= 2;
 
-		if (mmusr & (MMU_I | MMU_WP)) {
-			if (ssw & 4) {
-				printk("Data %s fault at %#010lx in %s (pc=%#lx)\n",
-				       ssw & RW ? "read" : "write",
-				       fp->un.fmtb.daddr,
-				       space_names[ssw & DFC], fp->ptregs.pc);
-				goto buserr;
-			}
-			/* Don't try to do anything further if an exception was
-			   handled. */
-			if (do_page_fault (&fp->ptregs, addr, errorcode) < 0)
-				return;
-		} else if (!(mmusr & MMU_I)) {
-			/* propably a 020 cas fault */
-			if (!(ssw & RM))
-				printk("unexpected bus error (%#x,%#x)\n", ssw, mmusr);
-		} else if (mmusr & (MMU_B|MMU_L|MMU_S)) {
-			printk("invalid %s access at %#lx from pc %#lx\n",
-			       !(ssw & RW) ? "write" : "read", addr,
-			       fp->ptregs.pc);
-			die_if_kernel("Oops",&fp->ptregs,mmusr);
-			force_sig(SIGSEGV, current);
+	    if (mmusr & (MMU_I | MMU_WP)) {
+		/* Don't try to do anything further if an exception was
+		   handled. */
+		if (do_page_fault (&fp->ptregs, addr, errorcode) < 0)
 			return;
-		} else {
+	    } else if (mmusr & (MMU_B|MMU_L|MMU_S)) {
+		    printk ("invalid %s access at %#lx from pc %#lx\n",
+			    !(ssw & RW) ? "write" : "read", addr,
+			    fp->ptregs.pc);
+		    die_if_kernel("Oops",&fp->ptregs,mmusr);
+		    force_sig(SIGSEGV, current);
+		    return;
+	    } else {
 #if 0
-			static volatile long tlong;
+		    static volatile long tlong;
 #endif
 
-			printk("weird %s access at %#lx from pc %#lx (ssw is %#x)\n",
-			       !(ssw & RW) ? "write" : "read", addr,
-			       fp->ptregs.pc, ssw);
-			asm volatile ("ptestr #1,%1@,#0\n\t"
-				      "pmove %%psr,%0@"
-				      : /* no outputs */
-				      : "a" (&temp), "a" (addr));
-			mmusr = temp;
+		    printk ("weird %s access at %#lx from pc %#lx (ssw is %#x)\n",
+			    !(ssw & RW) ? "write" : "read", addr,
+			    fp->ptregs.pc, ssw);
+		    asm volatile ("ptestr #1,%1@,#0\n\t"
+				  "pmove %/psr,%0@"
+				  : /* no outputs */
+				  : "a" (&temp), "a" (addr));
+		    mmusr = temp;
 
-			printk ("level 0 mmusr is %#x\n", mmusr);
+		    printk ("level 0 mmusr is %#x\n", mmusr);
 #if 0
-			asm volatile ("pmove %%tt0,%0@"
-				      : /* no outputs */
-				      : "a" (&tlong));
-			printk("tt0 is %#lx, ", tlong);
-			asm volatile ("pmove %%tt1,%0@"
-				      : /* no outputs */
-				      : "a" (&tlong));
-			printk("tt1 is %#lx\n", tlong);
+		    asm volatile ("pmove %/tt0,%0@"
+				  : /* no outputs */
+				  : "a" (&tlong));
+		    printk ("tt0 is %#lx, ", tlong);
+		    asm volatile ("pmove %/tt1,%0@"
+				  : /* no outputs */
+				  : "a" (&tlong));
+		    printk ("tt1 is %#lx\n", tlong);
 #endif
 #if DEBUG
-			printk("Unknown SIGSEGV - 1\n");
+		    printk("Unknown SIGSEGV - 1\n");
 #endif
-			die_if_kernel("Oops",&fp->ptregs,mmusr);
-			force_sig(SIGSEGV, current);
-			return;
-		}
+		    die_if_kernel("Oops",&fp->ptregs,mmusr);
+		    force_sig(SIGSEGV, current);
+		    return;
+	    }
 
-		/* setup an ATC entry for the access about to be retried */
-		if (!(ssw & RW) || (ssw & RM))
-			asm volatile ("ploadw %1,%0@" : /* no outputs */
-				      : "a" (addr), "d" (ssw));
-		else
-			asm volatile ("ploadr %1,%0@" : /* no outputs */
-				      : "a" (addr), "d" (ssw));
-	}
+	    /* setup an ATC entry for the access about to be retried */
+	    if (!(ssw & RW))
+		    asm volatile ("ploadw %1,%0@" : /* no outputs */
+				  : "a" (addr), "d" (ssw));
+	    else
+		    asm volatile ("ploadr %1,%0@" : /* no outputs */
+				  : "a" (addr), "d" (ssw));
+	  }
 
 	/* Now handle the instruction fault. */
 
 	if (!(ssw & (FC|FB)))
 		return;
-
-	if (fp->ptregs.sr & PS_S) {
-		printk("Instruction fault at %#010lx\n",
-			fp->ptregs.pc);
-	buserr:
-		printk ("BAD KERNEL BUSERR\n");
-		die_if_kernel("Oops",&fp->ptregs,0);
-		force_sig(SIGKILL, current);
-		return;
-	}
 
 	/* get the fault address */
 	if (fp->ptregs.format == 10)
@@ -716,18 +735,21 @@ static inline void bus_error030 (struct frame *fp)
 		   should still create the ATC entry.  */
 		goto create_atc_entry;
 
+	mmusr = MMU_I;
+	if (user_space_fault) {
 #if DEBUG
-	asm volatile ("ptestr #1,%2@,#7,%0\n\t"
-		      "pmove %%psr,%1@"
-		      : "=a&" (desc)
-		      : "a" (&temp), "a" (addr));
+		asm volatile ("ptestr #1,%2@,#7,%0\n\t"
+			      "pmove %/psr,%1@"
+			      : "=a&" (desc)
+			      : "a" (&temp), "a" (addr));
 #else
-	asm volatile ("ptestr #1,%1@,#7\n\t"
-		      "pmove %%psr,%0@"
-		      : : "a" (&temp), "a" (addr));
+		asm volatile ("ptestr #1,%1@,#7\n\t"
+			      "pmove %/psr,%0@"
+			      : : "a" (&temp), "a" (addr));
 #endif
-	mmusr = temp;
-
+		mmusr = temp;
+	}
+      
 #ifdef DEBUG
 	printk ("mmusr is %#x for addr %#lx in task %p\n",
 		mmusr, addr, current);
@@ -794,74 +816,16 @@ asmlinkage void buserr_c(struct frame *fp)
 
 
 int kstack_depth_to_print = 48;
-extern struct module kernel_module;
 
-static inline int kernel_text_address(unsigned long addr)
+/* MODULE_RANGE is a guess of how much space is likely to be
+   vmalloced.  */
+#define MODULE_RANGE (8*1024*1024)
+
+static void dump_stack(struct frame *fp)
 {
-#ifdef CONFIG_MODULES
-	struct module *mod;
-#endif
-	extern char _stext, _etext;
-
-	if (addr >= (unsigned long) &_stext &&
-	    addr <= (unsigned long) &_etext)
-		return 1;
-
-#ifdef CONFIG_MODULES
-	for (mod = module_list; mod != &kernel_module; mod = mod->next) {
-		/* mod_bound tests for addr being inside the vmalloc'ed
-		 * module area. Of course it'd be better to test only
-		 * for the .text subset... */
-		if (mod_bound(addr, 0, mod))
-			return 1;
-	}
-#endif
-
-	return 0;
-}
-
-void show_trace(unsigned long *stack)
-{
-	unsigned long *endstack;
-	unsigned long addr;
+	unsigned long *stack, *endstack, addr, module_start, module_end;
+	extern char _start, _etext;
 	int i;
-
-	printk("Call Trace:");
-	addr = (unsigned long)stack + THREAD_SIZE - 1;
-	endstack = (unsigned long *)(addr & -THREAD_SIZE);
-	i = 0;
-	while (stack + 1 <= endstack) {
-		addr = *stack++;
-		/*
-		 * If the address is either in the text segment of the
-		 * kernel, or in the region which contains vmalloc'ed
-		 * memory, it *may* be the address of a calling
-		 * routine; if so, print it so that someone tracing
-		 * down the cause of the crash will be able to figure
-		 * out the call path that was taken.
-		 */
-		if (kernel_text_address(addr)) {
-			if (i % 4 == 0)
-				printk("\n       ");
-			printk(" [<%08lx>]", addr);
-			i++;
-		}
-	}
-	printk("\n");
-}
-
-void show_trace_task(struct task_struct *tsk)
-{
-	show_trace((unsigned long *)tsk->thread.esp0);
-}
-
-static void show_stack(struct frame *fp)
-{
-	unsigned long *stack, *endstack, addr;
-	int i;
-
-	if (fp == NULL)
-	    fp = (struct frame *)&fp;
 
 	addr = (unsigned long)&fp->un;
 	printk("Frame format=%X ", fp->ptregs.format);
@@ -917,7 +881,7 @@ static void show_stack(struct frame *fp)
 	}
 
 	stack = (unsigned long *)addr;
-	endstack = (unsigned long *)((addr + THREAD_SIZE - 1) & -THREAD_SIZE);
+	endstack = (unsigned long *)PAGE_ALIGN(addr);
 
 	printk("Stack from %08lx:", (unsigned long)stack);
 	for (i = 0; i < kstack_depth_to_print; i++) {
@@ -927,21 +891,35 @@ static void show_stack(struct frame *fp)
 			printk("\n       ");
 		printk(" %08lx", *stack++);
 	}
-	printk("\n");
-	show_trace((unsigned long *)addr);
 
-	printk("Code: ");
+	printk ("\nCall Trace:");
+	stack = (unsigned long *) addr;
+	i = 0;
+	module_start = VMALLOC_START;
+	module_end = module_start + MODULE_RANGE;
+	while (stack + 1 <= endstack) {
+		addr = *stack++;
+		/*
+		 * If the address is either in the text segment of the
+		 * kernel, or in the region which contains vmalloc'ed
+		 * memory, it *may* be the address of a calling
+		 * routine; if so, print it so that someone tracing
+		 * down the cause of the crash will be able to figure
+		 * out the call path that was taken.
+		 */
+		if (((addr >= (unsigned long) &_start) &&
+		     (addr <= (unsigned long) &_etext)) ||
+		    ((addr >= module_start) && (addr <= module_end))) {
+			if (i % 4 == 0)
+				printk("\n       ");
+			printk(" [<%08lx>]", addr);
+			i++;
+		}
+	}
+	printk("\nCode: ");
 	for (i = 0; i < 10; i++)
 		printk("%04x ", 0xffff & ((short *) fp->ptregs.pc)[i]);
 	printk ("\n");
-}
-
-/*
- * The architecture-independent backtrace generator
- */
-void dump_stack(void)
-{
-	show_stack(0);
 }
 
 void bad_super_trap (struct frame *fp)
@@ -1114,7 +1092,7 @@ void die_if_kernel (char *str, struct pt_regs *fp, int nr)
 
 	printk("Process %s (pid: %d, stackpage=%08lx)\n",
 		current->comm, current->pid, PAGE_SIZE+(unsigned long)current);
-	show_stack((struct frame *)fp);
+	dump_stack((struct frame *)fp);
 	do_exit(SIGSEGV);
 }
 

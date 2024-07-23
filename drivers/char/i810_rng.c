@@ -1,7 +1,7 @@
 /*
 
 	Hardware driver for Intel i810 Random Number Generator (RNG)
-	Copyright 2000,2001 Jeff Garzik <jgarzik@pobox.com>
+	Copyright 2000,2001 Jeff Garzik <jgarzik@mandrakesoft.com>
 	Copyright 2000,2001 Philipp Rumpf <prumpf@mandrakesoft.com>
 
 	Driver Web site:  http://sourceforge.net/projects/gkernel/
@@ -27,7 +27,6 @@
 #include <linux/miscdevice.h>
 #include <linux/smp_lock.h>
 #include <linux/mm.h>
-#include <linux/delay.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -36,7 +35,7 @@
 /*
  * core module and version information
  */
-#define RNG_VERSION "0.9.8"
+#define RNG_VERSION "0.9.6"
 #define RNG_MODULE_NAME "i810_rng"
 #define RNG_DRIVER_NAME   RNG_MODULE_NAME " hardware driver " RNG_VERSION
 #define PFX RNG_MODULE_NAME ": "
@@ -244,13 +243,8 @@ static ssize_t rng_dev_read (struct file *filp, char *buf, size_t size,
 		if (filp->f_flags & O_NONBLOCK)
 			return ret ? : -EAGAIN;
 
-		if (current->need_resched)
-		{
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(1);
-		}
-		else
-			udelay(200);
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
 
 		if (signal_pending (current))
 			return ret ? : -ERESTARTSYS;
@@ -340,9 +334,7 @@ err_out:
 static struct pci_device_id rng_pci_tbl[] __initdata = {
 	{ 0x8086, 0x2418, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0x8086, 0x2428, PCI_ANY_ID, PCI_ANY_ID, },
-	{ 0x8086, 0x2448, PCI_ANY_ID, PCI_ANY_ID, },
-	{ 0x8086, 0x244e, PCI_ANY_ID, PCI_ANY_ID, },
-	{ 0x8086, 0x245e, PCI_ANY_ID, PCI_ANY_ID, },
+	{ 0x8086, 0x1130, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, },
 };
 MODULE_DEVICE_TABLE (pci, rng_pci_tbl);

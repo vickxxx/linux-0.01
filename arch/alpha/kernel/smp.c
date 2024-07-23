@@ -23,7 +23,6 @@
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/irq.h>
-#include <linux/cache.h>
 
 #include <asm/hwrpb.h>
 #include <asm/ptrace.h>
@@ -66,7 +65,7 @@ enum ipi_message_type {
 	IPI_CPU_STOP,
 };
 
-spinlock_t kernel_flag __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
+spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 
 /* Set to a secondary's cpuid when it comes online.  */
 static unsigned long smp_secondary_alive;
@@ -77,10 +76,11 @@ unsigned long cpu_present_mask;
 /* cpus reported in the hwrpb */
 static unsigned long hwrpb_cpu_present_mask __initdata = 0;
 
-static int max_cpus = NR_CPUS;	/* Command-line limitation.  */
+static int max_cpus = -1;	/* Command-line limitation.  */
 int smp_num_probed;		/* Internal processor count */
 int smp_num_cpus = 1;		/* Number that came online.  */
 int smp_threads_ready;		/* True once the per process idle is forked. */
+cycles_t cacheflush_time;
 
 int __cpu_number_map[NR_CPUS];
 int __cpu_logical_map[NR_CPUS];
@@ -103,7 +103,7 @@ static int __init maxcpus(char *str)
 	return 1;
 }
 
-__setup("maxcpus=", maxcpus);
+__setup("maxcpus", maxcpus);
 
 
 /*
@@ -174,9 +174,6 @@ smp_callin(void)
 	/* Get our local ticker going. */
 	smp_setup_percpu_timer(cpuid);
 
-	/* Call platform-specific callin, if specified */
-	if (alpha_mv.smp_callin) alpha_mv.smp_callin();
-
 	/* Must have completely accurate bogos.  */
 	__sti();
 
@@ -186,23 +183,9 @@ smp_callin(void)
 	 */
 	wait_boot_cpu_to_stop(cpuid);
 	mb();
-
 	calibrate_delay();
 
 	smp_store_cpu_info(cpuid);
-
-	{
-#define LPJ(c) ((long)cpu_data[c].loops_per_jiffy)
-	  long diff = LPJ(boot_cpuid) - LPJ(cpuid);
-	  if (diff < 0) diff = -diff;
-				
-	  if (diff > LPJ(boot_cpuid)/10) {
-	  	printk("Bogus BogoMIPS for cpu %d - trusting boot CPU\n",
-		       cpuid);
-		loops_per_jiffy = LPJ(cpuid) = LPJ(boot_cpuid);
-	  }
-	}
-
 	/*
 	 * Allow master to continue only after we written
 	 * the loops_per_jiffy.
@@ -225,6 +208,64 @@ smp_callin(void)
 	current->active_mm = &init_mm;
 	/* Do nothing.  */
 	cpu_idle();
+}
+
+
+/*
+ * Rough estimation for SMP scheduling, this is the number of cycles it
+ * takes for a fully memory-limited process to flush the SMP-local cache.
+ *
+ * We are not told how much cache there is, so we have to guess.
+ */
+static void __init
+smp_tune_scheduling (int cpuid)
+{
+	struct percpu_struct *cpu;
+	unsigned long on_chip_cache;
+	unsigned long freq;
+
+	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset
+				      + cpuid * hwrpb->processor_size);
+	switch (cpu->type)
+	{
+	case EV45_CPU:
+		on_chip_cache = 16 + 16;
+		break;
+
+	case EV5_CPU:
+	case EV56_CPU:
+		on_chip_cache = 8 + 8 + 96;
+		break;
+
+	case PCA56_CPU:
+		on_chip_cache = 16 + 8;
+		break;
+
+	case EV6_CPU:
+	case EV67_CPU:
+		on_chip_cache = 64 + 64;
+		break;
+
+	default:
+		on_chip_cache = 8 + 8;
+		break;
+	}
+
+	freq = hwrpb->cycle_freq ? : est_cycle_freq;
+
+#if 0
+	/* Magic estimation stolen from x86 port.  */
+	cacheflush_time = freq / 1024L * on_chip_cache / 5000L;
+
+        printk("Using heuristic of %d cycles.\n",
+               cacheflush_time);
+#else
+	/* Magic value to force potential preemption of other CPUs.  */
+	cacheflush_time = INT_MAX;
+
+        printk("Using heuristic of %d cycles.\n",
+               cacheflush_time);
+#endif
 }
 
 /*
@@ -566,6 +607,7 @@ smp_boot_cpus(void)
 	current->processor = boot_cpuid;
 
 	smp_store_cpu_info(boot_cpuid);
+	smp_tune_scheduling(boot_cpuid);
 	smp_setup_percpu_timer(boot_cpuid);
 
 	init_idle();
@@ -584,9 +626,6 @@ smp_boot_cpus(void)
 
 	cpu_count = 1;
 	for (i = 0; i < NR_CPUS; i++) {
-		if (cpu_count >= max_cpus)
-			break;
-
 		if (i == boot_cpuid)
 			continue;
 
@@ -612,8 +651,8 @@ smp_boot_cpus(void)
 	}
 	printk(KERN_INFO "SMP: Total of %d processors activated "
 	       "(%lu.%02lu BogoMIPS).\n",
-	       cpu_count, bogosum / (500000/HZ),
-	       (bogosum / (5000/HZ)) % 100);
+	       cpu_count, (bogosum + 2500) / (500000/HZ),
+	       ((bogosum + 2500) / (5000/HZ)) % 100);
 
 	smp_num_cpus = cpu_count;
 }
@@ -868,36 +907,11 @@ smp_call_function_on_cpu (void (*func) (void *info), void *info, int retry,
 	       && time_before (jiffies, timeout))
 		barrier();
 
-	/* If there's no response yet, log a message but allow a longer
-	 * timeout period -- if we get a response this time, log
-	 * a message saying when we got it.. 
-	 */
-	if (atomic_read(&data.unstarted_count) > 0) {
-		long start_time = jiffies;
-		printk(KERN_ERR "%s: initial timeout -- trying long wait\n",
-		       __FUNCTION__);
-		timeout = jiffies + 30 * HZ;
-		while (atomic_read(&data.unstarted_count) > 0
-		       && time_before(jiffies, timeout))
-			barrier();
-		if (atomic_read(&data.unstarted_count) <= 0) {
-			long delta = jiffies - start_time;
-			printk(KERN_ERR 
-			       "%s: response %ld.%ld seconds into long wait\n",
-			       __FUNCTION__, delta / HZ,
-			       (100 * (delta - ((delta / HZ) * HZ))) / HZ);
-		}
-	}
-
-	/* We either got one or timed out -- clear the lock. */
+	/* We either got one or timed out -- clear the lock.  */
 	mb();
 	smp_call_function_data = 0;
-
-	/* 
-	 * If after both the initial and long timeout periods we still don't
-	 * have a response, something is very wrong...
-	 */
-	BUG_ON(atomic_read (&data.unstarted_count) > 0);
+	if (atomic_read (&data.unstarted_count) > 0)
+		return -ETIMEDOUT;
 
 	/* Wait for a complete response, if needed.  */
 	if (wait) {
@@ -1050,8 +1064,7 @@ ipi_flush_icache_page(void *x)
 }
 
 void
-flush_icache_user_range(struct vm_area_struct *vma, struct page *page,
-			unsigned long addr, int len)
+flush_icache_page(struct vm_area_struct *vma, struct page *page)
 {
 	struct mm_struct *mm = vma->vm_mm;
 

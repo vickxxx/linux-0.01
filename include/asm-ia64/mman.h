@@ -2,10 +2,8 @@
 #define _ASM_IA64_MMAN_H
 
 /*
- * Based on <asm-i386/mman.h>.
- *
- * Modified 1998-2000
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #define PROT_READ	0x1		/* page can be read */

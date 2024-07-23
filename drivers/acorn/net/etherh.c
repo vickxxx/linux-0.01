@@ -1,7 +1,7 @@
 /*
  *  linux/drivers/acorn/net/etherh.c
  *
- *  Copyright (C) 2000-2002 Russell King
+ *  Copyright (C) 2000 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -23,7 +23,6 @@
  *  12-10-1999  CK/TEW		EtherM driver first release
  *  21-12-2000	TTC		EtherH/EtherM integration
  *  25-12-2000	RMK	1.08	Clean integration of EtherM into this driver.
- *  03-01-2002	RMK	1.09	Always enable IRQs if we're in the nic slot.
  */
 
 #include <linux/module.h>
@@ -65,18 +64,13 @@ static const card_ids __init etherh_cids[] = {
 	{ 0xffff,   0xffff }
 };
 
-struct etherh_priv {
-	unsigned int	id;
-	unsigned int	ctrl_port;
-	unsigned int	ctrl;
-};
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("EtherH/EtherM driver");
 MODULE_LICENSE("GPL");
 
 static char version[] __initdata =
-	"EtherH/EtherM Driver (c) 2002 Russell King v1.09\n";
+	"EtherH/EtherM Driver (c) 2000 Russell King v1.08\n";
 
 #define ETHERH500_DATAPORT	0x200	/* MEMC */
 #define ETHERH500_NS8390	0x000	/* MEMC */
@@ -103,61 +97,18 @@ static char version[] __initdata =
 #define ETHERM_TX_START_PAGE	64
 #define ETHERM_STOP_PAGE	127
 
-/* ------------------------------------------------------------------------ */
-
-static inline void etherh_set_ctrl(struct etherh_priv *eh, unsigned int mask)
-{
-	eh->ctrl |= mask;
-	outb(eh->ctrl, eh->ctrl_port);
-}
-
-static inline void etherh_clr_ctrl(struct etherh_priv *eh, unsigned int mask)
-{
-	eh->ctrl &= ~mask;
-	outb(eh->ctrl, eh->ctrl_port);
-}
-
-static inline unsigned int etherh_get_stat(struct etherh_priv *eh)
-{
-	return inb(eh->ctrl_port);
-}
-
-
-
-
-static void etherh_irq_enable(ecard_t *ec, int irqnr)
-{
-	struct etherh_priv *eh = ec->irq_data;
-
-	etherh_set_ctrl(eh, ETHERH_CP_IE);
-}
-
-static void etherh_irq_disable(ecard_t *ec, int irqnr)
-{
-	struct etherh_priv *eh = ec->irq_data;
-
-	etherh_clr_ctrl(eh, ETHERH_CP_IE);
-}
-
-static expansioncard_ops_t etherh_ops = {
-	irqenable:	etherh_irq_enable,
-	irqdisable:	etherh_irq_disable,
-};
-
-
-
+/* --------------------------------------------------------------------------- */
 
 static void
 etherh_setif(struct net_device *dev)
 {
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
-	struct etherh_priv *eh = (struct etherh_priv *)dev->rmem_start;
 	unsigned long addr, flags;
 
 	save_flags_cli(flags);
 
 	/* set the interface type */
-	switch (eh->id) {
+	switch (dev->mem_end) {
 	case PROD_I3_ETHERLAN600:
 	case PROD_I3_ETHERLAN600A:
 		addr = dev->base_addr + EN0_RCNTHI;
@@ -173,13 +124,14 @@ etherh_setif(struct net_device *dev)
 		break;
 
 	case PROD_I3_ETHERLAN500:
+		addr = dev->rmem_start;
+
 		switch (dev->if_port) {
 		case IF_PORT_10BASE2:
-			etherh_clr_ctrl(eh, ETHERH_CP_IF);
+			outb(inb(addr) & ~ETHERH_CP_IF, addr);
 			break;
-
 		case IF_PORT_10BASET:
-			etherh_set_ctrl(eh, ETHERH_CP_IF);
+			outb(inb(addr) | ETHERH_CP_IF, addr);
 			break;
 		}
 		break;
@@ -195,10 +147,9 @@ static int
 etherh_getifstat(struct net_device *dev)
 {
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
-	struct etherh_priv *eh = (struct etherh_priv *)dev->rmem_start;
 	int stat = 0;
 
-	switch (eh->id) {
+	switch (dev->mem_end) {
 	case PROD_I3_ETHERLAN600:
 	case PROD_I3_ETHERLAN600A:
 		switch (dev->if_port) {
@@ -217,7 +168,7 @@ etherh_getifstat(struct net_device *dev)
 			stat = 1;
 			break;
 		case IF_PORT_10BASET:
-			stat = etherh_get_stat(eh) & ETHERH_CP_HEARTBEAT;
+			stat = inb(dev->rmem_start) & ETHERH_CP_HEARTBEAT;
 			break;
 		}
 		break;
@@ -300,13 +251,7 @@ etherh_block_output (struct net_device *dev, int count, const unsigned char *buf
 		return;
 	}
 
-	/*
-	 * Make sure we have a round number of bytes if we're in word mode.
-	 */
-	if (count & 1 && ei_local->word16)
-		count++;
-
-	ei_local->dmaing = 1;
+	ei_local->dmaing |= 1;
 
 	addr = dev->base_addr;
 	dma_addr = dev->mem_start;
@@ -346,7 +291,7 @@ etherh_block_output (struct net_device *dev, int count, const unsigned char *buf
 		}
 
 	outb (ENISR_RDC, addr + EN0_ISR);
-	ei_local->dmaing = 0;
+	ei_local->dmaing &= ~1;
 }
 
 /*
@@ -366,7 +311,7 @@ etherh_block_input (struct net_device *dev, int count, struct sk_buff *skb, int 
 		return;
 	}
 
-	ei_local->dmaing = 1;
+	ei_local->dmaing |= 1;
 
 	addr = dev->base_addr;
 	dma_addr = dev->mem_start;
@@ -387,7 +332,7 @@ etherh_block_input (struct net_device *dev, int count, struct sk_buff *skb, int 
 		insb (dma_addr, buf, count);
 
 	outb (ENISR_RDC, addr + EN0_ISR);
-	ei_local->dmaing = 0;
+	ei_local->dmaing &= ~1;
 }
 
 /*
@@ -406,7 +351,7 @@ etherh_get_header (struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_p
 		return;
 	}
 
-	ei_local->dmaing = 1;
+	ei_local->dmaing |= 1;
 
 	addr = dev->base_addr;
 	dma_addr = dev->mem_start;
@@ -424,7 +369,7 @@ etherh_get_header (struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_p
 		insb (dma_addr, hdr, sizeof (*hdr));
 
 	outb (ENISR_RDC, addr + EN0_ISR);
-	ei_local->dmaing = 0;
+	ei_local->dmaing &= ~1;
 }
 
 /*
@@ -439,12 +384,6 @@ static int
 etherh_open(struct net_device *dev)
 {
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
-
-	if (!is_valid_ether_addr(dev->dev_addr)) {
-		printk(KERN_WARNING "%s: invalid ethernet address\n",
-			dev->name);
-		return -EINVAL;
-	}
 
 	if (request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))
 		return -EAGAIN;
@@ -488,22 +427,22 @@ etherh_close(struct net_device *dev)
 	return 0;
 }
 
-static int
-etherh_set_mac_address(struct net_device *dev, void *p)
+static void etherh_irq_enable(ecard_t *ec, int irqnr)
 {
-	struct sockaddr *addr = p;
-
-	if (netif_running(dev))
-		return -EBUSY;
-
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
-
-	/*
-	 * We'll set the MAC address on the chip when we open it.
-	 */
-
-	return 0;
+	unsigned int ctrl_addr = (unsigned int)ec->irq_data;
+	outb(inb(ctrl_addr) | ETHERH_CP_IE, ctrl_addr);
 }
+
+static void etherh_irq_disable(ecard_t *ec, int irqnr)
+{
+	unsigned int ctrl_addr = (unsigned int)ec->irq_data;
+	outb(inb(ctrl_addr) & ~ETHERH_CP_IE, ctrl_addr);
+}
+
+static expansioncard_ops_t etherh_ops = {
+	irqenable:	etherh_irq_enable,
+	irqdisable:	etherh_irq_disable,
+};
 
 /*
  * Initialisation
@@ -521,13 +460,11 @@ static void __init etherh_banner(void)
  * Read the ethernet address string from the on board rom.
  * This is an ascii string...
  */
-static void __init etherh_addr(char *addr, struct expansion_card *ec)
+static int __init etherh_addr(char *addr, struct expansion_card *ec)
 {
 	struct in_chunk_dir cd;
 	char *s;
 	
-	memset(addr, 0, 6);
-
 	if (ecard_readchunk(&cd, ec, 0xf5, 0) && (s = strchr(cd.d.string, '('))) {
 		int i;
 		for (i = 0; i < 6; i++) {
@@ -535,25 +472,31 @@ static void __init etherh_addr(char *addr, struct expansion_card *ec)
 			if (*s != (i == 5? ')' : ':'))
 				break;
 		}
+		if (i == 6)
+			return 0;
 	}
+	return ENODEV;
 }
 
 /*
  * Create an ethernet address from the system serial number.
  */
-static void __init etherm_addr(char *addr)
+static int __init etherm_addr(char *addr)
 {
 	unsigned int serial;
 
+	if (system_serial_low == 0 && system_serial_high == 0)
+		return ENODEV;
+
 	serial = system_serial_low | system_serial_high;
-	if (serial != 0) {
-		addr[0] = 0;
-		addr[1] = 0;
-		addr[2] = 0xa4;
-		addr[3] = 0x10 + (serial >> 24);
-		addr[4] = serial >> 16;
-		addr[5] = serial >> 8;
-	}
+
+	addr[0] = 0;
+	addr[1] = 0;
+	addr[2] = 0xa4;
+	addr[3] = 0x10 + (serial >> 24);
+	addr[4] = serial >> 16;
+	addr[5] = serial >> 8;
+	return 0;
 }
 
 static u32 etherh_regoffsets[16];
@@ -563,7 +506,6 @@ static struct net_device * __init etherh_init_one(struct expansion_card *ec)
 {
 	struct ei_device *ei_local;
 	struct net_device *dev;
-	struct etherh_priv *eh;
 	const char *dev_type;
 	int i, size;
 
@@ -575,50 +517,42 @@ static struct net_device * __init etherh_init_one(struct expansion_card *ec)
 	if (!dev)
 		goto out;
 
-	eh = kmalloc(sizeof(struct etherh_priv), GFP_KERNEL);
-	if (!eh)
-		goto out_nopriv;
-
 	SET_MODULE_OWNER(dev);
 
-	dev->open		= etherh_open;
-	dev->stop		= etherh_close;
-	dev->set_mac_address	= etherh_set_mac_address;
-	dev->set_config		= etherh_set_config;
-	dev->irq		= ec->irq;
-	dev->base_addr		= ecard_address(ec, ECARD_MEMC, 0);
-	dev->rmem_start		= (unsigned long)eh;
-
-	/*
-	 * IRQ and control port handling
-	 */
+	dev->open	= etherh_open;
+	dev->stop	= etherh_close;
+	dev->set_config	= etherh_set_config;
+	dev->irq	= ec->irq;
+	dev->base_addr	= ecard_address(ec, ECARD_MEMC, 0);
+	dev->mem_end	= ec->cid.product;
 	ec->ops		= &etherh_ops;
-	ec->irq_data	= eh;
-	eh->ctrl	= 0;
-	eh->id		= ec->cid.product;
 
 	switch (ec->cid.product) {
 	case PROD_ANT_ETHERM:
-		etherm_addr(dev->dev_addr);
+		if (etherm_addr(dev->dev_addr))
+			goto free;
 		dev->base_addr += ETHERM_NS8390;
 		dev->mem_start  = dev->base_addr + ETHERM_DATAPORT;
-		eh->ctrl_port   = dev->base_addr + ETHERM_CTRLPORT;
+		ec->irq_data    = (void *)(dev->base_addr + ETHERM_CTRLPORT);
 		break;
 
 	case PROD_I3_ETHERLAN500:
-		etherh_addr(dev->dev_addr, ec);
+		if (etherh_addr(dev->dev_addr, ec))
+			goto free;
 		dev->base_addr += ETHERH500_NS8390;
 		dev->mem_start  = dev->base_addr + ETHERH500_DATAPORT;
-		eh->ctrl_port   = ecard_address (ec, ECARD_IOC, ECARD_FAST)
+		dev->rmem_start = (unsigned long)
+		ec->irq_data    = (void *)ecard_address (ec, ECARD_IOC, ECARD_FAST)
 				  + ETHERH500_CTRLPORT;
 		break;
 
 	case PROD_I3_ETHERLAN600:
 	case PROD_I3_ETHERLAN600A:
-		etherh_addr(dev->dev_addr, ec);
+		if (etherh_addr(dev->dev_addr, ec))
+			goto free;
 		dev->base_addr += ETHERH600_NS8390;
-		dev->mem_start  = dev->base_addr + ETHERH600_DATAPORT;
-		eh->ctrl_port   = dev->base_addr + ETHERH600_CTRLPORT;
+		dev->mem_start = dev->base_addr + ETHERH600_DATAPORT;
+		ec->irq_data   = (void *)(dev->base_addr + ETHERH600_CTRLPORT);
 		break;
 
 	default:
@@ -636,12 +570,6 @@ static struct net_device * __init etherh_init_one(struct expansion_card *ec)
 
 	if (ethdev_init(dev))
 		goto release;
-
-	/*
-	 * If we're in the NIC slot, make sure the IRQ is enabled
-	 */
-	if (dev->irq == 11)
-		etherh_set_ctrl(eh, ETHERH_CP_IE);
 
 	/*
 	 * Unfortunately, ethdev_init eventually calls
@@ -708,8 +636,6 @@ static struct net_device * __init etherh_init_one(struct expansion_card *ec)
 release:
 	release_region(dev->base_addr, 16);
 free:
-	kfree(eh);
-out_nopriv:
 	unregister_netdev(dev);
 	kfree(dev);
 out:
@@ -770,7 +696,6 @@ static void __exit etherh_exit(void)
 		}
 		if (e_card[i]) {
 			e_card[i]->ops = NULL;
-			kfree(e_card[i]->irq_data);
 			ecard_release(e_card[i]);
 			e_card[i] = NULL;
 		}

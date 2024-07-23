@@ -1,5 +1,5 @@
-/*
- * Linux/PA-RISC Project (http://www.parisc-linux.org/)
+/*------------------------------------------------------------------------------
+ * Native PARISC/Linux Project (http://www.puffingroup.com/parisc)
  *
  * Assembly Language User Access Routines
  *  Copyright (C) 2000 Hewlett-Packard (John Marvin)
@@ -30,6 +30,7 @@
  */
 
 
+	.level		1.1
 	.text
 	
 #include <asm/assembly.h>
@@ -41,8 +42,11 @@
 	 * on the flag stored in the task structure.
 	 */
 
+	/* FIXME! depi below has hardcoded idea of kernel stack size */
+
 	.macro  get_sr
-	mfctl       %cr30,%r1
+	copy        %r30,%r1        ;! Get task structure
+	depi        0,31,14,%r1     ;! into r1
 	ldw         TASK_SEGMENT(%r1),%r22
 	mfsp        %sr3,%r1
 	or,<>       %r22,%r0,%r0
@@ -78,11 +82,7 @@ $lctu_done:
 	ldo         1(%r24),%r24
 
 	.section __ex_table,"a"
-#ifdef __LP64__
-	.dword      1b,(2b-1b)
-#else
 	.word       1b,(2b-1b)
-#endif
 	.previous
 
 	.procend
@@ -123,11 +123,7 @@ $lcfu_zero_loop:
 	nop
 
 	.section __ex_table,"a"
-#ifdef __LP64__
-	.dword      1b,(2b-1b)
-#else
 	.word       1b,(2b-1b)
-#endif
 	.previous
 
 	.procend
@@ -137,7 +133,7 @@ $lcfu_zero_loop:
 	 *
 	 * Returns -EFAULT if exception before terminator,
 	 *         N if the entire buffer filled,
-	 *         otherwise strlen (i.e. excludes zero byte)
+	 *         otherwise strlen + 1 (i.e. includes zero byte)
 	 */
 
 	.export lstrncpy_from_user,code
@@ -146,7 +142,7 @@ lstrncpy_from_user:
 	.callinfo NO_CALLS
 	.entry
 	comib,=     0,%r24,$lsfu_done
-	copy        %r24,%r23
+	copy        %r26,%r23
 	get_sr
 1:      ldbs,ma     1(%sr1,%r25),%r1
 $lsfu_loop:
@@ -155,7 +151,7 @@ $lsfu_loop:
 	addib,<>,n  -1,%r24,$lsfu_loop
 2:      ldbs,ma     1(%sr1,%r25),%r1
 $lsfu_done:
-	sub         %r23,%r24,%r28
+	sub         %r26,%r23,%r28
 $lsfu_exit:
 	bv          %r0(%r2)
 	nop
@@ -165,13 +161,8 @@ $lsfu_exit:
 	ldi         -EFAULT,%r28
 
 	.section __ex_table,"a"
-#ifdef __LP64__
-	.dword      1b,(3b-1b)
-	.dword      2b,(3b-2b)
-#else
 	.word       1b,(3b-1b)
-	.word       2b,(3b-2b)
-#endif
+	.word       2b,(2b-1b)
 	.previous
 
 	.procend
@@ -203,11 +194,7 @@ $lclu_done:
 	ldo        1(%r25),%r25
 
 	.section __ex_table,"a"
-#ifdef __LP64__
-	.dword      1b,(2b-1b)
-#else
 	.word       1b,(2b-1b)
-#endif
 	.previous
 
 	.procend
@@ -246,13 +233,8 @@ $lslen_nzero:
 	copy        %r24,%r26    /* reset r26 so 0 is returned on fault */
 
 	.section __ex_table,"a"
-#ifdef __LP64__
-	.dword      1b,(3b-1b)
-	.dword      2b,(3b-2b)
-#else
 	.word       1b,(3b-1b)
-	.word       2b,(3b-2b)
-#endif
+	.word       2b,(2b-1b)
 	.previous
 
 	.procend

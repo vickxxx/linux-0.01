@@ -312,9 +312,6 @@ struct cs_card {
 	/* The cs461x has a certain amount of cross channel interaction
 	   so we use a single per card lock */
 	spinlock_t lock;
-	
-	/* Keep AC97 sane */
-	spinlock_t ac97_lock;
 
 	/* mixer use count */
 	atomic_t mixer_use_cnt;
@@ -950,8 +947,8 @@ static void cs_play_setup(struct cs_state *state)
 
 struct InitStruct
 {
-    u32 off;
-    u32 val;
+    u32 long off;
+    u32 long val;
 } InitArray[] = { {0x00000040, 0x3fc0000f},
                   {0x0000004c, 0x04800000},
 
@@ -1913,8 +1910,11 @@ static int cs_midi_release(struct inode *inode, struct file *file)
                                 break;
                         if (signal_pending(current))
                                 break;
-                        if (file->f_flags & O_NONBLOCK)
-                        	break;
+                        if (file->f_flags & O_NONBLOCK) {
+                                remove_wait_queue(&card->midi.owait, &wait);
+                                current->state = TASK_RUNNING;
+                                return -EBUSY;
+                        }                      
                         tmo = (count * HZ) / 3100;
                         if (!schedule_timeout(tmo ? : 1) && tmo)
                                 printk(KERN_DEBUG "cs46xx: midi timed out??\n");
@@ -2117,7 +2117,7 @@ static ssize_t cs_read(struct file *file, char *buffer, size_t count, loff_t *pp
 	
 	down(&state->sem);
 	if (!dmabuf->ready && (ret = __prog_dmabuf(state)))
-		goto out2;
+		goto out;
 
 	add_wait_queue(&state->dmabuf.wait, &wait);
 	while (count > 0) {
@@ -2187,9 +2187,8 @@ static ssize_t cs_read(struct file *file, char *buffer, size_t count, loff_t *pp
                 start_adc(state);
 	}
 out:
-	remove_wait_queue(&state->dmabuf.wait, &wait);
-out2:
 	up(&state->sem);
+	remove_wait_queue(&state->dmabuf.wait, &wait);
 	set_current_state(TASK_RUNNING);
 	CS_DBGOUT(CS_WAVE_READ | CS_FUNCTION, 4, 
 		printk("cs46xx: cs_read()- %d\n",ret) );
@@ -2214,8 +2213,6 @@ static ssize_t cs_write(struct file *file, const char *buffer, size_t count, lof
 	state = (struct cs_state *)card->states[1];
 	if(!state)
 		return -ENODEV;
-	if (!access_ok(VERIFY_READ, buffer, count))
-		return -EFAULT;
 	dmabuf = &state->dmabuf;
 
 	if (ppos != &file->f_pos)
@@ -2230,6 +2227,11 @@ static ssize_t cs_write(struct file *file, const char *buffer, size_t count, lof
 
 	if (!dmabuf->ready && (ret = __prog_dmabuf(state)))
 		goto out;
+	if (!access_ok(VERIFY_READ, buffer, count))
+	{
+	ret = -EFAULT;
+	goto out;
+	}
 	add_wait_queue(&state->dmabuf.wait, &wait);
 	ret = 0;
 /*
@@ -2963,7 +2965,7 @@ static int cs_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 			cinfo.blocks = dmabuf->count/dmabuf->divisor >> dmabuf->fragshift;
 			cinfo.ptr = dmabuf->hwptr/dmabuf->divisor;
 			spin_unlock_irqrestore(&state->card->lock, flags);
-			return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+			return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 		}
 		return -ENODEV;
 
@@ -2996,12 +2998,12 @@ static int cs_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 			    "cs46xx: GETOPTR bytes=%d blocks=%d ptr=%d\n",
 				cinfo.bytes,cinfo.blocks,cinfo.ptr) );
 			spin_unlock_irqrestore(&state->card->lock, flags);
-			return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+			return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 		}
 		return -ENODEV;
 
 	case SNDCTL_DSP_SETDUPLEX:
-		return 0;
+		return -EINVAL;
 
 	case SNDCTL_DSP_GETODELAY:
 		if (!(file->f_mode & FMODE_WRITE))
@@ -3826,12 +3828,11 @@ static /*const*/ struct file_operations cs461x_fops = {
 /* Write AC97 codec registers */
 
 
-static u16 _cs_ac97_get(struct ac97_codec *dev, u8 reg)
+static u16 cs_ac97_get(struct ac97_codec *dev, u8 reg)
 {
 	struct cs_card *card = dev->private_data;
 	int count,loopcnt;
 	unsigned int tmp;
-	u16 ret;
 	
 	/*
 	 *  1. Write ACCAD = Command Address Register = 46Ch for AC97 register address
@@ -3841,6 +3842,7 @@ static u16 _cs_ac97_get(struct ac97_codec *dev, u8 reg)
 	 *  5. if DCV not cleared, break and return error
 	 *  6. Read ACSTS = Status Register = 464h, check VSTS bit
 	 */
+
 
 	cs461x_peekBA0(card, BA0_ACSDA);
 
@@ -3932,19 +3934,7 @@ static u16 _cs_ac97_get(struct ac97_codec *dev, u8 reg)
 		"cs46xx: cs_ac97_get() reg = 0x%x, val = 0x%x, BA0_ACCAD = 0x%x\n", 
 			reg, cs461x_peekBA0(card, BA0_ACSDA),
 			cs461x_peekBA0(card, BA0_ACCAD)));
-	ret = cs461x_peekBA0(card, BA0_ACSDA);
-	return ret;
-}
-
-static u16 cs_ac97_get(struct ac97_codec *dev, u8 reg)
-{
-	u16 ret;
-	struct cs_card *card = dev->private_data;
-	
-	spin_lock(&card->ac97_lock);
-	ret = _cs_ac97_get(dev, reg);
-	spin_unlock(&card->ac97_lock);
-	return ret;
+	return(cs461x_peekBA0(card, BA0_ACSDA));
 }
 
 static void cs_ac97_set(struct ac97_codec *dev, u8 reg, u16 val)
@@ -3953,13 +3943,10 @@ static void cs_ac97_set(struct ac97_codec *dev, u8 reg, u16 val)
 	int count;
 	int val2 = 0;
 	
-	spin_lock(&card->ac97_lock);
-	
 	if(reg == AC97_CD_VOL)
 	{
-		val2 = _cs_ac97_get(dev, AC97_CD_VOL);
+		val2 = cs_ac97_get(dev, AC97_CD_VOL);
 	}
-	
 	
 	/*
 	 *  1. Write ACCAD = Command Address Register = 46Ch for AC97 register address
@@ -4007,8 +3994,6 @@ static void cs_ac97_set(struct ac97_codec *dev, u8 reg, u16 val)
 		CS_DBGOUT(CS_ERROR, 1, printk(KERN_WARNING 
 			"cs46xx: AC'97 write problem, reg = 0x%x, val = 0x%x\n", reg, val));
 	}
-
-	spin_unlock(&card->ac97_lock);
 
 	/*
 	 *	Adjust power if the mixer is selected/deselected according
@@ -4255,8 +4240,9 @@ static int __init cs_ac97_init(struct cs_card *card)
 		"cs46xx: cs_ac97_init()+\n") );
 
 	for (num_ac97 = 0; num_ac97 < NR_AC97; num_ac97++) {
-		if ((codec = ac97_alloc_codec()) == NULL)
+		if ((codec = kmalloc(sizeof(struct ac97_codec), GFP_KERNEL)) == NULL)
 			return -ENOMEM;
+		memset(codec, 0, sizeof(struct ac97_codec));
 
 		/* initialize some basic codec information, other fields will be filled
 		   in ac97_probe_codec */
@@ -4279,10 +4265,10 @@ static int __init cs_ac97_init(struct cs_card *card)
 
 		eid = cs_ac97_get(codec, AC97_EXTENDED_ID);
 		
-		if(eid==0xFFFF)
+		if(eid==0xFFFFFF)
 		{
 			printk(KERN_WARNING "cs46xx: codec %d not present\n",num_ac97);
-			ac97_release_codec(codec);
+			kfree(codec);
 			break;
 		}
 		
@@ -4290,7 +4276,7 @@ static int __init cs_ac97_init(struct cs_card *card)
 			
 		if ((codec->dev_mixer = register_sound_mixer(&cs_mixer_fops, -1)) < 0) {
 			printk(KERN_ERR "cs46xx: couldn't register mixer!\n");
-			ac97_release_codec(codec);
+			kfree(codec);
 			break;
 		}
 		card->ac97_codec[num_ac97] = codec;
@@ -4323,7 +4309,7 @@ static void cs461x_download_image(struct cs_card *card)
     {
         offset = ClrStat[i].BA1__DestByteOffset;
         count  = ClrStat[i].BA1__SourceSize;
-        for(  temp1 = offset; temp1<(offset+count); temp1+=4 )
+        for(  temp1 = offset; temp1<(offset+count); temp1+=4 );
               writel(0, pBA1+temp1);
     }
 
@@ -5263,8 +5249,6 @@ static struct cs_card_type cards[]={
 	{0x1681, 0x0052, "Hercules Game Theatre XP", amp_hercules, NULL, NULL},
 	{0x1681, 0x0053, "Hercules Game Theatre XP", amp_hercules, NULL, NULL},
 	{0x1681, 0x0054, "Hercules Game Theatre XP", amp_hercules, NULL, NULL},
-	{0x1681, 0xa010, "Hercules Fortissimo II", amp_none, NULL, NULL},
-	
 	/* Not sure if the 570 needs the clkrun hack */
 	{PCI_VENDOR_ID_IBM, 0x0132, "Thinkpad 570", amp_none, NULL, clkrun_hack},
 	{PCI_VENDOR_ID_IBM, 0x0153, "Thinkpad 600X/A20/T20", amp_none, NULL, clkrun_hack},
@@ -5330,7 +5314,6 @@ static int __devinit cs46xx_probe(struct pci_dev *pci_dev,
 	card->irq = pci_dev->irq;
 	card->magic = CS_CARD_MAGIC;
 	spin_lock_init(&card->lock);
-	spin_lock_init(&card->ac97_lock);
 
 	pci_set_master(pci_dev);
 
@@ -5458,7 +5441,7 @@ static int __devinit cs46xx_probe(struct pci_dev *pci_dev,
 			for (j = 0; j < NR_AC97; j++)
 				if (card->ac97_codec[j] != NULL) {
 					unregister_sound_mixer(card->ac97_codec[j]->dev_mixer);
-					ac97_release_codec(card->ac97_codec[j]);
+					kfree (card->ac97_codec[j]);
 				}
 			mdelay(10 * cs_laptop_wait);
 			continue;
@@ -5615,7 +5598,7 @@ static void __devinit cs46xx_remove(struct pci_dev *pci_dev)
 	for (i = 0; i < NR_AC97; i++)
 		if (card->ac97_codec[i] != NULL) {
 			unregister_sound_mixer(card->ac97_codec[i]->dev_mixer);
-			ac97_release_codec(card->ac97_codec[i]);
+			kfree (card->ac97_codec[i]);
 		}
 	unregister_sound_dsp(card->dev_audio);
         if(card->dev_midi)

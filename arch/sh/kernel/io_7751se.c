@@ -17,7 +17,7 @@
 #include <asm/hitachi_7751se.h>
 #include <asm/addrspace.h>
 
-#include <linux/pci.h>
+#include <asm/pci.h>
 #include <asm/pci-sh7751.h>
 
 #if 0
@@ -70,7 +70,7 @@ port2adr(unsigned int port)
 	else
 		return (volatile __u16 *) (PA_SUPERIO + (port << 1));
 #endif
-	maybebadio(name,(unsigned long)port);
+	maybebadio(name,port);
 	return (volatile __u16*)port;
 }
 
@@ -97,7 +97,7 @@ shifted_port(unsigned long port)
 #define CHECK_SH7751_PCIIO(port) \
   ((port >= PCIBIOS_MIN_IO) && (port < (PCIBIOS_MIN_IO + SH7751_PCI_IO_SIZE)))
 #else
-#define CHECK_SH7751_PCIIO(port) (0)
+#define CHECK_SH_7751_PCIIO(port) (0)
 #endif
 
 /*
@@ -276,7 +276,6 @@ void sh7751se_writel(unsigned int b, unsigned long addr)
 /* ISA page descriptor.  */
 static __u32 sh_isa_memmap[256];
 
-#if 0
 static int
 sh_isa_mmap(__u32 start, __u32 length, __u32 offset)
 {
@@ -287,11 +286,12 @@ sh_isa_mmap(__u32 start, __u32 length, __u32 offset)
 
 	idx = start >> 12;
 	sh_isa_memmap[idx] = 0xb8000000 + (offset &~ 0xfff);
+#if 0
 	printk("sh_isa_mmap: start %x len %x offset %x (idx %x paddr %x)\n",
 	       start, length, offset, idx, sh_isa_memmap[idx]);
+#endif
 	return 0;
 }
-#endif
 
 unsigned long
 sh7751se_isa_port2addr(unsigned long offset)

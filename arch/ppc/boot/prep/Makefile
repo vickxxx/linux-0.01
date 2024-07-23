@@ -1,3 +1,4 @@
+# BK Id: SCCS/s.Makefile 1.26 09/25/01 07:54:40 trini
 #
 # arch/ppc/boot/Makefile
 #
@@ -16,18 +17,18 @@
 
 USE_STANDARD_AS_RULE		:= true
 
-TFTPIMAGE			= /tftpboot/zImage.prep
 ifeq ($(CONFIG_SMP),y)
-TFTPIMAGE			:= $(TFTPIMAGE).smp
+TFTPIMAGE			= /tftpboot/zImage.prep.smp
+else
+TFTPIMAGE			= /tftpboot/zImage.prep
 endif
 
-LD_ARGS				= -T ../ld.script -Ttext 0x00800000 -Bstatic
-obj-y				:= head.o ../simple/legacy.o misc.o \
-					../common/util.o ../common/string.o \
-					../common/misc-common.o \
-					../common/serial_stub.o
+ZLINKFLAGS			= -T $(TOPDIR)/arch/$(ARCH)/vmlinux.lds \
+					-Ttext 0x00800000
+obj-y				:= head.o misc.o ../common/misc-common.o \
+					../common/string.o of1275.o
 OBJCOPY_ARGS			= -O elf32-powerpc
-LIBS 				= ../lib/zlib.a ../of1275/of1275.a
+LIBS 				= ../lib/zlib.a
 
 obj-$(CONFIG_SERIAL_CONSOLE)	+= ../common/ns16550.o
 obj-$(CONFIG_VGA_CONSOLE)	+= vreset.o kbd.o
@@ -37,34 +38,57 @@ MKPREP				:= ../utils/mkprep
 SIZE				:= ../utils/size
 OFFSET				:= ../utils/offset
 
-# Extra include search dirs
-CFLAGS_kbd.o			+= -I$(TOPDIR)/drivers/char
+all:	zImage
 
-all: zImage
+misc.o: misc.c
+	$(CC) $(CFLAGS) -DINITRD_OFFSET=0 -DINITRD_SIZE=0 -DZIMAGE_OFFSET=0 \
+		-DZIMAGE_SIZE=0 -c -o $@ $*.c
 
-zImage: $(obj-y) $(LIBS) ../ld.script ../images/vmlinux.gz ../common/dummy.o \
-		$(MKPREP)
+zvmlinux.initrd: $(obj-y) $(LIBS) ../images/vmlinux.gz
+	$(LD) $(ZLINKFLAGS) -o $@.tmp $(obj-y) $(LIBS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
-		--add-section=.image=../images/vmlinux.gz \
-		--set-section-flags=.image=contents,alloc,load,readonly,data \
-		../common/dummy.o image.o
-	$(LD) $(LD_ARGS) -o $@ $(obj-y) image.o $(LIBS)
-	$(OBJCOPY) $(OBJCOPY_ARGS) $@ $@ -R .comment -R .stab -R .stabstr
-	$(MKPREP) -pbp $@ ../images/$@.prep
-	rm -f $@
-
-zImage.initrd: $(obj-y) $(LIBS) ../ld.script ../images/vmlinux.gz $(MKPREP) \
-		../common/dummy.o
+		--add-section=initrd=../images/ramdisk.image.gz \
+		--add-section=image=../images/vmlinux.gz \
+		$@.tmp $@
+	$(CC) $(CFLAGS) -DINITRD_OFFSET=`sh $(OFFSET) $(OBJDUMP) $@ initrd` \
+		-DINITRD_SIZE=`sh $(SIZE) $(OBJDUMP) $@ initrd` \
+		-DZIMAGE_OFFSET=`sh $(OFFSET) $(OBJDUMP) $@ image` \
+		-DZIMAGE_SIZE=`sh $(SIZE) $(OBJDUMP) $@ image` \
+		-c -o misc.o misc.c
+	$(LD) $(ZLINKFLAGS) -o $@.tmp $(obj-y) $(LIBS)
 	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
-		--add-section=.ramdisk=../images/ramdisk.image.gz \
-		--set-section-flags=.ramdisk=contents,alloc,load,readonly,data \
-		--add-section=.image=../images/vmlinux.gz \
-		--set-section-flags=.image=contents,alloc,load,readonly,data \
-		../common/dummy.o image.o
-	$(LD) $(LD_ARGS) -o $@ $(obj-y) image.o $(LIBS)
-	$(OBJCOPY) $(OBJCOPY_ARGS) $@ $@ -R .comment -R .stab -R .stabstr
-	$(MKPREP) -pbp $@ ../images/$@.prep
-	rm -f $@
+		--add-section=initrd=../images/ramdisk.image.gz \
+		--add-section=image=../images/vmlinux.gz \
+		$@.tmp $@
+	rm -f $@.tmp zvmlinux
+
+zImage: zvmlinux $(MKPREP)
+	$(MKPREP) -pbp zvmlinux ../images/$@.prep
+	rm -f zvmlinux
+
+zImage.initrd: zvmlinux.initrd $(MKPREP)
+	$(MKPREP) -pbp zvmlinux.initrd ../images/$@.prep
+	rm -f zvmlinux.initrd
+
+zvmlinux: $(obj-y) $(LIBS) ../images/vmlinux.gz
+#
+# build the boot loader image and then compute the offset into it
+# for the kernel image
+#
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.tmp $(obj-y) $(LIBS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
+		--add-section=image=../images/vmlinux.gz zvmlinux.tmp $@
+#
+# then with the offset rebuild the bootloader so we know where the kernel is
+#
+	$(CC) $(CFLAGS) -DINITRD_OFFSET=0 -DINITRD_SIZE=0 \
+		-DZIMAGE_OFFSET=`sh $(OFFSET) $(OBJDUMP) zvmlinux image` \
+		-DZIMAGE_SIZE=`sh $(SIZE) $(OBJDUMP) zvmlinux image` \
+		-c -o misc.o misc.c
+	$(LD) $(ZLINKFLAGS) -o zvmlinux.tmp $(obj-y) $(LIBS)
+	$(OBJCOPY) $(OBJCOPY_ARGS) -R .comment \
+		--add-section=image=../images/vmlinux.gz $@.tmp $@
+	rm $@.tmp
 
 floppy: zImage
 	dd if=../images/zImage.prep of=/dev/fd0H1440 bs=64b

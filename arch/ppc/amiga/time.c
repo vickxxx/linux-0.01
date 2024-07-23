@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.time.c 1.5 05/17/01 18:14:20 cort
+ */
 #include <linux/config.h> /* CONFIG_HEARTBEAT */
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -53,4 +56,6 @@ void apus_heartbeat (void)
                 dist = period / 4;
 	}
 #endif
+	/* should be made smarter */
+	ppc_md.heartbeat_count = 1;
 }

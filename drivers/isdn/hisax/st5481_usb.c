@@ -41,9 +41,9 @@ static void usb_next_ctrl_msg(struct urb *urb,
 		(unsigned char *)&ctrl->msg_fifo.data[r_index];
 	
 	DBG(1,"request=0x%02x,value=0x%04x,index=%x",
-	    ((struct ctrl_msg *)urb->setup_packet)->dr.bRequest,
-	    ((struct ctrl_msg *)urb->setup_packet)->dr.wValue,
-	    ((struct ctrl_msg *)urb->setup_packet)->dr.wIndex);
+	    ((struct ctrl_msg *)urb->setup_packet)->dr.request,
+	    ((struct ctrl_msg *)urb->setup_packet)->dr.value,
+	    ((struct ctrl_msg *)urb->setup_packet)->dr.index);
 
 	// Prepare the URB
 	urb->dev = adapter->usb_dev;
@@ -69,11 +69,11 @@ void usb_ctrl_msg(struct st5481_adapter *adapter,
 	}
 	ctrl_msg = &ctrl->msg_fifo.data[w_index]; 
    
-	ctrl_msg->dr.bRequestType = requesttype;
-	ctrl_msg->dr.bRequest = request;
-	ctrl_msg->dr.wValue = cpu_to_le16p(&value);
-	ctrl_msg->dr.wIndex = cpu_to_le16p(&index);
-	ctrl_msg->dr.wLength = 0;
+	ctrl_msg->dr.requesttype = requesttype;
+	ctrl_msg->dr.request = request;
+	ctrl_msg->dr.value = cpu_to_le16p(&value);
+	ctrl_msg->dr.index = cpu_to_le16p(&index);
+	ctrl_msg->dr.length = 0;
 	ctrl_msg->complete = complete;
 	ctrl_msg->context = context;
 
@@ -140,17 +140,17 @@ static void usb_ctrl_complete(struct urb *urb)
 
 	ctrl_msg = (struct ctrl_msg *)urb->setup_packet;
 	
-	if (ctrl_msg->dr.bRequest == USB_REQ_CLEAR_FEATURE) {
+	if (ctrl_msg->dr.request == USB_REQ_CLEAR_FEATURE) {
 	        /* Special case handling for pipe reset */
-		le16_to_cpus(&ctrl_msg->dr.wIndex);
+		le16_to_cpus(&ctrl_msg->dr.index);
 		usb_endpoint_running(adapter->usb_dev,
-				     ctrl_msg->dr.wIndex & ~USB_DIR_IN, 
-				     (ctrl_msg->dr.wIndex & USB_DIR_IN) == 0);
+				     ctrl_msg->dr.index & ~USB_DIR_IN, 
+				     (ctrl_msg->dr.index & USB_DIR_IN) == 0);
 
 		/* toggle is reset on clear */
 		usb_settoggle(adapter->usb_dev, 
-			      ctrl_msg->dr.wIndex & ~USB_DIR_IN, 
-			      (ctrl_msg->dr.wIndex & USB_DIR_IN) == 0,
+			      ctrl_msg->dr.index & ~USB_DIR_IN, 
+			      (ctrl_msg->dr.index & USB_DIR_IN) == 0,
 			      0);
 
 
@@ -235,7 +235,7 @@ int __devinit st5481_setup_usb(struct st5481_adapter *adapter)
 	struct usb_interface_descriptor *altsetting;
 	struct usb_endpoint_descriptor *endpoint;
 	int status;
-	struct urb *urb;
+	urb_t *urb;
 	u_char *buf;
 	
 	DBG(1,"");
@@ -307,7 +307,7 @@ int __devinit st5481_setup_usb(struct st5481_adapter *adapter)
  * Release buffers and URBs for the interrupt and control
  * endpoint.
  */
-void st5481_release_usb(struct st5481_adapter *adapter)
+void __devexit st5481_release_usb(struct st5481_adapter *adapter)
 {
 	struct st5481_intr *intr = &adapter->intr;
 	struct st5481_ctrl *ctrl = &adapter->ctrl;
@@ -443,7 +443,7 @@ st5481_setup_isocpipes(struct urb* urb[2], struct usb_device *dev,
 	return retval;
 }
 
-void st5481_release_isocpipes(struct urb* urb[2])
+void __devexit st5481_release_isocpipes(struct urb* urb[2])
 {
 	int j;
 
@@ -484,18 +484,16 @@ static void usb_in_complete(struct urb *urb)
 	ptr = urb->transfer_buffer;
 	while (len > 0) {
 		if (in->mode == L1_MODE_TRANS) {
-			/* swap rx bytes to get hearable audio */
-			register unsigned char *dest = in->rcvbuf;
+			memcpy(in->rcvbuf, ptr, len);
 			status = len;
-			for (; len; len--)
-				*dest++ = isdnhdlc_bit_rev_tab[*ptr++];
+			len = 0;
 		} else {
-			status = isdnhdlc_decode(&in->hdlc_state, ptr, len, &count,
-					         in->rcvbuf, in->bufsize);
+			status = hdlc_decode(&in->hdlc_state, ptr, len, &count,
+					     in->rcvbuf, in->bufsize);
 			ptr += count;
 			len -= count;
 		}
-
+		
 		if (status > 0) {
 			// Good frame received
 			DBG(4,"count=%d",status);
@@ -549,7 +547,7 @@ int __devinit st5481_setup_in(struct st5481_in *in)
 	return retval;
 }
 
-void st5481_release_in(struct st5481_in *in)
+void __devexit st5481_release_in(struct st5481_in *in)
 {
 	DBG(2,"");
 
@@ -562,8 +560,7 @@ void st5481_release_in(struct st5481_in *in)
  */
 int st5481_isoc_flatten(struct urb *urb)
 {
-	struct iso_packet_descriptor *pipd;
-	struct iso_packet_descriptor *pend;
+	piso_packet_descriptor_t pipd,pend;
 	unsigned char *src,*dst;
 	unsigned int len;
 	
@@ -624,8 +621,8 @@ void st5481_in_mode(struct st5481_in *in, int mode)
 
 	if (in->mode != L1_MODE_NULL) {
 		if (in->mode != L1_MODE_TRANS)
-			isdnhdlc_rcv_init(&in->hdlc_state,
-				          in->mode == L1_MODE_HDLC_56K);
+			hdlc_rcv_init(&in->hdlc_state,
+				      in->mode == L1_MODE_HDLC_56K);
 		
 		st5481_usb_pipe_reset(in->adapter, in->ep, NULL, NULL);
 		st5481_usb_device_ctrl_msg(in->adapter, in->counter,

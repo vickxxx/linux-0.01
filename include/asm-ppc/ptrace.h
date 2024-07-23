@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.ptrace.h 1.5 05/17/01 18:14:25 cort
+ */
 #ifndef _PPC_PTRACE_H
 #define _PPC_PTRACE_H
 
@@ -31,7 +34,7 @@ struct pt_regs {
 					/* Used on APUS to hold IPL value. */
 	unsigned long trap;		/* Reason for being here */
 	unsigned long dar;		/* Fault registers */
-	unsigned long dsisr;		/* used for ESR on 4xx/Book-E */
+	unsigned long dsisr;
 	unsigned long result; 		/* Result of a system call */
 };
 #endif
@@ -100,8 +103,5 @@ struct pt_regs {
 #define PT_FPR31 (PT_FPR0 + 2*31)
 #define PT_FPSCR (PT_FPR0 + 2*32 + 1)
 
-/* Get/set all the altivec registers vr0..vr31, vscr, vrsave, in one go */
-#define PTRACE_GETVRREGS	18
-#define PTRACE_SETVRREGS	19
-
 #endif
+

@@ -17,9 +17,6 @@
 
 ======================================================================*/
 
-#define DRV_NAME	"3c589_cs"
-#define DRV_VERSION	"1.162"
-
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -31,9 +28,6 @@
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -140,7 +134,7 @@ MODULE_PARM(irq_list, "1-4i");
 INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-DRV_NAME ".c " DRV_VERSION " 2001/10/13 00:08:50 (David Hinds)";
+"3c589_cs.c 1.162 2001/10/13 00:08:50 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
@@ -165,7 +159,6 @@ static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
-static struct ethtool_ops netdev_ethtool_ops;
 
 static dev_info_t dev_info = "3c589_cs";
 
@@ -256,8 +249,7 @@ static dev_link_t *tc589_attach(void)
     dev->tx_timeout = el3_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
 #endif
-    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
-
+    
     /* Register with Card Services */
     link->next = dev_list;
     dev_list = link;
@@ -647,34 +639,6 @@ static void tc589_reset(struct net_device *dev)
     outw(SetIntrEnb | IntLatch | TxAvailable | RxComplete | StatsFull
 	 | AdapterFailure, ioaddr + EL3_CMD);
 }
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
-}
-
-#ifdef PCMCIA_DEBUG
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return pc_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	pc_debug = level;
-}
-#endif /* PCMCIA_DEBUG */
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-#ifdef PCMCIA_DEBUG
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-#endif /* PCMCIA_DEBUG */
-};
 
 static int el3_config(struct net_device *dev, struct ifmap *map)
 {

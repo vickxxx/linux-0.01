@@ -52,16 +52,70 @@ struct vlan_hdr {
    unsigned short       h_vlan_encapsulated_proto; /* packet type ID field (or len) */
 };
 
-#define VLAN_VID_MASK	0xfff
+/*  Find a VLAN device by the MAC address of it's Ethernet device, and
+ *  it's VLAN ID.  The default configuration is to have VLAN's scope
+ *  to be box-wide, so the MAC will be ignored.  The mac will only be
+ *  looked at if we are configured to have a seperate set of VLANs per
+ *  each MAC addressable interface.  Note that this latter option does
+ *  NOT follow the spec for VLANs, but may be useful for doing very
+ *  large quantities of VLAN MUX/DEMUX onto FrameRelay or ATM PVCs.
+ */
+struct net_device *find_802_1Q_vlan_dev(struct net_device* real_dev,
+                                        unsigned short VID); /* vlan.c */
 
 /* found in af_inet.c */
 extern int (*vlan_ioctl_hook)(unsigned long arg);
+
+/* found in vlan_dev.c */
+struct net_device_stats* vlan_dev_get_stats(struct net_device* dev);
+int vlan_dev_rebuild_header(struct sk_buff *skb);
+int vlan_skb_recv(struct sk_buff *skb, struct net_device *dev,
+                  struct packet_type* ptype);
+int vlan_dev_hard_header(struct sk_buff *skb, struct net_device *dev,
+                         unsigned short type, void *daddr, void *saddr,
+                         unsigned len);
+int vlan_dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev);
+int vlan_dev_change_mtu(struct net_device *dev, int new_mtu);
+int vlan_dev_set_mac_address(struct net_device *dev, void* addr);
+int vlan_dev_open(struct net_device* dev);
+int vlan_dev_stop(struct net_device* dev);
+int vlan_dev_init(struct net_device* dev);
+void vlan_dev_destruct(struct net_device* dev);
+void vlan_dev_copy_and_sum(struct sk_buff *dest, unsigned char *src,
+                           int length, int base);
+int vlan_dev_set_ingress_priority(char* dev_name, __u32 skb_prio, short vlan_prio);
+int vlan_dev_set_egress_priority(char* dev_name, __u32 skb_prio, short vlan_prio);
+int vlan_dev_set_vlan_flag(char* dev_name, __u32 flag, short flag_val);
+
+/* VLAN multicast stuff */
+/* Delete all of the MC list entries from this vlan device.  Also deals
+ * with the underlying device...
+ */
+void vlan_flush_mc_list(struct net_device* dev);
+/* copy the mc_list into the vlan_info structure. */
+void vlan_copy_mc_list(struct dev_mc_list* mc_list, struct vlan_dev_info* vlan_info);
+/** dmi is a single entry into a dev_mc_list, a single node.  mc_list is
+ *  an entire list, and we'll iterate through it.
+ */
+int vlan_should_add_mc(struct dev_mc_list *dmi, struct dev_mc_list *mc_list);
+/** Taken from Gleb + Lennert's VLAN code, and modified... */
+void vlan_dev_set_multicast_list(struct net_device *vlan_dev);
+
+int vlan_collection_add_vlan(struct vlan_collection* vc, unsigned short vlan_id,
+                             unsigned short flags);
+int vlan_collection_remove_vlan(struct vlan_collection* vc,
+                                struct net_device* vlan_dev);
+int vlan_collection_remove_vlan_id(struct vlan_collection* vc, unsigned short vlan_id);
+
+/* found in vlan.c */
+/* Our listing of VLAN group(s) */
+extern struct vlan_group* p802_1Q_vlan_list;
 
 #define VLAN_NAME "vlan"
 
 /* if this changes, algorithm will have to be reworked because this
  * depends on completely exhausting the VLAN identifier space.  Thus
- * it gives constant time look-up, but in many cases it wastes memory.
+ * it gives constant time look-up, but it many cases it wastes memory.
  */
 #define VLAN_GROUP_ARRAY_LEN 4096
 
@@ -116,229 +170,55 @@ struct vlan_dev_info {
 
 /* inline functions */
 
-static inline struct net_device_stats *vlan_dev_get_stats(struct net_device *dev)
+/* Used in vlan_skb_recv */
+static inline struct sk_buff *vlan_check_reorder_header(struct sk_buff *skb)
 {
-	return &(VLAN_DEV_INFO(dev)->dev_stats);
-}
-
-static inline __u32 vlan_get_ingress_priority(struct net_device *dev,
-					      unsigned short vlan_tag)
-{
-	struct vlan_dev_info *vip = VLAN_DEV_INFO(dev);
-
-	return vip->ingress_priority_map[(vlan_tag >> 13) & 0x7];
-}
-
-/* VLAN tx hw acceleration helpers. */
-struct vlan_skb_tx_cookie {
-	u32	magic;
-	u32	vlan_tag;
-};
-
-#define VLAN_TX_COOKIE_MAGIC	0x564c414e	/* "VLAN" in ascii. */
-#define VLAN_TX_SKB_CB(__skb)	((struct vlan_skb_tx_cookie *)&((__skb)->cb[0]))
-#define vlan_tx_tag_present(__skb) \
-	(VLAN_TX_SKB_CB(__skb)->magic == VLAN_TX_COOKIE_MAGIC)
-#define vlan_tx_tag_get(__skb)	(VLAN_TX_SKB_CB(__skb)->vlan_tag)
-
-/* VLAN rx hw acceleration helper.  This acts like netif_{rx,receive_skb}(). */
-static inline int __vlan_hwaccel_rx(struct sk_buff *skb,
-				    struct vlan_group *grp,
-				    unsigned short vlan_tag, int polling)
-{
-	struct net_device_stats *stats;
-
-	skb->real_dev = skb->dev;
-	skb->dev = grp->vlan_devices[vlan_tag & VLAN_VID_MASK];
-	if (skb->dev == NULL) {
-		kfree_skb(skb);
-
-		/* Not NET_RX_DROP, this is not being dropped
-		 * due to congestion.
-		 */
-		return 0;
-	}
-
-	skb->dev->last_rx = jiffies;
-
-	stats = vlan_dev_get_stats(skb->dev);
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
-
-	skb->priority = vlan_get_ingress_priority(skb->dev, vlan_tag);
-	switch (skb->pkt_type) {
-	case PACKET_BROADCAST:
-		break;
-
-	case PACKET_MULTICAST:
-		stats->multicast++;
-		break;
-
-	case PACKET_OTHERHOST:
-		/* Our lower layer thinks this is not local, let's make sure.
-		 * This allows the VLAN to have a different MAC than the underlying
-		 * device, and still route correctly.
-		 */
-		if (!memcmp(skb->mac.ethernet->h_dest, skb->dev->dev_addr, ETH_ALEN))
-			skb->pkt_type = PACKET_HOST;
-		break;
-	};
-
-	return (polling ? netif_receive_skb(skb) : netif_rx(skb));
-}
-
-static inline int vlan_hwaccel_rx(struct sk_buff *skb,
-				  struct vlan_group *grp,
-				  unsigned short vlan_tag)
-{
-	return __vlan_hwaccel_rx(skb, grp, vlan_tag, 0);
-}
-
-static inline int vlan_hwaccel_receive_skb(struct sk_buff *skb,
-					   struct vlan_group *grp,
-					   unsigned short vlan_tag)
-{
-	return __vlan_hwaccel_rx(skb, grp, vlan_tag, 1);
-}
-
-/**
- * __vlan_put_tag - regular VLAN tag inserting
- * @skb: skbuff to tag
- * @tag: VLAN tag to insert
- *
- * Inserts the VLAN tag into @skb as part of the payload
- * Returns a VLAN tagged skb. If a new skb is created, @skb is freed.
- * 
- * Following the skb_unshare() example, in case of error, the calling function
- * doesn't have to worry about freeing the original skb.
- */
-static inline struct sk_buff *__vlan_put_tag(struct sk_buff *skb, unsigned short tag)
-{
-	struct vlan_ethhdr *veth;
-
-	if (skb_headroom(skb) < VLAN_HLEN) {
-		struct sk_buff *sk_tmp = skb;
-		skb = skb_realloc_headroom(sk_tmp, VLAN_HLEN);
-		kfree_skb(sk_tmp);
-		if (!skb) {
-			printk(KERN_ERR "vlan: failed to realloc headroom\n");
-			return NULL;
-		}
-	} else {
-		skb = skb_unshare(skb, GFP_ATOMIC);
-		if (!skb) {
-			printk(KERN_ERR "vlan: failed to unshare skbuff\n");
-			return NULL;
+	if (VLAN_DEV_INFO(skb->dev)->flags & 1) {
+		skb = skb_share_check(skb, GFP_ATOMIC);
+		if (skb) {
+			/* Lifted from Gleb's VLAN code... */
+			memmove(skb->data - ETH_HLEN,
+				skb->data - VLAN_ETH_HLEN, 12);
+			skb->mac.raw += VLAN_HLEN;
 		}
 	}
-
-	veth = (struct vlan_ethhdr *)skb_push(skb, VLAN_HLEN);
-
-	/* Move the mac addresses to the beginning of the new header. */
-	memmove(skb->data, skb->data + VLAN_HLEN, 2 * VLAN_ETH_ALEN);
-
-	/* first, the ethernet type */
-	veth->h_vlan_proto = __constant_htons(ETH_P_8021Q);
-
-	/* now, the tag */
-	veth->h_vlan_TCI = htons(tag);
 
 	return skb;
 }
 
-/**
- * __vlan_hwaccel_put_tag - hardware accelerated VLAN inserting
- * @skb: skbuff to tag
- * @tag: VLAN tag to insert
- *
- * Puts the VLAN tag in @skb->cb[] and lets the device do the rest
- */
-static inline struct sk_buff *__vlan_hwaccel_put_tag(struct sk_buff *skb, unsigned short tag)
+static inline unsigned short vlan_dev_get_egress_qos_mask(struct net_device* dev,
+							  struct sk_buff* skb)
 {
-	struct vlan_skb_tx_cookie *cookie;
+	struct vlan_priority_tci_mapping *mp =
+		VLAN_DEV_INFO(dev)->egress_priority_map[(skb->priority & 0xF)];
 
-	cookie = VLAN_TX_SKB_CB(skb);
-	cookie->magic = VLAN_TX_COOKIE_MAGIC;
-	cookie->vlan_tag = tag;
-
-	return skb;
-}
-
-#define HAVE_VLAN_PUT_TAG
-
-/**
- * vlan_put_tag - inserts VLAN tag according to device features
- * @skb: skbuff to tag
- * @tag: VLAN tag to insert
- *
- * Assumes skb->dev is the target that will xmit this frame.
- * Returns a VLAN tagged skb.
- */
-static inline struct sk_buff *vlan_put_tag(struct sk_buff *skb, unsigned short tag)
-{
-	if (skb->dev->features & NETIF_F_HW_VLAN_TX) {
-		return __vlan_hwaccel_put_tag(skb, tag);
-	} else {
-		return __vlan_put_tag(skb, tag);
+	while (mp) {
+		if (mp->priority == skb->priority) {
+			return mp->vlan_qos; /* This should already be shifted to mask
+					      * correctly with the VLAN's TCI
+					      */
+		}
+		mp = mp->next;
 	}
-}
-
-/**
- * __vlan_get_tag - get the VLAN ID that is part of the payload
- * @skb: skbuff to query
- * @tag: buffer to store vlaue
- * 
- * Returns error if the skb is not of VLAN type
- */
-static inline int __vlan_get_tag(struct sk_buff *skb, unsigned short *tag)
-{
-	struct vlan_ethhdr *veth = (struct vlan_ethhdr *)skb->data;
-
-	if (veth->h_vlan_proto != __constant_htons(ETH_P_8021Q)) {
-		return -EINVAL;
-	}
-
-	*tag = ntohs(veth->h_vlan_TCI);
-
 	return 0;
 }
 
-/**
- * __vlan_hwaccel_get_tag - get the VLAN ID that is in @skb->cb[]
- * @skb: skbuff to query
- * @tag: buffer to store vlaue
- * 
- * Returns error if @skb->cb[] is not set correctly
- */
-static inline int __vlan_hwaccel_get_tag(struct sk_buff *skb, unsigned short *tag)
+static inline int vlan_dmi_equals(struct dev_mc_list *dmi1,
+                                  struct dev_mc_list *dmi2)
 {
-	struct vlan_skb_tx_cookie *cookie;
-
-	cookie = VLAN_TX_SKB_CB(skb);
-	if (cookie->magic == VLAN_TX_COOKIE_MAGIC) {
-		*tag = cookie->vlan_tag;
-		return 0;
-	} else {
-		*tag = 0;
-		return -EINVAL;
-	}
+	return ((dmi1->dmi_addrlen == dmi2->dmi_addrlen) &&
+		(memcmp(dmi1->dmi_addr, dmi2->dmi_addr, dmi1->dmi_addrlen) == 0));
 }
 
-#define HAVE_VLAN_GET_TAG
-
-/**
- * vlan_get_tag - get the VLAN ID from the skb
- * @skb: skbuff to query
- * @tag: buffer to store vlaue
- * 
- * Returns error if the skb is not VLAN tagged
- */
-static inline int vlan_get_tag(struct sk_buff *skb, unsigned short *tag)
+static inline void vlan_destroy_mc_list(struct dev_mc_list *mc_list)
 {
-	if (skb->dev->features & NETIF_F_HW_VLAN_TX) {
-		return __vlan_hwaccel_get_tag(skb, tag);
-	} else {
-		return __vlan_get_tag(skb, tag);
+	struct dev_mc_list *dmi = mc_list;
+	struct dev_mc_list *next;
+
+	while(dmi) {
+		next = dmi->next;
+		kfree(dmi);
+		dmi = next;
 	}
 }
 
@@ -355,9 +235,7 @@ enum vlan_ioctl_cmds {
 	GET_VLAN_INGRESS_PRIORITY_CMD,
 	GET_VLAN_EGRESS_PRIORITY_CMD,
 	SET_VLAN_NAME_TYPE_CMD,
-	SET_VLAN_FLAG_CMD,
-        GET_VLAN_REALDEV_NAME_CMD, /* If this works, you know it's a VLAN device, btw */
-        GET_VLAN_VID_CMD /* Get the VID of this VLAN (specified by name) */
+	SET_VLAN_FLAG_CMD
 };
 
 enum vlan_name_types {

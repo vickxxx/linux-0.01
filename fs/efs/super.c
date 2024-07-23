@@ -137,20 +137,11 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 	struct buffer_head *bh;
 
  	sb = SUPER_INFO(s);
- 
-	s->s_magic		= EFS_SUPER_MAGIC;
-	s->s_blocksize		= EFS_BLOCKSIZE;
-	s->s_blocksize_bits	= EFS_BLOCKSIZE_BITS;
-	
-	if( set_blocksize(dev, EFS_BLOCKSIZE) < 0)
-	{
-		printk(KERN_ERR "EFS: device does not support %d byte blocks\n",
-			EFS_BLOCKSIZE);
-		goto out_no_fs_ul;
-	}
+
+	set_blocksize(dev, EFS_BLOCKSIZE);
   
 	/* read the vh (volume header) block */
-	bh = sb_bread(s, 0);
+	bh = bread(dev, 0, EFS_BLOCKSIZE);
 
 	if (!bh) {
 		printk(KERN_ERR "EFS: cannot read volume header\n");
@@ -169,7 +160,7 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		goto out_no_fs_ul;
 	}
 
-	bh = sb_bread(s, sb->fs_start + EFS_SUPER);
+	bh = bread(dev, sb->fs_start + EFS_SUPER, EFS_BLOCKSIZE);
 	if (!bh) {
 		printk(KERN_ERR "EFS: cannot read superblock\n");
 		goto out_no_fs_ul;
@@ -183,6 +174,10 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		goto out_no_fs_ul;
 	}
 	brelse(bh);
+ 
+	s->s_magic		= EFS_SUPER_MAGIC;
+	s->s_blocksize		= EFS_BLOCKSIZE;
+	s->s_blocksize_bits	= EFS_BLOCKSIZE_BITS;
 
 	if (!(s->s_flags & MS_RDONLY)) {
 #ifdef DEBUG

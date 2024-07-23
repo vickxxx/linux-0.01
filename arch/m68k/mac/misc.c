@@ -11,7 +11,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/time.h>
-#include <linux/rtc.h>
+
 #include <linux/mm.h>
 
 #include <linux/adb.h>
@@ -39,7 +39,6 @@
 extern struct mac_booter_data mac_bi_data;
 static void (*rom_reset)(void);
 
-#ifdef CONFIG_ADB
 /*
  * Return the current time as the number of seconds since January 1, 1904.
  */
@@ -104,7 +103,6 @@ static void adb_write_pram(int offset, __u8 data)
 			(offset >> 8) & 0xFF, offset & 0xFF,
 			data);
 }
-#endif /* CONFIG_ADB */
 
 /*
  * VIA PRAM/RTC access routines
@@ -231,8 +229,8 @@ static long via_read_time(void)
 	do {
 		if (++ct > 10) {
 			printk("via_read_time: couldn't get valid time, "
-			       "last read = 0x%08lx and 0x%08lx\n",
-			       last_result.idata, result.idata);
+			       "last read = 0x%08X and 0x%08X\n", last_result.idata,
+			       result.idata);
 			break;
 		}
 
@@ -359,11 +357,7 @@ void mac_pram_read(int offset, __u8 *buffer, int len)
 	    macintosh_config->adb_type == MAC_ADB_PB1 ||
 	    macintosh_config->adb_type == MAC_ADB_PB2 ||
 	    macintosh_config->adb_type == MAC_ADB_CUDA) {
-#ifdef CONFIG_ADB
 		func = adb_read_pram;
-#else
-		return;
-#endif
 	} else {
 		func = via_read_pram;
 	}
@@ -381,11 +375,7 @@ void mac_pram_write(int offset, __u8 *buffer, int len)
 	    macintosh_config->adb_type == MAC_ADB_PB1 ||
 	    macintosh_config->adb_type == MAC_ADB_PB2 ||
 	    macintosh_config->adb_type == MAC_ADB_CUDA) {
-#ifdef CONFIG_ADB
 		func = adb_write_pram;
-#else
-		return;
-#endif
 	} else {
 		func = via_write_pram;
 	}
@@ -605,41 +595,37 @@ void mac_gettod(int *yearp, int *monp, int *dayp,
  * Read/write the hardware clock.
  */
 
-int mac_hwclk(int op, struct rtc_time *t)
+int mac_hwclk(int op, struct hwclk_time *t)
 {
 	unsigned long now;
 
 	if (!op) { /* read */
 		if (macintosh_config->adb_type == MAC_ADB_II) {
 			now = via_read_time();
-		} else
-#ifdef CONFIG_ADB
-		if ((macintosh_config->adb_type == MAC_ADB_IISI) ||
+		} else if ((macintosh_config->adb_type == MAC_ADB_IISI) ||
 			   (macintosh_config->adb_type == MAC_ADB_PB1) ||
 			   (macintosh_config->adb_type == MAC_ADB_PB2) ||
 			   (macintosh_config->adb_type == MAC_ADB_CUDA)) {
 			now = adb_read_time();
-		} else
-#endif
-		if (macintosh_config->adb_type == MAC_ADB_IOP) {
+		} else if (macintosh_config->adb_type == MAC_ADB_IOP) {
 			now = via_read_time();
 		} else {
 			now = 0;
 		}
 
-		t->tm_wday = 0;
+		t->wday = 0;
 		unmktime(now, 0,
-			 &t->tm_year, &t->tm_mon, &t->tm_mday,
-			 &t->tm_hour, &t->tm_min, &t->tm_sec);
+			 &t->year, &t->mon, &t->day,
+			 &t->hour, &t->min, &t->sec);
 		printk("mac_hwclk: read %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+			t->year + 1900, t->mon + 1, t->day, t->hour, t->min, t->sec);
 	} else { /* write */
 		printk("mac_hwclk: tried to write %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+			t->year + 1900, t->mon + 1, t->day, t->hour, t->min, t->sec);
 
 #if 0	/* it trashes my rtc */
-		now = mktime(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
-			     t->tm_hour, t->tm_min, t->tm_sec);
+		now = mktime(t->year + 1900, t->mon + 1, t->day,
+			     t->hour, t->min, t->sec);
 
 		if (macintosh_config->adb_type == MAC_ADB_II) {
 			via_write_time(now);
@@ -662,11 +648,11 @@ int mac_hwclk(int op, struct rtc_time *t)
 
 int mac_set_clock_mmss (unsigned long nowtime)
 {
-	struct rtc_time now;
+	struct hwclk_time now;
 
 	mac_hwclk(0, &now);
-	now.tm_sec = nowtime % 60;
-	now.tm_min = (nowtime / 60) % 60;
+	now.sec = nowtime % 60;
+	now.min = (nowtime / 60) % 60;
 	mac_hwclk(1, &now);
 
 	return 0;

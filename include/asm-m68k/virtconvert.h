@@ -20,36 +20,54 @@
  */
 #ifndef CONFIG_SUN3
 extern unsigned long mm_vtop(unsigned long addr) __attribute__ ((const));
+extern unsigned long mm_vtop_fallback (unsigned long) __attribute__ ((const));
 extern unsigned long mm_ptov(unsigned long addr) __attribute__ ((const));
 #else
-static inline unsigned long mm_vtop(unsigned long vaddr)
+extern inline unsigned long mm_vtop(unsigned long vaddr)
 {
 	return __pa(vaddr);
 }
 
-static inline unsigned long mm_ptov(unsigned long paddr)
+extern inline unsigned long mm_ptov(unsigned long paddr)
 {
 	return (unsigned long)__va(paddr);
 }
 #endif 
 
 #ifdef CONFIG_SINGLE_MEMORY_CHUNK
-static inline unsigned long virt_to_phys(void *vaddr)
+extern inline unsigned long virt_to_phys(volatile void *vaddr)
 {
-	return (unsigned long)vaddr - PAGE_OFFSET + m68k_memory[0].addr;
+	unsigned long voff = (unsigned long)vaddr - PAGE_OFFSET;
+
+	if (voff < m68k_memory[0].size)
+		return voff + m68k_memory[0].addr;
+	return mm_vtop_fallback((unsigned long)vaddr);
 }
 
-static inline void * phys_to_virt(unsigned long paddr)
+extern inline void * phys_to_virt(unsigned long paddr)
 {
-	return (void *)(paddr - m68k_memory[0].addr + PAGE_OFFSET);
+	unsigned long poff = paddr - m68k_memory[0].addr;
+
+	if (poff < m68k_memory[0].size)
+		return (void *)(poff + PAGE_OFFSET);
+
+#ifdef CONFIG_AMIGA
+	/*
+	 * if on an amiga and address is in first 16M, move it 
+	 * to the ZTWO_VADDR range
+	 */
+	if (MACH_IS_AMIGA && paddr < 16*1024*1024)
+		return (void *)ZTWO_VADDR(paddr);
+#endif
+	return (void *)paddr;
 }
 #else
-static inline unsigned long virt_to_phys(void *address)
+extern inline unsigned long virt_to_phys(volatile void * address)
 {
 	return mm_vtop((unsigned long)address);
 }
 
-static inline void *phys_to_virt(unsigned long address)
+extern inline void * phys_to_virt(unsigned long address)
 {
 	return (void *) mm_ptov(address);
 }
@@ -66,13 +84,6 @@ static inline void *phys_to_virt(unsigned long address)
 #define virt_to_bus virt_to_phys
 #define bus_to_virt phys_to_virt
 #endif
-
-/*
- * Change "struct page" to physical address.
- */
-
-#define __page_address(page)      (PAGE_OFFSET + (((page) - mem_map) << PAGE_SHIFT))
-#define page_to_phys(page)       virt_to_phys((void *)__page_address(page))
 
 #endif
 #endif

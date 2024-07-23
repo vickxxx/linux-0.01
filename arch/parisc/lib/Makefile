@@ -4,8 +4,10 @@
 
 
 L_TARGET = lib.a
-obj-y	:= lusercopy.o bitops.o checksum.o io.o memset.o
+L_OBJS	= lusercopy.o bitops.o checksum.o
 
-obj-$(CONFIG_SMP) += locks.o
+
+.S.o:
+	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
 
 include $(TOPDIR)/Rules.make

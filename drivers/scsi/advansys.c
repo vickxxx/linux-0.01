@@ -713,7 +713,7 @@
      Tom Rini <trini@kernel.crashing.org> provided the CONFIG_ISA
      patch and helped with PowerPC wide and narrow board support.
 
-     Philip Blundell <philb@gnu.org> provided an
+     Philip Blundell <philip.blundell@pobox.com> provided an
      advansys_interrupts_enabled patch.
 
      Dave Jones <dave@denial.force9.co.uk> reported the compiler
@@ -3456,9 +3456,9 @@ do { \
 /*
  * Default EEPROM Configuration structure defined in a_init.c.
  */
-static ADVEEP_3550_CONFIG Default_3550_EEPROM_Config;
-static ADVEEP_38C0800_CONFIG Default_38C0800_EEPROM_Config;
-static ADVEEP_38C1600_CONFIG Default_38C1600_EEPROM_Config;
+extern ADVEEP_3550_CONFIG Default_3550_EEPROM_Config;
+extern ADVEEP_38C0800_CONFIG Default_38C0800_EEPROM_Config;
+extern ADVEEP_38C1600_CONFIG Default_38C1600_EEPROM_Config;
 
 /*
  * DvcGetPhyAddr() flag arguments
@@ -5131,6 +5131,7 @@ advansys_detect(Scsi_Host_Template *tpnt)
                 ep->adapter_info[3] = asc_dvc_varp->cfg->adapter_info[3];
                 ep->adapter_info[4] = asc_dvc_varp->cfg->adapter_info[4];
                 ep->adapter_info[5] = asc_dvc_varp->cfg->adapter_info[5];
+                ep->adapter_info[6] = asc_dvc_varp->cfg->adapter_info[6];
 
                /*
                 * Modify board configuration.
@@ -5551,7 +5552,7 @@ advansys_detect(Scsi_Host_Template *tpnt)
                 }
             } else {
                 ADV_CARR_T      *carrp;
-                int             req_cnt = 0;
+                int             req_cnt;
                 adv_req_t       *reqp = NULL;
                 int             sg_cnt = 0;
 
@@ -6118,8 +6119,8 @@ advansys_reset(Scsi_Cmnd *scp)
     } else {
         /* Append to 'done_scp' at the end with 'last_scp'. */
         ASC_ASSERT(last_scp != NULL);
-        last_scp->host_scribble = (unsigned char *)asc_dequeue_list(
-			&boardp->active, &new_last_scp, ASC_TID_ALL);
+        REQPNEXT(last_scp) = asc_dequeue_list(&boardp->active,
+            &new_last_scp, ASC_TID_ALL);
         if (new_last_scp != NULL) {
             ASC_ASSERT(REQPNEXT(last_scp) != NULL);
             for (tscp = REQPNEXT(last_scp); tscp; tscp = REQPNEXT(tscp)) {
@@ -6141,8 +6142,8 @@ advansys_reset(Scsi_Cmnd *scp)
     } else {
         /* Append to 'done_scp' at the end with 'last_scp'. */
         ASC_ASSERT(last_scp != NULL);
-        last_scp->host_scribble = (unsigned char *)asc_dequeue_list(
-			&boardp->waiting, &new_last_scp, ASC_TID_ALL);
+        REQPNEXT(last_scp) = asc_dequeue_list(&boardp->waiting,
+            &new_last_scp, ASC_TID_ALL);
         if (new_last_scp != NULL) {
             ASC_ASSERT(REQPNEXT(last_scp) != NULL);
             for (tscp = REQPNEXT(last_scp); tscp; tscp = REQPNEXT(tscp)) {
@@ -6394,8 +6395,8 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                     ASC_TID_ALL);
             } else {
                 ASC_ASSERT(last_scp != NULL);
-                last_scp->host_scribble = (unsigned char *)asc_dequeue_list(
-			&boardp->done, &new_last_scp, ASC_TID_ALL);
+                REQPNEXT(last_scp) = asc_dequeue_list(&boardp->done,
+                    &new_last_scp, ASC_TID_ALL);
                 if (new_last_scp != NULL) {
                     ASC_ASSERT(REQPNEXT(last_scp) != NULL);
                     last_scp = new_last_scp;
@@ -6466,7 +6467,7 @@ asc_scsi_done_list(Scsi_Cmnd *scp)
     while (scp != NULL) {
         ASC_DBG1(3, "asc_scsi_done_list: scp 0x%lx\n", (ulong) scp);
         tscp = REQPNEXT(scp);
-        scp->host_scribble = NULL;
+        REQPNEXT(scp) = NULL;
         ASC_STATS(scp->host, done);
         ASC_ASSERT(scp->scsi_done != NULL);
         scp->scsi_done(scp);
@@ -7171,7 +7172,7 @@ asc_isr_callback(ASC_DVC_VAR *asc_dvc_varp, ASC_QDONE_INFO *qdonep)
          * then return the number of underrun bytes.
          */
         if (scp->request_bufflen != 0 && qdonep->remain_bytes != 0 &&
-            qdonep->remain_bytes <= scp->request_bufflen) {
+            qdonep->remain_bytes <= scp->request_bufflen != 0) {
             ASC_DBG1(1, "asc_isr_callback: underrun condition %u bytes\n",
             (unsigned) qdonep->remain_bytes);
             scp->resid = qdonep->remain_bytes;
@@ -7511,7 +7512,7 @@ asc_enqueue(asc_queue_t *ascq, REQP reqp, int flag)
     tid = REQPTID(reqp);
     ASC_ASSERT(tid >= 0 && tid <= ADV_MAX_TID);
     if (flag == ASC_FRONT) {
-        reqp->host_scribble = (unsigned char *)ascq->q_first[tid];
+        REQPNEXT(reqp) = ascq->q_first[tid];
         ascq->q_first[tid] = reqp;
         /* If the queue was empty, set the last pointer. */
         if (ascq->q_last[tid] == NULL) {
@@ -7519,10 +7520,10 @@ asc_enqueue(asc_queue_t *ascq, REQP reqp, int flag)
         }
     } else { /* ASC_BACK */
         if (ascq->q_last[tid] != NULL) {
-            ascq->q_last[tid]->host_scribble = (unsigned char *)reqp;
+            REQPNEXT(ascq->q_last[tid]) = reqp;
         }
         ascq->q_last[tid] = reqp;
-        reqp->host_scribble = NULL;
+        REQPNEXT(reqp) = NULL;
         /* If the queue was empty, set the first pointer. */
         if (ascq->q_first[tid] == NULL) {
             ascq->q_first[tid] = reqp;
@@ -7643,7 +7644,7 @@ asc_dequeue_list(asc_queue_t *ascq, REQP *lastpp, int tid)
                     lastp = ascq->q_last[i];
                 } else {
                     ASC_ASSERT(lastp != NULL);
-                    lastp->host_scribble = (unsigned char *)ascq->q_first[i];
+                    REQPNEXT(lastp) = ascq->q_first[i];
                     lastp = ascq->q_last[i];
                 }
                 ascq->q_first[i] = ascq->q_last[i] = NULL;
@@ -7721,8 +7722,8 @@ asc_rmqueue(asc_queue_t *ascq, REQP reqp)
              currp; prevp = currp, currp = REQPNEXT(currp)) {
             if (currp == reqp) {
                 ret = ASC_TRUE;
-                prevp->host_scribble = (unsigned char *)REQPNEXT(currp);
-                reqp->host_scribble = NULL;
+                REQPNEXT(prevp) = REQPNEXT(currp);
+                REQPNEXT(reqp) = NULL;
                 if (ascq->q_last[tid] == reqp) {
                     ascq->q_last[tid] = prevp;
                 }
@@ -9257,6 +9258,8 @@ DvcAdvWritePCIConfigByte(
         PCI_DEVFN(ASC_PCI_ID2DEV(asc_dvc->cfg->pci_slot_info),
             ASC_PCI_ID2FUNC(asc_dvc->cfg->pci_slot_info)),
         offset, byte_data);
+#else /* CONFIG_PCI */
+    return 0;
 #endif /* CONFIG_PCI */
 }
 

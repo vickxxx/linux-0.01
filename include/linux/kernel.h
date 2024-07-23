@@ -11,8 +11,6 @@
 #include <linux/linkage.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
-#include <linux/compiler.h>
-#include <asm/byteorder.h>
 
 /* Optimization barrier */
 /* The "volatile" is due to gcc bugs */
@@ -38,23 +36,14 @@
 #define	KERN_INFO	"<6>"	/* informational			*/
 #define	KERN_DEBUG	"<7>"	/* debug-level messages			*/
 
-extern int console_printk[];
-
-#define console_loglevel (console_printk[0])
-#define default_message_loglevel (console_printk[1])
-#define minimum_console_loglevel (console_printk[2])
-#define default_console_loglevel (console_printk[3])
-
 # define NORET_TYPE    /**/
 # define ATTRIB_NORET  __attribute__((noreturn))
 # define NORET_AND     noreturn,
 
 #ifdef __i386__
 #define FASTCALL(x)	x __attribute__((regparm(3)))
-#define fastcall	__attribute__((regparm(3)))
 #else
 #define FASTCALL(x)	x
-#define fastcall
 #endif
 
 struct completion;
@@ -73,17 +62,14 @@ extern unsigned long long simple_strtoull(const char *,char **,unsigned int);
 extern long long simple_strtoll(const char *,char **,unsigned int);
 extern int sprintf(char * buf, const char * fmt, ...)
 	__attribute__ ((format (printf, 2, 3)));
-extern int vsprintf(char *buf, const char *, va_list)
-	__attribute__ ((format (printf, 2, 0)));
+extern int vsprintf(char *buf, const char *, va_list);
 extern int snprintf(char * buf, size_t size, const char * fmt, ...)
 	__attribute__ ((format (printf, 3, 4)));
-extern int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
-	__attribute__ ((format (printf, 3, 0)));
+extern int vsnprintf(char *buf, size_t size, const char *fmt, va_list args);
 
 extern int sscanf(const char *, const char *, ...)
-	__attribute__ ((format (scanf, 2, 3)));
-extern int vsscanf(const char *, const char *, va_list)
-	__attribute__ ((format (scanf, 2, 0)));
+	__attribute__ ((format (scanf,2,3)));
+extern int vsscanf(const char *, const char *, va_list);
 
 extern int get_option(char **str, int *pint);
 extern char *get_options(char *str, int nints, int *ints);
@@ -95,6 +81,8 @@ extern int session_of_pgrp(int pgrp);
 
 asmlinkage int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
+
+extern int console_loglevel;
 
 static inline void console_silent(void)
 {
@@ -112,8 +100,6 @@ extern int oops_in_progress;		/* If set, an oops, panic(), BUG() or die() is in 
 
 extern int tainted;
 extern const char *print_tainted(void);
-
-extern void dump_stack(void);
 
 #if DEBUG
 #define pr_debug(fmt,arg...) \
@@ -136,17 +122,11 @@ extern void dump_stack(void);
 	((unsigned char *)&addr)[2], \
 	((unsigned char *)&addr)[3]
 
-#if defined(__LITTLE_ENDIAN)
 #define HIPQUAD(addr) \
 	((unsigned char *)&addr)[3], \
 	((unsigned char *)&addr)[2], \
 	((unsigned char *)&addr)[1], \
 	((unsigned char *)&addr)[0]
-#elif defined(__BIG_ENDIAN)
-#define HIPQUAD	NIPQUAD
-#else
-#error "Please fix asm/byteorder.h"
-#endif /* __LITTLE_ENDIAN */
 
 /*
  * min()/max() macros that also do
@@ -176,9 +156,6 @@ extern void dump_stack(void);
 #define max_t(type,x,y) \
 	({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
 
-extern void __out_of_line_bug(int line) ATTRIB_NORET;
-#define out_of_line_bug() __out_of_line_bug(__LINE__)
-
 #endif /* __KERNEL__ */
 
 #define SI_LOAD_SHIFT	16
@@ -199,13 +176,4 @@ struct sysinfo {
 	char _f[20-2*sizeof(long)-sizeof(int)];	/* Padding: libc5 uses this.. */
 };
 
-#define BUG_ON(condition) do { if (unlikely((condition)!=0)) BUG(); } while(0)
-
-#define WARN_ON(condition) do { \
-	if (unlikely((condition)!=0)) { \
-		printk("Badness in %s at %s:%d\n", __FUNCTION__, __FILE__, __LINE__); \
-		dump_stack(); \
-	} \
-} while (0)
-
-#endif /* _LINUX_KERNEL_H */
+#endif

@@ -2,7 +2,7 @@
 
     A driver for the Qlogic SCSI card
 
-    qlogic_cs.c 1.83 2001/10/13 00:08:53
+    qlogic_cs.c 1.79 2000/06/12 21:27:26
 
     The contents of this file are subject to the Mozilla Public
     License Version 1.1 (the "License"); you may not use this file
@@ -19,8 +19,8 @@
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
-    terms of the GNU General Public License version 2 (the "GPL"), in
-    which case the provisions of the GPL are applicable instead of the
+    terms of the GNU General Public License version 2 (the "GPL"), in which
+    case the provisions of the GPL are applicable instead of the
     above.  If you wish to allow the use of your version of this file
     only under the terms of the GPL and not to allow others to use
     your version of this file under the MPL, indicate your decision
@@ -37,9 +37,9 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/timer.h>
 #include <linux/ioport.h>
 #include <asm/io.h>
-#include <asm/byteorder.h>
 #include <scsi/scsi.h>
 #include <linux/major.h>
 #include <linux/blk.h>
@@ -61,29 +61,26 @@
 
 extern void qlogicfas_preset(int port, int irq);
 
-/*====================================================================*/
-
-/* Module parameters */
-
-MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
-MODULE_DESCRIPTION("Qlogic PCMCIA SCSI driver");
-MODULE_LICENSE("Dual MPL/GPL");
-
-#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
-
-/* Bit map of interrupts to choose from */
-INT_MODULE_PARM(irq_mask, 0xdeb8);
-static int irq_list[4] = { -1 };
-MODULE_PARM(irq_list, "1-4i");
-
 #ifdef PCMCIA_DEBUG
-INT_MODULE_PARM(pc_debug, PCMCIA_DEBUG);
+static int pc_debug = PCMCIA_DEBUG;
+MODULE_PARM(pc_debug, "i");
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static char *version =
-"qlogic_cs.c 1.83 2001/10/13 00:08:53 (David Hinds)";
+"qlogic_cs.c 1.79 2000/06/12 21:27:26 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
+
+/*====================================================================*/
+
+/* Parameters that can be set with 'insmod' */
+
+/* Bit map of interrupts to choose from */
+static u_int irq_mask = 0xdeb8;
+static int irq_list[4] = { -1 };
+
+MODULE_PARM(irq_mask, "i");
+MODULE_PARM(irq_list, "1-4i");
 
 /*====================================================================*/
 
@@ -131,6 +128,8 @@ static dev_link_t *qlogic_attach(void)
     if (!info) return NULL;
     memset(info, 0, sizeof(*info));
     link = &info->link; link->priv = info;
+    link->release.function = &qlogic_release;
+    link->release.data = (u_long)link;
 
     link->io.NumPorts1 = 16;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
@@ -183,6 +182,7 @@ static void qlogic_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
+    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
 	qlogic_release((u_long)link);
 	if (link->state & DEV_STALE_CONFIG) {
@@ -367,7 +367,7 @@ static int qlogic_event(event_t event, int priority,
     case CS_EVENT_CARD_REMOVAL:
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG)
-	    qlogic_release((u_long)link);
+	    mod_timer(&link->release, jiffies + HZ/20);
 	break;
     case CS_EVENT_CARD_INSERTION:
 	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;

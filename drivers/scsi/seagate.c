@@ -21,7 +21,7 @@
  * linux 2.1.112, simplified some #defines etc. <pavel@ucw.cz>
  *
  * Aug 2000 - aeb - deleted seagate_st0x_biosparam(). It would try to
- * read the physical disk geometry, a bad mistake. Of course it doesn't
+ * read the physical disk geometry, a bad mistake. Of course it doesnt
  * matter much what geometry one invents, but on large disks it
  * returned 256 (or more) heads, causing all kind of failures.
  * Of course this means that people might see a different geometry now,
@@ -324,8 +324,6 @@ static Signature __initdata signatures[] = {
 	{"FUTURE DOMAIN TMC-950", 5, 21, FD},
 	/* Added for 2.2.16 by Matthias_Heidbrink@b.maus.de */
 	{"IBM F1 V1.2009/22/93", 5, 25, FD},
-	/* Added for Dell Latitude XP 4100CX */
-	{"Future Domain Corp. V1.0008/18/9364/32", 5, 38, FD},
 };
 
 #define NUM_SIGNATURES (sizeof(signatures) / sizeof(Signature))
@@ -698,7 +696,7 @@ int seagate_st0x_queue_command (Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	done_fn = done;
 	current_target = SCpnt->target;
 	current_lun = SCpnt->lun;
-	current_cmnd = SCpnt->cmnd;
+	(const void *) current_cmnd = SCpnt->cmnd;
 	current_data = (unsigned char *) SCpnt->request_buffer;
 	current_bufflen = SCpnt->request_bufflen;
 	SCint = SCpnt;

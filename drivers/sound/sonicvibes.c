@@ -3,7 +3,7 @@
 /*
  *      sonicvibes.c  --  S3 Sonic Vibes audio driver.
  *
- *      Copyright (C) 1998-2001, 2003  Thomas Sailer (t.sailer@alumni.ethz.ch)
+ *      Copyright (C) 1998-2001  Thomas Sailer (t.sailer@alumni.ethz.ch)
  *
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
@@ -94,7 +94,6 @@
  *                       Fix SETTRIGGER non OSS API conformity
  *    18.05.2001   0.30  PCI probing and error values cleaned up by Marcus
  *                       Meissner <mm@caldera.de>
- *    03.01.2003   0.31  open_mode fixes from Georg Acher <acher@in.tum.de>
  *
  */
 
@@ -1803,7 +1802,7 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
@@ -1821,7 +1820,7 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		if (s->dma_dac.mapped)
 			s->dma_dac.count &= s->dma_dac.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
@@ -1965,7 +1964,7 @@ static int sv_release(struct inode *inode, struct file *file)
 		stop_adc(s);
 		dealloc_dmabuf(s, &s->dma_adc);
 	}
-	s->open_mode &= ~(file->f_mode & (FMODE_READ|FMODE_WRITE));
+	s->open_mode &= (~file->f_mode) & (FMODE_READ|FMODE_WRITE);
 	wake_up(&s->open_wait);
 	up(&s->open_sem);
 	unlock_kernel();
@@ -2227,8 +2226,12 @@ static int sv_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK)
-				break;
+			if (file->f_flags & O_NONBLOCK) {
+				remove_wait_queue(&s->midi.owait, &wait);
+				set_current_state(TASK_RUNNING);
+				unlock_kernel();
+				return -EBUSY;
+			}
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				printk(KERN_DEBUG "sv: midi timed out??\n");
@@ -2237,7 +2240,7 @@ static int sv_midi_release(struct inode *inode, struct file *file)
 		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
-	s->open_mode &= ~((file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE));
+	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
 	spin_lock_irqsave(&s->lock, flags);
 	if (!(s->open_mode & (FMODE_MIDI_READ | FMODE_MIDI_WRITE))) {
 		outb(inb(s->ioenh + SV_CODEC_INTMASK) & ~SV_CINTMASK_MIDI, s->ioenh + SV_CODEC_INTMASK);
@@ -2717,7 +2720,7 @@ static int __init init_sonicvibes(void)
 {
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "sv: version v0.31 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "sv: version v0.30 time " __TIME__ " " __DATE__ "\n");
 #if 0
 	if (!(wavetable_mem = __get_free_pages(GFP_KERNEL, 20-PAGE_SHIFT)))
 		printk(KERN_INFO "sv: cannot allocate 1MB of contiguous nonpageable memory for wavetable data\n");

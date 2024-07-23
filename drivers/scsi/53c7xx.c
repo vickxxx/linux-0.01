@@ -1104,8 +1104,8 @@ NCR53c7x0_init (struct Scsi_Host *host) {
 }
 
 /* 
- * Function : int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
- *	unsigned long base, int io_port, int irq, int dma, long long options,
+ * Function : static int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, 
+ *	int chip, u32 base, int io_port, int irq, int dma, long long options,
  *	int clock);
  *
  * Purpose : initializes a NCR53c7,8x0 based on base addresses,
@@ -1119,9 +1119,8 @@ NCR53c7x0_init (struct Scsi_Host *host) {
  */
 
 int 
-ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
-    unsigned long base, int io_port, int irq, int dma, 
-    long long options, int clock)
+ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip, 
+    u32 base, int io_port, int irq, int dma, long long options, int clock)
 {
     struct Scsi_Host *instance;
     struct NCR53c7x0_hostdata *hostdata;
@@ -1145,8 +1144,8 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     	return -1;
     }
 
-    printk("scsi-ncr53c7xx : %s at memory 0x%lx, io 0x%x, irq %d",
-    	chip_str, base, io_port, irq);
+    printk("scsi-ncr53c7xx : %s at memory 0x%x, io 0x%x, irq %d",
+    	chip_str, (unsigned) base, io_port, irq);
     if (dma == DMA_NONE)
     	printk("\n");
     else 
@@ -1225,8 +1224,7 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     memset((void *)instance->hostdata[0], 0, 8192);
     cache_push(virt_to_phys((void *)(instance->hostdata[0])), 8192);
     cache_clear(virt_to_phys((void *)(instance->hostdata[0])), 8192);
-    kernel_set_cachemode((void *)(instance->hostdata[0]), 8192,
-			 IOMAP_NOCACHE_SER);
+    kernel_set_cachemode(instance->hostdata[0], 8192, IOMAP_NOCACHE_SER);
 
     /* FIXME : if we ever support an ISA NCR53c7xx based board, we
        need to check if the chip is running in a 16 bit mode, and if so 
@@ -1253,7 +1251,7 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
      */
 
     if (base) {
-	instance->base = (unsigned long) base;
+	instance->base = (unsigned char *) (unsigned long) base;
 	/* Check for forced I/O mapping */
     	if (!(options & OPTION_IO_MAPPED)) {
 	    options |= OPTION_MEMORY_MAPPED;
@@ -1425,7 +1423,7 @@ NCR53c7x0_init_fixup (struct Scsi_Host *host) {
     	memory_to_ncr = tmp|DMODE_800_DIOM;
     	ncr_to_memory = tmp|DMODE_800_SIOM;
     } else {
-    	base = virt_to_bus((void *)host->base);
+    	base = virt_to_bus(host->base);
 	memory_to_ncr = ncr_to_memory = tmp;
     }
 
@@ -1466,9 +1464,9 @@ NCR53c7x0_init_fixup (struct Scsi_Host *host) {
     patch_abs_32 (hostdata->script, 0, test_src, 
 	virt_to_bus(&hostdata->test_source));
     patch_abs_32 (hostdata->script, 0, saved_dsa,
-	virt_to_bus((void *)&hostdata->saved2_dsa));
+	virt_to_bus(&hostdata->saved2_dsa));
     patch_abs_32 (hostdata->script, 0, emulfly,
-	virt_to_bus((void *)&hostdata->emulated_intfly));
+	virt_to_bus(&hostdata->emulated_intfly));
 
     patch_abs_rwri_data (hostdata->script, 0, dsa_check_reselect, 
 	(unsigned char)(Ent_dsa_code_check_reselect - Ent_dsa_zero));
@@ -1629,7 +1627,7 @@ NCR53c7xx_run_tests (struct Scsi_Host *host) {
 	 */
 
 	timeout = jiffies + 5 * HZ / 10;
-	while ((hostdata->test_completed == -1) && time_before(jiffies, timeout))
+	while ((hostdata->test_completed == -1) && jiffies < timeout)
 		barrier();
 
 	failed = 1;
@@ -1715,7 +1713,7 @@ NCR53c7xx_run_tests (struct Scsi_Host *host) {
 	    restore_flags(flags);
 
 	    timeout = jiffies + 5 * HZ;	/* arbitrary */
-	    while ((hostdata->test_completed == -1) && time_before(jiffies, timeout))
+	    while ((hostdata->test_completed == -1) && jiffies < timeout)
 	    	barrier();
 
 	    NCR53c7x0_write32 (DSA_REG, 0);
@@ -3051,7 +3049,7 @@ my_free_page (void *addr, int dummy)
     /* XXX This assumes default cache mode to be IOMAP_FULL_CACHING, which
      * XXX may be invalid (CONFIG_060_WRITETHROUGH)
      */
-    kernel_set_cachemode(addr, 4096, IOMAP_FULL_CACHING);
+    kernel_set_cachemode((u32)addr, 4096, IOMAP_FULL_CACHING);
     free_page ((u32)addr);
 }
 
@@ -3060,7 +3058,7 @@ allocate_cmd (Scsi_Cmnd *cmd) {
     struct Scsi_Host *host = cmd->host;
     struct NCR53c7x0_hostdata *hostdata = 
 	(struct NCR53c7x0_hostdata *) host->hostdata[0];
-    void *real;			/* Real address */
+    u32 real;			/* Real address */
     int size;			/* Size of *tmp */
     struct NCR53c7x0_cmd *tmp;
     unsigned long flags;
@@ -3103,12 +3101,12 @@ allocate_cmd (Scsi_Cmnd *cmd) {
             printk (KERN_ERR "53c7xx: allocate_cmd size > 4K\n");
 	    return NULL;
 	}
-        real = (void *)get_free_page(GFP_ATOMIC);
+        real = get_free_page(GFP_ATOMIC);
         if (real == 0)
         	return NULL;
-        memset(real, 0, 4096);
-        cache_push(virt_to_phys(real), 4096);
-        cache_clear(virt_to_phys(real), 4096);
+        memset((void *)real, 0, 4096);
+        cache_push(virt_to_phys((void *)real), 4096);
+        cache_clear(virt_to_phys((void *)real), 4096);
         kernel_set_cachemode(real, 4096, IOMAP_NOCACHE_SER);
 	tmp = ROUNDUP(real, void *);
 #ifdef FORCE_DSA_ALIGNMENT
@@ -3117,12 +3115,12 @@ allocate_cmd (Scsi_Cmnd *cmd) {
 		tmp = (struct NCR53c7x0_cmd *)((u32)tmp + 255);
 	    tmp = (struct NCR53c7x0_cmd *)(((u32)tmp & ~0xff) + CmdPageStart);
 #if 0
-	    printk ("scsi: size = %d, real = %p, tmp set to 0x%08x\n",
+	    printk ("scsi: size = %d, real = 0x%08x, tmp set to 0x%08x\n",
 			size, real, (u32)tmp);
 #endif
 	}
 #endif
-	tmp->real = real;
+	tmp->real = (void *)real;
 	tmp->size = size;			
 	tmp->free = ((void (*)(void *, int)) my_free_page);
 	save_flags (flags);
@@ -4409,7 +4407,7 @@ abort_connected (struct Scsi_Host *host) {
  * account the current synchronous offset) 
  */
 
-    sstat = NCR53c8x0_read8 (SSTAT2_REG);
+    sstat = (NCR53c8x0_read8 (SSTAT2_REG);
     offset = OFFSET (sstat & SSTAT2_FF_MASK) >> SSTAT2_FF_SHIFT;
     phase = sstat & SSTAT2_PHASE_MASK;
 
@@ -6081,7 +6079,7 @@ NCR53c7x0_release(struct Scsi_Host *host) {
 	(struct NCR53c7x0_hostdata *) host->hostdata[0];
     struct NCR53c7x0_cmd *cmd, *tmp;
     shutdown (host);
-    if (host->irq != SCSI_IRQ_NONE)
+    if (host->irq != IRQ_NONE)
 	{
 	    int irq_count;
 	    struct Scsi_Host *tmp;

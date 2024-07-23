@@ -1,4 +1,4 @@
-/* $Id: ultra.S,v 1.70.2.1 2002/03/03 10:31:56 davem Exp $
+/* $Id: ultra.S,v 1.68 2001/11/09 14:59:19 davem Exp $
  * ultra.S: Don't expand these all over the place...
  *
  * Copyright (C) 1997, 2000 David S. Miller (davem@redhat.com)
@@ -10,15 +10,22 @@
 #include <asm/page.h>
 #include <asm/spitfire.h>
 #include <asm/mmu_context.h>
-#include <asm/pil.h>
-#include <asm/head.h>
 
-	/* Basically, most of the Spitfire vs. Cheetah madness
-	 * has to do with the fact that Cheetah does not support
-	 * IMMU flushes out of the secondary context.  Someone needs
-	 * to throw a south lake birthday party for the folks
+	/* Basically, all this madness has to do with the
+	 * fact that Cheetah does not support IMMU flushes
+	 * out of the secondary context.  Someone needs to
+	 * throw a south lake birthday party for the folks
 	 * in Microelectronics who refused to fix this shit.
 	 */
+#define BRANCH_IF_CHEETAH(tmp1, tmp2, label)		\
+	rdpr	%ver, %tmp1;				\
+	sethi	%hi(0x003e0014), %tmp2;			\
+	srlx	%tmp1, 32, %tmp1;			\
+	or	%tmp2, %lo(0x003e0014), %tmp2;		\
+	cmp	%tmp1, %tmp2;				\
+	be,pn	%icc, label;				\
+	 nop;						\
+	nop;
 
 	/* This file is meant to be read efficiently by the CPU, not humans.
 	 * Staraj sie tego nikomu nie pierdolnac...
@@ -27,7 +34,9 @@
 	.align		32
 	.globl		__flush_tlb_page, __flush_tlb_mm, __flush_tlb_range
 __flush_tlb_page: /* %o0=(ctx & TAG_CONTEXT_BITS), %o1=page&PAGE_MASK, %o2=SECONDARY_CONTEXT */
-	ldxa		[%o2] ASI_DMMU, %g2
+/*IC1*/	BRANCH_IF_CHEETAH(g2, g3, __cheetah_flush_tlb_page)
+__spitfire_flush_tlb_page:
+/*IC2*/	ldxa		[%o2] ASI_DMMU, %g2
 	cmp		%g2, %o0
 	bne,pn		%icc, __spitfire_flush_tlb_page_slow
 	 or		%o1, 0x10, %g3
@@ -35,17 +44,27 @@ __flush_tlb_page: /* %o0=(ctx & TAG_CONTEXT_BITS), %o1=page&PAGE_MASK, %o2=SECON
 	stxa		%g0, [%g3] ASI_IMMU_DEMAP
 	retl
 	 flush		%g6
+__cheetah_flush_tlb_page:
+/*IC3*/	rdpr		%pstate, %g5
+	andn		%g5, PSTATE_IE, %g2
+	wrpr		%g2, 0x0, %pstate
+	wrpr		%g0, 1, %tl
+	mov		PRIMARY_CONTEXT, %o2
+	ldxa		[%o2] ASI_DMMU, %g2
+	stxa		%o0, [%o2] ASI_DMMU
+	stxa		%g0, [%o1] ASI_DMMU_DEMAP
+/*IC4*/	stxa		%g0, [%o1] ASI_IMMU_DEMAP
+	stxa		%g2, [%o2] ASI_DMMU
+	flush		%g6
+	wrpr		%g0, 0, %tl
+	retl
+	 wrpr		%g5, 0x0, %pstate
 	nop
 	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-
 __flush_tlb_mm: /* %o0=(ctx & TAG_CONTEXT_BITS), %o1=SECONDARY_CONTEXT */
-	ldxa		[%o1] ASI_DMMU, %g2
+/*IC5*/	BRANCH_IF_CHEETAH(g2, g3, __cheetah_flush_tlb_mm)
+__spitfire_flush_tlb_mm:
+/*IC6*/	ldxa		[%o1] ASI_DMMU, %g2
 	cmp		%g2, %o0
 	bne,pn		%icc, __spitfire_flush_tlb_mm_slow
 	 mov		0x50, %g3
@@ -53,20 +72,30 @@ __flush_tlb_mm: /* %o0=(ctx & TAG_CONTEXT_BITS), %o1=SECONDARY_CONTEXT */
 	stxa		%g0, [%g3] ASI_IMMU_DEMAP
 	retl
 	 flush		%g6
+__cheetah_flush_tlb_mm:
+/*IC7*/	rdpr		%pstate, %g5
+	andn		%g5, PSTATE_IE, %g2
+	wrpr		%g2, 0x0, %pstate
+	wrpr		%g0, 1, %tl
+	mov		PRIMARY_CONTEXT, %o2
+	mov		0x40, %g3
+	ldxa		[%o2] ASI_DMMU, %g2
+	stxa		%o0, [%o2] ASI_DMMU
+/*IC8*/	stxa		%g0, [%g3] ASI_DMMU_DEMAP
+	stxa		%g0, [%g3] ASI_IMMU_DEMAP
+	stxa		%g2, [%o2] ASI_DMMU
+	flush		%g6
+	wrpr		%g0, 0, %tl
+	retl
+	 wrpr		%g5, 0x0, %pstate
 	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-	nop
-
 __flush_tlb_range: /* %o0=(ctx&TAG_CONTEXT_BITS), %o1=start&PAGE_MASK, %o2=SECONDARY_CONTEXT,
 		    * %o3=end&PAGE_MASK, %o4=PAGE_SIZE, %o5=(end - start)
 		    */
+/*IC9*/	BRANCH_IF_CHEETAH(g2, g3, __cheetah_flush_tlb_range)
+__spitfire_flush_tlb_range:
 #define TLB_MAGIC	207 /* Students, do you know how I calculated this?  -DaveM */
-	cmp		%o5, %o4
+/*IC10*/cmp		%o5, %o4
 	bleu,pt		%xcc, __flush_tlb_page
 	 srlx		%o5, PAGE_SHIFT, %g5
 	cmp		%g5, TLB_MAGIC
@@ -75,7 +104,7 @@ __flush_tlb_range: /* %o0=(ctx&TAG_CONTEXT_BITS), %o1=start&PAGE_MASK, %o2=SECON
 	ldxa		[%o2] ASI_DMMU, %g2
 	cmp		%g2, %o0
 __spitfire_flush_tlb_range_page_by_page:
-	bne,pn		%icc, __spitfire_flush_tlb_range_pbp_slow
+/*IC11*/bne,pn		%icc, __spitfire_flush_tlb_range_pbp_slow
 	 sub		%o5, %o4, %o5
 1:	stxa		%g0, [%g5 + %o5] ASI_DMMU_DEMAP
 	stxa		%g0, [%g5 + %o5] ASI_IMMU_DEMAP
@@ -84,10 +113,11 @@ __spitfire_flush_tlb_range_page_by_page:
 	retl
 	 flush		%g6
 __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
-	rdpr		%pstate, %g1
+/*IC12*/rdpr		%pstate, %g1
 	wrpr		%g1, PSTATE_IE, %pstate
 	mov		TLB_TAG_ACCESS, %g3
-	mov		((SPITFIRE_HIGHEST_LOCKED_TLBENT-1) << 3), %g2
+	/* XXX Spitfire dependency... */
+	mov		(62 << 3), %g2
 
 	/* Spitfire Errata #32 workaround. */
 	mov		0x8, %o4
@@ -98,7 +128,7 @@ __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
 	and		%o4, TAG_CONTEXT_BITS, %o5
 	cmp		%o5, %o0
 	bne,pt		%icc, 2f
-	 andn		%o4, TAG_CONTEXT_BITS, %o4
+/*IC13*/ andn		%o4, TAG_CONTEXT_BITS, %o4
 	cmp		%o4, %o1
 	blu,pt		%xcc, 2f
 	 cmp		%o4, %o3
@@ -106,7 +136,7 @@ __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
 2:	 ldxa		[%g2] ASI_DTLB_TAG_READ, %o4
 	and		%o4, TAG_CONTEXT_BITS, %o5
 	cmp		%o5, %o0
-	andn		%o4, TAG_CONTEXT_BITS, %o4
+/*IC14*/andn		%o4, TAG_CONTEXT_BITS, %o4
 	bne,pt		%icc, 3f
 	 cmp		%o4, %o1
 	blu,pt		%xcc, 3f
@@ -114,7 +144,7 @@ __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
 	blu,pn		%xcc, 5f
 	 nop
 3:	brnz,pt		%g2, 1b
-	 sub		%g2, (1 << 3), %g2
+/*IC15*/ sub		%g2, (1 << 3), %g2
 	retl
 	 wrpr		%g1, 0x0, %pstate
 4:	stxa		%g0, [%g3] ASI_IMMU
@@ -130,7 +160,7 @@ __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
 	 nop
 
 5:	stxa		%g0, [%g3] ASI_DMMU
-	stxa		%g0, [%g2] ASI_DTLB_DATA_ACCESS
+/*IC16*/stxa		%g0, [%g2] ASI_DTLB_DATA_ACCESS
 	flush		%g6
 
 	/* Spitfire Errata #32 workaround. */
@@ -141,6 +171,33 @@ __spitfire_flush_tlb_range_constant_time: /* %o0=ctx, %o1=start, %o3=end */
 	ba,pt		%xcc, 3b
 	 nop
 
+	.align		32
+__cheetah_flush_tlb_range:
+	cmp		%o5, %o4
+	bleu,pt		%xcc, __cheetah_flush_tlb_page
+	 nop
+/*IC17*/rdpr		%pstate, %g5
+	andn		%g5, PSTATE_IE, %g2
+	wrpr		%g2, 0x0, %pstate
+	wrpr		%g0, 1, %tl
+	mov		PRIMARY_CONTEXT, %o2
+	sub		%o5, %o4, %o5
+	ldxa		[%o2] ASI_DMMU, %g2
+	stxa		%o0, [%o2] ASI_DMMU
+
+/*IC18*/
+1:	stxa		%g0, [%o1 + %o5] ASI_DMMU_DEMAP
+	stxa		%g0, [%o1 + %o5] ASI_IMMU_DEMAP
+	membar		#Sync
+	brnz,pt		%o5, 1b
+	 sub		%o5, %o4, %o5
+
+	stxa		%g2, [%o2] ASI_DMMU
+	flush		%g6
+	wrpr		%g0, 0, %tl
+	retl
+/*IC19*/ wrpr		%g5, 0x0, %pstate
+
 __spitfire_flush_tlb_mm_slow:
 	rdpr		%pstate, %g1
 	wrpr		%g1, PSTATE_IE, %pstate
@@ -149,7 +206,7 @@ __spitfire_flush_tlb_mm_slow:
 	stxa		%g0, [%g3] ASI_IMMU_DEMAP
 	flush		%g6
 	stxa		%g2, [%o1] ASI_DMMU
-	flush		%g6
+/*IC18*/flush		%g6
 	retl
 	 wrpr		%g1, 0, %pstate
 
@@ -159,7 +216,7 @@ __spitfire_flush_tlb_page_slow:
 	stxa		%o0, [%o2] ASI_DMMU
 	stxa		%g0, [%g3] ASI_DMMU_DEMAP
 	stxa		%g0, [%g3] ASI_IMMU_DEMAP
-	flush		%g6
+/*IC20*/flush		%g6
 	stxa		%g2, [%o2] ASI_DMMU
 	flush		%g6
 	retl
@@ -169,7 +226,7 @@ __spitfire_flush_tlb_range_pbp_slow:
 	rdpr		%pstate, %g1
 	wrpr		%g1, PSTATE_IE, %pstate
 	stxa		%o0, [%o2] ASI_DMMU
-
+/*IC21*/
 2:	stxa		%g0, [%g5 + %o5] ASI_DMMU_DEMAP
 	stxa		%g0, [%g5 + %o5] ASI_IMMU_DEMAP
 	brnz,pt		%o5, 2b
@@ -178,7 +235,7 @@ __spitfire_flush_tlb_range_pbp_slow:
 	stxa		%g2, [%o2] ASI_DMMU
 	flush		%g6
 	retl
-	 wrpr		%g1, 0x0, %pstate
+/*IC22*/ wrpr		%g1, 0x0, %pstate
 
 /*
  * The following code flushes one page_size worth.
@@ -242,6 +299,30 @@ iflush2:sub		%o1, 0x20, %g3
 	flush		%g6
 	ba,a,pt		%xcc, 3b
 
+	.align		64
+	.globl		__flush_dcache_page
+__flush_dcache_page:	/* %o0=kaddr, %o1=flush_icache */
+	sub		%o0, %g4, %o0
+	
+	rdpr		%ver, %g1
+	sethi		%hi(0x003e0014), %g2
+	srlx		%g1, 32, %g1
+	or		%g2, %lo(0x003e0014), %g2
+	cmp		%g1, %g2
+	bne,pt		%icc, flush_dcpage_spitfire
+	 nop
+
+flush_dcpage_cheetah:
+	sethi		%hi(PAGE_SIZE), %o4
+1:	subcc		%o4, (1 << 5), %o4
+	stxa		%g0, [%o0 + %o4] ASI_DCACHE_INVALIDATE
+	bne,pt		%icc, 1b
+	 nop
+	membar		#Sync
+	/* I-cache flush never needed on Cheetah, see callers. */
+	retl
+	 nop
+
 #if (PAGE_SHIFT == 13)
 #define DTAG_MASK 0x3
 #elif (PAGE_SHIFT == 16)
@@ -252,10 +333,7 @@ iflush2:sub		%o1, 0x20, %g3
 #define DTAG_MASK 0x3ff
 #endif
 
-	.align		64
-	.globl		__flush_dcache_page
-__flush_dcache_page:	/* %o0=kaddr, %o1=flush_icache */
-	sub		%o0, %g4, %o0
+flush_dcpage_spitfire:
 	clr		%o4
 	srlx		%o0, 11, %o0
 	sethi		%hi(1 << 14), %o2
@@ -344,119 +422,6 @@ __update_mmu_cache:	/* %o0=vma, %o1=address, %o2=pte */
 1:	retl
 	 nop
 
-	/* Cheetah specific versions, patched at boot time.  */
-__cheetah_flush_tlb_page: /* 14 insns */
-	rdpr		%pstate, %g5
-	andn		%g5, PSTATE_IE, %g2
-	wrpr		%g2, 0x0, %pstate
-	wrpr		%g0, 1, %tl
-	mov		PRIMARY_CONTEXT, %o2
-	ldxa		[%o2] ASI_DMMU, %g2
-	stxa		%o0, [%o2] ASI_DMMU
-	stxa		%g0, [%o1] ASI_DMMU_DEMAP
-	stxa		%g0, [%o1] ASI_IMMU_DEMAP
-	stxa		%g2, [%o2] ASI_DMMU
-	flush		%g6
-	wrpr		%g0, 0, %tl
-	retl
-	 wrpr		%g5, 0x0, %pstate
-
-__cheetah_flush_tlb_mm: /* 15 insns */
-	rdpr		%pstate, %g5
-	andn		%g5, PSTATE_IE, %g2
-	wrpr		%g2, 0x0, %pstate
-	wrpr		%g0, 1, %tl
-	mov		PRIMARY_CONTEXT, %o2
-	mov		0x40, %g3
-	ldxa		[%o2] ASI_DMMU, %g2
-	stxa		%o0, [%o2] ASI_DMMU
-	stxa		%g0, [%g3] ASI_DMMU_DEMAP
-	stxa		%g0, [%g3] ASI_IMMU_DEMAP
-	stxa		%g2, [%o2] ASI_DMMU
-	flush		%g6
-	wrpr		%g0, 0, %tl
-	retl
-	 wrpr		%g5, 0x0, %pstate
-
-__cheetah_flush_tlb_range: /* 20 insns */
-	cmp		%o5, %o4
-	blu,pt		%xcc, 9f
-	 rdpr		%pstate, %g5
-	andn		%g5, PSTATE_IE, %g2
-	wrpr		%g2, 0x0, %pstate
-	wrpr		%g0, 1, %tl
-	mov		PRIMARY_CONTEXT, %o2
-	sub		%o5, %o4, %o5
-	ldxa		[%o2] ASI_DMMU, %g2
-	stxa		%o0, [%o2] ASI_DMMU
-1:	stxa		%g0, [%o1 + %o5] ASI_DMMU_DEMAP
-	stxa		%g0, [%o1 + %o5] ASI_IMMU_DEMAP
-	membar		#Sync
-	brnz,pt		%o5, 1b
-	 sub		%o5, %o4, %o5
-	stxa		%g2, [%o2] ASI_DMMU
-	flush		%g6
-	wrpr		%g0, 0, %tl
-9:	retl
-	 wrpr		%g5, 0x0, %pstate
-
-flush_dcpage_cheetah: /* 9 insns */
-	sub		%o0, %g4, %o0
-	sethi		%hi(PAGE_SIZE), %o4
-1:	subcc		%o4, (1 << 5), %o4
-	stxa		%g0, [%o0 + %o4] ASI_DCACHE_INVALIDATE
-	membar		#Sync
-	bne,pt		%icc, 1b
-	 nop
-	retl		/* I-cache flush never needed on Cheetah, see callers. */
-	 nop
-
-cheetah_patch_one:
-1:	lduw		[%o1], %g1
-	stw		%g1, [%o0]
-	flush		%o0
-	subcc		%o2, 1, %o2
-	add		%o1, 4, %o1
-	bne,pt		%icc, 1b
-	 add		%o0, 4, %o0
-	retl
-	 nop
-
-	.globl		cheetah_patch_cachetlbops
-cheetah_patch_cachetlbops:
-	save		%sp, -128, %sp
-
-	sethi		%hi(__flush_tlb_page), %o0
-	or		%o0, %lo(__flush_tlb_page), %o0
-	sethi		%hi(__cheetah_flush_tlb_page), %o1
-	or		%o1, %lo(__cheetah_flush_tlb_page), %o1
-	call		cheetah_patch_one
-	 mov		14, %o2
-
-	sethi		%hi(__flush_tlb_mm), %o0
-	or		%o0, %lo(__flush_tlb_mm), %o0
-	sethi		%hi(__cheetah_flush_tlb_mm), %o1
-	or		%o1, %lo(__cheetah_flush_tlb_mm), %o1
-	call		cheetah_patch_one
-	 mov		15, %o2
-
-	sethi		%hi(__flush_tlb_range), %o0
-	or		%o0, %lo(__flush_tlb_range), %o0
-	sethi		%hi(__cheetah_flush_tlb_range), %o1
-	or		%o1, %lo(__cheetah_flush_tlb_range), %o1
-	call		cheetah_patch_one
-	 mov		20, %o2
-
-	sethi		%hi(__flush_dcache_page), %o0
-	or		%o0, %lo(__flush_dcache_page), %o0
-	sethi		%hi(flush_dcpage_cheetah), %o1
-	or		%o1, %lo(flush_dcpage_cheetah), %o1
-	call		cheetah_patch_one
-	 mov		9, %o2
-
-	ret
-	 restore
-
 #ifdef CONFIG_SMP
 	/* These are all called by the slaves of a cross call, at
 	 * trap level 1, with interrupts fully disabled.
@@ -524,33 +489,6 @@ xcall_flush_tlb_range:
 	nop
 	nop
 
-	/* This runs in a very controlled environment, so we do
-	 * not need to worry about BH races etc.
-	 */
-	.globl		xcall_sync_tick
-xcall_sync_tick:
-	rdpr		%pstate, %g2
-	wrpr		%g2, PSTATE_IG | PSTATE_AG, %pstate
-	rdpr		%pil, %g2
-	wrpr		%g0, 15, %pil
-	sethi		%hi(109f), %g7
-	b,pt		%xcc, etrap_irq
-109:	 or		%g7, %lo(109b), %g7
-	call		smp_synchronize_tick_client
-	 nop
-	clr		%l6
-	b		rtrap_xcall
-	 ldx		[%sp + PTREGS_OFF + PT_V9_TSTATE], %l1
-
-	/* NOTE: This is SPECIAL!!  We do etrap/rtrap however
-	 *       we choose to deal with the "BH's run with
-	 *       %pil==15" problem (described in asm/pil.h)
-	 *       by just invoking rtrap directly past where
-	 *       BH's are checked for.
-	 *
-	 *       We do it like this because we do not want %pil==15
-	 *       lockups to prevent regs being reported.
-	 */
 	.globl		xcall_report_regs
 xcall_report_regs:
 	rdpr		%pstate, %g2
@@ -561,11 +499,9 @@ xcall_report_regs:
 	b,pt		%xcc, etrap_irq
 109:	 or		%g7, %lo(109b), %g7
 	call		__show_regs
-	 add		%sp, PTREGS_OFF, %o0
-	clr		%l6
-	/* Has to be a non-v9 branch due to the large distance. */
-	b		rtrap_xcall
-	 ldx		[%sp + PTREGS_OFF + PT_V9_TSTATE], %l1
+	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	b,pt		%xcc, rtrap
+	 clr		%l6
 
 	.align		32
 	.globl		xcall_flush_dcache_page_cheetah
@@ -573,9 +509,9 @@ xcall_flush_dcache_page_cheetah: /* %g1 == physical page address */
 	sethi		%hi(PAGE_SIZE), %g3
 1:	subcc		%g3, (1 << 5), %g3
 	stxa		%g0, [%g1 + %g3] ASI_DCACHE_INVALIDATE
-	membar		#Sync
 	bne,pt		%icc, 1b
 	 nop
+	membar		#Sync
 	retry
 	nop
 
@@ -614,6 +550,20 @@ xcall_flush_dcache_page_spitfire: /* %g1 == physical page address
 	nop
 	nop
 
+	.globl		xcall_capture
+xcall_capture:
+	rdpr		%pstate, %g2
+	wrpr		%g2, PSTATE_IG | PSTATE_AG, %pstate
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	sethi		%hi(109f), %g7
+	b,pt		%xcc, etrap_irq
+109:	 or		%g7, %lo(109b), %g7
+	call		smp_penguin_jailcell
+	 nop
+	b,pt		%xcc, rtrap
+	 clr		%l6
+
 	.globl		xcall_promstop
 xcall_promstop:
 	rdpr		%pstate, %g2
@@ -630,6 +580,21 @@ xcall_promstop:
 1:	b,a,pt		%xcc, 1b
 	nop
 
+	.globl		xcall_receive_signal
+xcall_receive_signal:
+	rdpr		%pstate, %g2
+	wrpr		%g2, PSTATE_IG | PSTATE_AG, %pstate
+	rdpr		%tstate, %g1
+	andcc		%g1, TSTATE_PRIV, %g0
+	/* If we did not trap from user space, just ignore. */
+	bne,pn		%xcc, 99f
+	 sethi		%hi(109f), %g7
+	b,pt		%xcc, etrap
+109:	 or		%g7, %lo(109b), %g7
+	b,pt		%xcc, rtrap
+	 clr		%l6
+99:	retry
+
 	.data
 
 errata32_hwbug:
@@ -638,8 +603,10 @@ errata32_hwbug:
 	.text
 
 	/* These two are not performance critical... */
-	.globl		xcall_flush_tlb_all_spitfire
-xcall_flush_tlb_all_spitfire:
+	.globl		xcall_flush_tlb_all
+xcall_flush_tlb_all:
+	BRANCH_IF_CHEETAH(g2, g3, __cheetah_xcall_flush_tlb_all)
+__spitfire_xcall_flush_tlb_all:
 	/* Spitfire Errata #32 workaround. */
 	sethi		%hi(errata32_hwbug), %g4
 	stx		%g0, [%g4 + %lo(errata32_hwbug)]
@@ -675,21 +642,22 @@ xcall_flush_tlb_all_spitfire:
 	stx		%g0, [%g4 + %lo(errata32_hwbug)]
 
 2:	add		%g2, 1, %g2
-	cmp		%g2, SPITFIRE_HIGHEST_LOCKED_TLBENT
+	cmp		%g2, 63
 	ble,pt		%icc, 1b
 	 sll		%g2, 3, %g3
 	flush		%g6
 	retry
 
-	.globl		xcall_flush_tlb_all_cheetah
-xcall_flush_tlb_all_cheetah:
+__cheetah_xcall_flush_tlb_all:
 	mov		0x80, %g2
 	stxa		%g0, [%g2] ASI_DMMU_DEMAP
 	stxa		%g0, [%g2] ASI_IMMU_DEMAP
 	retry
 
-	.globl		xcall_flush_cache_all_spitfire
-xcall_flush_cache_all_spitfire:
+	.globl		xcall_flush_cache_all
+xcall_flush_cache_all:
+	BRANCH_IF_CHEETAH(g2, g3, __cheetah_xcall_flush_cache_all)
+__spitfire_xcall_flush_cache_all:
 	sethi		%hi(16383), %g2
 	or		%g2, %lo(16383), %g2
 	clr		%g3
@@ -702,20 +670,30 @@ xcall_flush_cache_all_spitfire:
 	flush		%g6
 	retry
 
-	/* These just get rescheduled to PIL vectors. */
+	/* Cheetah's caches are fully coherent in the sense that
+	 * caches are flushed here.  We need to verify this and
+	 * really just not even send out the xcall at the top level.
+	 */
+__cheetah_xcall_flush_cache_all:
+	retry
+
 	.globl		xcall_call_function
 xcall_call_function:
-	wr		%g0, (1 << PIL_SMP_CALL_FUNC), %set_softint
-	retry
-
-	.globl		xcall_receive_signal
-xcall_receive_signal:
-	wr		%g0, (1 << PIL_SMP_RECEIVE_SIGNAL), %set_softint
-	retry
-
-	.globl		xcall_capture
-xcall_capture:
-	wr		%g0, (1 << PIL_SMP_CAPTURE), %set_softint
-	retry
+	mov		TLB_TAG_ACCESS, %g5		! wheee...
+	stxa		%g1, [%g5] ASI_IMMU		! save call_data here for a bit
+	membar		#Sync
+	rdpr		%pstate, %g2
+	wrpr		%g2, PSTATE_IG | PSTATE_AG, %pstate
+	mov		TLB_TAG_ACCESS, %g2
+	ldxa		[%g2] ASI_IMMU, %g5
+	rdpr		%pil, %g2
+	wrpr		%g0, 15, %pil
+	sethi		%hi(109f), %g7
+	b,pt		%xcc, etrap_irq
+109:	 or		%g7, %lo(109b), %g7
+	call		smp_call_function_client
+	 mov		%l5, %o0
+	b,pt		%xcc, rtrap
+	 clr		%l6
 
 #endif /* CONFIG_SMP */

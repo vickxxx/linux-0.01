@@ -48,11 +48,13 @@ proc_bus_zorro_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 	struct proc_dir_entry *dp = ino->u.generic_ip;
 	struct zorro_dev *dev = dp->data;
 	struct ConfigDev cd;
-	loff_t pos = *ppos;
+	int pos = *ppos;
 
-	if (pos < 0 || pos >= sizeof(struct ConfigDev))
+	if (pos >= sizeof(struct ConfigDev))
 		return 0;
-	if (nbytes > sizeof(struct ConfigDev) - pos)
+	if (nbytes >= sizeof(struct ConfigDev))
+		nbytes = sizeof(struct ConfigDev);
+	if (pos + nbytes > sizeof(struct ConfigDev))
 		nbytes = sizeof(struct ConfigDev) - pos;
 
 	/* Construct a ConfigDev */
@@ -65,7 +67,7 @@ proc_bus_zorro_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 
 	if (copy_to_user(buf, &cd, nbytes))
 		return -EFAULT;
-	*ppos = pos + nbytes;
+	*ppos += nbytes;
 
 	return nbytes;
 }

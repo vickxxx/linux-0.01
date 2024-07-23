@@ -40,4 +40,3 @@ static void __exit exit_msdos_fs(void)
 
 module_init(init_msdos_fs)
 module_exit(exit_msdos_fs)
-MODULE_LICENSE("GPL");

@@ -330,8 +330,8 @@ MODULE_PARM(fs_keystream, "i");
 #define FS_DEBUG_QSIZE   0x00001000
 
 
-#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter %s\n", __FUNCTION__)
-#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  %s\n", __FUNCTION__)
+#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter " __FUNCTION__ "\n")
+#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  " __FUNCTION__ "\n")
 
 
 struct fs_dev *fs_boards = NULL;
@@ -760,7 +760,6 @@ static void process_txdone_queue (struct fs_dev *dev, struct queue *q)
 		default:
 			/* Here we get the tx purge inhibit command ... */
 			/* Action, I believe, is "don't do anything". -- REW */
-			break;
 		}
     
 		write_fs (dev, Q_RP(q->offset), Q_INCWRAP);
@@ -1531,7 +1530,7 @@ static void top_off_fp (struct fs_dev *dev, struct freepool *fp, int gfp_flags)
 	fs_dprintk (FS_DEBUG_QUEUE, "Added %d entries. \n", n);
 }
 
-static void __devexit free_queue (struct fs_dev *dev, struct queue *txq)
+static void __exit free_queue (struct fs_dev *dev, struct queue *txq)
 {
 	func_enter ();
 
@@ -1547,7 +1546,7 @@ static void __devexit free_queue (struct fs_dev *dev, struct queue *txq)
 	func_exit ();
 }
 
-static void __devexit free_freepool (struct fs_dev *dev, struct freepool *fp)
+static void __exit free_freepool (struct fs_dev *dev, struct freepool *fp)
 {
 	func_enter ();
 
@@ -2089,7 +2088,7 @@ int __init init_PCI (void)
 #endif 
 */
 
-static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
+const static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS50, 
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, FS_IS50},
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS155, 
@@ -2103,7 +2102,7 @@ static struct pci_driver firestream_driver = {
 	name:           "firestream",
 	id_table:       firestream_pci_tbl,
 	probe:          firestream_init_one,
-	remove:         __devexit_p(firestream_remove_one),
+	remove:         firestream_remove_one,
 };
 
 static int __init firestream_init_module (void)

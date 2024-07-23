@@ -105,15 +105,9 @@ static ssize_t
 flash_read(struct file * file, char * buf,
 	   size_t count, loff_t *ppos)
 {
-	loff_t p = *ppos;
+	unsigned long p = file->f_pos;
 	int i;
 	
-	if (p > flash.read_size)
-		return 0;
-
-	if (p < 0)
-		return -EINVAL;
-
 	if (count > flash.read_size - p)
 		count = flash.read_size - p;
 
@@ -124,7 +118,7 @@ flash_read(struct file * file, char * buf,
 		buf++;
 	}
 
-	*ppos = p + count;
+	file->f_pos += count;
 	return count;
 }
 
@@ -167,13 +161,10 @@ static int __init flash_init(void)
 {
 	struct sbus_bus *sbus;
 	struct sbus_dev *sdev = 0;
-#ifdef CONFIG_PCI
 	struct linux_ebus *ebus;
 	struct linux_ebus_device *edev = 0;
 	struct linux_prom_registers regs[2];
-	int len, nregs;
-#endif
-	int err;
+	int len, err, nregs;
 
 	for_all_sbusdev(sdev, sbus) {
 		if (!strcmp(sdev->prom_name, "flashprom")) {

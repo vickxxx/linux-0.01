@@ -107,6 +107,12 @@
 
 #define SWAP(A) ((A>>8) | ((A&0xff) <<8))
 
+#if 0
+#define outb(a,d) *(char *)(a)=(d)
+#define outw(a,d) *(unsigned short *)a=d
+#endif
+
+
 /* frame buffer operations */
 
 static int dn_fb_get_fix(struct fb_fix_screeninfo *fix, int con, 
@@ -316,12 +322,12 @@ unsigned long __init dnfb_init(unsigned long mem_start) {
  
 	/* now we have registered we can safely setup the hardware */
 
-        out_8(AP_CONTROL_3A, RESET_CREG);
-        out_be16(AP_WRITE_ENABLE, 0x0);
-        out_8(AP_CONTROL_0, NORMAL_MODE); 
-        out_8(AP_CONTROL_1, (AD_BLT | DST_EQ_SRC | NORM_CREG1));
-        out_8(AP_CONTROL_2, S_DATA_PLN);
-        out_be16(AP_ROP_1, SWAP(0x3));
+        outb(RESET_CREG,  AP_CONTROL_3A);
+        outw(0x0,  AP_WRITE_ENABLE);
+        outb(NORMAL_MODE, AP_CONTROL_0); 
+        outb((AD_BLT | DST_EQ_SRC | NORM_CREG1),  AP_CONTROL_1);
+        outb(S_DATA_PLN,  AP_CONTROL_2);
+        outw(SWAP(0x3), AP_ROP_1);
 
         printk("apollo frame buffer alive and kicking !\n");
 
@@ -348,10 +354,10 @@ static int dnfbcon_updatevar(int con,  struct fb_info *info) {
 static void dnfbcon_blank(int blank,  struct fb_info *info) {
 
 	if(blank)  {
-		out_8(AP_CONTROL_3A, 0x0);
+        	outb(0x0,  AP_CONTROL_3A);
 	}
 	else {
-	        out_8(AP_CONTROL_3A, 0x1);
+	        outb(0x1,  AP_CONTROL_3A);
 	}
 
 	return ;
@@ -377,8 +383,7 @@ void dn_bitblt(struct display *p,int x_src,int y_src, int x_dest, int y_dest,
 		x_word_count=(x_end>>4) - (x_dest >> 4) + 1;
 		start_mask=0xffff0000 >> (x_dest & 0xf);
 		end_mask=0x7ffff >> (x_end & 0xf);
-		out_8(AP_CONTROL_0,
-		      (((x_dest & 0xf) - (x_src &0xf))  % 16)|(0x4 << 5));
+		outb((((x_dest & 0xf) - (x_src &0xf))  % 16)|(0x4 << 5),AP_CONTROL_0);
 		if((x_dest & 0xf) < (x_src & 0xf))
 			pre_read=1;
 	}
@@ -388,27 +393,26 @@ void dn_bitblt(struct display *p,int x_src,int y_src, int x_dest, int y_dest,
 		x_word_count=(x_dest>>4) - (x_end >> 4) + 1;
 		start_mask=0x7ffff >> (x_dest & 0xf);
 		end_mask=0xffff0000 >> (x_end & 0xf);
-		out_8(AP_CONTROL_0,
-		      ((-((x_src & 0xf) - (x_dest &0xf))) % 16)|(0x4 << 5));
+		outb(((-((x_src & 0xf) - (x_dest &0xf))) % 16)|(0x4 << 5),AP_CONTROL_0);
 		if((x_dest & 0xf) > (x_src & 0xf))
 			pre_read=1;
 	}
 
 	for(i=0;i<y_count;i++) {
 
-		out_8(AP_CONTROL_3A, 0xc | (dest >> 16));
-
+		outb(0xc | (dest >> 16), AP_CONTROL_3A);
+			
 		if(pre_read) {
 			dummy=*src;
 			src+=incr;
 		}
 
 		if(x_word_count) {
-			out_8(AP_WRITE_ENABLE, start_mask);
+			outb(start_mask,AP_WRITE_ENABLE);
 			*src=dest;
 			src+=incr;
 			dest+=incr;
-			out_8(AP_WRITE_ENABLE, 0);
+			outb(0,AP_WRITE_ENABLE);
 
 			for(j=1;j<(x_word_count-1);j++) {
 				*src=dest;
@@ -416,13 +420,13 @@ void dn_bitblt(struct display *p,int x_src,int y_src, int x_dest, int y_dest,
 				dest+=incr;
 			}
 
-			out_8(AP_WRITE_ENABLE, start_mask);
+			outb(start_mask,AP_WRITE_ENABLE);
 			*src=dest;
 			dest+=incr;
 			src+=incr;
 		}
 		else {
-			out_8(AP_WRITE_ENABLE, start_mask | end_mask);
+			outb(start_mask | end_mask, AP_WRITE_ENABLE);
 			*src=dest;
 			dest+=incr;
 			src+=incr;
@@ -430,7 +434,7 @@ void dn_bitblt(struct display *p,int x_src,int y_src, int x_dest, int y_dest,
 		src+=(y_delta/16);
 		dest+=(y_delta/16);
 	}
-	out_8(AP_CONTROL_0, NORMAL_MODE);
+	outb(NORMAL_MODE,AP_CONTROL_0);
 }
 
 static void bmove_apollofb(struct display *p, int sy, int sx, int dy, int dx,
@@ -485,7 +489,7 @@ static void putc_apollofb(struct vc_data *conp, struct display *p, int c, int yy
 	fbcon_mfb_putc(conp,p,c,yy,xx);
 }
 
-static void putcs_apollofb(struct vc_data *conp, struct display *p, const unsigned short *s,
+static void putcs_apollofb(struct vc_data *conp, struct display *p, const char *s,
 		      int count, int yy, int xx)
 {
 	fbcon_mfb_putcs(conp,p,s,count,yy,xx);

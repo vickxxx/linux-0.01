@@ -633,7 +633,10 @@ int ch, err, n, p;
 					
 				/* WakeUp if output buffer runs low */
 				if ((port->gs.xmit_cnt <= port->gs.wakeup_chars) && port->gs.tty) {
-					tty_wakeup(port->gs.tty);
+					if ((port->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && port->gs.tty->ldisc.write_wakeup){
+						(port->gs.tty->ldisc.write_wakeup)(port->gs.tty);
+					}
+					wake_up_interruptible(&port->gs.tty->write_wait);
 				}
 			} // if the port is used
 		} // for every port on the board
@@ -773,7 +776,7 @@ int a2232board_init(void)
 	volatile u_char *to;
 	volatile struct a2232memory *mem;
 
-#ifdef CONFIG_SMP
+#ifdef __SMP__
 	return -ENODEV;	/* This driver is not SMP aware. Is there an SMP ZorroII-bus-machine? */
 #endif
 

@@ -1,6 +1,8 @@
 /* 
  * Driver for PS/2 mouse on IOMD interface
  */
+
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
@@ -271,15 +273,8 @@ int __init psaux_init(void)
 	iomd_writeb(0, IOMD_MSECTL);
 	iomd_writeb(8, IOMD_MSECTL);
   
+	misc_register(&psaux_mouse);
 	queue = (struct aux_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
-	if (queue == NULL)
-		return -ENOMEM;
-
-	if (misc_register(&psaux_mouse)) {
-		kfree(queue);
-		return -ENODEV;
-	}
-
 	memset(queue, 0, sizeof(*queue));
 	queue->head = queue->tail = 0;
 	init_waitqueue_head(&queue->proc_list);
@@ -292,6 +287,3 @@ int __init psaux_init(void)
 
 	return 0;
 }
-
-module_init(psaux_init);
-

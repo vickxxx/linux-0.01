@@ -202,7 +202,6 @@ static int mode_access;		/* access mode: READ or WRITE */
 
 static int qic02_get_resources(void);
 static void qic02_release_resources(void);
-static void finish_rw(int cmd);
 
 /* This is a pointer to the actual kernel buffer where the interrupt routines
  * read from/write to. It is needed because the DMA channels 1 and 3 cannot
@@ -821,6 +820,7 @@ static int get_ext_status3(void)
 static int tp_sense(int ignore)
 {
 	unsigned err = 0, exnr = 0, gs = 0;
+	static void finish_rw(int cmd);
 
 	if (TPQDBG(SENSE_TEXT))
 		printk(TPQIC02_NAME ": tp_sense(ignore=0x%x) enter\n",
@@ -1815,10 +1815,10 @@ static void qic02_tape_interrupt(int irq, void *dev_id,
 static ssize_t qic02_tape_read(struct file *filp, char *buf, size_t count,
 			       loff_t * ppos)
 {
+	int err;
 	kdev_t dev = filp->f_dentry->d_inode->i_rdev;
 	unsigned short flags = filp->f_flags;
 	unsigned long bytes_todo, bytes_done, total_bytes_done = 0;
-	loff_t pos = *ppos;
 	int stat;
 
 	if (status_zombie == YES) {
@@ -1899,7 +1899,6 @@ static ssize_t qic02_tape_read(struct file *filp, char *buf, size_t count,
 
 	/*****************************/
 		if (bytes_todo == 0) {
-			*ppos = pos;
 			return total_bytes_done;
 		}
 
@@ -1945,8 +1944,12 @@ static ssize_t qic02_tape_read(struct file *filp, char *buf, size_t count,
 			}
 			/* copy buffer to user-space in one go */
 			if (bytes_done > 0) {
-				if (copy_to_user(buf, buffaddr, bytes_done))
+				err =
+				    copy_to_user(buf, buffaddr,
+						 bytes_done);
+				if (err) {
 					return -EFAULT;
+				}
 			}
 #if 1
 			/* Checks Ton's patch below */
@@ -1968,7 +1971,7 @@ static ssize_t qic02_tape_read(struct file *filp, char *buf, size_t count,
 		if (bytes_done > 0) {
 			status_bytes_rd = YES;
 			buf += bytes_done;
-			pos += bytes_done;
+			*ppos += bytes_done;
 			total_bytes_done += bytes_done;
 			count -= bytes_done;
 		}
@@ -2010,6 +2013,7 @@ static ssize_t qic02_tape_read(struct file *filp, char *buf, size_t count,
 static ssize_t qic02_tape_write(struct file *filp, const char *buf,
 				size_t count, loff_t * ppos)
 {
+	int err;
 	kdev_t dev = filp->f_dentry->d_inode->i_rdev;
 	unsigned short flags = filp->f_flags;
 	unsigned long bytes_todo, bytes_done, total_bytes_done = 0;
@@ -2081,8 +2085,10 @@ static ssize_t qic02_tape_write(struct file *filp, const char *buf,
 
 		/* copy from user to DMA buffer and initiate transfer. */
 		if (bytes_todo > 0) {
-			if (copy_from_user(buffaddr, buf, bytes_todo))
+			err = copy_from_user(buffaddr, buf, bytes_todo);
+			if (err) {
 				return -EFAULT;
+			}
 
 /****************** similar problem with read() at FM could happen here at EOT.
  ******************/
@@ -2172,6 +2178,16 @@ static ssize_t qic02_tape_write(struct file *filp, const char *buf,
  * remembered values, rewind the tape and set the required density.
  * Don't rewind if the minor bits specify density 0.
  */
+
+static int qic02_tape_open(struct inode *inode, struct file *filp)
+{
+	static int qic02_tape_open_no_use_count(struct inode *,
+						struct file *);
+	int open_error;
+
+	open_error = qic02_tape_open_no_use_count(inode, filp);
+	return open_error;
+}
 
 static int qic02_tape_open_no_use_count(struct inode *inode,
 					struct file *filp)
@@ -2374,14 +2390,6 @@ static int qic02_tape_open_no_use_count(struct inode *inode,
 	return 0;
 }				/* qic02_tape_open */
 
-
-static int qic02_tape_open(struct inode *inode, struct file *filp)
-{
-	int open_error;
-
-	open_error = qic02_tape_open_no_use_count(inode, filp);
-	return open_error;
-}
 
 static int qic02_tape_release(struct inode *inode, struct file *filp)
 {
@@ -2742,9 +2750,7 @@ static int qic02_get_resources(void)
 	 * the config parameters have been set using MTSETCONFIG.
 	 */
 
-	/* Grab the IO region. */
-	if (!request_region(QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE,
-			   TPQIC02_NAME)) {
+	if (check_region(QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE)) {
 		printk(TPQIC02_NAME
 		       ": IO space at 0x%x [%d ports] already reserved\n",
 		       QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE);
@@ -2758,7 +2764,6 @@ static int qic02_get_resources(void)
 		printk(TPQIC02_NAME
 		       ": can't allocate IRQ%d for QIC-02 tape\n",
 		       QIC02_TAPE_IRQ);
-		release_region(QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE);
 		return -EBUSY;
 	}
 
@@ -2768,9 +2773,12 @@ static int qic02_get_resources(void)
 		       ": can't allocate DMA%d for QIC-02 tape\n",
 		       QIC02_TAPE_DMA);
 		free_irq(QIC02_TAPE_IRQ, NULL);
-		release_region(QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE);
 		return -EBUSY;
 	}
+
+	/* Grab the IO region. We already made sure it's available. */
+	request_region(QIC02_TAPE_PORT, QIC02_TAPE_PORT_RANGE,
+		       TPQIC02_NAME);
 
 	/* Setup the page-address for the dma transfer. */
 	buffaddr =

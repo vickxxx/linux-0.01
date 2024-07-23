@@ -68,7 +68,6 @@ static const char version[] =
 #include <linux/in.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
-#include <linux/crc32.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -271,7 +270,6 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int length, send_length, output_page;
 	unsigned long flags;
-	char scratch[ETH_ZLEN];
 
 	length = skb->len;
 
@@ -342,16 +340,8 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * isn't already sending. If it is busy, the interrupt handler will
 	 * trigger the send later, upon receiving a Tx done interrupt.
 	 */
-	 
-	if(length == send_length)
-		ei_block_output(dev, length, skb->data, output_page);
-	else
-	{
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, output_page);
-	}
-		
+
+	ei_block_output(dev, length, skb->data, output_page);
 	if (! ei_local->txing) 
 	{
 		ei_local->txing = 1;
@@ -383,14 +373,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * reasonable hardware if you only use one Tx buffer.
 	 */
 
-	if(length == send_length)
-		ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
-	else
-	{
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, ei_local->tx_start_page);
-	}
+	ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
 	ei_local->txing = 1;
 	NS8390_trigger_send(dev, send_length, ei_local->tx_start_page);
 	dev->trans_start = jiffies;
@@ -902,6 +885,27 @@ static struct net_device_stats *get_stats(struct net_device *dev)
 }
 
 /*
+ * Update the given Autodin II CRC value with another data byte.
+ */
+
+static inline u32 update_crc(u8 byte, u32 current_crc)
+{
+	int bit;
+	u8 ah = 0;
+	for (bit=0; bit<8; bit++) 
+	{
+		u8 carry = (current_crc>>31);
+		current_crc <<= 1;
+		ah = ((ah<<1) | carry) ^ byte;
+		if (ah&1)
+			current_crc ^= 0x04C11DB7;	/* CRC polynomial */
+		ah >>= 1;
+		byte >>= 1;
+	}
+	return current_crc;
+}
+
+/*
  * Form the 64 bit 8390 multicast table from the linked list of addresses
  * associated with this dev structure.
  */
@@ -912,13 +916,16 @@ static inline void make_mc_bits(u8 *bits, struct net_device *dev)
 
 	for (dmi=dev->mc_list; dmi; dmi=dmi->next) 
 	{
+		int i;
 		u32 crc;
 		if (dmi->dmi_addrlen != ETH_ALEN) 
 		{
 			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
 			continue;
 		}
-		crc = ether_crc(ETH_ALEN, dmi->dmi_addr);
+		crc = 0xffffffff;	/* initial CRC value */
+		for (i=0; i<ETH_ALEN; i++)
+			crc = update_crc(dmi->dmi_addr[i], crc);
 		/* 
 		 * The 8390 uses the 6 most significant bits of the
 		 * CRC to index the multicast table.
@@ -1000,11 +1007,6 @@ static void set_multicast_list(struct net_device *dev)
 	spin_unlock_irqrestore(&ei_local->page_lock, flags);
 }	
 
-static inline void ei_device_init(struct ei_device *ei_local)
-{
-	spin_lock_init(&ei_local->page_lock);
-}
-
 /**
  * ethdev_init - init rest of 8390 device struct
  * @dev: network device structure to init
@@ -1020,11 +1022,14 @@ int ethdev_init(struct net_device *dev)
     
 	if (dev->priv == NULL) 
 	{
+		struct ei_device *ei_local;
+		
 		dev->priv = kmalloc(sizeof(struct ei_device), GFP_KERNEL);
 		if (dev->priv == NULL)
 			return -ENOMEM;
 		memset(dev->priv, 0, sizeof(struct ei_device));
-		ei_device_init(dev->priv);
+		ei_local = (struct ei_device *)dev->priv;
+		spin_lock_init(&ei_local->page_lock);
 	}
     
 	dev->hard_start_xmit = &ei_start_xmit;
@@ -1035,29 +1040,6 @@ int ethdev_init(struct net_device *dev)
         
 	return 0;
 }
-
-/* wrapper to make alloc_netdev happy; probably should just cast... */
-static void __ethdev_init(struct net_device *dev)
-{
-	ethdev_init(dev);
-}
-
-/**
- * alloc_ei_netdev - alloc_etherdev counterpart for 8390
- *
- * Allocate 8390-specific net_device.
- */
-struct net_device *alloc_ei_netdev(void)
-{
-	struct net_device *dev;
-	
-	dev = alloc_netdev(sizeof(struct ei_device), "eth%d", __ethdev_init);
-	if (dev)
-		ei_device_init(dev->priv);
-
-	return dev;
-}
-
 
 
 
@@ -1109,7 +1091,7 @@ void NS8390_init(struct net_device *dev, int startp)
 	for(i = 0; i < 6; i++) 
 	{
 		outb_p(dev->dev_addr[i], e8390_base + EN1_PHYS_SHIFT(i));
-		if (ei_debug > 1 && inb_p(e8390_base + EN1_PHYS_SHIFT(i))!=dev->dev_addr[i])
+		if(inb_p(e8390_base + EN1_PHYS_SHIFT(i))!=dev->dev_addr[i])
 			printk(KERN_ERR "Hw. address read/write mismap %d\n",i);
 	}
 
@@ -1143,7 +1125,7 @@ static void NS8390_trigger_send(struct net_device *dev, unsigned int length,
    
 	outb_p(E8390_NODMA+E8390_PAGE0, e8390_base+E8390_CMD);
     
-	if (inb_p(e8390_base+E8390_CMD) & E8390_TRANS) 
+	if (inb_p(e8390_base) & E8390_TRANS) 
 	{
 		printk(KERN_WARNING "%s: trigger_send() called with the transmitter busy.\n",
 			dev->name);
@@ -1161,7 +1143,6 @@ EXPORT_SYMBOL(ei_interrupt);
 EXPORT_SYMBOL(ei_tx_timeout);
 EXPORT_SYMBOL(ethdev_init);
 EXPORT_SYMBOL(NS8390_init);
-EXPORT_SYMBOL(alloc_ei_netdev);
 
 #if defined(MODULE)
 

@@ -35,6 +35,3 @@ dep:
 clean:
 	rm -f image listing iplfba.boot ipleckd.boot ipldump.boot
 
-install: $(CONFIGURE) $(BOOTIMAGE)
-	sh -x ./install.sh $(KERNELRELEASE) $(BOOTIMAGE) $(TOPDIR)/System.map $(TOPDIR)/Kerntypes "$(INSTALL_PATH)"
-

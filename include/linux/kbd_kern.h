@@ -72,7 +72,6 @@ extern void setledstate(struct kbd_struct *kbd, unsigned int led);
 extern int do_poke_blanked_console;
 
 extern void (*kbd_ledfunc)(unsigned int led);
-extern void kbd_refresh_leds(void);
 
 extern void set_console(int nr);
 extern void schedule_console_callback(void);
@@ -141,6 +140,7 @@ struct console;
 int getkeycode(unsigned int scancode);
 int setkeycode(unsigned int scancode, unsigned int keycode);
 void compute_shiftstate(void);
+int keyboard_wait_for_keypress(struct console *);
 
 /* defkeymap.c */
 

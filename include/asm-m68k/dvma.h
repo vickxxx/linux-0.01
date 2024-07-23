@@ -22,8 +22,7 @@ extern int dvma_map_iommu(unsigned long kaddr, unsigned long baddr,
 
 #define dvma_malloc(x) dvma_malloc_align(x, 0)
 #define dvma_map(x, y) dvma_map_align(x, y, 0)
-#define dvma_map_vme(x, y) (dvma_map(x, y) & 0xfffff)
-#define dvma_map_align_vme(x, y, z) (dvma_map_align (x, y, z) & 0xfffff)
+
 extern unsigned long dvma_map_align(unsigned long kaddr, int len, 
 			    int align);
 extern void *dvma_malloc_align(unsigned long len, unsigned long align);
@@ -53,13 +52,10 @@ extern void dvma_free(void *vaddr);
 /* virt <-> phys conversions */
 #define dvma_vtop(x) ((unsigned long)(x) & 0xffffff)
 #define dvma_ptov(x) ((unsigned long)(x) | 0xf000000)
-#define dvma_vtovme(x) ((unsigned long)(x) & 0x00fffff)
-#define dvma_vmetov(x) ((unsigned long)(x) | 0xff00000)
 #define dvma_vtob(x) dvma_vtop(x)
 #define dvma_btov(x) dvma_ptov(x)
 
-static inline int dvma_map_cpu(unsigned long kaddr, unsigned long vaddr,
-			       int len)
+extern inline int dvma_map_cpu(unsigned long kaddr, unsigned long vaddr, int len)
 {
 	return 0;
 }
@@ -111,7 +107,7 @@ enum dvma_rev {
 /* Linux DMA information structure, filled during probe. */
 struct Linux_SBus_DMA {
 	struct Linux_SBus_DMA *next;
-	struct sbus_dev *SBus_dev;
+	struct linux_sbus_device *SBus_dev;
 	struct sparc_dma_registers *regs;
 
 	/* Status, misc info */

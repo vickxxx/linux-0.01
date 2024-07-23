@@ -17,7 +17,7 @@
  *  CMI 8330 support - Alessandro Zummo <azummo@ita.flashnet.it>
  *
  * 18-01-2000 Separated sb_card and sb_common
- *  Jeff Garzik <jgarzik@pobox.com>
+ *  Jeff Garzik <jgarzik@mandrakesoft.com>
  *
  * 04-02-2000 Added Soundblaster AWE 64 PnP support, isapnpjump
  *  Alessandro Zummo <azummo@ita.flashnet.it>
@@ -369,11 +369,6 @@ static struct {
 		0,1,1,-1},
         {"Sound Blaster AWE 32",
 		ISAPNP_VENDOR('C','T','L'), ISAPNP_DEVICE(0x0045),
-		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0031),
-		0,0,0,0,
-		0,1,1,-1},
-	{"Sound Blaster AWE 32",
-		ISAPNP_VENDOR('C','T','L'), ISAPNP_DEVICE(0x0046),
 		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0031),
 		0,0,0,0,
 		0,1,1,-1},

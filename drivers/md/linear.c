@@ -153,29 +153,31 @@ static int linear_make_request (mddev_t *mddev,
 	return 1;
 }
 
-static void linear_status (struct seq_file *seq, mddev_t *mddev)
+static int linear_status (char *page, mddev_t *mddev)
 {
+	int sz = 0;
 
 #undef MD_DEBUG
 #ifdef MD_DEBUG
 	int j;
 	linear_conf_t *conf = mddev_to_conf(mddev);
   
-	seq_printf(seq, "      ");
+	sz += sprintf(page+sz, "      ");
 	for (j = 0; j < conf->nr_zones; j++)
 	{
-		seq_printf(seq, "[%s",
+		sz += sprintf(page+sz, "[%s",
 			partition_name(conf->hash_table[j].dev0->dev));
 
 		if (conf->hash_table[j].dev1)
-			seq_printf(seq, "/%s] ",
+			sz += sprintf(page+sz, "/%s] ",
 			  partition_name(conf->hash_table[j].dev1->dev));
 		else
-			seq_printf(seq, "] ");
+			sz += sprintf(page+sz, "] ");
 	}
-	seq_printf(seq, "\n");
+	sz += sprintf(page+sz, "\n");
 #endif
-	seq_printf(seq, " %dk rounding", mddev->param.chunk_size/1024);
+	sz += sprintf(page+sz, " %dk rounding", mddev->param.chunk_size/1024);
+	return sz;
 }
 
 

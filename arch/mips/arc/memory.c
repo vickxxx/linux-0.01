@@ -2,14 +2,7 @@
  * memory.c: PROM library functions for acquiring/using memory descriptors
  *           given to us from the ARCS firmware.
  *
- * Copyright (C) 1996 by David S. Miller
- * Copyright (C) 1999, 2000, 2001 by Ralf Baechle
- * Copyright (C) 1999, 2000 by Silicon Graphics, Inc.
- *
- * PROM library functions for acquiring/using memory descriptors given to us
- * from the ARCS firmware.  This is only used when CONFIG_ARC_MEMORY is set
- * because on some machines like SGI IP27 the ARC memory configuration data
- * completly bogus and alternate easier to use mechanisms are available.
+ * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -26,15 +19,10 @@
 
 #undef DEBUG
 
-/*
- * For ARC firmware memory functions the unit of meassuring memory is always
- * a 4k page of memory
- */
-#define ARC_PAGE_SHIFT	12
-
-struct linux_mdesc * __init ArcGetMemoryDescriptor(struct linux_mdesc *Current)
+struct linux_mdesc * __init
+ArcGetMemoryDescriptor(struct linux_mdesc *Current)
 {
-	return (struct linux_mdesc *) ARC_CALL1(get_mdesc, Current);
+	return romvec->get_mdesc(Current);
 }
 
 #ifdef DEBUG /* convenient for debugging */
@@ -59,8 +47,7 @@ static char *arc_mtypes[8] = {
 	"FirmwarePermanent",
 	"FreeContiguous"
 };
-#define mtypes(a) (prom_flags & PROM_FLAG_ARCS) ? arcs_mtypes[a.arcs] \
-						: arc_mtypes[a.arc]
+#define mtypes(a) (prom_flags & PROM_FLAG_ARCS) ? arcs_mtypes[a.arcs] : arc_mtypes[a.arc]
 #endif
 
 static inline int memtype_classify_arcs (union linux_memtypes type)
@@ -105,7 +92,7 @@ static inline int memtype_classify_arc (union linux_memtypes type)
 
 static int __init prom_memtype_classify (union linux_memtypes type)
 {
-	if (prom_flags & PROM_FLAG_ARCS)	/* SGI is ``different'' ... */
+	if (prom_flags & PROM_FLAG_ARCS)	/* SGI is ``different'' ...  */
 		return memtype_classify_arcs(type);
 
 	return memtype_classify_arc(type);
@@ -133,22 +120,20 @@ void __init prom_meminit(void)
 		unsigned long base, size;
 		long type;
 
-		base = p->base << ARC_PAGE_SHIFT;
-		size = p->pages << ARC_PAGE_SHIFT;
+		base = p->base << PAGE_SHIFT;
+		size = p->pages << PAGE_SHIFT;
 		type = prom_memtype_classify(p->type);
 
 		add_memory_region(base, size, type);
 	}
 }
 
-void __init prom_free_prom_memory(void)
+void __init
+prom_free_prom_memory (void)
 {
 	unsigned long freed = 0;
 	unsigned long addr;
 	int i;
-
-	if (prom_flags & PROM_FLAG_DONT_FREE_TEMP)
-		return 0;
 
 	for (i = 0; i < boot_mem_map.nr_map; i++) {
 		if (boot_mem_map.map[i].type != BOOT_MEM_ROM_DATA)
@@ -164,5 +149,5 @@ void __init prom_free_prom_memory(void)
 			freed += PAGE_SIZE;
 		}
 	}
-	printk(KERN_INFO "Freeing prom memory: %ldkb freed\n", freed >> 10);
+	printk("Freeing prom memory: %ldkb freed\n", freed >> 10);
 }

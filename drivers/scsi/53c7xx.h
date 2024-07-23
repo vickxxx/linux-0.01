@@ -1450,7 +1450,7 @@ struct NCR53c7x0_hostdata {
 
 };
 
-#define SCSI_IRQ_NONE	255
+#define IRQ_NONE	255
 #define DMA_NONE	255
 #define IRQ_AUTO	254
 #define DMA_AUTO	254
@@ -1599,10 +1599,6 @@ struct NCR53c7x0_hostdata {
 
 /* Paranoid people could use panic() here. */
 #define FATAL(host) shutdown((host));
-
-extern int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
-			  unsigned long base, int io_port, int irq, int dma,
-			  long long options, int clock);
 
 #endif /* NCR53c710_C */
 #endif /* NCR53c710_H */

@@ -1,4 +1,4 @@
-/* $Id: ranges.c,v 1.14.2.1 2001/12/19 00:16:21 davem Exp $
+/* $Id: ranges.c,v 1.14 1999/10/06 19:28:54 zaitcev Exp $
  * ranges.c: Handle ranges in newer proms for obio/sbus.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -16,20 +16,21 @@ struct linux_prom_ranges promlib_obio_ranges[PROMREG_MAX];
 int num_obio_ranges;
 
 /* Adjust register values based upon the ranges parameters. */
-static void
+void
 prom_adjust_regs(struct linux_prom_registers *regp, int nregs,
 		 struct linux_prom_ranges *rangep, int nranges)
 {
 	int regc, rngc;
 
-	for (regc = 0; regc < nregs; regc++) {
-		for (rngc = 0; rngc < nranges; rngc++)
-			if (regp[regc].which_io == rangep[rngc].ot_child_space)
+	for(regc=0; regc < nregs; regc++) {
+		for(rngc=0; rngc < nranges; rngc++)
+			if(regp[regc].which_io == rangep[rngc].ot_child_space &&
+			   regp[regc].phys_addr >= rangep[rngc].ot_child_base &&
+			   regp[regc].phys_addr + regp[regc].reg_size <= rangep[rngc].ot_child_base + rangep[rngc].or_size)
 				break; /* Fount it */
-		if (rngc == nranges) /* oops */
+		if(rngc==nranges) /* oops */
 			prom_printf("adjust_regs: Could not find range with matching bus type...\n");
 		regp[regc].which_io = rangep[rngc].ot_parent_space;
-		regp[regc].phys_addr -= rangep[rngc].ot_child_base;
 		regp[regc].phys_addr += rangep[rngc].ot_parent_base;
 	}
 }

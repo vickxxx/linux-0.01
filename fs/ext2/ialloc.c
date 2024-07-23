@@ -51,7 +51,8 @@ static struct buffer_head *read_inode_bitmap (struct super_block * sb,
 	if (!desc)
 		goto error_out;
 
-	bh = sb_bread(sb, le32_to_cpu(desc->bg_inode_bitmap));
+	bh = bread(sb->s_dev, le32_to_cpu(desc->bg_inode_bitmap),
+			sb->s_blocksize);
 	if (!bh)
 		ext2_error (sb, "read_inode_bitmap",
 			    "Cannot read inode bitmap - "
@@ -385,12 +386,13 @@ repeat:
 	inode->i_blksize = PAGE_SIZE;	/* This is the optimal IO size (for stat), not the fs block size */
 	inode->i_blocks = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->u.ext2_i.i_state = EXT2_STATE_NEW;
-	inode->u.ext2_i.i_flags = dir->u.ext2_i.i_flags & ~EXT2_BTREE_FL;
+	inode->u.ext2_i.i_new_inode = 1;
+	inode->u.ext2_i.i_flags = dir->u.ext2_i.i_flags;
 	if (S_ISLNK(mode))
 		inode->u.ext2_i.i_flags &= ~(EXT2_IMMUTABLE_FL|EXT2_APPEND_FL);
 	inode->u.ext2_i.i_block_group = group;
-	ext2_set_inode_flags(inode);
+	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL)
+		inode->i_flags |= S_SYNC;
 	insert_inode_hash(inode);
 	inode->i_generation = event++;
 	mark_inode_dirty(inode);

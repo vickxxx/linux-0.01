@@ -20,7 +20,7 @@ extern void genarch_init_irq(void);
 
 unsigned int vram_size;
 
-#if defined(CONFIG_ARCH_ACORN) || defined(CONFIG_ARCH_RISCSTATION)
+#ifdef CONFIG_ARCH_ACORN
 
 unsigned int memc_ctrl_reg;
 unsigned int number_mfm_drives;
@@ -49,8 +49,7 @@ static int __init parse_tag_acorn(const struct tag *tag)
 
 __tagtable(ATAG_ACORN, parse_tag_acorn);
 
-
-#if defined(CONFIG_ARCH_RPC) || defined(CONFIG_ARCH_RISCSTATION)
+#ifdef CONFIG_ARCH_RPC
 static void __init
 fixup_riscpc(struct machine_desc *desc, struct param_struct *unusd,
 	    char **cmdline, struct meminfo *mi)
@@ -62,9 +61,7 @@ fixup_riscpc(struct machine_desc *desc, struct param_struct *unusd,
 }
 
 extern void __init rpc_map_io(void);
-extern void __init riscstation_map_io(void);
 
-#ifdef CONFIG_ARCH_RPC
 MACHINE_START(RISCPC, "Acorn-RiscPC")
 	MAINTAINER("Russell King")
 	BOOT_MEM(0x10000000, 0x03000000, 0xe0000000)
@@ -76,20 +73,6 @@ MACHINE_START(RISCPC, "Acorn-RiscPC")
 	INITIRQ(genarch_init_irq)
 MACHINE_END
 #endif
-
-#ifdef CONFIG_ARCH_RISCSTATION
-/* TODO = check all parameters */
-MACHINE_START(RISCSTATION, "RiscStation-RS7500")
-	MAINTAINER("Ben Dooks, Vincent Sanders")
-	BOOT_MEM(0x10000000, 0x03000000, 0xe0000000)
-	BOOT_PARAMS(0x10000100)
-	FIXUP(fixup_riscpc)
-	MAPIO(riscstation_map_io)
-	INITIRQ(genarch_init_irq)
-MACHINE_END
-#endif
-
-#endif /* CONFIG_ARCH_RPC | CONFIG_ARCH_RISCSTATION */
 #ifdef CONFIG_ARCH_ARC
 MACHINE_START(ARCHIMEDES, "Acorn-Archimedes")
 	MAINTAINER("Dave Gilbert")

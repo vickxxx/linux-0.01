@@ -71,30 +71,6 @@ out:
 	return error;
 }
 
-/*
- * Install a file pointer in the fd array.  
- *
- * The VFS is full of places where we drop the files lock between
- * setting the open_fds bitmap and installing the file in the file
- * array.  At any such point, we are vulnerable to a dup2() race
- * installing a file in the array before us.  We need to detect this and
- * fput() the struct file we are about to overwrite in this case.
- *
- * It should never happen - if we allow dup2() do it, _really_ bad things
- * will follow.
- */
-
-void fd_install(unsigned int fd, struct file * file)
-{
-	struct files_struct *files = current->files;
-	
-	write_lock(&files->file_lock);
-	if (files->fd[fd])
-		BUG();
-	files->fd[fd] = file;
-	write_unlock(&files->file_lock);
-}
-
 int do_truncate(struct dentry *dentry, loff_t length)
 {
 	struct inode *inode = dentry->d_inode;
@@ -105,15 +81,11 @@ int do_truncate(struct dentry *dentry, loff_t length)
 	if (length < 0)
 		return -EINVAL;
 
-	down_write(&inode->i_alloc_sem);
 	down(&inode->i_sem);
 	newattrs.ia_size = length;
 	newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
-	/* Remove suid/sgid on truncate too */
-	remove_suid(inode);
 	error = notify_change(dentry, &newattrs);
 	up(&inode->i_sem);
-	up_write(&inode->i_alloc_sem);
 	return error;
 }
 
@@ -276,9 +248,6 @@ asmlinkage long sys_utime(char * filename, struct utimbuf * times)
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
-		error = -EPERM;
-		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
-			goto dput_and_out;
 		error = get_user(newattrs.ia_atime, &times->actime);
 		if (!error) 
 			error = get_user(newattrs.ia_mtime, &times->modtime);
@@ -287,9 +256,6 @@ asmlinkage long sys_utime(char * filename, struct utimbuf * times)
 
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		error = -EACCES;
-		if (IS_IMMUTABLE(inode))
-			goto dput_and_out;
 		if (current->fsuid != inode->i_uid &&
 		    (error = permission(inode,MAY_WRITE)) != 0)
 			goto dput_and_out;
@@ -328,9 +294,6 @@ asmlinkage long sys_utimes(char * filename, struct timeval * utimes)
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (utimes) {
 		struct timeval times[2];
-		error = -EPERM;
-		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
-			goto dput_and_out;
 		error = -EFAULT;
 		if (copy_from_user(&times, utimes, sizeof(times)))
 			goto dput_and_out;
@@ -338,12 +301,7 @@ asmlinkage long sys_utimes(char * filename, struct timeval * utimes)
 		newattrs.ia_mtime = times[1].tv_sec;
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		error = -EACCES;
-		if (IS_IMMUTABLE(inode))
-			goto dput_and_out;
-
-		if (current->fsuid != inode->i_uid &&
-		    (error = permission(inode,MAY_WRITE)) != 0)
+		if ((error = permission(inode,MAY_WRITE)) != 0)
 			goto dput_and_out;
 	}
 	error = notify_change(nd.dentry, &newattrs);
@@ -402,8 +360,17 @@ asmlinkage long sys_chdir(const char * filename)
 {
 	int error;
 	struct nameidata nd;
+	char *name;
 
-	error = __user_walk(filename,LOOKUP_POSITIVE|LOOKUP_FOLLOW|LOOKUP_DIRECTORY,&nd);
+	name = getname(filename);
+	error = PTR_ERR(name);
+	if (IS_ERR(name))
+		goto out;
+
+	error = 0;
+	if (path_init(name,LOOKUP_POSITIVE|LOOKUP_FOLLOW|LOOKUP_DIRECTORY,&nd))
+		error = path_walk(name, &nd);
+	putname(name);
 	if (error)
 		goto out;
 
@@ -453,9 +420,17 @@ asmlinkage long sys_chroot(const char * filename)
 {
 	int error;
 	struct nameidata nd;
+	char *name;
 
-	error = __user_walk(filename, LOOKUP_POSITIVE | LOOKUP_FOLLOW |
+	name = getname(filename);
+	error = PTR_ERR(name);
+	if (IS_ERR(name))
+		goto out;
+
+	path_init(name, LOOKUP_POSITIVE | LOOKUP_FOLLOW |
 		      LOOKUP_DIRECTORY | LOOKUP_NOALT, &nd);
+	error = path_walk(name, &nd);	
+	putname(name);
 	if (error)
 		goto out;
 
@@ -858,7 +833,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 		retval = filp->f_op->flush(filp);
 		unlock_kernel();
 	}
-	dnotify_flush(filp, id);
+	fcntl_dirnotify(0, filp, 0);
 	locks_remove_posix(filp, id);
 	fput(filp);
 	return retval;

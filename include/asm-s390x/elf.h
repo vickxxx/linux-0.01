@@ -36,7 +36,7 @@ typedef s390_regs elf_gregset_t;
 
 /* For SVR4/S390 the function pointer to be registered with `atexit` is
    passed in R14. */
-#define ELF_PLAT_INIT(_r, load_addr) \
+#define ELF_PLAT_INIT(_r) \
 	do { \
 	_r->gprs[14] = 0; \
 	current->thread.flags = 0; \
@@ -77,13 +77,7 @@ typedef s390_regs elf_gregset_t;
 #define ELF_PLATFORM (NULL)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex, ibcs2)			\
-do {							\
-	if (ibcs2)					\
-		set_personality(PER_SVR4);		\
-	else if (current->personality != PER_LINUX32)	\
-		set_personality(PER_LINUX);		\
-} while (0)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif

@@ -74,11 +74,9 @@
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <linux/ethtool.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
-#include <asm/uaccess.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -386,7 +384,6 @@ static int set_card_type(dev_link_t *link, const void *s);
 static int do_config(struct net_device *dev, struct ifmap *map);
 static int do_open(struct net_device *dev);
 static int do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static struct ethtool_ops netdev_ethtool_ops;
 static void hardreset(struct net_device *dev);
 static void do_reset(struct net_device *dev, int full);
 static int init_mii(struct net_device *dev);
@@ -651,7 +648,6 @@ xirc2ps_attach(void)
     dev->set_config = &do_config;
     dev->get_stats = &do_get_stats;
     dev->do_ioctl = &do_ioctl;
-    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     dev->set_multicast_list = &set_multicast_list;
     ether_setup(dev);
     dev->open = &do_open;
@@ -1550,6 +1546,7 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
     DEBUG(1, "do_start_xmit(skb=%p, dev=%p) len=%u\n",
 	  skb, dev, pktlen);
 
+    netif_stop_queue(dev);
 
     /* adjust the packet length to min. required
      * and hope that the buffer is large enough
@@ -1559,14 +1556,8 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
      * pad this in his buffer with random bytes
      */
     if (pktlen < ETH_ZLEN)
-    {
-        skb = skb_padto(skb, ETH_ZLEN);
-        if(skb == NULL)
-        	return 0;
 	pktlen = ETH_ZLEN;
-    }
 
-    netif_stop_queue(dev);
     SelectPage(0);
     PutWord(XIRCREG0_TRS, (u_short)pktlen+2);
     freespace = GetWord(XIRCREG0_TSO);
@@ -1724,16 +1715,6 @@ do_open(struct net_device *dev)
     return 0;
 }
 
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, "xirc2ps_cs");
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-};
-
 static int
 do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
@@ -1749,16 +1730,13 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return -EOPNOTSUPP;
 
     switch(cmd) {
-      case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
-      case SIOCDEVPRIVATE:
+      case SIOCDEVPRIVATE:	/* Get the address of the PHY in use. */
 	data[0] = 0;		/* we have only this address */
 	/* fall trough */
-      case SIOCGMIIREG:		/* Read the specified MII register. */
-      case SIOCDEVPRIVATE+1:
+      case SIOCDEVPRIVATE+1:	/* Read the specified MII register. */
 	data[3] = mii_rd(ioaddr, data[0] & 0x1f, data[1] & 0x1f);
 	break;
-      case SIOCSMIIREG:		/* Write the specified MII register */
-      case SIOCDEVPRIVATE+2:
+      case SIOCDEVPRIVATE+2:	/* Write the specified MII register */
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mii_wr(ioaddr, data[0] & 0x1f, data[1] & 0x1f, data[2], 16);
@@ -2118,7 +2096,7 @@ static int __init setup_xirc2ps_cs(char *str)
 	MAYBE_SET(irq_list[1], 7);
 	MAYBE_SET(irq_list[2], 8);
 	MAYBE_SET(irq_list[3], 9);
-#undef  MAYBE_SET
+#undef  MAYBE_SET(X,Y)
 
 	return 0;
 }

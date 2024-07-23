@@ -119,7 +119,6 @@ void __init pcibios_init(void)
 {
 	unsigned int sec_bus = li_pcib_read16(LI_PCI_BUSNUM) & 0xff;
 
-	pcibios_set_cacheline_size();
 	printk("PCI: Probing PCI hardware on host buses 00 and %02x\n", sec_bus);
 	pci_scan_bus(0, &visws_pci_ops, NULL);
 	pci_scan_bus(sec_bus, &visws_pci_ops, NULL);
@@ -132,9 +131,9 @@ char * __init pcibios_setup(char *str)
 	return str;
 }
 
-int pcibios_enable_device(struct pci_dev *dev, int mask)
+int pcibios_enable_device(struct pci_dev *dev)
 {
-	return pcibios_enable_resources(dev, mask);
+	return pcibios_enable_resources(dev);
 }
 
 void __init pcibios_penalize_isa_irq(irq)

@@ -1,3 +1,9 @@
+/*
+ * gus.h
+ *
+ * Copyright:	Christoph Hellwig <chhellwig@gmx.net>
+ *
+ */
 
 #include "ad1848.h"
 

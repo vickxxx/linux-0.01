@@ -29,6 +29,7 @@
  *    Gareth Hughes <gareth@valinux.com>
  */
 
+#define __NO_VERSION__
 #include "drmP.h"
 
 static int DRM(hash_magic)(drm_magic_t magic)
@@ -63,7 +64,6 @@ int DRM(add_magic)(drm_device_t *dev, drm_file_t *priv, drm_magic_t magic)
 	hash	     = DRM(hash_magic)(magic);
 	entry	     = DRM(alloc)(sizeof(*entry), DRM_MEM_MAGIC);
 	if (!entry) return -ENOMEM;
-	memset(entry, 0, sizeof(*entry));
 	entry->magic = magic;
 	entry->priv  = priv;
 	entry->next  = NULL;

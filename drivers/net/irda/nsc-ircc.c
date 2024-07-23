@@ -6,8 +6,8 @@
  * Status:        Stable.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Sat Nov  7 21:43:15 1998
- * Modified at:   Sat Aug 14 04:14:57 2004
- * Modified by:   Maik Broemme <mbroemme@plusserver.de>
+ * Modified at:   Wed Mar  1 11:29:34 2000
+ * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
  *     Copyright (c) 1998-2000 Dag Brattli <dagb@cs.uit.no>
  *     Copyright (c) 1998 Lichen Wang, <lwang@actisys.com>
@@ -83,28 +83,16 @@ static unsigned int dma[] = { 0, 0, 0, 0, 0 };
 
 static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info);
-static int nsc_ircc_probe_39x(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_init_338(nsc_chip_t *chip, chipio_t *info);
-static int nsc_ircc_init_39x(nsc_chip_t *chip, chipio_t *info);
 
 /* These are the known NSC chips */
 static nsc_chip_t chips[] = {
-/*  Name, {cfg registers}, chip id index reg, chip id expected value, revision mask */
 	{ "PC87108", { 0x150, 0x398, 0xea }, 0x05, 0x10, 0xf0, 
 	  nsc_ircc_probe_108, nsc_ircc_init_108 },
 	{ "PC87338", { 0x398, 0x15c, 0x2e }, 0x08, 0xb0, 0xf8, 
 	  nsc_ircc_probe_338, nsc_ircc_init_338 },
-	/* Contributed by Jan Frey - IBM A30/A31 */
-	{ "PC8739x", { 0x2e, 0x4e, 0x0 }, 0x20, 0xea, 0xff, 
-	  nsc_ircc_probe_39x, nsc_ircc_init_39x },
 	{ NULL }
-#if 0
-	/* Probably bogus, "PC8739x" should be the real thing. Jean II */
-	/* Contributed by Kevin Thayer - OmniBook 6100 */
-	{ "PC87338?", { 0x2e, 0x15c, 0x398 }, 0x08, 0x00, 0xf8, 
-	  nsc_ircc_probe_338, nsc_ircc_init_338 },
-#endif
 };
 
 /* Max 4 instances for now */
@@ -173,8 +161,8 @@ int __init nsc_ircc_init(void)
 
 	/* Probe for all the NSC chipsets we know about */
 	for (chip=chips; chip->name ; chip++) {
-		IRDA_DEBUG(2, "%s(), Probing for %s ...\n", 
-			__FUNCTION__, chip->name);
+		IRDA_DEBUG(2, __FUNCTION__"(), Probing for %s ...\n", 
+			   chip->name);
 		
 		/* Try all config registers for this chip */
 		for (cfg=0; cfg<3; cfg++) {
@@ -191,8 +179,8 @@ int __init nsc_ircc_init(void)
 			/* Read index register */
 			reg = inb(cfg_base);
 			if (reg == 0xff) {
-				IRDA_DEBUG(2, "%s() no chip at 0x%03x\n", 
-					__FUNCTION__, cfg_base);
+				IRDA_DEBUG(2, __FUNCTION__ 
+					   "() no chip at 0x%03x\n", cfg_base);
 				continue;
 			}
 			
@@ -200,8 +188,9 @@ int __init nsc_ircc_init(void)
 			outb(chip->cid_index, cfg_base);
 			id = inb(cfg_base+1);
 			if ((id & chip->cid_mask) == chip->cid_value) {
-				IRDA_DEBUG(2, "%s() Found %s chip, revision=%d\n",
-					__FUNCTION__, chip->name, id & ~chip->cid_mask);
+				IRDA_DEBUG(2, __FUNCTION__ 
+					   "() Found %s chip, revision=%d\n",
+					   chip->name, id & ~chip->cid_mask);
 				/* 
 				 * If the user supplies the base address, then
 				 * we init the chip, if not we probe the values
@@ -216,7 +205,8 @@ int __init nsc_ircc_init(void)
 					ret = 0;
 				i++;
 			} else {
-				IRDA_DEBUG(2, "%s(), Wrong chip id=0x%02x\n", __FUNCTION__, id);
+				IRDA_DEBUG(2, __FUNCTION__ 
+					   "(), Wrong chip id=0x%02x\n", id);
 			}
 		} 
 		
@@ -256,10 +246,10 @@ static int nsc_ircc_open(int i, chipio_t *info)
 	struct net_device *dev;
 	struct nsc_ircc_cb *self;
         struct pm_dev *pmdev;
-	void *ret;
+	int ret;
 	int err;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	MESSAGE("%s, Found chip at base=0x%03x\n", driver_name,
 		info->cfg_base);
@@ -272,8 +262,8 @@ static int nsc_ircc_open(int i, chipio_t *info)
 	/* Allocate new instance of the driver */
 	self = kmalloc(sizeof(struct nsc_ircc_cb), GFP_KERNEL);
 	if (self == NULL) {
-		ERROR("%s(), can't allocate memory for "
-		       "control block!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), can't allocate memory for "
+		       "control block!\n");
 		return -ENOMEM;
 	}
 	memset(self, 0, sizeof(struct nsc_ircc_cb));
@@ -292,14 +282,15 @@ static int nsc_ircc_open(int i, chipio_t *info)
         self->io.fifo_size = 32;
 	
 	/* Reserve the ioports that we need */
-	ret = request_region(self->io.fir_base, self->io.fir_ext, driver_name);
-	if (!ret) {
-		WARNING("%s(), can't get iobase of 0x%03x\n",
-			__FUNCTION__, self->io.fir_base);
+	ret = check_region(self->io.fir_base, self->io.fir_ext);
+	if (ret < 0) { 
+		WARNING(__FUNCTION__ "(), can't get iobase of 0x%03x\n",
+			self->io.fir_base);
 		dev_self[i] = NULL;
 		kfree(self);
 		return -ENODEV;
 	}
+	request_region(self->io.fir_base, self->io.fir_ext, driver_name);
 
 	/* Initialize QoS for this device */
 	irda_init_max_qos_capabilies(&self->qos);
@@ -345,7 +336,7 @@ static int nsc_ircc_open(int i, chipio_t *info)
 	self->tx_fifo.tail = self->tx_buff.head;
 
 	if (!(dev = dev_alloc("irda%d", &err))) {
-		ERROR("%s(), dev_alloc() failed!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), dev_alloc() failed!\n");
 		return -ENOMEM;
 	}
 
@@ -364,27 +355,20 @@ static int nsc_ircc_open(int i, chipio_t *info)
 	err = register_netdevice(dev);
 	rtnl_unlock();
 	if (err) {
-		ERROR("%s(), register_netdev() failed!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), register_netdev() failed!\n");
 		return -1;
 	}
 	MESSAGE("IrDA: Registered device %s\n", dev->name);
 
-	/* Check if user has supplied the dongle id and if it is in the range of available ids or not. */
+	/* Check if user has supplied the dongle id or not */
 	if (!dongle_id) {
 		dongle_id = nsc_ircc_read_dongle_id(self->io.fir_base);
 		
 		MESSAGE("%s, Found dongle: %s\n", driver_name,
 			dongle_types[dongle_id]);
 	} else {
-		if (dongle_id < sizeof(dongle_types) / sizeof(dongle_types[0])) {
-			MESSAGE("%s, Using dongle: %s\n", driver_name,
-				dongle_types[dongle_id]);
-		} else {
-			MESSAGE("%s, dongle id %i out of range, start autodetect.\n", driver_name, dongle_id);
-			dongle_id = nsc_ircc_read_dongle_id(self->io.fir_base);
-			MESSAGE("%s, Found dongle: %s\n", driver_name,
-				dongle_types[dongle_id]);
-		}
+		MESSAGE("%s, Using dongle: %s\n", driver_name,
+			dongle_types[dongle_id]);
 	}
 	
 	self->io.dongle_id = dongle_id;
@@ -408,7 +392,7 @@ static int nsc_ircc_close(struct nsc_ircc_cb *self)
 {
 	int iobase;
 
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	ASSERT(self != NULL, return -1;);
 
@@ -422,8 +406,8 @@ static int nsc_ircc_close(struct nsc_ircc_cb *self)
 	}
 
 	/* Release the PORT that this driver is using */
-	IRDA_DEBUG(4, "%s(), Releasing Region %03x\n", 
-		__FUNCTION__, self->io.fir_base);
+	IRDA_DEBUG(4, __FUNCTION__ "(), Releasing Region %03x\n", 
+		   self->io.fir_base);
 	release_region(self->io.fir_base, self->io.fir_ext);
 
 	if (self->tx_buff.head)
@@ -454,13 +438,13 @@ static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info)
 	outb(0x00, cfg_base+1); /* Disable device */
 	
 	/* Base Address and Interrupt Control Register (BAIC) */
-	outb(CFG_108_BAIC, cfg_base);
+	outb(0, cfg_base);
 	switch (info->fir_base) {
 	case 0x3e8: outb(0x14, cfg_base+1); break;
 	case 0x2e8: outb(0x15, cfg_base+1); break;
 	case 0x3f8: outb(0x16, cfg_base+1); break;
 	case 0x2f8: outb(0x17, cfg_base+1); break;
-	default: ERROR("%s(), invalid base_address", __FUNCTION__);
+	default: ERROR(__FUNCTION__ "(), invalid base_address");
 	}
 	
 	/* Control Signal Routing Register (CSRT) */
@@ -472,18 +456,18 @@ static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info)
 	case 9:  temp = 0x05; break;
 	case 11: temp = 0x06; break;
 	case 15: temp = 0x07; break;
-	default: ERROR("%s(), invalid irq", __FUNCTION__);
+	default: ERROR(__FUNCTION__ "(), invalid irq");
 	}
-	outb(CFG_108_CSRT, cfg_base);
+	outb(1, cfg_base);
 	
 	switch (info->dma) {	
 	case 0: outb(0x08+temp, cfg_base+1); break;
 	case 1: outb(0x10+temp, cfg_base+1); break;
 	case 3: outb(0x18+temp, cfg_base+1); break;
-	default: ERROR("%s(), invalid dma", __FUNCTION__);
+	default: ERROR(__FUNCTION__ "(), invalid dma");
 	}
 	
-	outb(CFG_108_MCTL, cfg_base);      /* Mode Control Register (MCTL) */
+	outb(2, cfg_base);      /* Mode Control Register (MCTL) */
 	outb(0x03, cfg_base+1); /* Enable device */
 
 	return 0;
@@ -501,7 +485,7 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 	int reg;
 
 	/* Read address and interrupt control register (BAIC) */
-	outb(CFG_108_BAIC, cfg_base);
+	outb(CFG_BAIC, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	switch (reg & 0x03) {
@@ -519,11 +503,11 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 		break;
 	}
 	info->sir_base = info->fir_base;
-	IRDA_DEBUG(2, "%s(), probing fir_base=0x%03x\n", 
-		__FUNCTION__, info->fir_base);
+	IRDA_DEBUG(2, __FUNCTION__ "(), probing fir_base=0x%03x\n", 
+		   info->fir_base);
 
 	/* Read control signals routing register (CSRT) */
-	outb(CFG_108_CSRT, cfg_base);
+	outb(CFG_CSRT, cfg_base);
 	reg = inb(cfg_base+1);
 
 	switch (reg & 0x07) {
@@ -552,7 +536,7 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 		info->irq = 15;
 		break;
 	}
-	IRDA_DEBUG(2, "%s(), probing irq=%d\n", __FUNCTION__, info->irq);
+	IRDA_DEBUG(2, __FUNCTION__ "(), probing irq=%d\n", info->irq);
 
 	/* Currently we only read Rx DMA but it will also be used for Tx */
 	switch ((reg >> 3) & 0x03) {
@@ -569,10 +553,10 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 		info->dma = 3;
 		break;
 	}
-	IRDA_DEBUG(2, "%s(), probing dma=%d\n", __FUNCTION__, info->dma);
+	IRDA_DEBUG(2, __FUNCTION__ "(), probing dma=%d\n", info->dma);
 
 	/* Read mode control register (MCTL) */
-	outb(CFG_108_MCTL, cfg_base);
+	outb(CFG_MCTL, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->enabled = reg & 0x01;
@@ -609,13 +593,13 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 	int pnp;
 
 	/* Read funtion enable register (FER) */
-	outb(CFG_338_FER, cfg_base);
+	outb(CFG_FER, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->enabled = (reg >> 2) & 0x01;
 
 	/* Check if we are in Legacy or PnP mode */
-	outb(CFG_338_PNP0, cfg_base);
+	outb(CFG_PNP0, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	pnp = (reg >> 3) & 0x01;
@@ -630,7 +614,7 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 		info->fir_base = reg;
 	} else {
 		/* Read function address register (FAR) */
-		outb(CFG_338_FAR, cfg_base);
+		outb(CFG_FAR, cfg_base);
 		reg = inb(cfg_base+1);
 		
 		switch ((reg >> 4) & 0x03) {
@@ -680,146 +664,22 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 	info->sir_base = info->fir_base;
 
 	/* Read PnP register 1 (PNP1) */
-	outb(CFG_338_PNP1, cfg_base);
+	outb(CFG_PNP1, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	info->irq = reg >> 4;
 	
 	/* Read PnP register 3 (PNP3) */
-	outb(CFG_338_PNP3, cfg_base);
+	outb(CFG_PNP3, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->dma = (reg & 0x07) - 1;
 
 	/* Read power and test register (PTR) */
-	outb(CFG_338_PTR, cfg_base);
+	outb(CFG_PTR, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->suspended = reg & 0x01;
-
-	return 0;
-}
-
-
-/*
- * Function nsc_ircc_init_39x (chip, info)
- *
- *    Now that we know it's a '39x (see probe below), we need to
- *    configure it so we can use it.
- *
- * The NSC '338 chip is a Super I/O chip with a "bank" architecture,
- * the configuration of the different functionality (serial, parallel,
- * floppy...) are each in a different bank (Logical Device Number).
- * The base address, irq and dma configuration registers are common
- * to all functionalities (index 0x30 to 0x7F).
- * There is only one configuration register specific to the
- * serial port, CFG_39X_SPC.
- * JeanII
- *
- * Note : this code was written by Jan Frey <janfrey@web.de>
- */
-static int nsc_ircc_init_39x(nsc_chip_t *chip, chipio_t *info) 
-{
-	int cfg_base = info->cfg_base;
-	int enabled;
-
-	/* User is shure about his config... accept it. */
-	IRDA_DEBUG(2, "%s(): nsc_ircc_init_39x (user settings): "
-		   "io=0x%04x, irq=%d, dma=%d\n", 
-		   __FUNCTION__, info->fir_base, info->irq, info->dma);
-
-	/* Access bank for SP2 */
-	outb(CFG_39X_LDN, cfg_base);
-	outb(0x02, cfg_base+1);
-
-	/* Configure SP2 */
-
-	/* We want to enable the device if not enabled */
-	outb(CFG_39X_ACT, cfg_base);
-	enabled = inb(cfg_base+1) & 0x01;
-	
-	if (!enabled) {
-		/* Enable the device */
-		outb(CFG_39X_SIOCF1, cfg_base);
-		outb(0x01, cfg_base+1);
-		/* May want to update info->enabled. Jean II */
-	}
-
-	/* Enable UART bank switching (bit 7) ; Sets the chip to normal
-	 * power mode (wake up from sleep mode) (bit 1) */
-	outb(CFG_39X_SPC, cfg_base);
-	outb(0x82, cfg_base+1);
-
-	return 0;
-}
-
-/*
- * Function nsc_ircc_probe_39x (chip, info)
- *
- *    Test if we really have a '39x chip at the given address
- *
- * Note : this code was written by Jan Frey <janfrey@web.de>
- */
-static int nsc_ircc_probe_39x(nsc_chip_t *chip, chipio_t *info) 
-{
-	int cfg_base = info->cfg_base;
-	int reg1, reg2, irq, irqt, dma1, dma2;
-	int enabled, susp;
-
-	IRDA_DEBUG(2, "%s(), nsc_ircc_probe_39x, base=%d\n",
-		   __FUNCTION__, cfg_base);
-
-	/* This function should be executed with irq off to avoid
-	 * another driver messing with the Super I/O bank - Jean II */
-
-	/* Access bank for SP2 */
-	outb(CFG_39X_LDN, cfg_base);
-	outb(0x02, cfg_base+1);
-
-	/* Read infos about SP2 ; store in info struct */
-	outb(CFG_39X_BASEH, cfg_base);
-	reg1 = inb(cfg_base+1);
-	outb(CFG_39X_BASEL, cfg_base);
-	reg2 = inb(cfg_base+1);
-	info->fir_base = (reg1 << 8) | reg2;
-
-	outb(CFG_39X_IRQNUM, cfg_base);
-	irq = inb(cfg_base+1);
-	outb(CFG_39X_IRQSEL, cfg_base);
-	irqt = inb(cfg_base+1);
-	info->irq = irq;
-
-	outb(CFG_39X_DMA0, cfg_base);
-	dma1 = inb(cfg_base+1);
-	outb(CFG_39X_DMA1, cfg_base);
-	dma2 = inb(cfg_base+1);
-	info->dma = dma1 -1;
-
-	outb(CFG_39X_ACT, cfg_base);
-	info->enabled = enabled = inb(cfg_base+1) & 0x01;
-	
-	outb(CFG_39X_SPC, cfg_base);
-	susp = 1 - ((inb(cfg_base+1) & 0x02) >> 1);
-
-	IRDA_DEBUG(2, "%s(): io=0x%02x%02x, irq=%d (type %d), rxdma=%d, txdma=%d, enabled=%d (suspended=%d)\n", __FUNCTION__, reg1,reg2,irq,irqt,dma1,dma2,enabled,susp);
-
-	/* Configure SP2 */
-
-	/* We want to enable the device if not enabled */
-	outb(CFG_39X_ACT, cfg_base);
-	enabled = inb(cfg_base+1) & 0x01;
-	
-	if (!enabled) {
-		/* Enable the device */
-		outb(CFG_39X_SIOCF1, cfg_base);
-		outb(0x01, cfg_base+1);
-		/* May want to update info->enabled. Jean II */
-	}
-
-	/* Enable UART bank switching (bit 7) ; Sets the chip to normal
-	 * power mode (wake up from sleep mode) (bit 1) */
-	outb(CFG_39X_SPC, cfg_base);
-	outb(0x82, cfg_base+1);
 
 	return 0;
 }
@@ -838,9 +698,6 @@ static int nsc_ircc_setup(chipio_t *info)
 	/* Read the Module ID */
 	switch_bank(iobase, BANK3);
 	version = inb(iobase+MID);
-
-	IRDA_DEBUG(2, "%s() Driver %s Found chip version %02x\n", __FUNCTION__,
-		   driver_name, version);
 
 	/* Should be 0x2? */
 	if (0x20 != (version & 0xf0)) {
@@ -942,39 +799,39 @@ static void nsc_ircc_init_dongle_interface (int iobase, int dongle_id)
 	switch (dongle_id) {
 	case 0x00: /* same as */
 	case 0x01: /* Differential serial interface */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x02: /* same as */
 	case 0x03: /* Reserved */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x04: /* Sharp RY5HD01 */
 		break;
 	case 0x05: /* Reserved, but this is what the Thinkpad reports */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x06: /* Single-ended serial interface */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x07: /* Consumer-IR only */
-		IRDA_DEBUG(0, "%s(), %s is not for IrDA mode\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s is not for IrDA mode\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x08: /* HP HSDL-2300, HP HSDL-3600/HSDL-3610 */
-		IRDA_DEBUG(0, "%s(), %s\n",
-			__FUNCTION__, dongle_types[dongle_id]);
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s\n",
+			   dongle_types[dongle_id]);
 		break;
 	case 0x09: /* IBM31T1100 or Temic TFDS6000/TFDS6500 */
 		outb(0x28, iobase+7); /* Set irsl[0-2] as output */
 		break;
 	case 0x0A: /* same as */
 	case 0x0B: /* Reserved */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x0C: /* same as */
 	case 0x0D: /* HP HSDL-1100/HSDL-2100 */
@@ -988,15 +845,15 @@ static void nsc_ircc_init_dongle_interface (int iobase, int dongle_id)
 		outb(0x28, iobase+7); /* Set irsl[0-2] as output */
 		break;
 	case 0x0F: /* No dongle connected */
-		IRDA_DEBUG(0, "%s(), %s\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s\n",
+			   dongle_types[dongle_id]); 
 
 		switch_bank(iobase, BANK0);
 		outb(0x62, iobase+MCR);
 		break;
 	default: 
-		IRDA_DEBUG(0, "%s(), invalid dongle_id %#x", 
-			__FUNCTION__, dongle_id);
+		IRDA_DEBUG(0, __FUNCTION__ "(), invalid dongle_id %#x", 
+			   dongle_id);
 	}
 	
 	/* IRCFG1: IRSL1 and 2 are set to IrDA mode */
@@ -1028,31 +885,31 @@ static void nsc_ircc_change_dongle_speed(int iobase, int speed, int dongle_id)
 	switch (dongle_id) {
 	case 0x00: /* same as */
 	case 0x01: /* Differential serial interface */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x02: /* same as */
 	case 0x03: /* Reserved */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x04: /* Sharp RY5HD01 */
 		break;
 	case 0x05: /* Reserved */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x06: /* Single-ended serial interface */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x07: /* Consumer-IR only */
-		IRDA_DEBUG(0, "%s(), %s is not for IrDA mode\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s is not for IrDA mode\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x08: /* HP HSDL-2300, HP HSDL-3600/HSDL-3610 */
-		IRDA_DEBUG(0, "%s(), %s\n", 
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s\n", 
+			   dongle_types[dongle_id]); 
 		outb(0x00, iobase+4);
 		if (speed > 115200)
 			outb(0x01, iobase+4);
@@ -1071,8 +928,8 @@ static void nsc_ircc_change_dongle_speed(int iobase, int speed, int dongle_id)
 		break;
 	case 0x0A: /* same as */
 	case 0x0B: /* Reserved */
-		IRDA_DEBUG(0, "%s(), %s not defined by irda yet\n",
-			__FUNCTION__, dongle_types[dongle_id]); 
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
+			   dongle_types[dongle_id]); 
 		break;
 	case 0x0C: /* same as */
 	case 0x0D: /* HP HSDL-1100/HSDL-2100 */
@@ -1080,14 +937,14 @@ static void nsc_ircc_change_dongle_speed(int iobase, int speed, int dongle_id)
 	case 0x0E: /* Supports SIR Mode only */
 		break;
 	case 0x0F: /* No dongle connected */
-		IRDA_DEBUG(0, "%s(), %s is not for IrDA mode\n",
-			__FUNCTION__, dongle_types[dongle_id]);
+		IRDA_DEBUG(0, __FUNCTION__ "(), %s is not for IrDA mode\n",
+			   dongle_types[dongle_id]);
 
 		switch_bank(iobase, BANK0); 
 		outb(0x62, iobase+MCR);
 		break;
 	default: 
-		IRDA_DEBUG(0, "%s(), invalid data_rate\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), invalid data_rate\n");
 	}
 	/* Restore bank register */
 	outb(bank, iobase+BSR);
@@ -1106,7 +963,7 @@ static void nsc_ircc_change_speed(struct nsc_ircc_cb *self, __u32 speed)
 	int iobase; 
 	__u8 bank;
 
-	IRDA_DEBUG(2, "%s(), speed=%d\n", __FUNCTION__, speed);
+	IRDA_DEBUG(2, __FUNCTION__ "(), speed=%d\n", speed);
 
 	ASSERT(self != NULL, return;);
 
@@ -1139,20 +996,20 @@ static void nsc_ircc_change_speed(struct nsc_ircc_cb *self, __u32 speed)
 		outb(inb(iobase+4) | 0x04, iobase+4);
 	       
 		mcr = MCR_MIR;
-		IRDA_DEBUG(0, "%s(), handling baud of 576000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 576000\n");
 		break;
 	case 1152000:
 		mcr = MCR_MIR;
-		IRDA_DEBUG(0, "%s(), handling baud of 1152000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 1152000\n");
 		break;
 	case 4000000:
 		mcr = MCR_FIR;
-		IRDA_DEBUG(0, "%s(), handling baud of 4000000\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 4000000\n");
 		break;
 	default:
 		mcr = MCR_FIR;
-		IRDA_DEBUG(0, "%s(), unknown baud rate of %d\n", 
-			__FUNCTION__, speed);
+		IRDA_DEBUG(0, __FUNCTION__ "(), unknown baud rate of %d\n", 
+			   speed);
 		break;
 	}
 
@@ -1307,7 +1164,7 @@ static int nsc_ircc_hard_xmit_fir(struct sk_buff *skb, struct net_device *dev)
 		mtt = irda_get_mtt(skb);
 		if (mtt) {
 			/* Check how much time we have used already */
-			do_gettimeofday(&self->now);
+			get_fast_time(&self->now);
 			diff = self->now.tv_usec - self->stamp.tv_usec;
 			if (diff < 0) 
 				diff += 1000000;
@@ -1415,14 +1272,15 @@ static int nsc_ircc_pio_write(int iobase, __u8 *buf, int len, int fifo_size)
 	int actual = 0;
 	__u8 bank;
 	
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	/* Save current bank */
 	bank = inb(iobase+BSR);
 
 	switch_bank(iobase, BANK0);
 	if (!(inb_p(iobase+LSR) & LSR_TXEMP)) {
-		IRDA_DEBUG(4, "%s(), warning, FIFO not empty yet!\n", __FUNCTION__);
+		IRDA_DEBUG(4, __FUNCTION__ 
+			   "(), warning, FIFO not empty yet!\n");
 
 		/* FIFO may still be filled to the Tx interrupt threshold */
 		fifo_size -= 17;
@@ -1434,8 +1292,8 @@ static int nsc_ircc_pio_write(int iobase, __u8 *buf, int len, int fifo_size)
 		outb(buf[actual++], iobase+TXD);
 	}
         
-	IRDA_DEBUG(4, "%s(), fifo_size %d ; %d sent of %d\n", 
-		__FUNCTION__, fifo_size, actual, len);
+	IRDA_DEBUG(4, __FUNCTION__ "(), fifo_size %d ; %d sent of %d\n", 
+		   fifo_size, actual, len);
 	
 	/* Restore bank */
 	outb(bank, iobase+BSR);
@@ -1456,7 +1314,7 @@ static int nsc_ircc_dma_xmit_complete(struct nsc_ircc_cb *self)
 	__u8 bank;
 	int ret = TRUE;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	iobase = self->io.fir_base;
 
@@ -1592,7 +1450,7 @@ static int nsc_ircc_dma_receive_complete(struct nsc_ircc_cb *self, int iobase)
 		len = inb(iobase+RFLFL) | ((inb(iobase+RFLFH) & 0x1f) << 8);
 
 		if (st_fifo->tail >= MAX_RX_WINDOW) {
-			IRDA_DEBUG(0, "%s(), window is full!\n", __FUNCTION__);
+			IRDA_DEBUG(0, __FUNCTION__ "(), window is full!\n");
 			continue;
 		}
 			
@@ -1678,12 +1536,12 @@ static int nsc_ircc_dma_receive_complete(struct nsc_ircc_cb *self, int iobase)
 			 * reduce the min turn time a bit since we will know
 			 * how much time we have used for protocol processing
 			 */
-			do_gettimeofday(&self->stamp);
+			get_fast_time(&self->stamp);
 
 			skb = dev_alloc_skb(len+1);
 			if (skb == NULL)  {
-				WARNING("%s(), memory squeeze, "
-					"dropping frame.\n", __FUNCTION__);
+				WARNING(__FUNCTION__ "(), memory squeeze, "
+					"dropping frame.\n");
 				self->stats.rx_dropped++;
 
 				/* Restore bank register */
@@ -1779,7 +1637,7 @@ static void nsc_ircc_sir_interrupt(struct nsc_ircc_cb *self, int eir)
 	if (eir & EIR_TXEMP_EV) {
 		/* Check if we need to change the speed? */
 		if (self->new_speed) {
-			IRDA_DEBUG(2, "%s(), Changing speed!\n", __FUNCTION__);
+			IRDA_DEBUG(2, __FUNCTION__ "(), Changing speed!\n");
 			nsc_ircc_change_speed(self, self->new_speed);
 			self->new_speed = 0;
 
@@ -1958,7 +1816,7 @@ static int nsc_ircc_is_receiving(struct nsc_ircc_cb *self)
  */
 static int nsc_ircc_net_init(struct net_device *dev)
 {
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	/* Setup to be a normal IrDA network device driver */
 	irda_device_setup(dev);
@@ -1981,7 +1839,7 @@ static int nsc_ircc_net_open(struct net_device *dev)
 	char hwname[32];
 	__u8 bank;
 	
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 	
 	ASSERT(dev != NULL, return -1;);
 	self = (struct nsc_ircc_cb *) dev->priv;
@@ -2045,7 +1903,7 @@ static int nsc_ircc_net_close(struct net_device *dev)
 	int iobase;
 	__u8 bank;
 
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 	
 	ASSERT(dev != NULL, return -1;);
 
@@ -2101,7 +1959,7 @@ static int nsc_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 	ASSERT(self != NULL, return -1;);
 
-	IRDA_DEBUG(2, "%s(), %s, (cmd=0x%X)\n", __FUNCTION__, dev->name, cmd);
+	IRDA_DEBUG(2, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
 	
 	/* Disable interrupts & save flags */
 	save_flags(flags);

@@ -124,7 +124,7 @@ void show_regs(struct pt_regs * regs)
 /*
  * Create a kernel thread
  */
-int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	int pid;
 	mm_segment_t fs;
@@ -136,7 +136,6 @@ int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	register long retval __asm__ ("d0");
 	register long clone_arg __asm__ ("d1") = flags | CLONE_VM;
 
-	retval = __NR_clone;
 	__asm__ __volatile__
 	  ("clrl %%d2\n\t"
 	   "trap #0\n\t"		/* Linux/m68k system call */
@@ -146,15 +145,14 @@ int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	   "movel %3,%%sp@-\n\t"	/* push argument */
 	   "jsr %4@\n\t"		/* call fn */
 	   "movel %0,%%d1\n\t"		/* pass exit value */
-	   "movel %2,%%d0\n\t"		/* exit */
+	   "movel %2,%0\n\t"		/* exit */
 	   "trap #0\n"
 	   "1:"
-	   : "+d" (retval)
-	   : "i" (__NR_clone), "i" (__NR_exit),
+	   : "=d" (retval)
+	   : "0" (__NR_clone), "i" (__NR_exit),
 	     "r" (arg), "a" (fn), "d" (clone_arg), "r" (current),
 	     "i" (-KTHREAD_SIZE)
-	   : "d2");
-
+	   : "d0", "d2");
 	pid = retval;
 	}
 

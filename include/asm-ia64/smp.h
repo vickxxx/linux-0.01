@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
- * Copyright (C) 2001-2003 Hewlett-Packard Co
+ * Copyright (C) 2001 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #ifndef _ASM_IA64_SMP_H
@@ -48,8 +48,6 @@ extern volatile int ia64_cpu_to_sapicid[];
 
 extern unsigned long ap_wakeup_vector;
 
-#define cpu_online(cpu)		(cpu_online_map & (1UL << (cpu)))
-
 /*
  * Function to map hard smp processor id to logical id.  Slow, so
  * don't use this in performance-critical code.
@@ -60,7 +58,7 @@ cpu_logical_id (int cpuid)
 	int i;
 
 	for (i = 0; i < smp_num_cpus; ++i)
-		if (cpu_physical_id(i) == cpuid)
+		if (cpu_physical_id(i) == (__u32) cpuid)
 			break;
 	return i;
 }
@@ -124,7 +122,6 @@ extern void smp_do_timer (struct pt_regs *regs);
 extern int smp_call_function_single (int cpuid, void (*func) (void *info), void *info,
 				     int retry, int wait);
 
-extern void smp_build_cpu_map(void);
 
 #endif /* CONFIG_SMP */
 #endif /* _ASM_IA64_SMP_H */

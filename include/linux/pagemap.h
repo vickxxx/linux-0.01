@@ -29,7 +29,7 @@
 #define PAGE_CACHE_ALIGN(addr)	(((addr)+PAGE_CACHE_SIZE-1)&PAGE_CACHE_MASK)
 
 #define page_cache_get(x)	get_page(x)
-#define page_cache_release(x)	__free_page(x)
+extern void FASTCALL(page_cache_release(struct page *));
 
 static inline struct page *page_cache_alloc(struct address_space *x)
 {
@@ -45,7 +45,7 @@ extern unsigned int page_hash_bits;
 #define PAGE_HASH_BITS (page_hash_bits)
 #define PAGE_HASH_SIZE (1 << PAGE_HASH_BITS)
 
-extern unsigned long page_cache_size; /* # of pages currently in the hash table */
+extern atomic_t page_cache_size; /* # of pages currently in the hash table */
 extern struct page **page_hash_table;
 
 extern void page_cache_init(unsigned long);
@@ -97,17 +97,7 @@ static inline void wait_on_page(struct page * page)
 		___wait_on_page(page);
 }
 
-extern void FASTCALL(wakeup_page_waiters(struct page * page));
-
-/*
- * Returns locked page at given index in given cache, creating it if needed.
- */
-static inline struct page *grab_cache_page(struct address_space *mapping, unsigned long index)
-{
-	return find_or_create_page(mapping, index, mapping->gfp_mask);
-}
-
-
+extern struct page * grab_cache_page (struct address_space *, unsigned long);
 extern struct page * grab_cache_page_nowait (struct address_space *, unsigned long);
 
 typedef int filler_t(void *, struct page*);

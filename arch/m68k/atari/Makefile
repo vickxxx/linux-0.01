@@ -11,12 +11,10 @@ O_TARGET := atari.o
 
 export-objs	:= atari_ksyms.o
 
-obj-y		:= config.o time.o debug.o ataints.o stdma.o \
-			atasound.o stram.o atari_ksyms.o
+obj-y		:= config.o time.o debug.o atakeyb.o ataints.o stdma.o \
+			atasound.o joystick.o stram.o atari_ksyms.o
 
-obj-$(CONFIG_VT)	+= atakeyb.o joystick.o
-
-ifeq ($(CONFIG_PCI),y)
+ifdef CONFIG_PCI
 obj-$(CONFIG_HADES)	+= hades-pci.o
 endif
 

@@ -4,8 +4,7 @@
  */
 
 #include <linux/config.h>
-#include <linux/sched.h>
-#include <linux/compiler.h>
+
 
     /*
      *  Elements of the hardware specific atyfb_par structure
@@ -16,6 +15,7 @@ struct crtc {
     u32 vyres;
     u32 xoffset;
     u32 yoffset;
+    u32 bpp;
     u32 h_tot_disp;
     u32 h_sync_strt_wid;
     u32 v_tot_disp;
@@ -24,17 +24,6 @@ struct crtc {
     u32 gen_cntl;
     u32 dp_pix_width;	/* acceleration */
     u32 dp_chain_mask;	/* acceleration */
-#ifdef CONFIG_FB_ATY_GENERIC_LCD
-    u32 monitors_enabled; /* LCD monitor support */
-    u16 h_stretching;     /* LCD monitor support */
-    u16 v_stretching;     /* LCD monitor support */
-#endif
-    u8 bpp;
-    u8 h_blank_start;
-    u8 h_blank_end;
-    u16 v_blank_start;
-    u8 v_blank_end;
-    u8 genmo;
 };
 
 struct pll_514 {
@@ -51,17 +40,16 @@ struct pll_18818
 };
 
 struct pll_ct {
-//    u8 pll_ref_div;
-//    u8 pll_gen_cntl;
-//    u8 mclk_fb_div;
+    u8 pll_ref_div;
+    u8 pll_gen_cntl;
+    u8 mclk_fb_div;
     u8 pll_vclk_cntl;
     u8 vclk_post_div;
     u8 vclk_fb_div;
-//    u8 alt_post_div;
-//    u8 pll_ext_cntl;
+    u8 pll_ext_cntl;
     u32 dsp_config;	/* Mach64 GTB DSP */
     u32 dsp_on_off;	/* Mach64 GTB DSP */
-//    u8 mclk_post_div_real;
+    u8 mclk_post_div_real;
     u8 vclk_post_div_real;
 };
 
@@ -101,42 +89,11 @@ struct aty_cursor {
 struct fb_info_aty {
     struct fb_info fb_info;
     struct fb_info_aty *next;
-    u32* ati_regaddr[256];
     unsigned long ati_regbase_phys;
     unsigned long ati_regbase;
     unsigned long frame_buffer_phys;
     unsigned long frame_buffer;
     unsigned long clk_wr_offset;
-#ifdef CONFIG_FB_ATY_CT
-    u8 pll_ref_div;
-    u8 xclk_post_div_real;
-    u16 mclk_fb_div;
-    u8 fifo_size;
-    u8 dsp_loop_latency;
-//    u8 page_size;
-    u8 xclkpagefaultdelay,xclkmaxrasdelay;
-#endif
-#ifdef CONFIG_FB_ATY_GENERIC_LCD
-    unsigned long bios_base_phys;
-    unsigned long bios_base;
-    unsigned long lcd_table;
-    u16 lcd_width;
-    u16 lcd_height;
-    u32 lcd_pixclock;
-    u16 lcd_htotal;
-    u16 lcd_hdisp;
-    u16 lcd_hsync_start;
-    u16 lcd_hsync_delay;
-    u16 lcd_hsync_width;
-    u16 lcd_vtotal;
-    u16 lcd_vdisp;
-    u16 lcd_vsync_start;
-    u16 lcd_vsync_width;
-    u16 lcd_right;
-    u16 lcd_lower;
-    u16 lcd_hblank_width;
-    u16 lcd_vblank_width;
-#endif
     struct pci_mmap_map *mmap_map;
     struct aty_cursor *cursor;
     struct aty_cmap_regs *aty_cmap_regs;
@@ -148,7 +105,6 @@ struct fb_info_aty {
     u32 ref_clk_per;
     u32 pll_per;
     u32 mclk_per;
-    u32 xclk_per;
     u8 bus_type;
     u8 ram_type;
     u8 mem_refresh_rate;
@@ -168,7 +124,6 @@ struct fb_info_aty {
 #endif
     } fbcon_cmap;
     u8 blitter_may_be_busy;
-    u8 font_loaded;
 #ifdef __sparc__
     u8 mmaped;
     int open;
@@ -209,12 +164,6 @@ struct fb_info_aty {
 #define M64F_LT_SLEEP		0x00040000
 #define M64F_XL_DLL		0x00080000
 
-#ifdef __i386__
-#   define stdcall	__attribute__ ((stdcall))
-#else
-#   define stdcall
-#endif
-#define packed		__attribute__ ((packed))
 
     /*
      *  Register access
@@ -223,72 +172,62 @@ struct fb_info_aty {
 static inline u32 aty_ld_le32(int regindex,
 			      const struct fb_info_aty *info)
 {
-    if (regindex >= 0x400) {
-        regindex -= 0x800;
-#if defined(__mc68000__)
-        return le32_to_cpu(*((volatile u32 *)(info->ati_regbase+regindex)));
-#else
-        return readl (info->ati_regbase + regindex);
-#endif
-    } else {
-#if defined(__mc68000__)
-        return le32_to_cpu(*((volatile u32 *)(info->ati_regaddr[regindex/4])));
-#else
-        return readl (info->ati_regaddr[regindex/4]);
-#endif
-    };
-}
+    /* Hack for bloc 1, should be cleanly optimized by compiler */
+    if (regindex >= 0x400)
+    	regindex -= 0x800;
 
-static inline void aty_st_le32_sr(int regindex, u32 val,
-			         const struct fb_info_aty *info)
-{
 #if defined(__mc68000__)
-    *((volatile u32 *)(info->ati_regaddr[regindex/4])) = cpu_to_le32(val);
+    return le32_to_cpu(*((volatile u32 *)(info->ati_regbase+regindex)));
 #else
-    writel (val,info->ati_regaddr[regindex/4]);
+    return readl (info->ati_regbase + regindex);
 #endif
 }
 
 static inline void aty_st_le32(int regindex, u32 val,
 			       const struct fb_info_aty *info)
 {
-    if (regindex >= 0x400) {
-        regindex -= 0x800;
+    /* Hack for bloc 1, should be cleanly optimized by compiler */
+    if (regindex >= 0x400)
+    	regindex -= 0x800;
+
 #if defined(__mc68000__)
-        *((volatile u32 *)(info->ati_regbase+regindex)) = cpu_to_le32(val);
+    *((volatile u32 *)(info->ati_regbase+regindex)) = cpu_to_le32(val);
 #else
-        writel (val,info->ati_regbase + regindex);
+    writel (val, info->ati_regbase + regindex);
 #endif
-    } else {
-#if defined(__mc68000__)
-        *((volatile u32 *)(info->ati_regaddr[regindex/4])) = cpu_to_le32(val);
-#else
-        writel (val,info->ati_regaddr[regindex/4]);
-#endif
-    };
 }
 
 static inline u8 aty_ld_8(int regindex,
 			  const struct fb_info_aty *info)
 {
+    /* Hack for bloc 1, should be cleanly optimized by compiler */
     if (regindex >= 0x400)
-        regindex -= 0x800;
+    	regindex -= 0x800;
+
     return readb (info->ati_regbase + regindex);
 }
 
 static inline void aty_st_8(int regindex, u8 val,
 			    const struct fb_info_aty *info)
 {
+    /* Hack for bloc 1, should be cleanly optimized by compiler */
     if (regindex >= 0x400)
-        regindex -= 0x800;
-    writeb (val,info->ati_regbase + regindex);
+    	regindex -= 0x800;
+
+    writeb (val, info->ati_regbase + regindex);
 }
 
-    /* 
-     * Mach64 CT PLL operations
-     */
+static inline u8 aty_ld_pll(int offset, const struct fb_info_aty *info)
+{
+    u8 res;
 
-extern u8 aty_ld_pll(int offset, const struct fb_info_aty *info) stdcall;
+    /* write addr byte */
+    aty_st_8(CLOCK_CNTL + 1, (offset << 2), info);
+    /* read the register value */
+    res = aty_ld_8(CLOCK_CNTL + 2, info);
+    return res;
+}
+
 
     /*
      *  DAC operations
@@ -312,11 +251,10 @@ extern const struct aty_dac_ops aty_dac_ct;		/* Integrated */
 
 struct aty_pll_ops {
     int (*var_to_pll)(const struct fb_info_aty *info, u32 vclk_per, u8 bpp,
-		      u32 xres, union aty_pll *pll);
+		      union aty_pll *pll);
     u32 (*pll_to_var)(const struct fb_info_aty *info,
 	    	      const union aty_pll *pll);
     void (*set_pll)(const struct fb_info_aty *info, const union aty_pll *pll);
-    void (*init_pll)(struct fb_info_aty *info);
 };
 
 extern const struct aty_pll_ops aty_pll_ati18818_1;	/* ATI 18818 */
@@ -330,8 +268,8 @@ extern const struct aty_pll_ops aty_pll_ct;		/* Integrated */
 
 extern void aty_set_pll_ct(const struct fb_info_aty *info,
 			   const union aty_pll *pll);
-//extern void aty_calc_pll_ct(const struct fb_info_aty *info,
-//			    struct pll_ct *pll);
+extern void aty_calc_pll_ct(const struct fb_info_aty *info,
+			    struct pll_ct *pll);
 
 
     /*
@@ -351,7 +289,7 @@ extern int atyfb_set_font(struct display *d, int width, int height);
 
 static inline void wait_for_fifo(u16 entries, const struct fb_info_aty *info)
 {
-    while (__builtin_expect((aty_ld_le32(FIFO_STAT, info) & 0xffff), 0) >
+    while ((aty_ld_le32(FIFO_STAT, info) & 0xffff) >
 	   ((u32)(0x8000 >> entries)));
 }
 
@@ -359,21 +297,20 @@ static inline void wait_for_idle(struct fb_info_aty *info)
 {
     wait_for_fifo(16, info);
     while ((aty_ld_le32(GUI_STAT, info) & 1)!= 0);
-      info->blitter_may_be_busy = 0;
+    info->blitter_may_be_busy = 0;
 }
 
 extern void aty_reset_engine(const struct fb_info_aty *info);
 extern void aty_init_engine(const struct atyfb_par *par,
 			    struct fb_info_aty *info);
 extern void aty_rectfill(int dstx, int dsty, u_int width, u_int height,
-                         u_int color, struct fb_info_aty *info);
+			 u_int color, struct fb_info_aty *info);
 
 
     /*
      *  Text console acceleration
      */
 
-extern const struct display_switch fbcon_aty0;
 extern const struct display_switch fbcon_aty8;
 extern const struct display_switch fbcon_aty16;
 extern const struct display_switch fbcon_aty24;

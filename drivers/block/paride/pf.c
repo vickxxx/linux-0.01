@@ -733,8 +733,7 @@ static void xs( char *buf, char *targ, int offs, int len )
 	for (k=0;k<len;k++) 
 	   if((buf[k+offs]!=0x20)||(buf[k+offs]!=l))
 		l=targ[j++]=buf[k+offs];
-	if (l==0x20) j--;
-	targ[j]=0;
+	if (l==0x20) j--; targ[j]=0;
 }
 
 static int xl( char *buf, int offs )
@@ -930,7 +929,7 @@ repeat:
 
 static void pf_next_buf( int unit )
 
-{	unsigned long	saved_flags;
+{	long	saved_flags;
 
 	spin_lock_irqsave(&io_request_lock,saved_flags);
 	end_request(1);
@@ -963,7 +962,7 @@ static void do_pf_read( void )
 static void do_pf_read_start( void )
 
 {       int	unit = pf_unit;
-	unsigned long	saved_flags;
+	long	saved_flags;
 
 	pf_busy = 1;
 
@@ -988,7 +987,7 @@ static void do_pf_read_start( void )
 static void do_pf_read_drq( void )
 
 {       int	unit = pf_unit;
-	unsigned long	saved_flags;
+	long	saved_flags;
 	
 	while (1) {
             if (pf_wait(unit,STAT_BUSY,STAT_DRQ|STAT_ERR,
@@ -1030,7 +1029,7 @@ static void do_pf_write( void )
 static void do_pf_write_start( void )
 
 {       int	unit = pf_unit;
-	unsigned long	saved_flags;
+	long	saved_flags;
 
 	pf_busy = 1;
 
@@ -1079,7 +1078,7 @@ static void do_pf_write_start( void )
 static void do_pf_write_done( void )
 
 {       int	unit = pf_unit;
-	unsigned long	saved_flags;
+	long	saved_flags;
 
         if (pf_wait(unit,STAT_BUSY,0,"write block","done") & STAT_ERR) {
                 pi_disconnect(PI);

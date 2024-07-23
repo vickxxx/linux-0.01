@@ -1,3 +1,4 @@
+# BK Id: SCCS/s.Makefile 1.23 09/18/01 11:19:05 paulus
 #
 # This file is included by the global makefile so that you can add your own
 # architecture-specific flags and dependencies. Remember to do have actions
@@ -14,19 +15,22 @@
 #
 
 # Be sure to change PAGE_OFFSET in include/asm-ppc/page.h to match
-KERNELLOAD	=$(CONFIG_KERNEL_START)
+KERNELLOAD	=0xc0000000
 
+ifeq ($(shell uname -m),ppc)
+CHECKS		= checks
+endif
+
+ASFLAGS		=
 LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
-CPPFLAGS	:= $(CPPFLAGS) -I$(TOPDIR)/arch/$(ARCH)
-AFLAGS		:= $(AFLAGS) -I$(TOPDIR)/arch/$(ARCH)
-CFLAGS		:= $(CFLAGS) -I$(TOPDIR)/arch/$(ARCH) -fsigned-char \
+CPPFLAGS	:= $(CPPFLAGS) -D__powerpc__
+CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char \
 		-msoft-float -pipe -ffixed-r2 -Wno-uninitialized \
 		-mmultiple -mstring
-HOSTCFLAGS	+= -I$(TOPDIR)/arch/$(ARCH)
 CPP		= $(CC) -E $(CFLAGS)
 
 ifdef CONFIG_4xx
-CFLAGS := $(CFLAGS) -Wa,-m405
+CFLAGS := $(CFLAGS) -mcpu=403
 endif
 
 ifdef CONFIG_8xx
@@ -37,23 +41,19 @@ ifdef CONFIG_PPC64BRIDGE
 CFLAGS := $(CFLAGS) -Wa,-mppc64bridge
 endif
 
-ifdef CONFIG_MORE_COMPILE_OPTIONS
-# Use sed to remove the quotes.
-  CFLAGS += $(shell echo $(CONFIG_COMPILE_OPTIONS) | sed -e 's/"//g')
+ifdef CONFIG_4xx
+  HEAD := arch/ppc/kernel/head_4xx.o
+else
+  ifdef CONFIG_8xx
+    HEAD := arch/ppc/kernel/head_8xx.o
+  else
+    HEAD := arch/ppc/kernel/head.o
+  endif
 endif
 
-HEAD-y			:= arch/ppc/kernel/head.o
-HEAD-$(CONFIG_40x)	:= arch/ppc/kernel/head_4xx.o
-HEAD-$(CONFIG_44x)	:= arch/ppc/kernel/head_44x.o
-HEAD-$(CONFIG_8xx)	:= arch/ppc/kernel/head_8xx.o
-HEAD-$(CONFIG_6xx)	+= arch/ppc/kernel/idle_6xx.o
-
-HEAD := $(HEAD-y)
-
-ARCH_SUBDIRS = arch/ppc/kernel arch/ppc/platforms arch/ppc/mm arch/ppc/lib
+ARCH_SUBDIRS = arch/ppc/kernel arch/ppc/mm arch/ppc/lib
 SUBDIRS := $(SUBDIRS) $(ARCH_SUBDIRS)
-CORE_FILES := arch/ppc/kernel/kernel.o arch/ppc/platforms/platform.o \
-	arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(CORE_FILES)
+CORE_FILES := arch/ppc/kernel/kernel.o arch/ppc/mm/mm.o arch/ppc/lib/lib.o $(CORE_FILES)
 
 ifdef CONFIG_MATH_EMULATION
 SUBDIRS += arch/ppc/math-emu
@@ -72,9 +72,9 @@ SUBDIRS += arch/ppc/8xx_io
 DRIVERS += arch/ppc/8xx_io/8xx_io.o
 endif
 
-ifdef CONFIG_CPM2
-SUBDIRS += arch/ppc/cpm2_io
-DRIVERS += arch/ppc/cpm2_io/cpm2_io.o
+ifdef CONFIG_8260
+SUBDIRS += arch/ppc/8260_io
+DRIVERS += arch/ppc/8260_io/8260_io.o
 endif
 
 ifdef CONFIG_APUS
@@ -85,12 +85,12 @@ endif
 checks:
 	@$(MAKE) -C arch/$(ARCH)/kernel checks
 
-BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd uImage
+BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd
 
 # All the instructions talk about "make bzImage".
 bzImage: zImage
 
-$(BOOT_TARGETS): vmlinux
+$(BOOT_TARGETS): $(CHECKS) vmlinux
 	@$(MAKEBOOT) $@
 
 %_config: arch/ppc/configs/%_defconfig

@@ -62,7 +62,6 @@
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/console.h>
-#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -773,7 +772,11 @@ do_softint(void *private_)
 	wake_up_interruptible(&info->open_wait);
     }
     if (test_and_clear_bit(Cy_EVENT_WRITE_WAKEUP, &info->event)) {
-	tty_wakeup(tty);
+	if((tty->flags & (1<< TTY_DO_WRITE_WAKEUP))
+	&& tty->ldisc.write_wakeup){
+	    (tty->ldisc.write_wakeup)(tty);
+	}
+	wake_up_interruptible(&tty->write_wait);
     }
 } /* do_softint */
 
@@ -1259,7 +1262,7 @@ cy_write(struct tty_struct * tty, int from_user,
 			    break;
 		    }
 
-		    save_flags(flags); cli();		
+		    cli();
 		    c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				   SERIAL_XMIT_SIZE - info->xmit_head));
 		    memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
@@ -1274,7 +1277,7 @@ cy_write(struct tty_struct * tty, int from_user,
 	    up(&tmp_buf_sem);
     } else {
 	    while (1) {
-		    save_flags(flags); cli();		
+		    cli();
 		    c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 		    if (c <= 0) {
@@ -1353,7 +1356,9 @@ cy_flush_buffer(struct tty_struct *tty)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
     restore_flags(flags);
     wake_up_interruptible(&tty->write_wait);
-    tty_wakeup(tty);
+    if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP))
+    && tty->ldisc.write_wakeup)
+	(tty->ldisc.write_wakeup)(tty);
 } /* cy_flush_buffer */
 
 
@@ -1372,7 +1377,7 @@ cy_throttle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
   char buf[64];
 	
-    printk("throttle %s: %d....\n", tty_name(tty, buf),
+    printk("throttle %s: %d....\n", _tty_name(tty, buf),
 	   tty->ldisc.chars_in_buffer(tty));
     printk("cy_throttle ttyS%d\n", info->line);
 #endif
@@ -1408,7 +1413,7 @@ cy_unthrottle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
   char buf[64];
 	
-    printk("throttle %s: %d....\n", tty_name(tty, buf),
+    printk("throttle %s: %d....\n", _tty_name(tty, buf),
 	   tty->ldisc.chars_in_buffer(tty));
     printk("cy_unthrottle ttyS%d\n", info->line);
 #endif
@@ -1910,9 +1915,18 @@ cy_close(struct tty_struct * tty, struct file * filp)
     shutdown(info);
     if (tty->driver.flush_buffer)
 	tty->driver.flush_buffer(tty);
-    tty_ldisc_flush(tty);
+    if (tty->ldisc.flush_buffer)
+	tty->ldisc.flush_buffer(tty);
     info->event = 0;
     info->tty = 0;
+    if (tty->ldisc.num != ldiscs[N_TTY].num) {
+	if (tty->ldisc.close)
+	    (tty->ldisc.close)(tty);
+	tty->ldisc = ldiscs[N_TTY];
+	tty->termios->c_line = N_TTY;
+	if (tty->ldisc.open)
+	    (tty->ldisc.open)(tty);
+    }
     if (info->blocked_open) {
 	if (info->close_delay) {
 	    current->state = TASK_INTERRUPTIBLE;
@@ -2381,11 +2395,7 @@ scrn[1] = '\0';
     
     memset(&cy_serial_driver, 0, sizeof(struct tty_driver));
     cy_serial_driver.magic = TTY_DRIVER_MAGIC;
-#ifdef CONFIG_DEVFS_FS
-    cy_serial_driver.name = "tts/%d";
-#else
     cy_serial_driver.name = "ttyS";
-#endif
     cy_serial_driver.major = TTY_MAJOR;
     cy_serial_driver.minor_start = 64;
     cy_serial_driver.num = NR_PORTS;
@@ -2420,11 +2430,7 @@ scrn[1] = '\0';
      * major number and the subtype code.
      */
     cy_callout_driver = cy_serial_driver;
-#ifdef CONFIG_DEVFS_FS
-    cy_callout_driver.name = "cua/%d";
-#else
     cy_callout_driver.name = "cua";
-#endif
     cy_callout_driver.major = TTYAUX_MAJOR;
     cy_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 
@@ -2800,6 +2806,58 @@ void serial167_console_write(struct console *co, const char *str, unsigned count
 	restore_flags(flags);
 }
 
+/* This is a hack; if there are multiple chars waiting in the chip we
+ * discard all but the last one, and return that.  The cd2401 is not really
+ * designed to be driven in polled mode.
+ */
+
+int serial167_console_wait_key(struct console *co)
+{
+	volatile unsigned char *base_addr = (u_char *)BASE_ADDR;
+	unsigned long flags;
+	volatile u_char sink;
+	u_char ier;
+	int port;
+	int keypress = 0;
+
+	save_flags(flags); cli();
+
+	/* Ensure receiver is enabled! */
+
+	port = 0;
+	base_addr[CyCAR] = (u_char)port;
+	while (base_addr[CyCCR])
+		;
+	base_addr[CyCCR] = CyENB_RCVR;
+	ier = base_addr[CyIER];
+	base_addr[CyIER] = CyRxData;
+
+	while (!keypress) {
+		if (pcc2chip[PccSCCRICR] & 0x20)
+		{
+			/* We have an Rx int. Acknowledge it */
+			sink = pcc2chip[PccRPIACKR];
+			if ((base_addr[CyLICR] >> 2) == port) {
+				int cnt = base_addr[CyRFOC];
+				while (cnt-- > 0)
+				{
+					keypress = base_addr[CyRDR];
+				}
+				base_addr[CyREOIR] = 0;
+			}
+			else
+				base_addr[CyREOIR] = CyNOTRANS;
+		}
+	}
+
+	base_addr[CyIER] = ier;
+
+	restore_flags(flags);
+
+	return keypress;
+}
+
+
 static kdev_t serial167_console_device(struct console *c)
 {
 	return MKDEV(TTY_MAJOR, 64 + c->index);
@@ -2816,6 +2874,7 @@ static struct console sercons = {
 	name:		"ttyS",
 	write:		serial167_console_write,
 	device:		serial167_console_device,
+	wait_key:	serial167_console_wait_key,
 	setup:		serial167_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

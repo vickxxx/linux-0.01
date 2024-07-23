@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.55.2.1 2001/12/21 04:58:23 davem Exp $
+/* $Id: sys_sparc.c,v 1.54 2001/10/28 20:49:13 davem Exp $
  * linux/arch/sparc64/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -40,15 +40,12 @@ asmlinkage unsigned long sys_getpagesize(void)
 	return PAGE_SIZE;
 }
 
-#define COLOUR_ALIGN(addr,pgoff)		\
-	((((addr)+SHMLBA-1)&~(SHMLBA-1)) +	\
-	 (((pgoff)<<PAGE_SHIFT) & (SHMLBA-1)))
+#define COLOUR_ALIGN(addr)	(((addr)+SHMLBA-1)&~(SHMLBA-1))
 
 unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	struct vm_area_struct * vmm;
 	unsigned long task_size = TASK_SIZE;
-	int do_color_align;
 
 	if (flags & MAP_FIXED) {
 		/* We do not accept a shared mapping if it would violate
@@ -66,14 +63,11 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
-	do_color_align = 0;
-	if (filp || (flags & MAP_SHARED))
-		do_color_align = 1;
-
-	if (do_color_align)
-		addr = COLOUR_ALIGN(addr, pgoff);
+	if (flags & MAP_SHARED)
+		addr = COLOUR_ALIGN(addr);
 	else
 		addr = PAGE_ALIGN(addr);
+
 	task_size -= len;
 
 	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
@@ -87,8 +81,8 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
 		addr = vmm->vm_end;
-		if (do_color_align)
-			addr = COLOUR_ALIGN(addr, pgoff);
+		if (flags & MAP_SHARED)
+			addr = COLOUR_ALIGN(addr);
 	}
 }
 
@@ -182,10 +176,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 	if (call <= SEMCTL)
 		switch (call) {
 		case SEMOP:
-			err = sys_semtimedop (first, (struct sembuf *)ptr, second, NULL);
-			goto out;
-		case SEMTIMEDOP:
-			err = sys_semtimedop (first, (struct sembuf *)ptr, second, (const struct timespec *) fifth);
+			err = sys_semop (first, (struct sembuf *)ptr, second);
 			goto out;
 		case SEMGET:
 			err = sys_semget (first, second, (int)third);
@@ -202,7 +193,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			goto out;
 			}
 		default:
-			err = -ENOSYS;
+			err = -EINVAL;
 			goto out;
 		}
 	if (call <= MSGCTL) 
@@ -221,20 +212,14 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_msgctl (first, second | IPC_64, (struct msqid_ds *) ptr);
 			goto out;
 		default:
-			err = -ENOSYS;
+			err = -EINVAL;
 			goto out;
 		}
 	if (call <= SHMCTL) 
 		switch (call) {
-		case SHMAT: {
-			ulong raddr;
-			err = sys_shmat (first, (char *) ptr, second, &raddr);
-			if (!err) {
-				if (put_user(raddr, (ulong *) third))
-					err = -EFAULT;
-			}
+		case SHMAT:
+			err = sys_shmat (first, (char *) ptr, second, (ulong *) third);
 			goto out;
-		}
 		case SHMDT:
 			err = sys_shmdt ((char *)ptr);
 			goto out;
@@ -245,11 +230,11 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_shmctl (first, second | IPC_64, (struct shmid_ds *) ptr);
 			goto out;
 		default:
-			err = -ENOSYS;
+			err = -EINVAL;
 			goto out;
 		}
 	else
-		err = -ENOSYS;
+		err = -EINVAL;
 out:
 	return err;
 }
@@ -270,15 +255,27 @@ extern asmlinkage long sys_personality(unsigned long);
 
 asmlinkage int sparc64_personality(unsigned long personality)
 {
-	int ret;
+	unsigned long ret, trying, orig_ret;
 
-	if (current->personality == PER_LINUX32 && personality == PER_LINUX)
-		personality = PER_LINUX32;
-	ret = sys_personality(personality);
-	if (ret == PER_LINUX32)
+	trying = ret = personality;
+
+	if (current->personality == PER_LINUX32 &&
+	    trying == PER_LINUX)
+		trying = ret = PER_LINUX32;
+
+	/* For PER_LINUX32 we want to retain &default_exec_domain.  */
+	if (trying == PER_LINUX32)
 		ret = PER_LINUX;
 
-	return ret;
+	orig_ret = ret;
+	ret = sys_personality(ret);
+
+	if (orig_ret == PER_LINUX && trying == PER_LINUX32) {
+		current->personality = PER_LINUX32;
+		ret = PER_LINUX;
+	}
+
+	return (int) ret;
 }
 
 /* Linux version of mmap */
@@ -300,11 +297,12 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 
 	if (current->thread.flags & SPARC_FLAG_32BIT) {
 		if (len > 0xf0000000UL ||
-		    (addr > 0xf0000000UL - len))
+		    ((flags & MAP_FIXED) && addr > 0xf0000000UL - len))
 			goto out_putf;
 	} else {
 		if (len > -PAGE_OFFSET ||
-		    (addr < PAGE_OFFSET && addr + len > -PAGE_OFFSET))
+		    ((flags & MAP_FIXED) &&
+		     addr < PAGE_OFFSET && addr + len > -PAGE_OFFSET))
 			goto out_putf;
 	}
 
@@ -388,7 +386,7 @@ out:
 asmlinkage unsigned long
 c_sys_nis_syscall (struct pt_regs *regs)
 {
-	static int count;
+	static int count=0;
 	
 	/* Don't make the system unusable, if someone goes stuck */
 	if (count++ > 5)
@@ -458,7 +456,7 @@ asmlinkage int sys_aplib(void)
 
 asmlinkage int solaris_syscall(struct pt_regs *regs)
 {
-	static int count;
+	static int count = 0;
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;
@@ -478,7 +476,7 @@ asmlinkage int solaris_syscall(struct pt_regs *regs)
 #ifndef CONFIG_SUNOS_EMUL
 asmlinkage int sunos_syscall(struct pt_regs *regs)
 {
-	static int count;
+	static int count = 0;
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;

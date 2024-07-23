@@ -1450,7 +1450,7 @@ int DC390_bios_param (Disk *disk, kdev_t devno, int geom[])
     int ret_code = -1;
     int size = disk->capacity;
 
-    if ((bh = bread(MKDEV(MAJOR(devno), MINOR(devno)&~0xf), 0, block_size(devno))))
+    if ((bh = bread(MKDEV(MAJOR(devno), MINOR(devno)&~0xf), 0, 1024)))
     {
 	/* try to infer mapping from partition table */
 	ret_code = partsize (bh, (unsigned long) size, (unsigned int *) geom + 2,
@@ -3047,7 +3047,7 @@ int DC390_release (struct Scsi_Host *host)
     /* TO DO: We should check for outstanding commands first. */
     dc390_shutdown (host);
 
-    if (host->irq != SCSI_IRQ_NONE)
+    if (host->irq != IRQ_NONE)
     {
 	DEBUG0(printk(KERN_INFO "DC390: Free IRQ %i\n",host->irq);)
 	free_irq (host->irq, pACB);

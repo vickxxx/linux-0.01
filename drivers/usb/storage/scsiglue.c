@@ -75,15 +75,15 @@ static int detect(struct SHT *sht)
 {
 	struct us_data *us;
 	char local_name[32];
-	/* Note: this function gets called with io_request_lock spinlock helt! */
+
 	/* This is not nice at all, but how else are we to get the
 	 * data here? */
 	us = (struct us_data *)sht->proc_dir;
 
 	/* set up the name of our subdirectory under /proc/scsi/ */
 	sprintf(local_name, "usb-storage-%d", us->host_number);
-	sht->proc_name = kmalloc (strlen(local_name) + 1, GFP_ATOMIC);
-	if (!sht->proc_name) 
+	sht->proc_name = kmalloc (strlen(local_name) + 1, GFP_KERNEL);
+	if (!sht->proc_name)
 		return 0;
 	strcpy(sht->proc_name, local_name);
 
@@ -127,7 +127,7 @@ static int release(struct Scsi_Host *psh)
 	wait_for_completion(&(us->notify));
 
 	/* remove the pointer to the data structure we were using */
-	psh->hostdata[0] = (unsigned long)NULL;
+	(struct us_data*)psh->hostdata[0] = NULL;
 
 	/* we always have a successful release */
 	return 0;
@@ -145,13 +145,12 @@ static int command( Scsi_Cmnd *srb )
 static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
 {
 	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
-	unsigned long flags;
 
 	US_DEBUGP("queuecommand() called\n");
 	srb->host_scribble = (unsigned char *)us;
 
 	/* get exclusive access to the structures we want */
-	spin_lock_irqsave(&(us->queue_exclusion), flags);
+	down(&(us->queue_exclusion));
 
 	/* enqueue the command */
 	us->queue_srb = srb;
@@ -159,7 +158,7 @@ static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
 	us->action = US_ACT_COMMAND;
 
 	/* release the lock on the structure */
-	spin_unlock_irqrestore(&(us->queue_exclusion), flags);
+	up(&(us->queue_exclusion));
 
 	/* wake up the process task */
 	up(&(us->sema));
@@ -191,16 +190,12 @@ static int command_abort( Scsi_Cmnd *srb )
 	}
 
 	/* if we have an urb pending, let's wake the control thread up */
-	if (!us->current_done.done) {
-		atomic_inc(&us->abortcnt);
-		spin_unlock_irq(&io_request_lock);
+	if (us->current_urb->status == -EINPROGRESS) {
 		/* cancel the URB -- this will automatically wake the thread */
 		usb_unlink_urb(us->current_urb);
 
 		/* wait for us to be done */
 		wait_for_completion(&(us->notify));
-		spin_lock_irq(&io_request_lock);
-		atomic_dec(&us->abortcnt);
 		return SUCCESS;
 	}
 
@@ -213,21 +208,9 @@ static int command_abort( Scsi_Cmnd *srb )
 static int device_reset( Scsi_Cmnd *srb )
 {
 	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
-	int rc;
 
 	US_DEBUGP("device_reset() called\n" );
-
-	spin_unlock_irq(&io_request_lock);
-	down(&(us->dev_semaphore));
-	if (!us->pusb_dev) {
-		up(&(us->dev_semaphore));
-		spin_lock_irq(&io_request_lock);
-		return SUCCESS;
-	}
-	rc = us->transport_reset(us);
-	up(&(us->dev_semaphore));
-	spin_lock_irq(&io_request_lock);
-	return rc;
+	return us->transport_reset(us);
 }
 
 /* This resets the device port, and simulates the device
@@ -242,45 +225,24 @@ static int bus_reset( Scsi_Cmnd *srb )
 	/* we use the usb_reset_device() function to handle this for us */
 	US_DEBUGP("bus_reset() called\n");
 
-	spin_unlock_irq(&io_request_lock);
-
-	down(&(us->dev_semaphore));
-
 	/* if the device has been removed, this worked */
 	if (!us->pusb_dev) {
 		US_DEBUGP("-- device removed already\n");
-		up(&(us->dev_semaphore));
-		spin_lock_irq(&io_request_lock);
-		return SUCCESS;
-	}
-
-	/* The USB subsystem doesn't handle synchronisation between
-	 * a device's several drivers. Therefore we reset only devices
-	 * with just one interface, which we of course own. */
-	if (us->pusb_dev->actconfig->bNumInterfaces != 1) {
-		printk(KERN_NOTICE "usb-storage: "
-		    "Refusing to reset a multi-interface device\n");
-		up(&(us->dev_semaphore));
-		spin_lock_irq(&io_request_lock);
-		/* XXX Don't just return success, make sure current cmd fails */
 		return SUCCESS;
 	}
 
 	/* release the IRQ, if we have one */
+	down(&(us->irq_urb_sem));
 	if (us->irq_urb) {
 		US_DEBUGP("-- releasing irq URB\n");
 		result = usb_unlink_urb(us->irq_urb);
 		US_DEBUGP("-- usb_unlink_urb() returned %d\n", result);
 	}
+	up(&(us->irq_urb_sem));
 
 	/* attempt to reset the port */
-	if (usb_reset_device(us->pusb_dev) < 0) {
-		/*
-		 * Do not return errors, or else the error handler might
-		 * invoke host_reset, which is not implemented.
-		 */
-		goto bail_out;
-	}
+	if (usb_reset_device(us->pusb_dev) < 0)
+		return FAILED;
 
 	/* FIXME: This needs to lock out driver probing while it's working
 	 * or we can have race conditions */
@@ -310,19 +272,16 @@ static int bus_reset( Scsi_Cmnd *srb )
 		up(&intf->driver->serialize);
 	}
 
-bail_out:
 	/* re-allocate the IRQ URB and submit it to restore connectivity
 	 * for CBI devices
 	 */
 	if (us->protocol == US_PR_CBI) {
+		down(&(us->irq_urb_sem));
 		us->irq_urb->dev = us->pusb_dev;
 		result = usb_submit_urb(us->irq_urb);
 		US_DEBUGP("usb_submit_urb() returns %d\n", result);
+		up(&(us->irq_urb_sem));
 	}
-
-	up(&(us->dev_semaphore));
-
-	spin_lock_irq(&io_request_lock);
 
 	US_DEBUGP("bus_reset() complete\n");
 	return SUCCESS;

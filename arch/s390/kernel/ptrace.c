@@ -41,7 +41,7 @@
 
 void FixPerRegisters(struct task_struct *task)
 {
-	struct pt_regs *regs = __KSTK_PTREGS(task);
+	struct pt_regs *regs = task->thread.regs;
 	per_struct *per_info=
 			(per_struct *)&task->thread.per_info;
 
@@ -121,11 +121,10 @@ int ptrace_usercopy(addr_t realuseraddr,addr_t copyaddr,int len,int tofromuser,i
 		else
 		{
 			if(realuseraddr==(addr_t)NULL)
-				retval=clear_user((void *)copyaddr,len);
+				retval=(clear_user((void *)copyaddr,len)==-EFAULT ? -EIO:0);
 			else
-				retval=copy_to_user((void *)copyaddr,(void *)realuseraddr,len);
+				retval=(copy_to_user((void *)copyaddr,(void *)realuseraddr,len)==-EFAULT ? -EIO:0);
 		}      
-		retval = retval ? -EFAULT : 0;
 	}
 	else
 	{
@@ -156,7 +155,7 @@ int copy_user(struct task_struct *task,saddr_t useraddr,addr_t copyaddr,int len,
 		mask=0xffffffff;
 		if(useraddr<PT_FPC)
 		{
-			realuseraddr=((addr_t) __KSTK_PTREGS(task)) + useraddr;
+			realuseraddr=(addr_t)&(((u8 *)task->thread.regs)[useraddr]);
 			if(useraddr<PT_PSWMASK)
 			{
 				copymax=PT_PSWMASK;
@@ -218,6 +217,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
 	int ret = -EPERM;
+	unsigned long flags;
 	unsigned long tmp;
 	int copied;
 	ptrace_area   parea; 
@@ -236,18 +236,16 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
 	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out;
 	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
+		goto out;
 	if (request == PTRACE_ATTACH) 
 	{
 		ret = ptrace_attach(child);
-		goto out_tsk;
+		goto out;
 	}
 	ret = -ESRCH;
 	// printk("child=%lX child->flags=%lX",child,child->flags);
@@ -256,14 +254,14 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	if(child!=current)
 	{
 		if (!(child->ptrace & PT_PTRACED))
-			goto out_tsk;
+			goto out;
 		if (child->state != TASK_STOPPED) 
 		{
 			if (request != PTRACE_KILL)
-				goto out_tsk;
+				goto out;
 		}
 		if (child->p_pptr != current)
-			goto out_tsk;
+			goto out;
 	}
 	switch (request) 
 	{
@@ -273,9 +271,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		copied = access_process_vm(child,ADDR_BITS_REMOVE(addr), &tmp, sizeof(tmp), 0);
 		ret = -EIO;
 		if (copied != sizeof(tmp))
-			break;
+			goto out;
 		ret = put_user(tmp,(unsigned long *) data);
-		break;
+		goto out;
 
 		/* read the word at location addr in the USER area. */
 	case PTRACE_PEEKUSR:
@@ -287,8 +285,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	case PTRACE_POKEDATA:
 		ret = 0;
 		if (access_process_vm(child,ADDR_BITS_REMOVE(addr), &data, sizeof(data), 1) == sizeof(data))
-			break;
+			goto out;
 		ret = -EIO;
+		goto out;
 		break;
 
 	case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
@@ -343,17 +342,14 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 	case PTRACE_PEEKUSR_AREA:
 	case PTRACE_POKEUSR_AREA:
-		if(copy_from_user(&parea,(void *)addr,sizeof(parea))==0)  
-			ret=copy_user(child,parea.kernel_addr,parea.process_addr,
-				      parea.len,1,(request==PTRACE_POKEUSR_AREA));
-		else ret = -EFAULT;
+		if((ret=copy_from_user(&parea,(void *)addr,sizeof(parea)))==0)  
+		   ret=copy_user(child,parea.kernel_addr,parea.process_addr,
+				 parea.len,1,(request==PTRACE_POKEUSR_AREA));
 		break;
 	default:
 		ret = -EIO;
 		break;
 	}
- out_tsk:
-	free_task_struct(child);
  out:
 	unlock_kernel();
 	return ret;

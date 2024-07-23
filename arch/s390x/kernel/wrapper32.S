@@ -17,14 +17,14 @@ sys32_read_wrapper:
 	llgfr	%r2,%r2			# unsigned int
 	llgtr	%r3,%r3			# char *
 	llgfr	%r4,%r4			# size_t
-	jg	sys32_read		# branch to sys_read
+	jg	sys_read		# branch to sys_read
 
 	.globl  sys32_write_wrapper 
 sys32_write_wrapper:
 	llgfr	%r2,%r2			# unsigned int
 	llgtr	%r3,%r3			# const char *
 	llgfr	%r4,%r4			# size_t
-	jg	sys32_write		# branch to system call
+	jg	sys_write		# branch to system call
 
 	.globl  sys32_open_wrapper 
 sys32_open_wrapper:
@@ -120,8 +120,8 @@ sys32_ptrace_wrapper:
 	lgfr	%r2,%r2			# long
 	lgfr	%r3,%r3			# long
 	llgtr	%r4,%r4			# long
-	llgfr	%r5,%r5			# long
-	jg	sys_ptrace		# branch to system call
+	lgfr	%r5,%r5			# long
+	jg	sys32_ptrace		# branch to system call
 
 	.globl  sys32_alarm_wrapper 
 sys32_alarm_wrapper:
@@ -310,12 +310,6 @@ sys32_old_getrlimit_wrapper:
 	llgfr	%r2,%r2			# unsigned int
 	llgtr	%r3,%r3			# struct rlimit_emu31 *
 	jg	sys32_old_getrlimit	# branch to system call
-
-	.globl  sys32_getrlimit_wrapper 
-sys32_getrlimit_wrapper:
-	llgfr	%r2,%r2			# unsigned int
-	llgtr	%r3,%r3			# struct rlimit_emu31 *
-	jg	sys32_getrlimit		# branch to system call
 
 	.globl  sys32_mmap2_wrapper 
 sys32_mmap2_wrapper:
@@ -543,7 +537,7 @@ sys32_setdomainname_wrapper:
 	.globl  sys32_newuname_wrapper 
 sys32_newuname_wrapper:
 	llgtr	%r2,%r2			# struct new_utsname *
-	jg	s390x_newuname		# branch to system call
+	jg	sys_newuname		# branch to system call
 
 	.globl  sys32_adjtimex_wrapper 
 sys32_adjtimex_wrapper:
@@ -620,7 +614,7 @@ sys32_sysfs_wrapper:
 	.globl  sys32_personality_wrapper 
 sys32_personality_wrapper:
 	llgfr	%r2,%r2			# unsigned long
-	jg	s390x_personality	# branch to system call
+	jg	sys_personality		# branch to system call
 
 	.globl  sys32_setfsuid16_wrapper 
 sys32_setfsuid16_wrapper:
@@ -1097,13 +1091,3 @@ sys32_fstat64_wrapper:
 	llgtr	%r3,%r3			# struct stat64 *
 	llgfr	%r4,%r4			# long
 	jg	sys32_fstat64		# branch to system call
-
-	.globl	sys32_stime_wrapper
-sys32_stime_wrapper:
-	llgtr	%r2,%r2			# int *
-	jg	sys_stime		# branch to system call
-
-	.globl  sys32_sysctl_wrapper
-sys32_sysctl_wrapper:
-	llgtr   %r2,%r2                 # struct __sysctl_args32 *
-	jg      sys32_sysctl

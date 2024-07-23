@@ -64,11 +64,17 @@
 void (*kbd_ledfunc)(unsigned int led);
 EXPORT_SYMBOL(handle_scancode);
 EXPORT_SYMBOL(kbd_ledfunc);
-EXPORT_SYMBOL(kbd_refresh_leds);
 
 extern void ctrl_alt_del(void);
 
+DECLARE_WAIT_QUEUE_HEAD(keypress_wait);
 struct console;
+
+int keyboard_wait_for_keypress(struct console *co)
+{
+	sleep_on(&keypress_wait);
+	return 0;
+}
 
 /*
  * global state includes the following, and various static variables
@@ -95,7 +101,6 @@ struct kbd_struct kbd_table[MAX_NR_CONSOLES];
 static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
 static struct tty_struct * tty;
-static unsigned char prev_scancode;
 
 void compute_shiftstate(void);
 
@@ -198,7 +203,6 @@ void handle_scancode(unsigned char scancode, int down)
 	unsigned char keycode;
 	char up_flag = down ? 0 : 0200;
 	char raw_mode;
-	char have_keycode;
 
 	pm_access(pm_kbd);
 	add_keyboard_randomness(scancode | up_flag);
@@ -215,38 +219,17 @@ void handle_scancode(unsigned char scancode, int down)
 		tty = NULL;
 	}
 	kbd = kbd_table + fg_console;
-	/*
-	 *  Convert scancode to keycode
-	 */
-	raw_mode = (kbd->kbdmode == VC_RAW);
-	have_keycode = kbd_translate(scancode, &keycode, raw_mode);
-	if (raw_mode) {
-		/*
-		 *	The following is a workaround for hardware
-		 *	which sometimes send the key release event twice 
-		 */
-		unsigned char next_scancode = scancode|up_flag;
-		if (have_keycode && up_flag && next_scancode==prev_scancode) {
-			/* unexpected 2nd release event */
-		} else {
-			/* 
-			 * Only save previous scancode if it was a key-up
-			 * and had a single-byte scancode.  
-			 */
-			if (!have_keycode)
-				prev_scancode = 1;
-			else if (!up_flag || prev_scancode == 1)
-				prev_scancode = 0;
-			else
-				prev_scancode = next_scancode;
-			put_queue(next_scancode);
-		}
+	if ((raw_mode = (kbd->kbdmode == VC_RAW))) {
+		put_queue(scancode | up_flag);
 		/* we do not return yet, because we want to maintain
 		   the key_down array, so that we have the correct
 		   values when finishing RAW mode or when changing VT's */
 	}
 
-	if (!have_keycode)
+	/*
+	 *  Convert scancode to keycode
+	 */
+	if (!kbd_translate(scancode, &keycode, raw_mode))
 		goto out;
 
 	/*
@@ -336,7 +319,7 @@ void handle_scancode(unsigned char scancode, int down)
 			compute_shiftstate();
 			kbd->slockstate = 0; /* play it safe */
 #else
-			keysym = U(key_maps[0][keycode]);
+			keysym =  U(plain_map[keycode]);
 			type = KTYP(keysym);
 			if (type == KT_SHIFT)
 			  (*key_handler[type])(keysym & 0xff, up_flag);
@@ -348,8 +331,10 @@ out:
 	schedule_console_callback();
 }
 
+
 void put_queue(int ch)
 {
+	wake_up(&keypress_wait);
 	if (tty) {
 		tty_insert_flip_char(tty, ch, 0);
 		con_schedule_flip(tty);
@@ -358,6 +343,7 @@ void put_queue(int ch)
 
 static void puts_queue(char *cp)
 {
+	wake_up(&keypress_wait);
 	if (!tty)
 		return;
 
@@ -764,7 +750,7 @@ void compute_shiftstate(void)
 	    k = i*BITS_PER_LONG;
 	    for(j=0; j<BITS_PER_LONG; j++,k++)
 	      if(test_bit(k, key_down)) {
-		sym = U(key_maps[0][k]);
+		sym = U(plain_map[k]);
 		if(KTYP(sym) == KT_SHIFT || KTYP(sym) == KT_SLOCK) {
 		  val = KVAL(sym);
 		  if (val == KVAL(K_CAPSSHIFT))
@@ -907,9 +893,9 @@ static inline unsigned char getleds(void){
  * Aside from timing (which isn't really that important for
  * keyboard interrupts as they happen often), using the software
  * interrupt routines for this thing allows us to easily mask
- * this when we don't want any of the above to happen.
- * This allows for easy and efficient race-condition prevention
- * for kbd_ledfunc => input_event(dev, EV_LED, ...) => ...
+ * this when we don't want any of the above to happen. Not yet
+ * used, but this allows for easy and efficient race-condition
+ * prevention later on.
  */
 static void kbd_bh(unsigned long dummy)
 {
@@ -924,18 +910,6 @@ static void kbd_bh(unsigned long dummy)
 
 EXPORT_SYMBOL(keyboard_tasklet);
 DECLARE_TASKLET_DISABLED(keyboard_tasklet, kbd_bh, 0);
-
-/*
- * This allows a newly plugged keyboard to pick the LED state.
- * We do it in this seemindly backwards fashion to ensure proper locking.
- * Built-in keyboard does refresh on its own.
- */
-void kbd_refresh_leds(void)
-{
-	tasklet_disable(&keyboard_tasklet);
-	if (ledstate != 0xff && kbd_ledfunc != NULL) kbd_ledfunc(ledstate);
-	tasklet_enable(&keyboard_tasklet);
-}
 
 typedef void (pm_kbd_func) (void);
 

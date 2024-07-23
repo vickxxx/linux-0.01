@@ -32,8 +32,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 
-MODULE_LICENSE("GPL");
-
 /*================ Forward declarations ================*/
 
 static void hfs_read_inode(struct inode *);
@@ -49,7 +47,6 @@ static struct super_operations hfs_super_operations = {
 	put_super:	hfs_put_super,
 	write_super:	hfs_write_super,
 	statfs:		hfs_statfs,
-	remount_fs:     hfs_remount,
 };
 
 /*================ File-local variables ================*/
@@ -163,24 +160,23 @@ static int parse_options(char *options, struct hfs_sb_info *hsb, int *part)
 	char *this_char, *value;
 	char names, fork;
 
-	if (hsb->magic != HFS_SB_MAGIC) {
-		/* initialize the sb with defaults */
-		hsb->magic = HFS_SB_MAGIC;
-		hsb->s_uid   = current->uid;
-		hsb->s_gid   = current->gid;
-		hsb->s_umask = current->fs->umask;
-		hsb->s_type    = 0x3f3f3f3f;	/* == '????' */
-		hsb->s_creator = 0x3f3f3f3f;	/* == '????' */
-		hsb->s_lowercase = 0;
-		hsb->s_quiet     = 0;
-		hsb->s_afpd      = 0;
-		/* default version. 0 just selects the defaults */
-		hsb->s_version   = 0; 
-		hsb->s_conv = 'b';
-		names = '?';
-		fork = '?';
-		*part = 0;
-	}
+	/* initialize the sb with defaults */
+	memset(hsb, 0, sizeof(*hsb));
+	hsb->magic = HFS_SB_MAGIC;
+	hsb->s_uid   = current->uid;
+	hsb->s_gid   = current->gid;
+	hsb->s_umask = current->fs->umask;
+	hsb->s_type    = 0x3f3f3f3f;	/* == '????' */
+	hsb->s_creator = 0x3f3f3f3f;	/* == '????' */
+	hsb->s_lowercase = 0;
+	hsb->s_quiet     = 0;
+	hsb->s_afpd      = 0;
+        /* default version. 0 just selects the defaults */
+	hsb->s_version   = 0; 
+	hsb->s_conv = 'b';
+	names = '?';
+	fork = '?';
+	*part = 0;
 
 	if (!options) {
 		goto done;
@@ -395,26 +391,17 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	struct hfs_mdb *mdb;
 	struct hfs_cat_key key;
 	kdev_t dev = s->s_dev;
-	int dev_blocksize;
 	hfs_s32 part_size, part_start;
 	struct inode *root_inode;
 	int part;
 
-	memset(HFS_SB(s), 0, sizeof(*(HFS_SB(s))));	
 	if (!parse_options((char *)data, HFS_SB(s), &part)) {
 		hfs_warn("hfs_fs: unable to parse mount options.\n");
 		goto bail3;
 	}
 
 	/* set the device driver to 512-byte blocks */
-	if (set_blocksize(dev, HFS_SECTOR_SIZE) < 0) {
-		dev_blocksize = get_hardsect_size(dev);
-		hfs_warn("hfs_fs: unsupported device block size: %d\n",
-			 dev_blocksize);
-		goto bail3;
-	}
-	s->s_blocksize_bits = HFS_SECTOR_SIZE_BITS;
-	s->s_blocksize = HFS_SECTOR_SIZE;
+	set_blocksize(dev, HFS_SECTOR_SIZE);
 
 #ifdef CONFIG_MAC_PARTITION
 	/* check to see if we're in a partition */
@@ -443,12 +430,6 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 		goto bail2;
 	}
 
-	if (mdb->attrib & (HFS_SB_ATTRIB_HLOCK | HFS_SB_ATTRIB_SLOCK)) {
-		if (!silent)
-			hfs_warn("hfs_fs: Filesystem is marked locked, mounting read-only.\n");
-		s->s_flags |= MS_RDONLY;
-	}
-
 	HFS_SB(s)->s_mdb = mdb;
 	if (HFS_ITYPE(mdb->next_id) != 0) {
 		hfs_warn("hfs_fs: too many files.\n");
@@ -456,6 +437,8 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	}
 
 	s->s_magic = HFS_SUPER_MAGIC;
+	s->s_blocksize_bits = HFS_SECTOR_SIZE_BITS;
+	s->s_blocksize = HFS_SECTOR_SIZE;
 	s->s_op = &hfs_super_operations;
 
 	/* try to get the root inode */
@@ -487,27 +470,6 @@ bail2:
 	set_blocksize(dev, BLOCK_SIZE);
 bail3:
 	return NULL;	
-}
-
-int hfs_remount(struct super_block *s, int *flags, char *data)
-{
-        int part; /* ignored */
-
-        if (!parse_options(data, HFS_SB(s), &part)) {
-                hfs_warn("hfs_fs: unable to parse mount options.\n");
-                return -EINVAL;
-	}
-
-        if ((*flags & MS_RDONLY) == (s->s_flags & MS_RDONLY))
-                return 0;
-	if (!(*flags & MS_RDONLY)) {
-                if (HFS_SB(s)->s_mdb->attrib & (HFS_SB_ATTRIB_HLOCK | HFS_SB_ATTRIB_SLOCK)) {
-                        hfs_warn("hfs_fs: Filesystem is marked locked, leaving it read-only.\n");
-		        s->s_flags |= MS_RDONLY;
-			*flags |= MS_RDONLY;
-	        }
-        }
-	return 0;
 }
 
 static int __init init_hfs_fs(void)

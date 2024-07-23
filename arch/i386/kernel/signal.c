@@ -28,7 +28,7 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-int FASTCALL(do_signal(struct pt_regs *regs, sigset_t *oldset));
+asmlinkage int FASTCALL(do_signal(struct pt_regs *regs, sigset_t *oldset));
 
 int copy_siginfo_to_user(siginfo_t *to, siginfo_t *from)
 {
@@ -581,7 +581,7 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
-int fastcall do_signal(struct pt_regs *regs, sigset_t *oldset)
+int do_signal(struct pt_regs *regs, sigset_t *oldset)
 {
 	siginfo_t info;
 	struct k_sigaction *ka;
@@ -658,7 +658,7 @@ int fastcall do_signal(struct pt_regs *regs, sigset_t *oldset)
 				continue;
 
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
+			case SIGCONT: case SIGCHLD: case SIGWINCH:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -685,7 +685,10 @@ int fastcall do_signal(struct pt_regs *regs, sigset_t *oldset)
 				/* FALLTHRU */
 
 			default:
-				sig_exit(signr, exit_code, &info);
+				sigaddset(&current->pending.signal, signr);
+				recalc_sigpending(current);
+				current->flags |= PF_SIGNALED;
+				do_exit(exit_code);
 				/* NOTREACHED */
 			}
 		}

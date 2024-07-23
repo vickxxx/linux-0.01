@@ -10,10 +10,15 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $*.s
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $*.o
+
+all: pb1000.o
 
 O_TARGET := pb1000.o
 
-obj-y := init.o board_setup.o irqmap.o
+obj-y := init.o setup.o
 
 include $(TOPDIR)/Rules.make

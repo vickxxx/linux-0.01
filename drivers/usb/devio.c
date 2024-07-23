@@ -50,10 +50,9 @@ struct async {
         struct dev_state *ps;
 	struct task_struct *task;
 	unsigned int signr;
-	unsigned int intf;
 	void *userbuffer;
         void *userurb;
-        struct urb urb;
+        urb_t urb;
 };
 
 static loff_t usbdev_lseek(struct file *file, loff_t offset, int orig)
@@ -80,7 +79,7 @@ static ssize_t usbdev_read(struct file *file, char * buf, size_t nbytes, loff_t 
 	struct dev_state *ps = (struct dev_state *)file->private_data;
 	ssize_t ret = 0;
 	unsigned len;
-	loff_t pos, last;
+	loff_t pos;
 	int i;
 
 	pos = *ppos;
@@ -102,45 +101,44 @@ static ssize_t usbdev_read(struct file *file, char * buf, size_t nbytes, loff_t 
 			goto err;
 		}
 
-		pos += len;
+		*ppos += len;
 		buf += len;
 		nbytes -= len;
 		ret += len;
 	}
 
-	last = sizeof(struct usb_device_descriptor);
+	pos = sizeof(struct usb_device_descriptor);
 	for (i = 0; nbytes && i < ps->dev->descriptor.bNumConfigurations; i++) {
 		struct usb_config_descriptor *config =
 			(struct usb_config_descriptor *)ps->dev->rawdescriptors[i];
 		unsigned int length = le16_to_cpu(config->wTotalLength);
 
-		if (pos < last + length) {
-			len = length - (pos - last);
+		if (*ppos < pos + length) {
+			len = length - (*ppos - pos);
 			if (len > nbytes)
 				len = nbytes;
 
 			if (copy_to_user(buf,
-			    ps->dev->rawdescriptors[i] + (pos - last), len)) {
+			    ps->dev->rawdescriptors[i] + (*ppos - pos), len)) {
 				ret = -EFAULT;
 				goto err;
 			}
 
-			pos += len;
+			*ppos += len;
 			buf += len;
 			nbytes -= len;
 			ret += len;
 		}
 
-		last += length;
+		pos += length;
 	}
-	*ppos = pos;
 
 err:
 	up_read(&ps->devsem);
 	return ret;
 }
 
-static inline unsigned int ld2(unsigned int x)
+extern inline unsigned int ld2(unsigned int x)
 {
         unsigned int r = 0;
         
@@ -171,7 +169,7 @@ static inline unsigned int ld2(unsigned int x)
 
 static struct async *alloc_async(unsigned int numisoframes)
 {
-        unsigned int assize = sizeof(struct async) + numisoframes * sizeof(struct iso_packet_descriptor);
+        unsigned int assize = sizeof(struct async) + numisoframes * sizeof(iso_packet_descriptor_t);
         struct async *as = kmalloc(assize, GFP_KERNEL);
         if (!as)
                 return NULL;
@@ -190,7 +188,7 @@ static void free_async(struct async *as)
         kfree(as);
 }
 
-static inline void async_newpending(struct async *as)
+extern __inline__ void async_newpending(struct async *as)
 {
         struct dev_state *ps = as->ps;
         unsigned long flags;
@@ -200,17 +198,18 @@ static inline void async_newpending(struct async *as)
         spin_unlock_irqrestore(&ps->lock, flags);
 }
 
-static inline void async_removepending(struct async *as)
+extern __inline__ void async_removepending(struct async *as)
 {
         struct dev_state *ps = as->ps;
         unsigned long flags;
         
         spin_lock_irqsave(&ps->lock, flags);
-        list_del_init(&as->asynclist);
+        list_del(&as->asynclist);
+        INIT_LIST_HEAD(&as->asynclist);
         spin_unlock_irqrestore(&ps->lock, flags);
 }
 
-static inline struct async *async_getcompleted(struct dev_state *ps)
+extern __inline__ struct async *async_getcompleted(struct dev_state *ps)
 {
         unsigned long flags;
         struct async *as = NULL;
@@ -218,36 +217,43 @@ static inline struct async *async_getcompleted(struct dev_state *ps)
         spin_lock_irqsave(&ps->lock, flags);
         if (!list_empty(&ps->async_completed)) {
                 as = list_entry(ps->async_completed.next, struct async, asynclist);
-                list_del_init(&as->asynclist);
+                list_del(&as->asynclist);
+                INIT_LIST_HEAD(&as->asynclist);
         }
         spin_unlock_irqrestore(&ps->lock, flags);
         return as;
 }
 
-static inline struct async *async_getpending(struct dev_state *ps, void *userurb)
+extern __inline__ struct async *async_getpending(struct dev_state *ps, void *userurb)
 {
         unsigned long flags;
         struct async *as;
+        struct list_head *p;
 
         spin_lock_irqsave(&ps->lock, flags);
-	list_for_each_entry(as, &ps->async_pending, asynclist)
-		if (as->userurb == userurb) {
-			list_del_init(&as->asynclist);
-			spin_unlock_irqrestore(&ps->lock, flags);
-			return as;
-		}
+        for (p = ps->async_pending.next; p != &ps->async_pending; ) {
+                as = list_entry(p, struct async, asynclist);
+                p = p->next;
+                if (as->userurb != userurb)
+                        continue;
+                list_del(&as->asynclist);
+                INIT_LIST_HEAD(&as->asynclist);
+                spin_unlock_irqrestore(&ps->lock, flags);
+                return as;
+        }
         spin_unlock_irqrestore(&ps->lock, flags);
         return NULL;
 }
 
-static void async_completed(struct urb *urb)
+static void async_completed(purb_t urb)
 {
         struct async *as = (struct async *)urb->context;
         struct dev_state *ps = as->ps;
 	struct siginfo sinfo;
 
         spin_lock(&ps->lock);
-        list_move_tail(&as->asynclist, &ps->async_completed);
+        list_del(&as->asynclist);
+        list_add_tail(&as->asynclist, &ps->async_completed);
         spin_unlock(&ps->lock);
         wake_up(&ps->wait);
 	if (as->signr) {
@@ -259,48 +265,28 @@ static void async_completed(struct urb *urb)
 	}
 }
 
-static void destroy_async (struct dev_state *ps, struct list_head *list)
+static void destroy_all_async(struct dev_state *ps)
 {
-	struct async *as;
-	unsigned long flags;
+        struct async *as;
+        unsigned long flags;
 
-	spin_lock_irqsave(&ps->lock, flags);
-	while (!list_empty(list)) {
-		as = list_entry(list->next, struct async, asynclist);
-		list_del_init(&as->asynclist);
-		spin_unlock_irqrestore(&ps->lock, flags);
-		/* usb_unlink_urb calls the completion handler with status == USB_ST_URB_KILLED */
-		usb_unlink_urb(&as->urb);
-		spin_lock_irqsave(&ps->lock, flags);
-	}
-	spin_unlock_irqrestore(&ps->lock, flags);
-	while ((as = async_getcompleted(ps)))
-		free_async(as);
-}
-
-static void destroy_async_on_interface (struct dev_state *ps, unsigned int intf)
-{
-	struct list_head *p, *q, hitlist;
-	unsigned long flags;
-
-	INIT_LIST_HEAD(&hitlist);
-	spin_lock_irqsave(&ps->lock, flags);
-	list_for_each_safe(p, q, &ps->async_pending)
-		if (intf == list_entry(p, struct async, asynclist)->intf)
-			list_move_tail(p, &hitlist);
-	spin_unlock_irqrestore(&ps->lock, flags);
-	destroy_async(ps, &hitlist);
-}
-
-static inline void destroy_all_async(struct dev_state *ps)
-{
-	destroy_async(ps, &ps->async_pending);
+        spin_lock_irqsave(&ps->lock, flags);
+        while (!list_empty(&ps->async_pending)) {
+                as = list_entry(ps->async_pending.next, struct async, asynclist);
+                list_del(&as->asynclist);
+                INIT_LIST_HEAD(&as->asynclist);
+                spin_unlock_irqrestore(&ps->lock, flags);
+                /* usb_unlink_urb calls the completion handler with status == USB_ST_URB_KILLED */
+                usb_unlink_urb(&as->urb);
+                spin_lock_irqsave(&ps->lock, flags);
+        }
+        spin_unlock_irqrestore(&ps->lock, flags);
+        while ((as = async_getcompleted(ps)))
+                free_async(as);
 }
 
 /*
- * interface claims are made only at the request of user level code,
- * which can also release them (explicitly or by closing files).
- * they're also undone when devices disconnect.
+ * interface claiming
  */
 
 static void *driver_probe(struct usb_device *dev, unsigned int intf,
@@ -313,20 +299,7 @@ static void driver_disconnect(struct usb_device *dev, void *context)
 {
 	struct dev_state *ps = (struct dev_state *)context;
 
-	if (!ps)
-		return;
-
-	/* this waits till synchronous requests complete */
-	down_write (&ps->devsem);
-
-	/* prevent new I/O requests */
-	ps->dev = 0;
 	ps->ifclaimed = 0;
-
-	/* force async requests to complete */
-	destroy_all_async (ps);
-
-	up_write (&ps->devsem);
 }
 
 struct usb_driver usbdevfs_driver = {
@@ -531,7 +504,8 @@ static int usbdev_release(struct inode *inode, struct file *file)
 	unsigned int i;
 
 	lock_kernel();
-	list_del_init(&ps->list);
+	list_del(&ps->list);
+	INIT_LIST_HEAD(&ps->list);
 	if (ps->dev) {
 		for (i = 0; ps->ifclaimed && i < 8*sizeof(ps->ifclaimed); i++)
 			if (test_bit(i, &ps->ifclaimed))
@@ -623,12 +597,7 @@ static int proc_bulk(struct dev_state *ps, void *arg)
 			free_page((unsigned long)tbuf);
 			return -EINVAL;
 		}
-		if (usb_excl_lock(dev, 1, 1) != 0) {
-			free_page((unsigned long)tbuf);
-			return -ERESTARTSYS;
-		}
 		i = usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
-		usb_excl_unlock(dev, 1);
 		if (!i && len2) {
 			if (copy_to_user(bulk.data, tbuf, len2)) {
 				free_page((unsigned long)tbuf);
@@ -642,12 +611,7 @@ static int proc_bulk(struct dev_state *ps, void *arg)
 				return -EFAULT;
 			}
 		}
-		if (usb_excl_lock(dev, 2, 1) != 0) {
-			free_page((unsigned long)tbuf);
-			return -ERESTARTSYS;
-		}
 		i = usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
-		usb_excl_unlock(dev, 2);
 	}
 	free_page((unsigned long)tbuf);
 	if (i < 0) {
@@ -793,10 +757,9 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 	struct usbdevfs_iso_packet_desc *isopkt = NULL;
 	struct usb_endpoint_descriptor *ep_desc;
 	struct async *as;
-	struct usb_ctrlrequest *dr = NULL;
+	devrequest *dr = NULL;
 	unsigned int u, totlen, isofrmlen;
 	int ret;
-	int intf = -1;
 
 	if (copy_from_user(&uurb, arg, sizeof(uurb)))
 		return -EFAULT;
@@ -808,9 +771,9 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 	if (uurb.signr != 0 && (uurb.signr < SIGRTMIN || uurb.signr > SIGRTMAX))
 		return -EINVAL;
 	if (!(uurb.type == USBDEVFS_URB_TYPE_CONTROL && (uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) == 0)) {
-		if ((intf = findintfep(ps->dev, uurb.endpoint)) < 0)
-			return intf;
-		if ((ret = checkintf(ps, intf)))
+		if ((ret = findintfep(ps->dev, uurb.endpoint)) < 0)
+			return ret;
+		if ((ret = checkintf(ps, ret)))
 			return ret;
 	}
 	switch(uurb.type) {
@@ -824,23 +787,23 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 		/* min 8 byte setup packet, max arbitrary */
 		if (uurb.buffer_length < 8 || uurb.buffer_length > PAGE_SIZE)
 			return -EINVAL;
-		if (!(dr = kmalloc(sizeof(struct usb_ctrlrequest), GFP_KERNEL)))
+		if (!(dr = kmalloc(sizeof(devrequest), GFP_KERNEL)))
 			return -ENOMEM;
 		if (copy_from_user(dr, (unsigned char*)uurb.buffer, 8)) {
 			kfree(dr);
 			return -EFAULT;
 		}
-		if (uurb.buffer_length < (le16_to_cpup(&dr->wLength) + 8)) {
+		if (uurb.buffer_length < (le16_to_cpup(&dr->length) + 8)) {
 			kfree(dr);
 			return -EINVAL;
 		}
-		if ((ret = check_ctrlrecip(ps, dr->bRequestType, le16_to_cpup(&dr->wIndex)))) {
+		if ((ret = check_ctrlrecip(ps, dr->requesttype, le16_to_cpup(&dr->index)))) {
 			kfree(dr);
 			return ret;
 		}
-		uurb.endpoint = (uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) | (dr->bRequestType & USB_ENDPOINT_DIR_MASK);
+		uurb.endpoint = (uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) | (dr->requesttype & USB_ENDPOINT_DIR_MASK);
 		uurb.number_of_packets = 0;
-		uurb.buffer_length = le16_to_cpup(&dr->wLength);
+		uurb.buffer_length = le16_to_cpup(&dr->length);
 		uurb.buffer += 8;
 		if (!access_ok((uurb.endpoint & USB_DIR_IN) ?  VERIFY_WRITE : VERIFY_READ, uurb.buffer, uurb.buffer_length)) {
 			kfree(dr);
@@ -931,7 +894,6 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 	else
 		as->userbuffer = NULL;
 	as->signr = uurb.signr;
-	as->intf = intf;
 	as->task = current;
 	if (!(uurb.endpoint & USB_DIR_IN)) {
 		if (copy_from_user(as->urb.transfer_buffer, uurb.buffer, as->urb.transfer_buffer_length)) {
@@ -1077,10 +1039,7 @@ static int proc_releaseinterface(struct dev_state *ps, void *arg)
 		return -EFAULT;
 	if ((ret = findintfif(ps->dev, intf)) < 0)
 		return ret;
-	if ((ret = releaseintf(ps, intf)) < 0)
-		return ret;
-	destroy_async_on_interface (ps, intf);
-	return 0;
+	return releaseintf(ps, intf);
 }
 
 static int proc_ioctl (struct dev_state *ps, void *arg)
@@ -1089,8 +1048,6 @@ static int proc_ioctl (struct dev_state *ps, void *arg)
 	int			size;
 	void			*buf = 0;
 	int			retval = 0;
-       struct usb_interface    *ifp = 0;
-       struct usb_driver       *driver = 0;
 
 	/* get input parameters and alloc buffer */
 	if (copy_from_user(&ctrl, (void *) arg, sizeof (ctrl)))
@@ -1108,43 +1065,32 @@ static int proc_ioctl (struct dev_state *ps, void *arg)
 		}
 	}
 
-       if (!ps->dev)
-               retval = -ENODEV;
-       else if (!(ifp = usb_ifnum_to_if (ps->dev, ctrl.ifno)))
-               retval = -EINVAL;
-       else switch (ctrl.ioctl_code) {
+	/* ioctl to device */
+	if (ctrl.ifno < 0) {
+		switch (ctrl.ioctl_code) {
+		/* access/release token for issuing control messages
+		 * ask a particular driver to bind/unbind, ... etc
+		 */
+		}
+		retval = -ENOSYS;
 
-       /* disconnect kernel driver from interface, leaving it unbound.  */
-       case USBDEVFS_DISCONNECT:
-               driver = ifp->driver;
-               if (driver) {
-                       down (&driver->serialize);
-                       dbg ("disconnect '%s' from dev %d interface %d",
-                               driver->name, ps->dev->devnum, ctrl.ifno);
-                       driver->disconnect (ps->dev, ifp->private_data);
-                       usb_driver_release_interface (driver, ifp);
-                       up (&driver->serialize);
-               } else
-                       retval = -ENODATA;
-               break;
-
-       /* let kernel drivers try to (re)bind to the interface */
-       case USBDEVFS_CONNECT:
-               usb_find_interface_driver_for_ifnum (ps->dev, ctrl.ifno);
-               break;
-
-       /* talk directly to the interface's driver */
-       default:
-               driver = ifp->driver;
-               if (driver == 0 || driver->ioctl == 0)
-                       retval = -ENOSYS;
+	/* ioctl to the driver which has claimed a given interface */
+	} else {
+		struct usb_interface	*ifp = 0;
+		if (!ps->dev)
+			retval = -ENODEV;
+		else if (ctrl.ifno >= ps->dev->actconfig->bNumInterfaces)
+			retval = -EINVAL;
 		else {
+			if (!(ifp = usb_ifnum_to_if (ps->dev, ctrl.ifno)))
+				retval = -EINVAL;
+			else if (ifp->driver == 0 || ifp->driver->ioctl == 0)
+				retval = -ENOSYS;
+		}
+		if (retval == 0)
 			/* ifno might usefully be passed ... */
-                       retval = driver->ioctl (ps->dev, ctrl.ioctl_code, buf);
+			retval = ifp->driver->ioctl (ps->dev, ctrl.ioctl_code, buf);
 			/* size = min_t(int, size, retval)? */
-			if (retval == -ENOIOCTLCMD)
-				retval = -ENOTTY;
-               }
 	}
 
 	/* cleanup and return */
@@ -1158,14 +1104,27 @@ static int proc_ioctl (struct dev_state *ps, void *arg)
 	return retval;
 }
 
-static int usbdev_ioctl_exclusive(struct dev_state *ps, struct inode *inode,
-				  unsigned int cmd, unsigned long arg)
+static int usbdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
-	int ret;
+	struct dev_state *ps = (struct dev_state *)file->private_data;
+	int ret = -ENOIOCTLCMD;
 
+	if (!(file->f_mode & FMODE_WRITE))
+		return -EPERM;
+	down_read(&ps->devsem);
+	if (!ps->dev) {
+		up_read(&ps->devsem);
+		return -ENODEV;
+	}
 	switch (cmd) {
 	case USBDEVFS_CONTROL:
 		ret = proc_control(ps, (void *)arg);
+		if (ret >= 0)
+			inode->i_mtime = CURRENT_TIME;
+		break;
+
+	case USBDEVFS_BULK:
+		ret = proc_bulk(ps, (void *)arg);
 		if (ret >= 0)
 			inode->i_mtime = CURRENT_TIME;
 		break;
@@ -1186,6 +1145,14 @@ static int usbdev_ioctl_exclusive(struct dev_state *ps, struct inode *inode,
 			inode->i_mtime = CURRENT_TIME;
 		break;
 
+	case USBDEVFS_GETDRIVER:
+		ret = proc_getdriver(ps, (void *)arg);
+		break;
+
+	case USBDEVFS_CONNECTINFO:
+		ret = proc_connectinfo(ps, (void *)arg);
+		break;
+
 	case USBDEVFS_SETINTERFACE:
 		ret = proc_setintf(ps, (void *)arg);
 		break;
@@ -1204,53 +1171,6 @@ static int usbdev_ioctl_exclusive(struct dev_state *ps, struct inode *inode,
 		ret = proc_unlinkurb(ps, (void *)arg);
 		break;
 
-	case USBDEVFS_CLAIMINTERFACE:
-		ret = proc_claiminterface(ps, (void *)arg);
-		break;
-
-	case USBDEVFS_RELEASEINTERFACE:
-		ret = proc_releaseinterface(ps, (void *)arg);
-		break;
-
-	case USBDEVFS_IOCTL:
-		ret = proc_ioctl(ps, (void *) arg);
-		break;
-
-	default:
-		ret = -ENOTTY;
-	}
-	return ret;
-}
-
-static int usbdev_ioctl(struct inode *inode, struct file *file,
-			unsigned int cmd, unsigned long arg)
-{
-	struct dev_state *ps = file->private_data;
-	int ret;
-
-	if (!(file->f_mode & FMODE_WRITE))
-		return -EPERM;
-	down_read(&ps->devsem);
-	if (!ps->dev) {
-		up_read(&ps->devsem);
-		return -ENODEV;
-	}
-
-	/*
-	 * Some ioctls don't touch the device and can be called without
-	 * grabbing its exclusive_access mutex; they are handled in this
-	 * switch.  Other ioctls which need exclusive_access are handled in
-	 * usbdev_ioctl_exclusive().
-	 */
-	switch (cmd) {
-	case USBDEVFS_GETDRIVER:
-		ret = proc_getdriver(ps, (void *)arg);
-		break;
-
-	case USBDEVFS_CONNECTINFO:
-		ret = proc_connectinfo(ps, (void *)arg);
-		break;
-
 	case USBDEVFS_REAPURB:
 		ret = proc_reapurb(ps, (void *)arg);
 		break;
@@ -1263,32 +1183,17 @@ static int usbdev_ioctl(struct inode *inode, struct file *file,
 		ret = proc_disconnectsignal(ps, (void *)arg);
 		break;
 
-	case USBDEVFS_BULK:
-		ret = proc_bulk(ps, (void *)arg);
-		if (ret >= 0)
-			inode->i_mtime = CURRENT_TIME;
-		break;
-
-	case USBDEVFS_CONTROL:
-	case USBDEVFS_RESETEP:
-	case USBDEVFS_RESET:
-	case USBDEVFS_CLEAR_HALT:
-	case USBDEVFS_SETINTERFACE:
-	case USBDEVFS_SETCONFIGURATION:
-	case USBDEVFS_SUBMITURB:
-	case USBDEVFS_DISCARDURB:
 	case USBDEVFS_CLAIMINTERFACE:
-	case USBDEVFS_RELEASEINTERFACE:
-	case USBDEVFS_IOCTL:
-		ret = -ERESTARTSYS;
-		if (usb_excl_lock(ps->dev, 3, 1) == 0) {
-			ret = usbdev_ioctl_exclusive(ps, inode, cmd, arg);
-			usb_excl_unlock(ps->dev, 3);
-		}
+		ret = proc_claiminterface(ps, (void *)arg);
 		break;
 
-	default:
-		ret = -ENOTTY;
+	case USBDEVFS_RELEASEINTERFACE:
+		ret = proc_releaseinterface(ps, (void *)arg);
+		break;
+
+	case USBDEVFS_IOCTL:
+		ret = proc_ioctl(ps, (void *) arg);
+		break;
 	}
 	up_read(&ps->devsem);
 	if (ret >= 0)

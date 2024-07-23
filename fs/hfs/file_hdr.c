@@ -241,9 +241,7 @@ static struct hfs_hdr_layout *dup_layout(const struct hfs_hdr_layout *old)
 	if (HFS_NEW(new)) {
 		memcpy(new, old, sizeof(*new));
 		for (lcv = 0; lcv < new->entries; ++lcv) {
-			new->order[lcv] = (struct hfs_hdr_descr *)
-					  ((char *)(new->order[lcv]) +
-					   ((char *)new - (char *)old));
+			(char *)(new->order[lcv]) += (char *)new - (char *)old;
 		}
 	}
 	return new;
@@ -386,7 +384,7 @@ static hfs_rwret_t hdr_read(struct file * filp, char * buf,
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 	const struct hfs_hdr_layout *layout;
 	off_t start, length, offset;
-	loff_t pos = *ppos;
+	off_t pos = *ppos;
 	int left, lcv, read = 0;
 
 	if (!S_ISREG(inode->i_mode)) {
@@ -401,7 +399,7 @@ static hfs_rwret_t hdr_read(struct file * filp, char * buf,
 	}
 
 	/* Adjust count to fit within the bounds of the file */
-	if (pos != (unsigned)pos || pos >= inode->i_size || count <= 0) {
+	if ((pos >= inode->i_size) || (count <= 0)) {
 		return 0;
 	} else if (count > inode->i_size - pos) {
 		count = inode->i_size - pos;
@@ -642,18 +640,17 @@ static hfs_rwret_t hdr_write(struct file *filp, const char *buf,
         int left, lcv, written = 0;
 	struct hdr_hdr meta;
 	int built_meta = 0;
-        loff_t pos;
+        off_t pos;
 
 	if (!S_ISREG(inode->i_mode)) {
 		hfs_warn("hfs_hdr_write: mode = %07o\n", inode->i_mode);
 		return -EINVAL;
 	}
-
-	pos = (filp->f_flags & O_APPEND) ? inode->i_size : *ppos;
-
-	if (count <= 0 || pos != (unsigned)pos) {
+	if (count <= 0) {
 		return 0;
 	}
+
+	pos = (filp->f_flags & O_APPEND) ? inode->i_size : *ppos;
 
 	if (!HFS_I(inode)->layout) {
 		HFS_I(inode)->layout = dup_layout(HFS_I(inode)->default_layout);

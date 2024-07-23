@@ -148,8 +148,6 @@ static int q40fb_set_var(struct fb_var_screeninfo *var, int con,
 		return -EINVAL;
 	if(var->activate!=FB_ACTIVATE_NOW)
 		return -EINVAL;
-// ignore broken tools trying to set these values
-#if 0
 	if(var->pixclock!=0)
 		return -EINVAL;
 	if(var->left_margin!=0)
@@ -164,7 +162,6 @@ static int q40fb_set_var(struct fb_var_screeninfo *var, int con,
 		return -EINVAL;
 	if(var->vmode!=FB_VMODE_NONINTERLACED)
 		return -EINVAL;
-#endif
 
 	return 0;
 
@@ -190,7 +187,8 @@ static int q40_getcolreg(unsigned regno, unsigned *red, unsigned *green,
 }
 
 static int q40_setcolreg(unsigned regno, unsigned red, unsigned green,
-			 unsigned blue, unsigned transp, struct fb_info *info)
+			 unsigned blue, unsigned transp,
+			 const struct fb_info *info)
 {
     /*
      *  Set a single color register. The values supplied have a 16 bit
@@ -295,7 +293,7 @@ static void q40fb_set_disp(int con, struct fb_info *info)
 
   if (con<0) con=0;
 
-   display->screen_base = (char *)fix.smem_start;
+   display->screen_base = fix.smem_start;
    display->visual = fix.visual;
    display->type = fix.type;
    display->type_aux = fix.type_aux;

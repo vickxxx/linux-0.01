@@ -361,6 +361,10 @@ static void receive_chars(struct sab82532 *info,
 		writeb(SAB82532_CMDR_RMC, &info->regs->w.cmdr);
 	}
 
+#ifdef CONFIG_SERIAL_CONSOLE
+	if (info->is_console)
+		wake_up(&keypress_wait);
+#endif
 	if (!tty)
 		return;
 
@@ -669,7 +673,10 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		tty_wakeup(tty);
+		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+		    tty->ldisc.write_wakeup)
+			(tty->ldisc.write_wakeup)(tty);
+		wake_up_interruptible(&tty->write_wait);
 	}
 }
 
@@ -1203,7 +1210,10 @@ static void sab82532_flush_buffer(struct tty_struct *tty)
 	info->xmit.head = info->xmit.tail = 0;
 	restore_flags(flags);
 
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 /*
@@ -1661,7 +1671,8 @@ static void sab82532_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
@@ -2530,6 +2541,13 @@ sab82532_console_write(struct console *con, const char *s, unsigned n)
 	sab82532_tec_wait(info);
 }
 
+static int
+sab82532_console_wait_key(struct console *con)
+{
+	sleep_on(&keypress_wait);
+	return 0;
+}
+
 static kdev_t
 sab82532_console_device(struct console *con)
 {
@@ -2604,6 +2622,7 @@ static struct console sab82532_console = {
 	name:		"ttyS",
 	write:		sab82532_console_write,
 	device:		sab82532_console_device,
+	wait_key:	sab82532_console_wait_key,
 	setup:		sab82532_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

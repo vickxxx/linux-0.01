@@ -27,7 +27,7 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_super.c,v 1.29 2002/01/02 22:02:12 hch Exp hch $"
+#ident "$Id: vxfs_super.c,v 1.26 2001/08/07 16:13:30 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - superblock related routines.
@@ -61,6 +61,19 @@ static struct super_operations vxfs_super_ops = {
 	.put_super =		vxfs_put_super,
 	.statfs =		vxfs_statfs,
 };
+
+static __inline__ u_long
+vxfs_validate_bsize(kdev_t dev)
+{
+	u_long			bsize;
+	
+	bsize = get_hardsect_size(dev);
+	if (bsize < BLOCK_SIZE)
+		bsize = BLOCK_SIZE;
+
+	set_blocksize(dev, bsize);
+	return (bsize);
+}
 
 /**
  * vxfs_put_super - free superblock resources
@@ -140,24 +153,21 @@ vxfs_read_super(struct super_block *sbp, void *dp, int silent)
 {
 	struct vxfs_sb_info	*infp;
 	struct vxfs_sb		*rsbp;
-	struct buffer_head	*bp = NULL;
+	struct buffer_head	*bp;
 	u_long			bsize;
+	kdev_t			dev = sbp->s_dev;
 
-	infp = kmalloc(sizeof(*infp), GFP_KERNEL);
+	infp = kmalloc(sizeof(struct vxfs_sb_info), GFP_KERNEL);
 	if (!infp) {
 		printk(KERN_WARNING "vxfs: unable to allocate incore superblock\n");
 		return NULL;
 	}
-	memset(infp, 0, sizeof(*infp));
+	memset(infp, 0, sizeof(struct vxfs_sb_info));
 
-	bsize = sb_min_blocksize(sbp, BLOCK_SIZE);
-	if (!bsize) {
-		printk(KERN_WARNING "vxfs: unable to set blocksize\n");
-		goto out;
-	}
+	bsize = vxfs_validate_bsize(dev);
 
-	bp = sb_bread(sbp, 1);
-	if (!bp || !buffer_mapped(bp)) {
+	bp = bread(dev, 1, bsize);
+	if (!bp) {
 		if (!silent) {
 			printk(KERN_WARNING
 				"vxfs: unable to read disk superblock\n");
@@ -184,15 +194,31 @@ vxfs_read_super(struct super_block *sbp, void *dp, int silent)
 #endif
 
 	sbp->s_magic = rsbp->vs_magic;
+	sbp->s_blocksize = rsbp->vs_bsize;
 	sbp->u.generic_sbp = (void *)infp;
 
 	infp->vsi_raw = rsbp;
 	infp->vsi_bp = bp;
 	infp->vsi_oltext = rsbp->vs_oltext[0];
 	infp->vsi_oltsize = rsbp->vs_oltsize;
+	
 
-	if (!sb_set_blocksize(sbp, rsbp->vs_bsize)) {
-		printk(KERN_WARNING "vxfs: unable to set final block size\n");
+	switch (rsbp->vs_bsize) {
+	case 1024:
+		sbp->s_blocksize_bits = 10;
+		break;
+	case 2048:
+		sbp->s_blocksize_bits = 11;
+		break;
+	case 4096:
+		sbp->s_blocksize_bits = 12;
+		break;
+	default:
+		if (!silent) {
+			printk(KERN_WARNING
+				"vxfs: unsupported blocksise: %d\n",
+				rsbp->vs_bsize);
+		}
 		goto out;
 	}
 

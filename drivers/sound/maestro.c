@@ -2756,7 +2756,7 @@ static int ess_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
@@ -2771,7 +2771,7 @@ static int ess_ioctl(struct inode *inode, struct file *file, unsigned int cmd, u
 		if (s->dma_dac.mapped)
 			s->dma_dac.count &= s->dma_dac.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
@@ -3359,7 +3359,7 @@ parse_power(struct ess_card *card, struct pci_dev *pcidev)
 	/* check to see if we have a capabilities list in
 		the config register */
 	pci_read_config_word(pcidev, PCI_STATUS, &w);
-	if(!(w & PCI_STATUS_CAP_LIST)) return 0;
+	if(! w & PCI_STATUS_CAP_LIST) return 0;
 
 	/* walk the list, starting at the head. */
 	pci_read_config_byte(pcidev,PCI_CAPABILITY_LIST,&next);
@@ -3569,19 +3569,9 @@ maestro_probe(struct pci_dev *pcidev,const struct pci_device_id *pdid)
 static void maestro_remove(struct pci_dev *pcidev) {
 	struct ess_card *card = pci_get_drvdata(pcidev);
 	int i;
-	u32 n;
 	
 	/* XXX maybe should force stop bob, but should be all 
 		stopped by _release by now */
-
-	/* Turn off hardware volume control interrupt.
-	   This has to come before we leave the IRQ below,
-	   or a crash results if a button is pressed ! */
-
-	n = inw(card->iobase+0x18);
-	n&=~(1<<6);
-	outw(n, card->iobase+0x18);
-
 	free_irq(card->irq, card);
 	unregister_sound_mixer(card->dev_mixer);
 	for(i=0;i<NR_DSPS;i++)

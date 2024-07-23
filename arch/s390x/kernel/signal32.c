@@ -30,7 +30,7 @@
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
-#define _USER_PSW_MASK32 0x0705C00080000000
+#define _USER_PSW_MASK32 0x0701C00080000000
 
 typedef struct 
 {
@@ -302,7 +302,7 @@ static int save_sigregs32(struct pt_regs *regs,_sigregs32 *sregs)
 		save_fp_regs(&fpregs);
 		__put_user(fpregs.fpc, &sregs->fpregs.fpc);
 		for(i=0; i<NUM_FPRS; i++)
-			err |= __put_user(fpregs.fprs[i].ui, &sregs->fpregs.fprs[i].d);  
+			err |= __put_user(fpregs.fprs[i].d, &sregs->fpregs.fprs[i].d);  
 	}
 	return(err);
 	
@@ -331,7 +331,7 @@ static int restore_sigregs32(struct pt_regs *regs,_sigregs32 *sregs)
 		(regs->psw.addr&PSW_ADDR_DEBUGCHANGE);
 		__get_user(fpregs.fpc, &sregs->fpregs.fpc);
                 for(i=0; i<NUM_FPRS; i++)
-                        err |= __get_user(fpregs.fprs[i].ui, &sregs->fpregs.fprs[i].d);              
+                        err |= __get_user(fpregs.fprs[i].d, &sregs->fpregs.fprs[i].d);              
 		if(!err)
 			restore_fp_regs(&fpregs);
 	}
@@ -474,10 +474,6 @@ static void setup_frame32(int sig, struct k_sigaction *ka,
 			goto give_sigsegv;
         }
 
-	/* Set up backchain. */
-	if (__put_user((unsigned int) regs->gprs[15], (unsigned int *) frame))
-		goto give_sigsegv;
-
 	/* Set up registers for signal handler */
 	regs->gprs[15] = (addr_t)frame;
 	regs->psw.addr = FIX_PSW(ka->sa.sa_handler);
@@ -530,10 +526,6 @@ static void setup_rt_frame32(int sig, struct k_sigaction *ka, siginfo_t *info,
 		err |= __put_user(S390_SYSCALL_OPCODE | __NR_rt_sigreturn,
 		                  (u16 *)(frame->retcode));
 	}
-
-	/* Set up backchain. */
-	if (__put_user((unsigned int) regs->gprs[15], (unsigned int *) frame))
-		goto give_sigsegv;
 
 	/* Set up registers for signal handler */
 	regs->gprs[15] = (addr_t)frame;
@@ -683,7 +675,7 @@ int do_signal32(struct pt_regs *regs, sigset_t *oldset)
 				continue;
 
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
+			case SIGCONT: case SIGCHLD: case SIGWINCH:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -707,7 +699,10 @@ int do_signal32(struct pt_regs *regs, sigset_t *oldset)
                                 /* FALLTHRU */
 
 			default:
-				sig_exit(signr, exit_code, &info);
+				sigaddset(&current->pending.signal, signr);
+				recalc_sigpending(current);
+				current->flags |= PF_SIGNALED;
+				do_exit(exit_code);
 				/* NOTREACHED */
 			}
 		}

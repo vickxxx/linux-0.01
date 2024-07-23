@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.siginfo.h 1.5 05/17/01 18:14:25 cort
+ */
 #ifndef _PPC_SIGINFO_H
 #define _PPC_SIGINFO_H
 
@@ -105,7 +108,6 @@ typedef struct siginfo {
 #define SI_MESGQ	-3		/* sent by real time mesq state change */
 #define SI_ASYNCIO	-4		/* sent by AIO completion */
 #define SI_SIGIO	-5		/* sent by queued SIGIO */
-#define SI_TKILL	-6		/* sent by tkill system call */
 
 #define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
 #define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
@@ -182,8 +184,8 @@ typedef struct siginfo {
 
 /*
  * sigevent definitions
- *
- * It seems likely that SIGEV_THREAD will have to be handled from
+ * 
+ * It seems likely that SIGEV_THREAD will have to be handled from 
  * userspace, libpthread transmuting it to SIGEV_SIGNAL, which the
  * thread manager then catches and does the appropriate nonsense.
  * However, everything is written out here so as to not get lost.

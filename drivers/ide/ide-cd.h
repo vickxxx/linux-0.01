@@ -38,9 +38,7 @@
 /************************************************************************/
 
 #define SECTOR_BITS 		9
-#ifndef SECTOR_SIZE
 #define SECTOR_SIZE		(1 << SECTOR_BITS)
-#endif
 #define SECTORS_PER_FRAME	(CD_FRAMESIZE >> SECTOR_BITS)
 #define SECTOR_BUFFER_SIZE	(CD_FRAMESIZE * 32)
 #define SECTORS_BUFFER		(SECTOR_BUFFER_SIZE >> SECTOR_BITS)
@@ -437,7 +435,7 @@ struct atapi_mechstat_header {
 
 	byte     curlba[3];
 	byte     nslots;
-	__u16	slot_tablelen;
+	__u8 short slot_tablelen;
 };
 
 

@@ -20,7 +20,7 @@
 #endif
 
 /*
- * Our node_data structure for discontiguous memory.
+ * Our node_data structure for discontigous memory.
  */
 
 static bootmem_data_t node_bootmem_data[NR_NODES];

@@ -30,6 +30,7 @@
  *    Gareth Hughes <gareth@valinux.com>
  */
 
+#define __NO_VERSION__
 #include "drmP.h"
 #include <linux/poll.h>
 
@@ -37,7 +38,7 @@
 
 int DRM(open_helper)(struct inode *inode, struct file *filp, drm_device_t *dev)
 {
-	int	     minor = minor(inode->i_rdev);
+	kdev_t	     minor = MINOR(inode->i_rdev);
 	drm_file_t   *priv;
 
 	if (filp->f_flags & O_EXCL)   return -EBUSY; /* No exclusive opens */
@@ -94,8 +95,8 @@ int DRM(flush)(struct file *filp)
 	drm_file_t    *priv   = filp->private_data;
 	drm_device_t  *dev    = priv->dev;
 
-	DRM_DEBUG("pid = %d, device = 0x%lx, open_count = %d\n",
-		  current->pid, (long)dev->device, dev->open_count);
+	DRM_DEBUG("pid = %d, device = 0x%x, open_count = %d\n",
+		  current->pid, dev->device, dev->open_count);
 	return 0;
 }
 
@@ -105,7 +106,7 @@ int DRM(fasync)(int fd, struct file *filp, int on)
 	drm_device_t  *dev    = priv->dev;
 	int	      retcode;
 
-	DRM_DEBUG("fd = %d, device = 0x%lx\n", fd, (long)dev->device);
+	DRM_DEBUG("fd = %d, device = 0x%x\n", fd, dev->device);
 	retcode = fasync_helper(fd, filp, on, &dev->buf_async);
 	if (retcode < 0) return retcode;
 	return 0;
@@ -124,31 +125,21 @@ ssize_t DRM(read)(struct file *filp, char *buf, size_t count, loff_t *off)
 	int	      avail;
 	int	      send;
 	int	      cur;
-	DECLARE_WAITQUEUE(wait, current);
 
 	DRM_DEBUG("%p, %p\n", dev->buf_rp, dev->buf_wp);
 
-	add_wait_queue(&dev->buf_readers, &wait);
-	set_current_state(TASK_INTERRUPTIBLE);
 	while (dev->buf_rp == dev->buf_wp) {
 		DRM_DEBUG("  sleeping\n");
 		if (filp->f_flags & O_NONBLOCK) {
-			remove_wait_queue(&dev->buf_readers, &wait);
-			set_current_state(TASK_RUNNING);
 			return -EAGAIN;
 		}
-		schedule(); /* wait for dev->buf_readers */
+		interruptible_sleep_on(&dev->buf_readers);
 		if (signal_pending(current)) {
 			DRM_DEBUG("  interrupted\n");
-			remove_wait_queue(&dev->buf_readers, &wait);
-			set_current_state(TASK_RUNNING);
 			return -ERESTARTSYS;
 		}
 		DRM_DEBUG("  awake\n");
-		set_current_state(TASK_INTERRUPTIBLE);
 	}
-	remove_wait_queue(&dev->buf_readers, &wait);
-	set_current_state(TASK_RUNNING);
 
 	left  = (dev->buf_rp + DRM_BSZ - dev->buf_wp) % DRM_BSZ;
 	avail = DRM_BSZ - left;
@@ -200,8 +191,24 @@ int DRM(write_string)(drm_device_t *dev, const char *s)
 		send -= count;
 	}
 
-	if (dev->buf_async) kill_fasync(&dev->buf_async, SIGIO, POLL_IN);
+#if LINUX_VERSION_CODE < 0x020315 && !defined(KILLFASYNCHASTHREEPARAMETERS)
+	/* The extra parameter to kill_fasync was added in 2.3.21, and is
+           _not_ present in _stock_ 2.2.14 and 2.2.15.  However, some
+           distributions patch 2.2.x kernels to add this parameter.  The
+           Makefile.linux attempts to detect this addition and defines
+           KILLFASYNCHASTHREEPARAMETERS if three parameters are found. */
+	if (dev->buf_async) kill_fasync(dev->buf_async, SIGIO);
+#else
 
+				/* Parameter added in 2.3.21. */
+#if LINUX_VERSION_CODE < 0x020400
+	if (dev->buf_async) kill_fasync(dev->buf_async, SIGIO, POLL_IN);
+#else
+				/* Type of first parameter changed in
+                                   Linux 2.4.0-test2... */
+	if (dev->buf_async) kill_fasync(&dev->buf_async, SIGIO, POLL_IN);
+#endif
+#endif
 	DRM_DEBUG("waking\n");
 	wake_up_interruptible(&dev->buf_readers);
 	return 0;

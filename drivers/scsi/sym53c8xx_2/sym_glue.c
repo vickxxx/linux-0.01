@@ -125,7 +125,7 @@ void sym_mdelay(int ms) { mdelay(ms); }
  *
  *  The whole SCSI sub-system under Linux is basically single-threaded.
  *  Everything, including low-level driver interrupt routine, happens 
- *  with the `io_request_lock' held.
+ *  whith the `io_request_lock' held.
  *  The sym53c8xx-1.x drivers series ran their interrupt code using a 
  *  spin mutex per controller. This added complexity without improving 
  *  scalability significantly. the sym-2 driver still use a spinlock 
@@ -224,26 +224,15 @@ static u_long __init pci_map_mem(u_long base, u_long size)
 {
 	u_long page_base	= ((u_long) base) & PAGE_MASK;
 	u_long page_offs	= ((u_long) base) - page_base;
-	u_long page_remapped;
-
-	spin_unlock_irq(&io_request_lock);
-	page_remapped = (u_long) ioremap(page_base, page_offs+size);
-	spin_lock_irq(&io_request_lock);
+	u_long page_remapped	= (u_long) ioremap(page_base, page_offs+size);
 
 	return page_remapped? (page_remapped + page_offs) : 0UL;
 }
 
-static void pci_unmap_mem(u_long vaddr,
-                          u_long size,
-                          int holding_io_request_lock)
+static void __init pci_unmap_mem(u_long vaddr, u_long size)
 {
-	if (vaddr) {
-		if (holding_io_request_lock)
-			spin_unlock_irq(&io_request_lock);
+	if (vaddr)
 		iounmap((void *) (vaddr & PAGE_MASK));
-		if (holding_io_request_lock)
-			spin_lock_irq(&io_request_lock);
-	}
 }
 #endif
 
@@ -1160,6 +1149,7 @@ prepare:
 	switch(to_do) {
 	default:
 	case SYM_EH_DO_IGNORE:
+		goto finish;
 		break;
 	case SYM_EH_DO_WAIT:
 #if LINUX_VERSION_CODE > LinuxVersionCode(2,3,0)
@@ -1203,6 +1193,7 @@ prepare:
 		to_do = SYM_EH_DO_IGNORE;
 	}
 
+finish:
 	ep->to_do = to_do;
 	/* Complete the command with locks held as required by the driver */
 	if (to_do == SYM_EH_DO_COMPLETE)
@@ -1478,8 +1469,7 @@ static void sym_exec_user_command (hcb_p np, struct sym_usrcmd *uc)
 					tp->tinfo.goal.offset  = 0;
 					break;
 				}
-				if (uc->data <= 9 && np->minsync_dt &&
-				    np->scsi_mode == SMODE_LVD) {
+				if (uc->data <= 9 && np->minsync_dt) {
 					if (uc->data < np->minsync_dt)
 						uc->data = np->minsync_dt;
 					tp->tinfo.goal.options = PPR_OPT_DT;
@@ -1851,7 +1841,7 @@ static int sym53c8xx_proc_info(char *buffer, char **start, off_t offset,
 /*
  *	Free controller resources.
  */
-static void sym_free_resources(hcb_p np, int holding_io_request_lock)
+static void sym_free_resources(hcb_p np)
 {
 	/*
 	 *  Free O/S specific resources.
@@ -1862,13 +1852,9 @@ static void sym_free_resources(hcb_p np, int holding_io_request_lock)
 		release_region(np->s.io_port, np->s.io_ws);
 #ifndef SYM_OPT_NO_BUS_MEMORY_MAPPING
 	if (np->s.mmio_va)
-		pci_unmap_mem(np->s.mmio_va,
-		              np->s.io_ws,
-		              holding_io_request_lock);
+		pci_unmap_mem(np->s.mmio_va, np->s.io_ws);
 	if (np->s.ram_va)
-		pci_unmap_mem(np->s.ram_va,
-		              np->ram_ws,
-		              holding_io_request_lock);
+		pci_unmap_mem(np->s.ram_va, np->ram_ws);
 #endif
 	/*
 	 *  Free O/S independant resources.
@@ -1904,7 +1890,7 @@ static int sym_setup_bus_dma_mask(hcb_p np)
 					sym_name(np));
 		}
 		else {
-			if (pci_set_dma_mask(np->s.device, 0xffffffffUL))
+			if (!pci_set_dma_mask(np->s.device, 0xffffffffUL))
 				goto out_err32;
 		}
 	}
@@ -2154,7 +2140,6 @@ sym_attach (Scsi_Host_Template *tpnt, int unit, sym_device *dev)
 	instance->max_cmd_len	= 16;
 #endif
 	instance->select_queue_depths = sym53c8xx_select_queue_depths;
-	instance->highmem_io	= 1;
 
 	SYM_UNLOCK_HCB(np, flags);
 
@@ -2170,7 +2155,7 @@ attach_failed:
 	if (!instance) return -1;
 	printf_info("%s: giving up ...\n", sym_name(np));
 	if (np)
-		sym_free_resources(np, 1);
+		sym_free_resources(np);
 	scsi_unregister(instance);
 
         return -1;
@@ -2212,7 +2197,7 @@ static void __init sym_get_nvram(sym_device *devp, sym_nvram *nvp)
 #ifdef SYM_CONF_IOMAPPED
 	release_region(devp->s.io_port, 128);
 #else
-	pci_unmap_mem((u_long) devp->s.mmio_va, 128ul, 1);
+	pci_unmap_mem((u_long) devp->s.mmio_va, 128ul);
 #endif
 }
 #endif	/* SYM_CONF_NVRAM_SUPPORT */
@@ -2471,8 +2456,8 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, sym_device *device)
 	u_char pci_fix_up = SYM_SETUP_PCI_FIX_UP;
 	u_char revision;
 	u_int irq;
-	u_long base, base_2, base_io; 
-	u_long base_c, base_2_c, io_port; 
+	u_long base, base_2, io_port; 
+	u_long base_c, base_2_c; 
 	int i;
 	sym_chip *chip;
 
@@ -2489,7 +2474,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, sym_device *device)
 	device_id = PciDeviceId(pdev);
 	irq	  = PciIrqLine(pdev);
 
-	i = pci_get_base_address(pdev, 0, &base_io);
+	i = pci_get_base_address(pdev, 0, &io_port);
 	io_port = pci_get_base_cookie(pdev, 0);
 
 	base_c = pci_get_base_cookie(pdev, i);
@@ -2507,9 +2492,9 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, sym_device *device)
 	/*
 	 *  If user excluded this chip, donnot initialize it.
 	 */
-	if (base_io) {
+	if (io_port) {
 		for (i = 0 ; i < 8 ; i++) {
-			if (sym_driver_setup.excludes[i] == base_io)
+			if (sym_driver_setup.excludes[i] == io_port)
 				return -1;
 		}
 	}
@@ -2566,7 +2551,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, sym_device *device)
 		ram_ptr = pci_map_mem(base_2_c, ram_size);
 		if (ram_ptr) {
 			ram_val = readl_raw(ram_ptr + ram_size - 16);
-			pci_unmap_mem(ram_ptr, ram_size, 1);
+			pci_unmap_mem(ram_ptr, ram_size);
 			if (ram_val == 0x52414944) {
 				printf_info("%s: not initializing, "
 				            "driven by RAID controller.\n",
@@ -2729,7 +2714,7 @@ static u_short sym_chip_ids[] __initdata	= {
  *  differ and attach them using the order in the NVRAM.
  *
  *  If no NVRAM is found or data appears invalid attach boards in 
- *  the order they are detected.
+ *  the the order they are detected.
  */
 int __init sym53c8xx_detect(Scsi_Host_Template *tpnt)
 {
@@ -2995,7 +2980,7 @@ static int sym_detach(hcb_p np)
 	/*
 	 *  Free host resources
 	 */
-	sym_free_resources(np, 0);
+	sym_free_resources(np);
 
 	return 1;
 }

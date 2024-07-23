@@ -30,7 +30,7 @@
 #ifndef _VXFS_SUPER_H_
 #define _VXFS_SUPER_H_
 
-#ident "$Id: vxfs.h 1.12 2001/12/28 19:48:03 hch Exp $"
+#ident "$Id: vxfs.h 1.11 2001/05/21 15:40:28 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - superblock structure.
@@ -39,7 +39,6 @@
  * superblocks of the Veritas Filesystem.
  */
 #include <linux/types.h>
-#include "vxfs_kcompat.h"
 
 
 /*

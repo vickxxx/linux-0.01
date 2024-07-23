@@ -1,4 +1,4 @@
-/* $Id: eicon_idi.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: eicon_idi.c,v 1.41.6.4 2001/11/06 20:58:29 kai Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
  * IDI interface 
@@ -25,7 +25,7 @@
 
 #undef EICON_FULL_SERVICE_OKTETT
 
-char *eicon_idi_revision = "$Revision: 1.1.4.1 $";
+char *eicon_idi_revision = "$Revision: 1.41.6.4 $";
 
 eicon_manifbuf *manbuf;
 
@@ -2054,8 +2054,7 @@ idi_faxdata_send(eicon_card *ccard, eicon_chan *chan, struct sk_buff *skb)
 				OutBuf.Len++;
 			} else {
 				*OutBuf.Next++ = 0;
-				*(__u16 *) OutBuf.Next = (__u16) LineBuf.Len;
-				OutBuf.Next += sizeof(__u16);
+				*((__u16 *) OutBuf.Next)++ = (__u16) LineBuf.Len;
 				OutBuf.Len += 3;
 			}
 			memcpy(OutBuf.Next, LineBuf.Data, LineBuf.Len);

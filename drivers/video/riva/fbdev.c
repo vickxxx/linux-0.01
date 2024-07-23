@@ -1,12 +1,9 @@
 /*
- * linux/drivers/video/riva/fbdev.c
+ * linux/drivers/video/riva/fbdev.c - nVidia RIVA 128/TNT/TNT2 fb driver
  *
- * nVidia RIVA 128/TNT/TNT2/GeForce2/3 fb driver
- *
- * Maintained by Ani Joshi <ajoshi@kernel.crashing.org>
+ * Maintained by Ani Joshi <ajoshi@shell.unixbox.com>
  *
  * Copyright 1999-2000 Jeff Garzik
- * Copyright 2000-2003 Ani Joshi
  *
  * Contributors:
  *
@@ -58,7 +55,7 @@
 
 
 /* version number of this driver */
-#define RIVAFB_VERSION "0.9.4"
+#define RIVAFB_VERSION "0.9.2a"
 
 
 
@@ -98,11 +95,7 @@
 #define CURSOR_HIDE_DELAY		(20)
 #define CURSOR_SHOW_DELAY		(3)
 
-#ifdef __BIG_ENDIAN
-#define CURSOR_COLOR		0xff7f
-#else
 #define CURSOR_COLOR		0x7fff
-#endif
 #define TRANSPARENT_COLOR	0x0000
 #define MAX_CURS		32
 
@@ -117,7 +110,7 @@
 static void rivafb_blank(int blank, struct fb_info *info);
 
 extern void riva_setup_accel(struct rivafb_info *rinfo);
-extern void wait_for_idle(struct rivafb_info *rinfo);
+extern inline void wait_for_idle(struct rivafb_info *rinfo);
 
 
 
@@ -143,11 +136,6 @@ enum riva_chips {
 	CH_GEFORCE2_GTS,
 	CH_GEFORCE2_ULTRA,
 	CH_QUADRO2_PRO,
-	CH_GEFORCE2_GO,
-        CH_GEFORCE3,
-        CH_GEFORCE3_1,
-        CH_GEFORCE3_2,
-        CH_QUADRO_DDC
 };
 
 /* directly indexed by riva_chips enum, above */
@@ -170,11 +158,6 @@ static struct riva_chip_info {
 	{ "GeForce2-GTS", NV_ARCH_10},
 	{ "GeForce2-ULTRA", NV_ARCH_10},
 	{ "Quadro2-PRO", NV_ARCH_10},
-        { "GeForce2-Go", NV_ARCH_10},
-        { "GeForce3", NV_ARCH_20}, 
-        { "GeForce3 Ti 200", NV_ARCH_20},
-        { "GeForce3 Ti 500", NV_ARCH_20},
-        { "Quadro DDC", NV_ARCH_20}
 };
 
 static struct pci_device_id rivafb_pci_tbl[] __devinitdata = {
@@ -212,16 +195,6 @@ static struct pci_device_id rivafb_pci_tbl[] __devinitdata = {
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_ULTRA },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO2_PRO,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO2_PRO },
-        { PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE2_GO,
-          PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE2_GO },
-        { PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3,
-          PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3 },
-        { PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_1,
-          PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3_1 },
-        { PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_GEFORCE3_2,
-          PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_GEFORCE3_2 },
-        { PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_QUADRO_DDC,
-          PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_QUADRO_DDC },
 	{ 0, } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, rivafb_pci_tbl);
@@ -870,7 +843,6 @@ static void riva_load_video_mode(struct rivafb_info *rinfo,
 	struct riva_regs newmode;
 	int bpp, width, hDisplaySize, hDisplay, hStart,
 	    hEnd, hTotal, height, vDisplay, vStart, vEnd, vTotal, dotClock;
-	int hBlankStart, hBlankEnd, vBlankStart, vBlankEnd;
 
 	/* time to calculate */
 
@@ -887,8 +859,6 @@ static void riva_load_video_mode(struct rivafb_info *rinfo,
 		video_mode->hsync_len) / 8 - 1;
 	hTotal = (hDisplaySize + video_mode->right_margin +
 		  video_mode->hsync_len + video_mode->left_margin) / 8 - 1;
-	hBlankStart = hDisplay;
-	hBlankEnd = hTotal;
 	height = video_mode->yres_virtual;
 	vDisplay = video_mode->yres - 1;
 	vStart = video_mode->yres + video_mode->lower_margin - 1;
@@ -896,63 +866,35 @@ static void riva_load_video_mode(struct rivafb_info *rinfo,
 	       video_mode->vsync_len - 1;
 	vTotal = video_mode->yres + video_mode->lower_margin +
 		 video_mode->vsync_len + video_mode->upper_margin + 2;
-	vBlankStart = vDisplay;
-	vBlankEnd = vTotal;
 	dotClock = 1000000000 / video_mode->pixclock;
 
 	memcpy(&newmode, &reg_template, sizeof(struct riva_regs));
 
-	newmode.ext.screen = SetBitField(hBlankEnd,6:6,4:4)
-                  | SetBitField(vBlankStart,10:10,3:3)
-                  | SetBitField(vStart,10:10,2:2)
-                  | SetBitField(vDisplay,10:10,1:1)
-                  | SetBitField(vTotal,10:10,0:0);
-    
-    	newmode.ext.horiz  = SetBitField(hTotal,8:8,0:0)
-                  | SetBitField(hDisplay,8:8,1:1)
-                  | SetBitField(hBlankStart,8:8,2:2)
-                  | SetBitField(hStart,8:8,3:3);
-
-    	newmode.ext.extra  = SetBitField(vTotal,11:11,0:0)
-                    | SetBitField(vDisplay,11:11,2:2)
-                    | SetBitField(vStart,11:11,4:4)
-                    | SetBitField(vBlankStart,11:11,6:6);
-
-	if (rinfo->riva.flatPanel) {
-		vStart = vTotal - 3;
-		vEnd = vTotal - 2;
-		vBlankStart = vStart;
-		hStart = hTotal - 3;
-		hEnd = hTotal - 2;
-		hBlankEnd = hTotal + 4;
-	}
-
 	newmode.crtc[0x0] = Set8Bits (hTotal - 4);
 	newmode.crtc[0x1] = Set8Bits (hDisplay);
-	newmode.crtc[0x2] = Set8Bits (hBlankStart);
-	newmode.crtc[0x3] = SetBitField(hBlankEnd,4:0,4:0)
-                | SetBit(7);
+	newmode.crtc[0x2] = Set8Bits (hDisplay);
+	newmode.crtc[0x3] = SetBitField (hTotal, 4: 0, 4:0) | SetBit (7);
 	newmode.crtc[0x4] = Set8Bits (hStart);
-	newmode.crtc[0x5] = SetBitField (hBlankEnd, 5: 5, 7:7)
- 		| SetBitField (hEnd, 4: 0, 4:0);
+	newmode.crtc[0x5] = SetBitField (hTotal, 5: 5, 7:7)
+		| SetBitField (hEnd, 4: 0, 4:0);
 	newmode.crtc[0x6] = SetBitField (vTotal, 7: 0, 7:0);
 	newmode.crtc[0x7] = SetBitField (vTotal, 8: 8, 0:0)
 		| SetBitField (vDisplay, 8: 8, 1:1)
 		| SetBitField (vStart, 8: 8, 2:2)
-		| SetBitField (vBlankStart, 8: 8, 3:3)
+		| SetBitField (vDisplay, 8: 8, 3:3)
 		| SetBit (4)
 		| SetBitField (vTotal, 9: 9, 5:5)
 		| SetBitField (vDisplay, 9: 9, 6:6)
 		| SetBitField (vStart, 9: 9, 7:7);
-	newmode.crtc[0x9] = SetBitField (vBlankStart, 9: 9, 5:5)
+	newmode.crtc[0x9] = SetBitField (vDisplay, 9: 9, 5:5)
 		| SetBit (6);
 	newmode.crtc[0x10] = Set8Bits (vStart);
 	newmode.crtc[0x11] = SetBitField (vEnd, 3: 0, 3:0)
 		| SetBit (5);
 	newmode.crtc[0x12] = Set8Bits (vDisplay);
 	newmode.crtc[0x13] = ((width / 8) * ((bpp + 1) / 8)) & 0xFF;
-	newmode.crtc[0x15] = Set8Bits (vBlankStart);
-	newmode.crtc[0x16] = Set8Bits (vBlankEnd + 1);
+	newmode.crtc[0x15] = Set8Bits (vDisplay);
+	newmode.crtc[0x16] = Set8Bits (vTotal + 1);
 
 	newmode.ext.bpp = bpp;
 	newmode.ext.width = width;
@@ -963,31 +905,11 @@ static void riva_load_video_mode(struct rivafb_info *rinfo,
 				  hTotal, height, vDisplay, vStart, vEnd,
 				  vTotal, dotClock);
 
-	newmode.ext.scale = rinfo->riva.PRAMDAC[0x00000848/4] & 0xfff000ff;
-
-	if (rinfo->riva.flatPanel) {
-		newmode.ext.pixel |= (1 << 7);
-		newmode.ext.scale |= (1 << 8);
-	}
-
-	newmode.ext.vpll2 = rinfo->riva.PRAMDAC[0x00000520/4];
-
-#if defined(__powerpc__)
-	/*
-	 * XXX only Mac cards use second DAC for flat panel
-	 */
-	if (rinfo->riva.flatPanel) {
-		newmode.ext.pllsel |= 0x20000800;
-		newmode.ext.vpll2 = newmode.ext.vpll;
-	}
-#endif
 	rinfo->current_state = newmode;
 	riva_load_state(rinfo, &rinfo->current_state);
 
 	rinfo->riva.LockUnlock(&rinfo->riva, 0); /* important for HW cursor */
 	rivafb_download_cursor(rinfo);
-
-	rivafb_blank(0, (struct fb_info *)rinfo);
 }
 
 /**
@@ -1367,6 +1289,9 @@ static int rivafb_get_fix(struct fb_fix_screeninfo *fix, int con,
 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
 	sprintf(fix->id, "nVidia %s", rivainfo->drvr_name);
 
+	fix->smem_start = rivainfo->fb_base_phys;
+	fix->smem_len = rivainfo->ram_amount;
+
 	fix->type = p->type;
 	fix->type_aux = p->type_aux;
 	fix->visual = p->visual;
@@ -1380,7 +1305,7 @@ static int rivafb_get_fix(struct fb_fix_screeninfo *fix, int con,
 	fix->mmio_start = rivainfo->ctrl_base_phys;
 	fix->mmio_len = rivainfo->base0_region_size;
 	fix->smem_start = rivainfo->fb_base_phys;
-	fix->smem_len = rivainfo->ram_amount;
+	fix->smem_len = rivainfo->base1_region_size;
 
 	switch (rivainfo->riva.Architecture) {
 	case NV_ARCH_03:
@@ -1390,7 +1315,6 @@ static int rivafb_get_fix(struct fb_fix_screeninfo *fix, int con,
 		fix->accel = FB_ACCEL_NV4;
 		break;
 	case NV_ARCH_10:	/* FIXME: ID for GeForce */
-	case NV_ARCH_20:
 		fix->accel = FB_ACCEL_NV4;
 		break;
 
@@ -1838,10 +1762,6 @@ static int __devinit riva_init_disp_var(struct rivafb_info *rinfo)
 		fb_find_mode(&rinfo->disp.var, &rinfo->info, mode_option,
 			     NULL, 0, NULL, 8);
 #endif
-	if (rinfo->use_default_var)
-		/* We will use the modified default var */
-		rinfo->disp.var = rivafb_default_var;
-
 	return 0;
 }
 
@@ -1912,117 +1832,6 @@ static int __devinit riva_set_fbinfo(struct rivafb_info *rinfo)
 	return 0;
 }
 
-#ifdef CONFIG_ALL_PPC
-static int riva_get_EDID_OF(struct rivafb_info *rinfo)
-{
-	struct device_node *dp;
-	unsigned char *pedid = NULL;
-
-	dp = pci_device_to_OF_node(rinfo->pd);
-	pedid = (unsigned char *)get_property(dp, "EDID,B", 0);
-
-	if (pedid) {
-		rinfo->EDID = pedid;
-		return 1;
-	} else
-		return 0;
-}
-#endif /* CONFIG_ALL_PPC */
-
-static int riva_dfp_parse_EDID(struct rivafb_info *rinfo)
-{
-	unsigned char *block = rinfo->EDID;
-
-	if (!block)
-		return 0;
-
-	/* jump to detailed timing block section */
-	block += 54;
-
-        rinfo->clock = (block[0] + (block[1] << 8));
-        rinfo->panel_xres = (block[2] + ((block[4] & 0xf0) << 4));
-        rinfo->hblank = (block[3] + ((block[4] & 0x0f) << 8));
-        rinfo->panel_yres = (block[5] + ((block[7] & 0xf0) << 4));
-        rinfo->vblank = (block[6] + ((block[7] & 0x0f) << 8));
-        rinfo->hOver_plus = (block[8] + ((block[11] & 0xc0) << 2));
-        rinfo->hSync_width = (block[9] + ((block[11] & 0x30) << 4));
-        rinfo->vOver_plus = ((block[10] >> 4) + ((block[11] & 0x0c) << 2));
-        rinfo->vSync_width = ((block[10] & 0x0f) + ((block[11] & 0x03) << 4));
-        rinfo->interlaced = ((block[17] & 0x80) >> 7);
-        rinfo->synct = ((block[17] & 0x18) >> 3);
-        rinfo->misc = ((block[17] & 0x06) >> 1);
-        rinfo->hAct_high = rinfo->vAct_high = 0;
-        if (rinfo->synct == 3) {
-                if (rinfo->misc & 2)
-                        rinfo->hAct_high = 1;
-                if (rinfo->misc & 1)
-                        rinfo->vAct_high = 1;
-	}
-
-	printk("rivafb: detected DFP panel size from EDID: %dx%d\n",
-		rinfo->panel_xres, rinfo->panel_yres);
-
-	rinfo->got_dfpinfo = 1;
-
-	return 1;
-}
-
-static void riva_update_default_var(struct rivafb_info *rinfo)
-{
-	struct fb_var_screeninfo *var = &rivafb_default_var;
-
-        var->xres = rinfo->panel_xres;
-        var->yres = rinfo->panel_yres;
-        var->xres_virtual = rinfo->panel_xres;
-        var->yres_virtual = rinfo->panel_yres;
-        var->xoffset = var->yoffset = 0;
-        var->bits_per_pixel = 8;
-        var->pixclock = 100000000 / rinfo->clock;
-        var->left_margin = (rinfo->hblank - rinfo->hOver_plus - rinfo->hSync_width);
-        var->right_margin = rinfo->hOver_plus;
-        var->upper_margin = (rinfo->vblank - rinfo->vOver_plus - rinfo->vSync_width);
-        var->lower_margin = rinfo->vOver_plus;
-        var->hsync_len = rinfo->hSync_width;
-        var->vsync_len = rinfo->vSync_width;
-        var->sync = 0;
-
-        if (rinfo->synct == 3) {
-                if (rinfo->hAct_high)
-                        var->sync |= FB_SYNC_HOR_HIGH_ACT;
-                if (rinfo->vAct_high)
-                        var->sync |= FB_SYNC_VERT_HIGH_ACT;
-        }
- 
-        var->vmode = 0;
-        if (rinfo->interlaced)
-                var->vmode |= FB_VMODE_INTERLACED;
-
-	if (!noaccel)
-		var->accel_flags |= FB_ACCELF_TEXT;
-        
-        rinfo->use_default_var = 1;
-}
-
-
-static void riva_get_EDID(struct rivafb_info *rinfo)
-{
-#ifdef CONFIG_ALL_PPC
-	if (!riva_get_EDID_OF(rinfo))
-		printk("rivafb: could not retrieve EDID from OF\n");
-#else
-	/* XXX use other methods later */
-#endif
-}
-
-
-static void riva_get_dfpinfo(struct rivafb_info *rinfo)
-{
-	if (riva_dfp_parse_EDID(rinfo))
-		riva_update_default_var(rinfo);
-
-	rinfo->riva.flatPanel = rinfo->got_dfpinfo;
-}
-
 
 
 /* ------------------------------------------------------------------------- *
@@ -2053,18 +1862,24 @@ static int __devinit rivafb_init_one(struct pci_dev *pd,
 	rinfo->base0_region_size = pci_resource_len(pd, 0);
 	rinfo->base1_region_size = pci_resource_len(pd, 1);
 
-	{
-		/* enable IO and mem if not already done */
-		unsigned short cmd;
+	assert(rinfo->base0_region_size >= 0x00800000);	/* from GGI */
+	assert(rinfo->base1_region_size >= 0x01000000);	/* from GGI */
 
-		pci_read_config_word(pd, PCI_COMMAND, &cmd);
-		cmd |= (PCI_COMMAND_IO | PCI_COMMAND_MEMORY);
-		pci_write_config_word(pd, PCI_COMMAND, cmd);
-	}
- 
 	rinfo->ctrl_base_phys = pci_resource_start(rinfo->pd, 0);
 	rinfo->fb_base_phys = pci_resource_start(rinfo->pd, 1);
 
+	if (!request_mem_region(rinfo->ctrl_base_phys,
+				rinfo->base0_region_size, "rivafb")) {
+		printk(KERN_ERR PFX "cannot reserve MMIO region\n");
+		goto err_out_kfree;
+	}
+
+	if (!request_mem_region(rinfo->fb_base_phys,
+				rinfo->base1_region_size, "rivafb")) {
+		printk(KERN_ERR PFX "cannot reserve FB region\n");
+		goto err_out_free_base0;
+	}
+	
 	rinfo->ctrl_base = ioremap(rinfo->ctrl_base_phys,
 				   rinfo->base0_region_size);
 	if (!rinfo->ctrl_base) {
@@ -2072,9 +1887,26 @@ static int __devinit rivafb_init_one(struct pci_dev *pd,
 		goto err_out_free_base1;
 	}
 	
-	riva_get_EDID(rinfo);
-
-	riva_get_dfpinfo(rinfo);
+	rinfo->fb_base = ioremap(rinfo->fb_base_phys,
+				 rinfo->base1_region_size);
+	if (!rinfo->fb_base) {
+		printk(KERN_ERR PFX "cannot ioremap FB base\n");
+		goto err_out_iounmap_ctrl;
+	}
+	
+#ifdef CONFIG_MTRR
+	if (!nomtrr) {
+		rinfo->mtrr.vram = mtrr_add(rinfo->fb_base_phys,
+					    rinfo->base1_region_size, MTRR_TYPE_WRCOMB, 1);
+		if (rinfo->mtrr.vram < 0) {
+			printk(KERN_ERR PFX "unable to setup MTRR\n");
+		} else {
+			rinfo->mtrr.vram_valid = 1;
+			/* let there be speed */
+			printk(KERN_INFO PFX "RIVA MTRR set to ON\n");
+		}
+	}
+#endif /* CONFIG_MTRR */
 
 	rinfo->riva.EnableIRQ = 0;
 	rinfo->riva.PRAMDAC = (unsigned *)(rinfo->ctrl_base + 0x00680000);
@@ -2092,95 +1924,31 @@ static int __devinit rivafb_init_one(struct pci_dev *pd,
 
 	rinfo->riva.IO = (MISCin(rinfo) & 0x01) ? 0x3D0 : 0x3B0;
 
-	if (rinfo->riva.Architecture == NV_ARCH_03) {
-		/*
-		 * We have to map the full BASE_1 aperture for Riva128's
-		 * because they use the PRAMIN set in "framebuffer" space
-		 */
-		if (!request_mem_region(rinfo->fb_base_phys,
-					rinfo->base1_region_size, "rivafb")) {
-			printk(KERN_ERR PFX "cannot reserve FB region\n");
-			goto err_out_free_base0;
-		}
-	
-		rinfo->fb_base = ioremap(rinfo->fb_base_phys,
-					 rinfo->base1_region_size);
-		if (!rinfo->fb_base) {
-			printk(KERN_ERR PFX "cannot ioremap FB base\n");
-			goto err_out_iounmap_ctrl;
-		}
-	}
-
-
 	switch (rinfo->riva.Architecture) {
 	case NV_ARCH_03:
 		rinfo->riva.PRAMIN = (unsigned *)(rinfo->fb_base + 0x00C00000);
 		break;
 	case NV_ARCH_04:
 	case NV_ARCH_10:
-	case NV_ARCH_20:
 		rinfo->riva.PCRTC = (unsigned *)(rinfo->ctrl_base + 0x00600000);
 		rinfo->riva.PRAMIN = (unsigned *)(rinfo->ctrl_base + 0x00710000);
 		break;
 	}
 
-#if defined(__powerpc__)
-	/*
-	 * XXX Mac cards use the second DAC for the panel
-	 */
-	if (rinfo->riva.flatPanel) {
-		printk("rivafb: using second CRTC\n");
-		rinfo->riva.PCIO = rinfo->riva.PCIO + 0x2000;
-		rinfo->riva.PCRTC = rinfo->riva.PCRTC + 0x800;
-		rinfo->riva.PRAMDAC = rinfo->riva.PRAMDAC + 0x800;
-		rinfo->riva.PDIO = rinfo->riva.PDIO + 0x2000;
-	}
-#endif
-
 	RivaGetConfig(&rinfo->riva);
 
-	rinfo->ram_amount = rinfo->riva.RamAmountKBytes * 1024;
-	rinfo->dclk_max = rinfo->riva.MaxVClockFreqKHz * 1000;
+	/* back to normal */
 
-	if (rinfo->riva.Architecture != NV_ARCH_03) {
-		/*
-		 * Now the _normal_ chipsets can just map the amount of
-		 * real physical ram instead of the whole aperture
-		 */
-		if (!request_mem_region(rinfo->fb_base_phys,
-					rinfo->ram_amount, "rivafb")) {
-			printk(KERN_ERR PFX "cannot reserve FB region\n");
-			goto err_out_free_base0;
-		}
-	
-		rinfo->fb_base = ioremap(rinfo->fb_base_phys,
-					 rinfo->ram_amount);
-		if (!rinfo->fb_base) {
-			printk(KERN_ERR PFX "cannot ioremap FB base\n");
-			goto err_out_iounmap_ctrl;
-		}
-	}
-
-#ifdef CONFIG_MTRR
-	if (!nomtrr) {
-		rinfo->mtrr.vram = mtrr_add(rinfo->fb_base_phys,
-					    rinfo->ram_amount,
-					    MTRR_TYPE_WRCOMB, 1);
-		if (rinfo->mtrr.vram < 0) {
-			printk(KERN_ERR PFX "unable to setup MTRR\n");
-		} else {
-			rinfo->mtrr.vram_valid = 1;
-			/* let there be speed */
-			printk(KERN_INFO PFX "RIVA MTRR set to ON\n");
-		}
-	}
-#endif /* CONFIG_MTRR */
+	assert(rinfo->pd != NULL);
 
 	/* unlock io */
 	CRTCout(rinfo, 0x11, 0xFF);	/* vgaHWunlock() + riva unlock (0x7F) */
 	rinfo->riva.LockUnlock(&rinfo->riva, 0);
 
 	riva_save_state(rinfo, &rinfo->initial_state);
+
+	rinfo->ram_amount = rinfo->riva.RamAmountKBytes * 1024;
+	rinfo->dclk_max = rinfo->riva.MaxVClockFreqKHz * 1000;
 
 	if (!nohwcursor) rinfo->cursor = rivafb_init_cursor(rinfo);
 
@@ -2200,7 +1968,7 @@ static int __devinit rivafb_init_one(struct pci_dev *pd,
 	pci_set_drvdata(pd, rinfo);
 
 	printk(KERN_INFO PFX
-		"PCI nVidia NV%x framebuffer ver %s (%s, %dMB @ 0x%lX)\n",
+		"PCI nVidia NV%d framebuffer ver %s (%s, %dMB @ 0x%lX)\n",
 		rinfo->riva.Architecture,
 		RIVAFB_VERSION,
 		rinfo->drvr_name,
@@ -2221,6 +1989,7 @@ err_out_free_base1:
 	release_mem_region(rinfo->fb_base_phys, rinfo->base1_region_size);
 err_out_free_base0:
 	release_mem_region(rinfo->ctrl_base_phys, rinfo->base0_region_size);
+err_out_kfree:
 	kfree(rinfo);
 err_out:
 	return -ENODEV;
@@ -2244,7 +2013,7 @@ static void __devexit rivafb_remove_one(struct pci_dev *pd)
 #ifdef CONFIG_MTRR
 	if (board->mtrr.vram_valid)
 		mtrr_del(board->mtrr.vram, board->fb_base_phys,
-			 board->ram_amount);
+			 board->base1_region_size);
 #endif /* CONFIG_MTRR */
 
 	iounmap(board->ctrl_base);
@@ -2253,7 +2022,7 @@ static void __devexit rivafb_remove_one(struct pci_dev *pd)
 	release_mem_region(board->ctrl_base_phys,
 			   board->base0_region_size);
 	release_mem_region(board->fb_base_phys,
-			   board->ram_amount);
+			   board->base1_region_size);
 
 	kfree(board);
 
@@ -2313,7 +2082,7 @@ static struct pci_driver rivafb_driver = {
 	name:		"rivafb",
 	id_table:	rivafb_pci_tbl,
 	probe:		rivafb_init_one,
-	remove:		__devexit_p(rivafb_remove_one),
+	remove:		rivafb_remove_one,
 };
 
 

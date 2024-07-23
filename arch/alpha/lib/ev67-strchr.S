@@ -16,7 +16,7 @@
  * Try not to change the actual algorithm if possible for consistency.
  */
 
-#include <asm/regdef.h>
+#include <alpha/regdef.h>
 
 	.set noreorder
 	.set noat

@@ -36,9 +36,6 @@
  * Al Viro too.
  * Jens Axboe <axboe@suse.de>, Nov 2000
  *
- * Support up to 256 loop devices
- * Heinz Mauelshagen <mge@sistina.com>, Feb 2002
- *
  * Still To Fix:
  * - Advisory locking is ignored here. 
  * - Should use an own CAP_* category instead of CAP_SYS_ADMIN 
@@ -154,7 +151,7 @@ struct loop_func_table *xfer_funcs[MAX_LO_CRYPT] = {
 
 #define MAX_DISK_SIZE 1024*1024*1024
 
-static int compute_loop_size(struct loop_device *lo, struct dentry * lo_dentry, kdev_t lodev)
+static unsigned long compute_loop_size(struct loop_device *lo, struct dentry * lo_dentry, kdev_t lodev)
 {
 	if (S_ISREG(lo_dentry->d_inode->i_mode))
 		return (lo_dentry->d_inode->i_size - lo->lo_offset) >> BLOCK_SIZE_BITS;
@@ -199,9 +196,9 @@ static int lo_send(struct loop_device *lo, struct buffer_head *bh, int bsize,
 		page = grab_cache_page(mapping, index);
 		if (!page)
 			goto fail;
-		kaddr = kmap(page);
 		if (aops->prepare_write(file, page, offset, offset+size))
 			goto unlock;
+		kaddr = page_address(page);
 		flush_dcache_page(page);
 		transfer_result = lo_do_transfer(lo, WRITE, kaddr + offset, data, size, IV);
 		if (transfer_result) {
@@ -216,7 +213,6 @@ static int lo_send(struct loop_device *lo, struct buffer_head *bh, int bsize,
 			goto unlock;
 		if (transfer_result)
 			goto unlock;
-		kunmap(page);
 		data += size;
 		len -= size;
 		offset = 0;
@@ -229,7 +225,6 @@ static int lo_send(struct loop_device *lo, struct buffer_head *bh, int bsize,
 	return 0;
 
 unlock:
-	kunmap(page);
 	UnlockPage(page);
 	page_cache_release(page);
 fail:
@@ -420,7 +415,6 @@ static struct buffer_head *loop_get_buffer(struct loop_device *lo,
 			break;
 
 		run_task_queue(&tq_disk);
-		set_current_state(TASK_INTERRUPTIBLE);
 		schedule_timeout(HZ);
 	} while (1);
 	memset(bh, 0, sizeof(*bh));
@@ -440,7 +434,6 @@ static struct buffer_head *loop_get_buffer(struct loop_device *lo,
 			break;
 
 		run_task_queue(&tq_disk);
-		set_current_state(TASK_INTERRUPTIBLE);
 		schedule_timeout(HZ);
 	} while (1);
 
@@ -487,7 +480,9 @@ static int loop_make_request(request_queue_t *q, int rw, struct buffer_head *rbh
 		goto err;
 	}
 
-	rbh = blk_queue_bounce(q, rw, rbh);
+#if CONFIG_HIGHMEM
+	rbh = create_bounce(rw, rbh);
+#endif
 
 	/*
 	 * file backed, queue for loop_thread to handle
@@ -567,7 +562,6 @@ static int loop_thread(void *data)
 
 	daemonize();
 	exit_files(current);
-	reparent_to_init();
 
 	sprintf(current->comm, "loop%d", lo->lo_number);
 
@@ -576,12 +570,13 @@ static int loop_thread(void *data)
 	flush_signals(current);
 	spin_unlock_irq(&current->sigmask_lock);
 
+	current->policy = SCHED_OTHER;
+	current->nice = -20;
+
 	spin_lock_irq(&lo->lo_lock);
 	lo->lo_state = Lo_bound;
 	atomic_inc(&lo->lo_pending);
 	spin_unlock_irq(&lo->lo_lock);
-
-	current->flags |= PF_NOIO;
 
 	/*
 	 * up sem, we are running
@@ -645,10 +640,6 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file, kdev_t dev,
 
 	if (S_ISBLK(inode->i_mode)) {
 		lo_device = inode->i_rdev;
-		if (lo_device == dev) {
-			error = -EBUSY;
-			goto out_putf;
-		}
 	} else if (S_ISREG(inode->i_mode)) {
 		struct address_space_operations *aops = inode->i_mapping->a_ops;
 		/*
@@ -682,7 +673,7 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file, kdev_t dev,
 	lo->ioctl = NULL;
 	figure_loop_size(lo);
 	lo->old_gfp_mask = inode->i_mapping->gfp_mask;
-	inode->i_mapping->gfp_mask &= ~(__GFP_IO|__GFP_FS);
+	inode->i_mapping->gfp_mask = GFP_NOIO;
 
 	bs = 0;
 	if (blksize_size[MAJOR(lo_device)])
@@ -693,23 +684,12 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file, kdev_t dev,
 	set_blocksize(dev, bs);
 
 	lo->lo_bh = lo->lo_bhtail = NULL;
-	error = kernel_thread(loop_thread, lo,
-	    CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-	if (error < 0)
-		goto out_clr;
-	down(&lo->lo_sem); /* wait for the thread to start */
+	kernel_thread(loop_thread, lo, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	down(&lo->lo_sem);
 
 	fput(file);
 	return 0;
 
- out_clr:
-	lo->lo_backing_file = NULL;
-	lo->lo_device = 0;
-	lo->lo_flags = 0;
-	loop_sizes[lo->lo_number] = 0;
-	inode->i_mapping->gfp_mask = lo->old_gfp_mask;
-	lo->lo_state = Lo_unbound;
-	fput(file); /* yes, have to do it twice */
  out_putf:
 	fput(file);
  out:
@@ -904,7 +884,6 @@ static int lo_ioctl(struct inode * inode, struct file * file,
 		break;
 	case BLKBSZGET:
 	case BLKBSZSET:
-	case BLKSSZGET:
 		err = blk_ioctl(inode->i_rdev, cmd, arg);
 		break;
 	default:
@@ -980,12 +959,12 @@ static struct block_device_operations lo_fops = {
  * And now the modules code and kernel interface.
  */
 MODULE_PARM(max_loop, "i");
-MODULE_PARM_DESC(max_loop, "Maximum number of loop devices (1-256)");
+MODULE_PARM_DESC(max_loop, "Maximum number of loop devices (1-255)");
 MODULE_LICENSE("GPL");
 
 int loop_register_transfer(struct loop_func_table *funcs)
 {
-	if ((unsigned)funcs->number >= MAX_LO_CRYPT || xfer_funcs[funcs->number])
+	if ((unsigned)funcs->number > MAX_LO_CRYPT || xfer_funcs[funcs->number])
 		return -EINVAL;
 	xfer_funcs[funcs->number] = funcs;
 	return 0; 
@@ -1016,9 +995,9 @@ int __init loop_init(void)
 {
 	int	i;
 
-	if ((max_loop < 1) || (max_loop > 256)) {
+	if ((max_loop < 1) || (max_loop > 255)) {
 		printk(KERN_WARNING "loop: invalid max_loop (must be between"
-				    " 1 and 256), using default (8)\n");
+				    " 1 and 255), using default (8)\n");
 		max_loop = 8;
 	}
 
@@ -1028,6 +1007,11 @@ int __init loop_init(void)
 		return -EIO;
 	}
 
+	devfs_handle = devfs_mk_dir(NULL, "loop", NULL);
+	devfs_register_series(devfs_handle, "%u", max_loop, DEVFS_FL_DEFAULT,
+			      MAJOR_NR, 0,
+			      S_IFBLK | S_IRUSR | S_IWUSR | S_IRGRP,
+			      &lo_fops, NULL);
 
 	loop_dev = kmalloc(max_loop * sizeof(struct loop_device), GFP_KERNEL);
 	if (!loop_dev)
@@ -1060,21 +1044,13 @@ int __init loop_init(void)
 	for (i = 0; i < max_loop; i++)
 		register_disk(NULL, MKDEV(MAJOR_NR, i), 1, &lo_fops, 0);
 
-	devfs_handle = devfs_mk_dir(NULL, "loop", NULL);
-	devfs_register_series(devfs_handle, "%u", max_loop, DEVFS_FL_DEFAULT,
-			      MAJOR_NR, 0,
-			      S_IFBLK | S_IRUSR | S_IWUSR | S_IRGRP,
-			      &lo_fops, NULL);
-
 	printk(KERN_INFO "loop: loaded (max %d devices)\n", max_loop);
 	return 0;
 
-out_blksizes:
-	kfree(loop_sizes);
 out_sizes:
 	kfree(loop_dev);
-	if (devfs_unregister_blkdev(MAJOR_NR, "loop"))
-		printk(KERN_WARNING "loop: cannot unregister blkdev\n");
+out_blksizes:
+	kfree(loop_sizes);
 	printk(KERN_ERR "loop: ran out of memory\n");
 	return -ENOMEM;
 }
@@ -1084,6 +1060,7 @@ void loop_exit(void)
 	devfs_unregister(devfs_handle);
 	if (devfs_unregister_blkdev(MAJOR_NR, "loop"))
 		printk(KERN_WARNING "loop: cannot unregister blkdev\n");
+
 	kfree(loop_dev);
 	kfree(loop_sizes);
 	kfree(loop_blksizes);

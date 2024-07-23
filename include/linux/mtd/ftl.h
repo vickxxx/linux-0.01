@@ -1,5 +1,5 @@
 /*
- * $Id: ftl.h,v 1.6 2003/01/24 13:20:04 dwmw2 Exp $
+ * $Id: ftl.h,v 1.5 2001/06/02 20:35:51 dwmw2 Exp $
  * 
  * Derived from (and probably identical to):
  * ftl.h 1.7 1999/10/25 20:23:17
@@ -15,7 +15,7 @@
  * limitations under the License. 
  *
  * The initial developer of the original code is David A. Hinds
- * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
+ * <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the

@@ -1,6 +1,9 @@
 /*
- * Locks for smp ppc
- *
+ * BK Id: SCCS/s.locks.c 1.11 08/19/01 22:27:32 paulus
+ */
+/*
+ * Locks for smp ppc 
+ * 
  * Written by Cort Dougan (cort@cs.nmt.edu)
  */
 
@@ -13,7 +16,7 @@
 #include <asm/system.h>
 #include <asm/io.h>
 
-#if SPINLOCK_DEBUG
+#ifdef SPINLOCK_DEBUG
 
 #undef INIT_STUCK
 #define INIT_STUCK 200000000 /*0xffffffff*/
@@ -32,9 +35,8 @@ static unsigned long __spin_trylock(volatile unsigned long *lock)
 	__asm__ __volatile__ ("\n\
 1:	lwarx	%0,0,%1\n\
 	cmpwi	0,%0,0\n\
-	bne	2f\n"
-	PPC405_ERR77(0,%1)
-"	stwcx.	%2,0,%1\n\
+	bne	2f\n\
+	stwcx.	%2,0,%1\n\
 	bne-	1b\n\
 	isync\n\
 2:"
@@ -70,7 +72,7 @@ int spin_trylock(spinlock_t *lock)
 {
 	if (__spin_trylock(&lock->lock))
 		return 0;
-	lock->owner_cpu = smp_processor_id();
+	lock->owner_cpu = smp_processor_id(); 
 	lock->owner_pc = (unsigned long)__builtin_return_address(0);
 	return 1;
 }
@@ -101,7 +103,7 @@ void _read_lock(rwlock_t *rw)
 	unsigned long stuck = INIT_STUCK;
 	int cpu = smp_processor_id();
 
-again:
+again:	
 	/* get our read lock in there */
 	atomic_inc((atomic_t *) &(rw)->lock);
 	if ( (signed long)((rw)->lock) < 0) /* someone has a write lock */
@@ -153,7 +155,7 @@ again:
 		}
 		goto again;
 	}
-
+	
 	if ( (rw)->lock & ~(1<<31)) /* someone has a read lock */
 	{
 		/* clear our write lock and wait for reads to go away */

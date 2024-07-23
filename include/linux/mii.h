@@ -70,8 +70,6 @@
 #define ADVERTISE_LPACK         0x4000  /* Ack link partners response  */
 #define ADVERTISE_NPAGE         0x8000  /* Next page bit               */
 
-#define ADVERTISE_FULL (ADVERTISE_100FULL | ADVERTISE_10FULL | \
-			ADVERTISE_CSMA)
 #define ADVERTISE_ALL (ADVERTISE_10HALF | ADVERTISE_10FULL | \
                        ADVERTISE_100HALF | ADVERTISE_100FULL)
 
@@ -105,49 +103,11 @@
 
 /* This structure is used in all SIOCxMIIxxx ioctl calls */
 struct mii_ioctl_data {
-	__u16		phy_id;
-	__u16		reg_num;
-	__u16		val_in;
-	__u16		val_out;
+	u16		phy_id;
+	u16		reg_num;
+	u16		val_in;
+	u16		val_out;
 };
-
-#ifdef __KERNEL__
-
-#include <linux/if.h>
-
-struct ethtool_cmd;
-
-struct mii_if_info {
-	int phy_id;
-	int advertising;
-	int phy_id_mask;
-	int reg_num_mask;
-
-	unsigned int full_duplex : 1;	/* is full duplex? */
-	unsigned int force_media : 1;	/* is autoneg. disabled? */
-
-	struct net_device *dev;
-	int (*mdio_read) (struct net_device *dev, int phy_id, int location);
-	void (*mdio_write) (struct net_device *dev, int phy_id, int location, int val);
-};
-
-extern int mii_link_ok (struct mii_if_info *mii);
-extern int mii_nway_restart (struct mii_if_info *mii);
-extern int mii_ethtool_gset(struct mii_if_info *mii, struct ethtool_cmd *ecmd);
-extern int mii_ethtool_sset(struct mii_if_info *mii, struct ethtool_cmd *ecmd);
-extern void mii_check_link (struct mii_if_info *mii);
-extern unsigned int mii_check_media (struct mii_if_info *mii,
-				     unsigned int ok_to_print,
-				     unsigned int init_media);
-extern int generic_mii_ioctl(struct mii_if_info *mii_if,
-                      	     struct mii_ioctl_data *mii_data, int cmd,
-			     unsigned int *duplex_changed);
-
-
-static inline struct mii_ioctl_data *if_mii(struct ifreq *rq)
-{
-	return (struct mii_ioctl_data *) &rq->ifr_ifru;
-}
 
 
 /**
@@ -201,5 +161,5 @@ static inline unsigned int mii_duplex (unsigned int duplex_lock,
 	return 0;
 }
 
-#endif /* __KERNEL__ */
+
 #endif /* __LINUX_MII_H__ */

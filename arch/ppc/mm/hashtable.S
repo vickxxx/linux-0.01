@@ -1,9 +1,12 @@
 /*
+ * BK Id: SCCS/s.hashtable.S 1.18 08/15/01 22:43:07 paulus
+ */
+/*
  *  arch/ppc/kernel/hashtable.S
  *
  *  $Id: hashtable.S,v 1.6 1999/10/08 01:56:15 paulus Exp $
  *
- *  PowerPC version
+ *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *  Rewritten by Cort Dougan (cort@cs.nmt.edu) for PReP
  *    Copyright (C) 1996 Cort Dougan <cort@cs.nmt.edu>
@@ -20,16 +23,15 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *
+ *	
  */
 
 #include <linux/config.h>
+#include "../kernel/ppc_asm.h"
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/cputable.h>
-#include <asm/ppc_asm.h>
-#include <kernel/ppc_defs.h>
 
 #ifdef CONFIG_SMP
 	.comm	hash_table_lock,4
@@ -168,7 +170,7 @@ retry:
 	lwz	r23,GPR23(r21)
 	lwz	r21,GPR21(r21)
 	RFI
-
+	
 #ifdef CONFIG_SMP
 hash_page_out:
 	eieio
@@ -327,9 +329,28 @@ _GLOBAL(create_hpte)
 	rlwimi	r5,r5,32-2,31,31	/* _PAGE_USER -> PP lsb */
 	ori	r8,r8,0xe14		/* clear out reserved bits and M */
 	andc	r8,r5,r8		/* PP = user? (rw&dirty? 2: 3): 0 */
-BEGIN_FTR_SECTION
+#ifdef CONFIG_SMP
 	ori	r8,r8,_PAGE_COHERENT	/* set M (coherence required) */
-END_FTR_SECTION_IFSET(CPU_FTR_NEED_COHERENT)
+#endif
+
+#ifdef CONFIG_POWER4
+	/*
+	 * XXX hack hack hack - translate 32-bit "physical" addresses
+	 * in the linux page tables to 42-bit real addresses in such
+	 * a fashion that we can get at the I/O we need to access.
+	 *	-- paulus
+	 */
+	cmpwi	r8,0
+	rlwinm	r0,r8,16,16,30
+	bge	57f
+	cmplwi	r0,0xfe00
+	li	r0,0x3fd
+	bne	56f
+	li	r0,0x3ff
+56:	sldi	r0,r0,32
+	or	r8,r8,r0
+57:
+#endif
 
 	/* Construct the high word of the PPC-style PTE (r5) */
 #ifndef CONFIG_PPC64BRIDGE

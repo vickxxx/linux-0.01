@@ -75,7 +75,7 @@
 
 #ifndef __ASSEMBLY__
 
-static inline unsigned long sun4c_get_synchronous_error(void)
+extern __inline__ unsigned long sun4c_get_synchronous_error(void)
 {
 	unsigned long sync_err;
 
@@ -85,7 +85,7 @@ static inline unsigned long sun4c_get_synchronous_error(void)
 	return sync_err;
 }
 
-static inline unsigned long sun4c_get_synchronous_address(void)
+extern __inline__ unsigned long sun4c_get_synchronous_address(void)
 {
 	unsigned long sync_addr;
 
@@ -96,7 +96,7 @@ static inline unsigned long sun4c_get_synchronous_address(void)
 }
 
 /* SUN4C pte, segmap, and context manipulation */
-static inline unsigned long sun4c_get_segmap(unsigned long addr)
+extern __inline__ unsigned long sun4c_get_segmap(unsigned long addr)
 {
   register unsigned long entry;
 
@@ -107,16 +107,15 @@ static inline unsigned long sun4c_get_segmap(unsigned long addr)
   return entry;
 }
 
-static inline void sun4c_put_segmap(unsigned long addr, unsigned long entry)
+extern __inline__ void sun4c_put_segmap(unsigned long addr, unsigned long entry)
 {
 
   __asm__ __volatile__("\n\tstba %1, [%0] %2; nop; nop; nop;\n\t" : :
 		       "r" (addr), "r" (entry),
-		       "i" (ASI_SEGMAP)
-		       : "memory");
+		       "i" (ASI_SEGMAP));
 }
 
-static inline unsigned long sun4c_get_pte(unsigned long addr)
+extern __inline__ unsigned long sun4c_get_pte(unsigned long addr)
 {
   register unsigned long entry;
 
@@ -126,15 +125,14 @@ static inline unsigned long sun4c_get_pte(unsigned long addr)
   return entry;
 }
 
-static inline void sun4c_put_pte(unsigned long addr, unsigned long entry)
+extern __inline__ void sun4c_put_pte(unsigned long addr, unsigned long entry)
 {
   __asm__ __volatile__("\n\tsta %1, [%0] %2; nop; nop; nop;\n\t" : :
 		       "r" (addr), 
-		       "r" ((entry & ~(_SUN4C_PAGE_PRESENT))), "i" (ASI_PTE)
-		       : "memory");
+		       "r" ((entry & ~(_SUN4C_PAGE_PRESENT))), "i" (ASI_PTE));
 }
 
-static inline int sun4c_get_context(void)
+extern __inline__ int sun4c_get_context(void)
 {
   register int ctx;
 
@@ -145,11 +143,10 @@ static inline int sun4c_get_context(void)
   return ctx;
 }
 
-static inline int sun4c_set_context(int ctx)
+extern __inline__ int sun4c_set_context(int ctx)
 {
   __asm__ __volatile__("\n\tstba %0, [%1] %2; nop; nop; nop;\n\t" : :
-		       "r" (ctx), "r" (AC_CONTEXT), "i" (ASI_CONTROL)
-		       : "memory");
+		       "r" (ctx), "r" (AC_CONTEXT), "i" (ASI_CONTROL));
 
   return ctx;
 }

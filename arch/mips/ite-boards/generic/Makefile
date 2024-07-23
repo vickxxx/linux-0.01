@@ -10,16 +10,27 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $*.s
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $*.o
 
 all: it8172.o
 
 O_TARGET := it8172.o
 
-obj-y := it8172_setup.o irq.o int-handler.o pmon_prom.o time.o lpc.o puts.o reset.o
+obj-y := it8172_rtc.o it8172_setup.o irq.o int-handler.o pmon_prom.o time.o lpc.o puts.o reset.o
 
-obj-$(CONFIG_PCI) += it8172_pci.o
-obj-$(CONFIG_IT8172_CIR) += it8172_cir.o
-obj-$(CONFIG_KGDB) += dbg_io.o
+ifdef CONFIG_PCI
+obj-y += it8172_pci.o
+endif
+
+ifdef CONFIG_IT8172_CIR
+obj-y += it8172_cir.o 
+endif
+
+ifdef CONFIG_REMOTE_DEBUG
+ obj-y += dbg_io.o             
+endif
 
 include $(TOPDIR)/Rules.make

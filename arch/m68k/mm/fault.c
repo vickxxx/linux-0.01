@@ -152,25 +152,22 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-
- survive:
 	fault = handle_mm_fault(mm, vma, address, write);
 #ifdef DEBUG
  	printk("handle_mm_fault returns %d\n",fault);
 #endif
-	switch (fault) {
-	case 1:
-		current->min_flt++;
-		break;
-	case 2:
-		current->maj_flt++;
-		break;
-	case 0:
-		goto bus_err;
-	default:
+	if (fault < 0)
 		goto out_of_memory;
-	}
+	if (!fault)
+		goto bus_err;
 
+	/* There seems to be a missing invalidate somewhere in do_no_page.
+	 * Until I found it, this one cures the problem and makes
+	 * 1.2 run on the 68040 (Martin Apel).
+	 */
+	#warning should be obsolete now...
+	if (CPU_IS_040_OR_060)
+		flush_tlb_page(vma, address);
 	up_read(&mm->mmap_sem);
 	return 0;
 
@@ -179,12 +176,6 @@ good_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	if (current->pid == 1) {
-		yield();
-		goto survive;
-	}
-
-	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);

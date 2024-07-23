@@ -2,7 +2,7 @@
  * Written by Martin Schwidefsky (schwidefsky@de.ibm.com)
  */
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
-OUTPUT_ARCH(s390:64-bit)
+OUTPUT_ARCH(s390)
 ENTRY(_start)
 SECTIONS
 {
@@ -13,6 +13,7 @@ SECTIONS
 	*(.fixup)
 	*(.gnu.warning)
 	} = 0x0700
+  .text.lock : { *(.text.lock) }	/* out-of-line lock text */
   .rodata : { *(.rodata) *(.rodata.*) }
   .kstrtab : { *(.kstrtab) }
 

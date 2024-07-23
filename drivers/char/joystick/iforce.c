@@ -93,7 +93,6 @@ static signed short btn_joystick[] = { BTN_TRIGGER, BTN_TOP, BTN_THUMB, BTN_TOP2
 	BTN_BASE2, BTN_BASE3, BTN_BASE4, BTN_BASE5, BTN_A, BTN_B, BTN_C, BTN_DEAD, -1 };
 static signed short btn_wheel[] =    { BTN_TRIGGER, BTN_TOP, BTN_THUMB, BTN_TOP2, BTN_BASE,
 	BTN_BASE2, BTN_BASE3, BTN_BASE4, BTN_BASE5, BTN_A, BTN_B, BTN_C, -1 };
-static signed short btn_avb_tw[] =   { BTN_TRIGGER, BTN_THUMB, BTN_TOP, BTN_TOP2, BTN_BASE, BTN_BASE2, BTN_BASE3, BTN_BASE4, -1 };
 static signed short abs_joystick[] = { ABS_X, ABS_Y, ABS_THROTTLE, ABS_HAT0X, ABS_HAT0Y, -1 };
 static signed short abs_wheel[] =    { ABS_WHEEL, ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y, -1 };
 static signed short ff_iforce[] =    { FF_PERIODIC, FF_CONSTANT, FF_SPRING, FF_FRICTION,
@@ -107,15 +106,11 @@ static struct iforce_device {
 	signed short *abs;
 	signed short *ff;
 } iforce_device[] = {
-	{ 0x044f, 0xa01c, "Thrustmaster Motor Sport GT",		btn_wheel, abs_wheel, ff_iforce },
 	{ 0x046d, 0xc281, "Logitech WingMan Force",			btn_joystick, abs_joystick, ff_iforce },
 	{ 0x046d, 0xc291, "Logitech WingMan Formula Force",		btn_wheel, abs_wheel, ff_iforce },
 	{ 0x05ef, 0x020a, "AVB Top Shot Pegasus",			btn_joystick, abs_joystick, ff_iforce },
 	{ 0x05ef, 0x8884, "AVB Mag Turbo Force",			btn_wheel, abs_wheel, ff_iforce },
-	{ 0x05ef, 0x8888, "AVB Top Shot Force Feedback Racing Wheel",	btn_avb_tw, abs_wheel, ff_iforce },
-	{ 0x061c, 0xc084, "ACT LABS Force RS",                          btn_wheel, abs_wheel, ff_iforce },
 	{ 0x06f8, 0x0001, "Guillemot Race Leader Force Feedback",	btn_wheel, abs_wheel, ff_iforce },
-	{ 0x06f8, 0x0004, "Guillemot Force Feedback Racing Wheel",	btn_wheel, abs_wheel, ff_iforce },
 	{ 0x0000, 0x0000, "Unknown I-Force Device [%04x:%04x]",		btn_joystick, abs_joystick, ff_iforce }
 };
 
@@ -139,7 +134,7 @@ struct iforce {
 #ifdef IFORCE_USB
 	struct usb_device *usbdev;	/* USB transfer */
 	struct urb irq, out, ctrl;
-	struct usb_ctrlrequest dr;
+	devrequest dr;
 #endif
 					/* Force Feedback */
 	wait_queue_head_t wait;
@@ -288,7 +283,7 @@ static int get_id_packet(struct iforce *iforce, char *packet)
 #ifdef IFORCE_USB
 		case IFORCE_USB:
 
-			iforce->dr.bRequest = packet[0];
+			iforce->dr.request = packet[0];
 			iforce->ctrl.dev = iforce->usbdev;
 
 			set_current_state(TASK_INTERRUPTIBLE);
@@ -1032,9 +1027,9 @@ static void *iforce_usb_probe(struct usb_device *dev, unsigned int ifnum,
 	iforce->bus = IFORCE_USB;
 	iforce->usbdev = dev;
 
-	iforce->dr.bRequestType = USB_TYPE_VENDOR | USB_DIR_IN | USB_RECIP_INTERFACE;
-	iforce->dr.wIndex = 0;
-	iforce->dr.wLength = 16;
+	iforce->dr.requesttype = USB_TYPE_VENDOR | USB_DIR_IN | USB_RECIP_INTERFACE;
+	iforce->dr.index = 0;
+	iforce->dr.length = 16;
 
 	FILL_INT_URB(&iforce->irq, dev, usb_rcvintpipe(dev, epirq->bEndpointAddress),
 			iforce->data, 16, iforce_usb_irq, iforce, epirq->bInterval);
@@ -1066,15 +1061,11 @@ static void iforce_usb_disconnect(struct usb_device *dev, void *ptr)
 }
 
 static struct usb_device_id iforce_usb_ids [] = {
-	{ USB_DEVICE(0x044f, 0xa01c) },		/* Thrustmaster Motor Sport GT */
 	{ USB_DEVICE(0x046d, 0xc281) },		/* Logitech WingMan Force */
 	{ USB_DEVICE(0x046d, 0xc291) },		/* Logitech WingMan Formula Force */
 	{ USB_DEVICE(0x05ef, 0x020a) },		/* AVB Top Shot Pegasus */
 	{ USB_DEVICE(0x05ef, 0x8884) },		/* AVB Mag Turbo Force */
-	{ USB_DEVICE(0x05ef, 0x8888) },		/* AVB Top Shot FFB Racing Wheel */
-	{ USB_DEVICE(0x061c, 0xc084) },         /* ACT LABS Force RS */
 	{ USB_DEVICE(0x06f8, 0x0001) },		/* Guillemot Race Leader Force Feedback */
-	{ USB_DEVICE(0x06f8, 0x0004) },		/* Guillemot Force Feedback Racing Wheel */
 	{ }					/* Terminating entry */
 };
 

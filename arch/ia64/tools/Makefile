@@ -2,10 +2,9 @@ CFLAGS	= -g -O2 -Wall $(CPPFLAGS)
 
 TARGET	= $(TOPDIR)/include/asm-ia64/offsets.h
 
-all:
+all: 
 
-mrproper: clean
-	rm -f $(TARGET)
+mrproper:
 
 clean:
 	rm -f print_offsets.s print_offsets offsets.h
@@ -32,10 +31,8 @@ ifeq ($(CROSS_COMPILE),)
 offsets.h: print_offsets
 	./print_offsets > offsets.h
 
-comma	:= ,
-
-print_offsets: emptyoffsets print_offsets.c FORCE_RECOMPILE
-	$(CC) $(CFLAGS) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) print_offsets.c -o $@
+print_offsets: print_offsets.c FORCE_RECOMPILE
+	$(CC) $(CFLAGS) print_offsets.c -o $@
 
 FORCE_RECOMPILE:
 
@@ -44,20 +41,9 @@ else
 offsets.h: print_offsets.s
 	$(AWK) -f print_offsets.awk $^ > $@
 
-print_offsets.s: emptyoffsets print_offsets.c
-	$(CC) $(CFLAGS) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) -S print_offsets.c -o $@
+print_offsets.s: print_offsets.c
+	$(CC) $(CFLAGS) -S print_offsets.c -o $@
 
 endif
-
-#
-# The TARGET offsets.h is included by ptrace.h, which is included by
-# print_offsets.c, so can't compile print_offsets.c to create offsets.h
-# until we already have offsets.h.  Break the chicken-and-egg cycle by
-# creating a dummy offsets.h with sufficient define's to bootstrap
-# the first compilation of print_offsets.c.
-#
-
-emptyoffsets:
-	test -f ${TARGET} || echo '#define IA64_TASK_THREAD_OFFSET 0' > ${TARGET}
 
 .PHONY: all modules modules_install

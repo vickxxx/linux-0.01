@@ -5,7 +5,7 @@
  * PPPoE --- PPP over Ethernet (RFC 2516)
  *
  *
- * Version:    0.6.11
+ * Version:    0.6.9
  *
  * 030700 :     Fixed connect logic to allow for disconnect.
  * 270700 :	Fixed potential SMP problems; we must protect against
@@ -31,12 +31,6 @@
  *		a memory leak.
  * 081001 :     Misc. cleanup (licence string, non-blocking, prevent
  *              reference of device on close).
- * 121301 :     New ppp channels interface; cannot unregister a channel
- *              from interrupts.  Thus, we mark the socket as a ZOMBIE
- *              and do the unregistration later.
- * 071502 :     When a connection is being torn down, we must remember that
- *              ZOMBIE state connections are still connected and thus
- *              pppox_unbind_sock must unbind them (in pppoe_release).
  *
  * Author:	Michal Ostrowski <mostrows@speakeasy.net>
  * Contributors:
@@ -92,11 +86,11 @@ struct proto_ops pppoe_ops;
 
 
 #if 0
-#define CHECKPTR(x,y) do { if (!(x) && pppoe_debug &7 ){ printk(KERN_CRIT "PPPoE Invalid pointer : %s , %p\n",#x,(x)); error=-EINVAL; goto y; }} while (0)
-#define DEBUG(s,args...) do { if( pppoe_debug & (s) ) printk(KERN_CRIT args ); } while (0)
+#define CHECKPTR(x,y) { if (!(x) && pppoe_debug &7 ){ printk(KERN_CRIT "PPPoE Invalid pointer : %s , %p\n",#x,(x)); error=-EINVAL; goto y; }}
+#define DEBUG(s,args...) if( pppoe_debug & (s) ) printk(KERN_CRIT args );
 #else
-#define CHECKPTR(x,y) do { } while (0)
-#define DEBUG(s,args...) do { } while (0)
+#define CHECKPTR(x,y) do {} while (0);
+#define DEBUG(s,args...) do { } while (0);
 #endif
 
 
@@ -279,10 +273,10 @@ static void pppoe_flush_dev(struct net_device *dev)
 
 				lock_sock(sk);
 
-				if (sk->state & (PPPOX_CONNECTED|PPPOX_BOUND)){
+				if (sk->state & (PPPOX_CONNECTED | PPPOX_BOUND)) {
 					pppox_unbind_sock(sk);
 					dev_put(dev);
-					sk->state = PPPOX_ZOMBIE;
+					sk->state = PPPOX_DEAD;
 					sk->state_change(sk);
 				}
 
@@ -350,6 +344,7 @@ int pppoe_rcv_core(struct sock *sk, struct sk_buff *skb)
 	struct pppox_opt *relay_po = NULL;
 
 	if (sk->state & PPPOX_BOUND) {
+		skb_pull(skb, sizeof(struct pppoe_hdr));
 		ppp_input(&po->chan, skb);
 	} else if (sk->state & PPPOX_RELAY) {
 		relay_po = get_item_by_addr(&po->pppoe_relay);
@@ -360,11 +355,11 @@ int pppoe_rcv_core(struct sock *sk, struct sk_buff *skb)
 		if ((relay_po->sk->state & PPPOX_CONNECTED) == 0)
 			goto abort_put;
 
+		skb_pull(skb, sizeof(struct pppoe_hdr));
 		if (!__pppoe_xmit( relay_po->sk , skb))
 			goto abort_put;
 	} else {
-		if (sock_queue_rcv_skb(sk, skb))
-			goto abort_kfree;
+		sock_queue_rcv_skb(sk, skb);
 	}
 
 	return NET_RX_SUCCESS;
@@ -388,21 +383,16 @@ static int pppoe_rcv(struct sk_buff *skb,
 
 {
 	struct pppoe_hdr *ph = (struct pppoe_hdr *) skb->nh.raw;
-	int len = ntohs(ph->length);
 	struct pppox_opt *po;
 	struct sock *sk ;
 	int ret;
 
-	skb_pull(skb, sizeof(*ph));
-	if (skb->len < len)
-		goto drop;
-
 	po = get_item((unsigned long) ph->sid, skb->mac.ethernet->h_source);
-	if (!po)
-		goto drop;
 
-	if (pskb_trim(skb, len))
-		goto drop;
+	if (!po) {
+		kfree_skb(skb);
+		return NET_RX_DROP;
+	}
 
 	sk = po->sk;
         bh_lock_sock(sk);
@@ -419,9 +409,6 @@ static int pppoe_rcv(struct sk_buff *skb,
 	sock_put(sk);
 
 	return ret;
- drop:
-	kfree_skb(skb);
-	return NET_RX_DROP;
 }
 
 /************************************************************************
@@ -452,12 +439,8 @@ static int pppoe_disc_rcv(struct sk_buff *skb,
 		 * one socket family type, we cannot (easily) distinguish
 		 * what kind of SKB it is during backlog rcv.
 		 */
-		if (sk->lock.users == 0) {
-			/* We're no longer connect at the PPPOE layer,
-			 * and must wait for ppp channel to disconnect us.
-			 */
-			sk->state = PPPOX_ZOMBIE;
-		}
+		if (sk->lock.users == 0)
+			pppox_unbind_sock(sk);
 
 		bh_unlock_sock(sk);
 		sock_put(sk);
@@ -612,8 +595,7 @@ int pppoe_connect(struct socket *sock, struct sockaddr *uservaddr,
 		/* Delete the old binding */
 		delete_item(po->pppoe_pa.sid,po->pppoe_pa.remote);
 
-		if(po->pppoe_dev)
-			dev_put(po->pppoe_dev);
+		dev_put(po->pppoe_dev);
 
 		memset(po, 0, sizeof(struct pppox_opt));
 		po->sk = sk;
@@ -645,7 +627,6 @@ int pppoe_connect(struct socket *sock, struct sockaddr *uservaddr,
 		po->chan.hdrlen = (sizeof(struct pppoe_hdr) +
 				   dev->hard_header_len);
 
-		po->chan.mtu = dev->mtu - sizeof(struct pppoe_hdr);
 		po->chan.private = sk;
 		po->chan.ops = &pppoe_chan_ops;
 
@@ -662,10 +643,8 @@ int pppoe_connect(struct socket *sock, struct sockaddr *uservaddr,
 	release_sock(sk);
 	return error;
 err_put:
-	if (po->pppoe_dev) {
-		dev_put(po->pppoe_dev);
-		po->pppoe_dev = NULL;
-	}
+	dev_put(po->pppoe_dev);
+	po->pppoe_dev = NULL;
 	goto end;
 }
 
@@ -743,7 +722,7 @@ int pppoe_ioctl(struct socket *sock, unsigned int cmd,
 		struct pppox_opt *relay_po;
 
 		err = -EBUSY;
-		if (sk->state & (PPPOX_BOUND|PPPOX_ZOMBIE|PPPOX_DEAD))
+		if (sk->state & PPPOX_BOUND)
 			break;
 
 		err = -ENOTCONN;
@@ -907,9 +886,6 @@ int __pppoe_xmit(struct sock *sk, struct sk_buff *skb)
 		 * give dev_queue_xmit something it can free.
 		 */
 		skb2 = skb_clone(skb, GFP_ATOMIC);
-
-		if (skb2 == NULL)
-			goto abort;
 	}
 
 	ph = (struct pppoe_hdr *) skb_push(skb2, sizeof(struct pppoe_hdr));
@@ -961,6 +937,8 @@ int pppoe_rcvmsg(struct socket *sock, struct msghdr *m, int total_len, int flags
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb = NULL;
 	int error = 0;
+	int len;
+	struct pppoe_hdr *ph = NULL;
 
 	if (sk->state & PPPOX_BOUND) {
 		error = -EIO;
@@ -977,12 +955,17 @@ int pppoe_rcvmsg(struct socket *sock, struct msghdr *m, int total_len, int flags
 	m->msg_namelen = 0;
 
 	if (skb) {
-		total_len = min_t(int, total_len, skb->len);
-		error = skb_copy_datagram_iovec(skb, 0, m->msg_iov, total_len);
-		if (error == 0)
-			error = total_len;
+		error = 0;
+		ph = (struct pppoe_hdr *) skb->nh.raw;
+		len = ntohs(ph->length);
+
+		error = memcpy_toiovec(m->msg_iov, (unsigned char *) &ph->tag[0], len);
+		if (error < 0)
+			goto do_skb_free;
+		error = len;
 	}
 
+do_skb_free:
 	if (skb)
 		kfree_skb(skb);
 end:

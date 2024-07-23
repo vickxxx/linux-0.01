@@ -339,7 +339,7 @@ int ufs_read_cylinder_structures (struct super_block * sb) {
 		size = uspi->s_bsize;
 		if (i + uspi->s_fpb > blks)
 			size = (blks - i) * uspi->s_fsize;
-		ubh = ubh_bread(sb, uspi->s_csaddr + i, size);
+		ubh = ubh_bread(sb->s_dev, uspi->s_csaddr + i, size);
 		if (!ubh)
 			goto failed;
 		ubh_ubhcpymem (space, ubh, size);
@@ -363,7 +363,7 @@ int ufs_read_cylinder_structures (struct super_block * sb) {
 	}
 	for (i = 0; i < uspi->s_ncg; i++) {
 		UFSD(("read cg %u\n", i))
-		if (!(sb->u.ufs_sb.s_ucg[i] = sb_bread(sb, ufs_cgcmin(i))))
+		if (!(sb->u.ufs_sb.s_ucg[i] = bread (sb->s_dev, ufs_cgcmin(i), sb->s_blocksize)))
 			goto failed;
 		if (!ufs_cg_chkmagic (sb, (struct ufs_cylinder_group *) sb->u.ufs_sb.s_ucg[i]->b_data))
 			goto failed;
@@ -414,7 +414,7 @@ void ufs_put_cylinder_structures (struct super_block * sb) {
 		size = uspi->s_bsize;
 		if (i + uspi->s_fpb > blks)
 			size = (blks - i) * uspi->s_fsize;
-		ubh = ubh_bread(sb, uspi->s_csaddr + i, size);
+		ubh = ubh_bread (sb->s_dev, uspi->s_csaddr + i, size);
 		ubh_memcpyubh (ubh, space, size);
 		space += size;
 		ubh_mark_buffer_uptodate (ubh, 1);
@@ -442,7 +442,6 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 	struct ufs_super_block_second * usb2;
 	struct ufs_super_block_third * usb3;
 	struct ufs_buffer_head * ubh;	
-	struct inode *inode;
 	unsigned block_size, super_block_size;
 	unsigned flags;
 
@@ -597,17 +596,12 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 	}
 	
 again:	
-	if (set_blocksize (sb->s_dev, block_size)) {
-		printk(KERN_ERR "UFS: failed to set blocksize\n");
-		goto failed;
-	}
-
-	sb->s_blocksize = block_size;
+	set_blocksize (sb->s_dev, block_size);
 
 	/*
 	 * read ufs super block from device
 	 */
-	ubh = ubh_bread_uspi (uspi, sb, uspi->s_sbbase + UFS_SBLOCK/block_size, super_block_size);
+	ubh = ubh_bread_uspi (uspi, sb->s_dev, uspi->s_sbbase + UFS_SBLOCK/block_size, super_block_size);
 	if (!ubh) 
 		goto failed;
 	
@@ -657,34 +651,14 @@ magic_found:
 	uspi->s_fmask = fs32_to_cpu(sb, usb1->fs_fmask);
 	uspi->s_fshift = fs32_to_cpu(sb, usb1->fs_fshift);
 
-	if (uspi->s_fsize & (uspi->s_fsize - 1)) {
-		printk(KERN_ERR "ufs_read_super: fragment size %u is not a power of 2\n",
-			uspi->s_fsize);
+	if (uspi->s_bsize != 4096 && uspi->s_bsize != 8192 
+	  && uspi->s_bsize != 32768) {
+		printk("ufs_read_super: fs_bsize %u != {4096, 8192, 32768}\n", uspi->s_bsize);
 		goto failed;
 	}
-	if (uspi->s_fsize < 512) {
-		printk(KERN_ERR "ufs_read_super: fragment size %u is too small\n",
-			uspi->s_fsize);
-		goto failed;
-	}
-	if (uspi->s_fsize > 4096) {
-		printk(KERN_ERR "ufs_read_super: fragment size %u is too large\n",
-			uspi->s_fsize);
-		goto failed;
-	}
-	if (uspi->s_bsize & (uspi->s_bsize - 1)) {
-		printk(KERN_ERR "ufs_read_super: block size %u is not a power of 2\n",
-			uspi->s_bsize);
-		goto failed;
-	}
-	if (uspi->s_bsize < 4096) {
-		printk(KERN_ERR "ufs_read_super: block size %u is too small\n",
-			uspi->s_bsize);
-		goto failed;
-	}
-	if (uspi->s_bsize / uspi->s_fsize > 8) {
-		printk(KERN_ERR "ufs_read_super: too many fragments per block (%u)\n",
-			uspi->s_bsize / uspi->s_fsize);
+	if (uspi->s_fsize != 512 && uspi->s_fsize != 1024 
+	  && uspi->s_fsize != 2048 && uspi->s_fsize != 4096) {
+		printk("ufs_read_super: fs_fsize %u != {512, 1024, 2048. 4096}\n", uspi->s_fsize);
 		goto failed;
 	}
 	if (uspi->s_fsize != block_size || uspi->s_sbsize != super_block_size) {
@@ -815,13 +789,7 @@ magic_found:
 		    fs32_to_cpu(sb, usb3->fs_u2.fs_44.fs_maxsymlinklen);
 	
 	sb->u.ufs_sb.s_flags = flags;
-
-	inode = iget(sb, UFS_ROOTINO);
-	if (!inode || is_bad_inode(inode))
-		goto failed;
-	sb->s_root = d_alloc_root(inode);
-	if (!sb->s_root)
-		goto dalloc_failed;
+	sb->s_root = d_alloc_root(iget(sb, UFS_ROOTINO));
 
 
 	/*
@@ -834,8 +802,6 @@ magic_found:
 	UFSD(("EXIT\n"))
 	return(sb);
 
-dalloc_failed:
-	iput(inode);
 failed:
 	if (ubh) ubh_brelse_uspi (uspi);
 	if (uspi) kfree (uspi);
@@ -1006,4 +972,3 @@ EXPORT_NO_SYMBOLS;
 
 module_init(init_ufs_fs)
 module_exit(exit_ufs_fs)
-MODULE_LICENSE("GPL");

@@ -33,7 +33,6 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
-#include <linux/compiler.h>
 
 /*================ File-local variables ================*/
 
@@ -79,7 +78,7 @@ static unsigned char mac2latin_map[128] = {
  *
  * Given a hexadecimal digit in ASCII, return the integer representation.
  */
-static inline __attribute_const__ unsigned char dehex(char c) {
+static inline const unsigned char dehex(char c) {
 	if ((c>='0')&&(c<='9')) {
 		return c-'0';
 	}

@@ -17,7 +17,7 @@
 #include <linux/module.h>
 #include <asm/bitops.h>
 
-struct proc_dir_entry *proc_net, *proc_net_stat, *proc_bus, *proc_root_fs, *proc_root_driver;
+struct proc_dir_entry *proc_net, *proc_bus, *proc_root_fs, *proc_root_driver;
 
 #ifdef CONFIG_SYSCTL
 struct proc_dir_entry *proc_sys_root;
@@ -38,8 +38,6 @@ void __init proc_root_init(void)
 	}
 	proc_misc_init();
 	proc_net = proc_mkdir("net", 0);
-	proc_net_stat = proc_mkdir("net/stat", NULL);
-
 #ifdef CONFIG_SYSVIPC
 	proc_mkdir("sysvipc", 0);
 #endif
@@ -59,12 +57,6 @@ void __init proc_root_init(void)
 	proc_tty_init();
 #ifdef CONFIG_PROC_DEVICETREE
 	proc_device_tree_init();
-#endif
-#ifdef CONFIG_PPC_ISERIES
-	iSeries_proc_create();
-#endif
-#ifdef CONFIG_PPC64
-	proc_ppc64_init(); 
 #endif
 #ifdef CONFIG_PPC_RTAS
 	proc_rtas_init();
@@ -145,6 +137,5 @@ EXPORT_SYMBOL(remove_proc_entry);
 EXPORT_SYMBOL(proc_root);
 EXPORT_SYMBOL(proc_root_fs);
 EXPORT_SYMBOL(proc_net);
-EXPORT_SYMBOL(proc_net_stat);
 EXPORT_SYMBOL(proc_bus);
 EXPORT_SYMBOL(proc_root_driver);

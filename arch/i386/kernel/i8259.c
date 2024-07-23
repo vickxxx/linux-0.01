@@ -12,7 +12,6 @@
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
 
-#include <asm/acpi.h>
 #include <asm/atomic.h>
 #include <asm/system.h>
 #include <asm/io.h>
@@ -499,8 +498,7 @@ void __init init_IRQ(void)
 	outb(LATCH >> 8 , 0x40);	/* MSB */
 
 #ifndef CONFIG_VISWS
-	if (!acpi_ioapic)
-		setup_irq(2, &irq2);
+	setup_irq(2, &irq2);
 #endif
 
 	/*

@@ -106,10 +106,6 @@ Log: nmclan_cs.c,v
 
 ---------------------------------------------------------------------------- */
 
-#define DRV_NAME	"nmclan_cs"
-#define DRV_VERSION	"0.16"
-
-
 /* ----------------------------------------------------------------------------
 Conditional Compilation Options
 ---------------------------------------------------------------------------- */
@@ -134,9 +130,6 @@ Include Files
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -382,7 +375,7 @@ Private Global Variables
 static char rcsid[] =
 "nmclan_cs.c,v 0.16 1995/07/01 06:42:17 rpao Exp rpao";
 static char *version =
-DRV_NAME " " DRV_VERSION " (Roger C. Pao)";
+"nmclan_cs 0.16 (Roger C. Pao)";
 #endif
 
 static dev_info_t dev_info="nmclan_cs";
@@ -437,9 +430,8 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static struct net_device_stats *mace_get_stats(struct net_device *dev);
 static int mace_rx(struct net_device *dev, unsigned char RxCnt);
 static void restore_multicast_list(struct net_device *dev);
-static void set_multicast_list(struct net_device *dev);
-static struct ethtool_ops netdev_ethtool_ops;
 
+static void set_multicast_list(struct net_device *dev);
 
 static dev_link_t *nmclan_attach(void);
 static void nmclan_detach(dev_link_t *);
@@ -521,7 +513,6 @@ static dev_link_t *nmclan_attach(void)
     dev->set_config = &mace_config;
     dev->get_stats = &mace_get_stats;
     dev->set_multicast_list = &set_multicast_list;
-    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     ether_setup(dev);
     dev->open = &mace_open;
     dev->stop = &mace_close;
@@ -1010,34 +1001,6 @@ static int mace_close(struct net_device *dev)
 
   return 0;
 } /* mace_close */
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
-}
-
-#ifdef PCMCIA_DEBUG
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return pc_debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	pc_debug = level;
-}
-#endif /* PCMCIA_DEBUG */
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-#ifdef PCMCIA_DEBUG
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-#endif /* PCMCIA_DEBUG */
-};
 
 /* ----------------------------------------------------------------------------
 mace_start_xmit

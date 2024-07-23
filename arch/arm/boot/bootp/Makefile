@@ -5,7 +5,9 @@
 ZSYSTEM		=$(TOPDIR)/arch/arm/boot/zImage
 ZLDFLAGS	=-p -X -T bootp.lds \
 		 --defsym initrd_addr=$(INITRD_PHYS) \
-		 --defsym params=$(PARAMS_PHYS)
+		 --defsym initrd_virt=$(INITRD_VIRT) \
+		 --defsym params=$(PARAMS_PHYS) \
+		 --defsym kernel_addr=$(ZTEXTADDR)
 
 all:		bootp
 

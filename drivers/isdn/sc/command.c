@@ -1,4 +1,4 @@
-/* $Id: command.c,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+/* $Id: command.c,v 1.4.10.1 2001/09/23 22:24:59 kai Exp $
  *
  * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
@@ -95,7 +95,7 @@ int get_card_from_id(int driver)
 		if(adapter[i]->driverId == driver)
 			return i;
 	}
-	return -ENODEV;
+	return -NODEV;
 }
 
 /* 

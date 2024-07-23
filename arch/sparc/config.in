@@ -29,10 +29,6 @@ define_bool CONFIG_VT_CONSOLE y
 
 bool 'Symmetric multi-processing support (does not work on sun4/sun4c)' CONFIG_SMP
 
-if [ "$CONFIG_SMP" = "y" ]; then
-   int  'Maximum number of CPUs (2-32)' CONFIG_NR_CPUS 32
-fi
-
 # Identify this as a Sparc32 build
 define_bool CONFIG_SPARC32 y
 
@@ -54,7 +50,6 @@ define_bool CONFIG_SUN_AUXIO y
 define_bool CONFIG_SUN_IO y
 define_bool CONFIG_RWSEM_GENERIC_SPINLOCK y
 define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM n
-define_bool CONFIG_SUN_PM y
 
 bool 'Support for SUN4 machines (disables SUN4[CDM] support)' CONFIG_SUN4
 if [ "$CONFIG_SUN4" != "y" ]; then
@@ -73,10 +68,9 @@ if [ "$CONFIG_PROC_FS" = "y" ]; then
    define_bool CONFIG_KCORE_ELF y
 fi
 tristate 'Kernel support for a.out binaries' CONFIG_BINFMT_AOUT
-bool 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
+tristate 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
 tristate 'Kernel support for MISC binaries' CONFIG_BINFMT_MISC
 bool 'SunOS binary emulation' CONFIG_SUNOS_EMUL
-bool 'Select task to kill on out of memory condition' CONFIG_OOM_KILLER
 source drivers/parport/Config.in
 dep_tristate '  Parallel printer support' CONFIG_PRINTER $CONFIG_PARPORT
 endmenu
@@ -101,6 +95,11 @@ bool 'Normal floppy disk support' CONFIG_BLK_DEV_FD
 
 tristate 'Loopback device support' CONFIG_BLK_DEV_LOOP
 dep_tristate 'Network block device support' CONFIG_BLK_DEV_NBD $CONFIG_NET
+
+#tristate 'Logical volume manager (LVM) support' CONFIG_BLK_DEV_LVM N
+#if [ "$CONFIG_BLK_DEV_LVM" != "n" ]; then
+#   bool '   LVM information in proc filesystem' CONFIG_LVM_PROC_FS Y
+#fi
 
 source drivers/md/Config.in
 
@@ -127,12 +126,14 @@ if [ "$CONFIG_PCI" = "y" ]; then
   if [ "$CONFIG_IDE" != "n" ]; then
     source drivers/ide/Config.in
   else
+    define_bool CONFIG_BLK_DEV_IDE_MODES n
     define_bool CONFIG_BLK_DEV_HD n
   fi
   endmenu
 else
 
   define_bool CONFIG_IDE n
+  define_bool CONFIG_BLK_DEV_IDE_MODES n
   define_bool CONFIG_BLK_DEV_HD n
 fi
 
@@ -204,18 +205,12 @@ if [ "$CONFIG_NET" = "y" ]; then
           tristate '  Ethertap network tap (OBSOLETE)' CONFIG_ETHERTAP
         fi
       fi
-      tristate '  PPP (point-to-point protocol) support' CONFIG_PPP
+      tristate '  PPP (point-to-point) support' CONFIG_PPP
       if [ ! "$CONFIG_PPP" = "n" ]; then
         dep_tristate '  PPP support for async serial ports' CONFIG_PPP_ASYNC $CONFIG_PPP
         dep_tristate '  PPP support for sync tty ports' CONFIG_PPP_SYNC_TTY $CONFIG_PPP
         dep_tristate '  PPP Deflate compression' CONFIG_PPP_DEFLATE $CONFIG_PPP
         dep_tristate '  PPP BSD-Compress compression' CONFIG_PPP_BSDCOMP m
-	if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-	  dep_tristate '  PPP over Ethernet (EXPERIMENTAL)' CONFIG_PPPOE $CONFIG_PPP
-	  if [ "$CONFIG_ATM" = "y" -o "$CONFIG_ATM" = "m" ]; then
-	    dep_tristate '  PPP over ATM (EXPERIMENTAL)' CONFIG_PPPOATM $CONFIG_PPP $CONFIG_ATM
-	  fi
-	fi
       fi
       tristate '  SLIP (serial line) support' CONFIG_SLIP
       if [ "$CONFIG_SLIP" != "n" ]; then
@@ -238,7 +233,7 @@ if [ "$CONFIG_NET" = "y" ]; then
 #      if [ "$CONFIG_FDDI" = "y" ]; then
 #      fi
 
-      if [ "$CONFIG_ATM" != "n" ]; then
+      if [ "$CONFIG_ATM" = "y" ]; then
 	 source drivers/atm/Config.in
       fi
    fi
@@ -256,7 +251,9 @@ endmenu
 
 source fs/Config.in
 
-source net/bluetooth/Config.in
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   source net/bluetooth/Config.in
+fi
 
 mainmenu_option next_comment
 comment 'Watchdog'
@@ -267,18 +264,5 @@ endmenu
 mainmenu_option next_comment
 comment 'Kernel hacking'
 
-bool 'Kernel debugging' CONFIG_DEBUG_KERNEL
-if [ "$CONFIG_DEBUG_KERNEL" != "n" ]; then
-   bool '  Debug high memory support' CONFIG_DEBUG_HIGHMEM
-   bool '  Debug memory allocations' CONFIG_DEBUG_SLAB
-   bool '  Memory mapped I/O debugging' CONFIG_DEBUG_IOVIRT
-   bool '  Magic SysRq key' CONFIG_MAGIC_SYSRQ
-   bool '  Spinlock debugging' CONFIG_DEBUG_SPINLOCK
-fi
-
-int 'Kernel messages buffer length shift (0 = default)' CONFIG_LOG_BUF_SHIFT 0
-
+bool 'Magic SysRq key' CONFIG_MAGIC_SYSRQ
 endmenu
-
-source crypto/Config.in
-source lib/Config.in

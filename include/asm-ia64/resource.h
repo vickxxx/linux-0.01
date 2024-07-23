@@ -4,13 +4,9 @@
 /*
  * Resource limits
  *
- * Based on <asm-i386/resource.h>.
- *
- * Modified 1998, 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  */
-
-#include <asm/ustack.h>
 
 #define RLIMIT_CPU	0		/* CPU time in ms */
 #define RLIMIT_FSIZE	1		/* Maximum filesize */
@@ -39,7 +35,7 @@
 	{ RLIM_INFINITY, RLIM_INFINITY },		\
 	{ RLIM_INFINITY, RLIM_INFINITY },		\
 	{ RLIM_INFINITY, RLIM_INFINITY },		\
-	{      _STK_LIM, DEFAULT_USER_STACK_SIZE },	\
+	{      _STK_LIM, RLIM_INFINITY },		\
 	{             0, RLIM_INFINITY },		\
 	{ RLIM_INFINITY, RLIM_INFINITY },		\
 	{             0,             0 },		\

@@ -10,8 +10,6 @@
 
 #include <linux/config.h>
 #include <linux/sched.h>
-#include <linux/init.h>
-#include <linux/kernel_stat.h>
 #include <asm/processor.h>
 #include <asm/i387.h>
 #include <asm/math_emu.h>
@@ -26,29 +24,6 @@
 #define HAVE_HWFP 1
 #endif
 
-static union i387_union empty_fpu_state;
-
-void __init boot_init_fpu(void)
-{
-	memset(&empty_fpu_state, 0, sizeof(union i387_union));
-
-	if (!cpu_has_fxsr) {
-		empty_fpu_state.fsave.cwd = 0xffff037f;
-		empty_fpu_state.fsave.swd = 0xffff0000;
-		empty_fpu_state.fsave.twd = 0xffffffff;
-		empty_fpu_state.fsave.fos = 0xffff0000;
-	} else {
-		empty_fpu_state.fxsave.cwd = 0x37f;
-		if (cpu_has_xmm)
-			empty_fpu_state.fxsave.mxcsr = 0x1f80;
-	}
-}
-
-void load_empty_fpu(struct task_struct * tsk)
-{
-	memcpy(&tsk->thread.i387, &empty_fpu_state, sizeof(union i387_union));
-}
-
 /*
  * The _current_ task is using the FPU for the first time
  * so initialize it and set the mxcsr to its default
@@ -57,10 +32,10 @@ void load_empty_fpu(struct task_struct * tsk)
  */
 void init_fpu(void)
 {
-	if (cpu_has_fxsr)
-		asm volatile("fxrstor %0" : : "m" (empty_fpu_state.fxsave));
-	else
-		__asm__("fninit");
+	__asm__("fninit");
+	if ( cpu_has_xmm )
+		load_mxcsr(0x1f80);
+		
 	current->used_math = 1;
 }
 
@@ -71,12 +46,8 @@ void init_fpu(void)
 static inline void __save_init_fpu( struct task_struct *tsk )
 {
 	if ( cpu_has_fxsr ) {
-		asm volatile( "fxsave %0"
+		asm volatile( "fxsave %0 ; fnclex"
 			      : "=m" (tsk->thread.i387.fxsave) );
-		if (tsk->thread.i387.fxsave.swd & (1<<7))
-			asm volatile("fnclex");
-		/* AMD CPUs leak F?P. Clear it here */
-		asm volatile("ffree %%st(7) ; fildl %0" :: "m" (kstat.context_swtch));
 	} else {
 		asm volatile( "fnsave %0 ; fwait"
 			      : "=m" (tsk->thread.i387.fsave) );
@@ -133,17 +104,16 @@ static inline unsigned short twd_i387_to_fxsr( unsigned short twd )
 static inline unsigned long twd_fxsr_to_i387( struct i387_fxsave_struct *fxsave )
 {
 	struct _fpxreg *st = NULL;
-	unsigned long tos = (fxsave->swd >> 11) & 7;
 	unsigned long twd = (unsigned long) fxsave->twd;
 	unsigned long tag;
 	unsigned long ret = 0xffff0000;
 	int i;
 
-#define FPREG_ADDR(f, n)	((void *)&(f)->st_space + (n) * 16);
+#define FPREG_ADDR(f, n)	((char *)&(f)->st_space + (n) * 16);
 
 	for ( i = 0 ; i < 8 ; i++ ) {
 		if ( twd & 0x1 ) {
-			st = FPREG_ADDR( fxsave, (i - tos) & 7 );
+			st = (struct _fpxreg *) FPREG_ADDR( fxsave, i );
 
 			switch ( st->exponent & 0x7fff ) {
 			case 0x7fff:
@@ -379,14 +349,14 @@ static inline int restore_i387_fsave( struct _fpstate *buf )
 
 static inline int restore_i387_fxsave( struct _fpstate *buf )
 {
-	int err;
 	struct task_struct *tsk = current;
 	clear_fpu( tsk );
-	err = __copy_from_user( &tsk->thread.i387.fxsave, &buf->_fxsr_env[0],
-				sizeof(struct i387_fxsave_struct) );
+	if ( __copy_from_user( &tsk->thread.i387.fxsave, &buf->_fxsr_env[0],
+			       sizeof(struct i387_fxsave_struct) ) )
+		return 1;
 	/* mxcsr bit 6 and 31-16 must be zero for security reasons */
 	tsk->thread.i387.fxsave.mxcsr &= 0xffbf;
-	return err ? 1 : convert_fxsr_from_user( &tsk->thread.i387.fxsave, buf );
+	return convert_fxsr_from_user( &tsk->thread.i387.fxsave, buf );
 }
 
 int restore_i387( struct _fpstate *buf )

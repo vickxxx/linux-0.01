@@ -153,7 +153,8 @@ static void __init pci_fixup_dec21285(struct pci_dev *dev)
 }
 
 /*
- * PCI IDE controllers use non-standard I/O port decoding, respect it.
+ * PCI IDE controllers use non-standard I/O port
+ * decoding, respect it.
  */
 static void __init pci_fixup_ide_bases(struct pci_dev *dev)
 {
@@ -180,81 +181,8 @@ static void __init pci_fixup_dec21142(struct pci_dev *dev)
 	pci_write_config_dword(dev, 0x40, 0x80000000);
 }
 
-/*
- * The CY82C693 needs some rather major fixups to ensure that it does
- * the right thing.  Idea from the Alpha people, with a few additions.
- *
- * We ensure that the IDE base registers are set to 1f0/3f4 for the
- * primary bus, and 170/374 for the secondary bus.  Also, hide them
- * from the PCI subsystem view as well so we won't try to perform
- * our own auto-configuration on them.
- *
- * In addition, we ensure that the PCI IDE interrupts are routed to
- * IRQ 14 and IRQ 15 respectively.
- *
- * The above gets us to a point where the IDE on this device is
- * functional.  However, The CY82C693U _does not work_ in bus
- * master mode without locking the PCI bus solid.
- */
-static void __init pci_fixup_cy82c693(struct pci_dev *dev)
-{
-	if ((dev->class >> 8) == PCI_CLASS_STORAGE_IDE) {
-		u32 base0, base1;
-
-		if (dev->class & 0x80) {	/* primary */
-			base0 = 0x1f0;
-			base1 = 0x3f4;
-		} else {			/* secondary */
-			base0 = 0x170;
-			base1 = 0x374;
-		}
-
-		pci_write_config_dword(dev, PCI_BASE_ADDRESS_0,
-				       base0 | PCI_BASE_ADDRESS_SPACE_IO);
-		pci_write_config_dword(dev, PCI_BASE_ADDRESS_1,
-				       base1 | PCI_BASE_ADDRESS_SPACE_IO);
-
-		dev->resource[0].start = 0;
-		dev->resource[0].end   = 0;
-		dev->resource[0].flags = 0;
-
-		dev->resource[1].start = 0;
-		dev->resource[1].end   = 0;
-		dev->resource[1].flags = 0;
-	} else if (PCI_FUNC(dev->devfn) == 0) {
-		/*
-		 * Setup IDE IRQ routing.
-		 */
-		pci_write_config_byte(dev, 0x4b, 14);
-		pci_write_config_byte(dev, 0x4c, 15);
-
-		/*
-		 * Disable FREQACK handshake, enable USB.
-		 */
-		pci_write_config_byte(dev, 0x4d, 0x41);
-
-		/*
-		 * Enable PCI retry, and PCI post-write buffer.
-		 */
-		pci_write_config_byte(dev, 0x44, 0x17);
-
-		/*
-		 * Enable ISA master and DMA post write buffering.
-		 */
-		pci_write_config_byte(dev, 0x45, 0x03);
-	}
-}
-
 struct pci_fixup pcibios_fixups[] = {
 	{
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_CONTAQ,	PCI_DEVICE_ID_CONTAQ_82C693,
-		pci_fixup_cy82c693
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21142,
-		pci_fixup_dec21142
-	}, {
 		PCI_FIXUP_HEADER,
 		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21285,
 		pci_fixup_dec21285
@@ -270,6 +198,10 @@ struct pci_fixup pcibios_fixups[] = {
 		PCI_FIXUP_HEADER,
 		PCI_ANY_ID,		PCI_ANY_ID,
 		pci_fixup_ide_bases
+	}, {
+		PCI_FIXUP_HEADER,
+		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21142,
+		pci_fixup_dec21142
 	}, { 0 }
 };
 
@@ -354,7 +286,25 @@ pbus_assign_bus_resources(struct pci_bus *bus, struct pci_sys_data *root)
 	struct pci_dev *dev = bus->self;
 	int i;
 
-	if (!dev) {
+	if (dev) {
+		for (i = 0; i < 3; i++) {
+			if(root->resource[i]) {
+				bus->resource[i] = &dev->resource[PCI_BRIDGE_RESOURCES+i];
+				bus->resource[i]->end  = root->resource[i]->end;
+				bus->resource[i]->name = bus->name;
+			}
+		}
+		bus->resource[0]->flags |= pci_bridge_check_io(dev);
+		bus->resource[1]->flags |= IORESOURCE_MEM;
+
+		if (root->resource[2])
+			bus->resource[2]->flags = root->resource[2]->flags;
+		else {
+			/* no prefetchable memory region - disable it */
+			bus->resource[2]->start = 1024*1024;
+			bus->resource[2]->end   = bus->resource[2]->start - 1;
+		}
+	} else {
 		/*
 		 * Assign root bus resources.
 		 */
@@ -569,8 +519,7 @@ char * __init pcibios_setup(char *str)
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might be mirrored at 0x0100-0x03ff..
  */
-void pcibios_align_resource(void *data, struct resource *res,
-			    unsigned long size, unsigned long align)
+void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 	if (res->flags & IORESOURCE_IO) {
 		unsigned long start = res->start;
@@ -584,7 +533,7 @@ void pcibios_align_resource(void *data, struct resource *res,
  * pcibios_enable_device - Enable I/O and memory.
  * @dev: PCI device to be enabled
  */
-int pcibios_enable_device(struct pci_dev *dev, int mask)
+int pcibios_enable_device(struct pci_dev *dev)
 {
 	u16 cmd, old_cmd;
 	int idx;
@@ -593,10 +542,6 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	old_cmd = cmd;
 	for (idx = 0; idx < 6; idx++) {
-		/* Only set up the requested stuff */
-		if (!(mask & (1 << idx)))
-			continue;
-
 		r = dev->resource + idx;
 		if (!r->start && r->end) {
 			printk(KERN_ERR "PCI: Device %s not available because"
@@ -608,13 +553,6 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 		if (r->flags & IORESOURCE_MEM)
 			cmd |= PCI_COMMAND_MEMORY;
 	}
-
-	/*
-	 * Bridges (eg, cardbus bridges) need to be fully enabled
-	 */
-	if ((dev->class >> 16) == PCI_BASE_CLASS_BRIDGE)
-		cmd |= PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
-
 	if (cmd != old_cmd) {
 		printk("PCI: enabling device %s (%04x -> %04x)\n",
 		       dev->slot_name, old_cmd, cmd);

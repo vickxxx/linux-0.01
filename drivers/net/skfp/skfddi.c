@@ -56,7 +56,6 @@
  *		12-Nov-99	CG	Source code release
  *		22-Nov-99	CG	Included in kernel source.
  *		07-May-00	DM	64 bit fixes, new dma interface
- *		06-May-02	ML	Structure fixes
  *
  * Compilation options (-Dxxx):
  *              DRIVERDEBUG     print lots of messages to log file
@@ -69,7 +68,7 @@
 
 /* Version information string - should be updated prior to */
 /* each new release!!! */
-#define VERSION		"2.07"
+#define VERSION		"2.06"
 
 static const char *boot_msg = 
 	"SysKonnect FDDI PCI Adapter driver v" VERSION " for\n"
@@ -189,7 +188,6 @@ static struct pci_device_id skfddi_pci_tbl[] __initdata = {
 };
 MODULE_DEVICE_TABLE(pci, skfddi_pci_tbl);
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Mirko Lindner <mlindner@syskonnect.de>");
 
 // Define module-wide (static) variables
 
@@ -1363,7 +1361,7 @@ static int skfp_send_pkt(struct sk_buff *skb, struct net_device *dev)
 	 */
 
 	if (!(skb->len >= FDDI_K_LLC_ZLEN && skb->len <= FDDI_K_LLC_LEN)) {
-		bp->MacStat.gen.tx_errors++;	/* bump error counter */
+		bp->MacStat.tx_errors++;	/* bump error counter */
 		// dequeue packets from xmt queue and send them
 		netif_start_queue(dev);
 		dev_kfree_skb(skb);
@@ -1814,8 +1812,8 @@ void mac_drv_tx_complete(struct s_smc *smc, volatile struct s_smt_fp_txd *txd)
 			 skb->len, PCI_DMA_TODEVICE);
 	txd->txd_os.dma_addr = 0;
 
-	smc->os.MacStat.gen.tx_packets++;	// Count transmitted packets.
-	smc->os.MacStat.gen.tx_bytes+=skb->len;	// Count bytes
+	smc->os.MacStat.tx_packets++;	// Count transmitted packets.
+	smc->os.MacStat.tx_bytes+=skb->len;	// Count bytes
 
 	// free the skb
 	dev_kfree_skb_irq(skb);
@@ -1897,7 +1895,7 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	skb = rxd->rxd_os.skb;
 	if (!skb) {
 		PRINTK(KERN_INFO "No skb in rxd\n");
-		smc->os.MacStat.gen.rx_errors++;
+		smc->os.MacStat.rx_errors++;
 		goto RequeueRxd;
 	}
 	virt = skb->data;
@@ -1950,14 +1948,13 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
 	}
 
 	// Count statistics.
-	smc->os.MacStat.gen.rx_packets++;	// Count indicated receive
-						// packets.
-	smc->os.MacStat.gen.rx_bytes+=len;	// Count bytes.
+	smc->os.MacStat.rx_packets++;	// Count indicated receive packets.
+	smc->os.MacStat.rx_bytes+=len;	// Count bytes
 
 	// virt points to header again
 	if (virt[1] & 0x01) {	// Check group (multicast) bit.
 
-		smc->os.MacStat.gen.multicast++;
+		smc->os.MacStat.multicast++;
 	}
 
 	// deliver frame to system
@@ -1975,8 +1972,7 @@ void mac_drv_rx_complete(struct s_smc *smc, volatile struct s_smt_fp_rxd *rxd,
       RequeueRxd:
 	PRINTK(KERN_INFO "Rx: re-queue RXD.\n");
 	mac_drv_requeue_rxd(smc, rxd, frag_count);
-	smc->os.MacStat.gen.rx_errors++;	// Count receive packets
-						// not indicated.
+	smc->os.MacStat.rx_errors++;	// Count receive packets not indicated.
 
 }				// mac_drv_rx_complete
 
@@ -2351,7 +2347,7 @@ void smt_stat_counter(struct s_smc *smc, int stat)
 		break;
 	case 1:
 		PRINTK(KERN_INFO "Receive fifo overflow.\n");
-		smc->os.MacStat.gen.rx_errors++;
+		smc->os.MacStat.rx_errors++;
 		break;
 	default:
 		PRINTK(KERN_INFO "Unknown status (%d).\n", stat);

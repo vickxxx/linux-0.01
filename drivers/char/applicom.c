@@ -36,7 +36,7 @@
 
 #if LINUX_VERSION_CODE < 0x20300 
 /* These probably want adding to <linux/compatmac.h> */
-#define init_waitqueue_head(x) do { *(x) = NULL; } while (0)
+#define init_waitqueue_head(x) do { *(x) = NULL; } while (0);
 #define PCI_BASE_ADDRESS(dev) (dev->base_address[0])
 #define DECLARE_WAIT_QUEUE_HEAD(x) struct wait_queue *x
 #define __setup(x,y) /* */
@@ -222,7 +222,6 @@ int __init applicom_init(void)
 
 		if (!RamIO) {
 			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", PCI_BASE_ADDRESS(dev));
-			pci_disable_device(dev);
 			return -EIO;
 		}
 
@@ -234,14 +233,12 @@ int __init applicom_init(void)
 						  (unsigned long)RamIO,0))) {
 			printk(KERN_INFO "ac.o: PCI Applicom device doesn't have correct signature.\n");
 			iounmap(RamIO);
-			pci_disable_device(dev);
 			continue;
 		}
 
 		if (request_irq(dev->irq, &ac_interrupt, SA_SHIRQ, "Applicom PCI", &dummy)) {
 			printk(KERN_INFO "Could not allocate IRQ %d for PCI Applicom device.\n", dev->irq);
 			iounmap(RamIO);
-			pci_disable_device(dev);
 			apbs[boardno - 1].RamIO = 0;
 			continue;
 		}
@@ -268,6 +265,12 @@ int __init applicom_init(void)
 
 	/* Now try the specified ISA cards */
 
+#warning "LEAK"
+	RamIO = ioremap(mem, LEN_RAM_IO * MAX_ISA_BOARD);
+
+	if (!RamIO) 
+		printk(KERN_INFO "ac.o: Failed to ioremap ISA memory space at 0x%lx\n", mem);
+
 	for (i = 0; i < MAX_ISA_BOARD; i++) {
 		RamIO = ioremap(mem + (LEN_RAM_IO * i), LEN_RAM_IO);
 
@@ -290,8 +293,7 @@ int __init applicom_init(void)
 				iounmap((void *) RamIO);
 				apbs[boardno - 1].RamIO = 0;
 			}
-			else
-				apbs[boardno - 1].irq = irq;
+			apbs[boardno - 1].irq = irq;
 		}
 		else
 			apbs[boardno - 1].irq = 0;
@@ -366,7 +368,7 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	if (count != sizeof(struct st_ram_io) + sizeof(struct mailbox)) {
 		static int warncount = 5;
 		if (warncount) {
-			printk(KERN_INFO "Hmmm. write() of Applicom card, length %zd != expected %zd\n",
+			printk(KERN_INFO "Hmmm. write() of Applicom card, length %d != expected %d\n",
 			       count, sizeof(struct st_ram_io) + sizeof(struct mailbox));
 			warncount--;
 		}
@@ -474,17 +476,18 @@ static ssize_t ac_write(struct file *file, const char *buf, size_t count, loff_t
 	return 0;
 }
 
-static int do_ac_read(int IndexCard, char *buf,
-		struct st_ram_io *st_loc, struct mailbox *mailbox)
+static int do_ac_read(int IndexCard, char *buf)
 {
+	struct st_ram_io st_loc;
+	struct mailbox tmpmailbox;	/* bounce buffer - can't copy to user space with cli() */
 	unsigned long from = (unsigned long)apbs[IndexCard].RamIO + RAM_TO_PC;
-	unsigned char *to = (unsigned char *)&mailbox;
+	unsigned char *to = (unsigned char *)&tmpmailbox;
 #ifdef DEBUG
 	int c;
 #endif
 
-	st_loc->tic_owner_to_pc = readb(apbs[IndexCard].RamIO + TIC_OWNER_TO_PC);
-	st_loc->numcard_owner_to_pc = readb(apbs[IndexCard].RamIO + NUMCARD_OWNER_TO_PC);
+	st_loc.tic_owner_to_pc = readb(apbs[IndexCard].RamIO + TIC_OWNER_TO_PC);
+	st_loc.numcard_owner_to_pc = readb(apbs[IndexCard].RamIO + NUMCARD_OWNER_TO_PC);
 
 
 	{
@@ -507,24 +510,32 @@ static int do_ac_read(int IndexCard, char *buf,
 		printk("Read from applicom card #%d. struct st_ram_io follows:", NumCard);
 
 		for (c = 0; c < sizeof(struct st_ram_io);) {
-			printk("\n%5.5X: %2.2X", c, ((unsigned char *)st_loc)[c]);
+			printk("\n%5.5X: %2.2X", c, ((unsigned char *) &st_loc)[c]);
 
 			for (c++; c % 8 && c < sizeof(struct st_ram_io); c++) {
-				printk(" %2.2X", ((unsigned char *)st_loc)[c]);
+				printk(" %2.2X", ((unsigned char *) &st_loc)[c]);
 			}
 		}
 
 		printk("\nstruct mailbox follows:");
 
 		for (c = 0; c < sizeof(struct mailbox);) {
-			printk("\n%5.5X: %2.2X", c, ((unsigned char *)mailbox)[c]);
+			printk("\n%5.5X: %2.2X", c, ((unsigned char *) &tmpmailbox)[c]);
 
 			for (c++; c % 8 && c < sizeof(struct mailbox); c++) {
-				printk(" %2.2X", ((unsigned char *)mailbox)[c]);
+				printk(" %2.2X", ((unsigned char *) &tmpmailbox)[c]);
 			}
 		}
 		printk("\n");
 #endif
+
+#warning "Je suis stupide. DW. - copy*user in cli"
+
+	if (copy_to_user(buf, &st_loc, sizeof(struct st_ram_io)))
+		return -EFAULT;
+	if (copy_to_user(&buf[sizeof(struct st_ram_io)], &tmpmailbox, sizeof(struct mailbox)))
+		return -EFAULT;
+
 	return (sizeof(struct st_ram_io) + sizeof(struct mailbox));
 }
 
@@ -540,7 +551,7 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 #endif
 	/* No need to ratelimit this. Only root can trigger it anyway */
 	if (count != sizeof(struct st_ram_io) + sizeof(struct mailbox)) {
-		printk( KERN_WARNING "Hmmm. read() of Applicom card, length %zd != expected %zd\n",
+		printk( KERN_WARNING "Hmmm. read() of Applicom card, length %d != expected %d\n",
 			count,sizeof(struct st_ram_io) + sizeof(struct mailbox));
 		return -EINVAL;
 	}
@@ -559,19 +570,11 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 			tmp = readb(apbs[i].RamIO + DATA_TO_PC_READY);
 			
 			if (tmp == 2) {
-				struct st_ram_io st_loc;
-				struct mailbox mailbox;
-
 				/* Got a packet for us */
-				ret = do_ac_read(i, buf, &st_loc, &mailbox);
+				ret = do_ac_read(i, buf);
 				spin_unlock_irqrestore(&apbs[i].mutex, flags);
 				set_current_state(TASK_RUNNING);
 				remove_wait_queue(&FlagSleepRec, &wait);
-
-				if (copy_to_user(buf, &st_loc, sizeof(st_loc)))
-					return -EFAULT;
-				if (copy_to_user(buf + sizeof(st_loc), &mailbox, sizeof(mailbox)))
-					return -EFAULT;
 				return tmp;
 			}
 			

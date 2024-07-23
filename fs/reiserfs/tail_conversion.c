@@ -1,5 +1,5 @@
 /*
- * Copyright 1999-2002 Hans Reiser, see reiserfs/README for licensing and copyright details
+ * Copyright 1999 Hans Reiser, see reiserfs/README for licensing and copyright details
  */
 
 #include <linux/config.h>
@@ -30,7 +30,7 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
                                 key of unfm pointer to be pasted */
     int	n_blk_size,
       n_retval;	  /* returned value for reiserfs_insert_item and clones */
-    unp_t unfm_ptr;  /* Handle on an unformatted node
+    struct unfm_nodeinfo unfm_ptr;  /* Handle on an unformatted node
 				       that will be inserted in the
 				       tree. */
 
@@ -49,17 +49,14 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
     make_cpu_key (&end_key, inode, tail_offset, TYPE_INDIRECT, 4);
 
     // FIXME: we could avoid this 
-    if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND ) {
-	reiserfs_warning (sb, "PAP-14030: direct2indirect: "
-			"pasted or inserted byte exists in the tree %K. "
-			"Use fsck to repair.\n", &end_key);
-	pathrelse(path);
-	return -EIO;
-    }
+    if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND )
+	reiserfs_panic (sb, "PAP-14030: direct2indirect: "
+			"pasted or inserted byte exists in the tree");
     
     p_le_ih = PATH_PITEM_HEAD (path);
 
-    unfm_ptr = cpu_to_le32 (unbh->b_blocknr);
+    unfm_ptr.unfm_nodenum = cpu_to_le32 (unbh->b_blocknr);
+    unfm_ptr.unfm_freespace = 0; // ???
     
     if ( is_statdata_le_ih (p_le_ih) )  {
 	/* Insert new indirect item. */
@@ -93,10 +90,10 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
            last item of the file */
 	if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND )
 	    reiserfs_panic (sb, "PAP-14050: direct2indirect: "
-			    "direct item (%K) not found", &end_key);
+			    "direct item (%k) not found", &end_key);
 	p_le_ih = PATH_PITEM_HEAD (path);
 	RFALSE( !is_direct_le_ih (p_le_ih),
-	        "vs-14055: direct item expected(%K), found %h",
+	        "vs-14055: direct item expected(%k), found %h",
                 &end_key, p_le_ih);
         tail_size = (le_ih_k_offset (p_le_ih) & (n_blk_size - 1))
             + ih_item_len(p_le_ih) - 1;
@@ -104,10 +101,8 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
 	/* we only send the unbh pointer if the buffer is not up to date.
 	** this avoids overwriting good data from writepage() with old data
 	** from the disk or buffer cache
-	** Special case: unbh->b_page will be NULL if we are coming through
-	** DIRECT_IO handler here.
 	*/
-	if ( !unbh->b_page || buffer_uptodate(unbh) || Page_Uptodate(unbh->b_page)) {
+	if (buffer_uptodate(unbh) || Page_Uptodate(unbh->b_page)) {
 	    up_to_date_bh = NULL ;
 	} else {
 	    up_to_date_bh = unbh ;
@@ -132,7 +127,6 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
 
     inode->u.reiserfs_i.i_first_direct_byte = U32_MAX;
 
-    reiserfs_update_tail_transaction(inode);
     return 0;
 }
 
@@ -215,7 +209,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
     copy_item_head (&s_ih, PATH_PITEM_HEAD(p_s_path));
 
     tail_len = (n_new_file_size & (n_block_size - 1));
-    if (get_inode_sd_version (p_s_inode) == STAT_DATA_V2)
+    if (!old_format_only (p_s_sb))
 	round_tail_len = ROUND_UP (tail_len);
     else
 	round_tail_len = tail_len;
@@ -233,7 +227,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
 	/* re-search indirect item */
 	if ( search_for_position_by_key (p_s_sb, p_s_item_key, p_s_path) == POSITION_NOT_FOUND )
 	    reiserfs_panic(p_s_sb, "PAP-5520: indirect2direct: "
-			   "item to be converted %K does not exist", p_s_item_key);
+			   "item to be converted %k does not exist", p_s_item_key);
 	copy_item_head(&s_ih, PATH_PITEM_HEAD(p_s_path));
 #ifdef CONFIG_REISERFS_CHECK
 	pos = le_ih_k_offset (&s_ih) - 1 + 
@@ -246,7 +240,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
 
 
     /* Set direct item header to insert. */
-    make_le_item_head (&s_ih, 0, get_inode_item_key_version (p_s_inode), pos1 + 1,
+    make_le_item_head (&s_ih, 0, inode_items_version (p_s_inode), pos1 + 1,
 		       TYPE_DIRECT, round_tail_len, 0xffff/*ih_free_space*/);
 
     /* we want a pointer to the first byte of the tail in the page.

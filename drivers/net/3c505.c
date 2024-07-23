@@ -32,15 +32,10 @@
  *              Linux 1.3.0 changes by
  *                      Alan Cox <Alan.Cox@linux.org>
  *              More debugging, DMA support, currently maintained by
- *                      Philip Blundell <philb@gnu.org>
+ *                      Philip Blundell <Philip.Blundell@pobox.com>
  *              Multicard/soft configurable dma channel/rev 2 hardware support
  *                      by Christopher Collins <ccollins@pcug.org.au>
- *		Ethtool support (jgarzik), 11/17/2001
  */
-
-#define DRV_NAME	"3c505"
-#define DRV_VERSION	"1.10a"
-
 
 /* Theory of operation:
  *
@@ -108,9 +103,6 @@
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
@@ -156,11 +148,10 @@ static char couldnot_msg[] __initdata = "%s: 3c505 not found\n";
  *********************************************************/
 
 #ifdef ELP_DEBUG
-static int elp_debug = ELP_DEBUG;
+static const int elp_debug = ELP_DEBUG;
 #else
-static int elp_debug;
+static const int elp_debug;
 #endif
-#define debug elp_debug
 
 /*
  *  0 = no messages (well, some)
@@ -1036,9 +1027,8 @@ static int send_packet(struct net_device *dev, struct sk_buff *skb)
 	adapter->current_dma.direction = 1;
 	adapter->current_dma.start_time = jiffies;
 
-	if ((unsigned long)(skb->data + nlen) >= MAX_DMA_ADDRESS || nlen != skb->len) {
-		memcpy(adapter->dma_buffer, skb->data, skb->len);
-		memset(adapter->dma_buffer+skb->len, 0, nlen-skb->len);
+	if ((unsigned long)(skb->data + nlen) >= MAX_DMA_ADDRESS) {
+		memcpy(adapter->dma_buffer, skb->data, nlen);
 		target = virt_to_bus(adapter->dma_buffer);
 	}
 	else {
@@ -1270,31 +1260,6 @@ static void elp_set_mc_list(struct net_device *dev)
 	}
 }
 
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
-}
-
-static u32 netdev_get_msglevel(struct net_device *dev)
-{
-	return debug;
-}
-
-static void netdev_set_msglevel(struct net_device *dev, u32 level)
-{
-	debug = level;
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-	.get_msglevel		= netdev_get_msglevel,
-	.set_msglevel		= netdev_set_msglevel,
-};
-
 /******************************************************
  *
  * initialise Etherlink Plus board
@@ -1315,7 +1280,6 @@ static inline void elp_init(struct net_device *dev)
 	dev->tx_timeout = elp_timeout;			/* local */
 	dev->watchdog_timeo = 10*HZ;
 	dev->set_multicast_list = elp_set_mc_list;	/* local */
-	dev->ethtool_ops = &netdev_ethtool_ops;		/* local */
 
 	/* Setup the generic properties */
 	ether_setup(dev);
@@ -1342,7 +1306,7 @@ static int __init elp_sense(struct net_device *dev)
 	int timeout;
 	int addr = dev->base_addr;
 	const char *name = dev->name;
-	unsigned long flags;
+	long flags;
 	byte orig_HSR;
 
 	if (!request_region(addr, ELP_IO_EXTENT, "3c505"))

@@ -1,24 +1,15 @@
 /* Driver for Datafab USB Compact Flash reader
  *
- * $Id: datafab.c,v 1.7 2002/02/25 00:40:13 mdharm Exp $
- *
  * datafab driver v0.1:
  *
  * First release
  *
  * Current development and maintenance by:
  *   (c) 2000 Jimmie Mayfield (mayfield+datafab@sackheads.org)
- *
- *   Many thanks to Robert Baruch for the SanDisk SmartMedia reader driver
+ *   many thanks to Robert Baruch for the SanDisk SmartMedia reader driver
  *   which I used as a template for this driver.
- *
  *   Some bugfixes and scatter-gather code by Gregory P. Smith 
  *   (greg-usb@electricrain.com)
- *
- *   Fix for media change by Joerg Schneider (js@joergschneider.com)
- *
- * Other contributors:
- *   (c) 2002 Alan Stern <stern@rowland.org>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -111,7 +102,7 @@ static int datafab_raw_bulk(int direction,
 	if (result == -EPIPE) {
 		US_DEBUGP("datafab_raw_bulk: EPIPE. clearing endpoint halt for"
 			  " pipe 0x%x, stalled at %d bytes\n", pipe, act_len);
-		usb_stor_clear_halt(us, pipe);
+		usb_clear_halt(us->pusb_dev, pipe);
 	}
 
 	if (result) {
@@ -121,8 +112,8 @@ static int datafab_raw_bulk(int direction,
 			return US_BULK_TRANSFER_FAILED;
 		}
 
-		// -ECONNRESET -- we canceled this transfer
-		if (result == -ECONNRESET) {
+		// -ENOENT -- we canceled this transfer
+		if (result == -ENOENT) {
 			US_DEBUGP("datafab_raw_bulk:  transfer aborted\n");
 			return US_BULK_TRANSFER_ABORTED;
 		}
@@ -217,7 +208,7 @@ static int datafab_read_data(struct us_data *us,
 
 		if (use_sg) {
 			sg = (struct scatterlist *) dest;
-			buffer = kmalloc(len, GFP_NOIO);
+			buffer = kmalloc(len, GFP_KERNEL);
 			if (buffer == NULL)
 				return USB_STOR_TRANSPORT_ERROR;
 			ptr = buffer;
@@ -342,7 +333,7 @@ static int datafab_write_data(struct us_data *us,
 
 		if (use_sg) {
 			sg = (struct scatterlist *) src;
-			buffer = kmalloc(len, GFP_NOIO);
+			buffer = kmalloc(len, GFP_KERNEL);
 			if (buffer == NULL)
 				return USB_STOR_TRANSPORT_ERROR;
 			ptr = buffer;
@@ -674,7 +665,7 @@ int datafab_transport(Scsi_Cmnd * srb, struct us_data *us)
 	};
 
 	if (!us->extra) {
-		us->extra = kmalloc(sizeof(struct datafab_info), GFP_NOIO);
+		us->extra = kmalloc(sizeof(struct datafab_info), GFP_KERNEL);
 		if (!us->extra) {
 			US_DEBUGP("datafab_transport:  Gah! Can't allocate storage for Datafab info struct!\n");
 			return USB_STOR_TRANSPORT_ERROR;
@@ -695,24 +686,20 @@ int datafab_transport(Scsi_Cmnd * srb, struct us_data *us)
 	}
 
 	if (srb->cmnd[0] == READ_CAPACITY) {
-		unsigned int max_sector;
-
 		info->ssize = 0x200;  // hard coded 512 byte sectors as per ATA spec
 		rc = datafab_id_device(us, info);
 		if (rc != USB_STOR_TRANSPORT_GOOD)
 			return rc;
 
-		US_DEBUGP("datafab_transport:  READ_CAPACITY:  "
-			  "%ld sectors, %ld bytes per sector\n",
+		US_DEBUGP("datafab_transport:  READ_CAPACITY:  %ld sectors, %ld bytes per sector\n",
 			  info->sectors, info->ssize);
 
 		// build the reply
 		//
-		max_sector = info->sectors - 1;
-		ptr[0] = (max_sector >> 24) & 0xFF;
-		ptr[1] = (max_sector >> 16) & 0xFF;
-		ptr[2] = (max_sector >> 8) & 0xFF;
-		ptr[3] = (max_sector) & 0xFF;
+		ptr[0] = (info->sectors >> 24) & 0xFF;
+		ptr[1] = (info->sectors >> 16) & 0xFF;
+		ptr[2] = (info->sectors >> 8) & 0xFF;
+		ptr[3] = (info->sectors) & 0xFF;
 
 		ptr[4] = (info->ssize >> 24) & 0xFF;
 		ptr[5] = (info->ssize >> 16) & 0xFF;
@@ -813,23 +800,6 @@ int datafab_transport(Scsi_Cmnd * srb, struct us_data *us)
 		//
 		return USB_STOR_TRANSPORT_GOOD;
 	}
-
-	if (srb->cmnd[0] == START_STOP) {
-		/* this is used by sd.c'check_scsidisk_media_change to detect
-		   media change */
-		US_DEBUGP("datafab_transport:  START_STOP.\n");
-		/* the first datafab_id_device after a media change returns
-		   an error (determined experimentally) */
-		rc = datafab_id_device(us, info);
-		if (rc == USB_STOR_TRANSPORT_GOOD) {
-			info->sense_key = NO_SENSE;
-			srb->result = SUCCESS;
-		} else {
-			info->sense_key = UNIT_ATTENTION;
-			srb->result = CHECK_CONDITION;
-		}
-		return rc;
-        }
 
 	US_DEBUGP("datafab_transport:  Gah! Unknown command: %d (0x%x)\n", srb->cmnd[0], srb->cmnd[0]);
 	return USB_STOR_TRANSPORT_ERROR;

@@ -234,13 +234,29 @@ failure:
 
 #ifdef DEBUG_PTRACE
 char *pt_rq [] = {
-	/* 0  */ "TRACEME", "PEEKTEXT", "PEEKDATA", "PEEKUSR",
-	/* 4  */ "POKETEXT", "POKEDATA", "POKEUSR", "CONT",
-	/* 8  */ "KILL", "SINGLESTEP", "SUNATTACH", "SUNDETACH",
-	/* 12 */ "GETREGS", "SETREGS", "GETFPREGS", "SETFPREGS",
-	/* 16 */ "READDATA", "WRITEDATA", "READTEXT", "WRITETEXT",
-	/* 20 */ "GETFPAREGS", "SETFPAREGS", "unknown", "unknown",
-	/* 24 */ "SYSCALL", ""
+"TRACEME",
+"PEEKTEXT",
+"PEEKDATA",
+"PEEKUSR",
+"POKETEXT",
+"POKEDATA",
+"POKEUSR",
+"CONT",
+"KILL",
+"SINGLESTEP",
+"SUNATTACH",
+"SUNDETACH",
+"GETREGS",
+"SETREGS",
+"GETFPREGS",
+"SETFPREGS",
+"READDATA",
+"WRITEDATA",
+"READTEXT",
+"WRITETEXT",
+"GETFPAREGS",
+"SETFPAREGS",
+""
 };
 #endif
 
@@ -268,7 +284,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	{
 		char *s;
 
-		if ((request >= 0) && (request <= 24))
+		if ((request > 0) && (request < 21))
 			s = pt_rq [request];
 		else
 			s = "unknown";

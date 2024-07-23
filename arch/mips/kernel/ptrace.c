@@ -20,6 +20,7 @@
 #include <linux/smp_lock.h>
 #include <linux/user.h>
 
+#include <asm/fp.h>
 #include <asm/mipsregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
@@ -27,7 +28,6 @@
 #include <asm/uaccess.h>
 #include <asm/bootinfo.h>
 #include <asm/cpu.h>
-#include <asm/fpu.h>
 
 /*
  * Called by kernel/ptrace.c when detaching..
@@ -42,7 +42,8 @@ void ptrace_disable(struct task_struct *child)
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
-	int ret;
+	int res;
+	extern void save_fp(struct task_struct *);
 
 	lock_kernel();
 #if 0
@@ -53,15 +54,15 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
 		if (current->ptrace & PT_PTRACED) {
-			ret = -EPERM;
+			res = -EPERM;
 			goto out;
 		}
 		/* set the ptrace bit in the process flags. */
 		current->ptrace |= PT_PTRACED;
-		ret = 0;
+		res = 0;
 		goto out;
 	}
-	ret = -ESRCH;
+	res = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
 	if (child)
@@ -70,31 +71,36 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	if (!child)
 		goto out;
 
-	ret = -EPERM;
+	res = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
+		goto out;
 
 	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
+		res = ptrace_attach(child);
 		goto out_tsk;
 	}
-
-	ret = ptrace_check_attach(child, request == PTRACE_KILL);
-	if (ret < 0)
+	res = -ESRCH;
+	if (!(child->ptrace & PT_PTRACED))
 		goto out_tsk;
-
+	if (child->state != TASK_STOPPED) {
+		if (request != PTRACE_KILL)
+			goto out_tsk;
+	}
+	if (child->p_pptr != current)
+		goto out_tsk;
 	switch (request) {
-	case PTRACE_PEEKTEXT: /* read word at location addr. */
+	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
 		int copied;
 
 		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
-		ret = -EIO;
+		res = -EIO;
 		if (copied != sizeof(tmp))
 			break;
-		ret = put_user(tmp,(unsigned long *) data);
-		break;
+		res = put_user(tmp,(unsigned long *) data);
+
+		goto out;
 		}
 
 	/* Read the word at location addr in the USER area.  */
@@ -112,12 +118,30 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 		case FPR_BASE ... FPR_BASE + 31:
 			if (child->used_math) {
-			        unsigned long long *fregs = get_fpu_regs(child);
+			        unsigned long long *fregs
+					= (unsigned long long *)
+					    &child->thread.fpu.hard.fp_regs[0];
+			 	if(!(mips_cpu.options & MIPS_CPU_FPU)) {
+					fregs = (unsigned long long *)
+						child->thread.fpu.soft.regs;
+				} else 
+					if (last_task_used_math == child) {
+						enable_cp1();
+						save_fp(child);
+						disable_cp1();
+						last_task_used_math = NULL;
+						regs->cp0_status &= ~ST0_CU1;
+					}
 				/*
 				 * The odd registers are actually the high
 				 * order bits of the values stored in the even
 				 * registers - unless we're using r2k_switch.S.
 				 */
+#ifdef CONFIG_CPU_R3000
+				if (mips_cpu.options & MIPS_CPU_FPU)
+					tmp = *(unsigned long *)(fregs + addr);
+				else
+#endif
 				if (addr & 1)
 					tmp = (unsigned long) (fregs[((addr & ~1) - 32)] >> 32);
 				else
@@ -142,44 +166,41 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			tmp = regs->lo;
 			break;
 		case FPC_CSR:
-			if (!cpu_has_fpu)
+			if (!(mips_cpu.options & MIPS_CPU_FPU))
 				tmp = child->thread.fpu.soft.sr;
 			else
 				tmp = child->thread.fpu.hard.control;
 			break;
 		case FPC_EIR: {	/* implementation / version register */
-			unsigned long flags;
-
-			if (!cpu_has_fpu)
-				break;
+			unsigned int flags;
 
 			__save_flags(flags);
-			__enable_fpu();
+			enable_cp1();
 			__asm__ __volatile__("cfc1\t%0,$0": "=r" (tmp));
 			__restore_flags(flags);
 			break;
 		}
 		default:
 			tmp = 0;
-			ret = -EIO;
-			goto out_tsk;
+			res = -EIO;
+			goto out;
 		}
-		ret = put_user(tmp, (unsigned long *) data);
-		break;
+		res = put_user(tmp, (unsigned long *) data);
+		goto out;
 		}
 
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA:
-		ret = 0;
+		res = 0;
 		if (access_process_vm(child, addr, &data, sizeof(data), 1)
 		    == sizeof(data))
 			break;
-		ret = -EIO;
-		break;
+		res = -EIO;
+		goto out;
 
 	case PTRACE_POKEUSR: {
 		struct pt_regs *regs;
-		ret = 0;
+		res = 0;
 		regs = (struct pt_regs *) ((unsigned long) child +
 		       KERNEL_STACK_SIZE - 32 - sizeof(struct pt_regs));
 
@@ -189,8 +210,21 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			break;
 		case FPR_BASE ... FPR_BASE + 31: {
 			unsigned long long *fregs;
-			fregs = (unsigned long long *)get_fpu_regs(child);
-			if (!child->used_math) {
+			fregs = (unsigned long long *)&child->thread.fpu.hard.fp_regs[0];
+			if (child->used_math) {
+				if (last_task_used_math == child) {
+					if(!(mips_cpu.options & MIPS_CPU_FPU)) {
+						fregs = (unsigned long long *)
+						child->thread.fpu.soft.regs;
+					} else {
+						enable_cp1();
+						save_fp(child);
+						disable_cp1();
+						last_task_used_math = NULL;
+						regs->cp0_status &= ~ST0_CU1;
+					}
+				}
+			} else {
 				/* FP not yet used  */
 				memset(&child->thread.fpu.hard, ~0,
 				       sizeof(child->thread.fpu.hard));
@@ -201,6 +235,11 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			 * of the values stored in the even registers - unless
 			 * we're using r2k_switch.S.
 			 */
+#ifdef CONFIG_CPU_R3000
+			if (mips_cpu.options & MIPS_CPU_FPU)
+				*(unsigned long *)(fregs + addr) = data;
+			else
+#endif
 			if (addr & 1) {
 				fregs[(addr & ~1) - FPR_BASE] &= 0xffffffff;
 				fregs[(addr & ~1) - FPR_BASE] |= ((unsigned long long) data) << 32;
@@ -220,14 +259,14 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			regs->lo = data;
 			break;
 		case FPC_CSR:
-			if (!cpu_has_fpu)
+			if (!(mips_cpu.options & MIPS_CPU_FPU)) 
 				child->thread.fpu.soft.sr = data;
 			else
 				child->thread.fpu.hard.control = data;
 			break;
 		default:
 			/* The rest are not allowed. */
-			ret = -EIO;
+			res = -EIO;
 			break;
 		}
 		break;
@@ -235,7 +274,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 	case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 	case PTRACE_CONT: { /* restart after signal. */
-		ret = -EIO;
+		res = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
 		if (request == PTRACE_SYSCALL)
@@ -244,17 +283,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 		wake_up_process(child);
-		ret = 0;
+		res = 0;
 		break;
 		}
 
 	/*
-	 * make the child exit.  Best I can do is send it a sigkill.
-	 * perhaps it should be put in the status that it wants to
+	 * make the child exit.  Best I can do is send it a sigkill. 
+	 * perhaps it should be put in the status that it wants to 
 	 * exit.
 	 */
 	case PTRACE_KILL:
-		ret = 0;
+		res = 0;
 		if (child->state == TASK_ZOMBIE)	/* already dead */
 			break;
 		child->exit_code = SIGKILL;
@@ -262,7 +301,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		break;
 
 	case PTRACE_DETACH: /* detach a process that was attached. */
-		ret = ptrace_detach(child, data);
+		res = ptrace_detach(child, data);
 		break;
 
 	case PTRACE_SETOPTIONS:
@@ -270,18 +309,18 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			child->ptrace |= PT_TRACESYSGOOD;
 		else
 			child->ptrace &= ~PT_TRACESYSGOOD;
-		ret = 0;
+		res = 0;
 		break;
 
 	default:
-		ret = -EIO;
-		break;
+		res = -EIO;
+		goto out;
 	}
 out_tsk:
 	free_task_struct(child);
 out:
 	unlock_kernel();
-	return ret;
+	return res;
 }
 
 asmlinkage void syscall_trace(void)

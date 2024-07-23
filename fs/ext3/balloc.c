@@ -91,7 +91,8 @@ static int read_block_bitmap (struct super_block * sb,
 	if (!gdp)
 		goto error_out;
 	retval = 0;
-	bh = sb_bread(sb, le32_to_cpu(gdp->bg_block_bitmap));
+	bh = bread (sb->s_dev,
+			le32_to_cpu(gdp->bg_block_bitmap), sb->s_blocksize);
 	if (!bh) {
 		ext3_error (sb, "read_block_bitmap",
 			    "Cannot read block bitmap - "
@@ -276,8 +277,7 @@ void ext3_free_blocks (handle_t *handle, struct inode * inode,
 	}
 	lock_super (sb);
 	es = sb->u.ext3_sb.s_es;
-	if (block < le32_to_cpu(es->s_first_data_block) ||
-	    block + count < block ||
+	if (block < le32_to_cpu(es->s_first_data_block) || 
 	    (block + count) > le32_to_cpu(es->s_blocks_count)) {
 		ext3_error (sb, "ext3_free_blocks",
 			    "Freeing blocks not in datazone - "
@@ -310,6 +310,17 @@ do_more:
 	if (!gdp)
 		goto error_return;
 
+	if (in_range (le32_to_cpu(gdp->bg_block_bitmap), block, count) ||
+	    in_range (le32_to_cpu(gdp->bg_inode_bitmap), block, count) ||
+	    in_range (block, le32_to_cpu(gdp->bg_inode_table),
+		      sb->u.ext3_sb.s_itb_per_group) ||
+	    in_range (block + count - 1, le32_to_cpu(gdp->bg_inode_table),
+		      sb->u.ext3_sb.s_itb_per_group))
+		ext3_error (sb, "ext3_free_blocks",
+			    "Freeing blocks in system zones - "
+			    "Block = %lu, count = %lu",
+			    block, count);
+
 	/*
 	 * We are about to start releasing blocks in the bitmap,
 	 * so we need undo access.
@@ -335,24 +346,15 @@ do_more:
 	if (err)
 		goto error_return;
 
-	for (i = 0; i < count; i++, block++) {
-		if (block == le32_to_cpu(gdp->bg_block_bitmap) ||
-		    block == le32_to_cpu(gdp->bg_inode_bitmap) ||
-		    in_range(block, le32_to_cpu(gdp->bg_inode_table),
-			     EXT3_SB(sb)->s_itb_per_group)) {
-			ext3_error(sb, __FUNCTION__,
-				   "Freeing block in system zone - block = %lu",
-				   block);
-			continue;
-		}
-
+	for (i = 0; i < count; i++) {
 		/*
 		 * An HJ special.  This is expensive...
 		 */
 #ifdef CONFIG_JBD_DEBUG
 		{
 			struct buffer_head *debug_bh;
-			debug_bh = sb_get_hash_table(sb, block);
+			debug_bh = get_hash_table(sb->s_dev, block + i,
+							sb->s_blocksize);
 			if (debug_bh) {
 				BUFFER_TRACE(debug_bh, "Deleted!");
 				if (!bh2jh(bitmap_bh)->b_committed_data)
@@ -365,8 +367,9 @@ do_more:
 #endif
 		BUFFER_TRACE(bitmap_bh, "clear bit");
 		if (!ext3_clear_bit (bit + i, bitmap_bh->b_data)) {
-			ext3_error(sb, __FUNCTION__,
-				   "bit already cleared for block %lu", block);
+			ext3_error (sb, __FUNCTION__,
+				      "bit already cleared for block %lu", 
+				      block + i);
 			BUFFER_TRACE(bitmap_bh, "bit already cleared");
 		} else {
 			dquot_freed_blocks++;
@@ -414,6 +417,7 @@ do_more:
 	if (!err) err = ret;
 
 	if (overflow && !err) {
+		block += count;
 		count = overflow;
 		goto do_more;
 	}
@@ -540,7 +544,6 @@ int ext3_new_block (handle_t *handle, struct inode * inode,
 	int i, j, k, tmp, alloctmp;
 	int bitmap_nr;
 	int fatal = 0, err;
-	int performed_allocation = 0;
 	struct super_block * sb;
 	struct ext3_group_desc * gdp;
 	struct ext3_super_block * es;
@@ -574,7 +577,6 @@ int ext3_new_block (handle_t *handle, struct inode * inode,
 
 	ext3_debug ("goal=%lu.\n", goal);
 
-repeat:
 	/*
 	 * First, test whether the goal block is free.
 	 */
@@ -644,7 +646,8 @@ repeat:
 	}
 
 	/* No space left on the device */
-	goto out;
+	unlock_super (sb);
+	return 0;
 
 search_back:
 	/* 
@@ -683,35 +686,23 @@ got_block:
 	if (tmp == le32_to_cpu(gdp->bg_block_bitmap) ||
 	    tmp == le32_to_cpu(gdp->bg_inode_bitmap) ||
 	    in_range (tmp, le32_to_cpu(gdp->bg_inode_table),
-		      EXT3_SB(sb)->s_itb_per_group)) {
-		ext3_error(sb, __FUNCTION__,
-			   "Allocating block in system zone - block = %u", tmp);
-
-		/* Note: This will potentially use up one of the handle's
-		 * buffer credits.  Normally we have way too many credits,
-		 * so that is OK.  In _very_ rare cases it might not be OK.
-		 * We will trigger an assertion if we run out of credits,
-		 * and we will have to do a full fsck of the filesystem -
-		 * better than randomly corrupting filesystem metadata.
-		 */
-		ext3_set_bit(j, bh->b_data);
-		goto repeat;
-	}
-
+		      sb->u.ext3_sb.s_itb_per_group))
+		ext3_error (sb, "ext3_new_block",
+			    "Allocating block in system zone - "
+			    "block = %u", tmp);
 
 	/* The superblock lock should guard against anybody else beating
 	 * us to this point! */
 	J_ASSERT_BH(bh, !ext3_test_bit(j, bh->b_data));
 	BUFFER_TRACE(bh, "setting bitmap bit");
 	ext3_set_bit(j, bh->b_data);
-	performed_allocation = 1;
 
 #ifdef CONFIG_JBD_DEBUG
 	{
 		struct buffer_head *debug_bh;
 
 		/* Record bitmap buffer state in the newly allocated block */
-		debug_bh = sb_get_hash_table(sb, tmp);
+		debug_bh = get_hash_table(sb->s_dev, tmp, sb->s_blocksize);
 		if (debug_bh) {
 			BUFFER_TRACE(debug_bh, "state when allocated");
 			BUFFER_TRACE2(debug_bh, bh, "bitmap state");
@@ -826,11 +817,6 @@ out:
 		ext3_std_error(sb, fatal);
 	}
 	unlock_super (sb);
-	/*
-	 * Undo the block allocation
-	 */
-	if (!performed_allocation)
-		DQUOT_FREE_BLOCK(inode, 1);
 	return 0;
 	
 }

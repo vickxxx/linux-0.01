@@ -1,53 +1,13 @@
-/* $Id: ide.c,v 1.30 2003/07/08 07:24:47 pkj Exp $
+/* $Id: ide.c,v 1.19 2001/05/09 12:53:16 johana Exp $
  *
  * Etrax specific IDE functions, like init and PIO-mode setting etc.
  * Almost the entire ide.c is used for the rest of the Etrax ATA driver.
- * Copyright (c) 2000, 2001, 2002 Axis Communications AB 
+ * Copyright (c) 2000, 2001 Axis Communications AB 
  *
  * Authors:    Bjorn Wesen        (initial version)
  *             Mikael Starvik     (pio setup stuff)
  *
  * $Log: ide.c,v $
- * Revision 1.30  2003/07/08 07:24:47  pkj
- * Corrected spelling mistakes originally found in 2.5.x
- *
- * Revision 1.29  2003/06/17 13:57:49  starvik
- * Merge of Linux 2.4.21
- *
- * Revision 1.28  2003/01/22 12:41:12  starvik
- * Added LBA48 support
- * Fixed typo in e100_ideproc
- *
- * Revision 1.27  2003/01/09 18:03:47  starvik
- * init_ioremap is now called by kernel before device drivers are initialized
- *
- * Revision 1.26  2002/09/17 12:16:59  bjornw
- * Removed unnecessary cli/sti pair
- *
- * Revision 1.25  2002/08/19 08:07:19  matsfg
- * Added IN_WORD.
- *
- * Revision 1.24  2002/04/22 11:47:21  johana
- * Fix according to 2.4.19-pre7. time_after/time_before and
- * missing end of comment.
- * The patch has a typo for ethernet.c in e100_clear_network_leds(),
- *  that is fixed here.
- *
- * Revision 1.23  2002/03/19 15:35:51  bjornw
- * Cleaned up the bus-reset code a bit and made G27-reset work
- *
- * Revision 1.22  2002/03/19 15:23:05  bjornw
- * Added flush_etrax_cache before starting the receiving DMA
- *
- * Revision 1.21  2002/03/06 15:37:56  hp
- * 	* ide.c (OUT_BYTE): If timing out in the first busy-loop, do a
- * 	printk, fall through and still do the write.
- * 	(IN_BYTE): If timing out in the first loop, and reg indicated it's
- * 	the ATA status register in the device being read, return BUSY_STAT.
- *
- * Revision 1.20  2002/02/22 11:47:56  bjornw
- * Added a timeout to IN_BYTE and OUT_BYTE
- *
  * Revision 1.19  2001/05/09 12:53:16  johana
  * Added #include <asm/dma.h>
  *
@@ -152,102 +112,30 @@
 /* number of Etrax DMA descriptors */
 #define MAX_DMA_DESCRS 64
 
-/* number of times to retry busy-flags when reading/writing IDE-registers 
- * this can't be too high because a hung harddisk might cause the watchdog
- * to trigger (sometimes IN_BYTE and OUT_BYTE are called with irq's disabled)
- */
-
-#define IDE_REGISTER_TIMEOUT 300
-
 #ifdef CONFIG_ETRAX_IDE_CSE1_16_RESET
 /* address where the memory-mapped IDE reset bit lives, if used */
 static volatile unsigned long *reset_addr;
 #endif
 
-static int e100_read_command = 0;
-
 #define LOWDB(x)
 #define D(x) 
 
-void 
-OUT_BYTE(unsigned char data, ide_ioreg_t reg) {
-	int timeleft;
+void OUT_BYTE(unsigned char data, ide_ioreg_t reg) {
 	LOWDB(printk("ob: data 0x%x, reg 0x%x\n", data, reg));
-
-	/* note the lack of handling any timeouts. we stop waiting, but we don't
-	 * really notify anybody.
-	 */
-
-	timeleft = IDE_REGISTER_TIMEOUT;
-	/* wait for busy flag */
-	while(timeleft && (*R_ATA_STATUS_DATA & IO_MASK(R_ATA_STATUS_DATA, busy)))
-		timeleft--;
-
-	/*
-	 * Fall through at a timeout, so the ongoing command will be
-	 * aborted by the write below, which is expected to be a dummy
-	 * command to the command register.  This happens when a faulty
-	 * drive times out on a command.  See comment on timeout in
-	 * IN_BYTE.
-	 */
-	if(!timeleft)
-		printk("ATA timeout reg 0x%lx := 0x%x\n", reg, data);
-
+	while(*R_ATA_STATUS_DATA & IO_MASK(R_ATA_STATUS_DATA, busy)); /* wait for busy flag */
 	*R_ATA_CTRL_DATA = reg | data; /* write data to the drive's register */
-
-	timeleft = IDE_REGISTER_TIMEOUT;
-	/* wait for transmitter ready */
-	while(timeleft && !(*R_ATA_STATUS_DATA &
-			    IO_MASK(R_ATA_STATUS_DATA, tr_rdy)))
-		timeleft--;
+	while(!(*R_ATA_STATUS_DATA &
+		IO_MASK(R_ATA_STATUS_DATA, tr_rdy))); /* wait for transmitter ready */
 }
 
-unsigned short 
-IN_BYTE(ide_ioreg_t reg) {
+unsigned char IN_BYTE(ide_ioreg_t reg) {
 	int status;
-	int timeleft;
-
-	timeleft = IDE_REGISTER_TIMEOUT;
-	/* wait for busy flag */
-	while(timeleft && (*R_ATA_STATUS_DATA & IO_MASK(R_ATA_STATUS_DATA, busy)))
-		timeleft--;
-
-	if(!timeleft) {
-		/*
-		 * If we're asked to read the status register, like for
-		 * example when a command does not complete for an
-		 * extended time, but the ATA interface is stuck in a
-		 * busy state at the *ETRAX* ATA interface level (as has
-		 * happened repeatedly with at least one bad disk), then
-		 * the best thing to do is to pretend that we read
-		 * "busy" in the status register, so the IDE driver will
-		 * time-out, abort the ongoing command and perform a
-		 * reset sequence.  Note that the subsequent OUT_BYTE
-		 * call will also timeout on busy, but as long as the
-		 * write is still performed, everything will be fine.
-		 */
-		if ((reg & IO_MASK (R_ATA_CTRL_DATA, addr))
-		    == IO_FIELD (R_ATA_CTRL_DATA, addr, IDE_STATUS_OFFSET))
-			return BUSY_STAT;
-		else
-			/* For other rare cases we assume 0 is good enough.  */
-			return 0;
-	}
-
+	while(*R_ATA_STATUS_DATA & IO_MASK(R_ATA_STATUS_DATA, busy)); /* wait for busy flag */
 	*R_ATA_CTRL_DATA = reg | IO_STATE(R_ATA_CTRL_DATA, rw, read); /* read data */ 
-
-	timeleft = IDE_REGISTER_TIMEOUT;
-	/* wait for available */
-	while(timeleft && !((status = *R_ATA_STATUS_DATA) &
-			    IO_MASK(R_ATA_STATUS_DATA, dav)))
-		timeleft--;
-
-	if(!timeleft)
-		return 0;
-
+	while(!((status = *R_ATA_STATUS_DATA) &
+		IO_MASK(R_ATA_STATUS_DATA, dav))); /* wait for available */
 	LOWDB(printk("inb: 0x%x from reg 0x%x\n", status & 0xff, reg));
-
-        return (unsigned char)status;
+	return (unsigned char)status; /* data was in the lower 16 bits in the status reg */
 }
 
 /* PIO timing (in R_ATA_CONFIG)
@@ -302,15 +190,9 @@ IN_BYTE(ide_ioreg_t reg) {
 #define ATA_PIO0_STROBE 19
 #define ATA_PIO0_HOLD    4
 
-static int e100_dma_check (ide_drive_t *drive);
-static int e100_dma_begin (ide_drive_t *drive);
-static int e100_dma_end (ide_drive_t *drive);
-static int e100_dma_read (ide_drive_t *drive);
-static int e100_dma_write (ide_drive_t *drive);
-static void e100_ide_input_data (ide_drive_t *drive, void *, unsigned int);
-static void e100_ide_output_data (ide_drive_t *drive, void *, unsigned int);
-static void e100_atapi_input_bytes(ide_drive_t *drive, void *, unsigned int);
-static void e100_atapi_output_bytes(ide_drive_t *drive, void *, unsigned int);
+static int e100_dmaproc (ide_dma_action_t func, ide_drive_t *drive);
+static void e100_ideproc (ide_ide_action_t func, ide_drive_t *drive,
+			  void *buffer, unsigned int length);
 
 /*
  * good_dma_drives() lists the model names (from "hdparm -i")
@@ -325,9 +207,14 @@ const char *good_dma_drives[] = {"Micropolis 2112A",
 
 static void tune_e100_ide(ide_drive_t *drive, byte pio)
 {
+	unsigned long flags;
+	
 	pio = 4;
 	/* pio = ide_get_best_pio_mode(drive, pio, 4, NULL); */
 	
+	save_flags(flags);
+	cli();
+
 	/* set pio mode! */
   	 
 	switch(pio) {
@@ -372,6 +259,7 @@ static void tune_e100_ide(ide_drive_t *drive, byte pio)
 					  IO_FIELD( R_ATA_CONFIG, pio_hold,   ATA_PIO4_HOLD ) );
 			break;
 	}
+	restore_flags(flags);
 }
 
 void __init 
@@ -388,18 +276,23 @@ init_e100_ide (void)
 		ide_hwif_t *hwif = &ide_hwifs[h];
 		hwif->chipset = ide_etrax100;
 		hwif->tuneproc = &tune_e100_ide;
-                hwif->ata_input_data = &e100_ide_input_data;
-                hwif->ata_output_data = &e100_ide_output_data;
-                hwif->atapi_input_bytes = &e100_atapi_input_bytes;
-                hwif->atapi_output_bytes = &e100_atapi_output_bytes;
-                hwif->ide_dma_check = &e100_dma_check;
-                hwif->ide_dma_end = &e100_dma_end;
-		hwif->ide_dma_write = &e100_dma_write;
-		hwif->ide_dma_read = &e100_dma_read;
-		hwif->ide_dma_begin = &e100_dma_begin;
+		hwif->dmaproc = &e100_dmaproc;
+		hwif->ideproc = &e100_ideproc;
 	}
-
 	/* actually reset and configure the etrax100 ide/ata interface */
+
+	/* This is mystifying; why is not G27 SET anywhere ? It's just reset here twice. */
+
+	/* de-assert bus-reset */
+#ifdef CONFIG_ETRAX_IDE_PB7_RESET  
+	port_pb_dir_shadow = port_pb_dir_shadow | 
+		IO_STATE(R_PORT_PB_DIR, dir7, output);
+	*R_PORT_PB_DIR = port_pb_dir_shadow;
+	REG_SHADOW_SET(R_PORT_PB_DATA, port_pb_data_shadow, 7, 1);
+#endif
+#ifdef CONFIG_ETRAX_IDE_G27_RESET
+	*R_PORT_G_DATA = 0;
+#endif 
 
 	*R_ATA_CTRL_DATA = 0;
 	*R_ATA_TRANSFER_CNT = 0;
@@ -415,29 +308,18 @@ init_e100_ide (void)
 
 	*R_GEN_CONFIG = genconfig_shadow;
 
-        /* pull the chosen /reset-line low */
-        
-#ifdef CONFIG_ETRAX_IDE_G27_RESET
-        REG_SHADOW_SET(R_PORT_G_DATA, port_g_data_shadow, 27, 0);
-#endif 
 #ifdef CONFIG_ETRAX_IDE_CSE1_16_RESET
+        init_ioremap();
         REG_SHADOW_SET(port_cse1_addr, port_cse1_shadow, 16, 0);
 #endif
+
 #ifdef CONFIG_ETRAX_IDE_CSP0_8_RESET
+        init_ioremap();
         REG_SHADOW_SET(port_csp0_addr, port_csp0_shadow, 8, 0);
-#endif
-#ifdef CONFIG_ETRAX_IDE_PB7_RESET  
-	port_pb_dir_shadow = port_pb_dir_shadow | 
-		IO_STATE(R_PORT_PB_DIR, dir7, output);
-	*R_PORT_PB_DIR = port_pb_dir_shadow;
-	REG_SHADOW_SET(R_PORT_PB_DATA, port_pb_data_shadow, 7, 1);
 #endif
 
 	/* wait some */
-
 	udelay(25);
-
-	/* de-assert bus-reset */
 
 #ifdef CONFIG_ETRAX_IDE_CSE1_16_RESET
 	REG_SHADOW_SET(port_cse1_addr, port_cse1_shadow, 16, 1);
@@ -446,7 +328,7 @@ init_e100_ide (void)
 	REG_SHADOW_SET(port_csp0_addr, port_csp0_shadow, 8, 1);
 #endif
 #ifdef CONFIG_ETRAX_IDE_G27_RESET
-	REG_SHADOW_SET(R_PORT_G_DATA, port_g_data_shadow, 27, 1);
+	*R_PORT_G_DATA = 0; /* de-assert bus-reset */
 #endif 
 
 	/* make a dummy read to set the ata controller in a proper state */
@@ -469,13 +351,12 @@ init_e100_ide (void)
 			     IO_STATE( R_IRQ_MASK0_SET, ata_irq2, set ) |
 			     IO_STATE( R_IRQ_MASK0_SET, ata_irq3, set ) );
 
-	printk("ide: waiting %d seconds for drives to regain consciousness\n",
-	       CONFIG_ETRAX_IDE_DELAY);
+	printk("ide: waiting %d seconds for drives to regain consciousness\n", CONFIG_ETRAX_IDE_DELAY);
 
 	h = jiffies + (CONFIG_ETRAX_IDE_DELAY * HZ);
-	while(time_before(jiffies, h)) /* nothing */ ;
+	while(jiffies < h) ;
 
-	/* reset the dma channels we will use */
+  /* reset the dma channels we will use */
 
 	RESET_DMA(ATA_TX_DMA_NBR);
 	RESET_DMA(ATA_RX_DMA_NBR);
@@ -637,7 +518,7 @@ e100_atapi_output_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecoun
         LED_DISK_WRITE(1);
         
         /* Etrax will set busy = 1 until the multi pio transfer has finished
-         * and tr_rdy = 1 after each successful word transfer.
+         * and tr_rdy = 1 after each succesful word transfer. 
          * When the last byte has been transferred Etrax will first set tr_tdy = 1 
          * and then busy = 0 (not in the same cycle). If we read busy before it
          * has been set to 0 we will think that we should transfer more bytes 
@@ -672,6 +553,32 @@ static void
 e100_ide_output_data (ide_drive_t *drive, void *buffer, unsigned int wcount)
 {
 	e100_atapi_output_bytes(drive, buffer, wcount << 2);
+}
+
+/*
+ * The multiplexor for ide_xxxput_data and atapi calls
+ */
+static void 
+e100_ideproc (ide_ide_action_t func, ide_drive_t *drive,
+	      void *buffer, unsigned int length)
+{
+	switch (func) {
+		case ideproc_ide_input_data:
+			e100_ide_input_data(drive, buffer, length);
+			break;
+		case ideproc_ide_output_data:
+			e100_ide_input_data(drive, buffer, length);
+			break;
+		case ideproc_atapi_input_bytes:
+			e100_atapi_input_bytes(drive, buffer, length);
+			break;
+		case ideproc_atapi_output_bytes:
+			e100_atapi_output_bytes(drive, buffer, length);
+			break;
+		default:
+			printk("e100_ideproc: unsupported func %d!\n", func);
+			break;
+	}
 }
 
 /* we only have one DMA channel on the chip for ATA, so we can keep these statically */
@@ -750,9 +657,10 @@ static int e100_ide_build_dmatable (ide_drive_t *drive)
                 }
 		/* ok we want to do IO at addr, size bytes. set up a new descriptor entry */
                 if(size == 65536) {
-			ata_descrs[count].sw_len = 0;  /* 0 means 65536, this is a 16-bit field */
-                } else {
-			ata_descrs[count].sw_len = size;
+                  ata_descrs[count].sw_len = 0;  /* 0 means 65536, this is a 16-bit field */
+                }
+                else {
+                  ata_descrs[count].sw_len = size;
                 }
 		ata_descrs[count].ctrl = 0;
 		ata_descrs[count].buf = addr;
@@ -808,25 +716,25 @@ static ide_startstop_t etrax_dma_intr (ide_drive_t *drive)
 	LED_DISK_READ(0);
 	LED_DISK_WRITE(0);
 
-	dma_stat = HWIF(drive)->ide_dma_end(drive);
-	stat = HWIF(drive)->INB(IDE_STATUS_REG);		/* get drive status */
+	dma_stat = HWIF(drive)->dmaproc(ide_dma_end, drive);
+	stat = GET_STAT();			/* get drive status */
 	if (OK_STAT(stat,DRIVE_READY,drive->bad_wstat|DRQ_STAT)) {
 		if (!dma_stat) {
 			struct request *rq;
 			rq = HWGROUP(drive)->rq;
 			for (i = rq->nr_sectors; i > 0;) {
 				i -= rq->current_nr_sectors;
-				DRIVER(drive)->end_request(drive, 1);
+				ide_end_request(1, HWGROUP(drive));
 			}
 			return ide_stopped;
 		}
 		printk("%s: bad DMA status\n", drive->name);
 	}
-	return DRIVER(drive)->error(drive, "dma_intr", stat);
+	return ide_error(drive, "dma_intr", stat);
 }
 
 /*
- * Functions below initiates/aborts DMA read/write operations on a drive.
+ * e100_dmaproc() initiates/aborts DMA read/write operations on a drive.
  *
  * The caller is assumed to have selected the drive and programmed the drive's
  * sector address using CHS or LBA.  All that remains is to prepare for DMA
@@ -841,19 +749,59 @@ static ide_startstop_t etrax_dma_intr (ide_drive_t *drive)
  * the caller should revert to PIO for the current request.
  */
 
-static int e100_dma_check(ide_drive_t *drive)
+static int e100_dmaproc (ide_dma_action_t func, ide_drive_t *drive)
 {
-	return config_drive_for_dma (drive);
-}
+        static unsigned int reading; /* static to support ide_dma_begin semantics */
+	int atapi = 0;
 
-static int e100_dma_end(ide_drive_t *drive)
-{
-	/* TODO: check if something went wrong with the DMA */
-	return 0;
-}
+	D(printk("e100_dmaproc func %d\n", func));
 
-static int e100_start_dma(ide_drive_t *drive, int atapi, int reading)
-{
+        switch (func) {
+		case ide_dma_verbose:
+			return 0;
+                case ide_dma_check:
+                        return config_drive_for_dma (drive);
+		case ide_dma_off:
+		case ide_dma_off_quietly:
+			/* ok.. we don't really need to do anything I think. */
+			return 0;
+                case ide_dma_write:
+                        reading = 0;
+			break;
+                case ide_dma_read:
+			reading = 1;
+                        break;
+                case ide_dma_begin:
+			/* begin DMA, used by ATAPI devices which want to issue the 
+			 * appropriate IDE command themselves.
+			 *
+			 * they have already called ide_dma_read/write to set the
+			 * static reading flag, now they call ide_dma_begin to do
+			 * the real stuff. we tell our code below not to issue
+			 * any IDE commands itself and jump into it. 
+			 */
+			atapi++;
+			goto dma_begin;
+		case ide_dma_end: /* returns 1 on error, 0 otherwise */
+			/* TODO: check if something went wrong with the DMA */
+			return 0;
+
+                default:
+                        printk("e100_dmaproc: unsupported func %d\n", func);
+                        return 1;
+        }
+
+	/* ATAPI-devices (not disks) first call ide_dma_read/write to set the direction
+	 * then they call ide_dma_begin after they have issued the appropriate drive command
+	 * themselves to actually start the chipset DMA. so we just return here if we're
+	 * not a diskdrive.
+	 */
+
+        if (drive->media != ide_disk)
+                return 0;
+
+ dma_begin:
+
 	if(reading) {
 
 		RESET_DMA(ATA_RX_DMA_NBR); /* sometimes the DMA channel get stuck so we need to do this */
@@ -870,27 +818,12 @@ static int e100_start_dma(ide_drive_t *drive, int atapi, int reading)
 			ide_set_handler(drive, &etrax_dma_intr, WAIT_CMD, NULL);
 			
 			/* issue cmd to drive */
-                        if ((HWGROUP(drive)->rq->cmd == IDE_DRIVE_TASKFILE) &&
-			    (drive->addressing == 1)) {
-				ide_task_t *args = HWGROUP(drive)->rq->special;
-				OUT_BYTE(args->tfRegister[IDE_COMMAND_OFFSET], IDE_COMMAND_REG);
-			} else if (drive->addressing) {
-				OUT_BYTE(WIN_READDMA_EXT, IDE_COMMAND_REG);
-			} else {
-				OUT_BYTE(WIN_READDMA, IDE_COMMAND_REG);
-			}
+			
+			OUT_BYTE(WIN_READDMA, IDE_COMMAND_REG);
 		}
 
 		/* begin DMA */
-		
-		/* need to do this before RX DMA due to a chip bug
-		 * it is enough to just flush the part of the cache that
-		 * corresponds to the buffers we start, but since HD transfers
-		 * usually are more than 8 kB, it is easier to optimize for the
-		 * normal case and just flush the entire cache. its the only
-		 * way to be sure! (OB movie quote)
-		 */
-		flush_etrax_cache();  
+	      
 		*R_DMA_CH3_FIRST = virt_to_phys(ata_descrs);
 		*R_DMA_CH3_CMD   = IO_STATE(R_DMA_CH3_CMD, cmd, start);
 		
@@ -928,15 +861,8 @@ static int e100_start_dma(ide_drive_t *drive, int atapi, int reading)
 			ide_set_handler(drive, &etrax_dma_intr, WAIT_CMD, NULL);
 			
 			/* issue cmd to drive */
-			if ((HWGROUP(drive)->rq->cmd == IDE_DRIVE_TASKFILE) &&
-			    (drive->addressing == 1)) {
-				ide_task_t *args = HWGROUP(drive)->rq->special;
-				OUT_BYTE(args->tfRegister[IDE_COMMAND_OFFSET], IDE_COMMAND_REG);
-			} else if (drive->addressing) {
-				OUT_BYTE(WIN_WRITEDMA_EXT, IDE_COMMAND_REG);
-			} else {
-				OUT_BYTE(WIN_WRITEDMA, IDE_COMMAND_REG);
-			}
+			
+			OUT_BYTE(WIN_WRITEDMA, IDE_COMMAND_REG);
 		}
 
 		/* begin DMA */
@@ -961,44 +887,14 @@ static int e100_start_dma(ide_drive_t *drive, int atapi, int reading)
 
 		D(printk("dma write of %d bytes.\n", ata_tot_size));
 	}
+
+	/* DMA started successfully */
 	return 0;
 }
 
-static int e100_dma_write(ide_drive_t *drive)
-{
-	e100_read_command = 0;
-	/* ATAPI-devices (not disks) first call ide_dma_read/write to set the direction
-	 * then they call ide_dma_begin after they have issued the appropriate drive command
-	 * themselves to actually start the chipset DMA. so we just return here if we're
-	 * not a diskdrive.
-	 */
-	if (drive->media != ide_disk)
-                return 0;
-	return e100_start_dma(drive, 0, 0);
-}
+/* ide.c calls this, but we don't need to do anything particular */
 
-static int e100_dma_read(ide_drive_t *drive)
+int ide_release_dma (ide_hwif_t *hwif)
 {
-	e100_read_command = 1;
-	/* ATAPI-devices (not disks) first call ide_dma_read/write to set the direction
-	 * then they call ide_dma_begin after they have issued the appropriate drive command
-	 * themselves to actually start the chipset DMA. so we just return here if we're
-	 * not a diskdrive.
-	 */
-	if (drive->media != ide_disk)
-                return 0;
-	return e100_start_dma(drive, 0, 1);
-}
-
-static int e100_dma_begin(ide_drive_t *drive)
-{
-	/* begin DMA, used by ATAPI devices which want to issue the 
-	 * appropriate IDE command themselves.
-	 *
-	 * they have already called ide_dma_read/write to set the
-	 * static reading flag, now they call ide_dma_begin to do
-	 * the real stuff. we tell our code below not to issue
-	 * any IDE commands itself and jump into it. 
-	 */
-	 return e100_start_dma(drive, 1, e100_read_command);
+	return 1;
 }

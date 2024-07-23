@@ -511,7 +511,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 	if (!card->configured){
 
 		/* Initialize the Spin lock */
-#if defined(CONFIG_SMP) || defined(LINUX_2_4) 
+#if defined(__SMP__) || defined(LINUX_2_4) 
 		printk(KERN_INFO "%s: Initializing for SMP\n",wandev->name);
 #endif
 
@@ -604,13 +604,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 
   	/* Reserve I/O region and schedule background task */
         if(card->hw.type != SDLA_S514 && !card->wandev.piggyback)
-		if (!request_region(card->hw.port, card->hw.io_range, 
-				wandev->name)) {
-			printk(KERN_WARNING "port 0x%04x busy\n", card->hw.port);
-			release_hw(card);
-			wandev->state = WAN_UNCONFIGURED;
-			return -EBUSY;
-	  }
+                request_region(card->hw.port, card->hw.io_range, wandev->name);
 
 	/* Only use the polling routine for the X25 protocol */
 	
@@ -1027,7 +1021,7 @@ static int ioctl_dump (sdla_t* card, sdla_dump_t* u_dump)
                       #endif
                         dump.length     -= len;
                         dump.offset     += len;
-                        dump.ptr         = (char*)dump.ptr + len;
+                        (char*)dump.ptr += len;
                 }
 		
                 sdla_mapmem(&card->hw, oldvec);/* restore DPM window position */

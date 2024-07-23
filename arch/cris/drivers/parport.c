@@ -1,13 +1,13 @@
-/*
- * Parallel port driver for ETRAX.
- *
+/* $Id: parport.c,v 1.8 2001/09/26 11:51:52 bjornw Exp $
+ * 
+ * Elinux parallel port driver
  * NOTE!
  *   Since par0 shares DMA with ser2 and par 1 shares DMA with ser3
  *   this should be handled if both are enabled at the same time.
  *   THIS IS NOT HANDLED YET!
  *
- * Copyright (c) 2001, 2002, 2003 Axis Communications AB
- *
+ * Copyright (c) 2001 Axis Communications AB
+ * 
  * Author: Fredrik Hugosson
  *
  */
@@ -56,11 +56,11 @@ static inline int DPRINTK(void *nothing, ...) {return 0;}
 //#define CONFIG_PAR0_INT 1
 //#define CONFIG_PAR1_INT 1
 
-/* Define some macros to access ETRAX 100 registers */
-#define SETF(var, reg, field, val) var = (var & ~IO_MASK_(reg##_, field##_)) | \
-					  IO_FIELD_(reg##_, field##_, val)
-#define SETS(var, reg, field, val) var = (var & ~IO_MASK_(reg##_, field##_)) | \
-					  IO_STATE_(reg##_, field##_, _##val)
+#define SETF(var, reg, field, val) \
+	var = (var & ~IO_MASK(##reg##, field)) | IO_FIELD(##reg##, field, val)
+
+#define SETS(var, reg, field, val) \
+	var = (var & ~IO_MASK(##reg##, field)) | IO_STATE(##reg##, field, val)
 
 struct etrax100par_struct {
 	/* parallell port control */
@@ -204,7 +204,7 @@ parport_etrax_write_control(struct parport *p, unsigned char control)
 	SETF(info->reg_ctrl_data_shadow, R_PAR0_CTRL_DATA, autofd,
 	     (control & PARPORT_CONTROL_AUTOFD) > 0);
 	SETF(info->reg_ctrl_data_shadow, R_PAR0_CTRL_DATA, init,
-	     (control & PARPORT_CONTROL_INIT) == 0);
+	     (control & PARPORT_CONTROL_INIT) > 0);
 	SETF(info->reg_ctrl_data_shadow, R_PAR0_CTRL_DATA, seli,
 	     (control & PARPORT_CONTROL_SELECT) > 0);
 
@@ -223,7 +223,7 @@ parport_etrax_read_control( struct parport *p)
 		ret |= PARPORT_CONTROL_STROBE;
 	if (IO_EXTRACT(R_PAR0_CTRL_DATA, autofd, info->reg_ctrl_data_shadow))
 		ret |= PARPORT_CONTROL_AUTOFD;
-	if (!IO_EXTRACT(R_PAR0_CTRL_DATA, init, info->reg_ctrl_data_shadow))
+	if (IO_EXTRACT(R_PAR0_CTRL_DATA, init, info->reg_ctrl_data_shadow))
 		ret |= PARPORT_CONTROL_INIT;
 	if (IO_EXTRACT(R_PAR0_CTRL_DATA, seli, info->reg_ctrl_data_shadow))
 		ret |= PARPORT_CONTROL_SELECT;
@@ -258,7 +258,7 @@ parport_etrax_read_status(struct parport *p)
 		ret |= PARPORT_STATUS_ERROR;
 	if (IO_EXTRACT(R_PAR0_STATUS_DATA, sel, *info->reg_status_data))
 		ret |= PARPORT_STATUS_SELECT;
-	if (IO_EXTRACT(R_PAR0_STATUS_DATA, perr, *info->reg_status_data))
+	if (!IO_EXTRACT(R_PAR0_STATUS_DATA, perr, *info->reg_status_data))
 		ret |= PARPORT_STATUS_PAPEROUT;
 	if (IO_EXTRACT(R_PAR0_STATUS_DATA, ack, *info->reg_status_data))
 		ret |= PARPORT_STATUS_ACK;
@@ -406,7 +406,7 @@ parport_etrax_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 static void __init
 parport_etrax_show_parallel_version(void)
 {
-	printk("ETRAX 100LX parallel port driver v1.0, (c) 2001-2003 Axis Communications AB\n");
+	printk("ETRAX 100LX parallel port driver v1.0, (c) 2001 Axis Communications AB\n");
 }
 
 #ifdef CONFIG_ETRAX_PAR0_DMA

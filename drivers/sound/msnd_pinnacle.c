@@ -564,11 +564,11 @@ static int mixer_ioctl(unsigned int cmd, unsigned long arg)
 		mixer_info info;
 		set_mixer_info();
 		info.modify_counter = dev.mixer_mod_count;
-		return copy_to_user((void *)arg, &info, sizeof(info))?-EFAULT:0;
+		return copy_to_user((void *)arg, &info, sizeof(info));
 	} else if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
 		set_mixer_info();
-		return copy_to_user((void *)arg, &info, sizeof(info))?-EFAULT:0;
+		return copy_to_user((void *)arg, &info, sizeof(info));
 	} else if (cmd == SOUND_MIXER_PRIVATE1) {
 		dev.nresets = 0;
 		dsp_full_reset();
@@ -804,7 +804,7 @@ static int dev_release(struct inode *inode, struct file *file)
 
 static __inline__ int pack_DARQ_to_DARF(register int bank)
 {
-	register int size, timeout = 3;
+	register int size, n, timeout = 3;
 	register WORD wTmp;
 	LPDAQD DAQD;
 
@@ -825,10 +825,13 @@ static __inline__ int pack_DARQ_to_DARF(register int bank)
 	/* Read data from the head (unprotected bank 1 access okay
            since this is only called inside an interrupt) */
 	outb(HPBLKSEL_1, dev.io + HP_BLKS);
-	msnd_fifo_write(
+	if ((n = msnd_fifo_write(
 		&dev.DARF,
 		(char *)(dev.base + bank * DAR_BUFF_SIZE),
-		size);
+		size, 0)) <= 0) {
+		outb(HPBLKSEL_0, dev.io + HP_BLKS);
+		return n;
+	}
 	outb(HPBLKSEL_0, dev.io + HP_BLKS);
 
 	return 1;
@@ -850,16 +853,21 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 		if (protect) {
 			/* Critical section: protect fifo in non-interrupt */
 			spin_lock_irqsave(&dev.lock, flags);
-			n = msnd_fifo_read(
+			if ((n = msnd_fifo_read(
 				&dev.DAPF,
 				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE);
+				DAP_BUFF_SIZE, 0)) < 0) {
+				spin_unlock_irqrestore(&dev.lock, flags);
+				return n;
+			}
 			spin_unlock_irqrestore(&dev.lock, flags);
 		} else {
-			n = msnd_fifo_read(
+			if ((n = msnd_fifo_read(
 				&dev.DAPF,
 				(char *)(dev.base + bank_num * DAP_BUFF_SIZE),
-				DAP_BUFF_SIZE);
+				DAP_BUFF_SIZE, 0)) < 0) {
+				return n;
+			}
 		}
 		if (!n)
 			break;
@@ -886,32 +894,21 @@ static __inline__ int pack_DAPF_to_DAPQ(register int start)
 static int dsp_read(char *buf, size_t len)
 {
 	int count = len;
-	char *page = (char *)__get_free_page(PAGE_SIZE);
-
-	if (!page)
-		return -ENOMEM;
 
 	while (count > 0) {
-		int n, k;
+		int n;
 		unsigned long flags;
-
-		k = PAGE_SIZE;
-		if (k > count)
-			k = count;
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		n = msnd_fifo_read(&dev.DARF, page, k);
-		spin_unlock_irqrestore(&dev.lock, flags);
-		if (copy_to_user(buf, page, n)) {
-			free_page((unsigned long)page);
-			return -EFAULT;
+		if ((n = msnd_fifo_read(&dev.DARF, buf, count, 1)) < 0) {
+			printk(KERN_WARNING LOGNAME ": FIFO read error\n");
+			spin_unlock_irqrestore(&dev.lock, flags);
+			return n;
 		}
+		spin_unlock_irqrestore(&dev.lock, flags);
 		buf += n;
 		count -= n;
-
-		if (n == k && count)
-			continue;
 
 		if (!test_bit(F_READING, &dev.flags) && dev.mode & FMODE_READ) {
 			dev.last_recbank = -1;
@@ -919,10 +916,8 @@ static int dsp_read(char *buf, size_t len)
 				set_bit(F_READING, &dev.flags);
 		}
 
-		if (dev.rec_ndelay) {
-			free_page((unsigned long)page);
+		if (dev.rec_ndelay)
 			return count == len ? -EAGAIN : len - count;
-		}
 
 		if (count > 0) {
 			set_bit(F_READBLOCK, &dev.flags);
@@ -931,46 +926,32 @@ static int dsp_read(char *buf, size_t len)
 				get_rec_delay_jiffies(DAR_BUFF_SIZE)))
 				clear_bit(F_READING, &dev.flags);
 			clear_bit(F_READBLOCK, &dev.flags);
-			if (signal_pending(current)) {
-				free_page((unsigned long)page);
+			if (signal_pending(current))
 				return -EINTR;
-			}
 		}
 	}
-	free_page((unsigned long)page);
+
 	return len - count;
 }
 
 static int dsp_write(const char *buf, size_t len)
 {
 	int count = len;
-	char *page = (char *)__get_free_page(GFP_KERNEL);
-
-	if (!page)
-		return -ENOMEM;
 
 	while (count > 0) {
-		int n, k;
+		int n;
 		unsigned long flags;
-
-		k = PAGE_SIZE;
-		if (k > count)
-			k = count;
-
-		if (copy_from_user(page, buf, k)) {
-			free_page((unsigned long)page);
-			return -EFAULT;
-		}
 
 		/* Critical section: protect fifo in non-interrupt */
 		spin_lock_irqsave(&dev.lock, flags);
-		n = msnd_fifo_write(&dev.DAPF, page, k);
+		if ((n = msnd_fifo_write(&dev.DAPF, buf, count, 1)) < 0) {
+			printk(KERN_WARNING LOGNAME ": FIFO write error\n");
+			spin_unlock_irqrestore(&dev.lock, flags);
+			return n;
+		}
 		spin_unlock_irqrestore(&dev.lock, flags);
 		buf += n;
 		count -= n;
-
-		if (count && n == k)
-			continue;
 
 		if (!test_bit(F_WRITING, &dev.flags) && (dev.mode & FMODE_WRITE)) {
 			dev.last_playbank = -1;
@@ -978,10 +959,8 @@ static int dsp_write(const char *buf, size_t len)
 				set_bit(F_WRITING, &dev.flags);
 		}
 
-		if (dev.play_ndelay) {
-			free_page((unsigned long)page);
+		if (dev.play_ndelay)
 			return count == len ? -EAGAIN : len - count;
-		}
 
 		if (count > 0) {
 			set_bit(F_WRITEBLOCK, &dev.flags);
@@ -989,14 +968,11 @@ static int dsp_write(const char *buf, size_t len)
 				&dev.writeblock,
 				get_play_delay_jiffies(DAP_BUFF_SIZE));
 			clear_bit(F_WRITEBLOCK, &dev.flags);
-			if (signal_pending(current)) {
-				free_page((unsigned long)page);
+			if (signal_pending(current))
 				return -EINTR;
-			}
 		}
 	}
 
-	free_page((unsigned long)page);
 	return len - count;
 }
 

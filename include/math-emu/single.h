@@ -22,9 +22,6 @@
    not, write to the Free Software Foundation, Inc.,
    59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.  */
 
-#ifndef    __MATH_EMU_SINGLE_H__
-#define    __MATH_EMU_SINGLE_H__
-
 #if _FP_W_TYPE_SIZE < 32
 #error "Here's a nickel kid.  Go buy yourself a real computer."
 #endif
@@ -112,5 +109,3 @@ union _FP_UNION_S
 
 #define _FP_FRAC_HIGH_S(X)	_FP_FRAC_HIGH_1(X)
 #define _FP_FRAC_HIGH_RAW_S(X)	_FP_FRAC_HIGH_1(X)
-
-#endif /* __MATH_EMU_SINGLE_H__ */

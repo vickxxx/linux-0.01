@@ -2,9 +2,6 @@
  *  Emulation of the "brl" instruction for IA64 processors that
  *  don't support it in hardware.
  *  Author: Stephan Zeisset, Intel Corp. <Stephan.Zeisset@intel.com>
- *
- *    02/22/02	D. Mosberger	Clear si_flgs, si_isr, and si_imm to avoid
- *				leaking kernel bits.
  */
 
 #include <linux/kernel.h>
@@ -55,11 +52,11 @@ struct illegal_op_return
 ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 {
 	unsigned long bundle[2];
-	unsigned long opcode, btype, qp, offset, cpl;
+	unsigned long opcode, btype, qp, offset;
 	unsigned long next_ip;
 	struct siginfo siginfo;
 	struct illegal_op_return rv;
-	long tmp_taken, unimplemented_address;
+	int tmp_taken, unimplemented_address;
 
 	rv.fkt = (unsigned long) -1;
 
@@ -158,9 +155,9 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 			 *  AR[PFS].pec = AR[EC]
 			 *  AR[PFS].ppl = PSR.cpl
 			 */
-			cpl = ia64_psr(regs)->cpl;
 			regs->ar_pfs = ((regs->cr_ifs & 0x3fffffffff)
-					| (ar_ec << 52) | (cpl << 62));
+					| (ar_ec << 52)
+					| ((unsigned long) ia64_psr(regs)->cpl << 62));
 
 			/*
 			 *  CFM.sof -= CFM.sol
@@ -195,12 +192,9 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 		/*
 		 *  The target address contains unimplemented bits.
 		 */
-		printk(KERN_DEBUG "Woah! Unimplemented Instruction Address Trap!\n");
+		printk("Woah! Unimplemented Instruction Address Trap!\n");
 		siginfo.si_signo = SIGILL;
 		siginfo.si_errno = 0;
-		siginfo.si_flags = 0;
-		siginfo.si_isr = 0;
-		siginfo.si_imm = 0;
 		siginfo.si_code = ILL_BADIADDR;
 		force_sig_info(SIGILL, &siginfo, current);
 	} else if (ia64_psr(regs)->tb) {
@@ -211,10 +205,6 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 		siginfo.si_signo = SIGTRAP;
 		siginfo.si_errno = 0;
 		siginfo.si_code = TRAP_BRANCH;
-		siginfo.si_flags = 0;
-		siginfo.si_isr = 0;
-		siginfo.si_addr = 0;
-		siginfo.si_imm = 0;
 		force_sig_info(SIGTRAP, &siginfo, current);
 	} else if (ia64_psr(regs)->ss) {
 		/*
@@ -224,10 +214,6 @@ ia64_emulate_brl (struct pt_regs *regs, unsigned long ar_ec)
 		siginfo.si_signo = SIGTRAP;
 		siginfo.si_errno = 0;
 		siginfo.si_code = TRAP_TRACE;
-		siginfo.si_flags = 0;
-		siginfo.si_isr = 0;
-		siginfo.si_addr = 0;
-		siginfo.si_imm = 0;
 		force_sig_info(SIGTRAP, &siginfo, current);
 	}
 	return rv;

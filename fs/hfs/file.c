@@ -61,7 +61,7 @@ struct inode_operations hfs_file_inode_operations = {
 struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 {
 	int tmp;
-	struct super_block *sb = fork->entry->mdb->sys_mdb;
+	kdev_t dev = fork->entry->mdb->sys_mdb->s_dev;
 
 	tmp = hfs_extent_map(fork, block, create);
 
@@ -71,7 +71,7 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		*/
 		if (tmp) {
 			hfs_cat_mark_dirty(fork->entry);
-			return sb_getblk(sb, tmp);
+			return getblk(dev, tmp, HFS_SECTOR_SIZE);
 		}
 		return NULL;
 	} else {
@@ -80,7 +80,8 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		   we waited on the I/O in getblk to complete.
 		*/
 		do {
-			struct buffer_head *bh = sb_getblk(sb, tmp);
+			struct buffer_head *bh =
+					getblk(dev, tmp, HFS_SECTOR_SIZE);
 			int tmp2 = hfs_extent_map(fork, block, 0);
 
 			if (tmp2 == tmp) {
@@ -150,7 +151,7 @@ static hfs_rwret_t hfs_file_read(struct file * filp, char * buf,
 		return -EINVAL;
 	}
 	pos = *ppos;
-	if (pos < 0 || pos >= HFS_FORK_MAX) {
+	if (pos >= HFS_FORK_MAX) {
 		return 0;
 	}
 	size = inode->i_size;
@@ -167,7 +168,7 @@ static hfs_rwret_t hfs_file_read(struct file * filp, char * buf,
 	}
 	if ((read = hfs_do_read(inode, HFS_I(inode)->fork, pos,
 				buf, left, filp->f_reada != 0)) > 0) {
-	        *ppos = pos + read;
+	        *ppos += read;
 		filp->f_reada = 1;
 	}
 
@@ -197,7 +198,7 @@ static hfs_rwret_t hfs_file_write(struct file * filp, const char * buf,
 
 	pos = (filp->f_flags & O_APPEND) ? inode->i_size : *ppos;
 
-	if (pos < 0 || pos >= HFS_FORK_MAX) {
+	if (pos >= HFS_FORK_MAX) {
 		return 0;
 	}
 	if (count > HFS_FORK_MAX) {
@@ -207,8 +208,8 @@ static hfs_rwret_t hfs_file_write(struct file * filp, const char * buf,
 	        pos += written;
 
 	*ppos = pos;
-	if (pos > inode->i_size) {
-	        inode->i_size = pos;
+	if (*ppos > inode->i_size) {
+	        inode->i_size = *ppos;
 		mark_inode_dirty(inode);
 	}
 

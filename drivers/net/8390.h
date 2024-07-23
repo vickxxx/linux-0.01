@@ -50,7 +50,6 @@ extern void NS8390_init(struct net_device *dev, int startp);
 extern int ei_open(struct net_device *dev);
 extern int ei_close(struct net_device *dev);
 extern void ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-extern struct net_device *alloc_ei_netdev(void);
 
 /* Most of these entries should be in 'struct net_device' (or most of the
    things in there should be here!) */
@@ -113,25 +112,13 @@ struct ei_device {
 
 /*
  *	Only generate indirect loads given a machine that needs them.
- *      - removed AMIGA_PCMCIA from this list, handled as ISA io now
  */
  
-#if defined(CONFIG_MAC) ||  \
-    defined(CONFIG_ZORRO8390) || defined(CONFIG_ZORRO8390_MODULE) || \
-    defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE)
+#if defined(CONFIG_MAC) || defined(CONFIG_AMIGA_PCMCIA) || \
+    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE) || \
+    defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE) || \
+    defined(CONFIG_ARM_ETHERH) || defined(CONFIG_ARM_ETHERH_MODULE)
 #define EI_SHIFT(x)	(ei_local->reg_offset[x])
-#undef inb
-#undef inb_p
-#undef outb
-#undef outb_p
-
-#define inb(port)   in_8(port)
-#define outb(val,port)  out_8(port,val)
-#define inb_p(port)   in_8(port)
-#define outb_p(val,port)  out_8(port,val)
-
-#elif defined(CONFIG_ARM_ETHERH) || defined(CONFIG_ARM_ETHERH_MODULE)
-#define EI_SHIFT(x)    (ei_local->reg_offset[x])
 #else
 #define EI_SHIFT(x)	(x)
 #endif

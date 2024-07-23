@@ -1,4 +1,4 @@
-// Portions of this file taken from
+// Portions of this file taken from 
 // Petko Manolov - Petkan (petkan@dce.bg)
 // from his driver pegasus.c
 
@@ -25,28 +25,20 @@
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-#include <linux/module.h>
-#include <linux/ethtool.h>
-#include <asm/uaccess.h>
-
-#define DEBUG
 #include <linux/usb.h>
-
+#include <linux/module.h>
 #include "CDCEther.h"
 
-#define SHORT_DRIVER_DESC "CDC Ethernet Class"
-#define DRIVER_VERSION "0.98.6"
+static const char *version = __FILE__ ": v0.98.5 22 Sep 2001 Brad Hards and another";
 
-static const char driver_name[] = "CDCEther";
-static const char *version = __FILE__ ": " DRIVER_VERSION " 7 Jan 2002 Brad Hards and another";
-// We only try to claim CDC Ethernet model devices */
+/* Take any CDC device, and sort it out in probe() */
 static struct usb_device_id CDCEther_ids[] = {
-	{ USB_INTERFACE_INFO(USB_CLASS_COMM, 6, 0) },
-	{ }
+	{ USB_DEVICE_INFO(USB_CLASS_COMM, 0, 0) },
+	{ } /* Terminating null entry */
 };
 
-/*
- * module parameter that provides an alternate upper limit on the
+/* 
+ * module parameter that provides an alternate upper limit on the 
  * number of multicast filters we use, with a default to use all
  * the filters available to us. Note that the actual number used
  * is the lesser of this parameter and the number returned in the
@@ -54,6 +46,7 @@ static struct usb_device_id CDCEther_ids[] = {
  * spec for more info on the descriptor limit.
  */
 static int multicast_filter_limit = 32767;
+
 
 //////////////////////////////////////////////////////////////////////////////
 // Callback routines from USB device /////////////////////////////////////////
@@ -66,16 +59,7 @@ static void read_bulk_callback( struct urb *urb )
 	int count = urb->actual_length, res;
 	struct sk_buff	*skb;
 
-	switch ( urb->status ) {
-		case USB_ST_NOERROR:
-			break;
-		case USB_ST_URB_KILLED:
-			return;
-		default:
-			dbg("rx status %d", urb->status);
-	}
-
-	// Sanity check
+	// Sanity check 
 	if ( !ether_dev || !(ether_dev->flags & CDC_ETHER_RUNNING) ) {
 		dbg("BULK IN callback but driver is not active!");
 		return;
@@ -149,7 +133,7 @@ goon:
 	// Give this to the USB subsystem so it can tell us 
 	// when more data arrives.
 	if ( (res = usb_submit_urb(&ether_dev->rx_urb)) ) {
-		warn("%s failed submit rx_urb %d", __FUNCTION__, res);
+		warn( __FUNCTION__ " failed submint rx_urb %d", res);
 	}
 	
 	// We are no longer busy, show us the frames!!!
@@ -176,78 +160,47 @@ static void write_bulk_callback( struct urb *urb )
 
 	// Hmm...  What on Earth could have happened???
 	if ( urb->status ) {
-		dbg("%s: TX status %d", ether_dev->net->name, urb->status);
+		info("%s: TX status %d", ether_dev->net->name, urb->status);
 	}
 
 	// Update the network interface and tell it we are
 	// ready for another frame
 	ether_dev->net->trans_start = jiffies;
 	netif_wake_queue( ether_dev->net );
-
 }
 
-#if 0
-static void setpktfilter_done( struct urb *urb )
-{
-	ether_dev_t *ether_dev = urb->context;
-	struct net_device *net;
-
-	if ( !ether_dev )
-		return;
-	dbg("got ctrl callback for setting packet filter");
-	switch ( urb->status ) {
-		case USB_ST_NOERROR:
-			break;
-		case USB_ST_URB_KILLED:
-			return;
-		default:
-			dbg("intr status %d", urb->status);
-	}
-}
-#endif 
-
-static void intr_callback( struct urb *urb )
-{
-	ether_dev_t *ether_dev = urb->context;
-	struct net_device *net;
-	struct usb_ctrlrequest *event;
-#define bNotification	bRequest
-
-	if ( !ether_dev )
-		return;
-	net = ether_dev->net;
-	switch ( urb->status ) {
-		case USB_ST_NOERROR:
-			break;
-		case USB_ST_URB_KILLED:
-		default:
-			dbg("%s intr status %d", net->name, urb->status);
-			return;
-	}
-
-	event = urb->transfer_buffer;
-	if (event->bRequestType != 0xA1)
-		dbg ("%s unknown event type %x", net->name,
-			event->bRequestType);
-	else switch (event->bNotification) {
-	case 0x00:		// NETWORK CONNECTION
-		dbg ("%s network %s", net->name,
-			event->wValue ? "connect" : "disconnect");
-		if (event->wValue)
-			netif_carrier_on (net);
-		else
-			netif_carrier_off (net);
-		break;
-	case 0x2A:		// CONNECTION SPEED CHANGE
-		dbg ("%s speed change", net->name);
-		/* ignoring eight bytes of data */
-		break;
-	case 0x01:		// RESPONSE AVAILABLE (none requested)
-	default:		// else undefined for CDC Ether
-		err ("%s illegal notification %02x", net->name,
-			event->bNotification);
-	}
-}
+//static void intr_callback( struct urb *urb )
+//{
+//	ether_dev_t *ether_dev = urb->context;
+//	struct net_device *net;
+//	__u8	*d;
+//
+//	if ( !ether_dev )
+//		return;
+//		
+//	switch ( urb->status ) {
+//		case USB_ST_NOERROR:
+//			break;
+//		case USB_ST_URB_KILLED:
+//			return;
+//		default:
+//			info("intr status %d", urb->status);
+//	}
+//
+//	d = urb->transfer_buffer;
+//	net = ether_dev->net;
+//	if ( d[0] & 0xfc ) {
+//		ether_dev->stats.tx_errors++;
+//		if ( d[0] & TX_UNDERRUN )
+//			ether_dev->stats.tx_fifo_errors++;
+//		if ( d[0] & (EXCESSIVE_COL | JABBER_TIMEOUT) )
+//			ether_dev->stats.tx_aborted_errors++;
+//		if ( d[0] & LATE_COL )
+//			ether_dev->stats.tx_window_errors++;
+//		if ( d[0] & (NO_CARRIER | LOSS_CARRIER) )
+//			ether_dev->stats.tx_carrier_errors++;
+//	}
+//}
 
 //////////////////////////////////////////////////////////////////////////////
 // Routines for turning net traffic on and off on the USB side ///////////////
@@ -260,8 +213,8 @@ static inline int enable_net_traffic( ether_dev_t *ether_dev )
 	// Here would be the time to set the data interface to the configuration where
 	// it has two endpoints that use a protocol we can understand.
 
-	if (usb_set_interface( usb,
-	                        ether_dev->data_bInterfaceNumber,
+	if (usb_set_interface( usb, 
+	                        ether_dev->data_bInterfaceNumber, 
 	                        ether_dev->data_bAlternateSetting_with_traffic ) )  {
 		err("usb_set_interface() failed" );
 		err("Attempted to set interface %d", ether_dev->data_bInterfaceNumber);
@@ -277,8 +230,8 @@ static inline void disable_net_traffic( ether_dev_t *ether_dev )
 	// no endpoints.  This is what the spec suggests.
 
 	if (ether_dev->data_interface_altset_num_without_traffic >= 0 ) {
-		if (usb_set_interface( ether_dev->usb,
-		                        ether_dev->data_bInterfaceNumber,
+		if (usb_set_interface( ether_dev->usb, 
+		                        ether_dev->data_bInterfaceNumber, 
 		                        ether_dev->data_bAlternateSetting_without_traffic ) ) 	{
 			err("usb_set_interface() failed");
 		}
@@ -316,7 +269,21 @@ static void CDCEther_tx_timeout( struct net_device *net )
 static int CDCEther_start_xmit( struct sk_buff *skb, struct net_device *net )
 {
 	ether_dev_t	*ether_dev = net->priv;
+	int 	count;
 	int 	res;
+
+	// If we are told to transmit an ethernet frame that fits EXACTLY 
+	// into an integer number of USB packets, we force it to send one 
+	// more byte so the device will get a runt USB packet signalling the 
+	// end of the ethernet frame
+	if ( (skb->len) ^ (ether_dev->data_ep_out_size) ) {
+		// It was not an exact multiple
+		// no need to add anything extra
+		count = skb->len;
+	} else {
+		// Add one to make it NOT an exact multiple
+		count = skb->len + 1;
+	}
 
 	// Tell the kernel, "No more frames 'til we are done
 	// with this one.'
@@ -332,11 +299,8 @@ static int CDCEther_start_xmit( struct sk_buff *skb, struct net_device *net )
 			write_bulk_callback, ether_dev );
 
 	// Tell the URB how much it will be transporting today
-	ether_dev->tx_urb.transfer_buffer_length = skb->len;
-
-	/* Deal with the Zero Length packet problem, I hope */
-	ether_dev->tx_urb.transfer_flags |= USB_ZERO_PACKET;
-
+	ether_dev->tx_urb.transfer_buffer_length = count;
+	
 	// Send the URB on its merry way.
 	if ((res = usb_submit_urb(&ether_dev->tx_urb)))  {
 		// Hmm...  It didn't go. Tell someone...
@@ -362,9 +326,6 @@ static int CDCEther_start_xmit( struct sk_buff *skb, struct net_device *net )
 	return 0;
 }
 
-//////////////////////////////////////////////////////////////////////////////
-// Standard routines for kernel Ethernet Device //////////////////////////////
-//////////////////////////////////////////////////////////////////////////////
 static struct net_device_stats *CDCEther_netdev_stats( struct net_device *net )
 {
 	// Easy enough!
@@ -376,40 +337,27 @@ static int CDCEther_open(struct net_device *net)
 	ether_dev_t *ether_dev = (ether_dev_t *)net->priv;
 	int	res;
 
+	// We are finally getting used!
+	MOD_INC_USE_COUNT;
+
 	// Turn on the USB and let the packets flow!!!
 	if ( (res = enable_net_traffic( ether_dev )) ) {
-		err("%s can't enable_net_traffic() - %d", __FUNCTION__, res );
+		err( __FUNCTION__ "can't enable_net_traffic() - %d", res );
+		MOD_DEC_USE_COUNT;
 		return -EIO;
 	}
 
-	/* Prep a receive URB */
+	// Prep a receive URB
 	FILL_BULK_URB( &ether_dev->rx_urb, ether_dev->usb,
 			usb_rcvbulkpipe(ether_dev->usb, ether_dev->data_ep_in),
-			ether_dev->rx_buff, ether_dev->wMaxSegmentSize,
+			ether_dev->rx_buff, ether_dev->wMaxSegmentSize, 
 			read_bulk_callback, ether_dev );
 
-	/* Put it out there so the device can send us stuff */
-	if ( (res = usb_submit_urb(&ether_dev->rx_urb)) ) {
-		/* Hmm...  Okay... */
-		warn( "%s failed rx_urb %d", __FUNCTION__, res );
-	}
-
-	if (ether_dev->properties & HAVE_NOTIFICATION_ELEMENT) {
-		/* Arm and submit the interrupt URB */
-		FILL_INT_URB( &ether_dev->intr_urb,
-			ether_dev->usb,
-			usb_rcvintpipe(ether_dev->usb, ether_dev->comm_ep_in),
-			ether_dev->intr_buff,
-			sizeof ether_dev->intr_buff,
-			intr_callback,
-			ether_dev,
-			(ether_dev->usb->speed == USB_SPEED_HIGH)
-				? ( 1 << ether_dev->intr_interval)
-				: ether_dev->intr_interval
-			);
-		if ( (res = usb_submit_urb(&ether_dev->intr_urb)) ) {
-			warn("%s failed intr_urb %d", __FUNCTION__, res );
-		}
+	// Put it out there so the device can send us stuff
+	if ( (res = usb_submit_urb(&ether_dev->rx_urb)) )
+	{
+		// Hmm...  Okay...
+		warn( __FUNCTION__ " failed rx_urb %d", res );
 	}
 
 	// Tell the kernel we are ready to start receiving from it
@@ -442,135 +390,96 @@ static int CDCEther_close( struct net_device *net )
 	usb_unlink_urb( &ether_dev->rx_urb );
 	usb_unlink_urb( &ether_dev->tx_urb );
 	usb_unlink_urb( &ether_dev->intr_urb );
-	usb_unlink_urb( &ether_dev->ctrl_urb );
+	
+	// We are not being used now.
+	MOD_DEC_USE_COUNT;
 
 	// That's it.  I'm done.
 	return 0;
 }
 
-static int netdev_ethtool_ioctl(struct net_device *netdev, void *useraddr)
-{
-	ether_dev_t *ether_dev = netdev->priv;
-	u32 cmd;
-	char tmp[40];
-
-	if (get_user(cmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (cmd) {
-	/* get driver info */
-	case ETHTOOL_GDRVINFO: {
-	struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, driver_name, ETHTOOL_BUSINFO_LEN);
-		strncpy(info.version, DRIVER_VERSION, ETHTOOL_BUSINFO_LEN);
-		sprintf(tmp, "usb%d:%d", ether_dev->usb->bus->busnum, ether_dev->usb->devnum);
-		strncpy(info.bus_info, tmp, ETHTOOL_BUSINFO_LEN);
-		sprintf(tmp, "CDC %x.%x", ((ether_dev->bcdCDC & 0xff00)>>8), (ether_dev->bcdCDC & 0x00ff) );
-		strncpy(info.fw_version, tmp, ETHTOOL_BUSINFO_LEN);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	/* get link status */
-	case ETHTOOL_GLINK: {
-		struct ethtool_value edata = {ETHTOOL_GLINK};
-		edata.data = netif_carrier_ok(netdev);
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	dbg("Got unsupported ioctl: %x", cmd);
-	return -EOPNOTSUPP; /* the ethtool user space tool relies on this */
-}
-
 static int CDCEther_ioctl( struct net_device *net, struct ifreq *rq, int cmd )
 {
+	//__u16 *data = (__u16 *)&rq->ifr_data;
+	//ether_dev_t	*ether_dev = net->priv;
+
+	// No support here yet.
+	// Do we need support???
 	switch(cmd) {
-	case SIOCETHTOOL:
-		return netdev_ethtool_ioctl(net, (void *) rq->ifr_data);
-	default:
-		return -ENOTTY; /* per ioctl man page */
+		case SIOCDEVPRIVATE:
+			return -EOPNOTSUPP;
+		case SIOCDEVPRIVATE+1:
+			return -EOPNOTSUPP;
+		case SIOCDEVPRIVATE+2:
+			//return 0;
+			return -EOPNOTSUPP;
+		default:
+			return -EOPNOTSUPP;
 	}
 }
-
-/* Multicast routines */
 
 static void CDC_SetEthernetPacketFilter (ether_dev_t *ether_dev)
 {
-#if 0
-	struct usb_ctrlrequest *dr = &ether_dev->ctrl_dr;
-	int res;
-
-	dr->bRequestType = USB_TYPE_CLASS | USB_DIR_OUT | USB_RECIP_INTERFACE;
-	dr->bRequest = SET_ETHERNET_PACKET_FILTER;
-	dr->wValue = cpu_to_le16(ether_dev->mode_flags);
-	dr->wIndex = cpu_to_le16((u16)ether_dev->comm_interface);
-	dr->wLength = 0;
-
-	FILL_CONTROL_URB(&ether_dev->ctrl_urb,
-			ether_dev->usb,
+	usb_control_msg(ether_dev->usb,
 			usb_sndctrlpipe(ether_dev->usb, 0),
-			dr,
+			SET_ETHERNET_PACKET_FILTER, /* request */
+			USB_TYPE_CLASS | USB_DIR_OUT | USB_RECIP_INTERFACE, /* request type */
+			cpu_to_le16(ether_dev->mode_flags), /* value */
+			cpu_to_le16((u16)ether_dev->comm_interface), /* index */
 			NULL,
-			NULL,
-			setpktfilter_done,
-			ether_dev);
-	if ( (res = usb_submit_urb(&ether_dev->ctrl_urb)) ) {
-		warn("%s failed submit ctrl_urb %d", __FUNCTION__, res);
-	}
-#endif
+			0, /* size */
+			HZ); /* timeout */
+}	
 
-}
 
 static void CDCEther_set_multicast( struct net_device *net )
 {
 	ether_dev_t *ether_dev = net->priv;
 	int i;
 	__u8 *buff;
+	
 
 	// Tell the kernel to stop sending us frames while we get this
 	// all set up.
 	netif_stop_queue(net);
 
-	/* Note: do not reorder, GCC is clever about common statements. */
-	if (net->flags & IFF_PROMISC) {
-		/* Unconditionally log net taps. */
-		dbg( "%s: Promiscuous mode enabled", net->name);
+      /* Note: do not reorder, GCC is clever about common statements. */
+        if (net->flags & IFF_PROMISC) {
+                /* Unconditionally log net taps. */
+                info( "%s: Promiscuous mode enabled", net->name);
 		ether_dev->mode_flags = MODE_FLAG_PROMISCUOUS |
 			MODE_FLAG_ALL_MULTICAST |
 			MODE_FLAG_DIRECTED |
 			MODE_FLAG_BROADCAST |
 			MODE_FLAG_MULTICAST;
-	} else if (net->mc_count > ether_dev->wNumberMCFilters) {
-		/* Too many to filter perfectly -- accept all multicasts. */
-		dbg("%s: too many MC filters for hardware, using allmulti", net->name);
+        } else if (net->mc_count > ether_dev->wNumberMCFilters) {
+                /* Too many to filter perfectly -- accept all multicasts. */
+		info("%s: set too many MC filters, using allmulti", net->name);
 		ether_dev->mode_flags = MODE_FLAG_ALL_MULTICAST |
 			MODE_FLAG_DIRECTED |
 			MODE_FLAG_BROADCAST |
 			MODE_FLAG_MULTICAST;
 	} else if (net->flags & IFF_ALLMULTI) {
-		/* Filter in software */
-		dbg("%s: using allmulti", net->name);
+                /* Filter in software */
+		info("%s: using allmulti", net->name);
 		ether_dev->mode_flags = MODE_FLAG_ALL_MULTICAST |
 			MODE_FLAG_DIRECTED |
 			MODE_FLAG_BROADCAST |
 			MODE_FLAG_MULTICAST;
-	} else {
+        } else {
 		/* do multicast filtering in hardware */
-		struct dev_mc_list *mclist;
-		dbg("%s: set multicast filters", net->name);
+                struct dev_mc_list *mclist;
+		info("%s: set multicast filters", net->name);
 		ether_dev->mode_flags = MODE_FLAG_ALL_MULTICAST |
 			MODE_FLAG_DIRECTED |
 			MODE_FLAG_BROADCAST |
 			MODE_FLAG_MULTICAST;
-		buff = kmalloc(6 * net->mc_count, GFP_ATOMIC);
-		for (i = 0, mclist = net->mc_list;
-			mclist && i < net->mc_count;
-			i++, mclist = mclist->next) {
-				memcpy(&mclist->dmi_addr, &buff[i * 6], 6);
+		buff = kmalloc(6 * net->mc_count, in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+                for (i = 0, mclist = net->mc_list;
+		     mclist && i < net->mc_count;
+                     i++, mclist = mclist->next) {
+			memcpy(&mclist->dmi_addr, &buff[i * 6], 6);
 		}
-#if 0
 		usb_control_msg(ether_dev->usb,
 				usb_sndctrlpipe(ether_dev->usb, 0),
 				SET_ETHERNET_MULTICAST_FILTER, /* request */
@@ -580,13 +489,12 @@ static void CDCEther_set_multicast( struct net_device *net )
 				buff,
 				(6* net->mc_count), /* size */
 				HZ); /* timeout */
-#endif
 		kfree(buff);
 	}
-
+ 
 	CDC_SetEthernetPacketFilter(ether_dev);
-
-	/* Tell the kernel to start giving frames to us again. */
+	
+        // Tell the kernel to start giving frames to us again.
 	netif_wake_queue(net);
 }
 
@@ -594,42 +502,40 @@ static void CDCEther_set_multicast( struct net_device *net )
 // Routines used to parse out the Functional Descriptors /////////////////////
 //////////////////////////////////////////////////////////////////////////////
 
-/* Header Descriptor - CDC Spec 5.2.3.1, Table 26 */
-static int parse_header_functional_descriptor( int *bFunctionLength,
-                                               int bDescriptorType,
+static int parse_header_functional_descriptor( int *bFunctionLength, 
+                                               int bDescriptorType, 
                                                int bDescriptorSubtype,
                                                unsigned char *data,
                                                ether_dev_t *ether_dev,
                                                int *requirements )
 {
-	/* Check to make sure we haven't seen one of these already. */
+	// Check to make sure we haven't seen one of these already.
 	if ( (~*requirements) & REQ_HDR_FUNC_DESCR ) {
 		err( "Multiple Header Functional Descriptors found." );
 		return -1;
 	}
-
-	/* Check for appropriate length */
-	if (*bFunctionLength != HEADER_FUNC_DESC_LEN) {
-		dbg( "Invalid length in Header Functional Descriptor, working around it." );
-		/* This is a hack to get around a particular device (NO NAMES)
-		 * It has this function length set to the length of the
-		 * whole class-specific descriptor */
-		*bFunctionLength = HEADER_FUNC_DESC_LEN;
+	
+	// Is it the right size???
+	if (*bFunctionLength != 5) {
+		info( "Invalid length in Header Functional Descriptor" );
+		// This is a hack to get around a particular device (NO NAMES)
+		// It has this function length set to the length of the
+		// whole class-specific descriptor
+		*bFunctionLength = 5;
 	}
 	
-	/* Nothing extremely useful here */
-	/* We'll keep it for posterity */
+	// Nothing extremely useful here.
+	// We'll keep it for posterity
 	ether_dev->bcdCDC = data[0] + (data[1] << 8);
-	dbg( "Found Header descriptor, CDC version %x.", ether_dev->bcdCDC);
+	dbg( "Found Header descriptor, CDC version %x", ether_dev->bcdCDC);
 
-	/* We've seen one of these */
+	// We've seen one of these
 	*requirements &= ~REQ_HDR_FUNC_DESCR;
-
-	/* Success */
+	
+	// It's all good.
 	return 0;
 }
 
-/* Union Descriptor - CDC Spec 5.2.3.8, Table 33 */
 static int parse_union_functional_descriptor( int *bFunctionLength, 
                                               int bDescriptorType, 
                                               int bDescriptorSubtype,
@@ -637,89 +543,77 @@ static int parse_union_functional_descriptor( int *bFunctionLength,
                                               ether_dev_t *ether_dev,
                                               int *requirements )
 {
-	/* Check to make sure we haven't seen one of these already. */
+	// Check to make sure we haven't seen one of these already.
 	if ( (~*requirements) & REQ_UNION_FUNC_DESCR ) {
 		err( "Multiple Union Functional Descriptors found." );
 		return -1;
 	}
 
-	/* Check for appropriate length */
-	if (*bFunctionLength != UNION_FUNC_DESC_LEN) {
+	// Is it the right size?
+	if (*bFunctionLength != 5) {
 		// It is NOT the size we expected.
-		err( "Invalid length in Union Functional Descriptor." );
+		err( "Unsupported length in Union Functional Descriptor" );
 		return -1;
 	}
 	
-	/* Sanity check of sorts */
+	// Sanity check of sorts
 	if (ether_dev->comm_interface != data[0]) {
-		/* This tells us that we are chasing the wrong comm
-		 * interface or we are crazy or something else weird. */
+		// This tells us that we are chasing the wrong comm
+		// interface or we are crazy or something else weird.
 		if (ether_dev->comm_interface == data[1]) {
-			dbg( "Probably broken Union descriptor, fudging data interface." );
-			/* We'll need this in a few microseconds,
-			 * so if the comm interface was the first slave,
-			 * then probably the master interface is the data one
-			 * Just hope for the best */
+			info( "Probably broken Union descriptor, fudging data interface" );
+			// We'll need this in a few microseconds, 
+			// so guess here, and hope for the best
 			ether_dev->data_interface = data[0];
 		} else {
-			err( "Union Functional Descriptor is broken beyond repair." );
+			err( "Union Functional Descriptor is broken beyond repair" );
 			return -1;
 		}
-	} else{ /* Descriptor is OK */
+	} else{ // Descriptor is OK
+       		// We'll need this in a few microseconds!
 		ether_dev->data_interface = data[1];
 	}
 
-	/* We've seen one of these */
+	// We've seen one of these now.
 	*requirements &= ~REQ_UNION_FUNC_DESCR;
-
-	/* Success */
+	
+	// Done
 	return 0;
 }
 
-/* Ethernet Descriptor - CDC Spec 5.2.3.16, Table 41 */
-static int parse_ethernet_functional_descriptor( int *bFunctionLength,
+static int parse_ethernet_functional_descriptor( int *bFunctionLength, 
                                                  int bDescriptorType, 
                                                  int bDescriptorSubtype,
                                                  unsigned char *data,
                                                  ether_dev_t *ether_dev,
                                                  int *requirements )
 {
-	//* Check to make sure we haven't seen one of these already. */
+	// Check to make sure we haven't seen one of these already.
 	if ( (~*requirements) & REQ_ETH_FUNC_DESCR ) {
 		err( "Multiple Ethernet Functional Descriptors found." );
 		return -1;
 	}
 	
-	/* Check for appropriate length */
-	if (*bFunctionLength != ETHERNET_FUNC_DESC_LEN) {
-		err( "Invalid length in Ethernet Networking Functional Descriptor." );
+	// Is it the right size?
+	if (*bFunctionLength != 13) {
+		err( "Invalid length in Ethernet Networking Functional Descriptor" );
 		return -1;
 	}
-
-	/* Lots of goodies from this one.  They are all important. */
+	
+	// Lots of goodies from this one.  They are all important.
 	ether_dev->iMACAddress = data[0];
 	ether_dev->bmEthernetStatistics = data[1] + (data[2] << 8) + (data[3] << 16) + (data[4] << 24);
 	ether_dev->wMaxSegmentSize = data[5] + (data[6] << 8);
-	ether_dev->wNumberMCFilters = (data[7] + (data[8] << 8));
-	if (ether_dev->wNumberMCFilters & (1 << 15)) {
-		ether_dev->properties |= PERFECT_FILTERING;
-		dbg("Perfect filtering support");
-	} else {
-		dbg("Imperfect filtering support - need sw hashing");
-	}
-	if (0 == (ether_dev->wNumberMCFilters & (0x7f))) {
-		ether_dev->properties |= NO_SET_MULTICAST;
-		dbg("Can't use SetEthernetMulticastFilters request");
-	}
+	ether_dev->wNumberMCFilters = (data[7] + (data[8] << 8)) & 0x00007FFF;
 	if (ether_dev->wNumberMCFilters > multicast_filter_limit) {
 		ether_dev->wNumberMCFilters = multicast_filter_limit;
-	}
+		}	
 	ether_dev->bNumberPowerFilters = data[9];
 	
-	/* We've seen one of these */
+	// We've seen one of these now.
 	*requirements &= ~REQ_ETH_FUNC_DESCR;
-
-	/* Success */
+	
+	// That's all she wrote.
 	return 0;
 }
 
@@ -730,15 +624,15 @@ static int parse_protocol_unit_functional_descriptor( int *bFunctionLength,
                                                       ether_dev_t *ether_dev,
                                                       int *requirements )
 {
-	/* There should only be one type if we are sane */
+	// There should only be one type if we are sane
 	if (bDescriptorType != CS_INTERFACE) {
-		err( "Invalid bDescriptorType found." );
+		info( "Invalid bDescriptorType found." );
 		return -1;
 	}
 
-	/* The Subtype tells the tale - CDC spec Table 25 */
-	switch (bDescriptorSubtype) {
-		case 0x00:	/* Header Functional Descriptor */
+	// The Subtype tells the tale.
+	switch (bDescriptorSubtype){
+		case 0x00:	// Header Functional Descriptor
 			return parse_header_functional_descriptor( bFunctionLength,
 			                                           bDescriptorType,
 			                                           bDescriptorSubtype,
@@ -746,7 +640,7 @@ static int parse_protocol_unit_functional_descriptor( int *bFunctionLength,
 			                                           ether_dev,
 			                                           requirements );
 			break;
-		case 0x06:	/* Union Functional Descriptor */
+		case 0x06:	// Union Functional Descriptor
 			return parse_union_functional_descriptor( bFunctionLength,
 			                                          bDescriptorType,
 			                                          bDescriptorSubtype,
@@ -754,7 +648,7 @@ static int parse_protocol_unit_functional_descriptor( int *bFunctionLength,
 			                                          ether_dev,
 			                                          requirements );
 			break;
-		case 0x0F:	/* Ethernet Networking Functional Descriptor */
+		case 0x0F:	// Ethernet Networking Functional Descriptor
 			return parse_ethernet_functional_descriptor( bFunctionLength,
 			                                             bDescriptorType,
 			                                             bDescriptorSubtype,
@@ -762,12 +656,12 @@ static int parse_protocol_unit_functional_descriptor( int *bFunctionLength,
 			                                             ether_dev,
 			                                             requirements );
 			break;
-		default:	/* We don't support this at this time... */
-				/* However that doesn't necessarily indicate an error. */
-			dbg( "Unexpected header type %x.", bDescriptorSubtype );
+		default:	// We don't support this at this time...
+			// However that doesn't necessarily indicate an error.
+			dbg( "Unexpected header type %x:", bDescriptorSubtype );
 			return 0;
 	}
-	/* How did we get here? */
+	// How did we get here???
 	return -1;
 }
 
@@ -778,49 +672,46 @@ static int parse_ethernet_class_information( unsigned char *data, int length, et
 	int bFunctionLength;
 	int bDescriptorType;
 	int bDescriptorSubtype;
-	int requirements = REQUIREMENTS_TOTAL; /* We init to our needs, and then clear
-						* bits as we find the descriptors */
+	int requirements = REQUIREMENTS_TOTAL;
 
-	/* As long as there is something here, we will try to parse it */
-	/* All of the functional descriptors start with the same 3 byte pattern */
+	// As long as there is something here, we will try to parse it
 	while (loc < length) {
-		/* Length */
+		// Length
 		bFunctionLength = data[loc];
 		loc++;
-
-		/* Type */
+		
+		// Type
 		bDescriptorType = data[loc];
 		loc++;
-
-		/* Subtype */
+		
+		// Subtype
 		bDescriptorSubtype = data[loc];
 		loc++;
 		
-		/* ship this off to be processed */
+		// ship this off to be processed elsewhere.
 		rc = parse_protocol_unit_functional_descriptor( &bFunctionLength, 
 		                                                bDescriptorType, 
 		                                                bDescriptorSubtype, 
 		                                                &data[loc],
 		                                                ether_dev,
 		                                                &requirements );
-		/* Did it process okay? */
+		// Did it process okay?
 		if (rc)	{
-			/* Something was hosed somewhere. */
-			/*  No need to continue */
+			// Something was hosed somewhere.
+			// No need to continue;
 			err("Bad descriptor parsing: %x", rc );
 			return -1;
 		}
-		/* We move the loc pointer along, remembering
-		 * that we have already taken three bytes */
+		// We have already taken three bytes.
 		loc += (bFunctionLength - 3);
 	}
-	/* Check to see if we got everything we need. */
+	// Check to see if we got everything we need.
 	if (requirements) {
 		// We missed some of the requirements...
-		err( "Not all required functional descriptors present 0x%08X.", requirements );
+		err( "Not all required functional descriptors present 0x%08X", requirements );
 		return -1;
 	}
-	/* We got everything */
+	// We got everything.
 	return 0;
 }
 
@@ -834,28 +725,28 @@ static int find_and_parse_ethernet_class_information( struct usb_device *device,
 	struct usb_interface *comm_intf_group = NULL;
 	struct usb_interface_descriptor *comm_intf = NULL;
 	int rc = -1;
-	/* The assumption here is that find_ethernet_comm_interface
-	 * and find_valid_configuration
-	 * have already filled in the information about where to find
-	 * the a valid commication interface. */
+	// The assumption here is that find_ethernet_comm_interface
+	// and find_valid_configuration 
+	// have already filled in the information about where to find
+	// the a valid commication interface.
 
 	conf = &( device->config[ether_dev->configuration_num] );
 	comm_intf_group = &( conf->interface[ether_dev->comm_interface] );
 	comm_intf = &( comm_intf_group->altsetting[ether_dev->comm_interface_altset_num] );
+	// Let's check and see if it has the extra information we need...
 
-	/* Let's check and see if it has the extra information we need */
 	if (comm_intf->extralen > 0) {
-		/* This is where the information is SUPPOSED to be */
+		// This is where the information is SUPPOSED to be.
 		rc = parse_ethernet_class_information( comm_intf->extra, comm_intf->extralen, ether_dev );
 	} else if (conf->extralen > 0) {
-		/* This is a hack.  The spec says it should be at the interface
-		 * location checked above.  However I have seen it here also.
-		 * This is the same device that requires the functional descriptor hack above */
-		dbg( "Ethernet information found at device configuration.  Trying to use it anyway." );
+		// This is a hack.  The spec says it should be at the interface 
+		// location checked above.  However I have seen it here also.
+		// This is the same device that requires the functional descriptor hack above
+		warn( "Ethernet information found at device configuration.  This is broken." );
 		rc = parse_ethernet_class_information( conf->extra, conf->extralen, ether_dev );
 	} else 	{
-		/* I don't know where else to look */
-		err( "No ethernet information found." );
+		// I don't know where else to look.
+		warn( "No ethernet information found." );
 		rc = -1;
 	}
 	return rc;
@@ -870,43 +761,47 @@ static int get_data_interface_endpoints( struct usb_device *device, ether_dev_t 
 	struct usb_config_descriptor *conf = NULL;
 	struct usb_interface *data_intf_group = NULL;
 	struct usb_interface_descriptor *data_intf = NULL;
-
-	/* Walk through and get to the data interface we are checking. */
+	
+	// Walk through and get to the data interface we are checking.
 	conf = &( device->config[ether_dev->configuration_num] );
 	data_intf_group = &( conf->interface[ether_dev->data_interface] );
 	data_intf = &( data_intf_group->altsetting[ether_dev->data_interface_altset_num_with_traffic] );
 
-	/* Start out assuming we won't find anything we can use */
+	// Start out assuming we won't find anything we can use
 	ether_dev->data_ep_in = 0;
 	ether_dev->data_ep_out = 0;
-
-	/* If these are not BULK endpoints, we don't want them */
-	if ( data_intf->endpoint[0].bmAttributes != USB_ENDPOINT_XFER_BULK ) {
+	
+	// If these are not BULK endpoints, we don't want them
+	if ( data_intf->endpoint[0].bmAttributes != 0x02 ) {
+		return -1;
+	} if ( data_intf->endpoint[1].bmAttributes != 0x02 ) {
 		return -1;
 	}
-	if ( data_intf->endpoint[1].bmAttributes != USB_ENDPOINT_XFER_BULK ) {
-		return -1;
-	}
 
-	/* Check the first endpoint to see if it is IN or OUT */
-	if ( data_intf->endpoint[0].bEndpointAddress & USB_DIR_IN ) {
+	// Check the first endpoint to see if it is IN or OUT
+	if ( data_intf->endpoint[0].bEndpointAddress & 0x80 ) {
+		// This endpoint is IN
 		ether_dev->data_ep_in = data_intf->endpoint[0].bEndpointAddress & 0x7F;
 	} else {
-		ether_dev->data_ep_out = data_intf->endpoint[0].bEndpointAddress;
+		// This endpoint is OUT
+		ether_dev->data_ep_out = data_intf->endpoint[0].bEndpointAddress & 0x7F;
 		ether_dev->data_ep_out_size = data_intf->endpoint[0].wMaxPacketSize;
 	}
 
-	/* Check the second endpoint to see if it is IN or OUT */
-	if ( data_intf->endpoint[1].bEndpointAddress & USB_DIR_IN ) {
+	// Check the second endpoint to see if it is IN or OUT
+	if ( data_intf->endpoint[1].bEndpointAddress & 0x80 ) {
+		// This endpoint is IN
 		ether_dev->data_ep_in = data_intf->endpoint[1].bEndpointAddress & 0x7F;
 	} else	{
-		ether_dev->data_ep_out = data_intf->endpoint[1].bEndpointAddress;
+		// This endpoint is OUT
+		ether_dev->data_ep_out = data_intf->endpoint[1].bEndpointAddress & 0x7F;
 		ether_dev->data_ep_out_size = data_intf->endpoint[1].wMaxPacketSize;
 	}
-
-	/* Now make sure we got both an IN and an OUT */
+	
+	// Now make sure we got both an IN and an OUT
 	if (ether_dev->data_ep_in && ether_dev->data_ep_out) {
-		dbg( "detected BULK OUT packets of size %d", ether_dev->data_ep_out_size );
+		// We did get both, we are in good shape...
+		info( "detected BULK OUT packets of size %d", ether_dev->data_ep_out_size );
 		return 0;
 	}
 	return -1;
@@ -996,45 +891,45 @@ static int find_ethernet_comm_interface( struct usb_device *device, ether_dev_t 
 		for ( altset_num = 0; altset_num < comm_intf_group->num_altsetting; altset_num++ ) {
 			comm_intf = &( comm_intf_group->altsetting[altset_num] );
 
-			/* Good, we found one, we will try this one */
-			/* Fill in the structure */
-			ether_dev->comm_interface = intf_num;
-			ether_dev->comm_bInterfaceNumber = comm_intf->bInterfaceNumber;
-			ether_dev->comm_interface_altset_num = altset_num;
-			ether_dev->comm_bAlternateSetting = comm_intf->bAlternateSetting;
+			// Is this a communication class of interface of the
+			// ethernet subclass variety.
+			if ( ( comm_intf->bInterfaceClass == 0x02 )
+			   && ( comm_intf->bInterfaceSubClass == 0x06 )
+			   && ( comm_intf->bInterfaceProtocol == 0x00 ) ) {
+				if ( comm_intf->bNumEndpoints == 1 ) {
+					// Good, we found one, we will try this one
+					// Fill in the structure...
+					ether_dev->comm_interface = intf_num;
+					ether_dev->comm_bInterfaceNumber = comm_intf->bInterfaceNumber;
+					ether_dev->comm_interface_altset_num = altset_num;
+					ether_dev->comm_bAlternateSetting = comm_intf->bAlternateSetting;
 
-			// Look for the Ethernet Functional Descriptors
-			rc = find_and_parse_ethernet_class_information( device, ether_dev );
-			if (rc) {
-				// Nope this was no good after all.
-				continue;
-			}
+					// Look for the Ethernet Functional Descriptors
+					rc = find_and_parse_ethernet_class_information( device, ether_dev );
+					if (rc) {
+						// Nope this was no good after all.
+						continue;
+					}
 
-			/* Check that we really can talk to the data interface
-			 * This includes # of endpoints, protocols, etc. */
-			rc = verify_ethernet_data_interface( device, ether_dev );
-			if (rc)	{
-				/* We got something we didn't like */
-				continue;
-			}
-			/* It is a bit ambiguous whether the Ethernet model really requires
-			 * the notification element (usually an interrupt endpoint) or not
-			 * And some products (eg Sharp Zaurus) don't support it, so we
-			 * only use the notification element if present */
-			/* We check for a sane endpoint before using it */
-			if ( (comm_intf->bNumEndpoints == 1) &&
-				(comm_intf->endpoint[0].bEndpointAddress & USB_DIR_IN) &&
-				(comm_intf->endpoint[0].bmAttributes == USB_ENDPOINT_XFER_INT)) {
-					ether_dev->properties |= HAVE_NOTIFICATION_ELEMENT;
-					ether_dev->comm_ep_in = (comm_intf->endpoint[0].bEndpointAddress & 0x7F);
-					dbg("interrupt address: %x",ether_dev->comm_ep_in);
-					ether_dev->intr_interval = (comm_intf->endpoint[0].bInterval);
-					dbg("interrupt interval: %d",ether_dev->intr_interval);
-			}
-			// This communication interface seems to give us everything
-			// we require.  We have all the ethernet info we need.
-
-			return 0;
+					// Check that we really can talk to the data
+					// interface 
+					// This includes # of endpoints, protocols,
+					// etc.
+					rc = verify_ethernet_data_interface( device, ether_dev );
+					if (rc)	{
+						// We got something we didn't like
+						continue;
+					}
+					// This communication interface seems to give us everything
+					// we require.  We have all the ethernet info we need.
+					// Let's get out of here and go home right now.
+					return 0;
+				} else {
+                                        // bNumEndPoints != 1
+					// We found an interface that had the wrong number of 
+					// endpoints but would have otherwise been okay
+				} // end bNumEndpoints check.
+			} // end interface specifics check.
 		} // end for altset_num
 	} // end for intf_num
 	return -1;
@@ -1114,8 +1009,8 @@ static int check_for_claimed_interfaces( struct usb_config_descriptor *config )
 
 static inline unsigned char hex2dec( unsigned char digit )
 {
-	/* Is there a standard way to do this??? */
-	/* I have written this code TOO MANY times. */
+	// Is there a standard way to do this???
+	// I have written this code TOO MANY times.
 	if ( (digit >= '0') && (digit <= '9') )	{
 		return (digit - '0');
 	}
@@ -1125,14 +1020,9 @@ static inline unsigned char hex2dec( unsigned char digit )
 	if ( (digit >= 'A') && (digit <= 'F') )	{
 		return (digit - 'A' + 10);
 	}
-	return 16;
+	return 0;
 }
 
-/* CDC Ethernet devices provide the MAC address as a string */
-/* We get an index to the string in the Ethernet functional header */
-/* This routine retrieves the string, sanity checks it, and sets the */
-/* MAC address in the network device */
-/* The encoding is a bit wacky - see CDC Spec Table 41 for details */
 static void set_ethernet_addr( ether_dev_t *ether_dev )
 {
 	unsigned char	mac_addr[6];
@@ -1140,7 +1030,7 @@ static void set_ethernet_addr( ether_dev_t *ether_dev )
 	int 		len;
 	unsigned char	buffer[13];
 
-	/* Let's assume we don't get anything */
+	// Let's assume we don't get anything...
 	mac_addr[0] = 0x00;
 	mac_addr[1] = 0x00;
 	mac_addr[2] = 0x00;
@@ -1148,30 +1038,22 @@ static void set_ethernet_addr( ether_dev_t *ether_dev )
 	mac_addr[4] = 0x00;
 	mac_addr[5] = 0x00;
 
-	/* Let's ask the device */
-	if (0 > (len = usb_string(ether_dev->usb, ether_dev->iMACAddress, buffer, 13))) {
-		err("Attempting to get MAC address failed: %d", -1*len);
-		return;
-	}
+	// Let's ask the device...
+	len = usb_string(ether_dev->usb, ether_dev->iMACAddress, buffer, 13);
 
-	/* Sanity check */
+	// Sanity check!
 	if (len != 12)	{
-		/* You gotta love failing sanity checks */
+		// You gotta love failing sanity checks
 		err("Attempting to get MAC address returned %d bytes", len);
 		return;
 	}
 
-	/* Fill in the mac_addr */
+	// Fill in the mac_addr
 	for (i = 0; i < 6; i++)	{
-		if ((16 == buffer[2 * i]) || (16 == buffer[2 * i + 1])) {
-			err("Bad value in MAC address");
-		}
-		else {
-			mac_addr[i] = ( hex2dec( buffer[2 * i] ) << 4 ) + hex2dec( buffer[2 * i + 1] );
-		}
+		mac_addr[i] = ( hex2dec( buffer[2 * i] ) << 4 ) + hex2dec( buffer[2 * i + 1] );
 	}
 
-	/* Now copy it over to our network device structure */
+	// Now copy it over to the kernel's network driver.
 	memcpy( ether_dev->net->dev_addr, mac_addr, sizeof(mac_addr) );
 }
 
@@ -1189,12 +1071,12 @@ void log_device_info(ether_dev_t *ether_dev)
 	unsigned char sern[256];
 	unsigned char *mac_addr;
 
-	/* Default empty strings in case we don't find a real one */
+	// Default empty strings in case we don't find a real one
 	manu[0] = 0x00;
 	prod[0] = 0x00;
 	sern[0] = 0x00;
 
-	/*  Try to get the device Manufacturer */
+	// Try to get the device Manufacturer
 	string_num = ether_dev->usb->descriptor.iManufacturer;
 	if (string_num)	{
 		// Put it into its buffer
@@ -1203,7 +1085,7 @@ void log_device_info(ether_dev_t *ether_dev)
 		manu[len] = 0x00;
 	}
 
-	/* Try to get the device Product Name */
+	// Try to get the device Product Name
 	string_num = ether_dev->usb->descriptor.iProduct;
 	if (string_num)	{
 		// Put it into its buffer
@@ -1212,7 +1094,7 @@ void log_device_info(ether_dev_t *ether_dev)
 		prod[len] = 0x00;
 	}
 
-	/* Try to get the device Serial Number */
+	// Try to get the device Serial Number
 	string_num = ether_dev->usb->descriptor.iSerialNumber;
 	if (string_num)	{
 		// Put it into its buffer
@@ -1221,20 +1103,14 @@ void log_device_info(ether_dev_t *ether_dev)
 		sern[len] = 0x00;
 	}
 
-	/* This makes it easier for us to print */
+	// This makes it easier for us to print
 	mac_addr = ether_dev->net->dev_addr;
 
-	/* Now send everything we found to the syslog */
-	info( "%s: %s %s %s", ether_dev->net->name, manu, prod, sern);
-	dbg( "%s: %02X:%02X:%02X:%02X:%02X:%02X",
-		ether_dev->net->name,
-		mac_addr[0],
-		mac_addr[1],
-		mac_addr[2],
-		mac_addr[3],
-		mac_addr[4],
-		mac_addr[5] );
-
+	// Now send everything we found to the syslog
+	info( "%s: %s %s %s %02X:%02X:%02X:%02X:%02X:%02X", 
+	      ether_dev->net->name, manu, prod, sern, mac_addr[0], 
+	      mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], 
+	      mac_addr[5] );
 }
 
 /* Forward declaration */
@@ -1334,7 +1210,6 @@ static void * CDCEther_probe( struct usb_device *usb, unsigned int ifnum,
 	// Now that we have an ethernet device, let's set it up
 	// (And I don't mean "set [it] up the bomb".)
 	net->priv = ether_dev;
-	SET_MODULE_OWNER(net);
 	net->open = CDCEther_open;
 	net->stop = CDCEther_close;
 	net->watchdog_timeo = CDC_ETHER_TX_TIMEOUT;
@@ -1355,7 +1230,11 @@ static void * CDCEther_probe( struct usb_device *usb, unsigned int ifnum,
 	// Send a message to syslog about what we are handling
 	log_device_info( ether_dev );
 
-	/* We need to manually claim the data interface, while the comm interface gets claimed in the return */
+	// I claim this interface to be a CDC Ethernet Networking device
+	usb_driver_claim_interface( &CDCEther_driver, 
+	                            &(usb->config[ether_dev->configuration_num].interface[ether_dev->comm_interface]), 
+	                            ether_dev );
+	// I claim this interface to be a CDC Ethernet Networking device
 	usb_driver_claim_interface( &CDCEther_driver, 
 	                            &(usb->config[ether_dev->configuration_num].interface[ether_dev->data_interface]), 
 	                            ether_dev );
@@ -1363,8 +1242,11 @@ static void * CDCEther_probe( struct usb_device *usb, unsigned int ifnum,
 	// Does this REALLY do anything???
 	usb_inc_dev_use( usb );
 
+	// TODO - last minute HACK
+	ether_dev->comm_ep_in = 5;
+
 	// Okay, we are finally done...
-	return ether_dev;
+	return NULL;
 }
 
 
@@ -1422,7 +1304,7 @@ static void CDCEther_disconnect( struct usb_device *usb, void *ptr )
 //////////////////////////////////////////////////////////////////////////////
 
 static struct usb_driver CDCEther_driver = {
-	name:		driver_name,
+	name:		"CDCEther",
 	probe:		CDCEther_probe,
 	disconnect:	CDCEther_disconnect,
 	id_table:	CDCEther_ids,
@@ -1434,7 +1316,7 @@ static struct usb_driver CDCEther_driver = {
 
 int __init CDCEther_init(void)
 {
-	dbg( "%s", version );
+	info( "%s", version );
 	return usb_register( &CDCEther_driver );
 }
 
@@ -1454,9 +1336,10 @@ MODULE_AUTHOR("Brad Hards and another");
 MODULE_DESCRIPTION("USB CDC Ethernet driver");
 MODULE_LICENSE("GPL");
 
-MODULE_DEVICE_TABLE (usb, CDCEther_ids);
 MODULE_PARM (multicast_filter_limit, "i");
 MODULE_PARM_DESC (multicast_filter_limit, "CDCEther maximum number of filtered multicast addresses");
+
+MODULE_DEVICE_TABLE (usb, CDCEther_ids);
 
 //////////////////////////////////////////////////////////////////////////////
 // End of file ///////////////////////////////////////////////////////////////

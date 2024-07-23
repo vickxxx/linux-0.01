@@ -23,6 +23,29 @@
 #endif
 
 #ifdef CONFIG_SMP
+# ifdef CONFIG_MULTIQUAD
+#  define TARGET_CPUS 0xf     /* all CPUs in *THIS* quad */
+#  define INT_DELIVERY_MODE 0     /* physical delivery on LOCAL quad */
+# else
+#  define TARGET_CPUS cpu_online_map
+#  define INT_DELIVERY_MODE 1     /* logical delivery broadcast to all procs */
+# endif
+#else
+# define INT_DELIVERY_MODE 1     /* logical delivery */
+# define TARGET_CPUS 0x01
+#endif
+
+#ifndef clustered_apic_mode
+ #ifdef CONFIG_MULTIQUAD
+  #define clustered_apic_mode (1)
+  #define esr_disable (1)
+ #else /* !CONFIG_MULTIQUAD */
+  #define clustered_apic_mode (0)
+  #define esr_disable (0)
+ #endif /* CONFIG_MULTIQUAD */
+#endif 
+
+#ifdef CONFIG_SMP
 #ifndef __ASSEMBLY__
 
 /*
@@ -34,12 +57,9 @@ extern unsigned long phys_cpu_present_map;
 extern unsigned long cpu_online_map;
 extern volatile unsigned long smp_invalidate_needed;
 extern int pic_mode;
-extern int smp_num_siblings;
-extern int cpu_sibling_map[];
-
 extern void smp_flush_tlb(void);
 extern void smp_message_irq(int cpl, void *dev_id, struct pt_regs *regs);
-extern void fastcall smp_send_reschedule(int cpu);
+extern void smp_send_reschedule(int cpu);
 extern void smp_invalidate_rcv(void);		/* Process an NMI */
 extern void (*mtrr_hook) (void);
 extern void zap_low_mappings (void);

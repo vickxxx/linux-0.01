@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.machdep.h 1.25 11/13/01 21:26:07 paulus
+ */
 #ifdef __KERNEL__
 #ifndef _PPC_MACHDEP_H
 #define _PPC_MACHDEP_H
@@ -9,14 +12,9 @@
 #endif
 
 struct pt_regs;
-struct pci_bus;
+struct pci_bus;	
 struct pci_dev;
 struct seq_file;
-
-/* We export this macro for external modules like Alsa to know if
- * ppc_md.feature_call is implemented or not
- */
-#define CONFIG_PPC_HAS_FEATURE_CALLS
 
 struct machdep_calls {
 	void		(*setup_arch)(void);
@@ -27,7 +25,7 @@ struct machdep_calls {
 	unsigned int	(*irq_cannonicalize)(unsigned int irq);
 	void		(*init_IRQ)(void);
 	int		(*get_irq)(struct pt_regs *);
-
+	
 	/* A general init function, called by ppc_init in init/main.c.
 	   May be NULL. */
 	void		(*init)(void);
@@ -40,19 +38,18 @@ struct machdep_calls {
 	int		(*set_rtc_time)(unsigned long nowtime);
 	unsigned long	(*get_rtc_time)(void);
 	void		(*calibrate_decr)(void);
+
 	void		(*heartbeat)(void);
+	unsigned long	heartbeat_reset;
+	unsigned long	heartbeat_count;
 
 	unsigned long	(*find_end_of_memory)(void);
 	void		(*setup_io_mappings)(void);
 
-	void		(*early_serial_map)(void);
   	void		(*progress)(char *, unsigned short);
 
 	unsigned char 	(*nvram_read_val)(int addr);
 	void		(*nvram_write_val)(int addr, unsigned char val);
-
-	/* Called from prepare_namespace() */
-	void		(*discover_root)(void);
 
 	/* Tons of keyboard stuff. */
 	int		(*kbd_setkeycode)(unsigned int scancode,
@@ -98,15 +95,6 @@ struct machdep_calls {
 	/* this is for modules, since _machine can be a define -- Cort */
 	int ppc_machine;
 
-	/* Motherboard/chipset features. This is a kind of general purpose
-	 * hook used to control some machine specific features (like reset
-	 * lines, chip power control, etc...).
-	 */
-	int (*feature_call)(unsigned int feature, ...);
-
-	/* Hook for board-specific info passed by the bootloader */
-	void (*board_info)(void *bdinfo, int bdinfo_size);
-
 #ifdef CONFIG_SMP
 	/* functions for dealing with other cpus */
 	struct smp_ops_t *smp_ops;
@@ -114,7 +102,7 @@ struct machdep_calls {
 };
 
 extern struct machdep_calls ppc_md;
-extern char cmd_line[];
+extern char cmd_line[512];
 
 extern void setup_pci_ptrs(void);
 

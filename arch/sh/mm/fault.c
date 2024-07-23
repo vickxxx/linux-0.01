@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.1.1.1.2.3 2002/10/24 05:52:58 mrbrown Exp $
+/* $Id: fault.c,v 1.49 2001/10/06 19:46:00 lethal Exp $
  *
  *  linux/arch/sh/mm/fault.c
  *  Copyright (C) 1999  Niibe Yutaka
@@ -26,10 +26,6 @@
 #include <asm/pgalloc.h>
 #include <asm/hardirq.h>
 #include <asm/mmu_context.h>
-
-#if defined(CONFIG_SH_KGDB)
-#include <asm/kgdb.h>
-#endif
 
 extern void die(const char *,struct pt_regs *,long);
 
@@ -98,11 +94,6 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	struct vm_area_struct * vma;
 	unsigned long page;
 	unsigned long fixup;
-
-#if defined(CONFIG_SH_KGDB)
-	if (kgdb_nofault && kgdb_bus_err_hook)
-	  kgdb_bus_err_hook();
-#endif
 
 	tsk = current;
 	mm = tsk->mm;
@@ -214,11 +205,13 @@ no_context:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
+	up_read(&mm->mmap_sem);
 	if (current->pid == 1) {
-		yield();
+		current->policy |= SCHED_YIELD;
+		schedule();
+		down_read(&mm->mmap_sem);
 		goto survive;
 	}
-	up_read(&mm->mmap_sem);
 	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
@@ -252,15 +245,9 @@ asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 	pte_t *pte;
 	pte_t entry;
 
-#if defined(CONFIG_SH_KGDB)
-	if (kgdb_nofault && kgdb_bus_err_hook)
-	  kgdb_bus_err_hook();
-#endif
 	if (address >= P3SEG && address < P4SEG)
 		dir = pgd_offset_k(address);
 	else if (address >= TASK_SIZE)
-		return 1;
-	else if (!current->mm)
 		return 1;
 	else
 		dir = pgd_offset(current->mm, address);

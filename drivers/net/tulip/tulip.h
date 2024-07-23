@@ -63,7 +63,6 @@ enum tbl_flag {
 	HAS_8023X		= 0x0400,
 	COMET_MAC_ADDR		= 0x0800,
 	HAS_PCI_MWI		= 0x1000,
-	HAS_PHY_IRQ		= 0x2000,
 };
 
 
@@ -85,7 +84,6 @@ enum chips {
 	COMPEX9881,
 	I21145,
 	DM910X,
-	CONEXANT,
 };
 
 
@@ -146,9 +144,6 @@ enum status_bits {
 	TxIntr = 0x01,
 };
 
-/* bit mask for CSR5 TX/RX process state */
-#define CSR5_TS	0x00700000
-#define CSR5_RS	0x000e0000
 
 enum tulip_mode_bits {
 	TxThreshold		= (1 << 22),
@@ -392,8 +387,7 @@ struct tulip_private {
 	int susp_rx;
 	unsigned long nir;
 	unsigned long base_addr;
-	int csr12_shadow;
-	int pad0;		/* Used for 8-byte alignment */
+	int pad0, pad1;		/* Used for 8-byte alignment */
 };
 
 
@@ -487,19 +481,9 @@ static inline void tulip_stop_rxtx(struct tulip_private *tp)
 	u32 csr6 = inl(ioaddr + CSR6);
 
 	if (csr6 & RxTx) {
-		unsigned i=1300/10;
 		outl(csr6 & ~RxTx, ioaddr + CSR6);
 		barrier();
-		/* wait until in-flight frame completes.
-		 * Max time @ 10BT: 1500*8b/10Mbps == 1200us (+ 100us margin)
-		 * Typically expect this loop to end in < 50us on 100BT.
-		 */
-		while (--i && (inl(ioaddr + CSR5) & (CSR5_TS|CSR5_RS))) 
-			udelay(10);
-
-		if (!i)
-			printk (KERN_DEBUG "%s: tulip_stop_rxtx() failed\n",
-					tp->pdev->slot_name);
+		(void) inl(ioaddr + CSR6); /* mmio sync */
 	}
 }
 

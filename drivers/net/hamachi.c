@@ -158,6 +158,7 @@ static int tx_params[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/time.h>
+#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
@@ -209,10 +210,8 @@ KERN_INFO "   Further modifications by Keith Underwood <keithu@parl.clemson.edu>
 /* Condensed bus+endian portability operations. */
 #if ADDRLEN == 64
 #define cpu_to_leXX(addr)	cpu_to_le64(addr)
-#define desc_to_virt(addr) bus_to_virt(le64_to_cpu(addr))
 #else 
 #define cpu_to_leXX(addr)	cpu_to_le32(addr)
-#define desc_to_virt(addr) bus_to_virt(le32_to_cpu(addr))
 #endif   
 
 
@@ -507,11 +506,13 @@ struct hamachi_private {
 	unsigned int cur_tx, dirty_tx;
 	unsigned int rx_buf_sz;			/* Based on MTU+slack. */
 	unsigned int tx_full:1;			/* The Tx queue is full. */
+	unsigned int full_duplex:1;		/* Full-duplex operation requested. */
 	unsigned int duplex_lock:1;
+	unsigned int medialock:1;		/* Do not sense media. */
 	unsigned int default_port:4;		/* Last dev->if_port value. */
 	/* MII transceiver section. */
 	int mii_cnt;								/* MII device addresses. */
-	struct mii_if_info mii_if;		/* MII lib hooks/info */
+	u16 advertising;							/* NWay media advertisement */
 	unsigned char phys[MII_CNT];		/* MII device addresses, only first one used. */
 	u32 rx_int_var, tx_int_var;	/* interrupt control variables */
 	u32 option;							/* Hold on to a copy of the options */
@@ -554,8 +555,8 @@ MODULE_PARM_DESC(full_duplex, "GNIC-II full duplex setting(s) (1)");
 MODULE_PARM_DESC(force32, "GNIC-II: Bit 0: 32 bit PCI, bit 1: disable parity, bit 2: 64 bit PCI (all boards)");
                                                                         
 static int read_eeprom(long ioaddr, int location);
-static int mdio_read(struct net_device *dev, int phy_id, int location);
-static void mdio_write(struct net_device *dev, int phy_id, int location, int value);
+static int mdio_read(long ioaddr, int phy_id, int location);
+static void mdio_write(long ioaddr, int phy_id, int location, int value);
 static int hamachi_open(struct net_device *dev);
 static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 static void hamachi_timer(unsigned long data);
@@ -637,12 +638,6 @@ static int __init hamachi_init_one (struct pci_dev *pdev,
 	hmp = dev->priv;
 	spin_lock_init(&hmp->lock);
 
-	hmp->mii_if.dev = dev;
-	hmp->mii_if.mdio_read = mdio_read;
-	hmp->mii_if.mdio_write = mdio_write;
-	hmp->mii_if.phy_id_mask = 0x1f;
-	hmp->mii_if.reg_num_mask = 0x1f;
-
 	ring_space = pci_alloc_consistent(pdev, TX_TOTAL_SIZE, &ring_dma);
 	if (!ring_space)
 		goto err_out_cleardev;
@@ -691,18 +686,18 @@ static int __init hamachi_init_one (struct pci_dev *pdev,
 	if (option > 0) {
 		hmp->option = option;
 		if (option & 0x200)
-			hmp->mii_if.full_duplex = 1;
+			hmp->full_duplex = 1;
 		else if (option & 0x080)
-			hmp->mii_if.full_duplex = 0;
+			hmp->full_duplex = 0;
 		hmp->default_port = option & 15;
 		if (hmp->default_port)
-			hmp->mii_if.force_media = 1;
+			hmp->medialock = 1;
 	}
 	if (card_idx < MAX_UNITS  &&  full_duplex[card_idx] > 0)
-		hmp->mii_if.full_duplex = 1;
+		hmp->full_duplex = 1;
 
 	/* lock the duplex mode if someone specified a value */
-	if (hmp->mii_if.full_duplex || (option & 0x080))
+	if (hmp->full_duplex || (option & 0x080))
 		hmp->duplex_lock = 1;
 
 	/* Set interrupt tuning parameters */
@@ -755,21 +750,17 @@ static int __init hamachi_init_one (struct pci_dev *pdev,
 	if (chip_tbl[hmp->chip_id].flags & CanHaveMII) {
 		int phy, phy_idx = 0;
 		for (phy = 0; phy < 32 && phy_idx < MII_CNT; phy++) {
-			int mii_status = mdio_read(dev, phy, MII_BMSR);
+			int mii_status = mdio_read(ioaddr, phy, 1);
 			if (mii_status != 0xffff  &&
 				mii_status != 0x0000) {
 				hmp->phys[phy_idx++] = phy;
-				hmp->mii_if.advertising = mdio_read(dev, phy, MII_ADVERTISE);
+				hmp->advertising = mdio_read(ioaddr, phy, 4);
 				printk(KERN_INFO "%s: MII PHY found at address %d, status "
 					   "0x%4.4x advertising %4.4x.\n",
-					   dev->name, phy, mii_status, hmp->mii_if.advertising);
+					   dev->name, phy, mii_status, hmp->advertising);
 			}
 		}
 		hmp->mii_cnt = phy_idx;
-		if (hmp->mii_cnt > 0)
-			hmp->mii_if.phy_id = hmp->phys[0];
-		else
-			memset(&hmp->mii_if, 0, sizeof(hmp->mii_if));
 	}
 	/* Configure gigabit autonegotiation. */
 	writew(0x0400, ioaddr + ANXchngCtrl);	/* Enable legacy links. */
@@ -815,9 +806,8 @@ static int __init read_eeprom(long ioaddr, int location)
    These routines assume the MDIO controller is idle, and do not exit until
    the command is finished. */
 
-static int mdio_read(struct net_device *dev, int phy_id, int location)
+static int mdio_read(long ioaddr, int phy_id, int location)
 {
-	long ioaddr = dev->base_addr;
 	int i;
 
 	/* We should check busy first - per docs -KDU */
@@ -832,9 +822,8 @@ static int mdio_read(struct net_device *dev, int phy_id, int location)
 	return readw(ioaddr + MII_Rd_Data);
 }
 
-static void mdio_write(struct net_device *dev, int phy_id, int location, int value)
+static void mdio_write(long ioaddr, int phy_id, int location, int value)
 {
-	long ioaddr = dev->base_addr;
 	int i;
 
 	/* We should check busy first - per docs -KDU */
@@ -924,7 +913,7 @@ static int hamachi_open(struct net_device *dev)
 	/* Setting the Rx mode will start the Rx process. */
 	/* If someone didn't choose a duplex, default to full-duplex */ 
 	if (hmp->duplex_lock != 1)
-		hmp->mii_if.full_duplex = 1;
+		hmp->full_duplex = 1;
 
 	/* always 1, takes no more time to do it */
 	writew(0x0001, ioaddr + RxChecksum);
@@ -1369,211 +1358,6 @@ static int hamachi_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return 0;
 }
 
-/* This routine is logically part of the interrupt handler, but seperated
-   for clarity and better register allocation. */
-static int hamachi_rx(struct net_device *dev)
-{
-	struct hamachi_private *hmp = dev->priv;
-	int entry = hmp->cur_rx % RX_RING_SIZE;
-	int boguscnt = (hmp->dirty_rx + RX_RING_SIZE) - hmp->cur_rx;
-
-	if (hamachi_debug > 4) {
-		printk(KERN_DEBUG " In hamachi_rx(), entry %d status %4.4x.\n",
-			   entry, hmp->rx_ring[entry].status_n_length);
-	}
-
-	/* If EOP is set on the next entry, it's a new packet. Send it up. */
-	while (1) {
-		struct hamachi_desc *desc = &(hmp->rx_ring[entry]);
-		u32 desc_status = le32_to_cpu(desc->status_n_length);
-		u16 data_size = desc_status;	/* Implicit truncate */
-		u8 *buf_addr; 
-		s32 frame_status;
-		
-		if (desc_status & DescOwn)
-			break;
-		pci_dma_sync_single(hmp->pci_dev, desc->addr, hmp->rx_buf_sz, 
-			PCI_DMA_FROMDEVICE);
-		buf_addr = desc_to_virt(desc->addr);
-		frame_status = le32_to_cpu(get_unaligned((s32*)&(buf_addr[data_size - 12])));
-		if (hamachi_debug > 4)
-			printk(KERN_DEBUG "  hamachi_rx() status was %8.8x.\n",
-				frame_status);
-		if (--boguscnt < 0)
-			break;
-		if ( ! (desc_status & DescEndPacket)) {
-			printk(KERN_WARNING "%s: Oversized Ethernet frame spanned "
-				   "multiple buffers, entry %#x length %d status %4.4x!\n",
-				   dev->name, hmp->cur_rx, data_size, desc_status);
-			printk(KERN_WARNING "%s: Oversized Ethernet frame %p vs %p.\n",
-				   dev->name, desc, &hmp->rx_ring[hmp->cur_rx % RX_RING_SIZE]);
-			printk(KERN_WARNING "%s: Oversized Ethernet frame -- next status %x/%x last status %x.\n",
-				   dev->name,
-				   hmp->rx_ring[(hmp->cur_rx+1) % RX_RING_SIZE].status_n_length & 0xffff0000,
-				   hmp->rx_ring[(hmp->cur_rx+1) % RX_RING_SIZE].status_n_length & 0x0000ffff,
-				   hmp->rx_ring[(hmp->cur_rx-1) % RX_RING_SIZE].status_n_length);
-			hmp->stats.rx_length_errors++;
-		} /* else  Omit for prototype errata??? */
-		if (frame_status & 0x00380000) {
-			/* There was an error. */
-			if (hamachi_debug > 2)
-				printk(KERN_DEBUG "  hamachi_rx() Rx error was %8.8x.\n",
-					   frame_status);
-			hmp->stats.rx_errors++;
-			if (frame_status & 0x00600000) hmp->stats.rx_length_errors++;
-			if (frame_status & 0x00080000) hmp->stats.rx_frame_errors++;
-			if (frame_status & 0x00100000) hmp->stats.rx_crc_errors++;
-			if (frame_status < 0) hmp->stats.rx_dropped++;
-		} else {
-			struct sk_buff *skb;
-			/* Omit CRC */
-			u16 pkt_len = (frame_status & 0x07ff) - 4;	
-#ifdef RX_CHECKSUM
-			u32 pfck = *(u32 *) &buf_addr[data_size - 8];
-#endif
-
-
-#ifndef final_version
-			if (hamachi_debug > 4)
-				printk(KERN_DEBUG "  hamachi_rx() normal Rx pkt length %d"
-					   " of %d, bogus_cnt %d.\n",
-					   pkt_len, data_size, boguscnt);
-			if (hamachi_debug > 5)
-				printk(KERN_DEBUG"%s:  rx status %8.8x %8.8x %8.8x %8.8x %8.8x.\n",
-					   dev->name,
-					   *(s32*)&(buf_addr[data_size - 20]),
-					   *(s32*)&(buf_addr[data_size - 16]),
-					   *(s32*)&(buf_addr[data_size - 12]),
-					   *(s32*)&(buf_addr[data_size - 8]),
-					   *(s32*)&(buf_addr[data_size - 4]));
-#endif
-			/* Check if the packet is long enough to accept without copying
-			   to a minimally-sized skbuff. */
-			if (pkt_len < rx_copybreak
-				&& (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
-#ifdef RX_CHECKSUM
-				printk(KERN_ERR "%s: rx_copybreak non-zero "
-				  "not good with RX_CHECKSUM\n", dev->name);
-#endif
-				skb->dev = dev;
-				skb_reserve(skb, 2);	/* 16 byte align the IP header */
-				/* Call copy + cksum if available. */
-#if 1 || USE_IP_COPYSUM
-				eth_copy_and_sum(skb, 
-					hmp->rx_skbuff[entry]->data, pkt_len, 0);
-				skb_put(skb, pkt_len);
-#else
-				memcpy(skb_put(skb, pkt_len), hmp->rx_ring_dma
-					+ entry*sizeof(*desc), pkt_len);
-#endif
-			} else {
-				pci_unmap_single(hmp->pci_dev, 
-					hmp->rx_ring[entry].addr, 
-					hmp->rx_buf_sz, PCI_DMA_FROMDEVICE);
-				skb_put(skb = hmp->rx_skbuff[entry], pkt_len);
-				hmp->rx_skbuff[entry] = NULL;
-			}
-			skb->protocol = eth_type_trans(skb, dev);
-
-
-#ifdef RX_CHECKSUM
-			/* TCP or UDP on ipv4, DIX encoding */
-			if (pfck>>24 == 0x91 || pfck>>24 == 0x51) {
-				struct iphdr *ih = (struct iphdr *) skb->data;
-				/* Check that IP packet is at least 46 bytes, otherwise,
-				 * there may be pad bytes included in the hardware checksum.
-				 * This wouldn't happen if everyone padded with 0.
-				 */
-				if (ntohs(ih->tot_len) >= 46){
-					/* don't worry about frags */
-					if (!(ih->frag_off & __constant_htons(IP_MF|IP_OFFSET))) {
-						u32 inv = *(u32 *) &buf_addr[data_size - 16];
-						u32 *p = (u32 *) &buf_addr[data_size - 20];
-						register u32 crc, p_r, p_r1;
-
-						if (inv & 4) {
-							inv &= ~4;
-							--p;
-						}
-						p_r = *p;
-						p_r1 = *(p-1);
-						switch (inv) {
-							case 0:	
-								crc = (p_r & 0xffff) + (p_r >> 16);
-								break;
-							case 1:	
-								crc = (p_r >> 16) + (p_r & 0xffff)
-									+ (p_r1 >> 16 & 0xff00); 
-								break;
-							case 2:	
-								crc = p_r + (p_r1 >> 16); 
-								break;
-							case 3:	
-								crc = p_r + (p_r1 & 0xff00) + (p_r1 >> 16); 
-								break;
-							default:	/*NOTREACHED*/ crc = 0;
-						}
-						if (crc & 0xffff0000) {
-							crc &= 0xffff;
-							++crc;
-						}
-						/* tcp/udp will add in pseudo */
-						skb->csum = ntohs(pfck & 0xffff);
-						if (skb->csum > crc)
-							skb->csum -= crc;
-						else
-							skb->csum += (~crc & 0xffff);
-						/*
-						* could do the pseudo myself and return
-						* CHECKSUM_UNNECESSARY
-						*/
-						skb->ip_summed = CHECKSUM_HW;
-					}
-				}	
-			}
-#endif  /* RX_CHECKSUM */
-
-			netif_rx(skb);
-			dev->last_rx = jiffies;
-			hmp->stats.rx_packets++;
-		}
-		entry = (++hmp->cur_rx) % RX_RING_SIZE;
-	}
-
-	/* Refill the Rx ring buffers. */
-	for (; hmp->cur_rx - hmp->dirty_rx > 0; hmp->dirty_rx++) {
-		struct hamachi_desc *desc;
-
-		entry = hmp->dirty_rx % RX_RING_SIZE;
-		desc = &(hmp->rx_ring[entry]);
-		if (hmp->rx_skbuff[entry] == NULL) {
-			struct sk_buff *skb = dev_alloc_skb(hmp->rx_buf_sz);
-
-			hmp->rx_skbuff[entry] = skb;
-			if (skb == NULL)
-				break;		/* Better luck next round. */
-			skb->dev = dev;		/* Mark as being used by this device. */
-			skb_reserve(skb, 2);	/* Align IP on 16 byte boundaries */
-                	desc->addr = cpu_to_leXX(pci_map_single(hmp->pci_dev, 
-				skb->tail, hmp->rx_buf_sz, PCI_DMA_FROMDEVICE));
-		}
-		desc->status_n_length = cpu_to_le32(hmp->rx_buf_sz);
-		if (entry >= RX_RING_SIZE-1)
-			desc->status_n_length |= cpu_to_le32(DescOwn | 
-				DescEndPacket | DescEndRing | DescIntr);
-		else
-			desc->status_n_length |= cpu_to_le32(DescOwn | 
-				DescEndPacket | DescIntr);
-	}
-
-	/* Restart Rx engine if stopped. */
-	/* If we don't need to check status, don't. -KDU */
-	if (readw(dev->base_addr + RxStatus) & 0x0002)
-		writew(0x0001, dev->base_addr + RxCmd);
-
-	return 0;
-}
-
 /* The interrupt handler does all of the Rx thread work and cleans up
    after the Tx thread. */
 static void hamachi_interrupt(int irq, void *dev_instance, struct pt_regs *rgs)
@@ -1675,6 +1459,274 @@ static void hamachi_interrupt(int irq, void *dev_instance, struct pt_regs *rgs)
 #endif
 
 	spin_unlock(&hmp->lock);
+}
+
+#ifdef TX_CHECKSUM
+/*
+ * Copied from eth_type_trans(), with reduced header, since we don't
+ * get it on RX, only on TX.
+ */
+static unsigned short hamachi_eth_type_trans(struct sk_buff *skb,
+  struct net_device *dev)
+{
+	struct ethhdr *eth;
+	unsigned char *rawp;
+	
+	skb->mac.raw=skb->data;
+	skb_pull(skb,dev->hard_header_len-8);  /* artificially enlarged on tx */
+	eth= skb->mac.ethernet;
+	
+	if(*eth->h_dest&1)
+	{
+		if(memcmp(eth->h_dest,dev->broadcast, ETH_ALEN)==0)
+			skb->pkt_type=PACKET_BROADCAST;
+		else
+			skb->pkt_type=PACKET_MULTICAST;
+	}
+	
+	/*
+	 *	This ALLMULTI check should be redundant by 1.4
+	 *	so don't forget to remove it.
+	 *
+	 *	Seems, you forgot to remove it. All silly devices
+	 *	seems to set IFF_PROMISC.
+	 */
+	 
+	else if(dev->flags&(IFF_PROMISC/*|IFF_ALLMULTI*/))
+	{
+		if(memcmp(eth->h_dest,dev->dev_addr, ETH_ALEN))
+			skb->pkt_type=PACKET_OTHERHOST;
+	}
+	
+	if (ntohs(eth->h_proto) >= 1536)
+		return eth->h_proto;
+		
+	rawp = skb->data;
+	
+	/*
+	 *	This is a magic hack to spot IPX packets. Older Novell breaks
+	 *	the protocol design and runs IPX over 802.3 without an 802.2 LLC
+	 *	layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
+	 *	won't work for fault tolerant netware but does for the rest.
+	 */
+	if (*(unsigned short *)rawp == 0xFFFF)
+		return htons(ETH_P_802_3);
+		
+	/*
+	 *	Real 802.2 LLC
+	 */
+	return htons(ETH_P_802_2);
+}
+#endif  /* TX_CHECKSUM */
+
+/* This routine is logically part of the interrupt handler, but seperated
+   for clarity and better register allocation. */
+static int hamachi_rx(struct net_device *dev)
+{
+	struct hamachi_private *hmp = dev->priv;
+	int entry = hmp->cur_rx % RX_RING_SIZE;
+	int boguscnt = (hmp->dirty_rx + RX_RING_SIZE) - hmp->cur_rx;
+
+	if (hamachi_debug > 4) {
+		printk(KERN_DEBUG " In hamachi_rx(), entry %d status %4.4x.\n",
+			   entry, hmp->rx_ring[entry].status_n_length);
+	}
+
+	/* If EOP is set on the next entry, it's a new packet. Send it up. */
+	while (1) {
+		struct hamachi_desc *desc = &(hmp->rx_ring[entry]);
+		u32 desc_status = le32_to_cpu(desc->status_n_length);
+		u16 data_size = desc_status;	/* Implicit truncate */
+		u8 *buf_addr; 
+		s32 frame_status;
+		
+		if (desc_status & DescOwn)
+			break;
+		pci_dma_sync_single(hmp->pci_dev, desc->addr, hmp->rx_buf_sz, 
+			PCI_DMA_FROMDEVICE);
+		buf_addr = (u8 *)hmp->rx_ring + entry*sizeof(*desc);
+		frame_status = le32_to_cpu(get_unaligned((s32*)&(buf_addr[data_size - 12])));
+		if (hamachi_debug > 4)
+			printk(KERN_DEBUG "  hamachi_rx() status was %8.8x.\n",
+				frame_status);
+		if (--boguscnt < 0)
+			break;
+		if ( ! (desc_status & DescEndPacket)) {
+			printk(KERN_WARNING "%s: Oversized Ethernet frame spanned "
+				   "multiple buffers, entry %#x length %d status %4.4x!\n",
+				   dev->name, hmp->cur_rx, data_size, desc_status);
+			printk(KERN_WARNING "%s: Oversized Ethernet frame %p vs %p.\n",
+				   dev->name, desc, &hmp->rx_ring[hmp->cur_rx % RX_RING_SIZE]);
+			printk(KERN_WARNING "%s: Oversized Ethernet frame -- next status %x/%x last status %x.\n",
+				   dev->name,
+				   hmp->rx_ring[(hmp->cur_rx+1) % RX_RING_SIZE].status_n_length & 0xffff0000,
+				   hmp->rx_ring[(hmp->cur_rx+1) % RX_RING_SIZE].status_n_length & 0x0000ffff,
+				   hmp->rx_ring[(hmp->cur_rx-1) % RX_RING_SIZE].status_n_length);
+			hmp->stats.rx_length_errors++;
+		} /* else  Omit for prototype errata??? */
+		if (frame_status & 0x00380000) {
+			/* There was an error. */
+			if (hamachi_debug > 2)
+				printk(KERN_DEBUG "  hamachi_rx() Rx error was %8.8x.\n",
+					   frame_status);
+			hmp->stats.rx_errors++;
+			if (frame_status & 0x00600000) hmp->stats.rx_length_errors++;
+			if (frame_status & 0x00080000) hmp->stats.rx_frame_errors++;
+			if (frame_status & 0x00100000) hmp->stats.rx_crc_errors++;
+			if (frame_status < 0) hmp->stats.rx_dropped++;
+		} else {
+			struct sk_buff *skb;
+			/* Omit CRC */
+			u16 pkt_len = (frame_status & 0x07ff) - 4;	
+#ifdef RX_CHECKSUM
+			u32 pfck = *(u32 *) &buf_addr[data_size - 8];
+#endif
+
+
+#ifndef final_version
+			if (hamachi_debug > 4)
+				printk(KERN_DEBUG "  hamachi_rx() normal Rx pkt length %d"
+					   " of %d, bogus_cnt %d.\n",
+					   pkt_len, data_size, boguscnt);
+			if (hamachi_debug > 5)
+				printk(KERN_DEBUG"%s:  rx status %8.8x %8.8x %8.8x %8.8x %8.8x.\n",
+					   dev->name,
+					   *(s32*)&(buf_addr[data_size - 20]),
+					   *(s32*)&(buf_addr[data_size - 16]),
+					   *(s32*)&(buf_addr[data_size - 12]),
+					   *(s32*)&(buf_addr[data_size - 8]),
+					   *(s32*)&(buf_addr[data_size - 4]));
+#endif
+			/* Check if the packet is long enough to accept without copying
+			   to a minimally-sized skbuff. */
+			if (pkt_len < rx_copybreak
+				&& (skb = dev_alloc_skb(pkt_len + 2)) != NULL) {
+#ifdef RX_CHECKSUM
+				printk(KERN_ERR "%s: rx_copybreak non-zero "
+				  "not good with RX_CHECKSUM\n", dev->name);
+#endif
+				skb->dev = dev;
+				skb_reserve(skb, 2);	/* 16 byte align the IP header */
+				/* Call copy + cksum if available. */
+#if 1 || USE_IP_COPYSUM
+				eth_copy_and_sum(skb, 
+					hmp->rx_skbuff[entry]->data, pkt_len, 0);
+				skb_put(skb, pkt_len);
+#else
+				memcpy(skb_put(skb, pkt_len), hmp->rx_ring_dma
+					+ entry*sizeof(*desc), pkt_len);
+#endif
+			} else {
+				pci_unmap_single(hmp->pci_dev, 
+					hmp->rx_ring[entry].addr, 
+					hmp->rx_buf_sz, PCI_DMA_FROMDEVICE);
+				skb_put(skb = hmp->rx_skbuff[entry], pkt_len);
+				hmp->rx_skbuff[entry] = NULL;
+			}
+#ifdef TX_CHECKSUM
+			/* account for extra TX hard_header bytes */
+			skb->protocol = hamachi_eth_type_trans(skb, dev);
+#else
+			skb->protocol = eth_type_trans(skb, dev);
+#endif
+
+
+#ifdef RX_CHECKSUM
+			/* TCP or UDP on ipv4, DIX encoding */
+			if (pfck>>24 == 0x91 || pfck>>24 == 0x51) {
+				struct iphdr *ih = (struct iphdr *) skb->data;
+				/* Check that IP packet is at least 46 bytes, otherwise,
+				 * there may be pad bytes included in the hardware checksum.
+				 * This wouldn't happen if everyone padded with 0.
+				 */
+				if (ntohs(ih->tot_len) >= 46){
+					/* don't worry about frags */
+					if (!(ih->frag_off & __constant_htons(IP_MF|IP_OFFSET))) {
+						u32 inv = *(u32 *) &buf_addr[data_size - 16];
+						u32 *p = (u32 *) &buf_addr[data_size - 20];
+						register u32 crc, p_r, p_r1;
+
+						if (inv & 4) {
+							inv &= ~4;
+							--p;
+						}
+						p_r = *p;
+						p_r1 = *(p-1);
+						switch (inv) {
+							case 0:	
+								crc = (p_r & 0xffff) + (p_r >> 16);
+								break;
+							case 1:	
+								crc = (p_r >> 16) + (p_r & 0xffff)
+									+ (p_r1 >> 16 & 0xff00); 
+								break;
+							case 2:	
+								crc = p_r + (p_r1 >> 16); 
+								break;
+							case 3:	
+								crc = p_r + (p_r1 & 0xff00) + (p_r1 >> 16); 
+								break;
+							default:	/*NOTREACHED*/ crc = 0;
+						}
+						if (crc & 0xffff0000) {
+							crc &= 0xffff;
+							++crc;
+						}
+						/* tcp/udp will add in pseudo */
+						skb->csum = ntohs(pfck & 0xffff);
+						if (skb->csum > crc)
+							skb->csum -= crc;
+						else
+							skb->csum += (~crc & 0xffff);
+						/*
+						* could do the pseudo myself and return
+						* CHECKSUM_UNNECESSARY
+						*/
+						skb->ip_summed = CHECKSUM_HW;
+					}
+				}	
+			}
+#endif  /* RX_CHECKSUM */
+
+			netif_rx(skb);
+			dev->last_rx = jiffies;
+			hmp->stats.rx_packets++;
+		}
+		entry = (++hmp->cur_rx) % RX_RING_SIZE;
+	}
+
+	/* Refill the Rx ring buffers. */
+	for (; hmp->cur_rx - hmp->dirty_rx > 0; hmp->dirty_rx++) {
+		struct hamachi_desc *desc;
+
+		entry = hmp->dirty_rx % RX_RING_SIZE;
+		desc = &(hmp->rx_ring[entry]);
+		if (hmp->rx_skbuff[entry] == NULL) {
+			struct sk_buff *skb = dev_alloc_skb(hmp->rx_buf_sz);
+
+			hmp->rx_skbuff[entry] = skb;
+			if (skb == NULL)
+				break;		/* Better luck next round. */
+			skb->dev = dev;		/* Mark as being used by this device. */
+			skb_reserve(skb, 2);	/* Align IP on 16 byte boundaries */
+                	desc->addr = cpu_to_leXX(pci_map_single(hmp->pci_dev, 
+				skb->tail, hmp->rx_buf_sz, PCI_DMA_FROMDEVICE));
+		}
+		desc->status_n_length = cpu_to_le32(hmp->rx_buf_sz);
+		if (entry >= RX_RING_SIZE-1)
+			desc->status_n_length |= cpu_to_le32(DescOwn | 
+				DescEndPacket | DescEndRing | DescIntr);
+		else
+			desc->status_n_length |= cpu_to_le32(DescOwn | 
+				DescEndPacket | DescIntr);
+	}
+
+	/* Restart Rx engine if stopped. */
+	/* If we don't need to check status, don't. -KDU */
+	if (readw(dev->base_addr + RxStatus) & 0x0002)
+		writew(0x0001, dev->base_addr + RxCmd);
+
+	return 0;
 }
 
 /* This is more properly named "uncommon interrupt events", as it covers more
@@ -1858,7 +1910,7 @@ static void set_rx_mode(struct net_device *dev)
 
 static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 {
-	struct hamachi_private *np = dev->priv;
+	struct hamachi_private *hmp = dev->priv;
 	u32 ethcmd;
 		
 	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
@@ -1869,53 +1921,12 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
 		strcpy(info.driver, DRV_NAME);
 		strcpy(info.version, DRV_VERSION);
-		strcpy(info.bus_info, np->pci_dev->slot_name);
+		strcpy(info.bus_info, hmp->pci_dev->slot_name);
 		if (copy_to_user(useraddr, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
 	}
 
-	/* get settings */
-	case ETHTOOL_GSET: {
-		struct ethtool_cmd ecmd = { ETHTOOL_GSET };
-		if (!(chip_tbl[np->chip_id].flags & CanHaveMII))
-			return -EINVAL;
-		spin_lock_irq(&np->lock);
-		mii_ethtool_gset(&np->mii_if, &ecmd);
-		spin_unlock_irq(&np->lock);
-		if (copy_to_user(useraddr, &ecmd, sizeof(ecmd)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set settings */
-	case ETHTOOL_SSET: {
-		int r;
-		struct ethtool_cmd ecmd;
-		if (!(chip_tbl[np->chip_id].flags & CanHaveMII))
-			return -EINVAL;
-		if (copy_from_user(&ecmd, useraddr, sizeof(ecmd)))
-			return -EFAULT;
-		spin_lock_irq(&np->lock);
-		r = mii_ethtool_sset(&np->mii_if, &ecmd);
-		spin_unlock_irq(&np->lock);
-		return r;
-	}
-	/* restart autonegotiation */
-	case ETHTOOL_NWAY_RST: {
-		if (!(chip_tbl[np->chip_id].flags & CanHaveMII))
-			return -EINVAL;
-		return mii_nway_restart(&np->mii_if);
-	}
-	/* get link status */
-	case ETHTOOL_GLINK: {
-		struct ethtool_value edata = {ETHTOOL_GLINK};
-		if (!(chip_tbl[np->chip_id].flags & CanHaveMII))
-			return -EINVAL;
-		edata.data = mii_link_ok(&np->mii_if);
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
         }
 	
 	return -EOPNOTSUPP;
@@ -1923,17 +1934,32 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 
 static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
-	struct hamachi_private *np = dev->priv;
-	struct mii_ioctl_data *data = (struct mii_ioctl_data *) & rq->ifr_data;
-	int rc;
+	long ioaddr = dev->base_addr;
+	struct mii_ioctl_data *data = (struct mii_ioctl_data *)&rq->ifr_data;
 
-	if (!netif_running(dev))
-		return -EINVAL;
+	switch(cmd) {
+	case SIOCETHTOOL:
+		return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+	case SIOCGMIIPHY:		/* Get address of MII PHY in use. */
+	case SIOCDEVPRIVATE:		/* for binary compat, remove in 2.5 */
+		data->phy_id = ((struct hamachi_private *)dev->priv)->phys[0] & 0x1f;
+		/* Fall Through */
 
-	if (cmd == SIOCETHTOOL)
-		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+	case SIOCGMIIREG:		/* Read MII PHY register. */
+	case SIOCDEVPRIVATE+1:		/* for binary compat, remove in 2.5 */
+		data->val_out = mdio_read(ioaddr, data->phy_id & 0x1f, data->reg_num & 0x1f);
+		return 0;
 
-	else if (cmd == (SIOCDEVPRIVATE+3)) { /* set rx,tx intr params */
+	case SIOCSMIIREG:		/* Write MII PHY register. */
+	case SIOCDEVPRIVATE+2:		/* for binary compat, remove in 2.5 */
+		/* TODO: Check the sequencing of this.  Might need to stop and
+		 * restart Rx and Tx engines. -KDU
+		 */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+		mdio_write(ioaddr, data->phy_id & 0x1f, data->reg_num & 0x1f, data->val_in);
+		return 0;
+	case SIOCDEVPRIVATE+3: { /* set rx,tx intr params */
 		u32 *d = (u32 *)&rq->ifr_data;
 		/* Should add this check here or an ordinary user can do nasty
 		 * things. -KDU
@@ -1947,20 +1973,15 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		printk(KERN_NOTICE "%s: tx %08x, rx %08x intr\n", dev->name,
 		  (u32) readl(dev->base_addr + TxIntrCtrl),
 		  (u32) readl(dev->base_addr + RxIntrCtrl));
-		rc = 0;
+		return 0;
+	    }
+	default:
+		return -EOPNOTSUPP;
 	}
-
-	else {
-		spin_lock_irq(&np->lock);
-		rc = generic_mii_ioctl(&np->mii_if, data, cmd, NULL);
-		spin_unlock_irq(&np->lock);
-	}
-
-	return rc;
 }
 
 
-static void __devexit hamachi_remove_one (struct pci_dev *pdev)
+static void __exit hamachi_remove_one (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 
@@ -1987,10 +2008,10 @@ static struct pci_device_id hamachi_pci_tbl[] __initdata = {
 MODULE_DEVICE_TABLE(pci, hamachi_pci_tbl);
 
 static struct pci_driver hamachi_driver = {
-	.name		= DRV_NAME,
-	.id_table	= hamachi_pci_tbl,
-	.probe		= hamachi_init_one,
-	.remove		= __devexit_p(hamachi_remove_one),
+	name:		DRV_NAME,
+	id_table:	hamachi_pci_tbl,
+	probe:		hamachi_init_one,
+	remove:		hamachi_remove_one,
 };
 
 static int __init hamachi_init (void)

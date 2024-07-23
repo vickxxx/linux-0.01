@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.58.2.2 2002/03/12 12:25:15 davem Exp $
+/* $Id: fault.c,v 1.58 2001/09/01 00:11:16 kanoj Exp $
  * arch/sparc64/mm/fault.c: Page fault handlers for the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -55,21 +55,13 @@ void syscall_trace_exit(struct pt_regs *regs)
  */
 void set_brkpt(unsigned long addr, unsigned char mask, int flags, int mode)
 {
-	unsigned long lsubits;
-
-	__asm__ __volatile__("ldxa [%%g0] %1, %0"
-			     : "=r" (lsubits)
-			     : "i" (ASI_LSU_CONTROL));
-	lsubits &= ~(LSU_CONTROL_PM | LSU_CONTROL_VM |
-		     LSU_CONTROL_PR | LSU_CONTROL_VR |
-		     LSU_CONTROL_PW | LSU_CONTROL_VW);
+	unsigned long lsubits = LSU_CONTROL_IC|LSU_CONTROL_DC|LSU_CONTROL_IM|LSU_CONTROL_DM;
 
 	__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
 			     "membar	#Sync"
 			     : /* no outputs */
 			     : "r" (addr), "r" (mode ? VIRT_WATCHPOINT : PHYS_WATCHPOINT),
 			       "i" (ASI_DMMU));
-
 	lsubits |= ((unsigned long)mask << (mode ? 25 : 33));
 	if (flags & VM_READ)
 		lsubits |= (mode ? LSU_CONTROL_VR : LSU_CONTROL_PR);
@@ -129,8 +121,8 @@ unsigned long __init prom_probe_memory (void)
 	return tally;
 }
 
-static void unhandled_fault(unsigned long address, struct task_struct *tsk,
-			    struct pt_regs *regs)
+void unhandled_fault(unsigned long address, struct task_struct *tsk,
+                     struct pt_regs *regs)
 {
 	if ((unsigned long) address < PAGE_SIZE) {
 		printk(KERN_ALERT "Unable to handle kernel NULL "
@@ -145,19 +137,6 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 	       (tsk->mm ? (unsigned long) tsk->mm->pgd :
 		          (unsigned long) tsk->active_mm->pgd));
 	die_if_kernel("Oops", regs);
-}
-
-extern void show_trace_raw(struct task_struct *, unsigned long);
-
-static void bad_kernel_pc(struct pt_regs *regs)
-{
-	unsigned long ksp;
-
-	printk(KERN_CRIT "OOPS: Bogus kernel PC [%016lx] in fault handler\n",
-	       regs->tpc);
-	__asm__("mov %%sp, %0" : "=r" (ksp));
-	show_trace_raw(current, ksp);
-	unhandled_fault(regs->tpc, current, regs);
 }
 
 /*
@@ -203,21 +182,14 @@ outret:
 	return insn;
 }
 
-extern unsigned long compute_effective_address(struct pt_regs *, unsigned int, unsigned int);
-
-static void do_fault_siginfo(int code, int sig, struct pt_regs *regs,
-			     unsigned int insn, int fault_code)
+static void do_fault_siginfo(int code, int sig, unsigned long address)
 {
 	siginfo_t info;
 
 	info.si_code = code;
 	info.si_signo = sig;
 	info.si_errno = 0;
-	if (fault_code & FAULT_CODE_ITLB)
-		info.si_addr = (void *) regs->tpc;
-	else
-		info.si_addr = (void *)
-			compute_effective_address(regs, insn, 0);
+	info.si_addr = (void *) address;
 	info.si_trapno = 0;
 	force_sig_info(sig, &info, current);
 }
@@ -231,7 +203,7 @@ static inline unsigned int get_fault_insn(struct pt_regs *regs, unsigned int ins
 		if (!regs->tpc || (regs->tpc & 0x3))
 			return 0;
 		if (regs->tstate & TSTATE_PRIV) {
-			insn = *(unsigned int *) regs->tpc;
+			insn = *(unsigned int *)regs->tpc;
 		} else {
 			insn = get_user_insn(regs->tpc);
 		}
@@ -253,7 +225,7 @@ static void do_kernel_fault(struct pt_regs *regs, int si_code, int fault_code,
 	 * in that case.
 	 */
 
-	if (!(fault_code & (FAULT_CODE_WRITE|FAULT_CODE_ITLB)) &&
+	if (!(fault_code & FAULT_CODE_WRITE) &&
 	    (insn & 0xc0800000) == 0xc0800000) {
 		if (insn & 0x2000)
 			asi = (regs->tstate >> 24);
@@ -298,7 +270,7 @@ static void do_kernel_fault(struct pt_regs *regs, int si_code, int fault_code,
 		/* The si_code was set to make clear whether
 		 * this was a SEGV_MAPERR or SEGV_ACCERR fault.
 		 */
-		do_fault_siginfo(si_code, SIGSEGV, regs, insn, fault_code);
+		do_fault_siginfo(si_code, SIGSEGV, address);
 		return;
 	}
 
@@ -321,20 +293,6 @@ asmlinkage void do_sparc64_fault(struct pt_regs *regs)
 	if ((fault_code & FAULT_CODE_ITLB) &&
 	    (fault_code & FAULT_CODE_DTLB))
 		BUG();
-
-	if (regs->tstate & TSTATE_PRIV) {
-		unsigned long tpc = regs->tpc;
-		extern unsigned int _etext;
-
-		/* Sanity check the PC. */
-		if ((tpc >= KERNBASE && tpc < (unsigned long) &_etext) ||
-		    (tpc >= MODULES_VADDR && tpc < MODULES_END)) {
-			/* Valid, no problems... */
-		} else {
-			bad_kernel_pc(regs);
-			return;
-		}
-	}
 
 	/*
 	 * If we're in an interrupt or have no user
@@ -382,20 +340,6 @@ continue_fault:
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
-	if (!(fault_code & FAULT_CODE_WRITE)) {
-		/* Non-faulting loads shouldn't expand stack. */
-		insn = get_fault_insn(regs, insn);
-		if ((insn & 0xc0800000) == 0xc0800000) {
-			unsigned char asi;
-
-			if (insn & 0x2000)
-				asi = (regs->tstate >> 24);
-			else
-				asi = (insn >> 5);
-			if ((asi & 0xf2) == 0x82)
-				goto bad_area;
-		}
-	}
 	if (expand_stack(vma, address))
 		goto bad_area;
 	/*
@@ -404,16 +348,6 @@ continue_fault:
 	 */
 good_area:
 	si_code = SEGV_ACCERR;
-
-	/* If we took a ITLB miss on a non-executable page, catch
-	 * that here.
-	 */
-	if ((fault_code & FAULT_CODE_ITLB) && !(vma->vm_flags & VM_EXEC)) {
-		BUG_ON(address != regs->tpc);
-		BUG_ON(regs->tstate & TSTATE_PRIV);
-		goto bad_area;
-	}
-
 	if (fault_code & FAULT_CODE_WRITE) {
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
@@ -484,7 +418,7 @@ do_sigbus:
 	 * Send a sigbus, regardless of whether we were in kernel
 	 * or user mode.
 	 */
-	do_fault_siginfo(BUS_ADRERR, SIGBUS, regs, insn, fault_code);
+	do_fault_siginfo(BUS_ADRERR, SIGBUS, address);
 
 	/* Kernel mode? Handle exceptions or die */
 	if (regs->tstate & TSTATE_PRIV)

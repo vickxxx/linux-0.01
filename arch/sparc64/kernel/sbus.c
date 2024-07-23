@@ -1,4 +1,4 @@
-/* $Id: sbus.c,v 1.17.2.1 2002/03/03 10:31:56 davem Exp $
+/* $Id: sbus.c,v 1.17 2001/10/09 02:24:33 davem Exp $
  * sbus.c: UltraSparc SBUS controller support.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -27,10 +27,10 @@
  *
  * On SYSIO, using an 8K page size we have 1GB of SBUS
  * DMA space mapped.  We divide this space into equally
- * sized clusters. We allocate a DMA mapping from the
- * cluster that matches the order of the allocation, or
- * if the order is greater than the number of clusters,
- * we try to allocate from the last cluster.
+ * sized clusters.  Currently we allow clusters up to a
+ * size of 1MB.  If anything begins to generate DMA
+ * mapping requests larger than this we will need to
+ * increase things a bit.
  */
 
 #define NCLUSTERS	8UL
@@ -128,22 +128,17 @@ static void strbuf_flush(struct sbus_iommu *iommu, u32 base, unsigned long npage
 		   iommu->strbuf_regs + STRBUF_FSYNC);
 	upa_readq(iommu->sbus_control_reg);
 	while (iommu->strbuf_flushflag == 0UL)
-		rmb();
+		membar("#LoadLoad");
 }
 
 static iopte_t *alloc_streaming_cluster(struct sbus_iommu *iommu, unsigned long npages)
 {
-	iopte_t *iopte, *limit, *first, *cluster;
-	unsigned long cnum, ent, nent, flush_point, found;
+	iopte_t *iopte, *limit, *first;
+	unsigned long cnum, ent, flush_point;
 
 	cnum = 0;
-	nent = 1;
 	while ((1UL << cnum) < npages)
 		cnum++;
-	if(cnum >= NCLUSTERS) {
-		nent = 1UL << (cnum - NCLUSTERS);
-		cnum = NCLUSTERS - 1;
-	}
 	iopte  = iommu->page_table + (cnum * CLUSTER_NPAGES);
 
 	if (cnum == 0)
@@ -156,31 +151,22 @@ static iopte_t *alloc_streaming_cluster(struct sbus_iommu *iommu, unsigned long 
 	flush_point = iommu->alloc_info[cnum].flush;
 
 	first = iopte;
-	cluster = NULL;
-	found = 0;
 	for (;;) {
 		if (iopte_val(*iopte) == 0UL) {
-			found++;
-			if (!cluster)
-				cluster = iopte;
-		} else {
-			/* Used cluster in the way */
-			cluster = NULL;
-			found = 0;
-		}
-
-		if (found == nent)
+			if ((iopte + (1 << cnum)) >= limit)
+				ent = 0;
+			else
+				ent = ent + 1;
+			iommu->alloc_info[cnum].next = ent;
+			if (ent == flush_point)
+				__iommu_flushall(iommu);
 			break;
-
+		}
 		iopte += (1 << cnum);
 		ent++;
 		if (iopte >= limit) {
 			iopte = (iommu->page_table + (cnum * CLUSTER_NPAGES));
 			ent = 0;
-
-			/* Multiple cluster allocations must not wrap */
-			cluster = NULL;
-			found = 0;
 		}
 		if (ent == flush_point)
 			__iommu_flushall(iommu);
@@ -188,19 +174,8 @@ static iopte_t *alloc_streaming_cluster(struct sbus_iommu *iommu, unsigned long 
 			goto bad;
 	}
 
-	/* ent/iopte points to the last cluster entry we're going to use,
-	 * so save our place for the next allocation.
-	 */
-	if ((iopte + (1 << cnum)) >= limit)
-		ent = 0;
-	else
-		ent = ent + 1;
-	iommu->alloc_info[cnum].next = ent;
-	if (ent == flush_point)
-		__iommu_flushall(iommu);
-
 	/* I've got your streaming cluster right here buddy boy... */
-	return cluster;
+	return iopte;
 
 bad:
 	printk(KERN_EMERG "sbus: alloc_streaming_cluster of npages(%ld) failed!\n",
@@ -210,23 +185,15 @@ bad:
 
 static void free_streaming_cluster(struct sbus_iommu *iommu, u32 base, unsigned long npages)
 {
-	unsigned long cnum, ent, nent;
+	unsigned long cnum, ent;
 	iopte_t *iopte;
 
 	cnum = 0;
-	nent = 1;
 	while ((1UL << cnum) < npages)
 		cnum++;
-	if(cnum >= NCLUSTERS) {
-		nent = 1UL << (cnum - NCLUSTERS);
-		cnum = NCLUSTERS - 1;
-	}
 	ent = (base & CLUSTER_MASK) >> (IO_PAGE_SHIFT + cnum);
 	iopte = iommu->page_table + ((base - MAP_BASE) >> IO_PAGE_SHIFT);
-	do {
-		iopte_val(*iopte) = 0UL;
-		iopte += 1 << cnum;
-	} while(--nent);
+	iopte_val(*iopte) = 0UL;
 
 	/* If the global flush might not have caught this entry,
 	 * adjust the flush point such that we will flush before
@@ -665,11 +632,11 @@ void sbus_set_sbus64(struct sbus_dev *sdev, int bursts)
 
 /* SBUS SYSIO INO number to Sparc PIL level. */
 static unsigned char sysio_ino_to_pil[] = {
-	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 0 */
-	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 1 */
-	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 2 */
-	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 3 */
-	4, /* Onboard SCSI */
+	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 0 */
+	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 1 */
+	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 2 */
+	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 3 */
+	3, /* Onboard SCSI */
 	5, /* Onboard Ethernet */
 /*XXX*/	8, /* Onboard BPP */
 	0, /* Bogon */
@@ -791,10 +758,6 @@ unsigned int sbus_build_irq(void *buscookie, unsigned int ino)
 		printk("sbus_irq_build: Bad SYSIO INO[%x]\n", ino);
 		panic("Bad SYSIO IRQ translations...");
 	}
-
-	if (PIL_RESERVED(pil))
-		BUG();
-
 	imap = sysio_irq_offsets[ino];
 	if (imap == ((unsigned long)-1)) {
 		prom_printf("get_irq_translations: Bad SYSIO INO[%x] cpu[%d]\n",

@@ -29,13 +29,7 @@
 
 #ifdef CONFIG_BLK_DEV_IDE
 #include <linux/ide.h>	/* IDE xlate */
-#elif defined(CONFIG_BLK_DEV_IDE_MODULE)
-#include <linux/module.h>
-
-int (*ide_xlate_1024_hook)(kdev_t, int, int, const char *);
-EXPORT_SYMBOL(ide_xlate_1024_hook);
-#define ide_xlate_1024 ide_xlate_1024_hook
-#endif
+#endif /* CONFIG_BLK_DEV_IDE */
 
 #include <asm/system.h>
 
@@ -72,13 +66,13 @@ static inline int is_extended_partition(struct partition *p)
 }
 
 /*
- * msdos_partition_name() formats the short partition name into the supplied
+ * partition_name() formats the short partition name into the supplied
  * buffer, and returns a pointer to that buffer.
  * Used by several partition types which makes conditional inclusion messy,
  * use __attribute__ ((unused)) instead.
  */
 static char __attribute__ ((unused))
-	*msdos_partition_name (struct gendisk *hd, int minor, char *buf)
+	*partition_name (struct gendisk *hd, int minor, char *buf)
 {
 #ifdef CONFIG_DEVFS_FS
 	sprintf(buf, "p%d", (minor & ((1 << hd->minor_shift) - 1)));
@@ -231,7 +225,7 @@ solaris_x86_partition(struct gendisk *hd, struct block_device *bdev,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s: <solaris:", msdos_partition_name(hd, minor, buf));
+	printk(" %s: <solaris:", partition_name(hd, minor, buf));
 	if (le32_to_cpu(v->v_version) != 1) {
 		printk("  cannot handle version %d vtoc>\n",
 			le32_to_cpu(v->v_version));
@@ -263,43 +257,45 @@ solaris_x86_partition(struct gendisk *hd, struct block_device *bdev,
 #ifdef CONFIG_BSD_DISKLABEL
 static void
 check_and_add_bsd_partition(struct gendisk *hd, struct bsd_partition *bsd_p,
-	int baseminor, int *current_minor)
+	int minor, int *current_minor)
 {
-	int i, bsd_start, bsd_size;
-
-	bsd_start = le32_to_cpu(bsd_p->p_offset);
-	bsd_size = le32_to_cpu(bsd_p->p_size);
-
-	/* check relative position of already allocated partitions */
-	for (i = baseminor+1; i < *current_minor; i++) {
-		int start = hd->part[i].start_sect;
-		int size = hd->part[i].nr_sects;
-
-		if (start+size <= bsd_start || start >= bsd_start+bsd_size)
-			continue;	/* no overlap */
-
-		if (start == bsd_start && size == bsd_size)
-			return;		/* equal -> no need to add */
-
-		if (start <= bsd_start && start+size >= bsd_start+bsd_size) {
+	struct hd_struct *lin_p;
+		/* check relative position of partitions.  */
+	for (lin_p = hd->part + 1 + minor;
+	     lin_p - hd->part - minor < *current_minor; lin_p++) {
+			/* no relationship -> try again */
+		if (lin_p->start_sect + lin_p->nr_sects <= le32_to_cpu(bsd_p->p_offset) ||
+		    lin_p->start_sect >= le32_to_cpu(bsd_p->p_offset) + le32_to_cpu(bsd_p->p_size))
+			continue;	
+			/* equal -> no need to add */
+		if (lin_p->start_sect == le32_to_cpu(bsd_p->p_offset) && 
+			lin_p->nr_sects == le32_to_cpu(bsd_p->p_size)) 
+			return;
 			/* bsd living within dos partition */
+		if (lin_p->start_sect <= le32_to_cpu(bsd_p->p_offset) && lin_p->start_sect 
+			+ lin_p->nr_sects >= le32_to_cpu(bsd_p->p_offset) + le32_to_cpu(bsd_p->p_size)) {
 #ifdef DEBUG_BSD_DISKLABEL
 			printk("w: %d %ld+%ld,%d+%d", 
-			       i, start, size, bsd_start, bsd_size);
+				lin_p - hd->part, 
+				lin_p->start_sect, lin_p->nr_sects, 
+				le32_to_cpu(bsd_p->p_offset),
+				le32_to_cpu(bsd_p->p_size));
 #endif
-			break;		/* ok */
+			break;
 		}
-
-		/* ouch: bsd and linux overlap */
+	 /* ouch: bsd and linux overlap. Don't even try for that partition */
 #ifdef DEBUG_BSD_DISKLABEL
 		printk("???: %d %ld+%ld,%d+%d",
-		       i, start, size, bsd_start, bsd_size);
+			lin_p - hd->part, lin_p->start_sect, lin_p->nr_sects,
+			le32_to_cpu(bsd_p->p_offset), le32_to_cpu(bsd_p->p_size));
 #endif
 		printk("???");
 		return;
-	}
-
-	add_gd_partition(hd, *current_minor, bsd_start, bsd_size);
+	} /* if the bsd partition is not currently known to linux, we end
+	   * up here 
+	   */
+	add_gd_partition(hd, *current_minor, le32_to_cpu(bsd_p->p_offset),
+			 le32_to_cpu(bsd_p->p_size));
 	(*current_minor)++;
 }
 
@@ -315,7 +311,6 @@ static void do_bsd_partition(struct gendisk *hd, struct block_device *bdev,
 	struct bsd_disklabel *l;
 	struct bsd_partition *p;
 	int mask = (1 << hd->minor_shift) - 1;
-	int baseminor = (minor & ~mask);
 	char buf[40];
 
 	l = (struct bsd_disklabel *)read_dev_sector(bdev, offset+1, &sect);
@@ -325,7 +320,7 @@ static void do_bsd_partition(struct gendisk *hd, struct block_device *bdev,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s: <%s:", msdos_partition_name(hd, minor, buf), name);
+	printk(" %s: <%s", partition_name(hd, minor, buf), name);
 
 	if (le16_to_cpu(l->d_npartitions) < max_partitions)
 		max_partitions = le16_to_cpu(l->d_npartitions);
@@ -334,7 +329,7 @@ static void do_bsd_partition(struct gendisk *hd, struct block_device *bdev,
 			break;
 		if (p->p_fstype == BSD_FS_UNUSED) 
 			continue;
-		check_and_add_bsd_partition(hd, p, baseminor, current_minor);
+		check_and_add_bsd_partition(hd, p, minor, current_minor);
 	}
 	put_dev_sector(sect);
 	printk(" >\n");
@@ -391,7 +386,7 @@ static void unixware_partition(struct gendisk *hd, struct block_device *bdev,
 		put_dev_sector(sect);
 		return;
 	}
-	printk(" %s: <unixware:", msdos_partition_name(hd, minor, buf));
+	printk(" %s: <unixware:", partition_name(hd, minor, buf));
 	p = &l->vtoc.v_slice[1];
 	/* I omit the 0th slice as it is the same as whole disk. */
 	while (p - &l->vtoc.v_slice[0] < UNIXWARE_NUMSLICE) {
@@ -439,7 +434,7 @@ static void minix_partition(struct gendisk *hd, struct block_device *bdev,
 	if (msdos_magic_present (data + 510) &&
 	    SYS_IND(p) == MINIX_PARTITION) { /* subpartition table present */
 
-		printk(" %s: <minix:", msdos_partition_name(hd, minor, buf));
+		printk(" %s: <minix:", partition_name(hd, minor, buf));
 		for (i = 0; i < MINIX_NR_SUBPARTITIONS; i++, p++) {
 			if ((*current_minor & mask) == 0)
 				break;
@@ -473,7 +468,7 @@ static struct {
  */
 static int handle_ide_mess(struct block_device *bdev)
 {
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
+#ifdef CONFIG_BLK_DEV_IDE
 	Sector sect;
 	unsigned char *data;
 	kdev_t dev = to_kdev_t(bdev->bd_dev);
@@ -481,15 +476,11 @@ static int handle_ide_mess(struct block_device *bdev)
 	int heads = 0;
 	struct partition *p;
 	int i;
-#ifdef CONFIG_BLK_DEV_IDE_MODULE
-	if (!ide_xlate_1024)
-		return 1;
-#endif
 	/*
 	 * The i386 partition handling programs very often
 	 * make partitions end on cylinder boundaries.
-	 * There is no need to do so, and Linux fdisk doesn't always
-	 * do this, and Windows NT on Alpha doesn't do this either,
+	 * There is no need to do so, and Linux fdisk doesnt always
+	 * do this, and Windows NT on Alpha doesnt do this either,
 	 * but still, this helps to guess #heads.
 	 */
 	data = read_dev_sector(bdev, 0, &sect);
@@ -546,7 +537,7 @@ reread:
 	/* Flush the cache */
 	invalidate_bdev(bdev, 1);
 	truncate_inode_pages(bdev->bd_inode->i_mapping, 0);
-#endif /* defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE) */
+#endif /* CONFIG_BLK_DEV_IDE */
 	return 1;
 }
  
@@ -571,19 +562,6 @@ int msdos_partition(struct gendisk *hd, struct block_device *bdev,
 	if (!msdos_magic_present(data + 510)) {
 		put_dev_sector(sect);
 		return 0;
-	}
-	/*
-	 * Now that the 55aa signature is present, this is probably
-	 * either the boot sector of a FAT filesystem or a DOS-type
-	 * partition table. Reject this in case the boot indicator
-	 * is not 0 or 0x80.
-	 */
-	p = (struct partition *) (data + 0x1be);
-	for (i = 1; i <= 4; i++, p++) {
-		if (p->boot_ind != 0 && p->boot_ind != 0x80) {
-			put_dev_sector(sect);
-			return 0;
-		}
 	}
 	p = (struct partition *) (data + 0x1be);
 

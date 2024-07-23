@@ -1,36 +1,12 @@
-/* $Id: entry.S,v 1.42 2003/07/07 09:00:50 johana Exp $
+/* $Id: entry.S,v 1.35 2001/10/30 17:10:15 bjornw Exp $
  *
  *  linux/arch/cris/entry.S
  *
- *  Copyright (C) 2000, 2001, 2002 Axis Communications AB
+ *  Copyright (C) 2000, 2001 Axis Communications AB
  *
  *  Authors:	Bjorn Wesen (bjornw@axis.com)
  *
  *  $Log: entry.S,v $
- *  Revision 1.42  2003/07/07 09:00:50  johana
- *  Added CONFIG_ETRAX_DEBUG_INTERRUPT support.
- *
- *  Revision 1.41  2003/06/17 13:57:50  starvik
- *  Merge of Linux 2.4.21
- *
- *  Revision 1.40  2002/12/02 08:11:41  starvik
- *  Merge of Linux 2.4.20
- *
- *  Revision 1.39  2002/04/24 00:46:45  bjornw
- *  Added sys_tkill
- *
- *  Revision 1.38  2002/01/16 15:15:30  bjornw
- *  Use a C-code compatible watchdog reset when NICE_DOGGY is enabled
- *
- *  Revision 1.37  2001/12/07 17:03:55  bjornw
- *  Call a c-hook called watchdog_bite_hook instead of show_registers directly
- *
- *  Revision 1.36  2001/11/22 13:36:36  bjornw
- *  * In ret_from_intr, check regs->dccr for usermode reentrance instead of
- *    DCCR explicitely (because the latter might not reflect current reality)
- *  * In mmu_bus_fault, set $r9 _after_ calling the C-code instead of before
- *    since $r9 is call-clobbered and is potentially needed afterwards
- *
  *  Revision 1.35  2001/10/30 17:10:15  bjornw
  *  Add some syscalls
  *
@@ -241,11 +217,8 @@ _handle_softirq:
 	
 ret_from_intr:
 	;; check for resched only if we're going back to user-mode
-	;; this test matches the user_regs(regs) macro
-	;; we cannot simply test $dccr, because that does not necessarily
-	;; reflect what mode we'll return into.
-	
-	move.d	[$sp + LDCCR], $r0; regs->dccr
+
+	move	$ccr, $r0
 	btstq	8, $r0		; U-flag
 	bpl	_Rexit		; go back directly
 	nop
@@ -364,12 +337,6 @@ _ret_with_reschedule:
 	
 _Rexit:
 	;; this epilogue MUST match the prologues in multiple_interrupt, irq.h and ptregs.h
-#ifdef CONFIG_ETRAX_DEBUG_INTERRUPT
-	move.d $pc,$r10
-	move $ccr,$r11
-	move.d	[$sp + LDCCR], $r12; regs->dccr	
-	jsr log_int
-#endif
 	pop	$r10		; frametype
 	bne	_RBFexit	; was not CRIS_FRAME_NORMAL, handle otherwise
 	addq	4, $sp		; skip orig_r10, in delayslot
@@ -461,22 +428,6 @@ resume:
 	push	$srp		         ; we keep the old/new PC on the stack 
 	add.d	$r12, $r10		 ; r10 = current tasks tss
 	move	$dccr, [$r10+LTHREAD_DCCR] ; save irq enable state
-#ifdef CONFIG_ETRAX_DEBUG_INTERRUPT
-	push $r9
-	push $r10
-	push $r11
-	push $r12
-	push $r13
-	move.d $pc,$r10
-	move $ccr,$r11
-	clear.d $r12
-	jsr log_int
-	pop $r13
-	pop $r12
-	pop $r11
-	pop $r10
-	pop $r9
-#endif
 	di
 
 	move	$usp, [$r10+LTHREAD_USP] ; save user-mode stackpointer
@@ -517,6 +468,8 @@ mmu_bus_fault:
 	moveq	1, $r10
 	push	$r10		; frametype == 1, BUSFAULT frame type
 
+	moveq	0, $r9		; busfault is equivalent to an irq
+		
 	move.d	$sp, $r10	; pt_regs argument to handle_mmu_bus_fault
 		
 	jsr	handle_mmu_bus_fault  ; in arch/cris/mm/fault.c
@@ -526,8 +479,6 @@ mmu_bus_fault:
 	;; process due to a SEGV, scheduled due to a page blocking or
 	;; whatever.
 
-	moveq	0, $r9		; busfault is equivalent to an irq
-		
 	ba	ret_from_intr
 	nop
 		
@@ -608,16 +559,6 @@ _killed_by_death:
 ;; We'll see this in ksymoops dumps.
 Watchdog_bite:
 
-#ifdef CONFIG_ETRAX_WATCHDOG_NICE_DOGGY
-	;; We just restart the watchdog here to be sure we dont get
-	;; hit while printing the watchdogmsg below
-	;; This restart is compatible with the rest of the C-code, so
-	;; the C-code can keep restarting the watchdog after this point.
-	;; The non-NICE_DOGGY code below though, disables the possibility
-	;; to restart since it changes the watchdog key, to avoid any
-	;; buggy loops etc. keeping the watchdog alive after this.
-	jsr	reset_watchdog
-#else
 ;; We need to extend the 3.3ms after the NMI at watchdog bite, so we have
 ;; time for an oops-dump over a 115k2 serial wire.  Another 100ms should do.
 
@@ -634,8 +575,7 @@ Watchdog_bite:
 			    ^ WD_INIT)					\
 		| IO_STATE (R_WATCHDOG, enable, start), $r10
 	move.d	$r10, [$r11]
-#endif
-	
+
 ;; Note that we don't do "setf m" here (or after two necessary NOPs),
 ;; since *not* doing that saves us from re-entrancy checks.  We don't want
 ;; to get here again due to possible subsequent NMIs; we want the watchdog
@@ -645,7 +585,7 @@ Watchdog_bite:
 	jsr	printk
 
 	move.d	$sp, $r10
-	jsr	watchdog_bite_hook
+	jsr	show_registers
 
 ;; This nop is here so we see the "Watchdog_bite" label in ksymoops dumps
 ;; rather than "spurious_interrupt".
@@ -767,12 +707,12 @@ hw_bp_trig_ptr:
  * the grosser the code, at least with the gcc version in cris-dist-1.13.
  */
 
-/* int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags) */
+/* int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags) */
 /*                   r10                r11         r12  */
 
 	.text
-	.global arch_kernel_thread
-arch_kernel_thread:
+	.global kernel_thread
+kernel_thread:
 
 	/* Save ARG for later.  */
 	move.d $r11, $r13
@@ -1047,34 +987,7 @@ sys_call_table:
         .long SYMBOL_NAME(sys_ni_syscall)       /* Reserved for Security */
         .long SYMBOL_NAME(sys_gettid)
         .long SYMBOL_NAME(sys_readahead)        /* 225 */
-	.long SYMBOL_NAME(sys_setxattr)
-	.long SYMBOL_NAME(sys_lsetxattr)
-	.long SYMBOL_NAME(sys_fsetxattr)
-	.long SYMBOL_NAME(sys_getxattr)
-	.long SYMBOL_NAME(sys_lgetxattr)	/* 230 */
-	.long SYMBOL_NAME(sys_fgetxattr)
-	.long SYMBOL_NAME(sys_listxattr)
-	.long SYMBOL_NAME(sys_llistxattr)
-	.long SYMBOL_NAME(sys_flistxattr)
-	.long SYMBOL_NAME(sys_removexattr)	/* 235 */
-	.long SYMBOL_NAME(sys_lremovexattr)
-	.long SYMBOL_NAME(sys_fremovexattr)
- 	.long SYMBOL_NAME(sys_tkill)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sendfile64 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 240 reserved for futex */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_setaffinity */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_getaffinity */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_set_thread_area */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_get_thread_area */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 245 sys_io_setup */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_destroy */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_getevents */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_submit */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_cancel */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 250 sys_alloc_hugepages */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_free_hugepages */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_exit_group */
-	
+
         /*
          * NOTE!! This doesn't have to be exact - we just have
          * to make sure we have _enough_ of the "sys_ni_syscall"

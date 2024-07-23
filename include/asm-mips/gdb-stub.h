@@ -1,4 +1,5 @@
-/*
+/* $Id: gdb-stub.h,v 1.3 1998/07/20 17:52:19 ralf Exp $
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -21,11 +22,11 @@
  * Stack layout for the GDB exception handler
  * Derived from the stack layout described in asm-mips/stackframe.h
  *
- * The first PTRSIZE*6 bytes are argument save space for C subroutines.
+ * The first PTRSIZE*5 bytes are argument save space for C subroutines.
  */
 #define NUMREGS			90
 
-#define GDB_FR_REG0		(PTRSIZE*6)			/* 0 */
+#define GDB_FR_REG0		(PTRSIZE*5)			/* 0 */
 #define GDB_FR_REG1		((GDB_FR_REG0) + 4)		/* 1 */
 #define GDB_FR_REG2		((GDB_FR_REG1) + 4)		/* 2 */
 #define GDB_FR_REG3		((GDB_FR_REG2) + 4)		/* 3 */
@@ -57,7 +58,7 @@
 #define GDB_FR_REG29		((GDB_FR_REG28) + 4)		/* 29 */
 #define GDB_FR_REG30		((GDB_FR_REG29) + 4)		/* 30 */
 #define GDB_FR_REG31		((GDB_FR_REG30) + 4)		/* 31 */
-
+	
 /*
  * Saved special registers
  */
@@ -132,7 +133,7 @@
 
 #define GDB_FR_SIZE		((((GDB_FR_CP0_PRID) + 4) + (PTRSIZE-1)) & ~(PTRSIZE-1))
 
-#ifndef __ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
 /*
  * This is the same as above, but for the high-level
@@ -142,9 +143,9 @@
 struct gdb_regs {
 	/*
 	 * Pad bytes for argument save space on the stack
-	 * 24/48 Bytes for 32/64 bit code
+	 * 20/40 Bytes for 32/64 bit code
 	 */
-	unsigned long pad0[6];
+	unsigned long pad0[5];
 
 	/*
 	 * saved main processor registers
@@ -180,7 +181,7 @@ struct gdb_regs {
 	 */
 	long	frame_ptr;
 	long    dummy;		/* unused */
-
+	
 	/*
 	 * saved cp0 registers
 	 */
@@ -207,7 +208,6 @@ struct gdb_regs {
  */
 
 void set_debug_traps(void);
-void set_async_breakpoint(unsigned long *epc);
 
-#endif /* !__ASSEMBLY__ */
+#endif /* _LANGUAGE_ASSEMBLY */
 #endif /* __ASM_MIPS_GDB_STUB_H */

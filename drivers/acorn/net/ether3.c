@@ -417,9 +417,6 @@ ether3_probe_bus_16(struct net_device *dev, int val)
 static int
 ether3_open(struct net_device *dev)
 {
-	if (!is_valid_ether_addr(dev->dev_addr))
-		return -EINVAL;
-
 	if (request_irq(dev->irq, ether3_interrupt, 0, "ether3", dev))
 		return -EAGAIN;
 
@@ -461,23 +458,6 @@ static struct net_device_stats *ether3_getstats(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	return &priv->stats;
-}
-
-static int
-ether3_set_mac_address(struct net_device *dev, void *p)
-{
-	struct sockaddr *addr = p;
-
-	if (netif_running(dev))
-		return -EBUSY;
-
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
-
-	/*
-	 * We'll set the MAC address on the chip when we open it.
-	 */
-
-	return 0;
 }
 
 /*
@@ -551,12 +531,6 @@ ether3_sendpacket(struct sk_buff *skb, struct net_device *dev)
 		return 0;
 	}
 
-	if (skb->len != length) {
-		skb = skb_padto(skb, length);
-		if (!skb)
-			goto out;
-	}
-
 	next_ptr = (priv->tx_head + 1) & 15;
 
 	save_flags_cli(flags);
@@ -598,7 +572,6 @@ ether3_sendpacket(struct sk_buff *skb, struct net_device *dev)
 	if (priv->tx_tail == next_ptr)
 		netif_stop_queue(dev);
 
- out:
 	return 0;
 }
 
@@ -745,7 +718,7 @@ dropping:{
 	/*
 	 * Don't print this message too many times...
 	 */
-	if (time_after(jiffies, last_warned + 10 * HZ)) {
+	if (jiffies - last_warned > 30 * HZ) {
 		last_warned = jiffies;
 		printk("%s: memory squeeze, dropping packet.\n", dev->name);
 	}
@@ -902,7 +875,6 @@ static struct net_device * __init ether3_init_one(struct expansion_card *ec)
 	dev->hard_start_xmit	= ether3_sendpacket;
 	dev->get_stats		= ether3_getstats;
 	dev->set_multicast_list	= ether3_setmulticastlist;
-	dev->set_mac_address	= ether3_set_mac_address;
 	dev->tx_timeout		= ether3_timeout;
 	dev->watchdog_timeo	= 5 * HZ / 100;
 	return 0;

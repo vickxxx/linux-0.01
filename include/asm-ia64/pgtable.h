@@ -8,7 +8,7 @@
  * This hopefully works with any (fixed) IA-64 page-size, as defined
  * in <asm/page.h> (currently 8192).
  *
- * Copyright (C) 1998-2002 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
@@ -60,8 +60,7 @@
 #define _PAGE_PROTNONE		(__IA64_UL(1) << 63)
 
 #define _PFN_MASK		_PAGE_PPN_MASK
-/* Mask of bits which may be changed by pte_modify(); the odd bits are there for _PAGE_PROTNONE */
-#define _PAGE_CHG_MASK	(_PAGE_P | _PAGE_PROTNONE | _PAGE_PL_MASK | _PAGE_AR_MASK | _PAGE_ED)
+#define _PAGE_CHG_MASK		(_PFN_MASK | _PAGE_A | _PAGE_D)
 
 #define _PAGE_SIZE_4K	12
 #define _PAGE_SIZE_8K	13
@@ -109,15 +108,19 @@
 /*
  * All the normal masks have the "page accessed" bits on, as any time
  * they are used, the page is accessed. They are cleared only by the
- * page-out routines.
+ * page-out routines.  On the other hand, we do NOT turn on the
+ * execute bit on pages that are mapped writable.  For those pages, we
+ * turn on the X bit only when the program attempts to actually
+ * execute code in such a page (it's a "lazy execute bit", if you
+ * will).  This lets reduce the amount of i-cache flushing we have to
+ * do for data pages such as stack and heap pages.
  */
 #define PAGE_NONE	__pgprot(_PAGE_PROTNONE | _PAGE_A)
 #define PAGE_SHARED	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RW)
 #define PAGE_READONLY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_R)
-#define PAGE_COPY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RX)
+#define PAGE_COPY	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_R)
 #define PAGE_GATE	__pgprot(__ACCESS_BITS | _PAGE_PL_0 | _PAGE_AR_X_RX)
 #define PAGE_KERNEL	__pgprot(__DIRTY_BITS  | _PAGE_PL_0 | _PAGE_AR_RWX)
-#define PAGE_KERNELRX	__pgprot(__ACCESS_BITS | _PAGE_PL_0 | _PAGE_AR_RX)
 
 # ifndef __ASSEMBLY__
 
@@ -149,13 +152,24 @@
 #define __S011	PAGE_SHARED
 #define __S100	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_X_RX)
 #define __S101	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RX)
-#define __S110	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RWX)
-#define __S111	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RWX)
+#define __S110	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RW)
+#define __S111	__pgprot(__ACCESS_BITS | _PAGE_PL_3 | _PAGE_AR_RW)
 
 #define pgd_ERROR(e)	printk("%s:%d: bad pgd %016lx.\n", __FILE__, __LINE__, pgd_val(e))
 #define pmd_ERROR(e)	printk("%s:%d: bad pmd %016lx.\n", __FILE__, __LINE__, pmd_val(e))
 #define pte_ERROR(e)	printk("%s:%d: bad pte %016lx.\n", __FILE__, __LINE__, pte_val(e))
 
+
+/*
+ * Some definitions to translate between mem_map, PTEs, and page
+ * addresses:
+ */
+
+/*
+ * Given a pointer to an mem_map[] entry, return the kernel virtual
+ * address corresponding to that page.
+ */
+#define page_address(page)	((page)->virtual)
 
 /* Quick test to see if ADDR is a (potentially) valid physical address. */
 static inline long
@@ -179,7 +193,6 @@ ia64_phys_addr_valid (unsigned long addr)
  */
 #define kern_addr_valid(addr)	(1)
 
-
 /*
  * Now come the defines and routines to manage and access the three-level
  * page table.
@@ -192,13 +205,12 @@ ia64_phys_addr_valid (unsigned long addr)
 #define set_pte(ptep, pteval)	(*(ptep) = (pteval))
 
 #define RGN_SIZE	(1UL << 61)
+#define RGN_MAP_LIMIT	((1UL << (4*PAGE_SHIFT - 12)) - PAGE_SIZE)	/* per region addr limit */
 #define RGN_KERNEL	7
 
 #define VMALLOC_START		(0xa000000000000000 + 3*PAGE_SIZE)
 #define VMALLOC_VMADDR(x)	((unsigned long)(x))
-#define VMALLOC_END_INIT        (0xa000000000000000 + (1UL << (4*PAGE_SHIFT - 9))) 
-#define VMALLOC_END             vmalloc_end
-extern unsigned long vmalloc_end;
+#define VMALLOC_END		(0xa000000000000000 + (1UL << (4*PAGE_SHIFT - 9)))
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
@@ -217,7 +229,7 @@ extern unsigned long vmalloc_end;
 ({ pte_t __pte; pte_val(__pte) = physpage + pgprot_val(pgprot); __pte; })
 
 #define pte_modify(_pte, newprot) \
-	(__pte((pte_val(_pte) & ~_PAGE_CHG_MASK) | (pgprot_val(newprot) & _PAGE_CHG_MASK)))
+	(__pte((pte_val(_pte) & _PAGE_CHG_MASK) | pgprot_val(newprot)))
 
 #define page_pte_prot(page,prot)	mk_pte(page, prot)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
@@ -276,7 +288,11 @@ extern unsigned long vmalloc_end;
  * works bypasses the caches, but does allow for consecutive writes to
  * be combined into single (but larger) write transactions.
  */
-#define pgprot_writecombine(prot)	__pgprot((pgprot_val(prot) & ~_PAGE_MA_MASK) | _PAGE_MA_WC)
+#ifdef CONFIG_MCKINLEY_A0_SPECIFIC
+# define pgprot_writecombine(prot)	prot
+#else
+# define pgprot_writecombine(prot)	__pgprot((pgprot_val(prot) & ~_PAGE_MA_MASK) | _PAGE_MA_WC)
+#endif
 
 /*
  * Return the region index for virtual address ADDRESS.
@@ -407,6 +423,22 @@ pte_same (pte_t a, pte_t b)
 	return pte_val(a) == pte_val(b);
 }
 
+/*
+ * Macros to check the type of access that triggered a page fault.
+ */
+
+static inline int
+is_write_access (int access_type)
+{
+	return (access_type & 0x2);
+}
+
+static inline int
+is_exec_access (int access_type)
+{
+	return (access_type & 0x4);
+}
+
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern void paging_init (void);
 
@@ -426,32 +458,10 @@ extern void paging_init (void);
  * for zero-mapped memory areas etc..
  */
 extern unsigned long empty_zero_page[PAGE_SIZE/sizeof(unsigned long)];
-extern struct page *zero_page_memmap_ptr;
-#define ZERO_PAGE(vaddr) (zero_page_memmap_ptr)
+#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
 
 /* We provide our own get_unmapped_area to cope with VA holes for userland */
 #define HAVE_ARCH_UNMAPPED_AREA
-
-#ifdef CONFIG_HUGETLB_PAGE
-#define HUGETLB_PGDIR_SHIFT	(HPAGE_SHIFT + 2*(PAGE_SHIFT-3))
-#define HUGETLB_PGDIR_SIZE	(__IA64_UL(1) << HUGETLB_PGDIR_SHIFT)
-#define HUGETLB_PGDIR_MASK	(~(HUGETLB_PGDIR_SIZE-1))
-#endif
-
-/*
- * No page table caches to initialise
- */
-#define pgtable_cache_init()	do { } while (0)
-
-/* arch mem_map init routines are needed due to holes in a virtual mem_map */
-#define HAVE_ARCH_MEMMAP_INIT
-
-typedef unsigned long memmap_init_callback_t(struct page *start,
-	struct page *end, int zone, unsigned long start_paddr, int highmem);
-
-extern unsigned long arch_memmap_init (memmap_init_callback_t *callback,
-	struct page *start, struct page *end, int zone,
-	unsigned long start_paddr, int highmem);
 
 # endif /* !__ASSEMBLY__ */
 
@@ -472,5 +482,10 @@ extern unsigned long arch_memmap_init (memmap_init_callback_t *callback,
 #define KERNEL_TR_PAGE_SHIFT	_PAGE_SIZE_64M
 #define KERNEL_TR_PAGE_SIZE	(1 << KERNEL_TR_PAGE_SHIFT)
 #define KERNEL_TR_PAGE_NUM	((KERNEL_START - PAGE_OFFSET) / KERNEL_TR_PAGE_SIZE)
+
+/*
+ * No page table caches to initialise
+ */
+#define pgtable_cache_init()	do { } while (0)
 
 #endif /* _ASM_IA64_PGTABLE_H */

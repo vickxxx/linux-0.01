@@ -275,6 +275,7 @@ _arm3_xchg_4:	swp	r0, r0, [r1]
 _arm2_3_check_bugs:
 		bics	pc, lr, #0x04000000		@ Clear FIQ disable bit
 
+armvlsi_name:	.asciz	"ARM/VLSI"
 _arm2_name:	.asciz	"ARM 2"
 _arm250_name:	.asciz	"ARM 250"
 _arm3_name:	.asciz	"ARM 3"
@@ -294,7 +295,7 @@ SYMBOL_NAME(arm2_processor_functions):
 		.word	_arm2_xchg_4
 
 cpu_arm2_info:
-		.long	0
+		.long	armvlsi_name
 		.long	_arm2_name
 
 		.globl	SYMBOL_NAME(arm250_processor_functions)
@@ -307,7 +308,7 @@ SYMBOL_NAME(arm250_processor_functions):
 		.word	_arm3_xchg_4
 
 cpu_arm250_info:
-		.long	0
+		.long	armvlsi_name
 		.long	_arm250_name
 
 		.globl	SYMBOL_NAME(arm3_processor_functions)
@@ -320,7 +321,7 @@ SYMBOL_NAME(arm3_processor_functions):
 		.word	_arm3_xchg_4
 
 cpu_arm3_info:
-		.long	0
+		.long	armvlsi_name
 		.long	_arm3_name
 
 arm2_arch_name:	.asciz	"armv1"

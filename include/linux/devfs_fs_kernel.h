@@ -3,7 +3,7 @@
 
 #include <linux/fs.h>
 #include <linux/config.h>
-#include <linux/spinlock.h>
+#include <linux/locks.h>
 #include <linux/kdev_t.h>
 #include <linux/types.h>
 
@@ -37,7 +37,8 @@
 				       */
 #define DEVFS_FL_REMOVABLE      0x010 /* This is a removable media device    */
 #define DEVFS_FL_WAIT           0x020 /* Wait for devfsd to finish           */
-#define DEVFS_FL_CURRENT_OWNER  0x040 /* Set initial ownership to current    */
+#define DEVFS_FL_NO_PERSISTENCE 0x040 /* Forget changes after unregister     */
+#define DEVFS_FL_CURRENT_OWNER  0x080 /* Set initial ownership to current    */
 #define DEVFS_FL_DEFAULT        DEVFS_FL_NONE
 
 
@@ -45,6 +46,14 @@
 #define DEVFS_SPECIAL_BLK     1
 
 typedef struct devfs_entry * devfs_handle_t;
+
+
+#ifdef CONFIG_BLK_DEV_INITRD
+#  define ROOT_DEVICE_NAME ((real_root_dev ==ROOT_DEV) ? root_device_name:NULL)
+#else
+#  define ROOT_DEVICE_NAME root_device_name
+#endif
+
 
 #ifdef CONFIG_DEVFS_FS
 
@@ -54,13 +63,12 @@ struct unique_numspace
     unsigned char sem_initialised;
     unsigned int num_free;          /*  Num free in bits       */
     unsigned int length;            /*  Array length in bytes  */
-    unsigned long *bits;
+    __u32 *bits;
     struct semaphore semaphore;
 };
 
 #define UNIQUE_NUMBERSPACE_INITIALISER {SPIN_LOCK_UNLOCKED, 0, 0, 0, NULL}
 
-extern void devfs_put (devfs_handle_t de);
 extern devfs_handle_t devfs_register (devfs_handle_t dir, const char *name,
 				      unsigned int flags,
 				      unsigned int major, unsigned int minor,
@@ -71,9 +79,6 @@ extern int devfs_mk_symlink (devfs_handle_t dir, const char *name,
 			     devfs_handle_t *handle, void *info);
 extern devfs_handle_t devfs_mk_dir (devfs_handle_t dir, const char *name,
 				    void *info);
-extern devfs_handle_t devfs_get_handle (devfs_handle_t dir, const char *name,
-					unsigned int major,unsigned int minor,
-					char type, int traverse_symlinks);
 extern devfs_handle_t devfs_find_handle (devfs_handle_t dir, const char *name,
 					 unsigned int major,unsigned int minor,
 					 char type, int traverse_symlinks);
@@ -84,7 +89,6 @@ extern int devfs_get_maj_min (devfs_handle_t de,
 extern devfs_handle_t devfs_get_handle_from_inode (struct inode *inode);
 extern int devfs_generate_path (devfs_handle_t de, char *path, int buflen);
 extern void *devfs_get_ops (devfs_handle_t de);
-extern void devfs_put_ops (devfs_handle_t de);
 extern int devfs_set_file_size (devfs_handle_t de, unsigned long size);
 extern void *devfs_get_info (devfs_handle_t de);
 extern int devfs_set_info (devfs_handle_t de, void *info);
@@ -116,6 +120,7 @@ extern void devfs_dealloc_unique_number (struct unique_numspace *space,
 					 int number);
 
 extern void mount_devfs_fs (void);
+extern void devfs_make_root (const char *name);
 
 #else  /*  CONFIG_DEVFS_FS  */
 
@@ -126,10 +131,6 @@ struct unique_numspace
 
 #define UNIQUE_NUMBERSPACE_INITIALISER {0}
 
-static inline void devfs_put (devfs_handle_t de)
-{
-    return;
-}
 static inline devfs_handle_t devfs_register (devfs_handle_t dir,
 					     const char *name,
 					     unsigned int flags,
@@ -152,15 +153,6 @@ static inline int devfs_mk_symlink (devfs_handle_t dir, const char *name,
 }
 static inline devfs_handle_t devfs_mk_dir (devfs_handle_t dir,
 					   const char *name, void *info)
-{
-    return NULL;
-}
-static inline devfs_handle_t devfs_get_handle (devfs_handle_t dir,
-					       const char *name,
-					       unsigned int major,
-					       unsigned int minor,
-					       char type,
-					       int traverse_symlinks)
 {
     return NULL;
 }
@@ -198,10 +190,6 @@ static inline int devfs_generate_path (devfs_handle_t de, char *path,
 static inline void *devfs_get_ops (devfs_handle_t de)
 {
     return NULL;
-}
-static inline void devfs_put_ops (devfs_handle_t de)
-{
-    return;
 }
 static inline int devfs_set_file_size (devfs_handle_t de, unsigned long size)
 {
@@ -308,6 +296,10 @@ static inline void devfs_dealloc_unique_number (struct unique_numspace *space,
 }
 
 static inline void mount_devfs_fs (void)
+{
+    return;
+}
+static inline void devfs_make_root (const char *name)
 {
     return;
 }

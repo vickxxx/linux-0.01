@@ -33,7 +33,6 @@
 #include "sun.h"
 #include "ibm.h"
 #include "ultrix.h"
-#include "efi.h"
 
 extern int *blk_size[];
 
@@ -42,12 +41,6 @@ int warn_no_part = 1; /*This is ugly: should make genhd removable media aware*/
 static int (*check_part[])(struct gendisk *hd, struct block_device *bdev, unsigned long first_sect, int first_minor) = {
 #ifdef CONFIG_ACORN_PARTITION
 	acorn_partition,
-#endif
-#ifdef CONFIG_SGI_PARTITION
-	sgi_partition,
-#endif
-#ifdef CONFIG_EFI_PARTITION
-	efi_partition,		/* this must come before msdos */
 #endif
 #ifdef CONFIG_LDM_PARTITION
 	ldm_partition,		/* this must come before msdos */
@@ -70,6 +63,9 @@ static int (*check_part[])(struct gendisk *hd, struct block_device *bdev, unsign
 #ifdef CONFIG_MAC_PARTITION
 	mac_partition,
 #endif
+#ifdef CONFIG_SGI_PARTITION
+	sgi_partition,
+#endif
 #ifdef CONFIG_ULTRIX_PARTITION
 	ultrix_partition,
 #endif
@@ -81,17 +77,13 @@ static int (*check_part[])(struct gendisk *hd, struct block_device *bdev, unsign
 
 /*
  *	This is ucking fugly but its probably the best thing for 2.4.x
- *	Take it as a clear reminder that: 1) we should put the device name
+ *	Take it as a clear reminder than we should put the device name
  *	generation in the object kdev_t points to in 2.5.
- *	and 2) ioctls better work on half-opened devices.
  */
  
 #ifdef CONFIG_ARCH_S390
 int (*genhd_dasd_name)(char*,int,int,struct gendisk*) = NULL;
-int (*genhd_dasd_ioctl)(struct inode *inp, struct file *filp,
-			    unsigned int no, unsigned long data);
 EXPORT_SYMBOL(genhd_dasd_name);
-EXPORT_SYMBOL(genhd_dasd_ioctl);
 #endif
 
 /*
@@ -204,8 +196,7 @@ char *disk_name (struct gendisk *hd, int minor, char *buf)
 /*
  * Add a partitions details to the devices partition description.
  */
-void add_gd_partition(struct gendisk *hd, int minor, unsigned int start,
-                      unsigned int size)
+void add_gd_partition(struct gendisk *hd, int minor, int start, int size)
 {
 #ifndef CONFIG_DEVFS_FS
 	char buf[40];
@@ -347,8 +338,7 @@ void devfs_register_partitions (struct gendisk *dev, int minor, int unregister)
 	if (!unregister)
 		devfs_register_disc (dev, minor);
 	for (part = 1; part < dev->max_p; part++) {
-		if ( unregister || (dev->part[minor].nr_sects < 1) ||
-		     (dev->part[part + minor].nr_sects < 1) ) {
+		if ( unregister || (dev->part[part + minor].nr_sects < 1) ) {
 			devfs_unregister (dev->part[part + minor].de);
 			dev->part[part + minor].de = NULL;
 			continue;
@@ -393,8 +383,6 @@ void grok_partitions(struct gendisk *dev, int drive, unsigned minors, long size)
 
 	dev->part[first_minor].nr_sects = size;
 	/* No such device or no minors to use for partitions */
-	if ( !size && dev->flags && (dev->flags[drive] & GENHD_FL_REMOVABLE) )
-		devfs_register_partitions (dev, first_minor, 0);
 	if (!size || minors == 1)
 		return;
 

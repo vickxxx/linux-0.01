@@ -8,7 +8,7 @@
  *    RadioTrack II driver for Linux radio support (C) 1998 Ben Pfaff
  * 
  *    Based on RadioTrack I/RadioReveal (C) 1997 M. Kirkwood
- *    Converted to new API by Alan Cox <Alan.Cox@linux.org>
+ *    Coverted to new API by Alan Cox <Alan.Cox@linux.org>
  *    Various bugfixes and enhancements by Russell Kroll <rkroll@exploits.org>
  *
  * TODO: Allow for more than one of these foolish entities :-)
@@ -281,13 +281,13 @@ static int __init gemtek_init(void)
 	printk(KERN_INFO "GemTek Radio Card driver.\n");
 
 	spin_lock_init(&lock);
+ 	/* mute card - prevents noisy bootups */
+	outb(0x10, io);
+	udelay(5);
+	gemtek_unit.muted = 1;
 
 	/* this is _maybe_ unnecessary */
 	outb(0x01, io);
-
- 	/* mute card - prevents noisy bootups */
-	gemtek_unit.muted = 0;
-	gemtek_mute(&gemtek_unit);
 
 	return 0;
 }

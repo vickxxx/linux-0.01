@@ -56,6 +56,26 @@
 #define UTURN_IOA_RUNWAY 0x581
 #define UTURN_BC_GSC     0x502
 
+static int ccio_driver_callback(struct hp_device *, struct pa_iodc_driver *);
+
+static struct pa_iodc_driver ccio_drivers_for[] = {
+
+   {HPHW_BCPORT, U2_BC_GSC, 0x0, 0xb, 0, 0x10,
+		DRIVER_CHECK_HVERSION +
+		DRIVER_CHECK_SVERSION + DRIVER_CHECK_HWTYPE,
+                MODULE_NAME, "U2 I/O MMU", (void *) ccio_driver_callback},
+
+   {HPHW_BCPORT, UTURN_BC_GSC, 0x0, 0xb, 0, 0x10,
+		DRIVER_CHECK_HVERSION +
+		DRIVER_CHECK_SVERSION + DRIVER_CHECK_HWTYPE,
+                MODULE_NAME, "Uturn I/O MMU", (void *) ccio_driver_callback},
+
+   {0,0,0,0,0,0,
+   0,
+   (char *) NULL, (char *) NULL, (void *) NULL }
+};
+
+
 #define IS_U2(id) ( \
     (((id)->hw_type == HPHW_IOA) && ((id)->hversion == U2_IOA_RUNWAY)) || \
     (((id)->hw_type == HPHW_BCPORT) && ((id)->hversion == U2_BC_GSC))  \
@@ -66,13 +86,22 @@
     (((id)->hw_type == HPHW_BCPORT) && ((id)->hversion == UTURN_BC_GSC))  \
 )
 
+
+void __init ccio_init(void)
+{
+	register_driver(ccio_drivers_for);
+}
+
+
 static int ccio_dma_supported( struct pci_dev *dev, u64 mask)
 {
 	if (dev == NULL) {
-		printk(KERN_ERR MODULE_NAME ": EISA/ISA/et al not supported\n");
+		printk(MODULE_NAME ": EISA/ISA/et al not supported\n");
 		BUG();
 		return(0);
 	}
+
+	dev->dma_mask = mask;   /* save it */
 
 	/* only support 32-bit devices (ie PCI/GSC) */
 	return((int) (mask >= 0xffffffffUL));
@@ -118,7 +147,7 @@ static int ccio_map_sg(struct pci_dev *dev, struct scatterlist *sglist, int nent
 
         /* KISS: map each buffer seperately. */
 	while (nents) {
-		sg_dma_address(sglist) = ccio_map_single(dev, sg_virt_addr(sglist), sglist->length, direction);
+		sg_dma_address(sglist) = ccio_map_single(dev, sglist->address, sglist->length, direction);
 		sg_dma_len(sglist) = sglist->length;
 		nents--;
 		sglist++;
@@ -153,6 +182,8 @@ static struct pci_dma_ops ccio_ops = {
 	ccio_unmap_sg,
 	NULL,                   /* dma_sync_single : NOP for U2 */
 	NULL,                   /* dma_sync_sg     : ditto */
+
+
 };
 
 
@@ -162,11 +193,9 @@ static struct pci_dma_ops ccio_ops = {
 ** have work to do.
 */
 static int
-ccio_probe(struct parisc_device *dev)
+ccio_driver_callback(struct hp_device *d, struct pa_iodc_driver *dri)
 {
-	printk(KERN_INFO "%s found %s at 0x%lx\n", MODULE_NAME,
-			dev->id.hversion == U2_BC_GSC ? "U2" : "UTurn",
-			dev->hpa);
+	printk("%s found %s at 0x%p\n", dri->name, dri->version, d->hpa);
 
 /*
 ** FIXME - should check U2 registers to verify it's really running
@@ -180,21 +209,4 @@ ccio_probe(struct parisc_device *dev)
 #endif
 	hppa_dma_ops = &ccio_ops;
 	return 0;
-}
-
-static struct parisc_device_id ccio_tbl[] = {
-	{ HPHW_BCPORT, HVERSION_REV_ANY_ID, U2_BC_GSC, 0xc },
-	{ HPHW_BCPORT, HVERSION_REV_ANY_ID, UTURN_BC_GSC, 0xc },
-	{ 0, }
-};
-
-static struct parisc_driver ccio_driver = {
-        name:           "U2/Uturn",
-        id_table:       ccio_tbl,
-        probe:          ccio_probe,
-};
-
-void __init ccio_init(void)
-{
-	register_parisc_driver(&ccio_driver);
 }

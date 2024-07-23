@@ -30,7 +30,6 @@
 #include <linux/in_route.h>
 #include <linux/rtnetlink.h>
 #include <linux/route.h>
-#include <linux/ip.h>
 #include <linux/cache.h>
 
 #ifndef __KERNEL__
@@ -110,12 +109,6 @@ struct rt_cache_stat
         unsigned int out_hit;
         unsigned int out_slow_tot;
         unsigned int out_slow_mc;
-        unsigned int gc_total;
-        unsigned int gc_ignored;
-        unsigned int gc_goal_miss;
-        unsigned int gc_dst_overflow;
-	unsigned int in_hlist_search;
-	unsigned int out_hlist_search;
 } ____cacheline_aligned_in_smp;
 
 extern struct ip_rt_acct *ip_rt_acct;

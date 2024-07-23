@@ -9,7 +9,7 @@
  *	Al Longyear <longyear@netcom.com>, Paul Mackerras <Paul.Mackerras@cs.anu.edu.au>
  *
  * Original release 01/11/99
- * $Id: n_hdlc.c,v 3.7 2003/05/01 15:45:29 paulkf Exp $
+ * $Id: n_hdlc.c,v 3.2 2000/11/06 22:34:38 paul Exp $
  *
  * This code is released under the GNU General Public License (GPL)
  *
@@ -78,7 +78,7 @@
  */
 
 #define HDLC_MAGIC 0x239e
-#define HDLC_VERSION "$Revision: 3.7 $"
+#define HDLC_VERSION "3.2"
 
 #include <linux/version.h>
 #include <linux/config.h>
@@ -160,6 +160,11 @@ struct n_hdlc {
 	struct tty_struct *tty;		/* ptr to TTY structure	*/
 	struct tty_struct *backup_tty;	/* TTY to use if tty gets closed */
 	
+	/* Queues for select() functionality */
+	wait_queue_head_t read_wait;
+	wait_queue_head_t write_wait;
+	wait_queue_head_t poll_wait;
+
 	int		tbusy;		/* reentrancy flag for tx wakeup code */
 	int		woke_up;
 	N_HDLC_BUF	*tbuf;		/* currently transmitting tx buffer */
@@ -172,9 +177,9 @@ struct n_hdlc {
 /*
  * HDLC buffer list manipulation functions
  */
-static void n_hdlc_buf_list_init(N_HDLC_BUF_LIST *list);
-static void n_hdlc_buf_put(N_HDLC_BUF_LIST *list,N_HDLC_BUF *buf);
-static N_HDLC_BUF* n_hdlc_buf_get(N_HDLC_BUF_LIST *list);
+void n_hdlc_buf_list_init(N_HDLC_BUF_LIST *list);
+void n_hdlc_buf_put(N_HDLC_BUF_LIST *list,N_HDLC_BUF *buf);
+N_HDLC_BUF* n_hdlc_buf_get(N_HDLC_BUF_LIST *list);
 
 /* Local functions */
 
@@ -183,16 +188,13 @@ static struct n_hdlc *n_hdlc_alloc (void);
 MODULE_PARM(debuglevel, "i");
 MODULE_PARM(maxframe, "i");
 
-#ifdef MODULE_LICENSE
-MODULE_LICENSE("GPL");
-#endif
 
 /* debug level can be set by insmod for debugging purposes */
 #define DEBUG_LEVEL_INFO	1
-static int debuglevel=0;
+int debuglevel=0;
 
 /* max frame size for memory allocations */
-static ssize_t	maxframe=4096;
+ssize_t	maxframe=4096;
 
 /* TTY callbacks */
 
@@ -233,8 +235,9 @@ static void n_hdlc_release (struct n_hdlc *n_hdlc)
 		printk("%s(%d)n_hdlc_release() called\n",__FILE__,__LINE__);
 		
 	/* Ensure that the n_hdlcd process is not hanging on select()/poll() */
-	wake_up_interruptible (&tty->read_wait);
-	wake_up_interruptible (&tty->write_wait);
+	wake_up_interruptible (&n_hdlc->read_wait);
+	wake_up_interruptible (&n_hdlc->poll_wait);
+	wake_up_interruptible (&n_hdlc->write_wait);
 
 	if (tty != NULL && tty->disc_data == n_hdlc)
 		tty->disc_data = NULL;	/* Break the tty->n_hdlc link */
@@ -268,8 +271,7 @@ static void n_hdlc_release (struct n_hdlc *n_hdlc)
 		} else
 			break;
 	}
-	if (n_hdlc->tbuf)
-		kfree(n_hdlc->tbuf);
+	
 	kfree(n_hdlc);
 	
 }	/* end of n_hdlc_release() */
@@ -351,8 +353,9 @@ static int n_hdlc_tty_open (struct tty_struct *tty)
 #endif
 	
 	/* Flush any pending characters in the driver and discipline. */
-
-	tty_ldisc_flush(tty);	
+	
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer (tty);
 
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer (tty);
@@ -429,7 +432,8 @@ static void n_hdlc_send_frames (struct n_hdlc *n_hdlc, struct tty_struct *tty)
 			n_hdlc->tbuf = NULL;
 			
 			/* wait up sleeping writers */
-			wake_up_interruptible(&tty->write_wait);
+			wake_up_interruptible(&n_hdlc->write_wait);
+			wake_up_interruptible(&n_hdlc->poll_wait);
 	
 			/* get next pending transmit buffer */
 			tbuf = n_hdlc_buf_get(&n_hdlc->tx_buf_list);
@@ -571,7 +575,8 @@ static void n_hdlc_tty_receive(struct tty_struct *tty,
 	n_hdlc_buf_put(&n_hdlc->rx_buf_list,buf);
 	
 	/* wake up any blocked reads and perform async signalling */
-	wake_up_interruptible (&tty->read_wait);
+	wake_up_interruptible (&n_hdlc->read_wait);
+	wake_up_interruptible (&n_hdlc->poll_wait);
 	if (n_hdlc->tty->fasync != NULL)
 		kill_fasync (&n_hdlc->tty->fasync, SIGIO, POLL_IN);
 
@@ -616,9 +621,6 @@ static rw_ret_t n_hdlc_tty_read (struct tty_struct *tty,
 	}
 
 	for (;;) {
-		if (test_bit(TTY_OTHER_CLOSED, &tty->flags))
-			return -EIO;
-
 		n_hdlc = tty2n_hdlc (tty);
 		if (!n_hdlc || n_hdlc->magic != HDLC_MAGIC ||
 			 tty != n_hdlc->tty)
@@ -632,7 +634,7 @@ static rw_ret_t n_hdlc_tty_read (struct tty_struct *tty,
 		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 			
-		interruptible_sleep_on (&tty->read_wait);
+		interruptible_sleep_on (&n_hdlc->read_wait);
 		if (signal_pending(current))
 			return -EINTR;
 	}
@@ -701,7 +703,7 @@ static rw_ret_t n_hdlc_tty_write (struct tty_struct *tty, struct file *file,
 		count = maxframe;
 	}
 	
-	add_wait_queue(&tty->write_wait, &wait);
+	add_wait_queue(&n_hdlc->write_wait, &wait);
 	set_current_state(TASK_INTERRUPTIBLE);
 	
 	/* Allocate transmit buffer */
@@ -724,7 +726,7 @@ static rw_ret_t n_hdlc_tty_write (struct tty_struct *tty, struct file *file,
 	}
 
 	set_current_state(TASK_RUNNING);
-	remove_wait_queue(&tty->write_wait, &wait);
+	remove_wait_queue(&n_hdlc->write_wait, &wait);
 
 	if (!error) {		
 		/* Retrieve the user's buffer */
@@ -834,14 +836,12 @@ static unsigned int n_hdlc_tty_poll (struct tty_struct *tty,
 	if (n_hdlc && n_hdlc->magic == HDLC_MAGIC && tty == n_hdlc->tty) {
 		/* queue current process into any wait queue that */
 		/* may awaken in the future (read and write) */
-
-		poll_wait(filp, &tty->read_wait, wait);
-		poll_wait(filp, &tty->write_wait, wait);
+		poll_wait(filp, &n_hdlc->poll_wait, wait);
 
 		/* set bits for operations that wont block */
 		if(n_hdlc->rx_buf_list.head)
 			mask |= POLLIN | POLLRDNORM;	/* readable */
-		if (test_bit(TTY_OTHER_CLOSED, &tty->flags))
+		if(tty->flags & (1 << TTY_OTHER_CLOSED))
 			mask |= POLLHUP;
 		if(tty_hung_up_p(filp))
 			mask |= POLLHUP;
@@ -895,7 +895,11 @@ static struct n_hdlc *n_hdlc_alloc (void)
 	
 	/* Initialize the control block */
 	n_hdlc->magic  = HDLC_MAGIC;
+
 	n_hdlc->flags  = 0;
+	init_waitqueue_head(&n_hdlc->read_wait);
+	init_waitqueue_head(&n_hdlc->poll_wait);
+	init_waitqueue_head(&n_hdlc->write_wait);
 	
 	return n_hdlc;
 	
@@ -908,7 +912,7 @@ static struct n_hdlc *n_hdlc_alloc (void)
  * Arguments:	 	list	pointer to buffer list
  * Return Value:	None	
  */
-static void n_hdlc_buf_list_init(N_HDLC_BUF_LIST *list)
+void n_hdlc_buf_list_init(N_HDLC_BUF_LIST *list)
 {
 	memset(list,0,sizeof(N_HDLC_BUF_LIST));
 	spin_lock_init(&list->spinlock);
@@ -925,7 +929,7 @@ static void n_hdlc_buf_list_init(N_HDLC_BUF_LIST *list)
  * 
  * Return Value:	None	
  */
-static void n_hdlc_buf_put(N_HDLC_BUF_LIST *list,N_HDLC_BUF *buf)
+void n_hdlc_buf_put(N_HDLC_BUF_LIST *list,N_HDLC_BUF *buf)
 {
 	unsigned long flags;
 	spin_lock_irqsave(&list->spinlock,flags);
@@ -955,7 +959,7 @@ static void n_hdlc_buf_put(N_HDLC_BUF_LIST *list,N_HDLC_BUF *buf)
  * 
  * 	pointer to HDLC buffer if available, otherwise NULL
  */
-static N_HDLC_BUF* n_hdlc_buf_get(N_HDLC_BUF_LIST *list)
+N_HDLC_BUF* n_hdlc_buf_get(N_HDLC_BUF_LIST *list)
 {
 	unsigned long flags;
 	N_HDLC_BUF *buf;
@@ -1028,4 +1032,5 @@ static void __exit n_hdlc_exit(void)
 module_init(n_hdlc_init);
 module_exit(n_hdlc_exit);
 
+MODULE_LICENSE("GPL");
 EXPORT_NO_SYMBOLS;

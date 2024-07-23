@@ -143,7 +143,7 @@ void insb (unsigned long port, void *dst, unsigned long count)
 			return;
 		count--;
 		*(unsigned char *) dst = inb(port);
-		dst = (unsigned char *)dst + 1;
+		((unsigned char *) dst)++;
 	}
 
 	while (count >= 4) {
@@ -154,13 +154,13 @@ void insb (unsigned long port, void *dst, unsigned long count)
 		w |= inb(port) << 16;
 		w |= inb(port) << 24;
 		*(unsigned int *) dst = w;
-		dst = (unsigned int *)dst + 1;
+		((unsigned int *) dst)++;
 	}
 
 	while (count) {
 		--count;
 		*(unsigned char *) dst = inb(port);
-		dst = (unsigned char *)dst + 1;
+		((unsigned char *) dst)++;
 	}
 }
 
@@ -182,7 +182,7 @@ void insw (unsigned long port, void *dst, unsigned long count)
 			return;
 		count--;
 		*(unsigned short* ) dst = inw(port);
-		dst = (unsigned short *)dst + 1;
+		((unsigned short *) dst)++;
 	}
 
 	while (count >= 2) {
@@ -191,7 +191,7 @@ void insw (unsigned long port, void *dst, unsigned long count)
 		w = inw(port);
 		w |= inw(port) << 16;
 		*(unsigned int *) dst = w;
-		dst = (unsigned int *)dst + 1;
+		((unsigned int *) dst)++;
 	}
 
 	if (count) {
@@ -219,7 +219,7 @@ void insl (unsigned long port, void *dst, unsigned long count)
 		while (count--)
 		{
 			*(unsigned int *) dst = inl(port);
-			dst = (unsigned int *)dst + 1;
+			((unsigned int *) dst)++;
 		}
 		break;
 	
@@ -230,13 +230,13 @@ void insl (unsigned long port, void *dst, unsigned long count)
 		
 		l = inl(port);
 		*(unsigned short *) dst = l;
-		dst = (unsigned short *)dst + 1;
+		((unsigned short *) dst)++;
 		
 		while (count--)
 		{
 			l2 = inl(port);
 			*(unsigned int *) dst = l >> 16 | l2 << 16;
-			dst = (unsigned int *)dst + 1;
+			((unsigned int *) dst)++;
 			l = l2;
 		}
 		*(unsigned short *) dst = l >> 16;
@@ -246,14 +246,14 @@ void insl (unsigned long port, void *dst, unsigned long count)
 		
 		l = inl(port);
 		*(unsigned char *) dst = l;
-		dst = (unsigned char *)dst + 1;
+		((unsigned char *) dst)++;
 		*(unsigned short *) dst = l >> 8;
-		dst = (unsigned short *)dst + 1;
+		((unsigned short *) dst)++;
 		while (count--)
 		{
 			l2 = inl(port);
 			*(unsigned int *) dst = l >> 24 | l2 << 8;
-			dst = (unsigned int *)dst + 1;
+			((unsigned int *) dst)++;
 			l = l2;
 		}
 		*(unsigned char *) dst = l >> 24;
@@ -263,16 +263,16 @@ void insl (unsigned long port, void *dst, unsigned long count)
 		
 		l = inl(port);
 		*(unsigned char *) dst = l;
-		dst = (unsigned char *)dst + 1;
+		((unsigned char *) dst)++;
 		while (count--)
 		{
 			l2 = inl(port);
 			*(unsigned int *) dst = l << 24 | l2 >> 8;
-			dst = (unsigned int *)dst + 1;
+			((unsigned int *) dst)++;
 			l = l2;
 		}
 		*(unsigned short *) dst = l >> 8;
-		dst = (unsigned short *)dst + 1;
+		((unsigned short *) dst)++;
 		*(unsigned char *) dst = l >> 24;
 		break;
 	}
@@ -290,7 +290,7 @@ void outsb(unsigned long port, const void * src, unsigned long count)
 	while (count) {
 		count--;
 		outb(*(char *)src, port);
-		src = (char *)src + 1;
+		((char *) src)++;
 	}
 }
 
@@ -307,7 +307,7 @@ void outsw (unsigned long port, const void *src, unsigned long count)
 			panic("outsw: memory not short aligned");
 		}
 		outw(*(unsigned short*)src, port);
-		src = (unsigned short *)src + 1;
+		((unsigned short *) src)++;
 		--count;
 	}
 
@@ -315,7 +315,7 @@ void outsw (unsigned long port, const void *src, unsigned long count)
 		unsigned int w;
 		count -= 2;
 		w = *(unsigned int *) src;
-		src = (unsigned int *)src + 1;
+		((unsigned int *) src)++;
 		outw(w >>  0, port);
 		outw(w >> 16, port);
 	}
@@ -345,7 +345,7 @@ void outsl (unsigned long port, const void *src, unsigned long count)
 		while (count--)
 		{
 			outl(*(unsigned int *) src, port);
-			src = (unsigned int *)src + 1;
+			((unsigned int *) src)++;
 		}
 		break;
 	
@@ -355,12 +355,12 @@ void outsl (unsigned long port, const void *src, unsigned long count)
 		--count;
 		
 		l = *(unsigned short *) src << 16;
-		src = (unsigned short *)src + 1;
+		((unsigned short *) src)++;
 		
 		while (count--)
 		{
 			l2 = *(unsigned int *) src;
-			src = (unsigned int *)src + 1;
+			((unsigned int *) src)++;
 			outl (l >> 16 | l2 << 16, port);
 			l = l2;
 		}
@@ -371,13 +371,13 @@ void outsl (unsigned long port, const void *src, unsigned long count)
 		--count;
 		
 		l  = *(unsigned char *) src << 8;
-		src = (unsigned char *)src + 1;
+		((unsigned char *) src)++;
 		l |= *(unsigned short *) src << 16;
-		src = (unsigned short *)src + 1;
+		((unsigned short *) src)++;
 		while (count--)
 		{
 			l2 = *(unsigned int *) src;
-			src = (unsigned int *)src + 1;
+			((unsigned int *) src)++;
 			outl (l >> 8 | l2 << 24, port);
 			l = l2;
 		}
@@ -388,16 +388,16 @@ void outsl (unsigned long port, const void *src, unsigned long count)
 		--count;
 		
 		l  = *(unsigned char *) src << 24;
-		src = (unsigned char *)src + 1;
+		((unsigned char *) src)++;
 		while (count--)
 		{
 			l2 = *(unsigned int *) src;
-			src = (unsigned int *)src + 1;
+			((unsigned int *) src)++;
 			outl (l >> 24 | l2 << 8, port);
 			l = l2;
 		}
 		l2  = *(unsigned short *) src;
-		src = (unsigned short *)src + 1;
+		((unsigned short *) src)++;
 		l2 |= *(unsigned char *) src << 16;
 		outl (l >> 24 | l2 << 8, port);
 		break;

@@ -2,16 +2,12 @@
  * addinitrd - program to add a initrd image to an ecoff kernel
  *
  * (C) 1999 Thomas Bogendoerfer
- * minor modifications, cleanup: Guido Guenther <agx@sigxcpu.org>
- * further cleanup: Maciej W. Rozycki
  */
 
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <stdio.h>
-#include <netinet/in.h>
 
 #include "ecoff.h"
 
@@ -48,7 +44,7 @@ int main (int argc, char *argv[])
 	char buf[1024];
 	unsigned long loadaddr;
 	unsigned long initrd_header[2];
-	int i,cnt;
+	int i;
 	int swab = 0;
 
 	if (argc != 4) {
@@ -56,7 +52,7 @@ int main (int argc, char *argv[])
 		exit (1);
 	}
 
-	if ((fd_vmlinux = open (argv[1],O_RDONLY)) < 0)
+	if ((fd_vmlinux = open (argv[1],O_RDWR)) < 0)
 		 die ("open vmlinux");
 	if (read (fd_vmlinux, &efile, sizeof efile) != sizeof efile)
 		die ("read file header");
@@ -64,6 +60,7 @@ int main (int argc, char *argv[])
 		die ("read aout header");
 	if (read (fd_vmlinux, esecs, sizeof esecs) != sizeof esecs)
 		die ("read section headers");
+
 	/*
 	 * check whether the file is good for us
 	 */
@@ -80,16 +77,11 @@ int main (int argc, char *argv[])
 			swab = 1;
 	}
 
-	/* make sure we have an empty data segment for the initrd */
-	if (eaout.dsize || esecs[1].s_size) {
-		fprintf (stderr, "Data segment not empty. Giving up!\n");
-		exit (1);
-	}
 	if ((fd_initrd = open (argv[2], O_RDONLY)) < 0)
 		die ("open initrd");
 	if (fstat (fd_initrd, &st) < 0)
 		die ("fstat initrd");
-	loadaddr = ((SWAB(esecs[2].s_vaddr) + SWAB(esecs[2].s_size)
+	loadaddr = ((SWAB(esecs[2].s_vaddr) + SWAB(esecs[2].s_size) 
 			+ MIPS_PAGE_SIZE-1) & ~MIPS_PAGE_MASK) - 8;
 	if (loadaddr < (SWAB(esecs[2].s_vaddr) + SWAB(esecs[2].s_size)))
 		loadaddr += MIPS_PAGE_SIZE;
@@ -106,20 +98,9 @@ int main (int argc, char *argv[])
 		die ("write aout header");
 	if (write (fd_outfile, esecs, sizeof esecs) != sizeof esecs)
 		die ("write section headers");
-	/* skip padding */
-	if(lseek(fd_vmlinux, SWAB(esecs[0].s_scnptr), SEEK_SET) == (off_t)-1)
-		die ("lseek vmlinux");
-	if(lseek(fd_outfile, SWAB(esecs[0].s_scnptr), SEEK_SET) == (off_t)-1)
-		die ("lseek outfile");
-	/* copy text segment */
-	cnt = SWAB(eaout.tsize);
-	while (cnt) {
-		if ((i = read (fd_vmlinux, buf, sizeof buf)) <= 0)
-			die ("read vmlinux");
+	while ((i = read (fd_vmlinux, buf, sizeof buf)) > 0)
 		if (write (fd_outfile, buf, i) != i)
 			die ("write vmlinux");
-		cnt -= i;
-	}
 	if (write (fd_outfile, initrd_header, sizeof initrd_header) != sizeof initrd_header)
 		die ("write initrd header");
 	while ((i = read (fd_initrd, buf, sizeof buf)) > 0)

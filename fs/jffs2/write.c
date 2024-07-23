@@ -31,7 +31,7 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: write.c,v 1.30.2.2 2003/11/02 13:51:18 dwmw2 Exp $
+ * $Id: write.c,v 1.28 2001/05/01 16:25:25 dwmw2 Exp $
  *
  */
 
@@ -40,7 +40,7 @@
 #include <linux/jffs2.h>
 #include <linux/mtd/mtd.h>
 #include "nodelist.h"
-#include <linux/crc32.h>
+#include "crc32.h"
 
 /* jffs2_new_inode: allocate a new inode and inocache, add it to the hash,
    fill in the raw_inode while you're at it. */
@@ -110,9 +110,8 @@ struct inode *jffs2_new_inode (struct inode *dir_i, int mode, struct jffs2_raw_i
 	return inode;
 }
 
-/* This ought to be in core MTD code. All registered MTD devices
-   without writev should have this put in place. Bug the MTD
-   maintainer */
+/* This ought to be in core MTD code. All registered MTD devices without writev should have
+   this put in place. Bug the MTD maintainer */
 static int mtd_fake_writev(struct mtd_info *mtd, const struct iovec *vecs, unsigned long count, loff_t to, size_t *retlen)
 {
 	unsigned long i;
@@ -120,7 +119,7 @@ static int mtd_fake_writev(struct mtd_info *mtd, const struct iovec *vecs, unsig
 	int ret = 0;
 
 	for (i=0; i<count; i++) {
-		ret = mtd->write(mtd, to, vecs[i].iov_len, &thislen, vecs[i].iov_base);
+		mtd->write(mtd, to, vecs[i].iov_len, &thislen, vecs[i].iov_base);
 		totlen += thislen;
 		if (ret || thislen != vecs[i].iov_len)
 			break;
@@ -208,6 +207,8 @@ struct jffs2_full_dnode *jffs2_write_dnode(struct inode *inode, struct jffs2_raw
 	}
 	raw->flash_offset = flash_ofs;
 	raw->totlen = PAD(ri->totlen);
+	raw->next_in_ino = f->inocache->nodes;
+	f->inocache->nodes = raw;
 	raw->next_phys = NULL;
 
 	fn->ofs = ri->offset;
@@ -221,14 +222,6 @@ struct jffs2_full_dnode *jffs2_write_dnode(struct inode *inode, struct jffs2_raw
 		       sizeof(*ri)+datalen, flash_ofs, ret, retlen);
 		/* Mark the space as dirtied */
 		if (retlen) {
-			/* Doesn't belong to any inode */
-			raw->next_in_ino = NULL;
-
-			/* Don't change raw->size to match retlen. We may have 
-			   written the node header already, and only the data will
-			   seem corrupted, in which case the scan would skip over
-			   any node we write before the original intended end of 
-			   this node */
 			jffs2_add_physical_node_ref(c, raw, sizeof(*ri)+datalen, 1);
 			jffs2_mark_node_obsolete(c, raw);
 		} else {
@@ -244,11 +237,6 @@ struct jffs2_full_dnode *jffs2_write_dnode(struct inode *inode, struct jffs2_raw
 	}
 	/* Mark the space used */
 	jffs2_add_physical_node_ref(c, raw, retlen, 0);
-
-	/* Link into per-inode list */
-	raw->next_in_ino = f->inocache->nodes;
-	f->inocache->nodes = raw;
-
 	D1(printk(KERN_DEBUG "jffs2_write_dnode wrote node at 0x%08x with dsize 0x%x, csize 0x%x, node_crc 0x%08x, data_crc 0x%08x, totlen 0x%08x\n", flash_ofs, ri->dsize, ri->csize, ri->node_crc, ri->data_crc, ri->totlen));
 	if (writelen)
 		*writelen = retlen;

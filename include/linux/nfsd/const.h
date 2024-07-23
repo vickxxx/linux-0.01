@@ -12,7 +12,6 @@
 #include <linux/nfs.h>
 #include <linux/nfs2.h>
 #include <linux/nfs3.h>
-#include <asm/page.h>
 
 /*
  * Maximum protocol version supported by knfsd
@@ -20,16 +19,9 @@
 #define NFSSVC_MAXVERS		3
 
 /*
- * Maximum blocksize supported by daemon.  We want the largest
- * value which 1) fits in a UDP datagram less some headers
- * 2) is a multiple of page size 3) can be successfully kmalloc()ed
- * by each nfsd.   
+ * Maximum blocksize supported by daemon currently at 8K
  */
-#if PAGE_SIZE > (16*1024)
-#define NFSSVC_MAXBLKSIZE	(32*1024)
-#else
-#define NFSSVC_MAXBLKSIZE	(2*PAGE_SIZE)
-#endif
+#define NFSSVC_MAXBLKSIZE	8192
 
 #ifdef __KERNEL__
 

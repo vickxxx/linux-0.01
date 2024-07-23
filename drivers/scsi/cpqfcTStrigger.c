@@ -12,22 +12,22 @@
 #include <linux/pci.h>
 #include <asm/io.h>
 
-void TriggerHBA(void *io_upper, int print)
+void TriggerHBA( void* IOBaseUpper, int Print)
 {
-	__u32 long value;
+  __u32 long value;
 
-	// get initial value in hopes of not modifying any other GPIO line
-	io_upper += 0x188;	// TachTL/TS Control reg
+  // get initial value in hopes of not modifying any other GPIO line
+  IOBaseUpper += 0x188;  // TachTL/TS Control reg
+  
+  value = readl( IOBaseUpper);
+  // set HIGH to trigger external analyzer (tested on Dolche Finisar 1Gb GTA)
+  // The Finisar anaylzer triggers on low-to-high TTL transition
+  value |= 0x01; // set bit 0
 
-	value = readl(io_upper);
-	// set HIGH to trigger external analyzer (tested on Dolche Finisar 1Gb GTA)
-	// The Finisar anaylzer triggers on low-to-high TTL transition
-	value |= 0x01;		// set bit 0
+  writel( value, IOBaseUpper);
 
-	writel(value, io_upper);
-
-	if (print)
-		printk(" -GPIO0 set- ");
+  if( Print)
+    printk( " -GPIO0 set- ");
 }
 
 #endif

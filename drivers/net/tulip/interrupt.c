@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/interrupt.c
 
-	Maintained by Jeff Garzik <jgarzik@pobox.com>
+	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -14,10 +14,10 @@
 
 */
 
-#include <linux/pci.h>
 #include "tulip.h"
 #include <linux/config.h>
 #include <linux/etherdevice.h>
+#include <linux/pci.h>
 
 
 int tulip_rx_copybreak;
@@ -263,7 +263,7 @@ throttle:
            This would turn on IM for devices that is not contributing
            to backlog congestion with unnecessary latency.
 
-           We monitor the device RX-ring and have:
+           We monitor the the device RX-ring and have:
 
            HW Interrupt Mitigation either ON or OFF.
 
@@ -291,25 +291,6 @@ throttle:
 #endif
 }
 
-static inline void phy_interrupt (struct net_device *dev)
-{
-#ifdef __hppa__
-	int csr12 = inl(dev->base_addr + CSR12) & 0xff;
-	struct tulip_private *tp = (struct tulip_private *)dev->priv;
-
-	if (csr12 != tp->csr12_shadow) {
-		/* ack interrupt */
-		outl(csr12 | 0x02, dev->base_addr + CSR12);
-		tp->csr12_shadow = csr12;
-		/* do link change stuff */
-		spin_lock(&tp->lock);
-		tulip_check_duplex(dev);
-		spin_unlock(&tp->lock);
-		/* clear irq ack bit */
-		outl(csr12 & ~0x02, dev->base_addr + CSR12);
-	}
-#endif
-}
 
 /* The interrupt handler does all of the Rx thread work and cleans up
    after the Tx thread. */
@@ -332,9 +313,6 @@ void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 	/* Let's see whether the interrupt really is for us */
 	csr5 = inl(ioaddr + CSR5);
 
-        if (tp->flags & HAS_PHY_IRQ)
-	        phy_interrupt (dev);
-    
 	if ((csr5 & (NormalIntr|AbnormalIntr)) == 0)
 		return;
 

@@ -43,7 +43,7 @@ do {	unsigned int *dest = &(__elf_regs[0]);		\
 	dest[34] = (unsigned int) src->tnpc;		\
 	dest[35] = src->y;				\
 	dest[36] = dest[37] = 0; /* XXX */		\
-} while (0);
+} while(0);
 
 typedef struct {
 	union {
@@ -81,7 +81,7 @@ typedef struct {
 
 #define elf_check_arch(x)	(((x)->e_machine == EM_SPARC) || ((x)->e_machine == EM_SPARC32PLUS))
 
-#define ELF_ET_DYN_BASE         0x70000000
+#define ELF_ET_DYN_BASE         0x08000000
 
 
 #include <asm/processor.h>
@@ -149,6 +149,7 @@ struct elf_prpsinfo32
 #ifdef CONFIG_BINFMT_ELF32_MODULE
 #define CONFIG_BINFMT_ELF_MODULE CONFIG_BINFMT_ELF32_MODULE
 #endif
+#define ELF_FLAGS_INIT	current->thread.flags |= SPARC_FLAG_32BIT
 
 MODULE_DESCRIPTION("Binary format loader for compatibility with 32bit SparcLinux binaries on the Ultra");
 MODULE_AUTHOR("Eric Youngdale, David S. Miller, Jakub Jelinek");

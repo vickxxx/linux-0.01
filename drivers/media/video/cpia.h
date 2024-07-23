@@ -27,16 +27,12 @@
  */
 
 #define CPIA_MAJ_VER	0
-#define CPIA_MIN_VER   8
-#define CPIA_PATCH_VER	5
+#define CPIA_MIN_VER    7
+#define CPIA_PATCH_VER	4
 
-#define CPIA_PP_MAJ_VER       CPIA_MAJ_VER
-#define CPIA_PP_MIN_VER       CPIA_MIN_VER
-#define CPIA_PP_PATCH_VER     CPIA_PATCH_VER
-
-#define CPIA_USB_MAJ_VER      CPIA_MAJ_VER
-#define CPIA_USB_MIN_VER      CPIA_MIN_VER
-#define CPIA_USB_PATCH_VER    CPIA_PATCH_VER
+#define CPIA_PP_MAJ_VER       0
+#define CPIA_PP_MIN_VER       7
+#define CPIA_PP_PATCH_VER     4
 
 #define CPIA_MAX_FRAME_SIZE_UNALIGNED	(352 * 288 * 4)   /* CIF at RGB32 */
 #define CPIA_MAX_FRAME_SIZE	((CPIA_MAX_FRAME_SIZE_UNALIGNED + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) /* align above to PAGE_SIZE */
@@ -45,7 +41,6 @@
 
 #include <asm/uaccess.h>
 #include <linux/videodev.h>
-#include <linux/list.h>
 #include <linux/smp_lock.h>
 
 struct cpia_camera_ops
@@ -98,10 +93,6 @@ struct cpia_camera_ops
 	 * is STREAM_READY before calling streamRead.
 	 */
 	int wait_for_stream_ready;
-	/*
-	 * Used to maintain lowlevel module usage counts
-	 */
-	struct module *owner;
 };
 
 struct cpia_frame {
@@ -213,13 +204,6 @@ struct cam_params {
 		u8 subSample;
 		u8 yuvOrder;
 	} format;
-        struct {                        /* Intel QX3 specific data */
-                u8 qx3_detected;        /* a QX3 is present */
-                u8 toplight;            /* top light lit , R/W */
-                u8 bottomlight;         /* bottom light lit, R/W */
-                u8 button;              /* snapshot button pressed (R/O) */
-                u8 cradled;             /* microscope is in cradle (R/O) */
-        } qx3;
 	struct {
 		u8 colStart;		/* skip first 8*colStart pixels */
 		u8 colEnd;		/* finish at 8*colEnd pixels */
@@ -242,7 +226,8 @@ enum v4l_camstates {
 #define FRAME_NUM	2	/* double buffering for now */
 
 struct cam_data {
-	struct list_head cam_data_list;
+	struct cam_data **previous;
+	struct cam_data *next;
 
         struct semaphore busy_lock;     /* guard against SMP multithreading */
 	struct cpia_camera_ops *ops;	/* lowlevel driver operations */
@@ -393,14 +378,12 @@ void cpia_unregister_camera(struct cam_data *cam);
 /* ErrorCode */
 #define ERROR_FLICKER_BELOW_MIN_EXP     0x01 /*flicker exposure got below minimum exposure */
 
-#define ALOG(function,lineno,fmt,args...) printk(fmt, function, lineno, ##args)
-#define LOG(fmt,args...) ALOG((__FUNCTION__), (__LINE__), \
-			      KERN_INFO __FILE__":%s(%d):"fmt, ##args)
+#define ALOG(lineno,fmt,args...) printk(fmt,lineno,##args)
+#define LOG(fmt,args...) ALOG((__LINE__),KERN_INFO __FILE__":"__FUNCTION__"(%d):"fmt,##args)
 
 #ifdef _CPIA_DEBUG_
-#define ADBG(function,lineno,fmt,args...) printk(fmt, jiffies, function, lineno, ##args)
-#define DBG(fmt,args...) ADBG((__FUNCTION__), (__LINE__), \
-			      KERN_DEBUG __FILE__"(%ld):%s(%d):"fmt, ##args)
+#define ADBG(lineno,fmt,args...) printk(fmt, jiffies, lineno, ##args)
+#define DBG(fmt,args...) ADBG((__LINE__),KERN_DEBUG __FILE__"(%ld):"__FUNCTION__"(%d):"fmt,##args)
 #else
 #define DBG(fmn,args...) do {} while(0)
 #endif
@@ -409,6 +392,49 @@ void cpia_unregister_camera(struct cam_data *cam);
   DBG("%1d %1d %1d %1d %1d %1d %1d %1d \n",\
       (p)&0x80?1:0, (p)&0x40?1:0, (p)&0x20?1:0, (p)&0x10?1:0,\
         (p)&0x08?1:0, (p)&0x04?1:0, (p)&0x02?1:0, (p)&0x01?1:0);
+
+#define ADD_TO_LIST(l, drv) \
+  {\
+    lock_kernel();\
+    (drv)->next = l;\
+    (drv)->previous = &(l);\
+    (l) = drv;\
+    unlock_kernel();\
+  } while(0)
+
+#define REMOVE_FROM_LIST(drv) \
+  {\
+    if ((drv)->previous != NULL) {\
+      lock_kernel();\
+      if ((drv)->next != NULL)\
+        (drv)->next->previous = (drv)->previous;\
+      *((drv)->previous) = (drv)->next;\
+      (drv)->previous = NULL;\
+      (drv)->next = NULL;\
+      unlock_kernel();\
+    }\
+  } while (0)
+
+
+static inline void cpia_add_to_list(struct cam_data* l, struct cam_data* drv)
+{
+	drv->next = l;
+	drv->previous = &l;
+	l = drv;
+}
+
+
+static inline void cpia_remove_from_list(struct cam_data* drv)
+{
+	if (drv->previous != NULL) {
+		if (drv->next != NULL)
+			drv->next->previous = drv->previous;
+		*(drv->previous) = drv->next;
+		drv->previous = NULL;
+		drv->next = NULL;
+	}
+}
+
 
 #endif /* __KERNEL__ */
 

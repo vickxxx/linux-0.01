@@ -1,72 +1,99 @@
-/*
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
- * Copyright (C) 2000, 2001 Kanoj Sarcar
- * Copyright (C) 2000, 2001 Ralf Baechle
- * Copyright (C) 2000, 2001 Silicon Graphics, Inc.
- * Copyright (C) 2000, 2001 Broadcom Corporation
- */
 #include <linux/config.h>
-#include <linux/cache.h>
-#include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
 #include <linux/spinlock.h>
 #include <linux/threads.h>
-#include <linux/module.h>
 #include <linux/time.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
 
 #include <asm/atomic.h>
-#include <asm/cpu.h>
 #include <asm/processor.h>
 #include <asm/system.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 #include <asm/mmu_context.h>
-#include <asm/smp.h>
+#include <asm/irq.h>
+
+#ifdef CONFIG_SGI_IP27
+
+#include <asm/sn/arch.h>
+#include <asm/sn/intr.h>
+#include <asm/sn/addrs.h>
+#include <asm/sn/agent.h>
+#include <asm/sn/sn0/ip27.h>
+
+#define DORESCHED	0xab
+#define DOCALL		0xbc
+
+static void sendintr(int destid, unsigned char status)
+{
+	int irq;
+
+#if (CPUS_PER_NODE == 2)
+	switch (status) {
+		case DORESCHED:	irq = CPU_RESCHED_A_IRQ; break;
+		case DOCALL:	irq = CPU_CALL_A_IRQ; break;
+		default:	panic("sendintr");
+	}
+	irq += cputoslice(destid);
+
+	/*
+	 * Convert the compact hub number to the NASID to get the correct
+	 * part of the address space.  Then set the interrupt bit associated
+	 * with the CPU we want to send the interrupt to.
+	 */
+	REMOTE_HUB_SEND_INTR(COMPACT_TO_NASID_NODEID(cputocnode(destid)),
+			FAST_IRQ_TO_LEVEL(irq));
+#else
+	<< Bomb!  Must redefine this for more than 2 CPUS. >>
+#endif
+}
+
+#endif /* CONFIG_SGI_IP27 */
 
 /* The 'big kernel lock' */
-spinlock_t kernel_flag __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
+spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 int smp_threads_ready;	/* Not used */
 atomic_t smp_commenced = ATOMIC_INIT(0);
-
-atomic_t cpus_booted = ATOMIC_INIT(0);
-
-int smp_num_cpus = 1;			/* Number that came online.  */
-cpumask_t cpu_online_map;		/* Bitmask of currently online CPUs */
+struct cpuinfo_mips cpu_data[NR_CPUS];
+int smp_num_cpus = 1;		/* Number that came online.  */
 int __cpu_number_map[NR_CPUS];
 int __cpu_logical_map[NR_CPUS];
 cycles_t cacheflush_time;
 
-EXPORT_SYMBOL(__cpu_number_map);
-EXPORT_SYMBOL(__cpu_logical_map);
-
-void __init smp_callin(void)
+static void smp_tune_scheduling (void)
 {
-#if 0
-	calibrate_delay();
-	smp_store_cpu_info(cpuid);
-#endif
+}
+
+void __init smp_boot_cpus(void)
+{
+	extern void allowboot(void);
+
+	init_new_context(current, &init_mm);
+	current->processor = 0;
+	init_idle();
+	smp_tune_scheduling();
+	allowboot();
 }
 
 void __init smp_commence(void)
 {
 	wmb();
-	atomic_set(&smp_commenced, 1);
+	atomic_set(&smp_commenced,1);
+}
+
+static void stop_this_cpu(void *dummy)
+{
+	/*
+	 * Remove this CPU
+	 */
+	for (;;);
+}
+
+void smp_send_stop(void)
+{
+	smp_call_function(stop_this_cpu, NULL, 1, 0);
+	smp_num_cpus = 1;
 }
 
 /*
@@ -76,12 +103,14 @@ void __init smp_commence(void)
  */
 void smp_send_reschedule(int cpu)
 {
-	core_send_ipi(cpu, SMP_RESCHEDULE_YOURSELF);
+	sendintr(cpu, DORESCHED);
 }
 
-spinlock_t smp_call_lock = SPIN_LOCK_UNLOCKED;
-
-struct call_data_struct *call_data;
+/* Not really SMP stuff ... */
+int setup_profiling_timer(unsigned int multiplier)
+{
+	return 0;
+}
 
 /*
  * Run a function on all other CPUs.
@@ -94,14 +123,22 @@ struct call_data_struct *call_data;
  * Does not return until remote CPUs are nearly ready to execute <func>
  * or are or have executed.
  */
-int smp_call_function (void (*func) (void *info), void *info, int retry,
+static volatile struct call_data_struct {
+	void (*func) (void *info);
+	void *info;
+	atomic_t started;
+	atomic_t finished;
+	int wait;
+} *call_data;
+
+int smp_call_function (void (*func) (void *info), void *info, int retry, 
 								int wait)
 {
 	struct call_data_struct data;
-	int i, cpus = smp_num_cpus - 1;
-	int cpu = smp_processor_id();
+	int i, cpus = smp_num_cpus-1;
+	static spinlock_t lock = SPIN_LOCK_UNLOCKED;
 
-	if (!cpus)
+	if (cpus == 0)
 		return 0;
 
 	data.func = func;
@@ -111,14 +148,12 @@ int smp_call_function (void (*func) (void *info), void *info, int retry,
 	if (wait)
 		atomic_set(&data.finished, 0);
 
-	spin_lock(&smp_call_lock);
+	spin_lock_bh(&lock);
 	call_data = &data;
-	wmb();
-
 	/* Send a message to all other CPUs and wait for them to respond */
 	for (i = 0; i < smp_num_cpus; i++)
-		if (i != cpu)
-			core_send_ipi(i, SMP_CALL_FUNCTION);
+		if (smp_processor_id() != i)
+			sendintr(i, DOCALL);
 
 	/* Wait for response */
 	/* FIXME: lock-up detection, backtrace on lock-up */
@@ -128,87 +163,53 @@ int smp_call_function (void (*func) (void *info), void *info, int retry,
 	if (wait)
 		while (atomic_read(&data.finished) != cpus)
 			barrier();
-	spin_unlock(&smp_call_lock);
-
+	spin_unlock_bh(&lock);
 	return 0;
 }
 
-void smp_call_function_interrupt(void)
+extern void smp_call_function_interrupt(int irq, void *d, struct pt_regs *r)
 {
 	void (*func) (void *info) = call_data->func;
 	void *info = call_data->info;
 	int wait = call_data->wait;
-	int cpu = smp_processor_id();
 
-	irq_enter(cpu, 0);	/* XXX choose an irq number? */
 	/*
 	 * Notify initiating CPU that I've grabbed the data and am
 	 * about to execute the function.
 	 */
-	mb();
 	atomic_inc(&call_data->started);
 
 	/*
 	 * At this point the info structure may be out of scope unless wait==1.
 	 */
 	(*func)(info);
-	if (wait) {
-		mb();
+	if (wait)
 		atomic_inc(&call_data->finished);
-	}
-	irq_exit(cpu, 0);	/* XXX choose an irq number? */
 }
-
-static void stop_this_cpu(void *dummy)
-{
-	/*
-	 * Remove this CPU:
-	 */
-	clear_bit(smp_processor_id(), &cpu_online_map);
-	/* May need to service _machine_restart IPI */
-	local_irq_enable();
-	/* XXXKW wait if available? */
-	for (;;);
-}
-
-void smp_send_stop(void)
-{
-	smp_call_function(stop_this_cpu, NULL, 1, 0);
-	/*
-	 * Fix me: this prevents future IPIs, for example that would
-	 * cause a restart to happen on CPU0.
-	 */
-	smp_num_cpus = 1;
-}
-
-/* Not really SMP stuff ... */
-int setup_profiling_timer(unsigned int multiplier)
-{
-	return 0;
-}
+	
 
 static void flush_tlb_all_ipi(void *info)
 {
-	local_flush_tlb_all();
+	_flush_tlb_all();
 }
 
 void flush_tlb_all(void)
 {
 	smp_call_function(flush_tlb_all_ipi, 0, 1, 1);
-	local_flush_tlb_all();
+	_flush_tlb_all();
 }
 
 static void flush_tlb_mm_ipi(void *mm)
 {
-	local_flush_tlb_mm((struct mm_struct *)mm);
+	_flush_tlb_mm((struct mm_struct *)mm);
 }
 
 /*
- * The following tlb flush calls are invoked when old translations are
+ * The following tlb flush calls are invoked when old translations are 
  * being torn down, or pte attributes are changing. For single threaded
  * address spaces, a new context is obtained on the current cpu, and tlb
  * context on other cpus are invalidated to force a new context allocation
- * at switch_mm time, should the mm ever be used on other cpus. For
+ * at switch_mm time, should the mm ever be used on other cpus. For 
  * multithreaded address spaces, intercpu interrupts have to be sent.
  * Another case where intercpu interrupts are required is when the target
  * mm might be active on another cpu (eg debuggers doing the flushes on
@@ -224,9 +225,9 @@ void flush_tlb_mm(struct mm_struct *mm)
 		int i;
 		for (i = 0; i < smp_num_cpus; i++)
 			if (smp_processor_id() != i)
-				cpu_context(i, mm) = 0;
+				CPU_CONTEXT(i, mm) = 0;
 	}
-	local_flush_tlb_mm(mm);
+	_flush_tlb_mm(mm);
 }
 
 struct flush_tlb_data {
@@ -240,7 +241,7 @@ static void flush_tlb_range_ipi(void *info)
 {
 	struct flush_tlb_data *fd = (struct flush_tlb_data *)info;
 
-	local_flush_tlb_range(fd->mm, fd->addr1, fd->addr2);
+	_flush_tlb_range(fd->mm, fd->addr1, fd->addr2);
 }
 
 void flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
@@ -256,16 +257,16 @@ void flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long en
 		int i;
 		for (i = 0; i < smp_num_cpus; i++)
 			if (smp_processor_id() != i)
-				cpu_context(i, mm) = 0;
+				CPU_CONTEXT(i, mm) = 0;
 	}
-	local_flush_tlb_range(mm, start, end);
+	_flush_tlb_range(mm, start, end);
 }
 
 static void flush_tlb_page_ipi(void *info)
 {
 	struct flush_tlb_data *fd = (struct flush_tlb_data *)info;
 
-	local_flush_tlb_page(fd->vma, fd->addr1);
+	_flush_tlb_page(fd->vma, fd->addr1);
 }
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
@@ -280,16 +281,8 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 		int i;
 		for (i = 0; i < smp_num_cpus; i++)
 			if (smp_processor_id() != i)
-				cpu_context(i, vma->vm_mm) = 0;
+				CPU_CONTEXT(i, vma->vm_mm) = 0;
 	}
-	local_flush_tlb_page(vma, page);
+	_flush_tlb_page(vma, page);
 }
 
-EXPORT_SYMBOL(smp_num_cpus);
-EXPORT_SYMBOL(flush_tlb_page);
-EXPORT_SYMBOL(synchronize_irq);
-EXPORT_SYMBOL(kernel_flag);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);

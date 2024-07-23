@@ -105,6 +105,13 @@
 #include <net/syncppp.h>
 #include "cosa.h"
 
+/* Linux version stuff */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
+typedef struct wait_queue *wait_queue_head_t;
+#define DECLARE_WAITQUEUE(wait, current) \
+	struct wait_queue wait = { current, NULL }
+#endif
+
 /* Maximum length of the identification string. */
 #define COSA_MAX_ID_STRING	128
 
@@ -228,8 +235,8 @@ static int io[MAX_CARDS+1]  = { 0x220, 0x228, 0x210, 0x218, 0, };
 /* NOTE: DMA is not autoprobed!!! */
 static int dma[MAX_CARDS+1] = { 1, 7, 1, 7, 1, 7, 1, 7, 0, };
 #else
-static int io[MAX_CARDS+1];
-static int dma[MAX_CARDS+1];
+int io[MAX_CARDS+1]  = { 0, };
+int dma[MAX_CARDS+1] = { 0, };
 #endif
 /* IRQ can be safely autoprobed */
 static int irq[MAX_CARDS+1] = { -1, -1, -1, -1, -1, -1, 0, };
@@ -611,8 +618,7 @@ static void sppp_channel_delete(struct channel_data *chan)
 static int cosa_sppp_open(struct net_device *d)
 {
 	struct channel_data *chan = d->priv;
-	int err;
-	unsigned long flags;
+	int err, flags;
 
 	if (!(chan->cosa->firmware_status & COSA_FW_START)) {
 		printk(KERN_NOTICE "%s: start the firmware first (status %d)\n",
@@ -683,7 +689,7 @@ static void cosa_sppp_timeout(struct net_device *dev)
 static int cosa_sppp_close(struct net_device *d)
 {
 	struct channel_data *chan = d->priv;
-	unsigned long flags;
+	int flags;
 
 	netif_stop_queue(d);
 	sppp_close(d);
@@ -780,7 +786,7 @@ static ssize_t cosa_read(struct file *file,
 	char *buf, size_t count, loff_t *ppos)
 {
 	DECLARE_WAITQUEUE(wait, current);
-	unsigned long flags;
+	int flags;
 	struct channel_data *chan = (struct channel_data *)file->private_data;
 	struct cosa_data *cosa = chan->cosa;
 	char *kbuf;
@@ -857,7 +863,7 @@ static ssize_t cosa_write(struct file *file,
 	DECLARE_WAITQUEUE(wait, current);
 	struct channel_data *chan = (struct channel_data *)file->private_data;
 	struct cosa_data *cosa = chan->cosa;
-	unsigned long flags;
+	unsigned int flags;
 	char *kbuf;
 
 	if (!(cosa->firmware_status & COSA_FW_START)) {
@@ -1030,8 +1036,7 @@ static inline int cosa_download(struct cosa_data *cosa, struct cosa_download *d)
 		return -EPERM;
 	}
 
-	if (verify_area(VERIFY_READ, d, sizeof(*d)) ||
-	    __get_user(addr, &(d->addr)) ||
+	if (get_user(addr, &(d->addr)) ||
 	    __get_user(len, &(d->len)) ||
 	    __get_user(code, &(d->code)))
 		return -EFAULT;
@@ -1072,8 +1077,7 @@ static inline int cosa_readmem(struct cosa_data *cosa, struct cosa_download *d)
 		return -EPERM;
 	}
 
-	if (verify_area(VERIFY_READ, d, sizeof(*d)) ||
-	    __get_user(addr, &(d->addr)) ||
+	if (get_user(addr, &(d->addr)) ||
 	    __get_user(len, &(d->len)) ||
 	    __get_user(code, &(d->code)))
 		return -EFAULT;
@@ -1081,7 +1085,7 @@ static inline int cosa_readmem(struct cosa_data *cosa, struct cosa_download *d)
 	/* If something fails, force the user to reset the card */
 	cosa->firmware_status &= ~COSA_FW_RESET;
 
-	if ((i=readmem(cosa, code, len, addr)) < 0) {
+	if ((i=readmem(cosa, d->code, len, addr)) < 0) {
 		printk(KERN_NOTICE "cosa%d: reading memory failed: %d\n",
 			cosa->num, i);
 		return -EIO;
@@ -1248,7 +1252,7 @@ static void cosa_disable_rx(struct channel_data *chan)
 static int cosa_start_tx(struct channel_data *chan, char *buf, int len)
 {
 	struct cosa_data *cosa = chan->cosa;
-	unsigned long flags;
+	int flags;
 #ifdef DEBUG_DATA
 	int i;
 
@@ -1274,7 +1278,7 @@ static int cosa_start_tx(struct channel_data *chan, char *buf, int len)
 
 static void put_driver_status(struct cosa_data *cosa)
 {
-	unsigned long flags;
+	unsigned flags=0;
 	int status;
 
 	spin_lock_irqsave(&cosa->lock, flags);
@@ -1342,7 +1346,7 @@ static void put_driver_status_nolock(struct cosa_data *cosa)
  */
 static void cosa_kick(struct cosa_data *cosa)
 {
-	unsigned long flags, flags1;
+	unsigned flags, flags1;
 	char *s = "(probably) IRQ";
 
 	if (test_bit(RXBIT, &cosa->rxtx))

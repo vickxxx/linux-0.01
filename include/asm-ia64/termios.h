@@ -2,8 +2,8 @@
 #define _ASM_IA64_TERMIOS_H
 
 /*
- * Modified 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1999 Hewlett-Packard Co
+ * Copyright (C) 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * 99/01/28	Added N_IRDA and N_SMSBLOCK
  */
@@ -43,8 +43,6 @@ struct termio {
 #define TIOCM_OUT1	0x2000
 #define TIOCM_OUT2	0x4000
 #define TIOCM_LOOP	0x8000
-
-#define TIOCM_MODEM_BITS       TIOCM_OUT2      /* IRDA support */
 
 /* ioctl (fd, TIOCSERGETLSR, &result) where result may be as below */
 

@@ -3,7 +3,7 @@
 /*
  *      esssolo1.c  --  ESS Technology Solo1 (ES1946) audio driver.
  *
- *      Copyright (C) 1998-2001, 2003  Thomas Sailer (t.sailer@alumni.ethz.ch)
+ *      Copyright (C) 1998-2001  Thomas Sailer (t.sailer@alumni.ethz.ch)
  *
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
@@ -82,7 +82,6 @@
  *    22.05.2001   0.19  more cleanups, changed PM to PCI 2.4 style, got rid
  *                       of global list of devices, using pci device data.
  *                       Marcus Meissner <mm@caldera.de>
- *    03.01.2003   0.20  open_mode fixes from Georg Acher <acher@in.tum.de>
  */
 
 /*****************************************************************************/
@@ -1469,7 +1468,7 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
 		spin_unlock_irqrestore(&s->lock, flags);
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
@@ -1493,7 +1492,7 @@ static int solo1_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		       cinfo.bytes, cinfo.blocks, cinfo.ptr, s->dma_dac.buforder, s->dma_dac.numfrag, s->dma_dac.fragshift,
 		       s->dma_dac.swptr, s->dma_dac.count, s->dma_dac.fragsize, s->dma_dac.dmasize, s->dma_dac.fragsamples);
 #endif
-                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo)) ? -EFAULT : 0;
+                return copy_to_user((void *)arg, &cinfo, sizeof(cinfo));
 
         case SNDCTL_DSP_GETBLKSIZE:
 		if (file->f_mode & FMODE_WRITE) {
@@ -1968,8 +1967,12 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK)
-				break;
+			if (file->f_flags & O_NONBLOCK) {
+				remove_wait_queue(&s->midi.owait, &wait);
+				set_current_state(TASK_RUNNING);
+				unlock_kernel();
+				return -EBUSY;
+			}
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				printk(KERN_DEBUG "solo1: midi timed out??\n");
@@ -1978,7 +1981,7 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
-	s->open_mode &= ~((file->f_mode << FMODE_MIDI_SHIFT) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE));
+	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
 	spin_lock_irqsave(&s->lock, flags);
 	if (!(s->open_mode & (FMODE_MIDI_READ | FMODE_MIDI_WRITE))) {
 		outb(0x30, s->iobase + 7); /* enable A1, A2 irq's */
@@ -2378,9 +2381,9 @@ static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device
 	return 0;
 
  err:
-	unregister_sound_special(s->dev_dmfm);
+	unregister_sound_dsp(s->dev_dmfm);
  err_dev4:
-	unregister_sound_midi(s->dev_midi);
+	unregister_sound_dsp(s->dev_midi);
  err_dev3:
 	unregister_sound_mixer(s->dev_mixer);
  err_dev2:
@@ -2391,13 +2394,13 @@ static int __devinit solo1_probe(struct pci_dev *pcidev, const struct pci_device
  err_irq:
 	if (s->gameport.io)
 		release_region(s->gameport.io, GAMEPORT_EXTENT);
-	release_region(s->mpubase, MPUBASE_EXTENT);
- err_region4:
-	release_region(s->ddmabase, DDMABASE_EXTENT);
- err_region3:
-	release_region(s->sbbase+FMSYNTH_EXTENT, SBBASE_EXTENT-FMSYNTH_EXTENT);
- err_region2:
 	release_region(s->iobase, IOBASE_EXTENT);
+ err_region4:
+	release_region(s->sbbase+FMSYNTH_EXTENT, SBBASE_EXTENT-FMSYNTH_EXTENT);
+ err_region3:
+	release_region(s->ddmabase, DDMABASE_EXTENT);
+ err_region2:
+	release_region(s->mpubase, MPUBASE_EXTENT);
  err_region1:
 	kfree(s);
 	return ret;
@@ -2453,7 +2456,7 @@ static int __init init_solo1(void)
 {
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "solo1: version v0.20 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "solo1: version v0.19 time " __TIME__ " " __DATE__ "\n");
 	if (!pci_register_driver(&solo1_driver)) {
 		pci_unregister_driver(&solo1_driver);
                 return -ENODEV;

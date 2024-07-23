@@ -1,4 +1,4 @@
-/* $Id: isar.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: isar.h,v 1.9.6.2 2001/09/23 22:24:49 kai Exp $
  *
  * ISAR (Siemens PSB 7110) specific defines
  *
@@ -28,8 +28,6 @@
 #define ISAR_HIS_FIRM		0x1e
 #define ISAR_HIS_STDSP		0x08
 #define ISAR_HIS_DIAG		0x05
-#define ISAR_HIS_WAITSTATE	0x27
-#define ISAR_HIS_TIMERIRQ	0x25
 #define ISAR_HIS_P0CFG		0x3c
 #define ISAR_HIS_P12CFG		0x24
 #define ISAR_HIS_SARTCFG	0x25	
@@ -44,10 +42,6 @@
 #define ISAR_HIS_DPS1		0x40
 #define ISAR_HIS_DPS2		0x80
 #define SET_DPS(x)		((x<<6) & 0xc0)
-
-#define ISAR_CMD_TIMERIRQ_OFF	0x20
-#define ISAR_CMD_TIMERIRQ_ON	0x21
-
 
 #define ISAR_IIS_MSCMSD		0x3f
 #define ISAR_IIS_VNR		0x15
@@ -212,8 +206,6 @@
 #define STFAX_ACTIV	4
 #define STFAX_ESCAPE	5
 #define STFAX_SILDET	6
-
-#define ISDN_FAXPUMP_HALT	100
 
 extern int ISARVersion(struct IsdnCardState *cs, char *s);
 extern void isar_int_main(struct IsdnCardState *cs);

@@ -126,10 +126,10 @@ static ssize_t watchdog_write(struct file *file, const char *data, size_t len, l
 static int watchdog_ioctl(struct inode *inode, struct file *file,
 	unsigned int cmd, unsigned long arg)
 {
-	int i, new_margin;
+	int i;
 	static struct watchdog_info ident=
 	{
-		WDIOF_SETTIMEOUT,
+		0,
 		0,
 		"Footbridge Watchdog"
 	};
@@ -138,26 +138,17 @@ static int watchdog_ioctl(struct inode *inode, struct file *file,
 		default:
 			return -ENOTTY;
 		case WDIOC_GETSUPPORT:
-			if(copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident)))
-				return -EFAULT;
-			return 0;
+			i = verify_area(VERIFY_WRITE, (void*) arg, sizeof(struct watchdog_info));
+			if (i)
+				return i;
+			else
+				return copy_to_user((struct watchdog_info *)arg, &ident, sizeof(ident));
 		case WDIOC_GETSTATUS:
 		case WDIOC_GETBOOTSTATUS:
 			return put_user(0,(int *)arg);
 		case WDIOC_KEEPALIVE:
 			watchdog_ping();
 			return 0;
-		case WDIOC_SETTIMEOUT:
-			if (get_user(new_margin, (int *)arg))
-				return -EFAULT;
-			/* Arbitrary, can't find the card's limits */
-			if ((new_marg < 0) || (new_margin > 60))
-				return -EINVAL;
-			soft_margin = new_margin;
-			watchdog_ping();
-			/* Fall */
-		case WDIOC_GETTIMEOUT:
-			return put_user(soft_margin, (int *)arg);
 	}
 }
 
@@ -179,15 +170,10 @@ static struct miscdevice watchdog_miscdev=
 
 static int __init footbridge_watchdog_init(void)
 {
-	int retval;
-
 	if (machine_is_netwinder())
 		return -ENODEV;
 
-	retval = misc_register(&watchdog_miscdev);
-	if(retval < 0)
-		return retval;
-
+	misc_register(&watchdog_miscdev);
 	printk("Footbridge Watchdog Timer: 0.01, timer margin: %d sec\n", 
 	       soft_margin);
 	if (machine_is_cats())

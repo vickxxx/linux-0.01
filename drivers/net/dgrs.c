@@ -982,7 +982,7 @@ dgrs_download(struct net_device *dev0)
 {
 	DGRS_PRIV	*priv0 = (DGRS_PRIV *) dev0->priv;
 	int		is;
-	unsigned long	i;
+	int		i;
 
 	static int	iv2is[16] = {
 				0, 0, 0, ES4H_IS_INT3,
@@ -1141,10 +1141,10 @@ int __init
 dgrs_probe1(struct net_device *dev)
 {
 	DGRS_PRIV	*priv = (DGRS_PRIV *) dev->priv;
-	unsigned long	i;
+	int		i;
 	int		rc;
 
-	printk(KERN_INFO "%s: Digi RightSwitch io=%lx mem=%lx irq=%d plx=%lx dma=%lx\n",
+	printk("%s: Digi RightSwitch io=%lx mem=%lx irq=%d plx=%lx dma=%lx\n",
 		dev->name, dev->base_addr, dev->mem_start, dev->irq,
 		priv->plxreg, priv->plxdma);
 
@@ -1153,12 +1153,14 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	rc = dgrs_download(dev);
 	if (rc)
-		goto err_out;
+	{
+		return rc;
+	}
 
 	/*
 	 * Get ether address of board
 	 */
-	printk(KERN_INFO "%s: Ethernet address", dev->name);
+	printk("%s: Ethernet address", dev->name);
 	memcpy(dev->dev_addr, priv->port->ethaddr, 6);
 	for (i = 0; i < 6; ++i)
 		printk("%c%2.2x", i ? ':' : ' ', dev->dev_addr[i]);
@@ -1167,8 +1169,7 @@ dgrs_probe1(struct net_device *dev)
 	if (dev->dev_addr[0] & 1)
 	{
 		printk("%s: Illegal Ethernet Address\n", dev->name);
-		rc = -ENXIO;
-		goto err_out;
+		return (-ENXIO);
 	}
 
 	/*
@@ -1177,10 +1178,9 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	if (priv->plxreg)
 		OUTL(dev->base_addr + PLX_LCL2PCI_DOORBELL, 1);
-	
 	rc = request_irq(dev->irq, &dgrs_intr, SA_SHIRQ, "RightSwitch", dev);
 	if (rc)
-		goto err_out;
+		return (rc);
 
 	priv->intrcnt = 0;
 	for (i = jiffies + 2*HZ + HZ/2; time_after(i, jiffies); )
@@ -1191,22 +1191,16 @@ dgrs_probe1(struct net_device *dev)
 	}
 	if (priv->intrcnt < 2)
 	{
-		printk(KERN_ERR "%s: Not interrupting on IRQ %d (%d)\n",
+		printk("%s: Not interrupting on IRQ %d (%d)\n",
 				dev->name, dev->irq, priv->intrcnt);
-		rc = -ENXIO;
-		goto err_free_irq;
+		return (-ENXIO);
 	}
 
 	/*
 	 *	Register the /proc/ioports information...
 	 */
-	if (!request_region(dev->base_addr, 256, "RightSwitch")) {
-		printk(KERN_ERR "%s: io 0x%3lX, which is busy.\n", dev->name,
-				dev->base_addr);
-		rc = -EBUSY;
-		goto err_free_irq;
-	}
-	
+	request_region(dev->base_addr, 256, "RightSwitch");
+
 	/*
 	 *	Entry points...
 	 */
@@ -1217,12 +1211,7 @@ dgrs_probe1(struct net_device *dev)
 	dev->set_multicast_list = &dgrs_set_multicast_list;
 	dev->do_ioctl = &dgrs_ioctl;
 
-	return rc;
-
-err_free_irq:
-	free_irq(dev->irq, dev);
-err_out:
-       	return rc;
+	return (0);
 }
 
 int __init 
@@ -1279,10 +1268,8 @@ dgrs_found_device(
 	dev->init = dgrs_probe1;
 	SET_MODULE_OWNER(dev);
 	ether_setup(dev);
-	if (register_netdev(dev) != 0) {
-		kfree(dev);
+	if (register_netdev(dev) != 0)
 		return -EIO;
-	}
 
 	priv->next_dev = dgrs_root_dev;
 	dgrs_root_dev = dev;

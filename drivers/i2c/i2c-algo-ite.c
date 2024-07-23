@@ -38,6 +38,7 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
 #include <linux/ioport.h>
@@ -783,6 +784,7 @@ int i2c_iic_add_bus(struct i2c_adapter *adap)
 	MOD_INC_USE_COUNT;
 #endif
 
+	i2c_add_adapter(adap);
 	iic_init(iic_adap);
 
 	/* scan bus */
@@ -803,8 +805,7 @@ int i2c_iic_add_bus(struct i2c_adapter *adap)
 			udelay(iic_adap->udelay);
 		}
 	}
-
-	return i2c_add_adapter(adap);
+	return 0;
 }
 
 

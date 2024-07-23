@@ -61,19 +61,6 @@ unsigned char pckbd_sysrq_xlate[128] =
 	"\r\000/";					/* 0x60 - 0x6f */
 #endif
 
-/* Warning: do not redefine kbd_controller_present on ia64, mips and mips64 */
-#ifndef kbd_controller_present
-#define kbd_controller_present() keyboard_controller_present
-
-int keyboard_controller_present __initdata = 1;
-static int __init removable_keyb(char *str)
-{
-        keyboard_controller_present = 0;
-        return 0;
-}
-__setup("nokeyb", removable_keyb);
-#endif
-
 static void kbd_write_command_w(int data);
 static void kbd_write_output_w(int data);
 #ifdef CONFIG_PSMOUSE
@@ -908,11 +895,6 @@ static char * __init initialize_kbd(void)
 
 void __init pckbd_init_hw(void)
 {
-	if (!kbd_controller_present()) {
-		kbd_exists = 0;
-		return;
-	}
-
 	kbd_request_region();
 
 	/* Flush any pending input. */
@@ -1233,43 +1215,3 @@ static int __init psaux_init(void)
 }
 
 #endif /* CONFIG_PSMOUSE */
-
-
-static int blink_frequency = HZ/2;
-
-/* Tell the user who may be running in X and not see the console that we have 
-   panic'ed. This is to distingush panics from "real" lockups. 
-   Could in theory send the panic message as morse, but that is left as an
-   exercise for the reader.  */ 
-void panic_blink(void)
-{ 
-	static unsigned long last_jiffie;
-	static char led;
-	/* Roughly 1/2s frequency. KDB uses about 1s. Make sure it is 
-	   different. */
-	if (!blink_frequency) 
-		return;
-	if (jiffies - last_jiffie > blink_frequency) {
-		led ^= 0x01 | 0x04;
-		while (kbd_read_status() & KBD_STAT_IBF) mdelay(1); 
-		kbd_write_output(KBD_CMD_SET_LEDS);
-		mdelay(1); 
-		while (kbd_read_status() & KBD_STAT_IBF) mdelay(1); 
-		mdelay(1); 
-		kbd_write_output(led);
-		last_jiffie = jiffies;
-	}
-}  
-
-static int __init panicblink_setup(char *str)
-{
-    int par;
-    if (get_option(&str,&par)) 
-	    blink_frequency = par*(1000/HZ);
-    return 1;
-}
-
-/* panicblink=0 disables the blinking as it caused problems with some console
-   switches. otherwise argument is ms of a blink period. */
-__setup("panicblink=", panicblink_setup);
-

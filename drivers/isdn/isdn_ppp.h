@@ -1,4 +1,4 @@
-/* $Id: isdn_ppp.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+/* $Id: isdn_ppp.h,v 1.17.6.1 2001/09/23 22:24:32 kai Exp $
  *
  * header for Linux ISDN subsystem, functions for synchronous PPP (linklevel).
  *
@@ -19,7 +19,6 @@ extern int isdn_ppp_init(void);
 extern void isdn_ppp_cleanup(void);
 extern int isdn_ppp_free(isdn_net_local *);
 extern int isdn_ppp_bind(isdn_net_local *);
-extern int isdn_ppp_autodial_filter(struct sk_buff *, isdn_net_local *);
 extern int isdn_ppp_xmit(struct sk_buff *, struct net_device *);
 extern void isdn_ppp_receive(isdn_net_dev *, isdn_net_local *, struct sk_buff *);
 extern int isdn_ppp_dev_ioctl(struct net_device *, struct ifreq *, int);

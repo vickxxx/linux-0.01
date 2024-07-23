@@ -22,10 +22,12 @@
  * Our do_softirq out of line code.  See include/asm-arm/softirq.h for
  * the calling assembly.
  */
+	.section ".text.lock","ax"
 ENTRY(__do_softirq)
 	stmfd	sp!, {r0 - r3, ip, lr}
 	bl	do_softirq
 	ldmfd	sp!, {r0 - r3, ip, pc}
+	.previous
 
 	.align	5
 /*
@@ -34,7 +36,6 @@ ENTRY(__do_softirq)
  * stack.
  */
 ret_fast_syscall:
-	disable_irq r1				@ ensure IRQs are disabled
 	ldr	r1, [tsk, #TSK_NEED_RESCHED]
 	ldr	r2, [tsk, #TSK_SIGPENDING]
 	teq	r1, #0				@ need_resched || sigpending
@@ -46,35 +47,28 @@ ret_fast_syscall:
  * Ok, we need to do extra processing, enter the slow path.
  */
 slow:	str	r0, [sp, #S_R0+S_OFF]!	@ returned r0
-	teq	r1, #0
-	beq	1f
+	b	1f
 
 /*
  * "slow" syscall return path.  "why" tells us if this was a real syscall.
  */
 reschedule:
 	bl	SYMBOL_NAME(schedule)
-ret_disable_irq:
-	disable_irq r1				@ ensure IRQs are disabled
 ENTRY(ret_to_user)
 ret_slow_syscall:
 	ldr	r1, [tsk, #TSK_NEED_RESCHED]
 	ldr	r2, [tsk, #TSK_SIGPENDING]
-	teq	r1, #0				@ need_resched => schedule()
+1:	teq	r1, #0				@ need_resched => schedule()
 	bne	reschedule
-1:	teq	r2, #0				@ sigpending => do_signal()
-	bne	__do_signal
-restore:
+	teq	r2, #0				@ sigpending => do_signal()
+	blne	__do_signal
 	restore_user_regs
 
 __do_signal:
-	enable_irq r1
 	mov	r0, #0				@ NULL 'oldset'
 	mov	r1, sp				@ 'regs'
 	mov	r2, why				@ 'syscall'
-	bl	SYMBOL_NAME(do_signal)		@ note the bl above sets lr
-	disable_irq r1				@ ensure IRQs are disabled
-	b	restore
+	b	SYMBOL_NAME(do_signal)		@ note the bl above sets lr
 
 /*
  * This is how we return from a fork.  __switch_to will be calling us
@@ -87,11 +81,11 @@ ENTRY(ret_from_fork)
 	ldr	ip, [tsk, #TSK_PTRACE]		@ check for syscall tracing
 	mov	why, #1
 	tst	ip, #PT_TRACESYS		@ are we tracing syscalls?
-	beq	ret_disable_irq
+	beq	ret_slow_syscall
 	mov	r1, sp
 	mov	r0, #1				@ trace exit [IP = 1]
 	bl	SYMBOL_NAME(syscall_trace)
-	b	ret_disable_irq
+	b	ret_slow_syscall
 	
 
 #include "calls.S"
@@ -138,7 +132,7 @@ ENTRY(vector_swi)
 	ldr	ip, [ip]
 	mcr	p15, 0, ip, c1, c0		@ update control register
 #endif
-	enable_irq ip
+	enable_irqs ip
 
 	str	r4, [sp, #-S_OFF]!		@ push fifth arg
 
@@ -182,7 +176,7 @@ __sys_trace_return:
 	mov	r1, sp
 	mov	r0, #1				@ trace exit [IP = 1]
 	bl	SYMBOL_NAME(syscall_trace)
-	b	ret_disable_irq
+	b	ret_slow_syscall
 
 	.align	5
 #ifdef CONFIG_ALIGNMENT_TRAP

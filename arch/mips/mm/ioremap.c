@@ -14,10 +14,10 @@
 #include <asm/io.h>
 #include <asm/pgalloc.h>
 
-static inline void remap_area_pte(pte_t * pte, unsigned long address,
-	phys_t size, phys_t phys_addr, unsigned long flags)
+static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
+	unsigned long phys_addr, unsigned long flags)
 {
-	phys_t end;
+	unsigned long end;
 	pgprot_t pgprot = __pgprot(_PAGE_GLOBAL | _PAGE_PRESENT | __READABLE
 	                           | __WRITEABLE | flags);
 
@@ -39,10 +39,10 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address,
 	} while (address && (address < end));
 }
 
-static inline int remap_area_pmd(pmd_t * pmd, unsigned long address,
-	phys_t size, phys_t phys_addr, unsigned long flags)
+static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
+	unsigned long phys_addr, unsigned long flags)
 {
-	phys_t end;
+	unsigned long end;
 
 	address &= ~PGDIR_MASK;
 	end = address + size;
@@ -62,8 +62,8 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address,
 	return 0;
 }
 
-static int remap_area_pages(unsigned long address, phys_t phys_addr,
-	phys_t size, unsigned long flags)
+static int remap_area_pages(unsigned long address, unsigned long phys_addr,
+				 unsigned long size, unsigned long flags)
 {
 	int error;
 	pgd_t * dir;
@@ -94,17 +94,6 @@ static int remap_area_pages(unsigned long address, phys_t phys_addr,
 }
 
 /*
- * Allow physical addresses to be fixed up to help 36 bit 
- * peripherals.
- */
-static phys_t def_fixup_bigphys_addr(phys_t phys_addr, phys_t size)
-{
-	return phys_addr;
-}
-
-phys_t (*fixup_bigphys_addr)(phys_t phys_addr, phys_t size) = def_fixup_bigphys_addr;
-
-/*
  * Generic mapping function (not visible outside):
  */
 
@@ -118,16 +107,13 @@ phys_t (*fixup_bigphys_addr)(phys_t phys_addr, phys_t size) = def_fixup_bigphys_
  * caller shouldn't need to know that small detail.
  */
 
-#define IS_LOW512(addr) (!((phys_t)(addr) & (phys_t) ~0x1fffffffULL))
+#define IS_LOW512(addr) (!((unsigned long)(addr) & ~0x1fffffffUL))
 
-void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
+void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
 {
-	struct vm_struct * area;
-	unsigned long offset;
-	phys_t last_addr;
 	void * addr;
-
-	phys_addr = fixup_bigphys_addr(phys_addr, size);
+	struct vm_struct * area;
+	unsigned long offset, last_addr;
 
 	/* Don't allow wraparound or zero size */
 	last_addr = phys_addr + size - 1;
@@ -135,11 +121,10 @@ void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
 		return NULL;
 
 	/*
-	 * Map uncached objects in the low 512mb of address space using KSEG1,
-	 * otherwise map using page tables.
+	 * Map objects in the low 512mb of address space using KSEG1, otherwise
+	 * map using page tables.
 	 */
-	if (IS_LOW512(phys_addr) && IS_LOW512(last_addr) &&
-	    flags == _CACHE_UNCACHED)
+	if (IS_LOW512(phys_addr) && IS_LOW512(phys_addr + size - 1))
 		return (void *) KSEG1ADDR(phys_addr);
 
 	/*
@@ -151,7 +136,7 @@ void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
 
 		t_addr = __va(phys_addr);
 		t_end = t_addr + (size - 1);
-
+	   
 		for(page = virt_to_page(t_addr); page <= virt_to_page(t_end); page++)
 			if(!PageReserved(page))
 				return NULL;
@@ -162,7 +147,7 @@ void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr + 1) - phys_addr;
+	size = PAGE_ALIGN(last_addr) - phys_addr;
 
 	/*
 	 * Ok, go for it..

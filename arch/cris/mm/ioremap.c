@@ -13,7 +13,7 @@
 #include <asm/io.h>
 #include <asm/pgalloc.h>
 
-extern inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
+static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
 	unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
@@ -146,7 +146,7 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr+1) - phys_addr;
+	size = PAGE_ALIGN(last_addr) - phys_addr;
 
 	/*
 	 * Ok, go for it..

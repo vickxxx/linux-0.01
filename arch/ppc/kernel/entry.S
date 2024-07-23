@@ -1,5 +1,8 @@
 /*
- *  PowerPC version
+ * BK Id: SCCS/s.entry.S 1.22 08/15/01 22:43:06 paulus
+ */
+/*
+ *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *  Rewritten by Cort Dougan (cort@fsmlabs.com) for PReP
  *    Copyright (C) 1996 Cort Dougan <cort@fsmlabs.com>
@@ -16,9 +19,10 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *
+ *	
  */
 
+#include "ppc_asm.h"
 #include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sys.h>
@@ -27,8 +31,6 @@
 #include <asm/page.h>
 #include <asm/mmu.h>
 #include <asm/cputable.h>
-#include <asm/ppc_asm.h>
-#include "ppc_defs.h"
 
 #undef SHOW_SYSCALLS
 #undef SHOW_SYSCALLS_TASK
@@ -43,10 +45,6 @@ show_syscalls_task:
  * Handle a system call.
  */
 	.text
-	.stabs	"arch/ppc/kernel/",N_SO,0,0,0f
-	.stabs	"entry.S",N_SO,0,0,0f
-0:
-
 _GLOBAL(DoSyscall)
 	stw	r0,THREAD+LAST_SYSCALL(r2)
 	lwz	r11,_CCR(r1)	/* Clear SO bit in CR */
@@ -166,7 +164,8 @@ ret_from_syscall_1:
 	blrl			/* Call handler */
 	.globl	ret_from_syscall_2
 ret_from_syscall_2:
-	stw	r3,RESULT(r1)	/* Save result */
+	stw	r3,RESULT(r1)	/* Save result */	
+	stw	r3,GPR0(r1)	/* temporary gross hack to make strace work */
 	li	r10,-_LAST_ERRNO
 	cmpl	0,r3,r10
 	blt	60f
@@ -206,7 +205,7 @@ ret_from_syscall_2:
  *
  * The code which creates the new task context is in 'copy_thread'
  * in arch/ppc/kernel/process.c
- */
+ */	
 _GLOBAL(_switch)
 	stwu	r1,-INT_FRAME_SIZE(r1)
 	stw	r0,GPR0(r1)
@@ -217,7 +216,6 @@ _GLOBAL(_switch)
 	SAVE_8GPRS(14, r1)
 	SAVE_10GPRS(22, r1)
 	mflr	r20		/* Return to switch caller */
-	stw	r20,INT_FRAME_SIZE+4(r1)
 	mfmsr	r22
 	li	r0,MSR_FP	/* Disable floating-point */
 #ifdef CONFIG_ALTIVEC
@@ -225,12 +223,10 @@ BEGIN_FTR_SECTION
 	oris	r0,r0,MSR_VEC@h	/* Disable altivec */
 END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 #endif /* CONFIG_ALTIVEC */
-	and.	r0,r0,r22	/* FP or altivec enabled? */
-	beq+	1f
 	andc	r22,r22,r0
 	mtmsr	r22
 	isync
-1:	stw	r20,_NIP(r1)
+	stw	r20,_NIP(r1)
 	stw	r22,_MSR(r1)
 	stw	r20,_LINK(r1)
 	mfcr	r20
@@ -261,15 +257,6 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	mtlr	r4
 	addi	r1,r1,INT_FRAME_SIZE
 	blr
-
-	.globl	syscall_direct_return
-syscall_direct_return:
-	addi	r1,r3,-STACK_FRAME_OVERHEAD
-	lwz	r10,TASK_PTRACE(r2)
-	andi.	r10,r10,PT_TRACESYS
-	beq+	ret_from_except
-	bl	syscall_trace
-	b	ret_from_except
 
 	.globl	ret_from_fork
 ret_from_fork:
@@ -304,7 +291,7 @@ ret_from_except:
 	bl	do_signal
 	.globl	do_signal_ret
 do_signal_ret:
-	.globl ret_to_user_hook
+	.globl ret_to_user_hook	
 ret_to_user_hook:
 	nop
 restore:
@@ -316,17 +303,13 @@ restore:
 	REST_GPR(31,r1)
 
 	/* make sure we hard disable here, even if rtl is active, to protect
-	 * SRR[01] and SPRG2 -- Cort
+	 * SRR[01] and SPRG2 -- Cort 
 	 */
 	mfmsr	r0		/* Get current interrupt state */
 	rlwinm	r0,r0,0,17,15	/* clear MSR_EE in r0 */
-#ifdef CONFIG_4xx
- 	rlwinm	r0,r0,0,23,21	/* clear MSR_DE in r0 */
-#endif
 	SYNC			/* Some chip revs have problems here... */
 	mtmsr	r0		/* Update machine state */
 
-	PPC405_ERR77(0,r1)
 	stwcx.	r0,0,r1		/* to clear the reservation */
 
 	/* if returning to user mode, set new sprg2 and save kernel SP */
@@ -339,14 +322,6 @@ BEGIN_FTR_SECTION
 	mtspr	SPRN_VRSAVE,r0		/* if G4, restore VRSAVE reg */
 END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 #endif /* CONFIG_ALTIVEC */
-#if defined(CONFIG_4xx) && !defined(CONFIG_BDI_SWITCH)
-	/* Restore the processor debugging state of the thread.  Only do
-	 * this if we aren't using an Abatron BDI JTAG debugger.  It doesn't
-	 * tolerate others mucking with the debug registers.
-	 */
-	lwz	r0,THREAD+THREAD_DBCR0(r2)
-	mtspr	SPRN_DBCR0,r0
-#endif
 	addi	r0,r1,INT_FRAME_SIZE	/* size of frame */
 	stw	r0,THREAD+KSP(r2)	/* save kernel stack pointer */
 	tophys(r8,r1)
@@ -360,24 +335,13 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	REST_4GPRS(3, r1)
 	REST_2GPRS(7, r1)
 
-#ifndef CONFIG_SMP
 	/* We have to "dummy" load from the context save area in case
 	 * these instructions cause an MMU fault.  If this happens
 	 * after we load SRR0/SRR1, our return context is hosed.  -- Dan
-	 *
-	 * This workaround is not enough, we must also make sure the
-	 * actual code for this routine is in the TLB or BAT mapped.
-	 * For 6xx/Power3, we know the code is in a BAT, so this should
-	 * be enough in UP. In SMP, I limit lowmem to the amount of
-	 * RAM that can be BAT mapped. Other CPUs may need additional
-	 * tweaks, especially if used SMP or if the code for this routine
-	 * crosses page boundaries. The TLB pin down for 4xx should help
-	 * for example. --BenH.
 	 */
 	lwz	r0,GPR0(r1)
 	lwz	r0,GPR2(r1)
 	lwz	r0,GPR1(r1)
-#endif /* ndef CONFIG_SMP */
 
 	/* We re-use r3,r4 here (the load above was to cause the MMU
 	 * fault if necessary).  Using r3,r4 removes the need to "dummy"
@@ -398,12 +362,11 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	lwz	r4,GPR4(r1)
 	lwz	r1,GPR1(r1)
 	SYNC
-	PPC405_ERR77_SYNC
 	RFI
 
 
 /*
- * PROM code for specific machines follows.  Put it
+ * PROM code for specific machines follows.  Put it 
  * here so it's easy to add arch-specific sections later.
  * -- Cort
  */
@@ -428,9 +391,9 @@ enter_rtas:
 	mfmsr	r9
 	stw	r9,8(r1)
 	li	r0,0
-	ori	r0,r0,MSR_EE|MSR_SE|MSR_BE|MSR_FE0|MSR_FE1
+	ori	r0,r0,MSR_EE|MSR_SE|MSR_BE
 	andc	r0,r9,r0
-	li	r10,MSR_IR|MSR_DR|MSR_FP
+	li	r10,MSR_IR|MSR_DR|MSR_FE0|MSR_FE1|MSR_FP
 	andc	r9,r0,r10
 	SYNC			/* disable interrupts so SRR0/1 */
 	mtmsr	r0		/* don't get trashed */

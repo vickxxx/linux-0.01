@@ -27,7 +27,7 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_bmap.c,v 1.25 2002/01/02 23:36:55 hch Exp hch $"
+#ident "$Id: vxfs_bmap.c,v 1.23 2001/07/05 19:48:03 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - filesystem to disk block mapping.
@@ -64,46 +64,48 @@ vxfs_typdump(struct vxfs_typed *typ)
  *   The physical block number on success, else Zero.
  */
 static daddr_t
-vxfs_bmap_ext4(struct inode *ip, long bn)
+vxfs_bmap_ext4(struct inode *ip, long iblock)
 {
-	struct super_block *sb = ip->i_sb;
-	struct vxfs_inode_info *vip = VXFS_INO(ip);
-	unsigned long bsize = sb->s_blocksize;
-	u32 indsize = vip->vii_ext4.ve4_indsize;
-	int i;
-
-	if (indsize > sb->s_blocksize)
-		goto fail_size;
+	struct vxfs_inode_info		*vip = VXFS_INO(ip);
+	struct super_block		*sbp = ip->i_sb;
+	kdev_t				dev = ip->i_dev;
+	u_long				bsize = sbp->s_blocksize;
+	long				size = 0;
+	int				i;
 
 	for (i = 0; i < VXFS_NDADDR; i++) {
-		struct direct *d = vip->vii_ext4.ve4_direct + i;
-		if (bn >= 0 && bn < d->size)
-			return (bn + d->extent);
-		bn -= d->size;
+		struct direct		*dp = vip->vii_ext4.ve4_direct + i;
+
+#ifdef DIAGNOSTIC
+		printk(KERN_DEBUG "iblock: %ld, %d (size: %lu)\n", iblock, i, size);
+		printk(KERN_DEBUG "dp->extent: %d, dp->size: %d\n", dp->extent, dp->size);
+#endif
+
+		if (iblock >= size && iblock < (size + dp->size))
+			return ((iblock - size) + dp->extent);
+		size += dp->size;
 	}
 
-	if ((bn / (indsize * indsize * bsize / 4)) == 0) {
-		struct buffer_head *buf;
-		daddr_t	bno;
-		u32 *indir;
+	iblock -= size;
 
-		buf = sb_bread(sb, vip->vii_ext4.ve4_indir[0]);
-		if (!buf || !buffer_mapped(buf))
-			goto fail_buf;
+	if (!(iblock / (vip->vii_ext4.ve4_indsize * vip->vii_ext4.ve4_indsize * bsize >> 2))) {
+		struct buffer_head	*bp;
+		daddr_t			pblock;
 
-		indir = (u32 *)buf->b_data;
-		bno = indir[(bn/indsize) % (indsize*bn)] + (bn%indsize);
+		/*
+		 * XXX: is the second indir only used for
+		 *	double indirect extents?
+		 */
+		bp = bread(dev, vip->vii_ext4.ve4_indir[0],
+				bsize * ((vip->vii_ext4.ve4_indsize) / bsize) + 1);
+		pblock = *(bp->b_data + ((iblock / vip->vii_ext4.ve4_indsize) %
+					(vip->vii_ext4.ve4_indsize * bsize)));
 
-		brelse(buf);
-		return bno;
+		brelse(bp);
+		return (pblock + (iblock % vip->vii_ext4.ve4_indsize));
 	} else
 		printk(KERN_WARNING "no matching indir?");
 
-	return 0;
-
-fail_size:
-	printk("vxfs: indirect extent to big!\n");
-fail_buf:
 	return 0;
 }
 
@@ -135,8 +137,9 @@ vxfs_bmap_indir(struct inode *ip, long indir, int size, long block)
 		struct vxfs_typed	*typ;
 		int64_t			off;
 
-		bp = sb_bread(ip->i_sb,
-				indir + (i / VXFS_TYPED_PER_BLOCK(ip->i_sb)));
+		bp = bread(ip->i_dev,
+				indir + (i / VXFS_TYPED_PER_BLOCK(ip->i_sb)),
+				ip->i_sb->s_blocksize);
 		if (!buffer_mapped(bp))
 			return 0;
 

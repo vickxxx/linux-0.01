@@ -83,6 +83,8 @@ struct resource_list {
 extern struct resource ioport_resource;
 extern struct resource iomem_resource;
 
+extern int get_resource_list(struct resource *, char *buf, int size);
+
 extern int check_resource(struct resource *root, unsigned long, unsigned long);
 extern int request_resource(struct resource *root, struct resource *new);
 extern int release_resource(struct resource *new);
@@ -90,8 +92,7 @@ extern int allocate_resource(struct resource *root, struct resource *new,
 			     unsigned long size,
 			     unsigned long min, unsigned long max,
 			     unsigned long align,
-			     void (*alignf)(void *, struct resource *,
-					    unsigned long, unsigned long),
+			     void (*alignf)(void *, struct resource *, unsigned long),
 			     void *alignf_data);
 
 /* Convenience shorthand with allocation */
@@ -108,6 +109,9 @@ extern struct resource * __request_region(struct resource *, unsigned long start
 
 extern int __check_region(struct resource *, unsigned long, unsigned long);
 extern void __release_region(struct resource *, unsigned long, unsigned long);
+
+#define get_ioport_list(buf)	get_resource_list(&ioport_resource, buf, PAGE_SIZE)
+#define get_mem_list(buf)	get_resource_list(&iomem_resource, buf, PAGE_SIZE)
 
 #define HAVE_AUTOIRQ
 extern void autoirq_setup(int waittime);

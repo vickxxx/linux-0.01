@@ -53,15 +53,6 @@ struct disk_stat {
 
 #include "../kernel/fw-emu.c"
 
-/*
- * Set a break point on this function so that symbols are available to set breakpoints in
- * the kernel being debugged.
- */
-static void
-debug_break (void)
-{
-}
-
 static void
 cons_write (const char *buf)
 {
@@ -196,7 +187,6 @@ _start (void)
 
 	ssc(0, (long) kpath, 0, 0, SSC_LOAD_SYMBOLS);
 
-	debug_break();
 	asm volatile ("mov sp=%2; mov r28=%1; br.sptk.few %0"
 		      :: "b"(e_entry), "r"(bp), "r"(__pa(&stack)));
 

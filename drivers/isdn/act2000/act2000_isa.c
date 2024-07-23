@@ -1,4 +1,4 @@
-/* $Id: act2000_isa.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+/* $Id: act2000_isa.c,v 1.11.6.3 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000 (ISA-Version).
  *
@@ -178,8 +178,7 @@ act2000_isa_config_port(act2000_card * card, unsigned short portbase)
                 card->flags &= ~ACT2000_FLAGS_PVALID;
         }
         if (!check_region(portbase, ISA_REGION)) {
-                if (request_region(portbase, ACT2000_PORTLEN, card->regname) == NULL)
-			return -EIO;
+                request_region(portbase, ACT2000_PORTLEN, card->regname);
                 card->port = portbase;
                 card->flags |= ACT2000_FLAGS_PVALID;
                 return 0;

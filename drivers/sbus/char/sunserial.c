@@ -1,4 +1,4 @@
-/* $Id: sunserial.c,v 1.79.2.2 2002/01/05 01:12:31 davem Exp $
+/* $Id: sunserial.c,v 1.79 2001/04/18 21:06:17 davem Exp $
  * serial.c: Serial port driver infrastructure for the Sparc.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -139,7 +139,7 @@ struct sunkbd_operations kbd_ops = {
 	nop_getkeycode
 };
 
-#if defined(CONFIG_USB) || defined(CONFIG_USB_MODULE)
+#ifdef CONFIG_USB
 extern void pci_compute_shiftstate(void);
 extern int pci_setkeycode(unsigned int, unsigned int);
 extern int pci_getkeycode(unsigned int);
@@ -158,7 +158,7 @@ int kbd_init(void)
 		err = init->init();
 		init = init->next;
 	}
-#if defined(CONFIG_USB) || defined(CONFIG_USB_MODULE)
+#ifdef CONFIG_USB
 	if (!serial_console &&
 	    kbd_ops.compute_shiftstate == nop_compute_shiftstate) {
 		printk("kbd_init: Assuming USB keyboard.\n");

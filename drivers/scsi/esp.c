@@ -378,7 +378,7 @@ static inline void esp_advance_phase(Scsi_Cmnd *s, int newphase)
 #endif
 
 #ifdef DEBUG_ESP_CMDS
-static inline void esp_cmd(struct esp *esp, u8 cmd)
+extern inline void esp_cmd(struct esp *esp, u8 cmd)
 {
 	esp->espcmdlog[esp->espcmdent] = cmd;
 	esp->espcmdent = (esp->espcmdent + 1) & 31;
@@ -4368,4 +4368,4 @@ static Scsi_Host_Template driver_template = SCSI_SPARC_ESP;
 
 #include "scsi_module.c"
 
-MODULE_LICENSE("GPL");
+EXPORT_NO_SYMBOLS;

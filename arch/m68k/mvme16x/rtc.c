@@ -52,7 +52,6 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		cli();
 		/* Ensure clock and real-time-mode-register are accessible */
 		rtc->ctrl = RTC_READ;
-		memset(&wtime, 0, sizeof(struct rtc_time));
 		wtime.tm_sec =  BCD2BIN(rtc->bcd_sec);
 		wtime.tm_min =  BCD2BIN(rtc->bcd_min);
 		wtime.tm_hour = BCD2BIN(rtc->bcd_hr);
@@ -169,6 +168,7 @@ int __init rtc_MK48T08_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "MK48T08 Real Time Clock Driver v%s\n", RTC_VERSION);
-	return misc_register(&rtc_dev);
+	misc_register(&rtc_dev);
+	return 0;
 }
 

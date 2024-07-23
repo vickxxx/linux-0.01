@@ -54,7 +54,7 @@
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 #include <linux/zorro.h>
-
+#include <asm/io.h>
 #include <asm/irq.h>
 
 #include "ariadne.h"
@@ -577,7 +577,6 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
     volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     int entry;
     unsigned long flags;
-    int len = skb->len;
 
 #if 0
     if (ariadne_debug > 3) {
@@ -587,15 +586,6 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	lance->RDP = 0x0000;
     }
 #endif
-
-    /* FIXME: is the 79C960 new enough to do its own padding right ? */
-    if(skb->len < ETH_ZLEN)
-    {
-    	skb = skb_padto(skb, ETH_ZLEN);
-    	if(skb == NULL)
-    	    return 0;
-    	len = ETH_ZLEN;
-    }
 
     /* Fill in a Tx ring entry */
 
@@ -627,7 +617,8 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     priv->tx_ring[entry]->TMD2 = swapw((u_short)-skb->len);
     priv->tx_ring[entry]->TMD3 = 0x0000;
-    memcpyw(priv->tx_buff[entry], (u_short *)skb->data, len);
+    memcpyw(priv->tx_buff[entry], (u_short *)skb->data,
+	    skb->len <= ETH_ZLEN ? ETH_ZLEN : skb->len);
 
 #if 0
     {
@@ -856,5 +847,3 @@ static void __exit ariadne_cleanup(void)
 
 module_init(ariadne_probe);
 module_exit(ariadne_cleanup);
-
-MODULE_LICENSE("GPL");

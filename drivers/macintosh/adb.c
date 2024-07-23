@@ -34,7 +34,6 @@
 #include <linux/wait.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/completion.h>
 #include <asm/uaccess.h>
 #ifdef CONFIG_PPC
 #include <asm/prom.h>
@@ -64,7 +63,7 @@ static struct adb_driver *adb_driver_list[] = {
 #ifdef CONFIG_ADB_IOP
 	&adb_iop_driver,
 #endif
-#if defined(CONFIG_ADB_PMU) || defined(CONFIG_ADB_PMU68K)
+#ifdef CONFIG_ADB_PMU
 	&via_pmu_driver,
 #endif
 #ifdef CONFIG_ADB_MACIO
@@ -78,8 +77,8 @@ struct notifier_block *adb_client_list = NULL;
 static int adb_got_sleep = 0;
 static int adb_inited = 0;
 static pid_t adb_probe_task_pid;
-static DECLARE_MUTEX(adb_probe_mutex);
-static struct completion adb_probe_task_comp;
+static int adb_probe_task_flag;
+static wait_queue_head_t adb_probe_task_wq;
 static int sleepy_trackpad;
 int __adb_probe_sync;
 
@@ -242,8 +241,7 @@ adb_probe_task(void *x)
 	printk(KERN_INFO "adb: finished probe task...\n");
 	
 	adb_probe_task_pid = 0;
-	up(&adb_probe_mutex);
-	
+	clear_bit(0, &adb_probe_task_flag);
 	return 0;
 }
 
@@ -252,10 +250,6 @@ __adb_probe_task(void *data)
 {
 	adb_probe_task_pid = kernel_thread(adb_probe_task, NULL,
 		SIGCHLD | CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-	if (adb_probe_task_pid < 0) {
-		adb_probe_task_pid = 0;
-		printk(KERN_ERR "adb: failed to create probe task !\n");
-	}
 }
 
 int
@@ -269,8 +263,14 @@ adb_reset_bus(void)
 		do_adb_reset_bus();
 		return 0;
 	}
+		
+	/* We need to get a lock on the probe thread */
+	while (test_and_set_bit(0, &adb_probe_task_flag))
+		schedule();
 
-	down(&adb_probe_mutex);
+	/* Just wait for PID to be 0 just in case (possible race) */
+	while (adb_probe_task_pid != 0)
+		schedule();
 
 	/* Create probe thread as a child of keventd */
 	if (current_is_keventd())
@@ -315,12 +315,10 @@ int __init adb_init(void)
 #ifdef CONFIG_PMAC_PBOOK
 		pmu_register_sleep_notifier(&adb_sleep_notifier);
 #endif /* CONFIG_PMAC_PBOOK */
-#ifdef CONFIG_PPC
 		if (machine_is_compatible("AAPL,PowerBook1998") ||
 			machine_is_compatible("PowerBook1,1"))
 			sleepy_trackpad = 1;
-#endif /* CONFIG_PPC */
-		init_completion(&adb_probe_task_comp);
+		init_waitqueue_head(&adb_probe_task_wq);
 		adbdev_init();
 		adb_reset_bus();
 	}
@@ -342,20 +340,21 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 	case PBOOK_SLEEP_REQUEST:
 		adb_got_sleep = 1;
 		/* We need to get a lock on the probe thread */
-		down(&adb_probe_mutex);
-		/* Stop autopoll */
+		while (test_and_set_bit(0, &adb_probe_task_flag))
+			schedule();
+		/* Just wait for PID to be 0 just in case (possible race) */
+		while (adb_probe_task_pid != 0)
+			schedule();
 		if (adb_controller->autopoll)
 			adb_controller->autopoll(0);
 		ret = notifier_call_chain(&adb_client_list, ADB_MSG_POWERDOWN, NULL);
-		if (ret & NOTIFY_STOP_MASK) {
-			up(&adb_probe_mutex);
+		if (ret & NOTIFY_STOP_MASK)
 			return PBOOK_SLEEP_REFUSE;
-		}
 		break;
 	case PBOOK_SLEEP_REJECT:
 		if (adb_got_sleep) {
 			adb_got_sleep = 0;
-			up(&adb_probe_mutex);
+			clear_bit(0, &adb_probe_task_flag);
 			adb_reset_bus();
 		}
 		break;
@@ -364,7 +363,7 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 		break;
 	case PBOOK_WAKE:
 		adb_got_sleep = 0;
-		up(&adb_probe_mutex);
+		clear_bit(0, &adb_probe_task_flag);
 		adb_reset_bus();
 		break;
 	}
@@ -436,7 +435,7 @@ adb_poll(void)
 static void
 adb_probe_wakeup(struct adb_request *req)
 {
-	complete(&adb_probe_task_comp);
+	wake_up(&adb_probe_task_wq);
 }
 
 static struct adb_request adb_sreq;
@@ -485,11 +484,20 @@ adb_request(struct adb_request *req, void (*done)(struct adb_request *),
 	if ((flags & ADBREQ_SYNC) &&
 	    (current->pid && adb_probe_task_pid &&
 	    adb_probe_task_pid == current->pid)) {
+		DECLARE_WAITQUEUE(wait, current);
 		req->done = adb_probe_wakeup;
+		add_wait_queue(&adb_probe_task_wq, &wait);
 		rc = adb_controller->send_request(req, 0);
 		if (rc || req->complete)
 			goto bail;
-		wait_for_completion(&adb_probe_task_comp);
+		for (;;) {
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			if (req->complete)
+				break;
+			schedule();
+		}
+		current->state = TASK_RUNNING;
+		remove_wait_queue(&adb_probe_task_wq, &wait);
 		rc = 0;
 		goto bail;
 	}
@@ -596,6 +604,7 @@ adb_get_infos(int address, int *original_address, int *handler_id)
 	return (*original_address != 0);
 }
 
+
 /*
  * /dev/adb device driver.
  */
@@ -639,27 +648,6 @@ static void adb_write_done(struct adb_request *req)
 	spin_unlock_irqrestore(&state->lock, flags);
 }
 
-static int
-do_adb_query(struct adb_request *req)
-{
-	int	ret = -EINVAL;
-
-	switch(req->data[1])
-	{
-	case ADB_QUERY_GETDEVINFO:
-		if (req->nbytes < 3)
-			break;
-		req->reply[0] = adb_handler[req->data[2]].original_address;
-		req->reply[1] = adb_handler[req->data[2]].handler_id;
-		req->complete = 1;
-		req->reply_len = 2;
-		adb_write_done(req);
-		ret = 0;
-		break;
-	}
-	return ret;
-}
-
 static int adb_open(struct inode *inode, struct file *file)
 {
 	struct adbdev_state *state;
@@ -679,7 +667,6 @@ static int adb_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-/* FIXME: Should wait completion, dequeue & delete pending requests */
 static int adb_release(struct inode *inode, struct file *file)
 {
 	struct adbdev_state *state = file->private_data;
@@ -720,16 +707,17 @@ static ssize_t adb_read(struct file *file, char *buf,
 		return ret;
 
 	req = NULL;
-	spin_lock_irqsave(&state->lock, flags);
 	add_wait_queue(&state->wait_queue, &wait);
 	current->state = TASK_INTERRUPTIBLE;
 
 	for (;;) {
+		spin_lock_irqsave(&state->lock, flags);
 		req = state->completed;
 		if (req != NULL)
 			state->completed = req->next;
 		else if (atomic_read(&state->n_pending) == 0)
 			ret = -EIO;
+		spin_unlock_irqrestore(&state->lock, flags);
 		if (req != NULL || ret != 0)
 			break;
 		
@@ -741,15 +729,12 @@ static ssize_t adb_read(struct file *file, char *buf,
 			ret = -ERESTARTSYS;
 			break;
 		}
-		spin_unlock_irqrestore(&state->lock, flags);
 		schedule();
-		spin_lock_irqsave(&state->lock, flags);
 	}
 
 	current->state = TASK_RUNNING;
 	remove_wait_queue(&state->wait_queue, &wait);
-	spin_unlock_irqrestore(&state->lock, flags);
-	
+
 	if (ret)
 		return ret;
 
@@ -772,8 +757,6 @@ static ssize_t adb_write(struct file *file, const char *buf,
 
 	if (count < 2 || count > sizeof(req->data))
 		return -EINVAL;
-	if (adb_controller == NULL)
-		return -ENXIO;
 	ret = verify_area(VERIFY_READ, buf, count);
 	if (ret)
 		return ret;
@@ -793,35 +776,22 @@ static ssize_t adb_write(struct file *file, const char *buf,
 		goto out;
 
 	atomic_inc(&state->n_pending);
+	if (adb_controller == NULL) return -ENXIO;
 
-	/* If a probe is in progress or we are sleeping, wait for it to complete */
-	down(&adb_probe_mutex);
-
-	/* Queries are special requests sent to the ADB driver itself */
-	if (req->data[0] == ADB_QUERY) {
-		if (count > 1)
-			ret = do_adb_query(req);
-		else
-			ret = -EINVAL;
-		up(&adb_probe_mutex);
-	}
 	/* Special case for ADB_BUSRESET request, all others are sent to
 	   the controller */
-	else if ((req->data[0] == ADB_PACKET)&&(count > 1)
+	if ((req->data[0] == ADB_PACKET)&&(count > 1)
 		&&(req->data[1] == ADB_BUSRESET)) {
 		ret = do_adb_reset_bus();
-		up(&adb_probe_mutex);
 		atomic_dec(&state->n_pending);
-		if (ret == 0)
-			ret = count;
 		goto out;
 	} else {	
 		req->reply_expected = ((req->data[1] & 0xc) == 0xc);
+
 		if (adb_controller && adb_controller->send_request)
 			ret = adb_controller->send_request(req, 0);
 		else
 			ret = -ENXIO;
-		up(&adb_probe_mutex);
 	}
 
 	if (ret != 0) {

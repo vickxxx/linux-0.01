@@ -11,11 +11,13 @@
  * Delay routines
  */
 
+extern unsigned long loops_per_sec;
+
 static __inline__ void __delay(unsigned long loops) {
 	asm volatile(
-	"	.balignl	64,0x34000034\n"
-	"	addib,UV -1,%0,.\n"
-	"	nop\n"
+	"	.balignl	64,0x34000034
+		addib,UV -1,%0,.
+		nop"
 		: "=r" (loops) : "0" (loops));
 }
 
@@ -39,6 +41,5 @@ static __inline__ void __udelay(unsigned long usecs) {
 }
 
 #define udelay(n) __udelay(n)
-#define ndelay(n) __udelay(n/1000+1)
 
 #endif /* defined(_PARISC_DELAY_H) */

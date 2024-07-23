@@ -1,4 +1,4 @@
-/* $Id: divert_procfs.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: divert_procfs.c,v 1.11.6.2 2001/09/23 22:24:36 kai Exp $
  *
  * Filesystem handling for the diversion supplementary services.
  *
@@ -80,7 +80,6 @@ static ssize_t
 isdn_divert_read(struct file *file, char *buf, size_t count, loff_t * off)
 {
 	struct divert_info *inf;
-	loff_t pos = *off;
 	int len;
 
 	if (!*((struct divert_info **) file->private_data)) {
@@ -92,11 +91,11 @@ isdn_divert_read(struct file *file, char *buf, size_t count, loff_t * off)
 		return (0);
 
 	inf->usage_cnt--;	/* new usage count */
-	file->private_data = &inf->next;	/* next structure */
+	(struct divert_info **) file->private_data = &inf->next;	/* next structure */
 	if ((len = strlen(inf->info_start)) <= count) {
 		if (copy_to_user(buf, inf->info_start, len))
 			return -EFAULT;
-		*off = pos + len;
+		file->f_pos += len;
 		return (len);
 	}
 	return (0);
@@ -141,9 +140,9 @@ isdn_divert_open(struct inode *ino, struct file *filep)
 	cli();
 	if_used++;
 	if (divert_info_head)
-		filep->private_data = &(divert_info_tail->next);
+		(struct divert_info **) filep->private_data = &(divert_info_tail->next);
 	else
-		filep->private_data = &divert_info_head;
+		(struct divert_info **) filep->private_data = &divert_info_head;
 	restore_flags(flags);
 	/*  start_divert(); */
 	unlock_kernel();

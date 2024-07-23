@@ -16,7 +16,6 @@
 #include <linux/fb.h>
 #include <linux/console_struct.h>
 #include <linux/sched.h>
-#include <video/fbcon.h>
 
 
 #undef DEBUG
@@ -42,7 +41,7 @@ const char *global_mode_option = NULL;
 
 #define DEFAULT_MODEDB_INDEX	0
 
-static struct fb_videomode modedb[] __initdata = {
+static const struct fb_videomode modedb[] __initdata = {
     {
 	/* 640x400 @ 70 Hz, 31.5 kHz hsync */
 	NULL, 70, 640, 400, 39721, 40, 24, 39, 9, 96, 2,
@@ -256,6 +255,28 @@ static int __init my_atoi(const char *name)
 		return val;
 	}
     }
+}
+
+static int PROC_CONSOLE(const struct fb_info *info)
+{
+	int fgc;
+	
+	if (info->display_fg != NULL)
+		fgc = info->display_fg->vc_num;
+	else
+		return -1;
+		
+	if (!current->tty)
+		return fgc;
+
+	if (current->tty->driver.type != TTY_DRIVER_TYPE_CONSOLE)
+		/* XXX Should report error here? */
+		return fgc;
+
+	if (MINOR(current->tty->device) < 1)
+		return fgc;
+
+	return MINOR(current->tty->device) - 1;
 }
 
 

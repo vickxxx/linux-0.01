@@ -5,12 +5,9 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/smp.h>
 #include <asm/checksum.h>
-#include <asm/cpcmd.h>
 #include <asm/delay.h>
 #include <asm/setup.h>
-#include <asm/softirq.h>
 #if CONFIG_IP_MULTICAST
 #include <net/arp.h>
 #endif
@@ -21,10 +18,8 @@
 EXPORT_SYMBOL_NOVERS(_oi_bitmap);
 EXPORT_SYMBOL_NOVERS(_ni_bitmap);
 EXPORT_SYMBOL_NOVERS(_zb_findmap);
-EXPORT_SYMBOL_NOVERS(__copy_from_user_asm);
-EXPORT_SYMBOL_NOVERS(__copy_to_user_asm);
-EXPORT_SYMBOL_NOVERS(__clear_user_asm);
-EXPORT_SYMBOL(diag10);
+EXPORT_SYMBOL_NOVERS(__copy_from_user_fixup);
+EXPORT_SYMBOL_NOVERS(__copy_to_user_fixup);
 
 /*
  * semaphore ops
@@ -40,7 +35,6 @@ EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL_NOVERS(memcmp);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memmove);
-EXPORT_SYMBOL_NOVERS(memscan);
 EXPORT_SYMBOL_NOVERS(strlen);
 EXPORT_SYMBOL_NOVERS(strchr);
 EXPORT_SYMBOL_NOVERS(strcmp);
@@ -62,12 +56,6 @@ EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(csum_fold);
 EXPORT_SYMBOL(console_mode);
 EXPORT_SYMBOL(console_device);
-EXPORT_SYMBOL(pfix_get_addr);
-EXPORT_SYMBOL(pfix_get_page_addr);
-EXPORT_SYMBOL(get_storage_key);
 EXPORT_SYMBOL_NOVERS(do_call_softirq);
-EXPORT_SYMBOL(sys_wait4);
-EXPORT_SYMBOL(smp_call_function_on);
-EXPORT_SYMBOL(show_trace);
-EXPORT_SYMBOL(cpcmd);
+
 

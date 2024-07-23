@@ -76,6 +76,11 @@ alpha_fd_dma_setup(char *addr, unsigned long size, int mode, int io)
 
 #endif /* CONFIG_PCI */
 
+__inline__ void virtual_dma_init(void)
+{
+	/* Nothing to do on an Alpha */
+}
+
 static int FDC1 = 0x3f0;
 static int FDC2 = -1;
 
@@ -92,21 +97,24 @@ static int FDC2 = -1;
 
 /*
  * Most Alphas have no problems with floppy DMA crossing 64k borders,
- * except for certain ones, like XL and RUFFIAN.
- *
- * However, the test is simple and fast, and this *is* floppy, after all,
- * so we do it for all platforms, just to make sure.
- *
- * This is advantageous in other circumstances as well, as in moving
- * about the PCI DMA windows and forcing the floppy to start doing
- * scatter-gather when it never had before, and there *is* a problem
- * on that platform... ;-}
+ * except for XL and RUFFIAN.  They are also the only one with DMA
+ * limits, so we use that to test in the generic kernel.
  */
 
-#define CROSS_64KB(a,s)						\
+#define __CROSS_64KB(a,s)					\
 ({ unsigned long __s64 = (unsigned long)(a);			\
    unsigned long __e64 = __s64 + (unsigned long)(s) - 1;	\
    (__s64 ^ __e64) & ~0xfffful; })
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define CROSS_64KB(a,s)   (__CROSS_64KB(a,s) && ~alpha_mv.max_dma_address)
+#else
+# if defined(CONFIG_ALPHA_XL) || defined(CONFIG_ALPHA_RUFFIAN) || defined(CONFIG_ALPHA_NAUTILUS)
+#  define CROSS_64KB(a,s)  __CROSS_64KB(a,s)
+# else
+#  define CROSS_64KB(a,s)  (0)
+# endif
+#endif
 
 #define EXTRA_FLOPPY_PARAMS
 

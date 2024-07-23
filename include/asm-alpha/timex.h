@@ -18,6 +18,7 @@
  */
 
 typedef unsigned int cycles_t;
+extern cycles_t cacheflush_time;
 
 static inline cycles_t get_cycles (void)
 {
@@ -25,8 +26,5 @@ static inline cycles_t get_cycles (void)
 	__asm__ __volatile__ ("rpcc %0" : "=r"(ret));
 	return ret;
 }
-
-#define vxtime_lock()		do {} while (0)
-#define vxtime_unlock()		do {} while (0)
 
 #endif

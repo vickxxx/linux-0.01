@@ -55,9 +55,8 @@ static int
 smb_readpage_sync(struct dentry *dentry, struct page *page)
 {
 	char *buffer = kmap(page);
-	loff_t offset = (loff_t)page->index << PAGE_CACHE_SHIFT;
-	struct smb_sb_info *server = server_from_dentry(dentry);
-	unsigned int rsize = smb_get_rsize(server);
+	unsigned long offset = page->index << PAGE_CACHE_SHIFT;
+	int rsize = smb_get_rsize(server_from_dentry(dentry));
 	int count = PAGE_SIZE;
 	int result;
 
@@ -75,7 +74,7 @@ smb_readpage_sync(struct dentry *dentry, struct page *page)
 		if (count < rsize)
 			rsize = count;
 
-		result = server->ops->read(dentry->d_inode,offset,rsize,buffer);
+		result = smb_proc_read(dentry->d_inode, offset, rsize, buffer);
 		if (result < 0)
 			goto io_error;
 
@@ -119,23 +118,21 @@ smb_readpage(struct file *file, struct page *page)
  */
 static int
 smb_writepage_sync(struct inode *inode, struct page *page,
-		   unsigned long pageoffset, unsigned int count)
+		   unsigned long offset, unsigned int count)
 {
-	loff_t offset;
-	char *buffer = kmap(page) + pageoffset;
-	struct smb_sb_info *server = server_from_inode(inode);
-	unsigned int wsize = smb_get_wsize(server);
+	char *buffer = kmap(page) + offset;
+	int wsize = smb_get_wsize(server_from_inode(inode));
 	int result, written = 0;
 
-	offset = ((loff_t)page->index << PAGE_CACHE_SHIFT) + pageoffset;
-	VERBOSE("file ino=%ld, fileid=%d, count=%d@%Ld, wsize=%d\n",
+	offset += page->index << PAGE_CACHE_SHIFT;
+	VERBOSE("file ino=%ld, fileid=%d, count=%d@%ld, wsize=%d\n",
 		inode->i_ino, inode->u.smbfs_i.fileid, count, offset, wsize);
 
 	do {
 		if (count < wsize)
 			wsize = count;
 
-		result = server->ops->write(inode, offset, wsize, buffer);
+		result = smb_proc_write(inode, offset, wsize, buffer);
 		if (result < 0) {
 			PARANOIA("failed write, wsize=%d, result=%d\n",
 				 wsize, result);
@@ -273,6 +270,7 @@ out:
 static int smb_prepare_write(struct file *file, struct page *page, 
 			     unsigned offset, unsigned to)
 {
+	kmap(page);
 	return 0;
 }
 
@@ -285,6 +283,7 @@ static int smb_commit_write(struct file *file, struct page *page,
 	lock_kernel();
 	status = smb_updatepage(file, page, offset, to-offset);
 	unlock_kernel();
+	kunmap(page);
 	return status;
 }
 
@@ -350,14 +349,8 @@ static int
 smb_file_release(struct inode *inode, struct file * file)
 {
 	lock_kernel();
-	if (!--inode->u.smbfs_i.openers) {
-		/* We must flush any dirty pages now as we won't be able to
-		   write anything after close. mmap can trigger this.
-		   "openers" should perhaps include mmap'ers ... */
-		filemap_fdatasync(inode->i_mapping);
-		filemap_fdatawait(inode->i_mapping);
+	if (!--inode->u.smbfs_i.openers)
 		smb_close(inode);
-	}
 	unlock_kernel();
 	return 0;
 }

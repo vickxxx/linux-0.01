@@ -52,12 +52,10 @@ ifeq ($(CONFIG_ATM_FORE200E_SBA),y)
     CONFIG_ATM_FORE200E_SBA_FW := sba200e_ecd.bin2
   endif
 endif
+
 obj-$(CONFIG_ATM_FORE200E) += fore_200e.o
 
-obj-$(CONFIG_ATM_HE)		+= he.o
-ifeq ($(CONFIG_ATM_HE_USE_SUNI),y)
-  obj-$(CONFIG_ATM_HE)		+= suni.o
-endif
+EXTRA_CFLAGS=-g
 
 list-multi	:= fore_200e.o
 fore_200e-objs	:= fore200e.o $(FORE200E_FW_OBJS)
@@ -92,7 +90,7 @@ fore200e_mkfirm: fore200e_mkfirm.c
 # deal with the various suffixes of the binary firmware images
 %.bin %.bin1 %.bin2: %.data
 	objcopy -Iihex $< -Obinary $@.gz
-	gzip -n -df $@.gz
+	gzip -df $@.gz
 
 fore_200e.o: $(fore_200e-objs)
 	$(LD) -r -o $@ $(fore_200e-objs)

@@ -198,7 +198,6 @@ static void rw_intr(Scsi_Cmnd * SCpnt)
 	int good_sectors = (result == 0 ? this_count : 0);
 	int block_sectors = 0;
 	int device_nr = DEVICE_NR(SCpnt->request.rq_dev);
-	long error_sector;
 
 #ifdef DEBUG
 	printk("sr.c done: %x %p\n", result, SCpnt->request.bh->b_data);
@@ -211,54 +210,33 @@ static void rw_intr(Scsi_Cmnd * SCpnt)
 
 
 	if (driver_byte(result) != 0 &&		/* An error occurred */
-	    (SCpnt->sense_buffer[0] & 0x7f) == 0x70) {	/* Sense data is valid */
-		switch (SCpnt->sense_buffer[2]) {
-		case MEDIUM_ERROR:
-		case VOLUME_OVERFLOW:
-		case ILLEGAL_REQUEST:
-			if (!(SCpnt->sense_buffer[0] & 0x80))
-				break;
-			error_sector = (SCpnt->sense_buffer[3] << 24) |
-			(SCpnt->sense_buffer[4] << 16) |
-			(SCpnt->sense_buffer[5] << 8) |
-			SCpnt->sense_buffer[6];
-			if (SCpnt->request.bh != NULL)
-				block_sectors = SCpnt->request.bh->b_size >> 9;
-			if (block_sectors < 4)
-				block_sectors = 4;
-			if (scsi_CDs[device_nr].device->sector_size == 2048)
-				error_sector <<= 2;
-			error_sector &= ~(block_sectors - 1);
-			good_sectors = error_sector - SCpnt->request.sector;
-			if (good_sectors < 0 || good_sectors >= this_count)
-				good_sectors = 0;
-			/*
-			 * The SCSI specification allows for the value returned
-			 * by READ CAPACITY to be up to 75 2K sectors past the
-			 * last readable block.  Therefore, if we hit a medium
-			 * error within the last 75 2K sectors, we decrease the
-			 * saved size value.
-			 */
-			if ((error_sector >> 1) < sr_sizes[device_nr] &&
-			    scsi_CDs[device_nr].capacity - error_sector < 4 *75)
-				sr_sizes[device_nr] = error_sector >> 1;
-			break;
-
-		case RECOVERED_ERROR:
-			/*
-			 * An error occured, but it recovered.  Inform the
-			 * user, but make sure that it's not treated as a
-			 * hard error.
-			 */
-			print_sense("sr", SCpnt);
-			result = 0;
-			SCpnt->sense_buffer[0] = 0x0;
-			good_sectors = this_count;
-			break;
-
-		default:
-			break;
-		}
+	    SCpnt->sense_buffer[0] == 0xF0 &&	/* Sense data is valid */
+	    (SCpnt->sense_buffer[2] == MEDIUM_ERROR ||
+	     SCpnt->sense_buffer[2] == VOLUME_OVERFLOW ||
+	     SCpnt->sense_buffer[2] == ILLEGAL_REQUEST)) {
+		long error_sector = (SCpnt->sense_buffer[3] << 24) |
+		(SCpnt->sense_buffer[4] << 16) |
+		(SCpnt->sense_buffer[5] << 8) |
+		SCpnt->sense_buffer[6];
+		if (SCpnt->request.bh != NULL)
+			block_sectors = SCpnt->request.bh->b_size >> 9;
+		if (block_sectors < 4)
+			block_sectors = 4;
+		if (scsi_CDs[device_nr].device->sector_size == 2048)
+			error_sector <<= 2;
+		error_sector &= ~(block_sectors - 1);
+		good_sectors = error_sector - SCpnt->request.sector;
+		if (good_sectors < 0 || good_sectors >= this_count)
+			good_sectors = 0;
+		/*
+		 * The SCSI specification allows for the value returned by READ
+		 * CAPACITY to be up to 75 2K sectors past the last readable
+		 * block.  Therefore, if we hit a medium error within the last
+		 * 75 2K sectors, we decrease the saved size value.
+		 */
+		if ((error_sector >> 1) < sr_sizes[device_nr] &&
+		    scsi_CDs[device_nr].capacity - error_sector < 4 * 75)
+			sr_sizes[device_nr] = error_sector >> 1;
 	}
 
 	/*
@@ -349,8 +327,7 @@ static int sr_scatter_pad(Scsi_Cmnd *SCpnt, int s_size)
 	}
 	if (old_sg) {
 		memcpy(sg + i, old_sg, SCpnt->use_sg * sizeof(struct scatterlist));
-		if (old_bbpnt)
-			memcpy(bbpnt + i, old_bbpnt, SCpnt->use_sg * sizeof(void *));
+		memcpy(bbpnt + i, old_bbpnt, SCpnt->use_sg * sizeof(void *));
 		scsi_free(old_sg, (((SCpnt->use_sg * sizeof(struct scatterlist)) +
 				    (SCpnt->use_sg * sizeof(void *))) + 511) & ~511);
 	} else {
@@ -812,7 +789,6 @@ static int sr_init()
 	if (!sr_registered) {
 		if (devfs_register_blkdev(MAJOR_NR, "sr", &sr_bdops)) {
 			printk("Unable to get major %d for SCSI-CD\n", MAJOR_NR);
-			sr_template.dev_noticed = 0;
 			return 1;
 		}
 		sr_registered++;
@@ -854,10 +830,8 @@ cleanup_sizes:
 	kfree(sr_sizes);
 cleanup_cds:
 	kfree(scsi_CDs);
-	scsi_CDs = NULL;
 cleanup_devfs:
 	devfs_unregister_blkdev(MAJOR_NR, "sr");
-	sr_template.dev_noticed = 0;
 	sr_registered--;
 	return 1;
 }
@@ -931,8 +905,6 @@ static void sr_detach(Scsi_Device * SDp)
 	Scsi_CD *cpnt;
 	int i;
 
-	if (scsi_CDs == NULL)
-		return;
 	for (cpnt = scsi_CDs, i = 0; i < sr_template.dev_max; i++, cpnt++)
 		if (cpnt->device == SDp) {
 			/*

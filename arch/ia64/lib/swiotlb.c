@@ -27,19 +27,9 @@
 #define ALIGN(val, align) ((unsigned long)	\
 	(((unsigned long) (val) + ((align) - 1)) & ~((align) - 1)))
 
-#define OFFSET(val,align) ((unsigned long)	\
-	                   ( (val) & ( (align) - 1)))
-
 #define SG_ENT_VIRT_ADDRESS(sg)	((sg)->address ? (sg)->address			\
 				 : page_address((sg)->page) + (sg)->offset)
 #define SG_ENT_PHYS_ADDRESS(SG)	virt_to_phys(SG_ENT_VIRT_ADDRESS(SG))
-
-/*
- * Maximum allowable number of contiguous slabs to map,
- * must be a power of 2.  What is the appropriate value ?
- * The complexity of {map,unmap}_single is linearly dependent on this value.
- */
-#define IO_TLB_SEGSIZE	128
 
 /*
  * log of the size of each IO TLB slab.  The number of slabs is command line controllable.
@@ -50,13 +40,13 @@
  * Used to do a quick range check in swiotlb_unmap_single and swiotlb_sync_single, to see
  * if the memory was in fact allocated by this API.
  */
-char *io_tlb_start, *io_tlb_end;
+static char *io_tlb_start, *io_tlb_end;
 
 /*
  * The number of IO TLB blocks (in groups of 64) betweeen io_tlb_start and io_tlb_end.
  * This is command line adjustable via setup_io_tlb_npages.
  */
-static unsigned long io_tlb_nslabs = 32768;
+static unsigned long io_tlb_nslabs = 1024;
 
 /*
  * This is a free list describing the number of free entries available from each index
@@ -79,14 +69,9 @@ static int __init
 setup_io_tlb_npages (char *str)
 {
 	io_tlb_nslabs = simple_strtoul(str, NULL, 0) << (PAGE_SHIFT - IO_TLB_SHIFT);
-
-	/* avoid tail segment of size < IO_TLB_SEGSIZE */
-	io_tlb_nslabs = ALIGN(io_tlb_nslabs, IO_TLB_SEGSIZE);
-
 	return 1;
 }
 __setup("swiotlb=", setup_io_tlb_npages);
-
 
 /*
  * Statically reserve bounce buffer space and initialize bounce buffer data structures for
@@ -107,16 +92,16 @@ swiotlb_init (void)
 
 	/*
 	 * Allocate and initialize the free list array.  This array is used
-	 * to find contiguous free memory regions of size up to IO_TLB_SEGSIZE
-	 * between io_tlb_start and io_tlb_end.
+	 * to find contiguous free memory regions of size 2^IO_TLB_SHIFT between
+	 * io_tlb_start and io_tlb_end.
 	 */
 	io_tlb_list = alloc_bootmem(io_tlb_nslabs * sizeof(int));
 	for (i = 0; i < io_tlb_nslabs; i++)
- 		io_tlb_list[i] = IO_TLB_SEGSIZE - OFFSET(i, IO_TLB_SEGSIZE);
+		io_tlb_list[i] = io_tlb_nslabs - i;
 	io_tlb_index = 0;
 	io_tlb_orig_addr = alloc_bootmem(io_tlb_nslabs * sizeof(char *));
 
-	printk(KERN_INFO "Placing software IO TLB between 0x%p - 0x%p\n",
+	printk("Placing software IO TLB between 0x%p - 0x%p\n",
 	       (void *) io_tlb_start, (void *) io_tlb_end);
 }
 
@@ -139,7 +124,7 @@ map_single (struct pci_dev *hwdev, char *buffer, size_t size, int direction)
 	if (size > (1 << PAGE_SHIFT))
 		stride = (1 << (PAGE_SHIFT - IO_TLB_SHIFT));
 	else
-		stride = 1;
+		stride = nslots;
 
 	if (!nslots)
 		BUG();
@@ -166,8 +151,7 @@ map_single (struct pci_dev *hwdev, char *buffer, size_t size, int direction)
 
 				for (i = index; i < index + nslots; i++)
 					io_tlb_list[i] = 0;
-				for (i = index - 1; (OFFSET(i, IO_TLB_SEGSIZE) != IO_TLB_SEGSIZE -1)
-				       && io_tlb_list[i]; i--)
+				for (i = index - 1; (i >= 0) && io_tlb_list[i]; i--)
 					io_tlb_list[i] = ++count;
 				dma_addr = io_tlb_start + (index << IO_TLB_SHIFT);
 
@@ -233,8 +217,7 @@ unmap_single (struct pci_dev *hwdev, char *dma_addr, size_t size, int direction)
 	 */
 	spin_lock_irqsave(&io_tlb_lock, flags);
 	{
-		int count = ((index + nslots) < ALIGN(index + 1, IO_TLB_SEGSIZE) ?
-			     io_tlb_list[index + nslots] : 0);
+		int count = ((index + nslots) < io_tlb_nslabs ? io_tlb_list[index + nslots] : 0);
 		/*
 		 * Step 1: return the slots to the free list, merging the slots with
 		 * superceeding slots
@@ -245,8 +228,7 @@ unmap_single (struct pci_dev *hwdev, char *dma_addr, size_t size, int direction)
 		 * Step 2: merge the returned slots with the preceeding slots, if
 		 * available (non zero)
 		 */
-		for (i = index - 1;  (OFFSET(i, IO_TLB_SEGSIZE) != IO_TLB_SEGSIZE -1) &&
-		       io_tlb_list[i]; i--)
+		for (i = index - 1; (i >= 0) && io_tlb_list[i]; i--)
 			io_tlb_list[i] = ++count;
 	}
 	spin_unlock_irqrestore(&io_tlb_lock, flags);
@@ -277,11 +259,8 @@ swiotlb_alloc_consistent (struct pci_dev *hwdev, size_t size, dma_addr_t *dma_ha
 	int gfp = GFP_ATOMIC;
 	void *ret;
 
-	/*
-	 * Alloc_consistent() is defined to return memory < 4GB, no matter what the DMA
-	 * mask says.
-	 */
-	gfp |= GFP_DMA;	/* XXX fix me: should change this to GFP_32BIT or ZONE_32BIT */
+	if (!hwdev || hwdev->dma_mask <= 0xffffffff)
+		gfp |= GFP_DMA; /* XXX fix me: should change this to GFP_32BIT or ZONE_32BIT */
 	ret = (void *)__get_free_pages(gfp, get_order(size));
 	if (!ret)
 		return NULL;
@@ -351,7 +330,7 @@ mark_clean (void *addr, size_t size)
 	pg_addr = PAGE_ALIGN((unsigned long) addr);
 	end = (unsigned long) addr + size;
 	while (pg_addr + PAGE_SIZE <= end) {
-		struct page *page = virt_to_page((void *)pg_addr);
+		struct page *page = virt_to_page(pg_addr);
 		set_bit(PG_arch_1, &page->flags);
 		pg_addr += PAGE_SIZE;
 	}
@@ -417,23 +396,21 @@ swiotlb_sync_single (struct pci_dev *hwdev, dma_addr_t pci_addr, size_t size, in
 int
 swiotlb_map_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int direction)
 {
+	void *addr;
 	int i;
 
 	if (direction == PCI_DMA_NONE)
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++) {
-		void * virt_address = SG_ENT_VIRT_ADDRESS(sg);
-		unsigned long phys_address = virt_to_phys(virt_address);
-
-		sg->dma_length = sg->length;
-		if (phys_address & ~hwdev->dma_mask)
-			sg->dma_address = virt_to_phys(map_single(hwdev,
-			                                          virt_address,
-			                                          sg->length,
-			                                          direction));
-		else
-			sg->dma_address = phys_address;
+		sg->orig_address = SG_ENT_VIRT_ADDRESS(sg);
+		if ((SG_ENT_PHYS_ADDRESS(sg) & ~hwdev->dma_mask) != 0) {
+			addr = map_single(hwdev, sg->address, sg->length, direction);
+			if (sg->address)
+				sg->address = addr;
+			else
+				sg->page = virt_to_page(addr);
+		}
 	}
 	return nelems;
 }
@@ -451,11 +428,14 @@ swiotlb_unmap_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++)
-		if (sg->dma_address != virt_to_phys(SG_ENT_VIRT_ADDRESS(sg))) {
-			unmap_single(hwdev, phys_to_virt(sg->dma_address),
-			             sg->dma_length, direction);
+		if (sg->orig_address != SG_ENT_VIRT_ADDRESS(sg)) {
+			unmap_single(hwdev, SG_ENT_VIRT_ADDRESS(sg), sg->length, direction);
+			if (sg->address)
+				sg->address = sg->orig_address;
+			else
+				sg->page = virt_to_page(sg->orig_address);
 		} else if (direction == PCI_DMA_FROMDEVICE)
-			mark_clean(SG_ENT_VIRT_ADDRESS(sg), sg->length);
+			mark_clean(sg->address, sg->length);
 }
 
 /*
@@ -474,20 +454,14 @@ swiotlb_sync_sg (struct pci_dev *hwdev, struct scatterlist *sg, int nelems, int 
 		BUG();
 
 	for (i = 0; i < nelems; i++, sg++)
-		if (sg->dma_address != virt_to_phys(SG_ENT_VIRT_ADDRESS(sg)))
-			sync_single(hwdev, phys_to_virt(sg->dma_address),
-			            sg->dma_length, direction);
+		if (sg->orig_address != SG_ENT_VIRT_ADDRESS(sg))
+			sync_single(hwdev, SG_ENT_VIRT_ADDRESS(sg), sg->length, direction);
 }
 
-/*
- * Return whether the given PCI device DMA address mask can be supported properly.  For
- * example, if your device can only drive the low 24-bits during PCI bus mastering, then
- * you would pass 0x00ffffff as the mask to this function.
- */
-int
-swiotlb_pci_dma_supported (struct pci_dev *hwdev, u64 mask)
+unsigned long
+swiotlb_dma_address (struct scatterlist *sg)
 {
-	return 1;
+	return SG_ENT_PHYS_ADDRESS(sg);
 }
 
 EXPORT_SYMBOL(swiotlb_init);
@@ -497,6 +471,6 @@ EXPORT_SYMBOL(swiotlb_map_sg);
 EXPORT_SYMBOL(swiotlb_unmap_sg);
 EXPORT_SYMBOL(swiotlb_sync_single);
 EXPORT_SYMBOL(swiotlb_sync_sg);
+EXPORT_SYMBOL(swiotlb_dma_address);
 EXPORT_SYMBOL(swiotlb_alloc_consistent);
 EXPORT_SYMBOL(swiotlb_free_consistent);
-EXPORT_SYMBOL(swiotlb_pci_dma_supported);

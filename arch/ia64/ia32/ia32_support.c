@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Arun Sharma <arun.sharma@intel.com>
  * Copyright (C) 2000 Asit K. Mallick <asit.k.mallick@intel.com>
- * Copyright (C) 2001-2002 Hewlett-Packard Co
+ * Copyright (C) 2001 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * 06/16/00	A. Mallick	added csd/ssd/tssd for ia32 thread context
@@ -60,26 +60,30 @@ ia32_load_segment_descriptors (struct task_struct *task)
 	regs->r27 = load_desc(regs->r16 >>  0);		/* DSD */
 	regs->r28 = load_desc(regs->r16 >> 32);		/* FSD */
 	regs->r29 = load_desc(regs->r16 >> 48);		/* GSD */
-	regs->ar_csd = load_desc(regs->r17 >>  0);	/* CSD */
-	regs->ar_ssd = load_desc(regs->r17 >> 16);	/* SSD */
+	task->thread.csd = load_desc(regs->r17 >>  0);	/* CSD */
+	task->thread.ssd = load_desc(regs->r17 >> 16);	/* SSD */
 }
 
 void
 ia32_save_state (struct task_struct *t)
 {
-	unsigned long eflag, fsr, fcr, fir, fdr;
+	unsigned long eflag, fsr, fcr, fir, fdr, csd, ssd;
 
 	asm ("mov %0=ar.eflag;"
 	     "mov %1=ar.fsr;"
 	     "mov %2=ar.fcr;"
 	     "mov %3=ar.fir;"
 	     "mov %4=ar.fdr;"
-	     : "=r"(eflag), "=r"(fsr), "=r"(fcr), "=r"(fir), "=r"(fdr));
+	     "mov %5=ar.csd;"
+	     "mov %6=ar.ssd;"
+	     : "=r"(eflag), "=r"(fsr), "=r"(fcr), "=r"(fir), "=r"(fdr), "=r"(csd), "=r"(ssd));
 	t->thread.eflag = eflag;
 	t->thread.fsr = fsr;
 	t->thread.fcr = fcr;
 	t->thread.fir = fir;
 	t->thread.fdr = fdr;
+	t->thread.csd = csd;
+	t->thread.ssd = ssd;
 	ia64_set_kr(IA64_KR_IO_BASE, t->thread.old_iob);
 	ia64_set_kr(IA64_KR_TSSD, t->thread.old_k1);
 }
@@ -87,15 +91,19 @@ ia32_save_state (struct task_struct *t)
 void
 ia32_load_state (struct task_struct *t)
 {
-	unsigned long eflag, fsr, fcr, fir, fdr, tssd;
+	unsigned long eflag, fsr, fcr, fir, fdr, csd, ssd, tssd;
 	struct pt_regs *regs = ia64_task_regs(t);
 	int nr = smp_processor_id();	/* LDT and TSS depend on CPU number: */
+
+	nr = smp_processor_id();
 
 	eflag = t->thread.eflag;
 	fsr = t->thread.fsr;
 	fcr = t->thread.fcr;
 	fir = t->thread.fir;
 	fdr = t->thread.fdr;
+	csd = t->thread.csd;
+	ssd = t->thread.ssd;
 	tssd = load_desc(_TSS(nr));					/* TSSD */
 
 	asm volatile ("mov ar.eflag=%0;"
@@ -103,7 +111,9 @@ ia32_load_state (struct task_struct *t)
 		      "mov ar.fcr=%2;"
 		      "mov ar.fir=%3;"
 		      "mov ar.fdr=%4;"
-		      :: "r"(eflag), "r"(fsr), "r"(fcr), "r"(fir), "r"(fdr));
+		      "mov ar.csd=%5;"
+		      "mov ar.ssd=%6;"
+		      :: "r"(eflag), "r"(fsr), "r"(fcr), "r"(fir), "r"(fdr), "r"(csd), "r"(ssd));
 	current->thread.old_iob = ia64_get_kr(IA64_KR_IO_BASE);
 	current->thread.old_k1 = ia64_get_kr(IA64_KR_TSSD);
 	ia64_set_kr(IA64_KR_IO_BASE, IA32_IOBASE);
@@ -143,12 +153,10 @@ ia32_gdt_init (void)
 	/* We never change the TSS and LDT descriptors, so we can share them across all CPUs.  */
 	ldt_size = PAGE_ALIGN(IA32_LDT_ENTRIES*IA32_LDT_ENTRY_SIZE);
 	for (nr = 0; nr < NR_CPUS; ++nr) {
-		ia32_gdt[_TSS(nr) >> IA32_SEGSEL_INDEX_SHIFT]
-			= IA32_SEG_DESCRIPTOR(IA32_TSS_OFFSET, 235,
-					      0xb, 0, 3, 1, 1, 1, 0);
-		ia32_gdt[_LDT(nr) >> IA32_SEGSEL_INDEX_SHIFT]
-			= IA32_SEG_DESCRIPTOR(IA32_LDT_OFFSET, ldt_size - 1,
-					      0x2, 0, 3, 1, 1, 1, 0);
+		ia32_gdt[_TSS(nr)] = IA32_SEG_DESCRIPTOR(IA32_TSS_OFFSET, 235,
+							 0xb, 0, 3, 1, 1, 1, 0);
+		ia32_gdt[_LDT(nr)] = IA32_SEG_DESCRIPTOR(IA32_LDT_OFFSET, ldt_size - 1,
+							 0x2, 0, 3, 1, 1, 1, 0);
 	}
 }
 
@@ -164,10 +172,6 @@ ia32_bad_interrupt (unsigned long int_num, struct pt_regs *regs)
 
 	siginfo.si_signo = SIGTRAP;
 	siginfo.si_errno = int_num;	/* XXX is it OK to abuse si_errno like this? */
-	siginfo.si_flags = 0;
-	siginfo.si_isr = 0;
-	siginfo.si_addr = 0;
-	siginfo.si_imm = 0;
 	siginfo.si_code = TRAP_BRKPT;
 	force_sig_info(SIGTRAP, &siginfo, current);
 }

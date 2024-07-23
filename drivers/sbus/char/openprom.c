@@ -68,7 +68,7 @@ static int options_node = 0;
  */
 static int copyin(struct openpromio *info, struct openpromio **opp_p)
 {
-	unsigned int bufsize;
+	int bufsize;
 
 	if (!info || !opp_p)
 		return -EFAULT;
@@ -333,9 +333,6 @@ static int goodnode(int n, DATA *data)
 static int copyin_string(char *user, size_t len, char **ptr)
 {
 	char *tmp;
-
-	if ((ssize_t)len < 0 || (ssize_t)(len + 1) < 0)
-		return -EINVAL;
 
 	tmp = kmalloc(len + 1, GFP_KERNEL);
 	if (!tmp)

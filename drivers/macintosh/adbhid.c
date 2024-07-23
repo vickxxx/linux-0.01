@@ -42,12 +42,6 @@
 #include <linux/adb.h>
 #include <linux/cuda.h>
 #include <linux/pmu.h>
-
-#include <asm/machdep.h>
-#ifdef CONFIG_ALL_PPC
-#include <asm/pmac_feature.h>
-#endif
-
 #ifdef CONFIG_PMAC_BACKLIGHT
 #include <asm/backlight.h>
 #endif
@@ -71,7 +65,7 @@ unsigned char adb_to_linux_keycodes[128] = {
 	  0, 83,  0, 55,  0, 78,  0, 69,  0,  0,  0, 98, 96,  0, 74,  0,
 	  0,117, 82, 79, 80, 81, 75, 76, 77, 71,  0, 72, 73,183,181,124,
 	 63, 64, 65, 61, 66, 67,191, 87,190, 99,  0, 70,  0, 68,101, 88,
-	  0,119,110,102,104,111, 62,107, 60,109, 59, 54,100, 97,126,116
+	  0,119,110,102,104,111, 62,107, 60,109, 59, 54,100, 97,116,116
 };
 
 struct adbhid {
@@ -101,11 +95,6 @@ static void init_ms_a3(int id);
 static struct adb_ids keyboard_ids;
 static struct adb_ids mouse_ids;
 static struct adb_ids buttons_ids;
-
-#ifdef CONFIG_PMAC_BACKLIGHT
-/* Exported to via-pmu.c */
-int disable_kernel_backlight = 0;
-#endif /* CONFIG_PMAC_BACKLIGHT */
 
 /* Kind of keyboard, see Apple technote 1152  */
 #define ADB_KEYBOARD_UNKNOWN	0
@@ -160,17 +149,6 @@ adbhid_input_keycode(int id, int keycode, int repeat)
 		return;
 	case 0x3f: /* ignore Powerbook Fn key */
 		return;
-#ifdef CONFIG_ALL_PPC
-	case 0x7e: /* Power key on PBook 3400 needs remapping */
-		switch(pmac_call_feature(PMAC_FTR_GET_MB_INFO,
-			NULL, PMAC_MB_INFO_MODEL, 0)) {
-		case PMAC_TYPE_COMET:
-		case PMAC_TYPE_HOOPER:
-		case PMAC_TYPE_KANGA:
-			keycode = 0x7f;
-		}
-		break;
-#endif /* CONFIG_ALL_PPC */
 	}
 
 	if (adbhid[id]->keycode[keycode])
@@ -295,58 +273,43 @@ adbhid_buttons_input(unsigned char *data, int nb, struct pt_regs *regs, int auto
 		break;
 	case 0x1f: /* Powerbook button device */
 	  {
-	  	int down = (data[1] == (data[1] & 0xf));
 #ifdef CONFIG_PMAC_BACKLIGHT
 		int backlight = get_backlight_level();
-#endif
+
 		/*
 		 * XXX: Where is the contrast control for the passive?
 		 *  -- Cort
 		 */
 
-		switch (data[1] & 0x0f) {
+		switch (data[1]) {
 		case 0x8:	/* mute */
-			input_report_key(&adbhid[id]->input, KEY_MUTE, down);
 			break;
 
-		case 0x7:	/* volume decrease */
-			input_report_key(&adbhid[id]->input, KEY_VOLUMEDOWN, down);
+		case 0x7:	/* contrast decrease */
 			break;
 
-		case 0x6:	/* volume increase */
-			input_report_key(&adbhid[id]->input, KEY_VOLUMEUP, down);
- 			break;
-
-		case 0xb:	/* eject */
-			input_report_key(&adbhid[id]->input, KEY_EJECTCD, down);
+		case 0x6:	/* contrast increase */
 			break;
+
 		case 0xa:	/* brightness decrease */
-#ifdef CONFIG_PMAC_BACKLIGHT
-			if (!disable_kernel_backlight) {
-				if (down && backlight >= 0) {
-					if (backlight > BACKLIGHT_OFF)
-						set_backlight_level(backlight-1);
-					else
-						set_backlight_level(BACKLIGHT_OFF);
-				}
-			}
-#endif /* CONFIG_PMAC_BACKLIGHT */
-			input_report_key(&adbhid[id]->input, KEY_BRIGHTNESSDOWN, down);
+			if (backlight < 0)
+				break;
+			if (backlight > BACKLIGHT_OFF)
+				set_backlight_level(backlight-1);
+			else
+				set_backlight_level(BACKLIGHT_OFF);
 			break;
+
 		case 0x9:	/* brightness increase */
-#ifdef CONFIG_PMAC_BACKLIGHT
-			if (!disable_kernel_backlight) {
-				if (down && backlight >= 0) {
-					if (backlight < BACKLIGHT_MAX)
-						set_backlight_level(backlight+1);
-					else 
-						set_backlight_level(BACKLIGHT_MAX);
-				}
-			}
-#endif /* CONFIG_PMAC_BACKLIGHT */
-			input_report_key(&adbhid[id]->input, KEY_BRIGHTNESSUP, down);
+			if (backlight < 0)
+				break;
+			if (backlight < BACKLIGHT_MAX)
+				set_backlight_level(backlight+1);
+			else 
+				set_backlight_level(BACKLIGHT_MAX);
 			break;
 		}
+#endif /* CONFIG_PMAC_BACKLIGHT */
 	  }
 	  break;
 	}
@@ -541,13 +504,6 @@ adbhid_input_register(int id, int default_id, int original_handler_id,
 		case 0x1f: /* Powerbook button device */
 			sprintf(adbhid[id]->name, "ADB Powerbook buttons on ID %d:%d.%02x",
 				id, default_id, original_handler_id);
-			adbhid[id]->input.evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
-			set_bit(KEY_MUTE, adbhid[id]->input.keybit);
-			set_bit(KEY_VOLUMEUP, adbhid[id]->input.keybit);
-			set_bit(KEY_VOLUMEDOWN, adbhid[id]->input.keybit);
-			set_bit(KEY_BRIGHTNESSUP, adbhid[id]->input.keybit);
-			set_bit(KEY_BRIGHTNESSDOWN, adbhid[id]->input.keybit);
-			set_bit(KEY_EJECTCD, adbhid[id]->input.keybit);
 			break;
 		}
 		if (adbhid[id]->name[0])
@@ -586,38 +542,16 @@ static void adbhid_input_unregister(int id)
 }
 
 
-static u16
-adbhid_input_reregister(int id, int default_id, int org_handler_id,
-			int cur_handler_id, int mk)
-{
-	if (adbhid[id]) {
-		if (adbhid[id]->input.idproduct !=
-		    ((id << 12)|(default_id << 8)|org_handler_id)) {
-			adbhid_input_unregister(id);
-			adbhid_input_register(id, default_id, org_handler_id,
-				cur_handler_id, mk);
-		}
-	} else
-		adbhid_input_register(id, default_id, org_handler_id,
-			cur_handler_id, mk);
-	return 1<<id;
-}
-
-static void
-adbhid_input_devcleanup(u16 exist)
-{
-	int i;
-	for(i=1; i<16; i++)
-	    if (adbhid[i] && !(exist&(1<<i)))
-		adbhid_input_unregister(i);
-}
- 
 static void
 adbhid_probe(void)
 {
 	struct adb_request req;
 	int i, default_id, org_handler_id, cur_handler_id;
-	u16 reg = 0;
+
+	for (i = 1; i < 16; i++) {
+		if (adbhid[i])
+			adbhid_input_unregister(i);
+	}
 
 	adb_register(ADB_MOUSE, 0, &mouse_ids, adbhid_mouse_input);
 	adb_register(ADB_KEYBOARD, 0, &keyboard_ids, adbhid_keyboard_input);
@@ -646,14 +580,14 @@ adbhid_probe(void)
 			printk("ADB keyboard at %d, handler 1\n", id);
 
 		adb_get_infos(id, &default_id, &cur_handler_id);
-		reg |= adbhid_input_reregister(id, default_id, org_handler_id, cur_handler_id, 0);
+		adbhid_input_register(id, default_id, org_handler_id, cur_handler_id, 0);
 	}
 
 	for (i = 0; i < buttons_ids.nids; i++) {
 		int id = buttons_ids.id[i];
 
 		adb_get_infos(id, &default_id, &org_handler_id);
-		reg |= adbhid_input_reregister(id, default_id, org_handler_id, org_handler_id, 0);
+		adbhid_input_register(id, default_id, org_handler_id, org_handler_id, 0);
 	}
 
 	/* Try to switch all mice to handler 4, or 2 for three-button
@@ -742,10 +676,9 @@ adbhid_probe(void)
 		printk("\n");
 
 		adb_get_infos(id, &default_id, &cur_handler_id);
-		reg |= adbhid_input_reregister(id, default_id, org_handler_id,
+		adbhid_input_register(id, default_id, org_handler_id,
 				      cur_handler_id, mouse_kind);
         }
-	adbhid_input_devcleanup(reg);
 }
 
 static void 
@@ -926,10 +859,8 @@ init_ms_a3(int id)
 
 static int __init adbhid_init(void)
 {
-#ifndef CONFIG_MAC
 	if ( (_machine != _MACH_chrp) && (_machine != _MACH_Pmac) )
 	    return 0;
-#endif
 
 	led_request.complete = 1;
 

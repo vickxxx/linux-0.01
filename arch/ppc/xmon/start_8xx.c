@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.start_8xx.c 1.10 09/14/01 18:01:17 trini
+ */
+/*
  * Copyright (C) 1996 Paul Mackerras.
  * Copyright (C) 2000 Dan Malek.
  * Quick hack of Paul's code to make XMON work on 8xx processors.  Lots
@@ -46,7 +49,7 @@ xmon_map_scc(void)
 
 	cpmp = (cpm8xx_t *)&(((immap_t *)IMAP_ADDR)->im_cpm);
 	use_screen = 0;
-
+	
 	prom_drawstring("xmon uses serial port\n");
 }
 

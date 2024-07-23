@@ -70,8 +70,7 @@ void journal_brelse_array(struct buffer_head *b[], int n)
 static int do_readahead(journal_t *journal, unsigned int start)
 {
 	int err;
-	unsigned int max, nbufs, next;
-	unsigned long blocknr;
+	unsigned int max, nbufs, next, blocknr;
 	struct buffer_head *bh;
 	
 	struct buffer_head * bufs[MAXBUF];
@@ -87,11 +86,12 @@ static int do_readahead(journal_t *journal, unsigned int start)
 	nbufs = 0;
 	
 	for (next = start; next < max; next++) {
-		err = journal_bmap(journal, next, &blocknr);
+		blocknr = journal_bmap(journal, next);
 
-		if (err) {
+		if (!blocknr) {
 			printk (KERN_ERR "JBD: bad block at offset %u\n",
 				next);
+			err = -EIO;
 			goto failed;
 		}
 
@@ -132,23 +132,19 @@ failed:
 static int jread(struct buffer_head **bhp, journal_t *journal, 
 		 unsigned int offset)
 {
-	int err;
-	unsigned long blocknr;
+	unsigned int blocknr;
 	struct buffer_head *bh;
 
 	*bhp = NULL;
 
-	if (offset >= journal->j_maxlen) {
-		printk(KERN_ERR "JBD: corrupted journal superblock\n");
-		return -EIO;
-	}
+	J_ASSERT (offset < journal->j_maxlen);
+	
+	blocknr = journal_bmap(journal, offset);
 
-	err = journal_bmap(journal, offset, &blocknr);
-
-	if (err) {
+	if (!blocknr) {
 		printk (KERN_ERR "JBD: bad block at offset %u\n",
 			offset);
-		return err;
+		return -EIO;
 	}
 
 	bh = getblk(journal->j_dev, blocknr, journal->j_blocksize);
@@ -210,22 +206,20 @@ do {									\
 		var -= ((journal)->j_last - (journal)->j_first);	\
 } while (0)
 
-/**
- * int journal_recover(journal_t *journal) - recovers a on-disk journal
- * @journal: the journal to recover
- * 
+/*
+ * journal_recover
+ *
  * The primary function for recovering the log contents when mounting a
  * journaled device.  
- */
-int journal_recover(journal_t *journal)
-{
-/*
+ * 
  * Recovery is done in three passes.  In the first pass, we look for the
  * end of the log.  In the second, we assemble the list of revoke
  * blocks.  In the third and final pass, we replay any un-revoked blocks
  * in the log.  
  */
 
+int journal_recover(journal_t *journal)
+{
 	int			err;
 	journal_superblock_t *	sb;
 
@@ -269,23 +263,20 @@ int journal_recover(journal_t *journal)
 	return err;
 }
 
-/**
- * int journal_skip_recovery() - Start journal and wipe exiting records 
- * @journal: journal to startup
- * 
+/*
+ * journal_skip_recovery
+ *
  * Locate any valid recovery information from the journal and set up the
  * journal structures in memory to ignore it (presumably because the
  * caller has evidence that it is out of date).  
- * This function does'nt appear to be exorted..
- */
-int journal_skip_recovery(journal_t *journal)
-{
-/*
+ *
  * We perform one pass over the journal to allow us to tell the user how
  * much recovery information is being erased, and to let us initialise
  * the journal transaction sequence numbers to the next unused ID. 
  */
 
+int journal_skip_recovery(journal_t *journal)
+{
 	int			err;
 	journal_superblock_t *	sb;
 
@@ -480,7 +471,6 @@ static int do_one_pass(journal_t *journal,
 						goto failed;
 					}
 
-					lock_buffer(nbh);
 					memcpy(nbh->b_data, obh->b_data,
 							journal->j_blocksize);
 					if (flags & JFS_FLAG_ESCAPE) {
@@ -492,7 +482,6 @@ static int do_one_pass(journal_t *journal,
 					mark_buffer_dirty(nbh);
 					BUFFER_TRACE(nbh, "marking uptodate");
 					mark_buffer_uptodate(nbh, 1);
-					unlock_buffer(nbh);
 					++info->nr_replays;
 					/* ll_rw_block(WRITE, 1, &nbh); */
 					brelse(obh);
@@ -537,7 +526,6 @@ static int do_one_pass(journal_t *journal,
 		default:
 			jbd_debug(3, "Unrecognised magic %d, end of scan.\n",
 				  blocktype);
-			brelse(bh);
 			goto done;
 		}
 	}

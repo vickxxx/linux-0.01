@@ -42,8 +42,6 @@ choice 'Alpha system type' \
 	 Eiger			CONFIG_ALPHA_EIGER		\
 	 Jensen			CONFIG_ALPHA_JENSEN		\
 	 LX164			CONFIG_ALPHA_LX164		\
-	 Lynx			CONFIG_ALPHA_LYNX		\
-	 Marvel			CONFIG_ALPHA_MARVEL		\
 	 Miata			CONFIG_ALPHA_MIATA		\
 	 Mikasa			CONFIG_ALPHA_MIKASA		\
 	 Nautilus		CONFIG_ALPHA_NAUTILUS		\
@@ -104,44 +102,19 @@ if [ "$CONFIG_ALPHA_CABRIOLET" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EB64P y
 fi
-if [ "$CONFIG_ALPHA_ALCOR" = "y" ]
-then
-	define_bool CONFIG_ALPHA_EV5 y
-	define_bool CONFIG_ALPHA_CIA y
-	bool 'EV56 CPU (speed >= 366MHz)?' CONFIG_ALPHA_EV56
-fi
-if [ "$CONFIG_ALPHA_EB164" = "y" ]
+if [ "$CONFIG_ALPHA_EB164" = "y" -o "$CONFIG_ALPHA_PC164" = "y" \
+	-o "$CONFIG_ALPHA_ALCOR" = "y" -o "$CONFIG_ALPHA_TAKARA" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EV5 y
 	define_bool CONFIG_ALPHA_CIA y
 fi
-if [ "$CONFIG_ALPHA_PC164" = "y" -o "$CONFIG_ALPHA_TAKARA" = "y" ]
-then
-	define_bool CONFIG_ALPHA_EV5 y
-	define_bool CONFIG_ALPHA_EV56 y
-	define_bool CONFIG_ALPHA_CIA y
-fi
-if [ "$CONFIG_ALPHA_MIKASA" = "y" ]
+if [ "$CONFIG_ALPHA_MIKASA" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" ]
 then
 	bool 'EV5 CPU daughtercard (model 5/xxx)?' CONFIG_ALPHA_PRIMO
 	if [ "$CONFIG_ALPHA_PRIMO" = "y" ]
 	then
 		define_bool CONFIG_ALPHA_EV5 y
 		define_bool CONFIG_ALPHA_CIA y
-		bool 'EV56 CPU (speed >= 333MHz)?' CONFIG_ALPHA_EV56
-	else
-		define_bool CONFIG_ALPHA_EV4 y
-		define_bool CONFIG_ALPHA_APECS y
-	fi
-fi
-if [ "$CONFIG_ALPHA_NORITAKE" = "y" ]
-then
-	bool 'EV5 CPU (model 5/xxx)?' CONFIG_ALPHA_PRIMO
-	if [ "$CONFIG_ALPHA_PRIMO" = "y" ]
-	then
-		define_bool CONFIG_ALPHA_EV5 y
-		define_bool CONFIG_ALPHA_CIA y
-		bool 'EV56 CPU (speed >= 333MHz)?' CONFIG_ALPHA_EV56
 	else
 		define_bool CONFIG_ALPHA_EV4 y
 		define_bool CONFIG_ALPHA_APECS y
@@ -158,21 +131,10 @@ then
 	fi
 	define_bool CONFIG_ALPHA_T2 y
 fi
-if [ "$CONFIG_ALPHA_LYNX" = "y" ]
-then
-	bool 'EV5 CPU(s) (model 5/xxx)?' CONFIG_ALPHA_EV5
-	if [ "$CONFIG_ALPHA_EV5" != "y" ]
-	then
-		define_bool CONFIG_ALPHA_EV4 y
-	fi
-	define_bool CONFIG_ALPHA_GAMMA y
-	define_bool CONFIG_ALPHA_T2 y
-fi
 if [ "$CONFIG_ALPHA_MIATA" = "y" -o "$CONFIG_ALPHA_LX164" = "y" \
 	-o "$CONFIG_ALPHA_SX164" = "y" -o "$CONFIG_ALPHA_RUFFIAN" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EV5 y
-	define_bool CONFIG_ALPHA_EV56 y
 	define_bool CONFIG_ALPHA_CIA y
 	define_bool CONFIG_ALPHA_PYXIS y
 fi
@@ -193,22 +155,14 @@ then
 	define_bool CONFIG_ALPHA_EV6 y
 	define_bool CONFIG_ALPHA_EV67 y
 fi
-if [ "$CONFIG_ALPHA_MARVEL" = "y" ]
-then
-	define_bool CONFIG_ALPHA_EV6 y
-	define_bool CONFIG_ALPHA_EV67 y
-	define_bool CONFIG_ALPHA_EV7 y
-fi
 if [ "$CONFIG_ALPHA_RAWHIDE" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EV5 y
 	define_bool CONFIG_ALPHA_MCPCIA y
-	bool 'EV56 CPU (speed >= 400MHz)?' CONFIG_ALPHA_EV56
 fi
 if [ "$CONFIG_ALPHA_RX164" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EV5 y
-	define_bool CONFIG_ALPHA_EV56 y
 	define_bool CONFIG_ALPHA_POLARIS y
 fi
 if [ "$CONFIG_ALPHA_JENSEN" = "y" ]
@@ -226,8 +180,7 @@ if [ "$CONFIG_ALPHA_JENSEN" = "y" -o "$CONFIG_ALPHA_MIKASA" = "y" \
 	-o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" \
 	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
 	-o "$CONFIG_ALPHA_EIGER" = "y" -o "$CONFIG_ALPHA_WILDFIRE" = "y" \
-	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_SHARK" = "y" \
-	-o "$CONFIG_ALPHA_MARVEL" = "y" -o "$CONFIG_ALPHA_LYNX" = "y" ]
+	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_SHARK" = "y" ]
 then
 	define_bool CONFIG_ALPHA_SRM y
 fi
@@ -241,11 +194,9 @@ then
   bool 'Use SRM as bootloader' CONFIG_ALPHA_SRM
 fi
 
-bool 'Verbose Machine Checks' CONFIG_VERBOSE_MCHECK
-
 if [ "$CONFIG_ALPHA_ALCOR" = "y" -o "$CONFIG_ALPHA_MIKASA" = "y" \
 	-o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" \
-	-o "$CONFIG_ALPHA_RAWHIDE" = "y" -o "$CONFIG_ALPHA_LYNX" = "y" ]
+	-o "$CONFIG_ALPHA_RAWHIDE" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EISA y
 fi
@@ -261,25 +212,19 @@ fi
 if [ "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
 	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_WILDFIRE" = "y" \
 	-o "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_GENERIC" = "y" \
-	-o "$CONFIG_ALPHA_SHARK" = "y" -o "$CONFIG_ALPHA_MARVEL" = "y" \
-	-o "$CONFIG_ALPHA_LYNX" = "y" ]
+	-o "$CONFIG_ALPHA_SHARK" = "y" ]
 then
 	bool 'Symmetric multi-processing support' CONFIG_SMP
 fi
 
 if [ "$CONFIG_SMP" = "y" ]; then
    define_bool CONFIG_HAVE_DEC_LOCK y
-   int  'Maximum number of CPUs (2-32)' CONFIG_NR_CPUS 32
-fi
-
-if [ "$CONFIG_ALPHA_GENERIC" = "y" -o "$CONFIG_ALPHA_SRM" = "y" ]; then
-	define_bool CONFIG_EARLY_PRINTK y
 fi
 
 if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-   bool 'Discontiguous Memory Support (EXPERIMENTAL)' CONFIG_DISCONTIGMEM
+   bool 'Discontiguous Memory Support' CONFIG_DISCONTIGMEM
    if [ "$CONFIG_DISCONTIGMEM" = "y" ]; then
-      bool ' NUMA Support (EXPERIMENTAL)' CONFIG_NUMA
+      bool ' NUMA Support' CONFIG_NUMA
    fi
 fi
 
@@ -305,16 +250,12 @@ if [ "$CONFIG_PROC_FS" = "y" ]; then
 	"ELF		CONFIG_KCORE_ELF	\
 	 A.OUT		CONFIG_KCORE_AOUT" ELF
 fi
-if [ "$CONFIG_PROC_FS" != "n" ]; then
+if [ "$CONFIG_PROC_FS" != "n" -a "$CONFIG_ALPHA_SRM" = "y" ]; then
    tristate 'SRM environment through procfs' CONFIG_SRM_ENV
 fi
  
 tristate 'Kernel support for a.out (ECOFF) binaries' CONFIG_BINFMT_AOUT
-if [ "$CONFIG_BINFMT_AOUT" != "n" ]; then
-	bool '  OSF/1 v4 readv/writev compatibility' CONFIG_OSF4_COMPAT
-fi
-
-bool 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
+tristate 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
 tristate 'Kernel support for MISC binaries' CONFIG_BINFMT_MISC
 tristate 'Kernel support for Linux/Intel ELF binaries' CONFIG_BINFMT_EM86
 source drivers/parport/Config.in
@@ -338,9 +279,9 @@ comment 'ATA/IDE/MFM/RLL support'
 tristate 'ATA/IDE/MFM/RLL support' CONFIG_IDE
 
 if [ "$CONFIG_IDE" != "n" ]; then
-  int '  Maximum IDE interfaces' MAX_HWIFS 4
   source drivers/ide/Config.in
 else
+  define_bool CONFIG_BLK_DEV_IDE_MODES n
   define_bool CONFIG_BLK_DEV_HD n
 fi
 endmenu
@@ -357,7 +298,6 @@ endmenu
 
 if [ "$CONFIG_PCI" = "y" ]; then
   source drivers/message/fusion/Config.in
-  source drivers/ieee1394/Config.in
 fi
 
 if [ "$CONFIG_NET" = "y" ]; then
@@ -367,7 +307,7 @@ if [ "$CONFIG_NET" = "y" ]; then
   bool 'Network device support' CONFIG_NETDEVICES
   if [ "$CONFIG_NETDEVICES" = "y" ]; then
     source drivers/net/Config.in
-    if [ "$CONFIG_ATM" = "y" -o "$CONFIG_ATM" = "m" ]; then
+    if [ "$CONFIG_ATM" = "y" ]; then
       source drivers/atm/Config.in
     fi
   fi
@@ -388,16 +328,12 @@ endmenu
 mainmenu_option next_comment
 comment 'Old CD-ROM drivers (not SCSI, not IDE)'
 
-bool 'Support non-SCSI/IDE/ATAPI CDROM drives' CONFIG_CD_NO_IDESCSI
+bool 'Support non-SCSI/IDE/ATAPI drives' CONFIG_CD_NO_IDESCSI
 if [ "$CONFIG_CD_NO_IDESCSI" != "n" ]; then
   source drivers/cdrom/Config.in
 fi
 endmenu
 
-#
-# input before char - char/joystick depends on it. As does USB.
-#
-source drivers/input/Config.in
 source drivers/char/Config.in
 
 #source drivers/misc/Config.in
@@ -433,22 +369,16 @@ fi
 endmenu
 
 source drivers/usb/Config.in
+source drivers/input/Config.in
 
-source net/bluetooth/Config.in
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+   source net/bluetooth/Config.in
+fi
 
 mainmenu_option next_comment
 comment 'Kernel hacking'
 
-if [ "$CONFIG_ALPHA_TITAN" = "y" -o "$CONFIG_ALPHA_WILDFIRE" = "y" -o \
-     "$CONFIG_ALPHA_MARVEL" = "y" ]; then
-   define_bool CONFIG_ALPHA_LEGACY_START_ADDRESS n
-else
-   if [ "$CONFIG_ALPHA_GENERIC" = "y" ]; then
-      bool 'Legacy kernel start address' CONFIG_ALPHA_LEGACY_START_ADDRESS
-   else
-      define_bool CONFIG_ALPHA_LEGACY_START_ADDRESS y
-   fi
-fi
+bool 'Legacy kernel start address' CONFIG_ALPHA_LEGACY_START_ADDRESS
 
 bool 'Kernel debugging' CONFIG_DEBUG_KERNEL
 if [ "$CONFIG_DEBUG_KERNEL" != "n" ]; then
@@ -462,9 +392,4 @@ else
    define_tristate CONFIG_MATHEMU y
 fi
 
-int 'Kernel messages buffer length shift (0 = default)' CONFIG_LOG_BUF_SHIFT 0
-
 endmenu
-
-source crypto/Config.in
-source lib/Config.in

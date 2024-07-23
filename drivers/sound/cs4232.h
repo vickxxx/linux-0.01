@@ -1,3 +1,9 @@
+/*
+ *	cs4232.h
+ *
+ * Copyright: Christoph Hellwig <chhellwig@gmx.net>
+ *
+ */
 
 int probe_cs4232 (struct address_info *hw_config,int useisapnp);
 void attach_cs4232 (struct address_info *hw_config);

@@ -2,10 +2,10 @@
 #define _ASM_IA64_IOCTL_H
 
 /*
- * Based on <asm-i386/ioctl.h>.
+ * This is mostly derived from the Linux/x86 version.
  *
- * Modified 1998, 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 /* ioctl command encoding: 32 bits total, command in lower 16 bits,

@@ -42,11 +42,6 @@
  */ 
 
  
-/*
- * RFC 1213:  MIB-II
- * RFC 2011 (updates 1213):  SNMPv2-MIB-IP
- * RFC 2863:  Interfaces Group MIB
- */
 struct ip_mib
 {
  	unsigned long	IpInReceives;
@@ -69,9 +64,6 @@ struct ip_mib
 	unsigned long   __pad[0]; 
 } ____cacheline_aligned;
  
-/*
- * RFC 2465:  IPv6 MIB: General Group
- */
 struct ipv6_mib
 {
 	unsigned long	Ip6InReceives;
@@ -99,10 +91,6 @@ struct ipv6_mib
 	unsigned long   __pad[0]; 
 } ____cacheline_aligned;
  
-/*
- * RFC 1213:  MIB-II ICMP Group
- * RFC 2011 (updates 1213):  SNMPv2 MIB for IP: ICMP group
- */
 struct icmp_mib
 {
  	unsigned long	IcmpInMsgs;
@@ -135,9 +123,6 @@ struct icmp_mib
 	unsigned long   __pad[0]; 
 } ____cacheline_aligned;
 
-/*
- * RFC 2466:  ICMPv6-MIB
- */
 struct icmpv6_mib
 {
 	unsigned long	Icmp6InMsgs;
@@ -176,10 +161,6 @@ struct icmpv6_mib
 	unsigned long   __pad[0]; 
 } ____cacheline_aligned;
  
-/*
- * RFC 1213:  MIB-II TCP group
- * RFC 2012 (updates 1213):  SNMPv2-MIB-TCP
- */
 struct tcp_mib
 {
  	unsigned long	TcpRtoAlgorithm;
@@ -199,10 +180,6 @@ struct tcp_mib
 	unsigned long   __pad[0]; 
 } ____cacheline_aligned;
  
-/*
- * RFC 1213:  MIB-II UDP group
- * RFC 2013 (updates 1213):  SNMPv2-MIB-UDP
- */
 struct udp_mib
 {
  	unsigned long	UdpInDatagrams;
@@ -211,35 +188,6 @@ struct udp_mib
  	unsigned long	UdpOutDatagrams;
 	unsigned long   __pad[0];
 } ____cacheline_aligned; 
-
-/* draft-ietf-sigtran-sctp-mib-07.txt */
-struct sctp_mib
-{
-	unsigned long   SctpCurrEstab;
-	unsigned long   SctpActiveEstabs;
-	unsigned long   SctpPassiveEstabs;
-	unsigned long   SctpAborteds;
-	unsigned long   SctpShutdowns;
-	unsigned long   SctpOutOfBlues;
-	unsigned long   SctpChecksumErrors;
-	unsigned long   SctpOutCtrlChunks;
-	unsigned long   SctpOutOrderChunks;
-	unsigned long   SctpOutUnorderChunks;
-	unsigned long   SctpInCtrlChunks;
-	unsigned long   SctpInOrderChunks;
-	unsigned long   SctpInUnorderChunks;
-	unsigned long   SctpFragUsrMsgs;
-	unsigned long   SctpReasmUsrMsgs;
-	unsigned long   SctpOutSCTPPacks;
-	unsigned long   SctpInSCTPPacks;
-	unsigned long   SctpRtoAlgorithm;
-	unsigned long   SctpRtoMin;
-	unsigned long   SctpRtoMax;
-	unsigned long   SctpRtoInitial;
-	unsigned long   SctpValCookieLife;
-	unsigned long   SctpMaxInitRetr;
-	unsigned long   __pad[0];
-};
 
 struct linux_mib 
 {
@@ -320,8 +268,5 @@ struct linux_mib
 #define SNMP_INC_STATS(mib, field) ((mib)[2*smp_processor_id()+!in_softirq()].field++)
 #define SNMP_INC_STATS_BH(mib, field) ((mib)[2*smp_processor_id()].field++)
 #define SNMP_INC_STATS_USER(mib, field) ((mib)[2*smp_processor_id()+1].field++)
-#define SNMP_ADD_STATS_BH(mib, field, addend)	\
-	((mib)[2*smp_processor_id()].field += addend)
-#define SNMP_ADD_STATS_USER(mib, field, addend)	\
-	((mib)[2*smp_processor_id()+1].field += addend)
+ 	
 #endif

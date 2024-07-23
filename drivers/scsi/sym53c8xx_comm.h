@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
+**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@free.fr>
+**          Gerard Roudier              <groudier@club-internet.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -2509,7 +2509,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 **    differ and attach them using the order in the NVRAM.
 **
 **    If no NVRAM is found or data appears invalid attach boards in 
-**    the order they are detected.
+**    the the order they are detected.
 **
 **===================================================================
 */

@@ -136,6 +136,7 @@ static int __init
 lasi700_driver_callback(struct parisc_device *dev)
 {
 	unsigned long base = dev->hpa + LASI_SCSI_CORE_OFFSET;
+	int irq = busdevice_alloc_irq(dev);
 	char *driver_name;
 	struct Scsi_Host *host;
 	struct NCR_700_Host_Parameters *hostdata =
@@ -152,6 +153,12 @@ lasi700_driver_callback(struct parisc_device *dev)
 		return 1;
 	}
 	memset(hostdata, 0, sizeof(struct NCR_700_Host_Parameters));
+	if(request_mem_region(base, 64, driver_name) == NULL) {
+		printk(KERN_ERR "%s: Failed to claim memory region\n",
+		       driver_name);
+		kfree(hostdata);
+		return 1;
+	}
 	hostdata->base = base;
 	hostdata->differential = 0;
 	if(dev->id.sversion == LASI_700_SVERSION) {
@@ -163,14 +170,14 @@ lasi700_driver_callback(struct parisc_device *dev)
 		hostdata->chip710 = 1;
 		hostdata->dmode_extra = DMODE_FC2;
 	}
-	hostdata->pci_dev = ccio_get_fake(dev);
 	if((host = NCR_700_detect(host_tpnt, hostdata)) == NULL) {
 		kfree(hostdata);
+		release_mem_region(host->base, 64);
 		return 1;
 	}
-	host->irq = dev->irq;
-	if(request_irq(dev->irq, NCR_700_intr, SA_SHIRQ, driver_name, host)) {
-		printk(KERN_ERR "%s: irq problem, detaching\n",
+	host->irq = irq;
+	if(request_irq(irq, NCR_700_intr, SA_SHIRQ, driver_name, host)) {
+		printk(KERN_ERR "%s: irq problem, detatching\n",
 		       driver_name);
 		scsi_unregister(host);
 		NCR_700_release(host);
@@ -189,7 +196,7 @@ lasi700_release(struct Scsi_Host *host)
 	NCR_700_release(host);
 	kfree(hostdata);
 	free_irq(host->irq, host);
-	unregister_parisc_driver(&lasi700_driver);
+	release_mem_region(host->base, 64);
 	return 1;
 }
 

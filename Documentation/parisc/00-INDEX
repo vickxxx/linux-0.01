@@ -1,10 +1,10 @@
 00-INDEX
 	- this file.
 IODC.txt
-	- Documentation for IODC
+	- Documentation IODC
 debugging
 	- some debugging hints for real-mode code
-unwritten
-	- list of unwritten / incomplete functions
+mm
+	- Documentation on parisc mm status
 registers
 	- current/planned usage of registers

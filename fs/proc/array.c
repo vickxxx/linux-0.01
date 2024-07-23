@@ -70,7 +70,6 @@
 #include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/highmem.h>
-#include <linux/seq_file.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -86,13 +85,10 @@ static inline char * task_name(struct task_struct *p, char * buf)
 {
 	int i;
 	char * name;
-	char tcomm[sizeof(p->comm)];
-
-	get_task_comm(tcomm, p);
 
 	ADDBUF(buf, "Name:\t");
-	name = tcomm;
-	i = sizeof(tcomm);
+	name = p->comm;
+	i = sizeof(p->comm);
 	do {
 		unsigned char c = *name;
 		name++;
@@ -230,8 +226,6 @@ static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
 	sigemptyset(ign);
 	sigemptyset(catch);
 
-	spin_lock_irq(&p->sigmask_lock);
-
 	if (p->sig) {
 		k = p->sig->action;
 		for (i = 1; i <= _NSIG; ++i, ++k) {
@@ -241,7 +235,6 @@ static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
 				sigaddset(catch, i);
 		}
 	}
-	spin_unlock_irq(&p->sigmask_lock);
 }
 
 static inline char * task_sig(struct task_struct *p, char *buffer)
@@ -311,7 +304,6 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 	int res;
 	pid_t ppid;
 	struct mm_struct *mm;
-	char tcomm[sizeof(task->comm)];
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
@@ -337,8 +329,6 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 		up_read(&mm->mmap_sem);
 	}
 
-	get_task_comm(tcomm, task);
-
 	wchan = get_wchan(task);
 
 	collect_sigign_sigcatch(task, &sigign, &sigcatch);
@@ -356,7 +346,7 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
 %lu %lu %lu %lu %lu %lu %lu %lu %d %d\n",
 		task->pid,
-		tcomm,
+		task->comm,
 		state,
 		ppid,
 		task->pgrp,
@@ -518,95 +508,172 @@ int proc_pid_statm(struct task_struct *task, char * buffer)
 		       size, resident, share, trs, lrs, drs, dt);
 }
 
-static int show_map(struct seq_file *m, void *v)
+/*
+ * The way we support synthetic files > 4K
+ * - without storing their contents in some buffer and
+ * - without walking through the entire synthetic file until we reach the
+ *   position of the requested data
+ * is to cleverly encode the current position in the file's f_pos field.
+ * There is no requirement that a read() call which returns `count' bytes
+ * of data increases f_pos by exactly `count'.
+ *
+ * This idea is Linus' one. Bruno implemented it.
+ */
+
+/*
+ * For the /proc/<pid>/maps file, we use fixed length records, each containing
+ * a single line.
+ *
+ * f_pos = (number of the vma in the task->mm->mmap list) * PAGE_SIZE
+ *         + (index into the line)
+ */
+/* for systems with sizeof(void*) == 4: */
+#define MAPS_LINE_FORMAT4	  "%08lx-%08lx %s %08lx %s %lu"
+#define MAPS_LINE_MAX4	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
+
+/* for systems with sizeof(void*) == 8: */
+#define MAPS_LINE_FORMAT8	  "%016lx-%016lx %s %016lx %s %lu"
+#define MAPS_LINE_MAX8	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
+
+#define MAPS_LINE_FORMAT	(sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8)
+#define MAPS_LINE_MAX	(sizeof(void*) == 4 ?  MAPS_LINE_MAX4 :  MAPS_LINE_MAX8)
+
+static int proc_pid_maps_get_line (char *buf, struct vm_area_struct *map)
 {
-	struct vm_area_struct *map = v;
-	struct file *file = map->vm_file;
-	int flags = map->vm_flags;
-	unsigned long ino = 0;
-	dev_t dev = 0;
+	/* produce the next line */
+	char *line;
+	char str[5];
+	int flags;
+	kdev_t dev;
+	unsigned long ino;
 	int len;
 
-	if (file) {
-		struct inode *inode = map->vm_file->f_dentry->d_inode;
-		dev = kdev_t_to_nr(inode->i_sb->s_dev);
-		ino = inode->i_ino;
-	}
+	flags = map->vm_flags;
 
-	seq_printf(m, "%08lx-%08lx %c%c%c%c %08lx %02x:%02x %lu %n",
-			map->vm_start,
-			map->vm_end,
-			flags & VM_READ ? 'r' : '-',
-			flags & VM_WRITE ? 'w' : '-',
-			flags & VM_EXEC ? 'x' : '-',
-			flags & VM_MAYSHARE ? 's' : 'p',
-			map->vm_pgoff << PAGE_SHIFT,
-			MAJOR(dev), MINOR(dev), ino, &len);
+	str[0] = flags & VM_READ ? 'r' : '-';
+	str[1] = flags & VM_WRITE ? 'w' : '-';
+	str[2] = flags & VM_EXEC ? 'x' : '-';
+	str[3] = flags & VM_MAYSHARE ? 's' : 'p';
+	str[4] = 0;
 
-	if (map->vm_file) {
-		len = 25 + sizeof(void*) * 6 - len;
-		if (len < 1)
-			len = 1;
-		seq_printf(m, "%*c", len, ' ');
-		seq_path(m, file->f_vfsmnt, file->f_dentry, "");
-	}
-	seq_putc(m, '\n');
-	return 0;
+	dev = 0;
+	ino = 0;
+	if (map->vm_file != NULL) {
+		dev = map->vm_file->f_dentry->d_inode->i_dev;
+		ino = map->vm_file->f_dentry->d_inode->i_ino;
+		line = d_path(map->vm_file->f_dentry,
+			      map->vm_file->f_vfsmnt,
+			      buf, PAGE_SIZE);
+		buf[PAGE_SIZE-1] = '\n';
+		line -= MAPS_LINE_MAX;
+		if(line < buf)
+			line = buf;
+	} else
+		line = buf;
+
+	len = sprintf(line,
+		      MAPS_LINE_FORMAT,
+		      map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
+		      kdevname(dev), ino);
+
+	if(map->vm_file) {
+		int i;
+		for(i = len; i < MAPS_LINE_MAX; i++)
+			line[i] = ' ';
+		len = buf + PAGE_SIZE - line;
+		memmove(buf, line, len);
+	} else
+		line[len++] = '\n';
+	return len;
 }
 
-static void *m_start(struct seq_file *m, loff_t *pos)
+ssize_t proc_pid_read_maps (struct task_struct *task, struct file * file, char * buf,
+			  size_t count, loff_t *ppos)
 {
-	struct task_struct *task = m->private;
 	struct mm_struct *mm;
 	struct vm_area_struct * map;
-	loff_t l = *pos;
+	char *tmp, *kbuf;
+	long retval;
+	int off, lineno, loff;
+
+	/* reject calls with out of range parameters immediately */
+	retval = 0;
+	if (*ppos > LONG_MAX)
+		goto out;
+	if (count == 0)
+		goto out;
+	off = (long)*ppos;
+	/*
+	 * We might sleep getting the page, so get it first.
+	 */
+	retval = -ENOMEM;
+	kbuf = (char*)__get_free_page(GFP_KERNEL);
+	if (!kbuf)
+		goto out;
+
+	tmp = (char*)__get_free_page(GFP_KERNEL);
+	if (!tmp)
+		goto out_free1;
 
 	task_lock(task);
 	mm = task->mm;
 	if (mm)
 		atomic_inc(&mm->mm_users);
 	task_unlock(task);
-
+	retval = 0;
 	if (!mm)
-		return NULL;
+		goto out_free2;
 
 	down_read(&mm->mmap_sem);
 	map = mm->mmap;
-	while (l-- && map)
+	lineno = 0;
+	loff = 0;
+	if (count > PAGE_SIZE)
+		count = PAGE_SIZE;
+	while (map) {
+		int len;
+		if (off > PAGE_SIZE) {
+			off -= PAGE_SIZE;
+			goto next;
+		}
+		len = proc_pid_maps_get_line(tmp, map);
+		len -= off;
+		if (len > 0) {
+			if (retval+len > count) {
+				/* only partial line transfer possible */
+				len = count - retval;
+				/* save the offset where the next read
+				 * must start */
+				loff = len+off;
+			}
+			memcpy(kbuf+retval, tmp+off, len);
+			retval += len;
+		}
+		off = 0;
+next:
+		if (!loff)
+			lineno++;
+		if (retval >= count)
+			break;
+		if (loff) BUG();
 		map = map->vm_next;
-	if (!map) {
-		up_read(&mm->mmap_sem);
-		mmput(mm);
 	}
-	return map;
-}
+	up_read(&mm->mmap_sem);
+	mmput(mm);
 
-static void m_stop(struct seq_file *m, void *v)
-{
-	struct vm_area_struct *map = v;
-	if (map) {
-		struct mm_struct *mm = map->vm_mm;
-		up_read(&mm->mmap_sem);
-		mmput(mm);
-	}
-}
+	if (retval > count) BUG();
+	if (copy_to_user(buf, kbuf, retval))
+		retval = -EFAULT;
+	else
+		*ppos = (lineno << PAGE_SHIFT) + loff;
 
-static void *m_next(struct seq_file *m, void *v, loff_t *pos)
-{
-	struct vm_area_struct *map = v;
-	(*pos)++;
-	if (map->vm_next)
-		return map->vm_next;
-	m_stop(m, v);
-	return NULL;
+out_free2:
+	free_page((unsigned long)tmp);
+out_free1:
+	free_page((unsigned long)kbuf);
+out:
+	return retval;
 }
-
-struct seq_operations proc_pid_maps_op = {
-	.start	= m_start,
-	.next	= m_next,
-	.stop	= m_stop,
-	.show	= show_map
-};
 
 #ifdef CONFIG_SMP
 int proc_pid_cpu(struct task_struct *task, char * buffer)

@@ -2,64 +2,45 @@
  *
  * Module Name: dswexec - Dispatcher method execution callbacks;
  *                        dispatch to interpreter.
+ *              $Revision: 79 $
  *
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2004, R. Byron Moore
- * All rights reserved.
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
-#include <acpi/acpi.h>
-#include <acpi/acparser.h>
-#include <acpi/amlcode.h>
-#include <acpi/acdispat.h>
-#include <acpi/acinterp.h>
-#include <acpi/acnamesp.h>
-#include <acpi/acdebug.h>
-#include <acpi/acdisasm.h>
+#include "acpi.h"
+#include "acparser.h"
+#include "amlcode.h"
+#include "acdispat.h"
+#include "acinterp.h"
+#include "acnamesp.h"
+#include "acdebug.h"
 
 
 #define _COMPONENT          ACPI_DISPATCHER
-	 ACPI_MODULE_NAME    ("dswexec")
+	 MODULE_NAME         ("dswexec")
 
 /*
- * Dispatch table for opcode classes
+ * Dispatch tables for opcode classes
  */
-static ACPI_EXECUTE_OP      acpi_gbl_op_type_dispatch [] = {
+ACPI_EXECUTE_OP         acpi_gbl_op_type_dispatch [] = {
 			 acpi_ex_opcode_1A_0T_0R,
 			 acpi_ex_opcode_1A_0T_1R,
 			 acpi_ex_opcode_1A_1T_0R,
@@ -74,9 +55,9 @@ static ACPI_EXECUTE_OP      acpi_gbl_op_type_dispatch [] = {
 
 /*****************************************************************************
  *
- * FUNCTION:    acpi_ds_get_predicate_value
+ * FUNCTION:    Acpi_ds_get_predicate_value
  *
- * PARAMETERS:  walk_state      - Current state of the parse tree walk
+ * PARAMETERS:  Walk_state      - Current state of the parse tree walk
  *
  * RETURN:      Status
  *
@@ -86,18 +67,18 @@ static ACPI_EXECUTE_OP      acpi_gbl_op_type_dispatch [] = {
 
 acpi_status
 acpi_ds_get_predicate_value (
-	struct acpi_walk_state          *walk_state,
-	union acpi_operand_object       *result_obj) {
-	acpi_status                     status = AE_OK;
-	union acpi_operand_object       *obj_desc;
+	acpi_walk_state         *walk_state,
+	u32                     has_result_obj) {
+	acpi_status             status = AE_OK;
+	acpi_operand_object     *obj_desc;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("ds_get_predicate_value", walk_state);
+	FUNCTION_TRACE_PTR ("Ds_get_predicate_value", walk_state);
 
 
 	walk_state->control_state->common.state = 0;
 
-	if (result_obj) {
+	if (has_result_obj) {
 		status = acpi_ds_result_pop (&obj_desc, walk_state);
 		if (ACPI_FAILURE (status)) {
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
@@ -107,6 +88,7 @@ acpi_ds_get_predicate_value (
 			return_ACPI_STATUS (status);
 		}
 	}
+
 	else {
 		status = acpi_ds_create_operand (walk_state, walk_state->op, 0);
 		if (ACPI_FAILURE (status)) {
@@ -122,28 +104,30 @@ acpi_ds_get_predicate_value (
 	}
 
 	if (!obj_desc) {
-		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No predicate obj_desc=%p State=%p\n",
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "No predicate Obj_desc=%p State=%p\n",
 			obj_desc, walk_state));
 
 		return_ACPI_STATUS (AE_AML_NO_OPERAND);
 	}
 
+
 	/*
 	 * Result of predicate evaluation currently must
 	 * be a number
 	 */
-	if (ACPI_GET_OBJECT_TYPE (obj_desc) != ACPI_TYPE_INTEGER) {
+	if (obj_desc->common.type != ACPI_TYPE_INTEGER) {
 		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-			"Bad predicate (not a number) obj_desc=%p State=%p Type=%X\n",
-			obj_desc, walk_state, ACPI_GET_OBJECT_TYPE (obj_desc)));
+			"Bad predicate (not a number) Obj_desc=%p State=%p Type=%X\n",
+			obj_desc, walk_state, obj_desc->common.type));
 
 		status = AE_AML_OPERAND_TYPE;
 		goto cleanup;
 	}
 
+
 	/* Truncate the predicate to 32-bits if necessary */
 
-	acpi_ex_truncate_for32bit_table (obj_desc);
+	acpi_ex_truncate_for32bit_table (obj_desc, walk_state);
 
 	/*
 	 * Save the result of the predicate evaluation on
@@ -152,6 +136,7 @@ acpi_ds_get_predicate_value (
 	if (obj_desc->integer.value) {
 		walk_state->control_state->common.value = TRUE;
 	}
+
 	else {
 		/*
 		 * Predicate is FALSE, we will just toss the
@@ -164,12 +149,12 @@ acpi_ds_get_predicate_value (
 
 cleanup:
 
-	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Completed a predicate eval=%X Op=%p\n",
+	ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Completed a predicate eval=%X Op=%pn",
 		walk_state->control_state->common.value, walk_state->op));
 
 	 /* Break to debugger to display result */
 
-	ACPI_DEBUGGER_EXEC (acpi_db_display_result_object (obj_desc, walk_state));
+	DEBUGGER_EXEC (acpi_db_display_result_object (obj_desc, walk_state));
 
 	/*
 	 * Delete the predicate result object (we know that
@@ -177,17 +162,17 @@ cleanup:
 	 */
 	acpi_ut_remove_reference (obj_desc);
 
-	walk_state->control_state->common.state = ACPI_CONTROL_NORMAL;
+	walk_state->control_state->common.state = CONTROL_NORMAL;
 	return_ACPI_STATUS (status);
 }
 
 
 /*****************************************************************************
  *
- * FUNCTION:    acpi_ds_exec_begin_op
+ * FUNCTION:    Acpi_ds_exec_begin_op
  *
- * PARAMETERS:  walk_state      - Current state of the parse tree walk
- *              out_op          - Return op if a new one is created
+ * PARAMETERS:  Walk_state      - Current state of the parse tree walk
+ *              Out_op          - Return op if a new one is created
  *
  * RETURN:      Status
  *
@@ -199,15 +184,15 @@ cleanup:
 
 acpi_status
 acpi_ds_exec_begin_op (
-	struct acpi_walk_state          *walk_state,
-	union acpi_parse_object         **out_op)
+	acpi_walk_state         *walk_state,
+	acpi_parse_object       **out_op)
 {
-	union acpi_parse_object         *op;
-	acpi_status                     status = AE_OK;
-	u32                             opcode_class;
+	acpi_parse_object       *op;
+	acpi_status             status = AE_OK;
+	u32                     opcode_class;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("ds_exec_begin_op", walk_state);
+	FUNCTION_TRACE_PTR ("Ds_exec_begin_op", walk_state);
 
 
 	op = walk_state->op;
@@ -219,18 +204,8 @@ acpi_ds_exec_begin_op (
 
 		op = *out_op;
 		walk_state->op = op;
-		walk_state->opcode = op->common.aml_opcode;
-		walk_state->op_info = acpi_ps_get_opcode_info (op->common.aml_opcode);
-
-		if (acpi_ns_opens_scope (walk_state->op_info->object_type)) {
-			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "(%s) Popping scope for Op %p\n",
-				acpi_ut_get_type_name (walk_state->op_info->object_type), op));
-
-			status = acpi_ds_scope_stack_pop (walk_state);
-			if (ACPI_FAILURE (status)) {
-				return_ACPI_STATUS (status);
-			}
-		}
+		walk_state->op_info = acpi_ps_get_opcode_info (op->opcode);
+		walk_state->opcode = op->opcode;
 	}
 
 	if (op == walk_state->origin) {
@@ -248,11 +223,11 @@ acpi_ds_exec_begin_op (
 	 */
 	if ((walk_state->control_state) &&
 		(walk_state->control_state->common.state ==
-			ACPI_CONTROL_CONDITIONAL_EXECUTING)) {
+			CONTROL_CONDITIONAL_EXECUTING)) {
 		ACPI_DEBUG_PRINT ((ACPI_DB_EXEC, "Exec predicate Op=%p State=%p\n",
 				  op, walk_state));
 
-		walk_state->control_state->common.state = ACPI_CONTROL_PREDICATE_EXECUTING;
+		walk_state->control_state->common.state = CONTROL_PREDICATE_EXECUTING;
 
 		/* Save start of predicate */
 
@@ -264,7 +239,7 @@ acpi_ds_exec_begin_op (
 
 	/* We want to send namepaths to the load code */
 
-	if (op->common.aml_opcode == AML_INT_NAMEPATH_OP) {
+	if (op->opcode == AML_INT_NAMEPATH_OP) {
 		opcode_class = AML_CLASS_NAMED_OBJECT;
 	}
 
@@ -285,7 +260,7 @@ acpi_ds_exec_begin_op (
 
 	case AML_CLASS_NAMED_OBJECT:
 
-		if (walk_state->walk_type == ACPI_WALK_METHOD) {
+		if (walk_state->walk_type == WALK_METHOD) {
 			/*
 			 * Found a named object declaration during method
 			 * execution;  we must enter this object into the
@@ -296,16 +271,19 @@ acpi_ds_exec_begin_op (
 			status = acpi_ds_load2_begin_op (walk_state, NULL);
 		}
 
-		if (op->common.aml_opcode == AML_REGION_OP) {
+
+		if (op->opcode == AML_REGION_OP) {
 			status = acpi_ds_result_stack_push (walk_state);
 		}
+
 		break;
 
+
+	/* most operators with arguments */
 
 	case AML_CLASS_EXECUTE:
 	case AML_CLASS_CREATE:
 
-		/* most operators with arguments */
 		/* Start a new result/operand state */
 
 		status = acpi_ds_result_stack_push (walk_state);
@@ -324,9 +302,9 @@ acpi_ds_exec_begin_op (
 
 /*****************************************************************************
  *
- * FUNCTION:    acpi_ds_exec_end_op
+ * FUNCTION:    Acpi_ds_exec_end_op
  *
- * PARAMETERS:  walk_state      - Current state of the parse tree walk
+ * PARAMETERS:  Walk_state      - Current state of the parse tree walk
  *              Op              - Op that has been just been completed in the
  *                                walk;  Arguments have now been evaluated.
  *
@@ -340,17 +318,18 @@ acpi_ds_exec_begin_op (
 
 acpi_status
 acpi_ds_exec_end_op (
-	struct acpi_walk_state          *walk_state)
+	acpi_walk_state         *walk_state)
 {
-	union acpi_parse_object         *op;
-	acpi_status                     status = AE_OK;
-	u32                             op_type;
-	u32                             op_class;
-	union acpi_parse_object         *next_op;
-	union acpi_parse_object         *first_arg;
+	acpi_parse_object       *op;
+	acpi_status             status = AE_OK;
+	u32                     op_type;
+	u32                     op_class;
+	acpi_parse_object       *next_op;
+	acpi_parse_object       *first_arg;
+	u32                     i;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("ds_exec_end_op", walk_state);
+	FUNCTION_TRACE_PTR ("Ds_exec_end_op", walk_state);
 
 
 	op      = walk_state->op;
@@ -358,11 +337,11 @@ acpi_ds_exec_end_op (
 	op_class = walk_state->op_info->class;
 
 	if (op_class == AML_CLASS_UNKNOWN) {
-		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Unknown opcode %X\n", op->common.aml_opcode));
+		ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Unknown opcode %X\n", op->opcode));
 		return_ACPI_STATUS (AE_NOT_IMPLEMENTED);
 	}
 
-	first_arg = op->common.value.arg;
+	first_arg = op->value.arg;
 
 	/* Init the walk state */
 
@@ -370,19 +349,22 @@ acpi_ds_exec_end_op (
 	walk_state->return_desc = NULL;
 	walk_state->result_obj = NULL;
 
+
 	/* Call debugger for single step support (DEBUG build only) */
 
-	ACPI_DEBUGGER_EXEC (status = acpi_db_single_step (walk_state, op, op_class));
-	ACPI_DEBUGGER_EXEC (if (ACPI_FAILURE (status)) {return_ACPI_STATUS (status);});
+	DEBUGGER_EXEC (status = acpi_db_single_step (walk_state, op, op_class));
+	DEBUGGER_EXEC (if (ACPI_FAILURE (status)) {return_ACPI_STATUS (status);});
 
-	/* Decode the Opcode Class */
 
 	switch (op_class) {
-	case AML_CLASS_ARGUMENT:    /* constants, literals, etc. -- do nothing */
+	/* Decode the Opcode Class */
+
+	case AML_CLASS_ARGUMENT: /* constants, literals, etc.  do nothing */
 		break;
 
+	/* most operators with arguments */
 
-	case AML_CLASS_EXECUTE:     /* most operators with arguments */
+	case AML_CLASS_EXECUTE:
 
 		/* Build resolved operand stack */
 
@@ -403,42 +385,48 @@ acpi_ds_exec_end_op (
 		status = acpi_ex_resolve_operands (walk_state->opcode,
 				  &(walk_state->operands [walk_state->num_operands -1]),
 				  walk_state);
-		if (ACPI_SUCCESS (status)) {
-			ACPI_DUMP_OPERANDS (ACPI_WALK_OPERANDS, ACPI_IMODE_EXECUTE,
-					  acpi_ps_get_opcode_name (walk_state->opcode),
-					  walk_state->num_operands, "after ex_resolve_operands");
+		if (ACPI_FAILURE (status)) {
+			/* TBD: must pop and delete operands */
+
+			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "[%s]: Could not resolve operands, %s\n",
+				acpi_ps_get_opcode_name (walk_state->opcode), acpi_format_exception (status)));
 
 			/*
-			 * Dispatch the request to the appropriate interpreter handler
-			 * routine.  There is one routine per opcode "type" based upon the
-			 * number of opcode arguments and return type.
+			 * On error, we must delete all the operands and clear the
+			 * operand stack
 			 */
-			status = acpi_gbl_op_type_dispatch [op_type] (walk_state);
+			for (i = 0; i < walk_state->num_operands; i++) {
+				acpi_ut_remove_reference (walk_state->operands[i]);
+				walk_state->operands[i] = NULL;
+			}
+
+			walk_state->num_operands = 0;
+			goto cleanup;
 		}
-		else {
+
+		DUMP_OPERANDS (WALK_OPERANDS, IMODE_EXECUTE, acpi_ps_get_opcode_name (walk_state->opcode),
+				  walk_state->num_operands, "after Ex_resolve_operands");
+
+		/*
+		 * Dispatch the request to the appropriate interpreter handler
+		 * routine.  There is one routine per opcode "type" based upon the
+		 * number of opcode arguments and return type.
+		 */
+		status = acpi_gbl_op_type_dispatch [op_type] (walk_state);
+
+
+		/* Delete argument objects and clear the operand stack */
+
+		for (i = 0; i < walk_state->num_operands; i++) {
 			/*
-			 * Treat constructs of the form "Store(local_x,local_x)" as noops when the
-			 * Local is uninitialized.
+			 * Remove a reference to all operands, including both
+			 * "Arguments" and "Targets".
 			 */
-			if  ((status == AE_AML_UNINITIALIZED_LOCAL) &&
-				(walk_state->opcode == AML_STORE_OP) &&
-				(walk_state->operands[0]->common.type == ACPI_TYPE_LOCAL_REFERENCE) &&
-				(walk_state->operands[1]->common.type == ACPI_TYPE_LOCAL_REFERENCE) &&
-				(walk_state->operands[0]->reference.opcode ==
-				 walk_state->operands[1]->reference.opcode)) {
-				status = AE_OK;
-			}
-			else {
-				ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
-					"[%s]: Could not resolve operands, %s\n",
-					acpi_ps_get_opcode_name (walk_state->opcode),
-					acpi_format_exception (status)));
-			}
+			acpi_ut_remove_reference (walk_state->operands[i]);
+			walk_state->operands[i] = NULL;
 		}
 
-		/* Always delete the argument objects and clear the operand stack */
-
-		acpi_ds_clear_operands (walk_state);
+		walk_state->num_operands = 0;
 
 		/*
 		 * If a result object was returned from above, push it on the
@@ -457,14 +445,11 @@ acpi_ds_exec_end_op (
 		switch (op_type) {
 		case AML_TYPE_CONTROL:    /* Type 1 opcode, IF/ELSE/WHILE/NOOP */
 
-			/* 1 Operand, 0 external_result, 0 internal_result */
+			/* 1 Operand, 0 External_result, 0 Internal_result */
 
 			status = acpi_ds_exec_end_control_op (walk_state, op);
-			if (ACPI_FAILURE (status)) {
-				break;
-			}
 
-			status = acpi_ds_result_stack_pop (walk_state);
+			acpi_ds_result_stack_pop (walk_state);
 			break;
 
 
@@ -476,13 +461,13 @@ acpi_ds_exec_end_op (
 			 * (AML_METHODCALL) Op->Value->Arg->Node contains
 			 * the method Node pointer
 			 */
-			/* next_op points to the op that holds the method name */
+			/* Next_op points to the op that holds the method name */
 
 			next_op = first_arg;
 
-			/* next_op points to first argument op */
+			/* Next_op points to first argument op */
 
-			next_op = next_op->common.next;
+			next_op = next_op->next;
 
 			/*
 			 * Get the method's arguments and put them on the operand stack
@@ -493,15 +478,13 @@ acpi_ds_exec_end_op (
 			}
 
 			/*
-			 * Since the operands will be passed to another control method,
-			 * we must resolve all local references here (Local variables,
-			 * arguments to *this* method, etc.)
+			 * Since the operands will be passed to another
+			 * control method, we must resolve all local
+			 * references here (Local variables, arguments
+			 * to *this* method, etc.)
 			 */
 			status = acpi_ds_resolve_operands (walk_state);
 			if (ACPI_FAILURE (status)) {
-				/* On error, clear all resolved operands */
-
-				acpi_ds_clear_operands (walk_state);
 				break;
 			}
 
@@ -516,12 +499,13 @@ acpi_ds_exec_end_op (
 			 * especially the operand count!
 			 */
 			return_ACPI_STATUS (status);
+			break;
 
 
 		case AML_TYPE_CREATE_FIELD:
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
-				"Executing create_field Buffer/Index Op=%p\n", op));
+				"Executing Create_field Buffer/Index Op=%p\n", op));
 
 			status = acpi_ds_load2_end_op (walk_state);
 			if (ACPI_FAILURE (status)) {
@@ -532,65 +516,18 @@ acpi_ds_exec_end_op (
 			break;
 
 
-		case AML_TYPE_CREATE_OBJECT:
-
-			ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
-				"Executing create_object (Buffer/Package) Op=%p\n", op));
-
-			switch (op->common.parent->common.aml_opcode) {
-			case AML_NAME_OP:
-
-				/*
-				 * Put the Node on the object stack (Contains the ACPI Name of
-				 * this object)
-				 */
-				walk_state->operands[0] = (void *) op->common.parent->common.node;
-				walk_state->num_operands = 1;
-
-				status = acpi_ds_create_node (walk_state, op->common.parent->common.node, op->common.parent);
-				if (ACPI_FAILURE (status)) {
-					break;
-				}
-
-				/* Fall through */
-				/*lint -fallthrough */
-
-			case AML_INT_EVAL_SUBTREE_OP:
-
-				status = acpi_ds_eval_data_object_operands (walk_state, op,
-						  acpi_ns_get_attached_object (op->common.parent->common.node));
-				break;
-
-			default:
-
-				status = acpi_ds_eval_data_object_operands (walk_state, op, NULL);
-				break;
-			}
-
-			/*
-			 * If a result object was returned from above, push it on the
-			 * current result stack
-			 */
-			if (ACPI_SUCCESS (status) &&
-				walk_state->result_obj) {
-				status = acpi_ds_result_push (walk_state->result_obj, walk_state);
-			}
-			break;
-
-
 		case AML_TYPE_NAMED_FIELD:
 		case AML_TYPE_NAMED_COMPLEX:
 		case AML_TYPE_NAMED_SIMPLE:
-		case AML_TYPE_NAMED_NO_OBJ:
 
 			status = acpi_ds_load2_end_op (walk_state);
 			if (ACPI_FAILURE (status)) {
 				break;
 			}
 
-			if (op->common.aml_opcode == AML_REGION_OP) {
+			if (op->opcode == AML_REGION_OP) {
 				ACPI_DEBUG_PRINT ((ACPI_DB_EXEC,
-					"Executing op_region Address/Length Op=%p\n", op));
+					"Executing Op_region Address/Length Op=%p\n", op));
 
 				status = acpi_ds_eval_region_operands (walk_state, op);
 				if (ACPI_FAILURE (status)) {
@@ -602,26 +539,23 @@ acpi_ds_exec_end_op (
 
 			break;
 
-
 		case AML_TYPE_UNDEFINED:
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR, "Undefined opcode type Op=%p\n", op));
 			return_ACPI_STATUS (AE_NOT_IMPLEMENTED);
+			break;
 
 
 		case AML_TYPE_BOGUS:
-
-			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH,
-				"Internal opcode=%X type Op=%p\n",
+			ACPI_DEBUG_PRINT ((ACPI_DB_DISPATCH, "Internal opcode=%X type Op=%p\n",
 				walk_state->opcode, op));
 			break;
-
 
 		default:
 
 			ACPI_DEBUG_PRINT ((ACPI_DB_ERROR,
 				"Unimplemented opcode, class=%X type=%X Opcode=%X Op=%p\n",
-				op_class, op_type, op->common.aml_opcode, op));
+				op_class, op_type, op->opcode, op));
 
 			status = AE_NOT_IMPLEMENTED;
 			break;
@@ -629,10 +563,10 @@ acpi_ds_exec_end_op (
 	}
 
 	/*
-	 * ACPI 2.0 support for 64-bit integers: Truncate numeric
-	 * result value if we are executing from a 32-bit ACPI table
+	 * ACPI 2.0 support for 64-bit integers:
+	 * Truncate numeric result value if we are executing from a 32-bit ACPI table
 	 */
-	acpi_ex_truncate_for32bit_table (walk_state->result_obj);
+	acpi_ex_truncate_for32bit_table (walk_state->result_obj, walk_state);
 
 	/*
 	 * Check if we just completed the evaluation of a
@@ -641,9 +575,9 @@ acpi_ds_exec_end_op (
 
 	if ((walk_state->control_state) &&
 		(walk_state->control_state->common.state ==
-			ACPI_CONTROL_PREDICATE_EXECUTING) &&
+			CONTROL_PREDICATE_EXECUTING) &&
 		(walk_state->control_state->control.predicate_op == op)) {
-		status = acpi_ds_get_predicate_value (walk_state, walk_state->result_obj);
+		status = acpi_ds_get_predicate_value (walk_state, (u32) walk_state->result_obj);
 		walk_state->result_obj = NULL;
 	}
 
@@ -652,7 +586,7 @@ cleanup:
 	if (walk_state->result_obj) {
 		/* Break to debugger to display result */
 
-		ACPI_DEBUGGER_EXEC (acpi_db_display_result_object (walk_state->result_obj, walk_state));
+		DEBUGGER_EXEC (acpi_db_display_result_object (walk_state->result_obj, walk_state));
 
 		/*
 		 * Delete the result op if and only if:
@@ -662,25 +596,11 @@ cleanup:
 		acpi_ds_delete_result_if_not_used (op, walk_state->result_obj, walk_state);
 	}
 
-#ifdef _UNDER_DEVELOPMENT
-
-	if (walk_state->parser_state.aml == walk_state->parser_state.aml_end) {
-		acpi_db_method_end (walk_state);
-	}
-#endif
-
 	/* Always clear the object stack */
 
+	/* TBD: [Investigate] Clear stack of return value,
+	but don't delete it */
 	walk_state->num_operands = 0;
-
-#ifdef ACPI_DISASSEMBLER
-
-	/* On error, display method locals/args */
-
-	if (ACPI_FAILURE (status)) {
-		acpi_dm_dump_method_info (status, walk_state, op);
-	}
-#endif
 
 	return_ACPI_STATUS (status);
 }

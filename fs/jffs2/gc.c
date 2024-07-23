@@ -31,7 +31,7 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: gc.c,v 1.52.2.7 2003/11/02 13:54:20 dwmw2 Exp $
+ * $Id: gc.c,v 1.52 2001/09/19 21:53:47 dwmw2 Exp $
  *
  */
 
@@ -43,7 +43,7 @@
 #include <linux/interrupt.h>
 #include <linux/pagemap.h>
 #include "nodelist.h"
-#include <linux/crc32.h>
+#include "crc32.h"
 
 static int jffs2_garbage_collect_metadata(struct jffs2_sb_info *c, struct jffs2_eraseblock *jeb, 
 					struct inode *inode, struct jffs2_full_dnode *fd);
@@ -109,8 +109,8 @@ int jffs2_garbage_collect_pass(struct jffs2_sb_info *c)
 	struct jffs2_node_frag *frag;
 	struct jffs2_full_dnode *fn = NULL;
 	struct jffs2_full_dirent *fd;
-	struct jffs2_inode_cache *ic;
 	__u32 start = 0, end = 0, nrfrags = 0;
+	__u32 inum;
 	struct inode *inode;
 	int ret = 0;
 
@@ -134,10 +134,8 @@ int jffs2_garbage_collect_pass(struct jffs2_sb_info *c)
 
 	D1(printk(KERN_DEBUG "garbage collect from block at phys 0x%08x\n", jeb->offset));
 
-	if (!jeb->used_size) {
-		up(&c->alloc_sem);
+	if (!jeb->used_size)
 		goto eraseit;
-	}
 
 	raw = jeb->gc_node;
 			
@@ -158,54 +156,22 @@ int jffs2_garbage_collect_pass(struct jffs2_sb_info *c)
 		/* Inode-less node. Clean marker, snapshot or something like that */
 		spin_unlock_bh(&c->erase_completion_lock);
 		jffs2_mark_node_obsolete(c, raw);
-		up(&c->alloc_sem);
 		goto eraseit_lock;
 	}
 						     
-	ic = jffs2_raw_ref_to_ic(raw);
-	D1(printk(KERN_DEBUG "Inode number is #%u\n", ic->ino));
+	inum = jffs2_raw_ref_to_inum(raw);
+	D1(printk(KERN_DEBUG "Inode number is #%u\n", inum));
 
 	spin_unlock_bh(&c->erase_completion_lock);
 
-	D1(printk(KERN_DEBUG "jffs2_garbage_collect_pass collecting from block @0x%08x. Node @0x%08x, ino #%u\n", jeb->offset, raw->flash_offset&~3, ic->ino));
-	if (!ic->nlink) {
-		/* The inode has zero nlink but its nodes weren't yet marked
-		   obsolete. This has to be because we're still waiting for 
-		   the final (close() and) iput() to happen.
+	D1(printk(KERN_DEBUG "jffs2_garbage_collect_pass collecting from block @0x%08x. Node @0x%08x, ino #%u\n", jeb->offset, raw->flash_offset&~3, inum));
 
-		   There's a possibility that the final iput() could have 
-		   happened while we were contemplating. In order to ensure
-		   that we don't cause a new read_inode() (which would fail)
-		   for the inode in question, we use ilookup() in this case
-		   instead of iget().
-
-		   The nlink can't _become_ zero at this point because we're 
-		   holding the alloc_sem, and jffs2_do_unlink() would also
-		   need that while decrementing nlink on any inode.
-		*/
-		inode = ilookup(OFNI_BS_2SFFJ(c), ic->ino);
-		if (!inode) {
-			D1(printk(KERN_DEBUG "ilookup() failed for ino #%u; inode is probably deleted.\n",
-				  ic->ino));
-			up(&c->alloc_sem);
-			return 0;
-		}
-	} else {
-		/* Inode has links to it still; they're not going away because
-		   jffs2_do_unlink() would need the alloc_sem and we have it.
-		   Just iget() it, and if read_inode() is necessary that's OK.
-		*/
-		inode = iget(OFNI_BS_2SFFJ(c), ic->ino);
-		if (!inode) {
-			up(&c->alloc_sem);
-			return -ENOMEM;
-		}
-	}
+	inode = iget(OFNI_BS_2SFFJ(c), inum);
 	if (is_bad_inode(inode)) {
-		printk(KERN_NOTICE "Eep. read_inode() failed for ino #%u\n", ic->ino);
+		printk(KERN_NOTICE "Eep. read_inode() failed for ino #%u\n", inum);
 		/* NB. This will happen again. We need to do something appropriate here. */
-		up(&c->alloc_sem);
 		iput(inode);
+		up(&c->alloc_sem);
 		return -EIO;
 	}
 
@@ -268,7 +234,6 @@ int jffs2_garbage_collect_pass(struct jffs2_sb_info *c)
 	}
  upnout:
 	up(&f->sem);
-	up(&c->alloc_sem);
 	iput(inode);
 
  eraseit_lock:
@@ -285,6 +250,7 @@ int jffs2_garbage_collect_pass(struct jffs2_sb_info *c)
 		jffs2_erase_pending_trigger(c);
 	}
 	spin_unlock_bh(&c->erase_completion_lock);
+	up(&c->alloc_sem);
 
 	return ret;
 }
@@ -300,14 +266,15 @@ static int jffs2_garbage_collect_metadata(struct jffs2_sb_info *c, struct jffs2_
 	__u32 alloclen, phys_ofs;
 	int ret;
 
-	if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode)) {
+	if ((inode->i_mode & S_IFMT) == S_IFBLK ||
+	    (inode->i_mode & S_IFMT) == S_IFCHR) {
 		/* For these, we don't actually need to read the old node */
 		dev =  (MAJOR(to_kdev_t(inode->i_rdev)) << 8) | 
 			MINOR(to_kdev_t(inode->i_rdev));
 		mdata = (char *)&dev;
 		mdatalen = sizeof(dev);
 		D1(printk(KERN_DEBUG "jffs2_garbage_collect_metadata(): Writing %d bytes of kdev_t\n", mdatalen));
-	} else if (S_ISLNK(inode->i_mode)) {
+	} else if ((inode->i_mode & S_IFMT) == S_IFLNK) {
 		mdatalen = fn->size;
 		mdata = kmalloc(fn->size, GFP_KERNEL);
 		if (!mdata) {
@@ -364,7 +331,7 @@ static int jffs2_garbage_collect_metadata(struct jffs2_sb_info *c, struct jffs2_
 	jffs2_free_full_dnode(fn);
 	f->metadata = new_fn;
  out:
-	if (S_ISLNK(inode->i_mode))
+	if ((inode->i_mode & S_IFMT) == S_IFLNK)
 		kfree(mdata);
 	return ret;
 }
@@ -499,8 +466,8 @@ static int jffs2_garbage_collect_hole(struct jffs2_sb_info *c, struct jffs2_eras
 		ri.ino = inode->i_ino;
 		ri.version = ++f->highest_version;
 		ri.offset = start;
-		ri.dsize = end - start;
-		ri.csize = 0;
+		ri.csize = end - start;
+		ri.dsize = 0;
 		ri.compr = JFFS2_COMPR_ZERO;
 	}
 	ri.mode = inode->i_mode;
@@ -531,21 +498,9 @@ static int jffs2_garbage_collect_hole(struct jffs2_sb_info *c, struct jffs2_eras
 			jffs2_mark_node_obsolete(c, f->metadata->raw);
 			jffs2_free_full_dnode(f->metadata);
 			f->metadata = NULL;
+			return 0;
 		}
-		return 0;
 	}
-
-	/* 
-	 * We should only get here in the case where the node we are
-	 * replacing had more than one frag, so we kept the same version
-	 * number as before. (Except in case of error -- see 'goto fill;' 
-	 * above.)
-	 */
-	D1(if(fn->frags <= 1) {
-		printk(KERN_WARNING "jffs2_garbage_collect_hole: Replacing fn with %d frag(s) but new ver %d != highest_version %d of ino #%d\n",
-		       fn->frags, ri.version, f->highest_version, ri.ino);
-	});
-
 	for (frag = f->fraglist; frag; frag = frag->next) {
 		if (frag->ofs > fn->size + fn->ofs)
 			break;

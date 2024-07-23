@@ -4,7 +4,7 @@
  * This is the code behind /dev/parport* -- it allows a user-space
  * application to use the parport subsystem.
  *
- * Copyright (C) 1998-2000, 2002 Tim Waugh <tim@cyberelk.net>
+ * Copyright (C) 1998-2000 Tim Waugh <tim@cyberelk.demon.co.uk>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -80,7 +80,6 @@ struct pp_struct {
 	unsigned char irqctl;
 	struct ieee1284_info state;
 	struct ieee1284_info saved_state;
-	long default_inactivity;
 };
 
 /* pp_struct.flags bitfields */
@@ -108,6 +107,7 @@ static ssize_t pp_read (struct file * file, char * buf, size_t count,
 	struct pp_struct *pp = file->private_data;
 	char * kbuffer;
 	ssize_t bytes_read = 0;
+	ssize_t got = 0;
 	struct parport *pport;
 	int mode;
 
@@ -118,10 +118,6 @@ static ssize_t pp_read (struct file * file, char * buf, size_t count,
 		return -EINVAL;
 	}
 
-	/* Trivial case. */
-	if (count == 0)
-		return 0;
-
 	kbuffer = kmalloc(min_t(size_t, count, PP_BUFFER_SIZE), GFP_KERNEL);
 	if (!kbuffer) {
 		return -ENOMEM;
@@ -129,13 +125,8 @@ static ssize_t pp_read (struct file * file, char * buf, size_t count,
 	pport = pp->pdev->port;
 	mode = pport->ieee1284.mode & ~(IEEE1284_DEVICEID | IEEE1284_ADDR);
 
-	parport_set_timeout (pp->pdev,
-			     (file->f_flags & O_NONBLOCK) ?
-			     PARPORT_INACTIVITY_O_NONBLOCK :
-			     pp->default_inactivity);
-
-	while (bytes_read == 0) {
-		ssize_t need = min_t(unsigned long, count, PP_BUFFER_SIZE);
+	while (bytes_read < count) {
+		ssize_t need = min_t(unsigned long, count - bytes_read, PP_BUFFER_SIZE);
 
 		if (mode == IEEE1284_MODE_EPP) {
 			/* various specials for EPP mode */
@@ -153,32 +144,36 @@ static ssize_t pp_read (struct file * file, char * buf, size_t count,
 			} else {
 				fn = pport->ops->epp_read_data;
 			}
-			bytes_read = (*fn)(pport, kbuffer, need, flags);
+			got = (*fn)(pport, kbuffer, need, flags);
 		} else {
-			bytes_read = parport_read (pport, kbuffer, need);
+			got = parport_read (pport, kbuffer, need);
 		}
 
-		if (bytes_read != 0)
-			break;
-
-		if (file->f_flags & O_NONBLOCK) {
-			bytes_read = -EAGAIN;
+		if (got <= 0) {
+			if (!bytes_read) {
+				bytes_read = got;
+			}
 			break;
 		}
+
+		if (copy_to_user (buf + bytes_read, kbuffer, got)) {
+			bytes_read = -EFAULT;
+			break;
+		}
+
+		bytes_read += got;
 
 		if (signal_pending (current)) {
-			bytes_read = -ERESTARTSYS;
+			if (!bytes_read) {
+				bytes_read = -EINTR;
+			}
 			break;
 		}
 
-		if (current->need_resched)
+		if (current->need_resched) {
 			schedule ();
+		}
 	}
-
-	parport_set_timeout (pp->pdev, pp->default_inactivity);
-
-	if (bytes_read > 0 && copy_to_user (buf, kbuffer, bytes_read))
-		bytes_read = -EFAULT;
 
 	kfree (kbuffer);
 	pp_enable_irq (pp);
@@ -210,11 +205,6 @@ static ssize_t pp_write (struct file * file, const char * buf, size_t count,
 	pport = pp->pdev->port;
 	mode = pport->ieee1284.mode & ~(IEEE1284_DEVICEID | IEEE1284_ADDR);
 
-	parport_set_timeout (pp->pdev,
-			     (file->f_flags & O_NONBLOCK) ?
-			     PARPORT_INACTIVITY_O_NONBLOCK :
-			     pp->default_inactivity);
-
 	while (bytes_written < count) {
 		ssize_t n = min_t(unsigned long, count - bytes_written, PP_BUFFER_SIZE);
 
@@ -245,12 +235,6 @@ static ssize_t pp_write (struct file * file, const char * buf, size_t count,
 
 		bytes_written += wrote;
 
-		if (file->f_flags & O_NONBLOCK) {
-			if (!bytes_written)
-				bytes_written = -EAGAIN;
-			break;
-		}
-
 		if (signal_pending (current)) {
 			if (!bytes_written) {
 				bytes_written = -EINTR;
@@ -262,8 +246,6 @@ static ssize_t pp_write (struct file * file, const char * buf, size_t count,
 			schedule ();
 		}
 	}
-
-	parport_set_timeout (pp->pdev, pp->default_inactivity);
 
 	kfree (kbuffer);
 	pp_enable_irq (pp);
@@ -342,7 +324,6 @@ static int pp_ioctl(struct inode *inode, struct file *file,
 	case PPCLAIM:
 	    {
 		struct ieee1284_info *info;
-		int ret;
 
 		if (pp->flags & PP_CLAIMED) {
 			printk (KERN_DEBUG CHRDEV
@@ -358,10 +339,7 @@ static int pp_ioctl(struct inode *inode, struct file *file,
 			}
 		}
 
-		ret = parport_claim_or_block (pp->pdev);
-		if (ret < 0)
-			return ret;
-
+		parport_claim_or_block (pp->pdev);
 		pp->flags |= PP_CLAIMED;
 
 		/* For interrupt-reporting to work, we need to be
@@ -374,8 +352,6 @@ static int pp_ioctl(struct inode *inode, struct file *file,
 		pp->saved_state.phase = info->phase;
 		info->mode = pp->state.mode;
 		info->phase = pp->state.phase;
-		pp->default_inactivity = parport_set_timeout (pp->pdev, 0);
-		parport_set_timeout (pp->pdev, pp->default_inactivity);
 
 		return 0;
 	    }
@@ -457,12 +433,8 @@ static int pp_ioctl(struct inode *inode, struct file *file,
 	    {
 		unsigned int modes;
 
-		port = parport_find_number (minor);
-		if (!port)
-			return -ENODEV;
-
-		modes = port->modes;
-		if (copy_to_user ((unsigned int *)arg, &modes, sizeof (modes))) {
+		modes = pp->pdev->port->modes;
+		if (copy_to_user ((unsigned int *)arg, &modes, sizeof (port->modes))) {
 			return -EFAULT;
 		}
 		return 0;

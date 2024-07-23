@@ -1,9 +1,9 @@
+/*
+ * BK Id: SCCS/s.pci-bridge.h 1.11 05/21/01 01:31:30 cort
+ */
 #ifdef __KERNEL__
 #ifndef _ASM_PCI_BRIDGE_H
 #define _ASM_PCI_BRIDGE_H
-
-#include <linux/ioport.h>
-#include <linux/pci.h>
 
 struct device_node;
 struct pci_controller;
@@ -16,20 +16,12 @@ extern void *pci_bus_io_base(unsigned int bus);
 extern unsigned long pci_bus_io_base_phys(unsigned int bus);
 extern unsigned long pci_bus_mem_base_phys(unsigned int bus);
 
-/* Allocate a new PCI host bridge structure */
-extern struct pci_controller* pcibios_alloc_controller(void);
-
-/* Helper function for setting up resources */
-extern void pci_init_resource(struct resource *res, unsigned long start,
-			      unsigned long end, int flags, char *name);
-
 /*
- * PCI <-> OF matching functions
+ * PCI <-> OF matching functions 
  */
 extern int pci_device_from_OF_node(struct device_node *node,
 				   u8* bus, u8* devfn);
 extern struct device_node* pci_device_to_OF_node(struct pci_dev *);
-extern void pci_create_OF_bus_map(void);
 
 /* Get the PCI host controller for a bus */
 extern struct pci_controller* pci_bus_to_hose(int bus);
@@ -54,11 +46,10 @@ struct pci_controller {
 
 	int first_busno;
 	int last_busno;
-	int bus_offset;
-
+        
 	void *io_base_virt;
 	unsigned long io_base_phys;
-
+	
 	/* Some machines (PReP) have a non 1:1 mapping of
 	 * the PCI memory space in the CPU bus space
 	 */
@@ -67,11 +58,6 @@ struct pci_controller {
 	struct pci_ops *ops;
 	volatile unsigned int *cfg_addr;
 	volatile unsigned char *cfg_data;
-	/*
-	 * If set, indirect method will set the cfg_type bit as
-	 * needed to generate type 1 configuration transactions.
-	 */
-	int set_cfg_type;
 
 	/* Currently, we limit ourselves to 1 IO range and 3 mem
 	 * ranges since the common pci_bus structure can't handle more
@@ -79,64 +65,16 @@ struct pci_controller {
 	struct resource	io_resource;
 	struct resource mem_resources[3];
 	int mem_resource_count;
-
-	/* Host bridge I/O and Memory space
-	 * Used for BAR placement algorithms
-	 */
-	struct resource io_space;
-	struct resource mem_space;
 };
 
 /* These are used for config access before all the PCI probing
    has been done. */
-int early_read_config_byte(struct pci_controller *hose, int bus, int dev_fn,
-			   int where, u8 *val);
-int early_read_config_word(struct pci_controller *hose, int bus, int dev_fn,
-			   int where, u16 *val);
-int early_read_config_dword(struct pci_controller *hose, int bus, int dev_fn,
-			    int where, u32 *val);
-int early_write_config_byte(struct pci_controller *hose, int bus, int dev_fn,
-			    int where, u8 val);
-int early_write_config_word(struct pci_controller *hose, int bus, int dev_fn,
-			    int where, u16 val);
-int early_write_config_dword(struct pci_controller *hose, int bus, int dev_fn,
-			     int where, u32 val);
-
-extern void setup_indirect_pci(struct pci_controller* hose,
-			       u32 cfg_addr, u32 cfg_data);
-extern void setup_grackle(struct pci_controller *hose);
-
-extern unsigned char common_swizzle(struct pci_dev *, unsigned char *);
-
-/*
- *   The following code swizzles for exactly one bridge.  The routine
- *   common_swizzle below handles multiple bridges.  But there are a
- *   some boards that don't follow the PCI spec's suggestion so we
- *   break this piece out separately.
- */
-static inline unsigned char bridge_swizzle(unsigned char pin,
-		unsigned char idsel)
-{
-	return (((pin-1) + idsel) % 4) + 1;
-}
-
-/*
- * The following macro is used to lookup irqs in a standard table
- * format for those PPC systems that do not already have PCI
- * interrupts properly routed.
- */
-/* FIXME - double check this */
-#define PCI_IRQ_TABLE_LOOKUP						    \
-({ long _ctl_ = -1; 							    \
-   if (idsel >= min_idsel && idsel <= max_idsel && pin <= irqs_per_slot)    \
-     _ctl_ = pci_irq_table[idsel - min_idsel][pin-1];			    \
-   _ctl_; })
-
-/*
- * Scan the buses below a given PCI host bridge and assign suitable
- * resources to all devices found.
- */
-extern int pciauto_bus_scan(struct pci_controller *, int);
+int early_read_config_byte(struct pci_controller *hose, int bus, int dev_fn, int where, u8 *val);
+int early_read_config_word(struct pci_controller *hose, int bus, int dev_fn, int where, u16 *val);
+int early_read_config_dword(struct pci_controller *hose, int bus, int dev_fn, int where, u32 *val);
+int early_write_config_byte(struct pci_controller *hose, int bus, int dev_fn, int where, u8 val);
+int early_write_config_word(struct pci_controller *hose, int bus, int dev_fn, int where, u16 val);
+int early_write_config_dword(struct pci_controller *hose, int bus, int dev_fn, int where, u32 val);
 
 #endif
 #endif /* __KERNEL__ */

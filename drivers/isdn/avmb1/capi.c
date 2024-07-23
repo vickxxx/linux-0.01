@@ -1,4 +1,4 @@
-/* $Id: capi.c,v 1.1.4.2 2001/12/09 18:45:13 kai Exp $
+/* $Id: capi.c,v 1.44.6.15 2001/09/28 08:05:29 kai Exp $
  *
  * CAPI 2.0 Interface for Linux
  *
@@ -45,7 +45,7 @@
 #include "capifs.h"
 #endif
 
-static char *revision = "$Revision: 1.1.4.2 $";
+static char *revision = "$Revision: 1.44.6.15 $";
 
 MODULE_DESCRIPTION("CAPI4Linux: Userspace /dev/capi20 interface");
 MODULE_AUTHOR("Carsten Paeth");
@@ -87,10 +87,10 @@ struct capiminor {
 	struct capincci  *nccip;
 	unsigned int      minor;
 
-	u16  		 applid;
-	u32		 ncci;
-	u16		 datahandle;
-	u16		 msgid;
+	__u16		 applid;
+	__u32		 ncci;
+	__u16		 datahandle;
+	__u16		 msgid;
 
 	struct file      *file;
 	struct tty_struct *tty;
@@ -112,7 +112,7 @@ struct capiminor {
 	/* transmit path */
 	struct datahandle_queue {
 		    struct datahandle_queue *next;
-		    u16                      datahandle;
+		    __u16                    datahandle;
 	} *ackqueue;
 	int nack;
 
@@ -121,7 +121,7 @@ struct capiminor {
 
 struct capincci {
 	struct capincci *next;
-	u32		 ncci;
+	__u32		 ncci;
 	struct capidev	*cdev;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
 	struct capiminor *minorp;
@@ -131,8 +131,8 @@ struct capincci {
 struct capidev {
 	struct capidev *next;
 	struct file    *file;
-	u16		applid;
-	u16		errcode;
+	__u16		applid;
+	__u16		errcode;
 	unsigned int    minor;
 	unsigned        userflags;
 
@@ -166,7 +166,7 @@ static kmem_cache_t *capidh_cachep = 0;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
 /* -------- datahandles --------------------------------------------- */
 
-static int capincci_add_ack(struct capiminor *mp, u16 datahandle)
+int capincci_add_ack(struct capiminor *mp, __u16 datahandle)
 {
 	struct datahandle_queue *n, **pp;
 
@@ -184,7 +184,7 @@ static int capincci_add_ack(struct capiminor *mp, u16 datahandle)
 	return 0;
 }
 
-static int capiminor_del_ack(struct capiminor *mp, u16 datahandle)
+int capiminor_del_ack(struct capiminor *mp, __u16 datahandle)
 {
 	struct datahandle_queue **pp, *p;
 
@@ -200,7 +200,7 @@ static int capiminor_del_ack(struct capiminor *mp, u16 datahandle)
 	return -1;
 }
 
-static void capiminor_del_all_ack(struct capiminor *mp)
+void capiminor_del_all_ack(struct capiminor *mp)
 {
 	struct datahandle_queue **pp, *p;
 
@@ -216,7 +216,7 @@ static void capiminor_del_all_ack(struct capiminor *mp)
 
 /* -------- struct capiminor ---------------------------------------- */
 
-static struct capiminor *capiminor_alloc(u16 applid, u32 ncci)
+struct capiminor *capiminor_alloc(__u16 applid, __u32 ncci)
 {
 	struct capiminor *mp, **pp;
         unsigned int minor = 0;
@@ -257,7 +257,7 @@ static struct capiminor *capiminor_alloc(u16 applid, u32 ncci)
 	return mp;
 }
 
-static void capiminor_free(struct capiminor *mp)
+void capiminor_free(struct capiminor *mp)
 {
 	struct capiminor **pp;
 
@@ -283,7 +283,7 @@ static void capiminor_free(struct capiminor *mp)
 	}
 }
 
-static struct capiminor *capiminor_find(unsigned int minor)
+struct capiminor *capiminor_find(unsigned int minor)
 {
 	struct capiminor *p;
 	for (p = minors; p && p->minor != minor; p = p->next)
@@ -294,7 +294,7 @@ static struct capiminor *capiminor_find(unsigned int minor)
 
 /* -------- struct capincci ----------------------------------------- */
 
-static struct capincci *capincci_alloc(struct capidev *cdev, u32 ncci)
+static struct capincci *capincci_alloc(struct capidev *cdev, __u32 ncci)
 {
 	struct capincci *np, **pp;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
@@ -331,7 +331,7 @@ static struct capincci *capincci_alloc(struct capidev *cdev, u32 ncci)
         return np;
 }
 
-static void capincci_free(struct capidev *cdev, u32 ncci)
+static void capincci_free(struct capidev *cdev, __u32 ncci)
 {
 	struct capincci *np, **pp;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
@@ -375,7 +375,7 @@ static void capincci_free(struct capidev *cdev, u32 ncci)
 	}
 }
 
-static struct capincci *capincci_find(struct capidev *cdev, u32 ncci)
+struct capincci *capincci_find(struct capidev *cdev, __u32 ncci)
 {
 	struct capincci *p;
 
@@ -426,7 +426,7 @@ static void capidev_free(struct capidev *cdev)
 	kmem_cache_free(capidev_cachep, cdev);
 }
 
-static struct capidev *capidev_find(u16 applid)
+static struct capidev *capidev_find(__u16 applid)
 {
 	struct capidev *p;
 	for (p=capidev_openlist; p; p = p->next) {
@@ -439,13 +439,13 @@ static struct capidev *capidev_find(u16 applid)
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
 /* -------- handle data queue --------------------------------------- */
 
-static struct sk_buff *
+struct sk_buff *
 gen_data_b3_resp_for(struct capiminor *mp, struct sk_buff *skb)
 {
 	struct sk_buff *nskb;
 	nskb = alloc_skb(CAPI_DATA_B3_RESP_LEN, GFP_ATOMIC);
 	if (nskb) {
-		u16 datahandle = CAPIMSG_U16(skb->data,CAPIMSG_BASELEN+4+4+2);
+		__u16 datahandle = CAPIMSG_U16(skb->data,CAPIMSG_BASELEN+4+4+2);
 		unsigned char *s = skb_put(nskb, CAPI_DATA_B3_RESP_LEN);
 		capimsg_setu16(s, 0, CAPI_DATA_B3_RESP_LEN);
 		capimsg_setu16(s, 2, mp->applid);
@@ -458,11 +458,11 @@ gen_data_b3_resp_for(struct capiminor *mp, struct sk_buff *skb)
 	return nskb;
 }
 
-static int handle_recv_skb(struct capiminor *mp, struct sk_buff *skb)
+int handle_recv_skb(struct capiminor *mp, struct sk_buff *skb)
 {
 	struct sk_buff *nskb;
 	unsigned int datalen;
-	u16 errcode, datahandle;
+	__u16 errcode, datahandle;
 
 	datalen = skb->len - CAPIMSG_LEN(skb->data);
 	if (mp->tty) {
@@ -538,7 +538,7 @@ static int handle_recv_skb(struct capiminor *mp, struct sk_buff *skb)
 	return -1;
 }
 
-static void handle_minor_recv(struct capiminor *mp)
+void handle_minor_recv(struct capiminor *mp)
 {
 	struct sk_buff *skb;
 	while ((skb = skb_dequeue(&mp->inqueue)) != 0) {
@@ -552,13 +552,13 @@ static void handle_minor_recv(struct capiminor *mp)
 	}
 }
 
-static int handle_minor_send(struct capiminor *mp)
+int handle_minor_send(struct capiminor *mp)
 {
 	struct sk_buff *skb;
-	u16 len;
+	__u16 len;
 	int count = 0;
-	u16 errcode;
-	u16 datahandle;
+	__u16 errcode;
+	__u16 datahandle;
 
 	if (mp->tty && mp->ttyoutstop) {
 #if defined(_DEBUG_DATAFLOW) || defined(_DEBUG_TTYFUNCS)
@@ -569,7 +569,7 @@ static int handle_minor_send(struct capiminor *mp)
 
 	while ((skb = skb_dequeue(&mp->outqueue)) != 0) {
 		datahandle = mp->datahandle;
-		len = (u16)skb->len;
+		len = (__u16)skb->len;
 		skb_push(skb, CAPI_DATA_B3_REQ_LEN);
 		memset(skb->data, 0, CAPI_DATA_B3_REQ_LEN);
 		capimsg_setu16(skb->data, 0, CAPI_DATA_B3_REQ_LEN);
@@ -578,7 +578,7 @@ static int handle_minor_send(struct capiminor *mp)
 		capimsg_setu8 (skb->data, 5, CAPI_REQ);
 		capimsg_setu16(skb->data, 6, mp->msgid++);
 		capimsg_setu32(skb->data, 8, mp->ncci);	/* NCCI */
-		capimsg_setu32(skb->data, 12, (u32) skb->data); /* Data32 */
+		capimsg_setu32(skb->data, 12, (__u32) skb->data); /* Data32 */
 		capimsg_setu16(skb->data, 16, len);	/* Data length */
 		capimsg_setu16(skb->data, 18, datahandle);
 		capimsg_setu16(skb->data, 20, 0);	/* Flags */
@@ -620,16 +620,16 @@ static int handle_minor_send(struct capiminor *mp)
 #endif /* CONFIG_ISDN_CAPI_MIDDLEWARE */
 /* -------- function called by lower level -------------------------- */
 
-static void capi_signal(u16 applid, void *param)
+static void capi_signal(__u16 applid, void *param)
 {
 	struct capidev *cdev = (struct capidev *)param;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
 	struct capiminor *mp;
-	u16 datahandle;
+	__u16 datahandle;
 #endif /* CONFIG_ISDN_CAPI_MIDDLEWARE */
 	struct capincci *np;
 	struct sk_buff *skb = 0;
-	u32 ncci;
+	__u32 ncci;
 
 	(void) (*capifuncs->capi_get_message) (applid, &skb);
 	if (!skb) {
@@ -758,7 +758,7 @@ capi_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 	struct capidev *cdev = (struct capidev *)file->private_data;
 	struct sk_buff *skb;
 	int retval;
-	u16 mlen;
+	__u16 mlen;
 
         if (ppos != &file->f_pos)
 		return -ESPIPE;
@@ -998,7 +998,7 @@ capi_ioctl(struct inode *inode, struct file *file,
 						sizeof(ncci));
 			if (retval)
 				return -EFAULT;
-			nccip = capincci_find(cdev, (u32) ncci);
+			nccip = capincci_find(cdev, (__u32) ncci);
 			if (!nccip)
 				return 0;
 #ifdef CONFIG_ISDN_CAPI_MIDDLEWARE
@@ -1023,7 +1023,7 @@ capi_ioctl(struct inode *inode, struct file *file,
 						sizeof(ncci));
 			if (retval)
 				return -EFAULT;
-			nccip = capincci_find(cdev, (u32) ncci);
+			nccip = capincci_find(cdev, (__u32) ncci);
 			if (!nccip || (mp = nccip->minorp) == 0)
 				return -ESRCH;
 			return mp->minor;
@@ -1272,7 +1272,7 @@ static struct file_operations capinc_raw_fops =
 
 /* -------- tty_operations for capincci ----------------------------- */
 
-static int capinc_tty_open(struct tty_struct * tty, struct file * file)
+int capinc_tty_open(struct tty_struct * tty, struct file * file)
 {
 	struct capiminor *mp;
 
@@ -1300,7 +1300,7 @@ static int capinc_tty_open(struct tty_struct * tty, struct file * file)
 	return 0;
 }
 
-static void capinc_tty_close(struct tty_struct * tty, struct file * file)
+void capinc_tty_close(struct tty_struct * tty, struct file * file)
 {
 	struct capiminor *mp;
 
@@ -1325,8 +1325,8 @@ static void capinc_tty_close(struct tty_struct * tty, struct file * file)
 #endif
 }
 
-static int capinc_tty_write(struct tty_struct * tty, int from_user,
-			    const unsigned char *buf, int count)
+int capinc_tty_write(struct tty_struct * tty, int from_user,
+		      const unsigned char *buf, int count)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 	struct sk_buff *skb;
@@ -1377,7 +1377,7 @@ static int capinc_tty_write(struct tty_struct * tty, int from_user,
 	return count;
 }
 
-static void capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
+void capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 	struct sk_buff *skb;
@@ -1414,7 +1414,7 @@ static void capinc_tty_put_char(struct tty_struct *tty, unsigned char ch)
 	}
 }
 
-static void capinc_tty_flush_chars(struct tty_struct *tty)
+void capinc_tty_flush_chars(struct tty_struct *tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 	struct sk_buff *skb;
@@ -1440,7 +1440,7 @@ static void capinc_tty_flush_chars(struct tty_struct *tty)
 	(void)handle_minor_recv(mp);
 }
 
-static int capinc_tty_write_room(struct tty_struct *tty)
+int capinc_tty_write_room(struct tty_struct *tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 	int room;
@@ -1458,7 +1458,7 @@ static int capinc_tty_write_room(struct tty_struct *tty)
 	return room;
 }
 
-static int capinc_tty_chars_in_buffer(struct tty_struct *tty)
+int capinc_tty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 	if (!mp || !mp->nccip) {
@@ -1476,7 +1476,7 @@ static int capinc_tty_chars_in_buffer(struct tty_struct *tty)
 	return mp->outbytes;
 }
 
-static int capinc_tty_ioctl(struct tty_struct *tty, struct file * file,
+int capinc_tty_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg)
 {
 	int error = 0;
@@ -1488,14 +1488,14 @@ static int capinc_tty_ioctl(struct tty_struct *tty, struct file * file,
 	return error;
 }
 
-static void capinc_tty_set_termios(struct tty_struct *tty, struct termios * old)
+void capinc_tty_set_termios(struct tty_struct *tty, struct termios * old)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_set_termios\n");
 #endif
 }
 
-static void capinc_tty_throttle(struct tty_struct * tty)
+void capinc_tty_throttle(struct tty_struct * tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 #ifdef _DEBUG_TTYFUNCS
@@ -1505,7 +1505,7 @@ static void capinc_tty_throttle(struct tty_struct * tty)
 		mp->ttyinstop = 1;
 }
 
-static void capinc_tty_unthrottle(struct tty_struct * tty)
+void capinc_tty_unthrottle(struct tty_struct * tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 #ifdef _DEBUG_TTYFUNCS
@@ -1517,7 +1517,7 @@ static void capinc_tty_unthrottle(struct tty_struct * tty)
 	}
 }
 
-static void capinc_tty_stop(struct tty_struct *tty)
+void capinc_tty_stop(struct tty_struct *tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 #ifdef _DEBUG_TTYFUNCS
@@ -1528,7 +1528,7 @@ static void capinc_tty_stop(struct tty_struct *tty)
 	}
 }
 
-static void capinc_tty_start(struct tty_struct *tty)
+void capinc_tty_start(struct tty_struct *tty)
 {
 	struct capiminor *mp = (struct capiminor *)tty->driver_data;
 #ifdef _DEBUG_TTYFUNCS
@@ -1540,43 +1540,49 @@ static void capinc_tty_start(struct tty_struct *tty)
 	}
 }
 
-static void capinc_tty_hangup(struct tty_struct *tty)
+void capinc_tty_hangup(struct tty_struct *tty)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_hangup\n");
 #endif
 }
 
-static void capinc_tty_break_ctl(struct tty_struct *tty, int state)
+void capinc_tty_break_ctl(struct tty_struct *tty, int state)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_break_ctl(%d)\n", state);
 #endif
 }
 
-static void capinc_tty_flush_buffer(struct tty_struct *tty)
+void capinc_tty_flush_buffer(struct tty_struct *tty)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_flush_buffer\n");
 #endif
 }
 
-static void capinc_tty_set_ldisc(struct tty_struct *tty)
+void capinc_tty_set_ldisc(struct tty_struct *tty)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_set_ldisc\n");
 #endif
 }
 
-static void capinc_tty_send_xchar(struct tty_struct *tty, char ch)
+void capinc_tty_send_xchar(struct tty_struct *tty, char ch)
 {
 #ifdef _DEBUG_TTYFUNCS
 	printk(KERN_DEBUG "capinc_tty_send_xchar(%d)\n", ch);
 #endif
 }
 
-static int capinc_tty_read_proc(char *page, char **start, off_t off,
-				int count, int *eof, void *data)
+int capinc_tty_read_proc(char *page, char **start, off_t off,
+			  int count, int *eof, void *data)
+{
+	return 0;
+}
+
+int capinc_write_proc(struct file *file, const char *buffer,
+			  unsigned long count, void *data)
 {
 	return 0;
 }
@@ -1588,7 +1594,7 @@ static struct tty_struct *capinc_tty_table[CAPINC_NR_PORTS];
 static struct termios *capinc_tty_termios[CAPINC_NR_PORTS];
 static struct termios *capinc_tty_termios_locked[CAPINC_NR_PORTS];
 
-static int capinc_tty_init(void)
+int capinc_tty_init(void)
 {
 	struct tty_driver *drv = &capinc_tty_driver;
 
@@ -1646,7 +1652,7 @@ static int capinc_tty_init(void)
 	return 0;
 }
 
-static void capinc_tty_exit(void)
+void capinc_tty_exit(void)
 {
 	struct tty_driver *drv = &capinc_tty_driver;
 	int retval;
@@ -1772,7 +1778,7 @@ static void __exit proc_exit(void)
 /* -------- init function and module interface ---------------------- */
 
 
-static void alloc_exit(void)
+static void __exit alloc_exit(void)
 {
 	if (capidev_cachep) {
 		(void)kmem_cache_destroy(capidev_cachep);
@@ -1838,7 +1844,7 @@ static int __init alloc_init(void)
 	return 0;
 }
 
-static void lower_callback(unsigned int cmd, u32 contr, void *data)
+static void lower_callback(unsigned int cmd, __u32 contr, void *data)
 {
 	struct capi_ncciinfo *np;
 	struct capidev *cdev;

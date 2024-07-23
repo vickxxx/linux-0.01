@@ -63,20 +63,10 @@ typedef unsigned long pgprot_t;
 
 #ifndef __ASSEMBLY__
 
-#ifdef CONFIG_DEBUG_BUGVERBOSE
 extern void __bug(const char *file, int line, void *data);
 
-/* give file/line information */
 #define BUG()		__bug(__FILE__, __LINE__, NULL)
 #define PAGE_BUG(page)	__bug(__FILE__, __LINE__, page)
-
-#else
-
-/* these just cause an oops */
-#define BUG()		(*(int *)0 = 0)
-#define PAGE_BUG(page)	(*(int *)0 = 0)
-
-#endif
 
 /* Pure 2^n version of get_order */
 static inline int get_order(unsigned long size)
@@ -95,11 +85,17 @@ static inline int get_order(unsigned long size)
 #endif /* !__ASSEMBLY__ */
 
 #include <linux/config.h>
-#include <asm/memory.h>
+#include <asm/arch/memory.h>
 
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+#define __pa(x)			__virt_to_phys((unsigned long)(x))
+#define __va(x)			((void *)__phys_to_virt((unsigned long)(x)))
 
-#endif /* __KERNEL__ */
+#ifndef CONFIG_DISCONTIGMEM
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT) - \
+				 (PHYS_OFFSET >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#endif
+
+#endif
 
 #endif

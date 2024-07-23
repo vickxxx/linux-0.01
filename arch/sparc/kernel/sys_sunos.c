@@ -193,7 +193,7 @@ asmlinkage int sunos_brk(unsigned long brk)
 	 * fool it, but this should catch most mistakes.
 	 */
 	freepages = atomic_read(&buffermem_pages) >> PAGE_SHIFT;
-	freepages += page_cache_size;
+	freepages += atomic_read(&page_cache_size);
 	freepages >>= 1;
 	freepages += nr_free_pages();
 	freepages += nr_swap_pages;
@@ -488,8 +488,7 @@ asmlinkage int sunos_uname(struct sunos_utsname *name)
 		ret |= __copy_to_user(&name->mach[0], &system_utsname.machine[0], sizeof(name->mach) - 1);
 	}
 	up_read(&uts_sem);
-
-	return (ret ? -EFAULT : 0);
+	return ret;
 }
 
 asmlinkage int sunos_nosys(void)
@@ -688,8 +687,8 @@ static int get_default (int value, int def_value)
 
 static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 {
-	int  server_fd, err;
-	char *the_name, *mount_page;
+	int  server_fd;
+	char *the_name;
 	struct nfs_mount_data linux_nfs_mount;
 	struct sunos_nfs_mount_args sunos_mount;
 
@@ -742,16 +741,7 @@ static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 	linux_nfs_mount.hostname [255] = 0;
 	putname (the_name);
 	
-	mount_page = (char *) get_zeroed_page(GFP_KERNEL);
-	if (!mount_page)
-		return -ENOMEM;
-
-	memcpy(mount_page, &linux_nfs_mount, sizeof(linux_nfs_mount));
-
-	err = do_mount("", dir_name, "nfs", linux_flags, mount_page);
-
-	free_page((unsigned long) mount_page);
-	return err;
+	return do_mount ("", dir_name, "nfs", linux_flags, &linux_nfs_mount);
 }
 
 asmlinkage int
@@ -1059,8 +1049,8 @@ static inline int check_nonblock(int ret, int fd)
 	return ret;
 }
 
-extern asmlinkage ssize_t sys_read(unsigned int fd,char *buf,int count);
-extern asmlinkage ssize_t sys_write(unsigned int fd,char *buf,int count);
+extern asmlinkage int sys_read(unsigned int fd,char *buf,int count);
+extern asmlinkage int sys_write(unsigned int fd,char *buf,int count);
 extern asmlinkage int sys_recv(int fd, void * ubuf, int size, unsigned flags);
 extern asmlinkage int sys_send(int fd, void * buff, int len, unsigned flags);
 extern asmlinkage int sys_accept(int fd, struct sockaddr *sa, int *addrlen);

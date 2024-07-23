@@ -208,7 +208,6 @@
 #define VGAINIT1_MASK			0x1fffff
 #define VIDCFG_VIDPROC_ENABLE		BIT(0)
 #define VIDCFG_CURS_X11			BIT(1)
-#define VIDCFG_INTERLACE		BIT(3)
 #define VIDCFG_HALF_MODE		BIT(4)
 #define VIDCFG_DESK_ENABLE		BIT(7)
 #define VIDCFG_CLUT_BYPASS		BIT(10)
@@ -239,7 +238,6 @@
 #define TDFXF_VSYNC_ACT_LOW	0x08
 #define TDFXF_LINE_DOUBLE	0x10
 #define TDFXF_VIDEO_ENABLE	0x20
-#define TDFXF_INTERLACE		0x40
 
 #define TDFXF_HSYNC_MASK	0x03
 #define TDFXF_VSYNC_MASK	0x0c
@@ -403,7 +401,7 @@ static void tdfxfb_blank(int blank,
 /*
  *  Internal routines
  */
-static void tdfxfb_set_par(struct tdfxfb_par* par,
+static void tdfxfb_set_par(const struct tdfxfb_par* par,
 			   struct fb_info_tdfx* 
 			   info);
 static int  tdfxfb_decode_var(const struct fb_var_screeninfo *var,
@@ -497,7 +495,7 @@ static struct pci_driver tdfxfb_driver = {
 	name:		"tdfxfb",
 	id_table:	tdfxfb_id_table,
 	probe:		tdfxfb_probe,
-	remove:		__devexit_p(tdfxfb_remove),
+	remove:		tdfxfb_remove,
 };
 
 MODULE_DEVICE_TABLE(pci, tdfxfb_id_table);
@@ -764,11 +762,7 @@ static void do_putc(u32 fgx, u32 bgx,
    tdfx_outl(SRCXY,     0);
    tdfx_outl(DSTXY,     xx | (yy << 16));
    tdfx_outl(COMMAND_2D, COMMAND_2D_H2S_BITBLT | (ROP_COPY << 24));
-#ifdef __BIG_ENDIAN
-   tdfx_outl(SRCFORMAT, 0x400000 | BIT(20) );   
-#else
    tdfx_outl(SRCFORMAT, 0x400000);
-#endif
    tdfx_outl(DSTFORMAT, fmt);
    tdfx_outl(DSTSIZE,   fontwidth(p) | (fontheight(p) << 16));
    i=fontheight(p);
@@ -826,11 +820,7 @@ static void do_putcs(u32 fgx, u32 bgx,
    tdfx_outl(COMMAND_3D, COMMAND_3D_NOP);
    tdfx_outl(COLORFORE, fgx);
    tdfx_outl(COLORBACK, bgx);
-#ifdef __BIG_ENDIAN
-   tdfx_outl(SRCFORMAT, 0x400000 | BIT(20) );   
-#else
    tdfx_outl(SRCFORMAT, 0x400000);
-#endif   
    tdfx_outl(DSTFORMAT, fmt);
    tdfx_outl(DSTSIZE, w | (h << 16));
    tdfx_outl(SRCXY,     0);
@@ -1285,7 +1275,7 @@ static struct display_switch fbcon_banshee32 = {
 
 /* ------------------------------------------------------------------------- */
 
-static void tdfxfb_set_par(struct tdfxfb_par* par,
+static void tdfxfb_set_par(const struct tdfxfb_par* par,
 			   struct fb_info_tdfx*     info) {
   struct fb_info_tdfx* i = (struct fb_info_tdfx*)info;
   struct banshee_reg reg;
@@ -1300,28 +1290,6 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
 
   cpp = (par->bpp + 7)/8;
   
-  reg.vidcfg = 
-    VIDCFG_VIDPROC_ENABLE |
-    VIDCFG_DESK_ENABLE    |
-    VIDCFG_CURS_X11 |
-    ((cpp - 1) << VIDCFG_PIXFMT_SHIFT) |
-    (cpp != 1 ? VIDCFG_CLUT_BYPASS : 0);
-
-  /* PLL settings */
-  freq = par->pixclock;
-
-  reg.dacmode = 0;
-  reg.vidcfg  &= ~VIDCFG_2X;
-
-  if(freq > i->max_pixclock/2) {
-    freq = freq > i->max_pixclock ? i->max_pixclock : freq;
-    reg.dacmode |= DACMODE_2X;
-    reg.vidcfg  |= VIDCFG_2X;
-    par->hdispend >>= 1;
-    par->hsyncsta >>= 1;
-    par->hsyncend >>= 1;
-    par->htotal   >>= 1;
-  }
   wd = (par->hdispend >> 3) - 1;
 
   hd  = (par->hdispend >> 3) - 1;
@@ -1331,17 +1299,10 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
   hbs = hd;
   hbe = ht;
 
-  if (par->video & TDFXF_LINE_DOUBLE) {
-    vd = (par->vdispend << 1) - 1;
-    vs = (par->vsyncsta << 1) - 1;
-    ve = (par->vsyncend << 1) - 1;
-    vt = (par->vtotal   << 1) - 2;
-  } else {
-    vd = par->vdispend - 1;
-    vs = par->vsyncsta - 1;
-    ve = par->vsyncend - 1;
-    vt = par->vtotal   - 2;
-  }
+  vd  = par->vdispend - 1;
+  vs  = par->vsyncsta - 1;
+  ve  = par->vsyncend - 1;
+  vt  = par->vtotal   - 2;
   vbs = vd;
   vbe = vt;
   
@@ -1395,7 +1356,9 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
   reg.crt[0x02] = hbs;
   reg.crt[0x03] = 0x80 | (hbe & 0x1f);
   reg.crt[0x04] = hs;
-  reg.crt[0x05] = ((hbe & 0x20) << 2) | (he & 0x1f);
+  reg.crt[0x05] = 
+    ((hbe & 0x20) << 2) | 
+    (he & 0x1f);
   reg.crt[0x06] = vt;
   reg.crt[0x07] = 
     ((vs & 0x200) >> 2) |
@@ -1417,7 +1380,9 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
   reg.crt[0x0e] = 0x00;
   reg.crt[0x0f] = 0x00;
   reg.crt[0x10] = vs;
-  reg.crt[0x11] = (ve & 0x0f) | 0x20;
+  reg.crt[0x11] = 
+    (ve & 0x0f) |
+    0x20;
   reg.crt[0x12] = vd;
   reg.crt[0x13] = wd;
   reg.crt[0x14] = 0x00;
@@ -1446,6 +1411,16 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
     VGAINIT0_EXTSHIFTOUT;
   reg.vgainit1 = tdfx_inl(VGAINIT1) & 0x1fffff;
 
+  reg.vidcfg = 
+    VIDCFG_VIDPROC_ENABLE |
+    VIDCFG_DESK_ENABLE    |
+    VIDCFG_CURS_X11 |
+    ((cpp - 1) << VIDCFG_PIXFMT_SHIFT) |
+    (cpp != 1 ? VIDCFG_CLUT_BYPASS : 0);
+  
+  fb_info.cursor.enable=reg.vidcfg | VIDCFG_HWCURSOR_ENABLE;
+  fb_info.cursor.disable=reg.vidcfg;
+   
   reg.stride    = par->width*cpp;
   reg.cursloc   = 0;
    
@@ -1458,32 +1433,30 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
   reg.srcbase   = reg.startaddr;
   reg.dstbase   = reg.startaddr;
 
+  /* PLL settings */
+  freq = par->pixclock;
+
+  reg.dacmode &= ~DACMODE_2X;
+  reg.vidcfg  &= ~VIDCFG_2X;
+  if(freq > i->max_pixclock/2) {
+    freq = freq > i->max_pixclock ? i->max_pixclock : freq;
+    reg.dacmode |= DACMODE_2X;
+    reg.vidcfg  |= VIDCFG_2X;
+  }
   reg.vidpll = do_calc_pll(freq, &fout);
 #if 0
   reg.mempll = do_calc_pll(..., &fout);
   reg.gfxpll = do_calc_pll(..., &fout);
 #endif
 
-  if (par->video & TDFXF_LINE_DOUBLE) {
-    reg.screensize = par->width | (par->height << 13);
-    reg.vidcfg |= VIDCFG_HALF_MODE;
-    reg.crt[0x09] |= 0x80;
-  } else {
-    reg.screensize = par->width | (par->height << 12);
-    reg.vidcfg &= ~VIDCFG_HALF_MODE;
-  }
-  if (par->video & TDFXF_INTERLACE)
-    reg.vidcfg |= VIDCFG_INTERLACE;
+  reg.screensize = par->width | (par->height << 12);
+  reg.vidcfg &= ~VIDCFG_HALF_MODE;
 
-  fb_info.cursor.enable=reg.vidcfg | VIDCFG_HWCURSOR_ENABLE;
-  fb_info.cursor.disable=reg.vidcfg;
-   
   reg.miscinit0 = tdfx_inl(MISCINIT0);
 
 #if defined(__BIG_ENDIAN)
   switch (par->bpp) {
     case 8:
-    case 24:
       reg.miscinit0 &= ~(1 << 30);
       reg.miscinit0 &= ~(1 << 31);
       break;
@@ -1491,6 +1464,7 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
       reg.miscinit0 |= (1 << 30);
       reg.miscinit0 |= (1 << 31);
       break;
+    case 24:
     case 32:
       reg.miscinit0 |= (1 << 30);
       reg.miscinit0 &= ~(1 << 31);
@@ -1499,13 +1473,9 @@ static void tdfxfb_set_par(struct tdfxfb_par* par,
 #endif
 
   do_write_regs(&reg);
-  if (reg.vidcfg & VIDCFG_2X) {
-    par->hdispend <<= 1;
-    par->hsyncsta <<= 1;
-    par->hsyncend <<= 1;
-    par->htotal   <<= 1;
-  }
+
   i->current_par = *par;
+
 }
 
 static int tdfxfb_decode_var(const struct fb_var_screeninfo* var,
@@ -1518,6 +1488,11 @@ static int tdfxfb_decode_var(const struct fb_var_screeninfo* var,
      var->bits_per_pixel != 24 &&
      var->bits_per_pixel != 32) {
     DPRINTK("depth not supported: %u\n", var->bits_per_pixel);
+    return -EINVAL;
+  }
+
+  if((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED) {
+    DPRINTK("interlace not supported\n");
     return -EINVAL;
   }
 
@@ -1536,10 +1511,9 @@ static int tdfxfb_decode_var(const struct fb_var_screeninfo* var,
     return -EINVAL;
   }
 
-  /* Banshee doesn't support interlace, but Voodoo4 and probably Voodoo3 do. */
-  if(((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED)
-     && (i->dev == PCI_DEVICE_ID_3DFX_BANSHEE)) {
-    DPRINTK("interlace not supported on Banshee\n");
+  /* fixme: does Voodoo3 support interlace? Banshee doesn't */
+  if((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED) {
+    DPRINTK("interlace not supported\n");
     return -EINVAL;
   }
 
@@ -1599,8 +1573,6 @@ static int tdfxfb_decode_var(const struct fb_var_screeninfo* var,
       par->video |= TDFXF_VSYNC_ACT_LOW;
     if((var->vmode & FB_VMODE_MASK) == FB_VMODE_DOUBLE)
       par->video |= TDFXF_LINE_DOUBLE;
-    else if((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED)
-      par->video |= TDFXF_INTERLACE;
     if(var->activate == FB_ACTIVATE_NOW)
       par->video |= TDFXF_VIDEO_ENABLE;
   }
@@ -1643,6 +1615,10 @@ static int tdfxfb_encode_var(struct fb_var_screeninfo* var,
     v.blue.length  = 5;
     break;
   case 24:
+    v.red.offset=16;
+    v.green.offset=8;
+    v.blue.offset=0;
+    v.red.length = v.green.length = v.blue.length = 8;
   case 32:
     v.red.offset   = 16;
     v.green.offset = 8;
@@ -1658,8 +1634,6 @@ static int tdfxfb_encode_var(struct fb_var_screeninfo* var,
     v.sync |= FB_SYNC_VERT_HIGH_ACT;
   if(par->video & TDFXF_LINE_DOUBLE)
     v.vmode = FB_VMODE_DOUBLE;
-  else if(par->video & TDFXF_INTERLACE)
-    v.vmode = FB_VMODE_INTERLACED;
   *var = v;
   return 0;
 }
@@ -1693,7 +1667,7 @@ static int tdfxfb_encode_fix(struct fb_fix_screeninfo*  fix,
   fix->line_length = par->lpitch;
   fix->visual      = (par->bpp == 8) 
                      ? FB_VISUAL_PSEUDOCOLOR
-                     : FB_VISUAL_TRUECOLOR;
+                     : FB_VISUAL_DIRECTCOLOR;
 
   fix->xpanstep    = 0; 
   fix->ypanstep    = nopan ? 0 : 1;
@@ -1946,12 +1920,6 @@ static int __devinit tdfxfb_probe(struct pci_dev *pdev,
 			break;
 	}
 	
-        if (pci_enable_device(pdev)) 
-        {
-                printk(KERN_WARNING "fb: Unable to enable %s PCI device.\n", name);
-                return -ENXIO;
-        }
-
 	fb_info.regbase_phys = pci_resource_start(pdev, 0);
 	fb_info.regbase_size = 1 << 24;
 	fb_info.regbase_virt = ioremap_nocache(fb_info.regbase_phys, 1 << 24);
@@ -1980,13 +1948,6 @@ static int __devinit tdfxfb_probe(struct pci_dev *pdev,
 
 	fb_info.iobase = pci_resource_start (pdev, 2);
       
-        if (!fb_info.iobase) {
-	        printk(KERN_WARNING "fb: Can't access %s I/O ports.\n", name);
-		iounmap(fb_info.regbase_virt);
-		iounmap(fb_info.bufbase_virt);
-                return -ENXIO;
-	}
-   
 	printk("fb: %s memory = %ldK\n", name, fb_info.bufbase_size >> 10);
 
 #ifdef CONFIG_MTRR
@@ -2380,25 +2341,10 @@ static void tdfxfb_createcursor(struct display *p)
    unsigned int h,to;
 
    tdfxfb_createcursorshape(p);
-   xline = (~0) << (32 - fb_info.cursor.w);
+   xline = ~((1 << (32 - fb_info.cursor.w)) - 1);
 
 #ifdef __LITTLE_ENDIAN
    xline = swab32(xline);
-#else
-   switch (p->var.bits_per_pixel) {
-      case 8:
-      case 24:
-         xline = swab32(xline);
-         break;
-      case 16:
-         xline = ((xline & 0xff000000 ) >> 16 )
-               | ((xline & 0x00ff0000 ) >> 16 )
-               | ((xline & 0x0000ff00 ) << 16 )
-               | ((xline & 0x000000ff ) << 16 );
-         break;
-      case 32:
-         break;
-   }
 #endif
 
    cursorbase=(u8*)fb_info.bufbase_virt;
@@ -2435,9 +2381,7 @@ static void tdfxfb_createcursor(struct display *p)
 static void tdfxfb_hwcursor_init(void)
 {
    unsigned int start;
-   start = (fb_info.bufbase_size-1024) & (PAGE_MASK << 1);
-   	/* even page boundary - on Voodoo4 4500 bottom 48 lines
-	 * contained trash when just page boundary was used... */
+   start = (fb_info.bufbase_size-1024) & PAGE_MASK;
    fb_info.bufbase_size=start; 
    fb_info.cursor.cursorimage=fb_info.bufbase_size;
    printk("tdfxfb: reserving 1024 bytes for the hwcursor at %p\n",

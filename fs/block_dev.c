@@ -22,6 +22,8 @@
 
 #include <asm/uaccess.h>
 
+#define MAX_BUF_PER_PAGE (PAGE_CACHE_SIZE / 512)
+
 static unsigned long max_block(kdev_t dev)
 {
 	unsigned int retval = ~0U;
@@ -100,26 +102,6 @@ int set_blocksize(kdev_t dev, int size)
 	return 0;
 }
 
-int sb_set_blocksize(struct super_block *sb, int size)
-{
-	int bits;
-	if (set_blocksize(sb->s_dev, size) < 0)
-		return 0;
-	sb->s_blocksize = size;
-	for (bits = 9, size >>= 9; size >>= 1; bits++)
-		;
-	sb->s_blocksize_bits = bits;
-	return sb->s_blocksize;
-}
-
-int sb_min_blocksize(struct super_block *sb, int size)
-{
-	int minsize = get_hardsect_size(sb->s_dev);
-	if (size < minsize)
-		size = minsize;
-	return sb_set_blocksize(sb, size);
-}
-
 static int blkdev_get_block(struct inode * inode, long iblock, struct buffer_head * bh, int create)
 {
 	if (iblock >= max_block(inode->i_rdev))
@@ -189,15 +171,11 @@ static loff_t block_llseek(struct file *file, loff_t offset, int origin)
 
 static int __block_fsync(struct inode * inode)
 {
-	int ret, err;
+	int ret;
 
-	ret = filemap_fdatasync(inode->i_mapping);
-	err = sync_buffers(inode->i_rdev, 1);
-	if (err && !ret)
-		ret = err;
-	err = filemap_fdatawait(inode->i_mapping);
-	if (err && !ret)
-		ret = err;
+	filemap_fdatasync(inode->i_mapping);
+	ret = sync_buffers(inode->i_rdev, 1);
+	filemap_fdatawait(inode->i_mapping);
 
 	return ret;
 }
@@ -256,7 +234,7 @@ static struct vfsmount *bd_mnt;
 #define HASH_SIZE	(1UL << HASH_BITS)
 #define HASH_MASK	(HASH_SIZE-1)
 static struct list_head bdev_hashtable[HASH_SIZE];
-static spinlock_t bdev_lock __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
+static spinlock_t bdev_lock = SPIN_LOCK_UNLOCKED;
 static kmem_cache_t * bdev_cachep;
 
 #define alloc_bdev() \
@@ -351,7 +329,6 @@ struct block_device *bdget(dev_t dev)
 			inode->i_bdev = new_bdev;
 			inode->i_data.a_ops = &def_blk_aops;
 			inode->i_data.gfp_mask = GFP_USER;
-			inode->i_mode = S_IFBLK;
 			spin_lock(&bdev_lock);
 			bdev = bdfind(dev, head);
 			if (!bdev) {
@@ -521,10 +498,7 @@ int check_disk_change(kdev_t dev)
 
 		de = devfs_find_handle (NULL, NULL, i, MINOR (dev),
 					DEVFS_SPECIAL_BLK, 0);
-		if (de) {
-			bdops = devfs_get_ops (de);
-			devfs_put_ops (de); /* We're running in owner module */
-		}
+		if (de) bdops = devfs_get_ops (de);
 	}
 	if (bdops == NULL)
 		return 0;
@@ -532,6 +506,9 @@ int check_disk_change(kdev_t dev)
 		return 0;
 	if (!bdops->check_media_change(dev))
 		return 0;
+
+	printk(KERN_DEBUG "VFS: Disk change detected on device %s\n",
+		bdevname(dev));
 
 	if (invalidate_device(dev, 0))
 		printk("VFS: busy inodes on changed media.\n");

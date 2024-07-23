@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.71.2.1 2002/02/27 21:31:38 davem Exp $
+/*  $Id: setup.c,v 1.71 2001/11/13 00:49:28 davem Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -40,7 +40,6 @@
 #include <asm/head.h>
 #include <asm/starfire.h>
 #include <asm/hardirq.h>
-#include <asm/sections.h>
 
 #ifdef CONFIG_IP_PNP
 #include <net/ipconfig.h>
@@ -183,7 +182,7 @@ int prom_callback(long *args)
 
 			if (tlb_type == spitfire)
 				tte = spitfire_get_dtlb_data(SPITFIRE_HIGHEST_LOCKED_TLBENT);
-			else if (tlb_type == cheetah || tlb_type == cheetah_plus)
+			else if (tlb_type == cheetah)
 				tte = cheetah_get_ldtlb_data(CHEETAH_HIGHEST_LOCKED_TLBENT);
 
 			res = PROM_TRUE;
@@ -457,7 +456,7 @@ extern int root_mountflags;
 char saved_command_line[256];
 char reboot_command[256];
 
-extern unsigned long phys_base, kern_base, kern_size;
+extern unsigned long phys_base;
 
 static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
@@ -498,7 +497,7 @@ void __init setup_arch(char **cmdline_p)
 		extern unsigned int irqsz_patchme[1];
 		irqsz_patchme[0] |= ((i == SMP_CACHE_BYTES) ? SMP_CACHE_BYTES_SHIFT : \
 							SMP_CACHE_BYTES_SHIFT + 1);
-		flushi((long)&irqsz_patchme[0]);
+		flushi((long)&irqsz_patchme[1]);
 	} else {
 		prom_printf("Unexpected size of irq_stat[] elements\n");
 		prom_halt();
@@ -528,26 +527,10 @@ void __init setup_arch(char **cmdline_p)
 			highest_paddr = top;
 	}
 
-	switch (tlb_type) {
-	default:
-	case spitfire:
-		kern_base = spitfire_get_itlb_data(sparc64_highest_locked_tlbent());
-		kern_base &= _PAGE_PADDR_SF;
-		break;
-
-	case cheetah:
-	case cheetah_plus:
-		kern_base = cheetah_get_litlb_data(sparc64_highest_locked_tlbent());
-		kern_base &= _PAGE_PADDR;
-		break;
-	};
-
-	kern_size = (unsigned long)&_end - (unsigned long)KERNBASE;
-
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
 	ROOT_DEV = to_kdev_t(root_dev);
-#ifdef CONFIG_BLK_DEV_INITRD
+#ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = ram_flags & RAMDISK_IMAGE_START_MASK;
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
@@ -621,8 +604,8 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
 
 /* BUFFER is PAGE_SIZE bytes long. */
 
-extern char *sparc_cpu_type;
-extern char *sparc_fpu_type;
+extern char *sparc_cpu_type[];
+extern char *sparc_fpu_type[];
 
 extern void smp_info(struct seq_file *);
 extern void smp_bogo(struct seq_file *);
@@ -634,6 +617,8 @@ unsigned long up_clock_tick;
 
 static int show_cpuinfo(struct seq_file *m, void *__unused)
 {
+	int cpuid = smp_processor_id();
+
 	seq_printf(m, 
 		   "cpu\t\t: %s\n"
 		   "fpu\t\t: %s\n"
@@ -647,8 +632,8 @@ static int show_cpuinfo(struct seq_file *m, void *__unused)
 		   "Cpu0ClkTck\t: %016lx\n"
 #endif
 		   ,
-		   sparc_cpu_type,
-		   sparc_fpu_type,
+		   sparc_cpu_type[cpuid],
+		   sparc_fpu_type[cpuid],
 		   prom_rev,
 		   prom_prev >> 16,
 		   (prom_prev >> 8) & 0xff,

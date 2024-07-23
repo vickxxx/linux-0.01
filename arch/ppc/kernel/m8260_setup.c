@@ -1,4 +1,7 @@
 /*
+ * BK Id: SCCS/s.m8260_setup.c 1.30 11/13/01 21:26:07 paulus
+ */
+/*
  *  linux/arch/ppc/kernel/setup.c
  *
  *  Copyright (C) 1995  Linus Torvalds
@@ -40,12 +43,11 @@
 #include <asm/pgtable.h>
 #include <asm/ide.h>
 #include <asm/mpc8260.h>
-#include <asm/immap_cpm2.h>
+#include <asm/immap_8260.h>
 #include <asm/machdep.h>
-#include <asm/bootinfo.h>
-#include <asm/time.h>
 
-#include "cpm2_pic.h"
+#include <asm/time.h>
+#include "ppc8260_pic.h"
 
 static int m8260_set_rtc_time(unsigned long time);
 static unsigned long m8260_get_rtc_time(void);
@@ -53,14 +55,14 @@ static void m8260_calibrate_decr(void);
 
 unsigned char __res[sizeof(bd_t)];
 
-extern void cpm2_reset(void);
+extern void m8260_cpm_reset(void);
 
 static void __init
 m8260_setup_arch(void)
 {
 	/* Reset the Communication Processor Module.
 	*/
-	cpm2_reset();
+	m8260_cpm_reset();
 }
 
 static void
@@ -93,7 +95,7 @@ m8260_calibrate_decr(void)
  */
 static uint rtc_time;
 
-static int
+static static int
 m8260_set_rtc_time(unsigned long time)
 {
 	rtc_time = time;
@@ -148,7 +150,7 @@ m8260_show_percpuinfo(struct seq_file *m, int i)
 	bd_t	*bp;
 
 	bp = (bd_t *)__res;
-
+			
 	seq_printf(m, "core clock\t: %d MHz\n"
 		   "CPM  clock\t: %d MHz\n"
 		   "bus  clock\t: %d MHz\n",
@@ -172,18 +174,18 @@ m8260_init_IRQ(void)
 	void cpm_interrupt_init(void);
 
 #if 0
-        cpm2_pic.irq_offset = 0;
+        ppc8260_pic.irq_offset = 0;
 #endif
         for ( i = 0 ; i < NR_SIU_INTS ; i++ )
-                irq_desc[i].handler = &cpm2_pic;
-
+                irq_desc[i].handler = &ppc8260_pic;
+	
 	/* Initialize the default interrupt mapping priorities,
 	 * in case the boot rom changed something on us.
 	 */
-	cpm2_immr->im_intctl.ic_sicr = 0;
-	cpm2_immr->im_intctl.ic_siprr = 0x05309770;
-	cpm2_immr->im_intctl.ic_scprrh = 0x05309770;
-	cpm2_immr->im_intctl.ic_scprrl = 0x05309770;
+	immr->im_intctl.ic_sicr = 0;
+	immr->im_intctl.ic_siprr = 0x05309770;
+	immr->im_intctl.ic_scprrh = 0x05309770;
+	immr->im_intctl.ic_scprrl = 0x05309770;
 
 }
 
@@ -195,7 +197,7 @@ m8260_find_end_of_memory(void)
 {
 	bd_t	*binfo;
 	extern unsigned char __res[];
-
+	
 	binfo = (bd_t *)__res;
 
 	return binfo->bi_memsize;
@@ -217,11 +219,10 @@ void __init
 platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	      unsigned long r6, unsigned long r7)
 {
-	parse_bootinfo(find_bootinfo());
 
 	if ( r3 )
 		memcpy( (void *)__res,(void *)(r3+KERNELBASE), sizeof(bd_t) );
-
+	
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* take care of initrd if we have one */
 	if ( r4 )
@@ -233,7 +234,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	/* take care of cmd line */
 	if ( r6 )
 	{
-
+		
 		*(char *)(r7+KERNELBASE) = 0;
 		strcpy(cmd_line, (char *)(r6+KERNELBASE));
 	}
@@ -242,7 +243,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.show_percpuinfo		= m8260_show_percpuinfo;
 	ppc_md.irq_cannonicalize	= NULL;
 	ppc_md.init_IRQ			= m8260_init_IRQ;
-	ppc_md.get_irq			= cpm2_get_irq;
+	ppc_md.get_irq			= m8260_get_irq;
 	ppc_md.init			= NULL;
 
 	ppc_md.restart			= m8260_restart;
@@ -266,3 +267,11 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.ppc_kbd_sysrq_xlate	= NULL;
 }
 
+/* Mainly for ksyms.
+*/
+int
+request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+		       unsigned long flag, const char *naem, void *dev)
+{
+	panic("request IRQ\n");
+}

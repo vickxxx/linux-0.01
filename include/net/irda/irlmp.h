@@ -72,7 +72,7 @@ typedef enum {
 	S_END,
 } SERVICE;
 
-typedef void (*DISCOVERY_CALLBACK1) (discovery_t *, DISCOVERY_MODE, void *);
+typedef void (*DISCOVERY_CALLBACK1) (discovery_t *, void *);
 typedef void (*DISCOVERY_CALLBACK2) (hashbin_t *, void *);
 
 typedef struct {
@@ -132,7 +132,6 @@ struct lap_cb {
 
 	struct irlap_cb *irlap;   /* Instance of IrLAP layer */
 	hashbin_t *lsaps;         /* LSAP associated with this link */
-	struct lsap_cb *flow_next;	/* Next lsap to be polled for Tx */
 
 	__u8  caddr;  /* Connection address */
  	__u32 saddr;  /* Source device address */
@@ -215,7 +214,7 @@ void irlmp_disconnect_indication(struct lsap_cb *self, LM_REASON reason,
 				 struct sk_buff *userdata);
 int  irlmp_disconnect_request(struct lsap_cb *, struct sk_buff *userdata);
 
-void irlmp_discovery_confirm(hashbin_t *discovery_log, DISCOVERY_MODE);
+void irlmp_discovery_confirm(hashbin_t *discovery_log);
 void irlmp_discovery_request(int nslots);
 struct irda_device_info *irlmp_get_discoveries(int *pn, __u16 mask, int nslots);
 void irlmp_do_expiry(void);
@@ -236,7 +235,6 @@ void irlmp_connless_data_indication(struct lsap_cb *, struct sk_buff *);
 
 void irlmp_status_request(void);
 void irlmp_status_indication(struct lap_cb *, LINK_STATUS link, LOCK_STATUS lock);
-void irlmp_flow_indication(struct lap_cb *self, LOCAL_FLOW flow);
 
 int  irlmp_slsap_inuse(__u8 slsap);
 __u8 irlmp_find_free_slsap(void);
@@ -254,9 +252,7 @@ extern struct irlmp_cb *irlmp;
 
 static inline hashbin_t *irlmp_get_cachelog(void) { return irlmp->cachelog; }
 
-/* Check if LAP queue is full.
- * Used by IrTTP for low control, see comments in irlap.h - Jean II */
-static inline int irlmp_lap_tx_queue_full(struct lsap_cb *self)
+static inline int irlmp_get_lap_tx_queue_len(struct lsap_cb *self)
 {
 	if (self == NULL)
 		return 0;
@@ -265,21 +261,7 @@ static inline int irlmp_lap_tx_queue_full(struct lsap_cb *self)
 	if (self->lap->irlap == NULL)
 		return 0;
 
-	return(IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap) >= LAP_HIGH_THRESHOLD);
-}
-
-/* After doing a irlmp_dup(), this get one of the two socket back into
- * a state where it's waiting incomming connections.
- * Note : this can be used *only* if the socket is not yet connected
- * (i.e. NO irlmp_connect_response() done on this socket).
- * - Jean II */
-static inline void irlmp_listen(struct lsap_cb *self)
-{
-	self->dlsap_sel = LSAP_ANY;
-	self->lap = NULL;
-	self->lsap_state = LSAP_DISCONNECTED;
-	/* Started when we received the LM_CONNECT_INDICATION */
-	del_timer(&self->watchdog_timer);
+	return IRLAP_GET_TX_QUEUE_LEN(self->lap->irlap);
 }
 
 #endif

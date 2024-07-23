@@ -11,36 +11,7 @@
 *! Jan 14 2000  Johan Adolfsson    Fixed PB shadow register stuff - 
 *!                                 don't use PB_I2C if DS1302 uses same bits,
 *!                                 use PB.
-*| June 23 2003 Pieter Grimmerink  Added 'i2c_sendnack'. i2c_readreg now
-*|                                 generates nack on last received byte, 
-*|                                 instead of ack.
-*|                                 i2c_getack changed data level while clock
-*|                                 was high, causing DS75 to see  a stop condition
-*|
 *! $Log: i2c.c,v $
-*! Revision 1.12  2003/06/23 14:43:47  oskarp
-*! * i2c_sendnack is added.
-*!   - i2c_readreg now generates nack on last received byte, instead of ack.
-*!     i2c_getack changed data level while clock was high, causing DS75 to
-*!     see a stop condition.
-*!
-*! Revision 1.11  2003/05/23 09:37:23  oskarp
-*! * Made i2c_init() visible.
-*!   - e.g. pcf856.c uses i2c_init().
-*!
-*! Revision 1.10  2003/04/01 14:12:06  starvik
-*! Added loglevel for lots of printks
-*!
-*! Revision 1.9  2002/10/31 15:32:26  starvik
-*! Update Port B register and shadow even when running with hardware support
-*!   to avoid glitches when reading bits
-*! Never set direction to out in i2c_inbyte
-*! Removed incorrect clock togling at end of i2c_inbyte
-*!
-*! Revision 1.8  2002/08/13 06:31:53  starvik
-*! Made SDA and SCL line configurable
-*! Modified i2c_inbyte to work with PCF8563
-*!
 *! Revision 1.7  2001/04/04 13:11:36  markusl
 *! Updated according to review remarks
 *!
@@ -69,10 +40,10 @@
 *!
 *! ---------------------------------------------------------------------------
 *!
-*! (C) Copyright 1999-2002 Axis Communications AB, LUND, SWEDEN
+*! (C) Copyright 1999, 2000, 2001 Axis Communications AB, LUND, SWEDEN
 *!
 *!***************************************************************************/
-/* $Id: i2c.c,v 1.12 2003/06/23 14:43:47 oskarp Exp $ */
+/* $Id: i2c.c,v 1.7 2001/04/04 13:11:36 markusl Exp $ */
 /****************** INCLUDE FILES SECTION ***********************************/
 
 #include <linux/module.h>
@@ -122,15 +93,8 @@ static const char i2c_name[] = "i2c";
 
 #ifdef CONFIG_ETRAX_I2C_USES_PB_NOT_PB_I2C
 /* Use PB and not PB_I2C */
-#ifndef CONFIG_ETRAX_I2C_DATA_PORT
-#define CONFIG_ETRAX_I2C_DATA_PORT 0
-#endif
-#ifndef CONFIG_ETRAX_I2C_CLK_PORT
-#define CONFIG_ETRAX_I2C_CLK_PORT 1
-#endif
-
-#define SDABIT CONFIG_ETRAX_I2C_DATA_PORT
-#define SCLBIT CONFIG_ETRAX_I2C_CLK_PORT
+#define SDABIT 0
+#define SCLBIT 1
 #define i2c_enable() 
 #define i2c_disable() 
 
@@ -150,9 +114,9 @@ static const char i2c_name[] = "i2c";
 
 /* read a bit from the i2c interface */
 
-#define i2c_getbit() (((*R_PORT_PB_READ & (1 << SDABIT))) >> SDABIT)
+#define i2c_getbit() (*R_PORT_PB_READ & (1 << SDABIT))
 
-#else /* !CONFIG_ETRAX_I2C_USES_PB_NOT_PB_I2C */
+#else
 /* enable or disable the i2c interface */
 
 #define i2c_enable() *R_PORT_PB_I2C = (port_pb_i2c_shadow |= IO_MASK(R_PORT_PB_I2C, i2c_en))
@@ -160,30 +124,21 @@ static const char i2c_name[] = "i2c";
 
 /* enable or disable output-enable, to select output or input on the i2c bus */
 
-#define i2c_dir_out() \
-	*R_PORT_PB_I2C = (port_pb_i2c_shadow &= ~IO_MASK(R_PORT_PB_I2C, i2c_oe_)); \
-	REG_SHADOW_SET(R_PORT_PB_DIR, port_pb_dir_shadow, 0, 1); 
-#define i2c_dir_in() \
-	*R_PORT_PB_I2C = (port_pb_i2c_shadow |= IO_MASK(R_PORT_PB_I2C, i2c_oe_)); \
-	REG_SHADOW_SET(R_PORT_PB_DIR, port_pb_dir_shadow, 0, 0);
+#define i2c_dir_out() *R_PORT_PB_I2C = (port_pb_i2c_shadow &= ~IO_MASK(R_PORT_PB_I2C, i2c_oe_))
+#define i2c_dir_in() *R_PORT_PB_I2C = (port_pb_i2c_shadow |= IO_MASK(R_PORT_PB_I2C, i2c_oe_))
 
 /* control the i2c clock and data signals */
 
-#define i2c_clk(x) \
-	*R_PORT_PB_I2C = (port_pb_i2c_shadow = (port_pb_i2c_shadow & \
-       ~IO_MASK(R_PORT_PB_I2C, i2c_clk)) | IO_FIELD(R_PORT_PB_I2C, i2c_clk, (x))); \
-       REG_SHADOW_SET(R_PORT_PB_DATA, port_pb_data_shadow, 1, x);
+#define i2c_clk(x) *R_PORT_PB_I2C = (port_pb_i2c_shadow = (port_pb_i2c_shadow & \
+       ~IO_MASK(R_PORT_PB_I2C, i2c_clk)) | IO_FIELD(R_PORT_PB_I2C, i2c_clk, (x)))
 
-#define i2c_data(x) \
-	*R_PORT_PB_I2C = (port_pb_i2c_shadow = (port_pb_i2c_shadow & \
-	   ~IO_MASK(R_PORT_PB_I2C, i2c_d)) | IO_FIELD(R_PORT_PB_I2C, i2c_d, (x))); \
-	REG_SHADOW_SET(R_PORT_PB_DATA, port_pb_data_shadow, 0, x);
+#define i2c_data(x) *R_PORT_PB_I2C = (port_pb_i2c_shadow = (port_pb_i2c_shadow & \
+       ~IO_MASK(R_PORT_PB_I2C, i2c_d)) | IO_FIELD(R_PORT_PB_I2C, i2c_d, (x)))
 
 /* read a bit from the i2c interface */
 
 #define i2c_getbit() (*R_PORT_PB_READ & 0x1)
-
-#endif /* CONFIG_ETRAX_I2C_USES_PB_NOT_PB_I2C */
+#endif
 
 /* use the kernels delay routine */
 
@@ -251,15 +206,14 @@ void
 i2c_outbyte(unsigned char x)
 {
 	int i;
-
+	
 	i2c_dir_out();
 
 	for (i = 0; i < 8; i++) {
-		if (x & 0x80) {
+		if (x & 0x80)
 			i2c_data(I2C_DATA_HIGH);
-		} else {
+		else
 			i2c_data(I2C_DATA_LOW);
-		}
 		
 		i2c_delay(CLOCK_LOW_TIME/2);
 		i2c_clk(I2C_CLOCK_HIGH);
@@ -284,47 +238,65 @@ i2c_inbyte(void)
 {
 	unsigned char aBitByte = 0;
 	int i;
+	int iaa;
 
-	/* Switch off I2C to get bit */
-	i2c_disable();
+	/*
+	 * enable output
+	 */
+	i2c_dir_out();
+	/*
+	 * Release data bus by setting
+	 * data high
+	 */
+	i2c_data(I2C_DATA_HIGH);
+	/*
+	 * enable input
+	 */
 	i2c_dir_in();
-	i2c_delay(CLOCK_HIGH_TIME/2);
-
-	/* Get bit */
-	aBitByte |= i2c_getbit();
-
-	/* Enable I2C */
-	i2c_enable();
-	i2c_delay(CLOCK_LOW_TIME/2);
-
-	for (i = 1; i < 8; i++) {
-		aBitByte <<= 1;
-		/* Clock pulse */
+	/*
+	 * Use PORT PB instead of I2C
+	 * for input. (I2C not working)
+	 */
+	i2c_clk(1);
+	i2c_data(1);
+	/*
+	 * get bits
+	 */
+	for (i = 0; i < 8; i++) {
+		i2c_delay(CLOCK_LOW_TIME/2);
+		/*
+		 * low clock period
+		 */
 		i2c_clk(I2C_CLOCK_HIGH);
-		i2c_delay(CLOCK_HIGH_TIME);
-		i2c_clk(I2C_CLOCK_LOW);
-		i2c_delay(CLOCK_LOW_TIME);
-
-		/* Switch off I2C to get bit */
+		/*
+		 * switch off I2C
+		 */
+		i2c_data(1);
 		i2c_disable();
 		i2c_dir_in();
+		/*
+		 * wait before getting bit
+		 */
 		i2c_delay(CLOCK_HIGH_TIME/2);
-
-		/* Get bit */
-		aBitByte |= i2c_getbit();
-
-		/* Enable I2C */
+		aBitByte = (aBitByte << 1);
+		iaa = i2c_getbit();
+		aBitByte = aBitByte | iaa ;
+		/*
+		 * wait
+		 */
+		i2c_delay(CLOCK_HIGH_TIME/2);
+		/*
+		 * end clock puls
+		 */
 		i2c_enable();
+		i2c_dir_out();
+		i2c_clk(I2C_CLOCK_LOW);
+		/*
+		 * low clock period
+		 */
 		i2c_delay(CLOCK_LOW_TIME/2);
 	}
-	i2c_clk(I2C_CLOCK_HIGH);
-	i2c_delay(CLOCK_HIGH_TIME);
-	
-	/*
-	 * we leave the clock low, getbyte is usually followed
-	 * by sendack/nack, they assume the clock to be low
-	 */
-	i2c_clk(I2C_CLOCK_LOW);
+	i2c_dir_out();
 	return aBitByte;
 }
 
@@ -386,13 +358,6 @@ i2c_getack(void)
 		i2c_delay(CLOCK_HIGH_TIME/2);
 	}
 
-   /*
-    * our clock is high now, make sure data is low
-    * before we enable our output. If we keep data high
-    * and enable output, we would generate a stop condition.
-    */
-   i2c_data(I2C_DATA_LOW);
-   
 	/*
 	 * end clock pulse
 	 */
@@ -450,49 +415,18 @@ i2c_sendack(void)
 
 /*#---------------------------------------------------------------------------
 *#
-*# FUNCTION NAME: i2c_sendnack
-*#
-*# DESCRIPTION  : Sends NACK on received data
-*#
-*#--------------------------------------------------------------------------*/
-void
-i2c_sendnack(void)
-{
-	/*
-	 * enable output
-	 */
-	i2c_delay(CLOCK_LOW_TIME);
-	i2c_dir_out();
-	/*
-	 * set data high
-	 */
-	i2c_data(I2C_DATA_HIGH);
-	/*
-	 * generate clock pulse
-	 */
-	i2c_delay(CLOCK_HIGH_TIME/6);
-	i2c_clk(I2C_CLOCK_HIGH);
-	i2c_delay(CLOCK_HIGH_TIME);
-	i2c_clk(I2C_CLOCK_LOW);
-	i2c_delay(CLOCK_LOW_TIME);
-	
-	i2c_dir_in();
-}
-
-/*#---------------------------------------------------------------------------
-*#
 *# FUNCTION NAME: i2c_writereg
 *#
 *# DESCRIPTION  : Writes a value to an I2C device
 *#
 *#--------------------------------------------------------------------------*/
 int
-i2c_writereg(unsigned char theSlave, unsigned char theReg, 
+i2c_writereg(unsigned char theSlave, unsigned char theReg,
 	     unsigned char theValue)
 {
 	int error, cntr = 3;
 	unsigned long flags;
-
+		
 	do {
 		error = 0;
 		/*
@@ -500,12 +434,31 @@ i2c_writereg(unsigned char theSlave, unsigned char theReg,
 		 */
 		save_flags(flags);
 		cli();
+		/*
+		 * generate start condition
+		 */
+		i2c_start();
+		/*
+		 * dummy preamble
+		 */
+		i2c_outbyte(0x01);
+		i2c_data(I2C_DATA_HIGH);
+		i2c_clk(I2C_CLOCK_HIGH);
+		i2c_delay(CLOCK_HIGH_TIME); /* Dummy Acknowledge */
+		i2c_clk(I2C_CLOCK_LOW);
+		i2c_delay(CLOCK_LOW_TIME);
+		i2c_clk(I2C_CLOCK_HIGH);
+		i2c_delay(CLOCK_LOW_TIME); /* Repeated Start Condition */
+		i2c_data(I2C_DATA_LOW);
+		i2c_delay(CLOCK_HIGH_TIME);
+		i2c_clk(I2C_CLOCK_LOW);
+		i2c_delay(CLOCK_LOW_TIME);
 
 		i2c_start();
 		/*
 		 * send slave address
 		 */
-		i2c_outbyte((theSlave & 0xfe));
+		i2c_outbyte(theSlave);
 		/*
 		 * wait for ack
 		 */
@@ -540,7 +493,7 @@ i2c_writereg(unsigned char theSlave, unsigned char theReg,
 		restore_flags(flags);
 		
 	} while(error && cntr--);
-
+	
 	i2c_delay(CLOCK_LOW_TIME);
 	
 	return -error;
@@ -559,7 +512,7 @@ i2c_readreg(unsigned char theSlave, unsigned char theReg)
 	unsigned char b = 0;
 	int error, cntr = 3;
 	unsigned long flags;
-
+		
 	do {
 		error = 0;
 		/*
@@ -571,11 +524,28 @@ i2c_readreg(unsigned char theSlave, unsigned char theReg)
 		 * generate start condition
 		 */
 		i2c_start();
+		/*
+		 * dummy preamble
+		 */
+		i2c_outbyte(0x01);
+		i2c_data(I2C_DATA_HIGH);
+		i2c_clk(I2C_CLOCK_HIGH);
+		i2c_delay(CLOCK_HIGH_TIME); /* Dummy Acknowledge */
+		i2c_clk(I2C_CLOCK_LOW);
+		i2c_delay(CLOCK_LOW_TIME);
+		i2c_clk(I2C_CLOCK_HIGH);
+		i2c_delay(CLOCK_LOW_TIME); /* Repeated Start Condition */
+		i2c_data(I2C_DATA_LOW);
+		i2c_delay(CLOCK_HIGH_TIME);
+		i2c_clk(I2C_CLOCK_LOW);
+		i2c_delay(CLOCK_LOW_TIME);
+    
+		i2c_start();
     
 		/*
 		 * send slave address
 		 */
-		i2c_outbyte((theSlave & 0xfe));
+		i2c_outbyte(theSlave);
 		/*
 		 * wait for ack
 		 */
@@ -610,10 +580,9 @@ i2c_readreg(unsigned char theSlave, unsigned char theReg)
 		 */
 		b = i2c_inbyte();
 		/*
-		 * last received byte needs to be nacked
-		 * instead of acked
+		 * send Ack
 		 */
-		i2c_sendnack();
+		i2c_sendack();
 		/*
 		 * end sequence
 		 */
@@ -688,7 +657,7 @@ static struct file_operations i2c_fops = {
 	release:  i2c_release,
 };
 
-int __init
+static int __init
 i2c_init(void)
 {
 	int res;
@@ -718,7 +687,7 @@ i2c_init(void)
 		return res;
 	}
 
-	printk(KERN_INFO "I2C driver v2.2, (c) 1999-2001 Axis Communications AB\n");
+	printk("I2C driver v2.2, (c) 1999-2001 Axis Communications AB\n");
 	
 	return 0;
 }

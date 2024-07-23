@@ -1,6 +1,6 @@
 /*
- * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
+ * Carsten Langgaard, carstenl@mips.com
  *
  * Copyright 2001 MontaVista Software Inc.
  * Author: Jun Sun, jsun@mvista.com or jsun@junsun.net
@@ -20,10 +20,6 @@
  */
 #ifndef _ASM_GT64120_GT64120_H
 #define _ASM_GT64120_GT64120_H
-
-#include <linux/config.h>
-#include <asm/addrspace.h>
-#include <asm/byteorder.h>
 
 #define MSK(n)                    ((1 << (n)) - 1)
 
@@ -67,7 +63,7 @@
 #define GT_PCI1M0REMAP_OFS	0x110
 #define GT_PCI1M1REMAP_OFS	0x118
 
-#define GT_SCS0LD_OFS		0x400
+#define GT_SCS0LD_OFS		0x400	
 #define GT_SCS0HD_OFS		0x404
 #define GT_SCS1LD_OFS		0x408
 #define GT_SCS1HD_OFS		0x40c
@@ -331,7 +327,7 @@
 #define GT_PCI0_BARE_SWSCS32DIS_SHF	1
 #define GT_PCI0_BARE_SWSCS32DIS_MSK	(MSK(1) << GT_PCI0_BARE_SWSCS32DIS_SHF)
 #define GT_PCI0_BARE_SWSCS32DIS_BIT	GT_PCI0_BARE_SWSCS32DIS_MSK
-
+	
 #define GT_PCI0_BARE_SWSCS10DIS_SHF	2
 #define GT_PCI0_BARE_SWSCS10DIS_MSK	(MSK(1) << GT_PCI0_BARE_SWSCS10DIS_SHF)
 #define GT_PCI0_BARE_SWSCS10DIS_BIT	GT_PCI0_BARE_SWSCS10DIS_MSK
@@ -396,16 +392,34 @@
 #define GT_PCI0_CMD_SWORDSWAP_BIT       GT_PCI0_CMD_SWORDSWAP_MSK
 
 /*
- *  Misc base addresses
+ *  Misc
  */
-#define GT_DEF_PCI0_IO_BASE	0x10000000UL
-#define GT_DEF_PCI0_IO_SIZE	0x02000000UL
-#define GT_DEF_PCI0_MEM0_BASE	0x12000000UL
-#define GT_DEF_PCI0_MEM0_SIZE	0x02000000UL
-#define GT_DEF_BASE		0x14000000UL
+#define GT_DEF_BASE		0x14000000
+
+#define GT_DEF_PCI0_IO_BASE	0x10000000
+#define GT_DEF_PCI0_IO_SIZE	0x02000000
+#define GT_DEF_PCI0_MEM0_BASE	0x12000000
+#define GT_DEF_PCI0_MEM0_SIZE	0x02000000
 
 #define GT_MAX_BANKSIZE		(256 * 1024 * 1024)   /* Max 256MB bank */
 #define GT_LATTIM_MIN    	6		      /* Minimum lat	*/
+
+
+/***********************************************************************
+ *              BOARD-DEPENDENT SECTIONS                               *
+ ***********************************************************************
+ */
+
+/* 
+ * include asm/gt64120/<board>/gt64120_dep.h file
+ */
+
+#include <linux/config.h>
+#include <linux/init.h>
+
+#if defined(CONFIG_MOMENCO_OCELOT)
+#include <asm/gt64120/momenco_ocelot/gt64120_dep.h>
+#endif
 
 /*
  * The gt64120_dep.h file must define the following macros
@@ -417,50 +431,13 @@
  *		  full gt64120 cascade interrupt support is in place
  */
 
-#ifdef CONFIG_LASAT
-#include <asm/gt64120/lasat/gt64120_dep.h>
-#endif
-
-#ifdef CONFIG_MIPS_ATLAS
-#include <asm/gt64120/mips-boards/gt64120_dep.h>
-#endif
-
-#ifdef CONFIG_MIPS_EV64120
-#include <asm/gt64120/ev64120/ev64120.h>
-#endif
-
-#ifdef CONFIG_MIPS_EV96100
-#include <asm/gt64120/ev96100/gt64120_dep.h>
-#endif
-
-#ifdef CONFIG_MIPS_MALTA
-#include <asm/gt64120/mips-boards/gt64120_dep.h>
-#endif
-
-#ifdef CONFIG_MOMENCO_OCELOT
-#include <asm/gt64120/momenco_ocelot/gt64120_dep.h>
-#endif
-
 /*
- * Because of an error/peculiarity in the Galileo chip, we need to swap the
- * bytes when running bigendian.  We also provide non-swapping versions.
- */
-#define __GT_READ(ofs)							\
-	(*(volatile u32 *)(GT64120_BASE+(ofs)))
-#define __GT_WRITE(ofs, data)						\
-	do { *(volatile u32 *)(GT64120_BASE+(ofs)) = (data); } while (0)
-#define GT_READ(ofs)		le32_to_cpu(__GT_READ(ofs))
-#define GT_WRITE(ofs, data)	__GT_WRITE(ofs, cpu_to_le32(data))
-
-/*
- * Board-dependent functions, which must be defined in
+ * Board-dependent functions, which must be defined in 
  * arch/mips/gt64120/<board>/pci.c file.
  *
  * This function is called by pcibios_fixup_bus(bus), which in turn is
  * invoked a bus is scanned.  You typically fixes IRQ numbers in this routine.
  */
-struct pci_bus;
-
-extern void gt64120_board_pcibios_fixup_bus(struct pci_bus *bus);
+extern void __init gt64120_board_pcibios_fixup_bus(struct pci_bus *bus);
 
 #endif /* _ASM_GT64120_GT64120_H */

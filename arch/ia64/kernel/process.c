@@ -1,8 +1,8 @@
 /*
  * Architecture-specific setup.
  *
- * Copyright (C) 1998-2003 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #define __KERNEL_SYSCALLS__	/* see <asm/unistd.h> */
 #include <linux/config.h>
@@ -12,15 +12,14 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/personality.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
-#include <linux/efi.h>
 
 #include <asm/delay.h>
+#include <asm/efi.h>
 #include <asm/perfmon.h>
 #include <asm/pgtable.h>
 #include <asm/processor.h>
@@ -29,19 +28,12 @@
 #include <asm/unwind.h>
 #include <asm/user.h>
 
-#ifdef CONFIG_IA64_SGI_SN
-#include <asm/sn/idle.h>
-#endif
-
-#define print_symbol(fmt, addr)	printk(fmt, "(no symbol)");
-
-void
-ia64_do_show_stack (struct unw_frame_info *info, void *arg)
+static void
+do_show_stack (struct unw_frame_info *info, void *arg)
 {
 	unsigned long ip, sp, bsp;
-	char buf[128];			/* don't make it so big that it overflows the stack! */
 
-	printk("\nCall Trace:\n");
+	printk("\nCall Trace: ");
 	do {
 		unw_get_ip(info, &ip);
 		if (ip == 0)
@@ -49,11 +41,7 @@ ia64_do_show_stack (struct unw_frame_info *info, void *arg)
 
 		unw_get_sp(info, &sp);
 		unw_get_bsp(info, &bsp);
-		snprintf(buf, sizeof(buf),
-			 " [<%016lx>] %%s\n"
-			 "                                sp=%016lx bsp=%016lx\n",
-			 ip, sp, bsp);
-		print_symbol(buf, ip);
+		printk("[<%016lx>] sp=0x%016lx bsp=0x%016lx\n", ip, sp, bsp);
 	} while (unw_unwind(info) >= 0);
 }
 
@@ -61,19 +49,13 @@ void
 show_stack (struct task_struct *task)
 {
 	if (!task)
-		unw_init_running(ia64_do_show_stack, 0);
+		unw_init_running(do_show_stack, 0);
 	else {
 		struct unw_frame_info info;
 
 		unw_init_from_blocked_task(&info, task);
-		ia64_do_show_stack(&info, 0);
+		do_show_stack(&info, 0);
 	}
-}
-
-void
-show_trace_task (struct task_struct *task)
-{
-	show_stack(task);
 }
 
 void
@@ -81,17 +63,15 @@ show_regs (struct pt_regs *regs)
 {
 	unsigned long ip = regs->cr_iip + ia64_psr(regs)->ri;
 
-	printk("\nPid: %d, CPU %d, comm: %20s\n", current->pid, smp_processor_id(), current->comm);
+	printk("\nPid: %d, comm: %20s\n", current->pid, current->comm);
 	printk("psr : %016lx ifs : %016lx ip  : [<%016lx>]    %s\n",
 	       regs->cr_ipsr, regs->cr_ifs, ip, print_tainted());
-	print_symbol("ip is at %s\n", ip);
 	printk("unat: %016lx pfs : %016lx rsc : %016lx\n",
 	       regs->ar_unat, regs->ar_pfs, regs->ar_rsc);
 	printk("rnat: %016lx bsps: %016lx pr  : %016lx\n",
 	       regs->ar_rnat, regs->ar_bspstore, regs->pr);
 	printk("ldrs: %016lx ccv : %016lx fpsr: %016lx\n",
 	       regs->loadrs, regs->ar_ccv, regs->ar_fpsr);
-	printk("csd : %016lx ssd : %016lx\n", regs->ar_csd, regs->ar_ssd);
 	printk("b0  : %016lx b6  : %016lx b7  : %016lx\n", regs->b0, regs->b6, regs->b7);
 	printk("f6  : %05lx%016lx f7  : %05lx%016lx\n",
 	       regs->f6.u.bits[1], regs->f6.u.bits[0],
@@ -99,9 +79,6 @@ show_regs (struct pt_regs *regs)
 	printk("f8  : %05lx%016lx f9  : %05lx%016lx\n",
 	       regs->f8.u.bits[1], regs->f8.u.bits[0],
 	       regs->f9.u.bits[1], regs->f9.u.bits[0]);
-	printk("f10 : %05lx%016lx f11 : %05lx%016lx\n",
-	       regs->f10.u.bits[1], regs->f10.u.bits[0],
-	       regs->f11.u.bits[1], regs->f11.u.bits[0]);
 
 	printk("r1  : %016lx r2  : %016lx r3  : %016lx\n", regs->r1, regs->r2, regs->r3);
 	printk("r8  : %016lx r9  : %016lx r10 : %016lx\n", regs->r8, regs->r9, regs->r10);
@@ -113,8 +90,8 @@ show_regs (struct pt_regs *regs)
 	printk("r26 : %016lx r27 : %016lx r28 : %016lx\n", regs->r26, regs->r27, regs->r28);
 	printk("r29 : %016lx r30 : %016lx r31 : %016lx\n", regs->r29, regs->r30, regs->r31);
 
-	if (user_mode(regs)) {
-		/* print the stacked registers */
+	/* print the stacked registers if cr.ifs is valid: */
+	if (regs->cr_ifs & 0x8000000000000000) {
 		unsigned long val, sof, *bsp, ndirty;
 		int i, is_nat = 0;
 
@@ -128,107 +105,59 @@ show_regs (struct pt_regs *regs)
 		}
 	}
 	if (!user_mode(regs))
-		show_stack(NULL);
-}
-
-/*
- * We use this if we don't have any better idle routine..
- */
-void
-default_idle (void)
-{
-#ifdef CONFIG_IA64_PAL_IDLE
-	if (!current->need_resched)
-		safe_halt();
-#endif
+		show_stack(0);
 }
 
 void __attribute__((noreturn))
 cpu_idle (void *unused)
 {
+	/* endless idle loop with no priority at all */
 	init_idle();
 	current->nice = 20;
 	current->counter = -100;
 
 
-	/* endless idle loop with no priority at all */
 	while (1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-
 #ifdef CONFIG_SMP
 		if (!current->need_resched)
 			min_xtp();
 #endif
-
-		while (!current->need_resched) {
-#ifdef CONFIG_IA64_SGI_SN
-			snidle();
-#endif
-			(*idle)();
-		}
-
-#ifdef CONFIG_IA64_SGI_SN
-		snidleoff();
-#endif
-
+		while (!current->need_resched)
+			continue;
 #ifdef CONFIG_SMP
 		normal_xtp();
 #endif
 		schedule();
 		check_pgt_cache();
+		if (pm_idle)
+			(*pm_idle)();
 	}
 }
 
 void
 ia64_save_extra (struct task_struct *task)
 {
-#ifdef CONFIG_PERFMON
-	unsigned long info;
-#endif
-
 	if ((task->thread.flags & IA64_THREAD_DBG_VALID) != 0)
 		ia64_save_debug_regs(&task->thread.dbr[0]);
-
 #ifdef CONFIG_PERFMON
 	if ((task->thread.flags & IA64_THREAD_PM_VALID) != 0)
 		pfm_save_regs(task);
-
-	info = local_cpu_data->pfm_syst_info;
-	if (info & PFM_CPUINFO_SYST_WIDE)
-		pfm_syst_wide_update_task(task, info, 0);
 #endif
-
-#ifdef CONFIG_IA32_SUPPORT
 	if (IS_IA32_PROCESS(ia64_task_regs(task)))
 		ia32_save_state(task);
-#endif
 }
 
 void
 ia64_load_extra (struct task_struct *task)
 {
-#ifdef CONFIG_PERFMON
-	unsigned long info;
-#endif
-
 	if ((task->thread.flags & IA64_THREAD_DBG_VALID) != 0)
 		ia64_load_debug_regs(&task->thread.dbr[0]);
-
 #ifdef CONFIG_PERFMON
 	if ((task->thread.flags & IA64_THREAD_PM_VALID) != 0)
 		pfm_load_regs(task);
-
-	info = local_cpu_data->pfm_syst_info;
-	if (info & PFM_CPUINFO_SYST_WIDE)
-		pfm_syst_wide_update_task(task, info, 1);
 #endif
-
-#ifdef CONFIG_IA32_SUPPORT
 	if (IS_IA32_PROCESS(ia64_task_regs(task)))
 		ia32_load_state(task);
-#endif
 }
 
 /*
@@ -253,7 +182,7 @@ ia64_load_extra (struct task_struct *task)
  *	|                     | <-- sp (lowest addr)
  *	+---------------------+
  *
- * Note: if we get called through arch_kernel_thread() then the memory
+ * Note: if we get called through kernel_thread() then the memory
  * above "(highest addr)" is valid kernel stack memory that needs to
  * be copied as well.
  *
@@ -306,7 +235,7 @@ copy_thread (int nr, unsigned long clone_flags,
 
 	if (user_mode(child_ptregs)) {
 		if (user_stack_base) {
-			child_ptregs->r12 = user_stack_base + user_stack_size - 16;
+			child_ptregs->r12 = user_stack_base + user_stack_size;
 			child_ptregs->ar_bspstore = user_stack_base;
 			child_ptregs->ar_rnat = 0;
 			child_ptregs->loadrs = 0;
@@ -330,31 +259,27 @@ copy_thread (int nr, unsigned long clone_flags,
 
 	/* copy parts of thread_struct: */
 	p->thread.ksp = (unsigned long) child_stack - 16;
-
-	/* stop some PSR bits from being inherited: */
-	child_ptregs->cr_ipsr =  ((child_ptregs->cr_ipsr | IA64_PSR_BITS_TO_SET)
-				  & ~IA64_PSR_BITS_TO_CLEAR);
-
 	/*
-	 * NOTE: The calling convention considers all floating point registers in the high
-	 * partition (fph) to be scratch.  Since the only way to get to this point is
-	 * through a system call, we know that the values in fph are all dead.  Hence,
-	 * there is no need to inherit the fph state from the parent to the child and all
-	 * we have to do is to make sure that IA64_THREAD_FPH_VALID is cleared in the
-	 * child.
+	 * NOTE: The calling convention considers all floating point
+	 * registers in the high partition (fph) to be scratch.  Since
+	 * the only way to get to this point is through a system call,
+	 * we know that the values in fph are all dead.  Hence, there
+	 * is no need to inherit the fph state from the parent to the
+	 * child and all we have to do is to make sure that
+	 * IA64_THREAD_FPH_VALID is cleared in the child.
 	 *
-	 * XXX We could push this optimization a bit further by clearing
-	 * IA64_THREAD_FPH_VALID on ANY system call.  However, it's not clear this is
-	 * worth doing.  Also, it would be a slight deviation from the normal Linux system
-	 * call behavior where scratch registers are preserved across system calls (unless
-	 * used by the system call itself).
+	 * XXX We could push this optimization a bit further by
+	 * clearing IA64_THREAD_FPH_VALID on ANY system call.
+	 * However, it's not clear this is worth doing.  Also, it
+	 * would be a slight deviation from the normal Linux system
+	 * call behavior where scratch registers are preserved across
+	 * system calls (unless used by the system call itself).
 	 */
 #	define THREAD_FLAGS_TO_CLEAR	(IA64_THREAD_FPH_VALID | IA64_THREAD_DBG_VALID \
 					 | IA64_THREAD_PM_VALID)
 #	define THREAD_FLAGS_TO_SET	0
 	p->thread.flags = ((current->thread.flags & ~THREAD_FLAGS_TO_CLEAR)
 			   | THREAD_FLAGS_TO_SET);
-	ia64_drop_fpu(p);	/* don't pick up stale state from a CPU's fph */
 #ifdef CONFIG_IA32_SUPPORT
 	/*
 	 * If we're cloning an IA32 task then save the IA32 extra
@@ -363,17 +288,8 @@ copy_thread (int nr, unsigned long clone_flags,
 	if (IS_IA32_PROCESS(ia64_task_regs(current)))
 		ia32_save_state(p);
 #endif
-
 #ifdef CONFIG_PERFMON
-	/*
-	 * reset notifiers and owner check (may not have a perfmon context)
-	 */
-	atomic_set(&p->thread.pfm_notifiers_check, 0);
-	atomic_set(&p->thread.pfm_owners_check, 0);
-	/* clear list of sampling buffer to free for new task */
-	p->thread.pfm_smpl_buf_list = NULL;
-
-	if (current->thread.pfm_context)
+	if (p->thread.pfm_context)
 		retval = pfm_inherit(p, child_ptregs);
 #endif
 	return retval;
@@ -447,8 +363,6 @@ do_copy_regs (struct unw_frame_info *info, void *arg)
 	dst[52] = pt->ar_pfs;	/* UNW_AR_PFS is == to pt->cr_ifs for interrupt frames */
 	unw_get_ar(info, UNW_AR_LC, &dst[53]);
 	unw_get_ar(info, UNW_AR_EC, &dst[54]);
-	unw_get_ar(info, UNW_AR_CSD, &dst[55]);
-	unw_get_ar(info, UNW_AR_SSD, &dst[56]);
 }
 
 void
@@ -485,7 +399,7 @@ dump_fpu (struct pt_regs *pt, elf_fpregset_t dst)
 	return 1;	/* f0-f31 are always valid so we always return 1 */
 }
 
-long
+asmlinkage long
 sys_execve (char *filename, char **argv, char **envp, struct pt_regs *regs)
 {
 	int error;
@@ -500,33 +414,14 @@ out:
 	return error;
 }
 
-void
-ia64_set_personality (struct elf64_hdr *elf_ex, int ibcs2_interpreter)
-{
-	set_personality(PER_LINUX);
-	if (elf_ex->e_flags & EF_IA_64_LINUX_EXECUTABLE_STACK)
-		current->thread.flags |= IA64_THREAD_XSTACK;
-	else
-		current->thread.flags &= ~IA64_THREAD_XSTACK;
-}
-
 pid_t
-arch_kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
+kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
 {
 	struct task_struct *parent = current;
 	int result, tid;
 
 	tid = clone(flags | CLONE_VM, 0);
 	if (parent != current) {
-#ifdef CONFIG_IA32_SUPPORT
-		if (IS_IA32_PROCESS(ia64_task_regs(current))) {
-			/* A kernel thread is always a 64-bit process. */
-			current->thread.map_base  = DEFAULT_MAP_BASE;
-			current->thread.task_size = DEFAULT_TASK_SIZE;
-			ia64_set_kr(IA64_KR_IO_BASE, current->thread.old_iob);
-			ia64_set_kr(IA64_KR_TSSD, current->thread.old_k1);
-		}
-#endif
 		result = (*fn)(arg);
 		_exit(result);
 	}
@@ -541,20 +436,24 @@ flush_thread (void)
 {
 	/* drop floating-point and debug-register state if it exists: */
 	current->thread.flags &= ~(IA64_THREAD_FPH_VALID | IA64_THREAD_DBG_VALID);
-	ia64_drop_fpu(current);
+
+#ifndef CONFIG_SMP
+	if (ia64_get_fpu_owner() == current)
+		ia64_set_fpu_owner(0);
+#endif
 }
 
 #ifdef CONFIG_PERFMON
 /*
- * by the time we get here, the task is detached from the tasklist. This is important
- * because it means that no other tasks can ever find it as a notified task, therfore there
- * is no race condition between this code and let's say a pfm_context_create().
- * Conversely, the pfm_cleanup_notifiers() cannot try to access a task's pfm context if this
- * other task is in the middle of its own pfm_context_exit() because it would already be out of
- * the task list. Note that this case is very unlikely between a direct child and its parents
- * (if it is the notified process) because of the way the exit is notified via SIGCHLD.
+ * By the time we get here, the task is detached from the tasklist. This is important
+ * because it means that no other tasks can ever find it as a notifiied task, therfore
+ * there is no race condition between this code and let's say a pfm_context_create().
+ * Conversely, the pfm_cleanup_notifiers() cannot try to access a task's pfm context if
+ * this other task is in the middle of its own pfm_context_exit() because it would alreayd
+ * be out of the task list. Note that this case is very unlikely between a direct child
+ * and its parents (if it is the notified process) because of the way the exit is notified
+ * via SIGCHLD.
  */
-
 void
 release_thread (struct task_struct *task)
 {
@@ -563,12 +462,6 @@ release_thread (struct task_struct *task)
 
 	if (atomic_read(&task->thread.pfm_notifiers_check) > 0)
 		pfm_cleanup_notifiers(task);
-
-	if (atomic_read(&task->thread.pfm_owners_check) > 0)
-		pfm_cleanup_owners(task);
-
-	if (task->thread.pfm_smpl_buf_list)
-		pfm_cleanup_smpl_buf(task);
 }
 #endif
 
@@ -579,15 +472,27 @@ release_thread (struct task_struct *task)
 void
 exit_thread (void)
 {
-	ia64_drop_fpu(current);
+#ifndef CONFIG_SMP
+	if (ia64_get_fpu_owner() == current)
+		ia64_set_fpu_owner(0);
+#endif
 #ifdef CONFIG_PERFMON
        /* stop monitoring */
-	if (current->thread.pfm_context)
+	if ((current->thread.flags & IA64_THREAD_PM_VALID) != 0) {
+		/*
+		 * we cannot rely on switch_to() to save the PMU
+		 * context for the last time. There is a possible race
+		 * condition in SMP mode between the child and the
+		 * parent.  by explicitly saving the PMU context here
+		 * we garantee no race.  this call we also stop
+		 * monitoring
+		 */
 		pfm_flush_regs(current);
-
-	/* free debug register resources */
-	if (current->thread.flags & IA64_THREAD_DBG_VALID)
-		pfm_release_debug_registers(current);
+		/*
+		 * make sure that switch_to() will not save context again
+		 */
+		current->thread.flags &= ~IA64_THREAD_PM_VALID;
+	}
 #endif
 }
 

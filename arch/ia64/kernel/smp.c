@@ -30,13 +30,12 @@
 #include <linux/kernel_stat.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
-#include <linux/cache.h>
-#include <linux/efi.h>
 
 #include <asm/atomic.h>
 #include <asm/bitops.h>
 #include <asm/current.h>
 #include <asm/delay.h>
+#include <asm/efi.h>
 #include <asm/machvec.h>
 
 #include <asm/io.h>
@@ -52,7 +51,7 @@
 #include <asm/mca.h>
 
 /* The 'big kernel lock' */
-spinlock_t kernel_flag __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
+spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 
 /*
  * Structure and data for smp_call_function(). This is designed to minimise static memory
@@ -90,7 +89,7 @@ void
 handle_IPI (int irq, void *dev_id, struct pt_regs *regs)
 {
 	int this_cpu = smp_processor_id();
-	unsigned long *pending_ipis = &local_cpu_data->ipi.operation;
+	unsigned long *pending_ipis = &local_cpu_data->ipi_operation;
 	unsigned long ops;
 
 	/* Count this now; we may make a call that never returns. */
@@ -149,7 +148,7 @@ handle_IPI (int irq, void *dev_id, struct pt_regs *regs)
 static inline void
 send_IPI_single (int dest_cpu, int op)
 {
-	set_bit(op, &cpu_data(dest_cpu)->ipi.operation);
+	set_bit(op, &cpu_data(dest_cpu)->ipi_operation);
 	platform_send_ipi(dest_cpu, IA64_IPI_VECTOR, IA64_IPI_DM_INT, 0);
 }
 
@@ -188,20 +187,8 @@ smp_send_reschedule (int cpu)
 void
 smp_flush_tlb_all (void)
 {
-	smp_call_function((void (*)(void *))local_flush_tlb_all, 0, 1, 1);
-	local_flush_tlb_all();
-}
-
-void
-smp_flush_tlb_mm (struct mm_struct *mm)
-{
-	local_flush_tlb_mm(mm);
-
-	/* this happens for the common case of a single-threaded fork():  */
-	if (likely(mm == current->active_mm && atomic_read(&mm->mm_users) == 1))
-		return;
-
-	smp_call_function((void (*)(void *))local_flush_tlb_mm, mm, 1, 1);
+	smp_call_function ((void (*)(void *))__flush_tlb_all,0,1,1);
+	__flush_tlb_all();
 }
 
 /*
@@ -224,7 +211,7 @@ smp_call_function_single (int cpuid, void (*func) (void *info), void *info, int 
 	int cpus = 1;
 
 	if (cpuid == smp_processor_id()) {
-		printk("%s: trying to call self\n", __FUNCTION__);
+		printk(__FUNCTION__" trying to call self\n");
 		return -EBUSY;
 	}
 

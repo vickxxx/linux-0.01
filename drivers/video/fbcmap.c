@@ -271,7 +271,7 @@ int fb_set_cmap(struct fb_cmap *cmap, int kspc,
 	    hred = *red;
 	    hgreen = *green;
 	    hblue = *blue;
-	    htransp = transp ? *transp : 0xffff;
+	    htransp = transp ? *transp : 0;
 	} else {
 	    get_user(hred, red);
 	    get_user(hgreen, green);
@@ -279,7 +279,7 @@ int fb_set_cmap(struct fb_cmap *cmap, int kspc,
 	    if (transp)
 		get_user(htransp, transp);
 	    else
-		htransp = 0xffff;
+		htransp = 0;
 	}
 	red++;
 	green++;

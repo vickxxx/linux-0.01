@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.fcntl.h 1.8 09/19/01 23:06:01 paulus
+ */
 #ifndef _PPC_FCNTL_H
 #define _PPC_FCNTL_H
 

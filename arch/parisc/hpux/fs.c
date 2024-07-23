@@ -52,8 +52,7 @@ struct getdents_callback {
 #define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
 #define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
-static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
-		ino_t ino, unsigned int d_type)
+static int filldir(void * __buf, const char * name, int namlen, loff_t offset, ino_t ino)
 {
 	struct hpux_dirent * dirent;
 	struct getdents_callback * buf = (struct getdents_callback *) __buf;
@@ -84,21 +83,42 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 int hpux_getdents(unsigned int fd, struct hpux_dirent *dirent, unsigned int count)
 {
 	struct file * file;
+	struct dentry * dentry;
+	struct inode * inode;
 	struct hpux_dirent * lastdirent;
 	struct getdents_callback buf;
 	int error;
 
+	lock_kernel();
 	error = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto out;
+
+	dentry = file->f_dentry;
+	if (!dentry)
+		goto out_putf;
+
+	inode = dentry->d_inode;
+	if (!inode)
+		goto out_putf;
 
 	buf.current_dir = dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
 
-	error = vfs_readdir(file, filldir, &buf);
+	error = -ENOTDIR;
+	if (!file->f_op || !file->f_op->readdir)
+		goto out_putf;
+
+	/*
+	 * Get the inode's semaphore to prevent changes
+	 * to the directory while we read it.
+	 */
+	down(&inode->i_sem);
+	error = file->f_op->readdir(file, &buf, filldir);
+	up(&inode->i_sem);
 	if (error < 0)
 		goto out_putf;
 	error = buf.error;
@@ -111,6 +131,7 @@ int hpux_getdents(unsigned int fd, struct hpux_dirent *dirent, unsigned int coun
 out_putf:
 	fput(file);
 out:
+	unlock_kernel();
 	return error;
 }
 

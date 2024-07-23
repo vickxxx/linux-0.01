@@ -75,7 +75,7 @@ static __inline__ void down(struct semaphore * sem)
 "	bne,pn	%%icc, 1b\n"
 "	 cmp	%%g7, 1\n"
 "	bl,pn	%%icc, 3f\n"
-"	 membar	#StoreLoad | #StoreStore\n"
+"	 membar	#StoreStore\n"
 "2:\n"
 "	.subsection 2\n"
 "3:	mov	%0, %%g5\n"
@@ -120,7 +120,7 @@ static __inline__ int down_interruptible(struct semaphore *sem)
 "	bne,pn	%%icc, 1b\n"
 "	 cmp	%%g7, 1\n"
 "	bl,pn	%%icc, 3f\n"
-"	 membar	#StoreLoad | #StoreStore\n"
+"	 membar	#StoreStore\n"
 "2:\n"
 "	.subsection 2\n"
 "3:	mov	%2, %%g5\n"
@@ -173,7 +173,7 @@ static __inline__ int down_trylock(struct semaphore *sem)
 "	cmp	%%g5, %%g7\n"
 "	bne,pn	%%icc, 1b\n"
 "	 mov	0, %0\n"
-"	membar	#StoreLoad | #StoreStore\n"
+"	membar	#StoreStore\n"
 "2:\n"
 	: "=&r" (ret)
 	: "r" (sem)
@@ -207,7 +207,7 @@ static __inline__ void up(struct semaphore * sem)
 "	bne,pn	%%icc, 1b\n"
 "	 addcc	%%g7, 1, %%g0\n"
 "	ble,pn	%%icc, 3f\n"
-"	 membar	#StoreLoad | #StoreStore\n"
+"	 nop\n"
 "2:\n"
 "	.subsection 2\n"
 "3:	mov	%0, %%g5\n"
@@ -224,11 +224,6 @@ static __inline__ void up(struct semaphore * sem)
 "	.previous\n"
 	: : "r" (sem), "i" (__up)
 	: "g5", "g7", "memory", "cc");
-}
-
-static inline int sem_getcount(struct semaphore *sem)
-{
-	return atomic_read(&sem->count);
 }
 
 #endif /* __KERNEL__ */

@@ -20,8 +20,6 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/smp.h>
-#include <linux/list.h>
-#include <linux/timer.h>
 #include <linux/init.h>
 
 #include <asm/hardware.h>

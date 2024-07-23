@@ -31,7 +31,7 @@
  * provisions above, a recipient may use your version of this file
  * under either the RHEPL or the GPL.
  *
- * $Id: erase.c,v 1.24.2.1 2003/11/02 13:51:17 dwmw2 Exp $
+ * $Id: erase.c,v 1.23 2001/09/19 21:51:11 dwmw2 Exp $
  *
  */
 #include <linux/kernel.h>
@@ -40,7 +40,7 @@
 #include <linux/jffs2.h>
 #include <linux/interrupt.h>
 #include "nodelist.h"
-#include <linux/crc32.h>
+#include "crc32.h"
 
 struct erase_priv_struct {
 	struct jffs2_eraseblock *jeb;
@@ -215,8 +215,8 @@ static inline void jffs2_remove_node_refs_from_ino_list(struct jffs2_sb_info *c,
 
 	D2({
 		int i=0;
-		struct jffs2_raw_node_ref *this;
-		printk(KERN_DEBUG "After remove_node_refs_from_ino_list: \n" KERN_DEBUG);
+        struct jffs2_raw_node_ref *this;		
+        printk(KERN_DEBUG "After remove_node_refs_from_ino_list: \n" KERN_DEBUG);
 
 		this = ic->nodes;
 	   

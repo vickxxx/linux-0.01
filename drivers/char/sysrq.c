@@ -186,7 +186,7 @@ static void go_sync(struct super_block *sb, int remount_flag)
  * block devices and malfunctional network filesystems.
  */
 
-volatile int emergency_sync_scheduled;
+int emergency_sync_scheduled;
 
 void do_emergency_sync(void) {
 	struct super_block *sb;
@@ -284,20 +284,24 @@ static struct sysrq_key_op sysrq_showmem_op = {
 
 /* signal sysrq helper function
  * Sends a signal to all user processes */
-static void send_sig_all(int sig)
+static void send_sig_all(int sig, int even_init)
 {
 	struct task_struct *p;
 
 	for_each_task(p) {
-		if (p->mm && p->pid != 1)
-			/* Not swapper, init nor kernel thread */
-			force_sig(sig, p);
+		if (p->mm) { /* Not swapper nor kernel thread */
+			if (p->pid == 1 && even_init)
+				/* Ugly hack to kill init */
+				p->pid = 0x8000;
+			if (p->pid != 1)
+				force_sig(sig, p);
+		}
 	}
 }
 
 static void sysrq_handle_term(int key, struct pt_regs *pt_regs,
 		struct kbd_struct *kbd, struct tty_struct *tty) {
-	send_sig_all(SIGTERM);
+	send_sig_all(SIGTERM, 0);
 	console_loglevel = 8;
 }
 static struct sysrq_key_op sysrq_term_op = {
@@ -308,7 +312,7 @@ static struct sysrq_key_op sysrq_term_op = {
 
 static void sysrq_handle_kill(int key, struct pt_regs *pt_regs,
 		struct kbd_struct *kbd, struct tty_struct *tty) {
-	send_sig_all(SIGKILL);
+	send_sig_all(SIGKILL, 0);
 	console_loglevel = 8;
 }
 static struct sysrq_key_op sysrq_kill_op = {
@@ -317,11 +321,22 @@ static struct sysrq_key_op sysrq_kill_op = {
 	action_msg:	"Kill All Tasks",
 };
 
+static void sysrq_handle_killall(int key, struct pt_regs *pt_regs,
+		struct kbd_struct *kbd, struct tty_struct *tty) {
+	send_sig_all(SIGKILL, 1);
+	console_loglevel = 8;
+}
+static struct sysrq_key_op sysrq_killall_op = {
+	handler:	sysrq_handle_killall,
+	help_msg:	"killalL",
+	action_msg:	"Kill All Tasks (even init)",
+};
+
 /* END SIGNAL SYSRQ HANDLERS BLOCK */
 
 
 /* Key Operations table and lock */
-static spinlock_t sysrq_key_table_lock = SPIN_LOCK_UNLOCKED;
+spinlock_t sysrq_key_table_lock = SPIN_LOCK_UNLOCKED;
 #define SYSRQ_KEY_TABLE_LENGTH 36
 static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 /* 0 */	&sysrq_loglevel_op,
@@ -351,7 +366,7 @@ static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 #else
 /* k */	NULL,
 #endif
-/* l */	NULL,
+/* l */	&sysrq_killall_op,
 /* m */	&sysrq_showmem_op,
 /* n */	NULL,
 /* o */	NULL, /* This will often be registered
@@ -365,16 +380,16 @@ static struct sysrq_key_op *sysrq_key_table[SYSRQ_KEY_TABLE_LENGTH] = {
 /* v */	NULL,
 /* w */	NULL,
 /* x */	NULL,
-/* y */	NULL,
+/* w */	NULL,
 /* z */	NULL
 };
 
 /* key2index calculation, -1 on invalid index */
 static __inline__ int sysrq_key_table_key2index(int key) {
 	int retval;
-	if ((key >= '0') && (key <= '9')) {
+	if ((key >= '0') & (key <= '9')) {
 		retval = key - '0';
-	} else if ((key >= 'a') && (key <= 'z')) {
+	} else if ((key >= 'a') & (key <= 'z')) {
 		retval = key + 10 - 'a';
 	} else {
 		retval = -1;

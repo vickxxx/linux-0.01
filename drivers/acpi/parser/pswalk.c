@@ -1,62 +1,47 @@
 /******************************************************************************
  *
  * Module Name: pswalk - Parser routines to walk parsed op tree(s)
+ *              $Revision: 58 $
  *
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2004, R. Byron Moore
- * All rights reserved.
+ *  Copyright (C) 2000, 2001 R. Byron Moore
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
-#include <acpi/acpi.h>
-#include <acpi/acparser.h>
-#include <acpi/acdispat.h>
+#include "acpi.h"
+#include "amlcode.h"
+#include "acparser.h"
+#include "acdispat.h"
+#include "acnamesp.h"
+#include "acinterp.h"
 
 #define _COMPONENT          ACPI_PARSER
-	 ACPI_MODULE_NAME    ("pswalk")
+	 MODULE_NAME         ("pswalk")
 
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_get_next_walk_op
+ * FUNCTION:    Acpi_ps_get_next_walk_op
  *
- * PARAMETERS:  walk_state          - Current state of the walk
+ * PARAMETERS:  Walk_state          - Current state of the walk
  *              Op                  - Current Op to be walked
- *              ascending_callback  - Procedure called when Op is complete
+ *              Ascending_callback  - Procedure called when Op is complete
  *
  * RETURN:      Status
  *
@@ -66,22 +51,22 @@
 
 acpi_status
 acpi_ps_get_next_walk_op (
-	struct acpi_walk_state          *walk_state,
-	union acpi_parse_object         *op,
-	acpi_parse_upwards              ascending_callback)
+	acpi_walk_state         *walk_state,
+	acpi_parse_object       *op,
+	acpi_parse_upwards      ascending_callback)
 {
-	union acpi_parse_object         *next;
-	union acpi_parse_object         *parent;
-	union acpi_parse_object         *grand_parent;
-	acpi_status                     status;
+	acpi_parse_object       *next;
+	acpi_parse_object       *parent;
+	acpi_parse_object       *grand_parent;
+	acpi_status             status;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("ps_get_next_walk_op", op);
+	FUNCTION_TRACE_PTR ("Ps_get_next_walk_op", op);
 
 
 	/* Check for a argument only if we are descending in the tree */
 
-	if (walk_state->next_op_info != ACPI_NEXT_OP_UPWARD) {
+	if (walk_state->next_op_info != NEXT_OP_UPWARD) {
 		/* Look for an argument or child of the current op */
 
 		next = acpi_ps_get_arg (op, 0);
@@ -90,21 +75,22 @@ acpi_ps_get_next_walk_op (
 
 			walk_state->prev_op     = op;
 			walk_state->next_op     = next;
-			walk_state->next_op_info = ACPI_NEXT_OP_DOWNWARD;
+			walk_state->next_op_info = NEXT_OP_DOWNWARD;
 
 			return_ACPI_STATUS (AE_OK);
 		}
+
 
 		/*
 		 * No more children, this Op is complete.  Save Next and Parent
 		 * in case the Op object gets deleted by the callback routine
 		 */
-		next    = op->common.next;
-		parent  = op->common.parent;
+		next    = op->next;
+		parent  = op->parent;
 
 		walk_state->op    = op;
-		walk_state->op_info = acpi_ps_get_opcode_info (op->common.aml_opcode);
-		walk_state->opcode = op->common.aml_opcode;
+		walk_state->op_info = acpi_ps_get_opcode_info (op->opcode);
+		walk_state->opcode = op->opcode;
 
 		status = ascending_callback (walk_state);
 
@@ -129,7 +115,7 @@ acpi_ps_get_next_walk_op (
 
 			walk_state->prev_op     = op;
 			walk_state->next_op     = next;
-			walk_state->next_op_info = ACPI_NEXT_OP_DOWNWARD;
+			walk_state->next_op_info = NEXT_OP_DOWNWARD;
 
 			/* Continue downward */
 
@@ -141,6 +127,7 @@ acpi_ps_get_next_walk_op (
 		 * the tree
 		 */
 	}
+
 	else {
 		/*
 		 * We are resuming a walk, and we were (are) going upward in the tree.
@@ -148,6 +135,7 @@ acpi_ps_get_next_walk_op (
 		 */
 		parent = op;
 	}
+
 
 	/*
 	 * Look for a sibling of the current Op's parent
@@ -157,12 +145,12 @@ acpi_ps_get_next_walk_op (
 	while (parent) {
 		/* We are moving up the tree, therefore this parent Op is complete */
 
-		grand_parent = parent->common.parent;
-		next        = parent->common.next;
+		grand_parent = parent->parent;
+		next        = parent->next;
 
 		walk_state->op    = parent;
-		walk_state->op_info = acpi_ps_get_opcode_info (parent->common.aml_opcode);
-		walk_state->opcode = parent->common.aml_opcode;
+		walk_state->op_info = acpi_ps_get_opcode_info (parent->opcode);
+		walk_state->opcode = parent->opcode;
 
 		status = ascending_callback (walk_state);
 
@@ -187,7 +175,7 @@ acpi_ps_get_next_walk_op (
 
 			walk_state->prev_op     = parent;
 			walk_state->next_op     = next;
-			walk_state->next_op_info = ACPI_NEXT_OP_DOWNWARD;
+			walk_state->next_op_info = NEXT_OP_DOWNWARD;
 
 			return_ACPI_STATUS (status);
 		}
@@ -200,10 +188,9 @@ acpi_ps_get_next_walk_op (
 	}
 
 
-	/*
-	 * Got all the way to the top of the tree, we must be done!
-	 * However, the code should have terminated in the loop above
-	 */
+	/* Got all the way to the top of the tree, we must be done! */
+	/* However, the code should have terminated in the loop above */
+
 	walk_state->next_op     = NULL;
 
 	return_ACPI_STATUS (AE_OK);
@@ -212,22 +199,22 @@ acpi_ps_get_next_walk_op (
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_delete_completed_op
+ * FUNCTION:    Acpi_ps_delete_completed_op
  *
  * PARAMETERS:  State           - Walk state
  *              Op              - Completed op
  *
  * RETURN:      AE_OK
  *
- * DESCRIPTION: Callback function for acpi_ps_get_next_walk_op(). Used during
- *              acpi_ps_delete_parse tree to delete Op objects when all sub-objects
+ * DESCRIPTION: Callback function for Acpi_ps_get_next_walk_op(). Used during
+ *              Acpi_ps_delete_parse tree to delete Op objects when all sub-objects
  *              have been visited (and deleted.)
  *
  ******************************************************************************/
 
-acpi_status
+static acpi_status
 acpi_ps_delete_completed_op (
-	struct acpi_walk_state          *walk_state)
+	acpi_walk_state         *walk_state)
 {
 
 	acpi_ps_free_op (walk_state->op);
@@ -237,9 +224,9 @@ acpi_ps_delete_completed_op (
 
 /*******************************************************************************
  *
- * FUNCTION:    acpi_ps_delete_parse_tree
+ * FUNCTION:    Acpi_ps_delete_parse_tree
  *
- * PARAMETERS:  subtree_root        - Root of tree (or subtree) to delete
+ * PARAMETERS:  Subtree_root        - Root of tree (or subtree) to delete
  *
  * RETURN:      None
  *
@@ -249,14 +236,13 @@ acpi_ps_delete_completed_op (
 
 void
 acpi_ps_delete_parse_tree (
-	union acpi_parse_object         *subtree_root)
+	acpi_parse_object       *subtree_root)
 {
-	struct acpi_walk_state          *walk_state;
-	struct acpi_thread_state        *thread;
-	acpi_status                     status;
+	acpi_walk_state         *walk_state;
+	acpi_walk_list          walk_list;
 
 
-	ACPI_FUNCTION_TRACE_PTR ("ps_delete_parse_tree", subtree_root);
+	FUNCTION_TRACE_PTR ("Ps_delete_parse_tree", subtree_root);
 
 
 	if (!subtree_root) {
@@ -265,12 +251,11 @@ acpi_ps_delete_parse_tree (
 
 	/* Create and initialize a new walk list */
 
-	thread = acpi_ut_create_thread_state ();
-	if (!thread) {
-		return_VOID;
-	}
+	walk_list.walk_state = NULL;
+	walk_list.acquired_mutex_list.prev = NULL;
+	walk_list.acquired_mutex_list.next = NULL;
 
-	walk_state = acpi_ds_create_walk_state (0, NULL, NULL, thread);
+	walk_state = acpi_ds_create_walk_state (TABLE_ID_DSDT, NULL, NULL, &walk_list);
 	if (!walk_state) {
 		return_VOID;
 	}
@@ -279,26 +264,25 @@ acpi_ps_delete_parse_tree (
 	walk_state->descending_callback = NULL;
 	walk_state->ascending_callback  = NULL;
 
+
 	walk_state->origin = subtree_root;
 	walk_state->next_op = subtree_root;
 
+
 	/* Head downward in the tree */
 
-	walk_state->next_op_info = ACPI_NEXT_OP_DOWNWARD;
+	walk_state->next_op_info = NEXT_OP_DOWNWARD;
 
 	/* Visit all nodes in the subtree */
 
 	while (walk_state->next_op) {
-		status = acpi_ps_get_next_walk_op (walk_state, walk_state->next_op,
+		acpi_ps_get_next_walk_op (walk_state, walk_state->next_op,
 				 acpi_ps_delete_completed_op);
-		if (ACPI_FAILURE (status)) {
-			break;
-		}
 	}
 
 	/* We are done with this walk */
 
-	acpi_ut_delete_generic_state (ACPI_CAST_PTR (union acpi_generic_state, thread));
+	acpi_ex_release_all_mutexes ((acpi_operand_object *) &walk_list.acquired_mutex_list);
 	acpi_ds_delete_walk_state (walk_state);
 
 	return_VOID;

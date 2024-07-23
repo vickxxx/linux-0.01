@@ -25,6 +25,7 @@
 
 #include <linux/fs.h>
 #include <linux/vmalloc.h>
+#include <asm/segment.h>
 
 #include <linux/coda.h>
 #include <linux/coda_linux.h>
@@ -98,6 +99,7 @@ static struct super_block * coda_read_super(struct super_block *sb,
         ViceFid fid;
         int error;
 	int idx;
+	ENTRY;
 
 	idx = get_device_index((struct coda_mount_data *) data);
 
@@ -110,16 +112,19 @@ static struct super_block * coda_read_super(struct super_block *sb,
 	vc = &coda_comms[idx];
 	if (!vc->vc_inuse) {
 		printk("coda_read_super: No pseudo device\n");
+		EXIT;  
 		return NULL;
 	}
 
         if ( vc->vc_sb ) {
 		printk("coda_read_super: Device already mounted\n");
+		EXIT;  
 		return NULL;
 	}
 
 	sbi = kmalloc(sizeof(struct coda_sb_info), GFP_KERNEL);
 	if(!sbi) {
+		EXIT;  
 		return NULL;
 	}
 
@@ -128,7 +133,6 @@ static struct super_block * coda_read_super(struct super_block *sb,
 	sbi->sbi_sb = sb;
 	sbi->sbi_vcomm = vc;
 	INIT_LIST_HEAD(&sbi->sbi_cihead);
-	init_MUTEX(&sbi->sbi_iget4_mutex);
 
         sb->u.generic_sbp = sbi;
         sb->s_blocksize = 1024;	/* XXXXX  what do we put here?? */
@@ -155,9 +159,11 @@ static struct super_block * coda_read_super(struct super_block *sb,
 	printk("coda_read_super: rootinode is %ld dev %d\n", 
 	       root->i_ino, root->i_dev);
 	sb->s_root = d_alloc_root(root);
+	EXIT;  
         return sb;
 
  error:
+	EXIT;  
 	if (sbi) {
 		kfree(sbi);
 		if(vc)
@@ -173,12 +179,16 @@ static void coda_put_super(struct super_block *sb)
 {
         struct coda_sb_info *sbi;
 
+        ENTRY;
+
 	sbi = coda_sbp(sb);
 	sbi->sbi_vcomm->vc_sb = NULL;
         list_del_init(&sbi->sbi_cihead);
 
 	printk("Coda: Bye bye.\n");
 	kfree(sbi);
+
+	EXIT;
 }
 
 /* all filling in of inodes postponed until lookup */
@@ -186,8 +196,25 @@ static void coda_read_inode(struct inode *inode)
 {
 	struct coda_sb_info *sbi = coda_sbp(inode->i_sb);
 	struct coda_inode_info *cii;
+	ENTRY;
 
         if (!sbi) BUG();
+
+#if 0
+	/* check if the inode is already initialized */
+	if (inode->u.generic_ip) {
+            printk("coda_read_inode: initialized inode");
+            return;
+        }
+
+	inode->u.generic_ip = cii_alloc();
+	if (!inode->u.generic_ip) {
+		CDEBUG(D_CNODE, "coda_read_inode: failed to allocate inode info\n");
+		make_bad_inode(inode);
+		return;
+	}
+	memset(inode->u.generic_ip, 0, sizeof(struct coda_inode_info));
+#endif
 
 	cii = ITOC(inode);
 	if (!coda_isnullfid(&cii->c_fid)) {
@@ -195,7 +222,6 @@ static void coda_read_inode(struct inode *inode)
             return;
         }
 
-	cii->c_mapcount = 0;
 	list_add(&cii->c_cilist, &sbi->sbi_cihead);
 }
 
@@ -203,25 +229,36 @@ static void coda_clear_inode(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
 
+        ENTRY;
         CDEBUG(D_SUPER, " inode->ino: %ld, count: %d\n", 
 	       inode->i_ino, atomic_read(&inode->i_count));        
 	CDEBUG(D_DOWNCALL, "clearing inode: %ld, %x\n", inode->i_ino, cii->c_flags);
 
+	if (cii->c_container) BUG();
+	
         list_del_init(&cii->c_cilist);
+	inode->i_mapping = &inode->i_data;
 	coda_cache_clear_inode(inode);
+
+#if 0
+	cii_free(inode->u.generic_ip);
+	inode->u.generic_ip = NULL;
+#endif
+
+	EXIT;
 }
 
 int coda_notify_change(struct dentry *de, struct iattr *iattr)
 {
 	struct inode *inode = de->d_inode;
-	struct coda_vattr vattr;
-	int error;
+        struct coda_vattr vattr;
+        int error;
+	
+	ENTRY;
+        memset(&vattr, 0, sizeof(vattr)); 
 
-	memset(&vattr, 0, sizeof(vattr)); 
-
-	inode->i_ctime = CURRENT_TIME;
-	coda_iattr_to_vattr(iattr, &vattr);
-	vattr.va_type = C_VNON; /* cannot set type */
+        coda_iattr_to_vattr(iattr, &vattr);
+        vattr.va_type = C_VNON; /* cannot set type */
 	CDEBUG(D_SUPER, "vattr.va_mode %o\n", vattr.va_mode);
 
 	/* Venus is responsible for truncating the container-file!!! */
@@ -233,6 +270,7 @@ int coda_notify_change(struct dentry *de, struct iattr *iattr)
 	}
 	CDEBUG(D_SUPER, "inode.i_mode %o, error %d\n", inode->i_mode, error);
 
+	EXIT;
 	return error;
 }
 

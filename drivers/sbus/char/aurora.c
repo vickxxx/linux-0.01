@@ -1,4 +1,4 @@
-/*	$Id: aurora.c,v 1.18.2.1 2002/02/04 22:37:43 davem Exp $
+/*	$Id: aurora.c,v 1.18 2001/10/26 17:59:31 davem Exp $
  *	linux/drivers/sbus/char/aurora.c -- Aurora multiport driver
  *
  *	Copyright (c) 1999 by Oliver Aldulea (oli at bv dot ro)
@@ -136,25 +136,25 @@ static inline int aurora_paranoia_check(struct Aurora_port const * port,
  */
 
 /* Get board number from pointer */
-static inline int board_No (struct Aurora_board const * bp)
+extern inline int board_No (struct Aurora_board const * bp)
 {
 	return bp - aurora_board;
 }
 
 /* Get port number from pointer */
-static inline int port_No (struct Aurora_port const * port)
+extern inline int port_No (struct Aurora_port const * port)
 {
 	return AURORA_PORT(port - aurora_port); 
 }
 
 /* Get pointer to board from pointer to port */
-static inline struct Aurora_board * port_Board(struct Aurora_port const * port)
+extern inline struct Aurora_board * port_Board(struct Aurora_port const * port)
 {
 	return &aurora_board[AURORA_BOARD(port - aurora_port)];
 }
 
 /* Wait for Channel Command Register ready */
-static inline void aurora_wait_CCR(struct aurora_reg128 * r)
+extern inline void aurora_wait_CCR(struct aurora_reg128 * r)
 {
 	unsigned long delay;
 
@@ -173,14 +173,14 @@ printk("aurora_wait_CCR\n");
  */
 
 /* Must be called with enabled interrupts */
-static inline void aurora_long_delay(unsigned long delay)
+extern inline void aurora_long_delay(unsigned long delay)
 {
 	unsigned long i;
 
 #ifdef AURORA_DEBUG
 	printk("aurora_long_delay: start\n");
 #endif
-	for (i = jiffies + delay; time_before(jiffies, i); ) ;
+	for (i = jiffies + delay; i > jiffies; ) ;
 #ifdef AURORA_DEBUG
 	printk("aurora_long_delay: end\n");
 #endif
@@ -432,7 +432,7 @@ static void aurora_release_io_range(struct Aurora_board *bp)
 	sbus_iounmap((unsigned long)bp->r3, 4);
 }
 
-static inline void aurora_mark_event(struct Aurora_port * port, int event)
+extern inline void aurora_mark_event(struct Aurora_port * port, int event)
 {
 #ifdef AURORA_DEBUG
 	printk("aurora_mark_event: start\n");
@@ -1573,7 +1573,8 @@ static void aurora_close(struct tty_struct * tty, struct file * filp)
 	aurora_shutdown_port(bp, port);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	port->event = 0;
 	port->tty = 0;
@@ -1784,8 +1785,11 @@ static void aurora_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
-
-	tty_wakeup(tty);	
+	
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 #ifdef AURORA_DEBUG
 	printk("aurora_flush_buffer: end\n");
 #endif
@@ -2282,7 +2286,10 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		tty_wakeup(tty);
+		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+		    tty->ldisc.write_wakeup)
+			(tty->ldisc.write_wakeup)(tty);
+		wake_up_interruptible(&tty->write_wait);
 	}
 #ifdef AURORA_DEBUG
 	printk("do_softint: end\n");

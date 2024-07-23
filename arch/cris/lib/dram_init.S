@@ -1,4 +1,4 @@
-/* $Id: dram_init.S,v 1.15 2003/09/22 09:22:22 starvik Exp $
+/* $Id: dram_init.S,v 1.10 2001/10/04 12:00:21 martinnn Exp $
  * 
  * DRAM/SDRAM initialization - alter with care
  * This file is intended to be included from other assembler files
@@ -11,22 +11,6 @@
  * Authors:  Mikael Starvik (starvik@axis.com)	
  * 
  * $Log: dram_init.S,v $
- * Revision 1.15  2003/09/22 09:22:22  starvik
- * Decompresser is linked to 0x407xxxxx and sdram commands are at 0x000xxxxx
- * so we need to mask off 12 bits.
- *
- * Revision 1.14  2003/03/31 07:07:08  starvik
- * Corrected calculation of end of sdram init commands
- *
- * Revision 1.13  2002/10/30 07:42:28  starvik
- * Always read SDRAM command sequence from flash
- *
- * Revision 1.12  2002/08/09 11:37:37  orjanf
- * Added double initialization work-around for Samsung SDRAMs.
- *
- * Revision 1.11  2002/06/04 11:43:21  starvik
- * Check if mrs_data is specified in kernelconfig (necessary for MCM)
- *
  * Revision 1.10  2001/10/04 12:00:21  martinnn
  * Added missing underscores.
  *
@@ -86,11 +70,7 @@
 
 	move.d   CONFIG_ETRAX_DEF_R_DRAM_TIMING, $r0
 	move.d   $r0, [R_DRAM_TIMING]
-#else
-	;; Samsung SDRAMs seem to require to be initialized twice to work properly.
-	moveq    2, $r6	
-_sdram_init:
-	
+#else	
 	; Refer to ETRAX 100LX Designers Reference for a description of SDRAM initialization
 	
 	; Bank configuration
@@ -102,12 +82,6 @@ _sdram_init:
 	; CAS latency = 3 && bus_width = 32 => 0x60
 	; CAS latency = 2 && bus_width = 16 => 0x20
 	; CAS latency = 3 && bus_width = 16 => 0x30
-
-	; Check if value is already supplied in kernel config
-	move.d   CONFIG_ETRAX_DEF_R_SDRAM_TIMING, $r2
-	and.d    0x00ff0000, $r2
-	bne	 _set_timing
-	lsrq     16, $r2
 	
 	move.d   0x40, $r2       ; Assume 32 bits and CAS latency = 2
 	move.d   CONFIG_ETRAX_DEF_R_SDRAM_TIMING, $r1
@@ -153,9 +127,7 @@ _set_timing:
 	
 	; Issue initialization command sequence
 	move.d   _sdram_commands_start, $r2
-	and.d    0x000fffff, $r2 ; Make sure commands are read from flash
 	move.d   _sdram_commands_end,  $r3
-	and.d    0x000fffff, $r3
 1:	clear.d  $r4
 	move.b   [$r2+], $r4
 	lslq     9, $r4	; Command starts at bit 9
@@ -170,9 +142,6 @@ _set_timing:
 	bne      1b
 	nop
 	move.d   $r5, [R_SDRAM_TIMING]
-	subq     1, $r6
-	bne      _sdram_init
-	nop
 	ba       _sdram_commands_end
 	nop
 

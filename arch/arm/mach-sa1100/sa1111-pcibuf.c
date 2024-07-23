@@ -1,400 +1,273 @@
 /*
  *  linux/arch/arm/mach-sa1100/pci-sa1111.c
  *
- *  Special pci_{map/unmap/dma_sync}_* routines for SA-1111.
+ *  Special pci_map/unmap_single routines for SA-1111.   These functions
+ *  compensate for a bug in the SA-1111 hardware which don't allow DMA
+ *  to/from addresses above 1MB.
  *
- *  These functions utilize bouncer buffers to compensate for a bug in
- *  the SA-1111 hardware which don't allow DMA to/from addresses
- *  certain addresses above 1MB.
+ *  Brad Parker (brad@heeltoe.com)
  *
- *  Re-written by Christopher Hoover <ch@murgatroid.com>
- *  Original version by Brad Parker (brad@heeltoe.com)
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2 as
+ *  published by the Free Software Foundation.
  *
- *  Copyright (C) 2002 Hewlett Packard Company.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  version 2 as published by the Free Software Foundation.
- * */
-
+ *  06/13/2001 - created.
+ */
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
-#include <linux/list.h>
-#include <asm/hardware/sa1111.h>
-//#define DEBUG
-#ifdef DEBUG
-#define DPRINTK(...) do { printk(KERN_DEBUG __VA_ARGS__); } while (0)
-#else
-#define DPRINTK(...) do { } while (0)
-#endif
 
-struct safe_buffer {
-	struct list_head node;
+#include "pcipool.h"
 
-	/* original request */
-	void		*ptr;
-	size_t		size;
-	int		direction;
+/*
+ * simple buffer allocator for copying of unsafe to safe buffers
+ * uses __alloc/__free for actual buffers
+ * keeps track of safe buffers we've allocated so we can recover the
+ * unsafe buffers.
+ */
 
-	/* safe buffer info */
-	struct pci_pool *pool;
-	void		*safe;
-	dma_addr_t	safe_dma_addr;
-};
-
-LIST_HEAD(safe_buffers);
-
+#define MAX_SAFE	32
 #define SIZE_SMALL	1024
 #define SIZE_LARGE	(16*1024)
 
-static struct pci_pool *small_buffer_pool, *large_buffer_pool;
+static long mapped_alloc_size;
+static char *safe_buffers[MAX_SAFE][2];
 
-static int __init
-create_safe_buffer_pools(void)
+
+static struct pci_pool *small_buffer_cache, *large_buffer_cache;
+
+static int
+init_safe_buffers(struct pci_dev *dev)
 {
-	small_buffer_pool = pci_pool_create("sa1111_small_dma_buffer",
-					    SA1111_FAKE_PCIDEV,
+	small_buffer_cache = pci_pool_create("pci_small_buffer",
+					    dev,
 					    SIZE_SMALL,
 					    0 /* byte alignment */,
 					    0 /* no page-crossing issues */,
-					    SLAB_KERNEL);
-	if (0 == small_buffer_pool) {
-		printk(KERN_ERR
-		       "sa1111_pcibuf: could not allocate small pci pool\n");
-		return -1;
-	}
+					    GFP_KERNEL | GFP_DMA);
 
-	large_buffer_pool = pci_pool_create("sa1111_large_dma_buffer",
-					    SA1111_FAKE_PCIDEV,
+	if (small_buffer_cache == 0)
+		return -1;
+
+	large_buffer_cache = pci_pool_create("pci_large_buffer",
+					    dev,
 					    SIZE_LARGE,
 					    0 /* byte alignment */,
 					    0 /* no page-crossing issues */,
-					    SLAB_KERNEL);
-	if (0 == large_buffer_pool) {
-		printk(KERN_ERR
-		       "sa1111_pcibuf: could not allocate large pci pool\n");
-		pci_pool_destroy(small_buffer_pool);
-		small_buffer_pool = 0;
+					    GFP_KERNEL | GFP_DMA);
+	if (large_buffer_cache == 0)
 		return -1;
-	}
 
 	return 0;
 }
 
-static void __exit
-destroy_safe_buffer_pools(void)
-{
-	if (small_buffer_pool)
-		pci_pool_destroy(small_buffer_pool);
-	if (large_buffer_pool)
-		pci_pool_destroy(large_buffer_pool);
-
-	small_buffer_pool = large_buffer_pool = 0;
-}
-
-
 /* allocate a 'safe' buffer and keep track of it */
-static struct safe_buffer *
-alloc_safe_buffer(void *ptr, size_t size, int direction)
+static char *
+alloc_safe_buffer(char *unsafe, int size, dma_addr_t *pbus)
 {
-	struct safe_buffer *buf;
+	char *safe;
+	dma_addr_t busptr;
 	struct pci_pool *pool;
-	void *safe;
-	dma_addr_t safe_dma_addr;
+	int i;
 
-	DPRINTK("%s(ptr=%p, size=%d, direction=%d)\n",
-		__func__, ptr, size, direction);
+	if (0) printk("alloc_safe_buffer(size=%d)\n", size);
 
-	buf = kmalloc(sizeof(struct safe_buffer), GFP_ATOMIC);
-	if (buf == 0) {
-		printk(KERN_WARNING "%s: kmalloc failed\n", __func__);
+	if (size <= SIZE_SMALL)
+		pool = small_buffer_cache;
+	else
+		if (size < SIZE_LARGE)
+			pool = large_buffer_cache;
+				else
+					return 0;
+
+	safe = pci_pool_alloc(pool, SLAB_ATOMIC, &busptr);
+	if (safe == 0)
 		return 0;
+
+	for (i = 0; i < MAX_SAFE; i++)
+		if (safe_buffers[i][0] == 0) {
+			break;
+		}
+
+	if (i == MAX_SAFE) {
+		panic(__FILE__ ": exceeded MAX_SAFE buffers");
 	}
 
-	if (size <= SIZE_SMALL) {
-		pool = small_buffer_pool;
-		safe = pci_pool_alloc(pool, GFP_ATOMIC, &safe_dma_addr);
-	} else if (size <= SIZE_LARGE) {
-		pool = large_buffer_pool;
-		safe = pci_pool_alloc(pool, GFP_ATOMIC, &safe_dma_addr);
-	} else {
-		printk(KERN_DEBUG
-		       "sa111_pcibuf: resorting to pci_alloc_consistent\n");
-		pool = 0;
-		safe = pci_alloc_consistent(SA1111_FAKE_PCIDEV, size,
-					    &safe_dma_addr);
-	}
+	/* place the size index and the old buffer ptr in the first 8 bytes
+	 * and return a ptr + 12 to caller
+	 */
+	((int *)safe)[0] = i;
+	((char **)safe)[1] = (char *)pool;
+	((char **)safe)[2] = unsafe;
 
-	if (safe == 0) {
-		printk(KERN_WARNING
-		       "%s: could not alloc dma memory (size=%d)\n",
-		       __func__, size);
-		kfree(buf);
-		return 0;
-	}
+	busptr += sizeof(int) + sizeof(char *) + sizeof(char *);
 
-	BUG_ON(sa1111_check_dma_bug(safe_dma_addr));	// paranoia
+	safe_buffers[i][0] = (void *)busptr;
+	safe_buffers[i][1] = (void *)safe;
 
-	buf->ptr = ptr;
-	buf->size = size;
-	buf->direction = direction;
-	buf->pool = pool;
-	buf->safe = safe;
-	buf->safe_dma_addr = safe_dma_addr;
+	safe += sizeof(int) + sizeof(char *) + sizeof(char *);
 
-	MOD_INC_USE_COUNT;
-	list_add(&buf->node, &safe_buffers);
-
-	return buf;
+	*pbus = busptr;
+	return safe;
 }
 
 /* determine if a buffer is from our "safe" pool */
-static struct safe_buffer *
-find_safe_buffer(dma_addr_t safe_dma_addr)
+static char *
+find_safe_buffer(char *busptr, char **unsafe)
 {
-	struct list_head *entry;
+	int i;
+	char *buf;
 
-	list_for_each(entry, &safe_buffers) {
-		struct safe_buffer *b =
-			list_entry(entry, struct safe_buffer, node);
-
-		if (b->safe_dma_addr == safe_dma_addr) {
-			return b;
+	for (i = 0; i < MAX_SAFE; i++) {
+		if (safe_buffers[i][0] == busptr) {
+			if (0) printk("find_safe_buffer(%p) found @ %d\n", busptr, i);
+			buf = safe_buffers[i][1];
+			*unsafe = ((char **)buf)[2];
+			return buf + sizeof(int) + sizeof(char *) + sizeof(char *);
 		}
 	}
 
-	return 0;
+	return (char *)0;
 }
 
 static void
-free_safe_buffer(struct safe_buffer *buf)
+free_safe_buffer(char *buf)
 {
-	DPRINTK("%s(buf=%p)\n", __func__, buf);
+	int index;
+	struct pci_pool *pool;
+	char *dma;
 
-	list_del(&buf->node);
+	if (0) printk("free_safe_buffer(buf=%p)\n", buf);
 
-	if (buf->pool)
-		pci_pool_free(buf->pool, buf->safe, buf->safe_dma_addr);
-	else
-		pci_free_consistent(SA1111_FAKE_PCIDEV, buf->size, buf->safe,
-				    buf->safe_dma_addr);
-	kfree(buf);
+	/* retrieve the buffer size index */
+	buf -= sizeof(int) + sizeof(char*) + sizeof(char*);
+	index = ((int *)buf)[0];
+	pool = (struct pci_pool *)((char **)buf)[1];
 
-	MOD_DEC_USE_COUNT;
+	if (0) printk("free_safe_buffer(%p) index %d\n",
+		      buf, index);
+
+	if (index < 0 || index >= MAX_SAFE) {
+		printk(__FILE__ ": free_safe_buffer() corrupt buffer\n");
+		return;
+	}
+
+	dma = safe_buffers[index][0];
+	safe_buffers[index][0] = 0;
+
+	pci_pool_free(pool, buf, (u32)dma);
 }
 
-static inline int
-dma_range_is_safe(dma_addr_t addr, size_t size)
-{
-	unsigned int physaddr = SA1111_DMA_ADDR((unsigned int) addr);
-
-	/* Any address within one megabyte of the start of the target
-         * bank will be OK.  This is an overly conservative test:
-         * other addresses can be OK depending on the dram
-         * configuration.  (See sa1111.c:sa1111_check_dma_bug() * for
-         * details.)
-	 *
-	 * We take care to ensure the entire dma region is within
-	 * the safe range.
-	 */
-
-	return ((physaddr + size - 1) < (1<<20));
-}
+/*
+  NOTE:
+  replace pci_map/unmap_single with local routines which will
+  do buffer copies if buffer is above 1mb...
+*/
 
 /*
  * see if a buffer address is in an 'unsafe' range.  if it is
  * allocate a 'safe' buffer and copy the unsafe buffer into it.
  * substitute the safe buffer for the unsafe one.
  * (basically move the buffer from an unsafe area to a safe one)
+ *
+ * we assume calls to map_single are symmetric with calls to unmap_single...
  */
 dma_addr_t
-sa1111_map_single(void *ptr, size_t size, int direction)
+sa1111_map_single(struct pci_dev *hwdev, void *virtptr,
+	       size_t size, int direction)
 {
-	unsigned long flags;
-	dma_addr_t dma_addr;
+	dma_addr_t busptr;
 
-	DPRINTK("%s(ptr=%p,size=%d,dir=%x)\n",
-	       __func__, ptr, size, direction);
+	mapped_alloc_size += size;
 
-	BUG_ON(direction == PCI_DMA_NONE);
+	if (0) printk("pci_map_single(hwdev=%p,ptr=%p,size=%d,dir=%x) "
+		      "alloced=%ld\n",
+		      hwdev, virtptr, size, direction, mapped_alloc_size);
 
-	local_irq_save(flags);
+	busptr = virt_to_bus(virtptr);
 
-	dma_addr = virt_to_bus(ptr);
+	/* we assume here that a buffer will never be >=64k */
+	if ( (((unsigned long)busptr) & 0x100000) ||
+	     ((((unsigned long)busptr)+size) & 0x100000) )
+	{
+		char *safe;
 
-	if (!dma_range_is_safe(dma_addr, size)) {
-		struct safe_buffer *buf;
-
-		buf = alloc_safe_buffer(ptr, size, direction);
-		if (buf == 0) {
-			printk(KERN_ERR
-			       "%s: unable to map unsafe buffer %p!\n",
-			       __func__, ptr);
-			local_irq_restore(flags);
+		safe = alloc_safe_buffer(virtptr, size, &busptr);
+		if (safe == 0) {
+			printk("unable to map unsafe buffer %p!\n", virtptr);
 			return 0;
 		}
 
-		DPRINTK("%s: unsafe buffer %p (phy=%p) mapped to %p (phy=%p)\n",
-			__func__,
-			buf->ptr, (void *) virt_to_bus(buf->ptr),
-			buf->safe, (void *) buf->safe_dma_addr);
+		if (0) printk("unsafe buffer %p (phy=%p) mapped to %p (phy=%p)\n",
+			      virtptr, (void *)virt_to_bus(virtptr),
+			      safe, (void *)busptr);
 
-		if ((direction == PCI_DMA_TODEVICE) ||
-		    (direction == PCI_DMA_BIDIRECTIONAL)) {
-			DPRINTK("%s: copy out from unsafe %p, to safe %p, size %d\n",
-				__func__, ptr, buf->safe, size);
-			memcpy(buf->safe, ptr, size);
-		}
-		consistent_sync(buf->safe, size, direction);
+		memcpy(safe, virtptr, size);
+		consistent_sync(safe, size, direction);
 
-		dma_addr = buf->safe_dma_addr;
-	} else {
-		consistent_sync(ptr, size, direction);
+		return busptr;
 	}
 
-	local_irq_restore(flags);
-	return dma_addr;
+	consistent_sync(virtptr, size, direction);
+	return busptr;
 }
 
 /*
- * see if a mapped address was really a "safe" buffer and if so, copy
- * the data from the safe buffer back to the unsafe buffer and free up
- * the safe buffer.  (basically return things back to the way they
- * should be)
+ * see if a mapped address was really a "safe" buffer and if so,
+ * copy the data from the safe buffer back to the unsafe buffer
+ * and free up the safe buffer.
+ * (basically return things back to the way they should be)
  */
-
 void
-sa1111_unmap_single(dma_addr_t dma_addr, size_t size, int direction)
+sa1111_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr,
+		 size_t size, int direction)
 {
-	unsigned long flags;
-	struct safe_buffer *buf;
+	char *safe, *unsafe;
+	void *buf;
 
-	DPRINTK("%s(ptr=%p,size=%d,dir=%x)\n",
-		__func__, (void *) dma_addr, size, direction);
-
-	BUG_ON(direction == PCI_DMA_NONE);
-
-	local_irq_save(flags);
-
-	buf = find_safe_buffer(dma_addr);
-	if (buf) {
-		BUG_ON(buf->size != size);
-		BUG_ON(buf->direction != direction);
-
-		DPRINTK("%s: unsafe buffer %p (phy=%p) mapped to %p (phy=%p)\n",
-			__func__,
-			buf->ptr, (void *) virt_to_bus(buf->ptr),
-			buf->safe, (void *) buf->safe_dma_addr);
-
-		if ((direction == PCI_DMA_FROMDEVICE) ||
-		    (direction == PCI_DMA_BIDIRECTIONAL)) {
-			DPRINTK("%s: copy back from safe %p, to unsafe %p size %d\n",
-				__func__, buf->safe, buf->ptr, size);
-			memcpy(buf->ptr, buf->safe, size);
-		}
-		free_safe_buffer(buf);
+	/* hack; usb-ohci.c never sends hwdev==NULL, all others do */
+	if (hwdev == NULL) {
+		return;
 	}
 
-	local_irq_restore(flags);
-}
+	mapped_alloc_size -= size;
 
-int
-sa1111_map_sg(struct scatterlist *sg, int nents, int direction)
-{
-	BUG();			/* Not implemented. */
+	if (0) printk("pci_unmap_single(hwdev=%p,ptr=%p,size=%d,dir=%x) "
+		      "alloced=%ld\n",
+		      hwdev, (void *)dma_addr, size, direction,
+		      mapped_alloc_size);
 
-	return -1;
-}
+	if ((safe = find_safe_buffer((void *)dma_addr, &unsafe))) {
+		if (0) printk("copyback unsafe %p, safe %p, size %d\n",
+			      unsafe, safe, size);
 
-void
-sa1111_unmap_sg(struct scatterlist *sg, int nents, int direction)
-{
-	BUG();			/* Not implemented. */
-}
-
-void
-sa1111_dma_sync_single(dma_addr_t dma_addr, size_t size, int direction)
-{
-	unsigned long flags;
-	struct safe_buffer *buf;
-
-	DPRINTK("%s(ptr=%p,size=%d,dir=%x)\n",
-		__func__, (void *) dma_addr, size, direction);
-
-	local_irq_save(flags);
-
-	buf = find_safe_buffer(dma_addr);
-	if (buf) {
-		BUG_ON(buf->size != size);
-		BUG_ON(buf->direction != direction);
-
-		DPRINTK("%s: unsafe buffer %p (phy=%p) mapped to %p (phy=%p)\n",
-			__func__,
-			buf->ptr, (void *) virt_to_bus(buf->ptr),
-			buf->safe, (void *) buf->safe_dma_addr);
-
-		switch (direction) {
-		case PCI_DMA_FROMDEVICE:
-			DPRINTK("%s: copy back from safe %p, to unsafe %p size %d\n",
-				__func__, buf->safe, buf->ptr, size);
-			memcpy(buf->ptr, buf->safe, size);
-			break;
-		case PCI_DMA_TODEVICE:
-			DPRINTK("%s: copy out from unsafe %p, to safe %p, size %d\n",
-				__func__,buf->ptr, buf->safe, size);
-			memcpy(buf->safe, buf->ptr, size);
-			break;
-		case PCI_DMA_BIDIRECTIONAL:
-			BUG();	/* is this allowed?  what does it mean? */
-		default:
-			BUG();
-		}
-		consistent_sync(buf->safe, size, direction);
+		consistent_sync(safe, size, PCI_DMA_FROMDEVICE);
+		memcpy(unsafe, safe, size);
+		free_safe_buffer(safe);
 	} else {
-		consistent_sync(bus_to_virt(dma_addr), size, direction);
+		/* assume this is normal memory */
+		buf = bus_to_virt(dma_addr);
+		consistent_sync(buf, size, PCI_DMA_FROMDEVICE);
 	}
-
-	local_irq_restore(flags);
-}
-
-void
-sa1111_dma_sync_sg(struct scatterlist *sg, int nelems, int direction)
-{
-	BUG();			/* Not implemented. */
 }
 
 EXPORT_SYMBOL(sa1111_map_single);
 EXPORT_SYMBOL(sa1111_unmap_single);
-EXPORT_SYMBOL(sa1111_map_sg);
-EXPORT_SYMBOL(sa1111_unmap_sg);
-EXPORT_SYMBOL(sa1111_dma_sync_single);
-EXPORT_SYMBOL(sa1111_dma_sync_sg);
 
-/* **************************************** */
-
-static int __init sa1111_pcibuf_init(void)
+static int __init sa1111_init_safe_buffers(void)
 {
-	int ret;
-
-	printk(KERN_DEBUG
-	       "sa1111_pcibuf: initializing SA-1111 DMA workaround\n");
-
-	ret = create_safe_buffer_pools();
-
-	return ret;
+	printk("Initializing SA1111 buffer pool for DMA workaround\n");
+	init_safe_buffers(NULL);
+	return 0;
 }
-module_init(sa1111_pcibuf_init);
 
-static void __exit sa1111_pcibuf_exit(void)
+static void free_safe_buffers(void)
 {
-	BUG_ON(!list_empty(&safe_buffers));
-
-	destroy_safe_buffer_pools();
+	pci_pool_destroy(small_buffer_cache);
+	pci_pool_destroy(large_buffer_cache);
 }
-module_exit(sa1111_pcibuf_exit);
 
-MODULE_AUTHOR("Christopher Hoover <ch@hpl.hp.com>");
-MODULE_DESCRIPTION("Special pci_{map/unmap/dma_sync}_* routines for SA-1111.");
-MODULE_LICENSE("GPL");
+module_init(sa1111_init_safe_buffers);
+module_exit(free_safe_buffers);

@@ -56,7 +56,7 @@ static void ps_set_intr( void (*continuation)(void),
 			 int (*ready)(void),
 			 int timeout, int nice )
 
-{       unsigned long	flags;
+{       long	flags;
 
 	spin_lock_irqsave(&ps_spinlock,flags);
 
@@ -86,7 +86,7 @@ static void ps_set_intr( void (*continuation)(void),
 static void ps_tq_int( void *data )
 
 {       void (*con)(void);
-	unsigned long flags;
+	long flags;
 
 	spin_lock_irqsave(&ps_spinlock,flags);
 
@@ -102,7 +102,7 @@ static void ps_tq_int( void *data )
 		spin_unlock_irqrestore(&ps_spinlock,flags);
 		return;
 	}
-        if (!ps_ready || ps_ready() || time_after_eq(jiffies, ps_timeout)) {
+        if (!ps_ready || ps_ready() || (jiffies >= ps_timeout)) {
                 ps_continuation = NULL;
         	spin_unlock_irqrestore(&ps_spinlock,flags);
                 con();
@@ -121,7 +121,7 @@ static void ps_tq_int( void *data )
 static void ps_timer_int( unsigned long data)
 
 {       void (*con)(void);
-	unsigned long	flags;
+	long	flags;
 
 	spin_lock_irqsave(&ps_spinlock,flags);
 
@@ -131,7 +131,7 @@ static void ps_timer_int( unsigned long data)
 	        spin_unlock_irqrestore(&ps_spinlock,flags);
 		return;
 	}
-        if (!ps_ready || ps_ready() || time_after_eq(jiffies, ps_timeout)) {
+        if (!ps_ready || ps_ready() || (jiffies >= ps_timeout)) {
                 ps_continuation = NULL;
 	        spin_unlock_irqrestore(&ps_spinlock,flags);
                 con();

@@ -5,7 +5,6 @@
  *
  * Copyright (C) 1995 - 2000 by Ralf Baechle
  */
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -19,9 +18,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/version.h>
-#include <linux/vt_kern.h>
 
-#include <asm/branch.h>
 #include <asm/hardirq.h>
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
@@ -31,43 +28,12 @@
 
 #define development_version (LINUX_VERSION_CODE & 0x100)
 
+unsigned long asid_cache = ASID_FIRST_VERSION;
+
 /*
  * Macro for exception fixup code to access integer registers.
  */
 #define dpf_reg(r) (regs->regs[r])
-
-extern spinlock_t timerlist_lock;
-
-/*
- * Unlock any spinlocks which will prevent us from getting the
- * message out (timerlist_lock is acquired through the
- * console unblank code)
- */
-void bust_spinlocks(int yes)
-{
-	spin_lock_init(&timerlist_lock);
-	if (yes) {
-		oops_in_progress = 1;
-#ifdef CONFIG_SMP
-		/* Many serial drivers do __global_cli() */
-		global_irq_lock = SPIN_LOCK_UNLOCKED;
-#endif
-	} else {
-		int loglevel_save = console_loglevel;
-#ifdef CONFIG_VT
-		unblank_screen();
-#endif
-		oops_in_progress = 0;
-		/*
-		 * OK, the message is on the console.  Now we call printk()
-		 * without oops_in_progress set so that printk will give klogd
-		 * a poke.  Hold onto your hats...
-		 */
-		console_loglevel = 15;		/* NMI oopser may have shut the console up */
-		printk(" ");
-		console_loglevel = loglevel_save;
-	}
-}
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -92,7 +58,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
 	 * only copy the information from the master page table,
 	 * nothing more.
 	 */
-	if (address >= VMALLOC_START)
+	if (address >= TASK_SIZE)
 		goto vmalloc_fault;
 
 	info.si_code = SEGV_MAPERR;
@@ -131,7 +97,6 @@ good_area:
 			goto bad_area;
 	}
 
-survive:
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
@@ -160,6 +125,7 @@ survive:
 bad_area:
 	up_read(&mm->mmap_sem);
 
+bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
 		tsk->thread.cp0_badvaddr = address;
@@ -183,7 +149,7 @@ bad_area:
 
 no_context:
 	/* Are we prepared to handle this kernel fault?  */
-	fixup = search_exception_table(exception_epc(regs));
+	fixup = search_exception_table(regs->cp0_epc);
 	if (fixup) {
 		long new_epc;
 
@@ -204,19 +170,15 @@ no_context:
 	       "address %08lx, epc == %08lx, ra == %08lx\n",
 	       address, regs->cp0_epc, regs->regs[31]);
 	die("Oops", regs);
-	/* Game over.  */
+	do_exit(SIGKILL);
 
 /*
  * We ran out of memory, or some other thing happened to us that made
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	if (tsk->pid == 1) {
-		yield();
-		goto survive;
-	}
 	up_read(&mm->mmap_sem);
-	printk(KERN_NOTICE "VM: killing process %s\n", tsk->comm);
+	printk("VM: killing process %s\n", tsk->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;
@@ -229,7 +191,7 @@ do_sigbus:
 	 * or user mode.
 	 */
 	tsk->thread.cp0_badvaddr = address;
-	info.si_signo = SIGBUS;
+	info.si_code = SIGBUS;
 	info.si_errno = 0;
 	info.si_code = BUS_ADRERR;
 	info.si_addr = (void *) address;
@@ -246,31 +208,26 @@ vmalloc_fault:
 		/*
 		 * Synchronize this task's top level page-table
 		 * with the 'reference' page table.
-		 *
-		 * Do _not_ use "tsk" here. We might be inside
-		 * an interrupt in the middle of a task switch..
 		 */
-		int offset = __pgd_offset(address);
+		int offset = pgd_index(address);
 		pgd_t *pgd, *pgd_k;
 		pmd_t *pmd, *pmd_k;
-		pte_t *pte_k;
 
-		pgd = (pgd_t *) pgd_current[smp_processor_id()] + offset;
+		pgd = tsk->active_mm->pgd + offset;
 		pgd_k = init_mm.pgd + offset;
 
-		if (!pgd_present(*pgd_k))
-			goto no_context;
-		set_pgd(pgd, *pgd_k);
+		if (!pgd_present(*pgd)) {
+			if (!pgd_present(*pgd_k))
+				goto bad_area_nosemaphore;
+			set_pgd(pgd, *pgd_k);
+			return;
+		}
 
 		pmd = pmd_offset(pgd, address);
 		pmd_k = pmd_offset(pgd_k, address);
-		if (!pmd_present(*pmd_k))
-			goto no_context;
-		set_pmd(pmd, *pmd_k);
 
-		pte_k = pte_offset(pmd_k, address);
-		if (!pte_present(*pte_k))
-			goto no_context;
-		return;
+		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
+			goto bad_area_nosemaphore;
+		set_pmd(pmd, *pmd_k);
 	}
 }

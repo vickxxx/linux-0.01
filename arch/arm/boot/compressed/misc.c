@@ -18,10 +18,9 @@
 
 unsigned int __machine_arch_type;
 
-#include <linux/kernel.h>
-
 #include <asm/uaccess.h>
 #include <asm/arch/uncompress.h>
+#include <asm/proc/uncompress.h>
 
 #ifdef STANDALONE_DEBUG
 #define puts printf
@@ -290,6 +289,7 @@ decompress_kernel(ulg output_start, ulg free_mem_ptr_p, ulg free_mem_ptr_end_p,
 	free_mem_ptr_end	= free_mem_ptr_end_p;
 	__machine_arch_type	= arch_id;
 
+	proc_decomp_setup();
 	arch_decomp_setup();
 
 	makecrc();
@@ -313,3 +313,4 @@ int main()
 	return 0;
 }
 #endif
+	

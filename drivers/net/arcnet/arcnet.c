@@ -57,8 +57,8 @@
 /* "do nothing" functions for protocol drivers */
 static void null_rx(struct net_device *dev, int bufnum,
 		    struct archdr *pkthdr, int length);
-static int null_build_header(struct sk_buff *skb, struct net_device *dev,
-			     unsigned short type, uint8_t daddr);
+static int null_build_header(struct sk_buff *skb, unsigned short type,
+			     uint8_t daddr);
 static int null_prepare_tx(struct net_device *dev, struct archdr *pkt,
 			   int length, int bufnum);
 
@@ -163,7 +163,6 @@ void __init arcnet_init(void)
 
 static int debug = ARCNET_DEBUG;
 MODULE_PARM(debug, "i");
-MODULE_LICENSE("GPL");
 
 int __init init_module(void)
 {
@@ -186,7 +185,7 @@ void cleanup_module(void)
 void arcnet_dump_skb(struct net_device *dev, struct sk_buff *skb, char *desc)
 {
 	int i;
-	unsigned long flags;
+	long flags;
 
 	save_flags(flags);
 	cli();
@@ -212,7 +211,7 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc)
 {
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int i, length;
-	unsigned long flags;
+	long flags;
 	static uint8_t buf[512];
 
 	save_flags(flags);
@@ -277,7 +276,7 @@ static void release_arcbuf(struct net_device *dev, int bufnum)
 	BUGLVL(D_DURING) {
 		BUGMSG(D_DURING, "release_arcbuf: freed #%d; buffer queue is now: ",
 		       bufnum);
-		for (i = lp->next_buf; i != lp->first_free_buf; i = (i+1) % 5)
+		for (i = lp->next_buf; i != lp->first_free_buf; i = ++i % 5)
 			BUGMSG2(D_DURING, "#%d ", lp->buf_queue[i]);
 		BUGMSG2(D_DURING, "\n");
 	}
@@ -310,7 +309,7 @@ static int get_arcbuf(struct net_device *dev)
 
 	BUGLVL(D_DURING) {
 		BUGMSG(D_DURING, "get_arcbuf: got #%d; buffer queue is now: ", buf);
-		for (i = lp->next_buf; i != lp->first_free_buf; i = (i+1) % 5)
+		for (i = lp->next_buf; i != lp->first_free_buf; i = ++i % 5)
 			BUGMSG2(D_DURING, "#%d ", lp->buf_queue[i]);
 		BUGMSG2(D_DURING, "\n");
 	}
@@ -343,7 +342,7 @@ void arcdev_setup(struct net_device *dev)
 	dev->hard_header_len = sizeof(struct archdr);
 	dev->mtu = choose_mtu();
 
-	dev->addr_len = ARCNET_ALEN;
+	dev->addr_len = 1;
 	dev->tx_queue_len = 30;
 	dev->broadcast[0] = 0x00;	/* for us, broadcasts are address 0 */
 	dev->watchdog_timeo = TX_TIMEOUT;
@@ -512,7 +511,7 @@ static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
 		       arc_bcast_proto->suffix);
 		proto = arc_bcast_proto;
 	}
-	return proto->build_header(skb, dev, type, _daddr);
+	return proto->build_header(skb, type, _daddr);
 }
 
 
@@ -528,7 +527,6 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 	int status = 0;		/* default is failure */
 	unsigned short type;
 	uint8_t daddr=0;
-	struct ArcProto *proto;
 
 	if (skb->nh.raw - skb->mac.raw != 2) {
 		BUGMSG(D_NORMAL,
@@ -557,8 +555,7 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 		return 0;
 
 	/* add the _real_ header this time! */
-	proto = arc_proto_map[lp->default_proto[daddr]];
-	proto->build_header(skb, dev, type, daddr);
+	arc_proto_map[lp->default_proto[daddr]]->build_header(skb, type, daddr);
 
 	return 1;		/* success */
 }
@@ -988,9 +985,10 @@ static void null_rx(struct net_device *dev, int bufnum,
 }
 
 
-static int null_build_header(struct sk_buff *skb, struct net_device *dev,
-			     unsigned short type, uint8_t daddr)
+static int null_build_header(struct sk_buff *skb, unsigned short type,
+			     uint8_t daddr)
 {
+	struct net_device *dev = skb->dev;
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 
 	BUGMSG(D_PROTO,

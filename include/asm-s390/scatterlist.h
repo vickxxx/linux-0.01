@@ -1,16 +1,8 @@
-#ifndef _ASMS390_SCATTERLIST_H
-#define _ASMS390_SCATTERLIST_H
+#ifndef _ASMS390X_SCATTERLIST_H
+#define _ASMS390X_SCATTERLIST_H
 
 struct scatterlist {
-    /* This will disappear in 2.5.x */
-    char *address;
-
-    /* These two are only valid if ADDRESS member of this
-     * struct is NULL.
-     */
-    struct page *page;
-    unsigned int offset;
-
+    char *  address;    /* Location data is to be transferred to */
     unsigned int length;
 };
 

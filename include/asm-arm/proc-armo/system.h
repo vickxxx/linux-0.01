@@ -39,7 +39,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Save the current interrupt enable state & disable IRQs
  */
-#define local_save_flags_cli(x)				\
+#define __save_flags_cli(x)				\
 	do {						\
 	  unsigned long temp;				\
 	  __asm__ __volatile__(				\
@@ -55,7 +55,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Enable IRQs
  */
-#define local_irq_enable()			\
+#define __sti()					\
 	do {					\
 	  unsigned long temp;			\
 	  __asm__ __volatile__(			\
@@ -70,7 +70,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Disable IRQs
  */
-#define local_irq_disable()			\
+#define __cli()					\
 	do {					\
 	  unsigned long temp;			\
 	  __asm__ __volatile__(			\
@@ -103,7 +103,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * save current IRQ & FIQ state
  */
-#define local_save_flags(x)			\
+#define __save_flags(x)				\
 	do {					\
 	  __asm__ __volatile__(			\
 "	mov	%0, pc		@ save_flags\n"	\
@@ -114,7 +114,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * restore saved IRQ & FIQ state
  */
-#define local_irq_restore(x)				\
+#define __restore_flags(x)				\
 	do {						\
 	  unsigned long temp;				\
 	  __asm__ __volatile__(				\
@@ -126,7 +126,5 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 	  : "r" (x)					\
 	  : "memory");					\
 	} while (0)
-
-#define __save_and_sti(x)	({__save_flags(x);__sti();})
 
 #endif

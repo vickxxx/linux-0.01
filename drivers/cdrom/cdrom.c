@@ -761,7 +761,6 @@ static int cdrom_load_unload(struct cdrom_device_info *cdi, int slot)
 	cgc.cmd[0] = GPCMD_LOAD_UNLOAD;
 	cgc.cmd[4] = 2 + (slot >= 0);
 	cgc.cmd[8] = slot;
-	cgc.timeout = 60 * HZ;
 
 	/* The Sanyo 3 CD changer uses byte 7 of the 
 	GPCMD_TEST_UNIT_READY to command to switch CDs instead of
@@ -1259,7 +1258,7 @@ static int dvd_read_bca(struct cdrom_device_info *cdi, dvd_struct *s)
 	init_cdrom_command(&cgc, buf, sizeof(buf), CGC_DATA_READ);
 	cgc.cmd[0] = GPCMD_READ_DVD_STRUCTURE;
 	cgc.cmd[7] = s->type;
-	cgc.cmd[9] = cgc.buflen & 0xff;
+	cgc.cmd[9] = cgc.buflen = 0xff;
 
 	if ((ret = cdo->generic_packet(cdi, &cgc)))
 		return ret;
@@ -1882,26 +1881,20 @@ static int cdrom_do_cmd(struct cdrom_device_info *cdi,
 	if (cgc->buflen < 0 || cgc->buflen >= 131072)
 		return -EINVAL;
 
-	usense = cgc->sense;
-	cgc->sense = &sense;
-	if (usense && !access_ok(VERIFY_WRITE, usense, sizeof(*usense))) {
-		return -EFAULT;
-	}
-
-	ubuf = cgc->buffer;
-	if (cgc->data_direction == CGC_DATA_READ ||
-	    cgc->data_direction == CGC_DATA_WRITE) {
+	if ((ubuf = cgc->buffer)) {
 		cgc->buffer = kmalloc(cgc->buflen, GFP_KERNEL);
 		if (cgc->buffer == NULL)
 			return -ENOMEM;
 	}
 
+	usense = cgc->sense;
+	cgc->sense = &sense;
+	if (usense && !access_ok(VERIFY_WRITE, usense, sizeof(*usense)))
+		return -EFAULT;
 
 	if (cgc->data_direction == CGC_DATA_READ) {
-		if (!access_ok(VERIFY_READ, ubuf, cgc->buflen)) {
-			kfree(cgc->buffer);
+		if (!access_ok(VERIFY_READ, ubuf, cgc->buflen))
 			return -EFAULT;
-		}
 	} else if (cgc->data_direction == CGC_DATA_WRITE) {
 		if (copy_from_user(cgc->buffer, ubuf, cgc->buflen)) {
 			kfree(cgc->buffer);
@@ -1913,10 +1906,7 @@ static int cdrom_do_cmd(struct cdrom_device_info *cdi,
 	__copy_to_user(usense, cgc->sense, sizeof(*usense));
 	if (!ret && cgc->data_direction == CGC_DATA_READ)
 		__copy_to_user(ubuf, cgc->buffer, cgc->buflen);
-	if (cgc->data_direction == CGC_DATA_READ ||
-	    cgc->data_direction == CGC_DATA_WRITE) {
-		kfree(cgc->buffer);
-	}
+	kfree(cgc->buffer);
 	return ret;
 }
 
@@ -1925,7 +1915,6 @@ static int mmc_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 {		
 	struct cdrom_device_ops *cdo = cdi->ops;
 	struct cdrom_generic_command cgc;
-	struct request_sense sense;
 	kdev_t dev = cdi->dev;
 	char buffer[32];
 	int ret = 0;
@@ -1961,11 +1950,9 @@ static int mmc_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 		cgc.buffer = (char *) kmalloc(blocksize, GFP_KERNEL);
 		if (cgc.buffer == NULL)
 			return -ENOMEM;
-		memset(&sense, 0, sizeof(sense));
-		cgc.sense = &sense;
 		cgc.data_direction = CGC_DATA_READ;
 		ret = cdrom_read_block(cdi, &cgc, lba, 1, format, blocksize);
-		if (ret && sense.sense_key==0x05 && sense.asc==0x20 && sense.ascq==0x00) {
+		if (ret) {
 			/*
 			 * SCSI-II devices are not required to support
 			 * READ_CD, so let's try switching block size
@@ -2598,7 +2585,9 @@ ctl_table cdrom_cdrom_table[] = {
 
 /* Make sure that /proc/sys/dev is there */
 ctl_table cdrom_root_table[] = {
+#ifdef CONFIG_PROC_FS
 	{CTL_DEV, "dev", NULL, 0, 0555, cdrom_cdrom_table},
+#endif /* CONFIG_PROC_FS */
 	{0}
 	};
 static struct ctl_table_header *cdrom_sysctl_header;

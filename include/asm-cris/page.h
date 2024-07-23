@@ -80,20 +80,6 @@ typedef unsigned long pgprot_t;
          BUG(); \
 } while (0)
 
-/* Pure 2^n version of get_order */
-static __inline__ int get_order(unsigned long size)
-{
-	int order;
-
-	size = (size-1) >> (PAGE_SHIFT-1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-	return order;
-}
-
 #endif /* __ASSEMBLY__ */
 
 /* macros to convert between really physical and virtual addresses
@@ -125,9 +111,6 @@ static __inline__ int get_order(unsigned long size)
 /* from linker script */
 
 extern unsigned long dram_start, dram_end;
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

@@ -2,15 +2,7 @@
 #define _LINUX_SEQ_FILE_H
 #ifdef __KERNEL__
 
-#include <linux/types.h>
-#include <linux/string.h>
-#include <asm/semaphore.h>
-
 struct seq_operations;
-struct file;
-struct vfsmount;
-struct dentry;
-struct inode;
 
 struct seq_file {
 	char *buf;
@@ -20,7 +12,6 @@ struct seq_file {
 	loff_t index;
 	struct semaphore sem;
 	struct seq_operations *op;
-	void *private;
 };
 
 struct seq_operations {
@@ -59,14 +50,6 @@ static inline int seq_puts(struct seq_file *m, const char *s)
 
 int seq_printf(struct seq_file *, const char *, ...)
 	__attribute__ ((format (printf,2,3)));
-
-int seq_path(struct seq_file *, struct vfsmount *, struct dentry *, char *);
-
-int single_open(struct file *, int (*)(struct seq_file *, void *), void *);
-int single_release(struct inode *, struct file *);
-int seq_release_private(struct inode *, struct file *);
-
-#define SEQ_START_TOKEN ((void *)1)
 
 #endif
 #endif

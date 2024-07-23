@@ -100,7 +100,6 @@
 #include <linux/tqueue.h>
 #include <linux/bootmem.h>
 #include <linux/pm.h>
-#include <linux/smp_lock.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -111,8 +110,6 @@
 
 
 const struct consw *conswitchp;
-
-static void __console_callback(void);
 
 /* A bitmap for codes <32. A bit of 1 indicates that the code
  * corresponding to that bit number invokes some special action
@@ -244,16 +241,9 @@ static inline void scrolldelta(int lines)
 	schedule_console_callback();
 }
 
-extern int machine_paniced; 
-
 void schedule_console_callback(void)
 {
-	/* Don't care about locking after panic - but I want to switch the console
-	   NOW */ 
-	if (machine_paniced)
-		__console_callback(); 
-	else
-		schedule_task(&console_callback_tq);
+	schedule_task(&console_callback_tq);
 }
 
 static void scrup(int currcons, unsigned int t, unsigned int b, int nr)
@@ -705,9 +695,6 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 	return 0;
 }
 
-#define VC_RESIZE_MAXCOL (32767)
-#define VC_RESIZE_MAXROW (32767)
-
 /*
  * Change # of rows and columns (0 means unchanged/the size of fg_console)
  * [this is to be used together with some user program
@@ -719,9 +706,6 @@ int vc_resize(unsigned int lines, unsigned int cols,
 	unsigned int cc, ll, ss, sr, todo = 0;
 	unsigned int currcons = fg_console, i;
 	unsigned short *newscreens[MAX_NR_CONSOLES];
-
-	if (cols > VC_RESIZE_MAXCOL || lines > VC_RESIZE_MAXROW)
-		return -EINVAL;
 
 	cc = (cols ? cols : video_num_columns);
 	ll = (lines ? lines : video_num_lines);
@@ -1436,10 +1420,7 @@ static void reset_terminal(int currcons, int do_clear)
 	kbd_table[currcons].slockstate = 0;
 	kbd_table[currcons].ledmode = LED_SHOW_FLAGS;
 	kbd_table[currcons].ledflagstate = kbd_table[currcons].default_ledflagstate;
-	
-	/* Only schedule the keyboard_tasklet if it is enabled. */
-	if(!atomic_read(&keyboard_tasklet.count))
-		set_leds();
+	set_leds();
 
 	cursor_type = CUR_DEFAULT;
 	complement_mask = s_complement_mask;
@@ -2054,15 +2035,10 @@ out:
  * with other console code and prevention of re-entrancy is
  * ensured with console_sem.
  */
-static void console_callback(void *unused) 
+static void console_callback(void *ignored)
 {
 	acquire_console_sem();
-	__console_callback(); 
-	release_console_sem();	
-} 
 
-static void __console_callback(void)
-{
 	if (want_console >= 0) {
 		if (want_console != fg_console && vc_cons_allocated(want_console)) {
 			hide_cursor(fg_console);
@@ -2084,6 +2060,8 @@ static void __console_callback(void)
 			sw->con_scrolldelta(vc_cons[currcons].d, scrollback_delta);
 		scrollback_delta = 0;
 	}
+
+	release_console_sem();
 }
 
 void set_console(int nr)
@@ -2200,6 +2178,7 @@ struct console vt_console_driver = {
 	name:		"tty",
 	write:		vt_console_print,
 	device:		vt_console_device,
+	wait_key:	keyboard_wait_for_keypress,
 	unblank:	unblank_screen,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,
@@ -2369,25 +2348,17 @@ static void con_start(struct tty_struct *tty)
 	set_leds();
 }
 
-/*
- * we can race here against con_close, so we grab the bkl
- * and check the pointer before calling set_cursor
- */
 static void con_flush_chars(struct tty_struct *tty)
 {
-	struct vt_struct *vt;
+	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
 
 	if (in_interrupt())	/* from flush_to_ldisc */
 		return;
 
 	pm_access(pm_con);
-	lock_kernel();
 	acquire_console_sem();
-	vt = (struct vt_struct *)tty->driver_data;
-	if (vt)
-		set_cursor(vt->vc_num);
+	set_cursor(vt->vc_num);
 	release_console_sem();
-	unlock_kernel();
 }
 
 /*
@@ -2628,10 +2599,10 @@ void give_up_console(const struct consw *csw)
 
 static void set_vesa_blanking(unsigned long arg)
 {
-	char *argp = (char *)arg + 1;
-	unsigned int mode;
-	if (get_user(mode, argp) == 0)
-		vesa_blank_mode = (mode < 4) ? mode : 0;
+    char *argp = (char *)arg + 1;
+    unsigned int mode;
+    get_user(mode, argp);
+    vesa_blank_mode = (mode < 4) ? mode : 0;
 }
 
 /* We can't register the console with devfs during con_init(), because it
@@ -2781,12 +2752,6 @@ void unblank_screen(void)
 static void blank_screen(unsigned long dummy)
 {
 	timer_do_blank_screen(0, 1);
-}
-
-void disable_console_blank(void)
-{
-	del_timer_sync(&console_timer);
-	blankinterval = 0;
 }
 
 void poke_blanked_console(void)

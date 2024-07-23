@@ -143,8 +143,6 @@ void matrox_cfbX_init(WPMINFO struct display* p) {
 	ACCESS_FBINFO(accel.m_opmode) = mopmode;
 }
 
-EXPORT_SYMBOL(matrox_cfbX_init);
-
 static void matrox_cfbX_bmove(struct display* p, int sy, int sx, int dy, int dx, int height, int width) {
 	int pixx = p->var.xres_virtual, start, end;
 	CRITFLAGS
@@ -758,7 +756,6 @@ static void matrox_cfb8_revc(struct display* p, int xx, int yy) {
 }
 #endif
 
-#if defined(FBCON_HAS_CFB16) || defined(FBCON_HAS_CFB24) || defined(FBCON_HAS_CFB32)
 static void matrox_cfbX_revc(struct display* p, int xx, int yy) {
 	CRITFLAGS
 	MINFO_FROM_DISP(p);
@@ -779,7 +776,6 @@ static void matrox_cfbX_revc(struct display* p, int xx, int yy) {
 
 	CRITEND
 }
-#endif
 
 static void matrox_cfbX_clear_margins(struct vc_data* conp, struct display* p, int bottom_only) {
 	unsigned int bottom_height, right_width;
@@ -947,7 +943,7 @@ static void matrox_text_revc(struct display* p, int xx, int yy) {
 	CRITEND
 }
 
-static void matrox_text_createcursor(WPMINFO struct display* p) {
+void matrox_text_createcursor(WPMINFO struct display* p) {
 	CRITFLAGS
 
 	if (ACCESS_FBINFO(currcon_display) != p)
@@ -1032,8 +1028,6 @@ void matrox_text_round(CPMINFO struct fb_var_screeninfo* var, struct display* p)
 	}
 	var->xres_virtual = vxres * hf;
 }
-
-EXPORT_SYMBOL(matrox_text_round);
 
 static int matrox_text_setfont(struct display* p, int width, int height) {
 	DBG("matrox_text_setfont");
@@ -1229,8 +1223,6 @@ void initMatrox(WPMINFO struct display* p) {
 	}
 }
 
-EXPORT_SYMBOL(initMatrox);
-
 void matrox_init_putc(WPMINFO struct display* p, void (*dac_createcursor)(WPMINFO struct display* p)) {
 	int i;
 
@@ -1253,7 +1245,4 @@ void matrox_init_putc(WPMINFO struct display* p, void (*dac_createcursor)(WPMINF
 		ACCESS_FBINFO(curr.putcs) = matrox_cfbX_putcs;
 	}
 }
-
-EXPORT_SYMBOL(matrox_init_putc);
-
 MODULE_LICENSE("GPL");

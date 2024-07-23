@@ -1,4 +1,6 @@
 /*
+ * BK Id: SCCS/s.m8xx_setup.c 1.40 11/13/01 21:26:07 paulus
+ *
  *  linux/arch/ppc/kernel/setup.c
  *
  *  Copyright (C) 1995  Linus Torvalds
@@ -41,12 +43,9 @@
 #include <asm/mpc8xx.h>
 #include <asm/8xx_immap.h>
 #include <asm/machdep.h>
-#include <asm/bootinfo.h>
+
 #include <asm/time.h>
-
 #include "ppc8xx_pic.h"
-
-extern int i8259_pic_irq_offset; /* defined in arch/ppc/kernel/i8259.c */
 
 static int m8xx_set_rtc_time(unsigned long time);
 static unsigned long m8xx_get_rtc_time(void);
@@ -56,17 +55,22 @@ unsigned char __res[sizeof(bd_t)];
 
 extern void m8xx_ide_init(void);
 
+#ifdef CONFIG_BLK_DEV_RAM
+extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
+extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
+extern int rd_image_start;	/* starting block # of image */
+#endif
+
 extern unsigned long find_available_memory(void);
 extern void m8xx_cpm_reset(uint);
-extern void m8xx_wdt_handler_install(bd_t *bp);
 
 void __init
 m8xx_setup_arch(void)
 {
 	int	cpm_page;
-
+	
 	cpm_page = (int) alloc_bootmem_pages(PAGE_SIZE);
-
+	
 	/* Reset the Communication Processor Module.
 	*/
 	m8xx_cpm_reset(cpm_page);
@@ -74,10 +78,10 @@ m8xx_setup_arch(void)
 #ifdef notdef
 	ROOT_DEV = to_kdev_t(0x0301); /* hda1 */
 #endif
-
+	
 #ifdef CONFIG_BLK_DEV_INITRD
 #if 0
-	ROOT_DEV = to_kdev_t(0x0200); /* floppy */
+	ROOT_DEV = to_kdev_t(0x0200); /* floppy */  
 	rd_prompt = 1;
 	rd_doload = 1;
 	rd_image_start = 0;
@@ -107,9 +111,6 @@ abort(void)
 	xmon(0);
 #endif
 	machine_restart(NULL);
-
-	/* not reached */
-	for (;;);
 }
 
 /* A place holder for time base interrupts, if they are ever enabled. */
@@ -182,16 +183,8 @@ void __init m8xx_calibrate_decr(void)
 				((mk_int_int_mask(DEC_INTERRUPT) << 8) |
 					 (TBSCR_TBF | TBSCR_TBE));
 
-	if (request_irq(DEC_INTERRUPT, timebase_interrupt, 0, "tbint",
-				NULL) != 0)
+	if (request_8xxirq(DEC_INTERRUPT, timebase_interrupt, 0, "tbint", NULL) != 0)
 		panic("Could not allocate timer IRQ!");
-
-#ifdef CONFIG_8xx_WDT
-	/* Install watchdog timer handler early because it might be
-	 * already enabled by the bootloader
-	 */
-	m8xx_wdt_handler_install(binfo);
-#endif
 }
 
 /* The RTC on the MPC8xx is an internal register.
@@ -230,7 +223,7 @@ m8xx_restart(char *cmd)
 	__asm__("mtmsr %0" : : "r" (msr) );
 
 	dummy = ((immap_t *)IMAP_ADDR)->im_clkrst.res[0];
-	printk("Restart failed\n");
+	printk("Restart failed\n"); 
 	while(1);
 }
 
@@ -253,9 +246,9 @@ m8xx_show_percpuinfo(struct seq_file *m, int i)
 	bd_t	*bp;
 
 	bp = (bd_t *)__res;
-
-	seq_printf(m, "clock\t\t: %dMHz\n"
-		   "bus clock\t: %dMHz\n",
+			
+	seq_printf(m, "clock\t\t: %ldMHz\n"
+		   "bus clock\t: %ldMHz\n",
 		   bp->bi_intfreq / 1000000,
 		   bp->bi_busfreq / 1000000);
 
@@ -274,26 +267,23 @@ m8xx_init_IRQ(void)
 	int i;
 	void cpm_interrupt_init(void);
 
-	for (i = SIU_IRQ_OFFSET ; i < SIU_IRQ_OFFSET + NR_SIU_INTS ; i++)
-		irq_desc[i].handler = &ppc8xx_pic;
-
+        for ( i = 0 ; i < NR_SIU_INTS ; i++ )
+                irq_desc[i].handler = &ppc8xx_pic;
+	
+	/* We could probably incorporate the CPM into the multilevel
+	 * interrupt structure.
+	 */
 	cpm_interrupt_init();
+        unmask_irq(CPM_INTERRUPT);
 
 #if defined(CONFIG_PCI)
-	for (i = I8259_IRQ_OFFSET ; i < I8259_IRQ_OFFSET + NR_8259_INTS ; i++)
-		irq_desc[i].handler = &i8259_pic;
-
-	i8259_pic_irq_offset = I8259_IRQ_OFFSET;
-	i8259_init(0);
-
-	/* The i8259 cascade interrupt must be level sensitive. */
-	((immap_t *)IMAP_ADDR)->im_siu_conf.sc_siel &=
-		~(0x80000000 >> ISA_BRIDGE_INT);
-
-	if (request_irq(ISA_BRIDGE_INT, mbx_i8259_action, 0, "i8259 cascade",
-				NULL) != 0)
-		panic("Could not allocate 8259 IRQ!");
-#endif	/* CONFIG_PCI */
+        for ( i = NR_SIU_INTS ; i < (NR_SIU_INTS + NR_8259_INTS) ; i++ )
+                irq_desc[i].handler = &i8259_pic;
+        i8259_pic.irq_offset = NR_SIU_INTS;
+        i8259_init();
+        request_8xxirq(ISA_BRIDGE_INT, mbx_i8259_action, 0, "8259 cascade", NULL);
+        enable_irq(ISA_BRIDGE_INT);
+#endif
 }
 
 /* -------------------------------------------------------------------- */
@@ -312,7 +302,7 @@ m8xx_find_end_of_memory(void)
 {
 	bd_t	*binfo;
 	extern unsigned char __res[];
-
+	
 	binfo = (bd_t *)__res;
 
 	return binfo->bi_memsize;
@@ -359,11 +349,9 @@ void __init
 platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		unsigned long r6, unsigned long r7)
 {
-	parse_bootinfo(find_bootinfo());
-
 	if ( r3 )
 		memcpy( (void *)__res,(void *)(r3+KERNELBASE), sizeof(bd_t) );
-
+	
 #ifdef CONFIG_PCI
 	m8xx_setup_pci_ptrs();
 #endif
@@ -378,7 +366,7 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #endif /* CONFIG_BLK_DEV_INITRD */
 	/* take care of cmd line */
 	if ( r6 )
-	{
+	{	
 		*(char *)(r7+KERNELBASE) = 0;
 		strcpy(cmd_line, (char *)(r6+KERNELBASE));
 	}
@@ -412,5 +400,5 @@ platform_init(unsigned long r3, unsigned long r4, unsigned long r5,
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 	m8xx_ide_init();
-#endif
+#endif		
 }

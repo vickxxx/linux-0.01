@@ -35,10 +35,8 @@ extern void __flush_icache_page(unsigned long);
 extern void flush_dcache_page_impl(struct page *page);
 #ifdef CONFIG_SMP
 extern void smp_flush_dcache_page_impl(struct page *page, int cpu);
-extern void flush_dcache_page_all(struct mm_struct *mm, struct page *page);
 #else
 #define smp_flush_dcache_page_impl(page,cpu) flush_dcache_page_impl(page)
-#define flush_dcache_page_all(mm,page) flush_dcache_page_impl(page)
 #endif
 
 extern void flush_dcache_page(struct page *page);
@@ -100,6 +98,13 @@ extern void smp_flush_tlb_page(struct mm_struct *mm, unsigned long page);
 
 #endif /* ! CONFIG_SMP */
 
+#define VPTE_BASE_SPITFIRE	0xfffffffe00000000
+#if 1
+#define VPTE_BASE_CHEETAH	VPTE_BASE_SPITFIRE
+#else
+#define VPTE_BASE_CHEETAH	0xffe0000000000000
+#endif
+
 extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long start,
 					  unsigned long end)
 {
@@ -121,6 +126,8 @@ extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long st
 			vpte_base + (s >> (PAGE_SHIFT - 3)),
 			vpte_base + (e >> (PAGE_SHIFT - 3)));
 }
+#undef VPTE_BASE_SPITFIRE
+#undef VPTE_BASE_CHEETAH
 
 /* Page table allocation/freeing. */
 #ifdef CONFIG_SMP
@@ -147,11 +154,11 @@ extern __inline__ void free_pgd_fast(pgd_t *pgd)
 	struct page *page = virt_to_page(pgd);
 
 	if (!page->pprev_hash) {
-		page->next_hash = (struct page *)pgd_quicklist;
+		(unsigned long *)page->next_hash = pgd_quicklist;
 		pgd_quicklist = (unsigned long *)page;
 	}
-	page->pprev_hash = (struct page **)(((unsigned long)page->pprev_hash) |
-	    (((unsigned long)pgd & (PAGE_SIZE / 2)) ? 2 : 1));
+	(unsigned long)page->pprev_hash |=
+		(((unsigned long)pgd & (PAGE_SIZE / 2)) ? 2 : 1);
 	pgd_cache_size++;
 }
 
@@ -169,7 +176,7 @@ extern __inline__ pgd_t *get_pgd_fast(void)
 			off = PAGE_SIZE / 2;
 			mask &= ~2;
 		}
-		ret->pprev_hash = (struct page **)mask;
+		(unsigned long)ret->pprev_hash = mask;
 		if (!mask)
 			pgd_quicklist = (unsigned long *)ret->next_hash;
                 ret = (struct page *)(__page_address(ret) + off);
@@ -180,8 +187,8 @@ extern __inline__ pgd_t *get_pgd_fast(void)
 		if (page) {
 			ret = (struct page *)page_address(page);
 			clear_page(ret);
-			page->pprev_hash = (struct page **) 2UL;
-			page->next_hash = (struct page *) pgd_quicklist;
+			(unsigned long)page->pprev_hash = 2;
+			(unsigned long *)page->next_hash = pgd_quicklist;
 			pgd_quicklist = (unsigned long *)page;
 			pgd_cache_size++;
 		}

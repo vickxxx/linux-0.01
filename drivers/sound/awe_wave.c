@@ -2051,23 +2051,26 @@ awe_ioctl(int dev, unsigned int cmd, caddr_t arg)
 			awe_info.nr_voices = awe_max_voices;
 		else
 			awe_info.nr_voices = AWE_MAX_CHANNELS;
-		if(copy_to_user(arg, &awe_info, sizeof(awe_info)))
-			return -EFAULT;
+		memcpy((char*)arg, &awe_info, sizeof(awe_info));
 		return 0;
+		break;
 
 	case SNDCTL_SEQ_RESETSAMPLES:
 		awe_reset(dev);
 		awe_reset_samples();
 		return 0;
+		break;
 
 	case SNDCTL_SEQ_PERCMODE:
 		/* what's this? */
 		return 0;
+		break;
 
 	case SNDCTL_SYNTH_MEMAVL:
 		return memsize - awe_free_mem_ptr() * 2;
 
 	default:
+		printk(KERN_WARNING "AWE32: unsupported ioctl %d\n", cmd);
 		return -EINVAL;
 	}
 }
@@ -4770,16 +4773,21 @@ awe_detect_base(int addr)
 }
 	
 #if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
-static struct isapnp_device_id isapnp_awe_list[] __initdata = {
+static struct {
+	unsigned short card_vendor, card_device;
+	unsigned short vendor;
+	unsigned short function;
+	char *name;
+} isapnp_awe_list[] __initdata = {
 	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0021),
-		(unsigned long)"AWE32 WaveTable" },
+		"AWE32 WaveTable" },
 	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0022),
-		(unsigned long)"AWE64 WaveTable" },
+		"AWE64 WaveTable" },
 	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('C','T','L'), ISAPNP_FUNCTION(0x0023),
-		(unsigned long)"AWE64 Gold WaveTable" },
+		"AWE64 Gold WaveTable" },
 	{0}
 };
 
@@ -4810,7 +4818,7 @@ static int __init awe_probe_isapnp(int *port)
 		if (!idev)
 			continue;
 		printk(KERN_INFO "ISAPnP reports %s at i/o %#x\n",
-		       (char*)isapnp_awe_list[i].driver_data, *port);
+		       isapnp_awe_list[i].name, *port);
 		return 0;
 	}
 	return -ENODEV;

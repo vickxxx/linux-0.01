@@ -1,4 +1,4 @@
-/* $Id: nj_s.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: nj_s.c,v 2.7.6.6 2001/09/23 22:24:50 kai Exp $
  *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
@@ -16,7 +16,7 @@
 #include <linux/ppp_defs.h>
 #include "netjet.h"
 
-const char *NETjet_S_revision = "$Revision: 1.1.4.1 $";
+const char *NETjet_S_revision = "$Revision: 2.7.6.6 $";
 
 static u_char dummyrr(struct IsdnCardState *cs, int chan, u_char off)
 {
@@ -130,7 +130,6 @@ NETjet_S_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 			release_io_netjet(cs);
 			return(0);
 		case CARD_INIT:
-			reset_netjet_s(cs);
 			inittiger(cs);
 			clear_pending_isac_ints(cs);
 			initisac(cs);
@@ -185,14 +184,6 @@ setup_netjet_s(struct IsdnCard *card)
 				printk(KERN_WARNING "NETjet-S: No IO-Adr for PCI card found\n");
 				return(0);
 			}
-			/* 2001/10/04 Christoph Ersfeld, Formula-n Europe AG www.formula-n.com */
-			if ((dev_netjet->subsystem_vendor == 0x55) &&
-				(dev_netjet->subsystem_device == 0x02)) {
-				printk(KERN_WARNING "Netjet: You tried to load this driver with an incompatible TigerJet-card\n");
-				printk(KERN_WARNING "Use type=41 for Formula-n enter:now ISDN PCI and compatible\n");
-				return(0);
-			}
-			/* end new code */
 		} else {
 			printk(KERN_WARNING "NETjet-S: No PCI card found\n");
 			return(0);
@@ -263,6 +254,7 @@ setup_netjet_s(struct IsdnCard *card)
 	} else {
 		request_region(cs->hw.njet.base, bytecnt, "netjet-s isdn");
 	}
+	reset_netjet_s(cs);
 	cs->readisac  = &NETjet_ReadIC;
 	cs->writeisac = &NETjet_WriteIC;
 	cs->readisacfifo  = &NETjet_ReadICfifo;

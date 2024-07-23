@@ -6,12 +6,11 @@
    the GNU General Public License.
  */
 
-/* $Id: nsp_message.c,v 1.6 2003/07/26 14:21:09 elca Exp $ */
+/* $Id: nsp_message.c,v 1.7 2001/09/07 04:33:01 elca Exp $ */
 
-static void nsp_message_in(Scsi_Cmnd *SCpnt)
+static void nsp_message_in(Scsi_Cmnd *SCpnt, nsp_hw_data *data)
 {
-	unsigned int  base = SCpnt->device->host->io_port;
-	nsp_hw_data  *data = (nsp_hw_data *)SCpnt->device->host->hostdata;
+	unsigned int  base = SCpnt->host->io_port;
 	unsigned char data_reg, control_reg;
 	int           ret, len;
 
@@ -24,7 +23,7 @@ static void nsp_message_in(Scsi_Cmnd *SCpnt)
 	ret = 16;
 	len = 0;
 
-	nsp_dbg(NSP_DEBUG_MSGINOCCUR, "msgin loop");
+	DEBUG(0, " msgin loop\n");
 	do {
 		/* read data */
 		data_reg = nsp_index_read(base, SCSIDATAIN);
@@ -50,9 +49,8 @@ static void nsp_message_in(Scsi_Cmnd *SCpnt)
 
 }
 
-static void nsp_message_out(Scsi_Cmnd *SCpnt)
+static void nsp_message_out(Scsi_Cmnd *SCpnt, nsp_hw_data *data)
 {
-	nsp_hw_data *data = (nsp_hw_data *)SCpnt->device->host->hostdata;
 	int ret = 1;
 	int len = data->MsgLen;
 
@@ -63,10 +61,10 @@ static void nsp_message_out(Scsi_Cmnd *SCpnt)
 	 * the next "msg out" if exists (no scsi phase changes).
 	 */
 
-	nsp_dbg(NSP_DEBUG_MSGOUTOCCUR, "msgout loop");
+	DEBUG(0, " msgout loop\n");
 	do {
-		if (nsp_xfer(SCpnt, BUSPHASE_MESSAGE_OUT)) {
-			nsp_msg(KERN_DEBUG, "msgout: xfer short");
+		if (nsp_xfer(SCpnt, data, BUSPHASE_MESSAGE_OUT)) {
+			printk(KERN_DEBUG " " __FUNCTION__ " msgout: xfer short\n");
 		}
 
 		/* catch a next signal */

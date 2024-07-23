@@ -639,13 +639,13 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 	int rlpos = 0, rlsize, buf_size, err = 0;
 	ntfs_io io;
 
-	ntfs_debug(DEBUG_OTHER, "%s(): Entering with *location = 0x%x, "
-			"*count = 0x%x, zone = %s_ZONE.\n", __FUNCTION__,
-			*location, *count, zone == DATA_ZONE ? "DATA" : "MFT");
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Entering with *location = "
+			"0x%x, *count = 0x%x, zone = %s_ZONE.\n", *location,
+			*count, zone == DATA_ZONE ? "DATA" : "MFT");
 	buf = (char*)__get_free_page(GFP_NOFS);
 	if (!buf) {
-		ntfs_debug(DEBUG_OTHER, "%s(): Returning -ENOMEM.\n",
-				__FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Returning "
+				"-ENOMEM.\n");
 		return -ENOMEM;
 	}
 	io.fn_put = ntfs_put;
@@ -721,101 +721,101 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 	clusters = *count;
 	rlpos = rlsize = 0;
 	if (*count <= 0) {
-		ntfs_debug(DEBUG_OTHER, "%s(): *count <= 0, "
-				"returning -EINVAL.\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): *count <= 0, "
+				"returning -EINVAL.\n");
 		err = -EINVAL;
 		goto err_ret;
 	}
 	while (1) {
-		ntfs_debug(DEBUG_OTHER, "%s(): Start of outer while "
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Start of outer while "
 				"loop: done_zones = 0x%x, search_zone = %i, "
 				"pass = %i, zone_start = 0x%x, zone_end = "
 				"0x%x, initial_location = 0x%x, buf_pos = "
 				"0x%x, rlpos = %i, rlsize = %i.\n",
-				__FUNCTION__, done_zones, search_zone, pass,
-				zone_start, zone_end, initial_location, buf_pos,
-				rlpos, rlsize);
+				done_zones, search_zone, pass, zone_start,
+				zone_end, initial_location, buf_pos, rlpos,
+				rlsize);
 		/* Loop until we run out of free clusters. */
 		io.param = buf;
 		io.size = PAGE_SIZE;
 		io.do_read = 1;
 		last_read_pos = buf_pos >> 3;
-		ntfs_debug(DEBUG_OTHER, "%s(): last_read_pos = 0x%x.\n",
-				__FUNCTION__, last_read_pos);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): last_read_pos = "
+				"0x%x.\n", last_read_pos);
 		err = ntfs_readwrite_attr(vol->bitmap, data, last_read_pos,
 				&io);
 		if (err) {
-			ntfs_debug(DEBUG_OTHER, "%s(): ntfs_read_attr failed "
-					"with error code %i, going to "
-					"err_ret.\n", __FUNCTION__, -err);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+					"ntfs_read_attr failed with error "
+					"code %i, going to err_ret.\n", -err);
 			goto err_ret;
 		}
 		if (!io.size) {
-			ntfs_debug(DEBUG_OTHER, "%s(): !io.size, going to "
-					"zone_pass_done.\n", __FUNCTION__);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): !io.size, "
+					"going to zone_pass_done.\n");
 			goto zone_pass_done;
 		}
 		buf_size = io.size << 3;
 		lcn = buf_pos & 7;
 		buf_pos &= ~7;
 		need_writeback = 0;
-		ntfs_debug(DEBUG_OTHER, "%s(): Before inner while "
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Before inner while "
 				"loop: buf_size = 0x%x, lcn = 0x%x, buf_pos = "
-				"0x%x, need_writeback = %i.\n", __FUNCTION__,
-				buf_size, lcn, buf_pos, need_writeback);
+				"0x%x, need_writeback = %i.\n", buf_size, lcn,
+				buf_pos, need_writeback);
 		while (lcn < buf_size && lcn + buf_pos < zone_end) {
 			byte = buf + (lcn >> 3);
-			ntfs_debug(DEBUG_OTHER, "%s(): In inner while loop: "
-					"buf_size = 0x%x, lcn = 0x%x, buf_pos "
-					"= 0x%x, need_writeback = %i, byte ofs "
-					"= 0x%x, *byte = 0x%x.\n", __FUNCTION__,
-					buf_size, lcn, buf_pos,	need_writeback,
-					lcn >> 3, *byte);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): In inner "
+					"while loop: buf_size = 0x%x, lcn = "
+					"0x%x, buf_pos = 0x%x, need_writeback "
+					"= %i, byte ofs = 0x%x, *byte = "
+					"0x%x.\n", buf_size, lcn, buf_pos,
+					need_writeback, lcn >> 3, *byte);
 			/* Skip full bytes. */
 			if (*byte == 0xff) {
 				lcn += 8;
-				ntfs_debug(DEBUG_OTHER, "%s(): continuing while"
-					    " loop 1.\n", __FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"continuing while loop 1.\n");
 				continue;
 			}
 			bit = 1 << (lcn & 7);
-			ntfs_debug(DEBUG_OTHER, "%s(): bit = %i.\n",
-					__FUNCTION__, bit);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): bit = %i.\n",
+					bit);
 			/* If the bit is already set, go onto the next one. */
 			if (*byte & bit) {
 				lcn++;
-				ntfs_debug(DEBUG_OTHER, "%s(): continuing while"
-					    " loop 2.\n", __FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"continuing while loop 2.\n");
 				continue;
 			}
 			/* Allocate the bitmap bit. */
 			*byte |= bit;
 			/* We need to write this bitmap buffer back to disk! */
 			need_writeback = 1;
-			ntfs_debug(DEBUG_OTHER, "%s(): *byte = 0x%x, "
-					"need_writeback = %i.\n", __FUNCTION__,
-					*byte, need_writeback);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): *byte = "
+					"0x%x, need_writeback = %i.\n", *byte,
+					need_writeback);
 			/* Reallocate memory if necessary. */
 			if ((rlpos + 2) * sizeof(ntfs_runlist) >= rlsize) {
-				ntfs_debug(DEBUG_OTHER, "%s(): Reallocating "
-						"space.\n", __FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Reallocating space.\n");
 				/* Setup first free bit return value. */
 				if (!rl2) {
 					*location = lcn + buf_pos;
-					ntfs_debug(DEBUG_OTHER,	"%s(): "
-							"*location = 0x%x.\n",
-							__FUNCTION__,
-							*location);
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): *location = "
+							"0x%x.\n", *location);
 				}
 				rlsize += PAGE_SIZE;
 				rlt = ntfs_vmalloc(rlsize);
 				if (!rlt) {
 					err = -ENOMEM;
-					ntfs_debug(DEBUG_OTHER, "%s(): Failed "
-							"to allocate memory, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Failed to "
+							"allocate memory, "
 							"returning -ENOMEM, "
-							"going to wb_err_ret.\n",
-							__FUNCTION__);
+							"going to "
+							"wb_err_ret.\n");
 					goto wb_err_ret;
 				}
 				if (rl2) {
@@ -824,46 +824,45 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 					ntfs_vfree(rl2);
 				}
 				rl2 = rlt;
-				ntfs_debug(DEBUG_OTHER, "%s(): Reallocated "
-						"memory, rlsize = 0x%x.\n",
-						__FUNCTION__, rlsize);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Reallocated memory, rlsize = "
+						"0x%x.\n", rlsize);
 			}
 			/*
 			 * Coalesce with previous run if adjacent LCNs.
 			 * Otherwise, append a new run.
 			 */
-			ntfs_debug(DEBUG_OTHER, "%s(): Adding run (lcn 0x%x, "
-					"len 0x%x), prev_lcn = 0x%x, lcn = "
-					"0x%x, buf_pos = 0x%x, prev_run_len = "
-					"0x%x, rlpos = %i.\n", __FUNCTION__,
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Adding run "
+					"(lcn 0x%x, len 0x%x), prev_lcn = "
+					"0x%x, lcn = 0x%x, buf_pos = 0x%x, "
+					"prev_run_len = 0x%x, rlpos = %i.\n",
 					lcn + buf_pos, 1, prev_lcn, lcn,
 					buf_pos, prev_run_len, rlpos);
 			if (prev_lcn == lcn + buf_pos - prev_run_len && rlpos) {
-				ntfs_debug(DEBUG_OTHER, "%s(): Coalescing to "
-						"run (lcn 0x%x, len 0x%x).\n",
-						__FUNCTION__,
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Coalescing to run (lcn 0x%x, "
+						"len 0x%x).\n",
 						rl2[rlpos - 1].lcn,
 						rl2[rlpos - 1].len);
 				rl2[rlpos - 1].len = ++prev_run_len;
-				ntfs_debug(DEBUG_OTHER, "%s(): Run now (lcn "
-						"0x%x, len 0x%x), prev_run_len "
-						"= 0x%x.\n", __FUNCTION__,
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Run now (lcn 0x%x, len 0x%x), "
+						"prev_run_len = 0x%x.\n",
 						rl2[rlpos - 1].lcn,
 						rl2[rlpos - 1].len,
 						prev_run_len);
 			} else {
 				if (rlpos)
-					ntfs_debug(DEBUG_OTHER, "%s(): Adding "
-							"new run, (previous "
-							"run lcn 0x%x, "
-							"len 0x%x).\n",
-							__FUNCTION__,
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Adding new run, "
+							"(previous run lcn "
+							"0x%x, len 0x%x).\n",
 							rl2[rlpos - 1].lcn,
 							rl2[rlpos - 1].len);
 				else
-					ntfs_debug(DEBUG_OTHER, "%s(): Adding "
-							"new run, is first "
-							"run.\n", __FUNCTION__);
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Adding new run, "
+							"is first run.\n");
 				rl2[rlpos].lcn = prev_lcn = lcn + buf_pos;
 				rl2[rlpos].len = prev_run_len =
 						(ntfs_cluster_t)1;
@@ -879,16 +878,17 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 				 * during the respective zone switches.
 				 */
 				tc = lcn + buf_pos + 1;
-				ntfs_debug(DEBUG_OTHER, "%s(): Done. Updating "
-						"current zone position, tc = "
-						"0x%x, search_zone = %i.\n",
-						__FUNCTION__, tc, search_zone);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Done. Updating current zone "
+						"position, tc = 0x%x, "
+						"search_zone = %i.\n", tc,
+						search_zone);
 				switch (search_zone) {
 				case 1:
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->mft_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->mft_zone_pos);
 					if (tc >= vol->mft_zone_end) {
 						vol->mft_zone_pos =
@@ -901,17 +901,17 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 							tc > vol->mft_zone_pos)
 							&& tc >= vol->mft_lcn)
 						vol->mft_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->mft_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->mft_zone_pos);
 					break;
 				case 2:
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->data1_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data1_zone_pos);
 					if (tc >= vol->nr_clusters)
 						vol->data1_zone_pos =
@@ -921,17 +921,17 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 						    tc > vol->data1_zone_pos)
 						    && tc >= vol->mft_zone_end)
 						vol->data1_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->data1_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data1_zone_pos);
 					break;
 				case 4:
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->data2_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data2_zone_pos);
 					if (tc >= vol->mft_zone_start)
 						vol->data2_zone_pos =
@@ -940,52 +940,52 @@ int ntfs_allocate_clusters(ntfs_volume *vol, ntfs_cluster_t *location,
 						      vol->data2_zone_pos ||
 						      tc > vol->data2_zone_pos)
 						vol->data2_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->data2_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data2_zone_pos);
 					break;
 				default:
 					BUG();
 				}
-				ntfs_debug(DEBUG_OTHER, "%s(): Going to "
-						"done_ret.\n", __FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Going to done_ret.\n");
 				goto done_ret;
 			}
 			lcn++;
 		}
 		buf_pos += buf_size;
-		ntfs_debug(DEBUG_OTHER, "%s(): After inner while "
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): After inner while "
 				"loop: buf_size = 0x%x, lcn = 0x%x, buf_pos = "
-				"0x%x, need_writeback = %i.\n", __FUNCTION__,
-				buf_size, lcn, buf_pos, need_writeback);
+				"0x%x, need_writeback = %i.\n", buf_size, lcn,
+				buf_pos, need_writeback);
 		if (need_writeback) {
-			ntfs_debug(DEBUG_OTHER, "%s(): Writing back.\n",
-					__FUNCTION__);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Writing "
+					"back.\n");
 			need_writeback = 0;
 			io.param = buf;
 			io.do_read = 0;
 			err = ntfs_readwrite_attr(vol->bitmap, data,
 					last_read_pos, &io);
 			if (err) {
-				ntfs_error("%s(): Bitmap writeback failed "
-						"in read next buffer code "
-						"path with error code %i.\n",
-						__FUNCTION__, -err);
+				ntfs_error(__FUNCTION__ "(): Bitmap writeback "
+						"failed in read next buffer "
+						"code path with error code "
+						"%i.\n", -err);
 				goto err_ret;
 			}
 		}
 		if (buf_pos < zone_end) {
-			ntfs_debug(DEBUG_OTHER, "%s(): Continuing "
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Continuing "
 					"outer while loop, buf_pos = 0x%x, "
-					"zone_end = 0x%x.\n", __FUNCTION__,
-					buf_pos, zone_end);
+					"zone_end = 0x%x.\n", buf_pos,
+					zone_end);
 			continue;
 		}
 zone_pass_done:	/* Finished with the current zone pass. */
-		ntfs_debug(DEBUG_OTHER, "%s(): At zone_pass_done, pass = %i.\n",
-				__FUNCTION__, pass);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At zone_pass_done, "
+				"pass = %i.\n", pass);
 		if (pass == 1) {
 			/*
 			 * Now do pass 2, scanning the first part of the zone
@@ -1010,37 +1010,36 @@ zone_pass_done:	/* Finished with the current zone pass. */
 			if (zone_end < zone_start)
 				zone_end = zone_start;
 			buf_pos = zone_start;
-			ntfs_debug(DEBUG_OTHER, "%s(): Continuing "
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Continuing "
 					"outer while loop, pass = 2, "
 					"zone_start = 0x%x, zone_end = 0x%x, "
-					"buf_pos = 0x%x.\n", __FUNCTION__,
-					zone_start, zone_end, buf_pos);
+					"buf_pos = 0x%x.\n");
 			continue;
 		} /* pass == 2 */
 done_zones_check:
-		ntfs_debug(DEBUG_OTHER, "%s(): At done_zones_check, "
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At done_zones_check, "
 				"search_zone = %i, done_zones before = 0x%x, "
-				"done_zones after = 0x%x.\n", __FUNCTION__,
+				"done_zones after = 0x%x.\n",
 				search_zone, done_zones, done_zones |
 				search_zone);
 		done_zones |= search_zone;
 		if (done_zones < 7) {
-			ntfs_debug(DEBUG_OTHER, "%s(): Switching zone.\n",
-					__FUNCTION__);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Switching "
+					"zone.\n");
 			/* Now switch to the next zone we haven't done yet. */
 			pass = 1;
 			switch (search_zone) {
 			case 1:
-				ntfs_debug(DEBUG_OTHER, "%s(): Switching from "
-						"mft zone to data1 zone.\n",
-						__FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Switching from mft zone to "
+						"data1 zone.\n");
 				/* Update mft zone position. */
 				if (rlpos) {
 					ntfs_cluster_t tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->mft_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->mft_zone_pos);
 					tc = rl2[rlpos - 1].lcn +
 							rl2[rlpos - 1].len;
@@ -1055,10 +1054,10 @@ done_zones_check:
 							tc > vol->mft_zone_pos)
 							&& tc >= vol->mft_lcn)
 						vol->mft_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->mft_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->mft_zone_pos);
 				}
 				/* Switch from mft zone to data1 zone. */
@@ -1075,16 +1074,16 @@ switch_to_data1_zone:		search_zone = 2;
 				}
 				break;
 			case 2:
-				ntfs_debug(DEBUG_OTHER, "%s(): Switching from "
-						"data1 zone to data2 zone.\n",
-						__FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Switching from data1 zone to "
+						"data2 zone.\n");
 				/* Update data1 zone position. */
 				if (rlpos) {
 					ntfs_cluster_t tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->data1_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data1_zone_pos);
 					tc = rl2[rlpos - 1].lcn +
 							rl2[rlpos - 1].len;
@@ -1096,10 +1095,10 @@ switch_to_data1_zone:		search_zone = 2;
 						    tc > vol->data1_zone_pos)
 						    && tc >= vol->mft_zone_end)
 						vol->data1_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->data1_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data1_zone_pos);
 				}
 				/* Switch from data1 zone to data2 zone. */
@@ -1117,16 +1116,16 @@ switch_to_data1_zone:		search_zone = 2;
 				}
 				break;
 			case 4:
-				ntfs_debug(DEBUG_OTHER, "%s(): Switching from "
-						"data2 zone to data1 zone.\n",
-						__FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Switching from data2 zone to "
+						"data1 zone.\n");
 				/* Update data2 zone position. */
 				if (rlpos) {
 					ntfs_cluster_t tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): Before checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): Before checks, "
 							"vol->data2_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data2_zone_pos);
 					tc = rl2[rlpos - 1].lcn +
 							rl2[rlpos - 1].len;
@@ -1137,10 +1136,10 @@ switch_to_data1_zone:		search_zone = 2;
 						      vol->data2_zone_pos ||
 						      tc > vol->data2_zone_pos)
 						vol->data2_zone_pos = tc;
-					ntfs_debug(DEBUG_OTHER,
-							"%s(): After checks, "
+					ntfs_debug(DEBUG_OTHER, __FUNCTION__
+							"(): After checks, "
 							"vol->data2_zone_pos = "
-							"0x%x.\n", __FUNCTION__,
+							"0x%x.\n",
 							vol->data2_zone_pos);
 				}
 				/* Switch from data2 zone to data1 zone. */
@@ -1148,45 +1147,45 @@ switch_to_data1_zone:		search_zone = 2;
 			default:
 				BUG();
 			}
-			ntfs_debug(DEBUG_OTHER, "%s(): After zone switch, "
-					"search_zone = %i, pass = %i, "
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): After zone "
+					"switch, search_zone = %i, pass = %i, "
 					"initial_location = 0x%x, zone_start "
 					"= 0x%x, zone_end = 0x%x.\n",
-					__FUNCTION__, search_zone, pass,
-					initial_location, zone_start, zone_end);
+					search_zone, pass, initial_location,
+					zone_start, zone_end);
 			buf_pos = zone_start;
 			if (zone_start == zone_end) {
-				ntfs_debug(DEBUG_OTHER, "%s(): Empty zone, "
-						"going to done_zones_check.\n",
-						__FUNCTION__);
+				ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): "
+						"Empty zone, going to "
+						"done_zones_check.\n");
 				/* Empty zone. Don't bother searching it. */
 				goto done_zones_check;
 			}
-			ntfs_debug(DEBUG_OTHER, "%s(): Continuing outer while "
-					"loop.\n", __FUNCTION__);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Continuing "
+					"outer while loop.\n");
 			continue;
 		} /* done_zones == 7 */
-		ntfs_debug(DEBUG_OTHER, "%s(): All zones are finished.\n",
-				__FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): All zones are "
+				"finished.\n");
 		/*
 		 * All zones are finished! If DATA_ZONE, shrink mft zone. If
 		 * MFT_ZONE, we have really run out of space.
 		 */
 		mft_zone_size = vol->mft_zone_end - vol->mft_zone_start;
-		ntfs_debug(DEBUG_OTHER, "%s(): vol->mft_zone_start = 0x%x, "
-				"vol->mft_zone_end = 0x%x, mft_zone_size = "
-				"0x%x.\n", __FUNCTION__, vol->mft_zone_start,
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): vol->mft_zone_start "
+				"= 0x%x, vol->mft_zone_end = 0x%x, "
+				"mft_zone_size = 0x%x.\n", vol->mft_zone_start,
 				vol->mft_zone_end, mft_zone_size);
 		if (zone == MFT_ZONE || mft_zone_size <= (ntfs_cluster_t)0) {
-			ntfs_debug(DEBUG_OTHER, "%s(): No free clusters left, "
-					"returning -ENOSPC, going to "
-					"fail_ret.\n", __FUNCTION__);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): No free "
+					"clusters left, returning -ENOSPC, "
+					"going to fail_ret.\n");
 			/* Really no more space left on device. */
 			err = -ENOSPC;
 			goto fail_ret;
 		} /* zone == DATA_ZONE && mft_zone_size > 0 */
-		ntfs_debug(DEBUG_OTHER, "%s(): Shrinking mft zone.\n",
-				__FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Shrinking mft "
+				"zone.\n");
 		zone_end = vol->mft_zone_end;
 		mft_zone_size >>= 1;
 		if (mft_zone_size > (ntfs_cluster_t)0)
@@ -1204,72 +1203,71 @@ switch_to_data1_zone:		search_zone = 2;
 		search_zone = 2;
 		pass = 2;
 		done_zones &= ~2;
-		ntfs_debug(DEBUG_OTHER, "%s(): After shrinking mft "
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): After shrinking mft "
 				"zone, mft_zone_size = 0x%x, "
 				"vol->mft_zone_start = 0x%x, vol->mft_zone_end "
 				"= 0x%x, vol->mft_zone_pos = 0x%x, search_zone "
 				"= 2, pass = 2, dones_zones = 0x%x, zone_start "
 				"= 0x%x, zone_end = 0x%x, vol->data1_zone_pos "
 				"= 0x%x, continuing outer while loop.\n",
-				__FUNCTION__, mft_zone_size,
-				vol->mft_zone_start, vol->mft_zone_end,
-				vol->mft_zone_pos, done_zones, zone_start,
+				mft_zone_size, vol->mft_zone_start,
+				vol->mft_zone_end, vol->mft_zone_pos,
+				search_zone, pass, done_zones, zone_start,
 				zone_end, vol->data1_zone_pos);
 	}
-	ntfs_debug(DEBUG_OTHER, "%s(): After outer while loop.\n",
-			__FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): After outer while loop.\n");
 done_ret:
-	ntfs_debug(DEBUG_OTHER, "%s(): At done_ret.\n", __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At done_ret.\n");
 	rl2[rlpos].lcn = (ntfs_cluster_t)-1;
 	rl2[rlpos].len = (ntfs_cluster_t)0;
 	*rl = rl2;
 	*rl_len = rlpos;
 	if (need_writeback) {
-		ntfs_debug(DEBUG_OTHER, "%s(): Writing back.\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Writing back.\n");
 		need_writeback = 0;
 		io.param = buf;
 		io.do_read = 0;
 		err = ntfs_readwrite_attr(vol->bitmap, data, last_read_pos,
 				&io);
 		if (err) {
-			ntfs_error("%s(): Bitmap writeback failed in done "
-					"code path with error code %i.\n",
-					__FUNCTION__, -err);
+			ntfs_error(__FUNCTION__ "(): Bitmap writeback failed "
+					"in done code path with error code "
+					"%i.\n", -err);
 			goto err_ret;
 		}
-		ntfs_debug(DEBUG_OTHER, "%s(): Wrote 0x%Lx bytes.\n",
-				__FUNCTION__, io.size);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Wrote 0x%Lx bytes.\n",
+				io.size);
 	}
 done_fail_ret:
-	ntfs_debug(DEBUG_OTHER, "%s(): At done_fail_ret (follows done_ret).\n",
-			 __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At done_fail_ret (follows "
+			"done_ret).\n");
 	unlock_kernel();
 	free_page((unsigned long)buf);
 	if (err)
-		ntfs_debug(DEBUG_FILE3, "%s(): Failed to allocate "
+		ntfs_debug(DEBUG_FILE3, __FUNCTION__ "(): Failed to allocate "
 				"clusters. Returning with error code %i.\n",
-				__FUNCTION__, -err);
-	ntfs_debug(DEBUG_OTHER, "%s(): Syncing $Bitmap inode.\n", __FUNCTION__);
+				-err);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Syncing $Bitmap inode.\n");
 	if (ntfs_update_inode(vol->bitmap))
-		ntfs_error("%s(): Failed to sync inode $Bitmap. "
-				"Continuing anyway.\n", __FUNCTION__);
-	ntfs_debug(DEBUG_OTHER, "%s(): Returning with code %i.\n", __FUNCTION__,
+		ntfs_error(__FUNCTION__ "(): Failed to sync inode $Bitmap. "
+				"Continuing anyway.\n");
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Returning with code %i.\n",
 			err);
 	return err;
 fail_ret:
-	ntfs_debug(DEBUG_OTHER, "%s(): At fail_ret.\n", __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At fail_ret.\n");
 	if (rl2) {
 		if (err == -ENOSPC) {
 			/* Return first free lcn and count of free clusters. */
 			*location = rl2[0].lcn;
 			*count -= clusters;
-			ntfs_debug(DEBUG_OTHER, "%s(): err = -ENOSPC, "
-					"*location = 0x%x, *count = 0x%x.\n",
-					__FUNCTION__, *location, *count);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): err = "
+					"-ENOSPC, *location = 0x%x, *count = "
+					"0x%x.\n", *location, *count);
 		}
 		/* Deallocate all allocated clusters. */
-		ntfs_debug(DEBUG_OTHER, "%s(): Deallocating allocated "
-				"clusters.\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Deallocating "
+				"allocated clusters.\n");
 		ntfs_deallocate_clusters(vol, rl2, rlpos);
 		/* Free the runlist. */
 		ntfs_vfree(rl2);
@@ -1278,35 +1276,34 @@ fail_ret:
 			/* Nothing free at all. */
 			*location = vol->data1_zone_pos; /* Irrelevant... */
 			*count = 0;
-			ntfs_debug(DEBUG_OTHER, "%s(): No space left at all, "
-					"err = -ENOSPC, *location = 0x%x, "
-					"*count = 0.\n",
-					__FUNCTION__, *location);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): No space "
+					"left at all, err = -ENOSPC, *location "
+					"= 0x%x, *count = 0.\n", *location);
 		}
 	}
 	*rl = NULL;
 	*rl_len = 0;
-	ntfs_debug(DEBUG_OTHER, "%s(): *rl = NULL, *rl_len = 0, "
-			"going to done_fail_ret.\n", __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): *rl = NULL, *rl_len = 0, "
+			"going to done_fail_ret.\n");
 	goto done_fail_ret;
 wb_err_ret:
-	ntfs_debug(DEBUG_OTHER, "%s(): At wb_err_ret.\n", __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At wb_err_ret.\n");
 	if (need_writeback) {
 		int __err;
-		ntfs_debug(DEBUG_OTHER, "%s(): Writing back.\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Writing back.\n");
 		io.param = buf;
 		io.do_read = 0;
 		__err = ntfs_readwrite_attr(vol->bitmap, data, last_read_pos,
 				&io);
 		if (__err)
-			ntfs_error("%s(): Bitmap writeback failed in error "
-					"code path with error code %i.\n",
-					__FUNCTION__, -__err);
+			ntfs_error(__FUNCTION__ "(): Bitmap writeback failed "
+					"in error code path with error code "
+					"%i.\n", -__err);
 		need_writeback = 0;
 	}
 err_ret:
-	ntfs_debug(DEBUG_OTHER, "%s(): At err_ret, *location = -1, "
-			"*count = 0, going to fail_ret.\n", __FUNCTION__);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): At err_ret, *location = -1, "
+			"*count = 0, going to fail_ret.\n");
 	*location = -1;
 	*count = 0;
 	goto fail_ret;

@@ -2,13 +2,11 @@
 #define _ASM_IA64_BITOPS_H
 
 /*
- * Copyright (C) 1998-2003 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
-#include <linux/types.h>
-
-#include <asm/intrinsics.h>
+#include <asm/system.h>
 
 /**
  * set_bit - Atomically set a bit in memory
@@ -59,10 +57,10 @@ __set_bit (int nr, volatile void *addr)
 }
 
 /*
- * clear_bit() has "acquire" semantics.
+ * clear_bit() doesn't provide any barrier for the compiler.
  */
 #define smp_mb__before_clear_bit()	smp_mb()
-#define smp_mb__after_clear_bit()	do { /* skip */; } while (0)
+#define smp_mb__after_clear_bit()	smp_mb()
 
 /**
  * clear_bit - Clears a bit in memory
@@ -260,7 +258,7 @@ __test_and_change_bit (int nr, void *addr)
 }
 
 static __inline__ int
-test_bit (int nr, const volatile void *addr)
+test_bit (int nr, volatile void *addr)
 {
 	return 1 & (((const volatile __u32 *) addr)[nr >> 5] >> (nr & 31));
 }
@@ -282,21 +280,6 @@ ffz (unsigned long x)
 	return result;
 }
 
-/**
- * __ffs - find first bit in word.
- * @x: The word to search
- *
- * Undefined if no bit exists, so code should check against 0 first.
- */
-static __inline__ unsigned long
-__ffs (unsigned long x)
-{
-	unsigned long result;
-
-	__asm__ ("popcnt %0=%1" : "=r" (result) : "r" ((x - 1) & ~x));
-	return result;
-}
-
 #ifdef __KERNEL__
 
 /*
@@ -306,7 +289,7 @@ __ffs (unsigned long x)
 static inline unsigned long
 ia64_fls (unsigned long x)
 {
-	long double d = x;
+	double d = x;
 	long exp;
 
 	__asm__ ("getf.exp %0=%1" : "=r"(exp) : "f"(d));
@@ -342,7 +325,7 @@ hweight64 (unsigned long x)
 /*
  * Find next zero bit in a bitmap reasonably efficiently..
  */
-static inline unsigned long
+static inline int
 find_next_zero_bit (void *addr, unsigned long size, unsigned long offset)
 {
 	unsigned long *p = ((unsigned long *) addr) + (offset >> 6);
@@ -374,8 +357,6 @@ find_next_zero_bit (void *addr, unsigned long size, unsigned long offset)
 	tmp = *p;
 found_first:
 	tmp |= ~0UL << size;
-	if (tmp == ~0UL)		/* any bits zero? */
-		return result + size;	/* nope */
 found_middle:
 	return result + ffz(tmp);
 }

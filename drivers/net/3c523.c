@@ -81,14 +81,9 @@
    added option to disable multicast as is causes problems
        Ganesh Sittampalam <ganesh.sittampalam@magdalen.oxford.ac.uk>
        Stuart Adamson <stuart.adamson@compsoc.net>
-   Nov 2001
-   added support for ethtool (jgarzik)
 	
    $Header: /fsys2/home/chrisb/linux-1.3.59-MCA/drivers/net/RCS/3c523.c,v 1.1 1996/02/05 01:53:46 chrisb Exp chrisb $
  */
-
-#define DRV_NAME		"3c523"
-#define DRV_VERSION		"17-Nov-2001"
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -100,9 +95,6 @@
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/mca.h>
-#include <linux/ethtool.h>
-
-#include <asm/uaccess.h>
 #include <asm/processor.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -190,7 +182,6 @@ static void elmc_timeout(struct net_device *dev);
 #ifdef ELMC_MULTICAST
 static void set_multicast_list(struct net_device *dev);
 #endif
-static struct ethtool_ops netdev_ethtool_ops;
 
 /* helper-functions */
 static int init586(struct net_device *dev);
@@ -212,11 +203,10 @@ struct priv {
 	volatile struct iscp_struct *iscp;	/* volatile is important */
 	volatile struct scb_struct *scb;	/* volatile is important */
 	volatile struct tbd_struct *xmit_buffs[NUM_XMIT_BUFFS];
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
-	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int nop_point, num_recv_buffs;
@@ -573,8 +563,7 @@ int __init elmc_probe(struct net_device *dev)
 #else
 	dev->set_multicast_list = NULL;
 #endif
-	dev->ethtool_ops = &netdev_ethtool_ops;
-	
+
 	ether_setup(dev);
 
 	/* note that we haven't actually requested the IRQ from the kernel.
@@ -1122,11 +1111,8 @@ static int elmc_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	netif_stop_queue(dev);
 
-	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	
-	if(len != skb->len)
-		memset((char *) p->xmit_cbuffs[p->xmit_count], 0, ETH_ZLEN);
 	memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
+	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
 
 #if (NUM_XMIT_BUFFS == 1)
 #ifdef NO_NOPCOMMANDS
@@ -1228,17 +1214,7 @@ static void set_multicast_list(struct net_device *dev)
 }
 #endif
 
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "MCA 0x%lx", dev->base_addr);
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-};
+/*************************************************************************/
 
 #ifdef MODULE
 
@@ -1252,9 +1228,6 @@ MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
 MODULE_PARM_DESC(io, "EtherLink/MC I/O base address(es)");
 MODULE_PARM_DESC(irq, "EtherLink/MC IRQ number(s)");
-MODULE_AUTHOR("Chris Beauregard");
-MODULE_DESCRIPTION("net-3-driver for the 3c523 Etherlink/MC card (i82586 Ethernet chip)");
-MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

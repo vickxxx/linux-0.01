@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.59.2.1 2002/01/23 14:35:45 davem Exp $
+/* $Id: time.c,v 1.59 2001/10/30 04:54:21 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -115,7 +115,7 @@ __volatile__ unsigned int *master_l10_limit;
 void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
-	static long last_rtc_update;
+	static long last_rtc_update=0;
 
 #ifndef CONFIG_SMP
 	if(!user_mode(regs))
@@ -371,6 +371,7 @@ void __init sbus_time_init(void)
 	struct intersil *iregs;
 #endif
 
+	do_get_fast_time = do_gettimeofday;
 	BTFIXUPSET_CALL(bus_do_settimeofday, sbus_do_settimeofday, BTFIXUPCALL_NORM);
 	btfixup();
 
@@ -379,7 +380,7 @@ void __init sbus_time_init(void)
 	else
 		clock_probe();
 
-	sparc_init_timers(timer_interrupt);
+	init_timers(timer_interrupt);
 	
 #ifdef CONFIG_SUN4
 	if(idprom->id_machtype == (SM_SUN4 | SM_4_330)) {

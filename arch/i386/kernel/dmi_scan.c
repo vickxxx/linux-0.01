@@ -5,14 +5,10 @@
 #include <linux/init.h>
 #include <linux/apm_bios.h>
 #include <linux/slab.h>
-#include <asm/acpi.h>
 #include <asm/io.h>
 #include <linux/pm.h>
 #include <asm/keyboard.h>
 #include <asm/system.h>
-#include <linux/bootmem.h>
-
-#include "pci-i386.h"
 
 unsigned long dmi_broken;
 int is_sony_vaio_laptop;
@@ -24,11 +20,8 @@ struct dmi_header
 	u16	handle;
 };
 
-#ifdef DMI_DEBUG
-#define dmi_printk(x) printk x
-#else
 #define dmi_printk(x)
-#endif
+//#define dmi_printk(x) printk x
 
 static char * __init dmi_string(struct dmi_header *dm, u8 s)
 {
@@ -37,7 +30,7 @@ static char * __init dmi_string(struct dmi_header *dm, u8 s)
 	if(!s)
 		return "";
 	s--;
-	while(s>0 && *bp)
+	while(s>0)
 	{
 		bp+=strlen(bp);
 		bp++;
@@ -56,81 +49,79 @@ static int __init dmi_table(u32 base, int len, int num, void (*decode)(struct dm
 	u8 *buf;
 	struct dmi_header *dm;
 	u8 *data;
-	int i=0;
+	int i=1;
 		
-	buf = bt_ioremap(base, len);
+	buf = ioremap(base, len);
 	if(buf==NULL)
 		return -1;
 
 	data = buf;
 
 	/*
- 	 *	Stop when we see all the items the table claimed to have
+ 	 *	Stop when we see al the items the table claimed to have
  	 *	OR we run off the end of the table (also happens)
  	 */
  
-	while(i<num && data-buf+sizeof(struct dmi_header)<=len)
+	while(i<num && (data - buf) < len)
 	{
 		dm=(struct dmi_header *)data;
+	
 		/*
-		 *  We want to know the total length (formated area and strings)
-		 *  before decoding to make sure we won't run off the table in
-		 *  dmi_decode or dmi_string
+		 *	Avoid misparsing crud if the length of the last
+	 	 *	record is crap 
 		 */
+		if((data-buf+dm->length) >= len)
+			break;
+		decode(dm);		
 		data+=dm->length;
-		while(data-buf<len-1 && (data[0] || data[1]))
+		/*
+		 *	Don't go off the end of the data if there is
+	 	 *	stuff looking like string fill past the end
+	 	 */
+		while((data-buf) < len && (*data || data[1]))
 			data++;
-		if(data-buf<len-1)
-			decode(dm);
 		data+=2;
 		i++;
 	}
-	bt_iounmap(buf, len);
+	iounmap(buf);
 	return 0;
 }
 
 
-inline static int __init dmi_checksum(u8 *buf)
-{
-	u8 sum=0;
-	int a;
-	
-	for(a=0; a<15; a++)
-		sum+=buf[a];
-	return (sum==0);
-}
-
 static int __init dmi_iterate(void (*decode)(struct dmi_header *))
 {
-	u8 buf[15];
-	u32 fp=0xF0000;
+	unsigned char buf[20];
+	long fp=0xE0000L;
+	fp -= 16;
 
+#ifdef CONFIG_SIMNOW
+	/*
+ 	 *	Skip on x86/64 with simnow. Will eventually go away
+ 	 *	If you see this ifdef in 2.6pre mail me !
+ 	 */
+	return -1;
+#endif
+ 	
 	while( fp < 0xFFFFF)
 	{
-		isa_memcpy_fromio(buf, fp, 15);
-		if(memcmp(buf, "_DMI_", 5)==0 && dmi_checksum(buf))
+		fp+=16;
+		isa_memcpy_fromio(buf, fp, 20);
+		if(memcmp(buf, "_DMI_", 5)==0)
 		{
 			u16 num=buf[13]<<8|buf[12];
 			u16 len=buf[7]<<8|buf[6];
 			u32 base=buf[11]<<24|buf[10]<<16|buf[9]<<8|buf[8];
 
-			/*
-			 * DMI version 0.0 means that the real version is taken from
-			 * the SMBIOS version, which we don't know at this point.
-			 */
-			if(buf[14]!=0)
-				dmi_printk((KERN_INFO "DMI %d.%d present.\n",
-					buf[14]>>4, buf[14]&0x0F));
-			else
-				dmi_printk((KERN_INFO "DMI present.\n"));
+			dmi_printk((KERN_INFO "DMI %d.%d present.\n",
+				buf[14]>>4, buf[14]&0x0F));
 			dmi_printk((KERN_INFO "%d structures occupying %d bytes.\n",
-				num, len));
+				buf[13]<<8|buf[12],
+				buf[7]<<8|buf[6]));
 			dmi_printk((KERN_INFO "DMI table at 0x%08X.\n",
-				base));
+				buf[11]<<24|buf[10]<<16|buf[9]<<8|buf[8]));
 			if(dmi_table(base,len, num, decode)==0)
 				return 0;
 		}
-		fp+=16;
 	}
 	return -1;
 }
@@ -164,7 +155,7 @@ static void __init dmi_save_ident(struct dmi_header *dm, int slot, int string)
 		return;
 	if (dmi_ident[slot])
 		return;
-	dmi_ident[slot] = alloc_bootmem(strlen(p)+1);
+	dmi_ident[slot] = kmalloc(strlen(p)+1, GFP_KERNEL);
 	if(dmi_ident[slot])
 		strcpy(dmi_ident[slot], p);
 	else
@@ -198,6 +189,7 @@ struct dmi_blacklist
  *	KT7 series. On these it seems the newer BIOS has fixed them. The
  *	rule needs to be improved to match specific BIOS revisions with
  *	corruption problems
+ */ 
  
 static __init int disable_ide_dma(struct dmi_blacklist *d)
 {
@@ -211,7 +203,6 @@ static __init int disable_ide_dma(struct dmi_blacklist *d)
 #endif	
 	return 0;
 }
- */ 
 
 /* 
  * Reboot options and system auto-detection code provided by
@@ -301,31 +292,6 @@ static __init int apm_is_horked(struct dmi_blacklist *d)
 	return 0;
 }
 
-static __init int apm_is_horked_d850md(struct dmi_blacklist *d)
-{
-	if (apm_info.disabled == 0)
-	{
-		apm_info.disabled = 1;
-		printk(KERN_ERR "%s machine detected. Disabling APM.\n", d->ident);
-		printk(KERN_ERR "This bug is fixed in bios P15 which is available for \n");
-		printk(KERN_ERR "download from support.intel.com \n");
-	}
-	return 0;
-}
-
-/* 
- * Some APM bioses hang on APM idle calls
- */
-
-static __init int apm_likes_to_melt(struct dmi_blacklist *d)
-{
-	if (apm_info.forbid_idle == 0)
-	{
-		apm_info.forbid_idle = 1;
-		printk(KERN_INFO "%s machine detected. Disabling APM idle calls.\n", d->ident);
-	}
-	return 0;
-}
 
 /*
  *  Check for clue free BIOS implementations who use
@@ -381,6 +347,23 @@ static __init int swab_apm_power_in_minutes(struct dmi_blacklist *d)
 }
 
 /*
+ * The Intel 440GX hall of shame. 
+ *
+ * On many (all we have checked) of these boxes the $PIRQ table is wrong.
+ * The MP1.4 table is right however and so SMP kernels tend to work. 
+ */
+ 
+static __init int broken_pirq(struct dmi_blacklist *d)
+{
+	printk(KERN_INFO " *** Possibly defective BIOS detected (irqtable)\n");
+	printk(KERN_INFO " *** Many BIOSes matching this signature have incorrect IRQ routing tables.\n");
+	printk(KERN_INFO " *** If you see IRQ problems, in paticular SCSI resets and hangs at boot\n");
+	printk(KERN_INFO " *** contact your hardware vendor and ask about updates.\n");
+	printk(KERN_INFO " *** Building an SMP kernel may evade the bug some of the time.\n");
+	return 0;
+}
+
+/*
  * ASUS K7V-RM has broken ACPI table defining sleep modes
  */
 
@@ -388,6 +371,16 @@ static __init int broken_acpi_Sx(struct dmi_blacklist *d)
 {
 	printk(KERN_WARNING "Detected ASUS mainboard with broken ACPI sleep table\n");
 	dmi_broken |= BROKEN_ACPI_Sx;
+	return 0;
+}
+
+/*
+ * Toshiba keyboard likes to repeat keys when they are not repeated.
+ */
+
+static __init int broken_toshiba_keyboard(struct dmi_blacklist *d)
+{
+	printk(KERN_WARNING "Toshiba with broken keyboard detected. If your keyboard sometimes generates 3 keypresses instead of one, contact pavel@ucw.cz\n");
 	return 0;
 }
 
@@ -411,7 +404,7 @@ typedef void (pm_kbd_func) (void);
 
 static __init int broken_ps2_resume(struct dmi_blacklist *d)
 {
-#if defined(CONFIG_VT) && !defined(CONFIG_DUMMY_KEYB)
+#ifdef CONFIG_VT
 	if (pm_kbd_request_override == NULL)
 	{
 		pm_kbd_request_override = pckbd_pm_resume;
@@ -421,50 +414,6 @@ static __init int broken_ps2_resume(struct dmi_blacklist *d)
 	return 0;
 }
 
-/*
- * Work around broken HP Pavilion Notebooks which assign USB to
- * IRQ 9 even though it is actually wired to IRQ 11
- */
-static __init int fix_broken_hp_bios_irq9(struct dmi_blacklist *d)
-{
-#ifdef CONFIG_PCI
-	extern int broken_hp_bios_irq9;
-	if (broken_hp_bios_irq9 == 0)
-	{
-		broken_hp_bios_irq9 = 1;
-		printk(KERN_INFO "%s detected - fixing broken IRQ routing\n", d->ident);
-	}
-#endif
-	return 0;
-}
-
-/*
- * Work around broken Acer TravelMate 360 Notebooks which assign Cardbus to
- * IRQ 11 even though it is actually wired to IRQ 10
- */
-static __init int fix_acer_tm360_irqrouting(struct dmi_blacklist *d)
-{
-#ifdef CONFIG_PCI
-	extern int acer_tm360_irqrouting;
-	if (acer_tm360_irqrouting == 0) {
-		acer_tm360_irqrouting = 1;
-		printk(KERN_INFO "%s detected - fixing broken IRQ routing\n", d->ident);
-	}
-#endif
-	return 0;
-}
-
-/*
- *	Exploding PnPBIOS. Don't yet know if its the BIOS or us for
- *	some entries
- */
-
-static __init int exploding_pnp_bios(struct dmi_blacklist *d)
-{
-	printk(KERN_WARNING "%s detected. Disabling PnPBIOS\n", d->ident);
-	dmi_broken |= BROKEN_PNP_BIOS;
-	return 0;
-}
 
 /*
  *	Simple "print if true" callback
@@ -476,70 +425,10 @@ static __init int print_if_true(struct dmi_blacklist *d)
 	return 0;
 }
 
-
-#ifdef	CONFIG_ACPI_BOOT
-extern int acpi_force;
-
-static __init __attribute__((unused)) int dmi_disable_acpi(struct dmi_blacklist *d) 
-{ 
-	if (!acpi_force) { 
-		printk(KERN_NOTICE "%s detected: acpi off\n",d->ident); 
-		disable_acpi();
-	} else { 
-		printk(KERN_NOTICE 
-		       "Warning: DMI blacklist says broken, but acpi forced\n"); 
-	}
-	return 0;
-} 
-
-
-/*
- * Limit ACPI to CPU enumeration for HT
- */
-static __init __attribute__((unused)) int force_acpi_ht(struct dmi_blacklist *d) 
-{ 
-	if (!acpi_force) { 
-		printk(KERN_NOTICE "%s detected: force use of acpi=ht\n", d->ident); 
-		disable_acpi();
-		acpi_ht = 1; 
-	} else { 
-		printk(KERN_NOTICE 
-		       "Warning: acpi=force overrules DMI blacklist: acpi=ht\n"); 
-	}
-	return 0;
-} 
-#endif	/* CONFIG_ACPI_BOOT */
-
-#ifdef	CONFIG_ACPI_PCI
-static __init int disable_acpi_pci(struct dmi_blacklist *d) 
-{ 
-	printk(KERN_NOTICE "%s detected: force use of pci=noacpi\n", d->ident);
-	acpi_noirq_set();
-	return 0;
-} 
-#endif	/* CONFIG_ACPI_PCI */
-
 /*
  *	Process the DMI blacklists
  */
  
-
-#ifdef CONFIG_VT
-/*      IBM bladeservers have a USB console switch. The keyboard type is USB
- *      and the hardware does not have a console keyboard. We disable the
- *      console keyboard so the kernel does not try to initialize one and
- *      spew errors. This can be used for all systems without a console
- *      keyboard like systems with just a USB or IrDA keyboard.
- */
-static __init int disable_console_keyboard(struct dmi_blacklist *d)
-{
-        extern int keyboard_controller_present;
-        printk(KERN_INFO "*** Hardware has no console keyboard controller.\n");
-        printk(KERN_INFO "*** Disabling console keyboard.\n");
-        keyboard_controller_present = 0;
-        return 0;
-}
-#endif
 
 /*
  *	This will be expanded over time to force things like the APM 
@@ -552,51 +441,16 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_PRODUCT_NAME, "KT7-RAID"),
 			NO_MATCH, NO_MATCH, NO_MATCH
 			} },
-	{ disable_ide_dma, "Dell Inspiron 8100", {	/* Kill DMA on Dell Inspiron 8100 laptops */
-			MATCH(DMI_PRODUCT_NAME, "Inspiron 8100"),
-			MATCH(DMI_SYS_VENDOR,"Dell Computer Corporation"), NO_MATCH, NO_MATCH
-			} },
-
 #endif			
-	/* Dell Laptop hall of shame */
 	{ broken_ps2_resume, "Dell Latitude C600", {	/* Handle problems with APM on the C600 */
 		        MATCH(DMI_SYS_VENDOR, "Dell"),
 			MATCH(DMI_PRODUCT_NAME, "Latitude C600"),
 			NO_MATCH, NO_MATCH
 	                } },
-	{ apm_is_horked, "Dell Inspiron 2500", { /* APM crashes */
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "Inspiron 2500"),
-			MATCH(DMI_BIOS_VENDOR,"Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION,"A11")
-			} },
-	{ apm_is_horked, "Dell Dimension 4100", { /* APM crashes */
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "XPS-Z"),
-			MATCH(DMI_BIOS_VENDOR,"Intel Corp."),
-			MATCH(DMI_BIOS_VERSION,"A11")
-			} },
-	{ set_apm_ints, "Dell Inspiron", {	/* Allow interrupts during suspend on Dell Inspiron laptops*/
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "Inspiron 4000"),
-			NO_MATCH, NO_MATCH
-			} },
-	{ set_apm_ints, "Dell Latitude", {	/* Allow interrupts during suspend on Dell Latitude laptops*/
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "Latitude C510"),
-			NO_MATCH, NO_MATCH
-			} },
 	{ broken_apm_power, "Dell Inspiron 5000e", {	/* Handle problems with APM on Inspiron 5000e */
 			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
 			MATCH(DMI_BIOS_VERSION, "A04"),
 			MATCH(DMI_BIOS_DATE, "08/24/2000"), NO_MATCH
-			} },
-
-	/* other items */	
-	{ broken_apm_power, "Dell Inspiron 2500", {	/* Handle problems with APM on Inspiron 2500 */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "A12"),
-			MATCH(DMI_BIOS_DATE, "02/04/2002"), NO_MATCH
 			} },
 	{ set_realmode_power_off, "Award Software v4.60 PGMA", {	/* broken PM poweroff bios */
 			MATCH(DMI_BIOS_VENDOR, "Award Software International, Inc."),
@@ -613,9 +467,9 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_PRODUCT_NAME, "PowerEdge 300/"),
 			NO_MATCH, NO_MATCH
 			} },
-	{ set_bios_reboot, "Dell PowerEdge 2400", {  /* Handle problems with rebooting on Dell 2400's */
+	{ set_apm_ints, "Dell Inspiron", {	/* Allow interrupts during suspend on Dell Inspiron laptops*/
 			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "PowerEdge 2400"),
+			MATCH(DMI_PRODUCT_NAME, "Inspiron 4000"),
 			NO_MATCH, NO_MATCH
 			} },
 	{ set_apm_ints, "Compaq 12XL125", {	/* Allow interrupts during suspend on Compaq Laptops*/
@@ -629,36 +483,10 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_PRODUCT_NAME, "L8400K series Notebook PC"),
 			NO_MATCH, NO_MATCH
 			} },					
-	{ apm_is_horked, "ABIT KX7-333[R]", { /* APM blows on shutdown */
-			MATCH(DMI_BOARD_VENDOR, "ABIT"),
-			MATCH(DMI_BOARD_NAME, "VT8367-8233A (KX7-333[R])"),
-			NO_MATCH, NO_MATCH,
-			} },
 	{ apm_is_horked, "Trigem Delhi3", { /* APM crashes */
 			MATCH(DMI_SYS_VENDOR, "TriGem Computer, Inc"),
 			MATCH(DMI_PRODUCT_NAME, "Delhi3"),
 			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_is_horked, "Fujitsu-Siemens", { /* APM crashes */
-			MATCH(DMI_BIOS_VENDOR, "hoenix/FUJITSU SIEMENS"),
-			MATCH(DMI_BIOS_VERSION, "Version1.01"),
-			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_is_horked_d850md, "Intel D850MD", { /* APM crashes */
-			MATCH(DMI_BIOS_VENDOR, "Intel Corp."),
-			MATCH(DMI_BIOS_VERSION, "MV85010A.86A.0016.P07.0201251536"),
-			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_is_horked, "Intel D810EMO", { /* APM crashes */
-			MATCH(DMI_BIOS_VENDOR, "Intel Corp."),
-			MATCH(DMI_BIOS_VERSION, "MO81010A.86A.0008.P04.0004170800"),
-			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_is_horked, "Dell XPS-Z", { /* APM crashes */
-			MATCH(DMI_BIOS_VENDOR, "Intel Corp."),
-			MATCH(DMI_BIOS_VERSION, "A11"),
-			MATCH(DMI_PRODUCT_NAME, "XPS-Z"),
-			NO_MATCH,
 			} },
 	{ apm_is_horked, "Sharp PC-PJ/AX", { /* APM crashes */
 			MATCH(DMI_SYS_VENDOR, "SHARP"),
@@ -666,28 +494,6 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_BIOS_VENDOR,"SystemSoft"),
 			MATCH(DMI_BIOS_VERSION,"Version R2.08")
 			} },
-	{ apm_is_horked, "Dell Inspiron 2500", { /* APM crashes */
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME, "Inspiron 2500"),
-			MATCH(DMI_BIOS_VENDOR,"Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION,"A11")
-			} },
-	{ apm_likes_to_melt, "Jabil AMD", { /* APM idle hangs */
-			MATCH(DMI_BIOS_VENDOR, "American Megatrends Inc."),
-			MATCH(DMI_BIOS_VERSION, "0AASNP06"),
-			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_likes_to_melt, "AMI Bios", { /* APM idle hangs */
-			MATCH(DMI_BIOS_VENDOR, "American Megatrends Inc."),
-			MATCH(DMI_BIOS_VERSION, "0AASNP05"), 
-			NO_MATCH, NO_MATCH,
-			} },
-	{ apm_likes_to_melt, "Dell Inspiron 7500", { /* APM idle hangs */
-			MATCH(DMI_SYS_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_PRODUCT_NAME,  "Inspiron 7500"), 
-			NO_MATCH, NO_MATCH,
-			} },
-
 	{ sony_vaio_laptop, "Sony Vaio", { /* This is a Sony Vaio laptop */
 			MATCH(DMI_SYS_VENDOR, "Sony Corporation"),
 			MATCH(DMI_PRODUCT_NAME, "PCG-"),
@@ -717,18 +523,6 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_BIOS_DATE, "05/11/00"), NO_MATCH
 			} },
 
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z600NE */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "WME01Z1"),
-			MATCH(DMI_BIOS_DATE, "08/11/00"), NO_MATCH
-			} },
-
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z600LEK(DE) */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "R0206Z3"),
-			MATCH(DMI_BIOS_DATE, "12/25/00"), NO_MATCH
-			} },
-
 	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z505LS */
 			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
 			MATCH(DMI_BIOS_VERSION, "R0203D0"),
@@ -739,18 +533,6 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
 			MATCH(DMI_BIOS_VERSION, "R0203Z3"),
 			MATCH(DMI_BIOS_DATE, "08/25/00"), NO_MATCH
-			} },
-	
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z505LS (with updated BIOS) */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "R0209Z3"),
-			MATCH(DMI_BIOS_DATE, "05/12/01"), NO_MATCH
-			} },
-	
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z505LS (with updated BIOS) */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "WXP01Z3"),
-			MATCH(DMI_BIOS_DATE, "10/26/01"), NO_MATCH
 			} },
 	
 	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-F104K */
@@ -769,56 +551,59 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_BIOS_VERSION, "R0204P1"),
 			MATCH(DMI_BIOS_DATE, "09/12/00"), NO_MATCH
 			} },
-			
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z600RE */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "R0116Z1"),
+
+	/* Problem Intel 440GX bioses */
+
+	{ broken_pirq, "SABR1 Bios", {			/* Bad $PIR */
+			MATCH(DMI_BIOS_VENDOR, "Intel Corporation"),
+			MATCH(DMI_BIOS_VERSION,"SABR1"),
 			NO_MATCH, NO_MATCH
 			} },
-	
-	{ swab_apm_power_in_minutes, "Sony VAIO", {	/* Handle problems with APM on Sony Vaio PCG-Z600RE */
-			MATCH(DMI_BIOS_VENDOR, "Phoenix Technologies LTD"),
-			MATCH(DMI_BIOS_VERSION, "RK116Z1"),
+	{ broken_pirq, "l44GX Bios", {        		/* Bad $PIR */
+			MATCH(DMI_BIOS_VENDOR, "Intel Corporation"),
+			MATCH(DMI_BIOS_VERSION,"L440GX0.86B.0094.P10"),
+			NO_MATCH, NO_MATCH
+                        } },
+	{ broken_pirq, "l44GX Bios", {		/* Bad $PIR */
+			MATCH(DMI_BIOS_VENDOR, "Intel Corporation"),
+			MATCH(DMI_BIOS_VERSION,"L440GX0.86B.0125.P13"),
 			NO_MATCH, NO_MATCH
 			} },
-
-	{ exploding_pnp_bios, "Higraded P14H", {	/* BIOSPnP problem */
-			MATCH(DMI_BIOS_VENDOR, "American Megatrends Inc."),
-			MATCH(DMI_BIOS_VERSION, "07.00T"),
-			MATCH(DMI_SYS_VENDOR, "Higraded"),
-			MATCH(DMI_PRODUCT_NAME, "P14H")
+	{ broken_pirq, "l44GX Bios", {		/* Bad $PIR */
+			MATCH(DMI_BIOS_VENDOR, "Intel Corporation"),
+			MATCH(DMI_BIOS_VERSION,"L440GX0.86B.0066.P07.9906041405"),
+			NO_MATCH, NO_MATCH
 			} },
-
-	{ init_ints_after_s1, "Toshiba Satellite 4030cdt", { /* Reinitialization of 8259 is needed after S1 resume */
-			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
+                        
+	/* Intel in disgiuse - In this case they can't hide and they don't run
+	   too well either... */
+	{ broken_pirq, "Dell PowerEdge 8450", {		/* Bad $PIR */
+			MATCH(DMI_PRODUCT_NAME, "Dell PowerEdge 8450"),
 			NO_MATCH, NO_MATCH, NO_MATCH
 			} },
-
+			
 	{ broken_acpi_Sx, "ASUS K7V-RM", {		/* Bad ACPI Sx table */
 			MATCH(DMI_BIOS_VERSION,"ASUS K7V-RM ACPI BIOS Revision 1003A"),
 			MATCH(DMI_BOARD_NAME, "<K7V-RM>"),
 			NO_MATCH, NO_MATCH
 			} },
 			
+	{ broken_toshiba_keyboard, "Toshiba Satellite 4030cdt", { /* Keyboard generates spurious repeats */
+			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
+			NO_MATCH, NO_MATCH, NO_MATCH
+			} },
+	{ init_ints_after_s1, "Toshiba Satellite 4030cdt", { /* Reinitialization of 8259 is needed after S1 resume */
+			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
+			NO_MATCH, NO_MATCH, NO_MATCH
+			} },
+
 	{ print_if_true, KERN_WARNING "IBM T23 - BIOS 1.03b+ and controller firmware 1.02+ may be needed for Linux APM.", {
 			MATCH(DMI_SYS_VENDOR, "IBM"),
 			MATCH(DMI_BIOS_VERSION, "1AET38WW (1.01b)"),
 			NO_MATCH, NO_MATCH
 			} },
 	 
-	{ fix_broken_hp_bios_irq9, "HP Pavilion N5400 Series Laptop", {
-			MATCH(DMI_SYS_VENDOR, "Hewlett-Packard"),
-			MATCH(DMI_BIOS_VERSION, "GE.M1.03"),
-			MATCH(DMI_PRODUCT_VERSION, "HP Pavilion Notebook Model GE"),
-			MATCH(DMI_BOARD_VERSION, "OmniBook N32N-736")
-			} },
-
-	{ fix_acer_tm360_irqrouting, "Acer TravelMate 36x Laptop", {
-			MATCH(DMI_SYS_VENDOR, "Acer"),
-			MATCH(DMI_PRODUCT_NAME, "TravelMate 360"),
-			NO_MATCH, NO_MATCH
-			} },
- 
+			
 	/*
 	 *	Generic per vendor APM settings
 	 */
@@ -827,132 +612,6 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_SYS_VENDOR, "IBM"),
 			NO_MATCH, NO_MATCH, NO_MATCH
 			} },
-#ifdef CONFIG_VT
-        /*
-         *      IBM Bladeservers
-         */
-
-        { disable_console_keyboard, "IBM Server Blade", {
-                        MATCH(DMI_SYS_VENDOR,"IBM"),
-                        MATCH(DMI_BOARD_NAME, "Server Blade"),
-                        NO_MATCH, NO_MATCH
-                        } },
-#endif
-
-#ifdef	CONFIG_ACPI_BOOT
-	/*
-	 * If your system is blacklisted here, but you find that acpi=force
-	 * works for you, please contact acpi-devel@sourceforge.net
-	 */
-
-	/*
-	 *	Boxes that need ACPI disabled
-	 */
-
-	{ dmi_disable_acpi, "IBM Thinkpad", {
-			MATCH(DMI_BOARD_VENDOR, "IBM"),
-			MATCH(DMI_BOARD_NAME, "2629H1G"),
-			NO_MATCH, NO_MATCH }},
-
-	/*
-	 *	Boxes that need acpi=ht 
-	 */
-
-	{ force_acpi_ht, "FSC Primergy T850", {
-			MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
-			MATCH(DMI_PRODUCT_NAME, "PRIMERGY T850"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "DELL GX240", {
-			MATCH(DMI_BOARD_VENDOR, "Dell Computer Corporation"),
-			MATCH(DMI_BOARD_NAME, "OptiPlex GX240"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "HP VISUALIZE NT Workstation", {
-			MATCH(DMI_BOARD_VENDOR, "Hewlett-Packard"),
-			MATCH(DMI_PRODUCT_NAME, "HP VISUALIZE NT Workstation"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "Compaq ProLiant DL380 G2", {
-			MATCH(DMI_SYS_VENDOR, "Compaq"),
-			MATCH(DMI_PRODUCT_NAME, "ProLiant DL380 G2"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "Compaq ProLiant ML530 G2", {
-			MATCH(DMI_SYS_VENDOR, "Compaq"),
-			MATCH(DMI_PRODUCT_NAME, "ProLiant ML530 G2"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "Compaq ProLiant ML350 G3", {
-			MATCH(DMI_SYS_VENDOR, "Compaq"),
-			MATCH(DMI_PRODUCT_NAME, "ProLiant ML350 G3"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "Compaq Workstation W8000", {
-			MATCH(DMI_SYS_VENDOR, "Compaq"),
-			MATCH(DMI_PRODUCT_NAME, "Workstation W8000"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "ASUS P4B266", {
-			MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
-			MATCH(DMI_BOARD_NAME, "P4B266"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "ASUS P2B-DS", {
-			MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
-			MATCH(DMI_BOARD_NAME, "P2B-DS"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "ASUS CUR-DLS", {
-			MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
-			MATCH(DMI_BOARD_NAME, "CUR-DLS"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "ABIT i440BX-W83977", {
-			MATCH(DMI_BOARD_VENDOR, "ABIT <http://www.abit.com>"),
-			MATCH(DMI_BOARD_NAME, "i440BX-W83977 (BP6)"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "IBM Bladecenter", {
-			MATCH(DMI_BOARD_VENDOR, "IBM"),
-			MATCH(DMI_BOARD_NAME, "IBM eServer BladeCenter HS20"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "IBM eServer xSeries 360", {
-			MATCH(DMI_BOARD_VENDOR, "IBM"),
-			MATCH(DMI_BOARD_NAME, "eServer xSeries 360"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "IBM eserver xSeries 330", {
-			MATCH(DMI_BOARD_VENDOR, "IBM"),
-			MATCH(DMI_BOARD_NAME, "eserver xSeries 330"),
-			NO_MATCH, NO_MATCH }},
-
-	{ force_acpi_ht, "IBM eserver xSeries 440", {
-			MATCH(DMI_BOARD_VENDOR, "IBM"),
-			MATCH(DMI_PRODUCT_NAME, "eserver xSeries 440"),
-			NO_MATCH, NO_MATCH }},
-
-#endif	/* CONFIG_ACPI_BOOT */
-#ifdef	CONFIG_ACPI_PCI
-	/*
-	 *	Boxes that need ACPI PCI IRQ routing disabled
-	 */
-
-	{ disable_acpi_pci, "ASUS A7V", {
-			MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC"),
-			MATCH(DMI_BOARD_NAME, "<A7V>"),
-			/* newer BIOS, Revision 1011, does work */
-			MATCH(DMI_BIOS_VERSION, "ASUS A7V ACPI BIOS Revision 1007"),
-			NO_MATCH }},
-
-	{ disable_acpi_pci, "Acer TravelMate 36x Laptop", {
-			MATCH(DMI_SYS_VENDOR, "Acer"),
-			MATCH(DMI_PRODUCT_NAME, "TravelMate 360"),
-			NO_MATCH, NO_MATCH
-			} },
- 
-#endif	/* CONFIG_ACPI_PCI */
 
 	{ NULL, }
 };
@@ -963,34 +622,11 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
  *	returns 1 or we hit the end.
  */
  
-
 static __init void dmi_check_blacklist(void)
 {
 	struct dmi_blacklist *d;
 	int i;
 		
-#ifdef  CONFIG_ACPI_BOOT
-#define	ACPI_BLACKLIST_CUTOFF_YEAR	2001
-
-	if (dmi_ident[DMI_BIOS_DATE]) { 
-		char *s = strrchr(dmi_ident[DMI_BIOS_DATE], '/'); 
-		if (s) { 
-			int year, disable = 0;
-			s++; 
-			year = simple_strtoul(s,NULL,0); 
-			if (year >= 1000) 
-				disable = year < ACPI_BLACKLIST_CUTOFF_YEAR; 
-			else if (year < 1 || (year > 90 && year <= 99))
-				disable = 1; 
-			if (disable && !acpi_force) { 
-				printk(KERN_NOTICE "ACPI disabled because your bios is from %s and too old\n", s);
-				printk(KERN_NOTICE "You can enable it with acpi=force\n");
-				disable_acpi();
-			} 
-		}
-	}
-#endif
-
 	d=&dmi_blacklist[0];
 	while(d->callback)
 	{
@@ -1021,55 +657,70 @@ fail:
 
 static void __init dmi_decode(struct dmi_header *dm)
 {
-#ifdef	DMI_DEBUG
 	u8 *data = (u8 *)dm;
-#endif
+	char *p;
+	
 	switch(dm->type)
 	{
 		case  0:
-			dmi_printk(("BIOS Vendor: %s\n",
-				dmi_string(dm, data[4])));
-			dmi_save_ident(dm, DMI_BIOS_VENDOR, 4);
-			dmi_printk(("BIOS Version: %s\n", 
-				dmi_string(dm, data[5])));
-			dmi_save_ident(dm, DMI_BIOS_VERSION, 5);
-			dmi_printk(("BIOS Release: %s\n",
-				dmi_string(dm, data[8])));
-			dmi_save_ident(dm, DMI_BIOS_DATE, 8);
+			p=dmi_string(dm,data[4]);
+			if(*p)
+			{
+				dmi_printk(("BIOS Vendor: %s\n", p));
+				dmi_save_ident(dm, DMI_BIOS_VENDOR, 4);
+				dmi_printk(("BIOS Version: %s\n", 
+					dmi_string(dm, data[5])));
+				dmi_save_ident(dm, DMI_BIOS_VERSION, 5);
+				dmi_printk(("BIOS Release: %s\n",
+					dmi_string(dm, data[8])));
+				dmi_save_ident(dm, DMI_BIOS_DATE, 8);
+			}
 			break;
+			
 		case 1:
-			dmi_printk(("System Vendor: %s\n",
-				dmi_string(dm, data[4])));
-			dmi_save_ident(dm, DMI_SYS_VENDOR, 4);
-			dmi_printk(("Product Name: %s\n",
-				dmi_string(dm, data[5])));
-			dmi_save_ident(dm, DMI_PRODUCT_NAME, 5);
-			dmi_printk(("Version: %s\n",
-				dmi_string(dm, data[6])));
-			dmi_save_ident(dm, DMI_PRODUCT_VERSION, 6);
-			dmi_printk(("Serial Number: %s\n",
-				dmi_string(dm, data[7])));
+			p=dmi_string(dm,data[4]);
+			if(*p)
+			{
+				dmi_printk(("System Vendor: %s.\n",p));
+				dmi_save_ident(dm, DMI_SYS_VENDOR, 4);
+				dmi_printk(("Product Name: %s.\n",
+					dmi_string(dm, data[5])));
+				dmi_save_ident(dm, DMI_PRODUCT_NAME, 5);
+				dmi_printk(("Version %s.\n",
+					dmi_string(dm, data[6])));
+				dmi_save_ident(dm, DMI_PRODUCT_VERSION, 6);
+				dmi_printk(("Serial Number %s.\n",
+					dmi_string(dm, data[7])));
+			}
 			break;
 		case 2:
-			dmi_printk(("Board Vendor: %s\n",
-				dmi_string(dm, data[4])));
-			dmi_save_ident(dm, DMI_BOARD_VENDOR, 4);
-			dmi_printk(("Board Name: %s\n",
-				dmi_string(dm, data[5])));
-			dmi_save_ident(dm, DMI_BOARD_NAME, 5);
-			dmi_printk(("Board Version: %s\n",
-				dmi_string(dm, data[6])));
-			dmi_save_ident(dm, DMI_BOARD_VERSION, 6);
+			p=dmi_string(dm,data[4]);
+			if(*p)
+			{
+				dmi_printk(("Board Vendor: %s.\n",p));
+				dmi_save_ident(dm, DMI_BOARD_VENDOR, 4);
+				dmi_printk(("Board Name: %s.\n",
+					dmi_string(dm, data[5])));
+				dmi_save_ident(dm, DMI_BOARD_NAME, 5);
+				dmi_printk(("Board Version: %s.\n",
+					dmi_string(dm, data[6])));
+				dmi_save_ident(dm, DMI_BOARD_VERSION, 6);
+			}
+			break;
+		case 3:
+			p=dmi_string(dm,data[8]);
+			if(*p && *p!=' ')
+				dmi_printk(("Asset Tag: %s.\n", p));
 			break;
 	}
 }
 
-void __init dmi_scan_machine(void)
+static int __init dmi_scan_machine(void)
 {
 	int err = dmi_iterate(dmi_decode);
 	if(err == 0)
 		dmi_check_blacklist();
-	else
-		printk(KERN_INFO "DMI not present.\n");
+	return err;
 }
 
+module_init(dmi_scan_machine);

@@ -77,7 +77,7 @@ void efs_read_inode(struct inode *inode) {
 			(EFS_BLOCKSIZE / sizeof(struct efs_dinode))) *
 		sizeof(struct efs_dinode);
 
-	bh = sb_bread(inode->i_sb, block);
+	bh = bread(inode->i_dev, block, EFS_BLOCKSIZE);
 	if (!bh) {
 		printk(KERN_WARNING "EFS: bread() failed at block %d\n", block);
 		goto read_inode_error;
@@ -271,7 +271,7 @@ efs_block_t efs_map_block(struct inode *inode, efs_block_t block) {
 		if (first || lastblock != iblock) {
 			if (bh) brelse(bh);
 
-			bh = sb_bread(inode->i_sb, iblock);
+			bh = bread(inode->i_dev, iblock, EFS_BLOCKSIZE);
 			if (!bh) {
 				printk(KERN_ERR "EFS: bread() failed at block %d\n", iblock);
 				return 0;

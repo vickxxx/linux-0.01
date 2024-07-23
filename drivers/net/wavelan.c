@@ -2297,7 +2297,7 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 			wv_splx(lp, &flags);
 			if (copy_to_user(wrq->u.data.pointer,
 					 lp->his_sum,
-					 sizeof(long) * lp->his_number));
+					 sizeof(long) * lp->his_number);
 				ret = -EFAULT;
 			wv_splhi(lp, &flags);
 
@@ -2782,9 +2782,6 @@ static inline int wv_packet_write(device * dev, void *buf, short length)
 		    (unsigned char *) &nop.nop_h.ac_link,
 		    sizeof(nop.nop_h.ac_link));
 
-	/* Make sure the watchdog will keep quiet for a while */
-	dev->trans_start = jiffies;
-
 	/* Keep stats up to date. */
 	lp->stats.tx_bytes += length;
 
@@ -2824,13 +2821,6 @@ static int wavelan_packet_xmit(struct sk_buff *skb, device * dev)
 	printk(KERN_DEBUG "%s: ->wavelan_packet_xmit(0x%X)\n", dev->name,
 	       (unsigned) skb);
 #endif
-
-	if(skb->len < ETH_ZLEN)
-	{
-		skb = skb_padto(skb, ETH_ZLEN);
-		if(skb == NULL)
-			return 0;
-	}
 
 	/*
 	 * Block a timer-based transmit from overlapping.
@@ -4029,8 +4019,7 @@ static int __init wavelan_config(device * dev)
 
 	dev->irq = irq;
 
-	if (!request_region(ioaddr, sizeof(ha_t), "wavelan"))
-		return -EBUSY;
+	request_region(ioaddr, sizeof(ha_t), "wavelan");
 
 	dev->mem_start = 0x0000;
 	dev->mem_end = 0x0000;

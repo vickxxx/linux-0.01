@@ -2108,8 +2108,8 @@ static inline int __init lanai_pci_start(struct lanai_dev *lanai)
 	}
 	result = pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &w);
 	if (result != PCIBIOS_SUCCESSFUL) {
-		printk(KERN_ERR DEV_LABEL "(itf %d): can't read "
-		    "PCI_SUBSYSTEM_ID: %d\n", lanai->number, result);
+		printk(KERN_ERR DEV_LABEL "(itf %d): can't read ""
+		    PCI_SUBSYSTEM_ID: %d\n", lanai->number, result);
 		return -EINVAL;
 	}
 	if ((result = check_board_id_and_rev("PCI", w, NULL)) != 0)
@@ -2842,6 +2842,7 @@ static const struct atmdev_ops ops = {
 	phy_get:	NULL,
 	feedback:	NULL,
 	change_qos:	lanai_change_qos,
+	free_rx_skb:	NULL,
 	proc_read:	lanai_proc_read
 };
 

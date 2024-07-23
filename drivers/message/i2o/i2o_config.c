@@ -45,7 +45,7 @@ static void *page_buf;
 static spinlock_t i2o_config_lock = SPIN_LOCK_UNLOCKED;
 struct wait_queue *i2o_wait_queue;
 
-#define MODINC(x,y) ((x) = ((x) + 1) % (y))
+#define MODINC(x,y) (x = x++ % y)
 
 struct i2o_cfg_info
 {
@@ -428,7 +428,7 @@ static int ioctl_parms(unsigned long arg, unsigned int type)
 	put_user(len, kcmd.reslen);
 	if(len > reslen)
 		ret = -ENOBUFS;
-	else if(copy_to_user(kcmd.resbuf, res, len))
+	else if(copy_to_user(cmd->resbuf, res, len))
 		ret = -EFAULT;
 
 	kfree(res);
@@ -447,7 +447,7 @@ int ioctl_html(unsigned long arg)
 	int token;
 	u32 len;
 	u32 reslen;
-	u32 msg[MSG_FRAME_SIZE];
+	u32 msg[MSG_FRAME_SIZE/4];
 
 	if(copy_from_user(&kcmd, cmd, sizeof(struct i2o_html)))
 	{
@@ -908,7 +908,11 @@ static struct miscdevice i2o_miscdev = {
 	&config_fops
 };	
 
-static int __init i2o_config_init(void)
+#ifdef MODULE
+int init_module(void)
+#else
+int __init i2o_config_init(void)
+#endif
 {
 	printk(KERN_INFO "I2O configuration manager v 0.04.\n");
 	printk(KERN_INFO "  (C) Copyright 1999 Red Hat Software\n");
@@ -918,7 +922,7 @@ static int __init i2o_config_init(void)
 		printk(KERN_ERR "i2o_config: no memory for page buffer.\n");
 		return -ENOBUFS;
 	}
-	if(misc_register(&i2o_miscdev) < 0)
+	if(misc_register(&i2o_miscdev)==-1)
 	{
 		printk(KERN_ERR "i2o_config: can't register device.\n");
 		kfree(page_buf);
@@ -942,7 +946,9 @@ static int __init i2o_config_init(void)
 	return 0;
 }
 
-static void i2o_config_exit(void)
+#ifdef MODULE
+
+void cleanup_module(void)
 {
 	misc_deregister(&i2o_miscdev);
 	
@@ -957,5 +963,4 @@ MODULE_AUTHOR("Red Hat Software");
 MODULE_DESCRIPTION("I2O Configuration");
 MODULE_LICENSE("GPL");
 
-module_init(i2o_config_init);
-module_exit(i2o_config_exit);
+#endif

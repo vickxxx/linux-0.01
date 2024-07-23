@@ -6,7 +6,7 @@
     the GNU General Public License.
 =========================================================================*/
 
-/* $Id: nsp_debug.c,v 1.3 2003/07/26 14:21:09 elca Exp $ */
+/* $Id: nsp_debug.c,v 1.8 2001/09/07 04:32:28 elca Exp $ */
 
 /*
  * Show the command data of a command
@@ -87,21 +87,14 @@ static void print_opcodek(unsigned char opcode)
 
 static void print_commandk (unsigned char *command)
 {
-	int i, s;
+	int i,s;
 	printk(KERN_DEBUG);
 	print_opcodek(command[0]);
 	/*printk(KERN_DEBUG __FUNCTION__ " ");*/
-	if ((command[0] >> 5) == 6 ||
-	    (command[0] >> 5) == 7 ) {
-		s = 12; /* vender specific */
-	} else {
-		s = COMMAND_SIZE(command[0]);
-	}
-	for ( i = 1; i < s; ++i) {
+	for ( i = 1, s = COMMAND_SIZE(command[0]); i < s; ++i) {
 		printk("%02x ", command[i]);
 	}
-
-	switch (s) {
+	switch (COMMAND_SIZE(command[0])) {
 	case 6:
 		printk("LBA=%d len=%d",
 		       (((unsigned int)command[1] & 0x0f) << 16) |
@@ -138,9 +131,9 @@ static void print_commandk (unsigned char *command)
 	printk("\n");
 }
 
-static void show_command(Scsi_Cmnd *SCpnt)
+static void show_command(Scsi_Cmnd *ptr)
 {
-	print_commandk(SCpnt->cmnd);
+	print_commandk(ptr->cmnd);
 }
 
 static void show_phase(Scsi_Cmnd *SCpnt)

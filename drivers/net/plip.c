@@ -1097,10 +1097,7 @@ int plip_hard_header_cache(struct neighbour *neigh,
 	
 	if ((ret = nl->orig_hard_header_cache(neigh, hh)) == 0)
 	{
-		struct ethhdr *eth;
-
-		eth = (struct ethhdr*)(((u8*)hh->hh_data) +
-				       HH_DATA_OFF(sizeof(*eth)));
+		struct ethhdr *eth = (struct ethhdr*)(((u8*)hh->hh_data) + 2);
 		plip_rewrite_address (neigh->dev, eth);
 	}
 	
@@ -1180,7 +1177,7 @@ plip_close(struct net_device *dev)
 	struct plip_local *rcv = &nl->rcv_data;
 
 	netif_stop_queue (dev);
-	disable_parport_interrupts(dev);
+	DISABLE(dev->irq);
 	synchronize_irq();
 
 	if (dev->irq == -1)

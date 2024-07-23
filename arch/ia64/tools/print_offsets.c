@@ -1,9 +1,8 @@
 /*
  * Utility to generate asm-ia64/offsets.h.
  *
- * Copyright (C) 2002-2003 Fenghua Yu <fenghua.yu@intel.com>
  * Copyright (C) 1999-2001 Hewlett-Packard Co
- *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2001 David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * Note that this file has dual use: when building the kernel
  * natively, the file is translated into a binary and executed.  When
@@ -11,7 +10,7 @@
  * gets translated into an assembly file which, in turn, is processed
  * by awk to generate offsets.h.  So if you make any changes to this
  * file, be sure to verify that the awk procedure still works (see
- * print_offsets.awk).
+ * prin_offsets.awk).
  */
 #include <linux/config.h>
 
@@ -21,7 +20,6 @@
 #include <asm-ia64/ptrace.h>
 #include <asm-ia64/siginfo.h>
 #include <asm-ia64/sigcontext.h>
-#include <asm-ia64/mca.h>
 
 #include "../kernel/sigframe.h"
 
@@ -60,19 +58,10 @@ tab[] =
     { "IA64_TASK_THREAD_OFFSET",	offsetof (struct task_struct, thread) },
     { "IA64_TASK_THREAD_KSP_OFFSET",	offsetof (struct task_struct, thread.ksp) },
 #ifdef CONFIG_PERFMON
-    { "IA64_TASK_PFM_OVFL_BLOCK_RESET_OFFSET",
-					offsetof(struct task_struct, thread.pfm_ovfl_block_reset) },
+    { "IA64_TASK_PFM_MUST_BLOCK_OFFSET",offsetof(struct task_struct, thread.pfm_must_block) },
 #endif
     { "IA64_TASK_PID_OFFSET",		offsetof (struct task_struct, pid) },
     { "IA64_TASK_MM_OFFSET",		offsetof (struct task_struct, mm) },
-    { "IA64_PT_REGS_B6_OFFSET",		offsetof (struct pt_regs, b6) },
-    { "IA64_PT_REGS_B7_OFFSET",		offsetof (struct pt_regs, b7) },
-    { "IA64_PT_REGS_AR_CSD_OFFSET",	offsetof (struct pt_regs, ar_csd) },
-    { "IA64_PT_REGS_AR_SSD_OFFSET",	offsetof (struct pt_regs, ar_ssd) },
-    { "IA64_PT_REGS_R8_OFFSET",		offsetof (struct pt_regs, r8) },
-    { "IA64_PT_REGS_R9_OFFSET",		offsetof (struct pt_regs, r9) },
-    { "IA64_PT_REGS_R10_OFFSET",	offsetof (struct pt_regs, r10) },
-    { "IA64_PT_REGS_R11_OFFSET",	offsetof (struct pt_regs, r11) },
     { "IA64_PT_REGS_CR_IPSR_OFFSET",	offsetof (struct pt_regs, cr_ipsr) },
     { "IA64_PT_REGS_CR_IIP_OFFSET",	offsetof (struct pt_regs, cr_iip) },
     { "IA64_PT_REGS_CR_IFS_OFFSET",	offsetof (struct pt_regs, cr_ifs) },
@@ -82,16 +71,19 @@ tab[] =
     { "IA64_PT_REGS_AR_RNAT_OFFSET",	offsetof (struct pt_regs, ar_rnat) },
     { "IA64_PT_REGS_AR_BSPSTORE_OFFSET",offsetof (struct pt_regs, ar_bspstore) },
     { "IA64_PT_REGS_PR_OFFSET",		offsetof (struct pt_regs, pr) },
-    { "IA64_PT_REGS_B0_OFFSET",		offsetof (struct pt_regs, b0) },
+    { "IA64_PT_REGS_B6_OFFSET",		offsetof (struct pt_regs, b6) },
     { "IA64_PT_REGS_LOADRS_OFFSET",	offsetof (struct pt_regs, loadrs) },
     { "IA64_PT_REGS_R1_OFFSET",		offsetof (struct pt_regs, r1) },
-    { "IA64_PT_REGS_R12_OFFSET",	offsetof (struct pt_regs, r12) },
-    { "IA64_PT_REGS_R13_OFFSET",	offsetof (struct pt_regs, r13) },
-    { "IA64_PT_REGS_AR_FPSR_OFFSET",	offsetof (struct pt_regs, ar_fpsr) },
-    { "IA64_PT_REGS_R15_OFFSET",	offsetof (struct pt_regs, r15) },
-    { "IA64_PT_REGS_R14_OFFSET",	offsetof (struct pt_regs, r14) },
     { "IA64_PT_REGS_R2_OFFSET",		offsetof (struct pt_regs, r2) },
     { "IA64_PT_REGS_R3_OFFSET",		offsetof (struct pt_regs, r3) },
+    { "IA64_PT_REGS_R12_OFFSET",	offsetof (struct pt_regs, r12) },
+    { "IA64_PT_REGS_R13_OFFSET",	offsetof (struct pt_regs, r13) },
+    { "IA64_PT_REGS_R14_OFFSET",	offsetof (struct pt_regs, r14) },
+    { "IA64_PT_REGS_R15_OFFSET",	offsetof (struct pt_regs, r15) },
+    { "IA64_PT_REGS_R8_OFFSET",		offsetof (struct pt_regs, r8) },
+    { "IA64_PT_REGS_R9_OFFSET",		offsetof (struct pt_regs, r9) },
+    { "IA64_PT_REGS_R10_OFFSET",	offsetof (struct pt_regs, r10) },
+    { "IA64_PT_REGS_R11_OFFSET",	offsetof (struct pt_regs, r11) },
     { "IA64_PT_REGS_R16_OFFSET",	offsetof (struct pt_regs, r16) },
     { "IA64_PT_REGS_R17_OFFSET",	offsetof (struct pt_regs, r17) },
     { "IA64_PT_REGS_R18_OFFSET",	offsetof (struct pt_regs, r18) },
@@ -109,18 +101,21 @@ tab[] =
     { "IA64_PT_REGS_R30_OFFSET",	offsetof (struct pt_regs, r30) },
     { "IA64_PT_REGS_R31_OFFSET",	offsetof (struct pt_regs, r31) },
     { "IA64_PT_REGS_AR_CCV_OFFSET",	offsetof (struct pt_regs, ar_ccv) },
+    { "IA64_PT_REGS_AR_FPSR_OFFSET",	offsetof (struct pt_regs, ar_fpsr) },
+    { "IA64_PT_REGS_B0_OFFSET",		offsetof (struct pt_regs, b0) },
+    { "IA64_PT_REGS_B7_OFFSET",		offsetof (struct pt_regs, b7) },
     { "IA64_PT_REGS_F6_OFFSET",		offsetof (struct pt_regs, f6) },
     { "IA64_PT_REGS_F7_OFFSET",		offsetof (struct pt_regs, f7) },
     { "IA64_PT_REGS_F8_OFFSET",		offsetof (struct pt_regs, f8) },
     { "IA64_PT_REGS_F9_OFFSET",		offsetof (struct pt_regs, f9) },
-    { "IA64_PT_REGS_F10_OFFSET",	offsetof (struct pt_regs, f10) },
-    { "IA64_PT_REGS_F11_OFFSET",	offsetof (struct pt_regs, f11) },
     { "IA64_SWITCH_STACK_CALLER_UNAT_OFFSET",	offsetof (struct switch_stack, caller_unat) },
     { "IA64_SWITCH_STACK_AR_FPSR_OFFSET",	offsetof (struct switch_stack, ar_fpsr) },
     { "IA64_SWITCH_STACK_F2_OFFSET",		offsetof (struct switch_stack, f2) },
     { "IA64_SWITCH_STACK_F3_OFFSET",		offsetof (struct switch_stack, f3) },
     { "IA64_SWITCH_STACK_F4_OFFSET",		offsetof (struct switch_stack, f4) },
     { "IA64_SWITCH_STACK_F5_OFFSET",		offsetof (struct switch_stack, f5) },
+    { "IA64_SWITCH_STACK_F10_OFFSET",		offsetof (struct switch_stack, f10) },
+    { "IA64_SWITCH_STACK_F11_OFFSET",		offsetof (struct switch_stack, f11) },
     { "IA64_SWITCH_STACK_F12_OFFSET",		offsetof (struct switch_stack, f12) },
     { "IA64_SWITCH_STACK_F13_OFFSET",		offsetof (struct switch_stack, f13) },
     { "IA64_SWITCH_STACK_F14_OFFSET",		offsetof (struct switch_stack, f14) },
@@ -157,7 +152,6 @@ tab[] =
     { "IA64_SWITCH_STACK_AR_RNAT_OFFSET",	offsetof (struct switch_stack, ar_rnat) },
     { "IA64_SWITCH_STACK_AR_BSPSTORE_OFFSET",	offsetof (struct switch_stack, ar_bspstore) },
     { "IA64_SWITCH_STACK_PR_OFFSET",	offsetof (struct switch_stack, pr) },
-    { "IA64_SIGCONTEXT_IP_OFFSET",	offsetof (struct sigcontext, sc_ip) },
     { "IA64_SIGCONTEXT_AR_BSP_OFFSET",	offsetof (struct sigcontext, sc_ar_bsp) },
     { "IA64_SIGCONTEXT_AR_FPSR_OFFSET", offsetof (struct sigcontext, sc_ar_fpsr) },
     { "IA64_SIGCONTEXT_AR_RNAT_OFFSET",	offsetof (struct sigcontext, sc_ar_rnat) },
@@ -180,7 +174,6 @@ tab[] =
     { "IA64_CPU_IRQ_COUNT_OFFSET",	offsetof (struct cpuinfo_ia64, irq_stat.f.irq_count) },
     { "IA64_CPU_BH_COUNT_OFFSET",	offsetof (struct cpuinfo_ia64, irq_stat.f.bh_count) },
     { "IA64_CPU_PHYS_STACKED_SIZE_P8_OFFSET",offsetof (struct cpuinfo_ia64, phys_stacked_size_p8)},
-    { "IA64_MCA_TLB_INFO_SIZE",		sizeof (struct ia64_mca_tlb_info) },
 };
 
 static const char *tabs = "\t\t\t\t\t\t\t\t\t\t";

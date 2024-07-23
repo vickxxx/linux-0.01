@@ -13,6 +13,7 @@ SECTIONS
 	*(.fixup)
 	*(.gnu.warning)
 	} = 0x9090
+  .text.lock : { *(.text.lock) }	/* out-of-line lock text */
 
   _etext = .;			/* End of text section */
 

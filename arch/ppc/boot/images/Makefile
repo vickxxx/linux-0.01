@@ -5,8 +5,8 @@
 include $(TOPDIR)/Rules.make
 
 vmlinux.gz: $(TOPDIR)/vmlinux
-	$(OBJCOPY) --strip-all -S -O binary $(TOPDIR)/vmlinux vmlinux
+	$(OBJCOPY) -S -O binary $(TOPDIR)/vmlinux vmlinux
 	gzip -vf9 vmlinux
 
 clean:
-	rm -f sImage vmapus vmlinux* miboot* zImage* zvmlinux* uImage
+	rm -f sImage vmapus vmlinux.* miboot.image* zImage* zvmlinux.*

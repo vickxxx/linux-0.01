@@ -29,17 +29,11 @@
     Paul Gortmaker	: add support for the 2nd 8kB of RAM on 16 bit cards.
     Paul Gortmaker	: multiple card support for module users.
     rjohnson@analogic.com : Fix up PIO interface for efficient operation.
-    Jeff Garzik		: ethtool support
 
 */
 
-#define DRV_NAME	"3c503"
-#define DRV_VERSION	"1.10a"
-#define DRV_RELDATE	"11/17/2001"
-
-
 static const char version[] =
-    DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Donald Becker (becker@scyld.com)\n";
+    "3c503.c:v1.10 9/23/93  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
 
@@ -51,9 +45,7 @@ static const char version[] =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
-#include <linux/ethtool.h>
 
-#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
@@ -82,7 +74,6 @@ static void el2_block_input(struct net_device *dev, int count, struct sk_buff *s
 			   int ring_offset);
 static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			 int ring_page);
-static struct ethtool_ops netdev_ethtool_ops;
 
 
 /* This routine probes for a memory-mapped 3c503 board by looking for
@@ -310,7 +301,6 @@ el2_probe1(struct net_device *dev, int ioaddr)
 
     dev->open = &el2_open;
     dev->stop = &el2_close;
-    dev->ethtool_ops = &netdev_ethtool_ops;
 
     if (dev->mem_start)
 	printk("%s: %s - %dkB RAM, 8kB shared mem window at %#6lx-%#6lx.\n",
@@ -512,7 +502,6 @@ el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 
     if (dev->mem_start) {       /* Use the shared memory. */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
-	hdr->count = le16_to_cpu(hdr->count);
 	return;
     }
 
@@ -618,20 +607,6 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     outb_p(ei_status.interface_num == 0 ? ECNTRL_THIN : ECNTRL_AUI, E33G_CNTRL);
     return;
 }
-
-
-static void netdev_get_drvinfo(struct net_device *dev,
-			       struct ethtool_drvinfo *info)
-{
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
-	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
-}
-
-static struct ethtool_ops netdev_ethtool_ops = {
-	.get_drvinfo		= netdev_get_drvinfo,
-};
-
 #ifdef MODULE
 #define MAX_EL2_CARDS	4	/* Max number of EL2 cards per module */
 
@@ -642,11 +617,9 @@ static int xcvr[MAX_EL2_CARDS];	/* choose int. or ext. xcvr */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
-MODULE_PARM_DESC(io, "I/O base address(es)");
-MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
-MODULE_PARM_DESC(xcvr, "tranceiver(s) (0=internal, 1=external)");
-MODULE_DESCRIPTION("3Com ISA EtherLink II, II/16 (3c503, 3c503/16) driver");
-MODULE_LICENSE("GPL");
+MODULE_PARM_DESC(io, "EtherLink II I/O base address(es)");
+MODULE_PARM_DESC(irq, "EtherLink II IRQ number(s) (assigned)");
+MODULE_PARM_DESC(xcvr, "EtherLink II tranceiver(s) (0=internal, 1=external)");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -694,6 +667,7 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
 
 
 /*

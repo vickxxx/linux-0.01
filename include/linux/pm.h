@@ -103,8 +103,8 @@ struct pm_dev
 	void		*data;
 
 	unsigned long	 flags;
-	unsigned long	 state;
-	unsigned long	 prev_state;
+	int		 state;
+	int		 prev_state;
 
 	struct list_head entry;
 };

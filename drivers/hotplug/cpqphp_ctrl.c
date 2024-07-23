@@ -1,9 +1,9 @@
 /*
  * Compaq Hot Plug Controller Driver
  *
- * Copyright (C) 1995,2001 Compaq Computer Corporation
- * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
- * Copyright (C) 2001 IBM Corp.
+ * Copyright (c) 1995,2001 Compaq Computer Corporation
+ * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (c) 2001 IBM Corp.
  *
  * All rights reserved.
  *
@@ -135,9 +135,9 @@ static u8 handle_switch_change(u8 change, struct controller * ctrl)
 
 
 /*
- * cpqhp_find_slot
+ * find_slot
  */
-struct slot *cpqhp_find_slot (struct controller * ctrl, u8 device)
+static inline struct slot *find_slot (struct controller * ctrl, u8 device)
 {
 	struct slot *slot;
 
@@ -186,7 +186,7 @@ static u8 handle_presence_change(u16 change, struct controller * ctrl)
 
 			rc++;
 
-			p_slot = cpqhp_find_slot(ctrl, hp_slot + (readb(ctrl->hpc_reg + SLOT_MASK) >> 4));
+			p_slot = find_slot(ctrl, hp_slot + (readb(ctrl->hpc_reg + SLOT_MASK) >> 4));
 
 			// If the switch closed, must be a button
 			// If not in button mode, nevermind
@@ -771,13 +771,13 @@ static struct pci_resource *get_resource (struct pci_resource **head, u32 size)
 		return(NULL);
 
 	for (node = *head; node; node = node->next) {
-		dbg("%s: req_size =%x node=%p, base=%x, length=%x\n",
-		    __FUNCTION__, size, node, node->base, node->length);
+		dbg(__FUNCTION__": req_size =%x node=%p, base=%x, length=%x\n",
+		    size, node, node->base, node->length);
 		if (node->length < size)
 			continue;
 
 		if (node->base & (size - 1)) {
-			dbg("%s: not aligned\n", __FUNCTION__);
+			dbg(__FUNCTION__": not aligned\n");
 			// this one isn't base aligned properly
 			// so we'll make a new entry and split it up
 			temp_dword = (node->base | (size-1)) + 1;
@@ -803,7 +803,7 @@ static struct pci_resource *get_resource (struct pci_resource **head, u32 size)
 
 		// Don't need to check if too small since we already did
 		if (node->length > size) {
-			dbg("%s: too big\n", __FUNCTION__);
+			dbg(__FUNCTION__": too big\n");
 			// this one is longer than we need
 			// so we'll make a new entry and split it up
 			split_node = (struct pci_resource*) kmalloc(sizeof(struct pci_resource), GFP_KERNEL);
@@ -820,7 +820,7 @@ static struct pci_resource *get_resource (struct pci_resource **head, u32 size)
 			node->next = split_node;
 		}  // End of too big on top end
 
-		dbg("%s: got one!!!\n", __FUNCTION__);
+		dbg(__FUNCTION__": got one!!!\n");
 		// If we got here, then it is the right size
 		// Now take it out of the list
 		if (*head == node) {
@@ -855,7 +855,7 @@ int cpqhp_resource_sort_and_combine(struct pci_resource **head)
 	struct pci_resource *node2;
 	int out_of_order = 1;
 
-	dbg("%s: head = %p, *head = %p\n",__FUNCTION__, head, *head);
+	dbg(__FUNCTION__": head = %p, *head = %p\n", head, *head);
 
 	if (!(*head))
 		return(1);
@@ -916,7 +916,6 @@ int cpqhp_resource_sort_and_combine(struct pci_resource **head)
 void cpqhp_ctrl_intr(int IRQ, struct controller * ctrl, struct pt_regs *regs)
 {
 	u8 schedule_flag = 0;
-	u8 reset;
 	u16 misc;
 	u32 Diff;
 	u32 temp_dword;
@@ -942,7 +941,7 @@ void cpqhp_ctrl_intr(int IRQ, struct controller * ctrl, struct pt_regs *regs)
 		// Read to clear posted writes
 		misc = readw(ctrl->hpc_reg + MISC);
 
-		dbg ("%s - waking up\n", __FUNCTION__);
+		dbg (__FUNCTION__" - waking up\n");
 		wake_up_interruptible(&ctrl->queue);
 	}
 
@@ -966,15 +965,6 @@ void cpqhp_ctrl_intr(int IRQ, struct controller * ctrl, struct pt_regs *regs)
 		schedule_flag += handle_switch_change((u8)(Diff & 0xFFL), ctrl);
 		schedule_flag += handle_presence_change((u16)((Diff & 0xFFFF0000L) >> 16), ctrl);
 		schedule_flag += handle_power_fault((u8)((Diff & 0xFF00L) >> 8), ctrl);
-	}
-	
-	reset = readb(ctrl->hpc_reg + RESET_FREQ_MODE);
-	if (reset & 0x40) {
-		/* Bus Reset has completed */
-		reset &= 0xCF;
-		writeb(reset, ctrl->hpc_reg + RESET_FREQ_MODE);
-		reset = readb(ctrl->hpc_reg + RESET_FREQ_MODE);
-		wake_up_interruptible(&ctrl->queue);
 	}
 
 	if (schedule_flag) {
@@ -1179,7 +1169,6 @@ static u32 board_replaced(struct pci_func * func, struct controller * ctrl)
 {
 	u8 hp_slot;
 	u8 temp_byte;
-	u8 adapter_speed;
 	u32 index;
 	u32 rc = 0;
 	u32 src = 8;
@@ -1197,47 +1186,46 @@ static u32 board_replaced(struct pci_func * func, struct controller * ctrl)
 		//*********************************
 		rc = CARD_FUNCTIONING;
 	} else {
-		// Wait for exclusive access to hardware
-		down(&ctrl->crit_sect);
+		if (ctrl->speed == 1) {
+			// Wait for exclusive access to hardware
+			down(&ctrl->crit_sect);
 
-		// turn on board without attaching to the bus
-		enable_slot_power (ctrl, hp_slot);
+			// turn on board without attaching to the bus
+			enable_slot_power (ctrl, hp_slot);
 
-		set_SOGO(ctrl);
+			set_SOGO(ctrl);
 
-		// Wait for SOBS to be unset
-		wait_for_ctrl_irq (ctrl);
+			// Wait for SOBS to be unset
+			wait_for_ctrl_irq (ctrl);
 
-		// Change bits in slot power register to force another shift out
-		// NOTE: this is to work around the timer bug
-		temp_byte = readb(ctrl->hpc_reg + SLOT_POWER);
-		writeb(0x00, ctrl->hpc_reg + SLOT_POWER);
-		writeb(temp_byte, ctrl->hpc_reg + SLOT_POWER);
+			// Change bits in slot power register to force another shift out
+			// NOTE: this is to work around the timer bug
+			temp_byte = readb(ctrl->hpc_reg + SLOT_POWER);
+			writeb(0x00, ctrl->hpc_reg + SLOT_POWER);
+			writeb(temp_byte, ctrl->hpc_reg + SLOT_POWER);
 
-		set_SOGO(ctrl);
+			set_SOGO(ctrl);
 
-		// Wait for SOBS to be unset
-		wait_for_ctrl_irq (ctrl);
-		
-		// 66MHz and/or PCI-X support check
-		adapter_speed = get_adapter_speed(ctrl, hp_slot);
-		if (ctrl->speed != adapter_speed)
-			if (set_controller_speed(ctrl, adapter_speed, hp_slot))
+			// Wait for SOBS to be unset
+			wait_for_ctrl_irq (ctrl);
+
+			if (!(readl(ctrl->hpc_reg + NON_INT_INPUT) & (0x01 << hp_slot))) {
 				rc = WRONG_BUS_FREQUENCY;
+			}
+			// turn off board without attaching to the bus
+			disable_slot_power (ctrl, hp_slot);
 
-		// turn off board without attaching to the bus
-		disable_slot_power (ctrl, hp_slot);
+			set_SOGO(ctrl);
 
-		set_SOGO(ctrl);
+			// Wait for SOBS to be unset
+			wait_for_ctrl_irq (ctrl);
 
-		// Wait for SOBS to be unset
-		wait_for_ctrl_irq (ctrl);
+			// Done with exclusive hardware access
+			up(&ctrl->crit_sect);
 
-		// Done with exclusive hardware access
-		up(&ctrl->crit_sect);
-
-		if (rc)
-			return(rc);
+			if (rc)
+				return(rc);
+		}
 
 		// Wait for exclusive access to hardware
 		down(&ctrl->crit_sect);
@@ -1385,7 +1373,6 @@ static u32 board_added(struct pci_func * func, struct controller * ctrl)
 {
 	u8 hp_slot;
 	u8 temp_byte;
-	u8 adapter_speed;
 	int index;
 	u32 temp_register = 0xFFFFFFFF;
 	u32 rc = 0;
@@ -1394,105 +1381,103 @@ static u32 board_added(struct pci_func * func, struct controller * ctrl)
 	struct resource_lists res_lists;
 
 	hp_slot = func->device - ctrl->slot_device_offset;
-	dbg("%s: func->device, slot_offset, hp_slot = %d, %d ,%d\n",
-	    __FUNCTION__, func->device, ctrl->slot_device_offset, hp_slot);
-	
-	// Wait for exclusive access to hardware
-	down(&ctrl->crit_sect);
+	dbg(__FUNCTION__": func->device, slot_offset, hp_slot = %d, %d ,%d\n",
+	    func->device, ctrl->slot_device_offset, hp_slot);
 
-	// turn on board without attaching to the bus
-	enable_slot_power (ctrl, hp_slot);
+	if (ctrl->speed == 1) {
+		// Wait for exclusive access to hardware
+		down(&ctrl->crit_sect);
 
-	set_SOGO(ctrl);
+		// turn on board without attaching to the bus
+		enable_slot_power (ctrl, hp_slot);
 
-	// Wait for SOBS to be unset
-	wait_for_ctrl_irq (ctrl);
+		set_SOGO(ctrl);
 
-	// Change bits in slot power register to force another shift out
-	// NOTE: this is to work around the timer bug
-	temp_byte = readb(ctrl->hpc_reg + SLOT_POWER);
-	writeb(0x00, ctrl->hpc_reg + SLOT_POWER);
-	writeb(temp_byte, ctrl->hpc_reg + SLOT_POWER);
+		// Wait for SOBS to be unset
+		wait_for_ctrl_irq (ctrl);
 
-	set_SOGO(ctrl);
+		// Change bits in slot power register to force another shift out
+		// NOTE: this is to work around the timer bug
+		temp_byte = readb(ctrl->hpc_reg + SLOT_POWER);
+		writeb(0x00, ctrl->hpc_reg + SLOT_POWER);
+		writeb(temp_byte, ctrl->hpc_reg + SLOT_POWER);
 
-	// Wait for SOBS to be unset
-	wait_for_ctrl_irq (ctrl);
-	
-	// 66MHz and/or PCI-X support check
-	adapter_speed = get_adapter_speed(ctrl, hp_slot);
-	if (ctrl->speed != adapter_speed)
-		if (set_controller_speed(ctrl, adapter_speed, hp_slot))
+		set_SOGO(ctrl);
+
+		// Wait for SOBS to be unset
+		wait_for_ctrl_irq (ctrl);
+
+		if (!(readl(ctrl->hpc_reg + NON_INT_INPUT) & (0x01 << hp_slot))) {
 			rc = WRONG_BUS_FREQUENCY;
-	
-	// turn off board without attaching to the bus
-	disable_slot_power (ctrl, hp_slot);
+		}
+		// turn off board without attaching to the bus
+		disable_slot_power (ctrl, hp_slot);
 
-	set_SOGO(ctrl);
+		set_SOGO(ctrl);
 
-	// Wait for SOBS to be unset
-	wait_for_ctrl_irq (ctrl);
+		// Wait for SOBS to be unset
+		wait_for_ctrl_irq (ctrl);
 
-	// Done with exclusive hardware access
-	up(&ctrl->crit_sect);
+		// Done with exclusive hardware access
+		up(&ctrl->crit_sect);
 
-	if (rc)
-		return(rc);
-	
-	p_slot = cpqhp_find_slot(ctrl, hp_slot + ctrl->slot_device_offset);
+		if (rc)
+			return(rc);
+	}
+	p_slot = find_slot(ctrl, hp_slot + ctrl->slot_device_offset);
 
 	// turn on board and blink green LED
 
 	// Wait for exclusive access to hardware
-	dbg("%s: before down\n", __FUNCTION__);
+	dbg(__FUNCTION__": before down\n");
 	down(&ctrl->crit_sect);
-	dbg("%s: after down\n", __FUNCTION__);
+	dbg(__FUNCTION__": after down\n");
 
-	dbg("%s: before slot_enable\n", __FUNCTION__);
+	dbg(__FUNCTION__": before slot_enable\n");
 	slot_enable (ctrl, hp_slot);
 
-	dbg("%s: before green_LED_blink\n", __FUNCTION__);
+	dbg(__FUNCTION__": before green_LED_blink\n");
 	green_LED_blink (ctrl, hp_slot);
 
-	dbg("%s: before amber_LED_blink\n", __FUNCTION__);
+	dbg(__FUNCTION__": before amber_LED_blink\n");
 	amber_LED_off (ctrl, hp_slot);
 
-	dbg("%s: before set_SOGO\n", __FUNCTION__);
+	dbg(__FUNCTION__": before set_SOGO\n");
 	set_SOGO(ctrl);
 
 	// Wait for SOBS to be unset
-	dbg("%s: before wait_for_ctrl_irq\n", __FUNCTION__);
+	dbg(__FUNCTION__": before wait_for_ctrl_irq\n");
 	wait_for_ctrl_irq (ctrl);
-	dbg("%s: after wait_for_ctrl_irq\n", __FUNCTION__);
+	dbg(__FUNCTION__": after wait_for_ctrl_irq\n");
 
 	// Done with exclusive hardware access
-	dbg("%s: before up\n", __FUNCTION__);
+	dbg(__FUNCTION__": before up\n");
 	up(&ctrl->crit_sect);
-	dbg("%s: after up\n", __FUNCTION__);
+	dbg(__FUNCTION__": after up\n");
 
 	// Wait for ~1 second because of hot plug spec
-	dbg("%s: before long_delay\n", __FUNCTION__);
+	dbg(__FUNCTION__": before long_delay\n");
 	long_delay(1*HZ);
-	dbg("%s: after long_delay\n", __FUNCTION__);
+	dbg(__FUNCTION__": after long_delay\n");
 
-	dbg("%s: func status = %x\n", __FUNCTION__, func->status);
+	dbg(__FUNCTION__": func status = %x\n", func->status);
 	// Check for a power fault
 	if (func->status == 0xFF) {
 		// power fault occurred, but it was benign
 		temp_register = 0xFFFFFFFF;
-		dbg("%s: temp register set to %x by power fault\n", __FUNCTION__, temp_register);
+		dbg(__FUNCTION__": temp register set to %x by power fault\n", temp_register);
 		rc = POWER_FAILURE;
 		func->status = 0;
 	} else {
 		// Get vendor/device ID u32
 		rc = pci_read_config_dword_nodev (ctrl->pci_ops, func->bus, func->device, func->function, PCI_VENDOR_ID, &temp_register);
-		dbg("%s: pci_read_config_dword returns %d\n", __FUNCTION__, rc);
-		dbg("%s: temp_register is %x\n", __FUNCTION__, temp_register);
+		dbg(__FUNCTION__": pci_read_config_dword returns %d\n", rc);
+		dbg(__FUNCTION__": temp_register is %x\n", temp_register);
 
 		if (rc != 0) {
 			// Something's wrong here
 			temp_register = 0xFFFFFFFF;
-			dbg("%s: temp register set to %x by error\n", __FUNCTION__, temp_register);
+			dbg(__FUNCTION__": temp register set to %x by error\n", temp_register);
 		}
 		// Preset return code.  It will be changed later if things go okay.
 		rc = NO_ADAPTER_PRESENT;
@@ -1508,7 +1493,7 @@ static u32 board_added(struct pci_func * func, struct controller * ctrl)
 
 		rc = configure_new_device(ctrl, func, 0, &res_lists);
 
-		dbg("%s: back from configure_new_device\n", __FUNCTION__);
+		dbg(__FUNCTION__": back from configure_new_device\n");
 		ctrl->io_head = res_lists.io_head;
 		ctrl->mem_head = res_lists.mem_head;
 		ctrl->p_mem_head = res_lists.p_mem_head;
@@ -1545,7 +1530,7 @@ static u32 board_added(struct pci_func * func, struct controller * ctrl)
 		func->is_a_board = 0x01;
 
 		//next, we will instantiate the linux pci_dev structures (with appropriate driver notification, if already present)
-		dbg("%s: configure linux pci_dev structure\n", __FUNCTION__);
+		dbg(__FUNCTION__": configure linux pci_dev structure\n");
 		index = 0;
 		do {
 			new_slot = cpqhp_slot_find(ctrl->bus, func->device, index++);
@@ -1612,7 +1597,7 @@ static u32 remove_board(struct pci_func * func, u32 replace_flag, struct control
 	device = func->device;
 
 	hp_slot = func->device - ctrl->slot_device_offset;
-	dbg("In %s, hp_slot = %d\n", __FUNCTION__, hp_slot);
+	dbg("In "__FUNCTION__", hp_slot = %d\n", hp_slot);
 
 	// When we get here, it is safe to change base Address Registers.
 	// We will attempt to save the base Address Register Lengths
@@ -1722,18 +1707,10 @@ static int event_thread(void* data)
 	struct controller *ctrl;
 	lock_kernel();
 	daemonize();
-	reparent_to_init();
 	
 	//  New name
 	strcpy(current->comm, "phpd_event");
-
-	/* avoid getting signals */
-	spin_lock_irq(&current->sigmask_lock);
-	flush_signals(current);
-	sigfillset(&current->blocked);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
-
+	
 	unlock_kernel();
 
 	while (1) {
@@ -1822,7 +1799,7 @@ static void interrupt_event_handler(struct controller *ctrl)
 
 				func = cpqhp_slot_find(ctrl->bus, (hp_slot + ctrl->slot_device_offset), 0);
 
-				p_slot = cpqhp_find_slot(ctrl, hp_slot + ctrl->slot_device_offset);
+				p_slot = find_slot(ctrl, hp_slot + ctrl->slot_device_offset);
 
 				dbg("hp_slot %d, func %p, p_slot %p\n",
 				    hp_slot, func, p_slot);
@@ -1949,7 +1926,7 @@ void cpqhp_pushbutton_thread (unsigned long slot)
 		func = cpqhp_slot_find(p_slot->bus, p_slot->device, 0);
 		dbg("In power_down_board, func = %p, ctrl = %p\n", func, ctrl);
 		if (!func) {
-			dbg("Error! func NULL in %s\n", __FUNCTION__);
+			dbg("Error! func NULL in "__FUNCTION__"\n");
 			return ;
 		}
 
@@ -1973,7 +1950,7 @@ void cpqhp_pushbutton_thread (unsigned long slot)
 		func = cpqhp_slot_find(p_slot->bus, p_slot->device, 0);
 		dbg("In add_board, func = %p, ctrl = %p\n", func, ctrl);
 		if (!func) {
-			dbg("Error! func NULL in %s\n", __FUNCTION__);
+			dbg("Error! func NULL in "__FUNCTION__"\n");
 			return ;
 		}
 
@@ -2012,7 +1989,7 @@ int cpqhp_process_SI (struct controller *ctrl, struct pci_func *func)
 
 	device = func->device;
 	hp_slot = device - ctrl->slot_device_offset;
-	p_slot = cpqhp_find_slot(ctrl, device);
+	p_slot = find_slot(ctrl, device);
 	if (p_slot) {
 		physical_slot = p_slot->number;
 	}
@@ -2088,7 +2065,7 @@ int cpqhp_process_SI (struct controller *ctrl, struct pci_func *func)
 	}
 
 	if (rc) {
-		dbg("%s: rc = %d\n", __FUNCTION__, rc);
+		dbg(__FUNCTION__": rc = %d\n", rc);
 	}
 
 	if (p_slot)
@@ -2109,7 +2086,7 @@ int cpqhp_process_SS (struct controller *ctrl, struct pci_func *func)
 
 	device = func->device; 
 	func = cpqhp_slot_find(ctrl->bus, device, index++);
-	p_slot = cpqhp_find_slot(ctrl, device);
+	p_slot = find_slot(ctrl, device);
 	if (p_slot) {
 		physical_slot = p_slot->number;
 	}
@@ -2354,11 +2331,11 @@ static u32 configure_new_device (struct controller * ctrl, struct pci_func * fun
 
 	new_slot = func;
 
-	dbg("%s\n", __FUNCTION__);
+	dbg(__FUNCTION__"\n");
 	// Check for Multi-function device
 	rc = pci_read_config_byte_nodev (ctrl->pci_ops, func->bus, func->device, func->function, 0x0E, &temp_byte);
 	if (rc) {
-		dbg("%s: rc = %d\n", __FUNCTION__, rc);
+		dbg(__FUNCTION__": rc = %d\n", rc);
 		return rc;
 	}
 

@@ -44,7 +44,6 @@
 #include <linux/ioport.h>
 #include <linux/timer.h>
 #include <linux/proc_fs.h>
-#include <linux/pci.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 
@@ -104,82 +103,8 @@ static irq_info_t irq_table[NR_IRQS] = { { 0, 0, 0 }, /* etc */ };
 
 ======================================================================*/
 
-static struct resource *resource_parent(unsigned long b, unsigned long n,
-					int flags, struct pci_dev *dev)
-{
-#ifdef CONFIG_PCI
-	struct resource res, *pr;
-
-	if (dev != NULL) {
-		res.start = b;
-		res.end = b + n - 1;
-		res.flags = flags;
-		pr = pci_find_parent_resource(dev, &res);
-		if (pr)
-			return pr;
-	}
-#endif /* CONFIG_PCI */
-	if (flags & IORESOURCE_MEM)
-		return &iomem_resource;
-	return &ioport_resource;
-}
-
-static inline int check_io_resource(unsigned long b, unsigned long n,
-				    struct pci_dev *dev)
-{
-	return check_resource(resource_parent(b, n, IORESOURCE_IO, dev), b, n);
-}
-
-static inline int check_mem_resource(unsigned long b, unsigned long n,
-				     struct pci_dev *dev)
-{
-	return check_resource(resource_parent(b, n, IORESOURCE_MEM, dev), b, n);
-}
-
-static struct resource *make_resource(unsigned long b, unsigned long n,
-				      int flags, char *name)
-{
-	struct resource *res = kmalloc(sizeof(*res), GFP_KERNEL);
-
-	if (res) {
-		memset(res, 0, sizeof(*res));
-		res->name = name;
-		res->start = b;
-		res->end = b + n - 1;
-		res->flags = flags | IORESOURCE_BUSY;
-	}
-	return res;
-}
-
-static int request_io_resource(unsigned long b, unsigned long n,
-			       char *name, struct pci_dev *dev)
-{
-	struct resource *res = make_resource(b, n, IORESOURCE_IO, name);
-	struct resource *pr = resource_parent(b, n, IORESOURCE_IO, dev);
-	int err = -ENOMEM;
-
-	if (res) {
-		err = request_resource(pr, res);
-		if (err)
-			kfree(res);
-	}
-	return err;
-}
-
-static int request_mem_resource(unsigned long b, unsigned long n,
-				char *name, struct pci_dev *dev)
-{
-	struct resource *res = make_resource(b, n, IORESOURCE_MEM, name);
-	struct resource *pr = resource_parent(b, n, IORESOURCE_MEM, dev);
-	int err = -ENOMEM;
-
-	if (res) {
-		err = request_resource(pr, res);
-		if (err)
-			kfree(res);
-	}
-	return err;
-}
+#define check_io_resource(b,n)	check_resource(&ioport_resource, (b), (n))
+#define check_mem_resource(b,n)	check_resource(&iomem_resource, (b), (n))
 
 /*======================================================================
 
@@ -269,7 +194,7 @@ static void do_io_probe(ioaddr_t base, ioaddr_t num)
     }   
     memset(b, 0, 256);
     for (i = base, most = 0; i < base+num; i += 8) {
-	if (check_io_resource(i, 8, NULL))
+	if (check_io_resource(i, 8))
 	    continue;
 	hole = inb(i);
 	for (j = 1; j < 8; j++)
@@ -282,7 +207,7 @@ static void do_io_probe(ioaddr_t base, ioaddr_t num)
 
     bad = any = 0;
     for (i = base; i < base+num; i += 8) {
-	if (check_io_resource(i, 8, NULL))
+	if (check_io_resource(i, 8))
 	    continue;
 	for (j = 0; j < 8; j++)
 	    if (inb(i+j) != most) break;
@@ -322,8 +247,7 @@ static void do_io_probe(ioaddr_t base, ioaddr_t num)
 ======================================================================*/
 
 static int do_mem_probe(u_long base, u_long num,
-			int (*is_valid)(u_long), int (*do_cksum)(u_long),
-			socket_info_t *s)
+			int (*is_valid)(u_long), int (*do_cksum)(u_long))
 {
     u_long i, j, bad, fail, step;
 
@@ -334,14 +258,13 @@ static int do_mem_probe(u_long base, u_long num,
     for (i = j = base; i < base+num; i = j + step) {
 	if (!fail) {	
 	    for (j = i; j < base+num; j += step)
-		if ((check_mem_resource(j, step, s->cap.cb_dev) == 0) &&
-		    is_valid(j))
+		if ((check_mem_resource(j, step) == 0) && is_valid(j))
 		    break;
 	    fail = ((i == base) && (j == base+num));
 	}
 	if (fail) {
 	    for (j = i; j < base+num; j += 2*step)
-		if ((check_mem_resource(j, 2*step, s->cap.cb_dev) == 0) &&
+		if ((check_mem_resource(j, 2*step) == 0) &&
 		    do_cksum(j) && do_cksum(j+step))
 		    break;
 	}
@@ -360,12 +283,12 @@ static int do_mem_probe(u_long base, u_long num,
 
 static u_long inv_probe(int (*is_valid)(u_long),
 			int (*do_cksum)(u_long),
-			resource_map_t *m, socket_info_t *s)
+			resource_map_t *m)
 {
     u_long ok;
     if (m == &mem_db)
 	return 0;
-    ok = inv_probe(is_valid, do_cksum, m->next, s);
+    ok = inv_probe(is_valid, do_cksum, m->next);
     if (ok) {
 	if (m->base >= 0x100000)
 	    sub_interval(&mem_db, m->base, m->num);
@@ -373,13 +296,13 @@ static u_long inv_probe(int (*is_valid)(u_long),
     }
     if (m->base < 0x100000)
 	return 0;
-    return do_mem_probe(m->base, m->num, is_valid, do_cksum, s);
+    return do_mem_probe(m->base, m->num, is_valid, do_cksum);
 }
 
 void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
-		  int force_low, socket_info_t *s)
+		  int force_low)
 {
-    resource_map_t *m, mm;
+    resource_map_t *m, *n;
     static u_char order[] = { 0xd0, 0xe0, 0xc0, 0xf0 };
     static int hi = 0, lo = 0;
     u_long b, i, ok = 0;
@@ -387,28 +310,28 @@ void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
     if (!probe_mem) return;
     /* We do up to four passes through the list */
     if (!force_low) {
-	if (hi++ || (inv_probe(is_valid, do_cksum, mem_db.next, s) > 0))
+	if (hi++ || (inv_probe(is_valid, do_cksum, mem_db.next) > 0))
 	    return;
 	printk(KERN_NOTICE "cs: warning: no high memory space "
 	       "available!\n");
     }
     if (lo++) return;
-    for (m = mem_db.next; m != &mem_db; m = mm.next) {
-	mm = *m;
+    for (m = mem_db.next; m != &mem_db; m = n) {
+	n = m->next;
 	/* Only probe < 1 MB */
-	if (mm.base >= 0x100000) continue;
-	if ((mm.base | mm.num) & 0xffff) {
-	    ok += do_mem_probe(mm.base, mm.num, is_valid, do_cksum, s);
+	if (m->base >= 0x100000) continue;
+	if ((m->base | m->num) & 0xffff) {
+	    ok += do_mem_probe(m->base, m->num, is_valid, do_cksum);
 	    continue;
 	}
 	/* Special probe for 64K-aligned block */
 	for (i = 0; i < 4; i++) {
 	    b = order[i] << 12;
-	    if ((b >= mm.base) && (b+0x10000 <= mm.base+mm.num)) {
+	    if ((b >= m->base) && (b+0x10000 <= m->base+m->num)) {
 		if (ok >= mem_limit)
 		    sub_interval(&mem_db, b, 0x10000);
 		else
-		    ok += do_mem_probe(b, 0x10000, is_valid, do_cksum, s);
+		    ok += do_mem_probe(b, 0x10000, is_valid, do_cksum);
 	    }
 	}
     }
@@ -417,19 +340,16 @@ void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
 #else /* CONFIG_ISA */
 
 void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
-		  int force_low, socket_info_t *s)
+		  int force_low)
 {
-    resource_map_t *m, *n;
+    resource_map_t *m;
     static int done = 0;
     
     if (!probe_mem || done++)
 	return;
-
-    for (m = mem_db.next; m != &mem_db; m = n) {
-	n = m->next;
-	if (do_mem_probe(m->base, m->num, is_valid, do_cksum, s))
+    for (m = mem_db.next; m != &mem_db; m = m->next)
+	if (do_mem_probe(m->base, m->num, is_valid, do_cksum))
 	    return;
-    }
 }
 
 #endif /* CONFIG_ISA */
@@ -448,7 +368,7 @@ void validate_mem(int (*is_valid)(u_long), int (*do_cksum)(u_long),
 ======================================================================*/
 
 int find_io_region(ioaddr_t *base, ioaddr_t num, ioaddr_t align,
-		   char *name, socket_info_t *s)
+		   char *name)
 {
     ioaddr_t try;
     resource_map_t *m;
@@ -458,8 +378,9 @@ int find_io_region(ioaddr_t *base, ioaddr_t num, ioaddr_t align,
 	for (try = (try >= m->base) ? try : try+align;
 	     (try >= m->base) && (try+num <= m->base+m->num);
 	     try += align) {
-	    if (request_io_resource(try, num, name, s->cap.cb_dev) == 0) {
+	    if (check_io_resource(try, num) == 0) {
 		*base = try;
+		request_region(try, num, name);
 		return 0;
 	    }
 	    if (!align) break;
@@ -469,7 +390,7 @@ int find_io_region(ioaddr_t *base, ioaddr_t num, ioaddr_t align,
 }
 
 int find_mem_region(u_long *base, u_long num, u_long align,
-		    int force_low, char *name, socket_info_t *s)
+		    int force_low, char *name)
 {
     u_long try;
     resource_map_t *m;
@@ -482,7 +403,8 @@ int find_mem_region(u_long *base, u_long num, u_long align,
 	    for (try = (try >= m->base) ? try : try+align;
 		 (try >= m->base) && (try+num <= m->base+m->num);
 		 try += align) {
-		if (request_mem_resource(try, num, name, s->cap.cb_dev) == 0) {
+		if (check_mem_resource(try, num) == 0) {
+		    request_mem_region(try, num, name);
 		    *base = try;
 		    return 0;
 		}

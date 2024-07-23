@@ -1,13 +1,13 @@
 /*
- *  arch/mips/philips/nino/prom.c
+ *  linux/arch/mips/philips/nino/prom.c
  *
  *  Copyright (C) 2001 Steven J. Hill (sjhill@realitydiluted.com)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- *  Early initialization code for the Philips Nino
+ *  
+ *  Early initialization code for the Philips Nino.
  */
 #include <linux/config.h>
 #include <linux/init.h>
@@ -17,25 +17,29 @@
 #include <asm/addrspace.h>
 #include <asm/page.h>
 
-char arcs_cmdline[CL_SIZE];
+char arcs_cmdline[COMMAND_LINE_SIZE];
 
 #ifdef CONFIG_FB_TX3912
-extern unsigned long tx3912fb_paddr;
-extern unsigned long tx3912fb_vaddr;
-extern unsigned long tx3912fb_size;
+extern u_long tx3912fb_paddr;
+extern u_long tx3912fb_vaddr;
+extern u_long tx3912fb_size;
 #endif
 
-const char *get_system_type(void)
-{
-	return "Philips Nino";
-}
-
 /* Do basic initialization */
-void __init prom_init(int argc, char **argv, unsigned long magic, int *prom_vec)
+void __init prom_init(int argc, char **argv,
+		unsigned long magic, int *prom_vec)
 {
-	unsigned long mem_size;
+	u_long free_end, mem_size;
+	u_int i;
 
-	strcpy(arcs_cmdline, "console=tty0 console=ttyS0,115200");
+	/*
+	 * collect args and prepare cmd_line
+	 */
+	for (i = 1; i < argc; i++) {
+		strcat(arcs_cmdline, argv[i]);
+		if (i < (argc - 1))
+			strcat(arcs_cmdline, " ");
+	}
 
 	mips_machgroup = MACH_GROUP_PHILIPS;
 	mips_machtype = MACH_PHILIPS_NINO;
@@ -49,9 +53,6 @@ void __init prom_init(int argc, char **argv, unsigned long magic, int *prom_vec)
 #endif
 
 #ifdef CONFIG_FB_TX3912
-{
-	unsigned long free_end;
-
 	/*
 	 * The LCD controller requires that the framebuffer
 	 * start address fall within a 1MB segment and is
@@ -60,8 +61,8 @@ void __init prom_init(int argc, char **argv, unsigned long magic, int *prom_vec)
 	 * memory and mark it as reserved.
 	 */
 	free_end = (mem_size - tx3912fb_size) & PAGE_MASK;
-	add_memory_region(0, free_end, BOOT_MEM_RAM);
-	add_memory_region(free_end, (mem_size - free_end), BOOT_MEM_RESERVED);
+	add_memory_region(0, free_end, BOOT_MEM_RAM); 
+	add_memory_region(free_end, (mem_size - free_end), BOOT_MEM_RESERVED); 
 
 	/*
 	 * Calculate physical and virtual addresses for
@@ -69,9 +70,8 @@ void __init prom_init(int argc, char **argv, unsigned long magic, int *prom_vec)
 	 */
 	tx3912fb_paddr = PHYSADDR(free_end);
 	tx3912fb_vaddr = KSEG1ADDR(free_end);
-}
 #else
-	add_memory_region(0, mem_size, BOOT_MEM_RAM);
+	add_memory_region(0, mem_size, BOOT_MEM_RAM); 
 #endif
 }
 

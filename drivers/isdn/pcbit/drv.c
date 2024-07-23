@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (pedro_m@yahoo.com)
+ * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
  * the GNU General Public License, incorporated herein by reference.
@@ -430,7 +430,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 	switch(dev->l2_state) {
 	case L2_LWMODE:
 		/* check (size <= rdp_size); write buf into board */
-		if (len < 0 || len > BANK4 + 1)
+		if (len > BANK4 + 1)
 		{
 			printk("pcbit_writecmd: invalid length %d\n", len);
 			return -EINVAL;

@@ -36,7 +36,7 @@
 #include <linux/smp_lock.h>
 #include <linux/blkdev.h>
 #include <linux/vmalloc.h>
-#include <linux/zlib.h>
+#include <linux/zlib_fs.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -147,13 +147,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 	cend = le32_to_cpu(*(u32 *)(bh->b_data + (blockendptr & bufmask)));
 	brelse(bh);
 
-	if (cstart > cend)
-		goto eio;
-
 	csize = cend-cstart;
-
-	if (csize > deflateBound(1UL << zisofs_block_shift))
-		goto eio;
 
 	/* Now page[] contains an array of pages, any of which can be NULL,
 	   and the locks on which we hold.  We should now read the data and
@@ -215,7 +209,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 		stream.workspace = zisofs_zlib_workspace;
 		down(&zisofs_zlib_semaphore);
 		
-		zerr = zlib_inflateInit(&stream);
+		zerr = zlib_fs_inflateInit(&stream);
 		if ( zerr != Z_OK ) {
 			if ( err && zerr == Z_MEM_ERROR )
 				err = -ENOMEM;
@@ -256,7 +250,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 					}
 				}
 				ao = stream.avail_out;  ai = stream.avail_in;
-				zerr = zlib_inflate(&stream, Z_SYNC_FLUSH);
+				zerr = zlib_fs_inflate(&stream, Z_SYNC_FLUSH);
 				left_out = stream.avail_out;
 				if ( zerr == Z_BUF_ERROR && stream.avail_in == 0 )
 					continue;
@@ -297,7 +291,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 				fpage++;
 			}
 		}
-		zlib_inflateEnd(&stream);
+		zlib_fs_inflateEnd(&stream);
 
 	z_eio:
 		up(&zisofs_zlib_semaphore);
@@ -345,7 +339,7 @@ int __init zisofs_init(void)
 		return 0;
 	}
 
-	zisofs_zlib_workspace = vmalloc(zlib_inflate_workspacesize());
+	zisofs_zlib_workspace = vmalloc(zlib_fs_inflate_workspacesize());
 	if ( !zisofs_zlib_workspace )
 		return -ENOMEM;
 	init_MUTEX(&zisofs_zlib_semaphore);

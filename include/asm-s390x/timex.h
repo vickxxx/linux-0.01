@@ -17,27 +17,13 @@
 	(1000000/CLOCK_TICK_FACTOR) / (CLOCK_TICK_RATE/CLOCK_TICK_FACTOR)) \
 		<< (SHIFT_SCALE-SHIFT_HZ)) / HZ)
 
-typedef unsigned long long cycles_t;
+typedef unsigned long cycles_t;
 
 extern cycles_t cacheflush_time;
 
 static inline cycles_t get_cycles(void)
 {
-	cycles_t cycles;
-
-	__asm__("stck 0(%0)" : : "a" (&(cycles)) : "memory", "cc");
-	return cycles >> 2;
+        return 0;
 }
-
-static inline unsigned long long get_clock (void)
-{
-	unsigned long long clock;
-
-	__asm__("stck 0(%0)" : : "a" (&(clock)) : "memory", "cc");
-	return clock;
-}
-
-#define vxtime_lock()		do {} while (0)
-#define vxtime_unlock()		do {} while (0)
 
 #endif

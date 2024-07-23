@@ -1361,8 +1361,6 @@ read_data_block(char *buffer,
 	res_reg[0] = 0;
 	res_reg[1] = 0;
 	*res_size = 0;
-	/* Make sure that bytesleft doesn't exceed the buffer size */
-	if (nblocks > 4) nblocks = 4;
 	bytesleft = nblocks * 512;
 	offset = 0;
 
@@ -1386,9 +1384,9 @@ read_data_block(char *buffer,
 			       readahead_buffer + (2048 -
 						   readahead_dataleft),
 			       readahead_dataleft);
+			readahead_dataleft = 0;
 			bytesleft -= readahead_dataleft;
 			offset += readahead_dataleft;
-			readahead_dataleft = 0;
 		} else {
 			/* The readahead will fill the whole buffer, get the data
 			   and return. */
@@ -3387,8 +3385,7 @@ int __init cdu31a_init(void)
 	if (drive_found) {
 		int deficiency = 0;
 
-		if (!request_region(cdu31a_port, 4, "cdu31a"))
-			goto errout3;
+		request_region(cdu31a_port, 4, "cdu31a");
 
 		if (devfs_register_blkdev(MAJOR_NR, "cdu31a", &scd_bdops)) {
 			printk("Unable to get major %d for CDU-31a\n",

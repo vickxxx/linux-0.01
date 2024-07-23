@@ -27,8 +27,6 @@ typedef secno dnode_secno;		/* sector number of a dnode */
 typedef secno fnode_secno;		/* sector number of an fnode */
 typedef secno anode_secno;		/* sector number of an anode */
 
-typedef unsigned time32_t;		/* 32-bit time_t type */
-
 /* sector 0 */
 
 /* The boot block is very like a FAT boot block, except that the
@@ -86,9 +84,9 @@ struct hpfs_super_block
   unsigned zero1;			/* 0 */
   secno badblocks;			/* bad block list */
   unsigned zero3;			/* 0 */
-  time32_t last_chkdsk;			/* date last checked, 0 if never */
+  time_t last_chkdsk;			/* date last checked, 0 if never */
   /*unsigned zero4;*/			/* 0 */
-  time32_t last_optimize;			/* date last optimized, 0 if never */
+  time_t last_optimize;			/* date last optimized, 0 if never */
   secno n_dir_band;			/* number of sectors in dir band */
   secno dir_band_start;			/* first sector in dir band */
   secno dir_band_end;			/* last sector in dir band */
@@ -289,10 +287,10 @@ struct hpfs_dirent {
   unsigned not_8x3: 1;			/* name is not 8.3 */
   unsigned flag15: 1;
   fnode_secno fnode;			/* fnode giving allocation info */
-  time32_t write_date;			/* mtime */
+  time_t write_date;			/* mtime */
   unsigned file_size;			/* file length, bytes */
-  time32_t read_date;			/* atime */
-  time32_t creation_date;			/* ctime */
+  time_t read_date;			/* atime */
+  time_t creation_date;			/* ctime */
   unsigned ea_size;			/* total EA length, bytes */
   unsigned char no_of_acls : 3;		/* number of ACL's */
   unsigned char reserver : 5;
@@ -410,7 +408,7 @@ struct fnode
   unsigned file_size;			/* file length, bytes */
   unsigned n_needea;			/* number of EA's with NEEDEA set */
   char user_id[16];			/* unused */
-  unsigned short ea_offs;		/* offset from start of fnode
+  unsigned ea_offs;			/* offset from start of fnode
 					   to first fnode-resident ea */
   char dasd_limit_treshhold;
   char dasd_limit_delta;

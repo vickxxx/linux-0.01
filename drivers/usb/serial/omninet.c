@@ -37,15 +37,18 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/signal.h>
 #include <linux/errno.h>
+#include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/fcntl.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
-#include <asm/uaccess.h>
 #include <linux/usb.h>
 
 #ifdef CONFIG_USB_SERIAL_DEBUG
@@ -76,7 +79,7 @@ static int  omninet_write		(struct usb_serial_port *port, int from_user, const u
 static int  omninet_write_room		(struct usb_serial_port *port);
 static void omninet_shutdown		(struct usb_serial *serial);
 
-static struct usb_device_id id_table [] = {
+static __devinitdata struct usb_device_id id_table [] = {
 	{ USB_DEVICE(ZYXEL_VENDOR_ID, ZYXEL_OMNINET_ID) },
 	{ }						/* Terminating entry */
 };
@@ -84,21 +87,23 @@ static struct usb_device_id id_table [] = {
 MODULE_DEVICE_TABLE (usb, id_table);
 
 
-static struct usb_serial_device_type zyxel_omninet_device = {
-	.owner =		THIS_MODULE,
-	.name =			"ZyXEL - omni.net lcd plus usb",
-	.id_table =		id_table,
-	.num_interrupt_in =	1,
-	.num_bulk_in =		1,
-	.num_bulk_out =		2,
-	.num_ports =		1,
-	.open =			omninet_open,
-	.close =		omninet_close,
-	.write =		omninet_write,
-	.write_room =		omninet_write_room,
-	.read_bulk_callback =	omninet_read_bulk_callback,
-	.write_bulk_callback =	omninet_write_bulk_callback,
-	.shutdown =		omninet_shutdown,
+struct usb_serial_device_type zyxel_omninet_device = {
+	name:			"ZyXEL - omni.net lcd plus usb",
+	id_table:		id_table,
+	needs_interrupt_in:	MUST_HAVE,
+	needs_bulk_in:		MUST_HAVE,
+	needs_bulk_out:		MUST_HAVE,
+	num_interrupt_in:	1,
+	num_bulk_in:		1,
+	num_bulk_out:		2,
+	num_ports:		1,
+	open:			omninet_open,
+	close:			omninet_close,
+	write:			omninet_write,
+	write_room:		omninet_write_room,
+	read_bulk_callback:	omninet_read_bulk_callback,
+	write_bulk_callback:	omninet_write_bulk_callback,
+	shutdown:		omninet_shutdown,
 };
 
 
@@ -148,30 +153,45 @@ static int omninet_open (struct usb_serial_port *port, struct file *filp)
 	if (port_paranoia_check (port, __FUNCTION__))
 		return -ENODEV;
 
-	dbg("%s - port %d", __FUNCTION__, port->number);
+	dbg(__FUNCTION__ " - port %d", port->number);
 
 	serial = get_usb_serial (port, __FUNCTION__);
 	if (!serial)
 		return -ENODEV;
 
-	od = kmalloc( sizeof(struct omninet_data), GFP_KERNEL );
-	if( !od ) {
-		err("%s- kmalloc(%Zd) failed.", __FUNCTION__, sizeof(struct omninet_data));
-		return -ENOMEM;
+	down (&port->sem);
+
+	MOD_INC_USE_COUNT;
+	++port->open_count;
+
+	if (!port->active) {
+		port->active = 1;
+
+		od = kmalloc( sizeof(struct omninet_data), GFP_KERNEL );
+		if( !od ) {
+			err(__FUNCTION__"- kmalloc(%Zd) failed.", sizeof(struct omninet_data));
+			--port->open_count;
+			port->active = 0;
+			up (&port->sem);
+			MOD_DEC_USE_COUNT;
+			return -ENOMEM;
+		}
+
+		port->private = od;
+		wport = &serial->port[1];
+		wport->tty = port->tty;
+
+		/* Start reading from the device */
+		FILL_BULK_URB(port->read_urb, serial->dev, 
+			      usb_rcvbulkpipe(serial->dev, port->bulk_in_endpointAddress),
+			      port->read_urb->transfer_buffer, port->read_urb->transfer_buffer_length,
+			      omninet_read_bulk_callback, port);
+		result = usb_submit_urb(port->read_urb);
+		if (result)
+			err(__FUNCTION__ " - failed submitting read urb, error %d", result);
 	}
 
-	port->private = od;
-	wport = &serial->port[1];
-	wport->tty = port->tty;
-
-	/* Start reading from the device */
-	FILL_BULK_URB(port->read_urb, serial->dev, 
-		      usb_rcvbulkpipe(serial->dev, port->bulk_in_endpointAddress),
-		      port->read_urb->transfer_buffer, port->read_urb->transfer_buffer_length,
-		      omninet_read_bulk_callback, port);
-	result = usb_submit_urb(port->read_urb);
-	if (result)
-		err("%s - failed submitting read urb, error %d", __FUNCTION__, result);
+	up (&port->sem);
 
 	return result;
 }
@@ -185,21 +205,32 @@ static void omninet_close (struct usb_serial_port *port, struct file * filp)
 	if (port_paranoia_check (port, __FUNCTION__))
 		return;
 
-	dbg("%s - port %d", __FUNCTION__, port->number);
+	dbg(__FUNCTION__ " - port %d", port->number);
 
 	serial = get_usb_serial (port, __FUNCTION__);
 	if (!serial)
 		return;
 
-	if (serial->dev) {
-		wport = &serial->port[1];
-		usb_unlink_urb (wport->write_urb);
-		usb_unlink_urb (port->read_urb);
+	down (&port->sem);
+
+	--port->open_count;
+
+	if (port->open_count <= 0) {
+		if (serial->dev) {
+			wport = &serial->port[1];
+			usb_unlink_urb (wport->write_urb);
+			usb_unlink_urb (port->read_urb);
+		}
+
+		port->active = 0;
+		port->open_count = 0;
+		od = (struct omninet_data *)port->private;
+		if (od)
+			kfree(od);
 	}
 
-	od = (struct omninet_data *)port->private;
-	if (od)
-		kfree(od);
+	up (&port->sem);
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -221,12 +252,12 @@ static void omninet_read_bulk_callback (struct urb *urb)
 //	dbg("omninet_read_bulk_callback");
 
 	if (!serial) {
-		dbg("%s - bad serial pointer, exiting", __FUNCTION__);
+		dbg(__FUNCTION__ " - bad serial pointer, exiting");
 		return;
 	}
 
 	if (urb->status) {
-		dbg("%s - nonzero read bulk status received: %d", __FUNCTION__, urb->status);
+		dbg(__FUNCTION__ " - nonzero read bulk status received: %d", urb->status);
 		return;
 	}
 
@@ -254,7 +285,7 @@ static void omninet_read_bulk_callback (struct urb *urb)
 		      omninet_read_bulk_callback, port);
 	result = usb_submit_urb(urb);
 	if (result)
-		err("%s - failed resubmitting read urb, error %d", __FUNCTION__, result);
+		err(__FUNCTION__ " - failed resubmitting read urb, error %d", result);
 
 	return;
 }
@@ -272,11 +303,11 @@ static int omninet_write (struct usb_serial_port *port, int from_user, const uns
 //	dbg("omninet_write port %d", port->number);
 
 	if (count == 0) {
-		dbg("%s - write request of 0 bytes", __FUNCTION__);
+		dbg(__FUNCTION__" - write request of 0 bytes");
 		return (0);
 	}
 	if (wport->write_urb->status == -EINPROGRESS) {
-		dbg("%s - already writing", __FUNCTION__);
+		dbg (__FUNCTION__" - already writing");
 		return (0);
 	}
 
@@ -305,7 +336,7 @@ static int omninet_write (struct usb_serial_port *port, int from_user, const uns
 	wport->write_urb->dev = serial->dev;
 	result = usb_submit_urb(wport->write_urb);
 	if (result)
-		err("%s - failed submitting write urb, error %d", __FUNCTION__, result);
+		err(__FUNCTION__ " - failed submitting write urb, error %d", result);
 	else
 		result = count;
 
@@ -348,7 +379,7 @@ static void omninet_write_bulk_callback (struct urb *urb)
 	}
 
 	if (urb->status) {
-		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
+		dbg(__FUNCTION__" - nonzero write bulk status received: %d", urb->status);
 		return;
 	}
 
@@ -363,7 +394,11 @@ static void omninet_write_bulk_callback (struct urb *urb)
 
 static void omninet_shutdown (struct usb_serial *serial)
 {
-	dbg ("%s", __FUNCTION__);
+	dbg (__FUNCTION__);
+
+	while (serial->port[0].open_count > 0) {
+		omninet_close (&serial->port[0], NULL);
+	}
 }
 
 

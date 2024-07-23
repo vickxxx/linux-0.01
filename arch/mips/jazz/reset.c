@@ -1,6 +1,11 @@
 /*
- * Reset a Jazz machine.
+ *  linux/arch/mips/jazz/process.c
+ *
+ *  Reset a Jazz machine.
+ *
+ *  $Id:$
  */
+
 #include <linux/sched.h>
 #include <asm/jazz.h>
 #include <asm/io.h>
@@ -22,7 +27,7 @@ static inline void kb_wait(void)
 void jazz_machine_restart(char *command)
 {
     while (1) {
-	kb_wait ();
+	kb_wait ();    
 	kbd_write_command (0xd1);
 	kb_wait ();
 	kbd_write_output (0x00);

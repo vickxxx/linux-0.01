@@ -1,4 +1,4 @@
-/******************************************************************************
+/*!*****************************************************************************
 *!
 *!  Implements an interface for i2c compatible eeproms to run under linux.
 *!  Supports 2k, 8k(?) and 16k. Uses adaptive timing adjustents by
@@ -20,18 +20,6 @@
 *!                                  in the spin-lock.
 *!
 *!  $Log: eeprom.c,v $
-*!  Revision 1.12  2003/04/09 08:31:14  pkj
-*!  Typo correction (taken from Linux 2.5).
-*!
-*!  Revision 1.11  2003/02/12 20:43:46  johana
-*!  Previous checkin removed beginning of comment.
-*!
-*!  Revision 1.10  2003/02/10 07:18:20  starvik
-*!  Removed misplaced ;
-*!
-*!  Revision 1.9  2003/01/22 06:54:46  starvik
-*!  Fixed warnings issued by GCC 3.2.1
-*!
 *!  Revision 1.8  2001/06/15 13:24:29  jonashg
 *!  * Added verification of pointers from userspace in read and write.
 *!  * Made busy counter volatile.
@@ -215,7 +203,7 @@ int __init eeprom_init(void)
      * it will mirror the address space:
      * 1. We read two locations (that are mirrored), 
      *    if the content differs * it's a 16kB EEPROM.
-     * 2. if it doesn't differ - write different value to one of the locations,
+     * 2. if it doesn't differ - write diferent value to one of the locations,
      *    check the other - if content still is the same it's a 2k EEPROM,
      *    restore original data.
      */
@@ -505,8 +493,8 @@ static int eeprom_read_buf(loff_t addr, char * buf, int count)
 
 static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t *off)
 {
-  int read=0;
-  unsigned long p = *off;
+  int i, read=0;
+  unsigned long p = file->f_pos;
 
   unsigned char page;
 
@@ -531,7 +519,7 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
   if(!eeprom_address(p))
   {
     printk(KERN_INFO "%s: Read failed to address the eeprom: "
-           "0x%08lX (%li) page: %i\n", eeprom_name, p, p, page);
+           "0x%08X (%i) page: %i\n", eeprom_name, p, p, page);
     i2c_stop();
     
     /* don't forget to wake them up */
@@ -540,7 +528,7 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
     return -EFAULT;
   }
 
-  if(count > eeprom.size - p)
+  if( (p + count) > eeprom.size)
   {
     /* truncate count */
     count = eeprom.size - p;
@@ -560,7 +548,7 @@ static ssize_t eeprom_read(struct file * file, char * buf, size_t count, loff_t 
   
   if(read > 0)
   {
-    *off = p + read;
+    file->f_pos += read;
   }
 
   eeprom.busy--;
@@ -605,7 +593,7 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
   {
     restart = 0;
     written = 0;
-    p = *off;
+    p = file->f_pos;
    
     
     while( (written < count) && (p < eeprom.size))
@@ -614,7 +602,7 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
       if(!eeprom_address(p))
       {
         printk(KERN_INFO "%s: Write failed to address the eeprom: "
-               "0x%08lX (%li) \n", eeprom_name, p, p);
+               "0x%08X (%i) \n", eeprom_name, p, p);
         i2c_stop();
         
         /* don't forget to wake them up */
@@ -733,10 +721,10 @@ static ssize_t eeprom_write(struct file * file, const char * buf, size_t count,
 
   eeprom.busy--;
   wake_up_interruptible(&eeprom.wait_q);
-  if (written == 0 && p >= eeprom.size){
+  if (written == 0 && file->f_pos >= eeprom.size){
     return -ENOSPC;
   }
-  *off = p;
+  file->f_pos += written;
   return written;
 }
 
@@ -752,7 +740,7 @@ static int eeprom_close(struct inode * inode, struct file * file)
 
 static int eeprom_address(unsigned long addr)
 {
-  int i;
+  int i, j;
   unsigned char page, offset;
 
   page   = (unsigned char) (addr >> 8);
@@ -807,7 +795,7 @@ static int eeprom_address(unsigned long addr)
   return 1;
 }
 
-/* Reads from current address. */
+/* Reads from current adress. */
 
 static int read_from_eeprom(char * buf, int count)
 {
@@ -820,7 +808,7 @@ static int read_from_eeprom(char * buf, int count)
       i2c_outbyte( eeprom.select_cmd | 1 );
     }
 
-    if(i2c_getack())
+    if(i2c_getack());
     {
       break;
     }

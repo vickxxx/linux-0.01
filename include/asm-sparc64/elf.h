@@ -1,4 +1,4 @@
-/* $Id: elf.h,v 1.30.2.1 2002/02/04 22:37:47 davem Exp $ */
+/* $Id: elf.h,v 1.30 2001/08/30 23:35:38 kanoj Exp $ */
 #ifndef __ASM_SPARC64_ELF_H
 #define __ASM_SPARC64_ELF_H
 
@@ -21,39 +21,8 @@
 
 typedef unsigned long elf_greg_t;
 
-#define ELF_NGREG 36
+#define ELF_NGREG (sizeof (struct pt_regs) / sizeof(elf_greg_t))
 typedef elf_greg_t elf_gregset_t[ELF_NGREG];
-/* Format of 64-bit elf_gregset_t is:
- * 	G0 --> G7
- * 	O0 --> O7
- * 	L0 --> L7
- * 	I0 --> I7
- *	TSTATE
- *	TPC
- *	TNPC
- *	Y
- */
-#include <asm/psrcompat.h>
-#define ELF_CORE_COPY_REGS(__elf_regs, __pt_regs)	\
-do {	unsigned long *dest = &(__elf_regs[0]);		\
-	struct pt_regs *src = (__pt_regs);		\
-	unsigned long *sp;				\
-	int i;						\
-	for(i = 0; i < 16; i++)				\
-		dest[i] = src->u_regs[i];		\
-	/* Don't try this at home kids... */		\
-	set_fs(USER_DS);				\
-	sp = (unsigned long *)				\
-	 ((src->u_regs[14] + STACK_BIAS)		\
-	  & 0xfffffffffffffff8UL);			\
-	for(i = 0; i < 16; i++)				\
-		__get_user(dest[i+16], &sp[i]);		\
-	set_fs(KERNEL_DS);				\
-	dest[32] = src->tstate;				\
-	dest[33] = src->tpc;				\
-	dest[34] = src->tnpc;				\
-	dest[35] = src->y;				\
-} while (0);
 
 typedef struct {
 	unsigned long	pr_regs[32];
@@ -90,8 +59,7 @@ typedef struct {
 #define ELF_HWCAP	((HWCAP_SPARC_FLUSH | HWCAP_SPARC_STBAR | \
 			  HWCAP_SPARC_SWAP | HWCAP_SPARC_MULDIV | \
 			  HWCAP_SPARC_V9) | \
-			 ((tlb_type == cheetah || tlb_type == cheetah_plus) ? \
-			  HWCAP_SPARC_ULTRA3 : 0))
+			 ((tlb_type == cheetah) ? HWCAP_SPARC_ULTRA3 : 0))
 
 /* This yields a string that ld.so will use to load implementation
    specific libraries for optimization.  This is more specific in
@@ -107,11 +75,27 @@ do {	unsigned char flags = current->thread.flags;	\
 	else						\
 		flags &= ~SPARC_FLAG_32BIT;		\
 	if (flags != current->thread.flags) {		\
-		/* flush_thread will update pgd cache */\
-		current->thread.flags |= SPARC_FLAG_ABI_PENDING; \
-	} else {					\
-		current->thread.flags &= ~SPARC_FLAG_ABI_PENDING; \
+		unsigned long pgd_cache = 0UL;		\
+		if (flags & SPARC_FLAG_32BIT) {		\
+		  pgd_t *pgd0 = &current->mm->pgd[0];	\
+		  if (pgd_none (*pgd0)) {		\
+		    pmd_t *page = pmd_alloc_one_fast(NULL, 0);	\
+		    if (!page)				\
+		      page = pmd_alloc_one(NULL, 0);	\
+                    pgd_set(pgd0, page);		\
+		  }					\
+		  pgd_cache = pgd_val(*pgd0) << 11UL;	\
+		}					\
+		__asm__ __volatile__(			\
+			"stxa\t%0, [%1] %2\n\t"		\
+			"membar #Sync"			\
+			: /* no outputs */		\
+			: "r" (pgd_cache),		\
+			  "r" (TSB_REG),		\
+			  "i" (ASI_DMMU));		\
+		current->thread.flags = flags;		\
 	}						\
+							\
 	if (ibcs2)					\
 		set_personality(PER_SVR4);		\
 	else if (current->personality != PER_LINUX32)	\

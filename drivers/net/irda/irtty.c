@@ -121,8 +121,9 @@ static void irtty_cleanup(void)
 	
 	/* Unregister tty line-discipline */
 	if ((ret = tty_register_ldisc(N_IRDA, NULL))) {
-		ERROR("%s(), can't unregister line discipline (err = %d)\n",
-			__FUNCTION__, ret);
+		ERROR(__FUNCTION__ 
+		      "(), can't unregister line discipline (err = %d)\n",
+		      ret);
 	}
 
 	/*
@@ -179,8 +180,9 @@ static int irtty_open(struct tty_struct *tty)
 
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-
-	tty_ldisc_flush(tty);	
+	
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	
 	self->magic = IRTTY_MAGIC;
 	self->mode = IRDA_IRLAP;
@@ -228,7 +230,7 @@ static int irtty_open(struct tty_struct *tty)
 	self->rx_buff.data = self->rx_buff.head;
 	
 	if (!(dev = dev_alloc("irda%d", &err))) {
-		ERROR("%s(), dev_alloc() failed!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), dev_alloc() failed!\n");
 		return -ENOMEM;
 	}
 
@@ -247,7 +249,7 @@ static int irtty_open(struct tty_struct *tty)
 	err = register_netdevice(dev);
 	rtnl_unlock();
 	if (err) {
-		ERROR("%s(), register_netdev() failed!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), register_netdev() failed!\n");
 		return -1;
 	}
 
@@ -350,7 +352,7 @@ static void __irtty_change_speed(struct irtty_cb *self, __u32 speed)
 
 	cflag &= ~CBAUD;
 
-	IRDA_DEBUG(2, "%s(), Setting speed to %d\n", __FUNCTION__, speed);
+	IRDA_DEBUG(2, __FUNCTION__ "(), Setting speed to %d\n", speed);
 
 	switch (speed) {
 	case 1200:
@@ -398,14 +400,14 @@ static int irtty_change_speed(struct irda_task *task)
 	__u32 speed = (__u32) task->param;
 	int ret = 0;
 
-	IRDA_DEBUG(2, "%s(), <%ld>\n", __FUNCTION__, jiffies); 
+	IRDA_DEBUG(2, __FUNCTION__ "(), <%ld>\n", jiffies); 
 
 	self = (struct irtty_cb *) task->instance;
 	ASSERT(self != NULL, return -1;);
 
 	/* Check if busy */
 	if (self->task && self->task != task) {
-		IRDA_DEBUG(0, "%s(), busy!\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), busy!\n");
 		return MSECS_TO_JIFFIES(10);
 	} else
 		self->task = task;
@@ -453,7 +455,8 @@ static int irtty_change_speed(struct irda_task *task)
 			irda_task_next_state(task, IRDA_TASK_CHILD_DONE);
 		break;
 	case IRDA_TASK_CHILD_WAIT:
-		WARNING("%s(), changing speed of dongle timed out!\n", __FUNCTION__);
+		WARNING(__FUNCTION__ 
+			"(), changing speed of dongle timed out!\n");
 		ret = -1;		
 		break;
 	case IRDA_TASK_CHILD_DONE:
@@ -464,7 +467,7 @@ static int irtty_change_speed(struct irda_task *task)
 		self->task = NULL;
 		break;
 	default:
-		ERROR("%s(), unknown state %d\n", __FUNCTION__, task->state);
+		ERROR(__FUNCTION__ "(), unknown state %d\n", task->state);
 		irda_task_next_state(task, IRDA_TASK_DONE);
 		self->task = NULL;
 		ret = -1;
@@ -556,7 +559,7 @@ static void irtty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	struct irtty_cb *self = (struct irtty_cb *) tty->disc_data;
 
 	if (!self || !self->netdev) {
-		IRDA_DEBUG(0, "%s(), not ready yet!\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ "(), not ready yet!\n");
 		return;
 	}
 
@@ -602,7 +605,7 @@ static int irtty_change_speed_complete(struct irda_task *task)
 {
 	struct irtty_cb *self;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	self = (struct irtty_cb *) task->instance;
 
@@ -681,7 +684,7 @@ static int irtty_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 */
 static int irtty_receive_room(struct tty_struct *tty) 
 {
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 	return 65536;  /* We can handle an infinite amount of data. :-) */
 }
 
@@ -711,19 +714,19 @@ static void irtty_write_wakeup(struct tty_struct *tty)
 
 		self->tx_buff.data += actual;
 		self->tx_buff.len  -= actual;
+
+		self->stats.tx_packets++;		      
 	} else {		
 		/* 
 		 *  Now serial buffer is almost free & we can start 
 		 *  transmission of another packet 
 		 */
-		IRDA_DEBUG(5, "%s(), finished with frame!\n", __FUNCTION__);
+		IRDA_DEBUG(5, __FUNCTION__ "(), finished with frame!\n");
 		
-		self->stats.tx_packets++;		      
-
 		tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
 
 		if (self->new_speed) {
-			IRDA_DEBUG(5, "%s(), Changing speed!\n", __FUNCTION__);
+			IRDA_DEBUG(5, __FUNCTION__ "(), Changing speed!\n");
 			irda_task_execute(self, irtty_change_speed, 
 					  irtty_change_speed_complete, 
 					  NULL, (void *) self->new_speed);
@@ -757,11 +760,14 @@ static int irtty_set_dtr_rts(struct net_device *dev, int dtr, int rts)
 	struct irtty_cb *self;
 	struct tty_struct *tty;
 	mm_segment_t fs;
-	int arg = TIOCM_MODEM_BITS;
+	int arg = 0;
 
 	self = (struct irtty_cb *) dev->priv;
 	tty = self->tty;
 
+#ifdef TIOCM_OUT2 /* Not defined for ARM */
+	arg = TIOCM_OUT2;
+#endif
 	if (rts)
 		arg |= TIOCM_RTS;
 	if (dtr)
@@ -779,7 +785,7 @@ static int irtty_set_dtr_rts(struct net_device *dev, int dtr, int rts)
 	set_fs(get_ds());
 	
 	if (tty->driver.ioctl(tty, NULL, TIOCMSET, (unsigned long) &arg)) { 
-		IRDA_DEBUG(2, "%s(), error doing ioctl!\n", __FUNCTION__);
+		IRDA_DEBUG(2, __FUNCTION__ "(), error doing ioctl!\n");
 	}
 	set_fs(fs);
 
@@ -802,7 +808,7 @@ int irtty_set_mode(struct net_device *dev, int mode)
 
 	ASSERT(self != NULL, return -1;);
 
-	IRDA_DEBUG(2, "%s(), mode=%s\n", __FUNCTION__, infrared_mode[mode]);
+	IRDA_DEBUG(2, __FUNCTION__ "(), mode=%s\n", infrared_mode[mode]);
 	
 	/* save status for driver */
 	self->mode = mode;
@@ -895,7 +901,7 @@ static int irtty_net_open(struct net_device *dev)
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRTTY_MAGIC, return -1;);
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 	
 	/* Ready to play! */
 	netif_start_queue(dev);
@@ -963,16 +969,11 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRTTY_MAGIC, return -1;);
 
-	IRDA_DEBUG(3, "%s(), %s, (cmd=0x%X)\n", __FUNCTION__, dev->name, cmd);
+	IRDA_DEBUG(3, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
 	
-	/* Locking :
-	 * irda_device_dongle_init() can't be locked.
-	 * irda_task_execute() doesn't need to be locked (but
-	 * irtty_change_speed() should protect itself).
-	 * As this driver doesn't have spinlock protection, keep
-	 * old fashion locking :-(
-	 * Jean II
-	 */
+	/* Disable interrupts & save flags */
+	save_flags(flags);
+	cli();
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
@@ -998,17 +999,14 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		dongle->write       = irtty_raw_write;
 		dongle->set_dtr_rts = irtty_set_dtr_rts;
 		
-		/* Now initialize the dongle!
-		 * Safe to do unlocked : self->dongle is still NULL. */ 
+		self->dongle = dongle;
+
+		/* Now initialize the dongle!  */
 		dongle->issue->open(dongle, &self->qos);
 		
 		/* Reset dongle */
 		irda_task_execute(dongle, dongle->issue->reset, NULL, NULL, 
 				  NULL);	
-
-		/* Make dongle available to driver only now to avoid
-		 * race conditions - Jean II */
-		self->dongle = dongle;
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
 		if (!capable(CAP_NET_ADMIN))
@@ -1022,26 +1020,20 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	case SIOCSDTRRTS:
 		if (!capable(CAP_NET_ADMIN))
 			ret = -EPERM;
-		else {
-			save_flags(flags);
-			cli();
+		else
 			irtty_set_dtr_rts(dev, irq->ifr_dtr, irq->ifr_rts);
-			restore_flags(flags);
-		}
 		break;
 	case SIOCSMODE:
 		if (!capable(CAP_NET_ADMIN))
 			ret = -EPERM;
-		else {
-			save_flags(flags);
-			cli();
+		else
 			irtty_set_mode(dev, irq->ifr_mode);
-			restore_flags(flags);
-		}
 		break;
 	default:
 		ret = -EOPNOTSUPP;
 	}
+	
+	restore_flags(flags);
 	
 	return ret;
 }

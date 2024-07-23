@@ -25,7 +25,7 @@
  *	a0  = unaligned address of the last *word* written
  *	a2  = the number of full words left in COUNT
  *
- * Furthermore, v0, a3-a5, t11, and $at are untouched.
+ * Furthermore, v0, a3-a5, t11, t12, and $at are untouched.
  *
  * Much of the information about 21264 scheduling/coding comes from:
  *	Compiler Writer's Guide for the Alpha 21264
@@ -38,7 +38,7 @@
  * Try not to change the actual algorithm if possible for consistency.
  */
 
-#include <asm/regdef.h>
+#include <alpha/regdef.h>
 
 	.set noat
 	.set noreorder
@@ -205,30 +205,35 @@ $u_head:
 
 	cmpbge	zero, t6, t8	# E :
 	beq	a2, $u_eocfin	# U :
-	lda	t6, -1		# E :
+	nop
 	nop
 
 	bne	t8, $u_final	# U :
-	mskql	t6, a1, t6	# U : mask out bits already seen
+	lda	t6, -1		# E : mask out the bits we have
+	mskql	t6, a1, t6	# U :   already seen (stall)
 	stq_u	t0, 0(a0)	# L : store first output word
-	or      t6, t2, t2	# E : (stall)
 
-	cmpbge	zero, t2, t8	# E : find nulls in second partial
-	addq	a0, 8, a0	# E :
-	subq	a2, 1, a2	# E :
+	or      t6, t2, t2		# E :
+	cmpbge	zero, t2, t8		# E : find nulls in second partial (stall)
+	addq	a0, 8, a0		# E :
+	subq	a2, 1, a2		# E :
+
 	bne	t8, $u_late_head_exit	# U :
-
 	/* Finally, we've got all the stupid leading edge cases taken care
 	   of and we can set up to enter the main loop.  */
 	extql	t2, a1, t1	# U : position hi-bits of lo word
-	beq	a2, $u_eoc	# U :
 	ldq_u	t2, 8(a1)	# L : read next high-order source word
 	addq	a1, 8, a1	# E :
 
-	extqh	t2, a1, t0	# U : position lo-bits of hi word (stall)
-	cmpbge	zero, t2, t8	# E :
+	cmpbge	zero, t2, t8	# E : (stall)
+	beq	a2, $u_eoc	# U :
 	nop
-	bne	t8, $u_eos	# U :
+	nop
+
+	bne	t8, $u_eos	# e1    :
+	nop
+	nop
+	nop
 
 	/* Unaligned copy main loop.  In order to avoid reading too much,
 	   the loop is structured to detect zeros in aligned source words.
@@ -238,7 +243,6 @@ $u_head:
 	   to run as fast as possible.
 
 	   On entry to this basic block:
-	   t0 == the shifted low-order bits from the current source word
 	   t1 == the shifted high-order bits from the previous source word
 	   t2 == the unshifted current source word
 
@@ -246,20 +250,25 @@ $u_head:
 
 	.align 4
 $u_loop:
-	or	t0, t1, t0	# E : current dst word now complete
-	subq	a2, 1, a2	# E : decrement word count
-	extql	t2, a1, t1	# U : extract low bits for next time
+	extqh	t2, a1, t0	# U : extract high bits for current word
+	addq	a1, 8, a1	# E :
+	extql	t2, a1, t3	# U : extract low bits for next time
 	addq	a0, 8, a0	# E :
 
-	stq_u	t0, -8(a0)	# U : save the current word
-	beq	a2, $u_eoc	# U :
-	ldq_u	t2, 8(a1)	# U : Latency=3 load high word for next time
-	addq	a1, 8, a1	# E :
+	or	t0, t1, t0	# E : current dst word now complete
+	ldq_u	t2, 0(a1)	# U : Latency=3 load high word for next time
+	stq_u	t0, -8(a0)	# U : save the current word (stall)
+	mov	t3, t1		# E :
 
-	extqh	t2, a1, t0	# U : extract low bits (2 cycle stall)
-	cmpbge	zero, t2, t8	# E : test new word for eos
+	subq	a2, 1, a2	# E :
+	cmpbge	zero, t2, t8	# E : test new word for eos (2 cycle stall for data)
+	beq	a2, $u_eoc	# U : (stall)
 	nop
+
 	beq	t8, $u_loop	# U :
+	nop
+	nop
+	nop
 
 	/* We've found a zero somewhere in the source word we just read.
 	   If it resides in the lower half, we have one (probably partial)
@@ -267,12 +276,11 @@ $u_loop:
 	   have one full and one partial word left to write out.
 
 	   On entry to this basic block:
-	   t0 == the shifted low-order bits from the current source word
 	   t1 == the shifted high-order bits from the previous source word
 	   t2 == the unshifted current source word.  */
 $u_eos:
-	or	t0, t1, t0	# E : first (partial) source word complete
-	nop
+	extqh	t2, a1, t0	# U :
+	or	t0, t1, t0	# E : first (partial) source word complete (stall)
 	cmpbge	zero, t0, t8	# E : is the null in this first bit? (stall)
 	bne	t8, $u_final	# U : (stall)
 
@@ -310,26 +318,17 @@ $u_final:
 1:	stq_u	t0, 0(a0)	# L :
 	ret	(t9)		# L0 : Latency=3
 
-	  /* Got to end-of-count before end of string.  
-	     On entry to this basic block:
-	     t1 == the shifted high-order bits from the previous source word  */
-$u_eoc:
-	and	a1, 7, t6	# E : avoid final load if possible
-	sll	t10, t6, t6	# U : (stall)
-	and	t6, 0xff, t6	# E : (stall)
-	bne	t6, 1f		# U : (stall)
-
-	ldq_u	t2, 8(a1)	# L : load final src word
+$u_eoc:				# end-of-count
+	extqh	t2, a1, t0	# U :
+	or	t0, t1, t0	# E : (stall)
+	cmpbge	zero, t0, t8	# E : (stall)
 	nop
-	extqh	t2, a1, t0	# U : extract low bits for last word (stall)
-	or	t1, t0, t1	# E : (stall)
-
-1:	cmpbge	zero, t1, t8	# E :
-	mov	t1, t0		# E :
 
 $u_eocfin:			# end-of-count, final word
 	or	t10, t8, t8	# E :
 	br	$u_final	# L0 : Latency=3
+	nop
+	nop
 
 	/* Unaligned copy entry point.  */
 	.align 4
@@ -350,22 +349,24 @@ $unaligned:
 	mskql	t6, a0, t6	# U :
 	nop
 	nop
+	nop
+1:
 	subq	a1, t4, a1	# E : sub dest misalignment from src addr
 
 	/* If source misalignment is larger than dest misalignment, we need
 	   extra startup checks to avoid SEGV.  */
 
-1:	cmplt	t4, t5, t12	# E :
+	cmplt	t4, t5, t12	# E :
 	extql	t1, a1, t1	# U : shift src into place
 	lda	t2, -1		# E : for creating masks later
 	beq	t12, $u_head	# U : (stall)
 
-	extql	t2, a1, t2	# U :
+	mskqh	t2, t5, t2	# U : begin src byte validity mask
 	cmpbge	zero, t1, t8	# E : is there a zero?
-	andnot	t2, t6, t12	# E : dest mask for a single word copy
+	extql	t2, a1, t2	# U :
 	or	t8, t10, t5	# E : test for end-of-count too
 
-	cmpbge	zero, t12, t3	# E :
+	cmpbge	zero, t2, t3	# E :
 	cmoveq	a2, t5, t8	# E : Latency=2, extra map slot
 	nop			# E : keep with cmoveq
 	andnot	t8, t3, t8	# E : (stall)
@@ -379,13 +380,13 @@ $unaligned:
 	negq	t8, t6		# E : build bitmask of bytes <= zero
 	mskqh	t1, t4, t1	# U :
 
-	and	t6, t8, t2	# E :
-	subq	t2, 1, t6	# E : (stall)
-	or	t6, t2, t8	# E : (stall)
-	zapnot	t12, t8, t12	# U : prepare source word; mirror changes (stall)
+	and	t6, t8, t12	# E :
+	subq	t12, 1, t6	# E : (stall)
+	or	t6, t12, t8	# E : (stall)
+	zapnot	t2, t8, t2	# U : prepare source word; mirror changes (stall)
 
 	zapnot	t1, t8, t1	# U : to source validity mask
-	andnot	t0, t12, t0	# E : zero place for source to reside
+	andnot	t0, t2, t0	# E : zero place for source to reside
 	or	t0, t1, t0	# E : and put it there (stall both t0, t1)
 	stq_u	t0, 0(a0)	# L : (stall)
 
@@ -395,3 +396,4 @@ $unaligned:
 	nop
 
 	.end __stxncpy
+

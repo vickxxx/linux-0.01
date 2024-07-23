@@ -1,8 +1,9 @@
-/*
+/* $Id: setup.c,v 1.22 2001/10/23 17:42:58 pkj Exp $
+ *
  *  linux/arch/cris/kernel/setup.c
  *
  *  Copyright (C) 1995  Linus Torvalds
- *  Copyright (c) 2001, 2002, 2003  Axis Communications AB
+ *  Copyright (c) 2001  Axis Communications AB
  */
 
 /*
@@ -25,12 +26,10 @@
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
-#include <linux/seq_file.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
 #include <asm/smp.h>
-#include <asm/pgtable.h>
 #include <asm/types.h>
 #include <asm/svinto.h>
 
@@ -73,10 +72,10 @@ extern unsigned long romfs_start, romfs_length, romfs_in_flash; /* from head.S *
 void __init 
 setup_arch(char **cmdline_p)
 {
-	extern void init_etrax_debug(void);
-	unsigned long bootmap_size;
+        unsigned long bootmap_size;
 	unsigned long start_pfn, max_pfn;
 	unsigned long memory_start;
+	extern void console_print_etrax(const char *b);
 
  	/* register an initial console printing routine for printk's */
 
@@ -88,13 +87,12 @@ setup_arch(char **cmdline_p)
 
 	if(romfs_in_flash || !romfs_length) {
 		/* if we have the romfs in flash, or if there is no rom filesystem,
-		 * our free area starts directly after the BSS
+		 * our free area starts directly after the BSS 
 		 */
 		memory_start = (unsigned long) &_end;
 	} else {
 		/* otherwise the free area starts after the ROM filesystem */
-		printk(KERN_INFO "ROM fs in RAM, size %lu bytes\n",
-		       romfs_length);
+		printk("ROM fs in RAM, size %d bytes\n", romfs_length);
 		memory_start = romfs_start + romfs_length;
 	}
 
@@ -169,23 +167,20 @@ setup_arch(char **cmdline_p)
 
 	*cmdline_p = command_line;
 
-#ifdef CONFIG_ETRAX_CMDLINE
-	strncpy(command_line, CONFIG_ETRAX_CMDLINE, COMMAND_LINE_SIZE);
-#elif defined(CONFIG_ETRAX_ROOT_DEVICE)
-	strncpy(command_line, "root=", COMMAND_LINE_SIZE);
-	strncpy(command_line+5, CONFIG_ETRAX_ROOT_DEVICE,
+	if (romfs_in_flash) {
+		strncpy(command_line, "root=", COMMAND_LINE_SIZE);
+		strncpy(command_line+5, CONFIG_ETRAX_ROOT_DEVICE,
 			COMMAND_LINE_SIZE-5);
-#endif
-	command_line[COMMAND_LINE_SIZE - 1] = '\0';
 
-	/* Save command line copy for /proc/cmdline */
-	
-	memcpy(saved_command_line, command_line, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+		/* Save command line copy for /proc/cmdline */
+
+		memcpy(saved_command_line, command_line, COMMAND_LINE_SIZE);
+		saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+	}
 
 	/* give credit for the CRIS port */
 
-	printk(KERN_INFO "Linux/CRIS port on ETRAX 100LX (c) 2001, 2002 Axis Communications AB\n");
+	printk("Linux/CRIS port on ETRAX 100LX (c) 2001 Axis Communications AB\n");
 
 }
 
@@ -198,7 +193,7 @@ setup_arch(char **cmdline_p)
 #define HAS_ATA		0x0020
 #define HAS_USB		0x0040
 #define HAS_IRQ_BUG	0x0080
-#define HAS_MMU_BUG	0x0100
+#define HAS_MMU_BUG     0x0100
 
 static struct cpu_info {
 	char *model;
@@ -218,76 +213,74 @@ static struct cpu_info {
 	{ "ETRAX 100",       8, HAS_ETHERNET100 | HAS_SCSI | HAS_ATA | HAS_IRQ_BUG },
 	{ "ETRAX 100",       8, HAS_ETHERNET100 | HAS_SCSI | HAS_ATA },
 	{ "ETRAX 100LX",     8, HAS_ETHERNET100 | HAS_SCSI | HAS_ATA | HAS_USB | HAS_MMU | HAS_MMU_BUG },
-	{ "ETRAX 100LX v2",  8, HAS_ETHERNET100 | HAS_SCSI | HAS_ATA | HAS_USB | HAS_MMU  },
+	{ "ETRAX 100LX v2",  8, HAS_ETHERNET100 | HAS_SCSI | HAS_ATA | HAS_USB | HAS_MMU },
 	{ "Unknown",         0, 0 }  /* This entry MUST be the last */
 };
 
-static int show_cpuinfo(struct seq_file *m, void *v)
+/*
+ * get_cpuinfo - Get information on one CPU for use by the procfs.
+ *
+ *	Prints info on the next CPU into buffer.  Beware, doesn't check for
+ *	buffer overflow.  Current implementation of procfs assumes that the
+ *	resulting data is <= 1K.
+ *
+ *	BUFFER is PAGE_SIZE - 1K bytes long.
+ *
+ * Args:
+ *	buffer	-- you guessed it, the data buffer
+ *	cpu_np	-- Input: next cpu to get (start at 0).  Output: Updated.
+ *
+ *	Returns number of bytes written to buffer.
+ */
+int get_cpuinfo(char *buffer, unsigned *cpu_np)
 {
-	unsigned long revision;
-	struct cpu_info *info;
+	int revision;
+ 	struct cpu_info *info;
+	unsigned n;
 
 	/* read the version register in the CPU and print some stuff */
 
 	revision = rdvr();
 
-	if (revision >= sizeof cpu_info/sizeof *cpu_info)
+	if (revision < 0 || revision >= sizeof cpu_info/sizeof *cpu_info) {
 		info = &cpu_info[sizeof cpu_info/sizeof *cpu_info - 1];
-	else
+	} else
 		info = &cpu_info[revision];
 
-	return seq_printf(m,
-			  "processor\t: 0\n"
-			  "cpu\t\t: CRIS\n"
-			  "cpu revision\t: %lu\n"
-			  "cpu model\t: %s\n"
-			  "cache size\t: %d kB\n"
-			  "fpu\t\t: %s\n"
-			  "mmu\t\t: %s\n"
-			  "mmu DMA bug\t: %s\n"
-			  "ethernet\t: %s Mbps\n"
-			  "token ring\t: %s\n"
-			  "scsi\t\t: %s\n"
-			  "ata\t\t: %s\n"
-			  "usb\t\t: %s\n"
-			  "bogomips\t: %lu.%02lu\n",
+  	/* No SMP at the moment, so just toggle 0/1 */
+	n = *cpu_np;
+	*cpu_np = 1;
+	if (n != 0) {
+		return (0);
+	}
 
-			  revision,
-			  info->model,
-			  info->cache,
-			  info->flags & HAS_FPU ? "yes" : "no",
-			  info->flags & HAS_MMU ? "yes" : "no",
-			  info->flags & HAS_MMU_BUG ? "yes" : "no",
-			  info->flags & HAS_ETHERNET100 ? "10/100" : "10",
-			  info->flags & HAS_TOKENRING ? "4/16 Mbps" : "no",
-			  info->flags & HAS_SCSI ? "yes" : "no",
-			  info->flags & HAS_ATA ? "yes" : "no",
-			  info->flags & HAS_USB ? "yes" : "no",
-			  (loops_per_jiffy * HZ + 500) / 500000,
-			  ((loops_per_jiffy * HZ + 500) / 5000) % 100);
+	return sprintf(buffer,
+		       "cpu\t\t: CRIS\n"
+		       "cpu revision\t: %d\n"
+		       "cpu model\t: %s\n"
+		       "cache size\t: %d kB\n"
+		       "fpu\t\t: %s\n"
+		       "mmu\t\t: %s\n"
+		       "mmu DMA bug\t: %s\n"
+		       "ethernet\t: %s Mbps\n"
+		       "token ring\t: %s\n"
+		       "scsi\t\t: %s\n"
+		       "ata\t\t: %s\n"
+		       "usb\t\t: %s\n"
+		       "bogomips\t: %lu.%02lu\n",
+
+		       revision,
+		       info->model,
+		       info->cache,
+		       info->flags & HAS_FPU ? "yes" : "no",
+		       info->flags & HAS_MMU ? "yes" : "no",
+		       info->flags & HAS_MMU_BUG ? "yes" : "no",
+		       info->flags & HAS_ETHERNET100 ? "10/100" : "10",
+		       info->flags & HAS_TOKENRING ? "4/16 Mbps" : "no",
+		       info->flags & HAS_SCSI ? "yes" : "no",
+		       info->flags & HAS_ATA ? "yes" : "no",
+		       info->flags & HAS_USB ? "yes" : "no",
+		       (loops_per_jiffy * HZ + 500) / 500000,
+		       ((loops_per_jiffy * HZ + 500) / 5000) % 100);
 }
-
-static void *c_start(struct seq_file *m, loff_t *pos)
-{
-	/* We only got one CPU... */
-	return *pos < 1 ? (void *)1 : NULL;
-}
-
-static void *c_next(struct seq_file *m, void *v, loff_t *pos)
-{
-	++*pos;
-	return NULL;
-}
-
-static void c_stop(struct seq_file *m, void *v)
-{
-}
-
-struct seq_operations cpuinfo_op = {
-	start:  c_start,
-	next:   c_next,
-	stop:   c_stop,
-	show:   show_cpuinfo,
-};
-
 #endif /* CONFIG_PROC_FS */

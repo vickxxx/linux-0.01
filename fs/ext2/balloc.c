@@ -88,7 +88,7 @@ static int read_block_bitmap (struct super_block * sb,
 	if (!gdp)
 		goto error_out;
 	retval = 0;
-	bh = sb_bread(sb, le32_to_cpu(gdp->bg_block_bitmap));
+	bh = bread (sb->s_dev, le32_to_cpu(gdp->bg_block_bitmap), sb->s_blocksize);
 	if (!bh) {
 		ext2_error (sb, "read_block_bitmap",
 			    "Cannot read block bitmap - "
@@ -269,8 +269,7 @@ void ext2_free_blocks (struct inode * inode, unsigned long block,
 	}
 	lock_super (sb);
 	es = sb->u.ext2_sb.s_es;
-	if (block < le32_to_cpu(es->s_first_data_block) ||
-	    block + count < block ||
+	if (block < le32_to_cpu(es->s_first_data_block) || 
 	    (block + count) > le32_to_cpu(es->s_blocks_count)) {
 		ext2_error (sb, "ext2_free_blocks",
 			    "Freeing blocks not in datazone - "
@@ -303,20 +302,22 @@ do_more:
 	if (!gdp)
 		goto error_return;
 
-	for (i = 0; i < count; i++, block++) {
-		if (block == le32_to_cpu(gdp->bg_block_bitmap) ||
-		    block == le32_to_cpu(gdp->bg_inode_bitmap) ||
-		    in_range(block, le32_to_cpu(gdp->bg_inode_table),
-			     EXT2_SB(sb)->s_itb_per_group)) {
-			ext2_error(sb, __FUNCTION__,
-				   "Freeing block in system zone - block = %lu",
-				   block);
-			continue;
-		}
+	if (in_range (le32_to_cpu(gdp->bg_block_bitmap), block, count) ||
+	    in_range (le32_to_cpu(gdp->bg_inode_bitmap), block, count) ||
+	    in_range (block, le32_to_cpu(gdp->bg_inode_table),
+		      sb->u.ext2_sb.s_itb_per_group) ||
+	    in_range (block + count - 1, le32_to_cpu(gdp->bg_inode_table),
+		      sb->u.ext2_sb.s_itb_per_group))
+		ext2_error (sb, "ext2_free_blocks",
+			    "Freeing blocks in system zones - "
+			    "Block = %lu, count = %lu",
+			    block, count);
 
+	for (i = 0; i < count; i++) {
 		if (!ext2_clear_bit (bit + i, bh->b_data))
-			ext2_error(sb, __FUNCTION__,
-				   "bit already cleared for block %lu", block);
+			ext2_error (sb, "ext2_free_blocks",
+				      "bit already cleared for block %lu",
+				      block + i);
 		else {
 			DQUOT_FREE_BLOCK(inode, 1);
 			gdp->bg_free_blocks_count =
@@ -335,6 +336,7 @@ do_more:
 		wait_on_buffer (bh);
 	}
 	if (overflow) {
+		block += count;
 		count = overflow;
 		goto do_more;
 	}
@@ -518,14 +520,10 @@ got_block:
 	if (tmp == le32_to_cpu(gdp->bg_block_bitmap) ||
 	    tmp == le32_to_cpu(gdp->bg_inode_bitmap) ||
 	    in_range (tmp, le32_to_cpu(gdp->bg_inode_table),
-		      EXT2_SB(sb)->s_itb_per_group)) {
+		      sb->u.ext2_sb.s_itb_per_group))
 		ext2_error (sb, "ext2_new_block",
-			    "Allocating block in system zone - block = %u",
-			    tmp);
-		ext2_set_bit(j, bh->b_data);
-		DQUOT_FREE_BLOCK(inode, 1);
-		goto repeat;
-	}
+			    "Allocating block in system zone - "
+			    "block = %u", tmp);
 
 	if (ext2_set_bit (j, bh->b_data)) {
 		ext2_warning (sb, "ext2_new_block",

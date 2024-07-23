@@ -19,8 +19,7 @@
 	andcc		%o5, (FPRS_FEF|FPRS_DU), %g0;	\
 	be,pt		%icc, 297f;			\
 	 sethi		%hi(297f), %g7;			\
-	sethi		%hi(VISenter), %g1;		\
-	jmpl		%g1 + %lo(VISenter), %g0;	\
+	ba,pt		%xcc, VISenter;			\
 	 or		%g7, %lo(297f), %g7;		\
 297:	wr		%g0, FPRS_FEF, %fprs;		\
 
@@ -35,8 +34,7 @@
 	andcc		%o5, FPRS_FEF, %g0;		\
 	be,pt		%icc, 297f;			\
 	 sethi		%hi(298f), %g7;			\
-	sethi		%hi(VISenterhalf), %g1;		\
-	jmpl		%g1 + %lo(VISenterhalf), %g0;	\
+	ba,pt		%xcc, VISenterhalf;		\
 	 or		%g7, %lo(298f), %g7;		\
 	clr		%o5;				\
 297:	wr		%o5, FPRS_FEF, %fprs;		\
@@ -52,8 +50,7 @@ extern __inline__ void save_and_clear_fpu(void) {
 "		andcc %%o5, %0, %%g0\n"
 "		be,pt %%icc, 299f\n"
 "		 sethi %%hi(298f), %%g7\n"
-"		sethi %%hi(VISenter), %%g1\n"
-"		jmpl %%g1 + %%lo(VISenter), %%g0\n"
+"		ba VISenter	! Note. This cannot be bp, as it may be too far from VISenter.\n"
 "		 or %%g7, %%lo(298f), %%g7\n"
 "	298:	wr %%g0, 0, %%fprs\n"
 "	299:\n"

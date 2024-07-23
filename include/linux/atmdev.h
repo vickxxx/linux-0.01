@@ -30,6 +30,9 @@
 #define ATM_DS3_PCR	(8000*12)
 			/* DS3: 12 cells in a 125 usec time slot */
 
+#define ATM_PDU_OVHD	0	/* number of bytes to charge against buffer
+				   quota per PDU */
+
 #define ATM_SD(s)	((s)->sk->protinfo.af_atm)
 
 
@@ -92,8 +95,6 @@ struct atm_dev_stats {
 					/* enable or disable single-copy */
 #define ATM_SETBACKEND	_IOW('a',ATMIOC_SPECIAL+2,atm_backend_t)
 					/* set backend handler */
-#define ATM_NEWBACKENDIF _IOW('a',ATMIOC_SPECIAL+3,atm_backend_t)
-					/* use backend to make new if */
 
 /*
  * These are backend handkers that can be set via the ATM_SETBACKEND call
@@ -102,7 +103,7 @@ struct atm_dev_stats {
  */
 #define ATM_BACKEND_RAW		0	
 #define ATM_BACKEND_PPP		1	/* PPPoATM - RFC2364 */
-#define ATM_BACKEND_BR2684	2	/* Bridged RFC1483/2684 */
+#define ATM_BACKEND_BR_2684	2	/* Bridged RFC1483/2684 */
 
 /* for ATM_GETTYPE */
 #define ATM_ITFTYP_LEN	8	/* maximum length of interface type name */
@@ -199,7 +200,9 @@ struct atm_cirange {
     "SESSION",	"HASSAP",	"BOUND",	"CLOSE"
 
 
-#ifdef __KERNEL__
+#ifndef __KERNEL__
+#undef __AAL_STAT_ITEMS
+#else
 
 #include <linux/sched.h> /* wait_queue_head_t */
 #include <linux/time.h> /* struct timeval */
@@ -277,6 +280,7 @@ typedef struct { unsigned long bits; } atm_vcc_flags_t;
 
 struct atm_vcc {
 	atm_vcc_flags_t flags;		/* VCC flags (ATM_VF_*) */
+	unsigned char	family;		/* address family; 0 if unused */
 	short		vpi;		/* VPI and VCI (types must be equal */
 					/* with sockaddr) */
 	int 		vci;
@@ -285,20 +289,31 @@ struct atm_vcc {
 	struct atm_dev	*dev;		/* device back pointer */
 	struct atm_qos	qos;		/* QOS */
 	struct atm_sap	sap;		/* SAP */
+	atomic_t	tx_inuse,rx_inuse; /* buffer space in use */
 	void (*push)(struct atm_vcc *vcc,struct sk_buff *skb);
 	void (*pop)(struct atm_vcc *vcc,struct sk_buff *skb); /* optional */
+	struct sk_buff *(*alloc_tx)(struct atm_vcc *vcc,unsigned int size);
+					/* TX allocation routine - can be */
+					/* modified by protocol or by driver.*/
+					/* NOTE: this interface will change */
 	int (*push_oam)(struct atm_vcc *vcc,void *cell);
 	int (*send)(struct atm_vcc *vcc,struct sk_buff *skb);
 	void		*dev_data;	/* per-device data */
 	void		*proto_data;	/* per-protocol data */
+	struct timeval	timestamp;	/* AAL timestamps */
+	struct sk_buff_head recvq;	/* receive queue */
 	struct k_atm_aal_stats *stats;	/* pointer to AAL stats group */
 	wait_queue_head_t sleep;	/* if socket is busy */
 	struct sock	*sk;		/* socket backpointer */
+	struct atm_vcc	*prev,*next;
 	/* SVC part --- may move later ------------------------------------- */
 	short		itf;		/* interface number */
 	struct sockaddr_atmsvc local;
 	struct sockaddr_atmsvc remote;
 	void (*callback)(struct atm_vcc *vcc);
+	struct sk_buff_head listenq;
+	int		backlog_quota;	/* number of connection requests we */
+					/* can still accept */
 	int		reply;		/* also used by ATMTCP */
 	/* Multipoint part ------------------------------------------------- */
 	struct atm_vcc	*session;	/* session VCC descriptor */
@@ -324,6 +339,8 @@ struct atm_dev {
 					/* (NULL) */
 	const char	*type;		/* device type name */
 	int		number;		/* device index */
+	struct atm_vcc	*vccs;		/* VCC table (or NULL) */
+	struct atm_vcc	*last;		/* last VCC (or undefined) */
 	void		*dev_data;	/* per-device data */
 	void		*phy_data;	/* private PHY date */
 	atm_dev_flags_t flags;		/* device flags (ATM_DF_*) */
@@ -333,13 +350,11 @@ struct atm_dev {
 	struct k_atm_dev_stats stats;	/* statistics */
 	char		signal;		/* signal status (ATM_PHY_SIG_*) */
 	int		link_rate;	/* link rate (default: OC3) */
-	atomic_t	refcnt;		/* reference count */
-	spinlock_t	lock;		/* protect internal members */
 #ifdef CONFIG_PROC_FS
 	struct proc_dir_entry *proc_entry; /* proc entry */
 	char *proc_name;		/* proc entry name */
 #endif
-	struct list_head dev_list;	/* linkage */
+	struct atm_dev	*prev,*next;	/* linkage */
 };
 
 
@@ -375,6 +390,8 @@ struct atmdev_ops { /* only send is required */
 	void (*feedback)(struct atm_vcc *vcc,struct sk_buff *skb,
 	    unsigned long start,unsigned long dest,int len);
 	int (*change_qos)(struct atm_vcc *vcc,struct atm_qos *qos,int flags);
+	void (*free_rx_skb)(struct atm_vcc *vcc, struct sk_buff *skb);
+		/* @@@ temporary hack */
 	int (*proc_read)(struct atm_dev *dev,loff_t *pos,char *page);
 	struct module *owner;
 };
@@ -389,21 +406,18 @@ struct atmphy_ops {
 
 struct atm_skb_data {
 	struct atm_vcc	*vcc;		/* ATM VCC */
+	int		iovcnt;		/* 0 for "normal" operation */
 	unsigned long	atm_options;	/* ATM layer options */
 };
-
-extern struct sock *vcc_sklist;
-extern rwlock_t vcc_sklist_lock;
 
 #define ATM_SKB(skb) (((struct atm_skb_data *) (skb)->cb))
 
 struct atm_dev *atm_dev_register(const char *type,const struct atmdev_ops *ops,
     int number,atm_dev_flags_t *flags); /* number == -1: pick first available */
-struct atm_dev *atm_dev_lookup(int number);
+struct atm_dev *atm_find_dev(int number);
 void atm_dev_deregister(struct atm_dev *dev);
 void shutdown_atm_dev(struct atm_dev *dev);
-void vcc_insert_socket(struct sock *sk);
-void vcc_remove_socket(struct sock *sk);
+void bind_vcc(struct atm_vcc *vcc,struct atm_dev *dev);
 
 
 /*
@@ -411,43 +425,27 @@ void vcc_remove_socket(struct sock *sk);
  *
  */
 
-static inline int atm_guess_pdu2truesize(int size)
+static __inline__ int atm_guess_pdu2truesize(int pdu_size)
 {
-	return (SKB_DATA_ALIGN(size) + sizeof(struct skb_shared_info));
+	return ((pdu_size+15) & ~15) + sizeof(struct sk_buff);
 }
 
 
-static inline void atm_force_charge(struct atm_vcc *vcc,int truesize)
+static __inline__ void atm_force_charge(struct atm_vcc *vcc,int truesize)
 {
-	atomic_add(truesize, &vcc->sk->rmem_alloc);
+	atomic_add(truesize+ATM_PDU_OVHD,&vcc->rx_inuse);
 }
 
 
-static inline void atm_return(struct atm_vcc *vcc,int truesize)
+static __inline__ void atm_return(struct atm_vcc *vcc,int truesize)
 {
-	atomic_sub(truesize, &vcc->sk->rmem_alloc);
+	atomic_sub(truesize+ATM_PDU_OVHD,&vcc->rx_inuse);
 }
 
 
-static inline int atm_may_send(struct atm_vcc *vcc,unsigned int size)
+static __inline__ int atm_may_send(struct atm_vcc *vcc,unsigned int size)
 {
-	return (size + atomic_read(&vcc->sk->wmem_alloc)) < vcc->sk->sndbuf;
-}
-
-
-static inline void atm_dev_hold(struct atm_dev *dev)
-{
-	atomic_inc(&dev->refcnt);
-}
-
-
-static inline void atm_dev_put(struct atm_dev *dev)
-{
-	atomic_dec(&dev->refcnt);
-
-	if ((atomic_read(&dev->refcnt) == 1) &&
-	    test_bit(ATM_DF_CLOSE,&dev->flags))
-		shutdown_atm_dev(dev);
+	return size+atomic_read(&vcc->tx_inuse)+ATM_PDU_OVHD < vcc->sk->sndbuf;
 }
 
 
@@ -457,7 +455,7 @@ struct sk_buff *atm_alloc_charge(struct atm_vcc *vcc,int pdu_size,
 int atm_find_ci(struct atm_vcc *vcc,short *vpi,int *vci);
 int atm_pcr_goal(struct atm_trafprm *tp);
 
-void vcc_release_async(struct atm_vcc *vcc, int reply);
+void atm_async_release_vcc(struct atm_vcc *vcc,int reply);
 
 #endif /* __KERNEL__ */
 

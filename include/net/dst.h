@@ -18,8 +18,8 @@
  */
 #define RT_CACHE_DEBUG		0
 
-#define DST_GC_MIN	(HZ/10)
-#define DST_GC_INC	(HZ/2)
+#define DST_GC_MIN	(1*HZ)
+#define DST_GC_INC	(5*HZ)
 #define DST_GC_MAX	(120*HZ)
 
 struct sk_buff;
@@ -104,10 +104,8 @@ struct dst_entry * dst_clone(struct dst_entry * dst)
 static inline
 void dst_release(struct dst_entry * dst)
 {
-	if (dst) {
-		smp_mb__before_atomic_dec();
+	if (dst)
 		atomic_dec(&dst->__refcnt);
-	}
 }
 
 extern void * dst_alloc(struct dst_ops * ops);

@@ -14,6 +14,7 @@
  * TODO:
  *
  * b layer1 delay?
+ * hdlc as module
  * hotplug / unregister issues
  * mod_inc/dec_use_count
  * unify parts of d/b channel usb handling
@@ -177,7 +178,7 @@ MODULE_DEVICE_TABLE (usb, st5481_ids);
 static struct usb_driver st5481_usb_driver = {
 	name: "st5481_usb",
 	probe: probe_st5481,
-	disconnect: __devexit_p(disconnect_st5481),
+	disconnect: disconnect_st5481,
 	id_table: st5481_ids,
 };
 

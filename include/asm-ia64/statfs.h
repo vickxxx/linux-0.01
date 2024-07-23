@@ -2,10 +2,8 @@
 #define _ASM_IA64_STATFS_H
 
 /*
- * Based on <asm-i386/statfs.h>.
- *
- * Modified 1998, 1999
- *	David Mosberger-Tang <davidm@hpl.hp.com>, Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 Hewlett-Packard Co
+ * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 # ifndef __KERNEL_STRICT_NAMES

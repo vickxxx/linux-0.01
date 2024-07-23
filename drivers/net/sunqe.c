@@ -1,4 +1,4 @@
-/* $Id: sunqe.c,v 1.52.2.1 2001/12/21 00:52:47 davem Exp $
+/* $Id: sunqe.c,v 1.52 2001/10/18 08:18:08 davem Exp $
  * sunqe.c: Sparc QuadEthernet 10baseT SBUS card driver.
  *          Once again I am out to prove that every ethernet
  *          controller out there can be most efficiently programmed
@@ -24,7 +24,6 @@ static char version[] =
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <linux/crc32.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -495,7 +494,6 @@ static void qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				spin_unlock(&qep->lock);
 			}
 	next:
-			;
 		}
 		qec_status >>= 4;
 		channel++;
@@ -623,14 +621,17 @@ static struct net_device_stats *qe_get_stats(struct net_device *dev)
 	return &qep->net_stats;
 }
 
+#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
+#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
+
 static void qe_set_multicast(struct net_device *dev)
 {
 	struct sunqe *qep = (struct sunqe *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
 	u8 new_mconfig = qep->mconfig;
 	char *addrs;
-	int i;
-	u32 crc;
+	int i, j, bit, byte;
+	u32 crc, poly = CRC_POLYNOMIAL_LE;
 
 	/* Lock out others. */
 	netif_stop_queue(dev);
@@ -658,7 +659,18 @@ static void qe_set_multicast(struct net_device *dev)
 
 			if (!(*addrs & 1))
 				continue;
-			crc = ether_crc_le(6, addrs);
+
+			crc = 0xffffffffU;
+			for (byte = 0; byte < 6; byte++) {
+				for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
+					int test;
+
+					test = ((bit ^ crc) & 0x01);
+					crc >>= 1;
+					if (test)
+						crc = crc ^ poly;
+				}
+			}
 			crc >>= 26;
 			hash_table[crc >> 4] |= 1 << (crc & 0xf);
 		}
@@ -929,6 +941,7 @@ qec_free_devs:
 							     sizeof(struct sunqe_buffers),
 							     qe->buffers,
 							     qe->buffers_dvma);
+				kfree(qe_devs[i]->priv);
 			}
 			kfree(qe_devs[i]);
 		}

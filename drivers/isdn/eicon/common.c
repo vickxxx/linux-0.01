@@ -808,9 +808,7 @@ void	DivasDoDpc(void *pData)
 	
 	while(i--)
 	{
-            if (card->state == DIA_RUNNING)
-		DivaDoCardDpc(card);
-            card++;
+		DivaDoCardDpc(card++);
 	}
 }
 

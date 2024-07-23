@@ -37,8 +37,6 @@
 
 extern struct hwrpb_struct *hwrpb;
 extern void dump_thread(struct pt_regs *, struct user *);
-extern void dump_elf_thread(elf_gregset_t dest, struct pt_regs *pt,
-			    struct task_struct *task);
 extern int dump_fpu(struct pt_regs *, elf_fpregset_t *);
 extern spinlock_t kernel_flag;
 extern spinlock_t rtc_lock;
@@ -60,12 +58,11 @@ EXPORT_SYMBOL(disable_irq_nosync);
 EXPORT_SYMBOL(probe_irq_mask);
 EXPORT_SYMBOL(screen_info);
 EXPORT_SYMBOL(perf_irq);
+#ifdef CONFIG_ALPHA_SRM
 EXPORT_SYMBOL(callback_getenv);
 EXPORT_SYMBOL(callback_setenv);
 EXPORT_SYMBOL(callback_save_env);
-#ifdef CONFIG_ALPHA_GENERIC
-EXPORT_SYMBOL(alpha_using_srm);
-#endif /* CNFIG_ALPHA_GENERIC */
+#endif /* CONFIG_ALPHA_SRM */
 
 /* platform dependent support */
 EXPORT_SYMBOL(_inb);
@@ -112,7 +109,6 @@ EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(memmove);
-EXPORT_SYMBOL(memscan);
 EXPORT_SYMBOL(__memcpy);
 EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(__memsetw);
@@ -121,7 +117,7 @@ EXPORT_SYMBOL(copy_page);
 EXPORT_SYMBOL(clear_page);
 
 EXPORT_SYMBOL(__delay);
-EXPORT_SYMBOL(ndelay);
+EXPORT_SYMBOL(__udelay);
 EXPORT_SYMBOL(udelay);
 
 EXPORT_SYMBOL(__direct_map_base);
@@ -144,7 +140,6 @@ EXPORT_SYMBOL(pci_dac_dma_to_offset);
 #endif
 
 EXPORT_SYMBOL(dump_thread);
-EXPORT_SYMBOL(dump_elf_thread);
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(hwrpb);
 EXPORT_SYMBOL(wrusp);
@@ -218,7 +213,6 @@ EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL(smp_imb);
 EXPORT_SYMBOL(cpu_data);
 EXPORT_SYMBOL(__cpu_number_map);
-EXPORT_SYMBOL(__cpu_logical_map);
 EXPORT_SYMBOL(smp_num_cpus);
 EXPORT_SYMBOL(smp_call_function);
 EXPORT_SYMBOL(smp_call_function_on_cpu);
@@ -239,13 +233,6 @@ EXPORT_SYMBOL(read_lock);
 #endif
 EXPORT_SYMBOL(cpu_present_mask);
 #endif /* CONFIG_SMP */
-
-/*
- * NUMA specific symbols
- */
-#ifdef CONFIG_DISCONTIGMEM
-EXPORT_SYMBOL(plat_node_data);
-#endif /* CONFIG_DISCONTIGMEM */
 
 EXPORT_SYMBOL(rtc_lock);
 
@@ -271,16 +258,3 @@ EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memchr);
 
 EXPORT_SYMBOL(get_wchan);
-
-#ifdef CONFIG_ALPHA_IRONGATE
-EXPORT_SYMBOL(irongate_ioremap);
-EXPORT_SYMBOL(irongate_iounmap);
-#endif
-#ifdef CONFIG_ALPHA_TITAN
-EXPORT_SYMBOL(titan_ioremap);
-EXPORT_SYMBOL(titan_iounmap);
-#endif
-#ifdef CONFIG_ALPHA_MARVEL
-EXPORT_SYMBOL(marvel_ioremap);
-EXPORT_SYMBOL(marvel_iounmap);
-#endif

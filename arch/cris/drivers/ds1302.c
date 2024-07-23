@@ -4,35 +4,9 @@
 *!
 *! DESCRIPTION: Implements an interface for the DS1302 RTC through Etrax I/O
 *!
-*! Functions exported: ds1302_readreg, ds1302_writereg, ds1302_init
+*! Functions exported: ds1302_readreg, ds1302_writereg, ds1302_init, get_rtc_status
 *!
 *! $Log: ds1302.c,v $
-*! Revision 1.19  2003/06/12 08:02:05  johana
-*! Removed faulty comma from printk.
-*! Fixed warning () -> (void)
-*!
-*! Revision 1.18  2003/04/16 09:02:28  oskarp
-*! * Merged change_branch--rtc_readonly to main.
-*!
-*! Revision 1.17  2003/04/01 14:12:06  starvik
-*! Added loglevel for lots of printks
-*!
-*! Revision 1.16  2003/02/19 15:51:16  cedric
-*! Start the clock from ds1302_init()
-*!
-*! Revision 1.15  2002/10/11 16:14:33  johana
-*! Added CONFIG_ETRAX_DS1302_TRICKLE_CHARGE and initial setting of the
-*! trcklecharge register.
-*!
-*! Revision 1.14  2002/10/10 12:15:38  magnusmn
-*! Added support for having the RST signal on bit g0
-*!
-*! Revision 1.13  2002/05/29 15:16:08  johana
-*! Removed unused variables.
-*!
-*! Revision 1.12  2002/04/10 15:35:25  johana
-*! Moved probe function closer to init function and marked it __init.
-*!
 *! Revision 1.11  2001/06/14 12:35:52  jonashg
 *! The ATA hack is back. It is unfortunately the only way to set g27 to output.
 *!
@@ -108,7 +82,7 @@
 *!
 *! (C) Copyright 1999, 2000, 2001  Axis Communications AB, LUND, SWEDEN
 *!
-*! $Id: ds1302.c,v 1.19 2003/06/12 08:02:05 johana Exp $
+*! $Id: ds1302.c,v 1.11 2001/06/14 12:35:52 jonashg Exp $
 *!
 *!***************************************************************************/
 
@@ -254,6 +228,54 @@ ds1302_wdisable(void)
 	stop();
 }
 
+/* Probe for the chip by writing something to its RAM and try reading it back. */
+
+#define MAGIC_PATTERN 0x42
+
+static int
+ds1302_probe(void) 
+{
+	int retval, res; 
+
+	TK_RST_DIR(1);
+	TK_SCL_DIR(1);
+	TK_SDA_DIR(0);
+	
+	/* Try to talk to timekeeper. */
+
+	ds1302_wenable();  
+	start();
+	out_byte(0xc0); /* write RAM byte 0 */	
+	out_byte(MAGIC_PATTERN); /* write something magic */
+	start();
+	out_byte(0xc1); /* read RAM byte 0 */
+
+	if((res = in_byte()) == MAGIC_PATTERN) {
+		char buf[100];
+		stop();
+		ds1302_wdisable();
+		printk("%s: RTC found.\n", ds1302_name);
+		printk("%s: SDA, SCL, RST on PB%i, PB%i, %s%i\n",
+		       ds1302_name,
+		       CONFIG_ETRAX_DS1302_SDABIT,
+		       CONFIG_ETRAX_DS1302_SCLBIT,
+#ifdef CONFIG_ETRAX_DS1302_RST_ON_GENERIC_PORT
+		       "GENIO",
+#else
+		       "PB",
+#endif
+		       CONFIG_ETRAX_DS1302_RSTBIT);
+                get_rtc_status(buf);
+                printk(buf);
+		retval = 1;
+	} else {
+		stop();
+		printk("%s: RTC not found.\n", ds1302_name);
+		retval = 0;
+	}
+
+	return retval;
+}
 
 
 /* Read a byte from the selected register in the DS1302. */
@@ -276,23 +298,12 @@ ds1302_readreg(int reg)
 void
 ds1302_writereg(int reg, unsigned char val) 
 {
-#ifndef CONFIG_ETRAX_RTC_READONLY
-	int do_writereg = 1;
-#else
-	int do_writereg = 0;
-	
-	if (reg == RTC_TRICKLECHARGER)
-		do_writereg = 1;
-#endif
-	
-	if (do_writereg) {
-		ds1302_wenable();
-		start();
-		out_byte(0x80 | (reg << 1)); /* write register */
-		out_byte(val);
-		stop();
-		ds1302_wdisable();
-	}
+	ds1302_wenable();
+	start();
+	out_byte(0x80 | (reg << 1)); /* write register */
+	out_byte(val);
+	stop();
+	ds1302_wdisable();
 }
 
 void
@@ -346,7 +357,6 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		{
 			struct rtc_time rtc_tm;
 						
-			memset(&rtc_tm, 0, sizeof (struct rtc_time));
 			get_rtc_time(&rtc_tm);						
 			if (copy_to_user((struct rtc_time*)arg, &rtc_tm, sizeof(struct rtc_time)))
 				return -EFAULT;	
@@ -357,6 +367,7 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		{
 			struct rtc_time rtc_tm;
 			unsigned char mon, day, hrs, min, sec, leap_yr;
+			unsigned char save_control, save_freq_select;
 			unsigned int yrs;
 
 			if (!capable(CAP_SYS_TIME))
@@ -420,6 +431,7 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		case RTC_SET_CHARGE: /* set the RTC TRICKLE CHARGE register */
 		{
 			int tcs_val;                        
+			unsigned char save_control, save_freq_select;
 
 			if (!capable(CAP_SYS_TIME))
 				return -EPERM;
@@ -430,32 +442,19 @@ rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			tcs_val = RTC_TCR_PATTERN | (tcs_val & 0x0F);
 			ds1302_writereg(RTC_TRICKLECHARGER, tcs_val);
 			return 0;
-		}
-		case RTC_VLOW_RD:
-		{
-			/* TODO: 
-			 * Implement voltage low detection support 
-			 */
-			printk(KERN_WARNING "DS1302: RTC Voltage Low detection"
-			       " is not supported\n");
-			return 0;
-		}
-		case RTC_VLOW_SET:
-		{
-			/* TODO:
-			 * Nothing to do since Voltage Low detection is not supported
-			 */
-			return 0;
-		}
+		}                
 		default:
 			return -ENOIOCTLCMD;
 	}
 }
 
-static void
-print_rtc_status(void) 
+int
+get_rtc_status(char *buf) 
 {
+	char *p;
 	struct rtc_time tm;
+
+	p = buf;
 
 	get_rtc_time(&tm);
 
@@ -464,10 +463,13 @@ print_rtc_status(void)
 	 * time or for Universal Standard Time (GMT). Probably local though.
 	 */
 
-	printk(KERN_INFO "rtc_time\t: %02d:%02d:%02d\n",
-	       tm.tm_hour, tm.tm_min, tm.tm_sec);
-	printk(KERN_INFO "rtc_date\t: %04d-%02d-%02d\n",
-	       tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+	p += sprintf(p,
+		"rtc_time\t: %02d:%02d:%02d\n"
+		"rtc_date\t: %04d-%02d-%02d\n",
+		tm.tm_hour, tm.tm_min, tm.tm_sec,
+		tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+
+	return  p - buf;
 }
 
 
@@ -478,53 +480,6 @@ static struct file_operations rtc_fops = {
         ioctl:          rtc_ioctl,	
 }; 
 
-/* Probe for the chip by writing something to its RAM and try reading it back. */
-
-#define MAGIC_PATTERN 0x42
-
-static int __init
-ds1302_probe(void) 
-{
-	int retval, res; 
-
-	TK_RST_DIR(1);
-	TK_SCL_DIR(1);
-	TK_SDA_DIR(0);
-	
-	/* Try to talk to timekeeper. */
-
-	ds1302_wenable();  
-	start();
-	out_byte(0xc0); /* write RAM byte 0 */	
-	out_byte(MAGIC_PATTERN); /* write something magic */
-	start();
-	out_byte(0xc1); /* read RAM byte 0 */
-
-	if((res = in_byte()) == MAGIC_PATTERN) {
-		stop();
-		ds1302_wdisable();
-		printk(KERN_INFO "%s: RTC found.\n", ds1302_name);
-		printk(KERN_INFO "%s: SDA, SCL, RST on PB%i, PB%i, %s%i\n",
-		       ds1302_name,
-		       CONFIG_ETRAX_DS1302_SDABIT,
-		       CONFIG_ETRAX_DS1302_SCLBIT,
-#ifdef CONFIG_ETRAX_DS1302_RST_ON_GENERIC_PORT
-		       "GENIO",
-#else
-		       "PB",
-#endif
-		       CONFIG_ETRAX_DS1302_RSTBIT);
-                print_rtc_status();
-		retval = 1;
-	} else {
-		stop();
-		retval = 0;
-	}
-
-	return retval;
-}
-
-
 /* Just probe for the RTC and register the device to handle the ioctl needed. */
 
 int __init
@@ -532,30 +487,19 @@ ds1302_init(void)
 { 
 	if (!ds1302_probe()) {
 #ifdef CONFIG_ETRAX_DS1302_RST_ON_GENERIC_PORT
-#if CONFIG_ETRAX_DS1302_RSTBIT == 27
 		/*
 		 * The only way to set g27 to output is to enable ATA.
 		 *
 		 * Make sure that R_GEN_CONFIG is setup correct.
 		 */
     		genconfig_shadow = ((genconfig_shadow &
-				     ~IO_MASK(R_GEN_CONFIG, ata)) | 
+				     ~IO_MASK(R_GEN_CONFIG, ata))
+				   | 
 				   (IO_STATE(R_GEN_CONFIG, ata, select)));    
     		*R_GEN_CONFIG = genconfig_shadow;
-#elif CONFIG_ETRAX_DS1302_RSTBIT == 0
-		
-		/* Set the direction of this bit to out. */		
-    		genconfig_shadow = ((genconfig_shadow &
-				     ~IO_MASK(R_GEN_CONFIG, g0dir)) | 
-				   (IO_STATE(R_GEN_CONFIG, g0dir, out)));    
-    		*R_GEN_CONFIG = genconfig_shadow;
-#endif
-		if (!ds1302_probe()) {
-			printk(KERN_WARNING "%s: RTC not found.\n", ds1302_name);
+    		if (!ds1302_probe())
       			return -1;
-		}
 #else
-		printk(KERN_WARNING "%s: RTC not found.\n", ds1302_name);
     		return -1;
 #endif
   	}
@@ -565,10 +509,5 @@ ds1302_init(void)
 		       ds1302_name, RTC_MAJOR_NR);
 		return -1;
 	}
-	/* Initialise trickle charger */
-	ds1302_writereg(RTC_TRICKLECHARGER,
-			RTC_TCR_PATTERN |(CONFIG_ETRAX_DS1302_TRICKLE_CHARGE & 0x0F));
-	// Start clock by resetting CLOCK_HALT
-	ds1302_writereg(RTC_SECONDS, (ds1302_readreg(RTC_SECONDS) & 0x7F));
 	return 0;
 }

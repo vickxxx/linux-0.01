@@ -167,8 +167,6 @@ main1:
 			}
 		} else if (buffer[nbase+4] != '_')
 			continue;
-		if (!strcmp (sect, ".text.exit"))
-			continue;
 		if (strcmp (sect, ".text") && strcmp (sect, ".text.init") && strcmp (sect, ".fixup") && (strcmp (sect, "__ksymtab") || buffer[nbase+3] != 'f')) {
 			if (buffer[nbase+3] == 'f')
 				fprintf(stderr, "Wrong use of '%s' in '%s' section. It can be only used in .text, .text.init, .fixup and __ksymtab\n", buffer + shift, sect);

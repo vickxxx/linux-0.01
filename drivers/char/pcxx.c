@@ -153,6 +153,7 @@ static struct timer_list pcxx_timer;
 DECLARE_TASK_QUEUE(tq_pcxx);
 
 static void pcxxpoll(unsigned long dummy);
+static void pcxxdelay(int);
 static void fepcmd(struct channel *, int, int, int, int, int);
 static void pcxe_put_char(struct tty_struct *, unsigned char);
 static void pcxe_flush_chars(struct tty_struct *);
@@ -619,11 +620,28 @@ static void pcxe_close(struct tty_struct * tty, struct file * filp)
 	
 		if(tty->driver.flush_buffer)
 			tty->driver.flush_buffer(tty);
-		tty_ldisc_flush(tty);
+		if(tty->ldisc.flush_buffer)
+			tty->ldisc.flush_buffer(tty);
 		shutdown(info);
 		tty->closing = 0;
 		info->event = 0;
 		info->tty = NULL;
+#ifndef MODULE
+/* ldiscs[] is not available in a MODULE
+** worth noting that while I'm not sure what this hunk of code is supposed
+** to do, it is not present in the serial.c driver.  Hmmm.  If you know,
+** please send me a note.  brian@ilinx.com
+** Don't know either what this is supposed to do christoph@lameter.com.
+*/
+		if(tty->ldisc.num != ldiscs[N_TTY].num) {
+			if(tty->ldisc.close)
+				(tty->ldisc.close)(tty);
+			tty->ldisc = ldiscs[N_TTY];
+			tty->termios->c_line = N_TTY;
+			if(tty->ldisc.open)
+				(tty->ldisc.open)(tty);
+		}
+#endif
 		if(info->blocked_open) {
 			if(info->close_delay) {
 				current->state = TASK_INTERRUPTIBLE;
@@ -866,7 +884,9 @@ static void pcxe_flush_buffer(struct tty_struct *tty)
 	memoff(ch);
 	restore_flags(flags);
 
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 static void pcxe_flush_chars(struct tty_struct *tty)
@@ -1251,7 +1271,7 @@ int __init pcxe_init(void)
 	for(crd=0; crd < numcards; crd++) {
 		bd = &boards[crd];
 		outb(FEPRST, bd->port);
-		mdelay(1);
+		pcxxdelay(1);
 
 		for(i=0; (inb(bd->port) & FEPMASK) != FEPRST; i++) {
 			if(i > 100) {
@@ -1263,7 +1283,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 			schedule();
 #endif
-			mdelay(10);
+			pcxxdelay(10);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1342,7 +1362,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 			schedule();
 #endif
-			mdelay(1);
+			pcxxdelay(1);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1393,7 +1413,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 				schedule();
 #endif
-				mdelay(50);
+				pcxxdelay(50);
 			}
 
 			printk("\nPC/Xx: BIOS download failed for board at 0x%x(addr=%lx-%lx)!\n",
@@ -1423,7 +1443,7 @@ int __init pcxe_init(void)
 #ifdef MODULE
 				schedule();
 #endif
-				mdelay(10);
+				pcxxdelay(10);
 			}
 
 			printk("\nPC/Xx: BIOS download failed on the %s at 0x%x!\n",
@@ -1467,7 +1487,7 @@ load_fep:
 #ifdef MODULE
 			schedule();
 #endif
-			mdelay(1);
+			pcxxdelay(1);
 		}
 
 		if(bd->status == DISABLED)
@@ -1500,7 +1520,7 @@ load_fep:
 #ifdef MODULE
 			schedule();
 #endif
-			mdelay(1);
+			pcxxdelay(1);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1774,7 +1794,10 @@ static void doevent(int crd)
 			if (event & LOWTX_IND) {
 				if (ch->statusflags & LOWWAIT) {
 					ch->statusflags &= ~LOWWAIT;
-					tty_wakeup(tty);
+					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+						tty->ldisc.write_wakeup)
+						(tty->ldisc.write_wakeup)(tty);
+					wake_up_interruptible(&tty->write_wait);
 				}
 			}
 
@@ -1782,7 +1805,10 @@ static void doevent(int crd)
 				ch->statusflags &= ~TXBUSY;
 				if (ch->statusflags & EMPTYWAIT) {
 					ch->statusflags &= ~EMPTYWAIT;
-					tty_wakeup(tty);
+					if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+						tty->ldisc.write_wakeup)
+						(tty->ldisc.write_wakeup)(tty);
+					wake_up_interruptible(&tty->write_wait);
 				}
 			}
 		}
@@ -1796,6 +1822,15 @@ static void doevent(int crd)
 		globalwinon(chan0);
 	}
 
+}
+
+
+/*
+ * pcxxdelay - delays a specified number of milliseconds
+ */
+static void pcxxdelay(int msec)
+{
+	mdelay(msec);
 }
 
 
@@ -2229,7 +2264,8 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 				tty_wait_until_sent(tty, 0);
 			}
 			else {
-				tty_ldisc_flush(tty);
+				if(tty->ldisc.flush_buffer)
+					tty->ldisc.flush_buffer(tty);
 			}
 
 			/* Fall Thru */

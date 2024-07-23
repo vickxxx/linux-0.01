@@ -1,4 +1,5 @@
-/*
+/* $Id: posix_types.h,v 1.6 2000/02/04 23:32:54 ralf Exp $
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -17,7 +18,7 @@
 typedef unsigned int	__kernel_dev_t;
 typedef unsigned long	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
-typedef unsigned long	__kernel_nlink_t;
+typedef int		__kernel_nlink_t;
 typedef long		__kernel_off_t;
 typedef int		__kernel_pid_t;
 typedef int		__kernel_ipc_pid_t;
@@ -67,7 +68,7 @@ static __inline__ void __FD_CLR(unsigned long __fd, __kernel_fd_set *__fdsetp)
 
 #undef __FD_ISSET
 static __inline__ int __FD_ISSET(unsigned long __fd, const __kernel_fd_set *__p)
-{
+{ 
 	unsigned long __tmp = __fd / __NFDBITS;
 	unsigned long __rem = __fd % __NFDBITS;
 	return (__p->fds_bits[__tmp] & (1UL<<__rem)) != 0;

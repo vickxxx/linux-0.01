@@ -30,35 +30,6 @@
 #define PAGE_MASK		(~(PAGE_SIZE - 1))
 #define PAGE_ALIGN(addr)	(((addr) + PAGE_SIZE - 1) & PAGE_MASK)
 
-#ifdef CONFIG_HUGETLB_PAGE
-#if defined(CONFIG_HUGETLB_PAGE_SIZE_4GB)
-#define HPAGE_SHIFT                 32
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_1GB)
-#define HPAGE_SHIFT                 30
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_256MB)
-#define HPAGE_SHIFT                 28
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_64MB)
-#define HPAGE_SHIFT                 26
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_16MB)
-#define HPAGE_SHIFT                 24
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_4MB)
-#define HPAGE_SHIFT                 22
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_1MB)
-#define HPAGE_SHIFT                 20
-#elif defined(CONFIG_HUGETLB_PAGE_SIZE_256KB)
-#define HPAGE_SHIFT                 18
-#else
-# error Unsupported IA-64 HugeTLB Page Size!
-#endif
-
-#define       REGION_HPAGE          (4UL)
-#define       REGION_SHIFT          61
-#define HPAGE_SIZE                  (__IA64_UL_CONST(1) << HPAGE_SHIFT)
-#define HPAGE_MASK                  (~(HPAGE_SIZE - 1))
-#define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
-#endif
-#define RGN_MAP_LIMIT	((1UL << (4*PAGE_SHIFT - 12)) - PAGE_SIZE)	/* per region addr limit */
-
 #ifdef __ASSEMBLY__
 # define __pa(x)		((x) - PAGE_OFFSET)
 # define __va(x)		((x) + PAGE_OFFSET)
@@ -81,12 +52,20 @@ extern void copy_page (void *to, void *from);
  */
 #define MAP_NR_DENSE(addr)	(((unsigned long) (addr) - PAGE_OFFSET) >> PAGE_SHIFT)
 
-#define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
-#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
-
-struct page;
-extern int ia64_page_valid (struct page *);
-#define VALID_PAGE(page)	(((page - mem_map) < max_mapnr) && ia64_page_valid(page))
+#ifdef CONFIG_IA64_GENERIC
+# include <asm/machvec.h>
+# define virt_to_page(kaddr)	(mem_map + platform_map_nr(kaddr))
+# define page_to_phys(page)	XXX fix me
+#elif defined (CONFIG_IA64_SGI_SN1)
+# ifndef CONFIG_DISCONTIGMEM
+#  define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
+#  define page_to_phys(page)	XXX fix me
+# endif
+#else
+# define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
+# define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#endif
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 typedef union ia64_va {
 	struct {
@@ -112,21 +91,7 @@ typedef union ia64_va {
 #define REGION_SIZE		REGION_NUMBER(1)
 #define REGION_KERNEL	7
 
-#ifdef CONFIG_HUGETLB_PAGE
-#define htlbpage_to_page(x) ((REGION_NUMBER(x) << 61) | (REGION_OFFSET(x) >> (HPAGE_SHIFT-PAGE_SHIFT)))
-#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
-extern int  is_invalid_hugepage_range(unsigned long addr, unsigned long len);
-#else
-#define is_invalid_hugepage_range(addr, len) 0
-#endif
-
-#if (__GNUC__ > 3) || (__GNUC__ == 3 && __GNUC_MINOR__ >= 1)
-# define ia64_abort()	__builtin_trap()
-#else
-# define ia64_abort()	(*(volatile int *) 0 = 0)
-#endif
-
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); ia64_abort(); } while (0)
+#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
 #define PAGE_BUG(page) do { BUG(); } while (0)
 
 static __inline__ int
@@ -183,11 +148,6 @@ get_order (unsigned long size)
 # define __pgprot(x)	(x)
 #endif /* !STRICT_MM_TYPECHECKS */
 
-#define PAGE_OFFSET			0xe000000000000000
-
-#define VM_DATA_DEFAULT_FLAGS		(VM_READ | VM_WRITE |					\
-					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC |		\
-					 (((current->thread.flags & IA64_THREAD_XSTACK) != 0)	\
-					  ? VM_EXEC : 0))
+#define PAGE_OFFSET		0xe000000000000000
 
 #endif /* _ASM_IA64_PAGE_H */

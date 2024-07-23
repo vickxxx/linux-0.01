@@ -114,9 +114,9 @@ static ssize_t ntfs_write(struct file *filp, const char *buf, size_t count,
 
 	if (!ntfs_ino)
 		return -EINVAL;
-	ntfs_debug(DEBUG_LINUX, "%s(): Entering for inode 0x%lx, *pos 0x%Lx, "
-			"count 0x%x.\n", __FUNCTION__, ntfs_ino->i_number,
-			*pos, count);
+	ntfs_debug(DEBUG_LINUX, __FUNCTION__ "(): Entering for inode 0x%lx, "
+			"*pos 0x%Lx, count 0x%x.\n", ntfs_ino->i_number, *pos,
+			count);
 	/* Allows to lock fs ro at any time. */
 	if (vfs_ino->i_sb->s_flags & MS_RDONLY)
 		return -EROFS;
@@ -140,7 +140,7 @@ static ssize_t ntfs_write(struct file *filp, const char *buf, size_t count,
 	io.size = count;
 	io.do_read = 0;
 	err = ntfs_readwrite_attr(ntfs_ino, data, *pos, &io);
-	ntfs_debug(DEBUG_LINUX, "%s(): Returning %i\n", __FUNCTION__, -err);
+	ntfs_debug(DEBUG_LINUX, __FUNCTION__ "(): Returning %i\n", -err);
 	if (!err) {
 		*pos += io.size;
 		if (*pos > vfs_ino->i_size)
@@ -196,20 +196,20 @@ static int ntfs_printcb(ntfs_u8 *entry, void *param)
 	err = ntfs_encodeuni(NTFS_INO2VOL(nf->dir), (ntfs_u16*)(entry + 0x52),
 			name_len, &nf->name, &nf->namelen);
 	if (err) {
-		ntfs_debug(DEBUG_OTHER, "%s(): Skipping unrepresentable "
-				"file.\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Skipping "
+				"unrepresentable file.\n");
 		err = 0;
-		goto err_noname;
+		goto err_ret;
 	}
 	if (!show_sys_files && inum < 0x10UL) {
-		ntfs_debug(DEBUG_OTHER, "%s(): Skipping system file (%s).\n",
-				__FUNCTION__, nf->name);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Skipping system "
+				"file (%s).\n", nf->name);
 		err = 0;
 		goto err_ret;
 	}
 	/* Do not return ".", as this is faked. */
 	if (nf->namelen == 1 && nf->name[0] == '.') {
-		ntfs_debug(DEBUG_OTHER, "%s(): Skipping \".\"\n", __FUNCTION__);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Skipping \".\"\n");
 		err = 0;
 		goto err_ret;
 	}
@@ -218,8 +218,8 @@ static int ntfs_printcb(ntfs_u8 *entry, void *param)
 		file_type = DT_DIR;
 	else
 		file_type = DT_REG;
-	ntfs_debug(DEBUG_OTHER, "%s(): Calling filldir for %s with "
-			"len %i, f_pos 0x%Lx, inode %lu, %s.\n", __FUNCTION__,
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Calling filldir for %s with "
+			"len %i, f_pos 0x%Lx, inode %lu, %s.\n",
 			nf->name, nf->namelen, (loff_t)(nf->ph << 16) | nf->pl,
 			inum, file_type == DT_DIR ? "DT_DIR" : "DT_REG");
 	/*
@@ -233,9 +233,8 @@ static int ntfs_printcb(ntfs_u8 *entry, void *param)
 	if (err)
 		nf->ret_code = err;
 err_ret:
-	ntfs_free(nf->name);
-err_noname:
 	nf->namelen = 0;
+	ntfs_free(nf->name);
 	nf->name = NULL;
 	return err;
 }
@@ -255,16 +254,16 @@ static int ntfs_readdir(struct file* filp, void *dirent, filldir_t filldir)
 	cb.pl = filp->f_pos & 0xffff;
 	cb.ph = (filp->f_pos >> 16) & 0x7fff;
 	filp->f_pos = (loff_t)(cb.ph << 16) | cb.pl;
-	ntfs_debug(DEBUG_OTHER, "%s(): Entering for inode %lu, f_pos 0x%Lx, "
-			"i_mode 0x%x, i_count %lu.\n", __FUNCTION__,
-			dir->i_ino, filp->f_pos, (unsigned int)dir->i_mode,
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Entering for inode %lu, "
+			"f_pos 0x%Lx, i_mode 0x%x, i_count %lu.\n", dir->i_ino,
+			filp->f_pos, (unsigned int)dir->i_mode,
 			atomic_read(&dir->i_count));
 	if (!cb.ph) {
 		/* Start of directory. Emulate "." and "..". */
 		if (!cb.pl) {
-			ntfs_debug(DEBUG_OTHER, "%s(): Calling filldir for . "
-				    "with len 1, f_pos 0x%Lx, inode %lu, "
-				    "DT_DIR.\n", __FUNCTION__, filp->f_pos,
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Calling "
+				    "filldir for . with len 1, f_pos 0x%Lx, "
+				    "inode %lu, DT_DIR.\n", filp->f_pos,
 				    dir->i_ino);
 			cb.ret_code = filldir(dirent, ".", 1, filp->f_pos,
 				    dir->i_ino, DT_DIR);
@@ -274,9 +273,9 @@ static int ntfs_readdir(struct file* filp, void *dirent, filldir_t filldir)
 			filp->f_pos = (loff_t)(cb.ph << 16) | cb.pl;
 		}
 		if (cb.pl == (u32)1) {
-			ntfs_debug(DEBUG_OTHER, "%s(): Calling filldir for .. "
-				    "with len 2, f_pos 0x%Lx, inode %lu, "
-				    "DT_DIR.\n", __FUNCTION__, filp->f_pos,
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Calling "
+				    "filldir for .. with len 2, f_pos 0x%Lx, "
+				    "inode %lu, DT_DIR.\n", filp->f_pos,
 				    filp->f_dentry->d_parent->d_inode->i_ino);
 			cb.ret_code = filldir(dirent, "..", 2, filp->f_pos,
 				    filp->f_dentry->d_parent->d_inode->i_ino,
@@ -294,31 +293,34 @@ static int ntfs_readdir(struct file* filp, void *dirent, filldir_t filldir)
 	cb.dirent = dirent;
 	cb.type = NTFS_INO2VOL(dir)->ngt;
 	do {
-		ntfs_debug(DEBUG_OTHER, "%s(): Looking for next file using "
-				"ntfs_getdir_unsorted(), f_pos 0x%Lx.\n",
-				__FUNCTION__, (loff_t)(cb.ph << 16) | cb.pl);
+		ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Looking for next "
+				"file using ntfs_getdir_unsorted(), f_pos "
+				"0x%Lx.\n", (loff_t)(cb.ph << 16) | cb.pl);
 		err = ntfs_getdir_unsorted(NTFS_LINO2NINO(dir), &cb.ph, &cb.pl,
 				ntfs_printcb, &cb);
 	} while (!err && !cb.ret_code && cb.ph < 0x7fff);
 	filp->f_pos = (loff_t)(cb.ph << 16) | cb.pl;
-	ntfs_debug(DEBUG_OTHER, "%s(): After ntfs_getdir_unsorted()"
-			" calls, f_pos 0x%Lx.\n", __FUNCTION__, filp->f_pos);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): After ntfs_getdir_unsorted()"
+			" calls, f_pos 0x%Lx.\n", filp->f_pos);
 	if (!err) {
-done:
 #ifdef DEBUG
+		if (cb.ph != 0x7fff || cb.pl)
+			BUG();
+done:
 		if (!cb.ret_code)
-			ntfs_debug(DEBUG_OTHER, "%s(): EOD, f_pos 0x%Lx, "
-					"returning 0.\n", __FUNCTION__,
-					filp->f_pos);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): EOD, f_pos "
+					"0x%Lx, returning 0.\n", filp->f_pos);
 		else 
-			ntfs_debug(DEBUG_OTHER, "%s(): filldir returned %i, "
-					"returning 0, f_pos 0x%Lx.\n",
-					__FUNCTION__, cb.ret_code, filp->f_pos);
+			ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): filldir "
+					"returned %i, returning 0, f_pos "
+					"0x%Lx.\n", cb.ret_code, filp->f_pos);
+#else
+done:
 #endif
 		return 0;
 	}
-	ntfs_debug(DEBUG_OTHER, "%s(): Returning %i, f_pos 0x%Lx.\n",
-			__FUNCTION__, err, filp->f_pos);
+	ntfs_debug(DEBUG_OTHER, __FUNCTION__ "(): Returning %i, f_pos 0x%Lx.\n",
+			err, filp->f_pos);
 	return err;
 }
 
@@ -526,8 +528,8 @@ static struct dentry *ntfs_lookup(struct inode *dir, struct dentry *d)
 	ntfs_iterate_s walk;
 	int err;
 	
-	ntfs_debug(DEBUG_NAME1, "%s(): Looking up %s in directory ino 0x%x.\n",
-			__FUNCTION__, d->d_name.name, (unsigned)dir->i_ino);
+	ntfs_debug(DEBUG_NAME1, __FUNCTION__ "(): Looking up %s in directory "
+			"ino 0x%x.\n", d->d_name.name, (unsigned)dir->i_ino);
 	walk.name = NULL;
 	walk.namelen = 0;
 	/* Convert to wide string. */
@@ -849,6 +851,7 @@ static void _ntfs_clear_inode(struct inode *inode)
 			goto unl_out;
 		}
 		break;
+	default:
 		/* Nothing. Just clear the inode and exit. */
 	}
 	ntfs_clear_inode(&inode->u.ntfs_i);
@@ -1024,9 +1027,8 @@ struct super_block *ntfs_read_super(struct super_block *sb, void *options,
 		ntfs_error("Unable to set blocksize %d.\n", blocksize);
 		goto ntfs_read_super_vol;
 	}
-	sb->s_blocksize = blocksize;
 	/* Read the super block (boot block). */
-	if (!(bh = sb_bread(sb, 0))) {
+	if (!(bh = bread(sb->s_dev, 0, blocksize))) {
 		ntfs_error("Reading super block failed\n");
 		goto ntfs_read_super_unl;
 	}
@@ -1045,7 +1047,7 @@ struct super_block *ntfs_read_super(struct super_block *sb, void *options,
 	}
 	ntfs_debug(DEBUG_OTHER, "$Mft at cluster 0x%lx\n", vol->mft_lcn);
 	brelse(bh);
-	vol->sb = sb;
+	NTFS_SB(vol) = sb;
 	if (vol->cluster_size > PAGE_SIZE) {
 		ntfs_error("Partition cluster size is not supported yet (it "
 			   "is > max kernel blocksize).\n");
@@ -1073,7 +1075,8 @@ struct super_block *ntfs_read_super(struct super_block *sb, void *options,
 	if (to_read < 1)
 		to_read = 1;
 	for (i = 0; i < to_read; i++) {
-		if (!(bh = sb_bread(sb, vol->mft_lcn + i))) {
+		if (!(bh = bread(sb->s_dev, vol->mft_lcn + i,
+							  vol->cluster_size))) {
 			ntfs_error("Could not read $Mft record 0\n");
 			goto ntfs_read_super_mft;
 		}
@@ -1091,7 +1094,7 @@ struct super_block *ntfs_read_super(struct super_block *sb, void *options,
 	/* Inform the kernel about which super operations are available. */
 	sb->s_op = &ntfs_super_operations;
 	sb->s_magic = NTFS_SUPER_MAGIC;
-	sb->s_maxbytes = MAX_LFS_FILESIZE;
+	sb->s_maxbytes = ~0ULL >> 1;
 	ntfs_debug(DEBUG_OTHER, "Reading special files\n");
 	if (ntfs_load_special_files(vol)) {
 		ntfs_error("Error loading special files\n");

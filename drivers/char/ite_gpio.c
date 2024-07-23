@@ -30,7 +30,9 @@
  *  with this program; if not, write  to the Free Software Foundation, Inc.,
  *  675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
 #include <linux/module.h>
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
@@ -236,6 +238,10 @@ EXPORT_SYMBOL(ite_gpio_int_wait);
 
 static int ite_gpio_open(struct inode *inode, struct file *file)
 {
+	unsigned int minor = MINOR(inode->i_rdev); 
+	if (minor != GPIO_MINOR)
+		return -ENODEV;
+
 #ifdef MODULE
 	MOD_INC_USE_COUNT;
 #endif
@@ -246,6 +252,7 @@ static int ite_gpio_open(struct inode *inode, struct file *file)
 
 static int ite_gpio_release(struct inode *inode, struct file *file)
 {
+
 #ifdef MODULE
 	MOD_DEC_USE_COUNT;
 #endif
@@ -257,6 +264,7 @@ static int ite_gpio_release(struct inode *inode, struct file *file)
 static int ite_gpio_ioctl(struct inode *inode, struct file *file,
 	unsigned int cmd, unsigned long arg)
 {
+
 	static struct ite_gpio_ioctl_data ioctl_data;
 
 	if (copy_from_user(&ioctl_data, (struct ite_gpio_ioctl_data *)arg,
@@ -318,8 +326,7 @@ static int ite_gpio_ioctl(struct inode *inode, struct file *file,
 	return 0;
 }
 
-static void ite_gpio_irq_handler(int this_irq, void *dev_id,
-	struct pt_regs *regs)
+static void ite_gpio_irq_handler(int this_irq, void *dev_id, struct pt_regs *regs)
 {
 	int i,line;
 
@@ -364,20 +371,23 @@ DEB(printk("interrupt 0x%x %d\n",ITE_GPAISR, i));
 	}
 }
 
-static struct file_operations ite_gpio_fops = {
+static struct file_operations ite_gpio_fops =
+{
 	owner:		THIS_MODULE,
 	ioctl:		ite_gpio_ioctl,
 	open:		ite_gpio_open,
 	release:	ite_gpio_release,
 };
 
-static struct miscdevice ite_gpio_miscdev = {
-	MISC_DYNAMIC_MINOR,
+/* GPIO_MINOR in include/linux/miscdevice.h */
+static struct miscdevice ite_gpio_miscdev =
+{
+	GPIO_MINOR,
 	"ite_gpio",
 	&ite_gpio_fops
 };
 
-static int __init ite_gpio_init(void)
+int __init ite_gpio_init(void)
 {
 	int i;
 
@@ -409,7 +419,7 @@ static int __init ite_gpio_init(void)
 	return 0;
 }	
 
-static void __exit ite_gpio_exit(void)
+void __exit ite_gpio_exit(void)
 {
 	misc_deregister(&ite_gpio_miscdev);
 }

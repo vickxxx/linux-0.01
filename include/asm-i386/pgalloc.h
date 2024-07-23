@@ -18,21 +18,15 @@
  * Allocate and free page tables.
  */
 
-#if defined (CONFIG_X86_PAE)
-/*
- * We can't include <linux/slab.h> here, thus these uglinesses.
- */
-struct kmem_cache_s;
+#if CONFIG_X86_PAE
 
-extern struct kmem_cache_s *pae_pgd_cachep;
-extern void *kmem_cache_alloc(struct kmem_cache_s *, int);
-extern void kmem_cache_free(struct kmem_cache_s *, void *);
+extern void *kmalloc(size_t, int);
+extern void kfree(const void *);
 
-
-static inline pgd_t *get_pgd_slow(void)
+static __inline__ pgd_t *get_pgd_slow(void)
 {
 	int i;
-	pgd_t *pgd = kmem_cache_alloc(pae_pgd_cachep, GFP_KERNEL);
+	pgd_t *pgd = kmalloc(PTRS_PER_PGD * sizeof(pgd_t), GFP_KERNEL);
 
 	if (pgd) {
 		for (i = 0; i < USER_PTRS_PER_PGD; i++) {
@@ -42,36 +36,32 @@ static inline pgd_t *get_pgd_slow(void)
 			clear_page(pmd);
 			set_pgd(pgd + i, __pgd(1 + __pa(pmd)));
 		}
-		memcpy(pgd + USER_PTRS_PER_PGD,
-			swapper_pg_dir + USER_PTRS_PER_PGD,
-			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+		memcpy(pgd + USER_PTRS_PER_PGD, swapper_pg_dir + USER_PTRS_PER_PGD, (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
 	}
 	return pgd;
 out_oom:
 	for (i--; i >= 0; i--)
 		free_page((unsigned long)__va(pgd_val(pgd[i])-1));
-	kmem_cache_free(pae_pgd_cachep, pgd);
+	kfree(pgd);
 	return NULL;
 }
 
 #else
 
-static inline pgd_t *get_pgd_slow(void)
+static __inline__ pgd_t *get_pgd_slow(void)
 {
 	pgd_t *pgd = (pgd_t *)__get_free_page(GFP_KERNEL);
 
 	if (pgd) {
 		memset(pgd, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
-		memcpy(pgd + USER_PTRS_PER_PGD,
-			swapper_pg_dir + USER_PTRS_PER_PGD,
-			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+		memcpy(pgd + USER_PTRS_PER_PGD, swapper_pg_dir + USER_PTRS_PER_PGD, (PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
 	}
 	return pgd;
 }
 
-#endif /* CONFIG_X86_PAE */
+#endif
 
-static inline pgd_t *get_pgd_fast(void)
+static __inline__ pgd_t *get_pgd_fast(void)
 {
 	unsigned long *ret;
 
@@ -84,21 +74,21 @@ static inline pgd_t *get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-static inline void free_pgd_fast(pgd_t *pgd)
+static __inline__ void free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
 	pgd_quicklist = (unsigned long *) pgd;
 	pgtable_cache_size++;
 }
 
-static inline void free_pgd_slow(pgd_t *pgd)
+static __inline__ void free_pgd_slow(pgd_t *pgd)
 {
-#if defined(CONFIG_X86_PAE)
+#if CONFIG_X86_PAE
 	int i;
 
 	for (i = 0; i < USER_PTRS_PER_PGD; i++)
 		free_page((unsigned long)__va(pgd_val(pgd[i])-1));
-	kmem_cache_free(pae_pgd_cachep, pgd);
+	kfree(pgd);
 #else
 	free_page((unsigned long)pgd);
 #endif
@@ -114,8 +104,7 @@ static inline pte_t *pte_alloc_one(struct mm_struct *mm, unsigned long address)
 	return pte;
 }
 
-static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm,
-					unsigned long address)
+static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
 {
 	unsigned long *ret;
 
@@ -127,7 +116,7 @@ static inline pte_t *pte_alloc_one_fast(struct mm_struct *mm,
 	return (pte_t *)ret;
 }
 
-static inline void pte_free_fast(pte_t *pte)
+static __inline__ void pte_free_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
@@ -140,8 +129,13 @@ static __inline__ void pte_free_slow(pte_t *pte)
 }
 
 #define pte_free(pte)		pte_free_fast(pte)
+#ifdef CONFIG_X86_PAE
+#define pgd_alloc(mm)		get_pgd_slow()
 #define pgd_free(pgd)		free_pgd_slow(pgd)
+#else
 #define pgd_alloc(mm)		get_pgd_fast()
+#define pgd_free(pgd)		free_pgd_fast(pgd)
+#endif
 
 /*
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
@@ -224,15 +218,16 @@ struct tlb_state
 {
 	struct mm_struct *active_mm;
 	int state;
-} ____cacheline_aligned;
+};
 extern struct tlb_state cpu_tlbstate[NR_CPUS];
 
-#endif /* CONFIG_SMP */
+
+#endif
 
 static inline void flush_tlb_pgtables(struct mm_struct *mm,
 				      unsigned long start, unsigned long end)
 {
-	flush_tlb_mm(mm);
+	/* i386 does not keep any page table caches in TLB */
 }
 
 #endif /* _I386_PGALLOC_H */

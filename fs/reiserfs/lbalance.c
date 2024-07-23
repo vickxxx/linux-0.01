@@ -1,5 +1,5 @@
 /*
- * Copyright 2000-2002 by Hans Reiser, licensing governed by reiserfs/README
+ * Copyright 2000 by Hans Reiser, licensing governed by reiserfs/README
  */
 
 #include <linux/config.h>
@@ -63,7 +63,7 @@ static void leaf_copy_dir_entries (struct buffer_info * dest_bi, struct buffer_h
 
 	/* form item header */
 	memcpy (&new_ih.ih_key, &ih->ih_key, KEY_SIZE);
-	put_ih_version( &new_ih, KEY_FORMAT_3_5 );
+	put_ih_version( &new_ih, ITEM_VERSION_1 );
 	/* calculate item len */
 	put_ih_item_len( &new_ih, DEH_SIZE * copy_count + copy_records_len );
 	put_ih_entry_count( &new_ih, 0 );
@@ -78,7 +78,7 @@ static void leaf_copy_dir_entries (struct buffer_info * dest_bi, struct buffer_h
 		set_le_ih_k_offset (&new_ih, U32_MAX);
 		/* this item is not yet valid, but we want I_IS_DIRECTORY_ITEM to return 1 for it, so we -1 */
 	    }
-	    set_le_key_k_type (KEY_FORMAT_3_5, &(new_ih.ih_key), TYPE_DIRENTRY);
+	    set_le_key_k_type (ITEM_VERSION_1, &(new_ih.ih_key), TYPE_DIRENTRY);
 	}
     
 	/* insert item into dest buffer */
@@ -1209,10 +1209,10 @@ void    leaf_paste_entries (
       prev = (i != 0) ? deh_location( &(deh[i - 1]) ) : 0;
       
       if (prev && prev <= deh_location( &(deh[i])))
-	reiserfs_warning (NULL, "vs-10240: leaf_paste_entries: directory item (%h) corrupted (prev %a, cur(%d) %a)\n", 
+	reiserfs_warning ("vs-10240: leaf_paste_entries: directory item (%h) corrupted (prev %a, cur(%d) %a)\n", 
 			  ih, deh + i - 1, i, deh + i);
       if (next && next >= deh_location( &(deh[i])))
-	reiserfs_warning (NULL, "vs-10250: leaf_paste_entries: directory item (%h) corrupted (cur(%d) %a, next %a)\n",
+	reiserfs_warning ("vs-10250: leaf_paste_entries: directory item (%h) corrupted (cur(%d) %a, next %a)\n",
 			  ih, i, deh + i, deh + i + 1);
     }
   }

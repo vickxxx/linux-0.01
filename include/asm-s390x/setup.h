@@ -13,7 +13,7 @@
 #define RAMDISK_ORIGIN		0x800000
 #define RAMDISK_SIZE		0x800000
 
-#ifndef __ASSEMBLY__
+#ifndef __ASSEMBLER__
 
 #define IPL_DEVICE        (*(unsigned long *)  (0x10400))
 #define INITRD_START      (*(unsigned long *)  (0x10408))
@@ -25,14 +25,11 @@
  */
 extern unsigned long machine_flags;
 
-#define MACHINE_IS_VM		(machine_flags & 1)
-#define MACHINE_IS_P390		(machine_flags & 4)
-#define MACHINE_HAS_MVPG	(machine_flags & 16)
-#define MACHINE_HAS_DIAG44	(machine_flags & 32)
-#define MACHINE_NEW_STIDP	(machine_flags & 64)
-#define MACHINE_HAS_PFIX  	(0)
+#define MACHINE_IS_VM    (machine_flags & 1)
+#define MACHINE_IS_P390  (machine_flags & 4)
+#define MACHINE_HAS_MVPG (machine_flags & 16)
 
-#define MACHINE_HAS_HWC		(!MACHINE_IS_P390)
+#define MACHINE_HAS_HWC  (!MACHINE_IS_P390)
 
 /*
  * Console mode. Override with conmode=

@@ -12,7 +12,6 @@
 #include <linux/socket.h>
 #include <linux/fcntl.h>
 #include <linux/file.h>
-#include <linux/poll.h>
 #include <linux/in.h>
 #include <linux/net.h>
 #include <linux/mm.h>
@@ -306,55 +305,6 @@ smb_close_socket(struct smb_sb_info *server)
 	}
 }
 
-/*
- * Poll the server->socket to allow receives to time out.
- * returns 0 when ok to continue, <0 on errors.
- */
-static int
-smb_receive_poll(struct smb_sb_info *server)
-{
-	struct file *file = server->sock_file;
-	poll_table wait_table;
-	int result = 0;
-	int timeout = server->mnt->timeo * HZ;
-	int mask;
-
-	for (;;) {
-		poll_initwait(&wait_table);
-                set_current_state(TASK_INTERRUPTIBLE);
-
-		mask = file->f_op->poll(file, &wait_table);
-		if (mask & POLLIN) {
-			poll_freewait(&wait_table);
-			current->state = TASK_RUNNING;
-			break;
-		}
-
-		timeout = schedule_timeout(timeout);
-		poll_freewait(&wait_table);
-                set_current_state(TASK_RUNNING);
-
-		if (wait_table.error) {
-			result = wait_table.error;
-			break;
-		}
-
-		if (signal_pending(current)) {
-			/* we got a signal (which?) tell the caller to
-			   try again (on all signals?). */
-			DEBUG1("got signal_pending()\n");
-			result = -ERESTARTSYS;
-			break;
-		}
-		if (!timeout) {
-			printk(KERN_WARNING "SMB server not responding\n");
-			result = -EIO;
-			break;
-		}
-	}
-	return result;
-}
-
 static int
 smb_send_raw(struct socket *socket, unsigned char *source, int length)
 {
@@ -382,19 +332,13 @@ smb_send_raw(struct socket *socket, unsigned char *source, int length)
 }
 
 static int
-smb_receive_raw(struct smb_sb_info *server, unsigned char *target, int length)
+smb_receive_raw(struct socket *socket, unsigned char *target, int length)
 {
 	int result;
 	int already_read = 0;
-	struct socket *socket = server_sock(server);
 
 	while (already_read < length)
 	{
-		result = smb_receive_poll(server);
-		if (result < 0) {
-			DEBUG1("poll error = %d\n", -result);
-			return result;
-		}
 		result = _recvfrom(socket,
 				   (void *) (target + already_read),
 				   length - already_read, 0);
@@ -414,7 +358,7 @@ smb_receive_raw(struct smb_sb_info *server, unsigned char *target, int length)
 }
 
 static int
-smb_get_length(struct smb_sb_info *server, unsigned char *header)
+smb_get_length(struct socket *socket, unsigned char *header)
 {
 	int result;
 	unsigned char peek_buf[4];
@@ -423,7 +367,7 @@ smb_get_length(struct smb_sb_info *server, unsigned char *header)
       re_recv:
 	fs = get_fs();
 	set_fs(get_ds());
-	result = smb_receive_raw(server, peek_buf, 4);
+	result = smb_receive_raw(socket, peek_buf, 4);
 	set_fs(fs);
 
 	if (result < 0)
@@ -471,11 +415,12 @@ smb_round_length(int len)
 static int
 smb_receive(struct smb_sb_info *server)
 {
+	struct socket *socket = server_sock(server);
 	unsigned char * packet = server->packet;
 	int len, result;
 	unsigned char peek_buf[4];
 
-	result = smb_get_length(server, peek_buf);
+	result = smb_get_length(socket, peek_buf);
 	if (result < 0)
 		goto out;
 	len = result;
@@ -497,7 +442,7 @@ smb_receive(struct smb_sb_info *server)
 		server->packet_size = new_len;
 	}
 	memcpy(packet, peek_buf, 4);
-	result = smb_receive_raw(server, packet + 4, len);
+	result = smb_receive_raw(socket, packet + 4, len);
 	if (result < 0)
 	{
 		VERBOSE("receive error: %d\n", result);
@@ -571,11 +516,7 @@ smb_receive_trans2(struct smb_sb_info *server,
 					parm_disp, parm_offset, parm_count,
 					data_disp, data_offset, data_count);
 				*parm  = base + parm_offset;
-				if (*parm - inbuf + parm_tot > server->packet_size)
-					goto out_bad_parm;
 				*data  = base + data_offset;
-				if (*data - inbuf + data_tot > server->packet_size)
-					goto out_bad_data;
 				goto success;
 			}
 
@@ -595,8 +536,6 @@ smb_receive_trans2(struct smb_sb_info *server,
 			rcv_buf = smb_vmalloc(buf_len);
 			if (!rcv_buf)
 				goto out_no_mem;
-			memset(rcv_buf, 0, buf_len);
-			
 			*parm = rcv_buf;
 			*data = rcv_buf + total_p;
 		} else if (data_tot > total_d || parm_tot > total_p)
@@ -604,11 +543,7 @@ smb_receive_trans2(struct smb_sb_info *server,
 
 		if (parm_disp + parm_count > total_p)
 			goto out_bad_parm;
-		if (parm_offset + parm_count > server->packet_size)	
-			goto out_bad_parm;
 		if (data_disp + data_count > total_d)
-			goto out_bad_data;
-		if (data_offset + data_count > server->packet_size)	
 			goto out_bad_data;
 		memcpy(*parm + parm_disp, base + parm_offset, parm_count);
 		memcpy(*data + data_disp, base + data_offset, data_count);
@@ -620,11 +555,8 @@ smb_receive_trans2(struct smb_sb_info *server,
 		 * Check whether we've received all of the data. Note that
 		 * we use the packet totals -- total lengths might shrink!
 		 */
-		if (data_len >= data_tot && parm_len >= parm_tot) {
-			data_len = data_tot;
-			parm_len = parm_tot;
+		if (data_len >= data_tot && parm_len >= parm_tot)
 			break;
-		}
 	}
 
 	/*
@@ -638,9 +570,6 @@ smb_receive_trans2(struct smb_sb_info *server,
 		server->packet = rcv_buf;
 		rcv_buf = inbuf;
 	} else {
-		if (parm_len + data_len > buf_len)
-			goto out_data_grew;
-
 		PARANOIA("copying data, old size=%d, new size=%u\n",
 			 server->packet_size, buf_len);
 		memcpy(inbuf, rcv_buf, parm_len + data_len);

@@ -1,6 +1,6 @@
 /* Low-level parallel port routines for Archimedes onboard hardware
  *
- * Author: Phil Blundell <philb@gnu.org>
+ * Author: Phil Blundell <Philip.Blundell@pobox.com>
  */
 
 /* This driver is for the parallel port hardware found on Acorn's old

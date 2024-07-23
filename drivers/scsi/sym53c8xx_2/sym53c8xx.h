@@ -119,8 +119,7 @@ int sym53c8xx_release(struct Scsi_Host *);
 	this_id:		7,					\
 	sg_tablesize:		0,					\
 	cmd_per_lun:		0,					\
-	use_clustering:		DISABLE_CLUSTERING,			\
-	highmem_io:		1}
+	use_clustering:		DISABLE_CLUSTERING}
 
 #endif /* defined(HOSTS_C) || defined(MODULE) */ 
 
@@ -131,17 +130,17 @@ int sym53c8xx_release(struct Scsi_Host *);
 #if !defined(HOSTS_C)
 
 /*
- *  Use normal IO if configured.
- *  Normal IO forced for alpha.
+ *  Use normal IO if configured. Forced for alpha and powerpc.
+ *  Powerpc fails copying to on-chip RAM using memcpy_toio().
  *  Forced to MMIO for sparc.
  */
 #if defined(__alpha__)
 #define	SYM_CONF_IOMAPPED
+#elif defined(__powerpc__)
+#define	SYM_CONF_IOMAPPED
+#define SYM_OPT_NO_BUS_MEMORY_MAPPING
 #elif defined(__sparc__)
 #undef SYM_CONF_IOMAPPED
-/* #elif defined(__powerpc__) */
-/* #define	SYM_CONF_IOMAPPED */
-/* #define SYM_OPT_NO_BUS_MEMORY_MAPPING */
 #elif defined(CONFIG_SCSI_SYM53C8XX_IOMAPPED)
 #define	SYM_CONF_IOMAPPED
 #endif

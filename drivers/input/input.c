@@ -130,8 +130,6 @@ void input_event(struct input_dev *dev, unsigned int type, unsigned int code, in
 
 			if (code > MSC_MAX || !test_bit(code, dev->mscbit))
 				return;
-
-			if (dev->event) dev->event(dev, type, code, value);	
 	
 			break;
 
@@ -422,7 +420,7 @@ void input_unregister_minor(devfs_handle_t handle)
 static int __init input_init(void)
 {
 	if (devfs_register_chrdev(INPUT_MAJOR, "input", &input_fops)) {
-		printk(KERN_ERR "input: unable to register char major %d\n", INPUT_MAJOR);
+		printk(KERN_ERR "input: unable to register char major %d", INPUT_MAJOR);
 		return -EBUSY;
 	}
 	input_devfs_handle = devfs_mk_dir(NULL, "input", NULL);

@@ -119,10 +119,6 @@ void set_dma_sg (dmach_t channel, struct scatterlist *sg, int nr_sg)
 {
 	dma_t *dma = dma_chan + channel;
 
-	if (dma->active)
-		printk(KERN_ERR "dma%d: altering DMA SG while "
-		       "DMA active\n", channel);
-
 	dma->sg = sg;
 	dma->sgcount = nr_sg;
 	dma->using_sg = 1;
@@ -221,14 +217,6 @@ free_dma:
 	BUG();
 }
 
-/*
- * Is the specified DMA channel active?
- */
-int dma_channel_active(dmach_t channel)
-{
-	return dma_chan[channel].active;
-}
-
 void set_dma_page(dmach_t channel, char pagenr)
 {
 	printk(KERN_ERR "dma%d: trying to set_dma_page\n", channel);
@@ -284,12 +272,9 @@ GLOBAL_ALIAS(set_dma_addr, get_dma_residue);
 GLOBAL_ALIAS(set_dma_sg, get_dma_residue);
 GLOBAL_ALIAS(set_dma_speed, get_dma_residue);
 GLOBAL_ALIAS(init_dma, get_dma_residue);
-GLOBAL_ALIAS(dma_channel_active, get_dma_residue);
 
 #endif
 
-EXPORT_SYMBOL(request_dma);
-EXPORT_SYMBOL(free_dma);
 EXPORT_SYMBOL(enable_dma);
 EXPORT_SYMBOL(disable_dma);
 EXPORT_SYMBOL(set_dma_addr);
@@ -299,6 +284,3 @@ EXPORT_SYMBOL(set_dma_page);
 EXPORT_SYMBOL(get_dma_residue);
 EXPORT_SYMBOL(set_dma_sg);
 EXPORT_SYMBOL(set_dma_speed);
-EXPORT_SYMBOL(dma_channel_active);
-
-EXPORT_SYMBOL(dma_spin_lock);

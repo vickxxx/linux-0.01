@@ -1,7 +1,7 @@
 /*
  * include/asm-cris/processor.h
  *
- * Copyright (C) 2000, 2001, 2002 Axis Communications AB
+ * Copyright (C) 2000, 2001 Axis Communications AB
  *
  * Authors:         Bjorn Wesen        Initial version
  *
@@ -33,7 +33,7 @@
 #ifdef CONFIG_CRIS_LOW_MAP
 #define TASK_SIZE       (0x50000000UL)   /* 1.25 GB */
 #else
-#define TASK_SIZE       (0xA0000000UL)   /* 2.56 GB */
+#define TASK_SIZE       (0xB0000000UL)   /* 2.75 GB */
 #endif
 
 /* This decides where the kernel will search for a free chunk of vm
@@ -65,7 +65,7 @@ struct thread_struct {
 /*
  * At user->kernel entry, the pt_regs struct is stacked on the top of the kernel-stack.
  * This macro allows us to find those regs for a task.
- * Notice that subsequent pt_regs stackings, like recursive interrupts occurring while
+ * Notice that subsequent pt_regs stackings, like recursive interrupts occuring while
  * we're in the kernel, won't affect this - only the first user->kernel transition
  * registers are reached by this.
  */
@@ -81,7 +81,7 @@ struct thread_struct {
 #define INIT_THREAD  { \
    0, 0, 0x20 }  /* ccr = int enable, nothing else */
 
-extern int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 /* give the thread a program location
  * set user-mode (The 'U' flag (User mode flag) is CCR/DCCR bit 8) 
@@ -116,13 +116,13 @@ unsigned long get_wchan(struct task_struct *p);
  * Free current thread data structures etc..
  */
 
-extern inline void exit_thread(void)
+static inline void exit_thread(void)
 {
         /* Nothing needs to be done.  */
 }
 
 /* Free all resources held by a thread. */
-extern inline void release_thread(struct task_struct *dead_task)
+static inline void release_thread(struct task_struct *dead_task)
 {
         /* Nothing needs to be done.  */
 }
@@ -142,6 +142,6 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 #define init_task       (init_task_union.task)
 #define init_stack      (init_task_union.stack)
 
-#define cpu_relax()     do { } while (0)
+#define cpu_relax()	do { } while (0)
 
 #endif /* __ASM_CRIS_PROCESSOR_H */

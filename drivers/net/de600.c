@@ -403,7 +403,6 @@ de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	int	len;
 	int	tickssofar;
 	byte	*buffer = skb->data;
-	int	i;
 
 	if (free_tx_pages <= 0) {	/* Do timeouts, to avoid hangs. */
 		tickssofar = jiffies - dev->trans_start;
@@ -448,10 +447,8 @@ de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 #endif
 
 	de600_setup_address(transmit_from, RW_ADDR);
-	for (i = 0;  i < skb->len ; ++i, ++buffer)
+	for ( ; len > 0; --len, ++buffer)
 		de600_put_byte(*buffer);
-	for (; i < len; ++i)
-		de600_put_byte(0);
 
 	if (free_tx_pages-- == TX_PAGES) { /* No transmission going on */
 		dev->trans_start = jiffies;
@@ -721,7 +718,7 @@ static int
 adapter_init(struct net_device *dev)
 {
 	int	i;
-	unsigned long flags;
+	long flags;
 
 	save_flags(flags);
 	cli();

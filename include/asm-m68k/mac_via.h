@@ -3,7 +3,7 @@
  *
  *	There are two of these on the Mac II. Some IRQ's are vectored
  *	via them as are assorted bits and bobs - eg rtc, adb. The picture
- *	is a bit incomplete as the Mac documentation doesn't cover this well
+ *	is a bit incomplete as the Mac documentation doesnt cover this well
  */
  
 #ifndef _ASM_MAC_VIA_H_
@@ -255,8 +255,7 @@ extern volatile __u8 *via1,*via2;
 extern int rbv_present,via_alt_mapping;
 extern __u8 rbv_clear;
 
-static inline int rbv_set_video_bpp(int bpp)
-{
+extern __inline__ int rbv_set_video_bpp(int bpp) {
 	char val = (bpp==1)?0:(bpp==2)?1:(bpp==4)?2:(bpp==8)?3:-1;
 	if (!rbv_present || val<0) return -1;
 	via2[rMonP] = (via2[rMonP] & ~RBV_DEPTH) | val;

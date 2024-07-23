@@ -1700,12 +1700,12 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 			for (x=0; optr+1<eptr && x<-done->w; x++)
 			{
 				unsigned char a = iptr[x*2];
-				__put_user(a, optr++);
-				__put_user(a, optr++);
+				*optr++ = a;
+				*optr++ = a;
 			}
 			/* and clear the rest of the line */
 			for (x*=2; optr<eptr && x<done->bpl; x++)
-				__put_user(0, optr++);
+				*optr++ = 0;
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1722,10 +1722,10 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 		{
 			/* copy to doubled data to userland */
 			for (x=0; optr<eptr && x<-done->w; x++)
-				__put_user(iptr[x*2], optr++);
+				*optr++ = iptr[x*2];
 			/* and clear the rest of the line */
 			for (;optr<eptr && x<done->bpl; x++)
-				__put_user(0, optr++);
+				*optr++ = 0;
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1734,7 +1734,7 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 	/* API compliance:
 	 * place the framenumber (half fieldnr) in the last long
 	 */
-	__put_user(done->fieldnr/2, ((ulong*)eptr)-1);
+	((ulong*)eptr)[-1] = done->fieldnr/2;
 	}
 
 	/* keep the engine running */
@@ -2025,7 +2025,7 @@ int __init init_zoran(int card)
 }
 
 static
-void release_zoran(int max)
+void __exit release_zoran(int max)
 {
 	struct zoran *ztv;
 	int i;

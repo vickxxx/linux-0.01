@@ -1,25 +1,19 @@
 /*
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- *
- * Extracting time information from ARCS prom.
+ * time.c: Extracting time information from ARCS prom.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ *
+ * $Id: time.c,v 1.1 1998/10/18 13:32:10 tsbogend Exp $
  */
 #include <linux/init.h>
-
-#include <asm/arc/types.h>
 #include <asm/sgialib.h>
 
-struct linux_tinfo * __init
-ArcGetTime(VOID)
+struct linux_tinfo * __init prom_gettinfo(void)
 {
-	return (struct linux_tinfo *) ARC_CALL0(get_tinfo);
+	return romvec->get_tinfo();
 }
 
-ULONG __init
-ArcGetRelativeTime(VOID)
+unsigned long __init prom_getrtime(void)
 {
-	return ARC_CALL0(get_rtime);
+	return romvec->get_rtime();
 }

@@ -24,7 +24,6 @@ typedef struct {
 	unsigned short use_sg;	/* zero or number of segments for this adapter */
 	unsigned short sg_segs;	/* total number of allocated segments */
 	unsigned short orig_sg_segs;	/* number of segments allocated at first try */
-	unsigned int *sg_lengths;
 	struct scatterlist sg[1];	/* MUST BE last item */
 } ST_buffer;
 
@@ -84,8 +83,8 @@ typedef struct {
 	unsigned char cln_sense_value;
 	unsigned char cln_sense_mask;
 	unsigned char use_pf;			/* Set Page Format bit in all mode selects? */
-	unsigned char c_algo;	     /* compression algorithm */
 	int tape_type;
+	int write_threshold;
 	int timeout;		/* timeout for normal commands */
 	int long_timeout;	/* timeout for commands known to take long time */
 

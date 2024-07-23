@@ -39,7 +39,6 @@
  * Feb 2000, Version 1.13
  * Nov 2000, Version 1.14
  * Oct 2001, Version 1.15
- * Jan 2002, Version 1.16
  *
  * History:
  *    0.6b: first version in official kernel, Linux 1.3.46
@@ -86,7 +85,7 @@
  *         change APM_NOINTS to CONFIG_APM_ALLOW_INTS
  *         remove dependency on CONFIG_PROC_FS
  *         Stephen Rothwell
- *    1.9: Fix small typo.  <laslo@wodip.opole.pl>
+ *    1.9: Fix small typo.  <laslo@ilo.opole.pl>
  *         Try to cope with BIOS's that need to have all display
  *         devices blanked and not just the first one.
  *         Ross Paterson <ross@soi.city.ac.uk>
@@ -165,18 +164,8 @@
  *         If an APM idle fails log it and idle sensibly
  *   1.15: Don't queue events to clients who open the device O_WRONLY.
  *         Don't expect replies from clients who open the device O_RDONLY.
- *         (Idea from Thomas Hood <jdthood@mail.com>)
- *         Minor waitqueue cleanups. (John Fremlin <chief@bandits.org>)
- *   1.16: Fix idle calling. (Andreas Steinmetz <ast@domdv.de> et al.)
- *         Notify listeners of standby or suspend events before notifying
- *         drivers. Return EBUSY to ioctl() if suspend is rejected.
- *         (Russell King <rmk@arm.linux.org.uk> and Thomas Hood)
- *         Ignore first resume after we generate our own resume event
- *         after a suspend (Thomas Hood <jdthood@mail.com>)
- *         Daemonize now gets rid of our controlling terminal (sfr).
- *         CONFIG_APM_CPU_IDLE now just affects the default value of
- *         idle_threshold (sfr).
- *         Change name of kernel apm daemon (as it no longer idles) (sfr).
+ *         (Idea from Thomas Hood <jdthood at yahoo.co.uk>)
+ *         Minor waitqueue cleanups.(John Fremlin <chief@bandits.org>)
  *
  * APM 1.1 Reference:
  *
@@ -247,15 +236,8 @@ extern int (*console_blank_hook)(int);
  *	    					powering off
  *	    [no-]debug			log some debugging messages
  *	    [no-]power[-_]off		power off on shutdown
- *	    [no-]smp			Use apm even on an SMP box
  *	    bounce[-_]interval=<n>	number of ticks to ignore suspend
  *	    				bounces
- *          idle[-_]threshold=<n>       System idle percentage above which to
- *                                      make APM BIOS idle calls. Set it to
- *                                      100 to disable.
- *          idle[-_]period=<n>          Period (in 1/100s of a second) over
- *                                      which the idle percentage is
- *                                      calculated.
  */
 
 /* KNOWN PROBLEM MACHINES:
@@ -276,11 +258,10 @@ extern int (*console_blank_hook)(int);
  */
 
 /*
- * Define as 1 to make the driver always call the APM BIOS busy
- * routine even if the clock was not reported as slowed by the
- * idle routine.  Otherwise, define as 0.
+ * Define to always call the APM BIOS busy routine even if the clock was
+ * not slowed by the idle routine.
  */
-#define ALWAYS_CALL_BUSY   1
+#define ALWAYS_CALL_BUSY
 
 /*
  * Define to make the APM BIOS calls zero all data segment registers (so
@@ -327,7 +308,7 @@ extern int (*console_blank_hook)(int);
  * Save a segment register away
  */
 #define savesegment(seg, where) \
-		__asm__ __volatile__("mov %%" #seg ",%0" : "=m" (where))
+		__asm__ __volatile__("movl %%" #seg ",%0" : "=m" (where))
 
 /*
  * Maximum number of events stored
@@ -360,29 +341,18 @@ struct apm_user {
 #define APM_BIOS_MAGIC		0x4101
 
 /*
- * idle percentage above which bios idle calls are done
- */
-#ifdef CONFIG_APM_CPU_IDLE
-#define DEFAULT_IDLE_THRESHOLD	95
-#else
-#define DEFAULT_IDLE_THRESHOLD	100
-#endif
-#define DEFAULT_IDLE_PERIOD	(100 / 3)
-
-/*
  * Local variables
  */
 static struct {
 	unsigned long	offset;
 	unsigned short	segment;
 }				apm_bios_entry;
+#ifdef CONFIG_APM_CPU_IDLE
 static int			clock_slowed;
-static int			idle_threshold = DEFAULT_IDLE_THRESHOLD;
-static int			idle_period = DEFAULT_IDLE_PERIOD;
-static int			set_pm_idle;
+#endif
 static int			suspends_pending;
 static int			standbys_pending;
-static int			ignore_sys_suspend;
+static int			waiting_for_resume;
 static int			ignore_normal_resume;
 static int			bounce_interval = DEFAULT_BOUNCE_INTERVAL;
 
@@ -394,7 +364,6 @@ static long			clock_cmos_diff;
 static int			got_clock_diff;
 #endif
 static int			debug;
-static int			smp = 0;
 static int			apm_disabled = -1;
 #ifdef CONFIG_SMP
 static int			power_off;
@@ -419,7 +388,7 @@ static DECLARE_WAIT_QUEUE_HEAD(apm_waitqueue);
 static DECLARE_WAIT_QUEUE_HEAD(apm_suspend_waitqueue);
 static struct apm_user *	user_list;
 
-static char			driver_version[] = "1.16";	/* no spaces */
+static char			driver_version[] = "1.15";	/* no spaces */
 
 /*
  *	APM event names taken from the APM 1.2 specification. These are
@@ -473,62 +442,6 @@ static const lookup_t error_table[] = {
 };
 #define ERROR_COUNT	(sizeof(error_table)/sizeof(lookup_t))
 
-/**
- *	apm_error	-	display an APM error
- *	@str: information string
- *	@err: APM BIOS return code
- *
- *	Write a meaningful log entry to the kernel log in the event of
- *	an APM error.
- */
- 
-static void apm_error(char *str, int err)
-{
-	int	i;
-
-	for (i = 0; i < ERROR_COUNT; i++)
-		if (error_table[i].key == err) break;
-	if (i < ERROR_COUNT)
-		printk(KERN_NOTICE "apm: %s: %s\n", str, error_table[i].msg);
-	else
-		printk(KERN_NOTICE "apm: %s: unknown error code %#2.2x\n",
-			str, err);
-}
-
-/*
- * Lock APM functionality to physical CPU 0
- */
- 
-#ifdef CONFIG_SMP
-
-static unsigned long apm_save_cpus(void)
-{
-	unsigned long x = current->cpus_allowed;
-	/* Some bioses don't like being called from CPU != 0 */
-	if (cpu_number_map(smp_processor_id()) != 0) {
-		set_cpus_allowed(current, 1 << cpu_logical_map(0));
-		if (unlikely(cpu_number_map(smp_processor_id()) != 0))
-			BUG();
-	}
-	return x;
-}
-
-static inline void apm_restore_cpus(unsigned long mask)
-{
-	set_cpus_allowed(current, mask);
-}
-
-#else
-
-/*
- *	No CPU lockdown needed on a uniprocessor
- */
- 
-#define apm_save_cpus()	0
-#define apm_restore_cpus(x)	(void)(x)
-
-#endif
-
 /*
  * These are the actual BIOS calls.  Depending on APM_ZERO_SEGS and
  * apm_info.allow_ints, we are being really paranoid here!  Not only
@@ -553,7 +466,7 @@ static inline void apm_restore_cpus(unsigned long mask)
 
 #ifdef APM_ZERO_SEGS
 #	define APM_DECL_SEGS \
-		unsigned short saved_fs; unsigned short saved_gs;
+		unsigned int saved_fs; unsigned int saved_gs;
 #	define APM_DO_SAVE_SEGS \
 		savesegment(fs, saved_fs); savesegment(gs, saved_gs)
 #	define APM_DO_ZERO_SEGS \
@@ -602,8 +515,7 @@ static u8 apm_bios_call(u32 func, u32 ebx_in, u32 ecx_in,
 {
 	APM_DECL_SEGS
 	unsigned long	flags;
-	unsigned long cpus = apm_save_cpus();
-	
+
 	__save_flags(flags);
 	APM_DO_CLI;
 	APM_DO_SAVE_SEGS;
@@ -625,9 +537,6 @@ static u8 apm_bios_call(u32 func, u32 ebx_in, u32 ecx_in,
 		: "memory", "cc");
 	APM_DO_RESTORE_SEGS;
 	__restore_flags(flags);
-	
-	apm_restore_cpus(cpus);
-	
 	return *eax & 0xff;
 }
 
@@ -651,8 +560,6 @@ static u8 apm_bios_call_simple(u32 func, u32 ebx_in, u32 ecx_in, u32 *eax)
 	APM_DECL_SEGS
 	unsigned long	flags;
 
-	unsigned long cpus = apm_save_cpus();
-	
 	__save_flags(flags);
 	APM_DO_CLI;
 	APM_DO_SAVE_SEGS;
@@ -678,9 +585,6 @@ static u8 apm_bios_call_simple(u32 func, u32 ebx_in, u32 ecx_in, u32 *eax)
 	}
 	APM_DO_RESTORE_SEGS;
 	__restore_flags(flags);
-
-	apm_restore_cpus(cpus);
-	
 	return error;
 }
 
@@ -769,16 +673,18 @@ static int set_power_state(u_short what, u_short state)
 }
 
 /**
- *	set_system_power_state - set system wide power state
+ *	apm_set_power_state - set system wide power state
  *	@state: which state to enter
  *
  *	Transition the entire system into a new APM power state.
  */
  
-static int set_system_power_state(u_short state)
+static int apm_set_power_state(u_short state)
 {
 	return set_power_state(APM_DEVICE_ALL, state);
 }
+
+#ifdef CONFIG_APM_CPU_IDLE
 
 /**
  *	apm_do_idle	-	perform power saving
@@ -792,21 +698,25 @@ static int set_system_power_state(u_short state)
 static int apm_do_idle(void)
 {
 	u32	eax;
+	int	slowed;
 
 	if (apm_bios_call_simple(APM_FUNC_IDLE, 0, 0, &eax)) {
 		static unsigned long t;
 
-		/* This always fails on some SMP boards running UP kernels.
-		 * Only report the failure the first 5 times.
-		 */
-		if (++t < 5) {
+		if (time_after(jiffies, t + 10 * HZ)) {
 			printk(KERN_DEBUG "apm_do_idle failed (%d)\n",
 					(eax >> 8) & 0xff);
+			t = jiffies;
 		}
 		return -1;
 	}
-	clock_slowed = (apm_info.bios.flags & APM_IDLE_SLOWS_CLOCK) != 0;
-	return clock_slowed;
+	slowed = (apm_info.bios.flags & APM_IDLE_SLOWS_CLOCK) != 0;
+#ifdef ALWAYS_CALL_BUSY
+	clock_slowed = 1;
+#else
+	clock_slowed = slowed;
+#endif
+	return slowed;
 }
 
 /**
@@ -819,98 +729,77 @@ static void apm_do_busy(void)
 {
 	u32	dummy;
 
-	if (clock_slowed || ALWAYS_CALL_BUSY) {
+	if (clock_slowed) {
 		(void) apm_bios_call_simple(APM_FUNC_BUSY, 0, 0, &dummy);
 		clock_slowed = 0;
 	}
 }
 
+#if 0
+extern int hlt_counter;
+
 /*
- * If no process has really been interested in
- * the CPU for some time, we want to call BIOS
- * power management - we probably want
+ * If no process has been interested in this
+ * CPU for some time, we want to wake up the
+ * power management thread - we probably want
  * to conserve power.
  */
-#define IDLE_CALC_LIMIT   (HZ * 100)
-#define IDLE_LEAKY_MAX    16
+#define HARD_IDLE_TIMEOUT (HZ/3)
 
-static void (*original_pm_idle)(void);
-
-extern void default_idle(void);
+/* This should wake up kapmd and ask it to slow the CPU */
+#define powermanagement_idle()  do { } while (0)
 
 /**
  * apm_cpu_idle		-	cpu idling for APM capable Linux
  *
  * This is the idling function the kernel executes when APM is available. It 
- * tries to do BIOS powermanagement based on the average system idle time.
- * Furthermore it calls the system default idle routine.
+ * tries to save processor time directly by using hlt instructions. A
+ * separate apm thread tries to do the BIOS power management.
+ *
+ * N.B. This is curently not used for kernels 2.4.x.
  */
 
 static void apm_cpu_idle(void)
 {
-	static int use_apm_idle; /* = 0 */
-	static unsigned int last_jiffies; /* = 0 */
-	static unsigned int last_stime; /* = 0 */
+	unsigned int start_idle;
 
-	int apm_idle_done = 0;
-	unsigned int jiffies_since_last_check = jiffies - last_jiffies;
-	unsigned int bucket;
-
-recalc:
-	if (jiffies_since_last_check > IDLE_CALC_LIMIT) {
-		use_apm_idle = 0;
-		last_jiffies = jiffies;
-		last_stime = current->times.tms_stime;
-	} else if (jiffies_since_last_check > idle_period) {
-		unsigned int idle_percentage;
-
-		idle_percentage = current->times.tms_stime - last_stime;
-		idle_percentage *= 100;
-		idle_percentage /= jiffies_since_last_check;
-		use_apm_idle = (idle_percentage > idle_threshold);
-		if (apm_info.forbid_idle)
-			use_apm_idle = 0;
-		last_jiffies = jiffies;
-		last_stime = current->times.tms_stime;
-	}
-
-	bucket = IDLE_LEAKY_MAX;
-
-	while (!current->need_resched) {
-		if (use_apm_idle) {
-			unsigned int t;
-
-			t = jiffies;
-			switch (apm_do_idle()) {
-			case 0: apm_idle_done = 1;
-				if (t != jiffies) {
-					if (bucket) {
-						bucket = IDLE_LEAKY_MAX;
-						continue;
-					}
-				} else if (bucket) {
-					bucket--;
+	start_idle = jiffies;
+	while (1) {
+		if (!current->need_resched) {
+			if (jiffies - start_idle < HARD_IDLE_TIMEOUT) {
+				if (!current_cpu_data.hlt_works_ok)
 					continue;
-				}
-				break;
-			case 1: apm_idle_done = 1;
-				break;
-			default: /* BIOS refused */
-				break;
+				if (hlt_counter)
+					continue;
+				__cli();
+				if (!current->need_resched)
+					safe_halt();
+				else
+					__sti();
+				continue;
 			}
-		}
-		if (original_pm_idle)
-			original_pm_idle();
-		else
-			default_idle();
-		jiffies_since_last_check = jiffies - last_jiffies;
-		if (jiffies_since_last_check > idle_period)
-			goto recalc;
-	}
 
-	if (apm_idle_done)
-		apm_do_busy();
+			/*
+			 * Ok, do some power management - we've been idle for too long
+			 */
+			powermanagement_idle();
+		}
+
+		schedule();
+		check_pgt_cache();
+		start_idle = jiffies;
+	}
 }
+#endif
+#endif
+
+#ifdef CONFIG_SMP
+static int apm_magic(void * unused)
+{
+	while (1)
+		schedule();
+}
+#endif
 
 /**
  *	apm_power_off	-	ask the BIOS to power off
@@ -937,14 +826,18 @@ static void apm_power_off(void)
 	/*
 	 * This may be called on an SMP machine.
 	 */
-	if (apm_info.realmode_power_off)
-	{
-		(void)apm_save_cpus();
-		machine_real_restart(po_bios_call, sizeof(po_bios_call));
-		/* Never returns */
+#ifdef CONFIG_SMP
+	/* Some bioses don't like being called from CPU != 0 */
+	while (cpu_number_map(smp_processor_id()) != 0) {
+		kernel_thread(apm_magic, NULL,
+			CLONE_FS | CLONE_FILES | CLONE_SIGHAND | SIGCHLD);
+		schedule();
 	}
+#endif
+	if (apm_info.realmode_power_off)
+		machine_real_restart(po_bios_call, sizeof(po_bios_call));
 	else
-		(void) set_system_power_state(APM_STATE_OFF);
+		(void) apm_set_power_state(APM_STATE_OFF);
 }
 
 /**
@@ -1089,6 +982,28 @@ static int apm_engage_power_management(u_short device, int enable)
 	return APM_SUCCESS;
 }
 
+/**
+ *	apm_error	-	display an APM error
+ *	@str: information string
+ *	@err: APM BIOS return code
+ *
+ *	Write a meaningful log entry to the kernel log in the event of
+ *	an APM error.
+ */
+ 
+static void apm_error(char *str, int err)
+{
+	int	i;
+
+	for (i = 0; i < ERROR_COUNT; i++)
+		if (error_table[i].key == err) break;
+	if (i < ERROR_COUNT)
+		printk(KERN_NOTICE "apm: %s: %s\n", str, error_table[i].msg);
+	else
+		printk(KERN_NOTICE "apm: %s: unknown error code %#2.2x\n",
+			str, err);
+}
+
 #if defined(CONFIG_APM_DISPLAY_BLANK) && defined(CONFIG_VT)
 
 /**
@@ -1118,19 +1033,6 @@ static int apm_console_blank(int blank)
 	}
 	if ((error == APM_SUCCESS) || (error == APM_NO_ERROR))
 		return 1;
-	if (error == APM_NOT_ENGAGED) {
-		static int tried;
-		int eng_error;
-		if (tried++ == 0) {
-			eng_error = apm_engage_power_management(APM_DEVICE_ALL, 1);
-			if (eng_error) {
-				apm_error("set display", error);
-				apm_error("engage interface", eng_error);
-				return 0;
-			} else
-				return apm_console_blank(blank);
-		}
-	}
 	apm_error("set display", error);
 	return 0;
 }
@@ -1231,42 +1133,57 @@ static void reinit_timer(void)
 #endif
 }
 
-static int suspend(int vetoable)
+static int send_event(apm_event_t event)
+{
+	switch (event) {
+	case APM_SYS_SUSPEND:
+	case APM_CRITICAL_SUSPEND:
+	case APM_USER_SUSPEND:
+		/* map all suspends to ACPI D3 */
+		if (pm_send_all(PM_SUSPEND, (void *)3)) {
+			if (event == APM_CRITICAL_SUSPEND) {
+				printk(KERN_CRIT
+					"apm: Critical suspend was vetoed, "
+					"expect armageddon\n" );
+				return 0;
+			}
+			if (apm_info.connection_version > 0x100)
+				apm_set_power_state(APM_STATE_REJECT);
+			return 0;
+		}
+		break;
+	case APM_NORMAL_RESUME:
+	case APM_CRITICAL_RESUME:
+		/* map all resumes to ACPI D0 */
+		(void) pm_send_all(PM_RESUME, (void *)0);
+		break;
+	}
+
+	return 1;
+}
+
+static int suspend(void)
 {
 	int		err;
 	struct apm_user	*as;
 
-	if (pm_send_all(PM_SUSPEND, (void *)3)) {
-		/* Vetoed */
-		if (vetoable) {
-			if (apm_info.connection_version > 0x100)
-				set_system_power_state(APM_STATE_REJECT);
-			err = -EBUSY;
-			ignore_sys_suspend = 0;
-			printk(KERN_WARNING "apm: suspend was vetoed.\n");
-			goto out;
-		}
-		printk(KERN_CRIT "apm: suspend was vetoed, but suspending anyway.\n");
-	}
 	get_time_diff();
-	__cli();
-	err = set_system_power_state(APM_STATE_SUSPEND);
+	cli();
+	err = apm_set_power_state(APM_STATE_SUSPEND);
 	reinit_timer();
 	set_time();
-	ignore_normal_resume = 1;
-	__sti();
 	if (err == APM_NO_ERROR)
 		err = APM_SUCCESS;
 	if (err != APM_SUCCESS)
 		apm_error("suspend", err);
-	err = (err == APM_SUCCESS) ? 0 : -EIO;
-	pm_send_all(PM_RESUME, (void *)0);
+	send_event(APM_NORMAL_RESUME);
+	sti();
 	queue_event(APM_NORMAL_RESUME, NULL);
- out:
 	for (as = user_list; as != NULL; as = as->next) {
 		as->suspend_wait = 0;
-		as->suspend_result = err;
+		as->suspend_result = ((err == APM_SUCCESS) ? 0 : -EIO);
 	}
+	ignore_normal_resume = 1;
 	wake_up_interruptible(&apm_suspend_waitqueue);
 	return err;
 }
@@ -1275,9 +1192,8 @@ static void standby(void)
 {
 	int	err;
 
-	/* If needed, notify drivers here */
 	get_time_diff();
-	err = set_system_power_state(APM_STATE_STANDBY);
+	err = apm_set_power_state(APM_STATE_STANDBY);
 	if ((err != APM_SUCCESS) && (err != APM_NO_ERROR))
 		apm_error("standby", err);
 }
@@ -1319,25 +1235,29 @@ static void check_events(void)
 		if (ignore_bounce
 		    && ((jiffies - last_resume) > bounce_interval))
 			ignore_bounce = 0;
+		if (ignore_normal_resume && (event != APM_NORMAL_RESUME))
+			ignore_normal_resume = 0;
 
 		switch (event) {
 		case APM_SYS_STANDBY:
 		case APM_USER_STANDBY:
-			queue_event(event, NULL);
-			if (standbys_pending <= 0)
-				standby();
+			if (send_event(event)) {
+				queue_event(event, NULL);
+				if (standbys_pending <= 0)
+					standby();
+			}
 			break;
 
 		case APM_USER_SUSPEND:
 #ifdef CONFIG_APM_IGNORE_USER_SUSPEND
 			if (apm_info.connection_version > 0x100)
-				set_system_power_state(APM_STATE_REJECT);
+				apm_set_power_state(APM_STATE_REJECT);
 			break;
 #endif
 		case APM_SYS_SUSPEND:
 			if (ignore_bounce) {
 				if (apm_info.connection_version > 0x100)
-					set_system_power_state(APM_STATE_REJECT);
+					apm_set_power_state(APM_STATE_REJECT);
 				break;
 			}
 			/*
@@ -1348,34 +1268,35 @@ static void check_events(void)
 			 * sending a SUSPEND event until something else
 			 * happens!
 			 */
-			if (ignore_sys_suspend)
+			if (waiting_for_resume)
 				return;
-			ignore_sys_suspend = 1;
-			queue_event(event, NULL);
-			if (suspends_pending <= 0)
-				(void) suspend(1);
+			if (send_event(event)) {
+				queue_event(event, NULL);
+				waiting_for_resume = 1;
+				if (suspends_pending <= 0)
+					(void) suspend();
+			}
 			break;
 
 		case APM_NORMAL_RESUME:
 		case APM_CRITICAL_RESUME:
 		case APM_STANDBY_RESUME:
-			ignore_sys_suspend = 0;
+			waiting_for_resume = 0;
 			last_resume = jiffies;
 			ignore_bounce = 1;
 			if ((event != APM_NORMAL_RESUME)
 			    || (ignore_normal_resume == 0)) {
 				set_time();
-				pm_send_all(PM_RESUME, (void *)0);
+				send_event(event);
 				queue_event(event, NULL);
 			}
-			ignore_normal_resume = 0;
 			break;
 
 		case APM_CAPABILITY_CHANGE:
 		case APM_LOW_BATTERY:
 		case APM_POWER_STATUS_CHANGE:
+			send_event(event);
 			queue_event(event, NULL);
-			/* If needed, notify drivers here */
 			break;
 
 		case APM_UPDATE_TIME:
@@ -1383,10 +1304,12 @@ static void check_events(void)
 			break;
 
 		case APM_CRITICAL_SUSPEND:
+			send_event(event);
 			/*
-			 * We are not allowed to reject a critical suspend.
+			 * We can only hope it worked - we are not allowed
+			 * to reject a critical suspend.
 			 */
-			(void) suspend(0);
+			(void) suspend();
 			break;
 		}
 	}
@@ -1403,7 +1326,7 @@ static void apm_event_handler(void)
 			pending_count = 4;
 			if (debug)
 				printk(KERN_DEBUG "apm: setting state busy\n");
-			err = set_system_power_state(APM_STATE_BUSY);
+			err = apm_set_power_state(APM_STATE_BUSY);
 			if (err)
 				apm_error("busy", err);
 		}
@@ -1414,24 +1337,63 @@ static void apm_event_handler(void)
 
 /*
  * This is the APM thread main loop.
+ *
+ * Check whether we're the only running process to
+ * decide if we should just power down.
+ *
  */
+#define system_idle() (nr_running == 1)
 
 static void apm_mainloop(void)
 {
+	int timeout = HZ;
 	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue(&apm_waitqueue, &wait);
 	set_current_state(TASK_INTERRUPTIBLE);
 	for (;;) {
-		schedule_timeout(APM_CHECK_TIMEOUT);
+		/* Nothing to do, just sleep for the timeout */
+		timeout = 2 * timeout;
+		if (timeout > APM_CHECK_TIMEOUT)
+			timeout = APM_CHECK_TIMEOUT;
+		schedule_timeout(timeout);
 		if (exit_kapmd)
 			break;
+
 		/*
 		 * Ok, check all events, check for idle (and mark us sleeping
 		 * so as not to count towards the load average)..
 		 */
 		set_current_state(TASK_INTERRUPTIBLE);
 		apm_event_handler();
+#ifdef CONFIG_APM_CPU_IDLE
+		if (!system_idle())
+			continue;
+		
+		/*
+		 *	If we can idle...
+		 */
+		if (apm_do_idle() != -1) {
+			unsigned long start = jiffies;
+			while ((!exit_kapmd) && system_idle()) {
+				if (apm_do_idle()) {
+					set_current_state(TASK_INTERRUPTIBLE);
+					/* APM needs us to snooze .. either
+					   the BIOS call failed (-1) or it
+					   slowed the clock (1). We sleep
+					   until it talks to us again */
+					schedule_timeout(1);
+				}
+				if ((jiffies - start) > APM_CHECK_TIMEOUT) {
+					apm_event_handler();
+					start = jiffies;
+				}
+			}
+			apm_do_busy();
+			apm_event_handler();
+			timeout = 1;
+		}
+#endif
 	}
 	remove_wait_queue(&apm_waitqueue, &wait);
 }
@@ -1454,7 +1416,7 @@ static ssize_t do_read(struct file *fp, char *buf, size_t count, loff_t *ppos)
 	as = fp->private_data;
 	if (check_apm_user(as, "read"))
 		return -EIO;
-	if ((int)count < sizeof(apm_event_t))
+	if (count < sizeof(apm_event_t))
 		return -EINVAL;
 	if ((queue_empty(as)) && (fp->f_flags & O_NONBLOCK))
 		return -EAGAIN;
@@ -1517,7 +1479,9 @@ static int do_ioctl(struct inode * inode, struct file *filp,
 			as->standbys_read--;
 			as->standbys_pending--;
 			standbys_pending--;
-		} else
+		} else if (!send_event(APM_USER_STANDBY))
+			return -EAGAIN;
+		else
 			queue_event(APM_USER_STANDBY, as);
 		if (standbys_pending <= 0)
 			standby();
@@ -1527,10 +1491,13 @@ static int do_ioctl(struct inode * inode, struct file *filp,
 			as->suspends_read--;
 			as->suspends_pending--;
 			suspends_pending--;
-		} else
+		} else if (!send_event(APM_USER_SUSPEND))
+			return -EAGAIN;
+		else
 			queue_event(APM_USER_SUSPEND, as);
 		if (suspends_pending <= 0) {
-			return suspend(1);
+			if (suspend() != APM_SUCCESS)
+				return -EIO;
 		} else {
 			as->suspend_wait = 1;
 			wait_event_interruptible(apm_suspend_waitqueue,
@@ -1561,7 +1528,7 @@ static int do_release(struct inode * inode, struct file * filp)
 	if (as->suspends_pending > 0) {
 		suspends_pending -= as->suspends_pending;
 		if (suspends_pending <= 0)
-			(void) suspend(1);
+			(void) suspend();
 	}
 	if (user_list == as)
 		user_list = as->next;
@@ -1628,7 +1595,7 @@ static int apm_get_info(char *buf, char **start, off_t fpos, int length)
 
 	p = buf;
 
-	if ((smp_num_cpus == 1 || smp) &&
+	if ((smp_num_cpus == 1) &&
 	    !(error = apm_get_power_status(&bx, &cx, &dx))) {
 		ac_line_status = (bx >> 8) & 0xff;
 		battery_status = bx & 0xff;
@@ -1709,24 +1676,10 @@ static int apm(void *unused)
 
 	daemonize();
 
-	strcpy(current->comm, "kapmd");
+	strcpy(current->comm, "kapm-idled");
 	sigfillset(&current->blocked);
+	current->tty = NULL;	/* get rid of controlling tty */
 
-#ifdef CONFIG_SMP
-	/* 2002/08/01 - WT
-	 * This is to avoid random crashes at boot time during initialization
-	 * on SMP systems in case of "apm=power-off" mode. Seen on ASUS A7M266D.
-	 * Some bioses don't like being called from CPU != 0.
-	 * Method suggested by Ingo Molnar.
-	 */
-	if (cpu_number_map(smp_processor_id()) != 0) {
-		current->cpus_allowed = 1;
-		schedule();
-		if (unlikely(cpu_number_map(smp_processor_id()) != 0))
-			BUG();
-	}
-#endif
-	
 	if (apm_info.connection_version == 0) {
 		apm_info.connection_version = apm_info.bios.version;
 		if (apm_info.connection_version > 0x100) {
@@ -1773,7 +1726,7 @@ static int apm(void *unused)
 		}
 	}
 
-	if (debug && (smp_num_cpus == 1 || smp )) {
+	if (debug && (smp_num_cpus == 1)) {
 		error = apm_get_power_status(&bx, &cx, &dx);
 		if (error)
 			printk(KERN_INFO "apm: power status not available\n");
@@ -1817,7 +1770,7 @@ static int apm(void *unused)
 		pm_power_off = apm_power_off;
 	register_sysrq_key('o', &sysrq_poweroff_op);
 
-	if (smp_num_cpus == 1 || smp) {
+	if (smp_num_cpus == 1) {
 #if defined(CONFIG_APM_DISPLAY_BLANK) && defined(CONFIG_VT)
 		console_blank_hook = apm_console_blank;
 #endif
@@ -1844,23 +1797,11 @@ static int __init apm_setup(char *str)
 		if ((strncmp(str, "bounce-interval=", 16) == 0) ||
 		    (strncmp(str, "bounce_interval=", 16) == 0))
 			bounce_interval = simple_strtol(str + 16, NULL, 0);
-		if ((strncmp(str, "idle-threshold=", 15) == 0) ||
-		    (strncmp(str, "idle_threshold=", 15) == 0))
-			idle_threshold = simple_strtol(str + 15, NULL, 0);
-		if ((strncmp(str, "idle-period=", 12) == 0) ||
-		    (strncmp(str, "idle_period=", 12) == 0))
-			idle_period = simple_strtol(str + 12, NULL, 0);
-		invert = (strncmp(str, "no-", 3) == 0) ||
-			(strncmp(str, "no_", 3) == 0);
+		invert = (strncmp(str, "no-", 3) == 0);
 		if (invert)
 			str += 3;
 		if (strncmp(str, "debug", 5) == 0)
 			debug = !invert;
-		if (strncmp(str, "smp", 3) == 0)
-		{
-			smp = !invert;
-			idle_threshold = 100;
-		}
 		if ((strncmp(str, "power-off", 9) == 0) ||
 		    (strncmp(str, "power_off", 9) == 0))
 			power_off = !invert;
@@ -1965,7 +1906,7 @@ static int __init apm_init(void)
 		printk(KERN_NOTICE "apm: disabled on user request.\n");
 		return -ENODEV;
 	}
-	if ((smp_num_cpus > 1) && !power_off && !smp) {
+	if ((smp_num_cpus > 1) && !power_off) {
 		printk(KERN_NOTICE "apm: disabled - APM is not SMP safe.\n");
 		return -ENODEV;
 	}
@@ -2019,21 +1960,13 @@ static int __init apm_init(void)
 
 	kernel_thread(apm, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND | SIGCHLD);
 
-	if (smp_num_cpus > 1 && !smp) {
+	if (smp_num_cpus > 1) {
 		printk(KERN_NOTICE
 		   "apm: disabled - APM is not SMP safe (power off active).\n");
 		return 0;
 	}
 
 	misc_register(&apm_device);
-
-	if (HZ != 100)
-		idle_period = (idle_period * HZ) / 100;
-	if (idle_threshold < 100) {
-		original_pm_idle = pm_idle;
-		pm_idle  = apm_cpu_idle;
-		set_pm_idle = 1;
-	}
 
 	return 0;
 }
@@ -2042,8 +1975,6 @@ static void __exit apm_exit(void)
 {
 	int	error;
 
-	if (set_pm_idle)
-		pm_idle = original_pm_idle;
 	if (((apm_info.bios.flags & APM_BIOS_DISENGAGED) == 0)
 	    && (apm_info.connection_version > 0x0100)) {
 		error = apm_engage_power_management(APM_DEVICE_ALL, 0);
@@ -2081,14 +2012,5 @@ MODULE_PARM_DESC(broken_psr, "BIOS has a broken GetPowerStatus call");
 MODULE_PARM(realmode_power_off, "i");
 MODULE_PARM_DESC(realmode_power_off,
 		"Switch to real mode before powering off");
-MODULE_PARM(idle_threshold, "i");
-MODULE_PARM_DESC(idle_threshold,
-	"System idle percentage above which to make APM BIOS idle calls");
-MODULE_PARM(idle_period, "i");
-MODULE_PARM_DESC(idle_period,
-	"Period (in sec/100) over which to caculate the idle percentage");
-MODULE_PARM(smp, "i");
-MODULE_PARM_DESC(smp,
-	"Set this to enable APM use on an SMP platform. Use with caution on older systems");
 
 EXPORT_NO_SYMBOLS;

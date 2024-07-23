@@ -30,13 +30,6 @@
  * Aki Laukkanen	: added power management support
  * Arnaldo C. de Melo	: added missing restore_flags in ad1848_resume
  * Miguel Freitas       : added ISA PnP support
- * Alan Cox		: Added CS4236->4239 identification
- * Daniel T. Cobra	: Alernate config/mixer for later chips
- * Alan Cox		: Merged chip idents and config code
- * Zwane Mwaikambo	: Fix ISA PnP scan
- *
- * TODO
- *		APM save restore assist code on IBM thinkpad
  *
  * Status:
  *		Tested. Believed fully functional.
@@ -64,7 +57,7 @@ typedef struct
 	int             dual_dma;	/* 1, when two DMA channels allocated */
 	int 		subtype;
 	unsigned char   MCE_bit;
-	unsigned char   saved_regs[64];	/* Includes extended register space */
+	unsigned char   saved_regs[32];
 	int             debug_flag;
 
 	int             audio_flags;
@@ -85,9 +78,6 @@ typedef struct
 #define MD_IWAVE	7
 #define MD_4235         8 /* Crystal Audio CS4235  */
 #define MD_1845_SSCAPE  9 /* Ensoniq Soundscape PNP*/
-#define MD_4236		10 /* 4236 and higher */
-#define MD_42xB		11 /* CS 42xB */
-#define MD_4239		12 /* CS4239 */
 
 	/* Mixer parameters */
 	int             recmask;
@@ -135,7 +125,7 @@ static int timer_installed = -1;
 
 static int loaded;
 
-static int ad_format_mask[13 /*devc->model */ ] =
+static int ad_format_mask[10 /*devc->model */ ] =
 {
 	0,
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW,
@@ -146,10 +136,7 @@ static int ad_format_mask[13 /*devc->model */ ] =
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
 	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
 	AFMT_U8 | AFMT_S16_LE /* CS4235 */,
-	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW	/* Ensoniq Soundscape*/,
-	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
-	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM,
-	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW | AFMT_S16_BE | AFMT_IMA_ADPCM	
+	AFMT_U8 | AFMT_S16_LE | AFMT_MU_LAW | AFMT_A_LAW	/* Ensoniq Soundscape*/
 };
 
 static ad1848_info adev_info[MAX_AUDIO_DEV];
@@ -215,22 +202,9 @@ static int ad_read(ad1848_info * devc, int reg)
 
 	save_flags(flags);
 	cli();
-	
-	if(reg < 32)
-	{
-		outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-		x = inb(io_Indexed_Data(devc));
-	}
-	else
-	{
-		int xreg, xra;
-
-		xreg = (reg & 0xff) - 32;
-		xra = (((xreg & 0x0f) << 4) & 0xf0) | 0x08 | ((xreg & 0x10) >> 2);
-		outb(((unsigned char) (23 & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-		outb(((unsigned char) (xra & 0xff)), io_Indexed_Data(devc));
-		x = inb(io_Indexed_Data(devc));
-	}
+	outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+	x = inb(io_Indexed_Data(devc));
+/* printk("(%02x<-%02x) ", reg|devc->MCE_bit, x); */
 	restore_flags(flags);
 
 	return x;
@@ -246,22 +220,9 @@ static void ad_write(ad1848_info * devc, int reg, int data)
 
 	save_flags(flags);
 	cli();
-	
-	if(reg < 32)
-	{
-		outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-		outb(((unsigned char) (data & 0xff)), io_Indexed_Data(devc));
-	}
-	else
-	{
-		int xreg, xra;
-		
-		xreg = (reg & 0xff) - 32;
-		xra = (((xreg & 0x0f) << 4) & 0xf0) | 0x08 | ((xreg & 0x10) >> 2);
-		outb(((unsigned char) (23 & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
-		outb(((unsigned char) (xra & 0xff)), io_Indexed_Data(devc));
-		outb((unsigned char) (data & 0xff), io_Indexed_Data(devc));
-	}
+	outb(((unsigned char) (reg & 0xff) | devc->MCE_bit), io_Index_Addr(devc));
+	outb(((unsigned char) (data & 0xff)), io_Indexed_Data(devc));
+	/* printk("(%02x->%02x) ", reg|devc->MCE_bit, data); */
 	restore_flags(flags);
 }
 
@@ -630,14 +591,7 @@ static void ad1848_mixer_reset(ad1848_info * devc)
 			devc->mix_devices = &(iwave_mix_devices[0]);
 			break;
 
-		case MD_42xB:
-		case MD_4239:
-			devc->mix_devices = &(cs42xb_mix_devices[0]);
-			devc->supported_devices = MODE3_MIXER_DEVICES;
-			break;
 		case MD_4232:
-		case MD_4235:
-		case MD_4236:
 			devc->supported_devices = MODE3_MIXER_DEVICES;
 			break;
 
@@ -1164,7 +1118,7 @@ static int ad1848_prepare_for_output(int dev, int bsize, int bcount)
 	}
 	old_fs = ad_read(devc, 8);
 
-	if (devc->model == MD_4232 || devc->model >= MD_4236)
+	if (devc->model == MD_4232)
 	{
 		tmp = ad_read(devc, 16);
 		ad_write(devc, 16, tmp | 0x30);
@@ -1185,7 +1139,7 @@ static int ad1848_prepare_for_output(int dev, int bsize, int bcount)
 	while (timeout < 10000 && inb(devc->base) == 0x80)
 		timeout++;
 
-	if (devc->model >= MD_4232)
+	if (devc->model == MD_4232)
 		ad_write(devc, 16, tmp & ~0x30);
 
 	ad_leave_MCE(devc);	/*
@@ -1449,12 +1403,11 @@ static void ad1848_trigger(int dev, int state)
 static void ad1848_init_hw(ad1848_info * devc)
 {
 	int i;
-	int *init_values;
 
 	/*
 	 * Initial values for the indirect registers of CS4248/AD1848.
 	 */
-	static int      init_values_a[] =
+	static int      init_values[] =
 	{
 		0xa8, 0xa8, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
 		0x00, 0x0c, 0x02, 0x00, 0x8a, 0x01, 0x00, 0x00,
@@ -1464,31 +1417,6 @@ static void ad1848_init_hw(ad1848_info * devc)
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 	};
 
-	static int      init_values_b[] =
-	{
-		/* 
-		   Values for the newer chips
-		   Some of the register initialization values were changed. In
-		   order to get rid of the click that preceded PCM playback,
-		   calibration was disabled on the 10th byte. On that same byte,
-		   dual DMA was enabled; on the 11th byte, ADC dithering was
-		   enabled, since that is theoretically desirable; on the 13th
-		   byte, Mode 3 was selected, to enable access to extended
-		   registers.
-		 */
-		0xa8, 0xa8, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00,
-		0x00, 0x00, 0x06, 0x00, 0xe0, 0x01, 0x00, 0x00,
- 		0x80, 0x00, 0x10, 0x10, 0x00, 0x00, 0x1f, 0x40,
- 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-	};
-
-	/*
-	 *	Select initialisation data
-	 */
-	 
-	init_values = init_values_a;
-	if(devc->model >= MD_4236)
-		init_values = init_values_b;
 
 	for (i = 0; i < 16; i++)
 		ad_write(devc, i, init_values[i]);
@@ -1840,49 +1768,19 @@ int ad1848_detect(int io_base, int *ad_flags, int *osp)
 				else
 				{
 					switch (id & 0x1f) {
-					case 3: /* CS4236/CS4235/CS42xB/CS4239 */
+					case 3: /* CS4236/CS4235 */
 						{
 							int xid;
 							ad_write(devc, 12, ad_read(devc, 12) | 0x60); /* switch to mode 3 */
 							ad_write(devc, 23, 0x9c); /* select extended register 25 */
 							xid = inb(io_Indexed_Data(devc));
 							ad_write(devc, 12, ad_read(devc, 12) & ~0x60); /* back to mode 0 */
-							switch (xid & 0x1f)
-							{
-								case 0x00:
-									devc->chip_name = "CS4237B(B)";
-									devc->model = MD_42xB;
-									break;
-								case 0x08:
-									/* Seems to be a 4238 ?? */
-									devc->chip_name = "CS4238";
-									devc->model = MD_42xB;
-									break;
-								case 0x09:
-									devc->chip_name = "CS4238B";
-									devc->model = MD_42xB;
-									break;
-								case 0x0b:
-									devc->chip_name = "CS4236B";
-									devc->model = MD_4236;
-									break;
-								case 0x10:
-									devc->chip_name = "CS4237B";
-									devc->model = MD_42xB;
-									break;
-								case 0x1d:
-									devc->chip_name = "CS4235";
-									devc->model = MD_4235;
-									break;
-								case 0x1e:
-									devc->chip_name = "CS4239";
-									devc->model = MD_4239;
-									break;
-								default:
-									printk("Chip ident is %X.\n", xid&0x1F);
-									devc->chip_name = "CS42xx";
-									devc->model = MD_4232;
-									break;
+							if ((xid & 0x1f) == 0x1d) {
+								devc->chip_name = "CS4235";
+								devc->model = MD_4235;
+							} else {
+								devc->chip_name = "CS4236";
+								devc->model = MD_4232;
 							}
 						}
 						break;
@@ -2849,10 +2747,6 @@ static int ad1848_resume(ad1848_info *devc)
 
 	save_flags(flags);
 	cli();
-	
-	/* Thinkpad is a bit more of PITA than normal. The BIOS tends to
-	   restore it in a different config to the one we use.  Need to
-	   fix this somehow */
 
 	/* store old mixer levels */
 	memcpy(mixer_levels, devc->levels, sizeof (mixer_levels));  
@@ -2970,10 +2864,6 @@ static struct {
         	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('Y','M','H'), ISAPNP_FUNCTION(0x0021),
                 1, 0, 0, 1, 1},
-	{"AZT1008",
-		ISAPNP_ANY_ID, ISAPNP_ANY_ID,
-		ISAPNP_VENDOR('A','Z','T'), ISAPNP_FUNCTION(0x0001),
-		1, 0, 0, 1, 1},
 	{0}
 };
 
@@ -2986,8 +2876,6 @@ static struct isapnp_device_id id_table[] __devinitdata = {
 		ISAPNP_VENDOR('C','S','C'), ISAPNP_FUNCTION(0x0100), 0 },
         {       ISAPNP_ANY_ID, ISAPNP_ANY_ID,
 		ISAPNP_VENDOR('Y','M','H'), ISAPNP_FUNCTION(0x0021), 0 },
-	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
-		ISAPNP_VENDOR('A','Z','T'), ISAPNP_FUNCTION(0x0001), 0 },
 	{0}
 };
 
@@ -3011,10 +2899,11 @@ static struct pci_dev *activate_dev(char *devname, char *resname, struct pci_dev
 	return(dev);
 }
 
-static struct pci_dev *ad1848_init_generic(struct pci_dev *dev, struct address_info *hw_config, int slot)
+static struct pci_dev *ad1848_init_generic(struct pci_bus *bus, struct address_info *hw_config, int slot)
 {
-	/* Configure Audio device, point ad1848_dev to device found */
-	if((ad1848_dev = dev))
+
+	/* Configure Audio device */
+	if((ad1848_dev = isapnp_find_dev(bus, ad1848_isapnp_list[slot].vendor, ad1848_isapnp_list[slot].function, NULL)))
 	{
 		int ret;
 		ret = ad1848_dev->prepare(ad1848_dev);
@@ -3045,25 +2934,25 @@ static struct pci_dev *ad1848_init_generic(struct pci_dev *dev, struct address_i
 	return(ad1848_dev);
 }
 
-static int __init ad1848_isapnp_init(struct address_info *hw_config, struct pci_dev *dev, int slot)
+static int __init ad1848_isapnp_init(struct address_info *hw_config, struct pci_bus *bus, int slot)
 {
-	char *devname = dev->name[0] ? dev->name : ad1848_isapnp_list[slot].name;
+	char *busname = bus->name[0] ? bus->name : ad1848_isapnp_list[slot].name;
 
-	printk(KERN_INFO "ad1848: %s detected\n", devname);
+	printk(KERN_INFO "ad1848: %s detected\n", busname);
 
 	/* Initialize this baby. */
 
-	if(ad1848_init_generic(dev, hw_config, slot)) {
+	if(ad1848_init_generic(bus, hw_config, slot)) {
 		/* We got it. */
 
 		printk(KERN_NOTICE "ad1848: ISAPnP reports '%s' at i/o %#x, irq %d, dma %d, %d\n",
-		       devname,
+		       busname,
 		       hw_config->io_base, hw_config->irq, hw_config->dma,
 		       hw_config->dma2);
 		return 1;
 	}
 	else
-		printk(KERN_INFO "ad1848: Failed to initialize %s\n", devname);
+		printk(KERN_INFO "ad1848: Failed to initialize %s\n", busname);
 
 	return 0;
 }
@@ -3087,14 +2976,14 @@ static int __init ad1848_isapnp_probe(struct address_info *hw_config)
 		i = isapnpjump;
 	first = 0;
 	while(ad1848_isapnp_list[i].card_vendor != 0) {
-		static struct pci_dev *dev = NULL;
+		static struct pci_bus *bus = NULL;
 
-		while ((dev = isapnp_find_dev(NULL,
-				ad1848_isapnp_list[i].vendor,
-				ad1848_isapnp_list[i].function,
-				NULL))) {
-			
-			if(ad1848_isapnp_init(hw_config, dev, i)) {
+		while ((bus = isapnp_find_card(
+				ad1848_isapnp_list[i].card_vendor,
+				ad1848_isapnp_list[i].card_device,
+				bus))) {
+
+			if(ad1848_isapnp_init(hw_config, bus, i)) {
 				isapnpjump = i; /* start next search from here */
 				return 0;
 			}

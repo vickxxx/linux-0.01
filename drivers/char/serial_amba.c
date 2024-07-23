@@ -481,7 +481,7 @@ static void ambauart_modem_status(struct amba_info *info)
 		icount->dcd++;
 #ifdef CONFIG_HARD_PPS
 		if ((info->flags & ASYNC_HARDPPS_CD) &&
-		    (status & AMBA_UARTFR_DCD))
+		    (status & AMBA_UARTFR_DCD)
 			hardpps();
 #endif
 		if (info->flags & ASYNC_CHECK_CD) {
@@ -569,7 +569,10 @@ static void ambauart_tasklet_action(unsigned long data)
 	if (!tty || !test_and_clear_bit(EVT_WRITE_WAKEUP, &info->event))
 		return;
 
-	tty_wakeup(tty);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
+	wake_up_interruptible(&tty->write_wait);
 }
 
 static int ambauart_startup(struct amba_info *info)
@@ -955,7 +958,10 @@ static void ambauart_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit.head = info->xmit.tail = 0;
 	restore_flags(flags);
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 /*
@@ -1453,7 +1459,8 @@ static void ambauart_close(struct tty_struct *tty, struct file *filp)
 	ambauart_shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = NULL;
@@ -1914,6 +1921,22 @@ static void ambauart_console_write(struct console *co, const char *s, u_int coun
 	UART_PUT_CR(port, old_cr);
 }
 
+/*
+ *	Receive character from the serial port
+ */
+static int ambauart_console_wait_key(struct console *co)
+{
+	struct amba_port *port = &amba_ports[co->index];
+	unsigned int status;
+	int c;
+
+	do {
+		status = UART_GET_FR(port);
+	} while (!UART_RX_DATA(status));
+	c = UART_GET_CHAR(port);
+	return c;
+}
+
 static kdev_t ambauart_console_device(struct console *c)
 {
 	return MKDEV(SERIAL_AMBA_MAJOR, SERIAL_AMBA_MINOR + c->index);
@@ -1992,6 +2015,7 @@ static struct console ambauart_cons =
 	read:		ambauart_console_read,
 #endif
 	device:		ambauart_console_device,
+	wait_key:	ambauart_console_wait_key,
 	setup:		ambauart_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

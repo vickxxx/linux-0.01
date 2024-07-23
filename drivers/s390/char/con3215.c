@@ -119,7 +119,7 @@ static int tty3215_refcount;
 /*
  * Get a request structure from the free list
  */
-static inline raw3215_req *raw3215_alloc_req(void) {
+extern inline raw3215_req *raw3215_alloc_req(void) {
 	raw3215_req *req;
 	unsigned long flags;
 
@@ -133,7 +133,7 @@ static inline raw3215_req *raw3215_alloc_req(void) {
 /*
  * Put a request structure back to the free list
  */
-static inline void raw3215_free_req(raw3215_req *req) {
+extern inline void raw3215_free_req(raw3215_req *req) {
 	unsigned long flags;
 
         if (req->type == RAW3215_FREE)
@@ -312,7 +312,7 @@ static void raw3215_timeout(unsigned long __data)
  * amount of data is bigger than RAW3215_MIN_WRITE. If a write is not
  * done immediatly a timer is started with a delay of RAW3215_TIMEOUT.
  */
-static inline void raw3215_try_io(raw3215_info *raw)
+extern inline void raw3215_try_io(raw3215_info *raw)
 {
 	if (!(raw->flags & RAW3215_ACTIVE))
 		return;
@@ -363,7 +363,10 @@ static void raw3215_softint(void *data)
 	tty = raw->tty;
 	if (tty != NULL &&
 	    RAW3215_BUFFER_SIZE - raw->count >= RAW3215_MIN_SPACE) {
-		tty_wakeup(tty);
+		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+		    tty->ldisc.write_wakeup)
+			(tty->ldisc.write_wakeup)(tty);
+		wake_up_interruptible(&tty->write_wait);
 	}
 }
 
@@ -459,35 +462,30 @@ static void raw3215_irq(int irq, void *int_parm, struct pt_regs *regs)
                 if ((raw = req->info) == NULL)
                         return;              /* That shouldn't happen ... */
 		if (req->type == RAW3215_READ && raw->tty != NULL) {
-			unsigned int cchar;
+			char *cchar;
 
 			tty = raw->tty;
-			count = 160 - req->residual;
-			if (MACHINE_IS_P390) {
-				slen = strnlen(raw->inbuf, RAW3215_INBUF_SIZE);
-				if (count > slen)
-					count = slen;
-			} else
+                        count = 160 - req->residual;
+                        if (MACHINE_IS_P390) {
+                                slen = strnlen(raw->inbuf, RAW3215_INBUF_SIZE);
+                                if (count > slen)
+                                        count = slen;
+                        } else
 			if (count >= TTY_FLIPBUF_SIZE - tty->flip.count)
 				count = TTY_FLIPBUF_SIZE - tty->flip.count - 1;
 			EBCASC(raw->inbuf, count);
-			cchar = ctrlchar_handle(raw->inbuf, count, tty);
-			switch (cchar & CTRLCHAR_MASK) {
-			case CTRLCHAR_SYSRQ:
-				break;
-
-			case CTRLCHAR_CTRL:
+			if ((cchar = ctrlchar_handle(raw->inbuf, count, tty))) {
+				if (cchar == (char *)-1)
+					goto in_out;
 				tty->flip.count++;
 				*tty->flip.flag_buf_ptr++ = TTY_NORMAL;
-				*tty->flip.char_buf_ptr++ = cchar;
+				*tty->flip.char_buf_ptr++ = *cchar;
 				tty_flip_buffer_push(raw->tty);
-				break;
-
-			case CTRLCHAR_NONE:
+			} else {
 				memcpy(tty->flip.char_buf_ptr,
 				       raw->inbuf, count);
 				if (count < 2 ||
-				    (strncmp(raw->inbuf+count-2, "^n", 2) && 
+				    (strncmp(raw->inbuf+count-2, "^n", 2) ||
 				    strncmp(raw->inbuf+count-2, "\252n", 2)) ) {
 					/* don't add the auto \n */
 					tty->flip.char_buf_ptr[count] = '\n';
@@ -500,12 +498,12 @@ static void raw3215_irq(int irq, void *int_parm, struct pt_regs *regs)
 				tty->flip.flag_buf_ptr += count;
 				tty->flip.count += count;
 				tty_flip_buffer_push(raw->tty);
-				break;
 			}
 		} else if (req->type == RAW3215_WRITE) {
 			raw->count -= req->len;
                         raw->written -= req->len;
 		} 
+in_out:
 		raw->flags &= ~RAW3215_WORKING;
 		raw3215_free_req(req);
 		/* check for empty wait */
@@ -825,8 +823,7 @@ static int __init con3215_consetup(struct console *co, char *options)
  *  The console structure for the 3215 console
  */
 static struct console con3215 = {
-	name:		"ttyS",
-	index:		0,
+	name:		"tty3215",
 	write:		con3215_write,
 	device:		con3215_device,
 	unblank:	con3215_unblank,
@@ -975,7 +972,10 @@ static void tty3215_flush_buffer(struct tty_struct *tty)
 
 	raw = (raw3215_info *) tty->driver_data;
 	raw3215_flush_buffer(raw);
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 /*
@@ -1120,9 +1120,6 @@ void __init con3215_init(void)
  */
 void __init tty3215_init(void)
 {
-	/* Don't bother registering the tty if we already skipped the console */
-	if (!CONSOLE_IS_3215)
-		return;
 	/*
 	 * Initialize the tty_driver structure
 	 * Entries in tty3215_driver that are NOT initialized:

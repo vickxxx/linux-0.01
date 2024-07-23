@@ -1,4 +1,4 @@
-/* $Id: iommu_common.c,v 1.6.2.1 2001/12/11 22:47:27 davem Exp $
+/* $Id: iommu_common.c,v 1.6 2001/10/09 02:24:33 davem Exp $
  * iommu_common.c: UltraSparc SBUS/PCI common iommu code.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -66,9 +66,7 @@ static int verify_one_map(struct scatterlist *dma_sg, struct scatterlist **__sg,
 
 	daddr = dma_sg->dma_address;
 	sglen = sg->length;
-	sgaddr = (unsigned long) (sg->address ?
-				  sg->address :
-				  page_address(sg->page) + sg->offset);
+	sgaddr = (unsigned long) sg->address;
 	while (dlen > 0) {
 		unsigned long paddr;
 
@@ -118,9 +116,7 @@ static int verify_one_map(struct scatterlist *dma_sg, struct scatterlist **__sg,
 		sg++;
 		if (--nents <= 0)
 			break;
-		sgaddr = (unsigned long) (sg->address ?
-					  sg->address :
-					  page_address(sg->page) + sg->offset);
+		sgaddr = (unsigned long) sg->address;
 		sglen = sg->length;
 	}
 	if (dlen < 0) {
@@ -201,21 +197,14 @@ unsigned long prepare_sg(struct scatterlist *sg, int nents)
 	unsigned long prev;
 	u32 dent_addr, dent_len;
 
-	prev  = (unsigned long) (sg->address ?
-				 sg->address :
-				 page_address(sg->page) + sg->offset);
+	prev  = (unsigned long) sg->address;
 	prev += (unsigned long) (dent_len = sg->length);
-	dent_addr = (u32) ((unsigned long)(sg->address ?
-					   sg->address :
-					   page_address(sg->page) + sg->offset)
-			   & (IO_PAGE_SIZE - 1UL));
+	dent_addr = (u32) ((unsigned long)sg->address & (IO_PAGE_SIZE - 1UL));
 	while (--nents) {
 		unsigned long addr;
 
 		sg++;
-		addr = (unsigned long) (sg->address ?
-					sg->address :
-					page_address(sg->page) + sg->offset);
+		addr = (unsigned long) sg->address;
 		if (! VCONTIG(prev, addr)) {
 			dma_sg->dma_address = dent_addr;
 			dma_sg->dma_length = dent_len;

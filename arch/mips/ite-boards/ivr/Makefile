@@ -11,14 +11,18 @@
 # unless it's something special (ie not a .c file).
 #
 
-USE_STANDARD_AS_RULE := true
+.S.s:
+	$(CPP) $(CFLAGS) $< -o $*.s
+.S.o:
+	$(CC) $(CFLAGS) -c $< -o $*.o
 
 all: ivr.o
 
 O_TARGET := ivr.o
 
-obj-y := init.o
+obj-y := init.o 
 
-obj-$(CONFIG_PCI) += pci_fixup.o
+obj-CONFIG_PCI += pci_fixup.o
+obj-CONFIG_BLK_DEV_INITRD += le_ramdisk.o
 
 include $(TOPDIR)/Rules.make

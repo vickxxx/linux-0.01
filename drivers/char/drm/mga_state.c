@@ -26,17 +26,17 @@
  *
  * Authors:
  *    Jeff Hartmann <jhartmann@valinux.com>
- *    Keith Whitwell <keith@tungstengraphics.com>
+ *    Keith Whitwell <keithw@valinux.com>
  *
  * Rewritten by:
  *    Gareth Hughes <gareth@valinux.com>
  */
 
+#define __NO_VERSION__
 #include "mga.h"
 #include "drmP.h"
-#include "drm.h"
-#include "mga_drm.h"
 #include "mga_drv.h"
+#include "drm.h"
 
 
 /* ================================================================
@@ -513,7 +513,7 @@ static void mga_dma_dispatch_clear( drm_device_t *dev,
 	int nbox = sarea_priv->nbox;
 	int i;
 	DMA_LOCALS;
-	DRM_DEBUG( "\n" );
+	DRM_DEBUG( __FUNCTION__ ":\n" );
 
 	BEGIN_DMA( 1 );
 
@@ -607,7 +607,7 @@ static void mga_dma_dispatch_swap( drm_device_t *dev )
 	int nbox = sarea_priv->nbox;
 	int i;
 	DMA_LOCALS;
-	DRM_DEBUG( "\n" );
+	DRM_DEBUG( __FUNCTION__ ":\n" );
 
 	sarea_priv->last_frame.head = dev_priv->prim.tail;
 	sarea_priv->last_frame.wrap = dev_priv->prim.last_wrap;
@@ -761,7 +761,8 @@ static void mga_dma_dispatch_iload( drm_device_t *dev, drm_buf_t *buf,
 	u32 srcorg = buf->bus_address | MGA_SRCACC_AGP | MGA_SRCMAP_SYSMEM;
 	u32 y2;
 	DMA_LOCALS;
-	DRM_DEBUG( "buf=%d used=%d\n", buf->idx, buf->used );
+	DRM_DEBUG( "%s: buf=%d used=%d\n",
+		   __FUNCTION__, buf->idx, buf->used );
 
 	y2 = length / 64;
 
@@ -815,7 +816,7 @@ static void mga_dma_dispatch_blit( drm_device_t *dev,
 	int nbox = sarea_priv->nbox;
 	u32 scandir = 0, i;
 	DMA_LOCALS;
-	DRM_DEBUG( "\n" );
+	DRM_DEBUG( __FUNCTION__ ":\n" );
 
 	BEGIN_DMA( 4 + nbox );
 
@@ -1018,7 +1019,7 @@ int mga_dma_iload( struct inode *inode, struct file *filp,
 	drm_buf_t *buf;
 	drm_mga_buf_priv_t *buf_priv;
 	drm_mga_iload_t iload;
-	DRM_DEBUG( "%s:\n", __FUNCTION__ );
+	DRM_DEBUG( __FUNCTION__ ":\n" );
 
 	LOCK_TEST_WITH_RETURN( dev );
 
@@ -1028,7 +1029,7 @@ int mga_dma_iload( struct inode *inode, struct file *filp,
 #if 0
 	if ( mga_do_wait_for_idle( dev_priv ) < 0 ) {
 		if ( MGA_DMA_DEBUG )
-			DRM_INFO( "%s: -EBUSY\n" , __FUNCTION__);
+			DRM_INFO( __FUNCTION__": -EBUSY\n" );
 		return -EBUSY;
 	}
 #endif

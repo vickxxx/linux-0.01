@@ -123,7 +123,7 @@ struct miscdevice isiloader_device = {
 };
 
  
-static inline int WaitTillCardIsFree(unsigned short base)
+extern inline int WaitTillCardIsFree(unsigned short base)
 {
 	unsigned long count=0;
 	while( (!(inw(base+0xe) & 0x1)) && (count++ < 6000000));
@@ -359,7 +359,7 @@ static inline int isicom_paranoia_check(struct isi_port const * port, kdev_t dev
 	return 0;
 }
 			
-static inline void schedule_bh(struct isi_port * port)
+extern inline void schedule_bh(struct isi_port * port)
 {
 	queue_task(&port->bh_tqueue, &tq_isicom);
 	mark_bh(ISICOM_BH);
@@ -502,8 +502,11 @@ static void isicom_bottomhalf(void * data)
 	
 	if (!tty)
 		return;
-
-	tty_wakeup(tty);	
+	
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
+	wake_up_interruptible(&tty->write_wait);
 } 		
  		
 /* main interrupt handler routine */ 		
@@ -821,7 +824,7 @@ static void isicom_config_port(struct isi_port * port)
  
 /* open et all */ 
 
-static inline void isicom_setup_board(struct isi_board * bp)
+extern inline void isicom_setup_board(struct isi_board * bp)
 {
 	int channel;
 	struct isi_port * port;
@@ -1089,7 +1092,7 @@ static int isicom_open(struct tty_struct * tty, struct file * filp)
  
 /* close et all */
 
-static inline void isicom_shutdown_board(struct isi_board * bp)
+extern inline void isicom_shutdown_board(struct isi_board * bp)
 {
 	int channel;
 	struct isi_port * port;
@@ -1196,8 +1199,8 @@ static void isicom_close(struct tty_struct * tty, struct file * filp)
 	isicom_shutdown_port(port);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	port->tty = 0;
 	if (port->blocked_open) {
@@ -1223,15 +1226,9 @@ static void isicom_close(struct tty_struct * tty, struct file * filp)
 static int isicom_write(struct tty_struct * tty, int from_user,
 			const unsigned char * buf, int count)
 {
-	struct isi_port * port;
+	struct isi_port * port = (struct isi_port *) tty->driver_data;
 	unsigned long flags;
 	int cnt, total = 0;
-
-	if (!tty)
-		return 0;
-	
-	port = (struct isi_port *) tty->driver_data;
-	
 #ifdef ISICOM_DEBUG
 	printk(KERN_DEBUG "ISICOM: isicom_write for port%d: %d bytes.\n",
 			port->channel+1, count);
@@ -1239,7 +1236,7 @@ static int isicom_write(struct tty_struct * tty, int from_user,
 	if (isicom_paranoia_check(port, tty->device, "isicom_write"))
 		return 0;
 	
-	if (!port->xmit_buf || !tmp_buf)
+	if (!tty || !port->xmit_buf || !tmp_buf)
 		return 0;
 	if (from_user)
 		down(&tmp_buf_sem); /* acquire xclusive access to tmp_buf */
@@ -1287,18 +1284,13 @@ static int isicom_write(struct tty_struct * tty, int from_user,
 /* put_char et all */
 static void isicom_put_char(struct tty_struct * tty, unsigned char ch)
 {
-	struct isi_port * port;
+	struct isi_port * port = (struct isi_port *) tty->driver_data;
 	unsigned long flags;
-
-	if (!tty)
-		return;
-
-	port = (struct isi_port *) tty->driver_data;
 	
 	if (isicom_paranoia_check(port, tty->device, "isicom_put_char"))
 		return;
 	
-	if (!port->xmit_buf)
+	if (!tty || !port->xmit_buf)
 		return;
 #ifdef ISICOM_DEBUG
 	printk(KERN_DEBUG "ISICOM: put_char, port %d, char %c.\n", port->channel+1, ch);
@@ -1358,7 +1350,7 @@ static int isicom_chars_in_buffer(struct tty_struct * tty)
 }
 
 /* ioctl et all */
-static inline void isicom_send_break(struct isi_port * port, unsigned long length)
+extern inline void isicom_send_break(struct isi_port * port, unsigned long length)
 {
 	struct isi_board * card = port->card;
 	short wait = 10;
@@ -1678,7 +1670,10 @@ static void isicom_flush_buffer(struct tty_struct * tty)
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
 	
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 
@@ -2021,7 +2016,7 @@ int init_module(void)
 	retval=misc_register(&isiloader_device);
 	if (retval<0) {
 		printk(KERN_ERR "ISICOM: Unable to register firmware loader driver.\n");
-		return retval;
+		return -EIO;
 	}
 	
 	if (!isicom_init()) {

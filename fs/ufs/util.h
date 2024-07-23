@@ -226,9 +226,9 @@ ufs_set_inode_gid(struct super_block *sb, struct ufs_inode *inode, u32 value)
 /*
  * These functions manipulate ufs buffers
  */
-#define ubh_bread(sb,fragment,size) _ubh_bread_(uspi,sb,fragment,size)  
-extern struct ufs_buffer_head * _ubh_bread_(struct ufs_sb_private_info *, struct super_block *, unsigned, unsigned);
-extern struct ufs_buffer_head * ubh_bread_uspi(struct ufs_sb_private_info *, struct super_block *, unsigned, unsigned);
+#define ubh_bread(dev,fragment,size) _ubh_bread_(uspi,dev,fragment,size)  
+extern struct ufs_buffer_head * _ubh_bread_(struct ufs_sb_private_info *, kdev_t, unsigned, unsigned);
+extern struct ufs_buffer_head * ubh_bread_uspi(struct ufs_sb_private_info *, kdev_t, unsigned, unsigned);
 extern void ubh_brelse (struct ufs_buffer_head *);
 extern void ubh_brelse_uspi (struct ufs_sb_private_info *);
 extern void ubh_mark_buffer_dirty (struct ufs_buffer_head *);
@@ -273,7 +273,7 @@ extern void _ubh_memcpyubh_(struct ufs_sb_private_info *, struct ufs_buffer_head
 
 #define ubh_get_addr16(ubh,begin) \
 	(((u16*)((ubh)->bh[(begin) >> (uspi->s_fshift-1)]->b_data)) + \
-	((begin) & ((uspi->fsize>>1) - 1)))
+	((begin) & (uspi->fsize>>1) - 1)))
 
 #define ubh_get_addr32(ubh,begin) \
 	(((u32*)((ubh)->bh[(begin) >> (uspi->s_fshift-2)]->b_data)) + \

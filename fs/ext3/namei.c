@@ -354,8 +354,8 @@ static int ext3_add_entry (handle_t *handle, struct dentry *dentry,
 			 */
 			dir->i_mtime = dir->i_ctime = CURRENT_TIME;
 			dir->u.ext3_i.i_flags &= ~EXT3_INDEX_FL;
-			dir->i_version = ++event;
 			ext3_mark_inode_dirty(handle, dir);
+			dir->i_version = ++event;
 			BUFFER_TRACE(bh, "call ext3_journal_dirty_metadata");
 			ext3_journal_dirty_metadata(handle, bh);
 			brelse(bh);
@@ -429,11 +429,8 @@ static int ext3_add_nondir(handle_t *handle,
 {
 	int err = ext3_add_entry(handle, dentry, inode);
 	if (!err) {
-		err = ext3_mark_inode_dirty(handle, inode);
-		if (err == 0) {
-			d_instantiate(dentry, inode);
-			return 0;
-		}
+		d_instantiate(dentry, inode);
+		return 0;
 	}
 	ext3_dec_count(handle, inode);
 	iput(inode);
@@ -467,6 +464,7 @@ static int ext3_create (struct inode * dir, struct dentry * dentry, int mode)
 		inode->i_op = &ext3_file_inode_operations;
 		inode->i_fop = &ext3_file_operations;
 		inode->i_mapping->a_ops = &ext3_aops;
+		ext3_mark_inode_dirty(handle, inode);
 		err = ext3_add_nondir(handle, dentry, inode);
 	}
 	ext3_journal_stop(handle, dir);
@@ -491,6 +489,7 @@ static int ext3_mknod (struct inode * dir, struct dentry *dentry,
 	err = PTR_ERR(inode);
 	if (!IS_ERR(inode)) {
 		init_special_inode(inode, mode, rdev);
+		ext3_mark_inode_dirty(handle, inode);
 		err = ext3_add_nondir(handle, dentry, inode);
 	}
 	ext3_journal_stop(handle, dir);
@@ -716,10 +715,10 @@ int ext3_orphan_del(handle_t *handle, struct inode *inode)
 {
 	struct list_head *prev;
 	struct ext3_sb_info *sbi;
-	unsigned long ino_next;
+	ino_t ino_next; 
 	struct ext3_iloc iloc;
 	int err = 0;
-
+	
 	lock_super(inode->i_sb);
 	if (list_empty(&inode->u.ext3_i.i_orphan)) {
 		unlock_super(inode->i_sb);
@@ -730,7 +729,7 @@ int ext3_orphan_del(handle_t *handle, struct inode *inode)
 	prev = inode->u.ext3_i.i_orphan.prev;
 	sbi = EXT3_SB(inode->i_sb);
 
-	jbd_debug(4, "remove inode %lu from orphan list\n", inode->i_ino);
+	jbd_debug(4, "remove inode %ld from orphan list\n", inode->i_ino);
 
 	list_del(&inode->u.ext3_i.i_orphan);
 	INIT_LIST_HEAD(&inode->u.ext3_i.i_orphan);
@@ -741,13 +740,13 @@ int ext3_orphan_del(handle_t *handle, struct inode *inode)
 	 * list in memory. */
 	if (!handle)
 		goto out;
-
+	
 	err = ext3_reserve_inode_write(handle, inode, &iloc);
 	if (err)
 		goto out_err;
 
 	if (prev == &sbi->s_orphan) {
-		jbd_debug(4, "superblock will point to %lu\n", ino_next);
+		jbd_debug(4, "superblock will point to %ld\n", ino_next);
 		BUFFER_TRACE(sbi->s_sbh, "get_write_access");
 		err = ext3_journal_get_write_access(handle, sbi->s_sbh);
 		if (err)
@@ -758,8 +757,8 @@ int ext3_orphan_del(handle_t *handle, struct inode *inode)
 		struct ext3_iloc iloc2;
 		struct inode *i_prev =
 			list_entry(prev, struct inode, u.ext3_i.i_orphan);
-
-		jbd_debug(4, "orphan inode %lu will point to %lu\n",
+		
+		jbd_debug(4, "orphan inode %ld will point to %ld\n",
 			  i_prev->i_ino, ino_next);
 		err = ext3_reserve_inode_write(handle, i_prev, &iloc2);
 		if (err)
@@ -774,7 +773,7 @@ int ext3_orphan_del(handle_t *handle, struct inode *inode)
 	if (err)
 		goto out_brelse;
 
-out_err:
+out_err: 	
 	ext3_std_error(inode->i_sb, err);
 out:
 	unlock_super(inode->i_sb);
@@ -830,9 +829,9 @@ static int ext3_rmdir (struct inode * dir, struct dentry *dentry)
 	 * recovery. */
 	inode->i_size = 0;
 	ext3_orphan_add(handle, inode);
+	ext3_mark_inode_dirty(handle, inode);
 	dir->i_nlink--;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
-	ext3_mark_inode_dirty(handle, inode);
 	dir->u.ext3_i.i_flags &= ~EXT3_INDEX_FL;
 	ext3_mark_inode_dirty(handle, dir);
 
@@ -884,8 +883,8 @@ static int ext3_unlink(struct inode * dir, struct dentry *dentry)
 	inode->i_nlink--;
 	if (!inode->i_nlink)
 		ext3_orphan_add(handle, inode);
-	inode->i_ctime = dir->i_ctime;
 	ext3_mark_inode_dirty(handle, inode);
+	inode->i_ctime = dir->i_ctime;
 	retval = 0;
 
 end_unlink:
@@ -934,6 +933,7 @@ static int ext3_symlink (struct inode * dir,
 		inode->i_size = l-1;
 	}
 	inode->u.ext3_i.i_disksize = inode->i_size;
+	ext3_mark_inode_dirty(handle, inode);
 	err = ext3_add_nondir(handle, dentry, inode);
 out_stop:
 	ext3_journal_stop(handle, dir);
@@ -970,6 +970,7 @@ static int ext3_link (struct dentry * old_dentry,
 	ext3_inc_count(handle, inode);
 	atomic_inc(&inode->i_count);
 
+	ext3_mark_inode_dirty(handle, inode);
 	err = ext3_add_nondir(handle, dentry, inode);
 	ext3_journal_stop(handle, dir);
 	return err;

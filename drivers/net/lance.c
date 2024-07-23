@@ -354,7 +354,7 @@ MODULE_LICENSE("GPL");
    board probes now that kmalloc() can allocate ISA DMA-able regions.
    This also allows the LANCE driver to be used as a module.
    */
-int __init lance_probe(struct net_device *dev)
+int lance_probe(struct net_device *dev)
 {
 	int *port, result;
 
@@ -383,7 +383,7 @@ int __init lance_probe(struct net_device *dev)
 					return 0;
 				}
 			}
-			release_region(ioaddr, LANCE_TOTAL_SIZE);
+			release_resource(r);
 		}
 	}
 	return -ENODEV;
@@ -893,15 +893,8 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
 	if (chip_table[lp->chip_version].flags & LANCE_MUST_PAD) {
-		if(skb->len < ETH_ZLEN)
-		{
-			skb = skb_padto(skb, ETH_ZLEN);
-			if(skb == NULL)
-				goto out;
-			lp->tx_ring[entry].length = -ETH_ZLEN;
-		}
-		else 
-			lp->tx_ring[entry].length = -skb->len;
+		lp->tx_ring[entry].length =
+			-(ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN);
 	} else
 		lp->tx_ring[entry].length = -skb->len;
 
@@ -934,7 +927,6 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	if ((lp->cur_tx - lp->dirty_tx) >= TX_RING_SIZE)
 		netif_stop_queue(dev);
 
-out:
 	spin_unlock_irqrestore(&lp->devlock, flags);
 	return 0;
 }

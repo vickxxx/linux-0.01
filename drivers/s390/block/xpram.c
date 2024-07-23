@@ -171,7 +171,7 @@ static int hardsect = XPRAM_HARDSECT;
 int xpram_devs, xpram_rahead;
 int xpram_blksize, xpram_hardsect;
 int xpram_mem_avail = 0;
-unsigned int xpram_sizes[XPRAM_MAX_DEVS];
+unsigned long xpram_sizes[XPRAM_MAX_DEVS];
 
 
 MODULE_PARM(devs,"i");
@@ -184,7 +184,7 @@ MODULE_PARM_DESC(sizes, "list of device (partition) sizes " \
 		 "All devices with size 0 equally partition the "
 		 "remaining space on the expanded strorage not "
 		 "claimed by explicit sizes\n");
-MODULE_LICENSE("GPL");
+
 
 
 /* The following items are obtained through kmalloc() in init_module() */
@@ -271,7 +271,7 @@ xpram_int_format(char **strptr)
 		return XPRAM_INVALF;
 	if ( (**strptr == '0') 
 	     && ( (*((*strptr)+1) == 'x') || (*((*strptr) +1) == 'X') ) 
-	     && isxdigit(*((*strptr)+2)) ) {
+	     && isdigit(*((*strptr)+3)) ) {
 		*strptr=(*strptr)+2;
 		return XPRAM_HEXF;
 	} else return XPRAM_DECF;

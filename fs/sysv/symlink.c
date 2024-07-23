@@ -2,7 +2,7 @@
  *  linux/fs/sysv/symlink.c
  *
  *  Handling of System V filesystem fast symlinks extensions.
- *  Aug 2001, Christoph Hellwig (hch@infradead.org)
+ *  Aug 2001, Christoph Hellwig (hch@caldera.de)
  */
 
 #include <linux/fs.h>

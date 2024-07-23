@@ -448,8 +448,11 @@ int __journal_clean_checkpoint_list(journal_t *journal)
 			struct journal_head *last_jh = jh->b_cpprev;
 			struct journal_head *next_jh = jh;
 			do {
+				struct buffer_head *bh;
+
 				jh = next_jh;
 				next_jh = jh->b_cpnext;
+				bh = jh2bh(jh);
 				ret += __try_to_free_cp_buf(jh);
 			} while (jh != last_jh);
 		}
@@ -594,8 +597,7 @@ void __journal_drop_transaction(journal_t *journal, transaction_t *transaction)
 	J_ASSERT (transaction->t_log_list == NULL);
 	J_ASSERT (transaction->t_checkpoint_list == NULL);
 	J_ASSERT (transaction->t_updates == 0);
-	J_ASSERT (list_empty(&transaction->t_jcb));
-
+	
 	J_ASSERT (transaction->t_journal->j_committing_transaction !=
 					transaction);
 	

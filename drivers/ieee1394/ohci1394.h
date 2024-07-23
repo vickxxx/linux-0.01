@@ -21,10 +21,7 @@
 #ifndef _OHCI1394_H
 #define _OHCI1394_H
 
-#include <asm/io.h>
-
 #include "ieee1394_types.h"
-#include <asm/io.h>
 
 #define OHCI1394_DRIVER_NAME      "ohci1394"
 
@@ -79,13 +76,9 @@ struct at_dma_prg {
 	quadlet_t pad[4]; /* FIXME: quick hack for memory alignment */
 };
 
-/* identify whether a DMA context is asynchronous or isochronous */
-enum context_type { DMA_CTX_ASYNC_REQ, DMA_CTX_ASYNC_RESP, DMA_CTX_ISO };
-
 /* DMA receive context */
 struct dma_rcv_ctx {
-	struct ti_ohci *ohci;
-	enum context_type type;
+	void *ohci;
 	int ctx;
 	unsigned int num_desc;
 
@@ -95,7 +88,6 @@ struct dma_rcv_ctx {
 	/* dma block descriptors */
         struct dma_cmd **prg_cpu;
         dma_addr_t *prg_bus;
-	struct pci_pool *prg_pool;
 
 	/* dma buffers */
         quadlet_t **buf_cpu;
@@ -109,20 +101,17 @@ struct dma_rcv_ctx {
 	int ctrlClear;
 	int ctrlSet;
 	int cmdPtr;
-	int ctxtMatch;
 };
 
 /* DMA transmit context */	
 struct dma_trm_ctx {
-	struct ti_ohci *ohci;
-	enum context_type type;
+	void *ohci;
 	int ctx;
 	unsigned int num_desc;
 
 	/* dma block descriptors */
         struct at_dma_prg **prg_cpu;
 	dma_addr_t *prg_bus;
-	struct pci_pool *prg_pool;
 
         unsigned int prg_ind;
         unsigned int sent_ind;
@@ -130,10 +119,12 @@ struct dma_trm_ctx {
         quadlet_t *branchAddrPtr;
 
 	/* list of packets inserted in the AT FIFO */
-	struct list_head fifo_list;
+        struct hpsb_packet *fifo_first;
+        struct hpsb_packet *fifo_last;
 
 	/* list of pending packets to be inserted in the AT FIFO */
-	struct list_head pending_list;
+        struct hpsb_packet *pending_first;
+        struct hpsb_packet *pending_last;
 
         spinlock_t lock;
         struct tasklet_struct task;
@@ -142,29 +133,21 @@ struct dma_trm_ctx {
 	int cmdPtr;
 };
 
-struct ohci1394_iso_tasklet {
-	struct tasklet_struct tasklet;
-	struct list_head link;
-	int context;
-	enum { OHCI_ISO_TRANSMIT, OHCI_ISO_RECEIVE,
-	       OHCI_ISO_MULTICHANNEL_RECEIVE } type;
+/* video device template */
+struct video_template {
+	void (*irq_handler) (int card, quadlet_t isoRecvEvent, 
+			     quadlet_t isoXmitEvent);
 };
+
 
 struct ti_ohci {
         int id; /* sequential card number */
 
+	struct list_head list;
+
         struct pci_dev *dev;
 
-	enum { 
-		OHCI_INIT_ALLOC_HOST,
-		OHCI_INIT_HAVE_MEM_REGION,
-		OHCI_INIT_HAVE_IOMAPPING,
-		OHCI_INIT_HAVE_CONFIG_ROM_BUFFER,
-		OHCI_INIT_HAVE_SELFID_BUFFER,
-		OHCI_INIT_HAVE_TXRX_BUFFERS__MAYBE,
-		OHCI_INIT_HAVE_IRQ,
-		OHCI_INIT_DONE,
-	} init_state;
+        u32 state;
         
         /* remapped memory spaces */
         void *registers; 
@@ -172,7 +155,7 @@ struct ti_ohci {
 	/* dma buffer for self-id packets */
         quadlet_t *selfid_buf_cpu;
         dma_addr_t selfid_buf_bus;
-
+	
 	/* buffer for csr config rom */
         quadlet_t *csr_config_rom_cpu; 
         dma_addr_t csr_config_rom_bus; 
@@ -181,35 +164,21 @@ struct ti_ohci {
 	unsigned int max_packet_size;
 
         /* async receive */
-	struct dma_rcv_ctx ar_resp_context;
-	struct dma_rcv_ctx ar_req_context;
+	struct dma_rcv_ctx *ar_resp_context;
+	struct dma_rcv_ctx *ar_req_context;
 
 	/* async transmit */
-	struct dma_trm_ctx at_resp_context;
-	struct dma_trm_ctx at_req_context;
+	struct dma_trm_ctx *at_resp_context;
+	struct dma_trm_ctx *at_req_context;
 
         /* iso receive */
-	int nb_iso_rcv_ctx;
-	unsigned long ir_ctx_usage; /* use test_and_set_bit() for atomicity */
-	unsigned long ir_multichannel_used; /* ditto */
+	struct dma_rcv_ctx *ir_context;
         spinlock_t IR_channel_lock;
+	int nb_iso_rcv_ctx;
 
-	/* iso receive (legacy API) */
-	u64 ir_legacy_channels; /* note: this differs from ISO_channel_usage;
-				   it only accounts for channels listened to
-				   by the legacy API, so that we can know when
-				   it is safe to free the legacy API context */
-
-	struct dma_rcv_ctx ir_legacy_context;
-	struct ohci1394_iso_tasklet ir_legacy_tasklet;
-	
         /* iso transmit */
+	struct dma_trm_ctx *it_context;
 	int nb_iso_xmit_ctx;
-	unsigned long it_ctx_usage; /* use test_and_set_bit() for atomicity */
-
-	/* iso transmit (legacy API) */
-	struct dma_trm_ctx it_legacy_context;
-	struct ohci1394_iso_tasklet it_legacy_tasklet;
 
         u64 ISO_channel_usage;
 
@@ -223,19 +192,13 @@ struct ti_ohci {
 
 	int self_id_errors;
 
-	/* Tasklets for iso receive and transmit, used by video1394,
-	 * amdtp and dv1394 */
-
-	struct list_head iso_tasklet_list;
-	spinlock_t iso_tasklet_list_lock;
+	/* video device */
+	struct video_template *video_tmpl;
 
 	/* Swap the selfid buffer? */
 	unsigned int selfid_swap:1;
 	/* Some Apple chipset seem to swap incoming headers for us */
 	unsigned int no_swap_incoming:1;
-
-	/* Force extra paranoia checking on bus-reset handling */
-	unsigned int check_busreset:1;
 };
 
 static inline int cross_bound(unsigned long addr, unsigned int size)
@@ -267,12 +230,6 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 /* 2 KiloBytes of register space */
 #define OHCI1394_REGISTER_SIZE                0x800       
 
-/* Offsets relative to context bases defined below */
-
-#define OHCI1394_ContextControlSet            0x000
-#define OHCI1394_ContextControlClear          0x004
-#define OHCI1394_ContextCommandPtr            0x00C
-
 /* register map */
 #define OHCI1394_Version                      0x000
 #define OHCI1394_GUID_ROM                     0x004
@@ -291,13 +248,6 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 #define OHCI1394_VendorID                     0x040
 #define OHCI1394_HCControlSet                 0x050
 #define OHCI1394_HCControlClear               0x054
-#define  OHCI1394_HCControl_noByteSwap		0x40000000
-#define  OHCI1394_HCControl_programPhyEnable	0x00800000
-#define  OHCI1394_HCControl_aPhyEnhanceEnable	0x00400000
-#define  OHCI1394_HCControl_LPS			0x00080000
-#define  OHCI1394_HCControl_postedWriteEnable	0x00040000
-#define  OHCI1394_HCControl_linkEnable		0x00020000
-#define  OHCI1394_HCControl_softReset		0x00010000
 #define OHCI1394_SelfIDBuffer                 0x064
 #define OHCI1394_SelfIDCount                  0x068
 #define OHCI1394_IRMultiChanMaskHiSet         0x070
@@ -316,9 +266,6 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 #define OHCI1394_IsoRecvIntEventClear         0x0A4
 #define OHCI1394_IsoRecvIntMaskSet            0x0A8
 #define OHCI1394_IsoRecvIntMaskClear          0x0AC
-#define OHCI1394_InitialBandwidthAvailable    0x0B0
-#define OHCI1394_InitialChannelsAvailableHi   0x0B4
-#define OHCI1394_InitialChannelsAvailableLo   0x0B8
 #define OHCI1394_FairnessControl              0x0DC
 #define OHCI1394_LinkControlSet               0x0E0
 #define OHCI1394_LinkControlClear             0x0E4
@@ -334,37 +281,27 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 #define OHCI1394_PhyReqFilterLoSet            0x118
 #define OHCI1394_PhyReqFilterLoClear          0x11C
 #define OHCI1394_PhyUpperBound                0x120
-
-#define OHCI1394_AsReqTrContextBase           0x180
 #define OHCI1394_AsReqTrContextControlSet     0x180
 #define OHCI1394_AsReqTrContextControlClear   0x184
 #define OHCI1394_AsReqTrCommandPtr            0x18C
-
-#define OHCI1394_AsRspTrContextBase           0x1A0
 #define OHCI1394_AsRspTrContextControlSet     0x1A0
 #define OHCI1394_AsRspTrContextControlClear   0x1A4
 #define OHCI1394_AsRspTrCommandPtr            0x1AC
-
-#define OHCI1394_AsReqRcvContextBase          0x1C0
 #define OHCI1394_AsReqRcvContextControlSet    0x1C0
 #define OHCI1394_AsReqRcvContextControlClear  0x1C4
 #define OHCI1394_AsReqRcvCommandPtr           0x1CC
-
-#define OHCI1394_AsRspRcvContextBase          0x1E0
 #define OHCI1394_AsRspRcvContextControlSet    0x1E0
 #define OHCI1394_AsRspRcvContextControlClear  0x1E4
 #define OHCI1394_AsRspRcvCommandPtr           0x1EC
 
 /* Isochronous transmit registers */
-/* Add (16 * n) for context n */
-#define OHCI1394_IsoXmitContextBase           0x200
+/* Add (32 * n) for context n */
 #define OHCI1394_IsoXmitContextControlSet     0x200
 #define OHCI1394_IsoXmitContextControlClear   0x204
 #define OHCI1394_IsoXmitCommandPtr            0x20C
 
 /* Isochronous receive registers */
 /* Add (32 * n) for context n */
-#define OHCI1394_IsoRcvContextBase            0x400
 #define OHCI1394_IsoRcvContextControlSet      0x400
 #define OHCI1394_IsoRcvContextControlClear    0x404
 #define OHCI1394_IsoRcvCommandPtr             0x40C
@@ -405,52 +342,14 @@ static inline u32 reg_read(const struct ti_ohci *ohci, int offset)
 #define DMA_CTL_BRANCH                   0x000c0000
 #define DMA_CTL_WAIT                     0x00030000
 
-/* OHCI evt_* error types, table 3-2 of the OHCI 1.1 spec. */
-#define EVT_NO_STATUS		0x0	/* No event status */
-#define EVT_RESERVED_A		0x1	/* Reserved, not used !!! */
-#define EVT_LONG_PACKET		0x2	/* The revc data was longer than the buf */
-#define EVT_MISSING_ACK		0x3	/* A subaction gap was detected before an ack
-					   arrived, or recv'd ack had a parity error */
-#define EVT_UNDERRUN		0x4	/* Underrun on corresponding FIFO, packet
-					   truncated */
-#define EVT_OVERRUN		0x5	/* A recv FIFO overflowed on reception of ISO
-					   packet */
-#define EVT_DESCRIPTOR_READ	0x6	/* An unrecoverable error occurred while host was
-					   reading a descriptor block */
-#define EVT_DATA_READ		0x7	/* An error occurred while host controller was
-					   attempting to read from host memory in the data
-					   stage of descriptor processing */
-#define EVT_DATA_WRITE		0x8	/* An error occurred while host controller was
-					   attempting to write either during the data stage
-					   of descriptor processing, or when processing a single
-					   16-bit host memory write */
-#define EVT_BUS_RESET		0x9	/* Identifies a PHY packet in the recv buffer as
-					   being a synthesized bus reset packet */
-#define EVT_TIMEOUT		0xa	/* Indicates that the asynchronous transmit response
-					   packet expired and was not transmitted, or that an
-					   IT DMA context experienced a skip processing overflow */
-#define EVT_TCODE_ERR		0xb	/* A bad tCode is associated with this packet.
-					   The packet was flushed */
-#define EVT_RESERVED_B		0xc	/* Reserved, not used !!! */
-#define EVT_RESERVED_C		0xd	/* Reserved, not used !!! */
-#define EVT_UNKNOWN		0xe	/* An error condition has occurred that cannot be
-					   represented by any other event codes defined herein. */
-#define EVT_FLUSHED		0xf	/* Send by the link side of output FIFO when asynchronous
-					   packets are being flushed due to a bus reset. */
-
 #define OHCI1394_TCODE_PHY               0xE
 
-void ohci1394_init_iso_tasklet(struct ohci1394_iso_tasklet *tasklet, 
-			       int type,
-			       void (*func)(unsigned long), 
-			       unsigned long data);
-int ohci1394_register_iso_tasklet(struct ti_ohci *ohci,
-				  struct ohci1394_iso_tasklet *tasklet);
-void ohci1394_unregister_iso_tasklet(struct ti_ohci *ohci,
-				     struct ohci1394_iso_tasklet *tasklet);
-
-/* returns zero if successful, one if DMA context is locked up */
-int ohci1394_stop_context      (struct ti_ohci *ohci, int reg, char *msg);
+void ohci1394_stop_context(struct ti_ohci *ohci, int reg, char *msg);
 struct ti_ohci *ohci1394_get_struct(int card_num);
+int ohci1394_register_video(struct ti_ohci *ohci,
+			    struct video_template *tmpl);
+void ohci1394_unregister_video(struct ti_ohci *ohci,
+			       struct video_template *tmpl);
 
 #endif
+

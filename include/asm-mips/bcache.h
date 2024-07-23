@@ -3,8 +3,8 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (c) 1997, 1999 by Ralf Baechle
- * Copyright (c) 1999 Silicon Graphics, Inc.
+ * Copyright (c) 1997, 1999, 2000 by Ralf Baechle
+ * Copyright (c) 2000 by Silicon Graphics, Inc.
  */
 #ifndef _ASM_BCACHE_H
 #define _ASM_BCACHE_H
@@ -28,22 +28,22 @@ extern void sni_pcimt_sc_init(void);
 
 extern struct bcache_ops *bcops;
 
-static inline void bc_enable(void)
+extern inline void bc_enable(void)
 {
 	bcops->bc_enable();
 }
 
-static inline void bc_disable(void)
+extern inline void bc_disable(void)
 {
 	bcops->bc_disable();
 }
 
-static inline void bc_wback_inv(unsigned long page, unsigned long size)
+extern inline void bc_wback_inv(unsigned long page, unsigned long size)
 {
 	bcops->bc_wback_inv(page, size);
 }
 
-static inline void bc_inv(unsigned long page, unsigned long size)
+extern inline void bc_inv(unsigned long page, unsigned long size)
 {
 	bcops->bc_inv(page, size);
 }

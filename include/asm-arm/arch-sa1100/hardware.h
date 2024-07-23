@@ -60,7 +60,6 @@
    ( (((x)&0x00ffffff) | (((x)&(0x30000000>>VIO_SHIFT))<<VIO_SHIFT)) + PIO_START )
 
 #ifndef __ASSEMBLY__
-#include <asm/types.h>
 
 #if 0
 # define __REG(x)	(*((volatile u32 *)io_p2v(x)))
@@ -94,37 +93,28 @@ typedef struct { volatile u32 offset[4096]; } __regbase;
  * This must be called *before* the corresponding IRQ is registered.
  * Use this instead of directly setting GRER/GFER.
  */
-#define GPIO_NO_EDGES		0
-#define GPIO_FALLING_EDGE	1
-#define GPIO_RISING_EDGE	2
-#define GPIO_BOTH_EDGES 	3
+#define GPIO_FALLING_EDGE       1
+#define GPIO_RISING_EDGE        2
+#define GPIO_BOTH_EDGES         3
 #ifndef __ASSEMBLY__
 extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
+
+/*
+ * Return the current CPU clock frequency in units of 100kHz
+ */
+extern unsigned short get_cclk_frequency(void);
+
 #endif
 
 
 /*
  * Implementation specifics.
  *
- *                      *** BIG FAT NOTE ***
- *
+ * *** NOTE ***
  * Any definitions in these files should be prefixed by an identifier -
  * eg, ASSABET_UCB1300_IRQ  This will allow us to eleminate these
  * ifdefs, and lots of other preprocessor gunk elsewhere.
- *
- * Also, please try to add your entry in alphabetical order.  The
- * initial ones below are the start of the alphabetical list.
- *
- * Do NOT add your ifdefs around your file.
  */
-
-#include "badge4.h"
-
-#include "frodo.h"
-
-#include "h3600.h"
-
-#include "system3.h"
 
 #ifdef CONFIG_SA1100_PANGOLIN
 #include "pangolin.h"
@@ -155,6 +145,10 @@ extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 #include "empeg.h"
 #endif
 
+#ifdef CONFIG_SA1100_H3600
+#include "h3600.h"
+#endif
+
 #ifdef CONFIG_SA1100_ITSY
 #include "itsy.h"
 #endif
@@ -183,24 +177,12 @@ extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 #include "simpad.h"
 #endif
 
-#ifdef CONFIG_SA1100_SIMPUTER
-#include "simputer.h"
-#endif
-
 #if defined(CONFIG_SA1100_GRAPHICSMASTER)
 #include "graphicsmaster.h"
 #endif
 
-#if defined(CONFIG_SA1100_ADSAGC)
-#include "adsagc.h"
-#endif
-
 #if defined(CONFIG_SA1100_ADSBITSY)
 #include "adsbitsy.h"
-#endif
-
-#if defined(CONFIG_SA1100_ADSBITSYPLUS)
-#include "adsbitsyplus.h"
 #endif
 
 #ifdef CONFIG_SA1101
@@ -227,6 +209,21 @@ extern void set_GPIO_IRQ_edge( int gpio_mask, int edge_mask );
 
 #if defined(CONFIG_SA1100_FLEXANET)
 #include "flexanet.h"
+#endif
+
+#ifdef CONFIG_SA1111
+
+/*
+ * The SA1111 is always located at virtual 0xf4000000.
+ */
+
+#define SA1111_VBASE		0xf4000000
+
+#define SA1111_p2v( x )         ((x) - SA1111_BASE + SA1111_VBASE)
+#define SA1111_v2p( x )         ((x) - SA1111_VBASE + SA1111_BASE)
+
+#include "SA-1111.h"
+
 #endif
 
 #endif  /* _ASM_ARCH_HARDWARE_H */

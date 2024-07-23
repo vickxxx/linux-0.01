@@ -698,7 +698,10 @@ static void do_softint(void *private_)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		tty_wakeup(tty);
+		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+		    tty->ldisc.write_wakeup)
+			(tty->ldisc.write_wakeup)(tty);
+		wake_up_interruptible(&tty->write_wait);
 	}
 }
 
@@ -1310,7 +1313,10 @@ su_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	restore_flags(flags);
-	tty_wakeup(tty);
+	wake_up_interruptible(&tty->write_wait);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 /*
@@ -1809,7 +1815,8 @@ su_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
@@ -2847,6 +2854,40 @@ serial_console_write(struct console *co, const char *s,
 	su_outb(info, UART_IER, ier);
 }
 
+/*
+ *	Receive character from the serial port
+ */
+static int
+serial_console_wait_key(struct console *co)
+{
+	struct su_struct *info;
+	int ier;
+	int lsr;
+	int c;
+
+	info = su_table + co->index;
+
+	/*
+	 *	First save the IER then disable the interrupts so
+	 *	that the real driver for the port does not get the
+	 *	character.
+	 */
+	ier = su_inb(info, UART_IER);
+	su_outb(info, UART_IER, 0x00);
+
+	do {
+		lsr = su_inb(info, UART_LSR);
+	} while (!(lsr & UART_LSR_DR));
+	c = su_inb(info, UART_RX);
+
+	/*
+	 *	Restore the interrupts
+	 */
+	su_outb(info, UART_IER, ier);
+
+	return c;
+}
+
 static kdev_t
 serial_console_device(struct console *c)
 {
@@ -2972,6 +3013,7 @@ static struct console sercons = {
 	name:		"ttyS",
 	write:		serial_console_write,
 	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
 	setup:		serial_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

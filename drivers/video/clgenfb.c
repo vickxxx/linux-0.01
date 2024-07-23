@@ -1,7 +1,7 @@
 /*
  * drivers/video/clgenfb.c - driver for Cirrus Logic chipsets
  *
- * Copyright 1999-2001 Jeff Garzik <jgarzik@pobox.com>
+ * Copyright 1999-2001 Jeff Garzik <jgarzik@mandrakesoft.com>
  *
  * Contributors (thanks, all!)
  *
@@ -14,9 +14,6 @@
  *
  *	Lars Hecking:
  *	Amiga updates and testing.
- *
- *	Cliff Matthews <ctm@ardi.com>:
- *	16bpp fix for CL-GD7548 (uses info from XFree86 4.2.0 source)
  *
  * Original clgenfb author:  Frank Neumann
  *
@@ -283,7 +280,6 @@ static const struct {
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_5434_4 },
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_5430 }, /* GD-5440 has identical id */
 	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_7543 },
-	{ BT_ALPINE, NULL, PCI_DEVICE_ID_CIRRUS_7548 },
 	{ BT_GD5480, NULL, PCI_DEVICE_ID_CIRRUS_5480 }, /* MacPicasso probably */
 	{ BT_PICASSO4, NULL, PCI_DEVICE_ID_CIRRUS_5446 }, /* Picasso 4 is a GD5446 */
 	{ BT_LAGUNA, "CL Laguna", PCI_DEVICE_ID_CIRRUS_5462 },
@@ -406,9 +402,6 @@ struct clgenfb_info {
 
 #ifdef CONFIG_PCI
 	struct pci_dev *pdev;
-#define IS_7548(x) ((x)->pdev->device == PCI_DEVICE_ID_CIRRUS_7548)
-#else
-#define IS_7548(x) (FALSE)
 #endif
 };
 
@@ -420,7 +413,8 @@ static struct display disp;
 static struct clgenfb_info boards[MAX_NUM_BOARDS];	/* the boards */
 
 static unsigned clgen_def_mode = 1;
-static int noaccel = 0;
+
+static int release_io_ports = 0;
 
 
 
@@ -976,10 +970,7 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 
 	DPRINTK ("desired pixclock: %ld kHz\n", freq);
 
-	if (IS_7548(fb_info))
-		maxclock = 80100;
-	else
-		maxclock = clgen_board_info[fb_info->btype].maxclock;
+	maxclock = clgen_board_info[fb_info->btype].maxclock;
 	_par->multiplexing = 0;
 
 	/* If the frequency is greater than we can support, we might be able
@@ -1414,9 +1405,7 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 			break;
 
 		case BT_PICASSO4:
-#ifdef CONFIG_ZORRO
 			vga_wseq (fb_info->regs, CL_SEQRF, 0xb8);	/* ### INCOMPLETE!! */
-#endif
 /*          vga_wseq (fb_info->regs, CL_SEQR1F, 0x1c); */
 			break;
 
@@ -1487,17 +1476,10 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 
 		case BT_ALPINE:
 			DPRINTK (" (for GD543x)\n");
-			if (IS_7548(fb_info)) {
-				vga_wseq (fb_info->regs, CL_SEQR7, 
-					  (vga_rseq (fb_info->regs, CL_SEQR7) & 0xE0)
-					  | 0x17);
-				WHDR (fb_info, 0xC1);
-			} else {
-				if (_par->HorizRes >= 1024)
-					vga_wseq (fb_info->regs, CL_SEQR7, 0xa7);
-				else
-					vga_wseq (fb_info->regs, CL_SEQR7, 0xa3);
-			}	
+			if (_par->HorizRes >= 1024)
+				vga_wseq (fb_info->regs, CL_SEQR7, 0xa7);
+			else
+				vga_wseq (fb_info->regs, CL_SEQR7, 0xa3);
 			clgen_set_mclk (fb_info, _par->mclk, _par->divMCLK);
 			break;
 
@@ -1608,11 +1590,6 @@ static void clgen_set_par (const void *par, struct fb_info_gen *info)
 	else {
 		printk (KERN_ERR "clgen: What's this?? requested color depth == %d.\n",
 			_par->var.bits_per_pixel);
-	}
-
-	if (IS_7548(fb_info)) {
-		vga_wseq (fb_info->regs, CL_SEQR2D, 
-			vga_rseq (fb_info->regs, CL_SEQR2D) | 0xC0);
 	}
 
 	vga_wcrt (fb_info->regs, VGA_CRTC_OFFSET, offset & 0xff);
@@ -2433,8 +2410,6 @@ static void __init get_prep_addrs (unsigned long *display, unsigned long *regist
 
 
 #ifdef CONFIG_PCI
-static int release_io_ports = 0;
-
 /* Pulled the logic from XFree86 Cirrus driver to get the memory size,
  * based on the DRAM bandwidth bit and DRAM bank switching bit.  This
  * works with 1MB, 2MB and 4MB configurations (which the Motorola boards
@@ -2547,7 +2522,7 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 
 	pdev = clgen_pci_dev_get (btype);
 	if (!pdev) {
-		printk (KERN_INFO "clgenfb: couldn't find Cirrus Logic PCI device\n");
+		printk (KERN_ERR " Couldn't find PCI device\n");
 		DPRINTK ("EXIT, returning 1\n");
 		return 1;
 	}
@@ -2657,11 +2632,11 @@ static void __exit clgen_zorro_unmap (struct clgenfb_info *info)
 	release_mem_region(info->board_addr, info->board_size);
 
 	if (info->btype == BT_PICASSO4) {
-		iounmap ((void *)info->board_addr);
-		iounmap ((void *)info->fbmem_phys);
+		iounmap (info->board_addr);
+		iounmap (info->fbmem_phys);
 	} else {
 		if (info->board_addr > 0x01000000)
-			iounmap ((void *)info->board_addr);
+			iounmap (info->board_addr);
 	}
 }
 
@@ -2773,23 +2748,6 @@ int __init clgenfb_init(void)
 
 	DPRINTK ("clgen: (RAM start set to: 0x%p)\n", fb_info->fbmem);
 
-	if (noaccel)
-	{
-		printk("clgen: disabling text acceleration support\n");
-#ifdef FBCON_HAS_CFB8
-		fbcon_clgen_8.bmove = fbcon_cfb8_bmove;
-		fbcon_clgen_8.clear = fbcon_cfb8_clear;
-#endif
-#ifdef FBCON_HAS_CFB16
-		fbcon_clgen_16.bmove = fbcon_cfb16_bmove;
-		fbcon_clgen_16.clear = fbcon_cfb16_clear;
-#endif
-#ifdef FBCON_HAS_CFB32
-		fbcon_clgen_32.bmove = fbcon_cfb32_bmove;
-		fbcon_clgen_32.clear = fbcon_cfb32_clear;
-#endif
-	}
-
 	init_vgachip (fb_info);
 
 	/* set up a few more things, register framebuffer driver etc */
@@ -2893,8 +2851,6 @@ int __init clgenfb_setup(char *options) {
 			if (strcmp (this_opt, s) == 0)
 				clgen_def_mode = i;
 		}
-		if (!strcmp(this_opt, "noaccel"))
-			noaccel = 1;
 	}
 	return 0;
 }
@@ -2905,7 +2861,7 @@ int __init clgenfb_setup(char *options) {
      *  Modularization
      */
 
-MODULE_AUTHOR("Copyright 1999,2000 Jeff Garzik <jgarzik@pobox.com>");
+MODULE_AUTHOR("Copyright 1999,2000 Jeff Garzik <jgarzik@mandrakesoft.com>");
 MODULE_DESCRIPTION("Accelerated FBDev driver for Cirrus Logic chips");
 MODULE_LICENSE("GPL");
 
@@ -3111,7 +3067,7 @@ static void RClut (struct clgenfb_info *fb_info, unsigned char regnum, unsigned 
 *********************************************************************/
 
 /* FIXME: use interrupts instead */
-static inline void clgen_WaitBLT (caddr_t regbase)
+extern inline void clgen_WaitBLT (caddr_t regbase)
 {
 	/* now busy-wait until we're done */
 	while (vga_rgfx (regbase, CL_GR31) & 0x08)

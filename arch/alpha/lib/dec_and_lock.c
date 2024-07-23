@@ -27,7 +27,6 @@ atomic_dec_and_lock:				\n\
 	br	$atomic_dec_and_lock_1..ng	\n\
 	.subsection 2				\n\
 4:	br	1b				\n\
-	.previous				\n\
 	.end atomic_dec_and_lock");
 
 static int __attribute__((unused))

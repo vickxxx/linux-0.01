@@ -1,3 +1,4 @@
+
 /*
  **********************************************************************
  *     irqmgr.c - IRQ manager for emu10k1 driver
@@ -40,7 +41,7 @@
 void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct emu10k1_card *card = (struct emu10k1_card *) dev_id;
-	u32 irqstatus, irqstatus_tmp;
+	u32 irqstatus;
 
 	DPD(4, "emu10k1_interrupt called, irq =  %u\n", irq);
 
@@ -59,7 +60,8 @@ void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	while ((irqstatus = inl(card->iobase + IPR))) {
 		DPD(4, "irq status %#x\n", irqstatus);
 
-		irqstatus_tmp = irqstatus;
+		/* acknowledge interrupt */
+		outl(irqstatus, card->iobase + IPR);
 
 		if (irqstatus & IRQTYPE_TIMER) {
 			emu10k1_timer_irqhandler(card);
@@ -96,15 +98,7 @@ void emu10k1_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			irqstatus &=~IPR_VOLDECR;
 		}
 
-		if (irqstatus){
-			printk(KERN_ERR "emu10k1: Warning, unhandled interrupt: %#08x\n", irqstatus);
-			//make sure any interrupts we don't handle are disabled:
-			emu10k1_irq_disable(card, ~(INTE_MIDIRXENABLE | INTE_MIDITXENABLE | INTE_INTERVALTIMERENB |
-						INTE_VOLDECRENABLE | INTE_VOLINCRENABLE | INTE_MUTEENABLE |
-						INTE_FXDSPENABLE));
-		}
-
-		/* acknowledge interrupt */
-                outl(irqstatus_tmp, card->iobase + IPR);
+		if (irqstatus)
+			emu10k1_irq_disable(card, irqstatus);
 	}
 }

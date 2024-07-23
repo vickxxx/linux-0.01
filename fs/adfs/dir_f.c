@@ -193,7 +193,7 @@ adfs_dir_read(struct super_block *sb, unsigned long object_id,
 			goto release_buffers;
 		}
 
-		dir->bh[blk] = sb_bread(sb, phys);
+		dir->bh[blk] = bread(sb->s_dev, phys, sb->s_blocksize);
 		if (!dir->bh[blk])
 			goto release_buffers;
 	}

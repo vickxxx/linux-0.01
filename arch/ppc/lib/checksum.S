@@ -1,7 +1,10 @@
 /*
+ * BK Id: SCCS/s.checksum.S 1.8 08/20/01 22:09:34 paulus
+ */
+/*
  * This file contains assembly-language implementations
  * of IP-style 1's complement checksum routines.
- *
+ *	
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  *  This program is free software; you can redistribute it and/or
@@ -15,7 +18,7 @@
 #include <linux/sys.h>
 #include <asm/processor.h>
 #include <asm/errno.h>
-#include <asm/ppc_asm.h>
+#include "../kernel/ppc_asm.tmpl"
 
 	.text
 
@@ -43,7 +46,7 @@ _GLOBAL(ip_fast_csum)
 /*
  * Compute checksum of TCP or UDP pseudo-header:
  *   csum_tcpudp_magic(saddr, daddr, len, proto, sum)
- */
+ */	
 _GLOBAL(csum_tcpudp_magic)
 	rlwimi	r5,r6,16,0,15	/* put proto in upper half of len */
 	addc	r0,r3,r4	/* add 4 32-bit words together */

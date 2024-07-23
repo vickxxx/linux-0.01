@@ -59,7 +59,7 @@ static int errno;
  * before the hardware based power-off event is triggered.
  */
 
-/* These settings are in Celsius.  We use these defaults only
+/* These settings are in celcius.  We use these defaults only
  * if we cannot interrogate the cpu-fru SEEPROM.
  */
 struct temp_limits {
@@ -571,13 +571,12 @@ static void attach_one_fan(struct linux_ebus_child *echild, int fan_idx)
 	set_fan_speeds(fp);
 }
 
-int bbc_envctrl_init(void)
+void bbc_envctrl_init(void)
 {
 	struct linux_ebus_child *echild;
 	int temp_index = 0;
 	int fan_index = 0;
 	int devidx = 0;
-	int err = 0;
 
 	while ((echild = bbc_i2c_getdev(devidx++)) != NULL) {
 		if (!strcmp(echild->prom_name, "temperature"))
@@ -586,8 +585,7 @@ int bbc_envctrl_init(void)
 			attach_one_fan(echild, fan_index++);
 	}
 	if (temp_index != 0 && fan_index != 0)
-		err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
-	return err;
+		kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
 }
 
 static void destroy_one_temp(struct bbc_cpu_temperature *tp)

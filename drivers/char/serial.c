@@ -57,11 +57,6 @@
  * 10/00: add in optional software flow control for serial console.
  *	  Kanoj Sarcar <kanoj@sgi.com>  (Modified by Theodore Ts'o)
  *
- * 02/02: Fix for AMD Elan bug in transmit irq routine, by
- *        Christer Weinigel <wingel@hog.ctrl-c.liu.se>,
- *        Robert Schwebel <robert@schwebel.de>,
- *        Juergen Beisert <jbeisert@eurodsn.de>,
- *        Theodore Ts'o <tytso@mit.edu>
  */
 
 static char *serial_version = "5.05c";
@@ -236,8 +231,8 @@ static char *serial_revdate = "2001-07-08";
 #include <asm/irq.h>
 #include <asm/bitops.h>
 
-#if defined(CONFIG_MAC_SERIAL)
-#define SERIAL_DEV_OFFSET	((_machine == _MACH_prep || _machine == _MACH_chrp) ? 0 : 2)
+#ifdef CONFIG_MAC_SERIAL
+#define SERIAL_DEV_OFFSET	2
 #else
 #define SERIAL_DEV_OFFSET	0
 #endif
@@ -326,12 +321,11 @@ MODULE_PARM(force_rsa, "1-" __MODULE_STRING(PORT_RSA_MAX) "i");
 MODULE_PARM_DESC(force_rsa, "Force I/O ports for RSA");
 #endif /* CONFIG_SERIAL_RSA  */
 
-struct serial_state rs_table[RS_TABLE_SIZE] = {
+static struct serial_state rs_table[RS_TABLE_SIZE] = {
 	SERIAL_PORT_DFNS	/* Defined in serial.h */
 };
 
 #define NR_PORTS	(sizeof(rs_table)/sizeof(struct serial_state))
-int serial_nr_ports = NR_PORTS;
 
 #if (defined(ENABLE_SERIAL_PCI) || defined(ENABLE_SERIAL_PNP))
 #define NR_PCI_BOARDS	8
@@ -424,6 +418,10 @@ static _INLINE_ unsigned int serial_in(struct async_struct *info, int offset)
 	case SERIAL_IO_MEM:
 		return readb((unsigned long) info->iomem_base +
 			     (offset<<info->iomem_reg_shift));
+#ifdef CONFIG_SERIAL_GSC
+	case SERIAL_IO_GSC:
+		return gsc_readb(info->iomem_base + offset);
+#endif
 	default:
 		return inb(info->port + offset);
 	}
@@ -443,6 +441,11 @@ static _INLINE_ void serial_out(struct async_struct *info, int offset,
 		writeb(value, (unsigned long) info->iomem_base +
 			      (offset<<info->iomem_reg_shift));
 		break;
+#ifdef CONFIG_SERIAL_GSC
+	case SERIAL_IO_GSC:
+		gsc_writeb(value, info->iomem_base + offset);
+		break;
+#endif
 	default:
 		outb(value, info->port+offset);
 	}
@@ -573,19 +576,8 @@ static _INLINE_ void receive_chars(struct async_struct *info,
 	do {
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
 			tty->flip.tqueue.routine((void *) tty);
-			if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
-				/* no room in flip buffer, discard rx FIFO contents to clear IRQ
-				 * *FIXME* Hardware with auto flow control
-				 * would benefit from leaving the data in the FIFO and
-				 * disabling the rx IRQ until space becomes available.
-				 */
-				do {
-					serial_inp(info, UART_RX);
-					icount->overrun++;
-					*status = serial_inp(info, UART_LSR);
-				} while ((*status & UART_LSR_DR) && (max_count-- > 0));
+			if (tty->flip.count >= TTY_FLIPBUF_SIZE)
 				return;		// if TTY_DONT_FLIP is set
-			}
 		}
 		ch = serial_inp(info, UART_RX);
 		*tty->flip.char_buf_ptr = ch;
@@ -809,7 +801,7 @@ static _INLINE_ void check_modem_status(struct async_struct *info)
  */
 static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	int status, iir;
+	int status;
 	struct async_struct * info;
 	int pass_counter = 0;
 	struct async_struct *end_mark = 0;
@@ -834,7 +826,7 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	do {
 		if (!info->tty ||
-		    ((iir=serial_in(info, UART_IIR)) & UART_IIR_NO_INT)) {
+		    (serial_in(info, UART_IIR) & UART_IIR_NO_INT)) {
 			if (!end_mark)
 				end_mark = info;
 			goto next;
@@ -853,15 +845,8 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		if (status & UART_LSR_DR)
 			receive_chars(info, &status, regs);
 		check_modem_status(info);
-#ifdef CONFIG_MELAN
-		if ((status & UART_LSR_THRE) ||
-			/* for buggy ELAN processors */
-			((iir & UART_IIR_ID) == UART_IIR_THRI))
-			transmit_chars(info, 0);
-#else
 		if (status & UART_LSR_THRE)
 			transmit_chars(info, 0);
-#endif
 
 	next:
 		info = info->next_port;
@@ -894,7 +879,7 @@ static void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
  */
 static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 {
-	int status, iir;
+	int status;
 	int pass_counter = 0;
 	struct async_struct * info;
 #ifdef CONFIG_SERIAL_MULTIPORT	
@@ -916,7 +901,6 @@ static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 		first_multi = inb(multi->port_monitor);
 #endif
 
-	iir = serial_in(info, UART_IIR);
 	do {
 		status = serial_inp(info, UART_LSR);
 #ifdef SERIAL_DEBUG_INTR
@@ -925,26 +909,18 @@ static void rs_interrupt_single(int irq, void *dev_id, struct pt_regs * regs)
 		if (status & UART_LSR_DR)
 			receive_chars(info, &status, regs);
 		check_modem_status(info);
-#ifdef CONFIG_MELAN
-		if ((status & UART_LSR_THRE) ||
-		    /* For buggy ELAN processors */
-		    ((iir & UART_IIR_ID) == UART_IIR_THRI))
-			transmit_chars(info, 0);
-#else
 		if (status & UART_LSR_THRE)
 			transmit_chars(info, 0);
-#endif
 		if (pass_counter++ > RS_ISR_PASS_LIMIT) {
-#ifdef SERIAL_DEBUG_INTR
+#if 0
 			printk("rs_single loop break.\n");
 #endif
 			break;
 		}
-		iir = serial_in(info, UART_IIR);
 #ifdef SERIAL_DEBUG_INTR
-		printk("IIR = %x...", iir);
+		printk("IIR = %x...", serial_in(info, UART_IIR));
 #endif
-	} while ((iir & UART_IIR_NO_INT) == 0);
+	} while (!(serial_in(info, UART_IIR) & UART_IIR_NO_INT));
 	info->last_active = jiffies;
 #ifdef CONFIG_SERIAL_MULTIPORT	
 	if (multi->port_monitor)
@@ -1068,15 +1044,17 @@ static void do_serial_bh(void)
 static void do_softint(void *private_)
 {
 	struct async_struct	*info = (struct async_struct *) private_;
-	struct tty_struct       *tty;
-
+	struct tty_struct	*tty;
+	
 	tty = info->tty;
 	if (!tty)
 		return;
 
 	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
-		tty_wakeup(tty);
-		
+		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+		    tty->ldisc.write_wakeup)
+			(tty->ldisc.write_wakeup)(tty);
+		wake_up_interruptible(&tty->write_wait);
 #ifdef SERIAL_HAVE_POLL_WAIT
 		wake_up_interruptible(&tty->poll_wait);
 #endif
@@ -1827,18 +1805,13 @@ static void change_speed(struct async_struct *info,
 
 static void rs_put_char(struct tty_struct *tty, unsigned char ch)
 {
-	struct async_struct *info;
+	struct async_struct *info = (struct async_struct *)tty->driver_data;
 	unsigned long flags;
 
-	if (!tty)
-		return;
-	
-	info =  (struct async_struct *)tty->driver_data;
-	
 	if (serial_paranoia_check(info, tty->device, "rs_put_char"))
 		return;
 
-	if (!info->xmit.buf)
+	if (!tty || !info->xmit.buf)
 		return;
 
 	save_flags(flags); cli();
@@ -1878,18 +1851,13 @@ static int rs_write(struct tty_struct * tty, int from_user,
 		    const unsigned char *buf, int count)
 {
 	int	c, ret = 0;
-	struct async_struct *info;
+	struct async_struct *info = (struct async_struct *)tty->driver_data;
 	unsigned long flags;
 				
-	if (!tty)
-		return 0;
-
-	info = (struct async_struct *)tty->driver_data;
-	
 	if (serial_paranoia_check(info, tty->device, "rs_write"))
 		return 0;
 
-	if (!info->xmit.buf || !tmp_buf)
+	if (!tty || !info->xmit.buf || !tmp_buf)
 		return 0;
 
 	save_flags(flags);
@@ -1984,10 +1952,13 @@ static void rs_flush_buffer(struct tty_struct *tty)
 	save_flags(flags); cli();
 	info->xmit.head = info->xmit.tail = 0;
 	restore_flags(flags);
+	wake_up_interruptible(&tty->write_wait);
 #ifdef SERIAL_HAVE_POLL_WAIT
 	wake_up_interruptible(&tty->poll_wait);
 #endif
-	tty_wakeup(tty);
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    tty->ldisc.write_wakeup)
+		(tty->ldisc.write_wakeup)(tty);
 }
 
 /*
@@ -2162,7 +2133,6 @@ static int set_serial_info(struct async_struct * info,
 	if (new_serial.type) {
 		for (i = 0 ; i < NR_PORTS; i++)
 			if ((state != &rs_table[i]) &&
-			    (rs_table[i].io_type == SERIAL_IO_PORT) &&
 			    (rs_table[i].port == new_port) &&
 			    rs_table[i].type)
 				return -EADDRINUSE;
@@ -2225,7 +2195,7 @@ static int set_serial_info(struct async_struct * info,
 
 	
 check_and_exit:
-	if ((!state->port && !state->iomem_base) || !state->type)
+	if (!state->port || !state->type)
 		return 0;
 	if (info->flags & ASYNC_INITIALIZED) {
 		if (((old_state.flags & ASYNC_SPD_MASK) !=
@@ -2850,8 +2820,8 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	 * the line discipline to only process XON/XOFF characters.
 	 */
 	tty->closing = 1;
-	if (state->closing_wait != ASYNC_CLOSING_WAIT_NONE)
-		tty_wait_until_sent(tty, state->closing_wait);
+	if (info->closing_wait != ASYNC_CLOSING_WAIT_NONE)
+		tty_wait_until_sent(tty, info->closing_wait);
 	/*
 	 * At this point we stop accepting input.  To do this, we
 	 * disable the receive line status interrupts, and tell the
@@ -2872,14 +2842,15 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	shutdown(info);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)
+		tty->ldisc.flush_buffer(tty);
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
 	if (info->blocked_open) {
-		if (state->close_delay) {
+		if (info->close_delay) {
 			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(state->close_delay);
+			schedule_timeout(info->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -3162,10 +3133,6 @@ static int get_async_struct(int line, struct async_struct **ret_info)
  * enables interrupts for a serial port, linking in its async structure into
  * the IRQ chain.   It also performs the serial-specific
  * initialization for the tty structure.
- *
- * Note that on failure, we don't decrement the module use count - the tty
- * later will call rs_close, which will decrement it for us as long as
- * tty->driver_data is set non-NULL. --rmk
  */
 static int rs_open(struct tty_struct *tty, struct file * filp)
 {
@@ -3186,8 +3153,10 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	}
 	tty->driver_data = info;
 	info->tty = tty;
-	if (serial_paranoia_check(info, tty->device, "rs_open"))
+	if (serial_paranoia_check(info, tty->device, "rs_open")) {
+		MOD_DEC_USE_COUNT;		
 		return -ENODEV;
+	}
 
 #ifdef SERIAL_DEBUG_OPEN
 	printk("rs_open %s%d, count = %d\n", tty->driver.name, info->line,
@@ -3202,8 +3171,10 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	 */
 	if (!tmp_buf) {
 		page = get_zeroed_page(GFP_KERNEL);
-		if (!page)
+		if (!page) {
+			MOD_DEC_USE_COUNT;
 			return -ENOMEM;
+		}
 		if (tmp_buf)
 			free_page(page);
 		else
@@ -3217,6 +3188,7 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	    (info->flags & ASYNC_CLOSING)) {
 		if (info->flags & ASYNC_CLOSING)
 			interruptible_sleep_on(&info->close_wait);
+		MOD_DEC_USE_COUNT;
 #ifdef SERIAL_DO_RESTART
 		return ((info->flags & ASYNC_HUP_NOTIFY) ?
 			-EAGAIN : -ERESTARTSYS);
@@ -3229,8 +3201,10 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 	 * Start up serial port
 	 */
 	retval = startup(info);
-	if (retval)
+	if (retval) {
+		MOD_DEC_USE_COUNT;
 		return retval;
+	}
 
 	retval = block_til_ready(tty, filp, info);
 	if (retval) {
@@ -3238,6 +3212,7 @@ static int rs_open(struct tty_struct *tty, struct file * filp)
 		printk("rs_open returning after block_til_ready with %d\n",
 		       retval);
 #endif
+		MOD_DEC_USE_COUNT;
 		return retval;
 	}
 
@@ -3276,17 +3251,14 @@ static inline int line_info(char *buf, struct serial_state *state)
 	int	ret;
 	unsigned long flags;
 
-	/*
-	 * Return zero characters for ports not claimed by driver.
-	 */
-	if (state->type == PORT_UNKNOWN) {
-		return 0;	/* ignore unused ports */
-	}
-
 	ret = sprintf(buf, "%d: uart:%s port:%lX irq:%d",
 		      state->line, uart_config[state->type].name, 
-		      (state->port ? state->port : (long)state->iomem_base),
-		      state->irq);
+		      state->port, state->irq);
+
+	if (!state->port || (state->type == PORT_UNKNOWN)) {
+		ret += sprintf(buf+ret, "\n");
+		return ret;
+	}
 
 	/*
 	 * Figure out the current RS-232 lines
@@ -3351,8 +3323,8 @@ static inline int line_info(char *buf, struct serial_state *state)
 	return ret;
 }
 
-static int rs_read_proc(char *page, char **start, off_t off, int count,
-			int *eof, void *data)
+int rs_read_proc(char *page, char **start, off_t off, int count,
+		 int *eof, void *data)
 {
 	int i, len = 0, l;
 	off_t	begin = 0;
@@ -3761,14 +3733,7 @@ static void autoconfig(struct serial_state * state)
 		/* Check for Startech UART's */
 		serial_outp(info, UART_LCR, UART_LCR_DLAB);
 		if (serial_in(info, UART_EFR) == 0) {
-			serial_outp(info, UART_EFR, 0xA8);
-			if (serial_in(info, UART_EFR) == 0) {
-				/* We are a NS16552D/Motorola
-				 * 8xxx DUART, stop. */
-				goto out;
-			}
 			state->type = PORT_16650;
-			serial_outp(info, UART_EFR, 0);
 		} else {
 			serial_outp(info, UART_LCR, 0xBF);
 			if (serial_in(info, UART_EFR) == 0)
@@ -3817,7 +3782,6 @@ static void autoconfig(struct serial_state * state)
 		}
 	}
 #endif
-out:
 	serial_outp(info, UART_LCR, save_lcr);
 	if (state->type == PORT_16450) {
 		scratch = serial_in(info, UART_SCR);
@@ -3952,25 +3916,6 @@ static _INLINE_ int get_pci_port(struct pci_dev *dev,
 		
 	}
   
-	/* HP's Diva chip puts the 4th/5th serial port further out, and
-	 * some serial ports are supposed to be hidden on certain models.
-	 */
-	if (dev->vendor == PCI_VENDOR_ID_HP &&
-			dev->device == PCI_DEVICE_ID_HP_SAS) {
-		switch (dev->subsystem_device) {
-		case 0x104B: /* Maestro */
-			if (idx == 3) idx++;
-			break;
-		case 0x1282: /* Everest / Longs Peak */
-			if (idx > 0) idx++;
-			if (idx > 2) idx++;
-			break;
-		}
-		if (idx > 2) {
-			offset = 0x18;
-		}
-	}
-
 	port =  pci_resource_start(dev, base_idx) + offset;
 
 	if ((board->flags & SPCI_FL_BASE_TABLE) == 0)
@@ -4140,14 +4085,12 @@ pci_plx9050_fn(struct pci_dev *dev, struct pci_board *board, int enable)
  * interface chip and different configuration methods:
  *     - 10x cards have control registers in IO and/or memory space;
  *     - 20x cards have control registers in standard PCI configuration space.
- *
- * SIIG initialization functions exported for use by parport_serial.c module.
  */
 
 #define PCI_DEVICE_ID_SIIG_1S_10x (PCI_DEVICE_ID_SIIG_1S_10x_550 & 0xfffc)
 #define PCI_DEVICE_ID_SIIG_2S_10x (PCI_DEVICE_ID_SIIG_2S_10x_550 & 0xfff8)
 
-int __devinit
+static int __devinit
 pci_siig10x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
        u16 data, *p;
@@ -4172,12 +4115,11 @@ pci_siig10x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
        iounmap(p);
        return 0;
 }
-EXPORT_SYMBOL(pci_siig10x_fn);
 
 #define PCI_DEVICE_ID_SIIG_2S_20x (PCI_DEVICE_ID_SIIG_2S_20x_550 & 0xfffc)
 #define PCI_DEVICE_ID_SIIG_2S1P_20x (PCI_DEVICE_ID_SIIG_2S1P_20x_550 & 0xfffc)
 
-int __devinit
+static int __devinit
 pci_siig20x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
        u8 data;
@@ -4196,7 +4138,6 @@ pci_siig20x_fn(struct pci_dev *dev, struct pci_board *board, int enable)
        }
        return 0;
 }
-EXPORT_SYMBOL(pci_siig20x_fn);
 
 /* Added for EKF Intel i960 serial boards */
 static int __devinit
@@ -4214,7 +4155,7 @@ pci_inteli960ni_fn(struct pci_dev *dev,
    
 #ifdef SERIAL_DEBUG_PCI
 	printk(KERN_DEBUG " Subsystem ID %lx (intel 960)\n",
-	       (unsigned long) dev->subsystem_device);
+	       (unsigned long) board->subdevice);
 #endif
 	/* is firmware started? */
 	pci_read_config_dword(dev, 0x44, (void*) &oldval); 
@@ -4278,40 +4219,6 @@ pci_timedia_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 	return 0;
 }
 
-/*
- * HP's Remote Management Console.  The Diva chip came in several
- * different versions.  N-class, L2000 and A500 have two Diva chips, each
- * with 3 UARTs (the third UART on the second chip is unused).  Superdome
- * and Keystone have one Diva chip with 3 UARTs.  Some later machines have
- * one Diva chip, but it has been expanded to 5 UARTs.
- */
-static int __devinit
-pci_hp_diva(struct pci_dev *dev, struct pci_board *board, int enable)
-{
-	if (!enable)
-		return 0;
-
-	switch (dev->subsystem_device) {
-	case 0x1049: /* Prelude Diva 1 */
-	case 0x1223: /* Superdome */
-	case 0x1226: /* Keystone */
-	case 0x1282: /* Everest / Longs Peak */
-		board->num_ports = 3;
-		break;
-	case 0x104A: /* Prelude Diva 2 */
-		board->num_ports = 2;
-		break;
-	case 0x104B: /* Maestro */
-		board->num_ports = 4;
-		break;
-	case 0x1227: /* Powerbar */
-		board->num_ports = 1;
-		break;
-	}
-
-	return 0;
-}
-
 static int __devinit
 pci_xircom_fn(struct pci_dev *dev, struct pci_board *board, int enable)
 {
@@ -4341,7 +4248,6 @@ enum pci_board_num_t {
 	pbn_b0_bt_2_115200,
 	pbn_b0_bt_1_460800,
 	pbn_b0_bt_2_460800,
-	pbn_b0_bt_2_921600,
 
 	pbn_b1_1_115200,
 	pbn_b1_2_115200,
@@ -4356,7 +4262,6 @@ enum pci_board_num_t {
 	pbn_b1_4_1382400,
 	pbn_b1_8_1382400,
 
-	pbn_b2_1_115200,
 	pbn_b2_8_115200,
 	pbn_b2_4_460800,
 	pbn_b2_8_460800,
@@ -4377,14 +4282,12 @@ enum pci_board_num_t {
 	pbn_timedia,
 	pbn_intel_i960,
 	pbn_sgi_ioc3,
-	pbn_hp_diva,
 #ifdef CONFIG_DDB5074
 	pbn_nec_nile4,
 #endif
-
-	pbn_dci_pccom4,
+#if 0
 	pbn_dci_pccom8,
-
+#endif
 	pbn_xircom_combo,
 
 	pbn_siig10x_0,
@@ -4423,7 +4326,6 @@ static struct pci_board pci_boards[] __devinitdata = {
 	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 115200 }, /* pbn_b0_bt_2_115200 */
 	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 1, 460800 }, /* pbn_b0_bt_1_460800 */
 	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 460800 }, /* pbn_b0_bt_2_460800 */
-	{ SPCI_FL_BASE0 | SPCI_FL_BASE_TABLE, 2, 921600 }, /* pbn_b0_bt_2_921600 */
 
 	{ SPCI_FL_BASE1, 1, 115200 },		/* pbn_b1_1_115200 */
 	{ SPCI_FL_BASE1, 2, 115200 },		/* pbn_b1_2_115200 */
@@ -4438,7 +4340,6 @@ static struct pci_board pci_boards[] __devinitdata = {
 	{ SPCI_FL_BASE1, 4, 1382400 },		/* pbn_b1_4_1382400 */
 	{ SPCI_FL_BASE1, 8, 1382400 },		/* pbn_b1_8_1382400 */
 
-	{ SPCI_FL_BASE2, 1, 115200 },		/* pbn_b2_1_115200 */
 	{ SPCI_FL_BASE2, 8, 115200 },		/* pbn_b2_8_115200 */
 	{ SPCI_FL_BASE2, 4, 460800 },		/* pbn_b2_4_460800 */
 	{ SPCI_FL_BASE2, 8, 460800 },		/* pbn_b2_8_460800 */
@@ -4469,7 +4370,6 @@ static struct pci_board pci_boards[] __devinitdata = {
 		8<<2, 2, pci_inteli960ni_fn, 0x10000},
 	{ SPCI_FL_BASE0 | SPCI_FL_IRQRESOURCE,		   /* pbn_sgi_ioc3 */
 		1, 458333, 0, 0, 0, 0x20178 },
-	{ SPCI_FL_BASE0, 5, 115200, 8, 0, pci_hp_diva, 0},   /* pbn_hp_diva */
 #ifdef CONFIG_DDB5074
 	/*
 	 * NEC Vrc-5074 (Nile 4) builtin UART.
@@ -4478,10 +4378,9 @@ static struct pci_board pci_boards[] __devinitdata = {
 	{ SPCI_FL_BASE0, 1, 520833,			   /* pbn_nec_nile4 */
 		64, 3, NULL, 0x300 },
 #endif
-
-	{SPCI_FL_BASE3, 4, 115200, 8},			   /* pbn_dci_pccom4 */
-	{SPCI_FL_BASE3, 8, 115200, 8},			   /* pbn_dci_pccom8 */
-
+#if 0	/* PCI_DEVICE_ID_DCI_PCCOM8 ? */		   /* pbn_dci_pccom8 */
+	{ SPCI_FL_BASE3, 8, 115200, 8 },
+#endif
 	{ SPCI_FL_BASE0, 1, 115200,			  /* pbn_xircom_combo */
 		0, 0, pci_xircom_fn },
 
@@ -4762,7 +4661,7 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 		pbn_b0_4_115200 },
 	{	PCI_VENDOR_ID_OXSEMI, PCI_DEVICE_ID_OXSEMI_16PCI952,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 
-		pbn_b0_bt_2_921600 },
+		pbn_b0_2_115200 },
 
 	/* Digitan DS560-558, from jimd@esoft.com */
 	{	PCI_VENDOR_ID_ATT, PCI_DEVICE_ID_ATT_VENUS_MODEM,
@@ -4809,6 +4708,15 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_10x_850,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig10x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_1 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_1 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_10x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_1 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_550,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig10x_2 },
@@ -4816,6 +4724,15 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig10x_2 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_10x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig10x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_10x_850,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig10x_2 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_10x_550,
@@ -4836,6 +4753,24 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S_20x_850,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_1S1P_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2P1S_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_0 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_550,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig20x_2 },
@@ -4843,6 +4778,15 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig20x_2 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S_20x_850,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_550,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_650,
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+		pbn_siig20x_2 },
+	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_2S1P_20x_850,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_siig20x_2 },
 	{	PCI_VENDOR_ID_SIIG, PCI_DEVICE_ID_SIIG_4S_20x_550,
@@ -4924,14 +4868,6 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 		0xFF00, 0, 0, 0,
 		pbn_sgi_ioc3 },
 
-	/* HP Diva card */
-	{	PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_SAS,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		pbn_hp_diva },
-	{	PCI_VENDOR_ID_HP, 0x1290,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		pbn_b2_1_115200 },
-
 #ifdef CONFIG_DDB5074
 	/*
 	 * NEC Vrc-5074 (Nile 4) builtin UART.
@@ -4942,12 +4878,11 @@ static struct pci_device_id serial_pci_tbl[] __devinitdata = {
 		pbn_nec_nile4 },
 #endif
 
-	{	PCI_VENDOR_ID_DCI, PCI_DEVICE_ID_DCI_PCCOM4,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
-		pbn_dci_pccom4 },
+#if 0	/* PCI_DEVICE_ID_DCI_PCCOM8 ? */
 	{	PCI_VENDOR_ID_DCI, PCI_DEVICE_ID_DCI_PCCOM8,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0,
 		pbn_dci_pccom8 },
+#endif
 
        { PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
 	 PCI_CLASS_COMMUNICATION_SERIAL << 8, 0xffff00, },
@@ -4961,7 +4896,7 @@ MODULE_DEVICE_TABLE(pci, serial_pci_tbl);
 static struct pci_driver serial_pci_driver = {
        name:           "serial",
        probe:          serial_init_one,
-       remove:	       __devexit_p(serial_remove_one),
+       remove:	       serial_remove_one,
        id_table:       serial_pci_tbl,
 };
 
@@ -5273,7 +5208,7 @@ static struct pnp_board pnp_devices[] __devinitdata = {
 	{	0, }
 };
 
-static inline void avoid_irq_share(struct pci_dev *dev)
+static void inline avoid_irq_share(struct pci_dev *dev)
 {
 	int i, map = 0x1FF8;
 	struct serial_state *state = rs_table;
@@ -5310,7 +5245,7 @@ static int __devinit check_name(char *name)
        return 0;
 }
 
-static inline int check_compatible_id(struct pci_dev *dev)
+static int inline check_compatible_id(struct pci_dev *dev)
 {
        int i;
        for (i = 0; i < DEVICE_COUNT_COMPATIBLE; i++)
@@ -5462,7 +5397,6 @@ static int __init rs_init(void)
 #endif
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64 + SERIAL_DEV_OFFSET;
-	serial_driver.name_base = SERIAL_DEV_OFFSET;
 	serial_driver.num = NR_PORTS;
 	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
 	serial_driver.subtype = SERIAL_TYPE_NORMAL;
@@ -5555,7 +5489,7 @@ static int __init rs_init(void)
 		    && (state->port != 0 || state->iomem_base != 0))
 			state->irq = detect_uart_irq(state);
 		if (state->io_type == SERIAL_IO_MEM) {
-			printk(KERN_INFO"ttyS%02d%s at 0x%p (irq = %d) is a %s\n",
+			printk(KERN_INFO"ttyS%02d%s at 0x%px (irq = %d) is a %s\n",
 	 		       state->line + SERIAL_DEV_OFFSET,
 			       (state->flags & ASYNC_FOURPORT) ? " FourPort" : "",
 			       state->iomem_base, state->irq,
@@ -5730,7 +5664,7 @@ void unregister_serial(int line)
 	if (state->info && state->info->tty)
 		tty_hangup(state->info->tty);
 	state->type = PORT_UNKNOWN;
-	printk(KERN_INFO "ttyS%02d unloaded\n", state->line);
+	printk(KERN_INFO "tty%02d unloaded\n", state->line);
 	/* These will be hidden, because they are devices that will no longer
 	 * be available to the system. (ie, PCMCIA modems, once ejected)
 	 */
@@ -5891,6 +5825,35 @@ static void serial_console_write(struct console *co, const char *s,
 	serial_out(info, UART_IER, ier);
 }
 
+/*
+ *	Receive character from the serial port
+ */
+static int serial_console_wait_key(struct console *co)
+{
+	static struct async_struct *info;
+	int ier, c;
+
+	info = &async_sercons;
+
+	/*
+	 *	First save the IER then disable the interrupts so
+	 *	that the real driver for the port does not get the
+	 *	character.
+	 */
+	ier = serial_in(info, UART_IER);
+	serial_out(info, UART_IER, 0x00);
+ 
+	while ((serial_in(info, UART_LSR) & UART_LSR_DR) == 0);
+	c = serial_in(info, UART_RX);
+
+	/*
+	 *	Restore the interrupts
+	 */
+	serial_out(info, UART_IER, ier);
+
+	return c;
+}
+
 static kdev_t serial_console_device(struct console *c)
 {
 	return MKDEV(TTY_MAJOR, 64 + c->index);
@@ -6031,6 +5994,7 @@ static struct console sercons = {
 	name:		"ttyS",
 	write:		serial_console_write,
 	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
 	setup:		serial_console_setup,
 	flags:		CON_PRINTBUFFER,
 	index:		-1,

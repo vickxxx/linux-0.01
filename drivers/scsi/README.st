@@ -1,8 +1,8 @@
 This file contains brief information about the SCSI tape driver.
-The driver is currently maintained by Kai Mäkisara (email
-Kai.Makisara@kolumbus.fi)
+The driver is currently maintained by Kai M{kisara (email
+Kai.Makisara@metla.fi)
 
-Last modified: Sun Apr  6 22:44:55 2003 by makisara
+Last modified: Thu Nov  1 22:41:59 2001 by makisara@kai.makisara.local
 
 
 BASICS
@@ -112,7 +112,7 @@ ST_BUFFER_WRITES).
 
 Asynchronous writing. Writing the buffer contents to the tape is
 started and the write call returns immediately. The status is checked
-at the next tape operation. Applies only to variable block mode.
+at the next tape operation.
 
 Buffered writes and asynchronous writes may in some rare cases cause
 problems in multivolume operations if there is not enough space on the
@@ -147,6 +147,11 @@ should not be big if the tape drive is connected to a PCI adapter that
 supports scatter/gather (the allocation is not limited to "DMA memory"
 and the buffer can be composed of several fragments).
 
+The threshold for triggering asynchronous write in fixed block mode
+is defined by ST_WRITE_THRESHOLD. This may be optimized for each
+use pattern. The default triggers asynchronous write after three
+default sized writes (10 kB) from tar.
+
 Scatter/gather buffers (buffers that consist of chunks non-contiguous
 in the physical memory) are used if contiguous buffers can't be
 allocated. To support all SCSI adapters (including those not
@@ -179,11 +184,10 @@ The buffer size, write threshold, and the maximum number of allocated buffers
 are configurable when the driver is loaded as a module. The keywords are:
 
 buffer_kbs=xxx             the buffer size in kilobytes is set to xxx
+write_threshold_kbs=xxx    the write threshold in kilobytes set to xxx
 max_buffers=xxx            the maximum number of tape buffer set to xxx
 max_sg_segs=xxx		   the maximum number of scatter/gather
 			   segments
-blocking_open=xxx	   block in open() if drive not ready, O_NONBLOCK
-			   not used, and blocking_open non-zero
 
 Note that if the buffer size is changed but the write threshold is not
 set, the write threshold is set to the new buffer size - 2 kB.
@@ -207,7 +211,7 @@ The following syntax used by the old kernel versions is also supported:
 
 where
   aa is the buffer size in 1024 byte units
-  bb is the write threshold in 1024 byte units (not used any more)
+  bb is the write threshold in 1024 byte units
   cc is the maximum number of tape buffers to allocate (the number of
         buffers is bounded also by the number of drives detected)
   dd is the maximum number of scatter/gather segments
@@ -315,24 +319,20 @@ MTSETDRVBUFFER
 	MT_ST_SETBOOLEANS
 	MT_ST_CLEARBOOLEANS
 	   Sets or clears the option bits.
+        MT_ST_WRITE_THRESHOLD
+           Sets the write threshold for this device to kilobytes
+           specified by the lowest bits.
 	MT_ST_DEF_BLKSIZE
 	   Defines the default block size set automatically. Value
 	   0xffffff means that the default is not used any more.
 	MT_ST_DEF_DENSITY
 	MT_ST_DEF_DRVBUFFER
-	   Used to set or clear the density (8 bits), and drive buffer
-	   state (3 bits). If the value is MT_ST_CLEAR_DEFAULT
-	   (0xfffff) the default will not be used any more. Otherwise
-	   the lowermost bits of the value contain the new value of
-	   the parameter.
 	MT_ST_DEF_COMPRESSION
-	   The compression default will not be used if the value of
-	   the lowermost byte is 0xff. Otherwise the lowermost bit
-	   contains the new default. If the bits 8-15 are set to a
-	   non-zero number, and this number is not 0xff, the number is
-	   used as the compression algorithm. The value
-	   MT_ST_CLEAR_DEFAULT can be used to clear the compression
-	   default.
+	   Used to set or clear the density (8 bits), drive buffer
+	   state (3 bits), and compression (single bit). If the value is
+	   MT_ST_CLEAR_DEFAULT (0xfffff), the default will not be used
+	   any more. Otherwise the lower-most bits of the value contain
+	   the new value of the parameter.
 	MT_ST_SET_TIMEOUT
 	   Set the normal timeout in seconds for this device. The
 	   default is 900 seconds (15 minutes). The timeout should be
@@ -387,11 +387,6 @@ MISCELLANEOUS COMPILE OPTIONS
 
 The recovered write errors are considered fatal if ST_RECOVERED_WRITE_FATAL
 is defined.
-
-By default, open() does not block if the drive is not ready. The
-behaviour can be changed by setting ST_BLOCKING_OPEN to one. The
-behaviour can be changed also with the boot/module option
-blocking_open. The blocking open times out after ST_BLOCK_SECONDS.
 
 The maximum number of tape devices is determined by the define
 ST_MAX_TAPES. If more tapes are detected at driver initialization, the

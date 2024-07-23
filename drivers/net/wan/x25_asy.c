@@ -619,7 +619,9 @@ static int x25_asy_open_tty(struct tty_struct *tty)
 	if (tty->driver.flush_buffer)  {
 		tty->driver.flush_buffer(tty);
 	}
-	tty_ldisc_flush(tty);
+	if (tty->ldisc.flush_buffer)  {
+		tty->ldisc.flush_buffer(tty);
+	}
 
 	/* Restore default settings */
 	sl->dev->type = ARPHRD_X25;

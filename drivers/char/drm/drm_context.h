@@ -27,12 +27,9 @@
  * Authors:
  *    Rickard E. (Rik) Faith <faith@valinux.com>
  *    Gareth Hughes <gareth@valinux.com>
- * ChangeLog:
- *  2001-11-16	Torsten Duwe <duwe@caldera.de>
- *		added context constructor/destructor hooks,
- *		needed by SiS driver's memory management.
  */
 
+#define __NO_VERSION__
 #include "drmP.h"
 
 #if __HAVE_CTX_BITMAP
@@ -319,10 +316,6 @@ int DRM(addctx)( struct inode *inode, struct file *filp,
 				/* Should this return -EBUSY instead? */
 		return -ENOMEM;
 	}
-#ifdef DRIVER_CTX_CTOR
-	if ( ctx.handle != DRM_KERNEL_CONTEXT )
-		DRIVER_CTX_CTOR(ctx.handle); /* XXX: also pass dev ? */
-#endif
 
 	if ( copy_to_user( (drm_ctx_t *)arg, &ctx, sizeof(ctx) ) )
 		return -EFAULT;
@@ -397,9 +390,6 @@ int DRM(rmctx)( struct inode *inode, struct file *filp,
 		priv->remove_auth_on_close = 1;
 	}
 	if ( ctx.handle != DRM_KERNEL_CONTEXT ) {
-#ifdef DRIVER_CTX_DTOR
-		DRIVER_CTX_DTOR(ctx.handle); /* XXX: also pass dev ? */
-#endif
 		DRM(ctxbitmap_free)( dev, ctx.handle );
 	}
 
@@ -554,7 +544,7 @@ static int DRM(alloc_queue)(drm_device_t *dev)
 				/* Allocate a new queue */
 	down(&dev->struct_sem);
 
-	queue = DRM(alloc)(sizeof(*queue), DRM_MEM_QUEUES);
+	queue = gamma_alloc(sizeof(*queue), DRM_MEM_QUEUES);
 	memset(queue, 0, sizeof(*queue));
 	atomic_set(&queue->use_count, 1);
 

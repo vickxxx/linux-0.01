@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.crt0.S 1.12 08/09/01 17:09:10 paulus
+ */
 /*    Copyright (c) 1997 Paul Mackerras <paulus@cs.anu.edu.au>
  *      Initial Power Macintosh COFF version.
  *    Copyright (c) 1999 Grant Erickson <grant@lcse.umn.edu>
@@ -19,7 +22,7 @@
  */
 
 #include <linux/config.h>
-#include <asm/ppc_asm.h>
+#include "../../kernel/ppc_asm.tmpl"
 
 	.text
 
@@ -34,9 +37,9 @@ __start:
 
 	## Flush and invalidate the caches for the range in memory covering
 	## the .text section of the boot loader
-
+	
 	lis	r9,_start@h		# r9 = &_start
-	lis	r8,_etext@ha		#
+	lis	r8,_etext@ha		# 
 	addi	r8,r8,_etext@l		# r8 = &_etext
 3:	dcbf	r0,r9			# Flush the data cache
 	icbi	r0,r9			# Invalidate the instruction cache
@@ -50,12 +53,12 @@ __start:
 
 	lis	r7,_end@ha
 	addi	r7,r7,_end@l		# r7 = &_end
-	lis	r8,__bss_start@ha	#
+	lis	r8,__bss_start@ha	# 
 	addi	r8,r8,__bss_start@l	# r8 = &_bss_start
 
 	## Determine how large an area, in number of words, to clear
-
-	subf	r7,r8,r7		# r7 = &_end - &_bss_start + 1
+	
+	subf	r7,r8,r7		# r7 = &_end - &_bss_start + 1 
 	addi	r7,r7,3			# r7 += 3
 	srwi.	r7,r7,2			# r7 = size in words.
 	beq	2f			# If the size is zero, do not bother
@@ -70,7 +73,7 @@ __start:
 	## Set up the stack
 
 	lis	r9,_start@h		# r9 = &_start (text section entry)
-	ori	r9,r9,_start@l
+	addi	r9,r9,_start@l
 	subi	r1,r9,64		# Start the stack 64 bytes below _start
 	clrrwi	r1,r1,4			# Make sure it is aligned on 16 bytes.
 	li	r0,0

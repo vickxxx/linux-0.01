@@ -116,8 +116,7 @@ static void setup_irix_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	regs->regs[5] = 0; /* XXX sigcode XXX */
 	regs->regs[6] = regs->regs[29] = sp;
 	regs->regs[7] = (unsigned long) ka->sa.sa_handler;
-	regs->regs[25] = regs->cp0_epc = (unsigned long) ka->sa_restorer;
-
+	regs->regs[25] = regs->cp0_epc = (unsigned long) ka->sa.sa_restorer;
 	return;
 
 segv_and_exit:
@@ -380,7 +379,7 @@ static inline void dump_sigact_irix5(struct sigact_irix5 *p)
 }
 #endif
 
-asmlinkage int
+asmlinkage int 
 irix_sigaction(int sig, const struct sigaction *act,
 	      struct sigaction *oact, void *trampoline)
 {
@@ -408,7 +407,7 @@ irix_sigaction(int sig, const struct sigaction *act,
 		 * value for all invocations of sigaction.  Will have to
 		 * investigate.  POSIX POSIX, die die die...
 		 */
-		new_ka.sa_restorer = trampoline;
+		new_ka.sa.sa_restorer = trampoline;
 	}
 
 /* XXX Implement SIG_SETMASK32 for IRIX compatibility */
@@ -676,53 +675,49 @@ repeat:
 			continue;
 		flag = 1;
 		switch (p->state) {
-		case TASK_STOPPED:
-			if (!p->exit_code)
+			case TASK_STOPPED:
+				if (!p->exit_code)
+					continue;
+				if (!(options & (W_TRAPPED|W_STOPPED)) &&
+				    !(p->ptrace & PT_PTRACED))
+					continue;
+				if (ru != NULL)
+					getrusage(p, RUSAGE_BOTH, ru);
+				__put_user(SIGCHLD, &info->sig);
+				__put_user(0, &info->code);
+				__put_user(p->pid, &info->stuff.procinfo.pid);
+				__put_user((p->exit_code >> 8) & 0xff,
+				           &info->stuff.procinfo.procdata.child.status);
+				__put_user(p->times.tms_utime, &info->stuff.procinfo.procdata.child.utime);
+				__put_user(p->times.tms_stime, &info->stuff.procinfo.procdata.child.stime);
+				p->exit_code = 0;
+				retval = 0;
+				goto end_waitsys;
+			case TASK_ZOMBIE:
+				current->times.tms_cutime += p->times.tms_utime + p->times.tms_cutime;
+				current->times.tms_cstime += p->times.tms_stime + p->times.tms_cstime;
+				if (ru != NULL)
+					getrusage(p, RUSAGE_BOTH, ru);
+				__put_user(SIGCHLD, &info->sig);
+				__put_user(1, &info->code);      /* CLD_EXITED */
+				__put_user(p->pid, &info->stuff.procinfo.pid);
+				__put_user((p->exit_code >> 8) & 0xff,
+				           &info->stuff.procinfo.procdata.child.status);
+				__put_user(p->times.tms_utime,
+				           &info->stuff.procinfo.procdata.child.utime);
+				__put_user(p->times.tms_stime,
+				           &info->stuff.procinfo.procdata.child.stime);
+				retval = 0;
+				if (p->p_opptr != p->p_pptr) {
+					REMOVE_LINKS(p);
+					p->p_pptr = p->p_opptr;
+					SET_LINKS(p);
+					notify_parent(p, SIGCHLD);
+				} else
+					release_task(p);
+				goto end_waitsys;
+			default:
 				continue;
-			if (!(options & (W_TRAPPED|W_STOPPED)) &&
-			    !(p->ptrace & PT_PTRACED))
-				continue;
-			read_unlock(&tasklist_lock);
-			if (ru != NULL)
-				getrusage(p, RUSAGE_BOTH, ru);
-			__put_user(SIGCHLD, &info->sig);
-			__put_user(0, &info->code);
-			__put_user(p->pid, &info->stuff.procinfo.pid);
-			__put_user((p->exit_code >> 8) & 0xff,
-			           &info->stuff.procinfo.procdata.child.status);
-			__put_user(p->times.tms_utime, &info->stuff.procinfo.procdata.child.utime);
-			__put_user(p->times.tms_stime, &info->stuff.procinfo.procdata.child.stime);
-			p->exit_code = 0;
-			retval = 0;
-			goto end_waitsys;
-		case TASK_ZOMBIE:
-			current->times.tms_cutime += p->times.tms_utime + p->times.tms_cutime;
-			current->times.tms_cstime += p->times.tms_stime + p->times.tms_cstime;
-			read_unlock(&tasklist_lock);
-			if (ru != NULL)
-				getrusage(p, RUSAGE_BOTH, ru);
-			__put_user(SIGCHLD, &info->sig);
-			__put_user(1, &info->code);      /* CLD_EXITED */
-			__put_user(p->pid, &info->stuff.procinfo.pid);
-			__put_user((p->exit_code >> 8) & 0xff,
-			           &info->stuff.procinfo.procdata.child.status);
-			__put_user(p->times.tms_utime,
-			           &info->stuff.procinfo.procdata.child.utime);
-			__put_user(p->times.tms_stime,
-			           &info->stuff.procinfo.procdata.child.stime);
-			retval = 0;
-			if (p->p_opptr != p->p_pptr) {
-				write_lock_irq(&tasklist_lock);
-				REMOVE_LINKS(p);
-				p->p_pptr = p->p_opptr;
-				SET_LINKS(p);
-				notify_parent(p, SIGCHLD);
-				write_unlock_irq(&tasklist_lock);
-			} else
-				release_task(p);
-			goto end_waitsys;
-		default:
-			continue;
 		}
 	}
 	read_unlock(&tasklist_lock);

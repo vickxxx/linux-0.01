@@ -81,9 +81,7 @@ static inline void copy_from_pc(void *to, const void *from, size_t n)
     n -= odd;
     while (n) {
 	*(u_short *)to = __raw_readw(from);
-	to = (void *)((long)to + 2);
-	from = (const void *)((long)from + 2);
-	n -= 2;
+	(char *)to += 2; (char *)from += 2; n -= 2;
     }
     if (odd)
 	*(u_char *)to = readb(from);
@@ -95,9 +93,7 @@ static inline void copy_to_pc(void *to, const void *from, size_t n)
     n -= odd;
     while (n) {
 	__raw_writew(*(u_short *)from, to);
-	to = (void *)((long)to + 2);
-	from = (const void *)((long)from + 2);
-	n -= 2;
+	(char *)to += 2; (char *)from += 2; n -= 2;
     }
     if (odd)
 	writeb(*(u_char *)from, to);
@@ -109,9 +105,7 @@ static inline void copy_pc_to_user(void *to, const void *from, size_t n)
     n -= odd;
     while (n) {
 	put_user(__raw_readw(from), (short *)to);
-	to = (void *)((long)to + 2);
-	from = (const void *)((long)from + 2);
-	n -= 2;
+	(char *)to += 2; (char *)from += 2; n -= 2;
     }
     if (odd)
 	put_user(readb(from), (char *)to);
@@ -126,9 +120,7 @@ static inline void copy_user_to_pc(void *to, const void *from, size_t n)
     while (n) {
 	get_user(s, (short *)from);
 	__raw_writew(s, to);
-	to = (void *)((long)to + 2);
-	from = (const void *)((long)from + 2);
-	n -= 2;
+	(char *)to += 2; (char *)from += 2; n -= 2;
     }
     if (odd) {
 	get_user(c, (char *)from);

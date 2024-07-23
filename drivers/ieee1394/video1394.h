@@ -21,8 +21,6 @@
 #ifndef _VIDEO_1394_H
 #define _VIDEO_1394_H
 
-#include "ieee1394-ioctl.h"
-
 #define VIDEO1394_DRIVER_NAME "video1394"
 
 #define VIDEO1394_MAX_SIZE 0x4000000
@@ -37,12 +35,11 @@ enum {
 	VIDEO1394_LISTEN_CHANNEL = 0,
 	VIDEO1394_UNLISTEN_CHANNEL,
 	VIDEO1394_LISTEN_QUEUE_BUFFER,
-	VIDEO1394_LISTEN_WAIT_BUFFER,  // wait until buffer is ready
+	VIDEO1394_LISTEN_WAIT_BUFFER,
 	VIDEO1394_TALK_CHANNEL,
 	VIDEO1394_UNTALK_CHANNEL,
 	VIDEO1394_TALK_QUEUE_BUFFER,
-	VIDEO1394_TALK_WAIT_BUFFER,
-	VIDEO1394_LISTEN_POLL_BUFFER   // return immediately with -EINTR if not ready
+	VIDEO1394_TALK_WAIT_BUFFER
 };
 
 #define VIDEO1394_SYNC_FRAMES          0x00000001
@@ -50,7 +47,7 @@ enum {
 #define VIDEO1394_VARIABLE_PACKET_SIZE 0x00000004
 
 struct video1394_mmap {
-	int channel;			/* -1 to find an open channel in LISTEN/TALK */
+	unsigned int channel;
 	unsigned int sync_tag;
 	unsigned int nb_buffers;
 	unsigned int buf_size;
@@ -72,7 +69,6 @@ struct video1394_queue_variable {
 struct video1394_wait {
 	unsigned int channel;
 	unsigned int buffer;
-	struct timeval filltime;	/* time of buffer full */
 };
 
 

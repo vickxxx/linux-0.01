@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.51.2.1 2002/03/14 01:26:21 kanoj Exp $
+# $Id: Makefile,v 1.49 2001/10/17 18:26:58 davem Exp $
 # sparc64/Makefile
 #
 # Makefile for the architecture dependent flags and dependencies on the
@@ -12,12 +12,11 @@
 # line...
 SHELL  =/bin/bash
 
-CC		:= $(shell if $(CC) -m64 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo $(CC); else echo sparc64-linux-gcc; fi )
+CC		:= $(shell if gcc -m64 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo gcc; else echo sparc64-linux-gcc; fi )
 
 NEW_GCC := $(shell if $(CC) -m64 -mcmodel=medlow -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo y; else echo n; fi; )
 NEW_GAS := $(shell if $(LD) -V 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
 UNDECLARED_REGS := $(shell if $(CC) -c -x assembler /dev/null -Wa,--help | grep undeclared-regs > /dev/null; then echo y; else echo n; fi; )
-INLINE_LIMIT := $(shell if $(CC) -m64 -finline-limit=100000 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo y; else echo n; fi; )
 
 export NEW_GCC
 
@@ -39,6 +38,11 @@ CC_UNDECL	= -Wa,--undeclared-regs
 AS		:= $(AS) --undeclared-regs
 endif
 
+#
+# Uncomment the first CFLAGS if you are doing kgdb source level
+# debugging of the kernel to get the proper debugging information.
+
+#CFLAGS := $(CFLAGS) -g -pipe -fcall-used-g5 -fcall-used-g7 
 ifneq ($(NEW_GCC),y)
   CFLAGS := $(CFLAGS) -pipe -mno-fpu -mtune=ultrasparc -mmedlow \
 	    -ffixed-g4 -fcall-used-g5 -fcall-used-g7 -Wno-sign-compare
@@ -49,13 +53,23 @@ else
   AFLAGS += -m64 -mcpu=ultrasparc $(CC_UNDECL)
 endif
 
-ifeq ($(INLINE_LIMIT),y)
-  CFLAGS := $(CFLAGS) -finline-limit=100000
+# Uncomment this to get spinlock/rwlock debugging on SMP.
+# DEBUG_SPINLOCK = 1
+
+ifdef CONFIG_SMP
+  ifdef DEBUG_SPINLOCK
+    CFLAGS += -DSPIN_LOCK_DEBUG
+    AFLAGS += -DSPIN_LOCK_DEBUG
+  endif
 endif
 
-ifeq ($(CONFIG_MCOUNT),y)
-  CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS))
-  CFLAGS := $(CFLAGS) -pg
+# Uncomment this to keep track of how often flush_dcache_page
+# actually flushes the caches, output via /proc/cpuinfo
+#
+# DEBUG_DCACHE_FLUSH = 1
+ifdef DEBUG_DCACHE_FLUSH
+  CFLAGS += -DDCFLUSH_DEBUG
+  AFLAGS += -DDCFLUSH_DEBUG
 endif
 
 LINKFLAGS = -T arch/sparc64/vmlinux.lds
@@ -85,6 +99,9 @@ LIBS := $(TOPDIR)/lib/lib.a $(LIBS) $(TOPDIR)/arch/sparc64/prom/promlib.a \
 vmlinux.aout: vmlinux
 	$(ELFTOAOUT) -o $(TOPDIR)/vmlinux.aout $(TOPDIR)/vmlinux
 
+archclean:
+	rm -f $(TOPDIR)/vmlinux.aout
+
 archmrproper:
 	rm -f $(TOPDIR)/include/asm-sparc64/asm_offsets.h
 
@@ -93,14 +110,5 @@ archdep: check_asm
 check_asm: include/linux/version.h
 	$(MAKE) -C arch/sparc64/kernel check_asm
 
-
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
-
-archclean:
-	@$(MAKEBOOT) clean
-
 tftpboot.img:
-	@$(MAKEBOOT) tftpboot.img
-
-image:
-	@$(MAKEBOOT) image
+	$(MAKE) -C arch/sparc64/boot tftpboot.img

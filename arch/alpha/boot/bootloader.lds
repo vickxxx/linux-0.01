@@ -1,6 +1,5 @@
 OUTPUT_FORMAT("elf64-alpha")
 ENTRY(__start)
-printk = srm_printk;
 SECTIONS
 {
   . = 0x20000000;

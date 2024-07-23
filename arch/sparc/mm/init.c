@@ -1,4 +1,4 @@
-/*  $Id: init.c,v 1.103 2001/11/19 19:03:08 davem Exp $
+/*  $Id: init.c,v 1.100 2001/09/21 22:51:47 davem Exp $
  *  linux/arch/sparc/mm/init.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -61,17 +61,13 @@ unsigned long totalhigh_pages;
 pte_t *kmap_pte;
 pgprot_t kmap_prot;
 
-/* These are set in {srmmu,sun4c}_paging_init() */
-unsigned long fix_kmap_begin;
-unsigned long fix_kmap_end;
-
 #define kmap_get_fixed_pte(vaddr) \
 	pte_offset(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
 
 void __init kmap_init(void)
 {
 	/* cache the first kmap pte */
-	kmap_pte = kmap_get_fixed_pte(fix_kmap_begin);
+	kmap_pte = kmap_get_fixed_pte(FIX_KMAP_BEGIN);
 	kmap_prot = __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE);
 }
 
@@ -414,6 +410,9 @@ void __init mem_init(void)
 	int datapages = 0;
 	int initpages = 0; 
 	int i;
+#ifdef CONFIG_BLK_DEV_INITRD
+	unsigned long addr, last;
+#endif
 
 	highmem_start_page = mem_map + highstart_pfn;
 
@@ -463,7 +462,7 @@ void __init mem_init(void)
 	initpages = (((unsigned long) &__init_end) - ((unsigned long) &__init_begin));
 	initpages = PAGE_ALIGN(initpages) >> PAGE_SHIFT;
 
-	printk(KERN_INFO "Memory: %dk available (%dk kernel code, %dk data, %dk init, %ldk highmem) [%08lx,%08lx]\n",
+	printk("Memory: %dk available (%dk kernel code, %dk data, %dk init, %ldk highmem) [%08lx,%08lx]\n",
 	       nr_free_pages() << (PAGE_SHIFT-10),
 	       codepages << (PAGE_SHIFT-10),
 	       datapages << (PAGE_SHIFT-10), 
@@ -490,14 +489,14 @@ void free_initmem (void)
 		totalram_pages++;
 		num_physpages++;
 	}
-	printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
+	printk ("Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
 	if (start < end)
-		printk (KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+		printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 	for (; start < end; start += PAGE_SIZE) {
 		struct page *p = virt_to_page(start);
 

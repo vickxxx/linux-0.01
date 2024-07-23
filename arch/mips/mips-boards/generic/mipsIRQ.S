@@ -56,10 +56,6 @@
  *             6        Hardware (ignored)
  *             7        R4k timer (what we use)
  *
- * Note: On the SEAD board thing are a little bit different.
- *       Here IRQ 2 (hw0) is wired to the UART0 and IRQ 3 (hw1) is wired
- *       wired to UART1.
- *
  * We handle the IRQ according to _our_ priority which is:
  *
  * Highest ----     R4k Timer
@@ -78,9 +74,7 @@
 	CLI
 	.set	at
 
-	mfc0	s0, CP0_CAUSE		# get irq bits
-	mfc0	s1, CP0_STATUS		# get irq mask
-	and	s0, s1
+	mfc0	s0, CP0_CAUSE		# get irq mask
 
 	/* First we check for r4k counter/timer IRQ. */
 	andi	a0, s0, CAUSEF_IP7
@@ -96,23 +90,16 @@
 	 nop
 
 1:
-#if defined(CONFIG_MIPS_SEAD)
 	beq	a0, zero, 1f
-	 andi	a0, s0, CAUSEF_IP3	# delay slot, check hw1 interrupt
-#else
-	beq	a0, zero, 1f		# delay slot, check hw3 interrupt
- 	 andi	a0, s0, CAUSEF_IP5
-#endif
+	 nop
 
 	/* Wheee, combined hardware level zero interrupt. */
 #if defined(CONFIG_MIPS_ATLAS)
 	jal	atlas_hw0_irqdispatch
 #elif defined(CONFIG_MIPS_MALTA)
 	jal	malta_hw0_irqdispatch
-#elif defined(CONFIG_MIPS_SEAD)
-	jal	sead_hw0_irqdispatch
 #else
-#error "MIPS board not supported\n"
+#error "MIPS board not supported\n"	
 #endif
 	 move	a0, sp			# delay slot
 
@@ -120,24 +107,6 @@
 	 nop				# delay slot
 
 1:
-#if defined(CONFIG_MIPS_SEAD)
-	beq	a0, zero, 1f
-	 andi	a0, s0, CAUSEF_IP5	# delay slot, check hw3 interrupt
-	jal	sead_hw1_irqdispatch
-	 move	a0, sp			# delay slot
-	j	ret_from_irq
-	 nop				# delay slot
-1:
-#endif
-#if defined(CONFIG_MIPS_MALTA)
-	beq	a0, zero, 1f            # check hw3 (coreHI) interrupt
-	 nop
-	jal	corehi_irqdispatch
-	 move	a0, sp
-	j	ret_from_irq
-	 nop
-1:
-#endif
 	/*
 	 * Here by mistake?  This is possible, what can happen is that by the
 	 * time we take the exception the IRQ pin goes low, so just leave if

@@ -33,8 +33,7 @@ int inode_change_ok(struct inode *inode, struct iattr *attr)
 
 	/* Make sure caller can chgrp. */
 	if ((ia_valid & ATTR_GID) &&
-	    (current->fsuid != inode->i_uid ||
-	    (!in_group_p(attr->ia_gid) && attr->ia_gid != inode->i_gid)) &&
+	    (!in_group_p(attr->ia_gid) && attr->ia_gid != inode->i_gid) &&
 	    !capable(CAP_CHOWN))
 		goto error;
 
@@ -145,7 +144,7 @@ int notify_change(struct dentry * dentry, struct iattr * attr)
 	if (!error) {
 		unsigned long dn_mask = setattr_mask(ia_valid);
 		if (dn_mask)
-			dnotify_parent(dentry, dn_mask);
+			inode_dir_notify(dentry->d_parent->d_inode, dn_mask);
 	}
 	return error;
 }

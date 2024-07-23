@@ -110,7 +110,6 @@ int add_partition(kdev_t dev, struct blkpg_partition *p) {
 	g->part[minor].nr_sects = plength;
 	if (g->sizes)
 		g->sizes[minor] = (plength >> (BLOCK_SIZE_BITS - 9));
-	devfs_register_partitions (g, first_minor, 0);
 	return 0;
 }
 
@@ -158,7 +157,6 @@ int del_partition(kdev_t dev, struct blkpg_partition *p) {
 	g->part[minor].nr_sects = 0;
 	if (g->sizes)
 		g->sizes[minor] = 0;
-	devfs_register_partitions (g, first_minor, 0);
 
 	return 0;
 }
@@ -249,7 +247,7 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 			if (cmd == BLKGETSIZE)
 				return put_user((unsigned long)ullval, (unsigned long *)arg);
 			else
-				return put_user(ullval << 9, (u64 *)arg);
+				return put_user(ullval, (u64 *)arg);
 #if 0
 		case BLKRRPART: /* Re-read partition tables */
 			if (!capable(CAP_SYS_ADMIN)) 

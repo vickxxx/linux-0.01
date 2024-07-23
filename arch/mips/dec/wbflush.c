@@ -11,18 +11,15 @@
  * for more details.
  *
  * Copyright (C) 1998 Harald Koerfgen
- * Copyright (C) 2002 Maciej W. Rozycki
  */
 
-#include <linux/init.h>
-
 #include <asm/bootinfo.h>
-#include <asm/system.h>
-#include <asm/wbflush.h>
+#include <linux/init.h>
 
 static void wbflush_kn01(void);
 static void wbflush_kn210(void);
-static void wbflush_mips(void);
+static void wbflush_kn02ba(void);
+static void wbflush_kn03(void);
 
 void (*__wbflush) (void);
 
@@ -30,24 +27,28 @@ void __init wbflush_setup(void)
 {
 	switch (mips_machtype) {
 	case MACH_DS23100:
+	    __wbflush = wbflush_kn01;
+	    break;
+	case MACH_DS5100:	/*  DS5100 MIPSMATE */
+	    __wbflush = wbflush_kn210;
+	    break;
 	case MACH_DS5000_200:	/* DS5000 3max */
-		__wbflush = wbflush_kn01;
-		break;
-	case MACH_DS5100:	/* DS5100 MIPSMATE */
-		__wbflush = wbflush_kn210;
-		break;
+	    __wbflush = wbflush_kn01;
+	    break;
 	case MACH_DS5000_1XX:	/* DS5000/100 3min */
-	case MACH_DS5000_XX:	/* Personal DS5000/2x */
+	    __wbflush = wbflush_kn02ba;
+	    break;
 	case MACH_DS5000_2X0:	/* DS5000/240 3max+ */
-	case MACH_DS5900:	/* DS5900 bigmax */
-	default:
-		__wbflush = wbflush_mips;
-		break;
+	    __wbflush = wbflush_kn03;
+	    break;
+	case MACH_DS5000_XX:	/* Personal DS5000/2x */
+	    __wbflush = wbflush_kn02ba;
+	    break;
 	}
 }
 
 /*
- * For the DS3100 and DS5000/200 the R2020/R3220 writeback buffer functions
+ * For the DS3100 and DS5000/200 the writeback buffer functions
  * as part of Coprocessor 0.
  */
 static void wbflush_kn01(void)
@@ -77,16 +78,29 @@ static void wbflush_kn210(void)
 	"mtc0\t$2,$12\n\t"
 	"nop\n\t"
 	".set\tpop"
-	: : : "$2", "$3");
+  : : :"$2", "$3");
 }
 
 /*
- * I/O ASIC systems use a standard writeback buffer that gets flushed
- * upon an uncached read.
+ * Looks like some magic with the System Interrupt Mask Register
+ * in the famous IOASIC for kmins and maxines.
  */
-static void wbflush_mips(void)
+static void wbflush_kn02ba(void)
 {
-	__fast_iob();
+    asm(".set\tpush\n\t"
+	".set\tnoreorder\n\t"
+	"lui\t$2,0xbc04\n\t"
+	"lw\t$3,0x120($2)\n\t"
+	"lw\t$3,0x120($2)\n\t"
+	".set\tpop"
+  : : :"$2", "$3");
+}
+
+/*
+ * The DS500/2x0 doesnt need to write back the WB.
+ */
+static void wbflush_kn03(void)
+{
 }
 
 #include <linux/module.h>

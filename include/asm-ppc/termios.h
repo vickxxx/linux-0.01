@@ -1,3 +1,6 @@
+/*
+ * BK Id: SCCS/s.termios.h 1.8 05/17/01 18:14:26 cort
+ */
 #ifndef _PPC_TERMIOS_H
 #define _PPC_TERMIOS_H
 
@@ -152,8 +155,8 @@ struct termio {
 
 #ifdef __KERNEL__
 /*                   ^C  ^\ del  ^U  ^D   1   0   0   0   0  ^W  ^R  ^Z  ^Q  ^S  ^V  ^U  */
-#define INIT_C_CC "\003\034\177\025\004\001\000\000\000\000\027\022\032\021\023\026\025"
-#endif	/* __KERNEL__ */
+#define INIT_C_CC "\003\034\177\025\004\001\000\000\000\000\027\022\032\021\023\026\025" 
+#endif
 
 /* modem lines */
 #define TIOCM_LE	0x001
@@ -170,7 +173,6 @@ struct termio {
 #define TIOCM_OUT1	0x2000
 #define TIOCM_OUT2	0x4000
 #define TIOCM_LOOP	0x8000
-#define TIOCM_MODEM_BITS TIOCM_OUT2
 
 /* ioctl (fd, TIOCSERGETLSR, &result) where result may be as below */
 #define TIOCSER_TEMT    0x01	/* Transmitter physically empty */

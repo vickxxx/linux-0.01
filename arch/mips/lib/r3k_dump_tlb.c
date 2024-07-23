@@ -12,30 +12,31 @@
 
 #include <asm/bootinfo.h>
 #include <asm/cachectl.h>
-#include <asm/cpu.h>
 #include <asm/mipsregs.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 
-extern int r3k_have_wired_reg;	/* defined in tlb-r3k.c */
+#define mips_tlb_entries 64
 
-void dump_tlb(int first, int last)
+void
+dump_tlb(int first, int last)
 {
 	int	i;
 	unsigned int asid;
 	unsigned long entryhi, entrylo0;
 
-	asid = read_c0_entryhi() & 0xfc0;
+	asid = get_entryhi() & 0xfc0;
 
-	for (i = first; i <= last; i++) {
-		write_c0_index(i<<8);
+	for(i=first;i<=last;i++)
+	{
+		write_32bit_cp0_register(CP0_INDEX, i<<8);
 		__asm__ __volatile__(
 			".set\tnoreorder\n\t"
 			"tlbr\n\t"
 			"nop\n\t"
 			".set\treorder");
-		entryhi  = read_c0_entryhi();
-		entrylo0 = read_c0_entrylo0();
+		entryhi  = read_32bit_cp0_register(CP0_ENTRYHI);
+		entrylo0 = read_32bit_cp0_register(CP0_ENTRYLO0);
 
 		/* Unused entries have a virtual address of KSEG0.  */
 		if ((entryhi & 0xffffe000) != 0x80000000
@@ -58,34 +59,37 @@ void dump_tlb(int first, int last)
 	}
 	printk("\n");
 
-	write_c0_entryhi(asid);
+	set_entryhi(asid);
 }
 
-void dump_tlb_all(void)
+void
+dump_tlb_all(void)
 {
-	dump_tlb(0, current_cpu_data.tlbsize - 1);
+	dump_tlb(0, mips_tlb_entries - 1);
 }
 
-void dump_tlb_wired(void)
+void
+dump_tlb_wired(void)
 {
-	int wired = r3k_have_wired_reg ? read_c0_wired() : 8;
+	int	wired = 7;
 
 	printk("Wired: %d", wired);
-	dump_tlb(0, wired - 1);
+	dump_tlb(0, read_32bit_cp0_register(CP0_WIRED));
 }
 
-void dump_tlb_addr(unsigned long addr)
+void
+dump_tlb_addr(unsigned long addr)
 {
-	unsigned long flags, oldpid;
+	unsigned int flags, oldpid;
 	int index;
 
-	local_irq_save(flags);
-	oldpid = read_c0_entryhi() & 0xff;
-	write_c0_entryhi((addr & PAGE_MASK) | oldpid);
+	__save_and_cli(flags);
+	oldpid = get_entryhi() & 0xff;
+	set_entryhi((addr & PAGE_MASK) | oldpid);
 	tlb_probe();
-	index = read_c0_index();
-	write_c0_entryhi(oldpid);
-	local_irq_restore(flags);
+	index = get_index();
+	set_entryhi(oldpid);
+	__restore_flags(flags);
 
 	if (index < 0) {
 		printk("No entry for address 0x%08lx in TLB\n", addr);
@@ -96,13 +100,14 @@ void dump_tlb_addr(unsigned long addr)
 	dump_tlb(index, index);
 }
 
-void dump_tlb_nonwired(void)
+void
+dump_tlb_nonwired(void)
 {
-	int wired = r3k_have_wired_reg ? read_c0_wired() : 8;
-	dump_tlb(wired, current_cpu_data.tlbsize - 1);
+	dump_tlb(8, mips_tlb_entries - 1);
 }
 
-void dump_list_process(struct task_struct *t, void *address)
+void
+dump_list_process(struct task_struct *t, void *address)
 {
 	pgd_t	*page_dir, *pgd;
 	pmd_t	*pmd;
@@ -141,12 +146,14 @@ void dump_list_process(struct task_struct *t, void *address)
 	printk("\n");
 }
 
-void dump_list_current(void *address)
+void
+dump_list_current(void *address)
 {
 	dump_list_process(current, address);
 }
 
-unsigned int vtop(void *address)
+unsigned int
+vtop(void *address)
 {
 	pgd_t	*pgd;
 	pmd_t	*pmd;
@@ -163,14 +170,16 @@ unsigned int vtop(void *address)
 	return paddr;
 }
 
-void dump16(unsigned long *p)
+void
+dump16(unsigned long *p)
 {
 	int i;
 
-	for (i = 0; i < 8; i++) {
-		printk("*%08lx == %08lx, ", (unsigned long)p, *p);
-		p++;
-		printk("*%08lx == %08lx\n", (unsigned long)p, *p);
-		p++;
+	for(i=0;i<8;i++)
+	{
+		printk("*%08lx == %08lx, ",
+		       (unsigned long)p, (unsigned long)*p++);
+		printk("*%08lx == %08lx\n",
+		       (unsigned long)p, (unsigned long)*p++);
 	}
 }

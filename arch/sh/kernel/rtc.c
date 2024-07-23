@@ -23,7 +23,7 @@
 
 void sh_rtc_gettimeofday(struct timeval *tv)
 {
-	unsigned int sec128, sec, min, hr, wk, day, mon, yr, yr100, badval;
+	unsigned int sec128, sec, min, hr, wk, day, mon, yr, yr100;
 
  again:
 	do {
@@ -46,28 +46,23 @@ void sh_rtc_gettimeofday(struct timeval *tv)
 	} while ((ctrl_inb(RCR1) & RCR1_CF) != 0);
 
 #if RTC_BIT_INVERTED != 0
-	/* Work around to avoid reading incorrect value. */
+	/* Work around to avoid reading correct value. */
 	if (sec128 == RTC_BIT_INVERTED) {
 		schedule_timeout(1);
 		goto again;
 	}
 #endif
 
-	badval = ((yr & 15) > 9 || (mon & 15) > 9 || (day & 15) > 9 ||
-		 (hr & 15) > 9 || (min & 15) > 9 || (sec & 15) > 9);
+	BCD_TO_BIN(yr100);
+	BCD_TO_BIN(yr);
+	BCD_TO_BIN(mon);
+	BCD_TO_BIN(day);
+	BCD_TO_BIN(hr);
+	BCD_TO_BIN(min);
+	BCD_TO_BIN(sec);
 
-	if (!badval) {
-		BCD_TO_BIN(yr100);
-		BCD_TO_BIN(yr);
-		BCD_TO_BIN(mon);
-		BCD_TO_BIN(day);
-		BCD_TO_BIN(hr);
-		BCD_TO_BIN(min);
-		BCD_TO_BIN(sec);
-	}
-
-	if (badval || yr > 99 || mon < 1 || mon > 12 || day > 31 || day < 1 ||
-	    hr > 23 || min > 59 || sec > 59 || (yr100 != 19 && yr100 != 20)) {
+	if (yr > 99 || mon < 1 || mon > 12 || day > 31 || day < 1 ||
+	    hr > 23 || min > 59 || sec > 59) {
 		printk(KERN_ERR
 		       "SH RTC: invalid value, resetting to 1 Jan 2000\n");
 		ctrl_outb(RCR2_RESET, RCR2);  /* Reset & Stop */
@@ -86,18 +81,12 @@ void sh_rtc_gettimeofday(struct timeval *tv)
 		goto again;
 	}
 
-#if RTC_BIT_INVERTED != 0
-	if ((sec128 & RTC_BIT_INVERTED))
-		sec--;
-#endif
-
 	tv->tv_sec = mktime(yr100 * 100 + yr, mon, day, hr, min, sec);
-	tv->tv_usec = (sec128 * 1000000) / 128;
+	tv->tv_usec = ((sec128 ^ RTC_BIT_INVERTED) * 1000000) / 128;
 }
 
-int sh_rtc_settimeofday(const struct timeval *tv)
+static int set_rtc_time(unsigned long nowtime)
 {
-	unsigned long nowtime = tv->tv_sec;
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
 
@@ -133,4 +122,13 @@ int sh_rtc_settimeofday(const struct timeval *tv)
 	ctrl_outb(RCR2_RTCEN|RCR2_START, RCR2);  /* Start RTC */
 
 	return retval;
+}
+
+int sh_rtc_settimeofday(const struct timeval *tv)
+{
+#if RTC_BIT_INVERTED != 0
+	/* This is not accurate, but better than nothing. */
+	schedule_timeout(HZ/2);
+#endif
+	return set_rtc_time(tv->tv_sec);
 }

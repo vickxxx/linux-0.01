@@ -49,9 +49,7 @@ static void set_brk(unsigned long start, unsigned long end)
 	end = PAGE_ALIGN(end);
 	if (end <= start)
 		return;
-	down_write(&current->mm->mmap_sem);
 	do_brk(start, end - start);
-	up_write(&current->mm->mmap_sem);
 }
 
 /*
@@ -203,7 +201,6 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	unsigned long error;
 	unsigned long fd_offset;
 	unsigned long rlim;
-	unsigned char orig_thr_flags;
 	int retval;
 
 	ex = *((struct exec *) bprm->buf);		/* exec-header */
@@ -248,14 +245,10 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if (N_MAGIC(ex) == NMAGIC) {
 		loff_t pos = fd_offset;
 		/* Fuck me plenty... */
-		down_write(&current->mm->mmap_sem);
 		error = do_brk(N_TXTADDR(ex), ex.a_text);
-		up_write(&current->mm->mmap_sem);
 		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
 			  ex.a_text, &pos);
-		down_write(&current->mm->mmap_sem);
 		error = do_brk(N_DATADDR(ex), ex.a_data);
-		up_write(&current->mm->mmap_sem);
 		bprm->file->f_op->read(bprm->file, (char *) N_DATADDR(ex),
 			  ex.a_data, &pos);
 		goto beyond_if;
@@ -263,11 +256,8 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 	if (N_MAGIC(ex) == OMAGIC) {
 		loff_t pos = fd_offset;
-		down_write(&current->mm->mmap_sem);
 		do_brk(N_TXTADDR(ex) & PAGE_MASK,
 			ex.a_text+ex.a_data + PAGE_SIZE - 1);
-		up_write(&current->mm->mmap_sem);
-		
 		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
 			  ex.a_text+ex.a_data, &pos);
 	} else {
@@ -281,9 +271,7 @@ static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 		if (!bprm->file->f_op->mmap) {
 			loff_t pos = fd_offset;
-			down_write(&current->mm->mmap_sem);
 			do_brk(0, ex.a_text+ex.a_data);
-			up_write(&current->mm->mmap_sem);
 			bprm->file->f_op->read(bprm->file,(char *)N_TXTADDR(ex),
 				  ex.a_text+ex.a_data, &pos);
 			goto beyond_if;
@@ -317,14 +305,8 @@ beyond_if:
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
-	/* Make sure STACK_TOP returns the right thing.  */
-	orig_thr_flags = current->thread.flags;
-	current->thread.flags |= SPARC_FLAG_32BIT;
-
 	retval = setup_arg_pages(bprm);
 	if (retval < 0) { 
-		current->thread.flags = orig_thr_flags;
-
 		/* Someone check-me: is this error path enough? */ 
 		send_sig(SIGKILL, current, 0); 
 		return retval;
@@ -332,7 +314,7 @@ beyond_if:
 
 	current->mm->start_stack =
 		(unsigned long) create_aout32_tables((char *)bprm->p, bprm);
-	if (!(orig_thr_flags & SPARC_FLAG_32BIT)) {
+	if (!(current->thread.flags & SPARC_FLAG_32BIT)) {
 		unsigned long pgd_cache;
 
 		pgd_cache = ((unsigned long)current->mm->pgd[0])<<11UL;
@@ -341,6 +323,7 @@ beyond_if:
 				     : /* no outputs */
 				     : "r" (pgd_cache),
 				       "r" (TSB_REG), "i" (ASI_DMMU));
+		current->thread.flags |= SPARC_FLAG_32BIT;
 	}
 	start_thread32(regs, ex.a_entry, current->mm->start_stack);
 	if (current->ptrace & PT_PTRACED)
@@ -399,9 +382,7 @@ static int load_aout32_library(struct file *file)
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
 	if (bss > len) {
-		down_write(&current->mm->mmap_sem);
 		error = do_brk(start_addr + len, bss - len);
-		up_write(&current->mm->mmap_sem);
 		retval = error;
 		if (error != start_addr + len)
 			goto out;

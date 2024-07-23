@@ -50,8 +50,6 @@
 #define JOYDEV_MINORS		32
 #define JOYDEV_BUFFER_SIZE	64
 
-#define MSECS(t)	(1000 * ((t) / HZ) + 1000 * ((t) % HZ) / HZ)
-
 struct joydev {
 	int exist;
 	int open;
@@ -136,7 +134,7 @@ static void joydev_event(struct input_handle *handle, unsigned int type, unsigne
 			return;
 	}  
 
-	event.time = MSECS(jiffies);
+	event.time = jiffies * (1000 / HZ);
 
 	while (list) {
 
@@ -231,9 +229,6 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 	if (count < sizeof(struct js_event))
 		return -EINVAL;
-	
-	if (!joydev->exist)
-		return -ENODEV;
 
 	if (count == sizeof(struct JS_DATA_TYPE)) {
 
@@ -261,10 +256,6 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 		while (list->head == list->tail) {
 
-			if (!joydev->exist) {
-                                retval = -ENODEV;
-                                break;
-                        }
 			if (file->f_flags & O_NONBLOCK) {
 				retval = -EAGAIN;
 				break;
@@ -288,7 +279,7 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 
 		struct js_event event;
 
-		event.time = MSECS(jiffies);
+		event.time = jiffies * (1000/HZ);
 
 		if (list->startup < joydev->nkey) {
 			event.type = JS_EVENT_BUTTON | JS_EVENT_INIT;
@@ -336,9 +327,6 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	struct input_dev *dev = joydev->handle.dev;
 	int i;
 
-	if (!joydev->exist)
-		return -ENODEV;
-
 	switch (cmd) {
 
 		case JS_SET_CAL:
@@ -375,9 +363,9 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			return copy_to_user((struct js_corr *) arg, joydev->corr,
 						sizeof(struct js_corr) * joydev->nabs) ? -EFAULT : 0;
 		case JSIOCSAXMAP:
-			if (copy_from_user(joydev->abspam, (__u8 *) arg, sizeof(__u8) * ABS_MAX))
+			if (copy_from_user((__u8 *) arg, joydev->abspam, sizeof(__u8) * ABS_MAX))
 				return -EFAULT;
-			for (i = 0; i < joydev->nabs; i++) {
+			for (i = 0; i < ABS_MAX; i++) {
 				if (joydev->abspam[i] > ABS_MAX) return -EINVAL;
 				joydev->absmap[joydev->abspam[i]] = i;
 			}
@@ -386,11 +374,11 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			return copy_to_user((__u8 *) arg, joydev->abspam,
 						sizeof(__u8) * ABS_MAX) ? -EFAULT : 0;
 		case JSIOCSBTNMAP:
-			if (copy_from_user(joydev->keypam, (__u16 *) arg, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
+			if (copy_from_user((__u16 *) arg, joydev->absmap, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
 				return -EFAULT;
-			for (i = 0; i < joydev->nkey; i++) {
+			for (i = 0; i < KEY_MAX - BTN_MISC; i++); {
 				if (joydev->keypam[i] > KEY_MAX || joydev->keypam[i] < BTN_MISC) return -EINVAL;
-				joydev->keymap[joydev->keypam[i] - BTN_MISC] = i;
+				joydev->keymap[joydev->abspam[i - BTN_MISC]] = i;
 			}
 			return 0;
 		case JSIOCGBTNMAP:
@@ -423,7 +411,7 @@ static struct file_operations joydev_fops = {
 static struct input_handle *joydev_connect(struct input_handler *handler, struct input_dev *dev)
 {
 	struct joydev *joydev;
-	int i, j, t, minor;
+	int i, j, minor;
 
 	if (!(test_bit(EV_KEY, dev->evbit) && test_bit(EV_ABS, dev->evbit) &&
 	     (test_bit(ABS_X, dev->absbit) || test_bit(ABS_Y, dev->absbit)) &&
@@ -482,10 +470,8 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 		joydev->corr[i].prec = dev->absfuzz[j];
 		joydev->corr[i].coef[0] = (dev->absmax[j] + dev->absmin[j]) / 2 - dev->absflat[j];
 		joydev->corr[i].coef[1] = (dev->absmax[j] + dev->absmin[j]) / 2 + dev->absflat[j];
-		if (!(t = ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j])))
-			continue;
-		joydev->corr[i].coef[2] = (1 << 29) / t;
-		joydev->corr[i].coef[3] = (1 << 29) / t;
+		joydev->corr[i].coef[2] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
+		joydev->corr[i].coef[3] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
 
 		joydev->abs[i] = joydev_correct(dev->abs[j], joydev->corr + i);
 	}

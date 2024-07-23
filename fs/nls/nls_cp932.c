@@ -7904,7 +7904,6 @@ static void __exit exit_nls_cp932(void)
 
 module_init(init_nls_cp932)
 module_exit(exit_nls_cp932)
-MODULE_LICENSE("Dual BSD/GPL");
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

@@ -1,4 +1,6 @@
 /*
+ * BK Id: %F% %I% %G% %U% %#%
+ *
  *  PowerPC version derived from arch/arm/mm/consistent.c
  *    Copyright (C) 2001 Dan Malek (dmalek@jlc.net)
  *
@@ -11,7 +13,6 @@
  * is the virtual address and 'dma_handle' is the physical address.
  * Mostly stolen from the ARM port, with some changes for PowerPC.
  *						-- Dan
- * Modified for 36-bit support.  -Matt
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -49,24 +50,14 @@
 #include <asm/smp.h>
 #include <asm/machdep.h>
 
-#include "mmu_decl.h"
+extern int get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep);
 
-extern int map_page(unsigned long va, phys_addr_t pa, int flags);
-
-/* This function will allocate the requested contiguous pages and
- * map them into the kernel's vmalloc() space.  This is done so we
- * get unique mapping for these pages, outside of the kernel's 1:1
- * virtual:physical mapping.  This is necessary so we can cover large
- * portions of the kernel with single large page TLB entries, and
- * still get unique uncached pages for consistent DMA.
- */
 void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
 {
-	int order, err, i;
-	unsigned long page, va, flags;
-	phys_addr_t pa;
-	struct vm_struct *area;
-	void	 *ret;
+	int order, rsize;
+	unsigned long page;
+	void *ret;
+	pte_t	*pte;
 
 	if (in_interrupt())
 		BUG();
@@ -88,41 +79,23 @@ void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
 	 */
 	invalidate_dcache_range(page, page + size);
 
-	/* Allocate some common virtual space to map the new pages.
+	ret = (void *)page;
+	*dma_handle = virt_to_bus(ret);
+
+	/* Chase down all of the PTEs and mark them uncached.
 	*/
-	area = get_vm_area(size, VM_ALLOC);
-	if (area == 0) {
-		free_pages(page, order);
-		return NULL;
-	}
-	va = VMALLOC_VMADDR(area->addr);
-	ret = (void *)va;
-
-	/* This gives us the real physical address of the first page.
-	*/
-	*dma_handle = pa = virt_to_bus((void *)page);
-
-	flags = _PAGE_KERNEL | _PAGE_NO_CACHE;
-
-	/*
-	 * Set refcount=1 on all pages in an order>0
-	 * allocation so that vfree() will actually
-	 * free all pages that were allocated. 
-	 */
-	if (order > 0)
-	{
-		struct page *rpage = virt_to_page(page);
-		for (i = 1; i < (1 << order); i++)
-			set_page_count(rpage+i, 1);
-	}
-
-	err = 0;
-	for (i = 0; i < size && err == 0; i += PAGE_SIZE)
-		err = map_page(va+i, pa+i, flags);
-	
-	if (err) {
-		vfree((void *)va);
-		return NULL;
+	rsize = (int)size;
+	while (rsize > 0) {
+		if (get_pteptr(&init_mm, page, &pte)) {
+			pte_val(*pte) |= _PAGE_NO_CACHE | _PAGE_GUARDED;
+			flush_tlb_page(find_vma(&init_mm,page),page);
+		}
+		else {
+			BUG();
+			return NULL;
+		}
+		page += PAGE_SIZE;
+		rsize -= PAGE_SIZE;
 	}
 
 	return ret;
@@ -130,12 +103,42 @@ void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
 
 /*
  * free page(s) as defined by the above mapping.
+ * The caller has to tell us the size so we can free the proper number
+ * of pages.  We can't vmalloc() a new space for these pages and simply
+ * call vfree() like some other architectures because we could end up
+ * with aliased cache lines (or at least a cache line with the wrong
+ * attributes).  This can happen when the PowerPC speculative loads
+ * across page boundaries.
  */
-void consistent_free(void *vaddr)
+void consistent_free(void *vaddr, size_t size)
 {
+	int order, rsize;
+	unsigned long addr;
+	pte_t	*pte;
+
 	if (in_interrupt())
 		BUG();
-	vfree(vaddr);
+
+	size = PAGE_ALIGN(size);
+	order = get_order(size);
+
+	/* Chase down all of the PTEs and mark them cached again.
+	*/
+	addr = (unsigned long)vaddr;
+	rsize = (int)size;
+	while (rsize > 0) {
+		if (get_pteptr(&init_mm, addr, &pte)) {
+			pte_val(*pte) &= ~(_PAGE_NO_CACHE | _PAGE_GUARDED);
+			flush_tlb_page(find_vma(&init_mm,addr),addr);
+		}
+		else {
+			BUG();
+			return;
+		}
+		addr += PAGE_SIZE;
+		rsize -= PAGE_SIZE;
+	}
+	free_pages((unsigned long)vaddr, order);
 }
 
 /*
@@ -159,18 +162,4 @@ void consistent_sync(void *vaddr, size_t size, int direction)
 		flush_dcache_range(start, end);
 		break;
 	}
-}
-
-/*
- * consistent_sync_page make a page are consistent. identical
- * to consistent_sync, but takes a struct page instead of a virtual address
- */
-
-void consistent_sync_page(struct page *page, unsigned long offset,
-size_t size, int direction)
-{
-	void *start;
-
-	start = page_address(page) + offset; 
-	consistent_sync(start, size, direction);
 }

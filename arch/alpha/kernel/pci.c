@@ -19,7 +19,6 @@
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/bootmem.h>
-#include <linux/slab.h>
 #include <asm/machvec.h>
 
 #include "proto.h"
@@ -42,8 +41,6 @@ const char *const pci_mem_names[] = {
 
 const char pci_hae0_name[] = "HAE0";
 
-/* Indicate whether we respect the PCI setup left by console. */
-int pci_probe_only;
 
 /*
  * The PCI controller list.
@@ -66,6 +63,17 @@ static void __init
 quirk_isa_bridge(struct pci_dev *dev)
 {
 	dev->class = PCI_CLASS_BRIDGE_ISA << 8;
+}
+
+static void __init
+quirk_ali_ide_ports(struct pci_dev *dev)
+{
+	if (dev->resource[0].end == 0xffff)
+		dev->resource[0].end = dev->resource[0].start + 7;
+	if (dev->resource[2].end == 0xffff)
+		dev->resource[2].end = dev->resource[2].start + 7;
+	if (dev->resource[3].end == 0xffff)
+		dev->resource[3].end = dev->resource[3].start + 7;
 }
 
 static void __init
@@ -106,6 +114,8 @@ struct pci_fixup pcibios_fixups[] __initdata = {
 	  quirk_eisa_bridge },
 	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82378,
 	  quirk_isa_bridge },
+	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5229,
+	  quirk_ali_ide_ports },
 	{ PCI_FIXUP_HEADER, PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693,
 	  quirk_cypress },
 	{ 0 }
@@ -118,8 +128,7 @@ struct pci_fixup pcibios_fixups[] __initdata = {
 #define GB			(1024*MB)
 
 void
-pcibios_align_resource(void *data, struct resource *res,
-		       unsigned long size, unsigned long align)
+pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
 	struct pci_dev *dev = data;
 	struct pci_controller *hose = dev->sysdata;
@@ -159,7 +168,7 @@ pcibios_align_resource(void *data, struct resource *res,
 		 */
 
 		/* Align to multiple of size of minimum base.  */
-		alignto = MAX(0x1000, align);
+		alignto = MAX(0x1000, size);
 		start = ALIGN(start, alignto);
 		if (hose->sparse_mem_base && size <= 7 * 16*MB) {
 			if (((start / (16*MB)) & 0x7) == 0) {
@@ -197,52 +206,6 @@ pcibios_setup(char *str)
 	return str;
 }
 
-#ifdef ALPHA_RESTORE_SRM_SETUP
-static struct pdev_srm_saved_conf *srm_saved_configs;
-
-void __init
-pdev_save_srm_config(struct pci_dev *dev)
-{
-	struct pdev_srm_saved_conf *tmp;
-	static int printed = 0;
-
-	if (!alpha_using_srm || pci_probe_only)
-		return;
-
-	if (!printed) {
-		printk(KERN_INFO "pci: enabling save/restore of SRM state\n");
-		printed = 1;
-	}
-
-	tmp = kmalloc(sizeof(*tmp), GFP_KERNEL);
-	if (!tmp) {
-		printk(KERN_ERR "%s: kmalloc() failed!\n", __FUNCTION__);
-		return;
-	}
-	tmp->next = srm_saved_configs;
-	tmp->dev = dev;
-
-	pci_save_state(dev, tmp->regs);
-
-	srm_saved_configs = tmp;
-}
-
-void
-pci_restore_srm_config(void)
-{
-	struct pdev_srm_saved_conf *tmp;
-
-	/* No need to restore if probed only. */
-	if (pci_probe_only)
-		return;
-
-	/* Restore SRM config. */
-	for (tmp = srm_saved_configs; tmp; tmp = tmp->next) {
-		pci_restore_state(tmp->dev, tmp->regs);
-	}
-}
-#endif
-
 void __init
 pcibios_fixup_resource(struct resource *res, struct resource *root)
 {
@@ -279,30 +242,32 @@ pcibios_fixup_bus(struct pci_bus *bus)
 	struct pci_dev *dev = bus->self;
 
 	if (!dev) {
-		/* Root bus. */
-		u32 pci_mem_end;
-		u32 sg_base = hose->sg_pci ? hose->sg_pci->dma_base : ~0;
-		unsigned long end;
-
+		/* Root bus */
 		bus->resource[0] = hose->io_space;
 		bus->resource[1] = hose->mem_space;
+	} else {
+		/* This is a bridge. Do not care how it's initialized,
+		   just link its resources to the bus ones */
+		int i;
 
-		/* Adjust hose mem_space limit to prevent PCI allocations
-		   in the iommu windows. */
-		pci_mem_end = min((u32)__direct_map_base, sg_base) - 1;
-		end = hose->mem_space->start + pci_mem_end;
-		if (hose->mem_space->end > end)
-			hose->mem_space->end = end;
- 	} else if (pci_probe_only &&
- 		   (dev->class >> 8) == PCI_CLASS_BRIDGE_PCI) {
- 		pci_read_bridge_bases(bus);
- 		pcibios_fixup_device_resources(dev, bus);
-	} 
+		for(i=0; i<3; i++) {
+			bus->resource[i] =
+				&dev->resource[PCI_BRIDGE_RESOURCES+i];
+			bus->resource[i]->name = bus->name;
+		}
+		bus->resource[0]->flags |= pci_bridge_check_io(dev);
+		bus->resource[1]->flags |= IORESOURCE_MEM;
+		/* For now, propogate hose limits to the bus;
+		   we'll adjust them later. */
+		bus->resource[0]->end = hose->io_space->end;
+		bus->resource[1]->end = hose->mem_space->end;
+		/* Turn off downstream PF memory address range by default */
+		bus->resource[2]->start = 1024*1024;
+		bus->resource[2]->end = bus->resource[2]->start - 1;
+	}
 
 	for (ln = bus->devices.next; ln != &bus->devices; ln = ln->next) {
 		struct pci_dev *dev = pci_dev_b(ln);
-
-		pdev_save_srm_config(dev);
 		if ((dev->class >> 8) != PCI_CLASS_BRIDGE_PCI)
 			pcibios_fixup_device_resources(dev, bus);
 	}
@@ -347,6 +312,8 @@ void __init
 pcibios_update_irq(struct pci_dev *dev, int irq)
 {
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
+
+	/* ??? FIXME -- record old value for shutdown.  */
 }
 
 /* Most Alphas have straight-forward swizzling needs.  */
@@ -362,7 +329,7 @@ common_swizzle(struct pci_dev *dev, u8 *pinp)
 			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
 			/* Move up the chain of bridges. */
 			dev = dev->bus->self;
-		} while (dev->bus->parent);
+		} while (dev->bus->self);
 		*pinp = pin;
 
 		/* The slot is the slot of the last bridge. */
@@ -381,14 +348,10 @@ pcibios_fixup_pbus_ranges(struct pci_bus * bus,
 	ranges->io_end -= hose->io_space->start;
 	ranges->mem_start -= hose->mem_space->start;
 	ranges->mem_end -= hose->mem_space->start;
-/* FIXME: On older alphas we could use dense memory space
-	  to access prefetchable resources. */
-	ranges->prefetch_start -= hose->mem_space->start;
-	ranges->prefetch_end -= hose->mem_space->start;
 }
 
 int
-pcibios_enable_device(struct pci_dev *dev, int mask)
+pcibios_enable_device(struct pci_dev *dev)
 {
 	/* Nothing to do, since we enable all devices at startup.  */
 	return 0;
@@ -410,40 +373,6 @@ pcibios_set_master(struct pci_dev *dev)
 	pci_write_config_byte(dev, PCI_LATENCY_TIMER, 64);
 }
 
-static void __init
-pcibios_claim_one_bus(struct pci_bus *b)
-{
-	struct list_head *ld;
-	struct pci_bus *child_bus;
-
-	for (ld = b->devices.next; ld != &b->devices; ld = ld->next) {
-		struct pci_dev *dev = pci_dev_b(ld);
-		int i;
-
-		for (i = 0; i < PCI_NUM_RESOURCES; i++) {
-			struct resource *r = &dev->resource[i];
-
-			if (r->parent || !r->start || !r->flags)
-				continue;
-			pci_claim_resource(dev, i);
-		}
-	}
-
-	list_for_each_entry(child_bus, &b->children, node)
-		pcibios_claim_one_bus(child_bus);
-}
-
-static void __init
-pcibios_claim_console_setup(void)
-{
-	struct list_head *lb;
-
-	for(lb = pci_root_buses.next; lb != &pci_root_buses; lb = lb->next) {
-		struct pci_bus *b = pci_bus_b(lb);
-		pcibios_claim_one_bus(b);
-	}
-}
-
 void __init
 common_init_pci(void)
 {
@@ -461,12 +390,7 @@ common_init_pci(void)
 		next_busno += 1;
 	}
 
-	if (pci_probe_only)
-		pcibios_claim_console_setup();
-	else	/* FIXME: `else' will be removed when
-		   pci_assign_unassigned_resources() is able to work
-		   correctly with [partially] allocated PCI tree. */
-		pci_assign_unassigned_resources();
+	pci_assign_unassigned_resources();
 	pci_fixup_irqs(alpha_mv.pci_swizzle, alpha_mv.pci_map_irq);
 }
 

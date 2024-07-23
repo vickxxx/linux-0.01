@@ -136,8 +136,9 @@ repeat:
 oom:
 	if (!journal_oom_retry)
 		return -ENOMEM;
-	jbd_debug(1, "ENOMEM in %s, retrying.\n", __FUNCTION__);
-	yield();
+	jbd_debug(1, "ENOMEM in " __FUNCTION__ ", retrying.\n");
+	current->policy |= SCHED_YIELD;
+	schedule();
 	goto repeat;
 }
 
@@ -494,8 +495,6 @@ static void write_one_revoke_record(journal_t *journal,
 	
 	if (!descriptor) {
 		descriptor = journal_get_descriptor_buffer(journal);
-		if (!descriptor)
-			return;
 		header = (journal_header_t *) &jh2bh(descriptor)->b_data[0];
 		header->h_magic     = htonl(JFS_MAGIC_NUMBER);
 		header->h_blocktype = htonl(JFS_REVOKE_BLOCK);
@@ -530,7 +529,6 @@ static void flush_descriptor(journal_t *journal,
 
 	if (is_journal_aborted(journal)) {
 		JBUFFER_TRACE(descriptor, "brelse");
-		unlock_buffer(jh2bh(descriptor));
 		__brelse(jh2bh(descriptor));
 		return;
 	}
@@ -541,9 +539,7 @@ static void flush_descriptor(journal_t *journal,
 	{
 		struct buffer_head *bh = jh2bh(descriptor);
 		BUFFER_TRACE(bh, "write");
-		clear_bit(BH_Dirty, &bh->b_state);
-		bh->b_end_io = journal_end_buffer_io_sync;
-		submit_bh(WRITE, bh);
+		ll_rw_block (WRITE, 1, &bh);
 	}
 }
 
