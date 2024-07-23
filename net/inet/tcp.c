@@ -132,6 +132,9 @@
  *		Alan Cox	:	Fixed the closing state machine to
  *					resemble the RFC.
  *		Alan Cox	:	More 'per spec' fixes.
+ *		Alan Cox	:	tcp_data() doesn't ack illegal PSH
+ *					only frames. At least one pc tcp stack
+ *					generates them.
  *
  *
  * To Fix:
@@ -931,6 +934,8 @@ static int tcp_select(struct sock *sk, int sel_type, select_table *wait)
 		break;
 
 	case SEL_OUT:
+		if (sk->err)
+			return 1;
 		if (sk->shutdown & SEND_SHUTDOWN) 
 			return 0;
 		if (sk->state == TCP_SYN_SENT || sk->state == TCP_SYN_RECV)
@@ -945,7 +950,7 @@ static int tcp_select(struct sock *sk, int sel_type, select_table *wait)
 		return 1;
 
 	case SEL_EX:
-		if (sk->err || sk->urg_data)
+		if (sk->urg_data)
 			return 1;
 		break;
 	}
@@ -2851,7 +2856,7 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	buff = newsk->prot->wmalloc(newsk, MAX_SYN_SIZE, 1, GFP_ATOMIC);
 	if (buff == NULL) 
 	{
-		sk->err = -ENOMEM;
+		sk->err = ENOMEM;
 		newsk->dead = 1;
 		newsk->state = TCP_CLOSE;
 		/* And this will destroy it */
@@ -3810,7 +3815,7 @@ extern __inline__ int tcp_data(struct sk_buff *skb, struct sock *sk,
 	   
 	sk->bytes_rcv += skb->len;
 	
-	if (skb->len == 0 && !th->fin && !th->urg && !th->psh) 
+	if (skb->len == 0 && !th->fin) 
 	{
 		/* 
 		 *	Don't want to keep passing ack's back and forth. 
