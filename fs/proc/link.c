@@ -49,11 +49,14 @@ struct inode_operations proc_link_inode_operations = {
 	NULL,			/* rename */
 	proc_readlink,		/* readlink */
 	proc_follow_link,	/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
-	proc_permission		/* permission */
+	proc_permission,	/* permission */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 static struct dentry * proc_follow_link(struct dentry *dentry,
@@ -146,7 +149,7 @@ static int do_proc_readlink(struct dentry *dentry, char * buffer, int buflen)
 	/* Check for special dentries.. */
 	pattern = NULL;
 	inode = dentry->d_inode;
-	if (inode && dentry->d_parent == dentry) {
+	if (inode && IS_ROOT(dentry)) {
 		if (S_ISSOCK(inode->i_mode))
 			pattern = "socket:[%lu]";
 		if (S_ISFIFO(inode->i_mode))

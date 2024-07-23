@@ -72,6 +72,7 @@ asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 	struct file * file = NULL;
 	struct mmap_arg_struct a;
 
+	down(&current->mm->mmap_sem);
 	lock_kernel();
 	if (copy_from_user(&a, arg, sizeof(a)))
 		goto out;
@@ -87,6 +88,7 @@ asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 		fput(file);
 out:
 	unlock_kernel();
+	up(&current->mm->mmap_sem);
 	return error;
 }
 
@@ -223,13 +225,7 @@ out:
  */
 asmlinkage int sys_fork(struct pt_regs *regs)
 {
-	int ret;
-
-	lock_kernel();
-	ret = do_fork(SIGCHLD, regs->ARM_sp, regs);
-	unlock_kernel();
-
-	return ret;
+	return do_fork(SIGCHLD, regs->ARM_sp, regs);
 }
 
 /* Clone a task - this clones the calling program thread.
@@ -237,14 +233,14 @@ asmlinkage int sys_fork(struct pt_regs *regs)
  */
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp, struct pt_regs *regs)
 {
-	int ret;
-
-	lock_kernel();
 	if (!newsp)
 		newsp = regs->ARM_sp;
-	ret = do_fork(clone_flags, newsp, regs);
-	unlock_kernel();
-	return ret;
+	return do_fork(clone_flags, newsp, regs);
+}
+
+asmlinkage int sys_vfork(struct pt_regs *regs)
+{
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->ARM_sp, regs);
 }
 
 /* sys_execve() executes a new program.

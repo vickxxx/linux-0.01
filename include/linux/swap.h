@@ -52,7 +52,6 @@ struct swap_info_struct {
 	kdev_t swap_device;
 	struct dentry * swap_file;
 	unsigned short * swap_map;
-	unsigned char * swap_lockmap;
 	unsigned int lowest_bit;
 	unsigned int highest_bit;
 	unsigned int cluster_next;
@@ -67,8 +66,8 @@ extern int nr_swap_pages;
 extern int nr_free_pages;
 extern atomic_t nr_async_pages;
 extern struct inode swapper_inode;
-extern unsigned long page_cache_size;
-extern int buffermem;
+extern atomic_t page_cache_size;
+extern atomic_t buffermem;
 
 /* Incomplete types for prototype declarations: */
 struct task_struct;
@@ -85,7 +84,7 @@ extern void swap_setup (void);
 extern int try_to_free_pages(unsigned int gfp_mask);
 
 /* linux/mm/page_io.c */
-extern void rw_swap_page(int, unsigned long, char *, int);
+extern void rw_swap_page(int, struct page *, int);
 extern void rw_swap_page_nocache(int, unsigned long, char *);
 extern void rw_swap_page_nolock(int, unsigned long, char *, int);
 extern void swap_after_unlock_page (unsigned long entry);
@@ -97,7 +96,7 @@ extern void swap_in(struct task_struct *, struct vm_area_struct *,
 
 /* linux/mm/swap_state.c */
 extern void show_swap_cache_info(void);
-extern int add_to_swap_cache(struct page *, unsigned long);
+extern void add_to_swap_cache(struct page *, unsigned long);
 extern int swap_duplicate(unsigned long);
 extern int swap_check_entry(unsigned long);
 struct page * lookup_swap_cache(unsigned long);
@@ -107,12 +106,14 @@ extern int FASTCALL(swap_count(unsigned long));
 /*
  * Make these inline later once they are working properly.
  */
+extern void __delete_from_swap_cache(struct page *page);
 extern void delete_from_swap_cache(struct page *page);
 extern void free_page_and_swap_cache(unsigned long addr);
 
 /* linux/mm/swapfile.c */
 extern unsigned int nr_swapfiles;
 extern struct swap_info_struct swap_info[];
+extern int is_swap_partition(kdev_t);
 void si_swapinfo(struct sysinfo *);
 unsigned long get_swap_page(void);
 extern void FASTCALL(swap_free(unsigned long));
@@ -144,13 +145,6 @@ extern unsigned long swap_cache_find_total;
 extern unsigned long swap_cache_find_success;
 #endif
 
-extern inline unsigned long in_swap_cache(struct page *page)
-{
-	if (PageSwapCache(page))
-		return page->offset;
-	return 0;
-}
-
 /*
  * Work out if there are any other processes sharing this page, ignoring
  * any page reference coming from the swap cache, or from outstanding
@@ -162,7 +156,7 @@ static inline int is_page_shared(struct page *page)
 	unsigned int count;
 	if (PageReserved(page))
 		return 1;
-	count = atomic_read(&page->count);
+	count = page_count(page);
 	if (PageSwapCache(page))
 		count += swap_count(page->offset) - 2;
 	if (PageFreeAfter(page))

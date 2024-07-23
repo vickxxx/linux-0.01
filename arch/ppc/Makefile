@@ -22,13 +22,17 @@ ASFLAGS		=
 LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
 CFLAGSINC	= -D__KERNEL__ -I$(TOPDIR)/include -D__powerpc__
 CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char -msoft-float -pipe \
-		-fno-builtin -ffixed-r2 -Wno-uninitialized -mmultiple -mstring
+		-fno-builtin -ffixed-r2 -Wno-uninitialized -mmultiple \
+		-mstring
 CPP		= $(CC) -E $(CFLAGS)
 
 ifdef CONFIG_8xx
 CFLAGS := $(CFLAGS) -mcpu=860
 endif
 
+ifdef CONFIG_PPC64
+CFLAGS := $(CFLAGS) -Wa,-mppc64bridge #-mpowerpc64
+endif
 
 HEAD := arch/ppc/kernel/head.o
 

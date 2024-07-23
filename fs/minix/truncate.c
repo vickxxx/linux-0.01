@@ -32,6 +32,9 @@
  * general case (size = XXX). I hope.
  */
 
+#define DATA_BUFFER_USED(bh) \
+	(atomic_read(&bh->b_count) || buffer_locked(bh))
+
 /*
  * The functions for minix V1 fs truncation.
  */
@@ -52,7 +55,7 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || tmp != *p) {
+		if ((bh && DATA_BUFFER_USED(bh)) || tmp != *p) {
 			retry = 1;
 			brelse(bh);
 			continue;
@@ -103,7 +106,7 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || tmp != *ind) {
+		if ((bh && DATA_BUFFER_USED(bh)) || tmp != *ind) {
 			retry = 1;
 			brelse(bh);
 			continue;
@@ -118,7 +121,7 @@ repeat:
 		if (*(ind++))
 			break;
 	if (i >= 512) {
-		if (ind_bh->b_count != 1)
+		if (atomic_read(&ind_bh->b_count) != 1)
 			retry = 1;
 		else {
 			tmp = *p;
@@ -163,7 +166,7 @@ repeat:
 		if (*(dind++))
 			break;
 	if (i >= 512) {
-		if (dind_bh->b_count != 1)
+		if (atomic_read(&dind_bh->b_count) != 1)
 			retry = 1;
 		else {
 			tmp = *p;
@@ -216,7 +219,7 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || tmp != *p) {
+		if ((bh && DATA_BUFFER_USED(bh)) || tmp != *p) {
 			retry = 1;
 			brelse(bh);
 			continue;
@@ -267,7 +270,7 @@ repeat:
 			brelse(bh);
 			goto repeat;
 		}
-		if ((bh && bh->b_count != 1) || tmp != *ind) {
+		if ((bh && DATA_BUFFER_USED(bh)) || tmp != *ind) {
 			retry = 1;
 			brelse(bh);
 			continue;
@@ -282,7 +285,7 @@ repeat:
 		if (*(ind++))
 			break;
 	if (i >= 256) {
-		if (ind_bh->b_count != 1)
+		if (atomic_read(&ind_bh->b_count) != 1)
 			retry = 1;
 		else {
 			tmp = *p;
@@ -327,7 +330,7 @@ repeat:
 		if (*(dind++))
 			break;
 	if (i >= 256) {
-		if (dind_bh->b_count != 1)
+		if (atomic_read(&dind_bh->b_count) != 1)
 			retry = 1;
 		else {
 			tmp = *p;
@@ -373,7 +376,7 @@ repeat:
                 if (*(tind++))
                         break;
         if (i >= 256) {
-                if (tind_bh->b_count != 1)
+                if (atomic_read(&tind_bh->b_count) != 1)
                         retry = 1;
                 else {
                         tmp = *p;

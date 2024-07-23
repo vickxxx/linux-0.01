@@ -26,6 +26,7 @@
 #include <linux/init.h>
 #include <linux/nls.h>
 #include <linux/ctype.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -54,7 +55,7 @@ static int isofs_cmpi_ms(struct dentry *dentry, struct qstr *a, struct qstr *b);
 static int isofs_cmp_ms(struct dentry *dentry, struct qstr *a, struct qstr *b);
 #endif
 
-void isofs_put_super(struct super_block *sb)
+static void isofs_put_super(struct super_block *sb)
 {
 #ifdef CONFIG_JOLIET
 	if (sb->u.isofs_sb.s_nls_iocharset) {
@@ -71,6 +72,9 @@ void isofs_put_super(struct super_block *sb)
 	MOD_DEC_USE_COUNT;
 	return;
 }
+
+static void isofs_read_inode(struct inode *);
+static int isofs_statfs (struct super_block *, struct statfs *, int);
 
 static struct super_operations isofs_sops = {
 	isofs_read_inode,
@@ -126,6 +130,9 @@ struct iso9660_options{
 	uid_t uid;
 	char *iocharset;
 	unsigned char utf8;
+        /* LVE */
+        s32 session;
+        s32 sbsector;
 };
 
 /*
@@ -294,6 +301,8 @@ static int parse_options(char *options, struct iso9660_options * popt)
 	popt->uid = 0;
 	popt->iocharset = NULL;
 	popt->utf8 = 0;
+	popt->session=-1;
+	popt->sbsector=-1;
 	if (!options) return 1;
 	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
 	        if (strncmp(this_char,"norock",6) == 0) {
@@ -336,6 +345,18 @@ static int parse_options(char *options, struct iso9660_options * popt)
 			else if (!strcmp(value,"normal")) popt->map = 'n';
 			else if (!strcmp(value,"acorn")) popt->map = 'a';
 			else return 0;
+		}
+		if (!strcmp(this_char,"session") && value) {
+			char * vpnt = value;
+			unsigned int ivalue = simple_strtoul(vpnt, &vpnt, 0);
+			if(ivalue < 0 || ivalue >99) return 0;
+			popt->session=ivalue+1;
+		}
+		if (!strcmp(this_char,"sbsector") && value) {
+			char * vpnt = value;
+			unsigned int ivalue = simple_strtoul(vpnt, &vpnt, 0);
+			if(ivalue < 0 || ivalue >660*512) return 0;
+			popt->sbsector=ivalue;
 		}
 		else if (!strcmp(this_char,"check") && value) {
 			if (value[0] && !value[1] && strchr("rs",*value))
@@ -404,7 +425,7 @@ static int parse_options(char *options, struct iso9660_options * popt)
  */
 #define WE_OBEY_THE_WRITTEN_STANDARDS 1
 
-static unsigned int isofs_get_last_session(kdev_t dev)
+static unsigned int isofs_get_last_session(kdev_t dev,s32 session )
 {
   struct cdrom_multisession ms_info;
   unsigned int vol_desc_start;
@@ -423,13 +444,29 @@ static unsigned int isofs_get_last_session(kdev_t dev)
        */
       mm_segment_t old_fs=get_fs();
       inode_fake.i_rdev=dev;
+      init_waitqueue_head(&inode_fake.i_wait);
       ms_info.addr_format=CDROM_LBA;
       set_fs(KERNEL_DS);
+      if(session >= 0 && session <= 99) {
+	      struct cdrom_tocentry Te;
+	      Te.cdte_track=session;
+	      Te.cdte_format=CDROM_LBA;
+	      i=get_blkfops(MAJOR(dev))->ioctl(&inode_fake,
+				       NULL,
+				       CDROMREADTOCENTRY,
+				       (unsigned long) &Te);
+	      set_fs(old_fs);
+	      if(!i) printk(KERN_ERR"Session %d start %d type %d\n",session,Te.cdte_addr.lba,Te.cdte_ctrl&CDROM_DATA_TRACK);
+	      if(i || (Te.cdte_ctrl&CDROM_DATA_TRACK) != 4)
+			printk(KERN_ERR"Invalid session number or type of track\n");
+		else return Te.cdte_addr.lba;
+      }
       i=get_blkfops(MAJOR(dev))->ioctl(&inode_fake,
 				       NULL,
 				       CDROMMULTISESSION,
 				       (unsigned long) &ms_info);
       set_fs(old_fs);
+      if(session > 0) printk(KERN_ERR"Invalid session number\n");
 #if 0
       printk("isofs.inode: CDROMMULTISESSION: rc=%d\n",i);
       if (i==0)
@@ -453,8 +490,8 @@ static unsigned int isofs_get_last_session(kdev_t dev)
  * Note: a check_disk_change() has been done immediately prior
  * to this call, so we don't need to check again.
  */
-struct super_block *isofs_read_super(struct super_block *s, void *data,
-				     int silent)
+static struct super_block *isofs_read_super(struct super_block *s, void *data,
+					    int silent)
 {
 	kdev_t				dev = s->s_dev;
 	struct buffer_head	      * bh = NULL, *pri_bh = NULL;
@@ -523,7 +560,8 @@ struct super_block *isofs_read_super(struct super_block *s, void *data,
 
 	s->u.isofs_sb.s_high_sierra = high_sierra = 0; /* default is iso9660 */
 
-	vol_desc_start = isofs_get_last_session(dev);
+	vol_desc_start = (opt.sbsector != -1) ?
+		opt.sbsector : isofs_get_last_session(dev,opt.session);
 
   	for (iso_blknum = vol_desc_start+16;
              iso_blknum < vol_desc_start+100; iso_blknum++)
@@ -801,7 +839,7 @@ root_found:
 	if (!inode->i_op)
 		goto out_bad_root;
 	/* get the root dentry */
-	s->s_root = d_alloc_root(inode, NULL);
+	s->s_root = d_alloc_root(inode);
 	if (!(s->s_root))
 		goto out_no_root;
 
@@ -859,7 +897,7 @@ out_unlock:
 	return NULL;
 }
 
-int isofs_statfs (struct super_block *sb, struct statfs *buf, int bufsiz)
+static int isofs_statfs (struct super_block *sb, struct statfs *buf, int bufsiz)
 {
 	struct statfs tmp;
 
@@ -875,88 +913,116 @@ int isofs_statfs (struct super_block *sb, struct statfs *buf, int bufsiz)
 	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
 }
 
-int isofs_bmap(struct inode * inode,int block)
+/* Life is simpler than for other filesystem since we never
+ * have to create a new block, only find an existing one.
+ */
+int isofs_get_block(struct inode *inode, long iblock,
+		    struct buffer_head *bh_result, int create)
 {
-	off_t b_off, offset, size;
-	struct inode *ino;
+	off_t b_off, offset, sect_size;
 	unsigned int firstext;
 	unsigned long nextino;
-	int i;
+	int i, err;
 
-	if (block<0) {
-		printk("_isofs_bmap: block<0");
-		return 0;
-	}
+	lock_kernel();
 
-	b_off = block << ISOFS_BUFFER_BITS(inode);
+	err = -EROFS;
+	if (create)
+		goto abort_create_attempted;
 
-	/*
-	 * If we are beyond the end of this file, don't give out any
+	err = -EIO;
+	if (iblock < 0)
+		goto abort_negative;
+
+	b_off = iblock << ISOFS_BUFFER_BITS(inode);
+
+	/* If we are beyond the end of this file, don't give out any
 	 * blocks.
 	 */
-	if( b_off > inode->i_size )
-	  {
-	    off_t	max_legal_read_offset;
+	if (b_off > inode->i_size) {
+		off_t max_legal_read_offset;
 
-	    /*
-	     * If we are *way* beyond the end of the file, print a message.
-	     * Access beyond the end of the file up to the next page boundary
-	     * is normal, however because of the way the page cache works.
-	     * In this case, we just return 0 so that we can properly fill
-	     * the page with useless information without generating any
-	     * I/O errors.
-	     */
-	    max_legal_read_offset = (inode->i_size + PAGE_SIZE - 1)
-	      & ~(PAGE_SIZE - 1);
-	    if( b_off >= max_legal_read_offset )
-	      {
+		/* If we are *way* beyond the end of the file, print a message.
+		 * Access beyond the end of the file up to the next page boundary
+		 * is normal, however because of the way the page cache works.
+		 * In this case, we just return 0 so that we can properly fill
+		 * the page with useless information without generating any
+		 * I/O errors.
+		 */
+		max_legal_read_offset = (inode->i_size + PAGE_SIZE - 1)
+			& ~(PAGE_SIZE - 1);
+		if (b_off >= max_legal_read_offset)
+			goto abort_beyond_end;
+	}
 
-		printk("_isofs_bmap: block>= EOF(%d, %ld)\n", block,
-		       inode->i_size);
-	      }
-	    return 0;
-	  }
+	offset    = 0;
+	firstext  = inode->u.isofs_i.i_first_extent;
+	sect_size = inode->u.isofs_i.i_section_size;
+	nextino   = inode->u.isofs_i.i_next_section_ino;
 
-	offset = 0;
-	firstext = inode->u.isofs_i.i_first_extent;
-	size = inode->u.isofs_i.i_section_size;
-	nextino = inode->u.isofs_i.i_next_section_ino;
-#ifdef DEBUG
-	printk("first inode: inode=%x nextino=%x firstext=%u size=%lu\n",
-		inode->i_ino, nextino, firstext, size);
-#endif
 	i = 0;
 	if (nextino) {
-		while(b_off >= offset + size) {
-			offset += size;
+		while (b_off >= (offset + sect_size)) {
+			struct inode *ninode;
 
-			if(nextino == 0) return 0;
-			ino = iget(inode->i_sb, nextino);
-			if(!ino) return 0;
-			firstext = ino->u.isofs_i.i_first_extent;
-			size = ino->u.isofs_i.i_section_size;
-#ifdef DEBUG
-			printk("read inode: inode=%lu ino=%lu nextino=%lu firstext=%u size=%lu\n",
-			       inode->i_ino, nextino, ino->u.isofs_i.i_next_section_ino, firstext, size);
-#endif
-			nextino = ino->u.isofs_i.i_next_section_ino;
-			iput(ino);
-		
-			if(++i > 100) {
-				printk("isofs_bmap: More than 100 file sections ?!?, aborting...\n");
-				printk("isofs_bmap: ino=%lu block=%d firstext=%u size=%u nextino=%lu\n",
-				       inode->i_ino, block, firstext, (unsigned)size, nextino);
-				return 0;
-			}
+			offset += sect_size;
+			if (nextino == 0)
+				goto abort;
+			ninode = iget(inode->i_sb, nextino);
+			if (!ninode)
+				goto abort;
+			firstext  = ninode->u.isofs_i.i_first_extent;
+			sect_size = ninode->u.isofs_i.i_section_size;
+			nextino   = ninode->u.isofs_i.i_next_section_ino;
+			iput(ninode);
+
+			if (++i > 100)
+				goto abort_too_many_sections;
 		}
 	}
-#ifdef DEBUG
-	printk("isofs_bmap: mapped inode:block %x:%d to block %lu\n",
-		inode->i_ino, block, (b_off - offset + firstext) >> ISOFS_BUFFER_BITS(inode));
-#endif
-	return (b_off - offset + firstext) >> ISOFS_BUFFER_BITS(inode);
+
+	bh_result->b_dev = inode->i_dev;
+	bh_result->b_blocknr =
+		(b_off - offset + firstext) >> ISOFS_BUFFER_BITS(inode);
+	bh_result->b_state |= (1UL << BH_Mapped);
+	err = 0;
+
+abort:
+	unlock_kernel();
+	return err;
+
+abort_create_attempted:
+	printk("_isofs_bmap: Kernel tries to allocate a block\n");
+	goto abort;
+
+abort_negative:
+	printk("_isofs_bmap: block < 0\n");
+	goto abort;
+
+abort_beyond_end:
+	printk("_isofs_bmap: block >= EOF (%ld, %ld)\n",
+	       iblock, inode->i_size);
+	goto abort;
+
+abort_too_many_sections:
+	printk("isofs_bmap: More than 100 file sections ?!?, aborting...\n");
+	printk("isofs_bmap: ino=%lu block=%ld firstext=%u sect_size=%u nextino=%lu\n",
+	       inode->i_ino, iblock, firstext, (unsigned) sect_size, nextino);
+	goto abort;
 }
 
+int isofs_bmap(struct inode *inode, int block)
+{
+	struct buffer_head dummy;
+	int error;
+
+	dummy.b_state = 0;
+	dummy.b_blocknr = -1000;
+	error = isofs_get_block(inode, block, &dummy, 0);
+	if (!error)
+		return dummy.b_blocknr;
+	return 0;
+}
 
 static void test_and_set_uid(uid_t *p, uid_t value)
 {
@@ -1057,7 +1123,7 @@ out_toomany:
 	goto out;
 }
 
-void isofs_read_inode(struct inode * inode)
+static void isofs_read_inode(struct inode * inode)
 {
 	struct super_block *sb = inode->i_sb;
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
@@ -1116,7 +1182,7 @@ void isofs_read_inode(struct inode * inode)
 	   .. but a DVD may be up to 1Gig (Ulrich Habel) */
 	if((inode->i_size < 0 || inode->i_size > 1073741824) &&
 	    inode->i_sb->u.isofs_sb.s_cruft == 'n') {
-	  printk("Warning: defective cdrom.  Enabling \"cruft\" mount option.\n");
+	  printk(KERN_WARNING "Warning: defective CD-ROM.  Enabling \"cruft\" mount option.\n");
 	  inode->i_sb->u.isofs_sb.s_cruft = 'y';
 	}
 
@@ -1191,7 +1257,7 @@ void isofs_read_inode(struct inode * inode)
 	 */
 	if (inode->i_sb->u.isofs_sb.s_cruft == 'n' &&
 	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
-	  printk("Warning: defective cdrom (volume sequence number). Enabling \"cruft\" mount option.\n");
+	  printk(KERN_WARNING "Warning: defective CD-ROM (volume sequence number). Enabling \"cruft\" mount option.\n");
 	  inode->i_sb->u.isofs_sb.s_cruft = 'y';
 	}
 
@@ -1200,7 +1266,7 @@ void isofs_read_inode(struct inode * inode)
 #ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
 	if (inode->i_sb->u.isofs_sb.s_cruft != 'y' &&
 	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
-		printk("Multi volume CD somehow got mounted.\n");
+		printk(KERN_WARNING "Multi-volume CD somehow got mounted.\n");
 	} else
 #endif IGNORE_WRONG_MULTI_VOLUME_SPECS
 	{
@@ -1210,12 +1276,9 @@ void isofs_read_inode(struct inode * inode)
 	    inode->i_op = &isofs_dir_inode_operations;
 	  else if (S_ISLNK(inode->i_mode))
 	    inode->i_op = &isofs_symlink_inode_operations;
-	  else if (S_ISCHR(inode->i_mode))
-	    inode->i_op = &chrdev_inode_operations;
-	  else if (S_ISBLK(inode->i_mode))
-	    inode->i_op = &blkdev_inode_operations;
-	  else if (S_ISFIFO(inode->i_mode))
-	    init_fifo(inode);
+	  else
+	    /* XXX - parse_rock_ridge_inode() had already set i_rdev. */
+	    init_special_inode(inode, inode->i_mode, kdev_t_to_nr(inode->i_rdev));
 	}
 	return;
 

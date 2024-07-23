@@ -8,7 +8,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Version:	$Id: af_unix.c,v 1.76 1999/05/08 05:54:55 davem Exp $
+ * Version:	$Id: af_unix.c,v 1.79 1999/06/29 12:36:07 davem Exp $
  *
  * Fixes:
  *		Linus Torvalds	:	Assorted bug cures.
@@ -103,6 +103,7 @@
 #include <net/scm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
+#include <linux/smp_lock.h>
 
 #include <asm/checksum.h>
 
@@ -114,8 +115,8 @@ int sysctl_unix_max_dgram_qlen = 10;
 
 unix_socket *unix_socket_table[UNIX_HASH_SIZE+1];
 static atomic_t unix_nr_socks = ATOMIC_INIT(0);
-static struct wait_queue * unix_ack_wqueue = NULL;
-static struct wait_queue * unix_dgram_wqueue = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(unix_ack_wqueue);
+static DECLARE_WAIT_QUEUE_HEAD(unix_dgram_wqueue);
 
 #define unix_sockets_unbound	(unix_socket_table[UNIX_HASH_SIZE])
 
@@ -144,19 +145,21 @@ extern __inline__ int unix_may_send(unix_socket *sk, unix_socket *osk)
 	return (unix_peer(osk) == NULL || unix_our_peer(sk, osk));
 }
 
+#define ulock(sk)	(&(sk->protinfo.af_unix.user_count))
+
 extern __inline__ void unix_lock(unix_socket *sk)
 {
-	atomic_inc(&sk->sock_readers);
+	atomic_inc(ulock(sk));
 }
 
 extern __inline__ void unix_unlock(unix_socket *sk)
 {
-	atomic_dec(&sk->sock_readers);
+	atomic_dec(ulock(sk));
 }
 
 extern __inline__ int unix_locked(unix_socket *sk)
 {
-	return atomic_read(&sk->sock_readers);
+	return (atomic_read(ulock(sk)) != 0);
 }
 
 extern __inline__ void unix_release_addr(struct unix_address *addr)
@@ -433,7 +436,7 @@ static struct sock * unix_create1(struct socket *sock, int stream)
 	sk->destruct = unix_destruct_addr;
 	sk->protinfo.af_unix.family=PF_UNIX;
 	sk->protinfo.af_unix.dentry=NULL;
-	sk->protinfo.af_unix.readsem=MUTEX;	/* single task reading lock */
+	init_MUTEX(&sk->protinfo.af_unix.readsem);/* single task reading lock */
 	sk->protinfo.af_unix.list=&unix_sockets_unbound;
 	unix_insert_socket(sk);
 
@@ -941,7 +944,7 @@ static void unix_attach_fds(struct scm_cookie *scm, struct sk_buff *skb)
  *	Send AF_UNIX data.
  */
 
-static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
+static int do_unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 			      struct scm_cookie *scm)
 {
 	struct sock *sk = sock->sk;
@@ -1038,6 +1041,7 @@ static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	
 	if (!unix_peer(sk))
 		unix_unlock(other);
+
 	return len;
 
 out_unlock:
@@ -1048,8 +1052,18 @@ out:
 	return err;
 }
 
+static int unix_dgram_sendmsg(struct socket *sock, struct msghdr *msg, int len,
+			      struct scm_cookie *scm)
+{
+	int retval;
+
+	lock_kernel();
+	retval = do_unix_dgram_sendmsg(sock, msg, len, scm);
+	unlock_kernel();
+	return retval;
+}
 		
-static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
+static int do_unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 			       struct scm_cookie *scm)
 {
 	struct sock *sk = sock->sk;
@@ -1118,9 +1132,9 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		
 		if (skb==NULL)
 		{
-			if (sent)
-				goto out;
-			return err;
+			if (!sent)
+				sent = err;
+			goto out;
 		}
 
 		/*
@@ -1139,9 +1153,9 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 
 		if (memcpy_fromiovec(skb_put(skb,size), msg->msg_iov, size)) {
 			kfree_skb(skb);
-			if (sent)
-				goto out;
-			return -EFAULT;
+			if (!sent)
+				sent = -EFAULT;
+			goto out;
 		}
 
 		other=unix_peer(sk);
@@ -1153,7 +1167,8 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 				goto out;
 			if (!(msg->msg_flags&MSG_NOSIGNAL))
 				send_sig(SIGPIPE,current,0);
-			return -EPIPE;
+			sent = -EPIPE;
+			goto out;
 		}
 
 		skb_queue_tail(&other->receive_queue, skb);
@@ -1162,6 +1177,17 @@ static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	}
 out:
 	return sent;
+}
+
+static int unix_stream_sendmsg(struct socket *sock, struct msghdr *msg, int len,
+			       struct scm_cookie *scm)
+{
+	int retval;
+
+	lock_kernel();
+	retval = do_unix_stream_sendmsg(sock, msg, len, scm);
+	unlock_kernel();
+	return retval;
 }
 
 /*
@@ -1178,7 +1204,7 @@ static void unix_data_wait(unix_socket * sk)
 	}
 }
 
-static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
+static int do_unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 			      int flags, struct scm_cookie *scm)
 {
 	struct sock *sk = sock->sk;
@@ -1255,8 +1281,18 @@ out:
 	return err;
 }
 
+static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
+			      int flags, struct scm_cookie *scm)
+{
+	int retval;
 
-static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size,
+	lock_kernel();
+	retval = do_unix_dgram_recvmsg(sock, msg, size, flags, scm);
+	unlock_kernel();
+	return retval;
+}
+
+static int do_unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 			       int flags, struct scm_cookie *scm)
 {
 	struct sock *sk = sock->sk;
@@ -1273,8 +1309,7 @@ static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size
 		return -EOPNOTSUPP;
 	if (flags&MSG_WAITALL)
 		target = size;
-		
-		
+
 	msg->msg_namelen = 0;
 
 	/* Lock the socket to prevent queue disordering
@@ -1388,6 +1423,17 @@ static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size
 
 	up(&sk->protinfo.af_unix.readsem);
 	return copied;
+}
+
+static int unix_stream_recvmsg(struct socket *sock, struct msghdr *msg, int size,
+			       int flags, struct scm_cookie *scm)
+{
+	int retval;
+
+	lock_kernel();
+	retval = do_unix_stream_recvmsg(sock, msg, size, flags, scm);
+	unlock_kernel();
+	return retval;
 }
 
 static int unix_shutdown(struct socket *sock, int mode)
@@ -1511,7 +1557,7 @@ static int unix_read_proc(char *buffer, char **start, off_t offset,
 	{
 		len+=sprintf(buffer+len,"%p: %08X %08X %08lX %04X %02X %5ld",
 			s,
-			atomic_read(&s->sock_readers),
+			atomic_read(ulock(s)),
 			0,
 			s->socket ? s->socket->flags : 0,
 			s->type,

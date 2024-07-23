@@ -20,6 +20,11 @@ extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 #define flush_tlb_page local_flush_tlb_page
 #define flush_tlb_range local_flush_tlb_range
 
+extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long start, unsigned long end)
+{
+	/* PPC has hw page tables. */
+}
+
 /*
  * No cache flushing is required when address mappings are
  * changed, because the caches on PowerPCs are physically
@@ -208,7 +213,7 @@ extern unsigned long empty_zero_page[1024];
 #endif __ASSEMBLY__
 #define BAD_PAGETABLE	__bad_pagetable()
 #define BAD_PAGE	__bad_page()
-#define ZERO_PAGE	((unsigned long) empty_zero_page)
+#define ZERO_PAGE(vaddr)	((unsigned long) empty_zero_page)
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR	(8*sizeof(unsigned long))

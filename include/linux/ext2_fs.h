@@ -238,7 +238,7 @@ struct ext2_inode {
 		} masix1;
 	} osd1;				/* OS dependent 1 */
 	__u32	i_block[EXT2_N_BLOCKS];/* Pointers to blocks */
-	__u32	i_version;	/* File version (for NFS) */
+	__u32	i_generation;	/* File version (for NFS) */
 	__u32	i_file_acl;	/* File ACL */
 	__u32	i_dir_acl;	/* Directory ACL */
 	__u32	i_faddr;	/* Fragment address */
@@ -553,9 +553,11 @@ extern unsigned long ext2_count_free_inodes (struct super_block *);
 extern void ext2_check_inodes_bitmap (struct super_block *);
 
 /* inode.c */
-extern int ext2_bmap (struct inode *, int);
+extern long ext2_bmap (struct inode *, long);
+extern int ext2_get_block (struct inode *, long, struct buffer_head *, int);
 
 extern struct buffer_head * ext2_getblk (struct inode *, long, int, int *);
+extern int ext2_getblk_block (struct inode *, long, int, int *, int *);
 extern struct buffer_head * ext2_bread (struct inode *, int, int, int *);
 
 extern int ext2_getcluster (struct inode * inode, long block);

@@ -83,16 +83,18 @@ struct inode_operations hfs_cap_ndir_inode_operations = {
 	NULL,			/* symlink */
 	hfs_mkdir,		/* mkdir */
 	hfs_rmdir,		/* rmdir */
-	hfs_mknod,		/* mknod */
+	NULL,			/* mknod */
 	hfs_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
-	NULL			/* smap */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 struct inode_operations hfs_cap_fdir_inode_operations = {
@@ -108,12 +110,14 @@ struct inode_operations hfs_cap_fdir_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
-	NULL			/* smap */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 struct inode_operations hfs_cap_rdir_inode_operations = {
@@ -129,12 +133,14 @@ struct inode_operations hfs_cap_rdir_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
-	NULL			/* smap */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 /*================ File-local functions ================*/
@@ -236,10 +242,6 @@ static int cap_readdir(struct file * filp,
 	struct hfs_brec brec;
         struct hfs_cat_entry *entry;
 	struct inode *dir = filp->f_dentry->d_inode;
-
-	if (!dir || !dir->i_sb || !S_ISDIR(dir->i_mode)) {
-		return -EBADF;
-	}
 
 	entry = HFS_I(dir)->entry;
 	type = HFS_ITYPE(dir->i_ino);

@@ -33,6 +33,10 @@ if [ "$CONFIG_M686" = "y" ]; then
   define_bool CONFIG_X86_GOOD_APIC y
 fi
 
+choice 'Maximum Physical Memory' \
+	"1GB		CONFIG_1GB \
+	 2GB		CONFIG_2GB" 1GB
+
 bool 'Math emulation' CONFIG_MATH_EMULATION
 bool 'MTRR (Memory Type Range Register) support' CONFIG_MTRR
 bool 'Symmetric multi-processing support' CONFIG_SMP
@@ -87,9 +91,6 @@ bool 'Sysctl support' CONFIG_SYSCTL
 tristate 'Kernel support for a.out binaries' CONFIG_BINFMT_AOUT
 tristate 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
 tristate 'Kernel support for MISC binaries' CONFIG_BINFMT_MISC
-if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  tristate 'Kernel support for JAVA binaries (obsolete)' CONFIG_BINFMT_JAVA
-fi
 
 tristate 'Parallel port support' CONFIG_PARPORT
 if [ "$CONFIG_PARPORT" != "n" ]; then
@@ -113,6 +114,8 @@ if [ "$CONFIG_APM" = "y" ]; then
 fi
 
 endmenu
+
+source drivers/i2o/Config.in
 
 source drivers/pnp/Config.in
 
@@ -168,7 +171,7 @@ endmenu
 
 source drivers/char/Config.in
 
-# source drivers/usb/Config.in
+source drivers/usb/Config.in
 
 source fs/Config.in
 

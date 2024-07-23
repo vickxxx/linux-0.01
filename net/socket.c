@@ -131,6 +131,11 @@ struct net_proto_family *net_families[NPROTO];
 static int sockets_in_use  = 0;
 
 /*
+ *	Socket hashing lock.
+ */
+rwlock_t sockhash_lock = RW_LOCK_UNLOCKED;
+
+/*
  *	Support routines. Move socket addresses back and forth across the kernel/user
  *	divide and look after the messy bits.
  */
@@ -199,7 +204,7 @@ static int get_fd(struct inode *inode)
 			return -ENFILE;
 		}
 
-		file->f_dentry = d_alloc_root(inode, NULL);
+		file->f_dentry = d_alloc_root(inode);
 		if (!file->f_dentry) {
 			put_filp(file);
 			put_unused_fd(fd);
@@ -283,7 +288,7 @@ struct socket *sock_alloc(void)
 	inode->i_gid = current->fsgid;
 
 	sock->inode = inode;
-	init_waitqueue(&sock->wait);
+	init_waitqueue_head(&sock->wait);
 	sock->fasync_list = NULL;
 	sock->state = SS_UNCONNECTED;
 	sock->flags = 0;
@@ -561,7 +566,8 @@ int sock_wake_async(struct socket *sock, int how)
 		/* fall through */
 	case 0:
 	call_kill:
-		kill_fasync(sock->fasync_list, SIGIO);
+		if(sock->fasync_list != NULL)
+			kill_fasync(sock->fasync_list, SIGIO);
 		break;
 	}
 	return 0;
@@ -944,7 +950,6 @@ asmlinkage int sys_sendto(int fd, void * buff, size_t len, unsigned flags,
 	struct msghdr msg;
 	struct iovec iov;
 	
-	lock_kernel();
 	sock = sockfd_lookup(fd, &err);
 	if (!sock)
 		goto out;
@@ -971,7 +976,6 @@ asmlinkage int sys_sendto(int fd, void * buff, size_t len, unsigned flags,
 out_put:		
 	sockfd_put(sock);
 out:
-	unlock_kernel();
 	return err;
 }
 
@@ -999,7 +1003,6 @@ asmlinkage int sys_recvfrom(int fd, void * ubuf, size_t size, unsigned flags,
 	char address[MAX_SOCK_ADDR];
 	int err,err2;
 
-	lock_kernel();
 	sock = sockfd_lookup(fd, &err);
 	if (!sock)
 		goto out;
@@ -1024,7 +1027,6 @@ asmlinkage int sys_recvfrom(int fd, void * ubuf, size_t size, unsigned flags,
 	}
 	sockfd_put(sock);			
 out:
-	unlock_kernel();
 	return err;
 }
 
@@ -1117,8 +1119,6 @@ asmlinkage int sys_sendmsg(int fd, struct msghdr *msg, unsigned flags)
 	struct msghdr msg_sys;
 	int err, ctl_len, iov_size, total_len;
 	
-	lock_kernel();
-
 	err = -EFAULT;
 	if (copy_from_user(&msg_sys,msg,sizeof(struct msghdr)))
 		goto out; 
@@ -1188,7 +1188,6 @@ out_freeiov:
 out_put:
 	sockfd_put(sock);
 out:       
-	unlock_kernel();
 	return err;
 }
 
@@ -1212,7 +1211,6 @@ asmlinkage int sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 	struct sockaddr *uaddr;
 	int *uaddr_len;
 	
-	lock_kernel();
 	err=-EFAULT;
 	if (copy_from_user(&msg_sys,msg,sizeof(struct msghdr)))
 		goto out;
@@ -1276,7 +1274,6 @@ out_freeiov:
 out_put:
 	sockfd_put(sock);
 out:
-	unlock_kernel();
 	return err;
 }
 

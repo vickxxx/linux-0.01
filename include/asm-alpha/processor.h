@@ -8,6 +8,12 @@
 #define __ASM_ALPHA_PROCESSOR_H
 
 /*
+ * Returns current instruction pointer ("program counter").
+ */
+#define current_text_addr() \
+  ({ void *__pc; __asm__ ("br %0,.+4" : "=r"(__pc)); __pc; })
+
+/*
  * We have a 42-bit user address space: 4TB user VM...
  */
 #define TASK_SIZE (0x40000000000UL)
@@ -55,6 +61,15 @@ struct thread_struct {
 	 */
 	unsigned long flags;
 
+	/* The full version of the ASN including serial number.
+
+	   Two threads running on two different processors must of necessity
+	   have different serial numbers.  Having this duplicated from
+	   mm->context allows them to be slightly out of sync preventing 
+	   the asn from incrementing each and every time the two threads
+	   are scheduled.  */
+	unsigned long mm_context;
+
 	/* Perform syscall argument validation (get/set_fs). */
 	mm_segment_t fs;
 
@@ -71,7 +86,7 @@ struct thread_struct {
 	0, 0, 0, \
 	0, 0, 0, \
 	0, 0, 0, \
-	0, \
+	0, 0, \
 	KERNEL_DS \
 }
 
@@ -85,7 +100,7 @@ struct thread_struct {
  * is the frame pointer in schedule() and $15 is saved at offset 48 by
  * entry.S:do_switch_stack).
  *
- * Under heavy swap load I've seen this loose in an ugly way.  So do
+ * Under heavy swap load I've seen this lose in an ugly way.  So do
  * some extra sanity checking on the ranges we expect these pointers
  * to be in so that we can fail gracefully.  This is just for ps after
  * all.  -- r~

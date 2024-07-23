@@ -4,7 +4,7 @@
  *
  * 	Copyright (c) 1994 Pauline Middelink
  *
- *	$Id: ip_masq.c,v 1.34 1999/03/17 01:53:51 davem Exp $
+ *	$Id: ip_masq.c,v 1.35 1999/06/29 12:35:46 davem Exp $
  *
  *
  *	See ip_fw.c for original log
@@ -315,9 +315,7 @@ static __inline__ const __u8 icmp_type_request(__u8 type)
  *	Will cycle in MASQ_PORT boundaries.
  */
 static __u16 masq_port = PORT_MASQ_BEGIN;
-#ifdef __SMP__
 static spinlock_t masq_port_lock = SPIN_LOCK_UNLOCKED;
-#endif
 
 /*
  *	free ports counters (UDP & TCP)

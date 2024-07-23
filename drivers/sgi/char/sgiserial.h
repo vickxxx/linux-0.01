@@ -158,8 +158,8 @@ struct sgi_serial {
 	struct tq_struct	tqueue_hangup;
 	struct termios		normal_termios;
 	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
 };
 
 
@@ -412,7 +412,8 @@ extern inline void ZS_CLEARERR(struct sgi_zschannel *channel)
 
 	udelay(2);
 	channel->control = ERR_RES;
-	junk = ioc_icontrol->istat0;
+	if (ioc_icontrol)
+		junk = ioc_icontrol->istat0;
 }
 
 extern inline void ZS_CLEARFIFO(struct sgi_zschannel *channel)
@@ -421,11 +422,17 @@ extern inline void ZS_CLEARFIFO(struct sgi_zschannel *channel)
 
 	udelay(2);
 	junk = channel->data;
-	udelay(2); junk = ioc_icontrol->istat0;
+	udelay(2);
+	if (ioc_icontrol)
+		junk = ioc_icontrol->istat0;
 	junk = channel->data;
-	udelay(2); junk = ioc_icontrol->istat0;
+	udelay(2);
+	if (ioc_icontrol)
+		junk = ioc_icontrol->istat0;
 	junk = channel->data;
-	udelay(2); junk = ioc_icontrol->istat0;
+	udelay(2);
+	if (ioc_icontrol)
+		junk = ioc_icontrol->istat0;
 }
 
 #if 0

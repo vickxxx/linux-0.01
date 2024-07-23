@@ -27,7 +27,15 @@
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 
-static ssize_t minix_file_write(struct file *, const char *, size_t, loff_t *);
+/*
+ * Write to a file (through the page cache).
+ */
+static ssize_t
+minix_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
+{
+	return generic_file_write(file, buf, count,
+				  ppos, block_write_partial_page);
+}
 
 /*
  * We have mostly NULLs here: the current defaults are OK for
@@ -44,7 +52,10 @@ static struct file_operations minix_file_operations = {
 	NULL,			/* no special open is needed */
 	NULL,			/* flush */
 	NULL,			/* release */
-	minix_sync_file		/* fsync */
+	minix_sync_file,	/* fsync */
+	NULL,			/* fasync */
+	NULL,			/* check_media_change */
+	NULL			/* revalidate */
 };
 
 struct inode_operations minix_file_inode_operations = {
@@ -60,75 +71,12 @@ struct inode_operations minix_file_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	generic_readpage,	/* readpage */
-	NULL,			/* writepage */
-	minix_bmap,		/* bmap */
+	minix_get_block,	/* get_block */
+	block_read_full_page,	/* readpage */
+	block_write_full_page,	/* writepage */
+	block_flushpage,	/* flushpage */
 	minix_truncate,		/* truncate */
-	NULL			/* permission */
+	NULL,			/* permission */
+	NULL,			/* smap */
+	NULL,			/* revalidate */
 };
-
-static ssize_t minix_file_write(struct file * filp, const char * buf,
-				size_t count, loff_t *ppos)
-{
-	struct inode * inode = filp->f_dentry->d_inode;
-	off_t pos;
-	ssize_t written, c;
-	struct buffer_head * bh;
-	char * p;
-
-	if (!inode) {
-		printk("minix_file_write: inode = NULL\n");
-		return -EINVAL;
-	}
-	if (!S_ISREG(inode->i_mode)) {
-		printk("minix_file_write: mode = %07o\n",inode->i_mode);
-		return -EINVAL;
-	}
-	if (filp->f_flags & O_APPEND)
-		pos = inode->i_size;
-	else
-		pos = *ppos;
-	written = 0;
-	while (written < count) {
-		bh = minix_getblk(inode,pos/BLOCK_SIZE,1);
-		if (!bh) {
-			if (!written)
-				written = -ENOSPC;
-			break;
-		}
-		c = BLOCK_SIZE - (pos % BLOCK_SIZE);
-		if (c > count-written)
-			c = count-written;
-		if (c != BLOCK_SIZE && !buffer_uptodate(bh)) {
-			ll_rw_block(READ, 1, &bh);
-			wait_on_buffer(bh);
-			if (!buffer_uptodate(bh)) {
-				brelse(bh);
-				if (!written)
-					written = -EIO;
-				break;
-			}
-		}
-		p = (pos % BLOCK_SIZE) + bh->b_data;
-		c -= copy_from_user(p,buf,c);
-		if (!c) {
-			brelse(bh);
-			if (!written)
-				written = -EFAULT;
-			break;
-		}
-		update_vm_cache(inode, pos, p, c);
-		mark_buffer_uptodate(bh, 1);
-		mark_buffer_dirty(bh, 0);
-		brelse(bh);
-		pos += c;
-		written += c;
-		buf += c;
-	}
-	if (pos > inode->i_size)
-		inode->i_size = pos;
-	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	*ppos = pos;
-	mark_inode_dirty(inode);
-	return written;
-}

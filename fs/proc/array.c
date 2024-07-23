@@ -348,7 +348,7 @@ static int get_meminfo(char * buffer)
 	len = sprintf(buffer, "        total:    used:    free:  shared: buffers:  cached:\n"
 		"Mem:  %8lu %8lu %8lu %8lu %8lu %8lu\n"
 		"Swap: %8lu %8lu %8lu\n",
-		i.totalram, i.totalram-i.freeram, i.freeram, i.sharedram, i.bufferram, page_cache_size*PAGE_SIZE,
+		i.totalram, i.totalram-i.freeram, i.freeram, i.sharedram, i.bufferram, atomic_read(&page_cache_size)*PAGE_SIZE,
 		i.totalswap, i.totalswap-i.freeswap, i.freeswap);
 	/*
 	 * Tagged format, for easy grepping and expansion. The above will go away
@@ -359,14 +359,14 @@ static int get_meminfo(char * buffer)
 		"MemFree:   %8lu kB\n"
 		"MemShared: %8lu kB\n"
 		"Buffers:   %8lu kB\n"
-		"Cached:    %8lu kB\n"
+		"Cached:    %8u kB\n"
 		"SwapTotal: %8lu kB\n"
 		"SwapFree:  %8lu kB\n",
 		i.totalram >> 10,
 		i.freeram >> 10,
 		i.sharedram >> 10,
 		i.bufferram >> 10,
-		page_cache_size << (PAGE_SHIFT - 10),
+		atomic_read(&page_cache_size) << (PAGE_SHIFT - 10),
 		i.totalswap >> 10,
 		i.freeswap >> 10);
 }
@@ -567,7 +567,7 @@ static unsigned long get_wchan(struct task_struct *p)
 			}
 		} while (count++ < 16);
 	}
-#elif defined (CONFIG_ARM)
+#elif defined(__arm__)
 	{
 		unsigned long fp, lr;
 		unsigned long stack_page;
@@ -623,7 +623,7 @@ static unsigned long get_wchan(struct task_struct *p)
 # define KSTK_EIP(tsk) \
     (*(unsigned long *)(PT_REG(pc) + PAGE_SIZE + (unsigned long)(tsk)))
 # define KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->tss.usp)
-#elif defined(CONFIG_ARM)
+#elif defined(__arm__)
 # define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1022])
 # define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1020])
 #elif defined(__mc68000__)
@@ -975,7 +975,7 @@ static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned 
 			++*dirty;
 		if (MAP_NR(pte_page(page)) >= max_mapnr)
 			continue;
-		if (atomic_read(&mem_map[MAP_NR(pte_page(page))].count) > 1)
+		if (page_count(mem_map + MAP_NR(pte_page(page))) > 1)
 			++*shared;
 	} while (address < end);
 }
@@ -1326,6 +1326,9 @@ static long get_root_array(char * page, int type, char **start,
 
 		case PROC_IOPORTS:
 			return get_ioport_list(page);
+
+		case PROC_MEMORY:
+			return get_mem_list(page);
 #ifdef CONFIG_BLK_DEV_MD
 	        case PROC_MD:
 			return get_md_status(page);
@@ -1516,11 +1519,14 @@ struct inode_operations proc_array_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
-	NULL			/* permission */
+	NULL,			/* permission */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 static ssize_t arraylong_read(struct file * file, char * buf,
@@ -1564,9 +1570,12 @@ struct inode_operations proc_arraylong_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
-	NULL			/* permission */
+	NULL,			/* permission */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };

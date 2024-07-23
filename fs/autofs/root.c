@@ -54,13 +54,13 @@ struct inode_operations autofs_root_inode_operations = {
         NULL,                   /* rename */
         NULL,                   /* readlink */
         NULL,                   /* follow_link */
+        NULL,                   /* get_block */
         NULL,                   /* readpage */
         NULL,                   /* writepage */
-        NULL,                   /* bmap */
+        NULL,                   /* flushpage */
         NULL,                   /* truncate */
         NULL,			/* permission */
 	NULL,			/* smap */
-	NULL,			/* updatepage */
 	NULL			/* revalidate */
 };
 
@@ -71,9 +71,6 @@ static int autofs_root_readdir(struct file *filp, void *dirent, filldir_t filldi
 	struct autofs_sb_info *sbi;
 	struct inode * inode = filp->f_dentry->d_inode;
 	off_t onr, nr;
-
-	if (!inode || !S_ISDIR(inode->i_mode))
-		return -ENOTDIR;
 
 	sbi = autofs_sbi(inode->i_sb);
 	dirhash = &sbi->dirhash;

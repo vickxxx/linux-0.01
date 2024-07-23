@@ -59,13 +59,13 @@ struct inode_operations smb_dir_inode_operations =
 	smb_rename,		/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
 	NULL,			/* smap */
-	NULL,			/* updatepage */
 	smb_revalidate_inode,	/* revalidate */
 };
 
@@ -318,7 +318,7 @@ smb_renew_times(struct dentry * dentry)
 	for (;;)
 	{
 		dentry->d_time = jiffies;
-		if (dentry == dentry->d_parent)
+		if (IS_ROOT(dentry))
 			break;
 		dentry = dentry->d_parent;
 	}

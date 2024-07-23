@@ -16,8 +16,6 @@ static int autofs_dir_readdir(struct file *filp,
 			       void *dirent, filldir_t filldir)
 {
 	struct inode *inode=filp->f_dentry->d_inode;
-	if (!inode || !S_ISDIR(inode->i_mode))
-		return -ENOTDIR;
 
 	switch((unsigned long) filp->f_pos)
 	{
@@ -75,13 +73,13 @@ struct inode_operations autofs_dir_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
 	NULL,			/* smap */
-	NULL,			/* updatepage */
 	NULL			/* revalidate */
 };
 

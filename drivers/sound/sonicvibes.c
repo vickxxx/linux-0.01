@@ -68,6 +68,8 @@
  *                     SOUND_PCM_READ_CHANNELS, SOUND_PCM_READ_BITS; 
  *                     Alpha fixes reported by Peter Jones <pjones@redhat.com>
  *                     Note: dmaio hack might still be wrong on archs other than i386
+ *    15.06.99   0.15  Fix bad allocation bug.
+ *                     Thanks to Deti Fliegl <fliegl@in.tum.de>
  *
  */
 
@@ -286,7 +288,7 @@ struct sv_state {
 	spinlock_t lock;
 	struct semaphore open_sem;
 	mode_t open_mode;
-	struct wait_queue *open_wait;
+	wait_queue_head_t open_wait;
 
 	struct dmabuf {
 		void *rawbuf;
@@ -297,7 +299,7 @@ struct sv_state {
 		unsigned total_bytes;
 		int count;
 		unsigned error; /* over/underrun */
-		struct wait_queue *wait;
+		wait_queue_head_t wait;
 		/* redundant, but makes calculations easier */
 		unsigned fragsize;
 		unsigned dmasize;
@@ -315,8 +317,8 @@ struct sv_state {
 	struct {
 		unsigned ird, iwr, icnt;
 		unsigned ord, owr, ocnt;
-		struct wait_queue *iwait;
-		struct wait_queue *owait;
+		wait_queue_head_t iwait;
+		wait_queue_head_t owait;
 		struct timer_list timer;
 		unsigned char ibuf[MIDIINBUF];
 		unsigned char obuf[MIDIOUTBUF];
@@ -699,8 +701,9 @@ static int prog_dmabuf(struct sv_state *s, unsigned rec)
 	db->hwptr = db->swptr = db->total_bytes = db->count = db->error = db->endcleared = 0;
 	if (!db->rawbuf) {
 		db->ready = db->mapped = 0;
-		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER && !db->rawbuf; order--)
-			db->rawbuf = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA, order);
+		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER; order--)
+			if ((db->rawbuf = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA, order)))
+				break;
 		if (!db->rawbuf)
 			return -ENOMEM;
 		db->buforder = order;
@@ -1241,7 +1244,7 @@ static /*const*/ struct file_operations sv_mixer_fops = {
 
 static int drain_dac(struct sv_state *s, int nonblock)
 {
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	int count, tmo;
 
@@ -2043,7 +2046,7 @@ static int sv_midi_open(struct inode *inode, struct file *file)
 static int sv_midi_release(struct inode *inode, struct file *file)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	unsigned count, tmo;
 
@@ -2321,7 +2324,7 @@ __initfunc(int init_sonicvibes(void))
 
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "sv: version v0.14 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "sv: version v0.15 time " __TIME__ " " __DATE__ "\n");
 #if 0
 	if (!(wavetable_mem = __get_free_pages(GFP_KERNEL, 20-PAGE_SHIFT)))
 		printk(KERN_INFO "sv: cannot allocate 1MB of contiguous nonpageable memory for wavetable data\n");
@@ -2344,12 +2347,12 @@ __initfunc(int init_sonicvibes(void))
 			continue;
 		}
 		memset(s, 0, sizeof(struct sv_state));
-		init_waitqueue(&s->dma_adc.wait);
-		init_waitqueue(&s->dma_dac.wait);
-		init_waitqueue(&s->open_wait);
-		init_waitqueue(&s->midi.iwait);
-		init_waitqueue(&s->midi.owait);
-		s->open_sem = MUTEX;
+		init_waitqueue_head(&s->dma_adc.wait);
+		init_waitqueue_head(&s->dma_dac.wait);
+		init_waitqueue_head(&s->open_wait);
+		init_waitqueue_head(&s->midi.iwait);
+		init_waitqueue_head(&s->midi.owait);
+		init_MUTEX(&s->open_sem);
 		s->magic = SV_MAGIC;
 		s->iosb = pcidev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
 		s->ioenh = pcidev->base_address[1] & PCI_BASE_ADDRESS_IO_MASK;

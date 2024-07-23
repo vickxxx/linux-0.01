@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.78 1999/01/07 14:14:05 jj Exp $ */
+/* $Id: pgtable.h,v 1.81 1999/06/27 00:38:28 davem Exp $ */
 #ifndef _SPARC_PGTABLE_H
 #define _SPARC_PGTABLE_H
 
@@ -177,7 +177,7 @@ extern unsigned long empty_zero_page;
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE ((unsigned long)(&(empty_zero_page)))
+#define ZERO_PAGE(vaddr) ((unsigned long)(&(empty_zero_page)))
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR      (8*sizeof(unsigned long))

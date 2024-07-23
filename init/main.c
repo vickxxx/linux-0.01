@@ -14,6 +14,7 @@
 #include <linux/config.h>
 #include <linux/proc_fs.h>
 #include <linux/unistd.h>
+#include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/delay.h>
 #include <linux/utsname.h>
@@ -68,7 +69,6 @@ extern int console_loglevel;
 static int init(void *);
 extern int bdflush(void *);
 extern int kswapd(void *);
-extern int kpiod(void *);
 extern void kswapd_setup(void);
 
 extern void init_IRQ(void);
@@ -416,6 +416,10 @@ static struct dev_name_struct {
 	{ "hdj",     0x3840 },
 	{ "hdk",     0x3900 },
 	{ "hdl",     0x3940 },
+	{ "hdm",     0x5800 },
+	{ "hdn",     0x5840 },
+	{ "hdo",     0x5900 },
+	{ "hdp",     0x5940 },
 #endif
 #ifdef CONFIG_BLK_DEV_SD
 	{ "sda",     0x0800 },
@@ -929,7 +933,11 @@ static int __init checksetup(char *line)
 
 #ifdef CONFIG_BLK_DEV_IDE
 	/* ide driver needs the basic string, rather than pre-processed values */
-	if (!strncmp(line,"ide",3) || (!strncmp(line,"hd",2) && line[2] != '=')) {
+	if (!strncmp(line,"ide",3) ||
+#ifdef CONFIG_BLK_DEV_VIA82C586
+	    !strncmp(line,"splitfifo",9) ||
+#endif /* CONFIG_BLK_DEV_VIA82C586 */
+	    (!strncmp(line,"hd",2) && line[2] != '=')) {
 		ide_setup(line);
 		return 1;
 	}
@@ -1130,6 +1138,7 @@ asmlinkage void __init start_kernel(void)
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
+	lock_kernel();
 	printk(linux_banner);
 	setup_arch(&command_line, &memory_start, &memory_end);
 	memory_start = paging_init(memory_start,memory_end);
@@ -1177,6 +1186,7 @@ asmlinkage void __init start_kernel(void)
 	dcache_init();
 	vma_init();
 	buffer_init(memory_end-memory_start);
+	page_cache_init(memory_end-memory_start);
 	signals_init();
 	inode_init();
 	file_table_init();
@@ -1196,6 +1206,7 @@ asmlinkage void __init start_kernel(void)
 	 */
 	smp_init();
 	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	unlock_kernel();
 	current->need_resched = 1;
  	cpu_idle(NULL);
 }
@@ -1293,7 +1304,6 @@ static void __init do_basic_setup(void)
 	kernel_thread(bdflush, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 	/* Start the background pageout daemon. */
 	kswapd_setup();
-	kernel_thread(kpiod, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 	kernel_thread(kswapd, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 
 #if CONFIG_AP1000
@@ -1323,21 +1333,6 @@ static void __init do_basic_setup(void)
 
 	/* Mount the root filesystem.. */
 	mount_root();
-
-#ifdef CONFIG_UMSDOS_FS
-	{
-		/*
-			When mounting a umsdos fs as root, we detect
-			the pseudo_root (/linux) and initialise it here.
-			pseudo_root is defined in fs/umsdos/inode.c
-		*/
-		extern struct inode *pseudo_root;
-		if (pseudo_root != NULL){
-			current->fs->root = pseudo_root->i_sb->s_root;
-			current->fs->pwd  = pseudo_root->i_sb->s_root;
-		}
-	}
-#endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	root_mountflags = real_root_mountflags;

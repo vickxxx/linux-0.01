@@ -1,4 +1,4 @@
-/* $Id: sys_sunos.c,v 1.94 1998/10/12 06:15:04 jj Exp $
+/* $Id: sys_sunos.c,v 1.101 1999/06/29 12:33:54 davem Exp $
  * sys_sunos.c: SunOS specific syscall compatibility support.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -150,7 +150,6 @@ asmlinkage int sunos_brk(unsigned long brk)
 	unsigned long newbrk, oldbrk;
 
 	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if(ARCH_SUN4C_SUN4) {
 		if(brk >= 0x20000000 && brk < 0xe0000000) {
 			goto out;
@@ -197,8 +196,8 @@ asmlinkage int sunos_brk(unsigned long brk)
 	 * simple, it hopefully works in most obvious cases.. Easy to
 	 * fool it, but this should catch most mistakes.
 	 */
-	freepages = buffermem >> PAGE_SHIFT;
-        freepages += page_cache_size;
+	freepages = atomic_read(&buffermem) >> PAGE_SHIFT;
+	freepages += atomic_read(&page_cache_size);
 	freepages >>= 1;
 	freepages += nr_free_pages;
 	freepages += nr_swap_pages;
@@ -210,12 +209,9 @@ asmlinkage int sunos_brk(unsigned long brk)
 	 * Ok, we have probably got enough memory - let it rip.
 	 */
 	current->mm->brk = brk;
-	do_mmap(NULL, oldbrk, newbrk-oldbrk,
-		PROT_READ|PROT_WRITE|PROT_EXEC,
-		MAP_FIXED|MAP_PRIVATE, 0);
+	do_brk(oldbrk, newbrk-oldbrk);
 	retval = 0;
 out:
-	unlock_kernel();
 	up(&current->mm->mmap_sem);
 	return retval;
 }
@@ -1198,7 +1194,7 @@ asmlinkage int sunos_readv(unsigned long fd, const struct iovec * vector, long c
 
 	lock_kernel();
 	ret = check_nonblock(sys_readv(fd,vector,count),fd);
-	lock_kernel();
+	unlock_kernel();
 	return ret;
 }
 

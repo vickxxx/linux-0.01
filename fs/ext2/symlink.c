@@ -43,12 +43,14 @@ struct inode_operations ext2_symlink_inode_operations = {
 	NULL,			/* rename */
 	ext2_readlink,		/* readlink */
 	ext2_follow_link,	/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
 	NULL,			/* permission */
-	NULL			/* smap */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };
 
 static struct dentry * ext2_follow_link(struct dentry * dentry,
@@ -102,7 +104,6 @@ static int ext2_readlink (struct dentry * dentry, char * buffer, int buflen)
 		i++;
 	if (copy_to_user(buffer, link, i))
 		i = -EFAULT;
- 	UPDATE_ATIME(inode);
 	if (bh)
 		brelse (bh);
 	return i;

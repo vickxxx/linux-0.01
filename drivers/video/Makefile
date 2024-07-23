@@ -132,6 +132,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_FB_CYBER2000),y)
+L_OBJS += cyber2000fb.o
+else
+  ifeq ($(CONFIG_FB_CYBER2000),m)
+  M_OBJS += cyber2000fb.o
+  endif
+endif
+
 ifeq ($(CONFIG_FB_SGIVW),y)
 L_OBJS += sgivwfb.o
 else
@@ -192,6 +200,10 @@ endif
 
 ifeq ($(CONFIG_FB_VESA),y)
 L_OBJS += vesafb.o
+endif
+
+ifeq ($(CONFIG_FB_VGA16),y)
+L_OBJS += vga16fb.o
 endif
 
 ifeq ($(CONFIG_FB_VIRGE),y)
@@ -454,6 +466,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_FBCON_VGA_PLANES),y)
+OX_OBJS += fbcon-vga-planes.o
+else
+  ifeq ($(CONFIG_FBCON_VGA_PLANES),m)
+  MX_OBJS += fbcon-vga-planes.o
+  endif
+endif
+
 ifeq ($(CONFIG_FBCON_VGA),y)
 OX_OBJS += fbcon-vga.o
 else
@@ -475,6 +495,16 @@ L_OBJS += mdacon.o
 else
   ifeq ($(CONFIG_MDA_CONSOLE),m)
   M_OBJS += mdacon.o
+  endif
+endif
+
+# Newport Text Console
+
+ifeq ($(CONFIG_SGI_NEWPORT_CONSOLE),y)
+L_OBJS += newport_con.o vga_font.o
+else
+  ifeq ($(CONFIG_SGI_NEWPORT_CONSOLE),m)
+  M_OBJS += newport_con.o vga_font.o
   endif
 endif
 

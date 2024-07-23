@@ -945,7 +945,7 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 		printk("maxsg = %x, counted = %d this_count = %d\n",
 		       max_sg, counted, this_count);
 		while(bh){
-		    printk("[%p %lx] ", bh->b_data, bh->b_size);
+		    printk("[%p %x] ", bh->b_data, bh->b_size);
 		    bh = bh->b_reqnext;
 		}
 		if(SCpnt->use_sg < 16)
@@ -1183,7 +1183,7 @@ static int sd_init_onedisk(int i)
 		SCpnt->sense_buffer[2] = 0;
 
 		{
-		    struct semaphore sem = MUTEX_LOCKED;
+		    DECLARE_MUTEX_LOCKED(sem);
 		    /* Mark as really busy again */
 		    SCpnt->request.rq_status = RQ_SCSI_BUSY;
 		    SCpnt->request.sem = &sem;
@@ -1221,7 +1221,7 @@ static int sd_init_onedisk(int i)
 		    SCpnt->sense_buffer[2] = 0;
 
 		    {
-		    	struct semaphore sem = MUTEX_LOCKED;
+		        DECLARE_MUTEX_LOCKED(sem);
 			/* Mark as really busy again */
 			SCpnt->request.rq_status = RQ_SCSI_BUSY;
 		    	SCpnt->request.sem = &sem;
@@ -1263,7 +1263,7 @@ static int sd_init_onedisk(int i)
 	SCpnt->sense_buffer[2] = 0;
 
 	{
-	    struct semaphore sem = MUTEX_LOCKED;
+            DECLARE_MUTEX_LOCKED(sem);
 	    /* Mark as really busy again */
 	    SCpnt->request.rq_status = RQ_SCSI_BUSY;
 	    SCpnt->request.sem = &sem;
@@ -1444,7 +1444,7 @@ static int sd_init_onedisk(int i)
 
 	/* same code as READCAPA !! */
 	{
-	    struct semaphore sem = MUTEX_LOCKED;
+            DECLARE_MUTEX_LOCKED(sem);
 	    SCpnt->request.rq_status = RQ_SCSI_BUSY;  /* Mark as really busy again */
 	    SCpnt->request.sem = &sem;
 	    scsi_do_cmd (SCpnt,
@@ -1729,7 +1729,7 @@ static int fop_revalidate_scsidisk(kdev_t dev){
 static void sd_detach(Scsi_Device * SDp)
 {
     Scsi_Disk * dpnt;
-    int i;
+    int i, j;
     int max_p;
     int start;
 
@@ -1741,8 +1741,8 @@ static void sd_detach(Scsi_Device * SDp)
 	    max_p = sd_gendisk.max_p;
 	    start = i << sd_gendisk.minor_shift;
 
-	    for (i=max_p - 1; i >=0 ; i--) {
-		int index = start+i;
+	    for (j=max_p - 1; j >=0 ; j--) {
+		int index = start+j;
 		kdev_t devi = MKDEV_SD_PARTITION(index);
                 struct super_block *sb = get_super(devi);
 		sync_dev(devi);
@@ -1759,7 +1759,7 @@ static void sd_detach(Scsi_Device * SDp)
 	    SDp->attached--;
 	    sd_template.dev_noticed--;
 	    sd_template.nr_dev--;
-	    SD_GENDISK(start).nr_real--;
+	    SD_GENDISK(i).nr_real--;
 	    return;
 	}
     return;

@@ -512,7 +512,9 @@ repeat:
 	while ((fl = *before) != NULL) {
 		if ((fl->fl_flags & FL_FLOCK) && fl->fl_file == filp) {
 			int (*lock)(struct file *, int, struct file_lock *);
-			lock = filp->f_op->lock;
+			lock = NULL;
+			if (filp->f_op)
+				lock = filp->f_op->lock;
 			if (lock) {
 				file_lock = *fl;
 				file_lock.fl_type = F_UNLCK;
@@ -561,11 +563,14 @@ int locks_verify_area(int read_write, struct inode *inode, struct file *filp,
 	/* Candidates for mandatory locking have the setgid bit set
 	 * but no group execute bit -  an otherwise meaningless combination.
 	 */
-	if (IS_MANDLOCK(inode) &&
-	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID)
-		return (locks_mandatory_area(read_write, inode, filp, offset,
-					     count));
-	return (0);
+	if (IS_MANDLOCK(inode) && (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID) {
+		int retval;
+		lock_kernel();
+		retval = locks_mandatory_area(read_write, inode, filp, offset, count);
+		unlock_kernel();
+		return retval;
+	}
+	return 0;
 }
 
 int locks_mandatory_locked(struct inode *inode)
@@ -597,6 +602,7 @@ int locks_mandatory_area(int read_write, struct inode *inode,
 	tfl.fl_flags = FL_POSIX | FL_ACCESS;
 	tfl.fl_owner = current->files;
 	tfl.fl_pid = current->pid;
+	init_waitqueue_head(&tfl.fl_wait);
 	tfl.fl_type = (read_write == FLOCK_VERIFY_WRITE) ? F_WRLCK : F_RDLCK;
 	tfl.fl_start = offset;
 	tfl.fl_end = offset + count - 1;
@@ -646,6 +652,7 @@ static int posix_make_lock(struct file *filp, struct file_lock *fl,
 
 	memset(fl, 0, sizeof(*fl));
 	
+	init_waitqueue_head(&fl->fl_wait);
 	fl->fl_flags = FL_POSIX;
 
 	switch (l->l_type) {
@@ -693,6 +700,7 @@ static int flock_make_lock(struct file *filp, struct file_lock *fl,
 {
 	memset(fl, 0, sizeof(*fl));
 
+	init_waitqueue_head(&fl->fl_wait);
 	if (!filp->f_dentry)	/* just in case */
 		return (0);
 
@@ -1111,6 +1119,7 @@ static struct file_lock *locks_init_lock(struct file_lock *new,
 		memset(new, 0, sizeof(*new));
 		new->fl_owner = fl->fl_owner;
 		new->fl_pid = fl->fl_pid;
+		init_waitqueue_head(&new->fl_wait);
 		new->fl_file = fl->fl_file;
 		new->fl_flags = fl->fl_flags;
 		new->fl_type = fl->fl_type;

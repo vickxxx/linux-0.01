@@ -17,8 +17,8 @@ O_OBJS    = open.o read_write.o devices.o file_table.o buffer.o \
 
 MOD_LIST_NAME := FS_MODULES
 ALL_SUB_DIRS = coda minix ext2 fat msdos vfat proc isofs nfs umsdos ntfs \
-		hpfs sysv smbfs ncpfs ufs affs romfs autofs hfs lockd nfsd \
-		nls devpts adfs qnx4
+		hpfs sysv smbfs ncpfs ufs efs affs romfs autofs hfs lockd \
+		nfsd nls devpts adfs qnx4
 
 ifeq ($(CONFIG_QUOTA),y)
 O_OBJS += dquot.o
@@ -191,6 +191,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_EFS_FS),y)
+SUB_DIRS += efs
+else
+  ifeq ($(CONFIG_EFS_FS),m)
+  MOD_SUB_DIRS += efs
+  endif
+endif
+
 ifeq ($(CONFIG_AFFS_FS),y)
 SUB_DIRS += affs
 else
@@ -252,14 +260,6 @@ BINFMTS += binfmt_aout.o
 else
   ifeq ($(CONFIG_BINFMT_AOUT),m)
   M_OBJS += binfmt_aout.o
-  endif
-endif
-
-ifeq ($(CONFIG_BINFMT_JAVA),y)
-BINFMTS += binfmt_java.o
-else
-  ifeq ($(CONFIG_BINFMT_JAVA),m)
-  M_OBJS += binfmt_java.o
   endif
 endif
 

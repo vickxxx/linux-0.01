@@ -65,6 +65,8 @@
  *                     reported by "Ivan N. Kokshaysky" <ink@jurassic.park.msu.ru>
  *                     Note: joystick address handling might still be wrong on archs
  *                     other than i386
+ *    15.06.99   0.12  Fix bad allocation bug.
+ *                     Thanks to Deti Fliegl <fliegl@in.tum.de>
  *
  */
 
@@ -361,7 +363,7 @@ struct es1371_state {
 	spinlock_t lock;
 	struct semaphore open_sem;
 	mode_t open_mode;
-	struct wait_queue *open_wait;
+	wait_queue_head_t open_wait;
 
 	struct dmabuf {
 		void *rawbuf;
@@ -372,7 +374,7 @@ struct es1371_state {
 		unsigned total_bytes;
 		int count;
 		unsigned error; /* over/underrun */
-		struct wait_queue *wait;
+		wait_queue_head_t wait;
 		/* redundant, but makes calculations easier */
 		unsigned fragsize;
 		unsigned dmasize;
@@ -390,8 +392,8 @@ struct es1371_state {
 	struct {
 		unsigned ird, iwr, icnt;
 		unsigned ord, owr, ocnt;
-		struct wait_queue *iwait;
-		struct wait_queue *owait;
+		wait_queue_head_t iwait;
+		wait_queue_head_t owait;
 		unsigned char ibuf[MIDIINBUF];
 		unsigned char obuf[MIDIOUTBUF];
 	} midi;
@@ -759,8 +761,9 @@ static int prog_dmabuf(struct es1371_state *s, struct dmabuf *db, unsigned rate,
 	db->hwptr = db->swptr = db->total_bytes = db->count = db->error = db->endcleared = 0;
 	if (!db->rawbuf) {
 		db->ready = db->mapped = 0;
-		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER && !db->rawbuf; order--)
-			db->rawbuf = (void *)__get_free_pages(GFP_KERNEL, order);
+		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER; order--)
+			if ((db->rawbuf = (void *)__get_free_pages(GFP_KERNEL, order)))
+				break;
 		if (!db->rawbuf)
 			return -ENOMEM;
 		db->buforder = order;
@@ -1454,7 +1457,7 @@ static /*const*/ struct file_operations es1371_mixer_fops = {
 
 static int drain_dac1(struct es1371_state *s, int nonblock)
 {
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	int count, tmo;
 	
@@ -1489,7 +1492,7 @@ static int drain_dac1(struct es1371_state *s, int nonblock)
 
 static int drain_dac2(struct es1371_state *s, int nonblock)
 {
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	int count, tmo;
 
@@ -2625,7 +2628,7 @@ static int es1371_midi_open(struct inode *inode, struct file *file)
 static int es1371_midi_release(struct inode *inode, struct file *file)
 {
 	struct es1371_state *s = (struct es1371_state *)file->private_data;
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	unsigned count, tmo;
 
@@ -2732,7 +2735,7 @@ __initfunc(int init_es1371(void))
 
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "es1371: version v0.11 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "es1371: version v0.12 time " __TIME__ " " __DATE__ "\n");
 	while (index < NR_DEVICE && 
 	       (pcidev = pci_find_device(PCI_VENDOR_ID_ENSONIQ, PCI_DEVICE_ID_ENSONIQ_ES1371, pcidev))) {
 		if (pcidev->base_address[0] == 0 || 
@@ -2745,13 +2748,13 @@ __initfunc(int init_es1371(void))
 			continue;
 		}
 		memset(s, 0, sizeof(struct es1371_state));
-		init_waitqueue(&s->dma_adc.wait);
-		init_waitqueue(&s->dma_dac1.wait);
-		init_waitqueue(&s->dma_dac2.wait);
-		init_waitqueue(&s->open_wait);
-		init_waitqueue(&s->midi.iwait);
-		init_waitqueue(&s->midi.owait);
-		s->open_sem = MUTEX;
+		init_waitqueue_head(&s->dma_adc.wait);
+		init_waitqueue_head(&s->dma_dac1.wait);
+		init_waitqueue_head(&s->dma_dac2.wait);
+		init_waitqueue_head(&s->open_wait);
+		init_waitqueue_head(&s->midi.iwait);
+		init_waitqueue_head(&s->midi.owait);
+		init_MUTEX(&s->open_sem);
 		s->magic = ES1371_MAGIC;
 		s->io = pcidev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
 		s->irq = pcidev->irq;

@@ -49,9 +49,7 @@ static void set_brk(unsigned long start, unsigned long end)
 	end = PAGE_ALIGN(end);
 	if (end <= start)
 		return;
-	do_mmap(NULL, start, end - start,
-		PROT_READ | PROT_WRITE | PROT_EXEC,
-		MAP_FIXED | MAP_PRIVATE, 0);
+	do_brk(start, end - start);
 }
 
 /*
@@ -61,11 +59,7 @@ static void set_brk(unsigned long start, unsigned long end)
 
 static int dump_write(struct file *file, const void *addr, int nr)
 {
-	int r;
-	down(&file->f_dentry->d_inode->i_sem);
-	r = file->f_op->write(file, addr, nr, &file->f_pos) == nr;
-	up(&file->f_dentry->d_inode->i_sem);
-	return r;
+	return file->f_op->write(file, addr, nr, &file->f_pos) == nr;
 }
 
 #define DUMP_WRITE(addr, nr)	\
@@ -307,7 +301,6 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 	struct file * file;
 	int fd;
 	unsigned long error;
-	unsigned long p = bprm->p;
 	unsigned long fd_offset;
 	unsigned long rlim;
 	int retval;
@@ -330,7 +323,7 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 
 	if (N_MAGIC(ex) == ZMAGIC && ex.a_text &&
 	    bprm->dentry->d_inode->i_op &&
-	    bprm->dentry->d_inode->i_op->bmap &&
+	    bprm->dentry->d_inode->i_op->get_block &&
 	    (fd_offset < bprm->dentry->d_inode->i_sb->s_blocksize)) {
 		printk(KERN_NOTICE "N_TXTOFF < BLOCK_SIZE. Please convert binary.\n");
 		return -ENOEXEC;
@@ -373,14 +366,10 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 #ifdef __sparc__
 	if (N_MAGIC(ex) == NMAGIC) {
 		/* Fuck me plenty... */
-		error = do_mmap(NULL, N_TXTADDR(ex), ex.a_text,
-				PROT_READ|PROT_WRITE|PROT_EXEC,
-				MAP_FIXED|MAP_PRIVATE, 0);
+		error = do_brk(N_TXTADDR(ex), ex.a_text);
 		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
 			  ex.a_text, 0);
-		error = do_mmap(NULL, N_DATADDR(ex), ex.a_data,
-				PROT_READ|PROT_WRITE|PROT_EXEC,
-				MAP_FIXED|MAP_PRIVATE, 0);
+		error = do_brk(N_DATADDR(ex), ex.a_data);
 		read_exec(bprm->dentry, fd_offset + ex.a_text, (char *) N_DATADDR(ex),
 			  ex.a_data, 0);
 		goto beyond_if;
@@ -389,16 +378,12 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 
 	if (N_MAGIC(ex) == OMAGIC) {
 #if defined(__alpha__) || defined(__sparc__)
-		do_mmap(NULL, N_TXTADDR(ex) & PAGE_MASK,
-			ex.a_text+ex.a_data + PAGE_SIZE - 1,
-			PROT_READ|PROT_WRITE|PROT_EXEC,
-			MAP_FIXED|MAP_PRIVATE, 0);
+		do_brk(N_TXTADDR(ex) & PAGE_MASK,
+			ex.a_text+ex.a_data + PAGE_SIZE - 1);
 		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
 			  ex.a_text+ex.a_data, 0);
 #else
-		do_mmap(NULL, 0, ex.a_text+ex.a_data,
-			PROT_READ|PROT_WRITE|PROT_EXEC,
-			MAP_FIXED|MAP_PRIVATE, 0);
+		do_brk(0, ex.a_text+ex.a_data);
 		read_exec(bprm->dentry, 32, (char *) 0, ex.a_text+ex.a_data, 0);
 #endif
 		flush_icache_range((unsigned long) 0,
@@ -411,13 +396,19 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 		fd = open_dentry(bprm->dentry, O_RDONLY);
 		if (fd < 0)
 			return fd;
-		file = fcheck(fd);
+		file = fget(fd);
 
-		if (!file->f_op || !file->f_op->mmap) {
+		if ((fd_offset & ~PAGE_MASK) != 0) {
+			printk(KERN_WARNING 
+			       "fd_offset is not page aligned. Please convert program: %s\n",
+			       file->f_dentry->d_name.name
+			       );
+		}
+
+		if (!file->f_op || !file->f_op->mmap || ((fd_offset & ~PAGE_MASK) != 0)) {
+			fput(file);
 			sys_close(fd);
-			do_mmap(NULL, 0, ex.a_text+ex.a_data,
-				PROT_READ|PROT_WRITE|PROT_EXEC,
-				MAP_FIXED|MAP_PRIVATE, 0);
+			do_brk(0, ex.a_text+ex.a_data);
 			read_exec(bprm->dentry, fd_offset,
 				  (char *) N_TXTADDR(ex), ex.a_text+ex.a_data, 0);
 			flush_icache_range((unsigned long) N_TXTADDR(ex),
@@ -432,6 +423,7 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 			fd_offset);
 
 		if (error != N_TXTADDR(ex)) {
+			fput(file);
 			sys_close(fd);
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -441,6 +433,7 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
+		fput(file);
 		sys_close(fd);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
@@ -461,14 +454,18 @@ beyond_if:
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
-	p = setup_arg_pages(p, bprm);
+	retval = setup_arg_pages(bprm); 
+	if (retval < 0) { 
+		/* Someone check-me: is this error path enough? */ 
+		send_sig(SIGKILL, current, 0); 
+		return retval;
+	}
 
-	p = (unsigned long) create_aout_tables((char *)p, bprm);
-	current->mm->start_stack = p;
+	current->mm->start_stack = create_aout_tables(bprm->p, bprm);
 #ifdef __alpha__
 	regs->gp = ex.a_gpvalue;
 #endif
-	start_thread(regs, ex.a_entry, p);
+	start_thread(regs, ex.a_entry, current->mm->start_stack);
 	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
@@ -534,6 +531,24 @@ do_load_aout_library(int fd)
 
 	start_addr =  ex.a_entry & 0xfffff000;
 
+	if ((N_TXTOFF(ex) & ~PAGE_MASK) != 0) {
+		printk(KERN_WARNING 
+		       "N_TXTOFF is not page aligned. Please convert library: %s\n",
+		       file->f_dentry->d_name.name
+		       );
+		
+		do_mmap(NULL, start_addr & PAGE_MASK, ex.a_text + ex.a_data + ex.a_bss,
+			PROT_READ | PROT_WRITE | PROT_EXEC,
+			MAP_FIXED| MAP_PRIVATE, 0);
+		
+		read_exec(file->f_dentry, N_TXTOFF(ex),
+			  (char *)start_addr, ex.a_text + ex.a_data, 0);
+		flush_icache_range((unsigned long) start_addr,
+				   (unsigned long) start_addr + ex.a_text + ex.a_data);
+
+		retval = 0;
+		goto out_putf;
+	}
 	/* Now use mmap to map the library into memory. */
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -546,9 +561,7 @@ do_load_aout_library(int fd)
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
 	if (bss > len) {
-		error = do_mmap(NULL, start_addr + len, bss - len,
-				PROT_READ | PROT_WRITE | PROT_EXEC,
-				MAP_PRIVATE | MAP_FIXED, 0);
+		error = do_brk(start_addr + len, bss - len);
 		retval = error;
 		if (error != start_addr + len)
 			goto out_putf;

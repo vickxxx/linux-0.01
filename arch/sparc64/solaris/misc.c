@@ -1,4 +1,4 @@
-/* $Id: misc.c,v 1.13 1998/10/28 08:11:58 jj Exp $
+/* $Id: misc.c,v 1.14 1999/06/25 11:00:53 davem Exp $
  * misc.c: Miscelaneous syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -83,6 +83,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 		}
 	}
 
+	down(&current->mm->mmap_sem);
 	retval = -ENOMEM;
 	if(!(flags & MAP_FIXED) && !addr) {
 		unsigned long attempt = get_unmapped_area(addr, len);
@@ -102,6 +103,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	if(!ret_type)
 		retval = ((retval < 0xf0000000) ? 0 : retval);
 out_putf:
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:

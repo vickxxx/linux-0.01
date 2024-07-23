@@ -170,6 +170,12 @@ L:	linux-scsi@vger.rutgers.edu
 W:	http://www.dandelion.com/Linux/
 S:	Maintained
 
+CIRRUS LOGIC GENERIC FBDEV DRIVER
+P:	Jeff Garzik
+M:	jgarzik@pobox.com
+L:	linux-fbdev@vuser.vu.union.edu
+S:	Maintained
+
 CONFIGURE, MENUCONFIG, XCONFIG
 P:	Michael Elizabeth Chastain
 M:	mec@shout.net
@@ -190,6 +196,13 @@ S:	Maintained
 CREDITS FILE
 P:	John A. Martin
 M:	jam@acm.org
+S:	Maintained
+
+CYCLADES 2X SYNC CARD DRIVER
+P:	Arnaldo Carvalho de Melo
+M:	acme@conectiva.com.br
+W:	http://www.conectiva.com.br/~acme
+L:	cycsyn-devel@bazar.conectiva.com.br
 S:	Maintained
 
 CYCLADES ASYNC MUX DRIVER
@@ -227,9 +240,9 @@ L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
 DIGI INTL. EPCA DRIVER
-P:      Daniel Taylor
+P:	 Chad Schwartz
 M:      support@dgii.com
-M:      danielt@dgii.com
+M:      chads@dgii.com
 L:      digilnux@dgii.com
 S:      Maintained
 
@@ -361,6 +374,12 @@ M:	langa2@kph.uni-mainz.de
 W:	http://www.uni-mainz.de/~langm000/linux.html
 S:	Maintained
 
+HPFS FILESYSTEM
+P:	Mikulas Patocka
+M:	mikulas@artax.karlin.mff.cuni.cz
+W:	http://artax.karlin.mff.cuni.cz/~mikulas/vyplody/hpfs/index-e.cgi
+S:	Maintained
+
 IDE DRIVER [GENERAL]
 P:	Andre Hedrick
 M:	hedrick@astro.dyer.vanderbilt.edu
@@ -384,6 +403,11 @@ P:	Paul Russell
 M:	Paul.Russell@rustcorp.com.au
 W:	http://www.rustcorp.com/linux/ipchains
 S:	Supported
+
+IP MASQUERADING:
+P:	Juanjo Ciarlante
+M:	jjciarla@raiz.uncu.edu.ar
+S:	Maintained
 
 IPX/SPX NETWORK LAYER
 P:	Jay Schulist

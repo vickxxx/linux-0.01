@@ -15,7 +15,7 @@
 #include <asm/io.h>
 
 extern unsigned long log_size;
-extern struct wait_queue * log_wait;
+extern wait_queue_head_t log_wait;
 
 extern int do_syslog(int type, char * bug, int count);
 
@@ -72,9 +72,12 @@ struct inode_operations proc_kmsg_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	NULL,			/* truncate */
-	NULL			/* permission */
+	NULL,			/* permission */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };

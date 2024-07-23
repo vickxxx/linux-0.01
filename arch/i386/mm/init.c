@@ -159,17 +159,16 @@ void show_mem(void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!atomic_read(&mem_map[i].count))
+		else if (!page_count(mem_map+i))
 			free++;
 		else
-			shared += atomic_read(&mem_map[i].count) - 1;
+			shared += page_count(mem_map+i) - 1;
 	}
 	printk("%d pages of RAM\n",total);
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
 	printk("%ld pages in page table cache\n",pgtable_cache_size);
-	show_buffers();
 #ifdef CONFIG_NET
 	show_net_buffers();
 #endif
@@ -390,6 +389,7 @@ __initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 	int datapages = 0;
 	int initpages = 0;
 	unsigned long tmp;
+	unsigned long endbase;
 
 	end_mem &= PAGE_MASK;
 	high_memory = (void *) end_mem;
@@ -417,8 +417,10 @@ __initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 	 * IBM messed up *AGAIN* in their thinkpad: 0xA0000 -> 0x9F000.
 	 * They seem to have done something stupid with the floppy
 	 * controller as well..
+	 * The amount of available base memory is in WORD 40:13.
 	 */
-	while (start_low_mem < 0x9f000+PAGE_OFFSET) {
+	endbase = PAGE_OFFSET + ((*(unsigned short *)__va(0x413) * 1024) & PAGE_MASK);
+	while (start_low_mem < endbase) {
 		clear_bit(PG_reserved, &mem_map[MAP_NR(start_low_mem)].flags);
 		start_low_mem += PAGE_SIZE;
 	}
@@ -446,7 +448,7 @@ __initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 				reservedpages++;
 			continue;
 		}
-		atomic_set(&mem_map[MAP_NR(tmp)].count, 1);
+		set_page_count(mem_map+MAP_NR(tmp), 1);
 #ifdef CONFIG_BLK_DEV_INITRD
 		if (!initrd_start || (tmp < initrd_start || tmp >=
 		    initrd_end))
@@ -472,7 +474,7 @@ void free_initmem(void)
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
 		mem_map[MAP_NR(addr)].flags &= ~(1 << PG_reserved);
-		atomic_set(&mem_map[MAP_NR(addr)].count, 1);
+		set_page_count(mem_map+MAP_NR(addr), 1);
 		free_page(addr);
 	}
 	printk ("Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
@@ -486,14 +488,14 @@ void si_meminfo(struct sysinfo *val)
 	val->totalram = 0;
 	val->sharedram = 0;
 	val->freeram = nr_free_pages << PAGE_SHIFT;
-	val->bufferram = buffermem;
+	val->bufferram = atomic_read(&buffermem);
 	while (i-- > 0)  {
 		if (PageReserved(mem_map+i))
 			continue;
 		val->totalram++;
-		if (!atomic_read(&mem_map[i].count))
+		if (!page_count(mem_map+i))
 			continue;
-		val->sharedram += atomic_read(&mem_map[i].count) - 1;
+		val->sharedram += page_count(mem_map+i) - 1;
 	}
 	val->totalram <<= PAGE_SHIFT;
 	val->sharedram <<= PAGE_SHIFT;

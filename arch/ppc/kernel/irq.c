@@ -1,5 +1,5 @@
 /*
- * $Id: irq.c,v 1.105 1999/03/25 19:51:51 cort Exp $
+ * $Id: irq.c,v 1.107 1999/06/17 05:39:12 paulus Exp $
  *
  *  arch/ppc/kernel/irq.c
  *
@@ -65,7 +65,6 @@ extern volatile unsigned long ipi_count;
 void enable_irq(unsigned int irq_nr);
 void disable_irq(unsigned int irq_nr);
 
-/* Fixme - Need to figure out a way to get rid of this - Corey */
 volatile unsigned char *chrp_int_ack_special;
 
 #ifdef CONFIG_APUS
@@ -188,6 +187,12 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 void free_irq(unsigned int irq, void *dev_id)
 {
 	request_irq(irq, NULL, 0, NULL, dev_id);
+}
+
+/* XXX should implement irq disable depth like on intel */
+void disable_irq_nosync(unsigned int irq_nr)
+{
+	mask_irq(irq_nr);
 }
 
 void disable_irq(unsigned int irq_nr)

@@ -91,7 +91,7 @@ static inline void finish_stripe(struct stripe_head *sh)
 
 void __wait_on_stripe(struct stripe_head *sh)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 	PRINTK(("wait_on_stripe %lu\n", sh->sector));
 	sh->count++;
@@ -586,13 +586,15 @@ static void raid5_build_block (struct stripe_head *sh, struct buffer_head *bh, i
 
 	b_data = ((volatile struct buffer_head *) bh)->b_data;
 	memset (bh, 0, sizeof (struct buffer_head));
-	init_buffer(bh, dev, block, raid5_end_request, sh);
+	init_buffer(bh, raid5_end_request, sh);
+	bh->b_dev = dev;
+	bh->b_blocknr = block;
 	((volatile struct buffer_head *) bh)->b_data = b_data;
 
 	bh->b_rdev	= raid_conf->disks[i].dev;
 	bh->b_rsector   = sh->sector;
 
-	bh->b_state	= (1 << BH_Req);
+	bh->b_state	= (1 << BH_Req) | (1 << BH_Mapped);
 	bh->b_size	= sh->size;
 	bh->b_list	= BUF_LOCKED;
 }
@@ -1030,19 +1032,24 @@ static void handle_stripe(struct stripe_head *sh)
 				if (sh->bh_new[i])
 					continue;
 				block = (int) compute_blocknr(sh, i);
-				bh = find_buffer(MKDEV(MD_MAJOR, minor), block, sh->size);
-				if (bh && bh->b_count == 0 && buffer_dirty(bh) && !buffer_locked(bh)) {
-					PRINTK(("Whee.. sector %lu, index %d (%d) found in the buffer cache!\n", sh->sector, i, block));
-					add_stripe_bh(sh, bh, i, WRITE);
-					sh->new[i] = 0;
-					nr++; nr_write++;
-					if (sh->bh_old[i]) {
-						nr_cache_overwrite++;
-						nr_cache_other--;
-					} else if (!operational[i]) {
-						nr_failed_overwrite++;
-						nr_failed_other--;
+				bh = get_hash_table(MKDEV(MD_MAJOR, minor), block, sh->size);
+				if (bh) {
+					if (atomic_read(&bh->b_count) == 1 &&
+					    buffer_dirty(bh) &&
+					    !buffer_locked(bh)) {
+						PRINTK(("Whee.. sector %lu, index %d (%d) found in the buffer cache!\n", sh->sector, i, block));
+						add_stripe_bh(sh, bh, i, WRITE);
+						sh->new[i] = 0;
+						nr++; nr_write++;
+						if (sh->bh_old[i]) {
+							nr_cache_overwrite++;
+							nr_cache_other--;
+						} else if (!operational[i]) {
+							nr_failed_overwrite++;
+							nr_failed_other--;
+						}
 					}
+					atomic_dec(&bh->b_count);
 				}
 			}
 		}
@@ -1395,7 +1402,7 @@ static int raid5_run (int minor, struct md_dev *mddev)
 		goto abort;
 	memset(raid_conf->stripe_hashtbl, 0, HASH_PAGES * PAGE_SIZE);
 
-	init_waitqueue(&raid_conf->wait_for_stripe);
+	init_waitqueue_head(&raid_conf->wait_for_stripe);
 	PRINTK(("raid5_run(%d) called.\n", minor));
 
   	for (i = 0; i < mddev->nb_dev; i++) {

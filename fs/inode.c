@@ -99,7 +99,7 @@ void __mark_inode_dirty(struct inode *inode)
 
 static void __wait_on_inode(struct inode * inode)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue(&inode->i_wait, &wait);
 repeat:
@@ -126,11 +126,10 @@ static inline void wait_on_inode(struct inode *inode)
 static inline void init_once(struct inode * inode)
 {
 	memset(inode, 0, sizeof(*inode));
-	init_waitqueue(&inode->i_wait);
+	init_waitqueue_head(&inode->i_wait);
 	INIT_LIST_HEAD(&inode->i_hash);
 	INIT_LIST_HEAD(&inode->i_dentry);
 	sema_init(&inode->i_sem, 1);
-	sema_init(&inode->i_atomic_write, 1);
 }
 
 static inline void write_inode(struct inode *inode)
@@ -232,7 +231,7 @@ void write_inode_now(struct inode *inode)
 void clear_inode(struct inode *inode)
 {
 	if (inode->i_nrpages)
-		truncate_inode_pages(inode, 0);
+		BUG();
 	wait_on_inode(inode);
 	if (IS_QUOTAINIT(inode))
 		DQUOT_DROP(inode);
@@ -262,6 +261,8 @@ static void dispose_list(struct list_head * head)
 		if (tmp == head)
 			break;
 		inode = list_entry(tmp, struct inode, i_list);
+		if (inode->i_nrpages)
+			truncate_inode_pages(inode, 0);
 		clear_inode(inode);
 		count++;
 	}
@@ -296,6 +297,7 @@ static int invalidate_list(struct list_head *head, struct super_block * sb, stru
 			INIT_LIST_HEAD(&inode->i_hash);
 			list_del(&inode->i_list);
 			list_add(&inode->i_list, dispose);
+			inode->i_state |= I_FREEING;
 			continue;
 		}
 		busy = 1;
@@ -336,7 +338,7 @@ int invalidate_inodes(struct super_block * sb)
  *      dispose_list.
  */
 #define CAN_UNUSE(inode) \
-	(((inode)->i_count | (inode)->i_state) == 0)
+	(((inode)->i_count | (inode)->i_state | (inode)->i_nrpages) == 0)
 #define INODE(entry)	(list_entry(entry, struct inode, i_list))
 
 static int free_inodes(void)
@@ -356,6 +358,7 @@ static int free_inodes(void)
 		list_del(&INODE(tmp)->i_hash);
 		INIT_LIST_HEAD(&INODE(tmp)->i_hash);
 		list_add(tmp, freeable);
+		list_entry(tmp, struct inode, i_list)->i_state = I_FREEING;
 		found = 1;
 	}
 
@@ -525,6 +528,7 @@ void clean_inode(struct inode *inode)
 	inode->i_generation = 0;
 	memset(&inode->i_dquot, 0, sizeof(inode->i_dquot));
 	sema_init(&inode->i_sem, 1);
+	inode->i_pipe = NULL;
 }
 
 /*
@@ -639,6 +643,43 @@ static inline unsigned long hash(struct super_block *sb, unsigned long i_ino)
 	return tmp & HASH_MASK;
 }
 
+/* Yeah, I know about quadratic hash. Maybe, later. */
+ino_t iunique(struct super_block *sb, ino_t max_reserved)
+{
+	static ino_t counter = 0;
+	struct inode *inode;
+	struct list_head * head;
+	ino_t res;
+	spin_lock(&inode_lock);
+retry:
+	if (counter > max_reserved) {
+		head = inode_hashtable + hash(sb,counter);
+		inode = find_inode(sb, res = counter++, head);
+		if (!inode) {
+			spin_unlock(&inode_lock);
+			return res;
+		}
+		inode->i_count--; /* compensate find_inode() */
+	} else {
+		counter = max_reserved + 1;
+	}
+	goto retry;
+	
+}
+
+struct inode *igrab(struct inode *inode)
+{
+	spin_lock(&inode_lock);
+	if (inode->i_state & I_FREEING)
+		inode = NULL;
+	else
+		inode->i_count++;
+	spin_unlock(&inode_lock);
+	if (inode)
+		wait_on_inode(inode);
+	return inode;
+}
+
 struct inode *iget(struct super_block *sb, unsigned long ino)
 {
 	struct list_head * head = inode_hashtable + hash(sb,ino);
@@ -692,9 +733,12 @@ void iput(struct inode *inode)
 				INIT_LIST_HEAD(&inode->i_hash);
 				list_del(&inode->i_list);
 				INIT_LIST_HEAD(&inode->i_list);
+				inode->i_state|=I_FREEING;
 				if (op && op->delete_inode) {
 					void (*delete)(struct inode *) = op->delete_inode;
 					spin_unlock(&inode_lock);
+					if (inode->i_nrpages)
+						truncate_inode_pages(inode, 0);
 					delete(inode);
 					spin_lock(&inode_lock);
 				}
@@ -702,6 +746,7 @@ void iput(struct inode *inode)
 			if (list_empty(&inode->i_hash)) {
 				list_del(&inode->i_list);
 				INIT_LIST_HEAD(&inode->i_list);
+				inode->i_state|=I_FREEING;
 				spin_unlock(&inode_lock);
 				clear_inode(inode);
 				spin_lock(&inode_lock);
@@ -725,9 +770,6 @@ kdevname(inode->i_dev), inode->i_ino, inode->i_count);
 if (atomic_read(&inode->i_sem.count) != 1)
 printk(KERN_ERR "iput: Aieee, semaphore in use inode %s/%ld, count=%d\n",
 kdevname(inode->i_dev), inode->i_ino, atomic_read(&inode->i_sem.count));
-if (atomic_read(&inode->i_atomic_write.count) != 1)
-printk(KERN_ERR "iput: Aieee, atomic write semaphore in use inode %s/%ld, count=%d\n",
-kdevname(inode->i_dev), inode->i_ino, atomic_read(&inode->i_sem.count));
 #endif
 		}
 		if (inode->i_count > (1<<31)) {
@@ -740,8 +782,14 @@ kdevname(inode->i_dev), inode->i_ino, atomic_read(&inode->i_sem.count));
 
 int bmap(struct inode * inode, int block)
 {
-	if (inode->i_op && inode->i_op->bmap)
-		return inode->i_op->bmap(inode, block);
+	struct buffer_head tmp;
+
+	if (inode->i_op && inode->i_op->get_block) {
+		tmp.b_state = 0;
+		tmp.b_blocknr = 0;
+		inode->i_op->get_block(inode, block, &tmp, 0);
+		return tmp.b_blocknr;
+	}
 	return 0;
 }
 

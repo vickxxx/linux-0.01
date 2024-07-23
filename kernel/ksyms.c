@@ -32,6 +32,7 @@
 #include <linux/hdreg.h>
 #include <linux/skbuff.h>
 #include <linux/genhd.h>
+#include <linux/blkpg.h>
 #include <linux/swap.h>
 #include <linux/ctype.h>
 #include <linux/file.h>
@@ -81,6 +82,7 @@ EXPORT_SYMBOL(get_options);
 /* process memory management */
 EXPORT_SYMBOL(do_mmap);
 EXPORT_SYMBOL(do_munmap);
+EXPORT_SYMBOL(do_brk);
 EXPORT_SYMBOL(exit_mm);
 EXPORT_SYMBOL(exit_files);
 EXPORT_SYMBOL(exit_fs);
@@ -104,7 +106,6 @@ EXPORT_SYMBOL(mem_map);
 EXPORT_SYMBOL(remap_page_range);
 EXPORT_SYMBOL(max_mapnr);
 EXPORT_SYMBOL(high_memory);
-EXPORT_SYMBOL(update_vm_cache);
 EXPORT_SYMBOL(vmtruncate);
 EXPORT_SYMBOL(find_vma);
 EXPORT_SYMBOL(get_unmapped_area);
@@ -116,6 +117,8 @@ EXPORT_SYMBOL(get_super);
 EXPORT_SYMBOL(get_fs_type);
 EXPORT_SYMBOL(getname);
 EXPORT_SYMBOL(__fput);
+EXPORT_SYMBOL(igrab);
+EXPORT_SYMBOL(iunique);
 EXPORT_SYMBOL(iget);
 EXPORT_SYMBOL(iput);
 EXPORT_SYMBOL(__namei);
@@ -132,6 +135,7 @@ EXPORT_SYMBOL(d_instantiate);
 EXPORT_SYMBOL(d_alloc);
 EXPORT_SYMBOL(d_lookup);
 EXPORT_SYMBOL(d_path);
+EXPORT_SYMBOL(__mark_buffer_dirty);
 EXPORT_SYMBOL(__mark_inode_dirty);
 EXPORT_SYMBOL(get_empty_filp);
 EXPORT_SYMBOL(init_private_file);
@@ -159,19 +163,22 @@ EXPORT_SYMBOL(__brelse);
 EXPORT_SYMBOL(__bforget);
 EXPORT_SYMBOL(ll_rw_block);
 EXPORT_SYMBOL(__wait_on_buffer);
-EXPORT_SYMBOL(mark_buffer_uptodate);
 EXPORT_SYMBOL(add_blkdev_randomness);
+EXPORT_SYMBOL(block_read_full_page);
+EXPORT_SYMBOL(block_write_full_page);
+EXPORT_SYMBOL(block_write_partial_page);
+EXPORT_SYMBOL(block_flushpage);
 EXPORT_SYMBOL(generic_file_read);
 EXPORT_SYMBOL(generic_file_write);
 EXPORT_SYMBOL(generic_file_mmap);
-EXPORT_SYMBOL(generic_readpage);
+EXPORT_SYMBOL(page_hash_bits);
+EXPORT_SYMBOL(page_hash_table);
 EXPORT_SYMBOL(file_lock_table);
 EXPORT_SYMBOL(posix_lock_file);
 EXPORT_SYMBOL(posix_test_lock);
 EXPORT_SYMBOL(posix_block_lock);
 EXPORT_SYMBOL(posix_unblock_lock);
 EXPORT_SYMBOL(dput);
-EXPORT_SYMBOL(get_cached_page);
 EXPORT_SYMBOL(put_cached_page);
 EXPORT_SYMBOL(is_root_busy);
 EXPORT_SYMBOL(prune_dcache);
@@ -184,6 +191,7 @@ EXPORT_SYMBOL(vfs_rmdir);
 EXPORT_SYMBOL(vfs_unlink);
 EXPORT_SYMBOL(vfs_rename);
 EXPORT_SYMBOL(__pollwait);
+EXPORT_SYMBOL(ROOT_DEV);
 
 #if !defined(CONFIG_NFSD) && defined(CONFIG_NFSD_MODULE)
 EXPORT_SYMBOL(do_nfsservctl);
@@ -219,8 +227,8 @@ EXPORT_SYMBOL(resetup_one_dev);
 EXPORT_SYMBOL(unplug_device);
 EXPORT_SYMBOL(make_request);
 EXPORT_SYMBOL(tq_disk);
-EXPORT_SYMBOL(find_buffer);
 EXPORT_SYMBOL(init_buffer);
+EXPORT_SYMBOL(refile_buffer);
 EXPORT_SYMBOL(max_sectors);
 EXPORT_SYMBOL(max_readahead);
 
@@ -282,7 +290,6 @@ EXPORT_SYMBOL(timer_table);
 #ifdef __SMP__
 /* Various random spinlocks we want to export */
 EXPORT_SYMBOL(tqueue_lock);
-EXPORT_SYMBOL(waitqueue_lock);
 #endif
 
 /* autoirq from  drivers/net/auto_irq.c */
@@ -298,10 +305,12 @@ EXPORT_SYMBOL(disable_hlt);
 EXPORT_SYMBOL(enable_hlt);
 #endif
 
-/* IO port handling */
-EXPORT_SYMBOL(check_region);
-EXPORT_SYMBOL(request_region);
-EXPORT_SYMBOL(release_region);
+/* resource handling */
+EXPORT_SYMBOL(check_resource);
+EXPORT_SYMBOL(request_resource);
+EXPORT_SYMBOL(release_resource);
+EXPORT_SYMBOL(occupy_resource);
+EXPORT_SYMBOL(vacate_resource);
 
 /* process management */
 EXPORT_SYMBOL(__wake_up);
@@ -325,6 +334,7 @@ EXPORT_SYMBOL(vsprintf);
 EXPORT_SYMBOL(kdevname);
 EXPORT_SYMBOL(bdevname);
 EXPORT_SYMBOL(cdevname);
+EXPORT_SYMBOL(partition_name);		/* md.c only */
 EXPORT_SYMBOL(simple_strtoul);
 EXPORT_SYMBOL(system_utsname);	/* UTS data */
 EXPORT_SYMBOL(uts_sem);		/* UTS semaphore */
@@ -341,7 +351,7 @@ EXPORT_SYMBOL(securebits);
 
 /* Program loader interfaces */
 EXPORT_SYMBOL(setup_arg_pages);
-EXPORT_SYMBOL(copy_strings);
+EXPORT_SYMBOL(copy_strings_kernel);
 EXPORT_SYMBOL(do_execve);
 EXPORT_SYMBOL(flush_old_exec);
 EXPORT_SYMBOL(open_dentry);
@@ -351,14 +361,13 @@ EXPORT_SYMBOL(read_exec);
 EXPORT_SYMBOL(si_meminfo);
 
 /* Added to make file system as module */
-EXPORT_SYMBOL(set_writetime);
 EXPORT_SYMBOL(sys_tz);
 EXPORT_SYMBOL(__wait_on_super);
 EXPORT_SYMBOL(file_fsync);
 EXPORT_SYMBOL(clear_inode);
-EXPORT_SYMBOL(refile_buffer);
 EXPORT_SYMBOL(nr_async_pages);
 EXPORT_SYMBOL(___strtok);
+EXPORT_SYMBOL(init_special_inode);
 EXPORT_SYMBOL(init_fifo);
 EXPORT_SYMBOL(fifo_inode_operations);
 EXPORT_SYMBOL(chrdev_inode_operations);

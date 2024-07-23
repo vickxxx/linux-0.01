@@ -171,7 +171,7 @@ out:
 	return error;
 }
 
-#ifndef __alpha__
+#if !(defined(__alpha__) || defined(__ia64__))
 
 /*
  * sys_utime() can be implemented in user-level using sys_utimes().
@@ -790,7 +790,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 	int retval;
 	struct dentry *dentry = filp->f_dentry;
 
-	if (filp->f_count == 0) {
+	if (!atomic_read(&filp->f_count)) {
 		printk("VFS: Close: file count is 0\n");
 		return 0;
 	}

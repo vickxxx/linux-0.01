@@ -143,14 +143,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_ETHERH),y)
-CONFIG_8390_BUILTIN = y
-else
-  ifeq ($(CONFIG_ETHERH),m)
-  CONFIG_8390_MODULE = y
-  endif
-endif
-
 ifeq ($(CONFIG_WD80x3),y)
 L_OBJS += wd.o
 CONFIG_8390_BUILTIN = y
@@ -168,14 +160,6 @@ else
   ifeq ($(CONFIG_EL2),m)
   CONFIG_8390_MODULE = y
   M_OBJS += 3c503.o
-  endif
-endif
-
-ifeq ($(CONFIG_ETHERH),y)
-CONFIG_8390_BUILTIN = y
-else
-  ifeq ($(CONFIG_ETHERH),m)
-  CONFIG_8390_MODULE = y
   endif
 endif
 
@@ -483,6 +467,14 @@ L_OBJS += 3c523.o
 else
   ifeq ($(CONFIG_ELMC),m)
   M_OBJS += 3c523.o
+  endif
+endif
+
+ifeq ($(CONFIG_SKMC),y)
+L_OBJS += sk_mca.o
+else
+  ifeq ($(CONFIG_SKMC),m)
+  M_OBJS += sk_mca.o
   endif
 endif
 
@@ -884,10 +876,26 @@ else
 endif
 
 ifeq ($(CONFIG_MIPS_JAZZ_SONIC),y)
-L_OBJS += sonic.o
+L_OBJS += jazzsonic.o
 else
   ifeq ($(CONFIG_MIPS_JAZZ_SONIC),m)
-    M_OBJS += sonic.o
+  M_OBJS += jazzsonic.o
+  endif
+endif
+
+ifeq ($(CONFIG_BAGETLANCE),y)
+L_OBJS += bagetlance.o
+else
+  ifeq ($(CONFIG_BAGETLANCE),m)
+  M_OBJS += bagetlance.o
+  endif
+endif
+
+ifeq ($(CONFIG_DECLANCE),y)
+L_OBJS += declance.o
+else
+  ifeq ($(CONFIG_DECLANCE),m)
+  M_OBJS += declance.o
   endif
 endif
 
@@ -1048,6 +1056,23 @@ ifeq ($(CONFIG_VENDOR_SANGOMA),m)
   endif
 endif
 
+ifeq ($(CONFIG_CYCLADES_SYNC),y)
+  LX_OBJS += cycx_drv.o
+  L_OBJS += cycx_main.o
+  ifeq ($(CONFIG_CYCLOMX_X25),y)
+    L_OBJS += cycx_x25.o
+  endif
+endif
+
+ifeq ($(CONFIG_CYCLADES_SYNC),m)
+  MX_OBJS += cycx_drv.o
+  M_OBJS += cyclomx.o
+  CYCLOMX_OBJS = cycx_main.o
+  ifeq ($(CONFIG_CYCLOMX_X25),y)
+    CYCLOMX_OBJS += cycx_x25.o
+  endif
+endif
+
 ifeq ($(CONFIG_X25_ASY),y)
 L_OBJS += x25_asy.o
 else
@@ -1084,6 +1109,9 @@ clean:
 
 wanpipe.o: $(WANPIPE_OBJS)
 	ld -r -o $@ $(WANPIPE_OBJS)
+
+cyclomx.o: $(CYCLOMX_OBJS)
+	ld -r -o $@ $(CYCLOMX_OBJS)
 
 rcpci.o: rcpci45.o rclanmtl.o
 	$(LD) -r -o rcpci.o rcpci45.o rclanmtl.o

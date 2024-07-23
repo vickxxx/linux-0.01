@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.24 1998/10/20 03:09:16 jj Exp $ */
+/* $Id: page.h,v 1.25 1999/06/23 03:53:15 davem Exp $ */
 
 #ifndef _SPARC64_PAGE_H
 #define _SPARC64_PAGE_H
@@ -17,6 +17,10 @@
 #ifdef __KERNEL__
 
 #ifndef __ASSEMBLY__
+
+#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
+#define PAGE_BUG(page) do { \
+				BUG(); } while (0)
 
 extern void clear_page(unsigned long page);
 extern void copy_page(unsigned long to, unsigned long from);

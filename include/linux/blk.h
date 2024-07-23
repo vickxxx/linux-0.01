@@ -85,12 +85,6 @@ void initrd_init(void);
 
 #endif
 
-#define RO_IOCTLS(dev,where) \
-  case BLKROSET: { int __val;  if (!capable(CAP_SYS_ADMIN)) return -EACCES; \
-		   if (get_user(__val, (int *)(where))) return -EFAULT; \
-		   set_device_ro((dev),__val); return 0; } \
-  case BLKROGET: { int __val = (is_read_only(dev) != 0) ; \
-		    return put_user(__val,(int *) (where)); }
 		 
 #if defined(MAJOR_NR) || defined(IDE_DRIVER)
 
@@ -328,6 +322,15 @@ static void floppy_off(unsigned int nr);
 #define DEVICE_REQUEST ddv_request
 #define DEVICE_NR(device) (MINOR(device)>>PARTN_BITS)
 #define DEVICE_ON(device) 
+#define DEVICE_OFF(device)
+
+#elif (MAJOR_NR == MFM_ACORN_MAJOR)
+
+#define DEVICE_NAME "mfm disk"
+#define DEVICE_INTR do_mfm
+#define DEVICE_REQUEST do_mfm_request
+#define DEVICE_NR(device) (MINOR(device) >> 6)
+#define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
 #elif (MAJOR_NR == MFM_ACORN_MAJOR)

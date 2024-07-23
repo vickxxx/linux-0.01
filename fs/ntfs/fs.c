@@ -439,13 +439,13 @@ static struct inode_operations ntfs_inode_operations_nobmap = {
 	NULL, /* rename */
 	NULL, /* readlink */
 	NULL, /* follow_link */
+	NULL, /* get_block */
 	NULL, /* readpage */
 	NULL, /* writepage */
-	NULL, /* bmap */
+	NULL, /* flushpage */
 	NULL, /* truncate */
 	NULL, /* permission */
 	NULL, /* smap */
-	NULL, /* updatepage */
 	NULL, /* revalidate */
 };
 
@@ -622,13 +622,13 @@ static struct inode_operations ntfs_inode_operations = {
 	NULL, /* rename */
 	NULL, /* readlink */
 	NULL, /* follow_link */
-	generic_readpage,
+	ntfs_bmap, /* get_block */
+	block_read_full_page, /* readpage */
 	NULL, /* writepage */
-	ntfs_bmap,
+	NULL, /* flushpage */
 	NULL, /* truncate */
 	NULL, /* permission */
 	NULL, /* smap */
-	NULL, /* updatepage */
 	NULL, /* revalidate */
 };
 
@@ -671,13 +671,13 @@ static struct inode_operations ntfs_dir_inode_operations = {
 	NULL, /* rename */
 	NULL, /* readlink */
 	NULL, /* follow_link */
+	NULL, /* get_block */
 	NULL, /* readpage */
 	NULL, /* writepage */
-	NULL, /* bmap */
+	NULL, /* flushpage */
 	NULL, /* truncate */
 	NULL, /* permission */
 	NULL, /* smap */
-	NULL, /* updatepage */
 	NULL, /* revalidate */
 };
 
@@ -978,7 +978,7 @@ struct super_block * ntfs_read_super(struct super_block *sb,
 
 	ntfs_debug(DEBUG_OTHER, "Getting RootDir\n");
 	/* Get the root directory */
-	if(!(sb->s_root=d_alloc_root(iget(sb,FILE_ROOT),NULL))){
+	if(!(sb->s_root=d_alloc_root(iget(sb,FILE_ROOT)))){
 		ntfs_error("Could not get root dir inode\n");
 		goto ntfs_read_super_mft;
 	}

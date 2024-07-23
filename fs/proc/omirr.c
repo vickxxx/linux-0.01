@@ -16,8 +16,8 @@ static int cleared_flag = 0;
 static char * buffer = NULL;
 static int read_pos, write_pos;
 static int clip_pos, max_pos;
-static struct wait_queue * read_wait = NULL;
-static struct wait_queue * write_wait = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(read_wait);
+static DECLARE_WAIT_QUEUE_HEAD(write_wait);
 
 static /*inline*/ int reserve_write_space(int len)
 {
@@ -277,22 +277,24 @@ static struct file_operations omirr_operations = {
 };
 
 struct inode_operations proc_omirr_inode_operations = {
-    &omirr_operations,
-    NULL, /* create */
-    NULL, /* lookup */
-    NULL, /* link */
-    NULL, /* unlink */
-    NULL, /* symlink */
-    NULL, /* mkdir */
-    NULL, /* rmdir */
-    NULL, /* mknod */
-    NULL, /* rename */
-    NULL, /* readlink */
-    NULL, /* follow_link */
-    NULL, /* readpage */
-    NULL, /* writepage */
-    NULL, /* bmap */
-    NULL, /* truncate */
-    NULL, /* permission */
-    NULL  /* smap */
+	&omirr_operations,
+	NULL,			/* create */
+	NULL,			/* lookup */
+	NULL,			/* link */
+	NULL,			/* unlink */
+	NULL,			/* symlink */
+	NULL,			/* mkdir */
+	NULL,			/* rmdir */
+	NULL,			/* mknod */
+	NULL,			/* rename */
+	NULL,			/* readlink */
+	NULL,			/* follow_link */
+	NULL,			/* get_block */
+	NULL,			/* readpage */
+	NULL,			/* writepage */
+	NULL,			/* flushpage */
+	NULL,			/* truncate */
+	NULL,			/* permission */
+	NULL,			/* smap */
+	NULL			/* revalidate */
 };

@@ -249,7 +249,7 @@ static inline int dup_mmap(struct mm_struct * mm)
 		tmp->vm_next = NULL;
 		file = tmp->vm_file;
 		if (file) {
-			file->f_count++;
+			atomic_inc(&file->f_count);
 			if (tmp->vm_flags & VM_DENYWRITE)
 				file->f_dentry->d_inode->i_writecount--;
       
@@ -303,7 +303,7 @@ struct mm_struct * mm_alloc(void)
 		atomic_set(&mm->count, 1);
 		mm->map_count = 0;
 		mm->def_flags = 0;
-		mm->mmap_sem = MUTEX_LOCKED;
+		init_MUTEX_LOCKED(&mm->mmap_sem);
 		/*
 		 * Leave mm->pgd set to the parent's pgd
 		 * so that pgd_offset() is always valid.
@@ -390,7 +390,10 @@ static inline int copy_mm(int nr, unsigned long clone_flags, struct task_struct 
 	return 0;
 
 free_mm:
-	mm->pgd = NULL;
+	tsk->mm = NULL;
+	release_segments(mm);
+	kmem_cache_free(mm_cachep, mm);
+	return retval;
 free_pt:
 	tsk->mm = NULL;
 	mmput(mm);
@@ -471,6 +474,7 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 	if (!new_fds)
 		goto out_release;
 
+	newf->file_lock = RW_LOCK_UNLOCKED;
 	atomic_set(&newf->count, 1);
 	newf->max_fds = NR_OPEN;
 	newf->fd = new_fds;
@@ -482,7 +486,7 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 		struct file *f = *old_fds++;
 		*new_fds = f;
 		if (f)
-			f->f_count++;
+			atomic_inc(&f->f_count);
 		new_fds++;
 	}
 	/* This is long word aligned thus could use a optimized version */ 
@@ -536,7 +540,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	int nr;
 	int retval = -ENOMEM;
 	struct task_struct *p;
-	struct semaphore sem = MUTEX_LOCKED;
+	DECLARE_MUTEX_LOCKED(sem);
 
 	current->vfork_sem = &sem;
 
@@ -553,13 +557,14 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	if (p->user) {
 		if (atomic_read(&p->user->count) >= p->rlim[RLIMIT_NPROC].rlim_cur)
 			goto bad_fork_free;
+		atomic_inc(&p->user->count);
 	}
 
 	{
 		struct task_struct **tslot;
 		tslot = find_empty_process();
 		if (!tslot)
-			goto bad_fork_free;
+			goto bad_fork_cleanup_count;
 		p->tarray_ptr = tslot;
 		*tslot = p;
 		nr = tslot - &task[0];
@@ -589,7 +594,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 
 	p->p_pptr = p->p_opptr = current;
 	p->p_cptr = NULL;
-	init_waitqueue(&p->wait_chldexit);
+	init_waitqueue_head(&p->wait_chldexit);
 	p->vfork_sem = NULL;
 
 	p->sigpending = 0;
@@ -610,7 +615,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	{
 		int i;
 		p->has_cpu = 0;
-		p->processor = NO_PROC_ID;
+		p->processor = current->processor;
 		/* ?? should we just memset this ?? */
 		for(i = 0; i < smp_num_cpus; i++)
 			p->per_cpu_utime[i] = p->per_cpu_stime[i] = 0;
@@ -663,8 +668,6 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 		write_unlock_irq(&tasklist_lock);
 
 		nr_tasks++;
-		if (p->user)
-			atomic_inc(&p->user->count);
 
 		p->next_run = NULL;
 		p->prev_run = NULL;
@@ -692,6 +695,9 @@ bad_fork_cleanup:
 		__MOD_DEC_USE_COUNT(p->binfmt->module);
 
 	add_free_taskslot(p->tarray_ptr);
+bad_fork_cleanup_count:
+	if (p->user)
+		free_uid(p);
 bad_fork_free:
 	free_task_struct(p);
 	goto bad_fork;

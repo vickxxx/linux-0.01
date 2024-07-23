@@ -55,6 +55,7 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/nfs_fs.h>
 #include <asm/uaccess.h>
+#include <linux/smp_lock.h>
 
 #define NFS_PARANOIA 1
 #define NFSDBG_FACILITY		NFSDBG_PAGECACHE
@@ -93,6 +94,7 @@ nfs_writepage_sync(struct dentry *dentry, struct inode *inode,
 	u8		*buffer;
 	struct nfs_fattr fattr;
 
+	lock_kernel();
 	dprintk("NFS:      nfs_writepage_sync(%s/%s %d@%ld)\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name,
 		count, page->offset + offset);
@@ -110,7 +112,7 @@ nfs_writepage_sync(struct dentry *dentry, struct inode *inode,
 
 		if (result < 0) {
 			/* Must mark the page invalid after I/O error */
-			clear_bit(PG_uptodate, &page->flags);
+			ClearPageUptodate(page);
 			goto io_error;
 		}
 		if (result != wsize)
@@ -153,6 +155,7 @@ io_error:
 				inode->i_ino, fattr.fileid);
 	}
 
+	unlock_kernel();
 	return written? written : result;
 }
 
@@ -250,11 +253,24 @@ update_write_request(struct nfs_wreq *req, unsigned int first,
 	return 1;
 }
 
+static kmem_cache_t *nfs_wreq_cachep;
+
+int nfs_init_wreqcache(void)
+{
+	nfs_wreq_cachep = kmem_cache_create("nfs_wreq",
+					    sizeof(struct nfs_wreq),
+					    0, SLAB_HWCACHE_ALIGN,
+					    NULL, NULL);
+	if (nfs_wreq_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
 static inline void
 free_write_request(struct nfs_wreq * req)
 {
 	if (!--req->wb_count)
-		kfree(req);
+		kmem_cache_free(nfs_wreq_cachep, req);
 }
 
 /*
@@ -274,7 +290,7 @@ create_write_request(struct file * file, struct page *page, unsigned int offset,
 		page->offset + offset, bytes);
 
 	/* FIXME: Enforce hard limit on number of concurrent writes? */
-	wreq = (struct nfs_wreq *) kmalloc(sizeof(*wreq), GFP_KERNEL);
+	wreq = kmem_cache_alloc(nfs_wreq_cachep, SLAB_KERNEL);
 	if (!wreq)
 		goto out_fail;
 	memset(wreq, 0, sizeof(*wreq));
@@ -292,6 +308,7 @@ create_write_request(struct file * file, struct page *page, unsigned int offset,
 	wreq->wb_file = file;
 	wreq->wb_pid    = current->pid;
 	wreq->wb_page   = page;
+	init_waitqueue_head(&wreq->wb_wait);
 	wreq->wb_offset = offset;
 	wreq->wb_bytes  = bytes;
 	wreq->wb_count	= 2;		/* One for the IO, one for us */
@@ -305,7 +322,7 @@ create_write_request(struct file * file, struct page *page, unsigned int offset,
 
 out_req:
 	rpc_release_task(task);
-	kfree(wreq);
+	kmem_cache_free(nfs_wreq_cachep, wreq);
 out_fail:
 	return NULL;
 }
@@ -363,7 +380,7 @@ wait_on_write_request(struct nfs_wreq *req)
 	struct dentry		*dentry = file->f_dentry;
 	struct inode		*inode = dentry->d_inode;
 	struct rpc_clnt		*clnt = NFS_CLIENT(inode);
-	struct wait_queue	wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	sigset_t		oldmask;
 	int retval;
 
@@ -407,17 +424,17 @@ nfs_writepage(struct file * file, struct page *page)
  * things with a page scheduled for an RPC call (e.g. invalidate it).
  */
 int
-nfs_updatepage(struct file *file, struct page *page, unsigned long offset, unsigned int count, int sync)
+nfs_updatepage(struct file *file, struct page *page, unsigned long offset, unsigned int count)
 {
 	struct dentry	*dentry = file->f_dentry;
 	struct inode	*inode = dentry->d_inode;
 	struct nfs_wreq	*req;
-	int		synchronous = sync;
+	int		synchronous = file->f_flags & O_SYNC;
 	int		retval;
 
-	dprintk("NFS:      nfs_updatepage(%s/%s %d@%ld, sync=%d)\n",
+	dprintk("NFS:      nfs_updatepage(%s/%s %d@%ld)\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name,
-		count, page->offset+offset, sync);
+		count, page->offset+offset);
 
 	/*
 	 * Try to find a corresponding request on the writeback queue.
@@ -449,15 +466,15 @@ nfs_updatepage(struct file *file, struct page *page, unsigned long offset, unsig
 	 * Ok, there's another user of this page with the new request..
 	 * The IO completion will then free the page and the dentry.
 	 */
-	atomic_inc(&page->count);
-	file->f_count++;
+	get_page(page);
+	atomic_inc(&file->f_count);
 
 	/* Schedule request */
-	synchronous = schedule_write_request(req, sync);
+	synchronous = schedule_write_request(req, synchronous);
 
 updated:
 	if (req->wb_bytes == PAGE_SIZE)
-		set_bit(PG_uptodate, &page->flags);
+		SetPageUptodate(page);
 
 	retval = count;
 	if (synchronous) {
@@ -472,7 +489,7 @@ updated:
 		}
 
 		if (retval < 0)
-			clear_bit(PG_uptodate, &page->flags);
+			ClearPageUptodate(page);
 	}
 
 	free_write_request(req);
@@ -668,7 +685,7 @@ nfs_wback_result(struct rpc_task *task)
 	rpc_release_task(task);
 
 	if (WB_INVALIDATE(req))
-		clear_bit(PG_uptodate, &page->flags);
+		ClearPageUptodate(page);
 
 	__free_page(page);
 	remove_write_request(&NFS_WRITEBACK(inode), req);

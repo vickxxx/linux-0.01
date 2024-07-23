@@ -26,27 +26,40 @@ extern inline struct file * fcheck_task(struct task_struct *p, unsigned int fd)
 extern inline struct file * fcheck(unsigned int fd)
 {
 	struct file * file = NULL;
+	struct files_struct *files = current->files;
 
-	if (fd < current->files->max_fds)
-		file = current->files->fd[fd];
+	read_lock(&files->file_lock);
+	if (fd < files->max_fds)
+		file = files->fd[fd];
+	read_unlock(&files->file_lock);
 	return file;
 }
 
 extern inline struct file * fget(unsigned int fd)
 {
-	struct file * file = fcheck(fd);
+	struct file * file = NULL;
+	struct files_struct *files = current->files;
 
-	if (file)
-		file->f_count++;
+	read_lock(&files->file_lock);
+	if (fd < files->max_fds) {
+		file = files->fd[fd];
+		if (file)
+			atomic_inc(&file->f_count);
+	}
+	read_unlock(&files->file_lock);
 	return file;
 }
 
 /*
  * Install a file pointer in the fd array.
  */
-extern inline void fd_install(unsigned int fd, struct file *file)
+extern inline void fd_install(unsigned int fd, struct file * file)
 {
-	current->files->fd[fd] = file;
+	struct files_struct *files = current->files;
+
+	write_lock(&files->file_lock);
+	files->fd[fd] = file;
+	write_unlock(&files->file_lock);
 }
 
 /*
@@ -65,7 +78,7 @@ extern inline void fd_install(unsigned int fd, struct file *file)
  * I suspect there are many other similar "optimizations" across the
  * kernel...
  */
-extern void fput(struct file *file); 
-extern void put_filp(struct file *file);
+extern void fput(struct file *); 
+extern void put_filp(struct file *);
 
-#endif
+#endif /* __LINUX_FILE_H */

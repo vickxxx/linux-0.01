@@ -1,5 +1,5 @@
 /*
- * $Id: time.c,v 1.47 1999/03/18 05:11:11 cort Exp $
+ * $Id: time.c,v 1.50 1999/06/05 00:23:20 cort Exp $
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -126,13 +126,9 @@ void timer_interrupt(struct pt_regs * regs)
 	smp_local_timer_interrupt(regs);
 #endif		
 
-	/* Fixme - make this more generic - Corey */
-#ifdef CONFIG_APUS
-	{
-		extern void apus_heartbeat (void);
-		apus_heartbeat ();
-	}
-#endif
+	if ( ppc_md.heartbeat && !ppc_md.heartbeat_count--)
+		ppc_md.heartbeat();
+	
 	hardirq_exit(cpu);
 }
 

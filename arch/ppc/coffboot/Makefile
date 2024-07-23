@@ -3,7 +3,6 @@
 #
 # Paul Mackerras	January 1997
 
-HOSTCC	= gcc
 HOSTCFLAGS = -O -I$(TOPDIR)/include
 
 CC	= $(CROSS_COMPILE)gcc
@@ -23,10 +22,16 @@ ifeq ($(CONFIG_ALL_PPC),y)
 CONFIG_PMAC = y
 endif
 
-ifeq ($(CONFIG_SMP),y)
-TFTPIMAGE=/tftpboot/zImage.pmac.smp
+ifeq ($(CONFIG_PPC64),y)
+MSIZE=.64
 else
-TFTPIMAGE=/tftpboot/zImage.pmac
+MSIZE=
+endif
+
+ifeq ($(CONFIG_SMP),y)
+TFTPIMAGE=/tftpboot/zImage.pmac.smp$(MSIZE)
+else
+TFTPIMAGE=/tftpboot/zImage.pmac$(MSIZE)
 endif
 
 ifeq ($(CONFIG_PMAC),y)

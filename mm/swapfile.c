@@ -41,8 +41,6 @@ static inline int scan_swap_map(struct swap_info_struct *si)
 			offset = si->cluster_next++;
 			if (si->swap_map[offset])
 				continue;
-			if (test_bit(offset, si->swap_lockmap))
-				continue;
 			si->cluster_nr--;
 			goto got_page;
 		}
@@ -50,8 +48,6 @@ static inline int scan_swap_map(struct swap_info_struct *si)
 	si->cluster_nr = SWAPFILE_CLUSTER;
 	for (offset = si->lowest_bit; offset <= si->highest_bit ; offset++) {
 		if (si->swap_map[offset])
-			continue;
-		if (test_bit(offset, si->swap_lockmap))
 			continue;
 		si->lowest_bit = offset;
 got_page:
@@ -191,7 +187,7 @@ static inline void unuse_pte(struct vm_area_struct * vma, unsigned long address,
 		return;
 	set_pte(dir, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
 	swap_free(entry);
-	atomic_inc(&mem_map[MAP_NR(page)].count);
+	get_page(mem_map + MAP_NR(page));
 	++vma->vm_mm->rss;
 }
 
@@ -423,8 +419,6 @@ asmlinkage int sys_swapoff(const char * specialfile)
 	p->swap_device = 0;
 	vfree(p->swap_map);
 	p->swap_map = NULL;
-	vfree(p->swap_lockmap);
-	p->swap_lockmap = NULL;
 	p->flags = 0;
 	err = 0;
 
@@ -473,6 +467,18 @@ int get_swaparea_info(char *buf)
 	return len;
 }
 
+int is_swap_partition(kdev_t dev) {
+	struct swap_info_struct *ptr = swap_info;
+	int i;
+
+	for (i = 0 ; i < nr_swapfiles ; i++, ptr++) {
+		if (ptr->flags & SWP_USED)
+			if (ptr->swap_device == dev)
+				return 1;
+	}
+	return 0;
+}
+
 /*
  * Written 01/25/92 by Simmule Turner, heavily changed by Linus.
  *
@@ -491,7 +497,8 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 	int swap_header_version;
 	int lock_map_size = PAGE_SIZE;
 	int nr_good_pages = 0;
-	unsigned long tmp_lock_map = 0;
+	unsigned long maxpages;
+	int swapfilesize;
 	
 	lock_kernel();
 	if (!capable(CAP_SYS_ADMIN))
@@ -509,7 +516,6 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 	p->swap_file = NULL;
 	p->swap_device = 0;
 	p->swap_map = NULL;
-	p->swap_lockmap = NULL;
 	p->lowest_bit = 0;
 	p->highest_bit = 0;
 	p->cluster_nr = 0;
@@ -530,35 +536,41 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 	error = -EINVAL;
 
 	if (S_ISBLK(swap_dentry->d_inode->i_mode)) {
-		p->swap_device = swap_dentry->d_inode->i_rdev;
-		set_blocksize(p->swap_device, PAGE_SIZE);
+		kdev_t dev = swap_dentry->d_inode->i_rdev;
+
+		p->swap_device = dev;
+		set_blocksize(dev, PAGE_SIZE);
 		
 		filp.f_dentry = swap_dentry;
 		filp.f_mode = 3; /* read write */
 		error = blkdev_open(swap_dentry->d_inode, &filp);
 		if (error)
 			goto bad_swap_2;
-		set_blocksize(p->swap_device, PAGE_SIZE);
+		set_blocksize(dev, PAGE_SIZE);
 		error = -ENODEV;
-		if (!p->swap_device ||
-		    (blk_size[MAJOR(p->swap_device)] &&
-		     !blk_size[MAJOR(p->swap_device)][MINOR(p->swap_device)]))
+		if (!dev || (blk_size[MAJOR(dev)] &&
+		     !blk_size[MAJOR(dev)][MINOR(dev)]))
 			goto bad_swap;
 		error = -EBUSY;
 		for (i = 0 ; i < nr_swapfiles ; i++) {
 			if (i == type)
 				continue;
-			if (p->swap_device == swap_info[i].swap_device)
+			if (dev == swap_info[i].swap_device)
 				goto bad_swap;
 		}
+		swapfilesize = 0;
+		if (blk_size[MAJOR(dev)])
+			swapfilesize = blk_size[MAJOR(dev)][MINOR(dev)]
+				/ (PAGE_SIZE / 1024);
 	} else if (S_ISREG(swap_dentry->d_inode->i_mode)) {
 		error = -EBUSY;
 		for (i = 0 ; i < nr_swapfiles ; i++) {
-			if (i == type)
+			if (i == type || !swap_info[i].swap_file)
 				continue;
 			if (swap_dentry->d_inode == swap_info[i].swap_file->d_inode)
 				goto bad_swap;
 		}
+		swapfilesize = swap_dentry->d_inode->i_size / PAGE_SIZE;
 	} else
 		goto bad_swap;
 
@@ -569,9 +581,8 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 		goto bad_swap;
 	}
 
-	p->swap_lockmap = (char *) &tmp_lock_map;
-	rw_swap_page_nocache(READ, SWP_ENTRY(type,0), (char *) swap_header);
-	p->swap_lockmap = NULL;
+	lock_page(mem_map + MAP_NR(swap_header));
+	rw_swap_page_nolock(READ, SWP_ENTRY(type,0), (char *) swap_header, 1);
 
 	if (!memcmp("SWAP-SPACE",swap_header->magic.magic,10))
 		swap_header_version = 1;
@@ -627,10 +638,12 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 		p->highest_bit = swap_header->info.last_page - 1;
 		p->max	       = swap_header->info.last_page;
 
+		maxpages = SWP_OFFSET(SWP_ENTRY(0,~0UL));
+		if (p->max >= maxpages)
+			p->max = maxpages-1;
+
 		error = -EINVAL;
 		if (swap_header->info.nr_badpages > MAX_SWAP_BADPAGES)
-			goto bad_swap;
-		if (p->max >= SWP_OFFSET(SWP_ENTRY(0,~0UL)))
 			goto bad_swap;
 		
 		/* OK, set up the swap map and apply the bad block list */
@@ -654,17 +667,18 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 			goto bad_swap;
 	}
 	
+	if (swapfilesize && p->max > swapfilesize) {
+		printk(KERN_WARNING
+		       "Swap area shorter than signature indicates\n");
+		error = -EINVAL;
+		goto bad_swap;
+	}
 	if (!nr_good_pages) {
 		printk(KERN_WARNING "Empty swap-file\n");
 		error = -EINVAL;
 		goto bad_swap;
 	}
 	p->swap_map[0] = SWAP_MAP_BAD;
-	if (!(p->swap_lockmap = vmalloc (lock_map_size))) {
-		error = -ENOMEM;
-		goto bad_swap;
-	}
-	memset(p->swap_lockmap,0,lock_map_size);
 	p->flags = SWP_WRITEOK;
 	p->pages = nr_good_pages;
 	nr_swap_pages += nr_good_pages;
@@ -691,15 +705,12 @@ bad_swap:
 	if(filp.f_op && filp.f_op->release)
 		filp.f_op->release(filp.f_dentry->d_inode,&filp);
 bad_swap_2:
-	if (p->swap_lockmap)
-		vfree(p->swap_lockmap);
 	if (p->swap_map)
 		vfree(p->swap_map);
 	dput(p->swap_file);
 	p->swap_device = 0;
 	p->swap_file = NULL;
 	p->swap_map = NULL;
-	p->swap_lockmap = NULL;
 	p->flags = 0;
 	if (!(swap_flags & SWAP_FLAG_PREFER))
 		++least_priority;

@@ -1,10 +1,6 @@
 /*
  * USB hub driver.
  *
- * This is horrible, it knows about the UHCI driver
- * internals, but it's just meant as a rough example,
- * let's do the virtualization later when this works.
- *
  * (C) Copyright 1999 Linus Torvalds
  * (C) Copyright 1999 Johannes Erdfelt
  */
@@ -14,17 +10,15 @@
 #include <linux/list.h>
 #include <linux/malloc.h>
 #include <linux/smp_lock.h>
+#include <linux/module.h>
 
 #include <asm/spinlock.h>
 
 #include "usb.h"
-#include "uhci.h"
 #include "hub.h"
 
-extern struct usb_operations uhci_device_operations;
-
 /* Wakes up khubd */
-static struct wait_queue *usb_hub_wait = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(usb_hub_wait);
 static spinlock_t hub_event_lock = SPIN_LOCK_UNLOCKED;
 
 /* List of hubs needing servicing */
@@ -38,7 +32,7 @@ static int khubd_pid = 0;
  * the low-level driver that it wants to be re-activated,
  * or zero to say "I'm done".
  */
-static int hub_irq(int status, void *__buffer, void *dev_id)
+static int hub_irq(int status, void *__buffer, int len, void *dev_id)
 {
 	struct usb_hub *hub = dev_id;
 	unsigned long flags;
@@ -164,7 +158,7 @@ static int hub_probe(struct usb_device *dev)
 	if (dev->config[0].bNumInterfaces != 1)
 		return -1;
 
-	interface = &dev->config[0].interface[0];
+	interface = &dev->config[0].altsetting[0].interface[0];
 
 	/* Is it a hub? */
 	if (interface->bInterfaceClass != 9)
@@ -246,8 +240,8 @@ static void usb_hub_port_connect_change(struct usb_device *hub, int port)
 		return;
 	}
 
-	portstatus = *((unsigned short *)buf + 0);
-	portchange = *((unsigned short *)buf + 1);
+	portstatus = le16_to_cpup((unsigned short *)buf + 0);
+	portchange = le16_to_cpup((unsigned short *)buf + 1);
 
 	if ((!(portstatus & USB_PORT_STAT_CONNECTION)) &&
 		(!(portstatus & USB_PORT_STAT_ENABLE))) {
@@ -299,8 +293,8 @@ static void usb_hub_events(void)
 				continue;
 			}
 
-			portstatus = *((unsigned short *)buf + 0);
-			portchange = *((unsigned short *)buf + 1);
+			portstatus = le16_to_cpup((unsigned short *)buf + 0);
+			portchange = le16_to_cpup((unsigned short *)buf + 1);
 
 			if (portchange & USB_PORT_STAT_C_CONNECTION) {
 				printk("hub: port %d connection change\n", i + 1);
@@ -394,7 +388,7 @@ static struct usb_driver hub_driver = {
 /*
  * This should be a separate module.
  */
-int hub_init(void)
+int usb_hub_init(void)
 {
 	int pid;
 
@@ -413,10 +407,20 @@ int hub_init(void)
 	return 0;
 }
 
-void hub_cleanup(void)
+void usb_hub_cleanup(void)
 {
 	if (khubd_pid >= 0)
 		kill_proc(khubd_pid, SIGINT, 1);
 
 	usb_deregister(&hub_driver);
 }
+
+#ifdef MODULE
+int init_module(void){
+	return usb_hub_init();
+}
+
+void cleanup_module(void){
+	usb_hub_cleanup();
+}
+#endif

@@ -44,6 +44,7 @@
 #include <linux/genhd.h>
 #include <linux/malloc.h>
 #include <linux/cdrom.h>
+#include <linux/ide.h>
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
@@ -51,11 +52,6 @@
 #include <asm/io.h>
 #include <asm/unaligned.h>
 #include <asm/bitops.h>
-
-/*
- *	Main Linux ide driver include file
- */
-#include "ide.h"
 
 /*
  *	The following are used to debug the driver.
@@ -1011,7 +1007,8 @@ static void idefloppy_issue_pc (ide_drive_t *drive, idefloppy_pc_t *pc)
 		dma_ok=!HWIF(drive)->dmaproc(test_bit (PC_WRITING, &pc->flags) ? ide_dma_write : ide_dma_read, drive);
 #endif /* CONFIG_BLK_DEV_IDEDMA */
 
-	OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
+	if (IDE_CONTROL_REG)
+		OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
 	OUT_BYTE (dma_ok ? 1:0,IDE_FEATURE_REG);			/* Use PIO/DMA */
 	OUT_BYTE (bcount.b.high,IDE_BCOUNTH_REG);
 	OUT_BYTE (bcount.b.low,IDE_BCOUNTL_REG);
@@ -1633,11 +1630,16 @@ void cleanup_module (void)
 	ide_drive_t *drive;
 	int failed = 0;
 
-	while ((drive = ide_scan_devices (ide_floppy, idefloppy_driver.name, &idefloppy_driver, failed)) != NULL)
+	while ((drive = ide_scan_devices (ide_floppy, idefloppy_driver.name, &idefloppy_driver, failed)) != NULL) {
 		if (idefloppy_cleanup (drive)) {
 			printk ("%s: cleanup_module() called while still busy\n", drive->name);
 			failed++;
 		}
+		/* We must remove proc entries defined in this module.
+		   Otherwise we oops while accessing these entries */
+		if (drive->proc)
+			ide_remove_proc_entries(drive->proc, idefloppy_proc);
+	}
 	ide_unregister_module(&idefloppy_module);
 }
 #endif /* MODULE */

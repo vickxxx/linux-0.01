@@ -17,14 +17,15 @@ void gunzip(void *, int, unsigned char *, int *);
 #define get_32be(x)	(*(unsigned *)(x))
 
 #define RAM_START	0x00000000
-#define RAM_END		0x00800000	/* only 8M mapped with BATs */
+#define RAM_END		(8<<20)
 
-#define RAM_FREE	0x00540000	/* after image of chrpboot */
+#define RAM_FREE	((unsigned long)(_end+0x1000)&~0xFFF)
 #define PROG_START	0x00010000
 
 char *avail_ram;
 char *end_avail;
 
+extern char _end[];
 extern char image_data[];
 extern int image_len;
 extern char initrd_data[];
@@ -38,17 +39,17 @@ chrpboot(int a1, int a2, void *prom)
     void *dst;
     unsigned char *im;
     unsigned initrd_start, initrd_size;
+    extern char _start;
     
-    printf("chrpboot starting\n\r");
-    /* setup_bats(); */
+    printf("chrpboot starting: loaded at 0x%x\n\r", &_start);
 
     if (initrd_len) {
 	initrd_size = initrd_len;
 	initrd_start = (RAM_END - initrd_size) & ~0xFFF;
 	a1 = initrd_start;
 	a2 = initrd_size;
-	printf("initial ramdisk at %x (%u bytes)\n\r", initrd_start,
-	       initrd_size);
+	printf("initial ramdisk moving 0x%x <- 0x%x (%x bytes)\n\r", initrd_start,
+	       initrd_data,initrd_size);
 	memcpy((char *)initrd_start, initrd_data, initrd_size);
 	end_avail = (char *)initrd_start;
     } else
@@ -56,27 +57,20 @@ chrpboot(int a1, int a2, void *prom)
     im = image_data;
     len = image_len;
     dst = (void *) PROG_START;
-
     if (im[0] == 0x1f && im[1] == 0x8b) {
-	void *cp = (void *) RAM_FREE;
-	avail_ram = (void *) (RAM_FREE + ((len + 7) & -8));
-	memcpy(cp, im, len);
-	printf("gunzipping... ");
-	gunzip(dst, 0x400000, cp, &len);
-	printf("done\n\r");
-
+	avail_ram = (char *)RAM_FREE;
+	printf("gunzipping (0x%x <- 0x%x:0x%0x)...", dst, im, im+len);
+	gunzip(dst, 0x400000, im, &len);
+	printf("done %u bytes\n\r", len);
     } else {
 	memmove(dst, im, len);
     }
 
     flush_cache(dst, len);
-
-    sa = PROG_START+12;
+    
+    sa = *(unsigned long *)PROG_START+PROG_START;
     printf("start address = 0x%x\n\r", sa);
 
-#if 0
-    pause();
-#endif
     (*(void (*)())sa)(a1, a2, prom, 0, 0);
 
     printf("returned?\n\r");
@@ -150,7 +144,7 @@ void gunzip(void *dst, int dstlen, unsigned char *src, int *lenp)
     s.avail_out = dstlen;
     r = inflate(&s, Z_FINISH);
     if (r != Z_OK && r != Z_STREAM_END) {
-	printf("inflate returned %d\n\r", r);
+	printf("inflate returned %d msg: %s\n\r", r, s.msg);
 	exit();
     }
     *lenp = s.next_out - (unsigned char *) dst;

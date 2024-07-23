@@ -19,6 +19,10 @@ dep_tristate '  MSDOS fs support' CONFIG_MSDOS_FS $CONFIG_FAT_FS
 dep_tristate '  UMSDOS: Unix-like filesystem on top of standard MSDOS filesystem' CONFIG_UMSDOS_FS $CONFIG_MSDOS_FS
 dep_tristate '  VFAT (Windows-95) fs support' CONFIG_VFAT_FS $CONFIG_FAT_FS
 
+if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+  tristate 'EFS filesystem support (read only) (experimental)' CONFIG_EFS_FS
+fi
+
 tristate 'ISO 9660 CDROM filesystem support' CONFIG_ISO9660_FS
 if [ "$CONFIG_ISO9660_FS" != "n" ]; then
   bool 'Microsoft Joliet CDROM extensions' CONFIG_JOLIET
@@ -32,7 +36,7 @@ tristate 'NTFS filesystem support (read only)' CONFIG_NTFS_FS
 if [ "$CONFIG_NTFS_FS" != "n" -a "$CONFIG_EXPERIMENTAL" = "y" ]; then
   bool '   NTFS read-write support (DANGEROUS)' CONFIG_NTFS_RW
 fi
-tristate 'OS/2 HPFS filesystem support (read only)' CONFIG_HPFS_FS
+tristate 'OS/2 HPFS filesystem support (read/write) (NEW)' CONFIG_HPFS_FS
 bool '/proc filesystem support' CONFIG_PROC_FS
 if [ "$CONFIG_UNIX98_PTYS" = "y" ]; then
   # It compiles as a module for testing only.  It should not be used
@@ -69,9 +73,9 @@ if [ "$CONFIG_INET" = "y" ]; then
   fi
   if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
     tristate 'NFS server support' CONFIG_NFSD
-  fi
-  if [ "$CONFIG_NFSD" != "n" ]; then
-    bool '   Emulate SUN NFS server' CONFIG_NFSD_SUN
+    if [ "$CONFIG_NFSD" != "n" ]; then
+      bool '   Emulate SUN NFS server' CONFIG_NFSD_SUN
+    fi
   fi
   if [ "$CONFIG_NFS_FS" = "y" -o "$CONFIG_NFSD" = "y" ]; then
     define_bool CONFIG_SUNRPC y
@@ -86,9 +90,6 @@ if [ "$CONFIG_INET" = "y" ]; then
     fi
   fi
   tristate 'SMB filesystem support (to mount WfW shares etc.)' CONFIG_SMB_FS
-  if [ "$CONFIG_SMB_FS" != "n" ]; then
-    bool 'SMB Win95 bug work-around' CONFIG_SMB_WIN95
-  fi
 fi
 if [ "$CONFIG_IPX" != "n" -o "$CONFIG_INET" != "n" ]; then
   tristate 'NCP filesystem support (to mount NetWare volumes)' CONFIG_NCP_FS
@@ -107,6 +108,7 @@ bool 'BSD disklabel (BSD partition tables) support' CONFIG_BSD_DISKLABEL
 bool 'Macintosh partition map support' CONFIG_MAC_PARTITION
 bool 'SMD disklabel (Sun partition tables) support' CONFIG_SMD_DISKLABEL
 bool 'Solaris (x86) partition table support' CONFIG_SOLARIS_X86_PARTITION
+bool 'SGI disklabel support' CONFIG_SGI_DISKLABEL
 if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
   bool 'Unixware slices support (EXPERIMENTAL)' CONFIG_UNIXWARE_DISKLABEL
 fi

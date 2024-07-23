@@ -70,12 +70,17 @@ extern int amiga_mouse_init(void);
 extern int atari_mouse_init(void);
 extern int sun_mouse_init(void);
 extern int adb_mouse_init(void);
+#ifdef CONFIG_SGI_NEWPORT_GFX
+extern void gfx_register(void);
+#endif
+extern void streamable_init(void);
 extern void watchdog_init(void);
 extern void wdt_init(void);
 extern void acq_init(void);
 extern void dtlk_init(void);
 extern void pcwatchdog_init(void);
 extern int rtc_init(void);
+extern int rtc_sun_init(void);		/* Combines MK48T02 and MK48T08 */
 extern int rtc_DP8570A_init(void);
 extern int rtc_MK48T08_init(void);
 extern int dsp56k_init(void);
@@ -247,7 +252,10 @@ int __init misc_init(void)
 #ifdef CONFIG_BVME6000
 	rtc_DP8570A_init();
 #endif
-#if defined(CONFIG_RTC) || defined(CONFIG_SUN_MOSTEK_RTC)
+#if defined(CONFIG_SUN_MOSTEK_RTC)
+	rtc_sun_init();
+#endif
+#if defined(CONFIG_RTC)
 	rtc_init();
 #endif
 #ifdef CONFIG_ATARI_DSP56K
@@ -267,6 +275,12 @@ int __init misc_init(void)
 #endif
 #ifdef CONFIG_PMAC_PBOOK
 	pmu_device_init();
+#endif
+#ifdef CONFIG_SGI_NEWPORT_GFX
+	gfx_register ();
+#endif
+#ifdef CONFIG_SGI
+	streamable_init ();
 #endif
 	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
 		printk("unable to get major %d for misc devices\n",

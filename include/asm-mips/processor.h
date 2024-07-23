@@ -11,6 +11,12 @@
 #ifndef __ASM_MIPS_PROCESSOR_H
 #define __ASM_MIPS_PROCESSOR_H
 
+/*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+
 #if !defined (_LANGUAGE_ASSEMBLY)
 #include <asm/cachectl.h>
 #include <asm/mipsregs.h>
@@ -174,6 +180,7 @@ struct thread_struct {
 
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
+extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 /* Copy and release all segment info associated with a VM */
 #define copy_segments(nr, p, mm) do { } while(0)
@@ -194,6 +201,7 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 	return ((unsigned long*)t->reg29)[17];
 }
 
+struct pt_regs;
 extern int (*user_mode)(struct pt_regs *);
 
 /*

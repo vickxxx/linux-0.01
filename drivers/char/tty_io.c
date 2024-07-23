@@ -628,10 +628,12 @@ static ssize_t tty_read(struct file * file, char * buf, size_t count,
 			return -ERESTARTSYS;
 		}
 #endif
+	lock_kernel();
 	if (tty->ldisc.read)
 		i = (tty->ldisc.read)(tty,file,buf,count);
 	else
 		i = -EIO;
+	unlock_kernel();
 	if (i > 0)
 		inode->i_atime = CURRENT_TIME;
 	return i;
@@ -651,16 +653,16 @@ static inline ssize_t do_tty_write(
 	ssize_t ret = 0, written = 0;
 	struct inode *inode = file->f_dentry->d_inode;
 	
-	up(&inode->i_sem);
-	if (down_interruptible(&inode->i_atomic_write)) {
-		down(&inode->i_sem);
+	if (down_interruptible(&inode->i_sem)) {
 		return -ERESTARTSYS;
 	}
 	for (;;) {
 		unsigned long size = PAGE_SIZE*2;
 		if (size > count)
 			size = count;
+		lock_kernel();
 		ret = write(tty, file, buf, size);
+		unlock_kernel();
 		if (ret <= 0)
 			break;
 		written += ret;
@@ -678,8 +680,7 @@ static inline ssize_t do_tty_write(
 		file->f_dentry->d_inode->i_mtime = CURRENT_TIME;
 		ret = written;
 	}
-	up(&inode->i_atomic_write);
-	down(&inode->i_sem);
+	up(&inode->i_sem);
 	return ret;
 }
 
@@ -729,7 +730,7 @@ static ssize_t tty_write(struct file * file, const char * buf, size_t count,
 }
 
 /* Semaphore to protect creating and releasing a tty */
-static struct semaphore tty_sem = MUTEX;
+static DECLARE_MUTEX(tty_sem);
 
 static void down_tty_sem(int index)
 {
@@ -1930,7 +1931,9 @@ static void initialize_tty_struct(struct tty_struct *tty)
 	tty->flip.flag_buf_ptr = tty->flip.flag_buf;
 	tty->flip.tqueue.routine = flush_to_ldisc;
 	tty->flip.tqueue.data = tty;
-	tty->flip.pty_sem = MUTEX;
+	init_MUTEX(&tty->flip.pty_sem);
+	init_waitqueue_head(&tty->write_wait);
+	init_waitqueue_head(&tty->read_wait);
 	tty->tq_hangup.routine = do_tty_hangup;
 	tty->tq_hangup.data = tty;
 	sema_init(&tty->atomic_read, 1);

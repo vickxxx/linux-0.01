@@ -74,13 +74,13 @@ struct inode_operations affs_file_inode_operations = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	generic_readpage,	/* readpage */
+	affs_bmap,		/* get_block */
+	block_read_full_page,	/* readpage */
 	NULL,			/* writepage */
-	affs_bmap,		/* bmap */
+	NULL,			/* flushpage */
 	affs_truncate,		/* truncate */
 	NULL,			/* permission */
 	NULL,			/* smap */
-	NULL,			/* updatepage */
 	NULL			/* revalidate */
 };
 
@@ -115,13 +115,13 @@ struct inode_operations affs_file_inode_operations_ofs = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
+	NULL,			/* get_block */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
-	NULL,			/* bmap */
+	NULL,			/* flushpage */
 	affs_truncate,		/* truncate */
 	NULL,			/* permission */
 	NULL,			/* smap */
-	NULL,			/* updatepage */
 	NULL			/* revalidate */
 };
 

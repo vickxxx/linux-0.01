@@ -136,6 +136,11 @@ if [ "$CONFIG_VIDEO_DEV" != "n" ]; then
     dep_tristate 'Quickcam BW Video For Linux' CONFIG_VIDEO_BWQCAM $CONFIG_VIDEO_DEV $CONFIG_PARPORT
     dep_tristate 'Colour QuickCam Video For Linux (EXPERIMENTAL)' CONFIG_VIDEO_CQCAM $CONFIG_VIDEO_DEV $CONFIG_PARPORT
   fi
+  if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+    if [ "$CONFIG_SGI" = "y" ]; then
+      dep_tristate 'SGI Vino Video For Linux (EXPERIMENTAL)' CONFIG_VIDEO_VINO $CONFIG_VIDEO_DEV
+    fi
+  fi
   dep_tristate 'Mediavision Pro Movie Studio Video For Linux' CONFIG_VIDEO_PMS $CONFIG_VIDEO_DEV
   if [ "$CONFIG_PMAC" = "y" ]; then
     dep_tristate 'PlanB Video-In on PowerMac' CONFIG_VIDEO_PLANB $CONFIG_VIDEO_DEV
@@ -159,6 +164,7 @@ if [ "$CONFIG_VIDEO_DEV" != "n" ]; then
   if [ "$CONFIG_RADIO_ZOLTRIX" = "y" ]; then
     hex '  ZOLTRIX I/O port (0x20c or 0x30c)' CONFIG_RADIO_ZOLTRIX_PORT 20c
   fi
+  dep_tristate 'IIC on parallel port' CONFIG_I2C_PARPORT $CONFIG_PARPORT
 fi
 
 endmenu

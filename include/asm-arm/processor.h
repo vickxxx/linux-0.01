@@ -7,6 +7,12 @@
 #ifndef __ASM_ARM_PROCESSOR_H
 #define __ASM_ARM_PROCESSOR_H
 
+/*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+
 #define FP_SIZE 35
 
 struct fp_hard_struct {
@@ -30,6 +36,7 @@ typedef unsigned long mm_segment_t;		/* domain register	*/
 
 #define NR_DEBUGS	5
 
+#include <asm/proc/ptrace.h>
 #include <asm/arch/processor.h>
 #include <asm/proc/processor.h>
 
@@ -80,6 +87,7 @@ extern __inline__ void init_thread_css(struct context_save_struct *save)
 }
 
 /* Forward declaration, a strange C thing */
+struct task_struct;
 struct mm_struct;
 
 /* Free all resources held by a thread. */

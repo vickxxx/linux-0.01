@@ -1,5 +1,5 @@
 /*
- * $Id: setup.c,v 1.132 1999/03/24 00:32:19 cort Exp $
+ * $Id: setup.c,v 1.136 1999/06/18 07:11:35 cort Exp $
  * Common prep/pmac/chrp boot and setup code.
  */
 
@@ -17,6 +17,7 @@
 #include <asm/pmu.h>
 #include <asm/residual.h>
 #include <asm/io.h>
+#include <linux/ide.h>
 #include <asm/ide.h>
 #include <asm/prom.h>
 #include <asm/processor.h>
@@ -79,6 +80,9 @@ int _machine = 0;
 int have_of = 0;
 int is_prep = 0;
 int is_chrp = 0;
+#ifdef CONFIG_MAGIC_SYSRQ
+unsigned long SYSRQ_KEY;
+#endif /* CONFIG_MAGIC_SYSRQ */
 /* For MTX/MVME boards.. with Raven/Falcon Chipset
       Real close to CHRP, but boot like PReP (via PPCbug)
       There's probably a nicer way to do this.. --Troy */
@@ -159,15 +163,6 @@ void machine_halt(void)
 	ppc_md.halt();
 }
   
-#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
-void ide_init_hwif_ports (ide_ioreg_t *p, ide_ioreg_t base, int *irq)
-{
-	if (ppc_ide_md.ide_init_hwif != NULL) {
-		ppc_ide_md.ide_init_hwif(p, base, irq);
-	}
-}
-#endif
-
 unsigned long cpu_temp(void)
 {
 	unsigned char thres = 0;
@@ -375,7 +370,6 @@ identify_machine(unsigned long r3, unsigned long r4, unsigned long r5,
 			else
 			{
 				_machine = _MACH_Pmac;
-				is_prep = 1;
 			}
 		}
 

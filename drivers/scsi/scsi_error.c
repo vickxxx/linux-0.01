@@ -560,7 +560,7 @@ void scsi_sleep_done (struct semaphore * sem)
 
 void scsi_sleep (int timeout)
 {
-    struct semaphore sem = MUTEX_LOCKED;
+    DECLARE_MUTEX_LOCKED(sem);
     struct timer_list timer;
 
     init_timer(&timer);
@@ -603,7 +603,7 @@ retry:
 
     if (host->can_queue)
     {
-        struct semaphore sem = MUTEX_LOCKED;
+        DECLARE_MUTEX_LOCKED(sem);
 
         SCpnt->eh_state = SCSI_STATE_QUEUED;
 
@@ -1924,8 +1924,9 @@ scsi_error_handler(void * data)
 {
 	struct Scsi_Host     * host = (struct Scsi_Host *) data;
 	int	               rtn;
-	struct semaphore sem = MUTEX_LOCKED;
+        DECLARE_MUTEX_LOCKED(sem);
         unsigned long flags;
+        struct fs_struct *fs;
 
 	lock_kernel();
 
@@ -1936,16 +1937,18 @@ scsi_error_handler(void * data)
 	 */
 	exit_mm(current);
 
-
 	current->session = 1;
 	current->pgrp = 1;
-        /*
-         * FIXME(eric) this is still a child process of the one that did the insmod.
-         * This needs to be attached to task[0] instead.
-         */
+	
+	/* Become as one with the init task */
+	
+	exit_fs(current);	/* current->fs->count--; */
+	fs = init_task.fs;
+	current->fs = fs;
+	atomic_inc(&fs->count);
 
 	siginitsetinv(&current->blocked, SHUTDOWN_SIGS);
-        current->fs->umask = 0;
+
 
 	/*
 	 * Set the name of this process.

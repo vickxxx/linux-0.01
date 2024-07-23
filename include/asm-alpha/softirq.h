@@ -7,6 +7,31 @@
 
 extern unsigned int local_bh_count[NR_CPUS];
 
+extern inline void cpu_bh_disable(int cpu)
+{
+	local_bh_count[cpu]++;
+	mb();
+}
+
+extern inline void cpu_bh_enable(int cpu)
+{
+	mb();
+	local_bh_count[cpu]--;
+}
+
+extern inline int cpu_bh_trylock(int cpu)
+{
+	return local_bh_count[cpu] ? 0 : (local_bh_count[cpu] = 1);
+}
+
+extern inline void cpu_bh_endlock(int cpu)
+{
+	local_bh_count[cpu] = 0;
+}
+
+#define local_bh_enable()	cpu_bh_enable(smp_processor_id())
+#define local_bh_disable()	cpu_bh_disable(smp_processor_id())
+
 #define get_active_bhs()	(bh_mask & bh_active)
 
 static inline void clear_active_bhs(unsigned long x)
@@ -33,8 +58,9 @@ extern inline void init_bh(int nr, void (*routine)(void))
 
 extern inline void remove_bh(int nr)
 {
-	bh_base[nr] = NULL;
 	bh_mask &= ~(1 << nr);
+	wmb();
+	bh_base[nr] = NULL;
 }
 
 extern inline void mark_bh(int nr)
@@ -68,44 +94,39 @@ static inline void end_bh_atomic(void)
 /* These are for the irq's testing the lock */
 static inline int softirq_trylock(int cpu)
 {
-	if (!test_and_set_bit(0,&global_bh_count)) {
-		if (atomic_read(&global_bh_lock) == 0) {
-			++local_bh_count[cpu];
-			return 1;
+	if (cpu_bh_trylock(cpu)) {
+		if (!test_and_set_bit(0, &global_bh_count)) {
+			if (atomic_read(&global_bh_lock) == 0)
+				return 1;
+			clear_bit(0, &global_bh_count);
 		}
-		clear_bit(0,&global_bh_count);
+		cpu_bh_endlock(cpu);
 	}
 	return 0;
 }
 
 static inline void softirq_endlock(int cpu)
 {
-	local_bh_count[cpu]--;
-	clear_bit(0,&global_bh_count);
+	cpu_bh_enable(cpu);
+	clear_bit(0, &global_bh_count);
 }
 
 #else
 
 extern inline void start_bh_atomic(void)
 {
-	local_bh_count[smp_processor_id()]++;
-	barrier();
+	local_bh_disable();
 }
 
 extern inline void end_bh_atomic(void)
 {
-	barrier();
-	local_bh_count[smp_processor_id()]--;
+	local_bh_enable();
 }
 
 /* These are for the irq's testing the lock */
-#define softirq_trylock(cpu) \
-  (local_bh_count[cpu] ? 0 : (local_bh_count[cpu] = 1))
-
-#define softirq_endlock(cpu) \
-  (local_bh_count[cpu] = 0)
-
-#define synchronize_bh()	do { } while (0)
+#define softirq_trylock(cpu)	cpu_bh_trylock(cpu)
+#define softirq_endlock(cpu)	cpu_bh_endlock(cpu)
+#define synchronize_bh()	barrier()
 
 #endif	/* SMP */
 

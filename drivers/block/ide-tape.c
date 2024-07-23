@@ -338,6 +338,8 @@
 #include <linux/errno.h>
 #include <linux/genhd.h>
 #include <linux/malloc.h>
+#include <linux/pci.h>
+#include <linux/ide.h>
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
@@ -345,11 +347,6 @@
 #include <asm/io.h>
 #include <asm/unaligned.h>
 #include <asm/bitops.h>
-
-/*
- *	Main Linux ide driver include file
- */
-#include "ide.h"
 
 /*
  *	For general magnetic tape device compatibility.
@@ -401,6 +398,7 @@
 /*
  *	The following are used to debug the driver:
  *
+ *	Setting IDETAPE_INFO_LOG to 1 will log driver vender information.
  *	Setting IDETAPE_DEBUG_LOG to 1 will log driver flow control.
  *	Setting IDETAPE_DEBUG_BUGS to 1 will enable self-sanity checks in
  *	some places.
@@ -415,8 +413,14 @@
  *	is verified to be stable enough. This will make it much more
  *	esthetic.
  */
+#define IDETAPE_INFO_LOG		0
 #define IDETAPE_DEBUG_LOG		0
 #define IDETAPE_DEBUG_BUGS		1
+
+#if IDETAPE_DEBUG_LOG
+#undef IDETAPE_INFO_LOG
+#define IDETAPE_INFO_LOG		IDETAPE_DEBUG_LOG
+#endif
 
 /*
  *	After each failed packet command we issue a request sense command
@@ -1069,13 +1073,13 @@ static void idetape_input_buffers (ide_drive_t *drive, idetape_pc_t *pc, unsigne
 			return;
 		}
 #endif /* IDETAPE_DEBUG_BUGS */
-		count = IDE_MIN (bh->b_size - bh->b_count, bcount);
-		atapi_input_bytes (drive, bh->b_data + bh->b_count, count);
-		bcount -= count; bh->b_count += count;
-		if (bh->b_count == bh->b_size) {
+		count = IDE_MIN (bh->b_size - atomic_read(&bh->b_count), bcount);
+		atapi_input_bytes (drive, bh->b_data + atomic_read(&bh->b_count), count);
+		bcount -= count; atomic_add(count, &bh->b_count);
+		if (atomic_read(&bh->b_count) == bh->b_size) {
 			bh = bh->b_reqnext;
 			if (bh)
-				bh->b_count = 0;
+				atomic_set(&bh->b_count, 0);
 		}
 	}
 	pc->bh = bh;
@@ -1100,7 +1104,7 @@ static void idetape_output_buffers (ide_drive_t *drive, idetape_pc_t *pc, unsign
 			pc->bh = bh = bh->b_reqnext;
 			if (bh) {
 				pc->b_data = bh->b_data;
-				pc->b_count = bh->b_count;
+				pc->b_count = atomic_read(&bh->b_count);
 			}
 		}
 	}
@@ -1122,8 +1126,8 @@ static void idetape_update_buffers (idetape_pc_t *pc)
 		}
 #endif /* IDETAPE_DEBUG_BUGS */
 		count = IDE_MIN (bh->b_size, bcount);
-		bh->b_count = count;
-		if (bh->b_count == bh->b_size)
+		atomic_set(&bh->b_count, count);
+		if (atomic_read(&bh->b_count) == bh->b_size)
 			bh = bh->b_reqnext;
 		bcount -= count;
 	}
@@ -1347,13 +1351,13 @@ static void idetape_copy_stage_from_user (idetape_tape_t *tape, idetape_stage_t 
 			return;
 		}
 #endif /* IDETAPE_DEBUG_BUGS */
-		count = IDE_MIN (bh->b_size - bh->b_count, n);
-		copy_from_user (bh->b_data + bh->b_count, buf, count);
-		n -= count; bh->b_count += count; buf += count;
-		if (bh->b_count == bh->b_size) {
+		count = IDE_MIN (bh->b_size - atomic_read(&bh->b_count), n);
+		copy_from_user (bh->b_data + atomic_read(&bh->b_count), buf, count);
+		n -= count; atomic_add(count, &bh->b_count); buf += count;
+		if (atomic_read(&bh->b_count) == bh->b_size) {
 			bh = bh->b_reqnext;
 			if (bh)
-				bh->b_count = 0;
+				atomic_set(&bh->b_count, 0);
 		}
 	}
 	tape->bh = bh;
@@ -1378,7 +1382,7 @@ static void idetape_copy_stage_to_user (idetape_tape_t *tape, char *buf, idetape
 			tape->bh = bh = bh->b_reqnext;
 			if (bh) {
 				tape->b_data = bh->b_data;
-				tape->b_count = bh->b_count;
+				tape->b_count = atomic_read(&bh->b_count);
 			}
 		}
 	}
@@ -1390,10 +1394,10 @@ static void idetape_init_merge_stage (idetape_tape_t *tape)
 	
 	tape->bh = bh;
 	if (tape->chrdev_direction == idetape_direction_write)
-		bh->b_count = 0;
+		atomic_set(&bh->b_count, 0);
 	else {
 		tape->b_data = bh->b_data;
-		tape->b_count = bh->b_count;
+		tape->b_count = atomic_read(&bh->b_count);
 	}
 }
 
@@ -1968,7 +1972,8 @@ static void idetape_issue_packet_command (ide_drive_t *drive, idetape_pc_t *pc)
 		dma_ok=!HWIF(drive)->dmaproc(test_bit (PC_WRITING, &pc->flags) ? ide_dma_write : ide_dma_read, drive);
 #endif /* CONFIG_BLK_DEV_IDEDMA */
 
-	OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
+	if (IDE_CONTROL_REG)
+		OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
 	OUT_BYTE (dma_ok ? 1:0,IDE_FEATURE_REG);			/* Use PIO/DMA */
 	OUT_BYTE (bcount.b.high,IDE_BCOUNTH_REG);
 	OUT_BYTE (bcount.b.low,IDE_BCOUNTL_REG);
@@ -2126,7 +2131,7 @@ static void idetape_create_read_cmd (idetape_tape_t *tape, idetape_pc_t *pc, uns
 	pc->c[1] = 1;
 	pc->callback = &idetape_rw_callback;
 	pc->bh = bh;
-	bh->b_count = 0;
+	atomic_set(&bh->b_count, 0);
 	pc->buffer = NULL;
 	pc->request_transfer = pc->buffer_size = length * tape->tape_block_size;
 	if (pc->request_transfer == tape->stage_size)
@@ -2153,7 +2158,7 @@ static void idetape_create_write_cmd (idetape_tape_t *tape, idetape_pc_t *pc, un
 	set_bit (PC_WRITING, &pc->flags);
 	pc->bh = bh;
 	pc->b_data = bh->b_data;
-	pc->b_count = bh->b_count;
+	pc->b_count = atomic_read(&bh->b_count);
 	pc->buffer = NULL;
 	pc->request_transfer = pc->buffer_size = length * tape->tape_block_size;
 	if (pc->request_transfer == tape->stage_size)
@@ -2334,7 +2339,7 @@ static int idetape_queue_pc_tail (ide_drive_t *drive,idetape_pc_t *pc)
  */
 static void idetape_wait_for_request (ide_drive_t *drive, struct request *rq)
 {
-	struct semaphore sem = MUTEX_LOCKED;
+	DECLARE_MUTEX_LOCKED(sem);
 
 #if IDETAPE_DEBUG_BUGS
 	if (rq == NULL || !IDETAPE_RQ_CMD (rq->cmd)) {
@@ -2582,9 +2587,9 @@ static void idetape_pad_zeros (ide_drive_t *drive, int bcount)
 		bcount -= count;
 		blocks = count / tape->tape_block_size;
 		while (count) {
-			bh->b_count = IDE_MIN (count, bh->b_size);
-			memset (bh->b_data, 0, bh->b_count);
-			count -= bh->b_count;
+			atomic_set(&bh->b_count, IDE_MIN (count, bh->b_size));
+			memset (bh->b_data, 0, atomic_read(&bh->b_count));
+			count -= atomic_read(&bh->b_count);
 			bh = bh->b_reqnext;
 		}
 		idetape_queue_rw_tail (drive, IDETAPE_WRITE_RQ, blocks, tape->merge_stage->bh);
@@ -2611,8 +2616,8 @@ static void idetape_empty_write_pipeline (ide_drive_t *drive)
 		if (tape->merge_stage_size % tape->tape_block_size) {
 			blocks++;
 			i = tape->tape_block_size - tape->merge_stage_size % tape->tape_block_size;
-			memset (tape->bh->b_data + tape->bh->b_count, 0, i);
-			tape->bh->b_count += i;
+			memset (tape->bh->b_data + atomic_read(&tape->bh->b_count), 0, i);
+			atomic_add(i, &tape->bh->b_count);
 		}
 		(void) idetape_add_chrdev_write_request (drive, blocks);
 		tape->merge_stage_size = 0;
@@ -3337,16 +3342,16 @@ static int idetape_chrdev_release (struct inode *inode, struct file *filp)
 static int idetape_identify_device (ide_drive_t *drive,struct hd_driveid *id)
 {
 	struct idetape_id_gcw gcw;
-#if IDETAPE_DEBUG_LOG
+#if IDETAPE_INFO_LOG
 	unsigned short mask,i;
-#endif /* IDETAPE_DEBUG_LOG */
+#endif /* IDETAPE_INFO_LOG */
 
 	if (!id)
 		return 0;
 
 	*((unsigned short *) &gcw) = id->config;
 
-#if IDETAPE_DEBUG_LOG
+#if IDETAPE_INFO_LOG
 	printk (KERN_INFO "Dumping ATAPI Identify Device tape parameters\n");
 	printk (KERN_INFO "Protocol Type: ");
 	switch (gcw.protocol) {
@@ -3434,7 +3439,7 @@ static int idetape_identify_device (ide_drive_t *drive,struct hd_driveid *id)
 		
 	} else
 		printk (KERN_INFO "According to the device, fields 64-70 are not valid.\n");
-#endif /* IDETAPE_DEBUG_LOG */
+#endif /* IDETAPE_INFO_LOG */
 
 	/* Check that we can support this device */
 
@@ -3491,7 +3496,7 @@ static void idetape_get_mode_sense_results (ide_drive_t *drive)
 
 	tape->capabilities = *capabilities;		/* Save us a copy */
 	tape->tape_block_size = capabilities->blk512 ? 512:1024;
-#if IDETAPE_DEBUG_LOG
+#if IDETAPE_INFO_LOG
 	printk (KERN_INFO "Dumping the results of the MODE SENSE packet command\n");
 	printk (KERN_INFO "Mode Parameter Header:\n");
 	printk (KERN_INFO "Mode Data Length - %d\n",header->mode_data_length);
@@ -3519,7 +3524,7 @@ static void idetape_get_mode_sense_results (ide_drive_t *drive)
 	printk (KERN_INFO "Continuous transfer limits in blocks - %d\n",capabilities->ctl);
 	printk (KERN_INFO "Current speed in KBps - %d\n",capabilities->speed);	
 	printk (KERN_INFO "Buffer size - %d\n",capabilities->buffer_size*512);
-#endif /* IDETAPE_DEBUG_LOG */
+#endif /* IDETAPE_INFO_LOG */
 }
 
 static void idetape_add_settings(ide_drive_t *drive)
@@ -3561,7 +3566,18 @@ static void idetape_setup (ide_drive_t *drive, idetape_tape_t *tape, int minor)
 
 	drive->driver_data = tape;
 	drive->ready_stat = 0;			/* An ATAPI device ignores DRDY */
-	drive->dsc_overlap = 1;
+#ifdef CONFIG_BLK_DEV_IDEPCI
+	/*
+	 *  These two ide-pci host adapters appear to need this disabled.
+	 */
+	if ((hwif->pci_dev->device == PCI_DEVICE_ID_ARTOP_ATP850UF) ||
+	    (hwif->pci_dev->device == PCI_DEVICE_ID_TTI_HPT343)) {
+		drive->dsc_overlap = 0;
+	} else
+#endif  /* CONFIG_BLK_DEV_IDEPCI */
+	{
+		drive->dsc_overlap = 1;
+	}
 	memset (tape, 0, sizeof (idetape_tape_t));
 	tape->drive = drive;
 	tape->minor = minor;
@@ -3798,8 +3814,14 @@ void cleanup_module (void)
 
 	for (minor = 0; minor < MAX_HWIFS * MAX_DRIVES; minor++) {
 		drive = idetape_chrdevs[minor].drive;
-		if (drive != NULL && idetape_cleanup (drive))
-			printk (KERN_ERR "ide-tape: %s: cleanup_module() called while still busy\n", drive->name);
+		if (drive) {
+			if (idetape_cleanup (drive))
+				printk (KERN_ERR "ide-tape: %s: cleanup_module() called while still busy\n", drive->name);
+			/* We must remove proc entries defined in this module.
+			   Otherwise we oops while accessing these entries */
+			if (drive->proc)
+				ide_remove_proc_entries(drive->proc, idetape_proc);
+		}
 	}
 	ide_unregister_module(&idetape_module);
 }

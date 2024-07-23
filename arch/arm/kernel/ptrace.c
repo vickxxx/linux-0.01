@@ -34,11 +34,11 @@
  */
 static inline long get_stack_long(struct task_struct *task, int offset)
 {
-	unsigned char *stack;
+	struct pt_regs *regs;
 
-	stack = (unsigned char *)((unsigned long)task + 8192 - sizeof(struct pt_regs));
-	stack += offset << 2;
-	return *(unsigned long *)stack;
+	regs = (struct pt_regs *)((unsigned long)task + 8192 - sizeof(struct pt_regs));
+
+	return regs->uregs[offset];
 }
 
 /*
@@ -50,11 +50,12 @@ static inline long get_stack_long(struct task_struct *task, int offset)
 static inline long put_stack_long(struct task_struct *task, int offset,
 	unsigned long data)
 {
-	unsigned char *stack;
+	struct pt_regs *regs;
 
-	stack = (unsigned char *)((unsigned long)task + 8192 - sizeof(struct pt_regs));
-	stack += offset << 2;
-	*(unsigned long *) stack = data;
+	regs = (struct pt_regs *)((unsigned long)task + 8192 - sizeof(struct pt_regs));
+
+	regs->uregs[offset] = data;
+
 	return 0;
 }
 
@@ -157,30 +158,16 @@ repeat:
 	
 	if (MAP_NR(page) < max_mapnr) {
 		page += addr & ~PAGE_MASK;
+
+		flush_cache_range(vma->vm_mm, addr, addr + sizeof(unsigned long));
+
 		*(unsigned long *)page = data;
-		__flush_entry_to_ram(page);
+
+		clean_cache_area(page, sizeof(unsigned long));
+
+		set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
+		flush_tlb_page(vma, addr & PAGE_MASK);
 	}
-	set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
-	flush_tlb();
-}
-
-static struct vm_area_struct * find_extend_vma(struct task_struct * tsk, unsigned long addr)
-{
-	struct vm_area_struct * vma;
-
-	addr &= PAGE_MASK;
-	vma = find_vma(tsk->mm,addr);
-	if (!vma)
-		return NULL;
-	if (vma->vm_start <= addr)
-		return vma;
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		return NULL;
-	if (vma->vm_end - addr > tsk->rlim[RLIMIT_STACK].rlim_cur)
-		return NULL;
-	vma->vm_offset -= vma->vm_start - addr;
-	vma->vm_start = addr;
-	return vma;
 }
 
 /*
@@ -362,8 +349,7 @@ printk ("op2=r%02ldsh%dx%d", insn & 15, shift, type);
 printk ("=%08lX ", val);
 	return val;
 }
-#undef pc_pointer
-#define pc_pointer(x) ((x) & 0x03fffffc)
+
 int ptrace_set_bpt (struct task_struct *child)
 {
 	unsigned long insn, pc, alt;
@@ -580,6 +566,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		    (current->uid != child->uid) ||
 	 	    (current->gid != child->egid) ||
 	 	    (current->gid != child->sgid) ||
+		    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
 	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
 			goto out;
 		/* the same process cannot be attached many times */
@@ -669,7 +656,6 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				return 0;
 			wake_up_process (child);
 			child->exit_code = SIGKILL;
-			ptrace_cancel_bpt (child);
 			/* make sure single-step breakpoint is gone. */
 			ptrace_cancel_bpt (child);
 			ret = 0;

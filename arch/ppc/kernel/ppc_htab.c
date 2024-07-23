@@ -1,5 +1,5 @@
 /*
- * $Id: ppc_htab.c,v 1.26 1998/12/10 00:24:23 cort Exp $
+ * $Id: ppc_htab.c,v 1.28 1999/06/27 10:53:32 davem Exp $
  *
  * PowerPC hash table management proc entry.  Will show information
  * about the current hash table and will allow changes to it.
@@ -74,11 +74,14 @@ struct inode_operations proc_ppc_htab_inode_operations = {
     NULL,	    /* rename	   */
     NULL,	    /* readlink	   */
     NULL,	    /* follow_link */
+    NULL,	    /* get_block   */
     NULL,	    /* readpage	   */
     NULL,	    /* writepage   */
-    NULL,	    /* bmap	   */
+    NULL,	    /* flushpage   */
     NULL,	    /* truncate	   */
-    NULL	    /* permission  */
+    NULL,	    /* permission  */
+    NULL,	    /* smap        */
+    NULL	    /* revalidate  */
 };
 
 /* these will go into processor.h when I'm done debugging -- Cort */

@@ -33,6 +33,7 @@
 #include <linux/sys.h>
 #include <linux/ipc.h>
 #include <linux/utsname.h>
+#include <linux/file.h>
 
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
@@ -182,18 +183,14 @@ asmlinkage int sys_pipe(int *fildes)
 	int fd[2];
 	int error;
 
-	error = verify_area(VERIFY_WRITE, fildes, 8);
-	if (error)
-		return error;
 	lock_kernel();
 	error = do_pipe(fd);
 	unlock_kernel();
-	if (error)
-		return error;
-	if (__put_user(fd[0],0+fildes)
-	    || __put_user(fd[1],1+fildes))
-		return -EFAULT;	/* should we close the fds? */
-	return 0;
+	if (!error) {
+		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+			error = -EFAULT;
+	}
+	return error;
 }
 
 asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
@@ -205,13 +202,14 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
 
 	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
-		file = fget(fd);
-		if (!file)
+		if (!(file = fget(fd)))
 			goto out;
 	}
 	
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	down(&current->mm->mmap_sem);
 	ret = do_mmap(file, addr, len, prot, flags, offset);
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:

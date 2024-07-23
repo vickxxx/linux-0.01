@@ -69,6 +69,7 @@ extern int el1_probe(struct device *);
 extern int wavelan_probe(struct device *);
 extern int el16_probe(struct device *);
 extern int elmc_probe(struct device *);
+extern int skmca_probe(struct device *);
 extern int elplus_probe(struct device *);
 extern int ac3200_probe(struct device *);
 extern int es_probe(struct device *);
@@ -110,6 +111,8 @@ extern int am79c961_probe(struct device *dev);
 extern int epic100_probe(struct device *dev);
 extern int rtl8139_probe(struct device *dev);
 extern int hplance_probe(struct device *dev);
+extern int bagetlance_probe(struct device *);
+extern int dec_lance_probe(struct device *);
 extern int via_rhine_probe(struct device *dev);
 extern int tc515_probe(struct device *dev);
 extern int lance_probe(struct device *dev);
@@ -266,6 +269,9 @@ struct devprobe mca_probes[] __initdata = {
 #endif
 #ifdef CONFIG_ELMC		/* 3c523 */
 	{elmc_probe, 0},
+#endif
+#ifdef CONFIG_SKMC              /* SKnet Microchannel */
+        {skmca_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -438,6 +444,12 @@ struct devprobe sgi_probes[] __initdata = {
 struct devprobe mips_probes[] __initdata = {
 #ifdef CONFIG_MIPS_JAZZ_SONIC
 	{sonic_probe, 0},
+#endif
+#ifdef CONFIG_DECLANCE		/* DECstation on-board controller */
+	{dec_lance_probe, 0},   /* and maybe TURBOchannel option boards */
+#endif
+#ifdef CONFIG_BAGETLANCE        /* Lance-based Baget ethernet boards */
+        {bagetlance_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -805,3 +817,4 @@ struct device loopback_dev = {
 };
 
 struct device *dev_base = &loopback_dev;
+rwlock_t dev_base_lock = RW_LOCK_UNLOCKED;
