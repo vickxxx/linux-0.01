@@ -75,8 +75,8 @@ int send_sig(unsigned long sig,struct task_struct * p,int priv)
 	if (!p || sig > 32)
 		return -EINVAL;
 	if (!priv && ((sig != SIGCONT) || (current->session != p->session)) &&
-	    (current->euid ^ p->euid) && (current->euid ^ p->uid) &&
-	    (current->uid ^ p->euid) && (current->uid ^ p->uid) &&
+	    (current->euid ^ p->suid) && (current->euid ^ p->uid) &&
+	    (current->uid ^ p->suid) && (current->uid ^ p->uid) &&
 	    !suser())
 		return -EPERM;
 	if (!sig)
@@ -346,12 +346,12 @@ asmlinkage int sys_kill(int pid,int sig)
  * 
  * "I ask you, have you ever known what it is to be an orphan?"
  */
-int is_orphaned_pgrp(int pgrp)
+static int will_become_orphaned_pgrp(int pgrp, struct task_struct * ignored_task)
 {
 	struct task_struct *p;
 
 	for_each_task(p) {
-		if ((p->pgrp != pgrp) || 
+		if ((p == ignored_task) || (p->pgrp != pgrp) || 
 		    (p->state == TASK_ZOMBIE) ||
 		    (p->p_pptr->pid == 1))
 			continue;
@@ -360,6 +360,11 @@ int is_orphaned_pgrp(int pgrp)
 			return 0;
 	}
 	return(1);	/* (sighing) "Often!" */
+}
+
+int is_orphaned_pgrp(int pgrp)
+{
+	return will_become_orphaned_pgrp(pgrp, 0);
 }
 
 static inline int has_stopped_jobs(int pgrp)
@@ -388,6 +393,26 @@ static inline void forget_original_parent(struct task_struct * father)
 	}
 }
 
+static inline void close_files(struct files_struct * files)
+{
+	int i, j;
+
+	j = 0;
+	for (;;) {
+		unsigned long set = files->open_fds.fds_bits[j];
+		i = j * __NFDBITS;
+		j++;
+		if (i >= NR_OPEN)
+			break;
+		while (set) {
+			if (set & 1)
+				close_fp(files->fd[i]);
+			i++;
+			set >>= 1;
+		}
+	}
+}
+
 static inline void __exit_files(struct task_struct *tsk)
 {
 	struct files_struct * files = tsk->files;
@@ -395,14 +420,7 @@ static inline void __exit_files(struct task_struct *tsk)
 	if (files) {
 		tsk->files = NULL;
 		if (!--files->count) {
-			int i;
-			for (i=0 ; i<NR_OPEN ; i++) {
-				struct file * filp = files->fd[i];
-				if (!filp)
-					continue;
-				files->fd[i] = NULL;
-				close_fp(filp);
-			}
+			close_files(files);
 			kfree(files);
 		}
 	}
@@ -495,7 +513,7 @@ static void exit_notify(void)
 	 */
 	if ((current->p_pptr->pgrp != current->pgrp) &&
 	    (current->p_pptr->session == current->session) &&
-	    is_orphaned_pgrp(current->pgrp) &&
+	    will_become_orphaned_pgrp(current->pgrp, current) &&
 	    has_stopped_jobs(current->pgrp)) {
 		kill_pg(current->pgrp,SIGHUP,1);
 		kill_pg(current->pgrp,SIGCONT,1);
@@ -607,6 +625,9 @@ asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct
 		if (flag)
 			return flag;
 	}
+	if (options & ~(WNOHANG|WUNTRACED|__WCLONE))
+	    return -EINVAL;
+
 	add_wait_queue(&current->wait_chldexit,&wait);
 repeat:
 	flag=0;
@@ -666,12 +687,11 @@ repeat:
 		retval = 0;
 		if (options & WNOHANG)
 			goto end_wait4;
-		current->state=TASK_INTERRUPTIBLE;
-		schedule();
-		current->signal &= ~(1<<(SIGCHLD-1));
 		retval = -ERESTARTSYS;
 		if (current->signal & ~current->blocked)
 			goto end_wait4;
+		current->state=TASK_INTERRUPTIBLE;
+		schedule();
 		goto repeat;
 	}
 	retval = -ECHILD;

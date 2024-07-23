@@ -22,7 +22,7 @@
 
 
 /*	PROCEDURE TO REPORT NEW PCI DEVICES
- * We are trying to collect informations on new PCI devices, using
+ * We are trying to collect information on new PCI devices, using
  * the standard PCI identification procedure. If some warning is
  * displayed at boot time, please report 
  *	- /proc/pci
@@ -339,10 +339,10 @@
 #define PCI_DEVICE_ID_SGS_2000		0x0008
 #define PCI_DEVICE_ID_SGS_1764		0x0009
 
-#define PCI_VENDOR_ID_BUSLOGIC		0x104B
-#define PCI_DEVICE_ID_BUSLOGIC_946C_2	0x0140
-#define PCI_DEVICE_ID_BUSLOGIC_946C	0x1040
-#define PCI_DEVICE_ID_BUSLOGIC_930	0x8130
+#define PCI_VENDOR_ID_BUSLOGIC		      0x104B
+#define PCI_DEVICE_ID_BUSLOGIC_MULTIMASTER_NC 0x0140
+#define PCI_DEVICE_ID_BUSLOGIC_MULTIMASTER    0x1040
+#define PCI_DEVICE_ID_BUSLOGIC_FLASHPOINT     0x8130
 
 #define PCI_VENDOR_ID_OAK		0x104e
 #define PCI_DEVICE_ID_OAK_OTI107	0x0107
@@ -547,6 +547,7 @@
 #define PCI_DEVICE_ID_INTEL_82437	0x122d
 #define PCI_DEVICE_ID_INTEL_82371_0	0x122e
 #define PCI_DEVICE_ID_INTEL_82371_1	0x1230
+#define PCI_DEVICE_ID_INTEL_82441	0x1237
 #define PCI_DEVICE_ID_INTEL_82439	0x1250
 #define PCI_DEVICE_ID_INTEL_82371SB_0	0x7000
 #define PCI_DEVICE_ID_INTEL_82371SB_1	0x7010

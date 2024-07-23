@@ -36,6 +36,7 @@ fi
 choice 'Alpha system type' \
 	"Avanti		CONFIG_ALPHA_AVANTI		\
 	 Alpha-XL	CONFIG_ALPHA_XL			\
+	 Alpha-XLT	CONFIG_ALPHA_XLT		\
 	 Cabriolet	CONFIG_ALPHA_CABRIOLET		\
 	 EB66		CONFIG_ALPHA_EB66		\
 	 EB66+		CONFIG_ALPHA_EB66P		\
@@ -61,7 +62,7 @@ then
 	define_bool CONFIG_ALPHA_APECS y
 fi
 if [ "$CONFIG_ALPHA_EB164" = "y" -o "$CONFIG_ALPHA_PC164" = "y" \
-	-o "$CONFIG_ALPHA_ALCOR" = "y" ]
+	-o "$CONFIG_ALPHA_ALCOR" = "y" -o "$CONFIG_ALPHA_XLT" = "y" ]
 then
 	define_bool CONFIG_PCI y
 	define_bool CONFIG_ALPHA_EV5 y
@@ -82,7 +83,7 @@ then
 	define_bool CONFIG_ALPHA_AVANTI y
 fi
 
-bool 'Echo console messages on /dev/ttyS1' CONFIG_SERIAL_ECHO
+bool 'Echo console messages on /dev/ttyS0 (COM1)' CONFIG_SERIAL_ECHO
 if [ "$CONFIG_PCI" = "y" ]; then
   bool 'TGA Console Support' CONFIG_TGA_CONSOLE
   if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
@@ -121,6 +122,15 @@ if [ "$CONFIG_NET" = "y" ]; then
   fi
   endmenu
 fi
+
+mainmenu_option next_comment
+comment 'ISDN subsystem'
+
+tristate 'ISDN support' CONFIG_ISDN
+if [ "$CONFIG_ISDN" != "n" ]; then
+  source drivers/isdn/Config.in
+fi
+endmenu
 
 mainmenu_option next_comment
 comment 'CD-ROM drivers (not for SCSI or IDE/ATAPI drives)'

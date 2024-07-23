@@ -112,20 +112,19 @@ struct vm_operations_struct {
  * here (16 bytes or greater).  This ordering should be particularly
  * beneficial on 32-bit processors.
  *
- * The first line is data used in linear searches (eg. clock algorithm
- * scans).  The second line is data used in page searches through the
- * page-cache.  -- sct 
+ * The first line is data used in page cache lookup, the second line
+ * is used for linear searches (eg. clock algorithm scans). 
  */
 typedef struct page {
+	struct inode *inode;
+	unsigned long offset;
+	struct page *next_hash;
 	atomic_t count;
+	unsigned flags;	/* atomic flags, some possibly updated asynchronously */
 	unsigned dirty:16,
 		 age:8;
-	unsigned flags;	/* atomic flags, some possibly updated asynchronously */
 	struct wait_queue *wait;
 	struct page *next;
-	struct page *next_hash;
-	unsigned long offset;
-	struct inode *inode;
 	struct page *prev;
 	struct page *prev_hash;
 	struct buffer_head * buffers;
@@ -318,7 +317,8 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 	unsigned long grow;
 
 	address &= PAGE_MASK;
-	if (vma->vm_end - address > current->rlim[RLIMIT_STACK].rlim_cur)
+	if (vma->vm_end - address
+	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur)
 		return -ENOMEM;
 	grow = vma->vm_start - address;
 	vma->vm_start = address;

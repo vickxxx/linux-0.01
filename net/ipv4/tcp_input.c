@@ -28,9 +28,12 @@
  *		Eric Schenk	: 	Skip fast retransmit on small windows.
  *		Eric schenk	:	Fixes to retransmission code to
  *				:	avoid extra retransmission.
+ *		Theodore Ts'o	:	Do secure TCP sequence numbers.
  */
 
 #include <linux/config.h>
+#include <linux/types.h>
+#include <linux/random.h>
 #include <net/tcp.h>
 
 /*
@@ -66,7 +69,7 @@ extern __inline__ void tcp_delack_estimator(struct sock *sk)
 
 		/* This used to test against sk->rtt.
 		 * On a purely receiving link, there is no rtt measure.
-		 * The result is that we loose delayed ACKs on one way links.
+		 * The result is that we lose delayed ACKs on one-way links.
 		 * Therefore we test against sk->rto, which will always
 		 * at least have a default value.
 		 */
@@ -208,7 +211,17 @@ static void bad_tcp_sequence(struct sock *sk, struct tcphdr *th, u32 end_seq,
 	 * 	from the far end, but sometimes it means the far end lost
 	 *	an ACK we sent, so we better send an ACK.
 	 */
-	tcp_send_ack(sk);
+	/*
+	 *	BEWARE! Unconditional answering by ack to out-of-window ack
+	 *	can result in infinite exchange of empty acks.
+	 *	This check cures bug, found by Michiel Boland, but
+	 *	not another possible cases.
+	 *	If we are in TCP_TIME_WAIT, we have already received
+	 *	FIN, so that our peer need not window update. If our
+	 *	ACK were lost, peer would retransmit his FIN anyway. --ANK
+	 */
+	if (sk->state != TCP_TIME_WAIT || ntohl(th->seq) != end_seq)
+		tcp_send_ack(sk);
 }
 
 /*
@@ -860,11 +873,11 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	 		 * sensitive to minor changes in the round trip time.
 			 * We add in two compensating factors.
 			 * First we multiply by 5/4. For large congestion
-			 * windows this allows us to tollerate burst traffic
+			 * windows this allows us to tolerate burst traffic
 			 * delaying up to 1/4 of our packets.
 			 * We also add in a rtt / cong_window term.
 			 * For small congestion windows this allows
-			 * a single packet delay, but has neglibible effect
+			 * a single packet delay, but has negligible effect
 			 * on the compensation for large windows.
 	 		 */
 			sk->rto = (sk->rtt >> 3) + sk->mdev;
@@ -1722,6 +1735,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	struct tcphdr *th;
 	struct sock *sk;
 	int syn_ok=0;
+	__u32 seq;
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 	int r;
 #endif
@@ -1849,7 +1863,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 			 * handle them locally, due to transparent proxying.
 			 * Thus, narrow down the test to what is really meant.
 			 */
-			if(th->rst || !th->syn || th->ack || (r = ip_chk_addr(daddr) == IS_BROADCAST || r == IS_MULTICAST))
+			if(th->rst || !th->syn || th->ack || (r = ip_chk_addr(daddr)) == IS_BROADCAST || r == IS_MULTICAST)
 #else
 			if(th->rst || !th->syn || th->ack || ip_chk_addr(daddr)!=IS_MYADDR)
 #endif
@@ -1859,10 +1873,12 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 			}
 		
 			/*	
-			 *	Guess we need to make a new socket up 
+			 *	Guess we need to make a new socket up
 			 */
-		
-			tcp_conn_request(sk, skb, daddr, saddr, opt, dev, tcp_init_seq());
+			seq = secure_tcp_sequence_number(saddr, daddr,
+							 skb->h.th->dest,
+							 skb->h.th->source);
+			tcp_conn_request(sk, skb, daddr, saddr, opt, dev, seq);
 		
 			/*
 			 *	Now we have several options: In theory there is nothing else
@@ -1902,7 +1918,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 			{
 				/* We got an ack, but it's not a good ack.
 				 * We used to test this with a call to tcp_ack,
-				 * but this looses, because it takes the SYN
+				 * but this loses, because it takes the SYN
 				 * packet out of the send queue, even if
 				 * the ACK doesn't have the SYN bit sent, and
 				 * therefore isn't the one we are waiting for.
@@ -1932,7 +1948,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 
 				/* process the ACK, get the SYN packet out
 				 * of the send queue, do other initial
-				 * processing stuff. [We know its good, and
+				 * processing stuff. [We know it's good, and
 				 * we know it's the SYN,ACK we want.]
 				 */
 				tcp_ack(sk,th,skb->ack_seq,len);

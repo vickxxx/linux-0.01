@@ -26,9 +26,11 @@ S: CH-1015 Lausanne
 S: Switzerland
 
 N: H. Peter Anvin
-E: Peter.Anvin@linux.org 
+E: hpa@zytor.com
+W: http://www.zytor.com/~hpa/
+P: 2047/2A960705 BA 03 D3 2C 14 A8 A8 BD  1E DF FE 69 EE 35 BD 74
 D: Author of the SYSLINUX boot loader, maintainer of the linux.* news
-D: hierarchy, responsible for various console and other hacks
+D: hierarchy and the Linux Device List; various kernel hacks
 S: 4390 Albany Dr. #46
 S: San Jose CA 95129
 S: USA
@@ -223,7 +225,8 @@ D: Author of Starmode Radio IP (STRIP) driver
 D: Originator of design for new combined interrupt handlers
 S: William Gates Department
 S: Stanford University
-S: Stanford, California 94305, USA
+S: Stanford, California 94305
+S: USA
 
 N: Juan Jose Ciarlante
 E: jjciarla@raiz.uncu.edu.ar
@@ -854,11 +857,11 @@ D: cfdisk (curses based disk partitioning program)
 N: Mike McLagan
 E: mike.mclagan@linux.org
 W: http://www.invlogic.com/~mmclagan
+D: DLCI/FRAD drivers for Sangoma SDLAs
 S: Innovative Logic Corp
 S: P.O. Box 1068
 S: Laurel, MD  20732
 S: USA
-D: DLCI/FRAD drivers for Sangoma SDLAs
 
 N: Bradley McLean
 E: brad@bradpc.gaylord.com
@@ -886,11 +889,11 @@ S: Germany
 
 N: Nigel Metheringham
 E: Nigel.Metheringham@ThePLAnet.net
+P: 1024/31455639 B7 99 BD B8 00 17 BD 46  C1 15 B8 AB 87 BC 25 FA
 D: IP Masquerading work and minor fixes
 S: Planet Online
 S: The White House, Melbourne Street, LEEDS
 S: LS2  7PS,   UK
-P: 1024/31455639 B7 99 BD B8 00 17 BD 46  C1 15 B8 AB 87 BC 25 FA
 
 N: Craig Metz
 E: cmetz@tjhsst.edu
@@ -1001,9 +1004,10 @@ S: Germany
 
 N: David C. Niemi
 E: niemi@erols.com
-D: Mtools/VFAT/floppy work, benchmarking, random kernel dilettante
+D: Assistant maintainer of Mtools, fdutils, and floppy driver
+D: Administrator of WAUUG Linux Server, http://linux.wauug.org
 S: 2364 Old Trail Drive
-S: Reston, Virginia 22091
+S: Reston, Virginia 20191
 S: USA
 
 N: Michael O'Reilly
@@ -1028,6 +1032,13 @@ D: Various minor hacking
 S: RR #5, 497 Pole Line Road
 S: Thunder Bay, Ontario
 S: CANADA P7C 5M9
+
+N: Yuri Per
+E: yuri@pts.mipt.ru
+D: Some smbfs fixes
+S: Demonstratsii 8-382
+S: Tula 300000
+S: Russia
 
 N: Kai Petzke
 E: wpp@marie.physik.tu-berlin.de
@@ -1175,6 +1186,16 @@ S: 14355 SW Allen Blvd., Suite #140
 S: Beaverton, OR 97008
 S: USA
 
+N: Mike Shaver
+E: shaver@ingenia.com
+W: http://neon.ingenia.com/~shaver/
+D: Network hacking, /proc/sys/net
+S: c/o Ingenia Communications Corporation
+S: Suite 4200, CTTC Building
+S: 1125 Colonel By Drive
+S: Ottawa, Ontario
+S: Canada K1S 5R1
+
 N: John Shifflett
 E: john@geolog.com
 E: jshiffle@netcom.com
@@ -1225,8 +1246,8 @@ S: USA
 
 N: Leo Spiekman
 E: spiekman@et.tudelft.nl
-D: Optics Storage 8000AT cdrom driver
 W: http://dutettk.et.tudelft.nl/~spiekman
+D: Optics Storage 8000AT cdrom driver
 S: Utrecht
 S: The Netherlands
 
@@ -1241,13 +1262,13 @@ S: DK-1860 Frederiksberg C
 S: Denmark
 
 N: Drew Sullivan
-W: http://www.ss.org/
 E: drew@ss.org
+W: http://www.ss.org/
+P: 1024/ACFFA969 5A 9C 42 AB E4 24 82 31  99 56 00 BF D3 2B 25 46
 D: iBCS2 developer
 S: 22 Irvington Cres.
 S: Willowdale, Ontario
 S: Canada M2N 2Z1
-P: 1024/ACFFA969 5A 9C 42 AB E4 24 82 31  99 56 00 BF D3 2B 25 46
 
 N: Tommy Thorn
 E: Tommy.Thorn@irisa.fr
@@ -1257,7 +1278,7 @@ D: Device driver hacker (aha1542 & plip)
 S: IRISA
 S: Universit=E9 de Rennes I
 S: F-35042 Rennes Cedex
-S: FRANCE
+S: France
 
 N: Jon Tombs
 E: jon@gtex02.us.es
@@ -1426,9 +1447,10 @@ S: Oncology Research Division Computing Facility
 S: Roger Maris Cancer Center
 S: 820 4th St. N.
 S: Fargo, ND  58122
+S: USA
 
 N: Hans-Joachim Widmaier
-E: jbhr@sofal.tynet.sub.org
+E: hjw@zvw.de
 D: AFFS rewrite
 S: Eichenweg 16
 S: 73650 Winterbach
@@ -1517,6 +1539,15 @@ S: 3078 Sulphur Spring Court
 S: San Jose, California 95148
 S: USA
 
-# Don't add your name here, unless you really _are_ after Leonard
-# alphabetically.  Leonard is very proud of being the last entry,
-# and this file really _is_ supposed to be in alphabetic order.
+N: Marc Zyngier
+E: maz@gloups.fdn.fr
+D: MD driver
+S: 11 rue Victor HUGO
+S: 95560 Montsoult
+S: France
+
+# Don't add your name here, unless you really _are_ after Marc
+# alphabetically. Leonard used to be very proud of being the 
+# last entry, and he'll get positively pissed if he can't even
+# be second-to-last.  (and this file really _is_ supposed to be
+# in alphabetic order) 

@@ -202,6 +202,7 @@
  *					improvement.
  *	Stefan Magdalinski	:	adjusted tcp_readable() to fix FIONREAD
  *	Willy Konynenberg	:	Transparent proxying support.
+ *		Theodore Ts'o	:	Do secure TCP sequence numbers.
  *					
  * To Fix:
  *		Fast path the code. Two things here - fix the window calculation
@@ -427,6 +428,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
+#include <linux/random.h>
 
 #include <net/icmp.h>
 #include <net/tcp.h>
@@ -551,8 +553,15 @@ void tcp_err(int type, int code, unsigned char *header, __u32 daddr,
 			if (rt->rt_mtu > new_mtu)
 				rt->rt_mtu = new_mtu;
 
+		/*
+		 *	FIXME::
+		 *	Not the nicest of fixes: Lose a MTU update if the socket is
+		 *	locked this instant. Not the right answer but will be best
+		 *	for the production fix. Make 2.1 work right!
+		 */
+		 
 		if (sk->mtu > new_mtu - sizeof(struct iphdr) - sizeof(struct tcphdr)
-			&& new_mtu > sizeof(struct iphdr)+sizeof(struct tcphdr))
+			&& new_mtu > sizeof(struct iphdr)+sizeof(struct tcphdr) && !sk->users)
 			sk->mtu = new_mtu - sizeof(struct iphdr) - sizeof(struct tcphdr);
 
 		return;
@@ -943,40 +952,44 @@ static int do_tcp_sendmsg(struct sock *sk,
 				return -EPIPE;
 			}
 
-		/*
-		 * The following code can result in copy <= if sk->mss is ever
-		 * decreased.  It shouldn't be.  sk->mss is min(sk->mtu, sk->max_window).
-		 * sk->mtu is constant once SYN processing is finished.  I.e. we
-		 * had better not get here until we've seen his SYN and at least one
-		 * valid ack.  (The SYN sets sk->mtu and the ack sets sk->max_window.)
-		 * But ESTABLISHED should guarantee that.  sk->max_window is by definition
-		 * non-decreasing.  Note that any ioctl to set user_mss must be done
-		 * before the exchange of SYN's.  If the initial ack from the other
-		 * end has a window of 0, max_window and thus mss will both be 0.
-		 */
+			/*
+			 * The following code can result in copy <= if sk->mss is ever
+			 * decreased.  It shouldn't be.  sk->mss is min(sk->mtu, sk->max_window).
+			 * sk->mtu is constant once SYN processing is finished.  I.e. we
+			 * had better not get here until we've seen his SYN and at least one
+			 * valid ack.  (The SYN sets sk->mtu and the ack sets sk->max_window.)
+			 * But ESTABLISHED should guarantee that.  sk->max_window is by definition
+			 * non-decreasing.  Note that any ioctl to set user_mss must be done
+			 * before the exchange of SYN's.  If the initial ack from the other
+			 * end has a window of 0, max_window and thus mss will both be 0.
+			 */
 
-		/*
-		 *	Now we need to check if we have a half built packet.
-		 */
+			/*
+			 *	Now we need to check if we have a half built packet.
+			 */
 #ifndef CONFIG_NO_PATH_MTU_DISCOVERY
-		/*
-		 *	FIXME:  I'm almost sure that this fragment is BUG,
-		 *		but it works... I do not know why 8) --ANK
-		 *
-		 *	Really, we should rebuild all the queues...
-		 *	It's difficult. Temporary hack is to send all
-		 *	queued segments with allowed fragmentation.
-		 */
-		{
-			int new_mss = min(sk->mtu, sk->max_window);
-			if (new_mss < sk->mss)
+			/*
+			 *	FIXME:  I'm almost sure that this fragment is BUG,
+			 *		but it works... I do not know why 8) --ANK
+			 *
+			 *	Really, we should rebuild all the queues...
+			 *	It's difficult. Temporary hack is to send all
+			 *	queued segments with allowed fragmentation.
+			 */
 			{
-				tcp_send_partial(sk);
-				sk->mss = new_mss;
+				int new_mss = min(sk->mtu, sk->max_window);
+				if (new_mss < sk->mss)
+				{
+					tcp_send_partial(sk);
+					sk->mss = new_mss;
+				}
 			}
-		}
 #endif
 
+			/*
+			 *	If there is a partly filled frame we can fill
+			 *	out.
+			 */
 			if ((skb = tcp_dequeue_partial(sk)) != NULL)
 			{
 				int tcp_size;
@@ -987,11 +1000,33 @@ static int do_tcp_sendmsg(struct sock *sk,
 				if (!(flags & MSG_OOB))
 				{
 					copy = min(sk->mss - tcp_size, seglen);
+					
+					/*
+					 *	Now we may find the frame is as big, or too
+					 *	big for our MSS. Thats all fine. It means the
+					 *	MSS shrank (from an ICMP) after we allocated 
+					 *	this frame.
+					 */
+					 
 					if (copy <= 0)
 					{
-						printk(KERN_CRIT "TCP: **bug**: \"copy\" <= 0\n");
-				  		return -EFAULT;
+						/*
+						 *	Send the now forced complete frame out. 
+						 *
+						 *	Note for 2.1: The MSS reduce code ought to
+						 *	flush any frames in partial that are now
+						 *	full sized. Not serious, potential tiny
+						 *	performance hit.
+						 */
+						tcp_send_skb(sk,skb);
+						/*
+						 *	Get a new buffer and try again.
+						 */
+						continue;
 					}
+					/*
+					 *	Otherwise continue to fill the buffer.
+					 */
 					tcp_size += copy;
 					memcpy_fromfs(skb_put(skb,copy), from, copy);
 					skb->csum = csum_partial(skb->tail - tcp_size, tcp_size, 0);
@@ -1378,11 +1413,9 @@ static int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 
 		current->state = TASK_INTERRUPTIBLE;
 
-		skb = skb_peek(&sk->receive_queue);
-		do
+		skb = sk->receive_queue.next;
+		while (skb != (struct sk_buff *)&sk->receive_queue)
 		{
-			if (!skb)
-				break;
 			if (before(*seq, skb->seq))
 				break;
 			offset = *seq - skb->seq;
@@ -1396,7 +1429,6 @@ static int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 				skb->used = 1;
 			skb = skb->next;
 		}
-		while (skb != (struct sk_buff *)&sk->receive_queue);
 
 		if (copied)
 			break;
@@ -1856,6 +1888,36 @@ no_listen:
 	goto out;
 }
 
+/*
+ * Check that a TCP address is unique, don't allow multiple
+ * connects to/from the same address
+ */
+static int tcp_unique_address(u32 saddr, u16 snum, u32 daddr, u16 dnum)
+{
+	int retval = 1;
+	struct sock * sk;
+
+	/* Make sure we are allowed to connect here. */
+	cli();
+	for (sk = tcp_prot.sock_array[snum & (SOCK_ARRAY_SIZE -1)];
+			sk != NULL; sk = sk->next)
+	{
+		/* hash collision? */
+		if (sk->num != snum)
+			continue;
+		if (sk->saddr != saddr)
+			continue;
+		if (sk->daddr != daddr)
+			continue;
+		if (sk->dummy_th.dest != dnum)
+			continue;
+		retval = 0;
+		break;
+	}
+	sti();
+	return retval;
+}
+
 
 /*
  *	This will initiate an outgoing connection.
@@ -1891,7 +1953,7 @@ static int tcp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
   	 *	connect() to INADDR_ANY means loopback (BSD'ism).
   	 */
 
-  	if(usin->sin_addr.s_addr==INADDR_ANY)
+  	if (usin->sin_addr.s_addr==INADDR_ANY)
 		usin->sin_addr.s_addr=ip_my_addr();
 
 	/*
@@ -1901,26 +1963,25 @@ static int tcp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
 	if ((atype=ip_chk_addr(usin->sin_addr.s_addr)) == IS_BROADCAST || atype==IS_MULTICAST)
 		return -ENETUNREACH;
 
+	if (!tcp_unique_address(sk->saddr, sk->num, usin->sin_addr.s_addr, usin->sin_port))
+		return -EADDRNOTAVAIL;
+
 	lock_sock(sk);
 	sk->daddr = usin->sin_addr.s_addr;
-	sk->write_seq = tcp_init_seq();
-	sk->window_seq = sk->write_seq;
-	sk->rcv_ack_seq = sk->write_seq -1;
+
 	sk->rcv_ack_cnt = 1;
 	sk->err = 0;
 	sk->dummy_th.dest = usin->sin_port;
-	release_sock(sk);
 
 	buff = sock_wmalloc(sk,MAX_SYN_SIZE,0, GFP_KERNEL);
 	if (buff == NULL)
 	{
+		release_sock(sk);
 		return(-ENOMEM);
 	}
-	lock_sock(sk);
 	buff->sk = sk;
 	buff->free = 0;
 	buff->localroute = sk->localroute;
-
 
 	/*
 	 *	Put in the IP header and routing stuff.
@@ -1937,6 +1998,15 @@ static int tcp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
 	if ((rt = sk->ip_route_cache) != NULL && !sk->saddr)
 		sk->saddr = rt->rt_src;
 	sk->rcv_saddr = sk->saddr;
+
+	/*
+	 * Set up our outgoing TCP sequence number
+	 */
+	sk->write_seq = secure_tcp_sequence_number(sk->saddr, sk->daddr,
+						   sk->dummy_th.source,
+						   usin->sin_port);
+	sk->window_seq = sk->write_seq;
+	sk->rcv_ack_seq = sk->write_seq -1;
 
 	t1 = (struct tcphdr *) skb_put(buff,sizeof(struct tcphdr));
 

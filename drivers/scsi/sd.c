@@ -729,9 +729,9 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 	   ((unsigned int) SCpnt->request.bh->b_data-1) == ISA_DMA_THRESHOLD) count--;
 #endif
 	SCpnt->use_sg = count;  /* Number of chains */
-	count = 512;/* scsi_malloc can only allocate in chunks of 512 bytes */
-	while( count < (SCpnt->use_sg * sizeof(struct scatterlist))) 
-	    count = count << 1;
+	/* scsi_malloc can only allocate in chunks of 512 bytes */
+	count  = (SCpnt->use_sg * sizeof(struct scatterlist) + 511) & ~511;
+
 	SCpnt->sglist_len = count;
 	max_sg = count / sizeof(struct scatterlist);
 	if(SCpnt->host->sg_tablesize < max_sg) 
@@ -1054,7 +1054,7 @@ static int sd_init_onedisk(int i)
 	     * Issue command to spin up drive for these cases. */
 	    if(the_result && !rscsi_disks[i].device->removable && 
 	       SCpnt->sense_buffer[2] == NOT_READY) {
-		int time1;
+		unsigned long time1;
 		if(!spintime){
 		    printk( "sd%c: Spinning up disk...", 'a' + i );
 		    cmd[0] = START_STOP;
@@ -1081,8 +1081,8 @@ static int sd_init_onedisk(int i)
 		    spintime = jiffies;
 		}
 		
-		time1 = jiffies;
-		while(jiffies < time1 + HZ); /* Wait 1 second for next try */
+		time1 = jiffies + HZ;
+		while(jiffies < time1); /* Wait 1 second for next try */
 		printk( "." );
 	    }
 	} while(the_result && spintime && spintime+100*HZ > jiffies);
@@ -1388,7 +1388,8 @@ static void sd_finish()
 static int sd_detect(Scsi_Device * SDp){
     if(SDp->type != TYPE_DISK && SDp->type != TYPE_MOD) return 0;
     
-    printk("Detected scsi disk sd%c at scsi%d, channel %d, id %d, lun %d\n", 
+    printk("Detected scsi %sdisk sd%c at scsi%d, channel %d, id %d, lun %d\n", 
+           SDp->removable ? "removable " : "",
 	   'a'+ (sd_template.dev_noticed++),
 	   SDp->host->host_no, SDp->channel, SDp->id, SDp->lun); 
     

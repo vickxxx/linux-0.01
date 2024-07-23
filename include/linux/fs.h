@@ -478,7 +478,7 @@ struct inode_operations {
 	int (*mkdir) (struct inode *,const char *,int,int);
 	int (*rmdir) (struct inode *,const char *,int);
 	int (*mknod) (struct inode *,const char *,int,int,int);
-	int (*rename) (struct inode *,const char *,int,struct inode *,const char *,int);
+	int (*rename) (struct inode *,const char *,int,struct inode *,const char *,int, int);
 	int (*readlink) (struct inode *,char *,int);
 	int (*follow_link) (struct inode *,struct inode *,int,int,struct inode **);
 	int (*readpage) (struct inode *, struct page *);
@@ -623,6 +623,8 @@ extern struct inode * get_empty_inode(void);
 extern void insert_inode_hash(struct inode *);
 extern void clear_inode(struct inode *);
 extern struct inode * get_pipe_inode(void);
+extern int get_unused_fd(void);
+extern void put_unused_fd(int);
 extern struct file * get_empty_filp(void);
 extern int close_fp(struct file *filp);
 extern struct buffer_head * get_hash_table(kdev_t dev, int block, int size);

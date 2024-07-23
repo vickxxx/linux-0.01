@@ -2,27 +2,11 @@
  *	opl3.h	- Definitions of the OPL-3 registers
  */
 /*
- * Copyright by Hannu Savolainen 1993-1996
+ * Copyright (C) by Hannu Savolainen 1993-1996
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met: 1. Redistributions of source code must retain the above copyright
- * notice, this list of conditions and the following disclaimer. 2.
- * Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * USS/Lite for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Version 2 (June 1991). See the "COPYING" file distributed with this software
+ * for more info.
  */
 
 /*
@@ -160,7 +144,7 @@
  *	register offset).
  *
  *	For 4 OP voices the connection bit is used in the
- *	both halfs (gives 4 ways to connect the operators).
+ *	both halves (gives 4 ways to connect the operators).
  */
 #define FEEDBACK_CONNECTION				0xc0
 #define   FEEDBACK_MASK				0x0e	/* Valid just for 1st OP of a voice */
@@ -169,7 +153,7 @@
  *	In the 4 OP mode there is four possible configurations how the
  *	operators can be connected together (in 2 OP modes there is just
  *	AM or FM). The 4 OP connection mode is defined by the rightmost
- *	bit of the FEEDBACK_CONNECTION (0xC0-0xC8) on the both halfs.
+ *	bit of the FEEDBACK_CONNECTION (0xC0-0xC8) on the both halves.
  *
  *	First half	Second half	Mode
  *

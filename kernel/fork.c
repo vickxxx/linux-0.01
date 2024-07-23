@@ -34,7 +34,6 @@ int last_pid=0;
 static inline int find_empty_process(void)
 {
 	int i;
-	struct task_struct *p;
 
 	if (nr_tasks >= NR_TASKS - MIN_TASKS_LEFT_FOR_ROOT) {
 		if (current->uid)
@@ -43,7 +42,9 @@ static inline int find_empty_process(void)
 	if (current->uid) {
 		long max_tasks = current->rlim[RLIMIT_NPROC].rlim_cur;
 
+		max_tasks--;	/* count the new process.. */
 		if (max_tasks < nr_tasks) {
+			struct task_struct *p;
 			for_each_task (p) {
 				if (p->uid == current->uid)
 					if (--max_tasks < 0)
@@ -159,22 +160,33 @@ static inline int copy_fs(unsigned long clone_flags, struct task_struct * tsk)
 static inline int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 {
 	int i;
+	struct files_struct *oldf, *newf;
+	struct file **old_fds, **new_fds;
 
+	oldf = current->files;
 	if (clone_flags & CLONE_FILES) {
-		current->files->count++;
+		oldf->count++;
 		return 0;
 	}
-	tsk->files = kmalloc(sizeof(*tsk->files), GFP_KERNEL);
-	if (!tsk->files)
+
+	newf = kmalloc(sizeof(*newf), GFP_KERNEL);
+	tsk->files = newf;
+	if (!newf)
 		return -1;
-	tsk->files->count = 1;
-	memcpy(&tsk->files->close_on_exec, &current->files->close_on_exec,
-		sizeof(tsk->files->close_on_exec));
-	for (i = 0; i < NR_OPEN; i++) {
-		struct file * f = current->files->fd[i];
+			
+	newf->count = 1;
+	newf->close_on_exec = oldf->close_on_exec;
+	newf->open_fds = oldf->open_fds;
+
+	old_fds = oldf->fd;
+	new_fds = newf->fd;
+	for (i = NR_OPEN; i != 0; i--) {
+		struct file * f = *old_fds;
+		old_fds++;
+		*new_fds = f;
+		new_fds++;
 		if (f)
 			f->f_count++;
-		tsk->files->fd[i] = f;
 	}
 	return 0;
 }

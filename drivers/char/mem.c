@@ -176,6 +176,8 @@ static int read_zero(struct inode * node, struct file * file, char * buf, int co
 	for (left = count; left > 0; left--) {
 		put_user(0,buf);
 		buf++;
+		if (need_resched)
+			schedule();
 	}
 	return count;
 }
@@ -358,7 +360,7 @@ static int memory_open(struct inode * inode, struct file * filp)
 			filp->f_op = &urandom_fops;
 			break;
 		default:
-			return -ENODEV;
+			return -ENXIO;
 	}
 	if (filp->f_op && filp->f_op->open)
 		return filp->f_op->open(inode,filp);

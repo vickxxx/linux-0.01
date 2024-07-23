@@ -19,6 +19,7 @@
 #include <linux/mm.h>
 
 #include <asm/segment.h>
+#include <asm/bitops.h>
 
 asmlinkage int sys_statfs(const char * path, struct statfs * buf)
 {
@@ -53,6 +54,8 @@ asmlinkage int sys_fstatfs(unsigned int fd, struct statfs * buf)
 		return -EBADF;
 	if (!(inode = file->f_inode))
 		return -ENOENT;
+	if (!inode->i_sb)
+	        return -ENODEV;
 	if (!inode->i_sb->s_op->statfs)
 		return -ENOSYS;
 	inode->i_sb->s_op->statfs(inode->i_sb, buf, sizeof(struct statfs));
@@ -181,7 +184,8 @@ asmlinkage int sys_utime(char * filename, struct utimbuf * times)
 		newattrs.ia_mtime = get_user(&times->modtime);
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
-		if ((error = permission(inode,MAY_WRITE)) != 0) {
+		if (current->fsuid != inode->i_uid &&
+		    (error = permission(inode,MAY_WRITE)) != 0) {
 			iput(inode);
 			return error;
 		}
@@ -397,7 +401,7 @@ asmlinkage int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 	/*
 	 * If the owner has been changed, remove the setuid bit
 	 */
-	if (user != inode->i_uid && (inode->i_mode & S_ISUID)) {
+	if (inode->i_mode & S_ISUID) {
 		newattrs.ia_mode &= ~S_ISUID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
@@ -407,8 +411,7 @@ asmlinkage int sys_fchown(unsigned int fd, uid_t user, gid_t group)
 	 * Don't remove the setgid bit if no group execute bit.
 	 * This is a file marked for mandatory locking.
 	 */
-	if (group != inode->i_gid &&
-	    ((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
+	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
@@ -453,7 +456,7 @@ asmlinkage int sys_chown(const char * filename, uid_t user, gid_t group)
 	/*
 	 * If the owner has been changed, remove the setuid bit
 	 */
-	if (user != inode->i_uid && (inode->i_mode & S_ISUID)) {
+	if (inode->i_mode & S_ISUID) {
 		newattrs.ia_mode &= ~S_ISUID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
@@ -463,8 +466,7 @@ asmlinkage int sys_chown(const char * filename, uid_t user, gid_t group)
 	 * Don't remove the setgid bit if no group execute bit.
 	 * This is a file marked for mandatory locking.
 	 */
-	if (group != inode->i_gid &&
-	    ((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
+	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP))) {
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
 	}
@@ -496,11 +498,11 @@ asmlinkage int sys_chown(const char * filename, uid_t user, gid_t group)
  * for the internal routines (ie open_namei()/follow_link() etc). 00 is
  * used by symlinks.
  */
-int do_open(const char * filename,int flags,int mode)
+static int do_open(const char * filename,int flags,int mode, int fd)
 {
 	struct inode * inode;
 	struct file * f;
-	int flag,error,fd;
+	int flag,error;
 
 	f = get_empty_filp();
 	if (!f)
@@ -509,7 +511,7 @@ int do_open(const char * filename,int flags,int mode)
 	f->f_mode = (flag+1) & O_ACCMODE;
 	if (f->f_mode)
 		flag++;
-	if (flag & (O_TRUNC | O_CREAT))
+	if (flag & O_TRUNC)
 		flag |= 2;
 	error = open_namei(filename,flag,mode,&inode,NULL);
 	if (error)
@@ -533,21 +535,9 @@ int do_open(const char * filename,int flags,int mode)
 	}
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
-	/*
-	 * We have to do this last, because we mustn't export
-	 * an incomplete fd to other processes which may share
-	 * the same file table with us.
-	 */
-	for(fd = 0; fd < NR_OPEN && fd < current->rlim[RLIMIT_NOFILE].rlim_cur; fd++) {
-		if (!current->files->fd[fd]) {
-			current->files->fd[fd] = f;
-			FD_CLR(fd,&current->files->close_on_exec);
-			return fd;
-		}
-	}
-	error = -EMFILE;
-	if (f->f_op && f->f_op->release)
-		f->f_op->release(inode,f);
+	current->files->fd[fd] = f;
+	return 0;
+
 cleanup_all:
 	if (f->f_mode & FMODE_WRITE)
 		put_write_access(inode);
@@ -558,16 +548,44 @@ cleanup_file:
 	return error;
 }
 
+/*
+ * Find a empty file descriptor entry, and mark it busy
+ */
+int get_unused_fd(void)
+{
+	int fd;
+	struct files_struct * files = current->files;
+
+	fd = find_first_zero_bit(&files->open_fds, NR_OPEN);
+	if (fd < current->rlim[RLIMIT_NOFILE].rlim_cur) {
+		FD_SET(fd, &files->open_fds);
+		FD_CLR(fd, &files->close_on_exec);
+		return fd;
+	}
+	return -EMFILE;
+}
+
+inline void put_unused_fd(int fd)
+{
+	FD_CLR(fd, &current->files->open_fds);
+}
+
 asmlinkage int sys_open(const char * filename,int flags,int mode)
 {
 	char * tmp;
-	int error;
+	int fd, error;
 
+	fd = get_unused_fd();
+	if (fd < 0)
+		return fd;
 	error = getname(filename, &tmp);
-	if (error)
-		return error;
-	error = do_open(tmp,flags,mode);
-	putname(tmp);
+	if (!error) {
+		error = do_open(tmp,flags,mode, fd);
+		putname(tmp);
+		if (!error)
+			return fd;
+	}
+	put_unused_fd(fd);
 	return error;
 }
 
@@ -610,16 +628,20 @@ int close_fp(struct file *filp)
 }
 
 asmlinkage int sys_close(unsigned int fd)
-{	
+{
+	int error;
 	struct file * filp;
+	struct files_struct * files;
 
-	if (fd >= NR_OPEN)
-		return -EBADF;
-	FD_CLR(fd, &current->files->close_on_exec);
-	if (!(filp = current->files->fd[fd]))
-		return -EBADF;
-	current->files->fd[fd] = NULL;
-	return (close_fp (filp));
+	files = current->files;
+	error = -EBADF;
+	if (fd < NR_OPEN && (filp = files->fd[fd]) != NULL) {
+		put_unused_fd(fd);
+		FD_CLR(fd, &files->close_on_exec);
+		files->fd[fd] = NULL;
+		error = close_fp(filp);
+	}
+	return error;
 }
 
 /*

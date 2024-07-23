@@ -878,17 +878,12 @@ void tcp_send_synack(struct sock * newsk, struct sock * sk, struct sk_buff * skb
  */
 void tcp_send_delayed_ack(struct sock * sk, int max_timeout, unsigned long timeout)
 {
-	unsigned long now;
-
 	/* Calculate new timeout */
-	now = jiffies;
 	if (timeout > max_timeout)
 		timeout = max_timeout;
-	timeout += now;
-	if (sk->bytes_rcv >= sk->max_unacked) {
-		timeout = now;
-		mark_bh(TIMER_BH);
-	}
+	if (sk->bytes_rcv >= sk->max_unacked)
+		timeout = 0;
+	timeout += jiffies;
 
 	/* Use new timeout only if there wasn't a older one earlier  */
 	if (!del_timer(&sk->delack_timer) || timeout < sk->delack_timer.expires)

@@ -70,14 +70,17 @@ static inline void revalidate_inode(struct nfs_server * server, struct inode * i
 {
 	struct nfs_fattr fattr;
 
-	if (jiffies - NFS_READTIME(inode) < server->acregmax)
+	if (jiffies - NFS_READTIME(inode) < NFS_ATTRTIMEO(inode))
 		return;
 
 	NFS_READTIME(inode) = jiffies;
 	if (nfs_proc_getattr(server, NFS_FH(inode), &fattr) == 0) {
 		nfs_refresh_inode(inode, &fattr);
-		if (fattr.mtime.seconds == NFS_OLDMTIME(inode))
+		if (fattr.mtime.seconds == NFS_OLDMTIME(inode)) {
+			if ((NFS_ATTRTIMEO(inode) <<= 1) > server->acregmax)
+				NFS_ATTRTIMEO(inode) = server->acregmax;
 			return;
+		}
 		NFS_OLDMTIME(inode) = fattr.mtime.seconds;
 	}
 	invalidate_inode_pages(inode);
@@ -146,7 +149,9 @@ static int nfs_file_write(struct inode *inode, struct file *file, const char *bu
 	file->f_pos = pos;
 	if (pos > inode->i_size)
 		inode->i_size = pos;
-	nfs_refresh_inode(inode, &fattr);
+	/* Avoid possible Solaris 2.5 nfsd bug */
+	if (inode->i_ino == fattr.fileid)
+		nfs_refresh_inode(inode, &fattr);
 	return written;
 }
 
