@@ -7,7 +7,7 @@
  *		handler for protocols to use and generic option handler.
  *
  *
- * Version:	$Id: sock.c,v 1.75 1998/11/07 10:54:38 davem Exp $
+ * Version:	$Id: sock.c,v 1.80.2.3 2000/08/10 00:37:05 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -79,6 +79,7 @@
  *		Jay Schulist	:	Added SO_ATTACH_FILTER and SO_DETACH_FILTER.
  *		Andi Kleen	:	Add sock_kmalloc()/sock_kfree_s()
  *		Andi Kleen	:	Fix write_space callback
+ *		Chris Evans	:	Security fixes - signedness again
  *
  * To Fix:
  *
@@ -132,6 +133,8 @@
 
 #define min(a,b)	((a)<(b)?(a):(b))
 
+struct linux_mib net_statistics;
+
 /* Run time adjustable parameters. */
 __u32 sysctl_wmem_max = SK_WMEM_MAX;
 __u32 sysctl_rmem_max = SK_RMEM_MAX;
@@ -150,15 +153,14 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 		    char *optval, int optlen)
 {
 	struct sock *sk=sock->sk;
+#ifdef CONFIG_FILTER
+	struct sk_filter *filter;
+#endif
 	int val;
 	int valbool;
 	int err;
 	struct linger ling;
 	int ret = 0;
-
-#ifdef CONFIG_FILTER
-	struct sock_fprog fprog;
-#endif
 	
 	/*
 	 *	Options without arguments
@@ -255,12 +257,11 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 			break;
 
 		case SO_PRIORITY:
-			if (val >= 0 && val <= 7) 
+			if ((val >= 0 && val <= 6) || capable(CAP_NET_ADMIN)) 
 				sk->priority = val;
 			else
-				return(-EINVAL);
+				return(-EPERM);
 			break;
-
 
 		case SO_LINGER:
 			if(optlen<sizeof(ling))
@@ -310,10 +311,12 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 				if (optlen > IFNAMSIZ) 
 					optlen = IFNAMSIZ; 
 				if (copy_from_user(devname, optval, optlen))
-				    return -EFAULT;
-				    
+					return -EFAULT;
+
 				/* Remove any cached route for this socket. */
+				lock_sock(sk);
 				dst_release(xchg(&sk->dst_cache, NULL));
+				release_sock(sk);
 
 				if (devname[0] == '\0') {
 					sk->bound_dev_if = 0;
@@ -331,30 +334,27 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 
 #ifdef CONFIG_FILTER
 		case SO_ATTACH_FILTER:
-			if(optlen < sizeof(struct sock_fprog))
-				return -EINVAL;
+			ret = -EINVAL;
+			if (optlen == sizeof(struct sock_fprog)) {
+				struct sock_fprog fprog;
 
-			if(copy_from_user(&fprog, optval, sizeof(fprog)))
-			{
 				ret = -EFAULT;
-				break;
-			}
+				if (copy_from_user(&fprog, optval, sizeof(fprog)))
+					break;
 
-			ret = sk_attach_filter(&fprog, sk);
+				ret = sk_attach_filter(&fprog, sk);
+			}
 			break;
 
 		case SO_DETACH_FILTER:
-                        if(sk->filter)
-			{
-				fprog.filter = sk->filter_data;
-				kfree_s(fprog.filter, (sizeof(fprog.filter) * sk->filter));
-				sk->filter_data = NULL;
-				sk->filter = 0;
+			filter = sk->filter;
+                        if(filter) {
+				sk->filter = NULL;
+				synchronize_bh();
+				sk_filter_release(sk, filter);
 				return 0;
 			}
-			else
-				return -EINVAL;
-			break;
+			return -ENOENT;
 #endif
 		/* We implement the SO_SNDLOWAT etc to
 		   not be settable (1003.1g 5.3) */
@@ -382,6 +382,9 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
   	if(get_user(len,optlen))
   		return -EFAULT;
 
+	if(len < 0)
+		return -EINVAL;
+		
   	switch(optname) 
   	{
 		case SO_DEBUG:		
@@ -501,8 +504,22 @@ struct sock *sk_alloc(int family, int priority, int zero_it)
 
 void sk_free(struct sock *sk)
 {
+#ifdef CONFIG_FILTER
+	struct sk_filter *filter;
+#endif
 	if (sk->destruct)
 		sk->destruct(sk);
+
+#ifdef CONFIG_FILTER
+	filter = sk->filter;
+	if (filter) {
+		sk_filter_release(sk, filter);
+		sk->filter = NULL;
+	}
+#endif
+
+	if (atomic_read(&sk->omem_alloc))
+		printk(KERN_DEBUG "sk_free: optmem leakage (%d bytes) detected.\n", atomic_read(&sk->omem_alloc));
 
 	kmem_cache_free(sk_cachep, sk);
 }
@@ -555,6 +572,35 @@ struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int
 			skb->sk = sk;
 			return skb;
 		}
+#ifdef CONFIG_INET
+		net_statistics.SockMallocOOM++; 
+#endif
+	}
+	return NULL;
+}
+
+/*
+ * Allocate memory from the sockets send buffer, telling caller about real OOM. 
+ * err is only set for oom, not for socket buffer overflow.
+ */ 
+struct sk_buff *sock_wmalloc_err(struct sock *sk, unsigned long size, int force, int priority, int *err)
+{
+	*err = 0; 
+	/* Note: overcommitment possible */ 
+	if (force || atomic_read(&sk->wmem_alloc) < sk->sndbuf) {
+		struct sk_buff * skb;
+		*err = -ENOMEM; 
+		skb = alloc_skb(size, priority);
+		if (skb) {
+			*err = 0;
+			atomic_add(skb->truesize, &sk->wmem_alloc);
+			skb->destructor = sock_wfree;
+			skb->sk = sk;
+			return skb;
+		}
+#ifdef CONFIG_INET
+		net_statistics.SockMallocOOM++; 
+#endif
 	}
 	return NULL;
 }
@@ -572,6 +618,9 @@ struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int
 			skb->sk = sk;
 			return skb;
 		}
+#ifdef CONFIG_INET
+		net_statistics.SockMallocOOM++;
+#endif 
 	}
 	return NULL;
 }
@@ -591,6 +640,9 @@ void *sock_kmalloc(struct sock *sk, int size, int priority)
 		if (mem)
 			return mem;
 		atomic_sub(size, &sk->omem_alloc);
+#ifdef CONFIG_INET
+		net_statistics.SockMallocOOM++; 
+#endif
 	}
 	return NULL;
 }
@@ -933,7 +985,7 @@ int sock_no_fcntl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			 */
 			if (current->pgrp != -arg &&
 				current->pid != arg &&
-				!capable(CAP_NET_ADMIN)) return(-EPERM);
+				!capable(CAP_KILL)) return(-EPERM);
 			sk->proc = arg;
 			return(0);
 		case F_GETOWN:

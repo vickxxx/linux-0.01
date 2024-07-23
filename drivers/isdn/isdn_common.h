@@ -1,8 +1,8 @@
-/* $Id: isdn_common.h,v 1.9 1998/02/20 17:19:01 fritz Exp $
+/* $Id: isdn_common.h,v 1.21 2000/11/25 17:00:59 kai Exp $
 
  * header for Linux ISDN subsystem, common used functions and debugging-switches (linklevel).
  *
- * Copyright 1994,95,96 by Fritz Elfert (fritz@wuemaus.franken.de)
+ * Copyright 1994-1999  by Fritz Elfert (fritz@isdn4linux.de)
  * Copyright 1995,96    by Thinking Objects Software GmbH Wuerzburg
  * Copyright 1995,96    by Michael Hipp (Michael.Hipp@student.uni-tuebingen.de)
  *
@@ -19,50 +19,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * Note: This file differs from the corresponding revision as present in the
- * isdn4linux CVS repository because some later bug fixes have been extracted
- * from the repository and merged into this file. -- Henner Eisen
- *
- * $Log: isdn_common.h,v $
- * Revision 1.9  1998/02/20 17:19:01  fritz
- * Added common stub for sending commands to lowlevel.
- *
- * Revision 1.8  1997/10/09 21:28:49  fritz
- * New HL<->LL interface:
- *   New BSENT callback with nr. of bytes included.
- *   Sending without ACK.
- *   New L1 error status (not yet in use).
- *   Cleaned up obsolete structures.
- * Implemented Cisco-SLARP.
- * Changed local net-interface data to be dynamically allocated.
- * Removed old 2.0 compatibility stuff.
- *
- * Revision 1.7  1997/10/01 09:20:30  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.6  1997/02/28 02:32:44  fritz
- * Cleanup: Moved some tty related stuff from isdn_common.c
- *          to isdn_tty.c
- * Bugfix:  Bisync protocol did not behave like documented.
- *
- * Revision 1.5  1997/02/10 10:05:45  fritz
- * More changes for Kernel 2.1.X
- * Symbol information moved to isdn_syms.c
- *
- * Revision 1.4  1997/02/03 22:56:50  fritz
- * Removed isdn_writebuf_stub prototype.
- *
- * Revision 1.3  1996/05/19 00:13:05  fritz
- * Removed debug flag.
- *
- * Revision 1.2  1996/04/20 16:20:40  fritz
- * Misc. typos.
- *
- * Revision 1.1  1996/01/10 21:37:19  fritz
- * Initial revision
  *
  */
 
@@ -90,10 +46,12 @@ extern char *isdn_map_eaz2msn(char *msn, int di);
 extern void isdn_timer_ctrl(int tf, int onoff);
 extern void isdn_unexclusive_channel(int di, int ch);
 extern int isdn_getnum(char **);
-extern int isdn_readbchan(int, int, u_char *, u_char *, int, struct wait_queue**);
-extern int isdn_get_free_channel(int, int, int, int, int);
+extern int isdn_readbchan(int, int, u_char *, u_char *, int, wait_queue_head_t *);
+extern int isdn_get_free_channel(int, int, int, int, int, char *);
 extern int isdn_writebuf_skb_stub(int, int, int, struct sk_buff *);
 extern int register_isdn(isdn_if * i);
+extern int isdn_msncmp( const char *,  const char *);
+extern int isdn_add_channels(driver *, int, int, int);
 #if defined(ISDN_DEBUG_NET_DUMP) || defined(ISDN_DEBUG_MODEM_DUMP)
 extern void isdn_dumppkt(char *, u_char *, int, int);
 #endif

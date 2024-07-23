@@ -10,13 +10,20 @@
 SUB_DIRS	:= 
 MOD_SUB_DIRS	:=
 MOD_IN_SUB_DIRS	:=
-ALL_SUB_DIRS	:= $(SUB_DIRS) lowlevel
+ALL_SUB_DIRS	:= $(SUB_DIRS) lowlevel emu10k1
 
 ifeq ($(CONFIG_LOWLEVEL_SOUND),y)
     SUB_DIRS		+= lowlevel
     MOD_IN_SUB_DIRS	+= lowlevel
 endif
 
+ifeq ($(CONFIG_SOUND_EMU10K1),y)
+    SUB_DIRS		+= emu10k1 
+else
+  ifeq ($(CONFIG_SOUND_EMU10K1),m)
+    MOD_IN_SUB_DIRS	+= emu10k1
+  endif
+endif
 
 
 # All of the (potential) objects that export symbols.
@@ -24,7 +31,8 @@ endif
 
 export-objs	:=  ad1848.o audio_syms.o midi_syms.o mpu401.o \
 		    msnd.o opl3.o sb_card.o sequencer_syms.o \
-		    sound_core.o sound_syms.o uart401.o ad1816.o
+		    sound_core.o sound_syms.o uart401.o ad1816.o \
+		    nm256_audio.o ac97_codec.o
 
 
 
@@ -42,7 +50,6 @@ obj-		:=
 obj-$(CONFIG_SOUND)		+= soundcore.o
 obj-$(CONFIG_DMASOUND)		+= dmasound.o
 obj-$(CONFIG_SOUND_OSS)		+= sound.o
-obj-$(CONFIG_SOUND_ADLIB)	+= adlib_card.o opl3.o
 obj-$(CONFIG_SOUND_CS4232)	+= cs4232.o ad1848.o 
 
 # In theory, there's probably no reason to include the uart401 code
@@ -53,6 +60,7 @@ obj-$(CONFIG_SOUND_CS4232)	+= cs4232.o ad1848.o
 obj-$(CONFIG_SOUND_CS4232)	+= uart401.o
 obj-$(CONFIG_SOUND_GUS)		+= gus.o ad1848.o
 obj-$(CONFIG_SOUND_MAD16)	+= mad16.o ad1848.o sb.o uart401.o
+obj-$(CONFIG_SOUND_YMPCI)	+= ymfsb.o sb.o uart401.o ac97.o
 obj-$(CONFIG_SOUND_MAUI)	+= maui.o mpu401.o
 obj-$(CONFIG_SOUND_MPU401)	+= mpu401.o
 obj-$(CONFIG_SOUND_MSNDCLAS)	+= msnd.o msnd_classic.o
@@ -72,18 +80,38 @@ obj-$(CONFIG_SOUND_UART6850)	+= uart6850.o
 obj-$(CONFIG_SOUND_VMIDI)	+= v_midi.o
 obj-$(CONFIG_SOUND_YM3812)	+= adlib_card.o opl3.o
 obj-$(CONFIG_SOUND_VIDC)	+= vidc_mod.o
+obj-$(CONFIG_SOUND_VWSND)	+= vwsnd.o
 obj-$(CONFIG_SOUND_WAVEARTIST)	+= waveartist.o
 obj-$(CONFIG_SOUND_WAVEFRONT)   += wavefront.o
+obj-$(CONFIG_SOUND_NM256)	+= nm256.o
 
 #jnx
+obj-$(CONFIG_SOUND_CMPCI)	+= cmpci.o
+obj-$(CONFIG_SOUND_CS4281)	+= cs4281.o
 obj-$(CONFIG_SOUND_ES1370)	+= es1370.o
 obj-$(CONFIG_SOUND_ES1371)	+= es1371.o
+obj-$(CONFIG_SOUND_ESSSOLO1)	+= esssolo1.o
+obj-$(CONFIG_SOUND_FUSION)	+= cs46xx.o ac97_codec.o
+obj-$(CONFIG_SOUND_ICH)		+= i810_audio.o ac97_codec.o
+obj-$(CONFIG_SOUND_MAESTRO)	+= maestro.o ac97_codec.o
+obj-$(CONFIG_SOUND_MAESTRO3)	+= maestro3.o ac97_codec.o
 obj-$(CONFIG_SOUND_SONICVIBES)	+= sonicvibes.o
+obj-$(CONFIG_SOUND_TRIDENT)     += trident.o ac97_codec.o
+obj-$(CONFIG_SOUND_VIA82CXXX)	+= via82cxxx_audio.o ac97_codec.o
+obj-$(CONFIG_SOUND_YMFPCI)	+= ymfpci.o ac97_codec.o
+ifeq ($(CONFIG_SOUND_YMFPCI_LEGACY),y)
+  obj-$(CONFIG_SOUND_YMFPCI)	+= opl3.o uart401.o
+endif
+
+ifeq ($(CONFIG_SOUND_EMU10K1),y)
+  obj-y				+= emu10k1/emu10k1.o
+endif
+
 
 # Declare multi-part drivers.
 
 list-multi	:= sound.o gus.o pas2.o sb.o softoss2.o vidc_mod.o \
-    soundcore.o wavefront.o
+    soundcore.o wavefront.o nm256.o ymfsb.o via82cxxx.o \
 
 sound-objs	:= 							\
     dev_table.o soundcard.o sound_syms.o		\
@@ -98,8 +126,10 @@ pas2-objs	:= pas2_card.o pas2_midi.o pas2_mixer.o pas2_pcm.o
 sb-objs		:= sb_audio.o sb_card.o sb_common.o sb_midi.o sb_mixer.o	\
 			   sb_ess.o
 softoss2-objs	:= softoss.o softoss_rs.o
-vidc_mod-objs	:= vidc.o vidc_audio.o vidc_fill.o vidc_mixer.o vidc_synth.o
+vidc_mod-objs	:= vidc.o vidc_fill.o vidc_synth.o
 wavefront-objs  := wavfront.o wf_midi.o yss225.o
+nm256-objs	:= nm256_audio.o ac97.o
+via82cxxx-objs  := via82cxxx_audio.o ac97.o
 
 
 # Extract lists of the multi-part drivers.
@@ -140,19 +170,19 @@ obj-y		:= $(filter-out $(list-multi), $(obj-y)) $(int-y)
 
 # Translate to Rules.make lists.
 
-L_TARGET	:= sound.a
+O_TARGET	:= sounddrivers.o
 # This is a nice idea but needs depmod altering
 #MOD_LIST_NAME	:= SOUND_MODULES
 
-L_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-y)))
-LX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-y)))
+O_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-y)))
+OX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-y)))
 M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
 MX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-m)))
 MI_OBJS		:= $(sort $(filter-out $(export-objs), $(int-m)))
 MIX_OBJS	:= $(sort $(filter     $(export-objs), $(int-m)))
 
 ifeq ($(CONFIG_LOWLEVEL_SOUND),y)
-    L_OBJS	+= lowlevel/lowlevel.o
+    O_OBJS	+= lowlevel/lowlevel.o
 endif
 
 include $(TOPDIR)/Rules.make
@@ -184,6 +214,12 @@ vidc_mod.o: $(vidc_mod-objs)
 
 wavefront.o: $(wavefront-objs)
 	$(LD) -r -o $@ $(wavefront-objs)
+
+nm256.o: $(nm256-objs)
+	$(LD) -r -o $@ $(nm256-objs)
+
+via82cxxx.o: $(via82cxxx-objs)
+	$(LD) -r -o $@ $(via82cxxx-objs)
 
 # Firmware files that need translation
 #

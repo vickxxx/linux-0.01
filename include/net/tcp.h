@@ -24,22 +24,18 @@
 #include <net/checksum.h>
 
 /* This is for all connections with a full identity, no wildcards.
- * New scheme, half the table is for TIME_WAIT, the other half is
- * for the rest.  I'll experiment with dynamic table growth later.
+ * Half of the table is for TIME_WAIT, the other half is for the
+ * rest.
+ *
+ * This needs to be shared by v4 and v6 because the lookup and hashing
+ * code needs to work with different AF's yet the port space is
+ * shared.
  */
-#define TCP_HTABLE_SIZE		512
+extern unsigned int tcp_ehash_size;
+extern struct sock **tcp_ehash;
 
 /* This is for listening sockets, thus all sockets which possess wildcards. */
 #define TCP_LHTABLE_SIZE	32	/* Yes, really, this is all you need. */
-
-/* This is for all sockets, to keep track of the local port allocations. */
-#define TCP_BHTABLE_SIZE	512
-
-/* tcp_ipv4.c: These need to be shared by v4 and v6 because the lookup
- *             and hashing code needs to work with different AF's yet
- *             the port space is shared.
- */
-extern struct sock *tcp_established_hash[TCP_HTABLE_SIZE];
 extern struct sock *tcp_listening_hash[TCP_LHTABLE_SIZE];
 
 /* There are a few simple rules, which allow for local port reuse by
@@ -75,17 +71,14 @@ extern struct sock *tcp_listening_hash[TCP_LHTABLE_SIZE];
  */
 struct tcp_bind_bucket {
 	unsigned short		port;
-	unsigned short		flags;
-#define TCPB_FLAG_LOCKED	0x0001
-#define TCPB_FLAG_FASTREUSE	0x0002
-#define TCPB_FLAG_GOODSOCKNUM	0x0004
-
+	unsigned short		fastreuse;
 	struct tcp_bind_bucket	*next;
 	struct sock		*owners;
 	struct tcp_bind_bucket	**pprev;
 };
 
-extern struct tcp_bind_bucket *tcp_bound_hash[TCP_BHTABLE_SIZE];
+extern unsigned int tcp_bhash_size;
+extern struct tcp_bind_bucket **tcp_bhash;
 extern kmem_cache_t *tcp_bucket_cachep;
 extern struct tcp_bind_bucket *tcp_bucket_create(unsigned short snum);
 extern void tcp_bucket_unlock(struct sock *sk);
@@ -113,33 +106,7 @@ static __inline__ void tcp_reg_zap(struct sock *sk)
 /* These are AF independent. */
 static __inline__ int tcp_bhashfn(__u16 lport)
 {
-	return (lport & (TCP_BHTABLE_SIZE - 1));
-}
-
-static __inline__ void tcp_sk_bindify(struct sock *sk)
-{
-	struct tcp_bind_bucket *tb;
-	unsigned short snum = sk->num;
-
-	for(tb = tcp_bound_hash[tcp_bhashfn(snum)]; tb->port != snum; tb = tb->next)
-		;
-	/* Update bucket flags. */
-	if(tb->owners == NULL) {
-		/* We're the first. */
-		if(sk->reuse && sk->state != TCP_LISTEN)
-			tb->flags = TCPB_FLAG_FASTREUSE;
-		else
-			tb->flags = 0;
-	} else {
-		if((tb->flags & TCPB_FLAG_FASTREUSE) &&
-		   ((sk->reuse == 0) || (sk->state == TCP_LISTEN)))
-			tb->flags &= ~TCPB_FLAG_FASTREUSE;
-	}
-	if((sk->bind_next = tb->owners) != NULL)
-		tb->owners->bind_pprev = &sk->bind_next;
-	tb->owners = sk;
-	sk->bind_pprev = &tb->owners;
-	sk->prev = (struct sock *) tb;
+	return (lport & (tcp_bhash_size - 1));
 }
 
 /* This is a TIME_WAIT bucket.  It works around the memory consumption
@@ -150,6 +117,8 @@ struct tcp_tw_bucket {
 	/* These _must_ match the beginning of struct sock precisely.
 	 * XXX Yes I know this is gross, but I'd have to edit every single
 	 * XXX networking file if I created a "struct sock_header". -DaveM
+	 * Just don't forget -fno-strict-aliasing, but it should be really
+	 * fixed -AK
 	 */
 	struct sock		*sklist_next;
 	struct sock		*sklist_prev;
@@ -170,11 +139,14 @@ struct tcp_tw_bucket {
 				nonagle;
 
 	/* And these are ours. */
-	__u32			rcv_nxt;
+	__u32			rcv_nxt, snd_nxt;
+	__u16			window;
 	struct tcp_func		*af_specific;
 	struct tcp_bind_bucket	*tb;
 	struct tcp_tw_bucket	*next_death;
+	struct tcp_tw_bucket	**pprev_death;
 	int			death_slot;
+	
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 	struct in6_addr		v6_daddr;
 	struct in6_addr		v6_rcv_saddr;
@@ -289,7 +261,7 @@ static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
 #define TCP_PROBEWAIT_LEN (1*HZ)/* time to wait between probes when
 				 * I've got something to write and
 				 * there is no window			*/
-#define TCP_KEEPALIVE_TIME (180*60*HZ)		/* two hours */
+#define TCP_KEEPALIVE_TIME (120*60*HZ)		/* two hours */
 #define TCP_KEEPALIVE_PROBES	9		/* Max of 9 keepalive probes	*/
 #define TCP_KEEPALIVE_PERIOD ((75*HZ)>>2)	/* period of keepalive check	*/
 
@@ -477,7 +449,9 @@ extern __inline int between(__u32 seq1, __u32 seq2, __u32 seq3)
 extern struct proto tcp_prot;
 extern struct tcp_mib tcp_statistics;
 
-extern unsigned short		tcp_good_socknum(void);
+extern void			tcp_put_port(struct sock *sk);
+extern void			__tcp_put_port(struct sock *sk);
+extern void			tcp_inherit_port(struct sock *sk, struct sock *child);
 
 extern void			tcp_v4_err(struct sk_buff *skb,
 					   unsigned char *, int);
@@ -487,9 +461,7 @@ extern void			tcp_shutdown (struct sock *sk, int how);
 extern int			tcp_v4_rcv(struct sk_buff *skb,
 					   unsigned short len);
 
-extern int			tcp_do_sendmsg(struct sock *sk, 
-					       int iovlen, struct iovec *iov,
-					       int flags);
+extern int			tcp_do_sendmsg(struct sock *sk, struct msghdr *msg);
 
 extern int			tcp_ioctl(struct sock *sk, 
 					  int cmd, 
@@ -505,7 +477,13 @@ extern int			tcp_rcv_established(struct sock *sk,
 						    struct tcphdr *th, 
 						    unsigned len);
 
-extern int			tcp_timewait_state_process(struct tcp_tw_bucket *tw,
+enum tcp_tw_status {
+		TCP_TW_SUCCESS = 0,
+		TCP_TW_RST = 1,
+		TCP_TW_ACK = 2
+		};
+
+extern enum tcp_tw_status tcp_timewait_state_process(struct tcp_tw_bucket *tw,
 							   struct sk_buff *skb,
 							   struct tcphdr *th,
 							   unsigned len);
@@ -632,8 +610,7 @@ struct tcp_sl_timer {
 #define TCP_SLT_SYNACK		0
 #define TCP_SLT_KEEPALIVE	1
 #define TCP_SLT_TWKILL		2
-#define TCP_SLT_BUCKETGC	3
-#define TCP_SLT_MAX		4
+#define TCP_SLT_MAX		3
 
 extern struct tcp_sl_timer tcp_slt_array[TCP_SLT_MAX];
  
@@ -718,6 +695,30 @@ extern __inline__ int tcp_raise_window(struct sock *sk)
 	return (new_win && (new_win > (cur_win << 1)));
 }
 
+/* Recalculate snd_ssthresh, we want to set it to:
+ *
+ * 	one half the current congestion window, but no
+ *	less than two segments
+ *
+ * We must take into account the current send window
+ * as well, however we keep track of that using different
+ * units so a conversion is necessary.  -DaveM
+ */
+extern __inline__ __u32 tcp_recalc_ssthresh(struct tcp_opt *tp)
+{
+	__u32 snd_wnd_packets = tp->snd_wnd / max(tp->mss_cache, 1);
+
+	return max(min(snd_wnd_packets, tp->snd_cwnd) >> 1, 2);
+}
+
+/* TCP timestamps are only 32-bits, this causes a slight
+ * complication on 64-bit systems since we store a snapshot
+ * of jiffies in the buffer control blocks below.  We decidely
+ * only use of the low 32-bits of jiffies and hide the ugly
+ * casts with the following macro.
+ */
+#define tcp_time_stamp		((__u32)(jiffies))
+
 /* This is what the send packet queueing engine uses to pass
  * TCP per-packet control information to the transmission
  * code.  We also store the host-order sequence numbers in
@@ -734,7 +735,7 @@ struct tcp_skb_cb {
 	} header;	/* For incoming frames		*/
 	__u32		seq;		/* Starting sequence number	*/
 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
-	unsigned long	when;		/* used to compute rtt's	*/
+	__u32		when;		/* used to compute rtt's	*/
 	__u8		flags;		/* TCP header flags.		*/
 
 	/* NOTE: These must match up to the flags byte in a
@@ -776,10 +777,16 @@ static __inline__ int tcp_packets_in_flight(struct tcp_opt *tp)
 	return tp->packets_out - tp->fackets_out + tp->retrans_out;
 }
 
+/* Is SKB at the tail of the write queue? */
+static __inline__ int tcp_skb_is_last(struct sock *sk, struct sk_buff *skb)
+{
+	return (skb->next == (struct sk_buff*)&sk->write_queue);
+}
+
 /* This checks if the data bearing packet SKB (usually tp->send_head)
  * should be put on the wire right now.
  */
-static __inline__ int tcp_snd_test(struct sock *sk, struct sk_buff *skb)
+static __inline__ int tcp_snd_test(struct sock *sk, struct sk_buff *skb, int tail)
 {
 	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
 	int nagle_check = 1;
@@ -795,19 +802,49 @@ static __inline__ int tcp_snd_test(struct sock *sk, struct sk_buff *skb)
 	 *	c) We are retransmiting [Nagle]
 	 *	d) We have too many packets 'in flight'
 	 *
-	 * 	Don't use the nagle rule for urgent data.
+	 * 	FIN overrides nagle, even for the TCP_CORK
+	 *	case. -DaveM
+	 *
+	 *	Also, Nagle rule does not apply to frames, which
+	 *	sit in the middle of queue (they have no chances
+	 *	to get new data) and if room at tail of skb is
+	 *	not enough to save something seriously (<32 for now).
 	 */
-	if ((sk->nonagle == 2 && (skb->len < tp->mss_cache)) ||
-	    (!sk->nonagle &&
-	     skb->len < (tp->mss_cache >> 1) &&
-	     tp->packets_out &&
-	     !(TCP_SKB_CB(skb)->flags & TCPCB_FLAG_URG)))
-		nagle_check = 0;
+	if (!(TCP_SKB_CB(skb)->flags & (TCPCB_FLAG_URG|TCPCB_FLAG_FIN))) {
+		if ((sk->nonagle == 2 && (skb->len < tp->mss_cache)) ||
+		    (!sk->nonagle &&
+		     skb->len < (tp->mss_cache >> 1) &&
+		     tp->packets_out))
+			nagle_check = 0;
+	}
 
-	return (nagle_check &&
-		(tcp_packets_in_flight(tp) < tp->snd_cwnd) &&
+	/* Don't be strict about the congestion window for the
+	 * final FIN frame.  -DaveM
+	 */
+	return ((!tail || nagle_check || skb_tailroom(skb) < 32) &&
+		((tcp_packets_in_flight(tp) < tp->snd_cwnd) ||
+		 (TCP_SKB_CB(skb)->flags & TCPCB_FLAG_FIN)) &&
 		!after(TCP_SKB_CB(skb)->end_seq, tp->snd_una + tp->snd_wnd) &&
 		tp->retransmits == 0);
+}
+
+/* Push out any pending frames which were held back due to
+ * TCP_CORK or attempt at coalescing tiny packets.
+ * The socket must be locked by the caller.
+ */
+static __inline__ void tcp_push_pending_frames(struct sock *sk, struct tcp_opt *tp)
+{
+	struct sk_buff *skb = tp->send_head;
+
+	if(skb) {
+		if(tcp_snd_test(sk, skb, tcp_skb_is_last(sk, skb)))
+			tcp_write_xmit(sk);
+		else if(tp->packets_out == 0 && !tp->pending) {
+			/* We held off on this in tcp_send_skb() */
+			tp->pending = TIME_PROBE0;
+			tcp_reset_xmit_timer(sk, TIME_PROBE0, tp->rto);
+		}
+	}
 }
 
 /* This tells the input processing path that an ACK should go out
@@ -912,7 +949,7 @@ static __inline__ void tcp_build_and_update_options(__u32 *ptr, struct tcp_opt *
  * can generate.
  */
 extern __inline__ void tcp_syn_build_options(__u32 *ptr, int mss, int ts, int sack,
-					     int offer_wscale, int wscale, __u32 tstamp)
+					     int offer_wscale, int wscale, __u32 tstamp, __u32 ts_recent)
 {
 	/* We always get an MSS option.
 	 * The option bytes which will be seen in normal data
@@ -936,7 +973,7 @@ extern __inline__ void tcp_syn_build_options(__u32 *ptr, int mss, int ts, int sa
 			*ptr++ = __constant_htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16) |
 						  (TCPOPT_TIMESTAMP << 8) | TCPOLEN_TIMESTAMP);
 		*ptr++ = htonl(tstamp);		/* TSVAL */
-		*ptr++ = __constant_htonl(0);	/* TSECR */
+		*ptr++ = htonl(ts_recent);	/* TSECR */
 	} else if(sack)
 		*ptr++ = __constant_htonl((TCPOPT_NOP << 24) | (TCPOPT_NOP << 16) |
 					  (TCPOPT_SACK_PERM << 8) | TCPOLEN_SACK_PERM);
@@ -1023,17 +1060,6 @@ extern __inline__ void tcp_dec_slow_timer(int timer)
 	struct tcp_sl_timer *slt = &tcp_slt_array[timer];
 
 	atomic_dec(&slt->count);
-}
-
-/* This needs to use a slow timer, so it is here. */
-static __inline__ void tcp_sk_unbindify(struct sock *sk)
-{
-	struct tcp_bind_bucket *tb = (struct tcp_bind_bucket *) sk->prev;
-	if(sk->bind_next)
-		sk->bind_next->bind_pprev = sk->bind_pprev;
-	*sk->bind_pprev = sk->bind_next;
-	if(tb->owners == NULL)
-		tcp_inc_slow_timer(TCP_SLT_BUCKETGC);
 }
 
 extern const char timer_bug_msg[];

@@ -33,7 +33,7 @@ struct cpu_fp_info linux_sparc_fpu[] = {
   { 0x22, 0x10, 0, "UltraSparc II integrated FPU"},
   { 0x17, 0x11, 0, "UltraSparc II integrated FPU"},
   { 0x17, 0x12, 0, "UltraSparc IIi integrated FPU"},
-  { 0x17, 0x13, 0, "UltraSparc III integrated FPU"},
+  { 0x17, 0x14, 0, "UltraSparc III integrated FPU"},
 };
 
 #define NSPARCFPU  (sizeof(linux_sparc_fpu)/sizeof(struct cpu_fp_info))
@@ -43,17 +43,17 @@ struct cpu_iu_info linux_sparc_chips[] = {
   { 0x22, 0x10, "TI UltraSparc II  (BlackBird)"},
   { 0x17, 0x11, "TI UltraSparc II  (BlackBird)"},
   { 0x17, 0x12, "TI UltraSparc IIi"},
-  { 0x17, 0x13, "TI UltraSparc III (Cheetah)"},  /* A guess... */
+  { 0x17, 0x14, "TI UltraSparc III (Cheetah)"},  /* A guess... */
 };
 
 #define NSPARCCHIPS  (sizeof(linux_sparc_chips)/sizeof(struct cpu_iu_info))
 
 #ifdef __SMP__
-char *sparc_cpu_type[NR_CPUS] = { "cpu-oops", "cpu-oops1", "cpu-oops2", "cpu-oops3" };
-char *sparc_fpu_type[NR_CPUS] = { "fpu-oops", "fpu-oops1", "fpu-oops2", "fpu-oops3" };
+char *sparc_cpu_type[64] = { "cpu-oops", "cpu-oops1", "cpu-oops2", "cpu-oops3" };
+char *sparc_fpu_type[64] = { "fpu-oops", "fpu-oops1", "fpu-oops2", "fpu-oops3" };
 #else
-char *sparc_cpu_type[NR_CPUS] = { "cpu-oops", };
-char *sparc_fpu_type[NR_CPUS] = { "fpu-oops", };
+char *sparc_cpu_type[64] = { "cpu-oops", };
+char *sparc_fpu_type[64] = { "fpu-oops", };
 #endif
 
 unsigned int fsr_storage;
@@ -65,11 +65,11 @@ __initfunc(void cpu_probe(void))
 	long ver, fpu_vers;
 	long fprs;
 	
-	cpuid = smp_processor_id();
+	cpuid = hard_smp_processor_id();
 
 	fprs = fprs_read ();
 	fprs_write (FPRS_FEF);
-	__asm__ __volatile__ ("rdpr %%ver, %0; stx %%fsr, [%1]" : "=r" (ver) : "r" (&fpu_vers));
+	__asm__ __volatile__ ("rdpr %%ver, %0; stx %%fsr, [%1]" : "=&r" (ver) : "r" (&fpu_vers));
 	fprs_write (fprs);
 	
 	manuf = ((ver >> 48)&0xffff);
@@ -88,7 +88,7 @@ __initfunc(void cpu_probe(void))
 	if(i==NSPARCCHIPS) {
 		printk("DEBUG: manuf = 0x%x   impl = 0x%x\n", manuf, 
 			    impl);
-		sparc_cpu_type[cpuid] = "Unknow CPU";
+		sparc_cpu_type[cpuid] = "Unknown CPU";
 	}
 
 	for(i = 0; i<NSPARCFPU; i++) {

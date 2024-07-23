@@ -1,4 +1,4 @@
-/* $Id: head.h,v 1.35 1998/03/18 09:15:40 jj Exp $ */
+/* $Id: head.h,v 1.36.2.3 2000/05/26 22:19:39 ecd Exp $ */
 #ifndef __SPARC_HEAD_H
 #define __SPARC_HEAD_H
 
@@ -7,8 +7,6 @@
 #define SUN4C_SEGSZ     (1 << 18)
 #define SRMMU_L1_KBASE_OFFSET ((KERNBASE>>24)<<2)  /* Used in boot remapping. */
 #define INTS_ENAB        0x01           /* entry.S uses this. */
-
-#define NCPUS            4              /* Architectural limit of sun4m. */
 
 #define SUN4_PROM_VECTOR 0xFFE81000     /* SUN4 PROM needs to be hardwired */
 
@@ -55,6 +53,12 @@
         b linux_sparc_syscall; \
         or %l7, %lo(C_LABEL(sunos_sys_table)), %l7;
 
+#define SUNOS_NO_SYSCALL_TRAP \
+        b sunos_syscall; \
+        rd %psr, %l0; \
+        nop; \
+        nop;
+
 /* Software trap for Slowaris system calls. */
 #define SOLARIS_SYSCALL_TRAP \
         b solaris_syscall; \
@@ -88,6 +92,10 @@
 /* The Set Condition Codes software trap for userland. */
 #define SETCC_TRAP \
         b setcc_trap_handler; mov %psr, %l0; nop; nop;
+
+/* The Get PSR software trap for userland. */
+#define GETPSR_TRAP \
+	mov %psr, %i0; jmp %l2; rett %l2 + 4; nop;
 
 /* This is for hard interrupts from level 1-14, 15 is non-maskable (nmi) and
  * gets handled with another macro.

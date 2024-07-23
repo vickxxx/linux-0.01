@@ -1,4 +1,4 @@
-/* $Id: zs.c,v 1.32 1998/11/08 11:15:29 davem Exp $
+/* $Id: zs.c,v 1.41.2.7 2001/01/03 08:07:04 ecd Exp $
  * zs.c: Zilog serial port driver for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -52,6 +52,22 @@ static int num_serial = 2; /* sun4/sun4c/sun4m - Two chips on board. */
 
 #define KEYBOARD_LINE 0x2
 #define MOUSE_LINE    0x3
+
+/* On 32-bit sparcs we need to delay after register accesses
+ * to accomodate sun4 systems, but we do not need to flush writes.
+ * On 64-bit sparc we only need to flush single writes to ensure
+ * completion.
+ */
+#ifndef __sparc_v9__
+#define ZSDELAY()		udelay(5)
+#define ZSDELAY_LONG()		udelay(20)
+#define ZS_WSYNC(channel)	do { } while(0)
+#else
+#define ZSDELAY()
+#define ZSDELAY_LONG()
+#define ZS_WSYNC(channel) \
+	((void) *((volatile unsigned char *)(&((channel)->control))))
+#endif
 
 struct sun_zslayout **zs_chips;
 struct sun_zschannel **zs_channels;
@@ -200,9 +216,9 @@ static inline unsigned char read_zsreg(struct sun_zschannel *channel,
 	unsigned char retval;
 
 	channel->control = reg;
-	udelay(5);
+	ZSDELAY();
 	retval = channel->control;
-	udelay(5);
+	ZSDELAY();
 	return retval;
 }
 
@@ -210,9 +226,9 @@ static inline void write_zsreg(struct sun_zschannel *channel,
 			       unsigned char reg, unsigned char value)
 {
 	channel->control = reg;
-	udelay(5);
+	ZSDELAY();
 	channel->control = value;
-	udelay(5);
+	ZSDELAY();
 }
 
 static inline void load_zsregs(struct sun_serial *info, unsigned char *regs)
@@ -239,7 +255,7 @@ static inline void load_zsregs(struct sun_serial *info, unsigned char *regs)
 		write_zsreg(channel, R9, CHRA);
 	else
 		write_zsreg(channel, R9, CHRB);
-	udelay(20);	/* wait for some old sun4's */
+	ZSDELAY_LONG();
 	write_zsreg(channel, R4, regs[R4]);
 	write_zsreg(channel, R3, regs[R3] & ~RxENAB);
 	write_zsreg(channel, R5, regs[R5] & ~TxENAB);
@@ -267,10 +283,16 @@ static inline void zs_put_char(struct sun_zschannel *channel, char ch)
 {
 	int loops = ZS_PUT_CHAR_MAX_DELAY;
 
+	/* Do not change this to use ZSDELAY as this is
+	 * a timed polling loop and on sparc64 ZSDELAY
+	 * is a nop.  -DaveM
+	 */
 	while((channel->control & Tx_BUF_EMP) == 0 && --loops)
 		udelay(5);
+
 	channel->data = ch;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(channel);
 }
 
 /* Sets or clears DTR/RTS on the requested line */
@@ -352,6 +374,8 @@ static void zs_start(struct tty_struct *tty)
  */
 void batten_down_hatches(void)
 {
+	if (!stop_a_enabled)
+		return;
 	/* If we are doing kadb, we call the debugger
 	 * else we just drop into the boot monitor.
 	 * Note that we must flush the user windows
@@ -417,10 +441,11 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, stat;
+	int do_queue_task = 1;
 
 	do {
 		ch = (info->zs_channel->data) & info->parity_mask;
-		udelay(5);
+		ZSDELAY();
 
 		/* If this is the console keyboard, we need to handle
 		 * L1-A's here.
@@ -444,11 +469,13 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 				return;
 			}
 			sunkbd_inchar(ch, regs);
-			return;
+			do_queue_task = 0;
+			goto next_char;
 		}
 		if(info->cons_mouse) {
-			sun_mouse_inbyte(ch);
-			return;
+			sun_mouse_inbyte(ch, 0);
+			do_queue_task = 0;
+			goto next_char;
 		}
 		if(info->is_cons) {
 			if(ch==0) {
@@ -480,9 +507,10 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		*tty->flip.flag_buf_ptr++ = 0;
 		*tty->flip.char_buf_ptr++ = ch;
 
+	next_char:
 		/* Check if we have another character... */
 		stat = info->zs_channel->control;
-		udelay(5);
+		ZSDELAY();
 		if (!(stat & Rx_CH_AV))
 			break;
 
@@ -490,7 +518,8 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		stat = read_zsreg(info->zs_channel, R1);
 	} while (!(stat & (PAR_ERR | Rx_OVR | CRC_ERR)));
 
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	if (do_queue_task != 0)
+		queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
 static _INLINE_ void transmit_chars(struct sun_serial *info)
@@ -507,7 +536,8 @@ static _INLINE_ void transmit_chars(struct sun_serial *info)
 	if((info->xmit_cnt <= 0) || (tty != 0 && tty->stopped)) {
 		/* That's peculiar... */
 		info->zs_channel->control = RES_Tx_P;
-		udelay(5);
+		ZSDELAY();
+		ZS_WSYNC(info->zs_channel);
 		return;
 	}
 
@@ -521,7 +551,8 @@ static _INLINE_ void transmit_chars(struct sun_serial *info)
 
 	if(info->xmit_cnt <= 0) {
 		info->zs_channel->control = RES_Tx_P;
-		udelay(5);
+		ZSDELAY();
+		ZS_WSYNC(info->zs_channel);
 	}
 }
 
@@ -531,10 +562,11 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 
 	/* Get status from Read Register 0 */
 	status = info->zs_channel->control;
-	udelay(5);
+	ZSDELAY();
 	/* Clear status condition... */
 	info->zs_channel->control = RES_EXT_INT;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
 
 #if 0
 	if(status & DCD) {
@@ -554,8 +586,12 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 	 * 'break asserted' status change interrupt, call
 	 * the boot prom.
 	 */
-	if((status & BRK_ABRT) && info->break_abort)
-		batten_down_hatches();
+	if(status & BRK_ABRT) {
+		if (info->break_abort)
+			batten_down_hatches();
+		if (info->cons_mouse)
+			sun_mouse_inbyte(0, 1);
+	}
 
 	/* XXX Whee, put in a buffer somewhere, the status information
 	 * XXX whee whee whee... Where does the information go...
@@ -571,7 +607,7 @@ static _INLINE_ void special_receive(struct sun_serial *info)
 	stat = read_zsreg(info->zs_channel, R1);
 	if (stat & (PAR_ERR | Rx_OVR | CRC_ERR)) {
 		ch = info->zs_channel->data;
-		udelay(5);
+		ZSDELAY();
 	}
 
 	if (!tty)
@@ -592,7 +628,8 @@ done:
 	queue_task(&tty->flip.tqueue, &tq_timer);
 clear:
 	info->zs_channel->control = ERR_RES;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
 }
 
 
@@ -700,6 +737,7 @@ static void do_softint(void *private_)
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
+		wake_up_interruptible(&tty->poll_wait);
 	}
 }
 
@@ -772,9 +810,12 @@ static int startup(struct sun_serial * info)
 	 * Clear the interrupt registers.
 	 */
 	info->zs_channel->control = ERR_RES;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
+
 	info->zs_channel->control = RES_H_IUS;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
 
 	/*
 	 * Now, initialize the Zilog
@@ -798,9 +839,12 @@ static int startup(struct sun_serial * info)
 	 * And clear the interrupt registers again for luck.
 	 */
 	info->zs_channel->control = ERR_RES;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
+
 	info->zs_channel->control = RES_H_IUS;
-	udelay(5);
+	ZSDELAY();
+	ZS_WSYNC(info->zs_channel);
 
 	if (info->tty)
 		clear_bit(TTY_IO_ERROR, &info->tty->flags);
@@ -860,7 +904,6 @@ static void shutdown(struct sun_serial * info)
  */
 static void change_speed(struct sun_serial *info)
 {
-	unsigned short port;
 	unsigned cflag;
 	int	quot = 0;
 	int	i;
@@ -869,7 +912,7 @@ static void change_speed(struct sun_serial *info)
 	if (!info->tty || !info->tty->termios)
 		return;
 	cflag = info->tty->termios->c_cflag;
-	if (!(port = info->port))
+	if (!info->port)
 		return;
 	i = cflag & CBAUD;
 	if (cflag & CBAUDEX) {
@@ -1006,6 +1049,7 @@ void putDebugChar(char kgdb_char)
 	while((chan->control & Tx_BUF_EMP)==0)
 		udelay(5);
 	chan->data = kgdb_char;
+	ZS_WSYNC(chan);
 }
 
 char getDebugChar(void)
@@ -1013,7 +1057,7 @@ char getDebugChar(void)
 	struct sun_zschannel *chan = zs_kgdbchan;
 
 	while((chan->control & Rx_CH_AV)==0)
-		barrier();
+		udelay(5);
 	return chan->data;
 }
 
@@ -1140,6 +1184,7 @@ static void zs_flush_buffer(struct tty_struct *tty)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	sti();
 	wake_up_interruptible(&tty->write_wait);
+	wake_up_interruptible(&tty->poll_wait);
 	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 	    tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
@@ -1254,6 +1299,9 @@ static int set_serial_info(struct sun_serial * info,
 		goto check_and_exit;
 	}
 
+	if(new_serial.baud_base < 9600)
+		return -EINVAL;
+
 	if (info->count > 1)
 		return -EBUSY;
 
@@ -1291,6 +1339,7 @@ static int get_lsr_info(struct sun_serial * info, unsigned int *value)
 
 	cli();
 	status = info->zs_channel->control;
+	ZSDELAY();
 	sti();
 	put_user_ret(status,value, -EFAULT);
 	return 0;
@@ -1303,6 +1352,7 @@ static int get_modem_info(struct sun_serial * info, unsigned int *value)
 
 	cli();
 	status = info->zs_channel->control;
+	ZSDELAY();
 	sti();
 	result =  ((info->curregs[5] & RTS) ? TIOCM_RTS : 0)
 		| ((info->curregs[5] & DTR) ? TIOCM_DTR : 0)
@@ -1806,7 +1856,7 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 
 static void show_serial_version(void)
 {
-	char *revision = "$Revision: 1.32 $";
+	char *revision = "$Revision: 1.41.2.7 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -1853,8 +1903,8 @@ get_zs(int chip))
 			int len = prom_getproperty(zsnode, "address",
 						   (void *) vaddr, sizeof(vaddr));
 
-			if(len == -1) {
-				struct linux_sbus *sbus;
+			if(len == -1 || central_bus != NULL) {
+				struct linux_sbus *sbus = NULL;
 				struct linux_sbus_device *sdev = NULL;
 
 				/* "address" property is not guarenteed,
@@ -1862,20 +1912,40 @@ get_zs(int chip))
 				 * anyways by our clever TLB miss handling
 				 * scheme, so don't fail here.  -DaveM
 				 */
-				for_each_sbus(sbus) {
-					for_each_sbusdev(sdev, sbus) {
-						if (sdev->prom_node == zsnode)
-							goto found;
+				if (central_bus == NULL) {
+					for_each_sbus(sbus) {
+						for_each_sbusdev(sdev, sbus) {
+							if (sdev->prom_node == zsnode)
+								goto found;
+						}
 					}
 				}
 			found:
-				if (sdev == NULL)
+				if (sdev == NULL && central_bus == NULL)
 					prom_halt();
-				prom_apply_sbus_ranges(sbus, sdev->reg_addrs, 1, sdev);
-				mapped_addr = (unsigned long)
-					sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
-						       PAGE_SIZE, "Zilog Registers",
-						       sdev->reg_addrs[0].which_io, 0x0);
+				if (central_bus == NULL) {
+					prom_apply_sbus_ranges(sbus, sdev->reg_addrs, 1, sdev);
+					mapped_addr = (unsigned long)
+						sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
+							       PAGE_SIZE, "Zilog Registers",
+							       sdev->reg_addrs[0].which_io, 0x0);
+				} else {
+					struct linux_prom_registers zsregs[1];
+					int err;
+
+					err = prom_getproperty(zsnode, "reg",
+							       (char *)&zsregs[0],
+							       sizeof(zsregs));
+					if (err == -1) {
+						prom_printf("ZS: Cannot map Zilog regs.\n");
+						prom_halt();
+					}
+					prom_apply_fhc_ranges(central_bus->child, &zsregs[0], 1);
+					prom_apply_central_ranges(central_bus, &zsregs[0], 1);
+					mapped_addr = (unsigned long)
+						__va((((unsigned long)zsregs[0].which_io)<<32) |
+						     (((unsigned long)zsregs[0].phys_addr)));
+				}
 			} else if(len % sizeof(unsigned int)) {
 				prom_printf("WHOOPS:  proplen for %s "
 					    "was %d, need multiple of "
@@ -1954,25 +2024,26 @@ get_zs(int chip))
 		/* Can use the prom for other machine types */
 		zsnode = prom_getchild(prom_root_node);
 		if (sparc_cpu_model == sun4d) {
-			int board, node;
-			
+			int no = 0;
+
 			tmpnode = zsnode;
+			zsnode = 0;
+			bbnode = 0;
 			while (tmpnode && (tmpnode = prom_searchsiblings(tmpnode, "cpu-unit"))) {
-				board = prom_getintdefault (tmpnode, "board#", -1);
-				if (board == (chip >> 1)) {
-					node = prom_getchild(tmpnode);
-					if (node && (node = prom_searchsiblings(node, "bootbus"))) {
+				bbnode = prom_getchild(tmpnode);
+				if (bbnode && (bbnode = prom_searchsiblings(bbnode, "bootbus"))) {
+					if (no == (chip >> 1)) {
 						cpunode = tmpnode;
-						bbnode = node;
-						zsnode = prom_getchild(node);
+						zsnode = prom_getchild(bbnode);
 						chipid = (chip & 1);
 						break;
 					}
+					no++;
 				}
 				tmpnode = prom_getsibling(tmpnode);
 			}
 			if (!tmpnode)
-				panic ("get_zs: couldn't find board%d's bootbus\n", chip >> 1);
+				panic ("get_zs: couldn't find %dth bootbus\n", chip >> 1);
 		} else {
 			tmpnode = prom_searchsiblings(zsnode, "obio");
 			if(tmpnode)
@@ -2066,13 +2137,12 @@ __initfunc(int zs_probe (unsigned long *memory_start))
 	
 	node = prom_getchild(prom_root_node);
 	if (sparc_cpu_model == sun4d) {
-		node = prom_searchsiblings(node, "boards");
-		if (!node)
-			panic ("Cannot find out count of boards");
-		else
-			node = prom_getchild(node);
-		while (node && (node = prom_searchsiblings(node, "bif"))) {
-			NUM_SERIAL += 2;
+		int bbnode;
+		
+		while (node && (node = prom_searchsiblings(node, "cpu-unit"))) {
+			bbnode = prom_getchild(node);
+			if (bbnode && prom_searchsiblings(bbnode, "bootbus"))
+				NUM_SERIAL += 2;
 			node = prom_getsibling(node);
 		}
 		goto no_probe;
@@ -2082,7 +2152,7 @@ __initfunc(int zs_probe (unsigned long *memory_start))
 		int central_node;
 
 		/* Central bus zilogs must be checked for first,
-		 * since Enterprise boxes have SBUS as well.
+		 * since Enterprise boxes might have SBUSes as well.
 		 */
 		central_node = prom_finddevice("/central");
 		if(central_node != 0 && central_node != -1)
@@ -2219,11 +2289,6 @@ __initfunc(int zs_init(void))
         return 0;
 #endif
 
-#ifdef CONFIG_PCI
-	if (pci_present())
-		return 0;
-#endif
-
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
 	timer_table[RS_TIMER].fn = zs_timer;
@@ -2290,13 +2355,21 @@ __initfunc(int zs_init(void))
 	/* Initialize Softinfo */
 	zs_prepare();
 
+	/* Grab IRQ line before poking the chips so we do
+	 * not lose any interrupts.
+	 */
+	if (request_irq(zilog_irq, zs_interrupt,
+			(SA_INTERRUPT | SA_STATIC_ALLOC),
+			"Zilog8530", zs_chain))
+		panic("Unable to attach zs intr\n");
+
 	/* Initialize Hardware */
 	for(channel = 0; channel < NUM_CHANNELS; channel++) {
 
 		/* Hardware reset each chip */
 		if (!(channel & 1)) {
 			write_zsreg(zs_soft[channel].zs_channel, R9, FHWRES);
-			udelay(20);	/* wait for some old sun4's */
+			ZSDELAY_LONG();
 			dummy = read_zsreg(zs_soft[channel].zs_channel, R0);
 		}
 
@@ -2462,10 +2535,6 @@ __initfunc(int zs_init(void))
 		printk(" is a Zilog8530\n");
 	}
 
-	if (request_irq(zilog_irq, zs_interrupt,
-			(SA_INTERRUPT | SA_STATIC_ALLOC),
-			"Zilog8530", zs_chain))
-		panic("Unable to attach zs intr\n");
 	restore_flags(flags);
 
 	keyboard_zsinit(kbd_put_char);
@@ -2549,7 +2618,7 @@ static void zs_fair_output(struct sun_serial *info)
 
 	/* Last character is being transmitted now (hopefully). */
 	info->zs_channel->control = RES_Tx_P;
-	udelay(5);
+	ZSDELAY();
 
 	restore_flags(flags);
 	return;

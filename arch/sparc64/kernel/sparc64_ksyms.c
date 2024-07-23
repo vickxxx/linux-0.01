@@ -1,8 +1,9 @@
-/* $Id: sparc64_ksyms.c,v 1.49 1998/10/28 08:11:28 jj Exp $
+/* $Id: sparc64_ksyms.c,v 1.58.2.13 2001/01/03 22:05:54 anton Exp $
  * arch/sparc64/kernel/sparc64_ksyms.c: Sparc64 specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1996 Eddie C. Dost (ecd@skynet.be)
+ * Copyright (C) 1999 Jakub Jelinek (jj@ultra.linux.cz)
  */
 
 /* Tell string.h we don't want memcpy etc. as cpp defines */
@@ -42,9 +43,11 @@
 #endif
 #ifdef CONFIG_PCI
 #include <asm/ebus.h>
+#include <asm/pbm.h>
 #endif
 #include <asm/a.out.h>
 #include <asm/svr4.h>
+#include <asm/elf.h>
 
 struct poll {
 	int fd;
@@ -52,10 +55,9 @@ struct poll {
 	short revents;
 };
 
-extern unsigned prom_cpu_nodes[NR_CPUS];
+extern unsigned prom_cpu_nodes[64];
 extern void die_if_kernel(char *str, struct pt_regs *regs);
-extern unsigned long sunos_mmap(unsigned long, unsigned long, unsigned long,
-				unsigned long, unsigned long, unsigned long);
+extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 void _sigpause_common (unsigned int set, struct pt_regs *);
 extern void *__bzero(void *, size_t);
 extern void *__bzero_noasi(void *, size_t);
@@ -81,14 +83,16 @@ extern int svr4_setcontext(svr4_ucontext_t *uc, struct pt_regs *regs);
 extern int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
 extern int sys32_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 extern int (*handle_mathemu)(struct pt_regs *, struct fpustate *);
+extern void VISenter(void);
+extern int io_remap_page_range(unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space);
                 
 extern void bcopy (const char *, char *, int);
 extern int __ashrdi3(int, int);
 
 extern void dump_thread(struct pt_regs *, struct user *);
+extern int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs);
 
 #ifdef __SMP__
-extern spinlock_t scheduler_lock;
 extern spinlock_t kernel_flag;
 extern int smp_num_cpus;
 #ifdef SPIN_LOCK_DEBUG
@@ -102,21 +106,22 @@ extern void _do_write_unlock(rwlock_t *rw);
 #endif
 #endif
 
+extern unsigned long phys_base;
+
 /* One thing to note is that the way the symbols of the mul/div
  * support routines are named is a mess, they all start with
  * a '.' which makes it a bitch to export, here is the trick:
  */
 
 #define EXPORT_SYMBOL_PRIVATE(sym)				\
-extern int __sparc_priv_ ## sym (int) __asm__("__" ## #sym);	\
+extern int __sparc_priv_ ## sym (int) __asm__("__" #sym);	\
 const struct module_symbol __export_priv_##sym			\
 __attribute__((section("__ksymtab"))) =				\
-{ (unsigned long) &__sparc_priv_ ## sym, "__" ## #sym }
+{ (unsigned long) &__sparc_priv_ ## sym, "__" #sym }
 
 /* used by various drivers */
 #ifdef __SMP__
 /* Kernel wide locking */
-EXPORT_SYMBOL(scheduler_lock);
 EXPORT_SYMBOL(kernel_flag);
 
 /* Software-IRQ BH locking */
@@ -155,10 +160,15 @@ EXPORT_SYMBOL(_do_write_unlock);
 EXPORT_SYMBOL(local_irq_count);
 EXPORT_SYMBOL(local_bh_count);
 #endif
+
+EXPORT_SYMBOL(ivector_table);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 
 EXPORT_SYMBOL_PRIVATE(flushw_user);
+
+EXPORT_SYMBOL(flush_icache_range);
+EXPORT_SYMBOL(flush_dcache_page);
 
 EXPORT_SYMBOL(mstk48t02_regs);
 EXPORT_SYMBOL(request_fast_irq);
@@ -171,6 +181,7 @@ EXPORT_SYMBOL(sparc_dvma_malloc);
 EXPORT_SYMBOL(mmu_release_scsi_one);
 EXPORT_SYMBOL(mmu_release_scsi_sgl);
 #if CONFIG_SBUS
+EXPORT_SYMBOL(mmu_set_sbus64);
 EXPORT_SYMBOL(SBus_chain);
 EXPORT_SYMBOL(dma_chain);
 #endif
@@ -187,17 +198,30 @@ EXPORT_SYMBOL(outsl);
 EXPORT_SYMBOL(insb);
 EXPORT_SYMBOL(insw);
 EXPORT_SYMBOL(insl);
+EXPORT_SYMBOL(pci_dma_wsync);
 #endif
+
+/* I/O device mmaping on Sparc64. */
+EXPORT_SYMBOL(io_remap_page_range);
 
 /* Solaris/SunOS binary compatibility */
 EXPORT_SYMBOL(_sigpause_common);
-EXPORT_SYMBOL(sunos_mmap);
 
 /* Should really be in linux/kernel/ksyms.c */
 EXPORT_SYMBOL(dump_thread);
+EXPORT_SYMBOL(dump_fpu);
+EXPORT_SYMBOL(get_pmd_slow);
+EXPORT_SYMBOL(get_pte_slow);
+#ifndef CONFIG_SMP
+EXPORT_SYMBOL(pgt_quicklists);
+#endif
 
 /* math-emu wants this */
 EXPORT_SYMBOL(die_if_kernel);
+
+/* Kernel thread creation. */
+EXPORT_SYMBOL(kernel_thread);
+EXPORT_SYMBOL(init_mm);
 
 /* prom symbols */
 EXPORT_SYMBOL(idprom);
@@ -213,7 +237,9 @@ EXPORT_SYMBOL(prom_node_has_property);
 EXPORT_SYMBOL(prom_setprop);
 EXPORT_SYMBOL(saved_command_line);
 EXPORT_SYMBOL(prom_getname);
+EXPORT_SYMBOL(prom_finddevice);
 EXPORT_SYMBOL(prom_feval);
+EXPORT_SYMBOL(prom_getbool);
 EXPORT_SYMBOL(prom_getstring);
 EXPORT_SYMBOL(prom_apply_sbus_ranges);
 EXPORT_SYMBOL(prom_getint);
@@ -224,7 +250,7 @@ EXPORT_SYMBOL(__prom_getsibling);
 /* sparc library symbols */
 EXPORT_SYMBOL(bcopy);
 EXPORT_SYMBOL(__strlen);
-#if __GNUC__ > 2 || __GNUC_MINOR__ >= 91
+#if (__GNUC__ > 2) || (__GNUC__ == 2 && __GNUC_MINOR__ >= 91)
 EXPORT_SYMBOL(strlen);
 #endif
 EXPORT_SYMBOL(strnlen);
@@ -257,7 +283,6 @@ EXPORT_SYMBOL(svr4_setcontext);
 EXPORT_SYMBOL(prom_cpu_nodes);
 EXPORT_SYMBOL(sys_ioctl);
 EXPORT_SYMBOL(sys32_ioctl);
-EXPORT_SYMBOL(get_unmapped_area);
 EXPORT_SYMBOL(move_addr_to_kernel);
 EXPORT_SYMBOL(move_addr_to_user);
 #endif
@@ -281,10 +306,17 @@ EXPORT_SYMBOL(__copy_from_user);
 EXPORT_SYMBOL(__strncpy_from_user);
 EXPORT_SYMBOL(__bzero_noasi);
 
+/* Various address conversion macros use this. */
+EXPORT_SYMBOL(phys_base);
+EXPORT_SYMBOL(sparc64_valid_addr_bitmap);
+
 /* No version information on this, heavily used in inline asm,
  * and will always be 'void __ret_efault(void)'.
  */
 EXPORT_SYMBOL_NOVERS(__ret_efault);
+/* VISenter is defined in assembly as well.
+ */
+EXPORT_SYMBOL_NOVERS(VISenter);
 
 /* No version information on these, as gcc produces such symbols. */
 EXPORT_SYMBOL_NOVERS(memcmp);

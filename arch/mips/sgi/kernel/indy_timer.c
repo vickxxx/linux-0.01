@@ -1,4 +1,4 @@
-/* $Id: indy_timer.c,v 1.9 1998/06/25 20:15:02 ralf Exp $
+/* $Id: indy_timer.c,v 1.12 1999/06/13 16:30:36 ralf Exp $
  *
  * indy_timer.c: Setting up the clock on the INDY 8254 controller.
  *
@@ -104,9 +104,10 @@ void indy_timer_interrupt(struct pt_regs *regs)
 	 * absolutely sure we do this update within 500ms before the
 	 * next second starts, thus the following code.
 	 */
-	if (time_state != TIME_BAD && xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec > 500000 - (tick >> 1) &&
-	    xtime.tv_usec < 500000 + (tick >> 1))
+	if ((time_status & STA_UNSYNC) == 0 &&
+	    xtime.tv_sec > last_rtc_update + 660 &&
+	    xtime.tv_usec >= 500000 - (tick >> 1) &&
+	    xtime.tv_usec <= 500000 + (tick >> 1))
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
@@ -261,12 +262,12 @@ void indy_8254timer_irq(void)
 	int cpu = smp_processor_id();
 	int irq = 4;
 
-	irq_enter(cpu, irq);
+	hardirq_enter(cpu);
 	kstat.irqs[0][irq]++;
 	printk("indy_8254timer_irq: Whoops, should not have gotten this IRQ\n");
 	prom_getchar();
 	prom_imode();
-	irq_exit(cpu, irq);
+	hardirq_exit(cpu);
 }
 
 void do_gettimeofday(struct timeval *tv)

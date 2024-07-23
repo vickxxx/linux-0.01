@@ -174,12 +174,50 @@ show_mem(void)
 
 extern unsigned long free_area_init(unsigned long, unsigned long);
 
-static struct thread_struct *
+static inline struct thread_struct *
 load_PCB(struct thread_struct * pcb)
 {
 	register unsigned long sp __asm__("$30");
 	pcb->ksp = sp;
-	return __reload_tss(pcb);
+	return (struct thread_struct *) __reload_tss(pcb);
+}
+
+void
+switch_to_system_map(void)
+{
+	unsigned long newptbr;
+	struct thread_struct *original_pcb_ptr;
+
+	memset(swapper_pg_dir, 0, PAGE_SIZE);
+	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
+	pgd_val(swapper_pg_dir[1023]) =
+		(newptbr << 32) | pgprot_val(PAGE_KERNEL);
+
+
+	/* Also set up the real kernel PCB while we're at it.  */
+	init_task.tss.ptbr = newptbr;
+	init_task.tss.pal_flags = 1;	/* set FEN, clear everything else */
+	init_task.tss.flags = 0;
+
+	hwrpb->vptb = 0xfffffffe00000000;
+	hwrpb_update_checksum(hwrpb);
+
+	wrvptptr(0xfffffffe00000000);
+	original_pcb_ptr = load_PCB(&init_task.tss);
+	tbia();
+
+	/* Save off the contents of the original PCB so that we can
+	   restore the original console's page tables for a clean reboot.
+
+	   Note that the PCB is supposed to be a physical address, but
+	   since KSEG values also happen to work, folks get confused.
+	   Check this here.  */
+
+	if ((unsigned long)original_pcb_ptr < PAGE_OFFSET) {
+		original_pcb_ptr = (struct thread_struct *)
+		  phys_to_virt((unsigned long) original_pcb_ptr);
+	}
+	original_pcb = *original_pcb_ptr;
 }
 
 /*
@@ -190,10 +228,8 @@ unsigned long
 paging_init(unsigned long start_mem, unsigned long end_mem)
 {
 	int i;
-	unsigned long newptbr;
 	struct memclust_struct * cluster;
 	struct memdesc_struct * memdesc;
-	struct thread_struct *original_pcb_ptr;
 
 	/* initialize mem_map[] */
 	start_mem = free_area_init(start_mem, end_mem);
@@ -211,70 +247,20 @@ paging_init(unsigned long start_mem, unsigned long end_mem)
 		if (cluster->usage & 3)
 			continue;
 		pfn = cluster->start_pfn;
+		if (pfn >= MAP_NR(end_mem)) /* if we overrode mem size */
+			continue;
 		nr = cluster->numpages;
+		if ((pfn + nr) > MAP_NR(end_mem)) /* if override in cluster */
+			nr = MAP_NR(end_mem) - pfn;
 
 		while (nr--)
 			clear_bit(PG_reserved, &mem_map[pfn++].flags);
 	}
 
-	/* Initialize the kernel's page tables.  Linux puts the vptb in
-	   the last slot of the L1 page table.  */
-	memset((void *) ZERO_PAGE, 0, PAGE_SIZE);
-	memset(swapper_pg_dir, 0, PAGE_SIZE);
-	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
-	pgd_val(swapper_pg_dir[1023]) =
-		(newptbr << 32) | pgprot_val(PAGE_KERNEL);
-
-	/* Set the vptb.  This is often done by the bootloader, but 
-	   shouldn't be required.  */
-	if (hwrpb->vptb != 0xfffffffe00000000) {
-		wrvptptr(0xfffffffe00000000);
-		hwrpb->vptb = 0xfffffffe00000000;
-		hwrpb_update_checksum(hwrpb);
-	}
-
-	/* Also set up the real kernel PCB while we're at it.  */
-	init_task.tss.ptbr = newptbr;
-	init_task.tss.pal_flags = 1;	/* set FEN, clear everything else */
-	init_task.tss.flags = 0;
-	original_pcb_ptr = load_PCB(&init_task.tss);
-	tbia();
-
-	/* Save off the contents of the original PCB so that we can
-	   restore the original console's page tables for a clean reboot.
-
-	   Note that the PCB is supposed to be a physical address, but
-	   since KSEG values also happen to work, folks get confused.
-	   Check this here.  */
-
-	if ((unsigned long)original_pcb_ptr < PAGE_OFFSET) {
-		original_pcb_ptr = (struct thread_struct *)
-		  phys_to_virt((unsigned long) original_pcb_ptr);
-	}
-	original_pcb = *original_pcb_ptr;
+	memset((void *) ZERO_PAGE(0), 0, PAGE_SIZE);
 
 	return start_mem;
 }
-
-#ifdef __SMP__
-/*
- * paging_init_secondary(), called ONLY by secondary CPUs,
- * sets up current->tss contents appropriately and does a load_PCB.
- * note that current should be pointing at the idle thread task struct
- * for this CPU.
- */
-void
-paging_init_secondary(void)
-{
-	current->tss.ptbr = init_task.tss.ptbr;
-	current->tss.pal_flags = 1;
-	current->tss.flags = 0;
-	load_PCB(&current->tss);
-	tbia();
-
-	return;
-}
-#endif /* __SMP__ */
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)
 void
@@ -348,8 +334,8 @@ mem_init(unsigned long start_mem, unsigned long end_mem)
 		kill_page(tmp);
 		free_page(tmp);
 	}
-	tmp = nr_free_pages << PAGE_SHIFT;
-	printk("Memory: %luk available\n", tmp >> 10);
+	tmp = nr_free_pages << (PAGE_SHIFT - 10);
+	printk("Memory: %luk available\n", tmp);
 	return;
 }
 
@@ -378,7 +364,7 @@ si_meminfo(struct sysinfo *val)
 	i = max_mapnr;
 	val->totalram = 0;
 	val->sharedram = 0;
-	val->freeram = nr_free_pages << PAGE_SHIFT;
+	val->freeram = ((unsigned long)nr_free_pages) << PAGE_SHIFT;
 	val->bufferram = buffermem;
 	while (i-- > 0)  {
 		if (PageReserved(mem_map+i))

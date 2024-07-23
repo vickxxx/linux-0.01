@@ -27,18 +27,16 @@
 #include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/config.h>
-#include <linux/unistd.h>
 #include <linux/delay.h>
-#include <linux/smp.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
 
 #include <asm/uaccess.h>
-#include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/io.h>
 
 extern char *processor_modes[];
+extern void setup_mm_for_reboot(char mode);
 
 asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
 
@@ -55,46 +53,57 @@ void enable_hlt(void)
 }
 
 /*
- * The idle loop on an arm..
+ * The idle loop on an ARM...
  */
 asmlinkage int sys_idle(void)
 {
-	int ret = -EPERM;
+	current->priority = 0;
+	current->counter = -100;
 
-	lock_kernel();
-	if (current->pid != 0)
-		goto out;
 	/* endless idle loop with no priority at all */
-	current->priority = -100;
-	for (;;)
-	{
-		check_pgt_cache();
-#if 0 //def ARCH_IDLE_OK
-		if (!hlt_counter && !current->need_resched)
-			proc_idle ();
-#endif
-		run_task_queue(&tq_scheduler);
+	while (1) {
+		if (!current->need_resched && !hlt_counter)
+			arch_do_idle();
 		schedule();
+#ifndef CONFIG_NO_PGT_CACHE
+		check_pgt_cache();
+#endif
 	}
-	ret = 0;
-out:
-	unlock_kernel();
-	return ret;
 }
+
+static char reboot_mode = 'h';
 
 __initfunc(void reboot_setup(char *str, int *ints))
 {
+	reboot_mode = str[0];
 }
 
-/*
- * This routine reboots the machine by resetting the expansion cards via
- * their loaders, turning off the processor cache (if ARM3), copying the
- * first instruction of the ROM to 0, and executing it there.
- */
 void machine_restart(char * __unused)
 {
-	proc_hard_reset ();
-	arch_hard_reset ();
+	/*
+	 * Clean and disable cache, turn off interrupts
+	 */
+	processor._proc_fin();
+
+	/*
+	 * Tell the mm system that we are going to reboot -
+	 * we may need to insert some 1:1 mappings so that
+	 * soft boot works.
+	 */
+	setup_mm_for_reboot(reboot_mode);
+
+	/*
+	 * Now call the architecture specific reboot code.
+	 */
+	arch_reset(reboot_mode);
+
+	/*
+	 * Whoops - the architecture was unable to reboot.
+	 * Tell the user!
+	 */
+	mdelay(1000);
+	panic("Reboot failed -- System halted\n");
+	while (1);
 }
 
 void machine_halt(void)
@@ -150,6 +159,67 @@ void show_regs(struct pt_regs * regs)
 }
 
 /*
+ * Task structure and kernel stack allocation.
+ *
+ * Taken from the i386 version.
+ */
+#ifdef CONFIG_CPU_32
+#define EXTRA_TASK_STRUCT	8
+static struct task_struct *task_struct_stack[EXTRA_TASK_STRUCT];
+static int task_struct_stack_ptr = -1;
+#endif
+
+struct task_struct *alloc_task_struct(void)
+{
+	struct task_struct *tsk;
+
+#ifndef EXTRA_TASK_STRUCT
+	tsk = ll_alloc_task_struct();
+#else
+	int index;
+
+	index = task_struct_stack_ptr;
+	if (index >= EXTRA_TASK_STRUCT/2)
+		goto use_cache;
+
+	tsk = ll_alloc_task_struct();
+
+	if (!tsk) {
+		index = task_struct_stack_ptr;
+
+		if (index >= 0) {
+use_cache:		tsk = task_struct_stack[index];
+			task_struct_stack_ptr = index - 1;
+		}
+	}
+#endif
+#ifdef CONFIG_SYSRQ
+	/* You need this if you want SYSRQ-T to give sensible stack
+	 * usage information
+	 */
+	if (tsk) {
+		char *p = (char *)tsk;
+		memzero(p+KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+	}
+#endif
+
+	return tsk;
+}
+
+void free_task_struct(struct task_struct *p)
+{
+#ifdef EXTRA_TASK_STRUCT
+	int index = task_struct_stack_ptr + 1;
+
+	if (index < EXTRA_TASK_STRUCT) {
+		task_struct_stack[index] = p;
+		task_struct_stack_ptr = index;
+	} else
+#endif
+		ll_free_task_struct(p);
+}
+
+/*
  * Free current thread data structures etc..
  */
 void exit_thread(void)
@@ -158,10 +228,8 @@ void exit_thread(void)
 
 void flush_thread(void)
 {
-	int i;
-
-	for (i = 0; i < NR_DEBUGS; i++)
-		current->tss.debug[i] = 0;
+	memset(&current->tss.debug, 0, sizeof(struct debug_info));
+	memset(&current->tss.fpstate, 0, sizeof(union fp_state));
 	current->used_math = 0;
 	current->flags &= ~PF_USEDFPU;
 }
@@ -179,9 +247,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	childregs = ((struct pt_regs *)((unsigned long)p + 8192)) - 1;
 	*childregs = *regs;
 	childregs->ARM_r0 = 0;
+	childregs->ARM_sp = esp;
 
 	save = ((struct context_save_struct *)(childregs)) - 1;
-	copy_thread_css(save);
+	init_thread_css(save);
 	p->tss.save = save;
 
 	return 0;
@@ -192,12 +261,10 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
  */
 int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
 {
-	int fpvalid = 0;
-
 	if (current->used_math)
-		memcpy (fp, &current->tss.fpstate.soft, sizeof (fp));
+		memcpy (fp, &current->tss.fpstate.soft, sizeof (*fp));
 
-	return fpvalid;
+	return current->used_math;
 }
 
 /*
@@ -205,18 +272,20 @@ int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
  */
 void dump_thread(struct pt_regs * regs, struct user * dump)
 {
-	int i;
-
+	struct task_struct *tsk = current;
 	dump->magic = CMAGIC;
-	dump->start_code = current->mm->start_code;
+	dump->start_code = tsk->mm->start_code;
 	dump->start_stack = regs->ARM_sp & ~(PAGE_SIZE - 1);
 
-	dump->u_tsize = (current->mm->end_code - current->mm->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk - current->mm->start_data + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	dump->u_tsize = (tsk->mm->end_code - tsk->mm->start_code) >> PAGE_SHIFT;
+	dump->u_dsize = (tsk->mm->brk - tsk->mm->start_data + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	dump->u_ssize = 0;
 
-	for (i = 0; i < NR_DEBUGS; i++)
-		dump->u_debugreg[i] = current->tss.debug[i];  
+	dump->u_debugreg[0] = tsk->tss.debug.bp[0].address;
+	dump->u_debugreg[1] = tsk->tss.debug.bp[1].address;
+	dump->u_debugreg[2] = tsk->tss.debug.bp[0].insn;
+	dump->u_debugreg[3] = tsk->tss.debug.bp[1].insn;
+	dump->u_debugreg[4] = tsk->tss.debug.nsaved;
 
 	if (dump->start_stack < 0x04000000)
 		dump->u_ssize = (0x04000000 - dump->start_stack) >> PAGE_SHIFT;
@@ -224,3 +293,34 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	dump->regs = *regs;
 	dump->u_fpvalid = dump_fpu (regs, &dump->u_fp);
 }
+
+/*
+ * This is the mechanism for creating a new kernel thread.
+ *
+ * NOTE! Only a kernel-only process(ie the swapper or direct descendants
+ * who haven't done an "execve()") should use this: it will work within
+ * a system call from a "real" process, but the process memory space will
+ * not be free'd until both the parent and the child have exited.
+ */
+pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
+{
+	extern int sys_exit(int) __attribute__((noreturn));
+	pid_t __ret;
+
+	__asm__ __volatile__(
+	"orr	r0, %1, %2	@ kernel_thread\n"
+"	mov	r1, #0\n"
+	__syscall(clone)"\n"
+"	movs	%0, r0
+	bne	1f
+	mov	fp, r0
+	mov	r0, %4
+	mov	lr, pc
+	mov	pc, %3
+	b	sys_exit
+1:	"
+        : "=r" (__ret)
+        : "Ir" (flags), "I" (CLONE_VM), "r" (fn), "r" (arg): "r0", "r1", "lr");
+	return __ret;
+}
+

@@ -1,8 +1,8 @@
-/* $Id: isdnloop.c,v 1.4 1998/02/24 21:39:05 he Exp $
+/* $Id: isdnloop.c,v 1.11.6.1 2000/12/17 16:47:18 kai Exp $
 
  * ISDN low-level module implementing a dummy loop driver.
  *
- * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
+ * Copyright 1997 by Fritz Elfert (fritz@isdn4linux.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,31 +18,15 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: isdnloop.c,v $
- * Revision 1.4  1998/02/24 21:39:05  he
- * L2_PROT_X25DTE / DCE
- * additional state 17 and new internal signal messages "BCON_I"
- * (for reliable connect confirmation primitive as needed by x.25 upper layer)
- * Changes for new LL-HL interface
- *
- * Revision 1.3  1998/02/20 17:33:30  fritz
- * Changes for recent kernels.
- *
- * Revision 1.2  1997/10/01 09:22:03  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.1  1997/03/24 23:02:04  fritz
- * Added isdnloop driver.
- *
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
+#include <linux/init.h>
 #include "isdnloop.h"
 
 static char
-*revision = "$Revision: 1.4 $";
+*revision = "$Revision: 1.11.6.1 $";
 
 static int isdnloop_addcard(char *);
 
@@ -848,6 +832,7 @@ isdnloop_parse_cmd(isdnloop_card * card)
 			if (card->rcard[ch - 1]) {
 				isdnloop_fake(card->rcard[ch - 1], "BCON_I",
 					      card->rch[ch - 1] + 1);
+				isdnloop_fake(card, "BCON_C", ch);
 			}
 			break;
 		case 17:
@@ -1312,7 +1297,7 @@ isdnloop_command(isdn_ctrl * c, isdnloop_card * card)
 							c->parm.num[0] ? "N" : "ALL", c->parm.num);
 					} else
 						sprintf(cbuf, "%02d;EAZ%s\n", (int) a,
-							c->parm.num[0] ? c->parm.num : "0123456789");
+							c->parm.num[0] ? c->parm.num : (u_char *) "0123456789");
 					i = isdnloop_writecmd(cbuf, strlen(cbuf), 0, card);
 				}
 				break;
@@ -1551,22 +1536,7 @@ isdnloop_addcard(char *id1)
 	return 0;
 }
 
-#ifdef MODULE
-#define isdnloop_init init_module
-#else
-void
-isdnloop_setup(char *str, int *ints)
-{
-	static char sid[20];
-
-	if (strlen(str)) {
-		strcpy(sid, str);
-		isdnloop_id = sid;
-	}
-}
-#endif
-
-int
+static int __init
 isdnloop_init(void)
 {
 	char *p;
@@ -1585,9 +1555,8 @@ isdnloop_init(void)
 	return (isdnloop_addcard(isdnloop_id));
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void 
+isdnloop_exit(void)
 {
 	isdn_ctrl cmd;
 	isdnloop_card *card = cards;
@@ -1615,4 +1584,6 @@ cleanup_module(void)
 	}
 	printk(KERN_NOTICE "isdnloop-ISDN-driver unloaded\n");
 }
-#endif
+
+module_init(isdnloop_init);
+module_exit(isdnloop_exit);

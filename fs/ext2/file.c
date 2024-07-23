@@ -50,7 +50,7 @@ static int ext2_open_file (struct inode *, struct file *);
 	   (1LL << (bits - 2)) * (1LL << (bits - 2)) * (1LL << (bits - 2))) * 	\
 	  (1LL << bits)) - 1)
 
-static long long ext2_max_sizes[] = {
+long long ext2_max_sizes[] = {
 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
 EXT2_MAX_SIZE(10), EXT2_MAX_SIZE(11), EXT2_MAX_SIZE(12), EXT2_MAX_SIZE(13)
 };
@@ -120,23 +120,23 @@ static long long ext2_file_lseek(
 		case 1:
 			offset += file->f_pos;
 	}
-	if (((unsigned long long) offset >> 32) != 0) {
 #if BITS_PER_LONG < 64
+	if (offset >> 31)
 		return -EINVAL;
 #else
-		if (offset > ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(inode->i_sb)])
-			return -EINVAL;
+	if (offset < 0 ||
+	    offset > ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(inode->i_sb)])
+		return -EINVAL;
 #endif
-	} 
 	if (offset != file->f_pos) {
 		file->f_pos = offset;
 		file->f_reada = 0;
-		file->f_version = ++event;
+		file->f_version = ++global_event;
 	}
 	return offset;
 }
 
-static inline void remove_suid(struct inode *inode)
+inline void ext2_remove_suid(struct inode *inode)
 {
 	unsigned int mode;
 
@@ -162,11 +162,17 @@ static ssize_t ext2_file_write (struct file * filp, const char * buf,
 	struct buffer_head * bh, *bufferlist[NBUF];
 	struct super_block * sb;
 	int err;
-	int i,buffercount,write_error;
-
+	int i,buffercount,write_error, new_buffer;
+	unsigned long limit;
+	
 	/* POSIX: mtime/ctime may not change for 0 count */
 	if (!count)
 		return 0;
+	/* This makes the bounds-checking arithmetic later on much more
+	 * sane. */
+	if (((signed) count) < 0)
+		return -EINVAL;
+	
 	write_error = buffercount = 0;
 	if (!inode) {
 		printk("ext2_file_write: inode = NULL\n");
@@ -184,7 +190,7 @@ static ssize_t ext2_file_write (struct file * filp, const char * buf,
 			      inode->i_mode);
 		return -EINVAL;
 	}
-	remove_suid(inode);
+	ext2_remove_suid(inode);
 
 	if (filp->f_flags & O_APPEND)
 		pos = inode->i_size;
@@ -192,29 +198,38 @@ static ssize_t ext2_file_write (struct file * filp, const char * buf,
 		pos = *ppos;
 		if (pos != *ppos)
 			return -EINVAL;
-#if BITS_PER_LONG >= 64
-		if (pos > ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(sb)])
-			return -EINVAL;
-#endif
 	}
 
 	/* Check for overflow.. */
+
 #if BITS_PER_LONG < 64
-	if (pos > (__u32) (pos + count)) {
-		count = ~pos; /* == 0xFFFFFFFF - pos */
-		if (!count)
+	/* If the fd's pos is already greater than or equal to the file
+	 * descriptor's offset maximum, then we need to return EFBIG for
+	 * any non-zero count (and we already tested for zero above). */
+	if (((unsigned) pos) >= 0x7FFFFFFFUL)
+		return -EFBIG;
+	
+	/* If we are about to overflow the maximum file size, we also
+	 * need to return the error, but only if no bytes can be written
+	 * successfully. */
+	if (((unsigned) pos + count) > 0x7FFFFFFFUL) {
+		count = 0x7FFFFFFFL - pos;
+		if (((signed) count) < 0)
 			return -EFBIG;
 	}
 #else
 	{
 		off_t max = ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(sb)];
 
+		if (pos >= max)
+			return -EFBIG;
+		
 		if (pos + count > max) {
 			count = max - pos;
 			if (!count)
 				return -EFBIG;
 		}
-		if (((pos + count) >> 32) && 
+		if (((pos + count) >> 31) && 
 		    !(sb->u.ext2_sb.s_es->s_feature_ro_compat &
 		      cpu_to_le32(EXT2_FEATURE_RO_COMPAT_LARGE_FILE))) {
 			/* If this is the first large file created, add a flag
@@ -225,6 +240,20 @@ static ssize_t ext2_file_write (struct file * filp, const char * buf,
 		}
 	}
 #endif
+
+	/* From SUS: We must generate a SIGXFSZ for file size overflow
+	 * only if no bytes were actually written to the file. --sct */
+
+	limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
+	if (limit < RLIM_INFINITY) {
+		if (((unsigned) pos+count) >= limit) {
+			count = limit - pos;
+			if (((signed) count) <= 0) {
+				send_sig(SIGXFSZ, current, 0);
+				return -EFBIG;
+			}
+		}
+	}
 
 	/*
 	 * If a file has been opened in synchronous mode, we have to ensure
@@ -247,30 +276,60 @@ static ssize_t ext2_file_write (struct file * filp, const char * buf,
 		}
 		if (c > count)
 			c = count;
-		if (c != sb->s_blocksize && !buffer_uptodate(bh)) {
-			ll_rw_block (READ, 1, &bh);
-			wait_on_buffer (bh);
-			if (!buffer_uptodate(bh)) {
-				brelse (bh);
+
+		/* Tricky: what happens if we are writing the complete
+		 * contents of a block which is not currently
+		 * initialised?  We have to obey the same
+		 * synchronisation rules as the IO code, to prevent some
+		 * other process from stomping on the buffer contents by
+		 * refreshing them from disk while we are setting up the
+		 * buffer.  The copy_from_user() can page fault, after
+		 * all.  We also have to throw away partially successful
+		 * copy_from_users to such buffers, since we can't trust
+		 * the rest of the buffer_head in that case.  --sct */
+
+		new_buffer = (!buffer_uptodate(bh) && !buffer_locked(bh) &&
+			      c == sb->s_blocksize);
+
+		if (new_buffer) {
+			set_bit(BH_Lock, &bh->b_state);
+			c -= copy_from_user (bh->b_data + offset, buf, c);
+			if (c != sb->s_blocksize) {
+				c = 0;
+				unlock_buffer(bh);
+				brelse(bh);
 				if (!written)
-					written = -EIO;
+					written = -EFAULT;
 				break;
 			}
+			mark_buffer_uptodate(bh, 1);
+			unlock_buffer(bh);
+		} else {
+			if (!buffer_uptodate(bh)) {
+				ll_rw_block (READ, 1, &bh);
+				wait_on_buffer (bh);
+				if (!buffer_uptodate(bh)) {
+					brelse (bh);
+					if (!written)
+						written = -EIO;
+					break;
+				}
+			}
+			c -= copy_from_user (bh->b_data + offset, buf, c);
 		}
-		c -= copy_from_user (bh->b_data + offset, buf, c);
 		if (!c) {
 			brelse(bh);
 			if (!written)
 				written = -EFAULT;
 			break;
 		}
-		update_vm_cache(inode, pos, bh->b_data + offset, c);
+		mark_buffer_dirty(bh, 0);
+		update_vm_cache_conditional(inode, pos, bh->b_data + offset, c,
+					    (unsigned long) buf);
 		pos += c;
 		written += c;
 		buf += c;
 		count -= c;
-		mark_buffer_uptodate(bh, 1);
-		mark_buffer_dirty(bh, 0);
 
 		if (filp->f_flags & O_SYNC)
 			bufferlist[buffercount++] = bh;

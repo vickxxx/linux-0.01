@@ -79,9 +79,9 @@ static int UMSDOS_rreaddir (struct file *filp, void *dirbuf, filldir_t filldir)
  * In the real root directory (c:\), the directory ..
  * is the pseudo root (c:\linux).
  */
-int umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int nopseudo)
+struct dentry *umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int nopseudo)
 {
-	int ret;
+	struct dentry *ret;
 
 	if (saved_root && dir == saved_root->d_inode && !nopseudo &&
 	    dentry->d_name.len == UMSDOS_PSDROOT_LEN &&
@@ -91,15 +91,16 @@ int umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int nopseudo)
 		 * /linux won't show
 		 */
 		 
-		ret = -ENOENT;
+		ret = ERR_PTR(-ENOENT);
 		goto out;
 	}
 
 	ret = msdos_lookup (dir, dentry);
 	if (ret) {
 		printk(KERN_WARNING
-			"umsdos_rlookup_x: %s/%s failed, ret=%d\n",
-			dentry->d_parent->d_name.name, dentry->d_name.name,ret);
+			"umsdos_rlookup_x: %s/%s failed, ret=%ld\n",
+			dentry->d_parent->d_name.name, dentry->d_name.name,
+			PTR_ERR(ret));
 		goto out;
 	}
 	if (dentry->d_inode) {
@@ -109,7 +110,10 @@ int umsdos_rlookup_x ( struct inode *dir, struct dentry *dentry, int nopseudo)
 		 */
 Printk ((KERN_DEBUG "umsdos_rlookup_x: patch_dentry_inode %s/%s\n",
 dentry->d_parent->d_name.name, dentry->d_name.name));
-		umsdos_patch_dentry_inode(dentry, 0);
+/* only patch if needed (because we get called even for lookup
+   (not only rlookup) stuff sometimes, like in umsdos_covered() */
+		if (dentry->d_inode->u.umsdos_i.i_patched == 0)	
+			umsdos_patch_dentry_inode(dentry, 0);
 
 	}
 out:
@@ -119,7 +123,7 @@ out:
 }
 
 
-int UMSDOS_rlookup ( struct inode *dir, struct dentry *dentry)
+struct dentry *UMSDOS_rlookup ( struct inode *dir, struct dentry *dentry)
 {
 	return umsdos_rlookup_x (dir, dentry, 0);
 }

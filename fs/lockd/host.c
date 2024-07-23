@@ -15,6 +15,7 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/lockd/lockd.h>
+#include <linux/lockd/sm_inter.h>
 
 
 #define NLMDBG_FACILITY		NLMDBG_HOSTCACHE
@@ -25,7 +26,6 @@
 #define NLM_HOST_REBIND		(60 * HZ)
 #define NLM_HOST_EXPIRE		((nrhosts > NLM_HOST_MAX)? 300 * HZ : 120 * HZ)
 #define NLM_HOST_COLLECT	((nrhosts > NLM_HOST_MAX)? 120 * HZ :  60 * HZ)
-#define NLM_HOST_ADDR(sv)	(&(sv)->s_nlmclnt->cl_xprt->addr)
 
 static struct nlm_host *	nlm_hosts[NLM_HOST_NRHASH];
 static unsigned long		next_gc = 0;
@@ -34,24 +34,6 @@ static struct semaphore		nlm_host_sema = MUTEX;
 
 
 static void			nlm_gc_hosts(void);
-
-/*
- * Find an NLM server handle in the cache. If there is none, create it.
- */
-struct nlm_host *
-nlmclnt_lookup_host(struct sockaddr_in *sin, int proto, int version)
-{
-	return nlm_lookup_host(NULL, sin, proto, version);
-}
-
-/*
- * Find an NLM client handle in the cache. If there is none, create it.
- */
-struct nlm_host *
-nlmsvc_lookup_host(struct svc_rqst *rqstp)
-{
-	return nlm_lookup_host(rqstp->rq_client, &rqstp->rq_addr, 0, 0);
-}
 
 /*
  * Match the given host against client/address
@@ -66,61 +48,33 @@ nlm_match_host(struct nlm_host *host, struct svc_client *clnt,
 }
 
 /*
- * Common host lookup routine for server & client
+ * Hash the host
  */
-struct nlm_host *
-nlm_lookup_host(struct svc_client *clnt, struct sockaddr_in *sin,
-					int proto, int version)
+static inline int
+nlm_hash_host(struct svc_client *clnt, struct sockaddr_in *sin)
 {
-	struct nlm_host	*host, **hp;
+	if (clnt)
+		return NLM_PTRHASH(clnt);
+	return NLM_ADDRHASH(sin->sin_addr.s_addr);
+}
+
+static struct nlm_host *
+nlm_create_host(struct svc_client *clnt, struct sockaddr_in *sin,
+		int proto, int version)
+{
+	struct nlm_host	*host;
 	u32		addr;
 	int		hash;
-
-	if (!clnt && !sin) {
-		printk(KERN_NOTICE "lockd: no clnt or addr in lookup_host!\n");
-		return NULL;
-	}
-
-	dprintk("lockd: nlm_lookup_host(%08x, p=%d, v=%d)\n",
-			(unsigned)(sin? ntohl(sin->sin_addr.s_addr) : 0), proto, version);
-
-	if (clnt)
-		hash = NLM_PTRHASH(clnt);
-	else
-		hash = NLM_ADDRHASH(sin->sin_addr.s_addr);
-
-	/* Lock hash table */
-	down(&nlm_host_sema);
 
 	if (time_after_eq(jiffies, next_gc))
 		nlm_gc_hosts();
 
-	for (hp = &nlm_hosts[hash]; (host = *hp); hp = &host->h_next) {
-		if (host->h_version != version || host->h_proto != proto)
-			continue;
-
-		if (nlm_match_host(host, clnt, sin)) {
-			if (hp != nlm_hosts + hash) {
-				*hp = host->h_next;
-				host->h_next = nlm_hosts[hash];
-				nlm_hosts[hash] = host;
-			}
-			host->h_expires = jiffies + NLM_HOST_EXPIRE;
-			host->h_count++;
-			up(&nlm_host_sema);
-			return host;
-		}
+	if (!(host = (struct nlm_host *) kmalloc(sizeof(*host), GFP_KERNEL))) {
+		dprintk("lockd: attempt to create host entry failed.\n");
+		return NULL;
 	}
 
-	/* special hack for nlmsvc_invalidate_client */
-	if (sin == NULL)
-		goto nohost;
-
-	/* Ooops, no host found, create it */
-	dprintk("lockd: creating host entry\n");
-
-	if (!(host = (struct nlm_host *) kmalloc(sizeof(*host), GFP_KERNEL)))
-		goto nohost;
+	dprintk("lockd: creating host entry.\n");
 	memset(host, 0, sizeof(*host));
 
 	addr = sin->sin_addr.s_addr;
@@ -134,23 +88,104 @@ nlm_lookup_host(struct svc_client *clnt, struct sockaddr_in *sin,
 	host->h_addr.sin_port = 0;	/* ouch! */
 	host->h_version    = version;
 	host->h_proto      = proto;
-	host->h_authflavor = RPC_AUTH_NULL;
-	host->h_rpcclnt    = NULL;
+	host->h_authflavor = RPC_AUTH_UNIX;
 	host->h_sema	   = MUTEX;
-	host->h_nextrebind = jiffies + NLM_HOST_REBIND;
 	host->h_expires    = jiffies + NLM_HOST_EXPIRE;
 	host->h_count      = 1;
-	host->h_state      = 0;			/* pseudo NSM state */
-	host->h_nsmstate   = 0;			/* real NSM state */
 	host->h_exportent  = clnt;
 
+	hash = nlm_hash_host(clnt, sin);
 	host->h_next       = nlm_hosts[hash];
 	nlm_hosts[hash]    = host;
 
 	if (++nrhosts > NLM_HOST_MAX)
-		next_gc = 0;
+		next_gc = jiffies;
 
-nohost:
+	return host;
+}
+
+static struct nlm_host *
+__nlm_lookup_host(struct svc_client *clnt, struct sockaddr_in *sin,
+		  int proto, int version)
+{
+	struct nlm_host	*host, **hp;
+	int hash;
+
+	if (!clnt && !sin) {
+		printk(KERN_NOTICE "lockd: no clnt or addr in lookup_host!\n");
+		return NULL;
+	}
+
+	dprintk("lockd: nlm_lookup_host(%08x, p=%d, v=%d)\n",
+			(unsigned)(sin? ntohl(sin->sin_addr.s_addr) : 0), proto, version);
+
+	hash = nlm_hash_host(clnt, sin);
+	for (hp = &nlm_hosts[hash]; (host = *hp); hp = &host->h_next) {
+		if (proto && host->h_proto != proto)
+			continue;
+		if (version && host->h_version != version)
+			continue;
+
+		if (nlm_match_host(host, clnt, sin)) {
+			if (hp != nlm_hosts + hash) {
+				*hp = host->h_next;
+				host->h_next = nlm_hosts[hash];
+				nlm_hosts[hash] = host;
+			}
+			nlm_get_host(host);
+			break;
+		}
+	}
+	return host;
+}
+
+/*
+ * Common host lookup routine for server & client
+ */
+struct nlm_host *
+nlm_lookup_host(struct svc_client *clnt, struct sockaddr_in *sin,
+		int proto, int version)
+{
+	struct nlm_host *host;
+
+	/* Lock hash table */
+	down(&nlm_host_sema);
+	host = __nlm_lookup_host(clnt, sin, proto, version);
+	up(&nlm_host_sema);
+	return host;
+}
+
+/*
+ * Find an NLM server handle in the cache. If there is none, create it.
+ */
+struct nlm_host *
+nlmclnt_lookup_host(struct sockaddr_in *sin, int prot, int vers)
+{
+	struct nlm_host *host;
+
+	/* Lock hash table */
+	down(&nlm_host_sema);
+	if ((host = __nlm_lookup_host(NULL, sin, prot, vers)) == NULL)
+		host = nlm_create_host(NULL, sin, prot, vers);
+	up(&nlm_host_sema);
+	return host;
+}
+
+/*
+ * Find an NLM client handle in the cache. If there is none, create it.
+ */
+struct nlm_host *
+nlmsvc_lookup_host(struct svc_rqst *rqstp)
+{
+	struct nlm_host *host;
+	struct svc_client *clnt = rqstp->rq_client;
+	int prot = rqstp->rq_prot,
+	    vers = rqstp->rq_vers;
+
+	/* Lock hash table */
+	down(&nlm_host_sema);
+	if ((host = __nlm_lookup_host(clnt, NULL, prot, vers)) == NULL)
+		host = nlm_create_host(clnt, &rqstp->rq_addr, prot, vers);
 	up(&nlm_host_sema);
 	return host;
 }
@@ -171,9 +206,12 @@ nlm_bind_host(struct nlm_host *host)
 	down(&host->h_sema);
 
 	/* If we've already created an RPC client, check whether
-	 * RPC rebind is required */
+	 * RPC rebind is required
+	 * Note: why keep rebinding if we're on a tcp connection?
+	 */
 	if ((clnt = host->h_rpcclnt) != NULL) {
-		if (time_after_eq(jiffies, host->h_nextrebind)) {
+		xprt = clnt->cl_xprt;
+		if (!xprt->stream && time_after_eq(jiffies, host->h_nextrebind)) {
 			clnt->cl_port = 0;
 			host->h_nextrebind = jiffies + NLM_HOST_REBIND;
 			dprintk("lockd: next rebind in %ld jiffies\n",
@@ -203,6 +241,7 @@ nlm_bind_host(struct nlm_host *host)
 		clnt->cl_autobind = 1;	/* turn on pmap queries */
 		xprt->nocong = 1;	/* No congestion control for NLM */
 
+		host->h_nextrebind = jiffies + NLM_HOST_REBIND;
 		host->h_rpcclnt = clnt;
 	}
 
@@ -229,13 +268,27 @@ nlm_rebind_host(struct nlm_host *host)
 }
 
 /*
+ * Increment NLM host count
+ */
+struct nlm_host * nlm_get_host(struct nlm_host *host)
+{
+	if (host) {
+		dprintk("lockd: get host %s\n", host->h_name);
+		host->h_count ++;
+		host->h_expires = jiffies + NLM_HOST_EXPIRE;
+	}
+	return host;
+}
+
+/*
  * Release NLM host after use
  */
-void
-nlm_release_host(struct nlm_host *host)
+void nlm_release_host(struct nlm_host *host)
 {
-	dprintk("lockd: release host %s\n", host->h_name);
-	host->h_count -= 1;
+	if (host && host->h_count) {
+		dprintk("lockd: release host %s\n", host->h_name);
+		host->h_count --;
+	}
 }
 
 /*
@@ -255,7 +308,7 @@ nlm_shutdown_hosts(void)
 	dprintk("lockd: nuking all hosts...\n");
 	for (i = 0; i < NLM_HOST_NRHASH; i++) {
 		for (host = nlm_hosts[i]; host; host = host->h_next)
-			host->h_expires = 0;
+			host->h_expires = jiffies;
 	}
 
 	/* Then, perform a garbage collection pass */
@@ -307,15 +360,10 @@ nlm_gc_hosts(void)
 			}
 			dprintk("lockd: delete host %s\n", host->h_name);
 			*q = host->h_next;
-			if ((clnt = host->h_rpcclnt) != NULL) {
-				if (clnt->cl_users) {
-					printk(KERN_WARNING
-						"lockd: active RPC handle\n");
-					clnt->cl_dead = 1;
-				} else {
-					rpc_destroy_client(host->h_rpcclnt);
-				}
-			}
+			if (host->h_monitored)
+				nsm_unmonitor(host);
+			if ((clnt = host->h_rpcclnt) != NULL)
+				rpc_shutdown_client(clnt);
 			kfree(host);
 			nrhosts--;
 		}

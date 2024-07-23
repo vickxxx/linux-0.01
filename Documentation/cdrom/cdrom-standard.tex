@@ -24,8 +24,8 @@
 \title{A \linux\ \cdrom\ standard}
 \author{David van Leeuwen\\{\normalsize\tt david@ElseWare.cistron.nl}
 \\{\footnotesize updated by Erik Andersen {\tt(andersee@debian.org)}}
-\\{\footnotesize updated by Jens Axboe {\tt(axboe@image.dk)}}}
-\date{11 January 1999}
+\\{\footnotesize updated by Jens Axboe {\tt(axboe@suse.de)}}}
+\date{12 March 1999}
 
 \maketitle
 
@@ -549,7 +549,9 @@ non-supported $ioctl$s are: {\it CDROMREADMODE1, CDROMREADMODE2,
   CDROMREADAUDIO, CDROMREADRAW, CDROMREADCOOKED, CDROMSEEK,
   CDROMPLAY\-BLK and CDROM\-READALL}.
 
+
 \subsection{\cdrom\ capabilities}
+\label{capability}
 
 Instead of just implementing some $ioctl$ calls, the interface in
 \cdromc\ supplies the possibility to indicate the {\em capabilities\/}
@@ -917,7 +919,7 @@ the current flags.
   than fixing this interface by changing the assumptions it was made
   under, thereby breaking all user applications that use this
   function, the \UCD\ implements this $ioctl$ as follows: If the CD in
-  question has audio tracks on it, and it has absolutly no CD-I, XA,
+  question has audio tracks on it, and it has absolutely no CD-I, XA,
   or data tracks on it, it will be reported as $CDS_AUDIO$.  If it has
   both audio and data tracks, it will return $CDS_MIXED$.  If there
   are no audio tracks on the disc, and if the CD in question has any
@@ -944,6 +946,13 @@ the current flags.
 \item[CDROM_CHANGER_NSLOTS] Returns the number of slots in a
   juke-box. 
 \item[CDROMRESET] Reset the drive. 
+\item[CDROM_GET_CAPABILITY] Returns the $capability$ flags for the
+  drive. Refer to section \ref{capability} for more information on
+  these flags.
+\item[CDROM_LOCKDOOR] Locks the door of the drive. $arg == \rm0$
+  unlocks the door, any other value locks it.
+\item[CDROM_DEBUG] Turns on debugging info. Only root is allowed
+  to do this. Same semantics as CDROM_LOCKDOOR.
 \end{description}
 
 \subsubsection{Device dependent $ioctl$s}

@@ -18,13 +18,13 @@
 #include <asm/system.h>
 #include <asm/pci.h>
 #include <asm/hwrpb.h>
-#include <asm/mmu_context.h>
 
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_mcpcia.h>
 #undef __EXTERN_INLINE
 
+#include "machvec.h"
 #include "proto.h"
 #include "bios32.h"
 
@@ -46,21 +46,18 @@
 # define DBG_CFG(args)
 #endif
 
-
-#define DEBUG_MCHECK
-
-#ifdef DEBUG_MCHECK
-# define DBG_MCK(args)	printk args
-#else
-# define DBG_MCK(args)
-#endif
+#define DEBUG_MCHECK 0	/* 0 = minimal, 1 = debug, 2 = dump */
 
 static volatile unsigned int MCPCIA_mcheck_expected[NR_CPUS];
 static volatile unsigned int MCPCIA_mcheck_taken[NR_CPUS];
+static volatile unsigned int MCPCIA_mcheck_hose[NR_CPUS];
 static unsigned int MCPCIA_jd[NR_CPUS];
+static unsigned int MCPCIA_mcheck_enable_print = 1;
+static unsigned int MCPCIA_mcheck_probing_hose = 0;
 
-#define MCPCIA_MAX_HOSES 2
+#define MCPCIA_MAX_HOSES	4
 
+static struct linux_hose_info *mcpcia_hoses[MCPCIA_MAX_HOSES];
 
 /*
  * Given a bus, device, and function number, compute resulting
@@ -129,6 +126,7 @@ conf_read(unsigned long addr, unsigned char type1,
 	draina();
 	MCPCIA_mcheck_expected[cpu] = 1;
 	MCPCIA_mcheck_taken[cpu] = 0;
+	MCPCIA_mcheck_hose[cpu] = hoseno;
 	mb();
 
 	/* Access configuration space.  */
@@ -170,6 +168,7 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1,
 
 	draina();
 	MCPCIA_mcheck_expected[cpu] = 1;
+	MCPCIA_mcheck_hose[cpu] = hoseno;
 	mb();
 
 	/* Access configuration space.  */
@@ -191,7 +190,7 @@ mk_conf_addr(struct linux_hose_info *hose,
 {
 	unsigned long addr;
 
-	if (!pci_probe_enabled)
+	if (!pci_probe_enabled || !hose->pci_config_space)
 		return -1;
 
 	DBG_CFG(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x,"
@@ -302,23 +301,67 @@ mcpcia_hose_write_config_dword (u8 bus, u8 device_fn, u8 where, u32 value,
 	return PCIBIOS_SUCCESSFUL;
 }
 
+static void
+mcpcia_pci_clr_err(int cpu, int hose)
+{
+	MCPCIA_jd[cpu] = *(vuip)MCPCIA_CAP_ERR(hose);
+	*(vuip)MCPCIA_CAP_ERR(hose) = 0xffffffff; mb(); /* clear them all */
+	MCPCIA_jd[cpu] = *(vuip)MCPCIA_CAP_ERR(hose); /* read to force write */
+}
+
 void __init
 mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 {
-	extern asmlinkage void entInt(void);
+	struct linux_hose_info *hose;
+	int h;
+
+	/* Align memory to cache line; we'll be allocating from it.  */
+	*mem_start = (*mem_start | 31) + 1;
+
+	/* First, allocate for the maximum number of hoses we might have.  */
+	for (h = 0; h < MCPCIA_MAX_HOSES; h++) {
+
+		hose = (struct linux_hose_info *)*mem_start;
+		*mem_start = (unsigned long)(hose + 1);
+
+		memset(hose, 0, sizeof(*hose));
+
+		mcpcia_hoses[h] = hose;
+
+		hose->pci_config_space = MCPCIA_CONF(h);
+		hose->pci_hose_index = h;
+		hose->pci_first_busno = 255;
+		hose->pci_last_busno = 0;
+
+		/* Tell userland where I/O space is located.  */
+		hose->pci_sparse_io_space = MCPCIA_IO(h) - IDENT_ADDR;
+		hose->pci_sparse_mem_space = MCPCIA_SPARSE(h) - IDENT_ADDR;
+		hose->pci_dense_io_space = 0;
+		hose->pci_dense_mem_space = MCPCIA_DENSE(h) - IDENT_ADDR;
+	}
+
+#if 1
+	printk("mcpcia_init_arch: allocating for %d hoses\n",
+	       MCPCIA_MAX_HOSES);
+#endif
+}
+
+/*
+ * This is called from init_IRQ, since we cannot take interrupts
+ * before then, so we cannot do this in init_arch.
+ */
+void __init
+mcpcia_init_hoses(void)
+{
 	struct linux_hose_info *hose;
 	unsigned int mcpcia_err;
 	unsigned int pci_rev;
 	int h, cpu;
 
-	/* Ho hum.. init_arch is called before init_IRQ, but we need to be
-	   able to handle machine checks.  So install the handler now.  */
-	wrent(entInt, 0);
-
-	/* Align memory to cache line; we'll be allocating from it.  */
-	*mem_start = (*mem_start | 31) + 1;
-
 	cpu = smp_processor_id();
+
+	MCPCIA_mcheck_enable_print = 0;
+	MCPCIA_mcheck_probing_hose = 1;
 
 	/* First, find how many hoses we have.  */
 	for (h = 0; h < MCPCIA_MAX_HOSES; h++) {
@@ -329,12 +372,19 @@ mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 		mb();
 		mb();
 		draina();
+		wrmces(7);
 		MCPCIA_mcheck_expected[cpu] = 1;
 		MCPCIA_mcheck_taken[cpu]    = 0;
+		MCPCIA_mcheck_hose[cpu] = h;
+		pci_rev = 0xffffffff;
 		mb();
 
 		/* Access the bus revision word. */
 		pci_rev = *(vuip)MCPCIA_REV(h);
+
+#if 0
+		draina(); /* huh? */
+#endif
 
 		mb();
 		mb();  /* magic */
@@ -342,37 +392,29 @@ mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 			MCPCIA_mcheck_taken[cpu] = 0;
 			pci_rev = 0xffffffff;
 			mb();
+			break;
 		}
 		MCPCIA_mcheck_expected[cpu] = 0;
 		mb();
 
-#if 0
-		printk("mcpcia_init_arch: got 0x%x for PCI_REV for hose %d\n",
-		       pci_rev, h);
-#endif
 		if ((pci_rev >> 16) == PCI_CLASS_BRIDGE_HOST) {
+
 			hose_count++;
 
-			hose = (struct linux_hose_info *)*mem_start;
-			*mem_start = (unsigned long)(hose + 1);
+			mcpcia_pci_clr_err(cpu, h);
 
-			memset(hose, 0, sizeof(*hose));
+			hose = mcpcia_hoses[h];
 
 			*hose_tail = hose;
 			hose_tail = &hose->next;
-
-			hose->pci_io_space = MCPCIA_IO(h);
-			hose->pci_mem_space = MCPCIA_DENSE(h);
-			hose->pci_config_space = MCPCIA_CONF(h);
-			hose->pci_sparse_space = MCPCIA_SPARSE(h);
-			hose->pci_hose_index = h;
-			hose->pci_first_busno = 255;
-			hose->pci_last_busno = 0;
 		}
 	}
 
+	MCPCIA_mcheck_enable_print = 1;
+	MCPCIA_mcheck_probing_hose = 0;
+
 #if 1
-	printk("mcpcia_init_arch: found %d hoses\n", hose_count);
+	printk("mcpcia_init_hoses: found %d hoses\n", hose_count);
 #endif
 
 	/* Now do init for each hose.  */
@@ -395,22 +437,16 @@ mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 		printk("MCPCIA_HBASE 0x%x\n", *(vuip)MCPCIA_HBASE(h));
 #endif
 
+#if 1
 		/* 
-		 * Set up error reporting. Make sure CPU_PE is OFF in the mask.
+		 * Set up error reporting.
 		 */
-#if 0
-		mcpcia_err = *(vuip)MCPCIA_ERR_MASK(h);
-		mcpcia_err &= ~4;   
-		*(vuip)MCPCIA_ERR_MASK(h) = mcpcia_err;
-		mb();
-		mcpcia_err = *(vuip)MCPCIA_ERR_MASK;
-#endif
-
 		mcpcia_err = *(vuip)MCPCIA_CAP_ERR(h);
 		mcpcia_err |= 0x0006;   /* master/target abort */
 		*(vuip)MCPCIA_CAP_ERR(h) = mcpcia_err;
 		mb() ;
 		mcpcia_err = *(vuip)MCPCIA_CAP_ERR(h);
+#endif
 
 		switch (alpha_use_srm_setup)
 		{
@@ -491,11 +527,10 @@ mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 		case 0:
 			/*
 			 * Set up the PCI->physical memory translation windows.
-			 * For now, windows 1,2 and 3 are disabled.  In the
-			 * future, we may want to use them to do scatter/
-			 * gather DMA.
+			 * For now, windows 2 and 3 are disabled. 
 			 *
 			 * Window 0 goes at 2 GB and is 2 GB large.
+			 * Window 1 goes at ? MB and is ? MB large, S/G.
 			 */
 
 			*(vuip)MCPCIA_W0_BASE(h) = 1U | (MCPCIA_DMA_WIN_BASE_DEFAULT & 0xfff00000U);
@@ -555,21 +590,6 @@ mcpcia_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 	}
 }
 
-static int
-mcpcia_pci_clr_err(int h)
-{
-	unsigned int cpu = smp_processor_id();
-
-	MCPCIA_jd[cpu] = *(vuip)MCPCIA_CAP_ERR(h);
-#if 0
-	DBG_MCK(("MCPCIA_pci_clr_err: MCPCIA CAP_ERR(%d) after read 0x%x\n",
-		 h, MCPCIA_jd[cpu]));
-#endif
-	*(vuip)MCPCIA_CAP_ERR(h) = 0xffffffff; mb(); /* clear them all */
-	MCPCIA_jd[cpu] = *(vuip)MCPCIA_CAP_ERR(h);
-	return 0;
-}
-
 static void
 mcpcia_print_uncorrectable(struct el_MCPCIA_uncorrected_frame_mcheck *logout)
 {
@@ -580,133 +600,180 @@ mcpcia_print_uncorrectable(struct el_MCPCIA_uncorrected_frame_mcheck *logout)
 
 	/* Print PAL fields */
 	for (i = 0; i < 24; i += 2) {
-		printk("\tpal temp[%d-%d]\t\t= %16lx %16lx\n\r",
+		printk("  paltmp[%2d-%2d]    = %16lx %16lx\n",
 		       i, i+1, frame->paltemp[i], frame->paltemp[i+1]);
 	}
 	for (i = 0; i < 8; i += 2) {
-		printk("\tshadow[%d-%d]\t\t= %16lx %16lx\n\r",
+		printk("  shadow[%2d-%2d]     = %16lx %16lx\n",
 		       i, i+1, frame->shadow[i], 
 		       frame->shadow[i+1]);
 	}
-	printk("\tAddr of excepting instruction\t= %16lx\n\r",
+	printk("  Addr of excepting instruction  = %16lx\n",
 	       frame->exc_addr);
-	printk("\tSummary of arithmetic traps\t= %16lx\n\r",
+	printk("  Summary of arithmetic traps    = %16lx\n",
 	       frame->exc_sum);
-	printk("\tException mask\t\t\t= %16lx\n\r",
+	printk("  Exception mask                 = %16lx\n",
 	       frame->exc_mask);
-	printk("\tBase address for PALcode\t= %16lx\n\r",
+	printk("  Base address for PALcode       = %16lx\n",
 	       frame->pal_base);
-	printk("\tInterrupt Status Reg\t\t= %16lx\n\r",
+	printk("  Interrupt Status Reg           = %16lx\n",
 	       frame->isr);
-	printk("\tCURRENT SETUP OF EV5 IBOX\t= %16lx\n\r",
+	printk("  CURRENT SETUP OF EV5 IBOX      = %16lx\n",
 	       frame->icsr);
-	printk("\tI-CACHE Reg %s parity error\t= %16lx\n\r",
-	       (frame->ic_perr_stat & 0x800L) ? 
-	       "Data" : "Tag", 
+	printk("  I-CACHE Reg %s parity error    = %16lx\n",
+	       (frame->ic_perr_stat & 0x800L) ? "Data" : "Tag", 
 	       frame->ic_perr_stat); 
-	printk("\tD-CACHE error Reg\t\t= %16lx\n\r",
+	printk("  D-CACHE error Reg              = %16lx\n",
 	       frame->dc_perr_stat);
 	if (frame->dc_perr_stat & 0x2) {
 		switch (frame->dc_perr_stat & 0x03c) {
 		case 8:
-			printk("\t\tData error in bank 1\n\r");
+			printk("    Data error in bank 1\n");
 			break;
 		case 4:
-			printk("\t\tData error in bank 0\n\r");
+			printk("    Data error in bank 0\n");
 			break;
 		case 20:
-			printk("\t\tTag error in bank 1\n\r");
+			printk("    Tag error in bank 1\n");
 			break;
 		case 10:
-			printk("\t\tTag error in bank 0\n\r");
+			printk("    Tag error in bank 0\n");
 			break;
 		}
 	}
-	printk("\tEffective VA\t\t\t= %16lx\n\r",
+	printk("  Effective VA                   = %16lx\n",
 	       frame->va);
-	printk("\tReason for D-stream\t\t= %16lx\n\r",
+	printk("  Reason for D-stream            = %16lx\n",
 	       frame->mm_stat);
-	printk("\tEV5 SCache address\t\t= %16lx\n\r",
+	printk("  EV5 SCache address             = %16lx\n",
 	       frame->sc_addr);
-	printk("\tEV5 SCache TAG/Data parity\t= %16lx\n\r",
+	printk("  EV5 SCache TAG/Data parity     = %16lx\n",
 	       frame->sc_stat);
-	printk("\tEV5 BC_TAG_ADDR\t\t\t= %16lx\n\r",
+	printk("  EV5 BC_TAG_ADDR                = %16lx\n",
 	       frame->bc_tag_addr);
-	printk("\tEV5 EI_ADDR: Phys addr of Xfer\t= %16lx\n\r",
+	printk("  EV5 EI_ADDR: Phys addr of Xfer = %16lx\n",
 	       frame->ei_addr);
-	printk("\tFill Syndrome\t\t\t= %16lx\n\r",
+	printk("  Fill Syndrome                  = %16lx\n",
 	       frame->fill_syndrome);
-	printk("\tEI_STAT reg\t\t\t= %16lx\n\r",
+	printk("  EI_STAT reg                    = %16lx\n",
 	       frame->ei_stat);
-	printk("\tLD_LOCK\t\t\t\t= %16lx\n\r",
+	printk("  LD_LOCK                        = %16lx\n",
 	       frame->ld_lock);
 }
 
 void
-mcpcia_machine_check(unsigned long type, unsigned long la_ptr,
+mcpcia_print_system_area(unsigned long la_ptr)
+{
+	struct el_common *frame;
+	int i;
+
+	struct IOD_subpacket {
+	  unsigned long base;
+	  unsigned int whoami;
+	  unsigned int rsvd1;
+	  unsigned int pci_rev;
+	  unsigned int cap_ctrl;
+	  unsigned int hae_mem;
+	  unsigned int hae_io;
+	  unsigned int int_ctl;
+	  unsigned int int_reg;
+	  unsigned int int_mask0;
+	  unsigned int int_mask1;
+	  unsigned int mc_err0;
+	  unsigned int mc_err1;
+	  unsigned int cap_err;
+	  unsigned int rsvd2;
+	  unsigned int pci_err1;
+	  unsigned int mdpa_stat;
+	  unsigned int mdpa_syn;
+	  unsigned int mdpb_stat;
+	  unsigned int mdpb_syn;
+	  unsigned int rsvd3;
+	  unsigned int rsvd4;
+	  unsigned int rsvd5;
+	} *iodpp;
+
+	frame = (struct el_common *)la_ptr;
+
+	iodpp = (struct IOD_subpacket *) (la_ptr + frame->sys_offset);
+
+	for (i = 0; i < hose_count; i++, iodpp++) {
+	  printk("IOD %d Register Subpacket - Bridge Base Address %16lx\n",
+		 i, iodpp->base);
+	  printk("  WHOAMI      = %8x\n", iodpp->whoami);
+	  printk("  PCI_REV     = %8x\n", iodpp->pci_rev);
+	  printk("  CAP_CTRL    = %8x\n", iodpp->cap_ctrl);
+	  printk("  HAE_MEM     = %8x\n", iodpp->hae_mem);
+	  printk("  HAE_IO      = %8x\n", iodpp->hae_io);
+	  printk("  INT_CTL     = %8x\n", iodpp->int_ctl);
+	  printk("  INT_REG     = %8x\n", iodpp->int_reg);
+	  printk("  INT_MASK0   = %8x\n", iodpp->int_mask0);
+	  printk("  INT_MASK1   = %8x\n", iodpp->int_mask1);
+	  printk("  MC_ERR0     = %8x\n", iodpp->mc_err0);
+	  printk("  MC_ERR1     = %8x\n", iodpp->mc_err1);
+	  printk("  CAP_ERR     = %8x\n", iodpp->cap_err);
+	  printk("  PCI_ERR1    = %8x\n", iodpp->pci_err1);
+	  printk("  MDPA_STAT   = %8x\n", iodpp->mdpa_stat);
+	  printk("  MDPA_SYN    = %8x\n", iodpp->mdpa_syn);
+	  printk("  MDPB_STAT   = %8x\n", iodpp->mdpb_stat);
+	  printk("  MDPB_SYN    = %8x\n", iodpp->mdpb_syn);
+	}
+}
+
+void
+mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
 		     struct pt_regs * regs)
 {
-#if 0
-        printk("mcpcia machine check ignored\n") ;
-#else
 	struct el_common *mchk_header;
 	struct el_MCPCIA_uncorrected_frame_mcheck *mchk_logout;
-	unsigned int cpu = smp_processor_id();
-	int h = 0;
+	unsigned int cpu;
+#if 0
+halt();
+#endif
+	mb();
+	mb();  /* magic */
+#if 0
+	draina();
+#endif
 
 	mchk_header = (struct el_common *)la_ptr;
 	mchk_logout = (struct el_MCPCIA_uncorrected_frame_mcheck *)la_ptr;
 
-#if 0
-	DBG_MCK(("mcpcia_machine_check: type=0x%lx la_ptr=0x%lx\n",
-		 type, la_ptr));
-	DBG_MCK(("\t\t pc=0x%lx size=0x%x procoffset=0x%x sysoffset 0x%x\n",
-		 regs->pc, mchk_header->size, mchk_header->proc_offset,
-		 mchk_header->sys_offset));
-#endif
-	/*
-	 * Check if machine check is due to a badaddr() and if so,
-	 * ignore the machine check.
-	 */
-	mb();
-	mb();  /* magic */
-	if (MCPCIA_mcheck_expected[cpu]) {
-#if 0
-		DBG_MCK(("MCPCIA machine check expected\n"));
-#endif
-		MCPCIA_mcheck_expected[cpu] = 0;
-		MCPCIA_mcheck_taken[cpu] = 1;
-		mb();
-		mb();  /* magic */
-		draina();
-		mcpcia_pci_clr_err(h);
-		wrmces(0x7);
-		mb();
-	}
-#if 1
-	else {
-		printk("MCPCIA machine check NOT expected on CPU %d\n", cpu);
-		DBG_MCK(("mcpcia_machine_check: type=0x%lx pc=0x%lx"
-			 " code=0x%lx\n",
-			 type, regs->pc, mchk_header->code));
+	cpu = smp_processor_id();
 
-		MCPCIA_mcheck_expected[cpu] = 0;
-		MCPCIA_mcheck_taken[cpu] = 1;
-		mb();
-		mb();  /* magic */
-		draina();
-		mcpcia_pci_clr_err(h);
-		wrmces(0x7);
-		mb();
-#ifdef DEBUG_MCHECK_DUMP
-		if (type == 0x620)
-			printk("MCPCIA machine check: system CORRECTABLE!\n");
-		else if (type == 0x630)
-			printk("MCPCIA machine check: processor CORRECTABLE!\n");
-		else
-#endif /* DEBUG_MCHECK_DUMP */
-			mcpcia_print_uncorrectable(mchk_logout);
+	if (!MCPCIA_mcheck_probing_hose) {
+
+	    if (MCPCIA_mcheck_expected[cpu])
+		mcpcia_pci_clr_err(cpu, MCPCIA_mcheck_hose[cpu]);
+	    else {
+		/* FIXME: how do we figure out which hose the error was on? */
+		mcpcia_pci_clr_err(cpu, 0);
+		mcpcia_pci_clr_err(cpu, 1);
+	    }
+
+	} else {
+		/* FIXME: clear out known always good hoses */
+		mcpcia_pci_clr_err(cpu, 0);
+		mcpcia_pci_clr_err(cpu, 1);
 	}
+
+	wrmces(0x7);
+	mb();
+
+	if (MCPCIA_mcheck_enable_print) {
+
+	    process_mcheck_info(vector, la_ptr, regs, "MCPCIA",
+				DEBUG_MCHECK, MCPCIA_mcheck_expected[cpu]);
+
+	    if (vector != 0x620 && vector != 0x630
+		&& ! MCPCIA_mcheck_expected[cpu]) {
+		mcpcia_print_uncorrectable(mchk_logout);
+		mcpcia_print_system_area(la_ptr);
+	    }
+	}
+
+#if 0
+	MCPCIA_mcheck_expected[cpu] = 0;
 #endif
-#endif
+	MCPCIA_mcheck_taken[cpu] = 1;
 }

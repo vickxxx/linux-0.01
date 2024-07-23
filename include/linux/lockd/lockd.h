@@ -17,6 +17,7 @@
 #include <linux/nfsd/nfsfh.h>
 #include <linux/lockd/bind.h>
 #include <linux/lockd/xdr.h>
+#include <linux/lockd/xdr4.h>
 #include <linux/lockd/debug.h>
 
 /*
@@ -112,6 +113,7 @@ struct nlm_block {
  */
 extern struct rpc_program	nlm_program;
 extern struct svc_procedure	nlmsvc_procedures[];
+extern struct svc_procedure     nlmsvc_procedures4[];
 extern unsigned long		nlmsvc_grace_period;
 extern unsigned long		nlmsvc_timeout;
 
@@ -138,14 +140,16 @@ struct nlm_host * nlm_lookup_host(struct svc_client *,
 					struct sockaddr_in *, int, int);
 struct rpc_clnt * nlm_bind_host(struct nlm_host *);
 void		  nlm_rebind_host(struct nlm_host *);
+struct nlm_host * nlm_get_host(struct nlm_host *);
 void		  nlm_release_host(struct nlm_host *);
 void		  nlm_shutdown_hosts(void);
 
 /*
  * Server-side lock handling
  */
+int		  nlmsvc_async_call(struct nlm_rqst *, u32, rpc_action);
 u32		  nlmsvc_lock(struct svc_rqst *, struct nlm_file *,
-					struct nlm_lock *, int, u32);
+					struct nlm_lock *, int, struct nlm_cookie *);
 u32		  nlmsvc_unlock(struct nlm_file *, struct nlm_lock *);
 u32		  nlmsvc_testlock(struct nlm_file *, struct nlm_lock *,
 					struct nlm_lock *);

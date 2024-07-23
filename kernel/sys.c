@@ -323,12 +323,23 @@ asmlinkage int sys_setgid(gid_t gid)
  *  never happen.
  *
  *  -astor 
+ *
+ * cevans - New behaviour, Oct '99
+ * A process may, via prctl(), elect to keep its capabilities when it
+ * calls setuid() and switches away from uid==0. Both permitted and
+ * effective sets will be retained.
+ * Without this change, it was impossible for a daemon to drop only some
+ * of its privilege. The call to setuid(!=0) would drop all privileges!
+ * Keeping uid 0 is not an option because uid 0 owns too many vital
+ * files..
+ * Thanks to Olaf Kirch and Peter Benie for spotting this.
  */
 extern inline void cap_emulate_setxuid(int old_ruid, int old_euid, 
 				       int old_suid)
 {
 	if ((old_ruid == 0 || old_euid == 0 || old_suid == 0) &&
-	    (current->uid != 0 && current->euid != 0 && current->suid != 0)) {
+	    (current->uid != 0 && current->euid != 0 && current->suid != 0) &&
+	    !current->keep_capabilities) {
 		cap_clear(current->cap_permitted);
 		cap_clear(current->cap_effective);
 	}
@@ -370,14 +381,19 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 		else
 			return -EPERM;
 	}
+
+	lock_kernel();
+
 	if (euid != (uid_t) -1) {
 		if ((old_ruid == euid) ||
 		    (current->euid == euid) ||
 		    (current->suid == euid) ||
 		    capable(CAP_SETUID))
 			current->fsuid = current->euid = euid;
-		else
+		else {
+			unlock_kernel();
 			return -EPERM;
+		}
 	}
 	if (ruid != (uid_t) -1 ||
 	    (euid != (uid_t) -1 && euid != old_ruid))
@@ -396,6 +412,8 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 		current->uid = new_ruid;
 		alloc_uid(current);
 	}
+
+	unlock_kernel();
 	
 	if (!issecure(SECURE_NO_SETUID_FIXUP)) {
 		cap_emulate_setxuid(old_ruid, old_euid, old_suid);
@@ -422,14 +440,18 @@ asmlinkage int sys_setuid(uid_t uid)
 	int old_euid = current->euid;
 	int old_ruid, old_suid, new_ruid;
 
+	lock_kernel();
+
 	old_ruid = new_ruid = current->uid;
 	old_suid = current->suid;
 	if (capable(CAP_SETUID))
 		new_ruid = current->euid = current->suid = current->fsuid = uid;
 	else if ((uid == current->uid) || (uid == current->suid))
 		current->fsuid = current->euid = uid;
-	else
+	else {
+		unlock_kernel();
 		return -EPERM;
+	}
 
 	if (current->euid != old_euid)
 		current->dumpable = 0;
@@ -440,6 +462,8 @@ asmlinkage int sys_setuid(uid_t uid)
 		current->uid = new_ruid;
 		alloc_uid(current);
 	}
+
+	unlock_kernel();
 
 	if (!issecure(SECURE_NO_SETUID_FIXUP)) {
 		cap_emulate_setxuid(old_ruid, old_euid, old_suid);
@@ -470,6 +494,9 @@ asmlinkage int sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 		    (suid != current->euid) && (suid != current->suid))
 			return -EPERM;
 	}
+
+	lock_kernel();
+
 	if (ruid != (uid_t) -1) {
 		/* See above commentary about NPROC rlimit issues here. */
 		free_uid(current);
@@ -484,6 +511,8 @@ asmlinkage int sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 	}
 	if (suid != (uid_t) -1)
 		current->suid = suid;
+
+	unlock_kernel();
 
 	if (!issecure(SECURE_NO_SETUID_FIXUP)) {
 		cap_emulate_setxuid(old_ruid, old_euid, old_suid);
@@ -554,6 +583,8 @@ asmlinkage int sys_setfsuid(uid_t uid)
 {
 	int old_fsuid;
 
+	lock_kernel();
+
 	old_fsuid = current->fsuid;
 	if (uid == current->uid || uid == current->euid ||
 	    uid == current->suid || uid == current->fsuid || 
@@ -561,6 +592,8 @@ asmlinkage int sys_setfsuid(uid_t uid)
 		current->fsuid = uid;
 	if (current->fsuid != old_fsuid)
 		current->dumpable = 0;
+
+	unlock_kernel();
 
 	/* We emulate fsuid by essentially doing a scaled-down version
 	 * of what we did in setresuid and friends. However, we only
@@ -807,6 +840,27 @@ out:
 	return 1;
 }
 
+/* Like in_group_p, but testing against egid, not fsgid */
+
+int in_egroup_p(gid_t grp)
+{
+	if (grp != current->egid) {
+		int i = current->ngroups;
+		if (i) {
+			gid_t *groups = current->groups;
+			do {
+				if (*groups == grp)
+					goto out;
+				groups++;
+				i--;
+			} while (i);
+		}
+		return 0;
+	}
+out:
+	return 1;
+}
+
 /*
  * This should really be a blocking read-write lock
  * rather than a semaphore. Anybody want to implement
@@ -900,6 +954,8 @@ asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 		return -EINVAL;
 	if(copy_from_user(&new_rlim, rlim, sizeof(*rlim)))
 		return -EFAULT;
+	if (new_rlim.rlim_cur < 0 || new_rlim.rlim_max < 0)
+		return -EINVAL;
 	old_rlim = current->rlim + resource;
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
@@ -992,6 +1048,18 @@ asmlinkage int sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 				break;
 			}
 			current->pdeath_signal = sig;
+			break;
+
+		case PR_GET_KEEPCAPS:
+			if (current->keep_capabilities)
+				error = 1;
+			break;
+		case PR_SET_KEEPCAPS:
+			if (arg2 != 0 && arg2 != 1) {
+				error = -EINVAL;
+				break;
+			}
+			current->keep_capabilities = arg2;
 			break;
 		default:
 			error = -EINVAL;

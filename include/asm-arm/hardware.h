@@ -11,12 +11,8 @@
 
 #include <asm/arch/hardware.h>
 
-#ifndef FLUSH_BASE
-#define FLUSH_BASE	0xdf000000
-#endif
-
 #ifdef HAS_EXPMASK
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 #define __EXPMASK(offset)	(((volatile unsigned char *)EXPMASK_BASE)[offset])
 #else
 #define __EXPMASK(offset)	offset

@@ -1,10 +1,10 @@
-/* $Id: entry.S,v 1.153 1998/11/11 15:12:33 jj Exp $
+/* $Id: entry.S,v 1.159.2.8 2000/10/05 04:17:17 anton Exp $
  * arch/sparc/kernel/entry.S:  Sparc trap low-level entry points.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1996 Eddie C. Dost   (ecd@skynet.be)
  * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
- * Copyright (C) 1996,1998 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
+ * Copyright (C) 1996-1999 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997 Anton Blanchard (anton@progsoc.uts.edu.au)
  */
 
@@ -488,10 +488,13 @@ linux_trap_ipi15_sun4d:
 	.globl	bad_instruction
 bad_instruction:
 	sethi	%hi(0xc1f80000), %l4
-	ld	[%l1], %l5
+	ld	[%l1], %l6
 	sethi	%hi(0x81d80000), %l7
-	and	%l5, %l4, %l5
+	and	%l6, %l4, %l5
 	cmp	%l5, %l7
+	sethi	%hi(0x8143c000), %l4
+	be	1f
+	 cmp	%l6, %l4
 	be	1f
 	SAVE_ALL
 
@@ -506,7 +509,7 @@ bad_instruction:
 
 	RESTORE_ALL
 
-1:	/* unimplemented flush - just skip */
+1:	/* unimplemented flush/stbar - just skip */
 	jmpl	%l2, %g0
 	 rett	%l2 + 4
 
@@ -826,13 +829,13 @@ linux_trap_nmi_sun4c:
 	.globl	C_LABEL(invalid_segment_patch1_ff)
 	.globl	C_LABEL(invalid_segment_patch2_ff)
 C_LABEL(invalid_segment_patch1_ff):	cmp	%l4, 0xff
-C_LABEL(invalid_segment_patch2_ff):	mov	0xff, %l4
+C_LABEL(invalid_segment_patch2_ff):	mov	0xff, %l3
 
 	.align	4
 	.globl	C_LABEL(invalid_segment_patch1_1ff)
 	.globl	C_LABEL(invalid_segment_patch2_1ff)
 C_LABEL(invalid_segment_patch1_1ff):	cmp	%l4, 0x1ff
-C_LABEL(invalid_segment_patch2_1ff):	mov	0x1ff, %l4
+C_LABEL(invalid_segment_patch2_1ff):	mov	0x1ff, %l3
 
 	.align	4
 	.globl	C_LABEL(num_context_patch1_16), C_LABEL(num_context_patch2_16)
@@ -853,7 +856,7 @@ C_LABEL(vac_linesize_patch_32):		subcc	%l7, 32, %l7
 #ifdef CONFIG_SUN4
 C_LABEL(vac_hwflush_patch1_on):		nop
 #else
-C_LABEL(vac_hwflush_patch1_on):		subcc	%l7, (PAGE_SIZE - 4), %l7
+C_LABEL(vac_hwflush_patch1_on):		addcc	%l7, -PAGE_SIZE, %l7
 #endif
 
 C_LABEL(vac_hwflush_patch2_on):		sta	%g0, [%l3 + %l7] ASI_HWFLUSHSEG
@@ -874,7 +877,7 @@ C_LABEL(vac_hwflush_patch2_on):		sta	%g0, [%l3 + %l7] ASI_HWFLUSHSEG
 ! We want error in %l5, vaddr in %l6
 sun4c_fault:
 #ifdef CONFIG_SUN4
-	sethi	C_LABEL(sun4c_memerr_reg), %l4
+	sethi	%hi(C_LABEL(sun4c_memerr_reg)), %l4
 	ld	[%l4+%lo(C_LABEL(sun4c_memerr_reg))], %l4  ! memerr ctrl reg addr
 	ld	[%l4], %l6		! memerr ctrl reg
 	ld	[%l4 + 4], %l5		! memerr vaddr reg
@@ -956,7 +959,7 @@ sun4c_fault:
 	sll     %l6, 2, %l6
 	ld      [%l4 + %l6], %l4
 #ifdef CONFIG_SUN4
-	sethi	PAGE_MASK, %l6
+	sethi	%hi(PAGE_MASK), %l6
 	andcc	%l4, %l6, %g0
 #else
 	andcc   %l4, PAGE_MASK, %g0
@@ -969,12 +972,12 @@ C_LABEL(invalid_segment_patch1):
 	bne	1f
 	 sethi	%hi(C_LABEL(sun4c_kfree_ring)), %l4
 	or	%l4, %lo(C_LABEL(sun4c_kfree_ring)), %l4
-	ld	[%l4 + 0x10], %l3
+	ld	[%l4 + 0x18], %l3
 	deccc	%l3			! do we have a free entry?
 	bcs,a	2f			! no, unmap one.
 	 sethi	%hi(C_LABEL(sun4c_kernel_ring)), %l4
 
-	st	%l3, [%l4 + 0x10]	! sun4c_kfree_ring.num_entries--
+	st	%l3, [%l4 + 0x18]	! sun4c_kfree_ring.num_entries--
 
 	ld	[%l4 + 0x00], %l6	! entry = sun4c_kfree_ring.ringhd.next
 	st	%l5, [%l6 + 0x08]	! entry->vaddr = address
@@ -997,10 +1000,11 @@ C_LABEL(invalid_segment_patch1):
 
 	st	%l6, [%l4 + 0x00]	! head->next = entry
 
-	ld	[%l4 + 0x10], %l3
+	ld	[%l4 + 0x18], %l3
 	inc	%l3			! sun4c_kernel_ring.num_entries++
+	st	%l3, [%l4 + 0x18]
 	b	4f
-	 st	%l3, [%l4 + 0x10]
+	 ld	[%l6 + 0x08], %l5
 
 2:
 	or	%l4, %lo(C_LABEL(sun4c_kernel_ring)), %l4
@@ -1020,7 +1024,7 @@ C_LABEL(invalid_segment_patch1):
 C_LABEL(vac_hwflush_patch1):
 C_LABEL(vac_linesize_patch):
 	subcc	%l7, 16, %l7
-	bg	9b
+	bne	9b
 C_LABEL(vac_hwflush_patch2):
 	 sta	%g0, [%l3 + %l7] ASI_FLUSHSEG
 
@@ -1041,46 +1045,35 @@ C_LABEL(vac_hwflush_patch2):
 
 	mov	%l3, %l5		! address = tmp
 
+4:
 C_LABEL(num_context_patch1):
 	mov	0x08, %l7
 
+	ld	[%l6 + 0x08], %l4
+	ldub	[%l6 + 0x0c], %l3
+	or	%l4, %l3, %l4		! encode new vaddr/pseg into l4
+
+	sethi	%hi(AC_CONTEXT), %l3
+	lduba	[%l3] ASI_CONTROL, %l6
+
+	/* Invalidate old mapping, instantiate new mapping,
+	 * for each context.  Registers l6/l7 are live across
+	 * this loop.
+	 */
+3:	deccc	%l7
+	sethi	%hi(AC_CONTEXT), %l3
+	stba	%l7, [%l3] ASI_CONTROL
 C_LABEL(invalid_segment_patch2):
-	mov	0x7f, %l4
+	mov	0x7f, %l3
+	stXa	%l3, [%l5] ASI_SEGMAP
+	andn	%l4, 0x1ff, %l3
+	bne	3b
+	 stXa	%l4, [%l3] ASI_SEGMAP
 
 	sethi	%hi(AC_CONTEXT), %l3
-	lduba	[%l3] ASI_CONTROL, %l6
-
-3:
-	deccc	%l7
-	stba	%l7, [%l3] ASI_CONTROL
-	bne	3b
-	 stXa	%l4, [%l5] ASI_SEGMAP
-
 	stba	%l6, [%l3] ASI_CONTROL
 
-	! reload the entry
-
-	sethi	%hi(C_LABEL(sun4c_kernel_ring)), %l4
-	ld	[%l4 + %lo(C_LABEL(sun4c_kernel_ring))], %l6
-
-	ld	[%l6 + 0x08], %l5	! restore address from entry->vaddr
-
-4:
-C_LABEL(num_context_patch2):
-	mov	0x08, %l7
-
-	ldub	[%l6 + 0x0c], %l4	! entry->pseg
-
-	sethi	%hi(AC_CONTEXT), %l3
-	lduba	[%l3] ASI_CONTROL, %l6
-
-3:
-	deccc	%l7
-	stba	%l7, [%l3] ASI_CONTROL
-	bne	3b
-	 stXa	%l4, [%l5] ASI_SEGMAP
-
-	stba	%l6, [%l3] ASI_CONTROL
+	andn	%l4, 0x1ff, %l5
 
 1:
 	sethi	%hi(SUN4C_VMALLOC_START), %l4
@@ -1117,7 +1110,7 @@ C_LABEL(num_context_patch2):
 #ifndef CONFIG_SUN4
 	and	%l4, PAGE_MASK, %l4
 #else
-	sethi	PAGE_MASK, %l6
+	sethi	%hi(PAGE_MASK), %l6
 	and	%l4, %l6, %l4
 #endif
 
@@ -1149,6 +1142,7 @@ C_LABEL(num_context_patch2):
 
 sun4c_fault_fromuser:
 	SAVE_ALL
+	 nop
 	
 	mov	%l7, %o1		! Decode the info from %l7
 	mov	%l7, %o2
@@ -1199,6 +1193,7 @@ C_LABEL(srmmu_fault):
 
 	RESTORE_ALL
 
+#ifdef CONFIG_SUNOS_EMUL
 	/* SunOS uses syscall zero as the 'indirect syscall' it looks
 	 * like indir_syscall(scall_num, arg0, arg1, arg2...);  etc.
 	 * This is complete brain damage.
@@ -1226,6 +1221,7 @@ C_LABEL(sunos_indir):
 	mov	%o5, %o4
 	call	%l6
 	 mov	%l4, %o7
+#endif
 
 	.align	4
 	.globl	C_LABEL(sys_nis_syscall)
@@ -1380,11 +1376,13 @@ C_LABEL(sys_rt_sigreturn):
 
 	/* Now that we have a real sys_clone, sys_fork() is
 	 * implemented in terms of it.  Our _real_ implementation
-	 * of SunOS vfork() will use sys_clone() instead.
+	 * of SunOS vfork() will use sys_vfork().
+	 *
+	 * XXX These three should be consolidated into mostly shared
+	 * XXX code just like on sparc64... -DaveM
 	 */
 	.align	4
-	.globl	C_LABEL(sys_fork), C_LABEL(sys_vfork), flush_patch_two
-C_LABEL(sys_vfork):
+	.globl	C_LABEL(sys_fork), flush_patch_two
 C_LABEL(sys_fork):
 	mov	%o7, %l5
 flush_patch_two:
@@ -1422,6 +1420,23 @@ flush_patch_three:
 	call	C_LABEL(do_fork)
 	 mov	%l5, %o7
 
+	/* Whee, real vfork! */
+	.globl	C_LABEL(sys_vfork), flush_patch_four
+C_LABEL(sys_vfork):
+flush_patch_four:
+	FLUSH_ALL_KERNEL_WINDOWS;
+	rd	%psr, %g4
+	WRITE_PAUSE
+	rd	%wim, %g5
+	WRITE_PAUSE
+	std	%g4, [%curptr + AOFF_task_tss + AOFF_thread_fork_kpsr]
+	sethi	%hi(0x4000 | 0x0100 | SIGCHLD), %o0
+	mov	%fp, %o1
+	or	%o0, %lo(0x4000 | 0x0100 | SIGCHLD), %o0
+	sethi	%hi(C_LABEL(do_fork)), %l1
+	jmpl	%l1 + %lo(C_LABEL(do_fork)), %g0
+	 add	%sp, REGWIN_SZ, %o2
+
         .align  4
 linux_sparc_ni_syscall:
 	sethi   %hi(C_LABEL(sys_ni_syscall)), %l7
@@ -1454,11 +1469,10 @@ C_LABEL(ret_from_syscall):
 #ifdef __SMP__
 	.globl	C_LABEL(ret_from_smpfork)
 C_LABEL(ret_from_smpfork):
-	/* Nowadays all we need to do is drop the scheduler lock. */
-	sethi	%hi(C_LABEL(scheduler_lock)), %o4
-	stb	%g0, [%o4 + %lo(C_LABEL(scheduler_lock))]
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
+	call	schedule_tail
+	 mov	%g3, %o0
 	b	C_LABEL(ret_sys_call)
 	 ld	[%sp + REGWIN_SZ + PT_I0], %o0
 #endif
@@ -1621,6 +1635,20 @@ solaris_syscall:
  	b	ret_trap_entry	
 	 st	%l1, [%sp + REGWIN_SZ + PT_NPC]
 
+#ifndef CONFIG_SUNOS_EMUL
+	.align	4
+	.globl	sunos_syscall
+sunos_syscall:
+	SAVE_ALL_HEAD
+	 rd	%wim, %l3
+	wr	%l0, PSR_ET, %psr
+	nop
+	nop
+	mov	%i0, %l5
+	call	C_LABEL(do_sunos_syscall)
+	 add	%sp, REGWIN_SZ, %o0
+#endif
+
 	/* {net, open}bsd system calls enter here... */
 	.align	4
 	.globl	bsd_syscall
@@ -1779,13 +1807,13 @@ C_LABEL(fpload):
 C_LABEL(udelay):
 	save	%sp, -REGWIN_SZ, %sp
 	mov	%i0, %o0
-	sethi	%hi(0x10c6), %o1
+	sethi	%hi(0x10c600), %o1
 	call	.umul
-	 or	%o1, %lo(0x10c6), %o1
+	 or	%o1, %lo(0x10c600), %o1
 #ifndef __SMP__
-	sethi	%hi(C_LABEL(loops_per_sec)), %o3
+	sethi	%hi(C_LABEL(loops_per_jiffy)), %o3
 	call	.umul
-	 ld	[%o3 + %lo(C_LABEL(loops_per_sec))], %o1
+	 ld	[%o3 + %lo(C_LABEL(loops_per_jiffy))], %o1
 #else
 	GET_PROCESSOR_OFFSET(o4, o2)
 	set	C_LABEL(cpu_data), %o3
@@ -1870,5 +1898,53 @@ C_LABEL(restore_current):
 	LOAD_CURRENT(g6, o0)
 	retl
 	 nop
+
+#ifdef CONFIG_PCI
+#include <asm/pcic.h>
+
+	.align	4
+	.globl	linux_trap_ipi15_pcic
+linux_trap_ipi15_pcic:
+	rd	%wim, %l3
+	SAVE_ALL
+
+	/*
+	 * First deactivate NMI
+	 * or we cannot drop ET, cannot get window spill traps.
+	 * The busy loop is necessary because the PIO error
+	 * sometimes does not go away quickly and we trap again.
+	 */
+	sethi	%hi(C_LABEL(pcic_regs)), %o1
+	ld	[%o1 + %lo(C_LABEL(pcic_regs))], %o2
+
+	! Get pending status for printouts later.
+	ld	[%o2 + PCI_SYS_INT_PENDING], %o0
+
+	mov	PCI_SYS_INT_PENDING_CLEAR_ALL, %o1
+	stb	%o1, [%o2 + PCI_SYS_INT_PENDING_CLEAR]
+1:
+	ld	[%o2 + PCI_SYS_INT_PENDING], %o1
+	andcc	%o1, ((PCI_SYS_INT_PENDING_PIO|PCI_SYS_INT_PENDING_PCI)>>24), %g0
+	bne	1b
+	 nop
+
+	or	%l0, PSR_PIL, %l4
+	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
+	wr	%l4, PSR_ET, %psr
+	WRITE_PAUSE
+
+	call	C_LABEL(pcic_nmi)
+	 add	%sp, REGWIN_SZ, %o1	! struct pt_regs *regs
+	RESTORE_ALL
+
+	.globl	C_LABEL(pcic_nmi_trap_patch)
+C_LABEL(pcic_nmi_trap_patch):
+	sethi	%hi(linux_trap_ipi15_pcic), %l3
+	jmpl	%l3 + %lo(linux_trap_ipi15_pcic), %g0
+	 rd	%psr, %l0
+	.word	0
+
+#endif /* CONFIG_PCI */
 
 /* End of entry.S */

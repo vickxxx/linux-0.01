@@ -38,6 +38,7 @@ struct rpc_cred {
  * Client authentication handle
  */
 #define RPC_CREDCACHE_NR	8
+#define RPC_CREDCACHE_MASK	(RPC_CREDCACHE_NR - 1)
 struct rpc_auth {
 	struct rpc_cred *	au_credcache[RPC_CREDCACHE_NR];
 	unsigned long		au_expire;	/* cache expiry interval */
@@ -64,10 +65,10 @@ struct rpc_authops {
 	struct rpc_auth *	(*create)(struct rpc_clnt *);
 	void			(*destroy)(struct rpc_auth *);
 
-	struct rpc_cred *	(*crcreate)(struct rpc_task *);
+	struct rpc_cred *	(*crcreate)(int);
 	void			(*crdestroy)(struct rpc_cred *);
 
-	int			(*crmatch)(struct rpc_task *, struct rpc_cred*);
+	int			(*crmatch)(struct rpc_cred *, int);
 	u32 *			(*crmarshal)(struct rpc_task *, u32 *, int);
 	int			(*crrefresh)(struct rpc_task *);
 	u32 *			(*crvalidate)(struct rpc_task *, u32 *);
@@ -83,10 +84,14 @@ int			rpcauth_register(struct rpc_authops *);
 int			rpcauth_unregister(struct rpc_authops *);
 struct rpc_auth *	rpcauth_create(unsigned int, struct rpc_clnt *);
 void			rpcauth_destroy(struct rpc_auth *);
-struct rpc_cred *	rpcauth_lookupcred(struct rpc_task *);
+struct rpc_cred *	rpcauth_lookupcred(struct rpc_auth *, int);
+struct rpc_cred *	rpcauth_bindcred(struct rpc_task *);
 void			rpcauth_holdcred(struct rpc_task *);
-void			rpcauth_releasecred(struct rpc_task *);
-int			rpcauth_matchcred(struct rpc_task *, struct rpc_cred *);
+void			rpcauth_releasecred(struct rpc_auth *,
+					    struct rpc_cred *);
+void			rpcauth_unbindcred(struct rpc_task *);
+int			rpcauth_matchcred(struct rpc_auth *,
+					  struct rpc_cred *, int);
 u32 *			rpcauth_marshcred(struct rpc_task *, u32 *);
 u32 *			rpcauth_checkverf(struct rpc_task *, u32 *);
 int			rpcauth_refreshcred(struct rpc_task *);

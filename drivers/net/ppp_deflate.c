@@ -33,6 +33,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
@@ -43,7 +44,6 @@
 #include <linux/malloc.h>
 #include <linux/vmalloc.h>
 #include <linux/errno.h>
-#include <linux/sched.h>	/* to get the struct task_struct */
 #include <linux/string.h>	/* used in new tty drivers */
 #include <linux/signal.h>	/* used in new tty drivers */
 
@@ -657,13 +657,7 @@ struct compressor ppp_deflate_draft = {
 	z_comp_stats,		/* decomp_stat */
 };
 
-#ifdef MODULE
-/*************************************************************
- * Module support routines
- *************************************************************/
-
-int
-init_module(void)
+__initfunc(int ppp_deflate_install(void))
 {  
         int answer = ppp_register_compressor (&ppp_deflate);
         if (answer == 0)
@@ -671,6 +665,14 @@ init_module(void)
 			"PPP Deflate Compression module registered\n");
 	ppp_register_compressor(&ppp_deflate_draft);
         return answer;
+}
+
+#ifdef MODULE
+
+int
+init_module(void)
+{
+	return ppp_deflate_install();
 }
      
 void

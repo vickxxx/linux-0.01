@@ -29,7 +29,7 @@ static loff_t default_llseek(struct file *file, loff_t offset, int origin)
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
 			file->f_reada = 0;
-			file->f_version = ++event;
+			file->f_version = ++global_event;
 		}
 		retval = offset;
 	}
@@ -166,9 +166,9 @@ asmlinkage ssize_t sys_write(unsigned int fd, const char * buf, size_t count)
 	if (!file->f_op || !(write = file->f_op->write))
 		goto out;
 
-	down(&inode->i_sem);
+	fs_down(&inode->i_sem);
 	ret = write(file, buf, count, &file->f_pos);
-	up(&inode->i_sem);
+	fs_up(&inode->i_sem);
 out:
 	fput(file);
 bad_file:
@@ -210,9 +210,19 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	if (copy_from_user(iov, vector, count*sizeof(*vector)))
 		goto out;
 
+	/* BSD readv/writev returns EINVAL if one of the iov_len
+	   values < 0 or tot_len overflowed a 32-bit integer. -ink */
 	tot_len = 0;
-	for (i = 0 ; i < count ; i++)
-		tot_len += iov[i].iov_len;
+	ret = -EINVAL;
+	for (i = 0 ; i < count ; i++) {
+		size_t tmp = tot_len;
+		int len = iov[i].iov_len;
+		if (len < 0)
+			goto out;
+		(u32)tot_len += len;
+		if (tot_len < tmp || tot_len < (u32)len)
+			goto out;
+	}
 
 	inode = file->f_dentry->d_inode;
 	/* VERIFY_WRITE actually means a read, as we write to user space */
@@ -304,9 +314,9 @@ asmlinkage ssize_t sys_writev(unsigned long fd, const struct iovec * vector,
 	if (!file)
 		goto bad_file;
 	if (file->f_op && file->f_op->write && (file->f_mode & FMODE_WRITE)) {
-		down(&file->f_dentry->d_inode->i_sem);
+		fs_down(&file->f_dentry->d_inode->i_sem);
 		ret = do_readv_writev(VERIFY_READ, file, vector, count);
-		up(&file->f_dentry->d_inode->i_sem);
+		fs_up(&file->f_dentry->d_inode->i_sem);
 	}
 	fput(file);
 
@@ -376,9 +386,9 @@ asmlinkage ssize_t sys_pwrite(unsigned int fd, const char * buf,
 	if (pos < 0)
 		goto out;
 
-	down(&file->f_dentry->d_inode->i_sem);
+	fs_down(&file->f_dentry->d_inode->i_sem);
 	ret = write(file, buf, count, &pos);
-	up(&file->f_dentry->d_inode->i_sem);
+	fs_up(&file->f_dentry->d_inode->i_sem);
 
 out:
 	fput(file);

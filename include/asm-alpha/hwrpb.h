@@ -16,7 +16,7 @@
 #define EV56_CPU		7	/* EV5.6 (21164)	*/
 #define EV6_CPU			8	/* EV6 (21164)		*/
 #define PCA56_CPU		9	/* PCA56 (21164PC)	*/
-#define PCA57_CPU		10	/* PCA57 (21164??)	*/
+#define PCA57_CPU		10	/* PCA57 (21164notyet)	*/
 
 /*
  * DEC system types for Alpha systems.  Found in HWRPB.
@@ -55,10 +55,15 @@
 #define ST_DEC_TSUNAMI		 34	/* Tsunami systype	*/
 #define ST_DEC_WILDFIRE		 35	/* Wildfire systype	*/
 #define ST_DEC_CUSCO		 36	/* CUSCO systype	*/
+#define ST_DEC_EIGER		 37	/* Eiger systype	*/
 
 /* UNOFFICIAL!!! */
 #define ST_UNOFFICIAL_BIAS	100
 #define ST_DTI_RUFFIAN		101	/* RUFFIAN systype	*/
+
+/* Alpha Processor, Inc. systems */
+#define ST_API_BIAS		200			/* Offset for API systems */
+#define ST_API_NAUTILUS		(ST_API_BIAS + 1)	/* Nautilus systype */
 
 struct pcb_struct {
 	unsigned long ksp;
@@ -184,6 +189,8 @@ struct hwrpb_struct {
 	unsigned long txrdy;
 	unsigned long dsr_offset;	/* "Dynamic System Recognition Data Block Table" */
 };
+
+#define HWRPB_MEMBER_ID(v)	(((v) >> 10) & 0x3f)
 
 #ifdef __KERNEL__
 

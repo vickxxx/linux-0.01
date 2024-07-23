@@ -24,7 +24,9 @@
 #ifndef _LINUX_NETDEVICE_H
 #define _LINUX_NETDEVICE_H
 
+#ifdef __KERNEL__
 #include <linux/config.h>
+#endif
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
@@ -36,6 +38,8 @@
 #include <net/profile.h>
 #endif
 #endif
+
+struct divert_blk;
 
 /*
  *	For future expansion when we will have different priorities. 
@@ -64,33 +68,6 @@
 #else
 #define MAX_HEADER (LL_MAX_HEADER + 48)
 #endif
-
-struct neighbour;
-struct neigh_parms;
-struct sk_buff;
-
-/*
- *	We tag multicasts with these structures.
- */
- 
-struct dev_mc_list
-{	
-	struct dev_mc_list	*next;
-	__u8			dmi_addr[MAX_ADDR_LEN];
-	unsigned char		dmi_addrlen;
-	int			dmi_users;
-	int			dmi_gusers;
-};
-
-struct hh_cache
-{
-	struct hh_cache *hh_next;	/* Next entry			     */
-	atomic_t	hh_refcnt;	/* number of users                   */
-	unsigned short  hh_type;	/* protocol identifier, f.e ETH_P_IP */
-	int		(*hh_output)(struct sk_buff *skb);
-	/* cached hardware header; allow for machine alignment needs.        */
-	unsigned long	hh_data[16/sizeof(unsigned long)];
-};
 
 /*
  *	Network device statistics. Akin to the 2.0 ether stats but
@@ -156,6 +133,35 @@ enum {
 extern const char *if_port_text[];
 
 #include <linux/skbuff.h>
+
+struct neighbour;
+struct neigh_parms;
+struct sk_buff;
+
+/*
+ *	We tag multicasts with these structures.
+ */
+ 
+struct dev_mc_list
+{	
+	struct dev_mc_list	*next;
+	__u8			dmi_addr[MAX_ADDR_LEN];
+	unsigned char		dmi_addrlen;
+	int			dmi_users;
+	int			dmi_gusers;
+};
+
+struct hh_cache
+{
+	struct hh_cache *hh_next;	/* Next entry			     */
+	atomic_t	hh_refcnt;	/* number of users                   */
+	unsigned short  hh_type;	/* protocol identifier, f.e ETH_P_IP */
+	int		(*hh_output)(struct sk_buff *skb);
+	rwlock_t	hh_lock;
+	/* cached hardware header; allow for machine alignment needs.        */
+	unsigned long	hh_data[16/sizeof(unsigned long)];
+};
+
 
 /*
  *	The DEVICE structure.
@@ -264,6 +270,9 @@ struct device
 	struct Qdisc		*qdisc_list;
 	unsigned long		tx_queue_len;	/* Max frames per queue allowed */
 
+	/* Bridge stuff */
+	int			bridge_port_id;		
+	
 	/* Pointers to interface service routines.	*/
 	int			(*open)(struct device *dev);
 	int			(*stop)(struct device *dev);
@@ -310,6 +319,11 @@ struct device
 	/* Semi-private data. Keep it at the end of device struct. */
 	struct dst_entry	*fastpath[NETDEV_FASTROUTE_HMASK+1];
 #endif
+
+#ifdef CONFIG_NET_DIVERT
+	/* this will get initialized at each interface type init routine */
+	struct divert_blk	*divert;
+#endif /* CONFIG_NET_DIVERT */
 };
 
 
@@ -403,7 +417,7 @@ extern __inline__ void  dev_unlock_list(void)
 extern __inline__ void dev_lock_wait(void)
 {
 	while (atomic_read(&dev_lockct)) {
-		current->counter = 0;
+		current->policy |= SCHED_YIELD;
 		schedule();
 	}
 }
@@ -418,13 +432,17 @@ extern __inline__ void dev_init_buffers(struct device *dev)
 extern void		ether_setup(struct device *dev);
 extern void		fddi_setup(struct device *dev);
 extern void		tr_setup(struct device *dev);
+extern void		fc_setup(struct device *dev);
 extern void		tr_freedev(struct device *dev);
+extern void		fc_freedev(struct device *dev);
 extern int		ether_config(struct device *dev, struct ifmap *map);
 /* Support for loadable net-drivers */
 extern int		register_netdev(struct device *dev);
 extern void		unregister_netdev(struct device *dev);
 extern int		register_trdev(struct device *dev);
 extern void		unregister_trdev(struct device *dev);
+extern int		register_fcdev(struct device *dev);
+extern void		unregister_fcdev(struct device *dev);
 /* Functions used for multicast support */
 extern void		dev_mc_upload(struct device *dev);
 extern int 		dev_mc_delete(struct device *dev, void *addr, int alen, int all);
@@ -432,6 +450,7 @@ extern int		dev_mc_add(struct device *dev, void *addr, int alen, int newonly);
 extern void		dev_mc_discard(struct device *dev);
 extern void		dev_set_promiscuity(struct device *dev, int inc);
 extern void		dev_set_allmulti(struct device *dev, int inc);
+extern void		netdev_state_change(struct device *dev);
 /* Load a device via the kmod */
 extern void		dev_load(const char *name);
 extern void		dev_mcast_init(void);

@@ -37,6 +37,22 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_DISPLAY7SEG),y)
+O_OBJS += display7seg.o
+else
+  ifeq ($(CONFIG_DISPLAY7SEG),m)
+  M_OBJS += display7seg.o
+  endif
+endif
+
+ifeq ($(CONFIG_WATCHDOG_CP1XXX),y)
+O_OBJS += cpwatchdog.o
+else
+  ifeq ($(CONFIG_WATCHDOG_CP1XXX),m)
+  M_OBJS += cpwatchdog.o
+  endif
+endif
+
 endif # eq($(CONFIG_PCI,y)
 
 ifeq ($(CONFIG_OBP_FLASH),y)
@@ -84,6 +100,14 @@ O_OBJS += vfc.o
 else
   ifeq ($(CONFIG_SUN_VIDEOPIX),m)
   M_OBJS += vfc.o
+  endif
+endif
+
+ifeq ($(CONFIG_SUN_AURORA),y)
+O_OBJS += aurora.o
+else
+  ifeq ($(CONFIG_SUN_AURORA),m)
+  M_OBJS += aurora.o
   endif
 endif
 

@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.9 1998/10/06 20:56:05 ecd Exp $
+/* $Id: oplib.h,v 1.10.2.2 1999/10/24 17:29:38 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -175,20 +175,71 @@ enum prom_output_device {
 extern enum prom_output_device prom_query_output_device(void);
 
 /* Multiprocessor operations... */
-
+#ifdef __SMP__
 /* Start the CPU with the given device tree node, context table, and context
  * at the passed program counter.
  */
 extern void prom_startcpu(int cpunode, unsigned long pc, unsigned long o0);
 
-/* Stop the CPU with the passed device tree node. */
-extern int prom_stopcpu(int cpunode);
+/* Stop the current CPU. */
+extern void prom_stopself(void);
 
-/* Idle the CPU with the passed device tree node. */
-extern int prom_idlecpu(int cpunode);
+/* Idle the current CPU. */
+extern void prom_idleself(void);
 
-/* Re-Start the CPU with the passed device tree node. */
-extern int prom_restartcpu(int cpunode);
+/* Resume the CPU with the passed device tree node. */
+extern void prom_resumecpu(int cpunode);
+#endif
+
+/* Power management interfaces. */
+
+/* Put the current CPU to sleep. */
+extern void prom_sleepself(void);
+
+/* Put the entire system to sleep. */
+extern int prom_sleepsystem(void);
+
+/* Initiate a wakeup event. */
+extern int prom_wakeupsystem(void);
+
+/* MMU and memory related OBP interfaces. */
+
+/* Get unique string identifying SIMM at given physical address. */
+extern int prom_getunumber(int syndrome_code,
+			   unsigned long phys_addr,
+			   char *buf, int buflen);
+
+/* Retain physical memory to the caller across soft resets. */
+extern unsigned long prom_retain(char *name,
+				 unsigned long pa_low, unsigned long pa_high,
+				 long size, long align);
+
+/* Load explicit I/D TLB entries into the calling processor. */
+extern long prom_itlb_load(unsigned long index,
+			   unsigned long tte_data,
+			   unsigned long vaddr);
+
+extern long prom_dtlb_load(unsigned long index,
+			   unsigned long tte_data,
+			   unsigned long vaddr);
+
+/* Map/Unmap client program address ranges.  First the format of
+ * the mapping mode argument.
+ */
+#define PROM_MAP_WRITE	0x0001 /* Writable */
+#define PROM_MAP_READ	0x0002 /* Readable - sw */
+#define PROM_MAP_EXEC	0x0004 /* Executable - sw */
+#define PROM_MAP_LOCKED	0x0010 /* Locked, use i/dtlb load calls for this instead */
+#define PROM_MAP_CACHED	0x0020 /* Cacheable in both L1 and L2 caches */
+#define PROM_MAP_SE	0x0040 /* Side-Effects */
+#define PROM_MAP_GLOB	0x0080 /* Global */
+#define PROM_MAP_IE	0x0100 /* Invert-Endianness */
+#define PROM_MAP_DEFAULT (PROM_MAP_WRITE | PROM_MAP_READ | PROM_MAP_EXEC | PROM_MAP_CACHED)
+
+extern int prom_map(int mode, unsigned long size,
+		    unsigned long vaddr, unsigned long paddr);
+extern void prom_unmap(unsigned long size, unsigned long vaddr);
+
 
 /* PROM device tree traversal functions... */
 
@@ -304,6 +355,7 @@ extern long p1275_cmd (char *, long, ...);
 #define P1275_ARG_OUT_32B		3
 #define P1275_ARG_IN_FUNCTION		4
 #define P1275_ARG_IN_BUF		5
+#define P1275_ARG_IN_64B		6
 
 #define P1275_IN(x) ((x) & 0xf)
 #define P1275_OUT(x) (((x) << 4) & 0xf0)

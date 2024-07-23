@@ -21,7 +21,7 @@
 #endif
 
 #define spin_lock_init(lock)	do { } while(0)
-#define spin_lock(lock)		do { } while(0)
+#define spin_lock(lock)		(void)(lock) /* Not "unused variable". */
 #define spin_trylock(lock)	(1)
 #define spin_unlock_wait(lock)	do { } while(0)
 #define spin_unlock(lock)	do { } while(0)
@@ -72,7 +72,7 @@ typedef struct {
 #define spin_unlock_wait(x)	do {unsigned long __spinflags; save_flags(__spinflags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_wait(%s:%p) deadlock\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} restore_flags(__spinflags);} while (0)
 #define spin_unlock(x)		do {unsigned long __spinflags; save_flags(__spinflags); cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; restore_flags(__spinflags);} while (0)
 #define spin_lock_irq(x)	do {cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock_irq(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1;} while (0)
-#define spin_unlock_irq(x)	do {cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_lock(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; sti();} while (0)
+#define spin_unlock_irq(x)	do {cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_irq(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; sti();} while (0)
 
 #define spin_lock_irqsave(x,flags)      do {save_flags(flags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock_irqsave(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1;} while (0)
 #define spin_unlock_irqrestore(x,flags) do {cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_irqrestore(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; restore_flags(flags);} while (0)
@@ -99,9 +99,9 @@ typedef struct {
   #define RW_LOCK_UNLOCKED (rwlock_t) { 0 }
 #endif
 
-#define read_lock(lock)		do { } while(0)
+#define read_lock(lock)		(void)(lock) /* Not "unused variable." */
 #define read_unlock(lock)	do { } while(0)
-#define write_lock(lock)	do { } while(0)
+#define write_lock(lock)	(void)(lock) /* Not "unused variable." */
 #define write_unlock(lock)	do { } while(0)
 #define read_lock_irq(lock)	cli()
 #define read_unlock_irq(lock)	sti()
@@ -142,12 +142,18 @@ typedef struct {
 typedef struct { unsigned long a[100]; } __dummy_lock_t;
 #define __dummy_lock(lock) (*(__dummy_lock_t *)(lock))
 
+/*
+ *	Intel PIV would benefit from using 'rep nop' here but on older
+ *	processors and non intel it is listed as 'undefined' so cannot be
+ *	blindly used. On 2.4 we should add a PIV CPU type for this one.
+ */
 #define spin_lock_string \
 	"\n1:\t" \
 	"lock ; btsl $0,%0\n\t" \
 	"jc 2f\n" \
 	".section .text.lock,\"ax\"\n" \
 	"2:\t" \
+	"rep; nop\n\t" \
 	"testb $1,%0\n\t" \
 	"jne 2b\n\t" \
 	"jmp 1b\n" \
@@ -209,7 +215,8 @@ typedef struct {
 		     "js 2f\n" \
 		     ".section .text.lock,\"ax\"\n" \
 		     "2:\tlock ; decl %0\n" \
-		     "3:\tcmpl $0,%0\n\t" \
+		     "3:\trep; nop\n\t" \
+		     "cmpl $0,%0\n\t" \
 		     "js 3b\n\t" \
 		     "jmp 1b\n" \
 		     ".previous" \
@@ -227,7 +234,8 @@ typedef struct {
 		     "jne 3f\n" \
 		     ".section .text.lock,\"ax\"\n" \
 		     "3:\tlock ; btrl $31,%0\n" \
-		     "4:\tcmp $0,%0\n\t" \
+		     "4:\trep; nop\n\t" \
+		     "cmp $0,%0\n\t" \
 		     "jne 4b\n\t" \
 		     "jmp 1b\n" \
 		     ".previous" \

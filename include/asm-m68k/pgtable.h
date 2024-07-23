@@ -161,6 +161,7 @@ extern inline void flush_icache_range (unsigned long address,
     }
 }
 
+#define flush_dcache_page(page)			do { } while (0)
 
 /*
  * flush all user-space atc entries.
@@ -398,7 +399,7 @@ extern pte_t * __bad_pagetable(void);
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE empty_zero_page
+#define ZERO_PAGE(vaddr) empty_zero_page
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR			(8*sizeof(unsigned long))
@@ -507,6 +508,7 @@ extern inline void SET_PAGE_DIR(struct task_struct * tsk, pgd_t * pgdir)
 	if (tsk == current) {
 		if (CPU_IS_040_OR_060)
 			__asm__ __volatile__ (".chip 68040\n\t"
+					      "pflushan\n\t"
 					      "movec %0,%%urp\n\t"
 					      ".chip 68k"
 					      : : "r" (tsk->tss.crp[1]));
@@ -514,10 +516,22 @@ extern inline void SET_PAGE_DIR(struct task_struct * tsk, pgd_t * pgdir)
 			unsigned long tmp;
 			__asm__ __volatile__ ("movec  %%cacr,%0\n\t"
 					      "orw #0x0808,%0\n\t"
-					      "movec %0,%%cacr\n\t"
-					      "pmove %1,%%crp\n\t"
-					      : "=d" (tmp)
-					      : "m" (tsk->tss.crp[0]));
+					      "movec %0,%%cacr"
+					      : "=d" (tmp));
+			/* For a 030-only kernel, avoid flushing the whole
+			   ATC, we only need to flush the user entries.
+			   The 68851 does this by itself.  Avoid a runtime
+			   check here.  */
+			__asm__ __volatile__ (
+#ifdef CPU_M68030_ONLY
+					      ".chip 68030\n\t"
+					      "pmovefd %0,%%crp\n\t"
+					      ".chip 68k\n\t"
+					      "pflush #0,#4"
+#else
+					      "pmove %0,%%crp"
+#endif
+					      : : "m" (tsk->tss.crp[0]));
 		}
 	}
 }
@@ -813,5 +827,6 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
+#define kern_addr_valid(addr)	(1)
 
 #endif /* _M68K_PGTABLE_H */

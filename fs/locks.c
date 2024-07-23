@@ -111,7 +111,7 @@
 
 #include <asm/uaccess.h>
 
-#define OFFSET_MAX	((off_t)0x7fffffff)	/* FIXME: move elsewhere? */
+#define OFFSET_MAX	((off_t)LONG_MAX)	/* FIXME: move elsewhere? */
 
 static int flock_make_lock(struct file *filp, struct file_lock *fl,
 			       unsigned int cmd);
@@ -193,6 +193,14 @@ static void locks_insert_block(struct file_lock *blocker,
 {
 	struct file_lock *prevblock;
 
+	if (waiter->fl_prevblock) {
+		printk(KERN_ERR "locks_insert_block: remove duplicated lock "
+			"(pid=%d %ld-%ld type=%d)\n",
+			waiter->fl_pid, waiter->fl_start,
+			waiter->fl_end, waiter->fl_type);
+		locks_delete_block(waiter->fl_prevblock, waiter);
+	}
+
 	if (blocker->fl_prevblock == NULL)
 		/* No previous waiters - list is empty */
 		prevblock = blocker;
@@ -260,19 +268,23 @@ static void locks_wake_up_blocks(struct file_lock *blocker, unsigned int wait)
 
 	while ((waiter = blocker->fl_nextblock) != NULL) {
 		/* N.B. Is it possible for the notify function to block?? */
-		if (waiter->fl_notify)
-			waiter->fl_notify(waiter);
-		wake_up(&waiter->fl_wait);
-		if (wait)
-			/* Let the blocked process remove waiter from the
-			 * block list when it gets scheduled.
-			 */
-			schedule();
-		else
+		if (!wait) {
 			/* Remove waiter from the block list, because by the
 			 * time it wakes up blocker won't exist any more.
 			 */
 			locks_delete_block(blocker, waiter);
+		}
+		if (waiter->fl_notify)
+			waiter->fl_notify(waiter);
+		else
+			wake_up(&waiter->fl_wait);
+		if (wait) {
+			/* Let the blocked process remove waiter from the
+			 * block list when it gets scheduled.
+			 */
+			current->policy |= SCHED_YIELD;
+			schedule();
+		}
 	}
 	return;
 }
@@ -329,7 +341,7 @@ int fcntl_getlk(unsigned int fd, struct flock *l)
 		goto out;
 
 	error = -EINVAL;
-	if (!filp->f_dentry || !filp->f_dentry->d_inode)
+	if (!filp->f_dentry || !filp->f_dentry->d_inode || !filp->f_op)
 		goto out_putf;
 
 	if (!posix_make_lock(filp, &file_lock, &flock))
@@ -339,7 +351,11 @@ int fcntl_getlk(unsigned int fd, struct flock *l)
 		error = filp->f_op->lock(filp, F_GETLK, &file_lock);
 		if (error < 0)
 			goto out_putf;
-		fl = &file_lock;
+		else if (error == LOCK_USE_CLNT)
+		  /* Bypass for NFS with no locking - 2.0.36 compat */
+		  fl = posix_test_lock(filp, &file_lock);
+		else
+		  fl = (file_lock.fl_type == F_UNLCK ? NULL : &file_lock);
 	} else {
 		fl = posix_test_lock(filp, &file_lock);
 	}
@@ -395,19 +411,17 @@ int fcntl_setlk(unsigned int fd, unsigned int cmd, struct flock *l)
 		goto out_putf;
 	if (!(inode = dentry->d_inode))
 		goto out_putf;
+	if (!filp->f_op)
+		goto out_putf;
 
 	/* Don't allow mandatory locks on files that may be memory mapped
 	 * and shared.
 	 */
 	if (IS_MANDLOCK(inode) &&
 	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID &&
-	    inode->i_mmap) {
-		struct vm_area_struct *vma = inode->i_mmap;
+	    inode->i_mmap_shared) {
 		error = -EAGAIN;
-		do {
-			if (vma->vm_flags & VM_MAYSHARE)
-				goto out_putf;
-		} while ((vma = vma->vm_next_share) != NULL);
+		goto out_putf;
 	}
 
 	error = -EINVAL;
@@ -479,7 +493,9 @@ repeat:
 	while ((fl = *before) != NULL) {
 		if ((fl->fl_flags & FL_POSIX) && fl->fl_owner == owner) {
 			int (*lock)(struct file *, int, struct file_lock *);
-			lock = filp->f_op->lock;
+			lock = NULL;
+			if(filp->f_op)
+				lock = filp->f_op->lock;
 			if (lock) {
 				file_lock = *fl;
 				file_lock.fl_type = F_UNLCK;
@@ -510,7 +526,9 @@ repeat:
 	while ((fl = *before) != NULL) {
 		if ((fl->fl_flags & FL_FLOCK) && fl->fl_file == filp) {
 			int (*lock)(struct file *, int, struct file_lock *);
-			lock = filp->f_op->lock;
+			lock = NULL;
+			if (filp->f_op)
+				lock = filp->f_op->lock;
 			if (lock) {
 				file_lock = *fl;
 				file_lock.fl_type = F_UNLCK;
@@ -672,8 +690,11 @@ static int posix_make_lock(struct file *filp, struct file_lock *fl,
 
 	if (((start += l->l_start) < 0) || (l->l_len < 0))
 		return (0);
+	fl->fl_end = start + l->l_len - 1;
+	if (l->l_len > 0 && fl->fl_end < 0)
+		return (0);
 	fl->fl_start = start;	/* we record the absolute position */
-	if ((l->l_len == 0) || ((fl->fl_end = start + l->l_len - 1) < 0))
+	if (l->l_len == 0)
 		fl->fl_end = OFFSET_MAX;
 	
 	fl->fl_file = filp;
@@ -1115,6 +1136,8 @@ static struct file_lock *locks_init_lock(struct file_lock *new,
 		new->fl_start = fl->fl_start;
 		new->fl_end = fl->fl_end;
 		new->fl_notify = fl->fl_notify;
+		new->fl_insert = fl->fl_insert;
+		new->fl_remove = fl->fl_remove;
 		new->fl_u = fl->fl_u;
 	}
 	return new;
@@ -1132,6 +1155,9 @@ static void locks_insert_lock(struct file_lock **pos, struct file_lock *fl)
 	file_lock_table = fl;
 	fl->fl_next = *pos;	/* insert into file's list */
 	*pos = fl;
+
+	if (fl->fl_insert)
+		fl->fl_insert(fl);
 
 	return;
 }
@@ -1160,6 +1186,9 @@ static void locks_delete_lock(struct file_lock **thisfl_p, unsigned int wait)
 		prevfl->fl_nextlink = nextfl;
 	else
 		file_lock_table = nextfl;
+
+	if (thisfl->fl_remove)
+		thisfl->fl_remove(thisfl);
 	
 	locks_wake_up_blocks(thisfl, wait);
 	locks_free_lock(thisfl);
@@ -1170,7 +1199,7 @@ static void locks_delete_lock(struct file_lock **thisfl_p, unsigned int wait)
 
 static char *lock_get_status(struct file_lock *fl, int id, char *pfx)
 {
-	static char temp[129];
+	static char temp[155];
 	char *p = temp;
 	struct inode *inode;
 

@@ -74,7 +74,7 @@
  *  Time out in seconds for disks and Magneto-opticals (which are slower).
  */
 
-#define SD_TIMEOUT (15 * HZ)
+#define SD_TIMEOUT (30 * HZ)
 #define SD_MOD_TIMEOUT (75 * HZ)
 
 #define CLUSTERABLE_DEVICE(SC) (SC->host->use_clustering && \
@@ -150,36 +150,43 @@ static int sd_open(struct inode * inode, struct file * filp)
      * This is also used to lock out further access when the partition table
      * is being re-read.
      */
-
     while (rscsi_disks[target].device->busy)
         barrier();
-    if(rscsi_disks[target].device->removable) {
+
+    /*
+     * When opening removable disks, we check media...
+     * ... unless media don't matter, due to O_NONBLOCK.
+     */
+    if ( rscsi_disks[target].device->removable
+         && !(filp->f_flags & O_NONBLOCK) )
+    {
+        /*
+         * Note disk change and/or removal.
+         * Also try to read new partition table (if any).
+         */
 	check_disk_change(inode->i_rdev);
 
-	/*
-	 * If the drive is empty, just let the open fail.
-	 */
+        /*
+         * If the drive is empty, let the open fail.
+         */
 	if ( !rscsi_disks[target].ready )
-	    return -ENXIO;
+            return -ENXIO;
 
-	/*
-	 * Similarly, if the device has the write protect tab set,
-	 * have the open fail if the user expects to be able to write
-	 * to the thing.
-	 */
-	if ( (rscsi_disks[target].write_prot) && (filp->f_mode & 2) )
-	    return -EROFS;
+        /*
+         * If the device has the write protect tab set,
+         * let the open fail if the user expects to be able to write.
+         */
+        if ( (rscsi_disks[target].write_prot) && (filp->f_mode & 2) )
+            return -EROFS;
     }
 
     /*
-     * It is possible that the disk changing stuff resulted in the device being taken
-     * offline.  If this is the case, report this to the user, and don't pretend that
-     * the open actually succeeded.
+     * It is possible that the disk changing stuff (or something
+     * else?) resulted in the device being taken offline.
+     * If so, let the open fail.
      */
-    if( !rscsi_disks[target].device->online )
-    {
+    if ( !rscsi_disks[target].device->online )
         return -ENXIO;
-    }
 
     /*
      * See if we are requesting a non-existent partition.  Do this
@@ -483,11 +490,16 @@ static void rw_intr (Scsi_Cmnd *SCpnt)
 	 * would be a ten byte read where only a six byte read was supported.
 	 * Also, on a system where READ CAPACITY failed, we have have read
 	 * past the end of the disk.
+	 *
+	 * Don't screw with the ten byte flag unless we are certain that
+	 * the drive does not understand the command /axboe
 	 */
 
 	if (SCpnt->sense_buffer[2] == ILLEGAL_REQUEST) {
 	    if (rscsi_disks[DEVICE_NR(SCpnt->request.rq_dev)].ten) {
-		rscsi_disks[DEVICE_NR(SCpnt->request.rq_dev)].ten = 0;
+		if (SCpnt->cmnd[0] == READ_10 || SCpnt->cmnd[0] == WRITE_10 ||
+		    SCpnt->sense_buffer[12] == 0x20)
+		    rscsi_disks[DEVICE_NR(SCpnt->request.rq_dev)].ten = 0;
 		requeue_sd_request(SCpnt);
 		result = 0;
 	    } else {
@@ -708,17 +720,23 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
      */
     if (rscsi_disks[dev].sector_size == 1024)
 	if((block & 1) || (SCpnt->request.nr_sectors & 1)) {
-	    printk("sd.c:Bad block number requested");
+	    printk("sd.c:Bad block number/count requested");
 	    SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
 	    goto repeat;
 	}
 
      if (rscsi_disks[dev].sector_size == 2048)
  	if((block & 3) || (SCpnt->request.nr_sectors & 3)) {
- 	    printk("sd.c:Bad block number requested");
+ 	    printk("sd.c:Bad block number/count requested");
  	    SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
  	    goto repeat;
  	}
+    if (rscsi_disks[dev].sector_size == 4096) 
+	if((block & 7) || (SCpnt->request.nr_sectors & 7)) {
+	    printk("sd.cBad block number/count requested");
+	    SCpnt = end_scsi_request(SCpnt, 0, SCpnt->request.nr_sectors);
+	    goto repeat;
+	}
      
     switch (SCpnt->request.cmd)
     {
@@ -984,6 +1002,13 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 
     cmd[1] = (SCpnt->lun << 5) & 0xe0;
 
+     if (rscsi_disks[dev].sector_size == 4096){
+	if(block & 7) panic("sd.c:Bad block number requested");
+	if(this_count & 7) panic("sd.c:Bad block number requested");
+	block = block >> 3;
+	this_count = this_count >> 3;
+     }
+
      if (rscsi_disks[dev].sector_size == 2048){
  	if(block & 3) panic("sd.c:Bad block number requested");
  	if(this_count & 3) panic("sd.c:Bad block number requested");
@@ -1003,7 +1028,7 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 	this_count = this_count << 1;
     }
 
-    if (((this_count > 0xff) ||  (block > 0x1fffff)) && rscsi_disks[dev].ten)
+    if (((this_count > 0xff) ||  (block > 0x1fffff)) || rscsi_disks[dev].ten)
     {
 	if (this_count > 0xffff)
 	    this_count = 0xffff;
@@ -1037,6 +1062,7 @@ static void requeue_sd_request (Scsi_Cmnd * SCpnt)
 
     SCpnt->transfersize = rscsi_disks[dev].sector_size;
     SCpnt->underflow = this_count << 9;
+    SCpnt->cmd_len = 0;
     scsi_do_cmd (SCpnt, (void *) cmd, buff,
 		 this_count * rscsi_disks[dev].sector_size,
 		 rw_intr,
@@ -1049,7 +1075,6 @@ static int check_scsidisk_media_change(kdev_t full_dev){
     int retval;
     int target;
     struct inode inode;
-    int flag = 0;
 
     target =  DEVICE_NR(full_dev);
 
@@ -1101,11 +1126,11 @@ static int check_scsidisk_media_change(kdev_t full_dev){
      * presence of disk in the drive. This is kept in the Scsi_Disk
      * struct and tested at open !  Daniel Roche ( dan@lectra.fr )
      */
-
     rscsi_disks[target].ready = 1;	/* FLOPTICAL */
 
     retval = rscsi_disks[target].device->changed;
-    if(!flag) rscsi_disks[target].device->changed = 0;
+    rscsi_disks[target].device->changed = 0;
+
     return retval;
 }
 
@@ -1225,13 +1250,16 @@ static int sd_init_onedisk(int i)
 		    spintime = jiffies;
 		}
 
-		time1 = jiffies + HZ;
 		spin_unlock_irq(&io_request_lock);
-		while(jiffies < time1); /* Wait 1 second for next try */
+		time1 = HZ;
+		do {
+		    current->state = TASK_UNINTERRUPTIBLE;
+		    time1 = schedule_timeout(time1);
+		} while (time1); /* Wait 1 second for next try */
 		printk( "." );
 		spin_lock_irq(&io_request_lock);
 	    }
-	} while(the_result && spintime && spintime+100*HZ > jiffies);
+	} while(the_result && spintime && time_before(jiffies, spintime+100*HZ));
 	if (spintime) {
 	    if (the_result)
 		printk( "not responding...\n" );
@@ -1301,6 +1329,7 @@ static int sd_init_onedisk(int i)
 
 	printk("%s : block size assumed to be 512 bytes, disk size 1GB.  \n",
 	       nbuff);
+
 	rscsi_disks[i].capacity = 0x1fffff;
 	rscsi_disks[i].sector_size = 512;
 
@@ -1335,6 +1364,7 @@ static int sd_init_onedisk(int i)
 	if (rscsi_disks[i].sector_size != 512 &&
 	    rscsi_disks[i].sector_size != 1024 &&
 	    rscsi_disks[i].sector_size != 2048 &&
+	    rscsi_disks[i].sector_size != 4096 &&
 	    rscsi_disks[i].sector_size != 256)
 	{
 	    printk ("%s : unsupported sector size %d.\n",
@@ -1343,20 +1373,21 @@ static int sd_init_onedisk(int i)
 		rscsi_disks[i].capacity = 0;
 	    } else {
 		printk ("scsi : deleting disk entry.\n");
+		sd_detach(rscsi_disks[i].device);
 		rscsi_disks[i].device = NULL;
-		sd_template.nr_dev--;
-		SD_GENDISK(i).nr_real--;
 
                 /* Wake up a process waiting for device */
                 wake_up(&SCpnt->device->device_wait);
                 scsi_release_command(SCpnt);
                 SCpnt = NULL;
+		scsi_free(buffer, 512);
+		spin_unlock_irq(&io_request_lock);
                 
 		return i;
 	    }
 	}
 
-        if( rscsi_disks[i].sector_size == 2048 )
+        if( rscsi_disks[i].sector_size > 1024 )
           {
             int m;
 
@@ -1368,7 +1399,7 @@ static int sd_init_onedisk(int i)
              */
             for (m=i<<4; m<((i+1)<<4); m++)
               {
-                sd_blocksizes[m] = 2048;
+                sd_blocksizes[m] = rscsi_disks[i].sector_size;
               }
           }
     {
@@ -1394,6 +1425,8 @@ static int sd_init_onedisk(int i)
 		nbuff, hard_sector, rscsi_disks[i].capacity,
                 mb, sz_quot, sz_rem);
     }
+	if(rscsi_disks[i].sector_size == 4096)
+	    rscsi_disks[i].capacity <<= 3;
 	if(rscsi_disks[i].sector_size == 2048)
 	    rscsi_disks[i].capacity <<= 2;  /* Change into 512 byte sectors */
 	if(rscsi_disks[i].sector_size == 1024)
@@ -1698,6 +1731,7 @@ int revalidate_scsidisk(kdev_t dev, int maxusage) {
 #endif
 
     sd_gendisks->part[start].nr_sects = CAPACITY;
+    if (!rscsi_disks[target].device) return -EBUSY;
     resetup_one_dev(&SD_GENDISK(target),
 		    target % SCSI_DISKS_PER_MAJOR);
 
@@ -1713,7 +1747,7 @@ static int fop_revalidate_scsidisk(kdev_t dev){
 static void sd_detach(Scsi_Device * SDp)
 {
     Scsi_Disk * dpnt;
-    int i;
+    int i, j;
     int max_p;
     int start;
 
@@ -1725,8 +1759,8 @@ static void sd_detach(Scsi_Device * SDp)
 	    max_p = sd_gendisk.max_p;
 	    start = i << sd_gendisk.minor_shift;
 
-	    for (i=max_p - 1; i >=0 ; i--) {
-		int index = start+i;
+	    for (j=max_p - 1; j >=0 ; j--) {
+		int index = start+j;
 		kdev_t devi = MKDEV_SD_PARTITION(index);
                 struct super_block *sb = get_super(devi);
 		sync_dev(devi);
@@ -1741,9 +1775,11 @@ static void sd_detach(Scsi_Device * SDp)
 	    dpnt->device = NULL;
 	    dpnt->capacity = 0;
 	    SDp->attached--;
+            if (SDp->scsi_request_fn == do_sd_request)
+         	SDp->scsi_request_fn = NULL;
 	    sd_template.dev_noticed--;
 	    sd_template.nr_dev--;
-	    SD_GENDISK(start).nr_real--;
+	    SD_GENDISK(i).nr_real--;
 	    return;
 	}
     return;

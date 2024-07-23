@@ -44,7 +44,7 @@
      *  Frame buffer device initialization and setup routines
      */
 
-extern unsigned long acornfb_init(void);
+extern void acornfb_init(void);
 extern void acornfb_setup(char *options, int *ints);
 extern void amifb_init(void);
 extern void amifb_setup(char *options, int *ints);
@@ -56,6 +56,8 @@ extern void cyberfb_init(void);
 extern void cyberfb_setup(char *options, int *ints);
 extern void pm2fb_init(void);
 extern void pm2fb_setup(char *options, int *ints);
+extern void cyber2000fb_init(void);
+extern void cyber2000fb_setup(char *options, int *ints);
 extern void retz3fb_init(void);
 extern void retz3fb_setup(char *options, int *ints);
 extern void clgenfb_init(void);
@@ -66,12 +68,15 @@ extern void offb_init(void);
 extern void offb_setup(char *options, int *ints);
 extern void atyfb_init(void);
 extern void atyfb_setup(char *options, int *ints);
+extern void aty128fb_init(void);
+extern void aty128fb_setup(char *options, int *ints);
 extern void igafb_init(void);
 extern void igafb_setup(char *options, int *ints);
 extern void imsttfb_init(void);
 extern void imsttfb_setup(char *options, int *ints);
 extern void dnfb_init(void);
 extern void tgafb_init(void);
+extern void tgafb_setup(char *options, int *ints);
 extern void virgefb_init(void);
 extern void virgefb_setup(char *options, int *ints);
 extern void resolver_video_setup(char *options, int *ints);
@@ -79,6 +84,8 @@ extern void s3triofb_init(void);
 extern void s3triofb_setup(char *options, int *ints);
 extern void vesafb_init(void);
 extern void vesafb_setup(char *options, int *ints);
+extern void vga16fb_init(void);
+extern void vga16fb_setup(char *options, int *ints);
 extern void matroxfb_init(void);
 extern void matroxfb_setup(char* options, int *ints);
 extern void hpfb_init(void);
@@ -87,13 +94,23 @@ extern void sbusfb_init(void);
 extern void sbusfb_setup(char *options, int *ints);
 extern void valkyriefb_init(void);
 extern void valkyriefb_setup(char *options, int *ints);
+extern void control_init(void);
+extern void control_setup(char *options, int *ints);
 extern void g364fb_init(void);
+extern void fm2fb_init(void);
+extern void fm2fb_setup(char *options, int *ints);
+extern void q40fb_init(void);
+extern void sgivwfb_init(void);
+extern void sgivwfb_setup(char* options, int *ints);
 
 static struct {
 	const char *name;
 	void (*init)(void);
 	void (*setup)(char *options, int *ints);
 } fb_drivers[] __initdata = {
+#ifdef CONFIG_FB_SGIVW
+	{ "sgivw", sgivwfb_init, sgivwfb_setup },
+#endif
 #ifdef CONFIG_FB_RETINAZ3
 	{ "retz3", retz3fb_init, retz3fb_setup },
 #endif
@@ -112,6 +129,9 @@ static struct {
 #ifdef CONFIG_FB_CYBER
 	{ "cyber", cyberfb_init, cyberfb_setup },
 #endif
+#ifdef CONFIG_FB_CYBER2000
+	{ "cyber2000", cyber2000fb_init, cyber2000fb_setup },
+#endif
 #ifdef CONFIG_FB_PM2
 	{ "pm2fb", pm2fb_init, pm2fb_setup },
 #endif
@@ -127,6 +147,9 @@ static struct {
 #ifdef CONFIG_FB_ATY
 	{ "atyfb", atyfb_init, atyfb_setup },
 #endif
+#ifdef CONFIG_FB_ATY128
+	{ "aty128fb", aty128fb_init, aty128fb_setup },
+#endif
 #ifdef CONFIG_FB_IGA
         { "igafb", igafb_init, igafb_setup },
 #endif
@@ -136,17 +159,23 @@ static struct {
 #ifdef CONFIG_APOLLO
 	{ "apollo", dnfb_init, NULL },
 #endif
+#ifdef CONFIG_FB_Q40
+	{ "q40fb", q40fb_init, NULL },
+#endif
 #ifdef CONFIG_FB_S3TRIO
 	{ "s3trio", s3triofb_init, s3triofb_setup },
 #endif 
 #ifdef CONFIG_FB_TGA
-	{ "tga", tgafb_init, NULL },
+	{ "tga", tgafb_init, tgafb_setup },
 #endif
 #ifdef CONFIG_FB_VIRGE
 	{ "virge", virgefb_init, virgefb_setup },
 #endif
 #ifdef CONFIG_FB_VESA
 	{ "vesa", vesafb_init, vesafb_setup },
+#endif 
+#ifdef CONFIG_FB_VGA16
+	{ "vga16", vga16fb_init, vga16fb_setup },
 #endif 
 #ifdef CONFIG_FB_MATROX
 	{ "matrox", matroxfb_init, matroxfb_setup },
@@ -157,9 +186,15 @@ static struct {
 #ifdef CONFIG_FB_VALKYRIE
 	{ "valkyriefb", valkyriefb_init, valkyriefb_setup },
 #endif
+#ifdef CONFIG_FB_CONTROL
+	{ "controlfb", control_init, control_setup },
+#endif
 #ifdef CONFIG_FB_G364
 	{ "g364", g364fb_init, NULL },
 #endif
+#ifdef CONFIG_FB_FM2
+	{ "fm2fb", fm2fb_init, fm2fb_setup },
+#endif 
 #ifdef CONFIG_GSP_RESOLVER
 	/* Not a real frame buffer device... */
 	{ "resolver", NULL, resolver_video_setup },
@@ -181,6 +216,7 @@ static int num_pref_init_funcs __initdata = 0;
 
 struct fb_info *registered_fb[FB_MAX];
 int num_registered_fb = 0;
+int fbcon_softback_size = 32768;
 
 char con2fb_map[MAX_NR_CONSOLES];
 
@@ -188,17 +224,24 @@ static int first_fb_vc = 0;
 static int last_fb_vc = MAX_NR_CONSOLES-1;
 static int fbcon_is_default = 1;
 
-static inline int PROC_CONSOLE(void)
+static int PROC_CONSOLE(struct fb_info *info)
 {
+	int fgc;
+
+	if (info->display_fg != NULL)
+		fgc = info->display_fg->vc_num;
+	else
+		return -1;
+		
 	if (!current->tty)
-		return fg_console;
+		return fgc;
 
 	if (current->tty->driver.type != TTY_DRIVER_TYPE_CONSOLE)
 		/* XXX Should report error here? */
-		return fg_console;
+		return fgc;
 
 	if (MINOR(current->tty->device) < 1)
-		return fg_console;
+		return fgc;
 
 	return MINOR(current->tty->device) - 1;
 }
@@ -227,19 +270,27 @@ fb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 	struct fb_info *info = registered_fb[fbidx];
 	struct fb_ops *fb = info->fbops;
 	struct fb_fix_screeninfo fix;
-	char *base_addr;
-	ssize_t copy_size;
 
 	if (! fb || ! info->disp)
 		return -ENODEV;
 
-	fb->fb_get_fix(&fix,PROC_CONSOLE(), info);
-	base_addr=info->disp->screen_base;
-	copy_size=(count + p <= fix.smem_len ? count : fix.smem_len - p);
-	if (copy_to_user(buf, base_addr+p, copy_size))
-	    return -EFAULT;
-	*ppos += copy_size;
-	return copy_size;
+	fb->fb_get_fix(&fix,PROC_CONSOLE(info), info);
+	if (p >= fix.smem_len)
+	    return 0;
+	if (count >= fix.smem_len)
+	    count = fix.smem_len;
+	if (count + p > fix.smem_len)
+		count = fix.smem_len - p;
+	if (count) {
+	    char *base_addr;
+
+	    base_addr = info->disp->screen_base;
+	    count -= copy_to_user(buf, base_addr+p, count);
+	    if (!count)
+		return -EFAULT;
+	    *ppos += count;
+	}
+	return count;
 }
 
 static ssize_t
@@ -251,19 +302,32 @@ fb_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 	struct fb_info *info = registered_fb[fbidx];
 	struct fb_ops *fb = info->fbops;
 	struct fb_fix_screeninfo fix;
-	char *base_addr;
-	ssize_t copy_size;
+	int err;
 
 	if (! fb || ! info->disp)
 		return -ENODEV;
 
-	fb->fb_get_fix(&fix, PROC_CONSOLE(), info);
-	base_addr=info->disp->screen_base;
-	copy_size=(count + p <= fix.smem_len ? count : fix.smem_len - p);
-	if (copy_from_user(base_addr+p, buf, copy_size))
-	    return -EFAULT;
-	file->f_pos += copy_size;
-	return copy_size;
+	fb->fb_get_fix(&fix, PROC_CONSOLE(info), info);
+	if (p > fix.smem_len)
+	    return -ENOSPC;
+	if (count >= fix.smem_len)
+	    count = fix.smem_len;
+	err = 0;
+	if (count + p > fix.smem_len) {
+	    count = fix.smem_len - p;
+	    err = -ENOSPC;
+	}
+	if (count) {
+	    char *base_addr;
+
+	    base_addr = info->disp->screen_base;
+	    count -= copy_from_user(base_addr+p, buf, count);
+	    *ppos += count;
+	    err = -EFAULT;
+	}
+	if (count)
+		return count;
+	return err;
 }
 
 
@@ -273,7 +337,7 @@ static int set_all_vcs(int fbidx, struct fb_ops *fb,
     int unit, err;
 
     var->activate |= FB_ACTIVATE_TEST;
-    err = fb->fb_set_var(var, PROC_CONSOLE(), info);
+    err = fb->fb_set_var(var, PROC_CONSOLE(info), info);
     var->activate &= ~FB_ACTIVATE_TEST;
     if (err)
 	    return err;
@@ -320,6 +384,20 @@ static void set_con2fb_map(int unit, int newidx)
        /* tell console var has changed */
        if (newfb->changevar)
 	   newfb->changevar(unit);
+       /* fixme: this really needs lock protection */
+       conp->vc_display_fg = &newfb->display_fg;
+       if (!newfb->display_fg)
+	   newfb->display_fg = conp;
+       if (oldfb != newfb && oldfb->display_fg == conp) {
+	   int i;
+	   for (i = 0; i < MAX_NR_CONSOLES; i++)
+	       if (fb_display[i].conp && con2fb_map[i] == oldidx) {
+		   oldfb->display_fg = fb_display[i].conp;
+		   break;
+	       }
+	   if (i == MAX_NR_CONSOLES)
+	       oldfb->display_fg = NULL;
+       }
     }
 }
 
@@ -350,7 +428,7 @@ fb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		return -ENODEV;
 	switch (cmd) {
 	case FBIOGET_VSCREENINFO:
-		if ((i = fb->fb_get_var(&var, PROC_CONSOLE(), info)))
+		if ((i = fb->fb_get_var(&var, PROC_CONSOLE(info), info)))
 			return i;
 		return copy_to_user((void *) arg, &var,
 				    sizeof(var)) ? -EFAULT : 0;
@@ -359,29 +437,29 @@ fb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			return -EFAULT;
 		i = var.activate & FB_ACTIVATE_ALL
 			    ? set_all_vcs(fbidx, fb, &var, info)
-			    : fb->fb_set_var(&var, PROC_CONSOLE(), info);
+			    : fb->fb_set_var(&var, PROC_CONSOLE(info), info);
 		if (i)
 			return i;
 		if (copy_to_user((void *) arg, &var, sizeof(var)))
 			return -EFAULT;
 		return 0;
 	case FBIOGET_FSCREENINFO:
-		if ((i = fb->fb_get_fix(&fix, PROC_CONSOLE(), info)))
+		if ((i = fb->fb_get_fix(&fix, PROC_CONSOLE(info), info)))
 			return i;
 		return copy_to_user((void *) arg, &fix, sizeof(fix)) ?
 			-EFAULT : 0;
 	case FBIOPUTCMAP:
 		if (copy_from_user(&cmap, (void *) arg, sizeof(cmap)))
 			return -EFAULT;
-		return (fb->fb_set_cmap(&cmap, 0, PROC_CONSOLE(), info));
+		return (fb->fb_set_cmap(&cmap, 0, PROC_CONSOLE(info), info));
 	case FBIOGETCMAP:
 		if (copy_from_user(&cmap, (void *) arg, sizeof(cmap)))
 			return -EFAULT;
-		return (fb->fb_get_cmap(&cmap, 0, PROC_CONSOLE(), info));
+		return (fb->fb_get_cmap(&cmap, 0, PROC_CONSOLE(info), info));
 	case FBIOPAN_DISPLAY:
 		if (copy_from_user(&var, (void *) arg, sizeof(var)))
 			return -EFAULT;
-		if ((i=fb->fb_pan_display(&var, PROC_CONSOLE(), info)))
+		if ((i=fb->fb_pan_display(&var, PROC_CONSOLE(info), info)))
 			return i;
 		if (copy_to_user((void *) arg, &var, sizeof(var)))
 			return -EFAULT;
@@ -414,8 +492,13 @@ fb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		    for (i = 0; i < MAX_NR_CONSOLES; i++)
 			set_con2fb_map(i, con2fb.framebuffer);
 		return 0;
+	case FBIOBLANK:
+		if (info->blank == 0)
+			return -EINVAL;
+		(*info->blank)(arg, info);
+		return 0;
 	default:
-		return fb->fb_ioctl(inode, file, cmd, arg, PROC_CONSOLE(),
+		return fb->fb_ioctl(inode, file, cmd, arg, PROC_CONSOLE(info),
 				    info);
 	}
 }
@@ -435,29 +518,56 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 		return -ENODEV;
 	if (fb->fb_mmap)
 		return fb->fb_mmap(info, file, vma);
-	fb->fb_get_fix(&fix, PROC_CONSOLE(), info);
+#if defined(__sparc__) && !defined(__sparc_v9__)
+	/* Should never get here, all fb drivers should have their own
+	   mmap routines */
+	return -EINVAL;
+#else
+	fb->fb_get_fix(&fix, PROC_CONSOLE(info), info);
 
 	/* frame buffer memory */
 	start = (unsigned long)fix.smem_start;
 	len = (start & ~PAGE_MASK)+fix.smem_len;
-	start &= PAGE_MASK;
 	len = (len+~PAGE_MASK) & PAGE_MASK;
 	if (vma->vm_offset >= len) {
 		/* memory mapped io */
 		vma->vm_offset -= len;
-		fb->fb_get_var(&var, PROC_CONSOLE(), info);
+		fb->fb_get_var(&var, PROC_CONSOLE(info), info);
 		if (var.accel_flags)
 			return -EINVAL;
 		start = (unsigned long)fix.mmio_start;
 		len = (start & ~PAGE_MASK)+fix.mmio_len;
-		start &= PAGE_MASK;
 		len = (len+~PAGE_MASK) & PAGE_MASK;
 	}
+	start &= PAGE_MASK;
 	if ((vma->vm_end - vma->vm_start + vma->vm_offset) > len)
 		return -EINVAL;
 	vma->vm_offset += start;
 	if (vma->vm_offset & ~PAGE_MASK)
 		return -ENXIO;
+#if defined(__sparc_v9__)
+	vma->vm_flags |= (VM_SHM | VM_LOCKED);
+	{
+		unsigned long align, j;
+		for (align = 0x400000; align > PAGE_SIZE; align >>= 3)
+			if (len >= align && !((start & ~PAGE_MASK) & (align - 1)))
+				break;
+		if (align > PAGE_SIZE && vma->vm_start & (align - 1)) {
+			/* align as much as possible */
+			struct vm_area_struct *vmm;
+			j = (-vma->vm_start) & (align - 1);
+			vmm = find_vma(current->mm, vma->vm_start);
+			if (!vmm || vmm->vm_start >= vma->vm_end + j) {
+				vma->vm_start += j;
+				vma->vm_end += j;
+			}
+		}
+	}
+	if (io_remap_page_range(vma->vm_start, vma->vm_offset,
+				vma->vm_end - vma->vm_start, vma->vm_page_prot, 0))
+		return -EAGAIN;
+	vma->vm_flags |= VM_IO;
+#else
 #if defined(__mc68000__)
 	if (CPU_IS_020_OR_030)
 		pgprot_val(vma->vm_page_prot) |= _PAGE_NOCACHE030;
@@ -470,24 +580,28 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	pgprot_val(vma->vm_page_prot) |= _PAGE_NO_CACHE|_PAGE_GUARDED;
 #elif defined(__alpha__)
 	/* Caching is off in the I/O space quadrant by design.  */
-#elif defined(__sparc__)
-	/* Should never get here, all fb drivers should have their own
-	   mmap routines */
 #elif defined(__i386__)
 	if (boot_cpu_data.x86 > 3)
 		pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
 #elif defined(__mips__)
 	pgprot_val(vma->vm_page_prot) &= ~_CACHE_MASK;
 	pgprot_val(vma->vm_page_prot) |= _CACHE_UNCACHED;
+#elif defined(__arm__)
+#if defined(CONFIG_CPU_32) && !defined(CONFIG_ARCH_ACORN)
+	/* On Acorn architectures, we want to keep the framebuffer
+	 * cached.
+	 */
+	pgprot_val(vma->vm_page_prot) &= ~(PTE_CACHEABLE | PTE_BUFFERABLE);
+#endif
 #else
 #warning What do we have to do here??
 #endif
 	if (remap_page_range(vma->vm_start, vma->vm_offset,
 			     vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
-	vma->vm_file = file;
-	file->f_count++;
+#endif /* !__sparc_v9__ */
 	return 0;
+#endif /* ! sparc32 */
 }
 
 static int
@@ -648,6 +762,21 @@ __initfunc(void video_setup(char *options, int *ints))
     if (!options || !*options)
 	    return;
 	    
+    if (!strncmp(options, "scrollback:", 11)) {
+	    options += 11;
+	    if (*options) {
+		fbcon_softback_size = simple_strtoul(options, &options, 0);
+		if (*options == 'k' || *options == 'K') {
+			fbcon_softback_size *= 1024;
+			options++;
+		}
+		if (*options != ',')
+			return;
+		options++;
+	    } else
+	        return;
+    }
+
     if (!strncmp(options, "map:", 4)) {
 	    options += 4;
 	    if (*options)
@@ -658,7 +787,7 @@ __initfunc(void video_setup(char *options, int *ints))
 		    }
 	    return;
     }
-
+    
     if (!strncmp(options, "vc:", 3)) {
 	    options += 3;
 	    if (*options)

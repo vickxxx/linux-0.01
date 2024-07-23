@@ -7,12 +7,6 @@
  * Interrupt support added 1993 Nigel Gamble
  */
 
-/* Magic numbers for defining port-device mappings */
-#define LP_PARPORT_UNSPEC -4
-#define LP_PARPORT_AUTO -3
-#define LP_PARPORT_OFF -2
-#define LP_PARPORT_NONE -1
-
 /*
  * Per POSIX guidelines, this module reserves the LP and lp prefixes
  * These are the lp_table[minor].flags flags...
@@ -25,7 +19,7 @@
 #define LP_NOPA  0x0010
 #define LP_ERR   0x0020
 #define LP_ABORT 0x0040
-#define LP_CAREFUL 0x0080 /* obsoleted -arca */
+#define LP_CAREFUL 0x0080
 #define LP_ABORTOPEN 0x0100
 #define	LP_TRUST_IRQ 0x0200
 
@@ -86,6 +80,14 @@
 
 #define LP_TIMEOUT_INTERRUPT	(60 * HZ)
 #define LP_TIMEOUT_POLLED	(10 * HZ)
+
+#ifdef __KERNEL__
+
+/* Magic numbers for defining port-device mappings */
+#define LP_PARPORT_UNSPEC -4
+#define LP_PARPORT_AUTO -3
+#define LP_PARPORT_OFF -2
+#define LP_PARPORT_NONE -1
 
 #define LP_F(minor)	lp_table[(minor)].flags		/* flags for busy, etc. */
 #define LP_CHAR(minor)	lp_table[(minor)].chars		/* busy timeout */
@@ -180,5 +182,7 @@ struct lp_struct {
  */
 
 extern int lp_init(void);
+
+#endif
 
 #endif

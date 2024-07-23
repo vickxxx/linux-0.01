@@ -90,8 +90,18 @@ do_trace:
 	jbsr	SYMBOL_NAME(syscall_trace)
 
 SYMBOL_NAME_LABEL(ret_from_signal)
-	RESTORE_SWITCH_STACK
+	RESTORE_SWITCH_STACK 
 	addql	#4,%sp
+/* on 68040 complete pending writebacks if any */	
+#ifdef CONFIG_M68040
+	bfextu	%sp@(PT_VECTOR){#0,#4},%d0  
+	subql	#7,%d0				| bus error frame ?
+	jbne	1f
+	movel	%sp,%sp@-
+	jbsr	SYMBOL_NAME(berr_040cleanup)
+	addql	#4,%sp
+1:	
+#endif	
 	jra	SYMBOL_NAME(ret_from_exception)
 
 ENTRY(system_call)
@@ -164,8 +174,17 @@ SYMBOL_NAME_LABEL(inthandler)
 
 	movel	%sp,%sp@-
 	movel	%d0,%sp@- 		|  put vector # on stack
+#if defined(MACH_Q40_ONLY) && defined(CONFIG_BLK_DEV_FD)
+	btstb	#4,0xff000000	| Q40 floppy needs very special treatment ...
+	jbeq	1f
+	btstb	#3,0xff000004		
+	jbeq	1f
+	jbsr	SYMBOL_NAME(floppy_hardint)
+	jbra	3f
+1:		
+#endif		
 	jbsr	SYMBOL_NAME(process_int)|  process the IRQ
-	addql	#8,%sp			|  pop parameters off stack
+3:     	addql	#8,%sp			|  pop parameters off stack
 
 SYMBOL_NAME_LABEL(ret_from_interrupt)
 	subql	#1,SYMBOL_NAME(local_irq_count)
@@ -274,6 +293,11 @@ SYMBOL_NAME_LABEL(resume)
 	movel	%sp,%a0@(TASK_TSS+TSS_KSP)
 
 	/* save floating point context */
+#ifndef CONFIG_FPU_EMU_ONLY
+#ifdef CONFIG_FPU_EMU
+	tstl	SYMBOL_NAME(m68k_fputype)
+	jeq	3f
+#endif
 	fsave	%a0@(TASK_TSS+TSS_FPSTATE)
 
 #if defined(CONFIG_M68060)
@@ -295,6 +319,9 @@ SYMBOL_NAME_LABEL(resume)
 2:	fmovemx	%fp0-%fp7,%a0@(TASK_TSS+TSS_FPREG)
 	fmoveml	%fpcr/%fpsr/%fpiar,%a0@(TASK_TSS+TSS_FPCNTL)
 3:
+#endif	/* CONFIG_FPU_EMU_ONLY */
+	/* Return previous task in %d1 */
+	movel	%curptr,%d1
 
 	/* switch to new task (a1 contains new task) */
 	movel	%a1,%curptr
@@ -320,7 +347,14 @@ SYMBOL_NAME_LABEL(resume)
 	movec	%d0,%cacr
 
 	/* switch the root pointer */
+#ifdef CPU_M68030_ONLY
+	.chip	68030
+	pmovefd	%a1@(TASK_TSS+TSS_CRP),%crp
+	.chip	68k
+	pflush	#0,#4
+#else
 	pmove	%a1@(TASK_TSS+TSS_CRP),%crp
+#endif
 #endif
 
 #if defined(CPU_M68020_OR_M68030) && defined(CPU_M68040_OR_M68060)
@@ -356,7 +390,11 @@ SYMBOL_NAME_LABEL(resume)
 2:
 4:
 	/* restore floating point context */
-
+#ifndef CONFIG_FPU_EMU_ONLY
+#ifdef CONFIG_FPU_EMU
+	tstl	SYMBOL_NAME(m68k_fputype)
+	jeq	4f
+#endif
 #if defined(CONFIG_M68060)
 #if !defined(CPU_M68060_ONLY)
 	btst	#3,SYMBOL_NAME(m68k_cputype)+3
@@ -376,6 +414,8 @@ SYMBOL_NAME_LABEL(resume)
 2:	fmovemx	%a1@(TASK_TSS+TSS_FPREG),%fp0-%fp7
 	fmoveml	%a1@(TASK_TSS+TSS_FPCNTL),%fpcr/%fpsr/%fpiar
 3:	frestore %a1@(TASK_TSS+TSS_FPSTATE)
+4:
+#endif	/* CONFIG_FPU_EMU_ONLY */
 
 	/* restore the kernel stack pointer */
 	movel	%a1@(TASK_TSS+TSS_KSP),%sp

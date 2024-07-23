@@ -12,6 +12,7 @@
 
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/svc.h>
+#include <linux/lockd/xdr4.h>
 #include <linux/lockd/lockd.h>
 #include <linux/lockd/share.h>
 
@@ -35,13 +36,13 @@ nlmsvc_share_file(struct nlm_host *host, struct nlm_file *file,
 			goto update;
 		if ((argp->fsm_access & share->s_mode)
 		 || (argp->fsm_mode   & share->s_access ))
-			return nlm_lck_denied;
+			return nlm4_lck_denied;
 	}
 
 	share = (struct nlm_share *) kmalloc(sizeof(*share) + oh->len,
 						GFP_KERNEL);
 	if (share == NULL)
-		return nlm_lck_denied_nolocks;
+		return nlm4_lck_denied_nolocks;
 
 	/* Copy owner handle */
 	ohdata = (u8 *) (share + 1);
@@ -53,12 +54,11 @@ nlmsvc_share_file(struct nlm_host *host, struct nlm_file *file,
 	share->s_owner.len  = oh->len;
 	share->s_next       = file->f_shares;
 	file->f_shares      = share;
-	file->f_count	   += 1;
 
 update:
 	share->s_access = argp->fsm_access;
 	share->s_mode   = argp->fsm_mode;
-	return nlm_granted;
+	return nlm4_granted;
 }
 
 /*
@@ -75,13 +75,13 @@ nlmsvc_unshare_file(struct nlm_host *host, struct nlm_file *file,
 		if (share->s_host == host && nlm_cmp_owner(share, oh)) {
 			*shpp = share->s_next;
 			kfree(share);
-			return nlm_granted;
+			return nlm4_granted;
 		}
 	}
 
 	/* X/Open spec says return success even if there was no
 	 * corresponding share. */
-	return nlm_granted;
+	return nlm4_granted;
 }
 
 /*
@@ -95,14 +95,16 @@ nlmsvc_traverse_shares(struct nlm_host *host, struct nlm_file *file, int action)
 
 	shpp = &file->f_shares;
 	while ((share = *shpp) !=  NULL) {
+		if (host && host != share->s_host) {
+			shpp = &share->s_next;
+			continue;
+		}
 		if (action == NLM_ACT_MARK)
 			share->s_host->h_inuse = 1;
 		else if (action == NLM_ACT_UNLOCK) {
-			if (host == NULL || host == share->s_host) {
-				*shpp = share->s_next;
-				kfree(share);
-				continue;
-			}
+			*shpp = share->s_next;
+			kfree(share);
+			continue;
 		}
 		shpp = &share->s_next;
 	}

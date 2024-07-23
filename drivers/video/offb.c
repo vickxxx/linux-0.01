@@ -42,6 +42,16 @@
 
 static int currcon = 0;
 
+/* Supported palette hacks */
+enum {
+	cmap_unknown,
+	cmap_m64,	/* ATI Mach64 */
+	cmap_r128,	/* ATI Rage128 */
+	cmap_M3A,	/* ATI Rage Mobility M3 Head A */
+	cmap_M3B,	/* ATI Rage Mobility M3 Head B */
+	cmap_radeon	/* ATI Radeon */
+};
+
 struct fb_info_offb {
     struct fb_info info;
     struct fb_fix_screeninfo fix;
@@ -50,6 +60,7 @@ struct fb_info_offb {
     struct { u_char red, green, blue, pad; } palette[256];
     volatile unsigned char *cmap_adr;
     volatile unsigned char *cmap_data;
+    int cmap_type;
     union {
 #ifdef FBCON_HAS_CFB16
 	u16 cfb16[16];
@@ -106,7 +117,8 @@ extern boot_infos_t *boot_infos;
 static int offb_init_driver(struct device_node *);
 static void offb_init_nodriver(struct device_node *);
 static void offb_init_fb(const char *name, const char *full_name, int width,
-		      int height, int depth, int pitch, unsigned long address);
+		      int height, int depth, int pitch, unsigned long address,
+		      struct device_node *dp);
 
     /*
      *  Interface to the low level console driver
@@ -293,6 +305,9 @@ static int offb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 #ifdef CONFIG_FB_ATY
 extern void atyfb_of_init(struct device_node *dp);
 #endif /* CONFIG_FB_ATY */
+#if defined(CONFIG_FB_ATY128)
+extern void aty128fb_of_init(struct device_node *dp);
+#endif /* CONFIG_FB_ATY128 */
 #ifdef CONFIG_FB_S3TRIO
 extern void s3triofb_init_of(struct device_node *dp);
 #endif /* CONFIG_FB_S3TRIO */
@@ -333,6 +348,10 @@ __initfunc(void offb_init(void))
 	/* find the device node corresponding to the macos display */
 	for (dp = displays; dp != NULL; dp = dp->next) {
 	    int i;
+	    
+	    if (!strcmp(dp->name, "offscreen-display"))
+	    	continue;
+	    
 	    /*
 	     * Grrr...  It looks like the MacOS ATI driver
 	     * munges the assigned-addresses property (but
@@ -346,6 +365,35 @@ __initfunc(void offb_init(void))
 		    dp->addrs[0].size = 0x01000000;
 		}
 	    }
+
+	    /*
+	     * The LTPro on the Lombard powerbook has no addresses
+	     * on the display nodes, they are on their parent.
+	     */
+	    if (dp->n_addrs == 0 && device_is_compatible(dp, "ATY,264LTPro")) {
+		int na;
+		unsigned int *ap = (unsigned int *)
+		    get_property(dp, "AAPL,address", &na);
+		if (ap != 0)
+		    for (na /= sizeof(unsigned int); na > 0; --na, ++ap)
+			if (*ap <= addr && addr < *ap + 0x1000000)
+			    goto foundit;
+	    }
+
+	    /*
+	     * The M3 on the Pismo powerbook has no addresses
+	     * on the display nodes, they are on their parent.
+	     */
+	    if (dp->n_addrs == 0 && device_is_compatible(dp, "ATY,RageM3p")) {
+		int na;
+		unsigned int *ap = (unsigned int *)
+		    get_property(dp, "AAPL,address", &na);
+		if (ap != 0)
+		    for (na /= sizeof(unsigned int); na > 0; --na, ++ap)
+			if (*ap <= addr && addr < *ap + 0x1000000)
+			    goto foundit;
+	    }
+
 	    /*
 	     * See if the display address is in one of the address
 	     * ranges for this display.
@@ -356,6 +404,7 @@ __initfunc(void offb_init(void))
 		    break;
 	    }
 	    if (i < dp->n_addrs) {
+	    foundit:
 		printk(KERN_INFO "MacOS display is %s\n", dp->full_name);
 		macos_display = dp;
 		break;
@@ -370,7 +419,7 @@ __initfunc(void offb_init(void))
 			 boot_infos->dispDeviceRect[2],
 			 boot_infos->dispDeviceRect[3],
 			 boot_infos->dispDeviceDepth,
-			 boot_infos->dispDeviceRowBytes, addr);
+			 boot_infos->dispDeviceRowBytes, addr, 0);
 	}
     }
 
@@ -382,6 +431,8 @@ __initfunc(void offb_init(void))
 
     if (!ofonly) {
 	for (dp = find_type_devices("display"); dp != NULL; dp = dp->next) {
+	    if (!strcmp(dp->name, "offscreen-display"))
+	    	continue;
 	    for (dpy = 0; dpy < prom_num_displays; dpy++)
 		if (strcmp(dp->full_name, prom_display_paths[dpy]) == 0)
 		    break;
@@ -393,6 +444,16 @@ __initfunc(void offb_init(void))
 
 __initfunc(static int offb_init_driver(struct device_node *dp))
 {
+#ifdef CONFIG_FB_ATY128
+    if (!strncmp(dp->name, "ATY,Rage128", 11) ||
+    	!strncmp(dp->name, "ATY,RageM3p1", 12) ||
+    	!strncmp(dp->name, "ATY,RageM3pA", 12)) {
+	aty128fb_of_init(dp);
+	return 1;
+    }
+    if (!strncmp(dp->name, "ATY,RageM3pB", 12))
+    	return 1;
+#endif /* CONFIG_FB_ATY128*/
 #ifdef CONFIG_FB_ATY
     if (!strncmp(dp->name, "ATY", 3)) {
 	atyfb_of_init(dp);
@@ -461,9 +522,11 @@ __initfunc(static void offb_init_nodriver(struct device_node *dp))
 	&& len == sizeof(int))
 	height = *pp;
     if ((pp = (int *)get_property(dp, "linebytes", &len)) != NULL
-	&& len == sizeof(int))
+	&& len == sizeof(int)) {
 	pitch = *pp;
-    else
+	if (pitch == 1)
+	    pitch = 0x1000;
+    } else
 	pitch = width;
     if ((up = (unsigned *)get_property(dp, "address", &len)) != NULL
 	&& len == sizeof(unsigned))
@@ -476,6 +539,7 @@ __initfunc(static void offb_init_nodriver(struct device_node *dp))
 	    printk("no framebuffer address found for %s\n", dp->full_name);
 	    return;
 	}
+
 	address = (u_long)dp->addrs[i].address;
 
 	/* kludge for valkyrie */
@@ -483,12 +547,14 @@ __initfunc(static void offb_init_nodriver(struct device_node *dp))
 	    address += 0x1000;
     }
     offb_init_fb(dp->name, dp->full_name, width, height, depth,
-		 pitch, address);
+		 pitch, address, dp);
+    
 }
 
 __initfunc(static void offb_init_fb(const char *name, const char *full_name,
 				    int width, int height, int depth,
-				    int pitch, unsigned long address))
+				    int pitch, unsigned long address,
+				    struct device_node *dp))
 {
     int i;
     struct fb_fix_screeninfo *fix;
@@ -525,13 +591,32 @@ __initfunc(static void offb_init_fb(const char *name, const char *full_name,
     fix->type = FB_TYPE_PACKED_PIXELS;
     fix->type_aux = 0;
 
+    info->cmap_type = cmap_unknown;
     if (depth == 8)
     {
     	/* XXX kludge for ati */
-    	if (strncmp(name, "ATY,", 4) == 0) {
+	if (dp && !strncmp(name, "ATY,Rage128", 11)) {
+		unsigned long regbase = dp->addrs[2].address;
+		info->cmap_adr = ioremap(regbase, 0x1FFF);
+		info->cmap_type = cmap_r128;
+	} else if (dp && (!strncmp(name, "ATY,RageM3pA", 12) ||
+		!strncmp(name, "ATY,RageM3p1", 12))) {
+		unsigned long regbase = dp->parent->addrs[2].address;
+		info->cmap_adr = ioremap(regbase, 0x1FFF);
+		info->cmap_type = cmap_M3A;
+	} else if (dp && !strncmp(name, "ATY,RageM3pB", 12)) {
+		unsigned long regbase = dp->parent->addrs[2].address;
+		info->cmap_adr = ioremap(regbase, 0x1FFF);
+		info->cmap_type = cmap_M3B;
+	} else if (dp && !strncmp(name, "ATY,Rage6", 9)) {
+		unsigned long regbase = dp->addrs[1].address;
+		info->cmap_adr = ioremap(regbase, 0x1FFF);
+		info->cmap_type = cmap_radeon;
+	} else if (!strncmp(name, "ATY,", 4)) {
 		unsigned long base = address & 0xff000000UL;
 		info->cmap_adr = ioremap(base + 0x7ff000, 0x1000) + 0xcc0;
 		info->cmap_data = info->cmap_adr + 1;
+		info->cmap_type = cmap_m64;
 	}
         fix->visual = info->cmap_adr ? FB_VISUAL_PSEUDOCOLOR
 				     : FB_VISUAL_STATIC_PSEUDOCOLOR;
@@ -688,7 +773,7 @@ __initfunc(static void offb_init_fb(const char *name, const char *full_name,
 	display_info.cmap_data_address = 0;
 	display_info.disp_reg_address = 0;
 	/* XXX kludge for ati */
-	if (strncmp(name, "ATY,", 4) == 0) {
+	if (info->cmap_type == cmap_m64) {
 	    unsigned long base = address & 0xff000000UL;
 	    display_info.disp_reg_address = base + 0x7ffc00;
 	    display_info.cmap_adr_address = base + 0x7ffcc0;
@@ -749,12 +834,37 @@ static void offbcon_blank(int blank, struct fb_info *info)
 	return;
 
     if (blank)
-	for (i = 0; i < 256; i++) {
-	    *info2->cmap_adr = i;
-	    mach_eieio();
-	    for (j = 0; j < 3; j++) {
-		*info2->cmap_data = 0;
-		mach_eieio();
+        for (i = 0; i < 256; i++) {
+	    switch(info2->cmap_type) {
+	    case cmap_m64:
+	        *info2->cmap_adr = i;
+	  	mach_eieio();
+	  	for (j = 0; j < 3; j++) {
+		    *info2->cmap_data = 0;
+		    mach_eieio();
+	    	}
+	    	break;
+	    case cmap_M3A:
+	        /* Clear PALETTE_ACCESS_CNTL in DAC_CNTL */
+	    	out_le32((unsigned *)(info2->cmap_adr + 0x58),
+	    		in_le32((unsigned *)(info2->cmap_adr + 0x58)) & ~0x20);
+	    case cmap_r128:
+	    	/* Set palette index & data */
+    	        out_8(info2->cmap_adr + 0xb0, i);
+	    	out_le32((unsigned *)(info2->cmap_adr + 0xb4), 0);
+	    	break;
+	    case cmap_M3B:
+	        /* Set PALETTE_ACCESS_CNTL in DAC_CNTL */
+	    	out_le32((unsigned *)(info2->cmap_adr + 0x58),
+	    		in_le32((unsigned *)(info2->cmap_adr + 0x58)) | 0x20);
+	    	/* Set palette index & data */
+	    	out_8(info2->cmap_adr + 0xb0, i);
+	    	out_le32((unsigned *)(info2->cmap_adr + 0xb4), 0);
+	    	break;
+	    case cmap_radeon:
+    	        out_8(info2->cmap_adr + 0xb0, i);
+	    	out_le32((unsigned *)(info2->cmap_adr + 0xb4), 0);
+	    	break;
 	    }
 	}
     else
@@ -805,14 +915,43 @@ static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
     info2->palette[regno].green = green;
     info2->palette[regno].blue = blue;
 
-    *info2->cmap_adr = regno;/* On some chipsets, add << 3 in 15 bits */
-    mach_eieio();
-    *info2->cmap_data = red;
-    mach_eieio();
-    *info2->cmap_data = green;
-    mach_eieio();
-    *info2->cmap_data = blue;
-    mach_eieio();
+    switch(info2->cmap_type) {
+    case cmap_m64:
+        *info2->cmap_adr = regno;
+	mach_eieio();
+	*info2->cmap_data = red;
+	mach_eieio();
+	*info2->cmap_data = green;
+	mach_eieio();
+	*info2->cmap_data = blue;
+	mach_eieio();
+	break;
+    case cmap_M3A:
+	/* Clear PALETTE_ACCESS_CNTL in DAC_CNTL */
+	out_le32((unsigned *)(info2->cmap_adr + 0x58),
+		in_le32((unsigned *)(info2->cmap_adr + 0x58)) & ~0x20);
+    case cmap_r128:
+	/* Set palette index & data */
+	out_8(info2->cmap_adr + 0xb0, regno);
+	out_le32((unsigned *)(info2->cmap_adr + 0xb4),
+		(red << 16 | green << 8 | blue));
+	break;
+    case cmap_M3B:
+        /* Set PALETTE_ACCESS_CNTL in DAC_CNTL */
+    	out_le32((unsigned *)(info2->cmap_adr + 0x58),
+    		in_le32((unsigned *)(info2->cmap_adr + 0x58)) | 0x20);
+    	/* Set palette index & data */
+    	out_8(info2->cmap_adr + 0xb0, regno);
+  	out_le32((unsigned *)(info2->cmap_adr + 0xb4),
+    		(red << 16 | green << 8 | blue));
+    	break;
+    case cmap_radeon:
+	/* Set palette index & data (could be smarter) */
+	out_8(info2->cmap_adr + 0xb0, regno);
+  	out_le32((unsigned *)(info2->cmap_adr + 0xb4),
+    		(red << 16 | green << 8 | blue));
+	break;
+    }
 
     if (regno < 16)
 	switch (info2->var.bits_per_pixel) {

@@ -201,7 +201,7 @@ affs_find_entry(struct inode *dir, struct dentry *dentry, unsigned long *ino)
 	return bh;
 }
 
-int
+struct dentry *
 affs_lookup(struct inode *dir, struct dentry *dentry)
 {
 	unsigned long		 ino;
@@ -218,11 +218,11 @@ affs_lookup(struct inode *dir, struct dentry *dentry)
 		affs_brelse(bh);
 		inode = iget(dir->i_sb,ino);
 		if (!inode)
-			return -EACCES;
+			return ERR_PTR(-EACCES);
 	}
 	dentry->d_op = &affs_dentry_operations;
 	d_add(dentry,inode);
-	return 0;
+	return NULL;
 }
 
 int
@@ -247,7 +247,7 @@ affs_unlink(struct inode *dir, struct dentry *dentry)
 	
 	inode->i_nlink = retval;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
-	dir->i_version = ++event;
+	dir->i_version = ++global_event;
 	mark_inode_dirty(inode);
 	d_delete(dentry);
 	mark_inode_dirty(dir);
@@ -285,7 +285,7 @@ affs_create(struct inode *dir, struct dentry *dentry, int mode)
 	inode->u.affs_i.i_protect = mode_to_prot(inode->i_mode);
 	d_instantiate(dentry,inode);
 	mark_inode_dirty(inode);
-	dir->i_version = ++event;
+	dir->i_version = ++global_event;
 	mark_inode_dirty(dir);
 out:
 	return error;
@@ -319,7 +319,7 @@ affs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	inode->u.affs_i.i_protect = mode_to_prot(inode->i_mode);
 	d_instantiate(dentry,inode);
 	mark_inode_dirty(inode);
-	dir->i_version = ++event;
+	dir->i_version = ++global_event;
 	mark_inode_dirty(dir);
 out:
 	return error;
@@ -372,7 +372,7 @@ affs_rmdir(struct inode *dir, struct dentry *dentry)
 	inode->i_nlink = retval;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	retval         = 0;
-	dir->i_version = ++event;
+	dir->i_version = ++global_event;
 	mark_inode_dirty(dir);
 	mark_inode_dirty(inode);
 	d_delete(dentry);
@@ -450,7 +450,7 @@ affs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	if (error)
 		goto out_release;
 	d_instantiate(dentry,inode);
-	dir->i_version = ++event;
+	dir->i_version = ++global_event;
 	mark_inode_dirty(dir);
 
 out:
@@ -504,7 +504,7 @@ affs_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 	if (error)
 		inode->i_nlink = 0;
 	else {
-		dir->i_version = ++event;
+		dir->i_version = ++global_event;
 		mark_inode_dirty(dir);
 		mark_inode_dirty(oldinode);
 		oldinode->i_count++;
@@ -548,32 +548,14 @@ affs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			   "No inode for entry found (key=%lu)\n",new_ino);
 		goto end_rename;
 	}
-	if (new_inode == old_inode) {
-		if (old_ino == new_ino) {	/* Filename might have changed case	*/
-			retval = new_dentry->d_name.len < 31 ? new_dentry->d_name.len : 30;
-			strncpy(DIR_END(old_bh->b_data,old_inode)->dir_name + 1,
-				new_dentry->d_name.name,retval);
-			DIR_END(old_bh->b_data,old_inode)->dir_name[0] = retval;
-			goto new_checksum;
-		}
-		retval = 0;
-		goto end_rename;
-	}
 	if (S_ISDIR(old_inode->i_mode)) {
-		retval = -EINVAL;
-		if (is_subdir(new_dentry, old_dentry))
-			goto end_rename;
 		if (new_inode) {
-			if (new_dentry->d_count > 1)
-				shrink_dcache_parent(new_dentry);
-			retval = -EBUSY;
-			if (new_dentry->d_count > 1)
-				goto end_rename;
 			retval = -ENOTEMPTY;
 			if (!empty_dir(new_bh,AFFS_I2HSIZE(new_inode)))
 				goto end_rename;
 		}
 
+		retval = -ENOENT;
 		if (affs_parent_ino(old_inode) != old_dir->i_ino)
 			goto end_rename;
 	}
@@ -593,18 +575,16 @@ affs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	affs_copy_name(FILE_END(old_bh->b_data,old_inode)->file_name,new_dentry->d_name.name);
 	if ((retval = affs_insert_hash(new_dir->i_ino,old_bh,new_dir)))
 		goto end_rename;
-new_checksum:
 	affs_fix_checksum(AFFS_I2BSIZE(new_dir),old_bh->b_data,5);
 
 	new_dir->i_ctime   = new_dir->i_mtime = old_dir->i_ctime
 			   = old_dir->i_mtime = CURRENT_TIME;
-	new_dir->i_version = ++event;
-	old_dir->i_version = ++event;
+	new_dir->i_version = ++global_event;
+	old_dir->i_version = ++global_event;
 	retval             = 0;
 	mark_inode_dirty(new_dir);
 	mark_inode_dirty(old_dir);
 	mark_buffer_dirty(old_bh,1);
-	d_move(old_dentry,new_dentry);
 	
 end_rename:
 	affs_brelse(old_bh);

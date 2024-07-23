@@ -42,6 +42,12 @@ static int *trix_osp = NULL;
 
 static int mpu = 0;
 
+#ifdef TRIX_JOYSTICK
+static int joystick=1;
+#else
+static int joystick=0;
+#endif
+
 static unsigned char trix_read(int addr)
 {
 	outb(((unsigned char) addr), 0x390);	/* MT-0002-PC ASIC address */
@@ -196,9 +202,8 @@ int probe_trix_wss(struct address_info *hw_config)
 
 	if (ret)
 	{
-#ifdef TRIX_ENABLE_JOYSTICK
-		trix_write(0x15, 0x80);
-#endif
+		if(joystick==1)
+			trix_write(0x15, 0x80);
 		request_region(0x390, 2, "AudioTrix");
 	}
 	return ret;
@@ -323,7 +328,7 @@ int probe_trix_sb(struct address_info *hw_config)
 
 	hw_config->name = "AudioTrix SB";
 #ifdef CONFIG_SBDSP
-	return sb_dsp_detect(hw_config);
+	return sb_dsp_detect(hw_config, 0, 0);
 #else
 	return 0;
 #endif
@@ -477,7 +482,7 @@ MODULE_PARM(sb_dma,"i");
 MODULE_PARM(sb_irq,"i");
 MODULE_PARM(mpu_io,"i");
 MODULE_PARM(mpu_irq,"i");
-
+MODULE_PARM(joystick, "i");
 struct address_info config;
 struct address_info sb_config;
 struct address_info mpu_config;

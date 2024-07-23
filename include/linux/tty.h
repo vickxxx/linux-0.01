@@ -118,6 +118,9 @@ extern struct screen_info screen_info;
 
 #define VIDEO_TYPE_PMAC		0x60	/* PowerMacintosh frame buffer. */
 
+#define VIDEO_TYPE_SGI          0x70    /* Various SGI graphics hardware */
+#define VIDEO_TYPE_MIPS_G364	0x71    /* MIPS Magnum 4000 G364 video  */
+
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
  * a c_cc[] character, but indicates that a particular special character
@@ -274,6 +277,7 @@ struct tty_struct {
 	int alt_speed;		/* For magic substitution of 38400 bps */
 	struct wait_queue *write_wait;
 	struct wait_queue *read_wait;
+	struct wait_queue *poll_wait;
 	struct tq_struct tq_hangup;
 	void *disc_data;
 	void *driver_data;
@@ -300,6 +304,8 @@ struct tty_struct {
 	unsigned long canon_head;
 	unsigned int canon_column;
 	struct semaphore atomic_read;
+	struct semaphore atomic_write;
+	spinlock_t read_lock;
 };
 
 /* tty magic number */
@@ -325,6 +331,7 @@ struct tty_struct {
 #define TTY_HW_COOK_OUT 14
 #define TTY_HW_COOK_IN 15
 #define TTY_PTY_LOCK 16
+#define TTY_NO_WRITE_SPLIT 17
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -343,6 +350,9 @@ extern int rs_init(void);
 extern int lp_init(void);
 extern int pty_init(void);
 extern int tty_init(void);
+extern int mxser_init(void);
+extern int moxa_init(void);
+extern int ip2_init(void);
 extern int pcxe_init(void);
 extern int pc_init(void);
 extern int vcs_init(void);

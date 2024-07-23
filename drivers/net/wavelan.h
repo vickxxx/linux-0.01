@@ -19,6 +19,8 @@
 #ifndef _WAVELAN_H
 #define	_WAVELAN_H
 
+/************************** MAGIC NUMBERS ***************************/
+
 /* Detection of the WaveLAN card is done by reading the MAC
  * address from the card and checking it.  If you have a non-AT&T
  * product (OEM, like DEC RoamAbout, Digital Ocean, or Epson),
@@ -28,6 +30,8 @@ const char	MAC_ADDRESSES[][3] =
 {
   { 0x08, 0x00, 0x0E },		/* AT&T WaveLAN (standard) & DEC RoamAbout */
   { 0x08, 0x00, 0x6A },		/* AT&T WaveLAN (alternate) */
+  { 0x00, 0x00, 0xE1 },		/* Hitachi Wavelan */
+  { 0x00, 0x60, 0x1D }		/* Lucent Wavelan (another one) */
   /* Add your card here and send me the patch! */
 };
 
@@ -36,6 +40,25 @@ const char	MAC_ADDRESSES[][3] =
 #define WAVELAN_MTU		1500	/* Maximum size of WaveLAN packet */
 
 #define	MAXDATAZ		(WAVELAN_ADDR_SIZE + WAVELAN_ADDR_SIZE + 2 + WAVELAN_MTU)
+
+/*
+ * Constants used to convert channels to frequencies
+ */
+
+/* Frequency available in the 2.0 modem, in units of 250 kHz
+ * (as read in the offset register of the dac area).
+ * Used to map channel numbers used by `wfreqsel' to frequencies
+ */
+const short	channel_bands[] = { 0x30, 0x58, 0x64, 0x7A, 0x80, 0xA8,
+				    0xD0, 0xF0, 0xF8, 0x150 };
+
+/* Frequencies of the 1.0 modem (fixed frequencies).
+ * Use to map the PSA `subband' to a frequency
+ * Note : all frequencies apart from the first one need to be multiplied by 10
+ */
+const int	fixed_bands[] = { 915e6, 2.425e8, 2.46e8, 2.484e8, 2.4305e8 };
+
+
 
 /*************************** PC INTERFACE ****************************/
 
@@ -293,6 +316,7 @@ struct mmr_t
 #define	MMR_DCE_STATUS_LOOPT_IND	0x02	/* loop test indicated */
 #define	MMR_DCE_STATUS_TX_BUSY		0x04	/* transmitter on */
 #define	MMR_DCE_STATUS_JBR_EXPIRED	0x08	/* jabber timer expired */
+#define MMR_DCE_STATUS			0x0F	/* mask to get the bits */
   unsigned char	mmr_dsp_id;		/* DSP ID (AA = Daedalus rev A) */
   unsigned char	mmr_unused2[2];		/* unused */
   unsigned char	mmr_correct_nwid_l;	/* # of correct NWIDs rxd (low) */

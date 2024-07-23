@@ -67,8 +67,6 @@ static struct buffer_head * sysv_find_entry(struct inode * dir,
 	struct buffer_head * bh;
 
 	*res_dir = NULL;
-	if (!dir)
-		return NULL;
 	sb = dir->i_sb;
 	if (namelen > SYSV_NAMELEN) {
 		if (sb->sv_truncate)
@@ -103,17 +101,12 @@ static struct buffer_head * sysv_find_entry(struct inode * dir,
 	return NULL;
 }
 
-int sysv_lookup(struct inode * dir, struct dentry * dentry)
+struct dentry *sysv_lookup(struct inode * dir, struct dentry * dentry)
 {
 	struct inode * inode = NULL;
 	struct sysv_dir_entry * de;
 	struct buffer_head * bh;
 
-	if (!dir)
-		return -ENOENT;
-	if (!S_ISDIR(dir->i_mode)) {
-		return -ENOENT;
-	}
 	bh = sysv_find_entry(dir, dentry->d_name.name, dentry->d_name.len, &de);
 
 	if (bh) {
@@ -122,10 +115,10 @@ int sysv_lookup(struct inode * dir, struct dentry * dentry)
 		inode = iget(dir->i_sb, ino);
 	
 		if (!inode) 
-			return -EACCES;
+			return ERR_PTR(-EACCES);
 	}
 	d_add(dentry, inode);
-	return 0;
+	return NULL;
 }
 
 /*
@@ -151,8 +144,6 @@ static int sysv_add_entry(struct inode * dir,
 
 	*res_buf = NULL;
 	*res_dir = NULL;
-	if (!dir)
-		return -ENOENT;
 	sb = dir->i_sb;
 	if (namelen > SYSV_NAMELEN) {
 		if (sb->sv_truncate)
@@ -209,8 +200,6 @@ int sysv_create(struct inode * dir, struct dentry * dentry, int mode)
 	struct buffer_head * bh;
 	struct sysv_dir_entry * de;
 
-	if (!dir)
-		return -ENOENT;
 	inode = sysv_new_inode(dir);
 	if (!inode) 
 		return -ENOSPC;
@@ -239,8 +228,6 @@ int sysv_mknod(struct inode * dir, struct dentry * dentry, int mode, int rdev)
 	struct buffer_head * bh;
 	struct sysv_dir_entry * de;
 
-	if (!dir)
-		return -ENOENT;
 	bh = sysv_find_entry(dir, dentry->d_name.name,
 			     dentry->d_name.len, &de);
 	if (bh) {
@@ -286,8 +273,6 @@ int sysv_mkdir(struct inode * dir, struct dentry *dentry, int mode)
 	struct buffer_head * bh, *dir_block;
 	struct sysv_dir_entry * de;
 
-	if (!dir)
-		return -EINVAL;
 	bh = sysv_find_entry(dir, dentry->d_name.name,
                               dentry->d_name.len, &de);
 	if (bh) {
@@ -347,8 +332,6 @@ static int empty_dir(struct inode * inode)
 	struct buffer_head * bh;
 	struct sysv_dir_entry * de;
 
-	if (!inode)
-		return 1;
 	block = 0;
 	bh = NULL;
 	pos = offset = 2*SYSV_DIRSIZE;
@@ -404,20 +387,14 @@ int sysv_rmdir(struct inode * dir, struct dentry * dentry)
 	struct buffer_head * bh;
 	struct sysv_dir_entry * de;
 
-	inode = NULL;
-	bh = sysv_find_entry(dir, dentry->d_name.name,
-                             dentry->d_name.len, &de);
-	retval = -ENOENT;
-	if (!bh)
-		goto end_rmdir;
 	inode = dentry->d_inode;
+	bh = sysv_find_entry(dir, dentry->d_name.name, dentry->d_name.len, &de);
+	retval = -ENOENT;
+	if (!bh || de->inode != inode->i_ino)
+		goto end_rmdir;
 
 	if (!empty_dir(inode)) {
 		retval = -ENOTEMPTY;
-		goto end_rmdir;
-	}
-	if (de->inode != inode->i_ino) {
-		retval = -ENOENT;
 		goto end_rmdir;
 	}
 	if (!list_empty(&dentry->d_hash)) {
@@ -429,9 +406,9 @@ int sysv_rmdir(struct inode * dir, struct dentry * dentry)
 	de->inode = 0;
 	mark_buffer_dirty(bh, 1);
 	inode->i_nlink=0;
-	mark_inode_dirty(inode);
 	dir->i_nlink--;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
+	mark_inode_dirty(inode);
 	mark_inode_dirty(dir);
 	d_delete(dentry);
 	retval = 0;
@@ -447,26 +424,11 @@ int sysv_unlink(struct inode * dir, struct dentry * dentry)
 	struct buffer_head * bh;
 	struct sysv_dir_entry * de;
 
-repeat:
 	retval = -ENOENT;
-	inode = NULL;
-	bh = sysv_find_entry(dir, dentry->d_name.name,
-                             dentry->d_name.len, &de);
-	if (!bh)
-		goto end_unlink;
 	inode = dentry->d_inode;
-
-	retval = -EPERM;
-	if (de->inode != inode->i_ino) {
-		brelse(bh);
-		current->counter = 0;
-		schedule();
-		goto repeat;
-	}
-	if (de->inode != inode->i_ino) {
-		retval = -ENOENT;
+	bh = sysv_find_entry(dir, dentry->d_name.name, dentry->d_name.len, &de);
+	if (!bh || de->inode != inode->i_ino)
 		goto end_unlink;
-	}
 	if (!inode->i_nlink) {
 		printk("Deleting nonexistent file (%s:%lu), %d\n",
 		        kdevname(inode->i_dev), inode->i_ino, inode->i_nlink);
@@ -576,6 +538,7 @@ int sysv_link(struct dentry * old_dentry, struct inode * dir,
 	oldinode->i_nlink++;
 	oldinode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(oldinode);
+	oldinode->i_count++;
         d_instantiate(dentry, oldinode);
 	return 0;
 }
@@ -584,41 +547,26 @@ int sysv_link(struct dentry * old_dentry, struct inode * dir,
 (((struct sysv_dir_entry *) ((buffer) + 1*SYSV_DIRSIZE))->inode)
 
 /*
- * rename uses retrying to avoid race-conditions: at least they should be minimal.
- * it tries to allocate all the blocks, then sanity-checks, and if the sanity-
- * checks fail, it tries to restart itself again. Very practical - no changes
- * are done until we know everything works ok.. and then all the changes can be
- * done in one fell swoop when we have claimed all the buffers needed.
- *
  * Anybody can rename anything with this: the permission checks are left to the
  * higher-level routines.
  */
-static int do_sysv_rename(struct inode * old_dir, struct dentry * old_dentry,
-			  struct inode * new_dir, struct dentry * new_dentry)
+int sysv_rename(struct inode * old_dir, struct dentry * old_dentry,
+		  struct inode * new_dir, struct dentry * new_dentry)
 {
 	struct inode * old_inode, * new_inode;
 	struct buffer_head * old_bh, * new_bh, * dir_bh;
 	struct sysv_dir_entry * old_de, * new_de;
 	int retval;
 
-	goto start_up;
-try_again:
-	brelse(old_bh);
-	brelse(new_bh);
-	brelse(dir_bh);
-	current->counter = 0;
-	schedule();
-start_up:
-	old_inode = new_inode = NULL;
-	old_bh = new_bh = dir_bh = NULL;
+	old_inode = old_dentry->d_inode;
+	new_inode = new_dentry->d_inode;
+	new_bh = dir_bh = NULL;
 	old_bh = sysv_find_entry(old_dir, old_dentry->d_name.name,
 				old_dentry->d_name.len, &old_de);
 	retval = -ENOENT;
-	if (!old_bh)
+	if (!old_bh || old_de->inode != old_inode->i_ino)
 		goto end_rename;
-	old_inode = old_dentry->d_inode;	/* don't cross mnt-points */
 	retval = -EPERM;
-	new_inode = new_dentry->d_inode;
 	new_bh = sysv_find_entry(new_dir, new_dentry->d_name.name,
 				new_dentry->d_name.len, &new_de);
 	if (new_bh) {
@@ -627,20 +575,8 @@ start_up:
 			new_bh = NULL;
 		}
 	}
-	if (new_inode == old_inode) {
-		retval = 0;
-		goto end_rename;
-	}
 	if (S_ISDIR(old_inode->i_mode)) {
-		retval = -EINVAL;
-		if (is_subdir(new_dentry, old_dentry))
-			goto end_rename;
 		if (new_inode) {
-			if (new_dentry->d_count > 1)
-				shrink_dcache_parent(new_dentry);
-			retval = -EBUSY;
-			if (new_dentry->d_count > 1)
-				goto end_rename;
 			retval = -ENOTEMPTY;
 			if (!empty_dir(new_inode))
 				goto end_rename;
@@ -652,7 +588,8 @@ start_up:
 		if (PARENT_INO(dir_bh->b_data) != old_dir->i_ino)
 			goto end_rename;
 		retval = -EMLINK;
-		if (!new_inode && new_dir->i_nlink >= new_dir->i_sb->sv_link_max)
+		if (!new_inode && new_dir != old_dir &&
+				new_dir->i_nlink >= new_dir->i_sb->sv_link_max)
 			goto end_rename;
 	}
 	if (!new_bh) {
@@ -661,16 +598,8 @@ start_up:
 		if (retval)
 			goto end_rename;
 	}
-/* sanity checking before doing the rename - avoid races */
-	if (new_inode && (new_de->inode != new_inode->i_ino))
-		goto try_again;
-	if (new_de->inode && !new_inode)
-		goto try_again;
-	if (old_de->inode != old_inode->i_ino)
-		goto try_again;
-/* ok, that's it */
-	old_de->inode = 0;
 	new_de->inode = old_inode->i_ino;
+	old_de->inode = 0;
 	old_dir->i_ctime = old_dir->i_mtime = CURRENT_TIME;
 	mark_inode_dirty(old_dir);
 	new_dir->i_ctime = new_dir->i_mtime = CURRENT_TIME;
@@ -695,37 +624,10 @@ start_up:
 			mark_inode_dirty(new_dir);
 		}
 	}
-	d_move(old_dentry, new_dentry);
 	retval = 0;
 end_rename:
 	brelse(dir_bh);
 	brelse(old_bh);
 	brelse(new_bh);
 	return retval;
-}
-
-/*
- * Ok, rename also locks out other renames, as they can change the parent of
- * a directory, and we don't want any races. Other races are checked for by
- * "do_rename()", which restarts if there are inconsistencies.
- *
- * Note that there is no race between different filesystems: it's only within
- * the same device that races occur: many renames can happen at once, as long
- * as they are on different partitions.
- */
-int sysv_rename(struct inode * old_dir, struct dentry * old_dentry,
-		struct inode * new_dir, struct dentry * new_dentry)
-{
-	static struct wait_queue * wait = NULL;
-	static int lock = 0;
-	int result;
-
-	while (lock)
-		sleep_on(&wait);
-	lock = 1;
-	result = do_sysv_rename(old_dir, old_dentry,
-				new_dir, new_dentry);
-	lock = 0;
-	wake_up(&wait);
-	return result;
 }

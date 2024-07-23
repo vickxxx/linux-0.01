@@ -45,12 +45,7 @@ static int try_to_swap_out(struct task_struct * tsk, struct vm_area_struct* vma,
 	page = pte_page(pte);
 	if (MAP_NR(page) >= max_mapnr)
 		return 0;
-
 	page_map = mem_map + MAP_NR(page);
-	if (PageReserved(page_map)
-	    || PageLocked(page_map)
-	    || ((gfp_mask & __GFP_DMA) && !PageDMA(page_map)))
-		return 0;
 
 	if (pte_young(pte)) {
 		/*
@@ -58,9 +53,15 @@ static int try_to_swap_out(struct task_struct * tsk, struct vm_area_struct* vma,
 		 * tables to the global page map.
 		 */
 		set_pte(page_table, pte_mkold(pte));
+		flush_tlb_page(vma, address);
 		set_bit(PG_referenced, &page_map->flags);
 		return 0;
 	}
+
+	if (PageReserved(page_map)
+	    || PageLocked(page_map)
+	    || ((gfp_mask & __GFP_DMA) && !PageDMA(page_map)))
+		return 0;
 
 	/*
 	 * Is the page already in the swap cache? If so, then
@@ -95,6 +96,10 @@ drop_pte:
 	 * some real work in the future in "shrink_mmap()".
 	 */
 	if (!pte_dirty(pte)) {
+		if (page_map->inode && pgcache_under_min())
+			/* unmapping this page would be useless */
+			return 0;
+		flush_cache_page(vma, address);
 		pte_clear(page_table);
 		goto drop_pte;
 	}
@@ -104,7 +109,7 @@ drop_pte:
 	 * we cannot do I/O! Avoid recursing on FS
 	 * locks etc.
 	 */
-	if (!(gfp_mask & __GFP_IO))
+	if (!(gfp_mask & __GFP_IO) || current->fs_locks)
 		return 0;
 
 	/*
@@ -202,10 +207,12 @@ static inline int swap_out_pmd(struct task_struct * tsk, struct vm_area_struct *
 
 	do {
 		int result;
-		tsk->swap_address = address + PAGE_SIZE;
+		tsk->mm->swap_address = address + PAGE_SIZE;
 		result = try_to_swap_out(tsk, vma, address, pte, gfp_mask);
 		if (result)
 			return result;
+		if (current->need_resched)
+			return 2;
 		address += PAGE_SIZE;
 		pte++;
 	} while (address < end);
@@ -248,9 +255,8 @@ static int swap_out_vma(struct task_struct * tsk, struct vm_area_struct * vma,
 	pgd_t *pgdir;
 	unsigned long end;
 
-	/* Don't swap out areas like shared memory which have their
-	    own separate swapping mechanism or areas which are locked down */
-	if (vma->vm_flags & (VM_SHM | VM_LOCKED))
+	/* Don't swap out areas which are locked down */
+	if (vma->vm_flags & VM_LOCKED)
 		return 0;
 
 	pgdir = pgd_offset(tsk->mm, address);
@@ -274,7 +280,7 @@ static int swap_out_process(struct task_struct * p, int gfp_mask)
 	/*
 	 * Go through process' page directory.
 	 */
-	address = p->swap_address;
+	address = p->mm->swap_address;
 
 	/*
 	 * Find the proper vm-area
@@ -296,8 +302,8 @@ static int swap_out_process(struct task_struct * p, int gfp_mask)
 	}
 
 	/* We didn't find anything for the process */
-	p->swap_cnt = 0;
-	p->swap_address = 0;
+	p->mm->swap_cnt = 0;
+	p->mm->swap_address = 0;
 	return 0;
 }
 
@@ -309,7 +315,8 @@ static int swap_out_process(struct task_struct * p, int gfp_mask)
 static int swap_out(unsigned int priority, int gfp_mask)
 {
 	struct task_struct * p, * pbest;
-	int counter, assign, max_cnt;
+	int assign = 0, counter;
+	unsigned long max_cnt;
 
 	/* 
 	 * We make one or two passes through the task list, indexed by 
@@ -325,14 +332,11 @@ static int swap_out(unsigned int priority, int gfp_mask)
 	 * Think of swap_cnt as a "shadow rss" - it tells us which process
 	 * we want to page out (always try largest first).
 	 */
-	counter = nr_tasks / (priority+1);
+	counter = nr_tasks / priority;
 	if (counter < 1)
 		counter = 1;
-	if (counter > nr_tasks)
-		counter = nr_tasks;
 
 	for (; counter >= 0; counter--) {
-		assign = 0;
 		max_cnt = 0;
 		pbest = NULL;
 	select:
@@ -344,14 +348,16 @@ static int swap_out(unsigned int priority, int gfp_mask)
 	 		if (p->mm->rss <= 0)
 				continue;
 			/* Refresh swap_cnt? */
-			if (assign)
-				p->swap_cnt = p->mm->rss;
-			if (p->swap_cnt > max_cnt) {
-				max_cnt = p->swap_cnt;
+			if (assign == 1)
+				p->mm->swap_cnt = p->mm->rss;
+			if (p->mm->swap_cnt > max_cnt) {
+				max_cnt = p->mm->swap_cnt;
 				pbest = p;
 			}
 		}
 		read_unlock(&tasklist_lock);
+		if (assign == 1)
+			assign = 2;
 		if (!pbest) {
 			if (!assign) {
 				assign = 1;
@@ -360,8 +366,13 @@ static int swap_out(unsigned int priority, int gfp_mask)
 			goto out;
 		}
 
-		if (swap_out_process(pbest, gfp_mask))
+		switch (swap_out_process(pbest, gfp_mask)) {
+		case 1:
 			return 1;
+		case 2:
+			current->state = TASK_RUNNING;
+			schedule();
+		}
 	}
 out:
 	return 0;
@@ -376,7 +387,7 @@ out:
  * cluster them so that we get good swap-out behaviour. See
  * the "free_memory()" macro for details.
  */
-static int do_try_to_free_pages(unsigned int gfp_mask)
+int try_to_free_pages(unsigned int gfp_mask)
 {
 	int priority;
 	int count = SWAP_CLUSTER_MAX;
@@ -386,7 +397,7 @@ static int do_try_to_free_pages(unsigned int gfp_mask)
 	/* Always trim SLAB caches when memory gets low. */
 	kmem_cache_reap(gfp_mask);
 
-	priority = 6;
+	priority = 5;
 	do {
 		while (shrink_mmap(priority, gfp_mask)) {
 			if (!--count)
@@ -394,7 +405,7 @@ static int do_try_to_free_pages(unsigned int gfp_mask)
 		}
 
 		/* Try to get rid of some shared memory pages.. */
-		if (gfp_mask & __GFP_IO) {
+		if (gfp_mask & __GFP_IO && !current->fs_locks) {
 			while (shm_swap(priority, gfp_mask)) {
 				if (!--count)
 					goto done;
@@ -408,11 +419,12 @@ static int do_try_to_free_pages(unsigned int gfp_mask)
 		}
 
 		shrink_dcache_memory(priority, gfp_mask);
-	} while (--priority >= 0);
+	} while (--priority > 0);
 done:
 	unlock_kernel();
 
-	return priority >= 0;
+	/* Return success if we freed a page. */
+	return priority > 0;
 }
 
 /*
@@ -436,7 +448,7 @@ void __init kswapd_setup(void)
        printk ("Starting kswapd v%.*s\n", i, s);
 }
 
-static struct task_struct *kswapd_process;
+struct wait_queue * kswapd_wait;
 
 /*
  * The background pageout daemon, started as a kernel thread
@@ -456,7 +468,6 @@ int kswapd(void *unused)
 {
 	struct task_struct *tsk = current;
 
-	kswapd_process = tsk;
 	tsk->session = 1;
 	tsk->pgrp = 1;
 	strcpy(tsk->comm, "kswapd");
@@ -485,41 +496,18 @@ int kswapd(void *unused)
 		 * the processes needing more memory will wake us
 		 * up on a more timely basis.
 		 */
-		do {
-			if (nr_free_pages >= freepages.high)
-				break;
+		interruptible_sleep_on(&kswapd_wait);
 
-			if (!do_try_to_free_pages(GFP_KSWAPD))
-				break;
-		} while (!tsk->need_resched);
-		run_task_queue(&tq_disk);
-		tsk->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(HZ);
+		while (nr_free_pages < freepages.high)
+		{
+			if (try_to_free_pages(GFP_KSWAPD))
+			{
+				if (tsk->need_resched)
+					schedule();
+				continue;
+			}
+			tsk->state = TASK_INTERRUPTIBLE;
+			schedule_timeout(10*HZ);
+		}
 	}
 }
-
-/*
- * Called by non-kswapd processes when they want more
- * memory.
- *
- * In a perfect world, this should just wake up kswapd
- * and return. We don't actually want to swap stuff out
- * from user processes, because the locking issues are
- * nasty to the extreme (file write locks, and MM locking)
- *
- * One option might be to let kswapd do all the page-out
- * and VM page table scanning that needs locking, and this
- * process thread could do just the mmap shrink stage that
- * can be done by just dropping cached pages without having
- * any deadlock issues.
- */
-int try_to_free_pages(unsigned int gfp_mask)
-{
-	int retval = 1;
-
-	wake_up_process(kswapd_process);
-	if (gfp_mask & __GFP_WAIT)
-		retval = do_try_to_free_pages(gfp_mask);
-	return retval;
-}
-	

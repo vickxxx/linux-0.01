@@ -25,6 +25,7 @@
  *           which must be served                               /Roman Zippel
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
@@ -37,6 +38,10 @@
 #include <asm/traps.h>
 #include <asm/page.h>
 #include <asm/machdep.h>
+
+#ifdef CONFIG_Q40
+#include <asm/q40ints.h>
+#endif
 
 /* table for system interrupt handlers */
 static irq_handler_t irq_list[SYS_IRQS];
@@ -71,17 +76,17 @@ int (*mach_request_irq) (unsigned int, void (*)(int, void *, struct pt_regs *),
 void (*mach_free_irq) (unsigned int, void *) = dummy_free_irq;
 
 /*
- * void init_IRQ(void)
+ * unsigned long init_IRQ(unsigned long memory)
  *
- * Parameters:	None
+ * Parameters:	Memory base
  *
- * Returns:	Nothing
+ * Returns:	New memory base
  *
  * This function should be called during kernel startup to initialize
  * the IRQ handling routines.
  */
 
-__initfunc(void init_IRQ(void))
+unsigned long __init init_IRQ(unsigned long memory)
 {
 	int i;
 
@@ -97,6 +102,7 @@ __initfunc(void init_IRQ(void))
 		nodes[i].handler = NULL;
 
 	mach_init_IRQ ();
+	return memory;
 }
 
 irq_node_t *new_irq_node(void)
@@ -177,14 +183,24 @@ void sys_free_irq(unsigned int irq, void *dev_id)
 
 /*
  * Do we need these probe functions on the m68k?
+ *
+ *  ... may be usefull with ISA devices
  */
 unsigned long probe_irq_on (void)
 {
+#ifdef CONFIG_Q40
+	if (MACH_IS_Q40)
+		return q40_probe_irq_on();
+#endif
 	return 0;
 }
 
 int probe_irq_off (unsigned long irqs)
 {
+#ifdef CONFIG_Q40
+	if (MACH_IS_Q40)
+		return q40_probe_irq_off(irqs);
+#endif
 	return 0;
 }
 

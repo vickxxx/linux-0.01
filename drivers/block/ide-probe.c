@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/ide-probe.c	Version 1.03  Dec  5, 1997
+ *  linux/drivers/block/ide-probe.c	Version 1.04  March 10, 1999
  *
  *  Copyright (C) 1994-1998  Linus Torvalds & authors (see below)
  */
@@ -17,6 +17,9 @@
  * Version 1.02		increase WAIT_PIDENTIFY to avoid CD-ROM locking at boot
  *			 by Andrea Arcangeli
  * Version 1.03		fix for (hwif->chipset == ide_4drives)
+ * Version 1.04		fixed buggy treatments of known flash memory cards
+ * 17-OCT-2000 rjohnson@analogic.com Added spin-locks for reading CMOS
+ * chip.
  */
 
 #undef REALLY_SLOW_IO		/* most systems can safely undef this */
@@ -34,6 +37,7 @@
 #include <linux/genhd.h>
 #include <linux/malloc.h>
 #include <linux/delay.h>
+#include <linux/mc146818rtc.h> /* CMOS defines */
 
 #include <asm/byteorder.h>
 #include <asm/irq.h>
@@ -84,16 +88,6 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 	drive->present = 1;
 
 	/*
-	 * Prevent long system lockup probing later for non-existant
-	 * slave drive if the hwif is actually a Kodak CompactFlash card.
-	 */
-	if (!strcmp(id->model, "KODAK ATA_FLASH")) {
-		ide_drive_t *mate = &HWIF(drive)->drives[1^drive->select.b.unit];
-		mate->present = 0;
-		mate->noprobe = 1;
-	}
-
-	/*
 	 * Check for an ATAPI device
 	 */
 	if (cmd == WIN_PIDENTIFY) {
@@ -118,11 +112,23 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 				}
 				type = ide_cdrom;	/* Early cdrom models used zero */
 			case ide_cdrom:
-				printk ("CDROM");
 				drive->removable = 1;
+#ifdef CONFIG_PPC
+				/* kludge for Apple PowerBook internal zip */
+				if (!strstr(id->model, "CD-ROM") && strstr(id->model, "ZIP")) {
+					printk ("FLOPPY");
+					type = ide_floppy;
+					break;
+				}
+#endif
+				printk ("CDROM");
 				break;
 			case ide_tape:
 				printk ("TAPE");
+				break;
+			case ide_optical:
+				printk ("OPTICAL");
+				drive->removable = 1;
 				break;
 			default:
 				printk("UNKNOWN (type %d)", type);
@@ -133,6 +139,20 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 		return;
 	}
 
+	/*
+	 * Not an ATAPI device: looks like a "regular" hard disk
+	 */
+	if (id->config & (1<<7))
+		drive->removable = 1;
+	/*
+	 * Prevent long system lockup probing later for non-existant
+	 * slave drive if the hwif is actually a flash memory card of some variety:
+	 */
+	if (drive_is_flashcard(drive)) {
+		ide_drive_t *mate = &HWIF(drive)->drives[1^drive->select.b.unit];
+		mate->present = 0;
+		mate->noprobe = 1;
+	}
 	drive->media = ide_disk;
 	printk("ATA DISK drive\n");
 	return;
@@ -181,6 +201,10 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 		hd_status = IDE_STATUS_REG;	/* ancient Seagate drives, broken interfaces */
 	} else
 		hd_status = IDE_ALTSTATUS_REG;	/* use non-intrusive polling */
+
+	/* set features register for atapi identify command */
+	if((cmd == WIN_PIDENTIFY))
+	        OUT_BYTE(0,IDE_FEATURE_REG); /* disable dma & overlap mode */
 
 #if CONFIG_BLK_DEV_PDC4030
 	if (IS_PDC4030_DRIVE) {
@@ -270,6 +294,7 @@ static int do_probe (ide_drive_t *drive, byte cmd)
 		drive->name, drive->present, drive->media,
 		(cmd == WIN_IDENTIFY) ? "ATA" : "ATAPI");
 #endif
+	delay_50ms();	/* needed for some systems (e.g. crw9624 as drive0 with disk as slave) */
 	SELECT_DRIVE(hwif,drive);
 	delay_50ms();
 	if (IN_BYTE(IDE_SELECT_REG) != drive->select.all && !drive->present) {
@@ -364,6 +389,7 @@ static inline byte probe_for_drive (ide_drive_t *drive)
 static void probe_cmos_for_drives (ide_hwif_t *hwif)
 {
 #ifdef __i386__
+	unsigned long flags;
 	extern struct drive_info_struct drive_info;
 	byte cmos_disks, *BIOS = (byte *) &drive_info;
 	int unit;
@@ -372,17 +398,27 @@ static void probe_cmos_for_drives (ide_hwif_t *hwif)
 	if (hwif->chipset == ide_pdc4030 && hwif->channel != 0)
 		return;
 #endif /* CONFIG_BLK_DEV_PDC4030 */
+	spin_lock_irqsave(&rtc_lock, flags);
 	outb_p(0x12,0x70);		/* specify CMOS address 0x12 */
 	cmos_disks = inb_p(0x71);	/* read the data from 0x12 */
+	spin_unlock_irqrestore(&rtc_lock, flags);
 	/* Extract drive geometry from CMOS+BIOS if not already setup */
 	for (unit = 0; unit < MAX_DRIVES; ++unit) {
 		ide_drive_t *drive = &hwif->drives[unit];
-		if ((cmos_disks & (0xf0 >> (unit*4))) && !drive->present && !drive->nobios) {
-			drive->cyl   = drive->bios_cyl  = *(unsigned short *)BIOS;
-			drive->head  = drive->bios_head = *(BIOS+2);
-			drive->sect  = drive->bios_sect = *(BIOS+14);
-			drive->ctl   = *(BIOS+8);
-			drive->present = 1;
+		if ((cmos_disks & (0xf0 >> (unit*4)))
+		    && !drive->present && !drive->nobios) {
+			unsigned short cyl = *(unsigned short *)BIOS;
+			unsigned char head = *(BIOS+2);
+			unsigned char sect = *(BIOS+14);
+			if (cyl > 0 && head > 0 && sect > 0 && sect < 64) {
+				drive->cyl   = drive->bios_cyl  = cyl;
+				drive->head  = drive->bios_head = head;
+				drive->sect  = drive->bios_sect = sect;
+				drive->ctl   = *(BIOS+8);
+				drive->present = 1;
+			} else
+				printk("hd%d: C/H/S=%d/%d/%d from BIOS ignored\n",
+				       unit, cyl, head, sect);
 		}
 		BIOS += 16;
 	}
@@ -551,10 +587,6 @@ static int init_irq (ide_hwif_t *hwif)
 		hwgroup->handler  = NULL;
 		hwgroup->drive    = NULL;
 		hwgroup->busy     = 0;
-		hwgroup->spinlock = (spinlock_t)SPIN_LOCK_UNLOCKED;
-#if (DEBUG_SPINLOCK > 0)
-		printk("hwgroup(%s) spinlock is %p\n", hwif->name,  &hwgroup->spinlock);	/* FIXME */
-#endif
 		init_timer(&hwgroup->timer);
 		hwgroup->timer.function = &ide_timer_expiry;
 		hwgroup->timer.data = (unsigned long) hwgroup;
@@ -720,17 +752,39 @@ static int hwif_init (ide_hwif_t *hwif)
 	}
 	if (register_blkdev (hwif->major, hwif->name, ide_fops)) {
 		printk("%s: UNABLE TO GET MAJOR NUMBER %d\n", hwif->name, hwif->major);
-	} else if (init_irq (hwif)) {
-		printk("%s: UNABLE TO GET IRQ %d\n", hwif->name, hwif->irq);
-		(void) unregister_blkdev (hwif->major, hwif->name);
-	} else {
-		init_gendisk(hwif);
-		blk_dev[hwif->major].data = hwif;
-		blk_dev[hwif->major].request_fn = rfn;
-		blk_dev[hwif->major].queue = ide_get_queue;
-		read_ahead[hwif->major] = 8;	/* (4kB) */
-		hwif->present = 1;	/* success */
+		return (hwif->present = 0);
 	}
+	
+	if (init_irq (hwif)) {
+		int i = hwif->irq;
+		/*
+		 *	It failed to initialise. Find the default IRQ for 
+		 *	this port and try that.
+		 */
+		if (!(hwif->irq = ide_default_irq(hwif->io_ports[IDE_DATA_OFFSET]))) 
+		{
+			printk("%s: Disabled unable to get IRQ %d.\n", hwif->name, i);
+			(void) unregister_blkdev (hwif->major, hwif->name);
+			return (hwif->present = 0);
+		}
+		if(init_irq (hwif)) 
+		{
+			printk("%s: probed IRQ %d and default IRQ %d failed.\n",
+				hwif->name, i, hwif->irq);
+			(void) unregister_blkdev (hwif->major, hwif->name);
+			return (hwif->present = 0);
+		}
+		printk("%s: probed IRQ %d failed, using default.\n",
+			hwif->name, hwif->irq);
+	}
+	
+	init_gendisk(hwif);
+	blk_dev[hwif->major].data = hwif;
+	blk_dev[hwif->major].request_fn = rfn;
+	blk_dev[hwif->major].queue = ide_get_queue;
+	read_ahead[hwif->major] = 8;	/* (4kB) */
+	hwif->present = 1;	/* success */
+
 #if (DEBUG_SPINLOCK > 0)
 {
 	static int done = 0;
@@ -779,7 +833,12 @@ int init_module (void)
 	
 	for (index = 0; index < MAX_HWIFS; ++index)
 		ide_unregister(index);
-	return ideprobe_init();
+	ideprobe_init();
+#ifdef CONFIG_PROC_FS
+	proc_ide_destroy();	/* Avoid multiple entry in /proc */
+	proc_ide_create();
+#endif
+	return 0;
 }
 
 void cleanup_module (void)

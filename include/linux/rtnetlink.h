@@ -1,7 +1,9 @@
 #ifndef __LINUX_RTNETLINK_H
 #define __LINUX_RTNETLINK_H
 
+#ifdef __KERNEL__
 #include <linux/config.h>
+#endif
 #include <linux/netlink.h>
 
 #define RTNL_DEBUG 1
@@ -139,6 +141,7 @@ enum
 #define RTPROT_RA	9	/* RDISC/ND router advertisments */
 #define RTPROT_MRT	10	/* Merit MRT */
 #define RTPROT_ZEBRA	11	/* Zebra */
+#define RTPROT_BIRD	12	/* BIRD */
 
 /* rtm_scope
 

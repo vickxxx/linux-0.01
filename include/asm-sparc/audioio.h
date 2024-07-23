@@ -298,6 +298,9 @@ struct sparcaudio_driver
         int input_count, input_active, recording_count;
         struct wait_queue *input_read_wait;
 
+	/* Select/poll waiters. */
+	struct wait_queue *poll_wait;
+
         /* Hack to make it look like we support variable size buffers. */
         int buffer_size;
 };
@@ -429,6 +432,7 @@ extern void sparcaudio_output_done(struct sparcaudio_driver *, int);
 extern void sparcaudio_input_done(struct sparcaudio_driver *, int);
 extern int sparcaudio_init(void);
 extern int amd7930_init(void);
+extern int dbri_init(void);
 extern int cs4231_init(void);
 
 #endif

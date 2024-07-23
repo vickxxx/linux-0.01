@@ -123,7 +123,7 @@ void show_mem(void)
 unsigned long mm_cachebits = 0;
 #endif
 
-static pte_t *__init kernel_page_table(unsigned long *memavailp)
+__initfunc(static pte_t * kernel_page_table(unsigned long *memavailp))
 {
 	pte_t *ptablep;
 
@@ -139,16 +139,21 @@ static pte_t *__init kernel_page_table(unsigned long *memavailp)
 }
 
 static pmd_t *last_pgtable __initdata = NULL;
+static pmd_t *zero_pgtable __initdata = NULL;
 
-static pmd_t *__init kernel_ptr_table(unsigned long *memavailp)
+__initfunc(static pmd_t * kernel_ptr_table(unsigned long *memavailp))
 {
 	if (!last_pgtable) {
 		unsigned long pmd, last;
 		int i;
 
+		/* Find the last ptr table that was used in head.S and
+		 * reuse the remaining space in that page for further
+		 * ptr tables.
+		 */
 		last = (unsigned long)kernel_pg_dir;
 		for (i = 0; i < PTRS_PER_PGD; i++) {
-			if (!pgd_val(kernel_pg_dir[i]))
+			if (!pgd_present(kernel_pg_dir[i]))
 				continue;
 			pmd = pgd_page(kernel_pg_dir[i]);
 			if (pmd > last)
@@ -175,8 +180,8 @@ static pmd_t *__init kernel_ptr_table(unsigned long *memavailp)
 	return last_pgtable;
 }
 
-static unsigned long __init
-map_chunk (unsigned long addr, long size, unsigned long *memavailp)
+__initfunc(static unsigned long
+map_chunk (unsigned long addr, long size, unsigned long *memavailp))
 {
 #define PTRTREESIZE (256*1024)
 #define ROOTTREESIZE (32*1024*1024)
@@ -232,7 +237,8 @@ map_chunk (unsigned long addr, long size, unsigned long *memavailp)
 #ifdef DEBUG
 				printk ("[zero map]");
 #endif
-				pte_dir = (pte_t *)kernel_ptr_table(memavailp);
+				zero_pgtable = kernel_ptr_table(memavailp);
+				pte_dir = (pte_t *)zero_pgtable;
 				pmd_dir->pmd[0] = virt_to_phys(pte_dir) |
 					_PAGE_TABLE | _PAGE_ACCESSED;
 				pte_val(*pte_dir++) = 0;
@@ -282,8 +288,8 @@ extern char __init_begin, __init_end;
  * paging_init() continues the virtual memory environment setup which
  * was begun by the code in arch/head.S.
  */
-unsigned long __init paging_init(unsigned long start_mem,
-				 unsigned long end_mem)
+__initfunc(unsigned long paging_init(unsigned long start_mem,
+				     unsigned long end_mem))
 {
 	int chunk;
 	unsigned long mem_avail = 0;
@@ -376,7 +382,7 @@ unsigned long __init paging_init(unsigned long start_mem,
 				  "pmove %0,%%crp\n\t"
 				  ".chip 68k"
 				  : /* no outputs */
-				  : "m" (task[0]->tss.crp[0]));
+				  : "m" (task[0]->tss.crp[1]|_PAGE_TABLE));
 #ifdef DEBUG
 	printk ("set crp\n");
 #endif
@@ -392,7 +398,7 @@ unsigned long __init paging_init(unsigned long start_mem,
 	return PAGE_ALIGN(free_area_init(start_mem, end_mem));
 }
 
-void __init mem_init(unsigned long start_mem, unsigned long end_mem)
+__initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 {
 	int codepages = 0;
 	int datapages = 0;
@@ -443,9 +449,12 @@ void __init mem_init(unsigned long start_mem, unsigned long end_mem)
 	/* insert pointer tables allocated so far into the tablelist */
 	init_pointer_table((unsigned long)kernel_pg_dir);
 	for (i = 0; i < PTRS_PER_PGD; i++) {
-		if (pgd_val(kernel_pg_dir[i]))
+		if (pgd_present(kernel_pg_dir[i]))
 			init_pointer_table(pgd_page(kernel_pg_dir[i]));
 	}
+	/* insert also pointer table that we used to unmap the zero page */
+	if (zero_pgtable)
+		init_pointer_table((unsigned long)zero_pgtable);
 
 	printk("Memory: %luk/%luk available (%dk kernel code, %dk data, %dk init)\n",
 	       (unsigned long) nr_free_pages << (PAGE_SHIFT-10),

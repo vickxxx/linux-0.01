@@ -50,10 +50,9 @@
      *  Vector numbers
      */
 
-#define OPENPIC_VEC_SOURCE      0x10    /* and up */
-#define OPENPIC_VEC_TIMER       0x40    /* and up */
-#define OPENPIC_VEC_IPI         0x50    /* and up */
-#define OPENPIC_VEC_SPURIOUS    99
+#define OPENPIC_VEC_TIMER       64    /* and up */
+#define OPENPIC_VEC_IPI         70    /* and up */
+#define OPENPIC_VEC_SPURIOUS    127
 
 
     /*
@@ -263,8 +262,12 @@ extern u_char *OpenPIC_InitSenses;
      *  Interrupt Source Registers
      */
 
-#define OPENPIC_SENSE_POLARITY			0x00800000	/* Undoc'd */
+#define OPENPIC_POLARITY_POSITIVE		0x00800000
+#define OPENPIC_POLARITY_NEGATIVE		0x00000000
+#define OPENPIC_POLARITY_MASK			0x00800000
 #define OPENPIC_SENSE_LEVEL			0x00400000
+#define OPENPIC_SENSE_EDGE			0x00000000
+#define OPENPIC_SENSE_MASK			0x00400000
 
 
     /*
@@ -313,15 +316,6 @@ extern u_char *OpenPIC_InitSenses;
 #define Vector_Priority			_Vector_Priority.Reg
 #define Destination			_Destination.Reg
 
-
-    /*
-     *  Vendor and Device IDs
-     */
-
-#define OPENPIC_VENDOR_ID_APPLE		0x14
-#define OPENPIC_DEVICE_ID_APPLE_HYDRA	0x46
-
-
     /*
      *  OpenPIC Operations
      */
@@ -362,6 +356,7 @@ extern void openpic_maptimer(u_int timer, u_int cpumask);
 /* Interrupt Sources */
 extern void openpic_enable_irq(u_int irq);
 extern void openpic_disable_irq(u_int irq);
+extern u_int openpic_get_enable(u_int irq);
 extern void openpic_initirq(u_int irq, u_int pri, u_int vector, int polarity,
 			    int is_level);
 extern void openpic_mapirq(u_int irq, u_int cpumask);

@@ -32,6 +32,8 @@
  *  Converted cli() code to spinlocks, Ingo Molnar
  *
  *  Jiffies wrap fixes (host->resetting), 3 Dec 1998 Andrea Arcangeli
+ *
+ *  out_of_space + add-single-device work, D. Gilbert (dpg) 990612
  */
 
 #include <linux/config.h>
@@ -102,13 +104,16 @@ static const char RCSid[] = "$Header: /vger/u4/cvs/linux/drivers/scsi/scsi.c,v 1
  * lock up.
  */
 
-#define BLIST_NOLUN     0x01
-#define BLIST_FORCELUN  0x02
-#define BLIST_BORKEN    0x04
-#define BLIST_KEY       0x08
-#define BLIST_SINGLELUN 0x10
-#define BLIST_NOTQ	0x20
-#define BLIST_SPARSELUN 0x40
+#define BLIST_NOLUN     0x001
+#define BLIST_FORCELUN  0x002
+#define BLIST_BORKEN    0x004
+#define BLIST_KEY       0x008
+#define BLIST_SINGLELUN 0x010
+#define BLIST_NOTQ	0x020
+#define BLIST_SPARSELUN 0x040
+#define BLIST_MAX5LUN	0x080
+#define BLIST_ISDISK	0x100
+#define BLIST_ISROM	0x200
 
 /*
  * Data declarations.
@@ -127,6 +132,12 @@ static unsigned int       dma_sectors = 0;
 unsigned int              scsi_dma_free_sectors = 0;
 unsigned int              scsi_need_isa_buffer = 0;
 static unsigned char   ** dma_malloc_pages = NULL;
+
+/*
+ * get rid of callers having to aquire the io_request_lock before
+ * calling scsi_malloc and scsi_free
+ */
+spinlock_t		  scsi_malloc_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * Note - the initial logging level can be set here to log events at boot time.
@@ -162,7 +173,11 @@ const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE] =
     "Scanner          ",
     "Optical Device   ",
     "Medium Changer   ",
-    "Communications   "
+    "Communications   ",
+    "Unknown          ",
+    "Unknown          ",
+    "Unknown          ",
+    "Enclosure        ",
 };
 
 /* 
@@ -175,6 +190,7 @@ static int  scan_scsis_single (int channel,int dev,int lun,int * max_scsi_dev ,
                  int * sparse_lun, Scsi_Device ** SDpnt, Scsi_Cmnd * SCpnt,
                  struct Scsi_Host *shpnt, char * scsi_result);
 void        scsi_build_commandblocks(Scsi_Device * SDpnt);
+static int scsi_unregister_device(struct Scsi_Device_Template * tpnt);
 
 /*
  * These are the interface to the old error handling code.  It should go away
@@ -241,22 +257,31 @@ static struct dev_info device_list[] =
 {"SONY","CD-ROM CDU-541","4.3d", BLIST_NOLUN},
 {"SONY","CD-ROM CDU-55S","1.0i", BLIST_NOLUN},
 {"SONY","CD-ROM CDU-561","1.7x", BLIST_NOLUN},
+{"SONY","CD-ROM CDU-8012","*", BLIST_NOLUN},
 {"TANDBERG","TDC 3600","U07", BLIST_NOLUN},     /* Locks up if polled for lun != 0 */
 {"TEAC","CD-R55S","1.0H", BLIST_NOLUN},		/* Locks up if polled for lun != 0 */
 {"TEAC","CD-ROM","1.06", BLIST_NOLUN},          /* causes failed REQUEST SENSE on lun 1
 						 * for seagate controller, which causes
 						 * SCSI code to reset bus.*/
+	{"TEAC", "MT-2ST/45S2-27", "RV M", BLIST_NOLUN},	/* Responds to all lun */
 {"TEXEL","CD-ROM","1.06", BLIST_NOLUN},         /* causes failed REQUEST SENSE on lun 1
 						 * for seagate controller, which causes
 						 * SCSI code to reset bus.*/
 {"QUANTUM","LPS525S","3110", BLIST_NOLUN},      /* Locks sometimes if polled for lun != 0 */
 {"QUANTUM","PD1225S","3110", BLIST_NOLUN},      /* Locks sometimes if polled for lun != 0 */
+{"QUANTUM","FIREBALL ST4.3S","0F0C",BLIST_NOLUN},/* Locks sometimes if polled for lun != 0 */
 {"MEDIAVIS","CDR-H93MV","1.31", BLIST_NOLUN},   /* Locks up if polled for lun != 0 */
 {"SANKYO", "CP525","6.64", BLIST_NOLUN},        /* causes failed REQ SENSE, extra reset */
 {"HP", "C1750A", "3226", BLIST_NOLUN},          /* scanjet iic */
 {"HP", "C1790A", "", BLIST_NOLUN},              /* scanjet iip */
 {"HP", "C2500A", "", BLIST_NOLUN},              /* scanjet iicx */
-{"YAMAHA", "CDR102", "1.00", BLIST_NOLUN},	/* extra reset */
+{"YAMAHA","CDR100","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"YAMAHA","CDR102","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"YAMAHA","CRW8424S","1.0", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"YAMAHA","CRW6416S","1.0c", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"MITSUMI", "CD-R CR-2201CS", "6119", BLIST_NOLUN}, /* Locks up if polled for lun != 0 */
+{"RELISYS", "Scorpio", "*", BLIST_NOLUN},	/* responds to all LUN */
+{"MICROTEK", "ScanMaker II", "5.61", BLIST_NOLUN}, /* responds to all LUN */
 
 /*
  * Other types of devices that have special flags.
@@ -268,6 +293,8 @@ static struct dev_info device_list[] =
 {"INSITE","I325VM","*", BLIST_KEY},
 {"NRC","MBR-7","*", BLIST_FORCELUN | BLIST_SINGLELUN},
 {"NRC","MBR-7.4","*", BLIST_FORCELUN | BLIST_SINGLELUN},
+{"REGAL","CDC-4X","*", BLIST_MAX5LUN | BLIST_SINGLELUN},
+{"LASOUND","CDX7405","3.10", BLIST_MAX5LUN | BLIST_SINGLELUN},
 {"NAKAMICH","MJ-4.8S","*", BLIST_FORCELUN | BLIST_SINGLELUN},
 {"NAKAMICH","MJ-5.16S","*", BLIST_FORCELUN | BLIST_SINGLELUN},
 {"PIONEER","CD-ROM DRM-600","*", BLIST_FORCELUN | BLIST_SINGLELUN},
@@ -276,12 +303,19 @@ static struct dev_info device_list[] =
 {"EMULEX","MD21/S2     ESDI","*", BLIST_SINGLELUN},
 {"CANON","IPUBJD","*", BLIST_SPARSELUN},
 {"nCipher","Fastness Crypto","*", BLIST_FORCELUN},
-{"MATSHITA","PD","*", BLIST_FORCELUN | BLIST_SINGLELUN},
-{"YAMAHA","CDR100","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
-{"YAMAHA","CDR102","1.00", BLIST_NOLUN},	/* Locks up if polled for lun != 0 */
+{"DEC","HSG80","*", BLIST_FORCELUN},
+{"COMPAQ","LOGICAL VOLUME","*", BLIST_FORCELUN},
+{"NEC","PD-1 ODX654P","*", BLIST_FORCELUN | BLIST_SINGLELUN},
+{"MATSHITA","PD-1","*", BLIST_FORCELUN | BLIST_SINGLELUN},
 {"iomega","jaz 1GB","J.86", BLIST_NOTQ | BLIST_NOLUN},
-{"IBM","DPES-","*", BLIST_NOTQ | BLIST_NOLUN},
-{"WDIGTL","WDE","*", BLIST_NOTQ | BLIST_NOLUN},
+{"TOSHIBA","CDROM","*", BLIST_ISROM},
+{"MegaRAID", "LD", "*", BLIST_FORCELUN},     /* Multiple luns always safe (logical raid vols) */
+{"DGC",  "RAID",      "*", BLIST_SPARSELUN}, /* Dell PV 650F (tgt @ LUN 0) */
+{"DGC",  "DISK",      "*", BLIST_SPARSELUN}, /* Dell PV 650F (no tgt @ LUN 0) */
+{"DELL", "PV530F",    "*", BLIST_SPARSELUN}, /* Dell PV 530F */
+{"SONY", "TSL",       "*", BLIST_FORCELUN},  /* DDS3 & DDS4 autoloaders */
+{"DELL", "PERCRAID", "*", BLIST_FORCELUN},
+{"HP", "NetRAID-4M", "*", BLIST_FORCELUN},
 /*
  * Must be at end of list...
  */
@@ -444,16 +478,18 @@ static void scan_scsis (struct Scsi_Host *shpnt,
   Scsi_Device   * SDtail;
   int             sparse_lun;
 
-  SCpnt = (Scsi_Cmnd *) scsi_init_malloc (sizeof (Scsi_Cmnd), GFP_ATOMIC | GFP_DMA);
-  memset (SCpnt, 0, sizeof (Scsi_Cmnd));
-
-  SDpnt = (Scsi_Device *) scsi_init_malloc (sizeof (Scsi_Device), GFP_ATOMIC);
-  memset (SDpnt, 0, sizeof (Scsi_Device));
-
-
-  /* Make sure we have something that is valid for DMA purposes */
-  scsi_result = ( ( !shpnt->unchecked_isa_dma )
-                 ? &scsi_result0[0] : scsi_init_malloc (512, GFP_DMA));
+  scsi_result = NULL;
+  SCpnt = (Scsi_Cmnd *) scsi_init_malloc (sizeof (Scsi_Cmnd), 
+					  GFP_ATOMIC | GFP_DMA);
+    if (SCpnt) {
+	SDpnt = (Scsi_Device *) scsi_init_malloc(sizeof (Scsi_Device), 
+						 GFP_ATOMIC);
+	if (SDpnt) {
+	    /* Make sure we have something that is valid for DMA purposes */
+	    scsi_result = ( ( !shpnt->unchecked_isa_dma )
+			? &scsi_result0[0] : scsi_init_malloc (512, GFP_DMA));
+	}
+    }
 
   if (scsi_result == NULL) 
   {
@@ -505,18 +541,32 @@ static void scan_scsis (struct Scsi_Host *shpnt,
     if(lun >= shpnt->max_lun) goto leave;
     scan_scsis_single (channel, dev, lun, &max_dev_lun, &sparse_lun,
 		       &SDpnt, SCpnt, shpnt, scsi_result);
+
+    /* See warning by (DB) in scsi_proc_info() towards end of
+       'add-single-device' section. (dpg) */
+    if (shpnt->select_queue_depths != NULL)
+	(shpnt->select_queue_depths)(shpnt, shpnt->host_queue);
+
     if(SDpnt!=oldSDpnt) {
 
 	/* it could happen the blockdevice hasn't yet been inited */
-    for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next)
-        if(sdtpnt->init && sdtpnt->dev_noticed) (*sdtpnt->init)();
+	for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next)
+	    if(sdtpnt->init && sdtpnt->dev_noticed) (*sdtpnt->init)();
 
-            oldSDpnt->scsi_request_fn = NULL;
-            for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next)
-                if(sdtpnt->attach) {
-		  (*sdtpnt->attach)(oldSDpnt);
-                  if(oldSDpnt->attached) scsi_build_commandblocks(oldSDpnt);}
-	    resize_dma_pool();
+	oldSDpnt->scsi_request_fn = NULL;
+	for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next) {
+	    if(sdtpnt->attach) {
+		(*sdtpnt->attach)(oldSDpnt);
+		if(oldSDpnt->attached) {
+		    scsi_build_commandblocks(oldSDpnt);
+		    if (0 == oldSDpnt->has_cmdblocks) {
+			printk("scan_scsis: DANGER, no command blocks\n");
+			/* What to do now ?? */
+		    }
+		}
+	    }
+	}
+	resize_dma_pool();
 
         for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next) {
             if(sdtpnt->finish && sdtpnt->nr_dev)
@@ -727,11 +777,22 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
     }
 
   /*
-   * It would seem some TOSHIBA CDROM gets things wrong
+   * Get any flags for this device.
    */
-  if (!strncmp (scsi_result + 8, "TOSHIBA", 7) &&
-      !strncmp (scsi_result + 16, "CD-ROM", 6) &&
-      scsi_result[0] == TYPE_DISK) {
+  bflags = get_device_flags (scsi_result);
+
+  /* The Toshiba ROM was "gender-changed" here as an inline hack. 
+     This is now much more generic. 
+     This is a mess: What we really want is to leave the scsi_result
+     alone, and just change the SDpnt structure. And the SDpnt is what
+     we want print_inquiry to print.  -- REW
+  */
+  if (bflags & BLIST_ISDISK) {
+    scsi_result[0] = TYPE_DISK;
+    scsi_result[1] |= 0x80;     /* removable */
+  }
+
+  if (bflags & BLIST_ISROM) {
     scsi_result[0] = TYPE_ROM;
     scsi_result[1] |= 0x80;     /* removable */
   }
@@ -741,7 +802,8 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
   memcpy (SDpnt->rev, scsi_result + 32, 4);
 
   SDpnt->removable = (0x80 & scsi_result[1]) >> 7;
-  SDpnt->online = TRUE;
+  if (((scsi_result[0] >> 5) & 7) == 1)  SDpnt->online = FALSE;
+  else SDpnt->online = TRUE;
   SDpnt->lockable = SDpnt->removable;
   SDpnt->changed = 0;
   SDpnt->access_count = 0;
@@ -759,6 +821,7 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
   case TYPE_PROCESSOR:
   case TYPE_SCANNER:
   case TYPE_MEDIUM_CHANGER:
+  case TYPE_ENCLOSURE:
     SDpnt->writeable = 1;
     break;
   case TYPE_WORM:
@@ -797,10 +860,6 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
    */
   SDpnt->disconnect = 0;
 
-  /*
-   * Get any flags for this device.
-   */
-  bflags = get_device_flags (scsi_result);
 
   /*
    * Set the tagged_queue flag for SCSI-II devices that purport to support
@@ -876,8 +935,6 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
       return 0;
   }
 
-  memset (SDpnt, 0, sizeof (Scsi_Device));
-
   /*
    * And hook up our command block to the new device we will be testing
    * for.
@@ -927,6 +984,15 @@ int scan_scsis_single (int channel, int dev, int lun, int *max_dev_lun,
     *max_dev_lun = 8;
     return 1;
   }
+
+  /*
+   * REGAL CDC-4X: avoid hang after LUN 4
+   */
+  if (bflags & BLIST_MAX5LUN) {
+    *max_dev_lun = 5;
+    return 1;
+  }
+
   /*
    * We assume the device can't handle lun!=0 if: - it reports scsi-0 (ANSI
    * SCSI Revision 0) (old drives like MAXTOR XT-3280) or - it reports scsi-1
@@ -1412,6 +1478,7 @@ void scsi_do_cmd (Scsi_Cmnd * SCpnt, const void *cmnd ,
 {
     struct Scsi_Host * host = SCpnt->host;
     Scsi_Device      * device = SCpnt->device;
+    int mlqueue = 0;
 
     SCpnt->owner = SCSI_OWNER_MIDLEVEL;
 
@@ -1446,6 +1513,10 @@ SCSI_LOG_MLQUEUE(4,
     SCpnt->pid = scsi_pid++;
 
     while (SCSI_BLOCK((Scsi_Device *) NULL, host)) {
+	if (in_interrupt()){
+		mlqueue = 1;
+		break;
+	}
     	spin_unlock(&io_request_lock);	/* FIXME!!! */
 	SCSI_SLEEP(&host->host_wait, SCSI_BLOCK((Scsi_Device *) NULL, host));
     	spin_lock_irq(&io_request_lock);	/* FIXME!!! */
@@ -1492,7 +1563,15 @@ SCSI_LOG_MLQUEUE(4,
     SCpnt->internal_timeout = NORMAL_TIMEOUT;
     SCpnt->abort_reason = 0;
     SCpnt->result = 0;
-    internal_cmnd (SCpnt);
+
+    if (mlqueue == 1 && host->hostt->use_new_eh_code){
+	/* Assign a unique nonzero serial_number. */
+	if (++serial_number == 0) serial_number = 1;
+	SCpnt->serial_number = serial_number;
+	scsi_mlqueue_insert(SCpnt, SCSI_MLQUEUE_HOST_BUSY);
+    }
+    else
+	internal_cmnd (SCpnt);
 
     SCSI_LOG_MLQUEUE(3,printk ("Leaving scsi_do_cmd()\n"));
 }
@@ -1799,6 +1878,7 @@ static void scsi_unregister_host(Scsi_Host_Template *);
 void *scsi_malloc(unsigned int len)
 {
     unsigned int nbits, mask;
+    unsigned long flags;
     int i, j;
     if(len % SECTOR_SIZE != 0 || len > PAGE_SIZE)
 	return NULL;
@@ -1806,6 +1886,7 @@ void *scsi_malloc(unsigned int len)
     nbits = len >> 9;
     mask = (1 << nbits) - 1;
 
+    spin_lock_irqsave(&scsi_malloc_lock, flags);
     for(i=0;i < dma_sectors / SECTORS_PER_PAGE; i++)
 	for(j=0; j<=SECTORS_PER_PAGE - nbits; j++){
 	    if ((dma_malloc_freelist[i] & (mask << j)) == 0){
@@ -1815,15 +1896,18 @@ void *scsi_malloc(unsigned int len)
                 SCSI_LOG_MLQUEUE(3,printk("SMalloc: %d %p [From:%p]\n",len, dma_malloc_pages[i] + (j << 9)));
 		printk("SMalloc: %d %p [From:%p]\n",len, dma_malloc_pages[i] + (j << 9));
 #endif
+		spin_unlock_irqrestore(&scsi_malloc_lock, flags);
 		return (void *) ((unsigned long) dma_malloc_pages[i] + (j << 9));
 	    }
 	}
+    spin_unlock_irqrestore(&scsi_malloc_lock, flags);
     return NULL;  /* Nope.  No more */
 }
 
 int scsi_free(void *obj, unsigned int len)
 {
     unsigned int page, sector, nbits, mask;
+    unsigned long flags;
 
 #ifdef DEBUG
     unsigned long ret = 0;
@@ -1837,6 +1921,7 @@ int scsi_free(void *obj, unsigned int len)
     SCSI_LOG_MLQUEUE(3,printk("SFree: %p %d\n",obj, len));
 #endif
 
+    spin_lock_irqsave(&scsi_malloc_lock, flags);
     for (page = 0; page < dma_sectors / SECTORS_PER_PAGE; page++) {
         unsigned long page_addr = (unsigned long) dma_malloc_pages[page];
         if ((unsigned long) obj >= page_addr &&
@@ -1860,9 +1945,11 @@ int scsi_free(void *obj, unsigned int len)
             }
             scsi_dma_free_sectors += nbits;
             dma_malloc_freelist[page] &= ~(mask << sector);
+	    spin_unlock_irqrestore(&scsi_malloc_lock, flags);
             return 0;
 	}
     }
+    spin_unlock_irqrestore(&scsi_malloc_lock, flags);
     panic("scsi_free:Bad offset");
 }
 
@@ -1882,9 +1969,9 @@ void * scsi_init_malloc(unsigned int size, int gfp_mask)
 	for (order = 0, a_size = PAGE_SIZE;
              a_size < size; order++, a_size <<= 1)
             ;
-        retval = (void *) __get_free_pages(gfp_mask | GFP_DMA, order);
+	retval = (void *) __get_free_pages(gfp_mask | GFP_DMA, order);
     } else
-        retval = kmalloc(size, gfp_mask);
+	retval = kmalloc(size, gfp_mask);
 
     if (retval)
 	memset(retval, 0, size);
@@ -1921,10 +2008,12 @@ void scsi_build_commandblocks(Scsi_Device * SDpnt)
     SDpnt->device_queue = NULL;
 
     for(j=0;j<SDpnt->queue_depth;j++){
-      SCpnt = (Scsi_Cmnd *)
+        SCpnt = (Scsi_Cmnd *)
               scsi_init_malloc(sizeof(Scsi_Cmnd),
                                GFP_ATOMIC |
                                (host->unchecked_isa_dma ? GFP_DMA : 0));
+	if (NULL == SCpnt)
+	    break; /* If not, the next line will oops ... */
         memset(&SCpnt->eh_timeout, 0, sizeof(SCpnt->eh_timeout));
 	SCpnt->host                      = host;
 	SCpnt->device                    = SDpnt;
@@ -1947,7 +2036,14 @@ void scsi_build_commandblocks(Scsi_Device * SDpnt)
         SCpnt->state                     = SCSI_STATE_UNUSED;
         SCpnt->owner                     = SCSI_OWNER_NOBODY;
     }
-    SDpnt->has_cmdblocks = 1;
+    if (j < SDpnt->queue_depth) { /* low on space (D.Gilbert 990424) */
+	printk("scsi_build_commandblocks: want=%d, space for=%d blocks\n",
+	       SDpnt->queue_depth, j);
+	SDpnt->queue_depth = j;
+	SDpnt->has_cmdblocks = (0 != j);
+    }
+    else
+	SDpnt->has_cmdblocks = 1;
 }
 
 #ifndef MODULE /* { */
@@ -2011,7 +2107,13 @@ __initfunc(int scsi_dev_init(void))
             /* SDpnt->scsi_request_fn = NULL; */
             for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next)
                 if(sdtpnt->attach) (*sdtpnt->attach)(SDpnt);
-            if(SDpnt->attached) scsi_build_commandblocks(SDpnt);
+            if(SDpnt->attached) {
+		scsi_build_commandblocks(SDpnt);
+		if (0 == SDpnt->has_cmdblocks) {
+		    printk("scsi_dev_init: DANGER, no command blocks\n");
+		    /* What to do now ?? */
+		}
+	    }
         }
     }
     
@@ -2307,8 +2409,9 @@ int scsi_proc_info(char *buffer, char **start, off_t offset, int length,
         /* FIXME (DB) This assumes that the queue_depth routines can be used
            in this context as well, while they were all designed to be
            called only once after the detect routine. (DB) */
-	if (HBA_ptr->select_queue_depths != NULL)
-		(HBA_ptr->select_queue_depths)(HBA_ptr, HBA_ptr->host_queue);
+	/* ... but scan_scsis(,1,,,) needs the correct queue_length. So
+	   select_queue_depths() has been moved inside scan_scsis() and
+	   is only used in this context (ie scan_scsis(,1,,,) ). (dpg) */
 
 	return(length);
 
@@ -2371,7 +2474,9 @@ int scsi_proc_info(char *buffer, char **start, off_t offset, int length,
              * Nobody is using this device any more.
              * Free all of the command structures.
              */
-            for(SCpnt=scd->device_queue; SCpnt; SCpnt = SCpnt->next)
+	    if (HBA_ptr->hostt->revoke)
+		    HBA_ptr->hostt->revoke(scd);
+            for(SCpnt=scd->device_queue; SCpnt; SCpnt = scd->device_queue)
             {
                 scd->device_queue = SCpnt->next;
                 scsi_init_free((char *) SCpnt, sizeof(*SCpnt));
@@ -2404,7 +2509,7 @@ int scsi_proc_info(char *buffer, char **start, off_t offset, int length,
  */
 static void resize_dma_pool(void)
 {
-    int i;
+    int i, k;
     unsigned long size;
     struct Scsi_Host * shpnt;
     struct Scsi_Host * host = NULL;
@@ -2413,6 +2518,7 @@ static void resize_dma_pool(void)
     unsigned int new_dma_sectors = 0;
     unsigned int new_need_isa_buffer = 0;
     unsigned char ** new_dma_malloc_pages = NULL;
+    int out_of_space = 0;
 
     if( !scsi_hostlist )
     {
@@ -2471,7 +2577,8 @@ static void resize_dma_pool(void)
             }
             else if (SDpnt->type == TYPE_SCANNER ||
                      SDpnt->type == TYPE_PROCESSOR ||
-                     SDpnt->type == TYPE_MEDIUM_CHANGER) {
+                     SDpnt->type == TYPE_MEDIUM_CHANGER ||
+                     SDpnt->type == TYPE_ENCLOSURE) {
                 new_dma_sectors += (4096 >> 9) * SDpnt->queue_depth;
             }
             else {
@@ -2503,27 +2610,67 @@ static void resize_dma_pool(void)
      * race conditions that I would rather not even think
      * about right now.
      */
-    if( new_dma_sectors < dma_sectors )
+#if 0  /* Why do this? No gain and risks out_of_space */
+     if( new_dma_sectors < dma_sectors ) 
 	new_dma_sectors = dma_sectors;
+#endif
+    if( new_dma_sectors <= dma_sectors ) 
+	return;	/* best to quit while we are in front */
 
-    if (new_dma_sectors)
-    {
-        size = (new_dma_sectors / SECTORS_PER_PAGE)*sizeof(FreeSectorBitmap);
-	new_dma_malloc_freelist = (FreeSectorBitmap *) scsi_init_malloc(size, GFP_ATOMIC);
-	memset(new_dma_malloc_freelist, 0, size);
+    for (k = 0; k < 20; ++k) { /* just in case */
+	out_of_space = 0;
+	size = (new_dma_sectors / SECTORS_PER_PAGE) *
+				    sizeof(FreeSectorBitmap);
+	new_dma_malloc_freelist = (FreeSectorBitmap *) 
+			    scsi_init_malloc(size, GFP_ATOMIC);
+	if (new_dma_malloc_freelist) {
+	    size = (new_dma_sectors / SECTORS_PER_PAGE) *
+			    sizeof(*new_dma_malloc_pages);
+	    new_dma_malloc_pages = (unsigned char **) 
+			    scsi_init_malloc(size, GFP_ATOMIC);
+	    if (! new_dma_malloc_pages) {
+		size = (new_dma_sectors / SECTORS_PER_PAGE) *
+				    sizeof(FreeSectorBitmap);
+		scsi_init_free((char *)new_dma_malloc_freelist, size);
+		out_of_space = 1;
+	    }
+	}
+	else
+	    out_of_space = 1;
+	
+	if ((! out_of_space) && (new_dma_sectors > dma_sectors)) { 
+	    for(i = dma_sectors / SECTORS_PER_PAGE; 
+		i < new_dma_sectors / SECTORS_PER_PAGE; i++) {
+		new_dma_malloc_pages[i] = (unsigned char *)
+		    scsi_init_malloc(PAGE_SIZE, GFP_ATOMIC | GFP_DMA);
+		if (! new_dma_malloc_pages[i])
+		    break;
+	    }
+	    if (i != new_dma_sectors / SECTORS_PER_PAGE) { /* clean up */
+		int k = i;
 
-        size = (new_dma_sectors / SECTORS_PER_PAGE)*sizeof(*new_dma_malloc_pages);
-	new_dma_malloc_pages = (unsigned char **) scsi_init_malloc(size, GFP_ATOMIC);
-	memset(new_dma_malloc_pages, 0, size);
-    }
-
-    /*
-     * If we need more buffers, expand the list.
-     */
-    if( new_dma_sectors > dma_sectors ) { 
-	for(i=dma_sectors / SECTORS_PER_PAGE; i< new_dma_sectors / SECTORS_PER_PAGE; i++)
-	    new_dma_malloc_pages[i] = (unsigned char *)
-	        scsi_init_malloc(PAGE_SIZE, GFP_ATOMIC | GFP_DMA);
+		out_of_space = 1;
+		for (i = 0; i < k; ++i)
+		    scsi_init_free(new_dma_malloc_pages[i], PAGE_SIZE);
+	    }
+	}
+	if (out_of_space) { /* try scaling down new_dma_sectors request (dpg) */
+	    printk("scsi::resize_dma_pool: WARNING, dma_sectors=%u, "
+		   "wanted=%u, scaling\n", dma_sectors, new_dma_sectors);
+	    if (new_dma_sectors < (8 * SECTORS_PER_PAGE))
+		break; /* pretty well hopeless ... */
+	    new_dma_sectors = (new_dma_sectors * 3) / 4;
+	    new_dma_sectors = (new_dma_sectors + 15) & 0xfff0;
+	    if (new_dma_sectors <= dma_sectors)
+		break; /* stick with what we have got */
+	}
+	else
+	    break; /* found space ... */
+    } /* end of for loop */
+    if (out_of_space) {
+	scsi_need_isa_buffer = new_need_isa_buffer; /* some useful info */
+	printk("      WARNING, not enough memory, pool not expanded\n");
+	return;
     }
 
     /* When we dick with the actual DMA list, we need to
@@ -2570,6 +2717,7 @@ static int scsi_register_host(Scsi_Host_Template * tpnt)
     struct Scsi_Device_Template * sdtpnt;
     const char * name;
     unsigned long flags;
+    int out_of_space = 0;
 
     if (tpnt->next || !tpnt->detect) return 1;/* Must be already loaded, or
 					       * no detect routine available
@@ -2669,11 +2817,11 @@ static int scsi_register_host(Scsi_Host_Template * tpnt)
         {
 	    if(shpnt->hostt == tpnt) 
             {
-                scan_scsis(shpnt,0,0,0,0);
-                if (shpnt->select_queue_depths != NULL)
-                {
-                    (shpnt->select_queue_depths)(shpnt, shpnt->host_queue);
-                }
+		scan_scsis(shpnt,0,0,0,0);
+		if (shpnt->select_queue_depths != NULL)
+		{
+		    (shpnt->select_queue_depths)(shpnt, shpnt->host_queue);
+		}
 	    }
         }
 
@@ -2692,14 +2840,19 @@ static int scsi_register_host(Scsi_Host_Template * tpnt)
                 {
                     for(sdtpnt = scsi_devicelist; sdtpnt; sdtpnt = sdtpnt->next)
                         if(sdtpnt->attach) (*sdtpnt->attach)(SDpnt);
-                    if(SDpnt->attached) scsi_build_commandblocks(SDpnt);
+                    if(SDpnt->attached) {
+			scsi_build_commandblocks(SDpnt);
+			if (0 == SDpnt->has_cmdblocks)
+			    out_of_space = 1;
+		    }
                 }
         }
 
 	/*
 	 * Now that we have all of the devices, resize the DMA pool,
 	 * as required.  */
-	resize_dma_pool();
+	if (! out_of_space)
+	    resize_dma_pool();
 
 
 	/* This does any final handling that is required. */
@@ -2720,7 +2873,13 @@ static int scsi_register_host(Scsi_Host_Template * tpnt)
 #endif
 
     MOD_INC_USE_COUNT;
-    return 0;
+
+    if (out_of_space) {
+	scsi_unregister_host(tpnt); /* easiest way to clean up?? */
+	return 1;
+    }
+    else
+	return 0;
 }
 
 /*
@@ -2981,6 +3140,7 @@ static int scsi_register_device_module(struct Scsi_Device_Template * tpnt)
 {
     Scsi_Device      * SDpnt;
     struct Scsi_Host * shpnt;
+    int out_of_space = 0;
 
     if (tpnt->next) return 1;
 
@@ -3022,6 +3182,8 @@ static int scsi_register_device_module(struct Scsi_Device_Template * tpnt)
             {
                 SDpnt->online = TRUE;
                 scsi_build_commandblocks(SDpnt);
+		if (0 == SDpnt->has_cmdblocks)
+		    out_of_space = 1;
             }
         }
     }
@@ -3030,15 +3192,22 @@ static int scsi_register_device_module(struct Scsi_Device_Template * tpnt)
      * This does any final handling that is required.
      */
     if(tpnt->finish && tpnt->nr_dev)  (*tpnt->finish)();
-    resize_dma_pool();
+    if (! out_of_space)
+	resize_dma_pool();
     MOD_INC_USE_COUNT;
-    return 0;
+
+    if (out_of_space) {
+	scsi_unregister_device(tpnt); /* easiest way to clean up?? */
+	return 1;
+    }
+    else
+	return 0;
 }
 
 static int scsi_unregister_device(struct Scsi_Device_Template * tpnt)
 {
     Scsi_Device * SDpnt;
-    Scsi_Cmnd * SCpnt;
+    Scsi_Cmnd * SCpnt, *SCnext;
     struct Scsi_Host * shpnt;
     struct Scsi_Device_Template * spnt;
     struct Scsi_Device_Template * prev_spnt;
@@ -3066,11 +3235,14 @@ static int scsi_unregister_device(struct Scsi_Device_Template * tpnt)
 	         * Nobody is using this device any more.  Free all of the
 	         * command structures.
 	         */
-	        for(SCpnt = SDpnt->device_queue; SCpnt; 
-                    SCpnt = SCpnt->next)
+
+		SCpnt = SDpnt->device_queue;
+		if (SCpnt) SCnext = SCpnt->next;
+		for(; SCpnt; SCpnt = SCnext)
 	        {
 		    if(SCpnt == SDpnt->device_queue)
 			SDpnt->device_queue = SCpnt->next;
+		    SCnext = SCpnt->next;
 		    scsi_init_free((char *) SCpnt, sizeof(*SCpnt));
 	        }
 	        SDpnt->has_cmdblocks = 0;
@@ -3203,7 +3375,7 @@ scsi_dump_status(int level)
                 printk("(%3d) %2d:%1d:%2d:%2d (%6s %4ld %4ld %4ld %4x %1d) (%1d %1d 0x%2x) (%4d %4d %4d) 0x%2.2x 0x%2.2x 0x%8.8x\n",
                        i++, 
 
-                       SCpnt->host->host_no,
+                       SCpnt->host ? SCpnt->host->host_no : -1,
                        SCpnt->channel,
                        SCpnt->target,
                        SCpnt->lun,
@@ -3265,9 +3437,12 @@ scsi_dump_status(int level)
 
 #ifdef MODULE
 
+MODULE_PARM(max_scsi_luns, "i");
+
 int init_module(void) 
 {
     unsigned long size;
+    int has_space = 0;
 
     /*
      * This makes /proc/scsi visible.
@@ -3283,7 +3458,6 @@ int init_module(void)
     proc_scsi_register(0, &proc_scsi_scsi);
 #endif
 
-
     dma_sectors = PAGE_SIZE / SECTOR_SIZE;
     scsi_dma_free_sectors= dma_sectors;
     /*
@@ -3292,15 +3466,31 @@ int init_module(void)
      */
 
     /* One bit per sector to indicate free/busy */
-    size = (dma_sectors / SECTORS_PER_PAGE)*sizeof(FreeSectorBitmap);
-    dma_malloc_freelist = (unsigned char *) scsi_init_malloc(size, GFP_ATOMIC);
-    memset(dma_malloc_freelist, 0, size);
-
-    /* One pointer per page for the page list */
-    dma_malloc_pages = (unsigned char **)
-	scsi_init_malloc((dma_sectors / SECTORS_PER_PAGE)*sizeof(*dma_malloc_pages), GFP_ATOMIC);
-    dma_malloc_pages[0] = (unsigned char *)
-	scsi_init_malloc(PAGE_SIZE, GFP_ATOMIC | GFP_DMA);
+    size = (dma_sectors / SECTORS_PER_PAGE) * sizeof(FreeSectorBitmap);
+    dma_malloc_freelist = (FreeSectorBitmap *) 
+				scsi_init_malloc(size, GFP_ATOMIC);
+    if (dma_malloc_freelist) {
+	/* One pointer per page for the page list */
+	dma_malloc_pages = (unsigned char **)scsi_init_malloc(
+		(dma_sectors / SECTORS_PER_PAGE) * sizeof(*dma_malloc_pages),
+							      GFP_ATOMIC);
+	if (dma_malloc_pages) {
+	    dma_malloc_pages[0] = (unsigned char *)
+			scsi_init_malloc(PAGE_SIZE, GFP_ATOMIC | GFP_DMA);
+	    if (dma_malloc_pages[0])
+		has_space = 1;
+	}
+    }
+    if (! has_space) {
+	if (dma_malloc_freelist) {
+	    scsi_init_free((char *)dma_malloc_freelist, size);
+	    if (dma_malloc_pages)
+		scsi_init_free((char *)dma_malloc_pages,
+		(dma_sectors / SECTORS_PER_PAGE) * sizeof(*dma_malloc_pages));
+	}
+	printk("scsi::init_module: failed, out of memory\n");
+	return 1;
+    }
 
     /*
      * This is where the processing takes place for most everything

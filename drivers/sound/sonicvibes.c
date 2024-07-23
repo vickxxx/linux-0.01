@@ -3,7 +3,7 @@
 /*
  *      sonicvibes.c  --  S3 Sonic Vibes audio driver.
  *
- *      Copyright (C) 1998  Thomas Sailer (sailer@ife.ee.ethz.ch)
+ *      Copyright (C) 1998-2000  Thomas Sailer (sailer@ife.ee.ethz.ch)
  *
  *      This program is free software; you can redistribute it and/or modify
  *      it under the terms of the GNU General Public License as published by
@@ -35,22 +35,57 @@
  *  out first how to drive them...
  *
  *  Revision history
- *    06.05.98   0.1   Initial release
- *    10.05.98   0.2   Fixed many bugs, esp. ADC rate calculation
- *                     First stab at a simple midi interface (no bells&whistles)
- *    13.05.98   0.3   Fix stupid cut&paste error: set_adc_rate was called instead of
- *                     set_dac_rate in the FMODE_WRITE case in sv_open
- *                     Fix hwptr out of bounds (now mpg123 works)
- *    14.05.98   0.4   Don't allow excessive interrupt rates
- *    08.06.98   0.5   First release using Alan Cox' soundcore instead of miscdevice
- *    03.08.98   0.6   Do not include modversions.h
- *                     Now mixer behaviour can basically be selected between
- *                     "OSS documented" and "OSS actual" behaviour
- *    31.08.98   0.7   Fix realplayer problems - dac.count issues
- *    10.12.98   0.8   Fix drain_dac trying to wait on not yet initialized DMA
- *    16.12.98   0.9   Fix a few f_file & FMODE_ bugs
- *    06.01.99   0.10  remove the silly SA_INTERRUPT flag.
- *                     hopefully killed the egcs section type conflict
+ *    06.05.1998   0.1   Initial release
+ *    10.05.1998   0.2   Fixed many bugs, esp. ADC rate calculation
+ *                       First stab at a simple midi interface (no bells&whistles)
+ *    13.05.1998   0.3   Fix stupid cut&paste error: set_adc_rate was called instead of
+ *                       set_dac_rate in the FMODE_WRITE case in sv_open
+ *                       Fix hwptr out of bounds (now mpg123 works)
+ *    14.05.1998   0.4   Don't allow excessive interrupt rates
+ *    08.06.1998   0.5   First release using Alan Cox' soundcore instead of miscdevice
+ *    03.08.1998   0.6   Do not include modversions.h
+ *                       Now mixer behaviour can basically be selected between
+ *                       "OSS documented" and "OSS actual" behaviour
+ *    31.08.1998   0.7   Fix realplayer problems - dac.count issues
+ *    10.12.1998   0.8   Fix drain_dac trying to wait on not yet initialized DMA
+ *    16.12.1998   0.9   Fix a few f_file & FMODE_ bugs
+ *    06.01.1999   0.10  remove the silly SA_INTERRUPT flag.
+ *                       hopefully killed the egcs section type conflict
+ *    12.03.1999   0.11  cinfo.blocks should be reset after GETxPTR ioctl.
+ *                       reported by Johan Maes <joma@telindus.be>
+ *    22.03.1999   0.12  return EAGAIN instead of EBUSY when O_NONBLOCK
+ *                       read/write cannot be executed
+ *    05.04.1999   0.13  added code to sv_read and sv_write which should detect
+ *                       lockups of the sound chip and revive it. This is basically
+ *                       an ugly hack, but at least applications using this driver
+ *                       won't hang forever. I don't know why these lockups happen,
+ *                       it might well be the motherboard chipset (an early 486 PCI
+ *                       board with ALI chipset), since every busmastering 100MB
+ *                       ethernet card I've tried (Realtek 8139 and Macronix tulip clone)
+ *                       exhibit similar behaviour (they work for a couple of packets
+ *                       and then lock up and can be revived by ifconfig down/up).
+ *    07.04.1999   0.14  implemented the following ioctl's: SOUND_PCM_READ_RATE, 
+ *                       SOUND_PCM_READ_CHANNELS, SOUND_PCM_READ_BITS; 
+ *                       Alpha fixes reported by Peter Jones <pjones@redhat.com>
+ *                       Note: dmaio hack might still be wrong on archs other than i386
+ *    15.06.1999   0.15  Fix bad allocation bug.
+ *                       Thanks to Deti Fliegl <fliegl@in.tum.de>
+ *    28.06.1999   0.16  Add pci_set_master
+ *    03.08.1999   0.17  adapt to Linus' new __setup/__initcall
+ *                       added kernel command line options "sonicvibes=reverb" and "sonicvibesdmaio=dmaioaddr"
+ *    12.08.1999   0.18  module_init/__setup fixes
+ *    24.08.1999   0.19  get rid of the dmaio kludge, replace with allocate_resource
+ *    31.08.1999   0.20  add spin_lock_init
+ *                       __initlocaldata to fix gcc 2.7.x problems
+ *                       replaced current->state = x with set_current_state(x)
+ *    03.09.1999   0.21  change read semantics for MIDI to match
+ *                       OSS more closely; remove possible wakeup race
+ *    28.10.1999   0.22  More waitqueue races fixed
+ *    08.01.2000   0.25  Prevent some ioctl's from returning bad count values on underrun/overrun;
+ *                       Tim Janik's BSE (Bedevilled Sound Engine) found this
+ *    21.11.2000   0.27  Initialize dma buffers in poll, otherwise poll may return a bogus mask
+ *    12.12.2000   0.28  More dma buffer initializations, patch from
+ *                       Tjeerd Mulder <tjeerd.mulder@fujitsu-siemens.com>
  *
  */
 
@@ -79,6 +114,14 @@
 /* --------------------------------------------------------------------- */
 
 #undef OSS_DOCUMENTED_MIXER_SEMANTICS
+
+/* --------------------------------------------------------------------- */
+
+#ifdef MODULE
+#define __exit
+#else
+#define __exit __attribute__ ((unused, __section__ (".text.init")))
+#endif
 
 /* --------------------------------------------------------------------- */
 
@@ -251,7 +294,8 @@ struct sv_state {
 	int dev_dmfm;
 
 	/* hardware resources */
-	unsigned int iosb, ioenh, iosynth, iomidi, iogame, iodmaa, iodmac, irq;
+	unsigned long iosb, ioenh, iosynth, iomidi, iogame;  /* long for SPARC */
+	unsigned int iodmaa, iodmac, irq;
 
         /* mixer stuff */
         struct {
@@ -268,7 +312,8 @@ struct sv_state {
 	spinlock_t lock;
 	struct semaphore open_sem;
 	mode_t open_mode;
-	struct wait_queue *open_wait;
+	wait_queue_head_t open_wait;
+	wait_queue_head_t poll_wait;
 
 	struct dmabuf {
 		void *rawbuf;
@@ -279,7 +324,7 @@ struct sv_state {
 		unsigned total_bytes;
 		int count;
 		unsigned error; /* over/underrun */
-		struct wait_queue *wait;
+		wait_queue_head_t wait;
 		/* redundant, but makes calculations easier */
 		unsigned fragsize;
 		unsigned dmasize;
@@ -297,8 +342,8 @@ struct sv_state {
 	struct {
 		unsigned ird, iwr, icnt;
 		unsigned ord, owr, ocnt;
-		struct wait_queue *iwait;
-		struct wait_queue *owait;
+		wait_queue_head_t iwait;
+		wait_queue_head_t owait;
 		struct timer_list timer;
 		unsigned char ibuf[MIDIINBUF];
 		unsigned char obuf[MIDIOUTBUF];
@@ -483,7 +528,7 @@ static void frobindir(struct sv_state *s, unsigned char idx, unsigned char mask,
 static unsigned setpll(struct sv_state *s, unsigned char reg, unsigned rate)
 {
 	unsigned long flags;
-	unsigned char r, m, n;
+	unsigned char r=0, m=0, n=0;
 	unsigned xm, xn, xr, xd, metric = ~0U;
 	/* the warnings about m and n used uninitialized are bogus and may safely be ignored */
 
@@ -681,8 +726,9 @@ static int prog_dmabuf(struct sv_state *s, unsigned rec)
 	db->hwptr = db->swptr = db->total_bytes = db->count = db->error = db->endcleared = 0;
 	if (!db->rawbuf) {
 		db->ready = db->mapped = 0;
-		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER && !db->rawbuf; order--)
-			db->rawbuf = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA, order);
+		for (order = DMABUF_DEFAULTORDER; order >= DMABUF_MINORDER; order--)
+			if ((db->rawbuf = (void *)__get_free_pages(GFP_KERNEL | GFP_DMA, order)))
+				break;
 		if (!db->rawbuf)
 			return -ENOMEM;
 		db->buforder = order;
@@ -768,7 +814,10 @@ static void sv_update_ptr(struct sv_state *s)
 		s->dma_adc.total_bytes += diff;
 		s->dma_adc.count += diff;
 		if (s->dma_adc.count >= (signed)s->dma_adc.fragsize) 
+		{
 			wake_up(&s->dma_adc.wait);
+			wake_up(&s->poll_wait);
+		}
 		if (!s->dma_adc.mapped) {
 			if (s->dma_adc.count > (signed)(s->dma_adc.dmasize - ((3 * s->dma_adc.fragsize) >> 1))) {
 				s->enable &= ~SV_CENABLE_RE;
@@ -786,7 +835,10 @@ static void sv_update_ptr(struct sv_state *s)
 		if (s->dma_dac.mapped) {
 			s->dma_dac.count += diff;
 			if (s->dma_dac.count >= (signed)s->dma_dac.fragsize)
+			{
 				wake_up(&s->dma_dac.wait);
+				wake_up(&s->poll_wait);
+			}
 		} else {
 			s->dma_dac.count -= diff;
 			if (s->dma_dac.count <= 0) {
@@ -798,7 +850,10 @@ static void sv_update_ptr(struct sv_state *s)
 				s->dma_dac.endcleared = 1;
 			}
 			if (s->dma_dac.count + (signed)s->dma_dac.fragsize <= (signed)s->dma_dac.dmasize)
+			{
 				wake_up(&s->dma_dac.wait);
+				wake_up(&s->poll_wait);
+			}
 		}
 	}
 }
@@ -1020,9 +1075,9 @@ static int mixer_ioctl(struct sv_state *s, unsigned int cmd, unsigned long arg)
 			return put_user(0, (int *)arg);
 		return put_user(((4 - (l & 7)) << 2) | ((4 - (r & 7)) << 5) | 2, (int *)arg);
 	}
-	if (_IOC_TYPE(cmd) != 'M' || _IOC_SIZE(cmd) != sizeof(int))
+	if (_IOC_TYPE(cmd) != 'M' || _SIOC_SIZE(cmd) != sizeof(int))
                 return -EINVAL;
-        if (_IOC_DIR(cmd) == _IOC_READ) {
+        if (_SIOC_DIR(cmd) == _SIOC_READ) {
                 switch (_IOC_NR(cmd)) {
                 case SOUND_MIXER_RECSRC: /* Arg contains a bit for each recording source */
 			return put_user(mixer_recmask(s), (int *)arg);
@@ -1061,7 +1116,7 @@ static int mixer_ioctl(struct sv_state *s, unsigned int cmd, unsigned long arg)
 #endif /* OSS_DOCUMENTED_MIXER_SEMANTICS */
 		}
 	}
-        if (_IOC_DIR(cmd) != (_IOC_READ|_IOC_WRITE)) 
+        if (_SIOC_DIR(cmd) != (_SIOC_READ|_SIOC_WRITE)) 
 		return -EINVAL;
 	s->mix.modcnt++;
 	switch (_IOC_NR(cmd)) {
@@ -1223,15 +1278,15 @@ static /*const*/ struct file_operations sv_mixer_fops = {
 
 static int drain_dac(struct sv_state *s, int nonblock)
 {
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	int count, tmo;
 
 	if (s->dma_dac.mapped || !s->dma_dac.ready)
 		return 0;
-        current->state = TASK_INTERRUPTIBLE;
         add_wait_queue(&s->dma_dac.wait, &wait);
         for (;;) {
+		__set_current_state(TASK_INTERRUPTIBLE);
                 spin_lock_irqsave(&s->lock, flags);
 		count = s->dma_dac.count;
                 spin_unlock_irqrestore(&s->lock, flags);
@@ -1241,16 +1296,16 @@ static int drain_dac(struct sv_state *s, int nonblock)
                         break;
                 if (nonblock) {
                         remove_wait_queue(&s->dma_dac.wait, &wait);
-                        current->state = TASK_RUNNING;
+                        set_current_state(TASK_RUNNING);
                         return -EBUSY;
                 }
-		tmo = (count * HZ) / s->ratedac;
+		tmo = 3 * HZ * (count + s->dma_dac.fragsize) / 2 / s->ratedac;
 		tmo >>= sample_shift[(s->fmt >> SV_CFMT_ASHIFT) & SV_CFMT_MASK];
-		if (!schedule_timeout(tmo ? : 1) && tmo)
+		if (!schedule_timeout(tmo + 1))
 			printk(KERN_DEBUG "sv: dma timed out??\n");
         }
         remove_wait_queue(&s->dma_dac.wait, &wait);
-        current->state = TASK_RUNNING;
+        set_current_state(TASK_RUNNING);
         if (signal_pending(current))
                 return -ERESTARTSYS;
         return 0;
@@ -1261,6 +1316,7 @@ static int drain_dac(struct sv_state *s, int nonblock)
 static ssize_t sv_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned swptr;
@@ -1277,30 +1333,54 @@ static ssize_t sv_read(struct file *file, char *buffer, size_t count, loff_t *pp
 		return -EFAULT;
 	ret = 0;
 #if 0
-   spin_lock_irqsave(&s->lock, flags);
-   sv_update_ptr(s);
-   spin_unlock_irqrestore(&s->lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
+	sv_update_ptr(s);
+	spin_unlock_irqrestore(&s->lock, flags);
 #endif
+        add_wait_queue(&s->dma_adc.wait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		swptr = s->dma_adc.swptr;
 		cnt = s->dma_adc.dmasize-swptr;
 		if (s->dma_adc.count < cnt)
 			cnt = s->dma_adc.count;
+		if (cnt <= 0)
+			__set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
 			start_adc(s);
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EBUSY;
-			interruptible_sleep_on(&s->dma_adc.wait);
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+			if (file->f_flags & O_NONBLOCK) {
+				if (!ret)
+					ret = -EAGAIN;
+				break;
+			}
+			if (!schedule_timeout(HZ)) {
+				printk(KERN_DEBUG "sv: read: chip lockup? dmasz %u fragsz %u count %i hwptr %u swptr %u\n",
+				       s->dma_adc.dmasize, s->dma_adc.fragsize, s->dma_adc.count, 
+				       s->dma_adc.hwptr, s->dma_adc.swptr);
+				stop_adc(s);
+				spin_lock_irqsave(&s->lock, flags);
+				set_dmac(s, virt_to_bus(s->dma_adc.rawbuf), s->dma_adc.numfrag << s->dma_adc.fragshift);
+				/* program enhanced mode registers */
+				wrindir(s, SV_CIDMACBASECOUNT1, (s->dma_adc.fragsamples-1) >> 8);
+				wrindir(s, SV_CIDMACBASECOUNT0, s->dma_adc.fragsamples-1);
+				s->dma_adc.count = s->dma_adc.hwptr = s->dma_adc.swptr = 0;
+				spin_unlock_irqrestore(&s->lock, flags);
+			}
+			if (signal_pending(current)) {
+				if (!ret)
+					ret = -ERESTARTSYS;
+				break;
+			}
 			continue;
 		}
-		if (copy_to_user(buffer, s->dma_adc.rawbuf + swptr, cnt))
-			return ret ? ret : -EFAULT;
+		if (copy_to_user(buffer, s->dma_adc.rawbuf + swptr, cnt)) {
+			if (!ret)
+				ret = -EFAULT;
+			break;
+		}
 		swptr = (swptr + cnt) % s->dma_adc.dmasize;
 		spin_lock_irqsave(&s->lock, flags);
 		s->dma_adc.swptr = swptr;
@@ -1311,12 +1391,15 @@ static ssize_t sv_read(struct file *file, char *buffer, size_t count, loff_t *pp
 		ret += cnt;
 		start_adc(s);
 	}
+        remove_wait_queue(&s->dma_adc.wait, &wait);
+	set_current_state(TASK_RUNNING);
 	return ret;
 }
 
 static ssize_t sv_write(struct file *file, const char *buffer, size_t count, loff_t *ppos)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned swptr;
@@ -1333,10 +1416,11 @@ static ssize_t sv_write(struct file *file, const char *buffer, size_t count, lof
 		return -EFAULT;
 	ret = 0;
 #if 0
-   spin_lock_irqsave(&s->lock, flags);
-   sv_update_ptr(s);
-   spin_unlock_irqrestore(&s->lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
+	sv_update_ptr(s);
+	spin_unlock_irqrestore(&s->lock, flags);
 #endif
+        add_wait_queue(&s->dma_dac.wait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		if (s->dma_dac.count < 0) {
@@ -1347,20 +1431,43 @@ static ssize_t sv_write(struct file *file, const char *buffer, size_t count, lof
 		cnt = s->dma_dac.dmasize-swptr;
 		if (s->dma_dac.count + cnt > s->dma_dac.dmasize)
 			cnt = s->dma_dac.dmasize - s->dma_dac.count;
+		if (cnt <= 0)
+			__set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
 			start_dac(s);
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EBUSY;
-			interruptible_sleep_on(&s->dma_dac.wait);
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+			if (file->f_flags & O_NONBLOCK) {
+				if (!ret)
+					ret = -EAGAIN;
+				break;
+			}
+			if (!schedule_timeout(HZ)) {
+				printk(KERN_DEBUG "sv: write: chip lockup? dmasz %u fragsz %u count %i hwptr %u swptr %u\n",
+				       s->dma_dac.dmasize, s->dma_dac.fragsize, s->dma_dac.count, 
+				       s->dma_dac.hwptr, s->dma_dac.swptr);
+				stop_dac(s);
+				spin_lock_irqsave(&s->lock, flags);
+				set_dmaa(s, virt_to_bus(s->dma_dac.rawbuf), s->dma_dac.numfrag << s->dma_dac.fragshift);
+				/* program enhanced mode registers */
+				wrindir(s, SV_CIDMAABASECOUNT1, (s->dma_dac.fragsamples-1) >> 8);
+				wrindir(s, SV_CIDMAABASECOUNT0, s->dma_dac.fragsamples-1);
+				s->dma_dac.count = s->dma_dac.hwptr = s->dma_dac.swptr = 0;
+				spin_unlock_irqrestore(&s->lock, flags);
+			}
+			if (signal_pending(current)) {
+				if (!ret)
+					ret = -ERESTARTSYS;
+				break;
+			}
 			continue;
 		}
-		if (copy_from_user(s->dma_dac.rawbuf + swptr, buffer, cnt))
-			return ret ? ret : -EFAULT;
+		if (copy_from_user(s->dma_dac.rawbuf + swptr, buffer, cnt)) {
+			if (!ret)
+				ret = -EFAULT;
+			break;
+		}
 		swptr = (swptr + cnt) % s->dma_dac.dmasize;
 		spin_lock_irqsave(&s->lock, flags);
 		s->dma_dac.swptr = swptr;
@@ -1372,6 +1479,8 @@ static ssize_t sv_write(struct file *file, const char *buffer, size_t count, lof
 		ret += cnt;
 		start_dac(s);
 	}
+        remove_wait_queue(&s->dma_dac.wait, &wait);
+	set_current_state(TASK_RUNNING);
 	return ret;
 }
 
@@ -1382,10 +1491,8 @@ static unsigned int sv_poll(struct file *file, struct poll_table_struct *wait)
 	unsigned int mask = 0;
 
 	VALIDATE_STATE(s);
-	if (file->f_mode & FMODE_WRITE)
-		poll_wait(file, &s->dma_dac.wait, wait);
-	if (file->f_mode & FMODE_READ)
-		poll_wait(file, &s->dma_adc.wait, wait);
+	if (file->f_mode & (FMODE_WRITE|FMODE_READ))
+		poll_wait(file, &s->poll_wait, wait);
 	spin_lock_irqsave(&s->lock, flags);
 	sv_update_ptr(s);
 	if (file->f_mode & FMODE_READ) {
@@ -1431,8 +1538,6 @@ static int sv_mmap(struct file *file, struct vm_area_struct *vma)
 	if (remap_page_range(vma->vm_start, virt_to_phys(db->rawbuf), size, vma->vm_page_prot))
 		return -EAGAIN;
 	db->mapped = 1;
-	vma->vm_file = file;
-	file->f_count++;
 	return 0;
 }
 
@@ -1442,6 +1547,7 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	unsigned long flags;
         audio_buf_info abinfo;
         count_info cinfo;
+	int count;
 	int val, mapped, ret;
 	unsigned char fmtm, fmtd;
 
@@ -1477,7 +1583,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return 0;
 
         case SNDCTL_DSP_SPEED:
-                get_user_ret(val, (int *)arg, -EFAULT);
+                if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (val >= 0) {
 			if (file->f_mode & FMODE_READ) {
 				stop_adc(s);
@@ -1493,7 +1600,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return put_user((file->f_mode & FMODE_READ) ? s->rateadc : s->ratedac, (int *)arg);
 		
         case SNDCTL_DSP_STEREO:
-                get_user_ret(val, (int *)arg, -EFAULT);
+                if (get_user(val, (int *)arg))
+			return -EFAULT;
 		fmtd = 0;
 		fmtm = ~0;
 		if (file->f_mode & FMODE_READ) {
@@ -1516,7 +1624,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return 0;
 
         case SNDCTL_DSP_CHANNELS:
-                get_user_ret(val, (int *)arg, -EFAULT);
+                if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (val != 0) {
 			fmtd = 0;
 			fmtm = ~0;
@@ -1545,7 +1654,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
                 return put_user(AFMT_S16_LE|AFMT_U8, (int *)arg);
 		
 	case SNDCTL_DSP_SETFMT: /* Selects ONE fmt*/
-		get_user_ret(val, (int *)arg, -EFAULT);
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (val != AFMT_QUERY) {
 			fmtd = 0;
 			fmtm = ~0;
@@ -1582,7 +1692,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return put_user(val, (int *)arg);
 		
 	case SNDCTL_DSP_SETTRIGGER:
-		get_user_ret(val, (int *)arg, -EFAULT);
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (file->f_mode & FMODE_READ) {
 			if (val & PCM_ENABLE_INPUT) {
 				if (!s->dma_adc.ready && (ret =  prog_dmabuf(s, 1)))
@@ -1604,12 +1715,15 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	case SNDCTL_DSP_GETOSPACE:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
-		if (!(s->enable & SV_CENABLE_PE) && (val = prog_dmabuf(s, 0)) != 0)
+		if (!s->dma_dac.ready && (val = prog_dmabuf(s, 0)) != 0)
 			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		sv_update_ptr(s);
 		abinfo.fragsize = s->dma_dac.fragsize;
-                abinfo.bytes = s->dma_dac.dmasize - s->dma_dac.count;
+		count = s->dma_dac.count;
+		if (count < 0)
+			count = 0;
+                abinfo.bytes = s->dma_dac.dmasize - count;
                 abinfo.fragstotal = s->dma_dac.numfrag;
                 abinfo.fragments = abinfo.bytes >> s->dma_dac.fragshift;      
 		spin_unlock_irqrestore(&s->lock, flags);
@@ -1618,12 +1732,15 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	case SNDCTL_DSP_GETISPACE:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
-		if (!(s->enable & SV_CENABLE_RE) && (val = prog_dmabuf(s, 1)) != 0)
+		if (!s->dma_adc.ready && (val = prog_dmabuf(s, 1)) != 0)
 			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		sv_update_ptr(s);
 		abinfo.fragsize = s->dma_adc.fragsize;
-                abinfo.bytes = s->dma_adc.count;
+		count = s->dma_adc.count;
+		if (count < 0)
+			count = 0;
+                abinfo.bytes = count;
                 abinfo.fragstotal = s->dma_adc.numfrag;
                 abinfo.fragments = abinfo.bytes >> s->dma_adc.fragshift;      
 		spin_unlock_irqrestore(&s->lock, flags);
@@ -1636,19 +1753,28 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
         case SNDCTL_DSP_GETODELAY:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
+		if (!s->dma_dac.ready && (val = prog_dmabuf(s, 0)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		sv_update_ptr(s);
-                val = s->dma_dac.count;
+                count = s->dma_dac.count;
 		spin_unlock_irqrestore(&s->lock, flags);
-		return put_user(val, (int *)arg);
+		if (count < 0)
+			count = 0;
+		return put_user(count, (int *)arg);
 
         case SNDCTL_DSP_GETIPTR:
 		if (!(file->f_mode & FMODE_READ))
 			return -EINVAL;
+		if (!s->dma_adc.ready && (val = prog_dmabuf(s, 1)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		sv_update_ptr(s);
                 cinfo.bytes = s->dma_adc.total_bytes;
-                cinfo.blocks = s->dma_adc.total_bytes >> s->dma_adc.fragshift;
+		count = s->dma_adc.count;
+		if (count < 0)
+			count = 0;
+                cinfo.blocks = count >> s->dma_adc.fragshift;
                 cinfo.ptr = s->dma_adc.hwptr;
 		if (s->dma_adc.mapped)
 			s->dma_adc.count &= s->dma_adc.fragsize-1;
@@ -1658,10 +1784,15 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
         case SNDCTL_DSP_GETOPTR:
 		if (!(file->f_mode & FMODE_WRITE))
 			return -EINVAL;
+		if (!s->dma_dac.ready && (val = prog_dmabuf(s, 0)) != 0)
+			return val;
 		spin_lock_irqsave(&s->lock, flags);
 		sv_update_ptr(s);
                 cinfo.bytes = s->dma_dac.total_bytes;
-                cinfo.blocks = s->dma_dac.total_bytes >> s->dma_dac.fragshift;
+		count = s->dma_dac.count;
+		if (count < 0)
+			count = 0;
+                cinfo.blocks = count >> s->dma_dac.fragshift;
                 cinfo.ptr = s->dma_dac.hwptr;
 		if (s->dma_dac.mapped)
 			s->dma_dac.count &= s->dma_dac.fragsize-1;
@@ -1679,7 +1810,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		return put_user(s->dma_adc.fragsize, (int *)arg);
 
         case SNDCTL_DSP_SETFRAGMENT:
-                get_user_ret(val, (int *)arg, -EFAULT);
+                if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (file->f_mode & FMODE_READ) {
 			s->dma_adc.ossfragshift = val & 0xffff;
 			s->dma_adc.ossmaxfrags = (val >> 16) & 0xffff;
@@ -1706,7 +1838,8 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 		if ((file->f_mode & FMODE_READ && s->dma_adc.subdivision) ||
 		    (file->f_mode & FMODE_WRITE && s->dma_dac.subdivision))
 			return -EINVAL;
-                get_user_ret(val, (int *)arg, -EFAULT);
+                if (get_user(val, (int *)arg))
+			return -EFAULT;
 		if (val != 1 && val != 2 && val != 4)
 			return -EINVAL;
 		if (file->f_mode & FMODE_READ)
@@ -1715,11 +1848,19 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 			s->dma_dac.subdivision = val;
 		return 0;
 
+        case SOUND_PCM_READ_RATE:
+		return put_user((file->f_mode & FMODE_READ) ? s->rateadc : s->ratedac, (int *)arg);
+
+        case SOUND_PCM_READ_CHANNELS:
+		return put_user((s->fmt & ((file->f_mode & FMODE_READ) ? (SV_CFMT_STEREO << SV_CFMT_CSHIFT) 
+					   : (SV_CFMT_STEREO << SV_CFMT_ASHIFT))) ? 2 : 1, (int *)arg);
+
+        case SOUND_PCM_READ_BITS:
+		return put_user((s->fmt & ((file->f_mode & FMODE_READ) ? (SV_CFMT_16BIT << SV_CFMT_CSHIFT) 
+					   : (SV_CFMT_16BIT << SV_CFMT_ASHIFT))) ? 16 : 8, (int *)arg);
+
         case SOUND_PCM_WRITE_FILTER:
         case SNDCTL_DSP_SETSYNCRO:
-        case SOUND_PCM_READ_RATE:
-        case SOUND_PCM_READ_CHANNELS:
-        case SOUND_PCM_READ_BITS:
         case SOUND_PCM_READ_FILTER:
                 return -EINVAL;
 		
@@ -1730,6 +1871,7 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 static int sv_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
+	DECLARE_WAITQUEUE(wait, current);
 	struct sv_state *s = devs;
 	unsigned char fmtm = ~0, fmts = 0;
 
@@ -1746,8 +1888,12 @@ static int sv_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+		add_wait_queue(&s->open_wait, &wait);
+		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+		schedule();
+		remove_wait_queue(&s->open_wait, &wait);
+		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -1790,8 +1936,8 @@ static int sv_release(struct inode *inode, struct file *file)
 		dealloc_dmabuf(&s->dma_adc);
 	}
 	s->open_mode &= (~file->f_mode) & (FMODE_READ|FMODE_WRITE);
-	up(&s->open_sem);
 	wake_up(&s->open_wait);
+	up(&s->open_sem);
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
@@ -1819,6 +1965,7 @@ static /*const*/ struct file_operations sv_audio_fops = {
 static ssize_t sv_midi_read(struct file *file, char *buffer, size_t count, loff_t *ppos)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned ptr;
@@ -1829,26 +1976,40 @@ static ssize_t sv_midi_read(struct file *file, char *buffer, size_t count, loff_
 		return -ESPIPE;
 	if (!access_ok(VERIFY_WRITE, buffer, count))
 		return -EFAULT;
+	if (count == 0)
+		return 0;
 	ret = 0;
+	add_wait_queue(&s->midi.iwait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		ptr = s->midi.ird;
 		cnt = MIDIINBUF - ptr;
 		if (s->midi.icnt < cnt)
 			cnt = s->midi.icnt;
+		if (cnt <= 0)
+                      __set_current_state(TASK_INTERRUPTIBLE);
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EBUSY;
-			interruptible_sleep_on(&s->midi.iwait);
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+                      if (file->f_flags & O_NONBLOCK) {
+                              if (!ret)
+                                      ret = -EAGAIN;
+                              break;
+                      }
+                      schedule();
+                      if (signal_pending(current)) {
+                              if (!ret)
+                                      ret = -ERESTARTSYS;
+                              break;
+                      }
 			continue;
 		}
-		if (copy_to_user(buffer, s->midi.ibuf + ptr, cnt))
-			return ret ? ret : -EFAULT;
+		if (copy_to_user(buffer, s->midi.ibuf + ptr, cnt)) {
+			if (!ret)
+				ret = -EFAULT;
+			break;
+		}
 		ptr = (ptr + cnt) % MIDIINBUF;
 		spin_lock_irqsave(&s->lock, flags);
 		s->midi.ird = ptr;
@@ -1857,13 +2018,17 @@ static ssize_t sv_midi_read(struct file *file, char *buffer, size_t count, loff_
 		count -= cnt;
 		buffer += cnt;
 		ret += cnt;
+		break;
 	}
+	__set_current_state(TASK_RUNNING);
+	remove_wait_queue(&s->midi.iwait, &wait);
 	return ret;
 }
 
 static ssize_t sv_midi_write(struct file *file, const char *buffer, size_t count, loff_t *ppos)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t ret;
 	unsigned long flags;
 	unsigned ptr;
@@ -1874,28 +2039,42 @@ static ssize_t sv_midi_write(struct file *file, const char *buffer, size_t count
 		return -ESPIPE;
 	if (!access_ok(VERIFY_READ, buffer, count))
 		return -EFAULT;
+	if (count == 0)
+		return 0;
 	ret = 0;
+        add_wait_queue(&s->midi.owait, &wait);
 	while (count > 0) {
 		spin_lock_irqsave(&s->lock, flags);
 		ptr = s->midi.owr;
 		cnt = MIDIOUTBUF - ptr;
 		if (s->midi.ocnt + cnt > MIDIOUTBUF)
 			cnt = MIDIOUTBUF - s->midi.ocnt;
-		if (cnt <= 0)
+		if (cnt <= 0) {
+			__set_current_state(TASK_INTERRUPTIBLE);
 			sv_handle_midi(s);
+		}
 		spin_unlock_irqrestore(&s->lock, flags);
 		if (cnt > count)
 			cnt = count;
 		if (cnt <= 0) {
-			if (file->f_flags & O_NONBLOCK)
-				return ret ? ret : -EBUSY;
-			interruptible_sleep_on(&s->midi.owait);
-			if (signal_pending(current))
-				return ret ? ret : -ERESTARTSYS;
+			if (file->f_flags & O_NONBLOCK) {
+				if (!ret)
+					ret = -EAGAIN;
+				break;
+			}
+			schedule();
+			if (signal_pending(current)) {
+				if (!ret)
+					ret = -ERESTARTSYS;
+				break;
+			}
 			continue;
 		}
-		if (copy_from_user(s->midi.obuf + ptr, buffer, cnt))
-			return ret ? ret : -EFAULT;
+		if (copy_from_user(s->midi.obuf + ptr, buffer, cnt)) {
+			if (!ret)
+				ret = -EFAULT;
+			break;
+		}
 		ptr = (ptr + cnt) % MIDIOUTBUF;
 		spin_lock_irqsave(&s->lock, flags);
 		s->midi.owr = ptr;
@@ -1908,6 +2087,8 @@ static ssize_t sv_midi_write(struct file *file, const char *buffer, size_t count
 		sv_handle_midi(s);
 		spin_unlock_irqrestore(&s->lock, flags);
 	}
+	__set_current_state(TASK_RUNNING);
+	remove_wait_queue(&s->midi.owait, &wait);
 	return ret;
 }
 
@@ -1938,6 +2119,7 @@ static unsigned int sv_midi_poll(struct file *file, struct poll_table_struct *wa
 static int sv_midi_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
+	DECLARE_WAITQUEUE(wait, current);
 	struct sv_state *s = devs;
 	unsigned long flags;
 
@@ -1954,8 +2136,12 @@ static int sv_midi_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+		add_wait_queue(&s->open_wait, &wait);
+		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+		schedule();
+		remove_wait_queue(&s->open_wait, &wait);
+		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -1995,16 +2181,16 @@ static int sv_midi_open(struct inode *inode, struct file *file)
 static int sv_midi_release(struct inode *inode, struct file *file)
 {
 	struct sv_state *s = (struct sv_state *)file->private_data;
-        struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	unsigned count, tmo;
 
 	VALIDATE_STATE(s);
 
 	if (file->f_mode & FMODE_WRITE) {
-		current->state = TASK_INTERRUPTIBLE;
 		add_wait_queue(&s->midi.owait, &wait);
 		for (;;) {
+			__set_current_state(TASK_INTERRUPTIBLE);
 			spin_lock_irqsave(&s->lock, flags);
 			count = s->midi.ocnt;
 			spin_unlock_irqrestore(&s->lock, flags);
@@ -2014,7 +2200,7 @@ static int sv_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (file->f_flags & O_NONBLOCK) {
 				remove_wait_queue(&s->midi.owait, &wait);
-				current->state = TASK_RUNNING;
+				set_current_state(TASK_RUNNING);
 				return -EBUSY;
 			}
 			tmo = (count * HZ) / 3100;
@@ -2022,7 +2208,7 @@ static int sv_midi_release(struct inode *inode, struct file *file)
 				printk(KERN_DEBUG "sv: midi timed out??\n");
 		}
 		remove_wait_queue(&s->midi.owait, &wait);
-		current->state = TASK_RUNNING;
+		set_current_state(TASK_RUNNING);
 	}
 	down(&s->open_sem);
 	s->open_mode &= (~(file->f_mode << FMODE_MIDI_SHIFT)) & (FMODE_MIDI_READ|FMODE_MIDI_WRITE);
@@ -2032,8 +2218,8 @@ static int sv_midi_release(struct inode *inode, struct file *file)
 		del_timer(&s->midi.timer);		
 	}
 	spin_unlock_irqrestore(&s->lock, flags);
-	up(&s->open_sem);
 	wake_up(&s->open_wait);
+	up(&s->open_sem);
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
@@ -2158,6 +2344,7 @@ static int sv_dmfm_ioctl(struct inode *inode, struct file *file, unsigned int cm
 static int sv_dmfm_open(struct inode *inode, struct file *file)
 {
 	int minor = MINOR(inode->i_rdev);
+	DECLARE_WAITQUEUE(wait, current);
 	struct sv_state *s = devs;
 
 	while (s && s->dev_dmfm != minor)
@@ -2173,8 +2360,12 @@ static int sv_dmfm_open(struct inode *inode, struct file *file)
 			up(&s->open_sem);
 			return -EBUSY;
 		}
+		add_wait_queue(&s->open_wait, &wait);
+		__set_current_state(TASK_INTERRUPTIBLE);
 		up(&s->open_sem);
-		interruptible_sleep_on(&s->open_wait);
+		schedule();
+		remove_wait_queue(&s->open_wait, &wait);
+		set_current_state(TASK_RUNNING);
 		if (signal_pending(current))
 			return -ERESTARTSYS;
 		down(&s->open_sem);
@@ -2206,8 +2397,8 @@ static int sv_dmfm_release(struct inode *inode, struct file *file)
 		outb(regb, s->iosynth+2);
 		outb(0, s->iosynth+3);
 	}
-	up(&s->open_sem);
 	wake_up(&s->open_wait);
+	up(&s->open_sem);
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
@@ -2273,7 +2464,7 @@ __initfunc(int init_sonicvibes(void))
 
 	if (!pci_present())   /* No PCI bus in this machine! */
 		return -ENODEV;
-	printk(KERN_INFO "sv: version v0.10 time " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "sv: version v0.28 time " __TIME__ " " __DATE__ "\n");
 #if 0
 	if (!(wavetable_mem = __get_free_pages(GFP_KERNEL, 20-PAGE_SHIFT)))
 		printk(KERN_INFO "sv: cannot allocate 1MB of contiguous nonpageable memory for wavetable data\n");
@@ -2296,12 +2487,14 @@ __initfunc(int init_sonicvibes(void))
 			continue;
 		}
 		memset(s, 0, sizeof(struct sv_state));
-		init_waitqueue(&s->dma_adc.wait);
-		init_waitqueue(&s->dma_dac.wait);
-		init_waitqueue(&s->open_wait);
-		init_waitqueue(&s->midi.iwait);
-		init_waitqueue(&s->midi.owait);
-		s->open_sem = MUTEX;
+		init_waitqueue_head(&s->dma_adc.wait);
+		init_waitqueue_head(&s->dma_dac.wait);
+		init_waitqueue_head(&s->open_wait);
+		init_waitqueue_head(&s->poll_wait);
+		init_waitqueue_head(&s->midi.iwait);
+		init_waitqueue_head(&s->midi.owait);
+		init_MUTEX(&s->open_sem);
+		spin_lock_init(&s->lock);
 		s->magic = SV_MAGIC;
 		s->iosb = pcidev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
 		s->ioenh = pcidev->base_address[1] & PCI_BASE_ADDRESS_IO_MASK;
@@ -2327,7 +2520,7 @@ __initfunc(int init_sonicvibes(void))
 		}
 		pci_write_config_dword(pcidev, 0x40, s->iodmaa | 9);  /* enable and use extended mode */
 		pci_write_config_dword(pcidev, 0x48, s->iodmac | 9);  /* enable */
-		printk(KERN_DEBUG "sv: io ports: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n",
+		printk(KERN_DEBUG "sv: io ports: %#lx %#lx %#lx %#lx %#lx %#x %#x\n",
 		       s->iosb, s->ioenh, s->iosynth, s->iomidi, s->iogame, s->iodmaa, s->iodmac);
 		if (s->ioenh == 0 || s->iodmaa == 0 || s->iodmac == 0)
 			continue;
@@ -2337,7 +2530,7 @@ __initfunc(int init_sonicvibes(void))
 		pci_write_config_dword(pcidev, 0x60, wavetable_mem >> 12);  /* wavetable base address */
 
 		if (check_region(s->ioenh, SV_EXTENT_ENH)) {
-			printk(KERN_ERR "sv: io ports %#x-%#x in use\n", s->ioenh, s->ioenh+SV_EXTENT_ENH-1);
+			printk(KERN_ERR "sv: io ports %#lx-%#lx in use\n", s->ioenh, s->ioenh+SV_EXTENT_ENH-1);
 			goto err_region5;
 		}
 		request_region(s->ioenh, SV_EXTENT_ENH, "S3 SonicVibes PCM");
@@ -2352,12 +2545,12 @@ __initfunc(int init_sonicvibes(void))
 		}
 		request_region(s->iodmac, SV_EXTENT_DMA, "S3 SonicVibes DMAC");
 		if (check_region(s->iomidi, SV_EXTENT_MIDI)) {
-			printk(KERN_ERR "sv: io ports %#x-%#x in use\n", s->iomidi, s->iomidi+SV_EXTENT_MIDI-1);
+			printk(KERN_ERR "sv: io ports %#lx-%#lx in use\n", s->iomidi, s->iomidi+SV_EXTENT_MIDI-1);
 			goto err_region2;
 		}
 		request_region(s->iomidi, SV_EXTENT_MIDI, "S3 SonicVibes Midi");
 		if (check_region(s->iosynth, SV_EXTENT_SYNTH)) {
-			printk(KERN_ERR "sv: io ports %#x-%#x in use\n", s->iosynth, s->iosynth+SV_EXTENT_SYNTH-1);
+			printk(KERN_ERR "sv: io ports %#lx-%#lx in use\n", s->iosynth, s->iosynth+SV_EXTENT_SYNTH-1);
 			goto err_region1;
 		}
 		request_region(s->iosynth, SV_EXTENT_SYNTH, "S3 SonicVibes Synth");
@@ -2372,8 +2565,8 @@ __initfunc(int init_sonicvibes(void))
 		wrindir(s, SV_CIDRIVECONTROL, 0);  /* drive current 16mA */
 		wrindir(s, SV_CIENABLE, s->enable = 0);  /* disable DMAA and DMAC */
 		outb(~(SV_CINTMASK_DMAA | SV_CINTMASK_DMAC), s->ioenh + SV_CODEC_INTMASK);
-		//outb(0xff, s->iodmaa + SV_DMA_RESET);
-		//outb(0xff, s->iodmac + SV_DMA_RESET);
+		/* outb(0xff, s->iodmaa + SV_DMA_RESET); */
+		/* outb(0xff, s->iodmac + SV_DMA_RESET); */
 		inb(s->ioenh + SV_CODEC_STATUS); /* ack interrupts */
 		wrindir(s, SV_CIADCCLKSOURCE, 0); /* use pll as ADC clock source */
 		wrindir(s, SV_CIANALOGPWRDOWN, 0); /* power up the analog parts of the device */
@@ -2388,7 +2581,7 @@ __initfunc(int init_sonicvibes(void))
 			printk(KERN_ERR "sv: irq %u in use\n", s->irq);
 			goto err_irq;
 		}
-		printk(KERN_INFO "sv: found adapter at io %#06x irq %u dmaa %#06x dmac %#06x revision %u\n",
+		printk(KERN_INFO "sv: found adapter at io %#lx irq %u dmaa %#06x dmac %#06x revision %u\n",
 		       s->ioenh, s->irq, s->iodmaa, s->iodmac, rdindir(s, SV_CIREVISION));
 		/* register devices */
 		if ((s->dev_audio = register_sound_dsp(&sv_audio_fops, -1)) < 0)
@@ -2399,6 +2592,7 @@ __initfunc(int init_sonicvibes(void))
 			goto err_dev3;
 		if ((s->dev_dmfm = register_sound_special(&sv_dmfm_fops, 15 /* ?? */)) < 0)
 			goto err_dev4;
+		pci_set_master(pcidev);  /* enable bus mastering */
 		/* initialize the chips */
 		fs = get_fs();
 		set_fs(KERNEL_DS);
@@ -2472,8 +2666,8 @@ void cleanup_module(void)
 		synchronize_irq();
 		inb(s->ioenh + SV_CODEC_STATUS); /* ack interrupts */
 		wrindir(s, SV_CIENABLE, 0);     /* disable DMAA and DMAC */
-		//outb(0, s->iodmaa + SV_DMA_RESET);
-		//outb(0, s->iodmac + SV_DMA_RESET);
+		/*outb(0, s->iodmaa + SV_DMA_RESET);*/
+		/*outb(0, s->iodmac + SV_DMA_RESET);*/
 		free_irq(s->irq, s);
 		release_region(s->iodmac, SV_EXTENT_DMA);
 		release_region(s->iodmaa, SV_EXTENT_DMA);

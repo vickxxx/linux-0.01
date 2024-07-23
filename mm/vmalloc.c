@@ -70,11 +70,12 @@ static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned lo
 void vmfree_area_pages(unsigned long address, unsigned long size)
 {
 	pgd_t * dir;
+	unsigned long start = address;
 	unsigned long end = address + size;
 
 	dir = pgd_offset_k(address);
 	flush_cache_all();
-	while (address < end) {
+	while (address >= start && address < end) {
 		free_area_pmd(dir, address, end - address);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
@@ -127,11 +128,12 @@ static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 int vmalloc_area_pages(unsigned long address, unsigned long size)
 {
 	pgd_t * dir;
+	unsigned long start = address;
 	unsigned long end = address + size;
 
 	dir = pgd_offset_k(address);
 	flush_cache_all();
-	while (address < end) {
+	while (address >= start && address < end) {
 		pmd_t *pmd;
 		pgd_t olddir = *dir;
 		
@@ -157,18 +159,23 @@ struct vm_struct * get_vm_area(unsigned long size)
 	area = (struct vm_struct *) kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
 		return NULL;
+	size += PAGE_SIZE;
 	addr = VMALLOC_START;
 	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
+		if ((size + addr) < addr) {
+			kfree(area);
+			return NULL;
+		}
 		if (size + addr < (unsigned long) tmp->addr)
 			break;
+		addr = tmp->size + (unsigned long) tmp->addr;
 		if (addr > VMALLOC_END-size) {
 			kfree(area);
 			return NULL;
 		}
-		addr = tmp->size + (unsigned long) tmp->addr;
 	}
 	area->addr = (void *)addr;
-	area->size = size + PAGE_SIZE;
+	area->size = size;
 	area->next = *p;
 	*p = area;
 	return area;

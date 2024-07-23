@@ -62,12 +62,18 @@ struct awacs_regs {
 #define MASK_ADDR_VOLC	MASK_ADDR4	/* Volume Control C -- Speaker */
 #define MASK_ADDR_VOLSPK MASK_ADDR4
 
+/* additional registers of screamer */
+#define MASK_ADDR5	(0x5 << 12)	/* Expanded Data Mode Address 5 */
+#define MASK_ADDR6	(0x6 << 12)	/* Expanded Data Mode Address 6 */
+#define MASK_ADDR7	(0x7 << 12)	/* Expanded Data Mode Address 7 */
+
+
 /* Address 0 Bit Masks & Macros */
 /* ------- - --- ----- - ------ */
 #define MASK_GAINRIGHT	(0xf)		/* Gain Right Mask */
 #define MASK_GAINLEFT	(0xf << 4)	/* Gain Left Mask */
-#define MASK_GAINLINE	(0x1 << 8)	/* Change Gain for Line??? */
-#define MASK_GAINMIC	(0x0 << 8)	/* Change Gain for Mic??? */
+#define MASK_GAINLINE	(0x1 << 8)	/* Disable Mic preamp */
+#define MASK_GAINMIC	(0x0 << 8)	/* Enable Mic preamp */
 
 #define MASK_MUX_CD	(0x1 << 9)	/* Select CD in MUX */
 #define MASK_MUX_MIC	(0x1 << 10)	/* Select Mic in MUX */
@@ -156,5 +162,69 @@ struct awacs_regs {
 #define RATE_7350	(0x7 << 8)	/* 7.35 kHz */
 
 #define RATE_LOW	1	/* HIGH = 48kHz, etc;  LOW = 44.1kHz, etc. */
+
+
+/* Burgundy values */
+
+#define MASK_ADDR_BURGUNDY_INPSEL21 (0x11 << 12)
+#define MASK_ADDR_BURGUNDY_INPSEL3 (0x12 << 12)
+
+#define MASK_ADDR_BURGUNDY_GAINCH1 (0x13 << 12)
+#define MASK_ADDR_BURGUNDY_GAINCH2 (0x14 << 12)
+#define MASK_ADDR_BURGUNDY_GAINCH3 (0x15 << 12)
+#define MASK_ADDR_BURGUNDY_GAINCH4 (0x16 << 12)
+
+#define MASK_ADDR_BURGUNDY_VOLCH1 (0x20 << 12)
+#define MASK_ADDR_BURGUNDY_VOLCH2 (0x21 << 12)
+#define MASK_ADDR_BURGUNDY_VOLCH3 (0x22 << 12)
+#define MASK_ADDR_BURGUNDY_VOLCH4 (0x23 << 12)
+
+#define MASK_ADDR_BURGUNDY_OUTPUTSELECTS (0x2B << 12)
+#define MASK_ADDR_BURGUNDY_OUTPUTENABLES (0x2F << 12)
+
+#define MASK_ADDR_BURGUNDY_MASTER_VOLUME (0x30 << 12)
+
+#define MASK_ADDR_BURGUNDY_MORE_OUTPUTENABLES (0x60 << 12)
+
+#define MASK_ADDR_BURGUNDY_ATTENSPEAKER (0x62 << 12)
+#define MASK_ADDR_BURGUNDY_ATTENLINEOUT (0x63 << 12)
+#define MASK_ADDR_BURGUNDY_ATTENHP (0x64 << 12)
+
+#define MASK_ADDR_BURGUNDY_VOLCD (MASK_ADDR_BURGUNDY_VOLCH1)
+#define MASK_ADDR_BURGUNDY_VOLLINE (MASK_ADDR_BURGUNDY_VOLCH2)
+#define MASK_ADDR_BURGUNDY_VOLMIC (MASK_ADDR_BURGUNDY_VOLCH3)
+#define MASK_ADDR_BURGUNDY_VOLMODEM (MASK_ADDR_BURGUNDY_VOLCH4)
+
+#define MASK_ADDR_BURGUNDY_GAINCD (MASK_ADDR_BURGUNDY_GAINCH1)
+#define MASK_ADDR_BURGUNDY_GAINLINE (MASK_ADDR_BURGUNDY_GAINCH2)
+#define MASK_ADDR_BURGUNDY_GAINMIC (MASK_ADDR_BURGUNDY_GAINCH3)
+#define MASK_ADDR_BURGUNDY_GAINMODEM (MASK_ADDR_BURGUNDY_VOLCH4)
+
+
+/* These are all default values for the burgundy */
+#define DEF_BURGUNDY_INPSEL21 (0xAA)
+#define DEF_BURGUNDY_INPSEL3 (0x0A)
+
+#define DEF_BURGUNDY_GAINCD (0x33)
+#define DEF_BURGUNDY_GAINLINE (0x44)
+#define DEF_BURGUNDY_GAINMIC (0x44)
+#define DEF_BURGUNDY_GAINMODEM (0x06)
+
+/* Remember: lowest volume here is 0x9b */
+#define DEF_BURGUNDY_VOLCD (0xCCCCCCCC)
+#define DEF_BURGUNDY_VOLLINE (0x00000000)
+#define DEF_BURGUNDY_VOLMIC (0x00000000)
+#define DEF_BURGUNDY_VOLMODEM (0xCCCCCCCC)
+
+#define DEF_BURGUNDY_OUTPUTSELECTS (0x010f010f)
+#define DEF_BURGUNDY_OUTPUTENABLES (0x0A)
+
+#define DEF_BURGUNDY_MASTER_VOLUME (0xFFFFFFFF)
+
+#define DEF_BURGUNDY_MORE_OUTPUTENABLES (0x7E)
+
+#define DEF_BURGUNDY_ATTENSPEAKER (0x44)
+#define DEF_BURGUNDY_ATTENLINEOUT (0xCC)
+#define DEF_BURGUNDY_ATTENHP (0xCC)
 
 #endif /* _AWACS_DEFS_H_ */

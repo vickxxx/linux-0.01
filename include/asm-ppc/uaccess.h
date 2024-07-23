@@ -27,7 +27,7 @@
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
 #define __kernel_ok (segment_eq(get_fs(), KERNEL_DS))
-#define __user_ok(addr,size) (((size) <= 0x80000000)&&((addr) <= 0x80000000-(size)))
+#define __user_ok(addr,size) (((size) <= TASK_SIZE)&&((addr) <= TASK_SIZE-(size)))
 #define __access_ok(addr,size) (__kernel_ok || __user_ok((addr),(size)))
 #define access_ok(type,addr,size) __access_ok((unsigned long)(addr),(size))
 
@@ -57,7 +57,7 @@ struct exception_table_entry
 
 /* Returns 0 if exception not found and fixup otherwise.  */
 extern unsigned long search_exception_table(unsigned long);
-
+extern void sort_exception_table(void);
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -224,6 +224,10 @@ copy_to_user(void *to, const void *from, unsigned long n)
 	return n;
 }
 
+#define copy_to_user_ret(to,from,n,retval) ({ if (copy_to_user(to,from,n)) return retval; })
+
+#define copy_from_user_ret(to,from,n,retval) ({ if (copy_from_user(to,from,n)) return retval; })
+
 #define __copy_from_user(to, from, size) \
 	__copy_tofrom_user((to), (from), (size))
 #define __copy_to_user(to, from, size) \
@@ -255,7 +259,22 @@ strncpy_from_user(char *dst, const char *src, long count)
  * Return 0 for error
  */
 
-extern long strlen_user(const char *);
+extern int __strnlen_user(const char *str, long len, unsigned long top);
+
+/*
+ * Returns the length of the string at str (including the null byte),
+ * or 0 if we hit a page we can't access,
+ * or something > len if we didn't find a null byte.
+ *
+ * The `top' parameter to __strnlen_user is to make sure that
+ * we can never overflow from the user area into kernel space.
+ * It is 1 + the highest address the task can access.
+ */
+extern __inline__ int strnlen_user(const char *str, long len)
+{
+	unsigned long top = __kernel_ok? 0: TASK_SIZE;
+	return __strnlen_user(str, len, top);
+}
 
 #endif  /* __ASSEMBLY__ */
 

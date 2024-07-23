@@ -1,4 +1,4 @@
-/* $Id: pbm.h,v 1.14 1998/05/29 06:00:40 ecd Exp $
+/* $Id: pbm.h,v 1.16.2.1 2000/06/14 07:41:19 davem Exp $
  * pbm.h: U2P PCI bus module pseudo driver software state.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -13,6 +13,8 @@
 #include <asm/oplib.h>
 
 struct linux_pbm_info;
+
+extern volatile u64 *pci_dma_wsync;
 
 /* This is what we use to determine what the PROM has assigned so
  * far, so that we can perform assignments for addresses which
@@ -30,15 +32,21 @@ struct pci_vma {
 
 struct linux_psycho;
 
+/* There can be quite a few ranges and interrupt maps on a PCI
+ * segment.  Thus...
+ */
+#define PROM_PCIRNG_MAX		64
+#define PROM_PCIIMAP_MAX	64
+
 struct linux_pbm_info {
 	struct linux_psycho		*parent;
 	struct pci_vma			*IO_assignments;
 	struct pci_vma			*MEM_assignments;
 	int				prom_node;
 	char				prom_name[64];
-	struct linux_prom_pci_ranges	pbm_ranges[PROMREG_MAX];
+	struct linux_prom_pci_ranges	pbm_ranges[PROM_PCIRNG_MAX];
 	int				num_pbm_ranges;
-	struct linux_prom_pci_intmap	pbm_intmap[PROMREG_MAX];
+	struct linux_prom_pci_intmap	pbm_intmap[PROM_PCIIMAP_MAX];
 	int				num_pbm_intmap;
 	struct linux_prom_pci_intmask	pbm_intmask;
 
@@ -63,6 +71,8 @@ struct linux_psycho {
 	unsigned int			pci_first_busno;
 	unsigned int			pci_last_busno;
 	struct pci_bus			*pci_bus;
+
+	void				*starfire_cookie;
 };
 
 /* PCI devices which are not bridges have this placed in their pci_dev

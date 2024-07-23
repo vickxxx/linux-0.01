@@ -70,7 +70,7 @@ int vm_enough_memory(long pages)
 	return free > pages;
 }
 
-/* Remove one vm structure from the inode's i_mmap ring. */
+/* Remove one vm structure from the inode's i_mmap{,_shared} ring. */
 static inline void remove_shared_vm_struct(struct vm_area_struct *vma)
 {
 	struct file * file = vma->vm_file;
@@ -176,6 +176,9 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	struct vm_area_struct * vma;
 	int error;
 
+	if (file && (!file->f_op || !file->f_op->mmap))
+		return -ENODEV;
+
 	if ((len = PAGE_ALIGN(len)) == 0)
 		return addr;
 
@@ -183,7 +186,7 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		return -EINVAL;
 
 	/* offset overflow? */
-	if (off + len < off)
+	if (off + len - 1 < off)
 		return -EINVAL;
 
 	/* Too many mappings? */
@@ -194,7 +197,10 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	if (mm->def_flags & VM_LOCKED) {
 		unsigned long locked = mm->locked_vm << PAGE_SHIFT;
 		locked += len;
-		if (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur)
+		if (locked < len)
+			return -EAGAIN;
+		if ((current->rlim[RLIMIT_MEMLOCK].rlim_cur < RLIM_INFINITY) &&
+		   (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur))
 			return -EAGAIN;
 	}
 
@@ -244,9 +250,6 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	 * specific mapper. the address has already been validated, but
 	 * not unmapped, but the maps are removed from the list.
 	 */
-	if (file && (!file->f_op || !file->f_op->mmap))
-		return -ENODEV;
-
 	vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!vma)
 		return -ENOMEM;
@@ -288,8 +291,11 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		goto free_vma;
 
 	/* Check against address space limit. */
-	if ((mm->total_vm << PAGE_SHIFT) + len
-	    > current->rlim[RLIMIT_AS].rlim_cur)
+	if ((mm->total_vm << PAGE_SHIFT) + len < len)
+		goto free_vma;
+	if ((current->rlim[RLIMIT_AS].rlim_cur < RLIM_INFINITY) &&
+	    ((mm->total_vm << PAGE_SHIFT) + len
+	    > current->rlim[RLIMIT_AS].rlim_cur))
 		goto free_vma;
 
 	/* Private writable mapping? Check memory availability.. */
@@ -319,6 +325,8 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 			file->f_dentry->d_inode->i_writecount++;
 		if (error)
 			goto unmap_and_free_vma;
+		vma->vm_file = file;
+		file->f_count++;
 	}
 
 	/*
@@ -393,6 +401,7 @@ struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)
 			} else {
 				/* Then go through the AVL tree quickly. */
 				struct vm_area_struct * tree = mm->mmap_avl;
+				vma = NULL;
 				for (;;) {
 					if (tree == vm_avl_empty)
 						break;
@@ -487,8 +496,8 @@ struct vm_area_struct * find_vma_prev(struct mm_struct * mm, unsigned long addr,
  * allocate a new one, and the return indicates whether the old
  * area was reused.
  */
-static int unmap_fixup(struct vm_area_struct *area, unsigned long addr,
-			 size_t len, struct vm_area_struct **extra)
+static struct vm_area_struct * unmap_fixup(struct vm_area_struct *area,
+	unsigned long addr, size_t len, struct vm_area_struct *extra)
 {
 	struct vm_area_struct *mpnt;
 	unsigned long end = addr + len;
@@ -503,7 +512,8 @@ static int unmap_fixup(struct vm_area_struct *area, unsigned long addr,
 			area->vm_ops->close(area);
 		if (area->vm_file)
 			fput(area->vm_file);
-		return 0;
+		kmem_cache_free(vm_area_cachep, area);
+		return extra;
 	}
 
 	/* Work out to one of the ends. */
@@ -515,8 +525,8 @@ static int unmap_fixup(struct vm_area_struct *area, unsigned long addr,
 	} else {
 	/* Unmapping a hole: area->vm_start < addr <= end < area->vm_end */
 		/* Add end mapping -- leave beginning for below */
-		mpnt = *extra;
-		*extra = NULL;
+		mpnt = extra;
+		extra = NULL;
 
 		mpnt->vm_mm = area->vm_mm;
 		mpnt->vm_start = end;
@@ -536,7 +546,7 @@ static int unmap_fixup(struct vm_area_struct *area, unsigned long addr,
 	}
 
 	insert_vm_struct(current->mm, area);
-	return 1;
+	return extra;
 }
 
 /*
@@ -556,15 +566,15 @@ static void free_pgtables(struct mm_struct * mm, struct vm_area_struct *prev,
 	unsigned long start, unsigned long end)
 {
 	unsigned long first = start & PGDIR_MASK;
-	unsigned long last = (end & PGDIR_MASK) + PGDIR_SIZE;
+	unsigned long last = (end + PGDIR_SIZE - 1) & PGDIR_MASK;
 
 	if (!prev) {
 		prev = mm->mmap;
 		if (!prev)
 			goto no_mmaps;
 		if (prev->vm_end > start) {
-			if (last > prev->vm_end)
-				last = prev->vm_end;
+			if (last > prev->vm_start)
+				last = prev->vm_start;
 			goto no_mmaps;
 		}
 	}
@@ -604,7 +614,7 @@ int do_munmap(unsigned long addr, size_t len)
 		return -EINVAL;
 
 	if ((len = PAGE_ALIGN(len)) == 0)
-		return 0;
+		return -EINVAL;
 
 	/* Check if this memory area is ok - put it on the temporary
 	 * list if so..  The checks here are pretty simple --
@@ -671,8 +681,7 @@ int do_munmap(unsigned long addr, size_t len)
 		/*
 		 * Fix the mapping, and free the old area if it wasn't reused.
 		 */
-		if (!unmap_fixup(mpnt, st, size, &extra))
-			kmem_cache_free(vm_area_cachep, mpnt);
+		extra = unmap_fixup(mpnt, st, size, extra);
 	}
 
 	/* Release the extra vma struct if it wasn't used */
@@ -746,7 +755,7 @@ void exit_mmap(struct mm_struct * mm)
 }
 
 /* Insert vm structure into process list sorted by address
- * and into the inode's i_mmap ring.
+ * and into the inode's i_mmap{,_shared} ring.
  */
 void insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vmp)
 {
@@ -774,14 +783,20 @@ void insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vmp)
 	file = vmp->vm_file;
 	if (file) {
 		struct inode * inode = file->f_dentry->d_inode;
+		struct vm_area_struct **head;
+
 		if (vmp->vm_flags & VM_DENYWRITE)
 			inode->i_writecount--;
       
+		head = &inode->i_mmap;
+		if (vmp->vm_flags & VM_SHARED)
+			head = &inode->i_mmap_shared;
+
 		/* insert vmp into inode's share list */
-		if((vmp->vm_next_share = inode->i_mmap) != NULL)
-			inode->i_mmap->vm_pprev_share = &vmp->vm_next_share;
-		inode->i_mmap = vmp;
-		vmp->vm_pprev_share = &inode->i_mmap;
+		if((vmp->vm_next_share = *head) != NULL)
+			(*head)->vm_pprev_share = &vmp->vm_next_share;
+		*head = vmp;
+		vmp->vm_pprev_share = head;
 	}
 }
 

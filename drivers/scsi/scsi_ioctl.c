@@ -131,15 +131,16 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd,
 	    else printk("SCSI device (ioctl) reports ILLEGAL REQUEST.\n");
 	    break;
 	case NOT_READY: /* This happens if there is no disc in drive */
-	    if(dev->removable){
+	    if(dev->removable && (cmd[0] != TEST_UNIT_READY)){
 		printk(KERN_INFO "Device not ready.  Make sure there is a disc in the drive.\n");
 		break;
-	    };
+	    }
 	case UNIT_ATTENTION:
 	    if (dev->removable){
 		dev->changed = 1;
 		SCpnt->result = 0; /* This is no longer considered an error */
-		printk(KERN_INFO "Disc change detected.\n");
+		/* gag this error, VFS will log it anyway /axboe */
+		/* printk(KERN_INFO "Disc change detected.\n"); */
 		break;
 	    };
 	default: /* Fall through for non-removable media */
@@ -226,10 +227,8 @@ int scsi_ioctl_send_command(Scsi_Device *dev, Scsi_Ioctl_Command *sic)
     if(buf_needed){
 	buf_needed = (buf_needed + 511) & ~511;
 	if (buf_needed > MAX_BUF) buf_needed = MAX_BUF;
-        spin_lock_irqsave(&io_request_lock, flags);
-	buf = (char *) scsi_malloc(buf_needed);
-        spin_unlock_irqrestore(&io_request_lock, flags);
-	if (!buf) return -ENOMEM;
+	if ((buf = (char *) scsi_malloc(buf_needed)) == NULL)
+		return -ENOMEM;
 	memset(buf, 0, buf_needed);
     } else
 	buf = NULL;
@@ -404,6 +403,7 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 	return ioctl_probe(dev->host, arg);
     case SCSI_IOCTL_SEND_COMMAND:
 	if(!capable(CAP_SYS_ADMIN))  return -EACCES;
+	if(!capable(CAP_SYS_RAWIO))  return -EACCES;
 	return scsi_ioctl_send_command((Scsi_Device *) dev,
 				       (Scsi_Ioctl_Command *) arg);
     case SCSI_IOCTL_DOORLOCK:

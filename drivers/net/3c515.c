@@ -62,6 +62,7 @@ static int max_interrupt_work = 20;
 
 #define NEW_MULTICAST
 #include <linux/delay.h>
+#include <linux/init.h>
 
 /* Kernel version compatibility functions. */
 #define RUN_AT(x) (jiffies + (x))
@@ -399,7 +400,7 @@ init_module(void)
 }
 
 #else
-int tc515_probe(struct device *dev)
+int __init tc515_probe(struct device *dev)
 {
 	int cards_found = 0;
 
@@ -412,7 +413,7 @@ int tc515_probe(struct device *dev)
 }
 #endif  /* not MODULE */
 
-static int vortex_scan(struct device *dev)
+static int __init vortex_scan(struct device *dev)
 {
 	int cards_found = 0;
 	static int ioaddr = 0x100;
@@ -452,7 +453,7 @@ static int vortex_scan(struct device *dev)
 	return cards_found;
 }
 
-static struct device *vortex_found_device(struct device *dev, int ioaddr,
+static struct device * __init vortex_found_device(struct device *dev, int ioaddr,
 										  int irq, int product_index,
 										  int options)
 {
@@ -517,7 +518,7 @@ static struct device *vortex_found_device(struct device *dev, int ioaddr,
 	return dev;
 }
 
-static int vortex_probe1(struct device *dev)
+static int __init vortex_probe1(struct device *dev)
 {
 	int ioaddr = dev->base_addr;
 	struct vortex_private *vp = (struct vortex_private *)dev->priv;
@@ -1009,6 +1010,7 @@ vortex_start_xmit(struct sk_buff *skb, struct device *dev)
 			outb(0x00, ioaddr + TxStatus); /* Pop the status stack. */
 		}
 	}
+	vp->stats.tx_bytes+=skb->len;
 	return 0;
 }
 
@@ -1209,6 +1211,7 @@ vortex_rx(struct device *dev)
 				netif_rx(skb);
 				dev->last_rx = jiffies;
 				vp->stats.rx_packets++;
+				vp->stats.rx_bytes+=skb->len;
 				/* Wait a limited time to go to next packet. */
 				for (i = 200; i >= 0; i--)
 					if ( ! (inw(ioaddr + EL3_STATUS) & CmdInProgress))
@@ -1256,6 +1259,7 @@ boomerang_rx(struct device *dev)
 			short pkt_len = rx_status & 0x1fff;
 			struct sk_buff *skb;
 
+			vp->stats.rx_bytes+=pkt_len;
 			if (vortex_debug > 4)
 				printk("Receiving packet size %d status %4.4x.\n",
 					   pkt_len, rx_status);
@@ -1297,7 +1301,7 @@ boomerang_rx(struct device *dev)
 		entry = (++vp->cur_rx) % RX_RING_SIZE;
 	}
 	/* Refill the Rx ring buffers. */
-	for (; vp->dirty_rx < vp->cur_rx; vp->dirty_rx++) {
+	for (; vp->cur_rx - vp->dirty_rx > 0; vp->dirty_rx++) {
 		struct sk_buff *skb;
 		entry = vp->dirty_rx % RX_RING_SIZE;
 		if (vp->rx_skbuff[entry] == NULL) {

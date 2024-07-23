@@ -111,7 +111,7 @@ static int proc_ide_write_config
 	unsigned long	startn = 0, n, flags;
 	const char	*start = NULL, *msg = NULL;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
 		return -EACCES;
 	/*
 	 * Skip over leading whitespace
@@ -333,6 +333,7 @@ static int proc_ide_read_imodel
 		case ide_rz1000:	name = "rz1000";	break;
 		case ide_trm290:	name = "trm290";	break;
 		case ide_4drives:	name = "4drives";	break;
+		case ide_pmac:		name = "mac-io";	break;
 		default:		name = "(unknown)";	break;
 	}
 	len = sprintf(page, "%s\n", name);
@@ -516,8 +517,10 @@ int proc_ide_read_geometry
 	char		*out = page;
 	int		len;
 
-	out += sprintf(out,"physical     %hi/%hi/%hi\n", drive->cyl, drive->head, drive->sect);
-	out += sprintf(out,"logical      %hi/%hi/%hi\n", drive->bios_cyl, drive->bios_head, drive->bios_sect);
+	out += sprintf(out,"physical     %d/%d/%d\n",
+		       drive->cyl, drive->head, drive->sect);
+	out += sprintf(out,"logical      %d/%d/%d\n",
+		       drive->bios_cyl, drive->bios_head, drive->bios_sect);
 	len = out - page;
 	PROC_IDE_READ_RETURN(page,start,off,count,eof,len);
 }

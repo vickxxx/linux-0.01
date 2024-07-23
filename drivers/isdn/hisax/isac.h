@@ -1,20 +1,10 @@
-/* $Id: isac.h,v 1.4 1997/10/29 19:09:34 keil Exp $
-
+/* $Id: isac.h,v 1.7 2000/06/26 08:59:13 keil Exp $
+ *
  * isac.h   ISAC specific defines
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * Author       Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: isac.h,v $
- * Revision 1.4  1997/10/29 19:09:34  keil
- * new L1
- *
- * Revision 1.3  1997/07/27 21:37:41  keil
- * T3 implemented; supervisor l1timer; B-channel TEST_LOOP
- *
- * Revision 1.2  1997/06/26 11:16:16  keil
- * first version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
@@ -26,16 +16,18 @@
 #define ISAC_STAR 0x21
 #define ISAC_CMDR 0x21
 #define ISAC_EXIR 0x24
-#define ISAC_RBCH 0x2a
 #define ISAC_ADF2 0x39
 #define ISAC_SPCR 0x30
 #define ISAC_ADF1 0x38
 #define ISAC_CIR0 0x31
 #define ISAC_CIX0 0x31
+#define ISAC_CIR1 0x33
+#define ISAC_CIX1 0x33
 #define ISAC_STCR 0x37
 #define ISAC_MODE 0x22
 #define ISAC_RSTA 0x27
 #define ISAC_RBCL 0x25
+#define ISAC_RBCH 0x2A
 #define ISAC_TIMR 0x23
 #define ISAC_SQXR 0x3b
 #define ISAC_MOSR 0x3a
@@ -44,6 +36,8 @@
 #define ISAC_MOX0 0x32
 #define ISAC_MOR1 0x34
 #define ISAC_MOX1 0x34
+
+#define ISAC_RBCH_XAC 0x80
 
 #define ISAC_CMD_TIM	0x0
 #define ISAC_CMD_RS	0x1

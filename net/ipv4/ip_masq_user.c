@@ -2,7 +2,7 @@
  *	IP_MASQ_USER user space control module
  *
  *
- *	$Id: ip_masq_user.c,v 1.1 1998/08/29 23:51:08 davem Exp $
+ *	$Id: ip_masq_user.c,v 1.1.2.6 2001/01/04 04:20:16 davem Exp $
  */
 
 #include <linux/config.h>
@@ -35,7 +35,6 @@
  */
 static int debug=0;
 
-MODULE_PARM(ports, "1-" __MODULE_STRING(MAX_MASQ_APP_PORTS) "i");
 MODULE_PARM(debug, "i");
 
 /*
@@ -100,7 +99,7 @@ static int ip_masq_user_maddr(struct ip_masq_user *ums)
 		return ret;
 	}
 	dev = rt->u.dst.dev;
-	ums->maddr = ip_masq_select_addr(dev, rt->rt_gateway, RT_SCOPE_UNIVERSE);
+	ums->maddr = rt->rt_src;  /* Per Alexey */
 
 	IP_MASQ_DEBUG(1-debug, "did setup maddr=%lX\n", ntohl(ums->maddr));
 	ip_rt_put(rt);
@@ -186,8 +185,10 @@ static int ip_masq_user_del(struct ip_masq_user *ums)
 				ums->saddr, ums->sport,
 				ums->daddr, ums->dport);
 		end_bh_atomic();
-	} else
+	} else {
+		end_bh_atomic();
 		return EINVAL;	
+	}
 	
 	if (ms == NULL) {
 		return ESRCH;
@@ -224,8 +225,10 @@ static struct ip_masq * ip_masq_user_locked_get (struct ip_masq_user *ums, int *
 				ums->saddr, ums->sport,
 				ums->daddr, ums->dport);
 		end_bh_atomic();
-	} else
+	} else {
+		end_bh_atomic();
 		*err = EINVAL;	
+	}
 	
 	if (ms == NULL) *err = ESRCH;
 	return ms;
@@ -347,8 +350,10 @@ static int ip_masq_user_info(char *buffer, char **start, off_t offset,
 	struct ip_masq *ms;
 	char temp[129];
         int idx = 0;
+	int col;
 	int len=0;
 	int magic_control;
+	struct list_head *l,*e;
 
 	MOD_INC_USE_COUNT;
 
@@ -357,7 +362,7 @@ static int ip_masq_user_info(char *buffer, char **start, off_t offset,
 	if (offset < 128)
 	{
 		sprintf(temp,
-			"Prot SrcIP    SPrt DstIP    DPrt MAddr    MPrt State        Flgs Ref Ctl Expires (free=%d,%d,%d)",
+			"Prot SrcIP    SPrt DstIP    DPrt MAddr    MPrt State        Flgs Ref Ctl Expires HRow HCol (free=%d,%d,%d)",
 			atomic_read(ip_masq_free_ports), 
 			atomic_read(ip_masq_free_ports+1), 
 			atomic_read(ip_masq_free_ports+2));
@@ -371,9 +376,12 @@ static int ip_masq_user_info(char *buffer, char **start, off_t offset,
 	 *	Lock is actually only need in next loop 
 	 *	we are called from uspace: must stop bh.
 	 */
+	col=0;
 	read_lock_bh(&__ip_masq_lock);
-        for(ms = ip_masq_m_tab[idx]; ms ; ms = ms->m_link)
-	{
+	l = &ip_masq_m_table[idx];
+	for (e=l->next; e!=l; e=e->next) {
+		col++;
+		ms = list_entry(e, struct ip_masq, m_list);
 		if (ms->protocol != proto) {
 			continue;
 		}
@@ -392,7 +400,7 @@ static int ip_masq_user_info(char *buffer, char **start, off_t offset,
 
 		magic_control = atomic_read(&ms->n_control);
 		if (!magic_control && ms->control) magic_control = -1;
-		sprintf(temp,"%-4s %08lX:%04X %08lX:%04X %08lX:%04X %-12s %3X %4d %3d %7lu",
+		sprintf(temp,"%-4s %08X:%04X %08X:%04X %08X:%04X %-12s %3X %4d %3d %7lu %4d %4d",
 			masq_proto_name(ms->protocol),
 			ntohl(ms->saddr), ntohs(ms->sport),
 			ntohl(ms->daddr), ntohs(ms->dport),
@@ -401,7 +409,8 @@ static int ip_masq_user_info(char *buffer, char **start, off_t offset,
 			ms->flags,
 			atomic_read(&ms->refcnt),
 			magic_control,
-			(ms->timer.expires-jiffies)/HZ);
+			(ms->timer.expires-jiffies)/HZ,
+			idx, col);
 		len += sprintf(buffer+len, "%-127s\n", temp);
 
 		if(len >= length) {

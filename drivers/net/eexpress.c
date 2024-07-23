@@ -81,8 +81,22 @@
  * ftp's, which is significantly better than I get in DOS, so the overhead of
  * stopping and restarting the CU with each transmit is not prohibitive in
  * practice.
+ *
+ * Update by David Woodhouse 11/5/99:
+ *
+ * I've seen "CU wedged" messages in 16-bit mode, on the Alpha architecture.
+ * I assume that this is because 16-bit accesses are actually handled as two
+ * 8-bit accesses.
  */
+
+#ifdef __alpha__
+#define LOCKUP16 1
+#endif
+#ifndef LOCKUP16
+#define LOCKUP16 0
+#endif
   
+#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -106,6 +120,8 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/malloc.h>
+
+#include <asm/spinlock.h>
 
 #ifndef NET_DEBUG
 #define NET_DEBUG 4
@@ -141,6 +157,7 @@ struct net_local
 	unsigned char width;         /* 0 for 16bit, 1 for 8bit */
 	unsigned char was_promisc;
 	unsigned char old_mc_count;
+	spinlock_t lock;
 };
 
 /* This is the code and data that is downloaded to the EtherExpress card's
@@ -293,7 +310,7 @@ static inline void clear_loopback(struct device *dev)
 	outb(inb(dev->base_addr + Config) & ~2, dev->base_addr + Config);
 }
 
-static inline short int SHADOW(short int addr)
+static inline unsigned short int SHADOW(short int addr)
 {
 	addr &= 0x1f;
 	if (addr > 0xf) addr += 0x3ff0;
@@ -396,7 +413,10 @@ static int eexp_close(struct device *dev)
 	outb(0,ioaddr+SIGNAL_CA);
 	free_irq(irq,dev);
 	outb(i586_RST,ioaddr+EEPROM_Ctrl);
-	release_region(ioaddr,16);
+	release_region(ioaddr, EEXP_IO_EXTENT);
+	release_region(ioaddr+0x4000, 16);
+	release_region(ioaddr+0x8000, 16);
+	release_region(ioaddr+0xc000, 16);
 
 	MOD_DEC_USE_COUNT;
 	return 0;
@@ -502,12 +522,22 @@ static void unstick_cu(struct device *dev)
 static int eexp_xmit(struct sk_buff *buf, struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
+	unsigned long flags;
 
 #if NET_DEBUG > 6
 	printk(KERN_DEBUG "%s: eexp_xmit()\n", dev->name);
 #endif
 
 	disable_irq(dev->irq);
+
+	/*
+	 *	Best would be to use synchronize_irq(); spin_lock() here
+	 *	lets make it work first..
+	 */
+	 
+#ifdef CONFIG_SMP
+	spin_lock_irqsave(&lp->lock, flags);
+#endif
 
 	/* If dev->tbusy is set, all our tx buffers are full but the kernel
 	 * is calling us anyway.  Check that nothing bad is happening.
@@ -516,7 +546,13 @@ static int eexp_xmit(struct sk_buff *buf, struct device *dev)
 		int status = scb_status(dev);
   		unstick_cu(dev);
 		if ((jiffies - lp->last_tx) < HZ)
+		{
+#ifdef CONFIG_SMP
+			spin_unlock_irqrestore(&lp->lock, flags);
+#endif
+
 			return 1;
+		}
 		printk(KERN_INFO "%s: transmit timed out, %s?", dev->name,
 		       (SCB_complete(status)?"lost interrupt":
 			"board on fire"));
@@ -544,6 +580,9 @@ static int eexp_xmit(struct sk_buff *buf, struct device *dev)
 	        eexp_hw_tx_pio(dev,data,length);
 	}
 	dev_kfree_skb(buf);
+#ifdef CONFIG_SMP
+	spin_unlock_irqrestore(&lp->lock, flags);
+#endif
 	enable_irq(dev->irq);
 	return 0;
 }
@@ -610,6 +649,7 @@ static unsigned short eexp_start_irq(struct device *dev,
 			ack_cmd |= SCB_RUstart;
 			scb_wrrfa(dev, lp->rx_buf_start);
 			lp->rx_ptr = lp->rx_buf_start;
+			lp->started |= STARTED_RU;
 		}
 		ack_cmd |= SCB_CUstart | 0x2000;
 	}
@@ -646,11 +686,14 @@ static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
 	lp = (struct net_local *)dev->priv;
 	ioaddr = dev->base_addr;
 
+	spin_lock(&lp->lock);
+
 	old_read_ptr = inw(ioaddr+READ_PTR);
 	old_write_ptr = inw(ioaddr+WRITE_PTR);
 
 	outb(SIRQ_dis|irqrmap[irq],ioaddr+SET_IRQ);
 
+	
 	dev->interrupt = 1;
 
 	status = scb_status(dev);
@@ -726,6 +769,8 @@ static void eexp_irq(int irq, void *dev_info, struct pt_regs *regs)
 #endif
 	outw(old_read_ptr, ioaddr+READ_PTR);
 	outw(old_write_ptr, ioaddr+WRITE_PTR);
+	
+	spin_unlock(&lp->lock);
 	return;
 }
 
@@ -859,7 +904,7 @@ static void eexp_hw_tx_pio(struct device *dev, unsigned short *buf,
 	struct net_local *lp = (struct net_local *)dev->priv;
 	unsigned short ioaddr = dev->base_addr;
 
-	if (lp->width) {
+	if (LOCKUP16 || lp->width) {
 		/* Stop the CU so that there is no chance that it
 		   jumps off to a bogus address while we are writing the
 		   pointer to the next transmit packet in 8-bit mode -- 
@@ -899,7 +944,7 @@ static void eexp_hw_tx_pio(struct device *dev, unsigned short *buf,
 	if (lp->tx_head != lp->tx_reap)
 		dev->tbusy = 0;
 
-	if (lp->width) {
+	if (LOCKUP16 || lp->width) {
 		/* Restart the CU so that the packet can actually
 		   be transmitted. (Zoltan Szilagyi 10-12-96) */
 		scb_command(dev, SCB_CUresume);

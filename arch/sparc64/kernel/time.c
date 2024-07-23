@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.16 1998/09/05 17:25:28 jj Exp $
+/* $Id: time.c,v 1.20.2.2 2000/03/02 02:03:31 davem Exp $
  * time.c: UltraSparc timer and TOD clock support.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -31,6 +31,8 @@
 #include <asm/pbm.h>
 #include <asm/ebus.h>
 
+extern rwlock_t xtime_lock;
+
 struct mostek48t02 *mstk48t02_regs = 0;
 static struct mostek48t08 *mstk48t08_regs = 0;
 static struct mostek48t59 *mstk48t59_regs = 0;
@@ -45,7 +47,7 @@ static int set_rtc_mmss(unsigned long);
  */
 unsigned long timer_tick_offset;
 static unsigned long timer_tick_compare;
-static unsigned long timer_ticks_per_usec;
+static unsigned long timer_ticks_per_usec_quotient;
 
 static __inline__ void timer_check_rtc(void)
 {
@@ -67,26 +69,65 @@ static __inline__ void timer_check_rtc(void)
 
 static void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	unsigned long ticks;
+	unsigned long ticks, pstate;
+
+	write_lock(&xtime_lock);
 
 	do {
 		do_timer(regs);
 
+		/* Guarentee that the following sequences execute
+		 * uninterrupted.
+		 */
+		__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
+				     "wrpr	%0, %1, %%pstate"
+				     : "=r" (pstate)
+				     : "i" (PSTATE_IE));
+
+		/* Workaround for Spitfire Errata (#54 I think??), I discovered
+		 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
+		 * number 103640.
+		 *
+		 * On Blackbird writes to %tick_cmpr can fail, the
+		 * workaround seems to be to execute the wr instruction
+		 * at the start of an I-cache line, and perform a dummy
+		 * read back from %tick_cmpr right after writing to it. -DaveM
+		 *
+		 * Just to be anal we add a workaround for Spitfire
+		 * Errata 50 by preventing pipeline bypasses on the
+		 * final read of the %tick register into a compare
+		 * instruction.  The Errata 50 description states
+		 * that %tick is not prone to this bug, but I am not
+		 * taking any chances.
+		 */
 		__asm__ __volatile__("
 			rd	%%tick_cmpr, %0
-			add	%0, %2, %0
-			wr	%0, 0, %%tick_cmpr
-			rd	%%tick, %1"
+			ba,pt	%%xcc, 1f
+			 add	%0, %2, %0
+			.align	64
+		     1: wr	%0, 0, %%tick_cmpr
+		        rd	%%tick_cmpr, %%g0
+			rd	%%tick, %1
+			mov	%1, %1"
 			: "=&r" (timer_tick_compare), "=r" (ticks)
 			: "r" (timer_tick_offset));
+
+		/* Restore PSTATE_IE. */
+		__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
+				     : /* no outputs */
+				     : "r" (pstate));
 	} while (ticks >= timer_tick_compare);
 
 	timer_check_rtc();
+
+	write_unlock(&xtime_lock);
 }
 
 #ifdef __SMP__
 void timer_tick_interrupt(struct pt_regs *regs)
 {
+	write_lock(&xtime_lock);
+
 	do_timer(regs);
 
 	/*
@@ -99,6 +140,8 @@ void timer_tick_interrupt(struct pt_regs *regs)
 		: "r" (timer_tick_offset));
 
 	timer_check_rtc();
+
+	write_unlock(&xtime_lock);
 }
 #endif
 
@@ -256,13 +299,17 @@ void __init clock_probe(void)
 	node = prom_getchild(busnd);
 
 	while(1) {
-		prom_getstring(node, "model", model, sizeof(model));
+		if (!node)
+			model[0] = 0;
+		else
+			prom_getstring(node, "model", model, sizeof(model));
 		if(strcmp(model, "mk48t02") &&
 		   strcmp(model, "mk48t08") &&
 		   strcmp(model, "mk48t59")) {
-			node = prom_getsibling(node);
+		   	if (node)
+				node = prom_getsibling(node);
 #ifdef CONFIG_PCI
-			if ((node == 0) && ebus) {
+			while ((node == 0) && ebus) {
 				ebus = ebus->next;
 				if (ebus) {
 					busnd = ebus->prom_node;
@@ -378,7 +425,7 @@ void __init time_init(void)
 
 	init_timers(timer_interrupt, &clock);
 	timer_tick_offset = clock / HZ;
-	timer_ticks_per_usec = clock / 1000000;
+	timer_ticks_per_usec_quotient = ((1UL<<32) / (clock / 1000020UL));
 }
 
 static __inline__ unsigned long do_gettimeoffset(void)
@@ -394,9 +441,12 @@ static __inline__ unsigned long do_gettimeoffset(void)
 		: "r" (timer_tick_offset), "r" (timer_tick_compare)
 		: "g1", "g2");
 
-	return ticks / timer_ticks_per_usec;
+	return (ticks * timer_ticks_per_usec_quotient) >> 32UL;
 }
 
+/* This need not obtain the xtime_lock as it is coded in
+ * an implicitly SMP safe way already.
+ */
 void do_gettimeofday(struct timeval *tv)
 {
 	/* Load doubles must be used on xtime so that what we get
@@ -414,24 +464,22 @@ void do_gettimeofday(struct timeval *tv)
 	or	%g2, %lo(xtime), %g2
 	or	%g1, %lo(timer_tick_compare), %g1
 1:	ldda	[%g2] 0x24, %o4
-	membar	#LoadLoad | #MemIssue
 	rd	%tick, %o1
 	ldx	[%g1], %g7
-	membar	#LoadLoad | #MemIssue
 	ldda	[%g2] 0x24, %o2
-	membar	#LoadLoad
 	xor	%o4, %o2, %o2
 	xor	%o5, %o3, %o3
 	orcc	%o2, %o3, %g0
 	bne,pn	%xcc, 1b
 	 sethi	%hi(lost_ticks), %o2
-	sethi	%hi(timer_ticks_per_usec), %o3
+	sethi	%hi(timer_ticks_per_usec_quotient), %o3
 	ldx	[%o2 + %lo(lost_ticks)], %o2
 	add	%g3, %o1, %o1
-	ldx	[%o3 + %lo(timer_ticks_per_usec)], %o3
+	ldx	[%o3 + %lo(timer_ticks_per_usec_quotient)], %o3
 	sub	%o1, %g7, %o1
+	mulx	%o3, %o1, %o1
 	brz,pt	%o2, 1f
-	 udivx	%o1, %o3, %o1
+	 srlx	%o1, 32, %o1
 	sethi	%hi(10000), %g2
 	or	%g2, %lo(10000), %g2
 	add	%o1, %g2, %o1
@@ -450,7 +498,7 @@ void do_gettimeofday(struct timeval *tv)
 
 void do_settimeofday(struct timeval *tv)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 
 	tv->tv_usec -= do_gettimeoffset();
 	if(tv->tv_usec < 0) {
@@ -461,10 +509,10 @@ void do_settimeofday(struct timeval *tv)
 	xtime = *tv;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+
+	write_unlock_irq(&xtime_lock);
 }
 
 static int set_rtc_mmss(unsigned long nowtime)

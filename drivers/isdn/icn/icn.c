@@ -1,8 +1,8 @@
-/* $Id: icn.c,v 1.49 1998/02/13 11:14:15 keil Exp $
+/* $Id: icn.c,v 1.65.6.2 2000/12/17 22:45:13 kai Exp $
 
  * ISDN low-level module for the ICN active ISDN-Card.
  *
- * Copyright 1994,95,96 by Fritz Elfert (fritz@wuemaus.franken.de)
+ * Copyright 1994,95,96 by Fritz Elfert (fritz@isdn4linux.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,185 +18,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: icn.c,v $
- * Revision 1.49  1998/02/13 11:14:15  keil
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 1.48  1997/10/10 15:56:14  fritz
- * New HL<->LL interface:
- *   New BSENT callback with nr. of bytes included.
- *   Sending without ACK.
- *
- * Revision 1.47  1997/10/01 09:21:51  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.46  1997/08/21 22:38:33  fritz
- * Fixed a typo.
- *
- * Revision 1.45  1997/06/21 10:42:06  fritz
- * Added availability to select leased mode on only one channel.
- *
- * Revision 1.44  1997/03/30 16:51:26  calle
- * changed calls to copy_from_user/copy_to_user and removed verify_area
- * were possible.
- *
- * Revision 1.43  1997/03/21 18:27:04  fritz
- * Corrected parsing of incoming setup.
- *
- * Revision 1.42  1997/03/05 21:13:18  fritz
- * Bugfix: sndcount was not reset on hangup.
- *
- * Revision 1.41  1997/02/24 23:34:29  fritz
- * Bugfix in Layer1 error-recovery.
- *
- * Revision 1.40  1997/02/23 23:34:45  fritz
- * Minor bugfixes in debugging code.
- *
- * Revision 1.39  1997/02/23 16:21:56  fritz
- * Bugfix: Check for NULL pointer in icn_parse_status().
- *
- * Revision 1.38  1997/02/11 18:29:31  fritz
- * Bugfix in D64S initialization.
- *
- * Revision 1.37  1997/02/10 22:43:20  fritz
- * Added plan and screen elements on ISDN_STAT_ICALL
- *
- * Revision 1.36  1997/02/10 21:31:20  fritz
- * Changed setup-interface (incoming and outgoing).
- *
- * Revision 1.35  1997/02/10 10:10:28  fritz
- * Changes for Kernel 2.1.X compatibility.
- * Enhanced initialization, can recover from
- * misconfiguration by other autoprobing drivers.
- *
- * Revision 1.34  1997/01/29 22:34:44  fritz
- * Cleanup, Corrected D64S setup of 2nd channel.
- *
- * Revision 1.33  1996/12/05 20:31:48  tsbogend
- * added handling of L2: DATA LINK LOST messages
- *
- * Revision 1.32  1996/11/14 23:49:18  fritz
- * Bugfix: copy_to_user/copy_from_user mismatch in debugging-ioctl.
- *
- * Revision 1.31  1996/11/13 02:36:25  fritz
- * Fixed a race condition in writecmd.
- * Some optimizations and cleanup.
- *
- * Revision 1.30  1996/10/22 23:14:09  fritz
- * Changes for compatibility to 2.0.X and 2.1.X kernels.
- *
- * Revision 1.29  1996/08/29 20:34:54  fritz
- * Bugfix in send queue management:
- * sndcount was not updated correctly.
- * Minor Bugfixes.
- *
- * Revision 1.28  1996/06/28 17:02:53  fritz
- * replaced memcpy_fromfs_toio.
- *
- * Revision 1.27  1996/06/25 18:38:59  fritz
- * Fixed function name in error message.
- *
- * Revision 1.26  1996/06/24 17:20:35  fritz
- * Bugfixes in pollbchan_send():
- *   - Using lock field of skbuff breaks networking.
- *   - Added channel locking
- *   - changed dequeuing scheme.
- * Eliminated misc. compiler warnings.
- *
- * Revision 1.25  1996/06/11 22:53:35  tsbogend
- * fixed problem with large array on stack
- * made the driver working on Linux/alpha
- *
- * Revision 1.24  1996/06/06 13:58:33  fritz
- * Changed code to be architecture independent
- *
- * Revision 1.23  1996/06/03 19:59:00  fritz
- * Fixed typos.
- *
- * Revision 1.22  1996/05/17 15:46:41  fritz
- * Removed own queue management.
- * Changed queue management to use sk_buffs.
- *
- * Revision 1.21  1996/05/02 04:01:20  fritz
- * Bugfix:
- *  - icn_addcard() evaluated wrong driverId.
- *
- * Revision 1.20  1996/05/02 00:40:27  fritz
- * Major rewrite to support more than one card
- * with a single module.
- * Support for new firmware.
- *
- * Revision 1.19  1996/04/21 17:43:32  fritz
- * Changes for Support of new Firmware BRV3.02
- *
- * Revision 1.18  1996/04/20 16:50:26  fritz
- * Fixed status-buffer overrun.
- * Misc. typos
- *
- * Revision 1.17  1996/02/11 02:39:04  fritz
- * Increased Buffer for status-messages.
- * Removed conditionals for HDLC-firmware.
- *
- * Revision 1.16  1996/01/22 05:01:55  fritz
- * Revert to GPL.
- *
- * Revision 1.15  1996/01/10 20:57:39  fritz
- * Bugfix: Loading firmware twice caused the device stop working.
- *
- * Revision 1.14  1995/12/18  18:23:37  fritz
- * Support for ICN-2B Cards.
- * Change for supporting user-settable service-octet.
- *
- * Revision 1.13  1995/10/29  21:41:07  fritz
- * Added support for DriverId's, added Jan's patches for Kernel versions.
- *
- * Revision 1.12  1995/04/29  13:07:35  fritz
- * Added support for new Euro-ISDN-firmware
- *
- * Revision 1.11  1995/04/23  13:40:45  fritz
- * Added support for SPV's.
- * Changed Dial-Command to support MSN's on DSS1-Lines.
- *
- * Revision 1.10  1995/03/25  23:23:24  fritz
- * Changed configurable Ports, to allow settings for DIP-Switch Cardversions.
- *
- * Revision 1.9  1995/03/25  23:17:30  fritz
- * Fixed race-condition in pollbchan_send
- *
- * Revision 1.8  1995/03/15  12:49:44  fritz
- * Added support for SPV's
- * Split pollbchan_work for calling send-routine directly
- *
- * Revision 1.7  1995/02/20  03:48:03  fritz
- * Added support of new request_region-function.
- * Minor bugfixes.
- *
- * Revision 1.6  1995/01/31  15:48:45  fritz
- * Added Cause-Messages to be signaled to upper layers.
- * Added Revision-Info on load.
- *
- * Revision 1.5  1995/01/29  23:34:59  fritz
- * Added stopdriver() and appropriate calls.
- * Changed printk-statements to support loglevels.
- *
- * Revision 1.4  1995/01/09  07:40:46  fritz
- * Added GPL-Notice
- *
- * Revision 1.3  1995/01/04  05:15:18  fritz
- * Added undocumented "bootload-finished"-command in download-code
- * to satisfy some brain-damaged icn card-versions.
- *
- * Revision 1.2  1995/01/02  02:14:45  fritz
- * Misc Bugfixes
- *
- * Revision 1.1  1994/12/14  17:56:06  fritz
- * Initial revision
- *
  */
 
 #include "icn.h"
+#include <linux/init.h>
 
 /*
  * Verbose bootcode- and protocol-downloading.
@@ -209,7 +34,7 @@
 #undef MAP_DEBUG
 
 static char
-*revision = "$Revision: 1.49 $";
+*revision = "$Revision: 1.65.6.2 $";
 
 static int icn_addcard(int, char *, char *);
 
@@ -232,10 +57,10 @@ icn_free_queue(icn_card * card, int channel)
 	cli();
 	card->xlen[channel] = 0;
 	card->sndcount[channel] = 0;
-	if (card->xskb[channel]) {
+	if ((skb = card->xskb[channel])) {
 		card->xskb[channel] = NULL;
 		restore_flags(flags);
-		dev_kfree_skb(card->xskb[channel]);
+		dev_kfree_skb(skb);
 	} else
 		restore_flags(flags);
 }
@@ -438,7 +263,7 @@ icn_pollbchan_receive(int channel, icn_card * card)
 			if (!eflag) {
 				if ((cnt = card->rcvidx[channel])) {
 					if (!(skb = dev_alloc_skb(cnt))) {
-						printk(KERN_WARNING "ïcn: receive out of memory\n");
+						printk(KERN_WARNING "icn: receive out of memory\n");
 						break;
 					}
 					memcpy(skb_put(skb, cnt), card->rcvbuf[channel], cnt);
@@ -516,12 +341,10 @@ icn_pollbchan_send(int channel, icn_card * card)
 			if (!skb->len) {
 				save_flags(flags);
 				cli();
-				if (card->xskb[channel]) {
+				if (card->xskb[channel])
 					card->xskb[channel] = NULL;
-					restore_flags(flags);
-					dev_kfree_skb(skb);
-				} else
-					restore_flags(flags);
+				restore_flags(flags);
+				dev_kfree_skb(skb);
 				if (card->xlen[channel]) {
 					cmd.command = ISDN_STAT_BSENT;
 					cmd.driver = card->myid;
@@ -529,6 +352,11 @@ icn_pollbchan_send(int channel, icn_card * card)
 					cmd.parm.length = card->xlen[channel];
 					card->interface.statcallb(&cmd);
 				}
+			} else {
+				save_flags(flags);
+				cli();
+				card->xskb[channel] = skb;
+				restore_flags(flags);
 			}
 			card->xmit_lock[channel] = 0;
 			if (!icn_trymaplock_channel(card, mch))
@@ -561,9 +389,7 @@ icn_pollbchan(unsigned long data)
 		/* schedule b-channel polling again */
 		save_flags(flags);
 		cli();
-		del_timer(&card->rb_timer);
-		card->rb_timer.expires = jiffies + ICN_TIMER_BCREAD;
-		add_timer(&card->rb_timer);
+		mod_timer(&card->rb_timer, jiffies+ICN_TIMER_BCREAD);
 		card->flags |= ICN_FLAGS_RBTIMER;
 		restore_flags(flags);
 	} else
@@ -580,8 +406,11 @@ static icn_stat icn_stat_table[] =
 {
 	{"BCON_",          ISDN_STAT_BCONN, 1},	/* B-Channel connected        */
 	{"BDIS_",          ISDN_STAT_BHUP,  2},	/* B-Channel disconnected     */
-	{"DCON_",          ISDN_STAT_DCONN, 0},	/* D-Channel connected        */
-	{"DDIS_",          ISDN_STAT_DHUP,  0},	/* D-Channel disconnected     */
+	/*
+	** add d-channel connect and disconnect support to link-level
+	*/
+	{"DCON_",          ISDN_STAT_DCONN, 10},	/* D-Channel connected        */
+	{"DDIS_",          ISDN_STAT_DHUP,  11},	/* D-Channel disconnected     */
 	{"DCAL_I",         ISDN_STAT_ICALL, 3},	/* Incoming call dialup-line  */
 	{"DSCA_I",         ISDN_STAT_ICALL, 3},	/* Incoming call 1TR6-SPV     */
 	{"FCALL",          ISDN_STAT_ICALL, 4},	/* Leased line connection up  */
@@ -630,7 +459,33 @@ icn_parse_status(u_char * status, int channel, icn_card * card)
 	cmd.driver = card->myid;
 	cmd.arg = channel;
 	switch (action) {
+	case 11:
+			save_flags(flags);
+			cli();
+			icn_free_queue(card,channel);
+			card->rcvidx[channel] = 0;
+
+			if (card->flags & 
+			    ((channel)?ICN_FLAGS_B2ACTIVE:ICN_FLAGS_B1ACTIVE)) {
+				
+				isdn_ctrl ncmd;
+				
+				card->flags &= ~((channel)?
+						 ICN_FLAGS_B2ACTIVE:ICN_FLAGS_B1ACTIVE);
+				
+				memset(&ncmd, 0, sizeof(ncmd));
+				
+				ncmd.driver = card->myid;
+				ncmd.arg = channel;
+				ncmd.command = ISDN_STAT_BHUP;
+				restore_flags(flags);
+				card->interface.statcallb(&cmd);
+			} else
+				restore_flags(flags);
+			
+			break;
 		case 1:
+			icn_free_queue(card,channel);
 			card->flags |= (channel) ?
 			    ICN_FLAGS_B2ACTIVE : ICN_FLAGS_B1ACTIVE;
 			break;
@@ -835,9 +690,7 @@ icn_polldchan(unsigned long data)
 	/* schedule again */
 	save_flags(flags);
 	cli();
-	del_timer(&card->st_timer);
-	card->st_timer.expires = jiffies + ICN_TIMER_DCREAD;
-	add_timer(&card->st_timer);
+	mod_timer(&card->st_timer, jiffies+ICN_TIMER_DCREAD);
 	restore_flags(flags);
 }
 
@@ -1539,7 +1392,7 @@ icn_command(isdn_ctrl * c, icn_card * card)
 						c->parm.num[0] ? "N" : "ALL", c->parm.num);
 				} else
 					sprintf(cbuf, "%02d;EAZ%s\n", (int) a,
-						c->parm.num[0] ? c->parm.num : "0123456789");
+						c->parm.num[0] ? (char *)(c->parm.num) : "0123456789");
 				i = icn_writecmd(cbuf, strlen(cbuf), 0, card);
 			}
 			break;
@@ -1786,21 +1639,18 @@ icn_addcard(int port, char *id1, char *id2)
 	return 0;
 }
 
-#ifdef MODULE
-#define icn_init init_module
-#else
+#ifndef MODULE
 void
 icn_setup(char *str, int *ints)
 {
 	char *p;
 	static char sid[20];
 	static char sid2[20];
-
 	if (ints[0])
 		portbase = ints[1];
 	if (ints[0] > 1)
 		membase = ints[2];
-	if (strlen(str)) {
+	if (str && *str) {
 		strcpy(sid, str);
 		icn_id = sid;
 		if ((p = strchr(sid, ','))) {
@@ -1810,10 +1660,9 @@ icn_setup(char *str, int *ints)
 		}
 	}
 }
-#endif
+#endif /* MODULE */
 
-int
-icn_init(void)
+static int __init icn_init(void)
 {
 	char *p;
 	char rev[10];
@@ -1823,9 +1672,6 @@ icn_init(void)
 	dev.channel = -1;
 	dev.mcard = NULL;
 	dev.firstload = 1;
-
-	/* No symbols to export, hide all symbols */
-	EXPORT_NO_SYMBOLS;
 
 	if ((p = strchr(revision, ':'))) {
 		strcpy(rev, p + 1);
@@ -1838,9 +1684,7 @@ icn_init(void)
 	return (icn_addcard(portbase, icn_id, icn_id2));
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void  icn_exit(void)
 {
 	isdn_ctrl cmd;
 	icn_card *card = cards;
@@ -1874,4 +1718,6 @@ cleanup_module(void)
 		release_shmem((ulong) dev.shmem, 0x4000);
 	printk(KERN_NOTICE "ICN-ISDN-driver unloaded\n");
 }
-#endif
+
+module_init(icn_init);
+module_exit(icn_exit);

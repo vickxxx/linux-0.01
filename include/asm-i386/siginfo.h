@@ -89,8 +89,8 @@ typedef struct siginfo {
 #define SI_ASYNCIO	-4	/* sent by AIO completion */
 #define SI_SIGIO	-5	/* sent by queued SIGIO */
 
-#define SI_FROMUSER(siptr)	((siptr)->si_code <= 0)
-#define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0)
+#define SI_FROMUSER(siptr)	((siptr)->si_code <= 0 && (siptr)->si_code != SI_SIGIO)
+#define SI_FROMKERNEL(siptr)	((siptr)->si_code > 0 || (siptr)->si_code == SI_SIGIO)
 
 /*
  * SIGILL si_codes
@@ -138,7 +138,7 @@ typedef struct siginfo {
  */
 #define TRAP_BRKPT	1	/* process breakpoint */
 #define TRAP_TRACE	2	/* process trace trap */
-#define NSIGTRAP
+#define NSIGTRAP	2
 
 /*
  * SIGCHLD si_codes

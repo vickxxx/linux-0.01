@@ -1,7 +1,7 @@
 /*
  *	IP multicast routing support for mrouted 3.6/3.8
  *
- *		(c) 1995 Alan Cox, <alan@cymru.net>
+ *		(c) 1995 Alan Cox, <alan@redhat.com>
  *	  Linux Consultancy and Custom Driver Development
  *
  *	This program is free software; you can redistribute it and/or
@@ -9,7 +9,7 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- *	Version: $Id: ipmr.c,v 1.38 1999/01/12 14:34:40 davem Exp $
+ *	Version: $Id: ipmr.c,v 1.40.2.2 1999/06/20 21:27:44 davem Exp $
  *
  *	Fixes:
  *	Michael Chastain	:	Incorrect size of copying.
@@ -23,6 +23,8 @@
  *	Brad Parker		:	Better behaviour on mrouted upcall
  *					overflow.
  *      Carlos Picoto           :       PIMv1 Support
+ *	Pavlin Ivanov Radoslavov:	PIMv2 Registers must checksum only PIM header
+ *					Relax this requrement to work with older peers.
  *
  */
 
@@ -138,6 +140,8 @@ static struct device * reg_dev;
 
 static int reg_vif_xmit(struct sk_buff *skb, struct device *dev)
 {
+	((struct net_device_stats*)dev->priv)->tx_bytes += skb->len;
+	((struct net_device_stats*)dev->priv)->tx_packets++;
 	ipmr_cache_report(skb, reg_vif_num, IGMPMSG_WHOLEPKT);
 	kfree_skb(skb);
 	return 0;
@@ -429,7 +433,7 @@ static void ipmr_cache_resolve(struct mfc_cache *cache)
 				skb_trim(skb, nlh->nlmsg_len);
 				((struct nlmsgerr*)NLMSG_DATA(nlh))->error = -EMSGSIZE;
 			}
-			err = netlink_unicast(rtnl, skb, NETLINK_CB(skb).pid, MSG_DONTWAIT);
+			err = netlink_unicast(rtnl, skb, NETLINK_CB(skb).dst_pid, MSG_DONTWAIT);
 		} else
 #endif
 			ip_mr_forward(skb, cache, 0);
@@ -448,6 +452,9 @@ static int ipmr_cache_report(struct sk_buff *pkt, vifi_t vifi, int assert)
 	struct igmphdr *igmp;
 	struct igmpmsg *msg;
 	int ret;
+
+	if (mroute_socket==NULL)
+		return -EINVAL;
 
 #ifdef CONFIG_IP_PIMSM
 	if (assert == IGMPMSG_WHOLEPKT)
@@ -656,7 +663,10 @@ static void mrtsock_destruct(struct sock *sk)
 {
 	if (sk == mroute_socket) {
 		ipv4_devconf.mc_forwarding = 0;
+
 		mroute_socket=NULL;
+		synchronize_bh();
+
 		mroute_close(sk);
 	}
 }
@@ -867,6 +877,10 @@ int ip_mroute_getsockopt(struct sock *sk,int optname,char *optval,int *optlen)
 		return -EFAULT;
 
 	olr=min(olr,sizeof(int));
+	
+	if(olr < 0)
+		return -EINVAL;
+		
 	if(put_user(olr,optlen))
 		return -EFAULT;
 	if(optname==MRT_VERSION)
@@ -1045,7 +1059,7 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 
 	dev = rt->u.dst.dev;
 
-	if (skb->len+encap > rt->u.dst.pmtu /* && (ntohs(iph->frag_off) & IP_DF) */) {
+	if (skb->len+encap > rt->u.dst.pmtu && (ntohs(iph->frag_off) & IP_DF)) {
 		/* Do not fragment multicasts. Alas, IPv4 does not
 		   allow to send ICMP, so that packets will disappear
 		   to blackhole.
@@ -1119,7 +1133,10 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 	 * not mrouter) cannot join to more than one interface - it will
 	 * result in receiving multiple packets.
 	 */
-	skb2->dst->output(skb2);
+	if (skb2->len <= rt->u.dst.pmtu)
+		skb2->dst->output(skb2);
+	else
+		ip_fragment(skb2, skb2->dst->output);
 }
 
 int ipmr_find_vif(struct device *dev)
@@ -1332,7 +1349,8 @@ int pim_rcv(struct sk_buff * skb, unsigned short len)
 	    pim->type != ((PIM_VERSION<<4)|(PIM_REGISTER)) ||
 	    (pim->flags&PIM_NULL_REGISTER) ||
 	    reg_dev == NULL ||
-	    ip_compute_csum((void *)pim, len)) {
+	    (ip_compute_csum((void *)pim, sizeof(*pim)) &&
+	     ip_compute_csum((void *)pim, len))) {
 		kfree_skb(skb);
                 return -EINVAL;
         }

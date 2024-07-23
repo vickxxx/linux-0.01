@@ -29,6 +29,10 @@ ifdef CONFIG_8xx
 CFLAGS := $(CFLAGS) -mcpu=860
 endif
 
+ifdef CONFIG_PPC64
+CFLAGS := $(CFLAGS) -Wa,-mppc64bridge #-Wa,-mppc64
+#CFLAGS := $(CFLAGS) -Wa,-mppc64 -mpowerpc64
+endif
 
 HEAD := arch/ppc/kernel/head.o
 
@@ -45,6 +49,7 @@ endif
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 MAKECOFFBOOT = $(MAKE) -C arch/$(ARCH)/coffboot
 MAKECHRPBOOT = $(MAKE) -C arch/$(ARCH)/chrpboot
+MAKEMBXBOOT = $(MAKE) -C arch/$(ARCH)/mbxboot
 
 ifdef CONFIG_8xx
 SUBDIRS += arch/ppc/8xx_io
@@ -60,13 +65,28 @@ endif
 checks:
 	@$(MAKE) -C arch/$(ARCH)/kernel checks
 
-BOOT_TARGETS = netboot znetboot zImage floppy install \
-	vmlinux.coff znetboot.initrd zImage.initrd vmlinux.coff.initrd
+BOOT_TARGETS = zImage znetboot.initrd zImage.initrd
 
+ifdef CONFIG_MBX
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEMBXBOOT) $@
+else
 $(BOOT_TARGETS): $(CHECKS) vmlinux
 	@$(MAKECOFFBOOT) $@
 	@$(MAKEBOOT) $@
 	@$(MAKECHRPBOOT) $@
+
+znetboot: $(CHECKS) vmlinux
+ifdef CONFIG_SMP
+	cp -f vmlinux /tftpboot/vmlinux.smp
+else
+	cp -f vmlinux /tftpboot/vmlinux
+endif
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEBOOT) $@
+	@$(MAKECHRPBOOT) $@
+endif
 
 pmac_config:
 	rm -f .config arch/ppc/defconfig
@@ -92,6 +112,10 @@ apus_config:
 	rm -f .config arch/ppc/defconfig
 	ln -s apus_defconfig arch/ppc/defconfig
 
+gemini_config:
+	rm -f .config arch/ppc/defconfig
+	ln -s gemini_defconfig arch/ppc/defconfig
+
 tags:
 	etags */*.c include/{asm,linux}/*.h arch/ppc/kernel/*.{c,h}
 
@@ -100,10 +124,10 @@ archclean:
 	@$(MAKECOFFBOOT) clean
 	@$(MAKEBOOT) clean
 	@$(MAKECHRPBOOT) clean
+	@$(MAKEMBXBOOT) clean
 
 archmrproper:
 
 archdep:
 	$(MAKEBOOT) fastdep
 	$(MAKECHRPBOOT) fastdep
-

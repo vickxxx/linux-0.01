@@ -41,6 +41,7 @@ static int dma;
 
 struct sv11_device
 {
+	void *if_ptr;	/* General purpose pointer (used by SPPP) */
 	struct z8530_dev sync;
 	struct ppp_device netdev;
 	char name[16];
@@ -240,6 +241,11 @@ static struct sv11_device *sv11_init(int iobase, int irq)
 		goto fail3;
 			
 	memset(sv, 0, sizeof(*sv));
+	sv->if_ptr=&sv->netdev;
+
+	sv->netdev.dev=(struct device *)kmalloc(sizeof(struct device), GFP_KERNEL);
+	if(!sv->netdev.dev)
+		goto fail2;
 	
 	dev=&sv->sync;
 	
@@ -264,12 +270,12 @@ static struct sv11_device *sv11_init(int iobase, int irq)
 	if(request_irq(irq, &z8530_interrupt, SA_INTERRUPT, "Hostess SV/11", dev)<0)
 	{
 		printk(KERN_WARNING "hostess: IRQ %d already in use.\n", irq);
-		goto fail2;
+		goto fail1;
 	}
 	
 	dev->irq=irq;
 	dev->chanA.private=sv;
-	dev->chanA.netdevice=&sv->netdev.dev;
+	dev->chanA.netdevice=sv->netdev.dev;
 	dev->chanA.dev=dev;
 	dev->chanB.dev=dev;
 	dev->name=sv->name;
@@ -302,6 +308,7 @@ static struct sv11_device *sv11_init(int iobase, int irq)
 	if(z8530_init(dev)!=0)
 	{
 		printk(KERN_ERR "Z8530 series device not found.\n");
+		restore_flags(flags);
 		goto dmafail2;
 	}
 	z8530_channel_load(&dev->chanB, z8530_dead_port);
@@ -374,6 +381,8 @@ dmafail:
 		free_dma(dev->chanA.txdma);
 fail:
 	free_irq(irq, dev);
+fail1:
+	kfree(sv->netdev.dev);
 fail2:
 	kfree(sv);
 fail3:
@@ -383,13 +392,14 @@ fail3:
 
 static void sv11_shutdown(struct sv11_device *dev)
 {
-	sppp_detach(&dev->netdev.dev);
+	sppp_detach(dev->netdev.dev);
 	z8530_shutdown(&dev->sync);
-	unregister_netdev(&dev->netdev.dev);
+	unregister_netdev(dev->netdev.dev);
 	free_irq(dev->sync.irq, dev);
 	if(dma)
 	{
-		free_dma(dev->sync.chanA.rxdma);
+		if(dma==1)
+			free_dma(dev->sync.chanA.rxdma);
 		free_dma(dev->sync.chanA.txdma);
 	}
 	release_region(dev->sync.chanA.ctrlio-1, 8);
@@ -416,10 +426,8 @@ static struct sv11_device *sv11_unit;
 
 int init_module(void)
 {
-	printk(KERN_INFO "SV-11 Z85230 Synchronous Driver v 0.01.\n");
+	printk(KERN_INFO "SV-11 Z85230 Synchronous Driver v 0.02.\n");
 	printk(KERN_INFO "(c) Copyright 1998, Building Number Three Ltd.\n");	
-	if(dma)
-		printk(KERN_WARNING "DMA mode probably wont work right now.\n");
 	if((sv11_unit=sv11_init(io,irq))==NULL)
 		return -ENODEV;
 	return 0;

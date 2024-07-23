@@ -59,6 +59,7 @@
 #include <linux/init.h>
 
 #include <asm/uaccess.h>
+#include <asm/pgtable.h>
 
 static int inline min(int a, int b)
 {
@@ -267,9 +268,6 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	int stored = 0;
 	char fsname[ROMFS_MAXFN];	/* XXX dynamic? */
 
-	if (!i || !S_ISDIR(i->i_mode))
-		return -EBADF;
-
 	maxoff = i->i_sb->u.romfs_sb.s_maxsize;
 
 	offset = filp->f_pos;
@@ -312,7 +310,7 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	}
 }
 
-static int
+static struct dentry *
 romfs_lookup(struct inode *dir, struct dentry *dentry)
 {
 	unsigned long offset, maxoff;
@@ -322,10 +320,6 @@ romfs_lookup(struct inode *dir, struct dentry *dentry)
 	struct romfs_inode ri;
 	const char *name;		/* got from dentry */
 	int len;
-
-	res = -EBADF;
-	if (!dir || !S_ISDIR(dir->i_mode))
-		goto out;
 
 	res = 0;			/* instead of ENOENT */
 	offset = dir->i_ino & ROMFH_MASK;
@@ -379,7 +373,7 @@ romfs_lookup(struct inode *dir, struct dentry *dentry)
 	}
 
 out:
-	return res;
+	return ERR_PTR(res);
 }
 
 /*
@@ -410,6 +404,7 @@ romfs_readpage(struct file * file, struct page * page)
 			if (readlen < PAGE_SIZE) {
 				memset((void *)(buf+readlen),0,PAGE_SIZE-readlen);
 			}
+			flush_dcache_page(page_address(page));
 			set_bit(PG_uptodate, &page->flags);
 			result = 0;
 		}

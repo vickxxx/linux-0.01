@@ -1,4 +1,4 @@
-/* $Id: cgthreefb.c,v 1.3 1998/09/04 15:43:43 jj Exp $
+/* $Id: cgthreefb.c,v 1.4.2.1 1999/09/28 16:00:08 davem Exp $
  * cgthreefb.c: CGthree frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -88,25 +88,38 @@ static struct sbus_mmap_map cg3_mmap_map[] = {
 static void cg3_loadcmap (struct fb_info_sbusfb *fb, struct display *p, int index, int count)
 {
 	struct bt_regs *bt = &fb->s.cg3.regs->cmap;
+	unsigned long flags;
 	u32 *i;
 	int steps;
 	        
+	spin_lock_irqsave(&fb->lock, flags);
+
 	i = (((u32 *)fb->color_map) + D4M3(index));
 	steps = D4M3(index+count-1) - D4M3(index)+3;
 	                        
 	*(volatile u8 *)&bt->addr = (u8)D4M4(index);
 	while (steps--)
 		bt->color_map = *i++;
+
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg3_blank (struct fb_info_sbusfb *fb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.cg3.regs->control &= ~CG3_CR_ENABLE_VIDEO;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg3_unblank (struct fb_info_sbusfb *fb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.cg3.regs->control |= CG3_CR_ENABLE_VIDEO;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg3_margins (struct fb_info_sbusfb *fb, struct display *p, int x_margin, int y_margin)
@@ -186,6 +199,7 @@ __initfunc(char *cgthreefb_init(struct fb_info_sbusfb *fb))
 	strcpy(fb->info.modename, "CGthree");
 	strcpy(fix->id, "CGthree");
 	fix->line_length = fb->var.xres_virtual;
+	fix->accel = FB_ACCEL_SUN_CGTHREE;
 	
 	disp->scrollmode = SCROLL_YREDRAW;
 	if (!disp->screen_base)

@@ -16,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/joystick.h>
 #include <linux/i2c.h>
+#include <linux/capability.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -33,8 +34,8 @@ void dmasound_init(void);
 #ifdef CONFIG_SPARCAUDIO
 extern int sparcaudio_init(void);
 #endif
-#ifdef CONFIG_ISDN
-int isdn_init(void);
+#ifdef CONFIG_PHONE
+extern int telephony_init(void);
 #endif
 #ifdef CONFIG_VIDEO_DEV
 extern int videodev_init(void);
@@ -48,10 +49,7 @@ extern void prom_con_init(void);
 #ifdef CONFIG_MDA_CONSOLE
 extern void mda_console_init(void);
 #endif
-#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
-extern void adbdev_init(void);
-#endif
-
+     
 static ssize_t do_write_mem(struct file * file, void *p, unsigned long realp,
 			    const char * buf, size_t count, loff_t *ppos)
 {
@@ -138,8 +136,11 @@ static ssize_t write_mem(struct file * file, const char * buf,
 static inline unsigned long pgprot_noncached(unsigned long prot)
 {
 #if defined(__i386__)
+	/* On PPro and successors, PCD alone doesn't always mean 
+	    uncached because of interactions with the MTRRs. PCD | PWT
+	    means definitely uncached. */ 
 	if (boot_cpu_data.x86 > 3)
-		prot |= _PAGE_PCD;
+		prot |= _PAGE_PCD | _PAGE_PWT;
 #elif defined(__powerpc__)
 	prot |= _PAGE_NO_CACHE | _PAGE_GUARDED;
 #elif defined(__mc68000__)
@@ -155,6 +156,28 @@ static inline unsigned long pgprot_noncached(unsigned long prot)
 	return prot;
 }
 
+/*
+ * Architectures vary in how they handle caching for addresses 
+ * outside of main memory.
+ */
+static inline int noncached_address(unsigned long addr)
+{
+#if defined(__i386__)
+	/* 
+	 * On the PPro and successors, the MTRRs are used to set
+	 * memory types for physical addresses outside main memory, 
+	 * so blindly setting PCD or PWT on those pages is wrong.
+	 * For Pentiums and earlier, the surround logic should disable 
+	 * caching for the high addresses through the KEN pin, but
+	 * we maintain the tradition of paranoia in this code.
+	 */
+ 	return !(boot_cpu_data.x86_capability & X86_FEATURE_MTRR)
+		&& addr >= __pa(high_memory);
+#else
+	return addr >= __pa(high_memory);
+#endif
+}
+
 static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 {
 	unsigned long offset = vma->vm_offset;
@@ -166,20 +189,20 @@ static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 	 * Accessing memory above the top the kernel knows about or
 	 * through a file pointer that was marked O_SYNC will be
 	 * done non-cached.
-	 *
-	 * Set VM_IO, as this is likely a non-cached access to an
-	 * I/O area, and we don't want to include that in a core
-	 * file.
 	 */
-	if (offset >= __pa(high_memory) || (file->f_flags & O_SYNC)) {
-		pgprot_val(vma->vm_page_prot) = pgprot_noncached(pgprot_val(vma->vm_page_prot));
+	if (noncached_address(offset) || (file->f_flags & O_SYNC))
+		pgprot_val(vma->vm_page_prot) 
+			= pgprot_noncached(pgprot_val(vma->vm_page_prot));
+
+	/*
+	 * Don't dump addresses that are not real memory to a core file.
+	 */
+	if (offset >= __pa(high_memory) || (file->f_flags & O_SYNC))
 		vma->vm_flags |= VM_IO;
-	}
+
 	if (remap_page_range(vma->vm_start, offset, vma->vm_end-vma->vm_start,
 			     vma->vm_page_prot))
 		return -EAGAIN;
-	vma->vm_file = file;
-	file->f_count++;
 	return 0;
 }
 
@@ -430,11 +453,19 @@ static loff_t memory_lseek(struct file * file, loff_t offset, int orig)
 	}
 }
 
+static int open_port(struct inode * inode, struct file * filp)
+{
+	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+}
+
+
 #define mmap_kmem	mmap_mem
 #define zero_lseek	null_lseek
 #define full_lseek      null_lseek
 #define write_zero	write_null
 #define read_full       read_zero
+#define open_mem	open_port	/* different capability? */
+#define open_kmem	open_mem
 
 static struct file_operations mem_fops = {
 	memory_lseek,
@@ -444,7 +475,7 @@ static struct file_operations mem_fops = {
 	NULL,		/* mem_poll */
 	NULL,		/* mem_ioctl */
 	mmap_mem,
-	NULL,		/* no special open code */
+	open_mem,
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -458,7 +489,7 @@ static struct file_operations kmem_fops = {
 	NULL,		/* kmem_poll */
 	NULL,		/* kmem_ioctl */
 	mmap_kmem,
-	NULL,		/* no special open code */
+	open_kmem,
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -486,7 +517,7 @@ static struct file_operations port_fops = {
 	NULL,		/* port_poll */
 	NULL,		/* port_ioctl */
 	NULL,		/* port_mmap */
-	NULL,		/* no special open code */
+	open_port,
 	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* fsync */
@@ -613,20 +644,17 @@ __initfunc(int chr_dev_init(void))
 #if CONFIG_QIC02_TAPE
 	qic02_tape_init();
 #endif
-#if CONFIG_ISDN
-	isdn_init();
-#endif
 #ifdef CONFIG_FTAPE
 	ftape_init();
 #endif
 #ifdef CONFIG_VIDEO_BT848
 	i2c_init();
 #endif
-#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
-	adbdev_init();
-#endif
 #ifdef CONFIG_VIDEO_DEV
 	videodev_init();
+#endif
+#ifdef CONFIG_PHONE
+	telephony_init();
 #endif
 	return 0;
 }

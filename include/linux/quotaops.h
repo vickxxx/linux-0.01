@@ -31,8 +31,8 @@ extern int  dquot_alloc_inode(const struct inode *inode, unsigned long number,
 extern void dquot_free_block(const struct inode *inode, unsigned long number);
 extern void dquot_free_inode(const struct inode *inode, unsigned long number);
 
-extern int  dquot_transfer(struct inode *inode, struct iattr *iattr,
-                           char direction, uid_t initiator);
+extern int  dquot_transfer(struct dentry *dentry, struct iattr *iattr,
+                           uid_t initiator);
 
 /*
  * Operations supported for diskquotas.
@@ -55,7 +55,7 @@ extern __inline__ int DQUOT_PREALLOC_BLOCK(struct super_block *sb, const struct 
 {
 	if (sb->dq_op) {
 		if (sb->dq_op->alloc_block(inode, fs_to_dq_blocks(nr, sb->s_blocksize),
-					   current->euid, 0) == NO_QUOTA)
+					   current->fsuid, 0) == NO_QUOTA)
 			return 1;
 	}
 	return 0;
@@ -65,7 +65,7 @@ extern __inline__ int DQUOT_ALLOC_BLOCK(struct super_block *sb, const struct ino
 {
 	if (sb->dq_op) {
 		if (sb->dq_op->alloc_block(inode, fs_to_dq_blocks(nr, sb->s_blocksize),
-					   current->euid, 1) == NO_QUOTA)
+					   current->fsuid, 1) == NO_QUOTA)
 			return 1;
 	}
 	return 0;
@@ -75,7 +75,7 @@ extern __inline__ int DQUOT_ALLOC_INODE(struct super_block *sb, struct inode *in
 {
 	if (sb->dq_op) {
 		sb->dq_op->initialize (inode, -1);
-		if (sb->dq_op->alloc_inode (inode, 1, current->euid))
+		if (sb->dq_op->alloc_inode (inode, 1, current->fsuid))
 			return 1;
 	}
 	inode->i_flags |= S_QUOTA;
@@ -98,18 +98,12 @@ extern __inline__ int DQUOT_TRANSFER(struct dentry *dentry, struct iattr *iattr)
 {
 	int error = -EDQUOT;
 
-	if (dentry->d_inode->i_sb->dq_op) {
-		if (IS_QUOTAINIT(dentry->d_inode) == 0)
-			dentry->d_inode->i_sb->dq_op->initialize(dentry->d_inode, -1);
-		if (dentry->d_inode->i_sb->dq_op->transfer(dentry->d_inode, iattr, 0, current->euid))
-			goto out;
-		error = notify_change(dentry, iattr);
-		if (error)
-			dentry->d_inode->i_sb->dq_op->transfer(dentry->d_inode, iattr, 1, current->euid);
+	if (dentry->d_inode->i_sb && dentry->d_inode->i_sb->dq_op) {
+		dentry->d_inode->i_sb->dq_op->initialize(dentry->d_inode, -1);
+		error = dentry->d_inode->i_sb->dq_op->transfer(dentry, iattr, current->fsuid);
 	} else {
 		error = notify_change(dentry, iattr);
 	}
-out:
 	return error;
 }
 

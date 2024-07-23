@@ -182,6 +182,7 @@ typedef unsigned char	byte;	/* used everywhere */
 
 #define ide_scsi	0x21
 #define ide_disk	0x20
+#define ide_optical	0x7
 #define ide_cdrom	0x5
 #define ide_tape	0x1
 #define ide_floppy	0x0
@@ -305,7 +306,7 @@ typedef enum {	ide_unknown,	ide_generic,	ide_pci,
 		ide_cmd640,	ide_dtc2278,	ide_ali14xx,
 		ide_qd6580,	ide_umc8672,	ide_ht6560b,
 		ide_pdc4030,	ide_rz1000,	ide_trm290,
-		ide_cmd646,	ide_4drives
+		ide_cmd646,	ide_4drives,	ide_pmac
 	} hwif_chipset_t;
 
 typedef struct ide_pci_devid_s {
@@ -352,20 +353,35 @@ typedef struct hwif_s {
 	} ide_hwif_t;
 
 /*
+ * Status returned from various ide_ functions
+ */
+typedef enum {
+	ide_stopped,	/* no drive operation was started */
+	ide_started	/* a drive operation was started, and a handler was set up */
+} ide_startstop_t;
+
+/*
  *  internal ide interrupt handler type
  */
-typedef void (ide_handler_t)(ide_drive_t *);
+typedef ide_startstop_t (ide_handler_t)(ide_drive_t *);
+
+/*
+ * when ide_timer_expiry fires, invoke a handler of this type
+ * to decide what to do.
+ */
+typedef int (ide_expiry_t)(ide_drive_t *);
 
 typedef struct hwgroup_s {
-	spinlock_t		spinlock; /* protects "busy" and "handler" */
 	ide_handler_t		*handler;/* irq handler, if active */
-	int			busy;	/* BOOL: protects all fields below */
+	volatile int		busy;	/* BOOL: protects all fields below */
+	int			sleeping; /* BOOL: wake us up on timer expiry */
 	ide_drive_t		*drive;	/* current drive */
 	ide_hwif_t		*hwif;	/* ptr to current hwif in linked-list */
 	struct request		*rq;	/* current request */
 	struct timer_list	timer;	/* failsafe timer */
 	struct request		wrq;	/* local copy of current write rq */
 	unsigned long		poll_timeout;	/* timeout value during long polls */
+	ide_expiry_t		*expiry; /* queried upon timeouts */
 	} ide_hwgroup_t;
 
 /*
@@ -442,13 +458,14 @@ read_proc_t proc_ide_read_geometry;
 #define PROC_IDE_READ_RETURN(page,start,off,count,eof,len) return 0;
 #endif
 
+
 /*
  * Subdrivers support.
  */
 #define IDE_SUBDRIVER_VERSION	1
 
 typedef int	(ide_cleanup_proc)(ide_drive_t *);
-typedef void 	(ide_do_request_proc)(ide_drive_t *, struct request *, unsigned long);
+typedef ide_startstop_t (ide_do_request_proc)(ide_drive_t *, struct request *, unsigned long);
 typedef void	(ide_end_request_proc)(byte, ide_hwgroup_t *);
 typedef int 	(ide_ioctl_proc)(ide_drive_t *, struct inode *, struct file *, unsigned int, unsigned long);
 typedef int	(ide_open_proc)(struct inode *, struct file *, ide_drive_t *);
@@ -456,7 +473,7 @@ typedef void 	(ide_release_proc)(struct inode *, struct file *, ide_drive_t *);
 typedef int	(ide_check_media_change_proc)(ide_drive_t *);
 typedef void	(ide_pre_reset_proc)(ide_drive_t *);
 typedef unsigned long (ide_capacity_proc)(ide_drive_t *);
-typedef void	(ide_special_proc)(ide_drive_t *);
+typedef ide_startstop_t (ide_special_proc)(ide_drive_t *);
 typedef void	(ide_setting_proc)(ide_drive_t *);
 
 typedef struct ide_driver_s {
@@ -535,7 +552,7 @@ void atapi_output_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecoun
  * This is used on exit from the driver, to designate the next irq handler
  * and also to start the safety timer.
  */
-void ide_set_handler (ide_drive_t *drive, ide_handler_t *handler, unsigned int timeout);
+void ide_set_handler (ide_drive_t *drive, ide_handler_t *handler, unsigned int timeout, ide_expiry_t *expiry);
 
 /*
  * Error reporting, in human readable form (luxurious, but a memory hog).
@@ -544,9 +561,9 @@ byte ide_dump_status (ide_drive_t *drive, const char *msg, byte stat);
 
 /*
  * ide_error() takes action based on the error returned by the controller.
- * The calling function must return afterwards, to restart the request.
+ * The caller should return immediately after invoking this.
  */
-void ide_error (ide_drive_t *drive, const char *msg, byte stat);
+ide_startstop_t ide_error (ide_drive_t *drive, const char *msg, byte stat);
 
 /*
  * Issue a simple drive command
@@ -566,10 +583,11 @@ void ide_fixstring (byte *s, const int bytecount, const int byteswap);
  * This routine busy-waits for the drive status to be not "busy".
  * It then checks the status for all of the "good" bits and none
  * of the "bad" bits, and if all is okay it returns 0.  All other
- * cases return 1 after invoking ide_error() -- caller should return.
- *
+ * cases return 1 after doing "*startstop = ide_error()", and the
+ * caller should return the updated value of "startstop" in this case.
+ * "startstop" is unchanged when the function returns 0;
  */
-int ide_wait_stat (ide_drive_t *drive, byte good, byte bad, unsigned long timeout);
+int ide_wait_stat (ide_startstop_t *startstop, ide_drive_t *drive, byte good, byte bad, unsigned long timeout);
 
 /*
  * This routine is called from the partition-table code in genhd.c
@@ -593,7 +611,7 @@ int ide_xlate_1024 (kdev_t, int, const char *);
  * Start a reset operation for an IDE interface.
  * The caller should return immediately after invoking this.
  */
-void ide_do_reset (ide_drive_t *);
+ide_startstop_t ide_do_reset (ide_drive_t *);
 
 /*
  * This function is intended to be used prior to invoking ide_do_drive_cmd().
@@ -660,7 +678,7 @@ int ide_system_bus_speed (void);
  * ide_multwrite() transfers a block of up to mcount sectors of data
  * to a drive as part of a disk multwrite operation.
  */
-void ide_multwrite (ide_drive_t *drive, unsigned int mcount);
+int ide_multwrite (ide_drive_t *drive, unsigned int mcount);
 
 /*
  * ide_stall_queue() can be used by a drive to give excess bandwidth back
@@ -672,6 +690,13 @@ void ide_stall_queue (ide_drive_t *drive, unsigned long timeout);
  * ide_get_queue() returns the queue which corresponds to a given device.
  */
 struct request **ide_get_queue (kdev_t dev);
+
+/*
+ * CompactFlash cards and their brethern pretend to be removable hard disks,
+ * but they never have a slave unit, and they don't have doorlock mechanisms.
+ * This test catches them, and is invoked elsewhere when setting appropriate config bits.
+ */
+int drive_is_flashcard (ide_drive_t *drive);
 
 int  ide_spin_wait_hwgroup(ide_drive_t *drive, unsigned long *flags);
 void ide_timer_expiry (unsigned long data);
@@ -743,7 +768,7 @@ void ide_scan_pcibus (void) __init;
 #define BAD_DMA_DRIVE		0
 #define GOOD_DMA_DRIVE		1
 int ide_build_dmatable (ide_drive_t *drive);
-void ide_dma_intr  (ide_drive_t *drive);
+ide_startstop_t ide_dma_intr  (ide_drive_t *drive);
 int check_drive_lists (ide_drive_t *drive, int good_bad);
 int ide_dmaproc (ide_dma_action_t func, ide_drive_t *drive);
 int ide_release_dma (ide_hwif_t *hwif);

@@ -1,4 +1,4 @@
-/* $Id: srmmu.c,v 1.175 1998/08/28 18:57:31 zaitcev Exp $
+/* $Id: srmmu.c,v 1.187.2.10 2000/09/07 04:44:48 davem Exp $
  * srmmu.c:  SRMMU specific routines for memory management.
  *
  * Copyright (C) 1995 David S. Miller  (davem@caip.rutgers.edu)
@@ -12,7 +12,9 @@
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/vmalloc.h>
+#include <linux/pagemap.h>
 #include <linux/init.h>
+#include <linux/blk.h>
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -112,6 +114,9 @@ static unsigned long srmmu_p2v_hash[SRMMU_HASHSZ];
 #define srmmu_ahashfn(addr)	((addr) >> 24)
 
 int viking_mxcc_present = 0;
+#ifdef __SMP__
+static spinlock_t srmmu_context_spinlock = SPIN_LOCK_UNLOCKED;
+#endif
 
 /* Physical memory can be _very_ non-contiguous on the sun4m, especially
  * the SS10/20 class machines and with the latest openprom revisions.
@@ -216,24 +221,36 @@ __initfunc(void srmmu_frob_mem_map(unsigned long start_mem))
 	mem_map[MAP_NR(pg1)].flags &= ~(1<<PG_reserved);
 	mem_map[MAP_NR(pg2)].flags &= ~(1<<PG_reserved);
 	mem_map[MAP_NR(pg3)].flags &= ~(1<<PG_reserved);
-
+	
 	start_mem = PAGE_ALIGN(start_mem);
 	for(i = 0; srmmu_map[i].size; i++) {
 		bank_start = srmmu_map[i].vbase;
 		
-		if (i && bank_start - bank_end > 2 * PAGE_SIZE) {
+		/* Making a one or two pages PG_skip holes
+		 * is not necessary.  We add one more because
+		 * we must set the PG_skip flag on the first
+		 * two mem_map[] entries for the hole.  Go and
+		 * see the mm/filemap.c:shrink_mmap() loop for
+		 * details. -DaveM
+		 */
+		if (i && bank_start - bank_end > 3 * PAGE_SIZE) {
 			mem_map[MAP_NR(bank_end)].flags |= (1<<PG_skip);
 			mem_map[MAP_NR(bank_end)].next_hash = mem_map + MAP_NR(bank_start);
+			mem_map[MAP_NR(bank_end)+1UL].flags |= (1<<PG_skip);
+			mem_map[MAP_NR(bank_end)+1UL].next_hash = mem_map + MAP_NR(bank_start);
 			PGSKIP_DEBUG(MAP_NR(bank_end), MAP_NR(bank_start));
 			if (bank_end > KERNBASE && bank_start < KERNBASE) {
 				mem_map[0].flags |= (1<<PG_skip);
 				mem_map[0].next_hash = mem_map + MAP_NR(bank_start);
+				mem_map[1].flags |= (1<<PG_skip);
+				mem_map[1].next_hash = mem_map + MAP_NR(bank_start);
 				PGSKIP_DEBUG(0, MAP_NR(bank_start));
 			}
 		}
 		
 		bank_end = bank_start + srmmu_map[i].size;
 		while(bank_start < bank_end) {
+			set_bit(MAP_NR(bank_start) >> 8, sparc_valid_addr_bitmap);
 			if((bank_start >= KERNBASE) &&
 			   (bank_start < start_mem)) {
 				bank_start += PAGE_SIZE;
@@ -250,14 +267,19 @@ __initfunc(void srmmu_frob_mem_map(unsigned long start_mem))
 	if (bank_end < KERNBASE) {
 		mem_map[MAP_NR(bank_end)].flags |= (1<<PG_skip);
 		mem_map[MAP_NR(bank_end)].next_hash = mem_map + MAP_NR(KERNBASE);
+		mem_map[MAP_NR(bank_end)+1UL].flags |= (1<<PG_skip);
+		mem_map[MAP_NR(bank_end)+1UL].next_hash = mem_map + MAP_NR(KERNBASE);
 		PGSKIP_DEBUG(MAP_NR(bank_end), MAP_NR(KERNBASE));
 	} else if (MAP_NR(bank_end) < max_mapnr) {
 		mem_map[MAP_NR(bank_end)].flags |= (1<<PG_skip);
+		mem_map[MAP_NR(bank_end)+1UL].flags |= (1<<PG_skip);
 		if (mem_map[0].flags & (1 << PG_skip)) {
 			mem_map[MAP_NR(bank_end)].next_hash = mem_map[0].next_hash;
+			mem_map[MAP_NR(bank_end)+1UL].next_hash = mem_map[0].next_hash;
 			PGSKIP_DEBUG(MAP_NR(bank_end), mem_map[0].next_hash - mem_map);
 		} else {
 			mem_map[MAP_NR(bank_end)].next_hash = mem_map;
+			mem_map[MAP_NR(bank_end)+1UL].next_hash = mem_map;
 			PGSKIP_DEBUG(MAP_NR(bank_end), 0);
 		}
 	}
@@ -447,7 +469,8 @@ static inline pte_t *srmmu_s_pte_offset(pmd_t * dir, unsigned long address)
 /* This must update the context table entry for this process. */
 static void srmmu_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp) 
 {
-	if(tsk->mm->context != NO_CONTEXT) {
+	if(tsk->mm->context != NO_CONTEXT &&
+	   tsk->mm->pgd != pgdp) {
 		flush_cache_mm(tsk->mm);
 		ctxd_set(&srmmu_context_table[tsk->mm->context], pgdp);
 		flush_tlb_mm(tsk->mm);
@@ -704,6 +727,17 @@ static void srmmu_set_pte_cacheable(pte_t *ptep, pte_t pteval)
 	srmmu_set_entry(ptep, pte_val(pteval));
 }
 
+extern void swift_flush_chunk(unsigned long chunk);
+
+static void srmmu_set_pte_nocache_swift(pte_t *ptep, pte_t pteval)
+{
+	unsigned long page;
+
+	srmmu_set_entry(ptep, pte_val(pteval));
+	page = ((unsigned long)ptep) & PAGE_MASK;
+	swift_flush_chunk(page);
+}
+
 static void srmmu_set_pte_nocache_cypress(pte_t *ptep, pte_t pteval)
 {
 	register unsigned long a, b, c, d, e, f, g;
@@ -799,17 +833,19 @@ static inline void free_context(int context)
 static void srmmu_switch_to_context(struct task_struct *tsk)
 {
 	if(tsk->mm->context == NO_CONTEXT) {
+		spin_lock(&srmmu_context_spinlock);
 		alloc_context(tsk->mm);
-		flush_cache_mm(tsk->mm);
+		spin_unlock(&srmmu_context_spinlock);
 		ctxd_set(&srmmu_context_table[tsk->mm->context], tsk->mm->pgd);
-		flush_tlb_mm(tsk->mm);
 	}
 	srmmu_set_context(tsk->mm->context);
 }
 
 static void srmmu_init_new_context(struct mm_struct *mm)
 {
+	spin_lock(&srmmu_context_spinlock);
 	alloc_context(mm);
+	spin_unlock(&srmmu_context_spinlock);
 
 	flush_cache_mm(mm);
 	ctxd_set(&srmmu_context_table[mm->context], mm->pgd);
@@ -886,7 +922,8 @@ static void srmmu_free_task_struct(struct task_struct *tsk)
 /* tsunami.S */
 extern void tsunami_flush_cache_all(void);
 extern void tsunami_flush_cache_mm(struct mm_struct *mm);
-extern void tsunami_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void tsunami_flush_cache_range(struct mm_struct *mm,
+				      unsigned long start, unsigned long end);
 extern void tsunami_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void tsunami_flush_page_to_ram(unsigned long page);
 extern void tsunami_flush_page_for_dma(unsigned long page);
@@ -894,111 +931,54 @@ extern void tsunami_flush_sig_insns(struct mm_struct *mm, unsigned long insn_add
 extern void tsunami_flush_chunk(unsigned long chunk);
 extern void tsunami_flush_tlb_all(void);
 extern void tsunami_flush_tlb_mm(struct mm_struct *mm);
-extern void tsunami_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void tsunami_flush_tlb_range(struct mm_struct *mm,
+				    unsigned long start, unsigned long end);
 extern void tsunami_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
+extern void tsunami_setup_blockops(void);
 
-/* Workaround, until we find what's going on with Swift. When low on memory, it sometimes
- * loops in fault/handle_mm_fault incl. flush_tlb_page to find out it is already in page tables/
- * fault again on the same instruction. I really don't understand it, have checked it and contexts
- * are right, flush_tlb_all is done as well, and it faults again... Strange. -jj
- */
-static void swift_update_mmu_cache(struct vm_area_struct * vma, unsigned long address, pte_t pte)
+/* swift.S */
+extern void swift_flush_cache_all(void);
+extern void swift_flush_cache_mm(struct mm_struct *mm);
+extern void swift_flush_cache_range(struct mm_struct *mm,
+				    unsigned long start, unsigned long end);
+extern void swift_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
+extern void swift_flush_page_to_ram(unsigned long page);
+extern void swift_flush_page_for_dma(unsigned long page);
+extern void swift_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
+extern void swift_flush_tlb_all(void);
+extern void swift_flush_tlb_mm(struct mm_struct *mm);
+extern void swift_flush_tlb_range(struct mm_struct *mm,
+				  unsigned long start, unsigned long end);
+extern void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
+
+static void swift_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp) 
 {
-	static unsigned long last;
-
-	if (last == address) viking_hwprobe(address);
-	last = address;
+	if(pgdp != swapper_pg_dir)
+		swift_flush_chunk((unsigned long)pgdp);
+	if(tsk->mm->context != NO_CONTEXT &&
+	   tsk->mm->pgd != pgdp) {
+		swift_flush_cache_mm(tsk->mm);
+		ctxd_set(&srmmu_context_table[tsk->mm->context], pgdp);
+		swift_flush_tlb_mm(tsk->mm);
+	}
 }
 
-/* Swift flushes.  It has the recommended SRMMU specification flushing
- * facilities, so we can do things in a more fine grained fashion than we
- * could on the tsunami.  Let's watch out for HARDWARE BUGS...
- */
-
-static void swift_flush_cache_all(void)
+static void swift_init_new_context(struct mm_struct *mm)
 {
-	flush_user_windows();
-	swift_idflash_clear();
-}
+	ctxd_t *ctxp;
 
-static void swift_flush_cache_mm(struct mm_struct *mm)
-{
-	FLUSH_BEGIN(mm)
-	flush_user_windows();
-	swift_idflash_clear();
-	FLUSH_END
-}
+	spin_lock(&srmmu_context_spinlock);
+	alloc_context(mm);
+	spin_unlock(&srmmu_context_spinlock);
 
-static void swift_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	FLUSH_BEGIN(mm)
-	flush_user_windows();
-	swift_idflash_clear();
-	FLUSH_END
-}
+	ctxp = &srmmu_context_table[mm->context];
+	srmmu_set_entry((pte_t *)ctxp,
+			__pte((SRMMU_ET_PTD |
+			       (srmmu_v2p((unsigned long) mm->pgd) >> 4))));
+	swift_flush_chunk(((unsigned long)ctxp) & PAGE_MASK);
 
-static void swift_flush_cache_page(struct vm_area_struct *vma, unsigned long page)
-{
-	FLUSH_BEGIN(vma->vm_mm)
-	flush_user_windows();
-	if(vma->vm_flags & VM_EXEC)
-		swift_flush_icache();
-	swift_flush_dcache();
-	FLUSH_END
-}
-
-/* Not copy-back on swift. */
-static void swift_flush_page_to_ram(unsigned long page)
-{
-}
-
-/* But not IO coherent either. */
-static void swift_flush_page_for_dma(unsigned long page)
-{
-	swift_flush_dcache();
-}
-
-/* Again, Swift is non-snooping split I/D cache'd just like tsunami,
- * so have to punt the icache for on-stack signal insns.  Only the
- * icache need be flushed since the dcache is write-through.
- */
-static void swift_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr)
-{
-	swift_flush_icache();
-}
-
-static void swift_flush_chunk(unsigned long chunk)
-{
-}
-
-static void swift_flush_tlb_all(void)
-{
-	srmmu_flush_whole_tlb();
-	module_stats.invall++;
-}
-
-static void swift_flush_tlb_mm(struct mm_struct *mm)
-{
-	FLUSH_BEGIN(mm)
-	srmmu_flush_whole_tlb();
-	module_stats.invmm++;
-	FLUSH_END
-}
-
-static void swift_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	FLUSH_BEGIN(mm)
-	srmmu_flush_whole_tlb();
-	module_stats.invrnge++;
-	FLUSH_END
-}
-
-static void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
-{
-	FLUSH_BEGIN(vma->vm_mm)
-	srmmu_flush_whole_tlb();
-	module_stats.invpg++;
-	FLUSH_END
+	if(mm == current->mm)
+		srmmu_set_context(mm->context);
 }
 
 /* The following are all MBUS based SRMMU modules, and therefore could
@@ -1273,11 +1253,18 @@ extern void viking_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 				   unsigned long end);
 extern void viking_flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long page);
+extern void sun4dsmp_flush_tlb_all(void);
+extern void sun4dsmp_flush_tlb_mm(struct mm_struct *mm);
+extern void sun4dsmp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+				   unsigned long end);
+extern void sun4dsmp_flush_tlb_page(struct vm_area_struct *vma,
+				  unsigned long page);
 
 /* hypersparc.S */
 extern void hypersparc_flush_cache_all(void);
 extern void hypersparc_flush_cache_mm(struct mm_struct *mm);
-extern void hypersparc_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void hypersparc_flush_cache_range(struct mm_struct *mm,
+					 unsigned long start, unsigned long end);
 extern void hypersparc_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void hypersparc_flush_page_to_ram(unsigned long page);
 extern void hypersparc_flush_chunk(unsigned long chunk);
@@ -1285,7 +1272,8 @@ extern void hypersparc_flush_page_for_dma(unsigned long page);
 extern void hypersparc_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
 extern void hypersparc_flush_tlb_all(void);
 extern void hypersparc_flush_tlb_mm(struct mm_struct *mm);
-extern void hypersparc_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void hypersparc_flush_tlb_range(struct mm_struct *mm,
+				       unsigned long start, unsigned long end);
 extern void hypersparc_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 extern void hypersparc_setup_blockops(void);
 
@@ -1299,7 +1287,8 @@ static void srmmu_set_pte_nocache_hyper(pte_t *ptep, pte_t pteval)
 
 static void hypersparc_ctxd_set(ctxd_t *ctxp, pgd_t *pgdp)
 {
-	srmmu_set_entry((pte_t *)ctxp, __pte((SRMMU_ET_PTD | (srmmu_v2p((unsigned long) pgdp) >> 4))));
+	srmmu_set_entry((pte_t *)ctxp, __pte((SRMMU_ET_PTD |
+					      (srmmu_v2p((unsigned long) pgdp) >> 4))));
 	hypersparc_flush_page_to_ram((unsigned long)ctxp);
 	hyper_flush_whole_icache();
 }
@@ -1311,7 +1300,8 @@ static void hypersparc_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp)
 	if(pgdp != swapper_pg_dir)
 		hypersparc_flush_page_to_ram(page);
 
-	if(tsk->mm->context != NO_CONTEXT) {
+	if(tsk->mm->context != NO_CONTEXT &&
+	   tsk->mm->pgd != pgdp) {
 		flush_cache_mm(tsk->mm);
 		ctxd_set(&srmmu_context_table[tsk->mm->context], pgdp);
 		flush_tlb_mm(tsk->mm);
@@ -1320,11 +1310,13 @@ static void hypersparc_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp)
 
 static void viking_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp) 
 {
-	viking_flush_page((unsigned long)pgdp);
-	if(tsk->mm->context != NO_CONTEXT) {
-		flush_cache_mm(current->mm);
+	if(pgdp != swapper_pg_dir)
+		flush_chunk((unsigned long)pgdp);
+	if(tsk->mm->context != NO_CONTEXT &&
+	   tsk->mm->pgd != pgdp) {
+		flush_cache_mm(tsk->mm);
 		ctxd_set(&srmmu_context_table[tsk->mm->context], pgdp);
-		flush_tlb_mm(current->mm);
+		flush_tlb_mm(tsk->mm);
 	}
 }
 
@@ -1333,6 +1325,9 @@ static void cypress_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp)
 	register unsigned long a, b, c, d, e, f, g;
 	unsigned long page = ((unsigned long) pgdp) & PAGE_MASK;
 	unsigned long line;
+
+	if(pgdp == swapper_pg_dir)
+		goto skip_flush;
 
 	a = 0x20; b = 0x40; c = 0x60; d = 0x80; e = 0xa0; f = 0xc0; g = 0xe0;
 	page &= PAGE_MASK;
@@ -1354,11 +1349,12 @@ static void cypress_update_rootmmu_dir(struct task_struct *tsk, pgd_t *pgdp)
 				     "r" (a), "r" (b), "r" (c), "r" (d),
 				     "r" (e), "r" (f), "r" (g));
 	} while(line != page);
-
-	if(tsk->mm->context != NO_CONTEXT) {
-		flush_cache_mm(current->mm);
+skip_flush:
+	if(tsk->mm->context != NO_CONTEXT &&
+	   tsk->mm->pgd != pgdp) {
+		flush_cache_mm(tsk->mm);
 		ctxd_set(&srmmu_context_table[tsk->mm->context], pgdp);
-		flush_tlb_mm(current->mm);
+		flush_tlb_mm(tsk->mm);
 	}
 }
 
@@ -1367,9 +1363,13 @@ static void hypersparc_switch_to_context(struct task_struct *tsk)
 	if(tsk->mm->context == NO_CONTEXT) {
 		ctxd_t *ctxp;
 
+		spin_lock(&srmmu_context_spinlock);
 		alloc_context(tsk->mm);
+		spin_unlock(&srmmu_context_spinlock);
 		ctxp = &srmmu_context_table[tsk->mm->context];
-		srmmu_set_entry((pte_t *)ctxp, __pte((SRMMU_ET_PTD | (srmmu_v2p((unsigned long) tsk->mm->pgd) >> 4))));
+		srmmu_set_entry((pte_t *)ctxp,
+				__pte((SRMMU_ET_PTD |
+				       (srmmu_v2p((unsigned long) tsk->mm->pgd) >> 4))));
 		hypersparc_flush_page_to_ram((unsigned long)ctxp);
 	}
 	hyper_flush_whole_icache();
@@ -1380,15 +1380,20 @@ static void hypersparc_init_new_context(struct mm_struct *mm)
 {
 	ctxd_t *ctxp;
 
+	spin_lock(&srmmu_context_spinlock);
 	alloc_context(mm);
+	spin_unlock(&srmmu_context_spinlock);
 
 	ctxp = &srmmu_context_table[mm->context];
-	srmmu_set_entry((pte_t *)ctxp, __pte((SRMMU_ET_PTD | (srmmu_v2p((unsigned long) mm->pgd) >> 4))));
+	srmmu_set_entry((pte_t *)ctxp,
+			__pte((SRMMU_ET_PTD |
+			       (srmmu_v2p((unsigned long) mm->pgd) >> 4))));
 	hypersparc_flush_page_to_ram((unsigned long)ctxp);
 
-	hyper_flush_whole_icache();
-	if(mm == current->mm)
+	if(mm == current->mm) {
+		hyper_flush_whole_icache();
 		srmmu_set_context(mm->context);
+	}
 }
 
 static unsigned long mempool;
@@ -1409,12 +1414,14 @@ static inline unsigned long srmmu_early_paddr(unsigned long vaddr)
 
 static inline void srmmu_early_pgd_set(pgd_t *pgdp, pmd_t *pmdp)
 {
-	set_pte((pte_t *)pgdp, __pte((SRMMU_ET_PTD | (srmmu_early_paddr((unsigned long) pmdp) >> 4))));
+	set_pte((pte_t *)pgdp, __pte((SRMMU_ET_PTD |
+				      (srmmu_early_paddr((unsigned long) pmdp) >> 4))));
 }
 
 static inline void srmmu_early_pmd_set(pmd_t *pmdp, pte_t *ptep)
 {
-	set_pte((pte_t *)pmdp, __pte((SRMMU_ET_PTD | (srmmu_early_paddr((unsigned long) ptep) >> 4))));
+	set_pte((pte_t *)pmdp, __pte((SRMMU_ET_PTD |
+				      (srmmu_early_paddr((unsigned long) ptep) >> 4))));
 }
 
 static inline unsigned long srmmu_early_pgd_page(pgd_t pgd)
@@ -1429,12 +1436,14 @@ static inline unsigned long srmmu_early_pmd_page(pmd_t pmd)
 
 static inline pmd_t *srmmu_early_pmd_offset(pgd_t *dir, unsigned long address)
 {
-	return (pmd_t *) srmmu_early_pgd_page(*dir) + ((address >> SRMMU_PMD_SHIFT) & (SRMMU_PTRS_PER_PMD - 1));
+	return (pmd_t *) srmmu_early_pgd_page(*dir) +
+		((address >> SRMMU_PMD_SHIFT) & (SRMMU_PTRS_PER_PMD - 1));
 }
 
 static inline pte_t *srmmu_early_pte_offset(pmd_t *dir, unsigned long address)
 {
-	return (pte_t *) srmmu_early_pmd_page(*dir) + ((address >> PAGE_SHIFT) & (SRMMU_PTRS_PER_PTE - 1));
+	return (pte_t *) srmmu_early_pmd_page(*dir) +
+		((address >> PAGE_SHIFT) & (SRMMU_PTRS_PER_PTE - 1));
 }
 
 static inline void srmmu_allocate_ptable_skeleton(unsigned long start, unsigned long end)
@@ -1653,7 +1662,8 @@ __initfunc(static unsigned long map_spbank(unsigned long vbase, int sp_entry))
 	srmmu_map[srmmu_bank].vbase = vbase;
 	srmmu_map[srmmu_bank].pbase = sp_banks[sp_entry].base_addr;
 	srmmu_map[srmmu_bank].size = sp_banks[sp_entry].num_bytes;
-	srmmu_bank++;
+	if (srmmu_map[srmmu_bank].size)
+		srmmu_bank++;
 	map_spbank_last_pa = pstart - SRMMU_PGDIR_SIZE;
 	return vstart;
 }
@@ -1917,12 +1927,13 @@ __initfunc(unsigned long srmmu_paging_init(unsigned long start_mem, unsigned lon
 		/* Find the number of contexts on the srmmu. */
 		cpunode = prom_getchild(prom_root_node);
 		num_contexts = 0;
-		while((cpunode = prom_getsibling(cpunode)) != 0) {
+		while(cpunode != 0) {
 			prom_getstring(cpunode, "device_type", node_str, sizeof(node_str));
 			if(!strcmp(node_str, "cpu")) {
 				num_contexts = prom_getintdefault(cpunode, "mmu-nctx", 0x8);
 				break;
 			}
+			cpunode = prom_getsibling(cpunode);
 		}
 	}
 
@@ -1969,6 +1980,18 @@ __initfunc(unsigned long srmmu_paging_init(unsigned long start_mem, unsigned lon
 
 	start_mem = sparc_context_init(start_mem, num_contexts);
 	start_mem = free_area_init(start_mem, end_mem);
+	
+#ifdef CONFIG_BLK_DEV_INITRD
+	/* If initial ramdisk was specified with physical address,
+	   translate it here, as the p2v translation in srmmu
+	   is not straightforward. */
+	if (initrd_start && initrd_start < KERNBASE) {
+		initrd_start = srmmu_p2v(initrd_start);
+		initrd_end = srmmu_p2v(initrd_end);
+		if (initrd_end <= initrd_start)
+			initrd_start = 0;
+	}
+#endif
 
 	return PAGE_ALIGN(start_mem);
 }
@@ -1998,10 +2021,17 @@ static void srmmu_update_mmu_cache(struct vm_area_struct * vma, unsigned long ad
 static void srmmu_destroy_context(struct mm_struct *mm)
 {
 	if(mm->context != NO_CONTEXT && atomic_read(&mm->count) == 1) {
+		/* XXX This could be drastically improved.
+		 * XXX We are only called from __exit_mm and it just did
+		 * XXX cache/tlb mm flush and right after this will (re-)
+		 * XXX SET_PAGE_DIR to swapper_pg_dir.  -DaveM
+		 */
 		flush_cache_mm(mm);
 		ctxd_set(&srmmu_context_table[mm->context], swapper_pg_dir);
 		flush_tlb_mm(mm);
+		spin_lock(&srmmu_context_spinlock);
 		free_context(mm->context);
+		spin_unlock(&srmmu_context_spinlock);
 		mm->context = NO_CONTEXT;
 	}
 }
@@ -2026,10 +2056,13 @@ static void srmmu_vac_update_mmu_cache(struct vm_area_struct * vma,
 			goto done;
 		inode = file->f_dentry->d_inode;
 		offset = (address & PAGE_MASK) - vma->vm_start;
-		vmaring = inode->i_mmap; 
-		do {
-			vaddr = vmaring->vm_start + offset;
+		vmaring = inode->i_mmap_shared; 
+		if (vmaring) do {
+			/* Do not mistake ourselves as another mapping. */
+			if(vmaring == vma)
+				continue;
 
+			vaddr = vmaring->vm_start + offset;
 			if ((vaddr ^ address) & vac_badbits) {
 				alias_found++;
 				start = vmaring->vm_start;
@@ -2042,7 +2075,7 @@ static void srmmu_vac_update_mmu_cache(struct vm_area_struct * vma,
 					if(!ptep) goto next;
 
 					if((pte_val(*ptep) & SRMMU_ET_MASK) == SRMMU_VALID) {
-#if 1
+#if 0
 						printk("Fixing USER/USER alias [%ld:%08lx]\n",
 						       vmaring->vm_mm->context, start);
 #endif
@@ -2057,11 +2090,12 @@ static void srmmu_vac_update_mmu_cache(struct vm_area_struct * vma,
 			}
 		} while ((vmaring = vmaring->vm_next_share) != NULL);
 
-		if(alias_found && !(pte_val(pte) & _SUN4C_PAGE_NOCACHE)) {
+		if(alias_found && ((pte_val(pte) & SRMMU_CACHE) != 0)) {
 			pgdp = srmmu_pgd_offset(vma->vm_mm, address);
-			ptep = srmmu_pte_offset((pmd_t *) pgdp, address);
+			pmdp = srmmu_pmd_offset(pgdp, address);
+			ptep = srmmu_pte_offset(pmdp, address);
 			flush_cache_page(vma, address);
-			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_NOCACHE);
+			set_pte(ptep, __pte((pte_val(*ptep) & ~SRMMU_CACHE)));
 			flush_tlb_page(vma, address);
 		}
 	done:
@@ -2086,7 +2120,9 @@ static void hypersparc_destroy_context(struct mm_struct *mm)
 		hypersparc_flush_page_to_ram((unsigned long)ctxp);
 
 		flush_tlb_mm(mm);
+		spin_lock(&srmmu_context_spinlock);
 		free_context(mm->context);
+		spin_unlock(&srmmu_context_spinlock);
 		mm->context = NO_CONTEXT;
 	}
 }
@@ -2178,6 +2214,7 @@ __initfunc(static void poke_hypersparc(void))
 __initfunc(static void init_hypersparc(void))
 {
 	srmmu_name = "ROSS HyperSparc";
+	srmmu_modtype = HyperSparc;
 
 	init_vac_layout();
 
@@ -2306,21 +2343,14 @@ __initfunc(static void init_cypress_605(unsigned long mrev))
 
 __initfunc(static void poke_swift(void))
 {
-	unsigned long mreg = srmmu_get_mmureg();
+	unsigned long mreg;
 
 	/* Clear any crap from the cache or else... */
-	swift_idflash_clear();
-	mreg |= (SWIFT_IE | SWIFT_DE); /* I & D caches on */
+	swift_flush_cache_all();
 
-	/* The Swift branch folding logic is completely broken.  At
-	 * trap time, if things are just right, if can mistakenly
-	 * think that a trap is coming from kernel mode when in fact
-	 * it is coming from user mode (it mis-executes the branch in
-	 * the trap code).  So you see things like crashme completely
-	 * hosing your machine which is completely unacceptable.  Turn
-	 * this shit off... nice job Fujitsu.
-	 */
-	mreg &= ~(SWIFT_BF);
+	/* Enable I & D caches */
+	mreg = srmmu_get_mmureg();
+	mreg |= (SWIFT_IE | SWIFT_DE);
 	srmmu_set_mmureg(mreg);
 }
 
@@ -2377,18 +2407,32 @@ __initfunc(static void init_swift(void))
 	BTFIXUPSET_CALL(flush_cache_page, swift_flush_cache_page, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_cache_range, swift_flush_cache_range, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(flush_chunk, swift_flush_chunk, BTFIXUPCALL_NOP); /* local flush _only_ */
+	BTFIXUPSET_CALL(flush_chunk, swift_flush_chunk, BTFIXUPCALL_NORM); /* local flush _only_ */
 
 	BTFIXUPSET_CALL(flush_tlb_all, swift_flush_tlb_all, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_tlb_mm, swift_flush_tlb_mm, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_tlb_page, swift_flush_tlb_page, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_tlb_range, swift_flush_tlb_range, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(flush_page_to_ram, swift_flush_page_to_ram, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(flush_page_to_ram, swift_flush_page_to_ram, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_sig_insns, swift_flush_sig_insns, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_page_for_dma, swift_flush_page_for_dma, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(update_mmu_cache, swift_update_mmu_cache, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(update_mmu_cache, srmmu_update_mmu_cache, BTFIXUPCALL_NOP);
+
+	BTFIXUPSET_CALL(sparc_update_rootmmu_dir, swift_update_rootmmu_dir, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(set_pte, srmmu_set_pte_nocache_swift, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(init_new_context, swift_init_new_context, BTFIXUPCALL_NORM);
+
+#if 1
+	/* If granular flushes are ever cured and reenabled in
+	 * swift.S, revert this setting back to non-global iommu
+	 * cache flushes. -DaveM
+	 */
+	flush_page_for_dma_global = 1;
+#else
+	flush_page_for_dma_global = 0;
+#endif
 
 	/* Are you now convinced that the Swift is one of the
 	 * biggest VLSI abortions of all time?  Bravo Fujitsu!
@@ -2546,7 +2590,7 @@ __initfunc(static void init_turbosparc(void))
 	BTFIXUPSET_CALL(flush_chunk, turbosparc_flush_chunk, BTFIXUPCALL_NORM);
 
 	BTFIXUPSET_CALL(flush_sig_insns, turbosparc_flush_sig_insns, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(flush_page_for_dma, turbosparc_flush_page_for_dma, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(flush_page_for_dma, turbosparc_flush_page_for_dma, BTFIXUPCALL_NORM);
 
 	poke_srmmu = poke_turbosparc;
 }
@@ -2577,7 +2621,7 @@ __initfunc(static void init_tsunami(void))
 	BTFIXUPSET_CALL(flush_cache_page, tsunami_flush_cache_page, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_cache_range, tsunami_flush_cache_range, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(flush_chunk, tsunami_flush_chunk, BTFIXUPCALL_NOP); /* local flush _only_ */
+	BTFIXUPSET_CALL(flush_chunk, tsunami_flush_chunk, BTFIXUPCALL_NORM); /* local flush _only_ */
 
 	BTFIXUPSET_CALL(flush_tlb_all, tsunami_flush_tlb_all, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_tlb_mm, tsunami_flush_tlb_mm, BTFIXUPCALL_NORM);
@@ -2589,6 +2633,8 @@ __initfunc(static void init_tsunami(void))
 	BTFIXUPSET_CALL(flush_page_for_dma, tsunami_flush_page_for_dma, BTFIXUPCALL_NORM);
 
 	poke_srmmu = poke_tsunami;
+
+	tsunami_setup_blockops();
 }
 
 __initfunc(static void poke_viking(void))
@@ -2652,15 +2698,8 @@ __initfunc(static void init_viking(void))
 
 	/* Ahhh, the viking.  SRMMU VLSI abortion number two... */
 	if(mreg & VIKING_MMODE) {
-		unsigned long bpreg;
-
 		srmmu_name = "TI Viking";
 		viking_mxcc_present = 0;
-
-		bpreg = viking_get_bpreg();
-		bpreg &= ~(VIKING_ACTION_MIX);
-		viking_set_bpreg(bpreg);
-
 		msi_set_sync();
 
 		BTFIXUPSET_CALL(set_pte, srmmu_set_pte_nocache_viking, BTFIXUPCALL_NORM);
@@ -2678,8 +2717,7 @@ __initfunc(static void init_viking(void))
 		 * which we use the IOMMU.
 		 */
 		BTFIXUPSET_CALL(flush_page_for_dma, viking_flush_page, BTFIXUPCALL_NORM);
-		/* Also, this is so far the only chip which actually uses
-		   the page argument to flush_page_for_dma */
+
 		flush_page_for_dma_global = 0;
 	} else {
 		srmmu_name = "TI Viking/MXCC";
@@ -2691,16 +2729,25 @@ __initfunc(static void init_viking(void))
 		BTFIXUPSET_CALL(flush_page_for_dma, viking_flush_page_for_dma, BTFIXUPCALL_NOP);
 	}
 
-	/* flush_cache_* are nops */
-	BTFIXUPSET_CALL(flush_cache_all, viking_flush_cache_all, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(flush_cache_mm, viking_flush_cache_mm, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(flush_cache_page, viking_flush_cache_page, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(flush_cache_range, viking_flush_cache_range, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(flush_cache_all, viking_flush_cache_all, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(flush_cache_mm, viking_flush_cache_mm, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(flush_cache_page, viking_flush_cache_page, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(flush_cache_range, viking_flush_cache_range, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(flush_tlb_all, viking_flush_tlb_all, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_mm, viking_flush_tlb_mm, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_page, viking_flush_tlb_page, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_range, viking_flush_tlb_range, BTFIXUPCALL_NORM);
+#ifdef __SMP__
+	if (sparc_cpu_model == sun4d) {
+		BTFIXUPSET_CALL(flush_tlb_all, sun4dsmp_flush_tlb_all, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_mm, sun4dsmp_flush_tlb_mm, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_page, sun4dsmp_flush_tlb_page, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_range, sun4dsmp_flush_tlb_range, BTFIXUPCALL_NORM);
+	} else
+#endif
+	{
+		BTFIXUPSET_CALL(flush_tlb_all, viking_flush_tlb_all, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_mm, viking_flush_tlb_mm, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_page, viking_flush_tlb_page, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_range, viking_flush_tlb_range, BTFIXUPCALL_NORM);
+	}
 
 	BTFIXUPSET_CALL(flush_page_to_ram, viking_flush_page_to_ram, BTFIXUPCALL_NOP);
 	BTFIXUPSET_CALL(flush_sig_insns, viking_flush_sig_insns, BTFIXUPCALL_NOP);
@@ -3027,10 +3074,12 @@ __initfunc(void ld_mmu_srmmu(void))
 	BTFIXUPSET_CALL(flush_cache_mm, smp_flush_cache_mm, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_cache_range, smp_flush_cache_range, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_cache_page, smp_flush_cache_page, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_all, smp_flush_tlb_all, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_mm, smp_flush_tlb_mm, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_range, smp_flush_tlb_range, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(flush_tlb_page, smp_flush_tlb_page, BTFIXUPCALL_NORM);
+	if (sparc_cpu_model != sun4d) {
+		BTFIXUPSET_CALL(flush_tlb_all, smp_flush_tlb_all, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_mm, smp_flush_tlb_mm, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_range, smp_flush_tlb_range, BTFIXUPCALL_NORM);
+		BTFIXUPSET_CALL(flush_tlb_page, smp_flush_tlb_page, BTFIXUPCALL_NORM);
+	}
 	BTFIXUPSET_CALL(flush_page_to_ram, smp_flush_page_to_ram, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_sig_insns, smp_flush_sig_insns, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(flush_page_for_dma, smp_flush_page_for_dma, BTFIXUPCALL_NORM);

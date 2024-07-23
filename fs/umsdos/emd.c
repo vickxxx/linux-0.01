@@ -250,12 +250,8 @@ parent->d_name.name, demd->d_name.name));
 		printk (KERN_WARNING
 			"umsdos_make_emd: create %s/%s failed, err=%d\n",
 			parent->d_name.name, demd->d_name.name, err);
-		goto out_dput;
 	}
 out_set:
-	parent->d_inode->u.umsdos_i.i_emd_dir = demd->d_inode->i_ino;
-
-out_dput:
 	dput(demd);
 out:
 	return err;
@@ -277,6 +273,16 @@ int umsdos_emd_dir_readentry (struct file *filp, struct umsdos_dirent *entry)
 	Printk ((KERN_DEBUG "umsdos_emd_dir_readentry /mn/: entering.\n"));
 
 	ret = umsdos_emd_dir_read (filp, (char *) entry, UMSDOS_REC_SIZE);
+
+	/* if this is an invalid entry (invalid name length), ignore it */
+	if( entry->name_len > UMSDOS_MAXNAME )
+	{
+		printk (KERN_WARNING "Ignoring invalid EMD entry with size %d\n", entry->name_len);
+		entry->name_len = 0; 
+		ret = -ENAMETOOLONG; /* notify umssync(8) code that something is wrong */
+	}
+
+
 	if (ret == 0) {	/* if no error */
 		/* Variable size record. Maybe, we have to read some more */
 		int recsize = umsdos_evalrecsize (entry->name_len);
@@ -291,6 +297,7 @@ recsize, UMSDOS_REC_SIZE));
 	}
 	Printk (("umsdos_emd_dir_readentry /mn/: ret=%d.\n", ret));
 	if (entry && ret == 0) {
+		entry->name[entry->name_len]='\0';
 Printk (("umsdos_emd_dir_readentry /mn/: returning len=%d,name=%.*s\n",
 (int) entry->name_len, (int) entry->name_len, entry->name));
 	}

@@ -1,9 +1,12 @@
 /*
  * Permedia2 framebuffer driver.
  * Copyright (c) 1998-1999 Ilario Nardinocchi (nardinoc@CS.UniBO.IT)
+ * Copyright (c) 1999 Jakub Jelinek (jakub@redhat.com)
  * Based on linux/drivers/video/skeletonfb.c by Geert Uytterhoeven.
  * --------------------------------------------------------------------------
- * $Id: pm2fb.c,v 1.1.2.1 1999/01/12 19:53:02 geert Exp $
+ * $Id: pm2fb.c,v 1.163 1999/02/21 14:06:49 illo Exp $
+ * --------------------------------------------------------------------------
+ * TODO multiple boards support
  * --------------------------------------------------------------------------
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file README.legal in the main directory of this archive
@@ -26,20 +29,35 @@
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/uaccess.h>
 #include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
 #include <video/fbcon-cfb16.h>
 #include <video/fbcon-cfb24.h>
 #include <video/fbcon-cfb32.h>
-#include <asm/io.h>
-#include <asm/uaccess.h>
 #include "pm2fb.h"
-#ifdef CONFIG_FB_PM2_CVPPC
 #include "cvisionppc.h"
+#ifdef __sparc__
+#include <asm/pbm.h>
+#include <asm/fbio.h>
 #endif
 
 #if !defined(__LITTLE_ENDIAN) && !defined(__BIG_ENDIAN)
 #error	"The endianness of the target host has not been defined."
+#endif
+
+#if defined(__BIG_ENDIAN) && !defined(__sparc__)
+#define PM2FB_BE_APERTURE
+#endif
+
+/* Need to debug this some more */
+#undef PM2FB_HW_CURSOR
+
+#if defined(CONFIG_FB_PM2_PCI) && !defined(CONFIG_PCI)
+#undef CONFIG_FB_PM2_PCI
+#warning "support for Permedia2 PCI boards with no generic PCI support!"
 #endif
 
 #undef PM2FB_MASTER_DEBUG
@@ -52,12 +70,20 @@
 #define PICOS2KHZ(a) (1000000000UL/(a))
 #define KHZ2PICOS(a) (1000000000UL/(a))
 
-#ifdef CONFIG_APUS
-#define MMAP(a,b)	(unsigned char* )kernel_map((unsigned long )(a), \
-					b, KERNELMAP_NOCACHE_SER, NULL)
-#else
-#define MMAP(a,b)	ioremap(a, b)
-#endif
+/*
+ * The _DEFINITIVE_ memory mapping/unmapping functions.
+ * This is due to the fact that they're changing soooo often...
+ */
+#define MMAP(a,b)	ioremap((unsigned long )(a), b)
+#define UNMAP(a,b)	iounmap(a)
+
+/*
+ * The _DEFINITIVE_ memory i/o barrier functions.
+ * This is due to the fact that they're changing soooo often...
+ */
+#define DEFW()		wmb()
+#define DEFR()		rmb()
+#define DEFRW()		mb()
 
 #ifndef MIN
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -67,35 +93,41 @@
 #define MAX(a,b) ((a)>(b)?(a):(b))
 #endif
 
-#ifndef __powerpc__
-#define eieio()
-#endif
-
 struct pm2fb_par {
-	unsigned long pixclock;		/* pixclock in KHz */
-	unsigned long width;		/* width of virtual screen */
-	unsigned long height;		/* height of virtual screen */
-	unsigned long hsstart;		/* horiz. sync start */
-	unsigned long hsend;		/* horiz. sync end */
-	unsigned long hbend;		/* horiz. blank end (also gate end) */
-	unsigned long htotal;		/* total width (w/ sync & blank) */
-	unsigned long vsstart;		/* vert. sync start */
-	unsigned long vsend;		/* vert. sync end */
-	unsigned long vbend;		/* vert. blank end */
-	unsigned long vtotal;		/* total height (w/ sync & blank) */
-	unsigned long stride;		/* screen stride */
-	unsigned long base;		/* screen base (xoffset+yoffset) */
-	unsigned long depth;		/* screen depth (8, 16, 24 or 32) */
-	unsigned long video;		/* video control (hsync,vsync) */
+	u32 pixclock;		/* pixclock in KHz */
+	u32 width;		/* width of virtual screen */
+	u32 height;		/* height of virtual screen */
+	u32 hsstart;		/* horiz. sync start */
+	u32 hsend;		/* horiz. sync end */
+	u32 hbend;		/* horiz. blank end (also gate end) */
+	u32 htotal;		/* total width (w/ sync & blank) */
+	u32 vsstart;		/* vert. sync start */
+	u32 vsend;		/* vert. sync end */
+	u32 vbend;		/* vert. blank end */
+	u32 vtotal;		/* total height (w/ sync & blank) */
+	u32 stride;		/* screen stride */
+	u32 base;		/* screen base (xoffset+yoffset) */
+	u32 depth;		/* screen depth (8, 16, 24 or 32) */
+	u32 video;		/* video control (hsync,vsync) */
 };
 
-#define OPTF_OLD_MEM		0x00000001
-#define OPTF_YPAN		0x00000002
+#define OPTF_OLD_MEM		(1L<<0)
+#define OPTF_YPAN		(1L<<1)
+#define OPTF_VIRTUAL		(1L<<2)
+#define OPTF_USER		(1L<<3)
 static struct {
 	char font[40];
-	unsigned long flags;
+	u32 flags;
 	struct pm2fb_par user_mode;
-} pm2fb_options;
+} pm2fb_options =
+#ifdef __sparc__
+	/* For some reason Raptor is not happy with the low-end mode */
+	{"\0", 0L, {31499,640,480,4,20,50,209,0,3,20,499,80,0,8,121}};
+#else
+	{"\0", 0L, {25174,640,480,4,28,40,199,9,11,45,524,80,0,8,121}};
+#endif
+
+static char curblink __initdata = 1;
 
 static const struct {
 	char name[16];
@@ -164,15 +196,42 @@ static const struct {
 	{"\0", },
 };
 
+#ifdef CONFIG_FB_PM2_PCI
+struct pm2pci_par {
+	u32 mem_config;
+	u32 mem_control;
+	u32 boot_address;
+	struct pci_dev* dev;
+};
+#endif
+
+#define DEFAULT_CURSOR_BLINK_RATE       (20)
+#define CURSOR_DRAW_DELAY               (2)
+
+struct pm2_cursor {
+    int	enable;
+    int on;
+    int vbl_cnt;
+    int blink_rate;
+    struct {
+        u16 x, y;
+    } pos, hot, size;
+    u8 color[6];
+    u8 bits[8][64];
+    u8 mask[8][64];
+    struct timer_list *timer;
+};
+
 static const char permedia2_name[16]="Permedia2";
 
 static struct pm2fb_info {
 	struct fb_info_gen gen;
 	int board;			/* Permedia2 board index (see
 					   board_table[] below) */
+	pm2type_t type;
 	struct {
 		unsigned char* fb_base;	/* framebuffer memory base */
-		unsigned long  fb_size;	/* framebuffer memory size */
+		u32 fb_size;		/* framebuffer memory size */
 		unsigned char* rg_base;	/* register memory base */
 		unsigned char* p_fb;	/* physical address of frame buffer */
 		unsigned char* v_fb;	/* virtual address of frame buffer */
@@ -186,10 +245,13 @@ static struct pm2fb_info {
 #ifdef CONFIG_FB_PM2_CVPPC
 		struct cvppc_par cvppc;	/* CVisionPPC data */
 #endif
+#ifdef CONFIG_FB_PM2_PCI
+		struct pm2pci_par pci;	/* Permedia2 PCI boards data */
+#endif
 	} board_par;
 	struct pm2fb_par current_par;	/* displayed screen */
 	int current_par_valid;
-	unsigned long memclock;		/* memclock (set by the per-board
+	u32 memclock;			/* memclock (set by the per-board
 					   		init routine) */
 	struct display disp;
 	struct {
@@ -209,11 +271,29 @@ static struct pm2fb_info {
 		u32 cmap32[16];
 #endif
 	} cmap;
+	struct pm2_cursor *cursor;
 } fb_info;
 
 #ifdef CONFIG_FB_PM2_CVPPC
 static int cvppc_detect(struct pm2fb_info*);
 static void cvppc_init(struct pm2fb_info*);
+#endif
+
+#ifdef CONFIG_FB_PM2_PCI
+static int pm2pci_detect(struct pm2fb_info*);
+static void pm2pci_init(struct pm2fb_info*);
+#endif
+
+#ifdef PM2FB_HW_CURSOR
+static void pm2fb_cursor(struct display *p, int mode, int x, int y);
+static int pm2fb_set_font(struct display *d, int width, int height);
+static struct pm2_cursor *pm2_init_cursor(struct pm2fb_info *fb);
+static void pm2v_set_cursor_color(struct pm2fb_info *fb, u8 *red, u8 *green, u8 *blue);
+static void pm2v_set_cursor_shape(struct pm2fb_info *fb);
+static u8 cursor_color_map[2] = { 0, 0xff };
+#else
+#define pm2fb_cursor NULL
+#define pm2fb_set_font NULL
 #endif
 
 /*
@@ -236,6 +316,9 @@ static const struct {
 	void (*cleanup)(struct pm2fb_info*);
 	char name[32];
 } board_table[] = {
+#ifdef CONFIG_FB_PM2_PCI
+	{ pm2pci_detect, pm2pci_init, NULL, "Permedia2 PCI board" },
+#endif
 #ifdef CONFIG_FB_PM2_CVPPC
 	{ cvppc_detect, cvppc_init, NULL, "CVisionPPC/BVisionPPC" },
 #endif
@@ -247,8 +330,8 @@ static const struct {
  */
 #define PACKPP(p0,p1,p2)	(((p2)<<6)|((p1)<<3)|(p0))
 static const struct {
-	unsigned short width;
-	unsigned short pp;
+	u16 width;
+	u16 pp;
 } pp_table[] = {
 	{ 32,	PACKPP(1, 0, 0) }, { 64,	PACKPP(1, 1, 0) },
 	{ 96,	PACKPP(1, 1, 1) }, { 128,	PACKPP(2, 1, 1) },
@@ -286,14 +369,14 @@ static int pm2fb_setcolreg(unsigned regno,
 static int pm2fb_blank(int blank_mode, struct fb_info_gen* info);
 static int pm2fb_pan_display(const struct fb_var_screeninfo* var,
 					struct fb_info_gen* info);
-static void pm2fb_dispsw(const void* par, struct display* disp,
+static void pm2fb_set_disp(const void* par, struct display* disp,
 						struct fb_info_gen* info);
 
 static struct fbgen_hwswitch pm2fb_hwswitch={
 	pm2fb_detect, pm2fb_encode_fix, pm2fb_decode_var,
 	pm2fb_encode_var, pm2fb_get_par, pm2fb_set_par,
 	pm2fb_getcolreg, pm2fb_setcolreg, pm2fb_pan_display,
-	pm2fb_blank, pm2fb_dispsw
+	pm2fb_blank, pm2fb_set_disp
 };
 
 static int pm2fb_open(struct fb_info* info, int user);
@@ -302,68 +385,101 @@ static int pm2fb_release(struct fb_info* info, int user);
 static struct fb_ops pm2fb_ops={
 	pm2fb_open, pm2fb_release, fbgen_get_fix, fbgen_get_var,
 	fbgen_set_var, fbgen_get_cmap, fbgen_set_cmap, fbgen_pan_display,
-	NULL /* fb_ioctl() */, NULL /* fb_mmap() */
+	NULL /* fb_ioctl() */, NULL /* fb_mmap() */, NULL /* fb_rasterimg */,
 };
 
 /***************************************************************************
  * Begin of Permedia2 specific functions
  ***************************************************************************/
 
-inline static unsigned long RD32(unsigned char* base, long off) {
+inline static u32 RD32(unsigned char* base, s32 off) {
 
-	return *((volatile unsigned long* )(base+off));
+	return readl(base+off);
 }
 
-inline static void WR32(unsigned char* base, long off, unsigned long v) {
+inline static void WR32(unsigned char* base, s32 off, u32 v) {
 
-	*((volatile unsigned long* )(base+off))=v;
+	writel(v, base+off);
 }
 
-inline static unsigned long pm2_RD(struct pm2fb_info* p, long off) {
+inline static u32 pm2_RD(struct pm2fb_info* p, s32 off) {
 
 	return RD32(p->regions.v_regs, off);
 }
 
-inline static void pm2_WR(struct pm2fb_info* p, long off, unsigned long v) {
+inline static void pm2_WR(struct pm2fb_info* p, s32 off, u32 v) {
 
 	WR32(p->regions.v_regs, off, v);
 }
 
-inline static unsigned long pm2_RDAC_RD(struct pm2fb_info* p, long idx) {
+inline static u32 pm2_RDAC_RD(struct pm2fb_info* p, s32 idx) {
 
-	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
-	eieio();
-	return pm2_RD(p, PM2R_RD_INDEXED_DATA);
+	int index = PM2R_RD_INDEXED_DATA;
+	switch (p->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+		index = PM2VR_RD_INDEXED_DATA;
+		break;
+	}	
+	DEFRW();
+	return pm2_RD(p, index);
 }
 
-inline static void pm2_RDAC_WR(struct pm2fb_info* p, long idx,
-						unsigned long v) {
+inline static void pm2_RDAC_WR(struct pm2fb_info* p, s32 idx,
+						u32 v) {
 
-	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
-	eieio();
-	pm2_WR(p, PM2R_RD_INDEXED_DATA, v);
+	int index = PM2R_RD_INDEXED_DATA;
+	switch (p->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+		index = PM2VR_RD_INDEXED_DATA;
+		break;
+	}	
+	DEFRW();
+	pm2_WR(p, index, v);
+}
+
+inline static u32 pm2v_RDAC_RD(struct pm2fb_info* p, s32 idx) {
+
+	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+	DEFRW();
+	return pm2_RD(p, PM2VR_RD_INDEXED_DATA);
+}
+
+inline static void pm2v_RDAC_WR(struct pm2fb_info* p, s32 idx,
+						u32 v) {
+
+	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+	DEFRW();
+	pm2_WR(p, PM2VR_RD_INDEXED_DATA, v);
 }
 
 #ifdef CONFIG_FB_PM2_FIFO_DISCONNECT
 #define WAIT_FIFO(p,a)
 #else
-inline static void WAIT_FIFO(struct pm2fb_info* p, unsigned long a) {
+inline static void WAIT_FIFO(struct pm2fb_info* p, u32 a) {
 
 	while(pm2_RD(p, PM2R_IN_FIFO_SPACE)<a);
-	eieio();
+	DEFRW();
 }
 #endif
 
-static unsigned long partprod(unsigned long xres) {
+static u32 partprod(u32 xres) {
 	int i;
 
 	for (i=0; pp_table[i].width && pp_table[i].width!=xres; i++);
 	if (!pp_table[i].width)
-		DPRINTK("invalid width %lu\n", xres);
+		DPRINTK("invalid width %u\n", xres);
 	return pp_table[i].pp;
 }
 
-static unsigned long to3264(unsigned long timing, int bpp, int is64) {
+static u32 to3264(u32 timing, int bpp, int is64) {
 
 	switch (bpp) {
 		case 8:
@@ -383,7 +499,7 @@ static unsigned long to3264(unsigned long timing, int bpp, int is64) {
 	return timing;
 }
 
-static unsigned long from3264(unsigned long timing, int bpp, int is64) {
+static u32 from3264(u32 timing, int bpp, int is64) {
 
 	switch (bpp) {
 		case 8:
@@ -403,14 +519,14 @@ static unsigned long from3264(unsigned long timing, int bpp, int is64) {
 	return timing;
 }
 
-static void mnp(unsigned long clk, unsigned char* mm, unsigned char* nn,
-							unsigned char* pp) {
+static void pm2_mnp(u32 clk, unsigned char* mm, unsigned char* nn,
+		unsigned char* pp) {
 	unsigned char m;
 	unsigned char n;
 	unsigned char p;
-	unsigned long f;
-	long current;
-	long delta=100000;
+	u32 f;
+	s32 curr;
+	s32 delta=100000;
 
 	*mm=*nn=*pp=0;
 	for (n=2; n<15; n++) {
@@ -418,9 +534,9 @@ static void mnp(unsigned long clk, unsigned char* mm, unsigned char* nn,
 			f=PM2_REFERENCE_CLOCK*m/n;
 			if (f>=150000 && f<=300000) {
 				for (p=0; p<5; p++, f>>=1) {
-					current=clk>f?clk-f:f-clk;
-					if (current<delta) {
-						delta=current;
+					curr=clk>f?clk-f:f-clk;
+					if (curr<delta) {
+						delta=curr;
 						*mm=m;
 						*nn=n;
 						*pp=p;
@@ -431,66 +547,116 @@ static void mnp(unsigned long clk, unsigned char* mm, unsigned char* nn,
 	}
 }
 
+static void pm2v_mnp(u32 clk, unsigned char* mm, unsigned char* nn,
+		unsigned char* pp) {
+	unsigned char m;
+	unsigned char n;
+	unsigned char p;
+	u32 f;
+	s32 delta=1000;
+
+	*mm=*nn=*pp=0;
+	for (n=1; n; n++) {
+		for (m=1; m; m++) {
+			for (p=0; p<2; p++) {
+				f=PM2_REFERENCE_CLOCK*n/(m * (1<<(p+1)));
+				if (clk>f-delta && clk<f+delta) {
+					delta=clk>f?clk-f:f-clk;
+					*mm=m;
+					*nn=n;
+					*pp=p;
+				}
+			}
+		}
+	}
+}
+
 static void wait_pm2(struct pm2fb_info* i) {
 
 	WAIT_FIFO(i, 1);
 	pm2_WR(i, PM2R_SYNC, 0);
-	eieio();
+	DEFRW();
 	do {
 		while (pm2_RD(i, PM2R_OUT_FIFO_WORDS)==0);
-		eieio();
+		DEFR();
 	} while (pm2_RD(i, PM2R_OUT_FIFO)!=PM2TAG(PM2R_SYNC));
 }
 
-static void set_memclock(struct pm2fb_info* info, unsigned long clk) {
+static void pm2_set_memclock(struct pm2fb_info* info, u32 clk) {
 	int i;
 	unsigned char m, n, p;
 
-	mnp(clk, &m, &n, &p);
-	WAIT_FIFO(info, 5);
+	pm2_mnp(clk, &m, &n, &p);
+	WAIT_FIFO(info, 10);
 	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_3, 6);
-	eieio();
+	DEFW();
 	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_1, m);
 	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_2, n);
-	eieio();
+	DEFW();
 	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_3, 8|p);
-	eieio();
+	DEFW();
 	pm2_RDAC_RD(info, PM2I_RD_MEMORY_CLOCK_STATUS);
-	eieio();
+	DEFR();
 	for (i=256; i &&
 		!(pm2_RD(info, PM2R_RD_INDEXED_DATA)&PM2F_PLL_LOCKED); i--);
 }
 
-static void set_pixclock(struct pm2fb_info* info, unsigned long clk) {
+static void pm2_set_pixclock(struct pm2fb_info* info, u32 clk) {
 	int i;
 	unsigned char m, n, p;
 
-	mnp(clk, &m, &n, &p);
-	WAIT_FIFO(info, 5);
-	pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 0);
-	eieio();
-	pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A1, m);
-	pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A2, n);
-	eieio();
-	pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 8|p);
-	eieio();
-	pm2_RDAC_RD(info, PM2I_RD_PIXEL_CLOCK_STATUS);
-	eieio();
-	for (i=256; i &&
-		!(pm2_RD(info, PM2R_RD_INDEXED_DATA)&PM2F_PLL_LOCKED); i--);
+	switch (info->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_mnp(clk, &m, &n, &p);
+		WAIT_FIFO(info, 10);
+		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 0);
+		DEFW();
+		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A1, m);
+		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A2, n);
+		DEFW();
+		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 8|p);
+		DEFW();
+		pm2_RDAC_RD(info, PM2I_RD_PIXEL_CLOCK_STATUS);
+		DEFR();
+		for (i=256; i &&
+		     !(pm2_RD(info, PM2R_RD_INDEXED_DATA)&PM2F_PLL_LOCKED); i--);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2v_mnp(clk/2, &m, &n, &p);
+		WAIT_FIFO(info, 8);
+		pm2_WR(info, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CLK0_PRESCALE >> 8);
+		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_PRESCALE, m);
+		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_FEEDBACK, n);
+		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_POSTSCALE, p);
+		pm2_WR(info, PM2VR_RD_INDEX_HIGH, 0);
+		break;
+	}
+}
+
+static void clear_palette(struct pm2fb_info* p) {
+	int i=256;
+
+	WAIT_FIFO(p, 1);
+	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, 0);
+	DEFW();
+	while (i--) {
+		WAIT_FIFO(p, 3);
+		pm2_WR(p, PM2R_RD_PALETTE_DATA, 0);
+		pm2_WR(p, PM2R_RD_PALETTE_DATA, 0);
+		pm2_WR(p, PM2R_RD_PALETTE_DATA, 0);
+	}
 }
 
 static void set_color(struct pm2fb_info* p, unsigned char regno,
 			unsigned char r, unsigned char g, unsigned char b) {
 
 	WAIT_FIFO(p, 4);
-	eieio();
 	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, regno);
-	eieio();
+	DEFW();
 	pm2_WR(p, PM2R_RD_PALETTE_DATA, r);
-	eieio();
+	DEFW();
 	pm2_WR(p, PM2R_RD_PALETTE_DATA, g);
-	eieio();
+	DEFW();
 	pm2_WR(p, PM2R_RD_PALETTE_DATA, b);
 }
 
@@ -498,7 +664,7 @@ static void set_aperture(struct pm2fb_info* i, struct pm2fb_par* p) {
 
 	WAIT_FIFO(i, 2);
 #ifdef __LITTLE_ENDIAN
-	pm2_WR(i, PM2R_APERTURE_ONE, 0);	/* FIXME */
+	pm2_WR(i, PM2R_APERTURE_ONE, 0);
 	pm2_WR(i, PM2R_APERTURE_TWO, 0);
 #else
 	switch (p->depth) {
@@ -520,33 +686,48 @@ static void set_aperture(struct pm2fb_info* i, struct pm2fb_par* p) {
 }
 
 static void set_screen(struct pm2fb_info* i, struct pm2fb_par* p) {
-	unsigned long clrmode=0;
-	unsigned long txtmap=0;
-	unsigned long xres;
+	u32 clrmode=0;
+	u32 txtmap=0;
+	u32 pixsize=0;
+	u32 clrformat=0;
+	u32 xres;
+	u32 video, tmp;
 
+	if (i->type == PM2_TYPE_PERMEDIA2V) {
+		WAIT_FIFO(i, 1);
+		pm2_WR(i, PM2VR_RD_INDEX_HIGH, 0);
+	}
 	xres=(p->width+31)&~31;
 	set_aperture(i, p);
-	WAIT_FIFO(i, 22);
+	DEFRW();
+	WAIT_FIFO(i, 27);
 	pm2_RDAC_WR(i, PM2I_RD_COLOR_KEY_CONTROL, p->depth==8?0:
 						PM2F_COLOR_KEY_TEST_OFF);
 	switch (p->depth) {
 		case 8:
 			pm2_WR(i, PM2R_FB_READ_PIXEL, 0);
+			clrformat=0x0e;
 			break;
 		case 16:
 			pm2_WR(i, PM2R_FB_READ_PIXEL, 1);
 			clrmode=PM2F_RD_TRUECOLOR|0x06;
 			txtmap=PM2F_TEXTEL_SIZE_16;
+			pixsize=1;
+			clrformat=0x70;
 			break;
 		case 32:
 			pm2_WR(i, PM2R_FB_READ_PIXEL, 2);
 			clrmode=PM2F_RD_TRUECOLOR|0x08;
 			txtmap=PM2F_TEXTEL_SIZE_32;
+			pixsize=2;
+			clrformat=0x20;
 			break;
 		case 24:
 			pm2_WR(i, PM2R_FB_READ_PIXEL, 4);
 			clrmode=PM2F_RD_TRUECOLOR|0x09;
 			txtmap=PM2F_TEXTEL_SIZE_24;
+			pixsize=4;
+			clrformat=0x20;
 			break;
 	}
 	pm2_WR(i, PM2R_SCREEN_SIZE, (p->height<<16)|p->width);
@@ -565,13 +746,94 @@ static void set_screen(struct pm2fb_info* i, struct pm2fb_par* p) {
 	pm2_WR(i, PM2R_VS_END, p->vsend);
 	pm2_WR(i, PM2R_VB_END, p->vbend);
 	pm2_WR(i, PM2R_SCREEN_STRIDE, p->stride);
-	eieio();
+	DEFW();
 	pm2_WR(i, PM2R_SCREEN_BASE, p->base);
-	pm2_RDAC_WR(i, PM2I_RD_COLOR_MODE, PM2F_RD_COLOR_MODE_RGB|
-						PM2F_RD_GUI_ACTIVE|clrmode);
-	pm2_WR(i, PM2R_VIDEO_CONTROL, p->video);
-	set_pixclock(i, p->pixclock);
+	/* HW cursor needs /VSYNC for recognizing vert retrace */
+	video=p->video & ~(PM2F_HSYNC_ACT_LOW|PM2F_VSYNC_ACT_LOW);
+	video|=PM2F_HSYNC_ACT_HIGH|PM2F_VSYNC_ACT_HIGH;
+	switch (i->type) {
+	case PM2_TYPE_PERMEDIA2:
+		tmp = PM2F_RD_PALETTE_WIDTH_8;
+		pm2_RDAC_WR(i, PM2I_RD_COLOR_MODE, PM2F_RD_COLOR_MODE_RGB|
+						   PM2F_RD_GUI_ACTIVE|clrmode);
+		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 4; /* invert hsync */
+		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 8; /* invert vsync */
+		pm2_RDAC_WR(i, PM2I_RD_MISC_CONTROL, tmp);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		tmp = 0;
+		pm2v_RDAC_WR(i, PM2VI_RD_PIXEL_SIZE, pixsize);
+		pm2v_RDAC_WR(i, PM2VI_RD_COLOR_FORMAT, clrformat);
+		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 1; /* invert hsync */
+		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 4; /* invert vsync */
+		pm2v_RDAC_WR(i, PM2VI_RD_SYNC_CONTROL, tmp);
+		pm2v_RDAC_WR(i, PM2VI_RD_MISC_CONTROL, 1);
+		break;
+	}
+	pm2_WR(i, PM2R_VIDEO_CONTROL, video);
+	pm2_set_pixclock(i, p->pixclock);
 };
+
+/*
+ * copy with packed pixels (8/16bpp only).
+ */
+static void pm2fb_pp_copy(struct pm2fb_info* i, s32 xsrc, s32 ysrc,
+					s32 x, s32 y, s32 w, s32 h) {
+	s32 scale=i->current_par.depth==8?2:1;
+	s32 offset;
+
+	if (!w || !h)
+		return;
+	WAIT_FIFO(i, 7);
+	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
+				PM2F_CONFIG_FB_PACKED_DATA|
+				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
+	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
+	pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
+						((xsrc-x)&0xfff));
+	offset=(x&0x3)-(xsrc&0x3);
+	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|(x>>scale));
+	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|((w+7)>>scale));
+	pm2_WR(i, PM2R_PACKED_DATA_LIMITS, (offset<<29)|(x<<16)|(x+w));
+	DEFW();
+	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
+				(x<xsrc?PM2F_INCREASE_X:0)|
+				(y<ysrc?PM2F_INCREASE_Y:0));
+	wait_pm2(i);
+}
+
+/*
+ * block operation. copy=0: rectangle fill, copy=1: rectangle copy.
+ */
+static void pm2fb_block_op(struct pm2fb_info* i, int copy,
+					s32 xsrc, s32 ysrc,
+					s32 x, s32 y, s32 w, s32 h,
+					u32 color) {
+
+	if (!w || !h)
+		return;
+	WAIT_FIFO(i, 6);
+	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
+				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
+	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
+	if (copy)
+		pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
+							((xsrc-x)&0xfff));
+	else
+		pm2_WR(i, PM2R_FB_BLOCK_COLOR, color);
+	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|x);
+	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|w);
+	DEFW();
+	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
+				(x<xsrc?PM2F_INCREASE_X:0)|
+				(y<ysrc?PM2F_INCREASE_Y:0)|
+				(copy?0:PM2F_RENDER_FASTFILL));
+	wait_pm2(i);
+}
 
 /***************************************************************************
  * Begin of generic initialization functions
@@ -579,15 +841,17 @@ static void set_screen(struct pm2fb_info* i, struct pm2fb_par* p) {
 
 static void pm2fb_reset(struct pm2fb_info* p) {
 
+	if (p->type == PM2_TYPE_PERMEDIA2V)
+		pm2_WR(p, PM2VR_RD_INDEX_HIGH, 0);
 	pm2_WR(p, PM2R_RESET_STATUS, 0);
-	eieio();
+	DEFRW();
 	while (pm2_RD(p, PM2R_RESET_STATUS)&PM2F_BEING_RESET);
-	eieio();
+	DEFRW();
 #ifdef CONFIG_FB_PM2_FIFO_DISCONNECT
 	DPRINTK("FIFO disconnect enabled\n");
 	pm2_WR(p, PM2R_FIFO_DISCON, 1);
+	DEFRW();
 #endif
-	eieio();
 	if (board_table[p->board].init)
 		board_table[p->board].init(p);
 	WAIT_FIFO(p, 48);
@@ -626,15 +890,24 @@ static void pm2fb_reset(struct pm2fb_info* p) {
 	pm2_WR(p, PM2R_LOGICAL_OP_MODE, 0);
 	pm2_WR(p, PM2R_STATISTICS_MODE, 0);
 	pm2_WR(p, PM2R_SCISSOR_MODE, 0);
-	pm2_RDAC_WR(p, PM2I_RD_CURSOR_CONTROL, 0);
-	pm2_RDAC_WR(p, PM2I_RD_MISC_CONTROL, PM2F_RD_PALETTE_WIDTH_8);
+	switch (p->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_RDAC_WR(p, PM2I_RD_MODE_CONTROL, 0); /* no overlay */
+		pm2_RDAC_WR(p, PM2I_RD_CURSOR_CONTROL, 0);
+		pm2_RDAC_WR(p, PM2I_RD_MISC_CONTROL, PM2F_RD_PALETTE_WIDTH_8);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2v_RDAC_WR(p, PM2VI_RD_MISC_CONTROL, 1); /* 8bit */
+		break;
+	}
 	pm2_RDAC_WR(p, PM2I_RD_COLOR_KEY_CONTROL, 0);
 	pm2_RDAC_WR(p, PM2I_RD_OVERLAY_KEY, 0);
 	pm2_RDAC_WR(p, PM2I_RD_RED_KEY, 0);
 	pm2_RDAC_WR(p, PM2I_RD_GREEN_KEY, 0);
 	pm2_RDAC_WR(p, PM2I_RD_BLUE_KEY, 0);
-	eieio();
-	set_memclock(p, p->memclock);
+	clear_palette(p);
+	if (p->memclock)
+		pm2_set_memclock(p, p->memclock);
 }
 
 __initfunc(static int pm2fb_conf(struct pm2fb_info* p)) {
@@ -648,12 +921,16 @@ __initfunc(static int pm2fb_conf(struct pm2fb_info* p)) {
 	DPRINTK("found board: %s\n", board_table[p->board].name);
 	p->regions.p_fb=p->regions.fb_base;
 	p->regions.v_fb=MMAP(p->regions.p_fb, p->regions.fb_size);
-#ifdef __LITTLE_ENDIAN
+#ifndef PM2FB_BE_APERTURE
 	p->regions.p_regs=p->regions.rg_base;
 #else
 	p->regions.p_regs=p->regions.rg_base+PM2_REGS_SIZE;
 #endif
 	p->regions.v_regs=MMAP(p->regions.p_regs, PM2_REGS_SIZE);
+
+#ifdef PM2FB_HW_CURSOR
+	p->cursor = pm2_init_cursor(p);
+#endif
 	return 1;
 }
 
@@ -661,9 +938,12 @@ __initfunc(static int pm2fb_conf(struct pm2fb_info* p)) {
  * Begin of per-board initialization functions
  ***************************************************************************/
 
+/*
+ * Phase5 CvisionPPC/BVisionPPC
+ */
 #ifdef CONFIG_FB_PM2_CVPPC
 static int cvppc_PCI_init(struct cvppc_par* p) {
-	extern unsigned long powerup_PCI_present;
+	extern u32 powerup_PCI_present;
 
 	if (!powerup_PCI_present) {
 		DPRINTK("no PCI bridge detected\n");
@@ -683,14 +963,14 @@ static int cvppc_PCI_init(struct cvppc_par* p) {
 		return 0;
 	}
 	WR32(p->pci_bridge, CSPPC_BRIDGE_ENDIAN, CSPPCF_BRIDGE_BIG_ENDIAN);
-	eieio();
+	DEFW();
 	if (pm2fb_options.flags & OPTF_OLD_MEM)
 		WR32(p->pci_config, PCI_CACHE_LINE_SIZE, 0xff00);
 	WR32(p->pci_config, PCI_BASE_ADDRESS_0, CVPPC_REGS_REGION);
 	WR32(p->pci_config, PCI_BASE_ADDRESS_1, CVPPC_FB_APERTURE_ONE);
 	WR32(p->pci_config, PCI_BASE_ADDRESS_2, CVPPC_FB_APERTURE_TWO);
 	WR32(p->pci_config, PCI_ROM_ADDRESS, CVPPC_ROM_ADDRESS);
-	eieio();
+	DEFW();
 	WR32(p->pci_config, PCI_COMMAND, 0xef000000 |
 						PCI_COMMAND_IO |
 						PCI_COMMAND_MEMORY |
@@ -698,10 +978,11 @@ static int cvppc_PCI_init(struct cvppc_par* p) {
 	return 1;
 }
 
-static int cvppc_detect(struct pm2fb_info* p) {
+static int __init cvppc_detect(struct pm2fb_info* p) {
 
 	if (!cvppc_PCI_init(&p->board_par.cvppc))
 		return 0;
+	p->type = PM2_TYPE_PERMEDIA2;
 	p->regions.fb_base=(unsigned char* )CVPPC_FB_APERTURE_ONE;
 	p->regions.fb_size=CVPPC_FB_SIZE;
 	p->regions.rg_base=(unsigned char* )CVPPC_REGS_REGION;
@@ -714,7 +995,7 @@ static void cvppc_init(struct pm2fb_info* p) {
 	WAIT_FIFO(p, 3);
 	pm2_WR(p, PM2R_MEM_CONTROL, 0);
 	pm2_WR(p, PM2R_BOOT_ADDRESS, 0x30);
-	eieio();
+	DEFW();
 	if (pm2fb_options.flags & OPTF_OLD_MEM)
 		pm2_WR(p, PM2R_MEM_CONFIG, CVPPC_MEM_CONFIG_OLD);
 	else
@@ -722,70 +1003,158 @@ static void cvppc_init(struct pm2fb_info* p) {
 }
 #endif /* CONFIG_FB_PM2_CVPPC */
 
+/*
+ * Generic PCI detection routines
+ */
+#ifdef CONFIG_FB_PM2_PCI
+struct {
+	unsigned short vendor, device;
+	char *name;
+	pm2type_t type;
+} pm2pci_cards[] __initdata = {
+{ PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_TVP4020, "Texas Instruments TVP4020", PM2_TYPE_PERMEDIA2 },
+{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2, "3dLabs Permedia 2", PM2_TYPE_PERMEDIA2 },
+{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2V, "3dLabs Permedia 2v", PM2_TYPE_PERMEDIA2V },
+{ 0, 0 }
+};
+
+static int __init pm2pci_detect(struct pm2fb_info* p) {
+	struct pm2pci_par* pci=&p->board_par.pci;
+	struct pci_dev* dev;
+	int i;
+	unsigned char* m;
+#ifdef __sparc__
+	struct pcidev_cookie *pcp;
+#endif
+
+	memset(pci, 0, sizeof(struct pm2pci_par));
+	if (!pci_present()) {
+		DPRINTK("no PCI bus found.\n");
+		return 0;
+	}
+	DPRINTK("scanning PCI bus for known chipsets...\n");
+
+	for (dev = pci_devices; !pci->dev && dev; dev = dev->next) {
+		for (i = 0; pm2pci_cards[i].vendor; i++)
+			if (pm2pci_cards[i].vendor == dev->vendor &&
+			    pm2pci_cards[i].device == dev->device) {
+				pci->dev = dev;
+				p->type = pm2pci_cards[i].type;
+				DPRINTK("... found %s\n", pm2pci_cards[i].name);
+				break;
+			}
+	}
+	if (!pci->dev) {
+		DPRINTK("no PCI board found.\n");
+		return 0;
+	}
+	DPRINTK("PCI board @%08lx %08lx %08lx rom %08lx\n",
+			pci->dev->base_address[0],
+			pci->dev->base_address[1],
+			pci->dev->base_address[2],
+			pci->dev->rom_address);
+#ifdef __sparc__
+	p->regions.rg_base=(unsigned char* )
+		__pa(pci->dev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK);
+	p->regions.fb_base=(unsigned char* )
+		__pa(pci->dev->base_address[1] & PCI_BASE_ADDRESS_MEM_MASK);
+	pcp = pci->dev->sysdata;
+	/* If the user has not asked for a particular mode, lets guess */
+	if (pcp->prom_node && !(pm2fb_options.flags & OPTF_USER)) {
+		char timing[256], *q, *r;
+		unsigned long w, h;
+		int i;
+		prom_getstring(pcp->prom_node, "timing-numbers", timing, 256);
+		/* FIXME: Find out what the actual pixclock is and other values as well */
+		if (timing[0]) {
+			w = simple_strtoul(timing, &q, 0);
+			h = 0;
+			if (q == timing) w = 0;
+			if (w) {
+				for (i = 0; i < 3; i++) {
+					for (r = q; *r && (*r < '0' || *r > '9'); r++);
+					simple_strtoul(r, &q, 0);
+					if (r == q) break;
+				}
+				if (i < 3) w = 0;
+			}
+			if (w) {
+				for (r = q; *r && (*r < '0' || *r > '9'); r++);
+				h = simple_strtoul(r, &q, 0);
+				if (r == q) w = 0;
+			}
+			if (w == 640 && h == 480) w = 0;
+			if (w) {
+				for (i=0; user_mode[i].name[0] &&
+					  (w != user_mode[i].par.width ||
+					   h != user_mode[i].par.height); i++);
+				if (user_mode[i].name[0])
+					memcpy(&p->current_par, &user_mode[i].par, sizeof(user_mode[i].par));
+			}
+		}
+	}
+#else
+	if (pm2fb_options.flags & OPTF_VIRTUAL) {
+		p->regions.rg_base=(unsigned char* )
+			__pa(pci->dev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK);
+		p->regions.fb_base=(unsigned char* )
+			__pa(pci->dev->base_address[1] & PCI_BASE_ADDRESS_MEM_MASK);
+	}
+	else {
+		p->regions.rg_base=(unsigned char* )
+			(pci->dev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK);
+		p->regions.fb_base=(unsigned char* )
+			(pci->dev->base_address[1] & PCI_BASE_ADDRESS_MEM_MASK);
+	}
+#endif
+#ifdef PM2FB_BE_APERTURE
+	p->regions.rg_base += PM2_REGS_SIZE;
+#endif
+	if ((m=MMAP(p->regions.rg_base, PM2_REGS_SIZE))) {
+		pci->mem_control=RD32(m, PM2R_MEM_CONTROL);
+		pci->boot_address=RD32(m, PM2R_BOOT_ADDRESS);
+		pci->mem_config=RD32(m, PM2R_MEM_CONFIG);
+		switch (pci->mem_config & PM2F_MEM_CONFIG_RAM_MASK) {
+			case PM2F_MEM_BANKS_1:
+				p->regions.fb_size=0x200000;
+				break;
+			case PM2F_MEM_BANKS_2:
+				p->regions.fb_size=0x400000;
+				break;
+			case PM2F_MEM_BANKS_3:
+				p->regions.fb_size=0x600000;
+				break;
+			case PM2F_MEM_BANKS_4:
+				p->regions.fb_size=0x800000;
+				break;
+		}
+		p->memclock=CVPPC_MEMCLOCK;
+		UNMAP(m, PM2_REGS_SIZE);
+		return 1;
+	}
+	DPRINTK("MMAP() failed.\n");
+	return 0;
+}
+
+static void pm2pci_init(struct pm2fb_info* p) {
+	struct pm2pci_par* pci=&p->board_par.pci;
+
+	WAIT_FIFO(p, 3);
+	pm2_WR(p, PM2R_MEM_CONTROL, pci->mem_control);
+	pm2_WR(p, PM2R_BOOT_ADDRESS, pci->boot_address);
+	DEFW();
+	pm2_WR(p, PM2R_MEM_CONFIG, pci->mem_config);
+}
+#endif /* CONFIG_FB_PM2_PCI */
+
 /***************************************************************************
  * Console hw acceleration
  ***************************************************************************/
 
-/*
- * copy with packed pixels (8/16bpp only).
- */
-static void pm2fb_pp_copy(struct pm2fb_info* i, long xsrc, long ysrc,
-					long x, long y, long w, long h) {
-	long scale=i->current_par.depth==8?2:1;
-	long offset;
-
-	if (!w || !h)
-		return;
-	WAIT_FIFO(i, 7);
-	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
-				PM2F_CONFIG_FB_PACKED_DATA|
-				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
-	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
-	pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
-						((xsrc-x)&0xfff));
-	offset=(x&0x3)-(xsrc&0x3);
-	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|(x>>scale));
-	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|((w+7)>>scale));
-	pm2_WR(i, PM2R_PACKED_DATA_LIMITS, (offset<<29)|(x<<16)|(x+w));
-	eieio();
-	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
-				(x<xsrc?PM2F_INCREASE_X:0)|
-				(y<ysrc?PM2F_INCREASE_Y:0));
-	wait_pm2(i);
-}
-
-/*
- * block operation. copy=0: rectangle fill, copy=1: rectangle copy.
- */
-static void pm2fb_block_op(struct pm2fb_info* i, int copy,
-					long xsrc, long ysrc,
-					long x, long y, long w, long h,
-					unsigned long color) {
-
-	if (!w || !h)
-		return;
-	WAIT_FIFO(i, 6);
-	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
-				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
-	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
-	if (copy)
-		pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
-							((xsrc-x)&0xfff));
-	else
-		pm2_WR(i, PM2R_FB_BLOCK_COLOR, color);
-	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|x);
-	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|w);
-	eieio();
-	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
-				(x<xsrc?PM2F_INCREASE_X:0)|
-				(y<ysrc?PM2F_INCREASE_Y:0)|
-				(copy?0:PM2F_RENDER_FASTFILL));
-	wait_pm2(i);
-}
 
 static int pm2fb_blank(int blank_mode, struct fb_info_gen* info) {
 	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	unsigned long video;
+	u32 video;
 
 	if (!i->current_par_valid)
 		return 1;
@@ -871,7 +1240,7 @@ static void pm2fb_bmove(struct display* p, int sy, int sx,
 #ifdef FBCON_HAS_CFB8
 static void pm2fb_clear8(struct vc_data* conp, struct display* p,
 				int sy, int sx, int height, int width) {
-	unsigned long c;
+	u32 c;
 
 	sx=sx*fontwidth(p);
 	width=width*fontwidth(p);
@@ -886,9 +1255,9 @@ static void pm2fb_clear8(struct vc_data* conp, struct display* p,
 
 static void pm2fb_clear_margins8(struct vc_data* conp, struct display* p,
 							int bottom_only) {
-	unsigned long c;
-	unsigned long sx;
-	unsigned long sy;
+	u32 c;
+	u32 sx;
+	u32 sy;
 
 	c=attr_bgcol_ec(p, conp);
 	c|=c<<8;
@@ -903,9 +1272,15 @@ static void pm2fb_clear_margins8(struct vc_data* conp, struct display* p,
 }
 
 static struct display_switch pm2_cfb8 = {
-	fbcon_cfb8_setup, pm2fb_pp_bmove, pm2fb_clear8,
+	fbcon_cfb8_setup, pm2fb_pp_bmove,
+#ifdef __alpha__
+	/* No idea why, but pm2fb_clear8 does not always work on Alpha. */
+	fbcon_cfb8_clear,
+#else
+	pm2fb_clear8,
+#endif
 	fbcon_cfb8_putc, fbcon_cfb8_putcs, fbcon_cfb8_revc,
-	NULL /* cursor() */, NULL /* set_font() */,
+	pm2fb_cursor, pm2fb_set_font,
 	pm2fb_clear_margins8,
 	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16) };
 #endif /* FBCON_HAS_CFB8 */
@@ -913,7 +1288,7 @@ static struct display_switch pm2_cfb8 = {
 #ifdef FBCON_HAS_CFB16
 static void pm2fb_clear16(struct vc_data* conp, struct display* p,
 				int sy, int sx, int height, int width) {
-	unsigned long c;
+	u32 c;
 
 	sx=sx*fontwidth(p);
 	width=width*fontwidth(p);
@@ -927,9 +1302,9 @@ static void pm2fb_clear16(struct vc_data* conp, struct display* p,
 
 static void pm2fb_clear_margins16(struct vc_data* conp, struct display* p,
 							int bottom_only) {
-	unsigned long c;
-	unsigned long sx;
-	unsigned long sy;
+	u32 c;
+	u32 sx;
+	u32 sy;
 
 	c = ((u16 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
 	c|=c<<16;
@@ -945,7 +1320,7 @@ static void pm2fb_clear_margins16(struct vc_data* conp, struct display* p,
 static struct display_switch pm2_cfb16 = {
 	fbcon_cfb16_setup, pm2fb_pp_bmove, pm2fb_clear16,
 	fbcon_cfb16_putc, fbcon_cfb16_putcs, fbcon_cfb16_revc,
-	NULL /* cursor() */, NULL /* set_font() */,
+	pm2fb_cursor, pm2fb_set_font,
 	pm2fb_clear_margins16,
 	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16) };
 #endif /* FBCON_HAS_CFB16 */
@@ -957,7 +1332,7 @@ static struct display_switch pm2_cfb16 = {
 static void pm2fb_clear24(struct vc_data* conp, struct display* p,
 				int sy, int sx, int height, int width) {
 	struct pm2fb_info* i=(struct pm2fb_info* )p->fb_info;
-	unsigned long c;
+	u32 c;
 
 	c=attr_bgcol_ec(p, conp);
 	if (		i->palette[c].red==i->palette[c].green &&
@@ -978,9 +1353,9 @@ static void pm2fb_clear24(struct vc_data* conp, struct display* p,
 static void pm2fb_clear_margins24(struct vc_data* conp, struct display* p,
 							int bottom_only) {
 	struct pm2fb_info* i=(struct pm2fb_info* )p->fb_info;
-	unsigned long c;
-	unsigned long sx;
-	unsigned long sy;
+	u32 c;
+	u32 sx;
+	u32 sy;
 
 	c=attr_bgcol_ec(p, conp);
 	if (		i->palette[c].red==i->palette[c].green &&
@@ -1003,7 +1378,7 @@ static void pm2fb_clear_margins24(struct vc_data* conp, struct display* p,
 static struct display_switch pm2_cfb24 = {
 	fbcon_cfb24_setup, pm2fb_bmove, pm2fb_clear24,
 	fbcon_cfb24_putc, fbcon_cfb24_putcs, fbcon_cfb24_revc,
-	NULL /* cursor() */, NULL /* set_font() */,
+	pm2fb_cursor, pm2fb_set_font,
 	pm2fb_clear_margins24,
 	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16) };
 #endif /* FBCON_HAS_CFB24 */
@@ -1011,7 +1386,7 @@ static struct display_switch pm2_cfb24 = {
 #ifdef FBCON_HAS_CFB32
 static void pm2fb_clear32(struct vc_data* conp, struct display* p,
 				int sy, int sx, int height, int width) {
-	unsigned long c;
+	u32 c;
 
 	sx=sx*fontwidth(p);
 	width=width*fontwidth(p);
@@ -1024,9 +1399,9 @@ static void pm2fb_clear32(struct vc_data* conp, struct display* p,
 
 static void pm2fb_clear_margins32(struct vc_data* conp, struct display* p,
 							int bottom_only) {
-	unsigned long c;
-	unsigned long sx;
-	unsigned long sy;
+	u32 c;
+	u32 sx;
+	u32 sy;
 
 	c = ((u32 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
 	sx=conp->vc_cols*fontwidth(p);
@@ -1041,7 +1416,7 @@ static void pm2fb_clear_margins32(struct vc_data* conp, struct display* p,
 static struct display_switch pm2_cfb32 = {
 	fbcon_cfb32_setup, pm2fb_bmove, pm2fb_clear32,
 	fbcon_cfb32_putc, fbcon_cfb32_putcs, fbcon_cfb32_revc,
-	NULL /* cursor() */, NULL /* set_font() */,
+	pm2fb_cursor, pm2fb_set_font,
 	pm2fb_clear_margins32,
 	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16) };
 #endif /* FBCON_HAS_CFB32 */
@@ -1065,18 +1440,55 @@ static int pm2fb_encode_fix(struct fb_fix_screeninfo* fix,
 	fix->accel=FB_ACCEL_3DLABS_PERMEDIA2;
 	fix->type=FB_TYPE_PACKED_PIXELS;
 	fix->visual=p->depth==8?FB_VISUAL_PSEUDOCOLOR:FB_VISUAL_TRUECOLOR;
-	fix->line_length=0;
+	if (i->current_par_valid)
+		fix->line_length=i->current_par.width*(i->current_par.depth/8);
+	else
+		fix->line_length=0;
 	fix->xpanstep=p->depth==24?8:64/p->depth;
 	fix->ypanstep=1;
 	fix->ywrapstep=0;
 	return 0;
 }
 
+#ifdef PM2FB_MASTER_DEBUG
+static void pm2fb_display_var(const struct fb_var_screeninfo* var) {
+
+	printk( KERN_DEBUG
+"- struct fb_var_screeninfo ---------------------------------------------------\n");
+	printk( KERN_DEBUG
+		"resolution: %ux%ux%u (virtual %ux%u+%u+%u)\n",
+			var->xres, var->yres, var->bits_per_pixel,
+			var->xres_virtual, var->yres_virtual,
+			var->xoffset, var->yoffset);
+	printk( KERN_DEBUG
+		"color: %c%c "
+		"R(%u,%u,%u), G(%u,%u,%u), B(%u,%u,%u), T(%u,%u,%u)\n",
+			var->grayscale?'G':'C', var->nonstd?'N':'S',
+			var->red.offset, var->red.length, var->red.msb_right,
+			var->green.offset, var->green.length, var->green.msb_right,
+			var->blue.offset, var->blue.length, var->blue.msb_right,
+			var->transp.offset, var->transp.length,
+			var->transp.msb_right);
+	printk( KERN_DEBUG
+		"timings: %ups (%u,%u)-(%u,%u)+%u+%u\n",
+		var->pixclock,
+		var->left_margin, var->upper_margin, var->right_margin,
+		var->lower_margin, var->hsync_len, var->vsync_len);
+	printk(	KERN_DEBUG
+		"activate %08x accel_flags %08x sync %08x vmode %08x\n",
+		var->activate, var->accel_flags, var->sync, var->vmode);
+	printk(	KERN_DEBUG
+"------------------------------------------------------------------------------\n");
+}
+
+#define pm2fb_decode_var pm2fb_wrapped_decode_var
+#endif
+
 static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
 				void* par, struct fb_info_gen* info) {
 	struct pm2fb_info* i=(struct pm2fb_info* )info;
 	struct pm2fb_par p;
-	unsigned long xres;
+	u32 xres;
 	int data64;
 
 	memset(&p, 0, sizeof(struct pm2fb_par));
@@ -1084,41 +1496,41 @@ static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
 	p.height=var->yres_virtual;
 	p.depth=(var->bits_per_pixel+7)&~7;
 	p.depth=p.depth>32?32:p.depth;
-	data64=p.depth>8;
+	data64=p.depth>8 || i->type == PM2_TYPE_PERMEDIA2V;
 	xres=(var->xres+31)&~31;
-	if (p.width==~(0L))
-		p.width=xres;
-	if (p.height==~(0L))
-		p.height=var->yres;
 	if (p.width<xres+var->xoffset)
 		p.width=xres+var->xoffset;
 	if (p.height<var->yres+var->yoffset)
 		p.height=var->yres+var->yoffset;
 	if (!partprod(xres)) {
-		DPRINTK("width not supported: %lu\n", xres);
+		DPRINTK("width not supported: %u\n", xres);
 		return -EINVAL;
 	}
 	if (p.width>2047) {
-		DPRINTK("virtual width not supported: %lu\n", p.width);
+		DPRINTK("virtual width not supported: %u\n", p.width);
 		return -EINVAL;
 	}
 	if (var->yres<200) {
-		DPRINTK("height not supported: %lu\n",
-						(unsigned long )var->yres);
+		DPRINTK("height not supported: %u\n",
+						(u32 )var->yres);
 		return -EINVAL;
 	}
 	if (p.height<200 || p.height>2047) {
-		DPRINTK("virtual height not supported: %lu\n", p.height);
+		DPRINTK("virtual height not supported: %u\n", p.height);
+		return -EINVAL;
+	}
+	if (p.depth>32) {
+		DPRINTK("depth not supported: %u\n", p.depth);
 		return -EINVAL;
 	}
 	if (p.width*p.height*p.depth/8>i->regions.fb_size) {
-		DPRINTK("no memory for screen (%lux%lux%lu)\n",
-						xres, p.height, p.depth);
+		DPRINTK("no memory for screen (%ux%ux%u)\n",
+						p.width, p.height, p.depth);
 		return -EINVAL;
 	}
 	p.pixclock=PICOS2KHZ(var->pixclock);
 	if (p.pixclock>PM2_MAX_PIXCLOCK) {
-		DPRINTK("pixclock too high (%luKHz)\n", p.pixclock);
+		DPRINTK("pixclock too high (%uKHz)\n", p.pixclock);
 		return -EINVAL;
 	}
 	p.hsstart=to3264(var->right_margin, p.depth, data64);
@@ -1153,11 +1565,24 @@ static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
 	return 0;
 }
 
+#ifdef PM2FB_MASTER_DEBUG
+#undef pm2fb_decode_var
+
+static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
+				void* par, struct fb_info_gen* info) {
+	int result;
+
+	result=pm2fb_wrapped_decode_var(var, par, info);
+	pm2fb_display_var(var);
+	return result;
+}
+#endif
+
 static int pm2fb_encode_var(struct fb_var_screeninfo* var,
 				const void* par, struct fb_info_gen* info) {
 	struct pm2fb_par* p=(struct pm2fb_par* )par;
 	struct fb_var_screeninfo v;
-	unsigned long base;
+	u32 base;
 
 	memset(&v, 0, sizeof(struct fb_var_screeninfo));
 	v.xres_virtual=p->width;
@@ -1230,14 +1655,12 @@ static int pm2fb_encode_var(struct fb_var_screeninfo* var,
 
 static void set_user_mode(struct pm2fb_info* i) {
 
-	memcpy(&i->current_par, &pm2fb_options.user_mode,
-						sizeof(i->current_par));
 	if (pm2fb_options.flags & OPTF_YPAN) {
+		int h = i->current_par.height;
 		i->current_par.height=i->regions.fb_size/
 			(i->current_par.width*i->current_par.depth/8);
 		i->current_par.height=MIN(i->current_par.height,2047);
-		i->current_par.height=MAX(i->current_par.height,
-						pm2fb_options.user_mode.height);
+		i->current_par.height=MAX(i->current_par.height,h);
 	}
 }
 
@@ -1266,9 +1689,15 @@ static void pm2fb_set_par(const void* par, struct fb_info_gen* info) {
 			return;
 		}
 	}
+	set_screen(i, p);
 	i->current_par=*p;
 	i->current_par_valid=1;
-	set_screen(i, &i->current_par);
+#ifdef PM2FB_HW_CURSOR	
+	if (i->cursor) {
+		pm2v_set_cursor_color(i, cursor_color_map, cursor_color_map, cursor_color_map);
+		pm2v_set_cursor_shape(i);
+	}
+#endif
 }
 
 static int pm2fb_getcolreg(unsigned regno,
@@ -1322,7 +1751,7 @@ static int pm2fb_setcolreg(unsigned regno,
 				break;
 #endif
 			default:
-				DPRINTK("bad depth %lu\n",
+				DPRINTK("bad depth %u\n",
 						i->current_par.depth);
 				break;
 		}
@@ -1338,14 +1767,19 @@ static int pm2fb_setcolreg(unsigned regno,
 	return regno>255;
 }
 
-static void pm2fb_dispsw(const void* par, struct display* disp,
+static void pm2fb_set_disp(const void* par, struct display* disp,
 						struct fb_info_gen* info) {
 	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	unsigned long flags;
-	unsigned long depth;
+	u32 flags;
+	u32 depth;
 
 	save_flags(flags);
 	cli();
+#ifdef __alpha__
+	disp->screen_base=i->regions.v_fb + dense_mem(i->regions.v_fb);
+#else
+	disp->screen_base=i->regions.v_fb;
+#endif
 	switch (depth=((struct pm2fb_par* )par)->depth) {
 #ifdef FBCON_HAS_CFB8
 		case 8:
@@ -1389,6 +1823,210 @@ static int pm2fb_release(struct fb_info* info, int user) {
 	return 0;
 }
 
+#ifdef PM2FB_HW_CURSOR
+/***************************************************************************
+ * Hardware cursor support
+ ***************************************************************************/
+ 
+static u8 cursor_bits_lookup[16] = {
+	0x00, 0x40, 0x10, 0x50, 0x04, 0x44, 0x14, 0x54,
+	0x01, 0x41, 0x11, 0x51, 0x05, 0x45, 0x15, 0x55
+};
+
+static u8 cursor_mask_lookup[16] = {
+	0x00, 0x80, 0x20, 0xa0, 0x08, 0x88, 0x28, 0xa8,
+	0x02, 0x82, 0x22, 0xa2, 0x0a, 0x8a, 0x2a, 0xaa
+};
+
+static void pm2v_set_cursor_color(struct pm2fb_info *fb, u8 *red, u8 *green, u8 *blue)
+{
+	struct pm2_cursor *c = fb->cursor;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		c->color[3*i] = red[i];
+		c->color[3*i+1] = green[i];
+		c->color[3*i+2] = blue[i];
+	}
+
+	WAIT_FIFO(fb, 14);
+	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CURSOR_PALETTE >> 8);
+	for (i = 0; i < 6; i++)
+		pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PALETTE+i, c->color[i]);
+	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, 0);
+}
+
+static void pm2v_set_cursor_shape(struct pm2fb_info *fb)
+{
+	struct pm2_cursor *c = fb->cursor;
+	u8 m, b;
+	int i, x, y;
+
+	WAIT_FIFO(fb, 1);
+	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CURSOR_PATTERN >> 8);
+	for (y = 0, i = 0; y < c->size.y; y++) {
+		WAIT_FIFO(fb, 32);
+		for (x = 0; x < c->size.x >> 3; x++) {
+			m = c->mask[x][y];
+			b = c->bits[x][y];
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i,
+				     cursor_mask_lookup[m >> 4] |
+				     cursor_bits_lookup[(b & m) >> 4]);
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1,
+				     cursor_mask_lookup[m & 0x0f] |
+				     cursor_bits_lookup[(b & m) & 0x0f]);
+			i+=2;
+		}
+		for ( ; x < 8; x++) {
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i, 0);
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1, 0);
+			i+=2;
+		}
+	}
+	for (; y < 64; y++) {
+		WAIT_FIFO(fb, 32);
+		for (x = 0; x < 8; x++) {
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i, 0);
+			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1, 0);
+			i+=2;
+		}
+	}
+	WAIT_FIFO(fb, 1);
+	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, 0);
+}
+
+static void pm2v_set_cursor(struct pm2fb_info *fb, int on)
+{
+	struct pm2_cursor *c = fb->cursor;
+	int x = c->pos.x;
+
+	if (!on) x = 4000;
+	WAIT_FIFO(fb, 14);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_LOW, x & 0xff);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_HIGH, (x >> 8) & 0x0f);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_LOW, c->pos.y & 0xff);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_HIGH, (c->pos.y >> 8) & 0x0f);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_HOT, c->hot.x & 0x3f);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_HOT, c->hot.y & 0x3f);
+	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_MODE, 0x11);
+}
+
+static void pm2_cursor_timer_handler(unsigned long dev_addr)
+{
+	struct pm2fb_info *fb = (struct pm2fb_info *)dev_addr;
+
+	if (!fb->cursor->enable)
+		goto out;
+
+	if (fb->cursor->vbl_cnt && --fb->cursor->vbl_cnt == 0) {
+		fb->cursor->on ^= 1;
+		pm2v_set_cursor(fb, fb->cursor->on);
+		fb->cursor->vbl_cnt = fb->cursor->blink_rate;
+	}
+
+out:
+	fb->cursor->timer->expires = jiffies + (HZ / 50);
+	add_timer(fb->cursor->timer);
+}
+
+static void pm2fb_cursor(struct display *p, int mode, int x, int y)
+{
+	struct pm2fb_info *fb = (struct pm2fb_info *)p->fb_info;
+	struct pm2_cursor *c = fb->cursor;
+
+	if (!c) return;
+
+	x *= fontwidth(p);
+	y *= fontheight(p);
+	if (c->pos.x == x && c->pos.y == y && (mode == CM_ERASE) == !c->enable)
+		return;
+
+	c->enable = 0;
+	if (c->on)
+		pm2v_set_cursor(fb, 0);
+	c->pos.x = x;
+	c->pos.y = y;
+
+	switch (mode) {
+	case CM_ERASE:
+		c->on = 0;
+		break;
+
+	case CM_DRAW:
+	case CM_MOVE:
+		if (c->on)
+			pm2v_set_cursor(fb, 1);
+		else
+			c->vbl_cnt = CURSOR_DRAW_DELAY;
+		c->enable = 1;
+		break;
+	}
+}
+
+static struct pm2_cursor * __init pm2_init_cursor(struct pm2fb_info *fb)
+{
+	struct pm2_cursor *cursor;
+
+	if (fb->type != PM2_TYPE_PERMEDIA2V)
+		return 0; /* FIXME: Support hw cursor everywhere */
+
+	cursor = kmalloc(sizeof(struct pm2_cursor), GFP_ATOMIC);
+	if (!cursor)
+		return 0;
+	memset(cursor, 0, sizeof(*cursor));
+
+	cursor->timer = kmalloc(sizeof(*cursor->timer), GFP_KERNEL);
+	if (!cursor->timer) {
+		kfree(cursor);
+		return 0;
+	}
+	memset(cursor->timer, 0, sizeof(*cursor->timer));
+
+	cursor->blink_rate = DEFAULT_CURSOR_BLINK_RATE;
+
+	if (curblink) {
+		init_timer(cursor->timer);
+		cursor->timer->expires = jiffies + (HZ / 50);
+		cursor->timer->data = (unsigned long)fb;
+		cursor->timer->function = pm2_cursor_timer_handler;
+		add_timer(cursor->timer);
+	}
+
+	return cursor;
+}
+
+static int pm2fb_set_font(struct display *d, int width, int height)
+{
+	struct pm2fb_info *fb = (struct pm2fb_info *)d->fb_info;
+	struct pm2_cursor *c = fb->cursor;
+	int i, j;
+
+	if (c) {
+		if (!width || !height) {
+			width = 8;
+			height = 16;
+		}
+
+		c->hot.x = 0;
+		c->hot.y = 0;
+		c->size.x = width;
+		c->size.y = height;
+
+		memset(c->bits, 0xff, sizeof(c->bits));
+		memset(c->mask, 0, sizeof(c->mask));
+
+		for (i = 0, j = width; j >= 0; j -= 8, i++) {
+			c->mask[i][height-2] = (j >= 8) ? 0xff : (0xff << (8 - j));
+			c->mask[i][height-1] = (j >= 8) ? 0xff : (0xff << (8 - j));
+		}
+
+		pm2v_set_cursor_color(fb, cursor_color_map, cursor_color_map, cursor_color_map);
+		pm2v_set_cursor_shape(fb);
+	}
+	return 1;
+}
+#endif /* PM2FB_HW_CURSOR */
+
 /***************************************************************************
  * Begin of public functions
  ***************************************************************************/
@@ -1403,11 +2041,13 @@ void pm2fb_cleanup(struct fb_info* info) {
 		board_table[i->board].cleanup(i);
 }
 
-__initfunc(void pm2fb_init(void)) {
+int __init pm2fb_init(void) {
 
 	memset(&fb_info, 0, sizeof(fb_info));
+	memcpy(&fb_info.current_par, &pm2fb_options.user_mode, sizeof(fb_info.current_par));
 	if (!pm2fb_conf(&fb_info))
-		return;
+		return 0;
+	pm2fb_reset(&fb_info);
 	fb_info.disp.scrollmode=SCROLL_YNOMOVE;
 	fb_info.gen.parsize=sizeof(struct pm2fb_par);
 	fb_info.gen.fbhw=&pm2fb_hwswitch;
@@ -1420,44 +2060,43 @@ __initfunc(void pm2fb_init(void)) {
 	fb_info.gen.info.updatevar=&fbgen_update_var;
 	fb_info.gen.info.blank=&fbgen_blank;
 	fbgen_get_var(&fb_info.disp.var, -1, &fb_info.gen.info);
-	if (fbgen_do_set_var(&fb_info.disp.var, 1, &fb_info.gen)<0)
-		return;
+	fbgen_do_set_var(&fb_info.disp.var, 1, &fb_info.gen);
 	fbgen_set_disp(-1, &fb_info.gen);
 	fbgen_install_cmap(0, &fb_info.gen);
 	if (register_framebuffer(&fb_info.gen.info)<0) {
 		printk("pm2fb: unable to register.\n");
-		return;
+		return 0;
 	}
-	printk("fb%d: %s (%s), using %ldK of video memory.\n",
+	printk("fb%d: %s (%s), using %uK of video memory.\n",
 				GET_FB_IDX(fb_info.gen.info.node),
 				board_table[fb_info.board].name,
 				permedia2_name,
-				(unsigned long )(fb_info.regions.fb_size>>10));
+				(u32 )(fb_info.regions.fb_size>>10));
 	MOD_INC_USE_COUNT;
+	return 1;
 }
 
-__initfunc(void pm2fb_mode_setup(char* options)) {
+static void __init pm2fb_mode_setup(char* options) {
 	int i;
 
 	for (i=0; user_mode[i].name[0] &&
 		strcmp(options, user_mode[i].name); i++);
-	if (user_mode[i].name[0])
+	if (user_mode[i].name[0]) {
 		memcpy(&pm2fb_options.user_mode, &user_mode[i].par,
 					sizeof(pm2fb_options.user_mode));
+		pm2fb_options.flags |= OPTF_USER;
+	}
 }
 
-__initfunc(void pm2fb_font_setup(char* options)) {
+static void __init pm2fb_font_setup(char* options) {
 
 	strncpy(pm2fb_options.font, options, sizeof(pm2fb_options.font));
 	pm2fb_options.font[sizeof(pm2fb_options.font)-1]='\0';
 }
 
-__initfunc(void pm2fb_setup(char* options, int* ints)) {
+void __init pm2fb_setup(char* options, int* ints) {
 	char* next;
 
-	memset(&pm2fb_options, 0, sizeof(pm2fb_options));
-	memcpy(&pm2fb_options.user_mode, &user_mode[0].par,
-				sizeof(pm2fb_options.user_mode));
 	while (options) {
 		if ((next=strchr(options, ',')))
 			*(next++)='\0';
@@ -1469,6 +2108,10 @@ __initfunc(void pm2fb_setup(char* options, int* ints)) {
 			pm2fb_options.flags |= OPTF_YPAN;
 		else if (!strcmp(options, "oldmem"))
 			pm2fb_options.flags |= OPTF_OLD_MEM;
+		else if (!strcmp(options, "virtual"))
+			pm2fb_options.flags |= OPTF_VIRTUAL;
+		else if (!strcmp(options, "noblink"))
+			curblink = 0;
 		options=next;
 	}
 }
@@ -1478,9 +2121,15 @@ __initfunc(void pm2fb_setup(char* options, int* ints)) {
  ***************************************************************************/
 
 #ifdef MODULE
-int init_module(void) {
 
-	pm2fb_init();
+static char *mode = NULL;
+
+MODULE_PARM(mode, "s");
+
+int init_module(void) {
+	if (mode) pm2fb_mode_setup(mode);
+	if (!pm2fb_init())
+		return -ENXIO;
 }
 
 void cleanup_module(void) {

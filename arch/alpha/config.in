@@ -1,6 +1,6 @@
 #
 # For a description of the syntax of this configuration file,
-# see the Configure script.
+# see Documentation/kbuild/config-language.txt.
 #
 mainmenu_name "Kernel configuration of Linux for Alpha machines"
 
@@ -33,10 +33,12 @@ choice 'Alpha system type' \
 	 EB64+			CONFIG_ALPHA_EB64P		\
 	 EB66			CONFIG_ALPHA_EB66		\
 	 EB66+			CONFIG_ALPHA_EB66P		\
+	 Eiger			CONFIG_ALPHA_EIGER		\
 	 Jensen			CONFIG_ALPHA_JENSEN		\
 	 LX164			CONFIG_ALPHA_LX164		\
 	 Miata			CONFIG_ALPHA_MIATA		\
 	 Mikasa			CONFIG_ALPHA_MIKASA		\
+	 Nautilus		CONFIG_ALPHA_NAUTILUS		\
 	 Noname			CONFIG_ALPHA_NONAME		\
 	 Noritake		CONFIG_ALPHA_NORITAKE		\
 	 PC164			CONFIG_ALPHA_PC164		\
@@ -54,12 +56,11 @@ unset CONFIG_PCI CONFIG_ALPHA_EISA
 unset CONFIG_ALPHA_LCA CONFIG_ALPHA_APECS CONFIG_ALPHA_CIA
 unset CONFIG_ALPHA_T2 CONFIG_ALPHA_PYXIS CONFIG_ALPHA_POLARIS
 unset CONFIG_ALPHA_TSUNAMI CONFIG_ALPHA_MCPCIA
-unset CONFIG_ALPHA_NEED_ROUNDING_EMULATION
+unset CONFIG_ALPHA_IRONGATE
 
 if [ "$CONFIG_ALPHA_GENERIC" = "y" ]
 then
 	define_bool CONFIG_PCI y
-	define_bool CONFIG_ALPHA_NEED_ROUNDING_EMULATION y
 fi
 if [ "$CONFIG_ALPHA_BOOK1" = "y" ]
 then
@@ -78,6 +79,10 @@ then
 	define_bool CONFIG_PCI y
 	define_bool CONFIG_ALPHA_EV4 y
 	define_bool CONFIG_ALPHA_APECS y
+fi
+if [ "$CONFIG_ALPHA_CABRIOLET" = "y" ]
+then
+	define_bool CONFIG_ALPHA_EB64P y
 fi
 if [ "$CONFIG_ALPHA_EB164" = "y" -o "$CONFIG_ALPHA_PC164" = "y" \
 	-o "$CONFIG_ALPHA_ALCOR" = "y" -o "$CONFIG_ALPHA_XLT" = "y" \
@@ -108,7 +113,7 @@ then
 	then
 		define_bool CONFIG_ALPHA_EV5 y
 	else
-	define_bool CONFIG_ALPHA_EV4 y
+		define_bool CONFIG_ALPHA_EV4 y
 	fi
 	define_bool CONFIG_ALPHA_T2 y
 fi
@@ -119,7 +124,7 @@ then
 	define_bool CONFIG_ALPHA_EV5 y
 	define_bool CONFIG_ALPHA_PYXIS y
 fi
-if [ "$CONFIG_ALPHA_DP264" = "y" ]
+if [ "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_EIGER" = "y" ]
 then
 	define_bool CONFIG_PCI y
 	define_bool CONFIG_ALPHA_EV6 y
@@ -141,26 +146,33 @@ if [ "$CONFIG_ALPHA_JENSEN" = "y" ]
 then
 	define_bool CONFIG_ALPHA_EV4 y
 fi
-if [ "$CONFIG_ALPHA_EV4" = "y" ]
+if [ "$CONFIG_ALPHA_NAUTILUS" = "y" ]
 then
-	# EV45 and older do not support all rounding modes in hw:
-	define_bool CONFIG_ALPHA_NEED_ROUNDING_EMULATION y
+	define_bool CONFIG_PCI y
+	define_bool CONFIG_ALPHA_EV6 y
+	define_bool CONFIG_ALPHA_IRONGATE y
 fi
 
+if [ "$CONFIG_ALPHA_JENSEN" = "y" -o "$CONFIG_ALPHA_MIKASA" = "y" \
+        -o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" \
+        -o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
+        -o "$CONFIG_ALPHA_EIGER" = "y" ]
+then
+        define_bool CONFIG_ALPHA_SRM y
+fi
 if [ "$CONFIG_ALPHA_CABRIOLET" = "y" -o "$CONFIG_ALPHA_AVANTI" = "y" \
-	-o "$CONFIG_ALPHA_EB64P" = "y" -o "$CONFIG_ALPHA_JENSEN" = "y" \
-	-o "$CONFIG_ALPHA_MIKASA" = "y" -o "$CONFIG_ALPHA_ALCOR" = "y" \
-	-o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_MIATA" = "y" \
-	-o "$CONFIG_ALPHA_NORITAKE" = "y" -o "$CONFIG_ALPHA_PC164" = "y" \
-	-o "$CONFIG_ALPHA_LX164" = "y" -o "$CONFIG_ALPHA_SX164" = "y" \
-	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" ]
+        -o "$CONFIG_ALPHA_EB64P" = "y"  -o "$CONFIG_ALPHA_PC164" = "y" \
+        -o "$CONFIG_ALPHA_TAKARA" = "y" -o "$CONFIG_ALPHA_EB164" = "y" \
+        -o "$CONFIG_ALPHA_ALCOR" = "y"  -o "$CONFIG_ALPHA_MIATA" = "y" \
+        -o "$CONFIG_ALPHA_LX164" = "y"  -o "$CONFIG_ALPHA_SX164" = "y" \
+        -o "$CONFIG_ALPHA_NAUTILUS" = "y" ]
 then
   bool 'Use SRM as bootloader' CONFIG_ALPHA_SRM
-  if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-    if [ "$CONFIG_ALPHA_SRM" = "y" ]; then
-      bool '  Use SRM PCI setup' CONFIG_ALPHA_SRM_SETUP
-    fi
-  fi
+#  if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+#    if [ "$CONFIG_ALPHA_SRM" = "y" ]; then
+#      bool '  Use SRM PCI setup' CONFIG_ALPHA_SRM_SETUP
+#    fi
+#  fi
 fi
 if [ "$CONFIG_ALPHA_ALCOR" = "y" -o "$CONFIG_ALPHA_MIKASA" = "y" \
 	-o "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_NORITAKE" = "y" \
@@ -173,7 +185,11 @@ then
 	define_bool CONFIG_ALPHA_AVANTI y
 fi
 
-bool 'Symmetric multi-processing support' CONFIG_SMP
+if [ "$CONFIG_ALPHA_SABLE" = "y" -o "$CONFIG_ALPHA_RAWHIDE" = "y" \
+	-o "$CONFIG_ALPHA_DP264" = "y" -o "$CONFIG_ALPHA_GENERIC" = "y" ]
+then
+	bool 'Symmetric multi-processing support' CONFIG_SMP
+fi
 
 if [ "$CONFIG_PCI" = "y" ]; then
   bool 'PCI quirks' CONFIG_PCI_QUIRKS
@@ -236,14 +252,16 @@ source net/ax25/Config.in
 mainmenu_option next_comment
 comment 'ISDN subsystem'
 
-tristate 'ISDN support' CONFIG_ISDN
-if [ "$CONFIG_ISDN" != "n" ]; then
-  source drivers/isdn/Config.in
+if [ "$CONFIG_NET" != "n" ]; then
+   tristate 'ISDN support' CONFIG_ISDN
+   if [ "$CONFIG_ISDN" != "n" ]; then
+      source drivers/isdn/Config.in
+   fi
 fi
 endmenu
 
 mainmenu_option next_comment
-comment 'CD-ROM drivers (not for SCSI or IDE/ATAPI drives)'
+comment 'Old CD-ROM drivers (not SCSI, not IDE)'
 
 bool 'Support non-SCSI/IDE/ATAPI drives' CONFIG_CD_NO_IDESCSI
 if [ "$CONFIG_CD_NO_IDESCSI" != "n" ]; then
@@ -252,7 +270,7 @@ fi
 endmenu
 
 source drivers/char/Config.in
-
+source drivers/usb/Config.in
 source fs/Config.in
 
 if [ "$CONFIG_VT" = "y" ]; then

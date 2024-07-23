@@ -5,10 +5,14 @@
 
 SUB_DIRS     := 
 MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS) hamradio irda
+ALL_SUB_DIRS := $(SUB_DIRS) hamradio irda fc sk98lin lmc skfp
 
 L_TARGET := net.a
-L_OBJS   := auto_irq.o
+L_OBJS   :=
+ifneq ($(ARCH),s390)  
+L_OBJS   += auto_irq.o
+endif
+
 M_OBJS   :=
 MOD_LIST_NAME := NET_MODULES
 
@@ -18,6 +22,8 @@ CONFIG_8390_BUILTIN :=
 CONFIG_8390_MODULE  :=
 CONFIG_SLHC_BUILTIN :=
 CONFIG_SLHC_MODULE  :=
+CONFIG_BSDCOMP_BUILTIN :=
+CONFIG_BSDCOMP_MODULE  :=
 CONFIG_PPPDEF_BUILTIN :=
 CONFIG_PPPDEF_MODULE  :=
 CONFIG_7990_BUILTIN :=
@@ -31,12 +37,14 @@ CONFIG_SYNCPPP_MODULE  :=
 
 ifeq ($(CONFIG_ISDN),y)
   ifeq ($(CONFIG_ISDN_PPP),y)
+    CONFIG_BSDCOMP_BUILTIN = y
     CONFIG_SLHC_BUILTIN = y
     CONFIG_PPPDEF_BUILTIN = y
   endif
 else
   ifeq ($(CONFIG_ISDN),m)
     ifeq ($(CONFIG_ISDN_PPP),y)
+      CONFIG_BSDCOMP_MODULE = y
       CONFIG_SLHC_MODULE = y
       CONFIG_PPPDEF_MODULE = y
     endif
@@ -67,6 +75,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_IBMOL),y)
+L_OBJS += olympic.o
+else
+  ifeq ($(CONFIG_IBMOL),m)
+  M_OBJS += olympic.o
+  endif
+endif
+
 ifeq ($(CONFIG_SKTR),y)
 L_OBJS += sktr.o
 else
@@ -83,8 +99,21 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_NET_SB1000),y)
+L_OBJS += sb1000.o
+else
+  ifeq ($(CONFIG_NET_SB1000),m)
+  M_OBJS += sb1000.o
+  endif
+endif
+
 ifeq ($(CONFIG_DAYNAPORT), y)
 L_OBJS += daynaport.o
+CONFIG_8390_BUILTIN = y
+endif
+
+ifeq ($(CONFIG_MAC8390), y)
+L_OBJS += mac8390.o
 CONFIG_8390_BUILTIN = y
 endif
 
@@ -143,14 +172,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_ETHERH),y)
-CONFIG_8390_BUILTIN = y
-else
-  ifeq ($(CONFIG_ETHERH),m)
-  CONFIG_8390_MODULE = y
-  endif
-endif
-
 ifeq ($(CONFIG_WD80x3),y)
 L_OBJS += wd.o
 CONFIG_8390_BUILTIN = y
@@ -168,14 +189,6 @@ else
   ifeq ($(CONFIG_EL2),m)
   CONFIG_8390_MODULE = y
   M_OBJS += 3c503.o
-  endif
-endif
-
-ifeq ($(CONFIG_ETHERH),y)
-CONFIG_8390_BUILTIN = y
-else
-  ifeq ($(CONFIG_ETHERH),m)
-  CONFIG_8390_MODULE = y
   endif
 endif
 
@@ -307,19 +320,17 @@ else
   endif
 endif
 
-# bsd_comp.o is *always* a module, for some documented reason
-# (licensing).
 ifeq ($(CONFIG_PPP),y)
 LX_OBJS += ppp.o
-M_OBJS += bsd_comp.o
+CONFIG_BSDCOMP_BUILTIN = y
 CONFIG_SLHC_BUILTIN = y
 CONFIG_PPPDEF_BUILTIN = y
 else
   ifeq ($(CONFIG_PPP),m)
+  CONFIG_BSDCOMP_MODULE = y
   CONFIG_SLHC_MODULE = y
   CONFIG_PPPDEF_MODULE = y
   MX_OBJS += ppp.o
-  M_OBJS += bsd_comp.o
   endif
 endif
 
@@ -359,6 +370,14 @@ L_OBJS += dummy.o
 else
   ifeq ($(CONFIG_DUMMY),m)
   M_OBJS += dummy.o
+  endif
+endif
+
+ifeq ($(CONFIG_BONDING),y)
+L_OBJS += bonding.o
+else
+  ifeq ($(CONFIG_BONDING),m)
+  M_OBJS += bonding.o
   endif
 endif
 
@@ -430,6 +449,22 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_SUNBMAC),y)
+L_OBJS += sunbmac.o
+else
+  ifeq ($(CONFIG_SUNBMAC),m)
+  M_OBJS += sunbmac.o
+  endif
+endif
+
+ifeq ($(CONFIG_SUNBMAC),y)
+L_OBJS += sunbmac.o
+else
+  ifeq ($(CONFIG_SUNBMAC),m)
+  M_OBJS += sunbmac.o
+  endif
+endif
+
 ifeq ($(CONFIG_MYRI_SBUS),y)
 L_OBJS += myri_sbus.o
 else
@@ -475,6 +510,22 @@ L_OBJS += 3c523.o
 else
   ifeq ($(CONFIG_ELMC),m)
   M_OBJS += 3c523.o
+  endif
+endif
+
+ifeq ($(CONFIG_SKMC),y)
+L_OBJS += sk_mca.o
+else
+  ifeq ($(CONFIG_SKMC),m)
+  M_OBJS += sk_mca.o
+  endif
+endif
+
+ifeq ($(CONFIG_ELMC_II),y)
+L_OBJS += 3c527.o
+else
+  ifeq ($(CONFIG_ELMC_II),m)
+  M_OBJS += 3c527.o
   endif
 endif
 
@@ -534,6 +585,31 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_RTL8139TOO),y)
+L_OBJS += 8139too.o
+else
+  ifeq ($(CONFIG_RTL8139TOO),m)
+  M_OBJS += 8139too.o
+  endif
+endif
+
+ifeq ($(CONFIG_SIS900),y)
+L_OBJS += sis900.o
+else
+  ifeq ($(CONFIG_SIS900),m)
+  M_OBJS += sis900.o
+  endif
+endif
+
+ifeq ($(CONFIG_DM9102),y) 
+L_OBJS += dmfe.o
+else
+  ifeq ($(CONFIG_DM9102),m)
+  M_OBJS += dmfe.o
+  endif
+endif
+
+
 ifeq ($(CONFIG_YELLOWFIN),y)
 L_OBJS += yellowfin.o
 else
@@ -550,11 +626,39 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_SK98LIN),y)
+  SUB_DIRS += sk98lin
+  MOD_IN_SUB_DIRS += sk98lin
+  L_OBJS += sk98lin/sk98lin.o
+else
+  ifeq ($(CONFIG_SK98LIN),m)
+    MOD_IN_SUB_DIRS += sk98lin
+  endif
+endif
+
+ifeq ($(CONFIG_SKFP),y)
+  SUB_DIRS += skfp
+  MOD_IN_SUB_DIRS += skfp
+  L_OBJS += skfp/skfp.o
+else
+  ifeq ($(CONFIG_SKFP),m)
+    MOD_IN_SUB_DIRS += skfp
+  endif
+endif
+
 ifeq ($(CONFIG_WAVELAN),y)
 L_OBJS += wavelan.o
 else
   ifeq ($(CONFIG_WAVELAN),m)
   M_OBJS += wavelan.o
+  endif
+endif
+
+ifeq ($(CONFIG_ARLAN),y)
+LX_OBJS += arlan.o arlan-proc.o
+else
+  ifeq ($(CONFIG_ARLAN),m)
+  MX_OBJS += arlan.o arlan-proc.o
   endif
 endif
 
@@ -638,6 +742,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_ADAPTEC_STARFIRE),y)
+L_OBJS += starfire.o
+else
+  ifeq ($(CONFIG_ADAPTEC_STARFIRE),m)
+  M_OBJS += starfire.o
+  endif
+endif
+
 ifeq ($(CONFIG_AC3200),y)
 L_OBJS += ac3200.o
 CONFIG_8390_BUILTIN = y
@@ -672,11 +784,24 @@ else
   endif
 endif
 
+# This is also a 82596 and should probably be merged
+ifeq ($(CONFIG_LP486E),y)
+L_OBJS += lp486e.o
+endif
+
 ifeq ($(CONFIG_DEC_ELCP),y)
 L_OBJS += tulip.o
 else
   ifeq ($(CONFIG_DEC_ELCP),m)
   M_OBJS += tulip.o
+  endif
+endif
+
+ifeq ($(CONFIG_DEC_ELCP_OLD),y)
+L_OBJS += old_tulip.o
+else
+  ifeq ($(CONFIG_DEC_ELCP_OLD),m)
+  M_OBJS += old_tulip.o
   endif
 endif
 
@@ -744,6 +869,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_HAMACHI),y)
+L_OBJS += hamachi.o
+else
+  ifeq ($(CONFIG_HAMACHI),m)
+  M_OBJS += hamachi.o
+  endif
+endif
+
 ifeq ($(CONFIG_HOSTESS_SV11),y)
 L_OBJS += hostess_sv11.o
 CONFIG_85230_BUILTIN = y
@@ -756,6 +889,30 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_SEALEVEL_4021),y)
+L_OBJS += sealevel.o
+CONFIG_85230_BUILTIN = y
+CONFIG_SYNCPPP_BUILTIN = y
+else
+  ifeq ($(CONFIG_SEALEVEL_4021),m)
+  CONFIG_85230_MODULE = y
+  CONFIG_SYNCPPP_MODULE = y
+  M_OBJS += sealevel.o
+  endif
+endif
+
+ifeq ($(CONFIG_LANMEDIA),y)
+  SUB_DIRS += lmc
+  MOD_IN_SUB_DIRS += lmc
+  L_OBJS += lmc/lmc.o
+  CONFIG_SYNCPPP_BUILTIN = y
+else
+  ifeq ($(CONFIG_LANMEDIA),m)
+  CONFIG_SYNCPPP_MODULE = y
+  MOD_IN_SUB_DIRS += lmc
+  endif
+endif
+
 ifeq ($(CONFIG_COSA),y)
 L_OBJS += cosa.o
 CONFIG_SYNCPPP_BUILTIN = y
@@ -763,6 +920,142 @@ else
   ifeq ($(CONFIG_COSA),m)
   CONFIG_SYNCPPP_MODULE = y
   M_OBJS += cosa.o
+  endif
+endif
+
+ifeq ($(CONFIG_SYNCLINK_SYNCPPP),y)
+CONFIG_SYNCPPP_BUILTIN = y
+else
+  ifeq ($(CONFIG_SYNCLINK_SYNCPPP),m)
+  CONFIG_SYNCPPP_MODULE = y
+  endif
+endif
+
+#
+# COMX drivers
+#
+ifeq ($(CONFIG_COMX),y)
+LX_OBJS += comx.o
+else 
+  ifeq ($(CONFIG_COMX),m)
+  MX_OBJS += comx.o
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_HW_COMX),y)
+L_OBJS += comx-hw-comx.o
+else 
+  ifeq ($(CONFIG_COMX_HW_COMX),m)
+  M_OBJS += comx-hw-comx.o
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_HW_LOCOMX),y)
+L_OBJS += comx-hw-locomx.o
+CONFIG_85230_BUILTIN=y
+else 
+  ifeq ($(CONFIG_COMX_HW_LOCOMX),m)
+  M_OBJS += comx-hw-locomx.o
+  CONFIG_85230_MODULE=y
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_HW_MIXCOM),y)
+L_OBJS += comx-hw-mixcom.o
+else 
+  ifeq ($(CONFIG_COMX_HW_MIXCOM),m)
+  M_OBJS += comx-hw-mixcom.o
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_PROTO_PPP),y)
+L_OBJS += comx-proto-ppp.o
+CONFIG_SYNCPPP_BUILTIN = y
+else 
+  ifeq ($(CONFIG_COMX_PROTO_PPP),m)
+  M_OBJS += comx-proto-ppp.o
+  CONFIG_SYNCPPP_MODULE = y
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_PROTO_LAPB),y)
+L_OBJS += comx-proto-lapb.o
+else 
+  ifeq ($(CONFIG_COMX_PROTO_LAPB),m)
+  M_OBJS += comx-proto-lapb.o
+  endif
+endif
+
+ifeq ($(CONFIG_COMX_PROTO_FR),y)
+L_OBJS += comx-proto-fr.o
+else 
+  ifeq ($(CONFIG_COMX_PROTO_FR),m)
+  M_OBJS += comx-proto-fr.o
+  endif
+endif
+
+ifeq ($(CONFIG_XPEED),y)
+  SUB_DIRS += xpds
+  MOD_IN_SUB_DIRS += xpds
+  L_OBJS += xpds/xpds-fr.o
+else
+  ifeq ($(CONFIG_XPEED),m)
+    MOD_IN_SUB_DIRS += xpds
+  endif
+endif
+
+# If anything built-in uses Z85230, then build it into the kernel also.
+# If not, but a module uses it, build as a module.
+
+ifdef CONFIG_85230_BUILTIN
+LX_OBJS += z85230.o
+CONFIG_SYNCPPP_BUILTIN=y
+else
+  ifdef CONFIG_85230_MODULE
+  MX_OBJS += z85230.o
+  CONFIG_SYNCPPP_MODULE=y
+  endif
+endif
+
+ifeq ($(CONFIG_HDLC),y)
+L_OBJS += hdlc.o
+CONFIG_SYNCPPP_BUILTIN = y
+else
+  ifeq ($(CONFIG_HDLC),m)
+  M_OBJS += hdlc.o
+  CONFIG_SYNCPPP_MODULE = y
+  endif
+endif
+
+ifeq ($(CONFIG_N2),y)
+L_OBJS += n2.o
+else
+  ifeq ($(CONFIG_N2),m)
+  M_OBJS += n2.o
+  endif
+endif
+
+ifeq ($(CONFIG_C101),y)
+L_OBJS += c101.o
+else
+  ifeq ($(CONFIG_C101),m)
+  M_OBJS += c101.o
+  endif
+endif
+
+ifeq ($(CONFIG_WANXL),y)
+L_OBJS += wanxl.o
+else
+  ifeq ($(CONFIG_WANXL),m)
+  M_OBJS += wanxl.o
+  endif
+endif
+
+ifeq ($(CONFIG_PC300),y)
+L_OBJS += pc300.o
+else
+  ifeq ($(CONFIG_PC300),m)
+  M_OBJS += pc300.o
   endif
 endif
 
@@ -777,14 +1070,13 @@ else
   endif
 endif
 
-# If anything built-in uses Z85230, then build it into the kernel also.
+# If anything built-in uses bsd_comp, then build it into the kernel also.
 # If not, but a module uses it, build as a module.
-
-ifdef CONFIG_85230_BUILTIN
-LX_OBJS += z85230.o
+ifdef CONFIG_BSDCOMP_BUILTIN
+LX_OBJS += bsd_comp.o
 else
-  ifdef CONFIG_85230_MODULE
-  MX_OBJS += z85230.o
+  ifdef CONFIG_BSDCOMP_MODULE
+  MX_OBJS += bsd_comp.o
   endif
 endif
 
@@ -800,10 +1092,8 @@ endif
 
 # if anything built-in uses ppp_deflate, then build it into the kernel also.
 # If not, but a module uses it, build as a module.
-# ... NO!!!  ppp_deflate.o does not work as resident;
-# it works only as a module!
 ifdef CONFIG_PPPDEF_BUILTIN
-MX_OBJS += ppp_deflate.o
+LX_OBJS += ppp_deflate.o
 else
   ifdef CONFIG_PPPDEF_MODULE
   MX_OBJS += ppp_deflate.o
@@ -839,6 +1129,17 @@ else
   M_OBJS += hplance.o
   endif
 endif
+
+ifeq ($(CONFIG_MVME147_NET),y)
+L_OBJS += mvme147.o
+CONFIG_7990_BUILTIN = y
+else
+  ifeq ($(CONFIG_MVME147_NET),m)
+  CONFIG_7990_MODULE = y
+  M_OBJS += mvme147.o
+  endif
+endif
+
 # If we need generic LANCE support, either in the kernel or as a module,
 # build it in the appropriate way.
 ifdef CONFIG_7990_BUILTIN
@@ -868,10 +1169,26 @@ else
 endif
 
 ifeq ($(CONFIG_MIPS_JAZZ_SONIC),y)
-L_OBJS += sonic.o
+L_OBJS += jazzsonic.o
 else
   ifeq ($(CONFIG_MIPS_JAZZ_SONIC),m)
-    M_OBJS += sonic.o
+  M_OBJS += jazzsonic.o
+  endif
+endif
+
+ifeq ($(CONFIG_BAGETLANCE),y)
+L_OBJS += bagetlance.o
+else
+  ifeq ($(CONFIG_BAGETLANCE),m)
+  M_OBJS += bagetlance.o
+  endif
+endif
+
+ifeq ($(CONFIG_DECLANCE),y)
+L_OBJS += declance.o
+else
+  ifeq ($(CONFIG_DECLANCE),m)
+  M_OBJS += declance.o
   endif
 endif
 
@@ -955,6 +1272,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_MAC89x0),y)
+L_OBJS += mac89x0.o
+else
+  ifeq ($(CONFIG_MAC89x0),m)
+  M_OBJS += mac89x0.o
+  endif
+endif
+
 ifeq ($(CONFIG_LTPC),y)
 L_OBJS += ltpc.o
 else
@@ -989,10 +1314,46 @@ endif
 
 ifeq ($(CONFIG_MACE),y)
 L_OBJS += mace.o
+else
+  ifeq ($(CONFIG_MACE),m)
+  M_OBJS += mace.o
+  endif
+endif
+
+ifeq ($(CONFIG_MACMACE),y)
+L_OBJS += macmace.o
+endif
+
+ifeq ($(CONFIG_MACSONIC),y)
+L_OBJS += macsonic.o
+else
+  ifeq ($(CONFIG_MACSONIC),m)
+  M_OBJS += macsonic.o
+  endif
 endif
 
 ifeq ($(CONFIG_BMAC),y)
 L_OBJS += bmac.o
+else
+  ifeq ($(CONFIG_BMAC),m)
+  M_OBJS += bmac.o
+  endif
+endif
+
+ifeq ($(CONFIG_GMAC),y)
+L_OBJS += gmac.o
+else
+  ifeq ($(CONFIG_GMAC),m)
+  M_OBJS += gmac.o
+  endif
+endif
+
+ifeq ($(CONFIG_NCR885E),y)
+L_OBJS += ncr885e.o
+else
+  ifeq ($(CONFIG_NCR885E),m)
+  M_OBJS += ncr885e.o
+  endif
 endif
 
 ifeq ($(CONFIG_VENDOR_SANGOMA),y)
@@ -1000,6 +1361,7 @@ ifeq ($(CONFIG_VENDOR_SANGOMA),y)
   L_OBJS += sdlamain.o
   ifeq ($(CONFIG_WANPIPE_X25),y)
     L_OBJS += sdla_x25.o
+    L_OBJS += sdla_x25api.o
   endif
   ifeq ($(CONFIG_WANPIPE_FR),y)
     L_OBJS += sdla_fr.o
@@ -1007,6 +1369,9 @@ ifeq ($(CONFIG_VENDOR_SANGOMA),y)
   ifeq ($(CONFIG_WANPIPE_PPP),y)
     L_OBJS += sdla_ppp.o
   endif
+  ifeq ($(CONFIG_WANPIPE_CHDLC),y)
+    L_OBJS += sdla_chdlc.o
+  endif    
 endif
 
 ifeq ($(CONFIG_VENDOR_SANGOMA),m)
@@ -1015,6 +1380,7 @@ ifeq ($(CONFIG_VENDOR_SANGOMA),m)
   WANPIPE_OBJS = sdlamain.o
   ifeq ($(CONFIG_WANPIPE_X25),y)
     WANPIPE_OBJS += sdla_x25.o
+    WANPIPE_OBJS += sdla_x25api.o
   endif
   ifeq ($(CONFIG_WANPIPE_FR),y)
     WANPIPE_OBJS += sdla_fr.o
@@ -1022,6 +1388,9 @@ ifeq ($(CONFIG_VENDOR_SANGOMA),m)
   ifeq ($(CONFIG_WANPIPE_PPP),y)
     WANPIPE_OBJS += sdla_ppp.o
   endif
+  ifeq ($(CONFIG_WANPIPE_CHDLC),y)
+    WANPIPE_OBJS += sdla_chdlc.o
+  endif    
 endif
 
 ifeq ($(CONFIG_X25_ASY),y)
@@ -1046,9 +1415,27 @@ endif
 
 ifeq ($(CONFIG_IRDA),y)
 SUB_DIRS += irda
+MOD_IN_SUB_DIRS += irda
 else
   ifeq ($(CONFIG_IRDA),m)
-  MOD_SUB_DIRS += irda
+  MOD_IN_SUB_DIRS += irda
+  endif
+endif
+
+ifeq ($(CONFIG_NET_FC),y)
+SUB_DIRS += fc
+MOD_IN_SUB_DIRS += fc
+else
+  ifeq ($(CONFIG_NET_FC),m)
+  MOD_IN_SUB_DIRS += fc
+  endif
+endif
+
+ifeq ($(CONFIG_SBNI),y)
+L_OBJS += sbni.o
+else
+  ifeq ($(CONFIG_SBNI),m)
+  M_OBJS += sbni.o
   endif
 endif
 

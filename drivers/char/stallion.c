@@ -3,8 +3,8 @@
 /*
  *	stallion.c  -- stallion multiport serial driver.
  *
- *	Copyright (C) 1996-1998  Stallion Technologies (support@stallion.oz.au).
- *	Copyright (C) 1994-1996  Greg Ungerer (gerg@stallion.oz.au).
+ *	Copyright (C) 1996-2000  Stallion Technologies (support@stallion.oz.au)
+ *	Copyright (C) 1994-1996  Greg Ungerer.
  *
  *	This code is loosely based on the Linux serial driver, written by
  *	Linus Torvalds, Theodore T'so and others.
@@ -26,35 +26,28 @@
 
 /*****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/wait.h>
+#include <linux/version.h>
+#include <linux/malloc.h>
 #include <linux/interrupt.h>
-#include <linux/termios.h>
-#include <linux/fcntl.h>
-#include <linux/tty_driver.h>
-#include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
 #include <linux/cd1400.h>
 #include <linux/sc26198.h>
 #include <linux/comstats.h>
 #include <linux/stallion.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
 #include <linux/ioport.h>
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
 #endif
+
 
 /*****************************************************************************/
 
@@ -78,7 +71,7 @@
  *	stl_brdconf[] array is a board. Each line contains io/irq/memory
  *	ranges for that board (as well as what type of board it is).
  *	Some examples:
- *		{ BRD_EASYIO, 0x2a0, 0, 0, 10, 0 }
+ *		{ BRD_EASYIO, 0x2a0, 0, 0, 10, 0 },
  *	This line would configure an EasyIO board (4 or 8, no difference),
  *	at io address 2a0 and irq 10.
  *	Another example:
@@ -105,7 +98,7 @@ typedef struct {
 } stlconf_t;
 
 static stlconf_t	stl_brdconf[] = {
-	{ BRD_EASYIO, 0x2a0, 0, 0, 10, 0 },
+	/*{ BRD_EASYIO, 0x2a0, 0, 0, 10, 0 },*/
 };
 
 static int	stl_nrbrds = sizeof(stl_brdconf) / sizeof(stlconf_t);
@@ -136,6 +129,7 @@ static int	stl_nrbrds = sizeof(stl_brdconf) / sizeof(stlconf_t);
 #define	STL_TXBUFLOW		512
 #define	STL_TXBUFSIZE		4096
 
+#define	STL_IRQ_DEVID		(&stl_brds[0])
 /*****************************************************************************/
 
 /*
@@ -144,7 +138,7 @@ static int	stl_nrbrds = sizeof(stl_brdconf) / sizeof(stlconf_t);
  */
 static char	*stl_drvtitle = "Stallion Multiport Serial Driver";
 static char	*stl_drvname = "stallion";
-static char	*stl_drvversion = "5.4.7";
+static char	*stl_drvversion = "5.6.0";
 static char	*stl_serialname = "ttyE";
 static char	*stl_calloutname = "cue";
 
@@ -259,6 +253,85 @@ static char	*stl_brdnames[] = {
 
 /*****************************************************************************/
 
+#ifdef MODULE
+/*
+ *	Define some string labels for arguments passed from the module
+ *	load line. These allow for easy board definitions, and easy
+ *	modification of the io, memory and irq resoucres.
+ */
+
+static char	*board0[4];
+static char	*board1[4];
+static char	*board2[4];
+static char	*board3[4];
+
+static char	**stl_brdsp[] = {
+	(char **) &board0,
+	(char **) &board1,
+	(char **) &board2,
+	(char **) &board3
+};
+
+/*
+ *	Define a set of common board names, and types. This is used to
+ *	parse any module arguments.
+ */
+
+typedef struct stlbrdtype {
+	char	*name;
+	int	type;
+} stlbrdtype_t;
+
+static stlbrdtype_t	stl_brdstr[] = {
+	{ "easyio", BRD_EASYIO },
+	{ "eio", BRD_EASYIO },
+	{ "20", BRD_EASYIO },
+	{ "ec8/32", BRD_ECH },
+	{ "ec8/32-at", BRD_ECH },
+	{ "ec8/32-isa", BRD_ECH },
+	{ "ech", BRD_ECH },
+	{ "echat", BRD_ECH },
+	{ "21", BRD_ECH },
+	{ "ec8/32-mc", BRD_ECHMC },
+	{ "ec8/32-mca", BRD_ECHMC },
+	{ "echmc", BRD_ECHMC },
+	{ "echmca", BRD_ECHMC },
+	{ "22", BRD_ECHMC },
+	{ "ec8/32-pc", BRD_ECHPCI },
+	{ "ec8/32-pci", BRD_ECHPCI },
+	{ "26", BRD_ECHPCI },
+	{ "ec8/64-pc", BRD_ECH64PCI },
+	{ "ec8/64-pci", BRD_ECH64PCI },
+	{ "ech-pci", BRD_ECH64PCI },
+	{ "echpci", BRD_ECH64PCI },
+	{ "echpc", BRD_ECH64PCI },
+	{ "27", BRD_ECH64PCI },
+	{ "easyio-pc", BRD_EASYIOPCI },
+	{ "easyio-pci", BRD_EASYIOPCI },
+	{ "eio-pci", BRD_EASYIOPCI },
+	{ "eiopci", BRD_EASYIOPCI },
+	{ "28", BRD_EASYIOPCI },
+};
+
+/*
+ *	Define the module agruments.
+ */
+MODULE_AUTHOR("Stallion Technologies (support@stallion.oz.au)");
+MODULE_DESCRIPTION("Stallion Multiport Serial Driver");
+
+MODULE_PARM(board0, "1-4s");
+MODULE_PARM_DESC(board0, "Board 0 config -> name[,ioaddr[,ioaddr2][,irq]]");
+MODULE_PARM(board1, "1-4s");
+MODULE_PARM_DESC(board1, "Board 1 config -> name[,ioaddr[,ioaddr2][,irq]]");
+MODULE_PARM(board2, "1-4s");
+MODULE_PARM_DESC(board2, "Board 2 config -> name[,ioaddr[,ioaddr2][,irq]]");
+MODULE_PARM(board3, "1-4s");
+MODULE_PARM_DESC(board3, "Board 3 config -> name[,ioaddr[,ioaddr2][,irq]]");
+
+#endif
+
+/*****************************************************************************/
+
 /*
  *	Hardware ID bits for the EasyIO and ECH boards. These defines apply
  *	to the directly accessible io ports of these boards (not the uarts -
@@ -275,6 +348,7 @@ static char	*stl_brdnames[] = {
 #define	ID_BRD4		0x10
 #define	ID_BRD8		0x20
 #define	ID_BRD16	0x30
+#define	ID_BRD4_422     0x40    /* 4 port EIO supporting RS422*/
 
 #define	EIO_INTRPEND	0x08
 #define	EIO_INTEDGE	0x00
@@ -399,9 +473,11 @@ static unsigned int	stl_baudrates[] = {
 /*
  *	Define some handy local macros...
  */
-#ifndef	MIN
-#define	MIN(a,b)		(((a) <= (b)) ? (a) : (b))
-#endif
+#undef	MIN
+#define	MIN(a,b)	(((a) <= (b)) ? (a) : (b))
+
+#undef	TOLOWER
+#define	TOLOWER(x)	((((x) >= 'A') && ((x) <= 'Z')) ? ((x) + 0x20) : (x))
 
 /*****************************************************************************/
 
@@ -412,6 +488,10 @@ static unsigned int	stl_baudrates[] = {
 #ifdef MODULE
 int		init_module(void);
 void		cleanup_module(void);
+static void	stl_argbrds(void);
+static int	stl_parsebrd(stlconf_t *confp, char **argp);
+
+static unsigned long stl_atol(char *str);
 #endif
 
 int		stl_init(void);
@@ -447,6 +527,8 @@ static int	stl_setserial(stlport_t *portp, struct serial_struct *sp);
 static int	stl_getbrdstats(combrd_t *bp);
 static int	stl_getportstats(stlport_t *portp, comstats_t *cp);
 static int	stl_clrportstats(stlport_t *portp, comstats_t *cp);
+static int	stl_geticounters(stlport_t *portp,
+				 struct serial_icounter_struct *cp);
 static int	stl_getportstruct(unsigned long arg);
 static int	stl_getbrdstruct(unsigned long arg);
 static int	stl_waitcarrier(stlport_t *portp, struct file *filp);
@@ -459,15 +541,17 @@ static void	stl_echpciintr(stlbrd_t *brdp);
 static void	stl_echpci64intr(stlbrd_t *brdp);
 static void	stl_offintr(void *private);
 static void	*stl_memalloc(int len);
+static stlbrd_t *stl_allocbrd(void);
 static stlport_t *stl_getport(int brdnr, int panelnr, int portnr);
 
 static inline int	stl_initbrds(void);
 static inline int	stl_initeio(stlbrd_t *brdp);
 static inline int	stl_initech(stlbrd_t *brdp);
+static inline int	stl_getbrdnr(void);
 
 #ifdef	CONFIG_PCI
 static inline int	stl_findpcibrds(void);
-static inline int	stl_initpcibrd(int brdtype, struct pci_dev *dev);
+static inline int	stl_initpcibrd(int brdtype, struct pci_dev *devp);
 #endif
 
 /*
@@ -747,7 +831,8 @@ void cleanup_module()
 		kfree_s(stl_tmpwritebuf, STL_TXBUFSIZE);
 
 	for (i = 0; (i < stl_nrbrds); i++) {
-		brdp = stl_brds[i];
+		if ((brdp = stl_brds[i]) == (stlbrd_t *) NULL)
+			continue;
 		for (j = 0; (j < STL_MAXPANELS); j++) {
 			panelp = brdp->panels[j];
 			if (panelp == (stlpanel_t *) NULL)
@@ -774,9 +859,127 @@ void cleanup_module()
 	}
 
 	for (i = 0; (i < stl_numintrs); i++)
-		free_irq(stl_gotintrs[i], NULL);
+		free_irq(stl_gotintrs[i], STL_IRQ_DEVID);
 
 	restore_flags(flags);
+}
+
+/*****************************************************************************/
+
+/*
+ *	Check for any arguments passed in on the module load command line.
+ */
+
+static void stl_argbrds()
+{
+	stlconf_t	conf;
+	stlbrd_t	*brdp;
+	int		nrargs, i;
+
+#if DEBUG
+	printk("stl_argbrds()\n");
+#endif
+
+	nrargs = sizeof(stl_brdsp) / sizeof(char **);
+
+	for (i = stl_nrbrds; (i < nrargs); i++) {
+		memset(&conf, 0, sizeof(conf));
+		if (stl_parsebrd(&conf, stl_brdsp[i]) == 0)
+			continue;
+		if ((brdp = stl_allocbrd()) == (stlbrd_t *) NULL)
+			continue;
+		stl_nrbrds = i + 1;
+		brdp->brdnr = i;
+		brdp->brdtype = conf.brdtype;
+		brdp->ioaddr1 = conf.ioaddr1;
+		brdp->ioaddr2 = conf.ioaddr2;
+		brdp->irq = conf.irq;
+		brdp->irqtype = conf.irqtype;
+		stl_brdinit(brdp);
+	}
+}
+
+/*****************************************************************************/
+
+/*
+ *	Convert an ascii string number into an unsigned long.
+ */
+
+static unsigned long stl_atol(char *str)
+{
+	unsigned long	val;
+	int		base, c;
+	char		*sp;
+
+	val = 0;
+	sp = str;
+	if ((*sp == '0') && (*(sp+1) == 'x')) {
+		base = 16;
+		sp += 2;
+	} else if (*sp == '0') {
+		base = 8;
+		sp++;
+	} else {
+		base = 10;
+	}
+
+	for (; (*sp != 0); sp++) {
+		c = (*sp > '9') ? (TOLOWER(*sp) - 'a' + 10) : (*sp - '0');
+		if ((c < 0) || (c >= base)) {
+			printk("STALLION: invalid argument %s\n", str);
+			val = 0;
+			break;
+		}
+		val = (val * base) + c;
+	}
+	return(val);
+}
+
+/*****************************************************************************/
+
+/*
+ *	Parse the supplied argument string, into the board conf struct.
+ */
+
+static int stl_parsebrd(stlconf_t *confp, char **argp)
+{
+	char	*sp;
+	int	nrbrdnames, i;
+
+#if DEBUG
+	printk("stl_parsebrd(confp=%x,argp=%x)\n", (int) confp, (int) argp);
+#endif
+
+	if ((argp[0] == (char *) NULL) || (*argp[0] == 0))
+		return(0);
+
+	for (sp = argp[0], i = 0; ((*sp != 0) && (i < 25)); sp++, i++)
+		*sp = TOLOWER(*sp);
+
+	nrbrdnames = sizeof(stl_brdstr) / sizeof(stlbrdtype_t);
+	for (i = 0; (i < nrbrdnames); i++) {
+		if (strcmp(stl_brdstr[i].name, argp[0]) == 0)
+			break;
+	}
+	if (i >= nrbrdnames) {
+		printk("STALLION: unknown board name, %s?\n", argp[0]);
+		return(0);
+	}
+
+	confp->brdtype = stl_brdstr[i].type;
+
+	i = 1;
+	if ((argp[i] != (char *) NULL) && (*argp[i] != 0))
+		confp->ioaddr1 = stl_atol(argp[i]);
+	i++;
+	if (confp->brdtype == BRD_ECH) {
+		if ((argp[i] != (char *) NULL) && (*argp[i] != 0))
+			confp->ioaddr2 = stl_atol(argp[i]);
+		i++;
+	}
+	if ((argp[i] != (char *) NULL) && (*argp[i] != 0))
+		confp->irq = stl_atol(argp[i]);
+	return(1);
 }
 
 #endif
@@ -790,6 +993,28 @@ void cleanup_module()
 static void *stl_memalloc(int len)
 {
 	return((void *) kmalloc(len, GFP_KERNEL));
+}
+
+/*****************************************************************************/
+
+/*
+ *	Allocate a new board structure. Fill out the basic info in it.
+ */
+
+static stlbrd_t *stl_allocbrd()
+{
+	stlbrd_t	*brdp;
+
+	brdp = (stlbrd_t *) stl_memalloc(sizeof(stlbrd_t));
+	if (brdp == (stlbrd_t *) NULL) {
+		printk("STALLION: failed to allocate memory (size=%d)\n",
+			sizeof(stlbrd_t));
+		return((stlbrd_t *) NULL);
+	}
+
+	memset(brdp, 0, sizeof(stlbrd_t));
+	brdp->magic = STL_BOARDMAGIC;
+	return(brdp);
 }
 
 /*****************************************************************************/
@@ -1121,7 +1346,6 @@ static int stl_write(struct tty_struct *tty, int from_user, const unsigned char 
 		
 		down(&stl_tmpwritesem);
 		copy_from_user(stl_tmpwritebuf, chbuf, count);
-		up(&stl_tmpwritesem);
 		chbuf = &stl_tmpwritebuf[0];
 	}
 
@@ -1153,6 +1377,9 @@ static int stl_write(struct tty_struct *tty, int from_user, const unsigned char 
 
 	clear_bit(ASYI_TXLOW, &portp->istate);
 	stl_startrxtx(portp, -1, 1);
+
+	if (from_user)
+		up(&stl_tmpwritesem);
 
 	return(count);
 }
@@ -1378,7 +1605,8 @@ static int stl_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd
 		return(-ENODEV);
 
 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
- 	    (cmd != COM_GETPORTSTATS) && (cmd != COM_CLRPORTSTATS)) {
+ 	    (cmd != COM_GETPORTSTATS) && (cmd != COM_CLRPORTSTATS) &&
+	    (cmd != TIOCGICOUNT)) {
 		if (tty->flags & (1 << TTY_IO_ERROR))
 			return(-EIO);
 	}
@@ -1450,6 +1678,13 @@ static int stl_ioctl(struct tty_struct *tty, struct file *file, unsigned int cmd
 		    sizeof(comstats_t))) == 0)
 			rc = stl_clrportstats(portp, (comstats_t *) arg);
 		break;
+	case TIOCGICOUNT:
+		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
+		    sizeof(struct serial_icounter_struct *))) == 0)
+			rc = stl_geticounters(portp,
+				      (struct serial_icounter_struct *) arg);
+		break;
+		
 	case TIOCSERCONFIG:
 	case TIOCSERGWILD:
 	case TIOCSERSWILD:
@@ -1648,6 +1883,7 @@ static void stl_flushbuffer(struct tty_struct *tty)
 
 	stl_flush(portp);
 	wake_up_interruptible(&tty->write_wait);
+	wake_up_interruptible(&tty->poll_wait);
 	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 	    tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
@@ -2032,6 +2268,7 @@ static void stl_offintr(void *private)
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
+		wake_up_interruptible(&tty->poll_wait);
 	}
 	if (test_bit(ASYI_DCDCHANGE, &portp->istate)) {
 		clear_bit(ASYI_DCDCHANGE, &portp->istate);
@@ -2073,7 +2310,8 @@ __initfunc(static int stl_mapirq(int irq, char *name))
 			break;
 	}
 	if (i >= stl_numintrs) {
-		if (request_irq(irq, stl_intr, SA_INTERRUPT, name, NULL) != 0) {
+		if (request_irq(irq, stl_intr, SA_SHIRQ, name,
+				STL_IRQ_DEVID) != 0) {
 			printk("STALLION: failed to register interrupt "
 				"routine for %s irq=%d\n", name, irq);
 			rc = -ENODEV;
@@ -2127,6 +2365,8 @@ __initfunc(static int stl_initports(stlbrd_t *brdp, stlpanel_t *panelp))
 		portp->callouttermios = stl_deftermios;
 		portp->tqueue.routine = stl_offintr;
 		portp->tqueue.data = portp;
+		portp->open_wait = 0;
+		portp->close_wait = 0;
 		portp->stats.brd = portp->brdnr;
 		portp->stats.panel = portp->panelnr;
 		portp->stats.port = portp->portnr;
@@ -2185,12 +2425,12 @@ static inline int stl_initeio(stlbrd_t *brdp)
 	}
 
 	if (check_region(brdp->ioaddr1, brdp->iosize1)) {
-		printk("STALLION: Warning, unit %d I/O address %x conflicts "
+		printk("STALLION: Warning, board %d I/O address %x conflicts "
 			"with another device\n", brdp->brdnr, brdp->ioaddr1);
 	}
 	if (brdp->iosize2 > 0) {
 		if (check_region(brdp->ioaddr2, brdp->iosize2)) {
-			printk("STALLION: Warning, unit %d I/O address %x "
+			printk("STALLION: Warning, board %d I/O address %x "
 				"conflicts with another device\n",
 				brdp->brdnr, brdp->ioaddr2);
 		}
@@ -2223,6 +2463,9 @@ static inline int stl_initeio(stlbrd_t *brdp)
 			break;
 		case ID_BRD16:
 			brdp->nrports = 16;
+			break;
+		case ID_BRD4_422:
+			brdp->nrports = 4;
 			break;
 		default:
 			return(-ENODEV);
@@ -2376,7 +2619,7 @@ static int inline stl_initech(stlbrd_t *brdp)
 		conflict = check_region(brdp->ioaddr2, brdp->iosize2) ?
 			brdp->ioaddr2 : 0;
 	if (conflict) {
-		printk("STALLION: Warning, unit %d I/O address %x conflicts "
+		printk("STALLION: Warning, board %d I/O address %x conflicts "
 			"with another device\n", brdp->brdnr, conflict);
 	}
 
@@ -2499,14 +2742,14 @@ __initfunc(static int stl_brdinit(stlbrd_t *brdp))
 		stl_initech(brdp);
 		break;
 	default:
-		printk("STALLION: unit=%d is unknown board type=%d\n",
+		printk("STALLION: board=%d is unknown board type=%d\n",
 			brdp->brdnr, brdp->brdtype);
 		return(ENODEV);
 	}
 
 	stl_brds[brdp->brdnr] = brdp;
 	if ((brdp->state & BRD_FOUND) == 0) {
-		printk("STALLION: %s board not found, unit=%d io=%x irq=%d\n",
+		printk("STALLION: %s board not found, board=%d io=%x irq=%d\n",
 			stl_brdnames[brdp->brdtype], brdp->brdnr,
 			brdp->ioaddr1, brdp->irq);
 		return(ENODEV);
@@ -2516,11 +2759,31 @@ __initfunc(static int stl_brdinit(stlbrd_t *brdp))
 		if (brdp->panels[i] != (stlpanel_t *) NULL)
 			stl_initports(brdp, brdp->panels[i]);
 
-	printk("STALLION: %s found, unit=%d io=%x irq=%d "
+	printk("STALLION: %s found, board=%d io=%x irq=%d "
 		"nrpanels=%d nrports=%d\n", stl_brdnames[brdp->brdtype],
 		brdp->brdnr, brdp->ioaddr1, brdp->irq, brdp->nrpanels,
 		brdp->nrports);
 	return(0);
+}
+
+/*****************************************************************************/
+
+/*
+ *	Find the next available board number that is free.
+ */
+
+static inline int stl_getbrdnr()
+{
+	int	i;
+
+	for (i = 0; (i < STL_MAXBRDS); i++) {
+		if (stl_brds[i] == (stlbrd_t *) NULL) {
+			if (i >= stl_nrbrds)
+				stl_nrbrds = i + 1;
+			return(i);
+		}
+	}
+	return(-1);
 }
 
 /*****************************************************************************/
@@ -2533,42 +2796,32 @@ __initfunc(static int stl_brdinit(stlbrd_t *brdp))
  *	configuration space.
  */
 
-static inline int stl_initpcibrd(int brdtype, struct pci_dev *dev)
+static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
 {
-	unsigned int	bar[4];
 	stlbrd_t	*brdp;
-	int		i;
-	unsigned char	irq;
 
 #if DEBUG
-	printk("stl_initpcibrd(brdtype=%d,busnr=%x,devnr=%x)\n",
-		brdtype, dev->bus->number, dev->devfn);
+	printk("stl_initpcibrd(brdtype=%d,busnr=%x,devnr=%x)\n", brdtype,
+		devp->bus->number, devp->devfn);
 #endif
 
-	brdp = (stlbrd_t *) stl_memalloc(sizeof(stlbrd_t));
-	if (brdp == (stlbrd_t *) NULL) {
-		printk("STALLION: failed to allocate memory (size=%d)\n",
-			sizeof(stlbrd_t));
+	if ((brdp = stl_allocbrd()) == (stlbrd_t *) NULL)
 		return(-ENOMEM);
+	if ((brdp->brdnr = stl_getbrdnr()) < 0) {
+		printk("STALLION: too many boards found, "
+			"maximum supported %d\n", STL_MAXBRDS);
+		return(0);
 	}
-
-	memset(brdp, 0, sizeof(stlbrd_t));
-	brdp->magic = STL_BOARDMAGIC;
-	brdp->brdnr = stl_nrbrds++;
 	brdp->brdtype = brdtype;
 
 /*
- *	Read in all the BAR registers from this board. Different Stallion
- *	boards use these in different ways, so we just read in the whole
- *	lot and then figure out what is what later.
+ *	Different Stallion boards use the BAR registers in different ways,
+ *	so set up io addresses based on board type.
  */
-	for (i = 0; (i < 4); i++)
-		bar[i] = dev->base_address[i];
-	irq = dev->irq;
-
 #if DEBUG
 	printk("%s(%d): BAR[]=%x,%x,%x,%x IRQ=%x\n", __FILE__, __LINE__,
-		bar[0], bar[1], bar[2], bar[3], irq);
+		devp->base_address[0], devp->base_address[1],
+		devp->base_address[2], devp->base_address[3], devp->irq);
 #endif
 
 /*
@@ -2577,28 +2830,33 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *dev)
  */
 	switch (brdtype) {
 	case BRD_ECHPCI:
-		brdp->ioaddr2 = (bar[0] & PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (bar[1] & PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr2 = (devp->base_address[0] &
+			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr1 = (devp->base_address[1] &
+			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	case BRD_ECH64PCI:
-		brdp->ioaddr2 = (bar[2] & PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (bar[1] & PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr2 = (devp->base_address[2] &
+			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr1 = (devp->base_address[1] &
+			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	case BRD_EASYIOPCI:
-		brdp->ioaddr1 = (bar[2] & PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr2 = (bar[1] & PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr1 = (devp->base_address[2] &
+			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr2 = (devp->base_address[1] &
+			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	default:
 		printk("STALLION: unknown PCI board type=%d\n", brdtype);
 		break;
 	}
 
-	brdp->irq = irq;
+	brdp->irq = devp->irq;
 	stl_brdinit(brdp);
 
 	return(0);
 }
-
 
 /*****************************************************************************/
 
@@ -2621,17 +2879,8 @@ static inline int stl_findpcibrds()
 		return(0);
 
 	for (i = 0; (i < stl_nrpcibrds); i++)
-		while ((dev = pci_find_device(stl_pcibrds[i].vendid, stl_pcibrds[i].devid, dev))) {
-
-/*
- *			Check that we can handle more boards...
- */
-			if (stl_nrbrds >= STL_MAXBRDS) {
-				printk("STALLION: too many boards found, "
-					"maximum supported %d\n", STL_MAXBRDS);
-				i = stl_nrpcibrds;
-				break;
-			}
+		while ((dev = pci_find_device(stl_pcibrds[i].vendid,
+		    stl_pcibrds[i].devid, dev))) {
 
 /*
  *			Found a device on the PCI bus that has our vendor and
@@ -2680,15 +2929,11 @@ static inline int stl_initbrds()
  */
 	for (i = 0; (i < stl_nrbrds); i++) {
 		confp = &stl_brdconf[i];
-		brdp = (stlbrd_t *) stl_memalloc(sizeof(stlbrd_t));
-		if (brdp == (stlbrd_t *) NULL) {
-			printk("STALLION: failed to allocate memory "
-				"(size=%d)\n", sizeof(stlbrd_t));
+#ifdef MODULE
+		stl_parsebrd(confp, stl_brdsp[i]);
+#endif
+		if ((brdp = stl_allocbrd()) == (stlbrd_t *) NULL)
 			return(-ENOMEM);
-		}
-		memset(brdp, 0, sizeof(stlbrd_t));
-
-		brdp->magic = STL_BOARDMAGIC;
 		brdp->brdnr = i;
 		brdp->brdtype = confp->brdtype;
 		brdp->ioaddr1 = confp->ioaddr1;
@@ -2698,11 +2943,14 @@ static inline int stl_initbrds()
 		stl_brdinit(brdp);
 	}
 
-#ifdef CONFIG_PCI
 /*
- *	If the PCI BIOS support is compiled in then let's go looking for
- *	ECH-PCI boards.
+ *	Find any dynamically supported boards. That is via module load
+ *	line options or auto-detected on the PCI bus.
  */
+#ifdef MODULE
+	stl_argbrds();
+#endif
+#ifdef CONFIG_PCI
 	stl_findpcibrds();
 #endif
 
@@ -2856,6 +3104,28 @@ static int stl_clrportstats(stlport_t *portp, comstats_t *cp)
 	portp->stats.port = portp->portnr;
 	copy_to_user(cp, &portp->stats, sizeof(comstats_t));
 	return(0);
+}
+
+static int stl_geticounters(stlport_t *portp,
+			    struct serial_icounter_struct *icp)
+{
+	struct serial_icounter_struct icount;
+	comstats_t *s	= &portp->stats;
+	
+	memset(&icount, 0, sizeof(icount));
+	/*
+	 * we only support a subset of the icounters - the others are handled
+	 * by the uart and we don't get interrupted for them
+	 */
+	icount.dcd	= s->modem;
+	icount.rx	= s->rxtotal;
+	icount.tx	= s->txtotal;
+	icount.frame	= s->rxframing;
+	icount.overrun	= s->rxoverrun;
+	icount.parity	= s->rxparity;
+	icount.brk	= s->rxbreaks;
+	
+	return (copy_to_user(icp, &icount, sizeof(icount)));
 }
 
 /*****************************************************************************/
@@ -3983,6 +4253,7 @@ static void stl_cd1400rxisr(stlpanel_t *panelp, int ioaddr)
 		if ((tty == (struct tty_struct *) NULL) ||
 		    (tty->flip.char_buf_ptr == (char *) NULL) ||
 		    ((buflen = TTY_FLIPBUF_SIZE - tty->flip.count) == 0)) {
+			len = MIN(len, sizeof(stl_unwanted));
 			outb((RDSR + portp->uartaddr), ioaddr);
 			insb((ioaddr + EREG_DATA), &stl_unwanted[0], len);
 			portp->stats.rxlost += len;
@@ -4949,6 +5220,7 @@ static void stl_sc26198rxisr(stlport_t *portp, unsigned int iack)
 		if ((tty == (struct tty_struct *) NULL) ||
 		    (tty->flip.char_buf_ptr == (char *) NULL) ||
 		    ((buflen = TTY_FLIPBUF_SIZE - tty->flip.count) == 0)) {
+			len = MIN(len, sizeof(stl_unwanted));
 			outb(GRXFIFO, (ioaddr + XP_ADDR));
 			insb((ioaddr + XP_DATA), &stl_unwanted[0], len);
 			portp->stats.rxlost += len;

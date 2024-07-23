@@ -38,7 +38,15 @@ static int bus_count = 0, driver_count = 0;
 
 #ifdef CONFIG_VIDEO_BT848
 extern int i2c_tuner_init(void);
+#endif
 extern int msp3400c_init(void);
+#ifdef CONFIG_VIDEO_BUZ
+extern int saa7111_init(void);
+extern int saa7185_init(void);
+#endif
+#ifdef CONFIG_VIDEO_LML33
+extern int bt819_init(void);
+extern int bt856_init(void);
 #endif
 
 int i2c_init(void)
@@ -48,8 +56,18 @@ int i2c_init(void)
 	/* anything to do here ? */
 #ifdef CONFIG_VIDEO_BT848
 	i2c_tuner_init();
+#endif	
+#ifdef CONFIG_VIDEO_MSP3400
 	msp3400c_init();
 #endif	
+#ifdef CONFIG_VIDEO_BUZ
+	saa7111_init();
+	saa7185_init();
+#endif
+#ifdef CONFIG_VIDEO_LML33
+	bt819_init();
+	bt856_init();
+#endif
 	return 0;
 }
 

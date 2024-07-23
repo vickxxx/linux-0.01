@@ -23,18 +23,6 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 
-/*
- * The bitmask for a lookup event:
- *  - follow links at the end
- *  - require a directory
- *  - ending slashes ok even for nonexistent files
- *  - internal "there are more path compnents" flag
- */
-#define LOOKUP_FOLLOW		(1)
-#define LOOKUP_DIRECTORY	(2)
-#define LOOKUP_SLASHOK		(4)
-#define LOOKUP_CONTINUE		(8)
-
 #include <asm/namei.h>
 
 /* This can be removed after the beta phase. */
@@ -148,13 +136,11 @@ char * getname(const char * filename)
  * for filesystem access without changing the "normal" uids which
  * are used for other things..
  */
-int permission(struct inode * inode,int mask)
+int vfs_permission(struct inode * inode,int mask)
 {
 	int mode = inode->i_mode;
 
-	if (inode->i_op && inode->i_op->permission)
-		return inode->i_op->permission(inode, mask);
-	else if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
+	if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
 		 (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
 		return -EROFS; /* Nobody gets write access to a read-only fs */
 	else if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
@@ -167,10 +153,17 @@ int permission(struct inode * inode,int mask)
 		return 0;
 	/* read and search access */
 	if ((mask == S_IROTH) ||
-	    (S_ISDIR(mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
+	    (S_ISDIR(inode->i_mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
 		if (capable(CAP_DAC_READ_SEARCH))
 			return 0;
 	return -EACCES;
+}
+
+int permission(struct inode * inode,int mask)
+{
+	if (inode->i_op && inode->i_op->permission)
+		return inode->i_op->permission(inode, mask);
+	return vfs_permission(inode, mask);
 }
 
 /*
@@ -225,12 +218,12 @@ static struct dentry * reserved_lookup(struct dentry * parent, struct qstr * nam
 /*
  * Internal lookup() using the new generic dcache.
  */
-static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name)
+static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name, int flags)
 {
 	struct dentry * dentry = d_lookup(parent, name);
 
 	if (dentry && dentry->d_op && dentry->d_op->d_revalidate) {
-		if (!dentry->d_op->d_revalidate(dentry) && !d_invalidate(dentry)) {
+		if (!dentry->d_op->d_revalidate(dentry, flags) && !d_invalidate(dentry)) {
 			dput(dentry);
 			dentry = NULL;
 		}
@@ -245,7 +238,7 @@ static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name)
  * We get the directory semaphore, and after getting that we also
  * make sure that nobody added the entry to the dcache in the meantime..
  */
-static struct dentry * real_lookup(struct dentry * parent, struct qstr * name)
+static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, int flags)
 {
 	struct dentry * result;
 	struct inode *dir = parent->d_inode;
@@ -258,20 +251,30 @@ static struct dentry * real_lookup(struct dentry * parent, struct qstr * name)
 	 * FIXME! This could use version numbering or similar to
 	 * avoid unnecessary cache lookups.
 	 */
-	result = cached_lookup(parent, name);
+	result = d_lookup(parent, name);
 	if (!result) {
 		struct dentry * dentry = d_alloc(parent, name);
 		result = ERR_PTR(-ENOMEM);
 		if (dentry) {
-			int error = dir->i_op->lookup(dir, dentry);
-			result = dentry;
-			if (error) {
+			result = dir->i_op->lookup(dir, dentry);
+			if (result)
 				dput(dentry);
-				result = ERR_PTR(error);
-			}
+			else
+				result = dentry;
 		}
+		up(&dir->i_sem);
+		return result;
 	}
+
+	/*
+	 * Uhhuh! Nasty case: the cache was re-populated while
+	 * we waited on the semaphore. Need to revalidate, but
+	 * we're going to return this entry regardless (same
+	 * as if it was busy).
+	 */
 	up(&dir->i_sem);
+	if (result->d_op && result->d_op->d_revalidate)
+		result->d_op->d_revalidate(result, flags);
 	return result;
 }
 
@@ -279,7 +282,8 @@ static struct dentry * do_follow_link(struct dentry *base, struct dentry *dentry
 {
 	struct inode * inode = dentry->d_inode;
 
-	if (inode && inode->i_op && inode->i_op->follow_link) {
+	if ((follow & LOOKUP_FOLLOW)
+	    && inode && inode->i_op && inode->i_op->follow_link) {
 		if (current->link_count < 5) {
 			struct dentry * result;
 
@@ -392,9 +396,9 @@ struct dentry * lookup_dentry(const char * name, struct dentry * base, unsigned 
 		/* This does the actual lookups.. */
 		dentry = reserved_lookup(base, &this);
 		if (!dentry) {
-			dentry = cached_lookup(base, &this);
+			dentry = cached_lookup(base, &this, flags);
 			if (!dentry) {
-				dentry = real_lookup(base, &this);
+				dentry = real_lookup(base, &this, flags);
 				if (IS_ERR(dentry))
 					break;
 			}
@@ -402,9 +406,6 @@ struct dentry * lookup_dentry(const char * name, struct dentry * base, unsigned 
 
 		/* Check mountpoints.. */
 		dentry = follow_mount(dentry);
-
-		if (!(flags & LOOKUP_FOLLOW))
-			break;
 
 		base = do_follow_link(base, dentry, flags);
 		if (IS_ERR(base))
@@ -808,7 +809,7 @@ struct dentry * do_mknod(const char * filename, int mode, dev_t dev)
 	struct dentry *dentry, *retval;
 
 	mode &= ~current->fs->umask;
-	dentry = lookup_dentry(filename, NULL, LOOKUP_FOLLOW);
+	dentry = lookup_dentry(filename, NULL, 0);
 	if (IS_ERR(dentry))
 		return dentry;
 
@@ -1034,17 +1035,13 @@ int vfs_unlink(struct inode *dir, struct dentry *dentry)
 	int error;
 
 	error = may_delete(dir, dentry, 0);
-	if (error)
-		goto exit_lock;
-
-	if (!dir->i_op || !dir->i_op->unlink)
-		goto exit_lock;
-
-	DQUOT_INIT(dir);
-
-	error = dir->i_op->unlink(dir, dentry);
-
-exit_lock:
+	if (!error) {
+		error = -EPERM;
+		if (dir->i_op && dir->i_op->unlink) {
+			DQUOT_INIT(dir);
+			error = dir->i_op->unlink(dir, dentry);
+		}
+	}
 	return error;
 }
 
@@ -1231,15 +1228,16 @@ asmlinkage int sys_link(const char * oldname, const char * newname)
 	return error;
 }
 
-int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+int vfs_rename_dir(struct inode *old_dir, struct dentry *old_dentry,
 	       struct inode *new_dir, struct dentry *new_dentry)
 {
 	int error;
-	int isdir;
+	int need_rehash = 0;
 
-	isdir = S_ISDIR(old_dentry->d_inode->i_mode);
+	if (old_dentry->d_inode == new_dentry->d_inode)
+		return 0;
 
-	error = may_delete(old_dir, old_dentry, isdir); /* XXX */
+	error = may_delete(old_dir, old_dentry, 1);
 	if (error)
 		return error;
 
@@ -1249,7 +1247,64 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (!new_dentry->d_inode)
 		error = may_create(new_dir, new_dentry);
 	else
-		error = may_delete(new_dir, new_dentry, isdir);
+		error = may_delete(new_dir, new_dentry, 1);
+	if (error)
+		return error;
+
+	if (!old_dir->i_op || !old_dir->i_op->rename)
+		return -EPERM;
+
+	/*
+	 * If we are going to change the parent - check write permissions,
+	 * we'll need to flip '..'.
+	 */
+	if (new_dir != old_dir) {
+		error = permission(old_dentry->d_inode, MAY_WRITE);
+	}
+	if (error)
+		return error;
+
+	DQUOT_INIT(old_dir);
+	DQUOT_INIT(new_dir);
+	down(&old_dir->i_sb->s_vfs_rename_sem);
+	error = -EINVAL;
+	if (is_subdir(new_dentry, old_dentry))
+		goto out_unlock;
+	if (new_dentry->d_inode) {
+		error = -EBUSY;
+		if (d_invalidate(new_dentry)<0)
+			goto out_unlock;
+		need_rehash = 1;
+	}
+	error = old_dir->i_op->rename(old_dir, old_dentry, new_dir, new_dentry);
+	if (need_rehash)
+		d_rehash(new_dentry);
+	if (!error)
+		d_move(old_dentry,new_dentry);
+out_unlock:
+	up(&old_dir->i_sb->s_vfs_rename_sem);
+	return error;
+}
+
+int vfs_rename_other(struct inode *old_dir, struct dentry *old_dentry,
+	       struct inode *new_dir, struct dentry *new_dentry)
+{
+	int error;
+
+	if (old_dentry->d_inode == new_dentry->d_inode)
+		return 0;
+
+	error = may_delete(old_dir, old_dentry, 0);
+	if (error)
+		return error;
+
+	if (new_dir->i_dev != old_dir->i_dev)
+		return -EXDEV;
+
+	if (!new_dentry->d_inode)
+		error = may_create(new_dir, new_dentry);
+	else
+		error = may_delete(new_dir, new_dentry, 0);
 	if (error)
 		return error;
 
@@ -1259,8 +1314,22 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	DQUOT_INIT(old_dir);
 	DQUOT_INIT(new_dir);
 	error = old_dir->i_op->rename(old_dir, old_dentry, new_dir, new_dentry);
+	if (error)
+		return error;
+	/* The following d_move() should become unconditional */
+	if (!(old_dir->i_sb->s_flags & MS_ODD_RENAME)) {
+		d_move(old_dentry, new_dentry);
+	}
+	return 0;
+}
 
-	return error;
+int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+	       struct inode *new_dir, struct dentry *new_dentry)
+{
+	if (S_ISDIR(old_dentry->d_inode->i_mode))
+		return vfs_rename_dir(old_dir,old_dentry,new_dir,new_dentry);
+	else
+		return vfs_rename_other(old_dir,old_dentry,new_dir,new_dentry);
 }
 
 static inline int do_rename(const char * oldname, const char * newname)

@@ -27,7 +27,13 @@
  * - Should use an own CAP_* category instead of CAP_SYS_ADMIN 
  * - Should use the underlying filesystems/devices read function if possible
  *   to support read ahead (and for write)
- */
+ *
+ * WARNING/FIXME:
+ * - The block number as IV passing to low level transfer functions is broken:
+ *   it passes the underlying device's block number instead of the
+ *   offset. This makes it change for a given block when the file is 
+ *   moved/restored/copied and also doesn't work over NFS. 
+ */ 
 
 #include <linux/module.h>
 
@@ -107,7 +113,7 @@ static int none_status(struct loop_device *lo, struct loop_info *info)
 
 static int xor_status(struct loop_device *lo, struct loop_info *info)
 {
-	if (info->lo_encrypt_key_size < 0)
+	if (info->lo_encrypt_key_size <= 0)
 		return -EINVAL;
 	return 0;
 }
@@ -309,7 +315,7 @@ static int create_missing_block(struct loop_device *lo, int block, int blksize)
 		/* Do what the default llseek() code would have done */
 		file->f_pos = new_offset;
 		file->f_reada = 0;
-		file->f_version = ++event;
+		file->f_version = ++global_event;
 	}
 
 	if (file->f_op->write == NULL) {
@@ -369,6 +375,10 @@ static int loop_set_fd(struct loop_device *lo, kdev_t dev, unsigned int arg)
 		   a file structure */
 		lo->lo_backing_file = NULL;
 	} else if (S_ISREG(inode->i_mode)) {
+		if (!inode->i_op->bmap) { 
+			printk(KERN_ERR "loop: device has no block access/not implemented\n");
+			goto out_putf;
+		}
 
 		/* Backed by a regular file - we need to hold onto
 		   a file structure for this file.  We'll use it to

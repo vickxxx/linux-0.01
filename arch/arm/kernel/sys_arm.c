@@ -77,12 +77,14 @@ asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 		goto out;
 	if (!(a.flags & MAP_ANONYMOUS)) {
 		error = -EBADF;
-		if (a.fd >= current->files->max_fds || 
-		    !(file = current->files->fd[a.fd]))
+		file = fget(a.fd);
+		if (!file)
 			goto out;
 	}
 	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	error = do_mmap(file, a.addr, a.len, a.prot, a.flags, a.offset);
+	if (file)
+		fput(file);
 out:
 	unlock_kernel();
 	return error;
@@ -221,13 +223,7 @@ out:
  */
 asmlinkage int sys_fork(struct pt_regs *regs)
 {
-	int ret;
-
-	lock_kernel();
-	ret = do_fork(SIGCHLD, regs->ARM_sp, regs);
-	unlock_kernel();
-
-	return ret;
+	return do_fork(SIGCHLD, regs->ARM_sp, regs);
 }
 
 /* Clone a task - this clones the calling program thread.
@@ -235,14 +231,14 @@ asmlinkage int sys_fork(struct pt_regs *regs)
  */
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp, struct pt_regs *regs)
 {
-	int ret;
-
-	lock_kernel();
 	if (!newsp)
 		newsp = regs->ARM_sp;
-	ret = do_fork(clone_flags, newsp, regs);
-	unlock_kernel();
-	return ret;
+	return do_fork(clone_flags, newsp, regs);
+}
+
+asmlinkage int sys_vfork(struct pt_regs *regs)
+{
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->ARM_sp, regs);
 }
 
 /* sys_execve() executes a new program.

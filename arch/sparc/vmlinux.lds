@@ -31,13 +31,26 @@ SECTIONS
   __start___ksymtab = .;
   __ksymtab  : { *(__ksymtab) }
   __stop___ksymtab = .;
+
+  . = ALIGN(32);
+  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
+
   . = ALIGN(4096);
   __init_begin = .;
   .text.init : { *(.text.init) }
   __init_text_end = .;
   .data.init : { *(.data.init) }
+  . = ALIGN(16);		/* __setup() commandline parameters */
+  __setup_start = .;
+  .setup.init : { *(.setup.init) }
+  __setup_end = .;
+  __initcall_start = .;		/* the init functions to be called */
+  .initcall.init : { *(.initcall.init) }
+  __initcall_end = .;
   . = ALIGN(4096);
   __init_end = .;
+
+
   __bss_start = .;
   .sbss      : { *(.sbss) *(.scommon) }
   .bss       :

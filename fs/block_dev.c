@@ -24,7 +24,7 @@ ssize_t block_write(struct file * filp, const char * buf,
 	ssize_t block, blocks;
 	loff_t offset;
 	ssize_t chars;
-	ssize_t written = 0;
+	ssize_t written = 0, retval = 0;
 	struct buffer_head * bhlist[NBUF];
 	size_t size;
 	kdev_t dev;
@@ -54,8 +54,10 @@ ssize_t block_write(struct file * filp, const char * buf,
 	else
 		size = INT_MAX;
 	while (count>0) {
-		if (block >= size)
-			return written ? written : -ENOSPC;
+		if (block >= size) {
+			retval = -ENOSPC;
+			goto cleanup;
+		}
 		chars = blocksize - offset;
 		if (chars > count)
 			chars=count;
@@ -67,39 +69,59 @@ ssize_t block_write(struct file * filp, const char * buf,
 			if (chars != blocksize)
 				fn = bread;
 			bh = fn(dev, block, blocksize);
+			if (!bh) {
+				retval = -EIO;
+				goto cleanup;
+			}
+			if (!buffer_uptodate(bh))
+				wait_on_buffer(bh);
 		}
 #else
 		bh = getblk(dev, block, blocksize);
+		if (!bh) {
+			retval = -EIO;
+			goto cleanup;
+		}
 
-		if (chars != blocksize && !buffer_uptodate(bh)) {
-		  if(!filp->f_reada ||
-		     !read_ahead[MAJOR(dev)]) {
-		    /* We do this to force the read of a single buffer */
-		    brelse(bh);
-		    bh = bread(dev,block,blocksize);
-		  } else {
-		    /* Read-ahead before write */
-		    blocks = read_ahead[MAJOR(dev)] / (blocksize >> 9) / 2;
-		    if (block + blocks > size) blocks = size - block;
-		    if (blocks > NBUF) blocks=NBUF;
+		if (!buffer_uptodate(bh))
+		{
+		  if (chars == blocksize)
+		    wait_on_buffer(bh);
+		  else
+		  {
 		    bhlist[0] = bh;
-		    for(i=1; i<blocks; i++){
-		      bhlist[i] = getblk (dev, block+i, blocksize);
-		      if(!bhlist[i]){
-			while(i >= 0) brelse(bhlist[i--]);
-			return written ? written : -EIO;
-		      };
-		    };
+		    if (!filp->f_reada || !read_ahead[MAJOR(dev)]) {
+		      /* We do this to force the read of a single buffer */
+		      blocks = 1;
+		    } else {
+		      /* Read-ahead before write */
+		      blocks = read_ahead[MAJOR(dev)] / (blocksize >> 9) / 2;
+		      if (block + blocks > size) blocks = size - block;
+		      if (blocks > NBUF) blocks=NBUF;
+		      if (!blocks) blocks = 1;
+		      for(i=1; i<blocks; i++)
+		      {
+		        bhlist[i] = getblk (dev, block+i, blocksize);
+		        if (!bhlist[i])
+			{
+			  while(i >= 0) brelse(bhlist[i--]);
+			  retval = -EIO;
+			  goto cleanup;
+		        }
+		      }
+		    }
 		    ll_rw_block(READ, blocks, bhlist);
 		    for(i=1; i<blocks; i++) brelse(bhlist[i]);
 		    wait_on_buffer(bh);
-		      
+		    if (!buffer_uptodate(bh)) {
+			  brelse(bh);
+			  retval = -EIO;
+			  goto cleanup;
+		    }
 		  };
 		};
 #endif
 		block++;
-		if (!bh)
-			return written ? written : -EIO;
 		p = offset + bh->b_data;
 		offset = 0;
 		*ppos += chars;
@@ -127,6 +149,7 @@ ssize_t block_write(struct file * filp, const char * buf,
 		if(write_error)
 			break;
 	}
+	cleanup:
 	if ( buffercount ){
 		ll_rw_block(WRITE, buffercount, bufferlist);
 		for(i=0; i<buffercount; i++){
@@ -136,10 +159,11 @@ ssize_t block_write(struct file * filp, const char * buf,
 			brelse(bufferlist[i]);
 		}
 	}		
-	filp->f_reada = 1;
+	if(!retval)
+		filp->f_reada = 1;
 	if(write_error)
 		return -EIO;
-	return written;
+	return written ? written : retval;
 }
 
 ssize_t block_read(struct file * filp, char * buf, size_t count, loff_t *ppos)
@@ -273,6 +297,8 @@ ssize_t block_read(struct file * filp, char * buf, size_t count, loff_t *ppos)
 			if (++bhe == &buflist[NBUF])
 				bhe = buflist;
 		} while (left > 0 && bhe != bhb && (!*bhe || !buffer_locked(*bhe)));
+		if (bhe == bhb && !blocks)
+			break;
 	} while (left > 0);
 
 /* Release the read-ahead blocks */

@@ -15,7 +15,7 @@ typedef long		__kernel_off_t;
 typedef int		__kernel_pid_t;
 typedef unsigned int	__kernel_uid_t;
 typedef unsigned int	__kernel_gid_t;
-typedef unsigned long	__kernel_size_t;
+typedef unsigned int	__kernel_size_t;
 typedef long		__kernel_ssize_t;
 typedef long		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
@@ -43,7 +43,8 @@ typedef struct {
 
 #else /* __GNUC__ */
 
-#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
+#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2) \
+    || (__GLIBC__ == 2 && __GLIBC_MINOR__ == 0)
 /* With GNU C, use inline functions instead so args are evaluated only once: */
 
 #undef __FD_SET

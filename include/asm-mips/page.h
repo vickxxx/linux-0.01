@@ -1,11 +1,12 @@
-/*
+/* $Id: page.h,v 1.6 1999/01/04 16:09:24 ralf Exp $
+ *
  * Definitions for page handling
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995, 1996 by Ralf Baechle
+ * Copyright (C) 1994 - 1998 by Ralf Baechle
  */
 #ifndef __ASM_MIPS_PAGE_H
 #define __ASM_MIPS_PAGE_H
@@ -19,12 +20,25 @@
 
 #define STRICT_MM_TYPECHECKS
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
-#define get_user_page(vaddr)		__get_free_page(GFP_KERNEL)
-#define free_user_page(page, addr)	free_page(addr)
 extern void (*clear_page)(unsigned long page);
 extern void (*copy_page)(unsigned long to, unsigned long from);
+
+extern __inline__ int get_order(unsigned long size)
+{
+        int order;
+
+        size = (size-1) >> (PAGE_SHIFT-1);
+        order = -1;
+        do {
+                size >>= 1;
+                order++;
+        } while (size);
+        return order;
+}
+
+#endif /* defined (__KERNEL__) */
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -66,7 +80,7 @@ typedef unsigned long pgprot_t;
 
 #endif /* !defined (STRICT_MM_TYPECHECKS) */
 
-#endif /* __LANGUAGE_ASSEMBLY__ */
+#endif /* _LANGUAGE_ASSEMBLY */
 
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
@@ -78,9 +92,7 @@ typedef unsigned long pgprot_t;
 #define PAGE_OFFSET	0x80000000UL
 #define __pa(x)		((unsigned long) (x) - PAGE_OFFSET)
 #define __va(x)		((void *)((unsigned long) (x) + PAGE_OFFSET))
-#define MAP_MASK        0x1fffffffUL
-#define MAP_NR(addr)	((((unsigned long)(addr)) & MAP_MASK) >> PAGE_SHIFT)
+#define MAP_NR(addr)	(__pa(addr) >> PAGE_SHIFT)
 
-#endif /* defined (__KERNEL__) */
 
 #endif /* __ASM_MIPS_PAGE_H */

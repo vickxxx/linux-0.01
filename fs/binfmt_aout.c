@@ -58,14 +58,25 @@ static void set_brk(unsigned long start, unsigned long end)
  * These are the only things you should do on a core-file: use only these
  * macros to write out all the necessary info.
  */
-#define DUMP_WRITE(addr,nr) \
-while (file.f_op->write(&file,(char *)(addr),(nr),&file.f_pos) != (nr)) goto close_coredump
+
+static int dump_write(struct file *file, const void *addr, int nr)
+{
+	int r;
+	fs_down(&file->f_dentry->d_inode->i_sem);
+	r = file->f_op->write(file, addr, nr, &file->f_pos) == nr;
+	fs_up(&file->f_dentry->d_inode->i_sem);
+	return r;
+}
+
+#define DUMP_WRITE(addr, nr)	\
+	if (!dump_write(file, (void *)(addr), (nr))) \
+		goto close_coredump;
 
 #define DUMP_SEEK(offset) \
-if (file.f_op->llseek) { \
-	if (file.f_op->llseek(&file,(offset),0) != (offset)) \
+if (file->f_op->llseek) { \
+	if (file->f_op->llseek(file,(offset),0) != (offset)) \
  		goto close_coredump; \
-} else file.f_pos = (offset)
+} else file->f_pos = (offset)
 
 /*
  * Routine writes a core dump image in the current directory.
@@ -82,7 +93,7 @@ do_aout_core_dump(long signr, struct pt_regs * regs)
 {
 	struct dentry * dentry = NULL;
 	struct inode * inode = NULL;
-	struct file file;
+	struct file * file;
 	mm_segment_t fs;
 	int has_dumped = 0;
 	char corefile[6+sizeof(current->comm)];
@@ -116,21 +127,16 @@ do_aout_core_dump(long signr, struct pt_regs * regs)
 #else
 	corefile[4] = '\0';
 #endif
-	dentry = open_namei(corefile,O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
-	if (IS_ERR(dentry)) {
-		dentry = NULL;
+	file = filp_open(corefile,O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
+	if (IS_ERR(file))
 		goto end_coredump;
-	}
+	dentry = file->f_dentry;
 	inode = dentry->d_inode;
 	if (!S_ISREG(inode->i_mode))
-		goto end_coredump;
+		goto close_coredump;
 	if (!inode->i_op || !inode->i_op->default_file_ops)
-		goto end_coredump;
-	if (get_write_access(inode))
-		goto end_coredump;
-	if (init_private_file(&file, dentry, 3))
-		goto end_coredump_write;
-	if (!file.f_op->write)
+		goto close_coredump;
+	if (!file->f_op->write)
 		goto close_coredump;
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
@@ -211,13 +217,9 @@ do_aout_core_dump(long signr, struct pt_regs * regs)
 	set_fs(KERNEL_DS);
 	DUMP_WRITE(current,sizeof(*current));
 close_coredump:
-	if (file.f_op->release)
-		file.f_op->release(inode,&file);
-end_coredump_write:
-	put_write_access(inode);
+	filp_close(file, NULL);
 end_coredump:
 	set_fs(fs);
-	dput(dentry);
 	return has_dumped;
 }
 
@@ -294,6 +296,8 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 	return sp;
 }
 
+static int warnings = 0;
+
 /*
  * These are the functions used to load a.out style executables and shared
  * libraries.  There is no binary dependent code anywhere else.
@@ -322,13 +326,8 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 
 #ifdef __i386__
 	if (N_MAGIC(ex) == ZMAGIC && fd_offset != BLOCK_SIZE) {
-		printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
-		return -ENOEXEC;
-	}
-
-	if (N_MAGIC(ex) == ZMAGIC && ex.a_text &&
-	    (fd_offset < bprm->dentry->d_inode->i_sb->s_blocksize)) {
-		printk(KERN_NOTICE "N_TXTOFF < BLOCK_SIZE. Please convert binary.\n");
+		if(warnings++<10)
+			printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
 		return -ENOEXEC;
 	}
 #endif
@@ -402,16 +401,23 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 	} else {
 		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
 		    (N_MAGIC(ex) != NMAGIC))
-			printk(KERN_NOTICE "executable not page aligned\n");
+			if(warnings++<10)
+				printk(KERN_NOTICE "executable not page aligned\n");
 
 		fd = open_dentry(bprm->dentry, O_RDONLY);
 		if (fd < 0)
 			return fd;
-		file = fcheck(fd);
+		file = fget(fd);
 
-		if (!file->f_op || !file->f_op->mmap) {
+		if (!file->f_op || !file->f_op->mmap ||
+		    fd_offset & (bprm->dentry->d_inode->i_sb->s_blocksize-1)) {
+			if (warnings++<10)
+				printk(KERN_NOTICE
+				       "fd_offset is not blocksize aligned. Loading %s in anonymous memory.\n",
+				       file->f_dentry->d_name.name);
+			fput(file);
 			sys_close(fd);
-			do_mmap(NULL, 0, ex.a_text+ex.a_data,
+			do_mmap(NULL, N_TXTADDR(ex), ex.a_text+ex.a_data,
 				PROT_READ|PROT_WRITE|PROT_EXEC,
 				MAP_FIXED|MAP_PRIVATE, 0);
 			read_exec(bprm->dentry, fd_offset,
@@ -428,6 +434,7 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 			fd_offset);
 
 		if (error != N_TXTADDR(ex)) {
+			fput(file);
 			sys_close(fd);
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -437,6 +444,7 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
+		fput(file);
 		sys_close(fd);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
@@ -516,12 +524,6 @@ do_load_aout_library(int fd)
 		goto out_putf;
 	}
 
-	if (N_MAGIC(ex) == ZMAGIC && N_TXTOFF(ex) &&
-	    (N_TXTOFF(ex) < inode->i_sb->s_blocksize)) {
-		printk("N_TXTOFF < BLOCK_SIZE. Please convert library\n");
-		goto out_putf;
-	}
-
 	if (N_FLAGS(ex))
 		goto out_putf;
 
@@ -530,6 +532,20 @@ do_load_aout_library(int fd)
 
 	start_addr =  ex.a_entry & 0xfffff000;
 
+	if (N_TXTOFF(ex) & (inode->i_sb->s_blocksize-1)) {
+		if (warnings++<10)
+			printk(KERN_NOTICE
+			       "N_TXTOFF is not blocksize aligned. Loading library %s in anonymous memory.\n",
+			       file->f_dentry->d_name.name);
+		do_mmap(NULL, start_addr, ex.a_text + ex.a_data,
+			PROT_READ | PROT_WRITE | PROT_EXEC,
+			MAP_FIXED| MAP_PRIVATE, 0);
+		read_exec(file->f_dentry, N_TXTOFF(ex),
+			  (char *)start_addr, ex.a_text + ex.a_data, 0);
+		flush_icache_range((unsigned long) start_addr,
+				   (unsigned long) start_addr + ex.a_text + ex.a_data);
+		goto map_bss;
+	}
 	/* Now use mmap to map the library into memory. */
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -539,6 +555,7 @@ do_load_aout_library(int fd)
 	if (error != start_addr)
 		goto out_putf;
 
+ map_bss:
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
 	if (bss > len) {

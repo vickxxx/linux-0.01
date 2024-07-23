@@ -171,8 +171,7 @@ start_kernel(void)
 	srm_printk("Initrd positioned at %#lx\n", initrd_start);
 #endif
 
-	nbytes = srm_dispatch(CCB_GET_ENV, ENV_BOOTED_OSFLAGS,
-			      envval, sizeof(envval));
+	nbytes = callback_getenv(ENV_BOOTED_OSFLAGS, envval, sizeof(envval));
 	if (nbytes < 0 || nbytes >= sizeof(envval)) {
 		nbytes = 0;
 	}
@@ -200,11 +199,11 @@ start_kernel(void)
         load(START_ADDR+(4*KERNEL_SIZE), KERNEL_ORIGIN, KERNEL_SIZE);
         load(START_ADDR, START_ADDR+(4*KERNEL_SIZE), KERNEL_SIZE);
 
-	memset((char*)ZERO_PAGE, 0, PAGE_SIZE);
-	strcpy((char*)ZERO_PAGE, envval);
+	memset((char*)ZERO_PAGE(0), 0, PAGE_SIZE);
+	strcpy((char*)ZERO_PAGE(0), envval);
 #ifdef INITRD_SIZE
-	((long *)(ZERO_PAGE+256))[0] = initrd_start;
-	((long *)(ZERO_PAGE+256))[1] = INITRD_SIZE;
+	((long *)(ZERO_PAGE(0)+256))[0] = initrd_start;
+	((long *)(ZERO_PAGE(0)+256))[1] = INITRD_SIZE;
 #endif
 
 	runkernel();

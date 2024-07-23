@@ -22,10 +22,11 @@ asmlinkage int sys_statfs(const char * path, struct statfs * buf)
 	error = PTR_ERR(dentry);
 	if (!IS_ERR(dentry)) {
 		struct inode * inode = dentry->d_inode;
+		struct super_block * sb = inode->i_sb;
 
-		error = -ENOSYS;
-		if (inode->i_sb->s_op->statfs)
-			error = inode->i_sb->s_op->statfs(inode->i_sb, buf, sizeof(struct statfs));
+		error = -ENODEV;
+		if (sb && sb->s_op && sb->s_op->statfs)
+			error = sb->s_op->statfs(sb, buf, sizeof(struct statfs));
 
 		dput(dentry);
 	}
@@ -52,10 +53,8 @@ asmlinkage int sys_fstatfs(unsigned int fd, struct statfs * buf)
 	if (!(inode = dentry->d_inode))
 		goto out_putf;
 	error = -ENODEV;
-	if (!(sb = inode->i_sb))
-		goto out_putf;
-	error = -ENOSYS;
-	if (sb->s_op->statfs)
+	sb = inode->i_sb;
+	if (sb && sb->s_op && sb->s_op->statfs)
 		error = sb->s_op->statfs(sb, buf, sizeof(struct statfs));
 out_putf:
 	fput(file);
@@ -70,7 +69,11 @@ int do_truncate(struct dentry *dentry, unsigned long length)
 	int error;
 	struct iattr newattrs;
 
-	down(&inode->i_sem);
+	/* Not pretty: "inode->i_size" shouldn't really be "off_t". But it is. */
+	if ((off_t) length < 0)
+		return -EINVAL;
+
+	fs_down(&inode->i_sem);
 	newattrs.ia_size = length;
 	newattrs.ia_valid = ATTR_SIZE | ATTR_CTIME;
 	error = notify_change(dentry, &newattrs);
@@ -80,7 +83,7 @@ int do_truncate(struct dentry *dentry, unsigned long length)
 		if (inode->i_op && inode->i_op->truncate)
 			inode->i_op->truncate(inode);
 	}
-	up(&inode->i_sem);
+	fs_up(&inode->i_sem);
 	return error;
 }
 
@@ -295,11 +298,16 @@ asmlinkage int sys_access(const char * filename, int mode)
 	/* Clear the capabilities if we switch to a non-root user */
 	if (current->uid)
 		cap_clear(current->cap_effective);
-
+	else
+		current->cap_effective = current->cap_permitted;
+		
 	dentry = namei(filename);
 	res = PTR_ERR(dentry);
 	if (!IS_ERR(dentry)) {
 		res = permission(dentry->d_inode, mode);
+		/* SuS v2 requires we report a read only fs too */
+		if(!res && (mode & S_IWOTH) && IS_RDONLY(dentry->d_inode))
+			res = -EROFS;
 		dput(dentry);
 	}
 
@@ -527,10 +535,13 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 	 * non-root user, remove the setuid bit.
 	 * 19981026	David C Niemi <niemi@tux.org>
 	 *
+	 * Changed this to apply to all users, including root, to avoid
+	 * some races. This is the behavior we had in 2.0. The check for
+	 * non-root was definitely wrong for 2.2 anyway, as it should
+	 * have been using CAP_FSETID rather than fsuid -- 19990830 SD.
 	 */
 	if ((inode->i_mode & S_ISUID) == S_ISUID &&
-		!S_ISDIR(inode->i_mode)
-		&& current->fsuid) 
+		!S_ISDIR(inode->i_mode))
 	{
 		newattrs.ia_mode &= ~S_ISUID;
 		newattrs.ia_valid |= ATTR_MODE;
@@ -540,9 +551,11 @@ static int chown_common(struct dentry * dentry, uid_t user, gid_t group)
 	 * by a non-root user, remove the setgid bit UNLESS there is no group
 	 * execute bit (this would be a file marked for mandatory locking).
 	 * 19981026	David C Niemi <niemi@tux.org>
+	 *
+	 * Removed the fsuid check (see the comment above) -- 19990830 SD.
 	 */
 	if (((inode->i_mode & (S_ISGID | S_IXGRP)) == (S_ISGID | S_IXGRP)) 
-		&& !S_ISDIR(inode->i_mode) && current->fsuid) 
+		&& !S_ISDIR(inode->i_mode))
 	{
 		newattrs.ia_mode &= ~S_ISGID;
 		newattrs.ia_valid |= ATTR_MODE;
@@ -683,9 +696,13 @@ int get_unused_fd(void)
 {
 	struct files_struct * files = current->files;
 	int fd, error;
-
+	
+repeat:
 	error = -EMFILE;
-	fd = find_first_zero_bit(&files->open_fds, NR_OPEN);
+
+	fd = find_next_zero_bit(files->open_fds, 
+				current->files->max_fdset, 
+				files->next_fd);
 	/*
 	 * N.B. For clone tasks sharing a files structure, this test
 	 * will limit the total number of files that can be opened.
@@ -693,10 +710,27 @@ int get_unused_fd(void)
 	if (fd >= current->rlim[RLIMIT_NOFILE].rlim_cur)
 		goto out;
 
-	/* Check here for fd > files->max_fds to do dynamic expansion */
+	/* Do we need to expand the fdset array? */
+	if (fd >= current->files->max_fdset) {
+		error = expand_fdset(files, fd + 1);
+		if (!error)
+			goto repeat;
+		goto out;
+	}
+	
+	/* 
+	 * Check whether we need to expand the fd array.
+	 */
+	if (fd >= files->max_fds) {
+		error = expand_fd_array(files, fd + 1);
+		if (!error)
+			goto repeat;
+		goto out;
+	}
 
-	FD_SET(fd, &files->open_fds);
-	FD_CLR(fd, &files->close_on_exec);
+	FD_SET(fd, files->open_fds);
+	FD_CLR(fd, files->close_on_exec);
+	files->next_fd = fd + 1;
 #if 1
 	/* Sanity check */
 	if (files->fd[fd] != NULL) {
@@ -707,12 +741,11 @@ int get_unused_fd(void)
 	error = fd;
 
 out:
+#ifdef FDSET_DEBUG	
+	if (error < 0)
+		printk (KERN_ERR __FUNCTION__ ": return %d\n", error);
+#endif
 	return error;
-}
-
-inline void put_unused_fd(unsigned int fd)
-{
-	FD_CLR(fd, &current->files->open_fds);
 }
 
 asmlinkage int sys_open(const char * filename, int flags, int mode)
@@ -752,12 +785,7 @@ out_error:
  */
 asmlinkage int sys_creat(const char * pathname, int mode)
 {
-	int ret;
-
-	lock_kernel();
-	ret = sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
-	unlock_kernel();
-	return ret;
+	return sys_open(pathname, O_CREAT | O_WRONLY | O_TRUNC, mode);
 }
 
 #endif
@@ -782,7 +810,7 @@ void __fput(struct file *filp)
  * "id" is the POSIX thread ID. We use the
  * files pointer for this..
  */
-int close_fp(struct file *filp, fl_owner_t id)
+int filp_close(struct file *filp, fl_owner_t id)
 {
 	int retval;
 	struct dentry *dentry = filp->f_dentry;
@@ -817,8 +845,8 @@ asmlinkage int sys_close(unsigned int fd)
 		struct files_struct * files = current->files;
 		files->fd[fd] = NULL;
 		put_unused_fd(fd);
-		FD_CLR(fd, &files->close_on_exec);
-		error = close_fp(filp, files);
+		FD_CLR(fd, files->close_on_exec);
+ 		error = filp_close(filp, files);
 	}
 	unlock_kernel();
 	return error;

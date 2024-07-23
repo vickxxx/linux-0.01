@@ -5,7 +5,7 @@
  *
  *		The Internet Protocol (IP) module.
  *
- * Version:	$Id: ip_input.c,v 1.35 1999/01/12 14:32:48 davem Exp $
+ * Version:	$Id: ip_input.c,v 1.37.2.4 2001/01/04 04:20:16 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -97,6 +97,7 @@
  *		Alan Cox	:	Multicast routing hooks
  *		Jos Vos		:	Do accounting *before* call_in_firewall
  *	Willy Konynenberg	:	Transparent proxying support
+ *             Stephan Uphoff   :       Check IP header length field
  *
  *  
  *
@@ -154,6 +155,7 @@
 
 struct ip_mib ip_statistics={2,IPDEFTTL,};	/* Forwarding=No, Default TTL=64 */
 
+int sysctl_ip_always_defrag = 0;
 
 /*
  *	Handle the issuing of an ioctl() request
@@ -169,11 +171,6 @@ int ip_ioctl(struct sock *sk, int cmd, unsigned long arg)
 			return(-EINVAL);
 	}
 }
-
-
-#if defined(CONFIG_IP_TRANSPARENT_PROXY) && !defined(CONFIG_IP_ALWAYS_DEFRAG)
-#define CONFIG_IP_ALWAYS_DEFRAG 1
-#endif
 
 /*
  *	0 - deliver
@@ -235,25 +232,36 @@ int ip_local_deliver(struct sk_buff *skb)
 	unsigned char hash;
 	int flag = 0;
 
-#ifndef CONFIG_IP_ALWAYS_DEFRAG
 	/*
 	 *	Reassemble IP fragments.
 	 */
 
-	if (iph->frag_off & htons(IP_MF|IP_OFFSET)) {
+        if (sysctl_ip_always_defrag == 0 &&
+            (iph->frag_off & htons(IP_MF|IP_OFFSET))) {
 		skb = ip_defrag(skb);
 		if (!skb)
 			return 0;
 		iph = skb->nh.iph;
 	}
-#endif
 
 #ifdef CONFIG_IP_MASQUERADE
 	/*
 	 * Do we need to de-masquerade this packet?
 	 */
         {
-		int ret = ip_fw_demasquerade(&skb);
+		int ret;
+		/*
+		 *	Some masq modules can re-inject packets if
+		 *	bad configured.
+		 */
+
+		if((IPCB(skb)->flags&IPSKB_MASQUERADED)) {
+			printk(KERN_DEBUG "ip_input(): demasq recursion detected. Check masq modules configuration\n");
+			kfree_skb(skb);
+			return 0;
+		}
+
+		ret = ip_fw_demasquerade(&skb);
 		if (ret < 0) {
 			kfree_skb(skb);
 			return 0;
@@ -387,6 +395,10 @@ int ip_local_deliver(struct sk_buff *skb)
 int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 {
 	struct iphdr *iph = skb->nh.iph;
+#ifdef	CONFIG_FIREWALL
+	int fwres;
+	u16 rport;
+#endif /* CONFIG_FIREWALL */
 
 	/*
 	 * 	When the interface is in promisc. mode, drop all the crap
@@ -410,12 +422,19 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 
 	if (skb->len < sizeof(struct iphdr))
 		goto inhdr_error; 
+
+	if (skb->len < (iph->ihl << 2))
+		goto inhdr_error;
+
 	if (iph->ihl < 5 || iph->version != 4 || ip_fast_csum((u8 *)iph, iph->ihl) != 0)
 		goto inhdr_error; 
 
 	{
 	__u32 len = ntohs(iph->tot_len); 
 	if (skb->len < len)
+		goto inhdr_error; 
+
+	if (len <  (iph->ihl << 2))
 		goto inhdr_error; 
 
 	/*
@@ -427,6 +446,29 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	__skb_trim(skb, len);
 	}
 	
+	/* Won't send ICMP reply, since skb->dst == NULL. --RR */
+        if (sysctl_ip_always_defrag != 0 &&
+            iph->frag_off & htons(IP_MF|IP_OFFSET)) {
+		skb = ip_defrag(skb);
+		if (!skb)
+			return 0;
+		iph = skb->nh.iph;
+		ip_send_check(iph);
+	}
+
+#ifdef CONFIG_FIREWALL
+	/*
+	 *	See if the firewall wants to dispose of the packet. 
+	 *
+	 * We can't do ICMP reply or local delivery before routing,
+	 * so we delay those decisions until after route. --RR
+	 */
+	fwres = call_in_firewall(PF_INET, dev, iph, &rport, &skb);
+	if (fwres < FW_ACCEPT && fwres != FW_REJECT)
+		goto drop;
+	iph = skb->nh.iph;
+#endif /* CONFIG_FIREWALL */
+
 	/*
 	 *	Initialise the virtual path cache for the packet. It describes
 	 *	how the packet travels inside Linux networking.
@@ -442,13 +484,13 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 #endif
 	}
 
-#ifdef CONFIG_IP_ALWAYS_DEFRAG
-	if (iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-		skb = ip_defrag(skb);
-		if (!skb)
-			return 0;
-		iph = skb->nh.iph;
-		ip_send_check(iph);
+#ifdef CONFIG_NET_CLS_ROUTE
+	if (skb->dst->tclassid) {
+		u32 idx = skb->dst->tclassid;
+		ip_rt_acct[idx&0xFF].o_packets++;
+		ip_rt_acct[idx&0xFF].o_bytes+=skb->len;
+		ip_rt_acct[(idx>>16)&0xFF].i_packets++;
+		ip_rt_acct[(idx>>16)&0xFF].i_bytes+=skb->len;
 	}
 #endif
 
@@ -462,7 +504,7 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		   and running sniffer is extremely rare condition.
 		                                      --ANK (980813)
 		*/
-		   
+
 		skb = skb_cow(skb, skb_headroom(skb));
 		if (skb == NULL)
 			return 0;
@@ -486,51 +528,17 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		}
 	}
 
-	/*
-	 *	See if the firewall wants to dispose of the packet. 
-	 *
-	 *	Note: the current standard firewall code expects that the 
-	 *	destination address was already checked against the interface 
-	 *	address lists.
-	 *
-	 *	If this code is ever moved in front of ip_route_input() you need
-	 *	to fix the fw code [moving it might be a good idea anyways,
-	 *	so that we can firewall against potentially bugs in the options
-	 *	or routing code]
-	 */
-	
-#ifdef	CONFIG_FIREWALL
-        {
-		int fwres;
-		u16 rport;
-#ifdef  CONFIG_IP_ROUTE_TOS
-		u8  tos = iph->tos;
-#endif
-
-		if ((fwres=call_in_firewall(PF_INET, skb->dev, iph, &rport, &skb))<FW_ACCEPT) {
-			if (fwres==FW_REJECT)
-				icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
-			goto drop;
-		}
-
+#ifdef CONFIG_FIREWALL
 #ifdef	CONFIG_IP_TRANSPARENT_PROXY
-		if (fwres==FW_REDIRECT && (IPCB(skb)->redirport = rport) != 0)
-			return ip_local_deliver(skb);
-#endif
-#ifdef	CONFIG_IP_ROUTE_TOS
-		/* It is for 2.2 only. Firewalling should make smart
-		   rerouting itself, ideally, but now it is too late
-		   to teach it. 			--ANK (980905)
-		 */
-		if (iph->tos != tos && ((struct rtable*)skb->dst)->rt_type == RTN_UNICAST) {
-			dst_release(skb->dst);
-			skb->dst = NULL;
-			if (ip_route_input(skb, iph->daddr, iph->saddr, iph->tos, dev))
-				goto drop; 
-		}
-#endif
+	if (fwres == FW_REDIRECT && (IPCB(skb)->redirport = rport) != 0)
+		return ip_local_deliver(skb);
+#endif /* CONFIG_IP_TRANSPARENT_PROXY */
+
+	if (fwres == FW_REJECT) {
+		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0);
+		goto drop;
 	}
-#endif
+#endif /* CONFIG_FIREWALL */
 
 	return skb->dst->input(skb);
 

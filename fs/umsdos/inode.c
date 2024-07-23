@@ -50,25 +50,24 @@ void fill_new_filp (struct file *filp, struct dentry *dentry)
 void UMSDOS_put_inode (struct inode *inode)
 {
 	PRINTK ((KERN_DEBUG 
-		"put inode %p (%lu) owner %lu pos %lu dir %lu count=%d\n"
+		"put inode %p (%lu) pos %lu count=%d\n"
 		 ,inode, inode->i_ino
-		 ,inode->u.umsdos_i.i_emd_owner, inode->u.umsdos_i.pos
-		 ,inode->u.umsdos_i.i_emd_dir, inode->i_count));
+		 ,inode->u.umsdos_i.pos
+		 ,inode->i_count));
 
 	if (inode == pseudo_root) {
-		printk (KERN_ERR "Umsdos: Oops releasing pseudo_root."
-			" Notify jacques@solucorp.qc.ca\n");
+		printk (KERN_ERR "Umsdos: debug: releasing pseudo_root - ino=%lu count=%d\n", inode->i_ino, inode->i_count);
 	}
 
-	inode->u.umsdos_i.i_patched = 0;
-	fat_put_inode (inode);
+	if (inode->i_count == 1)
+		inode->u.umsdos_i.i_patched = 0;
 }
 
 
 void UMSDOS_put_super (struct super_block *sb)
 {
 	Printk ((KERN_DEBUG "UMSDOS_put_super: entering\n"));
-	if (saved_root) {
+	if (saved_root && pseudo_root && sb->s_dev == ROOT_DEV) {
 		shrink_dcache_parent(saved_root);
 printk("UMSDOS_put_super: freeing saved root, d_count=%d\n",
 saved_root->d_count);
@@ -94,7 +93,6 @@ void umsdos_setup_dir(struct dentry *dir)
 		printk(KERN_ERR "umsdos_setup_dir: %s/%s not a dir!\n",
 			dir->d_parent->d_name.name, dir->d_name.name);
 
-	inode->u.umsdos_i.i_emd_dir = 0;
 	inode->i_op = &umsdos_rdir_inode_operations;
 	if (umsdos_have_emd(dir)) {
 Printk((KERN_DEBUG "umsdos_setup_dir: %s/%s using EMD\n",
@@ -112,14 +110,11 @@ void umsdos_set_dirinfo_new (struct dentry *dentry, off_t f_pos)
 	struct inode *inode = dentry->d_inode;
 	struct dentry *demd;
 
-	inode->u.umsdos_i.i_emd_owner = 0;
 	inode->u.umsdos_i.pos = f_pos;
 
 	/* now check the EMD file */
 	demd = umsdos_get_emd_dentry(dentry->d_parent);
 	if (!IS_ERR(demd)) {
-		if (demd->d_inode)
-			inode->u.umsdos_i.i_emd_owner = demd->d_inode->i_ino;
 		dput(demd);
 	}
 	return;
@@ -149,7 +144,6 @@ PRINTK (("umsdos_patch_inode: call umsdos_set_dirinfo_new(%p,%lu)\n",
 dentry, f_pos));
 	umsdos_set_dirinfo_new(dentry, f_pos);
 
-	inode->u.umsdos_i.i_emd_dir = 0;
 	if (S_ISREG (inode->i_mode)) {
 		if (MSDOS_SB (inode->i_sb)->cvf_format) {
 			if (MSDOS_SB (inode->i_sb)->cvf_format->flags & CVF_USE_READPAGE) {
@@ -173,48 +167,17 @@ dentry, f_pos));
 	} else if (S_ISBLK (inode->i_mode)) {
 		inode->i_op = &blkdev_inode_operations;
 	} else if (S_ISFIFO (inode->i_mode)) {
-		init_fifo (inode);
+	/* if someone is using FIFO, we must not reinitialize it, because
+	   we will destroy its locks, and sleep_on in fifo_open() will
+	   hardlock/oops our kernel! this started happening with
+	   patch-2.2.7. Why did it not happen before ? Maybe we were
+	   never called with i_count > 1 ?
+	*/
+		if (inode->i_count < 2)	
+			init_fifo (inode);
 	}
 }
 
-
-/*
- * Load an inode from disk.
- */
-/* #Specification: Inode / post initialisation
- * To completely initialise an inode, we need access to the owner
- * directory, so we can locate more info in the EMD file. This is
- * not available the first time the inode is accessed, so we use
- * a value in the inode to tell if it has been finally initialised.
- * 
- * New inodes are obtained by the lookup and create routines, and
- * each of these must ensure that the inode gets patched.
- */
-void UMSDOS_read_inode (struct inode *inode)
-{
-	Printk ((KERN_DEBUG "UMSDOS_read_inode %p ino = %lu ",
-		inode, inode->i_ino));
-	msdos_read_inode (inode);
-
-	/* inode needs patching */
-	inode->u.umsdos_i.i_patched = 0;
-}
-
-
-int umsdos_notify_change_locked(struct dentry *, struct iattr *);
-/*
- * lock the parent dir before starting ...
- */
-int UMSDOS_notify_change (struct dentry *dentry, struct iattr *attr)
-{
-	struct inode *dir = dentry->d_parent->d_inode;
-	int ret;
-
-	down(&dir->i_sem);
-	ret = umsdos_notify_change_locked(dentry, attr);
-	up(&dir->i_sem);
-	return ret;
-}
 
 /*
  * Must be called with the parent lock held.
@@ -321,14 +284,71 @@ out:
 
 
 /*
+ * lock the parent dir before starting ...
+ * also handles hardlink converting
+ */
+int UMSDOS_notify_change (struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *dir;
+	struct umsdos_info info;
+	struct dentry *temp, *old_dentry = NULL;
+	int ret;
+
+	ret = umsdos_parse (dentry->d_name.name, dentry->d_name.len,
+				&info);
+	if (ret)
+		goto out;
+	ret = umsdos_findentry (dentry->d_parent, &info, 0);
+	if (ret) {
+printk("UMSDOS_notify_change: %s/%s not in EMD, ret=%d\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, ret);
+		goto out;
+	}
+
+	if (info.entry.flags & UMSDOS_HLINK) {
+		/*
+		 * In order to get the correct (real) inode, we just drop
+		 * the original dentry.
+		 */ 
+		d_drop(dentry);
+Printk(("UMSDOS_notify_change: hard link %s/%s, fake=%s\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, info.fake.fname));
+	
+		/* Do a real lookup to get the short name dentry */
+		temp = umsdos_covered(dentry->d_parent, info.fake.fname,
+						info.fake.len);
+		ret = PTR_ERR(temp);
+		if (IS_ERR(temp))
+			goto out;
+	
+		/* now resolve the link ... */
+		temp = umsdos_solve_hlink(temp);
+		ret = PTR_ERR(temp);
+		if (IS_ERR(temp))
+			goto out;
+		old_dentry = dentry;
+		dentry = temp;	/* so umsdos_notify_change_locked will operate on that */
+	}
+
+	dir = dentry->d_parent->d_inode;
+
+	down(&dir->i_sem);
+	ret = umsdos_notify_change_locked(dentry, attr);
+	up(&dir->i_sem);
+out:
+	if (old_dentry)
+		dput (dentry);	/* if we had to use fake dentry for hardlinks, dput() it now */
+	return ret;
+}
+
+
+/*
  * Update the disk with the inode content
  */
 void UMSDOS_write_inode (struct inode *inode)
 {
 	struct iattr newattrs;
 
-	PRINTK (("UMSDOS_write_inode emd %d (FIXME: missing notify_change)\n",
-		inode->u.umsdos_i.i_emd_owner));
 	fat_write_inode (inode);
 	newattrs.ia_mtime = inode->i_mtime;
 	newattrs.ia_atime = inode->i_atime;
@@ -348,16 +368,34 @@ void UMSDOS_write_inode (struct inode *inode)
 
 static struct super_operations umsdos_sops =
 {
-	UMSDOS_read_inode,	/* read_inode */
+	NULL,			/* read_inode */
 	UMSDOS_write_inode,	/* write_inode */
 	UMSDOS_put_inode,	/* put_inode */
 	fat_delete_inode,	/* delete_inode */
 	UMSDOS_notify_change,	/* notify_change */
 	UMSDOS_put_super,	/* put_super */
 	NULL,			/* write_super */
-	fat_statfs,		/* statfs */
-	NULL			/* remount_fs */
+	UMSDOS_statfs,		/* statfs */
+	NULL,			/* remount_fs */
+	fat_clear_inode,	/* clear_inode */
 };
+
+
+int UMSDOS_statfs(struct super_block *sb,struct statfs *buf, int bufsiz)
+{
+	int ret;
+	struct statfs tmp;
+	
+	ret = fat_statfs (sb, buf, bufsiz);
+	copy_from_user (&tmp, buf, bufsiz);
+	if (!ret) {
+		copy_from_user (&tmp, buf, bufsiz);
+		tmp.f_namelen = UMSDOS_MAXNAME;
+		copy_to_user (buf, &tmp, bufsiz);
+	}
+	return ret;
+}
+
 
 /*
  * Read the super block of an Extended MS-DOS FS.
@@ -378,7 +416,7 @@ struct super_block *UMSDOS_read_super (struct super_block *sb, void *data,
 	if (!res)
 		goto out_fail;
 
-	printk (KERN_INFO "UMSDOS dentry-pre 0.84 "
+	printk (KERN_INFO "UMSDOS 0.85i "
 		"(compatibility level %d.%d, fast msdos)\n", 
 		UMSDOS_VERSION, UMSDOS_RELEASE);
 
@@ -423,16 +461,20 @@ out_fail:
 /*
  * Check for an alternate root if we're the root device.
  */
+
+extern kdev_t ROOT_DEV;
 static struct dentry *check_pseudo_root(struct super_block *sb)
 {
 	struct dentry *root, *init;
 
 	/*
 	 * Check whether we're mounted as the root device.
-	 * If so, this should be the only superblock.
+	 * must check like this, because we can be used with initrd
 	 */
-	if (sb->s_list.next->next != &sb->s_list)
+		
+	if (sb->s_dev != ROOT_DEV)
 		goto out_noroot;
+		
 printk("check_pseudo_root: mounted as root\n");
 
 	root = lookup_dentry(UMSDOS_PSDROOT_NAME, dget(sb->s_root), 0); 

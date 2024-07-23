@@ -115,7 +115,6 @@ static int coda_file_mmap(struct file * file, struct vm_area_struct * vma)
 
         ENTRY;
 	cii = ITOC(file->f_dentry->d_inode);
-	cii->c_mmcount++;
   
 	res =generic_file_mmap(file, vma);
 	EXIT;
@@ -136,7 +135,6 @@ static ssize_t coda_file_read(struct file *coda_file, char *buff,
 	coda_vfs_stat.file_read++;
 
         cnp = ITOC(coda_inode);
-        CHECK_CNODE(cnp);
 	
         cont_inode = cnp->c_ovp;
         if ( cont_inode == NULL ) {
@@ -155,8 +153,8 @@ static ssize_t coda_file_read(struct file *coda_file, char *buff,
         result = cont_file.f_op->read(&cont_file , buff, count, 
 				      &(cont_file.f_pos));
 
-        CDEBUG(D_FILE, "ops at %x result %d, count %d, position: %d\n", 
-	       (int)cont_file.f_op, result, count, (int)cont_file.f_pos);
+        CDEBUG(D_FILE, "ops at %p result %d, count %ld, position: %d\n", 
+	       cont_file.f_op, result, (long)count, (int)cont_file.f_pos);
 
         coda_restore_codafile(coda_inode, coda_file, cont_inode, &cont_file);
         return result;
@@ -177,7 +175,6 @@ static ssize_t coda_file_write(struct file *coda_file, const char *buff,
 	coda_vfs_stat.file_write++;
 
         cnp = ITOC(coda_inode);
-        CHECK_CNODE(cnp);
 
         cont_inode = cnp->c_ovp;
         if ( cont_inode == NULL ) {
@@ -193,10 +190,10 @@ static ssize_t coda_file_write(struct file *coda_file, const char *buff,
                 return -1;
         }
 
-	down(&cont_inode->i_sem);
+	fs_down(&cont_inode->i_sem);
         result = cont_file.f_op->write(&cont_file , buff, count, 
 				       &(cont_file.f_pos));
-	up(&cont_inode->i_sem);
+	fs_up(&cont_inode->i_sem);
         coda_restore_codafile(coda_inode, coda_file, cont_inode, &cont_file);
 	
 	if (result)
@@ -221,7 +218,6 @@ int coda_fsync(struct file *coda_file, struct dentry *coda_dentry)
 		return -EINVAL;
 
         cnp = ITOC(coda_inode);
-        CHECK_CNODE(cnp);
 
         cont_inode = cnp->c_ovp;
         if ( cont_inode == NULL ) {
@@ -232,14 +228,14 @@ int coda_fsync(struct file *coda_file, struct dentry *coda_dentry)
         coda_prepare_openfile(coda_inode, coda_file, cont_inode, 
 			      &cont_file, &cont_dentry);
 
-	down(&cont_inode->i_sem);
+	fs_down(&cont_inode->i_sem);
 
         result = file_fsync(&cont_file ,&cont_dentry);
 	if ( result == 0 ) {
 		result = venus_fsync(coda_inode->i_sb, &(cnp->c_fid));
 	}
 
-	up(&cont_inode->i_sem);
+	fs_up(&cont_inode->i_sem);
 
         coda_restore_codafile(coda_inode, coda_file, cont_inode, &cont_file);
         return result;
@@ -292,10 +288,10 @@ int coda_inode_grab(dev_t dev, ino_t ino, struct inode **ind)
 
         if ( *ind == NULL ) {
                 printk("coda_inode_grab: iget(dev: %d, ino: %ld) 
-                       returns NULL.\n", dev, ino);
+                       returns NULL.\n", dev, (long)ino);
                 return -ENOENT;
         }
-	CDEBUG(D_FILE, "ino: %ld, ops at %x\n", ino, (int)(*ind)->i_op);
+	CDEBUG(D_FILE, "ino: %ld, ops at %p\n", (long)ino, (*ind)->i_op);
         return 0;
 }
 

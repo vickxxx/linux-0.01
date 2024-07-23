@@ -36,18 +36,14 @@
  * BIOS32-style PCI interface:
  */
 
-#ifdef DEBUG_CONFIG
+#define DEBUG_MCHECK 0  /* 0 = minimum, 1 = debug, 2 = dump */
+
+#define DEBUG_CONFIG 0
+
+#if DEBUG_CONFIG > 0
 # define DBG_CFG(args)	printk args
 #else
 # define DBG_CFG(args)
-#endif
-
-#define DEBUG_MCHECK
-#ifdef DEBUG_MCHECK
-# define DBG_MCK(args)	printk args
-#define DEBUG_MCHECK_DUMP
-#else
-# define DBG_MCK(args)
 #endif
 
 static volatile unsigned int TSUNAMI_mcheck_expected[NR_CPUS];
@@ -95,19 +91,19 @@ mk_conf_addr(u8 bus, u8 device_fn, u8 where, struct linux_hose_info *hose,
 {
 	unsigned long addr;
 
-	if (!pci_probe_enabled)
+	if (!pci_probe_enabled || !hose->pci_config_space)
 		return -1;
 
 	DBG_CFG(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x, "
 		 "pci_addr=0x%p, type1=0x%p)\n",
 		 bus, device_fn, where, pci_addr, type1));
 
-        *type1 = (bus != 0);
+	*type1 = (bus != 0);
 
-        if (hose->pci_first_busno == bus)
+	if (hose->pci_first_busno == bus)
 		bus = 0;
 
-        addr = (bus << 16) | (device_fn << 8) | where;
+	addr = (bus << 16) | (device_fn << 8) | where;
 	addr |= hose->pci_config_space;
 		
 	*pci_addr = addr;
@@ -168,6 +164,8 @@ tsunami_hose_write_config_byte (u8 bus, u8 device_fn, u8 where, u8 value,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	__kernel_stb(value, *(vucp)addr);
+	mb();
+	__kernel_ldbu(*(vucp)addr);
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -182,6 +180,8 @@ tsunami_hose_write_config_word (u8 bus, u8 device_fn, u8 where, u16 value,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	__kernel_stw(value, *(vusp)addr);
+	mb();
+	__kernel_ldwu(*(vusp)addr);
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -196,6 +196,8 @@ tsunami_hose_write_config_dword (u8 bus, u8 device_fn, u8 where, u32 value,
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	*(vuip)addr = value;
+	mb();
+	*(vuip)addr;
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -264,11 +266,19 @@ tsunami_init_one_pchip(tsunami_pchip *pchip, int index,
 	*hose_tail = hose;
 	hose_tail = &hose->next;
 
-	hose->pci_io_space = TSUNAMI_IO(index);
-	hose->pci_mem_space = TSUNAMI_MEM(index);
 	hose->pci_config_space = TSUNAMI_CONF(index);
-	hose->pci_sparse_space = 0;
 	hose->pci_hose_index = index;
+
+	/* This is for userland consumption.  For some reason, the 40-bit
+	   PIO bias that we use in the kernel through KSEG didn't work for
+	   the page table based user mappings.  So make sure we get the
+	   43-bit PIO bias.  */
+	hose->pci_sparse_io_space = 0;
+	hose->pci_sparse_mem_space = 0;
+	hose->pci_dense_io_space
+	  = (TSUNAMI_IO(index) & 0xffffffffff) | 0x80000000000;
+	hose->pci_dense_mem_space
+	  = (TSUNAMI_MEM(index) & 0xffffffffff) | 0x80000000000;
 
 	switch (alpha_use_srm_setup)
 	{
@@ -302,20 +312,18 @@ tsunami_init_one_pchip(tsunami_pchip *pchip, int index,
 		 * we may want to use them to do scatter/gather DMA. 
 		 *
 		 * Window 0 goes at 1 GB and is 1 GB large, mapping to 0.
+		 * Window 1 goes at 2 GB and is 1 GB large, mapping to 1GB.
 		 */
 
-		pchip->wsba[0].csr = 1L | (TSUNAMI_DMA_WIN_BASE_DEFAULT & 0xfff00000U);
-		pchip->wsm[0].csr = (TSUNAMI_DMA_WIN_SIZE_DEFAULT - 1) & 0xfff00000UL;
-		pchip->tba[0].csr = 0;
+		pchip->wsba[0].csr = TSUNAMI_DMA_WIN0_BASE_DEFAULT | 1UL;
+		pchip->wsm[0].csr  = (TSUNAMI_DMA_WIN0_SIZE_DEFAULT - 1) &
+				     0xfff00000UL;
+		pchip->tba[0].csr  = TSUNAMI_DMA_WIN0_TRAN_DEFAULT;
 
-#if 0
-		pchip->wsba[1].csr = 0;
-#else
-		/* make the second window at 2Gb for 1Gb mapping to 1Gb */
-		pchip->wsba[1].csr = 1L | ((0x80000000U) & 0xfff00000U);
-		pchip->wsm[1].csr = (0x40000000UL - 1) & 0xfff00000UL;
-		pchip->tba[1].csr = 0x40000000;
-#endif
+		pchip->wsba[1].csr = TSUNAMI_DMA_WIN1_BASE_DEFAULT | 1UL;
+		pchip->wsm[1].csr  = (TSUNAMI_DMA_WIN1_SIZE_DEFAULT - 1) &
+				     0xfff00000UL;
+		pchip->tba[1].csr  = TSUNAMI_DMA_WIN1_TRAN_DEFAULT;
 
 		pchip->wsba[2].csr = 0;
 		pchip->wsba[3].csr = 0;
@@ -329,7 +337,7 @@ tsunami_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 {
 #ifdef NXM_MACHINE_CHECKS_ON_TSUNAMI
 	extern asmlinkage void entInt(void);
-        unsigned long tmp;
+	unsigned long tmp;
 	
 	/* Ho hum.. init_arch is called before init_IRQ, but we need to be
 	   able to handle machine checks.  So install the handler now.  */
@@ -365,8 +373,8 @@ tsunami_init_arch(unsigned long *mem_start, unsigned long *mem_end)
 	*mem_start = (*mem_start | 31) + 1;
 
 	/* Find how many hoses we have, and initialize them.  */
+	/* TSUNAMI and TYPHOON can have 2, but might only have 1 (DS10) */
 	tsunami_init_one_pchip(TSUNAMI_pchip0, 0, mem_start);
-	/* must change this for TYPHOON which may have 4 */
 	if (TSUNAMI_cchip->csc.csr & 1L<<14)
 	    tsunami_init_one_pchip(TSUNAMI_pchip1, 1, mem_start);
 }
@@ -375,8 +383,6 @@ static inline void
 tsunami_pci_clr_err_1(tsunami_pchip *pchip, int cpu)
 {
 	TSUNAMI_jd[cpu] = pchip->perror.csr;
-	DBG_MCK(("TSUNAMI_pci_clr_err: PERROR after read 0x%x\n",
-		 TSUNAMI_jd[cpu]));
 	pchip->perror.csr = 0x040;
 	mb();
 	TSUNAMI_jd[cpu] = pchip->perror.csr;
@@ -386,10 +392,13 @@ static int
 tsunami_pci_clr_err(void)
 {
 	int cpu = smp_processor_id();
+
 	tsunami_pci_clr_err_1(TSUNAMI_pchip0, cpu);
-	/* must change this for TYPHOON which may have 4 */
+
+	/* TSUNAMI and TYPHOON can have 2, but might only have 1 (DS10) */
 	if (TSUNAMI_cchip->csc.csr & 1L<<14)
 	    tsunami_pci_clr_err_1(TSUNAMI_pchip1, cpu);
+
 	return 0;
 }
 
@@ -397,9 +406,6 @@ void
 tsunami_machine_check(unsigned long vector, unsigned long la_ptr,
 		      struct pt_regs * regs)
 {
-#if 0
-        printk("TSUNAMI machine check ignored\n") ;
-#else
 	struct el_common *mchk_header;
 	struct el_TSUNAMI_sysdata_mcheck *mchk_sysdata;
 	unsigned int cpu = smp_processor_id();
@@ -410,61 +416,21 @@ tsunami_machine_check(unsigned long vector, unsigned long la_ptr,
 	mchk_sysdata = (struct el_TSUNAMI_sysdata_mcheck *)
 		(la_ptr + mchk_header->sys_offset);
 
-#if 0
-	DBG_MCK(("tsunami_machine_check: vector=0x%lx la_ptr=0x%lx\n",
-		 vector, la_ptr));
-	DBG_MCK(("\t\t pc=0x%lx size=0x%x procoffset=0x%x sysoffset 0x%x\n",
-		 regs->pc, mchk_header->size, mchk_header->proc_offset,
-		 mchk_header->sys_offset));
-	DBG_MCK(("tsunami_machine_check: expected %d DCSR 0x%lx PEAR 0x%lx\n",
-		 TSUNAMI_mcheck_expected[cpu], mchk_sysdata->epic_dcsr,
-		 mchk_sysdata->epic_pear));
-#endif
-#ifdef DEBUG_MCHECK_DUMP
-	{
-		unsigned long *ptr;
-		int i;
+	/* Clear error before any reporting. */
+	mb();
+	mb();  /* magic */
+	draina();
+	tsunami_pci_clr_err();
+	wrmces(0x7);
+	mb();
 
-		ptr = (unsigned long *)la_ptr;
-		for (i = 0; i < mchk_header->size / sizeof(long); i += 2) {
-			printk(" +%lx %lx %lx\n", i*sizeof(long), ptr[i], ptr[i+1]);
-		}
-	}
-#endif /* DEBUG_MCHECK_DUMP */
 	/*
 	 * Check if machine check is due to a badaddr() and if so,
 	 * ignore the machine check.
 	 */
-	mb();
-	mb();  /* magic */
-	if (TSUNAMI_mcheck_expected[cpu]) {
-		DBG_MCK(("TSUNAMI machine check expected\n"));
-		TSUNAMI_mcheck_expected[cpu] = 0;
-		TSUNAMI_mcheck_taken[cpu] = 1;
-		mb();
-		mb();  /* magic */
-		draina();
-		tsunami_pci_clr_err();
-		wrmces(0x7);
-		mb();
-	}
-#if 1
-	else {
-		printk("TSUNAMI machine check NOT expected\n") ;
-		DBG_MCK(("tsunami_machine_check: vector=0x%lx la_ptr=0x%lx\n",
-			 vector, la_ptr));
-		DBG_MCK(("\t\t pc=0x%lx size=0x%x procoffset=0x%x sysoffset 0x%x\n",
-			 regs->pc, mchk_header->size, mchk_header->proc_offset,
-			 mchk_header->sys_offset));
-		TSUNAMI_mcheck_expected[cpu] = 0;
-		TSUNAMI_mcheck_taken[cpu] = 1;
-		mb();
-		mb();  /* magic */
-		draina();
-		tsunami_pci_clr_err();
-		wrmces(0x7);
-		mb();
-	}
-#endif
-#endif
+	process_mcheck_info(vector, la_ptr, regs, "TSUNAMI",
+			    DEBUG_MCHECK, TSUNAMI_mcheck_expected[cpu]);
+
+	TSUNAMI_mcheck_expected[cpu] = 0;
+	TSUNAMI_mcheck_taken[cpu] = 1;
 }

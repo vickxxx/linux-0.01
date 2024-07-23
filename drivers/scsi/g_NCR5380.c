@@ -166,21 +166,25 @@ __initfunc(static void internal_setup(int board, char *str, int *ints)) {
 	    printk("generic_NCR5380_setup : usage ncr5380=" STRVAL(NCR5380_map_name) ",irq,dma\n");
 	    return;
 	}
+	break;
     case BOARD_NCR53C400:
 	if (ints[0] != 2) {
 	    printk("generic_NCR53C400_setup : usage ncr53c400=" STRVAL(NCR5380_map_name) ",irq\n");
 	    return;
 	}
+	break;
     case BOARD_NCR53C400A:
 	if (ints[0] != 2) {
 	    printk("generic_NCR53C400A_setup : usage ncr53c400a=" STRVAL(NCR5380_map_name) ",irq\n");
 	    return;
 	}
+	break;
     case BOARD_DTC3181E:
 	if (ints[0] != 2) {
 	    printk("generic_DTC3181E_setup : usage dtc3181e=" STRVAL(NCR5380_map_name) ",irq\n");
 	    return;
 	}
+	break;
     }
 
     if (commandline_current < NO_OVERRIDES) {
@@ -495,7 +499,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	    dst[start+i] = NCR5380_read(C400_HOST_BUFFER);
 #else
 	/* implies CONFIG_SCSI_G_NCR5380_MEM */
-	memcpy(dst+start,NCR53C400_host_buffer+NCR5380_map_name,128);
+	memcpy_fromio(dst+start,NCR53C400_host_buffer+NCR5380_map_name,128);
 #endif
 	start+=128;
 	blocks--;
@@ -516,7 +520,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	    dst[start+i] = NCR5380_read(C400_HOST_BUFFER);
 #else
 	/* implies CONFIG_SCSI_G_NCR5380_MEM */
-	memcpy(dst+start,NCR53C400_host_buffer+NCR5380_map_name,128);
+	memcpy_fromio(dst+start,NCR53C400_host_buffer+NCR5380_map_name,128);
 #endif
 	start+=128;
 	blocks--;
@@ -603,7 +607,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 	    NCR5380_write(C400_HOST_BUFFER, src[start+i]);
 #else
 	/* implies CONFIG_SCSI_G_NCR5380_MEM */
-	memcpy(NCR53C400_host_buffer+NCR5380_map_name,src+start,128);
+	memcpy_toio(NCR53C400_host_buffer+NCR5380_map_name,src+start,128);
 #endif
 	start+=128;
 	blocks--;
@@ -623,7 +627,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 	    NCR5380_write(C400_HOST_BUFFER, src[start+i]);
 #else
 	/* implies CONFIG_SCSI_G_NCR5380_MEM */
-	memcpy(NCR53C400_host_buffer+NCR5380_map_name,src+start,128);
+	memcpy_toio(NCR53C400_host_buffer+NCR5380_map_name,src+start,128);
 #endif
 	start+=128;
 	blocks--;

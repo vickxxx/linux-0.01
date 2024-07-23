@@ -53,6 +53,25 @@ typedef unsigned long pgprot_t;
 #define __pgprot(x)	(x)
 
 #endif
+
+#define BUG() do { \
+        printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+        __asm__ __volatile__(".byte 0x0f,0x0b"); \
+} while (0)
+
+extern __inline__ int get_order(unsigned long size)
+{
+        int order;
+
+        size = (size-1) >> (PAGE_SHIFT-1);
+        order = -1;
+        do {
+                size >>= 1;
+                order++;
+        } while (size);
+        return order;
+}
+
 #endif /* !__ASSEMBLY__ */
 
 /* to align the pointer to the (next) page boundary */
@@ -69,10 +88,9 @@ typedef unsigned long pgprot_t;
  * you want to use more physical memory, change this define.
  *
  * For example, if you have 2GB worth of physical memory, you
- * could change this define to 0x70000000, which gives the
- * kernel slightly more than 2GB of virtual memory (enough to
- * map all your physical memory + a bit extra for various
- * io-memory mappings)
+ * could change this define to 0x80000000, which gives the
+ * kernel 2GB of virtual memory (enough to most of your physical memory
+ * as the kernel needs a bit extra for various io-memory mappings)
  *
  * IF YOU CHANGE THIS, PLEASE ALSO CHANGE
  *
@@ -80,12 +98,16 @@ typedef unsigned long pgprot_t;
  *
  * which has the same constant encoded..
  */
-#define __PAGE_OFFSET		(0xC0000000)
+
+#include <asm/page_offset.h>
+
+#define __PAGE_OFFSET		(PAGE_OFFSET_RAW)
 
 #define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 #define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
+
 
 #endif /* __KERNEL__ */
 

@@ -1,4 +1,4 @@
-/*  $Id: signal.c,v 1.90 1998/10/18 03:31:05 davem Exp $
+/*  $Id: signal.c,v 1.91.2.2 2000/05/28 19:13:21 ecd Exp $
  *  linux/arch/sparc/kernel/signal.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -38,6 +38,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 
 /* This turned off for production... */
 /* #define DEBUG_SIGNALS 1 */
+/* #define DEBUG_SIGNALS_TRACE 1 */
+/* #define DEBUG_SIGNALS_MAPS 1 */
 
 /* Signal frames: the original one (compatible with SunOS):
  *
@@ -534,7 +536,7 @@ save_fpu_state(struct pt_regs *regs, __siginfo_fpu_t *fpu)
 
 static inline void
 new_setup_frame(struct k_sigaction *ka, struct pt_regs *regs,
-		int signo, sigset_t *oldset)
+		int signr, sigset_t *oldset)
 {
 	struct new_signal_frame *sf;
 	int sigframe_size, err;
@@ -581,7 +583,7 @@ new_setup_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	
 	/* 3. signal handler back-trampoline and parameters */
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
-	regs->u_regs[UREG_I0] = signo;
+	regs->u_regs[UREG_I0] = signr;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
 
 	/* 4. signal handler */
@@ -615,7 +617,7 @@ sigsegv:
 
 static inline void
 new_setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
-		   int signo, sigset_t *oldset, siginfo_t *info)
+		   int signr, sigset_t *oldset, siginfo_t *info)
 {
 	struct rt_signal_frame *sf;
 	int sigframe_size;
@@ -648,20 +650,77 @@ new_setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	} else {
 		err |= __put_user(0, &sf->fpu_save);
 	}
-	err |= __copy_to_user(&sf->mask, &oldset->sig[0], sizeof(sigset_t));
-	
+
+	/* Update the siginfo structure.  Is this good?  */
+	if (info->si_code == 0) {
+		info->si_signo = signr;
+		info->si_errno = 0;
+
+		switch (signr) {
+		case SIGSEGV:
+		case SIGILL:
+		case SIGFPE:
+		case SIGBUS:
+		case SIGEMT:
+			info->si_code = current->tss.sig_desc;
+			info->si_addr = (void *)current->tss.sig_address;
+			info->si_trapno = 0;
+			break;
+		default:
+			break;
+		}
+	}
+
+	err = __put_user (info->si_signo, &sf->info.si_signo);
+	err |= __put_user (info->si_errno, &sf->info.si_errno);
+	err |= __put_user (info->si_code, &sf->info.si_code);
+	if (info->si_code < 0)
+		err |= __copy_to_user (sf->info._sifields._pad, info->_sifields._pad, SI_PAD_SIZE);
+	else {
+		int i = info->si_signo;
+		if (info->si_code == SI_USER)
+			i = SIGRTMIN;
+		switch (i) {
+		case SIGPOLL:
+			err |= __put_user (info->si_band, &sf->info.si_band);
+			err |= __put_user (info->si_fd, &sf->info.si_fd);
+			break;
+		case SIGCHLD:
+			err |= __put_user (info->si_pid, &sf->info.si_pid);
+			err |= __put_user (info->si_uid, &sf->info.si_uid);
+			err |= __put_user (info->si_status, &sf->info.si_status);
+			err |= __put_user (info->si_utime, &sf->info.si_utime);
+			err |= __put_user (info->si_stime, &sf->info.si_stime);
+			break;
+		case SIGSEGV:
+		case SIGILL:
+		case SIGFPE:
+		case SIGBUS:
+		case SIGEMT:
+			err |= __put_user ((long)info->si_addr, &sf->info.si_addr);
+			err |= __put_user (info->si_trapno, &sf->info.si_trapno);
+			break;
+		default:
+			err |= __put_user (info->si_pid, &sf->info.si_pid);
+			err |= __put_user (info->si_uid, &sf->info.si_uid);
+			break;
+		}
+	}
+
 	/* Setup sigaltstack */
 	err |= __put_user(current->sas_ss_sp, &sf->stack.ss_sp);
 	err |= __put_user(sas_ss_flags(regs->u_regs[UREG_FP]), &sf->stack.ss_flags);
 	err |= __put_user(current->sas_ss_size, &sf->stack.ss_size);
-	
+
+	err |= __copy_to_user(&sf->mask, &oldset->sig[0], sizeof(sigset_t));
+
 	err |= __copy_to_user(sf, (char *) regs->u_regs [UREG_FP],
 			      sizeof (struct reg_window));	
 	if (err)
 		goto sigsegv;
 
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
-	regs->u_regs[UREG_I0] = signo;
+	regs->u_regs[UREG_I0] = signr;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
 
 	regs->pc = (unsigned long) ka->sa.sa_handler;
@@ -1004,6 +1063,59 @@ static inline void syscall_restart(unsigned long orig_i0, struct pt_regs *regs,
 	}
 }
 
+#ifdef DEBUG_SIGNALS_MAPS
+
+#define MAPS_LINE_FORMAT	  "%08lx-%08lx %s %08lx %s %lu "
+
+static inline void read_maps (void)
+{
+	struct vm_area_struct * map, * next;
+	char * buffer;
+	ssize_t i;
+
+	buffer = (char*)__get_free_page(GFP_KERNEL);
+	if (!buffer)
+		return;
+
+	for (map = current->mm->mmap ; map ; map = next ) {
+		/* produce the next line */
+		char *line;
+		char str[5], *cp = str;
+		int flags;
+		kdev_t dev;
+		unsigned long ino;
+
+		/*
+		 * Get the next vma now (but it won't be used if we sleep).
+		 */
+		next = map->vm_next;
+		flags = map->vm_flags;
+
+		*cp++ = flags & VM_READ ? 'r' : '-';
+		*cp++ = flags & VM_WRITE ? 'w' : '-';
+		*cp++ = flags & VM_EXEC ? 'x' : '-';
+		*cp++ = flags & VM_MAYSHARE ? 's' : 'p';
+		*cp++ = 0;
+
+		dev = 0;
+		ino = 0;
+		if (map->vm_file != NULL) {
+			dev = map->vm_file->f_dentry->d_inode->i_dev;
+			ino = map->vm_file->f_dentry->d_inode->i_ino;
+			line = d_path(map->vm_file->f_dentry, buffer, PAGE_SIZE);
+		}
+		printk(MAPS_LINE_FORMAT, map->vm_start, map->vm_end, str, map->vm_offset,
+			      kdevname(dev), ino);
+		if (map->vm_file != NULL)
+			printk("%s\n", line);
+		else
+			printk("\n");
+	}
+	free_page((unsigned long)buffer);
+	return;
+}
+#endif
+
 /* Note that 'init' is a special process: it doesn't get signals it doesn't
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
@@ -1115,13 +1227,31 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 				}
 #ifdef DEBUG_SIGNALS
 				/* Very useful to debug dynamic linker problems */
-				printk ("Sig ILL going...\n");
+				printk ("Sig %ld going for %s[%d]...\n", signr, current->comm, current->pid);
 				show_regs (regs);
+#ifdef DEBUG_SIGNALS_TRACE
+				{
+					struct reg_window *rw = (struct reg_window *)regs->u_regs[UREG_FP];
+					unsigned int ins[8];
+
+					while(rw &&
+					      !(((unsigned long) rw) & 0x3)) {
+						copy_from_user(ins, &rw->ins[0], sizeof(ins));
+						printk("Caller[%08x](%08x,%08x,%08x,%08x,%08x,%08x)\n", ins[7], ins[0], ins[1], ins[2], ins[3], ins[4], ins[5]);
+						rw = (struct reg_window *)(unsigned long)ins[6];
+					}
+				}
+#endif
+#ifdef DEBUG_SIGNALS_MAPS
+				printk("Maps:\n");
+				read_maps();
+#endif
 #endif
 				/* fall through */
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
+				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOT REACHED */

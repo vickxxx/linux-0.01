@@ -70,6 +70,14 @@ static int sound_alloc_dmap(struct dma_buffparms *dmap)
 	if (dma_buffsize < 4096)
 		dma_buffsize = 4096;
 	dma_pagesize = (dmap->dma < 4) ? (64 * 1024) : (128 * 1024);
+	
+	/*
+	 *	Now check for the Cyrix problem.
+	 */
+	 
+	if(isa_dma_bridge_buggy==2)
+		dma_pagesize=32768;
+	 
 	dmap->raw_buf = NULL;
 	dmap->buffsize = dma_buffsize;
 	if (dmap->buffsize > dma_pagesize)
@@ -187,7 +195,7 @@ static int open_dmap(struct audio_operations *adev, int mode, struct dma_buffpar
 		printk(KERN_WARNING "Sound: DMA buffers not available\n");
 		return -ENOSPC;	/* Memory allocation failed during boot */
 	}
-	if (sound_open_dma(dmap->dma, adev->name)) {
+	if (dmap->dma >= 0 && sound_open_dma(dmap->dma, adev->name)) {
 		printk(KERN_WARNING "Unable to grab(2) DMA%d for the audio driver\n", dmap->dma);
 		return -EBUSY;
 	}
@@ -209,14 +217,15 @@ static void close_dmap(struct audio_operations *adev, struct dma_buffparms *dmap
 {
 	unsigned long flags;
 	
-	sound_close_dma(dmap->dma);
+	if (dmap->dma >= 0) {
+		sound_close_dma(dmap->dma);
+		flags=claim_dma_lock();
+		disable_dma(dmap->dma);
+		release_dma_lock(flags);
+	}
 	if (dmap->flags & DMA_BUSY)
 		dmap->dma_mode = DMODE_NONE;
 	dmap->flags &= ~DMA_BUSY;
-	
-	flags=claim_dma_lock();
-	disable_dma(dmap->dma);
-	release_dma_lock(flags);
 	
 	if (sound_dmap_flag == DMAP_FREE_ON_CLOSE)
 		sound_free_dmap(dmap);
@@ -935,6 +944,7 @@ static void finish_output_interrupt(int dev, struct dma_buffparms *dmap)
 	if (dmap->audio_callback != NULL)
 		dmap->audio_callback(dev, dmap->callback_parm);
 	wake_up(&adev->out_sleeper);
+	wake_up(&adev->poll_sleeper);
 }
 
 static void do_outputintr(int dev, int dummy)
@@ -1103,7 +1113,10 @@ static void do_inputintr(int dev)
 	}
 	dmap->flags |= DMA_ACTIVE;
 	if (dmap->qlen > 0)
+	{
 		wake_up(&adev->in_sleeper);
+		wake_up(&adev->poll_sleeper);
+	}
 }
 
 void DMAbuf_inputintr(int dev)
@@ -1217,7 +1230,6 @@ static unsigned int poll_input(struct file * file, int dev, poll_table *wait)
 	if (!(adev->open_mode & OPEN_READ))
 		return 0;
 	if (dmap->mapping_flags & DMA_MAP_MAPPED) {
-		poll_wait(file, &adev->in_sleeper, wait);
 		if (dmap->qlen)
 			return POLLIN | POLLRDNORM;
 		return 0;
@@ -1228,7 +1240,6 @@ static unsigned int poll_input(struct file * file, int dev, poll_table *wait)
 		    !dmap->qlen && adev->go) {
 			unsigned long flags;
 			
-			poll_wait(file, &adev->in_sleeper, wait);
 			save_flags(flags);
 			cli();
 			DMAbuf_activate_recording(dev, dmap);
@@ -1236,7 +1247,6 @@ static unsigned int poll_input(struct file * file, int dev, poll_table *wait)
 		}
 		return 0;
 	}
-	poll_wait(file, &adev->in_sleeper, wait);
 	if (!dmap->qlen)
 		return 0;
 	return POLLIN | POLLRDNORM;
@@ -1250,14 +1260,12 @@ static unsigned int poll_output(struct file * file, int dev, poll_table *wait)
 	if (!(adev->open_mode & OPEN_WRITE))
 		return 0;
 	if (dmap->mapping_flags & DMA_MAP_MAPPED) {
-		poll_wait(file, &adev->out_sleeper, wait);
 		if (dmap->qlen)
 			return POLLOUT | POLLWRNORM;
 		return 0;
 	}
 	if (dmap->dma_mode == DMODE_INPUT)
 		return 0;
-	poll_wait(file, &adev->out_sleeper, wait);
 	if (dmap->dma_mode == DMODE_NONE)
 		return POLLOUT | POLLWRNORM;
 	if (!DMAbuf_space_in_queue(dev))
@@ -1267,6 +1275,8 @@ static unsigned int poll_output(struct file * file, int dev, poll_table *wait)
 
 unsigned int DMAbuf_poll(struct file * file, int dev, poll_table *wait)
 {
+	struct audio_operations *adev = audio_devs[dev];
+	poll_wait(file, &adev->poll_sleeper, wait);
 	return poll_input(file, dev, wait) | poll_output(file, dev, wait);
 }
 

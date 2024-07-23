@@ -2,7 +2,7 @@
  * Permedia2 framebuffer driver definitions.
  * Copyright (c) 1998-1999 Ilario Nardinocchi (nardinoc@CS.UniBO.IT)
  * --------------------------------------------------------------------------
- * $Id: pm2fb.h,v 1.1.2.1 1999/01/12 19:53:02 geert Exp $
+ * $Id: pm2fb.h,v 1.21 1999/01/28 13:18:07 illo Exp $
  * --------------------------------------------------------------------------
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file README.legal in the main directory of this archive
@@ -16,7 +16,7 @@
 #define PM2_MAX_PIXCLOCK	230000			/* in KHz */
 #define PM2_REGS_SIZE		0x10000
 
-#define PM2TAG(r) (unsigned long )(((r)-0x8000)>>3)
+#define PM2TAG(r) (u32 )(((r)-0x8000)>>3)
 
 /*****************************************************************************
  * Permedia2 registers used in the framebuffer
@@ -108,6 +108,11 @@
 #define PM2R_FB_SOURCE_DELTA				0x8d88
 #define PM2R_CONFIG					0x8d90
 
+/* Permedia2v */
+#define PM2VR_RD_INDEX_LOW				0x4020
+#define PM2VR_RD_INDEX_HIGH				0x4028
+#define PM2VR_RD_INDEXED_DATA				0x4030
+
 /* Permedia2 RAMDAC indexed registers */
 #define PM2I_RD_CURSOR_CONTROL				0x06
 #define PM2I_RD_COLOR_MODE				0x18
@@ -127,17 +132,39 @@
 #define PM2I_RD_GREEN_KEY				0x43
 #define PM2I_RD_BLUE_KEY				0x44
 
+/* Permedia2v extensions */
+#define PM2VI_RD_MISC_CONTROL				0x000
+#define PM2VI_RD_SYNC_CONTROL				0x001
+#define PM2VI_RD_DAC_CONTROL				0x002
+#define PM2VI_RD_PIXEL_SIZE				0x003
+#define PM2VI_RD_COLOR_FORMAT				0x004
+#define PM2VI_RD_CURSOR_MODE				0x005
+#define PM2VI_RD_CURSOR_X_LOW				0x007
+#define PM2VI_RD_CURSOR_X_HIGH				0x008
+#define PM2VI_RD_CURSOR_Y_LOW				0x009
+#define PM2VI_RD_CURSOR_Y_HIGH				0x00A
+#define PM2VI_RD_CURSOR_X_HOT				0x00B
+#define PM2VI_RD_CURSOR_Y_HOT				0x00C
+#define PM2VI_RD_CLK0_PRESCALE				0x201
+#define PM2VI_RD_CLK0_FEEDBACK				0x202
+#define PM2VI_RD_CLK0_POSTSCALE				0x203
+#define PM2VI_RD_CLK1_PRESCALE				0x204
+#define PM2VI_RD_CLK1_FEEDBACK				0x205
+#define PM2VI_RD_CLK1_POSTSCALE				0x206
+#define PM2VI_RD_CURSOR_PALETTE				0x303
+#define PM2VI_RD_CURSOR_PATTERN				0x400
+
 /* Fields and flags */
-#define PM2F_RENDER_AREASTIPPLE				(1<<0)
-#define PM2F_RENDER_FASTFILL				(1<<3)
-#define PM2F_RENDER_PRIMITIVE_MASK			(0x3<<6)
+#define PM2F_RENDER_AREASTIPPLE				(1L<<0)
+#define PM2F_RENDER_FASTFILL				(1L<<3)
+#define PM2F_RENDER_PRIMITIVE_MASK			(3L<<6)
 #define PM2F_RENDER_LINE				0
-#define PM2F_RENDER_TRAPEZOID				(1<<6)
-#define PM2F_RENDER_POINT				(2<<6)
-#define PM2F_RENDER_RECTANGLE				(3<<6)
-#define PM2F_SYNCHRONIZATION				(1<<10)
+#define PM2F_RENDER_TRAPEZOID				(1L<<6)
+#define PM2F_RENDER_POINT				(2L<<6)
+#define PM2F_RENDER_RECTANGLE				(3L<<6)
+#define PM2F_SYNCHRONIZATION				(1L<<10)
 #define PM2F_PLL_LOCKED					0x10
-#define PM2F_BEING_RESET				(1<<31)
+#define PM2F_BEING_RESET				(1L<<31)
 #define PM2F_DATATYPE_COLOR				0x8000
 #define PM2F_VGA_ENABLE					0x02
 #define PM2F_VGA_FIXED					0x04
@@ -166,13 +193,23 @@
 #define PM2F_TEXTEL_SIZE_32				0x00100000
 #define PM2F_TEXTEL_SIZE_4				0x00180000
 #define PM2F_TEXTEL_SIZE_24				0x00200000
-#define PM2F_INCREASE_X					(1<<21)
-#define PM2F_INCREASE_Y					(1<<22)
-#define PM2F_CONFIG_FB_WRITE_ENABLE			(1<<3)
-#define PM2F_CONFIG_FB_PACKED_DATA			(1<<2)
-#define PM2F_CONFIG_FB_READ_DEST_ENABLE			(1<<1)
-#define PM2F_CONFIG_FB_READ_SOURCE_ENABLE		(1<<0)
-#define PM2F_COLOR_KEY_TEST_OFF				(1<<4)
+#define PM2F_INCREASE_X					(1L<<21)
+#define PM2F_INCREASE_Y					(1L<<22)
+#define PM2F_CONFIG_FB_WRITE_ENABLE			(1L<<3)
+#define PM2F_CONFIG_FB_PACKED_DATA			(1L<<2)
+#define PM2F_CONFIG_FB_READ_DEST_ENABLE			(1L<<1)
+#define PM2F_CONFIG_FB_READ_SOURCE_ENABLE		(1L<<0)
+#define PM2F_COLOR_KEY_TEST_OFF				(1L<<4)
+#define PM2F_MEM_CONFIG_RAM_MASK			(3L<<29)
+#define PM2F_MEM_BANKS_1				0L
+#define PM2F_MEM_BANKS_2				(1L<<29)
+#define PM2F_MEM_BANKS_3				(2L<<29)
+#define PM2F_MEM_BANKS_4				(3L<<29)
+
+typedef enum {
+	PM2_TYPE_PERMEDIA2,
+	PM2_TYPE_PERMEDIA2V
+} pm2type_t;
 
 #endif /* PM2FB_H */
 

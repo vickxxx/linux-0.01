@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.17 1998/09/16 12:25:29 jj Exp $
+/* $Id: uaccess.h,v 1.18.2.1 1999/09/10 09:54:34 davem Exp $
  * uaccess.h: User space memore access functions.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -349,9 +349,8 @@ extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 	.align 4
 	.word 1f,3
 	.previous
-1:
 	mov %2, %%o1
-	call __bzero
+1:	call __bzero
 	 mov %1, %%o0
 	mov %%o0, %0 
 	" : "=r" (ret) : "r" (addr), "r" (size) :
@@ -384,14 +383,14 @@ if(__access_ok(__sfu_src, __sfu_count)) { \
 __sfu_res = __strncpy_from_user((unsigned long) (dest), __sfu_src, __sfu_count); \
 } __sfu_res; })
 
-extern int __strlen_user(const char *);
+extern int __strnlen_user(const char *, long len);
 
-extern __inline__ int strlen_user(const char *str)
+extern __inline__ int strnlen_user(const char *str, long len)
 {
 	if(!access_ok(VERIFY_READ, str, 0))
 		return 0;
 	else
-		return __strlen_user(str);
+		return __strnlen_user(str, len);
 }
 
 #endif  /* __ASSEMBLY__ */

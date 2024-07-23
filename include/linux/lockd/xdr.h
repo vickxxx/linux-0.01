@@ -25,10 +25,21 @@ struct nlm_lock {
 };
 
 /*
+ *	NLM cookies. Technically they can be 1K, Nobody uses over 8 bytes
+ *	however.
+ */
+ 
+struct nlm_cookie
+{
+	unsigned char data[8];
+	unsigned int len;
+};
+
+/*
  * Generic lockd arguments for all but sm_notify
  */
 struct nlm_args {
-	u32			cookie;
+	struct nlm_cookie	cookie;
 	struct nlm_lock		lock;
 	u32			block;
 	u32			reclaim;
@@ -42,7 +53,7 @@ struct nlm_args {
  * Generic lockd result
  */
 struct nlm_res {
-	u32			cookie;
+	struct nlm_cookie	cookie;
 	u32			status;
 	struct nlm_lock		lock;
 };
@@ -63,6 +74,7 @@ struct nlm_reboot {
 #define NLMSVC_XDRSIZE		sizeof(struct nlm_args)
 
 void	nlmxdr_init(void);
+void	nlmxdr_shutdown(void);
 int	nlmsvc_decode_testargs(struct svc_rqst *, u32 *, struct nlm_args *);
 int	nlmsvc_encode_testres(struct svc_rqst *, u32 *, struct nlm_res *);
 int	nlmsvc_decode_lockargs(struct svc_rqst *, u32 *, struct nlm_args *);

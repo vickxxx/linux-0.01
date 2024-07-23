@@ -136,7 +136,7 @@ const char *bad_dma_drives[] = {"WDC AC11000H",
 /*
  * dma_intr() is the handler for disk read/write DMA interrupts
  */
-void ide_dma_intr (ide_drive_t *drive)
+ide_startstop_t ide_dma_intr (ide_drive_t *drive)
 {
 	int i;
 	byte stat, dma_stat;
@@ -151,12 +151,11 @@ void ide_dma_intr (ide_drive_t *drive)
 				i -= rq->current_nr_sectors;
 				ide_end_request(1, HWGROUP(drive));
 			}
-			return;
+			return ide_stopped;
 		}
 		printk("%s: dma_intr: bad DMA status\n", drive->name);
 	}
-	ide__sti();	/* local CPU only */
-	ide_error(drive, "dma_intr", stat);
+	return ide_error(drive, "dma_intr", stat);
 }
 
 /*
@@ -329,7 +328,7 @@ int ide_dmaproc (ide_dma_action_t func, ide_drive_t *drive)
 			drive->waiting_for_dma = 1;
 			if (drive->media != ide_disk)
 				return 0;
-			ide_set_handler(drive, &ide_dma_intr, WAIT_CMD);/* issue cmd to drive */
+			ide_set_handler(drive, &ide_dma_intr, WAIT_CMD, NULL);/* issue cmd to drive */
 			OUT_BYTE(reading ? WIN_READDMA : WIN_WRITEDMA, IDE_COMMAND_REG);
 		case ide_dma_begin:
 			/* Note that this is done *after* the cmd has
@@ -425,7 +424,7 @@ __initfunc(unsigned long ide_get_or_set_dma_base (ide_hwif_t *hwif, int extra, c
 	} else {
 		dma_base = dev->base_address[4] & PCI_BASE_ADDRESS_IO_MASK;
 		if (!dma_base || dma_base == PCI_BASE_ADDRESS_IO_MASK) {
-			printk("%s: dma_base is invalid (0x%04lx, BIOS problem), please report to <mj@ucw.cz>\n", name, dma_base);
+			printk("%s: dma_base is invalid (0x%04lx)\n", name, dma_base);
 			dma_base = 0;
 		}
 	}
@@ -434,6 +433,12 @@ __initfunc(unsigned long ide_get_or_set_dma_base (ide_hwif_t *hwif, int extra, c
 			request_region(dma_base+16, extra, name);
 		dma_base += hwif->channel ? 8 : 0;
 		hwif->dma_extra = extra;
+		
+		/* ====== ALI M5229 ================================*/
+		if( hwif->pci_dev->device == PCI_DEVICE_ID_AL_M5229)
+			outb(inb(dma_base+2) & 0x60, dma_base+2);           
+		/* =================================================*/
+		
 		if (inb(dma_base+2) & 0x80) {
 			printk("%s: simplex device:  DMA disabled\n", name);
 			dma_base = 0;

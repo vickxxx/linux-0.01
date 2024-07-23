@@ -37,9 +37,10 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/hwrpb.h>
+#include <asm/page.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-
+#include <asm/console.h>
 
 #include "proto.h"
 
@@ -51,11 +52,21 @@ struct alpha_machine_vector alpha_mv;
 int alpha_using_srm, alpha_use_srm_setup;
 #endif
 
+/* Using SRM callbacks for initial console output. This works from
+   setup_arch() time through the end of init_IRQ(), as those places
+   are under our control.
+
+   By default, OFF; set it with a bootcommand arg of "srmcons".
+*/
+int srmcons_output = 0;
+
+/* For PS/2 presence */
 unsigned char aux_device_present = 0xaa;
 
 #define N(a) (sizeof(a)/sizeof(a[0]))
 
 static unsigned long find_end_memory(void);
+static unsigned long get_memory_end_override(char *);
 static struct alpha_machine_vector *get_sysvec(long, long, long);
 static struct alpha_machine_vector *get_sysvec_byname(const char *);
 static void get_sysnames(long, long, char **, char **);
@@ -66,7 +77,7 @@ static void get_sysnames(long, long, char **, char **);
  * initialized, we need to copy things out into a more permanent
  * place.
  */
-#define PARAM			ZERO_PAGE
+#define PARAM			ZERO_PAGE(0)
 #define COMMAND_LINE		((char*)(PARAM + 0x0000))
 #define COMMAND_LINE_SIZE	256
 #define INITRD_START		(*(unsigned long *) (PARAM+0x100))
@@ -106,17 +117,20 @@ WEAK(alcor_mv);
 WEAK(alphabook1_mv);
 WEAK(avanti_mv);
 WEAK(cabriolet_mv);
+WEAK(clipper_mv);
 WEAK(dp264_mv);
 WEAK(eb164_mv);
 WEAK(eb64p_mv);
 WEAK(eb66_mv);
 WEAK(eb66p_mv);
+WEAK(eiger_mv);
 WEAK(jensen_mv);
 WEAK(lx164_mv);
 WEAK(miata_mv);
 WEAK(mikasa_mv);
 WEAK(mikasa_primo_mv);
 WEAK(monet_mv);
+WEAK(nautilus_mv);
 WEAK(noname_mv);
 WEAK(noritake_mv);
 WEAK(noritake_primo_mv);
@@ -135,27 +149,35 @@ WEAK(xlt_mv);
 
 #undef WEAK
 
-
 void __init
 setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 	   unsigned long * memory_end_p)
 {
-	extern char _end[];
-
 	struct alpha_machine_vector *vec = NULL;
 	struct percpu_struct *cpu;
 	char *type_name, *var_name, *p;
+	unsigned long memory_end_override = 0;
+	extern char _end;
+	void *kernel_end = &_end; /* End of the kernel. */
 
-	hwrpb = (struct hwrpb_struct*)(IDENT_ADDR + INIT_HWRPB->phys_addr);
+	hwrpb = (struct hwrpb_struct*) __va(INIT_HWRPB->phys_addr);
+
+#ifdef CONFIG_ALPHA_GENERIC
+	/* Assume that we've booted from SRM if we havn't booted from MILO.
+	   Detect the later by looking for "MILO" in the system serial nr.  */
+	alpha_using_srm = strncmp((const char *)hwrpb->ssn, "MILO", 4) != 0;
+#endif
+
+	kernel_end = callback_init(kernel_end);
 
 	/* 
-	 * Locate the command line.
-	 */
+	   Process the command line.
 
-	/* Hack for Jensen... since we're restricted to 8 or 16 chars for
+	   Hack for Jensen... since we're restricted to 8 or 16 chars for
 	   boot flags depending on the boot mode, we need some shorthand.
 	   This should do for installation.  Later we'll add other
-	   abbreviations as well... */
+	   abbreviations as well...
+	*/
 	if (strcmp(COMMAND_LINE, "INSTALL") == 0) {
 		strcpy(command_line, "root=/dev/fd0 load_ramdisk=1");
 	} else {
@@ -183,10 +205,29 @@ setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 			vec = get_sysvec_byname(p+9);
 			continue;
 		}
+
+		if (strncmp(p, "cycle=", 6) == 0) {
+			est_cycle_freq = simple_strtol(p+6, NULL, 0);
+			continue;
+		}
+
+		if (strncmp(p, "mem=", 4) == 0) {
+			memory_end_override = get_memory_end_override(p+4);
+			continue;
+		}
+		if (strncmp(p, "srmcons", 7) == 0) {
+			srmcons_output = 1;
+			continue;
+		}
 	}
 
 	/* Replace the command line, not that we've killed it with strtok.  */
 	strcpy(command_line, saved_command_line);
+
+	/* If we want SRM console printk echoing early, do it now. */
+	if (alpha_using_srm && srmcons_output) {
+		register_srm_console();
+	}
 
 	/*
 	 * Indentify and reconfigure for the current system.
@@ -209,18 +250,20 @@ setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 		      type_name, (*var_name ? " variation " : ""), var_name,
 		      hwrpb->sys_type, hwrpb->sys_variation);
 	}
-	if (vec != &alpha_mv)
+	if (vec != &alpha_mv) {
 		alpha_mv = *vec;
-
+	}
+	
+	printk("%s on %s%s%s using machine vector %s from %s\n",
 #ifdef CONFIG_ALPHA_GENERIC
-	/* Assume that we've booted from SRM if we havn't booted from MILO.
-	   Detect the later by looking for "MILO" in the system serial nr.  */
-	alpha_using_srm = strncmp((const char *)hwrpb->ssn, "MILO", 4) != 0;
+	       "Booting GENERIC",
+#else
+	       "Booting",
 #endif
-
-	printk("Booting on %s%s%s using machine vector %s\n",
 	       type_name, (*var_name ? " variation " : ""),
-	       var_name, alpha_mv.vector_name);
+	       var_name, alpha_mv.vector_name,
+	       (alpha_using_srm ? "SRM" : "MILO"));
+
 	printk("Command line: %s\n", command_line);
 
 	/* 
@@ -235,8 +278,14 @@ setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 	wrmces(0x7);
 
 	/* Find our memory.  */
+	*memory_start_p = (unsigned long)kernel_end;
 	*memory_end_p = find_end_memory();
-	*memory_start_p = (unsigned long) _end;
+	if (memory_end_override && memory_end_override < *memory_end_p) {
+		printk("Overriding memory size from %luMB to %luMB\n",
+		       __pa(*memory_end_p) >> 20,
+		       __pa(memory_end_override) >> 20);
+		*memory_end_p = memory_end_override;
+	}
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	initrd_start = INITRD_START;
@@ -313,7 +362,7 @@ find_end_memory(void)
 	struct memdesc_struct * memdesc;
 
 	memdesc = (struct memdesc_struct *)
-		(INIT_HWRPB->mddt_offset + (unsigned long) INIT_HWRPB);
+		(hwrpb->mddt_offset + (unsigned long)hwrpb);
 	cluster = memdesc->cluster;
 
 	for (i = memdesc->numclusters ; i > 0; i--, cluster++) {
@@ -325,7 +374,36 @@ find_end_memory(void)
 
 	/* Round it up to an even number of pages. */
 	high = (high + PAGE_SIZE) & (PAGE_MASK*2);
-	return PAGE_OFFSET + high;
+
+	/* Enforce maximum of 2GB even if there is more,
+	 * but only if the platform (support) cannot handle it.
+	 */
+	if (high > 0x80000000UL) {
+		printk("Cropping memory from %luMB to 2048MB\n", high >> 20);
+		high = 0x80000000UL;
+	}
+
+	return (unsigned long) __va(high);
+}
+
+static unsigned long __init
+get_memory_end_override(char *s)
+{
+	unsigned long end = 0;
+	char *from = s;
+
+	end = simple_strtoul(from, &from, 0);
+	if ( *from == 'K' || *from == 'k' ) {
+		end = end << 10;
+		from++;
+	} else if ( *from == 'M' || *from == 'm' ) {
+		end = end << 20;
+		from++;
+	} else if ( *from == 'G' || *from == 'g' ) {
+		end = end << 30;
+		from++;
+	}
+	return (unsigned long) __va(end);
 }
 
 
@@ -338,10 +416,12 @@ static char systype_names[][16] = {
 	"Mikasa", "EB64", "EB66", "EB64+", "AlphaBook1",
 	"Rawhide", "K2", "Lynx", "XL", "EB164", "Noritake",
 	"Cortex", "29", "Miata", "XXM", "Takara", "Yukon",
-	"Tsunami", "Wildfire", "CUSCO"
+	"Tsunami", "Wildfire", "CUSCO", "Eiger"
 };
 
 static char unofficial_names[][8] = {"100", "Ruffian"};
+
+static char api_names[][16] = {"200", "Nautilus"};
 
 static char eb164_names[][8] = {"EB164", "PC164", "LX164", "SX164", "RX164"};
 static int eb164_indices[] = {0,0,0,1,1,1,1,1,2,2,2,2,3,3,3,3,4};
@@ -361,11 +441,10 @@ static char rawhide_names[][16] = {
 static int rawhide_indices[] = {0,0,0,1,1,2,2,3,3,4,4};
 
 static char tsunami_names[][16] = {
-	"0", "DP264", "Warhol", "Windjammer", "Monet", "Clipper",
+	"EarlyMonet", "DP264", "Warhol", "Windjammer", "Monet", "Clipper",
 	"Goldrush", "Webbrick", "Catamaran"
 };
 static int tsunami_indices[] = {0,1,2,3,4,5,6,7,8};
-
 
 static struct alpha_machine_vector * __init
 get_sysvec(long type, long variation, long cpu)
@@ -409,12 +488,19 @@ get_sysvec(long type, long variation, long cpu)
 		NULL,		/* Tsunami -- see variation.  */
 		NULL,		/* Wildfire */
 		NULL,		/* CUSCO */
+		&eiger_mv,	/* Eiger */
 	};
 
 	static struct alpha_machine_vector *unofficial_vecs[] __initlocaldata =
 	{
 		NULL,		/* 100 */
 		&ruffian_mv,
+	};
+
+	static struct alpha_machine_vector *api_vecs[] __initlocaldata =
+	{
+		NULL,		/* 200 */
+		&nautilus_mv,
 	};
 
 	static struct alpha_machine_vector *alcor_vecs[] __initlocaldata = 
@@ -431,7 +517,7 @@ get_sysvec(long type, long variation, long cpu)
 	{
 		&eb64p_mv,
 		&cabriolet_mv,
-		NULL		/* AlphaPCI64 */
+		&cabriolet_mv		/* AlphaPCI64 */
 	};
 
 	static struct alpha_machine_vector *eb66_vecs[] __initlocaldata =
@@ -442,12 +528,12 @@ get_sysvec(long type, long variation, long cpu)
 
 	static struct alpha_machine_vector *tsunami_vecs[]  __initlocaldata =
 	{
-		NULL,
-		&dp264_mv,		/* dp164 */
+		&monet_mv,		/* HACK for early Monets */
+		&dp264_mv,		/* dp264 */
 		&dp264_mv,		/* warhol */
 		&dp264_mv,		/* windjammer */
 		&monet_mv,		/* monet */
-		&dp264_mv,		/* clipper */
+		&clipper_mv,		/* clipper */
 		&dp264_mv,		/* goldrush */
 		&webbrick_mv,		/* webbrick */
 		&dp264_mv,		/* catamaran */
@@ -465,6 +551,9 @@ get_sysvec(long type, long variation, long cpu)
 	vec = NULL;
 	if (type < N(systype_vecs)) {
 		vec = systype_vecs[type];
+	} else if ((type > ST_API_BIAS) &&
+		   (type - ST_API_BIAS) < N(api_vecs)) {
+		vec = api_vecs[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
 		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_vecs)) {
 		vec = unofficial_vecs[type - ST_UNOFFICIAL_BIAS];
@@ -474,7 +563,7 @@ get_sysvec(long type, long variation, long cpu)
 
 	if (!vec) {
 		/* Member ID is a bit-field. */
-		long member = (variation >> 10) & 0x3f;
+		long member = HWRPB_MEMBER_ID(variation);
 
 		switch (type) {
 		case ST_DEC_ALCOR:
@@ -532,17 +621,20 @@ get_sysvec_byname(const char *name)
 		&alphabook1_mv,
 		&avanti_mv,
 		&cabriolet_mv,
+		&clipper_mv,
 		&dp264_mv,
 		&eb164_mv,
 		&eb64p_mv,
 		&eb66_mv,
 		&eb66p_mv,
+		&eiger_mv,
 		&jensen_mv,
 		&lx164_mv,
 		&miata_mv,
 		&mikasa_mv,
 		&mikasa_primo_mv,
 		&monet_mv,
+		&nautilus_mv,
 		&noname_mv,
 		&noritake_mv,
 		&noritake_primo_mv,
@@ -583,6 +675,9 @@ get_sysnames(long type, long variation,
 	   else set type name to family */
 	if (type < N(systype_names)) {
 		*type_name = systype_names[type];
+	} else if ((type > ST_API_BIAS) &&
+		   (type - ST_API_BIAS) < N(api_names)) {
+		*type_name = api_names[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
 		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_names)) {
 		*type_name = unofficial_names[type - ST_UNOFFICIAL_BIAS];
@@ -668,6 +763,21 @@ platform_string(void)
 	}
 }
 
+static int
+get_nr_processors(struct percpu_struct *cpubase, unsigned long num)
+{
+	struct percpu_struct *cpu;
+	int i, count = 0;
+
+	for (i = 0; i < num; i++) {
+		cpu = (struct percpu_struct *)
+			((char *)cpubase + i*hwrpb->processor_size);
+		if ((cpu->flags & 0x1cc) == 0x1cc)
+			count++;
+	}
+	return count;
+}
+
 /*
  * BUFFER is PAGE_SIZE bytes long.
  */
@@ -687,7 +797,7 @@ int get_cpuinfo(char *buffer)
 	char *cpu_name;
 	char *systype_name;
 	char *sysvariation_name;
-	int len;
+	int len, nr_processors;
 
 	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset);
 	cpu_index = (unsigned) (cpu->type - 1);
@@ -697,6 +807,8 @@ int get_cpuinfo(char *buffer)
 
 	get_sysnames(hwrpb->sys_type, hwrpb->sys_variation,
 		     &systype_name, &sysvariation_name);
+
+	nr_processors = get_nr_processors(cpu, hwrpb->nr_processors);
 
 	len = sprintf(buffer,
 		      "cpu\t\t\t: Alpha\n"
@@ -716,22 +828,23 @@ int get_cpuinfo(char *buffer)
 		      "BogoMIPS\t\t: %lu.%02lu\n"
 		      "kernel unaligned acc\t: %ld (pc=%lx,va=%lx)\n"
 		      "user unaligned acc\t: %ld (pc=%lx,va=%lx)\n"
-		      "platform string\t\t: %s\n",
+		      "platform string\t\t: %s\n"
+		      "cpus detected\t\t: %d\n",
 		       cpu_name, cpu->variation, cpu->revision,
 		       (char*)cpu->serial_no,
 		       systype_name, sysvariation_name, hwrpb->sys_revision,
 		       (char*)hwrpb->ssn,
-		       hwrpb->cycle_freq ? : est_cycle_freq,
-		       hwrpb->cycle_freq ? "" : "est.",
+		       est_cycle_freq ? : hwrpb->cycle_freq,
+		       est_cycle_freq ? "est." : "",
 		       hwrpb->intr_freq / 4096,
 		       (100 * hwrpb->intr_freq / 4096) % 100,
 		       hwrpb->pagesize,
 		       hwrpb->pa_bits,
 		       hwrpb->max_asn,
-		       loops_per_sec / 500000, (loops_per_sec / 5000) % 100,
+		       loops_per_jiffy * HZ / 500000, (loops_per_jiffy * HZ / 5000) % 100,
 		       unaligned[0].count, unaligned[0].pc, unaligned[0].va,
 		       unaligned[1].count, unaligned[1].pc, unaligned[1].va,
-		       platform_string());
+		       platform_string(), nr_processors);
 
 #ifdef __SMP__
 	len += smp_info(buffer+len);
@@ -739,3 +852,65 @@ int get_cpuinfo(char *buffer)
 
 	return len;
 }
+
+#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)
+/*
+ *      Manage the SRM callbacks as a "console".
+ */
+static struct console srmcons;
+
+void __init register_srm_console(void)
+{
+        register_console(&srmcons);
+}
+
+void __init unregister_srm_console(void)
+{
+        unregister_console(&srmcons);
+}
+
+static void srm_console_write(struct console *co, const char *s,
+                                unsigned count)
+{
+	srm_printk(s);
+}
+
+static kdev_t srm_console_device(struct console *c)
+{
+  /* Huh? */
+        return MKDEV(TTY_MAJOR, 64 + c->index);
+}
+
+static int srm_console_wait_key(struct console *co)
+{
+  /* Huh? */
+	return 1;
+}
+
+static int __init srm_console_setup(struct console *co, char *options)
+{
+	return 1;
+}
+
+static struct console srmcons = {
+        "srm0",
+        srm_console_write,
+        NULL,
+        srm_console_device,
+        srm_console_wait_key,
+        NULL,
+	srm_console_setup,
+        CON_PRINTBUFFER | CON_ENABLED, /* fake it out */
+        -1,
+        0,
+        NULL
+};
+
+#else
+void __init register_srm_console(void)
+{
+}
+void __init unregister_srm_console(void)
+{
+}
+#endif

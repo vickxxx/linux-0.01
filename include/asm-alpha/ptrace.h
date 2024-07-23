@@ -67,9 +67,10 @@ struct switch_stack {
 };
 
 #ifdef __KERNEL__
-#define user_mode(regs) ((regs)->ps & 8)
+#define user_mode(regs) (((regs)->ps & 8) != 0)
 #define instruction_pointer(regs) ((regs)->pc)
 extern void show_regs(struct pt_regs *);
+extern void __show_regs(struct pt_regs *);
 #endif
 
 #endif

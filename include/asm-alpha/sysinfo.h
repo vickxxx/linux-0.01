@@ -11,6 +11,8 @@
 #define GSI_UACPROC			8
 #define GSI_IEEE_FP_CONTROL		45
 #define GSI_IEEE_STATE_AT_SIGNAL	46
+#define GSI_PROC_TYPE			60
+#define GSI_GET_HWRPB			101
 
 #define SSI_NVPAIRS			1
 #define SSI_IEEE_FP_CONTROL		14
@@ -29,7 +31,7 @@
 
 /* This is the shift that is applied to the UAC bits as stored in the 
    per-thread flags.  */
-#define UAC_SHIFT			6
+#define UAC_SHIFT			14
 
 #endif
 

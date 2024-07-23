@@ -17,15 +17,27 @@
 	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
 
 CFLAGS	= -O -fno-builtin -DSTDC_HEADERS -I$(TOPDIR)/include
-LD_ARGS = -T ../vmlinux.lds -Ttext 0x00800000
+LD_ARGS = -Ttext 0x00400000
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
 OBJS = crt0.o start.o main.o misc.o ../coffboot/string.o ../coffboot/zlib.o image.o # initrd.o
 LIBS = $(TOPDIR)/lib/lib.a
 
+ifeq ($(CONFIG_PPC64),y)
+MSIZE=.64
+else
+MSIZE=
+endif
+
 ifeq ($(CONFIG_ALL_PPC),y)
 # yes, we want to build chrp stuff
 CONFIG_CHRP = y
+endif
+
+ifeq ($(CONFIG_SMP),y)
+TFTPIMAGE=/tftpboot/zImage.chrp.smp$(MSIZE)
+else
+TFTPIMAGE=/tftpboot/zImage.chrp$(MSIZE)
 endif
 
 all:	$(TOPDIR)/zImage
@@ -36,16 +48,19 @@ all:	$(TOPDIR)/zImage
 #
 ifeq ($(CONFIG_CHRP),y)
 znetboot: zImage
-	cp zImage /tftpboot/zImage.chrp
+	cp zImage $(TFTPIMAGE)
 
 znetboot.initrd: zImage.initrd
-	cp zImage.initrd /tftpboot/zImage.chrp
+	cp zImage.initrd $(TFTPIMAGE)
 
 floppy: zImage
 	mcopy zImage a:zImage
 
 piggyback: piggyback.c
-	$(HOSTCC) -DKERNELBASE=$(KERNELBASE) -o piggyback piggyback.c
+	$(HOSTCC) $(HOSTCFLAGS) -DKERNELBASE=$(KERNELBASE) -o piggyback piggyback.c
+
+mknote: mknote.c
+	$(HOSTCC) $(HOSTCFLAGS) -o mknote mknote.c
 
 image.o: piggyback ../coffboot/vmlinux.gz
 	./piggyback image < ../coffboot/vmlinux.gz | $(AS) -o image.o
@@ -53,9 +68,10 @@ image.o: piggyback ../coffboot/vmlinux.gz
 initrd.o: ramdisk.image.gz piggyback
 	./piggyback initrd < ramdisk.image.gz | $(AS) -o initrd.o
 
-zImage: $(OBJS) no_initrd.o
+zImage: $(OBJS) no_initrd.o mknote
 	$(LD) $(LD_ARGS) -o $@ $(OBJS) no_initrd.o $(LIBS)
-	objcopy zImage zImage
+	./mknote > note
+	$(OBJCOPY) $@ $@ --add-section=.note=note -R .comment
 
 zImage.initrd: $(OBJS) initrd.o
 	$(LD) $(LD_ARGS) -o $@ $(OBJS) initrd.o $(LIBS)
@@ -80,8 +96,7 @@ vmlinux.coff.initrd:
 
 
 clean:
-	rm -f piggyback
-	rm -f $(OBJS) zImage
+	rm -f piggyback note mknote $(OBJS) zImage
 
 fastdep:
 	$(TOPDIR)/scripts/mkdep *.[Sch] > .depend

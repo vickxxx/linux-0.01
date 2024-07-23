@@ -2,7 +2,7 @@
 #define _GDTH_IOCTL_H
 
 /* gdth_ioctl.h
- * $Id: gdth_ioctl.h,v 1.2 1998/12/17 15:42:49 achim Exp $
+ * $Id: gdth_ioctl.h,v 1.7 2000/10/11 08:43:35 achim Exp $
  */
 
 /* IOCTLs */
@@ -11,12 +11,18 @@
 #define GDTIOCTL_DRVERS     (GDTIOCTL_MASK | 1) /* get driver version */
 #define GDTIOCTL_CTRTYPE    (GDTIOCTL_MASK | 2) /* get controller type */
 #define GDTIOCTL_OSVERS     (GDTIOCTL_MASK | 3) /* get OS version */
+#define GDTIOCTL_HDRLIST    (GDTIOCTL_MASK | 4) /* get host drive list */
 #define GDTIOCTL_CTRCNT     (GDTIOCTL_MASK | 5) /* get controller count */
 #define GDTIOCTL_LOCKDRV    (GDTIOCTL_MASK | 6) /* lock host drive */
 #define GDTIOCTL_LOCKCHN    (GDTIOCTL_MASK | 7) /* lock channel */
 #define GDTIOCTL_EVENT      (GDTIOCTL_MASK | 8) /* read controller events */
+#define GDTIOCTL_SCSI       (GDTIOCTL_MASK | 9) /* SCSI command */
+#define GDTIOCTL_RESET_BUS  (GDTIOCTL_MASK |10) /* reset SCSI bus */
+#define GDTIOCTL_RESCAN     (GDTIOCTL_MASK |11) /* rescan host drives */
+#define GDTIOCTL_RESET_DRV  (GDTIOCTL_MASK |12) /* reset (remote) drv. res. */
 
-#define GDTIOCTL_MAGIC      0xaffe0001UL
+#define GDTIOCTL_MAGIC      0xaffe0003UL
+#define EVENT_SIZE          294 
 
 
 /* IOCTL structure (write) */
@@ -43,8 +49,15 @@ typedef struct {
         struct {
             int             erase;              /* erase event ? */
             int             handle;
-            unchar          evt[34];            /* event structure */
+            unchar          evt[EVENT_SIZE];    /* event structure */
         } event;
+        struct {
+            unchar          bus;                /* SCSI bus */
+            unchar          target;             /* target ID */
+            unchar          lun;                /* LUN */
+            unchar          cmd_len;            /* command length */
+            unchar          cmd[12];            /* SCSI command */
+        } scsi;
     } iu;
 } gdth_iowr_str;
 
@@ -77,8 +90,14 @@ typedef struct {
         } ctrcnt;
         struct {
             int             handle;
-            unchar          evt[34];            /* event structure */
+            unchar          evt[EVENT_SIZE];    /* event structure */
         } event;
+        struct {
+            unchar          bus;                /* SCSI bus, 0xff: invalid */
+            unchar          target;             /* target ID */
+            unchar          lun;                /* LUN */
+            unchar          cluster_type;       /* cluster properties */
+        } hdr_list[35];                         /* index is host drive number */
     } iu;
 } gdth_iord_str;
 

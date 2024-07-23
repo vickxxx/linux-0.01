@@ -34,9 +34,11 @@ extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 
 extern void flush_icache_range(unsigned long, unsigned long);
 extern void flush_page_to_ram(unsigned long);
+#define flush_dcache_page(page)			do { } while (0)
 
 extern unsigned long va_to_phys(unsigned long address);
 extern pte_t *va_to_pte(struct task_struct *tsk, unsigned long address);
+extern unsigned long ioremap_bot, ioremap_base;
 #endif /* __ASSEMBLY__ */
 /*
  * The PowerPC MMU uses a hash table containing PTEs, together with
@@ -95,16 +97,19 @@ extern pte_t *va_to_pte(struct task_struct *tsk, unsigned long address);
  * The vmalloc() routines leaves a hole of 4kB between each vmalloced
  * area for the same reason. ;)
  *
- * The vmalloc_offset MUST be larger than the gap between the bat2 mapping
- * and the size of physical ram.  Since the bat2 mapping can be larger than
- * the amount of ram we have vmalloc_offset must ensure that we don't try
- * to allocate areas that don't exist! This value of 64M will only cause
- * problems when we have >128M -- Cort
+ * We no longer map larger than phys RAM with the BATs so we don't have
+ * to worry about the VMALLOC_OFFSET causing problems.  We do have to worry
+ * about clashes between our early calls to ioremap() that start growing down
+ * from ioremap_base being run into the VM area allocations (growing upwards
+ * from VMALLOC_START).  For this reason we have ioremap_bot to check when
+ * we actually run into our mappings setup in the early boot with the VM
+ * system.  This really does become a problem for machines with good amounts
+ * of RAM.  -- Cort
  */
-#define VMALLOC_OFFSET	(0x4000000) /* 64M */
+#define VMALLOC_OFFSET (0x4000000) /* 64M */
 #define VMALLOC_START ((((long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1)))
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
-#define VMALLOC_END	0xf0000000
+#define VMALLOC_END	ioremap_bot
 
 /*
  * Bits in a linux-style PTE.  These match the bits in the
@@ -204,7 +209,7 @@ extern unsigned long empty_zero_page[1024];
 #endif __ASSEMBLY__
 #define BAD_PAGETABLE	__bad_pagetable()
 #define BAD_PAGE	__bad_page()
-#define ZERO_PAGE	((unsigned long) empty_zero_page)
+#define ZERO_PAGE(vaddr)	((unsigned long) empty_zero_page)
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR	(8*sizeof(unsigned long))
@@ -359,47 +364,46 @@ extern inline pte_t * pte_offset(pmd_t * dir, unsigned long address)
 	return (pte_t *) pmd_page(*dir) + ((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1));
 }
 
-
 /*
  * This is handled very differently on the PPC since out page tables
  * are all 0's and I want to be able to use these zero'd pages elsewhere
  * as well - it gives us quite a speedup.
  *
- * Note that the SMP/UP versions are the same since we don't need a
- * per cpu list of zero pages since we do the zero-ing with the cache
+ * Note that the SMP/UP versions are the same but we don't need a
+ * per cpu list of zero pages because we do the zero-ing with the cache
  * off and the access routines are lock-free but the pgt cache stuff
- * _IS_ per-cpu since it isn't done with any lock-free access routines
+ * is per-cpu since it isn't done with any lock-free access routines
  * (although I think we need arch-specific routines so I can do lock-free).
  *
  * I need to generalize this so we can use it for other arch's as well.
  * -- Cort
  */
+#ifdef __SMP__
+#define quicklists	cpu_data[smp_processor_id()]
+#else
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
 	unsigned long *pte_cache;
 	unsigned long pgtable_cache_sz;
-	unsigned long *zero_cache;    /* head linked list of pre-zero'd pages */
-  	unsigned long zero_sz;	      /* # currently pre-zero'd pages */
-	unsigned long zeropage_hits;  /* # zero'd pages request that we've done */
-	unsigned long zeropage_calls; /* # zero'd pages request that've been made */
-  	unsigned long zerototal;      /* # pages zero'd over time */
 } quicklists;
+#endif
 
-#ifdef __SMP__
-/*#warning Tell Cort to do the pgt cache for SMP*/
-#define pgd_quicklist (quicklists.pgd_cache)
-#define pmd_quicklist ((unsigned long *)0)
-#define pte_quicklist (quicklists.pte_cache)
-#define pgtable_cache_size (quicklists.pgtable_cache_sz)
-#else /* __SMP__ */
-#define pgd_quicklist (quicklists.pgd_cache)
-#define pmd_quicklist ((unsigned long *)0)
-#define pte_quicklist (quicklists.pte_cache)
-#define pgtable_cache_size (quicklists.pgtable_cache_sz)
-#endif /* __SMP__ */
+#define pgd_quicklist 		(quicklists.pgd_cache)
+#define pmd_quicklist 		((unsigned long *)0)
+#define pte_quicklist 		(quicklists.pte_cache)
+#define pgtable_cache_size 	(quicklists.pgtable_cache_sz)
 
-#define zero_quicklist (quicklists.zero_cache)
-#define zero_cache_sz  (quicklists.zero_sz)
+extern unsigned long *zero_cache;    /* head linked list of pre-zero'd pages */
+extern unsigned long zero_sz;	     /* # currently pre-zero'd pages */
+extern unsigned long zeropage_hits;  /* # zero'd pages request that we've done */
+extern unsigned long zeropage_calls; /* # zero'd pages request that've been made */
+extern unsigned long zerototal;      /* # pages zero'd over time */
+
+#define zero_quicklist     	(zero_cache)
+#define zero_cache_sz  	 	(zero_sz)
+#define zero_cache_calls 	(zeropage_calls)
+#define zero_cache_hits  	(zeropage_hits)
+#define zero_cache_total 	(zerototal)
 
 /* return a pre-zero'd page from the list, return NULL if none available -- Cort */
 extern unsigned long get_zero_page_fast(void);
@@ -410,8 +414,8 @@ extern __inline__ pgd_t *get_pgd_slow(void)
 
 	if ( (ret = (pgd_t *)get_zero_page_fast()) == NULL )
 	{
-		ret = (pgd_t *)__get_free_page(GFP_KERNEL);
-		memset (ret, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
+		if ( (ret = (pgd_t *)__get_free_page(GFP_KERNEL)) != NULL )
+			memset (ret, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
 	}
 	if (ret) {
 		init = pgd_offset(&init_mm, 0);
@@ -553,7 +557,7 @@ extern inline void set_pgdir(unsigned long address, pgd_t entry)
 	/* To pgd_alloc/pgd_free, one holds master kernel lock and so does our callee, so we can
 	   modify pgd caches of other CPUs as well. -jj */
 	for (i = 0; i < NR_CPUS; i++)
-		for (pgd = (pgd_t *)cpu_data[i].pgd_quick; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
+		for (pgd = (pgd_t *)cpu_data[i].pgd_cache; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
 			pgd[address >> PGDIR_SHIFT] = entry;
 #endif
 }

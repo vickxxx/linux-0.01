@@ -1,5 +1,5 @@
 /*
- * $Id: pci.c,v 1.43 1998/12/29 18:55:11 cort Exp $
+ * $Id: pci.c,v 1.54.2.1 1999/07/20 05:04:41 paulus Exp $
  * Common pmac/prep/chrp pci routines. -- Cort
  */
 
@@ -9,106 +9,57 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/config.h>
-#include <linux/pci.h>
 #include <linux/openpic.h>
+#include <linux/capability.h>
+#include <linux/sched.h>
+#include <linux/errno.h>
 
 #include <asm/processor.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
+#include <asm/pci.h>
 #include <asm/residual.h>
 #include <asm/byteorder.h>
 #include <asm/irq.h>
 #include <asm/gg2.h>
+#include <asm/uaccess.h>
 
-unsigned long isa_io_base;
-unsigned long isa_mem_base;
-unsigned long pci_dram_offset;
+#include "pci.h"
 
-unsigned int * pci_config_address;
-unsigned char * pci_config_data;
-
-/*
- * It would be nice if we could create a include/asm/pci.h and have just
- * function ptrs for all these in there, but that isn't the case.
- * We have a function, pcibios_*() which calls the function ptr ptr_pcibios_*()
- * which has been setup by pcibios_init().  This is all to avoid a check
- * for pmac/prep every time we call one of these.  It should also make the move
- * to a include/asm/pcibios.h easier, we can drop the ptr_ on these functions
- * and create pci.h
- *   -- Cort
- */
-int (*ptr_pcibios_read_config_byte)(unsigned char bus, unsigned char dev_fn,
-				    unsigned char offset, unsigned char *val);
-int (*ptr_pcibios_read_config_word)(unsigned char bus, unsigned char dev_fn,
-				    unsigned char offset, unsigned short *val);
-int (*ptr_pcibios_read_config_dword)(unsigned char bus, unsigned char dev_fn,
-				     unsigned char offset, unsigned int *val);
-int (*ptr_pcibios_write_config_byte)(unsigned char bus, unsigned char dev_fn,
-				     unsigned char offset, unsigned char val);
-int (*ptr_pcibios_write_config_word)(unsigned char bus, unsigned char dev_fn,
-				     unsigned char offset, unsigned short val);
-int (*ptr_pcibios_write_config_dword)(unsigned char bus, unsigned char dev_fn,
-				      unsigned char offset, unsigned int val);
-
-#define decl_config_access_method(name) \
-extern int name##_pcibios_read_config_byte(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned char *val); \
-extern int name##_pcibios_read_config_word(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned short *val); \
-extern int name##_pcibios_read_config_dword(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned int *val); \
-extern int name##_pcibios_write_config_byte(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned char val); \
-extern int name##_pcibios_write_config_word(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned short val); \
-extern int name##_pcibios_write_config_dword(unsigned char bus, \
-	unsigned char dev_fn, unsigned char offset, unsigned int val)
-
-#define set_config_access_method(name) \
-	ptr_pcibios_read_config_byte = name##_pcibios_read_config_byte; \
-	ptr_pcibios_read_config_word = name##_pcibios_read_config_word; \
-	ptr_pcibios_read_config_dword = name##_pcibios_read_config_dword; \
-	ptr_pcibios_write_config_byte = name##_pcibios_write_config_byte; \
-	ptr_pcibios_write_config_word = name##_pcibios_write_config_word; \
-	ptr_pcibios_write_config_dword = name##_pcibios_write_config_dword
-
-decl_config_access_method(pmac);
-decl_config_access_method(grackle);
-decl_config_access_method(gg2);
-decl_config_access_method(raven);
-decl_config_access_method(prep);
-decl_config_access_method(mbx);
+unsigned long isa_io_base     = 0;
+unsigned long isa_mem_base    = 0;
+unsigned long pci_dram_offset = 0;
 
 int pcibios_read_config_byte(unsigned char bus, unsigned char dev_fn,
 			     unsigned char offset, unsigned char *val)
 {
-	return ptr_pcibios_read_config_byte(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_read_config_byte(bus,dev_fn,offset,val);
 }
 int pcibios_read_config_word(unsigned char bus, unsigned char dev_fn,
 			     unsigned char offset, unsigned short *val)
 {
-	return ptr_pcibios_read_config_word(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_read_config_word(bus,dev_fn,offset,val);
 }
 int pcibios_read_config_dword(unsigned char bus, unsigned char dev_fn,
 			      unsigned char offset, unsigned int *val)
 {
-	return ptr_pcibios_read_config_dword(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_read_config_dword(bus,dev_fn,offset,val);
 }
 int pcibios_write_config_byte(unsigned char bus, unsigned char dev_fn,
 			      unsigned char offset, unsigned char val)
 {
-	return ptr_pcibios_write_config_byte(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_write_config_byte(bus,dev_fn,offset,val);
 }
 int pcibios_write_config_word(unsigned char bus, unsigned char dev_fn,
 			      unsigned char offset, unsigned short val)
 {
-	return ptr_pcibios_write_config_word(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_write_config_word(bus,dev_fn,offset,val);
 }
 int pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
 			       unsigned char offset, unsigned int val)
 {
-	return ptr_pcibios_write_config_dword(bus,dev_fn,offset,val);
+	return ppc_md.pcibios_write_config_dword(bus,dev_fn,offset,val);
 }
 
 int pcibios_present(void)
@@ -116,167 +67,199 @@ int pcibios_present(void)
 	return 1;
 }
 
-__initfunc(void pcibios_init(void))
+void __init pcibios_init(void)
 {
 }
 
-__initfunc(void
-	   setup_pci_ptrs(void))
+
+void __init pcibios_fixup(void)
 {
-#ifndef CONFIG_MBX  
-	PPC_DEVICE *hostbridge;
-	switch (_machine) {
-	case _MACH_prep:
-	  	hostbridge=residual_find_device(PROCESSORDEVICE, NULL,
-						BridgeController, PCIBridge,
-						-1, 0);
-		if (hostbridge && 
-		    hostbridge->DeviceId.Interface == PCIBridgeIndirect) {
-			PnP_TAG_PACKET * pkt;	
-			set_config_access_method(raven);
-			pkt=PnP_find_large_vendor_packet(
-			       res->DevicePnPHeap+hostbridge->AllocatedOffset, 
-			       3, 0);
-			if(pkt) { 
-#define p pkt->L4_Pack.L4_Data.L4_PPCPack
-				pci_config_address= (unsigned *)
-				  ld_le32((unsigned *) p.PPCData);
-				pci_config_data= (unsigned char *)
-				  ld_le32((unsigned *) (p.PPCData+8));
-			} else {/* default values */
-				pci_config_address= (unsigned *) 0x80000cf8;
-				pci_config_data= (unsigned char *) 0x80000cfc; 
-			}  
-		} else {
-			set_config_access_method(prep);
+	ppc_md.pcibios_fixup();
+}
+
+void __init pcibios_fixup_bus(struct pci_bus *bus)
+{
+}
+
+char __init *pcibios_setup(char *str)
+{
+	return str;
+}
+
+#ifndef CONFIG_MBX
+/* Recursively searches any node that is of type PCI-PCI bridge. Without
+ * this, the old code would miss children of P2P bridges and hence not
+ * fix IRQ's for cards located behind P2P bridges.
+ * - Ranjit Deshpande, 01/20/99
+ */
+void __init fix_intr(struct device_node *node, struct pci_dev *dev)
+{
+	unsigned int *reg, *class_code;
+
+	for (; node != 0;node = node->sibling) {
+		class_code = (unsigned int *) get_property(node, "class-code", 0);
+		if(class_code && (*class_code >> 8) == PCI_CLASS_BRIDGE_PCI)
+			fix_intr(node->child, dev);
+		reg = (unsigned int *) get_property(node, "reg", 0);
+		if (reg == 0 || ((reg[0] >> 8) & 0xff) != dev->devfn)
+			continue;
+		/* this is the node, see if it has interrupts */
+		if (node->n_intrs > 0) 
+			dev->irq = node->intrs[0].line;
+		break;
+	}
+}
+#endif
+
+
+void *
+pci_dev_io_base(unsigned char bus, unsigned char devfn, int physical)
+{
+	if (!ppc_md.pci_dev_io_base) {
+		/* Please, someone fix this for non-pmac machines, we
+		 * need either the virtual or physical PCI IO base
+		 */
+		return 0;
+	}
+	return ppc_md.pci_dev_io_base(bus, devfn, physical);
+}
+
+void *
+pci_dev_mem_base(unsigned char bus, unsigned char devfn)
+{
+	/* Default memory base is 0 (1:1 mapping) */
+	if (!ppc_md.pci_dev_mem_base) {
+		/* Please, someone fix this for non-pmac machines.*/
+		return 0;
+	}
+	return ppc_md.pci_dev_mem_base(bus, devfn);
+}
+
+/* Returns the root-bridge number (Uni-N number) of a device */
+int
+pci_dev_root_bridge(unsigned char bus, unsigned char devfn)
+{
+	/* Defaults to 0 */
+	if (!ppc_md.pci_dev_root_bridge)
+		return 0;
+	return ppc_md.pci_dev_root_bridge(bus, devfn);
+}
+
+/*
+ * Those syscalls are derived from the Alpha versions, they
+ * allow userland apps to retreive the per-device iobase and
+ * mem-base. They also provide wrapper for userland to do
+ * config space accesses.
+ * The "host_number" returns the number of the Uni-N sub bridge
+ */
+
+asmlinkage int
+sys_pciconfig_read(unsigned long bus, unsigned long dfn,
+		   unsigned long off, unsigned long len,
+		   unsigned char *buf)
+{
+	unsigned char ubyte;
+	unsigned short ushort;
+	unsigned int uint;
+	long err = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!pcibios_present())
+		return -ENOSYS;
+	
+	switch (len) {
+	case 1:
+		err = pcibios_read_config_byte(bus, dfn, off, &ubyte);
+		put_user(ubyte, buf);
+		break;
+	case 2:
+		err = pcibios_read_config_word(bus, dfn, off, &ushort);
+		put_user(ushort, (unsigned short *)buf);
+		break;
+	case 4:
+		err = pcibios_read_config_dword(bus, dfn, off, &uint);
+		put_user(uint, (unsigned int *)buf);
+		break;
+	default:
+		err = -EINVAL;
+		break;
+	}
+	return err;
+}
+
+asmlinkage int
+sys_pciconfig_write(unsigned long bus, unsigned long dfn,
+		    unsigned long off, unsigned long len,
+		    unsigned char *buf)
+{
+	unsigned char ubyte;
+	unsigned short ushort;
+	unsigned int uint;
+	long err = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!pcibios_present())
+		return -ENOSYS;
+
+	switch (len) {
+	case 1:
+		err = get_user(ubyte, buf);
+		if (err)
+			break;
+		err = pcibios_write_config_byte(bus, dfn, off, ubyte);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
 		}
 		break;
-	case _MACH_Pmac:
-		if (find_devices("pci") != 0) {
-			/* looks like a G3 powermac */
-			set_config_access_method(grackle);
-		} else {
-			set_config_access_method(pmac);
+	case 2:
+		err = get_user(ushort, (unsigned short *)buf);
+		if (err)
+			break;
+		err = pcibios_write_config_word(bus, dfn, off, ushort);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
 		}
 		break;
-	case _MACH_chrp:
-		if ( !strncmp("MOT",
-			      get_property(find_path_device("/"), "model", NULL),3) )
-		{
-			isa_io_base = 0xfe000000;
-			set_config_access_method(grackle);
-		}
-		else
-		{
-			isa_io_base = GG2_ISA_IO_BASE;
-			set_config_access_method(gg2);
+	case 4:
+		err = get_user(uint, (unsigned int *)buf);
+		if (err)
+			break;
+		err = pcibios_write_config_dword(bus, dfn, off, uint);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
 		}
 		break;
 	default:
-		printk("setup_pci_ptrs(): unknown machine type!\n");
-	}
-#else  /* CONFIG_MBX */
-	set_config_access_method(mbx);
-#endif /* CONFIG_MBX */	
-#undef set_config_access_method
-}
-
-__initfunc(void pcibios_fixup(void))
-{
-	extern unsigned long route_pci_interrupts(void);
-	struct pci_dev *dev;
-	extern struct bridge_data **bridges;
-	extern unsigned char *Motherboard_map;
-	extern unsigned char *Motherboard_routes;
-	unsigned char i;
-#ifndef CONFIG_MBX
-	switch (_machine )
-	{
-	case _MACH_prep:
-		route_pci_interrupts();
-		for(dev=pci_devices; dev; dev=dev->next)
-		{
-			/*
-			 * Use our old hard-coded kludge to figure out what
-			 * irq this device uses.  This is necessary on things
-			 * without residual data. -- Cort
-			 */
-			unsigned char d = PCI_SLOT(dev->devfn);
-			dev->irq = Motherboard_routes[Motherboard_map[d]];
-			for ( i = 0 ; i <= 5 ; i++ )
-			{
-				if ( dev->base_address[i] > 0x10000000 )
-				{
-					printk("Relocating PCI address %x -> %x\n",
-					       dev->base_address[i],
-					       (dev->base_address[i] & 0x00FFFFFF)
-				               | 0x01000000);
-					dev->base_address[i] =
-					  (dev->base_address[i] & 0x00FFFFFF) | 0x01000000;
-					pci_write_config_dword(dev,
-						PCI_BASE_ADDRESS_0+(i*0x4),
-						dev->base_address[i] );
-				}
-			}
-#if 0			
-			/*
-			 * If we have residual data and if it knows about this
-			 * device ask it what the irq is.
-			 *  -- Cort
-			 */
-			ppcd = residual_find_device_id( ~0L, dev->device,
-							-1,-1,-1, 0);
-#endif			
-		}
-		break;
-	case _MACH_chrp:
-		/* PCI interrupts are controlled by the OpenPIC */
-		for(dev=pci_devices; dev; dev=dev->next)
-			if (dev->irq)
-				dev->irq = openpic_to_irq(dev->irq);
-		break;
-	case _MACH_Pmac:
-		for(dev=pci_devices; dev; dev=dev->next)
-		{
-			/*
-			 * Open Firmware often doesn't initialize the,
-			 * PCI_INTERRUPT_LINE config register properly, so we
-			 * should find the device node and se if it has an
-			 * AAPL,interrupts property.
-			 */
-			struct bridge_data *bp = bridges[dev->bus->number];
-			struct device_node *node;
-			unsigned int *reg;
-			unsigned char pin;
-			
-			if (pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin) ||
-			    !pin)
-				continue;	/* No interrupt generated -> no fixup */
-			for (node = bp->node->child; node != 0;
-			     node = node->sibling) {
-				reg = (unsigned int *) get_property(node, "reg", 0);
-				if (reg == 0 || ((reg[0] >> 8) & 0xff) != dev->devfn)
-					continue;
-				/* this is the node, see if it has interrupts */
-				if (node->n_intrs > 0)
-					dev->irq = node->intrs[0].line;
-				break;
-			}
-		}
+		err = -EINVAL;
 		break;
 	}
-#else /* CONFIG_MBX */
-	for(dev=pci_devices; dev; dev=dev->next)
-	{
+	return err;
+}
+
+/* Provide information on locations of various I/O regions in physical
+ * memory.  Do this on a per-card basis so that we choose the right
+ * root bridge.
+ * Note that the returned IO or memory base is a physical address
+ */
+
+asmlinkage long
+sys_pciconfig_iobase(long which, unsigned long bus, unsigned long devfn)
+{
+	long result = -EOPNOTSUPP;
+	
+	switch (which) {
+	case IOBASE_BRIDGE_NUMBER:
+		return (long)pci_dev_root_bridge(bus, devfn);
+	case IOBASE_MEMORY:
+		return (long)pci_dev_mem_base(bus, devfn);
+	case IOBASE_IO:
+		result = (long)pci_dev_io_base(bus, devfn, 1);
+		if (result == 0)
+			result = -EOPNOTSUPP;
+		break;
 	}
-#endif /* CONFIG_MBX */
-}
 
-__initfunc(void pcibios_fixup_bus(struct pci_bus *bus))
-{
-}
-
-__initfunc(char *pcibios_setup(char *str))
-{
-	return str;
+	return result;
 }

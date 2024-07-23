@@ -31,6 +31,7 @@ typedef struct {
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
     struct tq_struct ppa_tq;	/* Polling interupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
+    unsigned long recon_tmo;    /* How many usecs to wait for reconnection (6th bit) */
     unsigned int failed:1;	/* Failure flag                 */
     unsigned int p_busy:1;	/* Parport sharing busy flag    */
 } ppa_struct;
@@ -43,12 +44,12 @@ typedef struct {
 	cur_cmd:	NULL,		\
 	ppa_tq:		{0, 0, ppa_interrupt, NULL},	\
 	jstart:		0,		\
+	recon_tmo:      PPA_RECON_TMO,	\
 	failed:		0,		\
 	p_busy:		0		\
 }
 
 #include  "ppa.h"
-#include <linux/parport.h>
 
 #define NO_HOSTS 4
 static ppa_struct ppa_hosts[NO_HOSTS] =
@@ -126,7 +127,7 @@ int ppa_detect(Scsi_Host_Template * host)
     }
   retry_entry:
     for (i = 0; pb; i++, pb = pb->next) {
-	int modes, ppb;
+	int modes, ppb, ppb_hi;
 
 	ppa_hosts[i].dev =
 	    parport_register_device(pb, "ppa", NULL, ppa_wakeup,
@@ -151,6 +152,7 @@ int ppa_detect(Scsi_Host_Template * host)
 	    }
 	}
 	ppb = PPA_BASE(i) = ppa_hosts[i].dev->port->base;
+	ppb_hi =  ppa_hosts[i].dev->port->base_hi;
 	w_ctr(ppb, 0x0c);
 	modes = ppa_hosts[i].dev->port->modes;
 
@@ -163,11 +165,11 @@ int ppa_detect(Scsi_Host_Template * host)
 	    ppa_hosts[i].mode = PPA_PS2;
 
 	if (modes & PARPORT_MODE_PCECPPS2) {
-	    w_ecr(ppb, 0x20);
+	    w_ecr(ppb_hi, 0x20);
 	    ppa_hosts[i].mode = PPA_PS2;
 	}
 	if (modes & PARPORT_MODE_PCECPEPP)
-	    w_ecr(ppb, 0x80);
+	    w_ecr(ppb_hi, 0x80);
 
 	/* Done configuration */
 	ppa_pb_release(i);
@@ -236,6 +238,12 @@ static inline int ppa_proc_write(int hostno, char *buffer, int length)
 	ppa_hosts[hostno].mode = x;
 	return length;
     }
+    if ((length > 10) && (strncmp(buffer, "recon_tmo=", 10) == 0)) {
+	x = simple_strtoul(buffer + 10, NULL, 0);
+	ppa_hosts[hostno].recon_tmo = x;
+        printk("ppa: recon_tmo set to %ld\n", x);
+	return length;
+    }
     printk("ppa /proc: invalid variable\n");
     return (-EINVAL);
 }
@@ -256,6 +264,9 @@ int ppa_proc_info(char *buffer, char **start, off_t offset,
     len += sprintf(buffer + len, "Version : %s\n", PPA_VERSION);
     len += sprintf(buffer + len, "Parport : %s\n", ppa_hosts[i].dev->port->name);
     len += sprintf(buffer + len, "Mode    : %s\n", PPA_MODE_STRING[ppa_hosts[i].mode]);
+#if PPA_DEBUG > 0
+    len += sprintf(buffer + len, "recon_tmo : %lu\n", ppa_hosts[i].recon_tmo);
+#endif
 
     /* Request for beyond end of buffer */
     if (offset > length)
@@ -299,12 +310,11 @@ static unsigned char ppa_wait(int host_no)
     unsigned char r;
 
     k = PPA_SPIN_TMO;
-    do {
-	r = r_str(ppb);
-	k--;
-	udelay(1);
+    /* Wait for bit 6 and 7 - PJC */
+    for (r = r_str (ppb); ((r & 0xc0)!=0xc0) && (k); k--) {
+	    udelay (1);
+	    r = r_str (ppb);
     }
-    while (!(r & 0x80) && (k));
 
     /*
      * return some status information.
@@ -323,8 +333,7 @@ static unsigned char ppa_wait(int host_no)
 }
 
 /*
- * output a string, in whatever mode is available, according to the
- * PPA protocol. 
+ * Clear EPP Timeout Bit 
  */
 static inline void epp_reset(unsigned short ppb)
 {
@@ -335,19 +344,23 @@ static inline void epp_reset(unsigned short ppb)
     w_str(ppb, i & 0xfe);
 }
 
-static inline void ecp_sync(unsigned short ppb)
+/* 
+ * Wait for empty ECP fifo (if we are in ECP fifo mode only)
+ */
+static inline void ecp_sync(unsigned short hostno)
 {
-    int i;
+    int i, ppb_hi=ppa_hosts[hostno].dev->port->base_hi;
 
-    if ((r_ecr(ppb) & 0xe0) != 0x80)
-	return;
+    if (ppb_hi == 0) return;
 
-    for (i = 0; i < 100; i++) {
-	if (r_ecr(ppb) & 0x01)
-	    return;
-	udelay(5);
+    if ((r_ecr(ppb_hi) & 0xe0) == 0x60) { /* mode 011 == ECP fifo mode */
+        for (i = 0; i < 100; i++) {
+            if (r_ecr(ppb_hi) & 0x01)
+                return;
+            udelay(5);
+        }
+        printk("ppa: ECP sync failed as data still present in FIFO.\n");
     }
-    printk("ppa: ECP sync failed as data still present in FIFO.\n");
 }
 
 static int ppa_byte_out(unsigned short base, const char *buffer, int len)
@@ -422,7 +435,7 @@ static int ppa_out(int host_no, char *buffer, int len)
 	w_ctr(ppb, 0xc);
 	r = !(r_str(ppb) & 0x01);
 	w_ctr(ppb, 0xc);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     default:
@@ -475,7 +488,7 @@ static int ppa_in(int host_no, char *buffer, int len)
 	w_ctr(ppb, 0x2c);
 	r = !(r_str(ppb) & 0x01);
 	w_ctr(ppb, 0x2c);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     default:
@@ -542,6 +555,7 @@ static int ppa_select(int host_no, int target)
     k = PPA_SELECT_TMO;
     do {
 	k--;
+	udelay(1);
     } while ((r_str(ppb) & 0x40) && (k));
     if (!k)
 	return 0;
@@ -555,6 +569,7 @@ static int ppa_select(int host_no, int target)
     k = PPA_SELECT_TMO;
     do {
 	k--;
+	udelay(1);
     }
     while (!(r_str(ppb) & 0x40) && (k));
     if (!k)
@@ -651,7 +666,7 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	    (v == WRITE_10));
 
     /*
-     * We only get here if the drive is ready to comunicate,
+     * We only get here if the drive is ready to communicate,
      * hence no need for a full ppa_wait.
      */
     r = (r_str(ppb) & 0xf0);
@@ -664,12 +679,36 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	if (time_after(jiffies, start_jiffies + 1))
 	    return 0;
 
-	if (((r & 0xc0) != 0xc0) || (cmd->SCp.this_residual <= 0)) {
+	if ((cmd->SCp.this_residual <= 0)) {
 	    ppa_fail(host_no, DID_ERROR);
 	    return -1;		/* ERROR_RETURN */
 	}
-	/* determine if we should use burst I/O */ fast = (bulk && (cmd->SCp.this_residual >= PPA_BURST_SIZE))
-	    ? PPA_BURST_SIZE : 1;
+
+	/* On some hardware we have SCSI disconnected (6th bit low)
+	 * for about 100usecs. It is too expensive to wait a 
+	 * tick on every loop so we busy wait for no more than
+	 * 500usecs to give the drive a chance first. We do not 
+	 * change things for "normal" hardware since generally 
+	 * the 6th bit is always high.
+	 * This makes the CPU load higher on some hardware 
+	 * but otherwise we can not get more then 50K/secs 
+	 * on this problem hardware.
+	 */
+	if ((r & 0xc0) != 0xc0) {
+	   /* Wait for reconnection should be no more than 
+	    * jiffy/2 = 5ms = 5000 loops
+	    */
+	   unsigned long k = ppa_hosts[host_no].recon_tmo; 
+	   for (; k && ((r = (r_str(ppb) & 0xf0)) & 0xc0) != 0xc0; k--)
+	     udelay(1);
+
+	   if(!k) 
+	     return 0;
+	}	   
+
+	/* determine if we should use burst I/O */ 
+	fast = (bulk && (cmd->SCp.this_residual >= PPA_BURST_SIZE)) 
+	     ? PPA_BURST_SIZE : 1;
 
 	if (r == (unsigned char) 0xc0)
 	    status = ppa_out(host_no, cmd->SCp.ptr, fast);
@@ -742,6 +781,7 @@ static void ppa_interrupt(void *data)
 {
     ppa_struct *tmp = (ppa_struct *) data;
     Scsi_Cmnd *cmd = tmp->cur_cmd;
+    unsigned long flags;
 
     if (!cmd) {
 	printk("PPA: bug in ppa_interrupt\n");
@@ -793,7 +833,10 @@ static void ppa_interrupt(void *data)
 	ppa_pb_release(cmd->host->unique_id);
 
     tmp->cur_cmd = 0;
+    
+    spin_lock_irqsave(&io_request_lock, flags);
     cmd->scsi_done(cmd);
+    spin_unlock_irqrestore(&io_request_lock, flags);
     return;
 }
 

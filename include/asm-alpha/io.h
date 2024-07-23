@@ -29,15 +29,16 @@
  */
 static inline void __set_hae(unsigned long new_hae)
 {
-	unsigned long ipl = swpipl(7);
+	unsigned long flags;
+	__save_and_cli(flags);
 
 	alpha_mv.hae_cache = new_hae;
 	*alpha_mv.hae_register = new_hae;
 	mb();
-
 	/* Re-read to make sure it was written.  */
 	new_hae = *alpha_mv.hae_register;
-	setipl(ipl);
+
+	__restore_flags(flags);
 }
 
 static inline void set_hae(unsigned long new_hae)
@@ -143,6 +144,10 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # include <asm/jensen.h>
 #elif defined(CONFIG_ALPHA_RX164)
 # include <asm/core_polaris.h>
+#elif defined(CONFIG_ALPHA_LX164)
+# include <asm/core_pyxis.h>
+#elif defined(CONFIG_ALPHA_IRONGATE)
+# include <asm/core_irongate.h>
 #else
 #error "What system is this?"
 #endif
@@ -258,6 +263,8 @@ static inline void iounmap(void *addr)
 {
 }
 
+#define ioremap_nocache(offset, size) ioremap((offset),(size))
+
 #ifndef readb
 # define readb(a)	_readb((unsigned long)(a))
 #endif
@@ -287,7 +294,7 @@ static inline void iounmap(void *addr)
  * String version of IO memory access ops:
  */
 extern void _memcpy_fromio(void *, unsigned long, long);
-extern void _memcpy_toio(unsigned long, void *, long);
+extern void _memcpy_toio(unsigned long, const void *, long);
 extern void _memset_c_io(unsigned long, unsigned long, long);
 
 #define memcpy_fromio(to,from,len) \

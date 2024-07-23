@@ -9,7 +9,7 @@
  *      as published by the Free Software Foundation; either version
  *      2 of the License, or (at your option) any later version.
  * 
- *  $Id: syncookies.c,v 1.6 1998/06/10 07:29:22 davem Exp $
+ *  $Id: syncookies.c,v 1.7.2.4 2000/04/17 05:57:01 davem Exp $
  *
  *  Missing: IPv6 support. 
  */
@@ -104,11 +104,19 @@ get_cookie_sock(struct sock *sk, struct sk_buff *skb, struct open_request *req,
 {
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
+	tp->syn_backlog++;
+
 	sk = tp->af_specific->syn_recv_sock(sk, skb, req, dst);
-	req->sk = sk; 
-	
-	/* Queue up for accept() */
-	tcp_synq_queue(tp, req);
+	if (sk) {
+		req->sk = sk; 
+
+		/* Queue up for accept() */
+		tcp_synq_queue(tp, req);
+	} else {
+		tp->syn_backlog--;
+		(*req->class->destructor)(req);
+		tcp_openreq_free(req); 
+	}
 	
 	return sk; 
 }
@@ -145,7 +153,12 @@ cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
  	req->rmt_port = skb->h.th->source;
 	req->af.v4_req.loc_addr = skb->nh.iph->daddr;
 	req->af.v4_req.rmt_addr = skb->nh.iph->saddr;
-	req->class = &or_ipv4; /* for savety */
+	req->class = &or_ipv4; /* for safety */
+#ifdef CONFIG_IP_TRANSPARENT_PROXY 
+	req->lcl_port = skb->h.th->dest;
+#endif
+
+	req->af.v4_req.opt = NULL;
 
 	/* We throwed the options of the initial SYN away, so we hope
 	 * the ACK carries the same options again (see RFC1122 4.2.3.8)
@@ -162,7 +175,6 @@ cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
 		}
 	}
 	
-	req->af.v4_req.opt = NULL;
 	req->snd_wscale = req->rcv_wscale = req->tstamp_ok = 0;
 	req->wscale_ok = 0; 
 	req->expires = 0UL; 
@@ -180,8 +192,10 @@ cookie_v4_check(struct sock *sk, struct sk_buff *skb, struct ip_options *opt)
 			    req->af.v4_req.loc_addr,
 			    sk->ip_tos | RTO_CONN,
 			    0)) { 
-	    tcp_openreq_free(req);
-	    return NULL; 
+		if (req->af.v4_req.opt)
+			kfree(req->af.v4_req.opt);
+		tcp_openreq_free(req);
+		return NULL; 
 	}
 
 	/* Try to redo what tcp_v4_send_synack did. */

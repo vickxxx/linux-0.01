@@ -32,6 +32,7 @@
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/svcsock.h>
 #include <linux/lockd/lockd.h>
+#include <linux/lockd/syscall.h>
 #include <linux/nfs.h>
 
 #define NLMDBG_FACILITY		NLMDBG_SVC
@@ -64,6 +65,7 @@ lockd(struct svc_rqst *rqstp)
 {
 	struct svc_serv	*serv = rqstp->rq_server;
 	int		err = 0;
+	unsigned long grace_period_expire;
 
 	/* Lock module and set up kernel thread */
 	MOD_INC_USE_COUNT;
@@ -75,9 +77,7 @@ lockd(struct svc_rqst *rqstp)
 	nlmsvc_pid = current->pid;
 	up(&lockd_start);
 
-	exit_mm(current);
-	current->session = 1;
-	current->pgrp = 1;
+	daemonize();
 	sprintf(current->comm, "lockd");
 
 	/* Process request with signals blocked.  */
@@ -103,15 +103,11 @@ lockd(struct svc_rqst *rqstp)
 #ifdef RPC_DEBUG
 	nlmsvc_grace_period = 10 * HZ;
 #else
-	if (nlm_grace_period) {
-		nlmsvc_grace_period += (1 + nlm_grace_period / nlm_timeout)
-						* nlm_timeout * HZ;
-	} else {
-		nlmsvc_grace_period += 5 * nlm_timeout * HZ;
-	}
+	nlmsvc_grace_period = (1 + nlm_grace_period / nlm_timeout)
+				* nlm_timeout * HZ;
 #endif
 
-	nlmsvc_grace_period += jiffies;
+	grace_period_expire = nlmsvc_grace_period + jiffies;
 	nlmsvc_timeout = nlm_timeout * HZ;
 
 	/*
@@ -136,8 +132,11 @@ lockd(struct svc_rqst *rqstp)
 		 */
 		if (!nlmsvc_grace_period) {
 			timeout = nlmsvc_retry_blocked();
-		} else if (time_before(nlmsvc_grace_period, jiffies))
+		} else if (time_before(grace_period_expire, jiffies)) {
 			nlmsvc_grace_period = 0;
+			continue;
+		} else
+			timeout = nlmsvc_timeout;
 
 		/*
 		 * Find a socket with data available and call its
@@ -228,13 +227,17 @@ lockd_up(void)
 
 	error = -ENOMEM;
 	serv = svc_create(&nlmsvc_program, 0, NLMSVC_XDRSIZE);
+
 	if (!serv) {
 		printk(KERN_WARNING "lockd_up: create service failed\n");
 		goto out;
 	}
 
 	if ((error = svc_makesock(serv, IPPROTO_UDP, 0)) < 0 
-	 || (error = svc_makesock(serv, IPPROTO_TCP, 0)) < 0) {
+#ifdef CONFIG_NFSD_TCP
+	 || (error = svc_makesock(serv, IPPROTO_TCP, 0)) < 0
+#endif
+		) {
 		if (warned++ == 0) 
 			printk(KERN_WARNING
 				"lockd_up: makesock failed, error=%d\n", error);
@@ -314,6 +317,9 @@ out:
   MODULE_PARM(nlm_grace_period, "10-240l");
   MODULE_PARM(nlm_timeout, "3-20l");
 #endif
+
+extern int (*do_lockdctl)(int, void *, void *);
+
 int
 init_module(void)
 {
@@ -323,6 +329,7 @@ init_module(void)
 	nlmsvc_pid = 0;
 	lockd_exit = NULL;
 	nlmxdr_init();
+	do_lockdctl = lockdctl;
 	return 0;
 }
 
@@ -331,6 +338,7 @@ cleanup_module(void)
 {
 	/* FIXME: delete all NLM clients */
 	nlm_shutdown_hosts();
+	do_lockdctl = NULL;
 }
 #endif
 
@@ -338,12 +346,12 @@ cleanup_module(void)
  * Define NLM program and procedures
  */
 static struct svc_version	nlmsvc_version1 = {
-	1, 16, nlmsvc_procedures, NULL
+	1, 17, nlmsvc_procedures, NULL
 };
 static struct svc_version	nlmsvc_version3 = {
 	3, 24, nlmsvc_procedures, NULL
 };
-#ifdef CONFIG_NFSD_NFS3
+#if (defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)) && defined(CONFIG_NFS_V3)
 static struct svc_version	nlmsvc_version4 = {
 	4, 24, nlmsvc_procedures4, NULL
 };
@@ -353,7 +361,7 @@ static struct svc_version *	nlmsvc_version[] = {
 	&nlmsvc_version1,
 	NULL,
 	&nlmsvc_version3,
-#ifdef CONFIG_NFSD_NFS3
+#if (defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)) && defined(CONFIG_NFS_V3)
 	&nlmsvc_version4,
 #endif
 };
@@ -369,3 +377,37 @@ struct svc_program		nlmsvc_program = {
 	"lockd",		/* service name */
 	&nlmsvc_stats,		/* stats table */
 };
+
+int
+lockdctl(int cmd, void *opaque_argp, void *opaque_resp)
+{
+#if 0
+	int err;
+
+	MOD_INC_USE_COUNT;
+
+	switch(cmd) {
+	case LOCKDCTL_SVC:
+		err = lockd_up ();
+		break;
+	default:
+		err = -EINVAL;
+	}
+
+	MOD_DEC_USE_COUNT;
+
+	return err;
+#else
+	/*
+	 *  For the moment, unless a real need for locks on NFS root
+	 *  emerges, we revert to automatic lockd start.  But we will leave the
+	 *  manual call machinery in place in case we ever want to go
+	 *  back to it.  I felt a warning was useful here, but many didn't like
+	 *  that, so I'll suppress it.  - dhiggen
+	 */
+#if 0
+	 printk("lockd: note, lockd is automatic in this kernel.  Remove rpc.lockd from any rc scripts.\n"); 
+#endif
+	return (0);
+#endif
+}

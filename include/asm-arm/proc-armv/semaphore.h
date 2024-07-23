@@ -16,12 +16,12 @@ extern inline void down(struct semaphore * sem)
 	@ atomic down operation
 	mrs	%0, cpsr
 	orr	%1, %0, #128		@ disable IRQs
-	bic	%0, %0, #0x80000000	@ clear N
 	msr	cpsr, %1
 	ldr	%1, [%2]
+	bic	%0, %0, #0x80000000	@ clear N
 	subs	%1, %1, #1
-	orrmi	%0, %0, #0x80000000	@ set N
 	str	%1, [%2]
+	orrmi	%0, %0, #0x80000000	@ set N
 	msr	cpsr, %0
 	movmi	r0, %2
 	blmi	" SYMBOL_NAME_STR(__down_failed)
@@ -42,16 +42,42 @@ extern inline int down_interruptible (struct semaphore * sem)
 	@ atomic down interruptible operation
 	mrs	%0, cpsr
 	orr	%1, %0, #128		@ disable IRQs
-	bic	%0, %0, #0x80000000	@ clear N
 	msr	cpsr, %1
 	ldr	%1, [%2]
+	bic	%0, %0, #0x80000000	@ clear N
 	subs	%1, %1, #1
-	orrmi	%0, %0, #0x80000000	@ set N
 	str	%1, [%2]
+	orrmi	%0, %0, #0x80000000	@ set N
 	msr	cpsr, %0
 	movmi	r0, %2
 	movpl	r0, #0
 	blmi	" SYMBOL_NAME_STR(__down_interruptible_failed) "
+	mov	%1, r0"
+		: "=&r" (cpsr), "=&r" (temp)
+		: "r" (sem)
+		: "r0", "lr", "cc");
+
+	return temp;
+}
+
+extern inline int down_trylock(struct semaphore *sem)
+{
+	unsigned int cpsr, temp;
+
+	__asm__ __volatile__ ("
+	@ atomic down try lock operation
+	mrs	%0, cpsr
+	orr	%1, %0, #128		@ disable IRQs
+	msr	cpsr, %1
+	ldr	%1, [%2]
+	bic	%0, %0, #0x80000000	@ clear N
+	subs	%1, %1, #1
+	str	%1, [%2]
+	orrmi	%0, %0, #0x80000000	@ set N
+	msr	cpsr, %0
+	movmi	r0, %2
+	movpl	r0, #0
+	blmi	" SYMBOL_NAME_STR(__down_trylock_failed) "
 	mov	%1, r0"
 		: "=&r" (cpsr), "=&r" (temp)
 		: "r" (sem)
@@ -74,12 +100,12 @@ extern inline void up(struct semaphore * sem)
 	@ atomic up operation
 	mrs	%0, cpsr
 	orr	%1, %0, #128		@ disable IRQs
-	bic	%0, %0, #0x80000000	@ clear N
 	msr	cpsr, %1
 	ldr	%1, [%2]
+	bic	%0, %0, #0x80000000	@ clear N
 	adds	%1, %1, #1
-	orrls	%0, %0, #0x80000000	@ set N
 	str	%1, [%2]
+	orrle	%0, %0, #0x80000000	@ set N
 	msr	cpsr, %0
 	movmi	r0, %2
 	blmi	" SYMBOL_NAME_STR(__up_wakeup)

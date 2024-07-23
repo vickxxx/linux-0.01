@@ -14,7 +14,7 @@
 /*
  * ioctl commands
  */
-#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, uid_t)
+#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_uid_t)
 #define SMB_IOC_NEWCONN                 _IOW('u', 2, struct smb_conn_opt)
 
 #ifdef __KERNEL__
@@ -70,12 +70,20 @@ smb_vfree(void *obj)
 #define SMB_F_CACHEVALID	0x01	/* directory cache valid */
 #define SMB_F_LOCALWRITE	0x02	/* file modified locally */
 
-/*
- * Bug fix flags
- */
-#define SMB_FIX_WIN95	0x0001	/* Win 95 server */
-#define SMB_FIX_OLDATTR	0x0002	/* Use core getattr (Win 95 speedup) */
-#define SMB_FIX_DIRATTR	0x0004	/* Use find_first for getattr */
+/* NT1 protocol capability bits */
+#define SMB_CAP_RAW_MODE         0x0001
+#define SMB_CAP_MPX_MODE         0x0002
+#define SMB_CAP_UNICODE          0x0004
+#define SMB_CAP_LARGE_FILES      0x0008
+#define SMB_CAP_NT_SMBS          0x0010
+#define SMB_CAP_RPC_REMOTE_APIS  0x0020
+#define SMB_CAP_STATUS32         0x0040
+#define SMB_CAP_LEVEL_II_OPLOCKS 0x0080
+#define SMB_CAP_LOCK_AND_READ    0x0100
+#define SMB_CAP_NT_FIND          0x0200
+#define SMB_CAP_DFS              0x1000
+#define SMB_CAP_LARGE_READX      0x4000
+
 
 /* linux/fs/smbfs/mmap.c */
 int smb_mmap(struct file *, struct vm_area_struct *);
@@ -101,6 +109,7 @@ struct inode *smb_iget(struct super_block *, struct smb_fattr *);
 extern int init_smb_fs(void);
 
 /* linux/fs/smbfs/proc.c */
+int smb_setcodepage(struct smb_sb_info *server, struct smb_nls_codepage *cp);
 __u32 smb_len(unsigned char *);
 __u8 *smb_encode_smb_length(__u8 *, __u32);
 __u8 *smb_setup_header(struct smb_sb_info *, __u8, __u16, __u16);
@@ -176,6 +185,7 @@ struct cache_head {
 	int	entries;	/* total entries */
 	int	pages;		/* number of data pages */
 	int	idx;		/* index of current data page */
+	time_t  mtime;          /* the last mtime of our dir inode */
 	struct cache_index index[NINDEX];
 };
 

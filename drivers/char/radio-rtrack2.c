@@ -89,7 +89,7 @@ static int rt_setfreq(struct rt_device *dev, unsigned long freq)
 	return 0;
 }
 
-int rt_getsigstr(struct rt_device *dev)
+static int rt_getsigstr(struct rt_device *dev)
 {
 	if (inb(io) & 2)	/* bit set = no signal present	*/
 		return 0;
@@ -130,6 +130,7 @@ static int rt_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			v.flags=VIDEO_TUNER_LOW;
 			v.mode=VIDEO_MODE_AUTO;
 			v.signal=0xFFFF*rt_getsigstr(rt);
+			strcpy(v.name, "FM");
 			if(copy_to_user(arg,&v, sizeof(v)))
 				return -EFAULT;
 			return 0;

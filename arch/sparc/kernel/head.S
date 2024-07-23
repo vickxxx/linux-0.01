@@ -1,8 +1,8 @@
-/* $Id: head.S,v 1.92 1998/06/10 07:21:55 davem Exp $
+/* $Id: head.S,v 1.95.2.6 2000/01/21 01:05:39 davem Exp $
  * head.S: The initial boot code for the Sparc port of Linux.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1995 Peter Zaitcev   (Zaitcev@ipmce.su)
+ * Copyright (C) 1995,1999 Pete Zaitcev   (zaitcev@metabyte.com)
  * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
  * Copyright (C) 1997 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997 Michael A. Griffith (grif@acm.org)
@@ -116,10 +116,10 @@ t_irq11:TRAP_ENTRY_INTERRUPT(11)            /* IRQ Floppy Intr.              */
 t_irq12:TRAP_ENTRY_INTERRUPT(12)            /* IRQ Zilog serial chip         */
 t_irq13:TRAP_ENTRY_INTERRUPT(13)            /* IRQ Audio Intr.               */
 t_irq14:TRAP_ENTRY_INTERRUPT(14)            /* IRQ Timer #2                  */
+	.globl	t_nmi
 #ifndef __SMP__
 t_nmi:	NMI_TRAP                            /* Level 15 (NMI)                */
 #else
-	.globl	t_nmi
 t_nmi:	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
 #endif
 t_racc:	TRAP_ENTRY(0x20, do_reg_access)     /* General Register Access Error */
@@ -151,7 +151,11 @@ t_bad6f:BAD_TRAP(0x6f) BAD_TRAP(0x70) BAD_TRAP(0x71) BAD_TRAP(0x72) BAD_TRAP(0x7
 t_bad74:BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 t_bad79:BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 t_bad7e:BAD_TRAP(0x7e) BAD_TRAP(0x7f)
+#ifdef CONFIG_SUNOS_EMUL
 t_sunos:SUNOS_SYSCALL_TRAP                  /* SunOS System Call             */
+#else
+t_sunos:SUNOS_NO_SYSCALL_TRAP		    /* No SunOS emulation	     */
+#endif
 t_sbkpt:BREAKPOINT_TRAP                     /* Software Breakpoint/KGDB      */
 t_divz:	BAD_TRAP(0x82)                      /* Divide by zero trap           */
 t_flwin:TRAP_ENTRY(0x83, do_flush_windows)  /* Flush Windows Trap            */
@@ -169,7 +173,8 @@ t_bad96:BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99) BAD_TRAP(0x9
 t_bad9b:BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e) BAD_TRAP(0x9f)
 t_getcc:GETCC_TRAP                          /* Get Condition Codes           */
 t_setcc:SETCC_TRAP                          /* Set Condition Codes           */
-t_bada2:BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+t_getpsr:GETPSR_TRAP                        /* Get PSR Register              */
+t_bada3:BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 t_slowi:INDIRECT_SOLARIS_SYSCALL(156)
 t_bada8:BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 t_badac:BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
@@ -235,7 +240,11 @@ C_LABEL(trapbase_cpu1):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP 
+#ifdef CONFIG_SUNOS_EMUL
+	SUNOS_SYSCALL_TRAP	/* SunOS System Call */
+#else
+	SUNOS_NO_SYSCALL_TRAP	/* No SunOS emulation */
+#endif
 	BREAKPOINT_TRAP
 	BAD_TRAP(0x82)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
@@ -245,8 +254,8 @@ C_LABEL(trapbase_cpu1):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -303,7 +312,11 @@ C_LABEL(trapbase_cpu2):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP 
+#ifdef CONFIG_SUNOS_EMUL
+	SUNOS_SYSCALL_TRAP	/* SunOS System Call */
+#else
+	SUNOS_NO_SYSCALL_TRAP	/* No SunOS emulation */
+#endif
 	BREAKPOINT_TRAP
 	BAD_TRAP(0x82)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
@@ -313,8 +326,8 @@ C_LABEL(trapbase_cpu2):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -371,7 +384,11 @@ C_LABEL(trapbase_cpu3):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP  
+#ifdef CONFIG_SUNOS_EMUL
+	SUNOS_SYSCALL_TRAP	/* SunOS System Call */
+#else
+	SUNOS_NO_SYSCALL_TRAP	/* No SunOS emulation */
+#endif
 	BREAKPOINT_TRAP
 	BAD_TRAP(0x82)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
@@ -381,8 +398,8 @@ C_LABEL(trapbase_cpu3):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -408,13 +425,11 @@ C_LABEL(trapbase_cpu3):
 /* This was the only reasonable way I could think of to properly align
  * these page-table data structures.
  */
-	.globl C_LABEL(bootup_user_stack)
 	.globl C_LABEL(pg0), C_LABEL(pg1), C_LABEL(pg2), C_LABEL(pg3)
 	.globl C_LABEL(empty_bad_page)
 	.globl C_LABEL(empty_bad_page_table)
 	.globl C_LABEL(empty_zero_page)
 	.globl C_LABEL(swapper_pg_dir)
-C_LABEL(bootup_user_stack):		.skip 0x2000
 C_LABEL(swapper_pg_dir):		.skip PAGE_SIZE
 C_LABEL(pg0):				.skip PAGE_SIZE
 C_LABEL(pg1):				.skip PAGE_SIZE
@@ -427,8 +442,8 @@ C_LABEL(empty_zero_page):		.skip PAGE_SIZE
 	.global C_LABEL(root_flags)
 	.global C_LABEL(ram_flags)
 	.global C_LABEL(root_dev)
-	.global C_LABEL(ramdisk_image)
-	.global C_LABEL(ramdisk_size)
+	.global C_LABEL(sparc_ramdisk_image)
+	.global C_LABEL(sparc_ramdisk_size)
 
 /* This stuff has to be in sync with SILO and other potential boot loaders
  * Fields should be kept upward compatible and whenever any change is made,
@@ -436,18 +451,20 @@ C_LABEL(empty_zero_page):		.skip PAGE_SIZE
  */
 	.ascii	"HdrS"
 	.word	LINUX_VERSION_CODE
-	.half	0x0201		/* HdrS version */
+	.half	0x0203		/* HdrS version */
 C_LABEL(root_flags):
 	.half	1
 C_LABEL(root_dev):
 	.half	0
 C_LABEL(ram_flags):
 	.half	0
-C_LABEL(ramdisk_image):
+C_LABEL(sparc_ramdisk_image):
 	.word	0
-C_LABEL(ramdisk_size):
+C_LABEL(sparc_ramdisk_size):
 	.word	0
 	.word	C_LABEL(reboot_command)
+	.word	0, 0, 0
+	.word	_end
 
 /* Cool, here we go. Pick up the romvec pointer in %o0 and stash it in
  * %g7 and at prom_vector_p. And also quickly check whether we are on
@@ -1005,8 +1022,8 @@ sun4c_continue_boot:
 		WRITE_PAUSE
 
 		/* I want a kernel stack NOW! */
-		set	C_LABEL(bootup_user_stack), %g1
-		set	(0x2000 - REGWIN_SZ), %g2
+		set	C_LABEL(init_task_union), %g1
+		set	(TASK_UNION_SIZE - REGWIN_SZ), %g2
 		add	%g1, %g2, %sp
 		mov	0, %fp			/* And for good luck */
 
@@ -1108,6 +1125,9 @@ sun4c_continue_boot:
 		st	%g4, [%g5 + 0x18]
 		st	%g4, [%g5 + 0x1c]
 		set	flush_patch_three, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_four, %g5
 		st	%g4, [%g5 + 0x18]
 		st	%g4, [%g5 + 0x1c]
 		set	flush_patch_exception, %g5

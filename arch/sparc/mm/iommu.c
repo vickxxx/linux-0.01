@@ -1,4 +1,4 @@
-/* $Id: iommu.c,v 1.9 1998/04/15 14:58:37 jj Exp $
+/* $Id: iommu.c,v 1.10.2.2 1999/11/03 03:05:55 davem Exp $
  * iommu.c:  IOMMU specific routines for memory management.
  *
  * Copyright (C) 1995 David S. Miller  (davem@caip.rutgers.edu)
@@ -16,6 +16,7 @@
 #include <asm/sbus.h>
 #include <asm/io.h>
 #include <asm/mxcc.h>
+#include <asm/mbus.h>
 
 /* srmmu.c */
 extern int viking_mxcc_present;
@@ -51,8 +52,7 @@ iommu_init(int iommund, struct linux_sbus *sbus))
 	unsigned long tmp;
 	struct iommu_struct *iommu;
 	struct linux_prom_registers iommu_promregs[PROMREG_MAX];
-	int i, j, k, l, m;
-	struct iommu_alloc { unsigned long addr; int next; } *ia;
+	int i;
 
 	iommu = kmalloc(sizeof(struct iommu_struct), GFP_ATOMIC);
 	prom_getproperty(iommund, "reg", (void *) iommu_promregs,
@@ -97,62 +97,18 @@ iommu_init(int iommund, struct linux_sbus *sbus))
 	ptsize = (ptsize >> PAGE_SHIFT) * sizeof(iopte_t);
 
 	/* Stupid alignment constraints give me a headache. 
-	   We want to get very large aligned memory area, larger than
-	   maximum what get_free_pages gives us (128K): we need
-	   256K or 512K or 1M or 2M aligned to its size. */
-	ia = (struct iommu_alloc *) kmalloc (sizeof(struct iommu_alloc) * 128, GFP_ATOMIC);
-	for (i = 0; i < 128; i++) {
-		ia[i].addr = 0;
-		ia[i].next = -1;
-	}
-	k = 0;
-	for (i = 0; i < 128; i++) {
-		ia[i].addr = __get_free_pages(GFP_DMA, 5);
-		if (ia[i].addr <= ia[k].addr) {
-			if (i) {
-				ia[i].next = k;
-				k = i;
-			}			
-		} else {
-			for (m = k, l = ia[k].next; l != -1; m = l, l = ia[l].next)
-				if (ia[i].addr <= ia[l].addr) {
-					ia[i].next = l;
-					ia[m].next = i;
-				}
-			if (l == -1)
-				ia[m].next = i;
-		}
-		for (m = -1, j = 0, l = k; l != -1; l = ia[l].next) {
-			if (!(ia[l].addr & (ptsize - 1))) {
-				tmp = ia[l].addr;
-				m = l;
-				j = 128 * 1024;
-			} else if (m != -1) {
-				if (ia[l].addr != tmp + j)
-					m = -1;
-				else {
-					j += 128 * 1024;
-					if (j == ptsize) {
-						break;
-					}
-				}
-			}
-		}
-		if (l != -1)
+	   We need 256K or 512K or 1M or 2M area aligned to
+           its size and current gfp will fortunately give
+           it to us. */
+	for (i = 6; i < 9; i++)
+		if ((1 << (i + PAGE_SHIFT)) == ptsize)
 			break;
-	}
-	if (i == 128) {
+        tmp = __get_free_pages(GFP_DMA, i);
+	if (!tmp) {
 		prom_printf("Could not allocate iopte of size 0x%08x\n", ptsize);
 		prom_halt();
 	}
-	for (l = m, j = 0; j < ptsize; j += 128 * 1024, l = ia[l].next)
-		ia[l].addr = 0;
-	for (l = k; l != -1; l = ia[l].next)
-		if (ia[l].addr)
-			free_pages(ia[l].addr, 5);
-	kfree (ia);
 	iommu->lowest = iommu->page_table = (iopte_t *)tmp;
-	
 
 	/* Initialize new table. */
 	flush_cache_all();
@@ -246,16 +202,19 @@ static void iommu_release_scsi_sgl(struct mmu_sglist *sg, int sz, struct linux_s
 #ifdef CONFIG_SBUS
 static void iommu_map_dma_area(unsigned long addr, int len)
 {
-	unsigned long page, end;
+	unsigned long page, end, ipte_cache;
 	pgprot_t dvma_prot;
 	struct iommu_struct *iommu = SBus_chain->iommu;
 	iopte_t *iopte = iommu->page_table;
 	iopte_t *first;
 
-	if(viking_mxcc_present)
+	if(viking_mxcc_present || srmmu_modtype == HyperSparc) {
 		dvma_prot = __pgprot(SRMMU_CACHE | SRMMU_ET_PTE | SRMMU_PRIV);
-	else
+		ipte_cache = 1;
+	} else {
 		dvma_prot = __pgprot(SRMMU_ET_PTE | SRMMU_PRIV);
+		ipte_cache = 0;
+	}
 
 	iopte += ((addr - iommu->start) >> PAGE_SHIFT);
 	first = iopte;
@@ -270,12 +229,24 @@ static void iommu_map_dma_area(unsigned long addr, int len)
 			pmd_t *pmdp;
 			pte_t *ptep;
 
+			if (viking_mxcc_present)
+				viking_mxcc_flush_page(page);
+			else if (viking_flush)
+				viking_flush_page(page);
+			else
+				flush_page_to_ram(page);
+
 			pgdp = pgd_offset(init_task.mm, addr);
 			pmdp = pmd_offset(pgdp, addr);
 			ptep = pte_offset(pmdp, addr);
 
 			set_pte(ptep, pte_val(mk_pte(page, dvma_prot)));
-			iopte_val(*iopte++) = MKIOPTE(mmu_v2p(page));
+			if (ipte_cache != 0) {
+				iopte_val(*iopte++) = MKIOPTE(mmu_v2p(page));
+			} else {
+				iopte_val(*iopte++) =
+					MKIOPTE(mmu_v2p(page)) & ~IOPTE_CACHE;
+			}
 		}
 		addr += PAGE_SIZE;
 	}

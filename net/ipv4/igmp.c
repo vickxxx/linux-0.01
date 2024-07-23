@@ -8,7 +8,7 @@
  *	the older version didn't come out right using gcc 2.5.8, the newer one
  *	seems to fall out with gcc 2.6.2.
  *
- *	Version: $Id: igmp.c,v 1.28 1998/11/30 15:53:13 davem Exp $
+ *	Version: $Id: igmp.c,v 1.30.2.2 2001/01/10 10:04:07 davem Exp $
  *
  *	Authors:
  *		Alan Cox <Alan.Cox@linux.org>
@@ -97,6 +97,7 @@
 #include <linux/mroute.h>
 #endif
 
+#define IP_MAX_MEMBERSHIPS 20
 
 #ifdef CONFIG_IP_MULTICAST
 
@@ -241,7 +242,7 @@ static void igmp_heard_report(struct in_device *in_dev, u32 group)
 
 	/* Timers are only set for non-local groups */
 
-	if (LOCAL_MCAST(group))
+	if (group == IGMP_ALL_HOSTS)
 		return;
 
 	for (im=in_dev->mc_list; im!=NULL; im=im->next) {
@@ -283,7 +284,7 @@ static void igmp_heard_query(struct in_device *in_dev, unsigned char max_resp_ti
 	for (im=in_dev->mc_list; im!=NULL; im=im->next) {
 		if (group && group != im->multiaddr)
 			continue;
-		if (LOCAL_MCAST(im->multiaddr))
+		if (im->multiaddr == IGMP_ALL_HOSTS)
 			continue;
 		im->unsolicit_count = 0;
 		if (im->tm_running && (long)(im->timer.expires-jiffies) > max_delay)
@@ -376,7 +377,7 @@ static void igmp_group_dropped(struct ip_mc_list *im)
 	}
 
 #ifdef CONFIG_IP_MULTICAST
-	if (LOCAL_MCAST(im->multiaddr))
+	if (im->multiaddr == IGMP_ALL_HOSTS)
 		return;
 
 	start_bh_atomic();
@@ -396,7 +397,7 @@ static void igmp_group_added(struct ip_mc_list *im)
 	}
 
 #ifdef CONFIG_IP_MULTICAST
-	if (LOCAL_MCAST(im->multiaddr))
+	if (im->multiaddr == IGMP_ALL_HOSTS)
 		return;
 
 	start_bh_atomic();
@@ -441,8 +442,8 @@ void ip_mc_inc_group(struct in_device *in_dev, u32 addr)
 	im->timer.function=&igmp_timer_expire;
 	im->unsolicit_count = IGMP_Unsolicited_Report_Count;
 	im->reporter = 0;
-	im->loaded = 0;
 #endif
+	im->loaded = 0;
 	im->next=in_dev->mc_list;
 	in_dev->mc_list=im;
 	igmp_group_added(im);
@@ -463,6 +464,8 @@ int ip_mc_dec_group(struct in_device *in_dev, u32 addr)
 		if (i->multiaddr==addr) {
 			if (--i->users == 0) {
 				*ip = i->next;
+				synchronize_bh();
+
 				igmp_group_dropped(i);
 				if (in_dev->dev->flags & IFF_UP)
 					ip_rt_multicast_event(in_dev);
@@ -610,7 +613,10 @@ int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr)
 			struct in_device *in_dev;
 			if (--iml->count)
 				return 0;
+
 			*imlp = iml->next;
+			synchronize_bh();
+
 			in_dev = inetdev_by_index(iml->multi.imr_ifindex);
 			if (in_dev)
 				ip_mc_dec_group(in_dev, imr->imr_multiaddr.s_addr);
@@ -684,6 +690,8 @@ done:
 	len-=(offset-begin);
 	if(len>length)
 		len=length;
+	if(len<0)
+		len=0;
 	return len;
 }
 #endif

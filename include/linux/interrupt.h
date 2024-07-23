@@ -5,6 +5,7 @@
 #include <linux/kernel.h>
 #include <asm/bitops.h>
 #include <asm/atomic.h>
+#include <asm/ptrace.h>
 
 struct irqaction {
 	void (*handler)(int, void *, struct pt_regs *);
@@ -35,6 +36,7 @@ enum {
 	SERIAL_BH,
 	RISCOM8_BH,
 	SPECIALIX_BH,
+	AURORA_BH,
 	ESP_BH,
 	NET_BH,
 	SCSI_BH,

@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>
  *
- *	$Id: icmp.c,v 1.20 1998/10/03 09:38:31 davem Exp $
+ *	$Id: icmp.c,v 1.21.2.1 1999/05/19 22:07:36 davem Exp $
  *
  *	Based on net/ipv4/icmp.c
  *
@@ -200,9 +200,11 @@ static inline int icmpv6_xrlim_allow(struct sock *sk, int type,
 	 * this lookup should be more aggressive (not longer than timeout).
 	 */
 	dst = ip6_route_output(sk, fl);
-	if (dst->error)
+	if (dst->error) {
 		ipv6_statistics.Ip6OutNoRoutes++;
-	else {
+	} else if (dst->dev && (dst->dev->flags&IFF_LOOPBACK)) {
+		res = 1;
+	} else {
 		struct rt6_info *rt = (struct rt6_info *)dst;
 		int tmo = sysctl_icmpv6_time;
 
@@ -313,6 +315,7 @@ void icmpv6_send(struct sk_buff *skb, int type, int code, __u32 info,
 	fl.nl_u.ip6_u.daddr = &hdr->saddr;
 	fl.nl_u.ip6_u.saddr = saddr;
 	fl.oif = iif;
+	fl.fl6_flowlabel = 0;
 	fl.uli_u.icmpt.type = type;
 	fl.uli_u.icmpt.code = code;
 
@@ -386,6 +389,7 @@ static void icmpv6_echo_reply(struct sk_buff *skb)
 	fl.nl_u.ip6_u.daddr = &hdr->saddr;
 	fl.nl_u.ip6_u.saddr = saddr;
 	fl.oif = skb->dev->ifindex;
+	fl.fl6_flowlabel = 0;
 	fl.uli_u.icmpt.type = ICMPV6_ECHO_REPLY;
 	fl.uli_u.icmpt.code = 0;
 

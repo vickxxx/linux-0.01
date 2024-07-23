@@ -50,7 +50,7 @@ struct tcf_proto_ops
 
 	unsigned long		(*get)(struct tcf_proto*, u32 handle);
 	void			(*put)(struct tcf_proto*, unsigned long);
-	int			(*change)(struct tcf_proto*, u32 handle, struct rtattr **, unsigned long *);
+	int			(*change)(struct tcf_proto*, unsigned long, u32 handle, struct rtattr **, unsigned long *);
 	int			(*delete)(struct tcf_proto*, unsigned long);
 	void			(*walk)(struct tcf_proto*, struct tcf_walker *arg);
 
@@ -75,6 +75,16 @@ extern __inline__ int tc_classify(struct sk_buff *skb, struct tcf_proto *tp, str
 			return err;
 	}
 	return -1;
+}
+
+extern __inline__ unsigned long cls_set_class(unsigned long *clp, unsigned long cl)
+{
+	unsigned long old_cl; 
+
+	old_cl = *clp;
+	*clp = cl;
+	synchronize_bh();
+	return old_cl;
 }
 
 extern int register_tcf_proto_ops(struct tcf_proto_ops *ops);

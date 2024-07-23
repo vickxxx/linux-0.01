@@ -149,18 +149,18 @@ static unsigned short get_pins(unsigned minor)
  */
 struct bpp_regs {
       /* DMA registers */
-      __u32 p_csr;		/* DMA Control/Status Register */
-      __u32 p_addr;		/* Address Register */
-      __u32 p_bcnt;		/* Byte Count Register */
-      __u32 p_tst_csr;		/* Test Control/Status (DMA2 only) */
+      __volatile__ __u32 p_csr;		/* DMA Control/Status Register */
+      __volatile__ __u32 p_addr;	/* Address Register */
+      __volatile__ __u32 p_bcnt;	/* Byte Count Register */
+      __volatile__ __u32 p_tst_csr;	/* Test Control/Status (DMA2 only) */
       /* Parallel Port registers */
-      __u16 p_hcr;		/* Hardware Configuration Register */
-      __u16 p_ocr;		/* Operation Configuration Register */
-      __u8 p_dr;		/* Parallel Data Register */
-      __u8 p_tcr;		/* Transfer Control Register */
-      __u8 p_or;		/* Output Register */
-      __u8 p_ir;		/* Input Register */
-      __u16 p_icr;		/* Interrupt Control Register */
+      __volatile__ __u16 p_hcr;		/* Hardware Configuration Register */
+      __volatile__ __u16 p_ocr;		/* Operation Configuration Register */
+      __volatile__ __u8 p_dr;		/* Parallel Data Register */
+      __volatile__ __u8 p_tcr;		/* Transfer Control Register */
+      __volatile__ __u8 p_or;		/* Output Register */
+      __volatile__ __u8 p_ir;		/* Input Register */
+      __volatile__ __u16 p_icr;		/* Interrupt Control Register */
 };
 
 /* P_CSR.  Bits of type RW1 are cleared with writting '1'. */
@@ -337,7 +337,7 @@ static int wait_for(unsigned short set, unsigned short clr,
        * responds real good. The first while loop guesses an expire
        * time accounting for possible wraparound of jiffies.
        */
-      while (time_after_eq(jiffies, extime) extime = jiffies + 1;
+      while (time_after_eq(jiffies, extime)) extime = jiffies + 1;
       while ( (time_before(jiffies, extime))
               && (((pins & set) != set) || ((pins & clr) != 0)) ) {
             pins = get_pins(minor);
@@ -470,13 +470,14 @@ static int bpp_open(struct inode *inode, struct file *f)
  * mode as this is a reasonable place to clean up from messes made by
  * ioctls, or other mayhem.
  */
-static void bpp_release(struct inode *inode, struct file *f)
+static int bpp_release(struct inode *inode, struct file *f)
 {
       unsigned minor = MINOR(inode->i_rdev);
       instances[minor].opened = 0;
 
       if (instances[minor].mode != COMPATIBILITY)
       terminate(minor);
+      return 0;
 }
 
 static long read_nibble(unsigned minor, char *c, unsigned long cnt)
@@ -624,11 +625,10 @@ static long read_ecp(unsigned minor, char *c, unsigned long cnt)
       return cnt - remaining;
 }
 
-static long bpp_read(struct inode *inode, struct file *f,
-		 char *c, unsigned long cnt)
+static ssize_t bpp_read(struct file *f, char *c, size_t cnt, loff_t * ppos)
 {
       long rc;
-      const unsigned minor = MINOR(inode->i_rdev);
+      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -694,10 +694,12 @@ static long write_compat(unsigned minor, const char *c, unsigned long cnt)
 
       unsigned long remaining = cnt;
 
+
       while (remaining > 0) {
             unsigned char byte;
-            c += 1;
+
             get_user_ret(byte, c, -EFAULT);
+            c += 1;
 
             rc = wait_for(BPP_GP_nAck, BPP_GP_Busy, TIME_IDLE_LIMIT, minor);
             if (rc == -1) return -ETIMEDOUT;
@@ -774,11 +776,10 @@ static long write_ecp(unsigned minor, const char *c, unsigned long cnt)
  * that. Otherwise, terminate and do my writing in compat mode. This
  * is the safest course as any device can handle it.
  */
-static long bpp_write(struct inode *inode, struct file *f,
-		  const char *c, unsigned long cnt)
+static ssize_t bpp_write(struct file *f, const char *c, size_t cnt, loff_t * ppos)
 {
       long errno = 0;
-      unsigned minor = MINOR(inode->i_rdev);
+      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -861,6 +862,11 @@ static struct file_operations bpp_fops = {
 	bpp_open,
 	NULL,		/* flush */
 	bpp_release,
+  NULL,   /* fsync */
+  NULL,   /* fasync */
+  NULL,   /* check media change */
+  NULL,   /* revalidate */
+  NULL,   /* lock */
 };
 
 #if defined(__i386__)

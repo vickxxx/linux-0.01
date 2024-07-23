@@ -9,6 +9,7 @@
 #include <linux/interrupt.h>
 #include <linux/smp_lock.h>
 #include <linux/module.h>
+#include <linux/vmalloc.h>
 #ifdef CONFIG_BSD_PROCESS_ACCT
 #include <linux/acct.h>
 #endif
@@ -22,7 +23,7 @@ extern struct task_struct *child_reaper;
 
 int getrusage(struct task_struct *, int, struct rusage *);
 
-static void release(struct task_struct * p)
+void release(struct task_struct * p)
 {
 	if (p != current) {
 #ifdef __SMP__
@@ -32,9 +33,9 @@ static void release(struct task_struct * p)
 		 */
 		for (;;)  {
 			int has_cpu;
-			spin_lock(&scheduler_lock);
+			spin_lock_irq(&runqueue_lock);
 			has_cpu = p->has_cpu;
-			spin_unlock(&scheduler_lock);
+			spin_unlock_irq(&runqueue_lock);
 			if (!has_cpu)
 				break;
 			do {
@@ -43,10 +44,10 @@ static void release(struct task_struct * p)
 		}
 #endif
 		free_uid(p);
-		nr_tasks--;
 		add_free_taskslot(p->tarray_ptr);
 
 		write_lock_irq(&tasklist_lock);
+		nr_tasks--;
 		unhash_pid(p);
 		REMOVE_LINKS(p);
 		write_unlock_irq(&tasklist_lock);
@@ -145,7 +146,9 @@ static inline void forget_original_parent(struct task_struct * father)
 	read_lock(&tasklist_lock);
 	for_each_task(p) {
 		if (p->p_opptr == father) {
+			/* We dont want people slaying init */
 			p->exit_signal = SIGCHLD;
+			p->self_exec_id++;
 			p->p_opptr = child_reaper; /* init */
 			if (p->pdeath_signal) send_sig(p->pdeath_signal, p, 0);
 		}
@@ -159,17 +162,17 @@ static inline void close_files(struct files_struct * files)
 
 	j = 0;
 	for (;;) {
-		unsigned long set = files->open_fds.fds_bits[j];
+		unsigned long set;
 		i = j * __NFDBITS;
-		j++;
-		if (i >= files->max_fds)
+		if (i >= files->max_fdset || i >= files->max_fds)
 			break;
+		set = files->open_fds->fds_bits[j++];
 		while (set) {
 			if (set & 1) {
 				struct file * file = files->fd[i];
 				if (file) {
 					files->fd[i] = NULL;
-					close_fp(file, files);
+					filp_close(file, files);
 				}
 			}
 			i++;
@@ -189,12 +192,14 @@ static inline void __exit_files(struct task_struct *tsk)
 		if (atomic_dec_and_test(&files->count)) {
 			close_files(files);
 			/*
-			 * Free the fd array as appropriate ...
+ 			 * Free the fd and fdset arrays if we expanded them.
 			 */
-			if (NR_OPEN * sizeof(struct file *) == PAGE_SIZE)
-				free_page((unsigned long) files->fd);
-			else
-				kfree(files->fd);
+ 			if (files->fd != &files->fd_array[0])
+ 				free_fd_array(files->fd, files->max_fds);
+ 			if (files->max_fdset > __FD_SETSIZE) {
+ 				free_fdset(files->open_fds, files->max_fdset);
+ 				free_fdset(files->close_on_exec, files->max_fdset);
+ 			}
 			kmem_cache_free(files_cachep, files);
 		}
 	}
@@ -227,18 +232,17 @@ void exit_fs(struct task_struct *tsk)
 static inline void __exit_sighand(struct task_struct *tsk)
 {
 	struct signal_struct * sig = tsk->sig;
+	unsigned long flags;
 
+	spin_lock_irqsave(&tsk->sigmask_lock, flags);
 	if (sig) {
-		unsigned long flags;
-
-		spin_lock_irqsave(&tsk->sigmask_lock, flags);
 		tsk->sig = NULL;
-		spin_unlock_irqrestore(&tsk->sigmask_lock, flags);
 		if (atomic_dec_and_test(&sig->count))
 			kfree(sig);
 	}
 
 	flush_signals(tsk);
+	spin_unlock_irqrestore(&tsk->sigmask_lock, flags);
 }
 
 void exit_sighand(struct task_struct *tsk)
@@ -274,7 +278,7 @@ void exit_mm(struct task_struct *tsk)
  */
 static void exit_notify(void)
 {
-	struct task_struct * p;
+	struct task_struct * p, *t;
 
 	forget_original_parent(current);
 	/*
@@ -286,15 +290,39 @@ static void exit_notify(void)
 	 * and we were the only connection outside, so our pgrp
 	 * is about to become orphaned.
 	 */
-	if ((current->p_pptr->pgrp != current->pgrp) &&
-	    (current->p_pptr->session == current->session) &&
+	 
+	t = current->p_pptr;
+	
+	if ((t->pgrp != current->pgrp) &&
+	    (t->session == current->session) &&
 	    will_become_orphaned_pgrp(current->pgrp, current) &&
 	    has_stopped_jobs(current->pgrp)) {
 		kill_pg(current->pgrp,SIGHUP,1);
 		kill_pg(current->pgrp,SIGCONT,1);
 	}
 
-	/* Let father know we died */
+	/* Let father know we died 
+	 *
+	 * Thread signals are configurable, but you aren't going to use
+	 * that to send signals to arbitary processes. 
+	 * That stops right now.
+	 *
+	 * If the parent exec id doesn't match the exec id we saved
+	 * when we started then we know the parent has changed security
+	 * domain.
+	 *
+	 * If our self_exec id doesn't match our parent_exec_id then
+	 * we have changed execution domain as these two values started
+	 * the same after a fork.
+	 *	
+	 */
+	
+	if(current->exit_signal != SIGCHLD &&
+	    ( current->parent_exec_id != t->self_exec_id  ||
+	      current->self_exec_id != current->parent_exec_id) 
+	    && !capable(CAP_KILL))
+		current->exit_signal = SIGCHLD;
+
 	notify_parent(current, current->exit_signal);
 
 	/*
@@ -409,12 +437,19 @@ asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct
 	struct wait_queue wait = { current, NULL };
 	struct task_struct *p;
 
-	if (options & ~(WNOHANG|WUNTRACED|__WCLONE))
+	if (options & ~(WNOHANG|WUNTRACED|__WCLONE|__WALL))
 		return -EINVAL;
 
 	add_wait_queue(&current->wait_chldexit,&wait);
 repeat:
 	flag = 0;
+
+	/* The interruptible state must be set before looking at the
+	   children. This because we want to catch any racy exit from
+	   the children as do_exit() may run under us. The following
+	   read_lock will enforce SMP ordering at the CPU level. */
+	current->state = TASK_INTERRUPTIBLE;
+
 	read_lock(&tasklist_lock);
  	for (p = current->p_cptr ; p ; p = p->p_osptr) {
 		if (pid>0) {
@@ -427,8 +462,13 @@ repeat:
 			if (p->pgrp != -pid)
 				continue;
 		}
-		/* wait for cloned processes iff the __WCLONE flag is set */
-		if ((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
+		/* Wait for all children (clone and not) if __WALL is set;
+		 * otherwise, wait for clone children *only* if __WCLONE is
+		 * set; otherwise, wait for non-clone children *only*.  (Note:
+		 * A "clone" child here is one that reports to its parent
+		 * using a signal other than SIGCHLD.) */
+		if (((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
+		    && !(options & __WALL))
 			continue;
 		flag = 1;
 		switch (p->state) {
@@ -481,13 +521,13 @@ repeat:
 		retval = -ERESTARTSYS;
 		if (signal_pending(current))
 			goto end_wait4;
-		current->state=TASK_INTERRUPTIBLE;
 		schedule();
 		goto repeat;
 	}
 	retval = -ECHILD;
 end_wait4:
 	remove_wait_queue(&current->wait_chldexit,&wait);
+	current->state = TASK_RUNNING;
 	return retval;
 }
 

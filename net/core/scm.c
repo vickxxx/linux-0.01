@@ -27,7 +27,6 @@
 #include <asm/uaccess.h>
 
 #include <linux/inet.h>
-#include <linux/netdevice.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/rarp.h>
@@ -123,7 +122,15 @@ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *p)
 		err = -EINVAL;
 
 		/* Verify that cmsg_len is at least sizeof(struct cmsghdr) */
-		if ((unsigned long)(((char*)cmsg - (char*)msg->msg_control)
+		/* The first check was omitted in <= 2.2.5. The reasoning was
+		   that parser checks cmsg_len in any case, so that
+		   additional check would be work duplication.
+		   But if cmsg_level is not SOL_SOCKET, we do not check 
+		   for too short ancillary data object at all! Oops.
+		   OK, let's add it...
+		 */
+		if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
+		    (unsigned long)(((char*)cmsg - (char*)msg->msg_control)
 				    + cmsg->cmsg_len) > msg->msg_controllen)
 			goto error;
 
@@ -203,11 +210,15 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 {
 	struct cmsghdr *cm = (struct cmsghdr*)msg->msg_control;
 
-	int fdmax = (msg->msg_controllen - sizeof(struct cmsghdr))/sizeof(int);
+	int fdmax = 0;
 	int fdnum = scm->fp->count;
 	struct file **fp = scm->fp->fp;
 	int *cmfptr;
 	int err = 0, i;
+
+	if (msg->msg_controllen > sizeof(struct cmsghdr))
+		fdmax = ((msg->msg_controllen - sizeof(struct cmsghdr))
+			 / sizeof(int));
 
 	if (fdnum < fdmax)
 		fdmax = fdnum;
@@ -244,7 +255,7 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 			msg->msg_controllen -= cmlen;
 		}
 	}
-	if (i < fdnum)
+	if (i < fdnum || (fdnum && fdmax <= 0))
 		msg->msg_flags |= MSG_CTRUNC;
 
 	/*

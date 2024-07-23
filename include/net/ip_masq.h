@@ -11,6 +11,7 @@
 #include <linux/netdevice.h>
 #include <linux/ip.h>
 #include <linux/skbuff.h>
+#include <linux/list.h>
 #endif /* __KERNEL__ */
 
 /*
@@ -30,6 +31,32 @@
 #define MASQUERADE_EXPIRE_TCP     15*60*HZ
 #define MASQUERADE_EXPIRE_TCP_FIN  2*60*HZ
 #define MASQUERADE_EXPIRE_UDP      5*60*HZ
+
+/*
+ *	Debugging stuff
+ */
+
+extern int ip_masq_get_debug_level(void);
+
+#ifdef CONFIG_IP_MASQ_DEBUG
+#define IP_MASQ_DEBUG(level, msg...) do { \
+	if (level <= ip_masq_get_debug_level()) \
+		printk(KERN_DEBUG "IP_MASQ:" ## msg); \
+	} while (0)
+#else	/* NO DEBUGGING at ALL */
+#define IP_MASQ_DEBUG(level, msg...) do { } while (0)
+#endif
+
+#define IP_MASQ_INFO(msg...) \
+	printk(KERN_INFO "IP_MASQ:" ## msg)
+
+#define IP_MASQ_ERR(msg...) \
+	printk(KERN_ERR "IP_MASQ:" ## msg)
+
+#define IP_MASQ_WARNING(msg...) \
+	printk(KERN_WARNING "IP_MASQ:" ## msg)
+
+
 /* 
  * ICMP can no longer be modified on the fly using an ioctl - this
  * define is the only way to change the timeouts 
@@ -57,6 +84,7 @@
 
 #define IP_MASQ_F_MPORT		      0x1000 	/* own mport specified */
 #define IP_MASQ_F_USER		      0x2000	/* from uspace */
+#define IP_MASQ_F_SIMPLE_HASH	      0x8000	/* prevent s+d and m+d hashing */
 
 /*
  *	Delta seq. info structure
@@ -73,7 +101,8 @@ struct ip_masq_seq {
  *	MASQ structure allocated for each masqueraded association
  */
 struct ip_masq {
-        struct ip_masq  *m_link, *s_link; /* hashed link ptrs */
+	struct list_head m_list, s_list, d_list;
+			/* hashed d-linked list heads */
 	atomic_t refcnt;		/* reference count */
 	struct timer_list timer;	/* Expiration timer */
 	__u16 		protocol;	/* Which protocol are we talking? */
@@ -126,6 +155,7 @@ extern int ip_masq_init(void);
  */
 extern int ip_fw_masquerade(struct sk_buff **, __u32 maddr);
 extern int ip_fw_masq_icmp(struct sk_buff **, __u32 maddr);
+extern int ip_fw_unmasq_icmp(struct sk_buff *);
 extern int ip_fw_demasquerade(struct sk_buff **);
 
 /*
@@ -144,8 +174,9 @@ struct ip_masq_hook {
 	int (*info)(char *, char **, off_t, int, int);
 };
 
-extern struct ip_masq *ip_masq_m_tab[IP_MASQ_TAB_SIZE];
-extern struct ip_masq *ip_masq_s_tab[IP_MASQ_TAB_SIZE];
+extern struct list_head ip_masq_m_table[IP_MASQ_TAB_SIZE];
+extern struct list_head ip_masq_s_table[IP_MASQ_TAB_SIZE];
+extern struct list_head ip_masq_d_table[IP_MASQ_TAB_SIZE];
 extern const char * ip_masq_state_name(int state);
 extern struct ip_masq_hook *ip_masq_user_hook;
 extern u32 ip_masq_select_addr(struct device *dev, u32 dst, int scope);
@@ -159,7 +190,7 @@ struct ip_masq_app
 {
         struct ip_masq_app *next;
 	char *name;		/* name of application proxy */
-        unsigned type;          /* type = proto<<16 | port (host byte order)*/
+        unsigned type;          /* type = flags | proto<<16 | port (host byte order)*/
         int n_attach;
         int (*masq_init_1)      /* ip_masq initializer */
                 (struct ip_masq_app *, struct ip_masq *);
@@ -177,20 +208,60 @@ struct ip_masq_app
 extern int ip_masq_app_init(void);
 
 /*
- * 	ip_masq_app object registration functions (port: host byte order)
+ * 	ip_masq_app object registration functions: register_ip_masq_app_type()
+ * 	can be used if ip_masq_app has been previously initialized
+ * 	(port: host byte order)
  */
-extern int register_ip_masq_app(struct ip_masq_app *mapp, unsigned short proto, __u16 port);
+extern int register_ip_masq_app_type(struct ip_masq_app *mapp);
+extern int register_ip_masq_app(struct ip_masq_app *mapp, unsigned proto, __u16 port);
 extern int unregister_ip_masq_app(struct ip_masq_app *mapp);
+
+/*
+ * 	ip_masq_app flags[8bits] (ORed with protocol[8bits] ) 
+ */
+#define IP_MASQ_APP_OUTBOUND	0x01000000	/* dst port matched (in-out) */
+#define IP_MASQ_APP_INBOUND	0x02000000	/* src port matched (in-out) */
+#define IP_MASQ_APP_FWMARK	0x80000000	/* hook by (fwmark & 0xffff) */
+#define IP_MASQ_APP_FLAGS_MASK	0xff000000	/* mask for app flags */
+#define IP_MASQ_APP_PROTO_MASK	0x00ff0000	/* mask for proto value */
+#define IP_MASQ_APP_PORT_MASK	0x0000ffff	/* mask for port value */
+#define IP_MASQ_APP_FWMARK_MASK	0x00ffffff	/* mask for fwmark value (24bits only) */
+
+#define IP_MASQ_APP_TYPE_PP(flags, proto, port) ((flags)|((proto)<<16)|(port))
+#define IP_MASQ_APP_TYPE_FWMARK(flags, fwmark) ((flags)|(fwmark&0x00ffffff))
+#define IP_MASQ_APP_TYPE2PORT(type)        ( (type) & 0xffff )
+#define IP_MASQ_APP_TYPE2PROTO(type)       ( ((type)>>16) & 0x00ff )
+#define IP_MASQ_APP_TYPE2FWMARK(type)       ( (type) & 0x00ffffff )
+#define IP_MASQ_APP_TYPE2FLAGS(type)       ( (type) & 0xff000000 )
+
+/* Init functions for later register_ip_masq_app_type() */
+static __inline__ int ip_masq_app_init_proto_port(struct ip_masq_app* mapp, unsigned flags, unsigned proto, unsigned port) {
+        mapp->type = IP_MASQ_APP_TYPE_PP(flags, proto, port);
+	return 0;
+}
+static __inline__ int ip_masq_app_init_fwmark(struct ip_masq_app* mapp, unsigned flags, __u32 fwmark) {
+	if (fwmark&~(IP_MASQ_APP_FWMARK_MASK)) {
+		IP_MASQ_ERR("ip_masq_app_init_fwmark(): fwmark must be <= %d, sorry (shoot Juanjo)\n", IP_MASQ_APP_FWMARK_MASK);
+		return -EINVAL;
+	}
+        mapp->type = IP_MASQ_APP_TYPE_FWMARK(flags, fwmark);
+	return 0;
+}
 
 /*
  *	get ip_masq_app obj by proto,port(net_byte_order)
  */
-extern struct ip_masq_app * ip_masq_app_get(unsigned short proto, __u16 port);
+extern struct ip_masq_app * ip_masq_app_get_type(unsigned type);
+static __inline__ struct ip_masq_app * ip_masq_app_get(unsigned short proto, __u16 port) {
+        unsigned type = IP_MASQ_APP_TYPE_PP(0, proto, port);
+	return ip_masq_app_get_type(type);
+}
 
 /*
  *	ip_masq TO ip_masq_app (un)binding functions.
  */
 extern struct ip_masq_app * ip_masq_bind_app(struct ip_masq *ms);
+extern struct ip_masq_app * ip_masq_bind_app_fwmark(struct ip_masq *ms, __u32);
 extern int ip_masq_unbind_app(struct ip_masq *ms);
 
 /*
@@ -248,31 +319,6 @@ extern rwlock_t __ip_masq_lock;
 /*
  *
  */
-
-/*
- *	Debugging stuff
- */
-
-extern int ip_masq_get_debug_level(void);
-
-#ifdef CONFIG_IP_MASQ_DEBUG
-#define IP_MASQ_DEBUG(level, msg...) do { \
-	if (level <= ip_masq_get_debug_level()) \
-		printk(KERN_DEBUG "IP_MASQ:" ## msg); \
-	} while (0)
-#else	/* NO DEBUGGING at ALL */
-#define IP_MASQ_DEBUG(level, msg...) do { } while (0)
-#endif
-
-#define IP_MASQ_INFO(msg...) \
-	printk(KERN_INFO "IP_MASQ:" ## msg)
-
-#define IP_MASQ_ERR(msg...) \
-	printk(KERN_ERR "IP_MASQ:" ## msg)
-
-#define IP_MASQ_WARNING(msg...) \
-	printk(KERN_WARNING "IP_MASQ:" ## msg)
-
 
 /*
  *	/proc/net entry

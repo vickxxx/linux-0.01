@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.33 1998/09/21 05:06:03 jj Exp $
+/* $Id: ebus.c,v 1.36.2.6 2001/01/26 22:26:07 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -35,9 +35,6 @@ extern void prom_ebus_intmap_init(struct linux_ebus *);
 #ifdef CONFIG_SUN_OPENPROMIO
 extern int openprom_init(void);
 #endif
-#ifdef CONFIG_SPARCAUDIO
-extern int sparcaudio_init(void);
-#endif
 #ifdef CONFIG_SUN_AUXIO
 extern void auxio_probe(void);
 #endif
@@ -46,6 +43,12 @@ extern int flash_init(void);
 #endif
 #ifdef CONFIG_ENVCTRL
 extern int envctrl_init(void);
+#endif
+#ifdef CONFIG_DISPLAY7SEG
+extern int d7s_init(void);
+#endif
+#ifdef CONFIG_WATCHDOG_CP1XXX
+extern int wd_init(void);
 #endif
 
 static inline unsigned long ebus_alloc(size_t size)
@@ -59,15 +62,15 @@ static inline unsigned long ebus_alloc(size_t size)
 	return mem;
 }
 
-__initfunc(void ebus_intmap_match(struct linux_ebus *ebus,
-				  struct linux_prom_registers *reg,
-				  int *interrupt))
+__initfunc(int ebus_intmap_match(struct linux_ebus *ebus,
+				 struct linux_prom_registers *reg,
+				 int *interrupt))
 {
 	unsigned int hi, lo, irq;
 	int i;
 
 	if (!ebus->num_ebus_intmap)
-		return;
+		return 0;
 
 	hi = reg->which_io & ebus->ebus_intmask.phys_hi;
 	lo = reg->phys_addr & ebus->ebus_intmask.phys_lo;
@@ -77,13 +80,10 @@ __initfunc(void ebus_intmap_match(struct linux_ebus *ebus,
 		    (ebus->ebus_intmap[i].phys_lo == lo) &&
 		    (ebus->ebus_intmap[i].interrupt == irq)) {
 			*interrupt = ebus->ebus_intmap[i].cinterrupt;
-			return;
+			return 0;
 		}
 	}
-
-	prom_printf("ebus: IRQ [%08x.%08x.%08x] not found in interrupt-map\n",
-		    reg->which_io, reg->phys_addr, *interrupt);
-	prom_halt();
+	return -1;
 }
 
 __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
@@ -103,9 +103,13 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 
 	for (i = 0; i < dev->num_addrs; i++) {
 		if (regs[i] >= dev->parent->num_addrs) {
+#if 1
+			continue;
+#else
 			prom_printf("UGH: property for %s was %d, need < %d\n",
 				    dev->prom_name, len, dev->parent->num_addrs);
 			panic(__FUNCTION__);
+#endif
 		}
 		dev->base_address[i] = dev->parent->base_address[regs[i]];
 	}
@@ -131,9 +135,16 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
 		for (i = 0; i < dev->num_irqs; i++) {
-			ebus_intmap_match(dev->bus, preg, &irqs[i]);
-			dev->irqs[i] = psycho_irq_build(dev->bus->parent,
-							dev->bus->self, irqs[i]);
+			if (ebus_intmap_match(dev->bus, preg, &irqs[i]) != -1) {
+				dev->irqs[i] = psycho_irq_build(dev->bus->parent,
+								dev->bus->self,
+								irqs[i]);
+			} else {
+				/* If we get a bogus interrupt property, just
+				 * record the raw value instead of punting.
+				 */
+				dev->irqs[i] = irqs[i];
+			}
 		}
 	}
 
@@ -185,9 +196,16 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
 		for (i = 0; i < dev->num_irqs; i++) {
-			ebus_intmap_match(dev->bus, &regs[0], &irqs[i]);
-			dev->irqs[i] = psycho_irq_build(dev->bus->parent,
-							dev->bus->self, irqs[i]);
+			if (ebus_intmap_match(dev->bus, &regs[0], &irqs[i]) != -1) {
+				dev->irqs[i] = psycho_irq_build(dev->bus->parent,
+								dev->bus->self,
+								irqs[i]);
+			} else {
+				/* If we get a bogus interrupt property, just
+				 * record the raw value instead of punting.
+				 */
+				dev->irqs[i] = irqs[i];
+			}
 		}
 	}
 
@@ -227,6 +245,7 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 }
 
 extern void clock_probe(void);
+extern void power_init(void);
 
 __initfunc(void ebus_init(void))
 {
@@ -263,6 +282,31 @@ __initfunc(void ebus_init(void))
 	ebus->next = 0;
 
 	while (ebusnd) {
+		/* SUNW,pci-qfe uses four empty ebuses on it.
+		   I think we should not consider them here,
+		   as they have half of the properties this
+		   code expects and once we do PCI hot-plug,
+		   we'd have to tweak with the ebus_chain
+		   in the runtime after initialization. -jj */
+		if (!prom_getchild (ebusnd)) {
+			pdev = pci_find_device(PCI_VENDOR_ID_SUN, 
+					       PCI_DEVICE_ID_SUN_EBUS, pdev);
+			if (!pdev) {
+				if (ebus == ebus_chain) {
+					ebus_chain = NULL;
+					printk("ebus: No EBus's found.\n");
+#ifdef PROM_DEBUG
+					dprintf("ebus: No EBus's found.\n");
+#endif
+					return;
+				}
+				break;
+			}
+			
+			cookie = pdev->sysdata;
+			ebusnd = cookie->prom_node;
+			continue;
+		}
 		printk("ebus%d:", num_ebus);
 #ifdef PROM_DEBUG
 		dprintf("ebus%d:", num_ebus);
@@ -279,6 +323,12 @@ __initfunc(void ebus_init(void))
 		pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
 		pci_command |= PCI_COMMAND_MASTER;
 		pci_write_config_word(pdev, PCI_COMMAND, pci_command);
+
+		/* Set reasonable cache line size and latency timer values. */
+		pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 64);
+
+		/* NOTE: Cache line size is in 32-bit word units. */
+		pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE, 0x10);
 
 		len = prom_getproperty(ebusnd, "reg", (void *)regs,
 				       sizeof(regs));
@@ -368,9 +418,6 @@ __initfunc(void ebus_init(void))
 #ifdef CONFIG_SUN_OPENPROMIO
 	openprom_init();
 #endif
-#ifdef CONFIG_SPARCAUDIO
-	sparcaudio_init();
-#endif
 #ifdef CONFIG_SUN_BPP
 	bpp_init();
 #endif
@@ -383,5 +430,9 @@ __initfunc(void ebus_init(void))
 #ifdef CONFIG_OBP_FLASH
 	flash_init();
 #endif
+#ifdef CONFIG_DISPLAY7SEG
+	d7s_init();
+#endif
 	clock_probe();
+	power_init();
 }

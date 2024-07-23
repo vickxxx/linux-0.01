@@ -36,10 +36,10 @@ nfsd_proc_read(char *buffer, char **start, off_t offset, int count,
 			nfsdstats.rchits,
 			nfsdstats.rcmisses,
 			nfsdstats.rcnocache,
-			nfsdstats.fh_cached,
-			nfsdstats.fh_valid,
-			nfsdstats.fh_fixup,
 			nfsdstats.fh_lookup,
+			nfsdstats.fh_anon,
+			nfsdstats.fh_nocache_nondir,
+			nfsdstats.fh_nocache_dir,
 			nfsdstats.fh_stale);
 
 	/* Assume we haven't hit EOF yet. Will be set by svc_proc_read. */

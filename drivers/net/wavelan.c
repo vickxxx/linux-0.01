@@ -290,24 +290,26 @@ psa_write(u_long	ioaddr,
   wv_16_on(ioaddr, hacr);
 } /* psa_write */
 
-#ifdef PSA_CRC
+#ifdef SET_PSA_CRC
 /*------------------------------------------------------------------*/
 /*
- * Calculate the PSA CRC (not tested yet)
- * As the WaveLAN drivers don't use the CRC, I won't use it either.
- * Thanks to Nico Valster <NVALSTER@wcnd.nl.lucent.com> for the code
+ * Calculate the PSA CRC
+ * Thanks to Valster, Nico <NVALSTER@wcnd.nl.lucent.com> for the code
  * NOTE: By specifying a length including the CRC position the
- * returned value should be zero. (i.e. a correct checksum in the PSA).
+ * returned value should be zero. (i.e. a correct checksum in the PSA)
+ *
+ * The Windows drivers don't use the CRC, but the AP and the PtP tool
+ * depend on it.
  */
-static u_short
-psa_crc(u_short *	psa,	/* The PSA */
+static inline u_short
+psa_crc(u_char *	psa,	/* The PSA */
 	int		size)	/* Number of short for CRC */
 {
   int		byte_cnt;	/* Loop on the PSA */
   u_short	crc_bytes = 0;	/* Data in the PSA */
   int		bit_cnt;	/* Loop on the bits of the short */
 
-  for(byte_cnt = 0; byte_cnt <= size; byte_cnt++ )
+  for(byte_cnt = 0; byte_cnt < size; byte_cnt++ )
     {
       crc_bytes ^= psa[byte_cnt];	/* Its an xor */
 
@@ -322,7 +324,49 @@ psa_crc(u_short *	psa,	/* The PSA */
 
   return crc_bytes;
 } /* psa_crc */
-#endif	/* PSA_CRC */
+#endif	/* SET_PSA_CRC */
+
+/*------------------------------------------------------------------*/
+/*
+ * update the checksum field in the Wavelan's PSA
+ */
+static void
+update_psa_checksum(device *	dev,
+		    u_long	ioaddr,
+		    u_short	hacr)
+{
+#ifdef SET_PSA_CRC
+  psa_t		psa;
+  u_short	crc;
+
+  /* read the parameter storage area */
+  psa_read(ioaddr, hacr, 0, (unsigned char *) &psa, sizeof(psa));
+
+  /* update the checksum */
+  crc = psa_crc((unsigned char *) &psa,
+		sizeof(psa) - sizeof(psa.psa_crc[0]) - sizeof(psa.psa_crc[1])
+		- sizeof(psa.psa_crc_status));
+
+  psa.psa_crc[0] = crc & 0xFF;
+  psa.psa_crc[1] = (crc & 0xFF00) >> 8;
+
+  /* Write it ! */
+  psa_write(ioaddr, hacr, (char *)&psa.psa_crc - (char *)&psa,
+	    (unsigned char *)&psa.psa_crc, 2);
+
+#ifdef DEBUG_IOCTL_INFO
+  printk (KERN_DEBUG "%s: update_psa_checksum(): crc = 0x%02x%02x\n",
+          dev->name, psa.psa_crc[0], psa.psa_crc[1]);
+
+  /* Check again (luxury !) */
+  crc = psa_crc ((unsigned char *) &psa,
+		 sizeof(psa) - sizeof(psa.psa_crc_status));
+
+  if(crc != 0)
+    printk(KERN_WARNING "%s: update_psa_checksum(): CRC does not agree with PSA data (even after recalculating)\n", dev->name);
+#endif /* DEBUG_IOCTL_INFO */
+#endif	/* SET_PSA_CRC */
+} /* update_psa_checksum */
 
 /*------------------------------------------------------------------*/
 /*
@@ -706,23 +750,23 @@ wv_config_complete(device *	dev,
       unsigned short	ias_addr;
 
       /* Check mc_config command */
-      if(status & AC_SFLD_OK != 0)
-	printk(KERN_INFO "wv_config_complete(): set_multicast_address failed; status = 0x%x\n",
-	       dev->name, str, status);
+      if((status & AC_SFLD_OK) != AC_SFLD_OK)
+	printk(KERN_INFO "%s: wv_config_complete(): set_multicast_address failed; status = 0x%x\n",
+	       dev->name, status);
 
       /* check ia-config command */
       ias_addr = mcs_addr - sizeof(ac_ias_t);
       obram_read(ioaddr, acoff(ias_addr, ac_status), (unsigned char *)&status, sizeof(status));
-      if(status & AC_SFLD_OK != 0)
-	printk(KERN_INFO "wv_config_complete(): set_MAC_address; status = 0x%x\n",
-	       dev->name, str, status);
+      if((status & AC_SFLD_OK) != AC_SFLD_OK)
+	printk(KERN_INFO "%s: wv_config_complete(): set_MAC_address failed; status = 0x%x\n",
+	       dev->name, status);
 
       /* Check config command. */
       cfg_addr = ias_addr - sizeof(ac_cfg_t);
       obram_read(ioaddr, acoff(cfg_addr, ac_status), (unsigned char *)&status, sizeof(status));
-      if(status & AC_SFLD_OK != 0)
-	printk(KERN_INFO "wv_config_complete(): configure; status = 0x%x\n",
-	       dev->name, str, status);
+      if((status & AC_SFLD_OK) != AC_SFLD_OK)
+	printk(KERN_INFO "%s: wv_config_complete(): configure failed; status = 0x%x\n",
+	       dev->name, status);
 #endif	/* DEBUG_CONFIG_ERROR */
 
       ret = 1;		/* Ready to be scrapped */
@@ -758,14 +802,14 @@ wv_complete(device *	dev,
       /* Read the first transmit buffer */
       obram_read(ioaddr, acoff(lp->tx_first_in_use, ac_status), (unsigned char *)&tx_status, sizeof(tx_status));
 
+      /* If not completed -> exit */
+      if((tx_status & AC_SFLD_C) == 0)
+	break;
+
       /* Hack for reconfiguration */
       if(tx_status == 0xFFFF)
 	if(!wv_config_complete(dev, ioaddr, lp))
 	  break;	/* Not completed */
-
-      /* If not completed -> exit */
-      if((tx_status & AC_SFLD_C) == 0)
-	break;
 
       /* We now remove this buffer */
       nreaped++;
@@ -799,7 +843,7 @@ if (lp->tx_n_in_use > 0)
 	  lp->stats.tx_packets++;
 	  ncollisions = tx_status & AC_SFLD_MAXCOL;
 	  lp->stats.collisions += ncollisions;
-#ifdef DEBUG_INTERRUPT_INFO
+#ifdef DEBUG_TX_INFO
 	  if(ncollisions > 0)
 	    printk(KERN_DEBUG "%s: wv_complete(): tx completed after %d collisions.\n",
 		   dev->name, ncollisions);
@@ -808,53 +852,49 @@ if (lp->tx_n_in_use > 0)
       else
 	{
 	  lp->stats.tx_errors++;
-#ifndef IGNORE_NORMAL_XMIT_ERRS
 	  if(tx_status & AC_SFLD_S10)
 	    {
 	      lp->stats.tx_carrier_errors++;
-#ifdef DEBUG_INTERRUPT_ERROR
-	      printk(KERN_INFO "%s: wv_complete(): tx error: no CS.\n",
+#ifdef DEBUG_TX_FAIL
+	      printk(KERN_DEBUG "%s: wv_complete(): tx error: no CS.\n",
 		     dev->name);
 #endif
 	    }
-#endif	/* IGNORE_NORMAL_XMIT_ERRS */
 	  if(tx_status & AC_SFLD_S9)
 	    {
 	      lp->stats.tx_carrier_errors++;
-#ifdef DEBUG_INTERRUPT_ERROR
-	      printk(KERN_INFO "%s: wv_complete(): tx error: lost CTS.\n",
+#ifdef DEBUG_TX_FAIL
+	      printk(KERN_DEBUG "%s: wv_complete(): tx error: lost CTS.\n",
 		     dev->name);
 #endif
 	    }
 	  if(tx_status & AC_SFLD_S8)
 	    {
 	      lp->stats.tx_fifo_errors++;
-#ifdef DEBUG_INTERRUPT_ERROR
-	      printk(KERN_INFO "%s: wv_complete(): tx error: slow DMA.\n",
+#ifdef DEBUG_TX_FAIL
+	      printk(KERN_DEBUG "%s: wv_complete(): tx error: slow DMA.\n",
 		     dev->name);
 #endif
 	    }
-#ifndef IGNORE_NORMAL_XMIT_ERRS
 	  if(tx_status & AC_SFLD_S6)
 	    {
 	      lp->stats.tx_heartbeat_errors++;
-#ifdef DEBUG_INTERRUPT_ERROR
-	      printk(KERN_INFO "%s: wv_complete(): tx error: heart beat.\n",
+#ifdef DEBUG_TX_FAIL
+	      printk(KERN_DEBUG "%s: wv_complete(): tx error: heart beat.\n",
 		     dev->name);
 #endif
 	    }
 	  if(tx_status & AC_SFLD_S5)
 	    {
 	      lp->stats.tx_aborted_errors++;
-#ifdef DEBUG_INTERRUPT_ERROR
-	      printk(KERN_INFO "%s: wv_complete(): tx error: too many collisions.\n",
+#ifdef DEBUG_TX_FAIL
+	      printk(KERN_DEBUG "%s: wv_complete(): tx error: too many collisions.\n",
 		     dev->name);
 #endif
 	    }
-#endif	/* IGNORE_NORMAL_XMIT_ERRS */
 	}
 
-#ifdef DEBUG_INTERRUPT_INFO
+#ifdef DEBUG_TX_INFO
       printk(KERN_DEBUG "%s: wv_complete(): tx completed, tx_status 0x%04x\n",
 	     dev->name, tx_status);
 #endif
@@ -1281,21 +1321,21 @@ wv_packet_info(u_char *		p,		/* Packet to dump */
 	       char *		msg1,		/* Name of the device */
 	       char *		msg2)		/* Name of the function */
 {
-#ifndef DEBUG_PACKET_DUMP
+  int		i;
+  int		maxi;
+
   printk(KERN_DEBUG "%s: %s(): dest %02X:%02X:%02X:%02X:%02X:%02X, length %d\n",
 	 msg1, msg2, p[0], p[1], p[2], p[3], p[4], p[5], length);
   printk(KERN_DEBUG "%s: %s(): src %02X:%02X:%02X:%02X:%02X:%02X, type 0x%02X%02X\n",
 	 msg1, msg2, p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]);
 
-#else	/* DEBUG_PACKET_DUMP */
-  int		i;
-  int		maxi;
+#ifdef DEBUG_PACKET_DUMP
 
-  printk(KERN_DEBUG "%s: %s(): len=%d, data=\"", msg1, msg2, length);
+  printk(KERN_DEBUG "data=\"");
 
   if((maxi = length) > DEBUG_PACKET_DUMP)
     maxi = DEBUG_PACKET_DUMP;
-  for(i = 0; i < maxi; i++)
+  for(i = 14; i < maxi; i++)
     if(p[i] >= ' ' && p[i] <= '~')
       printk(" %c", p[i]);
     else
@@ -1522,7 +1562,9 @@ wavelan_set_multicast_list(device *	dev)
 /*------------------------------------------------------------------*/
 /*
  * This function doesn't exist.
+ * (Note : it was a nice way to test the reconfigure stuff...)
  */
+#ifdef SET_MAC_ADDRESS
 static int
 wavelan_set_mac_address(device *	dev,
 			void *		addr)
@@ -1537,6 +1579,7 @@ wavelan_set_mac_address(device *	dev,
 
   return 0;
 }
+#endif	/* SET_MAC_ADDRESS */
 
 #ifdef WIRELESS_EXT	/* if wireless extensions exist in the kernel */
 
@@ -1573,11 +1616,8 @@ wv_set_frequency(u_long		ioaddr,	/* I/O port of the card */
   if((frequency->e == 0) &&
      (frequency->m >= 0) && (frequency->m < BAND_NUM))
     {
-      /* frequency in units of 250 kHz (as read in the offset register) */
-      short	bands[] = { 0x30, 0x58, 0x64, 0x7A, 0x80, 0xA8, 0xD0, 0xF0, 0xF8, 0x150 };
-
       /* Get frequency offset. */
-      freq = bands[frequency->m] >> 1;
+      freq = channel_bands[frequency->m] >> 1;
     }
 
   /* Verify that the frequency is allowed. */
@@ -1748,6 +1788,7 @@ wv_frequency_list(u_long	ioaddr,	/* I/O port of the card */
   u_short	table[10];	/* Authorized frequency table */
   long		freq = 0L;	/* offset to 2.4 GHz in .5 MHz + 12 MHz */
   int		i;		/* index in the table */
+  int		c = 0;		/* Channel number */
 
   /* Read the frequency table. */
   fee_read(ioaddr, 0x71 /* frequency table */, table, 10);
@@ -1758,6 +1799,12 @@ wv_frequency_list(u_long	ioaddr,	/* I/O port of the card */
     /* Look in the table if the frequency is allowed */
     if(table[9 - (freq / 16)] & (1 << (freq % 16)))
       {
+	/* Compute approximate channel number */
+	while((((channel_bands[c] >> 1) - 24) < freq) &&
+	      (c < NELS(channel_bands)))
+	  c++;
+	list[i].i = c;	/* Set the list index */
+
 	/* put in the list */
 	list[i].m = (((freq + 24) * 5) + 24000L) * 10000;
 	list[i++].e = 1;
@@ -1863,18 +1910,18 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIWNWID:
       /* Set NWID in WaveLAN. */
-      if(wrq->u.nwid.on)
+      if(!wrq->u.nwid.disabled)
 	{
-	  /* Set NWID in psa. */
-	  psa.psa_nwid[0] = (wrq->u.nwid.nwid & 0xFF00) >> 8;
-	  psa.psa_nwid[1] = wrq->u.nwid.nwid & 0xFF;
+	  /* Set NWID in psa */
+	  psa.psa_nwid[0] = (wrq->u.nwid.value & 0xFF00) >> 8;
+	  psa.psa_nwid[1] = wrq->u.nwid.value & 0xFF;
 	  psa.psa_nwid_select = 0x01;
 	  psa_write(ioaddr, lp->hacr, (char *)psa.psa_nwid - (char *)&psa,
 		    (unsigned char *)psa.psa_nwid, 3);
 
 	  /* Set NWID in mmc. */
-	  m.w.mmw_netw_id_l = wrq->u.nwid.nwid & 0xFF;
-	  m.w.mmw_netw_id_h = (wrq->u.nwid.nwid & 0xFF00) >> 8;
+	  m.w.mmw_netw_id_l = psa.psa_nwid[1];
+	  m.w.mmw_netw_id_h = psa.psa_nwid[0];
 	  mmc_write(ioaddr, (char *)&m.w.mmw_netw_id_l - (char *)&m,
 		    (unsigned char *)&m.w.mmw_netw_id_l, 2);
 	  mmc_out(ioaddr, mmwoff(0, mmw_loopt_sel), 0x00);
@@ -1890,14 +1937,17 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  /* Disable NWID in the mmc (no filtering). */
 	  mmc_out(ioaddr, mmwoff(0, mmw_loopt_sel), MMW_LOOPT_SEL_DIS_NWID);
 	}
+      /* update the Wavelan checksum */
+      update_psa_checksum(dev, ioaddr, lp->hacr);
       break;
 
     case SIOCGIWNWID:
       /* Read the NWID. */
       psa_read(ioaddr, lp->hacr, (char *)psa.psa_nwid - (char *)&psa,
 	       (unsigned char *)psa.psa_nwid, 3);
-      wrq->u.nwid.nwid = (psa.psa_nwid[0] << 8) + psa.psa_nwid[1];
-      wrq->u.nwid.on = psa.psa_nwid_select;
+      wrq->u.nwid.value = (psa.psa_nwid[0] << 8) + psa.psa_nwid[1];
+      wrq->u.nwid.disabled = !(psa.psa_nwid_select);
+      wrq->u.nwid.fixed = 1;	/* Superfluous */
       break;
 
     case SIOCSIWFREQ:
@@ -1924,14 +1974,12 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	}
       else
 	{
-	  int	bands[] = { 915e6, 2.425e8, 2.46e8, 2.484e8, 2.4305e8 };
-
 	  psa_read(ioaddr, lp->hacr, (char *)&psa.psa_subband - (char *)&psa,
 		   (unsigned char *)&psa.psa_subband, 1);
 
 	  if(psa.psa_subband <= 4)
 	    {
-	      wrq->u.freq.m = bands[psa.psa_subband];
+	      wrq->u.freq.m = fixed_bands[psa.psa_subband];
 	      wrq->u.freq.e = (psa.psa_subband != 0);
 	    }
 	  else
@@ -1941,11 +1989,13 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIWSENS:
       /* Set the level threshold. */
-      if(!suser())
-	return -EPERM;
-      psa.psa_thr_pre_set = wrq->u.sensitivity & 0x3F;
+      /* We should complain loudly if wrq->u.sens.fixed = 0, because we
+       * can't set auto mode... */
+      psa.psa_thr_pre_set = wrq->u.sens.value & 0x3F;
       psa_write(ioaddr, lp->hacr, (char *)&psa.psa_thr_pre_set - (char *)&psa,
 	       (unsigned char *) &psa.psa_thr_pre_set, 1);
+      /* update the Wavelan checksum */
+      update_psa_checksum(dev, ioaddr, lp->hacr);
       mmc_out(ioaddr, mmwoff(0, mmw_thr_pre_set), psa.psa_thr_pre_set);
       break;
 
@@ -1953,84 +2003,100 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Read the level threshold. */
       psa_read(ioaddr, lp->hacr, (char *)&psa.psa_thr_pre_set - (char *)&psa,
 	       (unsigned char *) &psa.psa_thr_pre_set, 1);
-      wrq->u.sensitivity = psa.psa_thr_pre_set & 0x3F;
+      wrq->u.sens.value = psa.psa_thr_pre_set & 0x3F;
+      wrq->u.sens.fixed = 1;
       break;
 
-     case SIOCSIWENCODE:
-       /* Set encryption key. */
-       if(!mmc_encr(ioaddr))
-	 {
-	   ret = -EOPNOTSUPP;
-	   break;
-	 }
+    case SIOCSIWENCODE:
+      /* Set encryption key */
+      if(!mmc_encr(ioaddr))
+	{
+	  ret = -EOPNOTSUPP;
+	  break;
+	}
 
-       if(wrq->u.encoding.method)
-	 {	/* Enable encryption. */
-	   int		i;
-	   long long	key = wrq->u.encoding.code;
+      /* Basic checking... */
+      if(wrq->u.encoding.pointer != (caddr_t) 0)
+	{
+	  /* Check the size of the key */
+	  if(wrq->u.encoding.length != 8)
+	    {
+	      ret = -EINVAL;
+	      break;
+	    }
 
-	   for(i = 7; i >= 0; i--)
-	     {
-	       psa.psa_encryption_key[i] = key & 0xFF;
-	       key >>= 8;
-	     }
-           psa.psa_encryption_select = 1;
-	   psa_write(ioaddr, lp->hacr,
-		     (char *) &psa.psa_encryption_select - (char *) &psa,
-		     (unsigned char *) &psa.psa_encryption_select, 8+1);
+	  /* Copy the key in the driver */
+	  if(copy_from_user(psa.psa_encryption_key, wrq->u.encoding.pointer,
+			    wrq->u.encoding.length))
+	    {
+	      ret = -EFAULT;
+	      break;
+	    }
 
-           mmc_out(ioaddr, mmwoff(0, mmw_encr_enable),
-		   MMW_ENCR_ENABLE_EN | MMW_ENCR_ENABLE_MODE);
-           mmc_write(ioaddr, mmwoff(0, mmw_encr_key),
-		     (unsigned char *) &psa.psa_encryption_key, 8);
-	 }
-       else
-	 {	/* Disable encryption. */
-	   psa.psa_encryption_select = 0;
-	   psa_write(ioaddr, lp->hacr,
-		     (char *) &psa.psa_encryption_select - (char *) &psa,
-		     (unsigned char *) &psa.psa_encryption_select, 1);
-
-	   mmc_out(ioaddr, mmwoff(0, mmw_encr_enable), 0);
-	 }
-       break;
-
-     case SIOCGIWENCODE:
-       /* Read the encryption key. */
-       if(!mmc_encr(ioaddr))
-	 {
-	   ret = -EOPNOTSUPP;
-	   break;
-	 }
-
-       /* Only super-user can see encryption key. */
-       if(!suser())
-	 {
-	   ret = -EPERM;
-	   break;
-	 }
-       else
-	 {
-	   int		i;
-	   long long	key = 0;
-
-	   psa_read(ioaddr, lp->hacr,
+	  psa.psa_encryption_select = 1;
+	  psa_write(ioaddr, lp->hacr,
 		    (char *) &psa.psa_encryption_select - (char *) &psa,
-		    (unsigned char *) &psa.psa_encryption_select, 1+8);
-	   for(i = 0; i < 8; i++)
-	     {
-	       key <<= 8;
-	       key += psa.psa_encryption_key[i];
-	     }
-	   wrq->u.encoding.code = key;
+		    (unsigned char *) &psa.psa_encryption_select, 8+1);
 
-	   /* encryption is enabled */
-	   if(psa.psa_encryption_select)
-	     wrq->u.encoding.method = mmc_encr(ioaddr);
-	   else
-	     wrq->u.encoding.method = 0;
-	 }
-       break;
+	  mmc_out(ioaddr, mmwoff(0, mmw_encr_enable),
+		  MMW_ENCR_ENABLE_EN | MMW_ENCR_ENABLE_MODE);
+	  mmc_write(ioaddr, mmwoff(0, mmw_encr_key),
+		    (unsigned char *) &psa.psa_encryption_key, 8);
+	}
+
+      if(wrq->u.encoding.flags & IW_ENCODE_DISABLED)
+	{	/* disable encryption */
+	  psa.psa_encryption_select = 0;
+	  psa_write(ioaddr, lp->hacr,
+		    (char *) &psa.psa_encryption_select - (char *) &psa,
+		    (unsigned char *) &psa.psa_encryption_select, 1);
+
+	  mmc_out(ioaddr, mmwoff(0, mmw_encr_enable), 0);
+	}
+      /* update the Wavelan checksum */
+      update_psa_checksum(dev, ioaddr, lp->hacr);
+      break;
+
+    case SIOCGIWENCODE:
+      /* Read the encryption key */
+      if(!mmc_encr(ioaddr))
+	{
+	  ret = -EOPNOTSUPP;
+	  break;
+	}
+
+      /* only super-user can see encryption key */
+      if(!suser())
+	{
+	  ret = -EPERM;
+	  break;
+	}
+
+      /* Basic checking... */
+      if(wrq->u.encoding.pointer != (caddr_t) 0)
+	{
+	  /* Verify the user buffer */
+	  ret = verify_area(VERIFY_WRITE, wrq->u.encoding.pointer, 8);
+	  if(ret)
+	    break;
+
+	  psa_read(ioaddr, lp->hacr,
+		   (char *) &psa.psa_encryption_select - (char *) &psa,
+		   (unsigned char *) &psa.psa_encryption_select, 1+8);
+
+	  /* encryption is enabled ? */
+	  if(psa.psa_encryption_select)
+	    wrq->u.encoding.flags = IW_ENCODE_ENABLED;
+	  else
+	    wrq->u.encoding.flags = IW_ENCODE_DISABLED;
+	  wrq->u.encoding.flags |= mmc_encr(ioaddr);
+
+	  /* Copy the key to the user buffer */
+	  wrq->u.encoding.length = 8;
+	  if(copy_to_user(wrq->u.encoding.pointer, psa.psa_encryption_key, 8))
+	    ret = -EFAULT;
+	}
+      break;
 
     case SIOCGIWRANGE:
       /* basic checking */
@@ -2038,17 +2104,11 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	{
 	  struct iw_range	range;
 
-	  /* Verify the user buffer. */
-	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
-			    sizeof(struct iw_range));
-	  if(ret)
-	    break;
-
 	  /* Set the length (useless:  it's constant). */
 	  wrq->u.data.length = sizeof(struct iw_range);
 
 	  /* Set information in the range struct.  */
-	  range.throughput = 1.6 * 1024 * 1024;	/* don't argue on this ! */
+	  range.throughput = 1.6 * 1000 * 1000;	/* don't argue on this ! */
 	  range.min_nwid = 0x0000;
 	  range.max_nwid = 0xFFFF;
 
@@ -2068,9 +2128,25 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  range.max_qual.level = MMR_SIGNAL_LVL;
 	  range.max_qual.noise = MMR_SILENCE_LVL;
 
+	  range.num_bitrates = 1;
+	  range.bitrate[0] = 2000000;	/* 2 Mb/s */
+
+	  /* Encryption supported ? */
+	  if(mmc_encr(ioaddr))
+	    {
+	      range.encoding_size[0] = 8;	/* DES = 64 bits key */
+	      range.num_encoding_sizes = 1;
+	      range.max_encoding_tokens = 1;	/* Only one key possible */
+	    }
+	  else
+	    {
+	      range.num_encoding_sizes = 0;
+	      range.max_encoding_tokens = 0;
+	    }
+
 	  /* Copy structure to the user buffer. */
-	  copy_to_user(wrq->u.data.pointer, &range,
-		       sizeof(struct iw_range));
+	  if (copy_to_user(wrq->u.data.pointer, &range, sizeof(struct iw_range)))
+	  	ret = -EFAULT;
 	}
       break;
 
@@ -2087,18 +2163,12 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	    { SIOCGIPHISTO, 0,	    IW_PRIV_TYPE_INT | 16, "gethisto" },
 	  };
 
-	  /* Verify the user buffer. */
-	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
-			    sizeof(priv));
-	  if(ret)
-	    break;
-
 	  /* Set the number of available ioctls. */
 	  wrq->u.data.length = 4;
 
 	  /* Copy structure to the user buffer. */
-	  copy_to_user(wrq->u.data.pointer, (u_char *) priv,
-		       sizeof(priv));
+	  if (copy_to_user(wrq->u.data.pointer, (u_char *) priv, sizeof(priv)))
+	  	ret = -EFAULT;
 	}
       break;
 
@@ -2120,14 +2190,11 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  struct sockaddr	address[IW_MAX_SPY];
 	  int			i;
 
-	  /* Verify where the user has set his addresses. */
-	  ret = verify_area(VERIFY_READ, wrq->u.data.pointer,
-			    sizeof(struct sockaddr) * lp->spy_number);
-	  if(ret)
-	    break;
 	  /* Copy addresses to the driver. */
-	  copy_from_user(address, wrq->u.data.pointer,
-			 sizeof(struct sockaddr) * lp->spy_number);
+	  if (copy_from_user(address, wrq->u.data.pointer, sizeof(struct sockaddr) * lp->spy_number)) {
+	  	ret = -EFAULT;
+	  	break;
+	  }
 
 	  /* Copy addresses to the lp structure. */
 	  for(i = 0; i < lp->spy_number; i++)
@@ -2166,13 +2233,6 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	  struct sockaddr	address[IW_MAX_SPY];
 	  int			i;
 
-	  /* Verify the user buffer. */
-	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
-			    (sizeof(iw_qual) + sizeof(struct sockaddr))
-			    * IW_MAX_SPY);
-	  if(ret)
-	    break;
-
 	  /* Copy addresses from the lp structure. */
 	  for(i = 0; i < lp->spy_number; i++)
 	    {
@@ -2182,13 +2242,18 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 	    }
 
 	  /* Copy addresses to the user buffer. */
-	  copy_to_user(wrq->u.data.pointer, address,
-		       sizeof(struct sockaddr) * lp->spy_number);
-
+	  if (copy_to_user(wrq->u.data.pointer, address, sizeof(struct sockaddr) * lp->spy_number)) {
+	  	ret = -EFAULT;
+	  	break;
+	  }
+	  	
 	  /* Copy stats to the user buffer (just after). */
-	  copy_to_user(wrq->u.data.pointer +
+	  if (copy_to_user(wrq->u.data.pointer +
 		       (sizeof(struct sockaddr) * lp->spy_number),
-		       lp->spy_stat, sizeof(iw_qual) * lp->spy_number);
+		       lp->spy_stat, sizeof(iw_qual) * lp->spy_number)) {
+		       		ret = -EFAULT;
+		       		break;
+	  }
 
 	  /* Reset updated flags. */
 	  for(i = 0; i < lp->spy_number; i++)
@@ -2202,10 +2267,15 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
 
     case SIOCSIPQTHR:
       if(!suser())
-	return -EPERM;
+        {
+	  ret = -EPERM;
+	  break;
+	}
       psa.psa_quality_thr = *(wrq->u.name) & 0x0F;
       psa_write(ioaddr, lp->hacr, (char *)&psa.psa_quality_thr - (char *)&psa,
 	       (unsigned char *)&psa.psa_quality_thr, 1);
+      /* update the Wavelan checksum */
+      update_psa_checksum(dev, ioaddr, lp->hacr);
       mmc_out(ioaddr, mmwoff(0, mmw_quality_thr), psa.psa_quality_thr);
       break;
 
@@ -2219,7 +2289,10 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
     case SIOCSIPHISTO:
       /* Verify that the user is root. */
       if(!suser())
-	return -EPERM;
+        {
+	  ret = -EPERM;
+	  break;
+	}
 
       /* Check the number of intervals. */
       if(wrq->u.data.length > 16)
@@ -2232,14 +2305,11 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Are there addresses to copy? */
       if(lp->his_number > 0)
 	{
-	  /* Verify where the user has set his addresses. */
-	  ret = verify_area(VERIFY_READ, wrq->u.data.pointer,
-			    sizeof(char) * lp->his_number);
-	  if(ret)
-	    break;
 	  /* Copy interval ranges to the driver */
-	  copy_from_user(lp->his_range, wrq->u.data.pointer,
-			 sizeof(char) * lp->his_number);
+	  if (copy_from_user(lp->his_range, wrq->u.data.pointer, sizeof(char) * lp->his_number)) {
+	  	ret = -EFAULT;
+	  	break;
+	  }
 
 	  /* Reset structure. */
 	  memset(lp->his_sum, 0x00, sizeof(long) * 16);
@@ -2253,15 +2323,10 @@ wavelan_ioctl(struct device *	dev,	/* device on which the ioctl is applied */
       /* Give back the distribution statistics */
       if((lp->his_number > 0) && (wrq->u.data.pointer != (caddr_t) 0))
 	{
-	  /* Verify the user buffer. */
-	  ret = verify_area(VERIFY_WRITE, wrq->u.data.pointer,
-			    sizeof(long) * 16);
-	  if(ret)
-	    break;
-
 	  /* Copy data to the user buffer. */
-	  copy_to_user(wrq->u.data.pointer, lp->his_sum,
-		       sizeof(long) * lp->his_number);
+	  if (copy_to_user(wrq->u.data.pointer, lp->his_sum, sizeof(long) * lp->his_number)) 
+			ret = -EFAULT;
+			
 	}	/* if(pointer != NULL) */
       break;
 #endif	/* HISTOGRAM */
@@ -2316,7 +2381,7 @@ wavelan_get_wireless_stats(device *	dev)
   mmc_out(ioaddr, mmwoff(0, mmw_freeze), 0);
 
   /* Copy data to wireless stuff. */
-  wstats->status = m.mmr_dce_status;
+  wstats->status = m.mmr_dce_status & MMR_DCE_STATUS;
   wstats->qual.qual = m.mmr_sgnl_qual & MMR_SGNL_QUAL;
   wstats->qual.level = m.mmr_signal_lvl & MMR_SIGNAL_LVL;
   wstats->qual.noise = m.mmr_silence_lvl & MMR_SILENCE_LVL;
@@ -2368,7 +2433,7 @@ wv_packet_read(device *		dev,
 
 #ifdef DEBUG_RX_TRACE
   printk(KERN_DEBUG "%s: ->wv_packet_read(0x%X, %d)\n",
-	 dev->name, fd_p, sksize);
+	 dev->name, buf_off, sksize);
 #endif
 
   /* Allocate buffer for the data */
@@ -2456,6 +2521,8 @@ wv_receive(device *	dev)
 {
   u_long	ioaddr = dev->base_addr;
   net_local *	lp = (net_local *)dev->priv;
+  fd_t		fd;
+  rbd_t		rbd;
   int		nreaped = 0;
 
 #ifdef DEBUG_RX_TRACE
@@ -2465,11 +2532,16 @@ wv_receive(device *	dev)
   /* Loop on each received packet. */
   for(;;)
     {
-      fd_t		fd;
-      rbd_t		rbd;
-      ushort		pkt_len;
-
       obram_read(ioaddr, lp->rx_head, (unsigned char *) &fd, sizeof(fd));
+
+      /* Note about the status :
+       * It start up to be 0 (the value we set). Then, when the RU
+       * grab the buffer to prepare for reception, it sets the
+       * FD_STATUS_B flag. When the RU has finished receiving the
+       * frame, it clears FD_STATUS_B, set FD_STATUS_C to indicate
+       * completion and set the other flags to indicate the eventual
+       * errors. FD_STATUS_OK indicates that the reception was OK.
+       */
 
       /* If the current frame is not complete, we have reached the end. */
       if((fd.fd_status & FD_STATUS_C) != FD_STATUS_C)
@@ -2478,34 +2550,43 @@ wv_receive(device *	dev)
       nreaped++;
 
       /* Check whether frame was correctly received. */
-      if((fd.fd_status & (FD_STATUS_B | FD_STATUS_OK)) !=
-	 (FD_STATUS_B | FD_STATUS_OK))
+      if((fd.fd_status & FD_STATUS_OK) == FD_STATUS_OK)
 	{
-	  /*
-	   * Not sure about this one -- it does not seem
-	   * to be an error so we will keep quiet about it.
-	   */
-#ifndef IGNORE_NORMAL_XMIT_ERRS
-#ifdef DEBUG_RX_ERROR
-	  if((fd.fd_status & FD_STATUS_B) != FD_STATUS_B)
-	    printk(KERN_INFO "%s: wv_receive(): frame not consumed by RU.\n",
-		   dev->name);
-#endif
-#endif	/* IGNORE_NORMAL_XMIT_ERRS */
+	  /* Does the frame contain a pointer to the data?  Let's check. */
+	  if(fd.fd_rbd_offset != I82586NULL)
+	    {
+	      /* Read the receive buffer descriptor */
+	      obram_read(ioaddr, fd.fd_rbd_offset,
+			 (unsigned char *) &rbd, sizeof(rbd));
 
 #ifdef DEBUG_RX_ERROR
-	  if((fd.fd_status & FD_STATUS_OK) != FD_STATUS_OK)
-	    printk(KERN_INFO "%s: wv_receive(): frame not received successfully.\n",
+	      if((rbd.rbd_status & RBD_STATUS_EOF) != RBD_STATUS_EOF)
+		printk(KERN_INFO "%s: wv_receive(): missing EOF flag.\n",
+		       dev->name);
+
+	      if((rbd.rbd_status & RBD_STATUS_F) != RBD_STATUS_F)
+		printk(KERN_INFO "%s: wv_receive(): missing F flag.\n",
+		       dev->name);
+#endif	/* DEBUG_RX_ERROR */
+
+	      /* Read the packet and transmit to Linux */
+	      wv_packet_read(dev, rbd.rbd_bufl,
+			     rbd.rbd_status & RBD_STATUS_ACNT);
+	    }
+#ifdef DEBUG_RX_ERROR
+	  else	/* if frame has no data */
+	    printk(KERN_INFO "%s: wv_receive(): frame has no data.\n",
 		   dev->name);
 #endif
 	}
-
-      /* Were there problems in processing the frame?  Let's check. */
-      if((fd.fd_status & (FD_STATUS_S6 | FD_STATUS_S7 | FD_STATUS_S8 |
-			  FD_STATUS_S9 | FD_STATUS_S10 | FD_STATUS_S11))
-	 != 0)
+      else	/* If reception was no successful */
 	{
 	  lp->stats.rx_errors++;
+
+#ifdef DEBUG_RX_INFO
+	  printk(KERN_DEBUG "%s: wv_receive(): frame not received successfully (%X).\n",
+		 dev->name, fd.fd_status);
+#endif
 
 #ifdef DEBUG_RX_ERROR
 	  if((fd.fd_status & FD_STATUS_S6) != 0)
@@ -2515,8 +2596,8 @@ wv_receive(device *	dev)
 	  if((fd.fd_status & FD_STATUS_S7) != 0)
 	    {
 	      lp->stats.rx_length_errors++;
-#ifdef DEBUG_RX_ERROR
-	      printk(KERN_INFO "%s: wv_receive(): frame too short.\n",
+#ifdef DEBUG_RX_FAIL
+	      printk(KERN_DEBUG "%s: wv_receive(): frame too short.\n",
 		     dev->name);
 #endif
 	    }
@@ -2524,8 +2605,8 @@ wv_receive(device *	dev)
 	  if((fd.fd_status & FD_STATUS_S8) != 0)
 	    {
 	      lp->stats.rx_over_errors++;
-#ifdef DEBUG_RX_ERROR
-	      printk(KERN_INFO "%s: wv_receive(): rx DMA overrun.\n",
+#ifdef DEBUG_RX_FAIL
+	      printk(KERN_DEBUG "%s: wv_receive(): rx DMA overrun.\n",
 		     dev->name);
 #endif
 	    }
@@ -2533,8 +2614,8 @@ wv_receive(device *	dev)
 	  if((fd.fd_status & FD_STATUS_S9) != 0)
 	    {
 	      lp->stats.rx_fifo_errors++;
-#ifdef DEBUG_RX_ERROR
-	      printk(KERN_INFO "%s: wv_receive(): ran out of resources.\n",
+#ifdef DEBUG_RX_FAIL
+	      printk(KERN_DEBUG "%s: wv_receive(): ran out of resources.\n",
 		     dev->name);
 #endif
 	    }
@@ -2542,8 +2623,8 @@ wv_receive(device *	dev)
 	  if((fd.fd_status & FD_STATUS_S10) != 0)
 	    {
 	      lp->stats.rx_frame_errors++;
-#ifdef DEBUG_RX_ERROR
-	      printk(KERN_INFO "%s: wv_receive(): alignment error.\n",
+#ifdef DEBUG_RX_FAIL
+	      printk(KERN_DEBUG "%s: wv_receive(): alignment error.\n",
 		     dev->name);
 #endif
 	    }
@@ -2551,37 +2632,11 @@ wv_receive(device *	dev)
 	  if((fd.fd_status & FD_STATUS_S11) != 0)
 	    {
 	      lp->stats.rx_crc_errors++;
-#ifdef DEBUG_RX_ERROR
-	      printk(KERN_INFO "%s: wv_receive(): CRC error.\n", dev->name);
+#ifdef DEBUG_RX_FAIL
+	      printk(KERN_DEBUG "%s: wv_receive(): CRC error.\n", dev->name);
 #endif
 	    }
 	}
-
-      /* Does the frame contain a pointer to the data?  Let's check. */
-      if(fd.fd_rbd_offset == I82586NULL)
-#ifdef DEBUG_RX_ERROR
-	printk(KERN_INFO "%s: wv_receive(): frame has no data.\n", dev->name);
-#endif
-      else
-	{
-	  obram_read(ioaddr, fd.fd_rbd_offset,
-		     (unsigned char *) &rbd, sizeof(rbd));
-
-#ifdef DEBUG_RX_ERROR
-	  if((rbd.rbd_status & RBD_STATUS_EOF) != RBD_STATUS_EOF)
-	    printk(KERN_INFO "%s: wv_receive(): missing EOF flag.\n",
-		   dev->name);
-
-	  if((rbd.rbd_status & RBD_STATUS_F) != RBD_STATUS_F)
-	    printk(KERN_INFO "%s: wv_receive(): missing F flag.\n",
-		   dev->name);
-#endif
-
-	  pkt_len = rbd.rbd_status & RBD_STATUS_ACNT;
-
-	  /* Read the packet and transmit to Linux */
-	  wv_packet_read(dev, rbd.rbd_bufl, pkt_len);
-	}	/* if frame has data */
 
       fd.fd_status = 0;
       obram_write(ioaddr, fdoff(lp->rx_head, fd_status),
@@ -2717,7 +2772,7 @@ if (lp->tx_n_in_use > 0)
   /*
    * Data
    */
-  obram_write(ioaddr, buf_addr, buf, clen);
+  obram_write(ioaddr, buf_addr, buf, length);
 
   /*
    * Overwrite the predecessor NOP link
@@ -2892,6 +2947,8 @@ wv_mmc_init(device *	dev)
 		(unsigned char *)&psa.psa_quality_thr, 1);
       psa_write(ioaddr, lp->hacr, (char *)&psa.psa_conf_status - (char *)&psa,
 		(unsigned char *)&psa.psa_conf_status, 1);
+      /* update the Wavelan checksum */
+      update_psa_checksum(dev, ioaddr, lp->hacr);
 #endif
     }
 
@@ -2918,21 +2975,18 @@ wv_mmc_init(device *	dev)
   m.mmw_thr_pre_set = psa.psa_thr_pre_set & 0x3F;
   m.mmw_quality_thr = psa.psa_quality_thr & 0x0F;
 
-  /* Encryption stuff is missing. */
-
   /*
    * Set default modem control parameters.
    * See NCR document 407-0024326 Rev. A.
    */
   m.mmw_jabber_enable = 0x01;
+  m.mmw_freeze = 0;
   m.mmw_anten_sel = MMW_ANTEN_SEL_ALG_EN;
   m.mmw_ifs = 0x20;
   m.mmw_mod_delay = 0x04;
   m.mmw_jam_time = 0x38;
 
-  m.mmw_encr_enable = 0;
   m.mmw_des_io_invert = 0;
-  m.mmw_freeze = 0;
   m.mmw_decay_prm = 0;
   m.mmw_decay_updat_prm = 0;
 
@@ -3066,7 +3120,7 @@ wv_ru_start(device *	dev)
 
   if(i <= 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wavelan_ru_start(): board not accepting command.\n",
 	     dev->name);
 #endif
@@ -3170,7 +3224,7 @@ wv_cu_start(device *	dev)
 
   if(i <= 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wavelan_cu_start(): board not accepting command.\n",
 	     dev->name);
 #endif
@@ -3257,7 +3311,7 @@ wv_82586_start(device *	dev)
 
   if(i <= 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wv_82586_start(): iscp_busy timeout.\n",
 	     dev->name);
 #endif
@@ -3277,7 +3331,7 @@ wv_82586_start(device *	dev)
 
   if (i <= 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wv_82586_start(): status: expected 0x%02x, got 0x%02x.\n",
 	     dev->name, SCB_ST_CX | SCB_ST_CNA, scb.scb_status);
 #endif
@@ -3298,7 +3352,7 @@ wv_82586_start(device *	dev)
   obram_read(ioaddr, OFFSET_CU, (unsigned char *)&cb, sizeof(cb));
   if(cb.ac_status & AC_SFLD_FAIL)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wv_82586_start(): i82586 Self Test failed.\n",
 	     dev->name);
 #endif
@@ -3398,39 +3452,29 @@ wv_82586_config(device *	dev)
   /* Create a configure action. */
   memset(&cfg, 0x00, sizeof(cfg));
 
-#if	0
-  /*
-   * The default board configuration
-   */
-  cfg.fifolim_bytecnt 	= 0x080c;
-  cfg.addrlen_mode  	= 0x2600;
-  cfg.linprio_interframe	= 0x7820;	/* IFS=120, ACS=2 */
-  cfg.slot_time      	= 0xf00c;	/* slottime=12    */
-  cfg.hardware	     	= 0x0008;	/* tx even without CD */
-  cfg.min_frame_len   	= 0x0040;
-#endif	/* 0 */
-
   /*
    * For Linux we invert AC_CFG_ALOC() so as to conform
    * to the way that net packets reach us from above.
    * (See also ac_tx_t.)
+   *
+   * Updated from Wavelan Manual WCIN085B
    */
   cfg.cfg_byte_cnt = AC_CFG_BYTE_CNT(sizeof(ac_cfg_t) - sizeof(ach_t));
-  cfg.cfg_fifolim = AC_CFG_FIFOLIM(8);
-  cfg.cfg_byte8 = AC_CFG_SAV_BF(0) |
+  cfg.cfg_fifolim = AC_CFG_FIFOLIM(4);
+  cfg.cfg_byte8 = AC_CFG_SAV_BF(1) |
 		  AC_CFG_SRDY(0);
   cfg.cfg_byte9 = AC_CFG_ELPBCK(0) |
 		  AC_CFG_ILPBCK(0) |
 		  AC_CFG_PRELEN(AC_CFG_PLEN_2) |
 		  AC_CFG_ALOC(1) |
 		  AC_CFG_ADDRLEN(WAVELAN_ADDR_SIZE);
-  cfg.cfg_byte10 = AC_CFG_BOFMET(0) |
-		   AC_CFG_ACR(0) |
+  cfg.cfg_byte10 = AC_CFG_BOFMET(1) |
+		   AC_CFG_ACR(6) |
 		   AC_CFG_LINPRIO(0);
-  cfg.cfg_ifs = 32;
-  cfg.cfg_slotl = 0;
+  cfg.cfg_ifs = 0x20;
+  cfg.cfg_slotl = 0x0C;
   cfg.cfg_byte13 = AC_CFG_RETRYNUM(15) |
-		   AC_CFG_SLTTMHI(2);
+		   AC_CFG_SLTTMHI(0);
   cfg.cfg_byte14 = AC_CFG_FLGPAD(0) |
 		   AC_CFG_BTSTF(0) |
 		   AC_CFG_CRC16(0) |
@@ -3589,12 +3633,15 @@ wv_hw_reset(device *	dev)
   wv_ints_on(dev);
 
   /* Start card functions */
-  if((wv_ru_start(dev) < 0) ||
-     (wv_cu_start(dev) < 0))
+  if(wv_cu_start(dev) < 0)
     return -1;
 
-  /* Finish configuration. */
+  /* Setup the controller and parameters */
   wv_82586_config(dev);
+
+  /* Finish configuration with the receive unit */
+  if(wv_ru_start(dev) < 0)
+    return -1;
 
 #ifdef DEBUG_CONFIG_TRACE
   printk(KERN_DEBUG "%s: <-wv_hw_reset()\n", dev->name);
@@ -3896,7 +3943,7 @@ wavelan_open(device *	dev)
   /* Check irq */
   if(dev->irq == 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_WARNING "%s: wavelan_open(): no IRQ\n", dev->name);
 #endif
       return -ENXIO;
@@ -3904,7 +3951,7 @@ wavelan_open(device *	dev)
 
   if(request_irq(dev->irq, &wavelan_interrupt, 0, "WaveLAN", dev) != 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_WARNING "%s: wavelan_open(): invalid IRQ\n", dev->name);
 #endif
       return -EAGAIN;
@@ -3919,7 +3966,7 @@ wavelan_open(device *	dev)
   else
     {
       free_irq(dev->irq, dev);
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_INFO "%s: wavelan_open(): impossible to start the card\n",
 	     dev->name);
 #endif
@@ -4016,6 +4063,8 @@ wavelan_config(device *	dev))
 #endif
 	  psa_write(ioaddr, HACR_DEFAULT,
 		    psaoff(0, psa_int_req_no), &irq_mask, 1);
+	  /* update the Wavelan checksum */
+	  update_psa_checksum(dev, ioaddr, HACR_DEFAULT);
 	  wv_hacr_reset(ioaddr);
 	}
     }
@@ -4069,7 +4118,9 @@ wavelan_config(device *	dev))
   dev->hard_start_xmit = wavelan_packet_xmit;
   dev->get_stats = wavelan_get_stats;
   dev->set_multicast_list = &wavelan_set_multicast_list;
+#ifdef SET_MAC_ADDRESS
   dev->set_mac_address = &wavelan_set_mac_address;
+#endif	/* SET_MAC_ADDRESS */
 
 #ifdef WIRELESS_EXT	/* if wireless extension exists in the kernel */
   dev->do_ioctl = wavelan_ioctl;
@@ -4123,7 +4174,7 @@ wavelan_probe(device *	dev))
   /* Don't probe at all. */
   if(base_addr < 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_WARNING "%s: wavelan_probe(): invalid base address\n",
 	     dev->name);
 #endif
@@ -4196,7 +4247,7 @@ int
 init_module(void)
 {
   mac_addr	mac;		/* MAC address (check WaveLAN existence) */
-  int		ret = 0;
+  int		ret = -EIO;	/* Return error if no cards found */
   int		i;
 
 #ifdef DEBUG_MODULE_TRACE
@@ -4206,7 +4257,7 @@ init_module(void)
   /* If probing is asked */
   if(io[0] == 0)
     {
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
       printk(KERN_WARNING "WaveLAN init_module(): doing device probing (bad !)\n");
       printk(KERN_WARNING "Specify base addresses while loading module to correct the problem\n");
 #endif
@@ -4228,6 +4279,11 @@ init_module(void)
 
 	  /* Create device and set basic arguments. */
 	  dev = kmalloc(sizeof(struct device), GFP_KERNEL);
+	  if(dev==NULL)
+	  {
+	  	ret = -ENOMEM;
+	  	break;
+	  }
 	  memset(dev, 0x00, sizeof(struct device));
 	  dev->name = name[i];
 	  dev->base_addr = io[i];
@@ -4241,12 +4297,16 @@ init_module(void)
 	      /* Deallocate everything. */
 	      /* Note: if dev->priv is mallocated, there is no way to fail. */
 	      kfree_s(dev, sizeof(struct device));
-	      ret = -EIO;
+	    }
+	  else
+	    {
+              /* If at least one device OK, we do not fail */
+              ret = 0;
 	    }
 	}	/* if there is something at the address */
     }		/* Loop on all addresses. */
 
-#ifdef DEBUG_CONFIG_ERRORS
+#ifdef DEBUG_CONFIG_ERROR
   if(wavelan_list == (net_local *) NULL)
     printk(KERN_WARNING "WaveLAN init_module(): no device found\n");
 #endif

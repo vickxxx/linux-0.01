@@ -47,7 +47,7 @@ struct vm_area_struct {
 	struct vm_area_struct * vm_avl_left;
 	struct vm_area_struct * vm_avl_right;
 
-	/* For areas with inode, the list inode->i_mmap, for shm areas,
+	/* For areas with inode, the list inode->i_mmap{,_shared}, for shm areas,
 	 * the list of attaches, otherwise unused.
 	 */
 	struct vm_area_struct *vm_next_share;
@@ -177,10 +177,12 @@ typedef struct page {
 			(test_and_clear_bit(PG_swap_cache, &(page)->flags))
 
 /*
- * page->reserved denotes a page which must never be accessed (which
+ * Various page->flags bits:
+ *
+ * PG_reserved is set for a page which must never be accessed (which
  * may not even be present).
  *
- * page->dma is set for those pages which lie in the range of
+ * PG_DMA is set for those pages which lie in the range of
  * physical addresses capable of carrying DMA transfers.
  *
  * Multiple processes may "see" the same page. E.g. for untouched
@@ -204,8 +206,8 @@ typedef struct page {
  * The following discussion applies only to them.
  *
  * A page may belong to an inode's memory mapping. In this case,
- * page->inode is the inode, and page->offset is the file offset
- * of the page (not necessarily a multiple of PAGE_SIZE).
+ * page->inode is the pointer to the inode, and page->offset is the
+ * file offset of the page (not necessarily a multiple of PAGE_SIZE).
  *
  * A page may have buffers allocated to it. In this case,
  * page->buffers is a circular list of these buffer heads. Else,
@@ -219,7 +221,7 @@ typedef struct page {
  * fields are also used for freelist management when page->count==0.)
  * There is also a hash table mapping (inode,offset) to the page
  * in memory if present. The lists for this hash table use the fields
- * page->next_hash and page->prev_hash.
+ * page->next_hash and page->pprev_hash.
  *
  * All process pages can do I/O:
  * - inode pages may need to be read from disk,
@@ -227,18 +229,23 @@ typedef struct page {
  *   to be written to disk,
  * - private pages which have been modified may need to be swapped out
  *   to swap space and (later) to be read back into memory.
- * During disk I/O, page->locked is true. This bit is set before I/O
+ * During disk I/O, PG_locked is used. This bit is set before I/O
  * and reset when I/O completes. page->wait is a wait queue of all
  * tasks waiting for the I/O on this page to complete.
- * page->uptodate tells whether the page's contents is valid.
+ * PG_uptodate tells whether the page's contents is valid.
  * When a read completes, the page becomes uptodate, unless a disk I/O
  * error happened.
- * When a write completes, and page->free_after is true, the page is
+ * When a write completes, and PG_free_after is set, the page is
  * freed without any further delay.
  *
  * For choosing which pages to swap out, inode pages carry a
- * page->referenced bit, which is set any time the system accesses
+ * PG_referenced bit, which is set any time the system accesses
  * that page through the (inode,offset) hash table.
+ *
+ * PG_skip is used on sparc/sparc64 architectures to "skip" certain
+ * parts of the address space.
+ *
+ * PG_error is set to indicate that an I/O error occurred on this page.
  */
 
 extern mem_map_t * mem_map;
@@ -268,7 +275,8 @@ extern int low_on_memory;
 
 #define free_page(addr) free_pages((addr),0)
 extern void FASTCALL(free_pages(unsigned long addr, unsigned long order));
-extern void FASTCALL(__free_page(struct page *));
+#define __free_page(page) __free_pages((page),0)
+extern void FASTCALL(__free_pages(struct page *, unsigned long));
 
 extern void show_free_areas(void);
 extern unsigned long put_dirty_page(struct task_struct * tsk,unsigned long page,
@@ -285,7 +293,7 @@ extern int zeromap_page_range(unsigned long from, unsigned long size, pgprot_t p
 
 extern void vmtruncate(struct inode * inode, unsigned long offset);
 extern int handle_mm_fault(struct task_struct *tsk,struct vm_area_struct *vma, unsigned long address, int write_access);
-extern void make_pages_present(unsigned long addr, unsigned long end);
+extern int make_pages_present(unsigned long addr, unsigned long end);
 
 extern int pgt_cache_water[2];
 extern int check_pgt_cache(void);
@@ -293,7 +301,6 @@ extern int check_pgt_cache(void);
 extern unsigned long paging_init(unsigned long start_mem, unsigned long end_mem);
 extern void mem_init(unsigned long start_mem, unsigned long end_mem);
 extern void show_mem(void);
-extern void oom(struct task_struct * tsk);
 extern void si_meminfo(struct sysinfo * val);
 
 /* mmap.c */
@@ -328,7 +335,7 @@ extern void put_cached_page(unsigned long);
 
 #define __GFP_DMA	0x80
 
-#define GFP_BUFFER	(__GFP_LOW | __GFP_WAIT)
+#define GFP_BUFFER	(__GFP_MED | __GFP_WAIT)
 #define GFP_ATOMIC	(__GFP_HIGH)
 #define GFP_USER	(__GFP_LOW | __GFP_WAIT | __GFP_IO)
 #define GFP_KERNEL	(__GFP_MED | __GFP_WAIT | __GFP_IO)
@@ -340,11 +347,6 @@ extern void put_cached_page(unsigned long);
 
 #define GFP_DMA		__GFP_DMA
 
-/*
- * Decide if we should try to do some swapout..
- */
-extern int free_memory_available(void);
-			
 /* vma is the first one with  address < vma->vm_end,
  * and even  address < vma->vm_start. Have to extend vma. */
 static inline int expand_stack(struct vm_area_struct * vma, unsigned long address)
@@ -353,10 +355,11 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 
 	address &= PAGE_MASK;
 	grow = vma->vm_start - address;
-	if (vma->vm_end - address
-	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur ||
-	    (vma->vm_mm->total_vm << PAGE_SHIFT) + grow
-	    > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
+	if ((vma->vm_end - address
+	    > current->rlim[RLIMIT_STACK].rlim_cur) ||
+	    ((current->rlim[RLIMIT_AS].rlim_cur < RLIM_INFINITY) &&
+	    ((vma->vm_mm->total_vm << PAGE_SHIFT) + grow
+	    > current->rlim[RLIMIT_AS].rlim_cur)))
 		return -ENOMEM;
 	vma->vm_start = address;
 	vma->vm_offset -= grow;

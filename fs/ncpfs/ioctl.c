@@ -3,6 +3,7 @@
  *
  *  Copyright (C) 1995, 1996 by Volker Lendecke
  *  Modified 1997 Peter Waltenberg, Bill Hawes, David Woodhouse for 2.1 dcache
+ *  Modified 1998 Wolfram Pienkoss for NLS
  *
  */
 
@@ -17,6 +18,7 @@
 
 #include <linux/ncp.h>
 #include <linux/ncp_fs.h>
+
 #include "ncplib_kernel.h"
 
 /* maximum limit for ncp_objectname_ioctl */
@@ -31,6 +33,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	int result;
 	struct ncp_ioctl_request request;
 	struct ncp_fs_info info;
+	char* bouncebuffer;
 
 #ifdef NCP_IOC_GETMOUNTUID_INT
 	/* remove after ncpfs-2.0.13/2.2.0 gets released */
@@ -55,12 +58,9 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}
-		if ((result = verify_area(VERIFY_READ, (char *) arg,
-					  sizeof(request))) != 0) {
-			return result;
-		}
-		copy_from_user(&request, (struct ncp_ioctl_request *) arg,
-			       sizeof(request));
+		if (copy_from_user(&request, (struct ncp_ioctl_request *) arg,
+			       sizeof(request)))
+			return -EFAULT;
 
 		if ((request.function > 255)
 		    || (request.size >
@@ -71,6 +71,13 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 					  NCP_PACKET_SIZE)) != 0) {
 			return result;
 		}
+		bouncebuffer = kmalloc(NCP_PACKET_SIZE, GFP_NFS);
+		if (!bouncebuffer)
+			return -ENOMEM;
+		if (copy_from_user(bouncebuffer, request.data, request.size)) {
+			kfree(bouncebuffer);
+			return -EFAULT;
+		}
 		ncp_lock_server(server);
 
 		/* FIXME: We hack around in the server's structures
@@ -78,17 +85,22 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 		server->has_subfunction = 0;
 		server->current_size = request.size;
-		copy_from_user(server->packet, request.data, request.size);
+		memcpy(server->packet, bouncebuffer, request.size);
 
-		ncp_request(server, request.function);
-
-		DPRINTK(KERN_DEBUG "ncp_ioctl: copy %d bytes\n",
-			server->reply_size);
-		copy_to_user(request.data, server->packet, server->reply_size);
-
+		result = ncp_request2(server, request.function, 
+			bouncebuffer, NCP_PACKET_SIZE);
+		if (result < 0)
+			result = -EIO;
+		else
+			result = server->reply_size;
 		ncp_unlock_server(server);
-
-		return server->reply_size;
+		DPRINTK(KERN_DEBUG "ncp_ioctl: copy %d bytes\n",
+			result);
+		if (result >= 0)
+			if (copy_to_user(request.data, bouncebuffer, result))
+				result = -EFAULT;
+		kfree(bouncebuffer);
+		return result;
 
 	case NCP_IOC_CONN_LOGGED_IN:
 
@@ -295,6 +307,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 				default:
 						return -EINVAL;
 			}
+			/* locking needs both read and write access */
 			if ((result = ncp_make_open(inode, O_RDWR)) != 0)
 			{
 				return result;
@@ -485,6 +498,69 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			return 0;
 		}
 #endif	/* CONFIG_NCPFS_NDS_DOMAINS */
+
+#ifdef CONFIG_NCPFS_NLS
+/* Here we are select the iocharset and the codepage for NLS.
+ * Thanks Petr Vandrovec for idea and many hints.
+ */
+	case NCP_IOC_SETCHARSETS:
+		if (   (permission(inode, MAY_WRITE) != 0)
+		    && (current->uid != server->m.mounted_uid))
+		{
+			return -EACCES;
+		}
+		if (server->root_setuped) return -EBUSY;
+		{
+			struct ncp_nls_ioctl user;
+			struct nls_table *codepage;
+			struct nls_table *iocharset;
+			struct nls_table *oldset_io;
+			struct nls_table *oldset_cp;
+			
+			if (copy_from_user(&user, 
+					   (struct ncp_nls_ioctl*)arg,
+					    sizeof(user))) return -EFAULT;
+
+			codepage = NULL;
+			if (!user.codepage[0]) {
+				codepage = load_nls_default();
+			}
+			else {
+				codepage = load_nls(user.codepage);
+				if (! codepage) {
+					return -EBADRQC;
+				}
+			}
+
+			iocharset = NULL;
+			if (user.iocharset[0] == 0) {
+				iocharset = load_nls_default();
+			}
+			else {
+				iocharset = load_nls(user.iocharset);
+				if (! iocharset) {
+					unload_nls(codepage);
+					return -EBADRQC;
+				}
+			}
+
+			oldset_cp = server->nls_vol;
+			server->nls_vol = codepage;
+			oldset_io = server->nls_io;
+			server->nls_io = iocharset;
+			server->nls_charsets = user;
+			if (oldset_cp) unload_nls(oldset_cp);
+			if (oldset_io) unload_nls(oldset_io);
+			return 0;
+		}
+		
+	case NCP_IOC_GETCHARSETS: /* not tested */
+		if (copy_to_user((struct ncp_nls_ioctl*)arg,
+				&(server->nls_charsets),
+				sizeof(server->nls_charsets))) return -EFAULT;
+		return 0;
+#endif /* CONFIG_NCPFS_NLS */
+
 	default:
 		return -EINVAL;
 	}

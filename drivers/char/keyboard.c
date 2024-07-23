@@ -24,6 +24,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -31,6 +32,7 @@
 #include <linux/string.h>
 #include <linux/random.h>
 #include <linux/init.h>
+#include <linux/module.h>
 
 #include <asm/keyboard.h>
 #include <asm/bitops.h>
@@ -58,6 +60,10 @@
 #ifndef KBD_DEFLOCK
 #define KBD_DEFLOCK 0
 #endif
+
+void (*kbd_ledfunc)(unsigned int led) = NULL;
+EXPORT_SYMBOL(handle_scancode);
+EXPORT_SYMBOL(kbd_ledfunc);
 
 extern void ctrl_alt_del(void);
 
@@ -190,15 +196,15 @@ int getkeycode(unsigned int scancode)
     return kbd_getkeycode(scancode);
 }
 
-void handle_scancode(unsigned char scancode)
+void handle_scancode(unsigned char scancode, int down)
 {
 	unsigned char keycode;
-	char up_flag;				 /* 0 or 0200 */
+	char up_flag = down ? 0 : 0200;
 	char raw_mode;
 
 	do_poke_blanked_console = 1;
 	mark_bh(CONSOLE_BH);
-	add_keyboard_randomness(scancode);
+	add_keyboard_randomness(scancode | up_flag);
 
 	tty = ttytab? ttytab[fg_console]: NULL;
 	if (tty && (!tty->driver_data)) {
@@ -213,20 +219,15 @@ void handle_scancode(unsigned char scancode)
 	}
 	kbd = kbd_table + fg_console;
 	if ((raw_mode = (kbd->kbdmode == VC_RAW))) {
- 		put_queue(scancode);
+		put_queue(scancode | up_flag);
 		/* we do not return yet, because we want to maintain
 		   the key_down array, so that we have the correct
 		   values when finishing RAW mode or when changing VT's */
- 	}
+	}
 
-	if (!kbd_pretranslate(scancode, raw_mode))
-	    return;
- 	/*
+	/*
 	 *  Convert scancode to keycode
- 	 */
-	up_flag = (scancode & 0200);
- 	scancode &= 0x7f;
-
+	 */
 	if (!kbd_translate(scancode, &keycode, raw_mode))
 	    return;
 
@@ -239,17 +240,17 @@ void handle_scancode(unsigned char scancode)
 
 	if (up_flag) {
 		rep = 0;
- 		if(!test_and_clear_bit(keycode, key_down))
+		if(!test_and_clear_bit(keycode, key_down))
 		    up_flag = kbd_unexpected_up(keycode);
 	} else
- 		rep = test_and_set_bit(keycode, key_down);
+		rep = test_and_set_bit(keycode, key_down);
 
 #ifdef CONFIG_MAGIC_SYSRQ		/* Handle the SysRq Hack */
 	if (keycode == SYSRQ_KEY) {
 		sysrq_pressed = !up_flag;
 		return;
 	} else if (sysrq_pressed) {
-		if (!up_flag)
+		if (!up_flag && sysrq_enabled)
 			handle_sysrq(kbd_sysrq_xlate[keycode], kbd_pt_regs, kbd, tty);
 		return;
 	}
@@ -257,11 +258,11 @@ void handle_scancode(unsigned char scancode)
 
 	if (kbd->kbdmode == VC_MEDIUMRAW) {
 		/* soon keycodes will require more than one byte */
- 		put_queue(keycode + up_flag);
+		put_queue(keycode + up_flag);
 		raw_mode = 1;	/* Most key classes will be ignored */
- 	}
+	}
 
- 	/*
+	/*
 	 * Small change in philosophy: earlier we defined repetition by
 	 *	 rep = keycode == prev_keycode;
 	 *	 prev_keycode = keycode;
@@ -270,9 +271,9 @@ void handle_scancode(unsigned char scancode)
 	 */
 
 	/*
- 	 *  Repeat a key only if the input buffers are empty or the
- 	 *  characters get echoed locally. This makes key repeat usable
- 	 *  with slow applications and under heavy loads.
+	 *  Repeat a key only if the input buffers are empty or the
+	 *  characters get echoed locally. This makes key repeat usable
+	 *  with slow applications and under heavy loads.
 	 */
 	if (!rep ||
 	    (vc_kbd_mode(kbd,VC_REPEAT) && tty &&
@@ -314,7 +315,7 @@ void handle_scancode(unsigned char scancode)
 #if 1			/* how? two almost equivalent choices follow */
 			compute_shiftstate();
 #else
-			keysym = U(plain_map[keycode]);
+			keysym = U(key_maps[0][keycode]);
 			type = KTYP(keysym);
 			if (type == KT_SHIFT)
 			  (*key_handler[type])(keysym & 0xff, up_flag);
@@ -323,7 +324,22 @@ void handle_scancode(unsigned char scancode)
 	}
 }
 
+#ifdef CONFIG_FORWARD_KEYBOARD
+extern int forward_chars;
 
+void put_queue(int ch)
+{
+	if (forward_chars == fg_console+1){
+		kbd_forward_char (ch);
+	} else {
+		wake_up(&keypress_wait);
+		if (tty) {
+			tty_insert_flip_char(tty, ch, 0);
+			con_schedule_flip(tty);
+		}
+	}
+}
+#else
 void put_queue(int ch)
 {
 	wake_up(&keypress_wait);
@@ -332,6 +348,7 @@ void put_queue(int ch)
 		con_schedule_flip(tty);
 	}
 }
+#endif
 
 static void puts_queue(char *cp)
 {
@@ -742,7 +759,7 @@ void compute_shiftstate(void)
 	    k = i*BITS_PER_LONG;
 	    for(j=0; j<BITS_PER_LONG; j++,k++)
 	      if(test_bit(k, key_down)) {
-		sym = U(plain_map[k]);
+		sym = U(key_maps[0][k]);
 		if(KTYP(sym) == KT_SHIFT) {
 		  val = KVAL(sym);
 		  if (val == KVAL(K_CAPSSHIFT))
@@ -890,6 +907,7 @@ static void kbd_bh(void)
 	if (leds != ledstate) {
 		ledstate = leds;
 		kbd_leds(leds);
+		if (kbd_ledfunc) kbd_ledfunc(leds);
 	}
 }
 

@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.15 1998/08/20 14:40:57 ralf Exp $
+/* $Id: pgtable.h,v 1.19 1999/06/13 16:35:53 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -33,6 +33,7 @@ extern void (*flush_cache_page)(struct vm_area_struct *vma, unsigned long page);
 extern void (*flush_cache_sigtramp)(unsigned long addr);
 extern void (*flush_page_to_ram)(unsigned long page);
 #define flush_icache_range(start, end) flush_cache_all()
+#define flush_dcache_page(page)			do { } while (0)
 
 /* TLB flushing:
  *
@@ -129,7 +130,7 @@ extern void (*add_wired_entry)(unsigned long entrylo0, unsigned long entrylo1,
 #define __READABLE	(_PAGE_READ | _PAGE_SILENT_READ | _PAGE_ACCESSED)
 #define __WRITEABLE	(_PAGE_WRITE | _PAGE_SILENT_WRITE | _PAGE_MODIFIED)
 
-#define _PAGE_CHG_MASK  (PAGE_MASK | __READABLE | __WRITEABLE | _CACHE_MASK)
+#define _PAGE_CHG_MASK  (PAGE_MASK | _PAGE_ACCESSED | _PAGE_MODIFIED | _CACHE_MASK)
 
 #define PAGE_NONE	__pgprot(_PAGE_PRESENT | _CACHE_CACHABLE_NONCOHERENT)
 #define PAGE_SHARED     __pgprot(_PAGE_PRESENT | _PAGE_READ | _PAGE_WRITE | \
@@ -356,7 +357,7 @@ extern inline pte_t mk_pte(unsigned long page, pgprot_t pgprot)
 
 extern inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
 {
-	return __pte((physpage - PAGE_OFFSET) | pgprot_val(pgprot));
+	return __pte(physpage | pgprot_val(pgprot));
 }
 
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
@@ -580,15 +581,16 @@ extern void (*update_mmu_cache)(struct vm_area_struct *vma,
 /*
  * Kernel with 32 bit address space
  */
-#define SWP_TYPE(entry) (((entry) >> 8) & 0x7f)
-#define SWP_OFFSET(entry) ((entry) >> 15)
-#define SWP_ENTRY(type,offset) (((type) << 8) | ((offset) << 15))
+#define SWP_TYPE(entry) (((entry) >> 1) & 0x3f)
+#define SWP_OFFSET(entry) ((entry) >> 8)
+#define SWP_ENTRY(type,offset) (((type) << 1) | ((offset) << 8))
 
 #define module_map      vmalloc
 #define module_unmap    vfree
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
+#define kern_addr_valid(addr)	(1)
 
 /* TLB operations. */
 extern inline void tlb_probe(void)

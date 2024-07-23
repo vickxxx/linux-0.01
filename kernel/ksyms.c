@@ -23,8 +23,6 @@
 #include <linux/serial.h>
 #include <linux/locks.h>
 #include <linux/delay.h>
-#include <linux/minix_fs.h>
-#include <linux/ext2_fs.h>
 #include <linux/random.h>
 #include <linux/reboot.h>
 #include <linux/pagemap.h>
@@ -37,6 +35,8 @@
 #include <linux/file.h>
 #include <linux/console.h>
 #include <linux/poll.h>
+#include <linux/mm.h>
+#include <linux/capability.h>
 
 #if defined(CONFIG_PROC_FS)
 #include <linux/proc_fs.h>
@@ -52,6 +52,9 @@ extern int blkdev_release(struct inode * inode);
 #if !defined(CONFIG_NFSD) && defined(CONFIG_NFSD_MODULE)
 extern int (*do_nfsservctl)(int, void *, void *);
 #endif
+#if !defined(CONFIG_LOCKD) && defined(CONFIG_LOCKD_MODULE)
+extern int (*do_lockdctl)(int, void *, void *);
+#endif
 
 extern void *sys_call_table;
 
@@ -60,7 +63,7 @@ extern int request_dma(unsigned int dmanr, char * deviceID);
 extern void free_dma(unsigned int dmanr);
 extern spinlock_t dma_spin_lock;
 
-#ifdef MODVERSIONS
+#ifdef CONFIG_MODVERSIONS
 const struct module_symbol __export_Using_Versions
 __attribute__((section("__ksymtab"))) = {
 	1 /* Version version */, "Using_Versions"
@@ -70,6 +73,10 @@ __attribute__((section("__ksymtab"))) = {
 
 #ifdef CONFIG_KMOD
 EXPORT_SYMBOL(request_module);
+EXPORT_SYMBOL(exec_usermodehelper);
+#ifdef CONFIG_HOTPLUG
+EXPORT_SYMBOL(hotplug_path);
+#endif
 #endif
 
 #ifdef CONFIG_MODULES
@@ -84,14 +91,16 @@ EXPORT_SYMBOL(exit_mm);
 EXPORT_SYMBOL(exit_files);
 EXPORT_SYMBOL(exit_fs);
 EXPORT_SYMBOL(exit_sighand);
+EXPORT_SYMBOL(daemonize);
 
 /* internal kernel memory management */
 EXPORT_SYMBOL(__get_free_pages);
 EXPORT_SYMBOL(free_pages);
-EXPORT_SYMBOL(__free_page);
+EXPORT_SYMBOL(__free_pages);
 EXPORT_SYMBOL(kmem_find_general_cachep);
 EXPORT_SYMBOL(kmem_cache_create);
 EXPORT_SYMBOL(kmem_cache_shrink);
+EXPORT_SYMBOL(kmem_cache_destroy);
 EXPORT_SYMBOL(kmem_cache_alloc);
 EXPORT_SYMBOL(kmem_cache_free);
 EXPORT_SYMBOL(kmalloc);
@@ -104,16 +113,24 @@ EXPORT_SYMBOL(remap_page_range);
 EXPORT_SYMBOL(max_mapnr);
 EXPORT_SYMBOL(high_memory);
 EXPORT_SYMBOL(update_vm_cache);
+EXPORT_SYMBOL(update_vm_cache_conditional);
 EXPORT_SYMBOL(vmtruncate);
+EXPORT_SYMBOL(find_vma);
+EXPORT_SYMBOL(get_unmapped_area);
 
 /* filesystem internal functions */
 EXPORT_SYMBOL(in_group_p);
+EXPORT_SYMBOL(in_egroup_p);
 EXPORT_SYMBOL(update_atime);
 EXPORT_SYMBOL(get_super);
 EXPORT_SYMBOL(get_fs_type);
 EXPORT_SYMBOL(getname);
 EXPORT_SYMBOL(__fput);
+EXPORT_SYMBOL(igrab);
+EXPORT_SYMBOL(iunique);
 EXPORT_SYMBOL(iget);
+EXPORT_SYMBOL(iget4);
+EXPORT_SYMBOL(iget_in_use);
 EXPORT_SYMBOL(iput);
 EXPORT_SYMBOL(__namei);
 EXPORT_SYMBOL(lookup_dentry);
@@ -129,18 +146,21 @@ EXPORT_SYMBOL(d_instantiate);
 EXPORT_SYMBOL(d_alloc);
 EXPORT_SYMBOL(d_lookup);
 EXPORT_SYMBOL(d_path);
+EXPORT_SYMBOL(have_submounts);
 EXPORT_SYMBOL(__mark_inode_dirty);
 EXPORT_SYMBOL(get_empty_filp);
 EXPORT_SYMBOL(init_private_file);
 EXPORT_SYMBOL(filp_open);
+EXPORT_SYMBOL(filp_close);
 EXPORT_SYMBOL(fput);
 EXPORT_SYMBOL(put_filp);
 EXPORT_SYMBOL(check_disk_change);
-EXPORT_SYMBOL(invalidate_buffers);
+EXPORT_SYMBOL(__invalidate_buffers);
 EXPORT_SYMBOL(invalidate_inodes);
 EXPORT_SYMBOL(invalidate_inode_pages);
 EXPORT_SYMBOL(truncate_inode_pages);
 EXPORT_SYMBOL(fsync_dev);
+EXPORT_SYMBOL(vfs_permission);
 EXPORT_SYMBOL(permission);
 EXPORT_SYMBOL(inode_setattr);
 EXPORT_SYMBOL(inode_change_ok);
@@ -180,9 +200,21 @@ EXPORT_SYMBOL(vfs_rmdir);
 EXPORT_SYMBOL(vfs_unlink);
 EXPORT_SYMBOL(vfs_rename);
 EXPORT_SYMBOL(__pollwait);
+EXPORT_SYMBOL(read_cache_page);
+EXPORT_SYMBOL(ROOT_DEV);
+EXPORT_SYMBOL(inode_generation_count);
+
+EXPORT_SYMBOL(page_cache_size);
+EXPORT_SYMBOL(page_hash_table);
+EXPORT_SYMBOL(page_hash_mask);
+EXPORT_SYMBOL(page_hash_bits);
+EXPORT_SYMBOL(__wait_on_page);
 
 #if !defined(CONFIG_NFSD) && defined(CONFIG_NFSD_MODULE)
 EXPORT_SYMBOL(do_nfsservctl);
+#endif
+#if !defined(CONFIG_LOCKD) && defined(CONFIG_LOCKD_MODULE)
+EXPORT_SYMBOL(do_lockdctl);
 #endif
 
 /* device registration */
@@ -218,6 +250,7 @@ EXPORT_SYMBOL(tq_disk);
 EXPORT_SYMBOL(find_buffer);
 EXPORT_SYMBOL(init_buffer);
 EXPORT_SYMBOL(max_sectors);
+EXPORT_SYMBOL(max_segments);
 EXPORT_SYMBOL(max_readahead);
 
 /* tty routines */
@@ -251,6 +284,7 @@ EXPORT_SYMBOL(unregister_exec_domain);
 EXPORT_SYMBOL(register_sysctl_table);
 EXPORT_SYMBOL(unregister_sysctl_table);
 EXPORT_SYMBOL(sysctl_string);
+EXPORT_SYMBOL(sysctl_jiffies);
 EXPORT_SYMBOL(sysctl_intvec);
 EXPORT_SYMBOL(proc_dostring);
 EXPORT_SYMBOL(proc_dointvec);
@@ -260,8 +294,6 @@ EXPORT_SYMBOL(proc_dointvec_minmax);
 /* interrupt handling */
 EXPORT_SYMBOL(request_irq);
 EXPORT_SYMBOL(free_irq);
-EXPORT_SYMBOL(probe_irq_on);
-EXPORT_SYMBOL(probe_irq_off);
 EXPORT_SYMBOL(bh_active);
 EXPORT_SYMBOL(bh_mask);
 EXPORT_SYMBOL(bh_mask_count);
@@ -281,14 +313,23 @@ EXPORT_SYMBOL(tqueue_lock);
 EXPORT_SYMBOL(waitqueue_lock);
 #endif
 
+/*
+ *	S390 has no auto-irq
+ */
+ 
+#ifndef CONFIG_ARCH_S390
+EXPORT_SYMBOL(probe_irq_on);
+EXPORT_SYMBOL(probe_irq_off);
 /* autoirq from  drivers/net/auto_irq.c */
 EXPORT_SYMBOL(autoirq_setup);
 EXPORT_SYMBOL(autoirq_report);
+#endif
 
 /* dma handling */
 EXPORT_SYMBOL(request_dma);
 EXPORT_SYMBOL(free_dma);
 EXPORT_SYMBOL(dma_spin_lock);
+
 #ifdef HAVE_DISABLE_HLT
 EXPORT_SYMBOL(disable_hlt);
 EXPORT_SYMBOL(enable_hlt);
@@ -310,8 +351,9 @@ EXPORT_SYMBOL(schedule_timeout);
 EXPORT_SYMBOL(jiffies);
 EXPORT_SYMBOL(xtime);
 EXPORT_SYMBOL(do_gettimeofday);
-EXPORT_SYMBOL(loops_per_sec);
+EXPORT_SYMBOL(loops_per_jiffy);
 EXPORT_SYMBOL(kstat);
+EXPORT_SYMBOL(pidhash); 
 
 /* misc */
 EXPORT_SYMBOL(panic);
@@ -319,6 +361,8 @@ EXPORT_SYMBOL(printk);
 EXPORT_SYMBOL(sprintf);
 EXPORT_SYMBOL(vsprintf);
 EXPORT_SYMBOL(kdevname);
+EXPORT_SYMBOL(bdevname);
+EXPORT_SYMBOL(cdevname);
 EXPORT_SYMBOL(simple_strtoul);
 EXPORT_SYMBOL(system_utsname);	/* UTS data */
 EXPORT_SYMBOL(uts_sem);		/* UTS semaphore */
@@ -332,6 +376,7 @@ EXPORT_SYMBOL(_ctype);
 EXPORT_SYMBOL(secure_tcp_sequence_number);
 EXPORT_SYMBOL(get_random_bytes);
 EXPORT_SYMBOL(securebits);
+EXPORT_SYMBOL(cap_bset);
 
 /* Program loader interfaces */
 EXPORT_SYMBOL(setup_arg_pages);
@@ -364,9 +409,10 @@ EXPORT_SYMBOL(insert_inode_hash);
 EXPORT_SYMBOL(remove_inode_hash);
 EXPORT_SYMBOL(make_bad_inode);
 EXPORT_SYMBOL(is_bad_inode);
-EXPORT_SYMBOL(event);
+EXPORT_SYMBOL(global_event);
 EXPORT_SYMBOL(__down);
 EXPORT_SYMBOL(__down_interruptible);
+EXPORT_SYMBOL(__down_trylock);
 EXPORT_SYMBOL(__up);
 EXPORT_SYMBOL(brw_page);
 
@@ -374,9 +420,7 @@ EXPORT_SYMBOL(brw_page);
 EXPORT_SYMBOL(add_mouse_randomness);
 EXPORT_SYMBOL(fasync_helper);
 
-#ifdef CONFIG_BLK_DEV_MD
-EXPORT_SYMBOL(disk_name);	/* for md.c */
-#endif
+EXPORT_SYMBOL(disk_name);	/* for md.c and others */
 
 /* binfmt_aout */
 EXPORT_SYMBOL(get_write_access);
@@ -391,3 +435,14 @@ EXPORT_SYMBOL(get_fast_time);
 
 /* library functions */
 EXPORT_SYMBOL(strnicmp);
+
+/* init task, for moving kthread roots - ought to export a function ?? */
+EXPORT_SYMBOL(init_task_union);
+
+/* Support for external backtracer */ 
+extern char _stext, _etext;
+EXPORT_SYMBOL(_stext);
+EXPORT_SYMBOL(_etext); 
+EXPORT_SYMBOL(module_list); 
+
+

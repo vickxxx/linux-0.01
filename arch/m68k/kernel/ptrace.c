@@ -18,6 +18,7 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/config.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -312,6 +313,7 @@ static int write_long(struct task_struct * tsk, unsigned long addr,
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
+	unsigned long flags;
 	int ret;
 
 	lock_kernel();
@@ -343,21 +345,22 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		    (current->uid != child->uid) ||
 	 	    (current->gid != child->egid) ||
 		    (current->gid != child->sgid) ||
+	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
 	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
 			goto out;
 		/* the same process cannot be attached many times */
 		if (child->flags & PF_PTRACED)
 			goto out;
 		child->flags |= PF_PTRACED;
-		if (child->p_pptr != current) {
-			unsigned long flags;
 
-			write_lock_irqsave(&tasklist_lock, flags);
+		write_lock_irqsave(&tasklist_lock, flags);
+		if (child->p_pptr != current) {
 			REMOVE_LINKS(child);
 			child->p_pptr = current;
 			SET_LINKS(child);
-			write_unlock_irqrestore(&tasklist_lock, flags);
 		}
+		write_unlock_irqrestore(&tasklist_lock, flags);
+
 		send_sig(SIGSTOP, child, 1);
 		ret = 0;
 		goto out;
@@ -401,10 +404,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				tmp = get_reg(child, addr);
 				if (addr == PT_SR)
 					tmp >>= 16;
-			}
-			else if (addr >= 21 && addr < 49)
+			} else if (addr >= 21 && addr < 49) {
 				tmp = child->tss.fp[addr - 21];
-			else
+#ifdef CONFIG_FPU_EMU
+				/* Convert internal fpu reg representation
+				 * into long double format
+				 */
+				if (FPU_IS_EMU && (addr < 45) && !(addr % 3))
+					tmp = ((tmp & 0xffff0000) << 15) |
+					      ((tmp & 0x0000ffff) << 16);
+#endif
+			} else
 				goto out;
 			ret = put_user(tmp,(unsigned long *) data);
 			goto out;
@@ -440,6 +450,16 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			}
 			if (addr >= 21 && addr < 48)
 			{
+#ifdef CONFIG_FPU_EMU
+				/* Convert long double format
+				 * into internal fpu reg representation
+				 */
+				if (FPU_IS_EMU && (addr < 45) && !(addr % 3)) {
+					data = (unsigned long)data << 15;
+					data = (data & 0xffff0000) |
+					       ((data & 0x0000ffff) >> 1);
+				}
+#endif
 				child->tss.fp[addr - 21] = data;
 				ret = 0;
 			}
@@ -502,7 +522,6 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		}
 
 		case PTRACE_DETACH: { /* detach a process that was attached. */
-			unsigned long flags;
 			long tmp;
 
 			ret = -EIO;

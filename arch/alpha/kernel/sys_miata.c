@@ -267,9 +267,20 @@ miata_pci_fixup(void)
 {
 	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
 	common_pci_fixup(miata_map_irq, miata_swizzle);
-	SMC669_Init(); /* it might be a GL (fails harmlessly if not) */
+	SMC669_Init(0); /* it might be a GL (fails harmlessly if not) */
 	es1888_init();
 }
+
+static void 
+miata_kill_arch (int mode, char *reboot_cmd) 
+{ 
+	/* Who said DEC engineers have no sense of humor? ;-)  */ 
+	if (alpha_using_srm) { 
+		*(vuip) PYXIS_RESET = 0x0000dead; 
+		mb(); 
+	} 
+	generic_kill_arch(mode, reboot_cmd); 
+} 
 
 
 /*
@@ -295,6 +306,6 @@ struct alpha_machine_vector miata_mv __initmv = {
 	init_irq:		miata_init_irq,
 	init_pit:		generic_init_pit,
 	pci_fixup:		miata_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	kill_arch:		miata_kill_arch,
 };
 ALIAS_MV(miata)

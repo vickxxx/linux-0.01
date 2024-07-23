@@ -238,7 +238,7 @@ struct ext2_inode {
 		} masix1;
 	} osd1;				/* OS dependent 1 */
 	__u32	i_block[EXT2_N_BLOCKS];/* Pointers to blocks */
-	__u32	i_version;	/* File version (for NFS) */
+	__u32	i_generation;	/* File version (for NFS) */
 	__u32	i_file_acl;	/* File ACL */
 	__u32	i_dir_acl;	/* Directory ACL */
 	__u32	i_faddr;	/* Fragment address */
@@ -504,6 +504,10 @@ struct ext2_dir_entry_2 {
 					 ~EXT2_DIR_ROUND)
 
 #ifdef __KERNEL__
+
+/* Filesize hard limits for 64-bit file offsets */
+extern long long ext2_max_sizes[];
+
 /*
  * Function prototypes
  */
@@ -542,6 +546,7 @@ extern int ext2_check_dir_entry (const char *, struct inode *,
 /* file.c */
 extern int ext2_read (struct inode *, struct file *, char *, int);
 extern int ext2_write (struct inode *, struct file *, char *, int);
+extern void ext2_remove_suid (struct inode *); 
 
 /* fsync.c */
 extern int ext2_sync_file (struct file *, struct dentry *);
@@ -564,6 +569,7 @@ extern void ext2_write_inode (struct inode *);
 extern void ext2_put_inode (struct inode *);
 extern void ext2_delete_inode (struct inode *);
 extern int ext2_sync_inode (struct inode *);
+extern int ext2_notify_change(struct dentry *, struct iattr *);
 extern void ext2_discard_prealloc (struct inode *);
 
 /* ioctl.c */
@@ -572,7 +578,7 @@ extern int ext2_ioctl (struct inode *, struct file *, unsigned int,
 
 /* namei.c */
 extern void ext2_release (struct inode *, struct file *);
-extern int ext2_lookup (struct inode *, struct dentry *);
+extern struct dentry *ext2_lookup (struct inode *, struct dentry *);
 extern int ext2_create (struct inode *,struct dentry *,int);
 extern int ext2_mkdir (struct inode *,struct dentry *,int);
 extern int ext2_rmdir (struct inode *,struct dentry *);

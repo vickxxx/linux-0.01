@@ -25,24 +25,25 @@
 #include <asm/processor.h>
 #include <asm/nvram.h>
 #include <asm/prom.h>
-#include "time.h"
+#include <asm/time.h>
 
 static int nvram_as1 = NVRAM_AS1;
 static int nvram_as0 = NVRAM_AS0;
 static int nvram_data = NVRAM_DATA;
 
-__initfunc(void chrp_time_init(void))
+__initfunc(long chrp_time_init(void))
 {
 	struct device_node *rtcs;
 	int base;
 
 	rtcs = find_compatible_devices("rtc", "pnpPNP,b00");
 	if (rtcs == NULL || rtcs->addrs == NULL)
-		return;
+		return 0;
 	base = rtcs->addrs[0].address;
 	nvram_as1 = 0;
 	nvram_as0 = base;
 	nvram_data = base + 1;
+	return 0;
 }
 
 int chrp_cmos_clock_read(int addr)
@@ -154,7 +155,8 @@ unsigned long chrp_get_rtc_time(void)
 __initfunc(void chrp_calibrate_decr(void))
 {
 	struct device_node *cpu;
-	int freq, *fp, divisor;
+	int *fp, divisor;
+	unsigned long freq;
 
 	if (via_calibrate_decr())
 		return;
@@ -170,10 +172,9 @@ __initfunc(void chrp_calibrate_decr(void))
 		if (fp != 0)
 			freq = *fp;
 	}
-
 	freq *= 60;	/* try to make freq/1e6 an integer */
         divisor = 60;
-        printk("time_init: decrementer frequency = %d/%d\n", freq, divisor);
+        printk("time_init: decrementer frequency = %lu/%d\n", freq, divisor);
         decrementer_count = freq / HZ / divisor;
         count_period_num = divisor;
         count_period_den = freq / 1000000;

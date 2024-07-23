@@ -6,10 +6,10 @@
  * Status:        Experimental.
  * Author:        Paul VanderSpek
  * Created at:    Thu Nov 19 13:55:34 1998
- * Modified at:   Thu Dec 10 14:06:18 1998
+ * Modified at:   Tue Jan 11 13:08:19 2000
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1998 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 1998-2000 Dag Brattli, All Rights Reserved.
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -150,9 +150,43 @@
 #define IRM_CR_IRX_MSL	0x40
 #define IRM_CR_AF_MNT   0x80 /* Automatic format */
 
+/* For storing entries in the status FIFO */
+struct st_fifo_entry {
+	int status;
+	int len;
+};
+
+struct st_fifo {
+	struct st_fifo_entry entries[10];
+	int head;
+	int tail;
+	int len;
+};
+
+/* Private data for each instance */
+struct w83977af_ir {
+	struct st_fifo st_fifo;
+
+	int tx_buff_offsets[10]; /* Offsets between frames in tx_buff */
+	int tx_len;          /* Number of frames in tx_buff */
+
+	struct device *netdev; /* Yes! we are some kind of netdevice */
+	struct net_device_stats stats;
+	
+	struct irlap_cb    *irlap; /* The link layer we are binded to */
+	struct qos_info     qos;   /* QoS capabilities for this device */
+	
+	chipio_t io;               /* IrDA controller information */
+	iobuff_t tx_buff;          /* Transmit buffer */
+	iobuff_t rx_buff;          /* Receive buffer */
+	
+	__u32 flags;               /* Interface flags */
+	__u32 new_speed;
+};
+
 static inline void switch_bank( int iobase, int set)
 {
-	outb( set, iobase+SSR);
+	outb(set, iobase+SSR);
 }
 
 #endif

@@ -1,4 +1,4 @@
-/* $Id: cgsixfb.c,v 1.12 1998/11/27 00:02:04 anton Exp $
+/* $Id: cgsixfb.c,v 1.16.2.2 1999/09/28 15:59:55 davem Exp $
  * cgsixfb.c: CGsix (GX,GXplus) frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -231,9 +231,11 @@ static void cg6_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct cg6_fbc *fbc = fb->s.cg6.fbc;
+	unsigned long flags;
 	int x, y, w, h;
 	int i;
 	
+	spin_lock_irqsave(&fb->lock, flags);
 	do {
 		i = fbc->s;
 	} while (i & 0x10000000);
@@ -262,6 +264,7 @@ static void cg6_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 	do {
 		i = fbc->draw;
 	} while (i < 0 && (i & 0x20000000));
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_fill(struct fb_info_sbusfb *fb, struct display *p, int s,
@@ -269,7 +272,9 @@ static void cg6_fill(struct fb_info_sbusfb *fb, struct display *p, int s,
 {
 	int i;
 	register struct cg6_fbc *fbc = fb->s.cg6.fbc;
+	unsigned long flags;
 	
+	spin_lock_irqsave(&fb->lock, flags);
 	do {
 		i = fbc->s;
 	} while (i & 0x10000000);
@@ -290,15 +295,18 @@ static void cg6_fill(struct fb_info_sbusfb *fb, struct display *p, int s,
 			i = fbc->draw;
 		} while (i < 0 && (i & 0x20000000));
 	}
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_putc(struct vc_data *conp, struct display *p, int c, int yy, int xx)
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct cg6_fbc *fbc = fb->s.cg6.fbc;
+	unsigned long flags;
 	int i, x, y;
 	u8 *fd;
 
+	spin_lock_irqsave(&fb->lock, flags);
 	if (fontheightlog(p)) {
 		y = fb->y_margin + (yy << fontheightlog(p));
 		i = ((c & p->charmask) << fontheightlog(p));
@@ -339,6 +347,7 @@ static void cg6_putc(struct vc_data *conp, struct display *p, int c, int yy, int
 			fd += 2;
 		}
 	}
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned short *s,
@@ -346,14 +355,16 @@ static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 {
 	struct fb_info_sbusfb *fb = (struct fb_info_sbusfb *)p->fb_info;
 	register struct cg6_fbc *fbc = fb->s.cg6.fbc;
+	unsigned long flags;
 	int i, x, y;
 	u8 *fd1, *fd2, *fd3, *fd4;
 
+	spin_lock_irqsave(&fb->lock, flags);
 	do {
 		i = fbc->s;
 	} while (i & 0x10000000);
-	fbc->fg = attr_fgcol(p,*s);
-	fbc->bg = attr_bgcol(p,*s);
+	fbc->fg = attr_fgcol(p, scr_readw(s));
+	fbc->bg = attr_bgcol(p, scr_readw(s));
 	fbc->mode = 0x140000;
 	fbc->alu = 0xe880fc30;
 	fbc->pixelm = ~(0);
@@ -379,15 +390,15 @@ static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 			fbc->x1 = (x += 4 * fontwidth(p)) - 1;
 			fbc->y0 = y;
 			if (fontheightlog(p)) {
-				fd1 = p->fontdata + ((*s++ & p->charmask) << fontheightlog(p));
-				fd2 = p->fontdata + ((*s++ & p->charmask) << fontheightlog(p));
-				fd3 = p->fontdata + ((*s++ & p->charmask) << fontheightlog(p));
-				fd4 = p->fontdata + ((*s++ & p->charmask) << fontheightlog(p));
+				fd1 = p->fontdata + ((scr_readw(s++) & p->charmask) << fontheightlog(p));
+				fd2 = p->fontdata + ((scr_readw(s++) & p->charmask) << fontheightlog(p));
+				fd3 = p->fontdata + ((scr_readw(s++) & p->charmask) << fontheightlog(p));
+				fd4 = p->fontdata + ((scr_readw(s++) & p->charmask) << fontheightlog(p));
 			} else {
-				fd1 = p->fontdata + ((*s++ & p->charmask) * fontheight(p));
-				fd2 = p->fontdata + ((*s++ & p->charmask) * fontheight(p));
-				fd3 = p->fontdata + ((*s++ & p->charmask) * fontheight(p));
-				fd4 = p->fontdata + ((*s++ & p->charmask) * fontheight(p));
+				fd1 = p->fontdata + ((scr_readw(s++) & p->charmask) * fontheight(p));
+				fd2 = p->fontdata + ((scr_readw(s++) & p->charmask) * fontheight(p));
+				fd3 = p->fontdata + ((scr_readw(s++) & p->charmask) * fontheight(p));
+				fd4 = p->fontdata + ((scr_readw(s++) & p->charmask) * fontheight(p));
 			}
 			if (fontwidth(p) == 8) {
 				for (i = 0; i < fontheight(p); i++)
@@ -408,11 +419,11 @@ static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 			fbc->x1 = (x += 2 * fontwidth(p)) - 1;
 			fbc->y0 = y;
 			if (fontheightlog(p)) {
-				fd1 = p->fontdata + ((*s++ & p->charmask) << (fontheightlog(p) + 1));
-				fd2 = p->fontdata + ((*s++ & p->charmask) << (fontheightlog(p) + 1));
+				fd1 = p->fontdata + ((scr_readw(s++) & p->charmask) << (fontheightlog(p) + 1));
+				fd2 = p->fontdata + ((scr_readw(s++) & p->charmask) << (fontheightlog(p) + 1));
 			} else {
-				fd1 = p->fontdata + (((*s++ & p->charmask) * fontheight(p)) << 1);
-				fd2 = p->fontdata + (((*s++ & p->charmask) * fontheight(p)) << 1);
+				fd1 = p->fontdata + (((scr_readw(s++) & p->charmask) * fontheight(p)) << 1);
+				fd2 = p->fontdata + (((scr_readw(s++) & p->charmask) * fontheight(p)) << 1);
 			}
 			for (i = 0; i < fontheight(p); i++) {
 				fbc->font = ((((u32)*(u16 *)fd1) << fontwidth(p)) | ((u32)*(u16 *)fd2)) << (16 - fontwidth(p));
@@ -428,9 +439,9 @@ static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 		fbc->x1 = (x += fontwidth(p)) - 1;
 		fbc->y0 = y;
 		if (fontheightlog(p))
-			i = ((*s++ & p->charmask) << fontheightlog(p));
+			i = ((scr_readw(s++) & p->charmask) << fontheightlog(p));
 		else
-			i = ((*s++ & p->charmask) * fontheight(p));
+			i = ((scr_readw(s++) & p->charmask) * fontheight(p));
 		if (fontwidth(p) <= 8) {
 			fd1 = p->fontdata + i;
 			for (i = 0; i < fontheight(p); i++)
@@ -443,6 +454,7 @@ static void cg6_putcs(struct vc_data *conp, struct display *p, const unsigned sh
 			}
 		}
 	}
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_revc(struct display *p, int xx, int yy)
@@ -453,24 +465,30 @@ static void cg6_revc(struct display *p, int xx, int yy)
 static void cg6_loadcmap (struct fb_info_sbusfb *fb, struct display *p, int index, int count)
 {
 	struct bt_regs *bt = fb->s.cg6.bt;
+	unsigned long flags;
 	int i;
                 
+	spin_lock_irqsave(&fb->lock, flags);
 	bt->addr = index << 24;
 	for (i = index; count--; i++){
 		bt->color_map = fb->color_map CM(i,0) << 24;
 		bt->color_map = fb->color_map CM(i,1) << 24;
 		bt->color_map = fb->color_map CM(i,2) << 24;
 	}
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_restore_palette (struct fb_info_sbusfb *fb)
 {
 	struct bt_regs *bt = fb->s.cg6.bt;
+	unsigned long flags;
                 
+	spin_lock_irqsave(&fb->lock, flags);
 	bt->addr = 0;
 	bt->color_map = 0xffffffff;
 	bt->color_map = 0xffffffff;
 	bt->color_map = 0xffffffff;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static struct display_switch cg6_dispsw __initdata = {
@@ -481,7 +499,9 @@ static struct display_switch cg6_dispsw __initdata = {
 static void cg6_setcursormap (struct fb_info_sbusfb *fb, u8 *red, u8 *green, u8 *blue)
 {
         struct bt_regs *bt = fb->s.cg6.bt;
+	unsigned long flags;
         
+	spin_lock_irqsave(&fb->lock, flags);
 	bt->addr = 1 << 24;
 	bt->cursor = red[0] << 24;
 	bt->cursor = green[0] << 24;
@@ -490,26 +510,32 @@ static void cg6_setcursormap (struct fb_info_sbusfb *fb, u8 *red, u8 *green, u8 
 	bt->cursor = red[1] << 24;
 	bt->cursor = green[1] << 24;
 	bt->cursor = blue[1] << 24;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 /* Set cursor shape */
 static void cg6_setcurshape (struct fb_info_sbusfb *fb)
 {
 	struct cg6_thc *thc = fb->s.cg6.thc;
+	unsigned long flags;
 	int i;
 
+	spin_lock_irqsave(&fb->lock, flags);
 	for (i = 0; i < 32; i++) {
 		thc->thc_cursmask [i] = fb->cursor.bits[0][i];
 		thc->thc_cursbits [i] = fb->cursor.bits[1][i];
 	}
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 /* Load cursor information */
 static void cg6_setcursor (struct fb_info_sbusfb *fb)
 {
 	unsigned int v;
+	unsigned long flags;
 	struct cg_cursor *c = &fb->cursor;
 
+	spin_lock_irqsave(&fb->lock, flags);
 	if (c->enable)
 		v = ((c->cpos.fbx - c->chot.fbx) << 16)
 		    |((c->cpos.fby - c->chot.fby) & 0xffff);
@@ -517,16 +543,25 @@ static void cg6_setcursor (struct fb_info_sbusfb *fb)
 		/* Magic constant to turn off the cursor */
 		v = ((65536-32) << 16) | (65536-32);
 	fb->s.cg6.thc->thc_cursxy = v;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_blank (struct fb_info_sbusfb *fb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.cg6.thc->thc_misc &= ~CG6_THC_MISC_VIDEO;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_unblank (struct fb_info_sbusfb *fb)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&fb->lock, flags);
 	fb->s.cg6.thc->thc_misc |= CG6_THC_MISC_VIDEO;
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_reset (struct fb_info_sbusfb *fb)
@@ -534,8 +569,12 @@ static void cg6_reset (struct fb_info_sbusfb *fb)
 	unsigned int rev, conf;
 	struct cg6_tec *tec = fb->s.cg6.tec;
 	struct cg6_fbc *fbc = fb->s.cg6.fbc;
+	unsigned long flags;
 	u32 mode;
+	int i;
 	
+	spin_lock_irqsave(&fb->lock, flags);
+
 	/* Turn off stuff in the Transform Engine. */
 	tec->tec_matrix = 0;
 	tec->tec_clip = 0;
@@ -557,6 +596,9 @@ static void cg6_reset (struct fb_info_sbusfb *fb)
 	 * back to back store/loads on the mode register, so copy it
 	 * out instead. */
 	mode = fbc->mode;
+	do {
+		i = fbc->s;
+	} while (i & 0x10000000);
 	mode &= ~(CG6_FBC_BLIT_MASK | CG6_FBC_MODE_MASK |
 		       CG6_FBC_DRAW_MASK | CG6_FBC_BWRITE0_MASK |
 		       CG6_FBC_BWRITE1_MASK | CG6_FBC_BREAD_MASK |
@@ -577,6 +619,8 @@ static void cg6_reset (struct fb_info_sbusfb *fb)
 	/* Enable cursor in Brooktree DAC. */
 	fb->s.cg6.bt->addr = 0x06 << 24;
 	fb->s.cg6.bt->control |= 0x03 << 24;
+
+	spin_unlock_irqrestore(&fb->lock, flags);
 }
 
 static void cg6_margins (struct fb_info_sbusfb *fb, struct display *p, int x_margin, int y_margin)
@@ -584,7 +628,7 @@ static void cg6_margins (struct fb_info_sbusfb *fb, struct display *p, int x_mar
 	p->screen_base += (y_margin - fb->y_margin) * p->line_length + (x_margin - fb->x_margin);
 }
 
-static char idstring[60] __initdata = { 0 };
+static char idstring[70] __initdata = { 0 };
 
 __initfunc(char *cgsixfb_init(struct fb_info_sbusfb *fb))
 {
@@ -595,6 +639,7 @@ __initfunc(char *cgsixfb_init(struct fb_info_sbusfb *fb))
 	unsigned long phys = fb->sbdp->reg_addrs[0].phys_addr;
 	u32 conf;
 	char *p;
+	char *cardtype;
 	struct bt_regs *bt;
 
 	strcpy(fb->info.modename, "CGsix");
@@ -652,15 +697,29 @@ __initfunc(char *cgsixfb_init(struct fb_info_sbusfb *fb))
 	case CG6_FHC_CPU_68020: p = "68020"; break;
 	default: p = "i386"; break;
 	}
+
+	if (((conf >> CG6_FHC_REV_SHIFT) & CG6_FHC_REV_MASK) >= 11) {
+		if (fix->smem_len <= 0x100000) {
+			cardtype = "TurboGX";
+		} else {
+			cardtype = "TurboGX+";
+		}
+	} else {
+		if (fix->smem_len <= 0x100000) {
+			cardtype = "GX";
+		} else {
+			cardtype = "GX+";
+		}
+	}
 	                                                                        
 	sprintf(idstring, 
 #ifdef __sparc_v9__
-		    "cgsix at %016lx TEC Rev %x CPU %s Rev %x", phys, 
+		    "cgsix at %016lx TEC Rev %x CPU %s Rev %x [%s]", phys, 
 #else	
-		    "cgsix at %x.%08lx TEC Rev %x CPU %s Rev %x", fb->iospace, phys, 
+		    "cgsix at %x.%08lx TEC Rev %x CPU %s Rev %x [%s]", fb->iospace, phys, 
 #endif
 		    (fb->s.cg6.thc->thc_misc >> CG6_THC_MISC_REV_SHIFT) & CG6_THC_MISC_REV_MASK,
-		    p, conf >> CG6_FHC_REV_SHIFT & CG6_FHC_REV_MASK);
+		    p, conf >> CG6_FHC_REV_SHIFT & CG6_FHC_REV_MASK, cardtype);
 		    
 	cg6_reset(fb);
 		    

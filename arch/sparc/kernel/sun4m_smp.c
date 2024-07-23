@@ -93,6 +93,14 @@ __initfunc(void smp4m_callin(void))
 	local_flush_cache_all();
 	local_flush_tlb_all();
 
+	/*
+	 * Unblock the master CPU _only_ when the scheduler state
+	 * of all secondary CPUs will be up-to-date, so after
+	 * the SMP initialization the master will be just allowed
+	 * to call the scheduler code.
+	 */
+	init_idle();
+
 	/* Allow master to continue. */
 	swap((unsigned long *)&cpu_callin_map[cpuid], 1);
 	local_flush_cache_all();
@@ -161,6 +169,7 @@ __initfunc(void smp4m_boot_cpus(void))
 	smp_store_cpu_info(boot_cpu_id);
 	set_irq_udt(mid_xlate[boot_cpu_id]);
 	smp_setup_percpu_timer();
+	init_idle();
 	local_flush_cache_all();
 	if(linux_num_cpus == 1)
 		return;  /* Not an MP box. */
@@ -180,6 +189,7 @@ __initfunc(void smp4m_boot_cpus(void))
 			p = task[++cpucount];
 
 			p->processor = i;
+			p->has_cpu = 1; /* we schedule the first task manually */
 			current_set[i] = p;
 
 			/* See trampoline.S for details... */
@@ -233,8 +243,8 @@ __initfunc(void smp4m_boot_cpus(void))
 		}
 		printk("Total of %d Processors activated (%lu.%02lu BogoMIPS).\n",
 		       cpucount + 1,
-		       (bogosum + 2500)/500000,
-		       ((bogosum + 2500)/5000)%100);
+		       bogosum/(500000/HZ),
+		       (bogosum/(5000/HZ))%100);
 		smp_activated = 1;
 		smp_num_cpus = cpucount + 1;
 	}
@@ -448,6 +458,7 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 	if(!--prof_counter[cpu]) {
 		int user = user_mode(regs);
 
+		irq_enter(cpu, 0);
 		if(current->pid) {
 			update_one_process(current, 1, user, !user, cpu);
 
@@ -456,7 +467,6 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 				current->need_resched = 1;
 			}
 
-			spin_lock(&ticker_lock);
 			if(user) {
 				if(current->priority < DEF_PRIORITY) {
 					kstat.cpu_nice++;
@@ -469,9 +479,9 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 				kstat.cpu_system++;
 				kstat.per_cpu_system[cpu]++;
 			}
-			spin_unlock(&ticker_lock);
 		}
 		prof_counter[cpu] = prof_multiplier[cpu];
+		irq_exit(cpu, 0);
 	}
 }
 

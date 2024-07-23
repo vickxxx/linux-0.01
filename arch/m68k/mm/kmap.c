@@ -7,6 +7,7 @@
  *	     used by other architectures		/Roman Zippel
  */
 
+#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -24,6 +25,7 @@
 #undef DEBUG
 
 #define PTRTREESIZE	(256*1024)
+#define ROOTTREESIZE (32*1024*1024)
 
 /*
  * For 040/060 we can use the virtual memory area like other architectures,
@@ -116,6 +118,14 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 	if (!size || size > physaddr + size)
 		return NULL;
 
+#ifdef CONFIG_AMIGA
+	if (MACH_IS_AMIGA) {
+		if ((physaddr >= 0x40000000) && (physaddr + size < 0x60000000)
+		    && (cacheflag == IOMAP_NOCACHE_SER))
+			return (void *)physaddr;
+	}
+#endif
+
 #ifdef DEBUG
 	printk("ioremap: 0x%lx,0x%lx(%d) - ", physaddr, size, cacheflag);
 #endif
@@ -174,25 +184,41 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 		}
 	}
 
-	while (size > 0) {
+	while ((long)size > 0) {
 #ifdef DEBUG
 		if (!(virtaddr & (PTRTREESIZE-1)))
 			printk ("\npa=%#lx va=%#lx ", physaddr, virtaddr);
 #endif
 		pgd_dir = pgd_offset_k(virtaddr);
-		pmd_dir = pmd_alloc_kernel(pgd_dir, virtaddr);
+		if (CPU_IS_020_OR_030) {
+			if (!(virtaddr & (ROOTTREESIZE-1)) &&
+			    size >= ROOTTREESIZE) {
+				pgd_val(*pgd_dir) = physaddr;
+				size -= ROOTTREESIZE;
+				virtaddr += ROOTTREESIZE;
+				physaddr += ROOTTREESIZE;
+				continue;
+			}
+		}
+		if (!pgd_present(*pgd_dir))
+			pmd_dir = pmd_alloc_kernel(pgd_dir, virtaddr);
+		else
+			pmd_dir = pmd_offset(pgd_dir, virtaddr);
 		if (!pmd_dir) {
 			printk("ioremap: no mem for pmd_dir\n");
 			return NULL;
 		}
 
 		if (CPU_IS_020_OR_030) {
-			pmd_dir->pmd[(virtaddr/PTRTREESIZE)&-16] = physaddr;
+			pmd_dir->pmd[(virtaddr/PTRTREESIZE) & 15] = physaddr;
 			physaddr += PTRTREESIZE;
 			virtaddr += PTRTREESIZE;
 			size -= PTRTREESIZE;
 		} else {
-			pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
+			if (!pmd_present(*pmd_dir))
+				pte_dir = pte_alloc_kernel(pmd_dir, virtaddr);
+			else
+				pte_dir = pte_offset(pmd_dir, virtaddr);
 			if (!pte_dir) {
 				printk("ioremap: no mem for pte_dir\n");
 				return NULL;
@@ -217,7 +243,14 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
  */
 void iounmap(void *addr)
 {
+#ifdef CONFIG_AMIGA
+	if ((!MACH_IS_AMIGA) ||
+	    (((unsigned long)addr < 0x40000000) ||
+	     ((unsigned long)addr > 0x60000000)))
+			free_io_area(addr);
+#else
 	free_io_area(addr);
+#endif
 }
 
 /*
@@ -232,7 +265,7 @@ void __iounmap(void *addr, unsigned long size)
 	pmd_t *pmd_dir;
 	pte_t *pte_dir;
 
-	while (size > 0) {
+	while ((long)size > 0) {
 		pgd_dir = pgd_offset_k(virtaddr);
 		if (pgd_bad(*pgd_dir)) {
 			printk("iounmap: bad pgd(%08lx)\n", pgd_val(*pgd_dir));
@@ -242,7 +275,7 @@ void __iounmap(void *addr, unsigned long size)
 		pmd_dir = pmd_offset(pgd_dir, virtaddr);
 
 		if (CPU_IS_020_OR_030) {
-			int pmd_off = (virtaddr/PTRTREESIZE) & -16;
+			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
 
 			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
 				pmd_dir->pmd[pmd_off] = 0;
@@ -308,7 +341,7 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 		}
 	}
 
-	while (size > 0) {
+	while ((long)size > 0) {
 		pgd_dir = pgd_offset_k(virtaddr);
 		if (pgd_bad(*pgd_dir)) {
 			printk("iocachemode: bad pgd(%08lx)\n", pgd_val(*pgd_dir));
@@ -318,7 +351,7 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 		pmd_dir = pmd_offset(pgd_dir, virtaddr);
 
 		if (CPU_IS_020_OR_030) {
-			int pmd_off = (virtaddr/PTRTREESIZE) & -16;
+			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
 
 			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
 				pmd_dir->pmd[pmd_off] = (pmd_dir->pmd[pmd_off] &

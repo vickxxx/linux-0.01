@@ -1,12 +1,12 @@
 /*
- *	$Id: pci.c,v 1.90 1998/09/05 12:39:39 mj Exp $
+ *	$Id: pci.c,v 1.91 1999/01/21 13:34:01 davem Exp $
  *
  *	PCI Bus Services, see include/linux/pci.h for further explanation.
  *
  *	Copyright 1993 -- 1997 Drew Eckhardt, Frederic Potter,
  *	David Mosberger-Tang
  *
- *	Copyright 1997 -- 1998 Martin Mares <mj@atrey.karlin.mff.cuni.cz>
+ *	Copyright 1997 -- 1999 Martin Mares <mj@atrey.karlin.mff.cuni.cz>
  */
 
 #include <linux/config.h>
@@ -28,9 +28,6 @@
 #endif
 
 struct pci_bus pci_root;
-#ifdef CONFIG_VISWS
-struct pci_bus pci_other;
-#endif
 struct pci_dev *pci_devices = NULL;
 static struct pci_dev **pci_last_dev_p = &pci_devices;
 static int pci_reverse __initdata = 0;
@@ -181,12 +178,15 @@ __initfunc(unsigned int pci_scan_bus(struct pci_bus *bus))
 
 		if (pcibios_read_config_dword(bus->number, devfn, PCI_VENDOR_ID, &l) ||
 		    /* some broken boards return 0 if a slot is empty: */
-		    l == 0xffffffff || l == 0x00000000 || l == 0x0000ffff || l == 0xffff0000) {
-			is_multi = 0;
+		    l == 0xffffffff || l == 0x00000000 || l == 0x0000ffff || l == 0xffff0000)
 			continue;
-		}
 
 		dev = kmalloc(sizeof(*dev), GFP_ATOMIC);
+		if(dev==NULL)
+		{
+			printk(KERN_ERR "pci: out of memory.\n");
+			continue;
+		}
 		memset(dev, 0, sizeof(*dev));
 		dev->bus = bus;
 		dev->devfn  = devfn;
@@ -282,6 +282,14 @@ __initfunc(unsigned int pci_scan_bus(struct pci_bus *bus))
 	 * all PCI-to-PCI bridges on this bus.
 	 */
 	pcibios_fixup_bus(bus);
+	/*
+	 * The fixup code may have just found some peer pci bridges on this
+	 * machine.  Update the max variable if that happened so we don't
+	 * get duplicate bus numbers.
+	 */
+	for(child=&pci_root; child; child=child->next)
+		max=((max > child->subordinate) ? max : child->subordinate);
+
 	for(dev=bus->devices; dev; dev=dev->sibling)
 		/*
 		 * If it's a bridge, scan the bus behind it.
@@ -292,9 +300,46 @@ __initfunc(unsigned int pci_scan_bus(struct pci_bus *bus))
 			unsigned short cr;
 
 			/*
+			 * Check for a duplicate bus.  If we already scanned
+			 * this bus number as a peer bus, don't also scan it
+			 * as a child bus
+			 */
+			if(
+			   ((dev->vendor == PCI_VENDOR_ID_SERVERWORKS) &&
+			    ((dev->device == PCI_DEVICE_ID_SERVERWORKS_HE) ||
+			     (dev->device == PCI_DEVICE_ID_SERVERWORKS_LE) ||
+			     (dev->device == PCI_DEVICE_ID_SERVERWORKS_CMIC_HE))) ||
+			   ((dev->vendor == PCI_VENDOR_ID_COMPAQ) &&
+			    (dev->device == PCI_DEVICE_ID_COMPAQ_6010)) ||
+			   ((dev->vendor == PCI_VENDOR_ID_INTEL) &&
+			    ((dev->device == PCI_DEVICE_ID_INTEL_82454NX) ||
+			     (dev->device == PCI_DEVICE_ID_INTEL_82451NX)))
+			  )
+				goto skip_it;
+			/*
+			 * Read the existing primary/secondary/subordinate bus
+			 * number configuration to determine if the PCI bridge
+			 * has already been configured by the system.  If so,
+			 * check to see if we've already scanned this bus as
+			 * a result of peer bus scanning, if so, skip this.
+			 */
+			pcibios_read_config_dword(bus->number, devfn, PCI_PRIMARY_BUS, &buses);
+			if ((buses & 0xFFFFFF) != 0)
+			  {
+			    for(child=pci_root.next;child;child=child->next)
+				if(child->number == ((buses >> 8) & 0xff))
+				    goto skip_it;
+			  }
+			
+			/*
 			 * Insert it into the tree of buses.
 			 */
 			child = kmalloc(sizeof(*child), GFP_ATOMIC);
+			if(child==NULL)
+			{
+				printk(KERN_ERR "pci: out of memory for bridge.\n");
+				continue;
+			}
 			memset(child, 0, sizeof(*child));
 			child->next = bus->children;
 			bus->children = child;
@@ -358,6 +403,7 @@ __initfunc(unsigned int pci_scan_bus(struct pci_bus *bus))
 			    pcibios_write_config_dword(bus->number, devfn, PCI_PRIMARY_BUS, buses);
 			  }
 			pcibios_write_config_word(bus->number, devfn, PCI_COMMAND, cr);
+skip_it:
 		}
 
 	/*
@@ -371,6 +417,24 @@ __initfunc(unsigned int pci_scan_bus(struct pci_bus *bus))
 	return max;
 }
 
+struct pci_bus * __init pci_scan_peer_bridge(int bus)
+{
+	struct pci_bus *b;
+
+	b = &pci_root;
+	while((b != NULL) && (bus != 0)) {
+		if(b->number == bus)
+			return(b);
+		b = b->next;
+	}
+	b = kmalloc(sizeof(*b), GFP_KERNEL);
+	memset(b, 0, sizeof(*b));
+	b->next = pci_root.next;
+	pci_root.next = b;
+	b->number = b->secondary = bus;
+	b->subordinate = pci_scan_bus(b);
+	return b;
+}
 
 __initfunc(void pci_init(void))
 {
@@ -385,11 +449,6 @@ __initfunc(void pci_init(void))
 
 	memset(&pci_root, 0, sizeof(pci_root));
 	pci_root.subordinate = pci_scan_bus(&pci_root);
-#ifdef CONFIG_VISWS
-	pci_other.number = 1; /* XXX unless bridge(s) on pci_root */
-	pci_other.subordinate = pci_scan_bus(&pci_other);
-	pci_root.next = &pci_other;
-#endif
 
 	/* give BIOS a chance to apply platform specific fixes: */
 	pcibios_fixup();
@@ -402,7 +461,6 @@ __initfunc(void pci_init(void))
 	pci_proc_init();
 #endif
 }
-
 
 __initfunc(void pci_setup (char *str, int *ints))
 {

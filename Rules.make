@@ -61,6 +61,9 @@ first_rule: sub_dirs
 %.o: %.s
 	$(AS) $(ASFLAGS) $(EXTRA_CFLAGS) -o $@ $<
 
+%.lst: %.c
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS_$@) -g -c -o $*.o $<
+	$(TOPDIR)/scripts/makelst $* $(TOPDIR) $(OBJDUMP)
 #
 #
 #
@@ -74,7 +77,7 @@ ALL_O = $(OX_OBJS) $(O_OBJS)
 $(O_TARGET): $(ALL_O)
 	rm -f $@
 ifneq "$(strip $(ALL_O))" ""
-	$(LD) $(EXTRA_LDFLAGS) -r -o $@ $(ALL_O)
+	$(LD) $(EXTRA_LDFLAGS) -r -o $@ $(filter $(ALL_O), $^)
 else
 	$(AR) rcs $@
 endif
@@ -201,6 +204,18 @@ ifdef CONFIG_SMP
 	genksyms_smp_prefix := -p smp_
 else
 	genksyms_smp_prefix := 
+endif
+
+#
+#	Differ 1 and 2Gig kernels to avoid module misload errors
+#
+
+ifdef CONFIG_2GB
+ifdef CONFIG_SMP
+	genksyms_smp_prefix := -p smp2gig_
+else
+	genksyms_smp_prefix := -p 2gig_
+endif
 endif
 
 $(MODINCL)/%.ver: %.c

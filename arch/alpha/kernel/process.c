@@ -55,7 +55,6 @@
 unsigned long init_user_stack[1024] = { STACK_MAGIC, };
 static struct vm_area_struct init_mmap = INIT_MMAP;
 static struct fs_struct init_fs = INIT_FS;
-static struct file * init_fd_array[NR_OPEN] = { NULL, };
 static struct files_struct init_files = INIT_FILES;
 static struct signal_struct init_signals = INIT_SIGNALS;
 struct mm_struct init_mm = INIT_MM;
@@ -75,86 +74,86 @@ sys_sethae(unsigned long hae, unsigned long a1, unsigned long a2,
 	return 0;
 }
 
-static void __attribute__((noreturn))
-do_cpu_idle(void)
+#ifdef __SMP__
+int
+cpu_idle(void *unused)
 {
 	/* An endless idle loop with no priority at all.  */
 	current->priority = 0;
-	while (1) {
-		check_pgt_cache();
-		run_task_queue(&tq_scheduler);
-		current->counter = 0;
-		schedule();
-	}
-}
+	current->counter = -100;
 
-#ifdef __SMP__
-void
-cpu_idle(void *unused)
-{
-	do_cpu_idle();
+	while (1) {
+		/* FIXME -- EV6 and LCA45 know how to power down
+		   the CPU.  */
+
+		/* Although we are an idle CPU, we do not want to 
+		   get into the scheduler unnecessarily.  */
+		barrier();
+		if (current->need_resched) {
+			schedule();
+			check_pgt_cache();
+		}
+	}
 }
 #endif
 
 asmlinkage int
 sys_idle(void)
 {
-	if (current->pid == 0)
-        	do_cpu_idle();
-	return -EPERM;
+	if (current->pid != 0)
+		return -EPERM;
+
+	/* An endless idle loop with no priority at all.  */
+	current->priority = 0;
+	current->counter = -100;
+	init_idle();
+
+	while (1) {
+		/* FIXME -- EV6 and LCA45 know how to power down
+		   the CPU.  */
+
+		schedule();
+		check_pgt_cache();
+	}
 }
 
-void
-generic_kill_arch (int mode, char *restart_cmd)
+struct halt_info {
+	int	mode;
+	char *	restart_cmd;
+};
+
+static void
+halt_processor(void * generic_ptr)
 {
-	/* The following currently only has any effect on SRM.  We should
-	   fix MILO to understand it.  Should be pretty easy.  Also we can
-	   support RESTART2 via the ipc_buffer machinations pictured below,
-	   which SRM ignores.  */
+	struct percpu_struct * cpup;
+	struct halt_info * how = (struct halt_info *)generic_ptr;
+	unsigned long *flags;
+	int cpuid = smp_processor_id();
 
-	if (alpha_using_srm) {
-		struct percpu_struct *cpup;
-		unsigned long flags;
-	
-		cpup = (struct percpu_struct *)
-		  ((unsigned long)hwrpb + hwrpb->processor_offset);
+	/* No point in taking interrupts anymore. */
+	__cli();
 
-		flags = cpup->flags;
+	cpup = (struct percpu_struct *)
+			((unsigned long)hwrpb + hwrpb->processor_offset
+			 + hwrpb->processor_size * cpuid);
+	flags = &cpup->flags;
 
-		/* Clear reason to "default"; clear "bootstrap in progress". */
-		flags &= ~0x00ff0001UL;
+	/* Clear reason to "default"; clear "bootstrap in progress". */
+	*flags &= ~0x00ff0001UL;
 
-		if (mode == LINUX_REBOOT_CMD_RESTART) {
-			if (!restart_cmd) {
-				flags |= 0x00020000UL; /* "cold bootstrap" */
-				cpup->ipc_buffer[0] = 0;
-			} else {
-				flags |=  0x00030000UL; /* "warm bootstrap" */
-				strncpy((char *)cpup->ipc_buffer, restart_cmd,
-					sizeof(cpup->ipc_buffer));
-			}
-		} else {
-			flags |=  0x00040000UL; /* "remain halted" */
-		}
-			
-		cpup->flags = flags;					       
-		mb();						
-
-		reset_for_srm();
-		set_hae(srm_hae);
-
-#ifdef CONFIG_DUMMY_CONSOLE
-		/* This has the effect of reseting the VGA video origin.  */
-		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
-#endif
+#ifdef __SMP__
+	/* Secondaries halt here. */
+	if (cpuid != smp_boot_cpuid) {
+		*flags |= 0x00040000UL; /* "remain halted" */
+		clear_bit(cpuid, &cpu_present_mask);
+		halt();
 	}
+#endif /* __SMP__ */
 
 #ifdef CONFIG_RTC
 	/* Reset rtc to defaults.  */
 	{
 		unsigned char control;
-
-		cli();
 
 		/* Reset periodic interrupt frequency.  */
 		CMOS_WRITE(0x26, RTC_FREQ_SELECT);
@@ -164,22 +163,73 @@ generic_kill_arch (int mode, char *restart_cmd)
 		control |= RTC_PIE;
 		CMOS_WRITE(control, RTC_CONTROL);	
 		CMOS_READ(RTC_INTR_FLAGS);
-
-		sti();
 	}
-#endif
+#endif /* CONFIG_RTC */
 
-	if (!alpha_using_srm && mode != LINUX_REBOOT_CMD_RESTART) {
+	if (how->mode == LINUX_REBOOT_CMD_RESTART) {
+		if (!how->restart_cmd) {
+			*flags |= 0x00020000UL; /* "cold bootstrap" */
+			cpup->ipc_buffer[0] = 0;
+		} else {
+		  /* NOTE: this could really only work when returning
+		     into MILO, rather than SRM console. The latter
+		     does NOT look at the ipc_buffer to get a new
+		     boot command. It could be done by using callbacks
+		     to change some of the SRM environment variables,
+		     but that is beyond our capabilities at this time.
+		     At the moment, SRM will use the last boot device,
+		     but the file and flags will be the defaults, when
+		     doing a "warm" bootstrap.
+		  */
+			*flags |=  0x00030000UL; /* "warm bootstrap" */
+			strncpy((char *)cpup->ipc_buffer,
+				how->restart_cmd,
+				sizeof(cpup->ipc_buffer));
+		}
+	} else
+		*flags |=  0x00040000UL; /* "remain halted" */
+
+#ifdef __SMP__
+	/* Wait for the secondaries to halt. */
+	clear_bit(smp_boot_cpuid, &cpu_present_mask);
+	while (cpu_present_mask)
+		/* Make sure we sample memory and not a register. */
+		barrier();
+#endif /* __SMP__ */
+
+        /* If booted from SRM, reset some of the original environment. */
+	if (alpha_using_srm) {
+#ifdef CONFIG_DUMMY_CONSOLE
+		/* This has the effect of resetting the VGA video origin.  */
+		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
+#endif
+		reset_for_srm();
+		set_hae(srm_hae);
+	}
+	else if (how->mode != LINUX_REBOOT_CMD_RESTART &&
+		 how->mode != LINUX_REBOOT_CMD_RESTART2) {
 		/* Unfortunately, since MILO doesn't currently understand
 		   the hwrpb bits above, we can't reliably halt the 
 		   processor and keep it halted.  So just loop.  */
 		return;
 	}
 
-	if (alpha_using_srm)
-		srm_paging_stop();
-
+	/* PRIMARY */
 	halt();
+}
+
+void
+generic_kill_arch(int mode, char * restart_cmd)
+{
+	struct halt_info copy_of_args;
+
+	copy_of_args.mode = mode;
+	copy_of_args.restart_cmd = restart_cmd;
+#ifdef __SMP__
+	/* A secondary can't wait here for the primary to finish, can it now? */
+	smp_call_function(halt_processor, (void *)&copy_of_args, 1, 0);
+#endif /* __SMP__ */
+	halt_processor(&copy_of_args);
 }
 
 void
@@ -199,8 +249,11 @@ void machine_power_off(void)
 	alpha_mv.kill_arch(LINUX_REBOOT_CMD_POWER_OFF, NULL);
 }
 
-void show_regs(struct pt_regs * regs)
+void __show_regs(struct pt_regs * regs)
 {
+	extern void dik_show_trace(unsigned long *);
+
+	printk("\nCPU: %d", smp_processor_id());
 	printk("\nps: %04lx pc: [<%016lx>]\n", regs->ps, regs->pc);
 	printk("rp: [<%016lx>] sp: %p\n", regs->r26, regs+1);
 	printk(" r0: %016lx  r1: %016lx  r2: %016lx  r3: %016lx\n",
@@ -215,6 +268,15 @@ void show_regs(struct pt_regs * regs)
 	       regs->r23, regs->r24, regs->r25, regs->r26);
 	printk("r27: %016lx r28: %016lx r29: %016lx hae: %016lx\n",
 	       regs->r27, regs->r28, regs->gp, regs->hae);
+	dik_show_trace(regs+1);
+}
+
+void show_regs(struct pt_regs * regs)
+{
+	__show_regs(regs);
+#ifdef CONFIG_SMP
+	smp_show_regs();
+#endif
 }
 
 /*
@@ -237,10 +299,10 @@ void exit_thread(void)
 
 void flush_thread(void)
 {
-	/* Arrange for each exec'ed process to start off with a 
-	   clean slate with respect to the FPU.  */
+	/* Arrange for each exec'ed process to start off with a clean slate
+	   with respect to the FPU.  This is all exceptions disabled.  */
 	current->tss.flags &= ~IEEE_SW_MASK;
-	wrfpcr(FPCR_DYN_NORMAL);
+	wrfpcr(FPCR_DYN_NORMAL | ieee_swcr_to_fpcr(0));
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -270,8 +332,6 @@ int alpha_vfork(struct switch_stack * swstack)
 			(struct pt_regs *) (swstack+1));
 }
 
-extern void ret_from_sys_call(void);
-extern void ret_from_smpfork(void);
 /*
  * Copy an alpha thread..
  *
@@ -282,9 +342,13 @@ extern void ret_from_smpfork(void);
  * Use the passed "regs" pointer to determine how much space we need
  * for a kernel fork().
  */
+
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	struct task_struct * p, struct pt_regs * regs)
 {
+	extern void ret_from_sys_call(void);
+	extern void ret_from_smp_fork(void);
+
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
 	unsigned long stack_offset;
@@ -292,18 +356,18 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack_offset = PAGE_SIZE - sizeof(struct pt_regs);
 	if (!(regs->ps & 8))
 		stack_offset = (PAGE_SIZE-1) & (unsigned long) regs;
-	childregs = (struct pt_regs *) (stack_offset + PAGE_SIZE + (unsigned long)p);
+	childregs = (struct pt_regs *) (stack_offset + PAGE_SIZE + (long)p);
 		
 	*childregs = *regs;
 	childregs->r0 = 0;
 	childregs->r19 = 0;
-	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.. */
+	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
 	regs->r20 = 0;
 	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
 #ifdef __SMP__
-	childstack->r26 = (unsigned long) ret_from_smpfork;
+	childstack->r26 = (unsigned long) ret_from_smp_fork;
 #else
 	childstack->r26 = (unsigned long) ret_from_sys_call;
 #endif
@@ -311,7 +375,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	p->tss.ksp = (unsigned long) childstack;
 	p->tss.pal_flags = 1;	/* set FEN, clear everything else */
 	p->tss.flags = current->tss.flags;
-	p->mm->context = 0;
 
 	return 0;
 }
@@ -328,10 +391,12 @@ void dump_thread(struct pt_regs * pt, struct user * dump)
 	dump->start_code  = current->mm->start_code;
 	dump->start_data  = current->mm->start_data;
 	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = (current->mm->end_code - dump->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk + (PAGE_SIZE - 1) - dump->start_data) >> PAGE_SHIFT;
-	dump->u_ssize =
-	  (current->mm->start_stack - dump->start_stack + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	dump->u_tsize = ((current->mm->end_code - dump->start_code)
+			 >> PAGE_SHIFT);
+	dump->u_dsize = ((current->mm->brk + PAGE_SIZE-1 - dump->start_data)
+			 >> PAGE_SHIFT);
+	dump->u_ssize = (current->mm->start_stack - dump->start_stack
+			 + PAGE_SIZE-1) >> PAGE_SHIFT;
 
 	/*
 	 * We store the registers in an order/format that is
@@ -410,3 +475,29 @@ out:
 	unlock_kernel();
 	return error;
 }
+
+#ifdef __SMP__
+/*
+ * execve() system call for in kernel use.
+ *
+ * Two(user and kernel) execve() have quite different call path and
+ * following function puts lock_kernel() and unlock_kernel() in kernel
+ * execve().  You could put them in unistd.h but you will have to
+ * modify many files to clear compile error -
+ *
+ * soohoon.lee@api-networks.com.  */
+
+asmlinkage int ___kernel_execve(char *filename, char **argp, char **envp,
+	struct pt_regs *regs)
+{
+	int error;
+
+	lock_kernel();
+
+	error = do_execve(filename, argp, envp, regs);
+
+	unlock_kernel();
+
+	return error;
+}
+#endif /* __SMP__ */

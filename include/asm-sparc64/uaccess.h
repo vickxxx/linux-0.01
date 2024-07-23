@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.28 1998/10/11 06:58:34 davem Exp $ */
+/* $Id: uaccess.h,v 1.29.2.1 1999/09/10 09:54:38 davem Exp $ */
 #ifndef _ASM_UACCESS_H
 #define _ASM_UACCESS_H
 
@@ -41,12 +41,9 @@
 
 #define segment_eq(a,b)  ((a).seg == (b).seg)
 
-extern spinlock_t scheduler_lock;
-
 #define set_fs(val)								\
 do {										\
 	if (current->tss.current_ds.seg != val.seg) {				\
-		spin_lock(&scheduler_lock);					\
 		current->tss.current_ds = (val);				\
 		if (segment_eq((val), KERNEL_DS)) {				\
 			flushw_user ();						\
@@ -56,7 +53,6 @@ do {										\
 		}								\
 		spitfire_set_secondary_context(current->tss.ctx); 		\
 		__asm__ __volatile__("flush %g6");				\
-		spin_unlock(&scheduler_lock);					\
 	}									\
 } while(0)
 
@@ -361,9 +357,8 @@ extern int __strncpy_from_user(unsigned long dest, unsigned long src, int count)
 #define strncpy_from_user(dest,src,count) \
 	__strncpy_from_user((unsigned long)(dest), (unsigned long)(src), (int)(count))
 
-extern int __strlen_user(const char *);
-
-#define strlen_user __strlen_user
+extern int __strnlen_user(const char *, long len);
+#define strnlen_user __strnlen_user
 
 #endif  /* __ASSEMBLY__ */
 

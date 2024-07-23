@@ -11,19 +11,18 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
+#include <linux/notifier.h>
 #include <linux/init.h>
 #include <linux/sysrq.h>
 #include <linux/interrupt.h>
-
-#ifdef __alpha__
-#include <asm/machvec.h>
-#endif
 
 asmlinkage void sys_sync(void);	/* it's really int */
 extern void unblank_console(void);
 extern int C_A_D;
 
 int panic_timeout = 0;
+
+struct notifier_block *panic_notifier_list = NULL;
 
 void __init panic_setup(char *str, int *ints)
 {
@@ -35,6 +34,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 {
 	static char buf[1024];
 	va_list args;
+#ifdef CONFIG_ARCH_S390
+        unsigned long caller = (unsigned long) __builtin_return_address(0);
+#endif
 
 	va_start(args, fmt);
 	vsprintf(buf, fmt, args);
@@ -52,6 +54,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 #ifdef __SMP__
 	smp_send_stop();
 #endif
+
+	notifier_call_chain(&panic_notifier_list, 0, NULL);
+
 	if (panic_timeout > 0)
 	{
 		/*
@@ -68,11 +73,15 @@ NORET_TYPE void panic(const char * fmt, ...)
 		machine_restart(NULL);
 	}
 #ifdef __sparc__
-	printk("Press L1-A to return to the boot prom\n");
+	{
+		extern int stop_a_enabled;
+		/* Make sure the user can actually press L1-A */
+		stop_a_enabled = 1;
+		printk("Press L1-A to return to the boot prom\n");
+	}
 #endif
-#ifdef __alpha__
-	if (alpha_using_srm)
-		halt();
+#ifdef CONFIG_ARCH_S390
+        disabled_wait(caller);
 #endif
 	sti();
 	for(;;) {

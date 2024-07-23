@@ -30,19 +30,6 @@
  *	serialize accesses to xtime/lost_ticks).
  */
 
-/* What about the "updated NTP code" stuff in 2.0 time.c? It's not in
- * 2.1, perhaps it should be ported, too.
- *
- * What about the BUGGY_NEPTUN_TIMER stuff in do_slow_gettimeoffset()?
- * Whatever it fixes, is it also fixed in the new code from the Jumbo
- * patch, so that that code can be used instead?
- *
- * The CPU Hz should probably be displayed in check_bugs() together
- * with the CPU vendor and type. Perhaps even only in MHz, though that
- * takes away some of the fun of the new code :)
- *
- * - Michael Krause */
-
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -60,6 +47,7 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/delay.h>
+#include <asm/msr.h>
 
 #include <linux/mc146818rtc.h>
 #include <linux/timex.h>
@@ -74,7 +62,7 @@
 #include "irq.h"
 
 
-unsigned long cpu_hz;	/* Detected as we calibrate the TSC */
+unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
 
 /* Number of usecs that the last interrupt was delayed */
 static int delay_at_last_interrupt;
@@ -86,9 +74,12 @@ static unsigned long last_tsc_low; /* lsb 32 bits of Time Stamp Counter */
  * Equal to 2^32 * (1 / (clocks per usec) ).
  * Initialized in time_init.
  */
-static unsigned long fast_gettimeoffset_quotient=0;
+unsigned long fast_gettimeoffset_quotient=0;
 
 extern rwlock_t xtime_lock;
+extern volatile unsigned long lost_ticks;
+
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 
 static inline unsigned long do_fast_gettimeoffset(void)
 {
@@ -96,8 +87,8 @@ static inline unsigned long do_fast_gettimeoffset(void)
 	register unsigned long edx asm("dx");
 
 	/* Read the Time Stamp Counter */
-	__asm__("rdtsc"
-		:"=a" (eax), "=d" (edx));
+
+	rdtsc(eax,edx);
 
 	/* .. relative to previous jiffy (32 bits is enough) */
 	eax -= last_tsc_low;	/* tsc_low delta */
@@ -123,6 +114,8 @@ static inline unsigned long do_fast_gettimeoffset(void)
 #define TICK_SIZE tick
 
 #ifndef CONFIG_X86_TSC
+
+spinlock_t i8253_lock = SPIN_LOCK_UNLOCKED;
 
 /* This function must be called with interrupts disabled 
  * It was inspired by Steve McCanne's microtime-i386 for BSD.  -- jrs
@@ -168,6 +161,8 @@ static unsigned long do_slow_gettimeoffset(void)
 	 */
 	unsigned long jiffies_t;
 
+	/* gets recalled with irq locally disabled */
+	spin_lock(&i8253_lock);
 	/* timer count may underflow right here */
 	outb_p(0x00, 0x43);	/* latch the count ASAP */
 
@@ -181,6 +176,14 @@ static unsigned long do_slow_gettimeoffset(void)
 
 	count |= inb_p(0x40) << 8;
 
+	/* VIA686a test code... reset the latch if count > max */
+ 	if (count > LATCH-1) {
+		outb_p(0x34, 0x43);
+		outb_p(LATCH & 0xff, 0x40);
+		outb(LATCH >> 8, 0x40);
+		count = LATCH - 1;
+	}	
+	
 	/*
 	 * avoiding timer inconsistencies (they are rare, but they happen)...
 	 * there are two kinds of problems that must be avoided here:
@@ -226,6 +229,7 @@ static unsigned long do_slow_gettimeoffset(void)
 		}
 	} else
 		jiffies_p = jiffies_t;
+	spin_unlock(&i8253_lock);
 
 	count_p = count;
 
@@ -249,7 +253,6 @@ static unsigned long (*do_gettimeoffset)(void) = do_slow_gettimeoffset;
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	extern volatile unsigned long lost_ticks;
 	unsigned long flags;
 	unsigned long usec, sec;
 
@@ -283,6 +286,7 @@ void do_settimeofday(struct timeval *tv)
 	 * would have done, and then undo it!
 	 */
 	tv->tv_usec -= do_gettimeoffset();
+	tv->tv_usec -= lost_ticks * (1000000 / HZ);
 
 	while (tv->tv_usec < 0) {
 		tv->tv_usec += 1000000;
@@ -292,7 +296,6 @@ void do_settimeofday(struct timeval *tv)
 	xtime = *tv;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
 	write_unlock_irq(&xtime_lock);
@@ -314,6 +317,8 @@ static int set_rtc_mmss(unsigned long nowtime)
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
 
+	/* gets recalled with irq locally disabled */
+	spin_lock(&rtc_lock);
 	save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
 	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
 
@@ -359,6 +364,7 @@ static int set_rtc_mmss(unsigned long nowtime)
 	 */
 	CMOS_WRITE(save_control, RTC_CONTROL);
 	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
+	spin_unlock(&rtc_lock);
 
 	return retval;
 }
@@ -457,12 +463,38 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		 */
 	
 		/* read Pentium cycle counter */
-		__asm__("rdtsc" : "=a" (last_tsc_low) : : "edx");
 
+		rdtscl(last_tsc_low);
+
+#if 0 /*
+       * SUBTLE: this is not necessary from here because it's implicit in the
+       * write xtime_lock.
+       */
+		spin_lock(&i8253_lock);
+#endif
 		outb_p(0x00, 0x43);     /* latch the count ASAP */
 
 		count = inb_p(0x40);    /* read the latched count */
 		count |= inb(0x40) << 8;
+
+		/* VIA686a test code... reset the latch if count > max */
+		if (count > LATCH-1) {
+			static int last_whine;
+			outb_p(0x34, 0x43);
+			outb_p(LATCH & 0xff, 0x40);
+			outb(LATCH >> 8, 0x40);
+			count = LATCH - 1;
+			if(time_after(jiffies, last_whine))
+			{
+				printk(KERN_WARNING "probable hardware bug: clock timer configuration lost - probably a VIA686a.\n");
+				printk(KERN_WARNING "probable hardware bug: restoring chip configuration.\n");
+				last_whine = jiffies + HZ;
+			}			
+		}	
+
+#if 0
+		spin_unlock(&i8253_lock);
+#endif
 
 		count = ((LATCH-1) - count) * TICK_SIZE;
 		delay_at_last_interrupt = (count + LATCH/2) / LATCH;
@@ -556,71 +588,75 @@ static struct irqaction irq0  = { timer_interrupt, SA_INTERRUPT, 0, "timer", NUL
  * device.
  */
 
+#define CALIBRATE_LATCH	(5 * LATCH)
+#define CALIBRATE_TIME	(5 * 1000020/HZ)
+
 __initfunc(static unsigned long calibrate_tsc(void))
 {
-       unsigned long retval;
+       /* Set the Gate high, disable speaker */
+	outb((inb(0x61) & ~0x02) | 0x01, 0x61);
 
-       __asm__( /* set the Gate high, program CTC channel 2 for mode 0
-		 * (interrupt on terminal count mode), binary count, 
-		 * load 5 * LATCH count, (LSB and MSB)
-		 * to begin countdown, read the TSC and busy wait.
-		 * BTW LATCH is calculated in timex.h from the HZ value
-		 */
+	/*
+	 * Now let's take care of CTC channel 2
+	 *
+	 * Set the Gate high, program CTC channel 2 for mode 0,
+	 * (interrupt on terminal count mode), binary count,
+	 * load 5 * LATCH count, (LSB and MSB) to begin countdown.
+	 */
+	outb(0xb0, 0x43);			/* binary, mode 0, LSB/MSB, Ch 2 */
+	outb(CALIBRATE_LATCH & 0xff, 0x42);	/* LSB of count */
+	outb(CALIBRATE_LATCH >> 8, 0x42);	/* MSB of count */
 
-	       /* Set the Gate high, disable speaker */
-	       "inb  $0x61, %%al\n\t" /* Read port */
-	       "andb $0xfd, %%al\n\t" /* Turn off speaker Data */
-	       "orb  $0x01, %%al\n\t" /* Set Gate high */
-	       "outb %%al, $0x61\n\t" /* Write port */
+	{
+		unsigned long startlow, starthigh;
+		unsigned long endlow, endhigh;
+		unsigned long count;
 
-	       /* Now let's take care of CTC channel 2 */
-	       "movb $0xb0, %%al\n\t" /* binary, mode 0, LSB/MSB, ch 2*/
-	       "outb %%al, $0x43\n\t" /* Write to CTC command port */
-	       "movl %1, %%eax\n\t"
-	       "outb %%al, $0x42\n\t" /* LSB of count */
-	       "shrl $8, %%eax\n\t"
-	       "outb %%al, $0x42\n\t" /* MSB of count */
+		rdtsc(startlow,starthigh);
+		count = 0;
+		do {
+			count++;
+		} while ((inb(0x61) & 0x20) == 0);
+		rdtsc(endlow,endhigh);
 
-               /* Read the TSC; counting has just started */
-               "rdtsc\n\t"
-               /* Move the value for safe-keeping. */
-               "movl %%eax, %%ebx\n\t"
-               "movl %%edx, %%ecx\n\t"
+		last_tsc_low = endlow;
 
-	       /* Busy wait. Only 50 ms wasted at boot time. */
-               "0: inb $0x61, %%al\n\t" /* Read Speaker Output Port */
-	       "testb $0x20, %%al\n\t" /* Check CTC channel 2 output (bit 5) */
-               "jz 0b\n\t"
+		/* Error: ECTCNEVERSET */
+		if (count <= 1)
+			goto bad_ctc;
 
-               /* And read the TSC.  5 jiffies (50.00077ms) have elapsed. */
-               "rdtsc\n\t"
+		/* 64-bit subtract - gcc just messes up with long longs */
+		__asm__("subl %2,%0\n\t"
+			"sbbl %3,%1"
+			:"=a" (endlow), "=d" (endhigh)
+			:"g" (startlow), "g" (starthigh),
+			 "0" (endlow), "1" (endhigh));
 
-               /* Great.  So far so good.  Store last TSC reading in
-                * last_tsc_low (only 32 lsb bits needed) */
-               "movl %%eax, last_tsc_low\n\t"
-               /* And now calculate the difference between the readings. */
-               "subl %%ebx, %%eax\n\t"
-               "sbbl %%ecx, %%edx\n\t" /* 64-bit subtract */
-	       /* but probably edx = 0 at this point (see below). */
-               /* Now we have 5 * (TSC counts per jiffy) in eax.  We want
-                * to calculate TSC->microsecond conversion factor. */
+		/* Error: ECPUTOOFAST */
+		if (endhigh)
+			goto bad_ctc;
 
-               /* Note that edx (high 32-bits of difference) will now be 
-                * zero iff CPU clock speed is less than 85 GHz.  Moore's
-                * law says that this is likely to be true for the next
-                * 12 years or so.  You will have to change this code to
-                * do a real 64-by-64 divide before that time's up. */
-               "movl %%eax, %%ecx\n\t"
-               "xorl %%eax, %%eax\n\t"
-               "movl %2, %%edx\n\t"
-               "divl %%ecx\n\t" /* eax= 2^32 / (1 * TSC counts per microsecond) */
-	       /* Return eax for the use of fast_gettimeoffset */
-               "movl %%eax, %0\n\t"
-               : "=r" (retval)
-               : "r" (5 * LATCH), "r" (5 * 1000020/HZ)
-               : /* we clobber: */ "ax", "bx", "cx", "dx", "cc", "memory");
-       return retval;
+		/* Error: ECPUTOOSLOW */
+		if (endlow <= CALIBRATE_TIME)
+			goto bad_ctc;
+
+		__asm__("divl %2"
+			:"=a" (endlow), "=d" (endhigh)
+			:"r" (endlow), "0" (0), "1" (CALIBRATE_TIME));
+
+		return endlow;
+	}
+
+	/*
+	 * The CTC wasn't reliable: we got a hit on the very first read,
+	 * or the CPU was so fast/slow that the quotient wouldn't fit in
+	 * 32 bits..
+	 */
+bad_ctc:
+	return 0;
 }
+
+extern int x86_udelay_tsc;
 
 __initfunc(void time_init(void))
 {
@@ -655,23 +691,31 @@ __initfunc(void time_init(void))
  	dodgy_tsc();
  	
 	if (boot_cpu_data.x86_capability & X86_FEATURE_TSC) {
+		unsigned long tsc_quotient = calibrate_tsc();
+		if (tsc_quotient) {
+			fast_gettimeoffset_quotient = tsc_quotient;
+			use_tsc = 1;
+			/*
+			 *	We should be more selective here I suspect
+			 *	and just enable this for the new intel chips ?
+			 */
+			x86_udelay_tsc = 1;
 #ifndef do_gettimeoffset
-		do_gettimeoffset = do_fast_gettimeoffset;
+			do_gettimeoffset = do_fast_gettimeoffset;
 #endif
-		do_get_fast_time = do_gettimeofday;
-		use_tsc = 1;
-		fast_gettimeoffset_quotient = calibrate_tsc();
-		
-		/* report CPU clock rate in Hz.
-		 * The formula is (10^6 * 2^32) / (2^32 * 1 / (clocks/us)) =
-		 * clock/second. Our precision is about 100 ppm.
-		 */
-		{	unsigned long eax=0, edx=1000000;
-			__asm__("divl %2"
-	       		:"=a" (cpu_hz), "=d" (edx)
-               		:"r" (fast_gettimeoffset_quotient),
-                	"0" (eax), "1" (edx));
-			printk("Detected %ld Hz processor.\n", cpu_hz);
+			do_get_fast_time = do_gettimeofday;
+
+			/* report CPU clock rate in Hz.
+			 * The formula is (10^6 * 2^32) / (2^32 * 1 / (clocks/us)) =
+			 * clock/second. Our precision is about 100 ppm.
+			 */
+			{	unsigned long eax=0, edx=1000;
+				__asm__("divl %2"
+		       		:"=a" (cpu_khz), "=d" (edx)
+        	       		:"r" (tsc_quotient),
+	                	"0" (eax), "1" (edx));
+				printk("Detected %ld kHz processor.\n", cpu_khz);
+			}
 		}
 	}
 

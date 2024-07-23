@@ -32,11 +32,20 @@
  * 3-Jan-1999:  Fixed serious procfs security hole -- users should never
  *              be allowed to view the chains!
  *              Marc Santoro <ultima@snicker.emoti.com>
+ * 29-Jan-1999: Locally generated bogus IPs dealt with, rather than crash
+ *              during dump_packet. --RR.
+ * 19-May-1999: Star Wars: The Phantom Menace opened.  Rule num
+ *		printed in log (modified from Michael Hasenstein's patch).
+ *		Added SYN in log message. --RR
+ * 23-Jul-1999: Fixed small fragment security exposure opened on 15-May-1998.
+ *              John McDonald <jm@dataprotect.com>
+ *              Thomas Lopatic <tl@dataprotect.com>
+ * 21-Oct-1999: Applied count fix by Emanuele Caratti <wiz@iol.it> --RR
  */
 
 /*
  *
- * The origina Linux port was done Alan Cox, with changes/fixes from
+ * The original Linux port was done Alan Cox, with changes/fixes from
  * Pauline Middlelink, Jos Vos, Thomas Quinot, Wouter Gadeyne, Juan
  * Jose Ciarlante, Bernd Eckenfels, Keith Owens and others.
  * 
@@ -78,6 +87,7 @@
 #include <net/udp.h>
 #include <net/sock.h>
 #include <net/icmp.h>
+#include <net/ip_masq.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
 #include <linux/firewall.h>
@@ -220,6 +230,7 @@ struct ip_reent
 {
 	struct ip_chain *prevchain;	/* Pointer to referencing chain */
 	struct ip_fwkernel *prevrule;	/* Pointer to referencing rule */
+	unsigned int count;
 	struct ip_counters counters;
 };
 
@@ -398,7 +409,9 @@ static void dump_packet(const struct iphdr *ip,
 			struct ip_fwkernel *f, 
 			const ip_chainlabel chainlabel,
 			__u16 src_port, 
-			__u16 dst_port)
+			__u16 dst_port,
+			unsigned int count,
+			int syn)
 {
 	__u32 *opt = (__u32 *) (ip + 1);
 	int opti;
@@ -412,7 +425,7 @@ static void dump_packet(const struct iphdr *ip,
 			printk("%d ",f->ipfw.fw_redirpt);
 	}
 
-	printk("%s PROTO=%d %ld.%ld.%ld.%ld:%hu %ld.%ld.%ld.%ld:%hu"
+	printk("%s PROTO=%d %d.%d.%d.%d:%hu %d.%d.%d.%d:%hu"
 	       " L=%hu S=0x%2.2hX I=%hu F=0x%4.4hX T=%hu",
 	       ifname, ip->protocol,
 	       (ntohl(ip->saddr)>>24)&0xFF,
@@ -430,7 +443,7 @@ static void dump_packet(const struct iphdr *ip,
 
 	for (opti = 0; opti < (ip->ihl - sizeof(struct iphdr) / 4); opti++)
 		printk(" O=0x%8.8X", *opt++);
-	printk("\n");
+	printk(" %s(#%d)\n", syn ? "SYN " : /* "PENANCE" */ "", count);
 }
 
 /* function for checking chain labels for user space. */
@@ -474,6 +487,14 @@ static int find_special(ip_chainlabel label, int *answer)
 		return 1;
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 	} else if (strcmp(label,IP_FW_LABEL_REDIRECT) == 0) {
+                extern int sysctl_ip_always_defrag;
+                static int enabled = 0;
+
+                if(!enabled)
+                {
+                	enabled=1;
+                        sysctl_ip_always_defrag++;
+                }
 		*answer = FW_REDIRECT;
 		return 1;
 #endif
@@ -518,12 +539,14 @@ ip_fw_domatch(struct ip_fwkernel *f,
 	      const ip_chainlabel label,
 	      struct sk_buff *skb,
 	      unsigned int slot,
-	      __u16 src_port, __u16 dst_port)
+	      __u16 src_port, __u16 dst_port, 
+	      unsigned int count,
+	      int tcpsyn)
 {
 	f->counters[slot].bcnt+=ntohs(ip->tot_len);
 	f->counters[slot].pcnt++;
 	if (f->ipfw.fw_flg & IP_FW_F_PRN) {
-		dump_packet(ip,rif,f,label,src_port,dst_port);
+		dump_packet(ip,rif,f,label,src_port,dst_port,count,tcpsyn);
 	}
 	ip->tos = (ip->tos & f->ipfw.fw_tosand) ^ f->ipfw.fw_tosxor;
 
@@ -550,7 +573,7 @@ ip_fw_domatch(struct ip_fwkernel *f,
 			strcpy(outskb->data+sizeof(__u32)*2, rif);
 			memcpy(outskb->data+sizeof(__u32)*2+IFNAMSIZ, ip, 
 			       len-(sizeof(__u32)*2+IFNAMSIZ));
-			netlink_broadcast(ipfwsk, outskb, 0, ~0, GFP_KERNEL);
+			netlink_broadcast(ipfwsk, outskb, 0, ~0, GFP_ATOMIC);
 		}
 		else {
 			if (net_ratelimit())
@@ -588,6 +611,7 @@ ip_fw_check(struct iphdr *ip,
 	unsigned char		oldtos;
 	struct ip_fwkernel	*f;	
 	int			ret = FW_SKIP+2;
+	unsigned int		count;
 
 	/* We handle fragments by dealing with the first fragment as
 	 * if it was a normal packet.  All other fragments are treated
@@ -608,7 +632,7 @@ ip_fw_check(struct iphdr *ip,
 	if (offset == 1 && ip->protocol == IPPROTO_TCP)	{
 		if (!testing && net_ratelimit()) {
 			printk("Suspect TCP fragment.\n");
-			dump_packet(ip,rif,NULL,NULL,0,0);
+			dump_packet(ip,rif,NULL,NULL,0,0,0,0);
 		}
 		return FW_BLOCK;
 	}
@@ -635,6 +659,18 @@ ip_fw_check(struct iphdr *ip,
 			size_req = 0;
 		}
 		offset = (ntohs(ip->tot_len) < (ip->ihl<<2)+size_req);
+
+		/* If it is a truncated first fragment then it can be
+		 * used to rewrite port information, and thus should
+		 * be blocked.
+		 */
+		if (offset && (ntohs(ip->frag_off) & IP_MF)) {
+			if (!testing && net_ratelimit()) {
+				printk("Suspect short first fragment.\n");
+				dump_packet(ip,rif,NULL,NULL,0,0,0,0);
+			}
+			return FW_BLOCK;
+		}
 	}
 
 	src = ip->saddr;
@@ -699,14 +735,17 @@ ip_fw_check(struct iphdr *ip,
 	else FWC_HAVE_LOCK(fwc_rlocks);
 
 	f = chain->chain;
+	count = 0;
 	do {
 		for (; f; f = f->next) {
+			count++;
 			if (ip_rule_match(f,rif,ip,
-					  tcpsyn,src_port,dst_port,offset)) {
+					  tcpsyn,src_port,dst_port,offset!=0)) {
 				if (!testing
 				    && !ip_fw_domatch(f, ip, rif, chain->label,
 						      skb, slot, 
-						      src_port, dst_port)) {
+						      src_port, dst_port,
+						      count, tcpsyn)) {
 					ret = FW_BLOCK;
 					goto out;
 				}
@@ -735,10 +774,12 @@ ip_fw_check(struct iphdr *ip,
 				else {
 					f->branch->reent[slot].prevchain 
 						= chain;
+					f->branch->reent[slot].count = count;
 					f->branch->reent[slot].prevrule 
 						= f->next;
 					chain = f->branch;
 					f = chain->chain;
+					count = 0;
 				}
 			}
 			else if (f->simplebranch == FW_SKIP) 
@@ -757,6 +798,7 @@ ip_fw_check(struct iphdr *ip,
 			if (chain->reent[slot].prevchain) {
 				struct ip_chain *tmp = chain;
 				f = chain->reent[slot].prevrule;
+				count = chain->reent[slot].count;
 				chain = chain->reent[slot].prevchain;
 				tmp->reent[slot].prevchain = NULL;
 			}
@@ -1406,8 +1448,10 @@ int ip_fw_ctl(int cmd, void *m, int len)
 		else if ((chain = find_label(new->fwc_label)) == NULL)
 			ret = ENOENT;
 		else if ((ip_fwkern = convert_ipfw(&new->fwc_rule, &ret))
-			 != NULL)
+			 != NULL) {
 			ret = del_rule_from_chain(chain, ip_fwkern);
+			kfree(ip_fwkern);
+		}
 	}
 	break;
 
@@ -1507,7 +1551,7 @@ static int dump_rule(char *buffer,
 
 	len=sprintf(buffer,
 		    "%9s "			/* Chain name */
-		    "%08lX/%08lX->%08lX/%08lX "	/* Source & Destination IPs */
+		    "%08X/%08X->%08X/%08X "	/* Source & Destination IPs */
 		    "%.16s "			/* Interface */
 		    "%X %X "			/* fw_flg and fw_invflg fields */
 		    "%u "			/* Protocol */
@@ -1660,6 +1704,10 @@ int ipfw_input_check(struct firewall_ops *this, int pf, struct device *dev,
 int ipfw_output_check(struct firewall_ops *this, int pf, struct device *dev, 
 		      void *phdr, void *arg, struct sk_buff **pskb)
 {
+	/* Locally generated bogus packets by root. <SIGH>. */
+	if (((struct iphdr *)phdr)->ihl * 4 < sizeof(struct iphdr)
+	    || (*pskb)->len < sizeof(struct iphdr))
+		return FW_ACCEPT;
 	return ip_fw_check(phdr, dev->name,
 			   arg, IP_FW_OUTPUT_CHAIN, *pskb, SLOT_NUMBER(), 0);
 }

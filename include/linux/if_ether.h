@@ -9,7 +9,7 @@
  *
  * Author:	Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Donald Becker, <becker@super.org>
- *		Alan Cox, <alan@cymru.net>
+ *		Alan Cox, <alan@redhat.com>
  *		Steve Whitehouse, <gw7rrm@eeshack3.swan.ac.uk>
  *
  *		This program is free software; you can redistribute it and/or
@@ -56,6 +56,10 @@
 #define ETH_P_AARP	0x80F3		/* Appletalk AARP		*/
 #define ETH_P_IPX	0x8137		/* IPX over DIX			*/
 #define ETH_P_IPV6	0x86DD		/* IPv6 over bluebook		*/
+#define ETH_P_ATMMPOA	0x884c		/* MultiProtocol Over ATM	*/
+#define ETH_P_ATMFATE	0x8884		/* Frame-based ATM Transport
+					 * over Ethernet
+					 */
 
 /*
  *	Non DIX types. Won't clash for 1500 types.

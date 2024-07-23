@@ -1,6 +1,6 @@
 /* linux/net/inet/arp.c
  *
- * Version:	$Id: arp.c,v 1.75 1998/11/16 04:51:56 davem Exp $
+ * Version:	$Id: arp.c,v 1.77.2.7 2000/10/29 11:41:15 davem Exp $
  *
  * Copyright (C) 1994 by Florian  La Roche
  *
@@ -65,6 +65,9 @@
  *					clean up the APFDDI & gen. FDDI bits.
  *		Alexey Kuznetsov:	new arp state machine;
  *					now it is in net/core/neighbour.c.
+ *		Krzysztof Halasa:	Added Frame Relay ARP support.
+ *		Julian Anastasov:	"hidden" flag: hide the
+ *					interface and don't reply for it
  */
 
 /* RFC1122 Status:
@@ -194,9 +197,14 @@ int arp_mc_map(u32 addr, u8 *haddr, struct device *dev, int dir)
 {
 	switch (dev->type) {
 	case ARPHRD_ETHER:
-	case ARPHRD_IEEE802:
 	case ARPHRD_FDDI:
-		ip_eth_mc_map(addr, haddr);
+		ip_eth_mc_map(addr, haddr) ; 
+		return 0 ; 
+	case ARPHRD_IEEE802:
+		if ( (dev->name[0] == 't') && (dev->name[1] == 'r')) /* Token Ring */
+			ip_tr_mc_map(addr,haddr) ; 
+		else  
+			ip_eth_mc_map(addr, haddr);
 		return 0;
 	default:
 		if (dir) {
@@ -294,7 +302,7 @@ static int arp_constructor(struct neighbour *neigh)
 
 static void arp_error_report(struct neighbour *neigh, struct sk_buff *skb)
 {
-	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0);
+	dst_link_failure(skb);
 	kfree_skb(skb);
 }
 
@@ -303,10 +311,15 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb)
 	u32 saddr;
 	u8  *dst_ha = NULL;
 	struct device *dev = neigh->dev;
+	struct device *dev2;
+	struct in_device *in_dev2;
 	u32 target = *(u32*)neigh->primary_key;
 	int probes = neigh->probes;
 
-	if (skb && inet_addr_type(skb->nh.iph->saddr) == RTN_LOCAL)
+	if (skb &&
+	    (dev2 = ip_dev_find(skb->nh.iph->saddr)) != NULL &&
+	    (in_dev2 = dev2->ip_ptr) != NULL &&
+	    !IN_DEV_HIDDEN(in_dev2))
 		saddr = skb->nh.iph->saddr;
 	else
 		saddr = inet_select_addr(dev, target, RT_SCOPE_LINK);
@@ -325,6 +338,22 @@ static void arp_solicit(struct neighbour *neigh, struct sk_buff *skb)
 	arp_send(ARPOP_REQUEST, ETH_P_ARP, target, dev, saddr,
 		 dst_ha, dev->dev_addr, NULL);
 }
+
+static int arp_filter(__u32 sip, __u32 tip, struct device *dev)
+{
+	struct rtable *rt;
+	int flag = 0; 
+	//unsigned long now; 
+
+	if (ip_route_output(&rt, sip, tip, 0, 0) < 0) 
+		return 1;
+	if (rt->u.dst.dev != dev) { 
+		net_statistics.ArpFilter++; 
+		flag = 1; 
+	} 
+	ip_rt_put(rt); 
+	return flag; 
+} 
 
 /* OBSOLETE FUNCTIONS */
 
@@ -383,9 +412,9 @@ int arp_find(unsigned char *haddr, struct sk_buff *skb)
 			end_bh_atomic();
 			return 0;
 		}
+		neigh_release(n);
 	} else
 		kfree_skb(skb);
-	neigh_release(n);
 	end_bh_atomic();
 	return 1;
 }
@@ -401,8 +430,12 @@ int arp_bind_neighbour(struct dst_entry *dst)
 
 	if (dev == NULL)
 		return 0;
-	if (dst->neighbour == NULL)
-		dst->neighbour = __neigh_lookup(&arp_tbl, &((struct rtable*)dst)->rt_gateway, dev, 1);
+	if (dst->neighbour == NULL) {
+		u32 nexthop = ((struct rtable*)dst)->rt_gateway;
+		if (dev->flags&(IFF_LOOPBACK|IFF_POINTOPOINT))
+			nexthop = 0;
+		dst->neighbour = __neigh_lookup(&arp_tbl, &nexthop, dev, 1);
+	}
 	return (dst->neighbour != NULL);
 }
 
@@ -557,6 +590,19 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		if (htons(dev_type) != arp->ar_hrd)
 			goto out;
 		break;
+#ifdef CONFIG_NET_ETHERNET
+	case ARPHRD_ETHER:
+		/*
+		 * ETHERNET devices will accept ARP hardware types of either
+		 * 1 (Ethernet) or 6 (IEEE 802.2).
+		 */
+		if (arp->ar_hrd != __constant_htons(ARPHRD_ETHER) &&
+		    arp->ar_hrd != __constant_htons(ARPHRD_IEEE802))
+			goto out;
+		if (arp->ar_pro != __constant_htons(ETH_P_IP))
+			goto out;
+		break;
+#endif
 #ifdef CONFIG_FDDI
 	case ARPHRD_FDDI:
 		/*
@@ -589,7 +635,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 #endif
 	}
 
-	/* Undertsand only these message types */
+	/* Understand only these message types */
 
 	if (arp->ar_op != __constant_htons(ARPOP_REPLY) &&
 	    arp->ar_op != __constant_htons(ARPOP_REQUEST))
@@ -605,12 +651,19 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	tha=arp_ptr;
 	arp_ptr += dev->addr_len;
 	memcpy(&tip, arp_ptr, 4);
+
 /* 
  *	Check for bad requests for 127.x.x.x and requests for multicast
  *	addresses.  If this is one such, delete it.
  */
 	if (LOOPBACK(tip) || MULTICAST(tip))
 		goto out;
+
+/*
+ *     Special case: We must set Frame Relay source Q.922 address
+ */
+	if (dev_type == ARPHRD_DLCI)
+		sha = dev->broadcast;
 
 /*
  *  Process entry.  The idea here is we want to send a reply if it is a
@@ -631,8 +684,14 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 
 	/* Special case: IPv4 duplicate address detection packet (RFC2131) */
 	if (sip == 0) {
+		struct device *dev2;
+		struct in_device *in_dev2;
+
 		if (arp->ar_op == __constant_htons(ARPOP_REQUEST) &&
-		    inet_addr_type(tip) == RTN_LOCAL)
+		    (dev2 = ip_dev_find(tip)) != NULL &&
+		    (dev2 == dev ||
+		     ((in_dev2 = dev2->ip_ptr) != NULL &&
+		      !IN_DEV_HIDDEN(in_dev2))))
 			arp_send(ARPOP_REPLY,ETH_P_ARP,tip,dev,tip,sha,dev->dev_addr,dev->dev_addr);
 		goto out;
 	}
@@ -646,7 +705,24 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		if (addr_type == RTN_LOCAL) {
 			n = neigh_event_ns(&arp_tbl, sha, &sip, dev);
 			if (n) {
-				arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
+				int dont_send = 0; 
+				if (ipv4_devconf.hidden &&
+				    skb->pkt_type != PACKET_HOST) {
+					struct device *dev2;
+					struct in_device *in_dev2;
+
+					if ((dev2 = ip_dev_find(tip)) != NULL &&
+					    dev2 != dev &&
+					    (in_dev2 = dev2->ip_ptr) != NULL &&
+					    IN_DEV_HIDDEN(in_dev2)) {
+						dont_send = 1; 
+					}	
+				}
+				if (IN_DEV_ARPFILTER(in_dev))
+					dont_send |= arp_filter(sip,tip,dev); 
+
+				if (!dont_send) 
+					arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
 				neigh_release(n);
 			}
 			goto out;

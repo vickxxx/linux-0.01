@@ -5,7 +5,6 @@
  *  available, usually until fbcon takes console over.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kdev_t.h>
 #include <linux/tty.h>
@@ -18,7 +17,7 @@
  *  Dummy console driver
  */
 
-#if defined(CONFIG_ARM)
+#if defined(__arm__)
 #define DUMMY_COLUMNS	ORIG_VIDEO_COLS
 #define DUMMY_ROWS	ORIG_VIDEO_LINES
 #else
@@ -26,7 +25,7 @@
 #define DUMMY_ROWS	25
 #endif
 
-__initfunc(static const char *dummycon_startup(void))
+static const char *dummycon_startup(void)
 {
     return "dummy device";
 }

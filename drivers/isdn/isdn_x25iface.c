@@ -1,4 +1,23 @@
-/* $Id: isdn_x25iface.c,v 1.3 1998/02/20 17:25:20 fritz Exp $
+/* $Id: isdn_x25iface.c,v 1.9 2000/05/16 20:52:10 keil Exp $
+
+ *
+ * Linux ISDN subsystem, X.25 related functions
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ *
  * stuff needed to support the Linux X.25 PLP code on top of devices that
  * can provide a lab_b service using the concap_proto mechanism.
  * This module supports a network interface wich provides lapb_sematics
@@ -8,16 +27,6 @@
  *
  * Only protocol specific stuff goes here. Device specific stuff
  * goes to another -- device related -- concap_proto support source file.
- *
- * $Log: isdn_x25iface.c,v $
- * Revision 1.3  1998/02/20 17:25:20  fritz
- * Changes for recent kernels.
- *
- * Revision 1.2  1998/01/31 22:49:22  keil
- * correct comments
- *
- * Revision 1.1  1998/01/31 22:27:58  keil
- * New files from Henner Eisen for X.25 support
  *
  */
 
@@ -302,7 +311,12 @@ int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 	case 0x01: /* dl_connect request */
 		if( *state == WAN_DISCONNECTED ){
 			*state = WAN_CONNECTING;
-		        cprot -> dops -> connect_req(cprot);
+		        ret = cprot -> dops -> connect_req(cprot);
+			if(ret){
+				/* reset state and notify upper layer about
+				 * immidiatly failed attempts */
+				isdn_x25iface_disconn_ind(cprot);
+			}
 		} else {
 			illegal_state_warn( *state, firstbyte );
 		}

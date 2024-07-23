@@ -63,6 +63,10 @@
 #include "bvme6000.h"
 #endif
 
+#ifdef CONFIG_SCSI_SIM710
+#include "sim710.h"
+#endif
+
 #ifdef CONFIG_A3000_SCSI
 #include "a3000.h"
 #endif
@@ -127,8 +131,16 @@
 #include "aha1740.h"
 #endif
 
+#ifdef CONFIG_SCSI_AACRAID
+#include "aacraid/include/linit.h"
+#endif
+
 #ifdef CONFIG_SCSI_AIC7XXX
-#include "aic7xxx.h"
+#include "aic7xxx/aic7xxx.h"
+#endif
+
+#ifdef CONFIG_SCSI_IPS
+#include "ips.h"
 #endif
 
 #ifdef CONFIG_SCSI_BUSLOGIC
@@ -195,6 +207,10 @@
 #include "53c7,8xx.h"
 #endif
 
+#ifdef CONFIG_SCSI_SYM53C8XX
+#include "sym53c8xx.h"
+#endif
+
 #ifdef CONFIG_SCSI_NCR53C8XX
 #include "ncr53c8xx.h"
 #endif
@@ -221,6 +237,10 @@
 
 #ifdef CONFIG_SCSI_NCR53C406A
 #include "NCR53c406a.h"
+#endif
+
+#ifdef CONFIG_SCSI_SYM53C416 
+#include "sym53c416.h" 
 #endif
 
 #ifdef CONFIG_SCSI_DC390T
@@ -283,6 +303,10 @@
 #include "ini9100u.h"
 #endif
 
+#ifdef CONFIG_SCSI_INIA100
+#include "inia100.h"
+#endif
+
 #ifdef CONFIG_SCSI_DEBUG
 #include "scsi_debug.h"
 #endif
@@ -315,6 +339,18 @@
 #include "jazz_esp.h"
 #endif
 
+#ifdef CONFIG_IPHASE5526
+#include "../net/fc/iph5526_scsi.h"
+#endif
+
+#ifdef CONFIG_BLK_DEV_3W_XXXX_RAID
+#include "3w-xxxx.h"
+#endif
+
+#ifdef CONFIG_I2O_SCSI
+#include "../i2o/i2o_scsi.h"
+#endif
+
 /*
  * Moved ppa driver to the end of the probe list
  * since it is a removable host adapter.
@@ -328,6 +364,11 @@
 #ifdef CONFIG_SCSI_IMM
 #include "imm.h"
 #endif
+
+#ifdef CONFIG_SCSI_CPQFCTS
+#include "cpqfcTS.h"
+#endif 
+
 
 /*
 static const char RCSid[] = "$Header: /vger/u4/cvs/linux/drivers/scsi/hosts.c,v 1.20 1996/12/12 19:18:32 davem Exp $";
@@ -416,6 +457,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_BVME6000_SCSI
 	BVME6000_SCSI,
 #endif
+#ifdef CONFIG_SCSI_SIM710
+	SIM710_SCSI,
+#endif
 #ifdef CONFIG_SCSI_ADVANSYS
 	ADVANSYS,
 #endif
@@ -449,10 +493,16 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_AHA1740
     AHA1740,
 #endif
+#ifdef CONFIG_SCSI_AACRAID
+    AAC_HOST_TEMPLATE_ENTRY,
+#endif
 #ifdef CONFIG_SCSI_AIC7XXX
     AIC7XXX,
 #endif
-#ifdef CONFIG_FD_MCS
+#ifdef CONFIG_SCSI_IPS
+    IPS,
+#endif
+#ifdef CONFIG_SCSI_FD_MCS
    FD_MCS,
 #endif
 #ifdef CONFIG_SCSI_FUTURE_DOMAIN
@@ -466,6 +516,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #ifdef CONFIG_SCSI_NCR53C406A	/* 53C406A should come before QLOGIC */
     NCR53c406a,
+#endif
+#ifdef CONFIG_SCSI_SYM53C416 
+    SYM53C416, 
 #endif
 #ifdef CONFIG_SCSI_QLOGIC_FAS
     QLOGICFAS,
@@ -490,6 +543,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #ifdef CONFIG_SCSI_NCR53C7xx
     NCR53c7xx,
+#endif
+#ifdef CONFIG_SCSI_SYM53C8XX
+    SYM53C8XX,
 #endif
 #ifdef CONFIG_SCSI_NCR53C8XX
     NCR53C8XX,
@@ -533,6 +589,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_INITIO
     INI9100U,
 #endif
+#ifdef CONFIG_SCSI_INIA100
+    INIA100,
+#endif
 #ifdef CONFIG_SCSI_QLOGICPTI
     QLOGICPTI,
 #endif
@@ -568,6 +627,16 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
     POWERTECSCSI,
 #endif
 #endif
+#ifdef CONFIG_IPHASE5526
+	IPH5526_SCSI_FC,
+#endif
+#ifdef CONFIG_BLK_DEV_3W_XXXX_RAID
+	TWXXXX,
+#endif
+/* Put I2O after specific adapters */
+#ifdef CONFIG_I2O_SCSI
+	I2OSCSI,
+#endif
 /* "Removable host adapters" below this line (Parallel Port/USB/other) */
 #ifdef CONFIG_SCSI_PPA
     PPA,
@@ -577,6 +646,10 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #ifdef CONFIG_SCSI_DEBUG
     SCSI_DEBUG,
+#endif
+/* CPQFCTS needs to be last because it can never be the boot device. */
+#ifdef CONFIG_SCSI_CPQFCTS
+   CPQFCTS,
 #endif
 };
 
@@ -824,6 +897,9 @@ __initfunc(unsigned int scsi_init(void))
 #endif
 #ifdef CONFIG_CHR_DEV_ST
     scsi_register_device(&st_template);
+#endif
+#ifdef CONFIG_CHR_DEV_OSST
+    scsi_register_device(&osst_template);
 #endif
 #ifdef CONFIG_CHR_DEV_SG
     scsi_register_device(&sg_template);

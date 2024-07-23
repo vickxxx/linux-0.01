@@ -35,6 +35,7 @@
 
 #include <asm/adb_mouse.h>
 #include <asm/uaccess.h>
+#include <asm/hardirq.h>
 #ifdef __powerpc__
 #include <asm/processor.h>
 #endif
@@ -56,7 +57,7 @@ extern int console_loglevel;
  *	XXX: need to figure out what ADB mouse packets mean ... 
  *	This is the stuff stolen from the Atari driver ...
  */
-static void adb_mouse_interrupt(unsigned char *buf, int nb)
+void adb_mouse_interrupt(unsigned char *buf, int nb)
 {
     int buttons, id;
 
@@ -113,7 +114,7 @@ static void adb_mouse_interrupt(unsigned char *buf, int nb)
      *  on a logitech mouseman, the right and mid buttons sometimes behave
      *  strangely until they both have been pressed after booting. */
     /* data valid only if extended mouse format ! */
-    if (nb == 4)
+    if (nb >= 4)
 	buttons = (buttons&6) | (buf[3] & 0x80 ? 1 : 0); /* 1+3 unchanged */
 
     add_mouse_randomness(((~buttons&7) << 16) + ((buf[2]&0x7f) << 8) + (buf[1]&0x7f));
@@ -154,6 +155,7 @@ static int release_mouse(struct inode *inode, struct file *file)
       return 0;
 
     adb_mouse_interrupt_hook = NULL;
+    synchronize_irq();
     MOD_DEC_USE_COUNT;
     return 0;
 }

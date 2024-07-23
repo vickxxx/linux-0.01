@@ -71,7 +71,7 @@ nlmclnt_block(struct nlm_host *host, struct file_lock *fl, u32 *statp)
 	 * a 1 minute timeout would do. See the comment before
 	 * nlmclnt_lock for an explanation.
 	 */
-	sleep_on_timeout(&block.b_wait, 30*HZ);
+	interruptible_sleep_on_timeout(&block.b_wait, 30*HZ);
 
 	for (head = &nlm_blocked; *head; head = &(*head)->b_next) {
 		if (*head == &block) {
@@ -138,21 +138,18 @@ nlmclnt_grant(struct nlm_lock *lock)
 void
 nlmclnt_recovery(struct nlm_host *host, u32 newstate)
 {
-	if (!host->h_reclaiming++) {
+	if (host->h_reclaiming++) {
 		if (host->h_nsmstate == newstate)
 			return;
 		printk(KERN_WARNING
 			"lockd: Uh-oh! Interfering reclaims for host %s",
 			host->h_name);
-		host->h_monitored = 0;
 		host->h_nsmstate = newstate;
 		host->h_state++;
-		nlm_release_host(host);
 	} else {
-		host->h_monitored = 0;
 		host->h_nsmstate = newstate;
 		host->h_state++;
-		host->h_count++;
+		nlm_get_host(host);
 		kernel_thread(reclaimer, host, 0);
 	}
 }
@@ -168,11 +165,15 @@ reclaimer(void *ptr)
 	/* This one ensures that our parent doesn't terminate while the
 	 * reclaim is in progress */
 	lock_kernel();
+	daemonize();
+
 	lockd_up();
+
+	exit_files(current);
 
 	/* First, reclaim all locks that have been granted previously. */
 	do {
-		for (fl = file_lock_table; fl; fl = fl->fl_next) {
+		for (fl = file_lock_table; fl; fl = fl->fl_nextlink) {
 			inode = fl->fl_file->f_dentry->d_inode;
 			if (inode->i_sb->s_magic == NFS_SUPER_MAGIC
 			 && nlm_cmp_addr(NFS_ADDR(inode), &host->h_addr)

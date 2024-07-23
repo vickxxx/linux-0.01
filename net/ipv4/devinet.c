@@ -1,7 +1,7 @@
 /*
  *	NET3	IP device support routines.
  *
- *	Version: $Id: devinet.c,v 1.25 1999/01/04 20:14:33 davem Exp $
+ *	Version: $Id: devinet.c,v 1.28.2.4 2000/10/29 11:41:15 davem Exp $
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -100,6 +100,9 @@ struct in_device *inetdev_init(struct device *dev)
 {
 	struct in_device *in_dev;
 
+	if (dev->mtu < 68)
+		return NULL;
+
 	in_dev = kmalloc(sizeof(*in_dev), GFP_KERNEL);
 	if (!in_dev)
 		return NULL;
@@ -139,6 +142,7 @@ static void inetdev_destroy(struct in_device *in_dev)
 	devinet_sysctl_unregister(&in_dev->cnf);
 #endif
 	in_dev->dev->ip_ptr = NULL;
+	synchronize_bh();
 	neigh_parms_release(&arp_tbl, in_dev->arp_parms);
 	kfree(in_dev);
 }
@@ -173,6 +177,8 @@ inet_del_ifa(struct in_device *in_dev, struct in_ifaddr **ifap, int destroy)
 				continue;
 			}
 			*ifap1 = ifa->ifa_next;
+			synchronize_bh();
+
 			rtmsg_ifa(RTM_DELADDR, ifa);
 			notifier_call_chain(&inetaddr_chain, NETDEV_DOWN, ifa);
 			inet_free_ifa(ifa);
@@ -182,7 +188,7 @@ inet_del_ifa(struct in_device *in_dev, struct in_ifaddr **ifap, int destroy)
 	/* 2. Unlink it */
 
 	*ifap = ifa1->ifa_next;
-
+	synchronize_bh();
 
 	/* 3. Announce address deletion */
 
@@ -238,7 +244,7 @@ inet_insert_ifa(struct in_device *in_dev, struct in_ifaddr *ifa)
 	}
 
 	ifa->ifa_next = *ifap;
-	/* ATOMIC_SET */
+	wmb();
 	*ifap = ifa;
 
 	/* Send message first, then call notifier.
@@ -646,12 +652,32 @@ u32 inet_select_addr(struct device *dev, u32 dst, int scope)
 	for_primary_ifa(in_dev) {
 		if (ifa->ifa_scope > scope)
 			continue;
-		addr = ifa->ifa_local;
 		if (!dst || inet_ifa_match(dst, ifa))
-			return addr;
+			return ifa->ifa_local;
+		if (!addr)
+			addr = ifa->ifa_local;
 	} endfor_ifa(in_dev);
+	
+	if (addr)
+		return addr;
 
-	return addr;
+	/* Not loopback addresses on loopback should be preferred
+	   in this case. It is importnat that lo is the first interface
+	   in dev_base list.
+	 */
+	for (dev=dev_base; dev; dev=dev->next) {
+		if ((in_dev=dev->ip_ptr) == NULL)
+			continue;
+
+		for_primary_ifa(in_dev) {
+			if (!IN_DEV_HIDDEN(in_dev) &&
+			    ifa->ifa_scope <= scope &&
+			    ifa->ifa_scope != RT_SCOPE_LINK)
+				return ifa->ifa_local;
+		} endfor_ifa(in_dev);
+	}
+
+	return 0;
 }
 
 /*
@@ -692,6 +718,7 @@ static int inetdev_event(struct notifier_block *this, unsigned long event, void 
 				ifa->ifa_mask = inet_make_mask(8);
 				ifa->ifa_dev = in_dev;
 				ifa->ifa_scope = RT_SCOPE_HOST;
+				memcpy(ifa->ifa_label, dev->name, IFNAMSIZ);
 				inet_insert_ifa(in_dev, ifa);
 			}
 		}
@@ -700,6 +727,10 @@ static int inetdev_event(struct notifier_block *this, unsigned long event, void 
 	case NETDEV_DOWN:
 		ip_mc_down(in_dev);
 		break;
+	case NETDEV_CHANGEMTU:	
+		if (dev->mtu >= 68)
+			break;
+		/* MTU falled under minimal IP mtu. Disable IP. */
 	case NETDEV_UNREGISTER:
 		inetdev_destroy(in_dev);
 		break;
@@ -894,7 +925,7 @@ int devinet_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
 static struct devinet_sysctl_table
 {
 	struct ctl_table_header *sysctl_header;
-	ctl_table devinet_vars[12];
+	ctl_table devinet_vars[14];
 	ctl_table devinet_dev[2];
 	ctl_table devinet_conf_dir[2];
 	ctl_table devinet_proto_dir[2];
@@ -933,6 +964,12 @@ static struct devinet_sysctl_table
          &proc_dointvec},
         {NET_IPV4_CONF_LOG_MARTIANS, "log_martians",
          &ipv4_devconf.log_martians, sizeof(int), 0644, NULL,
+         &proc_dointvec},
+	{NET_IPV4_CONF_HIDDEN, "hidden",
+         &ipv4_devconf.hidden, sizeof(int), 0644, NULL,
+         &proc_dointvec},
+	{NET_IPV4_CONF_ARPFILTER, "arp_filter",
+         &ipv4_devconf.arp_filter, sizeof(int), 0644, NULL,
          &proc_dointvec},
 	 {0}},
 

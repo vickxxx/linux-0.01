@@ -24,7 +24,9 @@ struct fat_mount_options {
 		 posixfs:1,       /* Allow names like makefile and Makefile to coexist */
 		 numtail:1,       /* Does first alias have a numeric '~1' type tail? */
 		 atari:1,         /* Use Atari GEMDOS variation of MS-DOS fs */
-		 fat32:1;	  /* Is this a FAT32 partition? */
+		 fat32:1,	  /* Is this a FAT32 partition? */
+		 small_letter:1,  /* Use small letters for short name */
+		 force_long:1;	  /* Force create longname */
 };
 
 struct vfat_unicode {
@@ -51,7 +53,9 @@ struct msdos_sb_info {
 	struct nls_table *nls_disk;  /* Codepage used on disk */
 	struct nls_table *nls_io;    /* Charset used for input and display */
 	struct cvf_format* cvf_format;
-	void* private_data;	
+	void *dir_ops;		     /* Opaque; default directory operations */
+	void (*put_super_callback)(struct super_block *);
+	void *private_data;	
 };
 
 #endif

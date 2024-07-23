@@ -8,6 +8,7 @@
 #ifndef _NCP_FS_SB
 #define _NCP_FS_SB
 
+#include <asm/semaphore.h>
 #include <linux/ncp_mount.h>
 #include <linux/types.h>
 
@@ -44,7 +45,7 @@ struct ncp_server {
 				   receive replies */
 
 	int lock;		/* To prevent mismatch in protocols. */
-	struct wait_queue *wait;
+	struct semaphore sem;
 
 	int current_size;	/* for packet preparation */
 	int has_subfunction;
@@ -73,6 +74,10 @@ struct ncp_server {
 		size_t len;
 		void*  data;
 	} priv;
+
+	struct ncp_nls_ioctl nls_charsets;	/* NLS user data */
+	struct nls_table *nls_vol;    /* codepage used on volume */
+	struct nls_table *nls_io;     /* charset used for input and display */
 };
 
 static inline int ncp_conn_valid(struct ncp_server *server)

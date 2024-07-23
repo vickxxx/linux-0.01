@@ -179,6 +179,17 @@ dentry->d_parent->d_name.name, dentry->d_name.name, cmd, data_ptr));
 			struct umsdos_info info;
 
 			ret = umsdos_emd_dir_readentry (&new_filp, &entry);
+
+			if (ret == -ENAMETOOLONG) {
+				printk (KERN_INFO "Fixing EMD entry with invalid size -- zeroing out\n");
+				fill_new_filp (&new_filp, demd);
+				new_filp.f_pos = f_pos;
+				new_filp.f_reada = 0;
+				memset (&entry, 0, sizeof (entry));
+				ret = umsdos_emd_dir_write (&new_filp, (char *) &entry, UMSDOS_REC_SIZE);
+				continue;
+			}
+
 			if (ret)
 				break;
 			if (entry.name_len <= 0)
@@ -280,6 +291,8 @@ printk("umsdos_ioctl: renaming %s/%s to %s/%s\n",
 old_dentry->d_parent->d_name.name, old_dentry->d_name.name,
 new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 			ret = msdos_rename (dir, old_dentry, dir, new_dentry);
+			d_drop(new_dentry);
+			d_drop(old_dentry);
 			dput(new_dentry);
 		}
 		dput(old_dentry);

@@ -9,15 +9,17 @@
 #ifndef _LINUX_SUNRPC_XPRT_H
 #define _LINUX_SUNRPC_XPRT_H
 
+#include <linux/timer.h>
 #include <linux/uio.h>
 #include <linux/socket.h>
 #include <linux/in.h>
+#include <linux/list.h>
 #include <linux/sunrpc/sched.h>
 
 /*
  * Maximum number of iov's we use.
  */
-#define MAX_IOVEC	8
+#define MAX_IOVEC	10
 
 /*
  * The transport code maintains an estimate on the maximum number of out-
@@ -39,15 +41,17 @@
  * Come Linux 2.3, we'll handle fragments directly.
  */
 #define RPC_MAXCONG		16
-#define RPC_MAXREQS		(RPC_MAXCONG + 1)
+#define RPC_MAXREQS		(RPC_MAXCONG + 2)
 #define RPC_CWNDSCALE		256
 #define RPC_MAXCWND		(RPC_MAXCONG * RPC_CWNDSCALE)
 #define RPC_INITCWND		RPC_CWNDSCALE
 #define RPCXPRT_CONGESTED(xprt) \
-	((xprt)->cong >= ((xprt)->nocong? RPC_MAXCWND : (xprt)->cwnd))
+	((xprt)->cong >= (xprt)->cwnd)
+#define RPCXPRT_SUPERCONGESTED(xprt) \
+				((xprt)->cwnd < 2*RPC_CWNDSCALE)
 
 /* Default timeout values */
-#define RPC_MAX_UDP_TIMEOUT	(6*HZ)
+#define RPC_MAX_UDP_TIMEOUT	(60*HZ)
 #define RPC_MAX_TCP_TIMEOUT	(600*HZ)
 
 /* RPC call and reply header size as number of 32bit words (verifier
@@ -96,8 +100,7 @@ struct rpc_rqst {
 	struct rpc_task *	rq_task;	/* RPC task data */
 	__u32			rq_xid;		/* request XID */
 	struct rpc_rqst *	rq_next;	/* free list */
-	unsigned char		rq_gotit;	/* reply received */
-	unsigned char		rq_damaged;	/* being received */
+	unsigned char		rq_received : 1;/* receive completed */
 
 	/*
 	 * For authentication (e.g. auth_des)
@@ -122,12 +125,6 @@ struct rpc_rqst {
 #define rq_rlen			rq_rcv_buf.io_len
 
 struct rpc_xprt {
-	struct rpc_xprt *	link;		/* list of all clients */
-	struct rpc_xprt *	rx_pending;	/* receive pending list */
-	
-	int 			rx_pending_flag;/* are we on the pending list ? */
-
-	struct file *		file;		/* VFS layer */
 	struct socket *		sock;		/* BSD socket layer */
 	struct sock *		inet;		/* INET layer */
 
@@ -143,63 +140,103 @@ struct rpc_xprt {
 	struct rpc_wait_queue	pending;	/* requests in flight */
 	struct rpc_wait_queue	backlog;	/* waiting for slot */
 	struct rpc_wait_queue	reconn;		/* waiting for reconnect */
+	struct rpc_wait_queue	pingwait;	/* waiting on ping() */
 	struct rpc_rqst *	free;		/* free slots */
 	struct rpc_rqst		slot[RPC_MAXREQS];
-	unsigned char		connected;	/* TCP: connected */
-	unsigned char		write_space;	/* TCP: can send */
-	unsigned int		shutdown   : 1,	/* being shut down */
-				nocong	   : 1,	/* no congestion control */
-				stream     : 1,	/* TCP */
-				tcp_more   : 1,	/* more record fragments */
-				connecting : 1;	/* being reconnected */
+	unsigned int		sockstate;	/* Socket state */
+	unsigned char		nocong	    : 1,/* no congestion control */
+				stream      : 1,/* TCP */
+				shutdown    : 1,/* being shut down */
+				tcp_more    : 1,/* more record fragments */
+				connecting  : 1;/* being reconnected */
+
+	unsigned long		tcp_timeout;	/* TCP timeout window */
+	struct timer_list	tcp_timer;	/* TCP timeout */
 
 	/*
 	 * State of TCP reply receive stuff
 	 */
-	union {					/* record marker & XID */
-		u32		header[2];
-		u8 		data[8];
-	}			tcp_recm;
-	struct rpc_rqst *	tcp_rqstp;
-	struct iovec		tcp_iovec[MAX_IOVEC];
-	u32			tcp_total;	/* overall record length */
-	u32			tcp_reclen;	/* fragment length */
-	u32			tcp_offset;	/* fragment offset */
-	u32			tcp_copied;	/* copied to request */
+	u32			tcp_recm;	/* Fragment header */
+	u32			tcp_xid;	/* Current XID */
+	unsigned int		tcp_reclen,	/* fragment length */
+				tcp_offset,	/* fragment offset */
+				tcp_copied;	/* copied to request */
+	struct list_head	rx_pending;	/* receive pending list */
 
 	/*
-	 * TCP send stuff
+	 * Send stuff
 	 */
-	struct rpc_iov		snd_buf;	/* send buffer */
 	struct rpc_task *	snd_task;	/* Task blocked in send */
-	u32			snd_sent;	/* Bytes we have sent */
 
 
 	void			(*old_data_ready)(struct sock *, int);
 	void			(*old_state_change)(struct sock *);
 	void			(*old_write_space)(struct sock *);
+
+	struct wait_queue *	cong_wait;
 };
-#define tcp_reclen		tcp_recm.header[0]
-#define tcp_xid			tcp_recm.header[1]
 
 #ifdef __KERNEL__
 
-struct rpc_xprt *	xprt_create(struct file *socket,
-					struct sockaddr_in *addr,
-					struct rpc_timeout *toparms);
 struct rpc_xprt *	xprt_create_proto(int proto, struct sockaddr_in *addr,
 					struct rpc_timeout *toparms);
 int			xprt_destroy(struct rpc_xprt *);
+void			xprt_shutdown(struct rpc_xprt *);
 void			xprt_default_timeout(struct rpc_timeout *, int);
 void			xprt_set_timeout(struct rpc_timeout *, unsigned int,
 					unsigned long);
 
 int			xprt_reserve(struct rpc_task *);
+int			xprt_ping_reserve(struct rpc_task *);
+int			xprt_down_transmit(struct rpc_task *);
 void			xprt_transmit(struct rpc_task *);
+void			xprt_up_transmit(struct rpc_task *);
 void			xprt_receive(struct rpc_task *);
 int			xprt_adjust_timeout(struct rpc_timeout *);
 void			xprt_release(struct rpc_task *);
+void			xprt_ping_release(struct rpc_task *);
 void			xprt_reconnect(struct rpc_task *);
+void			__rpciod_tcp_dispatcher(void);
+
+extern struct list_head	rpc_xprt_pending;
+
+static inline
+int xprt_tcp_pending(void)
+{
+	return !list_empty(&rpc_xprt_pending);
+}
+
+static inline
+void rpciod_tcp_dispatcher(void)
+{
+	if (xprt_tcp_pending())
+		__rpciod_tcp_dispatcher();
+}
+
+#define	XPRT_WSPACE	0
+#define XPRT_CONNECT	1
+#define XPRT_PING	2
+#define XPRT_NORESPOND	3
+
+#define xprt_wspace(xp)			(test_bit(XPRT_WSPACE, &(xp)->sockstate))
+#define xprt_test_and_set_wspace(xp)	(test_and_set_bit(XPRT_WSPACE, &(xp)->sockstate))
+#define xprt_clear_wspace(xp)		(clear_bit(XPRT_WSPACE, &(xp)->sockstate))
+
+#define xprt_connected(xp)		(!(xp)->stream || test_bit(XPRT_CONNECT, &(xp)->sockstate))
+#define xprt_set_connected(xp)		(set_bit(XPRT_CONNECT, &(xp)->sockstate))
+#define xprt_test_and_set_connected(xp)	(test_and_set_bit(XPRT_CONNECT, &(xp)->sockstate))
+#define xprt_clear_connected(xp)	(clear_bit(XPRT_CONNECT, &(xp)->sockstate))
+
+#define xprt_pinging(xp)		(test_bit(XPRT_PING, &(xp)->sockstate))
+#define xprt_set_pinging(xp)		(set_bit(XPRT_PING, &(xp)->sockstate))
+#define xprt_test_and_set_pinging(xp)	(test_and_set_bit(XPRT_PING, &(xp)->sockstate))
+#define xprt_clear_pinging(xp)		(clear_bit(XPRT_PING, &(xp)->sockstate))
+
+#define xprt_norespond(xp)		(test_bit(XPRT_NORESPOND, &(xp)->sockstate))
+#define xprt_test_and_set_norespond(xp)	(test_and_set_bit(XPRT_NORESPOND, &(xp)->sockstate))
+#define xprt_clear_norespond(xp)	(clear_bit(XPRT_NORESPOND, &(xp)->sockstate))
+
+
 
 #endif /* __KERNEL__*/
 

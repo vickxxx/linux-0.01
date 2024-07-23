@@ -56,6 +56,11 @@ SUBDIRS += arch/m68k/kernel arch/m68k/mm arch/m68k/lib
 CORE_FILES := arch/m68k/kernel/kernel.o arch/m68k/mm/mm.o $(CORE_FILES)
 LIBS += arch/m68k/lib/lib.a
 
+ifdef CONFIG_Q40
+CORE_FILES := $(CORE_FILES) arch/m68k/q40/q40.o
+SUBDIRS := $(SUBDIRS) arch/m68k/q40
+endif
+
 ifdef CONFIG_AMIGA
 CORE_FILES := $(CORE_FILES) arch/m68k/amiga/amiga.o
 SUBDIRS := $(SUBDIRS) arch/m68k/amiga
@@ -81,6 +86,11 @@ CORE_FILES := $(CORE_FILES) arch/m68k/apollo/apollo.o
 SUBDIRS := $(SUBDIRS) arch/m68k/apollo
 endif
 
+ifdef CONFIG_MVME147
+CORE_FILES := $(CORE_FILES) arch/m68k/mvme147/mvme147.o
+SUBDIRS := $(SUBDIRS) arch/m68k/mvme147
+endif
+
 ifdef CONFIG_MVME16x
 CORE_FILES := $(CORE_FILES) arch/m68k/mvme16x/mvme16x.o
 SUBDIRS := $(SUBDIRS) arch/m68k/mvme16x
@@ -91,6 +101,11 @@ CORE_FILES := $(CORE_FILES) arch/m68k/bvme6000/bvme6000.o
 SUBDIRS := $(SUBDIRS) arch/m68k/bvme6000
 endif
 
+ifdef CONFIG_SUN3X
+CORE_FILES := $(CORE_FILES) arch/m68k/sun3x/sun3x.o
+SUBDIRS := $(SUBDIRS) arch/m68k/sun3x
+endif
+
 ifdef CONFIG_M68040
 CORE_FILES := $(CORE_FILES) arch/m68k/fpsp040/fpsp.o
 SUBDIRS := $(SUBDIRS) arch/m68k/fpsp040
@@ -99,6 +114,11 @@ endif
 ifdef CONFIG_M68060
 CORE_FILES := $(CORE_FILES) arch/m68k/ifpsp060/ifpsp.o
 SUBDIRS := $(SUBDIRS) arch/m68k/ifpsp060
+endif
+
+ifdef CONFIG_FPU_EMU
+CORE_FILES := $(CORE_FILES) arch/m68k/math-emu/mathemu.o
+SUBDIRS := $(SUBDIRS) arch/m68k/math-emu
 endif
 
 lilo:	vmlinux
@@ -112,13 +132,26 @@ zImage compressed: vmlinux.gz
 
 vmlinux.gz: vmlinux
 
-ifdef CONFIG_KGDB
+ifndef CONFIG_KGDB
 	cp vmlinux vmlinux.tmp
 	$(STRIP) vmlinux.tmp
 	gzip -9c vmlinux.tmp >vmlinux.gz
 	rm vmlinux.tmp
 else
 	gzip -9c vmlinux >vmlinux.gz
+endif
+
+bzImage: vmlinux.bz2
+
+vmlinux.bz2: vmlinux
+
+ifndef CONFIG_KGDB
+	cp vmlinux vmlinux.tmp
+	$(STRIP) vmlinux.tmp
+	bzip2 -1c vmlinux.tmp >vmlinux.bz2
+	rm vmlinux.tmp
+else
+	bzip2 -1c vmlinux >vmlinux.bz2
 endif
 
 archclean:

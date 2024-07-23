@@ -57,10 +57,16 @@ struct smb_conn_opt {
 	/* The following are NT LM 0.12 options */
 	__u32              maxraw;
 	__u32              capabilities;
-	__u16              serverzone;
+	__s16              serverzone;
 };
 
 #ifdef __KERNEL__
+
+#define SMB_NLS_MAXNAMELEN 20
+struct smb_nls_codepage {
+	char local_name[SMB_NLS_MAXNAMELEN];
+	char remote_name[SMB_NLS_MAXNAMELEN];
+};
 
 #define SMB_MAXNAMELEN 255
 #define SMB_MAXPATHLEN 1024
@@ -113,11 +119,13 @@ enum smb_conn_state {
 
 #define SMB_HEADER_LEN   37     /* includes everything up to, but not
                                  * including smb_bcc */
-#define SMB_DEF_MAX_XMIT 32768
-#define SMB_INITIAL_PACKET_SIZE 4000
 
-/* Allocate max. 1 page */
-#define TRANS2_MAX_TRANSFER (4096-17)
+#define SMB_INITIAL_PACKET_SIZE	4000
+#define SMB_MAX_PACKET_SIZE	32768
+
+/* reserve this much space for trans2 parameters. Shouldn't have to be more
+   than 10 or so, but OS/2 seems happier like this. */
+#define SMB_TRANS2_MAX_PARAM 64
 
 #endif
 #endif

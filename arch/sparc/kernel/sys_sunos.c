@@ -1,4 +1,4 @@
-/* $Id: sys_sunos.c,v 1.94 1998/10/12 06:15:04 jj Exp $
+/* $Id: sys_sunos.c,v 1.94.2.6 2001/02/02 05:16:11 davem Exp $
  * sys_sunos.c: SunOS specific syscall compatibility support.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -26,7 +26,6 @@
 #include <linux/signal.h>
 #include <linux/uio.h>
 #include <linux/utsname.h>
-#include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/stat.h>
 #include <linux/malloc.h>
@@ -86,10 +85,17 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	}
 
 	retval = -ENOMEM;
-	if(!(flags & MAP_FIXED) && !addr) {
-		addr = get_unmapped_area(addr, len);
+	if(!(flags & MAP_FIXED) &&
+	   (!addr || (ARCH_SUN4C_SUN4 &&
+		      (addr >= 0x20000000 && addr < 0xe0000000)))) {
+		addr = get_unmapped_area(0, len);
 		if(!addr)
 			goto out_putf;
+		if (ARCH_SUN4C_SUN4 &&
+		    (addr >= 0x20000000 && addr < 0xe0000000)) {
+			retval = -EINVAL;
+			goto out_putf;
+		}
 	}
 	/* If this is ld.so or a shared library doing an mmap
 	 * of /dev/zero, transform it into an anonymous mapping.
@@ -111,13 +117,6 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	retval = -EINVAL;
 	if((len > (TASK_SIZE - PAGE_SIZE)) || (addr > (TASK_SIZE-len-PAGE_SIZE)))
 		goto out_putf;
-
-	if(ARCH_SUN4C_SUN4) {
-		if(((addr >= 0x20000000) && (addr < 0xe0000000))) {
-			retval = current->mm->brk;
-			goto out_putf;
-		}
-	}
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	retval = do_mmap(file, addr, len, prot, flags, off);
@@ -371,6 +370,7 @@ asmlinkage unsigned long sunos_sigblock(unsigned long blk_mask)
 	spin_lock_irq(&current->sigmask_lock);
 	old = current->blocked.sig[0];
 	current->blocked.sig[0] |= (blk_mask & _BLOCKABLE);
+	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	return old;
 }
@@ -382,6 +382,7 @@ asmlinkage unsigned long sunos_sigsetmask(unsigned long newmask)
 	spin_lock_irq(&current->sigmask_lock);
 	retval = current->blocked.sig[0];
 	current->blocked.sig[0] = (newmask & _BLOCKABLE);
+	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 	return retval;
 }
@@ -706,12 +707,12 @@ asmlinkage void sunos_nop(void)
 #define SMNT_SYS5         128
 
 struct sunos_fh_t {
-	char fh_data [NFS_FHSIZE];
+	char fh_data [NFS2_FHSIZE];
 };
 
 struct sunos_nfs_mount_args {
 	struct sockaddr_in  *addr; /* file server address */
-	struct nfs_fh *fh;     /* File handle to be mounted */
+	struct nfs3_fh *fh;     /* File handle to be mounted */
 	int        flags;      /* flags */
 	int        wsize;      /* write size in bytes */
 	int        rsize;      /* read size in bytes */
@@ -773,7 +774,7 @@ sunos_nfs_get_server_fd (int fd, struct sockaddr_in *addr)
 
 	server.sin_family = AF_INET;
 	server.sin_addr = addr->sin_addr;
-	server.sin_port = NFS_PORT;
+	server.sin_port = NFS2_PORT;
 
 	/* Call sys_connect */
 	ret = socket->ops->connect (socket, (struct sockaddr *) &server,
@@ -1198,7 +1199,7 @@ asmlinkage int sunos_readv(unsigned long fd, const struct iovec * vector, long c
 
 	lock_kernel();
 	ret = check_nonblock(sys_readv(fd,vector,count),fd);
-	lock_kernel();
+	unlock_kernel();
 	return ret;
 }
 

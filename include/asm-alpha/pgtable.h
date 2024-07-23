@@ -9,6 +9,7 @@
  * in <asm/page.h> (currently 8192).
  */
 #include <linux/config.h>
+#include <linux/mm.h>
 
 #include <asm/system.h>
 #include <asm/processor.h>	/* For TASK_SIZE */
@@ -17,13 +18,29 @@
 #include <asm/spinlock.h>	/* For the task lock */
 
 
-/* Caches aren't brain-dead on the Alpha. */
-#define flush_cache_all()			do { } while (0)
+/* The icache is not coherent with the dcache on an Alpha, thus before
+   running self modified code we must always issue an imb(). Actually
+   flush_cache_all() is real overkill as it's recalled from vmalloc() before
+   accessing pagetables and on the Alpha we are not required to flush the
+   icache before doing that, but the semantic of flush_cache_all() requires
+   us to flush _all_ the caches and so we must be correct here. It's instead
+   vmalloc that should be changed to use a more finegrained cache flush
+   operation (I suspect that also other archs doesn't need an icache flush
+   while handling pagetables). OTOH vmalloc is not a performance critical
+   path so after all we can live with it for now. */
+
+#define flush_cache_all()                      flush_icache_range(0, 0)
 #define flush_cache_mm(mm)			do { } while (0)
 #define flush_cache_range(mm, start, end)	do { } while (0)
 #define flush_cache_page(vma, vmaddr)		do { } while (0)
 #define flush_page_to_ram(page)			do { } while (0)
-#define flush_icache_range(start, end)		do { } while (0)
+#define flush_dcache_page(page)			do { } while (0)
+#ifndef __SMP__
+#define flush_icache_range(start, end)		imb()
+#else
+#define flush_icache_range(start, end)		smp_imb()
+extern void smp_imb(void);
+#endif
 
 /*
  * Use a few helper functions to hide the ugly broken ASN
@@ -49,7 +66,6 @@ ev4_flush_tlb_other(struct mm_struct *mm)
 __EXTERN_INLINE void
 ev5_flush_tlb_current(struct mm_struct *mm)
 {
-	mm->context = 0;
 	get_new_mmu_context(current, mm);
 	reload_context(current);
 }
@@ -57,7 +73,13 @@ ev5_flush_tlb_current(struct mm_struct *mm)
 __EXTERN_INLINE void
 ev5_flush_tlb_other(struct mm_struct *mm)
 {
-	mm->context = 0;
+	long * mmc = &mm->context[smp_processor_id()];
+	/*
+	 * Check it's not zero first to avoid cacheline ping pong when
+	 * possible.
+	 */
+	if (*mmc)
+		*mmc = 0;
 }
 
 /*
@@ -167,19 +189,6 @@ static inline void flush_tlb_range(struct mm_struct *mm,
 
 #else /* __SMP__ */
 
-/* ipi_msg_flush_tb is owned by the holder of the global kernel lock. */
-struct ipi_msg_flush_tb_struct {
-	volatile unsigned int flush_tb_mask;
-	union {
-		struct mm_struct *	flush_mm;
-		struct vm_area_struct *	flush_vma;
-	} p;
-	unsigned long flush_addr;
-	unsigned long flush_end;
-};
-
-extern struct ipi_msg_flush_tb_struct ipi_msg_flush_tb;
-
 extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *);
 extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
@@ -217,7 +226,8 @@ extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
 /* Number of pointers that fit on a page:  this will go away. */
 #define PTRS_PER_PAGE	(1UL << (PAGE_SHIFT-3))
 
-#define VMALLOC_START		0xFFFFFE0000000000
+#define CONSOLE_REMAP_START	0xFFFFFE0000000000
+#define VMALLOC_START		(CONSOLE_REMAP_START + PMD_SIZE)
 #define VMALLOC_VMADDR(x)	((unsigned long)(x))
 #define VMALLOC_END		(~0UL)
 
@@ -312,7 +322,7 @@ extern unsigned long __zero_page(void);
 
 #define BAD_PAGETABLE	__bad_pagetable()
 #define BAD_PAGE	__bad_page()
-#define ZERO_PAGE	(PAGE_OFFSET+0x30A000)
+#define ZERO_PAGE(vaddr)	(PAGE_OFFSET+0x30A000)
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR			(8*sizeof(unsigned long))
@@ -651,5 +661,6 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
+#define kern_addr_valid(addr)	(1)
 
 #endif /* _ALPHA_PGTABLE_H */

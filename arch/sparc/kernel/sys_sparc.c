@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.49 1998/10/11 06:57:53 davem Exp $
+/* $Id: sys_sparc.c,v 1.52.2.2 2000/03/24 00:03:22 davem Exp $
  * linux/arch/sparc/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -24,6 +24,8 @@
 
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
+
+/* #define DEBUG_UNIMP_SYSCALL */
 
 /* XXX Make this per-binary type, this way we can detect the type of
  * XXX a binary.  Every Sparc executable calls this very early on.
@@ -189,23 +191,24 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 			goto out;
 	}
 	retval = -ENOMEM;
-	if(!(flags & MAP_FIXED) && !addr) {
-		addr = get_unmapped_area(addr, len);
+	len = PAGE_ALIGN(len);
+	if(!(flags & MAP_FIXED) &&
+	   (!addr || (ARCH_SUN4C_SUN4 &&
+		      (addr >= 0x20000000 && addr < 0xe0000000)))) {
+		addr = get_unmapped_area(0, len);
 		if(!addr)
 			goto out_putf;
+		if (ARCH_SUN4C_SUN4 &&
+		    (addr >= 0x20000000 && addr < 0xe0000000)) {
+			retval = -EINVAL;
+			goto out_putf;
+		}
 	}
 
 	/* See asm-sparc/uaccess.h */
 	retval = -EINVAL;
 	if((len > (TASK_SIZE - PAGE_SIZE)) || (addr > (TASK_SIZE-len-PAGE_SIZE)))
 		goto out_putf;
-
-	if(ARCH_SUN4C_SUN4) {
-		if(((addr >= 0x20000000) && (addr < 0xe0000000))) {
-			retval = current->mm->brk;
-			goto out_putf;
-		}
-	}
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	retval = do_mmap(file, addr, len, prot, flags, off);
@@ -223,10 +226,22 @@ out:
 asmlinkage unsigned long
 c_sys_nis_syscall (struct pt_regs *regs)
 {
+	static int count = 0;
+	
+	if (count++ > 5) return -ENOSYS;
 	lock_kernel();
-	printk ("Unimplemented SPARC system call %d\n",(int)regs->u_regs[1]);
+	printk ("%s[%d]: Unimplemented SPARC system call %d\n", current->comm, current->pid, (int)regs->u_regs[1]);
+#ifdef DEBUG_UNIMP_SYSCALL	
 	show_regs (regs);
+#endif
 	unlock_kernel();
+	return -ENOSYS;
+}
+
+/* We don't want to warn about LFS syscalls which are defined in our headers */
+asmlinkage unsigned long
+sys_lfs_syscall (void)
+{
 	return -ENOSYS;
 }
 

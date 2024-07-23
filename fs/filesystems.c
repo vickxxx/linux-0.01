@@ -22,6 +22,7 @@
 #include <linux/ncp_fs.h>
 #include <linux/affs_fs.h>
 #include <linux/ufs_fs.h>
+#include <linux/efs_fs.h>
 #include <linux/romfs_fs.h>
 #include <linux/auto_fs.h>
 #include <linux/qnx4_fs.h>
@@ -36,6 +37,7 @@
 #endif
 #include <linux/lockd/bind.h>
 #include <linux/lockd/xdr.h>
+#include <linux/lockd/syscall.h>
 #include <linux/init.h>
 #include <linux/nls.h>
 
@@ -46,6 +48,9 @@ extern int init_coda(void);
 #ifdef CONFIG_DEVPTS_FS
 extern int init_devpts_fs(void);
 #endif
+
+extern int init_adfs_fs(void);
+
 
 void __init filesystem_setup(void)
 {
@@ -129,6 +134,10 @@ void __init filesystem_setup(void)
 	init_ufs_fs();
 #endif
 
+#ifdef CONFIG_EFS_FS
+	init_efs_fs();
+#endif
+
 #ifdef CONFIG_AUTOFS_FS
 	init_autofs_fs();
 #endif
@@ -154,28 +163,48 @@ void __init filesystem_setup(void)
 #ifdef CONFIG_NFSD_MODULE
 int (*do_nfsservctl)(int, void *, void *) = NULL;
 #endif
+
+#ifdef CONFIG_LOCKD_MODULE
+int (*do_lockdctl)(int, void *, void *) = NULL;
+#endif
+
 int
 asmlinkage sys_nfsservctl(int cmd, void *argp, void *resp)
 {
-#ifndef CONFIG_NFSD_MODULE
-	return -ENOSYS;
-#else
 	int ret = -ENOSYS;
 	
-	lock_kernel();
-	if (do_nfsservctl) {
-		ret = do_nfsservctl(cmd, argp, resp);
-		goto out;
-	}
+	if (cmd >= NFSCTL_LOCKD) {
+#if defined(CONFIG_LOCKD) || defined(CONFIG_LOCKD_MODULE)
+		lock_kernel();
+#ifdef CONFIG_LOCKD
+		ret = lockdctl(cmd, argp, resp);
+#else
+		if (do_lockdctl) 
+			ret = do_lockdctl(cmd, argp, resp);
 #ifdef CONFIG_KMOD
-	if (request_module ("nfsd") == 0) {
+		else if (request_module ("lockd") == 0) {
+			if (do_lockdctl)
+				ret = do_lockdctl(cmd, argp, resp);
+		}
+#endif
+#endif
+		unlock_kernel();
+#endif
+		return ret;
+	}
+
+#ifdef CONFIG_NFSD_MODULE
+	lock_kernel();
+	if (do_nfsservctl)
+		ret = do_nfsservctl(cmd, argp, resp);
+#ifdef CONFIG_KMOD
+	else if (request_module ("nfsd") == 0) {
 		if (do_nfsservctl)
 			ret = do_nfsservctl(cmd, argp, resp);
 	}
 #endif /* CONFIG_KMOD */
-out:
 	unlock_kernel();
-	return ret;
 #endif /* CONFIG_NFSD_MODULE */
+	return ret;
 }
 #endif /* CONFIG_NFSD */

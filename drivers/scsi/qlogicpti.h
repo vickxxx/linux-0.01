@@ -149,8 +149,8 @@ struct qlogicpti_regs {
  * requests are queued serially and the scatter/gather limit is
  * determined for each queue request anew.
  */
-#define QLOGICISP_REQ_QUEUE_LEN	255	/* must be power of two - 1 */
-#define QLOGICISP_MAX_SG(ql)	(4 + ((ql) > 0) ? 7*((ql) - 1) : 0)
+#define QLOGICPTI_REQ_QUEUE_LEN	255	/* must be power of two - 1 */
+#define QLOGICPTI_MAX_SG(ql)	(4 + ((ql) > 0) ? 7*((ql) - 1) : 0)
 
 #ifndef NULL
 #define NULL (0)
@@ -160,6 +160,7 @@ int qlogicpti_detect(Scsi_Host_Template *);
 int qlogicpti_release(struct Scsi_Host *);
 const char * qlogicpti_info(struct Scsi_Host *);
 int qlogicpti_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
+int qlogicpti_queuecommand_slow(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
 int qlogicpti_abort(Scsi_Cmnd *);
 int qlogicpti_reset(Scsi_Cmnd *, unsigned int);
 
@@ -441,9 +442,9 @@ struct dev_param {
 #define RES_QUEUE_LEN		255	/* Must be power of two - 1 */
 #define QUEUE_ENTRY_LEN		64
 
-#define NEXT_REQ_PTR(wheee)   (((wheee) + 1) & QLOGICISP_REQ_QUEUE_LEN)
+#define NEXT_REQ_PTR(wheee)   (((wheee) + 1) & QLOGICPTI_REQ_QUEUE_LEN)
 #define NEXT_RES_PTR(wheee)   (((wheee) + 1) & RES_QUEUE_LEN)
-#define PREV_REQ_PTR(wheee)   (((wheee) - 1) & QLOGICISP_REQ_QUEUE_LEN)
+#define PREV_REQ_PTR(wheee)   (((wheee) - 1) & QLOGICPTI_REQ_QUEUE_LEN)
 #define PREV_RES_PTR(wheee)   (((wheee) - 1) & RES_QUEUE_LEN)
 
 struct pti_queue_entry {
@@ -455,18 +456,26 @@ struct qlogicpti {
 	/* These are the hot elements in the cache, so they come first. */
 	struct qlogicpti         *next;                 /* Next active adapter        */
 	struct qlogicpti_regs    *qregs;                /* Adapter registers          */
+	struct pti_queue_entry   *res_cpu;              /* Ptr to RESPONSE bufs (CPU) */
+	struct pti_queue_entry   *req_cpu;              /* Ptr to REQUEST bufs (CPU)  */
+
+	__u32                     res_dvma;             /* Ptr to RESPONSE bufs (DVMA)*/
+	__u32                     req_dvma;             /* Ptr to REQUEST bufs (DVMA) */
 	u_int	                  req_in_ptr;		/* index of next request slot */
 	u_int	                  res_out_ptr;		/* index of next result slot  */
-	struct pti_queue_entry   *res_cpu;              /* Ptr to RESPONSE bufs (CPU) */
-	__u32                     res_dvma;             /* Ptr to RESPONSE bufs (DVMA)*/
-	struct pti_queue_entry   *req_cpu;              /* Ptr to REQUEST bufs (CPU)  */
-	__u32                     req_dvma;             /* Ptr to REQUEST bufs (DVMA) */
+
 	int                       cmd_count[MAX_TARGETS];
 	unsigned long             tag_ages[MAX_TARGETS];
 	long	                  send_marker;		/* must we send a marker?     */
 
+	/* The cmd->handler is only 32-bits, so that things work even on monster
+	 * Ex000 sparc64 machines with >4GB of ram we just keep track of the
+	 * scsi command pointers here.  This is essentially what Matt Jacob does. -DaveM
+	 */
+	Scsi_Cmnd                *cmd_slots[QLOGICPTI_REQ_QUEUE_LEN + 1];
+
 	/* The rest of the elements are unimportant for performance. */
-	u_char	                  fware_majrev, fware_minrev;
+	u_char	                  fware_majrev, fware_minrev, fware_micrev;
 	struct Scsi_Host         *qhost;
 	struct linux_sbus_device *qdev;
 	int                       qpti_id;
@@ -474,7 +483,7 @@ struct qlogicpti {
 	int                       prom_node;
 	char                      prom_name[64];
 	int                       irq;
-	char                      differential, ultra;
+	char                      differential, ultra, clock;
 	unsigned char             bursts;
 	struct	host_param        host_param;
 	struct	dev_param         dev_param[MAX_TARGETS];
@@ -487,11 +496,10 @@ struct qlogicpti {
 #define SREG_IMASK                0x0c   /* Interrupt level            */
 #define SREG_SPMASK               0x03   /* Mask for switch pack       */
 	unsigned char             swsreg;
-
-#if 0
-	char	res[RES_QUEUE_LEN+1][QUEUE_ENTRY_LEN];
-	char	req[QLOGICISP_REQ_QUEUE_LEN+1][QUEUE_ENTRY_LEN];
-#endif
+	unsigned int	
+		gotirq	:	1,	/* this instance got an irq */
+		is_pti	: 	1,	/* Non-zero if this is a PTI board. */
+		sbits	:	16;	/* syncmode known bits */
 };
 
 /* How to twiddle them bits... */
@@ -722,12 +730,12 @@ struct qlogicpti {
 	detect:		qlogicpti_detect,			   \
 	release:	qlogicpti_release,			   \
 	info:		qlogicpti_info,				   \
-	queuecommand:	qlogicpti_queuecommand,			   \
+	queuecommand:	qlogicpti_queuecommand_slow,		   \
 	abort:		qlogicpti_abort,			   \
 	reset:		qlogicpti_reset,			   \
-	can_queue:	QLOGICISP_REQ_QUEUE_LEN,		   \
+	can_queue:	QLOGICPTI_REQ_QUEUE_LEN,		   \
 	this_id:	7,					   \
-	sg_tablesize:	QLOGICISP_MAX_SG(QLOGICISP_REQ_QUEUE_LEN), \
+	sg_tablesize:	QLOGICPTI_MAX_SG(QLOGICPTI_REQ_QUEUE_LEN), \
 	cmd_per_lun:	1,					   \
 	use_clustering:	DISABLE_CLUSTERING,			   \
 	use_new_eh_code: 0					   \

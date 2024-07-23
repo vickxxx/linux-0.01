@@ -39,8 +39,9 @@
 # define FALSE 0
 #endif
 
-#define MAX_SCSI_DEVICE_CODE 10
+#define MAX_SCSI_DEVICE_CODE 14
 extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
+extern spinlock_t scsi_malloc_lock;
 
 #ifdef DEBUG
     #define SCSI_TIMEOUT (5*HZ)
@@ -296,6 +297,7 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 #define SCSI_1          1
 #define SCSI_1_CCS      2
 #define SCSI_2          3
+#define SCSI_3          4
 
 /*
  *  Every SCSI command starts with a one byte OP-code.
@@ -376,6 +378,9 @@ extern int  scsi_sense_valid(Scsi_Cmnd *);
 extern int  scsi_decide_disposition (Scsi_Cmnd * SCpnt);
 extern int  scsi_block_when_processing_errors(Scsi_Device *);
 extern void scsi_sleep(int);
+extern int  scsi_partsize(struct buffer_head *bh, unsigned long capacity,
+                    unsigned int *cyls, unsigned int *hds,
+                    unsigned int *secs);
 
 /*
  *  scsi_abort aborts the current command that is executing on host host.
@@ -629,7 +634,7 @@ extern int scsi_mlqueue_insert(Scsi_Cmnd * cmd, int reason);
 extern int scsi_mlqueue_finish(struct Scsi_Host * host, Scsi_Device * device);
 
 
-#if defined(MAJOR_NR) && (MAJOR_NR != SCSI_TAPE_MAJOR)
+#if defined(MAJOR_NR) && (MAJOR_NR != SCSI_TAPE_MAJOR) && (MAJOR_NR != OSST_MAJOR)
 #include "hosts.h"
 
 static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
@@ -650,8 +655,8 @@ static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors
 	    req->nr_sectors -= bh->b_size >> 9;
 	    req->sector += bh->b_size >> 9;
 	    bh->b_reqnext = NULL;
-	    bh->b_end_io(bh, uptodate);
 	    sectors -= bh->b_size >> 9;
+	    bh->b_end_io(bh, uptodate);
 	    if ((bh = req->bh) != NULL) {
 		req->current_nr_sectors = bh->b_size >> 9;
 		if (req->nr_sectors < req->current_nr_sectors) {

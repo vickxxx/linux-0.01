@@ -33,18 +33,17 @@ int ext2_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		flags = flags & EXT2_FL_USER_MODIFIABLE;
 		/*
 		 * The IMMUTABLE and APPEND_ONLY flags can only be changed by
-		 * the super user when the security level is zero.
+		 * a process with the relevent capability.
 		 */
 		if ((flags & (EXT2_APPEND_FL | EXT2_IMMUTABLE_FL)) ^
 		    (inode->u.ext2_i.i_flags &
-		     (EXT2_APPEND_FL | EXT2_IMMUTABLE_FL))) {
+		     (EXT2_APPEND_FL | EXT2_IMMUTABLE_FL)))
 			/* This test looks nicer. Thanks to Pauline Middelink */
 			if (!capable(CAP_LINUX_IMMUTABLE))
 				return -EPERM;
-		} else
-			if ((current->fsuid != inode->i_uid) && 
-			    !capable(CAP_FOWNER))
-				return -EPERM;
+
+		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
+			return -EPERM;
 		if (IS_RDONLY(inode))
 			return -EROFS;
 		inode->u.ext2_i.i_flags = (inode->u.ext2_i.i_flags &
@@ -69,13 +68,13 @@ int ext2_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		mark_inode_dirty(inode);
 		return 0;
 	case EXT2_IOC_GETVERSION:
-		return put_user(inode->u.ext2_i.i_version, (int *) arg);
+		return put_user(inode->i_generation, (int *) arg);
 	case EXT2_IOC_SETVERSION:
 		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
 			return -EPERM;
 		if (IS_RDONLY(inode))
 			return -EROFS;
-		if (get_user(inode->u.ext2_i.i_version, (int *) arg))
+		if (get_user(inode->i_generation, (int *) arg))
 			return -EFAULT;	
 		inode->i_ctime = CURRENT_TIME;
 		mark_inode_dirty(inode);

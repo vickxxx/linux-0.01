@@ -16,8 +16,6 @@ static int autofs_dir_readdir(struct file *filp,
 			       void *dirent, filldir_t filldir)
 {
 	struct inode *inode=filp->f_dentry->d_inode;
-	if (!inode || !S_ISDIR(inode->i_mode))
-		return -ENOTDIR;
 
 	switch((unsigned long) filp->f_pos)
 	{
@@ -38,10 +36,10 @@ static int autofs_dir_readdir(struct file *filp,
 /*
  * No entries except for "." and "..", both of which are handled by the VFS layer
  */
-static int autofs_dir_lookup(struct inode *dir, struct dentry * dentry)
+static struct dentry *autofs_dir_lookup(struct inode *dir,struct dentry *dentry)
 {
 	d_add(dentry, NULL);
-	return 0;
+	return NULL;
 }
 
 static struct file_operations autofs_dir_operations = {

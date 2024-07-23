@@ -24,7 +24,7 @@
  *                      <Jeff_Tranter@Mitel.COM>
  *
  * Bruno Haible      :  remove 4K limit for the maps file
- * 			<haible@ma2s2.mathematik.uni-karlsruhe.de>
+ *			<haible@ma2s2.mathematik.uni-karlsruhe.de>
  *
  * Yves Arrouye      :  remove removal of trailing spaces in get_array.
  *			<Yves.Arrouye@marin.fdn.fr>
@@ -41,8 +41,6 @@
  *
  * Alan Cox	     :  security fixes.
  *			<Alan.Cox@linux.org>
- *
- * Andi Kleen	     :  Race Fixes. 	
  *
  */
 
@@ -78,6 +76,11 @@ int get_malloc(char * buffer);
 #endif
 
 
+static int open_kcore(struct inode * inode, struct file * filp)
+{
+	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+}
+
 static ssize_t read_core(struct file * file, char * buf,
 			 size_t count, loff_t *ppos)
 {
@@ -95,6 +98,9 @@ static ssize_t read_core(struct file * file, char * buf,
 	memset(&dump, 0, sizeof(struct user));
 	dump.magic = CMAGIC;
 	dump.u_dsize = max_mapnr;
+#if defined (__i386__)
+	dump.start_code = PAGE_OFFSET;
+#endif
 #ifdef __alpha__
 	dump.start_data = PAGE_OFFSET;
 #endif
@@ -139,6 +145,12 @@ static ssize_t read_core(struct file * file, char * buf,
 static struct file_operations proc_kcore_operations = {
 	NULL,           /* lseek */
 	read_core,
+	NULL,		/* write */
+	NULL,		/* readdir */
+	NULL,		/* poll */
+	NULL,		/* ioctl */
+	NULL,		/* mmap */
+	open_kcore
 };
 
 struct inode_operations proc_kcore_inode_operations = {
@@ -236,9 +248,10 @@ static int get_kstat(char * buffer)
 	unsigned long ticks;
 
 	ticks = jiffies * smp_num_cpus;
+#ifndef CONFIG_ARCH_S390
 	for (i = 0 ; i < NR_IRQS ; i++)
 		sum += kstat_irqs(i);
-
+#endif
 #ifdef __SMP__
 	len = sprintf(buffer,
 		"cpu  %u %u %u %lu\n",
@@ -262,8 +275,13 @@ static int get_kstat(char * buffer)
 		"disk_rblk %u %u %u %u\n"
 		"disk_wblk %u %u %u %u\n"
 		"page %u %u\n"
+#ifdef CONFIG_ARCH_S390
+                "swap %u %u\n"
+		"intr 1 0",
+#else
 		"swap %u %u\n"
 		"intr %u",
+#endif
 #else
 	len = sprintf(buffer,
 		"cpu  %u %u %u %lu\n"
@@ -273,8 +291,13 @@ static int get_kstat(char * buffer)
 		"disk_rblk %u %u %u %u\n"
 		"disk_wblk %u %u %u %u\n"
 		"page %u %u\n"
-		"swap %u %u\n"
-		"intr %u",
+#ifdef CONFIG_ARCH_S390           
+                "swap %u %u\n"
+		"intr 1 0",   
+#else                             
+                "swap %u %u\n"    
+                "intr %u",        
+#endif                            
 		kstat.cpu_user,
 		kstat.cpu_nice,
 		kstat.cpu_system,
@@ -293,10 +316,14 @@ static int get_kstat(char * buffer)
 		kstat.pgpgin,
 		kstat.pgpgout,
 		kstat.pswpin,
-		kstat.pswpout,
+#ifdef CONFIG_ARCH_S390
+		kstat.pswpout);
+#else
+                kstat.pswpout, 
 		sum);
 	for (i = 0 ; i < NR_IRQS ; i++)
 		len += sprintf(buffer + len, " %u", kstat_irqs(i));
+#endif
 	len += sprintf(buffer + len,
 		"\nctxt %u\n"
 		"btime %lu\n"
@@ -388,46 +415,21 @@ static int get_cmdline(char * buffer)
 	return sprintf(buffer, "%s\n", saved_command_line);
 }
 
-/*
- * Caller must release_mm the mm_struct later.
- * You don't get any access to init_mm.
- */
-static struct mm_struct *get_mm_and_lock(int pid)
-{
-	struct mm_struct *mm = NULL;
-	struct task_struct *tsk;
-
-	read_lock(&tasklist_lock);
-	tsk = find_task_by_pid(pid);
-	if (tsk && tsk->mm && tsk->mm != &init_mm)
-		mmget(mm = tsk->mm);
-	read_unlock(&tasklist_lock);
-	if (mm != NULL)
-		down(&mm->mmap_sem);
-	return mm;
-}
-
-static void release_mm(struct mm_struct *mm)
-{
-	up(&mm->mmap_sem);
-	mmput(mm);
-}
-
-static unsigned long get_phys_addr(struct mm_struct *mm, unsigned long ptr)
+static unsigned long get_phys_addr(struct task_struct * p, unsigned long ptr)
 {
 	pgd_t *page_dir;
 	pmd_t *page_middle;
 	pte_t pte;
 
-	if (ptr >= TASK_SIZE)
+	if (!p || !p->mm || ptr >= TASK_SIZE)
 		return 0;
 	/* Check for NULL pgd .. shouldn't happen! */
-	if (!mm->pgd) {
-		printk(KERN_DEBUG "missing pgd for mm %p\n", mm);
+	if (!p->mm->pgd) {
+		printk("get_phys_addr: pid %d has NULL pgd!\n", p->pid);
 		return 0;
 	}
 
-	page_dir = pgd_offset(mm,ptr);
+	page_dir = pgd_offset(p->mm,ptr);
 	if (pgd_none(*page_dir))
 		return 0;
 	if (pgd_bad(*page_dir)) {
@@ -449,7 +451,7 @@ static unsigned long get_phys_addr(struct mm_struct *mm, unsigned long ptr)
 	return pte_page(pte) + (ptr & ~PAGE_MASK);
 }
 
-static int get_array(struct mm_struct *mm, unsigned long start, unsigned long end, char * buffer)
+static int get_array(struct task_struct *p, unsigned long start, unsigned long end, char * buffer)
 {
 	unsigned long addr;
 	int size = 0, result = 0;
@@ -458,7 +460,7 @@ static int get_array(struct mm_struct *mm, unsigned long start, unsigned long en
 	if (start >= end)
 		return result;
 	for (;;) {
-		addr = get_phys_addr(mm, start);
+		addr = get_phys_addr(p, start);
 		if (!addr)
 			return result;
 		do {
@@ -480,28 +482,27 @@ static int get_array(struct mm_struct *mm, unsigned long start, unsigned long en
 
 static int get_env(int pid, char * buffer)
 {
-	struct mm_struct *mm;
-	int res = 0;
+	struct task_struct *p;
+	
+	read_lock(&tasklist_lock);
+	p = find_task_by_pid(pid);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
 
-	mm = get_mm_and_lock(pid);
-	if (mm) {
-		res = get_array(mm, mm->env_start, mm->env_end, buffer);
-		release_mm(mm);
-	}
-	return res;
+	if (!p || !p->mm)
+		return 0;
+	return get_array(p, p->mm->env_start, p->mm->env_end, buffer);
 }
 
 static int get_arg(int pid, char * buffer)
 {
-	struct mm_struct *mm;
-	int res = 0;
+	struct task_struct *p;
 
-	mm = get_mm_and_lock(pid);
-	if (mm) {
-		res = get_array(mm, mm->arg_start, mm->arg_end, buffer);
-		release_mm(mm);
-	}
-	return res;
+	read_lock(&tasklist_lock);
+	p = find_task_by_pid(pid);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	if (!p || !p->mm)
+		return 0;
+	return get_array(p, p->mm->arg_start, p->mm->arg_end, buffer);
 }
 
 /*
@@ -557,7 +558,22 @@ static unsigned long get_wchan(struct task_struct *p)
 		return ((unsigned long *)schedule_frame)[12];
 	    }
 	    return pc;
-	}	
+	}
+#elif defined(__mips__)
+	/*
+	 * The same comment as on the Alpha applies here, too ...
+	 */
+	{
+		unsigned long schedule_frame;
+		unsigned long pc;
+
+		pc = thread_saved_pc(&p->tss);
+		if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
+			schedule_frame = ((unsigned long *)(long)p->tss.reg30)[16];
+			return (unsigned long)((unsigned long *)schedule_frame)[11];
+		}
+		return pc;
+	}
 #elif defined(__mc68000__)
 	{
 	    unsigned long fp, pc;
@@ -578,8 +594,24 @@ static unsigned long get_wchan(struct task_struct *p)
 	    } while (count++ < 16);
 	}
 #elif defined(__powerpc__)
-	return (p->tss.wchan);
-#elif defined (CONFIG_ARM)
+	{
+		unsigned long ip, sp;
+		unsigned long stack_page = (unsigned long) p;
+		int count = 0;
+
+		sp = p->tss.ksp;
+		do {
+			sp = *(unsigned long *)sp;
+			if (sp < stack_page || sp >= stack_page + 8188)
+				return 0;
+			if (count > 0) {
+				ip = *(unsigned long *)(sp + 4);
+				if (ip < first_sched || ip >= last_sched)
+					return ip;
+			}
+		} while (count++ < 16);
+	}
+#elif defined(__arm__)
 	{
 		unsigned long fp, lr;
 		unsigned long stack_page;
@@ -606,7 +638,7 @@ static unsigned long get_wchan(struct task_struct *p)
 #ifdef __sparc_v9__
 		bias = STACK_BIAS;
 #endif
-	    	fp = p->tss.ksp + bias;
+		fp = p->tss.ksp + bias;
 		do {
 			/* Bogus frame pointer? */
 			if (fp < (task_base + sizeof(struct task_struct)) ||
@@ -619,7 +651,28 @@ static unsigned long get_wchan(struct task_struct *p)
 			fp = rw->ins[6] + bias;
 		} while (++count < 16);
 	}
+#elif defined (__s390__)
+        {
+                unsigned long ksp, backchain, ip;
+                unsigned long stack_page;
+                int count = 0;
+
+                stack_page = (unsigned long)p;
+                ksp = p->tss.ksp;
+                if (!stack_page || ksp < stack_page || ksp >= 8188+stack_page)
+                        return 0;
+                backchain = (*(unsigned long *) ksp) & 0x7fffffff;
+                do {
+                        if (backchain < stack_page || backchain >= 8188+stack_page)
+                                return 0;
+                        ip = (*(unsigned long *) (backchain+56)) & 0x7fffffff;
+                        if (ip < first_sched || ip >= last_sched)
+                                return ip;
+                        backchain = (*(unsigned long *) backchain) & 0x7fffffff;
+                } while (count++ < 16);
+        }
 #endif
+
 	return 0;
 }
 
@@ -635,14 +688,14 @@ static unsigned long get_wchan(struct task_struct *p)
 # define KSTK_EIP(tsk) \
     (*(unsigned long *)(PT_REG(pc) + PAGE_SIZE + (unsigned long)(tsk)))
 # define KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->tss.usp)
-#elif defined(CONFIG_ARM)
+#elif defined(__arm__)
 # define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1022])
 # define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1020])
 #elif defined(__mc68000__)
 #define	KSTK_EIP(tsk)	\
     ({			\
 	unsigned long eip = 0;	 \
- 	if ((tsk)->tss.esp0 > PAGE_SIZE && \
+	if ((tsk)->tss.esp0 > PAGE_SIZE && \
 	    MAP_NR((tsk)->tss.esp0) < max_mapnr) \
 	      eip = ((struct pt_regs *) (tsk)->tss.esp0)->pc;	 \
 	eip; })
@@ -656,6 +709,15 @@ static unsigned long get_wchan(struct task_struct *p)
 #elif defined(__sparc__)
 # define KSTK_EIP(tsk)  ((tsk)->tss.kregs->pc)
 # define KSTK_ESP(tsk)  ((tsk)->tss.kregs->u_regs[UREG_FP])
+#elif defined(__mips__)
+# define PT_REG(reg)		((long)&((struct pt_regs *)0)->reg \
+				 - sizeof(struct pt_regs))
+#define KSTK_TOS(tsk) ((unsigned long)(tsk) + KERNEL_STACK_SIZE - 32)
+# define KSTK_EIP(tsk)	(*(unsigned long *)(KSTK_TOS(tsk) + PT_REG(cp0_epc)))
+# define KSTK_ESP(tsk)	(*(unsigned long *)(KSTK_TOS(tsk) + PT_REG(regs[29])))
+#elif defined(__s390__)
+#define KSTK_EIP(tsk)   ((tsk)->tss.regs->psw.addr)
+#define KSTK_ESP(tsk)   ((tsk)->tss.ksp)
 #endif
 
 /* Gcc optimizes away "strlen(x)" for constant x */
@@ -754,14 +816,11 @@ static inline char * task_mem(struct task_struct *p, char *buffer)
 {
 	struct mm_struct * mm = p->mm;
 
-	if (!mm)
-		return buffer;
-	if (mm != &init_mm) {
-		struct vm_area_struct * vma;
+	if (mm && mm != &init_mm) {
+		struct vm_area_struct * vma = mm->mmap;
 		unsigned long data = 0, stack = 0;
 		unsigned long exec = 0, lib = 0;
 
-		down(&mm->mmap_sem);
 		for (vma = mm->mmap; vma; vma = vma->vm_next) {
 			unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
 			if (!vma->vm_file) {
@@ -779,7 +838,6 @@ static inline char * task_mem(struct task_struct *p, char *buffer)
 				lib += len;
 			}
 		}	
-		up(&mm->mmap_sem);
 		buffer += sprintf(buffer,
 			"VmSize:\t%8lu kB\n"
 			"VmLck:\t%8lu kB\n"
@@ -827,7 +885,6 @@ static inline char * task_sig(struct task_struct *p, char *buffer)
 	buffer += sprintf(buffer, "SigBlk:\t");
 	buffer = render_sigset_t(&p->blocked, buffer);
 	*buffer++ = '\n';
-
 	collect_sigign_sigcatch(p, &ign, &catch);
 	buffer += sprintf(buffer, "SigIgn:\t");
 	buffer = render_sigset_t(&ign, buffer);
@@ -849,31 +906,15 @@ extern inline char *task_cap(struct task_struct *p, char *buffer)
 			    cap_t(p->cap_effective));
 }
 
-static struct task_struct *grab_task(int pid)
-{
-	struct task_struct *tsk = current;
-	if (pid != tsk->pid) {
-		read_lock(&tasklist_lock);
-		tsk = find_task_by_pid(pid);
-		if (tsk && tsk->mm && tsk->mm != &init_mm)
-			mmget(tsk->mm);
-		read_unlock(&tasklist_lock);
-	}	
-	return tsk;
-}
-
-static void release_task(struct task_struct *tsk)
-{
-	if (tsk != current && tsk->mm && tsk->mm != &init_mm)
-		mmput(tsk->mm);
-}
 
 static int get_status(int pid, char * buffer)
 {
 	char * orig = buffer;
 	struct task_struct *tsk;
-	
-	tsk = grab_task(pid);
+
+	read_lock(&tasklist_lock);
+	tsk = find_task_by_pid(pid);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
 	if (!tsk)
 		return 0;
 	buffer = task_name(tsk, buffer);
@@ -881,7 +922,9 @@ static int get_status(int pid, char * buffer)
 	buffer = task_mem(tsk, buffer);
 	buffer = task_sig(tsk, buffer);
 	buffer = task_cap(tsk, buffer);
-	release_task(tsk);
+#if __s390__
+	buffer = task_show_regs(tsk, buffer);
+#endif
 	return buffer - orig;
 }
 
@@ -893,25 +936,29 @@ static int get_stat(int pid, char * buffer)
 	int tty_pgrp;
 	sigset_t sigign, sigcatch;
 	char state;
-	int res;
 
-	tsk = grab_task(pid);
-	if (!tsk)
+	read_lock(&tasklist_lock);
+	tsk = find_task_by_pid(pid);
+	if (!tsk) {
+		read_unlock(&tasklist_lock);
 		return 0;
+	}
 	state = *get_task_state(tsk);
 	vsize = eip = esp = 0;
 	if (tsk->mm && tsk->mm != &init_mm) {
-		struct vm_area_struct *vma;
-
-		down(&tsk->mm->mmap_sem);
-		for (vma = tsk->mm->mmap; vma; vma = vma->vm_next) {
+		struct vm_area_struct *vma = tsk->mm->mmap;
+		while (vma) {
 			vsize += vma->vm_end - vma->vm_start;
+			vma = vma->vm_next;
 		}
-		up(&tsk->mm->mmap_sem);
-		
-		eip = KSTK_EIP(tsk);
-		esp = KSTK_ESP(tsk);
+		if ((current->fsuid == tsk->euid && tsk->dumpable &&
+		    cap_issubset(tsk->cap_permitted, current->cap_permitted)) ||
+		    capable(CAP_DAC_OVERRIDE)) {
+			eip = KSTK_EIP(tsk);
+			esp = KSTK_ESP(tsk);
+		}
 	}
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
 
 	wchan = get_wchan(tsk);
 
@@ -929,9 +976,9 @@ static int get_stat(int pid, char * buffer)
 	nice = tsk->priority;
 	nice = 20 - (nice * 20 + DEF_PRIORITY / 2) / DEF_PRIORITY;
 
-	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
+	return sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
 %lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
-%lu %lu %lu %lu %lu %lu %lu %lu %d\n",
+%lu %lu %lu %lu %lu %lu %lu %lu %d %d\n",
 		pid,
 		tsk->comm,
 		state,
@@ -973,10 +1020,8 @@ static int get_stat(int pid, char * buffer)
 		wchan,
 		tsk->nswap,
 		tsk->cnswap,
-		tsk->exit_signal);
-
-	release_task(tsk);
-	return res;
+		tsk->exit_signal,
+		tsk->processor);
 }
 		
 static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned long size,
@@ -1054,15 +1099,19 @@ static void statm_pgd_range(pgd_t * pgd, unsigned long address, unsigned long en
 
 static int get_statm(int pid, char * buffer)
 {
+	struct task_struct *tsk;
 	int size=0, resident=0, share=0, trs=0, lrs=0, drs=0, dt=0;
-	struct mm_struct *mm;
 
-	mm = get_mm_and_lock(pid);
-	if (mm) {
-		struct vm_area_struct * vma = mm->mmap;
+	read_lock(&tasklist_lock);
+	tsk = find_task_by_pid(pid);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+	if (!tsk)
+		return 0;
+	if (tsk->mm && tsk->mm != &init_mm) {
+		struct vm_area_struct * vma = tsk->mm->mmap;
 
 		while (vma) {
-			pgd_t *pgd = pgd_offset(mm, vma->vm_start);
+			pgd_t *pgd = pgd_offset(tsk->mm, vma->vm_start);
 			int pages = 0, shared = 0, dirty = 0, total = 0;
 
 			statm_pgd_range(pgd, vma->vm_start, vma->vm_end, &pages, &shared, &dirty, &total);
@@ -1080,7 +1129,6 @@ static int get_statm(int pid, char * buffer)
 				drs += pages;
 			vma = vma->vm_next;
 		}
-		release_mm(mm);
 	}
 	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
 		       size, resident, share, trs, lrs, drs, dt);
@@ -1118,7 +1166,7 @@ static int get_statm(int pid, char * buffer)
 
 #define MAPS_LINE_MAX	MAPS_LINE_MAX8
 
-/* FIXME: this does not do proper mm locking */
+
 static ssize_t read_maps (int pid, struct file * file, char * buf,
 			  size_t count, loff_t *ppos)
 {
@@ -1250,11 +1298,15 @@ out:
 #ifdef __SMP__
 static int get_pidcpu(int pid, char * buffer)
 {
-	struct task_struct * tsk;
+	struct task_struct * tsk = current ;
 	int i, len;
 
-	tsk = grab_task(pid);
-	if (!tsk)
+	read_lock(&tasklist_lock);
+	if (pid != tsk->pid)
+		tsk = find_task_by_pid(pid);
+	read_unlock(&tasklist_lock);	/* FIXME!! This should be done after the last use */
+
+	if (tsk == NULL)
 		return 0;
 
 	len = sprintf(buffer,
@@ -1268,7 +1320,6 @@ static int get_pidcpu(int pid, char * buffer)
 			tsk->per_cpu_utime[cpu_logical_map(i)],
 			tsk->per_cpu_stime[cpu_logical_map(i)]);
 
-	release_task(tsk);
 	return len;
 }
 #endif
@@ -1278,10 +1329,12 @@ extern int get_module_list(char *);
 extern int get_ksyms_list(char *, char **, off_t, int);
 #endif
 extern int get_device_list(char *);
-extern int get_partition_list(char *);
+extern int get_partition_list(char *, char **, off_t, int);
 extern int get_filesystem_list(char *);
 extern int get_filesystem_info( char * );
+#ifndef CONFIG_ARCH_S390
 extern int get_irq_list(char *);
+#endif
 extern int get_dma_list(char *);
 extern int get_cpuinfo(char *);
 extern int get_pci_list(char *);
@@ -1306,7 +1359,7 @@ static long get_root_array(char * page, int type, char **start,
 			return get_meminfo(page);
 
 #ifdef CONFIG_PCI_OLD_PROC
-  	        case PROC_PCI:
+	        case PROC_PCI:
 			return get_pci_list(page);
 #endif
 
@@ -1344,17 +1397,17 @@ static long get_root_array(char * page, int type, char **start,
 			return get_device_list(page);
 
 		case PROC_PARTITIONS:
-			return get_partition_list(page);
-
+			return get_partition_list(page, start, offset, length);
+#ifndef CONFIG_ARCH_S390
 		case PROC_INTERRUPTS:
 			return get_irq_list(page);
-
+#endif
 		case PROC_FILESYSTEMS:
 			return get_filesystem_list(page);
-
+#ifndef CONFIG_ARCH_S390
 		case PROC_DMA:
 			return get_dma_list(page);
-
+#endif
 		case PROC_IOPORTS:
 			return get_ioport_list(page);
 #ifdef CONFIG_BLK_DEV_MD
@@ -1364,14 +1417,18 @@ static long get_root_array(char * page, int type, char **start,
 		case PROC_CMDLINE:
 			return get_cmdline(page);
 
-                case PROC_MTAB:
-                       return get_filesystem_info( page );
+		case PROC_MTAB:
+			return get_filesystem_info( page );
 
-                case PROC_SWAP:
-                       return get_swaparea_info(page);
+		case PROC_SWAP:
+			return get_swaparea_info(page);
 #ifdef CONFIG_RTC
 		case PROC_RTC:
 			return get_rtc_status(page);
+#endif
+#ifdef CONFIG_SGI_DS1286
+		case PROC_RTC:
+			return get_ds1286_status(page);
 #endif
 		case PROC_LOCKS:
 			return get_locks_status(page, start, offset, length);
@@ -1391,6 +1448,7 @@ static int process_unauthorized(int type, int pid)
 {
 	struct task_struct *p;
 	uid_t euid=0;	/* Save the euid keep the lock short */
+	int ok = 0;
 		
 	read_lock(&tasklist_lock);
 	
@@ -1398,10 +1456,13 @@ static int process_unauthorized(int type, int pid)
 	 *	Grab the lock, find the task, save the uid and
 	 *	check it has an mm still (ie its not dead)
 	 */
+	
 	p = find_task_by_pid(pid);
-	if(p)
-	{
+	if (p) {
 		euid=p->euid;
+		ok = p->dumpable;
+		if(!cap_issubset(p->cap_permitted, current->cap_permitted))
+			ok=0;			
 		if(!p->mm)	/* Scooby scooby doo where are you ? */
 			p=NULL;
 	}
@@ -1421,7 +1482,7 @@ static int process_unauthorized(int type, int pid)
 		case PROC_PID_CPU:
 			return 0;	
 	}
-	if(capable(CAP_DAC_OVERRIDE) || current->fsuid == euid)
+	if((current->fsuid == euid && ok) || capable(CAP_DAC_OVERRIDE))
 		return 0;
 	return 1;
 }
@@ -1468,7 +1529,6 @@ static ssize_t array_read(struct file * file, char * buf,
 	ssize_t end;
 	unsigned int type, pid;
 	struct proc_dir_entry *dp;
-	int err;
 
 	if (count > PROC_BLOCK_SIZE)
 		count = PROC_BLOCK_SIZE;
@@ -1497,10 +1557,8 @@ static ssize_t array_read(struct file * file, char * buf,
 		return length;
 	}
 	if (start != NULL) {
-		if (length > count)
-			length = count;
 		/* We have had block-adjusting processing! */
-		err = copy_to_user(buf, start, length);
+		copy_to_user(buf, start, length);
 		*ppos += length;
 		count = length;
 	} else {
@@ -1512,11 +1570,11 @@ static ssize_t array_read(struct file * file, char * buf,
 		if (count + *ppos > length)
 			count = length - *ppos;
 		end = count + *ppos;
-		err = copy_to_user(buf, (char *) page + *ppos, count);
+		copy_to_user(buf, (char *) page + *ppos, count);
 		*ppos = end;
 	}
 	free_page(page);
-	return err ? -EFAULT : count;
+	return count;
 }
 
 static struct file_operations proc_array_operations = {

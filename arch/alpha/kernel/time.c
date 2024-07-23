@@ -1,7 +1,7 @@
 /*
  *  linux/arch/alpha/kernel/time.c
  *
- *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
+ *  Copyright (C) 1991, 1992, 1995, 1999  Linus Torvalds
  *
  * This file contains the PC-specific time handling details:
  * reading the RTC at bootup, etc..
@@ -18,6 +18,9 @@
  *      fixed tick loss calculation in timer_interrupt
  *      (round system clock to nearest tick instead of truncating)
  *      fixed algorithm in time_init for getting time from CMOS clock
+ * 1999-04-16	Thorsten Kranzkowski (dl8bcu@gmx.net)
+ *	fixed algorithm in do_gettimeofday() for calculating the precise time
+ *	from processor cycle counter (now taking lost_ticks into account)
  */
 #include <linux/config.h>
 #include <linux/errno.h>
@@ -39,8 +42,12 @@
 #include "proto.h"
 #include "irq.h"
 
+extern rwlock_t xtime_lock;
+extern volatile unsigned long lost_ticks;	/* kernel/sched.c */
+
 static int set_rtc_mmss(unsigned long);
 
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * Shift amount by which scaled_ticks_per_cycle is scaled.  Shifting
@@ -83,14 +90,19 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	long nticks;
 
 #ifdef __SMP__
-	extern void smp_percpu_timer_interrupt(struct pt_regs *);
-	extern unsigned int boot_cpu_id;
-	/* when SMP, do this for *all* CPUs, 
-	   but only do the rest for the boot CPU */
+	/* When SMP, do this for *all* CPUs, but only do the rest for
+           the boot CPU.  */
 	smp_percpu_timer_interrupt(regs);
-	if (smp_processor_id() != boot_cpu_id)
-	  return;
+	if (smp_processor_id() != smp_boot_cpuid)
+		return;
+#else
+	/* Not SMP, do kernel PC profiling here */
+	if (!user_mode(regs)) {
+		alpha_do_profile(regs->pc);
+	}
 #endif
+
+	write_lock(&xtime_lock);
 
 	/*
 	 * Calculate how many ticks have passed since the last update,
@@ -121,6 +133,8 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 		int tmp = set_rtc_mmss(xtime.tv_sec);
 		state.last_rtc_update = xtime.tv_sec - (tmp ? 600 : 0);
 	}
+
+	write_unlock(&xtime_lock);
 }
 
 /*
@@ -223,7 +237,8 @@ time_init(void)
 {
 	void (*irq_handler)(int, void *, struct pt_regs *);
 	unsigned int year, mon, day, hour, min, sec, cc1, cc2;
-	unsigned long cycle_freq;
+	unsigned long cycle_freq, ppm_error;
+	long diff;
 
 	/*
 	 * The Linux interpretation of the CMOS clock register contents:
@@ -237,19 +252,42 @@ time_init(void)
 	/* Read cycle counter exactly on falling edge of update flag */
 	cc1 = rpcc();
 
-	/* If our cycle frequency isn't valid, go another round and give
-	   a guess at what it should be.  */
-	cycle_freq = hwrpb->cycle_freq;
-	if (cycle_freq == 0) {
-		printk("HWRPB cycle frequency bogus.  Estimating... ");
-
+	if (!est_cycle_freq) {
+		/* Sometimes the hwrpb->cycle_freq value is bogus. 
+		   Go another round to check up on it and see.  */
 		do { } while (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP));
 		do { } while (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP);
 		cc2 = rpcc();
-		est_cycle_freq = cycle_freq = cc2 - cc1;
+		est_cycle_freq = cc2 - cc1;
 		cc1 = cc2;
+	}
 
-		printk("%lu Hz\n", cycle_freq);
+	/* This code used to check for a 1% error.
+	 * PWS600au reports 598802395 which is way off. (ntpd has problems.)
+	 * So I tightened down the check.  Hal Murray, Feb 27, 2000.
+	 *
+	 * HWRPB cycle_freq may be 0 (uninitialized) due to MILO, so make
+	 * sure that we handle this case by forcing use of est_cycle_freq.
+	 */
+	if (!(cycle_freq = hwrpb->cycle_freq))
+		cycle_freq = est_cycle_freq;
+
+	diff = cycle_freq - est_cycle_freq;
+	if (diff < 0)
+		diff = -diff;
+	ppm_error = (diff * 1000000L) / cycle_freq;
+#if 0
+	printk("Alpha clock init: HWRPB %lu, Measured %lu, error=%lu ppm.\n",
+	       hwrpb->cycle_freq, est_cycle_freq, ppm_error);
+#endif
+	if (ppm_error > 1000) {
+		printk("HWRPB cycle frequency (%lu) seems inaccurate -"
+		       " using the measured value of %lu Hz\n",
+		       cycle_freq, est_cycle_freq);
+		cycle_freq = est_cycle_freq;
+	}
+	else {
+		est_cycle_freq = 0;
 	}
 
 	/* From John Bowman <bowman@math.ualberta.ca>: allow the values
@@ -265,8 +303,7 @@ time_init(void)
 	mon = CMOS_READ(RTC_MONTH);
 	year = CMOS_READ(RTC_YEAR);
 
-	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-	{
+	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
 		BCD_TO_BIN(sec);
 		BCD_TO_BIN(min);
 		BCD_TO_BIN(hour);
@@ -314,16 +351,24 @@ time_init(void)
 void
 do_gettimeofday(struct timeval *tv)
 {
-	unsigned long flags, now, delta_cycles, delta_usec;
-	unsigned long sec, usec;
+	unsigned long sec, usec, lost, flags;
+	unsigned long delta_cycles, delta_usec, partial_tick;
 
-	now = rpcc();
-	save_and_cli(flags);
+	read_lock_irqsave(&xtime_lock, flags);
+
+	delta_cycles = rpcc() - state.last_time;
 	sec = xtime.tv_sec;
 	usec = xtime.tv_usec;
-	delta_cycles = now - state.last_time;
-	restore_flags(flags);
+	partial_tick = state.partial_tick;
+	lost = lost_ticks;
 
+	read_unlock_irqrestore(&xtime_lock, flags);
+
+#ifdef __SMP__
+	/* Until and unless we figure out how to get cpu cycle counters
+	   in sync and keep them there, we can't use the rpcc tricks.  */
+	delta_usec = lost * (1000000 / HZ);
+#else
 	/*
 	 * usec = cycles * ticks_per_cycle * 2**48 * 1e6 / (2**48 * ticks)
 	 *	= cycles * (s_t_p_c) * 1e6 / (2**48 * ticks)
@@ -337,8 +382,11 @@ do_gettimeofday(struct timeval *tv)
 	 * with no clear gain.
 	 */
 
-	delta_usec = delta_cycles * state.scaled_ticks_per_cycle * 15625;
+	delta_usec = (delta_cycles * state.scaled_ticks_per_cycle 
+		      + partial_tick
+		      + (lost << FIX_SHIFT)) * 15625;
 	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
+#endif
 
 	usec += delta_usec;
 	if (usec >= 1000000) {
@@ -353,14 +401,41 @@ do_gettimeofday(struct timeval *tv)
 void
 do_settimeofday(struct timeval *tv)
 {
-	cli();
-	xtime = *tv;
+	unsigned long delta_usec;
+	long sec, usec;
+	
+	write_lock_irq(&xtime_lock);
+
+	/* The offset that is added into time in do_gettimeofday above
+	   must be subtracted out here to keep a coherent view of the
+	   time.  Without this, a full-tick error is possible.  */
+
+#ifdef __SMP__
+	delta_usec = lost_ticks * (1000000 / HZ);
+#else
+	delta_usec = rpcc() - state.last_time;
+	delta_usec = (delta_usec * state.scaled_ticks_per_cycle 
+		      + state.partial_tick
+		      + (lost_ticks << FIX_SHIFT)) * 15625;
+	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
+#endif
+
+	sec = tv->tv_sec;
+	usec = tv->tv_usec;
+	usec -= delta_usec;
+	if (usec < 0) {
+		usec += 1000000;
+		sec -= 1;
+	}
+
+	xtime.tv_sec = sec;
+	xtime.tv_usec = usec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+
+	write_unlock_irq(&xtime_lock);
 }
 
 
@@ -381,6 +456,8 @@ set_rtc_mmss(unsigned long nowtime)
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
 
+	/* irq are locally disabled here */
+	spin_lock(&rtc_lock);
 	/* Tell the clock it's being set */
 	save_control = CMOS_READ(RTC_CONTROL);
 	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
@@ -430,6 +507,7 @@ set_rtc_mmss(unsigned long nowtime)
 	 */
 	CMOS_WRITE(save_control, RTC_CONTROL);
 	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
+	spin_unlock(&rtc_lock);
 
 	return retval;
 }

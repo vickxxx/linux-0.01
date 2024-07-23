@@ -130,15 +130,17 @@ void swap_free(unsigned long entry)
 	offset = SWP_OFFSET(entry);
 	if (offset >= p->max)
 		goto bad_offset;
-	if (offset < p->lowest_bit)
-		p->lowest_bit = offset;
-	if (offset > p->highest_bit)
-		p->highest_bit = offset;
 	if (!p->swap_map[offset])
 		goto bad_free;
 	if (p->swap_map[offset] < SWAP_MAP_MAX) {
 		if (!--p->swap_map[offset])
+		{
+			if (offset < p->lowest_bit)
+				p->lowest_bit = offset;
+			if (offset > p->highest_bit)
+				p->highest_bit = offset;
 			nr_swap_pages++;
+		}
 	}
 #ifdef DEBUG_SWAP
 	printk("DebugVM: swap_free(entry %08lx, count now %d)\n",
@@ -492,6 +494,7 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 	int lock_map_size = PAGE_SIZE;
 	int nr_good_pages = 0;
 	unsigned long tmp_lock_map = 0;
+	int swapfilesize;
 	
 	lock_kernel();
 	if (!capable(CAP_SYS_ADMIN))
@@ -530,35 +533,41 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 	error = -EINVAL;
 
 	if (S_ISBLK(swap_dentry->d_inode->i_mode)) {
-		p->swap_device = swap_dentry->d_inode->i_rdev;
-		set_blocksize(p->swap_device, PAGE_SIZE);
+		kdev_t dev = swap_dentry->d_inode->i_rdev;
+
+		p->swap_device = dev;
+		set_blocksize(dev, PAGE_SIZE);
 		
 		filp.f_dentry = swap_dentry;
 		filp.f_mode = 3; /* read write */
 		error = blkdev_open(swap_dentry->d_inode, &filp);
 		if (error)
 			goto bad_swap_2;
-		set_blocksize(p->swap_device, PAGE_SIZE);
+		set_blocksize(dev, PAGE_SIZE);
 		error = -ENODEV;
-		if (!p->swap_device ||
-		    (blk_size[MAJOR(p->swap_device)] &&
-		     !blk_size[MAJOR(p->swap_device)][MINOR(p->swap_device)]))
+		if (!dev || (blk_size[MAJOR(dev)] &&
+			     !blk_size[MAJOR(dev)][MINOR(dev)]))
 			goto bad_swap;
 		error = -EBUSY;
 		for (i = 0 ; i < nr_swapfiles ; i++) {
 			if (i == type)
 				continue;
-			if (p->swap_device == swap_info[i].swap_device)
+			if (dev == swap_info[i].swap_device)
 				goto bad_swap;
 		}
+		swapfilesize = 0;
+		if (blk_size[MAJOR(dev)])
+			swapfilesize = blk_size[MAJOR(dev)][MINOR(dev)]
+				>> (PAGE_SHIFT - 10);
 	} else if (S_ISREG(swap_dentry->d_inode->i_mode)) {
 		error = -EBUSY;
 		for (i = 0 ; i < nr_swapfiles ; i++) {
-			if (i == type)
+			if (i == type || !swap_info[i].swap_file)
 				continue;
-			if (p->swap_file == swap_info[i].swap_file)
+			if (swap_dentry->d_inode == swap_info[i].swap_file->d_inode)
 				goto bad_swap;
 		}
+		swapfilesize = swap_dentry->d_inode->i_size  >> PAGE_SHIFT;
 	} else
 		goto bad_swap;
 
@@ -648,12 +657,19 @@ asmlinkage int sys_swapon(const char * specialfile, int swap_flags)
 			else
 				p->swap_map[page] = SWAP_MAP_BAD;
 		}
-		nr_good_pages = swap_header->info.last_page - i;
+		nr_good_pages = swap_header->info.last_page -
+		                swap_header->info.nr_badpages - 1;
 		lock_map_size = (p->max + 7) / 8;
 		if (error) 
 			goto bad_swap;
 	}
-	
+
+	if (swapfilesize && p->max > swapfilesize) {
+		printk(KERN_WARNING
+		       "Swap area shorter than signature indicates\n");
+		error = -EINVAL;
+		goto bad_swap;
+	}
 	if (!nr_good_pages) {
 		printk(KERN_WARNING "Empty swap-file\n");
 		error = -EINVAL;
@@ -701,6 +717,8 @@ bad_swap_2:
 	p->swap_map = NULL;
 	p->swap_lockmap = NULL;
 	p->flags = 0;
+	if (!(swap_flags & SWAP_FLAG_PREFER))
+		++least_priority;
 out:
 	if (swap_header)
 		free_page((long) swap_header);

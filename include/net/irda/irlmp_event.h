@@ -6,10 +6,11 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Mon Aug  4 20:40:53 1997
- * Modified at:   Wed Oct 28 14:58:23 1998
+ * Modified at:   Thu Jul  8 12:18:54 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1997 Dag Brattli <dagb@cs.uit.no>, All Rights Reserved.
+ *     Copyright (c) 1997, 1999 Dag Brattli <dagb@cs.uit.no>, 
+ *     All Rights Reserved.
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -72,7 +73,7 @@ typedef enum {
 	LM_LAP_DISCONNECT_REQUEST,
 	LM_LAP_DISCOVERY_REQUEST,
  	LM_LAP_DISCOVERY_CONFIRM,
-
+	LM_LAP_IDLE_TIMEOUT,
 } IRLMP_EVENT;
 
 /*
@@ -92,22 +93,27 @@ struct irlmp_event {
 
 	int reason;
 
-	DISCOVERY *discovery;
+	discovery_t *discovery;
 };
 
-extern char *irlmp_state[];
-extern char *irlsap_state[];
+extern const char *irlmp_state[];
+extern const char *irlsap_state[];
 
-void irlmp_watchdog_timer_expired( unsigned long data);
-void irlmp_discovery_timer_expired( unsigned long data);
+void irlmp_watchdog_timer_expired(void *data);
+void irlmp_discovery_timer_expired(void *data);
+void irlmp_idle_timer_expired(void *data);
 
-void irlmp_next_station_state( IRLMP_STATE state);
-void irlmp_next_lsap_state( struct lsap_cb *self, LSAP_STATE state);
-void irlmp_next_lap_state( struct lap_cb *self, IRLMP_STATE state);
+void irlmp_next_station_state(IRLMP_STATE state);
+void irlmp_next_lsap_state(struct lsap_cb *self, LSAP_STATE state);
+void irlmp_next_lap_state(struct lap_cb *self, IRLMP_STATE state);
 
-void irlmp_do_lap_event( struct lap_cb *self, IRLMP_EVENT event, 
-			 struct sk_buff *skb);
-void irlmp_do_lsap_event( struct lsap_cb *self, IRLMP_EVENT event, 
-			  struct sk_buff *skb);
+void irlmp_do_lap_event(struct lap_cb *self, IRLMP_EVENT event, 
+			struct sk_buff *skb);
+int irlmp_do_lsap_event(struct lsap_cb *self, IRLMP_EVENT event, 
+			struct sk_buff *skb);
 
-#endif
+#endif /* IRLMP_EVENT_H */
+
+
+
+

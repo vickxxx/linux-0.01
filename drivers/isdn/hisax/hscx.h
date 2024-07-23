@@ -1,17 +1,10 @@
-/* $Id: hscx.h,v 1.3 1997/07/27 21:38:35 keil Exp $
-
+/* $Id: hscx.h,v 1.6 2000/06/26 08:59:13 keil Exp $
+ *
  * hscx.h   HSCX specific defines
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * Author       Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: hscx.h,v $
- * Revision 1.3  1997/07/27 21:38:35  keil
- * new B-channel interface
- *
- * Revision 1.2  1997/06/26 11:16:18  keil
- * first version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
@@ -44,3 +37,4 @@ extern void hscx_sched_event(struct BCState *bcs, int event);
 extern void modehscx(struct BCState *bcs, int mode, int bc);
 extern void clear_pending_hscx_ints(struct IsdnCardState *cs);
 extern void inithscx(struct IsdnCardState *cs);
+extern void inithscxisac(struct IsdnCardState *cs, int part);

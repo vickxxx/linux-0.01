@@ -7,8 +7,6 @@ L_TARGET := fc4.a
 M_OBJS   :=
 MOD_LIST_NAME := FC4_MODULES
 
-include ../../.config
-
 ifeq ($(CONFIG_FC4),y)
   FC4 = fc.o
   ifeq ($(CONFIG_MODULES),y)
@@ -30,6 +28,14 @@ L_OBJS += soc.o
 else
   ifeq ($(CONFIG_FC4_SOC),m)
   M_OBJS += soc.o
+  endif
+endif
+
+ifeq ($(CONFIG_FC4_SOCAL),y)
+L_OBJS += socal.o
+else
+  ifeq ($(CONFIG_FC4_SOCAL),m)
+  M_OBJS += socal.o
   endif
 endif
 

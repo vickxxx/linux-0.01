@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.96 1998/10/27 23:28:42 davem Exp $
+/* $Id: pgtable.h,v 1.103.2.4 2000/12/11 12:31:06 anton Exp $
  * pgtable.h: SpitFire page table operations.
  *
  * Copyright 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -14,6 +14,7 @@
 
 #ifndef __ASSEMBLY__
 #include <linux/mm.h>
+#include <linux/pagemap.h>
 #endif
 #include <asm/spitfire.h>
 #include <asm/asi.h>
@@ -106,8 +107,9 @@
 
 #define PAGE_NONE	__pgprot (_PAGE_PRESENT | _PAGE_ACCESSED)
 
+/* Don't set the TTE _PAGE_W bit here, else the dirty bit never gets set. */
 #define PAGE_SHARED	__pgprot (_PAGE_PRESENT | _PAGE_VALID | _PAGE_CACHE | \
-				  __ACCESS_BITS | _PAGE_W | _PAGE_WRITE)
+				  __ACCESS_BITS | _PAGE_WRITE)
 
 #define PAGE_COPY	__pgprot (_PAGE_PRESENT | _PAGE_VALID | _PAGE_CACHE | \
 				  __ACCESS_BITS)
@@ -155,7 +157,7 @@ extern pte_t __bad_page(void);
  * hit for all __pa()/__va() operations.
  */
 extern unsigned long phys_base;
-#define ZERO_PAGE	((unsigned long)__va(phys_base))
+#define ZERO_PAGE(vaddr)	((unsigned long)__va(phys_base))
 
 /* Allocate a block of RAM which is aligned to its size.
  * This procedure can be used until the call to mem_init().
@@ -169,9 +171,16 @@ extern void *sparc_init_alloc(unsigned long *kbrk, unsigned long size);
 #define flush_cache_range(mm, start, end)	flushw_user()
 #define flush_cache_page(vma, page)		flushw_user()
 
-/* These operations are unnecessary on the SpitFire since D-CACHE is write-through. */
-#define flush_icache_range(start, end)		do { } while (0)
+/* This is unnecessary on the SpitFire since D-CACHE is write-through. */
 #define flush_page_to_ram(page)			do { } while (0)
+
+/* 
+ * icache doesnt snoop local stores and we don't use block commit stores
+ * (which invalidate icache lines) during module load, so we need this.
+ */
+extern void flush_icache_range(unsigned long start, unsigned long end);
+
+extern void flush_dcache_page(unsigned long page);
 
 extern void __flush_dcache_range(unsigned long start, unsigned long end);
 
@@ -250,11 +259,13 @@ extern __inline__ void flush_tlb_page(struct vm_area_struct *vma, unsigned long 
 #define mk_pte_phys(physpage, pgprot)	(__pte((physpage) | pgprot_val(pgprot)))
 #define pte_modify(_pte, newprot) \
 	(pte_val(_pte) = ((pte_val(_pte) & _PAGE_CHG_MASK) | pgprot_val(newprot)))
-#define pmd_set(pmdp, ptep)		(pmd_val(*(pmdp)) = __pa((unsigned long) (ptep)))
-#define pgd_set(pgdp, pmdp)		(pgd_val(*(pgdp)) = __pa((unsigned long) (pmdp)))
+#define pmd_set(pmdp, ptep)	\
+	(pmd_val(*(pmdp)) = (__pa((unsigned long) (ptep)) >> 11UL))
+#define pgd_set(pgdp, pmdp)	\
+	(pgd_val(*(pgdp)) = (__pa((unsigned long) (pmdp)) >> 11UL))
 #define pte_page(pte)   ((unsigned long) __va(((pte_val(pte)&~PAGE_OFFSET)&~(0xfffUL))))
-#define pmd_page(pmd)			((unsigned long) __va(pmd_val(pmd)))
-#define pgd_page(pgd)			((unsigned long) __va(pgd_val(pgd)))
+#define pmd_page(pmd)			((unsigned long) __va((pmd_val(pmd)<<11UL)))
+#define pgd_page(pgd)			((unsigned long) __va((pgd_val(pgd)<<11UL)))
 #define pte_none(pte) 			(!pte_val(pte))
 #define pte_present(pte)		(pte_val(pte) & _PAGE_PRESENT)
 #define pte_clear(pte)			(pte_val(*(pte)) = 0UL)
@@ -328,9 +339,9 @@ static __inline__ pte_t pte_mkdirty(pte_t _pte)
 #else
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
-	unsigned long *pte_cache;
-	unsigned long pgcache_size;
-	unsigned long pgdcache_size;
+	unsigned long *pte_cache[2];
+	unsigned int pgcache_size;
+	unsigned int pgdcache_size;
 } pgt_quicklists;
 #endif
 #define pgd_quicklist		(pgt_quicklists.pgd_cache)
@@ -371,7 +382,7 @@ extern __inline__ pgd_t *get_pgd_fast(void)
 		(unsigned long)ret->pprev_hash = mask;
 		if (!mask)
 			pgd_quicklist = (unsigned long *)ret->next_hash;
-                ret = (struct page *) (page_address(ret) + off);
+                ret = (struct page *)(page_address(ret) + off);
                 pgd_cache_size--;
         } else {
 		ret = (struct page *) __get_free_page(GFP_KERNEL);
@@ -425,9 +436,12 @@ extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_premasked);
 extern __inline__ pmd_t *get_pmd_fast(void)
 {
 	unsigned long *ret;
+	int color = 0;
 
-	if((ret = (unsigned long *)pte_quicklist) != NULL) {
-		pte_quicklist = (unsigned long *)(*ret);
+	if (pte_quicklist[color] == NULL)
+		color = 1;
+	if((ret = (unsigned long *)pte_quicklist[color]) != NULL) {
+		pte_quicklist[color] = (unsigned long *)(*ret);
 		ret[0] = 0;
 		pgtable_cache_size--;
 	}
@@ -436,8 +450,10 @@ extern __inline__ pmd_t *get_pmd_fast(void)
 
 extern __inline__ void free_pmd_fast(pgd_t *pmd)
 {
-	*(unsigned long *)pmd = (unsigned long) pte_quicklist;
-	pte_quicklist = (unsigned long *) pmd;
+	int color = (int) (((long)pmd >> PAGE_SHIFT) & 0x1);
+
+	*(unsigned long *)pmd = (unsigned long) pte_quicklist[color];
+	pte_quicklist[color] = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
@@ -446,14 +462,15 @@ extern __inline__ void free_pmd_slow(pmd_t *pmd)
 	free_page((unsigned long)pmd);
 }
 
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
+extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted,
+			   unsigned long color);
 
-extern __inline__ pte_t *get_pte_fast(void)
+extern __inline__ pte_t *get_pte_fast(unsigned long color)
 {
 	unsigned long *ret;
 
-	if((ret = (unsigned long *)pte_quicklist) != NULL) {
-		pte_quicklist = (unsigned long *)(*ret);
+	if((ret = (unsigned long *)pte_quicklist[color]) != NULL) {
+		pte_quicklist[color] = (unsigned long *)(*ret);
 		ret[0] = 0;
 		pgtable_cache_size--;
 	}
@@ -462,8 +479,9 @@ extern __inline__ pte_t *get_pte_fast(void)
 
 extern __inline__ void free_pte_fast(pte_t *pte)
 {
-	*(unsigned long *)pte = (unsigned long) pte_quicklist;
-	pte_quicklist = (unsigned long *) pte;
+	unsigned long color = (((unsigned long)pte >> PAGE_SHIFT) & 0x1);
+	*(unsigned long *)pte = (unsigned long) pte_quicklist[color];
+	pte_quicklist[color] = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
@@ -483,10 +501,12 @@ extern inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
 {
 	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
 	if (pmd_none(*pmd)) {
-		pte_t *page = get_pte_fast();
+		/* Be careful, address can be just about anything... */
+		unsigned long color = (((unsigned long)pmd)>>2UL) & 0x1UL;
+		pte_t *page = get_pte_fast(color);
 
 		if (!page)
-			return get_pte_slow(pmd, address);
+			return get_pte_slow(pmd, address, color);
 		pmd_set(pmd, page);
 		return page + address;
 	}
@@ -519,7 +539,7 @@ extern pgd_t swapper_pg_dir[1];
 
 extern inline void SET_PAGE_DIR(struct task_struct *tsk, pgd_t *pgdir)
 {
-	if(pgdir != swapper_pg_dir && tsk->mm == current->mm) {
+	if(pgdir != swapper_pg_dir && tsk == current) {
 		register unsigned long paddr asm("o5");
 
 		paddr = __pa(pgdir);
@@ -642,9 +662,11 @@ __get_iospace (unsigned long addr)
 
 extern void * module_map (unsigned long size);
 extern void module_unmap (void *addr);
+extern unsigned long *sparc64_valid_addr_bitmap;
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(test_bit(PG_skip, &(page)->flags))
+#define kern_addr_valid(addr)	(test_bit(__pa((unsigned long)(addr))>>22, sparc64_valid_addr_bitmap))
 
 extern int io_remap_page_range(unsigned long from, unsigned long offset,
 			       unsigned long size, pgprot_t prot, int space);

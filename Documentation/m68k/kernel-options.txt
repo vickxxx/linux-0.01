@@ -1,12 +1,10 @@
-
-
 				  Command Line Options for Linux/m68k
 				  ===================================
 
-Last Update: Nov 28, 1997
-Linux/m68k version: 2.1.64
+Last Update: 2 May 1999
+Linux/m68k version: 2.2.6
 Author: Roman.Hodek@informatik.uni-erlangen.de (Roman Hodek)
-Update: jds@kom.auc.dk (Jes Sorensen)
+Update: jds@kom.auc.dk (Jes Sorensen) and faq@linux-m68k.org (Chris Lawrence)
 
 0) Introduction
 ===============
@@ -14,7 +12,7 @@ Update: jds@kom.auc.dk (Jes Sorensen)
   Often I've been asked which command line options the Linux/m68k
 kernel understands, or how the exact syntax for the ... option is, or
 ... about the option ... . I hope, this document supplies all the
-answers...
+answers.
 
   Note that some options might be outdated, their descriptions being
 incomplete or missing. Please update the information and send in the
@@ -110,20 +108,19 @@ the kernel command line.
 [Strange and maybe uninteresting stuff ON]
 
   This unusual translation of device names has some strange
-consequences: If, for example, you have a symbolic link from /dev/fd
+consequences: if, for example, you have a symbolic link from /dev/fd
 to /dev/fd0D720 as an abbreviation for floppy driver #0 in DD format,
 you cannot use this name for specifying the root device, because the
 kernel cannot see this symlink before mounting the root FS and it
 isn't in the table above. If you use it, the root device will not be 
-set at all, without an error message. Another example: You cannot use a
+set at all, without an error message. Another example: you cannot use a
 partition on e.g. the sixth SCSI disk as the root filesystem, if you
 want to specify it by name. This is, because only the devices up to
-/dev/sde are in the table above, but not /dev/sdf. Although, you can
-use the sixth SCSI disk for the root FS, but you have to specify the
-device by number... (see below). Or, even more strange, you can use the
-fact that there is no range checking of the partition number, and your
-knowledge that each disk uses 16 minors, and write "root=/dev/sde17"
-(for /dev/sdf1).
+/dev/sde are in the table above, but not /dev/sdf. You can use the sixth 
+SCSI disk for the root filesystem, but you have to specify the device by 
+number (see below). Even more strange, you can use the fact that there is 
+no range checking of the partition number, and your knowledge that each 
+disk uses 16 minors, and write "root=/dev/sde17" (for /dev/sdf1).
 
 [Strange and maybe uninteresting stuff OFF]
 
@@ -145,7 +142,7 @@ Syntax: ro
 
 These two options tell the kernel whether it should mount the root
 filesystem read-only or read-write. The default is read-only, except
-for ramdisks which are read-write.
+for ramdisks, which default to read-write.
 
 
 2.3) debug
@@ -181,7 +178,7 @@ at least 8 can also be set by the "debug" command line option (see
 Devices possible for Amiga:
 
  - "ser": built-in serial port; parameters: 9600bps, 8N1
- - "mem": Save the messages to a reserved area in chip mem. After
+ - "mem": Save the messages to a reserved area in chip memory. After
           rebooting, they can be read under AmigaOS with the tool
           'dmesg'.
 
@@ -205,7 +202,7 @@ Devices possible for Atari:
 Syntax: ramdisk=<size>
 
   This option instructs the kernel to set up a ramdisk of the given
-size in KBytes. Do not use this option if the ramdisk contents are
+size in kilobytes. Do not use this option if the ramdisk contents are
 passed by bootstrap! In this case, the size is selected automatically
 and should not be overwritten.
 
@@ -216,23 +213,10 @@ drive (with "root=").
 
 
 2.7) swap=
------------
-
-Syntax: swap=<max_age>,<adv>,<decl>,<init_age>,<cl_fract>,<cl_min>,\
-        <pgout_wgt>,<bfout_wgt>
-(All optional)
-
-TODO
-
-
 2.8) buff=
 -----------
 
-Syntax: buff=<max_age>,<adv>,<decl>,<init_age>,<bfout_wgt>,<mem_grace>
-(All optional)
-
-TODO
-
+  I can't find any sign of these options in 2.2.6.
 
 
 3) General Device Options (Amiga and Atari)
@@ -247,10 +231,10 @@ Syntax: ether=[<irq>[,<base_addr>[,<mem_start>[,<mem_end>]]]],<dev-name>
 drivers/net/Space.c in the Linux source. Most prominent are eth0, ...
 eth3, sl0, ... sl3, ppp0, ..., ppp3, dummy, and lo.
 
-  The non-ethernet drivers (sl, ppp, dummy, lo) obviously ignore the
-settings by this options. Also, the existing ethernet drivers for
+  The non-Ethernet drivers (sl, ppp, dummy, lo) obviously ignore the
+settings by this options. Also, the existing Ethernet drivers for
 Linux/m68k (ariadne, a2065, hydra) don't use them because Zorro boards
-are really Plug-'n-Play, so the "ether=" option is useless altogether
+are really Plug-'n'-Play, so the "ether=" option is useless altogether
 for Linux/m68k.
 
 
@@ -301,8 +285,8 @@ driver (Amiga and Atari): <buffers> is the number of buffers you want
 to use (minimum 4, default 4), <buffer-size> is the size of each
 buffer in kilobytes (minimum 4, default 32) and <catch-radius> says
 how much percent of error will be tolerated when setting a frequency
-(maximum 10, default 0). For example with 3% you can play 8000Hz
-AU-Files on the Falcon with its hardware frequency of 8195Hz and thus
+(maximum 10, default 0). For example, with 3% you can play 8000 Hz Sun
+audio files on the Falcon with its hardware frequency of 8195 Hz and thus
 don't need to expand the sound.
 
 
@@ -311,7 +295,7 @@ don't need to expand the sound.
 =========================
 
 4.1) video=
---------------
+-----------
 
 Syntax: video=<fbname>:<sub-options...>
 
@@ -322,8 +306,8 @@ below.
 
 NB: Please notice that this option was renamed from `atavideo' to
     `video' during the development of the 1.3.x kernels, thus you
-    might need to update your boot-scripts if upgrading to 2.0.x from
-    an 1.2.13ply kernel.
+    might need to update your boot-scripts if upgrading to 2.x from
+    an 1.2.x kernel.
 
 NBB: The behavior of video= was changed in 2.1.57 so the recommended
 option is to specify the name of the frame buffer.
@@ -495,7 +479,7 @@ the physical linelength differs from the visible length. With ProMST,
 xres_virtual must be set to 2048. For ET4000, xres_virtual depends on the
 initialisation of the video-card.
 If you're missing a corresponding yres_virtual: the external part is legacy,
-therefore we don't support hardware-dependend functions like hardware-scroll,
+therefore we don't support hardware-dependent functions like hardware scroll,
 panning or blanking.
 
 4.1.7) eclock:
@@ -666,7 +650,7 @@ present hardware.)
 "ov_midi", ... These options are meant for switching on an OverScan
 video extension. The difference to the bare option is that the
 switch-on is done after video initialization, and somehow synchronized
-to the HBLANK. A speciality is that ov_ikbd and ov_midi are switched
+to the HBLANK. A specialty is that ov_ikbd and ov_midi are switched
 off before rebooting, so that OverScan is disabled and TOS boots
 correctly.
 
@@ -705,10 +689,11 @@ down).
 Syntax: video=<fbname>:<sub-options...>
 
 The <fbname> parameter specifies the name of the frame buffer, valid
-options are `amifb', `cyberfb', `retz3' and `clgen', provided that the
-respective frame buffer devices have been compiled into the kernel (or
-compiled as loadable modules). The behavior of the <fbname> option was
-changed in 2.1.57 so it is now recommended to specify this option.
+options are `amifb', `cyber', 'virge', `retz3' and `clgen', provided
+that the respective frame buffer devices have been compiled into the
+kernel (or compiled as loadable modules). The behavior of the <fbname>
+option was changed in 2.1.57 so it is now recommended to specify this
+option.
 
 The <sub-options> is a comma-separated list of the sub-options listed
 below. This option is organized similar to the Atari version of the
@@ -749,8 +734,8 @@ VGA modes:
  - vga70           : 640x400, 31 kHz, 70 Hz
 
 Please notice that the ECS and VGA modes require either an ECS or AGA
-chipset, and that these modes are limited to 2-bit color for the ECS
-chipset and 8-bit color for the AGA chipset.
+chip set, and that these modes are limited to 2-bit color for the ECS
+chip set and 8-bit color for the AGA chip set.
 
 5.1.2) depth
 ------------
@@ -762,8 +747,8 @@ Specify the number of bit-planes for the selected video-mode.
 5.1.3) inverse
 --------------
 
-Use inverted display. Functionally the same as the "inverse"
-sub-option for the Atari.
+Use inverted display (black on white). Functionally the same as the
+"inverse" sub-option for the Atari.
 
 5.1.4) font
 -----------
@@ -787,7 +772,7 @@ the color frame buffer uses the settings of "monitorcap:".
 your monitor can work with, in Hz. <hmin> and <hmax> are the same for
 the horizontal frequency, in kHz.
 
-  The defaults are 50;90;15;38 (Generic Amiga monitor).
+  The defaults are 50;90;15;38 (Generic Amiga multisync monitor).
 
 
 5.2) fd_def_df0=
@@ -803,6 +788,9 @@ hexadecimal with "0x" prefix.
 -------------
 
 Syntax: wd33c93=<sub-options...>
+
+These options affect the A590/A2091, A3000 and GVP Series II SCSI
+controllers.
 
 The <sub-options> is a comma-separated list of the sub-options listed
 below.
@@ -851,17 +839,17 @@ wd33c93.h.
 Syntax: clock:x
 
   x = clock input in MHz for WD33c93 chip. Normal values would be from
-8 through 20. The default value depends on your hostadapter(s),
+8 through 20. The default value depends on your host adapter(s),
 default for the A3000 internal controller is 14, for the A2091 it's 8
-and for the GVP hostadapters it's either 8 or 14, depending on the
-hostadapter and the SCSI-clock jumper present on some GVP
-hostadapters.
+and for the GVP host adapters it's either 8 or 14, depending on the
+host adapter and the SCSI-clock jumper present on some GVP
+host adapters.
 
 5.3.6) next
 -----------
 
   No argument. Used to separate blocks of keywords when there's more
-than one host adapter in the system.
+than one wd33c93-based host adapter in the system.
 
 5.3.7) nodma
 ------------
@@ -884,8 +872,8 @@ Syntax: gvp11=<addr-mask>
   The earlier versions of the GVP driver did not handle DMA
 address-mask settings correctly which made it necessary for some
 people to use this option, in order to get their GVP controller
-running under Linux. These problems have hopefully been solved and the
-use of this option is now highly unrecommended!
+running under Linux. These problems should now be solved and
+further use of this option is highly discouraged!
 
   Incorrect use can lead to unpredictable behavior, so please only use
 this option if you *know* what you are doing and have a reason to do
@@ -903,6 +891,69 @@ some can address a 25 bit address range while others can use the whole
 32 bit address range for DMA. The correct setting depends on your
 controller and should be autodetected by the driver. An example is the
 24 bit region which is specified by a mask of 0x00fffffe.
+
+
+5.5) 53c7xx=
+------------
+
+Syntax: 53c7xx=<sub-options...>
+
+These options affect the A4000T, A4091, WarpEngine, Blizzard 603e+,
+and GForce 040/060 SCSI controllers on the Amiga, as well as the
+builtin MVME 16x SCSI controller.
+
+The <sub-options> is a comma-separated list of the sub-options listed
+below.
+
+5.5.1) nosync
+-------------
+
+Syntax: nosync:0
+
+  Disables sync negotiation for all devices.  Any value after the
+  colon is acceptable (and has the same effect).
+
+5.5.2) noasync
+--------------
+
+Syntax: noasync:0
+
+  Disables async and sync negotiation for all devices.  Any value
+  after the colon is acceptable (and has the same effect).
+
+5.5.3) nodisconnect
+-------------------
+
+Syntax: nodisconnect:0
+
+  Disables SCSI disconnects.  Any value after the colon is acceptable
+  (and has the same effect).
+
+5.5.4) validids
+---------------
+
+Syntax: validids:0xNN
+
+  Specify which SCSI ids the driver should pay attention to.  This is
+  a bitmask (i.e. to only pay attention to ID#4, you'd use 0x10).
+  Default is 0x7f (devices 0-6).
+
+5.5.5) opthi
+5.5.6) optlo
+------------
+
+Syntax: opthi:M,optlo:N
+
+  Specify options for "hostdata->options".  The acceptable definitions
+  are listed in drivers/scsi/53c7xx.h; the 32 high bits should be in
+  opthi and the 32 low bits in optlo.  They must be specified in the
+  order opthi=M,optlo=N.
+
+5.5.7) next
+-----------
+
+  No argument. Used to separate blocks of keywords when there's more
+  than one 53c7xx host adapter in the system.
 
 
 /* Local Variables: */

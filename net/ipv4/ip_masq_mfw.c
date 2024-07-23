@@ -3,7 +3,7 @@
  *
  *	Does (reverse-masq) forwarding based on skb->fwmark value
  *
- *	$Id: ip_masq_mfw.c,v 1.2 1998/12/12 02:40:42 davem Exp $
+ *	$Id: ip_masq_mfw.c,v 1.3.2.3 1999/09/22 16:33:26 davem Exp $
  *
  * Author:	Juan Jose Ciarlante   <jjciarla@raiz.uncu.edu.ar>
  *		  based on Steven Clarke's portfw
@@ -73,16 +73,12 @@ struct ip_masq_mfw {
 	__u32 fwmark;			/* key: firewall mark */
 	struct list_head hosts;		/* list of forward-to hosts */
 	atomic_t nhosts;		/* number of "" */
-#ifdef __SMP__
 	rwlock_t lock;
-#endif
 };
 
 
 static struct semaphore mfw_sema = MUTEX;
-#ifdef __SMP__
 static rwlock_t mfw_lock = RW_LOCK_UNLOCKED;
-#endif
 
 static struct ip_masq_mfw *ip_masq_mfw_table[IP_MASQ_MFW_HSIZE];
 
@@ -143,9 +139,7 @@ static struct ip_masq_mfw * mfw_new(int fwmark)
 	MOD_INC_USE_COUNT;
 	memset(mfw, 0, sizeof(*mfw));
 	mfw->fwmark = fwmark;
-#ifdef __SMP__
-	mfw->lock = (rwlock_t) RW_LOCK_UNLOCKED;
-#endif
+	mfw->lock = RW_LOCK_UNLOCKED;
 
 	INIT_LIST_HEAD(&mfw->hosts);
 out:
@@ -222,6 +216,7 @@ static int mfw_delhost(struct ip_masq_mfw *mfw, struct ip_mfw_user *mu)
 			(!mu->rport || h->port == mu->rport)) {
 			/* HIT */
 			atomic_dec(&mfw->nhosts);
+			e = h->list.prev;
 			list_del(&h->list);
 			kfree_s(h, sizeof(*h));
 			MOD_DEC_USE_COUNT;
@@ -693,7 +688,7 @@ static struct ip_masq * mfw_in_create(const struct sk_buff *skb, const struct ip
 			/* 	
 			 *	Only open TCP tunnel if SYN+!ACK packet
 			 */
-			if (!tph.th->syn && tph.th->ack)
+			if (!tph.th->syn || tph.th->ack)
 				return NULL;
 		case IPPROTO_UDP:
 			break;

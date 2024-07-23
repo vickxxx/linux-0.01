@@ -193,8 +193,8 @@ red_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	}
 
 	if (q->qave < q->qth_min) {
-enqueue:
 		q->qcount = -1;
+enqueue:
 		if (sch->stats.backlog <= q->limit) {
 			__skb_queue_tail(&sch->q, skb);
 			sch->stats.backlog += skb->len;
@@ -375,6 +375,7 @@ struct Qdisc_ops red_qdisc_ops =
 	red_init,
 	red_reset,
 	red_destroy,
+	NULL /* red_change */,
 
 #ifdef CONFIG_RTNETLINK
 	red_dump,

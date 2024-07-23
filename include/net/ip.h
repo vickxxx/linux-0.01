@@ -147,13 +147,14 @@ extern __inline__ int ip_finish_output(struct sk_buff *skb)
 	skb->protocol = __constant_htons(ETH_P_IP);
 
 	if (hh) {
+		read_lock_irq(&hh->hh_lock);
 		memcpy(skb->data - 16, hh->hh_data, 16);
+		read_unlock_irq(&hh->hh_lock);
 	        skb_push(skb, dev->hard_header_len);
 		return hh->hh_output(skb);
 	} else if (dst->neighbour)
 		return dst->neighbour->output(skb);
 
-	printk(KERN_DEBUG "khm\n");
 	kfree_skb(skb);
 	return -EINVAL;
 }
@@ -170,10 +171,8 @@ extern __inline__
 int ip_decrease_ttl(struct iphdr *iph)
 {
 	u16 check = iph->check;
-	check = ntohs(check) + 0x0100;
-	if ((check & 0xFF00) == 0)
-		check++;		/* carry overflow */
-	iph->check = htons(check);
+	check += __constant_htons(0x0100);
+	iph->check = check + ((check>=0xFFFF) ? 1 : 0);
 	return --iph->ttl;
 }
 
@@ -202,6 +201,22 @@ extern __inline__ void ip_eth_mc_map(u32 addr, char *buf)
 	buf[3]=addr&0x7F;
 }
 
+/*
+ *	Map a multicast IP onto multicast MAC for type Token Ring.
+ *      This conforms to RFC1469 Option 2 Multicasting i.e.
+ *      using a functional address to transmit / receive 
+ *      multicast packets.
+ */
+
+extern __inline__ void ip_tr_mc_map(u32 addr, char *buf)
+{
+	buf[0]=0xC0;
+	buf[1]=0x00;
+	buf[2]=0x00;
+	buf[3]=0x04;
+	buf[4]=0x00;
+	buf[5]=0x00;
+}
 
 extern int	ip_call_ra_chain(struct sk_buff *skb);
 

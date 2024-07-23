@@ -20,6 +20,7 @@
 
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu(elf_fpregset_t *);
+extern spinlock_t rtc_lock;
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_HD) || defined(CONFIG_BLK_DEV_IDE_MODULE) || defined(CONFIG_BLK_DEV_HD_MODULE)
 extern struct drive_info_struct drive_info;
@@ -39,10 +40,14 @@ EXPORT_SYMBOL(local_bh_count);
 EXPORT_SYMBOL(local_irq_count);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
+EXPORT_SYMBOL(disable_irq_nosync);
 EXPORT_SYMBOL(kernel_thread);
+EXPORT_SYMBOL(rtc_lock);
+EXPORT_SYMBOL(init_mm);
 
 EXPORT_SYMBOL_NOVERS(__down_failed);
 EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
+EXPORT_SYMBOL_NOVERS(__down_failed_trylock);
 EXPORT_SYMBOL_NOVERS(__up_wakeup);
 /* Networking helper routines. */
 EXPORT_SYMBOL(csum_partial_copy);
@@ -68,14 +73,17 @@ EXPORT_SYMBOL(clear_user);
 EXPORT_SYMBOL(__clear_user);
 EXPORT_SYMBOL(__generic_copy_from_user);
 EXPORT_SYMBOL(__generic_copy_to_user);
-EXPORT_SYMBOL(strlen_user);
+EXPORT_SYMBOL(strnlen_user);
 
 #ifdef __SMP__
 EXPORT_SYMBOL(cpu_data);
 EXPORT_SYMBOL(kernel_flag);
 EXPORT_SYMBOL(smp_invalidate_needed);
+EXPORT_SYMBOL(cpu_number_map);
 EXPORT_SYMBOL(__cpu_logical_map);
 EXPORT_SYMBOL(smp_num_cpus);
+EXPORT_SYMBOL(cpu_present_map);
+EXPORT_SYMBOL(cpu_online_map);
 
 /* Global SMP irq stuff */
 EXPORT_SYMBOL(synchronize_irq);
@@ -83,11 +91,12 @@ EXPORT_SYMBOL(synchronize_bh);
 EXPORT_SYMBOL(global_bh_count);
 EXPORT_SYMBOL(global_bh_lock);
 EXPORT_SYMBOL(global_irq_holder);
+EXPORT_SYMBOL(i386_bh_lock);
 EXPORT_SYMBOL(__global_cli);
 EXPORT_SYMBOL(__global_sti);
 EXPORT_SYMBOL(__global_save_flags);
 EXPORT_SYMBOL(__global_restore_flags);
-EXPORT_SYMBOL(mtrr_hook);
+EXPORT_SYMBOL(smp_call_function);
 #endif
 
 #ifdef CONFIG_MCA
@@ -105,8 +114,10 @@ EXPORT_SYMBOL(mca_isadapter);
 EXPORT_SYMBOL(mca_mark_as_used);
 EXPORT_SYMBOL(mca_mark_as_unused);
 EXPORT_SYMBOL(mca_find_unused_adapter);
+EXPORT_SYMBOL(mca_is_adapter_used);
 #endif
 
 #ifdef CONFIG_VT
 EXPORT_SYMBOL(screen_info);
 #endif
+

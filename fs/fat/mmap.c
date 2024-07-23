@@ -23,6 +23,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
+#include <asm/pgtable.h>
 
 /*
  * Fill in the supplied page for mmap
@@ -113,8 +114,6 @@ int fat_mmap(struct file * file, struct vm_area_struct * vma)
 		mark_inode_dirty(inode);
 	}
 
-	vma->vm_file = file;
-	file->f_count++;
 	vma->vm_ops = &fat_file_mmap;
 	return 0;
 }
@@ -125,8 +124,12 @@ int fat_readpage(struct file *file, struct page * page)
 	struct dentry * dentry = file->f_dentry;
 	struct inode * inode = dentry->d_inode;
 	if (MSDOS_SB(inode->i_sb)->cvf_format &&
-	    MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage)
-		return MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage(inode,page);
+	    MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage) {
+		int ret = MSDOS_SB(inode->i_sb)->cvf_format->cvf_readpage(inode,page);
+
+		flush_dcache_page(page_address(page));
+		return ret;
+	}
 	    
 	printk("fat_readpage called with no handler (shouldn't happen)\n");
 	return -1;

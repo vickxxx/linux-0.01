@@ -13,6 +13,7 @@
 #include <linux/sunrpc/clnt.h>
 #include <linux/nfsd/nfsfh.h>
 #include <linux/nfsd/export.h>
+#include <linux/lockd/xdr4.h>
 #include <linux/lockd/lockd.h>
 #include <linux/lockd/share.h>
 #include <linux/lockd/sm_inter.h>
@@ -43,17 +44,19 @@ static unsigned int file_hash(dev_t dev, ino_t ino)
  * Note that we open the file O_RDONLY even when creating write locks.
  * This is not quite right, but for now, we assume the client performs
  * the proper R/W checking.
+ *
+ * BEWARE:
+ * The cast to struct knfs_fh in this routine, imposes an alignment
+ * requirement on (struct nfs_fh)->data for some platforms.
  */
 u32
 nlm_lookup_file(struct svc_rqst *rqstp, struct nlm_file **result,
 					struct nfs_fh *f)
 {
-	struct knfs_fh	*fh = (struct knfs_fh *) f;
+	struct knfs_fh	*fh = (struct knfs_fh *) f->data;
 	struct nlm_file	*file;
 	unsigned int	hash;
 	u32		nfserr;
-	uid_t		saved_cr_uid;
-	struct svc_cred	*cred;
 
 	dprintk("lockd: nlm_file_lookup(%s/%u)\n",
 		kdevname(u32_to_kdev_t(fh->fh_dev)), fh->fh_ino);
@@ -64,14 +67,13 @@ nlm_lookup_file(struct svc_rqst *rqstp, struct nlm_file **result,
 	down(&nlm_file_sema);
 
 	for (file = nlm_files[hash]; file; file = file->f_next) {
-		if (file->f_handle.fh_dcookie == fh->fh_dcookie &&
-		    !memcmp(&file->f_handle, fh, sizeof(*fh)))
+		if (!memcmp(&file->f_handle, fh, sizeof(*fh)))
 			goto found;
 	}
 
 	dprintk("lockd: creating file for %s/%u\n",
 		kdevname(u32_to_kdev_t(fh->fh_dev)), fh->fh_ino);
-	nfserr = nlm_lck_denied_nolocks;
+	nfserr = nlm4_lck_denied_nolocks;
 	file = (struct nlm_file *) kmalloc(sizeof(*file), GFP_KERNEL);
 	if (!file)
 		goto out_unlock;
@@ -86,15 +88,10 @@ nlm_lookup_file(struct svc_rqst *rqstp, struct nlm_file **result,
 	 * We have to make sure we have the right credential to open
 	 * the file.
 	 */
-	cred = &rqstp->rq_cred;
-	saved_cr_uid = cred->cr_uid;
-	cred->cr_uid = 0;
 	if ((nfserr = nlmsvc_ops->fopen(rqstp, fh, &file->f_file)) != 0) {
-		dprintk("lockd: open failed (nfserr %ld)\n", ntohl(nfserr));
-		cred->cr_uid = saved_cr_uid;
+		dprintk("lockd: open failed (nfserr %d)\n", ntohl(nfserr));
 		goto out_free;
 	}
-	cred->cr_uid = saved_cr_uid;
 
 	file->f_next = nlm_files[hash];
 	nlm_files[hash] = file;
@@ -111,7 +108,10 @@ out_unlock:
 
 out_free:
 	kfree(file);
-	nfserr = nlm_lck_denied;
+        if (nfserr == 1)
+                nfserr = nlm4_stale_fh;
+        else
+		nfserr = nlm4_lck_denied;
 	goto out_unlock;
 }
 
@@ -134,7 +134,7 @@ nlm_delete_file(struct nlm_file *file)
 			kfree(file);
 			return;
 		}
-		fp = &file->f_next;
+		fp = &f->f_next;
 	}
 
 	printk(KERN_WARNING "lockd: attempt to release unknown file!\n");
@@ -150,6 +150,7 @@ nlm_traverse_locks(struct nlm_host *host, struct nlm_file *file, int action)
 	struct inode	 *inode = nlmsvc_file_inode(file);
 	struct file_lock *fl;
 	struct nlm_host	 *lockhost;
+	int		 status = 0;
 
 again:
 	file->f_locks = 0;
@@ -160,29 +161,27 @@ again:
 		/* update current lock count */
 		file->f_locks++;
 		lockhost = (struct nlm_host *) fl->fl_owner;
+		if (host && lockhost != host)
+			continue;
 		if (action == NLM_ACT_MARK)
 			lockhost->h_inuse = 1;
 		else if (action == NLM_ACT_CHECK)
-			return 1;
+			status = 1;
 		else if (action == NLM_ACT_UNLOCK) {
-			struct file_lock lock = *fl;
+			struct file_lock lock;
 
-			if (host && lockhost != host)
-				continue;
-
+			lock = *fl;
 			lock.fl_type  = F_UNLCK;
-			lock.fl_start = 0;
-			lock.fl_end   = NLM_OFFSET_MAX;
 			if (posix_lock_file(&file->f_file, &lock, 0) < 0) {
 				printk("lockd: unlock failure in %s:%d\n",
 						__FILE__, __LINE__);
-				return 1;
-			}
-			goto again;
+				status = 1;
+			} else
+				goto again;
 		}
 	}
 
-	return 0;
+	return status;
 }
 
 /*
@@ -211,6 +210,7 @@ nlm_traverse_files(struct nlm_host *host, int action)
 {
 	struct nlm_file	*file, **fp;
 	int		i;
+	int		res = 0;
 
 	down(&nlm_file_sema);
 	for (i = 0; i < FILE_NRHASH; i++) {
@@ -218,24 +218,21 @@ nlm_traverse_files(struct nlm_host *host, int action)
 		while ((file = *fp) != NULL) {
 			/* Traverse locks, blocks and shares of this file
 			 * and update file->f_locks count */
-			if (nlm_inspect_file(host, file, action)) {
-				up(&nlm_file_sema);
-				return 1;
-			}
+			if (nlm_inspect_file(host, file, action))
+				res = 1;
 
-			/* No more references to this file. Let go of it. */
-			if (!file->f_blocks && !file->f_locks
-			 && !file->f_shares && !file->f_count) {
-				*fp = file->f_next;
-				nlmsvc_ops->fclose(&file->f_file);
-				kfree(file);
-			} else {
+			if (file->f_blocks || file->f_locks
+			    || file->f_shares || file->f_count) {
 				fp = &file->f_next;
+				continue;
 			}
+			*fp = file->f_next;
+			nlmsvc_ops->fclose(&file->f_file);
+			kfree(file);
 		}
 	}
 	up(&nlm_file_sema);
-	return 0;
+	return res;
 }
 
 /*
@@ -301,7 +298,7 @@ nlmsvc_invalidate_client(struct svc_client *clnt)
 	if ((host = nlm_lookup_host(clnt, NULL, 0, 0)) != NULL) {
 		dprintk("lockd: invalidating client for %s\n", host->h_name);
 		nlmsvc_free_host_resources(host);
-		host->h_expires = 0;
+		host->h_expires = jiffies;
 		nlm_release_host(host);
 	}
 }

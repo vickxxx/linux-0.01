@@ -1,4 +1,3 @@
-
 #! /bin/sh
 #
 # This script is used to configure the Linux kernel.
@@ -8,18 +7,8 @@
 # something better'' because the old configure script wasn't flexible
 # enough.
 #
-# Please send comments / questions / bug fixes to raymondc@microsoft.com.
-#
-#              ***** IMPORTANT COMPATIBILITY NOTE ****
-# If configuration changes are made which might adversely effect 
-# Menuconfig or xconfig, please notify the respective maintainers so that 
-# those utilities can be updated in parallel.
-#
-# Menuconfig:  <mec@shout.net>
-# xconfig:     <apenwarr@foxnet.net>  <eric@aib.com>
-#              ****************************************
-#
-# Each line in the config file is a command.
+# Raymond Chen was the original author of Configure.
+# Michael Elizabeth Chastain (mec@shout.net) is the current maintainer.
 #
 # 050793 - use IFS='@' to get around a bug in a pre-version of bash-1.13
 # with an empty IFS.
@@ -56,6 +45,9 @@
 #
 # 102598 Michael Chastain (mec@shout.net) - put temporary files in
 # current directory, not in /tmp.
+#
+# 24 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+# - Improve the exit message (Jeff Ronne).
 
 #
 # Make sure we're really running bash.
@@ -151,6 +143,10 @@ function comment () {
 #	define_bool define value
 #
 function define_bool () {
+	define_tristate $1 $2
+}
+
+function define_tristate () {
 	case "$2" in
 	 "y")
 		echo "$1=y" >>$CONFIG
@@ -221,11 +217,11 @@ function tristate () {
 	  while :; do
 	    readln "$1 ($2) [$defprompt] " "$def" "$old"
 	    case "$ans" in
-	      [yY] | [yY]es ) define_bool "$2" "y"
+	      [yY] | [yY]es ) define_tristate "$2" "y"
 			      break ;;
-	      [nN] | [nN]o )  define_bool "$2" "n"
+	      [nN] | [nN]o )  define_tristate "$2" "n"
 			      break ;;
-	      [mM] )          define_bool "$2" "m"
+	      [mM] )          define_tristate "$2" "m"
 			      break ;;
 	      * )             help "$2"
 			      ;;
@@ -254,7 +250,7 @@ function dep_tristate () {
 	while [ $# -gt 0 ]; do
 	  case "$1" in
  	    n)
-	      define_bool "$var" "n"
+	      define_tristate "$var" "n"
 	      return
 	      ;;
 	    m)
@@ -276,9 +272,9 @@ function dep_tristate () {
 		while :; do
 		  readln "$ques ($var) [$defprompt] " "$def" "$old"
 		  case "$ans" in
-		      [nN] | [nN]o )  define_bool "$var" "n"
+		      [nN] | [nN]o )  define_tristate "$var" "n"
 				      break ;;
-		      [mM] )          define_bool "$var" "m"
+		      [mM] )          define_tristate "$var" "m"
 				      break ;;
 		      [yY] | [yY]es ) echo 
    echo "  This answer is not allowed, because it is not consistent with"
@@ -296,6 +292,43 @@ function dep_tristate () {
 	else
 	   tristate "$ques" "$var"
 	fi
+}
+
+function dep_bool () {
+	ques=$1
+	var=$2
+	shift 2
+	while [ $# -gt 0 ]; do
+	  case "$1" in
+	    m | n)
+	      define_bool "$var" "n"
+	      return
+	      ;;
+	  esac
+	  shift
+	done
+
+	bool "$ques" "$var"
+}
+
+function dep_mbool () {
+	ques=$1
+	var=$2
+	shift 2
+	while [ $# -gt 0 ]; do
+	  case "$1" in
+	    n)
+	      define_bool "$var" "n"
+	      return
+	      ;;
+	    m)
+	      eval "$var=y"
+	      ;;
+	  esac
+	  shift
+	done
+
+	bool "$ques" "$var"
 }
 
 #
@@ -376,9 +409,9 @@ function hex () {
 #	define_string define value
 #
 function define_string () {
-	echo "$1="'"'$2'"' >>$CONFIG
-	echo "#define $1 "'"'$2'"' >>$CONFIG_H
-	eval "$1=$2"
+	echo "$1=\"$2\"" >>$CONFIG
+	echo "#define $1 \"$2\"" >>$CONFIG_H
+	eval "$1=\"$2\""
 }
 
 #
@@ -389,7 +422,18 @@ function define_string () {
 function string () {
 	old=$(eval echo "\${$2}")
 	def=${old:-$3}
-	readln "$1 ($2) [$def] " "$def" "$old"
+	while :; do
+          if [ "$old" = "?" ]; then
+             readln "$1 ($2) [$def] " "$def" ""
+          else
+	     readln "$1 ($2) [$def] " "$def" "$old"
+          fi
+	  if [ "$ans" = "?" ]; then
+	    help "$2"
+	  else
+	    break
+	  fi
+	done
 	define_string "$2" "$ans"
 }
 #
@@ -509,7 +553,7 @@ if [ -f $DEFAULTS ]; then
   echo "# Using defaults found in" $DEFAULTS
   echo "#"
   . $DEFAULTS
-  sed -e 's/# \(.*\) is not.*/\1=n/' < $DEFAULTS > .config-is-not.$$
+  sed -e 's/# \(CONFIG_[^ ]*\) is not.*/\1=n/' <$DEFAULTS >.config-is-not.$$
   . .config-is-not.$$
   rm .config-is-not.$$
 else
@@ -528,10 +572,13 @@ mv .tmpconfig .config
 mv .tmpconfig.h include/linux/autoconf.h
 
 echo
-echo "The Linux kernel should now be configured for your setup."
-echo "Check the top-level Makefile for additional configuration,"
-echo "and do a 'make dep ; make clean' if you want to be sure all"
-echo "the files are correctly re-made"
+echo "*** End of Linux kernel configuration."
+echo "*** Check the top-level Makefile for additional configuration."
+if [ ! -f .hdepend -o "$CONFIG_MODVERSIONS" = "y" ] ; then
+    echo "*** Next, you must run 'make dep'."
+else
+    echo "*** Next, you may run 'make zImage', 'make zdisk', or 'make zlilo'."
+fi
 echo
 
 exit 0

@@ -10,7 +10,6 @@ if [ "$CONFIG_NETLINK" = "y" ]; then
   tristate 'Netlink device emulation' CONFIG_NETLINK_DEV
 fi
 bool 'Network firewalls' CONFIG_FIREWALL
-bool 'Network aliasing'  CONFIG_NET_ALIAS
 bool 'Socket Filtering'  CONFIG_FILTER
 tristate 'Unix domain sockets' CONFIG_UNIX
 bool 'TCP/IP networking' CONFIG_INET
@@ -40,6 +39,10 @@ if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
   tristate 'CCITT X.25 Packet Layer (EXPERIMENTAL)' CONFIG_X25
   tristate 'LAPB Data Link Driver (EXPERIMENTAL)' CONFIG_LAPB
   bool 'Bridging (EXPERIMENTAL)' CONFIG_BRIDGE
+  if [ "$CONFIG_BRIDGE" != "n" ]; then
+	int '  Maximum number of bridged interfaces' CONFIG_BRIDGE_NUM_PORTS 8
+  fi
+  bool 'Frame Diverter (EXPERIMENTAL)' CONFIG_NET_DIVERT
   bool '802.2 LLC (EXPERIMENTAL)' CONFIG_LLC
 #  if [ "$CONFIG_LLC" = "y" ]; then
 #   bool 'Netbeui (EXPERIMENTAL)' CONFIG_NETBEUI
@@ -53,15 +56,16 @@ if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
   bool 'Fast switching (read help!)' CONFIG_NET_FASTROUTE
   bool 'Forwarding between high speed interfaces' CONFIG_NET_HW_FLOWCONTROL
   bool 'CPU is too slow to handle full bandwidth' CONFIG_CPU_IS_SLOW
-  if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-  mainmenu_option next_comment
-  comment 'QoS and/or fair queueing'
-  bool 'QoS and/or fair queueing' CONFIG_NET_SCHED
-  if [ "$CONFIG_NET_SCHED" = "y" ]; then
-    source net/sched/Config.in
-  fi
-#  bool 'Network code profiler' CONFIG_NET_PROFILE
-  endmenu
-  fi
 fi
+
+mainmenu_option next_comment
+comment 'QoS and/or fair queueing'
+bool 'QoS and/or fair queueing' CONFIG_NET_SCHED
+if [ "$CONFIG_NET_SCHED" = "y" ]; then
+  source net/sched/Config.in
+fi
+endmenu
+
+#bool 'Network code profiler' CONFIG_NET_PROFILE
+
 endmenu

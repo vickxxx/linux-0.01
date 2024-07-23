@@ -4,13 +4,16 @@
  * Andrew G. Morgan <morgan@transmeta.com>
  * Alexander Kjeldaas <astor@guardian.no>
  * with help from Aleph1, Roland Buresund and Andrew Main.
+ *
+ * See here for the libcap library ("POSIX draft" compliance):
+ *
+ * ftp://linux.kernel.org/pub/linux/libs/security/linux-privs/kernel-2.2/
  */ 
 
 #ifndef _LINUX_CAPABILITY_H
 #define _LINUX_CAPABILITY_H
 
 #include <linux/types.h>
-#include <linux/fs.h>
 
 /* User-level do most of the mapping between kernel and user
    capabilities based on the version tag given by the kernel. The
@@ -89,9 +92,9 @@ typedef __u32 kernel_cap_t;
 /* Overrides the following restrictions that the effective user ID
    shall match the file owner ID when setting the S_ISUID and S_ISGID
    bits on that file; that the effective group ID (or one of the
-   supplementary group IDs shall match the file owner ID when setting
+   supplementary group IDs) shall match the file owner ID when setting
    the S_ISGID bit on that file; that the S_ISUID and S_ISGID bits are
-   cleared on successful return from chown(2). */
+   cleared on successful return from chown(2) (not implemented). */
 
 #define CAP_FSETID           4
 
@@ -168,8 +171,8 @@ typedef __u32 kernel_cap_t;
 
 #define CAP_IPC_OWNER        15
 
-/* Insert and remove kernel modules */
-
+/* Insert and remove kernel modules - modify kernel without limit */
+/* Modify cap_bset */
 #define CAP_SYS_MODULE       16
 
 /* Allow ioperm/iopl access */
@@ -193,7 +196,6 @@ typedef __u32 kernel_cap_t;
 /* Allow device administration (mknod)*/
 /* Allow examination and configuration of disk quotas */
 /* Allow configuring the kernel's syslog (printk behaviour) */
-/* Allow sending a signal to any process */
 /* Allow setting the domainname */
 /* Allow setting the hostname */
 /* Allow calling bdflush() */
@@ -265,6 +267,10 @@ typedef __u32 kernel_cap_t;
 #define CAP_SYS_TTY_CONFIG   26
 
 #ifdef __KERNEL__
+/* 
+ * Bounding set
+ */
+extern kernel_cap_t cap_bset;
 
 /*
  * Internal kernel functions only
@@ -285,12 +291,12 @@ typedef __u32 kernel_cap_t;
 #define CAP_EMPTY_SET       to_cap_t(0)
 #define CAP_FULL_SET        to_cap_t(~0)
 #define CAP_INIT_EFF_SET    to_cap_t(~0 & ~CAP_TO_MASK(CAP_SETPCAP))
-#define CAP_INIT_INH_SET    to_cap_t(~0 & ~CAP_TO_MASK(CAP_SETPCAP))
+#define CAP_INIT_INH_SET    to_cap_t(0)
 
 #define CAP_TO_MASK(x) (1 << (x))
 #define cap_raise(c, flag)   (cap_t(c) |=  CAP_TO_MASK(flag))
 #define cap_lower(c, flag)   (cap_t(c) &= ~CAP_TO_MASK(flag))
-#define cap_raised(c, flag)  (cap_t(c) &   CAP_TO_MASK(flag))
+#define cap_raised(c, flag)  (cap_t(c) & CAP_TO_MASK(flag))
 
 static inline kernel_cap_t cap_combine(kernel_cap_t a, kernel_cap_t b)
 {

@@ -133,6 +133,7 @@
 #define TYPE_MOD            0x07    /* Magneto-optical disk - 
 				     * - treated as TYPE_DISK */
 #define TYPE_MEDIUM_CHANGER 0x08
+#define TYPE_ENCLOSURE      0x0d    /* Enclosure Services Device */
 #define TYPE_NO_LUN         0x7f
 
 /*
@@ -203,6 +204,12 @@ struct ccs_modesel_head
 
 /* Used to get the bus number for a device */
 #define SCSI_IOCTL_GET_BUS_NUMBER 0x5386
+
+/* Used to get Fibre Channel WWN and port_id from device */
+#define SCSI_IOCTL_FC_TARGET_ADDRESS 0x5387
+
+/* Used to invoke Target Defice Reset for Fibre Channel */
+#define SCSI_IOCTL_FC_TDR 0x5388
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

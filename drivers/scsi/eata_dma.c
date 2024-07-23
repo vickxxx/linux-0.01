@@ -31,6 +31,10 @@
  *             mike@i-Connect.Net                           *
  *	       neuffer@mail.uni-mainz.de	            *
  *							    *
+ *
+ * Changes:
+ * 	Marcelo Tosatti, Jul/8/99 : SMP fixes
+ *
  *  This program is free software; you can redistribute it  *
  *  and/or modify it under the terms of the GNU General	    *
  *  Public License as published by the Free Software	    *
@@ -683,7 +687,8 @@ int eata_abort(Scsi_Cmnd * cmd)
 int eata_reset(Scsi_Cmnd * cmd, unsigned int resetflags)
 {
     uint x; 
-    ulong loop = loops_per_sec / 3;
+    /* 10 million PCI reads take at least one third of a second */
+    ulong loop = 10 * 1000 * 1000;
     ulong flags;
     unchar success = FALSE;
     Scsi_Cmnd *sp; 
@@ -777,7 +782,10 @@ int eata_reset(Scsi_Cmnd * cmd, unsigned int resetflags)
 	       x, sp->pid);
 	DBG(DBG_ABNORM && DBG_DELAY, DELAY(1));
 
+
+	spin_lock_irqsave(&io_request_lock, flags);
 	sp->scsi_done(sp);
+	spin_unlock_irqrestore(&io_request_lock, flags);
     }
     
     HD(cmd)->state = FALSE;

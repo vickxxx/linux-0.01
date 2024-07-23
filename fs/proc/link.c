@@ -143,6 +143,9 @@ static int do_proc_readlink(struct dentry *dentry, char * buffer, int buflen)
 	char * tmp = (char*)__get_free_page(GFP_KERNEL), *path, *pattern;
 	int len;
 
+	if(tmp==NULL)
+		return -ENOMEM;
+		
 	/* Check for special dentries.. */
 	pattern = NULL;
 	inode = dentry->d_inode;
@@ -158,7 +161,7 @@ static int do_proc_readlink(struct dentry *dentry, char * buffer, int buflen)
 		path = tmp;
 	} else {
 		path = d_path(dentry, tmp, PAGE_SIZE);
-		len = tmp + PAGE_SIZE - path;
+		len = tmp + PAGE_SIZE - 1 - path;
 	}
 
 	if (len < buflen)

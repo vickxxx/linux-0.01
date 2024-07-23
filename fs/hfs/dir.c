@@ -88,7 +88,7 @@ static inline void update_dirs_plus(struct hfs_cat_entry *dir, int is_dir)
 					++(tmp->i_nlink);
 				}
 				tmp->i_size += HFS_I(tmp)->dir_size;
-				tmp->i_version = ++event;
+				tmp->i_version = ++global_event;
 			}
 			tmp->i_ctime = tmp->i_mtime = CURRENT_TIME;
 			mark_inode_dirty(tmp);
@@ -118,7 +118,7 @@ static inline void update_dirs_minus(struct hfs_cat_entry *dir, int is_dir)
 					--(tmp->i_nlink);
 				}
 				tmp->i_size -= HFS_I(tmp)->dir_size;
-				tmp->i_version = ++event;
+				tmp->i_version = ++global_event;
 			}
 			tmp->i_ctime = tmp->i_mtime = CURRENT_TIME;
 			mark_inode_dirty(tmp);
@@ -430,8 +430,6 @@ int hfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			update_dirs_plus(new_parent, is_dir);
 		}
 	
-		/* update dcache */
-		d_move(old_dentry, new_dentry);
 	}
 
 hfs_rename_put:

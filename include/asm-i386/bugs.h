@@ -19,6 +19,7 @@
 
 #include <linux/config.h>
 #include <asm/processor.h>
+#include <asm/msr.h>
 
 #define CONFIG_BUGi386
 
@@ -26,6 +27,13 @@ __initfunc(static void no_halt(char *s, int *ints))
 {
 	boot_cpu_data.hlt_works_ok = 0;
 }
+
+#ifdef CONFIG_MCA
+__initfunc(static void mca_pentium(char *s, int *ints))
+{
+	mca_pentium_flag = 1;
+}
+#endif
 
 __initfunc(static void no_387(char *s, int *ints))
 {
@@ -38,7 +46,7 @@ static char __initdata fpu_error = 0;
 __initfunc(static void copro_timeout(void))
 {
 	fpu_error = 1;
-	timer_table[COPRO_TIMER].expires = jiffies+100;
+	timer_table[COPRO_TIMER].expires = jiffies+HZ;
 	timer_active |= 1<<COPRO_TIMER;
 	printk(KERN_ERR "387 failed: trying to reset\n");
 	send_sig(SIGFPE, current, 1);
@@ -61,6 +69,31 @@ __initfunc(static void check_fpu(void))
 #endif
 		return;
 	}
+	if (mca_pentium_flag) {
+		/* The IBM Model 95 machines with pentiums lock up on
+		 * fpu test, so we avoid it. All pentiums have inbuilt
+		 * FPU and thus should use exception 16. We still do
+		 * the FDIV test, although I doubt there where ever any
+		 * MCA boxes built with non-FDIV-bug cpus.
+		 */
+		__asm__("fninit\n\t"
+			"fldl %1\n\t"
+			"fdivl %2\n\t"
+			"fmull %2\n\t"
+			"fldl %1\n\t"
+			"fsubp %%st,%%st(1)\n\t"
+			"fistpl %0\n\t"
+			"fwait\n\t"
+			"fninit"
+			: "=m" (*&boot_cpu_data.fdiv_bug)
+			: "m" (*&x), "m" (*&y));
+		printk("mca-pentium specified, avoiding FPU coupling test... ");
+		if (!boot_cpu_data.fdiv_bug)
+			printk("??? No FDIV bug? Lucky you...\n");
+		else
+			printk("detected FDIV bug though.\n");
+		return;
+	}
 	/*
 	 * check if exception 16 works correctly.. This is truly evil
 	 * code: it disables the high 8 interrupts to make sure that
@@ -71,7 +104,7 @@ __initfunc(static void check_fpu(void))
 	 * should get there first..
 	 */
 	printk(KERN_INFO "Checking 386/387 coupling... ");
-	timer_table[COPRO_TIMER].expires = jiffies+50;
+	timer_table[COPRO_TIMER].expires = jiffies+HZ/2;
 	timer_table[COPRO_TIMER].fn = copro_timeout;
 	timer_active |= 1<<COPRO_TIMER;
 	__asm__("clts ; fninit ; fnstcw %0 ; fwait":"=m" (*&control_word));
@@ -155,6 +188,7 @@ __asm__(".align 4\nvide: ret");
 __initfunc(static void check_amd_k6(void))
 {
 	if (boot_cpu_data.x86_vendor == X86_VENDOR_AMD &&
+	    boot_cpu_data.x86 == 5 &&
 	    boot_cpu_data.x86_model == 6 &&
 	    boot_cpu_data.x86_mask == 1)
 	{
@@ -173,10 +207,10 @@ __initfunc(static void check_amd_k6(void))
 
 		n = K6_BUG_LOOP;
 		f_vide = vide;
-		__asm__ ("rdtsc" : "=a" (d));
+		rdtscl(d);
 		while (n--) 
 			f_vide();
-		__asm__ ("rdtsc" : "=a" (d2));
+		rdtscl(d2);
 		d = d2-d;
 
 		/* Knock these two lines out if it debugs out ok */
@@ -246,6 +280,7 @@ __initfunc(static void check_cx686_cpuid(void))
 	    ((Cx86_dir0_msb == 5) || (Cx86_dir0_msb == 3))) {
 		int eax, dummy;
 		unsigned char ccr3, ccr4;
+		__u32 old_cap;
 
 		cli();
 		ccr3 = getCx86(CX86_CCR3);
@@ -257,8 +292,11 @@ __initfunc(static void check_cx686_cpuid(void))
 
 		/* we have up to level 1 available on the Cx6x86(L|MX) */
 		boot_cpu_data.cpuid_level = 1;
+		/*  Need to preserve some externally computed capabilities  */
+		old_cap = boot_cpu_data.x86_capability & X86_FEATURE_MTRR;
 		cpuid(1, &eax, &dummy, &dummy,
 		      &boot_cpu_data.x86_capability);
+		boot_cpu_data.x86_capability |= old_cap;
 
 		boot_cpu_data.x86 = (eax >> 8) & 15;
 		/*
@@ -293,7 +331,7 @@ __initfunc(static void check_cx686_slop(void))
 		if (ccr5 & 2) { /* possible wrong calibration done */
 			printk(KERN_INFO "Recalibrating delay loop with SLOP bit reset\n");
 			calibrate_delay();
-			boot_cpu_data.loops_per_sec = loops_per_sec;
+			boot_cpu_data.loops_per_jiffy = loops_per_jiffy;
 		}
 	}
 }
@@ -311,6 +349,16 @@ __initfunc(static void check_cyrix_cpu(void))
 
 		strcpy(boot_cpu_data.x86_vendor_id, "CyrixInstead");
 	}
+}
+ 
+/*
+ * In setup.c's cyrix_model() we have set the boot_cpu_data.coma_bug
+ * on certain processors that we know contain this bug and now we
+ * enable the workaround for it.
+ */
+
+__initfunc(static void check_cyrix_coma(void))
+{
 }
  
 /*
@@ -371,5 +419,14 @@ __initfunc(static void check_bugs(void))
 	check_popad();
 	check_amd_k6();
 	check_pentium_f00f();
-	system_utsname.machine[1] = '0' + boot_cpu_data.x86;
+	check_cyrix_coma();
+	/*
+	 *	Catch people using stupid model number data
+	 *	(Pentium IV) and report 686 still. The /proc data
+	 *	however does not lie and reports 15 as will cpuid.
+	 */
+	if(boot_cpu_data.x86 > 9)
+		system_utsname.machine[1] = '6';
+	else
+		system_utsname.machine[1] = '0' + boot_cpu_data.x86;
 }

@@ -1,4 +1,4 @@
-/* $Id: fs.c,v 1.11 1998/10/28 08:12:04 jj Exp $
+/* $Id: fs.c,v 1.12.2.1 1999/05/29 04:03:23 davem Exp $
  * fs.c: fs related syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/stat.h>
 #include <linux/smp_lock.h>
@@ -21,7 +22,6 @@
 #include "conv.h"
 
 extern char * getname32(u32 filename);
-#define putname32 putname
  
 #define R4_DEV(DEV) ((DEV & 0xff) | ((DEV & 0xff00) << 10))
 #define R4_MAJOR(DEV) (((DEV) >> 18) & 0x3fff)
@@ -138,7 +138,7 @@ asmlinkage int solaris_stat(u32 filename, u32 statbuf)
 		set_fs (KERNEL_DS);
 		ret = sys_newstat(filenam, &s);
 		set_fs (old_fs);
-		putname32 (filenam);
+		putname (filenam);
 		if (putstat ((struct sol_stat *)A(statbuf), &s))
 			return -EFAULT;
 	}
@@ -166,7 +166,7 @@ asmlinkage int solaris_stat64(u32 filename, u32 statbuf)
 		set_fs (KERNEL_DS);
 		ret = sys_newstat(filenam, &s);
 		set_fs (old_fs);
-		putname32 (filenam);
+		putname (filenam);
 		if (putstat64 ((struct sol_stat64 *)A(statbuf), &s))
 			return -EFAULT;
 	}
@@ -188,7 +188,7 @@ asmlinkage int solaris_lstat(u32 filename, u32 statbuf)
 		set_fs (KERNEL_DS);
 		ret = sys_newlstat(filenam, &s);
 		set_fs (old_fs);
-		putname32 (filenam);
+		putname (filenam);
 		if (putstat ((struct sol_stat *)A(statbuf), &s))
 			return -EFAULT;
 	}
@@ -215,7 +215,7 @@ asmlinkage int solaris_lstat64(u32 filename, u32 statbuf)
 		set_fs (KERNEL_DS);
 		ret = sys_newlstat(filenam, &s);
 		set_fs (old_fs);
-		putname32 (filenam);
+		putname (filenam);
 		if (putstat64 ((struct sol_stat64 *)A(statbuf), &s))
 			return -EFAULT;
 	}
@@ -410,7 +410,11 @@ static int report_statvfs(struct inode *inode, u32 buf)
 	mm_segment_t old_fs = get_fs();
 	int error;
 	struct sol_statvfs *ss = (struct sol_statvfs *)A(buf);
-			
+
+	if (!inode->i_sb)
+		return -ENODEV;
+	if (!inode->i_sb->s_op->statfs)
+		return -ENOSYS;
 	set_fs (KERNEL_DS);
 	error = inode->i_sb->s_op->statfs(inode->i_sb, &s, sizeof(struct statfs));
 	set_fs (old_fs);
@@ -448,6 +452,10 @@ static int report_statvfs64(struct inode *inode, u32 buf)
 	int error;
 	struct sol_statvfs64 *ss = (struct sol_statvfs64 *)A(buf);
 			
+	if (!inode->i_sb)
+		return -ENODEV;
+	if (!inode->i_sb->s_op->statfs)
+		return -ENOSYS;
 	set_fs (KERNEL_DS);
 	error = inode->i_sb->s_op->statfs(inode->i_sb, &s, sizeof(struct statfs));
 	set_fs (old_fs);
@@ -489,9 +497,7 @@ asmlinkage int solaris_statvfs(u32 path, u32 buf)
 	if (!IS_ERR(dentry)) {
 		struct inode * inode = dentry->d_inode;
 
-		error = -ENOSYS;
-		if (inode->i_sb->s_op->statfs)
-			error = report_statvfs(inode, buf);
+		error = report_statvfs(inode, buf);
 		dput(dentry);
 	}
 	unlock_kernel();
@@ -515,10 +521,6 @@ asmlinkage int solaris_fstatvfs(unsigned int fd, u32 buf)
 		error = -ENOENT;
 	else if (!(inode = dentry->d_inode))
 		error = -ENOENT;
-	else if (!inode->i_sb)
-		error = -ENODEV;
-	else if (!inode->i_sb->s_op->statfs)
-		error = -ENOSYS;
 	else
 		error = report_statvfs(inode, buf);
 	fput(file);
@@ -538,9 +540,7 @@ asmlinkage int solaris_statvfs64(u32 path, u32 buf)
 	if (!IS_ERR(dentry)) {
 		struct inode * inode = dentry->d_inode;
 
-		error = -ENOSYS;
-		if (inode->i_sb->s_op->statfs)
-			error = report_statvfs64(inode, buf);
+		error = report_statvfs64(inode, buf);
 		dput(dentry);
 	}
 	unlock_kernel();
@@ -564,10 +564,6 @@ asmlinkage int solaris_fstatvfs64(unsigned int fd, u32 buf)
 		error = -ENOENT;
 	else if (!(inode = dentry->d_inode))
 		error = -ENOENT;
-	else if (!inode->i_sb)
-		error = -ENODEV;
-	else if (!inode->i_sb->s_op->statfs)
-		error = -ENOSYS;
 	else
 		error = report_statvfs64(inode, buf);
 	fput(file);

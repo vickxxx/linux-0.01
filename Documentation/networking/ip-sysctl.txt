@@ -96,7 +96,7 @@ tcp_timestamps - BOOLEAN
 	Enable timestamps as defined in RFC1323.
 
 tcp_sack - BOOLEAN
-	Enable select acknowledgements.
+	Enable select acknowledgments.
 
 tcp_retrans_collapse - BOOLEAN
 	Bug-to-bug compatibility with some broken printers.
@@ -119,7 +119,7 @@ icmp_destunreach_rate - INTEGER
 icmp_paramprob_rate - INTEGER
 icmp_timeexceed_rate - INTEGER
 icmp_echoreply_rate - INTEGER (not enabled per default)
-	Limit the maximal rates for sending ICMP packets to specifc targets.
+	Limit the maximal rates for sending ICMP packets to specific targets.
 	0 to disable any limiting, otherwise the maximal rate in jiffies(1)
 	See the source for more information.
 
@@ -156,6 +156,14 @@ mc_forwarding - BOOLEAN
 proxy_arp - BOOLEAN
 	Do proxy arp.
 
+hidden - BOOLEAN
+	Hide addresses attached to this device from another devices.
+	Such addresses will never be selected by source address autoselection
+	mechanism, host does not answer broadcast ARP requests for them,
+	does not announce it as source address of ARP requests,	but they
+	are still reachable via IP. This flag is activated only if it is
+	enabled both in specific device section and in "all" section.
+
 shared_media - BOOLEAN
 	undocumented.
 
@@ -173,7 +181,7 @@ redirects - BOOLEAN
 bootp_relay - BOOLEAN
 	Accept packets with source address 0.b.c.d destined
 	not to this host as local ones. It is supposed, that
-	BOOTP relay deamon will catch and forward such packets.
+	BOOTP relay daemon will catch and forward such packets.
 
 	default FALSE
 	Not Implemented Yet.
@@ -211,4 +219,4 @@ kuznet@ms2.inr.ac.ru
 Updated by:
 Andi Kleen
 ak@muc.de
-$Id: ip-sysctl.txt,v 1.8 1999/01/02 16:37:06 davem Exp $
+$Id: ip-sysctl.txt,v 1.9 1999/05/08 02:58:44 davem Exp $

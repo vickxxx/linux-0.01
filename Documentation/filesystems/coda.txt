@@ -776,7 +776,7 @@ kernel support.
   indicate confusion between the system call creat and the VFS operation
   create. The VFS operation create is only called to create new objects.
   This create call differs from the Unix one in that it is not invoked
-  to return a file descriptor. The trunctate and exclusive options,
+  to return a file descriptor. The truncate and exclusive options,
   together with the mode, could simply be part of the mode as it is
   under Unix.  There should be no flags argument; this is used in open
   (2) to return a file descriptor for READ or WRITE mode.
@@ -1531,7 +1531,7 @@ kernel support.
 
 
   DDeessccrriippttiioonn Remove all entries in the cache lying in a directory
-  CodaFid, and all children of this directory. This call is issed when
+  CodaFid, and all children of this directory. This call is issued when
   Venus receives a callback on the directory.
 
 
@@ -1630,7 +1630,7 @@ kernel support.
 
   The following requirements should be accommodated:
 
-  1. The message queueus should have open and close routines.  On Unix
+  1. The message queues should have open and close routines.  On Unix
      the opening of the character devices are such routines.
 
   +o  Before opening, no messages can be placed.

@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.54 1998/10/06 20:48:30 ecd Exp $
+/* $Id: head.S,v 1.60.2.5 2000/03/06 22:30:25 davem Exp $
  * head.S: Initial boot code for the Sparc64 port of Linux.
  *
  * Copyright (C) 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -7,6 +7,7 @@
  * Copyright (C) 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
  */
 
+#include <linux/config.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <asm/asm_offsets.h>
@@ -46,24 +47,25 @@ bootup_user_stack:
  * HdrS version should be incremented.
  */
         .global root_flags, ram_flags, root_dev
-        .global ramdisk_image, ramdisk_size
+        .global sparc_ramdisk_image, sparc_ramdisk_size
 	.globl	silo_args
 
         .ascii  "HdrS"
         .word   LINUX_VERSION_CODE
-        .half   0x0202          /* HdrS version */
+        .half   0x0203          /* HdrS version */
 root_flags:
         .half   1
 root_dev:
         .half   0
 ram_flags:
         .half   0
-ramdisk_image:
+sparc_ramdisk_image:
         .word   0
-ramdisk_size:
+sparc_ramdisk_size:
         .word   0
         .xword  reboot_command
 	.xword	bootstr_len
+	.word	_end
 
 	/* We must be careful, 32-bit OpenBOOT will get confused if it
 	 * tries to save away a register window to a 64-bit kernel
@@ -90,28 +92,6 @@ sparc64_boot:
          */
 	wrpr    %g0, (PSTATE_PRIV|PSTATE_PEF|PSTATE_IE), %pstate
 	wr	%g0, 0, %fprs
-
-#ifdef __SMP__
-	/* Ugly but necessary... */
-	sethi	%hi(KERNBASE), %g7
-	sethi	%hi(sparc64_cpu_startup), %g5
-	or	%g5, %lo(sparc64_cpu_startup), %g5
-	sub	%g5, %g7, %g5
-	sethi	%hi(sparc64_cpu_startup_end), %g6
-	or	%g6, %lo(sparc64_cpu_startup_end), %g6
-	sub	%g6, %g7, %g6
-	sethi	%hi(smp_trampoline), %g3
-	or	%g3, %lo(smp_trampoline), %g3
-	sub	%g3, %g7, %g3
-1:	ldx	[%g5], %g1
-	stx	%g1, [%g3]
-	membar	#StoreStore
-	flush	%g3
-	add	%g5, 8, %g5
-	cmp	%g5, %g6
-	blu,pt	%xcc, 1b
-	 add	%g3, 8, %g3
-#endif
 
 create_mappings:
 	/* %g5 holds the tlb data */
@@ -282,7 +262,16 @@ sun4u_init:
 
 	/* Setup "Linux Current Register", thanks Sun 8-) */
 	wr	%g0, 0x1, %pcr
-	wr	%g6, 0x0, %pic
+
+	/* Blackbird errata workaround.  See commentary in
+	 * smp.c:smp_percpu_timer_interrupt() for more
+	 * information.
+	 */
+	ba,pt	%xcc, 99f
+	 nop
+	.align	64
+99:	wr	%g6, %g0, %pic
+	rd	%pic, %g0
 #endif
 
 	mov	1, %g5
@@ -330,7 +319,7 @@ sun4u_init:
 /* IMPORTANT NOTE: Whenever making changes here, check
  * trampoline.S as well. -jj */
 	.globl	setup_tba
-setup_tba:
+setup_tba:	/* i0 = is_starfire */
 	save	%sp, -160, %sp
 
 	rdpr	%tba, %g7
@@ -376,9 +365,34 @@ setup_tba:
 
 	/* Setup Interrupt globals */
 	wrpr	%o1, (PSTATE_IG|PSTATE_IE), %pstate
-	sethi	%hi(ivector_to_mask), %g5
-	or	%g5, %lo(ivector_to_mask), %g1  /* IVECTOR table */
-	mov	0x40, %g2			/* INTR data 0 register */
+#ifndef __SMP__
+	sethi	%hi(__up_workvec), %g5
+	or	%g5, %lo(__up_workvec), %g6
+#else
+	/* By definition of where we are, this is boot_cpu. */
+	sethi	%hi(cpu_data), %g5
+	or	%g5, %lo(cpu_data), %g5
+
+	brz,pt	%i0, not_starfire
+	 sethi	%hi(0x1fff4000), %g1
+	or	%g1, %lo(0x1fff4000), %g1
+	sllx	%g1, 12, %g1
+	or	%g1, 0xd0, %g1
+	lduwa	[%g1] ASI_PHYS_BYPASS_EC_E, %g1
+	b,pt	%xcc, set_worklist
+	 nop
+
+not_starfire:
+	ldxa	[%g0] ASI_UPA_CONFIG, %g1
+	srlx	%g1, 17, %g1
+	and	%g1, 0x1f, %g1
+
+	/* In theory this is: &(cpu_data[boot_cpu_id].irq_worklists[0]) */
+set_worklist:
+	sllx	%g1, 7, %g1
+	add	%g5, %g1, %g5
+	add	%g5, 64, %g6
+#endif
 
 	/* Kill PROM timer */
 	wr	%g0, 0, %tick_cmpr
@@ -407,6 +421,13 @@ bootup_user_stack_end:
 	.globl	empty_bad_page
 empty_bad_page:
 	.skip	0x2000
+
+#ifdef CONFIG_SBUS
+/* This is just a hack to fool make depend config.h discovering
+   strategy: As the .S files below need config.h, but
+   make depend does not find it for them, we include config.h
+   in head.S */
+#endif
 
 ! 0x0000000000408000
 

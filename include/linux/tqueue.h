@@ -50,6 +50,7 @@ struct tq_struct {
 typedef struct tq_struct * task_queue;
 
 #define DECLARE_TASK_QUEUE(q)  task_queue q = NULL
+#define TQ_ACTIVE(q)           ((q) != NULL)
 
 extern task_queue tq_timer, tq_immediate, tq_scheduler, tq_disk;
 
@@ -59,7 +60,7 @@ extern task_queue tq_timer, tq_immediate, tq_scheduler, tq_disk;
  *
  * struct tq_struct *my_bh = NULL;
  * struct tq_struct run_my_bh = {
- *	0, 0, (void *)(void *) run_task_queue, &my_bh
+ *	0, 0, (void (*)(void *)) run_task_queue, &my_bh
  * };
  *
  * To activate a bottom half on your list, use:
@@ -78,19 +79,24 @@ extern task_queue tq_timer, tq_immediate, tq_scheduler, tq_disk;
 extern spinlock_t tqueue_lock;
 
 /*
- * queue_task
+ * Queue a task on a tq.  Return non-zero if it was successfully
+ * added.
  */
-extern __inline__ void queue_task(struct tq_struct *bh_pointer,
+extern __inline__ int queue_task(struct tq_struct *bh_pointer,
 			   task_queue *bh_list)
 {
+	int ret = 0;
 	if (!test_and_set_bit(0,&bh_pointer->sync)) {
 		unsigned long flags;
 		spin_lock_irqsave(&tqueue_lock, flags);
 		bh_pointer->next = *bh_list;
 		*bh_list = bh_pointer;
 		spin_unlock_irqrestore(&tqueue_lock, flags);
+		ret = 1;
 	}
+	return ret;
 }
+
 
 /*
  * Call all "bottom halfs" on a given list.

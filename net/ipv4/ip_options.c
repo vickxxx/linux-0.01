@@ -5,7 +5,7 @@
  *
  *		The options processing module for ip.c
  *
- * Version:	$Id: ip_options.c,v 1.15 1998/10/03 09:37:27 davem Exp $
+ * Version:	$Id: ip_options.c,v 1.16.2.1 1999/06/02 04:06:19 davem Exp $
  *
  * Authors:	A.N.Kuznetsov
  *		
@@ -137,17 +137,17 @@ int ip_options_echo(struct ip_options * dopt, struct sk_buff * skb)
 			if (sopt->ts_needtime) {
 				if (soffset + 3 > optlen)
 					return -EINVAL;
-				dopt->ts_needtime = 1;
-				soffset += 4;
-				if ((dptr[3]&0xF) == IPOPT_TS_PRESPEC) {
-					__u32 addr;
-					if (soffset + 3 > optlen)
-						return -EINVAL;
+				if ((dptr[3]&0xF) != IPOPT_TS_PRESPEC) {
+					dopt->ts_needtime = 1;
 					soffset += 4;
+				} else {
+					dopt->ts_needtime = 0;
+
 					if (soffset + 8 <= optlen) {
-						dopt->ts_needtime = 0;
+						__u32 addr;
+
 						memcpy(&addr, sptr+soffset-1, 4);
-						if (inet_addr_type(addr) != RTN_UNICAST) {
+						if (inet_addr_type(addr) != RTN_LOCAL) {
 							dopt->ts_needtime = 1;
 							soffset += 8;
 						}
@@ -452,7 +452,6 @@ eol:
 error:
 	if (skb) {
 		icmp_send(skb, ICMP_PARAMETERPROB, 0, htonl((pp_ptr-iph)<<24));
-		kfree_skb(skb);
 	}
 	return -EINVAL;
 }
@@ -471,19 +470,21 @@ void ip_options_undo(struct ip_options * opt)
 	}
 	if (opt->rr_needaddr) {
 		unsigned  char * optptr = opt->__data+opt->rr-sizeof(struct  iphdr);
-		memset(&optptr[optptr[2]-1], 0, 4);
 		optptr[2] -= 4;
+		memset(&optptr[optptr[2]-1], 0, 4);
 	}
 	if (opt->ts) {
 		unsigned  char * optptr = opt->__data+opt->ts-sizeof(struct  iphdr);
 		if (opt->ts_needtime) {
-			memset(&optptr[optptr[2]-1], 0, 4);
 			optptr[2] -= 4;
+			memset(&optptr[optptr[2]-1], 0, 4);
+			if ((optptr[3]&0xF) == IPOPT_TS_PRESPEC)
+				optptr[2] -= 4;
 		}
-		if (opt->ts_needaddr)
-			memset(&optptr[optptr[2]-1], 0, 4);
-		if ((optptr[3]&0xF) != IPOPT_TS_PRESPEC)
+		if (opt->ts_needaddr) {
 			optptr[2] -= 4;
+			memset(&optptr[optptr[2]-1], 0, 4);
+		}
 	}
 }
 

@@ -16,14 +16,13 @@
  * capability
  */
 #ifndef NO_IRQ
-#define NO_IRQ	255
+#define NO_IRQ	((unsigned int)(-1))
 #endif
+
+#define disable_irq_nosync(i) disable_irq(i)
 
 extern void disable_irq(unsigned int);
 extern void enable_irq(unsigned int);
-
-#define __STR(x) #x
-#define STR(x) __STR(x)
 
 #endif
 

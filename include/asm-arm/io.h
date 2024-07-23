@@ -8,12 +8,27 @@
  *			constant addresses and variable addresses.
  *  04-Dec-1997	RMK	Moved a lot of this stuff to the new architecture
  *			specific IO header files.
+ *  27-Mar-1999	PJB	Second parameter of memcpy_toio is const..
+ *  04-Apr-1999	PJB	Added check_signature.
  */
 #ifndef __ASM_ARM_IO_H
 #define __ASM_ARM_IO_H
 
+#ifdef __KERNEL__
+
+#include <linux/types.h>
+
+#ifndef NULL
+#define NULL	((void *) 0)
+#endif
+
+extern void * __ioremap(unsigned long offset, size_t size, unsigned long flags);
+extern void __iounmap(void *addr);
+
+#endif
+
 #include <asm/hardware.h>
-#include <asm/arch/mmu.h>
+#include <asm/arch/memory.h>
 #include <asm/arch/io.h>
 #include <asm/proc/io.h>
 
@@ -168,25 +183,69 @@ __IO(l,"",long)
 
 #endif
 
-#undef ARCH_IO_DELAY
-#undef ARCH_IO_CONSTANT
+/* for panic */
+#include <linux/kernel.h>
 
-#ifdef __KERNEL__
-
-extern void * __ioremap(unsigned long offset, unsigned long size, unsigned long flags);
+#ifndef readb
+#define readb(p)	(panic("readb called, but not implemented"),0)
+#endif
+#ifndef readw
+#define readw(p)	(panic("readw called, but not implemented"),0)
+#endif
+#ifndef readl
+#define readl(p)	(panic("readl called, but not implemented"),0)
+#endif
+#ifndef writeb
+#define writeb(v,p)	panic("writeb called, but not implemented")
+#endif
+#ifndef writew
+#define writew(v,p)	panic("writew called, but not implemented")
+#endif
+#ifndef writel
+#define writel(v,p)	panic("writel called, but not implemented")
+#endif
 
 /*
  * String version of IO memory access ops:
  */
+#ifndef memcpy_fromio
 extern void _memcpy_fromio(void *, unsigned long, unsigned long);
-extern void _memcpy_toio(unsigned long, void *, unsigned long);
-extern void _memset_io(unsigned long, int, unsigned long);
-
 #define memcpy_fromio(to,from,len)	_memcpy_fromio((to),(unsigned long)(from),(len))
-#define memcpy_toio(to,from,len)	_memcpy_toio((unsigned long)(to),(from),(len))
-#define memset_io(addr,c,len)		_memset_io((unsigned long)(addr),(c),(len))
-
 #endif
+
+#ifndef memcpy_toio
+extern void _memcpy_toio(unsigned long, const void *, unsigned long);
+#define memcpy_toio(to,from,len)	_memcpy_toio((unsigned long)(to),(from),(len))
+#endif
+
+#ifndef memset_io
+extern void _memset_io(unsigned long, int, unsigned long);
+#define memset_io(addr,c,len)		_memset_io((unsigned long)(addr),(c),(len))
+#endif
+
+/*
+ * This isn't especially architecture dependent so it seems like it
+ * might as well go here as anywhere.
+ */
+static inline int check_signature(unsigned long io_addr,
+                                  const unsigned char *signature, int length)
+{
+	int retval = 0;
+	do {
+		if (readb(io_addr) != *signature)
+			goto out;
+		io_addr++;
+		signature++;
+		length--;
+	} while (length);
+	retval = 1;
+out:
+	return retval;
+}
+
+#undef ARCH_READWRITE
+#undef ARCH_IO_DELAY
+#undef ARCH_IO_CONSTANT
 
 #endif
 

@@ -88,6 +88,10 @@ ifeq ($(CONFIG_FB_APOLLO),y)
 L_OBJS += dnfb.o
 endif
 
+ifeq ($(CONFIG_FB_Q40),y)
+L_OBJS += q40fb.o
+endif
+
 ifeq ($(CONFIG_FB_ATARI),y)
 L_OBJS += atafb.o
 else
@@ -98,6 +102,14 @@ endif
 
 ifeq ($(CONFIG_FB_ATY),y)
 L_OBJS += atyfb.o
+endif
+
+ifeq ($(CONFIG_FB_ATY128),y)
+  L_OBJS += aty128fb.o
+else
+  ifeq ($(CONFIG_FB_ATY128),m)
+  M_OBJS += aty128fb.o
+  endif
 endif
 
 ifeq ($(CONFIG_FB_IGA),y)
@@ -128,8 +140,24 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_FB_CYBER2000),y)
+LX_OBJS += cyber2000fb.o
+else
+  ifeq ($(CONFIG_FB_CYBER2000),m)
+  MX_OBJS += cyber2000fb.o
+  endif
+endif
+
+ifeq ($(CONFIG_FB_SGIVW),y)
+LX_OBJS += sgivwfb.o
+else
+  ifeq ($(CONFIG_FB_SGIVW),m)
+  MX_OBJS += sgivwfb.o
+  endif
+endif
+
 ifeq ($(CONFIG_FB_MAC),y)
-L_OBJS += macfb.o
+L_OBJS += macfb.o macmodes.o
 endif
 
 ifeq ($(CONFIG_FB_HP300),y)
@@ -172,14 +200,20 @@ endif
 
 ifeq ($(CONFIG_FB_TGA),y)
 L_OBJS += tgafb.o
+CONFIG_FBGEN_BUILTIN = y
 else
   ifeq ($(CONFIG_FB_TGA),m)
   M_OBJS += tgafb.o
+  CONFIG_FBGEN_MODULE = y
   endif
 endif
 
 ifeq ($(CONFIG_FB_VESA),y)
 L_OBJS += vesafb.o
+endif
+
+ifeq ($(CONFIG_FB_VGA16),y)
+L_OBJS += vga16fb.o
 endif
 
 ifeq ($(CONFIG_FB_VIRGE),y)
@@ -192,6 +226,10 @@ endif
 
 ifdef CONFIG_FB_G364
 L_OBJS := $(L_OBJS) g364fb.o
+endif
+
+ifdef CONFIG_FB_FM2
+L_OBJS := $(L_OBJS) fm2fb.o
 endif
 
 ifeq ($(CONFIG_FB_SBUS),y)
@@ -438,6 +476,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_FBCON_VGA_PLANES),y)
+OX_OBJS += fbcon-vga-planes.o
+else
+  ifeq ($(CONFIG_FBCON_VGA_PLANES),m)
+  MX_OBJS += fbcon-vga-planes.o
+  endif
+endif
+
 ifeq ($(CONFIG_FBCON_VGA),y)
 OX_OBJS += fbcon-vga.o
 else
@@ -459,6 +505,16 @@ L_OBJS += mdacon.o
 else
   ifeq ($(CONFIG_MDA_CONSOLE),m)
   M_OBJS += mdacon.o
+  endif
+endif
+
+# Newport Text Console
+
+ifeq ($(CONFIG_SGI_NEWPORT_CONSOLE),y)
+L_OBJS += newport_con.o vga_font.o
+else
+  ifeq ($(CONFIG_SGI_NEWPORT_CONSOLE),m)
+  M_OBJS += newport_con.o vga_font.o
   endif
 endif
 

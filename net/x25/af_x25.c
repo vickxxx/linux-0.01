@@ -16,6 +16,10 @@
  *	X.25 001	Jonathan Naylor	Started coding.
  *	X.25 002	Jonathan Naylor	Centralised disconnect handling.
  *					New timer architecture.
+ *	2000-03-11	Henner Eisen	MSG_EOR handling more POSIX compliant.
+ *	2000-08-27	Arnaldo C. Melo s/suser/capable/
+ *	2000-04-09	Henner Eisen	Set sock->state in x25_accept().
+ *					Fixed x25_output() related skb leakage.
  */
 
 #include <linux/config.h>
@@ -385,6 +389,9 @@ static int x25_getsockopt(struct socket *sock, int level, int optname,
 	if (get_user(len, optlen))
 		return -EFAULT;
 
+	if (len < 0)
+		return -EINVAL;
+		
 	switch (optname) {
 		case X25_QBITINCL:
 			val = sk->protinfo.x25->qbitincl;
@@ -725,6 +732,7 @@ static int x25_accept(struct socket *sock, struct socket *newsock, int flags)
 	kfree_skb(skb);
 	sk->ack_backlog--;
 	newsock->sk = newsk;
+	newsock->state = SS_CONNECTED;
 
 	return 0;
 }
@@ -854,7 +862,7 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 	unsigned char *asmptr;
 	int size, qbit = 0;
 
-	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_OOB))
+	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_OOB | MSG_EOR))
 		return -EINVAL;
 
 	if (sk->zapped)
@@ -970,7 +978,11 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 	if (msg->msg_flags & MSG_OOB) {
 		skb_queue_tail(&sk->protinfo.x25->interrupt_out_queue, skb);
 	} else {
-		x25_output(sk, skb);
+		err = x25_output(sk, skb);
+		if(err){
+			len = err;
+			kfree_skb(skb);
+		}
 	}
 
 	x25_kick(sk);
@@ -1035,6 +1047,9 @@ static int x25_recvmsg(struct socket *sock, struct msghdr *msg, int size, int fl
 		copied = size;
 		msg->msg_flags |= MSG_TRUNC;
 	}
+
+	/* Currently, each datagram always contains a complete record */ 
+	msg->msg_flags |= MSG_EOR;
 
 	skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 
@@ -1112,7 +1127,7 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			return x25_subscr_ioctl(cmd, (void *)arg);
 
 		case SIOCX25SSUBSCRIP:
-			if (!suser()) return -EPERM;
+			if (!capable(CAP_NET_ADMIN)) return -EPERM;
 			return x25_subscr_ioctl(cmd, (void *)arg);
 
 		case SIOCX25GFACILITIES: {

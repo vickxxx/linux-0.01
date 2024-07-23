@@ -9,10 +9,23 @@
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
 #define PAGE_OFFSET	0xc0000000
-
+#define KERNELBASE	PAGE_OFFSET
 
 #ifndef __ASSEMBLY__
 #ifdef __KERNEL__
+
+#ifdef CONFIG_XMON
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	xmon(0); \
+} while (0)
+#else
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	__asm__ __volatile__(".long 0x0"); \
+} while (0)
+#endif
+#define PAGE_BUG(page) do { BUG(); } while (0)
 
 #define STRICT_MM_TYPECHECKS
 
@@ -63,9 +76,9 @@ typedef unsigned long pgprot_t;
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
+extern void clear_page(unsigned long page);
+extern void copy_page(unsigned long to, unsigned long from);
 
-#define clear_page(page)        memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
 /* map phys->virtual and virtual->phys for RAM pages */
 #ifdef CONFIG_APUS
 #include <asm/amigappc.h>
@@ -81,6 +94,20 @@ typedef unsigned long pgprot_t;
 #define MAP_PAGE_RESERVED	(1<<15)
 
 extern unsigned long get_zero_page_fast(void);
+
+extern __inline__ int get_order(unsigned long size)
+{
+        int order;
+
+        size = (size-1) >> (PAGE_SHIFT-1);
+        order = -1;
+        do {
+                size >>= 1;
+                order++;
+        } while (size);
+        return order;
+}
+
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
 #endif /* _PPC_PAGE_H */

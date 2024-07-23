@@ -22,6 +22,8 @@
  *	"A Kernel Model for Precision Timekeeping" by Dave Mills
  *	Allow time_constant larger than MAXTC(6) for NTP v4 (MAXTC == 10)
  *	(Even though the technical memorandum forbids it)
+ * 1999-09-17    Andrea Arcangeli <andrea@suse.de>
+ *	Fixed adjtimex/settimeofday/stime SMP races.
  */
 
 #include <linux/mm.h>
@@ -53,6 +55,13 @@ void get_fast_time(struct timeval * t)
 {
 	do_get_fast_time(t);
 }
+
+/* The xtime_lock is not only serializing the xtime read/writes but it's also
+   serializing all accesses to the global NTP variables.
+   NOTE NOTE: We really need a spinlock here as the global irq locking
+   only protect us against the timer irq and not against other time-related
+   syscall running under us. */
+extern rwlock_t xtime_lock;
 
 #ifndef __alpha__
 
@@ -91,15 +100,14 @@ asmlinkage int sys_stime(int * tptr)
 		return -EPERM;
 	if (get_user(value, tptr))
 		return -EFAULT;
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
 	time_adjust = 0;	/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+	write_unlock_irq(&xtime_lock);
 	return 0;
 }
 
@@ -138,9 +146,9 @@ asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 inline static void warp_clock(void)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	sti();
+	write_unlock_irq(&xtime_lock);
 }
 
 /*
@@ -221,7 +229,7 @@ void (*hardpps_ptr)(struct timeval *) = (void (*)(struct timeval *))0;
 int do_adjtimex(struct timex *txc)
 {
         long ltemp, mtemp, save_adjust;
-	int error = 0;
+	int result;
 
 	/* In order to modify anything, you gotta be super-user! */
 	if (txc->modes && !capable(CAP_SYS_TIME))
@@ -239,7 +247,8 @@ int do_adjtimex(struct timex *txc)
 		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
 			return -EINVAL;
 
-	cli(); /* SMP: global cli() is enough protection. */
+	write_lock_irq(&xtime_lock);
+	result = time_state;	/* mostly `TIME_OK' */
 
 	/* Save for later - semantics of adjtime is to return old value */
 	save_adjust = time_adjust;
@@ -250,16 +259,13 @@ int do_adjtimex(struct timex *txc)
 	/* If there are input parameters, then process them */
 	if (txc->modes)
 	{
-	    if (time_state == TIME_ERROR)
-		time_state = TIME_OK;		/* reset error -- why? */
-
 	    if (txc->modes & ADJ_STATUS)	/* only set allowed bits */
 		time_status =  (txc->status & ~STA_RONLY) |
 			      (time_status & STA_RONLY);
 
 	    if (txc->modes & ADJ_FREQUENCY) {	/* p. 22 */
 		if (txc->freq > MAXFREQ || txc->freq < -MAXFREQ) {
-		    error = -EINVAL;
+		    result = -EINVAL;
 		    goto leave;
 		}
 		time_freq = txc->freq - pps_freq;
@@ -267,7 +273,7 @@ int do_adjtimex(struct timex *txc)
 
 	    if (txc->modes & ADJ_MAXERROR) {
 		if (txc->maxerror < 0 || txc->maxerror >= NTP_PHASE_LIMIT) {
-		    error = -EINVAL;
+		    result = -EINVAL;
 		    goto leave;
 		}
 		time_maxerror = txc->maxerror;
@@ -275,7 +281,7 @@ int do_adjtimex(struct timex *txc)
 
 	    if (txc->modes & ADJ_ESTERROR) {
 		if (txc->esterror < 0 || txc->esterror >= NTP_PHASE_LIMIT) {
-		    error = -EINVAL;
+		    result = -EINVAL;
 		    goto leave;
 		}
 		time_esterror = txc->esterror;
@@ -283,7 +289,7 @@ int do_adjtimex(struct timex *txc)
 
 	    if (txc->modes & ADJ_TIMECONST) {	/* p. 24 */
 		if (txc->constant < 0) {	/* NTP v4 uses values > 6 */
-		    error = -EINVAL;
+		    result = -EINVAL;
 		    goto leave;
 		}
 		time_constant = txc->constant;
@@ -329,7 +335,7 @@ int do_adjtimex(struct timex *txc)
 			    else
 			        time_freq += ltemp >> SHIFT_KH;
 			} else /* calibration interval too short (p. 12) */
-				time_state = TIME_ERROR;
+				result = TIME_ERROR;
 		    } else {	/* PLL mode */
 		        if (mtemp < MAXSEC) {
 			    ltemp *= mtemp;
@@ -342,7 +348,7 @@ int do_adjtimex(struct timex *txc)
 						       time_constant +
 						       SHIFT_KF - SHIFT_USEC);
 			} else /* calibration interval too long (p. 12) */
-				time_state = TIME_ERROR;
+				result = TIME_ERROR;
 		    }
 		    if (time_freq > time_tolerance)
 		        time_freq = time_tolerance;
@@ -354,7 +360,7 @@ int do_adjtimex(struct timex *txc)
 		/* if the quartz is off by more than 10% something is
 		   VERY wrong ! */
 		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ) {
-		    error = -EINVAL;
+		    result = -EINVAL;
 		    goto leave;
 		}
 		tick = txc->tick;
@@ -370,7 +376,7 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	    || ((time_status & STA_PPSFREQ) != 0
 		&& (time_status & (STA_PPSWANDER|STA_PPSERROR)) != 0))
 	    /* p. 24, (d) */
-		time_state = TIME_ERROR;
+		result = TIME_ERROR;
 	
 	if ((txc->modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
 	    txc->offset	   = save_adjust;
@@ -387,7 +393,6 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->constant	   = time_constant;
 	txc->precision	   = time_precision;
 	txc->tolerance	   = time_tolerance;
-	do_gettimeofday(&txc->time);
 	txc->tick	   = tick;
 	txc->ppsfreq	   = pps_freq;
 	txc->jitter	   = pps_jitter >> PPS_AVG;
@@ -397,9 +402,9 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->calcnt	   = pps_calcnt;
 	txc->errcnt	   = pps_errcnt;
 	txc->stbcnt	   = pps_stbcnt;
-
-	sti();
-	return(error < 0 ? error : time_state);
+	write_unlock_irq(&xtime_lock);
+	do_gettimeofday(&txc->time);
+	return(result);
 }
 
 asmlinkage int sys_adjtimex(struct timex *txc_p)

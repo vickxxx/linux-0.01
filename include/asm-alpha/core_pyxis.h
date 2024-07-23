@@ -74,8 +74,18 @@
 #define PYXIS_MEM_R2_MASK 0x07ffffff  /* SPARSE Mem region 2 mask is 27 bits */
 #define PYXIS_MEM_R3_MASK 0x03ffffff  /* SPARSE Mem region 3 mask is 26 bits */
 
-#define PYXIS_DMA_WIN_BASE_DEFAULT	(1024*1024*1024)
-#define PYXIS_DMA_WIN_SIZE_DEFAULT	(1024*1024*1024)
+#define PYXIS_DMA_WIN_BASE_DEFAULT	(1024*1024*1024U)
+#define PYXIS_DMA_WIN_SIZE_DEFAULT	(2*1024*1024*1024U)
+
+/* window 0 at 1GB size 1GB mapping 0 */
+#define PYXIS_DMA_WIN0_BASE_DEFAULT	(1024*1024*1024U)
+#define PYXIS_DMA_WIN0_SIZE_DEFAULT	(1024*1024*1024U)
+#define PYXIS_DMA_WIN0_TRAN_DEFAULT	(0U)
+
+/* window 0 at 2GB size 1GB mapping 1GB */
+#define PYXIS_DMA_WIN1_BASE_DEFAULT	(2*1024*1024*1024U)
+#define PYXIS_DMA_WIN1_SIZE_DEFAULT	(1024*1024*1024U)
+#define PYXIS_DMA_WIN1_TRAN_DEFAULT	(1024*1024*1024U)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
 #define PYXIS_DMA_WIN_BASE		alpha_mv.dma_win_base
@@ -592,7 +602,7 @@ __EXTERN_INLINE unsigned long pyxis_dense_mem(unsigned long addr)
 #define virt_to_bus	pyxis_virt_to_bus
 #define bus_to_virt	pyxis_bus_to_virt
 
-#if defined(BWIO_ENABLED) && !defined(CONFIG_ALPHA_RUFFIAN)
+#if defined(BWIO_ENABLED)
 # define __inb		pyxis_bw_inb
 # define __inw		pyxis_bw_inw
 # define __inl		pyxis_bw_inl
@@ -633,7 +643,7 @@ __EXTERN_INLINE unsigned long pyxis_dense_mem(unsigned long addr)
 
 #define dense_mem	pyxis_dense_mem
 
-#if defined(BWIO_ENABLED) && !defined(CONFIG_ALPHA_RUFFIAN)
+#if defined(BWIO_ENABLED)
 # define inb(port) __inb((port))
 # define inw(port) __inw((port))
 # define inl(port) __inl((port))

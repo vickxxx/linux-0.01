@@ -4,7 +4,8 @@
 
 # msdos and Joliet want NLS
 if [ "$CONFIG_JOLIET" = "y" -o "$CONFIG_FAT_FS" != "n" \
-	-o "$CONFIG_NTFS_FS" != "n" ]; then
+	-o "$CONFIG_NTFS_FS" != "n" -o "$CONFIG_NCPFS_NLS" = "y" \
+	-o "$CONFIG_SMB_FS" != "n" ]; then
   define_bool CONFIG_NLS y
 else
   define_bool CONFIG_NLS n
@@ -13,6 +14,7 @@ fi
 if [ "$CONFIG_NLS" = "y" ]; then
   mainmenu_option next_comment
   comment 'Native Language Support'
+  string 'Default NLS Option' CONFIG_NLS_DEFAULT "cp437"
   tristate 'Codepage 437 (United States, Canada)'  CONFIG_NLS_CODEPAGE_437
   tristate 'Codepage 737 (Greek)'                  CONFIG_NLS_CODEPAGE_737
   tristate 'Codepage 775 (Baltic Rim)'             CONFIG_NLS_CODEPAGE_775
@@ -29,6 +31,10 @@ if [ "$CONFIG_NLS" = "y" ]; then
   tristate 'Codepage 866 (Cyrillic/Russian)'       CONFIG_NLS_CODEPAGE_866
   tristate 'Codepage 869 (Greek)'                  CONFIG_NLS_CODEPAGE_869
   tristate 'Codepage 874 (Thai)'                   CONFIG_NLS_CODEPAGE_874
+  tristate 'Codepage 932 (Shift-JIS)'              CONFIG_NLS_CODEPAGE_932
+  tristate 'Codepage 936 (GBK)'                    CONFIG_NLS_CODEPAGE_936
+  tristate 'Codepage 949 (UnifiedHangul)'          CONFIG_NLS_CODEPAGE_949
+  tristate 'Codepage 950 (Big5)'                   CONFIG_NLS_CODEPAGE_950
   tristate 'NLS ISO 8859-1  (Latin 1; Western European Languages)' CONFIG_NLS_ISO8859_1
   tristate 'NLS ISO 8859-2  (Latin 2; Slavic/Central European Languages)' CONFIG_NLS_ISO8859_2
   tristate 'NLS ISO 8859-3  (Latin 3; Esperanto, Galician, Maltese, Turkish)' CONFIG_NLS_ISO8859_3
@@ -38,7 +44,9 @@ if [ "$CONFIG_NLS" = "y" ]; then
   tristate 'NLS ISO 8859-7  (Modern Greek)'         CONFIG_NLS_ISO8859_7
   tristate 'NLS ISO 8859-8  (Hebrew)'               CONFIG_NLS_ISO8859_8
   tristate 'NLS ISO 8859-9  (Latin 5; Turkish)'     CONFIG_NLS_ISO8859_9
+  tristate 'NLS ISO 8859-14 (Latin 8; Celtic)'      CONFIG_NLS_ISO8859_14
   tristate 'NLS ISO 8859-15 (Latin 9; Western European Languages with Euro)' CONFIG_NLS_ISO8859_15
   tristate 'NLS KOI8-R (Russian)'                   CONFIG_NLS_KOI8_R
+  tristate 'NLS KOI8-RU (Belorussia, Ukraine)'      CONFIG_NLS_KOI8_RU
   endmenu
 fi

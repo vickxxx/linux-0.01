@@ -57,12 +57,9 @@ struct termios {
 #define ICRNL	0000400
 #define IXON	0001000
 #define IXOFF	0002000
-#if defined(__KERNEL__) || defined(__USE_BSD)
-  /* POSIX.1 doesn't want these... */
-# define IXANY		0004000
-# define IUCLC		0010000
-# define IMAXBEL	0020000
-#endif
+#define IXANY	0004000
+#define IUCLC	0010000
+#define IMAXBEL	0020000
 
 /* c_oflag bits */
 #define OPOST	0000001
@@ -121,7 +118,7 @@ struct termios {
 #define  B38400	0000017
 #define EXTA B19200
 #define EXTB B38400
-#define CBAUDEX 0000020
+#define CBAUDEX 0000000
 #define  B57600   00020
 #define  B115200  00021
 #define  B230400  00022

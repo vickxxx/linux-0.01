@@ -1,4 +1,4 @@
-/* $Id: nosrmmu.c,v 1.1 1998/03/09 14:04:15 jj Exp $
+/* $Id: nosrmmu.c,v 1.2.2.1 1999/10/06 10:52:37 anton Exp $
  * nosrmmu.c: This file is a bunch of dummies for sun4 compiles, 
  *         so that it does not need srmmu and avoid ifdefs.
  *
@@ -13,6 +13,8 @@
 static char shouldnothappen[] __initdata = "SUN4 kernel can only run on SUN4\n";
 
 enum mbus_module srmmu_modtype;
+
+int vac_cache_size = 0;
 
 __initfunc(static void should_not_happen(void))
 {
@@ -45,6 +47,16 @@ void srmmu_unmapioaddr(unsigned long virt_addr)
 }
 
 __initfunc(void srmmu_end_memory(unsigned long memory_size, unsigned long *mem_end_p))
+{
+	return 0;
+}
+
+__u32 iounit_map_dma_init(struct linux_sbus *sbus, int size)
+{
+	return 0;
+}
+
+__u32 iounit_map_dma_page(__u32 vaddr, void *addr, struct linux_sbus *sbus)
 {
 	return 0;
 }

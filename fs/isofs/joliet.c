@@ -19,22 +19,15 @@ uni16_to_x8(unsigned char *ascii, unsigned char *uni, int len,
 	    struct nls_table *nls)
 {
 	unsigned char *ip, *op;
-	unsigned char ch, cl;
-	unsigned char *uni_page;
 
 	ip = uni;
 	op = ascii;
 
 	while ((*ip || ip[1]) && len) {
-		ch = *ip++;
-		cl = *ip++;
-
-		uni_page = nls->page_uni2charset[ch];
-		if (uni_page && uni_page[cl]) {
-			*op++ = uni_page[cl];
-		} else {
-			*op++ = '?';
-		}
+		int llen;
+		nls->uni2char(ip[0], ip[1], op, 20, &llen);
+		op += llen;
+		ip += 2;
 		len--;
 	}
 	*op = 0;
@@ -73,8 +66,8 @@ wcsntombs_be(__u8 *s, const __u8 *pwcs, int inlen, int maxlen)
 }
 
 int
-get_joliet_filename(struct iso_directory_record * de, struct inode * inode,
-		    unsigned char *outname)
+get_joliet_filename(struct iso_directory_record * de, unsigned char *outname,
+		    struct inode * inode)
 {
 	unsigned char utf8;
 	struct nls_table *nls;

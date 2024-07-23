@@ -15,7 +15,7 @@ typedef unsigned char spinlock_t;
 
 #define spin_lock_init(lock)	do { } while(0)
 #define spin_lock(lock)		do { } while(0)
-#define spin_trylock(lock)	do { } while(0)
+#define spin_trylock(lock)	(1)
 #define spin_unlock_wait(lock)	do { } while(0)
 #define spin_unlock(lock)	do { } while(0)
 #define spin_lock_irq(lock)	cli()
@@ -149,9 +149,9 @@ extern __inline__ void spin_unlock_irq(spinlock_t *lock)
 	: "memory");
 }
 
-#define spin_lock_irqsave(lock, flags)				\
-do {	register spinlock_t *lp asm("g1");			\
-	lp = lock;						\
+#define spin_lock_irqsave(__lock, flags)			\
+do {	register spinlock_t *__lp asm("g1");			\
+	__lp = (__lock);					\
 	__asm__ __volatile__(					\
 	"\n	rdpr		%%pil, %0\n"			\
 	"	wrpr		%%g0, 15, %%pil\n"		\
@@ -165,7 +165,7 @@ do {	register spinlock_t *lp asm("g1");			\
 	"	b,a,pt		%%xcc, 1b\n"			\
 	"	.previous\n"					\
 	: "=&r" (flags)						\
-	: "r" (lp)						\
+	: "r" (__lp)						\
 	: "g7", "memory");					\
 } while(0)
 
